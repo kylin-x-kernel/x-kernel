@@ -367,7 +367,7 @@ unsafe impl IxgbeHal for IxgbeHalImpl { ... }
 | T-07 | PCI 设备伪造 vendor:device ID 触发错误 VirtIO 类型匹配 | 中 | 恶意 PCI 设备声明 Red Hat vendor ID 和已知 VirtIO device ID | `probe_pci_device` 在激活阶段二次验证传输层响应；不匹配时返回 `Unsupported` |
 | T-08 | IRQ slot 耗尽导致合法设备无法注册中断 | 中 | 系统中激活超过 64 个中断驱动设备 | `request_irq` 返回 `ResError::NoMemory`，设备激活失败而非静默降级 |
 | T-09 | PCI BAR 分配器竞态导致两个设备分配到相同 MMIO 地址 | 中 | 并发 BAR 分配未正确串行化 | `PCI_BAR_ALLOCATOR` 使用 `SpinNoPreempt` 保护，分配在锁内完成 |
-| T-10 | boot console adoption 重复执行导致重复设备对象 | 中 | `boot_console_adopted` 标志未正确设置或检查 | `bool` 标志在一次枚举周期内最多执行一次 adoption；`adopt_active_device` 内部也应检查重复 |
+| T-10 | stdout UART 的 MMIO 被 serial 驱动重复映射导致双重所有权 | 中 | serial 驱动对 stdout 节点再次调用 `devm_iomap` | serial 驱动 probe 经 `take_early_port` 按 `SerialIdent` 复用早期 stdout 实例，永不二次映射 |
 | T-11 | devres 释放顺序错误导致设备仍在访问资源时资源被释放 | 中 | 驱动 remove 回调未停止设备 DMA 就返回 | devres LIFO 保证释放顺序；设备停止由驱动 remove 回调负责 |
 | T-12 | VirtIO MMIO 探测读取未映射或无效寄存器 | 中 | firmware 描述 `virtio,mmio` compatible 但物理地址无 VirtIO 设备 | `probe_mmio_device` 先读 MagicValue 验证 VirtIO 协议；无效时返回 None |
 | T-13 | firmware 描述的中断线号在平台 HAL 未校验时注册到错误向量 | 中 | `khal::irq::register` 未充分校验中断号 | 取决于平台 HAL 实现；`kdriver` 传入的 IRQ 号来自 firmware 或 PCI INTx routing |

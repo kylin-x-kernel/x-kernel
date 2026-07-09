@@ -7,169 +7,136 @@
 extern crate alloc;
 
 pub mod runtime;
+pub mod serial;
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use device_res::{Irq, IrqEvent, IrqResource, IrqTriggerMode};
-use khal::{irq::IrqDesc, mem::PhysAddr};
+use khal::irq::IrqDesc;
+#[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
+use khal::mem::PhysAddr;
 use kspin::SpinNoIrq;
-use lazyinit::LazyInit;
+pub use serial::{SerialIdent, SerialPort, SerialRole};
 
-cfg_select! {
-    feature = "pl011" => {
-        mod pl011;
-        use self::pl011 as backend;
-        use self::pl011::init_backend;
-    }
-    feature = "ns16550-mmio" => {
-        mod ns16550_mmio;
-        use self::ns16550_mmio as backend;
-        use self::ns16550_mmio::init_backend;
-    },
-    feature = "ns16550-ioport" => {
-        mod ns16550_ioport;
-        use self::ns16550_ioport as backend;
-        use self::ns16550_ioport::init_backend;
-    }
-    _ => {
-        compile_error!("console-driver requires one backend feature");
-    }
+#[cfg(not(any(
+    feature = "pl011",
+    feature = "ns16550-mmio",
+    feature = "ns16550-ioport"
+)))]
+compile_error!(
+    "console-driver requires at least one backend feature: `pl011`, `ns16550-mmio`, or \
+     `ns16550-ioport`"
+);
+
+/// Which UART family the device-tree stdout node is.
+#[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
+enum StdoutKind {
+    #[cfg(feature = "pl011")]
+    Pl011,
+    #[cfg(feature = "ns16550-mmio")]
+    Ns16550Mmio,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConsoleTransport {
-    Mmio { paddr: PhysAddr, size: usize },
-    IoPort { io_port: u16 },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConsoleSource {
-    DeviceTree,
-    Acpi,
-    PlatformStatic,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConsoleConfig {
-    pub transport: ConsoleTransport,
-    pub irq: Option<IrqDesc>,
-    pub source: ConsoleSource,
-}
-
-impl ConsoleConfig {
-    pub const fn mmio(
-        paddr: PhysAddr,
-        size: usize,
-        irq: Option<IrqDesc>,
-        source: ConsoleSource,
-    ) -> Self {
-        Self {
-            transport: ConsoleTransport::Mmio { paddr, size },
-            irq,
-            source,
-        }
-    }
-
-    pub const fn ioport(io_port: u16, irq: Option<IrqDesc>, source: ConsoleSource) -> Self {
-        Self {
-            transport: ConsoleTransport::IoPort { io_port },
-            irq,
-            source,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ConsoleState {
-    config: ConsoleConfig,
+/// Parsed device-tree stdout node: just enough to build a [`SerialPort`] and
+/// wire its input interrupt.
+#[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
+struct StdoutDesc {
+    kind: StdoutKind,
+    paddr: PhysAddr,
+    size: usize,
     irq: Option<IrqDesc>,
 }
 
-static CONSOLE: LazyInit<ConsoleState> = LazyInit::new();
 static INPUT_IRQ_REGISTERED: AtomicBool = AtomicBool::new(false);
 /// Keeps the console input interrupt registration alive for the lifetime of the
 /// kernel; dropping the [`Irq`] guard would release the handler.
 static INPUT_IRQ: SpinNoIrq<Option<Irq>> = SpinNoIrq::new(None);
 
-fn selected_config() -> Option<ConsoleConfig> {
-    CONSOLE.get().map(|state| state.config)
-}
-
-fn selected_irq_desc() -> Option<IrqDesc> {
-    CONSOLE.get().and_then(|state| state.irq)
-}
-
-pub fn config() -> Option<ConsoleConfig> {
-    selected_config()
-}
-
-pub fn interrupt_id() -> Option<usize> {
-    selected_irq_desc().and_then(IrqDesc::logical_irq)
-}
-
+/// Fixed I/O-port base for the NS16550 ISA COM port used as stdout on x86.
 #[cfg(feature = "ns16550-ioport")]
 pub fn boot_console_io_port() -> u16 {
     0x3f8
 }
 
-pub fn config_from_device_tree() -> Option<ConsoleConfig> {
+// The single `ConsoleIf` implementation. `crate_interface` permits exactly one
+// implementation per interface, so it lives here at the crate root and routes
+// printk to the early stdout [`SerialPort`]. The stdout port is brought up in
+// platform `early_driver_init`, before the driver model exists, so this is the
+// one console path that must not depend on kdriver.
+struct DriverConsoleIfImpl;
+
+#[kplat::impl_dev_interface]
+impl khal::console::ConsoleIf for DriverConsoleIfImpl {
+    fn write_data(buf: &[u8]) {
+        if let Some(port) = serial::stdout_port() {
+            port.write_data(buf);
+        }
+    }
+
+    fn write_data_atomic(buf: &[u8]) {
+        if let Some(port) = serial::stdout_port() {
+            port.write_data(buf);
+        }
+    }
+
+    fn read_data(buf: &mut [u8]) -> usize {
+        serial::stdout_port()
+            .map(|port| port.read_data(buf))
+            .unwrap_or(0)
+    }
+
+    fn interrupt_id() -> Option<usize> {
+        serial::stdout_irq().and_then(IrqDesc::logical_irq)
+    }
+}
+
+/// Read one byte from the stdout console, if it has been brought up.
+pub fn getchar() -> Option<u8> {
+    serial::stdout_port().and_then(|port| port.getchar())
+}
+
+/// Resolve the device-tree stdout node into a port description.
+#[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
+fn stdout_desc_from_device_tree() -> Option<StdoutDesc> {
     let stdout_path = of::chosen_stdout_path()?;
     let node = of::resolve_node(stdout_path)?;
     let reg = node.reg()?.next()?;
+    let paddr = PhysAddr::from_usize(reg.starting_address as usize);
+    let irq = of::first_interrupt_desc(node).map(device_tree_irq_desc);
 
     #[cfg(feature = "pl011")]
-    if !node
+    if node
         .compatibles()
         .any(|compatible| compatible == "arm,pl011")
     {
-        return None;
+        return Some(StdoutDesc {
+            kind: StdoutKind::Pl011,
+            paddr,
+            size: reg.size,
+            irq,
+        });
     }
 
     #[cfg(feature = "ns16550-mmio")]
-    if !node.compatibles().any(|compatible| {
+    if node.compatibles().any(|compatible| {
         matches!(
             compatible,
             "ns16550a" | "ns16550" | "snps,dw-apb-uart" | "mrvl,mmp-uart"
         )
     }) {
-        return None;
+        return Some(StdoutDesc {
+            kind: StdoutKind::Ns16550Mmio,
+            paddr,
+            size: reg.size,
+            irq,
+        });
     }
 
-    #[cfg(feature = "ns16550-ioport")]
-    {
-        let _ = node;
-        let _ = reg;
-        None
-    }
-
-    #[cfg(not(feature = "ns16550-ioport"))]
-    {
-        Some(ConsoleConfig::mmio(
-            PhysAddr::from_usize(reg.starting_address as usize),
-            reg.size,
-            of::first_interrupt_desc(node).map(device_tree_irq_desc),
-            ConsoleSource::DeviceTree,
-        ))
-    }
+    None
 }
 
-cfg_select! {
-    any(feature = "pl011", feature = "ns16550-mmio") => {
-        pub fn init_from_device_tree() -> Option<ConsoleConfig> {
-            let config = config_from_device_tree()?;
-            init(config);
-            Some(config)
-        }
-    }
-    feature = "ns16550-ioport" => {
-        pub fn init_from_device_tree() -> Option<ConsoleConfig> {
-            None
-        }
-    }
-}
-
-#[cfg(not(feature = "ns16550-ioport"))]
+#[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 fn device_tree_irq_desc(info: of::InterruptInfo) -> IrqDesc {
     let desc = match info.controller {
         of::InterruptControllerKind::Gic => match info.trigger {
@@ -192,39 +159,64 @@ fn device_tree_irq_desc(info: of::InterruptInfo) -> IrqDesc {
     desc.with_source(khal::irq::IrqSource::DeviceTree)
 }
 
-fn remember_config(config: ConsoleConfig) {
-    let irq = config.irq.map(|desc| desc.with_virq(khal::irq::map(desc)));
-    INPUT_IRQ_REGISTERED.store(false, Ordering::Release);
-    CONSOLE.init_once(ConsoleState { config, irq });
+/// Map the stdout MMIO window and build the matching [`SerialPort`].
+#[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
+fn build_stdout_port(desc: &StdoutDesc) -> SerialPort {
+    let uart_base = memspace::iomap_device(desc.paddr, desc.size, "console")
+        .unwrap_or_else(|err| panic!("failed to iomap console: {err:?}"));
+    match desc.kind {
+        #[cfg(feature = "pl011")]
+        StdoutKind::Pl011 => {
+            SerialPort::new_mmio_pl011(uart_base, desc.paddr, desc.size, SerialRole::Stdout)
+        }
+        #[cfg(feature = "ns16550-mmio")]
+        StdoutKind::Ns16550Mmio => {
+            // SAFETY: `uart_base` is the exclusively-mapped NS16550 MMIO
+            // window for this stdout node, returned by `memspace::iomap_device`.
+            unsafe {
+                SerialPort::new_mmio_ns16550(uart_base, desc.paddr, desc.size, SerialRole::Stdout)
+            }
+        }
+    }
 }
 
-pub fn init(config: ConsoleConfig) {
-    remember_config(config);
-    init_backend(config);
+/// Bring up the stdout console from the device tree.
+///
+/// Parses the `chosen` stdout node, builds the matching [`SerialPort`], and
+/// registers it as the early stdout so printk and the runtime serial driver
+/// share one instance. Returns `None` when the device tree does not describe a
+/// console any enabled backend recognizes.
+#[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
+pub fn init_stdout_from_device_tree() -> Option<()> {
+    let desc = stdout_desc_from_device_tree()?;
+    let port = build_stdout_port(&desc);
+    let irq = desc.irq.map(|desc| desc.with_virq(khal::irq::map(desc)));
+    serial::register_early_stdout(Arc::new(port), irq);
+    Some(())
 }
 
-pub fn write_data(bytes: &[u8]) {
-    let _ = selected_config().expect("console config not initialized");
-    backend::write_data(bytes);
-}
-
-pub fn read_data(bytes: &mut [u8]) -> usize {
-    let _ = selected_config().expect("console config not initialized");
-    backend::read_data(bytes)
-}
-
-pub fn getchar() -> Option<u8> {
-    let _ = selected_config().expect("console config not initialized");
-    backend::getchar()
+/// Bring up a fixed I/O-port stdout console (x86 ISA COM).
+#[cfg(feature = "ns16550-ioport")]
+pub fn init_stdout_ioport(port: u16, irq: Option<IrqDesc>) {
+    // SAFETY: `port` is the platform-configured NS16550 I/O-port base.
+    let uart = unsafe { SerialPort::new_ioport_ns16550(port, SerialRole::Stdout) };
+    let irq = irq.map(|desc| desc.with_virq(khal::irq::map(desc)));
+    serial::register_early_stdout(Arc::new(uart), irq);
 }
 
 fn handle_input_irq() -> IrqEvent {
-    backend::ack_interrupt();
+    if let Some(port) = serial::stdout_port() {
+        port.ack_interrupt();
+    }
     IrqEvent::HANDLED
 }
 
+/// Register the stdout console's input interrupt handler.
+///
+/// Must be called after the platform IRQ provider is up; platforms differ on
+/// whether that is `early_driver_init` or `final_init`.
 pub fn register_input_irq_handler() {
-    let Some(desc) = selected_irq_desc() else {
+    let Some(desc) = serial::stdout_irq() else {
         return;
     };
     let Some(virq) = desc.logical_irq() else {
@@ -239,9 +231,6 @@ pub fn register_input_irq_handler() {
     {
         return;
     }
-    // The descriptor was already resolved into `khal` via `map`, so the host
-    // provider can register by logical IRQ number; trigger/polarity metadata is
-    // applied from the stored descriptor.
     let resource = IrqResource::new(virq, IrqTriggerMode::Unspecified);
     match Irq::request(resource, Arc::new(handle_input_irq)) {
         Ok(guard) => *INPUT_IRQ.lock() = Some(guard),
@@ -249,5 +238,38 @@ pub fn register_input_irq_handler() {
             INPUT_IRQ_REGISTERED.store(false, Ordering::Release);
             panic!("failed to register console input IRQ handler: {desc:?} ({err:?})");
         }
+    }
+}
+
+#[cfg(all(unittest, any(feature = "pl011", feature = "ns16550-mmio")))]
+mod tests_irq_desc {
+    use khal::irq::IrqSource;
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    /// `device_tree_irq_desc` must tag every parsed interrupt as device-tree
+    /// sourced and propagate the controller-local IRQ number. (It deliberately
+    /// does not over-assert the trigger/polarity encoding, which is owned by
+    /// the `khal::irq` constructors.)
+    #[def_test]
+    fn device_tree_irq_desc_tags_source_and_propagates_hwirq() {
+        let gic = of::InterruptInfo {
+            irq: 33,
+            trigger: of::InterruptTrigger::EdgeRising,
+            controller: of::InterruptControllerKind::Gic,
+        };
+        let desc = device_tree_irq_desc(gic);
+        assert_eq!(desc.source, IrqSource::DeviceTree);
+        assert_eq!(desc.hwirq, 33);
+
+        let plic = of::InterruptInfo {
+            irq: 16,
+            trigger: of::InterruptTrigger::LevelHigh,
+            controller: of::InterruptControllerKind::Plic,
+        };
+        let desc = device_tree_irq_desc(plic);
+        assert_eq!(desc.source, IrqSource::DeviceTree);
+        assert_eq!(desc.hwirq, 16);
     }
 }

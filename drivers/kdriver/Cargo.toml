@@ -43,6 +43,13 @@ console-pl011 = ["console", "console_driver/pl011"]
 console-ns16550-mmio = ["console", "console_driver/ns16550-mmio"]
 console-ns16550-ioport = ["console", "console_driver/ns16550-ioport"]
 
+# Per-instance UART serial drivers: each UART node becomes a char device. They
+# build on the matching console-* backend (early stdout console) and add the
+# kdriver serial driver module on top.
+serial-pl011 = ["console-pl011"]
+serial-ns16550-mmio = ["console-ns16550-mmio"]
+serial-ns16550-ioport = ["console-ns16550-ioport"]
+
 ramdisk = ["block", "block/ramdisk"]
 ramdisk-static = ["ramdisk", "block/ramdisk-static"]
 # Placeholder concrete-driver feature names kept so source-level cfg(feature =

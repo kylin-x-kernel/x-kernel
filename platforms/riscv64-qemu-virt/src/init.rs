@@ -21,7 +21,8 @@ impl BootHandler for BootHandlerImpl {
         ));
         irq_driver::riscv::init_primary();
         irq_driver::riscv::init_current_cpu_context();
-        console_driver::init_from_device_tree().expect("failed to parse console from device tree");
+        console_driver::init_stdout_from_device_tree()
+            .expect("failed to parse console from device tree");
         console_driver::register_input_irq_handler();
         #[cfg(feature = "rtc")]
         rtc_driver::init_from_device_tree(timer_driver::riscv_sbi::rtc_now_nanos())

@@ -14,7 +14,8 @@ impl BootHandler for BootHandlerImpl {
     fn early_driver_init() {
         crate::time::early_init();
         crate::irq::init();
-        console_driver::init_from_device_tree().expect("failed to parse console from device tree");
+        console_driver::init_stdout_from_device_tree()
+            .expect("failed to parse console from device tree");
         console_driver::register_input_irq_handler();
     }
 

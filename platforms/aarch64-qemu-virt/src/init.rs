@@ -22,7 +22,8 @@ impl BootHandler for BootHandlerImpl {
         let timer_config = timer_driver::arm_generic::config_from_device_tree()
             .expect("ARM generic timer DT node is required on aarch64-qemu-virt");
         timer_driver::arm_generic::init(timer_config);
-        console_driver::init_from_device_tree().expect("failed to parse console from device tree");
+        console_driver::init_stdout_from_device_tree()
+            .expect("failed to parse console from device tree");
         #[cfg(feature = "rtc")]
         rtc_driver::init_from_device_tree(timer_driver::arm_generic::t2ns(
             timer_driver::arm_generic::now_ticks(),

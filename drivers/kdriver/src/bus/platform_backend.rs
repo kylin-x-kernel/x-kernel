@@ -29,16 +29,12 @@ const VIRTIO_MMIO_DT_COMPATIBLE: &str = "virtio,mmio";
 /// compile-time-known devices.
 pub struct PlatformBackend {
     id_alloc: LocalIdAlloc,
-    #[cfg(feature = "console")]
-    boot_console_adopted: bool,
 }
 
 impl PlatformBackend {
     pub fn new() -> Self {
         Self {
             id_alloc: LocalIdAlloc::new(),
-            #[cfg(feature = "console")]
-            boot_console_adopted: false,
         }
     }
 }
@@ -68,13 +64,6 @@ impl PlatformBackend {
         bus_id: BusId,
     ) -> DriverResult {
         let mut first_error = None;
-
-        #[cfg(feature = "console")]
-        if !self.boot_console_adopted && console_driver::config().is_some() {
-            let location_id = self.id_alloc.alloc();
-            self.boot_console_adopted =
-                crate::driver_registry::char::adopt_boot_console(bus_id, location_id)?;
-        }
 
         let firmware_specs = kdevice::firmware_match_specs_for_bus_type(BusTypeId::PLATFORM);
         #[cfg(feature = "any_firmware_driver")]
@@ -235,19 +224,48 @@ fn discovery_origin(source: fw::FirmwareSource) -> DiscoveryOrigin {
 // -- Static enumeration (formerly PlatformStaticBackend) ----------------------
 
 impl PlatformBackend {
+    /// `context` and `bus_id` are consumed only inside the per-device `#[cfg]`
+    /// blocks below, so a configuration that compiles in no platform-static
+    /// device leaves both unused. The names are kept non-underscored because
+    /// they are genuine inputs; `#[allow(unused_variables)]` covers the empty
+    /// configuration (same convention as `virtio::activate_virtio_device`).
+    #[allow(unused_variables)]
     fn enumerate_static(
         &mut self,
-        _context: &mut EnumerationContext,
-        _bus_id: BusId,
+        context: &mut EnumerationContext,
+        bus_id: BusId,
     ) -> DriverResult {
+        // --- NS16550 I/O-port (x86 ISA COM, no device tree) ---
+        // Always adopt the early stdout instance; the serial driver matches
+        // this alias and reuses the port printk already drives.
+        #[cfg(feature = "serial-ns16550-ioport")]
+        {
+            use kdevice::{
+                DeviceIdentity, DeviceLocation, DiscoveryOrigin, PlatformIdentity, ResourceSet,
+            };
+            context.register_device(
+                bus_id,
+                DeviceLocation::PlatformStatic {
+                    id: self.id_alloc.alloc(),
+                },
+                DiscoveryOrigin::PlatformStatic,
+                DeviceIdentity::Platform(PlatformIdentity {
+                    alias: Some("serial-ns16550-ioport"),
+                    firmware_id: None,
+                }),
+                None,
+                ResourceSet::new(),
+            )?;
+        }
+
         // --- ramdisk ---
         #[cfg(feature = "ramdisk")]
         {
             use kdevice::{
                 DeviceIdentity, DeviceLocation, DiscoveryOrigin, PlatformIdentity, ResourceSet,
             };
-            _context.register_device(
-                _bus_id,
+            context.register_device(
+                bus_id,
                 DeviceLocation::PlatformStatic {
                     id: self.id_alloc.alloc(),
                 },
@@ -275,8 +293,8 @@ impl PlatformBackend {
 
             use crate::driver_registry::firmware_specs::AHCI;
 
-            _context.register_device(
-                _bus_id,
+            context.register_device(
+                bus_id,
                 DeviceLocation::PlatformStatic {
                     id: self.id_alloc.alloc(),
                 },
@@ -301,8 +319,8 @@ impl PlatformBackend {
             };
 
             use crate::driver_registry::firmware_specs::BCM2835_SDHCI;
-            _context.register_device(
-                _bus_id,
+            context.register_device(
+                bus_id,
                 DeviceLocation::PlatformStatic {
                     id: self.id_alloc.alloc(),
                 },
@@ -327,8 +345,8 @@ impl PlatformBackend {
 
             use crate::driver_registry::firmware_specs::SDMMC;
 
-            _context.register_device(
-                _bus_id,
+            context.register_device(
+                bus_id,
                 DeviceLocation::PlatformStatic {
                     id: self.id_alloc.alloc(),
                 },

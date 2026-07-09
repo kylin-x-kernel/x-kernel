@@ -223,7 +223,7 @@ Registered ──► early_init() ──► enumerate() ──► probe_pending(
    - 对每个节点，查询已注册的 `FirmwareMatchSpec`（如 AHCI、sdmmc、fxmac 等）完成 compatible 匹配。
    - VirtIO MMIO 特殊处理：检测 `virtio,mmio` compatible，映射 MMIO 探测 VirtIO 设备类型。
    - 构建 `ResourceSet`（MMIO + IRQ），通过 `EnumerationContext` 注册。
-2. **Boot console adoption**：如果 console feature 启用且尚未被 adoption，在此阶段完成。
+2. **UART/serial 节点**：DT 中的 UART 节点（含 stdout）在此阶段被枚举。stdout UART 由 serial 驱动经 `take_early_port` 复用早期 boot 实例（同一硬件、不重新映射），其余 UART 各自映射并发布为独立 char 设备。
 3. **静态设备阶段**：注册编译期已知的平台设备（ramdisk 始终注册；AHCI/sdmmc/bcm2835-sdhci 仅在无 firmware 描述时注册）。
 
    > ramdisk 的存储后端由 `KFEAT_DRIVER_RAMDISK_STATIC` 控制：关闭时为 16 MiB 全零堆内存（仅用于驱动验证）；开启时由构建期嵌入的文件系统镜像零拷贝承载（路径由 Makefile 变量 `RAMDISK_IMG` 指定，格式由 `RAMDISK_IMG_FS` 控制，默认 ext4，由 `make ramdisk_img` 生成空镜像），从而可挂载为真实的可读写 root 文件系统。详见 `drivers/block/src/ramdisk_image.rs`。

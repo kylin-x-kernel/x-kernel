@@ -27,5 +27,6 @@ lazyinit = { workspace = true }
 log = { workspace = true }
 memspace = { workspace = true }
 of = { workspace = true }
+unittest.workspace = true
 arm_pl011 = { version = "0.1", optional = true }
 uart_16550 = { version = "0.4", optional = true }

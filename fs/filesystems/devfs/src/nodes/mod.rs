@@ -24,3 +24,5 @@ pub(crate) mod event;
 pub(crate) mod log;
 #[cfg(feature = "memtrack")]
 pub(crate) mod memtrack;
+#[cfg(feature = "serial")]
+pub(crate) mod serial;

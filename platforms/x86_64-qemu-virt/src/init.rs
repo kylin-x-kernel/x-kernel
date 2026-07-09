@@ -31,7 +31,7 @@ impl BootHandler for BootHandlerImpl {
             timer_driver::x86_lapic_tsc::TimerConfig::platform_static(TIMER_FREQUENCY_HZ as u64),
         );
         kernel_boot::bootln!("timer init");
-        console_driver::init(console_driver::ConsoleConfig::ioport(
+        console_driver::init_stdout_ioport(
             console_driver::boot_console_io_port(),
             Some(
                 khal::irq::IrqDesc::new(4, khal::irq::IrqTrigger::EdgeRising)
@@ -39,8 +39,7 @@ impl BootHandler for BootHandlerImpl {
                     .with_controller(khal::irq::IrqControllerKind::IoApic)
                     .with_domain(khal::irq::IO_APIC_DOMAIN),
             ),
-            console_driver::ConsoleSource::PlatformStatic,
-        ));
+        );
         kernel_boot::bootln!("console driver init");
         #[cfg(feature = "rtc")]
         rtc_driver::init(

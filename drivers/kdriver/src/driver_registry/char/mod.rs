@@ -4,15 +4,20 @@
 
 //! Character-device descriptors managed by the unified driver pipeline.
 
-#[cfg(feature = "console")]
-mod console;
-
-#[cfg(feature = "console")]
-pub(crate) use console::adopt_boot_console;
+#[cfg(any(
+    feature = "serial-pl011",
+    feature = "serial-ns16550-mmio",
+    feature = "serial-ns16550-ioport"
+))]
+mod serial;
 
 const DRIVER_FACTORIES: &[crate::driver_registry::DriverFactory] = &[
-    #[cfg(feature = "console")]
-    console::descriptor,
+    #[cfg(feature = "serial-pl011")]
+    serial::pl011_descriptor,
+    #[cfg(feature = "serial-ns16550-mmio")]
+    serial::ns16550_mmio_descriptor,
+    #[cfg(feature = "serial-ns16550-ioport")]
+    serial::ns16550_ioport_descriptor,
 ];
 
 pub fn register_all(registrar: &mut crate::driver_registry::DriverRegistrar) {

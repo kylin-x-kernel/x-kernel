@@ -14,10 +14,11 @@ use alloc::{sync::Arc, vec::Vec};
 
 use driver_base::{DriverError, DriverResult};
 use kclass::{
-    CharDevice, CharDeviceImpl, ClassDevice, char_devices, publish_char, subscribe_char_available,
+    CharDevice, CharDeviceImpl, ClassDevice, char_devices, find_char_device, publish_char,
+    subscribe_char_available,
 };
 use kdevice::{DeviceId, DeviceObject, subscribe_device_removed};
-use kspin::SpinNoPreempt;
+use kspin::{SpinNoIrq, SpinNoPreempt};
 use lazyinit::LazyInit;
 
 struct ConsoleSubsystem {
@@ -117,6 +118,11 @@ fn console_subsystem() -> &'static SpinNoPreempt<ConsoleSubsystem> {
 }
 
 fn is_runtime_console(handle: &ClassDevice<CharDeviceImpl>) -> bool {
+    // Only an explicit console driver is tracked via the char-availability
+    // bridge. The unified serial driver's stdout port is added DIRECTLY by
+    // `register_console_runtime` (not via this filter), so auxiliary serial
+    // ports — which share the `serial-*` driver name — can never be mistaken
+    // for the console and displace the real stdout UART.
     handle.driver_name() == "console"
 }
 
@@ -140,12 +146,51 @@ fn ensure_console_bridge() {
 }
 
 /// Publish a runtime console instance and mirror it into the local console view.
+///
+/// Only the caller's device is adopted as a console — the serial driver uses
+/// this for its stdout port. Auxiliary serial ports are published via
+/// `publish_char` and ignored by the char-availability bridge, so they can
+/// never become the active console.
 pub fn register_console_runtime(
     parent: Arc<DeviceObject>,
     runtime: CharDeviceImpl,
 ) -> DriverResult<()> {
     ensure_console_bridge();
-    publish_char(parent, runtime)
+    let id = parent.id();
+    publish_char(parent, runtime)?;
+    // This runs inside the driver's `probe_device`, so the device is usually
+    // not active yet and `find_char_device()` (which filters on availability)
+    // cannot see it. Adopt immediately when already active; otherwise remember
+    // the id and adopt when the device activates.
+    if let Some(handle) = find_char_device(id) {
+        console_subsystem().lock().add(handle);
+        return Ok(());
+    }
+    adopt_stdout_on_activation(id);
+    Ok(())
+}
+
+/// The stdout device id that was registered before the device became active,
+/// waiting for its activation notification so it can be adopted into the
+/// console subsystem.
+static PENDING_STDOUT: SpinNoIrq<Option<DeviceId>> = SpinNoIrq::new(None);
+static STDOUT_ADOPTION_BRIDGE: LazyInit<()> = LazyInit::new();
+
+/// Remember `id` as the future stdout console and subscribe (once) so that when
+/// the device activates it is added to the console subsystem.
+fn adopt_stdout_on_activation(id: DeviceId) {
+    *PENDING_STDOUT.lock() = Some(id);
+    STDOUT_ADOPTION_BRIDGE.call_once(|| {
+        subscribe_char_available(Arc::new(|handle: ClassDevice<CharDeviceImpl>| {
+            if PENDING_STDOUT
+                .lock()
+                .is_some_and(|pending| pending == handle.id())
+            {
+                console_subsystem().lock().add(handle);
+                *PENDING_STDOUT.lock() = None;
+            }
+        }));
+    });
 }
 
 /// Remove a runtime console from the console subsystem.

@@ -193,27 +193,57 @@ config KFEAT_DRIVER_VIRTIO_SOCKET
 comment "Character drivers"
 
 config KFEAT_DRIVER_CONSOLE_PL011
-    bool "PL011 runtime console handoff"
-    depends on KFEAT_CHAR && PLATFORM_AARCH64_QEMU_VIRT
+    bool "PL011 UART backend (early console)"
+    depends on KFEAT_CHAR
     default y if PLATFORM_AARCH64_QEMU_VIRT
     help
-      Reuse the early-boot PL011 console as a runtime character device managed
-      by kdriver.
+      Build the PL011 UART backend used by the early-boot console and the
+      per-instance serial driver.
 
 config KFEAT_DRIVER_CONSOLE_NS16550_MMIO
-    bool "NS16550 MMIO runtime console handoff"
+    bool "NS16550 MMIO UART backend (early console)"
     depends on KFEAT_CHAR
+    default y if PLATFORM_RISCV64_QEMU_VIRT
+    default y if PLATFORM_LOONGARCH64_QEMU_VIRT
     help
-      Reuse the early-boot NS16550 MMIO console as a runtime character device
-      managed by kdriver.
+      Build the NS16550 MMIO UART backend used by the early-boot console and
+      the per-instance serial driver.
 
 config KFEAT_DRIVER_CONSOLE_NS16550_IOPORT
-    bool "NS16550 I/O-port runtime console handoff"
-    depends on KFEAT_CHAR && PLATFORM_X86_64_QEMU_VIRT
+    bool "NS16550 I/O-port UART backend (early console)"
+    depends on KFEAT_CHAR && ARCH_X86_64
     default y if PLATFORM_X86_64_QEMU_VIRT
     help
-      Reuse the early-boot NS16550 I/O-port console as a runtime character
-      device managed by kdriver.
+      Build the NS16550 I/O-port UART backend used by the early-boot console
+      and the per-instance serial driver.
+
+config KFEAT_DRIVER_SERIAL_PL011
+    bool "PL011 per-instance serial driver"
+    depends on KFEAT_CHAR
+    select KFEAT_DRIVER_CONSOLE_PL011
+    default y if PLATFORM_AARCH64_QEMU_VIRT
+    help
+      Enable the kdriver per-instance serial driver for PL011 UARTs. Each UART
+      node becomes a character device; the stdout UART shares the early-boot
+      instance.
+
+config KFEAT_DRIVER_SERIAL_NS16550_MMIO
+    bool "NS16550 MMIO per-instance serial driver"
+    depends on KFEAT_CHAR
+    select KFEAT_DRIVER_CONSOLE_NS16550_MMIO
+    default y if PLATFORM_RISCV64_QEMU_VIRT
+    default y if PLATFORM_LOONGARCH64_QEMU_VIRT
+    help
+      Enable the kdriver per-instance serial driver for NS16550 MMIO UARTs.
+
+config KFEAT_DRIVER_SERIAL_NS16550_IOPORT
+    bool "NS16550 I/O-port per-instance serial driver"
+    depends on KFEAT_CHAR && ARCH_X86_64
+    select KFEAT_DRIVER_CONSOLE_NS16550_IOPORT
+    default y if PLATFORM_X86_64_QEMU_VIRT
+    help
+      Enable the kdriver per-instance serial driver for the NS16550 I/O-port
+      (x86 ISA COM) UART.
 
 comment "Filesystem transport drivers"
 

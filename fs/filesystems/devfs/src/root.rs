@@ -28,6 +28,8 @@ pub fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     nodes::memtrack::add_root_entries(&mut root, fs.clone());
     #[cfg(feature = "input")]
     nodes::event::add_root_entries(&mut root, fs.clone());
+    #[cfg(feature = "serial")]
+    nodes::serial::add_root_entries(&mut root, fs.clone());
     #[cfg(all(feature = "dice", target_os = "none"))]
     nodes::dice::add_root_entries(&mut root, fs.clone());
 

@@ -115,7 +115,7 @@ display = ["dep:fbdevice", "kruntime/display"]
 input = ["dep:inputdev", "kruntime/input", "devfs/input"]
 
 # Character device class infrastructure.
-char = ["kruntime/char"]
+char = ["kruntime/char", "devfs/serial"]
 
 # Real Time Clock (RTC) Driver.
 rtc = ["khal/rtc", "kruntime/rtc"]
@@ -140,12 +140,12 @@ driver_fxmac = ["kdriver/fxmac"]
 driver_ahci = ["kdriver/ahci"]
 driver_bcm2835_sdhci = ["kdriver/bcm2835-sdhci"]
 driver_sdmmc = ["kdriver/sdmmc"]
-driver_console_pl011 = ["kdriver/console-pl011", "aarch64-qemu-virt?/console-pl011"]
-driver_console_ns16550_mmio = [
-    "kdriver/console-ns16550-mmio",
-    "aarch64-qemu-virt?/console-ns16550-mmio",
-]
+driver_console_pl011 = ["kdriver/console-pl011"]
+driver_console_ns16550_mmio = ["kdriver/console-ns16550-mmio"]
 driver_console_ns16550_ioport = ["kdriver/console-ns16550-ioport"]
+driver_serial_pl011 = ["kdriver/serial-pl011"]
+driver_serial_ns16550_mmio = ["kdriver/serial-ns16550-mmio"]
+driver_serial_ns16550_ioport = ["kdriver/serial-ns16550-ioport"]
 
 # Backtrace
 dwarf = ["backtrace/dwarf"]
