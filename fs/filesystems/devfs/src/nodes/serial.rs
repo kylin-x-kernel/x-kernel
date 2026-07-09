@@ -12,16 +12,17 @@
 //! (auxiliary) UARTs are exposed as `/dev/serial0`, `/dev/serial1`, ...
 
 use alloc::{format, sync::Arc};
-use core::any::Any;
 
 use console_driver::runtime::active_console_id;
 use driver_base::DriverError;
 use kclass::{CharDevice, CharDeviceImpl, ClassDevice, char_devices};
 use kerrno::KError;
-use kvfs::{DeviceFileOps, DeviceId, NodeFlags, NodeType, VfsResult};
-use kvfs_simple::{DirMapping, SimpleDir, SimpleFs};
+use kvfs::{
+    DeviceFileOps, DeviceId, DirMapping, NodeFlags, NodeType, SimpleDir, SimpleFs, VfsFile,
+    VfsFileBuilder, VfsInode, VfsResult,
+};
 
-use crate::DeviceFile;
+use crate::{DeviceFile, add_device_entry};
 
 /// Linux TTY major; the minor identifies one auxiliary UART.
 const SERIAL_MAJOR: u32 = 4;
@@ -40,20 +41,33 @@ impl SerialDev {
 }
 
 impl DeviceFileOps for SerialDev {
-    fn read_at(&self, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+    fn open(&self, _inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
+        // UARTs are non-seekable stream devices: `lseek()` must fail with
+        // ESPIPE and reads/writes must ignore file position. `stream_open()`
+        // clears `FMode::LSEEK` (so the VFS rejects seeks) and the positional
+        // I/O flags, matching POSIX terminal/TTY semantics.
+        file.stream_open();
+        Ok(())
+    }
+
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn supports_write(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
         CharDevice::read(&self.device, buf).map_err(map_err)
     }
 
-    fn write_at(&self, buf: &[u8], _offset: u64) -> VfsResult<usize> {
+    fn write(&self, _file: &VfsFile, buf: &[u8], _offset: u64) -> VfsResult<usize> {
         CharDevice::write(&self.device, buf).map_err(map_err)
     }
 
     fn flags(&self) -> NodeFlags {
-        NodeFlags::NON_CACHEABLE | NodeFlags::STREAM
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
+        NodeFlags::NON_CACHEABLE
     }
 }
 
@@ -90,7 +104,7 @@ pub fn serial_devices(fs: Arc<SimpleFs>) -> DirMapping {
             DeviceId::new(SERIAL_MAJOR, idx),
             Arc::new(SerialDev::new(device)),
         );
-        serials.add(format!("serial{idx}"), dev);
+        add_device_entry(&mut serials, format!("serial{idx}"), dev);
         idx += 1;
     }
     serials
