@@ -13,8 +13,8 @@ use alloc::{
 use fs9p::FileAttr;
 use kvfs::{
     Dentry, DeviceId, DirContext, FileDirOperations, FileOperations, InodeDirOperations,
-    InodeOperations, InodeSymlinkOperations, Metadata, MetadataUpdate, NodeFlags, NodeType,
-    VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
+    InodeOperations, InodeSymlinkOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags,
+    NodeType, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
 };
 
 use super::{
@@ -342,7 +342,7 @@ impl InodeDirOperations for Inode {
     fn lookup(
         &self,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         _flags: kvfs::InodeLookupFlags,
     ) -> VfsResult<Dentry> {
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
@@ -360,7 +360,7 @@ impl InodeDirOperations for Inode {
         &self,
         _idmap: &kvfs::MountIdmap,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         _exclusive: bool,
     ) -> VfsResult<Dentry> {
@@ -386,7 +386,7 @@ impl InodeDirOperations for Inode {
                 inode_init_from_attr(&attr),
                 NodeFlags::NON_CACHEABLE,
                 Some(parent.clone()),
-                String::from(name),
+                name.to_owned(),
             ),
         )
     }
@@ -395,7 +395,7 @@ impl InodeDirOperations for Inode {
         &self,
         _idmap: &kvfs::MountIdmap,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
     ) -> VfsResult<Dentry> {
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
@@ -418,7 +418,7 @@ impl InodeDirOperations for Inode {
                 inode_init_from_attr(&attr),
                 NodeFlags::empty(),
                 Some(parent.clone()),
-                String::from(name),
+                name.to_owned(),
             ),
         )
     }
@@ -427,7 +427,7 @@ impl InodeDirOperations for Inode {
         &self,
         _idmap: &kvfs::MountIdmap,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         device: DeviceId,
     ) -> VfsResult<Dentry> {
@@ -456,7 +456,7 @@ impl InodeDirOperations for Inode {
                 inode_init_from_attr(&attr),
                 NodeFlags::empty(),
                 Some(parent.clone()),
-                String::from(name),
+                name.to_owned(),
             ),
         )
     }
@@ -465,14 +465,20 @@ impl InodeDirOperations for Inode {
         &self,
         _idmap: &kvfs::MountIdmap,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         target: &str,
     ) -> VfsResult<Dentry> {
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
-        self.create_symlink_entry(&parent, dentry.name(), target)
+        let name = dentry.name();
+        self.create_symlink_entry(&parent, name, target)
     }
 
-    fn link(&self, node: &Dentry, _dir: &kvfs::VfsInode, dentry: &Dentry) -> VfsResult<Dentry> {
+    fn link(
+        &self,
+        node: &Dentry,
+        _dir: &kvfs::VfsInode,
+        dentry: &LockedDentry<'_>,
+    ) -> VfsResult<Dentry> {
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
         let dir_path = self.dir_path()?;
@@ -488,9 +494,9 @@ impl InodeDirOperations for Inode {
         self.lookup_locked(&parent, name)
     }
 
-    fn unlink(&self, _dir: &kvfs::VfsInode, dentry: &Dentry) -> VfsResult<()> {
+    fn unlink(&self, _dir: &kvfs::VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
         let dir_path = self.dir_path()?;
-        let child_path = join_child_path(&dir_path, dentry.name());
+        let child_path = join_child_path(&dir_path, &dentry.name());
         let mut session = self.fs.lock();
         session.remove_path(&child_path).map_err(into_vfs_err)
     }
@@ -499,15 +505,18 @@ impl InodeDirOperations for Inode {
         &self,
         _idmap: &kvfs::MountIdmap,
         _old_dir: &kvfs::VfsInode,
-        old_dentry: &Dentry,
+        old_dentry: &LockedDentry<'_>,
         _new_dir: &kvfs::VfsInode,
-        new_dentry: &Dentry,
-        _flags: kvfs::RenameFlags,
+        new_dentry: &LockedDentry<'_>,
+        flags: kvfs::RenameFlags,
     ) -> VfsResult<()> {
+        if flags.contains(kvfs::RenameFlags::EXCHANGE) {
+            return Err(VfsError::InvalidInput);
+        }
         let dst_dir = new_dentry.parent().ok_or(VfsError::InvalidInput)?;
         let dst_dir: Arc<Self> = dst_dir.downcast().map_err(|_| VfsError::InvalidInput)?;
-        let src_path = join_child_path(&self.dir_path()?, old_dentry.name());
-        let dst_path = join_child_path(&dst_dir.dir_path()?, new_dentry.name());
+        let src_path = join_child_path(&self.dir_path()?, &old_dentry.name());
+        let dst_path = join_child_path(&dst_dir.dir_path()?, &new_dentry.name());
         let mut session = self.fs.lock();
         session
             .rename_path(&src_path, &dst_path)

@@ -20,9 +20,10 @@ use ksync::Mutex;
 use kvfs::{
     AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FileDirOperations,
     FileOperations, InodeCache, InodeDirOperations, InodeOperations, InodeSymlinkOperations, Kiocb,
-    Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType, StatFs, StatFsFlags, SuperBlock,
-    SuperBlockOperations, Umode, VfsError, VfsFile, VfsInodeInit, VfsResult, WriteBeginRequest,
-    WriteEndRequest, simple_getattr, simple_rename, simple_statfs_with_flags, simple_write_end,
+    LockedDentry, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType, StatFs,
+    StatFsFlags, SuperBlock, SuperBlockOperations, Umode, VfsError, VfsFile, VfsInodeInit,
+    VfsResult, WriteBeginRequest, WriteEndRequest, simple_getattr, simple_rename,
+    simple_statfs_with_flags, simple_write_end,
 };
 use slab::Slab;
 
@@ -371,7 +372,7 @@ impl MemoryNode {
 
     fn ramfs_mknod(
         &self,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         device: DeviceId,
     ) -> VfsResult<Dentry> {
@@ -486,7 +487,7 @@ impl InodeDirOperations for MemoryNode {
     fn lookup(
         &self,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         _flags: kvfs::InodeLookupFlags,
     ) -> VfsResult<Dentry> {
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
@@ -503,7 +504,7 @@ impl InodeDirOperations for MemoryNode {
         &self,
         _idmap: &kvfs::MountIdmap,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         _exclusive: bool,
     ) -> VfsResult<Dentry> {
@@ -515,7 +516,7 @@ impl InodeDirOperations for MemoryNode {
         &self,
         _idmap: &kvfs::MountIdmap,
         dir_inode: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
     ) -> VfsResult<Dentry> {
         let mode = mode.with_node_type(NodeType::Directory);
@@ -528,7 +529,7 @@ impl InodeDirOperations for MemoryNode {
         &self,
         _idmap: &kvfs::MountIdmap,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         device: DeviceId,
     ) -> VfsResult<Dentry> {
@@ -539,7 +540,7 @@ impl InodeDirOperations for MemoryNode {
         &self,
         _idmap: &kvfs::MountIdmap,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         target: &str,
     ) -> VfsResult<Dentry> {
         let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
@@ -568,7 +569,7 @@ impl InodeDirOperations for MemoryNode {
         &self,
         target_dentry: &Dentry,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
     ) -> VfsResult<Dentry> {
         let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
@@ -586,7 +587,7 @@ impl InodeDirOperations for MemoryNode {
         Ok(self.new_entry(&dir, name, inode))
     }
 
-    fn unlink(&self, dir_inode: &kvfs::VfsInode, dentry: &Dentry) -> VfsResult<()> {
+    fn unlink(&self, dir_inode: &kvfs::VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
         let name = dentry.name();
         let dir = self.inode.as_dir()?;
         let mut entries = dir.entries.lock();
@@ -613,9 +614,9 @@ impl InodeDirOperations for MemoryNode {
         &self,
         idmap: &kvfs::MountIdmap,
         old_dir_inode: &kvfs::VfsInode,
-        old_dentry: &Dentry,
+        old_dentry: &LockedDentry<'_>,
         new_dir_inode: &kvfs::VfsInode,
-        new_dentry: &Dentry,
+        new_dentry: &LockedDentry<'_>,
         flags: kvfs::RenameFlags,
     ) -> VfsResult<()> {
         let old_dir = old_dentry.parent().ok_or(VfsError::InvalidInput)?;
@@ -623,21 +624,12 @@ impl InodeDirOperations for MemoryNode {
         let src_name = old_dentry.name();
         let dst_name = new_dentry.name();
         let dst_node = dst_dir.downcast::<Self>()?;
-        let mut replaced_dir = None;
-        if let Ok(entry) = dst_dir.lookup(dst_name) {
-            let src_entry = old_dir.lookup(src_name)?;
-            if entry.inode() == src_entry.inode() {
-                return Ok(());
-            }
-            if src_entry.node_type() == NodeType::Directory
-                && entry.node_type() != NodeType::Directory
-            {
-                return Err(VfsError::NotADirectory);
-            }
-            if entry.node_type() == NodeType::Directory {
-                replaced_dir = Some(entry.downcast::<Self>()?.inode.clone());
-            }
-        }
+        let replaced_dir =
+            if new_dentry.is_really_positive() && new_dentry.node_type() == NodeType::Directory {
+                Some(new_dentry.downcast::<Self>()?.inode.clone())
+            } else {
+                None
+            };
 
         simple_rename(
             idmap,

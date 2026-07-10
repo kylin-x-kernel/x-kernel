@@ -161,9 +161,10 @@ impl BootVfs {
         let mountpoint = match self.lookup(path) {
             Ok(loc) if loc.is_dir() => loc,
             Ok(loc) => {
+                let name = loc.name();
                 loc.parent()
                     .ok_or(kvfs::VfsError::InvalidInput)?
-                    .unlink(loc.name())?;
+                    .unlink(&name)?;
                 self.mkdir_path(path)?;
                 self.lookup(path)?
             }

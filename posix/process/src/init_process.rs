@@ -53,7 +53,7 @@ pub fn run_init_process(
     let uctx = UserContext::new(entry_vaddr.into(), ustack_top, 0);
 
     let task_number = allocate_root_pid_handle().expect("Failed to allocate init PID");
-    let mut task = new_user_task(name, uctx, 0, task_number, dispatch_syscall);
+    let mut task = new_user_task(&name, uctx, 0, task_number, dispatch_syscall);
     task.ctx_mut()
         .set_page_table_root(uspace.page_table_hw_root());
 

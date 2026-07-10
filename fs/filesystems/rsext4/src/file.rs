@@ -290,6 +290,27 @@ pub(crate) fn remove_named_entry_at<B: BlockDevice>(
     try_remove_dentry_in_block(fs, block_dev, phys, name_bytes)
 }
 
+pub(crate) fn remove_inodeentry_from_parent<B: BlockDevice>(
+    fs: &mut Ext4FileSystem,
+    block_dev: &mut Jbd2Dev<B>,
+    parent_ino: u32,
+    parent_inode: &Ext4Inode,
+    child_name: &str,
+) -> BlockDevResult<bool> {
+    let Some(entry) = find_named_entry_in_parent(
+        fs,
+        block_dev,
+        parent_ino,
+        parent_inode,
+        child_name.as_bytes(),
+    )?
+    else {
+        return Ok(false);
+    };
+
+    remove_named_entry_at(fs, block_dev, entry.phys_block, child_name.as_bytes())
+}
+
 fn replace_named_entry_at<B: BlockDevice>(
     fs: &mut Ext4FileSystem,
     block_dev: &mut Jbd2Dev<B>,
@@ -1124,116 +1145,52 @@ fn read_file_follow<B: BlockDevice>(
 }
 
 // mv
-pub fn mv<B: BlockDevice>(
-    fs: &mut Ext4FileSystem,
-    block_dev: &mut Jbd2Dev<B>,
-    old_path: &str,
-    new_path: &str,
-) -> BlockDevResult<()> {
-    // 找到对应entry，找不到就返回。
-    // 判断new_path的父目录是否已经存在不存在就返回，存在继续判断new_path是否有对应的entry，存在就返回
-    // 判断被移动的entry类型，如果是目录
-    // 对entry的父目录的link-1.
-    // 将旧entry使用insertnewentry插入到新目录修改文件名称，更新长度信息，使用removeentry...删除旧entry
-    // 对新父目录的link+1.
-    // 如果是文件或者链接
-    // 将旧entry使用insertnewentry插入到新目录修改文件名称，更新长度信息，使用removeentry...删除旧entry
-
-    let old_norm = normalize_path(old_path)?;
-    let new_norm = normalize_path(new_path)?;
-
-    let (old_parent, old_name) = match old_norm.rfind('/') {
-        Some(pos) => {
-            let parent = if pos == 0 {
-                "/".to_string()
-            } else {
-                old_norm[..pos].to_string()
-            };
-            let name = old_norm[pos + 1..].to_string();
-            (parent, name)
-        }
-        None => {
-            error!("mv invalid old_path(no '/'): old_path={old_path}");
-            return Err(BlockDevError::InvalidInput);
-        }
-    };
-    let (new_parent, new_name) = match new_norm.rfind('/') {
-        Some(pos) => {
-            let parent = if pos == 0 {
-                "/".to_string()
-            } else {
-                new_norm[..pos].to_string()
-            };
-            let name = new_norm[pos + 1..].to_string();
-            (parent, name)
-        }
-        None => {
-            error!("mv invalid new_path(no '/'): new_path={new_path}");
-            return Err(BlockDevError::InvalidInput);
-        }
-    };
-
-    // 找到 old entry（inode + file_type），找不到就返回
-    let (old_pino, old_parent_inode) = match get_inode_with_num(fs, block_dev, &old_parent)
-        .ok()
-        .flatten()
-    {
-        Some(v) => v,
-        None => {
-            error!("mv old parent not found: old_path={old_path} old_parent={old_parent}");
-            return Err(BlockDevError::InvalidInput);
-        }
-    };
-
-    let old_entry = match find_named_entry_in_parent(
-        fs,
-        block_dev,
-        old_pino,
-        &old_parent_inode,
-        old_name.as_bytes(),
-    ) {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            error!(
-                "mv source entry not found in old parent: old_path={old_path} \
-                 old_parent={old_parent} old_name={old_name}"
-            );
-            return Err(BlockDevError::InvalidInput);
-        }
-        Err(e) => {
-            error!("mv lookup failed: {e:?} old_path={old_path}");
-            return Err(BlockDevError::InvalidInput);
-        }
-    };
-    let src_ino = old_entry.ino;
-    let src_ft = old_entry.file_type;
-
-    // new_parent 必须存在且是目录
-    let (new_pino, new_parent_inode) = match get_inode_with_num(fs, block_dev, &new_parent)
-        .ok()
-        .flatten()
-    {
-        Some(v) => v,
-        None => {
-            error!("mv new parent not found: new_path={new_path} new_parent={new_parent}");
-            return Err(BlockDevError::InvalidInput);
-        }
-    };
-    if !new_parent_inode.is_dir() {
-        error!("mv new parent is not dir: new_path={new_path} new_parent={new_parent}");
+fn validate_rename_child_name(name: &str) -> BlockDevResult<()> {
+    if name.is_empty() || name.contains('/') || name.contains('\0') || is_dot_or_dotdot(name) {
         return Err(BlockDevError::InvalidInput);
     }
+    Ok(())
+}
 
-    // old_path 不允许为根目录
-    if old_norm == "/" {
-        error!("mv refuses to move root: old_path={old_path}");
+/// Renames one child between ext4 parent directories identified by inode number.
+pub fn rename_child<B: BlockDevice>(
+    fs: &mut Ext4FileSystem,
+    block_dev: &mut Jbd2Dev<B>,
+    old_parent_ino: u32,
+    old_name: &str,
+    new_parent_ino: u32,
+    new_name: &str,
+) -> BlockDevResult<()> {
+    validate_rename_child_name(old_name)?;
+    validate_rename_child_name(new_name)?;
+
+    let old_parent_inode = fs.get_inode_by_num(block_dev, old_parent_ino)?;
+    if !old_parent_inode.is_dir() {
+        return Err(BlockDevError::NotDirectory);
+    }
+    let old_entry = find_named_entry_in_parent(
+        fs,
+        block_dev,
+        old_parent_ino,
+        &old_parent_inode,
+        old_name.as_bytes(),
+    )?
+    .ok_or(BlockDevError::InvalidInput)?;
+    let src_ino = old_entry.ino;
+    let src_file_type = old_entry.file_type;
+
+    let new_parent_inode = fs.get_inode_by_num(block_dev, new_parent_ino)?;
+    if !new_parent_inode.is_dir() {
+        return Err(BlockDevError::NotDirectory);
+    }
+    if old_parent_ino == src_ino {
         return Err(BlockDevError::InvalidInput);
     }
 
     let dst_entry = find_named_entry_in_parent(
         fs,
         block_dev,
-        new_pino,
+        new_parent_ino,
         &new_parent_inode,
         new_name.as_bytes(),
     )?;
@@ -1273,10 +1230,9 @@ pub fn mv<B: BlockDevice>(
             dst_entry.phys_block,
             new_name.as_bytes(),
             src_ino,
-            src_ft,
+            src_file_type,
         )?;
         if !replaced {
-            error!("mv replace destination entry failed: new_path={new_path}");
             return Err(BlockDevError::WriteError);
         }
         false
@@ -1285,41 +1241,56 @@ pub fn mv<B: BlockDevice>(
         insert_dir_entry(
             fs,
             block_dev,
-            new_pino,
+            new_parent_ino,
             &mut new_parent_inode_copy,
             src_ino,
-            &new_name,
-            src_ft,
+            new_name,
+            src_file_type,
         )
-        .map_err(|_| {
-            error!(
-                "mv insert_dir_entry failed: old_path={old_path} new_path={new_path} \
-                 new_parent={new_parent} new_name={new_name} src_ino={src_ino}"
-            );
-            BlockDevError::WriteError
-        })?;
+        .map_err(|_| BlockDevError::WriteError)?;
         true
     };
 
-    if !remove_inodeentry_from_parentdir(fs, block_dev, &old_parent, &old_name)? {
+    if !remove_inodeentry_from_parent(fs, block_dev, old_parent_ino, &old_parent_inode, old_name)? {
         if inserted_new_entry {
-            let _ = remove_inodeentry_from_parentdir(fs, block_dev, &new_parent, &new_name);
+            match fs.get_inode_by_num(block_dev, new_parent_ino) {
+                Ok(new_parent_inode) => {
+                    if let Err(err) = remove_inodeentry_from_parent(
+                        fs,
+                        block_dev,
+                        new_parent_ino,
+                        &new_parent_inode,
+                        new_name,
+                    ) {
+                        warn!(
+                            "rename rollback failed removing inserted entry: \
+                             parent_ino={new_parent_ino} name={new_name} err={err:?}"
+                        );
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        "rename rollback failed loading new parent inode: \
+                         parent_ino={new_parent_ino} name={new_name} err={err:?}"
+                    );
+                }
+            }
         } else if let (Some(dst_entry), Some((old_dst_ino, old_dst_file_type, _))) =
             (&dst_entry, &replaced_inode)
-        {
-            let _ = replace_named_entry_at(
+            && let Err(err) = replace_named_entry_at(
                 fs,
                 block_dev,
                 dst_entry.phys_block,
                 new_name.as_bytes(),
                 *old_dst_ino,
                 *old_dst_file_type,
+            )
+        {
+            warn!(
+                "rename rollback failed restoring replaced entry: parent_ino={new_parent_ino} \
+                 name={new_name} ino={old_dst_ino} err={err:?}"
             );
         }
-        error!(
-            "mv remove old entry failed: old_parent={old_parent} old_name={old_name} (rollback \
-             new_parent={new_parent} new_name={new_name})"
-        );
         return Err(BlockDevError::WriteError);
     }
 
@@ -1330,68 +1301,103 @@ pub fn mv<B: BlockDevice>(
         free_replaced_inode(fs, block_dev, *old_dst_ino, old_dst_inode)?;
     }
     if replaced_dir {
-        fs.modify_inode(block_dev, new_pino, |td| {
+        fs.modify_inode(block_dev, new_parent_ino, |td| {
             td.i_links_count = td.i_links_count.saturating_sub(1);
         })?;
     }
 
-    // 目录跨父目录移动：更新 link 以及 '..'
     let mut moved_inode = src_inode;
-    if moved_inode.is_dir() {
-        // 父目录不同才需要改
-        let old_pino = match get_inode_with_num(fs, block_dev, &old_parent)
-            .ok()
-            .flatten()
-        {
-            Some((n, _)) => n,
-            None => {
-                error!("mv old parent vanished while moving dir: old_parent={old_parent}");
-                return Err(BlockDevError::InvalidInput);
-            }
-        };
-        if old_pino != new_pino {
-            let _ = fs.modify_inode(block_dev, old_pino, |td| {
-                td.i_links_count = td.i_links_count.saturating_sub(1);
-            });
-            let _ = fs.modify_inode(block_dev, new_pino, |td| {
-                td.i_links_count = td.i_links_count.saturating_add(1);
-            });
+    if moved_inode.is_dir() && old_parent_ino != new_parent_ino {
+        fs.modify_inode(block_dev, old_parent_ino, |td| {
+            td.i_links_count = td.i_links_count.saturating_sub(1);
+        })?;
+        fs.modify_inode(block_dev, new_parent_ino, |td| {
+            td.i_links_count = td.i_links_count.saturating_add(1);
+        })?;
 
-            // 更新被移动目录的 ".." 指向新父目录 inode
-            let first_blk = match resolve_inode_block(block_dev, &mut moved_inode, 0) {
-                Ok(Some(b)) => b,
-                _ => {
-                    error!("mv resolve_inode_block failed for moved dir ino={src_ino}");
-                    return Err(BlockDevError::Corrupted);
+        let first_block = match resolve_inode_block(block_dev, &mut moved_inode, 0)? {
+            Some(block) => block,
+            None => return Err(BlockDevError::Corrupted),
+        };
+        remember_dir_block(fs, first_block as u64);
+        fs.datablock_cache
+            .modify(block_dev, first_block as u64, |data| {
+                let block_bytes = BLOCK_SIZE;
+                if block_bytes < 24 {
+                    return;
                 }
-            };
-            remember_dir_block(fs, first_blk as u64);
-            let _ = fs
-                .datablock_cache
-                .modify(block_dev, first_blk as u64, |data| {
-                    let block_bytes = BLOCK_SIZE;
-                    if block_bytes < 24 {
-                        return;
-                    }
-                    // '.' entry at offset 0
-                    let rec_len0 = u16::from_le_bytes([data[4], data[5]]) as usize;
-                    if rec_len0 == 0 || rec_len0 + 8 > block_bytes {
-                        return;
-                    }
-                    let off1 = rec_len0;
-                    if off1 + 4 > block_bytes {
-                        return;
-                    }
-                    let bytes = new_pino.to_le_bytes();
-                    data[off1] = bytes[0];
-                    data[off1 + 1] = bytes[1];
-                    data[off1 + 2] = bytes[2];
-                    data[off1 + 3] = bytes[3];
-                });
-        }
+                let dot_rec_len = u16::from_le_bytes([data[4], data[5]]) as usize;
+                if dot_rec_len == 0 || dot_rec_len + 8 > block_bytes {
+                    return;
+                }
+                let dotdot_offset = dot_rec_len;
+                if dotdot_offset + 4 > block_bytes {
+                    return;
+                }
+                let bytes = new_parent_ino.to_le_bytes();
+                data[dotdot_offset..dotdot_offset + 4].copy_from_slice(&bytes);
+            })?;
     }
 
     Ok(())
+}
+
+pub fn mv<B: BlockDevice>(
+    fs: &mut Ext4FileSystem,
+    block_dev: &mut Jbd2Dev<B>,
+    old_path: &str,
+    new_path: &str,
+) -> BlockDevResult<()> {
+    let old_norm = normalize_path(old_path)?;
+    let new_norm = normalize_path(new_path)?;
+
+    let (old_parent, old_name) = match old_norm.rfind('/') {
+        Some(pos) => {
+            let parent = if pos == 0 {
+                "/".to_string()
+            } else {
+                old_norm[..pos].to_string()
+            };
+            let name = old_norm[pos + 1..].to_string();
+            (parent, name)
+        }
+        None => {
+            error!("mv invalid old_path(no '/'): old_path={old_path}");
+            return Err(BlockDevError::InvalidInput);
+        }
+    };
+    let (new_parent, new_name) = match new_norm.rfind('/') {
+        Some(pos) => {
+            let parent = if pos == 0 {
+                "/".to_string()
+            } else {
+                new_norm[..pos].to_string()
+            };
+            let name = new_norm[pos + 1..].to_string();
+            (parent, name)
+        }
+        None => {
+            error!("mv invalid new_path(no '/'): new_path={new_path}");
+            return Err(BlockDevError::InvalidInput);
+        }
+    };
+
+    if old_norm == "/" {
+        return Err(BlockDevError::InvalidInput);
+    }
+
+    let (old_parent_ino, _) =
+        get_inode_with_num(fs, block_dev, &old_parent)?.ok_or(BlockDevError::InvalidInput)?;
+    let (new_parent_ino, _) =
+        get_inode_with_num(fs, block_dev, &new_parent)?.ok_or(BlockDevError::InvalidInput)?;
+    rename_child(
+        fs,
+        block_dev,
+        old_parent_ino,
+        &old_name,
+        new_parent_ino,
+        &new_name,
+    )
 }
 
 /// Unlinks a non-directory entry.
@@ -1540,21 +1546,12 @@ pub fn remove_inodeentry_from_parentdir<B: BlockDevice>(
         }
     };
 
-    let entry = match find_named_entry_in_parent(
-        fs,
-        block_dev,
-        parent_ino_num,
-        &parent_inode,
-        child_name.as_bytes(),
-    )? {
-        Some(v) => v,
-        None => {
-            warn!("Dir entry '{child_name}' not found under parent {parent_path}");
-            return Ok(false);
-        }
-    };
-
-    remove_named_entry_at(fs, block_dev, entry.phys_block, child_name.as_bytes())
+    let removed =
+        remove_inodeentry_from_parent(fs, block_dev, parent_ino_num, &parent_inode, child_name)?;
+    if !removed {
+        warn!("Dir entry '{child_name}' not found under parent {parent_path}");
+    }
+    Ok(removed)
 }
 
 pub fn rmdir<B: BlockDevice>(

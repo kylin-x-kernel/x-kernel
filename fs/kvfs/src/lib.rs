@@ -47,8 +47,8 @@ pub use namei::{DelayedCall, LastType, ParentLookup, dentry_open};
 pub use node::{
     Dentry, DentryOperations, DeviceFileOps, DirContext, DirEntrySink, GetattrQueryFlags,
     GetattrRequestMask, InodeCache, InodeDirOperations, InodeLookupFlags, InodeOperations,
-    InodeSymlinkOperations, MmapMapper, NodeFlags, RenameFlags, VfsInode, VfsInodeInit,
-    WeakVfsInode, bdev_add, bdev_del, cdev_add, cdev_del,
+    InodeSymlinkOperations, LockedDentry, MmapMapper, NodeFlags, RenameFlags, VfsInode,
+    VfsInodeInit, WeakVfsInode, bdev_add, bdev_del, cdev_add, cdev_del,
 };
 pub(crate) use node::{
     DentryKey, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive,
@@ -73,4 +73,4 @@ pub use types::{DeviceId, Metadata, MetadataUpdate, NodePermission, NodeType, Um
 pub type VfsError = kerrno::KError;
 pub type VfsResult<T> = Result<T, VfsError>;
 
-use ksync::{Mutex, MutexGuard};
+use ksync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};

@@ -14,9 +14,9 @@ use alloc::{
 use iov_iter::{IovIterDest, IovIterSource};
 use kvfs::{
     AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FileDirOperations,
-    FileOperations, InodeDirOperations, InodeOperations, InodeSymlinkOperations, Kiocb, Metadata,
-    MetadataUpdate, NodeType, ReadaheadControl, VfsError, VfsFile, VfsResult, WriteBeginRequest,
-    WriteEndRequest, WritebackControl,
+    FileOperations, InodeDirOperations, InodeOperations, InodeSymlinkOperations, Kiocb,
+    LockedDentry, Metadata, MetadataUpdate, NodeType, ReadaheadControl, VfsError, VfsFile,
+    VfsResult, WriteBeginRequest, WriteEndRequest, WritebackControl,
 };
 use rsext4::{BLOCK_SIZE, Jbd2Dev};
 
@@ -32,23 +32,12 @@ pub(crate) struct Inode {
     fs: Arc<Ext4Filesystem>,
     ino: u32,
     node_type: NodeType,
-    path: Option<String>,
 }
 
 impl Inode {
     /// Create a new inode wrapper.
-    pub(crate) fn new(
-        fs: Arc<Ext4Filesystem>,
-        ino: u32,
-        node_type: NodeType,
-        path: Option<String>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            fs,
-            ino,
-            node_type,
-            path,
-        })
+    pub(crate) fn new(fs: Arc<Ext4Filesystem>, ino: u32, node_type: NodeType) -> Arc<Self> {
+        Arc::new(Self { fs, ino, node_type })
     }
 
     fn create_entry(
@@ -59,8 +48,7 @@ impl Inode {
         name: impl Into<String>,
     ) -> Dentry {
         let name = name.into();
-        let path = self.dir_path().map(|dir| join_child_path(&dir, &name)).ok();
-        let inode = Ext4Filesystem::iget_from_disk_inode(&self.fs, ino, inode, path);
+        let inode = Ext4Filesystem::iget_from_disk_inode(&self.fs, ino, inode);
         if inode.is_dir() {
             Dentry::new_dir_from_inode(inode, Some(parent.clone()), name)
         } else {
@@ -68,12 +56,9 @@ impl Inode {
         }
     }
 
-    fn dir_path(&self) -> VfsResult<String> {
-        self.path.clone().ok_or(VfsError::InvalidInput)
-    }
-
     fn lookup_locked(&self, parent: &Dentry, name: &str) -> VfsResult<Dentry> {
-        let path = join_child_path(&self.dir_path()?, name);
+        let parent_path = parent.absolute_path()?.to_string();
+        let path = join_child_path(&parent_path, name);
         let mut state = self.fs.lock();
         let (fs, dev) = state.split();
         let (ino, inode) = rsext4::dir::get_inode_with_num(fs, dev, &path)
@@ -202,7 +187,7 @@ impl InodeDirOperations for Inode {
     fn lookup(
         &self,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         _flags: kvfs::InodeLookupFlags,
     ) -> VfsResult<Dentry> {
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
@@ -220,7 +205,7 @@ impl InodeDirOperations for Inode {
         &self,
         _idmap: &kvfs::MountIdmap,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         _exclusive: bool,
     ) -> VfsResult<Dentry> {
@@ -229,9 +214,7 @@ impl InodeDirOperations for Inode {
         if mode.node_type() != NodeType::RegularFile {
             return Err(VfsError::InvalidInput);
         }
-        let Some(dir_path) = self.dir_path().ok() else {
-            return Err(VfsError::InvalidInput);
-        };
+        let dir_path = parent.absolute_path()?.to_string();
         let path = join_child_path(&dir_path, name);
         let (ino, inode) = {
             let mut state = self.fs.lock();
@@ -258,7 +241,7 @@ impl InodeDirOperations for Inode {
             (ino, inode)
         };
 
-        let inode = Ext4Filesystem::iget_from_disk_inode(&self.fs, ino, &inode, Some(path));
+        let inode = Ext4Filesystem::iget_from_disk_inode(&self.fs, ino, &inode);
         Ok(Dentry::new_file_from_inode(
             inode,
             Some(parent.clone()),
@@ -270,7 +253,7 @@ impl InodeDirOperations for Inode {
         &self,
         _idmap: &kvfs::MountIdmap,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
     ) -> VfsResult<Dentry> {
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
@@ -278,7 +261,7 @@ impl InodeDirOperations for Inode {
         if mode.node_type() != NodeType::Directory {
             return Err(VfsError::InvalidInput);
         }
-        let dir_path = self.dir_path()?;
+        let dir_path = parent.absolute_path()?.to_string();
         let path = join_child_path(&dir_path, name);
         let (ino, inode) = {
             let mut state = self.fs.lock();
@@ -301,7 +284,7 @@ impl InodeDirOperations for Inode {
             (ino, inode)
         };
 
-        let inode = Ext4Filesystem::iget_from_disk_inode(&self.fs, ino, &inode, Some(path));
+        let inode = Ext4Filesystem::iget_from_disk_inode(&self.fs, ino, &inode);
         Ok(Dentry::new_dir_from_inode(
             inode,
             Some(parent.clone()),
@@ -313,7 +296,7 @@ impl InodeDirOperations for Inode {
         &self,
         _idmap: &kvfs::MountIdmap,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         device: DeviceId,
     ) -> VfsResult<Dentry> {
@@ -326,7 +309,7 @@ impl InodeDirOperations for Inode {
         ) {
             return Err(VfsError::InvalidInput);
         }
-        let dir_path = self.dir_path()?;
+        let dir_path = parent.absolute_path()?.to_string();
         let path = join_child_path(&dir_path, name);
         let (ino, inode) = {
             let mut state = self.fs.lock();
@@ -366,7 +349,7 @@ impl InodeDirOperations for Inode {
             (ino, inode)
         };
 
-        let inode = Ext4Filesystem::iget_from_disk_inode(&self.fs, ino, &inode, Some(path));
+        let inode = Ext4Filesystem::iget_from_disk_inode(&self.fs, ino, &inode);
         Ok(Dentry::new_file_from_inode(
             inode,
             Some(parent.clone()),
@@ -378,12 +361,12 @@ impl InodeDirOperations for Inode {
         &self,
         _idmap: &kvfs::MountIdmap,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         target: &str,
     ) -> VfsResult<Dentry> {
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
-        let dir_path = self.dir_path()?;
+        let dir_path = parent.absolute_path()?.to_string();
         let link_path = join_child_path(&dir_path, name);
         {
             let mut state = self.fs.lock();
@@ -393,10 +376,15 @@ impl InodeDirOperations for Inode {
         self.lookup_locked(&parent, name)
     }
 
-    fn link(&self, node: &Dentry, _dir: &kvfs::VfsInode, dentry: &Dentry) -> VfsResult<Dentry> {
+    fn link(
+        &self,
+        node: &Dentry,
+        _dir: &kvfs::VfsInode,
+        dentry: &LockedDentry<'_>,
+    ) -> VfsResult<Dentry> {
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
-        let dir_path = self.dir_path()?;
+        let dir_path = parent.absolute_path()?.to_string();
         let link_path = join_child_path(&dir_path, name);
         let target_path = node.absolute_path()?.to_string();
         {
@@ -422,9 +410,10 @@ impl InodeDirOperations for Inode {
         self.lookup_locked(&parent, name)
     }
 
-    fn unlink(&self, _dir: &kvfs::VfsInode, dentry: &Dentry) -> VfsResult<()> {
+    fn unlink(&self, _dir: &kvfs::VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
         let name = dentry.name();
-        let dir_path = self.dir_path()?;
+        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+        let dir_path = parent.absolute_path()?.to_string();
         let path = join_child_path(&dir_path, name);
         {
             let mut state = self.fs.lock();
@@ -445,19 +434,24 @@ impl InodeDirOperations for Inode {
         &self,
         _idmap: &kvfs::MountIdmap,
         _old_dir: &kvfs::VfsInode,
-        old_dentry: &Dentry,
+        old_dentry: &LockedDentry<'_>,
         _new_dir: &kvfs::VfsInode,
-        new_dentry: &Dentry,
-        _flags: kvfs::RenameFlags,
+        new_dentry: &LockedDentry<'_>,
+        flags: kvfs::RenameFlags,
     ) -> VfsResult<()> {
+        if flags.contains(kvfs::RenameFlags::EXCHANGE) {
+            return Err(VfsError::InvalidInput);
+        }
         let dst_dir = new_dentry.parent().ok_or(VfsError::InvalidInput)?;
         let dst_dir: Arc<Self> = dst_dir.downcast().map_err(|_| VfsError::InvalidInput)?;
-        let src_path = join_child_path(&self.dir_path()?, old_dentry.name());
-        let dst_path = join_child_path(&dst_dir.dir_path()?, new_dentry.name());
+        let old_name = old_dentry.name();
+        let new_name = new_dentry.name();
+
         {
             let mut state = self.fs.lock();
             let (fs, dev) = state.split();
-            rsext4::file::rename(dev, fs, &src_path, &dst_path).map_err(into_vfs_err)?;
+            rsext4::file::rename_child(fs, dev, self.ino, old_name, dst_dir.ino, new_name)
+                .map_err(into_vfs_err)?;
         }
         Ok(())
     }

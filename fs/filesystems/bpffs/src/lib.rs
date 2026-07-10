@@ -19,8 +19,9 @@ use kerrno::KResult;
 use ksync::Mutex;
 use kvfs::{
     AnonInodeFs, Dentry, DirContext, FMode, FileDirOperations, FileOperations, InodeDirOperations,
-    InodeOperations, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType, OpenFlags,
-    SimpleFs, SimpleFsNode, StatFsFlags, SuperBlock, VfsError, VfsFile, VfsInode, VfsResult,
+    InodeOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType,
+    OpenFlags, SimpleFs, SimpleFsNode, StatFsFlags, SuperBlock, VfsError, VfsFile, VfsInode,
+    VfsResult,
 };
 
 /// Linux `BPF_FS_MAGIC`.
@@ -438,7 +439,7 @@ impl InodeDirOperations for BpfInodeOperations {
     fn lookup(
         &self,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         _flags: kvfs::InodeLookupFlags,
     ) -> VfsResult<Dentry> {
         let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
@@ -458,7 +459,7 @@ impl InodeDirOperations for BpfInodeOperations {
         &self,
         _idmap: &kvfs::MountIdmap,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         _mode: kvfs::Umode,
     ) -> VfsResult<Dentry> {
         let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
@@ -469,7 +470,7 @@ impl InodeDirOperations for BpfInodeOperations {
         if entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
         }
-        entries.insert(name.into(), entry.clone());
+        entries.insert(name.to_owned(), entry.clone());
         self.node.new_entry(&dir, name, entry)
     }
 
@@ -477,12 +478,12 @@ impl InodeDirOperations for BpfInodeOperations {
         &self,
         _old_dentry: &Dentry,
         _dir: &kvfs::VfsInode,
-        _new_dentry: &Dentry,
+        _new_dentry: &LockedDentry<'_>,
     ) -> VfsResult<Dentry> {
         Err(VfsError::OperationNotPermitted)
     }
 
-    fn unlink(&self, _dir: &kvfs::VfsInode, dentry: &Dentry) -> VfsResult<()> {
+    fn unlink(&self, _dir: &kvfs::VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
         let name = dentry.name();
         let mut entries = self.node.inode.as_dir()?.lock();
         let entry = entries.get(name).ok_or(VfsError::NotFound)?;
@@ -499,9 +500,9 @@ impl InodeDirOperations for BpfInodeOperations {
         &self,
         _idmap: &kvfs::MountIdmap,
         _old_dir: &kvfs::VfsInode,
-        _old_dentry: &Dentry,
+        _old_dentry: &LockedDentry<'_>,
         _new_dir: &kvfs::VfsInode,
-        _new_dentry: &Dentry,
+        _new_dentry: &LockedDentry<'_>,
         _flags: kvfs::RenameFlags,
     ) -> VfsResult<()> {
         Err(VfsError::OperationNotPermitted)

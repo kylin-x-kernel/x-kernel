@@ -69,16 +69,11 @@ pub fn sys_unlinkat(dirfd: i32, path: UserConstPtr<c_char>, flags: usize) -> KRe
             LookupIntent::Open,
             LookupFlags::no_follow(),
         )?;
+        let name = entry.name();
         if flags == AT_REMOVEDIR as usize {
-            entry
-                .parent()
-                .ok_or(KError::ResourceBusy)?
-                .rmdir(entry.name())?;
+            entry.parent().ok_or(KError::ResourceBusy)?.rmdir(&name)?;
         } else {
-            entry
-                .parent()
-                .ok_or(KError::IsADirectory)?
-                .unlink(entry.name())?;
+            entry.parent().ok_or(KError::IsADirectory)?.unlink(&name)?;
         }
         Ok(0)
     })

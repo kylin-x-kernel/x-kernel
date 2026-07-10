@@ -74,7 +74,7 @@ pub fn sys_execve(
         .absolute_path()
         .map(|path| path.to_string())
         .unwrap_or_else(|_| path.clone());
-    let entry_name = loc.name().to_string();
+    let entry_name = loc.name();
 
     let aspace_ref = process.address_space()?;
     let mut aspace = aspace_ref.lock();

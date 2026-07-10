@@ -8,8 +8,8 @@ use core::time::Duration;
 
 use kvfs::{
     Dentry, DeviceId, DirContext, DirEntrySink, FileDirOperations, FileOperations,
-    InodeDirOperations, InodeOperations, Metadata, MetadataUpdate, NodePermission, NodeType,
-    VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
+    InodeDirOperations, InodeOperations, LockedDentry, Metadata, MetadataUpdate, NodePermission,
+    NodeType, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
 };
 
 use super::{
@@ -158,7 +158,7 @@ impl InodeDirOperations for FatDirInode {
     fn lookup(
         &self,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         _flags: kvfs::InodeLookupFlags,
     ) -> VfsResult<Dentry> {
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
@@ -183,7 +183,7 @@ impl InodeDirOperations for FatDirInode {
         &self,
         _idmap: &kvfs::MountIdmap,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         _exclusive: bool,
     ) -> VfsResult<Dentry> {
@@ -221,7 +221,7 @@ impl InodeDirOperations for FatDirInode {
         &self,
         _idmap: &kvfs::MountIdmap,
         _dir: &kvfs::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         _mode: kvfs::Umode,
     ) -> VfsResult<Dentry> {
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
@@ -246,14 +246,14 @@ impl InodeDirOperations for FatDirInode {
         &self,
         _old_dentry: &Dentry,
         _dir: &kvfs::VfsInode,
-        _new_dentry: &Dentry,
+        _new_dentry: &LockedDentry<'_>,
     ) -> VfsResult<Dentry> {
         //  EPERM  The filesystem containing oldpath and newpath does not
         //         support the creation of hard links.
         Err(VfsError::PermissionDenied)
     }
 
-    fn unlink(&self, _dir: &kvfs::VfsInode, dentry: &Dentry) -> VfsResult<()> {
+    fn unlink(&self, _dir: &kvfs::VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
         let name = dentry.name();
         let fs = self.fs.lock();
         let dir = self.inner.borrow(&fs);
@@ -264,11 +264,14 @@ impl InodeDirOperations for FatDirInode {
         &self,
         _idmap: &kvfs::MountIdmap,
         _old_dir: &kvfs::VfsInode,
-        old_dentry: &Dentry,
+        old_dentry: &LockedDentry<'_>,
         _new_dir: &kvfs::VfsInode,
-        new_dentry: &Dentry,
-        _flags: kvfs::RenameFlags,
+        new_dentry: &LockedDentry<'_>,
+        flags: kvfs::RenameFlags,
     ) -> VfsResult<()> {
+        if flags.contains(kvfs::RenameFlags::EXCHANGE) {
+            return Err(VfsError::InvalidInput);
+        }
         let src_name = old_dentry.name();
         let dst_dir = new_dentry.parent().ok_or(VfsError::InvalidInput)?;
         let dst_name = new_dentry.name();
@@ -279,13 +282,13 @@ impl InodeDirOperations for FatDirInode {
 
         // The default implementation throws EEXIST if dst exists, so we need to
         // dispatch_irq it
-        match dst_dir.inner.borrow(&fs).remove(dst_name) {
+        match dst_dir.inner.borrow(&fs).remove(&dst_name) {
             Ok(_) => {}
             Err(fatfs::Error::NotFound) => {}
             Err(err) => return Err(into_vfs_err(err)),
         }
 
-        dir.rename(src_name, dst_dir.inner.borrow(&fs), dst_name)
+        dir.rename(&src_name, dst_dir.inner.borrow(&fs), &dst_name)
             .map_err(into_vfs_err)
     }
 }

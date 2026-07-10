@@ -11,7 +11,7 @@ use alloc::{
 use hashbrown::HashMap;
 use klazy::Lazy;
 
-use crate::{Dentry, Mutex, VfsInode, VfsResult, WritebackControl};
+use crate::{Dentry, Mutex, MutexGuard, VfsInode, VfsResult, WritebackControl};
 
 static SUPER_BLOCK_REGISTRY: Lazy<SuperBlockRegistry> = Lazy::new(SuperBlockRegistry::new);
 
@@ -190,6 +190,7 @@ pub struct SuperBlock {
     ops: Arc<dyn SuperBlockOperations>,
     root: Dentry,
     max_file_size: u64,
+    rename_lock: Mutex<()>,
     inodes: Mutex<Vec<Weak<VfsInode>>>,
 }
 
@@ -217,6 +218,7 @@ impl SuperBlock {
             ops,
             root: root.clone(),
             max_file_size,
+            rename_lock: Mutex::default(),
             inodes: Mutex::default(),
         });
         root.bind_super_block(&super_block);
@@ -227,6 +229,10 @@ impl SuperBlock {
     /// Returns this superblock's maximum regular-file size.
     pub fn max_file_size(&self) -> u64 {
         self.max_file_size
+    }
+
+    pub(crate) fn lock_rename(&self) -> MutexGuard<'_, ()> {
+        self.rename_lock.lock()
     }
 
     /// Tracks an inode attached to this superblock.

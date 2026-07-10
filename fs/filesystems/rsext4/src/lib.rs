@@ -35,8 +35,8 @@ pub use dir::mkdir;
 pub use error::{Ext4Result, RSEXT4Error};
 pub use ext4::{Ext4FileSystem, find_file, mkfs, mount, umount};
 pub use file::{
-    create_symbol_link, delete_dir, delete_file, link, mkfile, mv, read_file, rename, truncate,
-    unlink, write_file,
+    create_symbol_link, delete_dir, delete_file, link, mkfile, mv, read_file, rename, rename_child,
+    truncate, unlink, write_file,
 };
 
 pub mod api;

@@ -553,9 +553,9 @@ impl Path {
         self.dentry.vfs_inode().metadata()
     }
 
-    /// Returns the name of this location within its parent directory.
-    pub fn name(&self) -> &str {
-        self.dentry.name()
+    /// Returns a snapshot of this location's name within its parent directory.
+    pub fn name(&self) -> String {
+        self.dentry.name_snapshot()
     }
 
     /// Returns the parent location, if any.
@@ -962,8 +962,8 @@ mod tests {
     use super::*;
     use crate::{
         Dentry, DirContext, FileDirOperations, FileOperations, InodeDirOperations, InodeOperations,
-        Metadata, MetadataUpdate, NodePermission, NodeType, StatFs, SuperBlockOperations, VfsError,
-        VfsFile, VfsInode, VfsInodeInit, VfsResult,
+        LockedDentry, Metadata, MetadataUpdate, NodePermission, NodeType, StatFs,
+        SuperBlockOperations, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
     };
 
     struct MockFilesystem {
@@ -1042,7 +1042,7 @@ mod tests {
         fn lookup(
             &self,
             _dir: &VfsInode,
-            dentry: &Dentry,
+            dentry: &LockedDentry<'_>,
             _flags: crate::InodeLookupFlags,
         ) -> VfsResult<Dentry> {
             let name = dentry.name();
@@ -1066,7 +1066,7 @@ mod tests {
             &self,
             _idmap: &crate::MountIdmap,
             _dir: &VfsInode,
-            _dentry: &Dentry,
+            _dentry: &LockedDentry<'_>,
             _mode: crate::Umode,
             _exclusive: bool,
         ) -> VfsResult<Dentry> {
@@ -1077,12 +1077,12 @@ mod tests {
             &self,
             _old_dentry: &Dentry,
             _dir: &VfsInode,
-            _new_dentry: &Dentry,
+            _new_dentry: &LockedDentry<'_>,
         ) -> VfsResult<Dentry> {
             Err(VfsError::OperationNotSupported)
         }
 
-        fn unlink(&self, _dir: &VfsInode, _dentry: &Dentry) -> VfsResult<()> {
+        fn unlink(&self, _dir: &VfsInode, _dentry: &LockedDentry<'_>) -> VfsResult<()> {
             Err(VfsError::OperationNotSupported)
         }
 
@@ -1090,9 +1090,9 @@ mod tests {
             &self,
             _idmap: &crate::MountIdmap,
             _old_dir: &VfsInode,
-            _old_dentry: &Dentry,
+            _old_dentry: &LockedDentry<'_>,
             _new_dir: &VfsInode,
-            _new_dentry: &Dentry,
+            _new_dentry: &LockedDentry<'_>,
             _flags: crate::RenameFlags,
         ) -> VfsResult<()> {
             Err(VfsError::OperationNotSupported)

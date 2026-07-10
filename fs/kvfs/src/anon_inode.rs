@@ -156,7 +156,7 @@ struct AnonInodeDentryOperations;
 
 impl DentryOperations for AnonInodeDentryOperations {
     fn d_dname(&self, dentry: &Dentry) -> VfsResult<Option<String>> {
-        Ok(Some(format!("anon_inode:{}", dentry.name())))
+        Ok(Some(format!("anon_inode:{}", dentry.name_snapshot())))
     }
 }
 

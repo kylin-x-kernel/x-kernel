@@ -151,9 +151,10 @@ fn main() {
                 kvfs::LookupFlags::no_follow(),
             )
             .and_then(|file| {
+                let name = file.name();
                 file.parent()
                     .ok_or(kvfs::VfsError::IsADirectory)?
-                    .unlink(file.name())
+                    .unlink(&name)
             });
         if let Err(err) = remove_result {
             if err.canonicalize() != kvfs::VfsError::NotFound {

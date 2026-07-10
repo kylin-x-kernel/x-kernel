@@ -29,9 +29,10 @@ use super::{
     device::{block_device_file_operations, character_device_file_operations},
 };
 use crate::{
-    AddressSpace, AddressSpaceOperations, DelayedCall, Dentry, DeviceId, FileOperations, Metadata,
-    MetadataUpdate, MountIdmap, Mutex, NodePermission, NodeType, Path, SuperBlock, Umode, VfsError,
-    VfsFileBuilder, VfsResult,
+    AddressSpace, AddressSpaceOperations, DelayedCall, Dentry, DeviceId, FileOperations,
+    LockedDentry, Metadata, MetadataUpdate, MountIdmap, Mutex, NodePermission, NodeType, Path,
+    RwLock, RwLockReadGuard, RwLockWriteGuard, SuperBlock, Umode, VfsError, VfsFileBuilder,
+    VfsResult,
     address_space::{default_address_space_operations, empty_address_space_operations},
 };
 
@@ -108,11 +109,16 @@ bitflags! {
 }
 
 /// Directory inode operations.
+///
+/// Namespace-mutating entry points are called by the VFS while holding the
+/// relevant parent-directory namespace locks. Dentry arguments that carry the
+/// operation name are passed as [`LockedDentry`], allowing filesystem callbacks
+/// to read `dentry.name()` as a borrowed `&str` without cloning.
 pub trait InodeDirOperations: Send + Sync {
     fn lookup(
         &self,
         _dir: &VfsInode,
-        _dentry: &Dentry,
+        _dentry: &LockedDentry<'_>,
         _flags: InodeLookupFlags,
     ) -> VfsResult<Dentry> {
         Err(VfsError::NotADirectory)
@@ -122,7 +128,7 @@ pub trait InodeDirOperations: Send + Sync {
         &self,
         _idmap: &MountIdmap,
         _dir: &VfsInode,
-        _dentry: &Dentry,
+        _dentry: &LockedDentry<'_>,
         _mode: Umode,
         _exclusive: bool,
     ) -> VfsResult<Dentry> {
@@ -133,12 +139,12 @@ pub trait InodeDirOperations: Send + Sync {
         &self,
         _old_dentry: &Dentry,
         _dir: &VfsInode,
-        _new_dentry: &Dentry,
+        _new_dentry: &LockedDentry<'_>,
     ) -> VfsResult<Dentry> {
         Err(VfsError::NotADirectory)
     }
 
-    fn unlink(&self, _dir: &VfsInode, _dentry: &Dentry) -> VfsResult<()> {
+    fn unlink(&self, _dir: &VfsInode, _dentry: &LockedDentry<'_>) -> VfsResult<()> {
         Err(VfsError::NotADirectory)
     }
 
@@ -146,7 +152,7 @@ pub trait InodeDirOperations: Send + Sync {
         &self,
         _idmap: &MountIdmap,
         _dir: &VfsInode,
-        _dentry: &Dentry,
+        _dentry: &LockedDentry<'_>,
         _symname: &str,
     ) -> VfsResult<Dentry> {
         Err(VfsError::NotADirectory)
@@ -156,13 +162,13 @@ pub trait InodeDirOperations: Send + Sync {
         &self,
         _idmap: &MountIdmap,
         _dir: &VfsInode,
-        _dentry: &Dentry,
+        _dentry: &LockedDentry<'_>,
         _mode: Umode,
     ) -> VfsResult<Dentry> {
         Err(VfsError::OperationNotPermitted)
     }
 
-    fn rmdir(&self, dir: &VfsInode, dentry: &Dentry) -> VfsResult<()> {
+    fn rmdir(&self, dir: &VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
         self.unlink(dir, dentry)
     }
 
@@ -170,7 +176,7 @@ pub trait InodeDirOperations: Send + Sync {
         &self,
         _idmap: &MountIdmap,
         _dir: &VfsInode,
-        _dentry: &Dentry,
+        _dentry: &LockedDentry<'_>,
         _mode: Umode,
         _device: DeviceId,
     ) -> VfsResult<Dentry> {
@@ -181,9 +187,9 @@ pub trait InodeDirOperations: Send + Sync {
         &self,
         _idmap: &MountIdmap,
         _old_dir: &VfsInode,
-        _old_dentry: &Dentry,
+        _old_dentry: &LockedDentry<'_>,
         _new_dir: &VfsInode,
-        _new_dentry: &Dentry,
+        _new_dentry: &LockedDentry<'_>,
         _flags: RenameFlags,
     ) -> VfsResult<()> {
         Err(VfsError::NotADirectory)
@@ -637,6 +643,7 @@ impl InodeSpecialState {
 pub struct VfsInode {
     identity: InodeIdentity,
     attributes: InodeAttributes,
+    namespace_lock: RwLock<()>,
     inode_operations: Arc<dyn InodeOperations>,
     file_operations: Arc<dyn FileOperations>,
     private_data: Arc<dyn Any + Send + Sync>,
@@ -1007,6 +1014,7 @@ impl VfsInode {
         Arc::new_cyclic(move |this| Self {
             identity: InodeIdentity::new(init.number),
             attributes: InodeAttributes::new(init, flags),
+            namespace_lock: RwLock::new(()),
             inode_operations,
             file_operations: file_operations.unwrap_or_else(no_open_file_operations),
             private_data,
@@ -1286,6 +1294,14 @@ impl VfsInode {
             .ok_or(VfsError::InvalidData)
     }
 
+    pub(crate) fn lock_namespace_shared(&self) -> RwLockReadGuard<'_, ()> {
+        self.namespace_lock.read()
+    }
+
+    pub(crate) fn lock_namespace_exclusive(&self) -> RwLockWriteGuard<'_, ()> {
+        self.namespace_lock.write()
+    }
+
     pub(crate) fn supports_directory_operations(&self) -> bool {
         self.inode_operations
             .as_ref()
@@ -1308,6 +1324,7 @@ impl VfsInode {
         exclusive: bool,
     ) -> VfsResult<Dentry> {
         let dentry = Dentry::new_negative(Some(dir.clone()), name.to_owned());
+        let dentry = dentry.lock_location();
         self.require_directory_operations()?
             .create(&MountIdmap, self, &dentry, mode, exclusive)
     }
@@ -1315,6 +1332,7 @@ impl VfsInode {
     /// Look up a child below this directory inode.
     pub fn lookup(&self, dir: &Dentry, name: &str) -> VfsResult<Dentry> {
         let dentry = Dentry::new_negative(Some(dir.clone()), name.to_owned());
+        let dentry = dentry.lock_location();
         self.require_directory_operations()?
             .lookup(self, &dentry, InodeLookupFlags::empty())
     }
@@ -1333,6 +1351,7 @@ impl VfsInode {
     /// Create a directory child below this directory inode.
     pub fn mkdir(&self, dir: &Dentry, name: &str, permission: NodePermission) -> VfsResult<Dentry> {
         let dentry = Dentry::new_negative(Some(dir.clone()), name.to_owned());
+        let dentry = dentry.lock_location();
         let mode = Umode::new(NodeType::Directory, permission);
         self.require_directory_operations()?
             .mkdir(&MountIdmap, self, &dentry, mode)
@@ -1348,6 +1367,7 @@ impl VfsInode {
         device: DeviceId,
     ) -> VfsResult<Dentry> {
         let dentry = Dentry::new_negative(Some(dir.clone()), name.to_owned());
+        let dentry = dentry.lock_location();
         let mode = Umode::new(node_type, permission);
         self.require_directory_operations()?
             .mknod(&MountIdmap, self, &dentry, mode, device)
@@ -1356,6 +1376,7 @@ impl VfsInode {
     /// Create a symbolic link below this directory inode.
     pub fn symlink(&self, dir: &Dentry, name: &str, target: &str) -> VfsResult<Dentry> {
         let dentry = Dentry::new_negative(Some(dir.clone()), name.to_owned());
+        let dentry = dentry.lock_location();
         self.require_directory_operations()?
             .symlink(&MountIdmap, self, &dentry, target)
     }
@@ -1363,13 +1384,15 @@ impl VfsInode {
     /// Link `source` below this directory inode.
     pub fn link(&self, dir: &Dentry, name: &str, source: &Dentry) -> VfsResult<Dentry> {
         let dentry = Dentry::new_negative(Some(dir.clone()), name.to_owned());
+        let dentry = dentry.lock_location();
         self.require_directory_operations()?
             .link(source, self, &dentry)
     }
 
     /// Unlink a child below this directory inode.
     pub fn unlink(&self, dentry: &Dentry) -> VfsResult<()> {
-        self.require_directory_operations()?.unlink(self, dentry)
+        let dentry = dentry.lock_location();
+        self.require_directory_operations()?.unlink(self, &dentry)
     }
 
     /// Rename a child from this directory inode to another directory inode.
@@ -1380,12 +1403,14 @@ impl VfsInode {
         new_dentry: &Dentry,
         flags: RenameFlags,
     ) -> VfsResult<()> {
+        let old_dentry = old_dentry.lock_location();
+        let new_dentry = new_dentry.lock_location();
         self.require_directory_operations()?.rename(
             &MountIdmap,
             self,
-            old_dentry,
+            &old_dentry,
             new_dir,
-            new_dentry,
+            &new_dentry,
             flags,
         )
     }

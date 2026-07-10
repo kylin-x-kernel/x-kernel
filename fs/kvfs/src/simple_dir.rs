@@ -18,8 +18,8 @@ use ksync::Mutex;
 
 use crate::{
     Dentry, DirContext, DirEntrySink, FileDirOperations, FileOperations, InodeDirOperations,
-    InodeOperations, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType, SeqFileInode,
-    VfsError, VfsFile, VfsInode, VfsResult,
+    InodeOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType,
+    SeqFileInode, VfsError, VfsFile, VfsInode, VfsResult,
     libfs::{generic_read_dir, noop_fsync},
     path::{DOT, DOTDOT},
     simple_fs::{SimpleFs, SimpleFsNode},
@@ -392,25 +392,24 @@ impl<O: SimpleDirOps> InodeDirOperations for SimpleDirInodeOperations<O> {
     fn lookup(
         &self,
         _dir: &crate::VfsInode,
-        dentry: &Dentry,
+        dentry: &LockedDentry<'_>,
         _flags: crate::InodeLookupFlags,
     ) -> VfsResult<Dentry> {
         let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
-        self.dir
-            .ops
-            .lookup_child(SimpleDirLookup::new(&dir), dentry.name())
+        let name = dentry.name();
+        self.dir.ops.lookup_child(SimpleDirLookup::new(&dir), name)
     }
 
     fn link(
         &self,
         _old_dentry: &Dentry,
         _dir: &crate::VfsInode,
-        _new_dentry: &Dentry,
+        _new_dentry: &LockedDentry<'_>,
     ) -> VfsResult<Dentry> {
         Err(VfsError::OperationNotPermitted)
     }
 
-    fn unlink(&self, _dir: &crate::VfsInode, _dentry: &Dentry) -> VfsResult<()> {
+    fn unlink(&self, _dir: &crate::VfsInode, _dentry: &LockedDentry<'_>) -> VfsResult<()> {
         Err(VfsError::OperationNotPermitted)
     }
 
@@ -418,9 +417,9 @@ impl<O: SimpleDirOps> InodeDirOperations for SimpleDirInodeOperations<O> {
         &self,
         _idmap: &crate::MountIdmap,
         _old_dir: &crate::VfsInode,
-        _old_dentry: &Dentry,
+        _old_dentry: &LockedDentry<'_>,
         _new_dir: &crate::VfsInode,
-        _new_dentry: &Dentry,
+        _new_dentry: &LockedDentry<'_>,
         _flags: crate::RenameFlags,
     ) -> VfsResult<()> {
         Err(VfsError::OperationNotPermitted)

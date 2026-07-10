@@ -856,9 +856,9 @@ mod tests {
     use super::*;
     use crate::{
         Dentry, DirContext, FileDirOperations, FileOperations, InodeDirOperations, InodeOperations,
-        InodeSymlinkOperations, MagicLinkOps, Metadata, MetadataUpdate, Mount, NodePermission,
-        NodeType, ResolvedObject, StatFs, SuperBlock, SuperBlockOperations, VfsError, VfsFile,
-        VfsInode, VfsInodeInit,
+        InodeSymlinkOperations, LockedDentry, MagicLinkOps, Metadata, MetadataUpdate, Mount,
+        NodePermission, NodeType, ResolvedObject, StatFs, SuperBlock, SuperBlockOperations,
+        VfsError, VfsFile, VfsInode, VfsInodeInit,
     };
 
     #[def_test]
@@ -945,7 +945,7 @@ mod tests {
         fn lookup(
             &self,
             _dir: &VfsInode,
-            dentry: &Dentry,
+            dentry: &LockedDentry<'_>,
             _flags: crate::InodeLookupFlags,
         ) -> VfsResult<Dentry> {
             self.children
@@ -959,7 +959,7 @@ mod tests {
             &self,
             _idmap: &crate::MountIdmap,
             _dir: &VfsInode,
-            _dentry: &Dentry,
+            _dentry: &LockedDentry<'_>,
             _mode: crate::Umode,
             _exclusive: bool,
         ) -> VfsResult<Dentry> {
@@ -970,12 +970,12 @@ mod tests {
             &self,
             _old_dentry: &Dentry,
             _dir: &VfsInode,
-            _new_dentry: &Dentry,
+            _new_dentry: &LockedDentry<'_>,
         ) -> VfsResult<Dentry> {
             Err(VfsError::OperationNotSupported)
         }
 
-        fn unlink(&self, _dir: &VfsInode, _dentry: &Dentry) -> VfsResult<()> {
+        fn unlink(&self, _dir: &VfsInode, _dentry: &LockedDentry<'_>) -> VfsResult<()> {
             Err(VfsError::OperationNotSupported)
         }
 
@@ -983,9 +983,9 @@ mod tests {
             &self,
             _idmap: &crate::MountIdmap,
             _old_dir: &VfsInode,
-            _old_dentry: &Dentry,
+            _old_dentry: &LockedDentry<'_>,
             _new_dir: &VfsInode,
-            _new_dentry: &Dentry,
+            _new_dentry: &LockedDentry<'_>,
             _flags: crate::RenameFlags,
         ) -> VfsResult<()> {
             Err(VfsError::OperationNotSupported)

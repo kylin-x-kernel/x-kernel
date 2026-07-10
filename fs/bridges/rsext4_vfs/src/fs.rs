@@ -66,7 +66,7 @@ impl Ext4Filesystem {
             inode_cache: InodeCache::new(),
             root_dir: Mutex::new(None),
         });
-        let root_inode = Self::iget(&fs, EXT4_ROOT_INO, Some("/".into()))?;
+        let root_inode = Self::iget(&fs, EXT4_ROOT_INO)?;
         *fs.root_dir.lock() = Some(Dentry::new_dir_from_inode(root_inode, None, String::new()));
         Ok(SuperBlock::new(fs))
     }
@@ -76,7 +76,7 @@ impl Ext4Filesystem {
         self.inner.lock()
     }
 
-    pub(crate) fn iget(fs: &Arc<Self>, ino: u32, path: Option<String>) -> VfsResult<Arc<VfsInode>> {
+    pub(crate) fn iget(fs: &Arc<Self>, ino: u32) -> VfsResult<Arc<VfsInode>> {
         if let Some(inode) = fs.inode_cache.lookup(ino as u64) {
             return Ok(inode);
         }
@@ -84,7 +84,7 @@ impl Ext4Filesystem {
         let mut state = fs.lock();
         let (inner, dev) = state.split();
         let disk_inode = inner.get_inode_by_num(dev, ino).map_err(into_vfs_err)?;
-        Ok(Self::iget_from_disk_inode(fs, ino, &disk_inode, path))
+        Ok(Self::iget_from_disk_inode(fs, ino, &disk_inode))
     }
 
     #[expect(
@@ -101,7 +101,6 @@ impl Ext4Filesystem {
         fs: &Arc<Self>,
         ino: u32,
         disk_inode: &Ext4Inode,
-        path: Option<String>,
     ) -> Arc<VfsInode> {
         let mode = Umode::from_bits(disk_inode.i_mode);
         let node_type = mode.node_type();
@@ -117,18 +116,18 @@ impl Ext4Filesystem {
             NodeType::Directory => fs.inode_cache.get_or_insert_openable_dir_with_init(
                 NodeFlags::empty(),
                 init,
-                || Inode::new(fs.clone(), ino, node_type, path),
+                || Inode::new(fs.clone(), ino, node_type),
             ),
             NodeType::RegularFile | NodeType::Unknown => fs
                 .inode_cache
                 .get_or_insert_file_with_init(NodeFlags::empty(), init, || {
-                    Inode::new(fs.clone(), ino, node_type, path)
+                    Inode::new(fs.clone(), ino, node_type)
                 }),
             NodeType::Symlink => {
                 let inode = fs.inode_cache.get_or_insert_symlink_with_init(
                     NodeFlags::empty(),
                     init,
-                    || Inode::new(fs.clone(), ino, node_type, path),
+                    || Inode::new(fs.clone(), ino, node_type),
                 );
                 if let Some(link) = inode_fast_symlink_target(disk_inode) {
                     inode.set_cached_link(link);
@@ -141,7 +140,7 @@ impl Ext4Filesystem {
             | NodeType::Socket => {
                 fs.inode_cache
                     .get_or_insert_special_with_init(NodeFlags::empty(), init, || {
-                        Inode::new(fs.clone(), ino, node_type, path)
+                        Inode::new(fs.clone(), ino, node_type)
                     })
             }
         }

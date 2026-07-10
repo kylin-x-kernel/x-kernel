@@ -113,10 +113,8 @@ impl FileVariant {
                 LookupIntent::Open,
                 LookupFlags::no_follow(),
             )?;
-            entry
-                .parent()
-                .ok_or(VfsError::IsADirectory)?
-                .unlink(entry.name())
+            let name = entry.name();
+            entry.parent().ok_or(VfsError::IsADirectory)?.unlink(&name)
         }) {
             Ok(()) => Ok(()),
             Err(VfsError::NotFound) => {
@@ -147,10 +145,8 @@ impl FileVariant {
                 LookupIntent::Open,
                 LookupFlags::no_follow(),
             )?;
-            entry
-                .parent()
-                .ok_or(VfsError::ResourceBusy)?
-                .rmdir(entry.name())
+            let name = entry.name();
+            entry.parent().ok_or(VfsError::ResourceBusy)?.rmdir(&name)
         })
         .inspect_err(|e| error!("remove dir failed: {:?}", e))
         .map_err(|_| TEE_ERROR_GENERIC)?;

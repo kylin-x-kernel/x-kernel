@@ -11,15 +11,15 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{any::Any, fmt, iter, mem};
+use core::{any::Any, fmt, iter, mem, ops::Deref};
 
 use bitflags::bitflags;
 use hashbrown::HashMap;
 
 use super::{DirEntrySink, NodeFlags, VfsInode};
 use crate::{
-    DeviceId, Metadata, MetadataUpdate, Mutex, NodePermission, NodeType, RenameFlags, SuperBlock,
-    VfsError, VfsResult,
+    DeviceId, Metadata, MetadataUpdate, Mutex, NodePermission, NodeType, RenameFlags, RwLock,
+    RwLockReadGuard, SuperBlock, VfsError, VfsResult,
     path::{DOT, DOTDOT, MAX_NAME_LEN, PathBuf},
 };
 
@@ -108,11 +108,16 @@ pub trait DentryOperations: Send + Sync + 'static {
     }
 }
 
+#[derive(Clone)]
+struct DentryLocation {
+    parent: Option<Dentry>,
+    name: String,
+}
+
 struct DentryInner {
     flags: Mutex<DentryFlags>,
     inode: Mutex<Option<Arc<VfsInode>>>,
-    parent: Option<Dentry>,
-    name: String,
+    location: RwLock<DentryLocation>,
     operations: Mutex<Option<Arc<dyn DentryOperations>>>,
     super_block: Mutex<Option<Weak<SuperBlock>>>,
     children: Mutex<HashMap<String, Dentry>>,
@@ -132,8 +137,7 @@ impl DentryInner {
         Self {
             flags: Mutex::new(flags),
             inode: Mutex::new(inode),
-            parent,
-            name,
+            location: RwLock::new(DentryLocation { parent, name }),
             operations: Mutex::default(),
             super_block: Mutex::new(super_block),
             children: Mutex::default(),
@@ -143,10 +147,11 @@ impl DentryInner {
 
 impl fmt::Debug for DentryInner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let location = self.location.read();
         f.debug_struct("DentryInner")
             .field("flags", &*self.flags.lock())
             .field("inode", &*self.inode.lock())
-            .field("name", &self.name)
+            .field("name", &location.name)
             .finish()
     }
 }
@@ -173,6 +178,42 @@ impl DentryAlias {
 /// Strong reference to a VFS directory entry.
 #[derive(Debug, Clone)]
 pub struct Dentry(Arc<DentryInner>);
+
+/// A dentry view protected by the VFS namespace operation that created it.
+///
+/// Filesystem namespace callbacks receive this type when they need to read the
+/// dentry name. The name borrow is tied to the location guard, so callbacks can
+/// inspect `d_name` without cloning while safe Rust prevents the borrow from
+/// escaping the protected operation.
+pub struct LockedDentry<'a> {
+    dentry: &'a Dentry,
+    location: RwLockReadGuard<'a, DentryLocation>,
+}
+
+impl LockedDentry<'_> {
+    /// Returns the dentry name within its parent directory.
+    pub fn name(&self) -> &str {
+        &self.location.name
+    }
+
+    /// Returns the parent directory entry, if any.
+    pub fn parent(&self) -> Option<Dentry> {
+        self.location.parent.clone()
+    }
+
+    /// Returns the protected dentry.
+    pub fn as_dentry(&self) -> &Dentry {
+        self.dentry
+    }
+}
+
+impl Deref for LockedDentry<'_> {
+    type Target = Dentry;
+
+    fn deref(&self) -> &Self::Target {
+        self.dentry
+    }
+}
 
 impl Dentry {
     /// Gets the inode number of the instantiated dentry.
@@ -413,8 +454,9 @@ impl Dentry {
 
     /// Returns the cache key for this entry.
     pub(crate) fn key(&self) -> DentryKey {
-        let parent = self.0.parent.as_ref().map_or(0, Dentry::as_ptr);
-        DentryKey::new(parent, self.0.name.clone())
+        let location = self.0.location.read();
+        let parent = location.parent.as_ref().map_or(0, Dentry::as_ptr);
+        DentryKey::new(parent, location.name.clone())
     }
 
     /// Returns the node type of this entry.
@@ -424,17 +466,24 @@ impl Dentry {
 
     /// Returns the parent directory entry, if any.
     pub fn parent(&self) -> Option<Self> {
-        self.0.parent.clone()
+        self.0.location.read().parent.clone()
     }
 
-    /// Returns the entry name within its parent directory.
-    pub fn name(&self) -> &str {
-        &self.0.name
+    /// Returns a snapshot of this entry's name within its parent directory.
+    pub fn name_snapshot(&self) -> String {
+        self.0.location.read().name.clone()
+    }
+
+    pub(crate) fn lock_location(&self) -> LockedDentry<'_> {
+        LockedDentry {
+            dentry: self,
+            location: self.0.location.read(),
+        }
     }
 
     /// Checks if the entry is a root of a mount point.
     pub fn is_root_of_mount(&self) -> bool {
-        self.0.parent.is_none()
+        self.0.location.read().parent.is_none()
     }
 
     /// Returns whether `self` is an ancestor of `other`.
@@ -456,7 +505,7 @@ impl Dentry {
     pub(crate) fn collect_absolute_path(&self, components: &mut Vec<String>) {
         let mut current = self.clone();
         loop {
-            components.push(current.name().to_owned());
+            components.push(current.name_snapshot());
             if let Some(parent) = current.parent() {
                 current = parent;
             } else {
@@ -524,8 +573,12 @@ impl Dentry {
         !flags.contains(DentryFlags::DONTCACHE) || flags.contains(DentryFlags::PERSISTENT)
     }
 
+    fn remove_cache_entry(&self, name: &str) -> Option<Dentry> {
+        self.0.children.lock().remove(name)
+    }
+
     fn forget_cache_entry(&self, name: &str) {
-        if let Some(entry) = self.0.children.lock().remove(name)
+        if let Some(entry) = self.remove_cache_entry(name)
             && entry.is_really_positive()
             && let Ok(dir) = entry.as_dir()
         {
@@ -551,12 +604,59 @@ impl Dentry {
         }
     }
 
+    fn rebind(&self, parent: Option<Dentry>, name: String) {
+        *self.0.location.write() = DentryLocation { parent, name };
+    }
+
+    fn commit_move(
+        &self,
+        src_name: &str,
+        src: &Dentry,
+        dst_dir: &Self,
+        dst_name: &str,
+        dst: &Dentry,
+    ) {
+        self.remove_cache_entry(src_name);
+        if dst.is_really_positive() {
+            dst_dir.forget_cache_entry(dst_name);
+        } else {
+            dst_dir.remove_cache_entry(dst_name);
+        }
+
+        src.rebind(Some(dst_dir.clone()), dst_name.to_owned());
+        dst_dir.insert_cache(dst_name.to_owned(), src.clone());
+    }
+
+    fn commit_exchange(
+        &self,
+        src_name: &str,
+        src: &Dentry,
+        dst_dir: &Self,
+        dst_name: &str,
+        dst: &Dentry,
+    ) {
+        self.remove_cache_entry(src_name);
+        dst_dir.remove_cache_entry(dst_name);
+
+        src.rebind(Some(dst_dir.clone()), dst_name.to_owned());
+        dst.rebind(Some(self.clone()), src_name.to_owned());
+
+        dst_dir.insert_cache(dst_name.to_owned(), src.clone());
+        self.insert_cache(src_name.to_owned(), dst.clone());
+    }
+
     /// Looks up a child dentry below this directory.
     pub fn lookup(&self, name: &str) -> VfsResult<Dentry> {
         self.as_dir()?;
         if name.len() > MAX_NAME_LEN {
             return Err(VfsError::NameTooLong);
         }
+        let dir_inode = self.vfs_inode();
+        let _namespace_guard = dir_inode.lock_namespace_shared();
+        self.lookup_no_namespace_lock(&dir_inode, name)
+    }
+
+    fn lookup_no_namespace_lock(&self, dir_inode: &VfsInode, name: &str) -> VfsResult<Dentry> {
         if let Some(entry) = self.lookup_cache(name) {
             return if entry.is_negative() {
                 Err(VfsError::NotFound)
@@ -565,7 +665,7 @@ impl Dentry {
             };
         }
 
-        let entry = self.vfs_inode().lookup(self, name)?;
+        let entry = dir_inode.lookup(self, name)?;
         if self.can_cache_children() && entry.can_cache_as_child() {
             self.0
                 .children
@@ -584,7 +684,9 @@ impl Dentry {
     pub fn create(&self, name: &str, permission: NodePermission) -> VfsResult<Dentry> {
         self.as_dir()?;
         Self::verify_child_name(name)?;
-        let entry = self.vfs_inode().create(self, name, permission)?;
+        let dir_inode = self.vfs_inode();
+        let _namespace_guard = dir_inode.lock_namespace_exclusive();
+        let entry = dir_inode.create(self, name, permission)?;
         self.insert_cache(name.to_owned(), entry.clone());
         Ok(entry)
     }
@@ -593,7 +695,9 @@ impl Dentry {
     pub fn mkdir(&self, name: &str, permission: NodePermission) -> VfsResult<Dentry> {
         self.as_dir()?;
         Self::verify_child_name(name)?;
-        let entry = self.vfs_inode().mkdir(self, name, permission)?;
+        let dir_inode = self.vfs_inode();
+        let _namespace_guard = dir_inode.lock_namespace_exclusive();
+        let entry = dir_inode.mkdir(self, name, permission)?;
         self.insert_cache(name.to_owned(), entry.clone());
         Ok(entry)
     }
@@ -608,9 +712,9 @@ impl Dentry {
     ) -> VfsResult<Dentry> {
         self.as_dir()?;
         Self::verify_child_name(name)?;
-        let entry = self
-            .vfs_inode()
-            .mknod(self, name, node_type, permission, device)?;
+        let dir_inode = self.vfs_inode();
+        let _namespace_guard = dir_inode.lock_namespace_exclusive();
+        let entry = dir_inode.mknod(self, name, node_type, permission, device)?;
         self.insert_cache(name.to_owned(), entry.clone());
         Ok(entry)
     }
@@ -619,7 +723,9 @@ impl Dentry {
     pub fn symlink(&self, name: &str, target: &str) -> VfsResult<Dentry> {
         self.as_dir()?;
         Self::verify_child_name(name)?;
-        let entry = self.vfs_inode().symlink(self, name, target)?;
+        let dir_inode = self.vfs_inode();
+        let _namespace_guard = dir_inode.lock_namespace_exclusive();
+        let entry = dir_inode.symlink(self, name, target)?;
         self.insert_cache(name.to_owned(), entry.clone());
         Ok(entry)
     }
@@ -628,7 +734,9 @@ impl Dentry {
     pub fn link(&self, name: &str, node: &Dentry) -> VfsResult<Dentry> {
         self.as_dir()?;
         Self::verify_child_name(name)?;
-        let entry = self.vfs_inode().link(self, name, node)?;
+        let dir_inode = self.vfs_inode();
+        let _namespace_guard = dir_inode.lock_namespace_exclusive();
+        let entry = dir_inode.link(self, name, node)?;
         self.insert_cache(name.to_owned(), entry.clone());
         Ok(entry)
     }
@@ -637,14 +745,16 @@ impl Dentry {
     pub fn unlink(&self, name: &str, is_dir: bool) -> VfsResult<()> {
         self.as_dir()?;
         Self::verify_child_name(name)?;
-        let entry = self.lookup(name)?;
+        let dir_inode = self.vfs_inode();
+        let _namespace_guard = dir_inode.lock_namespace_exclusive();
+        let entry = self.lookup_no_namespace_lock(&dir_inode, name)?;
         match (entry.is_dir(), is_dir) {
             (true, false) => return Err(VfsError::IsADirectory),
             (false, true) => return Err(VfsError::NotADirectory),
             _ => {}
         }
 
-        self.vfs_inode().unlink(&entry)?;
+        dir_inode.unlink(&entry)?;
         self.forget_cache_entry(name);
         Ok(())
     }
@@ -678,18 +788,91 @@ impl Dentry {
         dst_dir.as_dir()?;
         Self::verify_child_name(src_name)?;
         Self::verify_child_name(dst_name)?;
+        let supported_flags = RenameFlags::NOREPLACE | RenameFlags::EXCHANGE;
+        if !supported_flags.contains(flags) {
+            return Err(VfsError::InvalidInput);
+        }
+        let super_block = self.super_block();
+        let _rename_guard = super_block
+            .as_ref()
+            .map(|super_block| super_block.lock_rename());
+        let old_dir_inode = self.vfs_inode();
+        let new_dir_inode = dst_dir.vfs_inode();
 
-        let src = self.lookup(src_name)?;
-        let dst = match dst_dir.lookup(dst_name) {
+        if Arc::ptr_eq(&old_dir_inode, &new_dir_inode) {
+            let _old_guard = old_dir_inode.lock_namespace_exclusive();
+            return self.rename_no_namespace_lock(
+                &old_dir_inode,
+                src_name,
+                dst_dir,
+                &new_dir_inode,
+                dst_name,
+                flags,
+            );
+        }
+
+        if (Arc::as_ptr(&old_dir_inode) as usize) <= (Arc::as_ptr(&new_dir_inode) as usize) {
+            let _old_guard = old_dir_inode.lock_namespace_exclusive();
+            let _new_guard = new_dir_inode.lock_namespace_exclusive();
+            self.rename_no_namespace_lock(
+                &old_dir_inode,
+                src_name,
+                dst_dir,
+                &new_dir_inode,
+                dst_name,
+                flags,
+            )
+        } else {
+            let _new_guard = new_dir_inode.lock_namespace_exclusive();
+            let _old_guard = old_dir_inode.lock_namespace_exclusive();
+            self.rename_no_namespace_lock(
+                &old_dir_inode,
+                src_name,
+                dst_dir,
+                &new_dir_inode,
+                dst_name,
+                flags,
+            )
+        }
+    }
+
+    fn rename_no_namespace_lock(
+        &self,
+        old_dir_inode: &VfsInode,
+        src_name: &str,
+        dst_dir: &Self,
+        new_dir_inode: &VfsInode,
+        dst_name: &str,
+        flags: RenameFlags,
+    ) -> VfsResult<()> {
+        let src = self.lookup_no_namespace_lock(old_dir_inode, src_name)?;
+        let dst = match dst_dir.lookup_no_namespace_lock(new_dir_inode, dst_name) {
             Ok(dst) => {
-                if src.node_type() == NodeType::Directory {
-                    if dst.as_dir().is_ok() && dst.has_children()? {
-                        return Err(VfsError::DirectoryNotEmpty);
+                if src.is_same_inode(&dst) {
+                    return Ok(());
+                }
+                if !flags.contains(RenameFlags::EXCHANGE) {
+                    if src.node_type() == NodeType::Directory {
+                        if dst.node_type() != NodeType::Directory {
+                            return Err(VfsError::NotADirectory);
+                        }
+                        if dst.has_children()? {
+                            return Err(VfsError::DirectoryNotEmpty);
+                        }
+                    } else if dst.node_type() == NodeType::Directory {
+                        return Err(VfsError::IsADirectory);
                     }
-                } else if dst.node_type() == NodeType::Directory {
-                    return Err(VfsError::IsADirectory);
+                    if flags.contains(RenameFlags::NOREPLACE) {
+                        return Err(VfsError::AlreadyExists);
+                    }
                 }
                 dst
+            }
+            Err(err)
+                if err.canonicalize() == VfsError::NotFound
+                    && flags.contains(RenameFlags::EXCHANGE) =>
+            {
+                return Err(VfsError::NotFound);
             }
             Err(err) if err.canonicalize() == VfsError::NotFound => {
                 Dentry::new_negative(Some(dst_dir.clone()), dst_name.to_owned())
@@ -697,10 +880,12 @@ impl Dentry {
             Err(err) => return Err(err),
         };
 
-        self.vfs_inode()
-            .rename(&src, &dst_dir.vfs_inode(), &dst, flags)?;
-        self.forget_cache_entry(src_name);
-        dst_dir.forget_cache_entry(dst_name);
+        old_dir_inode.rename(&src, new_dir_inode, &dst, flags)?;
+        if flags.contains(RenameFlags::EXCHANGE) {
+            self.commit_exchange(src_name, &src, dst_dir, dst_name, &dst);
+        } else {
+            self.commit_move(src_name, &src, dst_dir, dst_name, &dst);
+        }
         Ok(())
     }
 
@@ -773,7 +958,7 @@ impl Dentry {
 
 #[cfg(unittest)]
 mod tests_dentry {
-    use alloc::{borrow::ToOwned, string::String, sync::Arc, vec::Vec};
+    use alloc::{string::String, sync::Arc, vec::Vec};
     use core::{
         sync::atomic::{AtomicUsize, Ordering},
         time::Duration,
@@ -784,9 +969,9 @@ mod tests_dentry {
     use super::{Dentry, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive};
     use crate::{
         AddressSpaceOperations, DirContext, FileDirOperations, FileOperations, InodeCache,
-        InodeDirOperations, InodeOperations, InodeSymlinkOperations, Metadata, MetadataUpdate,
-        NodeFlags, NodePermission, NodeType, StatFs, SuperBlockOperations, VfsError, VfsFile,
-        VfsInode, VfsInodeInit, VfsResult,
+        InodeDirOperations, InodeOperations, InodeSymlinkOperations, LockedDentry, Metadata,
+        MetadataUpdate, NodeFlags, NodePermission, NodeType, RenameFlags, StatFs,
+        SuperBlockOperations, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
     };
 
     struct MockFilesystem;
@@ -952,11 +1137,22 @@ mod tests_dentry {
 
     struct MockDirOps {
         inode: u64,
+        can_rename: bool,
     }
 
     impl MockDirOps {
         fn new(_fs: Arc<MockFilesystem>, inode: u64) -> Self {
-            Self { inode }
+            Self {
+                inode,
+                can_rename: false,
+            }
+        }
+
+        fn new_renamable(inode: u64) -> Self {
+            Self {
+                inode,
+                can_rename: true,
+            }
         }
     }
 
@@ -1003,7 +1199,7 @@ mod tests_dentry {
         fn lookup(
             &self,
             _dir: &VfsInode,
-            _dentry: &Dentry,
+            _dentry: &LockedDentry<'_>,
             _flags: crate::InodeLookupFlags,
         ) -> VfsResult<Dentry> {
             Err(VfsError::NotFound)
@@ -1013,7 +1209,7 @@ mod tests_dentry {
             &self,
             _idmap: &crate::MountIdmap,
             _dir: &VfsInode,
-            _dentry: &Dentry,
+            _dentry: &LockedDentry<'_>,
             _mode: crate::Umode,
             _exclusive: bool,
         ) -> VfsResult<Dentry> {
@@ -1024,12 +1220,12 @@ mod tests_dentry {
             &self,
             _old_dentry: &Dentry,
             _dir: &VfsInode,
-            _new_dentry: &Dentry,
+            _new_dentry: &LockedDentry<'_>,
         ) -> VfsResult<Dentry> {
             Err(VfsError::OperationNotSupported)
         }
 
-        fn unlink(&self, _dir: &VfsInode, _dentry: &Dentry) -> VfsResult<()> {
+        fn unlink(&self, _dir: &VfsInode, _dentry: &LockedDentry<'_>) -> VfsResult<()> {
             Err(VfsError::OperationNotSupported)
         }
 
@@ -1037,12 +1233,16 @@ mod tests_dentry {
             &self,
             _idmap: &crate::MountIdmap,
             _old_dir: &VfsInode,
-            _old_dentry: &Dentry,
+            _old_dentry: &LockedDentry<'_>,
             _new_dir: &VfsInode,
-            _new_dentry: &Dentry,
+            _new_dentry: &LockedDentry<'_>,
             _flags: crate::RenameFlags,
         ) -> VfsResult<()> {
-            Err(VfsError::OperationNotSupported)
+            if self.can_rename {
+                Ok(())
+            } else {
+                Err(VfsError::OperationNotSupported)
+            }
         }
     }
 
@@ -1102,6 +1302,14 @@ mod tests_dentry {
         Dentry::new_dir_from_inode(inode, parent, String::from(name))
     }
 
+    fn make_renamable_dir_entry(inode: u64, parent: Option<Dentry>, name: &str) -> Dentry {
+        let inode = VfsInode::new_openable_dir(
+            Arc::new(MockDirOps::new_renamable(inode)),
+            inode_init(inode, NodeType::Directory, 0),
+        );
+        Dentry::new_dir_from_inode(inode, parent, String::from(name))
+    }
+
     fn inode_init(inode: u64, node_type: NodeType, size: u64) -> VfsInodeInit {
         VfsInodeInit::new(
             inode,
@@ -1119,7 +1327,7 @@ mod tests_dentry {
 
         assert!(entry.is_file());
         assert!(!entry.is_dir());
-        assert_eq!(entry.name(), "leaf");
+        assert_eq!(entry.name_snapshot(), "leaf");
         assert_eq!(entry.node_type(), NodeType::RegularFile);
         assert!(matches!(entry.as_dir(), Err(VfsError::NotADirectory)));
         assert_eq!(entry.inode(), 2);
@@ -1170,11 +1378,105 @@ mod tests_dentry {
         let root = make_dir_entry(fs, 20, "");
         let negative = Dentry::new_negative(Some(root.clone()), String::from("missing"));
 
-        root.insert_cache(negative.name().to_owned(), negative.clone());
+        root.insert_cache(negative.name_snapshot(), negative.clone());
         assert!(root.lookup_cache("missing").unwrap().ptr_eq(&negative));
 
         root.forget_cache_entry("missing");
         assert!(root.lookup_cache("missing").is_none());
+    }
+
+    #[def_test]
+    fn test_rename_moves_cache_entry_without_changing_inode_identity() {
+        let fs = Arc::new(MockFilesystem);
+        let root = make_renamable_dir_entry(30, None, "");
+        let (source, _) = make_file_entry(fs, 31, Some(root.clone()), "tmp");
+
+        root.insert_cache(String::from("tmp"), source.clone());
+        root.rename("tmp", &root, "final", RenameFlags::empty())
+            .unwrap();
+
+        assert!(root.lookup_cache("tmp").is_none());
+        let moved = root.lookup_cache("final").unwrap();
+        assert!(moved.ptr_eq(&source));
+        assert!(moved.is_same_inode(&source));
+        assert_eq!(moved.name_snapshot(), "final");
+        assert_eq!(moved.absolute_path().unwrap().as_str(), "/final");
+    }
+
+    #[def_test]
+    fn test_rename_replace_keeps_source_inode_identity() {
+        let fs = Arc::new(MockFilesystem);
+        let root = make_renamable_dir_entry(32, None, "");
+        let (source, _) = make_file_entry(fs.clone(), 33, Some(root.clone()), "tmp");
+        let (target, _) = make_file_entry(fs, 34, Some(root.clone()), "final");
+
+        root.insert_cache(String::from("tmp"), source.clone());
+        root.insert_cache(String::from("final"), target.clone());
+        root.rename("tmp", &root, "final", RenameFlags::empty())
+            .unwrap();
+
+        let moved = root.lookup_cache("final").unwrap();
+        assert!(moved.ptr_eq(&source));
+        assert!(!moved.is_same_inode(&target));
+    }
+
+    #[def_test]
+    fn test_rename_noreplace_rejects_existing_target_before_filesystem_callback() {
+        let fs = Arc::new(MockFilesystem);
+        let root = make_renamable_dir_entry(35, None, "");
+        let (source, _) = make_file_entry(fs.clone(), 36, Some(root.clone()), "tmp");
+        let (target, _) = make_file_entry(fs, 37, Some(root.clone()), "final");
+
+        root.insert_cache(String::from("tmp"), source.clone());
+        root.insert_cache(String::from("final"), target.clone());
+
+        assert_eq!(
+            root.rename("tmp", &root, "final", RenameFlags::NOREPLACE),
+            Err(VfsError::AlreadyExists)
+        );
+        assert!(root.lookup_cache("tmp").unwrap().ptr_eq(&source));
+        assert!(root.lookup_cache("final").unwrap().ptr_eq(&target));
+    }
+
+    #[def_test]
+    fn test_rename_exchange_swaps_cache_entries_without_changing_inode_identity() {
+        let fs = Arc::new(MockFilesystem);
+        let root = make_renamable_dir_entry(38, None, "");
+        let (left, _) = make_file_entry(fs.clone(), 39, Some(root.clone()), "left");
+        let (right, _) = make_file_entry(fs, 40, Some(root.clone()), "right");
+
+        root.insert_cache(String::from("left"), left.clone());
+        root.insert_cache(String::from("right"), right.clone());
+        root.rename("left", &root, "right", RenameFlags::EXCHANGE)
+            .unwrap();
+
+        assert!(root.lookup_cache("left").unwrap().ptr_eq(&right));
+        assert!(root.lookup_cache("right").unwrap().ptr_eq(&left));
+        assert_eq!(left.name_snapshot(), "right");
+        assert_eq!(right.name_snapshot(), "left");
+    }
+
+    #[def_test]
+    fn test_rename_rejects_noreplace_exchange_combination() {
+        let fs = Arc::new(MockFilesystem);
+        let root = make_renamable_dir_entry(41, None, "");
+        let (left, _) = make_file_entry(fs.clone(), 42, Some(root.clone()), "left");
+        let (right, _) = make_file_entry(fs, 43, Some(root.clone()), "right");
+
+        root.insert_cache(String::from("left"), left.clone());
+        root.insert_cache(String::from("right"), right.clone());
+
+        assert_eq!(
+            root.rename(
+                "left",
+                &root,
+                "right",
+                RenameFlags::NOREPLACE | RenameFlags::EXCHANGE,
+            ),
+            Err(VfsError::InvalidInput)
+        );
+        assert!(root.lookup_cache("left").unwrap().ptr_eq(&left));
+        assert!(root.lookup_cache("right").unwrap().ptr_eq(&right));
     }
 
     #[def_test]

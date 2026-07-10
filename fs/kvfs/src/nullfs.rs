@@ -9,9 +9,9 @@ use core::time::Duration;
 
 use crate::{
     Dentry, DirContext, FileDirOperations, FileOperations, GetattrQueryFlags, GetattrRequestMask,
-    InodeDirOperations, InodeLookupFlags, InodeOperations, Metadata, MetadataUpdate, MountIdmap,
-    NodeFlags, NodePermission, NodeType, StatFs, StatFsFlags, SuperBlock, SuperBlockOperations,
-    Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
+    InodeDirOperations, InodeLookupFlags, InodeOperations, LockedDentry, Metadata, MetadataUpdate,
+    MountIdmap, NodeFlags, NodePermission, NodeType, StatFs, StatFsFlags, SuperBlock,
+    SuperBlockOperations, Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
     libfs::{generic_read_dir, noop_fsync, simple_statfs_with_flags},
     path::{DOT, DOTDOT},
 };
@@ -120,7 +120,7 @@ impl InodeDirOperations for NullFsRoot {
     fn lookup(
         &self,
         _dir: &VfsInode,
-        _dentry: &Dentry,
+        _dentry: &LockedDentry<'_>,
         _flags: InodeLookupFlags,
     ) -> VfsResult<Dentry> {
         Err(VfsError::NotFound)
