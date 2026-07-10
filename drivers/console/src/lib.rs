@@ -196,7 +196,7 @@ pub fn init_stdout_from_device_tree() -> Option<()> {
 }
 
 /// Bring up a fixed I/O-port stdout console (x86 ISA COM).
-#[cfg(feature = "ns16550-ioport")]
+#[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
 pub fn init_stdout_ioport(port: u16, irq: Option<IrqDesc>) {
     // SAFETY: `port` is the platform-configured NS16550 I/O-port base.
     let uart = unsafe { SerialPort::new_ioport_ns16550(port, SerialRole::Stdout) };

@@ -24,7 +24,7 @@ use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 #[cfg(feature = "ns16550-mmio")]
 use uart_16550::MmioSerialPort;
-#[cfg(feature = "ns16550-ioport")]
+#[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
 use uart_16550::SerialPort as SerialPort16550;
 
 /// Physical identity of a UART.
@@ -55,7 +55,7 @@ enum Backend {
     Pl011(Pl011Uart),
     #[cfg(feature = "ns16550-mmio")]
     Ns16550Mmio(MmioSerialPort),
-    #[cfg(feature = "ns16550-ioport")]
+    #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
     Ns16550IoPort(SerialPort16550),
 }
 
@@ -69,7 +69,7 @@ impl Backend {
             Backend::Pl011(uart) => pl011_putchar(uart, c),
             #[cfg(feature = "ns16550-mmio")]
             Backend::Ns16550Mmio(uart) => ns16550_mmio_putchar(uart, c),
-            #[cfg(feature = "ns16550-ioport")]
+            #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
             Backend::Ns16550IoPort(uart) => uart.send(c),
         }
     }
@@ -80,7 +80,7 @@ impl Backend {
             Backend::Pl011(uart) => uart.getchar(),
             #[cfg(feature = "ns16550-mmio")]
             Backend::Ns16550Mmio(uart) => uart.try_receive().ok(),
-            #[cfg(feature = "ns16550-ioport")]
+            #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
             Backend::Ns16550IoPort(uart) => uart.try_receive().ok(),
         }
     }
@@ -96,7 +96,7 @@ impl Backend {
             // The NS16550 backends have no explicit ack in the existing code.
             #[cfg(feature = "ns16550-mmio")]
             Backend::Ns16550Mmio(_) => {}
-            #[cfg(feature = "ns16550-ioport")]
+            #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
             Backend::Ns16550IoPort(_) => {}
         }
     }
@@ -180,7 +180,7 @@ impl SerialPort {
     /// # Safety
     ///
     /// `port` must name a valid NS16550 I/O-port base.
-    #[cfg(feature = "ns16550-ioport")]
+    #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
     pub unsafe fn new_ioport_ns16550(port: u16, role: SerialRole) -> Self {
         // SAFETY: caller guarantees `port` is a valid NS16550 I/O-port base.
         let mut uart = unsafe { SerialPort16550::new(port) };

@@ -102,14 +102,15 @@ pub fn init_softlockup_detection() {
     });
 
     // Watchdog task that periodically "touches" the soft lockup timestamp.
-    let watchdog_task = TaskInner::new(
+    let watchdog_task = TaskInner::new_kthread(
         move || loop {
             crate::touch_softlockup(khal::time::monotonic_time_nanos());
             ktask::yield_now();
         },
         "watchdog".into(),
         kbuild_config::TASK_STACK_SIZE,
-    );
+    )
+    .expect("watchdog thread identity allocation failed");
 
     // Bind watchdog task to the local CPU.
     watchdog_task.set_cpumask(KCpuMask::one_shot(this_cpu_id().as_usize()));
