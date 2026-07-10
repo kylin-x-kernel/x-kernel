@@ -7,7 +7,7 @@
 use core::ffi::{c_char, c_int};
 
 use kerrno::{KError, KResult};
-use kvfs::{Filename, LookupFlags, LookupIntent, RENAME_EXCHANGE, RENAME_NOREPLACE};
+use kvfs::{Filename, LookupFlags, LookupIntent, RenameFlags};
 use linux_raw_sys::general::*;
 use posix_types::{UserConstPtr, UserPtr};
 
@@ -175,9 +175,8 @@ pub fn sys_renameat2(
          new_path: {new_path}, flags: {flags}"
     );
 
-    if flags & !(RENAME_NOREPLACE | RENAME_EXCHANGE) != 0
-        || flags & (RENAME_NOREPLACE | RENAME_EXCHANGE) == (RENAME_NOREPLACE | RENAME_EXCHANGE)
-    {
+    let flags = RenameFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
+    if flags.contains(RenameFlags::WHITEOUT) || flags.has_conflicting_modes() {
         return Err(KError::InvalidInput);
     }
 

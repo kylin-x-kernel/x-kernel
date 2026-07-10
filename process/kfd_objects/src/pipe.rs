@@ -12,7 +12,7 @@ use kpoll::{IoEvents, PollSet, Pollable};
 use ksignal::{Signo, send_sig_current};
 use ksync::Mutex;
 use ktask::future::{block_on, poll_io};
-use kvfs::{AnonInodeFs, FMode, FileOperations, VfsFile, VfsInode, VfsResult};
+use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile, VfsInode, VfsResult};
 use linux_raw_sys::ioctl::FIONREAD;
 use osvm::VirtMutPtr;
 
@@ -338,6 +338,8 @@ pub fn create_pipe_files(
     read_flags: u32,
     write_flags: u32,
 ) -> KResult<(Arc<VfsFile>, Arc<VfsFile>)> {
+    let read_flags = OpenFlags::from_bits(read_flags).ok_or(KError::InvalidInput)?;
+    let write_flags = OpenFlags::from_bits(write_flags).ok_or(KError::InvalidInput)?;
     let pipe = PipeObject::new_anonymous();
     let operations: Arc<dyn FileOperations> = Arc::new(PipeFileOperations);
     let write_file = AnonInodeFs::global().get_file(

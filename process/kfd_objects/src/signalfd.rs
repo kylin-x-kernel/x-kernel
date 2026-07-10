@@ -17,7 +17,7 @@ use ktask::{
     current,
     future::{block_on, poll_io},
 };
-use kvfs::{AnonInodeFs, FMode, FileOperations, VfsFile, VfsInode};
+use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
 use zerocopy::{Immutable, IntoBytes};
 
@@ -117,6 +117,7 @@ impl Signalfd {
     }
 
     pub fn new_file(mask: SignalSet, open_flags: u32) -> KResult<Arc<VfsFile>> {
+        let open_flags = OpenFlags::from_bits(open_flags).ok_or(KError::InvalidInput)?;
         AnonInodeFs::global().get_file(
             "[signalfd]",
             Arc::new(SignalfdFops),

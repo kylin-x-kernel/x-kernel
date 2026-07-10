@@ -68,23 +68,44 @@ bitflags! {
     }
 }
 
-/// lookup flags passed to `InodeDirOperations::lookup`.
-pub type InodeLookupFlags = u32;
+bitflags! {
+    /// Lookup semantics passed to `InodeDirOperations::lookup`.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct InodeLookupFlags: u32 {
+    }
+}
 
-/// rename flags passed to `InodeDirOperations::rename`.
-pub type RenameFlags = u32;
-/// `RENAME_NOREPLACE`.
-pub const RENAME_NOREPLACE: RenameFlags = 1 << 0;
-/// `RENAME_EXCHANGE`.
-pub const RENAME_EXCHANGE: RenameFlags = 1 << 1;
-/// `RENAME_WHITEOUT`.
-pub const RENAME_WHITEOUT: RenameFlags = 1 << 2;
+bitflags! {
+    /// Rename semantics passed through the VFS namespace operation.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct RenameFlags: u32 {
+        /// Fail if the destination already exists.
+        const NOREPLACE = 1 << 0;
+        /// Atomically exchange the source and destination.
+        const EXCHANGE = 1 << 1;
+        /// Leave a whiteout at the source location.
+        const WHITEOUT = 1 << 2;
+    }
+}
 
-/// request mask passed to `InodeOperations::getattr`.
-pub type GetattrRequestMask = u32;
+impl RenameFlags {
+    /// Returns whether the requested rename modes cannot be combined.
+    pub const fn has_conflicting_modes(self) -> bool {
+        self.contains(Self::EXCHANGE) && self.intersects(Self::NOREPLACE.union(Self::WHITEOUT))
+    }
+}
 
-/// query flags passed to `InodeOperations::getattr`.
-pub type GetattrQueryFlags = u32;
+bitflags! {
+    /// Attribute fields requested from `InodeOperations::getattr`.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct GetattrRequestMask: u32 {
+    }
+
+    /// Query semantics passed to `InodeOperations::getattr`.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct GetattrQueryFlags: u32 {
+    }
+}
 
 /// Directory inode operations.
 pub trait InodeDirOperations: Send + Sync {
@@ -1295,7 +1316,7 @@ impl VfsInode {
     pub fn lookup(&self, dir: &Dentry, name: &str) -> VfsResult<Dentry> {
         let dentry = Dentry::new_negative(Some(dir.clone()), name.to_owned());
         self.require_directory_operations()?
-            .lookup(self, &dentry, 0)
+            .lookup(self, &dentry, InodeLookupFlags::empty())
     }
 
     /// Create a regular-file child below this directory inode.

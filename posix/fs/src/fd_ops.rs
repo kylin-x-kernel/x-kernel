@@ -14,12 +14,15 @@ use core::ffi::c_int;
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
 use kfd_objects::pipe::current_pipe_endpoint;
-use kvfs::FMode;
+use kvfs::{FMode, OpenFlags};
 use linux_raw_sys::general::*;
 use memfs::shmem;
 use posix_types::UserPtr;
 
-const SETFL_MASK: u32 = O_APPEND | O_NONBLOCK | O_NDELAY | O_DIRECT | O_NOATIME;
+const SETFL_MASK: OpenFlags = OpenFlags::APPEND
+    .union(OpenFlags::NONBLOCK)
+    .union(OpenFlags::DIRECT)
+    .union(OpenFlags::NO_ATIME);
 
 /// Closes the specified file descriptor.
 pub fn sys_close(fd: c_int) -> KResult<isize> {
@@ -130,10 +133,10 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
             }
             kprocess::current_resources()
                 .get_file(fd)?
-                .replace_flags(SETFL_MASK, flags);
+                .replace_flags(SETFL_MASK, OpenFlags::from_bits_retain(flags));
             Ok(0)
         }
-        F_GETFL => Ok(kprocess::current_resources().get_file(fd)?.flags() as _),
+        F_GETFL => Ok(kprocess::current_resources().get_file(fd)?.flags().bits() as _),
         F_GETFD => {
             let cloexec = kprocess::current_user_process().resources()?.cloexec(fd)?;
             Ok(if cloexec { FD_CLOEXEC as _ } else { 0 })

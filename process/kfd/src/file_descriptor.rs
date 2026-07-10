@@ -8,7 +8,7 @@ use alloc::sync::Arc;
 use core::ffi::c_int;
 
 use kerrno::KResult;
-use kvfs::{Path, VfsFile};
+use kvfs::{OpenFlags, Path, VfsFile};
 
 /// A file descriptor entry in the file descriptor table.
 #[derive(Clone)]
@@ -59,7 +59,7 @@ pub struct FdSnapshot {
     fd: c_int,
     file: Arc<VfsFile>,
     cloexec: bool,
-    open_flags: u32,
+    open_flags: OpenFlags,
 }
 
 impl FdSnapshot {
@@ -89,7 +89,7 @@ impl FdSnapshot {
     }
 
     /// Returns object-level open flags captured with the snapshot.
-    pub fn open_flags(&self) -> u32 {
+    pub fn open_flags(&self) -> OpenFlags {
         self.open_flags
     }
 

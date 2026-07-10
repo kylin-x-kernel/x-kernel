@@ -16,7 +16,7 @@ use khal::time::{self, monotonic_time, wall_time};
 use kpoll::{IoEvents, PollSet, Pollable};
 use kspin::SpinNoIrq;
 use ktask::future::{TimerHandle, block_on, cancel_timer, poll_io, register_timer};
-use kvfs::{AnonInodeFs, FMode, FileOperations, VfsFile, VfsInode};
+use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
 use linux_raw_sys::general::{CLOCK_BOOTTIME, CLOCK_MONOTONIC};
 
 fn clock_now(clock_id: u32) -> Duration {
@@ -100,6 +100,7 @@ impl TimerFd {
 
     /// Create the anonymous-inode file used by `timerfd_create`.
     pub fn new_file(clock_id: u32, open_flags: u32) -> KResult<Arc<VfsFile>> {
+        let open_flags = OpenFlags::from_bits(open_flags).ok_or(KError::InvalidInput)?;
         AnonInodeFs::global().get_file(
             "[timerfd]",
             Arc::new(TimerfdFops),

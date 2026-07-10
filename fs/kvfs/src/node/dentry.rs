@@ -671,6 +671,9 @@ impl Dentry {
         dst_name: &str,
         flags: RenameFlags,
     ) -> VfsResult<()> {
+        if flags.has_conflicting_modes() {
+            return Err(VfsError::InvalidInput);
+        }
         self.as_dir()?;
         dst_dir.as_dir()?;
         Self::verify_child_name(src_name)?;
@@ -808,7 +811,7 @@ mod tests_dentry {
                 free_file_count: 0,
                 name_length: 255,
                 fragment_size: 0,
-                mount_flags: 0,
+                mount_flags: crate::StatFsFlags::empty(),
             })
         }
     }

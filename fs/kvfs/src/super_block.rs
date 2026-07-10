@@ -129,24 +129,30 @@ pub fn default_evict_inode(inode: &VfsInode) -> VfsResult<()> {
 /// Large-file page-cache limit for 64-bit VFS offsets.
 pub const MAX_LFS_FILESIZE: u64 = i64::MAX as u64;
 
-/// Mount read-only.
-pub const ST_RDONLY: u32 = 0x1;
-/// Ignore set-user-ID and set-group-ID bits.
-pub const ST_NOSUID: u32 = 0x2;
-/// Disallow access to device special files.
-pub const ST_NODEV: u32 = 0x4;
-/// Disallow program execution.
-pub const ST_NOEXEC: u32 = 0x8;
-/// `f_flags` support is implemented.
-pub const ST_VALID: u32 = 0x20;
-/// Do not update file access times.
-pub const ST_NOATIME: u32 = 0x400;
-/// Do not update directory access times.
-pub const ST_NODIRATIME: u32 = 0x800;
-/// Update access time relative to mtime/ctime.
-pub const ST_RELATIME: u32 = 0x1000;
-/// Do not follow symlinks.
-pub const ST_NOSYMFOLLOW: u32 = 0x2000;
+bitflags::bitflags! {
+    /// Filesystem-wide flags reported through `statfs`.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct StatFsFlags: u32 {
+        /// Filesystem is read-only.
+        const RDONLY = 0x1;
+        /// Ignore set-user-ID and set-group-ID bits.
+        const NOSUID = 0x2;
+        /// Disallow access to device special files.
+        const NODEV = 0x4;
+        /// Disallow program execution.
+        const NOEXEC = 0x8;
+        /// `f_flags` support is implemented.
+        const VALID = 0x20;
+        /// Do not update file access times.
+        const NOATIME = 0x400;
+        /// Do not update directory access times.
+        const NODIRATIME = 0x800;
+        /// Update access time relative to mtime/ctime.
+        const RELATIME = 0x1000;
+        /// Do not follow symlinks.
+        const NOSYMFOLLOW = 0x2000;
+    }
+}
 
 /// Filesystem statistics returned by [`SuperBlockOperations::statfs`].
 pub struct StatFs {
@@ -171,7 +177,7 @@ pub struct StatFs {
     /// Fragment size (bytes).
     pub fragment_size: u32,
     /// Mount flags in effect.
-    pub mount_flags: u32,
+    pub mount_flags: StatFsFlags,
 }
 
 /// VFS superblock object.

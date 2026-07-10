@@ -14,7 +14,7 @@ use core::{
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ktask::future::{block_on, poll_io};
-use kvfs::{AnonInodeFs, FMode, FileOperations, VfsFile};
+use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile};
 
 /// Kernel object implementing eventfd semantics.
 pub struct EventFd {
@@ -38,6 +38,7 @@ impl EventFd {
     /// Create the anonymous-inode file used by eventfd.
     pub fn new_file(initval: u64, semaphore: bool, open_flags: u32) -> KResult<Arc<VfsFile>> {
         let state = Self::new(initval, semaphore);
+        let open_flags = OpenFlags::from_bits(open_flags).ok_or(KError::InvalidInput)?;
         AnonInodeFs::global().get_file(
             "[eventfd]",
             Arc::new(EventfdFops),

@@ -10,12 +10,10 @@
 
 use alloc::{borrow::ToOwned, string::String, sync::Arc, vec::Vec};
 
-use linux_raw_sys::general::{O_APPEND, O_CREAT, O_DIRECTORY, O_EXCL, O_PATH, O_TRUNC};
-
 use crate::{
     AccMode, FMode, Filename, LookupFlags, LookupIntent, MountFlags, NodePermission, NodeType,
-    OpenFlags, OpenHow, Path, ResolvedObject, VfsError, VfsFile, VfsFileBuilder, VfsInode,
-    VfsResult, d_inode, d_is_dir, d_is_negative, d_is_symlink, path::PathBuf,
+    OpenFlags, OpenHow, OpenParams, Path, ResolvedObject, VfsError, VfsFile, VfsFileBuilder,
+    VfsInode, VfsResult, d_inode, d_is_dir, d_is_negative, d_is_symlink, path::PathBuf,
 };
 
 /// Deferred cleanup context used while resolving symbolic-link targets.
@@ -556,22 +554,25 @@ pub(crate) struct MayOpenResult {
 }
 
 impl<'a> Nameidata<'a> {
-    fn may_open(path: &Path, acc_mode: AccMode, open_flag: u32) -> VfsResult<MayOpenResult> {
-        let f_mode = FMode::from_open_flags(open_flag);
-        if f_mode.contains(FMode::PATH) || open_flag & O_PATH != 0 {
+    fn may_open(path: &Path, acc_mode: AccMode, open_flags: OpenFlags) -> VfsResult<MayOpenResult> {
+        let f_mode = FMode::from_open_flags(open_flags);
+        if f_mode.contains(FMode::PATH) || open_flags.contains(OpenFlags::PATH) {
             return Ok(MayOpenResult { truncate: false });
         }
 
         if d_is_symlink(path.dentry()) {
             return Err(VfsError::FilesystemLoop);
         }
-        if open_flag & O_DIRECTORY != 0 && !d_is_dir(path.dentry()) {
+        if open_flags.contains(OpenFlags::DIRECTORY) && !d_is_dir(path.dentry()) {
             return Err(VfsError::NotADirectory);
         }
 
         let node_type = d_inode(path.dentry()).node_type();
-        let truncate = open_flag & O_TRUNC != 0 && node_type == NodeType::RegularFile;
-        if d_is_dir(path.dentry()) && (acc_mode.requires_write() || open_flag & O_TRUNC != 0) {
+        let truncate =
+            open_flags.contains(OpenFlags::TRUNCATE) && node_type == NodeType::RegularFile;
+        if d_is_dir(path.dentry())
+            && (acc_mode.requires_write() || open_flags.contains(OpenFlags::TRUNCATE))
+        {
             return Err(VfsError::IsADirectory);
         }
         if matches!(node_type, NodeType::CharacterDevice | NodeType::BlockDevice)
@@ -585,13 +586,13 @@ impl<'a> Nameidata<'a> {
         {
             return Err(VfsError::PermissionDenied);
         }
-        if acc_mode.requires_write() || open_flag & O_APPEND != 0 || truncate {
+        if acc_mode.requires_write() || open_flags.contains(OpenFlags::APPEND) || truncate {
             path.check_writable_mount()?;
         }
         Ok(MayOpenResult { truncate })
     }
 
-    fn check_resolved_open(path: &Path, flags: &OpenFlags, was_created: bool) -> VfsResult<()> {
+    fn check_resolved_open(path: &Path, flags: &OpenParams, was_created: bool) -> VfsResult<()> {
         if flags.will_create() {
             if flags.is_exclusive_create() && !was_created {
                 return Err(VfsError::AlreadyExists);
@@ -600,7 +601,7 @@ impl<'a> Nameidata<'a> {
                 return Err(VfsError::IsADirectory);
             }
         }
-        if flags.lookup_flags.contains(LookupFlags::DIRECTORY) && !d_is_dir(path.dentry()) {
+        if flags.lookup_flags().contains(LookupFlags::DIRECTORY) && !d_is_dir(path.dentry()) {
             return Err(VfsError::NotADirectory);
         }
         Ok(())
@@ -615,7 +616,7 @@ impl<'a> Nameidata<'a> {
 
     fn may_open_resolved(
         path: &Path,
-        flags: &OpenFlags,
+        flags: &OpenParams,
         was_created: bool,
     ) -> VfsResult<MayOpenResult> {
         Self::check_resolved_open(path, flags, was_created)?;
@@ -623,12 +624,12 @@ impl<'a> Nameidata<'a> {
         Self::may_open(path, acc_mode, open_flag)
     }
 
-    fn lookup_fast_for_open(&mut self, open_flag: u32) -> VfsResult<Option<Path>> {
-        if open_flag & O_CREAT != 0 {
+    fn lookup_fast_for_open(&mut self, flags: &OpenParams) -> VfsResult<Option<Path>> {
+        if flags.will_create() {
             if self.has_trailing_slashes() {
                 return Err(VfsError::IsADirectory);
             }
-            if open_flag & O_EXCL != 0 {
+            if flags.is_exclusive_create() {
                 return Ok(None);
             }
         }
@@ -647,9 +648,7 @@ impl<'a> Nameidata<'a> {
         };
         match result {
             Ok(path) => Ok(Some(path)),
-            Err(err) if err.canonicalize() == VfsError::NotFound && open_flag & O_CREAT != 0 => {
-                Ok(None)
-            }
+            Err(err) if err.canonicalize() == VfsError::NotFound && flags.will_create() => Ok(None),
             Err(err) => Err(err),
         }
     }
@@ -657,7 +656,7 @@ impl<'a> Nameidata<'a> {
     fn lookup_open(
         &mut self,
         file: &mut VfsFileBuilder,
-        flags: &OpenFlags,
+        flags: &OpenParams,
         got_write: bool,
     ) -> VfsResult<Path> {
         file.clear_created();
@@ -682,7 +681,7 @@ impl<'a> Nameidata<'a> {
         }
 
         let inode = dir.vfs_inode();
-        let entry = inode.create_with_mode(dir, name, flags.mode, flags.open_flag & O_EXCL != 0)?;
+        let entry = inode.create_with_mode(dir, name, flags.mode(), flags.is_exclusive_create())?;
         dir.insert_cache(name.to_owned(), entry.clone());
         file.mark_created();
         Ok(self.path.with_dentry(entry))
@@ -691,22 +690,17 @@ impl<'a> Nameidata<'a> {
     fn open_last_lookups(
         &mut self,
         file: &mut VfsFileBuilder,
-        flags: &OpenFlags,
+        flags: &OpenParams,
     ) -> VfsResult<Option<PathBuf>> {
         if self.last_type != LastType::Norm {
             self.handle_dots(self.last_type);
             return Ok(None);
         }
 
-        let path = if let Some(path) = self.lookup_fast_for_open(flags.open_flag)? {
+        let path = if let Some(path) = self.lookup_fast_for_open(flags)? {
             path
         } else {
-            let got_write =
-                if flags.open_flag & (O_CREAT | O_TRUNC) != 0 || flags.acc_mode.requires_write() {
-                    self.path.check_writable_mount().is_ok()
-                } else {
-                    false
-                };
+            let got_write = flags.needs_write_mount() && self.path.check_writable_mount().is_ok();
             self.lookup_open(file, flags, got_write)?
         };
 
@@ -717,7 +711,7 @@ impl<'a> Nameidata<'a> {
 
         let containing_dir = self.path.clone();
         let path = path.resolve_final_mount();
-        if d_is_symlink(path.dentry()) && flags.lookup_flags.follows_final() {
+        if d_is_symlink(path.dentry()) && flags.lookup_flags().follows_final() {
             self.reserve_link_follow()?;
             let target = d_inode(path.dentry()).read_link(path.dentry())?;
             if target.is_empty() {
@@ -735,7 +729,7 @@ impl<'a> Nameidata<'a> {
         base: &Path,
         filename: &Filename,
         mut file: VfsFileBuilder,
-        flags: &OpenFlags,
+        flags: &OpenParams,
     ) -> VfsResult<Arc<VfsFile>> {
         let mut name = filename.clone();
         let mut walk_base = base.clone();
@@ -746,7 +740,7 @@ impl<'a> Nameidata<'a> {
                 &walk_base,
                 &name,
                 LookupIntent::Open,
-                flags.lookup_flags,
+                flags.lookup_flags(),
             );
             nd.total_link_count = total_link_count;
             nd.link_path_walk(&walk_base)?;
@@ -772,9 +766,9 @@ impl<'a> Nameidata<'a> {
         base: &Path,
         filename: &Filename,
         file: VfsFileBuilder,
-        flags: &OpenFlags,
+        flags: &OpenParams,
     ) -> VfsResult<Arc<VfsFile>> {
-        let path = filename.lookup_at(root, base, LookupIntent::Open, flags.lookup_flags)?;
+        let path = filename.lookup_at(root, base, LookupIntent::Open, flags.lookup_flags())?;
         file.vfs_open(path)
     }
 
@@ -782,10 +776,10 @@ impl<'a> Nameidata<'a> {
         root: &Path,
         base: &Path,
         filename: &Filename,
-        flags: &OpenFlags,
+        flags: &OpenParams,
     ) -> VfsResult<Arc<VfsFile>> {
-        let file = VfsFileBuilder::allocate(flags.open_flag)?;
-        if flags.open_flag & O_PATH != 0 {
+        let file = VfsFileBuilder::allocate(flags.file_flags())?;
+        if flags.is_path() {
             Self::do_o_path(root, base, filename, file, flags)
         } else {
             Self::open_path(root, base, filename, file, flags)
@@ -795,6 +789,7 @@ impl<'a> Nameidata<'a> {
 
 /// Opens an already resolved VFS location.
 pub fn dentry_open(path: Path, flags: u32) -> VfsResult<Arc<VfsFile>> {
+    let flags = OpenFlags::from_bits(flags).ok_or(VfsError::InvalidInput)?;
     VfsFileBuilder::allocate(flags)?.vfs_open(path)
 }
 
@@ -807,7 +802,7 @@ impl Filename {
         flags: u32,
         mode: NodePermission,
     ) -> VfsResult<Arc<VfsFile>> {
-        let flags = OpenHow::from_legacy(flags, mode).into_open_flags()?;
+        let flags = OpenHow::from_legacy(flags, mode).into_open_params()?;
         Nameidata::path_openat(root, base, self, &flags)
     }
 
@@ -898,7 +893,7 @@ mod tests {
                 free_file_count: 0,
                 name_length: 255,
                 fragment_size: 4096,
-                mount_flags: 0,
+                mount_flags: crate::StatFsFlags::empty(),
             })
         }
     }

@@ -21,8 +21,8 @@ use hashbrown::HashMap;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use kspin::SpinNoPreempt;
-use kvfs::{AnonInodeFs, FMode, FileOperations, VfsFile, VfsInode};
-use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT, O_RDWR, epoll_event};
+use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
+use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT, epoll_event};
 
 /// A ready event returned by an [`Epoll`] instance.
 pub struct EpollEvent {
@@ -265,7 +265,7 @@ impl Epoll {
             Arc::new(EventpollFops),
             Arc::new(Self::new()),
             FMode::READ | FMode::WRITE | FMode::STREAM,
-            O_RDWR,
+            OpenFlags::READ_WRITE,
         )
     }
 

@@ -25,8 +25,8 @@ pub struct MountIdmap;
 use crate::{
     Dentry, DentryKey, DentryOperations, DeviceId, FMode, FileOperations, GetattrQueryFlags,
     GetattrRequestMask, Metadata, MetadataUpdate, Mutex, NodeFlags, NodePermission, NodeType,
-    RenameFlags, ST_RDONLY, StatFs, SuperBlock, VfsError, VfsFile, VfsFileBuilder, VfsInode,
-    VfsResult, nullfs, path::PathBuf,
+    OpenFlags, RenameFlags, StatFs, StatFsFlags, SuperBlock, VfsError, VfsFile, VfsFileBuilder,
+    VfsInode, VfsResult, nullfs, path::PathBuf,
 };
 
 bitflags::bitflags! {
@@ -325,7 +325,7 @@ impl Mount {
         inode: Arc<VfsInode>,
         name: &str,
         flags: FMode,
-        open_flags: u32,
+        open_flags: OpenFlags,
         f_op: Arc<dyn FileOperations>,
     ) -> VfsResult<Arc<VfsFile>> {
         self.alloc_file_pseudo_inner(inode, name, flags, open_flags, f_op, None)
@@ -337,7 +337,7 @@ impl Mount {
         inode: Arc<VfsInode>,
         name: &str,
         flags: FMode,
-        open_flags: u32,
+        open_flags: OpenFlags,
         f_op: Arc<dyn FileOperations>,
         d_op: Arc<dyn DentryOperations>,
     ) -> VfsResult<Arc<VfsFile>> {
@@ -349,7 +349,7 @@ impl Mount {
         inode: Arc<VfsInode>,
         name: &str,
         flags: FMode,
-        open_flags: u32,
+        open_flags: OpenFlags,
         f_op: Arc<dyn FileOperations>,
         d_op: Option<Arc<dyn DentryOperations>>,
     ) -> VfsResult<Arc<VfsFile>> {
@@ -619,7 +619,7 @@ impl Path {
             || self
                 .super_block()
                 .stat()
-                .is_ok_and(|stat| stat.mount_flags & ST_RDONLY != 0)
+                .is_ok_and(|stat| stat.mount_flags.contains(StatFsFlags::RDONLY))
     }
 
     /// Ensures this path's mount allows modification.
@@ -647,7 +647,8 @@ impl Path {
 
     /// Returns VFS metadata for this path.
     pub fn getattr(&self) -> VfsResult<Metadata> {
-        let mut metadata = self.getattr_nosec(0, 0)?;
+        let mut metadata =
+            self.getattr_nosec(GetattrRequestMask::empty(), GetattrQueryFlags::empty())?;
         metadata.device = self.mnt.synthetic_device_id();
         Ok(metadata)
     }
@@ -966,7 +967,7 @@ mod tests {
     };
 
     struct MockFilesystem {
-        mount_flags: u32,
+        mount_flags: StatFsFlags,
     }
 
     impl SuperBlockOperations for MockFilesystem {
@@ -988,12 +989,12 @@ mod tests {
     }
 
     struct MockDirOps {
-        mount_flags: u32,
+        mount_flags: StatFsFlags,
         inode: u64,
     }
 
     impl MockDirOps {
-        fn new(mount_flags: u32, inode: u64) -> Self {
+        fn new(mount_flags: StatFsFlags, inode: u64) -> Self {
             Self { mount_flags, inode }
         }
     }
@@ -1128,11 +1129,11 @@ mod tests {
         }
     }
 
-    fn mock_filesystem(mount_flags: u32) -> Arc<SuperBlock> {
+    fn mock_filesystem(mount_flags: StatFsFlags) -> Arc<SuperBlock> {
         SuperBlock::new(Arc::new(MockFilesystem { mount_flags }))
     }
 
-    fn statfs(mount_flags: u32) -> VfsResult<StatFs> {
+    fn statfs(mount_flags: StatFsFlags) -> VfsResult<StatFs> {
         Ok(StatFs {
             fs_type: 0,
             block_size: 0,
@@ -1155,7 +1156,7 @@ mod tests {
 
     #[def_test]
     fn test_root_mount_defaults_to_writable() {
-        let fs = mock_filesystem(0);
+        let fs = mock_filesystem(StatFsFlags::empty());
         let mount = Mount::new_root(&fs);
         let root = mount.root_path();
 
@@ -1168,7 +1169,7 @@ mod tests {
 
     #[def_test]
     fn test_root_mount_can_be_readonly() {
-        let fs = mock_filesystem(0);
+        let fs = mock_filesystem(StatFsFlags::empty());
         let mount = Mount::new_root_with_flags(&fs, MountFlags::RDONLY);
         let root = mount.root_path();
 
@@ -1184,8 +1185,8 @@ mod tests {
 
     #[def_test]
     fn test_child_mount_flags_are_independent_from_parent() {
-        let root_fs = mock_filesystem(0);
-        let child_fs = mock_filesystem(0);
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let child_fs = mock_filesystem(StatFsFlags::empty());
         let root_mount = Mount::new_root_with_flags(&root_fs, MountFlags::RDONLY);
         let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
         let child_mount = mount_dir
@@ -1201,7 +1202,7 @@ mod tests {
 
     #[def_test]
     fn test_filesystem_stat_readonly_makes_location_effectively_readonly() {
-        let fs = mock_filesystem(crate::ST_RDONLY);
+        let fs = mock_filesystem(StatFsFlags::RDONLY);
         let mount = Mount::new_root(&fs);
         let root = mount.root_path();
 
@@ -1236,7 +1237,7 @@ mod tests {
 
     #[def_test]
     fn test_initial_namespace_layers_visible_root_over_structural_root() {
-        let root_fs = mock_filesystem(0);
+        let root_fs = mock_filesystem(StatFsFlags::empty());
         let namespace = MntNamespace::build_initial_mount_tree(&root_fs).unwrap();
 
         let structural_root = namespace.root_path();
@@ -1250,9 +1251,9 @@ mod tests {
 
     #[def_test]
     fn test_overmount_hides_previous_and_restores_on_unmount() {
-        let root_fs = mock_filesystem(0);
-        let fs_a = mock_filesystem(0);
-        let fs_b = mock_filesystem(0);
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let fs_a = mock_filesystem(StatFsFlags::empty());
+        let fs_b = mock_filesystem(StatFsFlags::empty());
 
         let root_mount = Mount::new_root(&root_fs);
         let mnt_loc = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
@@ -1275,8 +1276,8 @@ mod tests {
 
     #[def_test]
     fn test_mount_root_keeps_root_dentry_name_and_dotdot_crosses_mount() {
-        let root_fs = mock_filesystem(0);
-        let child_fs = mock_filesystem(0);
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let child_fs = mock_filesystem(StatFsFlags::empty());
         let root_mount = Mount::new_root(&root_fs);
         let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
         let child_mount = mount_dir.mount_filesystem(&child_fs).unwrap();
@@ -1299,9 +1300,9 @@ mod tests {
 
     #[def_test]
     fn test_nested_mount_root_dotdot_crosses_to_parent_mount() {
-        let root_fs = mock_filesystem(0);
-        let child_fs = mock_filesystem(0);
-        let grandchild_fs = mock_filesystem(0);
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let child_fs = mock_filesystem(StatFsFlags::empty());
+        let grandchild_fs = mock_filesystem(StatFsFlags::empty());
 
         let root_mount = Mount::new_root(&root_fs);
         let first_mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
@@ -1324,8 +1325,8 @@ mod tests {
 
     #[def_test]
     fn test_mountpoint_child_tracking_updates_for_mount_and_unmount() {
-        let root_fs = mock_filesystem(0);
-        let child_fs = mock_filesystem(0);
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let child_fs = mock_filesystem(StatFsFlags::empty());
 
         let root_mount = Mount::new_root(&root_fs);
         assert_eq!(root_mount.children().len(), 0);
@@ -1343,9 +1344,9 @@ mod tests {
 
     #[def_test]
     fn test_mount_namespace_clone_copies_tree_and_retargets_paths() {
-        let root_fs = mock_filesystem(0);
-        let child_fs = mock_filesystem(0);
-        let overmount_fs = mock_filesystem(0);
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let child_fs = mock_filesystem(StatFsFlags::empty());
+        let overmount_fs = mock_filesystem(StatFsFlags::empty());
 
         let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
         let root = namespace.root_path();
@@ -1376,7 +1377,7 @@ mod tests {
 
     #[def_test]
     fn test_unmount_rejects_non_mount_root_path() {
-        let root_fs = mock_filesystem(0);
+        let root_fs = mock_filesystem(StatFsFlags::empty());
         let root_mount = Mount::new_root(&root_fs);
         let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
 
@@ -1386,9 +1387,9 @@ mod tests {
 
     #[def_test]
     fn test_unmount_rejects_mount_with_nested_children() {
-        let root_fs = mock_filesystem(0);
-        let child_fs = mock_filesystem(0);
-        let grandchild_fs = mock_filesystem(0);
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let child_fs = mock_filesystem(StatFsFlags::empty());
+        let grandchild_fs = mock_filesystem(StatFsFlags::empty());
 
         let root_mount = Mount::new_root(&root_fs);
         let first_mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
@@ -1410,9 +1411,9 @@ mod tests {
 
     #[def_test]
     fn test_unmount_all_recursively_clears_nested_mounts() {
-        let root_fs = mock_filesystem(0);
-        let child_fs = mock_filesystem(0);
-        let grandchild_fs = mock_filesystem(0);
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let child_fs = mock_filesystem(StatFsFlags::empty());
+        let grandchild_fs = mock_filesystem(StatFsFlags::empty());
 
         let root_mount = Mount::new_root(&root_fs);
         let first_mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
@@ -1435,9 +1436,9 @@ mod tests {
 
     #[def_test]
     fn test_hidden_mount_cannot_be_unmounted_while_overmounted() {
-        let root_fs = mock_filesystem(0);
-        let fs_a = mock_filesystem(0);
-        let fs_b = mock_filesystem(0);
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let fs_a = mock_filesystem(StatFsFlags::empty());
+        let fs_b = mock_filesystem(StatFsFlags::empty());
 
         let root_mount = Mount::new_root(&root_fs);
         let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
@@ -1453,8 +1454,8 @@ mod tests {
 
     #[def_test]
     fn test_metadata_uses_synthetic_device_identity() {
-        let root_fs = mock_filesystem(0);
-        let child_fs = mock_filesystem(0);
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let child_fs = mock_filesystem(StatFsFlags::empty());
 
         let root_mount = Mount::new_root(&root_fs);
         let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
@@ -1473,7 +1474,7 @@ mod tests {
 
     #[def_test]
     fn test_readonly_mount_blocks_create() {
-        let fs = mock_filesystem(0);
+        let fs = mock_filesystem(StatFsFlags::empty());
         let mount = Mount::new_root_with_flags(&fs, MountFlags::RDONLY);
         let root = mount.root_path();
 
@@ -1484,7 +1485,7 @@ mod tests {
 
     #[def_test]
     fn test_readonly_mount_blocks_unlink() {
-        let fs = mock_filesystem(0);
+        let fs = mock_filesystem(StatFsFlags::empty());
         let mount = Mount::new_root_with_flags(&fs, MountFlags::RDONLY);
         let root = mount.root_path();
 
@@ -1494,17 +1495,17 @@ mod tests {
 
     #[def_test]
     fn test_readonly_mount_blocks_rename() {
-        let fs = mock_filesystem(0);
+        let fs = mock_filesystem(StatFsFlags::empty());
         let mount = Mount::new_root_with_flags(&fs, MountFlags::RDONLY);
         let root = mount.root_path();
 
-        let result = root.rename("a", &root, "b", 0);
+        let result = root.rename("a", &root, "b", RenameFlags::empty());
         assert_eq!(result, Err(VfsError::ReadOnlyFilesystem));
     }
 
     #[def_test]
     fn test_writable_mount_allows_operations_to_reach_filesystem() {
-        let fs = mock_filesystem(0);
+        let fs = mock_filesystem(StatFsFlags::empty());
         let mount = Mount::new_root(&fs);
         let root = mount.root_path();
 
@@ -1517,7 +1518,7 @@ mod tests {
 
     #[def_test]
     fn test_stat_rdonly_combined_with_mount_rdonly_is_readonly() {
-        let fs = mock_filesystem(crate::ST_RDONLY);
+        let fs = mock_filesystem(StatFsFlags::RDONLY);
         let mount = Mount::new_root_with_flags(&fs, MountFlags::RDONLY);
         let root = mount.root_path();
 
@@ -1530,15 +1531,15 @@ mod tests {
     }
 
     #[def_test]
-    fn test_st_constants_values() {
-        assert_eq!(crate::ST_RDONLY, 0x0001);
-        assert_eq!(crate::ST_NOSUID, 0x0002);
-        assert_eq!(crate::ST_NODEV, 0x0004);
-        assert_eq!(crate::ST_NOEXEC, 0x0008);
-        assert_eq!(crate::ST_NOATIME, 0x0400);
-        assert_eq!(crate::ST_NODIRATIME, 0x0800);
-        assert_eq!(crate::ST_RELATIME, 0x1000);
-        assert_eq!(crate::ST_NOSYMFOLLOW, 0x2000);
+    fn test_statfs_flags_values() {
+        assert_eq!(StatFsFlags::RDONLY.bits(), 0x0001);
+        assert_eq!(StatFsFlags::NOSUID.bits(), 0x0002);
+        assert_eq!(StatFsFlags::NODEV.bits(), 0x0004);
+        assert_eq!(StatFsFlags::NOEXEC.bits(), 0x0008);
+        assert_eq!(StatFsFlags::NOATIME.bits(), 0x0400);
+        assert_eq!(StatFsFlags::NODIRATIME.bits(), 0x0800);
+        assert_eq!(StatFsFlags::RELATIME.bits(), 0x1000);
+        assert_eq!(StatFsFlags::NOSYMFOLLOW.bits(), 0x2000);
     }
 
     #[def_test]

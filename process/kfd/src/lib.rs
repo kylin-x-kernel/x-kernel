@@ -23,8 +23,8 @@ mod tests {
     use core::time::Duration;
 
     use kpoll::IoEvents;
-    use kvfs::{AnonInodeFs, DeviceId, FMode, FileOperations, VfsFile};
-    use linux_raw_sys::general::{O_NONBLOCK, stat};
+    use kvfs::{AnonInodeFs, DeviceId, FMode, FileOperations, OpenFlags, VfsFile};
+    use linux_raw_sys::general::stat;
     use unittest::def_test;
 
     use crate::{FdTable, Kstat};
@@ -44,7 +44,7 @@ mod tests {
                 alloc::sync::Arc::new(SnapshotTestFops),
                 alloc::sync::Arc::new(()),
                 FMode::READ,
-                O_NONBLOCK,
+                OpenFlags::NONBLOCK,
             )
             .expect("snapshot test anon inode file opens")
     }
@@ -112,7 +112,7 @@ mod tests {
 
         assert_eq!(snapshot.fd(), fd);
         assert!(snapshot.cloexec());
-        assert_eq!(snapshot.open_flags(), O_NONBLOCK);
+        assert_eq!(snapshot.open_flags(), OpenFlags::NONBLOCK);
         assert_eq!(
             snapshot.path().display_path().unwrap(),
             "anon_inode:[snapshot-test]"

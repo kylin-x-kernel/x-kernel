@@ -47,14 +47,14 @@ pub use namei::{DelayedCall, LastType, ParentLookup, dentry_open};
 pub use node::{
     Dentry, DentryOperations, DeviceFileOps, DirContext, DirEntrySink, GetattrQueryFlags,
     GetattrRequestMask, InodeCache, InodeDirOperations, InodeLookupFlags, InodeOperations,
-    InodeSymlinkOperations, MmapMapper, NodeFlags, RENAME_EXCHANGE, RENAME_NOREPLACE,
-    RENAME_WHITEOUT, RenameFlags, VfsInode, VfsInodeInit, WeakVfsInode, bdev_add, bdev_del,
-    cdev_add, cdev_del,
+    InodeSymlinkOperations, MmapMapper, NodeFlags, RenameFlags, VfsInode, VfsInodeInit,
+    WeakVfsInode, bdev_add, bdev_del, cdev_add, cdev_del,
 };
 pub(crate) use node::{
     DentryKey, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive,
 };
-pub(crate) use open_flags::{AccMode, OpenFlags, OpenHow};
+pub use open_flags::OpenFlags;
+pub(crate) use open_flags::{AccMode, OpenHow, OpenParams};
 pub use permission::{Permission, check_permission, open_access_to_permission};
 pub use seq_file::{SeqFile, SeqFileInode, SeqIterator, seq_open};
 pub use simple_dir::{
@@ -64,8 +64,7 @@ pub use simple_dir::{
 pub use simple_file::{RwFile, SimpleFile, SimpleFileOperation, SimpleFileOps};
 pub use simple_fs::{SimpleFs, SimpleFsNode};
 pub use super_block::{
-    MAX_LFS_FILESIZE, ST_NOATIME, ST_NODEV, ST_NODIRATIME, ST_NOEXEC, ST_NOSUID, ST_NOSYMFOLLOW,
-    ST_RDONLY, ST_RELATIME, ST_VALID, StatFs, SuperBlock, SuperBlockOperations, SuperBlockRegistry,
+    MAX_LFS_FILESIZE, StatFs, StatFsFlags, SuperBlock, SuperBlockOperations, SuperBlockRegistry,
     default_evict_inode, super_block_registry, sync_filesystems,
 };
 pub(crate) use type_map::TypeMap;

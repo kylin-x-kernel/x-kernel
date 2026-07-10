@@ -12,7 +12,7 @@ use slab::Slab;
 
 use crate::{
     Dentry, DeviceId, InodeOperations, Metadata, MetadataUpdate, NodePermission, NodeType, StatFs,
-    SuperBlock, SuperBlockOperations, VfsInodeInit, VfsResult, simple_dir::DirMaker,
+    StatFsFlags, SuperBlock, SuperBlockOperations, VfsInodeInit, VfsResult, simple_dir::DirMaker,
     simple_statfs_with_flags,
 };
 
@@ -20,7 +20,7 @@ use crate::{
 pub struct SimpleFs {
     name: String,
     fs_type: u32,
-    mount_flags: u32,
+    mount_flags: StatFsFlags,
     inodes: Mutex<Slab<()>>,
     root: Mutex<Option<Dentry>>,
 }
@@ -32,14 +32,14 @@ impl SimpleFs {
         fs_type: u32,
         root: impl FnOnce(Arc<Self>) -> DirMaker,
     ) -> Arc<SuperBlock> {
-        Self::new_with_flags(name, fs_type, 0, root)
+        Self::new_with_flags(name, fs_type, StatFsFlags::empty(), root)
     }
 
     /// Creates a superblock backed by a simple filesystem with explicit mount flags.
     pub fn new_with_flags(
         name: String,
         fs_type: u32,
-        mount_flags: u32,
+        mount_flags: StatFsFlags,
         root: impl FnOnce(Arc<Self>) -> DirMaker,
     ) -> Arc<SuperBlock> {
         let fs = Arc::new(Self {

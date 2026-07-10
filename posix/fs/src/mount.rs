@@ -8,16 +8,16 @@ use core::ffi::{c_char, c_void};
 
 use kerrno::{KError, KResult};
 use kprocess::current_user_process;
-use kvfs::{Filename, LookupFlags, LookupIntent, MountFlags, ST_RDONLY};
+use kvfs::{Filename, LookupFlags, LookupIntent, MountFlags, StatFsFlags};
 use memfs::shmem;
 use posix_types::UserConstPtr;
 
-fn superblock_flags_from_sys_mount(flags: i32) -> u32 {
+fn superblock_flags_from_sys_mount(flags: i32) -> StatFsFlags {
     let f = flags as u32;
-    let mut sb_flags = 0;
+    let mut sb_flags = StatFsFlags::empty();
 
     if f & linux_raw_sys::general::MS_RDONLY != 0 {
-        sb_flags |= ST_RDONLY;
+        sb_flags.insert(StatFsFlags::RDONLY);
     }
     sb_flags
 }
@@ -161,7 +161,7 @@ pub fn sys_umount2(target: UserConstPtr<c_char>, flags: i32) -> KResult<isize> {
 
 #[cfg(unittest)]
 mod tests {
-    use kvfs::{MountFlags, ST_RDONLY};
+    use kvfs::{MountFlags, StatFsFlags};
     use unittest::{assert, assert_eq, def_test};
 
     #[def_test]
@@ -173,14 +173,17 @@ mod tests {
             | linux_raw_sys::general::MS_NODIRATIME
             | linux_raw_sys::general::MS_NOSYMFOLLOW) as i32;
 
-        assert_eq!(super::superblock_flags_from_sys_mount(flags), 0);
+        assert_eq!(
+            super::superblock_flags_from_sys_mount(flags),
+            StatFsFlags::empty()
+        );
     }
 
     #[def_test]
     fn test_superblock_flags_preserve_readonly() {
         assert_eq!(
             super::superblock_flags_from_sys_mount(linux_raw_sys::general::MS_RDONLY as i32),
-            ST_RDONLY
+            StatFsFlags::RDONLY
         );
     }
 

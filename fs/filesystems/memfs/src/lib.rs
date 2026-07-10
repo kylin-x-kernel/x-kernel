@@ -20,7 +20,7 @@ use ksync::Mutex;
 use kvfs::{
     AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FileDirOperations,
     FileOperations, InodeCache, InodeDirOperations, InodeOperations, InodeSymlinkOperations, Kiocb,
-    Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType, StatFs, SuperBlock,
+    Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType, StatFs, StatFsFlags, SuperBlock,
     SuperBlockOperations, Umode, VfsError, VfsFile, VfsInodeInit, VfsResult, WriteBeginRequest,
     WriteEndRequest, simple_getattr, simple_rename, simple_statfs_with_flags, simple_write_end,
 };
@@ -70,7 +70,7 @@ impl Borrow<str> for FileName {
 pub struct MemoryFs {
     name: &'static str,
     fs_type: u32,
-    mount_flags: u32,
+    mount_flags: StatFsFlags,
     inodes: Mutex<Slab<Arc<Inode>>>,
     inode_cache: InodeCache,
     root: Mutex<Option<Dentry>>,
@@ -80,18 +80,21 @@ impl MemoryFs {
     /// Creates an in-memory superblock.
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> Arc<SuperBlock> {
-        Self::new_with_name_and_flags("memfs", 0)
+        Self::new_with_name_and_flags("memfs", StatFsFlags::empty())
     }
 
     /// Creates an in-memory superblock with explicit mount flags.
     #[allow(clippy::new_ret_no_self)]
-    pub fn new_with_flags(mount_flags: u32) -> Arc<SuperBlock> {
+    pub fn new_with_flags(mount_flags: StatFsFlags) -> Arc<SuperBlock> {
         Self::new_with_name_and_flags("memfs", mount_flags)
     }
 
     /// Creates an in-memory superblock with a custom name and mount flags.
     #[allow(clippy::new_ret_no_self)]
-    pub fn new_with_name_and_flags(name: &'static str, mount_flags: u32) -> Arc<SuperBlock> {
+    pub fn new_with_name_and_flags(
+        name: &'static str,
+        mount_flags: StatFsFlags,
+    ) -> Arc<SuperBlock> {
         Self::new_with_name_flags_and_root_mode(
             name,
             RAMFS_MAGIC,
@@ -103,7 +106,7 @@ impl MemoryFs {
     pub(crate) fn new_with_name_flags_and_root_mode(
         name: &'static str,
         fs_type: u32,
-        mount_flags: u32,
+        mount_flags: StatFsFlags,
         root_mode: NodePermission,
     ) -> Arc<SuperBlock> {
         let fs = Arc::new(Self {
@@ -803,7 +806,7 @@ mod tests {
 
     #[def_test]
     fn tmpfs_write_end_updates_vfs_inode_size() {
-        let fs = shmem::new_tmpfs(0);
+        let fs = shmem::new_tmpfs(StatFsFlags::empty());
         let root = kvfs::Path::new(kvfs::Mount::new_root(&fs), fs.root_dir());
         let file = kvfs::Filename::new("tmp")
             .open_with_flags_at(

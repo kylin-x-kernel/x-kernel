@@ -8,7 +8,7 @@ use alloc::{string::String, sync::Arc};
 use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
 use ksync::{Mutex, MutexGuard};
 use kvfs::{
-    Dentry, InodeCache, NodeFlags, NodeType, ST_RELATIME, StatFs, SuperBlock, SuperBlockOperations,
+    Dentry, InodeCache, NodeFlags, NodeType, StatFs, StatFsFlags, SuperBlock, SuperBlockOperations,
     Umode, VfsInode, VfsInodeInit, VfsResult, path::MAX_NAME_LEN,
 };
 use rsext4::{Jbd2Dev, disknode::Ext4Inode};
@@ -187,7 +187,7 @@ impl SuperBlockOperations for Ext4Filesystem {
 
             name_length: MAX_NAME_LEN as _,
             fragment_size: 0,
-            mount_flags: ST_RELATIME,
+            mount_flags: StatFsFlags::RELATIME,
         })
     }
 

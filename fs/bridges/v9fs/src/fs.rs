@@ -75,7 +75,7 @@ impl SuperBlockOperations for Fs9pFilesystem {
             free_file_count: 0,
             name_length: MAX_NAME_LEN as _,
             fragment_size: 0,
-            mount_flags: 0,
+            mount_flags: kvfs::StatFsFlags::empty(),
         })
     }
 

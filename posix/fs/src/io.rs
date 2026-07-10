@@ -20,8 +20,10 @@ use kerrno::{KError, KResult, LinuxError};
 use kfd_objects::pipe::current_pipe_endpoint;
 use kio::prelude::*;
 use kpoll::IoEvents;
-use kvfs::{FMode, Filename, LookupFlags, LookupIntent, Permission, VfsFile, check_permission};
-use linux_raw_sys::general::{__kernel_off_t, O_APPEND};
+use kvfs::{
+    FMode, Filename, LookupFlags, LookupIntent, OpenFlags, Permission, VfsFile, check_permission,
+};
+use linux_raw_sys::general::__kernel_off_t;
 use linux_sysno::Sysno;
 use osvm::{VirtPtr, VmBytes, VmBytesMut};
 use posix_types::{IoVec, IoVectorBuf, IoVectorBufIo, UserConstPtr, UserPtr};
@@ -780,7 +782,7 @@ pub fn sys_splice(
         }
         // APPEND mode files cannot be spliced (offset cannot be changed)
         let f = resources.get_file(fd_out)?;
-        if f.flags() & O_APPEND != 0 {
+        if f.flags().contains(OpenFlags::APPEND) {
             return Err(KError::InvalidInput);
         }
         // Verify destination is writable with a write probe

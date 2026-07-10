@@ -33,7 +33,7 @@ bitflags::bitflags! {
 }
 
 /// Creates a tmpfs superblock.
-pub fn new_tmpfs(mount_flags: u32) -> Arc<SuperBlock> {
+pub fn new_tmpfs(mount_flags: kvfs::StatFsFlags) -> Arc<SuperBlock> {
     MemoryFs::new_with_name_flags_and_root_mode(
         "tmpfs",
         TMPFS_MAGIC,
@@ -247,7 +247,7 @@ fn create_anonymous_file(
     permission: NodePermission,
     initial_seals: ShmemSealSet,
 ) -> VfsResult<ShmemObject> {
-    let fs = new_tmpfs(0);
+    let fs = new_tmpfs(kvfs::StatFsFlags::empty());
     let root = Path::new(Mount::new_root(&fs), fs.root_dir());
     let file =
         kvfs::Filename::new(name).open_with_flags_at(&root, &root, O_CREAT | O_EXCL, permission)?;

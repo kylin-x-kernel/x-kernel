@@ -19,14 +19,17 @@ use kerrno::KResult;
 use ksync::Mutex;
 use kvfs::{
     AnonInodeFs, Dentry, DirContext, FMode, FileDirOperations, FileOperations, InodeDirOperations,
-    InodeOperations, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType, SimpleFs,
-    SimpleFsNode, SuperBlock, VfsError, VfsFile, VfsInode, VfsResult,
+    InodeOperations, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType, OpenFlags,
+    SimpleFs, SimpleFsNode, StatFsFlags, SuperBlock, VfsError, VfsFile, VfsInode, VfsResult,
 };
 
 /// Linux `BPF_FS_MAGIC`.
 const BPF_FS_MAGIC: u32 = 0xcafe4a11;
 
-const BPF_MOUNT_FLAGS: u32 = kvfs::ST_NOSUID | kvfs::ST_NODEV | kvfs::ST_NOEXEC | kvfs::ST_RELATIME;
+const BPF_MOUNT_FLAGS: StatFsFlags = StatFsFlags::NOSUID
+    .union(StatFsFlags::NODEV)
+    .union(StatFsFlags::NOEXEC)
+    .union(StatFsFlags::RELATIME);
 const DIR_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o755);
 const PIN_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o600);
 
@@ -96,7 +99,13 @@ impl BpfProgram {
 
     pub fn into_file(self: Arc<Self>) -> VfsResult<Arc<VfsFile>> {
         let fops: Arc<dyn FileOperations> = self.clone();
-        AnonInodeFs::global().get_file("bpf-prog", fops, self, FMode::READ | FMode::WRITE, 0)
+        AnonInodeFs::global().get_file(
+            "bpf-prog",
+            fops,
+            self,
+            FMode::READ | FMode::WRITE,
+            OpenFlags::empty(),
+        )
     }
 
     pub fn from_file(file: &VfsFile) -> KResult<Arc<Self>> {
@@ -222,7 +231,13 @@ impl BpfMap {
     /// Wraps this map as an anonymous inode file.
     pub fn into_file(self: Arc<Self>) -> VfsResult<Arc<VfsFile>> {
         let fops: Arc<dyn FileOperations> = self.clone();
-        AnonInodeFs::global().get_file("bpf-map", fops, self, FMode::READ | FMode::WRITE, 0)
+        AnonInodeFs::global().get_file(
+            "bpf-map",
+            fops,
+            self,
+            FMode::READ | FMode::WRITE,
+            OpenFlags::empty(),
+        )
     }
 }
 

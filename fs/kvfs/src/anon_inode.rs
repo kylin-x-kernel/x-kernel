@@ -8,11 +8,10 @@ use alloc::{format, string::String, sync::Arc};
 use core::{any::Any, time::Duration};
 
 use klazy::Lazy;
-use linux_raw_sys::general::{O_ACCMODE, O_NONBLOCK};
 
 use crate::{
     Dentry, DentryOperations, FMode, FileOperations, InodeOperations, Metadata, Mount, MountIdmap,
-    NodeFlags, NodePermission, NodeType, Path, ST_NODEV, ST_NOEXEC, StatFs, SuperBlock,
+    NodeFlags, NodePermission, NodeType, OpenFlags, Path, StatFs, StatFsFlags, SuperBlock,
     SuperBlockOperations, Umode, VfsFile, VfsInode, VfsInodeInit, VfsResult,
 };
 
@@ -60,12 +59,14 @@ impl AnonInodeFs {
         fops: Arc<dyn FileOperations>,
         private_data: Arc<T>,
         flags: FMode,
-        open_flags: u32,
+        open_flags: OpenFlags,
     ) -> VfsResult<Arc<VfsFile>>
     where
         T: Any + Send + Sync + 'static,
     {
-        let file = self.alloc_file(name, flags, open_flags & (O_ACCMODE | O_NONBLOCK), fops)?;
+        let open_flags =
+            open_flags & (OpenFlags::WRITE_ONLY | OpenFlags::READ_WRITE | OpenFlags::NONBLOCK);
+        let file = self.alloc_file(name, flags, open_flags, fops)?;
         file.set_private_data(private_data);
         Ok(file)
     }
@@ -74,7 +75,7 @@ impl AnonInodeFs {
         &self,
         name: &str,
         flags: FMode,
-        open_flags: u32,
+        open_flags: OpenFlags,
         fops: Arc<dyn FileOperations>,
     ) -> VfsResult<Arc<VfsFile>> {
         self.mount.alloc_file_pseudo_with_dentry_operations(
@@ -207,7 +208,7 @@ impl SuperBlockOperations for AnonInodeSuperBlock {
             free_file_count: 0,
             name_length: ANON_INODE_NAME_LEN,
             fragment_size: ANON_INODE_BLOCK_SIZE_U32,
-            mount_flags: ST_NODEV | ST_NOEXEC,
+            mount_flags: StatFsFlags::NODEV | StatFsFlags::NOEXEC,
         })
     }
 }

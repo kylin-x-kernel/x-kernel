@@ -9,11 +9,12 @@ use core::task::Context;
 
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, Pollable};
-use kvfs::{AnonInodeFs, FMode, FileOperations, VfsFile, VfsResult};
+use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile, VfsResult};
 
 use crate::{RecvFlags, RecvOptions, SendFlags, SendOptions, Socket, SocketOps};
 
 pub fn sock_alloc_file(socket: Socket, flags: u32) -> KResult<Arc<VfsFile>> {
+    let flags = OpenFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
     let socket = Arc::new(socket);
     let name = format!("socket:[{}]", socket.as_ref() as *const _ as usize);
     AnonInodeFs::global().get_file(

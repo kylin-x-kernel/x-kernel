@@ -16,6 +16,6 @@ pub use device::{DeviceFileOps, MmapMapper, bdev_add, bdev_del, cdev_add, cdev_d
 pub use dir::{DirContext, DirEntrySink};
 pub use inode::{
     GetattrQueryFlags, GetattrRequestMask, InodeCache, InodeDirOperations, InodeLookupFlags,
-    InodeOperations, InodeSymlinkOperations, NodeFlags, RENAME_EXCHANGE, RENAME_NOREPLACE,
-    RENAME_WHITEOUT, RenameFlags, VfsInode, VfsInodeInit, WeakVfsInode,
+    InodeOperations, InodeSymlinkOperations, NodeFlags, RenameFlags, VfsInode, VfsInodeInit,
+    WeakVfsInode,
 };

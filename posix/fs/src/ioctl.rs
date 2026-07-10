@@ -7,10 +7,8 @@
 use core::ffi::c_int;
 
 use kerrno::{KError, KResult};
-use linux_raw_sys::{
-    general::O_NONBLOCK,
-    ioctl::{FIONBIO, TCGETS, TIOCGWINSZ},
-};
+use kvfs::OpenFlags;
+use linux_raw_sys::ioctl::{FIONBIO, TCGETS, TIOCGWINSZ};
 use posix_types::UserConstPtr;
 
 /// The `ioctl()` syscall manipulates the underlying device parameters
@@ -23,8 +21,12 @@ pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> KResult<isize> {
         if val != 0 && val != 1 {
             return Err(KError::InvalidInput);
         }
-        let flags = if val != 0 { O_NONBLOCK } else { 0 };
-        f.replace_flags(O_NONBLOCK, flags);
+        let flags = if val != 0 {
+            OpenFlags::NONBLOCK
+        } else {
+            OpenFlags::empty()
+        };
+        f.replace_flags(OpenFlags::NONBLOCK, flags);
         return Ok(0);
     }
     f.ioctl(cmd, arg)

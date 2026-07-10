@@ -17,15 +17,13 @@ use core::{
 use iov_iter::{IovIterDest, IovIterSource, iov_iter_kvec_dest, iov_iter_kvec_source};
 use kerrno::LinuxError;
 use kpoll::IoEvents;
-use linux_raw_sys::general::{
-    O_ACCMODE, O_APPEND, O_CREAT, O_DIRECT, O_EXCL, O_NOCTTY, O_NONBLOCK, O_PATH, O_TRUNC,
-};
+use linux_raw_sys::general::O_ACCMODE;
 use log::warn;
 use pagecache::Mapping;
 
 use crate::{
     AddressSpace, DirContext, Kiocb, MagicLinkOps, MmapMapper, Mutex, MutexGuard, NodeFlags,
-    NodeType, Path, TypeMap, VfsError, VfsInode, VfsResult,
+    NodeType, OpenFlags, Path, TypeMap, VfsError, VfsInode, VfsResult,
 };
 
 bitflags::bitflags! {
@@ -69,8 +67,8 @@ bitflags::bitflags! {
 
 impl FMode {
     /// Converts open access-mode bits to `file::f_mode` bits.
-    pub fn from_open_flags(flags: u32) -> Self {
-        Self::from_bits_truncate(flags.wrapping_add(1) & O_ACCMODE)
+    pub fn from_open_flags(flags: OpenFlags) -> Self {
+        Self::from_bits_truncate(flags.bits().wrapping_add(1) & O_ACCMODE)
     }
 }
 
@@ -294,11 +292,10 @@ impl FileLocation {
     }
 }
 
-fn default_direct(path: &Path, open_flags: u32) -> bool {
+fn default_direct(path: &Path, open_flags: OpenFlags) -> bool {
     let inode = path.inode();
     let direct = !path.is_dir()
-        && (open_flags & O_DIRECT != 0
-            || open_flags & O_PATH != 0
+        && (open_flags.intersects(OpenFlags::DIRECT | OpenFlags::PATH)
             || matches!(
                 inode.node_type(),
                 NodeType::CharacterDevice | NodeType::Fifo | NodeType::Socket
@@ -313,13 +310,13 @@ pub struct VfsFileBuilder {
     operations: Option<Arc<dyn FileOperations>>,
     location: Option<FileLocation>,
     private_data: TypeMap,
-    flags: u32,
+    flags: OpenFlags,
     position: u64,
 }
 
 impl VfsFileBuilder {
     /// Creates an unbound open-file builder.
-    pub(crate) fn empty(flags: FMode, open_flags: u32) -> Self {
+    pub(crate) fn empty(flags: FMode, open_flags: OpenFlags) -> Self {
         Self {
             mode: flags,
             operations: None,
@@ -330,14 +327,14 @@ impl VfsFileBuilder {
         }
     }
 
-    pub(crate) fn allocate(open_flags: u32) -> VfsResult<Self> {
+    pub(crate) fn allocate(open_flags: OpenFlags) -> VfsResult<Self> {
         Ok(Self::empty(FMode::from_open_flags(open_flags), open_flags))
     }
 
     pub(crate) fn from_path_state(
         path: Path,
         flags: FMode,
-        open_flags: u32,
+        open_flags: OpenFlags,
         f_op: Arc<dyn FileOperations>,
     ) -> Self {
         let mut file = Self::empty(flags, open_flags);
@@ -349,7 +346,7 @@ impl VfsFileBuilder {
     pub(crate) fn cloned_from(
         base: &VfsFile,
         flags: FMode,
-        open_flags: u32,
+        open_flags: OpenFlags,
         f_op: Arc<dyn FileOperations>,
     ) -> Self {
         let mut file = Self::empty(flags, open_flags);
@@ -395,7 +392,7 @@ impl VfsFileBuilder {
     fn do_dentry_open(mut self) -> VfsResult<Arc<VfsFile>> {
         let location = self.location()?.clone();
 
-        if self.flags & O_PATH != 0 {
+        if self.flags.contains(OpenFlags::PATH) {
             self.mode = FMode::PATH;
             self.install_operations(Arc::new(EmptyFileOperations));
             self.mark_opened()?;
@@ -417,7 +414,12 @@ impl VfsFileBuilder {
             self.mode.insert(FMode::CAN_ODIRECT);
         }
         operations.open(location.inode().as_ref(), &mut self)?;
-        self.flags &= !(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC);
+        self.flags.remove(
+            OpenFlags::CREATE
+                | OpenFlags::EXCLUSIVE
+                | OpenFlags::NO_CONTROLLING_TTY
+                | OpenFlags::TRUNCATE,
+        );
         self.mark_opened()?;
         self.finish()
     }
@@ -460,9 +462,9 @@ impl VfsFileBuilder {
     /// Sets the open-file nonblocking flag.
     pub fn set_nonblocking(&mut self, flag: bool) {
         if flag {
-            self.flags |= O_NONBLOCK;
+            self.flags.insert(OpenFlags::NONBLOCK);
         } else {
-            self.flags &= !O_NONBLOCK;
+            self.flags.remove(OpenFlags::NONBLOCK);
         }
     }
 
@@ -483,7 +485,7 @@ impl VfsFileBuilder {
             operations,
             location,
             private_data: Mutex::new(private_data),
-            flags: AtomicU32::new(flags),
+            flags: AtomicU32::new(flags.bits()),
             position: Mutex::new(position),
         }))
     }
@@ -504,7 +506,7 @@ impl VfsFile {
     pub fn alloc_clone(
         &self,
         flags: FMode,
-        open_flags: u32,
+        open_flags: OpenFlags,
         f_op: Arc<dyn FileOperations>,
     ) -> VfsResult<Arc<Self>> {
         let mut file = VfsFileBuilder::cloned_from(self, flags, open_flags, f_op);
@@ -516,7 +518,7 @@ impl VfsFile {
     pub fn alloc_clone_with_private_data<T>(
         &self,
         flags: FMode,
-        open_flags: u32,
+        open_flags: OpenFlags,
         f_op: Arc<dyn FileOperations>,
         private_data: Arc<T>,
     ) -> VfsResult<Arc<Self>>
@@ -707,7 +709,7 @@ impl VfsFile {
             self.verify_write_area(0, iter.count())?;
             let mut iocb = Kiocb::new(self, 0);
             self.operations().write_iter(&mut iocb, iter)
-        } else if self.flags() & O_APPEND != 0 {
+        } else if self.flags().contains(OpenFlags::APPEND) {
             let end = self.inode().size();
             self.verify_write_area(end, iter.count())?;
             let mut iocb = Kiocb::new(self, end);
@@ -782,24 +784,28 @@ impl VfsFile {
     /// Sets the open-file nonblocking flag.
     pub fn set_nonblocking(&self, flag: bool) {
         if flag {
-            self.flags.fetch_or(O_NONBLOCK, Ordering::AcqRel);
+            self.flags
+                .fetch_or(OpenFlags::NONBLOCK.bits(), Ordering::AcqRel);
         } else {
-            self.flags.fetch_and(!O_NONBLOCK, Ordering::AcqRel);
+            self.flags
+                .fetch_and(!OpenFlags::NONBLOCK.bits(), Ordering::AcqRel);
         }
     }
 
     /// Returns the open-file nonblocking flag.
     pub fn is_nonblocking(&self) -> bool {
-        self.flags() & O_NONBLOCK != 0
+        self.flags().contains(OpenFlags::NONBLOCK)
     }
 
     /// Returns this file's `f_flags`.
-    pub fn flags(&self) -> u32 {
-        self.flags.load(Ordering::Acquire)
+    pub fn flags(&self) -> OpenFlags {
+        OpenFlags::from_bits_retain(self.flags.load(Ordering::Acquire))
     }
 
     /// Replaces selected open-file status flags.
-    pub fn replace_flags(&self, mask: u32, flags: u32) {
+    pub fn replace_flags(&self, mask: OpenFlags, flags: OpenFlags) {
+        let mask = mask.bits();
+        let flags = flags.bits();
         let _ = self
             .flags
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {

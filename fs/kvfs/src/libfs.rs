@@ -10,12 +10,12 @@ use memaddr::PAGE_SIZE_4K;
 
 use crate::{
     AddressSpace, Dentry, GetattrQueryFlags, GetattrRequestMask, Metadata, MountIdmap, Path,
-    RENAME_EXCHANGE, RENAME_NOREPLACE, RenameFlags, StatFs, VfsError, VfsFile, VfsInode, VfsResult,
-    WriteEndRequest, d_really_is_positive, path::MAX_NAME_LEN,
+    RenameFlags, StatFs, StatFsFlags, VfsError, VfsFile, VfsInode, VfsResult, WriteEndRequest,
+    d_really_is_positive, path::MAX_NAME_LEN,
 };
 
 /// `simple_statfs` with explicit superblock mount flags.
-pub fn simple_statfs_with_flags(fs_type: u32, mount_flags: u32) -> StatFs {
+pub fn simple_statfs_with_flags(fs_type: u32, mount_flags: StatFsFlags) -> StatFs {
     StatFs {
         fs_type,
         block_size: PAGE_SIZE_4K as u32,
@@ -99,14 +99,15 @@ pub fn simple_rename(
 ) -> VfsResult<()> {
     let they_are_dirs = old_dentry.is_dir();
 
-    if flags & !(RENAME_NOREPLACE | RENAME_EXCHANGE) != 0 {
+    let supported_flags = RenameFlags::NOREPLACE | RenameFlags::EXCHANGE;
+    if !supported_flags.contains(flags) || flags.has_conflicting_modes() {
         return Err(VfsError::InvalidInput);
     }
 
-    if flags & RENAME_EXCHANGE != 0 {
+    if flags.contains(RenameFlags::EXCHANGE) {
         return simple_rename_exchange(old_dir, old_dentry, new_dir, new_dentry);
     }
-    if flags & RENAME_NOREPLACE != 0 && d_really_is_positive(new_dentry) {
+    if flags.contains(RenameFlags::NOREPLACE) && d_really_is_positive(new_dentry) {
         return Err(VfsError::AlreadyExists);
     }
 
@@ -190,7 +191,7 @@ mod tests {
     use super::*;
     use crate::{
         DeviceId, FileOperations, InodeOperations, Metadata, NodeFlags, NodePermission, NodeType,
-        RENAME_WHITEOUT, Umode, VfsInodeInit,
+        Umode, VfsInodeInit,
     };
 
     struct TestOps {
@@ -282,7 +283,15 @@ mod tests {
         let new_dentry =
             Dentry::new_file_from_inode(target.clone(), Some(new_parent), String::from("target"));
 
-        simple_rename(&MountIdmap, &old_dir, &old_dentry, &new_dir, &new_dentry, 0).unwrap();
+        simple_rename(
+            &MountIdmap,
+            &old_dir,
+            &old_dentry,
+            &new_dir,
+            &new_dentry,
+            RenameFlags::empty(),
+        )
+        .unwrap();
 
         assert_eq!(source.link_count(), 1);
         assert_eq!(target.link_count(), 0);
@@ -310,7 +319,7 @@ mod tests {
                 &old_dentry,
                 &new_dir,
                 &new_dentry,
-                RENAME_NOREPLACE,
+                RenameFlags::NOREPLACE,
             ),
             Err(VfsError::AlreadyExists)
         );
@@ -329,7 +338,15 @@ mod tests {
             Dentry::new_dir_from_inode(source.clone(), Some(old_parent), String::from("source"));
         let new_dentry = Dentry::new_negative(Some(new_parent), String::from("target"));
 
-        simple_rename(&MountIdmap, &old_dir, &old_dentry, &new_dir, &new_dentry, 0).unwrap();
+        simple_rename(
+            &MountIdmap,
+            &old_dir,
+            &old_dentry,
+            &new_dir,
+            &new_dentry,
+            RenameFlags::empty(),
+        )
+        .unwrap();
 
         assert_eq!(source.link_count(), 2);
         assert_eq!(old_dir.link_count(), 1);
@@ -361,7 +378,31 @@ mod tests {
                 &old_dentry,
                 &new_dir,
                 &new_dentry,
-                RENAME_WHITEOUT
+                RenameFlags::WHITEOUT
+            ),
+            Err(VfsError::InvalidInput)
+        );
+    }
+
+    #[def_test]
+    fn simple_rename_rejects_conflicting_modes() {
+        let old_dir = dir_inode(30, 2);
+        let new_dir = dir_inode(31, 2);
+        let source = file_inode(32, 1);
+        let old_parent = Dentry::new_dir_from_inode(old_dir.clone(), None, String::from("old"));
+        let new_parent = Dentry::new_dir_from_inode(new_dir.clone(), None, String::from("new"));
+        let old_dentry =
+            Dentry::new_file_from_inode(source, Some(old_parent), String::from("source"));
+        let new_dentry = Dentry::new_negative(Some(new_parent), String::from("target"));
+
+        assert_eq!(
+            simple_rename(
+                &MountIdmap,
+                &old_dir,
+                &old_dentry,
+                &new_dir,
+                &new_dentry,
+                RenameFlags::NOREPLACE | RenameFlags::EXCHANGE,
             ),
             Err(VfsError::InvalidInput)
         );

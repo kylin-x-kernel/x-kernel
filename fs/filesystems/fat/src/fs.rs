@@ -13,7 +13,7 @@ use core::{
 use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
 use ksync::{Mutex, MutexGuard};
 use kvfs::{
-    Dentry, NodePermission, NodeType, ST_RELATIME, StatFs, SuperBlock, SuperBlockOperations,
+    Dentry, NodePermission, NodeType, StatFs, StatFsFlags, SuperBlock, SuperBlockOperations,
     VfsInode, VfsInodeInit, VfsResult, path::MAX_NAME_LEN,
 };
 use slab::Slab;
@@ -146,7 +146,7 @@ impl SuperBlockOperations for FatFilesystem {
 
             name_length: MAX_NAME_LEN as _,
             fragment_size: 0,
-            mount_flags: ST_RELATIME,
+            mount_flags: StatFsFlags::RELATIME,
         })
     }
 }

@@ -20,10 +20,13 @@ use alloc::sync::Arc;
 
 pub use device_file::DeviceFile;
 pub(crate) use device_file::{add_device_entry, device_dentry};
-use kvfs::{ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RELATIME, SimpleFs, SuperBlock};
+use kvfs::{SimpleFs, StatFsFlags, SuperBlock};
 pub use nodes::pts::Ptmx;
 
-const DEV_MOUNT_FLAGS: u32 = ST_NOSUID | ST_NODEV | ST_NOEXEC | ST_RELATIME;
+const DEV_MOUNT_FLAGS: StatFsFlags = StatFsFlags::NOSUID
+    .union(StatFsFlags::NODEV)
+    .union(StatFsFlags::NOEXEC)
+    .union(StatFsFlags::RELATIME);
 const DEVFS_MAGIC: u32 = 0x0102_1994;
 
 /// Creates a devfs superblock for device access.

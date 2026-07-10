@@ -18,9 +18,12 @@ mod trace_nodes;
 
 use alloc::sync::Arc;
 
-use kvfs::{ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RELATIME, SimpleFs, SuperBlock};
+use kvfs::{SimpleFs, StatFsFlags, SuperBlock};
 
-const PROC_MOUNT_FLAGS: u32 = ST_NOSUID | ST_NODEV | ST_NOEXEC | ST_RELATIME;
+const PROC_MOUNT_FLAGS: StatFsFlags = StatFsFlags::NOSUID
+    .union(StatFsFlags::NODEV)
+    .union(StatFsFlags::NOEXEC)
+    .union(StatFsFlags::RELATIME);
 
 /// Creates a procfs superblock for process information.
 pub fn new_procfs() -> Arc<SuperBlock> {

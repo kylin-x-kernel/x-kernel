@@ -21,8 +21,8 @@ use kclass::{Virtio9pDevice as _, Virtio9pDeviceImpl, virtio_9p_devices};
 use kdevice::{DeviceId, subscribe_device_removed};
 use ksync::{Mutex, static_lock};
 use kvfs::{
-    Filename, LookupFlags, LookupIntent, MntNamespace, NodePermission, Path, ST_NODEV, ST_NOEXEC,
-    ST_NOSUID, ST_RELATIME, SuperBlock, path::PathBuf,
+    Filename, LookupFlags, LookupIntent, MntNamespace, NodePermission, Path, StatFsFlags,
+    SuperBlock, path::PathBuf,
 };
 
 static_lock! {
@@ -80,12 +80,16 @@ impl BootVfs {
             .expect("Failed to mount devfs");
         self.mount_at(
             "/dev/shm",
-            memfs::shmem::new_tmpfs(ST_NOSUID | ST_NODEV | ST_RELATIME),
+            memfs::shmem::new_tmpfs(
+                StatFsFlags::NOSUID | StatFsFlags::NODEV | StatFsFlags::RELATIME,
+            ),
         )
         .expect("Failed to mount /dev/shm");
         self.mount_at(
             "/tmp",
-            memfs::shmem::new_tmpfs(ST_NOSUID | ST_NODEV | ST_RELATIME),
+            memfs::shmem::new_tmpfs(
+                StatFsFlags::NOSUID | StatFsFlags::NODEV | StatFsFlags::RELATIME,
+            ),
         )
         .expect("Failed to mount /tmp");
         self.mount_at("/proc", procfs::new_procfs())
@@ -94,7 +98,10 @@ impl BootVfs {
             "/sys",
             memfs::ramfs::new_ramfs_with_name_and_flags(
                 "sysfs",
-                ST_NOSUID | ST_NODEV | ST_NOEXEC | ST_RELATIME,
+                StatFsFlags::NOSUID
+                    | StatFsFlags::NODEV
+                    | StatFsFlags::NOEXEC
+                    | StatFsFlags::RELATIME,
             ),
         )
         .expect("Failed to mount sysfs");

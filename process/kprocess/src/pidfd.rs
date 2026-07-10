@@ -8,7 +8,7 @@ use core::task::Context;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ktask::KtaskRef;
-use kvfs::{AnonInodeFs, FMode, FileOperations, VfsFile, VfsInode};
+use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
 
 use crate::{Pid, Process, Tid, lookup};
 
@@ -29,6 +29,7 @@ impl PidFd {
 
     /// Create the anonymous-inode file used by `pidfd_open`.
     pub fn new_file(process: &Arc<Process>, open_flags: u32) -> KResult<Arc<VfsFile>> {
+        let open_flags = OpenFlags::from_bits(open_flags).ok_or(KError::InvalidInput)?;
         AnonInodeFs::global().get_file(
             "[pidfd]",
             Arc::new(PidfdFops),

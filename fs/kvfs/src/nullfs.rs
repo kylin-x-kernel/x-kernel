@@ -10,8 +10,8 @@ use core::time::Duration;
 use crate::{
     Dentry, DirContext, FileDirOperations, FileOperations, GetattrQueryFlags, GetattrRequestMask,
     InodeDirOperations, InodeLookupFlags, InodeOperations, Metadata, MetadataUpdate, MountIdmap,
-    NodeFlags, NodePermission, NodeType, ST_NODEV, ST_NOEXEC, StatFs, SuperBlock,
-    SuperBlockOperations, Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
+    NodeFlags, NodePermission, NodeType, StatFs, StatFsFlags, SuperBlock, SuperBlockOperations,
+    Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
     libfs::{generic_read_dir, noop_fsync, simple_statfs_with_flags},
     path::{DOT, DOTDOT},
 };
@@ -20,7 +20,7 @@ const NULLFS_NAME: &str = "nullfs";
 const NULLFS_MAGIC: u32 = 0x4E55_4C4C;
 const NULLFS_ROOT_INO: u64 = 1;
 const NULLFS_BLOCK_SIZE: u64 = 4096;
-const NULLFS_MOUNT_FLAGS: u32 = ST_NODEV | ST_NOEXEC;
+const NULLFS_MOUNT_FLAGS: StatFsFlags = StatFsFlags::NODEV.union(StatFsFlags::NOEXEC);
 
 /// Creates the single-purpose filesystem used as the initial namespace root.
 pub(crate) fn new_superblock() -> Arc<SuperBlock> {
