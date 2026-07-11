@@ -225,7 +225,8 @@ smoltcp = { version = "=0.13.0", default-features = false }
 smccc = "0.2.3"
 strum = { version = "0.27", default-features = false, features = ["derive"] }
 virtio-drivers = { version = "0.13.1", default-features = false, package = "kvirtiodrivers" }
-x86_64 = { version = "0.15.2", features = ["instructions"] }
+# Pinned: 0.15.5's `nightly`->`step_trait` (pulled in by `x2apic`) needs Step methods absent from rustc 1.95.0; bump after nightly-2026-07-10+.
+x86_64 = { version = "=0.15.4", features = ["instructions"] }
 ktracepoint = "0.5"
 static-keys = "0.8"
 downcast-rs = { version = "2.0", default-features = false, features = ["sync"] }
