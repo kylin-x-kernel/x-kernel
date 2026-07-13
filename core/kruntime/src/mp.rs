@@ -181,7 +181,7 @@ mod tests_tlb_shootdown {
             let mut affinity = KCpuMask::new();
             affinity.set(remote_cpu, true);
 
-            let task = ktask::spawn_raw(
+            let task = ktask::TaskInner::new_kthread(
                 move || {
                     TASK_CPU.store(khal::percpu::this_cpu_id().as_usize(), Ordering::Release);
                     if let Some(t) = ktask::current_may_uninit() {
@@ -190,8 +190,10 @@ mod tests_tlb_shootdown {
                 },
                 "test_ctx_mask".into(),
                 0x2000,
-            );
+            )
+            .expect("test kernel thread identity allocation should succeed");
             task.set_cpumask(affinity);
+            let task = ktask::spawn_task(task);
 
             task.join();
             assert_eq!(TASK_CPU.load(Ordering::Acquire), remote_cpu);
