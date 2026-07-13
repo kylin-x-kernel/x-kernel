@@ -16,15 +16,17 @@ use crate::{
 /// Interrupt trigger mode.
 ///
 /// This is intentionally OS-neutral. Host kernels convert their own trigger
-/// representation into this enum at discovery time.
+/// representation into this enum at discovery time. `Unknown` carries the raw
+/// flag bits the host preserved (0 when truly unknown) so downstream layers
+/// never lose firmware-described trigger information.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IrqTriggerMode {
+pub enum IrqTrigger {
     EdgeRising,
     EdgeFalling,
     LevelHigh,
     LevelLow,
-    /// Trigger mode not described by firmware.
-    Unspecified,
+    /// Trigger mode not described by firmware; carries raw flag bits (0 if none).
+    Unknown(u32),
 }
 
 /// The interrupt controller family that owns an IRQ line.
@@ -55,7 +57,7 @@ pub struct IrqResource {
     /// IRQ number visible to the OS (virtual IRQ after domain translation).
     pub number: usize,
     /// Trigger mode.
-    pub trigger: IrqTriggerMode,
+    pub trigger: IrqTrigger,
     /// Controller family that owns this IRQ, if known.
     pub controller: Option<IrqController>,
     /// Domain this IRQ belongs to, if the host partitions IRQ number space.
@@ -69,7 +71,7 @@ pub struct IrqResource {
 
 impl IrqResource {
     /// Construct a minimal IRQ resource with just a number and trigger.
-    pub const fn new(number: usize, trigger: IrqTriggerMode) -> Self {
+    pub const fn new(number: usize, trigger: IrqTrigger) -> Self {
         Self {
             number,
             trigger,
@@ -115,7 +117,7 @@ pub struct IrqRouteDesc {
     /// Hardware IRQ number as discovered (e.g. GIC SPI number, PLIC source).
     pub hwirq: usize,
     /// Trigger mode.
-    pub trigger: IrqTriggerMode,
+    pub trigger: IrqTrigger,
     /// Controller family that owns this route.
     pub controller: IrqController,
     /// Domain id, when the host partitions IRQ number space.

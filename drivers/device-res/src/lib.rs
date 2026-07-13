@@ -103,7 +103,7 @@ mod tests {
 
     use crate::{
         DeviceResource, DmaAllocation, DmaCoherent, DmaOp, DmaSpec, Io, Irq, IrqEvent, IrqHandler,
-        IrqOp, IrqResource, IrqTriggerMode, MmioMapping, MmioOp, MmioRegion, ResError, ResResult,
+        IrqOp, IrqResource, IrqTrigger, MmioMapping, MmioOp, MmioRegion, ResError, ResResult,
         ResourceDesc, devm_alloc_coherent, devm_iomap, devm_request_irq, provider_installed,
         reset_providers, set_dma_provider, set_irq_provider, set_mmio_provider, try_dma_provider,
         try_irq_provider, try_mmio_provider,
@@ -341,7 +341,7 @@ mod tests {
         );
         assert_eq!(
             Irq::request(
-                IrqResource::new(1, IrqTriggerMode::EdgeRising),
+                IrqResource::new(1, IrqTrigger::EdgeRising),
                 Arc::new(|| IrqEvent::HANDLED),
             )
             .unwrap_err(),
@@ -388,7 +388,7 @@ mod tests {
         let _serial = TEST_SERIAL.lock();
         let _g = ProviderGuard::new();
 
-        let irq = IrqResource::new(7, IrqTriggerMode::LevelHigh);
+        let irq = IrqResource::new(7, IrqTrigger::LevelHigh);
         let spec = DmaSpec::new(24, 8);
 
         let guard = Irq::request(irq, Arc::new(|| IrqEvent::HANDLED)).unwrap();
@@ -460,7 +460,7 @@ mod tests {
         assert_eq!(
             devm_request_irq(
                 &device,
-                IrqResource::new(9, IrqTriggerMode::EdgeRising),
+                IrqResource::new(9, IrqTrigger::EdgeRising),
                 Arc::new(|| IrqEvent::NOT_HANDLED),
             )
             .unwrap_err(),

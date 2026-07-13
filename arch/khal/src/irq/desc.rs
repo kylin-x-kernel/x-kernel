@@ -5,6 +5,12 @@
 //! OS-visible IRQ descriptors.
 
 use bitflags::bitflags;
+// The trigger / controller / domain vocabulary is owned by the OS-agnostic
+// `device_res` crate and re-exported here so `khal::irq` remains the single
+// import path for IRQ types. The composite `IrqDesc` and the arch-core state
+// it carries (polarity / source / affinity / flags / the virq namespace) stay
+// in `khal`.
+pub use device_res::{IrqController, IrqDomainId, IrqEvent, IrqHandler, IrqTrigger};
 
 /// OS-visible logical interrupt number managed by `khal::irq`.
 pub type Virq = usize;
@@ -21,23 +27,9 @@ pub enum IrqSource {
     Unknown,
 }
 
-/// IRQ domain identifier used to distinguish logical interrupt namespaces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct IrqDomainId(pub u32);
-
 pub const GIC_ROOT_DOMAIN: IrqDomainId = IrqDomainId(1);
 pub const PLIC_ROOT_DOMAIN: IrqDomainId = IrqDomainId(2);
 pub const IO_APIC_DOMAIN: IrqDomainId = IrqDomainId(3);
-
-/// Interrupt controller family associated with an IRQ resource.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IrqControllerKind {
-    Gic,
-    IoApic,
-    Plic,
-    LoongArchExtioi,
-    Unknown,
-}
 
 /// Signal polarity described for an interrupt resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,29 +39,12 @@ pub enum IrqPolarity {
     Unknown,
 }
 
-/// Trigger semantics described for an interrupt resource.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IrqTrigger {
-    EdgeRising,
-    EdgeFalling,
-    LevelHigh,
-    LevelLow,
-    Unknown(u32),
-}
-
-impl IrqTrigger {
-    /// Returns whether the interrupt trigger is edge-triggered.
-    pub const fn is_edge(self) -> bool {
-        matches!(self, Self::EdgeRising | Self::EdgeFalling)
-    }
-
-    /// Returns the implied signal polarity when one is encoded by the trigger.
-    pub const fn polarity(self) -> IrqPolarity {
-        match self {
-            Self::EdgeRising | Self::LevelHigh => IrqPolarity::High,
-            Self::EdgeFalling | Self::LevelLow => IrqPolarity::Low,
-            Self::Unknown(_) => IrqPolarity::Unknown,
-        }
+/// Returns the implied signal polarity when one is encoded by the trigger.
+pub const fn trigger_polarity(trigger: IrqTrigger) -> IrqPolarity {
+    match trigger {
+        IrqTrigger::EdgeRising | IrqTrigger::LevelHigh => IrqPolarity::High,
+        IrqTrigger::EdgeFalling | IrqTrigger::LevelLow => IrqPolarity::Low,
+        IrqTrigger::Unknown(_) => IrqPolarity::Unknown,
     }
 }
 
@@ -101,7 +76,7 @@ pub struct IrqDesc {
     pub trigger: IrqTrigger,
     pub polarity: IrqPolarity,
     pub source: IrqSource,
-    pub controller: IrqControllerKind,
+    pub controller: IrqController,
     pub domain: Option<IrqDomainId>,
     pub affinity: IrqAffinity,
     pub flags: IrqFlags,
@@ -114,9 +89,9 @@ impl IrqDesc {
             virq: None,
             hwirq,
             trigger,
-            polarity: trigger.polarity(),
+            polarity: trigger_polarity(trigger),
             source: IrqSource::Unknown,
-            controller: IrqControllerKind::Unknown,
+            controller: IrqController::Unknown,
             domain: None,
             affinity: IrqAffinity::Any,
             flags: IrqFlags::empty(),
@@ -136,7 +111,7 @@ impl IrqDesc {
             trigger: IrqTrigger::Unknown(0),
             polarity: IrqPolarity::Unknown,
             source: IrqSource::Unknown,
-            controller: IrqControllerKind::Unknown,
+            controller: IrqController::Unknown,
             domain: None,
             affinity: IrqAffinity::Any,
             flags: IrqFlags::empty(),
@@ -149,7 +124,7 @@ impl IrqDesc {
     }
 
     /// Marks which controller family owns this descriptor.
-    pub const fn with_controller(self, controller: IrqControllerKind) -> Self {
+    pub const fn with_controller(self, controller: IrqController) -> Self {
         Self { controller, ..self }
     }
 
@@ -213,7 +188,7 @@ impl IrqDesc {
                 _ => newer.source,
             },
             controller: match newer.controller {
-                IrqControllerKind::Unknown => self.controller,
+                IrqController::Unknown => self.controller,
                 _ => newer.controller,
             },
             domain: newer.domain.or(self.domain),
@@ -228,7 +203,7 @@ impl IrqDesc {
 
 pub const fn gic_irq_desc(hwirq: Hwirq, trigger: IrqTrigger) -> IrqDesc {
     IrqDesc::new(hwirq, trigger)
-        .with_controller(IrqControllerKind::Gic)
+        .with_controller(IrqController::Gic)
         .with_domain(GIC_ROOT_DOMAIN)
 }
 
@@ -242,13 +217,13 @@ pub const fn gic_edge_irq_desc(hwirq: Hwirq) -> IrqDesc {
 
 pub const fn plic_irq_desc(hwirq: Hwirq) -> IrqDesc {
     IrqDesc::from_hwirq(hwirq)
-        .with_controller(IrqControllerKind::Plic)
+        .with_controller(IrqController::Plic)
         .with_domain(PLIC_ROOT_DOMAIN)
 }
 
 pub const fn io_apic_irq_desc(hwirq: Hwirq) -> IrqDesc {
     IrqDesc::from_hwirq(hwirq)
-        .with_controller(IrqControllerKind::IoApic)
+        .with_controller(IrqController::IoApic)
         .with_domain(IO_APIC_DOMAIN)
 }
 

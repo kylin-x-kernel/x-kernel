@@ -5,7 +5,7 @@
 //! VirtIO PCI transport integration.
 
 #[cfg(not(target_arch = "x86_64"))]
-use device_res::{IrqController, IrqRouteDesc, IrqTriggerMode, irq_provider};
+use device_res::{IrqController, IrqRouteDesc, IrqTrigger, irq_provider};
 use driver_base::DeviceKind;
 use pci::PciConfigAccess;
 #[cfg(not(target_arch = "x86_64"))]
@@ -266,13 +266,13 @@ pub fn probe_pci_device<H: VirtIoHal, C: ConfigurationAccess>(
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-fn fw_trigger_to_mode(t: InterruptTrigger) -> IrqTriggerMode {
+fn fw_trigger_to_kind(t: InterruptTrigger) -> IrqTrigger {
     match t {
-        InterruptTrigger::EdgeRising => IrqTriggerMode::EdgeRising,
-        InterruptTrigger::EdgeFalling => IrqTriggerMode::EdgeFalling,
-        InterruptTrigger::LevelHigh => IrqTriggerMode::LevelHigh,
-        InterruptTrigger::LevelLow => IrqTriggerMode::LevelLow,
-        InterruptTrigger::Unknown(_) => IrqTriggerMode::Unspecified,
+        InterruptTrigger::EdgeRising => IrqTrigger::EdgeRising,
+        InterruptTrigger::EdgeFalling => IrqTrigger::EdgeFalling,
+        InterruptTrigger::LevelHigh => IrqTrigger::LevelHigh,
+        InterruptTrigger::LevelLow => IrqTrigger::LevelLow,
+        InterruptTrigger::Unknown(f) => IrqTrigger::Unknown(f),
     }
 }
 
@@ -294,7 +294,7 @@ fn legacy_irq_for_bdf(config: &PciConfigAccess, bdf: DeviceFunction) -> Option<u
     if let Some(route) = legacy_interrupt_route(config, bdf) {
         let desc = IrqRouteDesc {
             hwirq: route.irq,
-            trigger: fw_trigger_to_mode(route.trigger),
+            trigger: fw_trigger_to_kind(route.trigger),
             controller: fw_controller_to_kind(route.controller),
             domain: None,
         };
@@ -316,7 +316,7 @@ fn legacy_irq_for_bdf(config: &PciConfigAccess, bdf: DeviceFunction) -> Option<u
         target_arch = "aarch64" => {
             let desc = IrqRouteDesc {
                 hwirq: 0x23 + (bdf.device & 3) as usize,
-                trigger: IrqTriggerMode::LevelHigh,
+                trigger: IrqTrigger::LevelHigh,
                 controller: IrqController::Gic,
                 domain: None,
             };
@@ -325,7 +325,7 @@ fn legacy_irq_for_bdf(config: &PciConfigAccess, bdf: DeviceFunction) -> Option<u
         target_arch = "riscv64" => {
             let desc = IrqRouteDesc {
                 hwirq: 0x20 + (bdf.device & 3) as usize,
-                trigger: IrqTriggerMode::LevelHigh,
+                trigger: IrqTrigger::LevelHigh,
                 controller: IrqController::Plic,
                 domain: None,
             };

@@ -19,73 +19,19 @@ use core::{alloc::Layout, ptr::NonNull};
 
 use device_res::{
     DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, IrqController, IrqHandler, IrqOp,
-    IrqResource, IrqRouteDesc, IrqTriggerMode, MmioMapping, MmioOp, MmioRegion, ResError,
-    ResResult,
+    IrqResource, IrqRouteDesc, MmioMapping, MmioOp, MmioRegion, ResError, ResResult,
 };
 use driver_base::{DriverError, DriverResult};
 use kdevice::DeviceObject;
-use kspin::SpinNoIrq;
 
 /// x-kernel implementation of the OS-agnostic resource provider.
 struct HostResourceProvider;
 
 static HOST_PROVIDER: HostResourceProvider = HostResourceProvider;
 
-/// Number of interrupt handlers that can be registered through the resource
-/// provider at once. `khal` dispatches the regular IRQ handler as a bare
-/// `fn()` carrying no identity, so each registration is bridged to a distinct
-/// trampoline that recovers a context-carrying [`IrqHandler`] from this table.
-const MAX_IRQ_SLOTS: usize = 64;
-
-/// A single bridged interrupt registration.
-struct IrqSlot {
-    state: SpinNoIrq<Option<IrqSlotState>>,
-}
-
-struct IrqSlotState {
-    virq: usize,
-    handler: Arc<dyn IrqHandler>,
-}
-
-impl IrqSlot {
-    const fn new() -> Self {
-        Self {
-            state: SpinNoIrq::new(None),
-        }
-    }
-}
-
-static IRQ_SLOTS: [IrqSlot; MAX_IRQ_SLOTS] = [const { IrqSlot::new() }; MAX_IRQ_SLOTS];
-
-/// Invoke the context handler bound to `slot`, if any.
-///
-/// The owning `Arc` is cloned out from under the slot lock so the lock is not
-/// held while the (potentially re-entrant) handler runs.
-fn dispatch_slot(slot: usize) {
-    let handler = IRQ_SLOTS[slot]
-        .state
-        .lock()
-        .as_ref()
-        .map(|state| state.handler.clone());
-    if let Some(handler) = handler {
-        let _ = handler.handle();
-    }
-}
-
-/// Distinct `fn()` trampolines, one per slot, each forwarding to its slot.
-macro_rules! irq_trampolines {
-    ($($slot:literal),* $(,)?) => {
-        [ $( || dispatch_slot($slot) ),* ]
-    };
-}
-
-#[rustfmt::skip]
-static IRQ_TRAMPOLINES: [fn(); MAX_IRQ_SLOTS] = irq_trampolines!(
-     0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
-    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
-    32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
-    48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
-);
+// Device IRQ handlers are registered with `khal::irq` as `Arc<dyn IrqHandler>`
+// directly — the Rust-native counterpart of Linux's `dev_id`. No slot table,
+// trampoline, or wrapper closure is needed.
 
 impl MmioOp for HostResourceProvider {
     fn map_mmio(&self, region: MmioRegion, name: &'static str) -> ResResult<MmioMapping> {
@@ -173,35 +119,17 @@ impl DmaOp for HostResourceProvider {
 
 impl IrqOp for HostResourceProvider {
     fn request_irq(&self, irq: IrqResource, handler: Arc<dyn IrqHandler>) -> ResResult<()> {
-        for (slot, trampoline) in IRQ_SLOTS.iter().zip(IRQ_TRAMPOLINES.iter()) {
-            let mut guard = slot.state.lock();
-            if guard.is_some() {
-                continue;
-            }
-            // Store the handler before enabling the line so an interrupt that
-            // fires immediately after `register` finds its handler in place.
-            *guard = Some(IrqSlotState {
-                virq: irq.number,
-                handler,
-            });
-            if khal::irq::register(irq.number, *trampoline) {
-                return Ok(());
-            }
-            *guard = None;
-            return Err(ResError::Busy);
+        // `khal::irq::register` stores the `Arc<dyn IrqHandler>` directly —
+        // no wrapper closure, no side table, no trampoline.
+        if khal::irq::register(irq.number, handler) {
+            Ok(())
+        } else {
+            Err(ResError::Busy)
         }
-        Err(ResError::NoMemory)
     }
 
     fn release_irq(&self, irq: IrqResource) {
-        for slot in IRQ_SLOTS.iter() {
-            let mut guard = slot.state.lock();
-            if guard.as_ref().is_some_and(|state| state.virq == irq.number) {
-                let _ = khal::irq::unregister(irq.number);
-                *guard = None;
-                return;
-            }
-        }
+        let _ = khal::irq::unregister(irq.number);
     }
 
     fn set_irq_enabled(&self, irq: IrqResource, enabled: bool) {
@@ -209,21 +137,20 @@ impl IrqOp for HostResourceProvider {
     }
 
     fn map_irq(&self, route: IrqRouteDesc) -> ResResult<IrqResource> {
-        let trigger = map_khal_trigger(route.trigger);
-        let desc = match route.controller {
-            IrqController::Gic => khal::irq::IrqDesc::new(route.hwirq, trigger)
-                .with_controller(khal::irq::IrqControllerKind::Gic)
-                .with_domain(khal::irq::GIC_ROOT_DOMAIN),
-            IrqController::Plic => khal::irq::IrqDesc::new(route.hwirq, trigger)
-                .with_controller(khal::irq::IrqControllerKind::Plic)
-                .with_domain(khal::irq::PLIC_ROOT_DOMAIN),
-            IrqController::IoApic => khal::irq::IrqDesc::new(route.hwirq, trigger)
-                .with_controller(khal::irq::IrqControllerKind::IoApic)
-                .with_domain(khal::irq::IO_APIC_DOMAIN),
-            IrqController::LoongArchExtioi => khal::irq::IrqDesc::new(route.hwirq, trigger)
-                .with_controller(khal::irq::IrqControllerKind::LoongArchExtioi),
-            IrqController::Unknown => khal::irq::IrqDesc::new(route.hwirq, trigger),
+        // `route.trigger` / `route.controller` already use the shared `device_res`
+        // vocabulary that `khal::irq` re-exports, so no translation is needed —
+        // only the controller → domain wiring.
+        let domain = match route.controller {
+            IrqController::Gic => Some(khal::irq::GIC_ROOT_DOMAIN),
+            IrqController::Plic => Some(khal::irq::PLIC_ROOT_DOMAIN),
+            IrqController::IoApic => Some(khal::irq::IO_APIC_DOMAIN),
+            IrqController::LoongArchExtioi | IrqController::Unknown => None,
         };
+        let mut desc =
+            khal::irq::IrqDesc::new(route.hwirq, route.trigger).with_controller(route.controller);
+        if let Some(domain) = domain {
+            desc = desc.with_domain(domain);
+        }
         let virq = khal::irq::map(desc);
         Ok(IrqResource::new(virq, route.trigger)
             .with_controller(route.controller)
@@ -266,17 +193,6 @@ fn map_dma_direction(d: DmaDirection) -> kdma::DmaDirection {
         DmaDirection::DriverToDevice => kdma::DmaDirection::DriverToDevice,
         DmaDirection::DeviceToDriver => kdma::DmaDirection::DeviceToDriver,
         DmaDirection::Bidirectional => kdma::DmaDirection::Bidirectional,
-    }
-}
-
-/// Translate a device-res IRQ trigger mode into the matching `khal` trigger.
-fn map_khal_trigger(t: IrqTriggerMode) -> khal::irq::IrqTrigger {
-    match t {
-        IrqTriggerMode::EdgeRising => khal::irq::IrqTrigger::EdgeRising,
-        IrqTriggerMode::EdgeFalling => khal::irq::IrqTrigger::EdgeFalling,
-        IrqTriggerMode::LevelHigh => khal::irq::IrqTrigger::LevelHigh,
-        IrqTriggerMode::LevelLow => khal::irq::IrqTrigger::LevelLow,
-        IrqTriggerMode::Unspecified => khal::irq::IrqTrigger::Unknown(0),
     }
 }
 

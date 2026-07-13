@@ -33,7 +33,7 @@ firmware (DT / ACPI) / PCI config space
 │      (raw MMIO register read)│
 └──────────────┬──────────────┘
                │
-               │ validated mappings, IRQ trampolines,
+               │ validated mappings, IRQ handler closures,
                │ DMA buffers
                v
     khal / kdma / memspace / driver crates
@@ -331,8 +331,8 @@ unsafe impl IxgbeHal for IxgbeHalImpl { ... }
 1. **MMIO vaddr 生命周期**：`devm_iomap` 返回的 `NonNull<u8>` 仅在 `DeviceObject` 存活期间有效，probe 失败或设备 remove 时 `iounmap` 释放。
 2. **DMA buffer 独占所有权**：`devm_alloc_coherent` 返回的 `DmaAllocation` 由 devres 独占持有，无公开 clone/复制接口。
 3. **DMA alloc/free 配对**：`alloc_coherent` 和 `free_coherent` 使用相同的 `DmaSpec` 重建 `Layout`，保证 size/align 一致。
-4. **IRQ slot 注册顺序**：先存储 handler 到 slot，再 `khal::irq::register` trampoline；`register` 失败时回滚清空 slot。
-5. **IRQ slot 释放顺序**：先 `khal::irq::unregister` trampoline，再清空 slot，保证中断到达时要么找到有效 handler，要么 slot 为空。
+4. **IRQ handler 原子注册**：`request_irq` 把捕获了 `Arc<dyn IrqHandler>` 的闭包交给 `khal::irq::register`，由后者原子地装入；不存在"分发路径已激活但 handler 尚未就绪"的窗口。
+5. **IRQ handler 释放**：`release_irq` 调用 `khal::irq::unregister`，丢弃存储的闭包并连带释放其捕获的 `Arc<dyn IrqHandler>`。
 6. **VirtIO DMA 清零**：`dma_alloc` 分配后用 `write_bytes(0)` 清零，防止设备读到内核残留数据。
 7. **VirtIO share/unshare 配对**：`share` 和 `unshare` 成对调用，方向一致，由 `virtio` crate 传输层保证。
 8. **PCI BAR 零地址拒绝**：枚举阶段分配后仍为 0 的 BAR 被跳过，不注册为有效资源。
@@ -360,7 +360,7 @@ unsafe impl IxgbeHal for IxgbeHalImpl { ... }
 |------|----------|----------|----------|----------|
 | T-01 | firmware 提供非法物理地址，MMIO 映射覆盖内核关键数据结构 | 高 | DT/ACPI 描述恶意物理地址且 `memspace::iomap_device` 未拒绝 | `iomap_device` 校验地址是否在平台 MMIO 窗口内；非法范围返回 `InvalidRange` |
 | T-02 | PCI BAR 分配后仍为零地址导致 page zero 映射 | 高 | BAR 分配器耗尽或分配范围未初始化，且 BAR 配置逻辑未拒绝零地址 | `configure_pci_device_if_needed` 分配失败返回 `NoMemory`；枚举 pass 3 跳过 `address == 0` 的 BAR |
-| T-03 | IRQ slot 注册与中断到达竞态，handler 在未就绪时被调用 | 高 | 中断在 `register` trampoline 绑定后、handler 写入 slot 前到达 | handler 在 trampoline 绑定前写入 slot；`register` 失败时回滚清空 slot |
+| T-03 | IRQ 注册与中断到达竞态，handler 在未就绪时被调用 | 高 | 中断在 handler 装入前到达该 virq | `khal::irq::register` 原子地装入闭包 handler，分发只会在装入完成后命中它；无中间 slot/trampoline 窗口 |
 | T-04 | DMA double-free 导致内存破坏 | 高 | `free_coherent` 被多次调用或 layout 不匹配 | `DmaAllocation` 无 Clone，devres 独占所有权；`alloc`/`free` 使用相同 `DmaSpec` 重建 `Layout` |
 | T-05 | VirtIO 设备通过恶意 DMA 描述符访问非授权内核内存 | 高 | 恶意或故障 VirtIO 设备构造错误描述符链 | 当前无 IOMMU 隔离单个 VirtIO 设备；`dma_alloc` 清零防止信息泄露；`share`/`unshare` 通过 `kdma` 管理 |
 | T-06 | firmware 伪造设备 compatible 导致错误驱动绑定 | 中 | DT 提供虚假 compatible string 且恰好命中已注册的 `FirmwareMatchSpec` | 驱动 probe 会因硬件无响应而失败，设备进入 unclaimed 列表 |
@@ -388,7 +388,7 @@ unsafe impl IxgbeHal for IxgbeHalImpl { ... }
 | F-03 | 单个设备 probe 失败 | 驱动 `probe_device` 返回错误 | 该设备不可用 | 同总线其他设备正常激活 | 4 | probe 错误记录 warn 并进入 unclaimed 列表，不阻断后续设备 |
 | F-04 | PCI BAR 分配器未初始化 | `pci_bar_allocation_range()` 返回 None 且设备有未分配 MEM BAR | 该 PCI 设备被跳过 | 单个 PCI 设备不可用 | 3 | `configure_pci_device_if_needed` 返回 `NoMemory`，设备跳过 |
 | F-05 | VirtIO MMIO 探测返回空设备 | MMIO 区域不存在 VirtIO 设备或 MagicValue 不匹配 | 该 MMIO 区域跳过 | 不影响其他 platform 设备 | 4 | `probe_mmio_device` 返回 None → `virtio_mmio_registration` 返回 None，记录 trace 后跳过 |
-| F-06 | IRQ trampoline 未注册 | slot 分配失败（64 槽位满） | 设备无法接收中断 | 该设备功能不可用或降级到轮询 | 3 | `request_irq` 返回 `NoMemory` 或 `Busy`，驱动 probe 返回错误 |
+| F-06 | IRQ handler 注册失败 | 该 virq 已有 handler（`khal::irq::register` 返回 false） | 设备无法接收中断 | 该设备功能不可用或降级到轮询 | 3 | `request_irq` 返回 `Busy`，驱动 probe 返回错误 |
 | F-07 | PCI host bridge adoption 失败 | platform 总线未注册或 `adopt_active_device` 错误 | PCI 设备无 host bridge parent | PCI 端点仍被枚举但设备树不完整 | 3 | adoption 失败记录 warn，枚举继续（parentless 布局） |
 | F-08 | 静态设备 MMIO 映射失败 | `kbuild_config` 地址非法或硬件不存在 | 该静态设备不可用 | 同总线其他设备正常 | 3 | `iomap_first_mmio` 返回错误，probe 失败 |
 | F-09 | 驱动注册时 bus type matcher 未就绪 | `register_bus_type` 在 driver 注册后调用 | 驱动匹配不到设备 | 设备进入 unclaimed 列表 | 2 | `default_bus_manager` 先注册 bus type matcher，再注册 bus backend，再在 `DeviceManager::new` 中注册 driver |
@@ -443,8 +443,8 @@ trace 日志会输出 firmware 遍历的 compatible string 和 VirtIO MMIO 探�
 - 每个 `unsafe` 块均有 `SAFETY:` 注释。
 - 新增 MMIO 映射路径使用 `devm_iomap` 或 `iomap_mmio`（内部校验物理地址合法性）。
 - 新增 DMA 分配路径通过 `devm_alloc_coherent` 或 `kdma::allocate_dma_memory`，且 `free` 时 layout 一致。
-- 新增 IRQ 注册遵循「先写 slot → 再 bind trampoline → 失败回滚」顺序。
-- 新增 IRQ 释放遵循「先 unbind trampoline → 再清空 slot」顺序。
+- 新增 IRQ 注册通过 `khal::irq::register(virq, move || handler.handle())` 把闭包 handler 原子装入；不再维护 slot 表或 trampoline。
+- 新增 IRQ 释放通过 `khal::irq::unregister(virq)`，由 `khal::irq` 丢弃闭包并释放捕获的 handler。
 - 新增总线后端实现 `BusBackend` 时，`enumerate` 中对每个设备的错误不应阻断其他设备枚举。
 - 新增 PCI device ID 到 VirtIO 类型的映射在 `pci_device_id_to_virtio_type` 中添加。
 - 新增 firmware compatible 匹配规格在 `firmware_specs.rs` 中声明，并注册对应的 platform driver。

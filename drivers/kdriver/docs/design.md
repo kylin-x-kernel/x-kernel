@@ -258,26 +258,29 @@ VirtIO 驱动在 PCI 和 MMIO 两条传输路径上共享同一激活入口：
 `resource.rs` 提供 device-managed 资源分配，绑定到 `DeviceObject` 的 devres 清理链表：
 
 - **`devm_iomap`**：通过 `memspace::iomap_device` 映射 MMIO，probe 失败或设备 remove 时自动 `iounmap`。
-- **`devm_request_irq`**：注册中断处理函数到 `khal::irq`，通过 IRQ slot table 桥接上下文 handler。
+- **`devm_request_irq`**：注册中断处理函数到 `khal::irq`，handler 以捕获了 `Arc<dyn IrqHandler>` 的闭包形式直接注册（Linux `dev_id` 风格），无需中间 slot 表。
 - **`devm_alloc_coherent`**：通过 `kdma::allocate_dma_memory` 分配一致性 DMA 缓冲区，release 时调用 `kdma::deallocate_dma_memory`。
 
 释放顺序与申请顺序相反（LIFO），避免资源依赖错乱。
 
 ### IRQ 分发机制
 
-x-kernel 的 `khal::irq::register` 只接受裸 `fn()` 函数指针，不支持上下文传递。
-`HostResourceProvider` 通过以下方案桥接：
+`khal::irq::register` 接受任意 `Fn() + Send + Sync` 闭包，内部擦除为
+`Arc<dyn Fn() + Send + Sync>` 存储。`HostResourceProvider` 借此把设备 handler 直接
+注册为一个捕获了 `Arc<dyn IrqHandler>` 的闭包——这是 Linux `dev_id` 的 Rust 原生对应物
+（闭包即"函数指针 + 私有上下文"的合体），无需任何 slot 表或 trampoline：
 
-1. 预分配 64 个 `IrqSlot`，每个 slot 持有一个 `SpinNoIrq<Option<IrqSlotState>>`。
-2. 编译期通过宏生成 64 个互不相同的 `fn()` trampoline，每个 trampoline 转发到对应 slot 的 `dispatch_slot`。
-3. 注册 IRQ 时：先在线程上下文中把 `Arc<dyn IrqHandler>` 写入空闲 slot，再调用 `khal::irq::register` 绑定 trampoline。
-4. 中断到达时：trampoline 被调用 → 从对应 slot 取出 handler → 调用 `handler.handle()`。
+1. `request_irq`：`khal::irq::register(irq.number, move || handler.handle())`，
+   闭包直接拥有该 `Arc<dyn IrqHandler>`。
+2. 中断到达时：`khal::irq` 调用存储的闭包 → 执行 `handler.handle()`。
+3. `release_irq`：`khal::irq::unregister` 丢弃存储的 `Arc<dyn Fn()>`，
+   连带释放其捕获的 `Arc<dyn IrqHandler>`。
 
 ## 并发模型
 
 - `DeviceManager::bus_mgr` 使用 `SpinNoPreempt`：总线枚举、重扫描、quiesce、remove 操作在 process context 中执行，互斥访问。
 - `EnumerationContext` 自身没有 interior locking：它是总线后端和 probe 之间的单线程桥梁，仅在 `bus_mgr` 锁内被填充。
-- `IrqSlot::state` 使用 `SpinNoIrq`：中断分发和注册路径可能并发，用关中断锁保护。
+- IRQ handler 的并发与生命周期由 `khal::irq` 单一掌握（`register`/`unregister`），`kdriver` 不再维护独立的 slot 锁。
 - `PCI_BAR_ALLOCATOR` 使用 `SpinNoPreempt`：BAR 分配仅在 process context（枚举或 probe）中发生。
 - `kdevice` 共享核心的内部锁由 `kdevice` crate 自行管理，`kdriver` 不直接持有其锁。
 
@@ -349,30 +352,30 @@ x-kernel 的 `khal::irq::register` 只接受裸 `fn()` 函数指针，不支持�
 该方案减少了描述符数量，但要求匹配器同时比较 bus type 和 VirtIO type，
 且 `probe_device` 入口需要分支处理 PCI 和 MMIO 两种传输初始化逻辑。
 
-### IRQ 静态槽位而非动态分配
+### IRQ handler 以闭包直接注册，而非 slot + trampoline
 
-**选择**：64 个 slot 的静态数组，编译期生成对应 trampoline。
+**选择**：`khal::irq` 把 handler 存为 `Arc<dyn Fn() + Send + Sync>`，
+`HostResourceProvider` 注册一个捕获了 `Arc<dyn IrqHandler>` 的闭包。
 
-**Trade-off**：硬编码上限（64）限制了同时使用中断的设备数量，
-但换取了以下好处：
+**Trade-off**：每次 `register` 需要一次 `Arc` 分配（闭包 + 捕获的 handler 引用计数），
+但换取以下好处：
 
-- IRQ 注册路径零动态内存分配（避免在 `request_irq` 中调用 `alloc`，
-  后者可能在中断上下文的调用链中被触发）；
-- trampoline 函数指针在编译期确定，无需运行时 JIT 或 thunk 分配；
-- slot 的 `SpinNoIrq` 保护足够轻量，满足中断上下文的锁约束。
+- 设备 handler 自带上下文，无需中间 slot 表或按 slot 生成 trampoline，
+  也消除了槽位数量上限；
+- 注册/释放语义由 `khal::irq` 单一掌握（`register` 原子地装入 handler，
+  `unregister` 丢弃闭包即释放 handler），不存在"trampoline 已绑定但 slot 尚空"的竞态窗口；
+- 代码量显著减少，`request_irq`/`release_irq` 各仅数行。
 
-**拒绝的方案**：动态 `Vec<IrqSlot>` + 运行时生成 trampoline。
-该方案消除了设备数量上限，但引入了 IRQ 路径的内存分配、
-更复杂的并发控制（slot 扩容时需要迁移 handler），
-且运行时生成可执行代码在当前 `#![no_std]` 环境中不可行。
-64 个 slot 覆盖了当前所有 VirtIO 设备类型 + 平台设备的中断需求。
+**拒绝的方案**：预分配静态 `IrqSlot` 数组 + 编译期为每个 slot 生成独立 `fn()` trampoline
+（早期实现）。该方案注册路径零分配，但需要维护 slot 表与 trampoline 的身份映射、
+硬编码设备上限，并承担"先写 slot 再绑 trampoline"的注册/释放顺序约束。
 
 ## Drop / 资源释放
 
 - devres 资源在 `DeviceObject` 的 remove 路径中按 LIFO 顺序释放。
 - `PciBackend` 不持有需在 drop 中释放的持久资源（`PciBus` 在 `enumerate` 返回时释放）。
 - `PlatformBackend` 仅持有 `LocalIdAlloc`（栈上 u16），无需显式释放。
-- 中断释放通过 `khal::irq::unregister` 解绑 trampoline，随后清空 slot 复用。
+- 中断释放通过 `khal::irq::unregister` 丢弃存储的闭包，连带释放其捕获的 `Arc<dyn IrqHandler>`。
 - 共享 DMA buffer 在 last handle drop 后由 `kdma::deallocate_dma_memory` 回收。
 
 ## Feature 门控关系

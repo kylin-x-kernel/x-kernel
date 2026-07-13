@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use device_res::{IrqController, IrqRouteDesc, IrqTriggerMode, irq_provider, try_irq_provider};
+use device_res::{IrqController, IrqRouteDesc, IrqTrigger, irq_provider, try_irq_provider};
 use pci::{
     PciConfigAccess,
     msix::{self, MsixCapability, MsixTable, MsixTableEntry, PCI_BAR_COUNT},
@@ -438,7 +438,7 @@ pub(super) fn legacy_irq_for_bdf(config: &PciConfigAccess, bdf: DeviceFunction) 
 
     let desc = IrqRouteDesc {
         hwirq: irq_line,
-        trigger: IrqTriggerMode::LevelLow,
+        trigger: IrqTrigger::LevelLow,
         controller: IrqController::IoApic,
         domain: None,
     };

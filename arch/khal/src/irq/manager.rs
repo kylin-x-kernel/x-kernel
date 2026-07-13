@@ -4,7 +4,7 @@
 
 //! IRQ manager and OS-visible handler dispatch state.
 
-use alloc::collections::BTreeMap;
+use alloc::{collections::BTreeMap, sync::Arc};
 use core::marker::PhantomData;
 
 use crate_interface::{call_interface, def_interface};
@@ -16,12 +16,15 @@ use kspin::SpinNoIrq;
 #[cfg(feature = "ipi")]
 pub use self::TargetCpu as IpiTarget;
 use super::{
-    Hwirq, IntoIrqDesc, IrqAffinity, IrqControllerKind, IrqDesc, IrqDomainId, IrqPolarity,
+    Hwirq, IntoIrqDesc, IrqAffinity, IrqController, IrqDesc, IrqDomainId, IrqHandler, IrqPolarity,
     IrqSource, IrqTrigger, Virq,
 };
 
-/// IRQ handler type.
-pub type Handler = handler_table::Handler;
+/// IRQ handler invoked on dispatch.
+///
+/// Each registration owns its `Arc<dyn IrqHandler>` — the Rust-native
+/// counterpart of Linux's `dev_id` — with no side table or trampoline.
+pub type Handler = Arc<dyn IrqHandler>;
 
 /// Target CPU(s) for inter-processor interrupts.
 pub enum TargetCpu {
@@ -145,7 +148,7 @@ fn needs_platform_binding(desc: IrqDesc) -> bool {
         || !matches!(desc.trigger, IrqTrigger::Unknown(_))
         || desc.polarity != IrqPolarity::Unknown
         || desc.source != IrqSource::Unknown
-        || desc.controller != IrqControllerKind::Unknown
+        || desc.controller != IrqController::Unknown
         || desc.affinity != IrqAffinity::Any
         || !desc.flags.is_empty()
 }
@@ -209,7 +212,7 @@ struct WakeSubscription {
     handler: WakeHandler,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct IrqStateDesc {
     desc: IrqDesc,
     handler: Option<Handler>,
@@ -266,7 +269,7 @@ impl IrqState {
                 && matches!(desc.trigger, IrqTrigger::Unknown(_))
                 && desc.polarity == IrqPolarity::Unknown
                 && desc.source == IrqSource::Unknown
-                && desc.controller == IrqControllerKind::Unknown
+                && desc.controller == IrqController::Unknown
                 && desc.affinity == IrqAffinity::Any
                 && desc.flags.is_empty()
                 && let Some(existing) = self.stored_desc(virq)
@@ -341,7 +344,7 @@ fn dispatch_subscribers(virq: Virq) {
             return;
         };
         let desc = entry.desc;
-        let regular_handler = entry.handler;
+        let regular_handler = entry.handler.clone();
         let wake_subscription = match entry.wake_subscription {
             Some(subscription) if subscription.mode == WakeupMode::Persistent => Some(subscription),
             Some(subscription) if subscription.armed => {
@@ -362,7 +365,7 @@ fn dispatch_subscribers(virq: Virq) {
     let has_regular_handler = regular_handler.is_some();
 
     if let Some(handler) = regular_handler {
-        handler();
+        let _ = handler.handle();
     }
 
     if let Some(wake_subscription) = wake_subscription {
@@ -413,6 +416,9 @@ pub fn descriptor(virq: Virq) -> Option<IrqDesc> {
 }
 
 /// Register the regular OS IRQ handler for an IRQ line.
+///
+/// Each registration carries its own `Arc<dyn IrqHandler>` — the Rust-native
+/// counterpart of Linux's `dev_id` — with no side table or trampoline.
 ///
 /// This is different from wakeup subscription: the registered handler is invoked
 /// directly on dispatch, while wakeup subscribers only participate in the wakeup
@@ -552,8 +558,10 @@ pub fn irq_handler(vector: usize) -> bool {
 #[cfg(unittest)]
 #[allow(missing_docs)]
 pub mod tests_irq {
+    use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
+    use device_res::IrqEvent;
     use unittest::def_test;
 
     use super::{
@@ -564,8 +572,9 @@ pub mod tests_irq {
     static REGULAR_CALLS: AtomicUsize = AtomicUsize::new(0);
     static WAKE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    fn test_handler() {
+    fn test_handler() -> IrqEvent {
         REGULAR_CALLS.fetch_add(1, Ordering::Relaxed);
+        IrqEvent::HANDLED
     }
 
     fn test_wake_handler(_irq: usize) {
@@ -598,7 +607,7 @@ pub mod tests_irq {
                 virq,
                 IrqStateDesc {
                     desc: IrqDesc::from_virq(virq),
-                    handler: Some(test_handler),
+                    handler: Some(Arc::new(test_handler)),
                     wake_subscription: Some(WakeSubscription {
                         mode: WakeupMode::Persistent,
                         armed: true,
@@ -624,7 +633,7 @@ pub mod tests_irq {
                 virq,
                 IrqStateDesc {
                     desc: IrqDesc::from_virq(virq),
-                    handler: Some(test_handler),
+                    handler: Some(Arc::new(test_handler)),
                     wake_subscription: Some(WakeSubscription {
                         mode: WakeupMode::OneShot,
                         armed: true,

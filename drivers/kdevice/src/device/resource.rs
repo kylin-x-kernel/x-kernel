@@ -10,29 +10,16 @@
 //! OS-neutral crate without coupling it to `khal`.
 
 pub use device_res::{
-    DmaSpec, IoPortRange, IrqResource, IrqTriggerMode, MmioRegion, ResourceDesc, ResourceSet,
+    DmaSpec, IoPortRange, IrqResource, IrqTrigger, MmioRegion, ResourceDesc, ResourceSet,
 };
 
-/// Convert a firmware-described interrupt trigger into an [`IrqTriggerMode`].
-pub fn irq_trigger_from_firmware(
-    trigger: khal::firmware::devices::InterruptTrigger,
-) -> IrqTriggerMode {
+/// Convert a firmware-described interrupt trigger into an [`IrqTrigger`].
+pub fn irq_trigger_from_firmware(trigger: khal::firmware::devices::InterruptTrigger) -> IrqTrigger {
     match trigger {
-        khal::firmware::devices::InterruptTrigger::EdgeRising => IrqTriggerMode::EdgeRising,
-        khal::firmware::devices::InterruptTrigger::EdgeFalling => IrqTriggerMode::EdgeFalling,
-        khal::firmware::devices::InterruptTrigger::LevelHigh => IrqTriggerMode::LevelHigh,
-        khal::firmware::devices::InterruptTrigger::LevelLow => IrqTriggerMode::LevelLow,
-        khal::firmware::devices::InterruptTrigger::Unknown(_) => IrqTriggerMode::Unspecified,
-    }
-}
-
-/// Convert a `khal` IRQ trigger into an [`IrqTriggerMode`].
-pub fn irq_trigger_from_khal(trigger: khal::irq::IrqTrigger) -> IrqTriggerMode {
-    match trigger {
-        khal::irq::IrqTrigger::EdgeRising => IrqTriggerMode::EdgeRising,
-        khal::irq::IrqTrigger::EdgeFalling => IrqTriggerMode::EdgeFalling,
-        khal::irq::IrqTrigger::LevelHigh => IrqTriggerMode::LevelHigh,
-        khal::irq::IrqTrigger::LevelLow => IrqTriggerMode::LevelLow,
-        khal::irq::IrqTrigger::Unknown(_) => IrqTriggerMode::Unspecified,
+        khal::firmware::devices::InterruptTrigger::EdgeRising => IrqTrigger::EdgeRising,
+        khal::firmware::devices::InterruptTrigger::EdgeFalling => IrqTrigger::EdgeFalling,
+        khal::firmware::devices::InterruptTrigger::LevelHigh => IrqTrigger::LevelHigh,
+        khal::firmware::devices::InterruptTrigger::LevelLow => IrqTrigger::LevelLow,
+        khal::firmware::devices::InterruptTrigger::Unknown(f) => IrqTrigger::Unknown(f),
     }
 }

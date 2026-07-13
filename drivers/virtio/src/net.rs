@@ -6,7 +6,7 @@
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use device_res::{Irq, IrqEvent, IrqEventSource, IrqResource, IrqTriggerMode, try_irq_provider};
+use device_res::{Irq, IrqEvent, IrqEventSource, IrqResource, IrqTrigger, try_irq_provider};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use driver_net::{MacAddress, NetBuf, NetBufBox, NetBufHandle, NetBufPool, NetDevice};
 use kspin::{SpinNoIrq, SpinNoPreempt};
@@ -86,7 +86,7 @@ fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: u
         }));
 
     if REGISTERED_NET_IRQS.lock().insert(irq) {
-        let resource = IrqResource::new(irq, IrqTriggerMode::Unspecified);
+        let resource = IrqResource::new(irq, IrqTrigger::Unknown(0));
         match Irq::request(resource, Arc::new(handle_virtio_net_irq)) {
             Ok(guard) => NET_IRQ_GUARDS.lock().push(guard),
             Err(_) => {
@@ -109,7 +109,7 @@ fn unregister_virtio_net_irq(irq: usize, handle_id: usize) {
     if !irq_still_used {
         REGISTERED_NET_IRQS.lock().remove(&irq);
         if let Some(p) = try_irq_provider() {
-            p.release_irq(IrqResource::new(irq, IrqTriggerMode::Unspecified));
+            p.release_irq(IrqResource::new(irq, IrqTrigger::Unknown(0)));
         }
     }
 }

@@ -24,6 +24,8 @@
 
 #![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
+
 #[macro_use]
 extern crate klogger;
 
@@ -476,28 +478,40 @@ fn init_interrupt() {
         khal::time::arm_timer(deadline);
     }
 
-    khal::irq::register(khal::time::interrupt_id(), || {
-        let now_ns = khal::time::monotonic_time_nanos();
-        update_timer(now_ns);
-        ktask::on_timer_tick();
-    });
+    khal::irq::register(
+        khal::time::interrupt_id(),
+        alloc::sync::Arc::new(|| {
+            let now_ns = khal::time::monotonic_time_nanos();
+            update_timer(now_ns);
+            ktask::on_timer_tick();
+            khal::irq::IrqEvent::HANDLED
+        }),
+    );
 
     #[cfg(feature = "ipi")]
-    khal::irq::register(kbuild_config::IPI_IRQ, || {
-        #[cfg(feature = "arm-timer-resume-fixup")]
-        timer_driver::arm_generic::handle_ipi_fixup();
-        #[cfg(feature = "ipi")]
-        kipi::ipi_handler();
-    });
+    khal::irq::register(
+        kbuild_config::IPI_IRQ,
+        alloc::sync::Arc::new(|| {
+            #[cfg(feature = "arm-timer-resume-fixup")]
+            timer_driver::arm_generic::handle_ipi_fixup();
+            #[cfg(feature = "ipi")]
+            kipi::ipi_handler();
+            khal::irq::IrqEvent::HANDLED
+        }),
+    );
 
     #[cfg(feature = "pmu")]
-    khal::irq::register(kbuild_config::PMU_IRQ, || {
-        debug!(
-            "PMU interrupt received on cpu {}",
-            khal::percpu::this_cpu_id().as_usize()
-        );
-        khal::pmu::dispatch_irq_overflows();
-    });
+    khal::irq::register(
+        kbuild_config::PMU_IRQ,
+        alloc::sync::Arc::new(|| {
+            debug!(
+                "PMU interrupt received on cpu {}",
+                khal::percpu::this_cpu_id().as_usize()
+            );
+            khal::pmu::dispatch_irq_overflows();
+            khal::irq::IrqEvent::HANDLED
+        }),
+    );
 
     // Enable IRQs before starting app
     karch::enable_local_irq();

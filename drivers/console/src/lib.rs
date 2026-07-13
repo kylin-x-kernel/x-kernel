@@ -12,7 +12,7 @@ pub mod serial;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use device_res::{Irq, IrqEvent, IrqResource, IrqTriggerMode};
+use device_res::{Irq, IrqEvent, IrqResource, IrqTrigger};
 use khal::irq::IrqDesc;
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 use khal::mem::PhysAddr;
@@ -231,7 +231,7 @@ pub fn register_input_irq_handler() {
     {
         return;
     }
-    let resource = IrqResource::new(virq, IrqTriggerMode::Unspecified);
+    let resource = IrqResource::new(virq, IrqTrigger::Unknown(0));
     match Irq::request(resource, Arc::new(handle_input_irq)) {
         Ok(guard) => *INPUT_IRQ.lock() = Some(guard),
         Err(err) => {

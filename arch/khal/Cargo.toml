@@ -45,7 +45,7 @@ acpi = { workspace = true }
 of = { workspace = true }
 unittest.workspace = true
 bitflags = { workspace = true }
-handler_table = "0.1.2"
+device_res = { workspace = true }
 
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
