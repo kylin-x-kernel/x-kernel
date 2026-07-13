@@ -46,6 +46,12 @@
 
 - **用户态寄存器状态**：`UserContext::run()` 切换到用户态后，用户可控制
   所有通用寄存器内容。trap handler 需正确处理任意寄存器值。
+- **riscv64 `gp`（percpu 基址）**：`gp` 是每 CPU 不变量，绝不从每任务
+  trapframe 恢复。trap 途中任务可能因 handler 阻塞而迁移到其他 hart；若从
+  可迁移的 trapframe 恢复 `gp`，会把另一 hart 的 percpu 基址装入本 hart，
+  使 `current()`/`this_cpu_id()` 指向错误的 CPU 与任务，构成跨任务指针泄漏。
+  当前实现：S-mode trap 返回不触碰 `gp`；仅 U-mode 返回从 slot-3 恢复用户
+  `gp`。
 
 - **中断/异常输入**：硬件中断和异常向量触发 trap 入口。IRQ 编号来自硬件，
   不完全可信。

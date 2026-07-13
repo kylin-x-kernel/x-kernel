@@ -33,6 +33,14 @@ trap_vector_base:
     j       riscv_trap_handler
 
 .Lexit_user:
+    // Trapped from U-mode: gp currently holds the USER's gp. The kernel
+    // percpu `gp` (per-hart, never carried in a trapframe) is restored from
+    // the callee frame at slot-13 below. Stash the user gp into the
+    // trapframe's slot-3 (UserContext.regs.gp) here -- before `LDR sp, sp, 0`
+    // switches `sp` to the callee frame -- so `.Ltrap_return` can reload it on
+    // return to U-mode. PUSH_POP_GENERAL_REGS no longer touches gp, so this is
+    // the sole write of slot-3 on the U-mode entry path.
+    STR     gp, sp, 3
     LDR     sp, sp, 0
     LDR     s0, sp, 0
     LDR     s1, sp, 1
@@ -80,7 +88,15 @@ enter_user:
     LDR     t1, sp, 33
     csrw    sepc, t0
     csrw    sstatus, t1
-
+    // `gp` is this hart's per-CPU base -- per-hart-invariant, so it is never
+    // restored from the (per-task, migratable) trapframe. For an S-mode trap
+    // return (SPP==1) leave `gp` as this hart's own base. For a U-mode return
+    // (SPP==0) restore the user's gp from slot-3 (saved by `.Lexit_user` on
+    // entry). t0/t1 are caller-saved and restored by POP_GENERAL_REGS below.
+    andi    t0, t1, 1 << 8          // SPP (from saved sstatus in t1)
+    bnez    t0, .Lgp_skip           // S-mode: keep this hart's gp
+    LDR     gp, sp, 3               // U-mode: restore user gp
+.Lgp_skip:
     POP_GENERAL_REGS
     LDR     sp, sp, 2           // restore sp
 

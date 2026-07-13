@@ -135,6 +135,14 @@ TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换
   每个架构在该函数中完成异常表排序、硬件描述符表加载、trap 向量基址设置。
 - **trap handler**（如 `x86_trap_handler`）：运行在中断关闭上下文中，
   不可睡眠或阻塞。由汇编入口直接调用，调用时栈上已保存完整 trap frame。
+- **riscv64 `gp` 不变量**：`gp`（x3）是每 CPU 的 percpu 基址，启动时由
+  `init_percpu_reg` 设置一次，S-mode trap 期间恒定，故**不**由
+  `PUSH_POP_GENERAL_REGS` 保存/恢复——绝不放入可迁移的每任务 trapframe。
+  U-mode 用户 `gp` 经 slot-3（`UserContext.regs.gp`）中转：`.Lexit_user`
+  入口保存，`.Ltrap_return` 仅在返回 U-mode（SPP==0）时恢复；S-mode 返回
+  保持本 hart 的 `gp`。原因：handler 若在 trap 途中阻塞（如 page-fault
+  后端），任务会在 PUSH 与 POP 之间迁移到另一 hart，此时从 trapframe 恢复
+  旧 hart 的基址会污染 `current()`/`this_cpu_id()`。
 - **`TaskContext::switch_to()`**：必须在中断关闭上下文调用。
   涉及页表切换、TLS 更新和 FP 状态保存/恢复。
 - **`UserContext::run()`**：禁用本地 IRQ 后进入用户态，返回后重新启用。

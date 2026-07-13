@@ -33,7 +33,7 @@ pub fn current_task_ptr<T>() -> *const T {
     unsafe {
         // on RISC-V and LA64, reading `CURRENT_TASK_PTR` requires multiple instruction, so we disable local IRQs.
         let _guard = kspin::IrqSave::new();
-        CURRENT_TASK_PTR.read_current_raw() as _
+        CURRENT_TASK_PTR.read_current_raw() as *const T
     }
 }
 

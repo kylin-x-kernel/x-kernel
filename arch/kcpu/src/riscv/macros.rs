@@ -168,7 +168,16 @@ macro_rules! include_asm_macros {
 
             .macro PUSH_POP_GENERAL_REGS, op
                 \op ra, sp, 1
-                \op gp, sp, 3
+                // gp (x3, slot-3) is intentionally NOT saved/restored here.
+                // On RISC-V `gp` holds this hart's per-CPU base (percpu
+                // crate); it is per-hart-invariant and set once at boot, so it
+                // must never be stored in a per-task trapframe that can
+                // migrate between harts between PUSH and POP -- doing so
+                // restored a stale foreign base into `gp` and corrupted
+                // `current()`. slot-3 is instead used to carry the *user* gp
+                // across a U-mode trap: written by `.Lexit_user` on entry and
+                // loaded by `.Ltrap_return` on U-mode return only. An S-mode
+                // trap return leaves `gp` untouched.
                 \op tp, sp, 4
                 \op t0, sp, 5
                 \op t1, sp, 6
