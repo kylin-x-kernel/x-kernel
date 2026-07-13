@@ -626,6 +626,63 @@ pub enum PageFlags {
 }
 
 // ---------------------------------------------------------------------------
+// Utility: split a byte range into maximal-order buddy chunks
+// ---------------------------------------------------------------------------
+
+/// Split a page-aligned byte range into maximal buddy chunks.
+///
+/// Each yielded `(addr, order)` pair satisfies:
+/// - `addr` is aligned to `(1 << order) * PAGE_SIZE`
+/// - the chunk spans exactly `(1 << order)` pages
+///
+/// This is useful for decomposing arbitrary page-aligned, page-multiple
+/// ranges (including non-power-of-two sizes) into chunks the buddy
+/// allocator can accept via `deallocate_pages`.
+///
+/// Returns `None` immediately when `size == 0`.
+pub fn split_to_chunks<const PAGE_SIZE: usize>(
+    addr: usize,
+    size: usize,
+) -> impl Iterator<Item = (usize, usize)> {
+    assert!(
+        addr.is_multiple_of(PAGE_SIZE),
+        "split_to_chunks: addr {:#x} not PAGE_SIZE-aligned",
+        addr,
+    );
+    assert!(
+        size.is_multiple_of(PAGE_SIZE),
+        "split_to_chunks: size {:#x} not a PAGE_SIZE multiple",
+        size,
+    );
+
+    let mut addr = addr;
+    let mut size = size;
+
+    core::iter::from_fn(move || {
+        if size == 0 {
+            return None;
+        }
+
+        // Largest order whose chunk size the address is naturally aligned to.
+        let max_ord =
+            (addr.trailing_zeros() as usize).saturating_sub(PAGE_SIZE.trailing_zeros() as usize);
+
+        // Largest order whose chunk size does not exceed the remaining size.
+        let pages = size / PAGE_SIZE;
+        let max_by_size = (usize::BITS as usize).saturating_sub(pages.leading_zeros() as usize + 1);
+
+        let order = max_ord.min(max_by_size);
+        let chunk_bytes = (1usize << order) * PAGE_SIZE;
+        let chunk_addr = addr;
+
+        addr += chunk_bytes;
+        size -= chunk_bytes;
+
+        Some((chunk_addr, order))
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -750,5 +807,67 @@ mod tests {
         b.init_region(base, 64 * PAGE).unwrap();
         assert!(b.add_region(base, 32 * PAGE).is_err());
         core::mem::forget(heap);
+    }
+
+    #[def_test]
+    fn test_split_to_chunks_empty() {
+        // zero size returns no chunks.
+        let chunks: alloc::vec::Vec<_> = split_to_chunks::<PAGE>(0x1000, 0).collect();
+        assert!(chunks.is_empty());
+    }
+
+    #[def_test]
+    fn test_split_to_chunks_power_of_two() {
+        // A 4-page range at a 4-page-aligned address yields a single order-2 chunk.
+        let chunks: alloc::vec::Vec<_> = split_to_chunks::<PAGE>(0x0, 4 * PAGE).collect();
+        assert_eq!(chunks, alloc::vec![(0x0, 2)]);
+    }
+
+    #[def_test]
+    fn test_split_to_chunks_non_power_of_two() {
+        // 3 pages starting at 0x3000 (page 3):
+        // addr 0x3000, size 0x3000.
+        // max_ord(0x3000) = 12-12 = 0  (page 3 is not 2-page aligned)
+        // max_by_size(3 pages) = floor(log2(3)) = 1
+        // order = min(0, 1) = 0  → (0x3000, 0) 1 page
+        // remaining: addr 0x4000, size 0x2000
+        // max_ord(0x4000) = 14-12 = 2
+        // max_by_size(2 pages) = 1
+        // order = min(2, 1) = 1  → (0x4000, 1) 2 pages
+        let chunks: alloc::vec::Vec<_> = split_to_chunks::<PAGE>(0x3000, 3 * PAGE).collect();
+        assert_eq!(chunks, alloc::vec![(0x3000, 0), (0x4000, 1)]);
+    }
+
+    #[def_test]
+    fn test_split_to_chunks_six_pages_unaligned() {
+        // 6 pages starting at page 7 (addr 0x7000):
+        // max_ord(0x7000) = 12-12 = 0, pages=6→max_by_size=2
+        // → (0x7000, 0) 1 page
+        // addr 0x8000, size 0x5000
+        // max_ord(0x8000) = 15-12 = 3, pages=5→max_by_size=2
+        // → (0x8000, 2) 4 pages
+        // addr 0xC000, size 0x1000
+        // → (0xC000, 0) 1 page
+        let chunks: alloc::vec::Vec<_> = split_to_chunks::<PAGE>(0x7000, 6 * PAGE).collect();
+        assert_eq!(chunks, alloc::vec![(0x7000, 0), (0x8000, 2), (0xC000, 0)]);
+    }
+
+    #[def_test]
+    fn test_split_to_chunks_recombine_after_alloc() {
+        // Allocate 3 pages, free them via split_to_chunks, then re-allocate.
+        // The buddy should merge chunks back so that a 3-page request succeeds.
+        let mut b = make_alloc();
+        let addr = b.allocate_pages(3, PAGE).unwrap();
+        // Decompose the 3-page range and return each chunk.
+        let chunks: alloc::vec::Vec<_> = split_to_chunks::<PAGE>(addr, 3 * PAGE).collect();
+        for (c_addr, order) in &chunks {
+            b.deallocate_pages(*c_addr, 1 << order);
+        }
+        // Re-allocate 3 pages (buddy allocates one order-2 chunk, 4 pages).
+        // The 4th page from the first alloc (addr+3*PAGE) is still allocated,
+        // so free_pages is 255, not 256.
+        let addr2 = b.allocate_pages(3, PAGE).unwrap();
+        b.deallocate_pages(addr2, 3);
+        assert_eq!(b.free_pages(), 255);
     }
 }

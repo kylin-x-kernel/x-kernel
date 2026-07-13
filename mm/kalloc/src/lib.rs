@@ -24,9 +24,7 @@ use alloc_engine::{
     AllocError, AllocResult, BaseAllocator, BuddyPageAllocator, ByteAllocator, PageAllocator,
 };
 use kaddr_layout::v2p;
-#[cfg(feature = "pcp")]
-use kspin::IrqSave;
-use kspin::SpinNoIrq;
+use kspin::{IrqSave, SpinNoIrq};
 use memaddr::PAGE_SIZE_4K;
 use strum::{IntoStaticStr, VariantArray};
 const MIN_HEAP_SIZE: usize = 0x8000; // 32 K
@@ -42,7 +40,6 @@ fn kernel_virt_to_phys(vaddr: usize) -> usize {
 }
 
 mod page;
-#[cfg(feature = "pcp")]
 mod pcp;
 pub use page::GlobalPage;
 
@@ -331,7 +328,7 @@ impl GlobalAllocator {
     /// `align_pow2` must be a power of 2, and the returned region bound will be
     /// aligned to it.
     ///
-    /// Single-page allocations with default alignment are served from the
+    /// 1–4 page allocations with standard alignment are served from the
     /// per-CPU page cache to reduce global lock contention.
     pub fn alloc_pages(
         &self,
@@ -344,34 +341,29 @@ impl GlobalAllocator {
             "page allocator is not initialized"
         );
 
-        // Fast path: single-page with standard alignment -> PCP cache.
-        #[cfg(feature = "pcp")]
-        {
-            if num_pages == 1 && align_pow2 <= PAGE_SIZE_4K {
-                let _guard = IrqSave::new();
-                if let Some(addr) = pcp::try_alloc() {
-                    drop(_guard);
-                    if !matches!(kind, UsageKind::RustHeap) {
-                        self.usages.lock().alloc(kind, PAGE_SIZE_4K);
-                    }
-                    return Ok(addr);
-                }
+        // Fast path: 1–4 pages with standard alignment -> PCP cache.
+        if (1..=pcp::PCP_MAX_PAGES).contains(&num_pages) && align_pow2 <= PAGE_SIZE_4K {
+            let _guard = IrqSave::new();
+            if let Some(addr) = pcp::try_alloc(num_pages) {
                 drop(_guard);
-
-                // Cache miss: batch-fill from the global allocator.
-                let mut palloc = self.palloc.lock();
-                let result = pcp::fill_cache(&mut palloc);
-                drop(palloc);
-                if result.is_ok() {
-                    if !matches!(kind, UsageKind::RustHeap) {
-                        self.usages.lock().alloc(kind, PAGE_SIZE_4K);
-                    }
+                if !matches!(kind, UsageKind::RustHeap) {
+                    self.usages.lock().alloc(kind, pages_to_bytes(num_pages));
                 }
-                return result;
+                return Ok(addr);
             }
+            drop(_guard);
+
+            // Cache miss: batch-fill from the global allocator.
+            let mut palloc = self.palloc.lock();
+            let result = pcp::fill_cache(num_pages, &mut palloc);
+            drop(palloc);
+            if result.is_ok() && !matches!(kind, UsageKind::RustHeap) {
+                self.usages.lock().alloc(kind, pages_to_bytes(num_pages));
+            }
+            return result;
         }
 
-        // Slow path: multi-page, special alignment, or PCP disabled.
+        // Slow path: multi-page or special alignment.
         let addr = self.palloc.lock().allocate_pages(num_pages, align_pow2)?;
         if !matches!(kind, UsageKind::RustHeap) {
             self.usages.lock().alloc(kind, pages_to_bytes(num_pages));
@@ -441,31 +433,28 @@ impl GlobalAllocator {
     /// should be the same as the one used in [`alloc_pages`]. Otherwise, the
     /// behavior is undefined.
     ///
-    /// Single-page deallocations are cached per-CPU to reduce global lock
+    /// 1–4 page deallocations are cached per-CPU to reduce global lock
     /// contention.
     ///
     /// [`alloc_pages`]: GlobalAllocator::alloc_pages
     pub fn dealloc_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
         self.usages.lock().dealloc(kind, pages_to_bytes(num_pages));
 
-        // Fast path: single page -> try to cache it per-CPU.
-        #[cfg(feature = "pcp")]
-        {
-            if num_pages == 1 {
-                let _guard = IrqSave::new();
-                if pcp::try_free(va) {
-                    return;
-                }
-                drop(_guard);
-
-                // Cache full: bulk-drain to the global allocator.
-                let mut palloc = self.palloc.lock();
-                pcp::drain_cache(&mut palloc, va);
+        // Fast path: 1–4 pages -> try to cache them per-CPU.
+        if (1..=pcp::PCP_MAX_PAGES).contains(&num_pages) {
+            let _guard = IrqSave::new();
+            if pcp::try_free(num_pages, va) {
                 return;
             }
+            drop(_guard);
+
+            // Cache full: bulk-drain to the global allocator.
+            let mut palloc = self.palloc.lock();
+            pcp::drain_cache(num_pages, &mut palloc, va);
+            return;
         }
 
-        // Slow path: multi-page or PCP disabled.
+        // Slow path: multi-page.
         self.palloc.lock().deallocate_pages(va, num_pages);
     }
 

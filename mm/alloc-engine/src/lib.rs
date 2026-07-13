@@ -55,7 +55,7 @@ use core::{alloc::Layout, fmt, ptr::NonNull};
 // ---------------------------------------------------------------------------
 // Re-exports from internal modules
 // ---------------------------------------------------------------------------
-pub use buddy_alloc::{BuddyAllocator, PageFlags};
+pub use buddy_alloc::{BuddyAllocator, PageFlags, split_to_chunks};
 #[cfg(feature = "kerrno")]
 use kerrno::KError;
 pub use slab_heap::SlabHeap;
