@@ -16,7 +16,6 @@
 //!   `preempt` features if it is enabled.
 
 #![cfg_attr(not(test), no_std)]
-#![feature(doc_cfg)]
 
 #[cfg(test)]
 mod tests;

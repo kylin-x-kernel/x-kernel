@@ -7,6 +7,9 @@ use kcpu::userspace::UserContext;
 
 use crate::{SignalSet, SignalStack};
 
+/// Stack alignment required when entering a user signal handler.
+pub(crate) const SIGNAL_FRAME_ALIGN: usize = 16;
+
 core::arch::global_asm!(
     "
 .section .text

@@ -20,7 +20,7 @@ use crate::{
     DefaultSignalAction, PendingSignals, SignalAction, SignalActionFlags, SignalDisposition,
     SignalInfo, SignalOSAction, SignalSet, SignalStack, Signo,
     api::{SignalDequeueAction, notify_signal_dequeued},
-    arch::UContext,
+    arch::{self, UContext},
 };
 
 struct SignalFrame {
@@ -131,7 +131,8 @@ impl ThreadSignalManager {
                 };
                 drop(stack);
 
-                let aligned_sp = (sp - layout.size()) & !(layout.align() - 1);
+                let frame_align = layout.align().max(arch::SIGNAL_FRAME_ALIGN);
+                let aligned_sp = (sp - layout.size()) & !(frame_align - 1);
 
                 let frame_ptr = aligned_sp as *mut SignalFrame;
                 if frame_ptr

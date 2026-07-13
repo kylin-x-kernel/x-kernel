@@ -4,7 +4,6 @@
 
 //! VFS bridge for the rsext4 filesystem library.
 #![cfg_attr(all(not(test), not(doc)), no_std)]
-#![feature(likely_unlikely)]
 #![allow(clippy::new_ret_no_self)]
 
 extern crate alloc;
