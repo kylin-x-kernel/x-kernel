@@ -884,21 +884,31 @@ pub fn insert_range_with_ino<B: BlockDevice>(
     Ok(())
 }
 
+/// 在 ext4 上创建一个符号链接，链接路径为 `dst_path`，指向 `src_path`。
+///
+/// # 契约
+///
+/// `src_path` 是符号链接的目标字符串，按 POSIX `symlink(2)` 语义它是**不透明的**：
+/// 既不需要存在，也不应被当作真实路径去解析或归一化。相对目标（如包管理器常见的
+/// `"libfoo.so.1"`）必须原样写入 inode，否则会把相对名扭曲成根路径下的绝对路径。
+/// 因此本函数只校验链接路径 `dst_path` 本身，`src_path` 原样写入新 inode。
+///
+/// # 错误
+///
+/// - [`BlockDevError::AlreadyExists`]：`dst_path` 已存在（`EEXIST`）。
+/// - [`BlockDevError::InvalidInput`]：`dst_path` 非法（如包含 NUL 或越界 `..`）。
+/// - [`BlockDevError::NotFound`]：`dst_path` 的父目录不存在（`ENOENT`）。
+/// - [`BlockDevError::NotDirectory`]：`dst_path` 的父目录不是目录（`ENOTDIR`）。
 pub fn create_symbol_link<B: BlockDevice>(
     device: &mut Jbd2Dev<B>,
     fs: &mut Ext4FileSystem,
     src_path: &str,
     dst_path: &str,
 ) -> BlockDevResult<()> {
-    // 首先判断两个目标文件是否存在，被链接不存在报错，链接文件存在报错。
-    let src_norm = normalize_path(src_path)?;
     let dst_norm = normalize_path(dst_path)?;
 
-    if get_file_inode(fs, device, &src_norm)?.is_none() {
-        return Err(BlockDevError::InvalidInput);
-    }
     if get_file_inode(fs, device, &dst_norm)?.is_some() {
-        return Err(BlockDevError::InvalidInput);
+        return Err(BlockDevError::AlreadyExists);
     }
 
     // 拆 parent / child（父目录必须存在）
@@ -917,10 +927,10 @@ pub fn create_symbol_link<B: BlockDevice>(
     let (parent_ino_num, parent_inode) =
         match get_inode_with_num(fs, device, &parent).ok().flatten() {
             Some(v) => v,
-            None => return Err(BlockDevError::InvalidInput),
+            None => return Err(BlockDevError::NotFound),
         };
     if !parent_inode.is_dir() {
-        return Err(BlockDevError::InvalidInput);
+        return Err(BlockDevError::NotDirectory);
     }
 
     // 为新链接分配 inode
@@ -1409,38 +1419,40 @@ pub fn unlink<B: BlockDevice>(
     delete_file(fs, block_dev, link_path)
 }
 
-/// Link
+/// 创建一个硬链接 `link_path`，指向已存在的文件 `linked_path`。
+///
+/// # 错误
+///
+/// - [`BlockDevError::NotFound`]：`linked_path` 不存在，或 `link_path` 的父目录
+///   不存在（`ENOENT`）。
+/// - [`BlockDevError::NotPermitted`]：`linked_path` 是目录（POSIX `link(2)` 对
+///   目录硬链接返回 `EPERM`）。
+/// - [`BlockDevError::AlreadyExists`]：`link_path` 已存在（`EEXIST`）。
+/// - [`BlockDevError::NotDirectory`]：`link_path` 的父目录不是目录（`ENOTDIR`）。
+/// - [`BlockDevError::IoError`]：目标 inode 链接计数自增失败（已回滚目录项）。
 pub fn link<B: BlockDevice>(
     fs: &mut Ext4FileSystem,
     block_dev: &mut Jbd2Dev<B>,
     link_path: &str,
     linked_path: &str,
-) {
-    let Ok(link_norm) = normalize_path(link_path) else {
-        return;
-    };
-    let Ok(linked_norm) = normalize_path(linked_path) else {
-        return;
+) -> BlockDevResult<()> {
+    let link_norm = normalize_path(link_path)?;
+    let linked_norm = normalize_path(linked_path)?;
+
+    // 1.被链接文件必须存在（ENOENT）
+    let (target_ino, target_inode) = match get_file_inode(fs, block_dev, &linked_norm)? {
+        Some(v) => v,
+        None => return Err(BlockDevError::NotFound),
     };
 
-    // 1.检查 被链接文件本身是否存在，不存在返回。
-    let (target_ino, target_inode) = match get_file_inode(fs, block_dev, &linked_norm) {
-        Ok(Some(v)) => v,
-        _ => return,
-    };
-
-    // 1.5 不允许链接目录
+    // 1.5 不允许硬链接目录（POSIX link(2): EPERM）
     if target_inode.is_dir() {
-        return;
+        return Err(BlockDevError::NotPermitted);
     }
 
-    // 2.检查链接文件本身是否已经存在同名entry，存在返回
-    if get_file_inode(fs, block_dev, &link_norm)
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        return;
+    // 2.链接路径不能已存在（EEXIST）
+    if get_file_inode(fs, block_dev, &link_norm)?.is_some() {
+        return Err(BlockDevError::AlreadyExists);
     }
 
     // link_path 的父目录必须存在且是目录
@@ -1455,15 +1467,12 @@ pub fn link<B: BlockDevice>(
     } else {
         ("/".to_string(), link_norm)
     };
-    let (parent_ino, mut parent_inode) = match get_inode_with_num(fs, block_dev, &parent_path)
-        .ok()
-        .flatten()
-    {
+    let (parent_ino, mut parent_inode) = match get_inode_with_num(fs, block_dev, &parent_path)? {
         Some(v) => v,
-        None => return,
+        None => return Err(BlockDevError::NotFound),
     };
     if !parent_inode.is_dir() {
-        return;
+        return Err(BlockDevError::NotDirectory);
     }
 
     // 3.复制目标entry（主要复制 file_type），插入到当前父目录（新名字）
@@ -1480,15 +1489,15 @@ pub fn link<B: BlockDevice>(
     };
 
     let mut copied_ft: Option<u8> = None;
-    if let Ok(Some((linked_parent_ino, linked_parent_inode))) =
-        get_inode_with_num(fs, block_dev, &linked_parent_path)
-        && let Ok(Some(entry)) = find_named_entry_in_parent(
+    if let Some((linked_parent_ino, linked_parent_inode)) =
+        get_inode_with_num(fs, block_dev, &linked_parent_path)?
+        && let Some(entry) = find_named_entry_in_parent(
             fs,
             block_dev,
             linked_parent_ino,
             &linked_parent_inode,
             linked_child_name.as_bytes(),
-        )
+        )?
     {
         copied_ft = Some(entry.file_type);
     }
@@ -1504,7 +1513,7 @@ pub fn link<B: BlockDevice>(
     });
 
     // insert_dir_entry 会根据 child_name 重新计算 name_len/rec_len（满足“更新名字和长度信息”）
-    if insert_dir_entry(
+    insert_dir_entry(
         fs,
         block_dev,
         parent_ino,
@@ -1512,11 +1521,7 @@ pub fn link<B: BlockDevice>(
         target_ino,
         &child_name,
         file_type,
-    )
-    .is_err()
-    {
-        return;
-    }
+    )?;
 
     // 4.更新目标inode的link+1，失败则回滚刚插入的目录项
     if fs
@@ -1526,7 +1531,10 @@ pub fn link<B: BlockDevice>(
         .is_err()
     {
         let _ = remove_inodeentry_from_parentdir(fs, block_dev, &parent_path, &child_name);
+        return Err(BlockDevError::IoError);
     }
+
+    Ok(())
 }
 
 pub fn remove_inodeentry_from_parentdir<B: BlockDevice>(

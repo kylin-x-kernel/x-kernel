@@ -386,7 +386,7 @@ impl InodeDirOperations for Inode {
                 inode_init_from_attr(&attr),
                 NodeFlags::NON_CACHEABLE,
                 Some(parent.clone()),
-                name.to_owned(),
+                name.to_string(),
             ),
         )
     }
@@ -418,7 +418,7 @@ impl InodeDirOperations for Inode {
                 inode_init_from_attr(&attr),
                 NodeFlags::empty(),
                 Some(parent.clone()),
-                name.to_owned(),
+                name.to_string(),
             ),
         )
     }
@@ -456,7 +456,7 @@ impl InodeDirOperations for Inode {
                 inode_init_from_attr(&attr),
                 NodeFlags::empty(),
                 Some(parent.clone()),
-                name.to_owned(),
+                name.to_string(),
             ),
         )
     }

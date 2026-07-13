@@ -404,7 +404,7 @@ impl InodeDirOperations for Inode {
                 return Err(VfsError::AlreadyExists);
             }
 
-            rsext4::file::link(fs, dev, &link_path, &target_path);
+            rsext4::file::link(fs, dev, &link_path, &target_path).map_err(into_vfs_err)?;
             Self::update_ctime_with(fs, dev, node.inode() as u32)?;
         }
         self.lookup_locked(&parent, name)

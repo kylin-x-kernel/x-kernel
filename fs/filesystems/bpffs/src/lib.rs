@@ -12,7 +12,11 @@
 
 extern crate alloc;
 
-use alloc::{string::String, sync::Arc, vec, vec::Vec};
+use alloc::{
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
 
 use hashbrown::HashMap;
 use kerrno::KResult;
@@ -146,7 +150,7 @@ impl BpfMap {
             value_size,
             max_entries,
             flags,
-            values: Mutex::new(vec![0; value_bytes]),
+            values: Mutex::new(alloc::vec![0; value_bytes]),
             frozen: Mutex::new(false),
         })
     }
@@ -470,7 +474,7 @@ impl InodeDirOperations for BpfInodeOperations {
         if entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
         }
-        entries.insert(name.to_owned(), entry.clone());
+        entries.insert(name.to_string(), entry.clone());
         self.node.new_entry(&dir, name, entry)
     }
 

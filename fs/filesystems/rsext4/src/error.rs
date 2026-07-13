@@ -14,6 +14,12 @@
 pub enum BlockDevError {
     /// Invalid input
     InvalidInput,
+    /// Target path already exists
+    AlreadyExists,
+    /// Target path does not exist (ENOENT)
+    NotFound,
+    /// Operation not permitted (EPERM)
+    NotPermitted,
     /// Expected a directory but the target is not a directory
     NotDirectory,
     /// Expected a non-directory but the target is a directory
@@ -64,6 +70,9 @@ impl core::fmt::Display for BlockDevError {
             BlockDevError::InvalidInput => {
                 write!(f, "invalid input")
             }
+            BlockDevError::AlreadyExists => write!(f, "target already exists"),
+            BlockDevError::NotFound => write!(f, "no such file or directory"),
+            BlockDevError::NotPermitted => write!(f, "operation not permitted"),
             BlockDevError::NotDirectory => write!(f, "not a directory"),
             BlockDevError::IsDirectory => write!(f, "is a directory"),
             BlockDevError::DirectoryNotEmpty => write!(f, "directory not empty"),

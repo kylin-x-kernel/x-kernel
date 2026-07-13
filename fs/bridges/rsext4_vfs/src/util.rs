@@ -13,6 +13,9 @@ use rsext4::{disknode::Ext4Inode, error::BlockDevError};
 pub(crate) fn into_vfs_err(err: BlockDevError) -> VfsError {
     let linux_error = match err {
         BlockDevError::InvalidInput => LinuxError::EINVAL,
+        BlockDevError::AlreadyExists => LinuxError::EEXIST,
+        BlockDevError::NotFound => LinuxError::ENOENT,
+        BlockDevError::NotPermitted => LinuxError::EPERM,
         BlockDevError::NotDirectory => LinuxError::ENOTDIR,
         BlockDevError::IsDirectory => LinuxError::EISDIR,
         BlockDevError::DirectoryNotEmpty => LinuxError::ENOTEMPTY,
