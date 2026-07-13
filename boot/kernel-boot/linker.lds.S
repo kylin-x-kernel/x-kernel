@@ -34,12 +34,6 @@ SECTIONS
         *(.sdata2 .sdata2.*)
     }
 
-    .init_array ALIGN(0x10) : {
-        __init_array_start = .;
-        *(.init_array .init_array.*)
-        __init_array_end = .;
-    }
-
     %DWARF%
 
     . = ALIGN(4K);
@@ -52,6 +46,12 @@ SECTIONS
         *(.data .data.*)
         *(.ldata .ldata.*)
         *(.sdata .sdata.*)
+
+        . = ALIGN(0x10);
+        __init_array_start = .;
+        KEEP(*(.init_array .init_array.*))
+        __init_array_end = .;
+
         *(.got .got.*)
 
         . = ALIGN(0x10);

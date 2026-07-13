@@ -24,6 +24,7 @@ unittest.workspace = true
 unittest_support.workspace = true
 xdice = { workspace = true, optional = true, features = ["nostd"] }
 klazy.workspace = true
+macros.workspace = true
 tee_crypto = { workspace = true, features = ["alloc"] }
 kcpu = { workspace = true, optional = true }
 dice_driver = { workspace = true, optional = true }

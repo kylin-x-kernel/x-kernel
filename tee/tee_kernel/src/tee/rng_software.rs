@@ -5,6 +5,7 @@
 use klazy::Lazy;
 use ksync::Mutex;
 use kvfs::{Filename, NodePermission};
+use macros::register_init;
 use tee_crypto::rng::{DeterministicRng, Infallible, Rng, TryCryptoRng, TryRng};
 use tee_raw_sys::TEE_ERROR_GENERIC;
 
@@ -20,6 +21,22 @@ static GLOBAL_TEE_SOFTWARE_RAND: Lazy<Mutex<DeterministicRng>> = Lazy::new(|| {
 fn tee_software_get_rand(output: &mut [u8]) {
     let mut rand = GLOBAL_TEE_SOFTWARE_RAND.lock();
     rand.fill_bytes(output);
+}
+
+/// Eagerly initialize the global TEE software RNG at boot.
+///
+/// Registered via `#[register_init]`, this runs during `init_cb()` after devfs
+/// is mounted and before any task can issue a TEE syscall. Reading `/dev/urandom`
+/// here -- on a single CPU with no concurrent RNG caller alive -- cannot contend.
+/// Once `Ready`, every later `tee_software_get_rand` takes a fast non-blocking
+/// path and never touches the VFS, so the factory closure's `/dev/urandom` read
+/// (which acquires the sleeping `fs_context`/devfs mutexes) can no longer run
+/// inside a `klazy::Once` spin-wait or under a held TEE-object lock. That removes
+/// the SMP AB-BA inversion with the TEE storage path that hung the system under
+/// contention.
+#[register_init]
+fn init_tee_software_rand() {
+    Lazy::force(&GLOBAL_TEE_SOFTWARE_RAND);
 }
 
 fn kernel_random_seed() -> TeeResult<[u8; RNG_SEED_SIZE]> {
