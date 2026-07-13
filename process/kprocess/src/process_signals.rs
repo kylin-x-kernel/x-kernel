@@ -18,10 +18,8 @@ fn send_signal_thread_inner(task: &TaskInner, thread: &Thread, sig: SignalInfo) 
     }
 }
 
-struct CurrentSignalDispatchImpl;
-
-#[crate_interface::impl_interface]
-impl ksignal::CurrentSignalDispatch for CurrentSignalDispatchImpl {
+#[kiface::provide]
+impl ksignal::CurrentSignalDispatch {
     fn send_sig_current(signo: ksignal::Signo) -> KResult<()> {
         let task = current();
         let thread = task.try_as_thread().ok_or(KError::OperationNotPermitted)?;

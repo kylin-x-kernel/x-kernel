@@ -7,22 +7,19 @@
 #![cfg_attr(target_os = "none", no_std)]
 
 use kcpu_id_map::LogicalCpuId;
-pub use linkme::{distributed_slice as def_boot_init, distributed_slice as register_boot_init};
 
-#[def_boot_init]
-pub static PRIMARY_KERNEL_ENTRY: [fn(usize) -> !];
+/// Primary CPU runtime entry supplied by the kernel runtime crate.
+#[kiface::interface]
+pub trait PrimaryKernelEntry {
+    /// Enters the runtime with the architecture-specific boot handoff pointer.
+    fn enter(boot_info: usize) -> !;
+}
 
-#[def_boot_init]
-pub static SECOND_KERNEL_ENTRY: [fn(LogicalCpuId) -> !];
-
-#[cfg(target_os = "none")]
-macro_rules! call_kernel_entry {
-    ($entry:ident, $($args:tt)*) => {{
-        let mut iter = $crate::$entry.iter();
-        if let Some(func) = iter.next() {
-            func($($args)*)
-        }
-    }}
+/// Secondary CPU runtime entry supplied by the kernel runtime crate.
+#[kiface::interface]
+pub trait SecondaryKernelEntry {
+    /// Enters the runtime for a secondary logical CPU.
+    fn enter(logical_cpu_id: LogicalCpuId) -> !;
 }
 
 #[cfg(target_os = "none")]

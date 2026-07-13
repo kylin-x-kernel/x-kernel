@@ -140,7 +140,7 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
                 .with_cpu_count(kcpu_id_map::nr_cpus());
         }
         let boot_info_ptr = core::ptr::addr_of!(X86_BOOT_INFO) as usize;
-        call_kernel_entry!(PRIMARY_KERNEL_ENTRY, boot_info_ptr)
+        crate::PrimaryKernelEntry::enter(boot_info_ptr)
     } else if magic as u64 == BOOT_INFO_MAGIC {
         // SAFETY: `mbi` is the bootloader-provided pointer to a live `BootInfo`
         // structure passed in the boot protocol handoff.
@@ -150,7 +150,7 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
         kcpu_id_map::init_boot_cpu_id_map(boot_info.rsdp_addr);
         // SAFETY: early boot performs the one-time AP bootstrap table setup here.
         unsafe { init_ap_boot_state() };
-        call_kernel_entry!(PRIMARY_KERNEL_ENTRY, mbi)
+        crate::PrimaryKernelEntry::enter(mbi)
     }
     loop {
         // SAFETY: if boot handoff returns unexpectedly, halting the CPU avoids
@@ -174,7 +174,7 @@ pub(super) unsafe extern "C" fn rust_entry_secondary(magic: usize) {
                 raw_cpu_id.as_usize()
             )
         });
-        call_kernel_entry!(SECOND_KERNEL_ENTRY, logical_cpu_id)
+        crate::SecondaryKernelEntry::enter(logical_cpu_id)
     }
     loop {
         // SAFETY: if the secondary-entry handoff returns unexpectedly, halting

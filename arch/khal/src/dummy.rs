@@ -12,15 +12,8 @@ use kplat::{
     sys::SysCtrl,
 };
 
-struct DummyInit;
-struct DummyConsole;
-struct DummyRtc;
-struct DummyTime;
-struct DummyPower;
-struct DummyIrq;
-
 #[impl_dev_interface]
-impl BootHandler for DummyInit {
+impl BootHandler {
     fn prepare_boot_memory(_boot_info: &kplat::boot::BootInfo) {}
 
     fn firmware_init(_boot_info: &kplat::boot::BootInfo) {}
@@ -34,7 +27,7 @@ impl BootHandler for DummyInit {
 }
 
 #[impl_dev_interface]
-impl crate::console::ConsoleIf for DummyConsole {
+impl crate::console::ConsoleIf {
     fn write_data(_bytes: &[u8]) {
         unimplemented!()
     }
@@ -52,15 +45,15 @@ impl crate::console::ConsoleIf for DummyConsole {
     }
 }
 
-#[crate_interface::impl_interface]
-impl crate::rtc::RtcIf for DummyRtc {
+#[impl_dev_interface]
+impl crate::rtc::RtcIf {
     fn offset_ns() -> u64 {
         0
     }
 }
 
 #[impl_dev_interface]
-impl crate::time::MonotonicTimerIf for DummyTime {
+impl crate::time::MonotonicTimerIf {
     fn now_ticks() -> u64 {
         0
     }
@@ -82,10 +75,14 @@ impl crate::time::MonotonicTimerIf for DummyTime {
     }
 
     fn arm_timer(_deadline_ns: u64) {}
+
+    fn handle_idle_return(_previous_ticks: u64) -> bool {
+        false
+    }
 }
 
 #[impl_dev_interface]
-impl SysCtrl for DummyPower {
+impl SysCtrl {
     #[cfg(feature = "smp")]
     fn boot_ap(_logical_cpu_id: LogicalCpuId, _stack_top_paddr: usize) -> kerrno::KResult {
         Ok(())
@@ -97,7 +94,7 @@ impl SysCtrl for DummyPower {
 }
 
 #[impl_dev_interface]
-impl crate::irq::IntrManagerIf for DummyIrq {
+impl crate::irq::IntrManagerIf {
     fn configure(_desc: crate::irq::IrqDesc) {}
 
     fn enable(_irq: usize, _enabled: bool) {}

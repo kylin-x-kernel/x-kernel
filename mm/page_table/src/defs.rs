@@ -319,10 +319,10 @@ pub trait PagingMetaData: Sync + Send {
 /// Interface for broadcasting TLB flush to remote CPUs.
 ///
 /// Implemented by the IPI subsystem (e.g. `kipi::tlb`) at link time via
-/// `crate_interface::impl_interface`. This indirection breaks the
+/// `kiface::provide`. This indirection breaks the
 /// circular dependency between `page_table` and the IPI crate.
 #[cfg(feature = "smp")]
-#[crate_interface::def_interface]
+#[kiface::interface]
 pub trait TlbFlushIf {
     /// Flush TLB entries on remote CPUs that may still retain the target
     /// user address space's translations (mm-owned CPU residency mask).

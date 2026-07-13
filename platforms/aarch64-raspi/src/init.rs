@@ -11,9 +11,8 @@ const GICD_PADDR: usize = 0xFF84_1000;
 const GICC_PADDR: usize = 0xFF84_2000;
 const UART_PADDR: usize = 0xFE20_1000;
 
-struct BootHandlerImpl;
 #[impl_dev_interface]
-impl BootHandler for BootHandlerImpl {
+impl BootHandler {
     fn early_init(_boot_info: &BootInfo) {
         kcpu::boot::init_trap();
         kplat_aarch64_peripherals::pl011::early_init(p2v(pa!(UART_PADDR)));

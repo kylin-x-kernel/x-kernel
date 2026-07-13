@@ -39,7 +39,7 @@ mod dma_integration;
 mod init_setup;
 
 use boot_info::BootConsoleTransport;
-use kernel_boot::{PRIMARY_KERNEL_ENTRY, register_boot_init};
+use kernel_boot::PrimaryKernelEntry;
 use khal::mem::MemFlags;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 
@@ -78,10 +78,8 @@ unsafe extern "C" {
     fn main();
 }
 
-struct LogIfImpl;
-
-#[crate_interface::impl_interface]
-impl klogger::LoggerAdapter for LogIfImpl {
+#[kiface::provide]
+impl klogger::LoggerAdapter {
     fn write_str(s: &str) {
         khal::console::write_data(s.as_bytes());
     }
@@ -185,7 +183,6 @@ fn register_boot_console_runtime_region(boot_info: &boot_info::BootInfo) {
 ///
 /// `arg` is the unified bootloader handoff payload (`BootInfo*`) for the
 /// primary CPU. Secondary cores call [`rust_main_secondary`].
-#[register_boot_init(PRIMARY_KERNEL_ENTRY)]
 pub fn rust_main(arg: usize) -> ! {
     let boot_info = khal::boot_info(arg);
     let cpu_id = boot_info.cpu_id;
@@ -316,6 +313,13 @@ pub fn rust_main(arg: usize) -> ! {
     unsafe { main() };
 
     ktask::exit(0);
+}
+
+#[kiface::provide]
+impl PrimaryKernelEntry {
+    fn enter(boot_info: usize) -> ! {
+        rust_main(boot_info)
+    }
 }
 
 fn log_memory_regions() {

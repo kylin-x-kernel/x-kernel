@@ -12,10 +12,8 @@ static TIMER_IRQ: AtomicUsize = AtomicUsize::new(0);
 static TIMER_FREQ_HZ: AtomicU64 = AtomicU64::new(0);
 static NANOS_PER_TICK: AtomicU64 = AtomicU64::new(0);
 
-struct RiscvSbiMonotonicTimer;
-
 #[kplat::impl_dev_interface]
-impl khal::time::MonotonicTimerIf for RiscvSbiMonotonicTimer {
+impl khal::time::MonotonicTimerIf {
     fn now_ticks() -> u64 {
         now_ticks()
     }
@@ -38,6 +36,10 @@ impl khal::time::MonotonicTimerIf for RiscvSbiMonotonicTimer {
 
     fn arm_timer(deadline_ns: u64) {
         arm_timer(deadline_ns)
+    }
+
+    fn handle_idle_return(_previous_ticks: u64) -> bool {
+        false
     }
 }
 

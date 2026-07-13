@@ -13,7 +13,7 @@ tee = ["dep:tee_task_iface"]
 tee_ta_sign = ["tee", "tee_task_iface/tee_ta_sign"]
 
 [dependencies]
-crate_interface.workspace = true
+kiface.workspace = true
 extern-trait.workspace = true
 fs_context.workspace = true
 kaddr_layout.workspace = true

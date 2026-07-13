@@ -128,10 +128,8 @@ macro_rules! with_cause {
     };
 }
 
-struct RiscvIrqIfImpl;
-
 #[kplat::impl_dev_interface]
-impl khal::irq::IntrManagerIf for RiscvIrqIfImpl {
+impl khal::irq::IntrManagerIf {
     fn configure(_desc: khal::irq::IrqDesc) {}
 
     fn enable(irq: usize, enabled: bool) {

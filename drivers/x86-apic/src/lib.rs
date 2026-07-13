@@ -93,10 +93,8 @@ impl MsixVectorAllocator {
     }
 }
 
-struct X86ApicIfImpl;
-
-#[crate_interface::impl_interface]
-impl khal::irq::X86ApicIf for X86ApicIfImpl {
+#[kiface::provide]
+impl khal::irq::X86ApicIf {
     fn alloc_msix_vector() -> Option<u8> {
         MSIX_VECTOR_ALLOCATOR.lock().alloc()
     }

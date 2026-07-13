@@ -27,12 +27,12 @@ pub use types::*;
 mod trampoline;
 pub use trampoline::map_signal_trampoline;
 
-#[crate_interface::def_interface]
+#[kiface::interface]
 pub trait CurrentSignalDispatch {
     fn send_sig_current(signo: Signo) -> kerrno::KResult<()>;
 }
 
 /// Sends a signal to the current user thread.
 pub fn send_sig_current(signo: Signo) -> kerrno::KResult<()> {
-    crate_interface::call_interface!(CurrentSignalDispatch::send_sig_current, signo)
+    CurrentSignalDispatch::send_sig_current(signo)
 }

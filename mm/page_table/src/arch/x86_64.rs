@@ -211,17 +211,14 @@ impl PagingMetaData for X64PagingMetaData {
     #[inline]
     fn flush_tlb_process_mask(vaddr: Option<VirtAddr>, target_mask: kcpu_id_map::KCpuMask) {
         karch::flush_tlb(vaddr);
-        crate_interface::call_interface!(crate::defs::TlbFlushIf::flush_process_mask(
-            vaddr,
-            target_mask
-        ));
+        crate::defs::TlbFlushIf::flush_process_mask(vaddr, target_mask);
     }
 
     #[cfg(feature = "smp")]
     #[inline]
     fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) {
         karch::flush_tlb(vaddr);
-        crate_interface::call_interface!(crate::defs::TlbFlushIf::flush_all_cpus(vaddr));
+        crate::defs::TlbFlushIf::flush_all_cpus(vaddr);
     }
 }
 

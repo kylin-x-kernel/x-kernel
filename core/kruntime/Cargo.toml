@@ -64,12 +64,11 @@ ktask = { workspace = true }
 timer_driver = { workspace = true }
 watchdog = { workspace = true, optional = true }
 chrono.workspace = true
-crate_interface.workspace = true
+kiface.workspace = true
 heapless = "0.9"
 percpu.workspace = true
 kbuild_config = { workspace = true }
 karch = { workspace = true }
 kernel_boot = { workspace = true }
-linkme = { workspace = true }
 unittest.workspace = true
 kcpu_id_map = { workspace = true }

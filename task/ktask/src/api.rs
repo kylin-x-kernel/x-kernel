@@ -54,11 +54,8 @@ cfg_select! {
 }
 
 #[cfg(feature = "preempt")]
-struct KernelGuardIfImpl;
-
-#[cfg(feature = "preempt")]
-#[crate_interface::impl_interface]
-impl kspin::KernelGuardIf for KernelGuardIfImpl {
+#[kiface::provide]
+impl kspin::KernelGuardIf {
     fn disable_preempt() {
         if let Some(curr) = current_may_uninit() {
             curr.disable_preempt();

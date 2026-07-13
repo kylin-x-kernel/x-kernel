@@ -323,10 +323,8 @@ pub fn mark_all_cpus_started() {
     ALL_CPUS_STARTED.store(true, Ordering::Release);
 }
 
-struct TlbFlushImpl;
-
-#[crate_interface::impl_interface]
-impl TlbFlushIf for TlbFlushImpl {
+#[kiface::provide]
+impl TlbFlushIf {
     fn flush_process_mask(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
         if !ALL_CPUS_STARTED.load(Ordering::Acquire) {
             return;
@@ -491,11 +489,10 @@ pub fn handle_shootdown() {
     set_last_handled_pending_epoch(pending_epoch);
 }
 
-/// Test helper: trigger a TLB shootdown directly, bypassing the
-/// `crate_interface` dispatch (which requires the defining crate's path).
+/// Test helper: trigger a TLB shootdown directly through the kiface facade.
 #[cfg(unittest)]
 pub fn trigger_flush_all(vaddr: Option<VirtAddr>) {
-    <TlbFlushImpl as TlbFlushIf>::flush_all_cpus(vaddr);
+    TlbFlushIf::flush_all_cpus(vaddr);
 }
 
 #[cfg(unittest)]

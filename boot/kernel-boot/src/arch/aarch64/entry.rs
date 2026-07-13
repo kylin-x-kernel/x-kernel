@@ -292,7 +292,7 @@ pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) {
             raw_cpu_id.as_usize()
         )
     });
-    call_kernel_entry!(SECOND_KERNEL_ENTRY, logical_cpu_id)
+    crate::SecondaryKernelEntry::enter(logical_cpu_id)
 }
 
 /// Post-MMU entry point – runs at the kernel's high virtual address.
@@ -367,7 +367,7 @@ pub unsafe extern "C" fn __primary_switched(
     crate::bootln!("boot linear RAM map extended from DT");
     let boot_info_ptr = core::ptr::addr_of!(AARCH64_BOOT_INFO) as usize;
     crate::bootln!("handoff to kruntime boot_info={boot_info_ptr:#x}");
-    call_kernel_entry!(PRIMARY_KERNEL_ENTRY, boot_info_ptr)
+    crate::PrimaryKernelEntry::enter(boot_info_ptr)
 }
 
 /// Enable FP/SIMD by clearing traps in `CPACR_EL1`.

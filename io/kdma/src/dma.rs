@@ -22,7 +22,7 @@ use crate::{
 
 /// Interface for updating page table flags.
 /// This breaks the cyclic dependency: kdma -> axmm -> axfs -> axdriver -> kdma.
-#[crate_interface::def_interface]
+#[kiface::interface]
 pub trait DmaPageTableIf {
     /// Update the mapping flags for the given virtual address range.
     fn protect(vaddr: VirtAddr, size: usize, flags: MappingFlags) -> kerrno::KResult;
@@ -112,11 +112,10 @@ impl DmaAllocator {
         flags: MappingFlags,
     ) -> AllocResult<()> {
         let expand_size = num_pages * PAGE_SIZE_4K;
-        crate_interface::call_interface!(DmaPageTableIf::protect(vaddr, expand_size, flags))
-            .map_err(|_| {
-                error!("change table flag fail");
-                AllocError::NoMemory
-            })
+        DmaPageTableIf::protect(vaddr, expand_size, flags).map_err(|_| {
+            error!("change table flag fail");
+            AllocError::NoMemory
+        })
     }
 
     fn prepare_platform_dma(&mut self, paddr: PhysAddr, size: usize) -> AllocResult<()> {

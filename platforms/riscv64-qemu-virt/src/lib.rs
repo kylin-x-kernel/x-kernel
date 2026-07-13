@@ -14,8 +14,5 @@ extern crate kernel_boot;
 mod init;
 mod power;
 
-struct DmaPlatformImpl;
-struct MmioPlatformImpl;
-
-kplat::default_dma_if_impl!(DmaPlatformImpl);
-kplat::default_mmio_if_impl!(MmioPlatformImpl);
+kplat::default_dma_if_impl!();
+kplat::default_mmio_if_impl!();

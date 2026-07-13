@@ -10,8 +10,8 @@
 #![doc = include_str!("../README.md")]
 #![no_std]
 
-/// crate_interface for cross-PE pipeline synchronisation. Implemented by `kipi`.
-#[crate_interface::def_interface]
+/// `kiface` for cross-PE pipeline synchronisation. Implemented by `kipi`.
+#[kiface::interface]
 pub trait IcacheFlushIf {
     fn flush_others();
 }
@@ -20,7 +20,7 @@ pub trait IcacheFlushIf {
 #[inline]
 #[allow(dead_code)]
 pub(crate) fn flush_icache_others() {
-    crate_interface::call_interface!(crate::IcacheFlushIf::flush_others());
+    crate::IcacheFlushIf::flush_others();
 }
 
 cfg_if::cfg_if! {

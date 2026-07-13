@@ -234,10 +234,8 @@ pub fn set_prio(irq: usize, priority: u8) {
     }
 }
 
-struct GicIrqIfImpl;
-
 #[kplat::impl_dev_interface]
-impl khal::irq::IntrManagerIf for GicIrqIfImpl {
+impl khal::irq::IntrManagerIf {
     fn configure(desc: khal::irq::IrqDesc) {
         match desc.trigger {
             khal::irq::IrqTrigger::EdgeRising | khal::irq::IrqTrigger::EdgeFalling => {

@@ -180,7 +180,7 @@ present leaf PTE。它包含：
 - **`PageTable64` 本身不是 `Sync`**：内部无锁，多线程同时修改同一页表需要外部同步。
 - **`PageTableMut` 借用 `&mut PageTable64`**：Rust 借用规则保证同一时刻只有一个可变引用，天然互斥。
 - **SMP TLB 刷新**：`feature = "smp"` 时，`flush_tlb_all_cpus()` 通过 `TlbFlushIf` 接口
-  （`crate_interface` 实现）向远端 CPU 发送 IPI shootdown。AArch64 使用硬件
+  （`kiface` 实现）向远端 CPU 发送 IPI shootdown。AArch64 使用硬件
   Inner Shareable TLBI 指令，无需软件 IPI。
 - **`PagingMetaData` 约束 `Send + Sync`**：确保元数据可跨线程访问。
 - **`PageTableEntry` 约束 `Send + Sync`**：PTE 可安全在线程间传递。
@@ -234,10 +234,10 @@ query_entry()
 用宏可以在编译期生成对应代码，避免运行时分支，同时复用遍历逻辑。
 Rust 泛型无法方便地表达"对 `&T` 和 `&mut T` 使用不同调用方式"的需求。
 
-### 为什么 TlbFlushIf 用 crate_interface 而非直接依赖
+### 为什么 TlbFlushIf 用 kiface 而非直接依赖
 
 `page_table` 被内存管理子系统依赖，而 IPI 子系统又依赖内存管理。
-直接依赖会形成循环。`crate_interface` 在链接时绑定实现，
+直接依赖会形成循环。`kiface` 在链接时绑定 exactly-one 实现，
 编译期只依赖接口定义，打破循环依赖。
 
 ### 为什么 x86_64 PTE 使用 EncodedPtePhys 封装

@@ -120,7 +120,7 @@ use kspin::KernelGuardIf;
 
 struct MyKernelGuard;
 
-#[crate_interface::impl_interface]
+#[kiface::provide]
 impl KernelGuardIf for MyKernelGuard {
     fn enable_preempt() {
         // Your implementation

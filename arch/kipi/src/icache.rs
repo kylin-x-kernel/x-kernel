@@ -7,10 +7,8 @@
 
 use karch::IcacheFlushIf;
 
-struct IcacheFlushImpl;
-
-#[crate_interface::impl_interface]
-impl IcacheFlushIf for IcacheFlushImpl {
+#[kiface::provide]
+impl IcacheFlushIf {
     fn flush_others() {
         // Queue callbacks on all other CPUs and send IPIs. The callback calls
         // flush_icache_remote() which is the IPI-dedicated variant — it does NOT

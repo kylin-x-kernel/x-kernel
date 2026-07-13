@@ -13,6 +13,6 @@ default = []
 [dependencies]
 cfg-if.workspace = true
 chrono = { workspace = true, default-features = true, optional = true }
-crate_interface.workspace = true
+kiface.workspace = true
 kspin.workspace = true
 log.workspace = true

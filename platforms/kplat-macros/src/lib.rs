@@ -7,7 +7,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
-use syn::{Error, FnArg, ItemTrait, TraitItem, Type};
+use syn::{Error, FnArg, ItemTrait, TraitItem};
 fn err_ts(e: Error) -> TokenStream {
     e.to_compile_error().into()
 }
@@ -19,8 +19,14 @@ pub fn device_interface(attr: TokenStream, item: TokenStream) -> TokenStream {
         return err_ts(Error::new(Span::call_site(), "Attr must be empty"));
     }
     let tr = syn::parse_macro_input!(item as ItemTrait);
+    let mut interface = tr.clone();
     let tr_id = &tr.ident;
     let mut defs = vec![];
+    for it in &mut interface.items {
+        if let TraitItem::Fn(m) = it {
+            m.default = None;
+        }
+    }
     for it in &tr.items {
         if let TraitItem::Fn(m) = it {
             let m_attrs = &m.attrs;
@@ -39,14 +45,14 @@ pub fn device_interface(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #(#m_attrs)*
                 #[inline]
                 pub #m_sig {
-                    crate::__priv::dispatch!(#tr_id::#m_id, #(#args),* )
+                    #tr_id::#m_id(#(#args),*)
                 }
             });
         }
     }
     quote! {
         #[crate::__priv::interface_def]
-        #tr
+        #interface
         #(#defs)*
     }
     .into()
@@ -55,10 +61,15 @@ pub fn device_interface(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Generates a default empty implementation for `kplat::dma::PlatformDmaIf`.
 #[proc_macro]
 pub fn default_dma_if_impl(item: TokenStream) -> TokenStream {
-    let impl_ty = syn::parse_macro_input!(item as Type);
+    if !item.is_empty() {
+        return err_ts(Error::new(
+            Span::call_site(),
+            "default_dma_if_impl takes no arguments",
+        ));
+    }
     quote! {
         #[kplat::impl_dev_interface]
-        impl kplat::dma::PlatformDmaIf for #impl_ty {
+        impl kplat::dma::PlatformDmaIf {
             fn prepare(_pa: usize, _size: usize) -> kplat::kerrno::KResult {
                 Ok(())
             }
@@ -74,10 +85,15 @@ pub fn default_dma_if_impl(item: TokenStream) -> TokenStream {
 /// Generates a default empty implementation for `kplat::mmio::PlatformMmioIf`.
 #[proc_macro]
 pub fn default_mmio_if_impl(item: TokenStream) -> TokenStream {
-    let impl_ty = syn::parse_macro_input!(item as Type);
+    if !item.is_empty() {
+        return err_ts(Error::new(
+            Span::call_site(),
+            "default_mmio_if_impl takes no arguments",
+        ));
+    }
     quote! {
         #[kplat::impl_dev_interface]
-        impl kplat::mmio::PlatformMmioIf for #impl_ty {
+        impl kplat::mmio::PlatformMmioIf {
             fn prepare(_pa: usize, _size: usize) -> kplat::kerrno::KResult {
                 Ok(())
             }

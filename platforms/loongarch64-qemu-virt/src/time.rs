@@ -68,9 +68,8 @@ pub(super) fn early_init() {
     #[cfg(feature = "rtc")]
     init_rtc();
 }
-struct GlobalTimerImpl;
 #[kplat::impl_dev_interface]
-impl MonotonicTimerIf for GlobalTimerImpl {
+impl MonotonicTimerIf {
     fn now_ticks() -> u64 {
         Time::read() as _
     }
@@ -97,5 +96,9 @@ impl MonotonicTimerIf for GlobalTimerImpl {
         let init_value = ticks_deadline - ticks_now;
         tcfg::set_init_val(init_value as _);
         tcfg::set_en(true);
+    }
+
+    fn handle_idle_return(_previous_ticks: u64) -> bool {
+        false
     }
 }

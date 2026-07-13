@@ -72,9 +72,9 @@ SECONDARY_BOOT_STACKS.stack_top(...)
 
 调用 `backtrace::Backtrace::capture()` 与 `khal::power::shutdown()`。要求 panic 时栈可遍历、关机例程可安全执行（可能已在错误状态）。
 
-### 6. `crate_interface` 实现
+### 6. `kiface` 实现
 
-`dma_integration`、`LogIfImpl` 为 safe Rust；安全性委托给 `memspace::protect`、`khal::console` 等被调用方。
+`dma_integration`、`LoggerAdapter` provider 为 safe Rust；安全性委托给 `memspace::protect`、`khal::console` 等被调用方。
 
 ## 内存与并发不变量
 
@@ -143,5 +143,5 @@ SECONDARY_BOOT_STACKS.stack_top(...)
 - [ ] 调整 `rust_main` 顺序时评估 IRQ、SMP、`init_cb` 依赖。
 - [ ] 修改 `INITED_CPUS` / `ENTERED_CPUS` 语义时检查死锁与屏障。
 - [ ] 新增 `register_init` 回调保持短、不可 panic，或接受启动风险。
-- [ ] 新增 `crate_interface` 实现保持单一链接实例。
+- [ ] 新增 `kiface` provider 保持单一链接实例。
 - [ ] Feature 组合在 defconfig 中可构建（`entry` + `kfeat`）。

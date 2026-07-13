@@ -59,15 +59,13 @@ pub fn boot_console_io_port() -> u16 {
     0x3f8
 }
 
-// The single `ConsoleIf` implementation. `crate_interface` permits exactly one
+// The single `ConsoleIf` implementation. `kiface` permits exactly one
 // implementation per interface, so it lives here at the crate root and routes
 // printk to the early stdout [`SerialPort`]. The stdout port is brought up in
 // platform `early_driver_init`, before the driver model exists, so this is the
 // one console path that must not depend on kdriver.
-struct DriverConsoleIfImpl;
-
 #[kplat::impl_dev_interface]
-impl khal::console::ConsoleIf for DriverConsoleIfImpl {
+impl khal::console::ConsoleIf {
     fn write_data(buf: &[u8]) {
         if let Some(port) = serial::stdout_port() {
             port.write_data(buf);

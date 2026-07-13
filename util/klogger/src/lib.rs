@@ -12,8 +12,6 @@ use core::{
     str::FromStr,
 };
 
-#[cfg(not(feature = "std"))]
-use crate_interface::call_interface;
 use log::{Level, LevelFilter, Log, Metadata, Record};
 pub use log::{debug, error, info, trace, warn};
 
@@ -65,7 +63,7 @@ enum AnsiBrightColor {
     BrightWhite   = 97,
 }
 
-#[crate_interface::def_interface]
+#[kiface::interface]
 pub trait LoggerAdapter {
     fn write_str(s: &str);
     fn now() -> core::time::Duration;
@@ -81,7 +79,7 @@ impl Write for KernelLogger {
             if #[cfg(feature = "std")] {
                 std::print!("{s}");
             } else {
-                call_interface!(LoggerAdapter::write_str, s);
+                LoggerAdapter::write_str(s);
             }
         }
         Ok(())
@@ -137,9 +135,9 @@ impl Log for KernelLogger {
                     ))
                 };
             } else {
-                let cpu_id = call_interface!(LoggerAdapter::cpu_id);
-                let tid = call_interface!(LoggerAdapter::task_id);
-                let now = call_interface!(LoggerAdapter::now);
+                let cpu_id = LoggerAdapter::cpu_id();
+                let tid = LoggerAdapter::task_id();
+                let now = LoggerAdapter::now();
 
                 let _ = match (compact, cpu_id, tid) {
                     (true, Some(c), Some(t)) => print_fmt(color_fmt!(

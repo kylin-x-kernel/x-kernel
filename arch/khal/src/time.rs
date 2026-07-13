@@ -7,8 +7,6 @@
 pub use core::time::Duration;
 pub type TimeValue = Duration;
 
-use crate_interface::{call_interface, def_interface};
-
 use crate::rtc;
 
 pub const MILLIS_PER_SEC: u64 = 1_000;
@@ -23,7 +21,7 @@ pub use NANOS_PER_MICROS as NS_US;
 pub use NANOS_PER_MILLIS as NS_MS;
 pub use NANOS_PER_SEC as NS_SEC;
 
-#[def_interface]
+#[kiface::interface]
 pub trait MonotonicTimerIf {
     /// Returns the current monotonic timer tick count.
     fn now_ticks() -> u64;
@@ -38,44 +36,42 @@ pub trait MonotonicTimerIf {
     /// Arms the monotonic timer to trigger at the given deadline (in ns).
     fn arm_timer(deadline: u64);
     /// Allows the timer backend to handle counter/timer repair after idle returns.
-    fn handle_idle_return(_previous_ticks: u64) -> bool {
-        false
-    }
+    fn handle_idle_return(previous_ticks: u64) -> bool;
 }
 
 #[inline]
 pub fn now_ticks() -> u64 {
-    call_interface!(MonotonicTimerIf::now_ticks)
+    MonotonicTimerIf::now_ticks()
 }
 
 #[inline]
 pub fn t2ns(ticks: u64) -> u64 {
-    call_interface!(MonotonicTimerIf::t2ns, ticks)
+    MonotonicTimerIf::t2ns(ticks)
 }
 
 #[inline]
 pub fn freq() -> u64 {
-    call_interface!(MonotonicTimerIf::freq)
+    MonotonicTimerIf::freq()
 }
 
 #[inline]
 pub fn ns2t(nanos: u64) -> u64 {
-    call_interface!(MonotonicTimerIf::ns2t, nanos)
+    MonotonicTimerIf::ns2t(nanos)
 }
 
 #[inline]
 pub fn interrupt_id() -> usize {
-    call_interface!(MonotonicTimerIf::interrupt_id)
+    MonotonicTimerIf::interrupt_id()
 }
 
 #[inline]
 pub fn arm_timer(deadline: u64) {
-    call_interface!(MonotonicTimerIf::arm_timer, deadline)
+    MonotonicTimerIf::arm_timer(deadline)
 }
 
 #[inline]
 pub fn handle_idle_return(previous_ticks: u64) -> bool {
-    call_interface!(MonotonicTimerIf::handle_idle_return, previous_ticks)
+    MonotonicTimerIf::handle_idle_return(previous_ticks)
 }
 
 #[inline]

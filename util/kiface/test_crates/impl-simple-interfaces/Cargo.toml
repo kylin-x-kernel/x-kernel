@@ -1,0 +1,9 @@
+[package]
+name = "impl-simple-interfaces"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+define-simple-interfaces = { path = "../define-simple-interfaces" }
+kiface = { path = "../.." }

@@ -15,11 +15,8 @@ mod power;
 #[cfg(feature = "smp")]
 mod mp;
 
-struct DmaPlatformImpl;
-struct MmioPlatformImpl;
-
-kplat::default_dma_if_impl!(DmaPlatformImpl);
-kplat::default_mmio_if_impl!(MmioPlatformImpl);
+kplat::default_dma_if_impl!();
+kplat::default_mmio_if_impl!();
 
 #[cfg(feature = "irq")]
 kplat_aarch64_peripherals::irq_if_impl!(IntrManagerImpl);

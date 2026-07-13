@@ -11,9 +11,8 @@ use kplat::sys::SysCtrl;
 
 const GED_PADDR: usize = 0x100E_001C;
 
-struct PowerImpl;
 #[impl_dev_interface]
-impl SysCtrl for PowerImpl {
+impl SysCtrl {
     #[cfg(feature = "smp")]
     fn boot_ap(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) -> KResult {
         let raw_cpu_id = raw_cpu_id(logical_cpu_id).unwrap_or_else(|| {

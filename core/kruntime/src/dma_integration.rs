@@ -2,10 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-struct DmaPageTableImpl;
-
-#[crate_interface::impl_interface]
-impl kdma::DmaPageTableIf for DmaPageTableImpl {
+#[kiface::provide]
+impl kdma::DmaPageTableIf {
     fn protect(
         vaddr: memaddr::VirtAddr,
         size: usize,

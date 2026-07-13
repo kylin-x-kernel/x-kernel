@@ -18,6 +18,6 @@ mod init;
 mod mmio;
 mod power;
 #[cfg(feature = "pmu")]
-aarch64_peripherals::pmu_if_impl!(PerfMgrImpl);
+aarch64_peripherals::pmu_if_impl!();
 #[cfg(feature = "nmi")]
-aarch64_peripherals::nmi_if_impl!(NmiIfImpl);
+aarch64_peripherals::nmi_if_impl!();

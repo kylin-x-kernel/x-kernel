@@ -22,7 +22,6 @@ klogger.workspace = true
 kruntime.workspace = true
 ktask.workspace = true
 cfg-if.workspace = true
-linkme.workspace = true
 kprocess.workspace = true
 kuaccess.workspace = true
 ksyscall.workspace = true

@@ -5,12 +5,6 @@ members = [
     "entry",
     # boot and loader
     "boot/*",
-    # filesystems under active standalone development
-    "fs/filesystems/kext4",
-    # tee_crypto source tree (publish / local tests); kernel deps use crates.io via workspace.dependencies
-    "tee/tee_crypto",
-    # virtualization
-    "virt/*",
 ]
 exclude = [
     # platform-specific boot code that is not intended to be built as part of the main workspace
@@ -180,6 +174,7 @@ kvmm = { path = "virt/kvmm" }
 backtrace = { path = "util/backtrace" }
 kbuild_config = { path = "util/kbuild_config" }
 kerrno = { path = "util/kerrno" }
+kiface = { path = "util/kiface" }
 kidentity = { path = "process/kidentity" }
 klogger = { path = "util/klogger" }
 macros = { path = "util/macros" }
@@ -218,12 +213,15 @@ int_ratio = "0.1"
 ouroboros = { version = "0.18.5", default-features = false }
 paste = "1.0"
 percpu = "0.4"
+proc-macro2 = "1.0"
+quote = "1.0"
 
 safe-mmio = "0.3.0"
 slab = { version = "0.4.9", default-features = false }
 smoltcp = { version = "=0.13.0", default-features = false }
 smccc = "0.2.3"
 strum = { version = "0.27", default-features = false, features = ["derive"] }
+syn = { version = "2.0", features = ["full"] }
 virtio-drivers = { version = "0.13.1", default-features = false, package = "kvirtiodrivers" }
 # Pinned: 0.15.5's `nightly`->`step_trait` (pulled in by `x2apic`) needs Step methods absent from rustc 1.95.0; bump after nightly-2026-07-10+.
 x86_64 = { version = "=0.15.4", features = ["instructions"] }

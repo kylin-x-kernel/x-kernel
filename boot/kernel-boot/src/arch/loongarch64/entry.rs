@@ -160,10 +160,7 @@ pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
             raw_cpu_id.as_usize()
         )
     });
-    call_kernel_entry!(SECOND_KERNEL_ENTRY, logical_cpu_id);
-    loop {
-        core::hint::spin_loop();
-    }
+    crate::SecondaryKernelEntry::enter(logical_cpu_id)
 }
 
 fn cmdline_len(cmdline_paddr: usize) -> usize {
@@ -280,8 +277,5 @@ pub unsafe extern "C" fn __primary_switched(
         kimage_voffset
     );
     let boot_info_ptr = core::ptr::addr_of!(LOONGARCH_BOOT_INFO) as usize;
-    call_kernel_entry!(PRIMARY_KERNEL_ENTRY, boot_info_ptr);
-    loop {
-        core::hint::spin_loop();
-    }
+    crate::PrimaryKernelEntry::enter(boot_info_ptr)
 }

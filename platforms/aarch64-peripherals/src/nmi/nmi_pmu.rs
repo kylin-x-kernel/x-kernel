@@ -4,12 +4,11 @@
 
 #[macro_export]
 macro_rules! nmi_if_impl {
-    ($name:ident) => {
-        struct $name;
+    () => {
         use kplat::nm_irq::{NmiHandler, NmiType};
         const CYCLE_COUNTER_INDEX: u32 = 31;
         #[impl_dev_interface]
-        impl kplat::nm_irq::NmiDef for $name {
+        impl kplat::nm_irq::NmiDef {
             fn init(threshold: u64) -> bool {
                 irq_driver::gic::set_prio(kbuild_config::PMU_IRQ, 0);
                 $crate::pmu::init_cycle_counter(threshold)

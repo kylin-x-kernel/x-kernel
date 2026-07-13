@@ -126,11 +126,10 @@ pub fn set_threshold(index: u32, threshold: u64) {
 }
 #[macro_export]
 macro_rules! pmu_if_impl {
-    ($name:ident) => {
-        struct $name;
+    () => {
         use kplat::perf::PerfCb;
         #[impl_dev_interface]
-        impl kplat::perf::PerfMgr for $name {
+        impl kplat::perf::PerfMgr {
             fn on_overflow() -> bool {
                 $crate::pmu::dispatch_irq_overflows()
             }

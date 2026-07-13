@@ -19,10 +19,8 @@ static NANOS_TO_TSC_TICKS_RATIO: Once<Ratio> = Once::new();
 static NANOS_TO_LAPIC_TICKS_RATIO: Once<Ratio> =
     Once::initialized(Ratio::new(LAPIC_TICKS_PER_SEC as u32, 1_000_000_000u32));
 
-struct X86LapicTscMonotonicTimer;
-
 #[kplat::impl_dev_interface]
-impl khal::time::MonotonicTimerIf for X86LapicTscMonotonicTimer {
+impl khal::time::MonotonicTimerIf {
     fn now_ticks() -> u64 {
         now_ticks()
     }
@@ -45,6 +43,10 @@ impl khal::time::MonotonicTimerIf for X86LapicTscMonotonicTimer {
 
     fn arm_timer(deadline_ns: u64) {
         arm_timer(deadline_ns)
+    }
+
+    fn handle_idle_return(_previous_ticks: u64) -> bool {
+        false
     }
 }
 

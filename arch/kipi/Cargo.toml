@@ -12,7 +12,7 @@ repository.workspace = true
 default = []
 
 [dependencies]
-crate_interface.workspace = true
+kiface.workspace = true
 karch = { workspace = true }
 khal = { workspace = true, features = ["ipi"] }
 kcpu_id_map.workspace = true

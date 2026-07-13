@@ -17,10 +17,8 @@ pub mod pl031;
 
 static RTC_EPOCHOFFSET_NANOS: AtomicU64 = AtomicU64::new(0);
 
-struct DriverRtcIfImpl;
-
 #[kplat::impl_dev_interface]
-impl khal::rtc::RtcIf for DriverRtcIfImpl {
+impl khal::rtc::RtcIf {
     fn offset_ns() -> u64 {
         offset_ns()
     }

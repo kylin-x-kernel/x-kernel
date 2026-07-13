@@ -7,7 +7,6 @@
 use alloc::{collections::BTreeMap, sync::Arc};
 use core::marker::PhantomData;
 
-use crate_interface::{call_interface, def_interface};
 #[cfg(feature = "ipi")]
 pub use kbuild_config::IPI_IRQ;
 use kcpu::excp::{IRQ, register_trap_handler};
@@ -37,7 +36,7 @@ pub enum TargetCpu {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[def_interface]
+#[kiface::interface]
 pub trait X86ApicIf {
     fn alloc_msix_vector() -> Option<u8>;
     fn free_msix_vector(vector: u8) -> bool;
@@ -49,7 +48,7 @@ pub trait X86ApicIf {
 /// Returns `None` when all vectors are exhausted.
 #[cfg(target_arch = "x86_64")]
 pub fn alloc_msix_vector() -> Option<u8> {
-    call_interface!(X86ApicIf::alloc_msix_vector())
+    X86ApicIf::alloc_msix_vector()
 }
 
 /// Releases a previously allocated MSI-X CPU vector.
@@ -58,13 +57,13 @@ pub fn alloc_msix_vector() -> Option<u8> {
 /// currently allocated.
 #[cfg(target_arch = "x86_64")]
 pub fn free_msix_vector(vector: u8) -> bool {
-    call_interface!(X86ApicIf::free_msix_vector(vector))
+    X86ApicIf::free_msix_vector(vector)
 }
 
 /// Returns the APIC ID of the current logical CPU.
 #[cfg(target_arch = "x86_64")]
 pub fn current_apic_id() -> u8 {
-    call_interface!(X86ApicIf::current_apic_id())
+    X86ApicIf::current_apic_id()
 }
 
 /// An IRQ claimed by the platform and not yet completed.
@@ -112,7 +111,7 @@ impl Drop for DispatchedIrq {
     }
 }
 
-#[def_interface]
+#[kiface::interface]
 pub trait IntrManagerIf {
     fn configure(desc: IrqDesc);
     fn enable(id: usize, on: bool);
@@ -133,12 +132,12 @@ pub trait IntrManagerIf {
 
 #[inline]
 fn platform_configure(desc: IrqDesc) {
-    call_interface!(IntrManagerIf::configure, desc)
+    IntrManagerIf::configure(desc)
 }
 
 #[inline]
 fn platform_enable(id: usize, on: bool) {
-    call_interface!(IntrManagerIf::enable, id, on)
+    IntrManagerIf::enable(id, on)
 }
 
 #[inline]
@@ -170,22 +169,22 @@ fn disable_platform_irq(desc: IrqDesc) {
 
 #[inline]
 fn platform_dispatch_irq(id: usize) -> Option<DispatchedIrq> {
-    call_interface!(IntrManagerIf::dispatch_irq, id)
+    IntrManagerIf::dispatch_irq(id)
 }
 
 #[inline]
 fn platform_complete_irq(completion_cookie: usize) {
-    call_interface!(IntrManagerIf::complete_irq, completion_cookie)
+    IntrManagerIf::complete_irq(completion_cookie)
 }
 
 #[inline]
 pub fn notify_cpu(id: usize, target: TargetCpu) {
-    call_interface!(IntrManagerIf::notify_cpu, id, target)
+    IntrManagerIf::notify_cpu(id, target)
 }
 
 #[inline]
 pub fn set_prio(id: usize, prio: u8) {
-    call_interface!(IntrManagerIf::set_prio, id, prio)
+    IntrManagerIf::set_prio(id, prio)
 }
 
 static IRQ_STATE: SpinNoIrq<IrqState> = SpinNoIrq::new(IrqState::new());

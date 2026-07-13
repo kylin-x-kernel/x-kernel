@@ -40,9 +40,8 @@ impl IrqType {
         }
     }
 }
-struct IntrManagerImpl;
 #[impl_dev_interface]
-impl khal::irq::IntrManagerIf for IntrManagerImpl {
+impl khal::irq::IntrManagerIf {
     fn configure(_desc: khal::irq::IrqDesc) {}
 
     fn enable(irq: usize, enabled: bool) {

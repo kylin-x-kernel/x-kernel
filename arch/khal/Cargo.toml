@@ -40,7 +40,7 @@ memaddr.workspace = true
 kaddr_layout.workspace = true
 page_table = { workspace = true }
 percpu.workspace = true
-crate_interface.workspace = true
+kiface.workspace = true
 acpi = { workspace = true }
 of = { workspace = true }
 unittest.workspace = true

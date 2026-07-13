@@ -5,7 +5,7 @@
 //! Cache maintenance operations for RISC-V.
 //!
 //! RISC-V `fence.i` synchronises instruction and data memories only on the
-//! current hart. For SMP correctness, we use `crate_interface` to delegate
+//! current hart. For SMP correctness, we use `kiface` to delegate
 //! remote hart flushes to the IPI subsystem (`kipi`).
 
 use memaddr::VirtAddr;

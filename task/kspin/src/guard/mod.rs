@@ -8,7 +8,7 @@
 //! kernel spinlocks with different synchronization guarantees.
 
 /// Low-level kernel interfaces for guard operations.
-#[crate_interface::def_interface]
+#[kiface::interface]
 pub trait KernelGuardIf {
     /// Enable kernel preemption.
     fn enable_preempt();

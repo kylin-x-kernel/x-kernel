@@ -8,7 +8,7 @@
 
 ## 背景
 
-x-kernel 将**引导**（`kernel-boot`、平台 `platconfig`）与**运行时**（内存、调度、驱动、用户态 init）分离。引导层通过 `BootInfo` 和 `linkme` 切片把主核/从核入口注册为函数指针；`kruntime` 提供这些入口的实现（`rust_main` / `rust_main_secondary`），并在全部 CPU 就绪后调用链接进来的 `main()`。
+x-kernel 将**引导**（`kernel-boot`、平台 `platconfig`）与**运行时**（内存、调度、驱动、用户态 init）分离。引导层通过 `BootInfo` 和 `kiface` 单实现入口把主核/从核控制权交给运行时；`kruntime` 提供这些入口的实现（`rust_main` / `rust_main_secondary`），并在全部 CPU 就绪后调用链接进来的 `main()`。
 
 应用逻辑（例如 `entry::runtime::init_runtime`）放在 `entry` crate；初始用户进程组装则由 `posix-process::run_init_process` 承接，避免 `kruntime` 反向依赖高层服务。
 
@@ -35,7 +35,7 @@ core/kruntime/
 ```
 kernel-boot (汇编 / MMU / BootInfo)
         │
-        │  call_kernel_entry!(PRIMARY_KERNEL_ENTRY, boot_info_ptr)
+        │  PrimaryKernelEntry::enter(boot_info_ptr)
         ▼
 ┌───────────────────────────────────────────────────────────────┐
 │  kruntime::rust_main (主核)                                    │
@@ -46,7 +46,7 @@ kernel-boot (汇编 / MMU / BootInfo)
 │    main()  ──────────────────────────────►  entry crate       │
 └───────────────────────────────────────────────────────────────┘
         │
-        │  boot_ap → SECOND_KERNEL_ENTRY
+        │  boot_ap → SecondaryKernelEntry::enter(logical_cpu_id)
         ▼
 ┌───────────────────────────────────────────────────────────────┐
 │  kruntime::rust_main_secondary (从核)                          │
@@ -55,14 +55,16 @@ kernel-boot (汇编 / MMU / BootInfo)
 └───────────────────────────────────────────────────────────────┘
 
 侧向接线（链接期，非启动顺序）：
-  dma_integration  ──impl──►  kdma::DmaPageTableIf  ──►  memspace
-  LogIfImpl          ──impl──►  klogger::LoggerAdapter
+  dma_integration  ──provide──►  kdma::DmaPageTableIf  ──►  memspace
+  lib.rs            ──provide──►  klogger::LoggerAdapter
+  lib.rs            ──provide──►  kernel_boot::PrimaryKernelEntry
+  mp.rs             ──provide──►  kernel_boot::SecondaryKernelEntry
 ```
 
 | 组件 | 职责 |
 |------|------|
-| `rust_main` | 主核唯一完整初始化路径；注册为 `PRIMARY_KERNEL_ENTRY` |
-| `rust_main_secondary` | 从核初始化；注册为 `SECOND_KERNEL_ENTRY`；最终 `run_idle` |
+| `rust_main` | 主核唯一完整初始化路径；由 `PrimaryKernelEntry` provider 进入 |
+| `rust_main_secondary` | 从核初始化；由 `SecondaryKernelEntry` provider 进入；最终 `run_idle` |
 | `mp::start_secondary_cpus` | 为 AP 准备栈、调用 `boot_ap`、等待 AP 进入 runtime |
 | `init_setup` | 执行链接段 `.init_array` 中的 `register_init` 回调 |
 | `dma_integration` | 将 DMA 页表属性更新委托给 `memspace::kernel_layout` |
@@ -115,7 +117,7 @@ INITED_CPUS.load(Acquire) == kcpu_id_map::nr_cpus()
 ## 启动流程（从核）
 
 ```
-SECOND_KERNEL_ENTRY(logical_cpu_id)
+SecondaryKernelEntry::enter(logical_cpu_id)
     → percpu::init_secondary, init_trap
     → ENTERED_CPUS += 1  (供 start_secondary_cpus 等待)
     → memspace::init_memory_management_secondary
@@ -139,13 +141,15 @@ SECOND_KERNEL_ENTRY(logical_cpu_id)
 
 各子系统可通过 `util/macros` 的 `#[register_init]` 向该段注册早期 init，无需修改 `kruntime` 源码列表。
 
-## `crate_interface` 接线
+## `kiface` 接线
 
 | 接口 | 实现位置 | 目的 |
 |------|----------|------|
 | `kdma::DmaPageTableIf` | `dma_integration.rs` | 打破 `kdma` ↔ `memspace` 循环依赖 |
-| `klogger::LoggerAdapter` | `lib.rs` `LogIfImpl` | 日志输出到 `khal::console`，附带 CPU/任务 ID |
-均为链接期单实现，非运行时注册。
+| `klogger::LoggerAdapter` | `lib.rs` | 日志输出到 `khal::console`，附带 CPU/任务 ID |
+| `kernel_boot::PrimaryKernelEntry` | `lib.rs` | 主核从 boot 层进入 `rust_main` |
+| `kernel_boot::SecondaryKernelEntry` | `mp.rs` | 从核从 boot 层进入 `rust_main_secondary` |
+均为链接期 exactly-one 单实现，非运行时注册。
 
 ## Cargo Features
 
@@ -178,7 +182,7 @@ SECOND_KERNEL_ENTRY(logical_cpu_id)
 
 ### 日志适配放在 `lib.rs`
 
-`LoggerAdapter` 需在 `klogger::init_klogger` 之前通过 `impl_interface` 链接生效；与 `rust_main` 同文件可避免初始化顺序问题。
+`LoggerAdapter` 需在 `klogger::init_klogger` 之前通过 `kiface` provider 链接生效；与 `rust_main` 同文件可避免初始化顺序问题。
 
 ## 与 QEMU / 真机的边界
 

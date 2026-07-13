@@ -15,7 +15,7 @@ x-kernel 将“**调度算法**”与“**任务运行时**”分离：
 - `ksched`：提供 FIFO/RR/CFS/EEVDF 等算法 trait 与实体。
 - `ktask`：维护任务生命周期、当前任务上下文、每 CPU run queue、切换与阻塞语义。
 
-`ktask` 通过 `crate_interface` 实现 `kspin::KernelGuardIf`，把 `kspin` 的 guard acquire/release 与任务抢占计数挂接，形成“临界区退出时再检查抢占”的延迟抢占模型。
+`ktask` 通过 `kiface` 实现 `kspin::KernelGuardIf`，把 `kspin` 的 guard acquire/release 与任务抢占计数挂接，形成“临界区退出时再检查抢占”的延迟抢占模型。
 
 ## 范围
 

@@ -10,7 +10,7 @@ use core::{
 
 use kbuild_config::{NR_CPUS, TASK_STACK_SIZE};
 use kcpu_id_map::{LogicalCpuId, for_each_present_logical_cpu};
-use kernel_boot::{SECOND_KERNEL_ENTRY, register_boot_init};
+use kernel_boot::SecondaryKernelEntry;
 use kerrno::KResult;
 use khal::mem::{VirtAddr, v2p};
 
@@ -86,7 +86,6 @@ pub fn start_secondary_cpus(primary_cpu_id: LogicalCpuId) -> KResult {
 /// The main entry point of the runtime for secondary cores.
 ///
 /// It is called from the bootstrapping code in the specific platform crate.
-#[register_boot_init(SECOND_KERNEL_ENTRY)]
 pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     khal::percpu::init_secondary(logical_cpu_id);
     kcpu::init_trap();
@@ -122,6 +121,13 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     watchdog::init_secondary();
 
     ktask::run_idle();
+}
+
+#[kiface::provide]
+impl SecondaryKernelEntry {
+    fn enter(logical_cpu_id: LogicalCpuId) -> ! {
+        rust_main_secondary(logical_cpu_id)
+    }
 }
 
 // ---------------------------------------------------------------------------

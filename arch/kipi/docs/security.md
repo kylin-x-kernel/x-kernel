@@ -19,7 +19,7 @@
 │  └──────────────┘   └──────────────────┘  │
 └───────────────────────────────────────────┘
    │
-   │ crate_interface / raw per-cpu refs / IRQ backend
+   │ kiface / raw per-cpu refs / IRQ backend
    v
 平台中断控制器与 CPU 本地执行上下文
 ```

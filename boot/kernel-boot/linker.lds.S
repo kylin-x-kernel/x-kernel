@@ -135,10 +135,6 @@ SECTIONS {
     linkm2_PAGE_FAULT : { KEEP(*(linkm2_PAGE_FAULT)) }
     linkme_INIT_TRAP : { KEEP(*(linkme_INIT_TRAP)) }
     linkm2_INIT_TRAP : { KEEP(*(linkm2_INIT_TRAP)) }
-    linkme_PRIMARY_KERNEL_ENTRY : { KEEP(*(linkme_PRIMARY_KERNEL_ENTRY)) }
-    linkm2_PRIMARY_KERNEL_ENTRY : { KEEP(*(linkm2_PRIMARY_KERNEL_ENTRY)) }
-    linkme_SECOND_KERNEL_ENTRY : { KEEP(*(linkme_SECOND_KERNEL_ENTRY)) }
-    linkm2_SECOND_KERNEL_ENTRY : { KEEP(*(linkm2_SECOND_KERNEL_ENTRY)) }
     linkme_LOCK_CLASSES : { KEEP(*(linkme_LOCK_CLASSES)) }
     linkm2_LOCK_CLASSES : { KEEP(*(linkm2_LOCK_CLASSES)) }
     scope_local : { KEEP(*(scope_local)) }

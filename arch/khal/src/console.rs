@@ -4,15 +4,11 @@
 
 use core::fmt::{Arguments, Result, Write};
 
-use crate_interface::{call_interface, def_interface};
-
-#[def_interface]
+#[kiface::interface]
 pub trait ConsoleIf {
     fn write_data(buf: &[u8]);
 
-    fn write_data_atomic(buf: &[u8]) {
-        Self::write_data(buf)
-    }
+    fn write_data_atomic(buf: &[u8]);
 
     fn read_data(buf: &mut [u8]) -> usize;
 
@@ -21,22 +17,22 @@ pub trait ConsoleIf {
 
 #[inline]
 pub fn write_data(buf: &[u8]) {
-    call_interface!(ConsoleIf::write_data, buf)
+    ConsoleIf::write_data(buf)
 }
 
 #[inline]
 pub fn write_data_atomic(buf: &[u8]) {
-    call_interface!(ConsoleIf::write_data_atomic, buf)
+    ConsoleIf::write_data_atomic(buf)
 }
 
 #[inline]
 pub fn read_data(buf: &mut [u8]) -> usize {
-    call_interface!(ConsoleIf::read_data, buf)
+    ConsoleIf::read_data(buf)
 }
 
 #[inline]
 pub fn interrupt_id() -> Option<usize> {
-    call_interface!(ConsoleIf::interrupt_id)
+    ConsoleIf::interrupt_id()
 }
 
 struct Logger;

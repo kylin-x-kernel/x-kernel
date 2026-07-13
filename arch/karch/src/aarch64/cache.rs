@@ -7,7 +7,7 @@
 //! AArch64 `ic ivau` / `ic iallu` broadcast to the inner shareable domain via
 //! hardware, so icache entries are invalidated on all PEs. However, only an
 //! `isb` on a given PE flushes that PE's pipeline of stale prefetched
-//! instructions. We therefore send an IPI (via `crate_interface` → `kipi`) so
+//! instructions. We therefore send an IPI (via `kiface` → `kipi`) so
 //! every PE executes `isb`.
 
 use core::arch::asm;

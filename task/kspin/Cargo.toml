@@ -18,7 +18,7 @@ default = []
 
 [dependencies]
 cfg-if = { workspace = true }
-crate_interface = {workspace = true }
+kiface = { workspace = true }
 karch = { workspace = true }
 klockstat = { workspace = true, optional = true }
 linkme = { workspace = true, optional = true }

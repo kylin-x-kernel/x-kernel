@@ -101,10 +101,8 @@ impl TimerConfig {
     }
 }
 
-struct ArmGenericMonotonicTimer;
-
 #[kplat::impl_dev_interface]
-impl khal::time::MonotonicTimerIf for ArmGenericMonotonicTimer {
+impl khal::time::MonotonicTimerIf {
     fn now_ticks() -> u64 {
         now_ticks()
     }
@@ -132,6 +130,11 @@ impl khal::time::MonotonicTimerIf for ArmGenericMonotonicTimer {
     #[cfg(feature = "arm-timer-resume-fixup")]
     fn handle_idle_return(previous_ticks: u64) -> bool {
         handle_idle_return(previous_ticks)
+    }
+
+    #[cfg(not(feature = "arm-timer-resume-fixup"))]
+    fn handle_idle_return(_previous_ticks: u64) -> bool {
+        false
     }
 }
 

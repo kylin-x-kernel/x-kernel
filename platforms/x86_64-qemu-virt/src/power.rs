@@ -9,9 +9,8 @@ use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
 use kerrno::KResult;
 use kplat::sys::SysCtrl;
 use x86_64::instructions::port::PortWriteOnly;
-struct PowerImpl;
 #[impl_dev_interface]
-impl SysCtrl for PowerImpl {
+impl SysCtrl {
     #[cfg(feature = "smp")]
     fn boot_ap(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) -> KResult {
         use khal::mem::pa;

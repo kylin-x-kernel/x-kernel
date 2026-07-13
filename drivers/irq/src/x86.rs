@@ -79,10 +79,8 @@ fn dispatch_irq(vector: usize) -> Option<khal::irq::DispatchedIrq> {
     None
 }
 
-struct X86ApicIrqIfImpl;
-
 #[kplat::impl_dev_interface]
-impl khal::irq::IntrManagerIf for X86ApicIrqIfImpl {
+impl khal::irq::IntrManagerIf {
     fn configure(desc: khal::irq::IrqDesc) {
         configure(desc);
     }

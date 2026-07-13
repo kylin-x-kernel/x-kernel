@@ -19,7 +19,7 @@ kbuild_config = { workspace = true }
 boot_info = { workspace = true }
 kaddr_layout = { workspace = true }
 kcpu_id_map = { workspace = true }
-linkme = { workspace = true }
+kiface = { workspace = true }
 
 # Architecture-specific dependencies
 [target.'cfg(target_arch = "aarch64")'.dependencies]

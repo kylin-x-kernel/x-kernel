@@ -5,7 +5,7 @@
 //! Cache maintenance operations for LoongArch64.
 //!
 //! LoongArch64 `ibar 0` invalidates the instruction cache only on the current
-//! core. For SMP correctness, we use `crate_interface` to delegate remote
+//! core. For SMP correctness, we use `kiface` to delegate remote
 //! core flushes to the IPI subsystem (`kipi`).
 
 use core::arch::asm;
