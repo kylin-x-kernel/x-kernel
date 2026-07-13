@@ -266,14 +266,15 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueR
     }
     #[cfg(feature = "smp")]
     {
-        let current_cpu = this_cpu_id();
-        let inner = if task.cpumask().get(current_cpu.as_usize()) {
-            current_run_queue_mut()
+        // Prefer the CPU where the task blocked; fall back to RR if affinity changed.
+        let last_cpu = task.cpu_id();
+        let index = if task.cpumask().get(last_cpu.as_usize()) {
+            last_cpu.as_usize()
         } else {
-            get_run_queue(select_run_queue_index(&task.cpumask()))
+            select_run_queue_index(&task.cpumask())
         };
         KRunQueueRef {
-            inner,
+            inner: get_run_queue(index),
             state: irq_state,
             _phantom: core::marker::PhantomData,
         }

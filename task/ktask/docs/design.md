@@ -143,7 +143,7 @@ guard 尚未释放时，抢占只保留 `need_resched` pending，不实际切换
 
 - `future::block_on` 在 `Poll::Pending` 下走 `blocked_resched()`，把当前任务置为 `Blocked`。
 - waker 触发时通过 `select_wake_run_queue(...).unblock_task(..., true)` 将任务恢复为 `Ready`。
-- SMP 下若当前 CPU 满足目标任务 affinity，唤醒优先入当前 CPU run queue；否则回退到普通 `select_run_queue` 轮询选队。
+- SMP 下唤醒优先入任务阻塞时的 home CPU（`task.cpu_id()`）；若 cpumask 已不含该 CPU，则回退到普通 `select_run_queue` 轮询选队。
 - `unblock_task(..., true)` 对本 CPU 设置 `need_resched`；对远端 CPU 在 `ipi + preempt` 可用时请求远端设置 `need_resched`。
 - `WaitQueue` 基于 `event_listener` 封装等待与通知，支持超时与条件等待。
 
@@ -162,7 +162,7 @@ guard 尚未释放时，抢占只保留 `need_resched` pending，不实际切换
 
 - 每 CPU 一个 `RUN_QUEUE`、`IDLE_TASK`、`EXITED_TASKS`、`WAIT_FOR_EXIT`。
 - `select_run_queue` 依据任务 `cpumask` 在允许 CPU 集内做轮询选队。
-- `select_wake_run_queue` 用于 wait/future 唤醒路径，优先选择当前 CPU 以缩短 wake-to-run 延迟。
+- `select_wake_run_queue` 用于 wait/future 唤醒路径，优先选择任务阻塞时的 home CPU，避免 waker 继续占用 CPU 导致 wakee 在 waker 核排队。
 - 当前实现无主动负载均衡器；任务跨核迁移主要由 affinity 变化触发。
 - 对 `Blocked` 任务重新入队时，SMP 下会等待 `task.on_cpu()` 清零，避免与远端 CPU 的切换过程并发冲突。
 - 远端 run queue 唤醒不会直接切换远端 CPU；在支持 IPI 和抢占时，通过远端 pending-resched 请求把切换推迟到远端安全点。
