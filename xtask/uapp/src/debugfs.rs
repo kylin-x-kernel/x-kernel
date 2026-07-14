@@ -3,6 +3,7 @@
 // See LICENSES for license details.
 
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -15,16 +16,62 @@ pub struct InstallFile {
     pub mode: u32,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct DebugfsScript {
     commands: Vec<String>,
+    known_directories: BTreeSet<String>,
 }
 
 impl DebugfsScript {
     pub fn new() -> Self {
+        let mut known_directories = BTreeSet::new();
+        known_directories.insert("/".to_string());
         Self {
             commands: Vec::new(),
+            known_directories,
         }
+    }
+
+    /// Discovers and records ancestor directories that already exist in `disk_img`.
+    ///
+    /// Recorded directories are skipped when later file additions generate their
+    /// directory-creation commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `debugfs` cannot inspect a path or an existing ancestor
+    /// is not a directory.
+    pub fn discover_existing_directories(
+        &mut self,
+        disk_img: &Path,
+        guest_paths: &[String],
+    ) -> Result<(), String> {
+        for guest_path in guest_paths {
+            let mut current = String::new();
+            for component in guest_path
+                .split('/')
+                .filter(|component| !component.is_empty())
+            {
+                current.push('/');
+                current.push_str(component);
+                if self.known_directories.contains(&current) {
+                    continue;
+                }
+
+                let Some(output) = debugfs_stat_if_exists(disk_img, &current)? else {
+                    // Descendants cannot exist when their parent is absent. They will be
+                    // created in order when the command script is executed.
+                    break;
+                };
+                if !output.contains("Type: directory") {
+                    return Err(format!(
+                        "debugfs path required as directory is not a directory: {current}"
+                    ));
+                }
+                self.known_directories.insert(current.clone());
+            }
+        }
+        Ok(())
     }
 
     pub fn add_file(&mut self, file: &InstallFile) {
@@ -68,9 +115,11 @@ impl DebugfsScript {
             };
             current.push('/');
             current.push_str(component);
-            self.commands.push(format!("cd {}", debugfs_quote(&parent)));
-            self.commands
-                .push(format!("mkdir {}", debugfs_quote(component)));
+            if self.known_directories.insert(current.clone()) {
+                self.commands.push(format!("cd {}", debugfs_quote(&parent)));
+                self.commands
+                    .push(format!("mkdir {}", debugfs_quote(component)));
+            }
         }
     }
 
@@ -83,6 +132,12 @@ impl DebugfsScript {
 
     pub fn command_count(&self) -> usize {
         self.commands.len()
+    }
+}
+
+impl Default for DebugfsScript {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -128,6 +183,11 @@ pub fn guest_parent(path: &str) -> String {
 }
 
 fn debugfs_stat(disk_img: &Path, path: &str) -> Result<String, String> {
+    debugfs_stat_if_exists(disk_img, path)?
+        .ok_or_else(|| format!("debugfs verification failed for {path}: path does not exist"))
+}
+
+fn debugfs_stat_if_exists(disk_img: &Path, path: &str) -> Result<Option<String>, String> {
     let output = Command::new("debugfs")
         .arg("-R")
         .arg(format!("stat {}", debugfs_quote(path)))
@@ -139,14 +199,16 @@ fn debugfs_stat(disk_img: &Path, path: &str) -> Result<String, String> {
     let mut text = String::new();
     text.push_str(&String::from_utf8_lossy(&output.stdout));
     text.push_str(&String::from_utf8_lossy(&output.stderr));
-    if !output.status.success()
-        || text.contains("File not found")
+    if text.contains("File not found")
         || text.contains("while looking up")
         || text.contains("while trying to resolve")
     {
+        return Ok(None);
+    }
+    if !output.status.success() {
         return Err(format!("debugfs verification failed for {path}: {text}"));
     }
-    Ok(text)
+    Ok(Some(text))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,7 +272,9 @@ fn debugfs_quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{guest_basename, guest_parent, validate_guest_path};
+    use std::path::PathBuf;
+
+    use super::{DebugfsScript, InstallFile, guest_basename, guest_parent, validate_guest_path};
 
     #[test]
     fn guest_parent_handles_root_children() {
@@ -249,5 +313,39 @@ mod tests {
     fn validate_guest_path_rejects_control_chars_and_nul() {
         assert!(validate_guest_path("/a\nb").is_err());
         assert!(validate_guest_path("/a\0b").is_err());
+    }
+
+    #[test]
+    fn directory_commands_skip_known_and_planned_directories() {
+        let mut script = DebugfsScript::new();
+        script.known_directories.insert("/usr".to_string());
+        let first = InstallFile {
+            host_path: PathBuf::from("/tmp/first"),
+            guest_path: "/usr/tests/app/first".to_string(),
+            mode: 0o755,
+        };
+        let second = InstallFile {
+            host_path: PathBuf::from("/tmp/second"),
+            guest_path: "/usr/tests/app/second".to_string(),
+            mode: 0o755,
+        };
+
+        script.add_file(&first);
+        script.add_file(&second);
+
+        assert!(
+            !script
+                .commands
+                .iter()
+                .any(|command| command == "mkdir \"usr\"")
+        );
+        assert_eq!(
+            script
+                .commands
+                .iter()
+                .filter(|command| command.starts_with("mkdir "))
+                .count(),
+            2
+        );
     }
 }

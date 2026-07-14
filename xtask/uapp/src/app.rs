@@ -80,6 +80,15 @@ pub fn install(command: InstallCommand) -> Result<(), String> {
     let autostart_host_path = install::write_autostart_file(&autostart_content)?;
 
     let mut script = DebugfsScript::new();
+    if !command.dry_run {
+        let mut parent_directories = install_files
+            .iter()
+            .map(|file| debugfs::guest_parent(&file.guest_path))
+            .collect::<Vec<_>>();
+        parent_directories.sort();
+        parent_directories.dedup();
+        script.discover_existing_directories(&command.disk_img, &parent_directories)?;
+    }
     for file in &install_files {
         script.add_file(file);
     }
