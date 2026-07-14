@@ -16,7 +16,7 @@ use kerrno::{KError, KResult, LinuxError};
 #[cfg(feature = "vsock")]
 use knet::vsock::{VsockSocket, VsockStreamTransport};
 use knet::{
-    Shutdown, Socket, SocketAddrEx, SocketOps,
+    AcceptOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
     netlink::NetlinkSocket,
     packet::{PacketSocket, PacketSocketKind},
     raw::{IpProtocol, IpVersion, RawSocket},
@@ -180,8 +180,11 @@ pub fn sys_accept4(
 ) -> KResult<isize> {
     let cloexec = flags & O_CLOEXEC != 0;
 
-    let socket = socket_from_fd(fd)?;
-    let socket = socket.accept()?;
+    let file = kprocess::current_resources().get_file(fd)?;
+    let socket = sock_from_file(&file)?;
+    let socket = socket.accept(AcceptOptions {
+        nonblocking: file.is_nonblocking(),
+    })?;
 
     let remote_addr = socket.peer_addr()?;
     let file = sock_alloc_file(socket, O_RDWR | (flags & O_NONBLOCK))?;

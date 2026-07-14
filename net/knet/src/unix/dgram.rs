@@ -185,7 +185,7 @@ impl UnixTransportOps for DgramTransport {
         Ok(())
     }
 
-    async fn accept(&self) -> KResult<(UnixTransport, UnixAddr)> {
+    async fn accept(&self, _nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)> {
         Err(KError::InvalidInput)
     }
 

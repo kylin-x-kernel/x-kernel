@@ -16,6 +16,8 @@ vsock = ["kclass/vsock"]
 unittest = { workspace = true }
 kclass = { workspace = true, features = ["net"] }
 kdevice = { workspace = true }
+device_res = { workspace = true }
+irq_notify = { workspace = true }
 khal = { workspace = true }
 ksync = { workspace = true }
 ktask = { workspace = true }

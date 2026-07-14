@@ -211,7 +211,7 @@ impl UnixTransportOps for StreamTransport {
         Ok(())
     }
 
-    async fn accept(&self) -> KResult<(UnixTransport, UnixAddr)> {
+    async fn accept(&self, nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)> {
         let (rx, _poll) = {
             let mut guard = self.accept_rx.lock();
             let Some((rx, poll)) = guard.as_mut() else {
@@ -219,11 +219,19 @@ impl UnixTransportOps for StreamTransport {
             };
             (rx.clone(), poll.clone())
         };
+        let request = if nonblocking {
+            rx.try_recv().map_err(|err| match err {
+                async_channel::TryRecvError::Empty => KError::WouldBlock,
+                async_channel::TryRecvError::Closed => KError::ConnectionReset,
+            })?
+        } else {
+            rx.recv().await.map_err(|_| KError::ConnectionReset)?
+        };
         let ConnRequest {
             channel,
             addr: peer_addr,
             pid,
-        } = rx.recv().await.map_err(|_| KError::ConnectionReset)?;
+        } = request;
         Ok((
             UnixTransport::Stream(StreamTransport::new_channel(Some(channel), pid)),
             peer_addr,

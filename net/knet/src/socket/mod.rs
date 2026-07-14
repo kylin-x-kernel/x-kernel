@@ -142,6 +142,13 @@ impl RecvFlags {
 
 pub type AncillaryData = Box<dyn Any + Send + Sync>;
 
+/// Options for accepting a connection from a listening socket.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct AcceptOptions {
+    /// Return [`KError::WouldBlock`] when no connection is ready.
+    pub nonblocking: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum SocketErrorOrigin {
     Local,
@@ -228,7 +235,7 @@ pub trait SocketOps: Configurable {
         Err(KError::OperationNotSupported)
     }
     /// Accepts a connection on a listening socket, returning a new socket.
-    fn accept(&self) -> KResult<Socket> {
+    fn accept(&self, _options: AcceptOptions) -> KResult<Socket> {
         Err(KError::OperationNotSupported)
     }
 
@@ -263,8 +270,8 @@ impl<T: SocketOps + ?Sized> SocketOps for Box<T> {
         (**self).listen(backlog)
     }
 
-    fn accept(&self) -> KResult<Socket> {
-        (**self).accept()
+    fn accept(&self, options: AcceptOptions) -> KResult<Socket> {
+        (**self).accept(options)
     }
 
     fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {

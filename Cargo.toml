@@ -146,6 +146,7 @@ vsock = { path = "drivers/vsock" }
 acpi = { path = "drivers/acpi" }
 of = { path = "drivers/of" }
 dice_driver = { path = "drivers/dice", package = "dice-driver" }
+irq_notify = { path = "drivers/irq-notify", package = "irq-notify" }
 irq_driver = { path = "drivers/irq", package = "irq-driver" }
 rtc_driver = { path = "drivers/rtc", package = "rtc-driver" }
 timer_driver = { path = "drivers/timer", package = "timer-driver" }

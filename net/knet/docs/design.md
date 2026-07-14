@@ -222,6 +222,8 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 3. `ListenTable` 为新连接创建一个 smoltcp TCP socket，放入 SYN 队列。
 4. 后续 poll 观察到连接可接受后移动到 accept 队列。
 5. `TcpSocket::accept` 取出 `AcceptedTcp`，构造新的 connected `TcpSocket`。
+6. POSIX 层通过 `AcceptOptions` 传入监听文件的 nonblocking 状态；accept 队列为空时，
+   nonblocking 调用返回 `WouldBlock`，由用户态 poll/epoll 负责等待下一次可读事件。
 
 ### rtnetlink 请求
 

@@ -100,7 +100,7 @@ impl VsockTransportOps for VsockStreamTransport {
         })
     }
 
-    fn accept(&self) -> KResult<(VsockTransport, VsockAddr)> {
+    fn accept(&self, nonblocking: bool) -> KResult<(VsockTransport, VsockAddr)> {
         if self.state.get() != State::Listening {
             k_bail!(InvalidInput, "not listening");
         }
@@ -109,26 +109,27 @@ impl VsockTransportOps for VsockStreamTransport {
         let local_port = conn.lock().local_addr().port;
 
         // wait for connection
-        self.general.recv_poller(self, || {
-            let mut manager = VSOCK_CONN_MANAGER.lock();
+        self.general
+            .recv_poller_with_nonblocking(self, nonblocking, || {
+                let mut manager = VSOCK_CONN_MANAGER.lock();
 
-            if !manager.can_accept(local_port) {
-                return Err(KError::WouldBlock);
-            }
+                if !manager.can_accept(local_port) {
+                    return Err(KError::WouldBlock);
+                }
 
-            let (conn_id, peer_addr) = manager.accept(local_port)?;
-            let conn = manager.get_connection(conn_id).ok_or(KError::NotFound)?;
+                let (conn_id, peer_addr) = manager.accept(local_port)?;
+                let conn = manager.get_connection(conn_id).ok_or(KError::NotFound)?;
 
-            // create new VsockStreamTransport
-            let new_transport = VsockStreamTransport {
-                conn_id: Mutex::new(Some(conn_id)),
-                connection: Mutex::new(Some(conn)),
-                state: StateLock::new(State::Connected),
-                general: GeneralOptions::default(),
-            };
+                // create new VsockStreamTransport
+                let new_transport = VsockStreamTransport {
+                    conn_id: Mutex::new(Some(conn_id)),
+                    connection: Mutex::new(Some(conn)),
+                    state: StateLock::new(State::Connected),
+                    general: GeneralOptions::default(),
+                };
 
-            Ok((VsockTransport::Stream(new_transport), peer_addr))
-        })
+                Ok((VsockTransport::Stream(new_transport), peer_addr))
+            })
     }
 
     fn connect(&self, peer_addr: VsockAddr) -> KResult<()> {

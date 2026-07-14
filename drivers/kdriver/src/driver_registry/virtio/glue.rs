@@ -90,10 +90,10 @@ cfg_if! {
         impl VirtIoSocket {
             pub fn try_new<T: virtio::Transport + 'static>(
                 transport: T,
-                _irq: Option<usize>,
+                irq: Option<usize>,
             ) -> DriverResult<kclass::prelude::VsockDeviceImpl> {
                 Ok(Box::new(virtio::VirtIoSocketDev::<VirtIoHalImpl, T>::try_new(
-                    transport,
+                    transport, irq,
                 )?))
             }
         }

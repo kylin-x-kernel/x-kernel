@@ -194,8 +194,9 @@ volatile 访问，但不提供 CPU 侧的内存序保证。额外的 `fence(Acqu
 | 类型 | Drop 行为 |
 |------|----------|
 | `Io` | 如果 mapping 和 provider 均为 `Some`，调用 `provider.unmap_mmio(mapping)` |
-| `Irq` | 如果 `armed` 且 provider 为 `Some`，调用 `provider.release_irq(resource)` |
+| `Irq` | 如果 `armed` 且 provider 为 `Some`，调用 `provider.release_irq(resource, token)` |
 | `DmaCoherent` | 如果 allocation 和 provider 均为 `Some`，调用 `provider.free_coherent(allocation)` |
 
 所有 drop 路径使用 `try_provider()` 避免在系统关闭时 panic。
-`Irq` 使用 `armed` 标志防止 `request_irq` 失败后 drop 时误调用 `release_irq`。
+`Irq` 使用 `armed` 标志防止 `request_irq` 失败后 drop 时误调用 `release_irq`，
+并保存 provider 返回的 token，使共享 IRQ 释放时只移除当前注册的 handler。

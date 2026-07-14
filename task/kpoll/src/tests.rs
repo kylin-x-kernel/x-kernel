@@ -6,7 +6,7 @@
 
 #![cfg(unittest)]
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
 use core::{
     sync::atomic::{AtomicUsize, Ordering},
     task::{RawWaker, RawWakerVTable, Waker},
@@ -66,25 +66,33 @@ fn test_pollset_register_and_wake() {
     set.register(&waker);
 
     let woke = set.wake();
-    unittest::assert_eq!(woke, 2);
-    unittest::assert_eq!(counter.load(Ordering::SeqCst), 2);
+    unittest::assert_eq!(woke, 1);
+    unittest::assert_eq!(counter.load(Ordering::SeqCst), 1);
 }
 
 #[def_test]
-fn test_pollset_capacity_eviction_wakes_old() {
+fn test_pollset_capacity_eviction_drops_old() {
     let set = PollSet::new();
-    let counter_old = new_counter();
-    let waker_old = make_waker(counter_old);
+    let mut old_counters = Vec::new();
 
     for _ in 0..POLL_SET_CAPACITY {
-        set.register(&waker_old);
+        let counter = new_counter();
+        let waker = make_waker(counter);
+        set.register(&waker);
+        old_counters.push(counter);
     }
 
     let counter_new = new_counter();
     let waker_new = make_waker(counter_new);
     set.register(&waker_new);
 
-    assert_eq!(counter_old.load(Ordering::SeqCst), 1);
+    assert_eq!(old_counters[0].load(Ordering::SeqCst), 0);
+    assert_eq!(set.wake(), POLL_SET_CAPACITY);
+    assert_eq!(old_counters[0].load(Ordering::SeqCst), 0);
+    for counter in old_counters.iter().skip(1) {
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+    assert_eq!(counter_new.load(Ordering::SeqCst), 1);
 }
 
 #[def_test]

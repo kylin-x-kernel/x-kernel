@@ -117,29 +117,44 @@ impl Inner {
             self.stats.register_count += 1;
         }
 
+        for i in 0..self.len() {
+            // SAFETY: `len()` is capped by `cursor`, which only counts entries
+            // that were previously written with `Waker` values.
+            let old = unsafe { self.entries[i].assume_init_ref() };
+            if old.will_wake(waker) {
+                return;
+            }
+        }
+
         let slot = self.cursor % POLL_SET_CAPACITY;
         if self.cursor >= POLL_SET_CAPACITY {
             // SAFETY: once `cursor >= POLL_SET_CAPACITY`, every slot in the
-            // ring buffer has been initialized at least once before reuse.
-            let old = unsafe { self.entries[slot].assume_init_read() };
-            if !old.will_wake(waker) {
-                old.wake();
-            }
+            // ring buffer has been initialized at least once before reuse. The
+            // old waker is dropped without waking because registration must not
+            // synthesize readiness.
+            unsafe { self.entries[slot].assume_init_drop() };
             self.cursor = ((slot + 1) % POLL_SET_CAPACITY) + POLL_SET_CAPACITY;
         } else {
             self.cursor += 1;
         }
         self.entries[slot].write(waker.clone());
     }
-}
 
-impl Drop for Inner {
-    fn drop(&mut self) {
-        for i in 0..self.len() {
+    fn wake_all(&mut self) -> usize {
+        let len = self.len();
+        for i in 0..len {
             // SAFETY: `len()` is capped by `cursor`, which only counts entries
             // that were previously written with `Waker` values.
             unsafe { self.entries[i].assume_init_read() }.wake();
         }
+        self.cursor = 0;
+        len
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        self.wake_all();
     }
 }
 
@@ -169,9 +184,9 @@ impl PollSet {
         if guard.is_empty() {
             return 0;
         }
-        let inner = core::mem::replace(&mut *guard, Inner::new());
+        let mut inner = core::mem::replace(&mut *guard, Inner::new());
         drop(guard);
-        inner.len()
+        inner.wake_all()
     }
 
     #[cfg(feature = "stats")]

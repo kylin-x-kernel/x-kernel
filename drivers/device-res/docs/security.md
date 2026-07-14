@@ -164,11 +164,11 @@ unsafe { ptr.write_volatile(value) };
 | 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
 |------|----------|----------|----------|----------|--------|----------|
 | F-01 | `Io::map` 返回错误 | 提供者未安装或映射失败 | 驱动无法访问设备寄存器 | 设备不可用 | 3 | `ResResult` 强制错误处理 |
-| F-02 | `Irq::request` 返回 `Busy` | 中断号已被其他驱动占用 | 驱动无法接收中断 | 设备中断功能不可用 | 3 | 返回 `ResError::Busy`，驱动可选择共享中断或失败 |
+| F-02 | `Irq::request` 返回 `Busy` | 提供者拒绝注册，例如共享 handler 达到上限或底层 IRQ 注册失败 | 驱动无法接收中断 | 设备中断功能不可用 | 3 | 返回 `ResError::Busy`，驱动终止 probe 或选择其他工作模式 |
 | F-03 | `DmaCoherent::alloc` 返回 `NoMemory` | 内核内存不足 | DMA 缓冲区分配失败 | 依赖 DMA 的设备功能不可用 | 3 | 返回 `ResError::NoMemory`，驱动可降级运行 |
 | F-04 | MMIO 读写时 offset 溢出 | `checked_add` 检测到 usize 溢出 | `assert!` panic | 调用线程 panic | 2 | `checked_add` 防止静默越界 |
 | F-05 | MMIO 读写越界 | offset + size > region.size | `assert!` panic | 调用线程 panic | 2 | `assert!` 阻止实际越界访问 |
-| F-06 | Drop 期间中断被释放两次 | `Irq::request` 成功但 `armed` 标志未设置 | 当前代码不可能发生 | 无 | — | `armed` 标志保证仅在请求成功后释放 |
+| F-06 | Drop 释放错误的共享 IRQ handler | 请求失败后仍构造 armed handle，或未保存提供者返回的 token | 当前 handler 未正确释放或同线其他 handler 被移除 | 设备中断功能异常 | 2 | 仅在 `request_irq` 成功后构造 `Irq`，并保存 token 供 Drop 精确释放 |
 | F-07 | 在中断上下文中调用 `Io::map` / `Irq::request` / `DmaCoherent::alloc` | 驱动在中断处理程序中获取资源 | `SpinNoIrq` 持锁期间禁止中断，若已被中断上下文占用则死锁 | 系统挂起 | 1 | 文档约束 `ResourceProvider` 方法仅可在正常上下文调用；无运行时检测 |
 | F-08 | 提供者实现回调重入 `device-res` 导致死锁 | `ResourceProvider` 方法内部调用 `provider()` 再次获取 `SpinNoIrq` 锁 | 自旋锁不可重入，死锁 | 系统挂起 | 1 | 由提供者实现保证不回调 `device-res` 全局 API；建议在提供者文档中显式声明此约束 |
 
@@ -214,6 +214,6 @@ unsafe { ptr.write_volatile(value) };
 - [ ] `Io::access_ptr` 的边界检查覆盖所有 `read*`/`write*` 入口。
 - [ ] 新增的 MMIO 访问方法包含 acquire/release fence。
 - [ ] RAII handle 的 drop 路径使用 `try_provider()` 而非 `provider()`。
-- [ ] `Irq` 的 `armed` 标志在 `request_irq` 失败时为 `false`。
+- [ ] `Irq` 仅在 `request_irq` 成功后构造，并保存提供者返回的 handler token。
 - [ ] `devm_*` 函数在注册清理回调前完成资源获取（失败时不注册空回调）。
 - [ ] 新增 `ResourceProvider` 方法文档声明执行上下文约束。

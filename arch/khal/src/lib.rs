@@ -29,7 +29,6 @@
 
 #![no_std]
 #![allow(rustdoc::broken_intra_doc_links)]
-#![feature(linkage)]
 
 extern crate alloc;
 

@@ -6,10 +6,10 @@
 use alloc::{string::String, vec, vec::Vec};
 use core::task::Waker;
 
+use device_res::IrqEventSource;
 use hashbrown::HashMap;
 use kclass::{ClassDevice, prelude::*};
 use kerrno::{KError, KResult, LinuxError};
-use ktask::future::register_irq_waker;
 use smoltcp::{
     storage::{PacketBuffer, PacketMetadata},
     time::{Duration, Instant},
@@ -27,6 +27,7 @@ use crate::{
 };
 
 const EMPTY_MAC: EthernetAddress = EthernetAddress([0; 6]);
+const NET_RX_IRQ_SOURCE: IrqEventSource = 0;
 
 struct ArpNeighbor {
     hardware_address: EthernetAddress,
@@ -56,7 +57,6 @@ impl EthernetDevice {
                     * ETHERNET_MAX_PENDING_PACKETS
             ],
         );
-        // Capture the IRQ before `inner` moves into `Self`.
         let irq = inner.irq();
         let dev = Self {
             name,
@@ -65,19 +65,14 @@ impl EthernetDevice {
             ip,
             pending_tx,
         };
-        // Spawn an interrupt-driven rx task that drains the NIC receive queue
-        // via `poll_interfaces` whenever the device raises an interrupt.
-        // Without this, received packets sit in the virtio queue until a socket
-        // operation happens to call `poll_interfaces` inline. The pattern
-        // mirrors io/ktty's line-discipline reader: drain, register the waker,
-        // then drain again to close the lost-wakeup race.
+
         if let Some(irq) = irq {
             let _ = ktask::spawn_with_name(
                 move || {
                     use core::{future::poll_fn, task::Poll};
                     ktask::future::block_on(poll_fn(move |cx| {
                         crate::poll_interfaces();
-                        register_irq_waker(irq, cx.waker());
+                        irq_notify::register_source_waker(irq, NET_RX_IRQ_SOURCE, cx.waker());
                         crate::poll_interfaces();
                         Poll::<()>::Pending
                     }));
@@ -436,7 +431,7 @@ impl NetDeviceOps for EthernetDevice {
 
     fn register_rx_waker(&self, waker: &Waker) {
         if let Some(irq) = self.inner.irq() {
-            register_irq_waker(irq, waker);
+            irq_notify::register_source_waker(irq, NET_RX_IRQ_SOURCE, waker);
         }
     }
 

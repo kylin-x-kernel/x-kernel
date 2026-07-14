@@ -103,10 +103,10 @@ mod tests {
 
     use crate::{
         DeviceResource, DmaAllocation, DmaCoherent, DmaOp, DmaSpec, Io, Irq, IrqEvent, IrqHandler,
-        IrqOp, IrqResource, IrqTrigger, MmioMapping, MmioOp, MmioRegion, ResError, ResResult,
-        ResourceDesc, devm_alloc_coherent, devm_iomap, devm_request_irq, provider_installed,
-        reset_providers, set_dma_provider, set_irq_provider, set_mmio_provider, try_dma_provider,
-        try_irq_provider, try_mmio_provider,
+        IrqHandlerToken, IrqOp, IrqResource, IrqTrigger, MmioMapping, MmioOp, MmioRegion, ResError,
+        ResResult, ResourceDesc, devm_alloc_coherent, devm_iomap, devm_request_irq,
+        provider_installed, reset_providers, set_dma_provider, set_irq_provider, set_mmio_provider,
+        try_dma_provider, try_irq_provider, try_mmio_provider,
     };
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,16 +227,20 @@ mod tests {
     }
 
     impl IrqOp for TestProvider {
-        fn request_irq(&self, irq: IrqResource, _handler: Arc<dyn IrqHandler>) -> ResResult<()> {
+        fn request_irq(
+            &self,
+            irq: IrqResource,
+            _handler: Arc<dyn IrqHandler>,
+        ) -> ResResult<IrqHandlerToken> {
             let mut state = self.state.lock();
             state.events.push(Event::RequestIrq(irq));
             if let Some(error) = state.irq_error.take() {
                 return Err(error);
             }
-            Ok(())
+            Ok(IrqHandlerToken::new(1))
         }
 
-        fn release_irq(&self, irq: IrqResource) {
+        fn release_irq(&self, irq: IrqResource, _token: IrqHandlerToken) {
             self.state.lock().events.push(Event::ReleaseIrq(irq));
         }
 

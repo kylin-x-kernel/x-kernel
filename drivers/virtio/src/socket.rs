@@ -77,7 +77,9 @@ impl<H: Hal, T: Transport> VirtIoSocketDev<H, T> {
     ///
     /// Returns `DriverError` if the VirtIO socket device fails to initialize
     /// (e.g. feature negotiation failure, queue allocation failure).
-    pub fn try_new(transport: T) -> DriverResult<Self> {
+    pub fn try_new(transport: T, _irq: Option<usize>) -> DriverResult<Self> {
+        // The current vsock backend does not expose interrupt acknowledgment
+        // or virtqueue notification control, so knet advances it by polling.
         let virtio_socket = Self::open_socket(transport)?;
         let inner = InnerDev::new_with_capacity(virtio_socket, DEFAULT_BUFFER_SIZE as u32);
         let guest_cid = inner.guest_cid();

@@ -1,0 +1,18 @@
+[package]
+name = "irq-notify"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "x-kernel IRQ source waiter notification"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[lib]
+name = "irq_notify"
+
+[dependencies]
+device_res = { workspace = true }
+kpoll = { workspace = true }
+kspin = { workspace = true }

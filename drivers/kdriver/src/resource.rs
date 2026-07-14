@@ -14,24 +14,78 @@
 //! removal releases the resource automatically and in reverse acquisition
 //! order.
 
-use alloc::sync::Arc;
-use core::{alloc::Layout, ptr::NonNull};
+use alloc::{sync::Arc, vec, vec::Vec};
+use core::{
+    alloc::Layout,
+    array,
+    ptr::NonNull,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use device_res::{
-    DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, IrqController, IrqHandler, IrqOp,
-    IrqResource, IrqRouteDesc, MmioMapping, MmioOp, MmioRegion, ResError, ResResult,
+    DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, IrqController, IrqEvent, IrqHandler,
+    IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, MmioMapping, MmioOp, MmioRegion, ResError,
+    ResResult,
 };
 use driver_base::{DriverError, DriverResult};
 use kdevice::DeviceObject;
+use kspin::SpinNoIrq;
 
 /// x-kernel implementation of the OS-agnostic resource provider.
 struct HostResourceProvider;
 
 static HOST_PROVIDER: HostResourceProvider = HostResourceProvider;
 
-// Device IRQ handlers are registered with `khal::irq` as `Arc<dyn IrqHandler>`
-// directly — the Rust-native counterpart of Linux's `dev_id`. No slot table,
-// trampoline, or wrapper closure is needed.
+const IRQ_MAX_SHARED_HANDLERS: usize = 4;
+
+struct IrqLine {
+    virq: usize,
+    state: Arc<IrqLineState>,
+}
+
+struct IrqLineState {
+    handlers: SpinNoIrq<Vec<IrqLineHandler>>,
+}
+
+struct IrqLineHandler {
+    token: IrqHandlerToken,
+    handler: Arc<dyn IrqHandler>,
+}
+
+impl IrqLineState {
+    fn dispatch(&self, virq: usize) -> IrqEvent {
+        let (handlers, handler_count) = {
+            let registered = self.handlers.lock();
+            let mut handlers: [Option<Arc<dyn IrqHandler>>; IRQ_MAX_SHARED_HANDLERS] =
+                array::from_fn(|_| None);
+            for (dst, src) in handlers.iter_mut().zip(registered.iter()) {
+                *dst = Some(src.handler.clone());
+            }
+            (handlers, registered.len())
+        };
+
+        let mut event = IrqEvent::NOT_HANDLED;
+        for handler in handlers.into_iter().take(handler_count).flatten() {
+            event.merge(handler.handle());
+        }
+        if event.handled() {
+            irq_notify::dispatch_sources(virq, event.sources());
+        }
+        event
+    }
+}
+
+static IRQ_LINES: SpinNoIrq<Vec<IrqLine>> = SpinNoIrq::new(Vec::new());
+static NEXT_IRQ_HANDLER_TOKEN: AtomicUsize = AtomicUsize::new(1);
+
+fn next_irq_handler_token() -> ResResult<IrqHandlerToken> {
+    NEXT_IRQ_HANDLER_TOKEN
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_add(1)
+        })
+        .map(IrqHandlerToken::new)
+        .map_err(|_| ResError::NoMemory)
+}
 
 impl MmioOp for HostResourceProvider {
     fn map_mmio(&self, region: MmioRegion, name: &'static str) -> ResResult<MmioMapping> {
@@ -118,18 +172,53 @@ impl DmaOp for HostResourceProvider {
 }
 
 impl IrqOp for HostResourceProvider {
-    fn request_irq(&self, irq: IrqResource, handler: Arc<dyn IrqHandler>) -> ResResult<()> {
-        // `khal::irq::register` stores the `Arc<dyn IrqHandler>` directly —
-        // no wrapper closure, no side table, no trampoline.
-        if khal::irq::register(irq.number, handler) {
-            Ok(())
-        } else {
-            Err(ResError::Busy)
+    fn request_irq(
+        &self,
+        irq: IrqResource,
+        handler: Arc<dyn IrqHandler>,
+    ) -> ResResult<IrqHandlerToken> {
+        let token = next_irq_handler_token()?;
+        let mut lines = IRQ_LINES.lock();
+        if let Some(line) = lines.iter().find(|line| line.virq == irq.number) {
+            let mut handlers = line.state.handlers.lock();
+            if handlers.len() >= IRQ_MAX_SHARED_HANDLERS {
+                return Err(ResError::Busy);
+            }
+            handlers.push(IrqLineHandler { token, handler });
+            return Ok(token);
         }
+
+        let state = Arc::new(IrqLineState {
+            handlers: SpinNoIrq::new(vec![IrqLineHandler { token, handler }]),
+        });
+        let dispatch_state = state.clone();
+        let virq = irq.number;
+        let dispatch_handler: Arc<dyn IrqHandler> = Arc::new(move || dispatch_state.dispatch(virq));
+        if !khal::irq::register(irq.number, dispatch_handler) {
+            return Err(ResError::Busy);
+        }
+        lines.push(IrqLine { virq, state });
+        Ok(token)
     }
 
-    fn release_irq(&self, irq: IrqResource) {
-        let _ = khal::irq::unregister(irq.number);
+    fn release_irq(&self, irq: IrqResource, token: IrqHandlerToken) {
+        let mut lines = IRQ_LINES.lock();
+        let Some(line_index) = lines.iter().position(|line| line.virq == irq.number) else {
+            return;
+        };
+        let mut handlers = lines[line_index].state.handlers.lock();
+        let Some(handler_index) = handlers.iter().position(|handler| handler.token == token) else {
+            return;
+        };
+        handlers.swap_remove(handler_index);
+        if !handlers.is_empty() {
+            return;
+        }
+        drop(handlers);
+        lines.swap_remove(line_index);
+        if khal::irq::unregister(irq.number).is_none() {
+            log::warn!("failed to unregister IRQ {}: no handler found", irq.number);
+        }
     }
 
     fn set_irq_enabled(&self, irq: IrqResource, enabled: bool) {

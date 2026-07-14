@@ -19,7 +19,7 @@ use kpoll::{IoEvents, Pollable};
 
 pub use self::stream::VsockStreamTransport;
 use crate::{
-    RecvOptions, SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
+    AcceptOptions, RecvOptions, SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
 };
 
@@ -29,7 +29,7 @@ pub trait VsockTransportOps: Configurable + Pollable + Send + Sync {
     fn bind(&self, local_addr: VsockAddr) -> KResult;
     fn listen(&self) -> KResult;
     fn connect(&self, peer_addr: VsockAddr) -> KResult;
-    fn accept(&self) -> KResult<(VsockTransport, VsockAddr)>;
+    fn accept(&self, nonblocking: bool) -> KResult<(VsockTransport, VsockAddr)>;
     fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize>;
     fn recv(&self, dst: impl Write, options: RecvOptions<'_>) -> KResult<usize>;
     fn shutdown(&self, _how: Shutdown) -> KResult;
@@ -99,11 +99,13 @@ impl SocketOps for VsockSocket {
         self.transport.listen()
     }
 
-    fn accept(&self) -> KResult<Socket> {
-        self.transport.accept().map(|(transport, _addr)| {
-            let socket = VsockSocket::new(transport);
-            Socket::Vsock(Box::new(socket))
-        })
+    fn accept(&self, options: AcceptOptions) -> KResult<Socket> {
+        self.transport
+            .accept(options.nonblocking)
+            .map(|(transport, _addr)| {
+                let socket = VsockSocket::new(transport);
+                Socket::Vsock(Box::new(socket))
+            })
     }
 
     fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {

@@ -142,6 +142,9 @@ pub trait FileOperations: Send + Sync + 'static {
     }
 
     /// Reads file data into an iterator destination.
+    ///
+    /// If a later backing read fails after bytes have already been copied, the
+    /// completed byte count is returned to preserve partial-read semantics.
     fn read_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterDest<'_>) -> VfsResult<usize> {
         let mut total = 0usize;
         let mut chunk = [0u8; memaddr::PAGE_SIZE_4K];
@@ -150,7 +153,11 @@ pub trait FileOperations: Send + Sync + 'static {
             if want == 0 {
                 break;
             }
-            let read = self.read(iocb.file(), &mut chunk[..want], iocb.ki_pos())?;
+            let read = match self.read(iocb.file(), &mut chunk[..want], iocb.ki_pos()) {
+                Ok(read) => read,
+                Err(_) if total != 0 => break,
+                Err(err) => return Err(err),
+            };
             if read == 0 {
                 break;
             }

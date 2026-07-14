@@ -24,7 +24,7 @@ use kvfs::{
 
 pub use self::{dgram::DgramTransport, stream::StreamTransport};
 use crate::{
-    RecvOptions, SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
+    AcceptOptions, RecvOptions, SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
 };
 
@@ -43,7 +43,7 @@ pub trait UnixTransportOps: Configurable + Pollable + Send + Sync {
     fn bind(&self, slot: &BindEntry, local_endpoint: &UnixAddr) -> KResult;
     fn connect(&self, slot: &BindEntry, local_endpoint: &UnixAddr) -> KResult;
 
-    async fn accept(&self) -> KResult<(UnixTransport, UnixAddr)>;
+    async fn accept(&self, nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)>;
 
     fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize>;
     fn recv(&self, dst: impl Write, options: RecvOptions<'_>) -> KResult<usize>;
@@ -267,8 +267,9 @@ impl SocketOps for UnixDomainSocket {
         Ok(())
     }
 
-    fn accept(&self) -> KResult<Socket> {
-        let (transport, peer_endpoint) = block_on(interruptible(self.transport.accept()))??;
+    fn accept(&self, options: AcceptOptions) -> KResult<Socket> {
+        let (transport, peer_endpoint) =
+            block_on(interruptible(self.transport.accept(options.nonblocking)))??;
         Ok(Socket::Unix(Box::new(Self {
             transport,
             local_endpoint: Mutex::new(self.local_endpoint.lock().clone()),

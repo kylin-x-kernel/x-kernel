@@ -24,8 +24,8 @@ use smoltcp::{
 };
 
 use crate::{
-    LISTEN_TABLE, RecvFlags, RecvOptions, SERVICE, SOCKET_SET, SendOptions, Shutdown, Socket,
-    SocketAddrEx, SocketOps,
+    AcceptOptions, LISTEN_TABLE, RecvFlags, RecvOptions, SERVICE, SOCKET_SET, SendOptions,
+    Shutdown, Socket, SocketAddrEx, SocketOps,
     consts::{TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
@@ -400,26 +400,27 @@ impl SocketOps for TcpSocket {
         Ok(())
     }
 
-    fn accept(&self) -> KResult<Socket> {
+    fn accept(&self, options: AcceptOptions) -> KResult<Socket> {
         if !self.is_listening() {
             k_bail!(InvalidInput, "not listening");
         }
 
         let bound_endpoint = self.bound_endpoint()?;
-        self.general.recv_poller(self, || {
-            poll_interfaces();
-            let accepted = {
-                let mut sockets = SOCKET_SET.inner.lock();
-                LISTEN_TABLE.accept(bound_endpoint, &mut sockets)?
-            };
-            Ok({
-                Socket::Tcp(Box::new(TcpSocket::new_connected(
-                    accepted.handle,
-                    accepted.local_endpoint,
-                    accepted.remote_endpoint,
-                )))
+        self.general
+            .recv_poller_with_nonblocking(self, options.nonblocking, || {
+                poll_interfaces();
+                let accepted = {
+                    let mut sockets = SOCKET_SET.inner.lock();
+                    LISTEN_TABLE.accept(bound_endpoint, &mut sockets)?
+                };
+                Ok({
+                    Socket::Tcp(Box::new(TcpSocket::new_connected(
+                        accepted.handle,
+                        accepted.local_endpoint,
+                        accepted.remote_endpoint,
+                    )))
+                })
             })
-        })
     }
 
     fn send(&self, mut src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
@@ -453,7 +454,10 @@ impl SocketOps for TcpSocket {
 
             match result {
                 Ok(0) => break,
-                Ok(len) => total_sent += len,
+                Ok(len) => {
+                    poll_interfaces();
+                    total_sent += len;
+                }
                 Err(_) if total_sent > 0 => return Ok(total_sent),
                 Err(err) => return Err(err),
             }

@@ -56,6 +56,10 @@ flags。namei 使用这些语义执行查找、创建和最终 open，不再直�
 rename 在 syscall 边界用 `RenameFlags::from_bits` 拒绝未知位，并拒绝互斥模式。
 VFS rename 入口再次检查组合不变量，文件系统 helper 再检查自身支持的子集。
 
+默认 `FileOperations::read_iter` 使用页大小的内核缓冲区适配标量 read 回调。
+一次迭代已经读取部分数据后，后续回调错误转换为已完成字节数，使 stream I/O
+保持 POSIX partial-read 语义；首个回调失败时保留原错误。
+
 ## 并发模型
 
 dentry 的 inode、children 和可变 operation 状态由各自 mutex 保护。一个 live dentry

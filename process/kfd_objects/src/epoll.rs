@@ -12,12 +12,12 @@ use alloc::{
 };
 use core::{
     hash::{Hash, Hasher},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     task::{Context, Waker},
 };
 
 use bitflags::bitflags;
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use kspin::SpinNoPreempt;
@@ -90,8 +90,21 @@ enum ConsumeResult {
     EventAndKeep(EpollEvent),
     /// Return an event and remove only this ready-queue entry after consumption.
     EventAndRemove(EpollEvent),
-    /// Return no event and drop this ready-queue entry.
-    NoEvent,
+    /// Return no event and rearm the interest according to the supplied policy.
+    NoEvent {
+        queue_current_events: IoEvents,
+        queue_registered_wake: bool,
+        registered_events: IoEvents,
+        post_register_poll: bool,
+    },
+}
+
+fn match_ready_events(current: IoEvents, interested: IoEvents) -> IoEvents {
+    (current & interested) | (current & IoEvents::ALWAYS_POLL)
+}
+
+fn register_events(interested: IoEvents) -> IoEvents {
+    interested | IoEvents::ALWAYS_POLL
 }
 
 #[derive(Clone)]
@@ -133,6 +146,8 @@ struct EpollInterest {
     event: EpollEvent,
     mode: SpinNoPreempt<TriggerMode>,
     in_ready_queue: AtomicBool,
+    last_reported_events: AtomicUsize,
+    waker_generation: AtomicUsize,
 }
 
 impl EpollInterest {
@@ -142,6 +157,8 @@ impl EpollInterest {
             event,
             mode: SpinNoPreempt::new(TriggerMode::from_flags(flags)),
             in_ready_queue: AtomicBool::new(false),
+            last_reported_events: AtomicUsize::new(IoEvents::empty().bits() as usize),
+            waker_generation: AtomicUsize::new(0),
         }
     }
 
@@ -169,12 +186,15 @@ impl EpollInterest {
 
     fn consume(&self, file: &VfsFile) -> ConsumeResult {
         let current_events = file.poll();
-        let matched = current_events & self.event.events;
+        let matched = match_ready_events(current_events, self.event.events);
         if matched.is_empty() {
-            return ConsumeResult::NoEvent;
+            return self.no_event_rearm_current_ready();
         }
 
         let mut mode = self.mode.lock();
+        if matches!(*mode, TriggerMode::Edge) && !self.should_notify_edge(matched) {
+            return self.no_event_wait_for_transition();
+        }
         let (should_notify, new_mode) = mode.should_notify();
         *mode = new_mode;
         trace!(
@@ -183,7 +203,7 @@ impl EpollInterest {
         );
 
         if !should_notify {
-            return ConsumeResult::NoEvent;
+            return self.no_event_rearm_current_ready();
         }
 
         let event = EpollEvent {
@@ -196,11 +216,63 @@ impl EpollInterest {
             TriggerMode::Edge | TriggerMode::OneShot { .. } => ConsumeResult::EventAndRemove(event),
         }
     }
+
+    fn next_waker_generation(&self) -> usize {
+        self.waker_generation.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn is_current_waker_generation(&self, generation: usize) -> bool {
+        self.waker_generation.load(Ordering::Acquire) == generation
+    }
+
+    fn no_event_rearm_current_ready(&self) -> ConsumeResult {
+        let registered_events = register_events(self.event.events);
+        self.last_reported_events
+            .store(IoEvents::empty().bits() as usize, Ordering::Release);
+        ConsumeResult::NoEvent {
+            queue_current_events: registered_events,
+            queue_registered_wake: false,
+            registered_events,
+            post_register_poll: true,
+        }
+    }
+
+    fn no_event_wait_for_transition(&self) -> ConsumeResult {
+        let registered_events = register_events(self.event.events);
+        ConsumeResult::NoEvent {
+            queue_current_events: IoEvents::empty(),
+            queue_registered_wake: true,
+            registered_events,
+            post_register_poll: false,
+        }
+    }
+
+    fn should_notify_edge(&self, matched: IoEvents) -> bool {
+        let edge_events = matched - IoEvents::ALWAYS_POLL;
+        if matched.intersects(IoEvents::ALWAYS_POLL) {
+            self.last_reported_events
+                .store(edge_events.bits() as usize, Ordering::Release);
+            return true;
+        }
+
+        let matched_bits = edge_events.bits() as usize;
+        self.last_reported_events
+            .swap(matched_bits, Ordering::AcqRel)
+            != matched_bits
+    }
+
+    fn clear_reported_edge_events(&self) {
+        self.last_reported_events
+            .store(IoEvents::empty().bits() as usize, Ordering::Release);
+    }
 }
 
 struct InterestWaker {
     epoll: Weak<EpollInner>,
     interest: Weak<EpollInterest>,
+    defer_wake: AtomicBool,
+    deferred_wake: AtomicBool,
+    generation: usize,
 }
 
 impl Wake for InterestWaker {
@@ -209,10 +281,60 @@ impl Wake for InterestWaker {
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        let Some(epoll) = self.epoll.upgrade() else {
+        if self.defer_wake.load(Ordering::Acquire) {
+            self.deferred_wake.store(true, Ordering::Release);
+            return;
+        }
+
+        if let Some(interest) = self.interest.upgrade() {
+            if !interest.is_current_waker_generation(self.generation) {
+                return;
+            }
+            interest.clear_reported_edge_events();
+            self.queue_interest_with(interest);
+        }
+    }
+}
+
+impl InterestWaker {
+    fn new(epoll: &Arc<EpollInner>, interest: &Arc<EpollInterest>) -> Arc<Self> {
+        let generation = interest.next_waker_generation();
+        Arc::new(Self {
+            epoll: Arc::downgrade(epoll),
+            interest: Arc::downgrade(interest),
+            defer_wake: AtomicBool::new(true),
+            deferred_wake: AtomicBool::new(false),
+            generation,
+        })
+    }
+
+    fn finish_register(
+        &self,
+        ready_events: IoEvents,
+        queue_current_events: IoEvents,
+        queue_registered_wake: bool,
+    ) {
+        self.defer_wake.store(false, Ordering::Release);
+        let had_registered_wake = self.deferred_wake.swap(false, Ordering::AcqRel);
+        if ready_events.intersects(queue_current_events)
+            || (queue_registered_wake && had_registered_wake)
+        {
+            self.queue_interest();
+        }
+    }
+
+    fn queue_interest(&self) {
+        let Some(interest) = self.interest.upgrade() else {
             return;
         };
-        let Some(interest) = self.interest.upgrade() else {
+        if !interest.is_current_waker_generation(self.generation) {
+            return;
+        }
+        self.queue_interest_with(interest);
+    }
+
+    fn queue_interest_with(&self, interest: Arc<EpollInterest>) {
+        let Some(epoll) = self.epoll.upgrade() else {
             return;
         };
 
@@ -275,7 +397,14 @@ impl Epoll {
             .ok_or(KError::BadFileDescriptor)
     }
 
-    fn register_waker_only(&self, interest: &Arc<EpollInterest>) {
+    fn register_waker_only(
+        &self,
+        interest: &Arc<EpollInterest>,
+        queue_current_events: IoEvents,
+        queue_registered_wake: bool,
+        registered_events: IoEvents,
+        post_register_poll: bool,
+    ) {
         let Some(file) = interest.key.get_file() else {
             return;
         };
@@ -283,13 +412,17 @@ impl Epoll {
             return;
         }
 
-        let waker = Waker::from(Arc::new(InterestWaker {
-            epoll: Arc::downgrade(&self.inner),
-            interest: Arc::downgrade(interest),
-        }));
+        let interest_waker = InterestWaker::new(&self.inner, interest);
+        let waker = Waker::from(interest_waker.clone());
 
         let mut context = Context::from_waker(&waker);
-        file.register_poll(&mut context, interest.event.events);
+        file.register_poll(&mut context, registered_events);
+        let current = if post_register_poll {
+            match_ready_events(file.poll(), interest.event.events)
+        } else {
+            IoEvents::empty()
+        };
+        interest_waker.finish_register(current, queue_current_events, queue_registered_wake);
     }
 
     fn replace_ready_interest(
@@ -326,22 +459,19 @@ impl Epoll {
             return;
         }
 
-        let waker = Waker::from(Arc::new(InterestWaker {
-            epoll: Arc::downgrade(&self.inner),
-            interest: Arc::downgrade(interest),
-        }));
+        let interest_waker = InterestWaker::new(&self.inner, interest);
+        let waker = Waker::from(interest_waker.clone());
 
-        let current = file.poll() & interest.event.events;
+        let current = match_ready_events(file.poll(), interest.event.events);
         if !current.is_empty() {
             waker.wake_by_ref();
+            interest_waker.finish_register(current, register_events(interest.event.events), false);
         } else {
             let mut context = Context::from_waker(&waker);
-            file.register_poll(&mut context, interest.event.events);
+            file.register_poll(&mut context, register_events(interest.event.events));
 
-            let current = file.poll() & interest.event.events;
-            if !current.is_empty() {
-                waker.wake_by_ref();
-            }
+            let current = match_ready_events(file.poll(), interest.event.events);
+            interest_waker.finish_register(current, register_events(interest.event.events), false);
         }
     }
 
@@ -384,7 +514,8 @@ impl Epoll {
 
         if old.is_in_queue() {
             self.replace_ready_interest(&old, &interest);
-            self.register_waker_only(&interest);
+            let registered_events = register_events(interest.event.events);
+            self.register_waker_only(&interest, registered_events, true, registered_events, true);
         } else {
             self.check_and_register_waker(&interest);
         }
@@ -414,8 +545,21 @@ impl Epoll {
 
         let mut count = 0;
         let mut deferred_keep = Vec::new();
-        loop {
-            let weak_interest = {
+        // Bound this call to the entries that were ready when it started.
+        // Rearming an interest while consuming it can synchronously enqueue the
+        // same interest again through `finish_register()`. Leaving those new
+        // entries for the next call prevents a persistently-ready fd from
+        // keeping one `epoll_wait` call alive forever.
+        let (ready_count, mut first_ready_interest) = {
+            let mut queue = self.inner.ready_queue.lock();
+            let ready_count = queue.len();
+            (ready_count, queue.pop_front())
+        };
+        let mut emitted = HashSet::with_capacity(ready_count);
+        for index in 0..ready_count {
+            let weak_interest = if index == 0 {
+                first_ready_interest.take()
+            } else {
                 let mut queue = self.inner.ready_queue.lock();
                 queue.pop_front()
             };
@@ -423,11 +567,6 @@ impl Epoll {
             let Some(weak_interest) = weak_interest else {
                 break;
             };
-            if count >= out.len() {
-                self.inner.ready_queue.lock().push_front(weak_interest);
-                break;
-            }
-
             let Some(interest) = weak_interest.upgrade() else {
                 continue;
             };
@@ -436,6 +575,14 @@ impl Epoll {
                 interest.mark_not_in_queue();
                 continue;
             };
+            if emitted.contains(&interest.key) {
+                continue;
+            }
+            emitted.insert(interest.key.clone());
+            if count >= out.len() {
+                self.inner.ready_queue.lock().push_front(weak_interest);
+                break;
+            }
 
             trace!(
                 "Epoll: consuming ready interest for fd={}, events={:?}",
@@ -458,11 +605,29 @@ impl Epoll {
                     };
                     count += 1;
                     interest.mark_not_in_queue();
-                    self.register_waker_only(&interest);
+                    let registered_events = register_events(interest.event.events);
+                    self.register_waker_only(
+                        &interest,
+                        IoEvents::empty(),
+                        false,
+                        registered_events,
+                        false,
+                    );
                 }
-                ConsumeResult::NoEvent => {
+                ConsumeResult::NoEvent {
+                    queue_current_events,
+                    queue_registered_wake,
+                    registered_events,
+                    post_register_poll,
+                } => {
                     interest.mark_not_in_queue();
-                    self.register_waker_only(&interest);
+                    self.register_waker_only(
+                        &interest,
+                        queue_current_events,
+                        queue_registered_wake,
+                        registered_events,
+                        post_register_poll,
+                    );
                 }
             }
         }
@@ -518,10 +683,125 @@ impl FileOperations for EventpollFops {
 
 #[cfg(unittest)]
 mod epoll_tests {
-    use kpoll::{IoEvents, Pollable};
+    use alloc::sync::Arc;
+    use core::{
+        ptr,
+        sync::atomic::{AtomicUsize, Ordering},
+        task::Context,
+    };
+
+    use kerrno::KError;
+    use kpoll::{IoEvents, PollSet, Pollable};
+    use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile};
+    use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT, epoll_event};
     use unittest::def_test;
 
-    use super::*;
+    use super::{
+        EntryKey, Epoll, EpollEvent, EpollFlags, EpollInterest, TriggerMode, match_ready_events,
+        register_events,
+    };
+
+    fn assert_epoll_event(event: &epoll_event, events: u32, data: u64) {
+        // SAFETY: `event` is a valid initialized `epoll_event`. The Linux ABI
+        // type is packed, so field reads must be explicitly unaligned.
+        let actual_events = unsafe { ptr::addr_of!(event.events).read_unaligned() };
+        // SAFETY: `event` is a valid initialized `epoll_event`. The Linux ABI
+        // type is packed, so field reads must be explicitly unaligned.
+        let actual_data = unsafe { ptr::addr_of!(event.data).read_unaligned() };
+
+        assert_eq!(actual_events, events);
+        assert_eq!(actual_data, data);
+    }
+
+    enum TestFileKind {
+        Ready,
+        Rewake,
+        EmptyRewake,
+        Hup,
+        CountedOut,
+        PollSetBacked,
+    }
+
+    struct TestFile {
+        kind: TestFileKind,
+        poll_count: AtomicUsize,
+        poll_set: PollSet,
+    }
+
+    impl TestFile {
+        fn new(kind: TestFileKind) -> Self {
+            Self {
+                kind,
+                poll_count: AtomicUsize::new(0),
+                poll_set: PollSet::new(),
+            }
+        }
+
+        fn poll_count(&self) -> usize {
+            self.poll_count.load(Ordering::Acquire)
+        }
+    }
+
+    impl Pollable for TestFile {
+        fn poll(&self) -> IoEvents {
+            match self.kind {
+                TestFileKind::Ready | TestFileKind::Rewake => IoEvents::IN,
+                TestFileKind::EmptyRewake | TestFileKind::PollSetBacked => IoEvents::empty(),
+                TestFileKind::Hup => IoEvents::HUP,
+                TestFileKind::CountedOut => {
+                    self.poll_count.fetch_add(1, Ordering::AcqRel);
+                    IoEvents::OUT
+                }
+            }
+        }
+
+        fn register(&self, context: &mut Context<'_>, _events: IoEvents) {
+            match self.kind {
+                TestFileKind::Rewake | TestFileKind::EmptyRewake => {
+                    context.waker().wake_by_ref();
+                }
+                TestFileKind::PollSetBacked => {
+                    self.poll_set.register(context.waker());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    struct TestFileFops;
+
+    impl TestFileFops {
+        fn state(file: &VfsFile) -> Arc<TestFile> {
+            file.private_data_get::<TestFile>()
+                .expect("test file private data is installed")
+        }
+    }
+
+    impl FileOperations for TestFileFops {
+        fn poll(&self, file: &VfsFile) -> IoEvents {
+            Self::state(file).poll()
+        }
+
+        fn register_poll(&self, file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+            Self::state(file).register(context, events);
+        }
+    }
+
+    fn test_file(kind: TestFileKind) -> Arc<VfsFile> {
+        AnonInodeFs::global()
+            .get_file(
+                "[epoll-test]",
+                Arc::new(TestFileFops),
+                Arc::new(TestFile::new(kind)),
+                FMode::READ | FMode::WRITE | FMode::STREAM,
+                OpenFlags::empty(),
+            )
+            .expect("test file opens")
+    }
+
+    fn test_file_state(file: &VfsFile) -> Arc<TestFile> {
+        TestFileFops::state(file)
+    }
 
     #[def_test]
     fn test_epoll_creation() {
@@ -606,6 +886,19 @@ mod epoll_tests {
     }
 
     #[def_test]
+    fn test_epoll_always_poll_events() {
+        let interested = IoEvents::IN;
+        assert_eq!(
+            register_events(interested).bits(),
+            (IoEvents::IN | IoEvents::ALWAYS_POLL).bits()
+        );
+        assert_eq!(
+            match_ready_events(IoEvents::HUP | IoEvents::OUT, interested).bits(),
+            IoEvents::HUP.bits()
+        );
+    }
+
+    #[def_test]
     fn test_epoll_poll_no_events() {
         let epoll = Epoll::new();
         let events = epoll.poll();
@@ -617,6 +910,232 @@ mod epoll_tests {
         let epoll = Epoll::new();
         let mut out = [epoll_event { events: 0, data: 0 }; 4];
         assert_eq!(epoll.poll_events(&mut out), Err(KError::WouldBlock));
+    }
+
+    #[def_test]
+    fn test_epoll_poll_events_deduplicates_ready_interest() {
+        let epoll = Epoll::new();
+        let file = test_file(TestFileKind::Ready);
+        let key = EntryKey::new(3, &file);
+        let interest = Arc::new(EpollInterest::new(
+            key,
+            EpollEvent {
+                events: IoEvents::IN,
+                user_data: 7,
+            },
+            EpollFlags::empty(),
+        ));
+        interest.in_ready_queue.store(true, Ordering::Release);
+
+        let weak = Arc::downgrade(&interest);
+        {
+            let mut queue = epoll.inner.ready_queue.lock();
+            queue.push_back(weak.clone());
+            queue.push_back(weak);
+        }
+
+        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
+        assert_epoll_event(&out[0], IoEvents::IN.bits(), 7);
+        assert_eq!(epoll.inner.ready_queue.lock().len(), 1);
+    }
+
+    #[def_test]
+    fn test_epoll_poll_events_ignores_edge_synchronous_rewake_after_rearm() {
+        let epoll = Epoll::new();
+        let file = test_file(TestFileKind::Rewake);
+
+        epoll
+            .add(
+                3,
+                file.clone(),
+                EpollEvent {
+                    events: IoEvents::IN,
+                    user_data: 7,
+                },
+                EpollFlags::EDGE_TRIGGER,
+            )
+            .unwrap();
+
+        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
+        assert_epoll_event(&out[0], IoEvents::IN.bits(), 7);
+        assert_eq!(epoll.poll().bits(), IoEvents::empty().bits());
+    }
+
+    #[def_test]
+    fn test_epoll_poll_events_does_not_requeue_edge_level_ready_file() {
+        let epoll = Epoll::new();
+        let file = test_file(TestFileKind::Ready);
+        let key = EntryKey::new(3, &file);
+        let interest = Arc::new(EpollInterest::new(
+            key,
+            EpollEvent {
+                events: IoEvents::IN,
+                user_data: 7,
+            },
+            EpollFlags::EDGE_TRIGGER,
+        ));
+        interest.in_ready_queue.store(true, Ordering::Release);
+
+        epoll
+            .inner
+            .ready_queue
+            .lock()
+            .push_back(Arc::downgrade(&interest));
+
+        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
+        assert_epoll_event(&out[0], IoEvents::IN.bits(), 7);
+        assert_eq!(epoll.poll().bits(), IoEvents::empty().bits());
+    }
+
+    #[def_test]
+    fn test_epoll_poll_events_drops_duplicate_edge_synchronous_rewake() {
+        let epoll = Epoll::new();
+        let file = test_file(TestFileKind::Rewake);
+        let key = EntryKey::new(3, &file);
+        let interest = Arc::new(EpollInterest::new(
+            key,
+            EpollEvent {
+                events: IoEvents::IN,
+                user_data: 7,
+            },
+            EpollFlags::EDGE_TRIGGER,
+        ));
+        interest.in_ready_queue.store(true, Ordering::Release);
+
+        let weak = Arc::downgrade(&interest);
+        {
+            let mut queue = epoll.inner.ready_queue.lock();
+            queue.push_back(weak.clone());
+            queue.push_back(weak);
+        }
+
+        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
+        assert_epoll_event(&out[0], IoEvents::IN.bits(), 7);
+        assert_eq!(epoll.poll().bits(), IoEvents::empty().bits());
+    }
+
+    #[def_test]
+    fn test_epoll_poll_events_drops_empty_synchronous_rewake() {
+        let epoll = Epoll::new();
+        let file = test_file(TestFileKind::EmptyRewake);
+        let key = EntryKey::new(3, &file);
+        let interest = Arc::new(EpollInterest::new(
+            key,
+            EpollEvent {
+                events: IoEvents::IN,
+                user_data: 7,
+            },
+            EpollFlags::EDGE_TRIGGER,
+        ));
+        interest.in_ready_queue.store(true, Ordering::Release);
+
+        epoll
+            .inner
+            .ready_queue
+            .lock()
+            .push_back(Arc::downgrade(&interest));
+
+        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        assert_eq!(epoll.poll_events(&mut out), Err(KError::WouldBlock));
+        assert_eq!(epoll.poll().bits(), IoEvents::empty().bits());
+    }
+
+    #[def_test]
+    fn test_epoll_edge_does_not_suppress_always_poll_events() {
+        let epoll = Epoll::new();
+        let file = test_file(TestFileKind::Hup);
+        let key = EntryKey::new(3, &file);
+        let interest = Arc::new(EpollInterest::new(
+            key,
+            EpollEvent {
+                events: IoEvents::IN,
+                user_data: 7,
+            },
+            EpollFlags::EDGE_TRIGGER,
+        ));
+        interest.in_ready_queue.store(true, Ordering::Release);
+        epoll
+            .inner
+            .ready_queue
+            .lock()
+            .push_back(Arc::downgrade(&interest));
+
+        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
+        assert_epoll_event(&out[0], IoEvents::HUP.bits(), 7);
+
+        assert!(interest.try_mark_in_queue());
+        epoll
+            .inner
+            .ready_queue
+            .lock()
+            .push_back(Arc::downgrade(&interest));
+
+        assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
+        assert_epoll_event(&out[0], IoEvents::HUP.bits(), 7);
+    }
+
+    #[def_test]
+    fn test_epoll_edge_rearm_skips_post_register_poll() {
+        let epoll = Epoll::new();
+        let file = test_file(TestFileKind::CountedOut);
+        let state = test_file_state(&file);
+        let key = EntryKey::new(3, &file);
+        let interest = Arc::new(EpollInterest::new(
+            key,
+            EpollEvent {
+                events: IoEvents::OUT,
+                user_data: 7,
+            },
+            EpollFlags::EDGE_TRIGGER,
+        ));
+        interest.in_ready_queue.store(true, Ordering::Release);
+
+        epoll
+            .inner
+            .ready_queue
+            .lock()
+            .push_back(Arc::downgrade(&interest));
+
+        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
+        assert_epoll_event(&out[0], IoEvents::OUT.bits(), 7);
+        assert_eq!(state.poll_count(), 1);
+    }
+
+    #[def_test]
+    fn test_epoll_rearm_limits_stale_registered_wakers() {
+        let epoll = Epoll::new();
+        let file = test_file(TestFileKind::PollSetBacked);
+        let key = EntryKey::new(3, &file);
+        let interest = Arc::new(EpollInterest::new(
+            key,
+            EpollEvent {
+                events: IoEvents::IN,
+                user_data: 7,
+            },
+            EpollFlags::EDGE_TRIGGER,
+        ));
+
+        for _ in 0..70 {
+            epoll.register_waker_only(
+                &interest,
+                IoEvents::empty(),
+                false,
+                register_events(interest.event.events),
+                false,
+            );
+        }
+
+        assert!(epoll.inner.ready_queue.lock().len() <= 1);
+
+        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        assert_eq!(epoll.poll_events(&mut out), Err(KError::WouldBlock));
+        assert_eq!(epoll.poll().bits(), IoEvents::empty().bits());
     }
 
     #[def_test]

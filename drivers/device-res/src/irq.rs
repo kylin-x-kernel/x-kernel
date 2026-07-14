@@ -216,6 +216,22 @@ where
     }
 }
 
+/// Provider-owned identity for one registered interrupt handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IrqHandlerToken(usize);
+
+impl IrqHandlerToken {
+    /// Create a token from a provider-local numeric id.
+    pub const fn new(id: usize) -> Self {
+        Self(id)
+    }
+
+    /// Return the provider-local numeric id.
+    pub const fn id(self) -> usize {
+        self.0
+    }
+}
+
 /// Interrupt capability: handler registration, interrupt-domain translation,
 /// and MSI-X vector allocation.
 ///
@@ -225,10 +241,14 @@ where
 /// controller supports (e.g. non-x86 leaves MSI-X as `Unsupported`).
 pub trait IrqOp: Sync {
     /// Register an interrupt handler for `irq`.
-    fn request_irq(&self, irq: IrqResource, handler: Arc<dyn IrqHandler>) -> ResResult<()>;
+    fn request_irq(
+        &self,
+        irq: IrqResource,
+        handler: Arc<dyn IrqHandler>,
+    ) -> ResResult<IrqHandlerToken>;
 
     /// Release an interrupt handler previously registered for `irq`.
-    fn release_irq(&self, irq: IrqResource);
+    fn release_irq(&self, irq: IrqResource, token: IrqHandlerToken);
 
     /// Enable or disable delivery of `irq`.
     fn set_irq_enabled(&self, irq: IrqResource, enabled: bool);
@@ -269,15 +289,17 @@ pub trait IrqOp: Sync {
 #[derive(Debug)]
 pub struct Irq {
     resource: IrqResource,
+    token: IrqHandlerToken,
     armed: bool,
 }
 
 impl Irq {
     /// Register `handler` for the interrupt described by `resource`.
     pub fn request(resource: IrqResource, handler: Arc<dyn IrqHandler>) -> ResResult<Self> {
-        irq_provider()?.request_irq(resource, handler)?;
+        let token = irq_provider()?.request_irq(resource, handler)?;
         Ok(Self {
             resource,
+            token,
             armed: true,
         })
     }
@@ -300,7 +322,7 @@ impl Drop for Irq {
         if self.armed
             && let Some(provider) = try_irq_provider()
         {
-            provider.release_irq(self.resource);
+            provider.release_irq(self.resource, self.token);
         }
     }
 }
