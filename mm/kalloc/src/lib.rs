@@ -524,6 +524,16 @@ unsafe impl GlobalAlloc for GlobalAllocator {
             if let Ok(ptr) = GlobalAllocator::alloc(self, layout) {
                 ptr.as_ptr()
             } else {
+                let used = self.used_bytes();
+                let avail = self.available_bytes();
+                error!(
+                    "kalloc OOM: layout {:?} (size={}, align={}), heap used={:#x} avail={:#x}",
+                    layout,
+                    layout.size(),
+                    layout.align(),
+                    used,
+                    avail
+                );
                 alloc::alloc::handle_alloc_error(layout)
             }
         };

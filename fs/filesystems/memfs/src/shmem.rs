@@ -6,7 +6,7 @@
 
 use alloc::{string::String, sync::Arc};
 
-use ksync::Mutex;
+use ksync::{Mutex, static_lock};
 use kvfs::{Mount, NodePermission, Path, SuperBlock, VfsFile, VfsResult, dentry_open};
 use linux_raw_sys::general::{
     F_SEAL_FUTURE_WRITE, F_SEAL_GROW, F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_WRITE, O_CREAT, O_EXCL,
@@ -236,6 +236,10 @@ impl ShmemObject {
     }
 }
 
+static_lock! {
+    static KERNEL_SHM_FS: Mutex<Option<(Arc<SuperBlock>, Path)>> = Mutex::new(None);
+}
+
 /// Creates an anonymous tmpfs-backed file object.
 ///
 /// The returned object is not inserted into a process-visible pathname
@@ -247,8 +251,23 @@ fn create_anonymous_file(
     permission: NodePermission,
     initial_seals: ShmemSealSet,
 ) -> VfsResult<ShmemObject> {
-    let fs = new_tmpfs(kvfs::StatFsFlags::empty());
-    let root = Path::new(Mount::new_root(&fs), fs.root_dir());
+    // Kernel-owned shm files share a single tmpfs instance to avoid
+    // leaking Mount/SuperBlock references on each create/destroy cycle.
+    let root = match kind {
+        ShmemObjectKind::Kernel => {
+            let mut guard = KERNEL_SHM_FS.lock();
+            if guard.is_none() {
+                let fs = new_tmpfs(kvfs::StatFsFlags::empty());
+                let root = Path::new(Mount::new_root(&fs), fs.root_dir());
+                *guard = Some((fs, root.clone()));
+            }
+            guard.as_ref().unwrap().1.clone()
+        }
+        ShmemObjectKind::Memfd => {
+            let fs = new_tmpfs(kvfs::StatFsFlags::empty());
+            Path::new(Mount::new_root(&fs), fs.root_dir())
+        }
+    };
     let file =
         kvfs::Filename::new(name).open_with_flags_at(&root, &root, O_CREAT | O_EXCL, permission)?;
     let location = file.path().clone();

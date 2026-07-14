@@ -69,11 +69,19 @@ impl ShmInner {
         pid: Pid,
     ) -> KResult<Self> {
         let page_num = memaddr::align_up_4k(size) / PAGE_SIZE_4K;
-        let file = create_kernel_file(
+        let shm_obj = create_kernel_file(
             &format!("SYSV{shmid:x}"),
             kvfs::NodePermission::from_bits_truncate(0o600),
-        )?
-        .into_file()?;
+        )?;
+        // Unlink the backing file from tmpfs so the inode's lifetime is
+        // tied solely to the returned VfsFile; when the last reference
+        // drops the page cache is freed.
+        shm_obj
+            .location()
+            .mount()
+            .root_path()
+            .unlink(&shm_obj.location().name())?;
+        let file = shm_obj.into_file()?;
         file.path().truncate((page_num * PAGE_SIZE_4K) as u64)?;
 
         Ok(ShmInner {
@@ -466,28 +474,37 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
 }
 
 pub fn sys_shmctl(shmid: i32, cmd: u32, buf: UserPtr<shmid_ds>) -> KResult<isize> {
-    let shm_inner = {
+    let shm_inner_arc = {
         let shm_manager = SHM_MANAGER.lock();
         shm_manager
             .get_inner_by_shmid(shmid)
             .ok_or(KError::InvalidInput)?
     };
-    let mut shm_inner = shm_inner.lock();
+    let mut shm_inner = shm_inner_arc.lock();
 
     let cmd = cmd as i32;
     if cmd == IPC_SET {
         shm_inner.shmid_ds = buf.read_vm()?;
+        shm_inner.shmid_ds.shm_ctime = monotonic_time_nanos() as __kernel_time_t;
     } else if cmd == IPC_STAT {
         if let Some(buf) = buf.check_non_null() {
             buf.write_vm(shm_inner.shmid_ds)?;
         }
     } else if cmd == IPC_RMID {
         shm_inner.rmid = true;
+        if shm_inner.attach_count() == 0 {
+            drop(shm_inner);
+            let mut shm_manager = SHM_MANAGER.lock();
+            let shm_inner_recheck = shm_inner_arc.lock();
+            if shm_inner_recheck.rmid && shm_inner_recheck.attach_count() == 0 {
+                shm_manager.remove_shmid(shmid);
+            }
+            return Ok(0);
+        }
     } else {
         return Err(KError::InvalidInput);
     }
 
-    shm_inner.shmid_ds.shm_ctime = monotonic_time_nanos() as __kernel_time_t;
     Ok(0)
 }
 
