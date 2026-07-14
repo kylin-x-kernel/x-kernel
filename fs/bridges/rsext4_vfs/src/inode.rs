@@ -57,11 +57,13 @@ impl Inode {
     }
 
     fn lookup_locked(&self, parent: &Dentry, name: &str) -> VfsResult<Dentry> {
-        let parent_path = parent.absolute_path()?.to_string();
-        let path = join_child_path(&parent_path, name);
+        let parent_ino: u32 = parent
+            .inode()
+            .try_into()
+            .map_err(|_| VfsError::InvalidInput)?;
         let mut state = self.fs.lock();
         let (fs, dev) = state.split();
-        let (ino, inode) = rsext4::dir::get_inode_with_num(fs, dev, &path)
+        let (ino, inode) = rsext4::dir::get_inode_by_name(fs, dev, parent_ino, name)
             .map_err(into_vfs_err)?
             .ok_or(VfsError::NotFound)?;
         Ok(self.create_entry(parent, ino, &inode, name))

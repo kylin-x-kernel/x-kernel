@@ -179,6 +179,30 @@ pub fn get_inode_with_num<B: BlockDevice>(
     Ok(Some((current_ino, current_inode)))
 }
 
+/// Looks up the inode number and `Ext4Inode` for a given entry name
+/// within the ext4 filesystem.
+///
+/// Returns `Ok(Some((ino, inode)))` if found, `Ok(None)` if the entry
+/// does not exist, or `Err` on I/O or corruption errors.
+pub fn get_inode_by_name<B: BlockDevice>(
+    fs: &mut Ext4FileSystem,
+    device: &mut Jbd2Dev<B>,
+    parent_ino: u32,
+    name: &str,
+) -> BlockDevResult<Option<(u32, Ext4Inode)>> {
+    if name.is_empty() || name.contains('\0') {
+        return Err(BlockDevError::InvalidInput);
+    }
+    let parent_inode = fs.get_inode_by_num(device, parent_ino)?;
+    let entry = find_named_entry_in_parent(fs, device, parent_ino, &parent_inode, name.as_bytes())?;
+    if let Some(entry) = entry {
+        let inode = fs.get_inode_by_num(device, entry.ino)?;
+        Ok(Some((entry.ino, inode)))
+    } else {
+        Ok(None)
+    }
+}
+
 /// 在父目录的所有逻辑块中查找空闲空间并插入一个目录项；
 /// 若所有现有块都无法容纳，则自动为目录分配一个新数据块并扩展 inode 映射和大小。
 pub fn insert_dir_entry<B: BlockDevice>(
