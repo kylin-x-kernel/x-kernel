@@ -36,7 +36,6 @@ impl Ext4State {
 pub struct Ext4Filesystem {
     inner: Mutex<Ext4State>,
     inode_cache: InodeCache,
-    root_dir: Mutex<Option<Dentry>>,
 }
 
 impl Ext4Filesystem {
@@ -64,11 +63,10 @@ impl Ext4Filesystem {
         let fs = Arc::new(Self {
             inner: Mutex::new(Ext4State { fs, dev }),
             inode_cache: InodeCache::new(),
-            root_dir: Mutex::new(None),
         });
         let root_inode = Self::iget(&fs, EXT4_ROOT_INO)?;
-        *fs.root_dir.lock() = Some(Dentry::new_dir_from_inode(root_inode, None, String::new()));
-        Ok(SuperBlock::new(fs))
+        let root = Dentry::new_dir_from_inode(root_inode, None, String::new());
+        Ok(SuperBlock::new(fs, root))
     }
 
     /// Lock the inner ext4 filesystem state.
@@ -162,10 +160,6 @@ impl Ext4Filesystem {
 impl SuperBlockOperations for Ext4Filesystem {
     fn name(&self) -> &str {
         "ext4"
-    }
-
-    fn root_dentry(&self) -> Dentry {
-        self.root_dir.lock().clone().unwrap()
     }
 
     fn statfs(&self) -> VfsResult<StatFs> {

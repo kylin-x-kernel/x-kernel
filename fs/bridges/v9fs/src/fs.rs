@@ -17,7 +17,6 @@ use super::inode::{Inode, inode_init_from_attr};
 /// 9P filesystem implementation.
 pub struct Fs9pFilesystem {
     inner: Mutex<Session>,
-    root_dir: Mutex<Option<Dentry>>,
 }
 
 impl Fs9pFilesystem {
@@ -34,17 +33,16 @@ impl Fs9pFilesystem {
 
         let fs = Arc::new(Self {
             inner: Mutex::new(session),
-            root_dir: Mutex::new(None),
         });
 
-        *fs.root_dir.lock() = Some(Inode::new_dir(fs.clone(), Some("/".into())).into_dentry(
+        let root = Inode::new_dir(fs.clone(), Some("/".into())).into_dentry(
             inode_init_from_attr(&root_attr),
             NodeFlags::empty(),
             None,
             String::new(),
-        ));
+        );
 
-        Ok(SuperBlock::new(fs))
+        Ok(SuperBlock::new(fs, root))
     }
 
     /// Lock the inner 9P session for sending requests.
@@ -56,10 +54,6 @@ impl Fs9pFilesystem {
 impl SuperBlockOperations for Fs9pFilesystem {
     fn name(&self) -> &str {
         "9p"
-    }
-
-    fn root_dentry(&self) -> Dentry {
-        self.root_dir.lock().clone().unwrap()
     }
 
     fn statfs(&self) -> VfsResult<StatFs> {

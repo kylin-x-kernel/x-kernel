@@ -11,7 +11,13 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{any::Any, fmt, iter, mem, ops::Deref};
+use core::{
+    any::Any,
+    fmt,
+    hash::{Hash, Hasher},
+    iter, mem,
+    ops::Deref,
+};
 
 use bitflags::bitflags;
 use hashbrown::HashMap;
@@ -85,15 +91,38 @@ impl DentryFlags {
 }
 
 /// Key type for dentry cache lookups.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct DentryKey {
-    parent: usize,
+    parent: Option<Weak<DentryInner>>,
     name: String,
 }
 
 impl DentryKey {
-    pub(super) fn new(parent: usize, name: String) -> Self {
+    fn new(parent: Option<Weak<DentryInner>>, name: String) -> Self {
         Self { parent, name }
+    }
+}
+
+impl PartialEq for DentryKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && match (&self.parent, &other.parent) {
+                (Some(parent), Some(other_parent)) => Weak::ptr_eq(parent, other_parent),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for DentryKey {}
+
+impl Hash for DentryKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.parent.is_some().hash(state);
+        if let Some(parent) = &self.parent {
+            parent.as_ptr().hash(state);
+        }
+        self.name.hash(state);
     }
 }
 
@@ -120,7 +149,9 @@ struct DentryInner {
     location: RwLock<DentryLocation>,
     operations: Mutex<Option<Arc<dyn DentryOperations>>>,
     super_block: Mutex<Option<Weak<SuperBlock>>>,
-    children: Mutex<HashMap<String, Dentry>>,
+    // A live child pins its parent, while the parent only indexes children.
+    // The superblock dentry cache owns hashed children until explicit eviction.
+    children: Mutex<HashMap<String, Weak<DentryInner>>>,
 }
 
 impl DentryInner {
@@ -448,14 +479,20 @@ impl Dentry {
 
         let children: Vec<_> = self.0.children.lock().values().cloned().collect();
         for child in children {
-            child.bind_super_block(super_block);
+            if let Some(child) = child.upgrade().map(Dentry) {
+                child.bind_super_block(super_block);
+                super_block.cache_dentry(child);
+            }
         }
     }
 
     /// Returns the cache key for this entry.
     pub(crate) fn key(&self) -> DentryKey {
         let location = self.0.location.read();
-        let parent = location.parent.as_ref().map_or(0, Dentry::as_ptr);
+        let parent = location
+            .parent
+            .as_ref()
+            .map(|parent| Arc::downgrade(&parent.0));
         DentryKey::new(parent, location.name.clone())
     }
 
@@ -574,7 +611,18 @@ impl Dentry {
     }
 
     fn remove_cache_entry(&self, name: &str) -> Option<Dentry> {
-        self.0.children.lock().remove(name)
+        let entry = self
+            .0
+            .children
+            .lock()
+            .remove(name)
+            .and_then(|entry| entry.upgrade().map(Dentry));
+        if let Some(entry) = &entry
+            && let Some(super_block) = entry.super_block()
+        {
+            super_block.uncache_dentry(entry);
+        }
+        entry
     }
 
     fn forget_cache_entry(&self, name: &str) {
@@ -589,7 +637,14 @@ impl Dentry {
     /// Looks up a directory entry by name in this dentry's cache.
     pub fn lookup_cache(&self, name: &str) -> Option<Dentry> {
         if self.can_cache_children() {
-            self.0.children.lock().get(name).cloned()
+            let mut children = self.0.children.lock();
+            let entry = children
+                .get(name)
+                .and_then(|entry| entry.upgrade().map(Dentry));
+            if entry.is_none() {
+                children.remove(name);
+            }
+            entry
         } else {
             None
         }
@@ -598,7 +653,16 @@ impl Dentry {
     /// Inserts a child dentry into this dentry's cache.
     pub fn insert_cache(&self, name: String, entry: Dentry) -> Option<Dentry> {
         if self.can_cache_children() && entry.can_cache_as_child() {
-            self.0.children.lock().insert(name, entry)
+            let previous = self
+                .0
+                .children
+                .lock()
+                .insert(name, Arc::downgrade(&entry.0))
+                .and_then(|entry| entry.upgrade().map(Dentry));
+            if let Some(super_block) = entry.super_block() {
+                super_block.cache_dentry(entry);
+            }
+            previous
         } else {
             None
         }
@@ -667,11 +731,7 @@ impl Dentry {
 
         let entry = dir_inode.lookup(self, name)?;
         if self.can_cache_children() && entry.can_cache_as_child() {
-            self.0
-                .children
-                .lock()
-                .entry(name.to_owned())
-                .or_insert_with(|| entry.clone());
+            self.insert_cache(name.to_owned(), entry.clone());
         }
         if entry.is_negative() {
             Err(VfsError::NotFound)
@@ -766,11 +826,14 @@ impl Dentry {
     }
 
     pub(crate) fn has_positive_children(&self) -> bool {
-        self.0
-            .children
-            .lock()
-            .iter()
-            .any(|(name, entry)| name != DOT && name != DOTDOT && entry.is_really_positive())
+        self.0.children.lock().iter().any(|(name, entry)| {
+            name != DOT
+                && name != DOTDOT
+                && entry
+                    .upgrade()
+                    .map(Dentry)
+                    .is_some_and(|entry| entry.is_really_positive())
+        })
     }
 
     /// Renames a child dentry from this directory to `dst_dir`.
@@ -902,8 +965,8 @@ impl Dentry {
             .children
             .lock()
             .iter()
+            .filter_map(|(name, entry)| entry.upgrade().map(|entry| (name.clone(), Dentry(entry))))
             .filter(|(_, entry)| entry.is_really_positive())
-            .map(|(name, entry)| (name.clone(), entry.clone()))
             .collect();
         children.sort_by(|left, right| left.0.cmp(&right.0));
 
@@ -945,12 +1008,16 @@ impl Dentry {
     pub(crate) fn forget(&self) {
         let children: Vec<_> = mem::take(&mut *self.0.children.lock())
             .into_values()
+            .filter_map(|entry| entry.upgrade().map(Dentry))
             .collect();
         for child in children {
             if child.is_really_positive()
                 && let Ok(dir) = child.as_dir()
             {
                 dir.forget();
+            }
+            if let Some(super_block) = child.super_block() {
+                super_block.uncache_dentry(&child);
             }
         }
     }
@@ -970,7 +1037,7 @@ mod tests_dentry {
     use crate::{
         AddressSpaceOperations, DirContext, FileDirOperations, FileOperations, InodeCache,
         InodeDirOperations, InodeOperations, InodeSymlinkOperations, LockedDentry, Metadata,
-        MetadataUpdate, NodeFlags, NodePermission, NodeType, RenameFlags, StatFs,
+        MetadataUpdate, NodeFlags, NodePermission, NodeType, RenameFlags, StatFs, SuperBlock,
         SuperBlockOperations, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
     };
 
@@ -979,10 +1046,6 @@ mod tests_dentry {
     impl SuperBlockOperations for MockFilesystem {
         fn name(&self) -> &str {
             "mockfs"
-        }
-
-        fn root_dentry(&self) -> Dentry {
-            panic!("root_dir is not used in these tests")
         }
 
         fn statfs(&self) -> VfsResult<StatFs> {
@@ -1526,6 +1589,49 @@ mod tests_dentry {
         assert!(root.is_ancestor_of(&leaf).unwrap());
         assert!(child.is_ancestor_of(&leaf).unwrap());
         assert!(!leaf.is_ancestor_of(&child).unwrap());
+    }
+
+    #[def_test]
+    fn test_dentry_cache_retains_hashed_children_and_preserves_parent_lifetime() {
+        let fs = Arc::new(MockFilesystem);
+        let root = make_dir_entry(fs.clone(), 13, "");
+        let _super_block = SuperBlock::new(fs.clone(), root.clone());
+        let cached = make_dir_entry_with_parent(fs.clone(), 14, Some(root.clone()), "cached");
+        let cached_weak = Arc::downgrade(&cached.0);
+        root.insert_cache(String::from("cached"), cached.clone());
+
+        assert!(cached_weak.upgrade().is_some());
+        assert!(root.lookup_cache("cached").is_some());
+        drop(cached);
+        assert!(cached_weak.upgrade().is_some());
+        assert!(root.lookup_cache("cached").is_some());
+
+        root.forget_cache_entry("cached");
+        assert!(cached_weak.upgrade().is_none());
+
+        let parent = make_dir_entry(fs.clone(), 15, "parent");
+        let parent_weak = Arc::downgrade(&parent.0);
+        let child = make_dir_entry_with_parent(fs, 16, Some(parent.clone()), "child");
+        drop(parent);
+
+        assert!(parent_weak.upgrade().is_some());
+        assert!(child.parent().is_some());
+        assert_eq!(child.absolute_path().unwrap().as_str(), "/parent/child");
+    }
+
+    #[def_test]
+    fn test_hashed_child_without_external_reference_keeps_directory_nonempty() {
+        let fs = Arc::new(MockFilesystem);
+        let root = make_dir_entry(fs.clone(), 17, "");
+        let _super_block = SuperBlock::new(fs.clone(), root.clone());
+        let directory = make_dir_entry_with_parent(fs.clone(), 18, Some(root.clone()), "directory");
+        root.insert_cache(String::from("directory"), directory.clone());
+        let (child, _) = make_file_entry(fs, 19, Some(directory.clone()), "child");
+        directory.insert_cache(String::from("child"), child.clone());
+
+        drop(child);
+
+        assert!(directory.has_children().unwrap());
     }
 
     #[def_test]

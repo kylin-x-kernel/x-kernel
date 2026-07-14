@@ -975,14 +975,6 @@ mod tests {
             "mockfs"
         }
 
-        fn root_dentry(&self) -> Dentry {
-            let inode = VfsInode::new_openable_dir(
-                Arc::new(MockDirOps::new(self.mount_flags, 1)),
-                inode_init(1),
-            );
-            Dentry::new_dir_from_inode(inode, None, String::new())
-        }
-
         fn statfs(&self) -> VfsResult<StatFs> {
             statfs(self.mount_flags)
         }
@@ -1130,7 +1122,10 @@ mod tests {
     }
 
     fn mock_filesystem(mount_flags: StatFsFlags) -> Arc<SuperBlock> {
-        SuperBlock::new(Arc::new(MockFilesystem { mount_flags }))
+        let inode =
+            VfsInode::new_openable_dir(Arc::new(MockDirOps::new(mount_flags, 1)), inode_init(1));
+        let root = Dentry::new_dir_from_inode(inode, None, String::new());
+        SuperBlock::new(Arc::new(MockFilesystem { mount_flags }), root)
     }
 
     fn statfs(mount_flags: StatFsFlags) -> VfsResult<StatFs> {

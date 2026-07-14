@@ -11,7 +11,7 @@ use alloc::{
 use hashbrown::HashMap;
 use klazy::Lazy;
 
-use crate::{Dentry, Mutex, MutexGuard, VfsInode, VfsResult, WritebackControl};
+use crate::{Dentry, DentryKey, Mutex, MutexGuard, VfsInode, VfsResult, WritebackControl};
 
 static SUPER_BLOCK_REGISTRY: Lazy<SuperBlockRegistry> = Lazy::new(SuperBlockRegistry::new);
 
@@ -89,9 +89,6 @@ impl SuperBlockRegistry {
 pub trait SuperBlockOperations: Send + Sync + 'static {
     /// Returns the filesystem type name.
     fn name(&self) -> &str;
-
-    /// Returns the root dentry for this superblock.
-    fn root_dentry(&self) -> Dentry;
 
     /// Returns filesystem statistics.
     fn statfs(&self) -> VfsResult<StatFs>;
@@ -185,10 +182,12 @@ pub struct StatFs {
 /// A superblock owns one filesystem instance and the live inode set attached to
 /// that instance. Inodes own their address spaces; superblock-wide writeback
 /// reaches page cache state through those inodes, matching Linux's
-/// `super_block` -> `inode` -> `address_space` layering.
+/// `super_block` -> `inode` -> `address_space` layering. It also retains hashed
+/// dentries until namespace eviction, matching Linux dcache lifetime semantics.
 pub struct SuperBlock {
     ops: Arc<dyn SuperBlockOperations>,
     root: Dentry,
+    dentry_cache: Mutex<HashMap<DentryKey, Dentry>>,
     max_file_size: u64,
     rename_lock: Mutex<()>,
     inodes: Mutex<Vec<Weak<VfsInode>>>,
@@ -210,20 +209,34 @@ impl SuperBlock {
         self.ops.statfs()
     }
 
-    /// Creates a superblock from superblock operations.
-    pub fn new(ops: Arc<dyn SuperBlockOperations>) -> Arc<Self> {
-        let root = ops.root_dentry();
+    /// Creates a superblock and transfers ownership of its root dentry to it.
+    pub fn new(ops: Arc<dyn SuperBlockOperations>, root: Dentry) -> Arc<Self> {
         let max_file_size = ops.max_file_size().min(MAX_LFS_FILESIZE);
         let super_block = Arc::new(Self {
             ops,
-            root: root.clone(),
+            root,
+            dentry_cache: Mutex::default(),
             max_file_size,
             rename_lock: Mutex::default(),
             inodes: Mutex::default(),
         });
-        root.bind_super_block(&super_block);
+        super_block.root.bind_super_block(&super_block);
         super_block_registry().register(&super_block);
         super_block
+    }
+
+    /// Retains a hashed dentry until it is explicitly evicted from the dcache.
+    pub(crate) fn cache_dentry(&self, dentry: Dentry) {
+        let key = dentry.key();
+        let replaced = self.dentry_cache.lock().insert(key, dentry);
+        drop(replaced);
+    }
+
+    /// Removes a dentry from the dcache without affecting external references.
+    pub(crate) fn uncache_dentry(&self, dentry: &Dentry) {
+        let key = dentry.key();
+        let removed = self.dentry_cache.lock().remove(&key);
+        drop(removed);
     }
 
     /// Returns this superblock's maximum regular-file size.

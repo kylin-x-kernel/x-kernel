@@ -34,9 +34,7 @@ pub struct AnonInodeFs {
 impl AnonInodeFs {
     fn new() -> Self {
         let singleton_inode = AnonInode::new_shared_inode();
-        let super_block = SuperBlock::new(Arc::new(AnonInodeSuperBlock {
-            root: anon_inode_root_dentry(),
-        }));
+        let super_block = SuperBlock::new(Arc::new(AnonInodeSuperBlock), anon_inode_root_dentry());
         Self {
             mount: Mount::new_root(&super_block),
             singleton_inode,
@@ -184,17 +182,11 @@ fn anon_inode_root_init() -> VfsInodeInit {
     )
 }
 
-struct AnonInodeSuperBlock {
-    root: Dentry,
-}
+struct AnonInodeSuperBlock;
 
 impl SuperBlockOperations for AnonInodeSuperBlock {
     fn name(&self) -> &str {
         "anon_inodefs"
-    }
-
-    fn root_dentry(&self) -> Dentry {
-        self.root.clone()
     }
 
     fn statfs(&self) -> VfsResult<StatFs> {

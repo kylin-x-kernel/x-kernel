@@ -22,7 +22,6 @@ pub struct SimpleFs {
     fs_type: u32,
     mount_flags: StatFsFlags,
     inodes: Mutex<Slab<()>>,
-    root: Mutex<Option<Dentry>>,
 }
 
 impl SimpleFs {
@@ -47,15 +46,10 @@ impl SimpleFs {
             fs_type,
             mount_flags,
             inodes: Mutex::new(Slab::new()),
-            root: Mutex::new(None),
         });
         let root = root(fs.clone());
-        fs.set_root(Dentry::new_dir_from_inode(root(), None, String::new()));
-        SuperBlock::new(fs)
-    }
-
-    fn set_root(&self, root: Dentry) {
-        *self.root.lock() = Some(root);
+        let root = Dentry::new_dir_from_inode(root(), None, String::new());
+        SuperBlock::new(fs, root)
     }
 
     fn alloc_inode(&self) -> u64 {
@@ -70,10 +64,6 @@ impl SimpleFs {
 impl SuperBlockOperations for SimpleFs {
     fn name(&self) -> &str {
         &self.name
-    }
-
-    fn root_dentry(&self) -> Dentry {
-        self.root.lock().clone().unwrap()
     }
 
     fn statfs(&self) -> VfsResult<StatFs> {

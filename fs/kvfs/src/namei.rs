@@ -869,17 +869,11 @@ mod tests {
         assert_eq!(DEFAULT_MAX_LINKS, 40);
     }
 
-    struct TestSuperBlock {
-        root: Dentry,
-    }
+    struct TestSuperBlock;
 
     impl SuperBlockOperations for TestSuperBlock {
         fn name(&self) -> &str {
             "namei-test"
-        }
-
-        fn root_dentry(&self) -> Dentry {
-            self.root.clone()
         }
 
         fn statfs(&self) -> VfsResult<StatFs> {
@@ -1239,7 +1233,7 @@ mod tests {
         let dir_link = file_entry(6, &root, "dirlink", NodeType::Symlink, b"/dir", None);
         root_ops.insert("dirlink", dir_link);
 
-        let fs = SuperBlock::new(Arc::new(TestSuperBlock { root: root.clone() }));
+        let fs = SuperBlock::new(Arc::new(TestSuperBlock), root.clone());
         let mount = Mount::new_root(&fs);
         let root_location = mount.root_path();
         let target_location = Path::new(mount.clone(), target);

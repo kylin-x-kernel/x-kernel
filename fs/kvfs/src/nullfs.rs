@@ -24,22 +24,14 @@ const NULLFS_MOUNT_FLAGS: StatFsFlags = StatFsFlags::NODEV.union(StatFsFlags::NO
 
 /// Creates the single-purpose filesystem used as the initial namespace root.
 pub(crate) fn new_superblock() -> Arc<SuperBlock> {
-    SuperBlock::new(Arc::new(NullFs {
-        root: nullfs_root_dentry(),
-    }))
+    SuperBlock::new(Arc::new(NullFs), nullfs_root_dentry())
 }
 
-struct NullFs {
-    root: Dentry,
-}
+struct NullFs;
 
 impl SuperBlockOperations for NullFs {
     fn name(&self) -> &str {
         NULLFS_NAME
-    }
-
-    fn root_dentry(&self) -> Dentry {
-        self.root.clone()
     }
 
     fn statfs(&self) -> VfsResult<StatFs> {

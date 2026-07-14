@@ -74,7 +74,6 @@ pub struct MemoryFs {
     mount_flags: StatFsFlags,
     inodes: Mutex<Slab<Arc<Inode>>>,
     inode_cache: InodeCache,
-    root: Mutex<Option<Dentry>>,
 }
 
 impl MemoryFs {
@@ -116,7 +115,6 @@ impl MemoryFs {
             mount_flags,
             inodes: Mutex::new(Slab::new()),
             inode_cache: InodeCache::new(),
-            root: Mutex::default(),
         });
         let root_ino = Inode::new(
             &fs,
@@ -125,13 +123,8 @@ impl MemoryFs {
             root_mode,
             DeviceId::default(),
         );
-        *fs.root.lock() = Some(MemoryNode::dentry_from_inode(
-            &fs,
-            None,
-            String::new(),
-            root_ino,
-        ));
-        SuperBlock::new(fs)
+        let root = MemoryNode::dentry_from_inode(&fs, None, String::new(), root_ino);
+        SuperBlock::new(fs, root)
     }
 
     fn get(&self, ino: u64) -> Arc<Inode> {
@@ -142,10 +135,6 @@ impl MemoryFs {
 impl SuperBlockOperations for MemoryFs {
     fn name(&self) -> &str {
         self.name
-    }
-
-    fn root_dentry(&self) -> Dentry {
-        self.root.lock().clone().unwrap()
     }
 
     fn statfs(&self) -> VfsResult<StatFs> {
@@ -813,6 +802,23 @@ mod tests {
         assert_eq!(file.write_from(b"hello", &mut pos).unwrap(), 5);
         assert_eq!(file.path().getattr().unwrap().size, 5);
         assert_eq!(file.inode().size(), 5);
+    }
+
+    #[def_test]
+    fn rename_rejects_nonempty_directory_after_child_handle_is_dropped() {
+        let fs = MemoryFs::new();
+        let root = fs.root_dir();
+        let permission = NodePermission::from_bits_truncate(0o755);
+        let source = root.mkdir("source", permission).unwrap();
+        let target = root.mkdir("target", permission).unwrap();
+        let child = target.create("child", permission).unwrap();
+        drop(child);
+        drop(source);
+
+        assert_eq!(
+            root.rename("source", &root, "target", kvfs::RenameFlags::empty()),
+            Err(VfsError::DirectoryNotEmpty)
+        );
     }
 }
 

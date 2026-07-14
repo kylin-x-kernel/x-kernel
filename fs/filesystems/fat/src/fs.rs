@@ -42,7 +42,6 @@ impl FatFilesystemInner {
 /// FAT filesystem implementation.
 pub struct FatFilesystem {
     inner: Mutex<FatFilesystemInner>,
-    root_dir: Mutex<Option<Dentry>>,
 }
 
 pub(crate) struct FatFilesystemGuard<'a> {
@@ -83,7 +82,6 @@ impl FatFilesystem {
         let root_block_size = inner.inner.cluster_size() as u64;
         let result = Arc::new(Self {
             inner: Mutex::new(inner),
-            root_dir: Mutex::default(),
         });
 
         let root_node = {
@@ -108,8 +106,7 @@ impl FatFilesystem {
             ),
         );
         let root_dir = Dentry::new_dir_from_inode(root_inode, None, String::new());
-        *result.root_dir.lock() = Some(root_dir);
-        SuperBlock::new(result)
+        SuperBlock::new(result, root_dir)
     }
 }
 
@@ -125,10 +122,6 @@ impl FatFilesystem {
 impl SuperBlockOperations for FatFilesystem {
     fn name(&self) -> &str {
         "vfat"
-    }
-
-    fn root_dentry(&self) -> Dentry {
-        self.root_dir.lock().clone().unwrap()
     }
 
     fn statfs(&self) -> VfsResult<StatFs> {
