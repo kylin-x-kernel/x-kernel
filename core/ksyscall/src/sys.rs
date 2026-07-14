@@ -11,6 +11,7 @@
 
 use kbuild_config::ARCH;
 use kerrno::KResult;
+use khal::mem;
 use kprocess::{current_user_process, current_user_process_fs_context};
 use kvfs::{Filename, NodePermission};
 use linux_raw_sys::{
@@ -99,6 +100,13 @@ pub fn sys_sysinfo(info: UserPtr<sysinfo>) -> KResult<isize> {
     };
     kinfo.procs = kprocess::system_view::process_count() as _;
     kinfo.mem_unit = 1;
+
+    let alloc = kalloc::global_allocator();
+    let avail = alloc.available_pages();
+    let total_pages = alloc.used_pages() + avail;
+    kinfo.totalram = total_pages.saturating_mul(mem::PAGE_SIZE_4K) as _;
+    kinfo.freeram = avail.saturating_mul(mem::PAGE_SIZE_4K) as _;
+
     info.write_vm(kinfo)?;
     Ok(0)
 }

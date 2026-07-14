@@ -1208,9 +1208,6 @@ impl MmSpace {
         if size == 0 {
             return Ok(());
         }
-        if policy.has_invalidate() {
-            return Err(KError::OperationNotSupported);
-        }
 
         let range = VirtAddrRange::from_start_size(start, size);
         let overlapped_vmas = self.vmas.collect_overlapping(range);
@@ -1223,6 +1220,8 @@ impl MmSpace {
             }
             let overlap = VirtAddrRange::new(cursor.max(vma.start()), range.end.min(vma.end()));
             if !overlap.is_empty() {
+                // TODO: when mlock is implemented, check VM_LOCKED and
+                // return EBUSY for MS_INVALIDATE as Linux does.
                 let runtime = self.runtime_for_vma(&vma).ok_or(KError::BadAddress)?;
                 runtime.msync(&vma, overlap, policy)?;
             }

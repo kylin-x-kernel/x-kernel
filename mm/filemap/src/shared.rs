@@ -339,9 +339,9 @@ impl FileSharedRuntime {
         range: VirtAddrRange,
         policy: MsyncPolicy,
     ) -> KResult<MsyncRuntimeResult> {
-        if policy.has_invalidate() {
-            return Err(KError::OperationNotSupported);
-        }
+        // MS_ASYNC (and MS_INVALIDATE) are no-ops at the VMA level —
+        // Linux never actually evicts or zaps pages for MS_INVALIDATE
+        // because the page cache is globally coherent.
         if !policy.is_sync() {
             return Ok(MsyncRuntimeResult::Synced);
         }

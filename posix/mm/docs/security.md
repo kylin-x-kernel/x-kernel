@@ -90,7 +90,7 @@
 | `munmap` 范围非法 | 长度为 0 或下游地址空间拒绝 | 返回错误 | 不修改地址空间 |
 | `mprotect` grow flag 不支持 | `PROT_GROWSDOWN` 或 `PROT_GROWSUP` | 返回错误 | protect 失败，不修改 PTE/VMA |
 | `MADV_DONTNEED` 范围非法 | 地址未映射、未页对齐、或 `addr + len` 溢出 | 返回错误 | advice 失败，不修改对象 |
-| `msync` flag 不支持 | unknown flags、`MS_ASYNC | MS_SYNC`、或 `MS_INVALIDATE` | 返回错误 | sync 失败，不修改对象 |
+| `msync` flag 不支持 | unknown flags 或 `MS_ASYNC | MS_SYNC` 组合 | 返回错误 | sync 失败，不修改对象 |
 | shared file writeback 失败 | VFS `AddressSpaceOperations::writepages()` 失败 | 返回错误，dirty bit 保留 | syscall 失败，调用者可重试 |
 
 ## 故障管理

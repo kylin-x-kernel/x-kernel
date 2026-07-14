@@ -20,6 +20,7 @@ tee_ta_sign = ["tee_task_iface?/tee_ta_sign"]
 ebpf = ["dep:posix-bpf", "posix-bpf/ebpf", "posix-fs/ebpf"]
 
 [dependencies]
+kalloc.workspace = true
 kaddr_layout.workspace = true
 kfd_objects.workspace = true
 kfutex.workspace = true
