@@ -38,7 +38,85 @@ pub(crate) fn remember_dir_blocks(fs: &mut Ext4FileSystem, blocks: &BTreeMap<u32
     }
 }
 
-/// Normalize an rsext4 API path to an absolute path under the filesystem root.
+/// Clears `EXT4_INDEX_FL` before converting an indexed directory to linear lookup.
+///
+/// Linux ext4 clears this flag and falls back to linear insertion when HTree
+/// insertion reports an unusable index and metadata checksums are disabled.
+/// rsext4 does not yet maintain HTree indexes during insertion, so it takes
+/// that fallback before overwriting directory-index metadata with a regular
+/// directory entry.
+fn clear_dir_index(inode: &mut Ext4Inode) {
+    inode.i_flags &= !Ext4Inode::EXT4_INDEX_FL;
+}
+
+/// Inserts `new_entry` into reusable space in one linear ext4 directory block.
+///
+/// Each record stores `inode`, `rec_len`, `name_len`, and `file_type` in its
+/// first eight bytes, followed by the name. A zero inode marks a reusable
+/// record. For an occupied record, only the aligned header and name are needed;
+/// the unused tail covered by `rec_len` can be split off for the new entry.
+fn try_insert_dir_entry_in_block(data: &mut [u8], new_entry: &Ext4DirEntry2) -> bool {
+    let block_bytes = data.len();
+    let new_rec_len = new_entry.rec_len as usize;
+    let mut offset = 0usize;
+
+    while offset + 8 <= block_bytes {
+        let inode = u32::from_le_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]);
+        let rec_len = u16::from_le_bytes([data[offset + 4], data[offset + 5]]) as usize;
+        if rec_len < 8 {
+            return false;
+        }
+        let entry_end = offset + rec_len;
+        if entry_end > block_bytes {
+            return false;
+        }
+
+        let insert_offset = if inode == 0 {
+            (rec_len >= new_rec_len).then_some(offset)
+        } else {
+            let current_name_len = data[offset + 6] as usize;
+            let ideal_len = (8 + current_name_len).div_ceil(4) * 4;
+            let tail_len = rec_len.saturating_sub(ideal_len);
+            if tail_len >= new_rec_len {
+                data[offset + 4..offset + 6].copy_from_slice(&(ideal_len as u16).to_le_bytes());
+                Some(offset + ideal_len)
+            } else {
+                None
+            }
+        };
+
+        if let Some(insert_offset) = insert_offset {
+            let mut entry = *new_entry;
+            entry.rec_len = (entry_end - insert_offset) as u16;
+            entry.to_disk_bytes(&mut data[insert_offset..insert_offset + 8]);
+            let name_len = entry.name_len as usize;
+            data[insert_offset + 8..insert_offset + 8 + name_len]
+                .copy_from_slice(&entry.name[..name_len]);
+            return true;
+        }
+
+        if entry_end == block_bytes {
+            return false;
+        }
+        offset = entry_end;
+    }
+
+    false
+}
+
+/// Normalizes an rsext4 API path to an absolute path under the filesystem root.
+///
+/// Paths are rooted at this filesystem. Parent components at the root are
+/// therefore no-ops, matching Linux pathname resolution at a lookup root.
+///
+/// # Errors
+///
+/// Returns [`BlockDevError::InvalidInput`] for an empty path or an embedded NUL.
 pub fn normalize_path(path: &str) -> BlockDevResult<String> {
     if path.is_empty() || path.contains('\0') {
         return Err(BlockDevError::InvalidInput);
@@ -49,9 +127,7 @@ pub fn normalize_path(path: &str) -> BlockDevResult<String> {
         match part {
             "" | "." => {}
             ".." => {
-                if components.pop().is_none() {
-                    return Err(BlockDevError::InvalidInput);
-                }
+                let _ = components.pop();
             }
             name => components.push(name),
         }
@@ -74,9 +150,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalize_path_rejects_root_escape() {
-        assert!(normalize_path("../host").is_err());
-        assert!(normalize_path("/../../host").is_err());
+    fn normalize_path_clamps_parent_components_at_root() {
+        assert_eq!(normalize_path("/..").unwrap(), "/");
+        assert_eq!(normalize_path("/../host").unwrap(), "/host");
+        assert_eq!(normalize_path("/../../host").unwrap(), "/host");
+        assert_eq!(normalize_path("../host").unwrap(), "/host");
     }
 
     #[test]
@@ -94,9 +172,59 @@ mod tests {
     fn normalize_path_rejects_empty() {
         assert!(normalize_path("").is_err());
     }
+
+    #[test]
+    fn linear_insert_downgrades_htree_root_layout() {
+        let mut inode = Ext4Inode {
+            i_flags: Ext4Inode::EXT4_EXTENTS_FL | Ext4Inode::EXT4_INDEX_FL,
+            ..Ext4Inode::default()
+        };
+        assert_ne!(inode.i_flags & Ext4Inode::EXT4_INDEX_FL, 0);
+        clear_dir_index(&mut inode);
+        assert_eq!(inode.i_flags, Ext4Inode::EXT4_EXTENTS_FL);
+
+        let mut block = alloc::vec![0u8; BLOCK_SIZE];
+        let dot_len = Ext4DirEntry2::entry_len(1);
+        let dot = Ext4DirEntry2::new(38, dot_len, Ext4DirEntry2::EXT4_FT_DIR, b".");
+        dot.to_disk_bytes(&mut block[..8]);
+        block[8] = b'.';
+
+        let dotdot = Ext4DirEntry2::new(
+            2,
+            BLOCK_SIZE as u16 - dot_len,
+            Ext4DirEntry2::EXT4_FT_DIR,
+            b"..",
+        );
+        let dotdot_offset = dot_len as usize;
+        dotdot.to_disk_bytes(&mut block[dotdot_offset..dotdot_offset + 8]);
+        block[dotdot_offset + 8..dotdot_offset + 10].copy_from_slice(b"..");
+
+        // An indexed directory stores its dx root in the slack covered by '..'.
+        // Linear insertion must replace that metadata after clearing EXT4_INDEX_FL.
+        block[dotdot_offset + 12..dotdot_offset + 20].fill(0xa5);
+        let child = Ext4DirEntry2::new(
+            99,
+            Ext4DirEntry2::entry_len(6),
+            Ext4DirEntry2::EXT4_FT_REG_FILE,
+            b"weston",
+        );
+        assert!(try_insert_dir_entry_in_block(&mut block, &child));
+
+        assert_eq!(
+            u16::from_le_bytes([block[dotdot_offset + 4], block[dotdot_offset + 5]]),
+            Ext4DirEntry2::entry_len(2)
+        );
+        assert_eq!(
+            classic_dir::find_entry(&block, b"weston").map(|entry| entry.inode),
+            Some(99)
+        );
+    }
 }
 
-/// 路径解析，返回 (inode_num, inode)
+/// Resolves a filesystem path component by component to its inode.
+///
+/// Each component uses the same per-directory lookup as other rsext4 callers,
+/// preserving indexed lookup with linear fallback for HTree directories.
 pub fn get_inode_with_num<B: BlockDevice>(
     fs: &mut Ext4FileSystem,
     device: &mut Jbd2Dev<B>,
@@ -104,79 +232,18 @@ pub fn get_inode_with_num<B: BlockDevice>(
 ) -> BlockDevResult<Option<(u32, Ext4Inode)>> {
     let norm_path = normalize_path(path)?;
 
-    // 根目录特殊处理
-    if norm_path == "/" {
-        let inode = fs.get_root(device)?;
-        return Ok(Some((fs.root_inode, inode)));
-    }
-
-    // 按 '/' 分割
-    let components = norm_path.split('/').filter(|s| !s.is_empty());
-
-    // 从根开始
-    let mut current_inode = fs.get_root(device)?;
-    let mut current_ino: u32 = fs.root_inode;
-
-    for name in components {
-        if !current_inode.is_dir() {
+    let mut current = (fs.root_inode, fs.get_root(device)?);
+    for name in norm_path
+        .split('/')
+        .filter(|component| !component.is_empty())
+    {
+        let Some(next) = get_inode_by_name(fs, device, current.0, name)? else {
             return Ok(None);
-        }
-
-        let target = name.as_bytes();
-
-        let total_size = current_inode.size() as usize;
-        let block_bytes = BLOCK_SIZE;
-        let total_blocks = if total_size == 0 {
-            0
-        } else {
-            total_size.div_ceil(block_bytes)
         };
-
-        let mut found_inode_num: Option<u64> = None;
-
-        for lbn in 0..total_blocks {
-            let phys = match resolve_inode_block(device, &mut current_inode, lbn as u32)? {
-                Some(b) => b,
-                None => continue,
-            };
-            remember_dir_block(fs, phys as u64);
-
-            let cached_block = fs.datablock_cache.get_or_load(device, phys as u64)?;
-            let block_data = &cached_block.data[..block_bytes];
-
-            if let Some(entry) = classic_dir::find_entry(block_data, target) {
-                found_inode_num = Some(entry.inode as u64);
-                break;
-            }
-        }
-
-        let inode_num = match found_inode_num {
-            Some(n) => n,
-            None => return Ok(None),
-        };
-
-        let (inode_group_idx, _idx_in_group) = fs.inode_allocator.global_to_group(inode_num as u32);
-        let inode_table_start = fs
-            .group_descs
-            .get(inode_group_idx as usize)
-            .ok_or(BlockDevError::Corrupted)?
-            .inode_table();
-
-        let (block_num, offset, _group_idx) = fs.inodetable_cache.calc_inode_location(
-            inode_num as u32,
-            fs.layout.inodes_per_group,
-            inode_table_start,
-            BLOCK_SIZE,
-        );
-
-        let cached_inode = fs
-            .inodetable_cache
-            .get_or_load(device, inode_num, block_num, offset)?;
-        current_inode = cached_inode.inode;
-        current_ino = inode_num as u32;
+        current = next;
     }
 
-    Ok(Some((current_ino, current_inode)))
+    Ok(Some(current))
 }
 
 /// Looks up the inode number and `Ext4Inode` for a given entry name
@@ -203,8 +270,7 @@ pub fn get_inode_by_name<B: BlockDevice>(
     }
 }
 
-/// 在父目录的所有逻辑块中查找空闲空间并插入一个目录项；
-/// 若所有现有块都无法容纳，则自动为目录分配一个新数据块并扩展 inode 映射和大小。
+/// Inserts a child entry into a parent directory, extending it when necessary.
 pub fn insert_dir_entry<B: BlockDevice>(
     fs: &mut Ext4FileSystem,
     device: &mut Jbd2Dev<B>,
@@ -216,13 +282,20 @@ pub fn insert_dir_entry<B: BlockDevice>(
 ) -> BlockDevResult<()> {
     let name_bytes = child_name.as_bytes();
     let name_len = core::cmp::min(name_bytes.len(), Ext4DirEntry2::MAX_NAME_LEN as usize);
-    let new_rec_len = Ext4DirEntry2::entry_len(name_len as u8) as usize;
     let new_entry = Ext4DirEntry2::new(
         child_ino,
         Ext4DirEntry2::entry_len(name_len as u8),
         file_type,
         &name_bytes[..name_len],
     );
+
+    let was_indexed = parent_inode.i_flags & Ext4Inode::EXT4_INDEX_FL != 0;
+    if was_indexed {
+        fs.modify_inode(device, parent_ino_num, |inode| {
+            clear_dir_index(inode);
+        })?;
+        clear_dir_index(parent_inode);
+    }
 
     let total_size = parent_inode.size() as usize;
     let block_bytes = BLOCK_SIZE;
@@ -253,73 +326,9 @@ pub fn insert_dir_entry<B: BlockDevice>(
             }
         };
 
-        let _ = fs.datablock_cache.modify(device, phys as u64, |data| {
-            if inserted {
-                return;
-            }
-
-            let block_bytes = BLOCK_SIZE;
-
-            let mut offset = 0usize;
-            while offset + 8 <= block_bytes {
-                let inode = u32::from_le_bytes([
-                    data[offset],
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                ]);
-                let rec_len = u16::from_le_bytes([data[offset + 4], data[offset + 5]]) as usize;
-                if rec_len < 8 {
-                    return;
-                }
-                let entry_end = offset + rec_len;
-                if entry_end > block_bytes {
-                    return;
-                }
-
-                // Free entry: directly use it if it can hold the new entry.
-                if inode == 0 {
-                    if rec_len >= new_rec_len {
-                        let mut full_entry = new_entry;
-                        full_entry.rec_len = rec_len as u16;
-                        full_entry.to_disk_bytes(&mut data[offset..offset + 8]);
-                        let nlen = full_entry.name_len as usize;
-                        data[offset + 8..offset + 8 + nlen]
-                            .copy_from_slice(&full_entry.name[..nlen]);
-                        inserted = true;
-                    }
-                    return;
-                }
-
-                // Occupied entry: try to split tail space.
-                let cur_name_len = data[offset + 6] as usize;
-                let mut ideal = 8 + cur_name_len;
-                ideal = (ideal + 3) & !3;
-                if ideal <= rec_len {
-                    let tail = rec_len - ideal;
-                    if tail >= new_rec_len {
-                        let ideal_bytes = (ideal as u16).to_le_bytes();
-                        data[offset + 4] = ideal_bytes[0];
-                        data[offset + 5] = ideal_bytes[1];
-
-                        let new_off = offset + ideal;
-                        let mut full_entry = new_entry;
-                        full_entry.rec_len = tail as u16;
-                        full_entry.to_disk_bytes(&mut data[new_off..new_off + 8]);
-                        let nlen = full_entry.name_len as usize;
-                        data[new_off + 8..new_off + 8 + nlen]
-                            .copy_from_slice(&full_entry.name[..nlen]);
-                        inserted = true;
-                        return;
-                    }
-                }
-
-                if entry_end == block_bytes {
-                    return;
-                }
-                offset = entry_end;
-            }
-        });
+        fs.datablock_cache.modify(device, phys, |data| {
+            inserted = try_insert_dir_entry_in_block(data, &new_entry);
+        })?;
     }
 
     if inserted {

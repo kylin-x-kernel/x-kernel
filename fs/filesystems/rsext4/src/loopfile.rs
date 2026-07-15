@@ -8,11 +8,10 @@
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use log::{debug, error};
+use log::error;
 
 use crate::{
-    blockdev::*, config::*, disknode::*, entries::*, error::*, ext4::*, extents_tree::*,
-    hashtree::*,
+    blockdev::*, dir::get_inode_with_num, disknode::*, error::*, ext4::*, extents_tree::*,
 };
 
 /// 支持extend数和多级索引(多级索引将来弃用)
@@ -135,109 +134,15 @@ pub fn resolve_inode_block_allextend<B: BlockDevice>(
     Ok(out)
 }
 
-/// 传入完整的路径信息按照特性进行扫描。
+/// Resolves a filesystem path to its inode number and inode.
+///
+/// An empty path retains the legacy root-directory behavior; all other paths
+/// use the canonical normalized resolver.
 pub fn get_file_inode<B: BlockDevice>(
     fs: &mut Ext4FileSystem,
     block_dev: &mut Jbd2Dev<B>,
     path: &str,
 ) -> BlockDevResult<Option<(u32, Ext4Inode)>> {
-    // 规范化路径：空串或"/" 视为根目录
-    if path.is_empty() || path == "/" {
-        let inode = fs.get_root(block_dev)?;
-        return Ok(Some((fs.root_inode, inode)));
-    }
-
-    // 按 '/' 分割，过滤掉空段
-    let components = path.split('/').filter(|s| !s.is_empty());
-
-    // 从根目录开始逐级解析，并维护一个路径栈以支持 ".." 回溯
-    let mut current_inode = fs.get_root(block_dev)?;
-    let mut current_ino_num: u32 = fs.root_inode;
-    let mut path_vec: Vec<Ext4Inode> = Vec::new();
-    path_vec.push(current_inode);
-
-    // 根目录所在的 inode 表起始块目前按 group0 处理
-    let inode_table_start = match fs.group_descs.first() {
-        Some(desc) => desc.inode_table(),
-        None => return Err(BlockDevError::Corrupted),
-    };
-    for name in components {
-        if !current_inode.is_dir() {
-            // 中间层不是目录，路径非法
-            return Ok(None);
-        }
-
-        // 特殊处理当前目录和父目录
-        if name == "." {
-            continue;
-        }
-        if name == ".." {
-            // 回溯到父目录：栈中至少保留根目录一层
-            if path_vec.len() > 1 {
-                path_vec.pop();
-                if let Some(parent_inode) = path_vec.last() {
-                    current_inode = *parent_inode;
-                }
-            }
-            continue;
-        }
-
-        let target = name.as_bytes();
-        let mut found_inode_num: Option<u64> = None;
-
-        // 尝试使用哈希树查找
-        match lookup_directory_entry(fs, block_dev, &current_inode, target) {
-            Ok(result) => {
-                found_inode_num = Some(result.entry.inode as u64);
-            }
-            Err(_) => {
-                // 哈希树查找失败，回退到线性查找
-                debug!("Hash tree lookup failed, falling back to linear search");
-
-                // 使用 resolve_inode_block_allextend 获取所有物理块，然后逐块线性查找
-                let total_size = current_inode.size() as usize;
-                let block_bytes = BLOCK_SIZE;
-                let blocks = resolve_inode_block_allextend(fs, block_dev, &mut current_inode)?;
-                debug!(
-                    "Directory inode size: {} bytes, blocks used: {}",
-                    &total_size,
-                    &blocks.len()
-                );
-
-                for (idx, phys) in blocks.iter().enumerate() {
-                    debug!("Scan dir block idx {} phys {}", &idx, phys.1);
-                    let cached_block = fs.datablock_cache.get_or_load(block_dev, *phys.1)?;
-                    let block_data = &cached_block.data[..block_bytes];
-
-                    if let Some(entry) = classic_dir::find_entry(block_data, target) {
-                        found_inode_num = Some(entry.inode as u64);
-                        break;
-                    }
-                }
-            }
-        }
-
-        let inode_num = match found_inode_num {
-            Some(n) => n,
-            None => return Ok(None),
-        };
-
-        let inode_num_u32 = inode_num as u32;
-
-        let (block_num, offset, _group_idx) = fs.inodetable_cache.calc_inode_location(
-            inode_num_u32,
-            fs.layout.inodes_per_group,
-            inode_table_start,
-            BLOCK_SIZE,
-        );
-
-        let cached_inode = fs
-            .inodetable_cache
-            .get_or_load(block_dev, inode_num, block_num, offset)?;
-        current_inode = cached_inode.inode;
-        current_ino_num = inode_num_u32;
-        path_vec.push(current_inode);
-    }
-
-    Ok(Some((current_ino_num, current_inode)))
+    let path = if path.is_empty() { "/" } else { path };
+    get_inode_with_num(fs, block_dev, path)
 }
