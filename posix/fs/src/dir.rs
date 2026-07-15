@@ -201,6 +201,13 @@ pub fn sys_getdents64(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
 }
 
 /// Gets the current working directory path.
+///
+/// On success returns the length of the path written to `buf` (including the
+/// NUL terminator), matching the Linux `getcwd(2)` convention.  glibc checks
+/// the return value against the buffer size and falls back to a manual
+/// directory walk (`generic_getcwd`) when the syscall returns a value that
+/// exceeds the buffer — an invariant that breaks when we return a raw
+/// pointer.
 pub fn sys_getcwd(buf: UserPtr<u8>, size: isize) -> KResult<isize> {
     let size: usize = size.try_into().map_err(|_| KError::BadAddress)?;
     if buf.is_null() {
@@ -219,7 +226,8 @@ pub fn sys_getcwd(buf: UserPtr<u8>, size: isize) -> KResult<isize> {
 
     if cwd.len() <= size {
         buf.write_vm_slice(cwd)?;
-        Ok(buf.as_ptr() as _)
+        // Return the byte count written (including NUL), per Linux ABI.
+        Ok(cwd.len() as isize)
     } else {
         Err(KError::OutOfRange)
     }
