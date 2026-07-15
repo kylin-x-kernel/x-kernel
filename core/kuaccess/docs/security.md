@@ -15,15 +15,18 @@
 
 - `user_copy(...)`：
   依赖调用前的用户地址范围检查，以及当前线程 `accessing_user_memory` 标志保证 trap handler 只在受控窗口内接管。
+- `user_atomic_cmpxchg_u32(...)`：
+  依赖 4 字节对齐检查、用户地址范围检查，以及同一用户访问窗口与 exception-table fixup。
 
 ## 内存安全不变量
 
 - `check_access()` 只允许访问用户空间有效区间。
+- `atomic_cmpxchg_u32()` / `atomic_load_u32()` / `atomic_u32_eq()` 额外要求地址 4 字节对齐。
 - `dispatch_irq_page_fault()` 仅在当前线程显式进入用户内存访问窗口时处理 fault。
 - `kuaccess` 必须保留 `MmSpace::handle_page_fault()` 的 typed outcome 分类：
   只有 `Resolved` 和 retry-class outcome 可以转换为 trap handled；unmapped、
   permission denied、bus error、OOM、no-progress 和 generic failure 必须转换为
-  user-copy failure，而不是继续重试。
+  user-copy / atomic-user 失败，而不是继续重试。
 - 字符串 helper 只在成功读取完整字节流后再做 UTF-8 解释。
 
 ## 线程安全
@@ -52,4 +55,5 @@
 
 ## 已知限制
 
-- 当前 helper 只覆盖字符串装载，复杂结构体解析仍由各调用方自行组织。
+- 当前 helper 只覆盖字符串装载与 `u32` 原子 cmpxchg；复杂结构体解析仍由各调用方自行组织。
+- 原子原语目前仅提供 32-bit cmpxchg；更大宽度或其它 RMW 操作按需再加。

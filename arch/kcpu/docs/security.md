@@ -359,7 +359,7 @@ $f0–$f31 的寄存器编号。
 - [ ] 修改 GDT 段选择子常量后验证 `UserContext::new` 中的 `cs`/`ss` 值。
 - [ ] 新增异常向量处理时检查是否需要更新异常表或注册新 handler。
 - [ ] LoongArch64 新增指令模拟时验证操作码掩码和寄存器编号范围。
-- [ ] 修改 `copy_user.S` 后确认每条访存指令均有对应的 `_asm_extable` 条目。
+- [ ] 修改 `copy_user.S` / `atomic_user.S` 后确认每条访存指令均有对应的 `_asm_extable` 条目。
 - [ ] 新增 per-CPU 变量时验证初始化顺序（percpu init → `init_trap`）。
 - [ ] 修改页表切换逻辑后验证 TLB 刷新语义是否正确。
 - [ ] 修改 `fp-simd` / `tls` feature 门控代码后验证所有架构的一致性。

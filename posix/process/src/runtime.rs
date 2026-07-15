@@ -13,12 +13,13 @@ use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
 use kidentity::PidHandle;
 use kprocess::{
-    CpuTimeState, Pid, Thread, UserThreadRuntimeAction, current_futex_key, current_user_process,
-    current_user_thread, poll_cpu_timers, process_exit, process_signals,
+    CpuTimeState, Pid, Thread, Tid, UserThreadRuntimeAction, current_futex_key,
+    current_user_process, current_user_thread, poll_cpu_timers, process_exit, process_signals,
 };
 use ksignal::{SignalInfo, SignalOSAction, SignalSet, Signo};
 use ktask::{TaskInner, current};
-use linux_raw_sys::general::ROBUST_LIST_LIMIT;
+use kuaccess::{atomic_cmpxchg_u32, atomic_load_u32};
+use linux_raw_sys::general::{FUTEX_OWNER_DIED, FUTEX_TID_MASK, FUTEX_WAITERS, ROBUST_LIST_LIMIT};
 use linux_sysno::Sysno;
 use memspace::PageFaultOutcome;
 use osvm::{VirtMutPtr, VirtPtr};
@@ -155,11 +156,63 @@ struct RobustListHead {
     list_op_pending: *mut RobustList,
 }
 
-fn dispatch_irq_futex_death(entry: *mut RobustList, offset: i64) -> KResult<()> {
+/// Userspace robust-mutex lock word (`u32` futex value).
+///
+/// Layout matches the Linux robust-futex ABI: TID in the low bits, plus
+/// `FUTEX_OWNER_DIED` / `FUTEX_WAITERS` in the high bits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(transparent)]
+struct RobustFutexWord(u32);
+
+impl RobustFutexWord {
+    fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
+
+    fn bits(self) -> u32 {
+        self.0
+    }
+
+    fn tid(self) -> Tid {
+        self.0 & FUTEX_TID_MASK
+    }
+
+    fn is_owner_died(self) -> bool {
+        self.0 & FUTEX_OWNER_DIED != 0
+    }
+
+    /// Preserve `WAITERS`, clear the TID, and set `OWNER_DIED`.
+    fn with_owner_died(self) -> Self {
+        Self((self.0 & FUTEX_WAITERS) | FUTEX_OWNER_DIED)
+    }
+}
+
+fn mark_futex_owner_died(address: usize, tid: Tid) -> KResult<bool> {
+    loop {
+        let observed = RobustFutexWord::from_bits(atomic_load_u32(address).map_err(KError::from)?);
+        if observed.tid() != tid {
+            return Ok(false);
+        }
+        if observed.is_owner_died() {
+            return Ok(true);
+        }
+        let newval = observed.with_owner_died();
+        let (exchanged, _) =
+            atomic_cmpxchg_u32(address, observed.bits(), newval.bits()).map_err(KError::from)?;
+        if exchanged {
+            return Ok(true);
+        }
+    }
+}
+
+fn dispatch_irq_futex_death(entry: *mut RobustList, offset: i64, tid: Tid) -> KResult<()> {
     let address = (entry as u64)
         .checked_add_signed(offset)
         .ok_or(KError::InvalidInput)?;
     let address: usize = address.try_into().map_err(|_| KError::InvalidInput)?;
+    if !mark_futex_owner_died(address, tid)? {
+        return Ok(());
+    }
     let key = current_futex_key(address);
 
     let futex_state = current_user_process().futex_state()?;
@@ -174,7 +227,7 @@ fn dispatch_irq_futex_death(entry: *mut RobustList, offset: i64) -> KResult<()> 
 }
 
 /// Process robust futex list on thread exit and wake waiting threads.
-fn exit_robust_list(head: *const RobustListHead) {
+fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
     let mut limit = ROBUST_LIST_LIMIT;
 
     // SAFETY: `head` comes from the task's registered robust-list head, and we
@@ -191,7 +244,7 @@ fn exit_robust_list(head: *const RobustListHead) {
         let Some(next_entry) = entry.read_vm().map(|node| node.next).ok() else {
             return;
         };
-        if entry != pending && dispatch_irq_futex_death(entry, offset).is_err() {
+        if entry != pending && dispatch_irq_futex_death(entry, offset, tid).is_err() {
             return;
         }
         entry = next_entry;
@@ -204,7 +257,7 @@ fn exit_robust_list(head: *const RobustListHead) {
     }
 
     if !pending.is_null() {
-        let _ = dispatch_irq_futex_death(pending, offset);
+        let _ = dispatch_irq_futex_death(pending, offset, tid);
     }
 }
 
@@ -229,7 +282,7 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
 
     let head = thr.robust_list_head() as *const RobustListHead;
     if !head.is_null() {
-        exit_robust_list(head);
+        exit_robust_list(head, thr.tid());
     }
 
     // Per-thread TEE session cleanup when this thread holds a session context.

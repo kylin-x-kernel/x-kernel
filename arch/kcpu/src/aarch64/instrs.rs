@@ -4,7 +4,11 @@
 
 //! Wrapper functions for assembly instructions.
 
-core::arch::global_asm!(include_str!("copy_user.S"));
+core::arch::global_asm!(
+    include_str!("../asm/extable.inc"),
+    include_str!("copy_user.S"),
+    include_str!("atomic_user.S"),
+);
 
 unsafe extern "C" {
     /// Copies data from source to destination, where addresses may be in user
@@ -17,6 +21,22 @@ unsafe extern "C" {
     /// Returns the number of bytes not copied. This means 0 indicates success,
     /// while a value > 0 indicates failure.
     pub fn raw_copy_from_user(dst: *mut u8, src: *const u8, size: usize) -> usize;
+
+    /// Atomically compare-exchanges a 32-bit word at `addr`.
+    ///
+    /// On success (return `0`), writes the previous `*addr` value into
+    /// `old_out`. If that previous value equals `old`, stores `new`.
+    ///
+    /// # Safety
+    ///
+    /// `addr` must be a 4-byte-aligned address that is currently accessible in
+    /// the active address space under the user-access window. `old_out` must
+    /// point to writable kernel memory.
+    ///
+    /// # Returns
+    ///
+    /// `0` if no fault occurred; non-zero if a data abort occurred.
+    pub fn user_atomic_cmpxchg_u32(addr: *mut u32, old: u32, new: u32, old_out: *mut u32) -> usize;
 }
 
 /// Alias for compatibility with other architectures

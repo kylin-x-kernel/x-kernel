@@ -23,6 +23,7 @@ khal.workspace = true
 kidentity.workspace = true
 klogger.workspace = true
 kprocess.workspace = true
+kuaccess.workspace = true
 ksignal.workspace = true
 ksync.workspace = true
 ktask.workspace = true

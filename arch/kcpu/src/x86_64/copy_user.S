@@ -1,11 +1,3 @@
-.macro _asm_extable, from, to
-    .pushsection __ex_table, "a"
-    .balign 8
-    .quad \from
-    .quad \to
-    .popsection
-.endm
-
 .section .text
 .global user_copy
 user_copy:

@@ -3,14 +3,6 @@
 // Arguments: x0=dst, x1=src, x2=size
 // Returns: 0 on success; remaining bytes (not copied) if a data abort occurs
 
-.macro _asm_extable, from, to
-    .pushsection __ex_table, "a"
-    .balign 8
-    .quad \from
-    .quad \to
-    .popsection
-.endm
-
 .section .text
 .global raw_copy_from_user
 
@@ -20,7 +12,7 @@
 // 3. Bulk copy 64 bytes per iteration using 8x LDP/STP pairs
 // 4. Copy remaining 8-byte chunks
 // 5. Tail copy bytes
-// All load/store pairs are covered by exception table entries pointing to .Lfault
+// All load/store pairs are covered by exception table entries pointing to .Lcopy_fault
 // so that on fault we compute remaining = original_end - current_dst.
 
 raw_copy_from_user:
@@ -90,22 +82,22 @@ raw_copy_from_user:
 
 // Fault handler: x0 currently points just past last successfully written byte.
 // Remaining = dst_end - current_dst (x3 - x0)
-.Lfault:
+.Lcopy_fault:
     sub     x0, x3, x0
     ret
 
 // Exception table entries for every faultable memory access.
-    _asm_extable 1b, .Lfault
-    _asm_extable 2b, .Lfault
-    _asm_extable 3b, .Lfault
-    _asm_extable 4b, .Lfault
-    _asm_extable 5b, .Lfault
-    _asm_extable 6b, .Lfault
-    _asm_extable 7b, .Lfault
-    _asm_extable 8b, .Lfault
-    _asm_extable 9b, .Lfault
-    _asm_extable 10b, .Lfault
-    _asm_extable 11b, .Lfault
-    _asm_extable 12b, .Lfault
-    _asm_extable 13b, .Lfault
-    _asm_extable 14b, .Lfault
+    _asm_extable 1b, .Lcopy_fault
+    _asm_extable 2b, .Lcopy_fault
+    _asm_extable 3b, .Lcopy_fault
+    _asm_extable 4b, .Lcopy_fault
+    _asm_extable 5b, .Lcopy_fault
+    _asm_extable 6b, .Lcopy_fault
+    _asm_extable 7b, .Lcopy_fault
+    _asm_extable 8b, .Lcopy_fault
+    _asm_extable 9b, .Lcopy_fault
+    _asm_extable 10b, .Lcopy_fault
+    _asm_extable 11b, .Lcopy_fault
+    _asm_extable 12b, .Lcopy_fault
+    _asm_extable 13b, .Lcopy_fault
+    _asm_extable 14b, .Lcopy_fault

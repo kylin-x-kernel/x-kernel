@@ -26,6 +26,11 @@ macro_rules! __asm_macros {
             sw \rs2, \off*XLENB(\rs1)
         .endm
 
+        .endif
+
+        .ifndef ASM_EXTABLE_FLAG
+        .equ ASM_EXTABLE_FLAG, 1
+
         .macro _asm_extable, from, to
             .pushsection __ex_table, "a"
             .balign 4
@@ -51,6 +56,11 @@ macro_rules! __asm_macros {
         .macro STR rs2, rs1, off
             sd \rs2, \off*XLENB(\rs1)
         .endm
+
+        .endif
+
+        .ifndef ASM_EXTABLE_FLAG
+        .equ ASM_EXTABLE_FLAG, 1
 
         .macro _asm_extable, from, to
             .pushsection __ex_table, "a"

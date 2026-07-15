@@ -9,6 +9,7 @@ use core::{mem::size_of, sync::atomic::Ordering};
 use kerrno::{KError, KResult, LinuxError};
 use kfutex::FutexKey;
 use kprocess::{AsThread, current_futex_key};
+use kuaccess::atomic_u32_eq;
 use linux_raw_sys::general::{
     FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_PRIVATE_FLAG, FUTEX_REQUEUE, FUTEX_WAIT,
     FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, robust_list_head, timespec,
@@ -57,9 +58,10 @@ pub fn sys_futex(
     let futex_table = process.futex_state()?.table_for(&key);
 
     let command = futex_op & (FUTEX_CMD_MASK as u32);
+    let uaddr_usize = uaddr.as_ptr() as usize;
     match command {
         FUTEX_WAIT | FUTEX_WAIT_BITSET => {
-            if uaddr.read_vm()? != value {
+            if !atomic_u32_eq(uaddr_usize, value)? {
                 return Err(KError::WouldBlock);
             }
 
@@ -79,9 +81,9 @@ pub fn sys_futex(
                 u32::MAX
             };
 
-            let wait_result = futex
-                .wq
-                .wait_if(bitset, timeout, || uaddr.read_vm() == Ok(value));
+            let wait_result = futex.wq.wait_if(bitset, timeout, || {
+                atomic_u32_eq(uaddr_usize, value).unwrap_or(false)
+            });
             match wait_result {
                 Ok(false) => {
                     return Err(KError::WouldBlock);
@@ -118,7 +120,7 @@ pub fn sys_futex(
         }
         FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
             validate_non_negative(value)?;
-            if command == FUTEX_CMP_REQUEUE && uaddr.read_vm()? != value3 {
+            if command == FUTEX_CMP_REQUEUE && !atomic_u32_eq(uaddr_usize, value3)? {
                 return Err(KError::WouldBlock);
             }
             let value2 = validate_non_negative(timeout_or_value2 as u32)?;
