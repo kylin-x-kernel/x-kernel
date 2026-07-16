@@ -39,7 +39,7 @@ impl VsockConnId {
 }
 
 /// Vsock driver event type.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum VsockDriverEventType {
     /// A connection request was received.
     ConnectionRequest(VsockConnId),

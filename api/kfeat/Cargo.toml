@@ -181,6 +181,10 @@ csv_huk_key = ["tee_kernel/csv_huk_key"]
 virtcca_huk_key = ["tee_kernel/virtcca_huk_key"]
 ta_verify_with_root = ["tee_ta_sign", "tee_task_iface/ta_verify_with_root"]
 
+# Trusty IPC
+tipc = ["ksyscall/tipc", "kprocess/tipc", "linux_sysno/tipc"]
+vsock_tipc_bridge = ["knet/vsock_tipc_bridge", "kruntime/vsock_tipc_bridge"]
+
 # Pmu
 pmu = ["kruntime/pmu"]
 
@@ -197,6 +201,7 @@ kalloc = { workspace = true, optional = true }
 backtrace.workspace = true
 fbdevice = { workspace = true, optional = true }
 kdriver.workspace = true
+kprocess.workspace = true
 aarch64-qemu-virt = { workspace = true, optional = true, features = [
     "fp-simd",
     "rtc",
@@ -224,6 +229,7 @@ kruntime.workspace = true
 ksync = { workspace = true, optional = true }
 ktask = { workspace = true, optional = true }
 ksyscall = { workspace = true }
+linux_sysno.workspace = true
 kspin = { workspace = true, optional = true }
 procfs = { workspace = true, optional = true }
 tee_kernel = { workspace = true, optional = true }

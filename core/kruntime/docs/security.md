@@ -78,7 +78,7 @@ SECONDARY_BOOT_STACKS.stack_top(...)
 
 ## 内存与并发不变量
 
-1. **主核写 `INITED_CPUS`** 与从核 `fetch_add` 使用 `Release`/`Acquire`，保证 `main()` 前可见所有从核 init 完成。
+1. **主核写 `INITED_CPUS`** 与从核 `fetch_add` 使用 `Release`/`Acquire`，保证 `main()` 以及依赖跨 CPU 调度的 late-start worker 前可见所有从核 init 完成。
 2. **`ENTERED_CPUS`** 仅用于主核等待 AP 进入 `rust_main_secondary`，与 `INITED_CPUS` 分离，避免启动顺序死锁。
 3. **`init_interrupt` 末尾 `enable_local_irq`**：此前定时器处理程序已注册；之后才可能触发抢占与并发 `register_init` 回调之外的 IRQ 路径（`init_cb` 在其之前）。
 

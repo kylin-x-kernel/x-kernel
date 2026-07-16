@@ -23,8 +23,10 @@ KFEAT_NET=y
 # KFEAT_TA_VERIFY_WITH_ROOT is not set
 KFEAT_TEE=y
 KFEAT_TEE_TA_SIGN=y
+# KFEAT_TIPC is not set
 # KFEAT_VIRTIO_BUS_MMIO is not set
 KFEAT_VSOCK=y
+# KFEAT_VSOCK_TIPC_BRIDGE is not set
 # KFEAT_VMM is not set
 # LOG_LEVEL_DEBUG is not set
 # LOG_LEVEL_ERROR is not set

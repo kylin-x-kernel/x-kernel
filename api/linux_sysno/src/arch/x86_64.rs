@@ -855,6 +855,25 @@ syscall_enum! {
             tee_scn_cache_operation = 570,
             tee_scn_test = 571,
         }
+
+        #[cfg(feature = "tipc")]
+        {
+            /// Trusty-IPC syscall numbers offset by 584 so that `port_create` starts at 600.
+            tipc_port_create = 600,
+            tipc_connect = 601,
+            tipc_accept = 602,
+            tipc_close = 603,
+            tipc_set_cookie = 604,
+            tipc_handle_set_create = 605,
+            tipc_handle_set_ctrl = 606,
+            tipc_wait = 608,
+            tipc_wait_any = 609,
+            tipc_get_msg = 616,
+            tipc_read_msg = 617,
+            tipc_put_msg = 618,
+            tipc_send_msg = 619,
+            tipc_memref_create = 648,
+        }
     }
     LAST: open_tree_attr;
 }

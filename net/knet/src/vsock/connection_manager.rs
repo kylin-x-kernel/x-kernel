@@ -297,19 +297,28 @@ impl VsockConnectionManager {
                 port + 1
             };
 
-            // check if port is in use by listen queue
-            if !self.listen_queues.contains_key(&port) {
-                // check if port is in use by existing connections
-                let port_in_use = self.connections.keys().any(|id| id.local_port == port);
-                if !port_in_use {
-                    return Ok(port);
+            #[cfg(feature = "vsock_tipc_bridge")]
+            if crate::vsock::bridge_port_map::is_bridge_port(port) {
+                if self.next_ephemeral_port == start {
+                    k_bail!(AddrInUse, "no available ports");
                 }
+                continue;
+            }
+
+            if !self.is_local_port_in_use(port) {
+                return Ok(port);
             }
 
             if self.next_ephemeral_port == start {
                 k_bail!(AddrInUse, "no available ports");
             }
         }
+    }
+
+    /// Returns whether a local port is already held by a listener or connection.
+    pub(crate) fn is_local_port_in_use(&self, port: u32) -> bool {
+        self.listen_queues.contains_key(&port)
+            || self.connections.keys().any(|id| id.local_port == port)
     }
 
     /// create a listen queue
@@ -358,20 +367,19 @@ impl VsockConnectionManager {
         local_addr: VsockAddr,
         peer_addr: Option<VsockAddr>,
         state: ConnectionState,
-    ) -> Arc<Mutex<Connection>> {
+    ) -> KResult<Arc<Mutex<Connection>>> {
+        if self.connections.contains_key(&conn_id) {
+            k_bail!(AddrInUse, "connection already exists");
+        }
         let conn = Connection::new(local_addr, peer_addr, state);
         let conn = Arc::new(Mutex::new(conn));
-        if self.connections.contains_key(&conn_id) {
-            info!("Connection {:?} already exists, overwriting", conn_id);
-        } else {
-            crate::device::start_vsock_polling();
-        }
+        crate::device::start_vsock_polling();
         self.connections.insert(conn_id, conn.clone());
         debug!(
             "Created connection {:?}: local={:?}, peer={:?}",
             conn_id, local_addr, peer_addr
         );
-        conn
+        Ok(conn)
     }
 
     /// get a connection by id
@@ -413,7 +421,7 @@ impl VsockConnectionManager {
             local_addr,
             Some(conn_id.peer_addr),
             ConnectionState::Connected,
-        );
+        )?;
 
         // 加入 accept 队列
         let mut queue_guard = queue.lock();

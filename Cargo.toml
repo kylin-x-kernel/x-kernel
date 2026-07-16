@@ -171,6 +171,10 @@ xdice = { path = "tee/xdice", default-features = false, features = ["nostd"] }
 # Internal: virtualization
 kvmm = { path = "virt/kvmm" }
 
+# Internal: Trusty IPC
+tipc = { path = "tee/tipc" }
+tipc_handle = { path = "tee/tipc_handle" }
+
 # Internal: utilities and tooling
 backtrace = { path = "util/backtrace" }
 kbuild_config = { path = "util/kbuild_config" }

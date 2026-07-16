@@ -695,12 +695,18 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
             Err(kerrno::KError::Unsupported)
         }
 
-        // TEE syscalls (>=500)
+        // TEE syscalls (500-599)
         #[cfg(feature = "tee")]
-        _ if uctx.sysno() >= 500 => match tee_kernel::tee::dispatch_irq_tee_syscall(sysno, uctx) {
-            Ok(_) => Ok(tee_kernel::TEE_SUCCESS as isize),
-            Err(errno) => Ok(errno as isize),
-        },
+        _ if (500..600).contains(&uctx.sysno()) => {
+            match tee_kernel::tee::dispatch_irq_tee_syscall(sysno, uctx) {
+                Ok(_) => Ok(tee_kernel::TEE_SUCCESS as isize),
+                Err(errno) => Ok(errno as isize),
+            }
+        }
+
+        // TIPC syscalls (>=600).
+        #[cfg(feature = "tipc")]
+        _ if uctx.sysno() >= 600 => tipc::syscall::dispatch_irq_tipc_syscall(sysno, uctx),
 
         _ => {
             let tid = kprocess::current_user_tid();
@@ -708,6 +714,7 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
             Err(kerrno::KError::Unsupported)
         }
     };
+
     debug!("Syscall {sysno} return {result:?}");
 
     uctx.set_retval(result.unwrap_or_else(|err| -LinuxError::from(err).into_raw() as _) as _);

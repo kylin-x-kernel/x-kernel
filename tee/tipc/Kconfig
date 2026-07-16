@@ -1,0 +1,16 @@
+menu "Trusty IPC"
+
+config KFEAT_TIPC
+    bool "Enable Trusty IPC support"
+    help
+      Enable the transport-independent Trusty IPC core, process-local handle
+      tables, and the Trusty-compatible syscall ABI.
+
+config KFEAT_VSOCK_TIPC_BRIDGE
+    bool "Enable Trusty-compatible vsock-TIPC bridge"
+    depends on KFEAT_TIPC && KFEAT_VSOCK
+    help
+      Enable the kernel bridge that maps selected host vsock ports to Trusty
+      IPC services and exposes the Trusty vsock forwarder service to TAs.
+
+endmenu

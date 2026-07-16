@@ -11,6 +11,7 @@ description = "Process management for X-Kernel"
 [features]
 tee = ["dep:tee_task_iface"]
 tee_ta_sign = ["tee", "tee_task_iface/tee_ta_sign"]
+tipc = ["dep:tipc_handle"]
 
 [dependencies]
 kiface.workspace = true
@@ -39,6 +40,7 @@ ktimer.workspace = true
 lazyinit.workspace = true
 memspace.workspace = true
 tee_task_iface = { workspace = true, optional = true }
+tipc_handle = { workspace = true, optional = true }
 weak-map.workspace = true
 unittest.workspace = true
 

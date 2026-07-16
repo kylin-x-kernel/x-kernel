@@ -1,0 +1,17 @@
+[package]
+name = "tipc_handle"
+description = "Process-local Trusty IPC handle ownership for X-Kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+bitflags.workspace = true
+kerrno.workspace = true
+kpoll.workspace = true
+kspin.workspace = true
+smallvec = { version = "1.15", features = ["const_new", "union"] }

@@ -5,6 +5,12 @@
 //! Vsock socket support.
 // pub(crate) mod dgram; todo
 
+#[cfg(feature = "vsock_tipc_bridge")]
+pub(crate) mod bridge;
+#[cfg(feature = "vsock_tipc_bridge")]
+mod bridge_connection;
+#[cfg(feature = "vsock_tipc_bridge")]
+pub(crate) mod bridge_port_map;
 pub(crate) mod connection_manager;
 pub(crate) mod stream;
 

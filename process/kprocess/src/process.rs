@@ -247,6 +247,8 @@ impl Process {
         self.reset_signal_actions()?;
         self.clear_posix_timers()?;
         self.close_cloexec_files()?;
+        #[cfg(feature = "tipc")]
+        self.close_all_tipc_handles()?;
         #[cfg(feature = "tee")]
         self.clear_tee_runtime_private()?;
         Ok(())
@@ -286,6 +288,17 @@ impl Process {
             .map(|runtime| runtime.resources().close_cloexec_files())
     }
 
+    /// Closes every TIPC handle before this process starts its new executable.
+    ///
+    /// TIPC handles are process-local capabilities, separate from the POSIX
+    /// file descriptor table, and therefore are not covered by `FD_CLOEXEC`.
+    #[cfg(feature = "tipc")]
+    pub fn close_all_tipc_handles(&self) -> KResult<()> {
+        self.runtime().map(|runtime| {
+            runtime.with_tipc_handles(|handles| handles.write().uctx_handle_close_all())
+        })
+    }
+
     /// Clears process-local TEE runtime private state.
     #[cfg(feature = "tee")]
     pub fn clear_tee_runtime_private(&self) -> KResult<()> {
@@ -306,6 +319,15 @@ impl Process {
         f: impl FnOnce(&mut tee_task_iface::TeeTaCtx) -> R,
     ) -> KResult<R> {
         self.runtime().map(|runtime| runtime.with_tee_ta_ctx_mut(f))
+    }
+
+    /// Runs a closure with access to the process-local Trusty IPC handle table.
+    #[cfg(feature = "tipc")]
+    pub fn with_tipc_handles<R>(
+        &self,
+        f: impl FnOnce(&ksync::RwLock<tipc_handle::HandleTable>) -> R,
+    ) -> KResult<R> {
+        self.runtime().map(|runtime| runtime.with_tipc_handles(f))
     }
 
     /// Returns sampled user and system CPU time in nanoseconds.

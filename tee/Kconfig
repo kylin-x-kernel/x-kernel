@@ -58,5 +58,6 @@ config KFEAT_TA_VERIFY_WITH_ROOT
 
 endif #KFEAT_TEE
 
+source "tee/tipc/Kconfig"
 
 endmenu

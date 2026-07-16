@@ -67,10 +67,15 @@ impl VsockTransportOps for VsockStreamTransport {
                 let mut manager = VSOCK_CONN_MANAGER.lock();
                 if local_addr.port == 0 {
                     local_addr.port = manager.allocate_port()?;
+                } else {
+                    #[cfg(feature = "vsock_tipc_bridge")]
+                    if crate::vsock::bridge_port_map::is_bridge_port(local_addr.port) {
+                        k_bail!(AddrInUse, "port reserved for vsock-TIPC bridge");
+                    }
                 }
                 let conn_id = VsockConnId::listening(local_addr.port);
                 let conn =
-                    manager.create_connection(conn_id, local_addr, None, ConnectionState::Idle);
+                    manager.create_connection(conn_id, local_addr, None, ConnectionState::Idle)?;
 
                 *self.conn_id.lock() = Some(conn_id);
                 *self.connection.lock() = Some(conn);
@@ -178,7 +183,7 @@ impl VsockTransportOps for VsockStreamTransport {
                 local_addr,
                 Some(peer_addr),
                 ConnectionState::Connecting,
-            );
+            )?;
 
             *self.conn_id.lock() = Some(conn_id);
             *self.connection.lock() = Some(conn.clone());

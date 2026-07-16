@@ -307,6 +307,9 @@ pub fn rust_main(arg: usize) -> ! {
         core::hint::spin_loop();
     }
 
+    #[cfg(feature = "vsock_tipc_bridge")]
+    knet::start_vsock_bridge();
+
     // SAFETY: The linker exported `main` as the final application entry, and
     // runtime initialization above has established the execution environment it
     // expects before control is transferred.

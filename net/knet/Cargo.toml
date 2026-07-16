@@ -11,6 +11,7 @@ documentation.workspace = true
 
 [features]
 vsock = ["kclass/vsock"]
+vsock_tipc_bridge = ["vsock", "dep:tipc"]
 
 [dependencies]
 unittest = { workspace = true }
@@ -26,8 +27,9 @@ kerrno = { workspace = true }
 kvfs = { workspace = true }
 kio = { workspace = true, features = ["alloc"] }
 kpoll = { workspace = true }
+tipc = { workspace = true, optional = true }
 linux-raw-sys = { workspace = true, features = ["general"] }
-bitflags = "2.9.1"
+bitflags = { workspace = true }
 cfg-if = { workspace = true }
 enum_dispatch = { workspace = true }
 hashbrown = "0.16"

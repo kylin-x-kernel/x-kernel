@@ -276,6 +276,59 @@ Ethernet 设备为未解析 next-hop 保留 `pending_tx`。
 同一个 next-hop 的 ARP 回复到达后，设备按队头顺序发送等待中的 IP 包。
 当前队列存在 head-of-line blocking，长时间 unresolved 的 next-hop 会阻塞后续 pending 包。
 
+### vsock-TIPC bridge
+
+`vsock_tipc_bridge` feature 打开时，bridge 在 vsock device 注册后初始化端口资源：
+保存 vsock device、监听桥接端口并发布反向 TIPC port。
+bridge worker 不在 device 注册回调里启动；
+它们由 `kruntime` 在 SMP secondary run queue 注册完成后 late-start，
+以避免 early boot 阶段把 task 调度到尚未注册的远端 CPU run queue。
+它不创建普通 AF_VSOCK stream endpoint，而是在 `device/vsock.rs` 的 driver event router 处优先识别桥接端口和已桥接连接。
+未命中的事件继续交给原有 `VSOCK_CONN_MANAGER`，保持普通 AF_VSOCK stream 行为。
+
+host-to-TA 方向使用固定端口映射：
+
+- port 0：动态 service-name handshake（见下节）。
+- port 1：`com.android.trusty.keymint`
+- port 2：`com.android.trusty.gatekeeper`
+- port 3：`com.android.trusty.vsock.forwarder`
+- port 4：`com.android.trusty.widevine.transact`
+
+#### Port 0 动态 handshake 协议
+
+Trusty-compatible dynamic bridge 在 host 连上 vsock port 0 后按 record 语义工作：
+
+1. Host 发送**第一个 vsock record**：UTF-8 TIPC service path（无 NUL 终止），长度不超过 `IPC_PORT_PATH_MAX`。
+2. Guest bridge 对该 path 调用 `ipc_port_connect_async(..., WAIT_FOR_PORT | ASYNC)`：
+   - 若 service **尚未 publish**，channel 保持 `Connecting`，**不**向 host 回包；等 TA publish 且 TIPC READY 后再继续。
+   - 若 service **已存在**或随后 publish 成功，bridge 在 TIPC READY 后向 host 发送单字节状态码 `[0]`，此后双方按 record 转发 payload。
+3. 下列情况 guest 发送 `[1]` 并关闭 vsock（**明确拒绝**，不同于“等待 publish”）：
+   - service name 非法（UTF-8 / 长度 / 内容校验失败）；
+   - 读取 service name record 失败；
+   - TIPC channel 在 `TipcConnecting` 阶段收到 `HUP` / `ERROR`（例如 port 存在但拒绝连接）。
+4. Host 侧（`libtrusty`）在发出 service name 后阻塞读取状态字节；应设置 recv 超时（`TRUSTY_VSOCK_TIMEOUT_SEC`，默认 60s）。超时或 EOF 视为连接失败。收到 `[1]` 映射为 `-EIO`。
+5. 若 service **永远不存在**，guest 会一直等待 publish，host 在 recv 超时后失败——负例测试依赖该超时，而非 `[1]`。
+
+固定端口（1–4）在 vsock 连接建立时即 `WAIT_FOR_PORT | ASYNC` 连到预置 TIPC service，不使用上述单字节 handshake。
+
+TA-to-host 方向发布 `com.android.trusty.vsock.forwarder` TIPC port，并把 accepted channel 连接到 host CID 2 port 0。
+bridge worker 直接使用 `VsockDevice` 的 `listen/connect/recv/send/disconnect/abort`，并直接复用 TIPC core 的 `IpcChan`、`IpcPort` 和 `HandleSet`。
+
+vsock `Received(conn_id, len)` 事件由 bridge 以 record 语义处理：
+bridge 分配 `len` 大小的临时 buffer 并调用一次 `recv(conn_id, &mut buf[..len])`，然后把该 record 作为一个 TIPC message。
+如果 TIPC send 返回 `WouldBlock`，bridge 只保留一条 pending record 并等待 `SEND_UNBLOCKED` 后重试。
+TIPC 到 vsock 方向按 `get_msg -> read_msg -> put_msg -> send` 转发；
+v1 不排队等待 vsock credit，send 失败会关闭连接。
+bridge v1 只转发 bytes，不转发 TIPC handles 或 memrefs。
+
+**事件路由约束**：`route_event` 对 `ConnectionRequest`（mapped port）立即记入 `pending_inbound`，使同批 `Received`（port 0 service name）在 `BridgeConnection` 创建前也能入 bridge FIFO。**不得**仅凭 `bridge_mapping(local_port)` 认领所有 `Connected`/`Received`，否则 guest 普通 AF_VSOCK 若显式 `bind(1..4)` 再 `connect()`，事件会被 bridge 误消费。
+
+`vsock-poll` 可能在同一批 `poll_event` 中连续弹出 `ConnectionRequest` 与 `Received`；若丢弃 `Received`，动态 handshake 的 service-name record 永久丢失，host `tipc_connect` 会在 status byte 上超时（`EAGAIN` / `-11`）。
+
+`bind()` 在 `vsock_tipc_bridge` 开启时拒绝显式绑定 `BRIDGE_PORT_MAP` 端口（ephemeral 分配本就跳过这些端口）。
+
+反向（TIPC→vsock）连接使用 `allocate_reverse_port()`，不在 `BRIDGE_PORT_MAP` 中；`accept_reverse_tipc()` 在 `dev.connect()` 之前插入 `BridgeConnection`，`has_connection()` 为真时生命周期事件仍走 bridge。
+
 ## Drop / 资源释放
 
 - `SocketSetWrapper::remove` 按 smoltcp handle 移除 socket。

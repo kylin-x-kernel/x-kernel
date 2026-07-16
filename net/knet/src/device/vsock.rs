@@ -187,6 +187,11 @@ fn poll_vsock_devices() -> KResult<bool> {
 fn handle_vsock_event(event: VsockDriverEventType, dev: &dyn VsockDevice, buf: &mut [u8]) {
     debug!("Handling vsock event: {event:?}");
 
+    #[cfg(feature = "vsock_tipc_bridge")]
+    if crate::vsock::bridge::route_event(event) {
+        return;
+    }
+
     match event {
         VsockDriverEventType::ConnectionRequest(conn_id) => {
             if let Err(e) = VSOCK_CONN_MANAGER.lock().on_connection_request(conn_id) {

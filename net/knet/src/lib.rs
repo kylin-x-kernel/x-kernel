@@ -167,6 +167,12 @@ pub fn init_vsock() {
     subscribe_vsock_available(Arc::new(register_vsock_handle));
 }
 
+/// Starts vsock runtime workers that require all scheduler run queues.
+#[cfg(feature = "vsock_tipc_bridge")]
+pub fn start_vsock_bridge() {
+    crate::vsock::bridge::start();
+}
+
 #[cfg(feature = "vsock")]
 fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
     use crate::device::{register_vsock_dev, unregister_vsock_dev};
@@ -178,9 +184,13 @@ fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
         handle.driver_name(),
         handle.location(),
     );
-    if let Err(e) = register_vsock_dev(handle) {
+    if let Err(e) = register_vsock_dev(handle.clone()) {
         warn!("Failed to initialize vsock device: {:?}", e);
     } else {
+        #[cfg(feature = "vsock_tipc_bridge")]
+        if let Err(e) = crate::vsock::bridge::init(handle.clone()) {
+            warn!("Failed to initialize vsock-TIPC bridge: {:?}", e);
+        }
         subscribe_device_removed(Arc::new(move |removed_id| {
             if removed_id == id && unregister_vsock_dev(id) {
                 warn!("vsock: detached removed device {:?}", id);

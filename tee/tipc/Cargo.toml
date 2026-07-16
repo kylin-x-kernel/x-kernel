@@ -1,0 +1,30 @@
+[package]
+name = "tipc"
+description = "Trusty IPC core subsystem for X-Kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[features]
+default = ["linux_sysno/tipc"]
+tee = ["dep:uuid", "kprocess/tee"]
+
+[dependencies]
+bitflags.workspace = true
+khal.workspace = true
+kerrno.workspace = true
+klazy.workspace = true
+kprocess = { workspace = true, features = ["tipc"] }
+memaddr.workspace = true
+kspin.workspace = true
+ktask.workspace = true
+linux_sysno.workspace = true
+posix-types.workspace = true
+tipc_handle.workspace = true
+unittest.workspace = true
+log.workspace = true
+uuid = { version = "0.8", default-features = false, optional = true }

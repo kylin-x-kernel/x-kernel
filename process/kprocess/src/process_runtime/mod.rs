@@ -22,6 +22,8 @@ use ksignal::{
 use ksync::{Mutex, RwLock, spin::SpinNoIrq};
 #[cfg(feature = "tee")]
 use tee_task_iface::TeeTaCtx;
+#[cfg(feature = "tipc")]
+use tipc_handle::HandleTable as TipcHandleTable;
 
 use self::{posix_state::ProcessPosixState, runtime_state::ProcessRuntimeState};
 use crate::Process;
@@ -82,6 +84,8 @@ pub(crate) struct ProcessRuntime {
     tee_ta_ctx: RwLock<TeeTaCtx>,
     #[cfg(feature = "tee")]
     tee_runtime_private: RwLock<Option<Arc<dyn Any + Send + Sync>>>,
+    #[cfg(feature = "tipc")]
+    tipc_handles: RwLock<TipcHandleTable>,
 }
 
 impl ProcessRuntime {
@@ -135,6 +139,8 @@ impl ProcessRuntime {
             tee_ta_ctx,
             #[cfg(feature = "tee")]
             tee_runtime_private: RwLock::new(None),
+            #[cfg(feature = "tipc")]
+            tipc_handles: RwLock::new(TipcHandleTable::new()),
             resources: ProcessResources::new(config.user_stack_size),
             fs_context,
             posix_state,
@@ -190,6 +196,12 @@ impl ProcessRuntime {
     pub fn with_tee_ta_ctx<R>(&self, f: impl FnOnce(&TeeTaCtx) -> R) -> R {
         let tee_ta_ctx = self.tee_ta_ctx.read();
         f(&tee_ta_ctx)
+    }
+
+    /// Runs a closure with access to the process-local Trusty IPC handle table.
+    #[cfg(feature = "tipc")]
+    pub(crate) fn with_tipc_handles<R>(&self, f: impl FnOnce(&RwLock<TipcHandleTable>) -> R) -> R {
+        f(&self.tipc_handles)
     }
 
     /// Returns the process-owned futex state.
