@@ -121,6 +121,14 @@ impl PmuCounter {
     ///
     /// This starts the counter and enables overflow interrupt.
     pub fn enable(&self) {
+        // Clear all pending overflow flags first — KVM leaves garbage in
+        // uninitialised event counters whose overflow bits would otherwise
+        // cause an interrupt storm.  We do NOT bulk-clear PMCNTENCLR_EL0 or
+        // PMINTENCLR_EL1 because KVM may misinterpret those writes and
+        // disable the entire vPMU.
+        msr!(PMOVSCLR_EL0, !0u64);
+        isb!();
+
         // Enable overflow interrupt
         msr!(PMINTENSET_EL1, 1u64 << self.counter_index);
 
@@ -131,8 +139,8 @@ impl PmuCounter {
         let pmcr: u64 = mrs!(PMCR_EL0);
         msr!(PMCR_EL0, pmcr | (1 << 0) | (1 << 1) | (1 << 2) | (1 << 6)); // Set E, P, U and LC bits
 
-        // Clear any pending overflow
-        msr!(PMOVSCLR_EL0, 1u64 << 31);
+        // Clear any pending overflow on our counter
+        msr!(PMOVSCLR_EL0, 1u64 << self.counter_index);
 
         msr!(PMCCFILTR_EL0, 0u64, "x");
 
