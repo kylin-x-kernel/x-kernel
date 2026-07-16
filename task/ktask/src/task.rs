@@ -472,7 +472,7 @@ impl TaskInner {
                 return;
             }
         }
-        warn!("held locks on task {} are full!", self.id_name());
+        debug!("held locks on task {} are full!", self.id_name());
     }
 
     /// Record that this task released `addr`.

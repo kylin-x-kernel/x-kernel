@@ -28,6 +28,12 @@ pub struct LockupDetection {
     hrtimer_interrupts_saved: AtomicU32,
 }
 
+impl Default for LockupDetection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LockupDetection {
     /// Create a new LockupDetection instance.
     pub const fn new() -> Self {
@@ -108,6 +114,9 @@ pub static LOCKUP_DETECTION: LockupDetection = LockupDetection::new();
 /// Touch softlockup timestamp (called from watchdog thread).
 #[inline]
 pub fn touch_softlockup(timestamp_ns: u64) {
+    // SAFETY: `current_ref_mut_raw` accesses the per‑CPU instance for the
+    // current CPU.  The watchdog thread is pinned to its CPU and runs with
+    // preemption disabled, so the pointer cannot race with migration.
     unsafe {
         LOCKUP_DETECTION
             .current_ref_mut_raw()
@@ -118,6 +127,9 @@ pub fn touch_softlockup(timestamp_ns: u64) {
 /// Timer tick (called from timer interrupt).
 #[inline]
 pub fn timer_tick() {
+    // SAFETY: `current_ref_mut_raw` accesses the per‑CPU instance for the
+    // current CPU.  Timer callbacks run with interrupts disabled on the
+    // local CPU, so the pointer is stable.
     unsafe {
         LOCKUP_DETECTION.current_ref_mut_raw().timer_tick();
     }
@@ -126,6 +138,8 @@ pub fn timer_tick() {
 /// Check softlockup of a CPU.
 #[inline]
 pub fn check_softlockup(now_ns: u64) -> bool {
+    // SAFETY: `current_ref_mut_raw` accesses the per‑CPU instance for the
+    // current CPU from timer interrupt context (interrupts disabled).
     unsafe {
         LOCKUP_DETECTION
             .current_ref_mut_raw()
@@ -135,6 +149,10 @@ pub fn check_softlockup(now_ns: u64) -> bool {
 
 /// Register the hard lockup detection task on the current CPU.
 pub fn register_hardlockup_detection_task() {
+    // SAFETY: `current_ref_raw` obtains a shared reference to the per‑CPU
+    // `LockupDetection` for the current CPU.  The returned `&'static`
+    // reference is valid as long as the per‑CPU storage exists (the
+    // lifetime of the kernel).  Called once during init on the owning CPU.
     let task: &'static LockupDetection = unsafe { LOCKUP_DETECTION.current_ref_raw() };
     crate::watchdog_task::register_watchdog_task(task);
 }

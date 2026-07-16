@@ -15,7 +15,7 @@ smp = ["kplat/smp",]
 fp-simd = ["kcpu/fp-simd",]
 vmm = ["kernel_boot/vmm"]
 rtc = []
-nmi = ["kplat/nmi"]
+nmi = ["kplat/nmi", "kspin/pmr"]
 pmu = []
 tls = ["kcpu/tls"]
 

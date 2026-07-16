@@ -14,8 +14,8 @@ mod pmuserenr_el0;
 pub use pmccfiltr_el0::PMCCFILTR_EL0;
 mod pmccfiltr_el0;
 
-mod regs;
-pub use regs::*;
+mod register_types;
+pub use register_types::*;
 
 #[macro_export]
 macro_rules! define_pmu_register {

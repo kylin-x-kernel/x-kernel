@@ -10,6 +10,7 @@ mod cpu;
 mod fp;
 mod irq;
 mod mmu;
+pub mod pmr;
 mod tlb;
 mod tls;
 mod trap;

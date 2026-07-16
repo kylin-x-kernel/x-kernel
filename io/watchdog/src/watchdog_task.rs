@@ -23,6 +23,9 @@ pub trait WatchdogTask {
 ///
 /// This function adds the task into the per-CPU watchdog task queue.
 pub fn register_watchdog_task(task: &'static dyn WatchdogTask) {
+    // SAFETY: `current_ref_mut_raw` accesses the per‑CPU task queue for
+    // the current CPU.  Registration happens during per‑CPU init where
+    // migration is impossible.
     unsafe {
         WATCHDOG_TASK_QUEUE.current_ref_mut_raw().push(task);
     }
@@ -31,6 +34,9 @@ pub fn register_watchdog_task(task: &'static dyn WatchdogTask) {
 /// Check watchdog tasks and return the first failed task ID if any.
 #[cfg(feature = "nmi")]
 pub(crate) fn check_watchdog_tasks() -> Option<&'static str> {
+    // SAFETY: `current_ref_mut_raw` accesses the per‑CPU task queue for
+    // the current CPU.  Called from NMI context where CPU migration is
+    // impossible.
     unsafe {
         let queue = WATCHDOG_TASK_QUEUE.current_ref_mut_raw();
         for task in queue.iter() {

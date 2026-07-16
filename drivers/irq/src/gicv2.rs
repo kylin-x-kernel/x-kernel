@@ -4,11 +4,6 @@
 
 //! GICv2 backend.
 
-#[cfg(feature = "pmr")]
-use core::arch::asm;
-#[cfg(feature = "pmr")]
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use arm_gic_driver::v2::*;
 use khal::irq::TargetCpu;
 use kspin::SpinNoIrq;
@@ -16,25 +11,6 @@ use lazyinit::LazyInit;
 
 static GIC: LazyInit<SpinNoIrq<Gic>> = LazyInit::new();
 static TRAP_OP: LazyInit<TrapOp> = LazyInit::new();
-#[cfg(feature = "pmr")]
-static GICC_PMR: LazyInit<usize> = LazyInit::new();
-#[cfg(feature = "pmr")]
-const PMR_OFFSET: usize = 0x4;
-#[cfg(feature = "pmr")]
-static GIC_INITIALIZED: AtomicBool = AtomicBool::new(false);
-
-#[cfg(feature = "pmr")]
-#[inline]
-pub fn set_gic_init_status(status: bool) {
-    GIC_INITIALIZED.store(status, Ordering::SeqCst);
-}
-
-#[cfg(feature = "pmr")]
-#[inline]
-pub fn is_gic_initialized() -> bool {
-    GIC_INITIALIZED.load(Ordering::SeqCst)
-}
-
 pub fn init(gicd_base: memaddr::VirtAddr, gicc_base: memaddr::VirtAddr) {
     if GIC.get().is_some() {
         return;
@@ -42,15 +18,12 @@ pub fn init(gicd_base: memaddr::VirtAddr, gicc_base: memaddr::VirtAddr) {
     info!("Initialize GICv2...");
     let gicd_base = VirtAddr::new(gicd_base.into());
     let gicc_base = VirtAddr::new(gicc_base.into());
-    #[cfg(feature = "pmr")]
-    {
-        GICC_PMR.init_once(usize::from(gicc_base) + PMR_OFFSET);
-        set_gic_init_status(true);
-    }
     // SAFETY: both distributor and CPU interface bases come from platform
     // discovery and point at the mapped GICv2 MMIO frames for this machine.
     let mut gic = unsafe { Gic::new(gicd_base, gicc_base, None) };
     gic.init();
+    #[cfg(feature = "pmr")]
+    karch::pmr::init(usize::from(gic.gicc_addr()));
     GIC.init_once(SpinNoIrq::new(gic));
     let cpu = GIC.lock().cpu_interface();
     TRAP_OP.init_once(cpu.trap_operations());
@@ -95,32 +68,7 @@ pub fn set_prio(_irq: usize, _priority: u8) {
     unreachable!()
 }
 
-#[cfg(feature = "pmr")]
-fn set_prio_mask(priority: u8) {
-    // SAFETY: `GICC_PMR` is initialized from the mapped CPU-interface frame
-    // before PMR mode is enabled, and PMR is a single 32-bit MMIO register.
-    unsafe {
-        core::ptr::write_volatile((*GICC_PMR.get_unchecked()) as *mut u32, priority as u32);
-    }
-}
-
-#[cfg(feature = "pmr")]
-fn open_high_priority_irq_mode() {
-    set_prio_mask(0x80);
-    // SAFETY: writing `daifclr, #2` only unmasks IRQ delivery on the current
-    // CPU and does not touch memory.
-    unsafe { asm!("msr daifclr, #2") };
-}
-
-#[cfg(feature = "pmr")]
-fn close_irq_and_restore_masking() {
-    // SAFETY: writing `daifset, #2` only masks IRQ delivery on the current
-    // CPU and does not touch memory.
-    unsafe { asm!("msr daifset, #2") };
-    set_prio_mask(0xff);
-}
-
-pub fn dispatch_irq(_pmu_irq: usize) -> Option<(usize, usize)> {
+pub fn dispatch_irq() -> Option<(usize, usize)> {
     let ack = TRAP_OP.ack();
     if ack.is_special() {
         return None;
@@ -138,28 +86,28 @@ pub fn dispatch_irq(_pmu_irq: usize) -> Option<(usize, usize)> {
     TRAP_OP.eoi(ack);
     // SAFETY: `isb` only orders the acknowledged interrupt before the handler.
     unsafe { core::arch::asm!("isb", options(nomem, nostack)) };
-
-    #[cfg(feature = "nmi-pmu")]
-    if irq != _pmu_irq {
-        open_high_priority_irq_mode();
-    }
     Some((irq, u32::from(ack) as usize))
 }
 
 pub fn complete_irq(completion_cookie: usize) {
     let ack = Ack::from(completion_cookie as u32);
     TRAP_OP.dir(ack);
+}
 
-    #[cfg(feature = "nmi-pmu")]
-    {
-        let hwirq = match ack {
-            Ack::Other(intid) => intid,
-            Ack::SGI { intid, cpu_id: _ } => intid,
-        }
-        .to_u32() as usize;
-        if hwirq != kbuild_config::PMU_IRQ {
-            close_irq_and_restore_masking();
-        }
+/// Decode the INTID from a GICv2 completion cookie.
+///
+/// `dispatch_irq()` returns `u32::from(Ack)` as the cookie, which encodes the
+/// interrupt ID differently for [`Ack::Other`] and [`Ack::SGI`].  This helper
+/// reconstructs the `Ack` and extracts the raw INTID so callers can compare
+/// against a known IRQ number (e.g. `PMU_IRQ`) without depending on the
+/// serialisation format.
+#[cfg(feature = "nmi-pmu")]
+#[inline]
+pub fn intid_from_cookie(cookie: usize) -> u32 {
+    let ack = Ack::from(cookie as u32);
+    match ack {
+        Ack::Other(intid) => intid.to_u32(),
+        Ack::SGI { intid, .. } => intid.to_u32(),
     }
 }
 

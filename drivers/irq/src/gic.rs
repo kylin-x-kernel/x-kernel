@@ -14,9 +14,6 @@ use lazyinit::LazyInit;
 use memaddr::{PhysAddr, VirtAddr};
 use memspace::iomap_device;
 
-#[cfg(feature = "pmr")]
-pub use self::gicv2::{is_gic_initialized, set_gic_init_status};
-
 const GICD_NAME: &str = "gicd";
 const GICC_NAME: &str = "gicc";
 const GICR_NAME: &str = "gicr";
@@ -190,6 +187,8 @@ pub fn init_current_cpu() {
         GicVersion::V2 => gicv2::init_current_cpu(),
         GicVersion::V3 => gicv3::init_current_cpu(),
     }
+    // Per‑CPU: this CPU's GIC interface is now ready for PMR access.
+    karch::pmr::mark_ready();
 }
 
 pub fn set_trigger(interrupt_id: usize, edge: bool) {
@@ -206,15 +205,129 @@ pub fn enable(irq: usize, enabled: bool) {
     }
 }
 
-pub fn dispatch_irq_by_gic_version(_unused: usize, pmu_irq: usize) -> Option<(usize, usize)> {
-    match active_version() {
-        GicVersion::V2 => gicv2::dispatch_irq(pmu_irq),
-        GicVersion::V3 => gicv3::dispatch_irq(),
-    }
+/// Open the pseudo‑NMI window after acknowledging a non‑PMU interrupt.
+///
+/// Sets PMR to [`pmr::NMI_ONLY`] so only pseudo‑NMIs can preempt the handler,
+/// then clears `DAIF.I` so those NMIs are actually delivered.  Normal IRQs
+/// remain masked by PMR until [`close_nmi_window`] is called.
+///
+/// # Pairing invariant
+///
+/// Every call to `open_nmi_window()` **must** be matched by exactly one call
+/// to [`close_nmi_window()`] on the same CPU and on every path (including
+/// error / unwind).  The pairing is maintained by the `DispatchedIrq` guard:
+///
+/// ```text
+///   dispatch_irq_by_gic_version()               // → open_nmi_window()
+///   → irq_handler vector                         // handler runs
+///   → dispatched_irq.complete()                  // → close_nmi_window()
+///   // … or DispatchedIrq::drop() on unwind       // → close_nmi_window() (panic=unwind only)
+/// ```
+///
+/// **Caveat:** the kernel uses `panic = "abort"`; a panic inside the handler
+/// causes `shutdown()` via `#[panic_handler]` without running `Drop`.  The NMI
+/// window "leaks" on the panicked CPU, but the CPU is halted immediately —
+/// normal IRQs can never be delivered there anyway.
+///
+/// # Caller constraints
+///
+/// Must be called from the IRQ exception level with `DAIF.I` already set by
+/// exception entry, and only after [`pmr::is_ready`] returns `true` on this
+/// CPU.  Must **never** be called from NMI context (not re‑entrant).
+#[cfg(feature = "nmi-pmu")]
+fn open_nmi_window() {
+    assert!(karch::pmr::is_ready());
+    karch::pmr::write(karch::pmr::NMI_ONLY);
+    // SAFETY: exception entry set DAIF.I; clear it so pseudo‑NMI can nest
+    // while normal IRQs remain gated by PMR.
+    //
+    // These functions are NOT re‑entrant: the caller must ensure they are
+    // never invoked from NMI context.
+    unsafe { core::arch::asm!("msr daifclr, #2") };
 }
 
+/// Close the pseudo‑NMI window before deactivating the interrupt.
+///
+/// Re‑masks `DAIF.I` then restores PMR to [`pmr::ALL`] so normal IRQs are
+/// unmasked again.  This is the symmetric counterpart to [`open_nmi_window`].
+///
+/// # Pairing invariant
+///
+/// Must be called exactly once per [`open_nmi_window()`] on the same CPU.
+/// See [`open_nmi_window()`] for the full contract and panic‑abort caveat.
+///
+/// # Caller constraints
+///
+/// Must be called from the same IRQ exception context that called
+/// `open_nmi_window()`, before the interrupt is deactivated (EOI / DIR),
+/// and only after [`pmr::is_ready`] returns `true`.
+/// Must **never** be called from NMI context.
+#[cfg(feature = "nmi-pmu")]
+fn close_nmi_window() {
+    assert!(karch::pmr::is_ready());
+    // SAFETY: restore the pre‑exception mask before deactivating the IRQ.
+    unsafe { core::arch::asm!("msr daifset, #2") };
+    karch::pmr::write(karch::pmr::ALL);
+}
+
+/// Dispatch the current hardware interrupt.
+///
+/// The `_unused` parameter exists only to satisfy the [`IntrManagerIf::dispatch_irq`]
+/// trait signature, which passes an IRQ identifier used by architectures like x86.
+/// On GIC (both v2 and v3), the pending interrupt ID is read directly from the
+/// hardware acknowledge register (IAR), so the parameter is never consumed.
+/// It is intentionally kept unnamed to avoid a register move on this hot path;
+/// callers cannot remove it without breaking the trait contract.
+///
+/// # NMI window (feature = `nmi-pmu`)
+///
+/// For non‑PMU interrupts this calls [`open_nmi_window()`].  The caller
+/// **must** ensure the returned `completion_cookie` is eventually passed to
+/// [`complete_irq()`] (or `DispatchedIrq::complete` / `Drop`) to invoke
+/// [`close_nmi_window()`].  See [`open_nmi_window()`] for the full pairing
+/// contract and the `panic = "abort"` caveat.
+pub fn dispatch_irq_by_gic_version(_unused: usize) -> Option<(usize, usize)> {
+    let res = match active_version() {
+        GicVersion::V2 => gicv2::dispatch_irq(),
+        GicVersion::V3 => gicv3::dispatch_irq(),
+    };
+    #[cfg(feature = "nmi-pmu")]
+    if let Some((irq, _)) = res
+        && irq != kbuild_config::PMU_IRQ
+    {
+        open_nmi_window();
+    }
+    res
+}
+
+/// Complete (deactivate) a previously dispatched interrupt.
+///
+/// For non‑PMU interrupts this calls [`close_nmi_window()`] to restore PMR
+/// and re‑mask `DAIF.I`, pairing with the [`open_nmi_window()`] call in
+/// [`dispatch_irq_by_gic_version()`].
+///
+/// The `completion_cookie` is decoded per GIC version before comparing with
+/// `PMU_IRQ`, matching the INTID‑based comparison in the dispatch path.
 pub fn complete_irq(completion_cookie: usize) {
-    match active_version() {
+    let version = active_version();
+    #[cfg(feature = "nmi-pmu")]
+    {
+        let is_pmu = match version {
+            // GICv2: cookie is `u32::from(Ack)`, which for SGIs encodes
+            // CPU ID alongside INTID.  Decode via Ack::from to extract
+            // the INTID before comparing — keeping this consistent with
+            // dispatch_irq_by_gic_version which also compares the INTID.
+            GicVersion::V2 => {
+                gicv2::intid_from_cookie(completion_cookie) as usize == kbuild_config::PMU_IRQ
+            }
+            // GICv3: cookie is directly the INTID (dispatch returns (irq, irq)).
+            GicVersion::V3 => completion_cookie == kbuild_config::PMU_IRQ,
+        };
+        if !is_pmu {
+            close_nmi_window();
+        }
+    }
+    match version {
         GicVersion::V2 => gicv2::complete_irq(completion_cookie),
         GicVersion::V3 => gicv3::complete_irq(completion_cookie),
     }
@@ -253,8 +366,7 @@ impl khal::irq::IntrManagerIf {
     }
 
     fn dispatch_irq(irq: usize) -> Option<khal::irq::DispatchedIrq> {
-        let pmu_irq = kbuild_config::PMU_IRQ;
-        crate::gic::dispatch_irq_by_gic_version(irq, pmu_irq).map(|(hwirq, completion_cookie)| {
+        crate::gic::dispatch_irq_by_gic_version(irq).map(|(hwirq, completion_cookie)| {
             khal::irq::DispatchedIrq::new(
                 khal::irq::resolve_hwirq(GIC_ROOT_DOMAIN, hwirq),
                 completion_cookie,

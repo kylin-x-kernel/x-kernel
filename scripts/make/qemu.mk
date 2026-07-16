@@ -109,7 +109,7 @@ else ifeq ($(ARCH), aarch64)
   else ifeq ($(findstring KFEAT_VMM=y,$(CONFIG_VALUES)),KFEAT_VMM=y)
     machine := virt,virtualization=on
   else
-    machine := virt
+    machine := virt,gic-version=3
   endif
 else ifeq ($(ARCH), loongarch64)
   machine := virt

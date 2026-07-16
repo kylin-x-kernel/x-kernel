@@ -8,6 +8,12 @@ use khal::percpu::this_cpu_id;
 use ktask::{KCpuMask, TaskInner};
 use log::debug;
 
+/// Per-CPU timestamp of the last softlockup report (nanoseconds).
+/// Rate-limits reports to one per threshold period so a genuine lockup
+/// doesn't dump on every timer tick.
+#[percpu::def_percpu]
+static LAST_SOFTLOCKUP_REPORT_NS: u64 = 0;
+
 /// Common watchdog initialization for both primary and secondary CPUs.
 ///
 /// It sets up:
@@ -31,8 +37,15 @@ fn init_nmi_watchdog() {
     // Register hard lockup detection task.
     crate::register_hardlockup_detection_task();
 
-    // Initialize and enable NMI source for hard lockup detection.
-    khal::nmi::init(khal::time::freq() * 10 * 16);
+    // TODO: read CPU max frequency from DT OPP table (opp-hz).
+    // For now assume 1 GHz — correct for QEMU, conservative for hardware.
+    let cpu_freq_hz: u64 = 1_000_000_000;
+    // Use u128 intermediate to avoid overflow when threshold_ns × cpu_freq_hz
+    // exceeds u64::MAX (e.g. ≥ 1.85 GHz with the 10 s default threshold).
+    let nmi_period_cycles = (crate::lockup_detection::DEFAULT_HARDLOCKUP_THRESH_NS as u128
+        * cpu_freq_hz as u128
+        / khal::time::NANOS_PER_SEC as u128) as u64;
+    khal::nmi::init(nmi_period_cycles);
     khal::nmi::enable();
 
     // Register NMI handler
@@ -40,6 +53,7 @@ fn init_nmi_watchdog() {
         // Every NMI checks whether watchdog tasks on THIS CPU are healthy.
         // If a failure is detected, THIS CPU becomes the cause CPU and
         // triggers a global rendezvous.
+
         let fail_name = crate::watchdog_task::check_watchdog_tasks();
         if fail_name.is_some() {
             if ktask::snapshot::nmi_begin() {
@@ -97,15 +111,29 @@ pub fn init_softlockup_detection() {
         crate::timer_tick();
 
         if crate::check_softlockup(now_ns) {
-            ktask::snapshot::dump_cpu_tasks(this_cpu_id());
+            // SAFETY: timer callbacks run with interrupts disabled on the
+            // current CPU, so per-CPU raw access is safe from migration.
+            let last = unsafe { LAST_SOFTLOCKUP_REPORT_NS.read_current_raw() };
+            if now_ns.saturating_sub(last) > crate::lockup_detection::DEFAULT_SOFTLOCKUP_THRESH_NS {
+                log::error!(
+                    "[watchdog] softlockup detected on cpu {}",
+                    this_cpu_id().as_usize()
+                );
+                // SAFETY: timer callback, IRQs disabled, same CPU as the
+                // `read_current_raw` above — cannot race with migration.
+                unsafe { LAST_SOFTLOCKUP_REPORT_NS.write_current_raw(now_ns) };
+                ktask::snapshot::dump_cpu_tasks(this_cpu_id());
+            }
         }
     });
 
-    // Watchdog task that periodically "touches" the soft lockup timestamp.
+    // Sleep 4s between touches instead of yielding — the softlockup threshold
+    // is 20s, so this gives 5 wakeup chances (20s / 4s) before a false positive while
+    // keeping the CPU truly idle when there is no other work.
     let watchdog_task = TaskInner::new_kthread(
         move || loop {
             crate::touch_softlockup(khal::time::monotonic_time_nanos());
-            ktask::yield_now();
+            ktask::sleep(core::time::Duration::from_secs(4));
         },
         "watchdog".into(),
         kbuild_config::TASK_STACK_SIZE,

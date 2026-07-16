@@ -13,6 +13,7 @@ categories = ["os", "no-std"]
 [features]
 preempt = []
 smp = []
+pmr = ["karch/pmr"]
 stats = ["dep:klockstat", "dep:linkme", "klockstat/stats"]
 default = []
 

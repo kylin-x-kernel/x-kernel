@@ -52,6 +52,12 @@ config KFEAT_WATCHDOG
       Enable watchdog-driven diagnostic checks such as soft lockup detection
       and lock-wait heuristics.
 
+config KFEAT_PMU
+    bool "PMU support"
+    help
+      Enable Performance Monitor Unit support for hardware performance
+      counters and PMU‑driven pseudo‑NMI delivery.
+
 config KFEAT_WATCHDOG_HARDLOCKUP
     bool "Watchdog hard lockup detection"
     depends on KFEAT_WATCHDOG

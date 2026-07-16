@@ -55,7 +55,7 @@ impl PmuCounter {
     ///
     /// # Arguments
     /// * `threshold` - Counter value at which to trigger interrupt.
-    ///                 For cycle counter, this is CPU cycles.
+    ///   For cycle counter, this is CPU cycles.
     pub const fn new_cycle_counter(threshold: u64) -> Self {
         Self {
             counter_index: 31,

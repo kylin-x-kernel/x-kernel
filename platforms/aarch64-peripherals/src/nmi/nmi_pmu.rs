@@ -10,6 +10,8 @@ macro_rules! nmi_if_impl {
         #[impl_dev_interface]
         impl kplat::nm_irq::NmiDef {
             fn init(threshold: u64) -> bool {
+                // irq_driver::gic is initialised before watchdog::init_primary
+                // (khal::early_driver_init runs first in kruntime::rust_main).
                 irq_driver::gic::set_prio(kbuild_config::PMU_IRQ, 0);
                 $crate::pmu::init_cycle_counter(threshold)
             }

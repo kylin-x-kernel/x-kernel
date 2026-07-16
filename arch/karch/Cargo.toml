@@ -11,13 +11,15 @@ repository.workspace = true
 [features]
 default = []
 arm-el2 = []
+pmr = []
 
 [dependencies]
-cfg-if = "1.0"
+cfg-if = { workspace = true }
 memaddr = { workspace = true }
 kbuild_config = { workspace = true }
 kcpu_id_map = { workspace = true }
 kiface = { workspace = true }
+percpu = { workspace = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86 = "0.52"
