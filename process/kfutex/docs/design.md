@@ -123,7 +123,11 @@ syscall / runtime cleanup
   → FutexGuard::drop() on scope exit
 ```
 
-`wait_if` 先在持队列锁状态下重新检查条件，只有条件仍满足才真正入队。
+`WaitFuture::poll`（`wait_if` 的 future）**先持队列锁入队**（`push_back` 不触碰用户内存），**再在释放队列锁后**求值 `condition`：条件成立则返回 `Pending` 等待唤醒；不成立则 `Drop` 移除自身 waiter 并返回"无需等待"。
+
+条件求值刻意放在队列锁之外：`condition` 闭包可能访问用户内存（如 futex word）并缺页，缺页处理需阻塞，而 `WaitQueue::queue` 是 `SpinNoIrq`（抢占禁用），持锁阻塞会违反 `blocked_resched` 的 `preempt_disable_count == 2` 不变量。
+
+"先入队、后检查"不会丢失唤醒：入队后 `is_active == true` 且对 `wake()` 可见，任何并发唤醒会清掉 `is_active` 并通过已注册的 waker 重新调度本 future；下次轮询（Path-A）观测到 `is_active == false` 即返回 `Ready`。
 
 ## 并发模型
 

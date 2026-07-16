@@ -698,25 +698,22 @@ impl RunQueue {
             next_task.set_on_cpu_mask_bit(this_cpu_id());
         }
 
-        use crate::TaskExt;
         let cpu_id = this_cpu_id();
-        if let Some(ext) = next_task.task_ext() {
+        if let Some(runtime) = next_task.user_runtime() {
             // Publish the CPU in the next mm before switching hardware state
             // so concurrent flushers can over-target but never miss this CPU.
             // We intentionally do not clear the previous mm here: code after
             // `switch_to()` runs only when the old task is scheduled again, so
             // eager clear-after-switch is not a sound timing point.
-            ext.set_user_mm_resident_cpu(cpu_id);
+            runtime.set_user_mm_resident_cpu(cpu_id);
         }
 
         {
-            use crate::TaskExt;
-
-            if let Some(ext) = prev_task.task_ext() {
-                ext.on_leave()
+            if let Some(runtime) = prev_task.user_runtime() {
+                runtime.on_leave()
             }
-            if let Some(ext) = next_task.task_ext() {
-                ext.on_enter()
+            if let Some(runtime) = next_task.user_runtime() {
+                runtime.on_enter()
             }
         }
 
@@ -729,8 +726,8 @@ impl RunQueue {
 
             #[cfg(target_arch = "aarch64")]
             if let Some(root) = next_task
-                .task_ext()
-                .and_then(|ext| ext.switch_page_table_root())
+                .user_runtime()
+                .and_then(|runtime| runtime.switch_page_table_root())
             {
                 (*next_ctx_ptr).set_page_table_root(root);
             }

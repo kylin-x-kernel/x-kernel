@@ -34,14 +34,14 @@ entry / ksyscall
 
 ## 调用约束 / 执行上下文
 
-- `new_user_task()` 仅用于创建会进入用户态执行的 task，并且要求调用方先准备好该线程的 `PidHandle`。
+- `new_user_task()` 仅用于创建会进入用户态执行的 task，并且要求调用方先准备好该线程的 `PidHandle` 和 `Thread`。
 - 用户 task 启动路径必须遵守：
   - 先由 process-domain owner 决定 PID namespace 和线程 identity
-  - 通过 `install_init_process(...)` 或同类 owner API 安装 `KTaskExt`
+  - 先构造 matching `Thread`，再通过 `new_user_task(..., thread, ...)` 一次性构造 task 与 `UserTaskRuntime`
   - 调用 `start_user_task(...)`
   - `kprocess` 内部先完成 publish，再使 task runnable
 - `run_init_process()` 依赖 rootfs、TTY 和默认 stdio 初始化路径可用。
-- `do_exit()`、`check_signals()` 依赖 current task 已安装线程扩展。
+- `do_exit()`、`check_signals()` 依赖 current task 是携带 `UserTaskRuntime` 的用户 task。
 - 这些接口会访问地址空间、信号状态、fd 表和共享内存管理器，可阻塞，不适用于中断上下文。
 
 ## 状态机

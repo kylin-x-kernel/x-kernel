@@ -1803,7 +1803,7 @@ pub mod tests_tee_svc_storage {
         assert_eq!(hs, [0]);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_syscall_storage_obj_create_type_data() {
         let storage_id = TEE_STORAGE_PRIVATE as c_ulong;
         let object_id = "test_object_create";
@@ -1938,7 +1938,7 @@ pub mod tests_tee_svc_storage {
     #[unittest::def_test]
     fn test_syscall_storage_init() {}
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_syscall_storage_obj_create_rejects_invalid_parameters() {
         let object_id = user_buffer_from_bytes(b"invalid_create");
         let mut obj = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -1968,7 +1968,7 @@ pub mod tests_tee_svc_storage {
         assert_eq!(result.err(), Some(TEE_ERROR_BAD_PARAMETERS));
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_syscall_storage_obj_open() {
         let storage_id = TEE_STORAGE_PRIVATE as c_ulong;
         let object_id = "test_object";
@@ -2017,7 +2017,7 @@ pub mod tests_tee_svc_storage {
         assert!(result.is_ok());
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_syscall_storage_obj_open_rejects_invalid_parameters() {
         let object_id = user_buffer_from_bytes(b"missing_object");
         let mut obj = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -2042,7 +2042,7 @@ pub mod tests_tee_svc_storage {
         assert_ne!(result.unwrap_err(), TEE_ERROR_BAD_PARAMETERS);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_syscall_storage_obj_seek_rejects_invalid_whence() {
         let storage_id = TEE_STORAGE_PRIVATE as c_ulong;
         let object_id = "seek_invalid_whence";

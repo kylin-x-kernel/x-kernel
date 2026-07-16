@@ -199,7 +199,12 @@ guard 尚未释放时，抢占只保留 `need_resched` pending，不实际切换
 | `watchdog` | watchdog 诊断（依赖 `snapshot`） |
 | `ipi` / `tls` | 可选扩展能力 |
 
-`TaskExt` / `KTaskExt` 是 `ktask` 的常规任务挂接机制，不再通过单独 feature 控制。
+`UserTaskRuntime` 是 `ktask` 的用户运行时接口。其 scheduler hook 可在关闭抢占的切换上下文
+调用，因此实现不得阻塞、递归调度或依赖普通的 current-process 上下文。`TaskIdentity::User`
+将 `PidHandle` 与非可选 `Box<dyn UserTaskRuntime>` 放在同一分支；
+`TaskInner::new_user(..., user_runtime)` 返回后不存在没有 runtime 的用户 task。内核 task 可以不带
+runtime。需要用户执行上下文的 unittest 通过正常的 `TaskInner::new_user` 构造并启动独立用户
+task；测试完成后由调用方等待该 task 退出，不再向 non-user task 临时注入 runtime。
 
 调度算法默认由 Kconfig 选择（默认 EEVDF）。
 

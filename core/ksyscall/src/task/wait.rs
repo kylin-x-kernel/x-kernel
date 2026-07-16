@@ -275,7 +275,7 @@ mod tests_wait {
         );
     }
 
-    #[def_test(custom, serial)]
+    #[def_test(user, serial)]
     fn test_waitable_child_rechecks_after_new_child_appears() {
         let parent = current_user_process();
         let existing = parent.fork(8_100);
@@ -296,7 +296,7 @@ mod tests_wait {
         reap_test_child(&parent, &existing);
     }
 
-    #[def_test(custom, serial)]
+    #[def_test(user, serial)]
     fn test_matching_children_reflects_reaped_children() {
         let parent = current_user_process();
         let child = parent.fork(8_110);
@@ -314,7 +314,7 @@ mod tests_wait {
         );
     }
 
-    #[def_test(custom, serial)]
+    #[def_test(user, serial)]
     fn test_waitpid_prefers_ready_zombie_over_pending_interrupt() {
         let parent = current_user_process();
         let child = parent.fork(8_120);
@@ -338,7 +338,7 @@ mod tests_wait {
         );
     }
 
-    #[def_test(custom, serial)]
+    #[def_test(user, serial)]
     fn test_waitpid_reports_restartsys_when_only_interrupt_is_ready() {
         let parent = current_user_process();
         let child = parent.fork(8_121);
@@ -357,7 +357,7 @@ mod tests_wait {
         reap_test_child(&parent, &child);
     }
 
-    #[def_test(custom, serial)]
+    #[def_test(user, serial)]
     fn test_concurrent_waiters_must_rescan_after_register_before_reaping() {
         let parent = current_user_process();
         let child = parent.fork(8_122);

@@ -23,8 +23,9 @@
 ## 内存安全不变量
 
 - robust futex 地址必须能转换成当前进程 futex key。
-- 初始用户进程的 `Thread` 必须在变为 runnable 前完整安装 task extension，
-  并且先通过 `install_init_process(...)` 完成 owner 域安装，再通过 `start_user_task(...)` 完成受控发布。
+- 初始用户进程的 `Thread` 必须与 task identity 匹配，并作为 `new_user_task(..., thread, ...)`
+  的构造参数；`TaskInner::new_user` 在返回前将它作为用户 task 的必备 runtime 保存，再通过
+  `start_user_task(...)` 完成受控发布。
 - 最后线程退出前必须先关闭 fd，再标记进程退出，避免外部等待者持有悬挂资源语义。
 - `SHM_MANAGER` 清理仅针对已退出进程 PID。
 
@@ -49,7 +50,7 @@
 - 退出路径漏关 fd：会破坏 pipe EOF / wait 语义；当前实现先 `close_all_fds()`。
 - 父进程通知丢失：通过退出信号和 `child_exit_event()` 双路径通知。
 - group-exit 未广播：会留下残余线程；当前实现遍历线程组发 `SIGKILL`。
-- init 进程启动前 task extension 未安装：会导致用户线程 runtime 前提失效；当前实现先通过 `install_init_process(...)` 安装 init process/thread 语义，再调用 `start_user_task(...)`，由 `kprocess` 内部保证“先 publish、后 runnable”。
+- init 进程启动前缺少 user runtime：会导致用户线程 runtime 前提失效；当前构造器将 `Thread` 与 `TaskInner` 一次性绑定，随后 `start_user_task(...)` 保证“先 publish、后 runnable”。
 
 ## 故障管理
 

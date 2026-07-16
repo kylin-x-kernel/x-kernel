@@ -281,7 +281,7 @@ pub mod tests_file_ops {
         Ok(loc.stat().map_err(|_| TEE_ERROR_GENERIC)?.size as usize)
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_file_ops_read() {
         let fd = FileVariant::open("/tmp/test.txt", O_RDWR | O_CREAT, 0o644);
         assert!(fd.is_ok());
@@ -308,7 +308,7 @@ pub mod tests_file_ops {
         assert_eq!(size, 4);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_file_ops_exists() {
         let path = "/tmp/test.txt.not_exists";
         assert!(!file_exists(path));
@@ -324,7 +324,7 @@ pub mod tests_file_ops {
         assert!(!file_exists(path));
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_file_ops_create_dir() {
         let path = "/tmp/test_create_dir/";
         let n = FileVariant::create_dir(path);

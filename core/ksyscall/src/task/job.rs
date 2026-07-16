@@ -81,7 +81,7 @@ mod tests {
 
     use super::{sys_getpgid, sys_getsid, sys_setpgid};
 
-    #[def_test(custom, serial)]
+    #[def_test(user, serial)]
     fn test_getsid_zero_targets_current_process() {
         let proc = kprocess::current_user_process();
         assert_eq!(
@@ -90,13 +90,13 @@ mod tests {
         );
     }
 
-    #[def_test(custom, serial)]
+    #[def_test(user, serial)]
     fn test_getpgid_zero_targets_current_process() {
         let proc = kprocess::current_user_process();
         assert_eq!(sys_getpgid(0).unwrap(), proc.group().pgid() as isize);
     }
 
-    #[def_test(custom, serial)]
+    #[def_test(user, serial)]
     fn test_setpgid_zero_zero_targets_current_process() {
         let proc = kprocess::current_user_process();
         let original_pgid = proc.group().pgid();

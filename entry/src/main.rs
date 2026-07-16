@@ -220,7 +220,7 @@ fn main() {
         }
 
         // Split into serial and parallel tests.
-        // Serial: explicitly marked serial OR non-Standard execution mode (custom/user).
+        // Serial: explicitly marked serial OR user execution mode.
         // Only Standard-mode tests without serial flag run in parallel.
         let (serial_tests, parallel_tests): (
             Vec<&'static unittest::TestDescriptor>,

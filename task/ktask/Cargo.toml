@@ -39,7 +39,6 @@ ksched = { workspace = true }
 cfg-if.workspace = true
 kiface = { workspace = true }
 event-listener = { workspace = true }
-extern-trait.workspace = true
 futures-util = { version = "0.3", default-features = false, features = [
     "alloc",
     "async-await-macro",

@@ -3012,7 +3012,7 @@ pub mod tests_fs_htree {
     use super::*;
     use crate::tee::common::file_ops::{FS_MODE_644, FS_OFLAG_DEFAULT, FileVariant};
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_tee_fs_htree_open() {
         let fd = FileVariant::open("/tmp/test_fs_htree_open.bin", FS_OFLAG_DEFAULT, FS_MODE_644)
             .unwrap();

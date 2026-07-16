@@ -17,7 +17,7 @@ use khal::uspace::UserContext;
 use kns::NamespaceFlags;
 use kprocess::{Pid, PidFd, ProcessForkConfig, current_user_thread, publish_user_task};
 use ksignal::Signo;
-use ktask::{KTaskExt, current};
+use ktask::current;
 use linux_raw_sys::general::*;
 use osvm::VirtMutPtr;
 use posix_process::new_user_task;
@@ -234,11 +234,16 @@ impl CloneRequest {
         let page_table_root = prepared.page_table_root();
         let (thr, task_number) = prepared.into_parts();
 
+        if self.flags.contains(CloneFlags::CHILD_CLEARTID) {
+            thr.set_clear_child_tid(self.child_tid);
+        }
+
         let mut new_task = new_user_task(
             &curr.name(),
             new_uctx,
             set_child_tid,
             task_number,
+            thr,
             crate::dispatch_irq_syscall,
         );
         new_task.ctx_mut().set_page_table_root(page_table_root);
@@ -251,13 +256,6 @@ impl CloneRequest {
         } else {
             None
         };
-
-        if self.flags.contains(CloneFlags::CHILD_CLEARTID) {
-            thr.set_clear_child_tid(self.child_tid);
-        }
-        // SAFETY: `thr` is the freshly constructed thread implementation for
-        // `new_task`, so converting it into the task extension is the intended one-time handoff.
-        *new_task.task_ext_mut() = Some(unsafe { KTaskExt::from_impl(thr) });
 
         publish_user_task(new_task).commit(|_| {
             if self.flags.contains(CloneFlags::PARENT_SETTID)

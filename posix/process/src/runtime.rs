@@ -4,7 +4,7 @@
 
 //! User-thread runtime helpers used by process-related syscalls.
 
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 use core::{ffi::c_long, sync::atomic::Ordering};
 
 use bytemuck::AnyBitPattern;
@@ -31,6 +31,7 @@ pub fn new_user_task(
     mut uctx: UserContext,
     set_child_tid: usize,
     task_number: Arc<PidHandle>,
+    thread: Box<Thread>,
     mut dispatch_syscall: impl FnMut(&mut UserContext) -> UserThreadRuntimeAction + Send + 'static,
 ) -> TaskInner {
     TaskInner::new_user(
@@ -137,6 +138,7 @@ pub fn new_user_task(
         name.into(),
         KERNEL_STACK_SIZE,
         task_number,
+        thread,
     )
 }
 

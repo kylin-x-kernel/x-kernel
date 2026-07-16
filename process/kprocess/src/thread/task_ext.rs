@@ -2,11 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::boxed::Box;
-
-use extern_trait::extern_trait;
 use kcpu_id_map::LogicalCpuId;
-use ktask::{TaskExt, TaskInner};
+use ktask::{TaskInner, UserTaskRuntime};
 
 use super::Thread;
 
@@ -21,11 +18,7 @@ pub trait AsThread {
     }
 }
 
-#[extern_trait]
-// SAFETY: `Box<Thread>` is the canonical user-task extension payload in
-// `kprocess`. The implementation only forwards scheduler hooks to the owning
-// thread object and does not relax any `TaskExt` invariants.
-unsafe impl TaskExt for Box<Thread> {
+impl UserTaskRuntime for Thread {
     fn set_user_mm_resident_cpu(&self, cpu_id: LogicalCpuId) {
         self.set_process_mm_resident_cpu(cpu_id);
     }
@@ -41,15 +34,14 @@ unsafe impl TaskExt for Box<Thread> {
             None
         }
     }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }
 
 impl AsThread for TaskInner {
     fn try_as_thread(&self) -> Option<&Thread> {
-        self.task_ext().map(|ext| {
-            // SAFETY: user tasks in `kprocess` install `Box<Thread>` as their
-            // `TaskExt` payload before publication; kernel tasks have no task
-            // extension and are filtered out by the outer `Option`.
-            unsafe { ext.downcast_ref::<Box<Thread>>() }.as_ref()
-        })
+        self.user_runtime()?.as_any().downcast_ref::<Thread>()
     }
 }

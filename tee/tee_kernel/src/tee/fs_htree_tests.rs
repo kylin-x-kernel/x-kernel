@@ -643,7 +643,7 @@ pub mod tests_fs_htree_tests {
 
     use super::*;
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn core_fs_htree_tests() {
         let result = test_write_read(10);
         assert!(result.is_ok());

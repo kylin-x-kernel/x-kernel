@@ -63,7 +63,7 @@ memspace / vmobj / ktask scheduler
 |------|----------|----------|----------|----------|
 | T-01 | private/shared table 路由错误导致跨进程串扰 | 高 | `ProcessFutexState::table_for` 误把 private key 路由到 shared cache | private/shared 分支集中在 `kfutex` owner 内维护 |
 | T-02 | shared futex identity 复用导致旧等待队列串扰 | 高 | shared object identity 被错误复用且 stale table 未清理 | shared cache 周期清理空且无外部引用 table；shared-anon 使用稳定 `VmObjectId`，file-backed 使用稳定 `MappingIdentity` |
-| T-03 | wait condition 与入队竞态导致错误阻塞 | 中 | 条件在检查与入队之间变化 | `wait_if` 在持队列锁状态下重新检查条件 |
+| T-03 | wait condition 与入队竞态导致错误阻塞 | 中 | 条件在检查与入队之间变化 | `WaitFuture::poll` **先持队列锁入队**（push 不触碰用户内存），**再在锁外**求值条件；并发 `wake()` 经 `is_active` token + `Drop` 移除 + Path-A 重轮询保证不丢唤醒。条件求值不能放在抢占禁用的队列锁内——`condition` 可能访问用户内存并缺页，缺页处理需阻塞（`blocked_resched` 要求 `preempt_disable_count == 2`）|
 | T-04 | inactive waiter 长期滞留导致 wake 计数失真 | 中 | caller drop/timeout 后未正确清理 | waiter token 在 drop 路径清除并从队列移除 |
 | T-05 | entry 过早回收导致后续 wake 丢失 | 中 | table 在仍有外部 guard 或活跃 waiter 时删除 entry | `FutexGuard::drop` 同时检查强引用计数和 wait queue 空状态 |
 
@@ -90,6 +90,7 @@ memspace / vmobj / ktask scheduler
 
 ## 已知限制
 
+- **`WaitQueue::queue` 是 `SpinNoIrq`（抢占+中断禁用），其锁保护区内不得调用任何可能缺页/阻塞的代码。** `wait_if` 的 `condition` 闭包可能访问用户内存（如 futex word），必须在锁外求值；否则缺页处理路径阻塞时 `preempt_disable_count` 超过 2，触发 `blocked_resched` 断言 panic（见 T-03）。
 - shared table cleanup 使用固定 100 次查找阈值，不是精确或实时回收机制。
 - shared-anon 与 file-backed 路径都使用稳定 `VmObjectId` / `MappingIdentity`。
 - 本 crate 不负责 robust-list 链表遍历和 `clear_child_tid` 语义，那些线程生命周期逻辑仍在 `kprocess` / `posix-process`。

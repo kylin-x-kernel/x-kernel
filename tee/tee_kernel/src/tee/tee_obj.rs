@@ -176,7 +176,7 @@ pub fn tee_obj_close_all() -> TeeResult {
     Ok(())
 }
 
-#[unittest::def_test(custom)]
+#[unittest::def_test(user)]
 fn test_tee_obj_add_get() {
     let obj = TeeObj {
         busy: true,

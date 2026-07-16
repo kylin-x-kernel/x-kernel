@@ -10,10 +10,8 @@ extern crate self as unittest;
 extern crate log;
 extern crate alloc;
 
-mod arch;
 pub mod runner;
 pub mod test_framework;
-mod user_stack;
 
 // Re-export the def_test and mod_test macros from unittest-macros crate
 pub use macros::{def_test, mod_test};
@@ -26,10 +24,8 @@ pub use test_framework::{__log_assert_eq_failure, __log_assert_failure, __log_as
 // Re-export commonly used types
 pub use test_framework::{
     TestDescriptor, TestExecutionMode, TestRunner, TestStats, Testable, print_unittest_error,
-    print_unittest_message, print_unittest_status, register_custom_test_executor,
-    register_user_test_executor,
+    print_unittest_message, print_unittest_status, register_user_test_executor,
 };
-pub use user_stack::run_test_on_user_stack;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TestResult {

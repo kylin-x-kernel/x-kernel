@@ -248,7 +248,7 @@ mod tests {
         assert!(matches!(res, Err(MemError::NoAccess)));
     }
 
-    #[def_test(custom)]
+    #[def_test(user)]
     fn test_atomic_cmpxchg_u32_match_updates_user_word() {
         let word = TestUserValue::<u32>::from_value(10).unwrap();
         let addr = word.as_user_ptr() as usize;
@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(word.read(), 20);
     }
 
-    #[def_test(custom)]
+    #[def_test(user)]
     fn test_atomic_cmpxchg_u32_mismatch_leaves_user_word() {
         let word = TestUserValue::<u32>::from_value(10).unwrap();
         let addr = word.as_user_ptr() as usize;
@@ -268,7 +268,7 @@ mod tests {
         assert_eq!(word.read(), 10);
     }
 
-    #[def_test(custom)]
+    #[def_test(user)]
     fn test_atomic_load_u32_reads_user_word() {
         let word = TestUserValue::<u32>::from_value(42).unwrap();
         let addr = word.as_user_ptr() as usize;
@@ -276,7 +276,7 @@ mod tests {
         assert_eq!(atomic_load_u32(addr).unwrap(), 42);
     }
 
-    #[def_test(custom)]
+    #[def_test(user)]
     fn test_atomic_u32_eq_matches_user_word() {
         let word = TestUserValue::<u32>::from_value(7).unwrap();
         let addr = word.as_user_ptr() as usize;
@@ -285,7 +285,7 @@ mod tests {
         assert!(!atomic_u32_eq(addr, 8).unwrap());
     }
 
-    #[def_test(custom)]
+    #[def_test(user)]
     fn test_atomic_cmpxchg_u32_faults_on_unmapped_user_addr() {
         let unmapped = USER_SPACE_BASE + 0x1000;
         let res = atomic_cmpxchg_u32(unmapped, 0, 1);

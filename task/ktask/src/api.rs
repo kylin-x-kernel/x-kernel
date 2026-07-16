@@ -15,7 +15,7 @@ use kspin::NoPreemptIrqSave;
 use crate::run_queue::task_run_queue;
 pub(crate) use crate::run_queue::{current_run_queue, select_run_queue, select_wake_run_queue};
 pub use crate::{
-    task::{CurrentTask, KTaskExt, TaskExt, TaskInner, TaskState},
+    task::{CurrentTask, TaskInner, TaskState, UserTaskRuntime},
     timers::register_timer_callback,
     wait_queue::WaitQueue,
 };

@@ -9,6 +9,7 @@ use alloc::{boxed::Box, string::String, sync::Arc};
 use core::sync::atomic::AtomicUsize;
 use core::{
     alloc::Layout,
+    any::Any,
     cell::{Cell, UnsafeCell},
     fmt,
     future::poll_fn,
@@ -32,26 +33,41 @@ use memaddr::{VirtAddr, align_up_4k};
 
 use crate::{KCpuMask, KTask, KtaskRef, future::block_on};
 
-#[derive(Debug, Clone)]
 enum TaskIdentity {
     Idle,
     Internal,
-    Thread(Arc<kidentity::PidHandle>),
+    KernelThread {
+        task_number: Arc<kidentity::PidHandle>,
+    },
+    User {
+        task_number: Arc<kidentity::PidHandle>,
+        user_runtime: Box<dyn UserTaskRuntime>,
+    },
 }
 
 impl TaskIdentity {
     fn thread_pid(&self) -> Option<&Arc<kidentity::PidHandle>> {
         match self {
-            Self::Thread(task_number) => Some(task_number),
+            Self::KernelThread { task_number, .. } | Self::User { task_number, .. } => {
+                Some(task_number)
+            }
             Self::Idle | Self::Internal => None,
         }
     }
 
     fn trace_id(&self) -> u64 {
         match self {
-            Self::Idle => 0,
-            Self::Internal => 0,
-            Self::Thread(task_number) => task_number.root_nr() as u64,
+            Self::Idle | Self::Internal => 0,
+            Self::KernelThread { task_number, .. } | Self::User { task_number, .. } => {
+                task_number.root_nr() as u64
+            }
+        }
+    }
+
+    fn user_runtime(&self) -> Option<&dyn UserTaskRuntime> {
+        match self {
+            Self::User { user_runtime, .. } => Some(user_runtime.as_ref()),
+            Self::Idle | Self::Internal | Self::KernelThread { .. } => None,
         }
     }
 }
@@ -71,14 +87,13 @@ pub enum TaskState {
     Exited  = 4,
 }
 
-/// User-defined task extended data.
-/// # Safety
-/// See [`extern_trait`].
-#[extern_trait::extern_trait(
-    /// The impl proxy type for [`TaskExt`].
-    pub KTaskExt
-)]
-pub unsafe trait TaskExt {
+/// Scheduler callbacks and type-erased access for a user-task runtime.
+///
+/// The scheduler invokes these callbacks with preemption disabled while
+/// switching tasks. Implementations must not sleep, block, recursively schedule,
+/// or depend on ordinary current-process state. Shared state accessed by
+/// callbacks must be synchronized for concurrent scheduler activity.
+pub trait UserTaskRuntime: Send + Sync + Any {
     /// Called when the task is switched in.
     fn on_enter(&self) {}
     /// Called when the task is switched out.
@@ -86,10 +101,13 @@ pub unsafe trait TaskExt {
     /// Marks that the current CPU may retain TLB state for this task's user
     /// address space.
     fn set_user_mm_resident_cpu(&self, _cpu_id: LogicalCpuId) {}
-    /// Returns the latest hardware user page-table root for switch-in.
+    /// Returns the latest valid hardware user page-table root for switch-in.
     fn switch_page_table_root(&self) -> Option<karch::HwPageTableRoot> {
         None
     }
+
+    /// Returns this runtime as [`Any`] for process-domain type recovery.
+    fn as_any(&self) -> &dyn Any;
 }
 
 // How many held locks we track per task (debug only).
@@ -188,8 +206,6 @@ pub struct TaskInner {
     kstack: Option<TaskStack>,
     ctx: TaskContextCell,
 
-    task_ext: Option<KTaskExt>,
-
     #[cfg(feature = "tls")]
     tls: TlsArea,
 
@@ -266,25 +282,38 @@ impl TaskInner {
             entry,
             name,
             stack_size,
-            TaskIdentity::Thread(kidentity::allocate_root_pid_handle()?),
+            TaskIdentity::KernelThread {
+                task_number: kidentity::allocate_root_pid_handle()?,
+            },
         ))
     }
 
-    /// Creates a user thread with a preallocated thread identity.
+    /// Creates a user thread with a preallocated thread identity and runtime.
     ///
     /// Callers must allocate the thread identity in the correct PID namespace
     /// before constructing the task, so process/thread-group/publication state
     /// can be built around the same handle before the task becomes runnable.
+    /// The runtime is installed as the task extension during construction;
+    /// a user task can therefore never be observed without its runtime.
     pub fn new_user<F>(
         entry: F,
         name: String,
         stack_size: usize,
         task_number: Arc<kidentity::PidHandle>,
+        user_runtime: Box<dyn UserTaskRuntime>,
     ) -> Self
     where
         F: FnOnce() + Send + 'static,
     {
-        Self::new_with_identity(entry, name, stack_size, TaskIdentity::Thread(task_number))
+        Self::new_with_identity(
+            entry,
+            name,
+            stack_size,
+            TaskIdentity::User {
+                task_number,
+                user_runtime,
+            },
+        )
     }
 
     /// Returns the shared task-number handle, if the task has one.
@@ -332,14 +361,9 @@ impl TaskInner {
         }))
     }
 
-    /// Returns a reference to the task extended data.
-    pub fn task_ext(&self) -> Option<&KTaskExt> {
-        self.task_ext.as_ref()
-    }
-
-    /// Returns a mutable reference to the task extended data.
-    pub fn task_ext_mut(&mut self) -> &mut Option<KTaskExt> {
-        &mut self.task_ext
+    /// Returns the runtime attached to this task, if any.
+    pub fn user_runtime(&self) -> Option<&dyn UserTaskRuntime> {
+        self.identity.user_runtime()
     }
 
     /// Returns a mutable reference to the task context.
@@ -528,7 +552,6 @@ impl TaskInner {
             wait_for_exit: AtomicWaker::new(),
             kstack: None,
             ctx: TaskContextCell::new(),
-            task_ext: None,
             #[cfg(feature = "tls")]
             tls: TlsArea::alloc(),
             #[cfg(feature = "snapshot")]
@@ -731,7 +754,8 @@ impl TaskInner {
 impl fmt::Debug for TaskInner {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut ds = f.debug_struct("TaskInner");
-        ds.field("identity", &self.identity)
+        ds.field("task_number", &self.task_number())
+            .field("has_user_runtime", &self.user_runtime().is_some())
             .field("name", &self.name)
             .field("state", &self.state());
 

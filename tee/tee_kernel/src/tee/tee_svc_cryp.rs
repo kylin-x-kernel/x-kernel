@@ -2656,7 +2656,7 @@ pub mod tests_tee_svc_cryp {
         assert_eq!(props.max_size, 256);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_op_attr_secret_value_from_user() {
         // 测试基础数据
         let user_key = [0xAAu8; 16];
@@ -2676,7 +2676,7 @@ pub mod tests_tee_svc_cryp {
         assert_eq!(result.err(), Some(TEE_ERROR_SHORT_BUFFER));
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_op_attr_secret_value_to_bytes() {
         // 准备测试数据
         let mut secret_wrapper = TeeCrypObjSecretWrapper::new(32);
@@ -2782,7 +2782,7 @@ pub mod tests_tee_svc_cryp {
         assert_eq!(offs_read, 4);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_op_attr_value_to_user() {
         let mut attr: [u8; 8] = [0; 8];
         // 设置属性值为 0x11223344
@@ -2799,7 +2799,7 @@ pub mod tests_tee_svc_cryp {
         assert_eq!(&buffer[..4], &value_bytes);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_op_attr_value_to_user_short_buffer() {
         let mut attr: [u8; 8] = [0; 8];
         let value: u32 = 0x11223344;
@@ -2875,7 +2875,7 @@ pub mod tests_tee_svc_cryp {
         assert_eq!(result.err(), Some(TEE_ERROR_NOT_SUPPORTED));
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryptoattrref_u32() {
         // test CryptoAttrRef::U32
         let mut value: u32 = 0;
@@ -2895,7 +2895,7 @@ pub mod tests_tee_svc_cryp {
         assert_eq!(&*exported, &value_bytes);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryptoattrref_bignum() {
         // test CryptoAttrRef::BigNum
         let bn = BigNum::new(0x11223344).unwrap();
@@ -2906,7 +2906,7 @@ pub mod tests_tee_svc_cryp {
         assert_eq!(bn_from, bn);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_secret_value() {
         // set secret value data to
         let mut secret = TeeCrypObjSecretWrapper::new(16);
@@ -2962,7 +2962,7 @@ pub mod tests_tee_svc_cryp {
         assert_eq!(&*exported, &secret.data()[..16]);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_syscall_cryp_obj_alloc() {
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result =
@@ -2981,7 +2981,7 @@ pub mod tests_tee_svc_cryp {
         assert!(matches!(obj.attr[0], TeeCryptObj::EccPublicKey(_)));
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_syscall_cryp_obj_get_attr() {
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result =
@@ -2998,7 +2998,7 @@ pub mod tests_tee_svc_cryp {
         // assert_eq!(&buffer[..4], &[0x00, 0x00, 0x00, 0x00]);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_syscall_cryp_generate_key_ecc_keypair() {
         // alloc sm2 key pair
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -3097,7 +3097,7 @@ pub mod tests_tee_svc_cryp {
         TestResult::Ok
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_syscall_cryp_generate_key_rsa() {
         // step1: test without usr_params (use default exponent 65537)
         if let TestResult::Failed = test_rsa_keypair(2048, 0) {
@@ -3150,14 +3150,14 @@ pub mod tests_tee_svc_cryp {
         TestResult::Ok
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_syscall_cryp_generate_key_sm4() {
         if let TestResult::Failed = test_syscall_cryp_generate_secret_key(TEE_TYPE_SM4 as _, 128) {
             return TestResult::Failed;
         }
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_syscall_cryp_generate_key_hmac_sm3() {
         if let TestResult::Failed =
             test_syscall_cryp_generate_secret_key(TEE_TYPE_HMAC_SM3 as _, 128)
@@ -3166,7 +3166,7 @@ pub mod tests_tee_svc_cryp {
         }
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_copy_in_attrs() {
         let mut usr_attrs = crate::user_vec![utee_attribute::default(); 2];
         // index 0 is value attribute

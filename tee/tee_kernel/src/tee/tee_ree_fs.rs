@@ -1429,7 +1429,7 @@ pub mod tests_tee_ree_fs {
         assert_eq!(result.unwrap_err(), TEE_ERROR_GENERIC);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_ree_fs_primitive_operations() {
         let uuid = TEE_UUID {
             timeLow: 0x12345678,

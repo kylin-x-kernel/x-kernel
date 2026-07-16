@@ -14,7 +14,7 @@ use kcred::Credentials;
 use kexec::load_user_app;
 use khal::uspace::UserContext;
 use kidentity::allocate_root_pid_handle;
-use kprocess::{UserThreadRuntimeAction, install_init_process, start_user_task};
+use kprocess::{Process, UserThreadRuntimeAction, build_process_thread, start_user_task};
 use ksync::Mutex;
 use ktty::tty::N_TTY;
 use kvfs::{Filename, LookupFlags, LookupIntent};
@@ -51,23 +51,23 @@ pub fn run_init_process(
         .unwrap_or_else(|e| panic!("Failed to load user app: {}", e));
 
     let uctx = UserContext::new(entry_vaddr.into(), ustack_top, 0);
+    let page_table_root = uspace.page_table_hw_root();
 
     let task_number = allocate_root_pid_handle().expect("Failed to allocate init PID");
-    let mut task = new_user_task(&name, uctx, 0, task_number, dispatch_syscall);
-    task.ctx_mut()
-        .set_page_table_root(uspace.page_table_hw_root());
-
+    let process = Process::new_init_with_task_number(task_number.clone());
     let fs_context = copy_init_fs_struct();
-    let process = install_init_process(
-        &mut task,
+    let thread = build_process_thread(
+        process.clone(),
+        task_number.clone(),
         path.to_string(),
         Arc::new(args.to_vec()),
         Arc::new(Mutex::new(uspace)),
         fs_context,
         Arc::default(),
         Credentials::root(),
-    )
-    .expect("Failed to install init process");
+    );
+    let mut task = new_user_task(&name, uctx, 0, task_number, thread, dispatch_syscall);
+    task.ctx_mut().set_page_table_root(page_table_root);
 
     N_TTY.bind_to(&process).expect("Failed to bind ntty");
 

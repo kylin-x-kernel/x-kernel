@@ -10,7 +10,6 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
-karch.workspace = true
 kaddr_layout.workspace = true
 kalloc.workspace = true
 kcred.workspace = true
@@ -18,7 +17,6 @@ kerrno.workspace = true
 fs_context.workspace = true
 khal.workspace = true
 kidentity.workspace = true
-klogger.workspace = true
 ksignal.workspace = true
 kprocess.workspace = true
 ksync.workspace = true

@@ -104,7 +104,6 @@ impl Default for TestStats {
 
 pub static TEST_FAILED_FLAG: AtomicBool = AtomicBool::new(false);
 
-pub type CustomTestExecutor = fn(&TestDescriptor) -> TestResult;
 pub type UserTestExecutor = fn(&TestDescriptor) -> TestResult;
 
 struct TestExecutorSlot<T: Copy> {
@@ -159,27 +158,17 @@ impl<T: Copy> TestExecutorSlot<T> {
 // prevents borrow-based aliasing from escaping the slot.
 unsafe impl<T: Copy> Sync for TestExecutorSlot<T> {}
 
-static CUSTOM_TEST_EXECUTOR: TestExecutorSlot<CustomTestExecutor> = TestExecutorSlot::new();
 static USER_TEST_EXECUTOR: TestExecutorSlot<UserTestExecutor> = TestExecutorSlot::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TestExecutionMode {
     Standard = 0,
-    Custom   = 1,
-    User     = 2,
-}
-
-pub fn register_custom_test_executor(executor: CustomTestExecutor) {
-    CUSTOM_TEST_EXECUTOR.store(executor, Ordering::Release);
+    User     = 1,
 }
 
 pub fn register_user_test_executor(executor: UserTestExecutor) {
     USER_TEST_EXECUTOR.store(executor, Ordering::Release);
-}
-
-fn custom_test_executor() -> Option<CustomTestExecutor> {
-    CUSTOM_TEST_EXECUTOR.load(Ordering::Acquire)
 }
 
 fn user_test_executor() -> Option<UserTestExecutor> {
@@ -245,19 +234,6 @@ impl Testable for TestDescriptor {
 
         match self.execution_mode {
             TestExecutionMode::Standard => (self.test_fn)(),
-            TestExecutionMode::Custom => custom_test_executor().map_or_else(
-                || {
-                    log_unittest(
-                        log::Level::Error,
-                        format_args!(
-                            "test {}::{} failed: custom test executor is not registered",
-                            self.module, self.name
-                        ),
-                    );
-                    TestResult::Failed
-                },
-                |executor| executor(self),
-            ),
             TestExecutionMode::User => user_test_executor().map_or_else(
                 || {
                     log_unittest(
@@ -757,14 +733,11 @@ pub fn tests_failed() -> bool {
 #[cfg(unittest)]
 mod tests_test_framework {
     use alloc::{collections::BTreeMap, vec};
-    use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     use unittest::def_test;
 
     use super::*;
     use crate::TestResult;
-
-    static CUSTOM_CALLS: AtomicUsize = AtomicUsize::new(0);
 
     fn ok_test() -> TestResult {
         TestResult::Ok
@@ -772,11 +745,6 @@ mod tests_test_framework {
 
     fn fail_test() -> TestResult {
         TestResult::Failed
-    }
-
-    fn custom_ok_test(_: &TestDescriptor) -> TestResult {
-        CUSTOM_CALLS.fetch_add(1, AtomicOrdering::Relaxed);
-        TestResult::Ok
     }
 
     fn assert_ok_test() -> TestResult {
@@ -892,30 +860,6 @@ mod tests_test_framework {
         assert!(!ignored.should_panic());
         assert!(ignored.ignore());
         assert_eq!(ignored.run(), TestResult::Ignored);
-    }
-
-    #[def_test(serial)]
-    fn test_custom_executor_paths() {
-        let old = CUSTOM_TEST_EXECUTOR.replace(None, Ordering::AcqRel);
-        CUSTOM_CALLS.store(0, AtomicOrdering::Relaxed);
-
-        let desc = TestDescriptor::new(
-            "custom",
-            "framework",
-            fail_test,
-            false,
-            false,
-            false,
-            TestExecutionMode::Custom,
-        );
-
-        assert_eq!(desc.run(), TestResult::Failed);
-
-        register_custom_test_executor(custom_ok_test);
-        assert_eq!(desc.run(), TestResult::Ok);
-        assert_eq!(CUSTOM_CALLS.load(AtomicOrdering::Relaxed), 1);
-
-        CUSTOM_TEST_EXECUTOR.store_raw(old, Ordering::Release);
     }
 
     #[def_test]
@@ -1064,27 +1008,5 @@ mod tests_test_framework {
         // assert_eq!(stats.failed, 1);
         // assert!(tests_failed());
         TEST_FAILED_FLAG.store(false, Ordering::Relaxed);
-    }
-
-    #[def_test(serial)]
-    fn test_custom_executor_can_be_restored_after_use() {
-        let old = CUSTOM_TEST_EXECUTOR.replace(None, Ordering::AcqRel);
-        CUSTOM_CALLS.store(0, AtomicOrdering::Relaxed);
-
-        register_custom_test_executor(custom_ok_test);
-        let desc = TestDescriptor::new(
-            "custom_restore",
-            "framework",
-            fail_test,
-            false,
-            false,
-            false,
-            TestExecutionMode::Custom,
-        );
-
-        assert_eq!(desc.run(), TestResult::Ok);
-        assert_eq!(CUSTOM_CALLS.load(AtomicOrdering::Relaxed), 1);
-
-        CUSTOM_TEST_EXECUTOR.store_raw(old, Ordering::Release);
     }
 }

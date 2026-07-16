@@ -1613,7 +1613,7 @@ pub mod tests_cryp {
         },
     };
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_state() {
         let mut state1: u32 = 0;
         let mut state2: u32 = 0;
@@ -1682,7 +1682,7 @@ pub mod tests_cryp {
 
     /// `tee_cryp_state_free` 会 `tee_obj_attr_clear` 并 `tee_obj_close`；此处额外 `Arc::clone` 住内核对象，
     /// 以便在会话表已删除句柄后仍能检查密钥尾随区是否已被写 0。
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_state_free_zeroes_key_material() {
         const KEY_LEN: usize = 16;
         let pattern = [0x5Cu8; KEY_LEN];
@@ -1756,7 +1756,7 @@ pub mod tests_cryp {
         assert_eq!(translate_compat_algo(TEE_ALG_SM3), TEE_ALG_SM3);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_syscall_cryp_generate_key_ecc_p256_keypair() {
         // ECDSA P-256：必须在 generate_key 时通过 TEE_ATTR_ECC_CURVE 指定曲线
         let mut usr_params = crate::user_vec![utee_attribute::default(); 1];
@@ -1795,7 +1795,7 @@ pub mod tests_cryp {
         assert!(y_len == 31 || y_len == 32);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_state_alloc_rejects_busy_key() {
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
@@ -1826,7 +1826,7 @@ pub mod tests_cryp {
         assert_eq!(result.err(), Some(TEE_ERROR_BUSY));
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_hash_sm3() {
         let mut state: u32 = 0;
         let res = tee_cryp_state_alloc(
@@ -1862,7 +1862,7 @@ pub mod tests_cryp {
         );
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_hash_requires_init_and_enough_output() {
         let mut state: u32 = 0;
         let res = tee_cryp_state_alloc(
@@ -1885,7 +1885,7 @@ pub mod tests_cryp {
         assert_eq!(result.err(), Some(TEE_ERROR_SHORT_BUFFER));
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_hmac_sm3() {
         let mut state: u32 = 0;
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -1950,7 +1950,7 @@ pub mod tests_cryp {
         );
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_state_copy_sm3_hash() {
         let mut src_state: u32 = 0;
         let mut dst_state: u32 = 0;
@@ -2002,7 +2002,7 @@ pub mod tests_cryp {
 
     /// GP `regression_4001`: `TEE_DigestExtract` calls `hash_final` into the
     /// operation buffer, then `TEE_CopyOperation` must still succeed.
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_hash_copy_after_digest_extract_style_final() {
         const HASH_DATA_MD5_IN1: [u8; 11] = [
             0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d,
@@ -2054,7 +2054,7 @@ pub mod tests_cryp {
     /// GP `regression_4001` MAC analogue: `TEE_DigestExtract` calls
     /// `mac_final` into the operation buffer, then `TEE_CopyOperation` must
     /// still succeed. HMAC-SM3 self-consistency: dst tag must equal src tag.
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_mac_copy_after_digest_extract_style_final_hmac_sm3() {
         let mut src_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let mut dst_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -2110,7 +2110,7 @@ pub mod tests_cryp {
 
     /// Same extract-then-copy check for AES-CMAC, with a known answer to also
     /// catch regressions in the CMAC finalize path itself.
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_mac_copy_after_digest_extract_style_final_aes_cmac() {
         const KEY: [u8; 16] = [
             0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
@@ -2175,7 +2175,7 @@ pub mod tests_cryp {
         assert_eq!(dst_tag, EXPECTED_TAG);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_state_copy_hmac_sm3() {
         let mut src_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let mut dst_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -2251,7 +2251,7 @@ pub mod tests_cryp {
         assert_eq!(dst_hash, src_hash);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_state_copy_sm4_cbc_ctx() {
         let mut src_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let mut dst_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -2335,7 +2335,7 @@ pub mod tests_cryp {
         assert_eq!(&out2_dst[..16], &out2_src[..16]);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_cmac_aes() {
         let mut state: u32 = 0;
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -2428,7 +2428,7 @@ pub mod tests_cryp {
     /// MAC_INIT(op1) → COPY(op3←op1) → MAC_UPDATE(op1, 9B) → COPY(op2←op1) →
     /// MAC_FINAL(op2, tail 7B) → MAC_INIT(op1) → MAC_FINAL(op1, full) →
     /// MAC_FINAL(op3, full)  // TEE_MACCompareFinal compute path
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_regression_4002_mac_aes_cmac_vect2() {
         const DATA: [u8; 16] = [
             0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93,
@@ -2498,7 +2498,7 @@ pub mod tests_cryp {
     }
 
     /// Minimal repro: op3 only gets post-MAC_INIT copy, then one-shot full final.
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_regression_4002_mac_aes_cmac_vect2_op3_snapshot_only() {
         const DATA: [u8; 16] = [
             0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93,
@@ -2540,7 +2540,7 @@ pub mod tests_cryp {
         assert_eq!(out_op3, out_op1);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_sm4_ecb_encrypt() {
         let mut state: u32 = 0;
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -2615,7 +2615,7 @@ pub mod tests_cryp {
         );
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_cipher_update_rejects_uninitialized_state_and_short_buffer() {
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
@@ -2647,7 +2647,7 @@ pub mod tests_cryp {
         assert_eq!(result.err(), Some(TEE_ERROR_SHORT_BUFFER));
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_sm4_ecb_decrypt() {
         let mut state: u32 = 0;
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -2720,7 +2720,7 @@ pub mod tests_cryp {
         assert_eq!(output, *b"abcdefghijklmnop1234567887654321");
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_sm4_cbc_encrypt() {
         let mut state: u32 = 0;
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -2791,7 +2791,7 @@ pub mod tests_cryp {
         );
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_sm4_cbc_decrypt() {
         let mut state: u32 = 0;
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -2860,7 +2860,7 @@ pub mod tests_cryp {
         assert_eq!(&out[..32], *b"abcdefghabcdefgh1234567890987654");
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_sm4_gcm_encrypt() {
         let mut state: u32 = 0;
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -2956,7 +2956,7 @@ pub mod tests_cryp {
         );
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_sm4_gcm_split_aad_matches_one_shot() {
         let mut state: u32 = 0;
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -3028,7 +3028,7 @@ pub mod tests_cryp {
         );
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_authenc_aad_rejected_after_payload() {
         let mut state: u32 = 0;
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -3057,7 +3057,7 @@ pub mod tests_cryp {
     /// After AEAD `enc_final` seals the tag, the operation is finalized —
     /// `TEE_CopyOperation` must reject it with `TEE_ERROR_BAD_STATE` rather
     /// than silently matching the pre-init `Others` placeholder.
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_state_copy_rejected_after_authenc_final() {
         let mut enc_state: u32 = 0;
         let mut dst_state: u32 = 0;
@@ -3099,7 +3099,7 @@ pub mod tests_cryp {
         assert_eq!(res.err(), Some(TEE_ERROR_BAD_STATE));
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_authenc_requires_ae_state() {
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
@@ -3150,7 +3150,7 @@ pub mod tests_cryp {
         Ok(state)
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_des3_ecb_2key_cipher_init() {
         let key = [
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -3161,7 +3161,7 @@ pub mod tests_cryp {
     }
 
     /// mbedtls `test_vec_ecb` vector for DES-EDE-ECB encrypt.
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_des3_ecb_2key_encrypt() {
         let key = [
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -3177,7 +3177,7 @@ pub mod tests_cryp {
         assert_eq!(&out, &expect);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_des3_ecb_3key_cipher_init() {
         let key = [
             0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
@@ -3205,7 +3205,7 @@ pub mod tests_cryp {
         (obj1_id, obj2_id)
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_aes_xts_incremental_update_matches_one_shot() {
         // IEEE P1619 vector (mbedtls aes_test_xts index 1): 32-byte unit.
         let key1 = [0x11u8; 16];
@@ -3249,7 +3249,7 @@ pub mod tests_cryp {
         assert_eq!(&out, &expect);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_aes_xts_512_byte_incremental_update() {
         use crate::tee::crypto::aes_xts::{aes_xts_crypt, aes_xts_init};
 
@@ -3424,7 +3424,7 @@ pub mod tests_cryp {
         out
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_aes_xts_host_split_block_aligned_decrypt() {
         let key1 = [0x11u8; 16];
         let key2 = [0x22u8; 16];
@@ -3441,7 +3441,7 @@ pub mod tests_cryp {
         core::assert_eq!(dec512, plain512, "host split 512-byte decrypt");
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_aes_xts_short_lengths_stealing() {
         let key1 = [0x11u8; 16];
         let key2 = [0x22u8; 16];
@@ -3571,14 +3571,14 @@ pub mod tests_cryp {
         out
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_des3_ecb_rejects_invalid_key_length() {
         let key = [0u8; 8];
         let res = des3_ecb_encrypt_test_setup(&key);
         assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_aes_ccm_encrypt_decrypt() {
         let mut enc_state: u32 = 0;
         let mut dec_state: u32 = 0;
@@ -3701,7 +3701,7 @@ pub mod tests_cryp {
         assert_eq!(&dec_out[..4], &plain);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_sm4_gcm_decrypt() {
         let mut state: u32 = 0;
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -3792,7 +3792,7 @@ pub mod tests_cryp {
         );
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_sm2_sign_verify() {
         // alloc sm2 key pair
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -3857,7 +3857,7 @@ pub mod tests_cryp {
         assert!(res.is_ok());
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_sm2_verify_with_pub_key() {
         // alloc sm2 key pair
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -3929,7 +3929,7 @@ pub mod tests_cryp {
 
     /// 与 `test_cryp_sm2_verify_with_pub_key` 相同数据与验签结论，公钥通过 `tee_init_ref_attribute` +
     /// `syscall_cryp_obj_populate` 写入（对齐 TA：`TEE_InitRefAttribute` + `TEE_PopulateTransientObject`）。
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_sm2_verify_with_pub_key_via_init_ref_attr() {
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let res =
@@ -3998,7 +3998,7 @@ pub mod tests_cryp {
         assert!(res.is_ok());
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_sm2_enc_dec() {
         // alloc sm2 key pair
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -4213,7 +4213,7 @@ pub mod tests_cryp {
         (kp_id, pub_id)
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_rsa_oaep_sha256_encrypt_decrypt_with_label() {
         let (kp_id, pub_id) = install_rsa_test_der_key_objects();
 
@@ -4256,7 +4256,7 @@ pub mod tests_cryp {
         assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_rsa_pkcs1_v15_encrypt_decrypt_random_key() {
         let kp_obj = TestUserValue::<c_uint>::from_value(0);
         assert!(kp_obj.is_ok());
@@ -4322,7 +4322,7 @@ pub mod tests_cryp {
         assert_eq!(&out[..out_len], plain.as_slice());
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_rsa_oaep_sha256_encrypt_decrypt_random_key_with_label() {
         let kp_obj = TestUserValue::<c_uint>::from_value(0);
         assert!(kp_obj.is_ok());
@@ -4397,7 +4397,7 @@ pub mod tests_cryp {
         assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_rsa_pss_sha256_sign_verify_random_key() {
         let kp_obj = TestUserValue::<c_uint>::from_value(0);
         assert!(kp_obj.is_ok());
@@ -4457,7 +4457,7 @@ pub mod tests_cryp {
         assert!(res.is_ok());
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_rsa_pss_sha256_sign_verify() {
         let (kp_id, pub_id) = install_rsa_test_der_key_objects();
 
@@ -4496,7 +4496,7 @@ pub mod tests_cryp {
         assert_eq!(res.err(), Some(TEE_ERROR_SIGNATURE_INVALID));
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_rsa_nopad_sign_operate_rejected() {
         let (kp_id, _pub_id) = install_rsa_test_der_key_objects();
 
@@ -4523,7 +4523,7 @@ pub mod tests_cryp {
             .collect()
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_cryp_ed25519_verify_sig_structure_vector() {
         let pub_key =
             hex_decode("720e968320f6d324d29423d546524c7acbb549c12a49e059dbc508c56099f82e");

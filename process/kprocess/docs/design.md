@@ -142,12 +142,11 @@ Inherited group
 
 ### 创建 init 进程
 
-1. owner 调用 `install_init_process(task, ...)`。
-2. owner 先为 init task 分配 leader `PidHandle`，再调用 `install_init_process(task, ...)` 消费这份 identity，保证首个 root-visible leader 为 `pid/tid 1`。
-3. 创建新的 `Session` 和 `ProcessGroup`，并建立稳定 init `Process` 身份。
-4. 创建 init `Thread` 与 `ProcessRuntime`，并把弱 runtime 引用登记到该 `Process`。
-5. 在 task 变为 runnable 之前安装 `KTaskExt`。
-6. 调用方完成 tty / stdio 等外部 owner 设置后，再调用 `start_user_task(task)`。
+1. owner 为 init task 分配 leader `PidHandle`，保证首个 root-visible leader 为 `pid/tid 1`。
+2. 创建新的 `Session` 和 `ProcessGroup`，并建立稳定 init `Process` 身份。
+3. 创建 init `Thread` 与 `ProcessRuntime`，并把弱 runtime 引用登记到该 `Process`。
+4. 调用 `TaskInner::new_user(..., thread)`；构造器在返回前建立带有 `UserTaskRuntime` 的用户 task，因此不存在可见的半初始化状态。
+5. 调用方完成 tty / stdio 等外部 owner 设置后，再调用 `start_user_task(task)`。
 
 ### fork 子进程
 

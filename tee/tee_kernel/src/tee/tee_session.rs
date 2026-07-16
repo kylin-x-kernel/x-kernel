@@ -215,7 +215,7 @@ pub mod tests_tee_session {
     use super::*;
 
     // Test function for with_tee_ta_ctx helper functions
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_with_tee_ta_ctx() {
         let mut uuid_back: String = String::new();
 

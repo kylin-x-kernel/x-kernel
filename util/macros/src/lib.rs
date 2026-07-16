@@ -149,8 +149,7 @@ pub fn mod_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `#[def_test]` - Normal test
 /// - `#[def_test(ignore)]` - Test will be skipped
 /// - `#[def_test(should_panic)]` - Test expects panic (not fully supported in no_std)
-/// - `#[def_test(custom)]` - Test runs through unittest's custom executor
-/// - `#[def_test(user)]` - Test runs through unittest's user-stack executor
+/// - `#[def_test(user)]` - Test runs in a newly constructed user task
 /// - `#[def_test(serial)]` - Test must run sequentially (not parallel-safe)
 #[proc_macro_attribute]
 pub fn def_test(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -164,7 +163,6 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
     let mut ignore = false;
     let mut should_panic = false;
     let mut serial = false;
-    let mut use_custom_executor = false;
     let mut use_user_executor = false;
 
     for arg in args {
@@ -172,7 +170,6 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
             "ignore" => ignore = true,
             "should_panic" => should_panic = true,
             "serial" => serial = true,
-            "custom" => use_custom_executor = true,
             "user" => use_user_executor = true,
             other => {
                 return Error::new(
@@ -183,15 +180,6 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
                 .into();
             }
         }
-    }
-
-    if use_custom_executor && use_user_executor {
-        return Error::new(
-            input.sig.ident.span(),
-            "def_test(custom, user) is not supported; choose one execution mode",
-        )
-        .to_compile_error()
-        .into();
     }
 
     let fn_name = &input.sig.ident;
@@ -233,8 +221,6 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
     let serial_val = serial;
     let execution_mode = if use_user_executor {
         quote!(unittest::TestExecutionMode::User)
-    } else if use_custom_executor {
-        quote!(unittest::TestExecutionMode::Custom)
     } else {
         quote!(unittest::TestExecutionMode::Standard)
     };

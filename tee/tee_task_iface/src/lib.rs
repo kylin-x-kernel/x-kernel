@@ -27,9 +27,10 @@ pub use ta_ctx::{SessionIdentity, TeeTaCtx, looks_like_ta};
 
 /// Tee session context trait.
 ///
-/// Stored behind `dyn` and used for type-erased access, so it must provide
-/// downcasting via `as_any`.
-pub trait TeeSessionCtxTrait {
+/// Stored behind `dyn` in a mutex-protected per-thread slot. Contexts may move
+/// with their task between CPUs, so they must be `Send` and provide downcasting
+/// via `as_any`.
+pub trait TeeSessionCtxTrait: Send {
     /// Get the any reference of the tee session context.
     fn as_any(&self) -> &dyn Any;
     /// Get the any mutable reference of the tee session context.

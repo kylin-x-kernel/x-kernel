@@ -13,7 +13,7 @@ use ktask::{TaskInner, current, prepare_task};
 use unittest::{assert, assert_eq, def_test};
 
 use crate::{
-    AsThread, Process, build_process_thread, current_user_process, install_process_thread,
+    AsThread, Process, build_process_thread, current_user_process,
     process::INIT_PROC,
     process_exit, procfs,
     publication::{prepare_user_task, process_publication, task_identity_matches_thread},
@@ -34,12 +34,6 @@ fn build_prepared_test_user_task() -> (Arc<Process>, TaskInner) {
     let parent = current_user_process();
     let task_number =
         kidentity::allocate_root_pid_handle().expect("test leader identity should allocate");
-    let mut task = TaskInner::new_user(
-        || {},
-        String::from("test-user-thread"),
-        16 * 1024,
-        task_number.clone(),
-    );
     let pid = task_number.root_nr();
     let process = parent.fork_with_task_number(task_number.clone(), Some(ksignal::Signo::SIGCHLD));
 
@@ -62,15 +56,22 @@ fn build_prepared_test_user_task() -> (Arc<Process>, TaskInner) {
         .credentials_snapshot()
         .unwrap_or_else(|_| Credentials::root());
 
-    install_process_thread(
-        &mut task,
+    let thread = build_process_thread(
         process.clone(),
+        task_number.clone(),
         exe_path,
         cmdline,
         address_space,
         fs_context,
         signal_actions,
         credentials,
+    );
+    let task = TaskInner::new_user(
+        || {},
+        String::from("test-user-thread"),
+        16 * 1024,
+        task_number,
+        thread,
     );
 
     task.set_name(format!("test-user-thread-{pid}").as_str());
@@ -79,7 +80,6 @@ fn build_prepared_test_user_task() -> (Arc<Process>, TaskInner) {
 
 fn publish_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskRef {
     let task_number = kidentity::PidHandle::fixed_root(tid);
-    let mut task = TaskInner::new_user(|| {}, format!("test-thread-{tid}"), 16 * 1024, task_number);
     let mut aspace = memspace::MmSpace::new_user_empty().expect("user mmspace should allocate");
     ksignal::map_signal_trampoline(&mut aspace).expect("signal trampoline should map");
     let address_space = Arc::new(ksync::Mutex::new(aspace));
@@ -89,15 +89,22 @@ fn publish_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskR
     ));
     let credentials = Credentials::root();
 
-    install_process_thread(
-        &mut task,
+    let thread = build_process_thread(
         process.clone(),
+        task_number.clone(),
         String::from("[test-thread]"),
         Arc::new(vec![]),
         address_space,
         fs_context,
         signal_actions,
         credentials,
+    );
+    let task = TaskInner::new_user(
+        || {},
+        format!("test-thread-{tid}"),
+        16 * 1024,
+        task_number,
+        thread,
     );
 
     let task = prepare_task(task);
@@ -344,7 +351,7 @@ fn test_free_only_reaps_target_zombie_child() {
     second.free();
 }
 
-#[def_test(custom, serial)]
+#[def_test(user, serial)]
 fn test_zombie_process_is_not_live_even_if_runtime_still_exists() {
     let (proc, prepared) = build_prepared_test_user_task();
     let publication = process_publication();
@@ -418,7 +425,7 @@ fn test_lifecycle_accumulates_exited_thread_and_child_cpu_time() {
     proc.free();
 }
 
-#[def_test(custom, serial)]
+#[def_test(user, serial)]
 fn test_published_task_lookup_matches_current_user_thread() {
     let task = current().clone();
     let tid = task.as_thread().tid();
@@ -446,7 +453,7 @@ fn test_published_task_lookup_matches_current_user_thread() {
     );
 }
 
-#[def_test(custom, serial)]
+#[def_test(user, serial)]
 fn test_current_process_mutation_helpers_preserve_process_boundary() {
     let process = current_user_process();
 
@@ -515,7 +522,7 @@ fn test_current_process_mutation_helpers_preserve_process_boundary() {
         .expect("current process must restore its previous exec metadata");
 }
 
-#[def_test(custom, serial)]
+#[def_test(user, serial)]
 fn test_prepare_thread_clone_defers_tid_visibility_until_publication() {
     let thread = crate::current_user_thread();
     let process = thread.process().clone();
@@ -530,15 +537,13 @@ fn test_prepare_thread_clone_defers_tid_visibility_until_publication() {
     );
 
     let (cloned, task_number) = prepared.into_parts();
-    let mut task = TaskInner::new_user(
+    let task = TaskInner::new_user(
         || {},
         String::from("prepared-thread"),
         16 * 1024,
         task_number,
+        cloned,
     );
-    // SAFETY: `cloned` is the freshly prepared thread object for `task` and is installed
-    // exactly once before publication or activation.
-    *task.task_ext_mut() = Some(unsafe { ktask::KTaskExt::from_impl(cloned) });
     let published = prepare_user_task(task).publish();
 
     let is_last = process.exit_thread(tid, 0);
@@ -549,7 +554,7 @@ fn test_prepare_thread_clone_defers_tid_visibility_until_publication() {
     drop(published);
 }
 
-#[def_test(custom, serial)]
+#[def_test(user, serial)]
 fn test_process_owns_tid_requires_published_task_binding() {
     let (process, _prepared) = build_prepared_test_user_task();
 
@@ -560,7 +565,7 @@ fn test_process_owns_tid_requires_published_task_binding() {
     );
 }
 
-#[def_test(custom, serial)]
+#[def_test(user, serial)]
 fn test_prepare_publish_stages_visibility_before_activation() {
     let (process, prepared) = build_prepared_test_user_task();
     let publication = process_publication();
@@ -604,7 +609,7 @@ fn test_prepare_publish_stages_visibility_before_activation() {
     publication.cleanup();
 }
 
-#[def_test(custom, serial)]
+#[def_test(user, serial)]
 fn test_publish_user_task_exposes_handle_before_activation() {
     let parent = current_user_process();
     let (process, prepared) = build_prepared_test_user_task();
@@ -672,13 +677,7 @@ fn test_prepare_user_task_rejects_mismatched_task_and_thread_identity() {
     let task_number = kidentity::allocate_root_pid_handle().expect("task identity should allocate");
     let mismatched_number =
         kidentity::allocate_root_pid_handle().expect("mismatched identity should allocate");
-    let mut task = TaskInner::new_user(
-        || {},
-        String::from("mismatched-user-thread"),
-        16 * 1024,
-        task_number.clone(),
-    );
-    let process = Process::new_init_with_task_number(task_number);
+    let process = Process::new_init_with_task_number(task_number.clone());
     let mut aspace = memspace::MmSpace::new_user_empty().expect("user mmspace should allocate");
     ksignal::map_signal_trampoline(&mut aspace).expect("signal trampoline should map");
 
@@ -695,9 +694,13 @@ fn test_prepare_user_task_rejects_mismatched_task_and_thread_identity() {
         Credentials::root(),
     );
 
-    // SAFETY: This intentionally installs a mismatched thread payload to verify that
-    // prepare_user_task rejects inconsistent task/thread identities before publication.
-    *task.task_ext_mut() = Some(unsafe { ktask::KTaskExt::from_impl(thread) });
+    let task = TaskInner::new_user(
+        || {},
+        String::from("mismatched-user-thread"),
+        16 * 1024,
+        task_number.clone(),
+        thread,
+    );
     let task = prepare_task(task);
     assert!(
         !task_identity_matches_thread(&task),
@@ -705,7 +708,7 @@ fn test_prepare_user_task_rejects_mismatched_task_and_thread_identity() {
     );
 }
 
-#[def_test(custom, serial)]
+#[def_test(user, serial)]
 fn test_zombie_process_stays_published_until_reaped() {
     let (process, prepared) = build_prepared_test_user_task();
     let child_pid = process.pid();
@@ -744,7 +747,7 @@ fn test_zombie_process_stays_published_until_reaped() {
     publication.cleanup();
 }
 
-#[def_test(custom, serial)]
+#[def_test(user, serial)]
 fn test_procfs_visibility_requires_representative_task() {
     let (process, prepared) = build_prepared_test_user_task();
     let pid = process.pid();
@@ -786,7 +789,7 @@ fn test_procfs_visibility_requires_representative_task() {
     publication.cleanup();
 }
 
-#[def_test(custom, serial)]
+#[def_test(user, serial)]
 fn test_create_session_publishes_new_job_control_identity() {
     let init = ensure_init();
     let process = init.fork(700);
@@ -810,7 +813,7 @@ fn test_create_session_publishes_new_job_control_identity() {
     publication.cleanup();
 }
 
-#[def_test(custom, serial)]
+#[def_test(user, serial)]
 fn test_create_group_publishes_new_process_group_identity() {
     let init = ensure_init();
     let leader = init.fork(710);

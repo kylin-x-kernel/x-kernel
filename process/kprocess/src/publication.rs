@@ -61,9 +61,9 @@ pub(crate) fn process_publication() -> &'static ProcessPublication {
 
 /// Prepares a user task for staged publication.
 ///
-/// The caller must install the user-thread task extension before calling this
-/// function. The returned task is not yet visible through process registries
-/// and will not execute until it is activated.
+/// `TaskInner::new_user` installs the user-thread extension before this
+/// function receives the task. The returned task is not yet visible through
+/// process registries and will not execute until it is activated.
 pub(crate) fn prepare_user_task(task: TaskInner) -> PreparedUserTask {
     let task = prepare_task(task);
     assert!(

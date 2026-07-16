@@ -69,19 +69,35 @@ impl<C: FnOnce() -> bool> Future for WaitFuture<'_, C> {
             return Poll::Ready(Ok(true));
         };
 
-        let mut queue = this.wait_queue.queue.lock();
-        if !condition() {
-            return Poll::Ready(Ok(false));
-        }
-
+        // Enqueue ourselves BEFORE checking the condition, holding the wait-queue
+        // lock only for the push. The push touches no user memory, so it cannot
+        // page-fault or block while preemption is disabled.
         let token = Arc::new(AtomicBool::new(true));
-        queue.push_back(Waiter {
-            waker: cx.waker().clone(),
-            bitset: this.bitset,
-            is_active: token.clone(),
-        });
+        {
+            let mut queue = this.wait_queue.queue.lock();
+            queue.push_back(Waiter {
+                waker: cx.waker().clone(),
+                bitset: this.bitset,
+                is_active: token.clone(),
+            });
+        }
         this.waiter = Some(token);
-        Poll::Pending
+
+        // Evaluate the condition outside the preempt-disabled lock. `condition` may
+        // access user memory (e.g. a futex word) and page-fault; resolving that
+        // fault can block on the address-space lock, which requires preemption
+        // enabled (blocked_resched asserts preempt_disable_count == 2).
+        //
+        // Because we are already enqueued with is_active == true, a concurrent
+        // wake() that matches our bitset deactivates us and re-schedules this
+        // future, so the wakeup is never lost. If the condition holds we return
+        // Pending and wait to be woken; if it already fails, `Drop` (this.waiter
+        // is Some) deactivates and removes our waiter, reporting "no need to wait".
+        if condition() {
+            Poll::Pending
+        } else {
+            Poll::Ready(Ok(false))
+        }
     }
 }
 
