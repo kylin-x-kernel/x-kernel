@@ -33,7 +33,7 @@ pub use vmobj::{ObjectInvalidateRequest, VmObjectId};
 #[cfg(target_arch = "aarch64")]
 pub use self::aarch64_asid::Aarch64UserAsidContext;
 pub use self::{
-    aspace::{AddrPolicy, AddrSpace, InvalidateHandle, MmSpace, MremapSource},
+    aspace::{AddrPolicy, AddrSpace, FutexBacking, InvalidateHandle, MmSpace, MremapSource},
     cpu_residency::{MmCpuResidency, MmCpuResidencyRef},
     fault::{FaultContext, FaultInput, FaultOutcome, PageFaultOutcome},
     iomap::{

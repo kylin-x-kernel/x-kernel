@@ -72,6 +72,31 @@ struct PendingInvalidations {
 
 static NEXT_MM_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Stable backing identity for one userspace futex word.
+///
+/// Private words are scoped by address-space identity and virtual address.
+/// Shared words are scoped by backing object, page index, and byte offset
+/// within that page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FutexBacking {
+    /// A word whose identity is local to one address space.
+    Private {
+        /// Stable identity of the owning address space.
+        mm_id: u64,
+        /// Aligned userspace virtual address.
+        address: usize,
+    },
+    /// A word in a shared VM object.
+    Shared {
+        /// Stable identity of the shared backing object.
+        object: VmObjectId,
+        /// Page index within the backing object.
+        page_index: u64,
+        /// Byte offset within the backing page.
+        offset_in_page: u16,
+    },
+}
+
 impl PendingInvalidations {
     fn enqueue(&mut self, request: ObjectInvalidateRequest) -> PendingInvalidateId {
         let id = PendingInvalidateId(self.next_id);
@@ -565,6 +590,45 @@ impl MmSpace {
     /// registrations.
     pub const fn mm_id(&self) -> u64 {
         self.mm_id
+    }
+
+    /// Resolves the Linux-style identity of a naturally aligned futex word.
+    ///
+    /// This is the shared-key path. The caller should bypass VMA lookup and
+    /// construct [`FutexBacking::Private`] directly when
+    /// `FUTEX_PRIVATE_FLAG` is present.
+    pub fn resolve_futex_backing(&self, address: usize) -> KResult<FutexBacking> {
+        if !address.is_multiple_of(core::mem::size_of::<u32>()) {
+            return Err(KError::InvalidInput);
+        }
+
+        let vaddr = VirtAddr::from_usize(address);
+        let vma = self.find_vma(vaddr).ok_or(KError::BadAddress)?;
+        if !vma.flags().contains(MappingFlags::READ) {
+            return Err(KError::BadAddress);
+        }
+
+        let object = match vma.backing().kind() {
+            VmBackingKind::AnonymousShared { object } | VmBackingKind::FileShared { object } => {
+                object
+            }
+            _ => {
+                return Ok(FutexBacking::Private {
+                    mm_id: self.mm_id,
+                    address,
+                });
+            }
+        };
+        let object_offset = vma.backing_offset_for(vaddr).ok_or(KError::BadAddress)?;
+        let page_size = PAGE_SIZE_4K as u64;
+        let offset_in_page =
+            u16::try_from(object_offset % page_size).map_err(|_| KError::InvalidInput)?;
+
+        Ok(FutexBacking::Shared {
+            object,
+            page_index: object_offset / page_size,
+            offset_in_page,
+        })
     }
 
     /// Checks if the address space contains the given address range.
@@ -1629,6 +1693,82 @@ mod tests {
             VmObjectId::File(FileObjectId::from_raw(11)),
             ObjectViewHit::new(view, 0, PAGE_SIZE_4K),
         )
+    }
+
+    #[def_test]
+    fn futex_backing_uses_mm_identity_for_private_mappings() {
+        let start = VirtAddr::from_usize(0x4000);
+        let flags = MappingFlags::READ | MappingFlags::WRITE;
+        let mut first =
+            MmSpace::new_empty_user(start, PAGE_SIZE_4K * 2).expect("allocate first address space");
+        first
+            .map(
+                start,
+                PAGE_SIZE_4K,
+                flags,
+                false,
+                VmRuntimeRef::new_anon_private(start, PageSize::Size4K),
+            )
+            .expect("map private futex page");
+        let second = MmSpace::new_empty_user(start, PAGE_SIZE_4K * 2)
+            .expect("allocate second address space");
+
+        assert_eq!(
+            first
+                .resolve_futex_backing(start.as_usize())
+                .expect("resolve private futex"),
+            FutexBacking::Private {
+                mm_id: first.mm_id(),
+                address: start.as_usize(),
+            }
+        );
+        assert_ne!(first.mm_id(), second.mm_id());
+    }
+
+    #[def_test]
+    fn futex_backing_preserves_shared_object_offset_after_vma_trim() {
+        let mut aspace = new_test_aspace();
+        let start = VirtAddr::from_usize(0x5000);
+        map_shared(
+            &mut aspace,
+            start.as_usize(),
+            PAGE_SIZE_4K * 3,
+            MappingFlags::READ | MappingFlags::WRITE,
+        );
+
+        let address = start.as_usize() + PAGE_SIZE_4K * 2 + 4;
+        let before = aspace
+            .resolve_futex_backing(address)
+            .expect("resolve shared futex before trim");
+        aspace
+            .unmap(start, PAGE_SIZE_4K)
+            .expect("trim first mapping page");
+        let after = aspace
+            .resolve_futex_backing(address)
+            .expect("resolve shared futex after trim");
+
+        assert_eq!(before, after);
+        assert!(matches!(
+            after,
+            FutexBacking::Shared {
+                page_index: 2,
+                offset_in_page: 4,
+                ..
+            }
+        ));
+    }
+
+    #[def_test]
+    fn futex_backing_rejects_unaligned_or_unmapped_addresses() {
+        let aspace = new_test_aspace();
+        assert!(matches!(
+            aspace.resolve_futex_backing(0x4001),
+            Err(KError::InvalidInput)
+        ));
+        assert!(matches!(
+            aspace.resolve_futex_backing(0x4000),
+            Err(KError::BadAddress)
+        ));
     }
 
     #[def_test]

@@ -22,7 +22,6 @@ kcpu_id_map.workspace = true
 kcred.workspace = true
 kerrno.workspace = true
 kfd.workspace = true
-kfutex.workspace = true
 khal.workspace = true
 klazy.workspace = true
 kpoll.workspace = true

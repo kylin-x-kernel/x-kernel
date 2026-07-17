@@ -73,6 +73,19 @@ object owner
 4. `VmArea::file_mapping()` 返回 file-backed introspection metadata。
 5. `VmArea::runtime()` 只在 `memspace` 内部用于执行 map/unmap/fault 操作。
 
+### Futex backing 解析
+
+`MmSpace::resolve_futex_backing()` 是 non-private futex key 的 MM 边界：
+
+- private VMA 返回 `(mm_id, virtual_address)`；
+- shared anon/file VMA 返回
+  `(VmObjectId, backing_page_index, byte_offset_in_page)`；
+- shared offset 通过 `VmArea::backing_offset_for()` 计算，因此 VMA split、trim、
+  不同 virtual mapping 和非零 file offset 都保持同一 object-relative identity。
+
+该 API 只读取 VMA metadata，不触发缺页。调用者仍需使用 kuaccess 完成实际
+用户字访问与 fault-in。
+
 ### VMA 插入
 
 1. 调用方构造 `VmArea` 和对应 `VmRuntimeRef`。

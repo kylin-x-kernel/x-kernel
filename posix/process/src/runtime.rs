@@ -5,7 +5,7 @@
 //! User-thread runtime helpers used by process-related syscalls.
 
 use alloc::{boxed::Box, sync::Arc};
-use core::{ffi::c_long, sync::atomic::Ordering};
+use core::ffi::c_long;
 
 use bytemuck::AnyBitPattern;
 use kbuild_config::KERNEL_STACK_SIZE;
@@ -13,8 +13,9 @@ use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
 use kidentity::PidHandle;
 use kprocess::{
-    CpuTimeState, Pid, Thread, Tid, UserThreadRuntimeAction, current_futex_key,
-    current_user_process, current_user_thread, poll_cpu_timers, process_exit, process_signals,
+    CpuTimeState, Pid, Thread, Tid, UserThreadRuntimeAction, current_user_process,
+    current_user_process_address_space, current_user_thread, poll_cpu_timers, process_exit,
+    process_signals,
 };
 use ksignal::{SignalInfo, SignalOSAction, SignalSet, Signo};
 use ktask::{TaskInner, current};
@@ -158,6 +159,16 @@ struct RobustListHead {
     list_op_pending: *mut RobustList,
 }
 
+const ROBUST_LIST_PI_TAG: usize = 1;
+
+fn decode_robust_pointer(pointer: *mut RobustList) -> (*mut RobustList, bool) {
+    let bits = pointer as usize;
+    (
+        (bits & !ROBUST_LIST_PI_TAG) as *mut RobustList,
+        bits & ROBUST_LIST_PI_TAG != 0,
+    )
+}
+
 /// Userspace robust-mutex lock word (`u32` futex value).
 ///
 /// Layout matches the Linux robust-futex ABI: TID in the low bits, plus
@@ -179,52 +190,50 @@ impl RobustFutexWord {
         self.0 & FUTEX_TID_MASK
     }
 
-    fn is_owner_died(self) -> bool {
-        self.0 & FUTEX_OWNER_DIED != 0
-    }
-
     /// Preserve `WAITERS`, clear the TID, and set `OWNER_DIED`.
     fn with_owner_died(self) -> Self {
         Self((self.0 & FUTEX_WAITERS) | FUTEX_OWNER_DIED)
     }
 }
 
-fn mark_futex_owner_died(address: usize, tid: Tid) -> KResult<bool> {
+fn mark_futex_owner_died(address: usize, tid: Tid, is_pending: bool) -> KResult<Option<bool>> {
     loop {
         let observed = RobustFutexWord::from_bits(atomic_load_u32(address).map_err(KError::from)?);
         if observed.tid() != tid {
-            return Ok(false);
-        }
-        if observed.is_owner_died() {
-            return Ok(true);
+            // A non-PI lock operation can publish list_op_pending before the
+            // userspace word. Linux wakes in the unlocked-word case so a
+            // waiter cannot be stranded between those two stores.
+            return Ok((is_pending && observed.bits() == 0).then_some(true));
         }
         let newval = observed.with_owner_died();
         let (exchanged, _) =
             atomic_cmpxchg_u32(address, observed.bits(), newval.bits()).map_err(KError::from)?;
         if exchanged {
-            return Ok(true);
+            return Ok(Some(observed.bits() & FUTEX_WAITERS != 0));
         }
     }
 }
 
-fn dispatch_irq_futex_death(entry: *mut RobustList, offset: i64, tid: Tid) -> KResult<()> {
+fn dispatch_irq_futex_death(
+    entry: *mut RobustList,
+    offset: i64,
+    tid: Tid,
+    is_pending: bool,
+) -> KResult<()> {
     let address = (entry as u64)
         .checked_add_signed(offset)
         .ok_or(KError::InvalidInput)?;
     let address: usize = address.try_into().map_err(|_| KError::InvalidInput)?;
-    if !mark_futex_owner_died(address, tid)? {
-        return Ok(());
-    }
-    let key = current_futex_key(address);
-
-    let futex_state = current_user_process().futex_state()?;
-    let futex_table = futex_state.table_for(&key);
-    let Some(futex) = futex_table.get(&key) else {
+    let Some(has_waiters) = mark_futex_owner_died(address, tid, is_pending)? else {
         return Ok(());
     };
+    if !has_waiters {
+        return Ok(());
+    }
 
-    futex.owner_dead.store(true, Ordering::SeqCst);
-    futex.wq.wake(1, u32::MAX);
+    let address_space = current_user_process_address_space();
+    let key = kfutex::FutexKey::resolve(&address_space.lock(), address, false)?;
+    kfutex::global_table().wake(key, 1, u32::MAX);
     Ok(())
 }
 
@@ -241,13 +250,21 @@ fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
     let mut entry = head.list.next;
     let offset = head.futex_offset;
     let pending = head.list_op_pending;
+    let (pending_address, pending_is_pi) = decode_robust_pointer(pending);
 
-    while !core::ptr::eq(entry, end_ptr) {
-        let Some(next_entry) = entry.read_vm().map(|node| node.next).ok() else {
-            return;
+    loop {
+        let (entry_address, entry_is_pi) = decode_robust_pointer(entry);
+        if core::ptr::eq(entry_address, end_ptr.cast_mut()) {
+            break;
+        }
+        let Some(next_entry) = entry_address.read_vm().map(|node| node.next).ok() else {
+            break;
         };
-        if entry != pending && dispatch_irq_futex_death(entry, offset, tid).is_err() {
-            return;
+        if entry_address != pending_address
+            && !entry_is_pi
+            && dispatch_irq_futex_death(entry_address, offset, tid, false).is_err()
+        {
+            break;
         }
         entry = next_entry;
 
@@ -258,8 +275,8 @@ fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
         ktask::yield_now();
     }
 
-    if !pending.is_null() {
-        let _ = dispatch_irq_futex_death(pending, offset, tid);
+    if !pending_address.is_null() && !pending_is_pi {
+        let _ = dispatch_irq_futex_death(pending_address, offset, tid, true);
     }
 }
 
@@ -270,21 +287,21 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
 
     info!("{} exit with code: {}", curr.id_name(), exit_code);
 
-    let clear_child_tid = thr.clear_child_tid() as *mut u32;
-    if clear_child_tid.write_vm(0).is_ok() {
-        let key = current_futex_key(clear_child_tid as usize);
-        if let Ok(futex_state) = thr.process().futex_state() {
-            let table = futex_state.table_for(&key);
-            if let Some(futex) = table.get(&key) {
-                futex.wq.wake(1, u32::MAX);
-            }
-        }
-        ktask::yield_now();
-    }
-
     let head = thr.robust_list_head() as *const RobustListHead;
     if !head.is_null() {
         exit_robust_list(head, thr.tid());
+    }
+
+    let clear_child_tid = thr.clear_child_tid() as *mut u32;
+    if clear_child_tid.write_vm(0).is_ok() {
+        let address_space = current_user_process_address_space();
+        let key = {
+            let address_space = address_space.lock();
+            kfutex::FutexKey::resolve(&address_space, clear_child_tid as usize, false)
+        };
+        if let Ok(key) = key {
+            kfutex::global_table().wake(key, 1, u32::MAX);
+        }
     }
 
     // Per-thread TEE session cleanup when this thread holds a session context.

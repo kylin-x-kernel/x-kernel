@@ -7,7 +7,7 @@
 它维护 process、thread、process group、session、父子关系、线程组成员、退出状态、
 publication/registry、signal targeting、timer delivery glue、controlling terminal 绑定。
 当前 `Process` 自身保留一个强类型的弱 runtime 引用
-（`Weak<ProcessRuntime>`），并直接对外提供 fs/mm/futex/signal/timer/credential
+（`Weak<ProcessRuntime>`），并直接对外提供 fs/mm/signal/timer/credential
 等 capability 方法；但外部 `live process` 语义不再以弱 runtime 引用为判据，
 而是以 `Process` 生命周期状态是否已经进入 zombie 为准。
 `current_user_*` helpers 显式要求当前 task 必须已经安装 user-thread runtime。
@@ -201,7 +201,9 @@ Inherited group
 ### 关系对象独立于运行时资源
 
 `kprocess` 只维护进程身份关系和生命周期摘要。
-地址空间、文件描述符、credential、信号处理和 futex 表留在 `kprocess`、`kresources`、`kcred`、`ksignal` 和 `kfutex`。
+地址空间 capability 留在 `kprocess` runtime，文件描述符、credential 和信号处理
+分别由 `kresources`、`kcred`、`ksignal` 拥有；non-PI futex waiter 由 `kfutex`
+全局固定 bucket 独立拥有，不再保存 process-owned futex table。
 这种分层让 job-control 关系能够被多个上层模块共享，也避免 `kprocess` 变成进程运行时状态集合。
 保留弱 runtime 引用是为了让稳定 `Process` 对象自己承载“升级到运行态 capability”的入口，
 而不是让外部再依赖额外 trait 或第二层全局 registry 真相。

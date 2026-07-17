@@ -53,6 +53,8 @@
 - detach frame、unmap PTE、TLB finalization、frame release 必须保持顺序。
 - `mremap` move-style source retirement must not call ordinary runtime
   `unmap()` on the moved source range.
+- `resolve_futex_backing()` 对 shared VMA 必须返回 object-relative offset；
+  不能把 VMA-relative address 当作跨进程 key。
 
 ## 线程安全
 

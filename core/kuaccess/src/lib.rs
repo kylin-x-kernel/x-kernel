@@ -17,7 +17,7 @@ use extern_trait::extern_trait;
 use kaddr_layout::{USER_SPACE_BASE, USER_SPACE_SIZE};
 use kerrno::{KError, KResult};
 use khal::{
-    asm::{user_atomic_cmpxchg_u32, user_copy},
+    asm::{user_atomic_cmpxchg_u32, user_atomic_load_u32, user_copy},
     paging::MappingFlags,
     trap::{PAGE_FAULT, register_trap_handler},
 };
@@ -103,18 +103,55 @@ pub fn vm_load_string_with_len(ptr: *const c_char, len: usize) -> KResult<String
 }
 
 /// Atomically loads a 32-bit word from user memory.
-///
-/// Implemented as a compare-exchange of zero with itself so no store occurs when
-/// the current value is non-zero.
 pub fn atomic_load_u32(addr: usize) -> MemResult<u32> {
-    let (_, observed) = atomic_cmpxchg_u32(addr, 0, 0)?;
-    Ok(observed)
+    atomic_load_u32_inner(addr, true)
+}
+
+/// Atomically loads a 32-bit user word without resolving page faults.
+///
+/// This is intended for callers that hold a non-sleepable lock. A fault is
+/// reported as [`MemError::NoAccess`]; the caller must drop its lock, fault the
+/// address in through [`atomic_load_u32`], and retry the whole operation.
+pub fn atomic_load_u32_nofault(addr: usize) -> MemResult<u32> {
+    atomic_load_u32_inner(addr, false)
 }
 
 /// Atomically tests whether `*addr == expected` without changing the word.
 pub fn atomic_u32_eq(addr: usize, expected: u32) -> MemResult<bool> {
-    let (exchanged, _) = atomic_cmpxchg_u32(addr, expected, expected)?;
-    Ok(exchanged)
+    Ok(atomic_load_u32(addr)? == expected)
+}
+
+/// Atomically tests a user word without resolving page faults.
+///
+/// See [`atomic_load_u32_nofault`] for the retry contract.
+pub fn atomic_u32_eq_nofault(addr: usize, expected: u32) -> MemResult<bool> {
+    Ok(atomic_load_u32_nofault(addr)? == expected)
+}
+
+fn atomic_load_u32_inner(addr: usize, resolve_faults: bool) -> MemResult<u32> {
+    if !addr.is_multiple_of(core::mem::align_of::<u32>()) {
+        return Err(MemError::InvalidAddr);
+    }
+    check_access(addr, core::mem::size_of::<u32>())?;
+
+    let mut observed = 0u32;
+    let mut operation = || {
+        // SAFETY: `check_access` validated the 4-byte user range, `addr` is
+        // naturally aligned, and `observed` is a live writable kernel stack
+        // slot. The assembly exception table converts a user-memory fault into
+        // a nonzero return.
+        unsafe { user_atomic_load_u32(addr as *const u32, core::ptr::addr_of_mut!(observed)) }
+    };
+    let failed = if resolve_faults {
+        access_user_memory(operation)
+    } else {
+        operation()
+    };
+    if unlikely(failed != 0) {
+        Err(MemError::NoAccess)
+    } else {
+        Ok(observed)
+    }
 }
 
 /// Atomically compare-exchanges a 32-bit word in user memory.
@@ -127,20 +164,36 @@ pub fn atomic_u32_eq(addr: usize, expected: u32) -> MemResult<bool> {
 /// This is the primitive futex / robust-list paths need for race-free updates
 /// of userspace futex words.
 pub fn atomic_cmpxchg_u32(addr: usize, old: u32, new: u32) -> MemResult<(bool, u32)> {
+    atomic_cmpxchg_u32_inner(addr, old, new, true)
+}
+
+/// Atomically compare-exchanges a 32-bit user word without fault resolution.
+///
+/// This operation is safe under a non-sleepable lock because a missing or
+/// inaccessible mapping is reported immediately. The caller must retry outside
+/// the lock through [`atomic_cmpxchg_u32`] when it needs to distinguish a
+/// resolvable page fault from a permanent access error.
+pub fn atomic_cmpxchg_u32_nofault(addr: usize, old: u32, new: u32) -> MemResult<(bool, u32)> {
+    atomic_cmpxchg_u32_inner(addr, old, new, false)
+}
+
+fn atomic_cmpxchg_u32_inner(
+    addr: usize,
+    old: u32,
+    new: u32,
+    resolve_faults: bool,
+) -> MemResult<(bool, u32)> {
     if !addr.is_multiple_of(core::mem::align_of::<u32>()) {
         return Err(MemError::InvalidAddr);
     }
     check_access(addr, core::mem::size_of::<u32>())?;
 
-    // Match `VirtMemIo`: keep IRQs masked for the exclusive/atomic sequence so
-    // a local interrupt cannot clear the monitor between load and store.
-    let _irq = IrqSave::new();
     let mut observed = 0u32;
-    let failed = access_user_memory(|| {
+    let mut operation = || {
         // SAFETY: `check_access` validated the 4-byte user range, `addr` is
         // 4-byte aligned, and `observed` is a live kernel stack slot. The
-        // call runs inside `access_user_memory`, so page faults are handled
-        // by the exception-table fixup on `user_atomic_cmpxchg_u32`.
+        // assembly exception table converts a user-memory fault into a nonzero
+        // return without exposing a raw user pointer to safe Rust.
         unsafe {
             user_atomic_cmpxchg_u32(
                 addr as *mut u32,
@@ -149,7 +202,15 @@ pub fn atomic_cmpxchg_u32(addr: usize, old: u32, new: u32) -> MemResult<(bool, u
                 core::ptr::addr_of_mut!(observed),
             )
         }
-    });
+    };
+    let failed = if resolve_faults {
+        access_user_memory(operation)
+    } else {
+        // The nofault form is used inside non-sleepable ordering sections.
+        // Keep its architecture-exclusive sequence local to this CPU.
+        let _irq = IrqSave::new();
+        operation()
+    };
     if unlikely(failed != 0) {
         Err(MemError::NoAccess)
     } else {

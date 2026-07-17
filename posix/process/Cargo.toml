@@ -18,6 +18,7 @@ kbuild_config.workspace = true
 kcred.workspace = true
 kerrno.workspace = true
 kexec.workspace = true
+kfutex.workspace = true
 fs_context.workspace = true
 khal.workspace = true
 kidentity.workspace = true

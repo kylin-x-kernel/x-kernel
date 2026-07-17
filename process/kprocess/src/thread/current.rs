@@ -68,6 +68,18 @@ pub fn current_user_process_address_space() -> Arc<Mutex<MmSpace>> {
         .expect("current user thread must still expose process address space")
 }
 
+/// Returns the current process address-space identity without taking the aspace lock.
+///
+/// # Panics
+///
+/// Panics if the current task is not a user thread or if the process runtime
+/// has already detached.
+pub fn current_user_mm_id() -> u64 {
+    current_user_process()
+        .mm_id()
+        .expect("current user thread must still expose process address space")
+}
+
 /// Returns the current stable process identity.
 pub fn current_user_process() -> Arc<Process> {
     with_current_user_thread(|thread| thread.process().clone())

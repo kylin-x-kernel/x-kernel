@@ -12,7 +12,6 @@ use core::any::Any;
 use fs_context::FsStruct;
 use kcred::Credentials;
 use kerrno::{KError, KResult};
-use kfutex::ProcessFutexState;
 use kns::{NamespaceFsContext, NsProxy};
 use kresources::ProcessResources;
 use ksignal::{
@@ -78,7 +77,6 @@ pub(crate) struct ProcessRuntime {
     runtime_state: ProcessRuntimeState,
     nsproxy: RwLock<Arc<NsProxy>>,
     signal_manager: Arc<ProcessSignalManager>,
-    futex_state: Arc<ProcessFutexState>,
     credentials: RwLock<Credentials>,
     #[cfg(feature = "tee")]
     tee_ta_ctx: RwLock<TeeTaCtx>,
@@ -150,7 +148,6 @@ impl ProcessRuntime {
                 signal_actions,
                 config.signal_trampoline,
             )),
-            futex_state: Arc::new(ProcessFutexState::new()),
             credentials: RwLock::new(credentials),
         });
         runtime.process.set_runtime_ref(&runtime);
@@ -204,11 +201,6 @@ impl ProcessRuntime {
         f(&self.tipc_handles)
     }
 
-    /// Returns the process-owned futex state.
-    pub fn futex_state(&self) -> &Arc<ProcessFutexState> {
-        &self.futex_state
-    }
-
     /// Returns the executable path.
     pub fn exe_path(&self) -> &RwLock<String> {
         self.posix_state.exe_path()
@@ -243,6 +235,11 @@ impl ProcessRuntime {
     /// Returns the virtual address space.
     pub fn address_space(&self) -> &Arc<Mutex<memspace::MmSpace>> {
         self.runtime_state.address_space()
+    }
+
+    /// Returns the immutable address-space identity used by private futex keys.
+    pub fn mm_id(&self) -> u64 {
+        self.runtime_state.mm_id()
     }
 
     /// Returns the process-owned filesystem context.

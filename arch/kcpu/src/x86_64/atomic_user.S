@@ -12,6 +12,26 @@
 // equals `old`, `new` was stored.
 
 .section .text
+.global user_atomic_load_u32
+.type user_atomic_load_u32, @function
+
+// Atomically load a naturally aligned user u32.
+// Args: rdi=addr, rsi=value_out
+// Returns: 0 if no fault occurred; non-zero if a fault occurred.
+user_atomic_load_u32:
+1:  mov     eax, dword ptr [rdi]
+    mov     dword ptr [rsi], eax
+    xor     eax, eax
+    ret
+
+.Latomic_load_fault:
+    mov     eax, 1
+    ret
+
+    _asm_extable 1b, .Latomic_load_fault
+
+.size user_atomic_load_u32, .-user_atomic_load_u32
+
 .global user_atomic_cmpxchg_u32
 .type user_atomic_cmpxchg_u32, @function
 

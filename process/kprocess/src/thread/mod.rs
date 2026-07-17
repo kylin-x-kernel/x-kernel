@@ -11,8 +11,8 @@ pub use core::{CurrentThread, PreparedUserClone, Thread};
 
 pub use cpu_time::CpuTimeState;
 pub use current::{
-    current_fs_context, current_user_process, current_user_process_address_space,
-    current_user_process_fs_context, current_user_thread, current_user_tid,
-    with_current_user_thread,
+    current_fs_context, current_user_mm_id, current_user_process,
+    current_user_process_address_space, current_user_process_fs_context, current_user_thread,
+    current_user_tid, with_current_user_thread,
 };
 pub use task_ext::AsThread;

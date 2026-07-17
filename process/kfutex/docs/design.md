@@ -2,168 +2,93 @@
 
 ## 定位
 
-`kfutex` 提供 x-kernel 的 futex 数据与等待队列 owner。
-它拥有 futex key、进程级 futex table、shared futex table 路由与复用策略，以及 wait/wake/requeue 所需的不变量。
-syscall adapter、线程退出清理和 robust-list 逻辑通过本 crate 操作 futex 状态，但不拥有这些状态本身。
+`kfutex` 是 non-PI futex 的并发语义 owner。它拥有 canonical key、全局固定
+bucket、waiter 状态机，以及 wait/wake/requeue/wake-op 的线性化规则。
+syscall ABI、timeout flag 解析和线程退出时的 robust-list 遍历仍由上层负责。
 
-## 背景
+PI futex 不在当前阶段范围内；在调度器具备有效优先级与 donation graph 前，
+不得把 PI 状态混入 non-PI bucket。
 
-futex 语义同时依赖：
-
-- 按地址或共享映射 identity 构造的 `FutexKey`；
-- 每个进程私有的 futex table；
-- 跨进程共享映射复用的 shared futex table；
-- wait/wake/requeue 的等待队列语义。
-
-这些数据和策略需要一起演进。
-如果只把 `FutexTable` 类型放在一个 crate，而把实例管理和 shared/private 路由留在别处，owner 边界会被切开，审计 shared/private 隔离会变得困难。
-
-## 范围
-
-涉及的源文件：
+## 组件
 
 ```text
-process/kfutex/
-├── Cargo.toml
-├── docs/
-│   ├── design.md
-│   └── security.md
-└── src/
-    ├── key.rs
-    ├── lib.rs
-    ├── process_state.rs
-    ├── table.rs
-    └── wait_queue.rs
+process/kfutex/src/
+├── key.rs       canonical private/shared key
+├── table.rs     static buckets and compound operations
+├── waiter.rs    Arc waiter and checked routing state
+├── wake_op.rs   FUTEX_WAKE_OP decode/arithmetic
+└── lib.rs
 ```
-
-## 架构
 
 ```text
-sys_futex / exit robust-list / clear-child-tid wake
-                  │
-                  ▼
-              FutexKey
-                  │
-                  ▼
-        ProcessFutexState::table_for()
-           ├─ private_table
-           └─ SHARED_FUTEX_TABLES[region identity]
-                  │
-                  ▼
-              FutexTable
-                  │
-                  ▼
-              FutexEntry
-           ├─ WaitQueue
-           └─ owner_dead
+MmSpace::resolve_futex_backing
+          |
+          v
+      FutexKey
+          |
+          v
+global FutexTable[256]
+          |
+          v
+SpinNoPreempt<VecDeque<Arc<FutexWaiter>>>
 ```
 
-| 组件 | 职责 |
-|------|------|
-| `FutexKey` | 标识 private futex 或 shared futex 映射区域中的逻辑地址 |
-| `ProcessFutexState` | 保存进程私有 futex table，并把 shared key 路由到全局 shared table cache |
-| `SharedFutexTables` | 缓存共享映射对应的 futex table，并周期性清理 stale entry |
-| `FutexTable` | 保存 `key -> FutexEntry` 映射 |
-| `FutexEntry` | 持有 `WaitQueue` 和 `owner_dead` 状态 |
-| `WaitQueue` | 管理 wait/wake/requeue 的阻塞队列 |
+## Key contract
 
-## 调用约束 / 执行上下文
+- `FUTEX_PRIVATE_FLAG` 生成 `(mm_id, virtual_address)`。
+- 未带 private flag 的 private VMA 仍生成 `(mm_id, virtual_address)`。
+- shared anon/file VMA 生成
+  `(VmObjectId, backing_page_index, byte_offset_in_page)`。
+- backing offset 由 `memspace` 根据 VMA split/trim 后的 metadata 计算；
+  `kfutex` 不自行推导 VMA-relative offset。
+- 地址必须按 `u32` 自然对齐并落入用户地址范围。
 
-- `FutexKey::new` 需要调用者提供已锁住并可安全遍历的地址空间快照。
-- `ProcessFutexState::table_for` 可能获取全局 shared table 锁，不应从中断上下文调用。
-- `WaitQueue::wait_if` 可能阻塞，只能在可睡眠的线程上下文调用。
-- `wake`、`requeue` 和 `owner_dead` 标记可用于退出清理路径，但调用点仍应位于 task/runtime 路径，而不是硬中断上下文。
-
-## 状态机
-
-### FutexEntry 生命周期
+## Waiter lifecycle
 
 ```text
-Absent
-  → get_or_insert()
-  → Live(entry in table)
-  → no external guards && queue empty
-  → removed on FutexGuard::drop
+Init -> Queued -> Woken
+               -> Cancelled
 ```
 
-`FutexEntry` 不保存引用计数之外的独立生命周期状态。
-当外部 guard 释放且等待队列为空时，table 会在 `FutexGuard::drop` 中回收条目。
+waiter 同时由等待 future 和 bucket 中的 `Arc` 持有。future drop 只通过
+`Arc::ptr_eq` 删除自身，不保存 bucket 或队列元素的裸指针。
 
-## 算法流程
+requeue 在同时持有 source/target bucket 锁时更新 waiter 的 key、bucket id 和
+generation。取消路径先读取 route，再获取对应 bucket 锁并复核 generation；
+若 route 已变化则重试。
 
-### futex key 构造
+signal 或 timeout 只能在持 bucket 锁成功执行 `Queued -> Cancelled` 后作为错误
+返回。如果 WAKE 已先执行 `Queued -> Woken`，等待方必须返回成功，避免同一次
+wake 既被计数又被 EINTR/ETIMEDOUT 消耗。
 
-```text
-FutexKey::new(aspace, address)
-  ├─ shared anonymous/file-backed mapping → Shared { offset, region }
-  └─ otherwise                             → Private { address }
-```
+## Linearization
 
-shared key 的 identity 使用：
+- WAIT：bucket 锁外先 fault-in 用户字，持锁执行 nofault 比较，值相等后入队；若锁内
+  nofault 因瞬时缺页失败则释放锁并重试 poll，避免在映射仍有效时误返 EFAULT。
+- WAKE：持 bucket 锁将至多 N 个 waiter 从 `Queued` 标记为 `Woken`。
+- CMP_REQUEUE：按 bucket index 顺序同时持有两个锁，执行 nofault compare，
+  然后完成 wake 与 route move。
+- WAKE_OP：按相同双锁顺序执行用户字 nofault CAS，再选择两个 key 上的 waiter。
 
-- shared-anon 路径：`memspace` 暴露的 `VmObjectId`；
-- file-backed 路径：通过 `memspace` 暴露的 VMA backing 描述，使用 inode-owned `MappingIdentity`。
+可能触发页错误的普通用户访问发生在 bucket 锁外。锁内只使用 kuaccess nofault
+原子操作，因此不会在禁止抢占的 bucket 临界区里进入缺页处理。wait 比较使用
+真正的只读原子 load，不会要求用户页可写或触发无意义的 COW。
 
-### table 选择
+唤醒调度器发生在释放 bucket 锁之后。被标记为 `Woken` 的 waiter 暂时保留在
+bucket 中，由 `drain_inactive` 移除后调用其 waker。
 
-```text
-ProcessFutexState::table_for(key)
-  ├─ Private → process-private Arc<FutexTable>
-  └─ Shared  → SHARED_FUTEX_TABLES.get_or_insert(region identity)
-```
+## Bucket lifetime and lock ordering
 
-shared table cache 每 100 次查找做一次 retain，删除“无外部强引用且 table 已空”的 entry。
+256 个 bucket 在第一次 futex 使用时一次性创建，之后永久存在。系统不存在
+动态 `key -> entry` cache，因此空 key 不需要回收，也没有 entry drop 与 wake
+并发导致的 UAF 窗口。
 
-### wait / wake / requeue
+双 bucket 操作始终先锁较小 index，再锁较大 index。waiter metadata 只能在
+持 bucket 锁时修改；取消路径读取 metadata 后必须在 bucket 锁内复核。
 
-```text
-syscall / runtime cleanup
-  → table.get_or_insert(key)
-  → FutexEntry::wq.wait_if / wake / requeue
-  → FutexGuard::drop() on scope exit
-```
+## Robust mutex
 
-`WaitFuture::poll`（`wait_if` 的 future）**先持队列锁入队**（`push_back` 不触碰用户内存），**再在释放队列锁后**求值 `condition`：条件成立则返回 `Pending` 等待唤醒；不成立则 `Drop` 移除自身 waiter 并返回"无需等待"。
-
-条件求值刻意放在队列锁之外：`condition` 闭包可能访问用户内存（如 futex word）并缺页，缺页处理需阻塞，而 `WaitQueue::queue` 是 `SpinNoIrq`（抢占禁用），持锁阻塞会违反 `blocked_resched` 的 `preempt_disable_count == 2` 不变量。
-
-"先入队、后检查"不会丢失唤醒：入队后 `is_active == true` 且对 `wake()` 可见，任何并发唤醒会清掉 `is_active` 并通过已注册的 waker 重新调度本 future；下次轮询（Path-A）观测到 `is_active == false` 即返回 `Ready`。
-
-## 并发模型
-
-- `WaitQueue` 使用 `SpinNoIrq<VecDeque<Waiter>>` 保护等待队列。
-- `FutexTable` 使用 `Mutex<HashMap<...>>` 串行化 entry 创建和回收。
-- `SharedFutexTables` 使用全局 `Mutex` 串行化 shared table cache 创建和周期清理。
-- `owner_dead` 使用 `AtomicBool` 让 robust-list 清理路径与正常 wait 路径共享状态。
-
-## 设计决策
-
-### 将 table 实例和路由策略收回 `kfutex`
-
-`FutexTable`、`ProcessFutexState`、shared table cache 和 `FutexKey` 需要围绕同一组不变量演进：
-
-- private/shared 隔离；
-- shared identity 复用策略；
-- stale table 清理；
-- entry 生命周期与等待队列清理。
-
-因此这部分必须由 `kfutex` 统一拥有，而不是把类型和实例管理拆到不同 crate。
-
-### file-backed shared futex 绑定 inode-owned mapping
-
-Linux 对 file-backed shared futex 的核心不是“哪个 `struct file` 打开的”，而是
-“它属于哪个 `file->f_mapping` / `struct address_space`”。
-
-因此 `kfutex` 使用 inode-owned `MappingIdentity` 作为 file-backed shared table
-的 region identity，而不是把 open-file 实例或 runtime 私有句柄当作共享对象本体。
-
-### robust-list 仍留在 `kprocess`
-
-robust-list head 和 `clear_child_tid` 属于线程生命周期状态，不属于 futex 数据 owner。
-`kfutex` 只承接等待队列和 table 组织；线程退出时由 `kprocess`/`posix-process` 调用 `kfutex` API 完成唤醒。
-
-## Drop / 资源释放
-
-- `FutexGuard::drop` 在 entry 没有外部强引用且等待队列为空时移除 table entry。
-- `SharedFutexTables` 不主动销毁仍被外部持有的 table；只在周期清理时删除 stale cache entry。
-- `ProcessFutexState` drop 后，私有 table 随 `Arc` 生命周期释放；shared table 是否保留由全局 cache 的外部引用计数和空表状态共同决定。
+robust owner death 只编码到用户 futex word：保留 `FUTEX_WAITERS`、清除 TID、
+设置 `FUTEX_OWNER_DIED`，然后按用户字中的 WAITERS 位决定是否唤醒一个 waiter。
+`kfutex` 不保存内核侧 `owner_dead` 标志，普通 FUTEX_WAIT 也不返回
+`EOWNERDEAD`；该错误由 pthread mutex 协议在用户态产生。

@@ -15,6 +15,9 @@
 
 - `user_copy(...)`：
   依赖调用前的用户地址范围检查，以及当前线程 `accessing_user_memory` 标志保证 trap handler 只在受控窗口内接管。
+- `user_atomic_load_u32(...)`：
+  依赖 4 字节对齐与用户地址范围检查；只读取用户字，并通过 exception-table
+  fixup 报告 fault。
 - `user_atomic_cmpxchg_u32(...)`：
   依赖 4 字节对齐检查、用户地址范围检查，以及同一用户访问窗口与 exception-table fixup。
 
@@ -55,5 +58,5 @@
 
 ## 已知限制
 
-- 当前 helper 只覆盖字符串装载与 `u32` 原子 cmpxchg；复杂结构体解析仍由各调用方自行组织。
-- 原子原语目前仅提供 32-bit cmpxchg；更大宽度或其它 RMW 操作按需再加。
+- 当前 helper 只覆盖字符串装载与 `u32` 原子 load/cmpxchg；复杂结构体解析仍由各调用方自行组织。
+- 原子原语目前仅提供 32-bit load/cmpxchg；更大宽度或其它 RMW 操作按需再加。

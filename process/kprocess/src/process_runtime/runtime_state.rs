@@ -16,6 +16,8 @@ use crate::Pid;
 /// Process runtime execution state shared by all threads in a process.
 pub(super) struct ProcessRuntimeState {
     address_space: Arc<Mutex<MmSpace>>,
+    /// Immutable address-space identity; safe to read without the aspace lock.
+    mm_id: u64,
     mm_cpu_residency: MmCpuResidencyRef,
     #[cfg(target_arch = "aarch64")]
     user_asid_context: Arc<memspace::Aarch64UserAsidContext>,
@@ -30,15 +32,18 @@ impl ProcessRuntimeState {
         address_space: Arc<Mutex<MmSpace>>,
         user_heap_base: usize,
     ) -> Self {
-        let mm_cpu_residency = address_space.lock().cpu_residency().clone();
+        let aspace = address_space.lock();
+        let mm_id = aspace.mm_id();
+        let mm_cpu_residency = aspace.cpu_residency().clone();
         #[cfg(target_arch = "aarch64")]
-        let user_asid_context = address_space
-            .lock()
+        let user_asid_context = aspace
             .user_asid_context()
             .expect("user process address space must carry an AArch64 ASID context")
             .clone();
+        drop(aspace);
         Self {
             address_space,
+            mm_id,
             mm_cpu_residency,
             #[cfg(target_arch = "aarch64")]
             user_asid_context,
@@ -50,6 +55,11 @@ impl ProcessRuntimeState {
     /// Returns the virtual address space.
     pub(super) fn address_space(&self) -> &Arc<Mutex<MmSpace>> {
         &self.address_space
+    }
+
+    /// Returns the immutable address-space identity used by private futex keys.
+    pub(super) fn mm_id(&self) -> u64 {
+        self.mm_id
     }
 
     /// Returns the mm-owned CPU residency state for this process address space.

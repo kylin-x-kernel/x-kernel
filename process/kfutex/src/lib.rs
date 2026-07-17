@@ -2,20 +2,15 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Process-side futex state and wait-queue ownership.
+//! Linux-compatible futex keys, waiters, and ordering buckets.
 
 #![no_std]
 
 extern crate alloc;
 
 mod key;
-mod process_state;
 mod table;
-mod wait_queue;
+mod waiter;
+mod wake_op;
 
-pub use self::{
-    key::FutexKey,
-    process_state::ProcessFutexState,
-    table::{FutexEntry, FutexGuard, FutexTable},
-    wait_queue::WaitQueue,
-};
+pub use self::{key::FutexKey, table::global_table, wake_op::FutexWakeOp};

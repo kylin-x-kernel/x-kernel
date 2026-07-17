@@ -1,6 +1,6 @@
 [package]
 name = "kfutex"
-description = "Process-side futex primitives for X-Kernel"
+description = "Linux-compatible futex primitives for X-Kernel"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -10,13 +10,12 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
-hashbrown.workspace = true
+khal.workspace = true
 kerrno.workspace = true
 klazy.workspace = true
 kspin.workspace = true
-ksync.workspace = true
 ktask.workspace = true
-memaddr.workspace = true
+kuaccess.workspace = true
+linux-raw-sys = { workspace = true, default-features = false, features = ["no_std", "general"] }
 memspace.workspace = true
 unittest.workspace = true
-vmobj.workspace = true

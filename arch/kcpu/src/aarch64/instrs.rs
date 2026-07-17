@@ -22,6 +22,17 @@ unsafe extern "C" {
     /// while a value > 0 indicates failure.
     pub fn raw_copy_from_user(dst: *mut u8, src: *const u8, size: usize) -> usize;
 
+    /// Atomically loads a naturally aligned 32-bit word from `addr`.
+    ///
+    /// On success (return `0`), writes the loaded value into `value_out`.
+    ///
+    /// # Safety
+    ///
+    /// `addr` must be a 4-byte-aligned address that is currently readable in
+    /// the active address space. `value_out` must point to writable kernel
+    /// memory.
+    pub fn user_atomic_load_u32(addr: *const u32, value_out: *mut u32) -> usize;
+
     /// Atomically compare-exchanges a 32-bit word at `addr`.
     ///
     /// On success (return `0`), writes the previous `*addr` value into

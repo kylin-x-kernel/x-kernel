@@ -15,6 +15,26 @@
 // so the desired store value must be reloaded into `rd` on each retry.
 
 .section .text
+.global user_atomic_load_u32
+.type user_atomic_load_u32, @function
+
+// Atomically load a naturally aligned user u32.
+// Args: a0=addr, a1=value_out
+// Returns: 0 if no fault occurred; non-zero if a fault occurred.
+user_atomic_load_u32:
+1:  ld.wu   $t0, $a0, 0
+    st.w    $t0, $a1, 0
+    move    $a0, $zero
+    jr      $ra
+
+.Latomic_load_fault:
+    ori     $a0, $zero, 1
+    jr      $ra
+
+    _asm_extable 1b, .Latomic_load_fault
+
+.size user_atomic_load_u32, .-user_atomic_load_u32
+
 .global user_atomic_cmpxchg_u32
 .type user_atomic_cmpxchg_u32, @function
 

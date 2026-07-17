@@ -171,7 +171,8 @@ ksyscall::dispatch_irq_syscall
   - owner 在 `ktask` 调度接口、`kprocess` 进程/线程状态和 `khal` CPU 查询
 - `sync/futex.rs`
   - `futex` / `get_robust_list` / `set_robust_list`
-  - owner 在 `kfutex` 等待队列与 `kprocess` 线程 robust-list 状态
+  - compound op（`REQUEUE` / `CMP_REQUEUE` / `WAKE_OP`）在单次
+    `address_space` 锁内解析两个 key；robust-list 遍历在 `posix/process`
 
 ## 非目标
 

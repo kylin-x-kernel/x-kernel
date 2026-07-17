@@ -17,7 +17,6 @@ use core::{
 use fs_context::FsStruct;
 use kcred::Credentials;
 use kerrno::{KError, KResult};
-use kfutex::ProcessFutexState;
 use khal::time::TimeValue;
 use kidentity::PidHandle;
 use kpoll::PollSet;
@@ -157,6 +156,11 @@ impl Process {
             .map(|runtime| runtime.address_space().clone())
     }
 
+    /// Returns the immutable address-space identity while runtime remains attached.
+    pub fn mm_id(&self) -> KResult<u64> {
+        self.runtime().map(|runtime| runtime.mm_id())
+    }
+
     /// Returns the signal manager while runtime remains attached.
     pub fn signal_manager(&self) -> KResult<Arc<ProcessSignalManager>> {
         self.runtime()
@@ -221,11 +225,6 @@ impl Process {
     pub fn timer_manager(&self) -> KResult<Arc<Mutex<ktimer::ProcessTimerManager>>> {
         self.runtime()
             .map(|runtime| runtime.timer_manager().clone())
-    }
-
-    /// Returns the futex state while runtime remains attached.
-    pub fn futex_state(&self) -> KResult<Arc<ProcessFutexState>> {
-        self.runtime().map(|runtime| runtime.futex_state().clone())
     }
 
     /// Updates the current executable metadata snapshot.

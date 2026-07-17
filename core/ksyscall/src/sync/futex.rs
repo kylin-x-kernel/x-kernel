@@ -4,34 +4,98 @@
 
 //! Futex and robust-list syscall adapters.
 
-use core::{mem::size_of, sync::atomic::Ordering};
+use core::{mem::size_of, time::Duration};
 
 use kerrno::{KError, KResult, LinuxError};
-use kfutex::FutexKey;
-use kprocess::{AsThread, current_futex_key};
-use kuaccess::atomic_u32_eq;
+use kfutex::{FutexKey, FutexWakeOp, global_table};
+use kprocess::{AsThread, current_user_mm_id, current_user_process_address_space};
 use linux_raw_sys::general::{
-    FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_PRIVATE_FLAG, FUTEX_REQUEUE, FUTEX_WAIT,
-    FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, robust_list_head, timespec,
+    FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_PRIVATE_FLAG, FUTEX_REQUEUE,
+    FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, FUTEX_WAKE_OP, robust_list_head,
+    timespec,
 };
 use osvm::VirtPtr;
 use posix_types::{TimeValueLike, UserConstPtr, UserPtr};
 
-/// Returns an error if the value would be negative when interpreted as signed.
-fn validate_non_negative(value: u32) -> KResult<u32> {
-    if (value as i32) < 0 {
-        Err(KError::InvalidInput)
-    } else {
-        Ok(value)
+/// Converts a wake-style count from the syscall `u32` ABI.
+///
+/// Linux passes this as `int nr_wake`. A value that is negative as `i32`
+/// must not yield `EINVAL` for `FUTEX_WAKE` / `FUTEX_WAKE_OP`; clamp to 0
+/// so the call succeeds without waking anyone. (`futex_requeue` is
+/// different — see [`validate_requeue_count`].)
+fn as_wake_count(value: u32) -> usize {
+    match value as i32 {
+        n if n <= 0 => 0,
+        n => n as usize,
     }
 }
 
-fn current_key_for_futex_op(address: usize, futex_op: u32) -> FutexKey {
-    if futex_op & FUTEX_PRIVATE_FLAG != 0 {
-        FutexKey::Private { address }
-    } else {
-        current_futex_key(address)
+/// Validates a requeue count against Linux `futex_requeue` ABI.
+///
+/// Linux rejects negative `nr_wake` / `nr_requeue` with `EINVAL`.
+fn validate_requeue_count(value: u32) -> KResult<usize> {
+    match value as i32 {
+        n if n < 0 => Err(KError::InvalidInput),
+        n => Ok(n as usize),
     }
+}
+
+fn resolve_key(address: usize, is_private: bool) -> KResult<FutexKey> {
+    if is_private {
+        // Private keys only need `mm_id` + VA; `mm_id` is immutable for the
+        // lifetime of the address space, so skip the mmap/munmap mutex.
+        return FutexKey::resolve_private(current_user_mm_id(), address);
+    }
+    let address_space = current_user_process_address_space();
+    let address_space = address_space.lock();
+    FutexKey::resolve(&address_space, address, false)
+}
+
+/// Resolves two futex keys under one address-space lock when needed.
+///
+/// Shared (non-private) compound operations must not resolve `uaddr` and
+/// `uaddr2` separately; a concurrent `mmap`/`munmap` could otherwise observe
+/// inconsistent backing metadata within a single syscall. Private keys skip
+/// the address-space lock entirely.
+fn resolve_key_pair(
+    first: usize,
+    second: usize,
+    is_private: bool,
+) -> KResult<(FutexKey, FutexKey)> {
+    if is_private {
+        let mm_id = current_user_mm_id();
+        let first_key = FutexKey::resolve_private(mm_id, first)?;
+        let second_key = FutexKey::resolve_private(mm_id, second)?;
+        return Ok((first_key, second_key));
+    }
+    let address_space = current_user_process_address_space();
+    let address_space = address_space.lock();
+    let first_key = FutexKey::resolve(&address_space, first, false)?;
+    let second_key = FutexKey::resolve(&address_space, second, false)?;
+    Ok((first_key, second_key))
+}
+
+fn parse_timeout(
+    command: u32,
+    is_realtime: bool,
+    timeout_address: usize,
+) -> KResult<Option<Duration>> {
+    let Some(timeout) = UserConstPtr::<timespec>::from(timeout_address).check_non_null() else {
+        return Ok(None);
+    };
+    let timeout = timeout.read_vm()?.try_into_time_value()?;
+    // `FUTEX_WAIT` is always relative; `FUTEX_CLOCK_REALTIME` only selects the
+    // clock used to measure that relative interval. `FUTEX_WAIT_BITSET` is
+    // always an absolute deadline on the selected clock.
+    Ok(Some(match command {
+        FUTEX_WAIT => timeout,
+        FUTEX_WAIT_BITSET => timeout.saturating_sub(if is_realtime {
+            khal::time::wall_time()
+        } else {
+            khal::time::monotonic_time()
+        }),
+        _ => return Err(KError::InvalidInput),
+    }))
 }
 
 /// Fast userspace mutex (futex) system call.
@@ -52,92 +116,78 @@ pub fn sys_futex(
         uaddr2.as_ptr(),
     );
 
-    let key = current_key_for_futex_op(uaddr.as_ptr() as usize, futex_op);
-
-    let process = kprocess::current_user_process();
-    let futex_table = process.futex_state()?.table_for(&key);
-
     let command = futex_op & (FUTEX_CMD_MASK as u32);
+    let is_private = futex_op & FUTEX_PRIVATE_FLAG != 0;
+    let is_realtime = futex_op & FUTEX_CLOCK_REALTIME != 0;
+    if is_realtime && !matches!(command, FUTEX_WAIT | FUTEX_WAIT_BITSET) {
+        return Err(KError::Unsupported);
+    }
+
     let uaddr_usize = uaddr.as_ptr() as usize;
     match command {
         FUTEX_WAIT | FUTEX_WAIT_BITSET => {
-            if !atomic_u32_eq(uaddr_usize, value)? {
-                return Err(KError::WouldBlock);
-            }
-
-            let timeout = if let Some(ts) =
-                UserConstPtr::<timespec>::from(timeout_or_value2).check_non_null()
-            {
-                let ts = ts.read_vm()?.try_into_time_value()?;
-                Some(ts)
-            } else {
-                None
-            };
-
-            let futex = futex_table.get_or_insert(&key);
             let bitset = if command == FUTEX_WAIT_BITSET {
+                if value3 == 0 {
+                    return Err(KError::InvalidInput);
+                }
                 value3
             } else {
                 u32::MAX
             };
+            let timeout = parse_timeout(command, is_realtime, timeout_or_value2)?;
+            let key = resolve_key(uaddr_usize, is_private)?;
 
-            let wait_result = futex.wq.wait_if(bitset, timeout, || {
-                atomic_u32_eq(uaddr_usize, value).unwrap_or(false)
-            });
-            match wait_result {
-                Ok(false) => {
-                    return Err(KError::WouldBlock);
-                }
-                Ok(true) => {}
+            match global_table().wait(key, uaddr_usize, value, bitset, timeout) {
+                Ok(false) => Err(KError::WouldBlock),
+                Ok(true) => Ok(0),
                 Err(err) => {
-                    #[cfg(target_arch = "x86_64")]
                     if timeout.is_none() && LinuxError::from(err) == LinuxError::EINTR {
-                        return Err(KError::from(LinuxError::ERESTARTSYS));
+                        Err(KError::from(LinuxError::ERESTARTSYS))
+                    } else {
+                        Err(err)
                     }
-                    return Err(err);
                 }
-            }
-
-            if futex.owner_dead.swap(false, Ordering::SeqCst) {
-                Err(KError::from(LinuxError::EOWNERDEAD))
-            } else {
-                Ok(0)
             }
         }
         FUTEX_WAKE | FUTEX_WAKE_BITSET => {
-            let futex = futex_table.get(&key);
-            let mut count = 0;
-            if let Some(futex) = futex {
-                let bitset = if command == FUTEX_WAKE_BITSET {
-                    value3
-                } else {
-                    u32::MAX
-                };
-                count = futex.wq.wake(value as _, bitset);
-            }
-            ktask::yield_now();
-            Ok(count as _)
+            let key = resolve_key(uaddr_usize, is_private)?;
+            let count = as_wake_count(value);
+            let bitset = if command == FUTEX_WAKE_BITSET {
+                if value3 == 0 {
+                    return Err(KError::InvalidInput);
+                }
+                value3
+            } else {
+                u32::MAX
+            };
+            Ok(global_table().wake(key, count, bitset) as isize)
         }
         FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
-            validate_non_negative(value)?;
-            if command == FUTEX_CMP_REQUEUE && !atomic_u32_eq(uaddr_usize, value3)? {
-                return Err(KError::WouldBlock);
-            }
-            let value2 = validate_non_negative(timeout_or_value2 as u32)?;
-
-            let futex = futex_table.get(&key);
-            let key2 = current_key_for_futex_op(uaddr2.as_ptr() as usize, futex_op);
-            let table2 = process.futex_state()?.table_for(&key2);
-            let futex2 = table2.get_or_insert(&key2);
-
-            let mut count = 0;
-            if let Some(futex) = futex {
-                count = futex.wq.wake(value as _, u32::MAX);
-                if count == value as usize {
-                    count += futex.wq.requeue(value2 as _, &futex2.wq) as usize;
-                }
-            }
-            Ok(count as _)
+            let uaddr2_usize = uaddr2.as_ptr() as usize;
+            let (key, key2) = resolve_key_pair(uaddr_usize, uaddr2_usize, is_private)?;
+            let wake_count = validate_requeue_count(value)?;
+            let requeue_count = validate_requeue_count(timeout_or_value2 as u32)?;
+            let compare = (command == FUTEX_CMP_REQUEUE).then_some((uaddr_usize, value3));
+            global_table()
+                .requeue(key, key2, wake_count, requeue_count, compare)
+                .map(|count| count as isize)
+        }
+        FUTEX_WAKE_OP => {
+            let uaddr2_usize = uaddr2.as_ptr() as usize;
+            let (key, key2) = resolve_key_pair(uaddr_usize, uaddr2_usize, is_private)?;
+            let source_count = as_wake_count(value);
+            let target_count = as_wake_count(timeout_or_value2 as u32);
+            let operation = FutexWakeOp::decode(value3)?;
+            global_table()
+                .wake_op(
+                    key,
+                    key2,
+                    uaddr2_usize,
+                    source_count,
+                    target_count,
+                    operation,
+                )
+                .map(|count| count as isize)
         }
         _ => Err(KError::Unsupported),
     }
