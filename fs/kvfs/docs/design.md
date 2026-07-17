@@ -13,6 +13,8 @@ traits 接入，POSIX 层负责把 syscall ABI 参数转换成 VFS 语义对象�
 - `src/node/`：dentry、inode 及文件系统 operation traits。
 - `src/file.rs`：打开文件及其可变状态。
 - `src/mount.rs`、`src/super_block.rs`：挂载树和文件系统实例。
+- `src/anon_inode.rs`：匿名 inode pseudo filesystem，用于 eventfd、epoll、
+  timerfd、pidfd 等内核创建的匿名文件。
 
 ## 架构
 
@@ -47,6 +49,10 @@ POSIX syscall ABI (u32 flags)
 这些 API 依赖分配器和正常内核运行环境。POSIX 路径通常需要当前进程的 mount、root
 和 cwd；纯 VFS 对象方法只依赖显式传入的对象。
 
+`init_anon_inodefs()` 必须在 boot/runtime 初始化阶段调用，早于普通任务和并行单元测试
+创建匿名 inode 文件。`AnonInodeFs::global()` 只读取已经初始化的 singleton，不会在
+运行时首次访问路径中构造 VFS 对象；未初始化时会 panic 暴露启动顺序错误。
+
 ## 算法流程
 
 open 在入口清理 legacy flags，校验已知位，生成 access mode、open intent 和 lookup
@@ -60,6 +66,10 @@ VFS rename 入口再次检查组合不变量，文件系统 helper 再检查自�
 一次迭代已经读取部分数据后，后续回调错误转换为已完成字节数，使 stream I/O
 保持 POSIX partial-read 语义；首个回调失败时保留原错误。
 
+匿名 inode 文件创建复用 boot 阶段发布的 `AnonInodeFs` singleton。初始化阶段创建
+匿名 inode superblock、root dentry、singleton inode 和 root mount；后续
+`get_file()` 只分配 per-file dentry/file，并共享 singleton inode。
+
 ## 并发模型
 
 dentry 的 inode、children 和可变 operation 状态由各自 mutex 保护。一个 live dentry
@@ -71,11 +81,17 @@ dentry 的 inode、children 和可变 operation 状态由各自 mutex 保护。�
 `f_flags` 与 `f_mode` 使用原子整数存储。bitflags 类型是按值复制的语义快照，不额外
 引入锁或分配。
 
+匿名 inode pseudo fs 使用 `Once<AnonInodeFs>` 作为发布槽，但初始化只允许通过
+`init_anon_inodefs()` 在受控 boot 阶段发生。这样避免多个 runtime 调用者并发首次访问时
+在 `Lazy` 初始化闭包中构造复杂 VFS 对象。
+
 ## 设计决策
 
 - ABI carrier 与内核语义类型分离，转换尽量靠近边界。
 - 不提供通用 raw-flags getter；只有写入 ABI 或底层存储时调用 `bits()`。
 - 不同 flags 家族不共享整数别名，使错误组合在编译期失败。
+- 匿名 inode pseudo fs 采用显式预初始化，而不是 `Lazy` 首次访问初始化。该设计对齐
+  复杂 VFS 全局对象的生命周期：启动时构造，运行时只复用。
 
 ## Drop / 资源释放
 

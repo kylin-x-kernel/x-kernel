@@ -45,6 +45,7 @@ impl v9fs::Transport for Virtio9pTransport {
 pub fn prepare_namespace() {
     let root_fs = mount_root_super_block();
     BootVfs::install_initial_root(root_fs);
+    kvfs::init_anon_inodefs();
 }
 
 /// Mounts boot-time virtual filesystems into the initial namespace.

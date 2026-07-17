@@ -7,7 +7,7 @@
 use alloc::{format, string::String, sync::Arc};
 use core::{any::Any, time::Duration};
 
-use klazy::Lazy;
+use klazy::Once;
 
 use crate::{
     Dentry, DentryOperations, FMode, FileOperations, InodeOperations, Metadata, Mount, MountIdmap,
@@ -15,7 +15,7 @@ use crate::{
     SuperBlockOperations, Umode, VfsFile, VfsInode, VfsInodeInit, VfsResult,
 };
 
-static ANON_INODE_FS: Lazy<AnonInodeFs> = Lazy::new(AnonInodeFs::new);
+static ANON_INODE_FS: Once<AnonInodeFs> = Once::new();
 
 const ANON_INODE_INO: u64 = 1;
 const ANON_INODEFS_ROOT_INO: u64 = 2;
@@ -42,9 +42,27 @@ impl AnonInodeFs {
         }
     }
 
+    /// Initializes the singleton anonymous-inode filesystem.
+    ///
+    /// This is intended to run from the VFS boot path before user tasks or
+    /// parallel unit tests can create anon-inode-backed files. Keeping
+    /// initialization out of the first-use path avoids many callers racing into
+    /// a complex VFS construction closure.
+    pub fn init_global() {
+        let _ = ANON_INODE_FS.call_once(Self::new);
+    }
+
     /// Returns the singleton anonymous-inode filesystem instance.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`AnonInodeFs::init_global`] has not completed. This makes
+    /// boot-order regressions fail at the call site instead of silently doing
+    /// complex VFS initialization from arbitrary runtime paths.
     pub fn global() -> &'static Self {
-        &ANON_INODE_FS
+        ANON_INODE_FS
+            .get()
+            .expect("anonymous inode filesystem must be initialized before use")
     }
 
     /// Creates an anonymous-inode-backed open file description.
@@ -85,6 +103,14 @@ impl AnonInodeFs {
             self.dentry_operations.clone(),
         )
     }
+}
+
+/// Initializes the VFS-wide anonymous-inode pseudo filesystem.
+///
+/// Boot code must call this before runtime paths can create eventfd, epoll,
+/// timerfd, pidfd, pipe, or other anon-inode-backed files.
+pub fn init_anon_inodefs() {
+    AnonInodeFs::init_global();
 }
 
 struct AnonInode {

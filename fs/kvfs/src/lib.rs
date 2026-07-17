@@ -34,7 +34,7 @@ pub use address_space::{
     AddressSpace, AddressSpaceOperations, ReadaheadControl, WriteBeginRequest, WriteEndRequest,
     WritebackControl, WritebackSyncMode,
 };
-pub use anon_inode::AnonInodeFs;
+pub use anon_inode::{AnonInodeFs, init_anon_inodefs};
 pub use file::{FMode, FileDirOperations, FileOperations, VfsFile, VfsFileBuilder};
 pub use filename::Filename;
 pub use kiocb::Kiocb;

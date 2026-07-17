@@ -11,6 +11,8 @@
 - `Filename::open_with_flags_at` 和 `dentry_open` 是保留 raw `O_*` 的兼容入口。
 - `sys_renameat2` 将 raw rename bits 转换为 `RenameFlags` 后才进入 VFS。
 - 文件系统 operation traits 可返回磁盘、网络或设备后端产生的错误与元数据。
+- `AnonInodeFs::global()` 是运行时匿名文件创建入口，但它只接受已经由 boot 阶段
+  初始化好的 singleton；不从用户输入直接触发全局 VFS 初始化。
 
 `kvfs` 不直接解引用用户指针，不直接访问 MMIO、PIO 或 DMA。
 
@@ -27,12 +29,17 @@ trait 的 `Send + Sync` 约束。
 - 不同 flags 类型不得通过 `.bits()` 在 VFS 内互相转换。
 - live child dentry 强持有 parent，parent 只保存 child 的弱索引；superblock dcache
   强持有 hashed dentry，驱逐时必须同时移除弱索引和 dcache 所有权。
+- `AnonInodeFs` singleton 必须先完成 `init_anon_inodefs()` 发布，后续 `global()`
+  返回的引用才有效；运行时路径不得绕过该初始化顺序。
 
 ## 线程安全
 
 共享 dentry、inode、mount 和 file 状态由 mutex、atomic、`Arc` 和 `Weak` 保护。
 children map 与 superblock dcache 不嵌套持锁；namespace 操作先更新 parent 弱索引，
 再更新 dcache 强所有权。类型化 flags 是不可变值快照，不提供共享可变状态。
+
+匿名 inode pseudo fs 的 singleton 由 `Once` 发布，但不允许普通运行时路径触发初始化；
+并发创建匿名文件只共享已经发布的 mount/inode，不竞争初始化闭包。
 
 ## 威胁分析
 
@@ -42,6 +49,7 @@ children map 与 superblock dcache 不嵌套持锁；namespace 操作先更新 p
 | T-02 | rename 模式冲突 | 中 | `EXCHANGE` 与 `NOREPLACE/WHITEOUT` 组合 | syscall 与 VFS 入口双重校验 |
 | T-03 | flags 家族误传 | 中 | 内部 API 使用裸整数 | 独立 bitflags 类型形成编译期隔离 |
 | T-04 | dentry 驱逐遗漏导致目录状态或资源生命周期错误 | 中 | namespace 更新只修改弱索引或只修改 dcache | insert/remove/forget 路径成对更新两层缓存，并以行为测试覆盖最后一个外部引用释放后的目录语义 |
+| T-05 | 运行时并发首次访问匿名 inode fs 导致初始化卡住 | 中 | 复杂 VFS 对象放在 lazy 首次访问路径中 | boot 阶段调用 `init_anon_inodefs()`，`global()` 只读取已发布对象 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -51,6 +59,7 @@ children map 与 superblock dcache 不嵌套持锁；namespace 操作先更新 p
 | F-02 | rename 参数非法 | 模式冲突或 helper 不支持 | rename 失败 | namespace 保持不变 | 2 | 操作前校验 |
 | F-03 | 文件系统回调失败 | 后端 I/O 或元数据错误 | 当前操作失败 | 可能降级为 I/O 错误 | 2 | 通过 `VfsResult` 传播 |
 | F-04 | hashed dentry 未被及时回收 | 当前阶段没有 Linux shrinker/LRU | dcache 占用增长 | 长期运行可能增加内存压力 | 3 | unlink、rename、forget 显式驱逐；后续接入全局回收策略 |
+| F-05 | 匿名 inode fs 未初始化即使用 | boot 初始化顺序缺失 | 当前调用 panic | 暴露启动顺序回归 | 3 | `fs_boot::prepare_namespace()` 显式初始化，测试覆盖启动路径 |
 
 ## 已知限制
 
@@ -67,3 +76,5 @@ children map 与 superblock dcache 不嵌套持锁；namespace 操作先更新 p
 - dentry cache 插入、rename、unlink、forget 是否保持 parent 弱索引与 superblock
   强所有权同步。
 - 没有外部 `Dentry` 引用时，hashed child 是否仍能参与目录非空判断。
+- 新增匿名 inode 使用点是否只调用 `AnonInodeFs::global()`，且不重新引入 lazy 首次访问
+  初始化。
