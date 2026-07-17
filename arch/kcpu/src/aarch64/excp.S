@@ -127,14 +127,16 @@ enter_user:
     stp     x21, x22, [sp, 2 * 8]
     stp     x19, x20, [sp]
 
+    mov     x19, x0
     mov     x10, sp
     mrs     x11, tpidr_el0
-    ldp     x8, x9, [x0, {trapframe_size}]
-    stp     x10, x11, [x0,{trapframe_size}]
+    ldp     x8, x9, [x19, {trapframe_size}]
+    stp     x10, x11, [x19,{trapframe_size}]
     msr     sp_el0, x8
     msr     tpidr_el0, x9
 
-    mov     sp, x0
+    bl      kcpu_prepare_enter_user_irq
+    mov     sp, x19
 
 .Lexception_return:
     RESTORE_REGS

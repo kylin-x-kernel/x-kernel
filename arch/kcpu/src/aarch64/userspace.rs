@@ -21,6 +21,11 @@ use crate::aarch64::ExceptionContext;
 use crate::excp::PageFaultFlags;
 pub use crate::userspace_common::{ExceptionKind, ReturnReason};
 
+#[unsafe(no_mangle)]
+extern "C" fn kcpu_prepare_enter_user_irq() {
+    karch::prepare_enter_user_irq();
+}
+
 /// Context to enter user space.
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]

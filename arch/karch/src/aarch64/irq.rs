@@ -61,6 +61,25 @@ pub fn disable_local_irq() {
     DAIF.write(DAIF::I::Masked);
 }
 
+/// Prepare to return from EL1 to EL0 with normal IRQs available in userspace.
+///
+/// In PMR mode, [`disable_local_irq`] masks normal IRQs by lowering PMR to
+/// [`pmr::NMI_ONLY`] while keeping `DAIF.I` clear so pseudo-NMIs can still
+/// arrive. That PMR mask must not be carried into EL0, otherwise ordinary
+/// timer IRQs remain blocked for user code. This helper is called from the
+/// AArch64 user-entry assembly while still on a kernel stack: it masks `DAIF.I`
+/// for the remaining EL1 register-restore window, then restores PMR to
+/// [`pmr::ALL`]. The final EL0 interrupt state is taken from `SPSR_EL1` by
+/// `eret`.
+#[inline]
+pub fn prepare_enter_user_irq() {
+    #[cfg(feature = "pmr")]
+    if pmr::is_ready() {
+        DAIF.write(DAIF::I::Masked);
+        pmr::write(pmr::ALL);
+    }
+}
+
 #[inline]
 pub fn local_irq_enabled() -> bool {
     #[cfg(feature = "pmr")]
