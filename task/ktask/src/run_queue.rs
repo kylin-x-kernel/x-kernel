@@ -7,6 +7,8 @@
 #[cfg(feature = "smp")]
 use alloc::sync::Weak;
 use alloc::{collections::VecDeque, sync::Arc};
+#[cfg(feature = "sched_stat")]
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::{
     future::poll_fn,
     ptr::NonNull,
@@ -27,6 +29,159 @@ use crate::{
     task::{CurrentTask, TaskState},
     tracing_hooks::{fire_context_switch, fire_task_wakeup},
 };
+
+#[cfg(feature = "sched_stat")]
+struct SchedCpuStats {
+    select_task: AtomicU64,
+    select_wakeup: AtomicU64,
+    wakeup_last_cpu: AtomicU64,
+    wakeup_fallback: AtomicU64,
+    add_task: AtomicU64,
+    unblock_task: AtomicU64,
+    local_resched: AtomicU64,
+    remote_resched: AtomicU64,
+    remote_resched_fail: AtomicU64,
+    tick_preempt: AtomicU64,
+    preempt_check: AtomicU64,
+    preempt_need: AtomicU64,
+    preempt_skip_disabled: AtomicU64,
+    preempt_skip_exception: AtomicU64,
+    preempt_resched: AtomicU64,
+    preempt_denied: AtomicU64,
+    resched: AtomicU64,
+    pick_idle: AtomicU64,
+    switch: AtomicU64,
+    switch_same: AtomicU64,
+}
+
+#[cfg(feature = "sched_stat")]
+impl SchedCpuStats {
+    const fn new() -> Self {
+        Self {
+            select_task: AtomicU64::new(0),
+            select_wakeup: AtomicU64::new(0),
+            wakeup_last_cpu: AtomicU64::new(0),
+            wakeup_fallback: AtomicU64::new(0),
+            add_task: AtomicU64::new(0),
+            unblock_task: AtomicU64::new(0),
+            local_resched: AtomicU64::new(0),
+            remote_resched: AtomicU64::new(0),
+            remote_resched_fail: AtomicU64::new(0),
+            tick_preempt: AtomicU64::new(0),
+            preempt_check: AtomicU64::new(0),
+            preempt_need: AtomicU64::new(0),
+            preempt_skip_disabled: AtomicU64::new(0),
+            preempt_skip_exception: AtomicU64::new(0),
+            preempt_resched: AtomicU64::new(0),
+            preempt_denied: AtomicU64::new(0),
+            resched: AtomicU64::new(0),
+            pick_idle: AtomicU64::new(0),
+            switch: AtomicU64::new(0),
+            switch_same: AtomicU64::new(0),
+        }
+    }
+}
+
+#[cfg(feature = "sched_stat")]
+static SCHED_CPU_STATS: [SchedCpuStats; kbuild_config::NR_CPUS] =
+    [const { SchedCpuStats::new() }; kbuild_config::NR_CPUS];
+
+#[cfg(feature = "sched_stat")]
+#[inline]
+fn sched_stat_cpu(cpu_id: LogicalCpuId) -> &'static SchedCpuStats {
+    &SCHED_CPU_STATS[cpu_id.as_usize()]
+}
+
+#[cfg(feature = "sched_stat")]
+#[inline]
+fn sched_stat_inc(counter: &AtomicU64) {
+    counter.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(feature = "sched_stat")]
+pub(crate) fn dump_sched_stats() {
+    // Use atomic console output here because this diagnostic is emitted from
+    // watchdog paths where taking the regular logger locks can recurse or hang.
+    khal::kprint_atomic!("[sched_stat] begin\n");
+    for (cpu, stats) in SCHED_CPU_STATS.iter().enumerate() {
+        khal::kprint_atomic!(
+            "[sched_stat] cpu={} select_task={} select_wakeup={} wakeup_last_cpu={} \
+             wakeup_fallback={} add_task={} unblock={} local_resched={} remote_resched={} \
+             remote_resched_fail={} tick_preempt={} preempt_check={} preempt_need={} \
+             preempt_skip_disabled={} preempt_skip_exception={} preempt_resched={} \
+             preempt_denied={} resched={} pick_idle={} switch={} switch_same={}\n",
+            cpu,
+            stats.select_task.load(Ordering::Relaxed),
+            stats.select_wakeup.load(Ordering::Relaxed),
+            stats.wakeup_last_cpu.load(Ordering::Relaxed),
+            stats.wakeup_fallback.load(Ordering::Relaxed),
+            stats.add_task.load(Ordering::Relaxed),
+            stats.unblock_task.load(Ordering::Relaxed),
+            stats.local_resched.load(Ordering::Relaxed),
+            stats.remote_resched.load(Ordering::Relaxed),
+            stats.remote_resched_fail.load(Ordering::Relaxed),
+            stats.tick_preempt.load(Ordering::Relaxed),
+            stats.preempt_check.load(Ordering::Relaxed),
+            stats.preempt_need.load(Ordering::Relaxed),
+            stats.preempt_skip_disabled.load(Ordering::Relaxed),
+            stats.preempt_skip_exception.load(Ordering::Relaxed),
+            stats.preempt_resched.load(Ordering::Relaxed),
+            stats.preempt_denied.load(Ordering::Relaxed),
+            stats.resched.load(Ordering::Relaxed),
+            stats.pick_idle.load(Ordering::Relaxed),
+            stats.switch.load(Ordering::Relaxed),
+            stats.switch_same.load(Ordering::Relaxed),
+        );
+    }
+    khal::kprint_atomic!("[sched_stat] end\n");
+}
+
+#[cfg(not(feature = "sched_stat"))]
+pub(crate) fn dump_sched_stats() {}
+
+#[cfg(feature = "sched_stat")]
+#[inline]
+pub(crate) fn record_preempt_pending_check(need_resched: bool) {
+    let stats = sched_stat_cpu(this_cpu_id());
+    sched_stat_inc(&stats.preempt_check);
+    if need_resched {
+        sched_stat_inc(&stats.preempt_need);
+    }
+}
+
+#[cfg(not(feature = "sched_stat"))]
+#[inline]
+pub(crate) fn record_preempt_pending_check(_need_resched: bool) {}
+
+#[cfg(feature = "sched_stat")]
+#[inline]
+pub(crate) fn record_preempt_pending_blocked(can_preempt: bool, in_exception: bool) {
+    let stats = sched_stat_cpu(this_cpu_id());
+    if !can_preempt {
+        sched_stat_inc(&stats.preempt_skip_disabled);
+    }
+    if in_exception {
+        sched_stat_inc(&stats.preempt_skip_exception);
+    }
+}
+
+#[cfg(not(feature = "sched_stat"))]
+#[inline]
+pub(crate) fn record_preempt_pending_blocked(_can_preempt: bool, _in_exception: bool) {}
+
+#[cfg(feature = "sched_stat")]
+#[inline]
+fn record_remote_resched(cpu_id: LogicalCpuId, failed: bool) {
+    let stats = sched_stat_cpu(cpu_id);
+    sched_stat_inc(&stats.remote_resched);
+    if failed {
+        sched_stat_inc(&stats.remote_resched_fail);
+    }
+}
+
+#[cfg(not(feature = "sched_stat"))]
+#[inline]
+fn record_remote_resched(_cpu_id: LogicalCpuId, _failed: bool) {}
 
 macro_rules! percpu_static {
     ($(
@@ -184,6 +339,8 @@ fn select_run_queue_index(cpumask: &KCpuMask) -> usize {
         count += 1;
     }
     let nth = RUN_QUEUE_INDEX.fetch_add(1, Ordering::Relaxed) % count;
+    #[cfg(feature = "sched_stat")]
+    sched_stat_inc(&sched_stat_cpu(LogicalCpuId::new(eligible[nth])).select_task);
     eligible[nth]
 }
 
@@ -269,9 +426,22 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueR
         // Prefer the CPU where the task blocked; fall back to RR if affinity changed.
         let last_cpu = task.cpu_id();
         let index = if task.cpumask().get(last_cpu.as_usize()) {
+            #[cfg(feature = "sched_stat")]
+            {
+                let stats = sched_stat_cpu(last_cpu);
+                sched_stat_inc(&stats.select_wakeup);
+                sched_stat_inc(&stats.wakeup_last_cpu);
+            }
             last_cpu.as_usize()
         } else {
-            select_run_queue_index(&task.cpumask())
+            let index = select_run_queue_index(&task.cpumask());
+            #[cfg(feature = "sched_stat")]
+            {
+                let stats = sched_stat_cpu(LogicalCpuId::new(index));
+                sched_stat_inc(&stats.select_wakeup);
+                sched_stat_inc(&stats.wakeup_fallback);
+            }
+            index
         };
         KRunQueueRef {
             inner: get_run_queue(index),
@@ -306,15 +476,20 @@ pub(crate) fn task_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'sta
 #[cfg(feature = "preempt")]
 fn request_resched(cpu_id: LogicalCpuId) {
     if cpu_id == this_cpu_id() {
+        #[cfg(feature = "sched_stat")]
+        sched_stat_inc(&sched_stat_cpu(cpu_id).local_resched);
         crate::current().set_preempt_pending(true);
     } else {
         #[cfg(all(feature = "smp", feature = "ipi"))]
-        request_remote_resched(cpu_id);
+        {
+            let resched_result = request_remote_resched(cpu_id);
+            record_remote_resched(cpu_id, resched_result.is_err());
+        }
     }
 }
 
 #[cfg(all(feature = "preempt", feature = "smp", feature = "ipi"))]
-fn request_remote_resched(cpu_id: LogicalCpuId) {
+fn request_remote_resched(cpu_id: LogicalCpuId) -> kipi::Result<()> {
     if let Err(err) = kipi::run_on_cpu(cpu_id, || {
         crate::current().set_preempt_pending(true);
     }) {
@@ -323,6 +498,9 @@ fn request_remote_resched(cpu_id: LogicalCpuId) {
             cpu_id.as_usize(),
             err
         );
+        Err(err)
+    } else {
+        Ok(())
     }
 }
 
@@ -390,6 +568,8 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
             let _g = kspin::NoPreempt::new();
             crate::task_registry::record_tracked_task(&task);
         }
+        #[cfg(feature = "sched_stat")]
+        sched_stat_inc(&sched_stat_cpu(self.inner.cpu_id).add_task);
         self.inner.scheduler.lock().add_task(task);
     }
 
@@ -415,6 +595,8 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
                 "task unblock: {task_id_name} on run_queue {}",
                 cpu_id.as_usize()
             );
+            #[cfg(feature = "sched_stat")]
+            sched_stat_inc(&sched_stat_cpu(cpu_id).unblock_task);
 
             // Fire the task wakeup tracepoint.
             fire_task_wakeup(task_id);
@@ -431,7 +613,12 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
 impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     pub fn scheduler_timer_tick(&mut self) {
         let curr = &self.current_task;
-        if !curr.is_idle() && self.inner.scheduler.lock().task_tick(curr) {
+        let should_preempt = !curr.is_idle() && self.inner.scheduler.lock().task_tick(curr);
+        #[cfg(feature = "sched_stat")]
+        if should_preempt {
+            sched_stat_inc(&sched_stat_cpu(self.inner.cpu_id).tick_preempt);
+        }
+        if should_preempt {
             #[cfg(feature = "preempt")]
             curr.set_preempt_pending(true);
         }
@@ -493,6 +680,14 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         // to set `current_disable_count` to 1 in `can_preempt()` to obtain
         // the preemption permission.
         let can_preempt = curr.can_preempt(1);
+        #[cfg(feature = "sched_stat")]
+        {
+            let stats = sched_stat_cpu(self.inner.cpu_id);
+            sched_stat_inc(&stats.preempt_resched);
+            if !can_preempt {
+                sched_stat_inc(&stats.preempt_denied);
+            }
+        }
 
         trace!(
             "current task is to be preempted: {}, allow={}",
@@ -655,11 +850,17 @@ impl RunQueue {
     /// Core reschedule subroutine.
     /// Pick the next task to run and switch to it.
     fn resched(&mut self) {
+        #[cfg(feature = "sched_stat")]
+        sched_stat_inc(&sched_stat_cpu(self.cpu_id).resched);
         let next = self
             .scheduler
             .lock()
             .pick_next_task()
             .unwrap_or_else(|| current_idle_task().clone());
+        #[cfg(feature = "sched_stat")]
+        if next.is_idle() {
+            sched_stat_inc(&sched_stat_cpu(self.cpu_id).pick_idle);
+        }
         assert!(
             next.is_ready(),
             "next {} is not ready: {:?}",
@@ -684,10 +885,16 @@ impl RunQueue {
         next_task.set_preempt_pending(false);
         next_task.set_state(TaskState::Running);
         if prev_task.ptr_eq(&next_task) {
+            #[cfg(feature = "sched_stat")]
+            sched_stat_inc(&sched_stat_cpu(this_cpu_id()).switch_same);
             return;
         }
 
+        let cpu_id = this_cpu_id();
+
         // Fire the context switch tracepoint.
+        #[cfg(feature = "sched_stat")]
+        sched_stat_inc(&sched_stat_cpu(cpu_id).switch);
         fire_context_switch(prev_task.trace_id(), next_task.trace_id());
 
         // Claim the task as running, we do this before switching to it
@@ -698,7 +905,6 @@ impl RunQueue {
             next_task.set_on_cpu_mask_bit(this_cpu_id());
         }
 
-        let cpu_id = this_cpu_id();
         if let Some(runtime) = next_task.user_runtime() {
             // Publish the CPU in the next mm before switching hardware state
             // so concurrent flushers can over-target but never miss this CPU.
@@ -743,9 +949,11 @@ impl RunQueue {
             assert!(Arc::strong_count(&prev_task) > 1);
             assert!(Arc::strong_count(&next_task) >= 1);
 
+            let suspended_exception = khal::context::suspend_active_exception_context();
             CurrentTask::set_current(prev_task, next_task);
 
             (*prev_ctx_ptr).switch_to(&*next_ctx_ptr);
+            khal::context::resume_active_exception_context(suspended_exception);
 
             // Current it's **next_task** running on this CPU, clear the `prev_task`'s `on_cpu` field
             // to indicate that it has finished its scheduling process and no longer running on this CPU.

@@ -119,6 +119,7 @@ pub fn init_softlockup_detection() {
                     "[watchdog] softlockup detected on cpu {}",
                     this_cpu_id().as_usize()
                 );
+                ktask::dump_sched_stats();
                 // SAFETY: timer callback, IRQs disabled, same CPU as the
                 // `read_current_raw` above — cannot race with migration.
                 unsafe { LAST_SOFTLOCKUP_REPORT_NS.write_current_raw(now_ns) };

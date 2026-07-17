@@ -52,6 +52,12 @@ config KFEAT_WATCHDOG
       Enable watchdog-driven diagnostic checks such as soft lockup detection
       and lock-wait heuristics.
 
+config KFEAT_SCHED_STAT
+    bool "Scheduler statistics"
+    help
+      Enable low-overhead per-CPU scheduler counters for diagnostics. The
+      watchdog prints these counters when reporting a soft lockup.
+
 config KFEAT_PMU
     bool "PMU support"
     help

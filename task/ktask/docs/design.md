@@ -139,6 +139,13 @@ init_scheduler_secondary()
 guard 尚未释放时，抢占只保留 `need_resched` pending，不实际切换任务，避免普通任务观察到
 仍属于异常路径的 per-CPU trapframe。
 
+异常路径可能进入会阻塞的后端（例如用户缺页处理），任务也可能在 trap handler
+返回前被调度到其它 CPU。为避免原 CPU 上的 active-exception slot 变成 stale 状态，
+`switch_to()` 在切离当前任务、更新 `CurrentTask` 之前会挂起并清空当前 CPU 的
+active exception context；当该任务被切回并从底层上下文切换返回时，再把挂起的
+active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自己仍在异常上下文，
+或迁移后的任务在 trap handler 后半段错误允许抢占。
+
 ### 5) 阻塞/唤醒与 WaitQueue/Future
 
 - `future::block_on` 在 `Poll::Pending` 下走 `blocked_resched()`，把当前任务置为 `Blocked`。
@@ -235,6 +242,14 @@ wait/future 唤醒通常发生在释放资源或发送事件的线程上下文�
 - `kruntime` 负责安装时钟中断并在 tick 时回调 `ktask::on_timer_tick()`。
 - `ktask` 负责将 tick 转换为调度记账、抢占请求、定时事件唤醒。
 - `kruntime` 不感知具体调度算法；`ktask` 不负责硬件 IRQ 路由。
+
+## 调度统计
+
+启用 `sched_stat` feature 后，`ktask` 维护每 CPU 计数器，覆盖选核、唤醒、
+本地/远端 resched 请求、tick 抢占、抢占跳过原因和实际 switch 次数。
+watchdog 触发时会调用 `dump_sched_stats()` 输出这些计数。它用于回答“任务是否已
+Ready、是否踢到目标 CPU、是否因为 preempt disabled 或 exception context 被延迟”
+这类整体行为问题；一次性 ktrace 仍用于还原具体事件序列。
 
 ## 冗余与过载
 

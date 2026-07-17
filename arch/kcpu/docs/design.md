@@ -235,9 +235,21 @@ syscall 可被信号中断并需要重启。`orig_rax` 字段保存入口时的�
 
 - **per-CPU 数据**：`ACTIVE_EXCEPTION_CONTEXT_PTR`、x86_64 的 `TSS` 和 `GDT`
   均通过 `#[percpu::def_percpu]` 定义，每个 CPU 有独立副本，无需锁保护。
-- **`ExceptionContextGuard`**：使用 `AtomicUsize` 的 `swap`/`store` 操作
-  （`Ordering::Relaxed`）更新 per-CPU 活跃 trapframe 指针。Relaxed 语义足够：
-  每个逻辑 CPU 上同一时刻只有一个 trap handler 在运行（中断已关闭）。
+- **`ExceptionContextGuard`**：安装 trapframe 时保存原始 per-CPU slot 地址，
+  并用 `AtomicUsize::swap` 记录前一个值。Drop 时不重新计算当前 CPU，而是对
+  原始 slot 和当前 CPU slot 做 `compare_exchange(ptr, prev)` 恢复。这样即使
+  page fault 后端或其它 trap handler 路径阻塞并迁移，迟到的 guard drop 也不会
+  把恢复操作写到错误 CPU；若 slot 已经被调度器清空或新的 trap 覆盖，CAS 失败并
+  保留新状态。迁移后内层 guard 释放时必须把当前 CPU slot 恢复为 `prev`，因为
+  `prev` 是同一任务嵌套 guard 链里的外层 live `ExceptionContext`；将其清零会让
+  外层 trap handler 后半段错误通过 `in_exception_context()` 检查并允许抢占。
+- **exception context 挂起/恢复**：调度器切离一个仍在 trap handler 内的任务时，
+  会把当前 CPU 的 active-exception 指针挂起并清零；当该任务的上下文切回并从
+  `switch_to()` 返回时，再把挂起的指针恢复到当前 CPU。这样既不会在旧 CPU 留下
+  stale 标记，也能保证任务迁移后继续执行 trap handler 后半段时
+  `in_exception_context()` 仍为真。
+  `Ordering::Relaxed` 足够，因为该指针只用于 best-effort 诊断和抢占门控，
+  不发布跨 CPU 数据。
 - **分布式切片**：`IRQ` 和 `PAGE_FAULT` 使用 `linkme` 分布式切片，
   编译期注册，运行时不可变，无需同步。
 - **IRQ 关闭保护**：`switch_to()` 和 `run()` 在操作上下文前关闭本地 IRQ，
@@ -282,5 +294,7 @@ RISC-V 的 `sstatus.FS` 字段跟踪 FP 状态（Off/Initial/Clean/Dirty）。
 ## Drop / 资源释放
 
 本 crate 的类型主要为寄存器快照和上下文容器，不持有需要显式释放的资源。
-唯一的 RAII 守卫是 `ExceptionContextGuard`，在 `Drop` 时恢复 per-CPU 活跃
-trapframe 指针为前一个值。
+唯一的 RAII 守卫是 `ExceptionContextGuard`，在 `Drop` 时尝试恢复安装时记录的
+per-CPU 活跃 trapframe 指针为前一个值。调度器在当前 CPU 切离安装该指针的任务前
+会挂起并清空本 CPU slot，任务被切回后恢复到新的当前 CPU，避免旧 CPU stale 标记
+和恢复后 trap handler 后半段缺失异常上下文标记。

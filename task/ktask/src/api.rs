@@ -289,6 +289,11 @@ pub fn run_idle() -> ! {
     }
 }
 
+/// Dumps aggregate scheduler behavior counters when scheduler statistics are enabled.
+pub fn dump_sched_stats() {
+    crate::run_queue::dump_sched_stats();
+}
+
 /// Returns `true` when no suspicious long lock-waits are observed on this CPU.
 /// Returns `false` when a task appears to have been waiting on a lock for too long.
 ///

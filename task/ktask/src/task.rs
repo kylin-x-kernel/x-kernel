@@ -671,10 +671,17 @@ impl TaskInner {
     fn current_check_preempt_pending() {
         use kspin::NoPreemptIrqSave;
         let curr = crate::current();
-        if curr.need_resched.load(Ordering::Acquire)
-            && curr.can_preempt(0)
-            && !khal::context::in_exception_context()
-        {
+        let need_resched = curr.need_resched.load(Ordering::Acquire);
+        crate::run_queue::record_preempt_pending_check(need_resched);
+        if !need_resched {
+            return;
+        }
+
+        let can_preempt = curr.can_preempt(0);
+        let in_exception = khal::context::in_exception_context();
+        crate::run_queue::record_preempt_pending_blocked(can_preempt, in_exception);
+
+        if can_preempt && !in_exception {
             // Note: if we want to print log msg during `preempt_resched`, we have to
             // disable preemption here, because the klogger may cause preemption.
             let mut rq = crate::current_run_queue::<NoPreemptIrqSave>();

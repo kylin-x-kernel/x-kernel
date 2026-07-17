@@ -89,9 +89,15 @@ pub mod trap {
 ///
 /// - [`in_exception_context`]: Returns whether the current CPU is still inside
 ///   an exception context without exposing the trapframe itself.
+///
+/// - [`suspend_active_exception_context`] and [`resume_active_exception_context`]:
+///   Temporarily remove and later restore the current CPU marker across a task
+///   switch, so a sleepable trap backend does not leave a stale marker on the
+///   old CPU and still resumes with the marker on the new CPU.
 pub mod context {
     pub use kcpu::{
-        TaskContext, TrapFrame, active_exception_context, in_exception_context,
+        SuspendedExceptionContext, TaskContext, TrapFrame, active_exception_context,
+        in_exception_context, resume_active_exception_context, suspend_active_exception_context,
         with_active_exception_context,
     };
 }

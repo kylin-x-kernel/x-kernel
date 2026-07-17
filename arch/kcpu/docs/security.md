@@ -61,7 +61,7 @@
 
 ## unsafe 代码清单
 
-### 1. `ExceptionContextGuard::new` / `Drop`（`active_exception_context.rs:79-94`）
+### 1. `ExceptionContextGuard::new` / `Drop`（`active_exception_context.rs`）
 
 ```rust
 ACTIVE_EXCEPTION_CONTEXT_PTR
@@ -72,8 +72,13 @@ ACTIVE_EXCEPTION_CONTEXT_PTR
 **不变量**：`tf` 必须是有效的 `&ExceptionContext` 引用；guard 的生命周期
 必须覆盖 trap handler 整个执行期。
 
-**为何安全**：per-CPU 变量保证同一 CPU 上只有一个 trap handler。
-`swap` 操作在 IRQ 关闭上下文中执行。
+**为何安全**：安装时记录原始 per-CPU slot 地址；per-CPU 数据区在整个内核生命
+周期内有效，因此该裸指针在迟到 Drop 时仍可解引用。`swap` 在 trap 入口的 IRQ
+关闭上下文中执行。Drop 时用 CAS 恢复原始 slot 和迁移后的当前 CPU slot，避免
+trap 后端阻塞/迁移后误写或遗漏 CPU slot。CAS 失败表示 slot 已被调度器清空或被
+新的 trap 覆盖，保留当前值是正确行为。迁移后的内层 guard 释放时，当前 CPU slot
+恢复为 `self.prev` 而不是 0；`self.prev` 来自同一任务中仍存活的外层 guard，必须
+保持可见，直到外层 guard 自己释放。
 
 ### 2. `active_exception_context()` 裸指针转换（`active_exception_context.rs:39-52`）
 
@@ -84,7 +89,8 @@ Some(unsafe { *(ptr as *const ExceptionContext) })
 **不变量**：`ptr` 必须指向有效的 `ExceptionContext` 实例。
 
 **为何安全**：指针仅由 `ExceptionContextGuard::new` 安装，guard 的 `Drop`
-保证在 trap 退出时恢复。该 API 立即按值复制 trapframe 并返回快照，
+在原始 slot 和当前 CPU slot 上尝试恢复；调度器切离安装者任务前会挂起并清空本
+CPU slot，切回后恢复到当前 CPU。该 API 立即按值复制 trapframe 并返回快照，
 避免向调用者暴露可能在 trap 返回后失效的借用引用。
 
 ### 3. `prepare_initial_frame`（`x86_64/ctx.rs:367-379`）
@@ -252,9 +258,13 @@ $f0–$f31 的寄存器编号。
 3. **异常表已排序**：`fixup_exception` 使用二分查找，要求异常表在调用前
    已通过 `init_exception_table()` 排序。
 
-4. **guard 生命周期**：`ExceptionContextGuard` 必须覆盖 trap handler 整个
-   执行期。guard 提前 drop 会导致 `active_exception_context()` 返回
-   过期指针。
+4. **guard 生命周期与迁移**：`ExceptionContextGuard` 必须覆盖 trap handler
+   整个执行期。guard 记录安装时的 per-CPU slot；调度器切离安装者任务前必须挂起并
+   清空当前 CPU slot，切回后恢复到当前 CPU。Drop 必须同时处理原始 slot 和迁移后
+   的当前 CPU slot，避免 trap handler 阻塞/迁移后留下 stale active-exception 标记
+   或在恢复执行后丢失异常上下文标记。嵌套 guard 的 `prev` 指向外层 live guard
+   的 `ExceptionContext`；只要外层 guard 未释放，该指针必须被视为当前任务仍处于
+   外层异常上下文的标记。
 
 5. **中断关闭**：`context_switch` 和 `UserContext::run` 的核心操作必须在
    中断关闭状态下执行。中断关闭保护了 per-CPU 状态和寄存器保存/恢复的原子性。
@@ -269,12 +279,13 @@ $f0–$f31 的寄存器编号。
 | `ExceptionContext` | `Copy` 类型，自动 `Send` | 自动 `Sync` |
 | `UserContext` | `Copy`/字段均为 `Send` | 自动 `Sync` |
 | `TaskContext` | 字段均为 `Send` | 字段均为 `Sync`，但不应跨 CPU 共享 |
-| `ExceptionContextGuard` | 不可 `Send`（per-CPU） | 不可 `Sync`（单线程使用） |
+| `ExceptionContextGuard` | 不应跨线程转移（绑定安装时 slot） | 不可共享使用 |
 
 - `TaskContext` 的 `switch_to` 方法接受 `&mut self`，天然独占。
   上下文切换在关中断下执行，防止并发访问。
-- `ACTIVE_EXCEPTION_CONTEXT_PTR` 为 per-CPU 变量，不同 CPU 访问各自副本，
-  无跨 CPU 竞争。
+- `ACTIVE_EXCEPTION_CONTEXT_PTR` 为 per-CPU 变量。安装路径写当前 CPU 副本；
+  迟到的 Drop 可能在迁移后访问原 CPU slot，也可能需要清理迁移后当前 CPU 的恢复
+  标记，因此恢复路径必须使用 CAS，不能无条件覆盖任一 CPU slot。
 - `IRQ` 和 `PAGE_FAULT` 分布式切片为编译期静态数据，运行时只读。
 
 ## 威胁分析
@@ -284,11 +295,11 @@ $f0–$f31 的寄存器编号。
 | T-01 | 用户通过 `user_copy` 传入恶意地址导致内核 panic | 高 | `user_copy` 访问无效用户指针且异常表条目缺失 | 异常表机制覆盖所有 `copy_user.S` 中的访存指令；`fixup_exception` 拦截内核态 Page Fault 并恢复到安全路径 |
 | T-02 | trap frame 布局与汇编不一致导致寄存器错位 | 高 | 修改 `ExceptionContext` 字段顺序但未同步汇编 | `trapframe_size` 编译期常量注入汇编；`repr(C)` 保证内存布局可预测 |
 | T-03 | LoongArch64 `emulate_unaligned` 解码未知指令导致寄存器损坏 | 高 | 故障指令为非预期的操作码 | 未匹配的操作码返回 `Err(UnalignedError)`，不修改寄存器；trap handler panic 而非继续执行 |
-| T-04 | `active_exception_context()` 返回过期指针 | 高 | NMI handler 在 guard drop 后使用返回的引用 | 文档声明返回引用仅在当前 trap 上下文中有效；调用者应作为瞬时快照使用，不持久存储 |
+| T-04 | `active_exception_context()` 返回过期或 stale trapframe | 高 | trap handler 阻塞/迁移后原 CPU slot 未清理，或调用者持久保存快照来源 | API 只返回按值快照；context switch 挂起并清空当前 CPU slot、切回后恢复当前 CPU slot；guard Drop 用 CAS 恢复原始/当前 slot |
 | T-05 | `switch_to` 使用无效页表根导致 TLB 填充错误地址 | 高 | `TaskContext` 的页表根被错误设置 | `set_page_table_root` 接受 `HwPageTableRoot` 类型，由内核页表子系统保证有效性 |
 | T-06 | IDT/向量表条目指向错误地址 | 高 | 汇编符号名拼写错误或链接脚本问题 | `trap_handler_table` 为汇编定义的固定大小数组；IDT 初始化通过 `set_handler_addr` 填充 |
 | T-07 | 中断未关闭时调用 `switch_to` 或 `run` | 中 | 调用者违反调用约束 | `run()` 内部调用 `disable_local_irq()`；`switch_to` 要求调用者保证关中断 |
-| T-08 | `ExceptionContextGuard` 嵌套导致 per-CPU 指针被覆盖 | 低 | trap handler 执行期间再次触发异常 | `swap` 语义保存前一个值，guard drop 时恢复；深层嵌套通过 guard 链正确恢复 |
+| T-08 | `ExceptionContextGuard` 嵌套导致 per-CPU 指针被覆盖 | 低 | trap handler 执行期间再次触发异常 | `swap` 语义保存前一个值，guard drop 时用 CAS 恢复；深层嵌套通过 guard 链正确恢复，且不会覆盖后续新 trap |
 | T-09 | LoongArch64 用户态构造恶意非对齐指令字 | 高 | 用户态程序执行非对齐访问，故障指令字被 `emulate_unaligned` 解码为意外操作 | `emulate_unaligned` 仅修改指令编码中指定的目标寄存器；未匹配操作码返回错误不修改任何状态；操作码掩码仅匹配已知指令类型 |
 | T-10 | `init_trap()` 被重复调用导致硬件状态不一致 | 中 | 二次调用覆盖 GDT/IDT/向量表等已激活的硬件结构 | 由调用者保证仅调用一次（boot 阶段单线程执行）；无运行时防护 |
 | T-11 | x86_64 `orig_rax` 被恶意篡改导致 syscall 重启异常 | 中 | 用户态通过信号处理器修改 trap frame 中的 `orig_rax` | `orig_rax` 仅在 `syscall_entry` 汇编中写入，用户态无法直接修改；信号 delivery 代码通过 `syscall_restart_error()` 判断重启条件 |
@@ -305,6 +316,7 @@ $f0–$f31 的寄存器编号。
 | F-05 | GDT/IDT 初始化顺序错误 | `init_trap()` 调用前 per-CPU 未初始化 | 段寄存器加载失败 | CPU 异常 | 1 | 文档标注前置条件；boot 代码按固定顺序调用 |
 | F-06 | FP 状态跨任务泄漏 | `fp-simd` 未启用但任务使用 FP 指令 | FP 寄存器包含前一个任务数据 | 信息泄漏 | 2 | 未启用 `fp-simd` 时不保存/恢复；依赖内核配置禁用用户态 FP |
 | F-07 | `ExceptionContextGuard` 提前 drop | trap handler 中 guard 被 shadow 或手动 drop | `active_exception_context()` 返回错误指针 | NMI 看门狗获取过期快照 | 2 | guard 声明为 handler 第一个局部变量，生命周期覆盖整个函数 |
+| F-13 | `ExceptionContextGuard` 迟到 drop 写错 CPU slot | trap handler 中阻塞并迁移，Drop 时重新计算当前 CPU | 原 CPU长期保持 stale active-exception 标记，或迁移后当前 CPU 标记未恢复 | `check_preempt_pending()` 一直跳过抢占，或 trap handler 后半段错误允许抢占 | 1 | guard 保存原始 slot 并 CAS 恢复；context switch 挂起/恢复当前 CPU slot |
 | F-08 | `emulate_unaligned` 内部 `.unwrap()` panic | 非对齐指令解码成功但实际访问故障（页不存在） | 当前 CPU trap handler panic | 系统崩溃 | 1 | `_unaligned_read`/`_unaligned_write` 汇编辅助函数含异常表条目，通常能安全恢复；若异常表未覆盖则 panic |
 | F-09 | trap handler 内 panic 触发 double fault | panic 过程中再次触发异常 | panic unwind 路径访问无效内存 | 系统不可恢复 | 1 | panic handler 应最小化操作；x86_64 #DF 有独立栈（TSS IST） |
 | F-10 | `init_trap` 重复调用导致 IDT/向量表重置 | boot 代码逻辑错误 | 中断配置被覆盖 | 后续中断处理异常 | 1 | 前置条件约束（仅调用一次）；无运行时防护 |
