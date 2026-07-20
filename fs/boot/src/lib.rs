@@ -3,6 +3,12 @@
 // See LICENSES for license details.
 
 //! Filesystem namespace preparation during kernel boot.
+//!
+//! This crate selects the root block device and builds the initial mount
+//! namespace. The concrete root filesystem is supplied through
+//! [`fs_block::FileSystemType`], so boot code does not branch on filesystem or
+//! backend names. Direct tmpfs, procfs, devfs, and bpffs construction here is
+//! initial namespace layout policy rather than filesystem-type dispatch.
 
 #![cfg_attr(all(not(test), not(doc)), no_std)]
 
@@ -219,7 +225,7 @@ fn mount_root_super_block() -> Arc<kvfs::SuperBlock> {
         handle.location(),
     );
 
-    let fs = match mount_configured_root(handle) {
+    let fs = match fs_block::FileSystemType::mount_bdev(handle, StatFsFlags::empty()) {
         Ok(fs) => fs,
         Err(e) => {
             error!("Failed to mount root filesystem: {e:?}");
@@ -252,21 +258,6 @@ fn select_root_block(devs: &mut Vec<ClassDevice<BlockDeviceImpl>>) -> ClassDevic
     {
         devs.pop().expect("No block device found!")
     }
-}
-
-fn mount_configured_root(dev: ClassDevice<BlockDeviceImpl>) -> kvfs::VfsResult<Arc<SuperBlock>> {
-    #[cfg(feature = "ext4")]
-    if kbuild_config::KFEAT_FS_EXT4 {
-        return rsext4_vfs::Ext4Filesystem::mount_bdev(dev);
-    }
-
-    #[cfg(feature = "fat")]
-    if kbuild_config::KFEAT_FS_FAT {
-        return Ok(fat::FatFilesystem::mount_bdev(dev));
-    }
-
-    let _ = dev;
-    Err(kvfs::VfsError::OperationNotSupported)
 }
 
 /// Mounts the host-share 9P filesystem into the initial namespace.

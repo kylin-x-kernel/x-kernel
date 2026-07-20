@@ -757,10 +757,10 @@ impl AddressSpaceOperations for MemoryNode {
         Ok(())
     }
 
-    fn set_len(&self, _mapping: &AddressSpace, len: u64) -> VfsResult<()> {
+    fn set_len(&self, mapping: &AddressSpace, len: u64) -> VfsResult<()> {
         self.inode.as_file()?;
         self.inode.metadata.lock().size = len;
-        Ok(())
+        mapping.truncate_pagecache(len)
     }
 
     fn write_begin(&self, _mapping: &AddressSpace, _request: WriteBeginRequest) -> VfsResult<()> {

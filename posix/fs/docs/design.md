@@ -73,6 +73,7 @@ core/ksyscall
 │  Internal object dispatch                                │
 │   ├─ kfd::FileLike                                       │
 │   ├─ kvfs::{Filename, VfsFile, MetadataUpdate, MountFlags}  │
+│   ├─ supported nodev filesystem constructors               │
 │   ├─ fs_context::FsStruct                                │
 │   └─ kfd_objects::PipeEndpoint interop for splice/fcntl  │
 └──────────────────────────────────────────────────────────┘
@@ -87,7 +88,7 @@ core/ksyscall
 | `dir` | 维护当前目录、根目录、目录创建和 `linux_dirent64` 输出 |
 | `namei` | 处理链接、删除、符号链接和重命名等命名空间变更 |
 | `metadata` | 修改所有者、权限和时间戳 |
-| `mount` | 把 Linux mount flags 映射到 `kvfs::MountFlags`，当前支持 tmpfs mount |
+| `mount` | 把 Linux mount flags 映射到 `kvfs::MountFlags`，并分派当前明确支持的 tmpfs/bpffs nodev mount |
 | `stat` | 转换 VFS metadata、access 检查和 statfs 信息 |
 | `ioctl` | 处理 `FIONBIO` 并把其它命令转交 `FileLike::ioctl` |
 | `sync` | 将同步请求转发到文件系统或打开对象所在文件系统 |

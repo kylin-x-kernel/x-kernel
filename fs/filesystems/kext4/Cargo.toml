@@ -13,4 +13,9 @@ categories = ["filesystem", "no-std"]
 default = []
 
 [dependencies]
+bitflags.workspace = true
 block = { workspace = true }
+
+[target.'cfg(target_os = "none")'.dependencies]
+ksync = { workspace = true }
+ktask = { workspace = true }

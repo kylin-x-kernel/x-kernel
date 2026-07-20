@@ -257,6 +257,22 @@ impl Dentry {
         self.vfs_inode().metadata()
     }
 
+    /// Refreshes cached inode metadata after a completed backing-store mutation.
+    ///
+    /// The supplied metadata must describe the inode identity already attached
+    /// to this dentry. Immutable identity and geometry fields are validated
+    /// before any cached attributes are changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::NotFound`] when this is a negative dentry, or
+    /// [`VfsError::InvalidInput`] when the metadata does not match the attached
+    /// inode identity.
+    pub fn update_metadata_after_backing_change(&self, metadata: &Metadata) -> VfsResult<()> {
+        let inode = self.0.inode.lock().clone().ok_or(VfsError::NotFound)?;
+        inode.update_metadata_after_backing_change(metadata)
+    }
+
     /// Increments the instantiated inode link count.
     pub fn increment_link_count(&self) {
         self.vfs_inode().increment_link_count();
@@ -265,6 +281,18 @@ impl Dentry {
     /// Decrements the instantiated inode link count.
     pub fn decrement_link_count(&self) {
         self.vfs_inode().decrement_link_count();
+    }
+
+    /// Sets the instantiated inode link count from a backing-filesystem
+    /// namespace mutation.
+    pub fn set_link_count(&self, link_count: u64) {
+        self.vfs_inode().set_link_count(link_count);
+    }
+
+    /// Sets the instantiated inode change time from a backing-filesystem
+    /// namespace mutation.
+    pub fn set_changed_at(&self, timestamp: core::time::Duration) {
+        self.vfs_inode().set_changed_at(timestamp);
     }
 
     /// Updates the instantiated inode change time to the current time.
@@ -370,7 +398,7 @@ impl Dentry {
         self.vfs_inode().downcast()
     }
 
-    /// Return the inode identity referenced by this directory entry.
+    /// Returns the inode identity referenced by this positive directory entry.
     pub(crate) fn vfs_inode(&self) -> Arc<VfsInode> {
         self.0
             .inode
@@ -1400,6 +1428,33 @@ mod tests_dentry {
         assert_eq!(metadata.size, 7);
 
         assert_eq!(ops.update_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[def_test]
+    fn test_dentry_backing_metadata_refresh_validates_entry_state() {
+        let fs = Arc::new(MockFilesystem);
+        let (entry, _) = make_file_entry(fs, 2, None, "leaf");
+        let mut updated = entry.metadata();
+        updated.nlink = 2;
+        updated.size = 11;
+
+        entry
+            .update_metadata_after_backing_change(&updated)
+            .unwrap();
+        assert_eq!(entry.metadata().nlink, 2);
+        assert_eq!(entry.metadata().size, 11);
+
+        updated.inode = 3;
+        assert_eq!(
+            entry.update_metadata_after_backing_change(&updated),
+            Err(VfsError::InvalidInput)
+        );
+
+        let negative = Dentry::new_negative(None, String::from("missing"));
+        assert_eq!(
+            negative.update_metadata_after_backing_change(&updated),
+            Err(VfsError::NotFound)
+        );
     }
 
     #[def_test]

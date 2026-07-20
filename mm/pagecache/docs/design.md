@@ -31,10 +31,11 @@ inode-owned content-object 模型。
 - `src/lib.rs`
 - `MappingKind::{InMemory, FileBacked}`
 - source-backed `MappingOps`
+- `filemap_add_folio()` 的非覆盖式 readahead completion
 - final teardown through `Mapping::truncate_final()`
 - RAII `EvictRegistration`
 - 不包含 VMA/page-table/fault dispatch
-- 不包含 readahead、swap、reclaim 或完整文件系统 writeback policy
+- 不包含自适应 readahead policy、swap、reclaim 或完整文件系统 writeback policy
 
 ## 架构
 
@@ -94,6 +95,15 @@ file open instance / mmap instance
 7. `Mapping::truncate_final()` 属于对象生命周期结束路径，直接清理 cached
    folio，不进入 ordinary writeback。
 
+### readahead completion
+
+1. VFS `ReadaheadControl` 保存 mapping 与连续 folio window，对应 Linux
+   `readahead_control` 的最小语义层。
+2. 文件系统读取 backing bytes 后调用 `filemap_add_folio()` 发布 folio。
+3. 若前台 read/write 已先插入同一 index，readahead completion 返回 `false`，不得覆盖
+   现有 folio，尤其不得用陈旧磁盘内容覆盖 dirty 数据。
+4. 当前实现允许竞态双方重复读取 backing storage；不额外维护 claim table 或 request ID。
+
 ### evict listener
 
 1. `Mapping::add_evict_listener()` 返回 `EvictRegistration`。
@@ -149,6 +159,10 @@ file open instance / mmap instance
 10. evict listener registration uses RAII.
    原因：listener lifetime 是资源生命周期；Rust guard/drop 语义比手动保存
    integer id 更能避免泄漏、重复 unregister 和 dangling callback。
+11. readahead 不保存独立 claim 状态。
+   原因：Linux 在 page cache 中插入 locked folio 后发起 I/O；当前同步实现只需保持
+   `filemap_add_folio()` 的非覆盖插入语义即可解决前台竞态，额外 claim tree/ID 会复制
+   page-cache residency 状态。
 
 ## Drop / 资源释放
 

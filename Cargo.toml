@@ -103,6 +103,7 @@ procfs = { path = "fs/filesystems/procfs" }
 devfs = { path = "fs/filesystems/devfs" }
 fs9p = { path = "fs/filesystems/fs9p", default-features = false }
 rsext4_vfs = { path = "fs/bridges/rsext4_vfs" }
+kext4_vfs = { path = "fs/bridges/kext4_vfs" }
 v9fs = { path = "fs/bridges/v9fs" }
 memaddr = { path = "mm/memaddr" }
 anon = { path = "mm/anon" }

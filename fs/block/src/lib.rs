@@ -2,15 +2,41 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Helpers for adapting kernel block devices to filesystem code.
+//! Block-device adaptation for filesystems.
+//!
+//! [`SeekableDisk`] adapts block I/O to byte-oriented filesystem libraries.
+//! [`FileSystemType`] is the Kconfig-selected block filesystem mount contract;
+//! the selected filesystem crate supplies its implementation at link time.
 #![cfg_attr(all(not(test), not(doc)), no_std)]
 
 extern crate alloc;
 
-use alloc::{boxed::Box, vec};
+use alloc::{boxed::Box, sync::Arc, vec};
 use core::mem;
 
-use kclass::{ClassDevice, prelude::*};
+use kclass::{BlockDeviceImpl, ClassDevice, prelude::*};
+use kvfs::{StatFsFlags, SuperBlock, VfsResult};
+
+/// The block-backed filesystem type selected by Kconfig.
+///
+/// This is the mount capability of Linux `struct file_system_type`, expressed
+/// as a Rust single-provider interface because the current Kconfig model
+/// selects exactly one root filesystem implementation per kernel image.
+#[kiface::interface]
+pub trait FileSystemType {
+    /// Mounts the selected filesystem from a block device.
+    ///
+    /// # Errors
+    ///
+    /// Returns a filesystem-specific error when the device cannot be mounted.
+    fn mount_bdev(
+        device: ClassDevice<BlockDeviceImpl>,
+        flags: StatFsFlags,
+    ) -> VfsResult<Arc<SuperBlock>>;
+}
+
+#[doc(hidden)]
+pub use kiface;
 
 /// Consume `cnt` bytes from the front of a slice.
 fn take<'a>(buf: &mut &'a [u8], cnt: usize) -> &'a [u8] {

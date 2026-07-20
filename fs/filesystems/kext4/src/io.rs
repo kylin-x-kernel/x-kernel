@@ -6,10 +6,13 @@ use alloc::{sync::Arc, vec};
 
 use block::BlockDevice;
 
-use crate::{Ext4Error, Ext4Result, FilesystemBlock};
+use crate::{
+    Ext4Error, Ext4Result, FilesystemBlock,
+    jbd2::{JournalReplayBlockWriter, JournalTargetBlock},
+};
 
 /// Adapts device blocks to the ext4 filesystem block address space.
-pub struct FilesystemDevice {
+pub(crate) struct FilesystemDevice {
     device: Arc<dyn BlockDevice>,
     device_block_size: usize,
     filesystem_block_size: usize,
@@ -99,18 +102,11 @@ impl FilesystemDevice {
         Ok(())
     }
 
-    /// Returns the ext4 filesystem block size.
-    pub const fn block_size(&self) -> usize {
+    pub(crate) const fn block_size(&self) -> usize {
         self.filesystem_block_size
     }
 
-    /// Returns the number of addressable ext4 filesystem blocks.
-    pub const fn block_count(&self) -> u64 {
-        self.filesystem_blocks
-    }
-
-    /// Reads one or more complete contiguous filesystem blocks.
-    pub fn read_blocks(
+    pub(crate) fn read_blocks(
         &self,
         start: FilesystemBlock,
         block_count: u32,
@@ -143,8 +139,215 @@ impl FilesystemDevice {
         Ok(())
     }
 
-    /// Returns the underlying hardware block size.
-    pub const fn device_block_size(&self) -> usize {
-        self.device_block_size
+    /// Writes one or more complete contiguous filesystem blocks.
+    pub(crate) fn write_contiguous_blocks(
+        &self,
+        start: FilesystemBlock,
+        block_count: u32,
+        input: &[u8],
+    ) -> Ext4Result<()> {
+        let expected = usize::try_from(block_count)
+            .map_err(|_| Ext4Error::Overflow)?
+            .checked_mul(self.filesystem_block_size)
+            .ok_or(Ext4Error::Overflow)?;
+        if input.len() != expected {
+            return Err(Ext4Error::InvalidBufferLength {
+                expected,
+                actual: input.len(),
+            });
+        }
+
+        let end = start
+            .get()
+            .checked_add(u64::from(block_count))
+            .ok_or(Ext4Error::Overflow)?;
+        if end > self.filesystem_blocks {
+            return Err(Ext4Error::OutOfBounds);
+        }
+
+        let device_block = start
+            .get()
+            .checked_mul(self.blocks_per_filesystem_block)
+            .ok_or(Ext4Error::Overflow)?;
+        let device_block_count = u64::from(block_count)
+            .checked_mul(self.blocks_per_filesystem_block)
+            .ok_or(Ext4Error::Overflow)?;
+        self.write_contiguous_device_blocks(device_block, device_block_count, input)?;
+        Ok(())
+    }
+
+    /// Flushes pending device writes.
+    pub(crate) fn flush(&self) -> Ext4Result<()> {
+        self.device.flush().map_err(Ext4Error::Device)
+    }
+
+    fn write_contiguous_device_blocks(
+        &self,
+        start: u64,
+        block_count: u64,
+        input: &[u8],
+    ) -> Ext4Result<()> {
+        let expected = usize::try_from(block_count)
+            .map_err(|_| Ext4Error::Overflow)?
+            .checked_mul(self.device_block_size)
+            .ok_or(Ext4Error::Overflow)?;
+        if input.len() != expected {
+            return Err(Ext4Error::InvalidBufferLength {
+                expected,
+                actual: input.len(),
+            });
+        }
+        let end = start.checked_add(block_count).ok_or(Ext4Error::Overflow)?;
+        if end > self.device.num_blocks() {
+            return Err(Ext4Error::OutOfBounds);
+        }
+
+        self.device
+            .write_block(start, input)
+            .map_err(Ext4Error::Device)
+    }
+}
+
+impl JournalReplayBlockWriter for FilesystemDevice {
+    fn write_replay_block(&self, block: JournalTargetBlock, input: &[u8]) -> Ext4Result<()> {
+        self.write_contiguous_blocks(FilesystemBlock::new(block.get()), 1, input)
+    }
+
+    fn flush_replay(&self) -> Ext4Result<()> {
+        self.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+    use std::sync::Mutex;
+
+    use block::{Device, DeviceKind, DriverError, DriverResult};
+
+    use super::*;
+
+    const DEVICE_BLOCK_SIZE: usize = 512;
+
+    struct MemoryBlockDevice {
+        bytes: Mutex<Vec<u8>>,
+        write_lengths: Mutex<Vec<usize>>,
+        is_flushed: Mutex<bool>,
+    }
+
+    impl MemoryBlockDevice {
+        fn new(device_blocks: usize) -> Self {
+            Self {
+                bytes: Mutex::new(vec![0; device_blocks * DEVICE_BLOCK_SIZE]),
+                write_lengths: Mutex::new(Vec::new()),
+                is_flushed: Mutex::new(false),
+            }
+        }
+    }
+
+    impl Device for MemoryBlockDevice {
+        fn name(&self) -> &str {
+            "kext4-memory-block-device"
+        }
+
+        fn device_kind(&self) -> DeviceKind {
+            DeviceKind::Block
+        }
+    }
+
+    impl BlockDevice for MemoryBlockDevice {
+        fn num_blocks(&self) -> u64 {
+            (self.bytes.lock().unwrap().len() / DEVICE_BLOCK_SIZE) as u64
+        }
+
+        fn block_size(&self) -> usize {
+            DEVICE_BLOCK_SIZE
+        }
+
+        fn read_block(&self, block_id: u64, output: &mut [u8]) -> DriverResult {
+            let start = usize::try_from(block_id)
+                .map_err(|_| DriverError::InvalidInput)?
+                .checked_mul(DEVICE_BLOCK_SIZE)
+                .ok_or(DriverError::InvalidInput)?;
+            let end = start
+                .checked_add(output.len())
+                .ok_or(DriverError::InvalidInput)?;
+            output.copy_from_slice(
+                self.bytes
+                    .lock()
+                    .unwrap()
+                    .get(start..end)
+                    .ok_or(DriverError::InvalidInput)?,
+            );
+            Ok(())
+        }
+
+        fn write_block(&self, block_id: u64, input: &[u8]) -> DriverResult {
+            self.write_lengths.lock().unwrap().push(input.len());
+            let start = usize::try_from(block_id)
+                .map_err(|_| DriverError::InvalidInput)?
+                .checked_mul(DEVICE_BLOCK_SIZE)
+                .ok_or(DriverError::InvalidInput)?;
+            let end = start
+                .checked_add(input.len())
+                .ok_or(DriverError::InvalidInput)?;
+            self.bytes
+                .lock()
+                .unwrap()
+                .get_mut(start..end)
+                .ok_or(DriverError::InvalidInput)?
+                .copy_from_slice(input);
+            Ok(())
+        }
+
+        fn flush(&self) -> DriverResult {
+            *self.is_flushed.lock().unwrap() = true;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn writes_filesystem_blocks_through_device_block_mapping() {
+        let device = Arc::new(MemoryBlockDevice::new(8));
+        let filesystem = FilesystemDevice::open(device.clone(), 1024, 4).unwrap();
+        let input = vec![0x5a; 1024];
+
+        filesystem
+            .write_contiguous_blocks(FilesystemBlock::new(2), 1, &input)
+            .unwrap();
+
+        let bytes = device.bytes.lock().unwrap();
+        assert_eq!(&bytes[2048..3072], input.as_slice());
+        assert_eq!(device.write_lengths.lock().unwrap().as_slice(), &[1024]);
+    }
+
+    #[test]
+    fn rejects_partial_contiguous_filesystem_block_write() {
+        let device = Arc::new(MemoryBlockDevice::new(8));
+        let filesystem = FilesystemDevice::open(device, 1024, 4).unwrap();
+
+        assert_eq!(
+            filesystem.write_contiguous_blocks(FilesystemBlock::new(1), 1, &[0; 512]),
+            Err(Ext4Error::InvalidBufferLength {
+                expected: 1024,
+                actual: 512,
+            })
+        );
+    }
+
+    #[test]
+    fn replay_writer_writes_one_block_and_flushes() {
+        let device = Arc::new(MemoryBlockDevice::new(8));
+        let filesystem = FilesystemDevice::open(device.clone(), 1024, 4).unwrap();
+        let input = vec![0xa5; 1024];
+
+        filesystem
+            .write_replay_block(JournalTargetBlock::new(1), &input)
+            .unwrap();
+        filesystem.flush_replay().unwrap();
+
+        let bytes = device.bytes.lock().unwrap();
+        assert_eq!(&bytes[1024..2048], input.as_slice());
+        assert!(*device.is_flushed.lock().unwrap());
     }
 }

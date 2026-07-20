@@ -3,6 +3,9 @@
 // See LICENSES for license details.
 
 //! FAT filesystem implementation.
+//!
+//! When selected as the root filesystem, this crate provides
+//! [`fs_block::FileSystemType`].
 #![cfg_attr(all(not(test), not(doc)), no_std)]
 #![feature(likely_unlikely)]
 #![allow(clippy::new_ret_no_self)]
@@ -22,6 +25,16 @@ pub use fs::FatFilesystem;
 use fs::FatFilesystemGuard;
 use fs_block::SeekableDisk;
 use kclass::{BlockDeviceImpl, ClassDevice};
+
+#[fs_block::kiface::provide]
+impl fs_block::FileSystemType {
+    fn mount_bdev(
+        device: ClassDevice<BlockDeviceImpl>,
+        _flags: kvfs::StatFsFlags,
+    ) -> kvfs::VfsResult<alloc::sync::Arc<kvfs::SuperBlock>> {
+        Ok(FatFilesystem::mount_bdev(device))
+    }
+}
 
 pub(crate) struct FatDisk(SeekableDisk);
 

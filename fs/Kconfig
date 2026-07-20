@@ -7,19 +7,36 @@ config KFEAT_FS
       Enable the kernel filesystem stack and related runtime support.
 
 choice
-    prompt "Default filesystem"
+    prompt "Root filesystem"
     depends on KFEAT_FS
     default KFEAT_FS_EXT4
 
 config KFEAT_FS_EXT4
     bool "ext4"
     help
-      Use ext4 as the default root filesystem backend.
+      Use ext4 as the root filesystem.
 
 config KFEAT_FS_FAT
     bool "FAT"
     help
-      Use FAT as the default root filesystem backend.
+      Use FAT as the root filesystem.
+
+endchoice
+
+choice
+    prompt "Ext4 implementation"
+    depends on KFEAT_FS_EXT4
+    default KFEAT_FS_EXT4_KEXT4
+
+config KFEAT_FS_EXT4_RSEXT4
+    bool "rsext4 compatibility backend"
+    help
+      Use the current writable rsext4 compatibility backend.
+
+config KFEAT_FS_EXT4_KEXT4
+    bool "KExt4 checked backend (experimental)"
+    help
+      Use the checked KExt4 core through its KVFS adapter.
 
 endchoice
 

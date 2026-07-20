@@ -1014,6 +1014,7 @@ mod tests {
         inode: u64,
         node_type: NodeType,
         data: crate::Mutex<Vec<u8>>,
+        release_write_counts: crate::Mutex<Vec<usize>>,
         magic_link: Option<Arc<TestMagicLink>>,
     }
 
@@ -1028,6 +1029,7 @@ mod tests {
                 inode,
                 node_type,
                 data: crate::Mutex::new(data.to_vec()),
+                release_write_counts: crate::Mutex::new(Vec::new()),
                 magic_link,
             }
         }
@@ -1105,6 +1107,13 @@ mod tests {
             }
             data[offset..offset + buf.len()].copy_from_slice(buf);
             Ok(buf.len())
+        }
+
+        fn release(&self, inode: &VfsInode, file: &VfsFile) -> VfsResult<()> {
+            if file.mode().contains(FMode::WRITE) {
+                self.release_write_counts.lock().push(inode.write_count());
+            }
+            Ok(())
         }
 
         fn magic_link(self: Arc<Self>) -> Option<Arc<dyn MagicLinkOps>> {
@@ -1474,5 +1483,28 @@ mod tests {
             .unwrap();
         assert_eq!(leaf.name(), "leaf");
         assert_eq!(tree.magic_dir.last_intent(), Some(LookupIntent::Stat));
+    }
+
+    #[def_test]
+    fn writable_open_lifetime_updates_inode_write_count() {
+        let tree = test_tree();
+        let inode = tree.target.inode().clone();
+        let file_ops = inode.downcast::<TestFile>().unwrap();
+
+        let first = dentry_open(tree.target.clone(), OpenFlags::WRITE_ONLY.bits()).unwrap();
+        assert_eq!(inode.write_count(), 1);
+        let second = dentry_open(tree.target.clone(), OpenFlags::WRITE_ONLY.bits()).unwrap();
+        assert_eq!(inode.write_count(), 2);
+
+        drop(first);
+        assert_eq!(inode.write_count(), 1);
+        {
+            let release_write_counts = file_ops.release_write_counts.lock();
+            assert_eq!(release_write_counts.as_slice(), &[2]);
+        }
+        drop(second);
+        assert_eq!(inode.write_count(), 0);
+        let release_write_counts = file_ops.release_write_counts.lock();
+        assert_eq!(release_write_counts.as_slice(), &[2, 1]);
     }
 }

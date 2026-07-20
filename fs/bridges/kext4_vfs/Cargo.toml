@@ -1,0 +1,27 @@
+[package]
+name = "kext4_vfs"
+description = "VFS bridge for the checked KExt4 filesystem core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[features]
+default = []
+times = ["dep:khal"]
+
+[dependencies]
+block.workspace = true
+fs_block.workspace = true
+iov_iter.workspace = true
+kclass = { workspace = true, features = ["block"] }
+kerrno.workspace = true
+kext4.workspace = true
+khal = { workspace = true, optional = true }
+klogger.workspace = true
+ksync.workspace = true
+kvfs.workspace = true
+unittest.workspace = true

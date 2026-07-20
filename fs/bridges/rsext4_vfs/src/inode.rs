@@ -514,7 +514,7 @@ impl AddressSpaceOperations for Inode {
         Ok(request.copied())
     }
 
-    fn readahead(&self, mapping: &AddressSpace, control: ReadaheadControl) -> VfsResult<()> {
+    fn readahead(&self, _mapping: &AddressSpace, control: ReadaheadControl) -> VfsResult<()> {
         if control.count() == 0 {
             return Ok(());
         }
@@ -533,7 +533,7 @@ impl AddressSpaceOperations for Inode {
             let page_index = control.start_index() + (copied / BLOCK_SIZE) as u64;
             let page_off = copied % BLOCK_SIZE;
             let step = (read - copied).min(BLOCK_SIZE - page_off);
-            mapping.cache_folio_range(page_index, page_off, &data[copied..copied + step])?;
+            control.complete_folio(page_index, page_off, &data[copied..copied + step])?;
             copied += step;
         }
         Ok(())
@@ -552,13 +552,13 @@ impl AddressSpaceOperations for Inode {
         })
     }
 
-    fn set_len(&self, _mapping: &AddressSpace, len: u64) -> VfsResult<()> {
+    fn set_len(&self, mapping: &AddressSpace, len: u64) -> VfsResult<()> {
         {
             let mut state = self.fs.lock();
             let (fs, dev) = state.split();
             rsext4::file::truncate_with_ino(dev, fs, self.ino, len).map_err(into_vfs_err)?;
         }
-        Ok(())
+        mapping.truncate_pagecache(len)
     }
 }
 

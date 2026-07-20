@@ -387,6 +387,11 @@ impl VfsFileBuilder {
         self.mode.remove(FMode::CREATED);
     }
 
+    /// Returns the access mode requested for this in-progress open.
+    pub fn mode(&self) -> FMode {
+        self.mode
+    }
+
     pub(crate) fn was_created(&self) -> bool {
         self.mode.contains(FMode::CREATED)
     }
@@ -420,14 +425,36 @@ impl VfsFileBuilder {
         if default_direct(location.path(), self.flags) {
             self.mode.insert(FMode::CAN_ODIRECT);
         }
-        operations.open(location.inode().as_ref(), &mut self)?;
+        let holds_write_access = self.mode.contains(FMode::WRITE)
+            && !matches!(
+                location.inode().node_type(),
+                NodeType::CharacterDevice
+                    | NodeType::BlockDevice
+                    | NodeType::Fifo
+                    | NodeType::Socket
+            );
+        if holds_write_access {
+            location.inode().acquire_write_access();
+            self.mode.insert(FMode::WRITER);
+        }
+        if let Err(error) = operations.open(location.inode().as_ref(), &mut self) {
+            if holds_write_access {
+                location.inode().release_write_access();
+            }
+            return Err(error);
+        }
         self.flags.remove(
             OpenFlags::CREATE
                 | OpenFlags::EXCLUSIVE
                 | OpenFlags::NO_CONTROLLING_TTY
                 | OpenFlags::TRUNCATE,
         );
-        self.mark_opened()?;
+        if let Err(error) = self.mark_opened() {
+            if holds_write_access {
+                location.inode().release_write_access();
+            }
+            return Err(error);
+        }
         self.finish()
     }
 
@@ -887,11 +914,15 @@ impl VfsFile {
 impl Drop for VfsFile {
     fn drop(&mut self) {
         let old_mode = self.mode.fetch_and(!FMode::OPENED.bits(), Ordering::AcqRel);
-        let release_result = if FMode::from_bits_truncate(old_mode).contains(FMode::OPENED) {
+        let old_mode = FMode::from_bits_truncate(old_mode);
+        let release_result = if old_mode.contains(FMode::OPENED) {
             self.operations().release(self.inode(), self)
         } else {
             Ok(())
         };
+        if old_mode.contains(FMode::WRITER) {
+            self.inode().release_write_access();
+        }
 
         if let Err(err) = release_result {
             let path = self

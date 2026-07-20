@@ -440,30 +440,24 @@ impl Mapping {
         f(&mut folio)
     }
 
-    /// Adds or updates one page-cache folio from backing-store data.
+    /// Adds one page-cache folio from backing-store data if it is still absent.
     ///
     /// This is the page-cache insertion side used by readahead after the
     /// backing filesystem has already filled a byte range.
-    pub fn filemap_add_folio(&self, index: PageIndex, offset: usize, src: &[u8]) -> KResult<()> {
-        let folio = {
-            let mut inner = self.inner.lock();
-            if let Some(folio) = inner.pages.get(&index) {
-                folio.clone()
-            } else {
-                let mut folio = Folio::new_zeroed()?;
-                folio.set_warn_on_dirty_drop(self.warn_on_dirty_drop());
-                let folio = Arc::new(Mutex::new(folio));
-                inner.pages.insert(index, folio.clone());
-                folio
-            }
-        };
-        let mut folio = folio.lock();
+    pub fn filemap_add_folio(&self, index: PageIndex, offset: usize, src: &[u8]) -> KResult<bool> {
         let end = offset.checked_add(src.len()).ok_or(KError::InvalidInput)?;
         if end > PAGE_SIZE_4K {
             return Err(KError::InvalidInput);
         }
+        let mut folio = Folio::new_zeroed()?;
         folio.data()[offset..end].copy_from_slice(src);
-        Ok(())
+        folio.set_warn_on_dirty_drop(self.warn_on_dirty_drop());
+        let mut inner = self.inner.lock();
+        if inner.pages.contains_key(&index) {
+            return Ok(false);
+        }
+        inner.pages.insert(index, Arc::new(Mutex::new(folio)));
+        Ok(true)
     }
 
     /// Reads bytes from the mapping into `dst`.
@@ -744,11 +738,14 @@ impl Mapping {
                 .checked_mul(PAGE_SIZE_4K as u64)
                 .ok_or(KError::InvalidInput)?;
             let valid_len = len.saturating_sub(page_start).min(PAGE_SIZE_4K as u64) as usize;
+            folio.clear_dirty();
             folio.start_writeback();
             let result = write_folio_fn(index, &folio.data()[..valid_len], valid_len);
+            if result.is_err() {
+                folio.mark_dirty();
+            }
             folio.end_writeback();
             result?;
-            folio.clear_dirty();
             stats.wrote(1);
         }
         Ok(stats)
@@ -807,8 +804,8 @@ impl Mapping {
             }
             for (_, folio) in batch_folios.drain(..) {
                 let mut folio = folio.lock();
-                if result.is_ok() {
-                    folio.clear_dirty();
+                if result.is_err() {
+                    folio.mark_dirty();
                 }
                 folio.end_writeback();
             }
@@ -892,6 +889,7 @@ impl Mapping {
                 batch_start = page_start;
             }
             batch_data.extend_from_slice(&locked.data()[..valid_len]);
+            locked.clear_dirty();
             locked.start_writeback();
             drop(locked);
             batch_folios.push((index, folio));
@@ -1135,6 +1133,48 @@ mod tests {
     }
 
     #[def_test]
+    fn readahead_insertion_never_overwrites_an_existing_dirty_folio() {
+        let ops = RecordingOps::new(false);
+        let mapping = Mapping::new(MappingKind::FileBacked, (PAGE_SIZE_4K * 2) as u64, ops);
+        mapping
+            .write_from(PAGE_SIZE_4K as u64, b"dirty page")
+            .unwrap();
+
+        assert!(mapping.filemap_add_folio(0, 0, b"disk page zero").unwrap());
+        assert!(
+            !mapping
+                .filemap_add_folio(1, 0, b"stale disk page one")
+                .unwrap()
+        );
+
+        let observed = mapping.with_folio(1, |folio| {
+            let folio = folio.expect("dirty folio remains cached");
+            let observed = (folio.is_dirty(), folio.data()[..10].to_vec());
+            folio.clear_dirty();
+            observed
+        });
+        assert!(observed.0);
+        assert_eq!(observed.1.as_slice(), b"dirty page");
+    }
+
+    #[def_test]
+    fn foreground_insertion_wins_over_readahead_completion() {
+        let ops = RecordingOps::new(false);
+        let mapping = Mapping::new(MappingKind::FileBacked, PAGE_SIZE_4K as u64, ops);
+
+        mapping.write_from(0, b"foreground").unwrap();
+        assert!(!mapping.filemap_add_folio(0, 0, b"stale disk").unwrap());
+        let observed = mapping.with_folio(0, |folio| {
+            let folio = folio.expect("foreground folio remains cached");
+            let observed = (folio.is_dirty(), folio.data()[..10].to_vec());
+            folio.clear_dirty();
+            observed
+        });
+        assert!(observed.0);
+        assert_eq!(observed.1.as_slice(), b"foreground");
+    }
+
+    #[def_test]
     fn writeback_range_writes_only_intersecting_dirty_folios() {
         let ops = RecordingOps::new(false);
         let mapping = Mapping::new(
@@ -1286,6 +1326,47 @@ mod tests {
                 assert!(!folio.is_under_writeback());
             });
         }
+    }
+
+    #[def_test]
+    fn write_cache_pages_preserves_dirty_from_a_concurrent_writer() {
+        let ops = RecordingOps::new(false);
+        let mapping = Mapping::new(MappingKind::FileBacked, PAGE_SIZE_4K as u64, ops);
+        mapping.write_from(0, b"old").unwrap();
+
+        let mapping_during_io = mapping.clone();
+        let mut first_snapshot = Vec::new();
+        mapping
+            .write_cache_pages(0, u64::MAX, usize::MAX, PAGE_SIZE_4K, &mut |_, data| {
+                first_snapshot.extend_from_slice(&data[..3]);
+                mapping_during_io.write_from(0, b"new")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(first_snapshot, b"old");
+        let observed = mapping.with_folio(0, |folio| {
+            let folio = folio.expect("redirtied folio");
+            (
+                folio.is_dirty(),
+                folio.data()[..3].to_vec(),
+                folio.is_under_writeback(),
+            )
+        });
+        assert!(observed.0);
+        assert_eq!(observed.1.as_slice(), b"new");
+        assert!(!observed.2);
+
+        let mut second_snapshot = Vec::new();
+        mapping
+            .write_cache_pages(0, u64::MAX, usize::MAX, PAGE_SIZE_4K, &mut |_, data| {
+                second_snapshot.extend_from_slice(&data[..3]);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(second_snapshot, b"new");
+        mapping.with_folio(0, |folio| {
+            assert!(!folio.expect("clean folio").is_dirty());
+        });
     }
 
     #[def_test]

@@ -152,7 +152,7 @@ kfd resources / kvfs / device and pipe implementations
 | F-04 | 设备 open 失败 | 设备 file operations 拒绝 open 或初始化失败 | open 返回错误 | 终端相关程序无法打开目标设备 | 3 | 错误传播；设备语义由对应设备实现维护 |
 | F-05 | `fallocate` 后端写零返回 0 | 底层文件系统无法前进写入 | 返回 `WriteZero` | 操作失败但文件不应继续无限循环 | 2 | `write_zeros_range` 检测 0 字节写 |
 | F-06 | `sendfile`/`splice` 遇到 `WouldBlock` | 非阻塞源暂时无数据 | 已写入部分则返回部分进度，否则返回错误 | 调用方可轮询后重试 | 4 | `do_send` 保留部分写入语义 |
-| F-07 | `mount` 请求不支持的文件系统 | `fs_type != "tmpfs"` | 返回 `NoSuchDevice` | 用户态 mount 失败 | 3 | 显式检查 fs_type |
+| F-07 | `mount` 请求当前未支持的文件系统类型 | 类型不在 tmpfs/bpffs nodev 支持集合内 | 返回 `NoSuchDevice` | 用户态 mount 失败 | 3 | syscall 边界显式限制当前支持集合，不把 boot root provider 当成通用用户 mount registry |
 | F-08 | `syncfs` 目标不是文件或目录 | fd 指向 pipe/socket/设备 | 返回 `InvalidInput` | 当前同步请求失败 | 4 | downcast 后只 flush 文件系统对象 |
 | F-09 | `copy_file_range` 语义不完整 | 重叠和普通文件检查 TODO | 可能出现与 Linux 不一致的数据结果 | 相关应用复制行为异常 | 2 | 非零 flags 显式拒绝；其余限制实现前需要补充测试 |
 | F-10 | `fcntl` unsupported cmd 返回成功 | 兼容占位 | 应用误判某些控制操作已生效 | 可能产生行为差异 | 2 | warning 记录；有安全影响的命令应显式实现或拒绝 |

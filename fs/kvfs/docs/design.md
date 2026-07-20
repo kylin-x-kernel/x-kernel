@@ -10,7 +10,8 @@ traits 接入，POSIX 层负责把 syscall ABI 参数转换成 VFS 语义对象�
 
 - `src/open_flags.rs`：原始 `O_*` 参数的规范化与 open intent。
 - `src/namei.rs`：路径遍历和 open 流程。
-- `src/node/`：dentry、inode 及文件系统 operation traits。
+- `src/node/`：dentry、inode、live inode identity cache 及文件系统 operation traits。
+- `src/address_space.rs`：inode-owned PageCache、writeback 与 truncate/invalidation 边界。
 - `src/file.rs`：打开文件及其可变状态。
 - `src/mount.rs`、`src/super_block.rs`：挂载树和文件系统实例。
 - `src/anon_inode.rs`：匿名 inode pseudo filesystem，用于 eventfd、epoll、
@@ -43,6 +44,14 @@ POSIX syscall ABI (u32 flags)
 文件系统私有状态，不重复保存 root；这对应 Linux 中 `super_block.s_root` 的所有权
 边界，也避免私有状态和 root inode 之间形成引用环。
 
+每个 live backing inode number 通过 filesystem `InodeCache` 复用同一个 `VfsInode`；hard
+link、rename 和重复 lookup 因此共享 AddressSpace/PageCache。具体文件系统完成 mutation
+后，operation callback 已持有 `VfsInode` 时可用 `update_metadata_after_backing_change()` 或
+不改变 size 的 `update_attributes_after_backing_change()` 刷新 VFS 缓存；只持有目标
+`Dentry` 时使用同名的 dentry metadata refresh。`Dentry` 不向外部 crate 暴露内部
+`Arc<VfsInode>`。更新入口校验 positive state、inode number、node type、block size 和
+`rdev`，防止把一个 core inode 的结果写入另一 identity。
+
 ## 调用约束 / 执行上下文
 
 路径操作会获取 mutex、分配对象并调用具体文件系统，可能阻塞，不适用于中断上下文。
@@ -70,6 +79,19 @@ VFS rename 入口再次检查组合不变量，文件系统 helper 再检查自�
 匿名 inode superblock、root dentry、singleton inode 和 root mount；后续
 `get_file()` 只分配 per-file dentry/file，并共享 singleton inode。
 
+`AddressSpaceOperations::set_len()` 负责文件系统自己的 truncate 顺序，并在 backing
+prepare 和 block removal 之间调用 `AddressSpace::truncate_pagecache()`；这对应 Linux
+文件系统 `setattr` 路径显式调用 `truncate_pagecache()`，不再增加第二层 truncate hook。
+PageCache resize 同时丢弃 EOF 后 folio、zero partial EOF tail，并通知已注册的 mmap view
+invalidation。
+
+KVFS 在非 special file 的 writable open 进入文件系统 `open` callback 前增加
+inode `write_count`，成功后用 `FMode::WRITER` 记录当前 file 持有该计数，打开
+失败或 `FileOperations::release()` 返回后减少。因此 release callback 中读到 1
+表示当前 file 是最后一个 writer，对应 Linux `do_dentry_open()` 中的
+`get_write_access()`/`FMODE_WRITER` 和 `ext4_release_file()` 的调用时序。当前 KVFS
+尚未实现 executable deny-write 导致的 negative count 状态。
+
 ## 并发模型
 
 dentry 的 inode、children 和可变 operation 状态由各自 mutex 保护。一个 live dentry
@@ -78,12 +100,16 @@ dentry 的 inode、children 和可变 operation 状态由各自 mutex 保护。�
 这对应 Linux dcache 中 child 引用 parent、零外部引用的 hashed dentry 仍可驻留缓存的
 生命周期，同时避免父子强引用环。`DentryKey` 通过持有 parent 的弱引用稳定对象身份，
 不需要为每个 dentry 分配额外 ID。`VfsFile` 的 position 和 private data 使用 mutex，
-`f_flags` 与 `f_mode` 使用原子整数存储。bitflags 类型是按值复制的语义快照，不额外
-引入锁或分配。
+`f_flags` 与 `f_mode` 使用原子整数存储，inode `write_count` 由打开与释放
+路径原子更新。bitflags 类型是按值复制的语义快照，不额外引入锁或分配。
 
 匿名 inode pseudo fs 使用 `Once<AnonInodeFs>` 作为发布槽，但初始化只允许通过
 `init_anon_inodefs()` 在受控 boot 阶段发生。这样避免多个 runtime 调用者并发首次访问时
 在 `Lazy` 初始化闭包中构造复杂 VFS 对象。
+
+Namespace callback 在 inode namespace lock 下运行。文件系统应在回调返回前把 core
+mutation result 同步到受影响的 live inode；dentry cache 的删除/rebind 仍由 KVFS 在成功
+返回后完成。
 
 ## 设计决策
 
@@ -92,11 +118,16 @@ dentry 的 inode、children 和可变 operation 状态由各自 mutex 保护。�
 - 不同 flags 家族不共享整数别名，使错误组合在编译期失败。
 - 匿名 inode pseudo fs 采用显式预初始化，而不是 `Lazy` 首次访问初始化。该设计对齐
   复杂 VFS 全局对象的生命周期：启动时构造，运行时只复用。
+- PageCache resize 顺序由 AddressSpace operation 契约表达，不允许文件系统绕过 inode-owned
+  Mapping 建立第二套数据 cache。
 
 ## Drop / 资源释放
 
 VFS 对象通过 `Arc`/`Weak` 管理生命周期。unlink、rename replacement 和 forget 会从
 parent children 弱索引与 superblock dentry cache 中移除 dentry；仍有 Path/File 引用
 时对象继续存活，否则释放时沿 strong parent 链逐级归还引用。superblock 最终释放会
-整体丢弃剩余 dcache 和 root。flags 类型不拥有资源；inode 与文件系统私有资源仍由
-现有对象生命周期及文件系统回调负责。
+整体丢弃剩余 dcache 和 root。dentry cache 与 open file 都持有 `VfsInode` 引用；最后一个
+引用消失后，`SuperBlockOperations::evict_inode()` 先获得 final teardown
+机会。默认实现只丢弃 inode PageCache，磁盘文件系统可在 nlink=0 时追加 journaled inode
+回收。per-open `FileOperations::release()` 先于 final inode eviction，不能代替后者。flags
+类型不拥有资源；inode 与文件系统私有资源仍由现有对象生命周期及文件系统回调负责。

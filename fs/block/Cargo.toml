@@ -11,3 +11,5 @@ documentation.workspace = true
 
 [dependencies]
 kclass = { workspace = true, features = ["block"] }
+kiface.workspace = true
+kvfs.workspace = true

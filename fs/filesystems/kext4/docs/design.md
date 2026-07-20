@@ -1,346 +1,242 @@
-# KExt4 - 设计与协作边界
+# KExt4 — 设计文档
 
 ## 定位
 
-KExt4 是 X-Kernel 新的 ext4 实现。它以 Linux ext4 的对象边界、磁盘格式、
-事务模型和关键数据路径为主要参考，但不以逐行复刻 Linux 为目标。
+`fs/filesystems/kext4` 是 X-Kernel 的受检 ext4 存储核心。它负责 ext4
+磁盘格式解析、元数据校验和、JBD2 恢复与事务、extent、分配器、truncate/orphan、
+namespace mutation、xattr 以及 ordered-data writeback。
 
-项目目标是：
+`fs/bridges/kext4_vfs` 是当前运行态 KVFS 适配层。它把 KExt4 核心暴露为 KVFS 的
+superblock、inode、address-space 和 file operations，但不拥有 ext4 磁盘格式和
+一致性不变量。
 
-- 兼容选定的 Linux ext4 磁盘格式和常用语义；
-- 保持元数据一致性和可恢复性；
-- 避免旧 `rsext4` 的全局大锁、重复数据缓存和细粒度同步 I/O；
-- 在约定的 fio 和元数据工作负载中稳定优于 `rsext4`；
-- 允许两名开发者长期并行开发，而不重复拥有同一份状态。
+磁盘 superblock 的 compat、incompat 和 ro-compat feature 字段分别使用独立的
+`bitflags` 类型表示。解码使用 `from_bits_retain` 保留未知磁盘位，避免把不同 feature
+类别中数值相同的位混为一类，并保证挂载协商仍能报告原始 unsupported bits。
 
-本文是模块所有权和协作规则的主文档。接口、锁和功能范围分别见：
+## 背景
 
-- `api.md`
-- `locking.md`
-- `features.md`
-- `vfs.md`
+KExt4 的目标是在 X-Kernel 中逐步替代兼容层 ext4 后端，同时保持 Rust 受检代码、
+明确的 feature negotiation、日志化元数据更新，以及 e2fsprogs/e2fsck 互操作能力。
+KExt4 当前通过独立 Kconfig 选项进入运行态。N0 已补齐 VFS inode identity、cached
+attributes、两阶段 truncate 和 open-unlink/final-evict 基线。后续先在 N1/N2 建立
+persistent journal、mount service ownership 和 buffered 并发执行框架，再在 N3 集中补齐
+crash recovery、错误观察和 unmount/freeze；不为旧后端扩展新语义。
 
-## 核心原则
+## 范围
 
-### 一个状态只有一个所有者
-
-同一种持久化状态或缓存不能在两个子系统中各维护一份权威副本。
-
-| 状态 | 唯一所有者 |
-|---|---|
-| 文件数据页、dirty/writeback 状态 | KFS `FileMapping` / PageCache |
-| 内存 inode、文件大小、extent 状态协调 | 文件语义层 |
-| extent tree 的解析和修改算法 | 文件语义层 |
-| 元数据块缓存及 buffer 生命周期 | 存储一致性层 |
-| block/inode bitmap | 存储一致性层 |
-| block group 空闲空间状态 | 存储一致性层 |
-| journal transaction 和 checkpoint | 存储一致性层 |
-| on-disk 结构、endian、checksum | 存储一致性层 |
-
-extent tree 节点位于元数据 buffer 中，但：
-
-- buffer 的读取、锁定、dirty、回写和 journal 归存储一致性层；
-- extent 节点的格式解释、查找、分裂和合并归文件语义层。
-
-### 单向依赖
+主要源文件：
 
 ```text
-kvfs / KFS PageCache
-          |
-          v
-vfs + inode + file + directory + extent + writeback       成员 B
-          |
-          v
-                    api
-          |
-          v
-superblock + allocator + metadata buffer + journal + I/O   成员 A
-          |
-          v
-                BlockDevice
+fs/filesystems/kext4/
+├── src/lib.rs
+├── src/superblock.rs
+├── src/journal.rs
+├── src/jbd2/
+├── src/buffer/
+├── src/extent/
+├── src/balloc.rs
+├── src/ialloc.rs
+├── src/mballoc.rs
+├── src/file.rs
+├── src/truncate.rs
+├── src/orphan.rs
+├── src/namei.rs
+├── src/dir.rs
+├── src/dirhash.rs
+└── src/xattr.rs
 ```
 
-允许上层调用下层，禁止下层依赖具体 VFS、目录、extent 或 PageCache 类型。
+运行态适配层位于 `fs/bridges/kext4_vfs/src/`。
 
-### 文件数据不重复缓存
-
-普通文件数据的长期缓存只有 KFS PageCache。KExt4 不实现类似
-`datablock_cache` 的第二套文件数据缓存。
-
-元数据需要独立的 metadata buffer cache，因为它必须参与 checksum、
-journal、checkpoint 和恢复流程。metadata buffer 不能冒充文件 PageCache，
-文件 PageCache 也不能绕过 journal 直接修改元数据块。
-
-## 长期人员分工
-
-文档使用“成员 A”和“成员 B”表示角色，实际人员可以调整，但一个迭代内不能
-同时交换目录所有权。
-
-### 成员 A：存储一致性层
-
-成员 A 对“磁盘上最终是什么状态、断电后如何恢复”负责。
-
-独占负责：
-
-- `disk/`：on-disk POD、endian、feature bit、checksum；
-- `io/`：块设备适配、批量 I/O、flush/barrier；
-- `buffer/`：metadata buffer cache、dirty 和 I/O 状态；
-- `superblock/`：挂载校验、group descriptor、错误策略；
-- `alloc/`：block/inode bitmap、buddy、多块分配、预分配；
-- `journal/`：JBD2 transaction、commit、checkpoint、recovery；
-- journal replay、orphan recovery 的底层机制；
-- 存储错误后的 abort、只读降级和持久化保证。
-
-成员 A 不得：
-
-- 实现第二套文件数据缓存；
-- 解释 VFS 路径或目录语义；
-- 直接修改内存 inode 的业务状态；
-- 从 journal 或 allocator 反向调用 VFS 操作。
-
-### 成员 B：文件语义与数据路径
-
-成员 B 对“VFS 调用后用户应当观察到什么”负责。
-
-独占负责：
-
-- `vfs/`：`SuperBlockOperations`、`NodeOps`、`FileNodeOps`、`DirNodeOps` 适配；
-- `inode/`：内存 inode、inode cache、生命周期和 inode 级同步；
-- `extent/`：逻辑块映射、extent tree、delayed allocation 映射；
-- `dir/`：目录项、HTree、lookup/readdir/create/unlink/rename/link；
-- `file/`：truncate、fallocate、fsync、symlink、特殊文件；
-- `writeback/`：PageCache 接入、聚合写回、ordered-data 完成事件；
-- `xattr/`：xattr、POSIX ACL 和相关 inode 语义；
-- mmap、direct I/O 与 buffered I/O 的一致性。
-
-成员 B 不得：
-
-- 直接扫描或修改 block/inode bitmap；
-- 绕过 metadata buffer 修改裸元数据块；
-- 自行提交 journal descriptor/commit block；
-- 直接持有块设备并绕过存储一致性层写元数据。
-
-### 共同负责的交叉路径
-
-以下功能由一人担任当次功能负责人，另一人必须 review：
-
-- mount/unmount；
-- buffered writeback 和 delayed allocation；
-- truncate、fallocate、punch hole；
-- create、unlink、rename、orphan；
-- fsync 和 fdatasync；
-- journal recovery；
-- direct I/O coherence；
-- 锁顺序或公共 API 变更。
-
-功能负责人负责集成测试和最终 PR，但不能在同一个 PR 中顺手重构另一人的
-内部模块。
-
-## 目标目录
+## 架构
 
 ```text
-kext4/
-├── Cargo.toml
-├── docs/
-│   ├── design.md
-│   ├── api.md
-│   ├── locking.md
-│   ├── features.md
-│   └── vfs.md
-└── src/
-    ├── lib.rs
-    ├── error.rs
-    ├── api/             # 共同契约，单 PR 只能有一名编辑者
-    ├── disk/            # A
-    ├── io/              # A
-    ├── buffer/          # A
-    ├── superblock/      # A
-    ├── alloc/           # A
-    ├── journal/         # A
-    ├── inode/           # B
-    ├── extent/          # B
-    ├── dir/             # B
-    ├── file/            # B
-    ├── writeback/       # B
-    ├── xattr/           # B
-    ├── vfs/             # B
-    └── tests/
-        ├── storage/     # A
-        ├── semantics/   # B
-        └── integration/ # 当次功能负责人
+KVFS syscall / PageCache
+    |
+    v
+fs/bridges/kext4_vfs
+    |
+    v
+kext4 mount services
+    |-- immutable layout / feature negotiation / device capability
+    |-- persistent journal coordinator
+    |     |-- running transaction
+    |     |-- committing transaction
+    |     `-- checkpoint queue / journal tail
+    |-- metadata buffer / checksum validation
+    |-- per-group allocator state
+    `-- inode / extent / orphan / namei / xattr / truncate
+    v
+block::BlockDevice
 ```
 
-`src/api/` 不表示第三个实现层。它只存放跨所有权边界所需的窄接口、共享 ID
-类型和错误类型，禁止放入业务算法。
+核心修改路径通过 `JournalHandle` 进入事务，先经 buffer 层取得元数据撤销/写入访问权，
+再修改元数据字节和内存中的布局状态。目标架构由 mount-owned coordinator 冻结 running
+transaction、持久化 commit，并把 frozen metadata image 放入独立 checkpoint 队列；普通
+mutation 不负责同步完成 home-block checkpoint。
 
-## 关键数据流
+## 调用约束 / 执行上下文
 
-### Buffered read
+KExt4 核心 API 可能执行块设备 I/O、内存分配、JBD2 事务、checkpoint 和设备 flush，
+因此属于任务上下文 API，允许阻塞，不适合在中断上下文调用。它也不适合在块设备、
+分配器和 journal 状态尚未可用的早期启动阶段调用。
+
+当前运行态 bridge 使用挂载级 `Mutex<kext4::Ext4Filesystem>` 串行化核心访问。调用者
+不能假设已有 per-inode 或 per-group 级别的并行修改。可写文件打开计数由
+KVFS `VfsInode` 拥有，bridge 只在 release callback 中读取它。
+
+该挂载级 mutex 是过渡实现而不是长期调用契约。N1 先把 journal、metadata cache、allocator
+和 immutable geometry 的 ownership 从 catch-all aggregate 中拆开；N2 再由各 service 的
+内部同步和 per-inode/per-group 锁替代 bridge 全局串行化。所有这些路径仍属于可阻塞的任务
+上下文，不能从中断上下文调用。
+
+## 状态机
+
+### 元数据事务
 
 ```text
-KFS FileMapping miss
-  -> B: inode logical page mapping
-  -> B: 判断 hole/unwritten/mapped
-  -> A: 提交连续数据块读取
-  -> KFS: 页面变为 READY
+加入或创建 running transaction，并预留 credits
+  -> 取得元数据撤销/写入访问权
+  -> 修改元数据字节和内存计数器
+  -> 记录受影响 inode / ordered-data dependency
+  -> 根据 credits、age、space 或 explicit sync 冻结 transaction
+  -> 持久化 journal commit
+  -> 独立推进 checkpoint / journal tail
 ```
 
-hole 和 unwritten extent 必须返回零，不能读取未初始化磁盘内容。
+含义：
 
-### Buffered writeback
+1. Handle 加入 mount-wide running transaction，并根据 mutation 类型预留 journal credits。
+2. 每个被修改的元数据 block 通过 buffer 层记录撤销/写入访问权。
+3. 元数据字节和内存计数器在同一事务内更新。
+4. 相关 inode 保存 sync/datasync transaction id，ordered data 在 metadata commit 前完成。
+5. Commit 只冻结并持久化对应 transaction，随后允许新的 running transaction。
+6. Checkpoint 独立写 home blocks；`fsync`、`syncfs`、unmount 和 journal-space pressure 按
+   各自 durability intent 等待相关状态。
+
+当前实现仍在 mutation 前 drain 旧 checkpoint、为本次 mutation 新建 `Journal`，并在 commit
+后同步推进 checkpoint。N1 会先用同步调用者驱动的 coordinator 替换该模型，再引入后台
+worker；这样状态机和 worker 生命周期不会在同一个切片中同时变化。
+
+该同步 drain 也是当前兼容不带 JBD2 revoke feature 镜像的安全前提：释放 extent/xattr
+metadata block 时，core 从当前 handle 的 metadata 集合中 forget 已淘汰的 block，而不生成
+磁盘不支持的 revoke record。因为新 mutation 开始前不存在更老的未 checkpoint transaction，
+recovery 没有旧 metadata image 需要抑制。N1 一旦允许 transaction/checkpoint 重叠，就必须
+改为启用并持久化 revoke，或用等价的 journal tail/reuse 约束替代这个前提。
+
+### Namespace zero-link 删除
 
 ```text
-KFS 收集连续脏页
-  -> B: 建立 delayed-allocation 请求
-  -> A: 开始 transaction 并保留 credits
-  -> A: 分配连续物理块
-  -> B: 更新 extent tree 和 inode
-  -> A: 将修改过的 metadata buffer 加入 transaction
-  -> B/A: 提交聚合数据 I/O
-  -> A: ordered transaction 等待数据完成
-  -> A: journal commit
+namespace transaction
+删除 dirent
+  -> 降低 nlink
+  -> nlink == 0 时加入 legacy orphan entry，并持久化 zero-link metadata
+  -> 返回更新后的 parent/target inode 给 bridge
+
+最后一个 VFS inode/open-file 引用消失
+  -> KVFS SuperBlockOperations::evict_inode
+  -> 丢弃 PageCache 和 delalloc reservation
+  -> 如果存在 external xattr block，先释放它
+  -> truncate extent-backed data blocks
+  -> 移除 orphan entry
+  -> 释放 inode bitmap entry
 ```
 
-数据 I/O 完成前，ordered 模式不能提交会暴露新数据块的元数据。
+Namespace transaction 不释放 inode number、xattr 或 data block。`referenced_inode()` 只供
+已经持有 VFS inode identity 的路径读取 zero-link inode，使 open fd 在 unlink 后仍可读写；
+新的 namespace lookup 仍使用严格的 `inode()`，不会把 orphan 重新实例化为可达文件。
 
-### Namespace mutation
+## 算法流程
 
-create、unlink 和 rename 的共同流程是：
+Namei 修改先验证 parent/name，查找目标 dirent，检查 inode kind 和磁盘格式约束，然后在
+一个 journal transaction 中完成 dirent 和 inode 更新。Rename 使用准备、替换、删除、收尾
+的顺序，保证目录父链接计数和 `..` 更新保持一致。
 
-1. B 估算 transaction credits 和需要锁定的 inode 集合；
-2. B 按 `locking.md` 获取 inode/目录锁，并通过 A 创建 transaction；
-3. B 修改目录、inode、link count 或 orphan 状态；
-4. A 分配或释放 inode/block，并 journal 所有 metadata buffer；
-5. B 更新内存状态；
-6. 释放业务锁后，由 A 决定 transaction commit 时机。
+Xattr 修改会先把 inline xattr 和 external xattr 解码到内存向量中，应用更新后再选择
+inode-body 或 single external-block 存储，维护 `i_file_acl`、`i_blocks`、block checksum
+和 refcount。Zero-link eviction 会复用 external xattr block 清理逻辑，先释放 EA block，
+再释放 inode bitmap entry。
 
-### Fsync
+Truncate 使用 legacy orphan list 保护 regular-file shrink。KExt4 的
+`AddressSpaceOperations::set_len()` 按
+`prepare_regular_inode_truncate()` → `AddressSpace::truncate_pagecache()`/mmap invalidation →
+`finish_regular_inode_truncate()` 排序；这与 Linux ext4 `setattr` 路径显式调用通用
+`truncate_pagecache()` 后再执行 filesystem block truncate 的职责层次一致，不增加第二个
+truncate operation hook。显式 recovery 在 journal 需要 replay 时先重放并保持 recovery flag，再遍历
+legacy orphan list；即使 journal 已 clean，只要 superblock 仍有 orphan head，也会执行同一
+cleanup。`nlink > 0` regular inode 完成中断的 truncate，`nlink == 0` inode 复用 final
+eviction 事务释放 external xattr、extent 和 inode bitmap。`recover()` 返回 `None` 只表示
+没有 journal replay report，不表示没有执行 orphan cleanup。Recovery cleanup 的 transaction
+在 checkpoint 后保持 recovery flag，并从已落盘的 superblock/group descriptors 重新建立
+内存状态，避免旧 orphan head 或 allocator counter 被 checkpoint 前的快照重新带回循环。
 
-fsync 至少保证：
+Truncate 和 unwritten preallocation discard 的 journal credits 按实际 extent 结构计算：inode
+root、重建后的 extent-tree blocks、需要 revoke 的旧 tree blocks，以及释放范围覆盖的不同 block
+group 中各一个 bitmap/descriptor target。数据块数量本身不会一对一增加 journal metadata block，
+因此不能用 `i_blocks` 或被释放 data block 数直接放大 reservation；否则大文件只回收一个很小的
+preallocation tail 也会被误判为超过空 journal 容量。计算结果仍为 allocator entry check 保留
+固定 headroom，并在任何 metadata mutation 前完成。
 
-1. 目标 inode 范围内的脏数据已经完成写入；
-2. 暴露这些数据所需的 extent、inode 和目录依赖已进入 journal；
-3. 相关 transaction 已 commit；
-4. 必要时底层设备已执行 flush/barrier。
+Ordered writeback 同样在打开 transaction 前读取当前 extent-tree 形状。预算覆盖 hole allocation、
+unwritten extent 插入与转换、重建后的 tree blocks、旧 tree block revoke 和 inode root；文件从
+inline extent root 增长为 external tree 后，预算随当前及预计 tree block 数增加，不再只按本次
+PageCache writeback 的 data block 数使用固定上限。
 
-具体语义由 `api.md` 定义，禁止把“清空某个本地 cache”等同于 fsync 完成。
+`huge_file` superblock feature 表示 inode 可以使用扩展的 block accounting 格式；未设置
+`EXT4_HUGE_FILE_FL` 的普通 inode 仍以 512-byte sector 记录 `i_blocks`，KExt4 可以安全修改。
+真正设置该 inode flag、以 filesystem block 为单位计数的 inode 仍显式返回 unsupported。
+
+Namei、setattr、writeback 和 truncate mutation 返回的 `Ext4Inode` 通过 bridge 统一转换为
+KVFS `Metadata`，刷新同一 `VfsInode` 的 nlink、size、blocks、mode/owner 和 timestamps。
+Callback 已持有 inode identity 时直接使用 `VfsInode` refresh；link/unlink/rename 等只持有
+目标 dentry 的路径通过 `Dentry` semantic refresh，不向 bridge 暴露 KVFS 内部 inode
+引用。`InodeCache` 保证一个 live ext4 inode number 只对应一个 `VfsInode` 和一个
+AddressSpace。
+
+Bridge 在 mount 时缓存 filesystem block size；该 geometry 在 mount 生命周期内不可变，普通
+inode metadata、write completion 和 writeback 路径因此不需要只为读取 block size 再取得
+挂载级 core mutex。每个 live inode 用一个 logical-block set 保存最小的 delayed extent 状态，
+对应 Linux `ext4_inode_info::i_es_tree` 中的 delayed entries；集合大小同时就是该 inode 的
+reserved data blocks，不另存派生 prefix 或计数字段。挂载级 reservation aggregate 对应 Linux
+`s_dirtyclusters_counter`，用于 admission 与 `statfs()`，不是第二份 extent identity。
+Delayed-allocation admission 使用 primary superblock 的 free-block counter 减去 ext4 reserved
+blocks 和 bridge 已有 reservation。该 counter 与 group descriptor 由同一
+allocation/release mutation 更新，因此 admission 是常数时间；显式 `statfs()` 仍遍历 group
+descriptor，提供独立的实时统计与一致性观察面。
 
 ## 并发模型
 
-KExt4 禁止使用一把 `Mutex<Ext4State>` 串行所有操作。
+运行态 filesystem 调用当前通过 bridge mutex 粗粒度串行化。核心内部的 metadata buffer
+和 JBD2 transaction handle 仍会记录 buffer ownership、credit consumption 和 revoke 状态。
+同一 inode 的 `writepages()` 由 bridge 的 sleepable writeback mutex 串行化，但进入 PageCache
+遍历时不持有挂载级 core mutex；PageCache 在释放 mapping/folio mutex 后调用 batch writer，
+batch writer 才短暂取得 core mutex，并在释放 core mutex 后更新 delalloc accounting。这样
+普通 cache miss 的 `MappingInner -> core` 路径不会与 writeback 形成反向锁序。
+N1 的 service split 必须先固定谁拥有 journal sequence、transaction、checkpoint queue、
+metadata buffer 和 allocator state；N2 才建立 per-inode、journal、metadata-buffer 和
+per-group 锁顺序。不得在 spinlock 下执行块 I/O、等待 PageCache 或获取 sleepable lock。
 
-并发状态按对象拆分：
+## 设计决策
 
-- mount/superblock 生命周期状态；
-- 每 inode 的 metadata/data/namespace 状态；
-- 每 block group 的 allocator 状态；
-- 每 metadata buffer 的内容和 I/O 状态；
-- journal running/committing/checkpoint transaction；
-- KFS 每 mapping 和每 cached page 状态。
+- ext4 磁盘格式和一致性不变量由 `kext4` 核心负责，KVFS 对象生命周期由 bridge 负责。
+- `kext4` crate 使用 `#![forbid(unsafe_code)]`，unsafe 或设备相关细节留在核心边界之外。
+- 未实现的 ext4 格式能力通过显式 unsupported error 暴露，避免把不完整格式误挂载为可写。
+- KExt4 的新生命周期与 I/O 语义只在 KExt4 core/bridge 落地；旧 ext4 backend 不随本计划
+  做功能性迁移。
+- errseq、clean unmount/freeze 和完整 fault matrix 依赖最终的后台执行图，集中放在 N3；它们
+  不阻塞 N1 persistent journal 和 mount ownership 重构，但仍是替换旧后端前的强制门槛。
 
-完整锁顺序和 I/O 等待规则见 `locking.md`。
+## Drop / 资源释放
 
-## 性能设计
+已分配的 metadata/data blocks 通过 journaled bitmap helper 释放。Inode 删除路径先切断
+目录可达性，用 legacy orphan list 保护 zero-link cleanup；若 inode 带 external xattr
+block，则先释放或降低 refcount，并清理 `i_file_acl`/`i_blocks`，然后 truncate
+extent-backed data，清理 inode metadata，最后释放 inode bitmap entry。
 
-性能目标不是通过省略一致性保证获得。核心策略包括：
-
-- PageCache 作为唯一普通文件数据缓存；
-- delayed allocation 和 extent-based multiblock allocation；
-- 连续脏页聚合和批量 block I/O；
-- `u64` bitmap 扫描、`first_hint`、per-group buddy；
-- per-inode/per-group 锁，避免全局文件系统锁；
-- metadata buffer 去重，避免每次访问完整反序列化和复制；
-- transaction 合并，避免每次系统调用单独 commit；
-- 热路径禁止无界线性扫描和不必要分配。
-
-基准、回归阈值和对比方式见 `features.md`。
-
-## 协作与合并规则
-
-### 文件所有权
-
-- A 默认只修改 A 目录，B 默认只修改 B 目录。
-- 修改对方目录前，必须在 issue/PR 中取得该目录所有者确认。
-- `api/`、五份规划文档和 workspace 配置属于共享文件；同一时间只能指定
-  一名编辑者。
-- 同一个功能涉及双方目录时，拆成“API PR、双方实现 PR、集成 PR”。
-
-开始编码前，在共享 issue 中登记工作项：
-
-| 字段 | 内容 |
-|---|---|
-| Work item | 唯一名称，例如 `journal-revoke` |
-| Owner | A、B 或明确的功能负责人 |
-| Writable paths | 本工作项允许修改的目录/文件 |
-| Shared files | 需要预约的 `api/`、文档、`Cargo.toml`、`lib.rs` |
-| Depends on | 已合并的 API PR 或其他工作项 |
-| Integration PR | 最终由谁提交 |
-
-同一路径同一时间只能出现在一个进行中的工作项中。开始另一个会修改相同共享
-文件的工作项前，必须先合并或关闭前一个工作项。
-
-`Cargo.toml`、`src/lib.rs`、`src/error.rs` 和 `src/api/` 使用“共享文件预约”：
-
-- 预约者是该文件当前唯一编辑者；
-- 预约应保持短期，只完成模块注册、导出或 API 变更；
-- 另一人通过后续小 PR 接入，不能在自己的长期分支同时修改；
-- 预约结束后立即同步共同开发分支。
-
-### 公共 API 变更
-
-公共 API 变更必须：
-
-1. 先修改 `api.md`，说明动机、不变量和调用时序；
-2. 单独提交 trait/type 变化，不夹带大规模实现；
-3. 由双方 review；
-4. 合并后，双方各自基于新接口实现；
-5. 同步删除被替代接口，不保留双入口。
-
-### PR 粒度
-
-一个 PR 应只包含下列一种主要变化：
-
-- API 或数据模型；
-- A 层实现；
-- B 层实现；
-- 集成和测试；
-- 纯重构；
-- 性能优化。
-
-不得把格式化整个 crate、重命名公共类型和新增功能混在一个 PR 中。
-
-### 分支和集成
-
-- 共同集成分支保持可构建，不直接承载长期开发。
-- 分支按所有者和工作项命名，例如 `kext4/a-journal-revoke`。
-- 每个工作分支开始前 rebase 到最新共同分支，合并后另一人立即同步。
-- 集成 PR 只连接已经 review 的 A/B 接口，不在集成时重新设计内部类型。
-- 发生冲突时由目标文件所有者解决，功能负责人提供调用语义，不能由双方各自
-  保留一份实现。
-
-### 完成标准
-
-功能完成需要同时满足：
-
-- 正常路径测试；
-- 边界和错误注入测试；
-- 并发测试；
-- 涉及持久化时的断电/重挂载测试；
-- 与 Linux ext4 镜像互操作测试；
-- 性能路径没有明显退化；
-- `design.md`、`api.md`、`locking.md`、`features.md`、`vfs.md` 与代码一致。
-
-## 非目标
-
-KExt4 不要求完全复刻 Linux 内部类型或兼容 Linux 内核模块 API。复杂且对目标
-工作负载价值有限的功能可以延后或明确不支持，但不能静默忽略磁盘上的
-`INCOMPAT` feature。
-
-功能取舍不能破坏：
-
-- 磁盘格式校验；
-- crash consistency；
-- mmap 和 buffered I/O 一致性；
-- fsync 持久化语义；
-- 不泄漏未初始化磁盘数据；
-- 不损坏未知 feature 的文件系统。
+运行态 bridge 仅在最后一个 writable-file `release()` 且没有 delayed data
+reservation 时丢弃 EOF 后未使用的预分配，对应 Linux `ext4_release_file()`；
+close 不额外强制普通 dirty PageCache writeback，数据回写由 `fsync`/`syncfs` 和通用
+writeback 路径负责。`VfsInode` 最后一个引用消失时，superblock hook 先丢弃
+PageCache/剩余 delalloc accounting，再对 nlink=0
+inode 调用 core final eviction。nlink 非零的 cache eviction 不释放磁盘 inode。

@@ -1418,6 +1418,15 @@ pub fn compute_fs_layout(inode_size: u16, total_blocks: u64) -> FsLayoutInfo {
     }
 }
 
+/// Formats the complete block device as ext4.
+///
+/// Block and bitmap accounting uses the physical capacity of each group,
+/// including a final group shorter than the nominal blocks-per-group value.
+///
+/// # Errors
+///
+/// Returns a block-device error when the layout cannot be written, mounted for
+/// initialization, or flushed successfully.
 pub fn mkfs<B: BlockDevice>(block_dev: &mut Jbd2Dev<B>) -> BlockDevResult<()> {
     debug!("Start initializing Ext4 filesystem...");
     // mkfs 阶段先强制关闭日志，避免还未初始化 journal superblock 时触发 JBD2 逻辑
@@ -1436,12 +1445,9 @@ pub fn mkfs<B: BlockDevice>(block_dev: &mut Jbd2Dev<B>) -> BlockDevResult<()> {
     debug!("  Inodes per group: {}", layout.inodes_per_group);
 
     // 构建并根据feature写入到所有group超级块
-    let superblock = build_superblock(total_blocks, &layout);
+    let mut superblock = build_superblock(total_blocks, &layout);
     write_superblock(block_dev, &superblock)?;
     debug!("Superblock written");
-
-    // 写冗余备份 自动判断是否写
-    write_superblock_redundant_backup(block_dev, &superblock, total_groups, &layout)?;
 
     let mut descs: VecDeque<Ext4GroupDesc> = VecDeque::new();
     // 为superblock写入gdt（全部标记为UNINIT）
@@ -1450,6 +1456,14 @@ pub fn mkfs<B: BlockDevice>(block_dev: &mut Jbd2Dev<B>) -> BlockDevResult<()> {
         write_group_desc(block_dev, group_id, &desc)?;
         descs.push_back(desc);
     }
+    let free_blocks = descs
+        .iter()
+        .map(|desc| u64::from(desc.free_blocks_count()))
+        .sum::<u64>();
+    superblock.s_free_blocks_count_lo = free_blocks as u32;
+    superblock.s_free_blocks_count_hi = (free_blocks >> 32) as u32;
+    write_superblock(block_dev, &superblock)?;
+    write_superblock_redundant_backup(block_dev, &superblock, total_groups, &layout)?;
     // 为其它块组选择性的写入冗余备份desc
     write_gdt_redundant_backup(block_dev, &descs, &superblock, total_groups, &layout)?;
     debug!("{total_groups} block group descriptors written");
@@ -1514,14 +1528,10 @@ fn build_superblock(total_blocks: u64, layout: &FsLayoutInfo) -> Ext4Superblock 
     let filesys_uuid = generate_uuid_8();
     sb.s_uuid = filesys_uuid;
 
-    // 空闲计数：总块数 - 组0元数据块数 - 预留块数（其余组初始全空闲）
+    // This value is replaced with the sum of the completed group descriptors
+    // before the freshly formatted filesystem is mounted.
     let metadata_blocks = layout.group0_metadata_blocks as u64;
-    let mut free_blocks = total_blocks
-        .saturating_sub(metadata_blocks)
-        .saturating_sub(layout.reserved_blocks);
-    if free_blocks > total_blocks {
-        free_blocks = 0;
-    }
+    let free_blocks = total_blocks.saturating_sub(metadata_blocks);
     sb.s_free_blocks_count_lo = (free_blocks & 0xFFFFFFFF) as u32;
     sb.s_free_blocks_count_hi = (free_blocks >> 32) as u32;
 
@@ -1577,9 +1587,9 @@ fn build_uninit_group_desc(
     desc.bg_inode_bitmap_lo = gl.group_inode_bitmap_startblocks as u32;
     desc.bg_inode_table_lo = gl.group_inode_table_startblocks as u32;
 
-    // 理论空闲块数：整组减去元数据块
+    // The last block group may be shorter than `blocks_per_group`.
     let used_meta = gl.metadata_blocks_in_group;
-    let free_blocks = layout.blocks_per_group.saturating_sub(used_meta);
+    let free_blocks = blocks_in_group(sb, group_id).saturating_sub(used_meta);
 
     if group_id == 0 {
         // 组0 还需要扣掉保留 inode
@@ -1599,6 +1609,24 @@ fn build_uninit_group_desc(
     desc.bg_flags = 0;
 
     desc
+}
+
+fn blocks_in_group(sb: &Ext4Superblock, group_id: u32) -> u32 {
+    let group_start = u64::from(sb.s_first_data_block)
+        .saturating_add(u64::from(group_id) * u64::from(sb.s_blocks_per_group));
+    let remaining = sb.blocks_count().saturating_sub(group_start);
+    u32::try_from(remaining.min(u64::from(sb.s_blocks_per_group))).unwrap_or(0)
+}
+
+fn mark_block_bitmap_padding(bitmap: &mut [u8], valid_blocks: u32) {
+    let bitmap_blocks = u32::try_from(bitmap.len())
+        .unwrap_or(u32::MAX)
+        .saturating_mul(8);
+    for block in valid_blocks..bitmap_blocks {
+        let byte_index = (block / 8) as usize;
+        let bit_index = block % 8;
+        bitmap[byte_index] |= 1 << bit_index;
+    }
 }
 
 /// 写备份超级块到所有组，从块组1开始
@@ -1773,6 +1801,10 @@ fn initialize_group_0<B: BlockDevice>(
     let block_bitmap_blk = layout.group0_block_bitmap;
     let inode_bitmap_blk = layout.group0_inode_bitmap;
     let inode_table_blk = layout.group0_inode_table;
+    let group_blocks = block_dev
+        .total_blocks()
+        .saturating_sub(u64::from(layout.first_data_block))
+        .min(u64::from(layout.blocks_per_group)) as u32;
 
     {
         let buffer = block_dev.buffer_mut();
@@ -1784,6 +1816,7 @@ fn initialize_group_0<B: BlockDevice>(
             let bit_idx = i % 8;
             buffer[byte_idx] |= 1 << bit_idx;
         }
+        mark_block_bitmap_padding(buffer, group_blocks);
     }
     block_dev.write_block(block_bitmap_blk, true)?;
 
@@ -1818,9 +1851,7 @@ fn initialize_group_0<B: BlockDevice>(
     // 更新块组0的描述符（清除UNINIT标志）
     let desc = Ext4GroupDesc {
         bg_flags: Ext4GroupDesc::EXT4_BG_INODE_ZEROED,
-        bg_free_blocks_count_lo: layout
-            .blocks_per_group
-            .saturating_sub(layout.group0_metadata_blocks) as u16,
+        bg_free_blocks_count_lo: group_blocks.saturating_sub(layout.group0_metadata_blocks) as u16,
         bg_free_inodes_count_lo: layout.inodes_per_group.saturating_sub(RESERVED_INODES) as u16,
         bg_block_bitmap_lo: block_bitmap_blk,
         bg_inode_bitmap_lo: inode_bitmap_blk,
@@ -1865,6 +1896,7 @@ fn initialize_other_groups_bitmaps<B: BlockDevice>(
                 let bit_idx = i % 8;
                 buffer[byte_idx] |= 1 << bit_idx;
             }
+            mark_block_bitmap_padding(buffer, blocks_in_group(sb, group_id));
         }
         block_dev.write_block(block_bitmap_blk, true)?;
 
@@ -1884,4 +1916,35 @@ fn initialize_other_groups_bitmaps<B: BlockDevice>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod mkfs_geometry_tests {
+    use alloc::vec;
+
+    use super::*;
+
+    #[test]
+    fn partial_last_group_uses_physical_capacity() {
+        let total_blocks = 16_384;
+        let layout = compute_fs_layout(DEFAULT_INODE_SIZE, total_blocks);
+        let superblock = build_superblock(total_blocks, &layout);
+        let descriptor = build_uninit_group_desc(&superblock, 0, &layout);
+
+        assert_eq!(blocks_in_group(&superblock, 0), total_blocks as u32);
+        assert_eq!(
+            u32::from(descriptor.bg_free_blocks_count_lo),
+            total_blocks as u32 - layout.group0_metadata_blocks
+        );
+    }
+
+    #[test]
+    fn block_bitmap_padding_marks_blocks_beyond_device() {
+        let mut bitmap = vec![0_u8; BLOCK_SIZE];
+        mark_block_bitmap_padding(&mut bitmap, 16_384);
+
+        assert_eq!(bitmap[2_047], 0);
+        assert_eq!(bitmap[2_048], u8::MAX);
+        assert_eq!(bitmap[BLOCK_SIZE - 1], u8::MAX);
+    }
 }

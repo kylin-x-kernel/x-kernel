@@ -13,7 +13,7 @@ use alloc::{
 use core::{
     any::Any,
     fmt,
-    sync::atomic::{AtomicU16, Ordering},
+    sync::atomic::{AtomicU16, AtomicUsize, Ordering},
     time::Duration,
 };
 
@@ -588,7 +588,7 @@ impl InodeAddressSpaces {
     }
 
     fn set_cached_len(&self, len: u64) -> VfsResult<()> {
-        self.mapping.set_cached_len(len)
+        self.mapping.truncate_pagecache(len)
     }
 
     fn evict(&self) -> VfsResult<()> {
@@ -643,6 +643,7 @@ impl InodeSpecialState {
 pub struct VfsInode {
     identity: InodeIdentity,
     attributes: InodeAttributes,
+    write_count: AtomicUsize,
     namespace_lock: RwLock<()>,
     inode_operations: Arc<dyn InodeOperations>,
     file_operations: Arc<dyn FileOperations>,
@@ -1014,6 +1015,7 @@ impl VfsInode {
         Arc::new_cyclic(move |this| Self {
             identity: InodeIdentity::new(init.number),
             attributes: InodeAttributes::new(init, flags),
+            write_count: AtomicUsize::new(0),
             namespace_lock: RwLock::new(()),
             inode_operations,
             file_operations: file_operations.unwrap_or_else(no_open_file_operations),
@@ -1026,6 +1028,21 @@ impl VfsInode {
             ),
             special_state: InodeSpecialState::new(),
         })
+    }
+
+    pub(crate) fn acquire_write_access(&self) {
+        let previous = self.write_count.fetch_add(1, Ordering::AcqRel);
+        debug_assert_ne!(previous, usize::MAX);
+    }
+
+    pub(crate) fn release_write_access(&self) {
+        let previous = self.write_count.fetch_sub(1, Ordering::AcqRel);
+        debug_assert_ne!(previous, 0);
+    }
+
+    /// Returns the number of open files holding write access to this inode.
+    pub fn write_count(&self) -> usize {
+        self.write_count.load(Ordering::Acquire)
     }
 
     /// Construct a directory inode without directory file operations.
@@ -1186,6 +1203,40 @@ impl VfsInode {
         self.address_spaces.set_cached_len(len)?;
         self.set_size(len);
         Ok(())
+    }
+
+    /// Refreshes mutable cached attributes from a validated backing inode.
+    ///
+    /// This does not change the cached size because truncate ordering may
+    /// require page-cache invalidation between backing-filesystem phases. Use
+    /// [`Self::update_metadata_after_backing_change`] when the backing size is
+    /// already final and no split truncate sequence is in progress.
+    pub fn update_attributes_after_backing_change(&self, metadata: &Metadata) -> VfsResult<()> {
+        let expected_block_size = 1_u64 << self.attributes.block_bits();
+        if metadata.inode != self.inode()
+            || metadata.mode.node_type() != self.node_type()
+            || metadata.block_size != expected_block_size
+            || metadata.rdev != self.attributes.rdev()
+        {
+            return Err(VfsError::InvalidInput);
+        }
+
+        self.attributes.set_permission(metadata.mode.permission());
+        self.attributes.set_owner(metadata.uid, metadata.gid);
+        self.attributes.set_link_count(metadata.nlink);
+        self.attributes.set_accessed_at(metadata.atime);
+        self.attributes.set_modified_at(metadata.mtime);
+        self.attributes.set_changed_at(metadata.ctime);
+        self.attributes
+            .set_allocated_bytes(metadata.blocks.saturating_mul(INODE_BYTES_PER_BLOCK));
+        Ok(())
+    }
+
+    /// Refreshes size and mutable cached attributes from a validated backing
+    /// inode after a completed backing-store mutation.
+    pub fn update_metadata_after_backing_change(&self, metadata: &Metadata) -> VfsResult<()> {
+        self.update_attributes_after_backing_change(metadata)?;
+        self.update_size_after_backing_change(metadata.size)
     }
 
     /// Builds a metadata snapshot from cached inode attributes.
@@ -1700,6 +1751,7 @@ impl InodeCache {
 #[cfg(unittest)]
 mod tests {
     use alloc::sync::Arc;
+    use core::time::Duration;
 
     use unittest::{assert_eq, def_test};
 
@@ -1799,5 +1851,50 @@ mod tests {
         assert_eq!(inode.link_count(), 7);
         inode.clear_link_count();
         assert_eq!(inode.link_count(), 0);
+    }
+
+    #[def_test]
+    fn backing_metadata_refresh_updates_mutable_cached_attributes() {
+        let node = Arc::new(TestChrdevInode::new(DeviceId::default()));
+        let init = VfsInodeInit::new(
+            7,
+            0,
+            Umode::new(
+                NodeType::CharacterDevice,
+                NodePermission::from_bits_truncate(0o666),
+            ),
+        )
+        .with_owner_links_and_rdev(0, 0, 1, DeviceId::new(1, 3));
+        let inode = VfsInode::new_special(node, NodeFlags::NON_CACHEABLE, init);
+        let mut updated = inode.metadata();
+        updated.nlink = 0;
+        updated.mode = updated
+            .mode
+            .with_permission(NodePermission::from_bits_truncate(0o640));
+        updated.uid = 1000;
+        updated.gid = 1001;
+        updated.blocks = 7;
+        updated.atime = Duration::new(11, 1);
+        updated.mtime = Duration::new(12, 2);
+        updated.ctime = Duration::new(13, 3);
+
+        inode
+            .update_attributes_after_backing_change(&updated)
+            .unwrap();
+
+        let cached = inode.metadata();
+        assert_eq!(cached.nlink, 0);
+        assert_eq!(cached.mode.permission().bits(), 0o640);
+        assert_eq!((cached.uid, cached.gid), (1000, 1001));
+        assert_eq!(cached.blocks, 7);
+        assert_eq!(cached.atime, Duration::new(11, 1));
+        assert_eq!(cached.mtime, Duration::new(12, 2));
+        assert_eq!(cached.ctime, Duration::new(13, 3));
+
+        updated.inode = 8;
+        assert_eq!(
+            inode.update_attributes_after_backing_change(&updated),
+            Err(VfsError::InvalidInput)
+        );
     }
 }

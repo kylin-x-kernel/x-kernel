@@ -10,15 +10,13 @@ homepage.workspace = true
 [features]
 default = []
 ebpf = ["dep:bpffs"]
-ext4 = ["dep:rsext4_vfs"]
-fat = ["dep:fat"]
 fs9p = ["dep:v9fs", "kclass/virtio-9p"]
 rootfs-secondary-block = []
-times = ["rsext4_vfs?/times"]
 
 [dependencies]
 bpffs = { workspace = true, optional = true }
 devfs.workspace = true
+fs_block.workspace = true
 fs_context.workspace = true
 kclass = { workspace = true, features = ["block"] }
 kbuild_config.workspace = true
@@ -29,6 +27,4 @@ kvfs.workspace = true
 log.workspace = true
 memfs.workspace = true
 procfs.workspace = true
-fat = { workspace = true, optional = true }
-rsext4_vfs = { workspace = true, optional = true }
 v9fs = { workspace = true, optional = true }

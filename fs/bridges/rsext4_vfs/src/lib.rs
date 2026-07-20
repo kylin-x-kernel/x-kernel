@@ -3,6 +3,9 @@
 // See LICENSES for license details.
 
 //! VFS bridge for the rsext4 filesystem library.
+//!
+//! When selected by Kconfig, this crate provides the rsext4 implementation of
+//! [`fs_block::FileSystemType`].
 #![cfg_attr(all(not(test), not(doc)), no_std)]
 #![allow(clippy::new_ret_no_self)]
 
@@ -21,6 +24,16 @@ use rsext4::{
 };
 
 const FS_BLOCK_SIZE: usize = rsext4::BLOCK_SIZE;
+
+#[fs_block::kiface::provide]
+impl fs_block::FileSystemType {
+    fn mount_bdev(
+        device: ClassDevice<KBlockDevice>,
+        _flags: kvfs::StatFsFlags,
+    ) -> kvfs::VfsResult<alloc::sync::Arc<kvfs::SuperBlock>> {
+        Ext4Filesystem::mount_bdev(device)
+    }
+}
 
 /// Block device wrapper implementing the ext4 driver traits.
 pub(crate) struct Ext4Disk(ClassDevice<KBlockDevice>);

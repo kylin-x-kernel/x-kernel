@@ -94,6 +94,13 @@ pub trait SuperBlockOperations: Send + Sync + 'static {
     fn statfs(&self) -> VfsResult<StatFs>;
 
     /// Writes back superblock-owned dirty state.
+    ///
+    /// [`SuperBlock::sync_fs`] calls this hook only after writing back dirty
+    /// page-cache state for all live inodes registered on the superblock and
+    /// after giving the filesystem a chance to write inode-owned metadata.
+    /// Filesystems should use this hook for superblock-wide metadata, journal
+    /// checkpoint, and device flush work rather than for discovering ordinary
+    /// dirty file data.
     fn sync_fs(&self) -> VfsResult<()> {
         Ok(())
     }

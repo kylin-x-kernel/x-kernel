@@ -117,23 +117,42 @@ impl WritebackControl {
 }
 
 /// Readahead window for `AddressSpaceOperations::readahead`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReadaheadControl {
+    mapping: Arc<Mapping>,
     start_index: PageIndex,
     count: usize,
 }
 
 impl ReadaheadControl {
-    pub const fn new(start_index: PageIndex, count: usize) -> Self {
-        Self { start_index, count }
+    fn new(mapping: Arc<Mapping>, start_index: PageIndex, count: usize) -> Self {
+        Self {
+            mapping,
+            start_index,
+            count,
+        }
     }
 
-    pub const fn start_index(self) -> PageIndex {
+    pub fn start_index(&self) -> PageIndex {
         self.start_index
     }
 
-    pub const fn count(self) -> usize {
+    pub fn count(&self) -> usize {
         self.count
+    }
+
+    /// Inserts one completed readahead folio if it is still absent.
+    ///
+    /// A foreground cache insertion wins over stale backing data.
+    pub fn complete_folio(&self, index: PageIndex, offset: usize, src: &[u8]) -> VfsResult<bool> {
+        let count = u64::try_from(self.count).map_err(|_| VfsError::InvalidInput)?;
+        let end = self
+            .start_index
+            .checked_add(count)
+            .ok_or(VfsError::InvalidInput)?;
+        if index < self.start_index || index >= end {
+            return Ok(false);
+        }
+        self.mapping.filemap_add_folio(index, offset, src)
     }
 }
 
@@ -241,7 +260,12 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
         })
     }
 
-    /// Changes the backing file length.
+    /// Changes the file length and resizes its page cache.
+    ///
+    /// Implementations own the filesystem-specific ordering and must call
+    /// [`AddressSpace::truncate_pagecache`] exactly once after the backing
+    /// inode is ready for cache invalidation and before freeing blocks that
+    /// could still be reachable through cached folios.
     fn set_len(&self, _mapping: &AddressSpace, _len: u64) -> VfsResult<()> {
         Err(VfsError::InvalidInput)
     }
@@ -259,11 +283,18 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
     }
 
     /// Prepares a buffered write.
+    ///
+    /// If copying into the page cache fails after this hook succeeds,
+    /// [`Self::write_end`] is called with `copied == 0` so the filesystem can
+    /// release reservations or other per-write state established here.
     fn write_begin(&self, _mapping: &AddressSpace, _request: WriteBeginRequest) -> VfsResult<()> {
         Err(VfsError::InvalidInput)
     }
 
-    /// Completes a buffered write.
+    /// Completes or cancels a buffered write.
+    ///
+    /// A `copied == 0` request can be a cancellation for a previously
+    /// successful [`Self::write_begin`] call.
     fn write_end(&self, _mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
         let _ = request;
         Err(VfsError::InvalidInput)
@@ -403,8 +434,12 @@ impl AddressSpace {
         let last_index = end.div_ceil(PAGE_SIZE_4K as u64);
         let count =
             usize::try_from(last_index - start_index).map_err(|_| VfsError::InvalidInput)?;
-        if count > 1 && self.page_cache.cached_run_len(start_index, count) == 0 {
-            self.readahead(ReadaheadControl::new(start_index, count))?;
+        if count > 1 && self.page_cache.cached_run_len(start_index, count) < count {
+            self.readahead(ReadaheadControl::new(
+                self.page_cache.clone(),
+                start_index,
+                count,
+            ))?;
         }
         Ok(())
     }
@@ -491,14 +526,20 @@ impl AddressSpace {
             if prepared_end > self.page_cache.len() {
                 self.page_cache.set_len(prepared_end)?;
             }
-            let copied = self.page_cache.with_folio_or_create(index, |folio| {
+            let copied = match self.page_cache.with_folio_or_create(index, |folio| {
                 let data = folio.data();
                 let copied = iter.copy_from_iter(&mut data[page_off..page_off + step])?;
                 if copied != 0 {
                     self.dirty_folio(folio)?;
                 }
                 Ok(copied)
-            })?;
+            }) {
+                Ok(copied) => copied,
+                Err(error) => {
+                    let _ = self.ops.write_end(self, WriteEndRequest::new(pos, step, 0));
+                    return Err(error);
+                }
+            };
             let accepted = self
                 .ops
                 .write_end(self, WriteEndRequest::new(pos, step, copied))?;
@@ -550,11 +591,16 @@ impl AddressSpace {
 
     /// Changes the backing file length through this address space.
     pub fn set_len(&self, len: u64) -> VfsResult<()> {
-        self.ops.set_len(self, len)?;
-        self.set_cached_len(len)
+        self.ops.set_len(self, len)
     }
 
-    pub(crate) fn set_cached_len(&self, len: u64) -> VfsResult<()> {
+    /// Resizes the page cache after the backing filesystem has prepared a
+    /// file-length change.
+    ///
+    /// This is the X-Kernel analogue of Linux `truncate_pagecache()`.
+    /// Callers must preserve their filesystem's truncate recovery protocol if
+    /// invalidation fails.
+    pub fn truncate_pagecache(&self, len: u64) -> VfsResult<()> {
         self.page_cache.set_len(len)?;
         Ok(())
     }
@@ -587,11 +633,6 @@ impl AddressSpace {
         )?;
         control.account_stats(stats);
         Ok(())
-    }
-
-    /// Inserts backing-store bytes into one cached folio.
-    pub fn cache_folio_range(&self, index: PageIndex, offset: usize, src: &[u8]) -> VfsResult<()> {
-        self.page_cache.filemap_add_folio(index, offset, src)
     }
 
     /// Writes cached dirty ranges through the supplied backing-store writer.
@@ -689,8 +730,8 @@ impl AddressSpaceOperations for InMemoryAddressSpaceOperations {
         mapping.writeback_cached_folios(control, |_, _, _| Ok(()))
     }
 
-    fn set_len(&self, _mapping: &AddressSpace, _len: u64) -> VfsResult<()> {
-        Ok(())
+    fn set_len(&self, mapping: &AddressSpace, len: u64) -> VfsResult<()> {
+        mapping.truncate_pagecache(len)
     }
 
     fn write_begin(&self, _mapping: &AddressSpace, _request: WriteBeginRequest) -> VfsResult<()> {
@@ -720,7 +761,10 @@ impl AddressSpaceOperations for EmptyAddressSpaceOperations {
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::sync::{Arc, Weak};
+    use alloc::{
+        sync::{Arc, Weak},
+        vec::Vec,
+    };
 
     use ksync::Mutex;
     use pagecache::{Folio, MappingKind, PageIndex};
@@ -733,6 +777,19 @@ mod tests {
     struct TestOps {
         writepages_called: Mutex<bool>,
         writeback_count: Mutex<usize>,
+    }
+
+    struct OrderedSetLenOps {
+        cached_pages: Mutex<Vec<u64>>,
+    }
+
+    impl AddressSpaceOperations for OrderedSetLenOps {
+        fn set_len(&self, mapping: &AddressSpace, len: u64) -> VfsResult<()> {
+            self.cached_pages.lock().push(mapping.nrpages());
+            mapping.truncate_pagecache(len)?;
+            self.cached_pages.lock().push(mapping.nrpages());
+            Ok(())
+        }
     }
 
     impl TestOps {
@@ -818,5 +875,26 @@ mod tests {
             0,
             "evict on clean cache should not write back anything",
         );
+    }
+
+    #[def_test]
+    fn filesystem_can_order_pagecache_resize_inside_set_len() {
+        let ops = Arc::new(OrderedSetLenOps {
+            cached_pages: Mutex::new(Vec::new()),
+        });
+        let address_space = AddressSpace::new(
+            Weak::new(),
+            ops.clone() as Arc<dyn AddressSpaceOperations>,
+            MappingKind::InMemory,
+            8192,
+        );
+        address_space
+            .page_cache
+            .filemap_add_folio(1, 0, b"cached tail")
+            .expect("page-cache insertion should succeed");
+
+        address_space.set_len(0).expect("ordered shrink succeeds");
+
+        assert_eq!(*ops.cached_pages.lock(), [1, 0]);
     }
 }

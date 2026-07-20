@@ -12,6 +12,7 @@
 - `truncate_final()`
 - `sync(data_only)`
 - `with_folio_or_create(index, ...)`
+- `filemap_add_folio(index, offset, data)`
 - `add_evict_listener(...)`
 
 这些接口都可能被不可信用户输入间接驱动，因此必须稳健处理越界、溢出和缺页分配失败。
@@ -77,6 +78,9 @@
 9. 写回失败后 folio 永久处于 under-writeback
    - 所有同步写回错误路径都清除 under-writeback，并保留 dirty 供后续重试
 
+10. readahead completion 覆盖并发前台写入
+    - `filemap_add_folio()` 只在 index 缺失时插入；已存在 folio 始终获胜
+
 ## 故障模式与影响分析（FMEA）
 
 | 故障 | 触发条件 | 当前处理 | 影响 |
@@ -88,6 +92,7 @@
 | filesystem 短写 | file-backed dirty folio writeback | 返回错误并保留 dirty | 防止数据丢失 |
 | range writeback 失败 | `AddressSpaceOperations::writepages()` 返回错误 | 返回错误并保留当前 folio dirty | 调用者可重试 `msync` |
 | under-writeback 状态泄漏 | 后端写回返回错误 | 清除 under-writeback 并保留 dirty | 避免后续写回永久跳过该 folio |
+| readahead 与前台插入竞态 | backing read 完成前同一 index 被 read/write materialize | completion 返回 `false`，保留现有 folio | 防止陈旧 backing data 覆盖 dirty 数据 |
 
 ## 故障管理
 
@@ -98,7 +103,7 @@
 ## 已知限制
 
 1. 仅实现最小 in-memory/file-backed mapping 模型。
-2. 没有 readahead / reclaim。
+2. 只有固定窗口 readahead completion，没有 Linux `file_ra_state` 自适应策略或 reclaim。
 3. 页树使用 `BTreeMap`，未做热点优化。
 4. 还没有 Linux `i_mmap` 那样的完整反向映射树，但 `resize` 现在已经能通过 registered-view notifier 触发最小版对象级 invalidate。
 5. registered file-backed views now record explicit object start bytes, so unaligned private executable prefixes are still included in object-driven truncate/invalidate coverage.
@@ -114,6 +119,7 @@
 - registered view notifier 是否只拆掉超 EOF 的 present PTE，而不会错误移除仍然有效的 VMA 元数据。
 - evict listener 调用方是否保存 `EvictRegistration` guard，并依赖 drop 自动注销。
 - 是否洞页读取始终返回零而非未初始化内存。
+- `filemap_add_folio()` 是否保持 insert-if-absent，且 readahead completion 不覆盖现有 folio。
 - `writeback_range()` 是否只写回与请求范围相交的 dirty folio，并在失败时保留 dirty。
 - 写回预算耗尽后是否停止本次 pass，而不是无限制扫描/写回。
 - 写回失败路径是否清除 under-writeback 并保留 dirty。
