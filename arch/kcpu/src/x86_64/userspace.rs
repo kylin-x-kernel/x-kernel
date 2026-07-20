@@ -38,6 +38,32 @@ pub struct UserContext {
     pub gs_base: u64,
 }
 
+/// Private frame used by `enter_user` while running user space.
+///
+/// The x86_64 entry assembly uses `tf` as a temporary trap stack: TSS.rsp0
+/// points to the end of `tf`, and hardware trap frames grow down into it.
+/// `kernel_rsp` is kept immediately before `tf` so the return path can recover
+/// the Rust caller's kernel stack without storing that private value in
+/// [`UserContext`] or any user-visible signal frame.
+#[repr(C, align(16))]
+struct EnterUserFrame {
+    kernel_rsp: u64,
+    tf: TrapFrame,
+}
+
+/// User-space state saved outside the ABI `mcontext_t` signal payload.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct UserRestorableContext {
+    fs_base: u64,
+    gs_base: u64,
+}
+
+pub(super) const KERNEL_RSP_TO_TRAPFRAME_OFFSET: usize =
+    core::mem::offset_of!(EnterUserFrame, tf) - core::mem::offset_of!(EnterUserFrame, kernel_rsp);
+
+const _: () = assert!(KERNEL_RSP_TO_TRAPFRAME_OFFSET == core::mem::size_of::<u64>());
+
 impl UserContext {
     /// Creates a new context with the given entry point, user stack pointer,
     /// and the argument.
@@ -64,6 +90,22 @@ impl UserContext {
         self.fs_base as _
     }
 
+    /// Saves user-restorable state that is not carried by signal `mcontext_t`.
+    pub fn save_user_restorable(&self) -> UserRestorableContext {
+        UserRestorableContext {
+            fs_base: self.fs_base,
+            gs_base: self.gs_base,
+        }
+    }
+
+    /// Restores user state that is not carried by signal `mcontext_t`.
+    pub fn restore_user_restorable(&mut self, saved: UserRestorableContext) {
+        self.fs_base = saved.fs_base;
+        self.gs_base = saved.gs_base;
+        self.ss = gdt::UDATA.0 as _;
+        self.orig_rax = u64::MAX;
+    }
+
     /// Sets the TLS area.
     pub const fn set_tls(&mut self, tls_area: usize) {
         self.fs_base = tls_area as _;
@@ -77,7 +119,7 @@ impl UserContext {
     /// This function returns when an exception or syscall occurs.
     pub fn run(&mut self) -> ReturnReason {
         unsafe extern "C" {
-            unsafe fn enter_user(uctx: &mut UserContext);
+            unsafe fn enter_user(frame: &mut EnterUserFrame);
         }
 
         assert_eq!(self.cs, gdt::UCODE64.0 as _);
@@ -90,8 +132,16 @@ impl UserContext {
         unsafe { karch::write_thread_pointer(self.fs_base as _) };
         KernelGsBase::write(x86_64::VirtAddr::new_truncate(self.gs_base));
 
-        // SAFETY: `enter_user` is an assembly stub that switches to user mode and returns on trap. `UserContext` fields are set up by `new()` with valid user segment selectors and entry point.
-        unsafe { enter_user(self) };
+        let mut frame = EnterUserFrame {
+            kernel_rsp: 0,
+            tf: self.tf,
+        };
+
+        // SAFETY: `enter_user` switches to user mode using the private
+        // `EnterUserFrame` layout above. `self.tf` was initialized by `new()` or
+        // restored from validated signal state with user segment selectors.
+        unsafe { enter_user(&mut frame) };
+        self.tf = frame.tf;
 
         self.gs_base = KernelGsBase::read().as_u64();
         self.fs_base = karch::read_thread_pointer() as _;

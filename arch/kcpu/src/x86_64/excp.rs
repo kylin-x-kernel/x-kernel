@@ -7,12 +7,13 @@
 use x86::{controlregs::cr2, irq::*};
 use x86_64::structures::idt::PageFaultErrorCode;
 
-use super::{ExceptionContext, gdt};
+use super::{ExceptionContext, gdt, userspace};
 use crate::excp::PageFaultFlags;
 
 core::arch::global_asm!(
     include_str!("excp.S"),
     trapframe_size = const core::mem::size_of::<ExceptionContext>(),
+    kernel_rsp_to_trapframe_offset = const userspace::KERNEL_RSP_TO_TRAPFRAME_OFFSET,
     UDATA = const gdt::UDATA.0,
     UCODE64 = const gdt::UCODE64.0,
     SYSCALL_VECTOR = const LEGACY_SYSCALL_VECTOR,

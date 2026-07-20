@@ -23,6 +23,11 @@ use crate::{ExceptionContext, excp::PageFaultFlags};
 #[repr(C)]
 pub struct UserContext(ExceptionContext);
 
+/// User-space state saved outside the ABI `mcontext_t` signal payload.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct UserRestorableContext;
+
 impl UserContext {
     /// Creates a new context with the given entry point, user stack pointer,
     /// and the argument.
@@ -35,6 +40,16 @@ impl UserContext {
         trap_frame.prmd = PPLV_UMODE | PIE;
         trap_frame.regs.a0 = arg0;
         Self(trap_frame)
+    }
+
+    /// Saves user-restorable state that is not carried by signal `mcontext_t`.
+    pub fn save_user_restorable(&self) -> UserRestorableContext {
+        UserRestorableContext
+    }
+
+    /// Restores user state that is not carried by signal `mcontext_t`.
+    pub fn restore_user_restorable(&mut self, _saved: UserRestorableContext) {
+        self.0.saved_syscall_arg0 = 0;
     }
 
     /// Enter user space.

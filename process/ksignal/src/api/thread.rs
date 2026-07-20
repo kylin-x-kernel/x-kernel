@@ -10,7 +10,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use kcpu::userspace::UserContext;
+use kcpu::userspace::{UserContext, UserRestorableContext};
 use kerrno::{KResult, LinuxError};
 use kspin::SpinNoIrq;
 use osvm::VirtMutPtr;
@@ -26,7 +26,7 @@ use crate::{
 struct SignalFrame {
     ucontext: UContext,
     siginfo: SignalInfo,
-    uctx: UserContext,
+    saved: UserRestorableContext,
 }
 
 /// Thread-level signal manager.
@@ -139,7 +139,7 @@ impl ThreadSignalManager {
                     .write_vm(SignalFrame {
                         ucontext: UContext::new(uctx, restore_blocked),
                         siginfo: sig.clone(),
-                        uctx: *uctx,
+                        saved: uctx.save_user_restorable(),
                     })
                     .is_err()
                 {
@@ -230,7 +230,7 @@ impl ThreadSignalManager {
         // SAFETY: pointer is valid
         let frame = unsafe { &*frame_ptr };
 
-        *uctx = frame.uctx;
+        uctx.restore_user_restorable(frame.saved);
         frame.ucontext.mcontext.restore(uctx);
 
         *self.blocked.lock() = frame.ucontext.sigmask;

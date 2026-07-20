@@ -46,6 +46,13 @@ pub struct UserContext {
     from_syscall: bool,
 }
 
+/// User-space state saved outside the ABI `mcontext_t` signal payload.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct UserRestorableContext {
+    tpidr: u64,
+}
+
 impl UserContext {
     const PAD_MAGIC: u64 = 0x1234_5678_9abc_def0;
 
@@ -87,6 +94,17 @@ impl UserContext {
     /// Gets the TLS area.
     pub const fn tls(&self) -> usize {
         self.tpidr as _
+    }
+
+    /// Saves user-restorable state that is not carried by signal `mcontext_t`.
+    pub fn save_user_restorable(&self) -> UserRestorableContext {
+        UserRestorableContext { tpidr: self.tpidr }
+    }
+
+    /// Restores user state that is not carried by signal `mcontext_t`.
+    pub fn restore_user_restorable(&mut self, saved: UserRestorableContext) {
+        self.tpidr = saved.tpidr;
+        self.saved_syscall_arg0 = 0;
     }
 
     /// Sets the TLS area.

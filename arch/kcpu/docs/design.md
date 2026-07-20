@@ -28,7 +28,7 @@ arch/kcpu/
 │   │   ├── ctx.rs                    # ExceptionContext（含 orig_rax）、ContextSwitchFrame、TaskContext
 │   │   ├── excp.rs / excp.S          # trap 入口、IRQ/PageFault 分发、syscall_entry
 │   │   ├── instrs.rs / copy_user.S   # user_copy + 异常表条目
-│   │   ├── userspace.rs              # UserContext、enter_user、syscall MSR 初始化、syscall_restart_error
+│   │   ├── userspace.rs              # UserContext、EnterUserFrame、UserRestorableContext、enter_user、syscall MSR 初始化、syscall_restart_error
 │   │   ├── boot.rs                   # init_trap()
 │   │   ├── gdt.rs                    # GDT/TSS per-CPU 初始化
 │   │   └── idt.rs                    # IDT 初始化
@@ -113,12 +113,23 @@ ExceptionContext  (每架构定义，完整寄存器 trap frame)
 UserContext       (每架构定义，包装 ExceptionContext + 用户态专用字段)
       │           x86_64:      { tf: TrapFrame, fs_base, gs_base }
       │                          - syscall_restart_error() 查询重启错误码
-      │           aarch64:     { tf: ExceptionContext, sp, tpidr }
+      │           aarch64:     { tf: ExceptionContext, sp, tpidr, saved_syscall_arg0 }
       │           riscv:       UserContext(ExceptionContext)     -- newtype
       │           loongarch64: UserContext(ExceptionContext)     -- newtype
       │
       └── Deref/DerefMut → ExceptionContext
           (通过 impl_user_context_deref! 宏)
+
+EnterUserFrame    (x86_64 私有 trap-return 汇编帧)
+      │           { kernel_rsp, tf: TrapFrame }
+      │           - kernel_rsp 为 enter_user 返回 Rust 调用者所需的内核栈指针
+      │           - tf 作为临时 trap stack，TSS.rsp0 指向其末尾
+      │           - 不进入 UserContext，也不进入用户可见 signal frame
+
+UserRestorableContext
+      │           信号帧保存的窄类型，仅包含 ABI `mcontext_t` 未覆盖且允许
+      │           从用户信号帧恢复的用户态语义状态；不包含 x86_64
+      │           EnterUserFrame 私有字段或 syscall restart scratch 字段。
 
 TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换)
                   x86_64:      { kstack_top, rsp, fs_base, cr3, ext_state? }
@@ -278,6 +289,16 @@ Rust 不支持继承。`impl_user_context_deref!` 宏为 `UserContext` 实现
 - aarch64 需要独立的 `sp`（EL0 栈指针不在 trap frame 中）和 `tpidr`。
 - riscv 和 loongarch64 的 `ExceptionContext` 已包含完整状态，
   `UserContext` 使用 newtype 包装即可。
+
+x86_64 的 `UserContext::run()` 会临时构造 `EnterUserFrame` 并传给汇编
+`enter_user`。这样 `UserContext` 保持为用户寄存器语义状态，而 TSS.rsp0、
+kernel stack restore slot、trap frame stack alignment 等汇编私有不变量集中在
+`EnterUserFrame` 内。
+
+信号处理不直接把完整 `UserContext` 放入用户栈。`UContext/MContext` 承载
+用户 ABI 寄存器状态，`UserRestorableContext` 只补充 ABI 上下文未覆盖的窄状态，
+避免 x86_64 `EnterUserFrame.kernel_rsp` 等内核私有字段泄露到 signal frame 或被
+`sigreturn` 恢复。
 
 ### 为什么 LoongArch64 有软件非对齐模拟
 

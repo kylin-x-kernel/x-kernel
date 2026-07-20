@@ -123,8 +123,9 @@ syscall_entry:
 .Lexit_user:
     PUSH_GENERAL_REGS
 
-    # restore kernel context
-    mov     rsp, [rsp + {trapframe_size}]
+    # Restore kernel context from EnterUserFrame.kernel_rsp, stored immediately
+    # before the TrapFrame that hardware and this entry code fill.
+    mov     rsp, [rsp - {kernel_rsp_to_trapframe_offset}]
     POP_KERNEL_CTX
     ret
 
@@ -132,8 +133,9 @@ syscall_entry:
 enter_user:
     # save kernel context
     PUSH_KERNEL_CTX
-    mov [rdi + {trapframe_size}], rsp
+    mov [rdi], rsp
 
+    add rdi, {kernel_rsp_to_trapframe_offset}
     mov rsp, rdi
     add rdi, {trapframe_size}
     mov gs:[offset __PERCPU_TSS + 4], rdi      # store end of TrapFrame -> TSS.sp0
