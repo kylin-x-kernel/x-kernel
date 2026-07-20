@@ -16,8 +16,11 @@ use vsock::{VsockConnId, VsockDevice, VsockDriverEventType};
 
 use crate::as_driver_error;
 
-/// Default buffer size for VirtIO socket device (32KB).
-const DEFAULT_BUFFER_SIZE: usize = 32 * 1024;
+/// Per-vsock RX virtqueue buffer size.
+const RX_BUFFER_SIZE: usize = 4096;
+
+/// Per-connection receive buffer capacity used by the connection manager.
+const PER_CONNECTION_BUFFER_CAPACITY: u32 = 32 * 1024;
 
 struct ConnectionArgs {
     peer_addr: VsockAddr,
@@ -56,7 +59,7 @@ impl ConnectionArgs {
 /// let event = vsock.poll_event()?;
 /// ```
 pub struct VirtIoSocketDev<H: Hal, T: Transport> {
-    inner: SpinNoIrq<InnerDev<H, T>>,
+    inner: SpinNoIrq<InnerDev<H, T, RX_BUFFER_SIZE>>,
     guest_cid: u64,
 }
 
@@ -81,7 +84,7 @@ impl<H: Hal, T: Transport> VirtIoSocketDev<H, T> {
         // The current vsock backend does not expose interrupt acknowledgment
         // or virtqueue notification control, so knet advances it by polling.
         let virtio_socket = Self::open_socket(transport)?;
-        let inner = InnerDev::new_with_capacity(virtio_socket, DEFAULT_BUFFER_SIZE as u32);
+        let inner = InnerDev::new_with_capacity(virtio_socket, PER_CONNECTION_BUFFER_CAPACITY);
         let guest_cid = inner.guest_cid();
         Ok(Self {
             inner: SpinNoIrq::new(inner),
@@ -89,8 +92,8 @@ impl<H: Hal, T: Transport> VirtIoSocketDev<H, T> {
         })
     }
 
-    fn open_socket(transport: T) -> DriverResult<VirtIOSocket<H, T>> {
-        VirtIOSocket::<H, _>::new(transport).map_err(as_driver_error)
+    fn open_socket(transport: T) -> DriverResult<VirtIOSocket<H, T, RX_BUFFER_SIZE>> {
+        VirtIOSocket::<H, T, RX_BUFFER_SIZE>::new(transport).map_err(as_driver_error)
     }
 
     fn translate_event(event: VsockEvent) -> VsockDriverEventType {
@@ -116,7 +119,7 @@ impl<H: Hal, T: Transport> VirtIoSocketDev<H, T> {
         }
     }
 
-    fn refresh_credit(inner: &mut InnerDev<H, T>, connection: &ConnectionArgs) {
+    fn refresh_credit(inner: &mut InnerDev<H, T, RX_BUFFER_SIZE>, connection: &ConnectionArgs) {
         let _ = inner.update_credit(connection.peer_addr, connection.host_port);
     }
 }
