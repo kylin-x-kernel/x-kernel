@@ -127,6 +127,11 @@ pub struct ExceptionContext {
     pub era: usize,
     /// Snapshot of a0 saved before syscall dispatch for SA_RESTART.
     pub saved_syscall_arg0: usize,
+    /// Whether the most recent user trap was a syscall.
+    ///
+    /// Software-only; assembly does not touch this field. It prevents treating
+    /// a coincidental user `a0` value as a Linux restart code after IRQ/fault.
+    from_syscall: bool,
 }
 
 impl ExceptionContext {
@@ -235,6 +240,16 @@ impl ExceptionContext {
         self.regs.ra = ra;
     }
 
+    /// Returns whether the most recent user trap was a syscall entry.
+    pub const fn is_from_syscall(&self) -> bool {
+        self.from_syscall
+    }
+
+    /// Records whether the trap that just left user space was a syscall.
+    pub(crate) fn set_from_syscall(&mut self, from_syscall: bool) {
+        self.from_syscall = from_syscall;
+    }
+
     /// Snapshot a0 before syscall dispatch so that [`rollback_syscall`] can
     /// restore it after the return value overwrites it.
     pub fn save_syscall_args(&mut self) {
@@ -244,12 +259,18 @@ impl ExceptionContext {
     /// Rewind PC and restore a0 so the syscall is re-executed with the
     /// original arguments.
     pub fn rollback_syscall(&mut self) {
+        if !self.is_from_syscall() {
+            return;
+        }
         self.era = self.era.wrapping_sub(4); // `syscall 0` is 4 bytes
         self.regs.a0 = self.saved_syscall_arg0;
     }
 
     /// Replace syscall number and rewind PC (used by ERESTART_RESTARTBLOCK).
     pub fn restart_with_syscall(&mut self, sysno: usize) {
+        if !self.is_from_syscall() {
+            return;
+        }
         self.rollback_syscall();
         self.set_sysno(sysno);
     }
@@ -258,6 +279,9 @@ impl ExceptionContext {
     /// returns that error; otherwise `None`.
     pub fn syscall_restart_error(&self) -> Option<kerrno::LinuxError> {
         use kerrno::LinuxError;
+        if !self.is_from_syscall() {
+            return None;
+        }
         let retval = self.retval() as isize;
         [
             LinuxError::ERESTARTSYS,

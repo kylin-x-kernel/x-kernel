@@ -81,4 +81,41 @@ pub mod tests_arch {
         ctx.set_retval(0x55aa);
         assert_eq!(ctx.retval(), 0x55aa);
     }
+
+    #[def_test]
+    fn test_user_context_restart_ignored_without_syscall_trap() {
+        use kerrno::LinuxError;
+
+        use super::userspace::UserContext;
+
+        let mut uctx = UserContext::new(0x1004, va!(0x2000), 7);
+        uctx.save_syscall_args();
+        uctx.set_retval((-LinuxError::ERESTARTSYS.into_raw() as isize) as usize);
+
+        assert!(!uctx.is_from_syscall());
+        assert!(uctx.syscall_restart_error().is_none());
+        uctx.rollback_syscall();
+        assert_eq!(uctx.ip(), 0x1004);
+        assert_eq!(
+            uctx.retval(),
+            (-LinuxError::ERESTARTSYS.into_raw() as isize) as usize
+        );
+    }
+
+    #[def_test]
+    fn test_user_context_restart_after_syscall_trap() {
+        use kerrno::LinuxError;
+
+        use super::userspace::UserContext;
+
+        let mut uctx = UserContext::new(0x1004, va!(0x2000), 7);
+        uctx.save_syscall_args();
+        uctx.set_retval((-LinuxError::ERESTARTSYS.into_raw() as isize) as usize);
+        uctx.set_from_syscall(true);
+
+        assert_eq!(uctx.syscall_restart_error(), Some(LinuxError::ERESTARTSYS));
+        uctx.rollback_syscall();
+        assert_eq!(uctx.retval(), 7);
+        assert_eq!(uctx.ip(), 0x1000);
+    }
 }

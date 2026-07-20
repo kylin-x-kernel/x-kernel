@@ -47,6 +47,7 @@ impl UserContext {
             sepc: entry,
             sstatus,
             saved_syscall_arg0: 0,
+            from_syscall: false,
         })
     }
 
@@ -93,6 +94,9 @@ impl UserContext {
         } else {
             ReturnReason::Unknown
         };
+
+        // Only syscall traps may interpret a0 as a Linux restart code.
+        self.set_from_syscall(matches!(ret, ReturnReason::Syscall));
 
         karch::enable_local_irq();
         ret

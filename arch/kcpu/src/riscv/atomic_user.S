@@ -10,6 +10,11 @@
 // Returns: 0 if no fault occurred; non-zero if a fault occurred.
 // On success, *old_out receives the value observed at *addr. If that value
 // equals `old`, `new` was stored.
+//
+// Newer LLVM assemblers treat LR/SC as Zalrsc (split out of the A extension).
+// Enable it explicitly so `lr.w`/`sc.w` assemble under rustc's integrated asm.
+
+.option arch, +zalrsc
 
 .section .text
 .global user_atomic_load_u32

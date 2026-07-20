@@ -84,6 +84,9 @@ impl UserContext {
             _ => ReturnReason::Unknown,
         };
 
+        // Only syscall traps may interpret a0 as a Linux restart code.
+        self.set_from_syscall(matches!(ret, ReturnReason::Syscall));
+
         karch::enable_local_irq();
         ret
     }

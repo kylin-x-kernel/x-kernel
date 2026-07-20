@@ -39,6 +39,11 @@ pub struct UserContext {
     /// SA_RESTART can restore argument 0 after the return value
     /// overwrites it.
     saved_syscall_arg0: u64,
+    /// Whether the most recent user trap was a syscall (`svc`).
+    ///
+    /// Software-only; assembly does not touch this field. It prevents treating
+    /// a coincidental user `x0` value as a Linux restart code after IRQ/fault.
+    from_syscall: bool,
 }
 
 impl UserContext {
@@ -65,6 +70,7 @@ impl UserContext {
             sp: ustack_top.as_usize() as _,
             tpidr: 0,
             saved_syscall_arg0: 0,
+            from_syscall: false,
         }
     }
 
@@ -147,12 +153,25 @@ impl UserContext {
             }
         };
 
+        // Only syscall traps may interpret x0 as a Linux restart code.
+        self.set_from_syscall(matches!(ret, ReturnReason::Syscall));
+
         karch::enable_local_irq();
         ret
     }
 }
 
 impl UserContext {
+    /// Returns whether the most recent user trap was a syscall entry.
+    pub const fn is_from_syscall(&self) -> bool {
+        self.from_syscall
+    }
+
+    /// Records whether the trap that just left user space was a syscall.
+    pub(crate) fn set_from_syscall(&mut self, from_syscall: bool) {
+        self.from_syscall = from_syscall;
+    }
+
     /// Snapshot x0 before entering the syscall dispatch so that it can
     /// be restored later by [`rollback_syscall`].
     pub fn save_syscall_args(&mut self) {
@@ -163,6 +182,9 @@ impl UserContext {
     /// the kernel is re-executed when we return to userspace.  Used by the
     /// SA_RESTART machinery to transparently restart an interrupted syscall.
     pub fn rollback_syscall(&mut self) {
+        if !self.is_from_syscall() {
+            return;
+        }
         // On AArch64, ELR holds the address of the instruction *after* SVC.
         self.tf.elr = self.tf.elr.wrapping_sub(4);
         // Restore the original syscall argument; x0 was overwritten with
@@ -173,6 +195,9 @@ impl UserContext {
     /// Replace the syscall number and rewind PC so that the new syscall
     /// is executed instead of the original one (used by ERESTART_RESTARTBLOCK).
     pub fn restart_with_syscall(&mut self, sysno: usize) {
+        if !self.is_from_syscall() {
+            return;
+        }
         self.rollback_syscall();
         self.set_sysno(sysno);
     }
@@ -180,6 +205,9 @@ impl UserContext {
     /// If the last syscall set a Linux restart error as its return value,
     /// returns that error; otherwise `None`.
     pub fn syscall_restart_error(&self) -> Option<LinuxError> {
+        if !self.is_from_syscall() {
+            return None;
+        }
         let retval = self.retval() as isize;
         [
             LinuxError::ERESTARTSYS,
