@@ -29,7 +29,8 @@ driver layer / smoltcp / ringbuf
 - safe API 调用者信任 `knet` 维护 socket 状态、路由状态、buffer 边界和 errno 映射。
 - `knet` 信任 `posix/net` 完成用户指针读取、sockaddr 长度校验、地址族选择和权限策略。
 - `knet` 信任 driver 层返回的 `NetBufHandle` 数据切片在 handle 生命周期内有效。
-- `knet` 信任 smoltcp checked parser 拒绝格式错误的 IP、TCP、UDP、ARP 和 Ethernet 数据。
+- `knet` 使用基于 `zerocopy` 和 `etherparse` 的 crate 内 checked parser 校验 Ethernet、ARP 和 IPv4 头部，并继续依赖 smoltcp 校验 TCP、UDP 和 IPv6 数据。
+- 设备层只接收经 `Router` 控制面适配后的 crate 内地址、CIDR 和邻居项。
 - unsafe 边界由 crate 内部封装，外部调用者没有直接调用 unsafe API 的入口。
 
 ## 外部边界 / 攻击面
@@ -202,6 +203,9 @@ unsafe {
 6. netlink message 边界：所有 payload 读取必须先经过 header 长度、attribute 长度和 family 校验。
 7. route index 边界：rtnetlink route 的 `oif` 转换成设备索引后必须检查 `dev < devices.len()`。
 8. static init 顺序：创建 socket 前必须完成 `init_network` 初始化 `SERVICE`、`SOCKET_SET` 和 `LISTEN_TABLE`。
+9. `PacketBuf` 所有权：设备、Router、loopback 和 smoltcp adapter 之间按值转移报文；协议偏移只能落在当前有效数据范围内。
+10. IPv4 输入边界：本地交付前必须校验版本、头长、总长和头部校验和，并按 `total_len` 截断尾部数据。
+11. 网络类型边界：`RouteTable` 和 `NetDevice` 不暴露 smoltcp 地址或时间类型；控制面与协议兼容转换由 `Router`、`Service` 和初始化入口完成。
 
 ## 线程安全
 
@@ -228,7 +232,7 @@ unsafe {
 | T-07 | raw socket 被无权限调用者创建 | 中 | syscall 层没有实施权限门禁 | `knet` 层只封装 raw socket 行为；权限策略应保留在 `posix/net::sys_socket` |
 | T-08 | netlink RX queue 被 uevent 或 response 填满 | 中 | 订阅者不消费，publisher 持续写入 | `NETLINK_RX_QUEUE_LIMIT` 限制单 socket queue 字节数，超限丢弃 |
 | T-09 | 路由状态与 data-plane 不一致 | 中 | rtnetlink mutation 只更新控制面或同步过程中出错 | `update_route_state` 写入 `ROUTE_STATE` 后调用 `SERVICE.lock().sync_netlink`；新增 mutation 需复用该路径 |
-| T-10 | 外部网络包触发 parser panic | 中 | malformed Ethernet、ARP、IP 或 TCP packet 进入 RX | RX 路径使用 smoltcp checked parser，错误包丢弃并记录 warn |
+| T-10 | 外部网络包触发 parser panic | 中 | malformed Ethernet、ARP、IP 或 TCP packet 进入 RX | Ethernet 和 ARP 使用 `zerocopy` checked view，IPv4 使用 `etherparse` checked parser，TCP、UDP 和 IPv6 继续使用 smoltcp checked parser；错误包直接丢弃 |
 | T-11 | 中断上下文误用导致锁竞争或延迟放大 | 中 | IRQ waker 回调中直接推进 `SERVICE`、`SOCKET_SET` 或执行阻塞 socket 操作 | 中断路径只注册和唤醒 waker，协议推进保留在普通 poll 路径 |
 | T-12 | driver buffer 或 DMA 输入破坏 packet 边界 | 高 | 驱动返回长度异常、数据在 recycle 后继续被访问、TX/RX buffer 生命周期使用错误 | RX 数据只在 `NetBufHandle` recycle 前解析和复制；外部帧使用 checked parser；TX buffer 由 driver handle 管理 |
 | T-13 | vsock-TIPC bridge 误把普通 AF_VSOCK 连接路由到 TIPC | 中 | 事件分流没有区分桥接端口或已桥接连接 | bridge 只接管静态 port map 和自己的 connection id，未命中事件继续交给 `VSOCK_CONN_MANAGER` |

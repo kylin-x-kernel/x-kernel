@@ -4,4 +4,6 @@
 
 //! Link-layer socket support.
 
+pub(crate) mod buf;
 pub mod packet;
+pub(crate) mod wire;

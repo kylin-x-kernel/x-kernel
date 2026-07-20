@@ -2,18 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! It provides unified networking primitives for TCP/UDP communication
-//! using various underlying network stacks. Currently, only [smoltcp] is
-//! supported.
+//! It provides unified networking primitives for TCP/UDP communication.
 //!
 //! # Organization
 //!
 //! - [`TcpSocket`]: A TCP socket that provides POSIX-like APIs.
 //! - [`UdpSocket`]: A UDP socket that provides POSIX-like APIs.
 //! - [`dns_query`]: Function for DNS query.
-//!
-//! [smoltcp]: https://github.com/smoltcp-rs/smoltcp
-
 #![no_std]
 #![allow(rustdoc::broken_intra_doc_links)]
 
@@ -23,6 +18,7 @@ extern crate alloc;
 
 mod consts;
 mod device;
+mod ip;
 mod link;
 pub mod netlink;
 mod socket;
@@ -41,7 +37,7 @@ use kdevice::subscribe_device_removed;
 use ksync::Mutex;
 use lazyinit::LazyInit;
 pub use link::packet;
-use smoltcp::wire::{EthernetAddress, Ipv4Address, Ipv4Cidr};
+pub(crate) use link::{buf, wire};
 pub use socket::{
     file::{sock_alloc_file, sock_from_file},
     options, *,
@@ -54,6 +50,7 @@ pub use transport::{raw, tcp, udp};
 use crate::{
     consts::{GATEWAY, IP, IP_PREFIX, STANDARD_MTU},
     device::{EthernetDevice, LoopbackDevice},
+    ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     listen_table::ListenTable,
     router::{Router, Rule},
     service::Service,
@@ -87,7 +84,7 @@ pub fn init_network() {
         let device_id = handle.id();
         info!("  use NIC 0: {:?}", handle.name());
 
-        let eth0_address = EthernetAddress(handle.mac().0);
+        let eth0_address = wire::MacAddress(handle.mac().0);
         eth0_mac = Some(handle.mac().0);
         let eth0_ip = Ipv4Cidr::new(IP.parse().expect("Invalid IPv4 address"), IP_PREFIX);
 
@@ -99,7 +96,9 @@ pub fn init_network() {
 
         router.add_rule(Rule::new(
             Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
-            Some(GATEWAY.parse().expect("Invalid gateway address")),
+            Some(IpAddress::Ipv4(
+                GATEWAY.parse().expect("Invalid gateway address"),
+            )),
             eth0_dev,
             eth0_ip.address().into(),
         ));
@@ -121,16 +120,16 @@ pub fn init_network() {
 
     let mut service = Service::new(router);
     service.iface.update_ip_addrs(|ip_addrs| {
-        ip_addrs.push(lo_ip.into()).unwrap();
+        ip_addrs.push(to_smoltcp_ipv4_cidr(lo_ip)).unwrap();
         if let Some(eth0_ip) = eth0_ip {
-            ip_addrs.push(eth0_ip.into()).unwrap();
+            ip_addrs.push(to_smoltcp_ipv4_cidr(eth0_ip)).unwrap();
         }
     });
     SERVICE.init_once(Mutex::new(service));
 
     let netlink_state = netlink::build_initial_state(
-        lo_ip.into(),
-        eth0_ip.map(Into::into),
+        to_smoltcp_ipv4_cidr(lo_ip),
+        eth0_ip.map(to_smoltcp_ipv4_cidr),
         eth0_mac,
         GATEWAY.parse().ok(),
         STANDARD_MTU as u32,
@@ -141,6 +140,13 @@ pub fn init_network() {
     SOCKET_SET.init_once(SocketSetWrapper::new());
     LISTEN_TABLE.init_once(ListenTable::new());
     udp_err::init_udp_error_registry();
+}
+
+fn to_smoltcp_ipv4_cidr(cidr: Ipv4Cidr) -> smoltcp::wire::IpCidr {
+    smoltcp::wire::IpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
+        cidr.address().into(),
+        cidr.prefix_len(),
+    ))
 }
 
 fn subscribe_network_unregister(id: kdevice::DeviceId) {

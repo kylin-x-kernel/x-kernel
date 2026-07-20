@@ -16,7 +16,10 @@ use ktask::future::sleep;
 use smoltcp::{
     iface::{Interface, SocketSet},
     time::Instant,
-    wire::{HardwareAddress, IpAddress, IpCidr, IpListenEndpoint},
+    wire::{
+        HardwareAddress, IpAddress as SmoltcpIpAddress, IpCidr,
+        IpListenEndpoint as SmoltcpIpListenEndpoint,
+    },
 };
 
 use crate::{LISTEN_TABLE, SOCKET_SET, netlink::RtnetlinkState, router::Router};
@@ -47,33 +50,37 @@ impl Service {
     }
 
     pub fn poll(&mut self, sockets: &mut SocketSet) -> bool {
-        let timestamp = now();
+        let smoltcp_timestamp = now();
+        let device_timestamp = monotonic_time();
 
-        self.router.poll(timestamp, sockets);
-        self.iface.poll(timestamp, &mut self.router, sockets);
+        self.router.poll(device_timestamp, sockets);
+        self.iface
+            .poll(smoltcp_timestamp, &mut self.router, sockets);
         LISTEN_TABLE.wake_touched_acceptors(sockets);
-        self.router.dispatch(timestamp)
+        self.router.dispatch(device_timestamp)
     }
 
-    pub fn get_source_address(&self, dst_addr: &IpAddress) -> KResult<IpAddress> {
+    pub fn get_source_address(&self, dst_addr: &SmoltcpIpAddress) -> KResult<SmoltcpIpAddress> {
+        let dst_addr = super::from_smoltcp_ip_address(*dst_addr);
         self.router
             .table
-            .lookup(dst_addr)
-            .map(|rule| rule.src)
+            .lookup(&dst_addr)
+            .map(|rule| super::to_smoltcp_ip_address(rule.src))
             .ok_or(KError::from(LinuxError::ENETUNREACH))
     }
 
-    pub fn device_mask_for(&self, endpoint: &IpListenEndpoint) -> u32 {
+    pub fn device_mask_for(&self, endpoint: &SmoltcpIpListenEndpoint) -> u32 {
         match endpoint.addr {
             Some(addr) => self.device_mask_for_addr(&addr),
             None => u32::MAX,
         }
     }
 
-    pub fn device_mask_for_addr(&self, addr: &IpAddress) -> u32 {
+    pub fn device_mask_for_addr(&self, addr: &SmoltcpIpAddress) -> u32 {
+        let addr = super::from_smoltcp_ip_address(*addr);
         self.router
             .table
-            .lookup(addr)
+            .lookup(&addr)
             .map_or(u32::MAX, |it| 1u32 << it.dev)
     }
 
@@ -126,7 +133,7 @@ impl Service {
         self.iface.update_ip_addrs(|ip_addrs| {
             ip_addrs.clear();
             for addr in &state.addrs {
-                if let IpAddress::Ipv4(ipv4) = addr.address {
+                if let SmoltcpIpAddress::Ipv4(ipv4) = addr.address {
                     let _ = ip_addrs.push(IpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
                         ipv4,
                         addr.prefix_len,

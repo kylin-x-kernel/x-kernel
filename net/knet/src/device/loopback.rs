@@ -3,35 +3,29 @@
 // See LICENSES for license details.
 
 //! Loopback network device implementation.
-use alloc::vec;
-use core::task::Waker;
+use alloc::collections::VecDeque;
 
+use ::core::task::Waker;
+use khal::time::TimeValue;
 use kpoll::PollSet;
-use smoltcp::{
-    storage::{PacketBuffer, PacketMetadata},
-    time::Instant,
-    wire::IpAddress,
-};
 
 use crate::{
-    consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
+    buf::{PacketBuf, PacketOwner},
+    consts::SOCKET_BUFFER_SIZE,
     device::NetDevice,
+    ip::IpAddress,
 };
 
 /// Loopback device backed by an in-memory queue.
 pub struct LoopbackDevice {
-    queue: PacketBuffer<'static, ()>,
+    queue: VecDeque<PacketBuf>,
     wakers: PollSet,
 }
 impl LoopbackDevice {
     /// Create a new loopback device.
     pub fn new() -> Self {
-        let queue = PacketBuffer::new(
-            vec![PacketMetadata::EMPTY; SOCKET_BUFFER_SIZE],
-            vec![0u8; STANDARD_MTU * SOCKET_BUFFER_SIZE],
-        );
         Self {
-            queue,
+            queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
             wakers: PollSet::new(),
         }
     }
@@ -42,44 +36,30 @@ impl NetDevice for LoopbackDevice {
         "lo"
     }
 
-    fn poll_rx(
-        &mut self,
-        _ifindex: i32,
-        buffer: &mut PacketBuffer<()>,
-        _timestamp: Instant,
-        packet_snoop: &mut dyn FnMut(&[u8]),
-    ) -> bool {
-        self.queue.dequeue().ok().is_some_and(|(_, rx_buf)| {
-            packet_snoop(rx_buf);
-            buffer
-                .enqueue(rx_buf.len(), ())
-                .unwrap()
-                .copy_from_slice(rx_buf);
-            true
-        })
+    fn poll_rx(&mut self, _ifindex: i32, _timestamp: TimeValue) -> Option<PacketBuf> {
+        self.queue.pop_front()
     }
 
     fn send_ip_packet(
         &mut self,
-        _ifindex: i32,
+        ifindex: i32,
         next_hop: IpAddress,
-        ip_packet: &[u8],
-        _timestamp: Instant,
+        mut packet: PacketBuf,
+        _timestamp: TimeValue,
     ) -> bool {
-        match self.queue.enqueue(ip_packet.len(), ()) {
-            Ok(tx_buf) => {
-                tx_buf.copy_from_slice(ip_packet);
-                self.wakers.wake();
-                true
-            }
-            Err(_) => {
-                warn!(
-                    "Loopback device buffer is full, dropping packet to {}",
-                    next_hop
-                );
-                false
-            }
+        if self.queue.len() >= SOCKET_BUFFER_SIZE {
+            warn!(
+                "Loopback device buffer is full, dropping packet to {}",
+                next_hop
+            );
+            return false;
         }
+
+        packet.set_ifindex(ifindex);
+        packet.set_owner(PacketOwner::Loopback);
+        self.queue.push_back(packet);
+        self.wakers.wake();
+        true
     }
 
     fn register_rx_waker(&self, waker: &Waker) {

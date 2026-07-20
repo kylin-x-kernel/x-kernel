@@ -9,32 +9,32 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::{
+
+use ::core::{
     ops::Range,
     sync::atomic::{AtomicU32, AtomicUsize, Ordering},
     task::Context,
 };
-
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
 use klazy::lazy_static;
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksync::{Mutex, RwLock};
-use smoltcp::wire::{EthernetAddress, EthernetFrame, EthernetProtocol};
 
 use crate::{
     RecvFlags, RecvOptions, SERVICE, SendOptions, Shutdown, SocketAddrEx, SocketOps,
+    buf::{PacketBuf, PacketType},
     general::GeneralOptions,
     netlink::{IFF_UP, LinkState, link_state_for_ifindex},
     options::{
         Configurable, GetSocketOption, OptionHandled, PacketMembership, PacketStatistics,
         SetSocketOption,
     },
+    wire::{ETHERNET_HEADER_LEN, EthernetFrameRef},
 };
 
 const ETH_P_ALL: u16 = 0x0003;
 
-const ETHERNET_HEADER_LEN: usize = 14;
 const ARPHRD_ETHER: u16 = 1;
 
 const PACKET_HOST: u8 = 0;
@@ -430,7 +430,7 @@ pub(crate) fn publish_link_frame(ifindex: i32, frame: &[u8], local_addr: [u8; 6]
         return;
     }
 
-    let Ok(frame_ref) = EthernetFrame::new_checked(frame) else {
+    let Some(frame_ref) = EthernetFrameRef::new_checked(frame) else {
         return;
     };
     publish_frame(
@@ -440,39 +440,29 @@ pub(crate) fn publish_link_frame(ifindex: i32, frame: &[u8], local_addr: [u8; 6]
         packet_addr_from_frame(
             ifindex,
             raw_ethertype(frame),
-            frame_ref.dst_addr().0,
-            frame_ref.src_addr().0,
+            frame_ref.dst_addr().bytes(),
+            frame_ref.src_addr().bytes(),
             local_addr,
             None,
         ),
     );
 }
 
-pub(crate) fn publish_parsed_link_frame(
-    ifindex: i32,
-    frame: &[u8],
-    dst_addr: EthernetAddress,
-    src_addr: EthernetAddress,
-    protocol: EthernetProtocol,
-    local_addr: [u8; 6],
-) {
+pub(crate) fn publish_link_packet(packet: &PacketBuf) {
     let active_sockets = PACKET_HANDLERS.active_sockets();
     if active_sockets.is_empty() {
         return;
     }
 
+    let Some(link_metadata) = packet.link_metadata() else {
+        return;
+    };
+
     publish_frame(
         active_sockets,
-        ifindex,
-        frame,
-        packet_addr_from_frame(
-            ifindex,
-            protocol.into(),
-            dst_addr.0,
-            src_addr.0,
-            local_addr,
-            None,
-        ),
+        packet.ifindex(),
+        packet.data(),
+        packet_addr_from_packet(packet, link_metadata.src_addr.0),
     );
 }
 
@@ -482,7 +472,7 @@ pub(crate) fn publish_outgoing_frame(ifindex: i32, frame: &[u8], local_addr: [u8
         return;
     }
 
-    let Ok(frame_ref) = EthernetFrame::new_checked(frame) else {
+    let Some(frame_ref) = EthernetFrameRef::new_checked(frame) else {
         return;
     };
     publish_frame(
@@ -492,8 +482,8 @@ pub(crate) fn publish_outgoing_frame(ifindex: i32, frame: &[u8], local_addr: [u8
         packet_addr_from_frame(
             ifindex,
             raw_ethertype(frame),
-            frame_ref.dst_addr().0,
-            frame_ref.src_addr().0,
+            frame_ref.dst_addr().bytes(),
+            frame_ref.src_addr().bytes(),
             local_addr,
             Some(PACKET_OUTGOING),
         ),
@@ -579,6 +569,24 @@ fn packet_addr_from_frame(
     }
 }
 
+fn packet_addr_from_packet(packet: &PacketBuf, src_addr: [u8; 6]) -> PacketAddr {
+    let mut addr = [0; 8];
+    addr[..src_addr.len()].copy_from_slice(&src_addr);
+    let protocol = packet
+        .link_metadata()
+        .map(|metadata| u16::from(metadata.protocol))
+        .unwrap_or(0);
+
+    PacketAddr {
+        protocol: protocol.to_be(),
+        ifindex: packet.ifindex(),
+        hatype: ARPHRD_ETHER,
+        pkttype: packet_type_to_packet_addr(packet.packet_type()),
+        addr_len: src_addr.len() as u8,
+        addr,
+    }
+}
+
 fn build_datagram_frame(
     addr: PacketAddr,
     source_addr: [u8; 6],
@@ -654,6 +662,15 @@ fn packet_type(dst_addr: [u8; 6], local_addr: [u8; 6]) -> u8 {
     }
 }
 
+fn packet_type_to_packet_addr(packet_type: PacketType) -> u8 {
+    match packet_type {
+        PacketType::Host => PACKET_HOST,
+        PacketType::Broadcast => PACKET_BROADCAST,
+        PacketType::Multicast => PACKET_MULTICAST,
+        PacketType::OtherHost => PACKET_OTHERHOST,
+    }
+}
+
 fn validate_protocol(_protocol: u16) -> KResult {
     Ok(())
 }
@@ -698,7 +715,7 @@ mod tests {
     const TEST_OTHER_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 3];
 
     fn ethernet_frame(dst: [u8; 6], ethertype: u16, payload: &[u8]) -> Vec<u8> {
-        let mut frame = Vec::with_capacity(EthernetFrame::<&[u8]>::header_len() + payload.len());
+        let mut frame = Vec::with_capacity(ETHERNET_HEADER_LEN + payload.len());
         frame.extend_from_slice(&dst);
         frame.extend_from_slice(&TEST_REMOTE_MAC);
         frame.extend_from_slice(&ethertype.to_be_bytes());

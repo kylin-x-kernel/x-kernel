@@ -26,8 +26,10 @@ net/knet/
     │   ├── loopback.rs
     │   └── vsock.rs
     ├── link/
+    │   ├── buf.rs
     │   ├── mod.rs
-    │   └── packet.rs
+    │   ├── packet.rs
+    │   └── wire.rs
     ├── netlink/
     │   ├── mod.rs
     │   ├── route.rs
@@ -40,6 +42,7 @@ net/knet/
     │   ├── options.rs
     │   └── state.rs
     ├── stack/
+    │   ├── ipv4.rs
     │   ├── mod.rs
     │   ├── service.rs
     │   ├── router.rs
@@ -100,8 +103,11 @@ core/kruntime
 |------|------|
 | `init_network` | 创建 loopback 与首个 Ethernet 设备，建立默认路由，初始化 `Service`、`SocketSetWrapper`、`ListenTable` 和 rtnetlink 初始状态 |
 | `Service` | 持有 smoltcp `Interface`、`Router`、poll timeout 和 RX waker 注册入口 |
-| `Router` | 管理设备列表、路由表、收包 snoop、发包 next-hop 选择和设备 dispatch |
-| `NetDevice` | 抽象 loopback、Ethernet 和 feature gated vsock 设备后端 |
+| `Router` | 管理设备列表、路由表、`PacketBuf` RX/TX 队列、IPv4 输入校验、next-hop 选择和设备 dispatch |
+| `NetDevice` | 抽象 loopback、Ethernet 和 feature gated vsock 设备后端，通过 `PacketBuf` 转移报文所有权，并使用 crate 内地址类型和 `TimeValue` 表达设备边界 |
+| `PacketBuf` | 保存报文数据、协议偏移、接口索引、包类型、校验状态和当前所有者 |
+| `link::wire` | 使用 `zerocopy` 校验和构造 Ethernet 与 Ethernet/IPv4 ARP 头部 |
+| `stack::ipv4` | 使用 `etherparse` 校验和构造 IPv4 与 ICMPv4 头部，并提供最终版分片相关 API |
 | `SocketSetWrapper` | 串行化 smoltcp socket set 访问，并在新增 socket 时通知等待者 |
 | `ListenTable` | 管理 TCP listen backlog、SYN 队列、accept 队列和 accept waker |
 | `GeneralOptions` | 统一管理 nonblock、reuseaddr、超时和设备 mask |
@@ -199,21 +205,26 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 ### RX 推进
 
 1. `poll_interfaces` 获取 `SERVICE` 和 `SOCKET_SET` 锁。
-2. `Service::poll` 调用 `Router::poll` 从设备拉取 IP 包。
-3. `Router::poll` 对收到的 IP 包执行 UDP error snoop 和 TCP listen snoop。
-4. smoltcp `Interface::poll` 驱动协议 socket。
+2. `Service::poll` 调用 `Router::poll`，设备以 `PacketBuf` 形式逐包转移 RX 所有权。
+3. `Router::poll` 根据网络层版本分流，IPv4 包先校验头部、长度、校验和和本地目的地址，再执行 UDP error snoop 和 TCP listen snoop。
+4. 校验后的 IPv4 或 IPv6 数据复制到 smoltcp RX adapter，`Interface::poll` 驱动现有协议 socket。
 5. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
 6. `Router::dispatch` 把 smoltcp 生成的 TX IP 包按路由发到设备。
 7. loopback 或设备 TX 触发后继续返回 `true`，外层循环继续推进。
 
 ### TX 路由
 
-1. smoltcp 把待发 IP 包写入 `Router` 的 TX buffer。
-2. `Router::dispatch` 按 IP 版本解析目的地址。
+1. smoltcp 把待发 IP 包写入 `Router` 的 `PacketBuf` TX 队列。
+2. `Router::dispatch` 接管所有权，并按 IP 版本解析目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和。
 3. 广播或组播包复制到所有设备。
 4. 单播包通过 `RouteTable::lookup` 选择最长前缀路由。
-5. Ethernet 设备先查 ARP neighbor cache，命中后封装 Ethernet frame。
+5. Ethernet 设备先查 ARP neighbor cache，命中后通过 `link::wire` 封装 Ethernet frame。
 6. 未命中时发送 ARP request，并把 IP 包放入 `pending_tx` 等待 neighbor 解析。
+
+当前 PR 保留 smoltcp TCP、UDP、raw socket 和 IPv6 推进。`PacketBuf`、`link::wire`
+和 `stack::ipv4` 使用最终接口，后续协议迁移直接复用这些类型和 parser/emitter。
+路由表和设备接口使用 `crate::ip` 地址类型，设备时间使用 `khal::time::TimeValue`。
+`Router`、`Service` 和初始化入口在 smoltcp 兼容边界完成地址与时间转换。
 
 ### TCP listen 和 accept
 

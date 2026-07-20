@@ -3,10 +3,9 @@
 // See LICENSES for license details.
 
 //! Network device abstractions.
-use core::task::Waker;
-
+use ::core::task::Waker;
 use kerrno::KResult;
-use smoltcp::{storage::PacketBuffer, time::Instant, wire::IpAddress};
+use khal::time::TimeValue;
 
 mod ethernet;
 mod loopback;
@@ -18,7 +17,10 @@ pub use loopback::*;
 #[cfg(feature = "vsock")]
 pub use vsock::*;
 
-use crate::netlink::{AddrState, LinkState, NeighState};
+use crate::{
+    buf::PacketBuf,
+    ip::{IpAddress, Ipv4Cidr},
+};
 
 /// Trait implemented by network device backends.
 pub trait NetDevice: Send + Sync {
@@ -29,14 +31,8 @@ pub trait NetDevice: Send + Sync {
         None
     }
 
-    /// Polls the device and pushes received IP packets into `buffer`.
-    fn poll_rx(
-        &mut self,
-        ifindex: i32,
-        buffer: &mut PacketBuffer<()>,
-        timestamp: Instant,
-        packet_snoop: &mut dyn FnMut(&[u8]),
-    ) -> bool;
+    /// Polls one received packet from the device.
+    fn poll_rx(&mut self, ifindex: i32, timestamp: TimeValue) -> Option<PacketBuf>;
     /// Sends an IP packet to the next hop.
     ///
     /// Returns `true` if this operation resulted in the readiness of receive
@@ -46,8 +42,8 @@ pub trait NetDevice: Send + Sync {
         &mut self,
         ifindex: i32,
         next_hop: IpAddress,
-        ip_packet: &[u8],
-        timestamp: Instant,
+        packet: PacketBuf,
+        timestamp: TimeValue,
     ) -> bool;
 
     /// Sends a link-layer frame through the device.
@@ -63,12 +59,12 @@ pub trait NetDevice: Send + Sync {
     /// Register a waker for receive readiness.
     fn register_rx_waker(&self, waker: &Waker);
 
-    /// Synchronize data-plane device state from the netlink control plane.
+    /// Synchronizes device state prepared by the control-plane adapter.
     fn sync_netlink(
         &mut self,
-        _link: Option<&LinkState>,
-        _addrs: &[AddrState],
-        _neighs: &[NeighState],
+        _name: Option<&str>,
+        _ipv4_addr: Option<Ipv4Cidr>,
+        _neighbors: &[(IpAddress, [u8; 6])],
     ) {
     }
 }
