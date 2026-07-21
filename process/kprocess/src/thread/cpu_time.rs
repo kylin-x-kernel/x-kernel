@@ -7,7 +7,7 @@
 use khal::time::{TimeValue, monotonic_time_nanos};
 
 /// Represents the current CPU-accounting state of a thread.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum CpuTimeState {
     /// The thread is not currently charging CPU time.
     None,
@@ -19,9 +19,9 @@ pub enum CpuTimeState {
 
 /// Per-thread CPU-time accounting state.
 pub(crate) struct CpuTimeStatistics {
-    utime_ns: usize,
-    stime_ns: usize,
-    last_wall_ns: Option<usize>,
+    utime_ns: u64,
+    stime_ns: u64,
+    last_wall_ns: Option<u64>,
     state: CpuTimeState,
 }
 
@@ -44,13 +44,13 @@ impl CpuTimeStatistics {
 
     /// Returns the current user time and system time as a tuple of [`TimeValue`].
     pub(crate) fn output(&self) -> (TimeValue, TimeValue) {
-        let utime = TimeValue::from_nanos(self.utime_ns as u64);
-        let stime = TimeValue::from_nanos(self.stime_ns as u64);
+        let utime = TimeValue::from_nanos(self.utime_ns);
+        let stime = TimeValue::from_nanos(self.stime_ns);
         (utime, stime)
     }
 
     /// Returns the sampled user and system CPU time in nanoseconds.
-    pub(crate) fn sample_nanos(&mut self) -> (usize, usize) {
+    pub(crate) fn sample_nanos(&mut self) -> (u64, u64) {
         self.update();
         (self.utime_ns, self.stime_ns)
     }
@@ -62,7 +62,7 @@ impl CpuTimeStatistics {
     }
 
     fn update(&mut self) {
-        let now_ns = monotonic_time_nanos() as usize;
+        let now_ns = monotonic_time_nanos();
         let Some(last_wall_ns) = self.last_wall_ns.replace(now_ns) else {
             return;
         };
@@ -70,10 +70,10 @@ impl CpuTimeStatistics {
 
         match self.state {
             CpuTimeState::User => {
-                self.utime_ns += delta;
+                self.utime_ns = self.utime_ns.saturating_add(delta);
             }
             CpuTimeState::Kernel => {
-                self.stime_ns += delta;
+                self.stime_ns = self.stime_ns.saturating_add(delta);
             }
             CpuTimeState::None => {}
         }

@@ -201,7 +201,6 @@ impl TeeTaCtx {
         ctx
     }
 
-    #[cfg(feature = "tee_ta_sign")]
     pub fn init_ta_ctx(&mut self, path: &str, ta_head: &[u8]) {
         if Self::is_ta(path) {
             self.set_uuid(path);

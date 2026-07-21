@@ -17,6 +17,10 @@ VMA metadata、运行时执行引用和页表状态。
   inheritance metadata。
 - `VmRuntimeRef` / `VmRuntimeOps`：VMA-side map/unmap/protect/fault/fork/mremap
   执行入口，角色接近 Linux `vm_operations_struct`。
+- `MmUserHandle` / `MmPin`：地址空间生命周期 capability。`MmUserHandle`
+  对应 Linux `mm_users`，表示仍有 runtime 或临时路径 active 使用用户映射；
+  `MmPin` 预留 Linux `mm_count` 风格对象 pin，只保证 `MmSpace` 对象和稳定
+  identity 可观察，不延长用户映射生命周期。
 
 Linux 对应关系：
 
@@ -37,6 +41,7 @@ Linux 对应关系：
 
 ```text
 MmSpace
+  -> MmUserLifetime
   -> PageTable
   -> MmCpuResidency
   -> VmAreaSet
@@ -211,6 +216,11 @@ dirty tracking.
 ## 并发模型
 
 - `MmSpace` 由外层锁串行化。
+- `MmUserHandle` 的 user-count 状态转换不依赖 `MmSpace` 主锁；从裸
+  `Arc<Mutex<MmSpace>>` mint handle 时会短暂读取 mm-owned lifetime，最后一个
+  user 释放时会获取 `MmSpace` 主锁并执行 `clear()`。
+- `MmUserHandle::clone_user_unless_zero()` 与最后一个 user release 通过同一个原子
+  状态转换互斥；一旦进入 torn-down 状态，后续 `MmPin` 不能再升级为 active user。
 - `MmCpuResidency` 由 `MmSpace` 拥有，用于记录“哪些 CPU 可能还保留该地址空间
   的 TLB 状态”。调度切换路径在切入新 mm 前先 set CPU，硬件切换完成后再从旧 mm
   clear CPU，保证 shootdown 最多过度命中、不会漏掉目标 CPU。

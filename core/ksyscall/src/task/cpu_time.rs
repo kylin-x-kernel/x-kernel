@@ -18,8 +18,8 @@ pub fn sys_times(tms: UserPtr<Tms>) -> KResult<isize> {
     tms.write_vm(Tms {
         tms_utime: utime,
         tms_stime: stime,
-        tms_cutime: ns2t(child_utime_ns as u64) as usize,
-        tms_cstime: ns2t(child_stime_ns as u64) as usize,
+        tms_cutime: ns2t(child_utime_ns) as usize,
+        tms_cstime: ns2t(child_stime_ns) as usize,
     })?;
     Ok(ns2t(monotonic_time_nanos()) as _)
 }

@@ -7,11 +7,10 @@ use alloc::sync::Arc;
 
 use kerrno::KResult;
 use khal::paging::{MappingFlags, PageSize};
-use ksync::Mutex;
 use kvfs::{MmapMapper, VfsFile};
 use memaddr::{MemoryAddr, PhysAddrRange, VirtAddr};
 use memfs::shmem;
-use memspace::{InvalidateHandle, MmSpace, VmArea, VmRuntimeRef};
+use memspace::{InvalidateHandle, MmObserver, VmArea, VmRuntimeRef};
 
 use crate::{
     FileMappingMode,
@@ -39,7 +38,7 @@ pub struct FileMmapRequest {
     pub max_flags: MappingFlags,
     pub file: Arc<VfsFile>,
     pub mm_id: u64,
-    pub aspace: Arc<Mutex<MmSpace>>,
+    pub observer: MmObserver,
     pub invalidate: InvalidateHandle,
 }
 
@@ -73,7 +72,7 @@ impl MmapMapper for FileMapper {
             self.mode,
             FileRuntimeContext {
                 mm_id: self.req.mm_id,
-                aspace: &self.req.aspace,
+                observer: &self.req.observer,
                 invalidate: self.req.invalidate.clone(),
             },
         )?);

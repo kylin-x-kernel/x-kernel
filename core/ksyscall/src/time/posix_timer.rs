@@ -87,10 +87,7 @@ pub fn sys_timer_create(
 ) -> KResult<isize> {
     let notify = parse_sigevent(sevp)?;
     let process = kprocess::current_user_process();
-    let timer_id = process
-        .timer_manager()?
-        .lock()
-        .create_posix_timer(clockid, notify)?;
+    let timer_id = process.create_posix_timer(clockid, notify)?;
     timerid.write_vm(timer_id)?;
     Ok(0)
 }
@@ -98,12 +95,7 @@ pub fn sys_timer_create(
 /// Queries the current setting of a POSIX timer.
 pub fn sys_timer_gettime(timerid: i32, curr_value: UserPtr<itimerspec>) -> KResult<isize> {
     let process = kprocess::current_user_process();
-    let (process_utime_ns, process_stime_ns) = process.process_cpu_time_ns();
-    let spec = process.timer_manager()?.lock().get_posix_timer(
-        timerid,
-        process_utime_ns,
-        process_stime_ns,
-    )?;
+    let spec = process.get_posix_timer(timerid)?;
     curr_value.write_vm(build_itimerspec(spec.0, spec.1))?;
     Ok(0)
 }
@@ -126,15 +118,7 @@ pub fn sys_timer_settime(
 
     let current_thread = kprocess::current_user_thread();
     let process = current_thread.process().clone();
-    let (process_utime_ns, process_stime_ns) = process.process_cpu_time_ns();
-    let (old, delivery) = process.timer_manager()?.lock().set_posix_timer(
-        timerid,
-        absolute,
-        interval_ns,
-        value_ns,
-        process_utime_ns,
-        process_stime_ns,
-    )?;
+    let (old, delivery) = process.set_posix_timer(timerid, absolute, interval_ns, value_ns)?;
 
     if let Some(old_value) = old_value.check_non_null() {
         old_value.write_vm(build_itimerspec(old.0, old.1))?;
@@ -147,18 +131,12 @@ pub fn sys_timer_settime(
 
 /// Deletes a POSIX timer object.
 pub fn sys_timer_delete(timerid: i32) -> KResult<isize> {
-    kprocess::current_user_process()
-        .timer_manager()?
-        .lock()
-        .delete_posix_timer(timerid)?;
+    kprocess::current_user_process().delete_posix_timer(timerid)?;
     Ok(0)
 }
 
 /// Returns the overrun count for the last timer notification.
 pub fn sys_timer_getoverrun(timerid: i32) -> KResult<isize> {
-    let overrun = kprocess::current_user_process()
-        .timer_manager()?
-        .lock()
-        .get_posix_timer_overrun(timerid)?;
+    let overrun = kprocess::current_user_process().get_posix_timer_overrun(timerid)?;
     Ok(overrun as isize)
 }

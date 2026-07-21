@@ -80,18 +80,22 @@ impl PosixTimerClock {
         }
     }
 
-    fn now_ns(self, process_utime_ns: usize, process_stime_ns: usize) -> usize {
+    fn now_ns(self, process_utime_ns: u64, process_stime_ns: u64) -> u64 {
         match self {
-            Self::Realtime => wall_time().as_nanos() as usize,
-            Self::Monotonic | Self::Boottime => monotonic_time_nanos() as usize,
+            Self::Realtime => wall_time().as_nanos() as u64,
+            Self::Monotonic | Self::Boottime => monotonic_time_nanos(),
             Self::ProcessCpu => process_utime_ns.saturating_add(process_stime_ns),
         }
     }
 
-    fn runtime_deadline_ns(self, deadline_ns: usize) -> Option<usize> {
+    fn runtime_deadline_ns(self, deadline_ns: u64) -> Option<usize> {
         match self {
-            Self::Realtime => Some(deadline_ns.saturating_sub(time::offset_ns() as usize)),
-            Self::Monotonic | Self::Boottime => Some(deadline_ns),
+            Self::Realtime => Some(
+                deadline_ns
+                    .saturating_sub(time::offset_ns())
+                    .min(usize::MAX as u64) as usize,
+            ),
+            Self::Monotonic | Self::Boottime => Some(deadline_ns.min(usize::MAX as u64) as usize),
             Self::ProcessCpu => None,
         }
     }
@@ -157,8 +161,8 @@ impl PosixTimer {
 
     pub(crate) fn snapshot(
         &self,
-        process_utime_ns: usize,
-        process_stime_ns: usize,
+        process_utime_ns: u64,
+        process_stime_ns: u64,
     ) -> (TimeValue, TimeValue) {
         self.spec
             .snapshot(self.clock.now_ns(process_utime_ns, process_stime_ns))
@@ -169,25 +173,25 @@ impl PosixTimer {
         absolute: bool,
         interval_ns: usize,
         value_ns: usize,
-        process_utime_ns: usize,
-        process_stime_ns: usize,
+        process_utime_ns: u64,
+        process_stime_ns: u64,
     ) -> (TimeValue, TimeValue) {
         let now_ns = self.clock.now_ns(process_utime_ns, process_stime_ns);
         let deadline_ns = if value_ns == 0 {
             None
         } else if absolute {
-            Some(value_ns)
+            Some(value_ns as u64)
         } else {
-            value_ns.checked_add(now_ns)
+            (value_ns as u64).checked_add(now_ns)
         };
-        let old = self.spec.set(now_ns, interval_ns, deadline_ns);
+        let old = self.spec.set(now_ns, interval_ns as u64, deadline_ns);
         self.pending_signal = false;
         self.queued_overrun = 0;
         self.last_overrun = 0;
         old
     }
 
-    pub(crate) fn update(&mut self, process_utime_ns: usize, process_stime_ns: usize) -> usize {
+    pub(crate) fn update(&mut self, process_utime_ns: u64, process_stime_ns: u64) -> usize {
         self.spec
             .update(self.clock.now_ns(process_utime_ns, process_stime_ns))
     }

@@ -60,7 +60,7 @@ impl PidFd {
 
     /// Returns the referenced process only while it is still live.
     pub fn live_process(&self) -> KResult<&Arc<Process>> {
-        if self.process.is_zombie() {
+        if self.process.is_exited() {
             return Err(kerrno::KError::NoSuchProcess);
         }
         Ok(&self.process)
@@ -80,7 +80,7 @@ pub fn robust_list_task(tid: Tid) -> KResult<KtaskRef> {
 impl Pollable for PidFd {
     fn poll(&self) -> IoEvents {
         let mut events = IoEvents::empty();
-        events.set(IoEvents::IN, self.process.is_zombie());
+        events.set(IoEvents::IN, self.process.is_exited());
         events
     }
 
@@ -145,6 +145,6 @@ mod pidfd_tests {
             "exited zombie must make pidfd readable"
         );
 
-        wait_reap::reap_zombie_process(&proc);
+        wait_reap::assert_reap_zombie_process(&proc);
     }
 }

@@ -22,6 +22,7 @@ mod lookup;
 /// PID-file-descriptor type and pidfd-related target resolution.
 pub mod pidfd;
 mod process;
+mod process_domain;
 /// Process and thread exit lifecycle owner operations.
 pub mod process_exit;
 mod process_group;
@@ -50,20 +51,25 @@ extern crate klogger;
 pub use credentials::{current_cred, current_real_cred};
 pub use pidfd::PidFd;
 pub use posix_types::{Pid, Tid};
-pub use process::{Process, ProcessExecUpdate, init_proc};
+pub use process::{
+    LiveAddressSpace, Process, ProcessExecUpdate, ProcessExitPublication, init_proc,
+};
 pub use process_group::ProcessGroup;
-pub use process_runtime::ProcessForkConfig;
+pub(crate) use process_group::ProcessGroupMemberSlot;
+pub use process_runtime::{
+    ForkAddressSpace, ForkFdTable, ForkFs, ForkParent, ForkSignalActions, ProcessForkConfig,
+};
 pub(crate) use process_runtime::{ProcessRuntime, fork_process_runtime};
 pub use publication::PublishedUserTask;
-pub use session::Session;
+pub use session::{ControllingTerminal, Session, SetTerminalResult};
 pub use stat::TaskStat;
 #[cfg(feature = "tee")]
 pub use tee_task_iface::{TeeSessionCtxTrait, TeeTaCtx};
 pub use thread::{
-    AsThread, CpuTimeState, CurrentThread, PreparedUserClone, Thread, current_fs_context,
-    current_user_mm_id, current_user_process, current_user_process_address_space,
-    current_user_process_fs_context, current_user_thread, current_user_tid,
-    with_current_user_thread,
+    AsThread, CpuTimeState, CurrentThread, NiceValue, PreparedUserClone, SchedulerParameters,
+    Thread, current_fs_context, current_user_mm_id, current_user_process,
+    current_user_process_address_space, current_user_process_fs_context, current_user_thread,
+    current_user_tid, with_current_user_thread,
 };
 pub use timer_delivery::{
     dispatch_timer_delivery, init_timer_runtime, poll_cpu_timers, spawn_alarm_task,

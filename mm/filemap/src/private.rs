@@ -14,8 +14,8 @@ use khal::{
 use ksync::Mutex;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange};
 use memspace::{
-    FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmArea, VmBackingInfo, VmBackingKind,
-    VmRuntimeOps, VmRuntimeRef,
+    FaultContext, ForkCloneTarget, InvalidateHandle, MmObserver, MmSpace, VmArea, VmBackingInfo,
+    VmBackingKind, VmRuntimeOps, VmRuntimeRef,
     backend::{
         FaultCompletion, FaultCompletionResult, alloc_frame, dealloc_frame,
         private::{
@@ -235,11 +235,11 @@ impl FilePrivateRuntime {
         file: &Option<(Arc<Mapping>, u64, Option<u64>)>,
         mm_id: Option<u64>,
         invalidate: Option<InvalidateHandle>,
-        aspace: Option<&Arc<Mutex<MmSpace>>>,
+        observer: Option<&MmObserver>,
         start: VirtAddr,
         len: usize,
     ) -> Option<MappingViewGuard> {
-        let aspace = aspace?;
+        let observer = observer?;
         let (mapping, file_start, file_end) = file.as_ref()?;
         let object_start = file_start / PageSize::Size4K as u64 * PageSize::Size4K as u64;
         let len = match file_end {
@@ -249,7 +249,7 @@ impl FilePrivateRuntime {
         if len == 0 {
             return None;
         }
-        let handle = invalidate.unwrap_or_else(|| aspace.lock().invalidate_handle(aspace));
+        let handle = invalidate.unwrap_or_else(|| observer.invalidate_handle());
         Some(mapping.register_view(MappingViewSpec {
             mm_id: mm_id?,
             vma_start: start.as_usize() as u64,
@@ -265,11 +265,11 @@ impl FilePrivateRuntime {
         anon: &Arc<AnonPrivateObject>,
         mm_id: Option<u64>,
         invalidate: Option<InvalidateHandle>,
-        aspace: Option<&Arc<Mutex<MmSpace>>>,
+        observer: Option<&MmObserver>,
         start: VirtAddr,
         len: usize,
     ) -> Option<AnonPrivateViewGuard> {
-        let aspace = aspace?;
+        let observer = observer?;
         Some(anon.register_view(MappingViewSpec {
             mm_id: mm_id?,
             vma_start: start.as_usize() as u64,
@@ -278,7 +278,7 @@ impl FilePrivateRuntime {
             object_len: len,
             kind: MappingViewKind::Private,
             notifier: Some(private_anon_invalidate_notifier(
-                invalidate.unwrap_or_else(|| aspace.lock().invalidate_handle(aspace)),
+                invalidate.unwrap_or_else(|| observer.invalidate_handle()),
             )),
         }))
     }
@@ -287,12 +287,11 @@ impl FilePrivateRuntime {
         &self,
         new_start: VirtAddr,
         new_mm_id: Option<u64>,
-        new_aspace: Option<&Arc<Mutex<MmSpace>>>,
+        new_observer: Option<&MmObserver>,
         invalidate: Option<InvalidateHandle>,
         fork_child: bool,
     ) -> Arc<Self> {
-        let invalidate =
-            invalidate.or_else(|| new_aspace.map(|aspace| aspace.lock().invalidate_handle(aspace)));
+        let invalidate = invalidate.or_else(|| new_observer.map(MmObserver::invalidate_handle));
         let anon = if fork_child {
             self.anon.fork_child()
         } else {
@@ -308,12 +307,17 @@ impl FilePrivateRuntime {
                 &self.file,
                 new_mm_id,
                 invalidate.clone(),
-                new_aspace,
+                new_observer,
                 new_start,
                 self.len,
             ),
             anon_view: Self::register_anon_view(
-                &anon, new_mm_id, invalidate, new_aspace, new_start, self.len,
+                &anon,
+                new_mm_id,
+                invalidate,
+                new_observer,
+                new_start,
+                self.len,
             ),
         })
     }
@@ -435,7 +439,14 @@ impl VmRuntimeOps for FilePrivateRuntime {
         aspace: &Arc<Mutex<MmSpace>>,
         invalidate: Option<InvalidateHandle>,
     ) -> KResult<Arc<dyn VmRuntimeOps>> {
-        Ok(self.rebuilt_runtime(new_start, Some(new_mm_id), Some(aspace), invalidate, false))
+        let observer = MmObserver::new(aspace);
+        Ok(self.rebuilt_runtime(
+            new_start,
+            Some(new_mm_id),
+            Some(&observer),
+            invalidate,
+            false,
+        ))
     }
 
     fn clone_for_fork(
@@ -464,6 +475,7 @@ impl VmRuntimeOps for FilePrivateRuntime {
         )?;
 
         let invalidate = target.invalidate;
+        let observer = MmObserver::new(target.new_aspace);
         Ok(Arc::new(Self {
             start: self.start,
             len: self.len,
@@ -474,7 +486,7 @@ impl VmRuntimeOps for FilePrivateRuntime {
                 &self.file,
                 Some(target.new_mm_id),
                 invalidate.clone(),
-                Some(target.new_aspace),
+                Some(&observer),
                 self.start,
                 self.len,
             ),
@@ -482,7 +494,7 @@ impl VmRuntimeOps for FilePrivateRuntime {
                 &child,
                 Some(target.new_mm_id),
                 invalidate,
-                Some(target.new_aspace),
+                Some(&observer),
                 self.start,
                 self.len,
             ),
@@ -496,7 +508,7 @@ pub(crate) fn new_private_runtime(
     size: PageSize,
     file: FilePrivateSource,
     mm_id: Option<u64>,
-    aspace: Option<&Arc<Mutex<MmSpace>>>,
+    observer: Option<&MmObserver>,
     invalidate: Option<InvalidateHandle>,
 ) -> KResult<VmRuntimeRef> {
     let file = Some(file.into_tuple());
@@ -511,12 +523,12 @@ pub(crate) fn new_private_runtime(
                 &file,
                 mm_id,
                 invalidate.clone(),
-                aspace,
+                observer,
                 start,
                 len,
             ),
             anon_view: FilePrivateRuntime::register_anon_view(
-                &anon, mm_id, invalidate, aspace, start, len,
+                &anon, mm_id, invalidate, observer, start, len,
             ),
             file,
         },

@@ -82,6 +82,7 @@ pub fn sys_clone3(uctx: &UserContext, cl_args: usize, size: usize) -> KResult<is
         .set_child_tid(kargs.child_tid as usize)
         .set_tls(kargs.tls as usize)
         .set_pidfd(kargs.pidfd as usize);
+    req.reject_exit_signal_with_shared_parent();
 
     req.do_clone(uctx)
 }

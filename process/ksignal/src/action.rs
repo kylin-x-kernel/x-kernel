@@ -9,8 +9,8 @@ use core::ffi::c_ulong;
 use bitflags::bitflags;
 use linux_raw_sys::{
     general::{
-        __sigrestore_t, SA_NODEFER, SA_ONSTACK, SA_RESETHAND, SA_RESTART, SA_SIGINFO,
-        kernel_sigaction,
+        __sigrestore_t, SA_NOCLDSTOP, SA_NOCLDWAIT, SA_NODEFER, SA_ONSTACK, SA_RESETHAND,
+        SA_RESTART, SA_SIGINFO, kernel_sigaction,
     },
     signal_macros::sig_ign,
 };
@@ -54,6 +54,8 @@ pub enum SignalOSAction {
 bitflags! {
     #[derive(Default, Debug, Clone, Copy)]
     pub struct SignalActionFlags: c_ulong {
+        const NOCLDSTOP = SA_NOCLDSTOP as _;
+        const NOCLDWAIT = SA_NOCLDWAIT as _;
         const SIGINFO = SA_SIGINFO as _;
         const NODEFER = SA_NODEFER as _;
         const RESETHAND = SA_RESETHAND as _;

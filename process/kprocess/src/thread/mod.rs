@@ -7,7 +7,7 @@ mod cpu_time;
 mod current;
 mod task_ext;
 
-pub use core::{CurrentThread, PreparedUserClone, Thread};
+pub use core::{CurrentThread, NiceValue, PreparedUserClone, SchedulerParameters, Thread};
 
 pub use cpu_time::CpuTimeState;
 pub use current::{

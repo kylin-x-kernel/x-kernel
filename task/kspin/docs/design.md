@@ -78,6 +78,9 @@ caller
 |------|------|
 | `SpinLock<G, T>` | 保存被保护数据和可选 SMP atomic 状态 |
 | `SpinLockGuard` | 持锁期间提供 `Deref` / `DerefMut`，drop 时释放锁并恢复 guard 状态 |
+| `SpinRwLock<G, T>` | 保存被保护数据和 reader/writer atomic 状态 |
+| `SpinRwLockReadGuard` | 持读锁期间提供 `Deref`，drop 时释放 reader slot 并恢复 guard 状态 |
+| `SpinRwLockWriteGuard` | 持写锁期间提供 `Deref` / `DerefMut`，drop 时释放 writer slot 并恢复 guard 状态 |
 | `BaseGuard` | 抽象进入/退出本地临界区的 acquire/release 协议 |
 | `KernelGuardIf` | `preempt` feature 下由调度器提供 enable/disable preempt 接口 |
 | `NoOp` | 不执行本地保护，适合调用方已关闭 IRQ/抢占的上下文 |
@@ -93,15 +96,19 @@ caller
   抢占开关只通过 `KernelGuardIf` 由 `ktask` 等上层提供。
 - 不直接操作架构寄存器，
   IRQ save/restore 经 `karch` 统一封装。
-- 不封装睡眠等待、条件变量、读写锁或 semaphore，
+- 不封装睡眠等待、条件变量或 semaphore，
   这些由 `ksync` 等更高层同步 crate 承担。
+- 仅提供不会睡眠的 spin-based reader-writer lock，
+  适用于 Linux `*_lock_irq()` 风格的短临界区。
 - 不依赖 `ktask`、`kservices`、`ktracing` 或驱动子系统，
   依赖方向是这些上层 crate 使用 `kspin`。
 
 公开 API 自审结果：
 
-- 保留 `SpinLock`、`SpinLockGuard`、`BaseGuard`、`KernelGuardIf`
-  和 `SpinRaw` / `SpinNoPreempt` / `SpinNoIrq` 类型别名。
+- 保留 `SpinLock`、`SpinLockGuard`、`SpinRwLock`、
+  `SpinRwLockReadGuard`、`SpinRwLockWriteGuard`、`BaseGuard`、
+  `KernelGuardIf` 和 `SpinRaw` / `SpinNoPreempt` / `SpinNoIrq` /
+  `SpinRwNoIrq` 类型别名。
 - `guard::arch` 是私有模块，
   IRQ save/restore helper 没有跨 crate 暴露。
 - 未接入模块树的旧重复实现 `src/base.rs` 已删除，
@@ -130,6 +137,28 @@ Unlocked
 | Locked | Locked | `lock` CAS 失败后自旋等待 |
 | Locked | Unlocked | `SpinLockGuard::drop` 执行 Release store |
 | Locked | Unlocked | `unsafe force_unlock` 在调用者证明持锁时强制释放 |
+
+### Spin rwlock 状态
+
+```text
+Unlocked(state = 0)
+   ├─ read CAS(state -> state + 1, Acquire) ──> Readers(state = n)
+   └─ write CAS(0 -> WRITE_LOCKED, Acquire) ─> Writer
+
+Readers(state = n)
+   ├─ read CAS(n -> n + 1, Acquire) ─────────> Readers(state = n + 1)
+   └─ read guard drop fetch_sub(1, Release) ─> Readers/Unlocked
+
+Writer
+   └─ write guard drop store(0, Release) ────> Unlocked
+```
+
+| 从 | 到 | 触发条件 |
+|----|----|----------|
+| Unlocked | Readers | `read` 或 `try_read` 在无 writer 时 CAS 成功 |
+| Readers | Readers | 新 reader 在无 writer 时 CAS 成功，或 reader drop 后仍有其他 reader |
+| Unlocked | Writer | `write` 或 `try_write` 在 state 为 0 时 CAS 成功 |
+| Writer | Unlocked | `SpinRwLockWriteGuard::drop` 执行 Release store |
 
 ### 非 SMP lock 状态
 
@@ -214,12 +243,16 @@ Normal
 锁策略：
 
 - `smp` feature 开启时，跨 CPU 互斥由 `AtomicBool` 提供。
+- `SpinRwLock` 使用 `AtomicUsize` 的高位表示 writer、低位表示 reader count。
 - `smp` feature 关闭时，不存在跨 CPU 竞争，
   互斥依赖 guard 阻止同 CPU 抢占或 IRQ 重入。
 - `SpinRaw` 不提供本地保护，
   只能在调用方已经保证不可重入的上下文使用。
 - `SpinNoIrq` 是默认最保守选择，
   可覆盖普通任务上下文和 IRQ 上下文访问同一数据的场景。
+- `SpinRwNoIrq` 在读写双方都关闭 IRQ/抢占，
+  适合短小、不可睡眠、读多写少的关系快照和事务边界。
+  不支持 read-to-write upgrade，调用方不得在持有 read guard 时等待 writer。
 
 内存序：
 

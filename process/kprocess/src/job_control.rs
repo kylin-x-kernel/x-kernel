@@ -8,7 +8,7 @@ use kerrno::KResult;
 
 use crate::{Pid, Process, ProcessGroup, lookup};
 
-/// Resolves the non-zombie process targeted by job-control mutation syscalls.
+/// Resolves the non-exited process targeted by job-control mutation syscalls.
 pub fn target_process(pid: Pid) -> KResult<Arc<Process>> {
     lookup::live_process(pid)
 }

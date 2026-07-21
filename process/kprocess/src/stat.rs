@@ -5,7 +5,6 @@
 use alloc::{borrow::ToOwned, fmt, string::String};
 
 use kerrno::KResult;
-use ksignal::Signo;
 use ktask::{TaskInner, TaskState};
 
 use crate::AsThread;
@@ -48,9 +47,9 @@ pub struct TaskStat {
     /// Kernel mode time of waited-for children in jiffies.
     pub cstime: u64,
     /// Process priority.
-    pub priority: u32,
+    pub priority: i32,
     /// Nice value.
-    pub nice: u32,
+    pub nice: i32,
     /// Number of threads in this process.
     pub num_threads: u32,
     /// Obsolete (always 0 in Linux).
@@ -136,6 +135,7 @@ impl TaskStat {
         let ppid = proc.parent().map_or(0, |p| p.pid());
         let pgrp = proc.group().pgid();
         let session = proc.group().session().sid();
+        let nice = thread.nice();
         Ok(Self {
             pid,
             comm: comm.to_owned(),
@@ -143,8 +143,10 @@ impl TaskStat {
             ppid,
             pgrp,
             session,
+            priority: nice.proc_stat_priority(),
+            nice: nice.as_i32(),
             num_threads: proc.thread_count() as u32,
-            exit_signal: proc.exit_signal().unwrap_or(Signo::SIGCHLD) as u8,
+            exit_signal: proc.exit_signal().map_or(0, |signo| signo as u8),
             exit_code: proc.exit_code(),
             ..Default::default()
         })
@@ -241,9 +243,11 @@ mod tests_stat {
             pid: 7,
             comm: "init".into(),
             state: 'R',
+            priority: 10,
+            nice: -10,
             ..Default::default()
         };
         let text = alloc::format!("{stat}");
-        assert!(text.starts_with("7 (init) R "));
+        assert!(text.contains(" 10 -10 "));
     }
 }

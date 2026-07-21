@@ -13,7 +13,7 @@ use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
 use kidentity::PidHandle;
 use kprocess::{
-    CpuTimeState, Pid, Thread, Tid, UserThreadRuntimeAction, current_user_process,
+    AsThread, CpuTimeState, Pid, Thread, Tid, UserThreadRuntimeAction, current_user_process,
     current_user_process_address_space, current_user_thread, poll_cpu_timers, process_exit,
     process_signals,
 };
@@ -64,6 +64,8 @@ pub fn new_user_task(
                             .expect("current user thread must still expose process address space");
                         let outcome = address_space.lock().handle_page_fault(addr, flags);
                         if outcome.is_retryable() {
+                            thr.set_cpu_state(CpuTimeState::User);
+                            ktask::check_preempt_pending();
                             continue;
                         } else if !outcome.is_resolved() {
                             let signo = match outcome {
@@ -86,7 +88,9 @@ pub fn new_user_task(
                                 .expect("Failed to send fatal fault signal");
                         }
                     }
-                    ReturnReason::Interrupt => {}
+                    ReturnReason::Interrupt => {
+                        ktask::check_preempt_pending();
+                    }
                     #[allow(unused_labels)]
                     ReturnReason::Exception(exc_info) => 'exc: {
                         let signo = match exc_info.kind() {
@@ -134,6 +138,7 @@ pub fn new_user_task(
                 thr.set_cpu_state(CpuTimeState::User);
                 poll_cpu_timers();
                 curr.clear_interrupt();
+                ktask::check_preempt_pending();
             }
         },
         name.into(),
@@ -284,6 +289,7 @@ fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
 pub fn do_exit(exit_code: i32, group_exit: bool) {
     let curr = current();
     let thr = current_user_thread();
+    let process = thr.process();
 
     info!("{} exit with code: {}", curr.id_name(), exit_code);
 
@@ -294,11 +300,10 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
 
     let clear_child_tid = thr.clear_child_tid() as *mut u32;
     if clear_child_tid.write_vm(0).is_ok() {
-        let address_space = current_user_process_address_space();
-        let key = {
+        let key = process.address_space().and_then(|address_space| {
             let address_space = address_space.lock();
             kfutex::FutexKey::resolve(&address_space, clear_child_tid as usize, false)
-        };
+        });
         if let Ok(key) = key {
             kfutex::global_table().wake(key, 1, u32::MAX);
         }
@@ -312,37 +317,47 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         error!("tee_session_release_state on thread exit: {e:#010X?}");
     }
 
-    let process = thr.process().clone();
-    let (utime_ns, stime_ns) = thr.sample_cpu_time_ns();
-    process_exit::record_exited_thread_cpu_time(&process, utime_ns, stime_ns);
-    if process_exit::finish_thread_exit(&process, thr.tid(), exit_code) {
-        let _ = process.close_all_fds();
+    let is_last_thread =
+        process_exit::finish_thread_exit(process, kprocess::current_user_tid(), exit_code);
 
-        process_exit::finalize_process_exit(&process);
+    // `finish_thread_exit()` only removes the current task from the process
+    // membership table; `thr` still holds the current thread object. Close its
+    // CPU-accounting interval before any parent waiter can observe and reap the
+    // zombie.
+    thr.set_cpu_state(kprocess::CpuTimeState::None);
+    let (thread_utime_ns, thread_stime_ns) = thr.sample_cpu_time_ns();
+    process_exit::record_exited_thread_cpu_time(process, thread_utime_ns, thread_stime_ns);
+
+    if is_last_thread {
+        if let Err(err) = process.close_all_fds() {
+            error!("close_all_fds on process exit failed: {err:?}");
+        }
 
         // Detach shared memory before waking the parent, so that
         // waitpid() returns only after segments marked IPC_RMID
         // have been destroyed.
         SHM_MANAGER.lock().clear_proc_shm(process.pid());
         #[cfg(feature = "tee")]
-        let _ = process.clear_tee_runtime_private();
-        if let Some(parent) = process.parent() {
-            if let Some(signo) = process.exit_signal() {
-                let _ = process_signals::send_to_process(
-                    parent.pid(),
-                    Some(SignalInfo::new_kernel(signo)),
-                );
-            }
-            parent.child_exit_event().wake();
+        if let Err(err) = process.clear_tee_runtime_private() {
+            error!("clear_tee_runtime_private on process exit failed: {err:?}");
         }
-        process.exit_event().wake();
+
+        if let Err(err) = process.clear_exclusive_address_space() {
+            error!("clear address space on process exit failed: {err:?}");
+        }
+
+        process_exit::complete_process_exit(process);
     }
 
     if group_exit && !process.is_group_exited() {
-        process_exit::mark_group_exited(&process);
+        process_exit::mark_group_exited(process);
         let sig = SignalInfo::new_kernel(Signo::SIGKILL);
-        for tid in process.threads() {
-            let _ = process_signals::send_to_thread(None, tid, Some(sig.clone()));
+        // `finish_thread_exit()` removed the current thread from the process
+        // member table before group-exit delivery, so this broadcast targets
+        // only surviving sibling threads.
+        for task in kprocess::scheduler::process_tasks(process.as_ref()) {
+            let tid = task.as_thread().tid();
+            let _ = kprocess::process_signals::send_to_thread(None, tid, Some(sig.clone()));
         }
     }
 

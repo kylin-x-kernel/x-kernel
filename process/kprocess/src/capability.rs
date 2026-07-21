@@ -6,7 +6,7 @@ use kerrno::KResult;
 
 use crate::{Pid, lookup};
 
-/// Validates that a capability-target PID names a non-zombie process.
+/// Validates that a capability-target PID names a non-exited process.
 pub fn validate_target_pid(pid: Pid) -> KResult<()> {
     let _ = lookup::live_process(pid)?;
     Ok(())

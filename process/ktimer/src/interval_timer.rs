@@ -22,21 +22,21 @@ pub(crate) fn timer_signal(timer_type: ITimerType) -> Signo {
 
 #[derive(Default)]
 pub(crate) struct ITimer {
-    interval_ns: usize,
-    deadline_ns: Option<usize>,
+    interval_ns: u64,
+    deadline_ns: Option<u64>,
     runtime_deadline_ns: Option<usize>,
     alarm_pid: Option<Pid>,
 }
 
 impl ITimer {
-    pub(crate) fn snapshot(&self, now_ns: usize) -> (TimeValue, TimeValue) {
+    pub(crate) fn snapshot(&self, now_ns: u64) -> (TimeValue, TimeValue) {
         (
-            TimeValue::from_nanos(self.interval_ns as u64),
-            TimeValue::from_nanos(self.remaining_ns(now_ns) as u64),
+            TimeValue::from_nanos(self.interval_ns),
+            TimeValue::from_nanos(self.remaining_ns(now_ns)),
         )
     }
 
-    pub(crate) fn remaining_ns(&self, now_ns: usize) -> usize {
+    pub(crate) fn remaining_ns(&self, now_ns: u64) -> u64 {
         self.deadline_ns
             .map(|deadline_ns| deadline_ns.saturating_sub(now_ns))
             .unwrap_or(0)
@@ -44,9 +44,9 @@ impl ITimer {
 
     pub(crate) fn set(
         &mut self,
-        now_ns: usize,
-        interval_ns: usize,
-        deadline_ns: Option<usize>,
+        now_ns: u64,
+        interval_ns: u64,
+        deadline_ns: Option<u64>,
     ) -> (TimeValue, TimeValue) {
         let old = self.snapshot(now_ns);
 
@@ -59,7 +59,7 @@ impl ITimer {
         old
     }
 
-    pub(crate) fn update(&mut self, now_ns: usize) -> usize {
+    pub(crate) fn update(&mut self, now_ns: u64) -> usize {
         let Some(deadline_ns) = self.deadline_ns else {
             return 0;
         };
@@ -82,11 +82,11 @@ impl ITimer {
                 .expect("interval timers divide by a non-zero interval");
             let advance_ns = self.interval_ns.saturating_mul(skipped_periods);
             self.deadline_ns = deadline_ns.checked_add(advance_ns);
-            skipped_periods
+            skipped_periods.min(usize::MAX as u64) as usize
         }
     }
 
-    pub(crate) fn deadline_ns(&self) -> Option<usize> {
+    pub(crate) fn deadline_ns(&self) -> Option<u64> {
         self.deadline_ns
     }
 

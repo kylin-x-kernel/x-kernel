@@ -65,6 +65,7 @@ kspin = { path = "task/kspin" }
 ksync = { path = "task/ksync" }
 ktask = { path = "task/ktask" }
 ksched = { path = "task/ksched" }
+linked_list_r4l = "0.3"
 
 # Internal: process management
 kfutex = { path = "process/kfutex" }

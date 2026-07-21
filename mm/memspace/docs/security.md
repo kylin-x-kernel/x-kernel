@@ -15,6 +15,8 @@
 - VMA permission 与 page-table permission 的同步；
 - fault class 的保存和上报；
 - object-side invalidate request 的复核和 PTE zap。
+- `MmUserHandle` / `MmPin` 生命周期 capability，区分 active user mappings
+  与对象 pin。
 
 ## 外部边界 / 攻击面
 
@@ -55,6 +57,9 @@
   `unmap()` on the moved source range.
 - `resolve_futex_backing()` 对 shared VMA 必须返回 object-relative offset；
   不能把 VMA-relative address 当作跨进程 key。
+- `MmUserHandle` 是唯一能保留用户映射生命周期的 capability；`MmPin` 和普通
+  `Arc<Mutex<MmSpace>>` observer 只能保留对象可观察性，不能阻止最后一个 user
+  释放时清空映射。
 
 ## 线程安全
 
@@ -68,6 +73,8 @@
   only valid in process context.
 - `MmCpuResidency` 只允许在调度切换边界做“先加入新 mm、后移除旧 mm”的保守更新，
   不能在 page-table flush 路径中重建目标集合。
+- `MmUserHandle::clone_user_unless_zero()` 和最后一个 user release 使用同一个原子
+  状态转换；进入 torn-down 状态后，`MmPin::try_upgrade_user()` 必须失败。
 
 ## 威胁分析
 
@@ -98,6 +105,10 @@
    - 防护：successful move uses metadata-only retirement after destination
      install and PTE transfer.
 
+8. mm object observer 阻止退出清理或重新激活已 teardown 的地址空间。
+   - 防护：只有 `MmUserHandle` 增加 active user 计数；`MmPin` 只 pin 对象，且
+     upgrade 与最后一个 release 通过单原子状态互斥。
+
 ## 故障模式与影响分析（FMEA）
 
 | 故障 | 条件 | 处理 | 影响 |
@@ -109,6 +120,7 @@
 | OOM | frame 或页表分配失败 | 返回 `OutOfMemory` / `NoMemory` | syscall 或 fault 失败 |
 | File EOF fault | file object 拒绝越界页 | `BusError` outcome | 上层映射为 SIGBUS-class 行为 |
 | `mremap` source teardown destroys moved private backing | 误把 relocation 当 ordinary unmap | metadata-only retirement | 避免 moved mapping 指向已释放对象页 |
+| Stale mm user acquire | 最后一个 user release 与新 user acquire 并发 | 单原子状态 CAS；torn-down 后 upgrade/acquire 失败 | 避免退出清理后重新使用已清空映射 |
 
 ## 故障管理
 
@@ -138,3 +150,5 @@
 - [ ] Invalidate request 是否通过 `vmobj` object/view language 进入 `MmSpace`。
 - [ ] `InvalidateSink` spinlock 内是否只做队列操作。
 - [ ] Unsupported Linux semantics 是否显式返回错误而不是静默降级。
+- [ ] 新增地址空间 observer 是否只持有 `MmPin` 或普通 `Arc`，不误用
+  `MmUserHandle` 延长用户映射生命周期。

@@ -18,13 +18,17 @@ use ksignal::{
     api::{ProcessSignalManager, SignalActions},
 };
 use ksync::{Mutex, RwLock, spin::SpinNoIrq};
+use memspace::process_lifetime::MmUserHandle;
 #[cfg(feature = "tee")]
 use tee_task_iface::TeeTaCtx;
 #[cfg(feature = "tipc")]
 use tipc_handle::HandleTable as TipcHandleTable;
 
-use self::{posix_state::ProcessPosixState, runtime_state::ProcessRuntimeState};
-use crate::Process;
+use self::{
+    posix_state::{ExecMetadata, ProcessPosixState},
+    runtime_state::ProcessRuntimeState,
+};
+use crate::{LiveAddressSpace, Process, process_domain};
 
 /// Static configuration used to initialize a [`ProcessRuntime`].
 #[derive(Clone, Copy)]
@@ -51,20 +55,65 @@ impl Default for ProcessRuntimeConfig {
 /// Fork-time options for constructing a child process.
 #[derive(Clone, Copy)]
 pub struct ProcessForkConfig {
-    /// Whether to reparent the new child under the caller's parent.
-    pub share_parent: bool,
-    /// Whether to share the caller's address space.
-    pub share_vm: bool,
-    /// Whether to share the caller's filesystem context.
-    pub share_fs: bool,
-    /// Whether to share process signal actions.
-    pub share_sighand: bool,
-    /// Whether to share the caller's file-descriptor table.
-    pub share_files: bool,
+    /// Wait-parent selection for the new process.
+    pub parent: ForkParent,
+    /// Address-space clone mode.
+    pub address_space: ForkAddressSpace,
+    /// Filesystem-context clone mode.
+    pub fs: ForkFs,
+    /// Signal-action clone mode.
+    pub signal_actions: ForkSignalActions,
+    /// File-descriptor table clone mode.
+    pub fd_table: ForkFdTable,
     /// Namespace flags requested by the clone/fork caller.
     pub namespace_flags: kns::NamespaceFlags,
     /// Exit signal configured for the new process.
     pub exit_signal: Option<Signo>,
+}
+
+/// Wait-parent selection for a forked process.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ForkParent {
+    /// Parent the child under the caller.
+    Caller,
+    /// Parent the child under the caller's current wait parent.
+    CallerParent,
+}
+
+/// Address-space clone mode for a forked process.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ForkAddressSpace {
+    /// Clone the caller's address space.
+    Private,
+    /// Share the caller's address space.
+    Shared,
+}
+
+/// Filesystem-context clone mode for a forked process.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ForkFs {
+    /// Clone the caller's filesystem context.
+    Private,
+    /// Share the caller's filesystem context.
+    Shared,
+}
+
+/// Signal-action clone mode for a forked process.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ForkSignalActions {
+    /// Clone the caller's signal actions.
+    Private,
+    /// Share the caller's signal actions.
+    Shared,
+}
+
+/// File-descriptor table clone mode for a forked process.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ForkFdTable {
+    /// Clone the caller's file-descriptor table.
+    Private,
+    /// Share the caller's file-descriptor table.
+    Shared,
 }
 
 /// Runtime state shared by all threads in a process.
@@ -82,6 +131,46 @@ pub(crate) struct ProcessRuntime {
     tee_runtime_private: RwLock<Option<Arc<dyn Any + Send + Sync>>>,
     #[cfg(feature = "tipc")]
     tipc_handles: RwLock<TipcHandleTable>,
+}
+
+/// RAII rollback guard for a child process attached during fork preparation.
+///
+/// If fork fails before publication commits, dropping this guard removes the
+/// unpublished child relation so no hidden process object remains linked.
+struct AttachedForkProcess {
+    process: Option<Arc<Process>>,
+}
+
+struct ForkFsNamespaces {
+    fs_context: Arc<Mutex<FsStruct>>,
+    nsproxy: Arc<NsProxy>,
+}
+
+struct ForkAddressSpaceState {
+    mm_user: MmUserHandle,
+}
+
+impl AttachedForkProcess {
+    fn new(process: Arc<Process>) -> Self {
+        Self {
+            process: Some(process),
+        }
+    }
+
+    fn into_process(mut self) -> Arc<Process> {
+        self.process
+            .take()
+            .expect("attached fork process must be present")
+    }
+}
+
+impl Drop for AttachedForkProcess {
+    fn drop(&mut self) {
+        if let Some(process) = self.process.take() {
+            let domain = process_domain::write_lock();
+            process.discard_unpublished_locked(&domain);
+        }
+    }
 }
 
 impl ProcessRuntime {
@@ -121,11 +210,35 @@ impl ProcessRuntime {
         config: ProcessRuntimeConfig,
         nsproxy: Arc<NsProxy>,
     ) -> Arc<Self> {
+        let mm_user = memspace::MmSpace::acquire_user(address_space)
+            .expect("new process runtime requires a live user address space");
+        Self::new_with_nsproxy_and_mm_user(
+            process,
+            exe_path,
+            cmdline,
+            mm_user,
+            fs_context,
+            signal_actions,
+            config,
+            nsproxy,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_nsproxy_and_mm_user(
+        process: Arc<Process>,
+        exe_path: String,
+        cmdline: Arc<Vec<String>>,
+        mm_user: MmUserHandle,
+        fs_context: Arc<Mutex<FsStruct>>,
+        signal_actions: Arc<SpinNoIrq<SignalActions>>,
+        config: ProcessRuntimeConfig,
+        nsproxy: Arc<NsProxy>,
+    ) -> Arc<Self> {
         #[cfg(feature = "tee")]
         let tee_ta_ctx = RwLock::new(TeeTaCtx::new(&exe_path));
         let posix_state = ProcessPosixState::new(exe_path, cmdline);
-        let runtime_state =
-            ProcessRuntimeState::new(process.pid(), address_space, config.user_heap_base);
+        let runtime_state = ProcessRuntimeState::new(process.pid(), mm_user, config.user_heap_base);
         let runtime = Arc::new(Self {
             process,
             #[cfg(feature = "tee")]
@@ -183,14 +296,19 @@ impl ProcessRuntime {
         f(&self.tipc_handles)
     }
 
+    /// Returns the executable metadata snapshot.
+    fn exec_metadata(&self) -> ExecMetadata {
+        self.posix_state.exec_metadata()
+    }
+
     /// Returns the executable path.
-    pub fn exe_path(&self) -> &RwLock<String> {
-        self.posix_state.exe_path()
+    pub fn exe_path(&self) -> String {
+        String::from(self.exec_metadata().exe_path())
     }
 
     /// Returns the command-line arguments.
-    pub fn cmdline(&self) -> &RwLock<Arc<Vec<String>>> {
-        self.posix_state.cmdline()
+    pub fn cmdline(&self) -> Arc<Vec<String>> {
+        self.exec_metadata().cmdline().clone()
     }
 
     /// Returns the process umask.
@@ -208,20 +326,42 @@ impl ProcessRuntime {
         self.posix_state.replace_umask(umask)
     }
 
-    /// Updates the executable metadata snapshot after a successful exec.
-    pub fn set_exec_metadata(&self, exe_path: String, cmdline: Arc<Vec<String>>) {
-        *self.exe_path().write() = exe_path;
-        *self.cmdline().write() = cmdline;
+    /// Returns the process OOM score adjustment.
+    pub fn oom_score_adj(&self) -> i32 {
+        self.posix_state.oom_score_adj()
     }
 
-    /// Returns the virtual address space.
-    pub fn address_space(&self) -> &Arc<Mutex<memspace::MmSpace>> {
-        self.runtime_state.address_space()
+    /// Sets the process OOM score adjustment.
+    pub fn set_oom_score_adj(&self, value: i32) {
+        self.posix_state.set_oom_score_adj(value);
+    }
+
+    /// Updates the executable metadata snapshot after a successful exec.
+    pub fn set_exec_metadata(&self, exe_path: String, cmdline: Arc<Vec<String>>) {
+        self.posix_state.set_exec_metadata(exe_path, cmdline);
+    }
+
+    /// Returns a live address-space capability if user mappings are still active.
+    pub(crate) fn address_space(&self) -> Option<LiveAddressSpace> {
+        self.runtime_state
+            .clone_mm_user()
+            .map(LiveAddressSpace::new)
+    }
+
+    /// Returns the pinned address-space object for teardown-state observation.
+    pub(crate) fn pinned_address_space_for_teardown_observation(
+        &self,
+    ) -> &Arc<Mutex<memspace::MmSpace>> {
+        self.runtime_state.pinned_address_space()
     }
 
     /// Returns the immutable address-space identity used by private futex keys.
     pub fn mm_id(&self) -> u64 {
         self.runtime_state.mm_id()
+    }
+
+    pub(crate) fn clear_exclusive_address_space(&self) -> bool {
+        self.runtime_state.clear_exclusive_address_space()
     }
 
     /// Returns the process-owned filesystem context.
@@ -250,7 +390,7 @@ impl ProcessRuntime {
     }
 
     /// Returns the process-owned timer manager.
-    pub fn timer_manager(&self) -> &Arc<Mutex<ktimer::ProcessTimerManager>> {
+    pub(crate) fn timer_manager(&self) -> &Arc<Mutex<ktimer::ProcessTimerManager>> {
         self.runtime_state.timer_manager()
     }
 
@@ -298,8 +438,36 @@ pub(crate) fn fork_process_runtime(
     parent: &Arc<ProcessRuntime>,
     config: ProcessForkConfig,
 ) -> KResult<(Arc<ProcessRuntime>, Arc<kidentity::PidHandle>)> {
+    let fs_namespaces = prepare_fork_fs_and_namespaces(parent, &config)?;
+    let leader_task_number = kidentity::allocate_root_pid_handle()?;
+    let process = parent.process().fork_with_tree_parent(
+        leader_task_number.clone(),
+        config.parent,
+        config.exit_signal,
+    )?;
+    let attached_process = AttachedForkProcess::new(process);
+
+    let address_space = prepare_fork_address_space(parent, config.address_space)?;
+    let signal_actions = prepare_fork_signal_actions(parent, config.signal_actions);
+    let process = attached_process.into_process();
+    let process_runtime = finish_fork_runtime(
+        parent,
+        process,
+        fs_namespaces,
+        address_space,
+        signal_actions,
+        config,
+    );
+
+    Ok((process_runtime, leader_task_number))
+}
+
+fn prepare_fork_fs_and_namespaces(
+    parent: &Arc<ProcessRuntime>,
+    config: &ProcessForkConfig,
+) -> KResult<ForkFsNamespaces> {
     let parent_fs_context = parent.fs_context();
-    let fs_context = if config.share_fs {
+    let fs_context = if matches!(config.fs, ForkFs::Shared) {
         if parent_fs_context.lock().in_exec() {
             return Err(KError::WouldBlock);
         }
@@ -308,7 +476,7 @@ pub(crate) fn fork_process_runtime(
         Arc::new(Mutex::new(parent_fs_context.lock().clone_for_process()))
     };
 
-    let nsproxy_result = if config.share_fs {
+    let nsproxy_result = if matches!(config.fs, ForkFs::Shared) {
         parent
             .nsproxy()
             .clone_for_child(config.namespace_flags, NamespaceFsContext::Shared)
@@ -323,42 +491,69 @@ pub(crate) fn fork_process_runtime(
         kns::CloneNsError::Unimplemented => KError::Unsupported,
         kns::CloneNsError::Mount(err) => err,
     })?;
-    let leader_task_number = kidentity::allocate_root_pid_handle()?;
-    let parent_process = if config.share_parent {
-        parent.process().parent().ok_or(KError::InvalidInput)?
-    } else {
-        parent.process().clone()
-    };
-    let process =
-        parent_process.fork_with_task_number(leader_task_number.clone(), config.exit_signal);
 
-    let address_space = if config.share_vm {
-        parent.address_space().clone()
+    Ok(ForkFsNamespaces {
+        fs_context,
+        nsproxy,
+    })
+}
+
+fn prepare_fork_address_space(
+    parent: &Arc<ProcessRuntime>,
+    mode: ForkAddressSpace,
+) -> KResult<ForkAddressSpaceState> {
+    let parent_mm_user = parent
+        .runtime_state
+        .clone_mm_user()
+        .ok_or(KError::NoSuchProcess)?;
+    let mm_user = if matches!(mode, ForkAddressSpace::Shared) {
+        parent_mm_user
     } else {
-        let mut aspace = parent.address_space().lock();
-        aspace.try_clone()?
+        let mut aspace = parent_mm_user.address_space().lock();
+        let address_space = aspace.try_clone()?;
+        memspace::MmSpace::acquire_user(address_space).ok_or(KError::NoSuchProcess)?
     };
-    let signal_actions = if config.share_sighand {
+
+    Ok(ForkAddressSpaceState { mm_user })
+}
+
+fn prepare_fork_signal_actions(
+    parent: &Arc<ProcessRuntime>,
+    mode: ForkSignalActions,
+) -> Arc<SpinNoIrq<SignalActions>> {
+    if matches!(mode, ForkSignalActions::Shared) {
         parent.signal_manager().actions.clone()
     } else {
         Arc::new(SpinNoIrq::new(
             parent.signal_manager().actions.lock().clone(),
         ))
-    };
-    let process_runtime = ProcessRuntime::new_with_nsproxy(
+    }
+}
+
+fn finish_fork_runtime(
+    parent: &Arc<ProcessRuntime>,
+    process: Arc<Process>,
+    fs_namespaces: ForkFsNamespaces,
+    address_space: ForkAddressSpaceState,
+    signal_actions: Arc<SpinNoIrq<SignalActions>>,
+    config: ProcessForkConfig,
+) -> Arc<ProcessRuntime> {
+    let exec_metadata = parent.exec_metadata();
+    let process_runtime = ProcessRuntime::new_with_nsproxy_and_mm_user(
         process,
-        parent.exe_path().read().clone(),
-        parent.cmdline().read().clone(),
-        address_space,
-        fs_context,
+        String::from(exec_metadata.exe_path()),
+        exec_metadata.cmdline().clone(),
+        address_space.mm_user,
+        fs_namespaces.fs_context,
         signal_actions,
         ProcessRuntimeConfig::default(),
-        nsproxy,
+        fs_namespaces.nsproxy,
     );
     process_runtime.set_umask(parent.umask());
+    process_runtime.set_oom_score_adj(parent.oom_score_adj());
     process_runtime.set_heap_top(parent.heap_top());
 
-    if config.share_files {
+    if matches!(config.fd_table, ForkFdTable::Shared) {
         process_runtime
             .resources()
             .replace_fd_table(parent.resources().fd_table());
@@ -367,5 +562,5 @@ pub(crate) fn fork_process_runtime(
         process_runtime.resources().replace_fd_table(fd_table);
     }
 
-    Ok((process_runtime, leader_task_number))
+    process_runtime
 }

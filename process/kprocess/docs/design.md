@@ -7,10 +7,11 @@
 它维护 process、thread、process group、session、父子关系、线程组成员、退出状态、
 publication/registry、signal targeting、timer delivery glue、controlling terminal 绑定。
 当前 `Process` 自身保留一个强类型的弱 runtime 引用
-（`Weak<ProcessRuntime>`），并直接对外提供 fs/mm/signal/timer
+（`Weak<ProcessRuntime>`），并直接对外提供 fs/mm/signal/timer/credential
 等 capability 方法；每个 `Thread` 则持有自己的 objective/subjective credential
-指针。外部 `live process` 语义不以弱 runtime 引用为判据，
-而是以 `Process` 生命周期状态是否已经进入 zombie 为准。
+指针。timer capability 通过 `Process` facade 暴露单个语义操作，外部模块不直接持有
+process-owned timer manager 的锁。外部 `live process` 语义不再以弱 runtime 引用为判据，
+而是以 `Process` 生命周期状态是否已经 exited 为准。
 `current_user_*` helpers 显式要求当前 task 必须已经安装 user-thread runtime。
 `posix/process`、`ksyscall`、`ktty`、procfs 等模块只通过 `Process` 公开 API
 或 `process_exit` / `wait_reap` 语义模块查询或调整进程关系与能力。
@@ -42,6 +43,11 @@ process/kprocess/
     ├── lookup.rs
     ├── pidfd.rs
     ├── process.rs
+    ├── process/
+    │   ├── exit.rs
+    │   ├── runtime_access.rs
+    │   ├── thread_membership.rs
+    │   └── tree.rs
     ├── process_exit.rs
     ├── process_signals.rs
     ├── process_group.rs
@@ -71,11 +77,19 @@ process/kprocess/
 
 ```text
 Process
-  ├─ parent: Weak<Process>
-  ├─ children: StrongMap<Pid, Arc<Process>>
-  ├─ thread_group: ThreadGroup
+  ├─ children: intrusive List<Arc<ChildRelationSlot>>
+  ├─ parent_relation: ParentRelation
+  │    ├─ wait_contract: WaitParentContract { Weak<Process>, exit_signal }
+  │    └─ current_child_slot / init_reparent_slot
+  ├─ thread_membership: ThreadMembership
+  │    └─ members: BTreeMap<Tid, Arc<ThreadMemberSlot>>
+  ├─ group_exit: ThreadGroupExitState
   ├─ lifecycle: ProcessLifecycleState
-  ├─ group: Arc<ProcessGroup>
+  │    ├─ events: ProcessEvents
+  │    └─ cpu_totals: ProcessCpuTotals
+  ├─ group_membership: GroupMembership
+  │    └─ group / member_slot
+  ├─ pid_publication_slot
   └─ runtime_ref: Option<Weak<ProcessRuntime>>
               │
               ├─ Thread
@@ -84,24 +98,27 @@ Process
               │
               v
         ProcessGroup
-          ├─ processes: WeakMap<Pid, Weak<Process>>
+          ├─ processes: BTreeMap<Pid, Arc<ProcessGroupMemberSlot>>
           └─ session: Arc<Session>
                           │
                           v
                     Session
                       ├─ process_groups: WeakMap<Pid, Weak<ProcessGroup>>
-                      └─ terminal: Option<Arc<dyn Any + Send + Sync>>
+                      └─ terminal: Option<Arc<dyn ControllingTerminal>>
 ```
 
 | 组件 | 职责 |
 |------|------|
-| `Process` | 保存 leader `PidHandle`、父子关系、线程组状态、lifecycle 事件、已退出线程/已回收 child CPU time、zombie 标志、当前进程组、弱 runtime 引用，以及对外 capability 入口 |
-| `ProcessPublication` | 保存 published task/process/group/session 的全局可观测目录，并承载 publish / unpublish / lookup / iteration；目录更新在单次 publication 事务内完成，避免 task/process/group/session lookup 读到跨表半发布状态；其中 `published` 覆盖 zombie 未 reap 的稳定身份，`live` 仅表示非 zombie 的外部可操作进程 |
+| `Process` | 保存 leader `PidHandle`、父子关系、线程成员表、线程组退出状态、lifecycle 事件、已退出线程/已回收 child CPU time、退出状态、当前进程组、弱 runtime 引用，以及对外 capability 入口 |
+| `ProcessPublication` | 保存 published task/process/group/session 的全局可观测目录，并承载 publish / unpublish / lookup / iteration；目录更新在单次 publication 事务内完成，避免 task/process/group/session lookup 读到跨表半发布状态；其中 `published` 覆盖 waitable zombie 未 reap 的稳定身份，`live` 仅表示尚未 exited 的外部可操作进程 |
 | `kidentity` | 作为 process domain 的 identity owner，维护底层 `PidHandle` 与 `PidNamespace`；`kprocess` 当前对外仍暴露 root/global `Pid/Tid` 语义 |
 | `lookup` | `kprocess` 内部目录原语层，负责 `published/live` 合约下的 task/process/group 查找 |
 | `procfs` / `scheduler` / `job_control` / `pidfd` / `process_signals` / `resource_limits` / `process_exit` / `wait_reap` / `system_view` | 面向外部领域语义的窄接口层；外部模块通过这些模块表达“要做什么”，而不是自己理解 `published/live` |
-| `ProcessLifecycleState` | 保存子进程退出事件、进程退出事件、已退出线程 CPU time 和已回收子进程 CPU time |
-| `ThreadGroup` | 保存进程自有的 published 线程成员表（`tid -> weak task`）、进程退出码和 group-exit 标志 |
+| `ParentRelation` | 封装 wait parent contract、当前 parent child-list slot 和预留 init reparent slot；这些状态只能在 process-domain 事务内作为同一父子关系更新 |
+| `GroupMembership` | 封装当前 `ProcessGroup` 和发布到 group 成员表的 slot；group move 通过该对象保持 group 指针与 member slot 成对切换 |
+| `ProcessLifecycleState` | 聚合进程生命周期事件和 CPU totals；内部 `ProcessEvents` 保存 child/process exit wait 事件，`ProcessCpuTotals` 保存已退出线程与已回收 child CPU time |
+| `ThreadMembership` | 保存进程自有的 published 线程成员表（`tid -> weak task`） |
+| `ThreadGroupExitState` | 保存进程退出码和 group-exit 标志，独立于线程成员表 |
 | `Thread` | 保存 task identity、所属 process/runtime、objective `real_cred`、subjective `cred` 和线程私有状态 |
 | `ProcessGroup` | 保存 PGID、所属 session 和弱引用进程成员表 |
 | `Session` | 保存 SID、弱引用进程组表和 controlling terminal |
@@ -114,20 +131,23 @@ Process
 ```text
 Created ──publish_task──> Running ──exit_thread(last)──> Exiting
    │                                              │
-   │                                              v
-   └──────────────────────────────────────────> Zombie ──free──> Reaped
+   │                                              ├─default wait policy──> Zombie ──wait/free──> Dead/Reaped
+   │                                              │
+   │                                              └─autoreap────────────> Dead/Reaped
+   └────────────────────────────────────────────────────────────────────> Dead/Reaped
 ```
 
 | 从 | 到 | 触发条件 |
 |----|----|----------|
 | `Created` | `Running` | publication 阶段把已准备好的 task 发布到 `Process` 自有线程成员表 |
 | `Running` | `Running` | 非最后一个线程调用 `exit_thread` |
-| `Running` | `Zombie` | 最后一个线程退出后调用 `Process::exit` |
-| `Zombie` | `Reaped` | 父进程 wait 路径调用 `free` |
+| `Running` | `Zombie` | 最后一个线程退出后调用 `Process::exit`，且 child-exit 策略要求父进程 wait |
+| `Running` | `Dead/Reaped` | 最后一个线程退出后 child-exit 策略要求 autoreap |
+| `Zombie` | `Dead/Reaped` | 父进程 wait 路径调用 `free` 或 `wait_reap` 获得单赢家 |
 
 `Process::exit` 对 init 进程直接返回。
-普通进程退出时设置 zombie 标志，并把子进程 reparent 到 init 进程。
-`free` 只允许 zombie 进程调用，并从父进程 children 表移除当前进程。
+普通进程退出时设置退出状态，并把子进程 reparent 到 init 进程。
+`free` 只允许已退出进程调用，并从父进程 children 表移除当前进程。
 
 ### Process group 和 session 转换
 
@@ -156,14 +176,35 @@ Inherited group
 
 ### fork 子进程
 
-1. `fork_process_runtime` 先克隆 child `NsProxy`。
+1. `fork_process_runtime` 先按 `ForkFs` 准备 child filesystem context，并按
+   `NamespaceFlags` 克隆 child `NsProxy`；共享 fs 场景若 parent 正处于 exec
+   临界状态会返回 `WouldBlock`。
 2. 当前 `CLONE_NEWPID` 尚未启用，因此 leader `PidHandle` 仍在 root PID namespace
    分配，并保持 root-visible `tid == pid`；后续 task-active PID namespace 应挂在
    task/PID identity 层，而不是 `NsProxy`。
-3. 再创建子进程稳定身份、加入 group 的 weak member 表、挂到父进程 children 表。
-4. 然后在同一个 owner 域内创建 `ProcessRuntime`、地址空间、文件表和信号状态，并把弱 runtime 引用登记到新 `Process`。
+3. 再创建子进程稳定身份、预分配 child relation slot，并加入 group 的 weak
+   member 表。`ProcessForkConfig` 使用 `ForkParent`、`ForkAddressSpace`、
+   `ForkFs`、`ForkSignalActions` 和 `ForkFdTable` 表达 clone 语义，syscall 层
+   负责把 Linux flags 解码成这些 typed config。parent link、父进程 children 链表挂接和 `CLONE_PARENT` 的
+   parent/exit-signal 继承在同一个 process-domain 临界区完成；普通 fork/clone
+   使用调用方请求的 exit signal，`CLONE_PARENT` 子进程继承调用者进程自身的
+   exit signal 契约，而不是使用本次 clone 请求中的 signal。
+4. tree attach 后，`fork_process_runtime` 使用 RAII rollback guard 覆盖后续
+   fallible 准备窗口；随后按 `ForkAddressSpace` 准备私有/共享地址空间状态，
+   按 `ForkSignalActions` 准备私有/共享 signal action 表，最后创建
+   `ProcessRuntime`、继承 umask / oom score / heap top，并按 `ForkFdTable`
+   安装共享或克隆的 fd table。若 runtime 输入准备失败，guard 会撤销未发布 child
+   的 parent/group 关系，避免 parent children 残留不会运行的半构造进程。
 5. child `Thread` 取得调用线程 subjective credential 的同一 `Arc<Cred>` 快照，并分别安装为自己的 `real_cred` 和 `cred`。
 6. syscall 层通过 staged publication 事务先完成 publication，使 PID/TID 与 group/session lookup 对外一致可见；随后执行 `CLONE_PARENT_SETTID` / `CLONE_PIDFD` 等父侧 writeback，成功后才把 task 变为 runnable，失败则回滚 publication 与 owner-side child membership。顺序对齐 Linux `kernel_clone()` 的“先完成 parent-side return setup，再 `wake_up_new_task()`”约束。
+
+### exec 状态发布
+
+`apply_exec_update` 先升级一次 `ProcessRuntime` 并完成 heap、signal actions、
+POSIX timer、cloexec fd、TEE/TIPC 私有状态等 post-exec cleanup，最后才
+发布新的 `(exe_path, cmdline)` metadata 快照。metadata 使用同一个
+`ExecMetadata` RwLock 保存，因此 procfs 等观察者不会看到旧 path + 新 argv 或新
+path + 旧 argv 的混合状态。
 
 ### 创建同进程线程
 
@@ -184,25 +225,119 @@ Inherited group
 ### 进程退出和回收
 
 1. `exit_thread` 从 `Process` 自有线程成员表移除 TID，并在未 group-exit 时记录退出码。
-2. 最后一个线程退出后，`posix-process` runtime glue 经 `process_exit` 语义模块触发稳定 `Process` 的 zombie 转换。
-3. `Process` 内部设置 zombie 标志，将所有子进程 reparent 到 init。
-4. zombie 之后该 `Process` 仍保持 published 身份，继续承担 wait/pidfd/reap 语义；与此同时，外部 `live` 查询必须开始把它视为不可操作对象。
+2. 最后一个线程退出后，`posix-process` runtime glue 经 `process_exit` 语义模块触发稳定 `Process` 的 exited-state 转换。
+3. `Process` 内部在 process-domain 临界区内设置 `Zombie` 或 `Dead` 退出状态，
+   将所有子进程 reparent 到 init，并同时更新旧 parent children、新 parent
+   children、child parent link 和 orphan 的退出通知 signal。reparent 会把
+   orphan 的退出通知 signal 重置为 `SIGCHLD`，避免 init 继承非 `SIGCHLD`
+   clone-child 通知语义。
+4. 默认 SIGCHLD 语义下，waitable zombie 之后该 `Process` 仍保持 published 身份，继续承担 wait/pidfd/reap 语义；与此同时，外部 `live` 查询必须开始把它视为不可操作对象。
 5. 弱 runtime 引用不在 zombie 转换时主动清除，而是允许当前退出线程在尾段继续通过稳定 `Process` 访问其已持有的运行态资源；其生命周期最终由 `Thread -> Arc<ProcessRuntime>` 强引用自然结束。
-6. 退出路径在唤醒父进程前，先把当前线程最终 CPU time 累计到 `ProcessLifecycleState`，再直接通过父进程 `child_exit_event` 唤醒等待者，并通过本进程 `exit_event` 通知 pidfd/poll 观察者。
-7. wait 路径观察 zombie 子进程后调用 `wait_reap::reap_zombie_process`。
-8. 回收阶段从父进程 children 表删除当前 PID，并从 published PID 目录撤销该身份。
+6. 最后一个线程在发布 zombie 前释放当前 runtime 持有的 `memspace::process_lifetime::MmUserHandle`；当这是最后一个 active mm user 时同步释放 VMA 和用户页资源。共享 VM 场景通过从父 runtime 的 handle 派生新 user 继续持有，普通 `Arc<MmSpace>` observer 或 `MmPin` 不参与该判定。
+7. 退出路径在父进程可观察前，先把当前线程最终 CPU time 累计到 `ProcessLifecycleState`，并通过本进程 `exit_event` 通知 pidfd/poll 观察者。
+8. child-exit 通知对齐 Linux `do_notify_parent()`：默认忽略的 SIGCHLD 仍会排队；显式 `SIG_IGN` 或 `SA_NOCLDWAIT` 请求 autoreap。`SA_NOCLDWAIT` 保持 Linux 行为，除非同时显式 `SIG_IGN`，否则仍发送 SIGCHLD。发送给父进程的 signal 使用 child-exit `siginfo_t` layout，而不是普通 `SI_KERNEL`：`si_code` 从 wait status 映射为 `CLD_EXITED`、`CLD_KILLED` 或 `CLD_DUMPED`，`si_status` 携带退出码或终止信号，并填充 child PID、real UID、用户态/内核态 CPU clock ticks。非 SIGCHLD 的 clone exit signal 也沿用同一 child-exit payload，只替换 `si_signo`。
+9. 对 SIGCHLD 退出，运行时先在 process-domain read side 采样
+   `(parent, exit_signal)`，随后在锁外读取 child-exit action 并得到
+   autoreap/queue 决策，但延迟把 SIGCHLD 放入 pending queue。最终进入
+   process-domain write side 提交 `Running -> Zombie/Dead`、autoreap detach 和
+   reparent；提交前重新校验 parent/exit-signal contract，若父进程并发退出导致
+   reparent，则丢弃旧 signal 准备结果并重新按当前 parent 准备。释放
+   process-domain 锁后才提交 SIGCHLD，并在提交时按父进程当前线程和 signal mask
+   重新选择打断目标；随后注销 published PID 身份并唤醒 `child_exit_event`，使
+   signal handler 和阻塞的 wait 都只能观察到已完成的 exit/autoreap 状态，同时避免
+   process-tree 写事务嵌入 signal 子系统锁。SIGCHLD 提交流程只接受 typed
+   child-exit SIGCHLD payload，非 SIGCHLD 的 clone exit signal 转换为普通
+   process-directed signal 发送。
+10. wait 路径通过 `wait_reap::scan_waitable_child` 执行 typed wait 事务：
+    syscall 层只把 ABI 选项转换成 `WaitChildSelector`、`WaitChildKind` 和
+    `WaitReapMode`，child 匹配、waitable 判断、`Zombie -> Dead` 状态转换和
+    parent children 移除在同一个 process-domain 临界区完成。事务返回稳定
+    `WaitedChild` 后，锁外再注销 PID identity、累计 child CPU time 和写用户
+    exit status，避免 syscall 层持有 stale children snapshot 后自行 reap。
 
 ## 并发模型
 
-- `Process::thread_group`、`children`、`parent`、`group` 使用 `SpinNoIrq`，避免持锁区被本地中断打断。
+- process-domain 临界区保护所有跨进程树和全局可见性关系的不变量：child parent
+  link、parent children 集合、exit state 的 Running/Zombie/Dead 转换、fork
+  挂载、exit reparent、wait reap detach、autoreap detach，以及 task/process/
+  process-group/session publication slot 的可见值切换。调用方不得在该临界区之外把
+  “判断当前状态”和“修改父子关系/退出状态/可见性状态”拆成两个动作。
+- 该边界对齐 Linux `tasklist_lock` 的职责。Linux 使用 IRQ-safe rwlock：
+  fork/exit/reparent 等写路径持 write lock，wait 扫描持 read lock，并在
+  `EXIT_ZOMBIE -> EXIT_DEAD` 获得单赢家后释放 tasklist lock。x-kernel 的
+  `process_domain` 使用 `kspin::SpinRwNoIrq`：纯 parent/children/exit-signal
+  快照走 read side，fork/exit/reparent/autoreap/reap/detach 这类会修改
+  parent link、children 集合或 exit state 的事务走 write side。当前 reap
+  会在消费 zombie 时直接从 parent children intrusive list 摘除 relation
+  slot，因此不能简单照搬 Linux 在 read side 下 claim zombie 的分阶段实现；
+  若后续拆出 Linux 风格 `release_task` 阶段，可在同一抽象层把 wait 扫描扩大为
+  read-side 事务。
+- 核心 parent-child relation mutator 接收 `ProcessDomainWriteGuard` token，
+  例如 attach、detach、exit reparent、wait reap 和 unpublished rollback 路径。
+  group membership、thread membership 和 PID publication helper 也接收同一
+  token。这把原先只靠 `_locked` 命名表达的前置条件推进到 Rust 类型检查。
+- `ksync::RwLock` 是 sleepable lock，会在竞争时 `block_on()`，不能用于这些
+  禁止睡眠的 exit/wait 临界区。
+- `Process::children` 使用 intrusive `ChildRelationSlot`，slot 在 `Process`
+  构造时分配；process-domain 锁内只把已经存在的 slot 挂入/摘出 parent 的
+  children list，并更新 slot 的 child 值、child parent link 与当前 parent slot。
+  exit reparent 直接 drain dying parent 的 children list 并挂到 init 预留 slot，
+  不在 process-domain write lock 内分配临时 `Vec`。这对齐 Linux
+  `list_add_tail(&p->sibling, &p->real_parent->children)` /
+  `list_splice_tail_init()` 的“不在 tasklist_lock 下分配”约束。
+- `ProcessPublication` 是 task/process/group/session 的全局观察目录，职责对齐
+  Linux 在 `tasklist_lock` 下维护 PID hash 和全局 task 可见性的部分。当前实现
+  采用 staged slot registry：`BTreeMap` 只保存 slot，结构性插入/移除在
+  process-domain 锁外完成；slot 有 `Vacant/Reserved/Published/Retired` 生命周期。
+  `cleanup()` 只能清理 `Vacant/Retired` slot，不能删除 reserved-but-empty slot，
+  因此 reserve 与 visible commit 之间即使发生 cleanup 也不会丢失发布位置。
+  publication table write guard 覆盖 reserve 到 commit/abort 的窗口，避免多个
+  事务复用同一个 Reserved group/session slot；进入 process-domain 前已完成所有
+  `BTreeMap` 结构性分配，slot 的 published value 在 process-domain 锁内切换，
+  因此 fork publish、rollback、wait reap 和 autoreap 的对外可见性提交不在
+  IRQ-off 临界区内分配内存。
+  后续若引入 intrusive hash/list，也应保持同样的 prepare-may-fail /
+  commit-noalloc 边界。
+- `Process::thread_membership.members` 和 `ProcessGroup::processes` 使用 staged member
+  slot：结构性 `BTreeMap` slot reserve 在事务前完成，对外枚举只返回 published
+  slot。task publication 用 `ThreadPublicationBinding` 把全局 TID task slot 和
+  进程内 thread member slot 绑定为同一事务对象；process-domain commit 同时发布
+  两个观察面，rollback 同时 retire 两个 slot。PID identity 是否由本次 task
+  publication 插入使用 `ProcessIdentityEffect` 表达，rollback 只撤销本事务插入的
+  process identity。group member 也只在 process-domain 内发布；group/session
+  lookup slot 的本次预留状态由 `PublicationSlotEffect` 记录，失败路径只 retire
+  本事务预留但未发布的 slot。rollback/reap/autoreap retire slot，使未发布 child
+  或已回收 child 不会从 thread 或 process-group 观察面泄漏。
+- job-control group move 通过 `ProcessPublication::move_process_to_group` 统一提交：
+  先在 process-domain 外预留目标 process-group member slot 与 group/session
+  publication slot，然后在同一个 process-domain 写事务里更新 `Process::group`、
+  retire 旧 member、publish 新 member，并发布 group/session lookup 身份。跨
+  session move 校验也在该事务内完成；失败路径 retire 本次预留但未发布的 slot。
+- process-domain 锁内只允许短小的非阻塞 owner-side 操作；PID publication
+  注销、signal commit、task interrupt 和 `PollSet` wake 等外部可观察动作在锁外执行。
+- process-owned timer state 由 `ProcessRuntimeState` 内部的 `ProcessTimers`
+  子对象保存，但 `Process` 只向外部暴露 create/get/set/delete/poll/dequeue 这类
+  timer facade。syscall 与
+  signal delivery 路径不直接获取 `ProcessTimerManager` 或其 mutex，避免把 timer
+  锁顺序和 lock scope 泄漏成跨模块契约；可能触发 signal delivery 的方法只返回
+  `TimerDelivery`，实际派发在 timer manager 锁外完成。
+- `timer_delivery::poll_cpu_timers` 和 POSIX timer signal dequeue hook 只能从当前
+  user-thread 返回/信号处理路径调用；它们会读取当前 user thread 的 live runtime。
+- `Process::thread_membership`、`group_exit`、`children`、`parent_relation` 和
+  `group_membership` 内部使用 `SpinNoIrq`，避免持锁区被本地中断打断。
+- `ParentRelation` 保护 wait-parent weak reference、exit signal、当前 parent
+  child-list slot 和预留 init reparent slot；读取或更新 parent link 时必须先进入
+  process-domain 临界区，避免观察到“新 parent + 旧 signal”或“旧 parent + 新
+  signal”的组合。
 - `Process::runtime_ref` 使用 `SpinNoIrq<Option<Weak<ProcessRuntime>>>`，只保存非拥有型 runtime upgrade 入口，不承担对外 `live` 判定。
 - `kidentity` 当前按 namespace 线性分配 `PidHandle`；当前阶段不做回收，后续如引入 pid reuse，应仍保持 “publish before runnable” 不变量。
 - `PidHandle` 已能携带 namespace 链，但 `kprocess` 对外 `pid()/tid()` 仍固定返回 root/global 编号；在 wait、kill、procfs、registry 全部 namespace-aware 之前，不把 namespace-visible 编号暴露到对外主语义。
-- `ProcessLifecycleState` 的 wait 事件通过 `Arc<PollSet>` 共享，已退出线程和已回收 child CPU time 使用 relaxed 原子累计。
+- `ProcessLifecycleState` 的 wait 事件通过 `ProcessEvents` 中的 `Arc<PollSet>` 共享，已退出线程和已回收 child CPU time 由 `ProcessCpuTotals` 使用 relaxed `u64` 原子累计。
 - `ProcessGroup::processes` 和 `Session::process_groups` 使用 `WeakMap`，避免 group/session 成员表延长成员生命周期。
 - `Thread::real_cred` 与 `Thread::cred` 分别使用 `RwLock<Arc<Cred>>`；读路径只克隆 `Arc`，写路径按固定顺序同时替换两个指针。
-- `Session::terminal` 使用 `SpinNoIrq<Option<Arc<dyn Any + Send + Sync>>>`，controlling terminal 只能设置一次，清除时要求对象指针匹配。
-- `is_zombie` 使用 `AtomicBool`，`exit` 使用 Release 写入，`is_zombie` 使用 Acquire 读取。
+- `Session::terminal` 使用 `SpinNoIrq<Option<Arc<dyn ControllingTerminal>>>`，controlling terminal 只能设置一次；`set_terminal` 只在短临界区内 compare-and-install 已构造好的 `Arc`，清除时要求对象指针匹配。`kprocess` 只持有 controlling-terminal trait object，不了解具体 TTY 类型；需要 downcast 的 `/dev/tty` 解析留在 `ktty` 边界完成。
+- `exit_state` 使用 `AtomicProcessExitState` 表达 `Running` / `Zombie` / `Dead`，raw 编码被封装在 typed atomic 内。单字段查询仍用
+  Acquire 读取；与 parent/children 关系有关的状态转换必须在 process-domain 临界区内完成。
 - `set_group` 同时修改当前 process、旧 group 和新 group，调用者应避免在外部持有这些对象的成员锁后再调用 group mutation API。
 
 ## 设计决策
@@ -236,7 +371,7 @@ syscall adapter 提供快照；credential 最终只保存在 `VfsFile::f_cred`�
 `published` 和 `live` 仍然是 `kprocess` 内部必须保留的两类 contract：
 
 - `published` 用于可观测身份目录
-- `live` 用于对外仍可操作的非 zombie 进程
+- `live` 用于对外仍可操作、尚未 exited 的进程
 
 但这两个术语不再作为外部主编程模型暴露。当前实现采用两层结构：
 
@@ -267,6 +402,10 @@ subreaper 尚未实现，代码保留 TODO。
 ## Drop / 资源释放
 
 - `Process` 没有自定义 `Drop`，生命周期由 `Arc` 引用计数控制。
-- 父进程 children 表持有子进程强引用，`free` 从父表移除 zombie 子进程后释放这条所有权边。
+- 父进程 children 表持有子进程强引用，`free` 或 autoreap 从父表移除已退出子进程后释放这条所有权边。
+- 用户进程的大块地址空间资源不依赖 `ktask` GC；最后一个 runtime `MmUserHandle` 释放时会同步清理 `MmSpace` 的用户映射。
+- 需要访问 live 用户映射的路径通过 `Process::address_space()` 进入，该入口要求
+  runtime 仍能派生 active `MmUserHandle`；退出清理后需要观察稳定 mm identity 或
+  空 VMA 状态的内部路径必须显式使用 teardown-observation pinned address-space 入口。
 - `ProcessGroup` 和 `Session` 成员表持有弱引用，不阻止成员释放。
 - `Session::unset_terminal` 只在传入 terminal 与当前 terminal 指针相同的时候清空绑定。

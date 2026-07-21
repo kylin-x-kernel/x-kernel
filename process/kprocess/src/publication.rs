@@ -9,11 +9,14 @@ use alloc::{
 };
 
 use kerrno::{KError, KResult};
+use kspin::SpinNoIrq;
 use ksync::RwLock;
 use ktask::{KtaskRef, TaskInner, WeakKtaskRef, activate_task, current, prepare_task};
-use weak_map::WeakMap;
 
-use crate::{AsThread, Pid, Process, ProcessGroup, Session, Tid, current_user_process};
+use crate::{
+    AsThread, Pid, Process, ProcessGroup, ProcessGroupMemberSlot, Session, Tid,
+    current_user_process, process_domain,
+};
 
 /// A prepared user task that is not yet visible to process/task registry lookups.
 pub(crate) struct PreparedUserTask {
@@ -28,16 +31,196 @@ pub struct PublishedUserTask {
 
 pub(crate) struct PublicationRollback {
     process: Arc<Process>,
-    pid: Pid,
-    tid: Tid,
-    insert_process: bool,
+    thread_binding: ThreadPublicationBinding,
+    process_effect: ProcessIdentityEffect,
+}
+
+pub(crate) type PublishedProcessSlot = PublicationSlot<Arc<Process>>;
+
+enum PublicationSlotInner<T> {
+    Vacant,
+    Reserved,
+    Published(T),
+    Retired,
+}
+
+pub(crate) struct PublicationSlot<T> {
+    inner: SpinNoIrq<PublicationSlotInner<T>>,
+}
+
+impl<T> PublicationSlot<T> {
+    const fn new() -> Self {
+        Self {
+            inner: SpinNoIrq::new(PublicationSlotInner::Vacant),
+        }
+    }
+
+    fn reserve_vacant_task_slot(&self) {
+        let mut inner = self.inner.lock();
+        assert!(
+            matches!(
+                &*inner,
+                PublicationSlotInner::Vacant | PublicationSlotInner::Retired
+            ),
+            "cannot reserve an active task-publication slot"
+        );
+        *inner = PublicationSlotInner::Reserved;
+    }
+
+    fn reserve_identity_if_unpublished(&self) -> PublicationReservation {
+        let mut inner = self.inner.lock();
+        if matches!(&*inner, PublicationSlotInner::Published(_)) {
+            PublicationReservation::AlreadyPublished
+        } else {
+            *inner = PublicationSlotInner::Reserved;
+            PublicationReservation::ReservedByTransaction
+        }
+    }
+
+    pub(crate) fn publish(&self, value: T) {
+        let mut inner = self.inner.lock();
+        assert!(
+            matches!(
+                &*inner,
+                PublicationSlotInner::Reserved | PublicationSlotInner::Published(_)
+            ),
+            "publishing an unreserved process-publication slot"
+        );
+        *inner = PublicationSlotInner::Published(value);
+    }
+
+    pub(crate) fn retire(&self) {
+        *self.inner.lock() = PublicationSlotInner::Retired;
+    }
+
+    fn can_cleanup(&self) -> bool {
+        matches!(
+            &*self.inner.lock(),
+            PublicationSlotInner::Vacant | PublicationSlotInner::Retired
+        )
+    }
+
+    fn is_published(&self) -> bool {
+        matches!(&*self.inner.lock(), PublicationSlotInner::Published(_))
+    }
+}
+
+impl<T: Clone> PublicationSlot<T> {
+    pub(crate) fn snapshot(&self) -> Option<T> {
+        let inner = self.inner.lock();
+        match &*inner {
+            PublicationSlotInner::Published(value) => Some(value.clone()),
+            PublicationSlotInner::Vacant
+            | PublicationSlotInner::Reserved
+            | PublicationSlotInner::Retired => None,
+        }
+    }
 }
 
 struct PublicationTables {
-    task_table: WeakMap<Tid, WeakKtaskRef>,
-    process_table: BTreeMap<Pid, Arc<Process>>,
-    process_group_table: WeakMap<Pid, Weak<ProcessGroup>>,
-    session_table: WeakMap<Pid, Weak<Session>>,
+    task_table: BTreeMap<Tid, Arc<PublicationSlot<WeakKtaskRef>>>,
+    process_table: BTreeMap<Pid, Arc<PublicationSlot<Arc<Process>>>>,
+    process_group_table: BTreeMap<Pid, Arc<PublicationSlot<Weak<ProcessGroup>>>>,
+    session_table: BTreeMap<Pid, Arc<PublicationSlot<Weak<Session>>>>,
+}
+
+struct ProcessIdentitySlots {
+    process: Arc<PublishedProcessSlot>,
+    group: Arc<PublicationSlot<Weak<ProcessGroup>>>,
+    session: Arc<PublicationSlot<Weak<Session>>>,
+}
+
+struct JobControlIdentitySlots {
+    member: Arc<ProcessGroupMemberSlot>,
+    group: PublicationSlotEffect<Weak<ProcessGroup>>,
+    session: PublicationSlotEffect<Weak<Session>>,
+}
+
+/// Binds the global TID slot and per-process thread member slot for one task.
+struct ThreadPublicationBinding {
+    task_slot: Arc<PublicationSlot<WeakKtaskRef>>,
+    member_slot: Arc<crate::process::ThreadMemberSlot>,
+}
+
+impl ThreadPublicationBinding {
+    fn reserve(
+        task_slot: Arc<PublicationSlot<WeakKtaskRef>>,
+        member_slot: Arc<crate::process::ThreadMemberSlot>,
+    ) -> Self {
+        task_slot.reserve_vacant_task_slot();
+        Self {
+            task_slot,
+            member_slot,
+        }
+    }
+
+    fn publish(
+        &self,
+        domain: &process_domain::ProcessDomainWriteGuard<'_>,
+        proc: &Process,
+        task: &KtaskRef,
+    ) {
+        proc.publish_thread_task_locked(domain, &self.member_slot, task);
+        self.task_slot.publish(Arc::downgrade(task));
+    }
+
+    fn retire(&self) {
+        self.task_slot.retire();
+        self.member_slot.retire();
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcessIdentityEffect {
+    Inserted,
+    AlreadyPublished,
+}
+
+impl ProcessIdentityEffect {
+    fn reserve_if_unpublished(slot: &PublishedProcessSlot) -> Self {
+        match slot.reserve_identity_if_unpublished() {
+            PublicationReservation::ReservedByTransaction => Self::Inserted,
+            PublicationReservation::AlreadyPublished => Self::AlreadyPublished,
+        }
+    }
+
+    fn inserted(self) -> bool {
+        matches!(self, Self::Inserted)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PublicationReservation {
+    ReservedByTransaction,
+    AlreadyPublished,
+}
+
+impl PublicationReservation {
+    fn should_retire_on_abort(self) -> bool {
+        matches!(self, Self::ReservedByTransaction)
+    }
+}
+
+struct PublicationSlotEffect<T> {
+    slot: Arc<PublicationSlot<T>>,
+    reservation: PublicationReservation,
+}
+
+impl<T> PublicationSlotEffect<T> {
+    fn reserve_if_unpublished(slot: Arc<PublicationSlot<T>>) -> Self {
+        let reservation = slot.reserve_identity_if_unpublished();
+        Self { slot, reservation }
+    }
+
+    fn publish(&self, value: T) {
+        self.slot.publish(value);
+    }
+
+    fn retire_reserved(&self) {
+        if self.reservation.should_retire_on_abort() {
+            self.slot.retire();
+        }
+    }
 }
 
 /// Global publication owner for the process domain.
@@ -47,10 +230,10 @@ pub(crate) struct ProcessPublication {
 
 static PROCESS_PUBLICATION: ProcessPublication = ProcessPublication {
     tables: RwLock::new(PublicationTables {
-        task_table: WeakMap::new(),
+        task_table: BTreeMap::new(),
         process_table: BTreeMap::new(),
-        process_group_table: WeakMap::new(),
-        session_table: WeakMap::new(),
+        process_group_table: BTreeMap::new(),
+        session_table: BTreeMap::new(),
     }),
 };
 
@@ -141,84 +324,245 @@ impl ProcessPublication {
     /// Cleans up expired task/process-group/session entries.
     pub(crate) fn cleanup(&self) {
         let mut tables = self.tables.write();
-        tables.task_table.cleanup();
-        tables.process_group_table.cleanup();
-        tables.session_table.cleanup();
+        tables.task_table.retain(|_, slot| {
+            !slot.can_cleanup()
+                && slot
+                    .snapshot()
+                    .is_none_or(|weak_task| weak_task.upgrade().is_some())
+        });
+        tables.process_table.retain(|_, slot| !slot.can_cleanup());
+        tables.process_group_table.retain(|_, slot| {
+            !slot.can_cleanup()
+                && slot
+                    .snapshot()
+                    .is_none_or(|weak_group| weak_group.upgrade().is_some())
+        });
+        tables.session_table.retain(|_, slot| {
+            !slot.can_cleanup()
+                && slot
+                    .snapshot()
+                    .is_none_or(|weak_session| weak_session.upgrade().is_some())
+        });
     }
 
-    fn refresh_process_identity_locked(
+    fn reserve_process_identity_locked(
         tables: &mut PublicationTables,
         proc: &Arc<Process>,
-        insert_process: bool,
-    ) {
+    ) -> (ProcessIdentitySlots, ProcessIdentityEffect) {
         let pid = proc.pid();
-        if insert_process {
-            tables
-                .process_table
-                .entry(pid)
-                .or_insert_with(|| proc.clone());
+        let process_slot = tables
+            .process_table
+            .entry(pid)
+            .or_insert_with(|| Arc::new(PublicationSlot::new()))
+            .clone();
+
+        let pg = proc.group();
+        let group_slot = tables
+            .process_group_table
+            .entry(pg.pgid())
+            .or_insert_with(|| Arc::new(PublicationSlot::new()))
+            .clone();
+
+        let session = pg.session();
+        let session_slot = tables
+            .session_table
+            .entry(session.sid())
+            .or_insert_with(|| Arc::new(PublicationSlot::new()))
+            .clone();
+
+        let process_effect = ProcessIdentityEffect::reserve_if_unpublished(&process_slot);
+        let _group_reservation = group_slot.reserve_identity_if_unpublished();
+        let _session_reservation = session_slot.reserve_identity_if_unpublished();
+        (
+            ProcessIdentitySlots {
+                process: process_slot,
+                group: group_slot,
+                session: session_slot,
+            },
+            process_effect,
+        )
+    }
+
+    fn publish_process_identity_slots(
+        domain: &process_domain::ProcessDomainWriteGuard<'_>,
+        proc: &Arc<Process>,
+        slots: &ProcessIdentitySlots,
+        process_effect: ProcessIdentityEffect,
+    ) {
+        if process_effect.inserted() {
+            slots.process.publish(proc.clone());
+            proc.install_pid_publication_slot_locked(domain, &slots.process);
         }
 
         let pg = proc.group();
-        tables.process_group_table.insert(pg.pgid(), &pg);
+        proc.publish_group_membership_locked(domain);
+        slots.group.publish(Arc::downgrade(&pg));
 
         let session = pg.session();
-        tables.session_table.insert(session.sid(), &session);
+        slots.session.publish(Arc::downgrade(&session));
+    }
+
+    fn reserve_job_control_identity_locked(
+        tables: &mut PublicationTables,
+        proc: &Arc<Process>,
+        group: &Arc<ProcessGroup>,
+    ) -> JobControlIdentitySlots {
+        let member = group.reserve_process_slot(proc.pid());
+        let group_slot = tables
+            .process_group_table
+            .entry(group.pgid())
+            .or_insert_with(|| Arc::new(PublicationSlot::new()))
+            .clone();
+        let session = group.session();
+        let session_slot = tables
+            .session_table
+            .entry(session.sid())
+            .or_insert_with(|| Arc::new(PublicationSlot::new()))
+            .clone();
+
+        JobControlIdentitySlots {
+            member,
+            group: PublicationSlotEffect::reserve_if_unpublished(group_slot),
+            session: PublicationSlotEffect::reserve_if_unpublished(session_slot),
+        }
+    }
+
+    /// Moves a process to `group` and publishes the corresponding group/session
+    /// identities as one process-domain transaction.
+    pub(crate) fn move_process_to_group(
+        &self,
+        proc: &Arc<Process>,
+        group: &Arc<ProcessGroup>,
+        allow_new_session: bool,
+    ) -> bool {
+        let mut tables = self.tables.write();
+        let slots = Self::reserve_job_control_identity_locked(&mut tables, proc, group);
+        let domain = process_domain::write_lock();
+        let current_group = proc.group();
+        if Arc::ptr_eq(&current_group, group) {
+            slots.group.publish(Arc::downgrade(group));
+            slots.session.publish(Arc::downgrade(&group.session()));
+            return true;
+        }
+        if !allow_new_session && !Arc::ptr_eq(&current_group.session(), &group.session()) {
+            slots.member.retire();
+            slots.group.retire_reserved();
+            slots.session.retire_reserved();
+            return false;
+        }
+
+        proc.install_group_membership_locked(&domain, group, slots.member);
+        slots.group.publish(Arc::downgrade(group));
+        slots.session.publish(Arc::downgrade(&group.session()));
+        true
     }
 
     /// Publishes a process identity together with its current group and session.
     #[cfg(unittest)]
     pub(crate) fn publish_process_identity(&self, proc: &Arc<Process>) {
         let mut tables = self.tables.write();
-        Self::refresh_process_identity_locked(&mut tables, proc, true);
+        let (slots, process_effect) = Self::reserve_process_identity_locked(&mut tables, proc);
+        let domain = process_domain::write_lock();
+        Self::publish_process_identity_slots(&domain, proc, &slots, process_effect);
     }
 
-    /// Refreshes process-group/session visibility for an already published process.
-    pub(crate) fn refresh_job_control_identity(&self, proc: &Arc<Process>) {
-        let mut tables = self.tables.write();
-        Self::refresh_process_identity_locked(&mut tables, proc, false);
+    /// Publishes a process after forcing cleanup between reserve and commit.
+    #[cfg(unittest)]
+    pub(crate) fn publish_process_identity_after_cleanup_for_test(&self, proc: &Arc<Process>) {
+        let (slots, process_effect) = {
+            let mut tables = self.tables.write();
+            Self::reserve_process_identity_locked(&mut tables, proc)
+        };
+        self.cleanup();
+        let domain = process_domain::write_lock();
+        Self::publish_process_identity_slots(&domain, proc, &slots, process_effect);
     }
 
     /// Publishes a task and its related process/group/session identities.
     pub(crate) fn publish_task(&self, task: &KtaskRef) -> PublicationRollback {
         let thread = task.as_thread();
         let proc = thread.process();
-        let pid = proc.pid();
-        let tid = thread.tid();
         let mut tables = self.tables.write();
-        let insert_process = !tables.process_table.contains_key(&pid);
-        proc.add_thread_task(task);
-        Self::refresh_process_identity_locked(&mut tables, proc, insert_process);
-        tables.task_table.insert(tid, task);
+        let task_slot = tables
+            .task_table
+            .entry(thread.tid())
+            .or_insert_with(|| Arc::new(PublicationSlot::new()))
+            .clone();
+        let member_slot = proc.reserve_thread_member_slot(thread.tid());
+        let (slots, process_effect) = Self::reserve_process_identity_locked(&mut tables, proc);
+        let thread_binding = ThreadPublicationBinding::reserve(task_slot, member_slot);
+
+        let domain = process_domain::write_lock();
+        thread_binding.publish(&domain, proc, task);
+        Self::publish_process_identity_slots(&domain, proc, &slots, process_effect);
         PublicationRollback {
             process: proc.clone(),
-            pid,
-            tid,
-            insert_process,
+            thread_binding,
+            process_effect,
         }
     }
 
     fn rollback_task_publication(&self, rollback: PublicationRollback) {
-        let mut tables = self.tables.write();
-        tables.task_table.remove(&rollback.tid);
-        if rollback.insert_process && !rollback.process.is_zombie() {
-            tables.process_table.remove(&rollback.pid);
-        }
-        drop(tables);
-        rollback.process.remove_thread_task(rollback.tid);
-        if rollback.insert_process && !rollback.process.is_zombie() {
-            rollback.process.discard_unpublished();
+        {
+            let domain = process_domain::write_lock();
+            if rollback.process_effect.inserted() && !rollback.process.is_exited_locked(&domain) {
+                rollback.process.clear_published_identity_locked(&domain);
+            }
+            rollback.thread_binding.retire();
+            if rollback.process_effect.inserted() && !rollback.process.is_exited_locked(&domain) {
+                rollback.process.discard_unpublished_locked(&domain);
+            }
         }
     }
 
     /// Removes a reaped process identity from the PID directory.
     pub(crate) fn unpublish_process(&self, pid: Pid) {
-        self.tables.write().process_table.remove(&pid);
+        let slot = self.tables.read().process_table.get(&pid).cloned();
+        if let Some(slot) = slot {
+            let domain = process_domain::write_lock();
+            if let Some(process) = slot.snapshot() {
+                process.clear_published_identity_locked(&domain);
+            } else {
+                slot.retire();
+            }
+        }
+    }
+
+    /// Removes a reaped process identity only when the PID still names `proc`.
+    pub(crate) fn unpublish_process_if_matches(&self, proc: &Arc<Process>) -> bool {
+        let pid = proc.pid();
+        let slot = self.tables.read().process_table.get(&pid).cloned();
+        let Some(slot) = slot else {
+            return false;
+        };
+        let removed = {
+            let domain = process_domain::write_lock();
+            if slot
+                .snapshot()
+                .is_some_and(|published| Arc::ptr_eq(&published, proc))
+            {
+                proc.clear_published_identity_locked(&domain);
+                true
+            } else {
+                false
+            }
+        };
+        if !removed {
+            return false;
+        }
+
+        true
     }
 
     /// Lists all published tasks.
     pub(crate) fn tasks(&self) -> Vec<KtaskRef> {
-        self.tables.read().task_table.values().collect()
+        let slots: Vec<_> = self.tables.read().task_table.values().cloned().collect();
+        let _domain = process_domain::read_lock();
+        slots
+            .into_iter()
+            .filter_map(|slot| slot.snapshot())
+            .filter_map(|weak_task| weak_task.upgrade())
+            .collect()
     }
 
     /// Finds the task with the given TID.
@@ -226,23 +570,36 @@ impl ProcessPublication {
         if tid == 0 {
             return Ok(current().clone());
         }
-        self.tables
+        let slot = self
+            .tables
             .read()
             .task_table
             .get(&tid)
+            .cloned()
+            .ok_or(KError::NoSuchProcess)?;
+        let _domain = process_domain::read_lock();
+        slot.snapshot()
+            .and_then(|weak_task| weak_task.upgrade())
             .ok_or(KError::NoSuchProcess)
     }
 
     /// Lists all published process identities, including zombies that have not
     /// yet been reaped from the PID directory.
     pub(crate) fn published_processes(&self) -> Vec<Arc<Process>> {
-        self.tables.read().process_table.values().cloned().collect()
+        let slots: Vec<_> = self.tables.read().process_table.values().cloned().collect();
+        let _domain = process_domain::read_lock();
+        slots
+            .into_iter()
+            .filter_map(|slot| slot.snapshot())
+            .collect()
     }
 
     /// Returns the number of published process identities currently visible in
     /// the PID directory.
     pub(crate) fn published_process_count(&self) -> usize {
-        self.tables.read().process_table.len()
+        let slots: Vec<_> = self.tables.read().process_table.values().cloned().collect();
+        let _domain = process_domain::read_lock();
+        slots.into_iter().filter(|slot| slot.is_published()).count()
     }
 
     /// Finds the published process identity with the given PID.
@@ -250,22 +607,25 @@ impl ProcessPublication {
         if pid == 0 {
             return Ok(current_user_process());
         }
-        self.tables
+        let slot = self
+            .tables
             .read()
             .process_table
             .get(&pid)
             .cloned()
-            .ok_or(KError::NoSuchProcess)
+            .ok_or(KError::NoSuchProcess)?;
+        let _domain = process_domain::read_lock();
+        slot.snapshot().ok_or(KError::NoSuchProcess)
     }
 
     /// Finds the published process identity with the given PID and ensures it
-    /// still represents a non-zombie process.
+    /// still represents a non-exited process.
     ///
     /// "Live" is an external observation contract, not a statement about
     /// whether an internal runtime attachment can still be upgraded.
     pub(crate) fn live_process(&self, pid: Pid) -> KResult<Arc<Process>> {
         let process = self.published_process(pid)?;
-        if !process.is_zombie() {
+        if !process.is_exited() {
             Ok(process)
         } else {
             Err(KError::NoSuchProcess)
@@ -276,16 +636,22 @@ impl ProcessPublication {
     pub(crate) fn live_processes(&self) -> Vec<Arc<Process>> {
         self.published_processes()
             .into_iter()
-            .filter(|process| !process.is_zombie())
+            .filter(|process| !process.is_exited())
             .collect()
     }
 
     /// Finds the process group with the given PGID.
     pub(crate) fn process_group(&self, pgid: Pid) -> KResult<Arc<ProcessGroup>> {
-        self.tables
+        let slot = self
+            .tables
             .read()
             .process_group_table
             .get(&pgid)
+            .cloned()
+            .ok_or(KError::NoSuchProcess)?;
+        let _domain = process_domain::read_lock();
+        slot.snapshot()
+            .and_then(|weak_group| weak_group.upgrade())
             .ok_or(KError::NoSuchProcess)
     }
 }

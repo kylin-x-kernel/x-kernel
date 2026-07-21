@@ -13,6 +13,6 @@ description = "x-kernel scheduler algorithms in a unified interface"
 default = []
 
 [dependencies]
-linked_list_r4l = "0.3"
+linked_list_r4l.workspace = true
 log = "0.4"
 unittest = { workspace = true }

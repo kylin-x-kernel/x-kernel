@@ -88,12 +88,14 @@ extern crate alloc;
 
 mod guard;
 mod lock;
+mod rwlock;
 mod tests;
 
 pub use guard::{BaseGuard, IrqSave, KernelGuardIf, NoOp, NoPreempt, NoPreemptIrqSave};
 #[cfg(feature = "stats")]
 pub use klockstat::{LOCK_CLASSES, LockClassStats, linkme, static_lock};
 pub use lock::{SpinLock, SpinLockGuard};
+pub use rwlock::{SpinRwLock, SpinRwLockReadGuard, SpinRwLockWriteGuard};
 
 /// Raw spinlock with no guards.
 ///
@@ -121,3 +123,15 @@ pub type SpinNoIrq<T> = SpinLock<NoPreemptIrqSave, T>;
 
 /// Guard for [`SpinNoIrq`].
 pub type SpinNoIrqGuard<'a, T> = SpinLockGuard<'a, NoPreemptIrqSave, T>;
+
+/// Reader-writer spinlock that disables IRQs and preemption.
+///
+/// Suitable for short process-tree or IRQ-visible critical sections that allow
+/// concurrent readers but cannot sleep.
+pub type SpinRwNoIrq<T> = SpinRwLock<NoPreemptIrqSave, T>;
+
+/// Read guard for [`SpinRwNoIrq`].
+pub type SpinRwNoIrqReadGuard<'a, T> = SpinRwLockReadGuard<'a, NoPreemptIrqSave, T>;
+
+/// Write guard for [`SpinRwNoIrq`].
+pub type SpinRwNoIrqWriteGuard<'a, T> = SpinRwLockWriteGuard<'a, NoPreemptIrqSave, T>;

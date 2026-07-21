@@ -487,76 +487,79 @@ pub fn sys_mmap(
     let (hint, mut length, page_size) = request.resolved_range()?;
 
     let aspace_ref = process.address_space()?;
-    let mut aspace = aspace_ref.lock();
-    let start = aspace.mmap_resolve_addr(
-        hint,
-        length,
-        page_size as usize,
-        request.flags.addr_policy(),
-    )?;
+    aspace_ref.with_mapping_owner(|mut mapping| {
+        let start = mapping.aspace_mut().mmap_resolve_addr(
+            hint,
+            length,
+            page_size as usize,
+            request.flags.addr_policy(),
+        )?;
 
-    debug!(
-        "sys_mmap <= addr: {addr:#x?}, length: {length:#x?}, permissions: {:?}, flags: {:?}, fd: \
-         {:?}, offset: {:?}",
-        request.permissions, request.flags, request.fd, request.offset
-    );
+        debug!(
+            "sys_mmap <= addr: {addr:#x?}, length: {length:#x?}, permissions: {:?}, flags: {:?}, \
+             fd: {:?}, offset: {:?}",
+            request.permissions, request.flags, request.fd, request.offset
+        );
 
-    let file_vma = match file.as_ref() {
-        None => {
-            // Anonymous mapping
-            None
-        }
-        Some(file) => {
-            validate_file_mapping_access(file, request.map_type, request.permissions.current)?;
-            let max_flags = if request.map_type.is_shared() {
-                shared_file_max_permissions(file)
-            } else {
-                request.permissions.maximum
+        let file_vma = match file.as_ref() {
+            None => {
+                // Anonymous mapping
+                None
+            }
+            Some(file) => {
+                validate_file_mapping_access(file, request.map_type, request.permissions.current)?;
+                let max_flags = if request.map_type.is_shared() {
+                    shared_file_max_permissions(file)
+                } else {
+                    request.permissions.maximum
+                };
+                let invalidate = mapping.invalidate_handle();
+                let req = FileMmapRequest {
+                    start,
+                    length,
+                    offset: request.offset,
+                    page_size,
+                    flags: request.permissions.current,
+                    max_flags,
+                    file: file.clone(),
+                    mm_id: mapping.aspace().mm_id(),
+                    observer: mapping.observer(),
+                    invalidate,
+                };
+                let (vma, runtime) = if request.map_type.is_shared() {
+                    mmap_shared_file(req)?
+                } else {
+                    mmap_private_file(FileMmapRequest {
+                        invalidate: req.invalidate.clone(),
+                        ..req
+                    })?
+                };
+                length = vma.size();
+                Some((vma, runtime))
+            }
+        };
+
+        if let Some((vma, runtime)) = file_vma {
+            mapping
+                .aspace_mut()
+                .map_runtime_vma(vma, request.flags.is_populate(), runtime)?;
+        } else {
+            let runtime = match request.map_type {
+                MapType::Shared => VmRuntimeRef::new_anon_shared(start, length, page_size)?,
+                MapType::Private => VmRuntimeRef::new_anon_private(start, page_size),
             };
-            let invalidate = aspace.invalidate_handle(&aspace_ref);
-            let req = FileMmapRequest {
+            mapping.aspace_mut().map_with_max_flags(
                 start,
                 length,
-                offset: request.offset,
-                page_size,
-                flags: request.permissions.current,
-                max_flags,
-                file: file.clone(),
-                mm_id: aspace.mm_id(),
-                aspace: aspace_ref.clone(),
-                invalidate,
-            };
-            let (vma, runtime) = if request.map_type.is_shared() {
-                mmap_shared_file(req)?
-            } else {
-                mmap_private_file(FileMmapRequest {
-                    invalidate: req.invalidate.clone(),
-                    ..req
-                })?
-            };
-            length = vma.size();
-            Some((vma, runtime))
+                request.permissions.current,
+                request.permissions.maximum,
+                request.flags.is_populate(),
+                runtime,
+            )?;
         }
-    };
 
-    if let Some((vma, runtime)) = file_vma {
-        aspace.map_runtime_vma(vma, request.flags.is_populate(), runtime)?;
-    } else {
-        let runtime = match request.map_type {
-            MapType::Shared => VmRuntimeRef::new_anon_shared(start, length, page_size)?,
-            MapType::Private => VmRuntimeRef::new_anon_private(start, page_size),
-        };
-        aspace.map_with_max_flags(
-            start,
-            length,
-            request.permissions.current,
-            request.permissions.maximum,
-            request.flags.is_populate(),
-            runtime,
-        )?;
-    }
-
-    Ok(start.as_usize() as _)
+        Ok(start.as_usize() as _)
+    })
 }
 
 pub fn sys_munmap(addr: usize, length: usize) -> KResult<isize> {
@@ -639,112 +642,118 @@ pub fn sys_mremap(
 
     let process = current_user_process();
     let aspace_ref = process.address_space()?;
-    let mut aspace = aspace_ref.lock();
+    aspace_ref.with_mapping_owner(|mut mapping| {
+        let source = mapping.aspace_mut().resolve_mremap_source(addr, old_size)?;
+        let vma_end = source.end();
+        let mapping_flags = source.flags();
+        let max_flags = source.max_flags();
+        let page_size = source.page_size();
 
-    let source = aspace.resolve_mremap_source(addr, old_size)?;
-    let vma_end = source.end();
-    let mapping_flags = source.flags();
-    let max_flags = source.max_flags();
-    let page_size = source.page_size();
+        // --- 3. Dispatch ---
 
-    // --- 3. Dispatch ---
-
-    // FIXED path: move to new_addr (handles both shrink and grow)
-    if mremap_flags.is_fixed() {
-        // If shrinking, trim source first
-        if new_size < old_size {
-            aspace.unmap(addr + new_size, old_size - new_size)?;
+        // FIXED path: move to new_addr (handles both shrink and grow)
+        if mremap_flags.is_fixed() {
+            // If shrinking, trim source first
+            if new_size < old_size {
+                mapping
+                    .aspace_mut()
+                    .unmap(addr + new_size, old_size - new_size)?;
+            }
+            let move_size = old_size.min(new_size);
+            // Unmap target region
+            mapping
+                .aspace_mut()
+                .unmap(VirtAddr::from(new_addr), new_size)?;
+            let target_addr = VirtAddr::from(new_addr);
+            mapping.map_relocated_snapshot(&source, target_addr, new_size, mapping_flags)?;
+            mapping
+                .aspace_mut()
+                .move_pages(addr, target_addr, move_size, page_size)?;
+            mapping
+                .aspace_mut()
+                .drop_mapping_metadata(addr, move_size)?;
+            if mremap_flags.keeps_source_mapping() {
+                let fresh_runtime = VmRuntimeRef::new_anon_private(addr, page_size);
+                mapping.aspace_mut().map_with_max_flags(
+                    addr,
+                    move_size,
+                    mapping_flags,
+                    max_flags,
+                    false,
+                    fresh_runtime,
+                )?;
+            }
+            return Ok(target_addr.as_usize() as _);
         }
-        let move_size = old_size.min(new_size);
-        // Unmap target region
-        aspace.unmap(VirtAddr::from(new_addr), new_size)?;
-        let target_addr = VirtAddr::from(new_addr);
-        aspace.map_relocated_snapshot(
-            &source,
-            target_addr,
-            new_size,
-            mapping_flags,
-            &aspace_ref,
-        )?;
-        aspace.move_pages(addr, target_addr, move_size, page_size)?;
-        aspace.drop_mapping_metadata(addr, move_size)?;
+
+        // DONTUNMAP path: move, leave old as fresh anonymous
         if mremap_flags.keeps_source_mapping() {
+            let target_addr = mapping
+                .aspace_mut()
+                .find_relocation_target(addr, new_size, page_size)?;
+
+            mapping.map_relocated_snapshot(&source, target_addr, new_size, mapping_flags)?;
+            mapping
+                .aspace_mut()
+                .move_pages(addr, target_addr, old_size, page_size)?;
+            // Old mapping: retire the moved source role, then install a fresh
+            // anonymous mapping at the original address.
+            mapping.aspace_mut().drop_mapping_metadata(addr, old_size)?;
             let fresh_runtime = VmRuntimeRef::new_anon_private(addr, page_size);
-            aspace.map_with_max_flags(
+            mapping.aspace_mut().map_with_max_flags(
                 addr,
-                move_size,
+                old_size,
                 mapping_flags,
                 max_flags,
                 false,
                 fresh_runtime,
             )?;
+            return Ok(target_addr.as_usize() as _);
         }
-        return Ok(target_addr.as_usize() as _);
-    }
 
-    // DONTUNMAP path: move, leave old as fresh anonymous
-    if mremap_flags.keeps_source_mapping() {
-        let target_addr = aspace.find_relocation_target(addr, new_size, page_size)?;
-
-        aspace.map_relocated_snapshot(
-            &source,
-            target_addr,
-            new_size,
-            mapping_flags,
-            &aspace_ref,
-        )?;
-        aspace.move_pages(addr, target_addr, old_size, page_size)?;
-        // Old mapping: retire the moved source role, then install a fresh
-        // anonymous mapping at the original address.
-        aspace.drop_mapping_metadata(addr, old_size)?;
-        let fresh_runtime = VmRuntimeRef::new_anon_private(addr, page_size);
-        aspace.map_with_max_flags(
-            addr,
-            old_size,
-            mapping_flags,
-            max_flags,
-            false,
-            fresh_runtime,
-        )?;
-        return Ok(target_addr.as_usize() as _);
-    }
-
-    // No-op: same size, no FIXED, no DONTUNMAP
-    if new_size == old_size {
-        return Ok(addr.as_usize() as _);
-    }
-
-    // Shrink (no FIXED, no DONTUNMAP)
-    if new_size < old_size {
-        aspace.unmap(addr + new_size, old_size - new_size)?;
-        return Ok(addr.as_usize() as _);
-    }
-
-    // --- 4. Grow (new_size > old_size, no FIXED, no DONTUNMAP) ---
-
-    // Can only grow in place if old_size covers the entire VMA
-    let can_grow_in_place = addr.as_usize() + old_size == vma_end.as_usize();
-
-    if can_grow_in_place {
-        match aspace.extend_area(addr, new_size - old_size) {
-            Ok(()) => return Ok(addr.as_usize() as _),
-            Err(e) => debug!("in-place grow failed ({e:?}), falling back to move"),
+        // No-op: same size, no FIXED, no DONTUNMAP
+        if new_size == old_size {
+            return Ok(addr.as_usize() as _);
         }
-    }
 
-    // In-place grow failed or not possible — fall back to move if MAYMOVE
-    if !mremap_flags.may_move() {
-        return Err(KError::NoMemory);
-    }
+        // Shrink (no FIXED, no DONTUNMAP)
+        if new_size < old_size {
+            mapping
+                .aspace_mut()
+                .unmap(addr + new_size, old_size - new_size)?;
+            return Ok(addr.as_usize() as _);
+        }
 
-    let target_addr = aspace.find_relocation_target(addr, new_size, page_size)?;
+        // --- 4. Grow (new_size > old_size, no FIXED, no DONTUNMAP) ---
 
-    let move_size = old_size.min(new_size);
-    aspace.map_relocated_snapshot(&source, target_addr, new_size, mapping_flags, &aspace_ref)?;
-    aspace.move_pages(addr, target_addr, move_size, page_size)?;
-    aspace.drop_mapping_metadata(addr, old_size)?;
+        // Can only grow in place if old_size covers the entire VMA
+        let can_grow_in_place = addr.as_usize() + old_size == vma_end.as_usize();
 
-    Ok(target_addr.as_usize() as _)
+        if can_grow_in_place {
+            match mapping.aspace_mut().extend_area(addr, new_size - old_size) {
+                Ok(()) => return Ok(addr.as_usize() as _),
+                Err(e) => debug!("in-place grow failed ({e:?}), falling back to move"),
+            }
+        }
+
+        // In-place grow failed or not possible — fall back to move if MAYMOVE
+        if !mremap_flags.may_move() {
+            return Err(KError::NoMemory);
+        }
+
+        let target_addr = mapping
+            .aspace_mut()
+            .find_relocation_target(addr, new_size, page_size)?;
+
+        let move_size = old_size.min(new_size);
+        mapping.map_relocated_snapshot(&source, target_addr, new_size, mapping_flags)?;
+        mapping
+            .aspace_mut()
+            .move_pages(addr, target_addr, move_size, page_size)?;
+        mapping.aspace_mut().drop_mapping_metadata(addr, old_size)?;
+
+        Ok(target_addr.as_usize() as _)
+    })
 }
 
 pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> KResult<isize> {

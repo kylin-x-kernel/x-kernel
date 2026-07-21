@@ -17,6 +17,7 @@ pub mod backend;
 mod cpu_residency;
 mod fault;
 mod iomap;
+mod lifetime;
 mod vma;
 
 use kaddr_layout::{KERNEL_ASPACE_BASE, KERNEL_ASPACE_SIZE};
@@ -40,11 +41,18 @@ pub use self::{
         DeviceRegion, DeviceRegionIter, IoMapError, device_regions, iomap_device, iounmap,
         register_device_region, register_fixed_device_region,
     },
+    lifetime::MmObserver,
     vma::{
         FileMappingInfo, ForkCloneTarget, MsyncPolicy, MsyncRuntimeResult, VmArea, VmAreaSet,
         VmBackingInfo, VmBackingKind, VmInheritance, VmMayPerm, VmPerm, VmRuntimeOps, VmRuntimeRef,
     },
 };
+
+/// Process-runtime-only address-space lifetime protocol.
+#[doc(hidden)]
+pub mod process_lifetime {
+    pub use crate::lifetime::{MmPin, MmUserHandle};
+}
 
 static KERNEL_ASPACE: LazyInit<SpinNoIrq<MmSpace>> = LazyInit::new();
 

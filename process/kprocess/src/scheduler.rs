@@ -55,12 +55,12 @@ pub fn representative_task(process: &Process) -> KResult<KtaskRef> {
     lookup::representative_task_for_process(process)
 }
 
-/// Resolves the non-zombie process targeted by scheduler process-level operations.
+/// Resolves the non-exited process targeted by scheduler process-level operations.
 pub fn target_process(pid: Pid) -> KResult<Arc<Process>> {
     lookup::live_process(pid)
 }
 
-/// Lists non-zombie processes that participate in scheduler-wide scans.
+/// Lists non-exited processes that participate in scheduler-wide scans.
 pub fn processes() -> alloc::vec::Vec<Arc<Process>> {
     lookup::live_processes()
 }

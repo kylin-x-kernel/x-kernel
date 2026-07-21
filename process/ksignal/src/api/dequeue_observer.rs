@@ -28,6 +28,10 @@ static OBSERVERS: SpinNoIrq<[Option<ObserverFn>; MAX_SIGNALS]> =
 ///
 /// Only one observer per signal is supported; a second registration
 /// overwrites the previous one.
+///
+/// The observer runs synchronously in the context that dequeues the signal.
+/// Callbacks must therefore only rely on execution-context properties that are
+/// guaranteed by every dequeue path that can deliver `signo`.
 pub fn register_signal_observer(signo: Signo, observer: ObserverFn) {
     let idx = signo as usize;
     assert!((1..=MAX_SIGNALS).contains(&idx));

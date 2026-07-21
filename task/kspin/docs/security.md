@@ -225,6 +225,9 @@ pub unsafe fn force_unlock(&self)
 |------|-----------|-----------|
 | `SpinLock<G, T>` | unsafe impl when `T: Send` | unsafe impl when `T: Send`，依赖 guard + atomic 协议 |
 | `SpinLockGuard<'_, G, T>` | 不显式实现；由字段决定 | guard 持有裸指针，不应跨线程共享访问 |
+| `SpinRwLock<G, T>` | unsafe impl when `T: Send` | unsafe impl when `T: Send + Sync`，读 guard 可并发暴露 `&T` |
+| `SpinRwLockReadGuard<'_, G, T>` | 不显式实现；由字段决定 | 通过 lock 的 reader 协议共享访问 |
+| `SpinRwLockWriteGuard<'_, G, T>` | 不显式实现；由字段决定 | 写 guard 持有独占访问，不应跨线程共享可变访问 |
 | `NoOp` | zero-sized | zero-sized |
 | `IrqSave` | 保存 IRQ flags | 只应在当前 CPU 上 acquire/release |
 | `NoPreempt` | zero-sized | 依赖 `KernelGuardIf` |
@@ -244,6 +247,9 @@ pub unsafe fn force_unlock(&self)
 | T-08 | Debug 输出在持锁时递归尝试 lock | 低 | 对已锁对象格式化 | `Debug` 使用 `try_lock`，失败输出 `<locked>` |
 | T-09 | 长临界区导致 CPU 自旋占用 | 中 | 持锁执行阻塞、I/O 或复杂循环 | 文档限定自旋锁用于短临界区；调用方审计热点 |
 | T-10 | 未启用 `preempt` feature 却依赖 `NoPreempt` | 中 | 配置错误 | feature 表说明；平台 defconfig 需匹配调度模型 |
+| T-11 | `SpinRwLock` read-to-write upgrade 自锁 | 中 | 持有 read guard 时尝试获取 write guard | 文档明确不支持 upgrade；调用方必须释放 read guard 后进入写事务 |
+| T-12 | `SpinRwLock` reader count 溢出 | 中 | 极端递归或泄漏 read guard 后继续获取 read lock | reader count 达上限时 panic，避免覆盖 writer bit |
+| T-13 | `SpinRwLock` writer 饥饿 | 中 | 持续新 reader 在 writer 等待期间进入 | 当前实现是 reader-preferred 简单 spin rwlock，只用于短临界区；需要公平性时另行设计 queued rwlock |
 
 影响等级定义：
 

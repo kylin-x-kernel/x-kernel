@@ -7,7 +7,7 @@ use core::{ops::Deref, sync::atomic::Ordering, task::Context};
 
 use kerrno::{KError, KResult, LinuxError};
 use kpoll::{IoEvents, Pollable};
-use kprocess::Process;
+use kprocess::{ControllingTerminal, Process, SetTerminalResult};
 use ksync::Mutex;
 use kvfs::{DeviceFileOps, NodeFlags, VfsFile, VfsFileBuilder, VfsInode};
 use osvm::{VirtMutPtr, VirtPtr};
@@ -31,6 +31,7 @@ fn current_tty_ops() -> KResult<Arc<dyn DeviceFileOps>> {
         .session()
         .terminal()
         .ok_or_else(|| KError::from(LinuxError::ENXIO))?;
+    let term = term.into_any();
 
     let term = match term.downcast::<NTtyDriver>() {
         Ok(term) => return Ok(term),
@@ -85,15 +86,30 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
     /// Bind this TTY to a process group as the controlling terminal
     pub fn bind_to(self: &Arc<Self>, proc: &Process) -> KResult<()> {
         let pg = proc.group();
-        if pg.session().sid() != proc.pid() {
+        let session = pg.session();
+        if session.sid() != proc.pid() {
             return Err(KError::OperationNotPermitted);
         }
-        assert!(pg.session().set_terminal_with(|| {
-            self.terminal.job_control.set_session(&pg.session());
-            self.clone()
-        }));
 
-        self.terminal.job_control.set_foreground(&pg)?;
+        let terminal: Arc<dyn ControllingTerminal> = self.clone();
+        let installed_job_session = self.terminal.job_control.ensure_session(&session)?;
+        match session.set_terminal(&terminal) {
+            SetTerminalResult::Installed | SetTerminalResult::AlreadySetToSame => {}
+            SetTerminalResult::Occupied => {
+                if installed_job_session {
+                    self.terminal.job_control.clear_session_if_matches(&session);
+                }
+                return Err(KError::ResourceBusy);
+            }
+        }
+
+        if let Err(err) = self.terminal.job_control.set_foreground(&pg) {
+            session.unset_terminal(&terminal);
+            if installed_job_session {
+                self.terminal.job_control.clear_session_if_matches(&session);
+            }
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -105,6 +121,12 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
     /// Set the pseudo-terminal slave number.
     pub fn set_pty_number(&self, n: u32) {
         self.terminal.pty_number.store(n, Ordering::Release);
+    }
+}
+
+impl<R: TtyRead, W: TtyWrite> ControllingTerminal for Tty<R, W> {
+    fn into_any(self: Arc<Self>) -> Arc<dyn core::any::Any + Send + Sync> {
+        self
     }
 }
 
@@ -184,11 +206,10 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
             TIOCNOTTY => {
                 let tty = self.this.upgrade().ok_or(KError::NoSuchDevice)?;
                 let current_process = kprocess::current_user_thread().process().clone();
-                if current_process
-                    .group()
-                    .session()
-                    .unset_terminal(&(tty as _))
-                {
+                let session = current_process.group().session();
+                let terminal: Arc<dyn ControllingTerminal> = tty.clone();
+                if session.unset_terminal(&terminal) {
+                    tty.terminal.job_control.clear_session_if_matches(&session);
                     // TODO: If the process was session leader, send SIGHUP and
                     // SIGCONT to the foreground process group and all processes
                     // in the current session lose their controlling terminal.

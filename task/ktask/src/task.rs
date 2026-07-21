@@ -668,7 +668,7 @@ impl TaskInner {
     }
 
     #[cfg(feature = "preempt")]
-    fn current_check_preempt_pending() {
+    pub(crate) fn current_check_preempt_pending() {
         use kspin::NoPreemptIrqSave;
         let curr = crate::current();
         let need_resched = curr.need_resched.load(Ordering::Acquire);

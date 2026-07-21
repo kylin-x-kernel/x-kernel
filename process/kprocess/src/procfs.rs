@@ -15,7 +15,7 @@ fn has_representative_task(process: &Arc<Process>) -> bool {
 
 /// Returns the process identities that should appear in `/proc`.
 pub fn visible_processes() -> alloc::vec::Vec<Arc<Process>> {
-    lookup::visible_processes()
+    lookup::published_processes()
         .into_iter()
         .filter(has_representative_task)
         .collect()

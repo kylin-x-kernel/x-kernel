@@ -6,9 +6,9 @@ use ktask::KtaskRef;
 
 use crate::lookup;
 
-/// Returns the number of visible process identities.
+/// Returns the number of published process identities.
 pub fn process_count() -> usize {
-    lookup::visible_process_count()
+    lookup::published_process_count()
 }
 
 /// Cleans up expired task/process-group/session lookup entries.

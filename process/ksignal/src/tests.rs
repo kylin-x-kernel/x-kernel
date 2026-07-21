@@ -13,8 +13,9 @@ use kspin::SpinNoIrq;
 use unittest::{assert, assert_eq, def_test};
 
 use crate::{
-    DefaultSignalAction, PendingSignals, SignalAction, SignalActionFlags, SignalDequeueAction,
-    SignalDisposition, SignalInfo, SignalSet, SignalStack, Signo,
+    ChildExitInfo, ChildExitSignalInfo, DefaultSignalAction, PendingSignals, SignalAction,
+    SignalActionFlags, SignalDequeueAction, SignalDisposition, SignalInfo, SignalSet, SignalStack,
+    Signo,
     api::{ProcessSignalManager, SignalActions, ThreadSignalManager},
 };
 
@@ -31,6 +32,42 @@ fn record_dequeued_signal(sig: &SignalInfo) -> SignalDequeueAction {
     LAST_DEQUEUED_SIGNAL.store(sig.signo() as usize, Ordering::Relaxed);
     DEQUEUED_SIGNAL_COUNT.fetch_add(1, Ordering::Relaxed);
     SignalDequeueAction::Deliver
+}
+
+#[def_test]
+fn test_child_exit_info_decodes_wait_status() {
+    let exited = ChildExitInfo::from_wait_status(42, 1000, 7 << 8, 11, 13);
+    assert_eq!(exited.code(), linux_raw_sys::general::CLD_EXITED as i32);
+    assert_eq!(exited.status(), 7);
+
+    let killed = ChildExitInfo::from_wait_status(42, 1000, Signo::SIGTERM as i32, 11, 13);
+    assert_eq!(killed.code(), linux_raw_sys::general::CLD_KILLED as i32);
+    assert_eq!(killed.status(), Signo::SIGTERM as i32);
+
+    let dumped = ChildExitInfo::from_wait_status(42, 1000, Signo::SIGSEGV as i32 | 0x80, 11, 13);
+    assert_eq!(dumped.code(), linux_raw_sys::general::CLD_DUMPED as i32);
+    assert_eq!(dumped.status(), Signo::SIGSEGV as i32);
+}
+
+#[def_test]
+fn test_signal_info_child_exit_payload() {
+    let child = ChildExitInfo::from_wait_status(42, 1000, 7 << 8, 11, 13);
+    let sigchld = ChildExitSignalInfo::new_sigchld(child);
+    let info = sigchld.as_child_exit_signal().as_signal_info();
+    let payload = info.child_exit().expect("SIGCHLD must carry child payload");
+
+    assert_eq!(info.signo(), Signo::SIGCHLD);
+    assert_eq!(info.code(), linux_raw_sys::general::CLD_EXITED as i32);
+    assert_eq!(payload.pid(), 42);
+    assert_eq!(payload.uid(), 1000);
+    assert_eq!(payload.status(), 7);
+    assert_eq!(payload.utime_ticks(), 11);
+    assert_eq!(payload.stime_ticks(), 13);
+}
+
+fn new_sigchld_child_exit_signal() -> crate::SigchldChildExitSignalInfo {
+    let child = ChildExitInfo::from_wait_status(42, 1000, 7 << 8, 11, 13);
+    ChildExitSignalInfo::new_sigchld(child)
 }
 
 fn drop_dequeued_signal(sig: &SignalInfo) -> SignalDequeueAction {
@@ -450,8 +487,13 @@ fn test_thread_signal_manager_send_signal_ignored_and_blocked_paths() {
     assert!(!thread.pending().has(Signo::SIGUSR1));
 
     let mut set = SignalSet::default();
+    set.add(Signo::SIGUSR1);
     set.add(Signo::SIGTERM);
     thread.set_blocked(set);
+
+    assert!(!thread.send_signal(SignalInfo::new_kernel(Signo::SIGUSR1)));
+    assert!(thread.pending().has(Signo::SIGUSR1));
+
     assert!(!thread.send_signal(SignalInfo::new_kernel(Signo::SIGTERM)));
     assert!(thread.pending().has(Signo::SIGTERM));
 }
@@ -482,9 +524,90 @@ fn test_process_signal_manager_pending_and_ignored_send() {
     );
     assert!(!proc.pending().has(Signo::SIGUSR2));
 
+    let mut set = SignalSet::default();
+    set.add(Signo::SIGCHLD);
+    set.add(Signo::SIGUSR2);
+    thread.set_blocked(set);
+
+    assert_eq!(
+        proc.send_signal(SignalInfo::new_kernel(Signo::SIGCHLD)),
+        None
+    );
+    assert!(proc.pending().has(Signo::SIGCHLD));
+
+    assert_eq!(
+        proc.send_signal(SignalInfo::new_kernel(Signo::SIGUSR2)),
+        None
+    );
+    assert!(proc.pending().has(Signo::SIGUSR2));
+
     assert_eq!(
         proc.send_signal(SignalInfo::new_kernel(Signo::SIGINT)),
         Some(1)
     );
     assert!(proc.pending().has(Signo::SIGINT));
+}
+
+#[def_test]
+fn test_process_signal_manager_child_exit_sigchld_uses_linux_default_semantics() {
+    let thread = new_thread_manager();
+    let proc = thread.process();
+
+    assert!(proc.signal_ignored(Signo::SIGCHLD));
+    let prepared = proc.prepare_child_exit_signal(new_sigchld_child_exit_signal());
+    assert!(!prepared.should_autoreap());
+    assert!(
+        !proc.pending().has(Signo::SIGCHLD),
+        "preparing child-exit delivery must not publish pending SIGCHLD"
+    );
+    assert_eq!(
+        proc.commit_child_exit_signal(prepared),
+        Some(1),
+        "commit must choose the currently unblocked target thread"
+    );
+    assert!(proc.pending().has(Signo::SIGCHLD));
+
+    let mut sigchld = SignalSet::default();
+    sigchld.add(Signo::SIGCHLD);
+    let _ = thread.dequeue_signal(&sigchld);
+
+    let (result, target_tid) = proc.send_child_exit_signal(new_sigchld_child_exit_signal());
+    assert_eq!(target_tid, Some(1));
+    assert!(!result.should_autoreap());
+    assert!(proc.pending().has(Signo::SIGCHLD));
+
+    let _ = thread.dequeue_signal(&sigchld);
+    proc.actions.lock()[Signo::SIGCHLD].disposition = SignalDisposition::Ignore;
+    let (result, target_tid) = proc.send_child_exit_signal(new_sigchld_child_exit_signal());
+    assert_eq!(target_tid, None);
+    assert!(result.should_autoreap());
+    assert!(!proc.pending().has(Signo::SIGCHLD));
+
+    proc.actions.lock()[Signo::SIGCHLD].disposition = SignalDisposition::Default;
+    proc.actions.lock()[Signo::SIGCHLD].flags |= SignalActionFlags::NOCLDWAIT;
+    let (result, target_tid) = proc.send_child_exit_signal(new_sigchld_child_exit_signal());
+    assert_eq!(target_tid, Some(1));
+    assert!(result.should_autoreap());
+    assert!(proc.pending().has(Signo::SIGCHLD));
+}
+
+#[def_test]
+fn test_child_exit_sigchld_commit_reselects_target_after_mask_change() {
+    let thread = new_thread_manager();
+    let proc = thread.process();
+    let prepared = proc.prepare_child_exit_signal(new_sigchld_child_exit_signal());
+
+    let mut blocked = SignalSet::default();
+    blocked.add(Signo::SIGCHLD);
+    thread.set_blocked(blocked);
+
+    assert_eq!(
+        proc.commit_child_exit_signal(prepared),
+        None,
+        "commit must not reuse a target selected before the signal mask changed"
+    );
+    assert!(
+        proc.pending().has(Signo::SIGCHLD),
+        "default SIGCHLD should still be queued even when currently blocked"
+    );
 }

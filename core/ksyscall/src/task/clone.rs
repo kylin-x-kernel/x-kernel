@@ -15,7 +15,10 @@ use bitflags::bitflags;
 use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::UserContext;
 use kns::NamespaceFlags;
-use kprocess::{Pid, PidFd, ProcessForkConfig, current_user_thread, publish_user_task};
+use kprocess::{
+    ForkAddressSpace, ForkFdTable, ForkFs, ForkParent, ForkSignalActions, Pid, PidFd,
+    ProcessForkConfig, current_user_thread, publish_user_task,
+};
 use ksignal::Signo;
 use ktask::current;
 use linux_raw_sys::general::*;
@@ -104,6 +107,7 @@ pub(crate) struct CloneRequest {
     child_tid: usize,
     tls: usize,
     pidfd: usize,
+    reject_exit_signal_with_shared_parent: bool,
 }
 
 impl CloneRequest {
@@ -117,6 +121,7 @@ impl CloneRequest {
             child_tid: 0,
             tls: 0,
             pidfd: 0,
+            reject_exit_signal_with_shared_parent: false,
         }
     }
 
@@ -166,6 +171,11 @@ impl CloneRequest {
         self
     }
 
+    pub fn reject_exit_signal_with_shared_parent(&mut self) -> &mut Self {
+        self.reject_exit_signal_with_shared_parent = true;
+        self
+    }
+
     /// Consume this request and execute the clone operation.
     pub fn do_clone(mut self, uctx: &UserContext) -> KResult<isize> {
         if self.flags.contains(CloneFlags::VFORK) {
@@ -185,9 +195,7 @@ impl CloneRequest {
             self.pidfd,
         );
 
-        if self.exit_signal != 0 && self.flags.contains(CloneFlags::THREAD | CloneFlags::PARENT) {
-            return Err(KError::InvalidInput);
-        }
+        self.validate_exit_signal_policy()?;
         if self.flags.contains(CloneFlags::THREAD)
             && !self.flags.contains(CloneFlags::VM | CloneFlags::SIGHAND)
         {
@@ -196,8 +204,6 @@ impl CloneRequest {
 
         // Namespace flag validation
         self.validate_namespace_flags()?;
-
-        let exit_signal = Signo::from_repr(self.exit_signal as u8);
 
         let mut new_uctx = *uctx;
         if self.stack != 0 {
@@ -219,12 +225,33 @@ impl CloneRequest {
         let prepared = if self.flags.contains(CloneFlags::THREAD) {
             current_thread.prepare_thread_clone()?
         } else {
+            let exit_signal = Self::parse_exit_signal(self.exit_signal)?;
             current_thread.prepare_process_fork(ProcessForkConfig {
-                share_parent: self.flags.contains(CloneFlags::PARENT),
-                share_vm: self.flags.contains(CloneFlags::VM),
-                share_fs: self.flags.contains(CloneFlags::FS),
-                share_sighand: self.flags.contains(CloneFlags::SIGHAND),
-                share_files: self.flags.contains(CloneFlags::FILES),
+                parent: if self.flags.contains(CloneFlags::PARENT) {
+                    ForkParent::CallerParent
+                } else {
+                    ForkParent::Caller
+                },
+                address_space: if self.flags.contains(CloneFlags::VM) {
+                    ForkAddressSpace::Shared
+                } else {
+                    ForkAddressSpace::Private
+                },
+                fs: if self.flags.contains(CloneFlags::FS) {
+                    ForkFs::Shared
+                } else {
+                    ForkFs::Private
+                },
+                signal_actions: if self.flags.contains(CloneFlags::SIGHAND) {
+                    ForkSignalActions::Shared
+                } else {
+                    ForkSignalActions::Private
+                },
+                fd_table: if self.flags.contains(CloneFlags::FILES) {
+                    ForkFdTable::Shared
+                } else {
+                    ForkFdTable::Private
+                },
                 namespace_flags: self.extract_namespace_flags(),
                 exit_signal,
             })?
@@ -276,6 +303,30 @@ impl CloneRequest {
         })?;
 
         Ok(tid as _)
+    }
+
+    fn parse_exit_signal(exit_signal: u64) -> KResult<Option<Signo>> {
+        if exit_signal == 0 {
+            return Ok(None);
+        }
+        if exit_signal > u8::MAX as u64 {
+            return Err(KError::InvalidInput);
+        }
+        Signo::from_repr(exit_signal as u8)
+            .ok_or(KError::InvalidInput)
+            .map(Some)
+    }
+
+    fn validate_exit_signal_policy(&self) -> KResult<()> {
+        if self.reject_exit_signal_with_shared_parent
+            && self.exit_signal != 0
+            && self
+                .flags
+                .intersects(CloneFlags::THREAD | CloneFlags::PARENT)
+        {
+            return Err(KError::InvalidInput);
+        }
+        Ok(())
     }
 
     /// Validates namespace-related flag combinations.
@@ -467,5 +518,26 @@ mod tests_clone {
         assert!(ns.contains(NamespaceFlags::NEWNS));
         assert!(ns.contains(NamespaceFlags::NEWUTS));
         assert!(ns.contains(NamespaceFlags::NEWTIME));
+    }
+
+    #[def_test]
+    fn test_parse_exit_signal_rejects_invalid_signal_number() {
+        assert!(CloneRequest::parse_exit_signal(0).unwrap().is_none());
+        assert_eq!(
+            CloneRequest::parse_exit_signal(SIGCHLD as u64).unwrap(),
+            Some(Signo::SIGCHLD)
+        );
+        assert!(CloneRequest::parse_exit_signal(65).is_err());
+        assert!(CloneRequest::parse_exit_signal(1 << 32).is_err());
+    }
+
+    #[def_test]
+    fn test_clone3_validation_rejects_exit_signal_with_shared_parent() {
+        let mut req = CloneRequest::new();
+        req.set_flags(CloneFlags::PARENT)
+            .set_exit_signal(SIGCHLD as u64)
+            .reject_exit_signal_with_shared_parent();
+
+        assert!(req.validate_exit_signal_policy().is_err());
     }
 }

@@ -41,27 +41,25 @@ pub(crate) fn poll_timer(pid: Pid) {
     let Ok(process) = lookup::live_process(pid) else {
         return;
     };
-    let Ok(timer_manager) = process.timer_manager() else {
+    let Ok(deliveries) = process.poll_wall_clock_timers() else {
         return;
     };
-
-    dispatch_timer_deliveries(pid, timer_manager.lock().poll_wall_clock());
+    dispatch_timer_deliveries(pid, deliveries);
 }
 
-/// Polls CPU-driven timers for the current thread's process.
+/// Polls CPU-driven timers for the current user thread's process.
+///
+/// This is part of the user-return path and requires a current user thread.
 pub fn poll_cpu_timers() {
     let thread = current_user_thread();
     let process = thread.process().clone();
-    let (process_utime_ns, process_stime_ns) = process.process_cpu_time_ns();
     let deliveries = process
-        .timer_manager()
-        .expect("current thread must still expose a process timer manager")
-        .lock()
-        .poll_cpu_timers(process_utime_ns, process_stime_ns);
+        .poll_cpu_timers()
+        .expect("current thread must still expose process timer state");
     dispatch_timer_deliveries(process.pid(), deliveries);
 }
 
-fn on_signal_dequeued(sig: &SignalInfo) -> SignalDequeueAction {
+fn on_timer_signal_dequeued_for_current_user_thread(sig: &SignalInfo) -> SignalDequeueAction {
     let Some(timer_id) = sig.timer_id() else {
         return SignalDequeueAction::Deliver;
     };
@@ -70,10 +68,8 @@ fn on_signal_dequeued(sig: &SignalInfo) -> SignalDequeueAction {
     };
     let process = current_user_thread().process().clone();
     let should_deliver = process
-        .timer_manager()
-        .expect("current thread must still expose a process timer manager")
-        .lock()
-        .on_timer_signal_dequeued(timer_id, signal_seq);
+        .on_timer_signal_dequeued(timer_id, signal_seq)
+        .expect("current thread must still expose process timer state");
     if should_deliver {
         SignalDequeueAction::Deliver
     } else {
@@ -101,11 +97,17 @@ pub fn init_timer_runtime() {
     TIMER_RUNTIME_INIT.call_once(|| {
         ktimer::register_expired_task_handler(poll_timer);
         for signo in [Signo::SIGALRM, Signo::SIGVTALRM, Signo::SIGPROF] {
-            ksignal::register_signal_observer(signo, on_signal_dequeued);
+            ksignal::register_signal_observer(
+                signo,
+                on_timer_signal_dequeued_for_current_user_thread,
+            );
         }
         for raw in Signo::SIGRTMIN as u8..=Signo::SIGRT32 as u8 {
             if let Some(signo) = Signo::from_repr(raw) {
-                ksignal::register_signal_observer(signo, on_signal_dequeued);
+                ksignal::register_signal_observer(
+                    signo,
+                    on_timer_signal_dequeued_for_current_user_thread,
+                );
             }
         }
         ktimer::spawn_alarm_task();

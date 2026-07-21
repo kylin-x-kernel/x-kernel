@@ -239,21 +239,35 @@ impl ThreadSignalManager {
 
     /// Sends a signal to the thread.
     ///
-    /// Returns `true` if the task was woken up by the signal (i.e. the signal
-    /// was not blocked and not ignored).
+    /// Returns `true` if the caller should interrupt the task.
+    ///
+    /// A `true` result means this generation decision found the signal neither
+    /// blocked nor ignored. The caller performs the actual task interrupt.
+    ///
+    /// Ignored signals are still queued while blocked, matching Linux signal
+    /// semantics that let userspace change the handler before unblocking.
     ///
     /// See [`ProcessSignalManager::send_signal`] for the process-level version.
     #[must_use]
     pub fn send_signal(&self, sig: SignalInfo) -> bool {
         let signo = sig.signo();
-        if self.proc.signal_ignored(signo) {
+        let (ignored, is_blocked) = {
+            let actions = self.proc.actions.lock();
+            let is_blocked = self.signal_blocked(signo);
+            (
+                super::process::signal_ignored_by(&actions, signo),
+                is_blocked,
+            )
+        };
+
+        if ignored && !is_blocked {
             return false;
         }
 
         if self.pending.lock().put_signal(sig) {
             self.possibly_has_signal.store(true, Ordering::Release);
         }
-        !self.signal_blocked(signo)
+        !is_blocked
     }
 
     /// Gets the blocked signals.

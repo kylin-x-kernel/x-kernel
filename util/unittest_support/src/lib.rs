@@ -19,7 +19,7 @@ use kcred::initial_cred;
 use kerrno::{KError, KResult};
 use khal::{mem::v2p, paging::MappingFlags};
 use kidentity::PidHandle;
-use kprocess::{AsThread, Pid, Thread, build_process_thread, start_user_task};
+use kprocess::{AsThread, LiveAddressSpace, Pid, Thread, build_process_thread, start_user_task};
 use ksignal::api::SignalActions;
 use ksync::{Mutex, spin::SpinNoIrq};
 use ktask::{TaskInner, current};
@@ -107,7 +107,7 @@ fn run_registered_test_user_task(test: &TestDescriptor) -> TestResult {
 }
 
 pub struct TestUserBuffer {
-    aspace: Arc<Mutex<memspace::MmSpace>>,
+    aspace: LiveAddressSpace,
     user_addr: usize,
     mapped_size: usize,
     kernel_va: usize,

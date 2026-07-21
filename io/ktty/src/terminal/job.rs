@@ -5,7 +5,7 @@
 use alloc::sync::{Arc, Weak};
 use core::task::Context;
 
-use kerrno::{KResult, k_bail};
+use kerrno::{KError, KResult, k_bail};
 use kpoll::{IoEvents, PollSet, Pollable};
 use kprocess::{ProcessGroup, Session};
 use kspin::SpinNoIrq;
@@ -71,11 +71,40 @@ impl JobControl {
         Ok(())
     }
 
-    /// Associate this terminal with a session
-    pub fn set_session(&self, session: &Arc<Session>) {
+    /// Ensures this terminal is associated with `session`.
+    ///
+    /// Returns `true` when a new association was installed.
+    pub fn ensure_session(&self, session: &Arc<Session>) -> KResult<bool> {
         let mut guard = self.session.lock();
-        assert!(guard.upgrade().is_none());
+        if let Some(current) = guard.upgrade() {
+            return if Arc::ptr_eq(&current, session) {
+                Ok(false)
+            } else {
+                Err(KError::ResourceBusy)
+            };
+        }
+
         *guard = Arc::downgrade(session);
+        Ok(true)
+    }
+
+    /// Clears this terminal's session association if it matches `session`.
+    pub fn clear_session_if_matches(&self, session: &Arc<Session>) -> bool {
+        let mut foreground = self.foreground.lock();
+        let mut guard = self.session.lock();
+        if guard
+            .upgrade()
+            .is_some_and(|current| Arc::ptr_eq(&current, session))
+        {
+            *guard = Weak::new();
+            *foreground = Weak::new();
+            drop(guard);
+            drop(foreground);
+            self.poll_fg.wake();
+            true
+        } else {
+            false
+        }
     }
 }
 

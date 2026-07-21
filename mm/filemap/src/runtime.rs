@@ -6,10 +6,11 @@ use alloc::sync::Arc;
 
 use kerrno::KResult;
 use khal::paging::{MappingFlags, PageSize};
-use ksync::Mutex;
 use kvfs::VfsFile;
 use memaddr::VirtAddr;
-use memspace::{FileMappingInfo, InvalidateHandle, MmSpace, VmArea, VmBackingInfo, VmRuntimeRef};
+use memspace::{
+    FileMappingInfo, InvalidateHandle, MmObserver, VmArea, VmBackingInfo, VmRuntimeRef,
+};
 use pagecache::{Mapping, MappingViewGuard};
 use vmobj::{MappingViewKind, MappingViewSpec, VmObjectId};
 
@@ -33,7 +34,7 @@ pub(crate) struct FileVmaSpec {
 
 pub(crate) struct FileRuntimeContext<'a> {
     pub mm_id: u64,
-    pub aspace: &'a Arc<Mutex<MmSpace>>,
+    pub observer: &'a MmObserver,
     pub invalidate: InvalidateHandle,
 }
 
@@ -188,7 +189,7 @@ pub(crate) fn build_file_runtime(
             page_size,
             FilePrivateSource::new(mapping, offset as u64, None),
             Some(ctx.mm_id),
-            Some(ctx.aspace),
+            Some(ctx.observer),
             Some(ctx.invalidate),
         ),
     }
@@ -257,7 +258,7 @@ mod tests {
 
     use khal::paging::MappingFlags;
     use memaddr::{PAGE_SIZE_4K, VirtAddr};
-    use memspace::VmBackingKind;
+    use memspace::{MmObserver, VmBackingKind};
     use unittest::def_test;
 
     use super::{FileRuntimeContext, FileVmaSpec, build_file_runtime, build_file_vma};
@@ -284,7 +285,8 @@ mod tests {
         let aspace = Arc::new(ksync::Mutex::new(
             memspace::MmSpace::new_user_empty().expect("mm"),
         ));
-        let invalidate = aspace.lock().invalidate_handle(&aspace);
+        let observer = MmObserver::new(&aspace);
+        let invalidate = observer.invalidate_handle();
         let runtime = build_file_runtime(
             VirtAddr::from_usize(0x20000),
             PAGE_SIZE_4K,
@@ -294,7 +296,7 @@ mod tests {
             crate::FileMappingMode::Private,
             FileRuntimeContext {
                 mm_id: aspace.lock().mm_id(),
-                aspace: &aspace,
+                observer: &observer,
                 invalidate,
             },
         )

@@ -16,8 +16,8 @@ use core::{
 use kspin::SpinNoIrq;
 
 use crate::{
-    DefaultSignalAction, MAX_SIGNALS, PendingSignals, SignalAction, SignalActionFlags,
-    SignalDisposition, SignalInfo, SignalSet, Signo,
+    DefaultSignalAction, MAX_SIGNALS, PendingSignals, SigchldChildExitSignalInfo, SignalAction,
+    SignalActionFlags, SignalDisposition, SignalInfo, SignalSet, Signo,
     api::{SignalDequeueAction, ThreadSignalManager, notify_signal_dequeued},
 };
 
@@ -69,6 +69,34 @@ pub struct ProcessSignalManager {
     pub(crate) has_pending: AtomicBool,
 }
 
+/// Prepared Linux-style `SIGCHLD` child-exit notification.
+#[derive(Debug)]
+pub struct PreparedChildExitSignal {
+    sig: SigchldChildExitSignalInfo,
+    autoreap: bool,
+    queue_signal: bool,
+}
+
+impl PreparedChildExitSignal {
+    /// Returns whether the exited child should skip the waitable zombie state.
+    pub fn should_autoreap(&self) -> bool {
+        self.autoreap
+    }
+}
+
+/// Outcome of an immediately sent child-exit notification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildExitSignalOutcome {
+    autoreap: bool,
+}
+
+impl ChildExitSignalOutcome {
+    /// Returns whether the exited child should skip the waitable zombie state.
+    pub fn should_autoreap(&self) -> bool {
+        self.autoreap
+    }
+}
+
 impl ProcessSignalManager {
     /// Creates a new process signal manager.
     ///
@@ -113,13 +141,7 @@ impl ProcessSignalManager {
 
     /// Checks if a signal is ignored by the process.
     pub fn signal_ignored(&self, signo: Signo) -> bool {
-        match &self.actions.lock()[signo].disposition {
-            SignalDisposition::Ignore => true,
-            SignalDisposition::Default => {
-                matches!(signo.default_action(), DefaultSignalAction::Ignore)
-            }
-            _ => false,
-        }
+        signal_ignored_by(&self.actions.lock(), signo)
     }
 
     /// Checks if syscalls interrupted by the given signal can be restarted.
@@ -162,32 +184,133 @@ impl ProcessSignalManager {
     /// * `sig` - Signal information to send
     ///
     /// # Returns
-    /// `Some(tid)` if a specific thread should handle the signal, `None` otherwise
+    /// `Some(tid)` if a specific thread should be interrupted, `None` otherwise.
+    ///
+    /// Ignored signals are dropped only when no live thread currently blocks
+    /// them. If a signal is blocked, it remains pending because userspace may
+    /// install a handler before unblocking it.
     #[must_use]
     pub fn send_signal(&self, sig: SignalInfo) -> Option<u32> {
         let signo = sig.signo();
+        let (ignored, target_tid, has_blocked_thread) = {
+            let actions = self.actions.lock();
 
-        // Check if signal should be ignored
-        if self.signal_ignored(signo) {
+            // Keep the disposition snapshot and target-thread scan in one
+            // generation decision. This follows Linux's prepare_signal() /
+            // complete_signal() structure without claiming the same global
+            // sighand->siglock consistency for every signal-related field.
+            let (target_tid, has_blocked_thread) = self.find_target_thread(signo);
+            (
+                signal_ignored_by(&actions, signo),
+                target_tid,
+                has_blocked_thread,
+            )
+        };
+
+        if ignored {
+            if !has_blocked_thread {
+                return None;
+            }
+
+            // Linux does not drop ignored signals while they are blocked:
+            // userspace may install a handler before unblocking them.
+            self.put_pending_signal(sig);
             return None;
         }
 
-        // Add to pending signals
+        self.put_pending_signal(sig);
+        target_tid
+    }
+}
+
+pub(super) fn signal_ignored_by(actions: &SignalActions, signo: Signo) -> bool {
+    match &actions[signo].disposition {
+        SignalDisposition::Ignore => true,
+        SignalDisposition::Default => {
+            matches!(signo.default_action(), DefaultSignalAction::Ignore)
+        }
+        _ => false,
+    }
+}
+
+impl ProcessSignalManager {
+    /// Prepares a child-exit `SIGCHLD` notification decision.
+    ///
+    /// Child-exit notification follows Linux `do_notify_parent()` semantics.
+    /// The default ignored disposition of `SIGCHLD` does not suppress queuing.
+    /// Explicit `SIG_IGN` suppresses the signal and requests autoreap.
+    /// `SA_NOCLDWAIT` also requests autoreap, while Linux still queues
+    /// `SIGCHLD` unless the disposition is explicit `SIG_IGN`.
+    #[must_use]
+    pub fn prepare_child_exit_signal(
+        &self,
+        sig: SigchldChildExitSignalInfo,
+    ) -> PreparedChildExitSignal {
+        let action = self.signal_action(Signo::SIGCHLD);
+        let explicit_ignore = matches!(action.disposition, SignalDisposition::Ignore);
+        let autoreap = explicit_ignore || action.flags.contains(SignalActionFlags::NOCLDWAIT);
+
+        if explicit_ignore {
+            return PreparedChildExitSignal {
+                sig,
+                autoreap,
+                queue_signal: false,
+            };
+        }
+
+        PreparedChildExitSignal {
+            sig,
+            autoreap,
+            queue_signal: true,
+        }
+    }
+
+    /// Commits a prepared child-exit `SIGCHLD` notification and returns the
+    /// current unblocked target thread, if one should be interrupted.
+    pub fn commit_child_exit_signal(&self, prepared: PreparedChildExitSignal) -> Option<u32> {
+        if prepared.queue_signal {
+            self.put_pending_signal(prepared.sig.into_signal_info());
+            let (target_tid, _) = self.find_target_thread(Signo::SIGCHLD);
+            target_tid
+        } else {
+            None
+        }
+    }
+
+    /// Sends child-exit `SIGCHLD` notification immediately.
+    ///
+    /// Process-exit code that must publish exit/autoreap state before SIGCHLD
+    /// becomes observable should use [`Self::prepare_child_exit_signal`] and
+    /// [`Self::commit_child_exit_signal`] instead.
+    #[must_use]
+    pub fn send_child_exit_signal(
+        &self,
+        sig: SigchldChildExitSignalInfo,
+    ) -> (ChildExitSignalOutcome, Option<u32>) {
+        let prepared = self.prepare_child_exit_signal(sig);
+        let outcome = ChildExitSignalOutcome {
+            autoreap: prepared.should_autoreap(),
+        };
+        let target_tid = self.commit_child_exit_signal(prepared);
+        (outcome, target_tid)
+    }
+
+    fn put_pending_signal(&self, sig: SignalInfo) {
         if self.pending.lock().put_signal(sig) {
             self.has_pending.store(true, Ordering::Release);
         }
-
-        // Find a thread that can handle this signal
-        self.find_target_thread(signo)
     }
 
-    /// Finds a suitable thread to handle the given signal.
-    fn find_target_thread(&self, signo: Signo) -> Option<u32> {
+    /// Finds a suitable thread and reports whether any live thread blocks it.
+    fn find_target_thread(&self, signo: Signo) -> (Option<u32>, bool) {
         let mut target_tid = None;
+        let mut has_blocked_thread = false;
 
         self.children.lock().retain(|(tid, thread_weak)| {
             if let Some(thread) = thread_weak.upgrade() {
-                if target_tid.is_none() && !thread.signal_blocked(signo) {
+                if thread.signal_blocked(signo) {
+                    has_blocked_thread = true;
+                } else if target_tid.is_none() {
                     target_tid = Some(*tid);
                 }
                 true // Keep this thread reference
@@ -196,7 +319,7 @@ impl ProcessSignalManager {
             }
         });
 
-        target_tid
+        (target_tid, has_blocked_thread)
     }
 
     /// Gets currently pending signals.

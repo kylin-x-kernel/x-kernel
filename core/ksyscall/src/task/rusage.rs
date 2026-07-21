@@ -66,12 +66,12 @@ fn children_rusage(process: &Process) -> Rusage {
     let (reaped_utime_ns, reaped_stime_ns) = process.child_time_ns();
     Rusage {
         utime: TimeValue::new(
-            reaped_utime_ns as u64 / 1_000_000_000,
-            (reaped_utime_ns as u64 % 1_000_000_000) as u32,
+            reaped_utime_ns / 1_000_000_000,
+            (reaped_utime_ns % 1_000_000_000) as u32,
         ),
         stime: TimeValue::new(
-            reaped_stime_ns as u64 / 1_000_000_000,
-            (reaped_stime_ns as u64 % 1_000_000_000) as u32,
+            reaped_stime_ns / 1_000_000_000,
+            (reaped_stime_ns % 1_000_000_000) as u32,
         ),
     }
 }

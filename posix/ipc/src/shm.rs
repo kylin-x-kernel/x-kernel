@@ -424,61 +424,62 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
     drop(shm_inner);
 
     let aspace_ref = process.address_space()?;
-    let mut aspace = aspace_ref.lock();
-
-    let start_aligned = if addr != 0 {
-        if shm_flg.contains(ShmAtFlags::SHM_RND) {
-            memaddr::align_down_4k(addr)
-        } else if !addr.is_multiple_of(PAGE_SIZE_4K) {
-            return Err(KError::InvalidInput);
+    let (start_addr, va_range) = aspace_ref.with_mapping_owner(|mut mapping| {
+        let start_aligned = if addr != 0 {
+            if shm_flg.contains(ShmAtFlags::SHM_RND) {
+                memaddr::align_down_4k(addr)
+            } else if !addr.is_multiple_of(PAGE_SIZE_4K) {
+                return Err(KError::InvalidInput);
+            } else {
+                addr
+            }
         } else {
-            addr
-        }
-    } else {
-        0
-    };
-    let start_addr = aspace
-        .find_free_area(
-            VirtAddr::from(start_aligned),
-            length,
-            VirtAddrRange::new(aspace.base(), aspace.end()),
-            PAGE_SIZE_4K,
-        )
-        .or_else(|| {
-            aspace.find_free_area(
-                aspace.base(),
+            0
+        };
+        let aspace_base = mapping.aspace().base();
+        let aspace_end = mapping.aspace().end();
+        let search_range = VirtAddrRange::new(aspace_base, aspace_end);
+        let start_addr = mapping
+            .aspace_mut()
+            .find_free_area(
+                VirtAddr::from(start_aligned),
                 length,
-                VirtAddrRange::new(aspace.base(), aspace.end()),
+                search_range,
                 PAGE_SIZE_4K,
             )
-        })
-        .ok_or(KError::NoMemory)?;
-    let end_addr = VirtAddr::from(start_addr.as_usize() + length);
-    let va_range = VirtAddrRange::new(start_addr, end_addr);
+            .or_else(|| {
+                mapping
+                    .aspace_mut()
+                    .find_free_area(aspace_base, length, search_range, PAGE_SIZE_4K)
+            })
+            .ok_or(KError::NoMemory)?;
+        let end_addr = VirtAddr::from(start_addr.as_usize() + length);
+        let va_range = VirtAddrRange::new(start_addr, end_addr);
 
-    info!(
-        "Process {} alloc shm virt addr start: {:#x}, size: {}, mapping_flags: {:#x?}",
-        pid,
-        start_addr.as_usize(),
-        length,
-        mapping_flags
-    );
+        info!(
+            "Process {} alloc shm virt addr start: {:#x}, size: {}, mapping_flags: {:#x?}",
+            pid,
+            start_addr.as_usize(),
+            length,
+            mapping_flags
+        );
 
-    let invalidate = aspace.invalidate_handle(&aspace_ref);
-    let (vma, runtime) = mmap_shared_file(FileMmapRequest {
-        start: start_addr,
-        length,
-        offset: 0,
-        page_size: PageSize::Size4K,
-        flags: mapping_flags,
-        max_flags: mapping_flags,
-        file: file.clone(),
-        mm_id: aspace.mm_id(),
-        aspace: aspace_ref.clone(),
-        invalidate,
+        let invalidate = mapping.invalidate_handle();
+        let (vma, runtime) = mmap_shared_file(FileMmapRequest {
+            start: start_addr,
+            length,
+            offset: 0,
+            page_size: PageSize::Size4K,
+            flags: mapping_flags,
+            max_flags: mapping_flags,
+            file: file.clone(),
+            mm_id: mapping.aspace().mm_id(),
+            observer: mapping.observer(),
+            invalidate,
+        })?;
+        mapping.aspace_mut().map_runtime_vma(vma, false, runtime)?;
+        Ok((start_addr, va_range))
     })?;
-    aspace.map_runtime_vma(vma, false, runtime)?;
-    drop(aspace);
 
     let mut shm_inner = shm_inner_arc.lock();
     shm_inner.attach_process(pid, va_range);

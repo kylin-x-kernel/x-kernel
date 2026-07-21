@@ -12,12 +12,7 @@ use posix_types::{ITimerType, TimeValueLike, UserConstPtr, UserPtr};
 pub fn sys_getitimer(which: i32, value: UserPtr<itimerval>) -> KResult<isize> {
     let timer_type = ITimerType::from_repr(which).ok_or(KError::InvalidInput)?;
     let process = kprocess::current_user_process();
-    let (process_utime_ns, process_stime_ns) = process.process_cpu_time_ns();
-    let (it_interval, it_value) =
-        process
-            .timer_manager()?
-            .lock()
-            .get_itimer(timer_type, process_utime_ns, process_stime_ns);
+    let (it_interval, it_value) = process.get_itimer(timer_type)?;
 
     value.write_vm(itimerval {
         it_interval: timeval::from_time_value(it_interval),
@@ -51,14 +46,7 @@ pub fn sys_setitimer(
     );
 
     let process = kprocess::current_user_process();
-    let (process_utime_ns, process_stime_ns) = process.process_cpu_time_ns();
-    let old = process.timer_manager()?.lock().set_itimer(
-        timer_type,
-        interval_ns,
-        remained_ns,
-        process_utime_ns,
-        process_stime_ns,
-    );
+    let old = process.set_itimer(timer_type, interval_ns, remained_ns)?;
 
     if let Some(old_value) = old_value.check_non_null() {
         old_value.write_vm(itimerval {

@@ -182,6 +182,23 @@ pub fn on_timer_fire() {
     crate::api::rearm_local_timer(earliest);
 }
 
+/// Consumes a pending preemption request before returning to ordinary task execution.
+///
+/// This is intended for task/user return paths that are about to resume normal
+/// execution outside interrupt or exception handling. It is a no-op before the
+/// current task is initialized, and it still obeys the normal preemption guards:
+/// a context switch is only performed when the current task can be preempted and
+/// the CPU is no longer inside an active exception context.
+#[cfg(feature = "preempt")]
+pub fn check_preempt_pending() {
+    if current_may_uninit().is_some() {
+        crate::task::TaskInner::current_check_preempt_pending();
+    }
+}
+
+#[cfg(not(feature = "preempt"))]
+pub fn check_preempt_pending() {}
+
 /// Adds the given task to the run queue, returns the task reference.
 pub fn spawn_task(task: TaskInner) -> KtaskRef {
     let task_ref = prepare_task(task);

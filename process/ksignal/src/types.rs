@@ -7,7 +7,8 @@ use core::{fmt, mem};
 
 use derive_more::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 use linux_raw_sys::general::{
-    SI_KERNEL, SI_TIMER, SS_DISABLE, SS_ONSTACK, kernel_sigset_t, siginfo_t,
+    CLD_DUMPED, CLD_EXITED, CLD_KILLED, SI_KERNEL, SI_TIMER, SS_DISABLE, SS_ONSTACK,
+    kernel_sigset_t, siginfo_t,
 };
 use posix_types::{k_sigaltstack, k_siginfo, k_sigset, k_sigval};
 use strum::{EnumIter, FromRepr, IntoEnumIterator};
@@ -227,6 +228,191 @@ impl fmt::Debug for SignalSet {
 #[repr(transparent)]
 pub struct SignalInfo(pub siginfo_t);
 
+/// Linux child-exit signal payload fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChildExitInfo {
+    /// Child PID as observed by the receiving parent.
+    pid: u32,
+    /// Real UID of the exited child as observed by the receiving parent.
+    uid: u32,
+    /// `CLD_*` reason code.
+    code: i32,
+    /// Exit status for `CLD_EXITED`, or terminating signal number otherwise.
+    status: i32,
+    /// User CPU time in clock ticks.
+    utime_ticks: u64,
+    /// System CPU time in clock ticks.
+    stime_ticks: u64,
+}
+
+impl ChildExitInfo {
+    /// Builds the Linux child-exit status view from a wait-status value.
+    pub fn from_wait_status(
+        pid: u32,
+        uid: u32,
+        wait_status: i32,
+        utime_ticks: u64,
+        stime_ticks: u64,
+    ) -> Self {
+        let signal_status = wait_status & 0x7f;
+        let (code, status) = if wait_status & 0x80 != 0 {
+            (CLD_DUMPED as i32, signal_status)
+        } else if signal_status != 0 {
+            (CLD_KILLED as i32, signal_status)
+        } else {
+            (CLD_EXITED as i32, wait_status >> 8)
+        };
+
+        Self {
+            pid,
+            uid,
+            code,
+            status,
+            utime_ticks,
+            stime_ticks,
+        }
+    }
+
+    /// Returns the child PID as observed by the receiving parent.
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// Returns the real UID of the exited child as observed by the receiving parent.
+    pub fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    /// Returns the `CLD_*` reason code.
+    pub fn code(&self) -> i32 {
+        self.code
+    }
+
+    /// Returns the exit status or terminating signal number.
+    pub fn status(&self) -> i32 {
+        self.status
+    }
+
+    /// Returns user CPU time in clock ticks.
+    pub fn utime_ticks(&self) -> u64 {
+        self.utime_ticks
+    }
+
+    /// Returns system CPU time in clock ticks.
+    pub fn stime_ticks(&self) -> u64 {
+        self.stime_ticks
+    }
+}
+
+/// Signal information whose payload is a Linux child-exit `siginfo_t` arm.
+///
+/// The notification signal number comes from the child process `exit_signal`.
+/// `SIGCHLD` has special parent-side autoreap and queueing policy, but clone
+/// children may request another signal while still carrying the same child-exit
+/// payload fields.
+#[derive(Clone)]
+pub struct ChildExitSignalInfo {
+    info: SignalInfo,
+}
+
+impl ChildExitSignalInfo {
+    /// Constructs a child-exit signal for the given notification signal number.
+    pub fn new(signo: Signo, child: ChildExitInfo) -> Self {
+        let mut info = SignalInfo::empty();
+        info.set_signo(signo);
+        info.set_code(child.code());
+        // SAFETY: `CLD_*` child-exit codes select the `_sigchld` union arm,
+        // and this constructor initializes every field exposed by that arm
+        // before the resulting `SignalInfo` can be observed.
+        let sigchld = unsafe { &mut info.sifields_mut()._sigchld };
+        sigchld._pid = child.pid() as _;
+        sigchld._uid = child.uid() as _;
+        sigchld._status = child.status();
+        sigchld._utime = child.utime_ticks() as _;
+        sigchld._stime = child.stime_ticks() as _;
+        Self { info }
+    }
+
+    /// Constructs a `SIGCHLD` child-exit notification.
+    pub fn new_sigchld(child: ChildExitInfo) -> SigchldChildExitSignalInfo {
+        SigchldChildExitSignalInfo {
+            info: Self::new(Signo::SIGCHLD, child),
+        }
+    }
+
+    /// Returns the notification signal number.
+    pub fn signo(&self) -> Signo {
+        self.info.signo()
+    }
+
+    /// Returns the underlying generic signal information.
+    pub fn as_signal_info(&self) -> &SignalInfo {
+        &self.info
+    }
+
+    /// Converts this child-exit signal into generic signal information.
+    pub fn into_signal_info(self) -> SignalInfo {
+        self.info
+    }
+}
+
+impl fmt::Debug for ChildExitSignalInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ChildExitSignalInfo")
+            .field(&self.info)
+            .finish()
+    }
+}
+
+impl From<ChildExitSignalInfo> for SignalInfo {
+    fn from(value: ChildExitSignalInfo) -> Self {
+        value.into_signal_info()
+    }
+}
+
+/// A `SIGCHLD` signal carrying a Linux child-exit `siginfo_t` payload.
+#[derive(Clone)]
+pub struct SigchldChildExitSignalInfo {
+    info: ChildExitSignalInfo,
+}
+
+impl SigchldChildExitSignalInfo {
+    /// Returns this `SIGCHLD` payload as a child-exit signal.
+    pub fn as_child_exit_signal(&self) -> &ChildExitSignalInfo {
+        &self.info
+    }
+
+    /// Converts this value into the generic child-exit signal wrapper.
+    pub fn into_child_exit_signal(self) -> ChildExitSignalInfo {
+        self.info
+    }
+
+    /// Converts this value into generic signal information.
+    pub fn into_signal_info(self) -> SignalInfo {
+        self.info.into_signal_info()
+    }
+}
+
+impl fmt::Debug for SigchldChildExitSignalInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("SigchldChildExitSignalInfo")
+            .field(&self.info)
+            .finish()
+    }
+}
+
+impl From<SigchldChildExitSignalInfo> for ChildExitSignalInfo {
+    fn from(value: SigchldChildExitSignalInfo) -> Self {
+        value.into_child_exit_signal()
+    }
+}
+
+impl From<SigchldChildExitSignalInfo> for SignalInfo {
+    fn from(value: SigchldChildExitSignalInfo) -> Self {
+        value.into_signal_info()
+    }
+}
+
 impl SignalInfo {
     fn empty() -> Self {
         // SAFETY: Linux `siginfo_t` uses an integer/union payload ABI where an
@@ -354,6 +540,22 @@ impl SignalInfo {
             code if code < 0 => Some(unsafe { self.sifields()._rt._sigval }),
             _ => None,
         }
+    }
+
+    /// Returns child-exit payload fields carried by a `CLD_*` signal.
+    pub fn child_exit(&self) -> Option<ChildExitInfo> {
+        matches!(self.code() as u32, CLD_EXITED | CLD_KILLED | CLD_DUMPED).then(|| {
+            // SAFETY: the `CLD_*` code selects the `_sigchld` union arm.
+            let sigchld = unsafe { self.sifields()._sigchld };
+            ChildExitInfo {
+                pid: sigchld._pid as u32,
+                uid: sigchld._uid,
+                code: self.code(),
+                status: sigchld._status,
+                utime_ticks: sigchld._utime as u64,
+                stime_ticks: sigchld._stime as u64,
+            }
+        })
     }
 
     fn set_timer_fields(&mut self, timer_id: i32, overrun: i32, value: k_sigval, signal_seq: u32) {

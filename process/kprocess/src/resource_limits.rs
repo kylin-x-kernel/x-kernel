@@ -8,7 +8,7 @@ use kerrno::KResult;
 
 use crate::{Pid, Process, lookup};
 
-/// Resolves the non-zombie process whose resource limits are being queried or updated.
+/// Resolves the non-exited process whose resource limits are being queried or updated.
 pub fn target_process(pid: Pid) -> KResult<Arc<Process>> {
     lookup::live_process(pid)
 }

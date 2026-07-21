@@ -9,11 +9,11 @@ use ktask::KtaskRef;
 
 use crate::{Pid, Process, ProcessGroup, Tid, publication::process_publication};
 
-pub(crate) fn visible_processes() -> Vec<Arc<Process>> {
+pub(crate) fn published_processes() -> Vec<Arc<Process>> {
     process_publication().published_processes()
 }
 
-pub(crate) fn visible_process_count() -> usize {
+pub(crate) fn published_process_count() -> usize {
     process_publication().published_process_count()
 }
 
@@ -39,6 +39,10 @@ pub(crate) fn live_processes() -> Vec<Arc<Process>> {
 
 pub(crate) fn unpublish_process(pid: Pid) {
     process_publication().unpublish_process(pid);
+}
+
+pub(crate) fn unpublish_process_if_matches(process: &Arc<Process>) -> bool {
+    process_publication().unpublish_process_if_matches(process)
 }
 
 pub(crate) fn cleanup_directory() {

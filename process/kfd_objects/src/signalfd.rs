@@ -66,6 +66,7 @@ const _: [(); SIGNALFD_SIGINFO_SIZE] = [(); mem::size_of::<SignalfdSiginfo>()];
 impl SignalfdSiginfo {
     fn from_signal_info(sig_info: &SignalInfo) -> Self {
         let errno = sig_info.errno();
+        let child_exit = sig_info.child_exit();
         let (ssi_tid, ssi_overrun) = match (sig_info.timer_id(), sig_info.timer_overrun()) {
             (Some(timer_id), Some(overrun)) => (timer_id as u32, overrun.max(0) as u32),
             _ => (0, 0),
@@ -84,18 +85,18 @@ impl SignalfdSiginfo {
             ssi_signo: sig_info.signo() as u32,
             ssi_errno: errno,
             ssi_code: sig_info.code(),
-            ssi_pid: 0,
-            ssi_uid: 0,
+            ssi_pid: child_exit.map(|child| child.pid()).unwrap_or(0),
+            ssi_uid: child_exit.map(|child| child.uid()).unwrap_or(0),
             ssi_fd: -1,
             ssi_tid,
             ssi_band: 0,
             ssi_overrun,
             ssi_trapno: 0,
-            ssi_status: 0,
+            ssi_status: child_exit.map(|child| child.status()).unwrap_or(0),
             ssi_int,
             ssi_ptr,
-            ssi_utime: 0,
-            ssi_stime: 0,
+            ssi_utime: child_exit.map(|child| child.utime_ticks()).unwrap_or(0),
+            ssi_stime: child_exit.map(|child| child.stime_ticks()).unwrap_or(0),
             ssi_addr: 0,
             ssi_addr_lsb: 0,
             _pad: [0; 46],
@@ -248,7 +249,7 @@ impl FileOperations for SignalfdFops {
 
 #[cfg(unittest)]
 mod tests {
-    use ksignal::Signo;
+    use ksignal::{ChildExitInfo, ChildExitSignalInfo, Signo};
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
@@ -292,5 +293,20 @@ mod tests {
         assert_eq!(info.ssi_signo, Signo::SIGUSR1 as u32);
         assert_eq!(info.ssi_fd, -1);
         assert_eq!(info.ssi_pid, 0);
+    }
+
+    #[def_test]
+    fn test_signalfd_siginfo_from_child_exit_signal_info() {
+        let child = ChildExitInfo::from_wait_status(42, 1000, 9 << 8, 11, 13);
+        let sig = ChildExitSignalInfo::new_sigchld(child);
+        let info = SignalfdSiginfo::from_signal_info(sig.as_child_exit_signal().as_signal_info());
+
+        assert_eq!(info.ssi_signo, Signo::SIGCHLD as u32);
+        assert_eq!(info.ssi_code, linux_raw_sys::general::CLD_EXITED as i32);
+        assert_eq!(info.ssi_pid, 42);
+        assert_eq!(info.ssi_uid, 1000);
+        assert_eq!(info.ssi_status, 9);
+        assert_eq!(info.ssi_utime, 11);
+        assert_eq!(info.ssi_stime, 13);
     }
 }

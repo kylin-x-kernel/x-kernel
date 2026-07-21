@@ -46,6 +46,7 @@ use crate::{
     VmBackingKind,
     backend::{FaultCompletionResult, map_paging_err, pages_in},
     cpu_residency::{MmCpuResidency, MmCpuResidencyRef},
+    lifetime::{MmUserHandle, MmUserLifetime},
     vma::VmRuntimeRef,
 };
 
@@ -223,6 +224,7 @@ impl MremapSource {
 /// The virtual memory address space.
 pub struct MmSpace {
     mm_id: u64,
+    user_lifetime: Arc<MmUserLifetime>,
     range: VirtAddrRange,
     vmas: VmAreaSet,
     pgtbl: PageTable,
@@ -698,6 +700,7 @@ impl MmSpace {
         };
         Ok(Self {
             mm_id: NEXT_MM_ID.fetch_add(1, Ordering::Relaxed),
+            user_lifetime: Arc::new(MmUserLifetime::new()),
             range: VirtAddrRange::from_start_size(base, size),
             vmas: VmAreaSet::new(),
             pgtbl,
@@ -717,6 +720,25 @@ impl MmSpace {
     /// shootdown targeting.
     pub fn cpu_residency(&self) -> &MmCpuResidencyRef {
         &self.cpu_residency
+    }
+
+    pub(crate) fn user_lifetime(&self) -> &Arc<MmUserLifetime> {
+        &self.user_lifetime
+    }
+
+    /// Acquires an active user for this address space.
+    ///
+    /// This is the X-Kernel counterpart of Linux `mmget_not_zero()`. The
+    /// returned handle keeps user mappings alive until it is released. After
+    /// the last user has released and the address space has been torn down,
+    /// this method returns `None`.
+    ///
+    /// The handle may synchronously clear mappings when it is released. Callers
+    /// must acquire and release it only from sleepable task context, without
+    /// holding spinlocks or running with IRQs/preemption disabled.
+    #[doc(hidden)]
+    pub fn acquire_user(address_space: Arc<Mutex<Self>>) -> Option<MmUserHandle> {
+        MmUserHandle::acquire(address_space)
     }
 
     /// Creates a new empty user address space with the standard user-space range.
@@ -2044,5 +2066,31 @@ mod tests {
         mm.read(target, &mut buf)
             .expect("read relocated contents after refault");
         assert_eq!(&buf, b"abc");
+    }
+
+    #[def_test]
+    fn mm_pin_does_not_keep_user_mappings_alive_after_last_user_release() {
+        let start = VirtAddr::from_usize(0x4000);
+        let aspace = Arc::new(Mutex::new(
+            MmSpace::new_empty_user(start, PAGE_SIZE_4K * 2).expect("allocate test address space"),
+        ));
+        let user = MmSpace::acquire_user(aspace.clone()).expect("new mm should accept user");
+        let pin = user.pin();
+
+        assert!(pin.is_user_alive());
+        assert!(
+            user.release_and_clear_if_last(),
+            "last active user should tear down mappings"
+        );
+        assert!(
+            pin.try_upgrade_user().is_none(),
+            "object pin must not resurrect a torn-down user address space"
+        );
+        let pinned_mm_id = pin.address_space().lock().mm_id();
+        let original_mm_id = aspace.lock().mm_id();
+        assert_eq!(
+            pinned_mm_id, original_mm_id,
+            "pin should still keep the mm object observable"
+        );
     }
 }

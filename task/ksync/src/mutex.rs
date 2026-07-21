@@ -45,6 +45,23 @@ impl RawMutex {
             stats: &klockstat::NOOP_CLASS,
         }
     }
+
+    /// Returns `true` if the current task owns this mutex.
+    #[inline(always)]
+    pub fn is_owned_by_current(&self) -> bool {
+        self.owner_id.load(Ordering::Relaxed) == current().owner_key()
+    }
+
+    /// Asserts that the current task does not own this mutex.
+    #[inline(always)]
+    pub fn assert_not_owned_by_current(&self, message: &str) {
+        assert!(
+            !self.is_owned_by_current(),
+            "{}: {}",
+            current().id_name(),
+            message
+        );
+    }
 }
 
 #[cfg(feature = "stats")]
@@ -257,6 +274,22 @@ impl<T> Mutex<T> {
     #[inline(always)]
     pub const fn const_new(raw: RawMutex, val: T) -> Self {
         Self(lock_api::Mutex::const_new(raw, val))
+    }
+
+    /// Returns `true` if the current task owns this mutex.
+    #[inline(always)]
+    pub fn is_owned_by_current(&self) -> bool {
+        // SAFETY: This wrapper only reads the raw mutex owner metadata and
+        // does not use the raw lock to bypass `lock_api`'s locking protocol.
+        unsafe { self.0.raw().is_owned_by_current() }
+    }
+
+    /// Asserts that the current task does not own this mutex.
+    #[inline(always)]
+    pub fn assert_not_owned_by_current(&self, message: &str) {
+        // SAFETY: This wrapper only reads the raw mutex owner metadata and
+        // does not use the raw lock to bypass `lock_api`'s locking protocol.
+        unsafe { self.0.raw().assert_not_owned_by_current(message) };
     }
 }
 

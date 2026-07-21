@@ -129,6 +129,9 @@ read/poll/close via generic fd syscalls
 - 基于打开文件状态的 nonblocking 语义；
 - `read()` 消费 pending signal 的 fd 语义；
 - `poll(IN)` 与 pending signal 可见性的对应关系。
+- Linux `signalfd_siginfo` 导出语义：通用 header 字段始终来自
+  `SignalInfo`，timer signal 导出 timer ID/overrun/sigval，child-exit
+  signal 按 `SIL_CHLD` 导出 child PID、UID、退出状态和 CPU clock ticks。
 
 它不处理：
 

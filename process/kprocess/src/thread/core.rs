@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::{boxed::Box, sync::Arc};
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
 use kcred::Cred;
 use kerrno::KResult;
@@ -61,6 +61,89 @@ impl PreparedUserClone {
     }
 }
 
+/// Linux nice value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NiceValue(i32);
+
+impl NiceValue {
+    /// Default Linux nice value.
+    pub const DEFAULT: Self = Self(0);
+    /// Highest Linux nice value.
+    pub const MAX: Self = Self(Self::MAX_RAW);
+    /// Highest raw Linux nice value.
+    pub const MAX_RAW: i32 = 19;
+    /// Lowest Linux nice value.
+    pub const MIN: Self = Self(Self::MIN_RAW);
+    /// Lowest raw Linux nice value.
+    pub const MIN_RAW: i32 = -20;
+
+    /// Returns `value` clamped to the Linux nice range.
+    pub fn new_clamped(value: i32) -> Self {
+        Self(value.clamp(Self::MIN_RAW, Self::MAX_RAW))
+    }
+
+    /// Returns the raw Linux nice value.
+    pub fn as_i32(self) -> i32 {
+        self.0
+    }
+
+    /// Returns the priority value exported by `/proc/[pid]/stat`.
+    pub fn proc_stat_priority(self) -> i32 {
+        20 + self.0
+    }
+
+    /// Returns the raw value exported by `getpriority(2)`.
+    pub fn getpriority_raw(self) -> isize {
+        (20 - self.0) as isize
+    }
+
+    /// Returns the scheduler priority value used by fair schedulers.
+    pub fn fair_scheduler_priority(self) -> isize {
+        self.0 as isize
+    }
+}
+
+impl Default for NiceValue {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Consistent scheduler policy/priority snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchedulerParameters {
+    policy: Option<u32>,
+    priority: i32,
+}
+
+impl SchedulerParameters {
+    fn new(policy: Option<u32>, priority: i32) -> Self {
+        Self { policy, priority }
+    }
+
+    /// Returns the explicit scheduler policy, if one was configured.
+    pub fn policy(self) -> Option<u32> {
+        self.policy
+    }
+
+    /// Returns the configured scheduler priority.
+    pub fn priority(self) -> i32 {
+        self.priority
+    }
+}
+
+#[derive(Debug, Default)]
+struct SchedulerState {
+    policy: Option<u32>,
+    priority: i32,
+}
+
+impl SchedulerState {
+    fn parameters(&self) -> SchedulerParameters {
+        SchedulerParameters::new(self.policy, self.priority)
+    }
+}
+
 /// The inner data of a thread.
 pub struct Thread {
     task_number: Arc<kidentity::PidHandle>,
@@ -72,11 +155,9 @@ pub struct Thread {
     robust_list_head: AtomicUsize,
     signal: Arc<ThreadSignalManager>,
     time: Mutex<CpuTimeStatistics>,
-    oom_score_adj: AtomicI32,
     nice: AtomicI32,
-    scheduler_policy: AtomicU32,
-    scheduler_priority: AtomicI32,
-    exit: AtomicBool,
+    scheduler: Mutex<SchedulerState>,
+    is_exiting: AtomicBool,
     accessing_user_memory: AtomicBool,
     #[cfg(feature = "tee")]
     tee_session_ctx: Mutex<Option<Box<dyn TeeSessionCtxTrait>>>,
@@ -101,11 +182,9 @@ impl Thread {
             clear_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
             time: Mutex::new(CpuTimeStatistics::new()),
-            oom_score_adj: AtomicI32::new(200),
-            nice: AtomicI32::new(0),
-            scheduler_policy: AtomicU32::new(u32::MAX),
-            scheduler_priority: AtomicI32::new(0),
-            exit: AtomicBool::new(false),
+            nice: AtomicI32::new(NiceValue::default().as_i32()),
+            scheduler: Mutex::new(SchedulerState::default()),
+            is_exiting: AtomicBool::new(false),
             accessing_user_memory: AtomicBool::new(false),
             #[cfg(feature = "tee")]
             tee_session_ctx: Mutex::new(None),
@@ -184,62 +263,83 @@ impl Thread {
 
     /// Returns the robust-futex list head pointer registered by this thread.
     pub fn robust_list_head(&self) -> usize {
-        self.robust_list_head.load(Ordering::SeqCst)
+        self.robust_list_head.load(Ordering::Acquire)
     }
 
     /// Sets the robust-futex list head pointer for this thread.
     pub fn set_robust_list_head(&self, robust_list_head: usize) {
         self.robust_list_head
-            .store(robust_list_head, Ordering::SeqCst);
+            .store(robust_list_head, Ordering::Release);
     }
 
-    /// Returns the thread's current OOM score adjustment.
+    /// Returns the process-shared OOM score adjustment.
     pub fn oom_score_adj(&self) -> i32 {
-        self.oom_score_adj.load(Ordering::SeqCst)
+        self.runtime.oom_score_adj()
     }
 
-    /// Sets the thread's OOM score adjustment.
+    /// Sets the process-shared OOM score adjustment.
     pub fn set_oom_score_adj(&self, value: i32) {
-        self.oom_score_adj.store(value, Ordering::SeqCst);
+        self.runtime.set_oom_score_adj(value);
     }
 
     /// Returns the thread's scheduler nice value.
-    pub fn nice(&self) -> i32 {
-        self.nice.load(Ordering::Acquire)
+    pub fn nice(&self) -> NiceValue {
+        NiceValue::new_clamped(self.nice.load(Ordering::Acquire))
     }
 
     /// Sets the thread's scheduler nice value.
-    pub fn set_nice(&self, nice: i32) {
-        self.nice.store(nice, Ordering::Release);
+    pub fn set_nice(&self, nice: NiceValue) {
+        self.nice.store(nice.as_i32(), Ordering::Release);
+    }
+
+    /// Returns the thread's scheduler policy/priority snapshot.
+    pub fn scheduler_parameters(&self) -> SchedulerParameters {
+        self.scheduler.lock().parameters()
     }
 
     /// Returns the explicit scheduler policy if one has been configured.
     pub fn scheduler_policy(&self) -> Option<u32> {
-        match self.scheduler_policy.load(Ordering::Acquire) {
-            u32::MAX => None,
-            policy => Some(policy),
-        }
+        self.scheduler_parameters().policy()
     }
 
     /// Returns the configured scheduler priority.
     pub fn scheduler_priority(&self) -> i32 {
-        self.scheduler_priority.load(Ordering::Acquire)
+        self.scheduler_parameters().priority()
     }
 
     /// Sets the scheduler policy and priority for this thread.
     pub fn set_scheduler(&self, policy: u32, priority: i32) {
-        self.scheduler_priority.store(priority, Ordering::Release);
-        self.scheduler_policy.store(policy, Ordering::Release);
+        let mut scheduler = self.scheduler.lock();
+        scheduler.policy = Some(policy);
+        scheduler.priority = priority;
+    }
+
+    /// Updates the scheduler priority after validating it against the current
+    /// effective policy while holding the scheduler state lock.
+    pub fn set_scheduler_priority_with<F>(
+        &self,
+        priority: i32,
+        default_policy: u32,
+        validate: F,
+    ) -> KResult<()>
+    where
+        F: FnOnce(u32, i32) -> KResult<()>,
+    {
+        let mut scheduler = self.scheduler.lock();
+        let policy = scheduler.policy.unwrap_or(default_policy);
+        validate(policy, priority)?;
+        scheduler.priority = priority;
+        Ok(())
     }
 
     /// Returns whether the thread is in its exit path.
     pub fn is_exiting(&self) -> bool {
-        self.exit.load(Ordering::Acquire)
+        self.is_exiting.load(Ordering::Acquire)
     }
 
     /// Marks the thread as exiting.
     pub fn set_exit(&self) {
-        self.exit.store(true, Ordering::Release);
+        self.is_exiting.store(true, Ordering::Release);
     }
 
     /// Returns whether the thread is currently performing a user-memory access.
@@ -334,7 +434,7 @@ impl Thread {
     }
 
     /// Returns sampled user and kernel CPU time in nanoseconds.
-    pub fn sample_cpu_time_ns(&self) -> (usize, usize) {
+    pub fn sample_cpu_time_ns(&self) -> (u64, u64) {
         self.time.lock().sample_nanos()
     }
 

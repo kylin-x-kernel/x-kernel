@@ -10,7 +10,6 @@ description = "Process management for X-Kernel"
 
 [features]
 tee = ["dep:tee_task_iface"]
-tee_ta_sign = ["tee", "tee_task_iface/tee_ta_sign"]
 tipc = ["dep:tipc_handle"]
 
 [dependencies]
@@ -37,6 +36,8 @@ ksync.workspace = true
 ktask.workspace = true
 ktimer.workspace = true
 lazyinit.workspace = true
+linked_list_r4l.workspace = true
+memaddr.workspace = true
 memspace.workspace = true
 tee_task_iface = { workspace = true, optional = true }
 tipc_handle = { workspace = true, optional = true }

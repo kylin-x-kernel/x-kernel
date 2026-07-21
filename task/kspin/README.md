@@ -1,9 +1,10 @@
 # kspin
-Kernel-space spinlocks with configurable critical section guards.
+Kernel-space spinlocks and reader-writer spinlocks with configurable critical section guards.
 
 ## Features
 
 - 🔒 **Type-safe spinlocks** with compile-time guard selection
+- 📖 **IRQ-safe reader-writer spinlocks** for short non-sleeping shared/exclusive sections
 - 🚀 **Zero-cost abstractions** - guards optimized away when not needed
 - 🎯 **Single-core optimization** - lock state removed without `smp` feature
 - 📦 **No-std compatible** - works in bare-metal environments
@@ -31,7 +32,7 @@ fn increment() {
 
 ## Lock Types
 
-kspin provides three main lock types with different safety guarantees:
+kspin provides spinlock aliases with different safety guarantees:
 
 ### `SpinRaw<T>`
 Raw spinlock with no guards. **Fastest but least safe** - must only be used in contexts where preemption and IRQs are already disabled.
@@ -67,6 +68,23 @@ let guard = lock.lock();
 // Both preemption and IRQs are disabled here
 ```
 
+### `SpinRwNoIrq<T>`
+Reader-writer spinlock that disables both IRQs and preemption for readers and
+writers. Use it for short non-sleeping invariants where multiple readers can
+observe stable state concurrently.
+
+```rust
+use kspin::SpinRwNoIrq;
+
+let lock = SpinRwNoIrq::new(0);
+let reader = lock.read();
+assert_eq!(*reader, 0);
+drop(reader);
+
+let mut writer = lock.write();
+*writer = 1;
+```
+
 ## Architecture
 
 The crate is organized into three main components:
@@ -81,11 +99,16 @@ RAII guards that manage critical sections:
 ### Locks (`lock` module)
 Generic spinlock implementation `SpinLock<G, T>` parameterized by guard type.
 
+### Reader-writer Locks (`rwlock` module)
+Generic spinning reader-writer lock implementation `SpinRwLock<G, T>`
+parameterized by guard type.
+
 ### Type Aliases
 Convenient aliases for common lock types:
 - `SpinRaw<T>` = `SpinLock<NoOp, T>`
 - `SpinNoPreempt<T>` = `SpinLock<NoPreempt, T>`
 - `SpinNoIrq<T>` = `SpinLock<NoPreemptIrqSave, T>`
+- `SpinRwNoIrq<T>` = `SpinRwLock<NoPreemptIrqSave, T>`
 
 ## Usage Patterns
 
@@ -149,4 +172,3 @@ impl KernelGuardIf for MyKernelGuard {
 ## License
 
 See [LICENSE](LICENSE) in the repository root.
-

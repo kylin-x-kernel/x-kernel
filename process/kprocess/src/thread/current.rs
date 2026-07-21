@@ -9,10 +9,9 @@ use fs_context::{FsStruct, init_fs};
 use kcred::Cred;
 use ksync::Mutex;
 use ktask::current;
-use memspace::MmSpace;
 
 use super::{AsThread, CurrentThread, Thread};
-use crate::{Process, Tid};
+use crate::{LiveAddressSpace, Process, Tid};
 
 impl Deref for CurrentThread {
     type Target = Thread;
@@ -80,7 +79,7 @@ pub fn current_user_process_fs_context() -> Arc<Mutex<FsStruct>> {
 ///
 /// Panics if the current task is not a user thread or if the process runtime
 /// has already detached its address space, such as during late process exit.
-pub fn current_user_process_address_space() -> Arc<Mutex<MmSpace>> {
+pub fn current_user_process_address_space() -> LiveAddressSpace {
     current_user_process()
         .address_space()
         .expect("current user thread must still expose process address space")

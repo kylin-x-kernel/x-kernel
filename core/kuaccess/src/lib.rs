@@ -55,12 +55,10 @@ fn dispatch_irq_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool 
         return false;
     }
 
-    let outcome = thread
-        .process()
-        .address_space()
-        .expect("accessing user memory requires a live process address space")
-        .lock()
-        .handle_page_fault(vaddr, access_flags);
+    let Ok(address_space) = thread.process().address_space() else {
+        return false;
+    };
+    let outcome = address_space.lock().handle_page_fault(vaddr, access_flags);
     fault_outcome_to_trap_result(outcome)
 }
 

@@ -30,6 +30,7 @@ impl BaseGuard for TestGuardIrq {
 }
 
 type TestSpinIrq<T> = SpinLock<TestGuardIrq, T>;
+type TestRwSpinIrq<T> = SpinRwLock<TestGuardIrq, T>;
 type TestMutex<T> = SpinRaw<T>;
 
 #[derive(Eq, PartialEq, Debug)]
@@ -64,6 +65,49 @@ fn guard_state_restored() {
     let _a = m.lock();
     assert_eq!(IRQ_CNT.load(Ordering::Relaxed), 1);
     drop(_a);
+    assert_eq!(IRQ_CNT.load(Ordering::Relaxed), 0);
+}
+
+#[def_test]
+fn rwlock_allows_multiple_readers() {
+    let lock = TestRwSpinIrq::new(42);
+    let first = lock.read();
+    let second = lock.read();
+
+    assert_eq!(*first, 42);
+    assert_eq!(*second, 42);
+    assert_eq!(IRQ_CNT.load(Ordering::Relaxed), 2);
+
+    drop(first);
+    drop(second);
+    assert_eq!(IRQ_CNT.load(Ordering::Relaxed), 0);
+}
+
+#[def_test]
+fn rwlock_writer_excludes_readers_and_writers() {
+    let lock = TestRwSpinIrq::new(1);
+    let mut writer = lock.write();
+    *writer = 2;
+
+    assert!(lock.try_read().is_none());
+    assert!(lock.try_write().is_none());
+    assert_eq!(IRQ_CNT.load(Ordering::Relaxed), 1);
+
+    drop(writer);
+    assert_eq!(*lock.read(), 2);
+    assert_eq!(IRQ_CNT.load(Ordering::Relaxed), 0);
+}
+
+#[def_test]
+fn rwlock_try_write_fails_when_reader_is_active() {
+    let lock = TestRwSpinIrq::new(());
+    let reader = lock.read();
+
+    assert!(lock.try_write().is_none());
+    assert_eq!(IRQ_CNT.load(Ordering::Relaxed), 1);
+
+    drop(reader);
+    assert!(lock.try_write().is_some());
     assert_eq!(IRQ_CNT.load(Ordering::Relaxed), 0);
 }
 

@@ -6,19 +6,226 @@
 
 #![cfg(unittest)]
 
-use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
+use core::{
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    task::{RawWaker, RawWakerVTable, Waker},
+};
 
 use kcred::initial_cred;
-use ktask::{TaskInner, current, prepare_task};
+use khal::{
+    mem::{PAGE_SIZE_4K, VirtAddr},
+    paging::MappingFlags,
+};
+use ktask::{TaskInner, prepare_task};
+use memspace::VmRuntimeRef;
 use unittest::{assert, assert_eq, def_test};
 
 use crate::{
-    AsThread, Process, build_process_thread, current_user_process,
+    AsThread, ForkAddressSpace, ForkFdTable, ForkFs, ForkParent, ForkSignalActions, Process,
+    ProcessExitPublication, ProcessForkConfig, build_process_thread,
     process::INIT_PROC,
     process_exit, procfs,
     publication::{prepare_user_task, process_publication, task_identity_matches_thread},
     publish_user_task, scheduler, wait_reap,
 };
+
+fn new_wake_counter() -> &'static AtomicUsize {
+    Box::leak(Box::new(AtomicUsize::new(0)))
+}
+
+/// # Safety
+///
+/// `data` must be the pointer originally stored in a counter `RawWaker`.
+unsafe fn counter_waker_clone(data: *const ()) -> RawWaker {
+    RawWaker::new(data, &COUNTER_WAKER_VTABLE)
+}
+
+/// # Safety
+///
+/// `data` must point to a leaked `'static` [`AtomicUsize`] created by
+/// `new_wake_counter`.
+unsafe fn counter_waker_wake(data: *const ()) {
+    // SAFETY: `data` points to a leaked `'static` `AtomicUsize`, so shared
+    // access through atomic operations is valid for the lifetime of the waker.
+    let counter = unsafe { &*(data as *const AtomicUsize) };
+    counter.fetch_add(1, Ordering::SeqCst);
+}
+
+/// # Safety
+///
+/// `data` must point to a leaked `'static` [`AtomicUsize`] created by
+/// `new_wake_counter`.
+unsafe fn counter_waker_wake_by_ref(data: *const ()) {
+    // SAFETY: `data` points to a leaked `'static` `AtomicUsize`, so shared
+    // access through atomic operations is valid for the lifetime of the waker.
+    let counter = unsafe { &*(data as *const AtomicUsize) };
+    counter.fetch_add(1, Ordering::SeqCst);
+}
+
+/// # Safety
+///
+/// `data` must be the pointer originally stored in a counter `RawWaker`.
+unsafe fn counter_waker_drop(_data: *const ()) {}
+
+static COUNTER_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
+    counter_waker_clone,
+    counter_waker_wake,
+    counter_waker_wake_by_ref,
+    counter_waker_drop,
+);
+
+fn counter_waker(counter: &'static AtomicUsize) -> Waker {
+    let raw = RawWaker::new(counter as *const _ as *const (), &COUNTER_WAKER_VTABLE);
+    // SAFETY: `raw` is built from callbacks that preserve the `RawWaker`
+    // contract for a leaked `'static` `AtomicUsize`.
+    unsafe { Waker::from_raw(raw) }
+}
+
+struct ExitAccountingObserver {
+    process: Arc<Process>,
+    expected_utime_ns: u64,
+    expected_stime_ns: u64,
+    failures: AtomicUsize,
+}
+
+fn new_exit_accounting_observer(
+    process: Arc<Process>,
+    expected_utime_ns: u64,
+    expected_stime_ns: u64,
+) -> &'static ExitAccountingObserver {
+    Box::leak(Box::new(ExitAccountingObserver {
+        process,
+        expected_utime_ns,
+        expected_stime_ns,
+        failures: AtomicUsize::new(0),
+    }))
+}
+
+/// # Safety
+///
+/// `data` must be the pointer originally stored in an accounting observer
+/// `RawWaker`.
+unsafe fn accounting_waker_clone(data: *const ()) -> RawWaker {
+    RawWaker::new(data, &ACCOUNTING_WAKER_VTABLE)
+}
+
+/// # Safety
+///
+/// `data` must point to a leaked `'static` [`ExitAccountingObserver`] created
+/// by `new_exit_accounting_observer`.
+unsafe fn accounting_waker_wake(data: *const ()) {
+    // SAFETY: `data` points to a leaked `'static` observer used only through
+    // shared references and atomics.
+    let observer = unsafe { &*(data as *const ExitAccountingObserver) };
+    let observed = observer.process.exited_thread_time_ns();
+    if observed != (observer.expected_utime_ns, observer.expected_stime_ns) {
+        observer.failures.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// # Safety
+///
+/// `data` must point to a leaked `'static` [`ExitAccountingObserver`] created
+/// by `new_exit_accounting_observer`.
+unsafe fn accounting_waker_wake_by_ref(data: *const ()) {
+    // SAFETY: same invariant as `accounting_waker_wake`; the observer is
+    // leaked for the test lifetime.
+    unsafe { accounting_waker_wake(data) };
+}
+
+/// # Safety
+///
+/// `data` must be the pointer originally stored in an accounting observer
+/// `RawWaker`.
+unsafe fn accounting_waker_drop(_data: *const ()) {}
+
+static ACCOUNTING_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
+    accounting_waker_clone,
+    accounting_waker_wake,
+    accounting_waker_wake_by_ref,
+    accounting_waker_drop,
+);
+
+fn accounting_waker(observer: &'static ExitAccountingObserver) -> Waker {
+    let raw = RawWaker::new(observer as *const _ as *const (), &ACCOUNTING_WAKER_VTABLE);
+    // SAFETY: `raw` is built from callbacks that preserve the `RawWaker`
+    // contract for a leaked `'static` observer.
+    unsafe { Waker::from_raw(raw) }
+}
+
+struct ChildExitWakeObserver {
+    parent: Arc<Process>,
+    child: Arc<Process>,
+    failures: AtomicUsize,
+}
+
+fn new_child_exit_wake_observer(
+    parent: Arc<Process>,
+    child: Arc<Process>,
+) -> &'static ChildExitWakeObserver {
+    Box::leak(Box::new(ChildExitWakeObserver {
+        parent,
+        child,
+        failures: AtomicUsize::new(0),
+    }))
+}
+
+/// # Safety
+///
+/// `data` must be the pointer originally stored in a child-exit observer
+/// `RawWaker`.
+unsafe fn child_exit_waker_clone(data: *const ()) -> RawWaker {
+    RawWaker::new(data, &CHILD_EXIT_WAKER_VTABLE)
+}
+
+/// # Safety
+///
+/// `data` must point to a leaked `'static` [`ChildExitWakeObserver`] created by
+/// `new_child_exit_wake_observer`.
+unsafe fn child_exit_waker_wake(data: *const ()) {
+    // SAFETY: `data` points to a leaked `'static` observer used only through
+    // shared references and atomics.
+    let observer = unsafe { &*(data as *const ChildExitWakeObserver) };
+    let child_is_linked = observer
+        .parent
+        .children()
+        .iter()
+        .any(|child| Arc::ptr_eq(child, &observer.child));
+    if !observer.child.is_waitable_zombie() || !child_is_linked {
+        observer.failures.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// # Safety
+///
+/// `data` must point to a leaked `'static` [`ChildExitWakeObserver`] created by
+/// `new_child_exit_wake_observer`.
+unsafe fn child_exit_waker_wake_by_ref(data: *const ()) {
+    // SAFETY: same invariant as `child_exit_waker_wake`; the observer is
+    // leaked for the test lifetime.
+    unsafe { child_exit_waker_wake(data) };
+}
+
+/// # Safety
+///
+/// `data` must be the pointer originally stored in a child-exit observer
+/// `RawWaker`.
+unsafe fn child_exit_waker_drop(_data: *const ()) {}
+
+static CHILD_EXIT_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
+    child_exit_waker_clone,
+    child_exit_waker_wake,
+    child_exit_waker_wake_by_ref,
+    child_exit_waker_drop,
+);
+
+fn child_exit_waker(observer: &'static ChildExitWakeObserver) -> Waker {
+    let raw = RawWaker::new(observer as *const _ as *const (), &CHILD_EXIT_WAKER_VTABLE);
+    // SAFETY: `raw` is built from callbacks that preserve the `RawWaker`
+    // contract for a leaked `'static` observer.
+    unsafe { Waker::from_raw(raw) }
+}
 
 fn ensure_init() -> Arc<Process> {
     if let Some(p) = INIT_PROC.get() {
@@ -31,38 +238,29 @@ fn ensure_init() -> Arc<Process> {
 }
 
 fn build_prepared_test_user_task() -> (Arc<Process>, TaskInner) {
-    let parent = current_user_process();
+    let parent = ensure_init();
     let task_number =
         kidentity::allocate_root_pid_handle().expect("test leader identity should allocate");
     let pid = task_number.root_nr();
     let process = parent.fork_with_task_number(task_number.clone(), Some(ksignal::Signo::SIGCHLD));
 
-    let exe_path = parent
-        .exe_path()
-        .expect("current process must expose a live exec path");
-    let cmdline = parent
-        .cmdline()
-        .expect("current process must expose a live cmdline");
-    let address_space = parent
-        .address_space()
-        .expect("current process must expose a live address space");
-    let fs_context = parent
-        .fs_context()
-        .expect("current process must expose a live fs context");
-    let signal_actions = parent
-        .signal_actions()
-        .expect("current process must expose live signal actions");
-    let credentials = crate::current_cred();
+    let mut aspace = memspace::MmSpace::new_user_empty().expect("user mmspace should allocate");
+    ksignal::map_signal_trampoline(&mut aspace).expect("signal trampoline should map");
+    let address_space = Arc::new(ksync::Mutex::new(aspace));
+    let fs_context = fs_context::copy_init_fs_struct();
+    let signal_actions = Arc::new(ksync::spin::SpinNoIrq::new(
+        ksignal::api::SignalActions::default(),
+    ));
 
     let thread = build_process_thread(
         process.clone(),
         task_number.clone(),
-        exe_path,
-        cmdline,
+        String::from("[test-user-thread]"),
+        Arc::new(vec![]),
         address_space,
         fs_context,
         signal_actions,
-        credentials,
+        initial_cred(),
     );
     let task = TaskInner::new_user(
         || {},
@@ -108,6 +306,55 @@ fn publish_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskR
     let task = prepare_task(task);
     process_publication().publish_task(&task);
     task
+}
+
+fn mapped_test_address_space() -> Arc<ksync::Mutex<memspace::MmSpace>> {
+    let start = VirtAddr::from_usize(0x4000);
+    let mut aspace = memspace::MmSpace::new_empty_user(start, PAGE_SIZE_4K * 4)
+        .expect("user mmspace should allocate");
+    aspace
+        .map(
+            start,
+            PAGE_SIZE_4K,
+            MappingFlags::READ | MappingFlags::WRITE,
+            false,
+            VmRuntimeRef::new_anon_private(start, khal::paging::PageSize::Size4K),
+        )
+        .expect("test mapping should install");
+    Arc::new(ksync::Mutex::new(aspace))
+}
+
+fn process_with_address_space(
+    pid: crate::Pid,
+    address_space: Arc<ksync::Mutex<memspace::MmSpace>>,
+) -> (Arc<Process>, TaskInner) {
+    let parent = ensure_init();
+    let task_number = kidentity::PidHandle::fixed_root(pid);
+    let process = parent.fork_with_task_number(task_number.clone(), Some(ksignal::Signo::SIGCHLD));
+    let fs_context = fs_context::copy_init_fs_struct();
+    let signal_actions = Arc::new(ksync::spin::SpinNoIrq::new(
+        ksignal::api::SignalActions::default(),
+    ));
+
+    let thread = build_process_thread(
+        process.clone(),
+        task_number.clone(),
+        String::from("[test-thread]"),
+        Arc::new(vec![]),
+        address_space,
+        fs_context,
+        signal_actions,
+        initial_cred(),
+    );
+    let task = TaskInner::new_user(
+        || {},
+        format!("test-user-thread-{pid}"),
+        16 * 1024,
+        task_number,
+        thread,
+    );
+
+    (process, task)
 }
 
 #[def_test(serial)]
@@ -166,10 +413,10 @@ fn test_process_lifecycle() {
     child.group_exit();
     assert!(child.is_group_exited());
 
-    // Test Zombie/Exit
-    assert!(!child.is_zombie());
-    child.exit();
-    assert!(child.is_zombie());
+    // Test Exit
+    assert!(!child.is_exited());
+    child.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    assert!(child.is_exited());
 
     // Free
     child.free();
@@ -192,6 +439,12 @@ fn test_process_group_session() {
     // Move p2 to p1's group - Should FAIL because they are in different sessions
     // p1 is in s1 (sid 200), p2 is in init's session (sid != 200)
     assert!(!p2.move_to_group(&g1));
+    assert!(
+        g1.processes()
+            .iter()
+            .all(|process| process.pid() != p2.pid()),
+        "failed cross-session move must not publish target group membership"
+    );
 
     // To test move_to_group successfully, we need a process in the SAME session.
     // Fork p1_child from p1. It inherits session s1.
@@ -211,11 +464,11 @@ fn test_process_group_session() {
     assert_eq!(p1_child.group().pgid(), 200);
 
     // Clean up
-    p1.exit();
+    p1.exit_with_publication(ProcessExitPublication::WaitableZombie);
     p1.free();
-    p2.exit();
+    p2.exit_with_publication(ProcessExitPublication::WaitableZombie);
     p2.free();
-    p1_child.exit();
+    p1_child.exit_with_publication(ProcessExitPublication::WaitableZombie);
     p1_child.free();
 }
 
@@ -263,9 +516,9 @@ fn test_move_to_group_keeps_group_membership_consistent() {
         "source group must stop listing the process after move_to_group"
     );
 
-    mover.exit();
+    mover.exit_with_publication(ProcessExitPublication::WaitableZombie);
     mover.free();
-    leader.exit();
+    leader.exit_with_publication(ProcessExitPublication::WaitableZombie);
     leader.free();
 }
 
@@ -287,7 +540,7 @@ fn test_exit_reparents_children_to_init() {
         "parent should initially list its child"
     );
 
-    parent.exit();
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
 
     let reparented = child
         .parent()
@@ -310,8 +563,126 @@ fn test_exit_reparents_children_to_init() {
     );
 
     parent.free();
-    child.exit();
+    child.exit_with_publication(ProcessExitPublication::WaitableZombie);
     child.free();
+}
+
+#[def_test(serial)]
+fn test_exit_reparent_resets_child_exit_signal_to_sigchld() {
+    let init = ensure_init();
+    let parent = init.fork_with_exit_signal(302, Some(ksignal::Signo::SIGUSR1));
+    let child = parent.fork_with_exit_signal(303, Some(ksignal::Signo::SIGUSR2));
+
+    assert_eq!(child.exit_signal(), Some(ksignal::Signo::SIGUSR2));
+
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+
+    let reparented = child.parent().expect("child should be reparented to init");
+    assert_eq!(reparented.pid(), init.pid());
+    assert_eq!(
+        child.exit_signal(),
+        Some(ksignal::Signo::SIGCHLD),
+        "orphaned children should report to init using SIGCHLD"
+    );
+
+    parent.free();
+    child.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    child.free();
+}
+
+#[def_test(serial)]
+fn test_reap_after_reparent_removes_child_from_current_parent() {
+    let init = ensure_init();
+    let parent = init.fork(304);
+    let child = parent.fork(305);
+
+    child.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+
+    assert_eq!(
+        child.parent().map(|parent| parent.pid()),
+        Some(init.pid()),
+        "exited child should be linked under init after old parent exits"
+    );
+    assert!(
+        init.children().iter().any(|proc| proc.pid() == child.pid()),
+        "init must own the reparented zombie before reap"
+    );
+
+    assert!(
+        wait_reap::try_reap_zombie_process(&child),
+        "reap should consume the zombie from its current parent relation"
+    );
+    assert!(
+        !init.children().iter().any(|proc| proc.pid() == child.pid()),
+        "reaped child must not remain linked under init"
+    );
+    assert!(
+        init.children()
+            .iter()
+            .any(|proc| proc.pid() == parent.pid()),
+        "reaping the reparented child must not detach the exited old parent"
+    );
+
+    parent.free();
+}
+
+#[def_test(serial)]
+fn test_clone_parent_inherits_callers_exit_signal_contract() {
+    let init = ensure_init();
+    let parent_task_number = kidentity::PidHandle::fixed_root(1_500);
+    let parent =
+        init.fork_with_task_number(parent_task_number.clone(), Some(ksignal::Signo::SIGUSR1));
+    let fs_context = fs_context::copy_init_fs_struct();
+    let signal_actions = Arc::new(ksync::spin::SpinNoIrq::new(
+        ksignal::api::SignalActions::default(),
+    ));
+    let thread = build_process_thread(
+        parent.clone(),
+        parent_task_number.clone(),
+        String::from("[clone-parent-test]"),
+        Arc::new(vec![]),
+        mapped_test_address_space(),
+        fs_context,
+        signal_actions,
+        initial_cred(),
+    );
+    let task = TaskInner::new_user(
+        || {},
+        String::from("clone-parent-test"),
+        16 * 1024,
+        parent_task_number,
+        thread,
+    );
+
+    let prepared = task
+        .as_thread()
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::CallerParent,
+            address_space: ForkAddressSpace::Private,
+            fs: ForkFs::Private,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::empty(),
+            exit_signal: Some(ksignal::Signo::SIGUSR2),
+        })
+        .expect("CLONE_PARENT-style fork should prepare");
+    let child = prepared.process().clone();
+
+    assert_eq!(
+        child.parent().map(|parent| parent.pid()),
+        Some(init.pid()),
+        "CLONE_PARENT child should be linked under the caller's parent"
+    );
+    assert_eq!(
+        child.exit_signal(),
+        Some(ksignal::Signo::SIGUSR1),
+        "CLONE_PARENT child should inherit the caller's process exit signal"
+    );
+
+    child.discard_unpublished();
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    parent.free();
 }
 
 #[def_test(serial)]
@@ -331,7 +702,7 @@ fn test_free_only_reaps_target_zombie_child() {
         "init should initially list the second child"
     );
 
-    first.exit();
+    first.exit_with_publication(ProcessExitPublication::WaitableZombie);
     first.free();
 
     assert!(
@@ -345,12 +716,12 @@ fn test_free_only_reaps_target_zombie_child() {
         "reaping one child must not hide live siblings"
     );
 
-    second.exit();
+    second.exit_with_publication(ProcessExitPublication::WaitableZombie);
     second.free();
 }
 
 #[def_test(user, serial)]
-fn test_zombie_process_is_not_live_even_if_runtime_still_exists() {
+fn test_exited_process_is_not_live_even_if_runtime_still_exists() {
     let (proc, prepared) = build_prepared_test_user_task();
     let publication = process_publication();
 
@@ -358,23 +729,194 @@ fn test_zombie_process_is_not_live_even_if_runtime_still_exists() {
     publication.publish_process_identity(&proc);
     assert!(
         publication.live_process(proc.pid()).is_ok(),
-        "non-zombie process should be live before exit"
+        "non-exited process should be live before exit"
     );
 
     process_exit::finalize_process_exit(&proc);
 
-    assert!(proc.is_zombie());
+    assert!(proc.is_exited());
     assert!(
         proc.runtime_ref().is_some(),
         "runtime may still exist while the owning thread object is not dropped yet"
     );
     assert!(
         publication.live_process(proc.pid()).is_err(),
-        "zombie process must stop participating in live-process lookups even before runtime drops"
+        "exited process must stop participating in live-process lookups even before runtime drops"
     );
 
     drop(prepared);
-    wait_reap::reap_zombie_process(&proc);
+    wait_reap::assert_reap_zombie_process(&proc);
+}
+
+#[def_test(serial)]
+fn test_exit_cleanup_clears_exclusive_address_space() {
+    let (proc, _task) = process_with_address_space(8_130, mapped_test_address_space());
+
+    assert!(
+        proc.clear_exclusive_address_space()
+            .expect("runtime must be attached"),
+        "exclusive address space should be cleared during process exit"
+    );
+    assert!(
+        proc.address_space().is_err(),
+        "live address-space access must fail after the runtime mm user is released"
+    );
+    let address_space = proc
+        .pinned_address_space_for_teardown_observation()
+        .expect("cleared address space object should remain attached until task drop");
+    assert_eq!(
+        address_space.lock().vmas().count(),
+        0,
+        "exit cleanup must release user VMA metadata eagerly"
+    );
+
+    process_exit::finalize_process_exit(&proc);
+    wait_reap::assert_reap_zombie_process(&proc);
+}
+
+#[def_test(serial)]
+fn test_exit_cleanup_ignores_non_runtime_address_space_refs() {
+    let observed_address_space = mapped_test_address_space();
+    let (proc, _task) = process_with_address_space(8_131, observed_address_space.clone());
+
+    assert!(
+        proc.clear_exclusive_address_space()
+            .expect("runtime must be attached"),
+        "temporary address-space references must not suppress final mm cleanup"
+    );
+    assert_eq!(
+        observed_address_space.lock().vmas().count(),
+        0,
+        "last runtime mm user must release mappings even when other Arc holders remain"
+    );
+
+    process_exit::finalize_process_exit(&proc);
+    wait_reap::assert_reap_zombie_process(&proc);
+}
+
+#[def_test(serial)]
+fn test_exit_cleanup_preserves_clone_vm_address_space_until_last_runtime_user() {
+    let shared_address_space = mapped_test_address_space();
+    let (parent, parent_task) = process_with_address_space(8_132, shared_address_space.clone());
+    let child = parent_task
+        .as_thread()
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Shared,
+            fs: ForkFs::Private,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::empty(),
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+        })
+        .expect("CLONE_VM test child should prepare");
+    let child_process = child.process().clone();
+
+    assert!(
+        !parent
+            .clear_exclusive_address_space()
+            .expect("runtime must be attached"),
+        "shared VM mappings must remain while another process runtime still uses the mm"
+    );
+    assert_eq!(
+        shared_address_space.lock().vmas().count(),
+        1,
+        "shared VM users must keep their mappings"
+    );
+
+    assert!(
+        child_process
+            .clear_exclusive_address_space()
+            .expect("child runtime must be attached"),
+        "last shared VM runtime user should clear mappings"
+    );
+    assert_eq!(
+        shared_address_space.lock().vmas().count(),
+        0,
+        "last shared VM user must release mappings"
+    );
+
+    child_process.discard_unpublished();
+    process_exit::finalize_process_exit(&parent);
+    wait_reap::assert_reap_zombie_process(&parent);
+}
+
+#[def_test(serial)]
+fn test_failed_shared_vm_fork_rolls_back_tree_relation() {
+    let shared_address_space = mapped_test_address_space();
+    let (parent, parent_task) = process_with_address_space(8_134, shared_address_space);
+    let child_count_before = parent.children().len();
+
+    assert!(
+        parent
+            .clear_exclusive_address_space()
+            .expect("runtime must be attached"),
+        "test setup must release the last active address-space user"
+    );
+
+    let err = match parent_task
+        .as_thread()
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Shared,
+            fs: ForkFs::Private,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::empty(),
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+        }) {
+        Ok(_) => panic!("shared-VM fork must fail once address-space users are released"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err, kerrno::KError::NoSuchProcess);
+    assert_eq!(
+        parent.children().len(),
+        child_count_before,
+        "failed fork must roll back the unpublished child relation"
+    );
+
+    process_exit::finalize_process_exit(&parent);
+    wait_reap::assert_reap_zombie_process(&parent);
+}
+
+#[def_test(serial)]
+fn test_failed_private_vm_fork_after_parent_mm_teardown_rolls_back_tree_relation() {
+    let shared_address_space = mapped_test_address_space();
+    let (parent, parent_task) = process_with_address_space(8_135, shared_address_space);
+    let child_count_before = parent.children().len();
+
+    assert!(
+        parent
+            .clear_exclusive_address_space()
+            .expect("runtime must be attached"),
+        "test setup must release the last active address-space user"
+    );
+
+    let err = match parent_task
+        .as_thread()
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Private,
+            fs: ForkFs::Private,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::empty(),
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+        }) {
+        Ok(_) => panic!("private fork must fail once parent mm user is released"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err, kerrno::KError::NoSuchProcess);
+    assert_eq!(
+        parent.children().len(),
+        child_count_before,
+        "failed fork must roll back the unpublished child relation"
+    );
+
+    process_exit::finalize_process_exit(&parent);
+    wait_reap::assert_reap_zombie_process(&parent);
 }
 
 #[def_test(serial)]
@@ -402,8 +944,262 @@ fn test_group_exit_prevents_late_thread_exit_from_overwriting_exit_code() {
         "late exits after group_exit must not overwrite the published group exit code"
     );
 
-    proc.exit();
+    proc.exit_with_publication(ProcessExitPublication::WaitableZombie);
     proc.free();
+}
+
+#[def_test(serial)]
+fn test_process_exit_notifies_pidfd_and_parent_waiters() {
+    let init = ensure_init();
+    let child = init.fork(580);
+    let _leader_task = publish_test_thread(&child, 580);
+    child.accumulate_exited_thread_time(77, 88);
+
+    let parent_counter = new_wake_counter();
+    let parent_waker = counter_waker(parent_counter);
+    init.child_exit_event().register(&parent_waker);
+
+    let child_counter = new_wake_counter();
+    let child_waker = counter_waker(child_counter);
+    child.exit_event().register(&child_waker);
+
+    let accounting_observer = new_exit_accounting_observer(child.clone(), 77, 88);
+    let accounting_parent_waker = accounting_waker(accounting_observer);
+    init.child_exit_event().register(&accounting_parent_waker);
+    let accounting_child_waker = accounting_waker(accounting_observer);
+    child.exit_event().register(&accounting_child_waker);
+
+    process_exit::finalize_process_exit(&child);
+
+    assert_eq!(
+        child_counter.load(Ordering::SeqCst),
+        1,
+        "process exit must wake pidfd-style observers"
+    );
+    assert_eq!(
+        parent_counter.load(Ordering::SeqCst),
+        0,
+        "finalize_process_exit must not wake parent waiters before child-exit policy is resolved"
+    );
+
+    process_exit::notify_child_exit(&init);
+
+    assert_eq!(
+        parent_counter.load(Ordering::SeqCst),
+        1,
+        "explicit child-exit notification must wake parent waitpid observers"
+    );
+    assert_eq!(
+        accounting_observer.failures.load(Ordering::SeqCst),
+        0,
+        "exit notifications must observe final exited-thread accounting"
+    );
+
+    wait_reap::assert_reap_zombie_process(&child);
+}
+
+#[def_test(serial)]
+fn test_complete_process_exit_wakes_parent_after_child_is_waitable() {
+    let init = ensure_init();
+    let child = init.fork(579);
+
+    let observer = new_child_exit_wake_observer(init.clone(), child.clone());
+    init.child_exit_event()
+        .register(&child_exit_waker(observer));
+
+    let autoreap = process_exit::complete_process_exit(&child);
+
+    assert!(!autoreap, "default SIGCHLD must leave a waitable child");
+    assert_eq!(
+        observer.failures.load(Ordering::SeqCst),
+        0,
+        "parent wait wake must observe a linked waitable zombie"
+    );
+
+    wait_reap::assert_reap_zombie_process(&child);
+}
+
+#[def_test(serial)]
+fn test_child_exit_signal_info_carries_linux_child_payload() {
+    let (child, _task) = build_prepared_test_user_task();
+    process_exit::finish_thread_exit(&child, child.pid(), 9 << 8);
+
+    let siginfo = process_exit::child_exit_signal_info(&child, ksignal::Signo::SIGCHLD);
+    let payload = siginfo
+        .as_signal_info()
+        .child_exit()
+        .expect("child-exit signal should carry sigchld payload");
+
+    assert_eq!(siginfo.signo(), ksignal::Signo::SIGCHLD);
+    assert_eq!(siginfo.as_signal_info().code(), 1);
+    assert_eq!(payload.pid(), child.pid());
+    assert_eq!(payload.uid(), 0);
+    assert_eq!(payload.status(), 9);
+
+    child.discard_unpublished();
+}
+
+#[def_test(user, serial)]
+fn test_thread_scheduler_parameters_are_a_consistent_snapshot() {
+    let (process, task) = build_prepared_test_user_task();
+    let thread = task.as_thread();
+
+    assert_eq!(thread.scheduler_parameters().policy(), None);
+    assert_eq!(thread.scheduler_parameters().priority(), 0);
+
+    thread.set_scheduler(1, 7);
+    let parameters = thread.scheduler_parameters();
+    assert_eq!(parameters.policy(), Some(1));
+    assert_eq!(parameters.priority(), 7);
+
+    thread
+        .set_scheduler_priority_with(9, 0, |policy, priority| {
+            if policy != 1 || priority != 9 {
+                return Err(kerrno::KError::InvalidInput);
+            }
+            Ok(())
+        })
+        .expect("priority update should validate against locked scheduler policy");
+    let parameters = thread.scheduler_parameters();
+    assert_eq!(parameters.policy(), Some(1));
+    assert_eq!(parameters.priority(), 9);
+
+    process.discard_unpublished();
+}
+
+#[def_test(user, serial)]
+fn test_oom_score_adjustment_is_process_shared_and_fork_inherited() {
+    let (process, task) = build_prepared_test_user_task();
+    let thread = task.as_thread();
+
+    assert_eq!(thread.oom_score_adj(), 0);
+    thread.set_oom_score_adj(321);
+
+    let sibling = thread
+        .clone_thread_in_process()
+        .expect("same-process thread clone should prepare");
+    assert_eq!(sibling.oom_score_adj(), 321);
+
+    let child = thread
+        .fork_process_child(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Private,
+            fs: ForkFs::Private,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::empty(),
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+        })
+        .expect("process fork should prepare");
+    assert_eq!(child.oom_score_adj(), 321);
+
+    child.process().discard_unpublished();
+    process.discard_unpublished();
+}
+
+#[def_test(serial)]
+fn test_exit_retries_signal_prepare_after_parent_reparent_race() {
+    let init = ensure_init();
+    let parent = init.fork(582);
+    let child = parent.fork(583);
+    let raced = AtomicBool::new(false);
+
+    let transition = child.finish_exit_in_process_domain(
+        ProcessExitPublication::WaitableZombie,
+        |observed_parent| {
+            if !raced.swap(true, Ordering::SeqCst) {
+                if observed_parent.pid() != parent.pid() {
+                    panic!("first signal preparation should observe the original parent");
+                }
+                parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+            }
+            Some((observed_parent.pid(), false))
+        },
+    );
+
+    assert_eq!(
+        transition.parent.as_ref().map(|parent| parent.pid()),
+        Some(init.pid()),
+        "exit commit must retry after reparent and target the current parent"
+    );
+    assert_eq!(
+        transition.prepared_sigchld,
+        Some(init.pid()),
+        "prepared SIGCHLD payload must come from the retried parent"
+    );
+    assert_eq!(
+        child.parent().map(|parent| parent.pid()),
+        Some(init.pid()),
+        "child must be linked under init after parent exit races with child exit"
+    );
+
+    child.free();
+    parent.free();
+}
+
+#[def_test(serial)]
+fn test_complete_process_exit_is_idempotent_for_sigchld_delivery() {
+    let init = ensure_init();
+    let child = init.fork(584);
+
+    assert!(
+        child
+            .finish_exit_in_process_domain(ProcessExitPublication::WaitableZombie, |parent| {
+                Some((parent.pid(), false))
+            })
+            .prepared_sigchld
+            .is_some(),
+        "first exit commit should return prepared SIGCHLD delivery"
+    );
+    assert!(
+        child
+            .finish_exit_in_process_domain(ProcessExitPublication::WaitableZombie, |parent| {
+                Some((parent.pid(), false))
+            })
+            .prepared_sigchld
+            .is_none(),
+        "idempotent exit commit must not return a stale prepared SIGCHLD delivery"
+    );
+
+    child.free();
+}
+
+#[def_test(serial)]
+fn test_finalize_process_exit_is_idempotent_after_autoreap() {
+    let init = ensure_init();
+    let child = init.fork(581);
+
+    let child_counter = new_wake_counter();
+    let child_waker = counter_waker(child_counter);
+    child.exit_event().register(&child_waker);
+
+    process_exit::finalize_process_exit_with_publication(
+        &child,
+        ProcessExitPublication::DetachedAutoreap,
+    );
+    assert!(child.is_exited());
+    assert!(
+        !child.is_waitable_zombie(),
+        "autoreap finalization must skip waitable zombie state"
+    );
+    assert_eq!(
+        child_counter.load(Ordering::SeqCst),
+        1,
+        "first finalization wakes exit observers"
+    );
+
+    process_exit::finalize_process_exit(&child);
+    assert!(
+        !child.is_waitable_zombie(),
+        "second finalization must not change Dead back to Zombie"
+    );
+    assert_eq!(
+        child_counter.load(Ordering::SeqCst),
+        1,
+        "second finalization must not notify exit observers again"
+    );
+
+    wait_reap::reap_exited_process(&child);
 }
 
 #[def_test(serial)]
@@ -419,18 +1215,16 @@ fn test_lifecycle_accumulates_exited_thread_and_child_cpu_time() {
     assert_eq!(proc.exited_thread_time_ns(), (44, 66));
     assert_eq!(proc.child_time_ns(), (132, 154));
 
-    proc.exit();
+    proc.exit_with_publication(ProcessExitPublication::WaitableZombie);
     proc.free();
 }
 
-#[def_test(user, serial)]
-fn test_published_task_lookup_matches_current_user_thread() {
-    let task = current().clone();
+#[def_test(serial)]
+fn test_published_task_lookup_matches_published_user_thread() {
+    let process = ensure_init().fork(740);
+    let task = publish_test_thread(&process, process.pid());
     let tid = task.as_thread().tid();
-    let process = current_user_process();
     let publication = process_publication();
-
-    publication.publish_task(&task);
 
     let published_task = publication.task(tid).expect("published tid should resolve");
     assert_eq!(published_task.as_thread().tid(), tid);
@@ -449,11 +1243,17 @@ fn test_published_task_lookup_matches_current_user_thread() {
             .any(|published| Arc::ptr_eq(published, &process)),
         "published process enumeration must include the current process after publication"
     );
+
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    process.free();
+    publication.unpublish_process(process.pid());
+    drop(task);
+    publication.cleanup();
 }
 
 #[def_test(user, serial)]
 fn test_current_process_mutation_helpers_preserve_process_boundary() {
-    let process = current_user_process();
+    let (process, _task) = process_with_address_space(741, mapped_test_address_space());
 
     let old_umask = process
         .replace_umask(0o077)
@@ -518,12 +1318,16 @@ fn test_current_process_mutation_helpers_preserve_process_boundary() {
     process
         .set_exec_metadata(old_exe_path, old_cmdline)
         .expect("current process must restore its previous exec metadata");
+
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    process.free();
 }
 
 #[def_test(user, serial)]
 fn test_prepare_thread_clone_defers_tid_visibility_until_publication() {
-    let thread = crate::current_user_thread();
-    let process = thread.process().clone();
+    let process = ensure_init().fork(742);
+    let leader_task = publish_test_thread(&process, process.pid());
+    let thread = leader_task.as_thread();
     let prepared = thread
         .prepare_thread_clone()
         .expect("thread clone should allocate a sibling tid");
@@ -550,6 +1354,12 @@ fn test_prepare_thread_clone_defers_tid_visibility_until_publication() {
         "published sibling thread removal must not tear down the whole process"
     );
     drop(published);
+    process.exit_thread(process.pid(), 0);
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    process.free();
+    process_publication().unpublish_process(process.pid());
+    drop(leader_task);
+    process_publication().cleanup();
 }
 
 #[def_test(user, serial)]
@@ -601,15 +1411,73 @@ fn test_prepare_publish_stages_visibility_before_activation() {
     );
 
     drop(published);
-    publication.unpublish_process(process.pid());
-    process.exit();
-    process.free();
+    publication.cleanup();
+}
+
+#[def_test(user, serial)]
+fn test_unpublished_tree_child_stays_hidden_from_group_membership() {
+    let parent = ensure_init();
+    let task_number =
+        kidentity::allocate_root_pid_handle().expect("test child identity should allocate");
+    let child = parent
+        .fork_with_tree_parent(
+            task_number,
+            ForkParent::Caller,
+            Some(ksignal::Signo::SIGCHLD),
+        )
+        .expect("tree fork should prepare a child relation");
+    let group = child.group();
+
+    assert!(
+        parent
+            .children()
+            .iter()
+            .any(|candidate| Arc::ptr_eq(candidate, &child)),
+        "tree relation is owner-visible after fork preparation"
+    );
+    assert!(
+        group
+            .processes()
+            .iter()
+            .all(|member| !Arc::ptr_eq(member, &child)),
+        "process-group membership must not expose a child before publication commits"
+    );
+
+    child.discard_unpublished();
+}
+
+#[def_test(user, serial)]
+fn test_cleanup_preserves_reserved_process_publication_slot() {
+    let parent = ensure_init();
+    let task_number =
+        kidentity::allocate_root_pid_handle().expect("test child identity should allocate");
+    let child = parent
+        .fork_with_tree_parent(
+            task_number,
+            ForkParent::Caller,
+            Some(ksignal::Signo::SIGCHLD),
+        )
+        .expect("tree fork should prepare a child relation");
+    let publication = process_publication();
+
+    publication.publish_process_identity_after_cleanup_for_test(&child);
+    let resolved = publication
+        .published_process(child.pid())
+        .expect("cleanup must not delete a reserved slot before publish commit");
+    assert!(
+        Arc::ptr_eq(&resolved, &child),
+        "reserved slot must still publish the original process identity"
+    );
+
+    child.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    child.free();
+    publication.unpublish_process(child.pid());
     publication.cleanup();
 }
 
 #[def_test(user, serial)]
 fn test_publish_user_task_exposes_handle_before_activation() {
-    let parent = current_user_process();
+    let parent = ensure_init();
     let (process, prepared) = build_prepared_test_user_task();
     let publication = process_publication();
 
@@ -727,8 +1595,11 @@ fn test_zombie_process_stays_published_until_reaped() {
         "published registry must expose the stable child process identity"
     );
 
-    process.exit();
-    assert!(process.is_zombie(), "exited child must become zombie");
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    assert!(
+        process.is_exited(),
+        "child exit must publish stable exited state"
+    );
     assert!(
         publication.published_process(child_pid).is_ok(),
         "zombie child must stay published until an explicit reap/removal step"
@@ -746,6 +1617,63 @@ fn test_zombie_process_stays_published_until_reaped() {
 }
 
 #[def_test(user, serial)]
+fn test_published_process_count_ignores_retired_slots_before_cleanup() {
+    let (process, prepared) = build_prepared_test_user_task();
+    let pid = process.pid();
+    let publication = process_publication();
+    let before = publication.published_process_count();
+    let published = prepare_user_task(prepared).publish();
+
+    assert_eq!(
+        publication.published_process_count(),
+        before + 1,
+        "publishing a process must increase the externally visible count"
+    );
+
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    process.free();
+    publication.unpublish_process(pid);
+    assert!(
+        publication.published_process(pid).is_err(),
+        "reaped process must disappear before cleanup removes its retired slot"
+    );
+    assert_eq!(
+        publication.published_process_count(),
+        before,
+        "retired publication slots must not contribute to the visible process count"
+    );
+
+    drop(published);
+    publication.cleanup();
+}
+
+#[def_test(serial)]
+fn test_unpublish_process_if_matches_preserves_different_identity() {
+    let init = ensure_init();
+    let published = init.fork(1_160);
+    let impostor = Process::new_init(1_160);
+    let publication = process_publication();
+
+    publication.publish_process_identity(&published);
+    assert!(
+        !publication.unpublish_process_if_matches(&impostor),
+        "identity-checked unpublish must reject a different process with the same pid"
+    );
+
+    let resolved = publication
+        .published_process(published.pid())
+        .expect("original published identity must remain visible");
+    assert!(
+        Arc::ptr_eq(&resolved, &published),
+        "published pid must still resolve to the original process"
+    );
+
+    published.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    published.free();
+    publication.unpublish_process(published.pid());
+}
+
+#[def_test(serial)]
 fn test_procfs_visibility_requires_representative_task() {
     let (process, prepared) = build_prepared_test_user_task();
     let pid = process.pid();
@@ -763,7 +1691,7 @@ fn test_procfs_visibility_requires_representative_task() {
         "visible live process must resolve to a representative task"
     );
 
-    process.exit();
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     drop(published);
     publication.cleanup();
 
@@ -805,7 +1733,7 @@ fn test_create_session_publishes_new_job_control_identity() {
     assert_eq!(published_group.pgid(), group.pgid());
     assert_eq!(published_group.session().sid(), process.pid());
 
-    process.exit();
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     process.free();
     publication.unpublish_process(process.pid());
     publication.cleanup();
@@ -837,10 +1765,10 @@ fn test_create_group_publishes_new_process_group_identity() {
     assert_eq!(published_group.pgid(), new_group.pgid());
     assert_eq!(published_group.session().sid(), leader.pid());
 
-    sibling.exit();
+    sibling.exit_with_publication(ProcessExitPublication::WaitableZombie);
     sibling.free();
     publication.unpublish_process(sibling.pid());
-    leader.exit();
+    leader.exit_with_publication(ProcessExitPublication::WaitableZombie);
     leader.free();
     publication.unpublish_process(leader.pid());
     publication.cleanup();

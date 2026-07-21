@@ -7,7 +7,7 @@
 use kcred::Cred;
 use kerrno::{KError, KResult};
 use khal::percpu::this_cpu_id;
-use kprocess::{AsThread, Process};
+use kprocess::{AsThread, NiceValue, Process};
 use ktask::{KCpuMask, KtaskRef, current};
 use linux_raw_sys::general::{
     PRIO_PGRP, PRIO_PROCESS, PRIO_USER, SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_NORMAL, SCHED_RR,
@@ -15,8 +15,6 @@ use linux_raw_sys::general::{
 use posix_types::{UserConstPtr, UserPtr, UserRead, UserWrite};
 
 const MAX_REALTIME_PRIORITY: i32 = 99;
-const MIN_NICE: i32 = -20;
-const MAX_NICE: i32 = 19;
 
 #[repr(C)]
 #[derive(Clone, Copy, UserRead, UserWrite)]
@@ -125,13 +123,13 @@ pub fn sys_sched_getparam(pid: i32, param: UserPtr<()>) -> KResult<isize> {
 pub fn sys_sched_setparam(pid: i32, param: UserConstPtr<()>) -> KResult<isize> {
     let task = scheduler_target(pid)?;
     let thread = task.as_thread();
-    let policy = thread
-        .scheduler_policy()
-        .unwrap_or_else(configured_scheduler_policy);
     let param = param.cast::<SchedParam>().read_vm()?;
 
-    validate_scheduler_priority(policy, param.sched_priority)?;
-    thread.set_scheduler(policy, param.sched_priority);
+    thread.set_scheduler_priority_with(
+        param.sched_priority,
+        configured_scheduler_policy(),
+        validate_scheduler_priority,
+    )?;
 
     Ok(0)
 }
@@ -142,8 +140,12 @@ pub fn sys_getpriority(which: u32, who: u32) -> KResult<isize> {
 
     match which {
         PRIO_PROCESS => {
-            let task = priority_target(who)?;
-            Ok(raw_priority(task.as_thread().nice()))
+            let proc = if who == 0 {
+                kprocess::current_user_process()
+            } else {
+                kprocess::scheduler::target_process(who)?
+            };
+            process_raw_priority(&proc)
         }
         PRIO_PGRP => {
             let pg = if who == 0 {
@@ -152,12 +154,10 @@ pub fn sys_getpriority(which: u32, who: u32) -> KResult<isize> {
                 kprocess::scheduler::target_group(who)?
             };
             let mut min_nice = None;
-            'processes: for proc in pg.processes() {
-                for task in kprocess::scheduler::process_tasks(&proc) {
-                    update_min_nice(&mut min_nice, task_nice(&task));
-                    if min_nice == Some(MIN_NICE) {
-                        break 'processes;
-                    }
+            for proc in pg.processes() {
+                update_min_nice(&mut min_nice, process_min_nice(&proc));
+                if min_nice == Some(NiceValue::MIN) {
+                    break;
                 }
             }
             min_nice.map(raw_priority).ok_or(KError::NoSuchProcess)
@@ -178,7 +178,7 @@ pub fn sys_getpriority(which: u32, who: u32) -> KResult<isize> {
                         continue;
                     }
                     update_min_nice(&mut min_nice, Some(thread.nice()));
-                    if min_nice == Some(MIN_NICE) {
+                    if min_nice == Some(NiceValue::MIN) {
                         break 'processes;
                     }
                 }
@@ -193,13 +193,19 @@ pub fn sys_getpriority(which: u32, who: u32) -> KResult<isize> {
 pub fn sys_setpriority(which: u32, who: u32, prio: i32) -> KResult<isize> {
     debug!("sys_setpriority <= which: {which}, who: {who}, prio: {prio}");
 
-    let prio = prio.clamp(MIN_NICE, MAX_NICE);
+    let nice = NiceValue::new_clamped(prio);
     let caller = kprocess::current_cred();
 
     match which {
         PRIO_PROCESS => {
-            let task = priority_target(who)?;
-            set_task_nice(&task, prio, &caller)?;
+            let proc = if who == 0 {
+                kprocess::current_user_process()
+            } else {
+                kprocess::scheduler::target_process(who)?
+            };
+            let mut result = NiceUpdateResult::default();
+            update_process_nice(&proc, nice, &caller, &mut result);
+            result.finish()?;
             Ok(0)
         }
         PRIO_PGRP => {
@@ -210,7 +216,7 @@ pub fn sys_setpriority(which: u32, who: u32, prio: i32) -> KResult<isize> {
             };
             let mut result = NiceUpdateResult::default();
             for proc in pg.processes() {
-                update_process_nice(&proc, prio, &caller, &mut result);
+                update_process_nice(&proc, nice, &caller, &mut result);
             }
             result.finish()?;
             Ok(0)
@@ -228,7 +234,7 @@ pub fn sys_setpriority(which: u32, who: u32, prio: i32) -> KResult<isize> {
                         continue;
                     };
                     if thread.real_cred().ruid() == uid {
-                        result.record(set_task_nice(&task, prio, &caller));
+                        result.record(set_task_nice(&task, nice, &caller));
                     }
                 }
             }
@@ -241,14 +247,6 @@ pub fn sys_setpriority(which: u32, who: u32, prio: i32) -> KResult<isize> {
 
 fn scheduler_target(pid: i32) -> KResult<ktask::KtaskRef> {
     kprocess::scheduler::target_task(pid)
-}
-
-fn priority_target(who: u32) -> KResult<KtaskRef> {
-    if who == 0 {
-        Ok(current().clone())
-    } else {
-        kprocess::scheduler::task_by_tid(who)
-    }
 }
 
 fn configured_scheduler_policy() -> u32 {
@@ -281,19 +279,21 @@ fn validate_scheduler_priority(policy: u32, priority: i32) -> KResult<()> {
     }
 }
 
-fn raw_priority(nice: i32) -> isize {
-    (20 - nice) as isize
+fn raw_priority(nice: NiceValue) -> isize {
+    nice.getpriority_raw()
 }
 
-fn task_nice(task: &KtaskRef) -> Option<i32> {
-    task.try_as_thread().map(|thread| thread.nice())
+fn process_raw_priority(proc: &kprocess::Process) -> KResult<isize> {
+    process_min_nice(proc)
+        .map(raw_priority)
+        .ok_or(KError::NoSuchProcess)
 }
 
 fn check_setpriority_permission(
     caller: &Cred,
     target: &Cred,
-    current_nice: i32,
-    requested_nice: i32,
+    current_nice: NiceValue,
+    requested_nice: NiceValue,
 ) -> KResult<()> {
     if !caller.is_privileged() && caller.euid() != target.ruid() && caller.euid() != target.euid() {
         return Err(KError::OperationNotPermitted);
@@ -304,17 +304,22 @@ fn check_setpriority_permission(
     Ok(())
 }
 
-fn set_task_nice(task: &KtaskRef, nice: i32, caller: &Cred) -> KResult<()> {
+fn set_task_nice(task: &KtaskRef, nice: NiceValue, caller: &Cred) -> KResult<()> {
     let thread = task.try_as_thread().ok_or(KError::NoSuchProcess)?;
     check_setpriority_permission(caller, &thread.real_cred(), thread.nice(), nice)?;
     thread.set_nice(nice);
-    if !ktask::set_task_prio(task, nice as isize) {
-        debug!("scheduler did not apply nice={nice} to the selected task");
+    if !ktask::set_task_prio(task, nice.fair_scheduler_priority()) {
+        debug!("scheduler did not apply nice={nice:?} to the selected task");
     }
     Ok(())
 }
 
-fn update_process_nice(process: &Process, nice: i32, caller: &Cred, result: &mut NiceUpdateResult) {
+fn update_process_nice(
+    process: &Process,
+    nice: NiceValue,
+    caller: &Cred,
+    result: &mut NiceUpdateResult,
+) {
     for task in kprocess::scheduler::process_tasks(process) {
         if task.try_as_thread().is_none() {
             continue;
@@ -348,7 +353,21 @@ impl NiceUpdateResult {
     }
 }
 
-fn update_min_nice(min_nice: &mut Option<i32>, nice: Option<i32>) {
+fn process_min_nice(proc: &kprocess::Process) -> Option<NiceValue> {
+    let mut min_nice = None;
+    for task in kprocess::scheduler::process_tasks(proc) {
+        let Some(thread) = task.try_as_thread() else {
+            continue;
+        };
+        update_min_nice(&mut min_nice, Some(thread.nice()));
+        if min_nice == Some(NiceValue::MIN) {
+            break;
+        }
+    }
+    min_nice
+}
+
+fn update_min_nice(min_nice: &mut Option<NiceValue>, nice: Option<NiceValue>) {
     let Some(nice) = nice else {
         return;
     };
@@ -359,6 +378,7 @@ fn update_min_nice(min_nice: &mut Option<i32>, nice: Option<i32>) {
 mod tests {
     use kcred::Cred;
     use kerrno::KError;
+    use kprocess::NiceValue;
     use unittest::def_test;
 
     use super::check_setpriority_permission;
@@ -370,10 +390,31 @@ mod tests {
             .set_resuid(Some(1000), Some(2000), Some(1000))
             .unwrap();
 
-        assert!(check_setpriority_permission(&Cred::new(1000, 1), &target, 0, 1).is_ok());
-        assert!(check_setpriority_permission(&Cred::new(2000, 1), &target, 0, 1).is_ok());
+        assert!(
+            check_setpriority_permission(
+                &Cred::new(1000, 1),
+                &target,
+                NiceValue::DEFAULT,
+                NiceValue::new_clamped(1),
+            )
+            .is_ok()
+        );
+        assert!(
+            check_setpriority_permission(
+                &Cred::new(2000, 1),
+                &target,
+                NiceValue::DEFAULT,
+                NiceValue::new_clamped(1),
+            )
+            .is_ok()
+        );
         assert_eq!(
-            check_setpriority_permission(&Cred::new(3000, 1), &target, 0, 1),
+            check_setpriority_permission(
+                &Cred::new(3000, 1),
+                &target,
+                NiceValue::DEFAULT,
+                NiceValue::new_clamped(1),
+            ),
             Err(KError::OperationNotPermitted)
         );
     }
@@ -383,9 +424,22 @@ mod tests {
         let target = Cred::new(1000, 1);
 
         assert_eq!(
-            check_setpriority_permission(&target, &target, 5, 0),
+            check_setpriority_permission(
+                &target,
+                &target,
+                NiceValue::new_clamped(5),
+                NiceValue::DEFAULT,
+            ),
             Err(KError::PermissionDenied)
         );
-        assert!(check_setpriority_permission(&Cred::root(), &target, 5, 0).is_ok());
+        assert!(
+            check_setpriority_permission(
+                &Cred::root(),
+                &target,
+                NiceValue::new_clamped(5),
+                NiceValue::DEFAULT,
+            )
+            .is_ok()
+        );
     }
 }
