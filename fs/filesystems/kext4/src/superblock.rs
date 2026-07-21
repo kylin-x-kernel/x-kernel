@@ -4453,6 +4453,134 @@ mod tests {
     }
 
     #[test]
+    fn extent_point_mutations_keep_existing_leaf_block() {
+        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let journal = Journal::new(TransactionId::new(4611));
+        let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
+        let inode_allocation = filesystem
+            .allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle)
+            .unwrap();
+        let mut inode = filesystem
+            .internal_inode(inode_allocation.inode())
+            .expect("read initialized inode");
+
+        for logical in [0, 2, 4, 6, 8] {
+            let block = filesystem.allocate_block(None, &mut handle).unwrap();
+            inode = filesystem
+                .insert_extent_mapping(
+                    &inode,
+                    LogicalBlock::new(logical),
+                    block.block(),
+                    BlockCount::new(1),
+                    ExtentMappingState::Initialized,
+                    &mut handle,
+                )
+                .unwrap();
+        }
+        let index_offset = crate::disk::extent::EXTENT_HEADER_SIZE;
+        let extent_block = u64::from(le_u32(inode.extent_bytes(), index_offset + 0x04))
+            | (u64::from(le_u16(inode.extent_bytes(), index_offset + 0x08)) << 32);
+
+        let data = filesystem.allocate_block(None, &mut handle).unwrap();
+        inode = filesystem
+            .insert_extent_mapping(
+                &inode,
+                LogicalBlock::new(10),
+                data.block(),
+                BlockCount::new(1),
+                ExtentMappingState::Unwritten,
+                &mut handle,
+            )
+            .unwrap();
+        inode = filesystem
+            .convert_unwritten_extent_range(
+                &inode,
+                LogicalBlock::new(10),
+                BlockCount::new(1),
+                &mut handle,
+            )
+            .unwrap();
+        inode = filesystem
+            .remove_extent_range(
+                &inode,
+                LogicalBlock::new(10),
+                BlockCount::new(1),
+                &mut handle,
+            )
+            .unwrap();
+
+        let current_extent_block = u64::from(le_u32(inode.extent_bytes(), index_offset + 0x04))
+            | (u64::from(le_u16(inode.extent_bytes(), index_offset + 0x08)) << 32);
+        assert_eq!(current_extent_block, extent_block);
+        assert_eq!(
+            filesystem.map_blocks(&inode, LogicalBlock::new(10)),
+            Ok(crate::BlockMapping::Hole {
+                len: BlockCount::new(u32::MAX),
+            })
+        );
+    }
+
+    #[test]
+    fn extent_leaf_split_leaves_space_in_reused_leaf() {
+        let mut groups = [AllocatorGroupSpec {
+            free_blocks: TEST_FREE_BLOCKS,
+            free_inodes: TEST_FREE_INODES,
+            used_directories: 0,
+            flags: 0,
+            block_bitmap: [0b0011_1111, 0, 0, 0],
+            inode_bitmap: [0, 0, 0, 0],
+        }; 16];
+        groups[0].inode_bitmap = [0xff, 0x03, 0, 0];
+        let (mut filesystem, _device) = allocator_multigroup_test_filesystem(&groups);
+        let journal = Journal::new(TransactionId::new(4612));
+        let mut handle = journal.begin(JournalCredits::new(100_000)).unwrap();
+        let inode_allocation = filesystem
+            .allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle)
+            .unwrap();
+        let mut inode = filesystem
+            .internal_inode(inode_allocation.inode())
+            .expect("read initialized inode");
+        let leaf_capacity =
+            u64::from(crate::disk::extent::extent_block_capacity(TEST_BLOCK_SIZE).unwrap());
+
+        for logical in 0..=leaf_capacity {
+            let block = filesystem.allocate_block(None, &mut handle).unwrap();
+            inode = filesystem
+                .insert_extent_mapping(
+                    &inode,
+                    LogicalBlock::new(logical * 2),
+                    block.block(),
+                    BlockCount::new(1),
+                    ExtentMappingState::Initialized,
+                    &mut handle,
+                )
+                .unwrap();
+        }
+        assert_eq!(le_u16(inode.extent_bytes(), 0x02), 2);
+
+        let inserted = filesystem.allocate_block(None, &mut handle).unwrap();
+        inode = filesystem
+            .insert_extent_mapping(
+                &inode,
+                LogicalBlock::new(1),
+                inserted.block(),
+                BlockCount::new(1),
+                ExtentMappingState::Initialized,
+                &mut handle,
+            )
+            .unwrap();
+
+        assert_eq!(le_u16(inode.extent_bytes(), 0x02), 2);
+        assert_eq!(
+            filesystem.map_blocks(&inode, LogicalBlock::new(1)),
+            Ok(crate::BlockMapping::Mapped {
+                physical: inserted.block(),
+                len: BlockCount::new(1),
+            })
+        );
+    }
+
+    #[test]
     fn extent_unwritten_conversion_splits_only_requested_range() {
         let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let journal = Journal::new(TransactionId::new(462));
@@ -4604,6 +4732,65 @@ mod tests {
     }
 
     #[test]
+    fn extent_remove_range_splits_full_inline_leaf() {
+        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let journal = Journal::new(TransactionId::new(4631));
+        let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
+        let physical = allocate_contiguous_blocks(&mut filesystem, 3, &mut handle);
+        let inode_allocation = filesystem
+            .allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle)
+            .unwrap();
+        let mut inode = filesystem.internal_inode(inode_allocation.inode()).unwrap();
+        inode = filesystem
+            .insert_extent_mapping(
+                &inode,
+                LogicalBlock::new(0),
+                physical,
+                BlockCount::new(3),
+                ExtentMappingState::Initialized,
+                &mut handle,
+            )
+            .unwrap();
+        for logical in [4, 6, 8] {
+            let block = filesystem.allocate_block(None, &mut handle).unwrap();
+            inode = filesystem
+                .insert_extent_mapping(
+                    &inode,
+                    LogicalBlock::new(logical),
+                    block.block(),
+                    BlockCount::new(1),
+                    ExtentMappingState::Initialized,
+                    &mut handle,
+                )
+                .unwrap();
+        }
+
+        inode = filesystem
+            .remove_extent_range(
+                &inode,
+                LogicalBlock::new(1),
+                BlockCount::new(1),
+                &mut handle,
+            )
+            .unwrap();
+
+        assert_eq!(le_u16(inode.extent_bytes(), 0x06), 1);
+        assert_eq!(
+            filesystem.map_blocks(&inode, LogicalBlock::new(1)),
+            Ok(crate::BlockMapping::Hole {
+                len: BlockCount::new(1),
+            })
+        );
+        assert_eq!(
+            filesystem.map_blocks(&inode, LogicalBlock::new(2)),
+            Ok(crate::BlockMapping::Mapped {
+                physical: PhysicalBlock::new(physical.get() + 2),
+                len: BlockCount::new(1),
+            })
+        );
+    }
+
+    #[test]
     fn extent_truncate_releases_tail_range() {
         let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let journal = Journal::new(TransactionId::new(464));
@@ -4653,7 +4840,7 @@ mod tests {
     }
 
     #[test]
-    fn extent_mutation_rebuilds_multiple_leaf_blocks() {
+    fn extent_mutation_splits_multiple_leaf_blocks() {
         let mut groups = [AllocatorGroupSpec {
             free_blocks: TEST_FREE_BLOCKS,
             free_inodes: TEST_FREE_INODES,

@@ -104,6 +104,7 @@ pub(super) fn validate_extent_entries(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct SelectedExtentIndex {
+    pub(super) entry: usize,
     pub(super) index: disk_extent::ExtentIndex,
     pub(super) next_lblk: Option<u32>,
 }
@@ -138,7 +139,11 @@ pub(super) fn find_index(
     } else {
         None
     };
-    Ok(SelectedExtentIndex { index, next_lblk })
+    Ok(SelectedExtentIndex {
+        entry: selected,
+        index,
+        next_lblk,
+    })
 }
 
 pub(super) fn map_leaf(

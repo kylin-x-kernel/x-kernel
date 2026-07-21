@@ -125,6 +125,13 @@ metadata block 时，core 从当前 handle 的 metadata 集合中 forget 已淘�
 recovery 没有旧 metadata image 需要抑制。N1 一旦允许 transaction/checkpoint 重叠，就必须
 改为启用并持久化 revoke，或用等价的 journal tail/reuse 约束替代这个前提。
 
+`ExtentPath` 保存从 inline root 到目标叶子的各层 buffer、选中 entry 和逻辑上下界，并负责
+叶子重写、索引 key 传播、均衡 split 与空叶 prune。路径查找把每层 bytes 直接移入路径，避免
+为 parent sidecar 再复制一次完整 metadata block。常规 extent 插入和 unwritten 转换必须在
+同一条路径内完成，不再进入全树重写；范围删除只在完整范围属于同一叶子时局部更新，跨叶
+truncate/remove 会在任何 metadata 写入前回退全树重写。局部 split 会均衡新旧节点，避免
+`capacity + 1` 条目形成“满节点 + 单条节点”并在后续插入时反复分配 metadata block。
+
 ### Namespace zero-link 删除
 
 ```text
@@ -183,10 +190,11 @@ group 中各一个 bitmap/descriptor target。数据块数量本身不会一对�
 preallocation tail 也会被误判为超过空 journal 容量。计算结果仍为 allocator entry check 保留
 固定 headroom，并在任何 metadata mutation 前完成。
 
-Ordered writeback 同样在打开 transaction 前读取当前 extent-tree 形状。预算覆盖 hole allocation、
-unwritten extent 插入与转换、重建后的 tree blocks、旧 tree block revoke 和 inode root；文件从
-inline extent root 增长为 external tree 后，预算随当前及预计 tree block 数增加，不再只按本次
-PageCache writeback 的 data block 数使用固定上限。
+Ordered writeback 的 insert 与 unwritten conversion 只使用 `ExtentPath`，因此 transaction 内不再
+切换到复杂度取决于整棵树大小的重建算法。它的 credits 在打开 transaction 前按本次 logical
+block 数、extent 最大深度和每层 split 可能涉及的现有/new metadata targets 计算，不扫描已有
+extent，也不再用 512 截断所需预算。跨叶 range removal 的全树回退仍使用 truncate planner 按
+实际 tree blocks、revoke targets 和 affected groups 单独估算。
 
 `huge_file` superblock feature 表示 inode 可以使用扩展的 block accounting 格式；未设置
 `EXT4_HUGE_FILE_FL` 的普通 inode 仍以 512-byte sector 记录 `i_blocks`，KExt4 可以安全修改。

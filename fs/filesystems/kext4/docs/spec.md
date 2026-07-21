@@ -113,7 +113,7 @@ confidence 和 method limits。rsext4 只作为只读对比基线，不再为其
 | ownership 聚合 | geometry、device、journal、metadata cache、allocator 和 inode mutation 都由一个可变 aggregate 驱动 | 无法为后台 worker 和细粒度锁建立稳定生命周期 |
 | durability 边界粗糙 | writeback、fdatasync、fsync、syncfs、checkpoint 常落到同类 flush | 无法按 transaction 和 inode 精确等待 |
 | PageCache writeback 基础有限 | 固定 batch copy、无后台 dirty control、无 transaction dependency | fio 的吞吐和内存压力都不可控 |
-| extent/allocator 仍是 baseline | extent rebuild、重复 lookup、scan-backed free-run cache | 长文件、碎片和多 job 扩展性受限 |
+| extent/allocator 仍未完整分层 | `ExtentPath` 已承载单路径更新和均衡 split，但跨叶 truncate 回退、重复 lookup 和 scan-backed free-run cache 仍存在 | 长文件常规写不再全树重建，复杂范围操作和多 job 仍受限 |
 
 完整 errseq、unmount 和 fault matrix 很重要，但它们不消除上述结构性瓶颈，也不应继续阻塞
 这些瓶颈的重构。
