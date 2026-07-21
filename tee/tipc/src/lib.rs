@@ -14,6 +14,7 @@
 extern crate alloc;
 
 mod channel;
+pub mod error;
 mod memref;
 mod message;
 mod port;
@@ -62,17 +63,27 @@ pub const IPC_CONNECT_ASYNC: u32 = 0x2;
 /// clients can provide identities without coupling the IPC core to either.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 #[repr(transparent)]
-pub struct IpcUuid([u8; 16]);
+pub struct IpcUuid(uuid::Uuid);
 
 impl IpcUuid {
     /// Creates a UUID from its canonical byte representation.
     pub const fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(bytes)
+        Self(uuid::Uuid::from_bytes(bytes))
     }
 
     /// Returns the canonical byte representation.
     pub const fn as_bytes(&self) -> &[u8; 16] {
-        &self.0
+        self.0.as_bytes()
+    }
+
+    /// Creates an identity from the crate-internal UUID representation.
+    pub(crate) const fn from_uuid(uuid: uuid::Uuid) -> Self {
+        Self(uuid)
+    }
+
+    /// Returns the crate-internal UUID representation.
+    pub(crate) const fn into_uuid(self) -> uuid::Uuid {
+        self.0
     }
 }
 

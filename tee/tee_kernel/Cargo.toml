@@ -49,7 +49,7 @@ postcard = { version = "1", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 tee_raw_sys = { workspace = true }
 tee_task_iface = { workspace = true }
-uuid = { version = "0.8", default-features = false }
+uuid = { workspace = true }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 cty = "0.2"
 subtle = { version = "2", default-features = false }

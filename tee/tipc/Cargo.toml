@@ -11,7 +11,7 @@ documentation.workspace = true
 
 [features]
 default = ["linux_sysno/tipc"]
-tee = ["dep:uuid", "kprocess/tee"]
+tee = ["kprocess/tee"]
 
 [dependencies]
 bitflags.workspace = true
@@ -27,4 +27,4 @@ posix-types.workspace = true
 tipc_handle.workspace = true
 unittest.workspace = true
 log.workspace = true
-uuid = { version = "0.8", default-features = false, optional = true }
+uuid = { workspace = true }

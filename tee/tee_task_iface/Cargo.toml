@@ -29,7 +29,7 @@ ta_verify_with_root = ["tee_ta_sign"]
 bytemuck = { workspace = true }
 cfg-if = { workspace = true }
 hashbrown = { workspace = true }
-uuid = { version = "0.8", default-features = false }
+uuid = { workspace = true }
 unittest.workspace = true
 kerrno.workspace = true
 kcred.workspace = true

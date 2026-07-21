@@ -705,9 +705,13 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
             }
         }
 
-        // TIPC syscalls (>=600).
+        // TIPC syscalls (>=600) return TIPC-specific error codes
+        // (not Linux errno) so that rust-libtipc can map them correctly.
         #[cfg(feature = "tipc")]
-        _ if uctx.sysno() >= 600 => tipc::syscall::dispatch_irq_tipc_syscall(sysno, uctx),
+        _ if uctx.sysno() >= 600 => match tipc::syscall::dispatch_irq_tipc_syscall(sysno, uctx) {
+            Ok(ret) => Ok(ret),
+            Err(err) => Ok(tipc::error::kerror_to_tipc_errno(err, sysno) as isize),
+        },
 
         _ => {
             let tid = kprocess::current_user_tid();

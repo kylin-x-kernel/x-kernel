@@ -196,6 +196,7 @@ bytemuck = { version = "1.23", features = ["unsound_ptr_pod_impl"] }
 cfg-if = "1.0"
 zerocopy = { version = "0.8", features = ["derive"] }
 zeroize = { version = "1.9", default-features = false }
+uuid = { version = "0.8", default-features = false }
 chrono = { version = "0.4", default-features = false }
 crate_interface = { version = "0.3", features = ["weak_default"] }
 enum_dispatch = "0.3"

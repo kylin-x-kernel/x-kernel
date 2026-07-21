@@ -18,6 +18,7 @@ use khal::{paging::MappingFlags, uspace::UserContext};
 use linux_sysno::Sysno;
 use memaddr::VirtAddr;
 use posix_types::{IoVec, UserConstPtr, UserPtr};
+use uuid::Uuid;
 
 use crate::{
     Handle, HandleEventMask, HandleKind, HandleSet, HandleSetCommand, HandleSetEntry,
@@ -60,35 +61,26 @@ impl From<UEvent> for UserEvent {
     }
 }
 
+/// TIPC UUID ABI carrier written back to rust-libtipc callers.
+///
+/// This type is `#[repr(transparent)]` over `uuid::Uuid` so the syscall ABI
+/// exposes the same 16-byte RFC 4122 byte layout as rust-libtipc's transparent
+/// `TipcUuid(Uuid)` wrapper. The size and alignment assertions below keep that
+/// userspace contract explicit.
+///
+/// The field is private because `IpcUuid` is the kernel semantic type. Syscall
+/// code should cross the ABI boundary through `From<IpcUuid>` instead of
+/// constructing raw ABI carriers directly.
 #[derive(Clone, Copy, posix_types::UserWrite)]
-#[repr(C)]
-pub(crate) struct TrustyUuid {
-    time_low: u32,
-    time_mid: u16,
-    time_hi_and_version: u16,
-    clock_seq_and_node: [u8; 8],
-}
+#[repr(transparent)]
+pub(crate) struct TipcUuid(Uuid);
 
-impl From<IpcUuid> for TrustyUuid {
+const _: () = assert!(core::mem::size_of::<TipcUuid>() == 16);
+const _: () = assert!(core::mem::align_of::<TipcUuid>() == 1);
+
+impl From<IpcUuid> for TipcUuid {
     fn from(uuid: IpcUuid) -> Self {
-        let [
-            time_low0,
-            time_low1,
-            time_low2,
-            time_low3,
-            time_mid0,
-            time_mid1,
-            time_hi_and_version0,
-            time_hi_and_version1,
-            clock_seq_and_node @ ..,
-        ] = *uuid.as_bytes();
-
-        Self {
-            time_low: u32::from_be_bytes([time_low0, time_low1, time_low2, time_low3]),
-            time_mid: u16::from_be_bytes([time_mid0, time_mid1]),
-            time_hi_and_version: u16::from_be_bytes([time_hi_and_version0, time_hi_and_version1]),
-            clock_seq_and_node,
-        }
+        Self(uuid.into_uuid())
     }
 }
 
@@ -350,8 +342,8 @@ fn read_path(path: UserConstPtr<u8>) -> KResult<alloc::string::String> {
 #[cfg(feature = "tee")]
 fn current_caller_uuid() -> KResult<IpcUuid> {
     let uuid = kprocess::current_user_process().with_tee_ta_ctx(|ctx| ctx.uuid.clone())?;
-    let tapp_uuid = uuid::Uuid::parse_str(&uuid).map_err(|_| KError::InvalidData)?;
-    Ok(IpcUuid::from_bytes(*tapp_uuid.as_bytes()))
+    let tapp_uuid = Uuid::parse_str(&uuid).map_err(|_| KError::InvalidData)?;
+    Ok(IpcUuid::from_uuid(tapp_uuid))
 }
 
 #[cfg(not(feature = "tee"))]
@@ -394,7 +386,7 @@ fn sys_tipc_connect(path: UserConstPtr<u8>, flags: u32) -> KResult<isize> {
 }
 
 /// Accepts one pending connection from a service port.
-fn sys_tipc_accept(port_id: i32, peer_uuid: UserPtr<TrustyUuid>) -> KResult<isize> {
+fn sys_tipc_accept(port_id: i32, peer_uuid: UserPtr<TipcUuid>) -> KResult<isize> {
     let port = get_as::<IpcPort>(port_id)?;
     let (channel, peer) = port.ipc_port_accept()?;
     let id = install(channel)? as i32;

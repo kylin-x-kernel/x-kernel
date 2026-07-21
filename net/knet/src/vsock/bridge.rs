@@ -634,33 +634,50 @@ impl VsockBridge {
             return;
         };
 
-        if event
+        let should_close = event
             .event
-            .intersects(HandleEventMask::HUP | HandleEventMask::ERROR)
-        {
-            let dynamic_connecting = self
-                .connections
-                .lock()
-                .iter()
-                .find(|conn| conn.conn_id() == conn_id)
-                .is_some_and(|conn| {
-                    conn.local_port() == 0 && conn.state() == BridgeConnectionState::TipcConnecting
-                });
-            if dynamic_connecting {
-                self.reject_dynamic_connect(conn_id);
-            } else {
-                self.close_connection(conn_id, true);
+            .intersects(HandleEventMask::HUP | HandleEventMask::ERROR);
+        let has_msg = event.event.contains(HandleEventMask::MSG);
+        match (should_close, has_msg) {
+            (true, false) => {
+                // A peer that closes before sending data gives the bridge no
+                // TIPC payload to drain. Close immediately so dynamic connects
+                // are rejected instead of reporting a transient READY edge.
+                self.close_channel_event(conn_id);
             }
-            return;
+            (true, true) => {
+                // A channel may report MSG and HUP together when the peer responded and
+                // closed immediately. Drain the queued message before cleanup.
+                self.forward_tipc_to_vsock(conn_id);
+                self.close_channel_event(conn_id);
+            }
+            (false, _) => {
+                if event.event.contains(HandleEventMask::READY) {
+                    self.on_tipc_ready(conn_id);
+                }
+                if event.event.contains(HandleEventMask::SEND_UNBLOCKED) {
+                    self.on_tipc_send_unblocked(conn_id);
+                }
+                if has_msg {
+                    self.forward_tipc_to_vsock(conn_id);
+                }
+            }
         }
-        if event.event.contains(HandleEventMask::READY) {
-            self.on_tipc_ready(conn_id);
-        }
-        if event.event.contains(HandleEventMask::SEND_UNBLOCKED) {
-            self.on_tipc_send_unblocked(conn_id);
-        }
-        if event.event.contains(HandleEventMask::MSG) {
-            self.forward_tipc_to_vsock(conn_id);
+    }
+
+    fn close_channel_event(&self, conn_id: VsockConnId) {
+        let dynamic_connecting = self
+            .connections
+            .lock()
+            .iter()
+            .find(|conn| conn.conn_id() == conn_id)
+            .is_some_and(|conn| {
+                conn.local_port() == 0 && conn.state() == BridgeConnectionState::TipcConnecting
+            });
+        if dynamic_connecting {
+            self.reject_dynamic_connect(conn_id);
+        } else {
+            self.close_connection(conn_id, true);
         }
     }
 

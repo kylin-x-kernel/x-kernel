@@ -9,14 +9,39 @@ use alloc::{
 };
 
 use kerrno::KError;
+use linux_sysno::Sysno;
 use unittest::def_test;
 
 use crate::{
     Handle, HandleEventMask, HandleKind, HandleSet, HandleSetCommand, HandleSetEntry, HandleTable,
     IPC_CHAN_MAX_BUF_SIZE, IPC_CHAN_MAX_BUFS, IPC_MAX_MSG_HANDLES, IPC_PORT_PATH_MAX,
-    IpcConnectFlags, IpcPortFlags, IpcUuid, MemRef, ipc_port_connect_async, ipc_port_create,
-    ipc_port_publish,
+    IpcConnectFlags, IpcPortFlags, IpcUuid, MemRef, error::kerror_to_tipc_errno,
+    ipc_port_connect_async, ipc_port_create, ipc_port_publish,
 };
+
+#[def_test]
+fn kerror_to_tipc_errno_preserves_tipc_abi_semantics() {
+    let mappings = [
+        (KError::NotConnected, Sysno::tipc_read_msg, -40),
+        (KError::BrokenPipe, Sysno::tipc_read_msg, -19),
+        (KError::ConnectionRefused, Sysno::tipc_connect, -19),
+        (KError::ConnectionReset, Sysno::tipc_read_msg, -19),
+        (KError::ConnectionAborted, Sysno::tipc_accept, -19),
+        (KError::Interrupted, Sysno::tipc_wait, -11),
+        (KError::InProgress, Sysno::tipc_connect, -11),
+        (KError::WouldBlock, Sysno::tipc_send_msg, -2),
+        (KError::WouldBlock, Sysno::tipc_get_msg, -12),
+        (KError::WouldBlock, Sysno::tipc_wait, -11),
+        (KError::PermissionDenied, Sysno::tipc_connect, -41),
+        (KError::OperationNotPermitted, Sysno::tipc_connect, -21),
+        (KError::TimedOut, Sysno::tipc_wait, -18),
+        (KError::OutOfRange, Sysno::tipc_read_msg, -29),
+    ];
+
+    for (err, sysno, tipc_errno) in mappings {
+        assert_eq!(kerror_to_tipc_errno(err, sysno), tipc_errno);
+    }
+}
 
 #[def_test]
 fn ipc_port_create_validates_trusty_limits() {
