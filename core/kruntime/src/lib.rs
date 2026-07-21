@@ -466,39 +466,13 @@ fn finish_allocator_init() {
 }
 
 fn init_interrupt() {
-    // Setup timer interrupt handler
-    const PERIODIC_INTERVAL_NANOS: u64 =
-        khal::time::NANOS_PER_SEC / kbuild_config::TICKS_PER_SECOND as u64;
-    #[percpu::def_percpu]
-    static NEXT_DEADLINE: u64 = 0;
-
-    fn update_timer(now_ns: u64) {
-        // SAFETY: timer IRQ handlers run with preemption disabled on the
-        // current CPU, so raw per-CPU access cannot race migration to another
-        // CPU.
-        let current_deadline = unsafe { NEXT_DEADLINE.read_current_raw() };
-
-        // Use the later of the existing deadline or "now + interval" as
-        // the timer deadline, and record the following tick accordingly.
-        let deadline = if now_ns < current_deadline {
-            current_deadline
-        } else {
-            now_ns + PERIODIC_INTERVAL_NANOS
-        };
-
-        let next_deadline = deadline + PERIODIC_INTERVAL_NANOS;
-        // SAFETY: timer IRQ handlers run with preemption disabled on the
-        // current CPU, so writing the current CPU's raw per-CPU slot is safe.
-        unsafe { NEXT_DEADLINE.write_current_raw(next_deadline) };
-        khal::time::arm_timer(deadline);
-    }
-
+    // Timer interrupt handler. All hardware-timer driving — periodic-tick
+    // bookkeeping, soft-timer wheel drain, and hardware re-arm — lives in
+    // `ktask::on_timer_fire`.
     khal::irq::register(
         khal::time::interrupt_id(),
         alloc::sync::Arc::new(|| {
-            let now_ns = khal::time::monotonic_time_nanos();
-            update_timer(now_ns);
-            ktask::on_timer_tick();
+            ktask::on_timer_fire();
             khal::irq::IrqEvent::HANDLED
         }),
     );

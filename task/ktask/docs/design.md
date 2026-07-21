@@ -52,7 +52,7 @@ kruntime::init_scheduler()/init_scheduler_secondary()
 │ per-CPU RUN_QUEUE + Scheduler(ksched) + IDLE_TASK + GC task     │
 └─────────────────────────────────────────────────────────────────┘
         │                         │
-        │ on_timer_tick()         │ block/wake/exit/yield
+        │ on_timer_fire()         │ block/wake/exit/yield
         ▼                         ▼
 task_tick() → set_preempt_pending   blocked_resched / unblock_task / resched
         │                         │
@@ -116,13 +116,24 @@ init_scheduler_secondary()
 
 `resched()` 在当前 CPU 的调度器上 `pick_next_task()`；无就绪任务时回退到本 CPU `IDLE_TASK`。
 
-### 3) 时钟 tick 与延迟抢占
+### 3) 硬件定时器驱动与时钟 tick
 
-`kruntime` 的定时器中断处理会调用 `ktask::on_timer_tick()`：
+`ktask` 拥有全部硬件定时器驱动逻辑：`kruntime` 只注册时钟中断向量，中断处理直接调用
+`ktask::on_timer_fire()`。`on_timer_fire()` 采用 tick 限定的 NOHZ 风格：
 
-1. `timers::check_events()`：分发 tick 回调、检查定时 future。
-2. `scheduler_timer_tick()`：调用算法 `task_tick(current)`。
-3. 若算法返回应抢占，设置 `need_resched`（`set_preempt_pending(true)`）。
+1. 每次硬件触发都执行 `timers::check_events()`：分发 tick 回调、排空定时 future 的
+   timer wheel（两者都是 ns 驱动，与触发频率无关）。
+2. **仅**当周期 tick 截止时间已到（或首次触发的懒初始化）时，才调用
+   `scheduler_timer_tick()` → 算法 `task_tick(current)`，并把下一个 tick 截止时间推进
+   `now + PERIODIC_INTERVAL_NANOS`。调度器按 tick 计数（slice/vruntime 以 tick 为单位），
+   因此子 tick 的 soft-timer 触发不会调用 `task_tick`，保证调度记账仍以固定 `TICKS_PER_SECOND`
+   速率推进。
+3. 重新装填硬件定时器到 `min(下一个周期 tick, wheel 最早 soft deadline)`。
+
+子 tick 精度的关键：`register_timer`/`sleep_until` 在入队后（仍持有 wheel 的 `SpinNoIrq`
+锁、IRQ 关闭）立即调 `rearm_local_timer()` 把硬件截止时间拉到新的最早 deadline；
+`cancel_timer`/`TimerFuture::drop` 在本地 CPU 移除最早项时同样重装。远程 CPU 上取消最早项
+不发 IPI，由对方 CPU 下次（已过期的）触发自纠正（至多一次多余中断）。
 
 `ktask` 采用延迟抢占：tick 里通常只打 pending 标记，真正 `preempt_resched()` 在抢占重新允许的安全点触发。
 
@@ -239,8 +250,9 @@ wait/future 唤醒通常发生在释放资源或发送事件的线程上下文�
 
 ## 与 `kruntime` 的边界
 
-- `kruntime` 负责安装时钟中断并在 tick 时回调 `ktask::on_timer_tick()`。
-- `ktask` 负责将 tick 转换为调度记账、抢占请求、定时事件唤醒。
+- `kruntime` 负责注册时钟（及 IPI/PMU）中断向量；定时器中断处理只调用 `ktask::on_timer_fire()`。
+- `ktask` 负责全部硬件定时器驱动：周期 tick 簿记、timer wheel 排空、硬件重装，并将 tick
+  转换为调度记账、抢占请求、定时事件唤醒（含子 tick 精度）。
 - `kruntime` 不感知具体调度算法；`ktask` 不负责硬件 IRQ 路由。
 
 ## 调度统计

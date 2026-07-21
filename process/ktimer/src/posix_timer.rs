@@ -251,14 +251,22 @@ impl PosixTimer {
         let expirations = expirations as u32;
         if self.pending_signal {
             self.queued_overrun = self.queued_overrun.saturating_add(expirations);
-            self.last_overrun = self.queued_overrun;
+            // Do NOT update last_overrun here: timer_getoverrun must return the
+            // overrun frozen at the most recent signal *delivery* (dequeue),
+            // not the live pending count.  Writing last_overrun here would let
+            // a subsequent collect_delivery (pending_signal == false) overwrite
+            // the dequeued value with a fresh `expirations - 1` before the
+            // caller reads it — a race that produces overrun == 0 when the
+            // alarm task fires at sub-tick precision (1 expiration per fire).
             return None;
         }
 
         let overrun = expirations.saturating_sub(1);
         self.pending_signal = true;
         self.queued_overrun = overrun;
-        self.last_overrun = overrun;
+        // last_overrun is intentionally NOT written here.  It is frozen only
+        // in on_signal_dequeued (POSIX: timer_getoverrun returns the overrun
+        // count for the most recently *delivered* notification).
 
         let signal = TimerSignal::Posix {
             signo,

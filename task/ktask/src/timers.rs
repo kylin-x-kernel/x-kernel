@@ -34,5 +34,7 @@ pub(crate) fn check_events() {
     for callback in unsafe { TIMER_CALLBACKS.current_ref_raw().iter() } {
         callback(wall_time());
     }
-    crate::future::check_timer_events();
+    // The timer-wheel drain is done separately in `on_timer_fire` (merged with
+    // rearm into a single wheel-lock acquisition) to avoid taking the lock twice
+    // on every timer IRQ.
 }

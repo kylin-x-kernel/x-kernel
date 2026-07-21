@@ -108,15 +108,78 @@ pub fn init_scheduler_secondary() {
     crate::run_queue::init_secondary();
 }
 
-/// Handles periodic timer ticks for the task manager.
+/// Nanoseconds per periodic scheduler tick (`Kconfig` `TICKS_PER_SECOND`).
+const PERIODIC_INTERVAL_NANOS: u64 =
+    khal::time::NANOS_PER_SEC / kbuild_config::TICKS_PER_SECOND as u64;
+
+/// Absolute monotonic deadline (ns) of the next periodic scheduler tick, per CPU.
+#[percpu::def_percpu]
+static NEXT_TICK_DEADLINE: u64 = 0;
+
+/// Re-arms the local CPU hardware timer to fire at the earlier of the next
+/// periodic tick deadline and `earliest_soft_deadline` (if any).
 ///
-/// For example, advance scheduler states, checks timed events, etc.
-pub fn on_timer_tick() {
+/// # IRQ safety
+/// The caller MUST hold the local timer-wheel `SpinNoIrq` lock (or otherwise
+/// guarantee IRQs are masked on this CPU), so the timer IRQ handler cannot race
+/// the `NEXT_TICK_DEADLINE` read or the hardware register write.
+pub(crate) fn rearm_local_timer(earliest_soft_deadline: Option<khal::time::TimeValue>) {
+    // SAFETY: the caller guarantees IRQs are masked on this CPU (the wheel lock
+    // is held or we run in IRQ context), so the timer IRQ cannot re-enter and
+    // observe a half-updated slot. Only this CPU's own slot is touched.
+    let next_tick_ns = unsafe { NEXT_TICK_DEADLINE.read_current_raw() };
+    let deadline_ns = match earliest_soft_deadline {
+        // `TimeValue` is `core::time::Duration`, whose `as_nanos()` returns
+        // `u128`; monotonic time since boot always fits in `u64`.
+        Some(e) => next_tick_ns.min(e.as_nanos() as u64),
+        None => next_tick_ns,
+    };
+    khal::time::arm_timer(deadline_ns);
+}
+
+/// Hardware-timer IRQ entry. Drives the timer in a tick-bounded NOHZ style:
+///
+/// - Always drains the per-CPU soft-timer wheel and runs the wall-clock tick
+///   callbacks (both are ns-driven, so safe to run on every hardware fire).
+/// - Advances the scheduler tick **only** when the periodic tick deadline has
+///   elapsed — the scheduler counts ticks rather than reading the clock, so it
+///   must keep firing at `TICKS_PER_SECOND` even though the hardware may now
+///   fire more often for sub-tick soft timers.
+/// - Re-arms the hardware for the earlier of the next tick or the earliest
+///   pending soft deadline, which is what makes sub-tick timeouts wake on time.
+pub fn on_timer_fire() {
     use kspin::NoOp;
+    let now_ns = khal::time::monotonic_time_nanos();
+
+    // Per-tick callbacks (ns-driven, safe to run on every hardware fire).
     crate::timers::check_events();
-    // Since irq and preemption are both disabled here,
-    // we can get current run queue with the default `kspin::NoOp`.
-    current_run_queue::<NoOp>().scheduler_timer_tick();
+
+    // Drain expired timers and determine the next hardware deadline under a
+    // single wheel-lock acquisition — avoids taking the lock twice (once for
+    // drain via `check_timer_events`, once for rearm) on every timer IRQ.
+    let cpu_id = khal::percpu::this_cpu_id();
+    let (wakers, earliest) = crate::future::drain_expired_and_get_earliest(cpu_id);
+    for (_, waker) in wakers {
+        waker.wake();
+    }
+
+    // Advance the periodic scheduler tick. `cur == 0` is the first-fire lazy
+    // init (avoids a catch-up loop while the slot still holds the sentinel).
+    // SAFETY: the timer IRQ runs with IRQs (and preemption) disabled on this
+    // CPU, so raw per-CPU access cannot race a migration to another CPU.
+    let cur = unsafe { NEXT_TICK_DEADLINE.read_current_raw() };
+    if cur == 0 || now_ns >= cur {
+        // IRQ and preemption are both disabled here, so the default `NoOp`
+        // spin guard suffices for obtaining the current run queue.
+        current_run_queue::<NoOp>().scheduler_timer_tick();
+        // SAFETY: as above.
+        unsafe { NEXT_TICK_DEADLINE.write_current_raw(now_ns + PERIODIC_INTERVAL_NANOS) };
+    }
+
+    // Re-arm the hardware timer. `rearm_local_timer` requires IRQs off
+    // (satisfied in the timer IRQ handler); the wheel lock is not needed here
+    // since we already captured the earliest deadline above.
+    crate::api::rearm_local_timer(earliest);
 }
 
 /// Adds the given task to the run queue, returns the task reference.
