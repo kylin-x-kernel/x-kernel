@@ -4,20 +4,19 @@
 
 //! Filesystem metadata update syscalls.
 
-use core::{
-    ffi::{c_char, c_long},
-    time::Duration,
-};
+use core::ffi::{c_char, c_long};
+#[cfg(target_arch = "x86_64")]
+use core::time::Duration;
 
 use kerrno::KResult;
 use khal::time::wall_time;
-use kvfs::{MetadataUpdate, NodePermission};
+use kvfs::{NodePermission, SetattrTime};
 use linux_raw_sys::general::*;
 #[cfg(target_arch = "x86_64")]
 use posix_types::utimbuf;
 use posix_types::{TimeValueLike, UserConstPtr};
 
-use crate::path::resolve_at;
+use crate::path::resolve_at_with_cred;
 
 #[cfg(target_arch = "x86_64")]
 pub fn sys_chown(path: UserConstPtr<c_char>, uid: i32, gid: i32) -> KResult<isize> {
@@ -45,22 +44,13 @@ pub fn sys_fchownat(
         .check_non_null()
         .map(UserConstPtr::load_string)
         .transpose()?;
-    let loc = resolve_at(dirfd, path.as_deref(), flags)?.into_path()?;
-    let meta = loc.getattr()?;
-
-    let mut mode = meta.mode.permission();
-    mode.remove(NodePermission::SET_UID);
-    if mode.contains(NodePermission::GROUP_EXEC) {
-        mode.remove(NodePermission::SET_GID);
-    }
-
-    let uid = if uid == -1 { meta.uid } else { uid as _ };
-    let gid = if gid == -1 { meta.gid } else { gid as _ };
-    loc.setattr(MetadataUpdate {
-        owner: Some((uid, gid)),
-        mode: Some(mode),
-        ..Default::default()
-    })?;
+    let cred = kprocess::current_cred();
+    let loc = resolve_at_with_cred(dirfd, path.as_deref(), flags, &cred)?.into_path()?;
+    loc.chown(
+        (uid != -1).then_some(uid as u32),
+        (gid != -1).then_some(gid as u32),
+        &cred,
+    )?;
     Ok(0)
 }
 
@@ -85,31 +75,26 @@ pub fn sys_fchmodat(
         .check_non_null()
         .map(UserConstPtr::load_string)
         .transpose()?;
-    let loc = resolve_at(dirfd, path.as_deref(), flags)?.into_path()?;
-    loc.setattr(MetadataUpdate {
-        mode: Some(NodePermission::from_bits_truncate(mode as u16)),
-        ..Default::default()
-    })?;
+    let cred = kprocess::current_cred();
+    let loc = resolve_at_with_cred(dirfd, path.as_deref(), flags, &cred)?.into_path()?;
+    loc.chmod(NodePermission::from_bits_truncate(mode as u16), &cred)?;
     Ok(0)
 }
 
 fn update_times(
     dirfd: i32,
     path: UserConstPtr<c_char>,
-    atime: Option<Duration>,
-    mtime: Option<Duration>,
+    atime: Option<SetattrTime>,
+    mtime: Option<SetattrTime>,
     flags: u32,
 ) -> KResult<()> {
     let path = path
         .check_non_null()
         .map(UserConstPtr::load_string)
         .transpose()?;
-    let loc = resolve_at(dirfd, path.as_deref(), flags)?.into_path()?;
-    loc.setattr(MetadataUpdate {
-        atime,
-        mtime,
-        ..Default::default()
-    })?;
+    let cred = kprocess::current_cred();
+    let loc = resolve_at_with_cred(dirfd, path.as_deref(), flags, &cred)?.into_path()?;
+    loc.set_times(atime, mtime, &cred)?;
     Ok(())
 }
 
@@ -118,12 +103,12 @@ pub fn sys_utime(path: UserConstPtr<c_char>, times: UserConstPtr<utimbuf>) -> KR
     let (atime, mtime) = if let Some(times) = times.check_non_null() {
         let times = times.read_vm()?;
         (
-            Duration::from_secs(times.actime as _),
-            Duration::from_secs(times.modtime as _),
+            SetattrTime::Explicit(Duration::from_secs(times.actime as _)),
+            SetattrTime::Explicit(Duration::from_secs(times.modtime as _)),
         )
     } else {
         let time = wall_time();
-        (time, time)
+        (SetattrTime::Current(time), SetattrTime::Current(time))
     };
     update_times(AT_FDCWD, path, Some(atime), Some(mtime), 0)?;
     Ok(0)
@@ -133,10 +118,13 @@ pub fn sys_utime(path: UserConstPtr<c_char>, times: UserConstPtr<utimbuf>) -> KR
 pub fn sys_utimes(path: UserConstPtr<c_char>, times: UserConstPtr<[timeval; 2]>) -> KResult<isize> {
     let (atime, mtime) = if let Some(times) = times.check_non_null() {
         let [atime, mtime] = times.read_vm()?;
-        (atime.try_into_time_value()?, mtime.try_into_time_value()?)
+        (
+            SetattrTime::Explicit(atime.try_into_time_value()?),
+            SetattrTime::Explicit(mtime.try_into_time_value()?),
+        )
     } else {
         let time = wall_time();
-        (time, time)
+        (SetattrTime::Current(time), SetattrTime::Current(time))
     };
     update_times(AT_FDCWD, path, Some(atime), Some(mtime), 0)?;
     Ok(0)
@@ -152,23 +140,26 @@ pub fn sys_utimensat(
         flags |= AT_EMPTY_PATH;
     }
 
-    fn utime_to_duration(time: &timespec) -> Option<KResult<Duration>> {
+    fn utime_to_update(time: &timespec) -> Option<KResult<SetattrTime>> {
         match time.tv_nsec {
             val if val == UTIME_OMIT as c_long => None,
-            val if val == UTIME_NOW as c_long => Some(Ok(wall_time())),
-            _ => Some(time.try_into_time_value()),
+            val if val == UTIME_NOW as c_long => Some(Ok(SetattrTime::Current(wall_time()))),
+            _ => Some(time.try_into_time_value().map(SetattrTime::Explicit)),
         }
     }
 
     let (atime, mtime) = if let Some(times) = times.check_non_null() {
         let [atime, mtime] = times.read_vm()?;
         (
-            utime_to_duration(&atime).transpose()?,
-            utime_to_duration(&mtime).transpose()?,
+            utime_to_update(&atime).transpose()?,
+            utime_to_update(&mtime).transpose()?,
         )
     } else {
         let time = wall_time();
-        (Some(time), Some(time))
+        (
+            Some(SetattrTime::Current(time)),
+            Some(SetattrTime::Current(time)),
+        )
     };
     if atime.is_none() && mtime.is_none() {
         return Ok(0);

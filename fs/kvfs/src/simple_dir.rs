@@ -17,9 +17,10 @@ use core::any::Any;
 use ksync::Mutex;
 
 use crate::{
-    Dentry, DirContext, DirEntrySink, FileDirOperations, FileOperations, InodeDirOperations,
-    InodeOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType,
-    SeqFileInode, VfsError, VfsFile, VfsInode, VfsResult,
+    Dentry, DeviceId, DirContext, DirEntrySink, FileDirOperations, FileOperations,
+    InodeDirOperations, InodeOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags,
+    NodePermission, NodeType, SeqFileInode, Umode, VfsError, VfsFile, VfsInode, VfsResult,
+    inode_init_owner,
     libfs::{generic_read_dir, noop_fsync},
     path::{DOT, DOTDOT},
     simple_fs::{SimpleFs, SimpleFsNode},
@@ -142,6 +143,16 @@ pub trait SimpleDirOps: Send + Sync + 'static {
         true
     }
 
+    /// Installs a persistent child backed by an already allocated inode.
+    fn create_inode_child(
+        &self,
+        _lookup: SimpleDirLookup<'_>,
+        _name: &str,
+        _inode: Arc<VfsInode>,
+    ) -> VfsResult<Dentry> {
+        Err(VfsError::OperationNotPermitted)
+    }
+
     /// Combines two directories into one.
     fn chain<N: SimpleDirOps>(self, other: N) -> ChainedDirOps<Self, N>
     where
@@ -164,6 +175,31 @@ impl SimpleDirOps for DirMapping {
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         self.lookup_child_with_parent(Some(lookup.parent().clone()), name)
+    }
+
+    fn create_inode_child(
+        &self,
+        lookup: SimpleDirLookup<'_>,
+        name: &str,
+        inode: Arc<VfsInode>,
+    ) -> VfsResult<Dentry> {
+        let mut entries = self.entries.lock();
+        if entries.contains_key(name) {
+            return Err(VfsError::AlreadyExists);
+        }
+
+        let stored_inode = inode.clone();
+        entries.insert(
+            name.to_owned(),
+            Arc::new(move |parent, name| {
+                Ok(Dentry::new_file_from_inode(
+                    stored_inode.clone(),
+                    parent,
+                    name.to_owned(),
+                ))
+            }),
+        );
+        Ok(lookup.file_from_inode(name, inode))
     }
 }
 
@@ -398,6 +434,39 @@ impl<O: SimpleDirOps> InodeDirOperations for SimpleDirInodeOperations<O> {
         let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
         self.dir.ops.lookup_child(SimpleDirLookup::new(&dir), name)
+    }
+
+    fn mknod(
+        &self,
+        _idmap: &crate::MountIdmap,
+        dir: &VfsInode,
+        dentry: &LockedDentry<'_>,
+        mode: Umode,
+        device: DeviceId,
+        cred: &kcred::Cred,
+    ) -> VfsResult<Dentry> {
+        if !matches!(
+            mode.node_type(),
+            NodeType::CharacterDevice | NodeType::BlockDevice | NodeType::Fifo | NodeType::Socket
+        ) {
+            return Err(VfsError::InvalidInput);
+        }
+
+        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+        let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
+        let node = Arc::new(SimpleFsNode::new_with_owner(
+            self.dir.node.filesystem(),
+            mode.node_type(),
+            mode.permission(),
+            uid,
+            gid,
+        ));
+        node.set_rdev(device);
+        let init = node.inode_init();
+        let inode = VfsInode::new_special(node, NodeFlags::empty(), init);
+        self.dir
+            .ops
+            .create_inode_child(SimpleDirLookup::new(&parent), dentry.name(), inode)
     }
 
     fn link(

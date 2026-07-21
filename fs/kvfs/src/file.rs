@@ -15,6 +15,7 @@ use core::{
 };
 
 use iov_iter::{IovIterDest, IovIterSource, iov_iter_kvec_dest, iov_iter_kvec_source};
+use kcred::Cred;
 use kerrno::LinuxError;
 use kpoll::IoEvents;
 use linux_raw_sys::general::O_ACCMODE;
@@ -313,6 +314,7 @@ fn default_direct(path: &Path, open_flags: OpenFlags) -> bool {
 
 /// Open-file state while the open path is still installing final fields.
 pub struct VfsFileBuilder {
+    cred: Arc<Cred>,
     mode: FMode,
     operations: Option<Arc<dyn FileOperations>>,
     location: Option<FileLocation>,
@@ -323,8 +325,9 @@ pub struct VfsFileBuilder {
 
 impl VfsFileBuilder {
     /// Creates an unbound open-file builder.
-    pub(crate) fn empty(flags: FMode, open_flags: OpenFlags) -> Self {
+    pub(crate) fn empty(flags: FMode, open_flags: OpenFlags, cred: Arc<Cred>) -> Self {
         Self {
+            cred,
             mode: flags,
             operations: None,
             location: None,
@@ -334,8 +337,12 @@ impl VfsFileBuilder {
         }
     }
 
-    pub(crate) fn allocate(open_flags: OpenFlags) -> VfsResult<Self> {
-        Ok(Self::empty(FMode::from_open_flags(open_flags), open_flags))
+    pub(crate) fn allocate(open_flags: OpenFlags, cred: Arc<Cred>) -> VfsResult<Self> {
+        Ok(Self::empty(
+            FMode::from_open_flags(open_flags),
+            open_flags,
+            cred,
+        ))
     }
 
     pub(crate) fn from_path_state(
@@ -343,8 +350,9 @@ impl VfsFileBuilder {
         flags: FMode,
         open_flags: OpenFlags,
         f_op: Arc<dyn FileOperations>,
+        cred: Arc<Cred>,
     ) -> Self {
-        let mut file = Self::empty(flags, open_flags);
+        let mut file = Self::empty(flags, open_flags, cred);
         file.bind_location(FileLocation::from_path(path));
         file.install_operations(f_op);
         file
@@ -356,7 +364,7 @@ impl VfsFileBuilder {
         open_flags: OpenFlags,
         f_op: Arc<dyn FileOperations>,
     ) -> Self {
-        let mut file = Self::empty(flags, open_flags);
+        let mut file = Self::empty(flags, open_flags, base.cred.clone());
         file.bind_location(FileLocation::cloned_from(base));
         file.install_operations(f_op);
         file
@@ -504,6 +512,7 @@ impl VfsFileBuilder {
 
     pub(crate) fn finish(self) -> VfsResult<Arc<VfsFile>> {
         let Self {
+            cred,
             mode,
             operations,
             location,
@@ -515,6 +524,7 @@ impl VfsFileBuilder {
         let operations = operations.ok_or(VfsError::InvalidInput)?;
         let location = location.ok_or(VfsError::InvalidInput)?;
         Ok(Arc::new(VfsFile {
+            cred,
             mode: AtomicU32::new(mode.bits()),
             operations,
             location,
@@ -527,6 +537,7 @@ impl VfsFileBuilder {
 
 /// VFS-owned open-file state.
 pub struct VfsFile {
+    cred: Arc<Cred>,
     mode: AtomicU32,
     operations: Arc<dyn FileOperations>,
     location: FileLocation,
@@ -536,6 +547,11 @@ pub struct VfsFile {
 }
 
 impl VfsFile {
+    /// Returns the credentials captured when this file was opened.
+    pub fn cred(&self) -> &Arc<Cred> {
+        &self.cred
+    }
+
     /// Allocates an opened file sharing the path and mapping of another file.
     pub fn alloc_clone(
         &self,
@@ -655,6 +671,15 @@ impl VfsFile {
         } else {
             Err(VfsError::BadFileDescriptor)
         }
+    }
+
+    /// Changes the length of a file opened for writing.
+    ///
+    /// Descriptor-based truncation uses the authority established by the open
+    /// file description and therefore does not repeat pathname DAC checks.
+    pub fn truncate(&self, len: u64) -> VfsResult<()> {
+        self.verify_mode(FMode::WRITE)?;
+        self.path().truncate_opened(len)
     }
 
     fn verify_io_area(&self, pos: u64, count: usize) -> VfsResult<()> {

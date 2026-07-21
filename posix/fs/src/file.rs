@@ -23,6 +23,7 @@ pub fn add_stdio(fd_table: &mut FdTable, fs_struct: &FsStruct) -> KResult<()> {
             fs_struct.pwd(),
             flags,
             NodePermission::empty(),
+            kcred::initial_cred(),
         )
     };
 

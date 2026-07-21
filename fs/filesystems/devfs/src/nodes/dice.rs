@@ -95,7 +95,13 @@ fn get_process_hash() -> KResult<Vec<u8>> {
     let fs_struct = thread.process().fs_context()?;
     let fs = fs_struct.lock();
     let file = Filename::new(proc_exe_path.as_str())
-        .open_with_flags_at(fs.root(), fs.pwd(), O_RDONLY, NodePermission::empty())
+        .open_with_flags_at(
+            fs.root(),
+            fs.pwd(),
+            O_RDONLY,
+            NodePermission::empty(),
+            kprocess::current_cred(),
+        )
         .map_err(|_| KError::NotFound)?;
     drop(fs);
     let len = usize::try_from(file.size()).map_err(|_| KError::InvalidData)?;

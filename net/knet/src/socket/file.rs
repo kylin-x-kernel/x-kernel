@@ -7,13 +7,15 @@
 use alloc::{format, sync::Arc};
 use core::task::Context;
 
+use kcred::Cred;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, Pollable};
 use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile, VfsResult};
 
 use crate::{RecvFlags, RecvOptions, SendFlags, SendOptions, Socket, SocketOps};
 
-pub fn sock_alloc_file(socket: Socket, flags: u32) -> KResult<Arc<VfsFile>> {
+/// Wraps a socket in a VFS file and captures `cred` as its open credential.
+pub fn sock_alloc_file(socket: Socket, flags: u32, cred: Arc<Cred>) -> KResult<Arc<VfsFile>> {
     let flags = OpenFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
     let socket = Arc::new(socket);
     let name = format!("socket:[{}]", socket.as_ref() as *const _ as usize);
@@ -23,6 +25,7 @@ pub fn sock_alloc_file(socket: Socket, flags: u32) -> KResult<Arc<VfsFile>> {
         socket,
         FMode::READ | FMode::WRITE | FMode::STREAM,
         flags,
+        cred,
     )
 }
 

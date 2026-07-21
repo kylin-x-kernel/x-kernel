@@ -15,7 +15,7 @@ use core::{
     sync::atomic::{AtomicU32, AtomicUsize, Ordering},
 };
 
-use kcred::Credentials;
+use kcred::initial_cred;
 use kerrno::{KError, KResult};
 use khal::{mem::v2p, paging::MappingFlags};
 use kidentity::PidHandle;
@@ -74,7 +74,7 @@ fn run_in_user_task(test: &TestDescriptor, init_thread: InitTestThreadHook) -> T
         Arc::new(Mutex::new(aspace)),
         fs_context::copy_init_fs_struct(),
         Arc::new(SpinNoIrq::new(SignalActions::default())),
-        Credentials::root(),
+        initial_cred(),
     );
     init_thread(&thread);
 

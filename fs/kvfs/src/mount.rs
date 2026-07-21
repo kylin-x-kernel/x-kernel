@@ -15,7 +15,7 @@ use core::{
 };
 
 use hashbrown::HashMap;
-use kcred::{NamespaceId, UserNamespace, initial_user_namespace};
+use kcred::{Cred, NamespaceId, UserNamespace, initial_user_namespace};
 use klazy::Once;
 
 /// Mount idmapping context passed into inode namespace operations.
@@ -23,9 +23,9 @@ use klazy::Once;
 pub struct MountIdmap;
 
 use crate::{
-    Dentry, DentryKey, DentryOperations, DeviceId, FMode, FileOperations, GetattrQueryFlags,
-    GetattrRequestMask, Metadata, MetadataUpdate, Mutex, NodeFlags, NodePermission, NodeType,
-    OpenFlags, RenameFlags, StatFs, StatFsFlags, SuperBlock, VfsError, VfsFile, VfsFileBuilder,
+    Dentry, DentryKey, DeviceId, FMode, FileOperations, GetattrQueryFlags, GetattrRequestMask,
+    Metadata, MetadataUpdate, Mutex, NodeFlags, NodePermission, NodeType, OpenFlags, Permission,
+    RenameFlags, SetattrTime, StatFs, StatFsFlags, SuperBlock, VfsError, VfsFile, VfsFileBuilder,
     VfsInode, VfsResult, nullfs, path::PathBuf,
 };
 
@@ -327,39 +327,12 @@ impl Mount {
         flags: FMode,
         open_flags: OpenFlags,
         f_op: Arc<dyn FileOperations>,
-    ) -> VfsResult<Arc<VfsFile>> {
-        self.alloc_file_pseudo_inner(inode, name, flags, open_flags, f_op, None)
-    }
-
-    /// Allocates an opened pseudo file with dentry operations on this mount.
-    pub fn alloc_file_pseudo_with_dentry_operations(
-        self: &Arc<Self>,
-        inode: Arc<VfsInode>,
-        name: &str,
-        flags: FMode,
-        open_flags: OpenFlags,
-        f_op: Arc<dyn FileOperations>,
-        d_op: Arc<dyn DentryOperations>,
-    ) -> VfsResult<Arc<VfsFile>> {
-        self.alloc_file_pseudo_inner(inode, name, flags, open_flags, f_op, Some(d_op))
-    }
-
-    fn alloc_file_pseudo_inner(
-        self: &Arc<Self>,
-        inode: Arc<VfsInode>,
-        name: &str,
-        flags: FMode,
-        open_flags: OpenFlags,
-        f_op: Arc<dyn FileOperations>,
-        d_op: Option<Arc<dyn DentryOperations>>,
+        cred: Arc<Cred>,
     ) -> VfsResult<Arc<VfsFile>> {
         let dentry = Dentry::new_file_from_inode(inode, None, name.to_string());
-        if let Some(d_op) = d_op {
-            dentry.set_operations(d_op);
-        }
         dentry.bind_super_block(self.super_block());
         let path = Path::new(self.clone(), dentry);
-        let mut file = VfsFileBuilder::from_path_state(path, flags, open_flags, f_op);
+        let mut file = VfsFileBuilder::from_path_state(path, flags, open_flags, f_op, cred);
         file.mark_opened()?;
         file.finish()
     }
@@ -553,6 +526,11 @@ impl Path {
         self.dentry.vfs_inode().metadata()
     }
 
+    /// Checks access to this location's inode.
+    pub fn permission(&self, permission: Permission, cred: &Cred) -> VfsResult<()> {
+        self.inode().permission(permission, cred)
+    }
+
     /// Returns a snapshot of this location's name within its parent directory.
     pub fn name(&self) -> String {
         self.dentry.name_snapshot()
@@ -630,10 +608,88 @@ impl Path {
         Ok(())
     }
 
-    /// Updates metadata after checking mount writability.
-    pub fn setattr(&self, update: MetadataUpdate) -> VfsResult<()> {
+    /// Changes this inode's owner after applying Linux chown/chgrp authorization.
+    pub fn chown(&self, uid: Option<u32>, gid: Option<u32>, cred: &Cred) -> VfsResult<()> {
+        if uid.is_none() && gid.is_none() {
+            return Ok(());
+        }
+
         self.check_writable_mount()?;
-        self.dentry.update_metadata(update)
+        let metadata = self.metadata();
+        let is_owner = cred.fsuid() == metadata.uid;
+        let is_privileged = cred.is_privileged();
+
+        if uid.is_some_and(|uid| !is_privileged && (!is_owner || uid != metadata.uid)) {
+            return Err(VfsError::OperationNotPermitted);
+        }
+        if gid.is_some_and(|gid| {
+            !is_privileged && (!is_owner || (gid != metadata.gid && !cred.in_group(gid)))
+        }) {
+            return Err(VfsError::OperationNotPermitted);
+        }
+
+        let mut mode = metadata.mode.permission();
+        mode.remove(NodePermission::SET_UID);
+        if mode.contains(NodePermission::GROUP_EXEC) {
+            mode.remove(NodePermission::SET_GID);
+        }
+        self.dentry.update_metadata(MetadataUpdate {
+            owner: Some((uid.unwrap_or(metadata.uid), gid.unwrap_or(metadata.gid))),
+            mode: Some(mode),
+            ..Default::default()
+        })
+    }
+
+    /// Changes this inode's permission bits after applying Linux chmod authorization.
+    pub fn chmod(&self, mut mode: NodePermission, cred: &Cred) -> VfsResult<()> {
+        self.check_writable_mount()?;
+        let metadata = self.metadata();
+        if cred.fsuid() != metadata.uid && !cred.is_privileged() {
+            return Err(VfsError::OperationNotPermitted);
+        }
+        if mode.contains(NodePermission::SET_GID)
+            && !cred.in_group(metadata.gid)
+            && !cred.is_privileged()
+        {
+            mode.remove(NodePermission::SET_GID);
+        }
+        self.dentry.update_metadata(MetadataUpdate {
+            mode: Some(mode),
+            ..Default::default()
+        })
+    }
+
+    /// Changes this inode's timestamps after applying Linux utimens authorization.
+    pub fn set_times(
+        &self,
+        atime: Option<SetattrTime>,
+        mtime: Option<SetattrTime>,
+        cred: &Cred,
+    ) -> VfsResult<()> {
+        if atime.is_none() && mtime.is_none() {
+            return Ok(());
+        }
+
+        self.check_writable_mount()?;
+        let metadata = self.metadata();
+        let is_owner = cred.fsuid() == metadata.uid;
+        let is_touch = matches!(
+            (atime, mtime),
+            (Some(SetattrTime::Current(_)), Some(SetattrTime::Current(_)))
+        );
+        if !is_touch {
+            if !is_owner && !cred.is_privileged() {
+                return Err(VfsError::OperationNotPermitted);
+            }
+        } else if !is_owner && !cred.is_privileged() {
+            self.permission(Permission::MAY_WRITE, cred)?;
+        }
+
+        self.dentry.update_metadata(MetadataUpdate {
+            atime: atime.map(SetattrTime::value),
+            mtime: mtime.map(SetattrTime::value),
+            ..Default::default()
+        })
     }
 
     /// Returns metadata without security checks.
@@ -665,6 +721,24 @@ impl Path {
         Ok(())
     }
 
+    fn may_modify_directory(&self, cred: &Cred) -> VfsResult<()> {
+        self.permission(Permission::MAY_WRITE | Permission::MAY_EXEC, cred)
+    }
+
+    fn check_sticky(&self, victim: &Self, cred: &Cred) -> VfsResult<()> {
+        let dir = self.metadata();
+        if !dir.mode.permission().contains(NodePermission::STICKY) {
+            return Ok(());
+        }
+
+        let fsuid = cred.fsuid();
+        if fsuid == 0 || fsuid == dir.uid || fsuid == victim.metadata().uid {
+            Ok(())
+        } else {
+            Err(VfsError::OperationNotPermitted)
+        }
+    }
+
     fn lookup_child_in_mount(&self, name: &str) -> VfsResult<Self> {
         Ok(Self::new(
             self.mnt.clone(),
@@ -673,20 +747,28 @@ impl Path {
     }
 
     /// Create a regular file under this directory path.
-    pub fn create(&self, name: &str, permission: NodePermission) -> VfsResult<Self> {
+    pub fn create(&self, name: &str, permission: NodePermission, cred: &Cred) -> VfsResult<Self> {
+        self.may_modify_directory(cred)?;
         self.check_writable_mount()?;
         self.dentry
             .as_dir()?
-            .create(name, permission)
+            .create(name, permission, cred)
             .map(|entry| self.with_dentry(entry))
     }
 
     /// Create a directory under this directory path.
-    pub fn mkdir(&self, name: &str, permission: NodePermission) -> VfsResult<Self> {
+    pub fn mkdir(
+        &self,
+        name: &str,
+        mut permission: NodePermission,
+        cred: &Cred,
+    ) -> VfsResult<Self> {
+        self.may_modify_directory(cred)?;
         self.check_writable_mount()?;
+        permission.remove(NodePermission::SET_UID | NodePermission::SET_GID);
         self.dentry
             .as_dir()?
-            .mkdir(name, permission)
+            .mkdir(name, permission, cred)
             .map(|entry| self.with_dentry(entry))
     }
 
@@ -697,19 +779,22 @@ impl Path {
         node_type: NodeType,
         permission: NodePermission,
         device: DeviceId,
+        cred: &Cred,
     ) -> VfsResult<Self> {
+        self.may_modify_directory(cred)?;
         self.check_writable_mount()?;
         self.dentry
             .as_dir()?
-            .mknod(name, node_type, permission, device)
+            .mknod(name, node_type, permission, device, cred)
             .map(|entry| self.with_dentry(entry))
     }
 
     /// Create a hard link to an existing path.
-    pub fn link(&self, name: &str, source: &Self) -> VfsResult<Self> {
+    pub fn link(&self, name: &str, source: &Self, cred: &Cred) -> VfsResult<Self> {
         if !Arc::ptr_eq(&self.mnt, &source.mnt) {
             return Err(VfsError::CrossesDevices);
         }
+        self.may_modify_directory(cred)?;
         self.check_writable_mount()?;
         self.dentry
             .as_dir()?
@@ -718,11 +803,12 @@ impl Path {
     }
 
     /// Create a symbolic link under this directory path.
-    pub fn symlink(&self, name: &str, target: &str) -> VfsResult<Self> {
+    pub fn symlink(&self, name: &str, target: &str, cred: &Cred) -> VfsResult<Self> {
+        self.may_modify_directory(cred)?;
         self.check_writable_mount()?;
         self.dentry
             .as_dir()?
-            .symlink(name, target)
+            .symlink(name, target, cred)
             .map(|entry| self.with_dentry(entry))
     }
 
@@ -733,16 +819,23 @@ impl Path {
         new_dir: &Self,
         new_name: &str,
         flags: RenameFlags,
+        cred: &Cred,
     ) -> VfsResult<()> {
         if !Arc::ptr_eq(&self.mnt, &new_dir.mnt) {
             return Err(VfsError::CrossesDevices);
+        }
+        self.may_modify_directory(cred)?;
+        if !self.ptr_eq(new_dir) {
+            new_dir.may_modify_directory(cred)?;
         }
         self.check_writable_mount()?;
         new_dir.check_writable_mount()?;
 
         let old_path = self.lookup_child_in_mount(old_name)?;
+        self.check_sticky(&old_path, cred)?;
         old_path.check_not_mountpoint()?;
         if let Ok(new_path) = new_dir.lookup_child_in_mount(new_name) {
+            new_dir.check_sticky(&new_path, cred)?;
             new_path.check_not_mountpoint()?;
         }
         if !self.ptr_eq(new_dir)
@@ -757,23 +850,27 @@ impl Path {
     }
 
     /// Remove a non-directory entry.
-    pub fn unlink(&self, name: &str) -> VfsResult<()> {
+    pub fn unlink(&self, name: &str, cred: &Cred) -> VfsResult<()> {
+        self.may_modify_directory(cred)?;
         self.check_writable_mount()?;
         let path = self.lookup_child_in_mount(name)?;
         if path.is_dir() {
             return Err(VfsError::IsADirectory);
         }
+        self.check_sticky(&path, cred)?;
         path.check_not_mountpoint()?;
         self.dentry.as_dir()?.unlink(name, false)
     }
 
     /// Remove a directory entry.
-    pub fn rmdir(&self, name: &str) -> VfsResult<()> {
+    pub fn rmdir(&self, name: &str, cred: &Cred) -> VfsResult<()> {
+        self.may_modify_directory(cred)?;
         self.check_writable_mount()?;
         let path = self.lookup_child_in_mount(name)?;
         if !path.is_dir() {
             return Err(VfsError::NotADirectory);
         }
+        self.check_sticky(&path, cred)?;
         path.check_not_mountpoint()?;
         self.dentry.as_dir()?.unlink(name, true)
     }
@@ -864,7 +961,12 @@ impl Path {
     }
 
     /// Changes a regular file length through the VFS truncate path.
-    pub fn truncate(&self, len: u64) -> VfsResult<()> {
+    pub fn truncate(&self, len: u64, cred: &Cred) -> VfsResult<()> {
+        self.permission(Permission::MAY_WRITE, cred)?;
+        self.truncate_opened(len)
+    }
+
+    pub(crate) fn truncate_opened(&self, len: u64) -> VfsResult<()> {
         self.check_writable_mount()?;
         if self.is_dir() {
             return Err(VfsError::IsADirectory);
@@ -1061,8 +1163,34 @@ mod tests {
             _dentry: &LockedDentry<'_>,
             _mode: crate::Umode,
             _exclusive: bool,
+            _cred: &Cred,
         ) -> VfsResult<Dentry> {
             Err(VfsError::OperationNotSupported)
+        }
+
+        fn mkdir(
+            &self,
+            _idmap: &crate::MountIdmap,
+            dir: &VfsInode,
+            dentry: &LockedDentry<'_>,
+            mode: crate::Umode,
+            cred: &Cred,
+        ) -> VfsResult<Dentry> {
+            let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+            let (mode, uid, gid) = crate::inode_init_owner(dir, mode, cred);
+            let inode = self.inode + 1;
+            let init = VfsInodeInit::new(inode, 0, mode)
+                .with_owner_links_and_rdev(uid, gid, 1, Default::default())
+                .with_stat_data(512, 1, Duration::ZERO, Duration::ZERO, Duration::ZERO);
+            let inode = VfsInode::new_openable_dir(
+                Arc::new(MockDirOps::new(self.mount_flags, inode)),
+                init,
+            );
+            Ok(Dentry::new_dir_from_inode(
+                inode,
+                Some(parent.clone()),
+                String::from(dentry.name()),
+            ))
         }
 
         fn link(
@@ -1473,7 +1601,7 @@ mod tests {
         let mount = Mount::new_root_with_flags(&fs, MountFlags::RDONLY);
         let root = mount.root_path();
 
-        let result = root.create("test", NodePermission::default());
+        let result = root.create("test", NodePermission::default(), &kcred::initial_cred());
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), VfsError::ReadOnlyFilesystem);
     }
@@ -1484,7 +1612,7 @@ mod tests {
         let mount = Mount::new_root_with_flags(&fs, MountFlags::RDONLY);
         let root = mount.root_path();
 
-        let result = root.unlink("test");
+        let result = root.unlink("test", &kcred::initial_cred());
         assert_eq!(result, Err(VfsError::ReadOnlyFilesystem));
     }
 
@@ -1494,7 +1622,13 @@ mod tests {
         let mount = Mount::new_root_with_flags(&fs, MountFlags::RDONLY);
         let root = mount.root_path();
 
-        let result = root.rename("a", &root, "b", RenameFlags::empty());
+        let result = root.rename(
+            "a",
+            &root,
+            "b",
+            RenameFlags::empty(),
+            &kcred::initial_cred(),
+        );
         assert_eq!(result, Err(VfsError::ReadOnlyFilesystem));
     }
 
@@ -1504,11 +1638,162 @@ mod tests {
         let mount = Mount::new_root(&fs);
         let root = mount.root_path();
 
-        let result = root.create("test", NodePermission::default());
+        let result = root.create("test", NodePermission::default(), &kcred::initial_cred());
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), VfsError::OperationNotSupported);
 
-        assert_eq!(root.unlink("test"), Err(VfsError::NotFound));
+        assert_eq!(
+            root.unlink("test", &kcred::initial_cred()),
+            Err(VfsError::NotFound)
+        );
+    }
+
+    #[def_test]
+    fn test_mkdir_strips_requested_setid_bits_before_owner_initialization() {
+        let fs = mock_filesystem(StatFsFlags::empty());
+        let root = Mount::new_root(&fs).root_path();
+        let requested = NodePermission::from_bits_truncate(0o7777);
+
+        let ordinary = root
+            .mkdir("ordinary", requested, &kcred::initial_cred())
+            .unwrap();
+        let ordinary_permission = ordinary.metadata().mode.permission();
+        assert!(!ordinary_permission.contains(NodePermission::SET_UID));
+        assert!(!ordinary_permission.contains(NodePermission::SET_GID));
+        assert!(ordinary_permission.contains(NodePermission::STICKY));
+
+        root.dentry
+            .update_metadata(MetadataUpdate {
+                mode: Some(NodePermission::from_bits_truncate(0o2777)),
+                owner: Some((0, 1234)),
+                ..Default::default()
+            })
+            .unwrap();
+        let inherited = root
+            .mkdir("inherited", requested, &kcred::initial_cred())
+            .unwrap();
+        let inherited_metadata = inherited.metadata();
+        assert!(
+            !inherited_metadata
+                .mode
+                .permission()
+                .contains(NodePermission::SET_UID)
+        );
+        assert!(
+            inherited_metadata
+                .mode
+                .permission()
+                .contains(NodePermission::SET_GID)
+        );
+        assert_eq!(inherited_metadata.gid, 1234);
+    }
+
+    #[def_test]
+    fn test_sticky_directory_rejects_unrelated_user_delete() {
+        let fs = mock_filesystem(StatFsFlags::empty());
+        let mount = Mount::new_root(&fs);
+        let root = mount.root_path();
+        root.dentry
+            .update_metadata(MetadataUpdate {
+                mode: Some(NodePermission::from_bits_truncate(0o1777)),
+                owner: Some((1000, 1000)),
+                ..Default::default()
+            })
+            .unwrap();
+        let victim = root.lookup_child_in_mount("mnt").unwrap();
+        victim
+            .dentry
+            .update_metadata(MetadataUpdate {
+                owner: Some((2000, 2000)),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            root.rmdir("mnt", &kcred::Cred::new(3000, 3000)),
+            Err(VfsError::OperationNotPermitted)
+        );
+    }
+
+    #[def_test]
+    fn test_metadata_owner_and_group_authorization() {
+        let fs = mock_filesystem(StatFsFlags::empty());
+        let root = Mount::new_root(&fs).root_path();
+        root.dentry
+            .update_metadata(MetadataUpdate {
+                mode: Some(NodePermission::from_bits_truncate(0o666)),
+                owner: Some((1000, 100)),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let mut owner = Cred::new(1000, 100);
+        owner.set_supplementary_groups(vec![200]);
+        let other = Cred::new(2000, 300);
+
+        assert_eq!(
+            root.chmod(NodePermission::from_bits_truncate(0o600), &other),
+            Err(VfsError::OperationNotPermitted)
+        );
+        assert_eq!(
+            root.chown(Some(2000), None, &owner),
+            Err(VfsError::OperationNotPermitted)
+        );
+        assert_eq!(
+            root.chown(None, Some(300), &owner),
+            Err(VfsError::OperationNotPermitted)
+        );
+
+        root.chown(None, Some(200), &owner).unwrap();
+        assert_eq!(root.metadata().gid, 200);
+        root.chmod(NodePermission::from_bits_truncate(0o2660), &owner)
+            .unwrap();
+        assert!(
+            root.metadata()
+                .mode
+                .permission()
+                .contains(NodePermission::SET_GID)
+        );
+    }
+
+    #[def_test]
+    fn test_timestamp_authorization_distinguishes_current_and_explicit_values() {
+        let fs = mock_filesystem(StatFsFlags::empty());
+        let root = Mount::new_root(&fs).root_path();
+        root.dentry
+            .update_metadata(MetadataUpdate {
+                mode: Some(NodePermission::from_bits_truncate(0o666)),
+                owner: Some((1000, 100)),
+                ..Default::default()
+            })
+            .unwrap();
+        let other = Cred::new(2000, 200);
+
+        root.set_times(
+            Some(SetattrTime::Current(Duration::from_secs(10))),
+            Some(SetattrTime::Current(Duration::from_secs(11))),
+            &other,
+        )
+        .unwrap();
+        let metadata = root.metadata();
+        assert_eq!(metadata.atime, Duration::from_secs(10));
+        assert_eq!(metadata.mtime, Duration::from_secs(11));
+        assert_eq!(
+            root.set_times(
+                Some(SetattrTime::Explicit(Duration::from_secs(20))),
+                None,
+                &other,
+            ),
+            Err(VfsError::OperationNotPermitted)
+        );
+        assert_eq!(
+            root.set_times(
+                Some(SetattrTime::Current(Duration::from_secs(30))),
+                None,
+                &other,
+            ),
+            Err(VfsError::OperationNotPermitted)
+        );
     }
 
     #[def_test]

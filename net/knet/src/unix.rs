@@ -19,7 +19,8 @@ use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
 use ktask::future::{block_on, interruptible};
 use kvfs::{
-    DeviceId, Filename, LookupFlags, LookupIntent, NodePermission, NodeType, Path, WeakVfsInode,
+    DeviceId, Filename, LookupFlags, LookupIntent, NodePermission, NodeType, Path, Permission,
+    WeakVfsInode,
 };
 
 pub use self::{dgram::DgramTransport, stream::StreamTransport};
@@ -110,26 +111,30 @@ fn path_bind_matches(entry: &PathBindEntry, loc: &Path) -> bool {
         .is_some_and(|inode| Arc::ptr_eq(&inode, &loc.inode()))
 }
 
-fn lookup_or_create_bind_location(root: &Path, pwd: &Path, path: &str) -> KResult<Path> {
-    match Filename::new(path).lookup_at(root, pwd, LookupIntent::Open, LookupFlags::follow()) {
-        Ok(loc) => Ok(loc),
-        Err(err) if err.canonicalize() == KError::NotFound => {
-            let (parent, name) = Filename::new(path)
-                .parent_at(root, pwd, LookupIntent::Open)?
-                .into_normal()?;
-            parent.mknod(
-                &name,
-                NodeType::Socket,
-                NodePermission::from_bits_truncate(0o666),
-                DeviceId::default(),
-            )
-        }
-        Err(err) => Err(err),
-    }
+fn create_bind_location(
+    root: &Path,
+    pwd: &Path,
+    path: &str,
+    mode: NodePermission,
+    cred: &kcred::Cred,
+) -> KResult<Path> {
+    let (parent, name) = Filename::new(path)
+        .parent_at(root, pwd, LookupIntent::Open, cred)?
+        .into_normal()?;
+    parent
+        .mknod(&name, NodeType::Socket, mode, DeviceId::default(), cred)
+        .map_err(|error| {
+            if error.canonicalize() == KError::AlreadyExists {
+                KError::AddrInUse
+            } else {
+                error
+            }
+        })
 }
 
 pub(crate) fn lookup_bind_entry<R>(
     addr: &UnixAddr,
+    cred: &kcred::Cred,
     f: impl FnOnce(&BindEntry) -> KResult<R>,
 ) -> KResult<R> {
     match addr {
@@ -150,7 +155,9 @@ pub(crate) fn lookup_bind_entry<R>(
                 fs.pwd(),
                 LookupIntent::Open,
                 LookupFlags::follow(),
+                cred,
             )?;
+            loc.permission(Permission::MAY_WRITE, cred)?;
             if loc.getattr()?.mode.node_type() != NodeType::Socket {
                 return Err(KError::NotASocket);
             }
@@ -172,6 +179,8 @@ pub(crate) fn lookup_bind_entry<R>(
 }
 fn lookup_or_create_bind_entry<R>(
     addr: &UnixAddr,
+    mode: NodePermission,
+    cred: &kcred::Cred,
     f: impl FnOnce(&BindEntry) -> KResult<R>,
 ) -> KResult<R> {
     match addr {
@@ -183,7 +192,7 @@ fn lookup_or_create_bind_entry<R>(
         UnixAddr::Path(path) => {
             let fs_struct = kprocess::current_fs_context();
             let fs = fs_struct.lock();
-            let loc = lookup_or_create_bind_location(fs.root(), fs.pwd(), path.as_ref())?;
+            let loc = create_bind_location(fs.root(), fs.pwd(), path.as_ref(), mode, cred)?;
             if loc.getattr()?.mode.node_type() != NodeType::Socket {
                 return Err(KError::NotASocket);
             }
@@ -223,6 +232,30 @@ impl UnixDomainSocket {
             peer_endpoint: Mutex::new(UnixAddr::Unbound),
         }
     }
+
+    /// Binds this socket using an explicit credential for pathname access.
+    ///
+    /// Kernel callers use this entry because they do not have a current user
+    /// task. User-facing bind enters through [`SocketOps::bind`], which takes
+    /// one snapshot of the current task credential before calling this method.
+    pub fn bind_with_cred(
+        &self,
+        local_endpoint: SocketAddrEx,
+        cred: &kcred::Cred,
+        mode: NodePermission,
+    ) -> KResult {
+        let local_endpoint = local_endpoint.into_unix()?;
+        let mut local_guard = self.local_endpoint.lock();
+        if matches!(&*local_guard, UnixAddr::Unbound) {
+            lookup_or_create_bind_entry(&local_endpoint, mode, cred, |slot| {
+                self.transport.bind(slot, &local_endpoint)
+            })?;
+            *local_guard = local_endpoint;
+        } else {
+            return Err(KError::InvalidInput);
+        }
+        Ok(())
+    }
 }
 impl Configurable for UnixDomainSocket {
     fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<OptionHandled> {
@@ -235,17 +268,9 @@ impl Configurable for UnixDomainSocket {
 }
 impl SocketOps for UnixDomainSocket {
     fn bind(&self, local_endpoint: SocketAddrEx) -> KResult {
-        let local_endpoint = local_endpoint.into_unix()?;
-        let mut local_guard = self.local_endpoint.lock();
-        if matches!(&*local_guard, UnixAddr::Unbound) {
-            lookup_or_create_bind_entry(&local_endpoint, |slot| {
-                self.transport.bind(slot, &local_endpoint)
-            })?;
-            *local_guard = local_endpoint;
-        } else {
-            return Err(KError::InvalidInput);
-        }
-        Ok(())
+        let cred = kprocess::current_cred();
+        let mode = NodePermission::from_bits_truncate(0o777 & !(kprocess::current_umask() as u16));
+        self.bind_with_cred(local_endpoint, &cred, mode)
     }
 
     fn connect(&self, remote_addr: SocketAddrEx) -> KResult {
@@ -253,7 +278,8 @@ impl SocketOps for UnixDomainSocket {
         let local_endpoint = self.local_endpoint.lock().clone();
         let mut peer_guard = self.peer_endpoint.lock();
         if matches!(&*peer_guard, UnixAddr::Unbound) {
-            lookup_bind_entry(&remote_addr, |slot| {
+            let cred = kprocess::current_cred();
+            lookup_bind_entry(&remote_addr, &cred, |slot| {
                 self.transport.connect(slot, &local_endpoint)
             })?;
             *peer_guard = remote_addr;

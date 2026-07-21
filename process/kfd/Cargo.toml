@@ -13,6 +13,7 @@ documentation.workspace = true
 flatten_objects.workspace = true
 kvfs.workspace = true
 kerrno.workspace = true
+kcred.workspace = true
 kpoll.workspace = true
 krlimit.workspace = true
 ksync.workspace = true

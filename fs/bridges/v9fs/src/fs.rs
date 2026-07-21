@@ -8,9 +8,7 @@ use alloc::{boxed::Box, string::String, sync::Arc};
 
 use fs9p::{Session, Transport};
 use ksync::{Mutex, MutexGuard};
-use kvfs::{
-    Dentry, NodeFlags, StatFs, SuperBlock, SuperBlockOperations, VfsResult, path::MAX_NAME_LEN,
-};
+use kvfs::{NodeFlags, StatFs, SuperBlock, SuperBlockOperations, VfsResult, path::MAX_NAME_LEN};
 
 use super::inode::{Inode, inode_init_from_attr};
 

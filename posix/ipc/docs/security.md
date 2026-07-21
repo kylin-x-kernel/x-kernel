@@ -14,6 +14,8 @@ must not bypass those layers by owning page frames directly.
 
 - `SHM_MANAGER` is the only owner of global key/shmid lookup state.
 - `ShmInner` owns only IPC metadata plus an `Arc<kvfs::VfsFile>` backing object.
+- Segment construction receives an explicit immutable credential snapshot;
+  `shm_perm` creator/owner IDs use its effective UID/GID.
 - SysV shm contents must flow through inode-owned `pagecache::Mapping`.
 - `ShmInner.page_num` is derived from a page-aligned segment size.
 - `shm_nattch` must match the number of process attach records in
@@ -42,6 +44,7 @@ must not bypass those layers by owning page frames directly.
 | address-space allocation failure | propagate error | no attach record is published |
 | duplicate attach by same process | return `InvalidInput` | any just-created mapping is unmapped |
 | detach of unknown address | return `InvalidInput` | no attach count change |
+| kernel task constructs a test segment | caller supplies `initial_cred()` explicitly | no current-user-thread lookup or panic |
 
 ## Known Limitations
 
@@ -55,5 +58,6 @@ must not bypass those layers by owning page frames directly.
 
 - New SysV shm behavior should keep content ownership in KFS/pagecache/filemap.
 - IPC metadata changes must update `shmid_ds` consistently.
+- Segment constructors must not call `current_cred()` or store a duplicate credential field.
 - New paths that hold `SHM_MANAGER` must not call into `MmSpace`.
 - `IPC_RMID` cleanup must re-check attach count while protected by IPC locks.

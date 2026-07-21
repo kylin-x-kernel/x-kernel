@@ -9,7 +9,7 @@
 
 use alloc::vec::Vec;
 
-use kcred::{CredentialError, Gid, Uid};
+use kcred::{Cred, Gid, Uid};
 use kerrno::{KError, KResult};
 use posix_types::{UserConstPtr, UserPtr};
 
@@ -22,102 +22,85 @@ fn optional_id(id: u32) -> Option<u32> {
     (id != NO_CHANGE_ID).then_some(id)
 }
 
-fn credential_error(err: CredentialError) -> KError {
-    match err {
-        CredentialError::PermissionDenied => KError::OperationNotPermitted,
-    }
+fn update_current_cred(update: impl FnOnce(&mut Cred) -> KResult<()>) -> KResult<()> {
+    let current = kprocess::current_user_thread();
+    let mut new = current.prepare_creds();
+    update(&mut new)?;
+    current.commit_creds(new);
+    Ok(())
 }
 
 /// Get the real user ID of the current process.
 pub fn sys_getuid() -> KResult<isize> {
-    Ok(kprocess::with_current_credentials(|credentials| {
-        credentials.ruid() as isize
-    }))
+    Ok(kprocess::current_cred().ruid() as isize)
 }
 
 /// Get the effective user ID of the current process.
 pub fn sys_geteuid() -> KResult<isize> {
-    Ok(kprocess::with_current_credentials(|credentials| {
-        credentials.euid() as isize
-    }))
+    Ok(kprocess::current_cred().euid() as isize)
 }
 
 /// Get the real group ID of the current process.
 pub fn sys_getgid() -> KResult<isize> {
-    Ok(kprocess::with_current_credentials(|credentials| {
-        credentials.rgid() as isize
-    }))
+    Ok(kprocess::current_cred().rgid() as isize)
 }
 
 /// Get the effective group ID of the current process.
 pub fn sys_getegid() -> KResult<isize> {
-    Ok(kprocess::with_current_credentials(|credentials| {
-        credentials.egid() as isize
-    }))
+    Ok(kprocess::current_cred().egid() as isize)
 }
 
 /// Set the user ID of the current process.
 pub fn sys_setuid(uid: Uid) -> KResult<isize> {
     debug!("sys_setuid <= uid: {uid}");
-    kprocess::with_current_credentials_mut(|credentials| credentials.set_uid(uid))
-        .map_err(credential_error)?;
+    update_current_cred(|cred| cred.set_uid(uid))?;
     Ok(0)
 }
 
 /// Set the group ID of the current process.
 pub fn sys_setgid(gid: Gid) -> KResult<isize> {
     debug!("sys_setgid <= gid: {gid}");
-    kprocess::with_current_credentials_mut(|credentials| credentials.set_gid(gid))
-        .map_err(credential_error)?;
+    update_current_cred(|cred| cred.set_gid(gid))?;
     Ok(0)
 }
 
 /// Set the real and/or effective user ID of the current process.
 pub fn sys_setreuid(ruid: u32, euid: u32) -> KResult<isize> {
     debug!("sys_setreuid <= ruid: {ruid}, euid: {euid}");
-    kprocess::with_current_credentials_mut(|credentials| {
-        credentials.set_reuid(optional_id(ruid), optional_id(euid))
-    })
-    .map_err(credential_error)?;
+    update_current_cred(|cred| cred.set_reuid(optional_id(ruid), optional_id(euid)))?;
     Ok(0)
 }
 
 /// Set the real and/or effective group ID of the current process.
 pub fn sys_setregid(rgid: u32, egid: u32) -> KResult<isize> {
     debug!("sys_setregid <= rgid: {rgid}, egid: {egid}");
-    kprocess::with_current_credentials_mut(|credentials| {
-        credentials.set_regid(optional_id(rgid), optional_id(egid))
-    })
-    .map_err(credential_error)?;
+    update_current_cred(|cred| cred.set_regid(optional_id(rgid), optional_id(egid)))?;
     Ok(0)
 }
 
 /// Set the real, effective, and saved user IDs of the current process.
 pub fn sys_setresuid(ruid: u32, euid: u32, suid: u32) -> KResult<isize> {
     debug!("sys_setresuid <= ruid: {ruid}, euid: {euid}, suid: {suid}");
-    kprocess::with_current_credentials_mut(|credentials| {
-        credentials.set_resuid(optional_id(ruid), optional_id(euid), optional_id(suid))
-    })
-    .map_err(credential_error)?;
+    update_current_cred(|cred| {
+        cred.set_resuid(optional_id(ruid), optional_id(euid), optional_id(suid))
+    })?;
     Ok(0)
 }
 
 /// Set the real, effective, and saved group IDs of the current process.
 pub fn sys_setresgid(rgid: u32, egid: u32, sgid: u32) -> KResult<isize> {
     debug!("sys_setresgid <= rgid: {rgid}, egid: {egid}, sgid: {sgid}");
-    kprocess::with_current_credentials_mut(|credentials| {
-        credentials.set_resgid(optional_id(rgid), optional_id(egid), optional_id(sgid))
-    })
-    .map_err(credential_error)?;
+    update_current_cred(|cred| {
+        cred.set_resgid(optional_id(rgid), optional_id(egid), optional_id(sgid))
+    })?;
     Ok(0)
 }
 
 /// Get the real, effective, and saved user IDs of the current process.
 pub fn sys_getresuid(ruid: UserPtr<Uid>, euid: UserPtr<Uid>, suid: UserPtr<Uid>) -> KResult<isize> {
+    let credentials = kprocess::current_cred();
     let (current_ruid, current_euid, current_suid) =
-        kprocess::with_current_credentials(|credentials| {
-            (credentials.ruid(), credentials.euid(), credentials.suid())
-        });
+        (credentials.ruid(), credentials.euid(), credentials.suid());
 
     ruid.write_vm(current_ruid)?;
     euid.write_vm(current_euid)?;
@@ -127,10 +110,9 @@ pub fn sys_getresuid(ruid: UserPtr<Uid>, euid: UserPtr<Uid>, suid: UserPtr<Uid>)
 
 /// Get the real, effective, and saved group IDs of the current process.
 pub fn sys_getresgid(rgid: UserPtr<Gid>, egid: UserPtr<Gid>, sgid: UserPtr<Gid>) -> KResult<isize> {
+    let credentials = kprocess::current_cred();
     let (current_rgid, current_egid, current_sgid) =
-        kprocess::with_current_credentials(|credentials| {
-            (credentials.rgid(), credentials.egid(), credentials.sgid())
-        });
+        (credentials.rgid(), credentials.egid(), credentials.sgid());
 
     rgid.write_vm(current_rgid)?;
     egid.write_vm(current_egid)?;
@@ -141,26 +123,32 @@ pub fn sys_getresgid(rgid: UserPtr<Gid>, egid: UserPtr<Gid>, sgid: UserPtr<Gid>)
 /// Set the filesystem user ID of the current process.
 pub fn sys_setfsuid(uid: Uid) -> KResult<isize> {
     debug!("sys_setfsuid <= uid: {uid}");
-    let old_fsuid = kprocess::with_current_credentials_mut(|credentials| {
-        if uid == NO_CHANGE_ID {
-            credentials.fsuid()
-        } else {
-            credentials.set_fsuid(uid)
+    let current = kprocess::current_user_thread();
+    let old = current.cred();
+    let old_fsuid = old.fsuid();
+    if uid != NO_CHANGE_ID {
+        let mut new = old.prepare();
+        new.set_fsuid(uid);
+        if new.fsuid() != old_fsuid {
+            current.commit_creds(new);
         }
-    });
+    }
     Ok(old_fsuid as isize)
 }
 
 /// Set the filesystem group ID of the current process.
 pub fn sys_setfsgid(gid: Gid) -> KResult<isize> {
     debug!("sys_setfsgid <= gid: {gid}");
-    let old_fsgid = kprocess::with_current_credentials_mut(|credentials| {
-        if gid == NO_CHANGE_ID {
-            credentials.fsgid()
-        } else {
-            credentials.set_fsgid(gid)
+    let current = kprocess::current_user_thread();
+    let old = current.cred();
+    let old_fsgid = old.fsgid();
+    if gid != NO_CHANGE_ID {
+        let mut new = old.prepare();
+        new.set_fsgid(gid);
+        if new.fsgid() != old_fsgid {
+            current.commit_creds(new);
         }
-    });
+    }
     Ok(old_fsgid as isize)
 }
 
@@ -171,9 +159,8 @@ pub fn sys_getgroups(size: i32, list: UserPtr<Gid>) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
 
-    let groups = kprocess::with_current_credentials(|credentials| {
-        credentials.supplementary_groups_snapshot()
-    });
+    let credentials = kprocess::current_cred();
+    let groups = credentials.supplementary_groups();
     if size == 0 {
         return Ok(groups.len() as isize);
     }
@@ -184,7 +171,7 @@ pub fn sys_getgroups(size: i32, list: UserPtr<Gid>) -> KResult<isize> {
 
     if !groups.is_empty() {
         list.check_non_null().ok_or(KError::BadAddress)?;
-        list.write_vm_slice(groups.as_ref())?;
+        list.write_vm_slice(groups)?;
     }
     Ok(groups.len() as isize)
 }
@@ -192,7 +179,7 @@ pub fn sys_getgroups(size: i32, list: UserPtr<Gid>) -> KResult<isize> {
 /// Set the supplementary group IDs of the current process.
 pub fn sys_setgroups(size: i32, list: UserConstPtr<Gid>) -> KResult<isize> {
     debug!("sys_setgroups <= size: {size}");
-    if !kprocess::with_current_credentials(|credentials| credentials.is_privileged()) {
+    if !kprocess::current_cred().is_privileged() {
         return Err(KError::OperationNotPermitted);
     }
 
@@ -207,12 +194,8 @@ pub fn sys_setgroups(size: i32, list: UserConstPtr<Gid>) -> KResult<isize> {
         list.load_vm_vec(size as usize)?
     };
 
-    kprocess::with_current_credentials_mut(|credentials| {
-        // Recheck after copy-in in case another thread changed process credentials.
-        if !credentials.is_privileged() {
-            return Err(KError::OperationNotPermitted);
-        }
-        credentials.set_supplementary_groups(groups);
+    update_current_cred(|cred| {
+        cred.set_supplementary_groups(groups);
         Ok(())
     })?;
     Ok(0)

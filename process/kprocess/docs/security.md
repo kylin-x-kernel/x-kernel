@@ -13,6 +13,7 @@ kprocess / posix/process / ksyscall / ktty
 │  process identity graph      │
 │  group/session membership    │
 │  zombie/thread metadata      │
+│  per-thread credential refs  │
 │  lifecycle wait/exit events  │
 │  controlling terminal slot   │
 │                              │
@@ -22,6 +23,8 @@ kprocess / posix/process / ksyscall / ktty
 
 - 调用者负责分配唯一 PID、PGID 和 SID，并在 syscall 层执行 POSIX 权限检查。
 - `kprocess` 负责在 safe API 内维护父子关系、进程组关系、session 关系和退出状态不变量。
+- `kprocess` 负责 current-task credential 的定位和 committed `Arc<Cred>` 发布；凭据转换
+  规则由 `kcred` 负责。
 - `kprocess` 不解析用户指针，不接收设备 DMA，不处理网络包，不直接读写用户内存。
 
 ## unsafe 代码清单
@@ -47,6 +50,10 @@ kprocess / posix/process / ksyscall / ktty
 10. **publication 失败必须可回滚**：若 parent-side `CLONE_PIDFD` / `PARENT_SETTID` 等收尾步骤失败，
    staged publication 必须撤销 task/process 目录可见性，以及尚未提交 child 的 parent/group 成员关系，
    不能留下“syscall 失败但 child 仍可见/可 wait”的残留对象。
+11. **凭据提交不可见半状态**：`Thread` 只发布不可变 `Arc<Cred>`；checked 转换在普通
+   `Cred` 副本上完成后，按 `real_cred`、`cred` 的固定锁顺序同时替换。
+12. **objective/subjective 关系明确**：当前未支持 override credential，普通提交要求两个
+   旧指针相同，避免静默覆盖未来的临时 subjective identity。
 
 ## 线程安全
 
@@ -56,6 +63,7 @@ kprocess / posix/process / ksyscall / ktty
 | `ProcessGroup` | 字段均满足 Send | `SpinNoIrq<WeakMap<...>>` 保护成员表 |
 | `Session` | 字段均满足 Send | `SpinNoIrq` 保护进程组表和 terminal slot |
 | `ThreadGroup` | 在 `SpinNoIrq` 内使用 | 不直接跨线程共享 |
+| `Thread` credential refs | `Arc<Cred>` 可发送 | 两个 `RwLock` 保护指针替换；`Cred` 本身不可变共享 |
 
 ## 威胁分析
 
@@ -76,6 +84,8 @@ kprocess / posix/process / ksyscall / ktty
 | T-14 | 多目录分步发布暴露 task/process 可见性裂缝 | 中 | parent 已观察到新 tid/pidfd，但 task/process/group/session 目录仍未统一可见 | `ProcessPublication` 用单锁事务同时更新可观测目录；`clone` 在 publication 完成后才回写 `PARENT_SETTID` / `PIDFD` |
 | T-15 | staged publication 失败后残留未提交 child | 高 | `clone()` 返回错误，但 child 仍留在 parent.children / thread membership / PID 目录里 | publication handle 默认可回滚；失败时同步撤销目录可见性与未提交 child 关系 |
 | T-11 | 中断上下文误用放大关中断区间 | 中 | 在中断上下文中执行进程关系 mutation，或持有 `SpinNoIrq` 后调用长路径逻辑 | `kprocess` API 内部锁区保持短小；新增调用点应限制在 task/syscall 生命周期路径 |
+| T-16 | 凭据转换中途被其它检查观察 | 高 | 原地修改共享 credential，或逐字段发布 | prepare/commit 模型只替换完整 `Arc<Cred>`；读取者先克隆快照 |
+| T-17 | 下层资源 owner 反向读取 current task 造成层级倒置、身份变化或内核任务 panic | 高 | VFS 路径或匿名文件构造隐式调用 `current_cred()` | current helper 只服务明确的用户 task 入口；syscall 将一个 `Arc<Cred>` 显式传入 `kvfs` 和 fd 对象构造函数 |
 
 影响等级定义：
 
@@ -113,8 +123,9 @@ kprocess / posix/process / ksyscall / ktty
 
 ## 隐私分析
 
-`kprocess` 保存 PID、父子关系、线程 ID、退出码、进程组、session 和 terminal 绑定。
-它不保存用户 payload、命令行、credential、文件路径或地址空间内容。
+`kprocess` 保存 PID、父子关系、线程 ID、退出码、进程组、session、terminal 绑定，
+以及每个线程的 credential 引用。credential 包含数值 UID/GID 和补充组，
+但不包含用户名、用户 payload、命令行、文件路径或地址空间内容。
 这些关系会被 procfs、wait、signal 和 job-control 路径读取，调用者需要在上层执行可见性和权限控制。
 
 ## 已知限制
@@ -124,6 +135,7 @@ kprocess / posix/process / ksyscall / ktty
 - `Session::terminal` 使用 `Any` 类型擦除，`kprocess` 只管理绑定槽，不了解具体 TTY 类型。
 - `Process::exit` 不主动从 process group 成员表删除进程，成员表依赖 weak entry 释放和 cleanup。
 - 弱 runtime 引用只在 `kprocess` 内部使用，不再作为对外公开的类型擦除桥，也不再作为 `live process` 判据。
+- subjective credential override 尚未实现；当前 `real_cred` 与 `cred` 始终共同提交。
 
 ## 审计清单
 
@@ -133,5 +145,7 @@ kprocess / posix/process / ksyscall / ktty
 - 新增进程关系转换是否保持 parent/children、group/processes、session/process_groups 三组关系一致。
 - 新增锁嵌套是否遵循现有 API 内部加锁方式，避免外部持有成员锁后调用 mutation API。
 - 新增退出路径是否保持最后线程退出、zombie、wait/free 顺序。
+- 新增凭据修改是否遵循 prepare/check/commit，且失败时不替换 committed `Arc`。
+- 需要文件权限的调用是否在 syscall 入口取得一次快照，而不是让下层反向查询 current task。
 - 新增 current-thread 尾段路径是否仍可通过稳定 `Process` 访问所需 runtime capability，且不会把 zombie 重新暴露为 live。
 - 新增 controlling terminal 行为是否保持 set-once 和 pointer-match unset 语义。

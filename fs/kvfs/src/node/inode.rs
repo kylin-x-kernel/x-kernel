@@ -19,6 +19,7 @@ use core::{
 
 use bitflags::bitflags;
 use hashbrown::HashMap;
+use kcred::Cred;
 use kerrno::LinuxError;
 use khal::time::wall_time;
 use klazy::Once;
@@ -31,9 +32,10 @@ use super::{
 use crate::{
     AddressSpace, AddressSpaceOperations, DelayedCall, Dentry, DeviceId, FileOperations,
     LockedDentry, Metadata, MetadataUpdate, MountIdmap, Mutex, NodePermission, NodeType, Path,
-    RwLock, RwLockReadGuard, RwLockWriteGuard, SuperBlock, Umode, VfsError, VfsFileBuilder,
-    VfsResult,
+    Permission, RwLock, RwLockReadGuard, RwLockWriteGuard, SuperBlock, Umode, VfsError,
+    VfsFileBuilder, VfsResult,
     address_space::{default_address_space_operations, empty_address_space_operations},
+    generic_permission,
 };
 
 const IOP_CACHED_LINK: u16 = 0x0040;
@@ -131,6 +133,7 @@ pub trait InodeDirOperations: Send + Sync {
         _dentry: &LockedDentry<'_>,
         _mode: Umode,
         _exclusive: bool,
+        _cred: &Cred,
     ) -> VfsResult<Dentry> {
         Err(VfsError::PermissionDenied)
     }
@@ -154,6 +157,7 @@ pub trait InodeDirOperations: Send + Sync {
         _dir: &VfsInode,
         _dentry: &LockedDentry<'_>,
         _symname: &str,
+        _cred: &Cred,
     ) -> VfsResult<Dentry> {
         Err(VfsError::NotADirectory)
     }
@@ -164,6 +168,7 @@ pub trait InodeDirOperations: Send + Sync {
         _dir: &VfsInode,
         _dentry: &LockedDentry<'_>,
         _mode: Umode,
+        _cred: &Cred,
     ) -> VfsResult<Dentry> {
         Err(VfsError::OperationNotPermitted)
     }
@@ -179,6 +184,7 @@ pub trait InodeDirOperations: Send + Sync {
         _dentry: &LockedDentry<'_>,
         _mode: Umode,
         _device: DeviceId,
+        _cred: &Cred,
     ) -> VfsResult<Dentry> {
         Err(VfsError::OperationNotPermitted)
     }
@@ -196,6 +202,30 @@ pub trait InodeDirOperations: Send + Sync {
     }
 }
 
+/// Derives the initial owner and mode for a newly allocated inode.
+///
+/// The filesystem UID comes from the subjective credential. A set-group-ID
+/// parent directory contributes its GID to every child and propagates the
+/// set-group-ID bit to newly created subdirectories, matching
+/// `inode_init_owner()` in Linux.
+pub fn inode_init_owner(dir: &VfsInode, mode: Umode, cred: &Cred) -> (Umode, u32, u32) {
+    let dir_metadata = dir.metadata();
+    let mut permission = mode.permission();
+    let gid = if dir_metadata
+        .mode
+        .permission()
+        .contains(NodePermission::SET_GID)
+    {
+        if mode.node_type() == NodeType::Directory {
+            permission.insert(NodePermission::SET_GID);
+        }
+        dir_metadata.gid
+    } else {
+        cred.fsgid()
+    };
+    (mode.with_permission(permission), cred.fsuid(), gid)
+}
+
 /// Symbolic-link inode operations.
 pub trait InodeSymlinkOperations: Send + Sync {
     fn get_link(
@@ -208,6 +238,17 @@ pub trait InodeSymlinkOperations: Send + Sync {
 
 /// Inode operation table installed on VFS inodes.
 pub trait InodeOperations: Send + Sync + 'static {
+    /// Checks access to this inode for the supplied task credentials.
+    fn permission(
+        &self,
+        _idmap: &MountIdmap,
+        inode: &VfsInode,
+        permission: Permission,
+        cred: &Cred,
+    ) -> VfsResult<()> {
+        generic_permission(inode, permission, cred)
+    }
+
     /// Returns directory operations when this inode supports directory lookup.
     fn directory_operations(&self) -> Option<&dyn InodeDirOperations> {
         None
@@ -1244,6 +1285,12 @@ impl VfsInode {
         self.attributes.fill_metadata(self.inode())
     }
 
+    /// Checks access through this inode's permission operation.
+    pub fn permission(&self, permission: Permission, cred: &Cred) -> VfsResult<()> {
+        self.inode_operations
+            .permission(&MountIdmap, self, permission, cred)
+    }
+
     /// Returns metadata through this inode's operation family.
     pub fn getattr(
         &self,
@@ -1373,11 +1420,18 @@ impl VfsInode {
         name: &str,
         mode: Umode,
         exclusive: bool,
+        cred: &Cred,
     ) -> VfsResult<Dentry> {
         let dentry = Dentry::new_negative(Some(dir.clone()), name.to_owned());
         let dentry = dentry.lock_location();
-        self.require_directory_operations()?
-            .create(&MountIdmap, self, &dentry, mode, exclusive)
+        self.require_directory_operations()?.create(
+            &MountIdmap,
+            self,
+            &dentry,
+            mode,
+            exclusive,
+            cred,
+        )
     }
 
     /// Look up a child below this directory inode.
@@ -1394,18 +1448,25 @@ impl VfsInode {
         dir: &Dentry,
         name: &str,
         permission: NodePermission,
+        cred: &Cred,
     ) -> VfsResult<Dentry> {
         let mode = Umode::new(NodeType::RegularFile, permission);
-        self.create_with_mode(dir, name, mode, false)
+        self.create_with_mode(dir, name, mode, false, cred)
     }
 
     /// Create a directory child below this directory inode.
-    pub fn mkdir(&self, dir: &Dentry, name: &str, permission: NodePermission) -> VfsResult<Dentry> {
+    pub fn mkdir(
+        &self,
+        dir: &Dentry,
+        name: &str,
+        permission: NodePermission,
+        cred: &Cred,
+    ) -> VfsResult<Dentry> {
         let dentry = Dentry::new_negative(Some(dir.clone()), name.to_owned());
         let dentry = dentry.lock_location();
         let mode = Umode::new(NodeType::Directory, permission);
         self.require_directory_operations()?
-            .mkdir(&MountIdmap, self, &dentry, mode)
+            .mkdir(&MountIdmap, self, &dentry, mode, cred)
     }
 
     /// Create a special child below this directory inode.
@@ -1416,20 +1477,27 @@ impl VfsInode {
         node_type: NodeType,
         permission: NodePermission,
         device: DeviceId,
+        cred: &Cred,
     ) -> VfsResult<Dentry> {
         let dentry = Dentry::new_negative(Some(dir.clone()), name.to_owned());
         let dentry = dentry.lock_location();
         let mode = Umode::new(node_type, permission);
         self.require_directory_operations()?
-            .mknod(&MountIdmap, self, &dentry, mode, device)
+            .mknod(&MountIdmap, self, &dentry, mode, device, cred)
     }
 
     /// Create a symbolic link below this directory inode.
-    pub fn symlink(&self, dir: &Dentry, name: &str, target: &str) -> VfsResult<Dentry> {
+    pub fn symlink(
+        &self,
+        dir: &Dentry,
+        name: &str,
+        target: &str,
+        cred: &Cred,
+    ) -> VfsResult<Dentry> {
         let dentry = Dentry::new_negative(Some(dir.clone()), name.to_owned());
         let dentry = dentry.lock_location();
         self.require_directory_operations()?
-            .symlink(&MountIdmap, self, &dentry, target)
+            .symlink(&MountIdmap, self, &dentry, target, cred)
     }
 
     /// Link `source` below this directory inode.

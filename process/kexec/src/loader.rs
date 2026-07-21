@@ -8,11 +8,12 @@ use alloc::{borrow::ToOwned, string::String, sync::Arc, vec, vec::Vec};
 use core::{ffi::CStr, iter};
 
 use filemap::new_file_private_vma;
+use kcred::Cred;
 use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_stack_region};
 use kerrno::{KError, KResult};
 use khal::paging::{MappingFlags, PageSize};
 use ksync::{Mutex, static_lock};
-use kvfs::{Filename, LookupFlags, LookupIntent, Path, VfsFile, dentry_open};
+use kvfs::{Filename, LookupFlags, LookupIntent, Path, Permission, VfsFile, dentry_open};
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use memspace::{MmSpace, VmRuntimeRef};
 use ouroboros::self_referencing;
@@ -35,8 +36,8 @@ fn mapping_flags(flags: xmas_elf::program::Flags) -> MappingFlags {
     mapping_flags
 }
 
-fn open_exec_file(location: &Path) -> KResult<Arc<VfsFile>> {
-    dentry_open(location.clone(), 0)
+fn open_exec_file(location: &Path, cred: Arc<Cred>) -> KResult<Arc<VfsFile>> {
+    dentry_open(location.clone(), 0, cred)
 }
 
 /// Source of an executable image.
@@ -54,7 +55,7 @@ pub enum ExecSource {
 }
 
 impl ExecSource {
-    fn resolve(&self) -> KResult<(Path, String)> {
+    fn resolve(&self, cred: &Cred) -> KResult<(Path, String)> {
         match self {
             Self::Path(path) => {
                 let fs_struct = kprocess::current_fs_context();
@@ -64,13 +65,16 @@ impl ExecSource {
                     fs.pwd(),
                     LookupIntent::Exec,
                     LookupFlags::follow(),
+                    cred,
                 )?;
+                location.permission(Permission::MAY_EXEC, cred)?;
                 Ok((location, path.clone()))
             }
             Self::Resolved {
                 location,
                 display_path,
             } => {
+                location.permission(Permission::MAY_EXEC, cred)?;
                 let display_path = match display_path {
                     Some(path) => path.clone(),
                     None => location.absolute_path()?.as_str().to_owned(),
@@ -86,20 +90,32 @@ pub struct ExecRequest {
     source: ExecSource,
     args: Vec<String>,
     envs: Vec<String>,
+    cred: Arc<Cred>,
 }
 
 impl ExecRequest {
     /// Creates an exec request from a path string.
-    pub fn from_path(path: impl Into<String>, args: Vec<String>, envs: Vec<String>) -> Self {
+    pub fn from_path(
+        path: impl Into<String>,
+        args: Vec<String>,
+        envs: Vec<String>,
+        cred: Arc<Cred>,
+    ) -> Self {
         Self {
             source: ExecSource::Path(path.into()),
             args,
             envs,
+            cred,
         }
     }
 
     /// Creates an exec request from an already-resolved executable location.
-    pub fn from_resolved(location: Path, args: Vec<String>, envs: Vec<String>) -> Self {
+    pub fn from_resolved(
+        location: Path,
+        args: Vec<String>,
+        envs: Vec<String>,
+        cred: Arc<Cred>,
+    ) -> Self {
         Self {
             source: ExecSource::Resolved {
                 location,
@@ -107,6 +123,7 @@ impl ExecRequest {
             },
             args,
             envs,
+            cred,
         }
     }
 
@@ -116,6 +133,7 @@ impl ExecRequest {
         display_path: String,
         args: Vec<String>,
         envs: Vec<String>,
+        cred: Arc<Cred>,
     ) -> Self {
         Self {
             source: ExecSource::Resolved {
@@ -124,6 +142,7 @@ impl ExecRequest {
             },
             args,
             envs,
+            cred,
         }
     }
 
@@ -145,14 +164,15 @@ impl ExecRequest {
     /// Resolves the executable and creates a binprm object without mutating
     /// the target address space.
     pub fn prepare(self) -> KResult<BinPrm> {
-        let (location, display_path) = self.source.resolve()?;
-        let executable = open_exec_file(&location)?;
+        let (location, display_path) = self.source.resolve(&self.cred)?;
+        let executable = open_exec_file(&location, self.cred.clone())?;
         Ok(BinPrm {
             location,
             executable,
             display_path,
             args: self.args,
             envs: self.envs,
+            cred: self.cred,
         })
     }
 }
@@ -164,6 +184,7 @@ pub struct BinPrm {
     display_path: String,
     args: Vec<String>,
     envs: Vec<String>,
+    cred: Arc<Cred>,
 }
 
 impl BinPrm {
@@ -175,6 +196,10 @@ impl BinPrm {
     /// Returns the opened executable file.
     pub fn executable(&self) -> &Arc<VfsFile> {
         &self.executable
+    }
+
+    fn cred(&self) -> &Arc<Cred> {
+        &self.cred
     }
 
     /// Returns the display path used for argv/script reconstruction.
@@ -377,8 +402,10 @@ impl ElfLoader {
                 fs.pwd(),
                 LookupIntent::Exec,
                 LookupFlags::follow(),
+                binprm.cred(),
             )?;
-            let file = open_exec_file(&location)?;
+            location.permission(Permission::MAY_EXEC, binprm.cred())?;
+            let file = open_exec_file(&location, binprm.cred().clone())?;
             match self.ensure_cached(file.clone())? {
                 Ok(_) => Some(file),
                 Err(_) => return Err(KError::InvalidInput),
@@ -458,13 +485,14 @@ pub fn load_user_app(
     path: Option<&str>,
     args: &[String],
     envs: &[String],
+    cred: Arc<Cred>,
 ) -> KResult<(VirtAddr, VirtAddr)> {
     let path = path
         .or_else(|| args.first().map(String::as_str))
         .ok_or(KError::InvalidInput)?;
     load_user_app_request_inner(
         uspace,
-        ExecRequest::from_path(path.to_owned(), args.to_vec(), envs.to_vec()),
+        ExecRequest::from_path(path.to_owned(), args.to_vec(), envs.to_vec(), cred),
         0,
     )
 }
@@ -515,7 +543,12 @@ fn load_user_app_request_inner(
 
                 let new_args = script_interpreter_args(line, binprm.display_path(), binprm.args());
                 let interpreter = new_args.first().ok_or(KError::InvalidInput)?.clone();
-                request = ExecRequest::from_path(interpreter, new_args, binprm.envs().to_vec());
+                request = ExecRequest::from_path(
+                    interpreter,
+                    new_args,
+                    binprm.envs().to_vec(),
+                    binprm.cred().clone(),
+                );
                 script_depth += 1;
             }
         }
@@ -608,7 +641,12 @@ mod tests {
     fn exec_request_owns_path_args_and_envs() {
         let mut args = vec!["app".to_owned(), "one".to_owned()];
         let mut envs = vec!["A=B".to_owned()];
-        let request = ExecRequest::from_path("/bin/app", args.clone(), envs.clone());
+        let request = ExecRequest::from_path(
+            "/bin/app",
+            args.clone(),
+            envs.clone(),
+            kcred::initial_cred(),
+        );
 
         args[0].push_str("-changed");
         envs[0].push_str("-changed");

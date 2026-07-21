@@ -10,7 +10,6 @@ use alloc::{string::String, sync::Arc, vec::Vec};
 use core::any::Any;
 
 use fs_context::FsStruct;
-use kcred::Credentials;
 use kerrno::{KError, KResult};
 use kns::{NamespaceFsContext, NsProxy};
 use kresources::ProcessResources;
@@ -77,7 +76,6 @@ pub(crate) struct ProcessRuntime {
     runtime_state: ProcessRuntimeState,
     nsproxy: RwLock<Arc<NsProxy>>,
     signal_manager: Arc<ProcessSignalManager>,
-    credentials: RwLock<Credentials>,
     #[cfg(feature = "tee")]
     tee_ta_ctx: RwLock<TeeTaCtx>,
     #[cfg(feature = "tee")]
@@ -96,7 +94,6 @@ impl ProcessRuntime {
         address_space: Arc<Mutex<memspace::MmSpace>>,
         fs_context: Arc<Mutex<FsStruct>>,
         signal_actions: Arc<SpinNoIrq<SignalActions>>,
-        credentials: Credentials,
         config: ProcessRuntimeConfig,
     ) -> Arc<Self> {
         let nsproxy = NsProxy::new_initial();
@@ -107,7 +104,6 @@ impl ProcessRuntime {
             address_space,
             fs_context,
             signal_actions,
-            credentials,
             config,
             nsproxy,
         )
@@ -122,7 +118,6 @@ impl ProcessRuntime {
         address_space: Arc<Mutex<memspace::MmSpace>>,
         fs_context: Arc<Mutex<FsStruct>>,
         signal_actions: Arc<SpinNoIrq<SignalActions>>,
-        credentials: Credentials,
         config: ProcessRuntimeConfig,
         nsproxy: Arc<NsProxy>,
     ) -> Arc<Self> {
@@ -148,7 +143,6 @@ impl ProcessRuntime {
                 signal_actions,
                 config.signal_trampoline,
             )),
-            credentials: RwLock::new(credentials),
         });
         runtime.process.set_runtime_ref(&runtime);
         runtime
@@ -167,18 +161,6 @@ impl ProcessRuntime {
     /// Returns the live process signal manager.
     pub fn signal_manager(&self) -> &Arc<ProcessSignalManager> {
         &self.signal_manager
-    }
-
-    /// Runs a closure with read-only access to process-shared credentials.
-    pub fn with_credentials<R>(&self, f: impl FnOnce(&Credentials) -> R) -> R {
-        let credentials = self.credentials.read();
-        f(&credentials)
-    }
-
-    /// Runs a closure with mutable access to process-shared credentials.
-    pub fn with_credentials_mut<R>(&self, f: impl FnOnce(&mut Credentials) -> R) -> R {
-        let mut credentials = self.credentials.write();
-        f(&mut credentials)
     }
 
     /// Runs a closure with mutable access to the process-shared TEE TA context.
@@ -370,7 +352,6 @@ pub(crate) fn fork_process_runtime(
         address_space,
         fs_context,
         signal_actions,
-        parent.with_credentials(Clone::clone),
         ProcessRuntimeConfig::default(),
         nsproxy,
     );

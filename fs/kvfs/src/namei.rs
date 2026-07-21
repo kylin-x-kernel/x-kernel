@@ -10,6 +10,8 @@
 
 use alloc::{borrow::ToOwned, string::String, sync::Arc, vec::Vec};
 
+use kcred::Cred;
+
 use crate::{
     AccMode, FMode, Filename, LookupFlags, LookupIntent, MountFlags, NodePermission, NodeType,
     OpenFlags, OpenHow, OpenParams, Path, ResolvedObject, VfsError, VfsFile, VfsFileBuilder,
@@ -229,7 +231,12 @@ impl<'a> Nameidata<'a> {
         Ok(())
     }
 
-    fn follow_symlink(&mut self, containing_dir: &Path, link: Path) -> VfsResult<Path> {
+    fn follow_symlink(
+        &mut self,
+        containing_dir: &Path,
+        link: Path,
+        cred: &Cred,
+    ) -> VfsResult<Path> {
         self.reserve_link_follow()?;
         let target = d_inode(link.dentry()).read_link(link.dentry())?;
         if target.is_empty() {
@@ -249,7 +256,7 @@ impl<'a> Nameidata<'a> {
             self.flags,
         );
         nd.total_link_count = self.total_link_count;
-        let resolved = nd.path_lookupat(containing_dir);
+        let resolved = nd.path_lookupat(containing_dir, cred);
         self.total_link_count = nd.total_link_count;
         self.flags = saved_flags;
         self.stack.pop();
@@ -278,6 +285,7 @@ impl<'a> Nameidata<'a> {
         containing_dir: &Path,
         next: Path,
         component: WalkComponent,
+        cred: &Cred,
     ) -> VfsResult<Path> {
         if d_inode(next.dentry()).magic_link().is_some() {
             if self.flags.rejects_magic_links() {
@@ -292,7 +300,7 @@ impl<'a> Nameidata<'a> {
         if d_is_symlink(next.dentry())
             && (component == WalkComponent::More || self.flags.follows_final())
         {
-            return self.follow_symlink(containing_dir, next);
+            return self.follow_symlink(containing_dir, next, cred);
         }
         Ok(next)
     }
@@ -339,7 +347,12 @@ impl<'a> Nameidata<'a> {
         ))
     }
 
-    fn walk_component(&mut self, name: &str, component: WalkComponent) -> VfsResult<()> {
+    fn walk_component(
+        &mut self,
+        name: &str,
+        component: WalkComponent,
+        cred: &Cred,
+    ) -> VfsResult<()> {
         let qstr = self.hash_name(name);
         let name = qstr.as_str();
         if !d_is_dir(self.path.dentry()) {
@@ -351,7 +364,7 @@ impl<'a> Nameidata<'a> {
             None => self.lookup_slow(name)?,
         }
         .resolve_final_mount();
-        let next = self.step_into(&containing_dir, next, component)?;
+        let next = self.step_into(&containing_dir, next, component, cred)?;
         self.set_path(next);
         Ok(())
     }
@@ -396,11 +409,12 @@ impl<'a> Nameidata<'a> {
         last_type: LastType,
         name: &str,
         walk_component: WalkComponent,
+        cred: &Cred,
     ) -> VfsResult<()> {
         if last_type == LastType::Norm {
             self.last_type = LastType::Norm;
             return match walk_component {
-                WalkComponent::More => self.walk_component(name, WalkComponent::More),
+                WalkComponent::More => self.walk_component(name, WalkComponent::More, cred),
                 WalkComponent::Final => {
                     self.hash_name(name);
                     Ok(())
@@ -415,7 +429,7 @@ impl<'a> Nameidata<'a> {
         Ok(())
     }
 
-    fn link_path_walk(&mut self, base: &Path) -> VfsResult<Path> {
+    fn link_path_walk(&mut self, base: &Path, cred: &Cred) -> VfsResult<Path> {
         if self.pathname.is_empty() {
             if self.flags.contains(LookupFlags::EMPTY_PATH) {
                 return Ok(base.clone());
@@ -429,18 +443,22 @@ impl<'a> Nameidata<'a> {
 
         while let Some((last_type, name)) = Self::next_path_component(&mut pathname, &mut at_start)
         {
-            if !Self::has_more_path_components(pathname, at_start) {
-                self.walk_path_component(last_type, name, WalkComponent::Final)?;
+            let has_more = Self::has_more_path_components(pathname, at_start);
+            if last_type != LastType::Root {
+                self.path.permission(crate::Permission::MAY_EXEC, cred)?;
+            }
+            if !has_more {
+                self.walk_path_component(last_type, name, WalkComponent::Final, cred)?;
                 return Ok(self.path.clone());
             }
-            self.walk_path_component(last_type, name, WalkComponent::More)?;
+            self.walk_path_component(last_type, name, WalkComponent::More, cred)?;
         }
 
         Ok(self.path.clone())
     }
 
-    fn path_lookupat(&mut self, base: &Path) -> VfsResult<Path> {
-        let path = self.link_path_walk(base)?;
+    fn path_lookupat(&mut self, base: &Path, cred: &Cred) -> VfsResult<Path> {
+        let path = self.link_path_walk(base, cred)?;
         if self.pathname.is_empty() {
             return Ok(path);
         }
@@ -455,7 +473,7 @@ impl<'a> Nameidata<'a> {
                     .map(Qstr::as_str)
                     .ok_or(VfsError::InvalidInput)?
                     .to_owned();
-                self.walk_component(&name, WalkComponent::Final)?;
+                self.walk_component(&name, WalkComponent::Final, cred)?;
             }
         }
         Ok(self.path.clone())
@@ -466,6 +484,7 @@ impl<'a> Nameidata<'a> {
         base: &Path,
         name: &'a Filename,
         intent: LookupIntent,
+        cred: &Cred,
     ) -> VfsResult<ParentLookup> {
         let mut nd = Nameidata::new(root, base, name, intent, LookupFlags::follow());
         let pathname = name.as_pathname();
@@ -519,13 +538,14 @@ impl<'a> Nameidata<'a> {
             let mut parent_nd =
                 Nameidata::new(root, base, &parent_filename, intent, LookupFlags::follow());
             parent_nd.total_link_count = nd.total_link_count;
-            let parent = parent_nd.path_lookupat(base)?;
+            let parent = parent_nd.path_lookupat(base, cred)?;
             nd.total_link_count = parent_nd.total_link_count;
             parent
         };
         if !d_is_dir(parent.dentry()) {
             return Err(VfsError::NotADirectory);
         }
+        parent.permission(crate::Permission::MAY_EXEC, cred)?;
         nd.last_type = last_type;
         nd.last = Some(Qstr::new_len(raw_last, last_len));
         Ok(ParentLookup {
@@ -536,9 +556,14 @@ impl<'a> Nameidata<'a> {
         })
     }
 
-    fn readlink(root: &Path, base: &Path, name: &Filename) -> VfsResult<String> {
-        let location =
-            name.lookup_at(root, base, LookupIntent::Readlink, LookupFlags::no_follow())?;
+    fn readlink(root: &Path, base: &Path, name: &Filename, cred: &Cred) -> VfsResult<String> {
+        let location = name.lookup_at(
+            root,
+            base,
+            LookupIntent::Readlink,
+            LookupFlags::no_follow(),
+            cred,
+        )?;
         if let Some(link) = d_inode(location.dentry()).magic_link() {
             link.readlink_display()
         } else {
@@ -554,7 +579,12 @@ pub(crate) struct MayOpenResult {
 }
 
 impl<'a> Nameidata<'a> {
-    fn may_open(path: &Path, acc_mode: AccMode, open_flags: OpenFlags) -> VfsResult<MayOpenResult> {
+    fn may_open(
+        path: &Path,
+        acc_mode: AccMode,
+        open_flags: OpenFlags,
+        cred: &Cred,
+    ) -> VfsResult<MayOpenResult> {
         let f_mode = FMode::from_open_flags(open_flags);
         if f_mode.contains(FMode::PATH) || open_flags.contains(OpenFlags::PATH) {
             return Ok(MayOpenResult { truncate: false });
@@ -589,6 +619,7 @@ impl<'a> Nameidata<'a> {
         if acc_mode.requires_write() || open_flags.contains(OpenFlags::APPEND) || truncate {
             path.check_writable_mount()?;
         }
+        path.permission(crate::Permission::MAY_OPEN | acc_mode.permission(), cred)?;
         Ok(MayOpenResult { truncate })
     }
 
@@ -611,17 +642,18 @@ impl<'a> Nameidata<'a> {
         if !may_open.truncate {
             return Ok(());
         }
-        file.path().truncate(0)
+        file.path().truncate_opened(0)
     }
 
     fn may_open_resolved(
         path: &Path,
         flags: &OpenParams,
         was_created: bool,
+        cred: &Cred,
     ) -> VfsResult<MayOpenResult> {
         Self::check_resolved_open(path, flags, was_created)?;
         let (open_flag, acc_mode) = flags.may_open_args(was_created);
-        Self::may_open(path, acc_mode, open_flag)
+        Self::may_open(path, acc_mode, open_flag, cred)
     }
 
     fn lookup_fast_for_open(&mut self, flags: &OpenParams) -> VfsResult<Option<Path>> {
@@ -658,6 +690,7 @@ impl<'a> Nameidata<'a> {
         file: &mut VfsFileBuilder,
         flags: &OpenParams,
         got_write: bool,
+        cred: &Cred,
     ) -> VfsResult<Path> {
         file.clear_created();
 
@@ -679,9 +712,14 @@ impl<'a> Nameidata<'a> {
         if !got_write {
             return Err(VfsError::ReadOnlyFilesystem);
         }
+        self.path.permission(
+            crate::Permission::MAY_WRITE | crate::Permission::MAY_EXEC,
+            cred,
+        )?;
 
         let inode = dir.vfs_inode();
-        let entry = inode.create_with_mode(dir, name, flags.mode(), flags.is_exclusive_create())?;
+        let entry =
+            inode.create_with_mode(dir, name, flags.mode(), flags.is_exclusive_create(), cred)?;
         dir.insert_cache(name.to_owned(), entry.clone());
         file.mark_created();
         Ok(self.path.with_dentry(entry))
@@ -691,6 +729,7 @@ impl<'a> Nameidata<'a> {
         &mut self,
         file: &mut VfsFileBuilder,
         flags: &OpenParams,
+        cred: &Cred,
     ) -> VfsResult<Option<PathBuf>> {
         if self.last_type != LastType::Norm {
             self.handle_dots(self.last_type);
@@ -701,7 +740,7 @@ impl<'a> Nameidata<'a> {
             path
         } else {
             let got_write = flags.needs_write_mount() && self.path.check_writable_mount().is_ok();
-            self.lookup_open(file, flags, got_write)?
+            self.lookup_open(file, flags, got_write, cred)?
         };
 
         if file.was_created() {
@@ -719,7 +758,7 @@ impl<'a> Nameidata<'a> {
             }
             return Ok(Some(PathBuf::from(target)));
         }
-        let path = self.step_into(&containing_dir, path, WalkComponent::Final)?;
+        let path = self.step_into(&containing_dir, path, WalkComponent::Final, cred)?;
         self.set_path(path);
         Ok(None)
     }
@@ -730,6 +769,7 @@ impl<'a> Nameidata<'a> {
         filename: &Filename,
         mut file: VfsFileBuilder,
         flags: &OpenParams,
+        cred: &Cred,
     ) -> VfsResult<Arc<VfsFile>> {
         let mut name = filename.clone();
         let mut walk_base = base.clone();
@@ -743,10 +783,10 @@ impl<'a> Nameidata<'a> {
                 flags.lookup_flags(),
             );
             nd.total_link_count = total_link_count;
-            nd.link_path_walk(&walk_base)?;
-            let Some(next) = nd.open_last_lookups(&mut file, flags)? else {
+            nd.link_path_walk(&walk_base, cred)?;
+            let Some(next) = nd.open_last_lookups(&mut file, flags, cred)? else {
                 let path = nd.path.clone();
-                let may_open = Self::may_open_resolved(&path, flags, file.was_created())?;
+                let may_open = Self::may_open_resolved(&path, flags, file.was_created(), cred)?;
                 let opened = file.vfs_open(path)?;
                 Self::handle_truncate(&opened, &may_open)?;
                 return Ok(opened);
@@ -767,8 +807,10 @@ impl<'a> Nameidata<'a> {
         filename: &Filename,
         file: VfsFileBuilder,
         flags: &OpenParams,
+        cred: &Cred,
     ) -> VfsResult<Arc<VfsFile>> {
-        let path = filename.lookup_at(root, base, LookupIntent::Open, flags.lookup_flags())?;
+        let path =
+            filename.lookup_at(root, base, LookupIntent::Open, flags.lookup_flags(), cred)?;
         file.vfs_open(path)
     }
 
@@ -777,20 +819,21 @@ impl<'a> Nameidata<'a> {
         base: &Path,
         filename: &Filename,
         flags: &OpenParams,
+        cred: Arc<Cred>,
     ) -> VfsResult<Arc<VfsFile>> {
-        let file = VfsFileBuilder::allocate(flags.file_flags())?;
+        let file = VfsFileBuilder::allocate(flags.file_flags(), cred.clone())?;
         if flags.is_path() {
-            Self::do_o_path(root, base, filename, file, flags)
+            Self::do_o_path(root, base, filename, file, flags, &cred)
         } else {
-            Self::open_path(root, base, filename, file, flags)
+            Self::open_path(root, base, filename, file, flags, &cred)
         }
     }
 }
 
 /// Opens an already resolved VFS location.
-pub fn dentry_open(path: Path, flags: u32) -> VfsResult<Arc<VfsFile>> {
+pub fn dentry_open(path: Path, flags: u32, cred: Arc<Cred>) -> VfsResult<Arc<VfsFile>> {
     let flags = OpenFlags::from_bits(flags).ok_or(VfsError::InvalidInput)?;
-    VfsFileBuilder::allocate(flags)?.vfs_open(path)
+    VfsFileBuilder::allocate(flags, cred)?.vfs_open(path)
 }
 
 impl Filename {
@@ -801,9 +844,10 @@ impl Filename {
         base: &Path,
         flags: u32,
         mode: NodePermission,
+        cred: Arc<Cred>,
     ) -> VfsResult<Arc<VfsFile>> {
         let flags = OpenHow::from_legacy(flags, mode).into_open_params()?;
-        Nameidata::path_openat(root, base, self, &flags)
+        Nameidata::path_openat(root, base, self, &flags, cred)
     }
 
     /// Resolves this filename relative to `root` and `base`.
@@ -813,8 +857,9 @@ impl Filename {
         base: &Path,
         intent: LookupIntent,
         flags: LookupFlags,
+        cred: &Cred,
     ) -> VfsResult<Path> {
-        Nameidata::new(root, base, self, intent, flags).path_lookupat(base)
+        Nameidata::new(root, base, self, intent, flags).path_lookupat(base, cred)
     }
 
     /// Resolves this filename to its parent directory and final component.
@@ -823,8 +868,9 @@ impl Filename {
         root: &Path,
         base: &Path,
         intent: LookupIntent,
+        cred: &Cred,
     ) -> VfsResult<ParentLookup> {
-        Nameidata::parent_lookup(root, base, self, intent)
+        Nameidata::parent_lookup(root, base, self, intent, cred)
     }
 
     /// Resolves this filename to the parent directory of a to-be-created component.
@@ -834,14 +880,15 @@ impl Filename {
         base: &Path,
         intent: LookupIntent,
         lookup_flags: LookupFlags,
+        cred: &Cred,
     ) -> VfsResult<(Path, String)> {
-        let lookup = self.parent_at(root, base, intent)?;
+        let lookup = self.parent_at(root, base, intent, cred)?;
         lookup.prepare_create(self, lookup_flags)
     }
 
     /// Reads the display target of this symlink or magic link.
-    pub fn readlink_at(&self, root: &Path, base: &Path) -> VfsResult<String> {
-        Nameidata::readlink(root, base, self)
+    pub fn readlink_at(&self, root: &Path, base: &Path, cred: &Cred) -> VfsResult<String> {
+        Nameidata::readlink(root, base, self, cred)
     }
 }
 
@@ -956,6 +1003,7 @@ mod tests {
             _dentry: &LockedDentry<'_>,
             _mode: crate::Umode,
             _exclusive: bool,
+            _cred: &Cred,
         ) -> VfsResult<Dentry> {
             Err(VfsError::OperationNotSupported)
         }
@@ -1300,6 +1348,7 @@ mod tests {
                 &tree.base,
                 LookupIntent::Open,
                 LookupFlags::follow(),
+                &kcred::initial_cred(),
             )
             .unwrap_err();
         assert_eq!(err, VfsError::NotFound);
@@ -1310,7 +1359,12 @@ mod tests {
         let tree = test_tree();
 
         let lookup = Filename::new("/")
-            .parent_at(&tree.root, &tree.base, LookupIntent::Open)
+            .parent_at(
+                &tree.root,
+                &tree.base,
+                LookupIntent::Open,
+                &kcred::initial_cred(),
+            )
             .unwrap();
 
         assert!(lookup.parent().ptr_eq(&tree.root));
@@ -1328,6 +1382,7 @@ mod tests {
                 &tree.base,
                 LookupIntent::Open,
                 LookupFlags::empty(),
+                &kcred::initial_cred(),
             )
             .unwrap_err();
 
@@ -1344,6 +1399,7 @@ mod tests {
                 &tree.base,
                 LookupIntent::Open,
                 LookupFlags::empty(),
+                &kcred::initial_cred(),
             )
             .unwrap_err();
         assert_eq!(err, VfsError::NotFound);
@@ -1354,6 +1410,7 @@ mod tests {
                 &tree.base,
                 LookupIntent::Open,
                 LookupFlags::DIRECTORY,
+                &kcred::initial_cred(),
             )
             .unwrap();
         assert!(parent.ptr_eq(&tree.root));
@@ -1370,6 +1427,7 @@ mod tests {
                 &tree.base,
                 LookupIntent::Open,
                 LookupFlags::follow(),
+                &kcred::initial_cred(),
             )
             .unwrap();
         assert!(followed.ptr_eq(&tree.target));
@@ -1380,6 +1438,7 @@ mod tests {
                 &tree.base,
                 LookupIntent::Open,
                 LookupFlags::no_follow(),
+                &kcred::initial_cred(),
             )
             .unwrap();
         assert_eq!(link.dentry().node_type(), NodeType::Symlink);
@@ -1396,6 +1455,7 @@ mod tests {
                 &tree.base,
                 LookupIntent::Open,
                 LookupFlags::no_follow(),
+                &kcred::initial_cred(),
             )
             .unwrap();
         assert_eq!(leaf.name(), "leaf");
@@ -1412,6 +1472,7 @@ mod tests {
                 &tree.base,
                 LookupIntent::Exec,
                 LookupFlags::follow(),
+                &kcred::initial_cred(),
             )
             .unwrap();
         assert!(followed.ptr_eq(&tree.target));
@@ -1429,6 +1490,7 @@ mod tests {
                 &tree.base,
                 LookupIntent::Open,
                 LookupFlags::no_follow(),
+                &kcred::initial_cred(),
             )
             .unwrap();
         assert_eq!(link.dentry().node_type(), NodeType::Symlink);
@@ -1436,7 +1498,7 @@ mod tests {
 
         assert_eq!(
             Filename::new("/magic")
-                .readlink_at(&tree.root, &tree.base)
+                .readlink_at(&tree.root, &tree.base, &kcred::initial_cred())
                 .unwrap(),
             "/display/target"
         );
@@ -1453,6 +1515,7 @@ mod tests {
                 &tree.base,
                 LookupIntent::Open,
                 LookupFlags::follow() | LookupFlags::NO_MAGIC_LINKS,
+                &kcred::initial_cred(),
             )
             .unwrap_err();
         assert_eq!(err, VfsError::FilesystemLoop);
@@ -1463,6 +1526,7 @@ mod tests {
                 &tree.base,
                 LookupIntent::Open,
                 LookupFlags::no_follow() | LookupFlags::NO_MAGIC_LINKS,
+                &kcred::initial_cred(),
             )
             .unwrap_err();
         assert_eq!(err, VfsError::FilesystemLoop);
@@ -1479,10 +1543,91 @@ mod tests {
                 &tree.base,
                 LookupIntent::Stat,
                 LookupFlags::no_follow(),
+                &kcred::initial_cred(),
             )
             .unwrap();
         assert_eq!(leaf.name(), "leaf");
         assert_eq!(tree.magic_dir.last_intent(), Some(LookupIntent::Stat));
+    }
+
+    #[def_test]
+    fn pathname_walk_requires_search_permission_on_intermediate_directory() {
+        let tree = test_tree();
+        tree.root
+            .dentry()
+            .update_metadata(MetadataUpdate {
+                mode: Some(NodePermission::from_bits_truncate(0o711)),
+                ..Default::default()
+            })
+            .unwrap();
+        let dir = Filename::new("/dir")
+            .lookup_at(
+                &tree.root,
+                &tree.base,
+                LookupIntent::Open,
+                LookupFlags::follow(),
+                &kcred::initial_cred(),
+            )
+            .unwrap();
+        dir.dentry()
+            .update_metadata(MetadataUpdate {
+                mode: Some(NodePermission::from_bits_truncate(0o600)),
+                owner: Some((1000, 1000)),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let cred = kcred::Cred::new(1000, 1000);
+        let result = Filename::new("/dir/leaf").lookup_at(
+            &tree.root,
+            &tree.base,
+            LookupIntent::Open,
+            LookupFlags::follow(),
+            &cred,
+        );
+
+        assert_eq!(result.unwrap_err(), VfsError::PermissionDenied);
+    }
+
+    #[def_test]
+    fn open_checks_final_inode_and_captures_opening_credential() {
+        let tree = test_tree();
+        tree.root
+            .dentry()
+            .update_metadata(MetadataUpdate {
+                mode: Some(NodePermission::from_bits_truncate(0o711)),
+                ..Default::default()
+            })
+            .unwrap();
+        tree.target
+            .dentry()
+            .update_metadata(MetadataUpdate {
+                mode: Some(NodePermission::from_bits_truncate(0o600)),
+                owner: Some((1000, 1000)),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let denied = Filename::new("/target").open_with_flags_at(
+            &tree.root,
+            &tree.base,
+            linux_raw_sys::general::O_RDONLY,
+            NodePermission::empty(),
+            Arc::new(kcred::Cred::new(2000, 2000)),
+        );
+        assert!(matches!(denied, Err(VfsError::PermissionDenied)));
+
+        let cred = Arc::new(kcred::Cred::new(1000, 1000));
+        let file = Filename::new("/target")
+            .open_with_flags_at(
+                &tree.root,
+                &tree.base,
+                linux_raw_sys::general::O_RDONLY,
+                NodePermission::empty(),
+                cred.clone(),
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(file.cred(), &cred));
     }
 
     #[def_test]
@@ -1491,9 +1636,19 @@ mod tests {
         let inode = tree.target.inode().clone();
         let file_ops = inode.downcast::<TestFile>().unwrap();
 
-        let first = dentry_open(tree.target.clone(), OpenFlags::WRITE_ONLY.bits()).unwrap();
+        let first = dentry_open(
+            tree.target.clone(),
+            OpenFlags::WRITE_ONLY.bits(),
+            kcred::initial_cred(),
+        )
+        .unwrap();
         assert_eq!(inode.write_count(), 1);
-        let second = dentry_open(tree.target.clone(), OpenFlags::WRITE_ONLY.bits()).unwrap();
+        let second = dentry_open(
+            tree.target.clone(),
+            OpenFlags::WRITE_ONLY.bits(),
+            kcred::initial_cred(),
+        )
+        .unwrap();
         assert_eq!(inode.write_count(), 2);
 
         drop(first);

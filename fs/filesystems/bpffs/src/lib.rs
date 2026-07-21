@@ -25,7 +25,7 @@ use kvfs::{
     AnonInodeFs, Dentry, DirContext, FMode, FileDirOperations, FileOperations, InodeDirOperations,
     InodeOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType,
     OpenFlags, SimpleFs, SimpleFsNode, StatFsFlags, SuperBlock, VfsError, VfsFile, VfsInode,
-    VfsResult,
+    VfsResult, inode_init_owner,
 };
 
 /// Linux `BPF_FS_MAGIC`.
@@ -98,11 +98,12 @@ impl BpfProgram {
         insns: Arc<[u8]>,
         prog_type: u32,
         map_values: Arc<[BpfProgramMapValue]>,
+        cred: Arc<kcred::Cred>,
     ) -> VfsResult<Arc<VfsFile>> {
-        Arc::new(Self::new(insns, prog_type, map_values)).into_file()
+        Arc::new(Self::new(insns, prog_type, map_values)).into_file(cred)
     }
 
-    pub fn into_file(self: Arc<Self>) -> VfsResult<Arc<VfsFile>> {
+    pub fn into_file(self: Arc<Self>, cred: Arc<kcred::Cred>) -> VfsResult<Arc<VfsFile>> {
         let fops: Arc<dyn FileOperations> = self.clone();
         AnonInodeFs::global().get_file(
             "bpf-prog",
@@ -110,6 +111,7 @@ impl BpfProgram {
             self,
             FMode::READ | FMode::WRITE,
             OpenFlags::empty(),
+            cred,
         )
     }
 
@@ -222,6 +224,7 @@ impl BpfMap {
         value_size: u32,
         max_entries: u32,
         flags: u32,
+        cred: Arc<kcred::Cred>,
     ) -> KResult<Arc<VfsFile>> {
         Ok(Arc::new(Self::new(
             map_type,
@@ -230,11 +233,11 @@ impl BpfMap {
             max_entries,
             flags,
         )?)
-        .into_file()?)
+        .into_file(cred)?)
     }
 
     /// Wraps this map as an anonymous inode file.
-    pub fn into_file(self: Arc<Self>) -> VfsResult<Arc<VfsFile>> {
+    pub fn into_file(self: Arc<Self>, cred: Arc<kcred::Cred>) -> VfsResult<Arc<VfsFile>> {
         let fops: Arc<dyn FileOperations> = self.clone();
         AnonInodeFs::global().get_file(
             "bpf-map",
@@ -242,6 +245,7 @@ impl BpfMap {
             self,
             FMode::READ | FMode::WRITE,
             OpenFlags::empty(),
+            cred,
         )
     }
 }
@@ -273,16 +277,22 @@ struct Inode {
 }
 
 impl Inode {
-    fn new_dir(fs: Arc<SimpleFs>) -> Arc<Self> {
+    fn new_dir(fs: Arc<SimpleFs>, mode: NodePermission, uid: u32, gid: u32) -> Arc<Self> {
         Arc::new(Self {
-            node: SimpleFsNode::new(fs, NodeType::Directory, DIR_PERMISSION),
+            node: SimpleFsNode::new_with_owner(fs, NodeType::Directory, mode, uid, gid),
             kind: InodeKind::Dir(Mutex::new(HashMap::new())),
         })
     }
 
-    fn new_program(fs: Arc<SimpleFs>, program: Arc<BpfProgram>) -> Arc<Self> {
+    fn new_program(
+        fs: Arc<SimpleFs>,
+        mode: NodePermission,
+        uid: u32,
+        gid: u32,
+        program: Arc<BpfProgram>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            node: SimpleFsNode::new(fs, NodeType::RegularFile, PIN_PERMISSION),
+            node: SimpleFsNode::new_with_owner(fs, NodeType::RegularFile, mode, uid, gid),
             kind: InodeKind::Program(program),
         })
     }
@@ -377,8 +387,15 @@ impl BpfNode {
         }
     }
 
-    fn pin_program(&self, name: &str, program: Arc<BpfProgram>) -> VfsResult<()> {
-        let inode = Inode::new_program(self.fs.clone(), program);
+    fn pin_program(
+        &self,
+        name: &str,
+        program: Arc<BpfProgram>,
+        mode: NodePermission,
+        uid: u32,
+        gid: u32,
+    ) -> VfsResult<()> {
+        let inode = Inode::new_program(self.fs.clone(), mode, uid, gid, program);
         let mut entries = self.inode.as_dir()?.lock();
         if entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
@@ -462,13 +479,15 @@ impl InodeDirOperations for BpfInodeOperations {
     fn mkdir(
         &self,
         _idmap: &kvfs::MountIdmap,
-        _dir: &kvfs::VfsInode,
+        dir_inode: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
-        _mode: kvfs::Umode,
+        mode: kvfs::Umode,
+        cred: &kcred::Cred,
     ) -> VfsResult<Dentry> {
         let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
-        let inode = Inode::new_dir(self.node.fs.clone());
+        let (mode, uid, gid) = inode_init_owner(dir_inode, mode, cred);
+        let inode = Inode::new_dir(self.node.fs.clone(), mode.permission(), uid, gid);
         let entry = BpfEntry::Dir(inode.clone());
         let mut entries = self.node.inode.as_dir()?.lock();
         if entries.contains_key(name) {
@@ -600,7 +619,7 @@ impl FileDirOperations for BpfFileOperations {
 /// Creates a bpffs superblock.
 pub fn new_bpffs() -> Arc<SuperBlock> {
     SimpleFs::new_with_flags("bpf".into(), BPF_FS_MAGIC, BPF_MOUNT_FLAGS, |fs| {
-        let root = Inode::new_dir(fs.clone());
+        let root = Inode::new_dir(fs.clone(), DIR_PERMISSION, 0, 0);
         Arc::new(move || {
             let node = BpfNode::new(fs.clone(), root.clone());
             node.into_vfs_inode(NodeFlags::empty())
@@ -609,13 +628,27 @@ pub fn new_bpffs() -> Arc<SuperBlock> {
 }
 
 /// Pins a BPF program in a resolved bpffs directory.
-pub fn pin_program(parent: &kvfs::Path, name: &str, program: Arc<BpfProgram>) -> KResult<()> {
+pub fn pin_program(
+    parent: &kvfs::Path,
+    name: &str,
+    program: Arc<BpfProgram>,
+    cred: &kcred::Cred,
+) -> KResult<()> {
+    parent.permission(
+        kvfs::Permission::MAY_WRITE | kvfs::Permission::MAY_EXEC,
+        cred,
+    )?;
     parent.check_writable_mount()?;
     if !parent.is_dir() {
         return Err(VfsError::NotADirectory);
     }
     let dir = parent.downcast_node::<BpfNode>()?;
-    dir.pin_program(name, program)?;
+    let (mode, uid, gid) = inode_init_owner(
+        &parent.inode(),
+        kvfs::Umode::new(NodeType::RegularFile, PIN_PERMISSION),
+        cred,
+    );
+    dir.pin_program(name, program, mode.permission(), uid, gid)?;
     Ok(())
 }
 

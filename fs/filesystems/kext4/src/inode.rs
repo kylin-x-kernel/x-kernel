@@ -83,12 +83,12 @@ pub(crate) struct InodeInitialization {
 
 #[allow(dead_code)]
 impl InodeInitialization {
-    pub(crate) const fn regular_file(permissions: u16) -> Self {
+    pub(crate) const fn regular_file(permissions: u16, uid: u32, gid: u32) -> Self {
         Self {
             kind: InodeKind::RegularFile,
             permissions,
-            uid: 0,
-            gid: 0,
+            uid,
+            gid,
             size: 0,
             block: [0; disk_inode::INODE_BLOCK_BYTES],
             uses_extent_tree: false,
@@ -98,12 +98,12 @@ impl InodeInitialization {
         }
     }
 
-    pub(crate) const fn directory(permissions: u16) -> Self {
+    pub(crate) const fn directory(permissions: u16, uid: u32, gid: u32) -> Self {
         Self {
             kind: InodeKind::Directory,
             permissions,
-            uid: 0,
-            gid: 0,
+            uid,
+            gid,
             size: 0,
             block: [0; disk_inode::INODE_BLOCK_BYTES],
             uses_extent_tree: false,
@@ -113,7 +113,7 @@ impl InodeInitialization {
         }
     }
 
-    pub(crate) fn fast_symlink(target: &[u8]) -> Ext4Result<Self> {
+    pub(crate) fn fast_symlink(target: &[u8], uid: u32, gid: u32) -> Ext4Result<Self> {
         if target.is_empty() || target.len() >= disk_inode::INODE_BLOCK_BYTES {
             return Err(Ext4Error::Unsupported(UnsupportedKind::BlockMappedSymlink));
         }
@@ -126,8 +126,8 @@ impl InodeInitialization {
         Ok(Self {
             kind: InodeKind::Symlink,
             permissions: 0o777,
-            uid: 0,
-            gid: 0,
+            uid,
+            gid,
             size: u64::try_from(target.len()).map_err(|_| Ext4Error::Overflow)?,
             block,
             uses_extent_tree: false,
@@ -137,15 +137,15 @@ impl InodeInitialization {
         })
     }
 
-    pub(crate) fn block_mapped_symlink(target_len: usize) -> Ext4Result<Self> {
+    pub(crate) fn block_mapped_symlink(target_len: usize, uid: u32, gid: u32) -> Ext4Result<Self> {
         if target_len == 0 {
             return Err(Ext4Error::InvalidName);
         }
         Ok(Self {
             kind: InodeKind::Symlink,
             permissions: 0o777,
-            uid: 0,
-            gid: 0,
+            uid,
+            gid,
             size: u64::try_from(target_len).map_err(|_| Ext4Error::Overflow)?,
             block: [0; disk_inode::INODE_BLOCK_BYTES],
             uses_extent_tree: true,
@@ -159,6 +159,8 @@ impl InodeInitialization {
         kind: InodeKind,
         permissions: u16,
         device: Option<Ext4DeviceId>,
+        uid: u32,
+        gid: u32,
     ) -> Ext4Result<Self> {
         let mut block = [0; disk_inode::INODE_BLOCK_BYTES];
         match kind {
@@ -173,8 +175,8 @@ impl InodeInitialization {
         Ok(Self {
             kind,
             permissions,
-            uid: 0,
-            gid: 0,
+            uid,
+            gid,
             size: 0,
             block,
             uses_extent_tree: false,
@@ -1752,6 +1754,8 @@ mod tests {
                 InodeKind::CharacterDevice,
                 0o666,
                 Some(Ext4DeviceId::new(0x1000, 0)),
+                0,
+                0,
             ),
             Err(Ext4Error::Unsupported(UnsupportedKind::DeviceId))
         );

@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{sync::Arc, vec};
+use alloc::vec;
 use core::bstr::ByteStr;
 
 use kerrno::{KErrorKind, LinuxError, LinuxResult};
@@ -10,12 +10,17 @@ use knet::{
     RecvOptions, SocketAddrEx, SocketOps,
     unix::{DgramTransport, UnixAddr, UnixDomainSocket},
 };
-use kvfs::{DirMapping, NodeType, SimpleFs};
+use kvfs::NodePermission;
 
 /// Bind /dev/log as a Unix domain socket for syslog messages
 pub fn bind_dev_log() -> LinuxResult<()> {
     let server = UnixDomainSocket::new(DgramTransport::new(1));
-    if let Err(err) = server.bind(SocketAddrEx::Unix(UnixAddr::Path("/dev/log".into()))) {
+    let cred = kcred::initial_cred();
+    if let Err(err) = server.bind_with_cred(
+        SocketAddrEx::Unix(UnixAddr::Path("/dev/log".into())),
+        &cred,
+        NodePermission::from_bits_truncate(0o755),
+    ) {
         let kind = KErrorKind::try_from(err);
         if matches!(
             kind,
@@ -45,11 +50,4 @@ pub fn bind_dev_log() -> LinuxResult<()> {
         "dev-log-server".into(),
     );
     Ok(())
-}
-
-pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
-    root.add(
-        "log",
-        kvfs::SimpleFile::new(fs.clone(), NodeType::Socket, || Ok(b"")),
-    );
 }

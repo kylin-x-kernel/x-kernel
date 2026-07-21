@@ -47,7 +47,7 @@ pub mod wait_reap;
 #[macro_use]
 extern crate klogger;
 
-pub use credentials::{with_current_credentials, with_current_credentials_mut};
+pub use credentials::{current_cred, current_real_cred};
 pub use pidfd::PidFd;
 pub use posix_types::{Pid, Tid};
 pub use process::{Process, ProcessExecUpdate, init_proc};
@@ -127,7 +127,7 @@ pub fn build_process_thread(
     address_space: alloc::sync::Arc<ksync::Mutex<memspace::MmSpace>>,
     fs_context: alloc::sync::Arc<ksync::Mutex<fs_context::FsStruct>>,
     signal_actions: alloc::sync::Arc<ksync::spin::SpinNoIrq<ksignal::api::SignalActions>>,
-    credentials: kcred::Credentials,
+    credentials: alloc::sync::Arc<kcred::Cred>,
 ) -> alloc::boxed::Box<Thread> {
     build_process_thread_with_config(
         process,
@@ -151,7 +151,7 @@ pub(crate) fn build_process_thread_with_config(
     address_space: alloc::sync::Arc<ksync::Mutex<memspace::MmSpace>>,
     fs_context: alloc::sync::Arc<ksync::Mutex<fs_context::FsStruct>>,
     signal_actions: alloc::sync::Arc<ksync::spin::SpinNoIrq<ksignal::api::SignalActions>>,
-    credentials: kcred::Credentials,
+    credentials: alloc::sync::Arc<kcred::Cred>,
     config: process_runtime::ProcessRuntimeConfig,
 ) -> alloc::boxed::Box<Thread> {
     let runtime = ProcessRuntime::new(
@@ -161,8 +161,7 @@ pub(crate) fn build_process_thread_with_config(
         address_space,
         fs_context,
         signal_actions,
-        credentials,
         config,
     );
-    Thread::new(process, runtime, task_number)
+    Thread::new(process, runtime, task_number, credentials)
 }

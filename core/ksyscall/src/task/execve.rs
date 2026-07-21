@@ -63,11 +63,13 @@ pub fn sys_execve(
 
     let fs_context = process.fs_context()?;
     let fs = fs_context.lock();
+    let cred = kprocess::current_cred();
     let loc = Filename::new(path.as_str()).lookup_at(
         fs.root(),
         fs.pwd(),
         LookupIntent::Exec,
         LookupFlags::follow(),
+        &cred,
     )?;
     drop(fs);
     let absolute_path = loc
@@ -85,6 +87,7 @@ pub fn sys_execve(
             path.clone(),
             args.clone(),
             envs.clone(),
+            cred,
         ),
     );
     let (entry_point, user_stack_base) = load_result?;
@@ -110,6 +113,9 @@ pub fn sys_execve(
     };
 
     process.apply_exec_update(exec_update)?;
+    let mut exec_cred = thread.prepare_creds();
+    exec_cred.apply_exec();
+    thread.commit_creds(exec_cred);
     thread.reset_after_exec();
 
     // execve replaces the entire address space.  The old mappings are

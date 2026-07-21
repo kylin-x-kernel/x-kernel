@@ -30,6 +30,8 @@ ktask timer runtime / generic fd readiness
 ```
 
 - `ksyscall` 负责用户指针、flag、clockid 的 ABI 校验。
+- `ksyscall` 或其它上层调用者负责选择创建文件时的 `Arc<Cred>`；本 crate 不假定存在
+  当前用户线程。
 - `kfd_objects` 信任 `ktask` timer runtime 的 handle/register/cancel 语义。
 - `kfd_objects` 信任 `kfd`/`kresources` 在 fd 生命周期上维持 `VfsFile`
   及其 private data 的强引用。
@@ -46,6 +48,7 @@ ktask timer runtime / generic fd readiness
   `PIPE_BUF` 原子写入语义保持一致。
 - `Signalfd::read/poll` 必须围绕同一 pending signal 可见性与 mask 语义保持一致。
 - `Epoll` 的 interest table、ready queue 与 trigger mode 必须围绕同一就绪语义保持一致。
+- 匿名文件构造必须使用调用者显式提供的 credential，并只由 `VfsFile` 保存该快照。
 
 ## 并发模型
 
@@ -110,6 +113,7 @@ watched file 失效后的清理维护同一个状态机。
 | T-12 | `epoll` ready queue 去重失效导致重复唤醒、事件风暴或 `MOD` 后丢失事件 | 中 | `in_ready_queue` 位与 ready queue 统一维护；`MOD` 替换已入队 interest 时同步替换 ready queue 中的 `Weak` |
 | T-13 | `epoll` oneshot / edge-triggered 状态机错误 | 高 | `TriggerMode` 集中建模并在消费路径统一更新 |
 | T-14 | watched file 失效后 interest 清理不完整 | 中 | ready 消费路径在 `Weak` 升级失败后立即回收 interest |
+| T-15 | 内核任务创建匿名 fd 时因隐式读取当前用户凭据而 panic | 高 | 构造函数调用 `current_cred()`，但当前 task 不是 `Thread` | 构造函数接收显式 `Arc<Cred>`；syscall adapter 传当前快照，内核调用者选择初始或其它明确凭据 |
 
 ## 审计清单
 
@@ -121,3 +125,4 @@ watched file 失效后的清理维护同一个状态机。
 - [ ] `PipeObject` 的 EOF/HUP/ERR、`PIPE_BUF` 原子写入和 resize 上限语义是否同步更新。
 - [ ] `Signalfd` 的 mask 更新、pending signal 观察和 `poll(IN)` 语义是否保持一致。
 - [ ] `Epoll` 的 interest table、ready queue、oneshot/edge 触发语义是否保持一致。
+- [ ] 新增文件构造路径是否显式接收凭据，且没有把 credential 重复保存到对象状态。

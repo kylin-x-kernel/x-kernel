@@ -22,6 +22,7 @@ kclass = { workspace = true, features = ["block"] }
 kbuild_config.workspace = true
 kdevice.workspace = true
 kerrno.workspace = true
+kcred.workspace = true
 ksync.workspace = true
 kvfs.workspace = true
 log.workspace = true

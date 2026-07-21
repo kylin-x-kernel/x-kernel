@@ -336,7 +336,8 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         ),
         #[cfg(target_arch = "x86_64")]
         Sysno::access => sys_access(uctx.arg0().into(), uctx.arg1() as _),
-        Sysno::faccessat | Sysno::faccessat2 => sys_faccessat2(
+        Sysno::faccessat => sys_faccessat(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2() as _),
+        Sysno::faccessat2 => sys_faccessat2(
             uctx.arg0() as _,
             uctx.arg1().into(),
             uctx.arg2() as _,

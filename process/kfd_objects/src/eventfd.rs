@@ -11,6 +11,7 @@ use core::{
     task::Context,
 };
 
+use kcred::Cred;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ktask::future::{block_on, poll_io};
@@ -36,7 +37,14 @@ impl EventFd {
     }
 
     /// Create the anonymous-inode file used by eventfd.
-    pub fn new_file(initval: u64, semaphore: bool, open_flags: u32) -> KResult<Arc<VfsFile>> {
+    ///
+    /// `cred` is captured as the new file's immutable open credential.
+    pub fn new_file(
+        initval: u64,
+        semaphore: bool,
+        open_flags: u32,
+        cred: Arc<Cred>,
+    ) -> KResult<Arc<VfsFile>> {
         let state = Self::new(initval, semaphore);
         let open_flags = OpenFlags::from_bits(open_flags).ok_or(KError::InvalidInput)?;
         AnonInodeFs::global().get_file(
@@ -45,6 +53,7 @@ impl EventFd {
             state,
             FMode::READ | FMode::WRITE | FMode::STREAM,
             open_flags,
+            cred,
         )
     }
 
@@ -228,7 +237,8 @@ mod eventfd_tests {
 
     #[def_test]
     fn test_eventfd_nonblocking_mode() {
-        let file = EventFd::new_file(0, false, 0).expect("eventfd file opens");
+        let file =
+            EventFd::new_file(0, false, 0, kcred::initial_cred()).expect("eventfd file opens");
 
         assert!(!file.is_nonblocking());
 
@@ -294,7 +304,8 @@ mod eventfd_tests {
 
     #[def_test]
     fn test_eventfd_write_then_read() {
-        let file = EventFd::new_file(0, false, 0).expect("eventfd file opens");
+        let file =
+            EventFd::new_file(0, false, 0, kcred::initial_cred()).expect("eventfd file opens");
 
         let data = 42u64.to_ne_bytes();
         let mut dst_buf = [0; size_of::<u64>()];
@@ -313,7 +324,8 @@ mod eventfd_tests {
 
     #[def_test]
     fn test_eventfd_semaphore_read_keeps_remaining_count() {
-        let file = EventFd::new_file(3, true, 0).expect("eventfd file opens");
+        let file =
+            EventFd::new_file(3, true, 0, kcred::initial_cred()).expect("eventfd file opens");
         let mut dst_buf = [0; size_of::<u64>()];
         let mut pos = 0;
 
@@ -330,7 +342,8 @@ mod eventfd_tests {
 
     #[def_test]
     fn test_eventfd_invalid_write_value() {
-        let file = EventFd::new_file(0, false, 0).expect("eventfd file opens");
+        let file =
+            EventFd::new_file(0, false, 0, kcred::initial_cred()).expect("eventfd file opens");
         let data = u64::MAX.to_ne_bytes();
         let mut pos = 0;
 
@@ -339,7 +352,8 @@ mod eventfd_tests {
 
     #[def_test]
     fn test_eventfd_small_buffers_fail() {
-        let file = EventFd::new_file(1, false, 0).expect("eventfd file opens");
+        let file =
+            EventFd::new_file(1, false, 0, kcred::initial_cred()).expect("eventfd file opens");
         let mut pos = 0;
 
         let mut short_dst = [0; size_of::<u64>() - 1];

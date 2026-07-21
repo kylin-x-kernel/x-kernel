@@ -17,6 +17,7 @@ use kvfs::{
     FileOperations, InodeDirOperations, InodeOperations, InodeSymlinkOperations, Kiocb,
     LockedDentry, Metadata, MetadataUpdate, NodeType, ReadaheadControl, RenameFlags, VfsError,
     VfsFile, VfsInode, VfsResult, WriteBeginRequest, WriteEndRequest, WritebackControl,
+    inode_init_owner,
 };
 
 use super::{
@@ -362,12 +363,14 @@ impl InodeDirOperations for Inode {
         dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         _exclusive: bool,
+        cred: &kcred::Cred,
     ) -> VfsResult<Dentry> {
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
         if mode.node_type() != NodeType::RegularFile {
             return Err(VfsError::InvalidInput);
         }
+        let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
         let created = {
             let mut fs = self.fs.lock();
             let parent_inode = fs.inode(self.number).map_err(into_vfs_err)?;
@@ -375,6 +378,8 @@ impl InodeDirOperations for Inode {
                 &parent_inode,
                 name.as_bytes(),
                 mode.permission().bits(),
+                uid,
+                gid,
                 current_ext4_timestamp(),
             )
             .map_err(into_vfs_err)?
@@ -394,9 +399,11 @@ impl InodeDirOperations for Inode {
         dir: &VfsInode,
         dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
+        cred: &kcred::Cred,
     ) -> VfsResult<Dentry> {
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
+        let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
         let created = {
             let mut fs = self.fs.lock();
             let parent_inode = fs.inode(self.number).map_err(into_vfs_err)?;
@@ -404,6 +411,8 @@ impl InodeDirOperations for Inode {
                 &parent_inode,
                 name.as_bytes(),
                 mode.permission().bits(),
+                uid,
+                gid,
                 current_ext4_timestamp(),
             )
             .map_err(into_vfs_err)?
@@ -424,6 +433,7 @@ impl InodeDirOperations for Inode {
         dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         device: DeviceId,
+        cred: &kcred::Cred,
     ) -> VfsResult<Dentry> {
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
@@ -433,15 +443,17 @@ impl InodeDirOperations for Inode {
             NodeType::Fifo | NodeType::Socket => None,
             _ => return Err(VfsError::InvalidInput),
         };
+        let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
         let created = {
             let mut fs = self.fs.lock();
             let parent_inode = fs.inode(self.number).map_err(into_vfs_err)?;
             fs.create_special_file(
                 &parent_inode,
                 name.as_bytes(),
-                kind,
+                (kind, device),
                 mode.permission().bits(),
-                device,
+                uid,
+                gid,
                 current_ext4_timestamp(),
             )
             .map_err(into_vfs_err)?
@@ -461,9 +473,18 @@ impl InodeDirOperations for Inode {
         dir: &VfsInode,
         dentry: &LockedDentry<'_>,
         target: &str,
+        cred: &kcred::Cred,
     ) -> VfsResult<Dentry> {
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
+        let (_, uid, gid) = inode_init_owner(
+            dir,
+            kvfs::Umode::new(
+                NodeType::Symlink,
+                kvfs::NodePermission::from_bits_truncate(0o777),
+            ),
+            cred,
+        );
         let created = {
             let mut fs = self.fs.lock();
             let parent_inode = fs.inode(self.number).map_err(into_vfs_err)?;
@@ -471,6 +492,8 @@ impl InodeDirOperations for Inode {
                 &parent_inode,
                 name.as_bytes(),
                 target.as_bytes(),
+                uid,
+                gid,
                 current_ext4_timestamp(),
             )
             .map_err(into_vfs_err)?

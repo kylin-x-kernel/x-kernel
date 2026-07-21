@@ -6,6 +6,7 @@ use alloc::sync::Arc;
 use core::ops::Deref;
 
 use fs_context::{FsStruct, init_fs};
+use kcred::Cred;
 use ksync::Mutex;
 use ktask::current;
 use memspace::MmSpace;
@@ -18,6 +19,23 @@ impl Deref for CurrentThread {
 
     fn deref(&self) -> &Self::Target {
         self.0.as_thread()
+    }
+}
+
+impl CurrentThread {
+    /// Returns the current task's subjective credentials.
+    pub fn cred(&self) -> Arc<Cred> {
+        self.subjective_cred()
+    }
+
+    /// Returns an uncommitted copy of the current subjective credentials.
+    pub fn prepare_creds(&self) -> Cred {
+        self.cred().prepare()
+    }
+
+    /// Commits a prepared credential to the current task.
+    pub fn commit_creds(&self, cred: Cred) {
+        self.commit_cred(cred);
     }
 }
 

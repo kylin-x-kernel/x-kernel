@@ -125,6 +125,7 @@ pub fn verify_ta_elf_on_load_and_cache_ta_head(file: &VfsFile) -> KResult<()> {
 /// raw user-provided exec path so lookup stays independent of per-process cwd
 /// or chroot state.
 pub fn get_ta_head_cached(path: &str) -> KResult<Option<Vec<u8>>> {
+    let cred = kcred::initial_cred();
     let fs_guard = init_fs();
     let fs = fs_guard.lock();
     let loc = Filename::new(path).lookup_at(
@@ -132,6 +133,7 @@ pub fn get_ta_head_cached(path: &str) -> KResult<Option<Vec<u8>>> {
         fs.pwd(),
         LookupIntent::Open,
         LookupFlags::follow(),
+        &cred,
     )?;
     drop(fs);
     let abs = loc.absolute_path()?;
@@ -144,7 +146,7 @@ pub fn get_ta_head_cached(path: &str) -> KResult<Option<Vec<u8>>> {
         }
     }
 
-    let file = dentry_open(loc, 0)?;
+    let file = dentry_open(loc, 0, cred)?;
     let ta_head = verify_ta_elf_signature_if_applicable(key.as_str(), &file)?;
 
     let mut guard = TA_HEAD_CACHE.lock();

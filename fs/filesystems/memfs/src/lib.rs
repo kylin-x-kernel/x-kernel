@@ -16,13 +16,14 @@ use core::{borrow::Borrow, cmp::Ordering, time::Duration};
 
 use hashbrown::HashMap;
 use iov_iter::{IovIterDest, IovIterSource};
+use kcred::Cred;
 use ksync::Mutex;
 use kvfs::{
     AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FileDirOperations,
     FileOperations, InodeCache, InodeDirOperations, InodeOperations, InodeSymlinkOperations, Kiocb,
     LockedDentry, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType, StatFs,
     StatFsFlags, SuperBlock, SuperBlockOperations, Umode, VfsError, VfsFile, VfsInodeInit,
-    VfsResult, WriteBeginRequest, WriteEndRequest, simple_getattr, simple_rename,
+    VfsResult, WriteBeginRequest, WriteEndRequest, inode_init_owner, simple_getattr, simple_rename,
     simple_statfs_with_flags, simple_write_end,
 };
 use slab::Slab;
@@ -121,6 +122,8 @@ impl MemoryFs {
             None,
             NodeType::Directory,
             root_mode,
+            0,
+            0,
             DeviceId::default(),
         );
         let root = MemoryNode::dentry_from_inode(&fs, None, String::new(), root_ino);
@@ -186,6 +189,8 @@ impl Inode {
         parent: Option<u64>,
         node_type: NodeType,
         permission: NodePermission,
+        uid: u32,
+        gid: u32,
         rdev: DeviceId,
     ) -> Arc<Inode> {
         let mut inodes = fs.inodes.lock();
@@ -196,8 +201,8 @@ impl Inode {
             inode: ino,
             nlink: 0,
             mode: Umode::new(node_type, permission),
-            uid: 0,
-            gid: 0,
+            uid,
+            gid,
             size: 0,
             block_size: 0,
             blocks: 0,
@@ -347,23 +352,30 @@ impl MemoryNode {
     fn ramfs_get_inode(
         &self,
         parent: Option<u64>,
+        dir: &kvfs::VfsInode,
         mode: kvfs::Umode,
         device: DeviceId,
+        cred: &Cred,
     ) -> Arc<Inode> {
+        let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
         Inode::new(
             &self.fs,
             parent,
             mode.node_type(),
             mode.permission(),
+            uid,
+            gid,
             device,
         )
     }
 
     fn ramfs_mknod(
         &self,
+        dir_inode: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         device: DeviceId,
+        cred: &Cred,
     ) -> VfsResult<Dentry> {
         let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
@@ -373,7 +385,7 @@ impl MemoryNode {
         if entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
         }
-        let inode = self.ramfs_get_inode(Some(self.inode.ino), mode, device);
+        let inode = self.ramfs_get_inode(Some(self.inode.ino), dir_inode, mode, device, cred);
         entries.insert(name.into(), InodeRef::new(self.fs.clone(), inode.ino));
         drop(entries);
         Ok(self.new_entry(&dir, name, inode))
@@ -496,9 +508,10 @@ impl InodeDirOperations for MemoryNode {
         dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         _exclusive: bool,
+        cred: &Cred,
     ) -> VfsResult<Dentry> {
         let mode = mode.with_node_type(NodeType::RegularFile);
-        self.ramfs_mknod(dentry, mode, DeviceId::default())
+        self.ramfs_mknod(_dir, dentry, mode, DeviceId::default(), cred)
     }
 
     fn mkdir(
@@ -507,9 +520,10 @@ impl InodeDirOperations for MemoryNode {
         dir_inode: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
+        cred: &Cred,
     ) -> VfsResult<Dentry> {
         let mode = mode.with_node_type(NodeType::Directory);
-        let entry = self.ramfs_mknod(dentry, mode, DeviceId::default())?;
+        let entry = self.ramfs_mknod(dir_inode, dentry, mode, DeviceId::default(), cred)?;
         dir_inode.increment_link_count();
         Ok(entry)
     }
@@ -517,20 +531,22 @@ impl InodeDirOperations for MemoryNode {
     fn mknod(
         &self,
         _idmap: &kvfs::MountIdmap,
-        _dir: &kvfs::VfsInode,
+        dir: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         device: DeviceId,
+        cred: &Cred,
     ) -> VfsResult<Dentry> {
-        self.ramfs_mknod(dentry, mode, device)
+        self.ramfs_mknod(dir, dentry, mode, device, cred)
     }
 
     fn symlink(
         &self,
         _idmap: &kvfs::MountIdmap,
-        _dir: &kvfs::VfsInode,
+        dir_inode: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
         target: &str,
+        cred: &Cred,
     ) -> VfsResult<Dentry> {
         let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
@@ -540,11 +556,18 @@ impl InodeDirOperations for MemoryNode {
         if entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
         }
+        let (mode, uid, gid) = inode_init_owner(
+            dir_inode,
+            Umode::new(NodeType::Symlink, NodePermission::from_bits_truncate(0o777)),
+            cred,
+        );
         let inode = Inode::new(
             &self.fs,
             Some(self.inode.ino),
-            NodeType::Symlink,
-            NodePermission::from_bits_truncate(0o777),
+            mode.node_type(),
+            mode.permission(),
+            uid,
+            gid,
             DeviceId::default(),
         );
         let file = inode.as_file()?;
@@ -795,6 +818,7 @@ mod tests {
                 &root,
                 O_WRONLY | O_CREAT | O_EXCL,
                 NodePermission::from_bits_truncate(0o600),
+                kcred::initial_cred(),
             )
             .unwrap();
         let mut pos = 0;
@@ -805,18 +829,67 @@ mod tests {
     }
 
     #[def_test]
+    fn created_inode_uses_fs_ids_and_inherits_setgid_directory() {
+        let fs = MemoryFs::new();
+        let root = kvfs::Path::new(kvfs::Mount::new_root(&fs), fs.root_dir());
+        root.chmod(
+            NodePermission::from_bits_truncate(0o777),
+            &kcred::initial_cred(),
+        )
+        .unwrap();
+
+        let mut cred = Cred::root();
+        cred.set_resgid(Some(100), Some(200), Some(300)).unwrap();
+        assert_eq!(cred.set_fsgid(300), 200);
+        cred.set_resuid(Some(1000), Some(2000), Some(3000)).unwrap();
+        assert_eq!(cred.set_fsuid(3000), 2000);
+
+        let file = root
+            .create("owned", NodePermission::from_bits_truncate(0o600), &cred)
+            .unwrap();
+        let file_metadata = file.metadata();
+        assert_eq!(file_metadata.uid, 3000);
+        assert_eq!(file_metadata.gid, 300);
+
+        root.chown(None, Some(4242), &kcred::initial_cred())
+            .unwrap();
+        root.chmod(
+            NodePermission::from_bits_truncate(0o2777),
+            &kcred::initial_cred(),
+        )
+        .unwrap();
+        let dir = root
+            .mkdir(
+                "inherited",
+                NodePermission::from_bits_truncate(0o755),
+                &cred,
+            )
+            .unwrap();
+        let dir_metadata = dir.metadata();
+        assert_eq!(dir_metadata.uid, 3000);
+        assert_eq!(dir_metadata.gid, 4242);
+        assert!(
+            dir_metadata
+                .mode
+                .permission()
+                .contains(NodePermission::SET_GID)
+        );
+    }
+
+    #[def_test]
     fn rename_rejects_nonempty_directory_after_child_handle_is_dropped() {
         let fs = MemoryFs::new();
         let root = fs.root_dir();
         let permission = NodePermission::from_bits_truncate(0o755);
-        let source = root.mkdir("source", permission).unwrap();
-        let target = root.mkdir("target", permission).unwrap();
-        let child = target.create("child", permission).unwrap();
+        let cred = kcred::initial_cred();
+        let source = root.mkdir("source", permission, &cred).unwrap();
+        let target = root.mkdir("target", permission, &cred).unwrap();
+        let child = target.create("child", permission, &cred).unwrap();
         drop(child);
         drop(source);
 
         assert_eq!(
-            root.rename("source", &root, "target", kvfs::RenameFlags::empty()),
+            root.rename("source", &root, "target", kvfs::RenameFlags::empty(),),
             Err(VfsError::DirectoryNotEmpty)
         );
     }

@@ -63,6 +63,9 @@ read/poll/close via generic fd syscalls
 - `kfd`/`kresources` 只负责 fd 槽位和对象句柄，不拥有对象业务语义。
 - 路径查找和通用 VFS 管理不进入该 crate；匿名 fd 对象通过 `VfsFile`
   和对象自己的 `FileOperations` 暴露行为。
+- 文件构造函数显式接收 `Arc<Cred>`。syscall adapter 在操作入口取得一次当前凭据，
+  内核调用者则显式选择 `initial_cred()` 等凭据；`kfd_objects` 不反向读取当前 task。
+  该快照只进入 `VfsFile::f_cred`，对象本身不重复保存 credential 字段。
 
 ## `TimerFd` 角色
 

@@ -101,8 +101,10 @@ kfd resources / kvfs / device and pipe implementations
 4. `AT_SYMLINK_NOFOLLOW` / `O_NOFOLLOW` 必须影响符号链接和 VFS magic-link follow。
 5. `mount` 不得静默忽略会改变语义的 unsupported operation flags。
 6. 创建文件和目录时应应用当前进程 `umask`。
-7. `chroot` 目标必须是目录。
-8. `F_ADD_SEALS` 只能单调添加 memfd seals，且必须尊重 `F_SEAL_SEAL`。
+7. `chroot` 目标必须是目录，且当前 capability 模型下调用者必须满足 `euid == 0`。
+8. `chown/chmod/utimensat` 必须把同一个 credential snapshot 传给 VFS metadata
+   授权，不能直接调用后端 `setattr`。
+9. `F_ADD_SEALS` 只能单调添加 memfd seals，且必须尊重 `F_SEAL_SEAL`。
 
 ## 线程安全
 
@@ -131,10 +133,14 @@ kfd resources / kvfs / device and pipe implementations
 | T-07 | `copy_file_range` 同文件重叠复制造成数据破坏 | fd-to-fd 复制 | 中 | 同文件重叠检查未实现 | 已在设计文档列为限制；非零 flags 在边界被拒绝；当前不宣称等价 Linux |
 | T-08 | 未实现的 mount/umount flags 被静默忽略 | mount flags | 高 | 用户态请求 bind、remount、detach 等语义 | 对未实现 operation flags 返回 `InvalidInput` |
 | T-09 | 文件锁占位返回成功导致应用误以为互斥成立 | fd_ops | 中 | `fcntl`/`flock` 锁语义未实现 | 文档列为限制；锁相关返回路径必须按当前占位语义审计 |
-| T-10 | 创建文件所有者固定为 root 导致 DAC 语义错误 | open/create | 高 | `current_effective_ids()` 固定 `(0, 0)` | 文档列为限制；当前未读取真实 fsuid/fsgid |
-| T-11 | `faccessat2` 权限检查与真实凭据不一致 | access | 中 | 仅检查 owner 权限位，不区分 UID/GID/补充组 | 文档列为限制；当前未接入 `kcred::AccessCredentials` |
+| T-10 | 创建文件使用错误所有者导致 DAC 语义错误 | open/create | 高 | 固定 root owner，或忽略 setgid 父目录 | syscall 传递当前 `Cred`，后端用 `inode_init_owner()` 初始化 fsuid/fsgid 与继承组 |
+| T-11 | `faccessat2` 权限检查使用错误身份 | access | 高 | 默认错误使用 filesystem IDs，或 `AT_EACCESS` 强行覆盖显式 fs ID | 默认构造 real-ID credential；`AT_EACCESS` 直接使用当前 credential 的 `fsuid/fsgid`，并用于完整遍历与最终检查 |
 | T-12 | 设备 ioctl 参数被错误解释 | ioctl / 设备对象 | 中 | syscall 层错误处理设备私有命令 | `FIONBIO` 在本层处理，其它命令转交 `FileLike::ioctl`；常见 isatty 探测错误不刷 warning |
 | T-13 | memfd seals 被非 shmem fd 或普通文件伪造 | fcntl / shmem | 中 | `F_ADD_SEALS` / `F_GET_SEALS` 没有校验 fd object 类型和 inode state | fcntl 先取得 `kvfs::VfsFile`，再由 shmem inode state 判断是否存在 |
+| T-14 | 同一 pathname 操作混用多个凭据快照 | syscall/VFS | 高 | 路径组件逐次查询 current task，期间 credential 被提交 | syscall 入口只取得一次 `Arc<Cred>` 并沿完整操作传递 |
+| T-15 | `ftruncate` 在 UID 改变后错误重做 pathname DAC | fd/VFS | 中 | fd 操作调用 `Path::truncate(cred)` | `VfsFile::truncate()` 只验证 open write mode，再使用 opened-file authority |
+| T-16 | 非 owner 绕过 VFS 直接修改 mode、owner 或时间 | metadata | 高 | syscall 直接调用后端 `setattr` | syscall 只做 ABI 转换，`Path::chown/chmod/set_times` 统一执行 owner、group 和 write authorization |
+| T-17 | 普通用户改变进程 root | chroot | 高 | 只验证目标目录可搜索 | 完成目录 DAC 后额外要求 `euid == 0`，近似 Linux `CAP_SYS_CHROOT` |
 
 影响等级定义：
 
@@ -192,8 +198,8 @@ kfd resources / kvfs / device and pipe implementations
 
 ## 已知限制
 
-1. `current_effective_ids()` 固定返回 root 身份，创建者 UID/GID 语义不完整。
-2. `faccessat2` 尚未完整接入真实凭据、补充组、capability 和 `AT_EACCESS` 语义。
+1. 凭据 DAC 尚无 capability、LSM、ACL、user namespace ID 映射和 idmapped mount。
+2. FAT 等不能表达 Unix owner 的后端无法完整保存创建者 UID/GID。
 3. `fcntl` 文件锁和 `flock` 未实现真实锁。
 4. `copy_file_range` 对普通文件类型、同文件重叠和跨文件系统限制仍为 TODO。
 5. `mount` 只支持 `tmpfs`，不支持 bind、remount、move、propagation 和 lazy/force unmount。
@@ -214,6 +220,8 @@ kfd resources / kvfs / device and pipe implementations
 - [ ] 涉及 offset/len 的路径检查负数、溢出和 0 长度语义。
 - [ ] 跨 fd 复制路径检查源目标类型、阻塞语义和用户 offset 写回。
 - [ ] 元数据和 access 改动与 `kcred` 凭据模型保持同步。
+- [ ] 每个多步 pathname 操作只取得一次 credential snapshot，并传递给完整解析过程。
+- [ ] pathname 与 descriptor 操作没有混淆调用时 DAC 和 open-file authority。
 - [ ] mount/umount 新 flags 要么完整实现，要么显式拒绝。
 - [ ] 新增日志不输出文件内容或敏感用户缓冲区。
 - [ ] 若修复当前已知限制，同步更新本文和 `design.md`。

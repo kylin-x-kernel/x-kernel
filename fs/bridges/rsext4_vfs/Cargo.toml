@@ -17,6 +17,7 @@ times = ["dep:khal"]
 fs_block.workspace = true
 iov_iter.workspace = true
 kclass = { workspace = true, features = ["block"] }
+kcred.workspace = true
 kerrno.workspace = true
 khal = { workspace = true, optional = true }
 ksync.workspace = true

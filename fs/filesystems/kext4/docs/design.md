@@ -153,6 +153,11 @@ Namei 修改先验证 parent/name，查找目标 dirent，检查 inode kind 和�
 一个 journal transaction 中完成 dirent 和 inode 更新。Rename 使用准备、替换、删除、收尾
 的顺序，保证目录父链接计数和 `..` 更新保持一致。
 
+Create、mkdir、mknod 和 symlink 的 KVFS bridge callback 接收同一次操作的 `&Cred`，先用
+`inode_init_owner()` 根据父 inode、`fsuid/fsgid` 和 setgid 继承规则得到 mode/UID/GID，
+再把显式 `uid`、`gid` 参数传入 KExt4 namei transaction。核心 inode constructor 不读取当前任务，
+也不提供固定 root owner 的运行态默认值；测试镜像构造必须显式传入其 fixture owner。
+
 Xattr 修改会先把 inline xattr 和 external xattr 解码到内存向量中，应用更新后再选择
 inode-body 或 single external-block 存储，维护 `i_file_acl`、`i_blocks`、block checksum
 和 refcount。Zero-link eviction 会复用 external xattr block 清理逻辑，先释放 EA block，

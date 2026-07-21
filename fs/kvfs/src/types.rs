@@ -180,6 +180,24 @@ pub struct MetadataUpdate {
     pub mtime: Option<Duration>,
 }
 
+/// Requested timestamp value together with its authorization semantics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SetattrTime {
+    /// Set the timestamp to the current wall-clock value.
+    Current(Duration),
+    /// Set the timestamp to a caller-supplied value.
+    Explicit(Duration),
+}
+
+impl SetattrTime {
+    /// Returns the resolved timestamp written to the filesystem.
+    pub const fn value(self) -> Duration {
+        match self {
+            Self::Current(value) | Self::Explicit(value) => value,
+        }
+    }
+}
+
 /// Device identifier (major/minor encoding).
 #[derive(Default, Clone, PartialEq, Eq, Copy)]
 pub struct DeviceId(pub u64);

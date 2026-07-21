@@ -246,6 +246,10 @@ impl AccMode {
     pub(crate) const fn requires_write(self) -> bool {
         self.0.contains(Permission::MAY_WRITE)
     }
+
+    pub(crate) const fn permission(self) -> Permission {
+        self.0
+    }
 }
 
 #[cfg(unittest)]

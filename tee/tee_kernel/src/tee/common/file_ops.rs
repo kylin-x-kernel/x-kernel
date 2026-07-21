@@ -35,7 +35,13 @@ fn open_path(
     mode: __kernel_mode_t,
 ) -> KResult<Arc<VfsFile>> {
     let permission = NodePermission::from_bits_truncate(mode as _);
-    Filename::new(path).open_with_flags_at(fs.root(), fs.pwd(), flags, permission)
+    Filename::new(path).open_with_flags_at(
+        fs.root(),
+        fs.pwd(),
+        flags,
+        permission,
+        kprocess::current_cred(),
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -106,15 +112,20 @@ impl FileVariant {
     pub fn remove_file(path: &str) -> TeeResult {
         tee_debug!("FileVariant::remove file with path: {}", path);
         let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
+        let cred = kprocess::current_cred();
         match with_fs(AT_FDCWD, |fs| {
             let entry = Filename::new(path.as_str()).lookup_at(
                 fs.root(),
                 fs.pwd(),
                 LookupIntent::Open,
                 LookupFlags::no_follow(),
+                &cred,
             )?;
             let name = entry.name();
-            entry.parent().ok_or(VfsError::IsADirectory)?.unlink(&name)
+            entry
+                .parent()
+                .ok_or(VfsError::IsADirectory)?
+                .unlink(&name, &cred)
         }) {
             Ok(()) => Ok(()),
             Err(VfsError::NotFound) => {
@@ -138,15 +149,20 @@ impl FileVariant {
     pub fn remove_dir(path: &str) -> TeeResult {
         tee_debug!("FileVariant::remove dir with path: {}", path);
         let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
+        let cred = kprocess::current_cred();
         with_fs(AT_FDCWD, |fs| {
             let entry = Filename::new(path.as_str()).lookup_at(
                 fs.root(),
                 fs.pwd(),
                 LookupIntent::Open,
                 LookupFlags::no_follow(),
+                &cred,
             )?;
             let name = entry.name();
-            entry.parent().ok_or(VfsError::ResourceBusy)?.rmdir(&name)
+            entry
+                .parent()
+                .ok_or(VfsError::ResourceBusy)?
+                .rmdir(&name, &cred)
         })
         .inspect_err(|e| error!("remove dir failed: {:?}", e))
         .map_err(|_| TEE_ERROR_GENERIC)?;
@@ -170,18 +186,20 @@ impl FileVariant {
     pub fn create_dir(path: &str) -> TeeResult {
         let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
         let mode = NodePermission::from_bits_truncate(0o755);
+        let cred = kprocess::current_cred();
         with_fs(AT_FDCWD, |fs| {
             let (dir, name) = match Filename::new(path.as_str()).create_at(
                 fs.root(),
                 fs.pwd(),
                 LookupIntent::Open,
                 LookupFlags::DIRECTORY,
+                &cred,
             ) {
                 Ok(location) => location,
                 Err(VfsError::AlreadyExists) => return Ok(()),
                 Err(err) => return Err(err),
             };
-            match dir.mkdir(&name, mode) {
+            match dir.mkdir(&name, mode, &cred) {
                 Ok(_) => Ok(()),
                 Err(VfsError::AlreadyExists) => {
                     // Directory already exists, return success (idempotent)
@@ -232,8 +250,7 @@ impl FileVariant {
 
     pub fn ftruncate(&mut self, len: usize) -> TeeResult<()> {
         with_file(self, |file| {
-            file.path()
-                .truncate(len as _)
+            file.truncate(len as _)
                 .inspect_err(|e| error!("set len failed: {:?}", e))
                 .map_err(|_| TEE_ERROR_GENERIC)
         })

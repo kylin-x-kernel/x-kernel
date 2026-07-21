@@ -10,14 +10,14 @@ use alloc::{
 };
 
 use fs_context::{copy_init_fs_struct, init_fs};
-use kcred::Credentials;
+use kcred::initial_cred;
 use kexec::load_user_app;
 use khal::uspace::UserContext;
 use kidentity::allocate_root_pid_handle;
 use kprocess::{Process, UserThreadRuntimeAction, build_process_thread, start_user_task};
 use ksync::Mutex;
 use ktty::tty::N_TTY;
-use kvfs::{Filename, LookupFlags, LookupIntent};
+use kvfs::{Filename, LookupFlags, LookupIntent, Permission};
 use posix_fs::file::add_stdio;
 
 use crate::new_user_task;
@@ -33,21 +33,25 @@ pub fn run_init_process(
 
     let fs_guard = init_fs();
     let fs = fs_guard.lock();
+    let cred = initial_cred();
     let loc = Filename::new(args[0].as_str())
         .lookup_at(
             fs.root(),
             fs.pwd(),
             LookupIntent::Exec,
             LookupFlags::follow(),
+            &cred,
         )
         .expect("Failed to resolve executable path");
+    loc.permission(Permission::MAY_EXEC, &cred)
+        .expect("Init executable is not executable");
     let path = loc
         .absolute_path()
         .expect("Failed to get executable absolute path");
     let name = loc.name();
     drop(fs);
 
-    let (entry_vaddr, ustack_top) = load_user_app(&mut uspace, None, args, envs)
+    let (entry_vaddr, ustack_top) = load_user_app(&mut uspace, None, args, envs, cred.clone())
         .unwrap_or_else(|e| panic!("Failed to load user app: {}", e));
 
     let uctx = UserContext::new(entry_vaddr.into(), ustack_top, 0);
@@ -64,7 +68,7 @@ pub fn run_init_process(
         Arc::new(Mutex::new(uspace)),
         fs_context,
         Arc::default(),
-        Credentials::root(),
+        cred,
     );
     let mut task = new_user_task(&name, uctx, 0, task_number, thread, dispatch_syscall);
     task.ctx_mut().set_page_table_root(page_table_root);

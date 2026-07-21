@@ -28,6 +28,8 @@ driver layer / smoltcp / ringbuf
 
 - safe API 调用者信任 `knet` 维护 socket 状态、路由状态、buffer 边界和 errno 映射。
 - `knet` 信任 `posix/net` 完成用户指针读取、sockaddr 长度校验、地址族选择和权限策略。
+- pathname Unix socket 操作信任入口传入的 `Cred` 快照与当前系统调用主体一致；
+  kvfs 负责逐级 search、父目录 mutation 和 inode DAC 检查。
 - `knet` 信任 driver 层返回的 `NetBufHandle` 数据切片在 handle 生命周期内有效。
 - `knet` 使用基于 `zerocopy` 和 `etherparse` 的 crate 内 checked parser 校验 Ethernet、ARP 和 IPv4 头部，并继续依赖 smoltcp 校验 TCP、UDP 和 IPv6 数据。
 - 设备层只接收经 `Router` 控制面适配后的 crate 内地址、CIDR 和邻居项。
@@ -44,7 +46,8 @@ driver layer / smoltcp / ringbuf
 - **网络输入**：Ethernet、ARP、IPv4、TCP、UDP、raw IP 包；
 - **设备输入**：driver 提供的 `NetBufHandle`、IRQ 唤醒、RX/TX 缓冲区生命周期；
 - **控制面输入**：netlink header、attribute、route mutation、neighbor 更新；
-- **Unix / vsock 输入**：peer socket 数据、连接建立与关闭事件；
+- **Unix / vsock 输入**：peer socket 数据、连接建立与关闭事件，
+  以及 pathname Unix socket 经 kvfs 解析的路径和 inode；
 - **上层 syscall 语义输入**：由 `posix/net` 传入的 socket 地址族、
   socket option、阻塞语义和权限决策结果。
 
@@ -203,6 +206,8 @@ unsafe {
 6. netlink message 边界：所有 payload 读取必须先经过 header 长度、attribute 长度和 family 校验。
 7. route index 边界：rtnetlink route 的 `oif` 转换成设备索引后必须检查 `dev < devices.len()`。
 8. static init 顺序：创建 socket 前必须完成 `init_network` 初始化 `SERVICE`、`SOCKET_SET` 和 `LISTEN_TABLE`。
+9. pathname credential 一致性：一次 Unix pathname bind 的查找、创建和属主初始化必须使用同一份 `Cred` 快照。
+10. kernel caller 边界：没有当前用户任务的内核调用者不得进入隐式 `current_cred()` 路径；pathname 操作和 socket file 构造都必须显式选择凭据。
 9. `PacketBuf` 所有权：设备、Router、loopback 和 smoltcp adapter 之间按值转移报文；协议偏移只能落在当前有效数据范围内。
 10. IPv4 输入边界：本地交付前必须校验版本、头长、总长和头部校验和，并按 `total_len` 截断尾部数据。
 11. 网络类型边界：`RouteTable` 和 `NetDevice` 不暴露 smoltcp 地址或时间类型；控制面与协议兼容转换由 `Router`、`Service` 和初始化入口完成。
@@ -239,6 +244,8 @@ unsafe {
 | T-14 | host 通过 bridge 注入超大或非法 TIPC message | 中 | `Received` record 超过 TIPC slot 或 port 0 service name 非法 | bridge 限制 record 长度为 `IPC_CHAN_MAX_BUF_SIZE`，动态 service name 需通过 UTF-8、NUL 和长度校验；非法 name 回 `[1]` 并断开 |
 | T-15 | TIPC handle/memref capability 经 vsock 泄露到 host | 高 | TA 向 bridge 发送带 attached handles 的 message | bridge v1 只转发 bytes，发现 attached handles 时关闭连接 |
 | T-16 | host 误判 port 0 handshake 结果 | 中 | 未读状态字节就发 payload；忽略 `[1]`；无 recv 超时导致永久阻塞 | 协议要求 host 先读单字节状态（`0`=成功，`1`=拒绝）；`libtrusty` 使用 `SO_RCVTIMEO`；CA 测试拒绝非 `[0]` 状态 |
+| T-17 | pathname Unix socket 绕过 inode/目录 DAC 或复用已有 inode | 高 | bind/connect/sendto 直接访问 binding 表，或 bind 接受已有路径 | bind 通过 `parent_at` 和 `Path::mknod` 排他创建；connect/sendto 在 lookup 后检查最终 inode `MAY_WRITE`；abstract 地址才直接访问内存 binding 表 |
+| T-18 | 内核任务隐式读取用户凭据 | 高 | 启动期 pathname bind 调用普通 `SocketOps::bind`，当前线程不存在或主体错误 | 内核调用者使用 `bind_with_cred` 显式传入 `initial_cred()` 等已选择凭据；普通入口只服务当前用户任务 |
 
 影响等级定义：
 
@@ -264,6 +271,7 @@ unsafe {
 | F-12 | RX buffer recycle 顺序错误 | frame payload 在 `recycle_rx` 后仍被引用 | 读取悬垂数据或数据损坏 | packet 解析异常，严重时破坏内存安全 | 1 | `EthernetDevice::poll_rx` 在 recycle 前完成解析和复制；新增设备适配需保持同样生命周期 |
 | F-13 | port 0 handshake 永久等待 | host 早于 TA publish 连接且未设 recv 超时；或 service 永不 publish | host `read` 阻塞；负例测试挂起 | CA/测试进程无响应 | 3 | dynamic connect 保留 `WAIT_FOR_PORT`；host 设 `TRUSTY_VSOCK_TIMEOUT_SEC`；明确拒绝场景回 `[1]` |
 | F-14 | 快速重连 `tipc_connect` 超时 `-11` | `route_event` 在 `has_connection()` 前丢弃同批 `Received`，service-name record 丢失 | host status-byte `EAGAIN`；约半数快速重连失败 | storage client/proxy harness 间歇失败 | 2 | mapped bridge port 仅按 `local_port` 认领；事件入 FIFO，不依赖 `has_connection()` |
+| F-15 | 启动期 Unix pathname bind panic | 内核任务调用隐式 `current_cred()`，但尚无当前用户线程 | `/dev/log` 等内核 socket 无法绑定 | 启动中断 | 2 | 启动期调用 `bind_with_cred` 并显式传入 `initial_cred()`；保留可用的初始 fs context |
 
 严重度定义：
 
@@ -306,4 +314,8 @@ unsafe {
 - 新增 ring buffer 操作的 advance count 来自同一锁内同一批 slices。
 - 新增外部网络输入使用 checked parser。
 - 新增 socket option 明确 errno、阻塞语义和 poll readiness。
+- 新增 pathname Unix socket 入口使用单次凭据快照，并让全部 VFS 操作显式接收该快照。
+- pathname bind 保持排他创建、`0777 & !umask` mode 和 fs credential owner；connect/sendto
+  在读取 binding 前检查最终 inode `MAY_WRITE`。
+- 新增内核调用路径不得依赖 `current_cred()`；调用者必须显式选择凭据。
 - 新增公开 API 先确认是否需要跨 crate 暴露。

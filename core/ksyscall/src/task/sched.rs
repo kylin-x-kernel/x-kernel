@@ -4,10 +4,11 @@
 
 //! Scheduling-related syscall adapters tied to task state.
 
+use kcred::Cred;
 use kerrno::{KError, KResult};
 use khal::percpu::this_cpu_id;
-use kprocess::AsThread;
-use ktask::{KCpuMask, current};
+use kprocess::{AsThread, Process};
+use ktask::{KCpuMask, KtaskRef, current};
 use linux_raw_sys::general::{
     PRIO_PGRP, PRIO_PROCESS, PRIO_USER, SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_NORMAL, SCHED_RR,
 };
@@ -141,12 +142,8 @@ pub fn sys_getpriority(which: u32, who: u32) -> KResult<isize> {
 
     match which {
         PRIO_PROCESS => {
-            let proc = if who == 0 {
-                kprocess::current_user_process()
-            } else {
-                kprocess::scheduler::target_process(who)?
-            };
-            process_raw_priority(&proc)
+            let task = priority_target(who)?;
+            Ok(raw_priority(task.as_thread().nice()))
         }
         PRIO_PGRP => {
             let pg = if who == 0 {
@@ -155,29 +152,34 @@ pub fn sys_getpriority(which: u32, who: u32) -> KResult<isize> {
                 kprocess::scheduler::target_group(who)?
             };
             let mut min_nice = None;
-            for proc in pg.processes() {
-                update_min_nice(&mut min_nice, process_min_nice(&proc));
-                if min_nice == Some(MIN_NICE) {
-                    break;
+            'processes: for proc in pg.processes() {
+                for task in kprocess::scheduler::process_tasks(&proc) {
+                    update_min_nice(&mut min_nice, task_nice(&task));
+                    if min_nice == Some(MIN_NICE) {
+                        break 'processes;
+                    }
                 }
             }
             min_nice.map(raw_priority).ok_or(KError::NoSuchProcess)
         }
         PRIO_USER => {
             let uid = if who == 0 {
-                kprocess::with_current_credentials(|credentials| credentials.ruid())
+                kprocess::current_cred().ruid()
             } else {
                 who
             };
             let mut min_nice = None;
-            for proc in kprocess::scheduler::processes() {
-                if proc
-                    .credentials_snapshot()
-                    .is_ok_and(|credentials| credentials.ruid() == uid)
-                {
-                    update_min_nice(&mut min_nice, process_min_nice(&proc));
+            'processes: for proc in kprocess::scheduler::processes() {
+                for task in kprocess::scheduler::process_tasks(&proc) {
+                    let Some(thread) = task.try_as_thread() else {
+                        continue;
+                    };
+                    if thread.real_cred().ruid() != uid {
+                        continue;
+                    }
+                    update_min_nice(&mut min_nice, Some(thread.nice()));
                     if min_nice == Some(MIN_NICE) {
-                        break;
+                        break 'processes;
                     }
                 }
             }
@@ -192,15 +194,12 @@ pub fn sys_setpriority(which: u32, who: u32, prio: i32) -> KResult<isize> {
     debug!("sys_setpriority <= which: {which}, who: {who}, prio: {prio}");
 
     let prio = prio.clamp(MIN_NICE, MAX_NICE);
+    let caller = kprocess::current_cred();
 
     match which {
         PRIO_PROCESS => {
-            let proc = if who == 0 {
-                kprocess::current_user_process()
-            } else {
-                kprocess::scheduler::target_process(who)?
-            };
-            set_process_nice(&proc, prio)?;
+            let task = priority_target(who)?;
+            set_task_nice(&task, prio, &caller)?;
             Ok(0)
         }
         PRIO_PGRP => {
@@ -209,33 +208,31 @@ pub fn sys_setpriority(which: u32, who: u32, prio: i32) -> KResult<isize> {
             } else {
                 kprocess::scheduler::target_group(who)?
             };
-            let mut updated = false;
+            let mut result = NiceUpdateResult::default();
             for proc in pg.processes() {
-                updated |= set_process_nice_if_present(&proc, prio);
+                update_process_nice(&proc, prio, &caller, &mut result);
             }
-            if !updated {
-                return Err(KError::NoSuchProcess);
-            }
+            result.finish()?;
             Ok(0)
         }
         PRIO_USER => {
             let uid = if who == 0 {
-                kprocess::with_current_credentials(|credentials| credentials.ruid())
+                kprocess::current_cred().ruid()
             } else {
                 who
             };
-            let mut updated = false;
+            let mut result = NiceUpdateResult::default();
             for proc in kprocess::scheduler::processes() {
-                if proc
-                    .credentials_snapshot()
-                    .is_ok_and(|credentials| credentials.ruid() == uid)
-                {
-                    updated |= set_process_nice_if_present(&proc, prio);
+                for task in kprocess::scheduler::process_tasks(&proc) {
+                    let Some(thread) = task.try_as_thread() else {
+                        continue;
+                    };
+                    if thread.real_cred().ruid() == uid {
+                        result.record(set_task_nice(&task, prio, &caller));
+                    }
                 }
             }
-            if !updated {
-                return Err(KError::NoSuchProcess);
-            }
+            result.finish()?;
             Ok(0)
         }
         _ => Err(KError::InvalidInput),
@@ -244,6 +241,14 @@ pub fn sys_setpriority(which: u32, who: u32, prio: i32) -> KResult<isize> {
 
 fn scheduler_target(pid: i32) -> KResult<ktask::KtaskRef> {
     kprocess::scheduler::target_task(pid)
+}
+
+fn priority_target(who: u32) -> KResult<KtaskRef> {
+    if who == 0 {
+        Ok(current().clone())
+    } else {
+        kprocess::scheduler::task_by_tid(who)
+    }
 }
 
 fn configured_scheduler_policy() -> u32 {
@@ -280,37 +285,67 @@ fn raw_priority(nice: i32) -> isize {
     (20 - nice) as isize
 }
 
-fn process_raw_priority(proc: &kprocess::Process) -> KResult<isize> {
-    process_min_nice(proc)
-        .map(raw_priority)
-        .ok_or(KError::NoSuchProcess)
+fn task_nice(task: &KtaskRef) -> Option<i32> {
+    task.try_as_thread().map(|thread| thread.nice())
 }
 
-fn process_min_nice(proc: &kprocess::Process) -> Option<i32> {
-    let mut min_nice = None;
-    for task in kprocess::scheduler::process_tasks(proc) {
-        let Some(thread) = task.try_as_thread() else {
+fn check_setpriority_permission(
+    caller: &Cred,
+    target: &Cred,
+    current_nice: i32,
+    requested_nice: i32,
+) -> KResult<()> {
+    if !caller.is_privileged() && caller.euid() != target.ruid() && caller.euid() != target.euid() {
+        return Err(KError::OperationNotPermitted);
+    }
+    if requested_nice < current_nice && !caller.is_privileged() {
+        return Err(KError::PermissionDenied);
+    }
+    Ok(())
+}
+
+fn set_task_nice(task: &KtaskRef, nice: i32, caller: &Cred) -> KResult<()> {
+    let thread = task.try_as_thread().ok_or(KError::NoSuchProcess)?;
+    check_setpriority_permission(caller, &thread.real_cred(), thread.nice(), nice)?;
+    thread.set_nice(nice);
+    if !ktask::set_task_prio(task, nice as isize) {
+        debug!("scheduler did not apply nice={nice} to the selected task");
+    }
+    Ok(())
+}
+
+fn update_process_nice(process: &Process, nice: i32, caller: &Cred, result: &mut NiceUpdateResult) {
+    for task in kprocess::scheduler::process_tasks(process) {
+        if task.try_as_thread().is_none() {
             continue;
-        };
-        update_min_nice(&mut min_nice, Some(thread.nice()));
-        if min_nice == Some(MIN_NICE) {
-            break;
+        }
+        result.record(set_task_nice(&task, nice, caller));
+    }
+}
+
+#[derive(Default)]
+struct NiceUpdateResult {
+    found: bool,
+    error: Option<KError>,
+}
+
+impl NiceUpdateResult {
+    fn record(&mut self, result: KResult<()>) {
+        self.found = true;
+        if let Err(error) = result {
+            self.error = Some(error);
         }
     }
-    min_nice
-}
 
-fn set_process_nice_if_present(proc: &kprocess::Process, nice: i32) -> bool {
-    let mut updated = false;
-    for task in kprocess::scheduler::process_tasks(proc) {
-        let Some(thread) = task.try_as_thread() else {
-            continue;
-        };
-        thread.set_nice(nice);
-        let _ = ktask::set_task_prio(&task, nice as isize);
-        updated = true;
+    fn finish(self) -> KResult<()> {
+        if !self.found {
+            return Err(KError::NoSuchProcess);
+        }
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+        Ok(())
     }
-    updated
 }
 
 fn update_min_nice(min_nice: &mut Option<i32>, nice: Option<i32>) {
@@ -320,10 +355,37 @@ fn update_min_nice(min_nice: &mut Option<i32>, nice: Option<i32>) {
     *min_nice = Some(min_nice.map_or(nice, |current| current.min(nice)));
 }
 
-fn set_process_nice(proc: &kprocess::Process, nice: i32) -> KResult<()> {
-    if set_process_nice_if_present(proc, nice) {
-        Ok(())
-    } else {
-        Err(KError::NoSuchProcess)
+#[cfg(unittest)]
+mod tests {
+    use kcred::Cred;
+    use kerrno::KError;
+    use unittest::def_test;
+
+    use super::check_setpriority_permission;
+
+    #[def_test]
+    fn setpriority_requires_matching_effective_uid() {
+        let mut target = Cred::root();
+        target
+            .set_resuid(Some(1000), Some(2000), Some(1000))
+            .unwrap();
+
+        assert!(check_setpriority_permission(&Cred::new(1000, 1), &target, 0, 1).is_ok());
+        assert!(check_setpriority_permission(&Cred::new(2000, 1), &target, 0, 1).is_ok());
+        assert_eq!(
+            check_setpriority_permission(&Cred::new(3000, 1), &target, 0, 1),
+            Err(KError::OperationNotPermitted)
+        );
+    }
+
+    #[def_test]
+    fn setpriority_raise_requires_privilege() {
+        let target = Cred::new(1000, 1);
+
+        assert_eq!(
+            check_setpriority_permission(&target, &target, 5, 0),
+            Err(KError::PermissionDenied)
+        );
+        assert!(check_setpriority_permission(&Cred::root(), &target, 5, 0).is_ok());
     }
 }

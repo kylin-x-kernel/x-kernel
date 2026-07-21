@@ -22,8 +22,6 @@ pub fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     nodes::shm::add_root_entries(&mut root, fs.clone());
     nodes::dtb::add_root_entries(&mut root, fs.clone());
 
-    #[cfg(feature = "dev-log")]
-    nodes::log::add_root_entries(&mut root, fs.clone());
     #[cfg(feature = "memtrack")]
     nodes::memtrack::add_root_entries(&mut root, fs.clone());
     #[cfg(feature = "input")]

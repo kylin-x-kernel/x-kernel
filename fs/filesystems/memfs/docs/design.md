@@ -24,6 +24,7 @@ owner，而不是由每个 dentry 或 open file 单独拥有内容对象。
 - `src/shmem.rs`
 - regular-file inode 与 VFS address-space/page-cache 的连接
 - 目录、链接、符号链接和元数据维护
+- 基于 VFS `Cred` callback 的 inode owner 初始化
 - fd-only tmpfs/shmem anonymous regular-file factory and opened-file conversion
 
 ## 架构
@@ -54,11 +55,13 @@ mapping；page cache、evict listener 与 MM shared object identity 的统一宿
 
 ### 创建普通文件
 
-1. `memfs` 创建 regular-file inode。
-2. `VfsInode` 构造时持有稳定的 `kvfs::AddressSpace`。
-3. 首次通过 KFS page-cache file path 进入文件缓存路径。
-4. `AddressSpace` 建立或复用唯一的 inode-owned `pagecache::Mapping`。
-5. open-file、mmap、truncate 和 evict 路径复用同一个 address-space mapping。
+1. VFS 完成路径与父目录 DAC 后，把同一 `&Cred` 传给 create/mkdir/mknod/symlink callback。
+2. `memfs` 调用 `inode_init_owner()`，用 `fsuid/fsgid` 初始化 owner，并处理 setgid
+   父目录的组继承与子目录 setgid 传播。
+3. `memfs` 创建对应 inode；`VfsInode` 构造时持有稳定的 `kvfs::AddressSpace`。
+4. 首次通过 KFS page-cache file path 进入文件缓存路径。
+5. `AddressSpace` 建立或复用唯一的 inode-owned `pagecache::Mapping`。
+6. open-file、mmap、truncate 和 evict 路径复用同一个 address-space mapping。
 
 ### 创建匿名文件
 
@@ -102,6 +105,10 @@ mapping；page cache、evict listener 与 MM shared object identity 的统一宿
    原因：这保持了 Linux `shmem_file_setup()` 的私有文件对象 + inode-owned page
    cache 语义，同时不把对象挂入进程可见路径空间。调用方通过 shmem 对象转换成
    opened `VfsFile`，不重新操作匿名路径的 open 细节。
+
+4. `memfs` 不保存“当前凭据”。
+   原因：当前 task 属于上层 `kprocess`；创建者身份由每次 VFS callback 的 `&Cred`
+   显式提供，inode 只持久化派生出的 UID/GID。
 
 ## Drop / 资源释放
 

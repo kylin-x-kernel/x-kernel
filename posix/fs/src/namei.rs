@@ -11,7 +11,7 @@ use kvfs::{Filename, LookupFlags, LookupIntent, RenameFlags};
 use linux_raw_sys::general::*;
 use posix_types::{UserConstPtr, UserPtr};
 
-use crate::path::{resolve_at, with_fs};
+use crate::path::{resolve_at_with_cred, with_fs};
 
 /// Creates a hard link to an existing file.
 pub fn sys_linkat(
@@ -34,8 +34,9 @@ pub fn sys_linkat(
     if flags != 0 {
         warn!("Unsupported flags: {flags}");
     }
+    let cred = kprocess::current_cred();
 
-    let old = resolve_at(old_dirfd, old_path.as_deref(), flags)?.into_path()?;
+    let old = resolve_at_with_cred(old_dirfd, old_path.as_deref(), flags, &cred)?.into_path()?;
     if old.is_dir() {
         return Err(KError::OperationNotPermitted);
     }
@@ -45,10 +46,11 @@ pub fn sys_linkat(
             fs.pwd(),
             LookupIntent::Open,
             LookupFlags::empty(),
+            &cred,
         )
     })?;
 
-    new_dir.link(&new_name, &old)?;
+    new_dir.link(&new_name, &old, &cred)?;
     Ok(0)
 }
 
@@ -61,6 +63,7 @@ pub fn sys_link(old_path: UserConstPtr<c_char>, new_path: UserConstPtr<c_char>) 
 pub fn sys_unlinkat(dirfd: i32, path: UserConstPtr<c_char>, flags: usize) -> KResult<isize> {
     let path = path.load_string()?;
     debug!("sys_unlinkat <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
+    let cred = kprocess::current_cred();
 
     with_fs(dirfd, |fs| {
         let entry = Filename::new(path.as_str()).lookup_at(
@@ -68,12 +71,19 @@ pub fn sys_unlinkat(dirfd: i32, path: UserConstPtr<c_char>, flags: usize) -> KRe
             fs.pwd(),
             LookupIntent::Open,
             LookupFlags::no_follow(),
+            &cred,
         )?;
         let name = entry.name();
         if flags == AT_REMOVEDIR as usize {
-            entry.parent().ok_or(KError::ResourceBusy)?.rmdir(&name)?;
+            entry
+                .parent()
+                .ok_or(KError::ResourceBusy)?
+                .rmdir(&name, &cred)?;
         } else {
-            entry.parent().ok_or(KError::IsADirectory)?.unlink(&name)?;
+            entry
+                .parent()
+                .ok_or(KError::IsADirectory)?
+                .unlink(&name, &cred)?;
         }
         Ok(0)
     })
@@ -103,6 +113,7 @@ pub fn sys_symlinkat(
     let target = target.load_string()?;
     let linkpath = linkpath.load_string()?;
     debug!("sys_symlinkat <= target: {target:?}, new_dirfd: {new_dirfd}, linkpath: {linkpath:?}");
+    let cred = kprocess::current_cred();
 
     with_fs(new_dirfd, |fs| {
         let (dir, name) = Filename::new(linkpath.as_str()).create_at(
@@ -110,8 +121,9 @@ pub fn sys_symlinkat(
             fs.pwd(),
             LookupIntent::Open,
             LookupFlags::empty(),
+            &cred,
         )?;
-        dir.symlink(&name, &target)?;
+        dir.symlink(&name, &target, &cred)?;
         Ok(0)
     })
 }
@@ -130,9 +142,10 @@ pub fn sys_readlinkat(
 ) -> KResult<isize> {
     let path = path.load_string()?;
     debug!("sys_readlinkat <= dirfd: {dirfd}, path: {path:?}");
+    let cred = kprocess::current_cred();
 
     with_fs(dirfd, |fs| {
-        let link = Filename::new(path.as_str()).readlink_at(fs.root(), fs.pwd())?;
+        let link = Filename::new(path.as_str()).readlink_at(fs.root(), fs.pwd(), &cred)?;
         let read = size.min(link.len());
         buf.write_vm_slice(&link.as_bytes()[..read])?;
         Ok(read as isize)
@@ -174,18 +187,19 @@ pub fn sys_renameat2(
     if flags.contains(RenameFlags::WHITEOUT) || flags.has_conflicting_modes() {
         return Err(KError::InvalidInput);
     }
+    let cred = kprocess::current_cred();
 
     let (old_dir, old_name) = with_fs(old_dirfd, |fs| {
         Filename::new(old_path.as_str())
-            .parent_at(fs.root(), fs.pwd(), LookupIntent::Open)
+            .parent_at(fs.root(), fs.pwd(), LookupIntent::Open, &cred)
             .and_then(|lookup| lookup.into_normal())
     })?;
     let (new_dir, new_name) = with_fs(new_dirfd, |fs| {
         Filename::new(new_path.as_str())
-            .parent_at(fs.root(), fs.pwd(), LookupIntent::Open)
+            .parent_at(fs.root(), fs.pwd(), LookupIntent::Open, &cred)
             .and_then(|lookup| lookup.into_normal())
     })?;
 
-    old_dir.rename(&old_name, &new_dir, &new_name, flags)?;
+    old_dir.rename(&old_name, &new_dir, &new_name, flags, &cred)?;
     Ok(0)
 }

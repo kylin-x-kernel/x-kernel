@@ -33,8 +33,11 @@ pub fn sys_pipe2(fds: UserPtr<[c_int; 2]>, flags: u32) -> KResult<isize> {
     } else {
         0
     };
-    let (read_file, write_file) =
-        create_pipe_files(O_RDONLY | status_flags, O_WRONLY | status_flags)?;
+    let (read_file, write_file) = create_pipe_files(
+        O_RDONLY | status_flags,
+        O_WRONLY | status_flags,
+        kprocess::current_cred(),
+    )?;
     let resources = kprocess::current_resources();
     let read_fd = resources.add_file(read_file, cloexec)?;
     let write_fd = resources.add_file(write_file, cloexec).inspect_err(|_| {

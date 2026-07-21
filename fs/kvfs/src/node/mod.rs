@@ -17,5 +17,5 @@ pub use dir::{DirContext, DirEntrySink};
 pub use inode::{
     GetattrQueryFlags, GetattrRequestMask, InodeCache, InodeDirOperations, InodeLookupFlags,
     InodeOperations, InodeSymlinkOperations, NodeFlags, RenameFlags, VfsInode, VfsInodeInit,
-    WeakVfsInode,
+    WeakVfsInode, inode_init_owner,
 };

@@ -249,7 +249,7 @@ impl CloneRequest {
         new_task.ctx_mut().set_page_table_root(page_table_root);
 
         let pidfd_install = if self.flags.contains(CloneFlags::PIDFD) {
-            let pidfd_file = PidFd::new_file(&child_process, O_RDWR)?;
+            let pidfd_file = PidFd::new_file(&child_process, O_RDWR, kprocess::current_cred())?;
             let resources = kprocess::current_resources();
             let fd = resources.add_file(pidfd_file, true)?;
             Some((resources, fd))

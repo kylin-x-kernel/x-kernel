@@ -7,6 +7,7 @@
 use alloc::{collections::btree_map::BTreeMap, format, sync::Arc, vec::Vec};
 
 use filemap::{FileMmapRequest, mmap_shared_file};
+use kcred::Cred;
 use kerrno::{KError, KResult};
 use khal::{
     paging::{MappingFlags, PageSize},
@@ -23,14 +24,20 @@ use posix_types::{IpcPerm, UserPtr, shmid_ds};
 
 use super::{IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, next_ipc_id};
 
-fn new_shmid_ds(key: i32, size: usize, mode: __kernel_mode_t, pid: __kernel_pid_t) -> shmid_ds {
+fn new_shmid_ds(
+    key: i32,
+    size: usize,
+    mode: __kernel_mode_t,
+    pid: __kernel_pid_t,
+    cred: &Cred,
+) -> shmid_ds {
     shmid_ds {
         shm_perm: IpcPerm {
             key,
-            uid: 0,
-            gid: 0,
-            cuid: 0,
-            cgid: 0,
+            uid: cred.euid(),
+            gid: cred.egid(),
+            cuid: cred.euid(),
+            cgid: cred.egid(),
             mode,
             seq: 0,
             pad: 0,
@@ -61,17 +68,20 @@ pub struct ShmInner {
 }
 
 impl ShmInner {
+    /// Creates a SysV shared-memory segment using the caller's credential snapshot.
     pub fn new(
         key: i32,
         shmid: i32,
         size: usize,
         mapping_flags: MappingFlags,
         pid: Pid,
+        cred: Arc<Cred>,
     ) -> KResult<Self> {
         let page_num = memaddr::align_up_4k(size) / PAGE_SIZE_4K;
         let shm_obj = create_kernel_file(
             &format!("SYSV{shmid:x}"),
             kvfs::NodePermission::from_bits_truncate(0o600),
+            cred.clone(),
         )?;
         // Unlink the backing file from tmpfs so the inode's lifetime is
         // tied solely to the returned VfsFile; when the last reference
@@ -80,9 +90,9 @@ impl ShmInner {
             .location()
             .mount()
             .root_path()
-            .unlink(&shm_obj.location().name())?;
-        let file = shm_obj.into_file()?;
-        file.path().truncate((page_num * PAGE_SIZE_4K) as u64)?;
+            .unlink(&shm_obj.location().name(), &cred)?;
+        let file = shm_obj.into_file(cred.clone())?;
+        file.truncate((page_num * PAGE_SIZE_4K) as u64)?;
 
         Ok(ShmInner {
             shmid,
@@ -91,7 +101,13 @@ impl ShmInner {
             file,
             rmid: false,
             mapping_flags,
-            shmid_ds: new_shmid_ds(key, size, mapping_flags.bits() as __kernel_mode_t, pid as _),
+            shmid_ds: new_shmid_ds(
+                key,
+                size,
+                mapping_flags.bits() as __kernel_mode_t,
+                pid as _,
+                &cred,
+            ),
         })
     }
 
@@ -358,6 +374,7 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> KResult<isize> {
     }
 
     let cur_pid = current_user_thread().pid();
+    let cred = kprocess::current_cred();
     let mut shm_manager = SHM_MANAGER.lock();
 
     if key != IPC_PRIVATE
@@ -377,6 +394,7 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> KResult<isize> {
         size,
         mapping_flags,
         cur_pid,
+        cred,
     )?));
     shm_manager.insert_key_shmid(key, shmid);
     shm_manager.insert_shmid_inner(shmid, shm_inner);
@@ -585,8 +603,22 @@ pub mod tests_shm {
     }
 
     #[def_test]
+    fn test_shmid_ds_uses_effective_credential_ids() {
+        let mut cred = Cred::root();
+        cred.set_resgid(Some(2001), Some(1001), Some(3001)).unwrap();
+        cred.set_resuid(Some(2000), Some(1000), Some(3000)).unwrap();
+        let metadata = new_shmid_ds(1, 4096, 0o600, 1, &cred);
+
+        assert_eq!(metadata.shm_perm.uid, 1000);
+        assert_eq!(metadata.shm_perm.gid, 1001);
+        assert_eq!(metadata.shm_perm.cuid, 1000);
+        assert_eq!(metadata.shm_perm.cgid, 1001);
+    }
+
+    #[def_test]
     fn test_shminner_attach_detach_and_update() {
-        let mut inner = ShmInner::new(1, 2, 4096, MappingFlags::READ, 1).unwrap();
+        let mut inner =
+            ShmInner::new(1, 2, 4096, MappingFlags::READ, 1, kcred::initial_cred()).unwrap();
         let range = VirtAddrRange::try_from(0x1000usize..0x2000usize).unwrap();
         inner.attach_process(1, range);
         assert_eq!(inner.attach_count(), 1);
@@ -616,8 +648,15 @@ pub mod tests_shm {
 
     #[def_test]
     fn test_shminner_file_backing_and_mode_mismatch() {
-        let mut inner =
-            ShmInner::new(7, 8, 5000, MappingFlags::READ | MappingFlags::WRITE, 9).unwrap();
+        let mut inner = ShmInner::new(
+            7,
+            8,
+            5000,
+            MappingFlags::READ | MappingFlags::WRITE,
+            9,
+            kcred::initial_cred(),
+        )
+        .unwrap();
         assert_eq!(inner.page_num, 2);
         assert!(
             inner
@@ -635,7 +674,7 @@ pub mod tests_shm {
     fn test_shm_manager_clear_proc_shm_removes_rmid_segment_after_last_detach() {
         let mut manager = ShmManager::new();
         let shm_inner = Arc::new(Mutex::new(
-            ShmInner::new(11, 22, 4096, MappingFlags::READ, 7).unwrap(),
+            ShmInner::new(11, 22, 4096, MappingFlags::READ, 7, kcred::initial_cred()).unwrap(),
         ));
         let range = VirtAddrRange::try_from(0x3000usize..0x4000usize).unwrap();
         shm_inner.lock().attach_process(7, range);
@@ -654,7 +693,7 @@ pub mod tests_shm {
     fn test_clear_proc_shm_rmid_false_preserves_segment() {
         let mut manager = ShmManager::new();
         let shm_inner = Arc::new(Mutex::new(
-            ShmInner::new(11, 33, 4096, MappingFlags::READ, 7).unwrap(),
+            ShmInner::new(11, 33, 4096, MappingFlags::READ, 7, kcred::initial_cred()).unwrap(),
         ));
         let range = VirtAddrRange::try_from(0x3000usize..0x4000usize).unwrap();
         shm_inner.lock().attach_process(7, range);

@@ -264,6 +264,8 @@ impl Ext4Filesystem {
         parent: &Ext4Inode,
         name: &[u8],
         permissions: u16,
+        uid: u32,
+        gid: u32,
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<Ext4NamespaceCreate> {
         self.ensure_namespace_create_supported(parent, name)?;
@@ -278,6 +280,8 @@ impl Ext4Filesystem {
             parent,
             name,
             permissions,
+            uid,
+            gid,
             timestamp,
             &mut handle,
         );
@@ -298,6 +302,8 @@ impl Ext4Filesystem {
         parent: &Ext4Inode,
         name: &[u8],
         permissions: u16,
+        uid: u32,
+        gid: u32,
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<Ext4NamespaceCreate> {
         self.ensure_namespace_create_supported(parent, name)?;
@@ -308,8 +314,15 @@ impl Ext4Filesystem {
         let journal = self.namei_metadata_journal()?;
         let mut handle = journal.begin(Ext4Credits::mkdir(self, parent))?;
         let transaction = handle.id();
-        let result =
-            self.create_directory_in_transaction(parent, name, permissions, timestamp, &mut handle);
+        let result = self.create_directory_in_transaction(
+            parent,
+            name,
+            permissions,
+            uid,
+            gid,
+            timestamp,
+            &mut handle,
+        );
 
         match result {
             Ok(created) => {
@@ -327,13 +340,15 @@ impl Ext4Filesystem {
         parent: &Ext4Inode,
         name: &[u8],
         target: &[u8],
+        uid: u32,
+        gid: u32,
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<Ext4NamespaceCreate> {
         validate_symlink_target(target)?;
         if target.len() < disk_inode::INODE_BLOCK_BYTES {
-            return self.create_fast_symlink(parent, name, target, timestamp);
+            return self.create_fast_symlink(parent, name, target, uid, gid, timestamp);
         }
-        self.create_block_mapped_symlink(parent, name, target, timestamp)
+        self.create_block_mapped_symlink(parent, name, target, uid, gid, timestamp)
     }
 
     /// Creates a fast symbolic link in a linear ext4 directory.
@@ -342,9 +357,11 @@ impl Ext4Filesystem {
         parent: &Ext4Inode,
         name: &[u8],
         target: &[u8],
+        uid: u32,
+        gid: u32,
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<Ext4NamespaceCreate> {
-        let initialization = InodeInitialization::fast_symlink(target)?
+        let initialization = InodeInitialization::fast_symlink(target, uid, gid)?
             .with_timestamp_seconds(timestamp_seconds_u32(timestamp)?);
         self.create_initialized_child(
             parent,
@@ -361,6 +378,8 @@ impl Ext4Filesystem {
         parent: &Ext4Inode,
         name: &[u8],
         target: &[u8],
+        uid: u32,
+        gid: u32,
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<Ext4NamespaceCreate> {
         validate_symlink_target(target)?;
@@ -384,6 +403,8 @@ impl Ext4Filesystem {
             parent,
             name,
             target,
+            uid,
+            gid,
             timestamp,
             &mut handle,
         );
@@ -399,16 +420,19 @@ impl Ext4Filesystem {
     }
 
     /// Creates a FIFO, socket, character device, or block device in a linear directory.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_special_file(
         &mut self,
         parent: &Ext4Inode,
         name: &[u8],
-        kind: InodeKind,
+        special: (InodeKind, Option<Ext4DeviceId>),
         permissions: u16,
-        device: Option<Ext4DeviceId>,
+        uid: u32,
+        gid: u32,
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<Ext4NamespaceCreate> {
-        let initialization = InodeInitialization::special(kind, permissions, device)?
+        let (kind, device) = special;
+        let initialization = InodeInitialization::special(kind, permissions, device, uid, gid)?
             .with_timestamp_seconds(timestamp_seconds_u32(timestamp)?);
         let file_type = directory_file_type_for_inode_kind(kind);
         self.create_initialized_child(parent, name, initialization, file_type, timestamp)
@@ -608,11 +632,14 @@ impl Ext4Filesystem {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_regular_file_in_transaction(
         &mut self,
         parent: &Ext4Inode,
         name: &[u8],
         permissions: u16,
+        uid: u32,
+        gid: u32,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<Ext4NamespaceCreate> {
@@ -620,7 +647,7 @@ impl Ext4Filesystem {
         let allocation = self.allocate_named_inode(
             Some(parent.number()),
             name,
-            InodeInitialization::regular_file(permissions)
+            InodeInitialization::regular_file(permissions, uid, gid)
                 .with_timestamp_seconds(timestamp_seconds),
             handle,
         )?;
@@ -637,11 +664,14 @@ impl Ext4Filesystem {
         Ok(Ext4NamespaceCreate { parent, child })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_directory_in_transaction(
         &mut self,
         parent: &Ext4Inode,
         name: &[u8],
         permissions: u16,
+        uid: u32,
+        gid: u32,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<Ext4NamespaceCreate> {
@@ -649,7 +679,8 @@ impl Ext4Filesystem {
         let allocation = self.allocate_named_inode(
             Some(parent.number()),
             name,
-            InodeInitialization::directory(permissions).with_timestamp_seconds(timestamp_seconds),
+            InodeInitialization::directory(permissions, uid, gid)
+                .with_timestamp_seconds(timestamp_seconds),
             handle,
         )?;
         let mut child = self.internal_inode(allocation.inode())?;
@@ -730,11 +761,14 @@ impl Ext4Filesystem {
         Ok(Ext4NamespaceCreate { parent, child })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_block_mapped_symlink_in_transaction(
         &mut self,
         parent: &Ext4Inode,
         name: &[u8],
         target: &[u8],
+        uid: u32,
+        gid: u32,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<Ext4NamespaceCreate> {
@@ -742,7 +776,7 @@ impl Ext4Filesystem {
         let allocation = self.allocate_named_inode(
             Some(parent.number()),
             name,
-            InodeInitialization::block_mapped_symlink(target.len())?
+            InodeInitialization::block_mapped_symlink(target.len(), uid, gid)?
                 .with_timestamp_seconds(timestamp_seconds),
             handle,
         )?;

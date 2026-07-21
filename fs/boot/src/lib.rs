@@ -134,22 +134,26 @@ impl BootVfs {
     }
 
     fn lookup(&self, path: impl AsRef<str>) -> kvfs::VfsResult<Path> {
+        let cred = kcred::initial_cred();
         Filename::new(path.as_ref()).lookup_at(
             &self.root,
             &self.root,
             LookupIntent::Open,
             LookupFlags::follow(),
+            &cred,
         )
     }
 
     fn mkdir_path(&self, path: impl AsRef<str>) -> kvfs::VfsResult<()> {
+        let cred = kcred::initial_cred();
         let (dir, name) = Filename::new(path.as_ref()).create_at(
             &self.root,
             &self.root,
             LookupIntent::Open,
             LookupFlags::DIRECTORY,
+            &cred,
         )?;
-        dir.mkdir(&name, NodePermission::from_bits_truncate(0o755))?;
+        dir.mkdir(&name, NodePermission::from_bits_truncate(0o755), &cred)?;
         Ok(())
     }
 
@@ -171,7 +175,7 @@ impl BootVfs {
                 let name = loc.name();
                 loc.parent()
                     .ok_or(kvfs::VfsError::InvalidInput)?
-                    .unlink(&name)?;
+                    .unlink(&name, &kcred::initial_cred())?;
                 self.mkdir_path(path)?;
                 self.lookup(path)?
             }
@@ -186,14 +190,16 @@ impl BootVfs {
 
     fn create_sys_graphics_links(&self) -> kvfs::VfsResult<()> {
         self.ensure_directory_path("/sys/class/graphics/fb0/device")?;
+        let cred = kcred::initial_cred();
         let symlink_result = Filename::new("/sys/class/graphics/fb0/device/subsystem")
             .create_at(
                 &self.root,
                 &self.root,
                 LookupIntent::Open,
                 LookupFlags::empty(),
+                &cred,
             )
-            .and_then(|(dir, name)| dir.symlink(&name, "whatever"));
+            .and_then(|(dir, name)| dir.symlink(&name, "whatever", &cred));
         if let Err(err) = symlink_result
             && err != kvfs::VfsError::AlreadyExists
         {

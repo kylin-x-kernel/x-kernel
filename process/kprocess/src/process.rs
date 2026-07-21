@@ -15,7 +15,6 @@ use core::{
 };
 
 use fs_context::FsStruct;
-use kcred::Credentials;
 use kerrno::{KError, KResult};
 use khal::time::TimeValue;
 use kidentity::PidHandle;
@@ -172,23 +171,6 @@ impl Process {
         self.signal_manager().map(|signal| signal.actions.clone())
     }
 
-    /// Returns a snapshot of the current process credentials.
-    pub fn credentials_snapshot(&self) -> KResult<Credentials> {
-        self.runtime()
-            .map(|runtime| runtime.with_credentials(Clone::clone))
-    }
-
-    /// Runs a closure with read-only access to process-shared credentials.
-    pub fn with_credentials<R>(&self, f: impl FnOnce(&Credentials) -> R) -> KResult<R> {
-        self.runtime().map(|runtime| runtime.with_credentials(f))
-    }
-
-    /// Runs a closure with mutable access to process-shared credentials.
-    pub fn with_credentials_mut<R>(&self, f: impl FnOnce(&mut Credentials) -> R) -> KResult<R> {
-        self.runtime()
-            .map(|runtime| runtime.with_credentials_mut(f))
-    }
-
     /// Returns the current executable path while runtime remains attached.
     pub fn exe_path(&self) -> KResult<String> {
         self.runtime()
@@ -242,7 +224,6 @@ impl Process {
         self.set_exec_metadata(update.exe_path.clone(), update.cmdline.clone())?;
         self.apply_exec_tee_update(&update)?;
         self.set_heap_top(update.heap_top)?;
-        self.with_credentials_mut(|credentials| credentials.apply_exec())?;
         self.reset_signal_actions()?;
         self.clear_posix_timers()?;
         self.close_cloexec_files()?;

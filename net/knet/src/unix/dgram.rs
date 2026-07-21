@@ -202,7 +202,8 @@ impl UnixTransportOps for DgramTransport {
         let connected = self.peer.read();
         if let Some(addr) = options.to {
             let addr = addr.into_unix()?;
-            lookup_bind_entry(&addr, |slot| {
+            let cred = kprocess::current_cred();
+            lookup_bind_entry(&addr, &cred, |slot| {
                 if let Some(bind) = slot.dgram.lock().as_ref() {
                     bind.tx.try_send(packet).map_err(|_| KError::BrokenPipe)?;
                     bind.poll.wake();

@@ -31,7 +31,11 @@ pub fn sys_timerfd_create(clock_id: i32, flags: u32) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
 
-    let file = TimerFd::new_file(clock_id as u32, O_RDWR | (flags & TFD_NONBLOCK))?;
+    let file = TimerFd::new_file(
+        clock_id as u32,
+        O_RDWR | (flags & TFD_NONBLOCK),
+        kprocess::current_cred(),
+    )?;
 
     kprocess::current_resources()
         .add_file(file, flags & TFD_CLOEXEC != 0)

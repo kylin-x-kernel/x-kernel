@@ -18,6 +18,7 @@ use core::{
 
 use bitflags::bitflags;
 use hashbrown::{HashMap, HashSet};
+use kcred::Cred;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use kspin::SpinNoPreempt;
@@ -380,14 +381,15 @@ impl Epoll {
         Self::default()
     }
 
-    /// Creates an anonymous-inode file for this epoll instance.
-    pub fn new_file() -> KResult<Arc<VfsFile>> {
+    /// Creates an epoll anonymous-inode file and captures `cred` as its open credential.
+    pub fn new_file(cred: Arc<Cred>) -> KResult<Arc<VfsFile>> {
         AnonInodeFs::global().get_file(
             "[eventpoll]",
             Arc::new(EventpollFops),
             Arc::new(Self::new()),
             FMode::READ | FMode::WRITE | FMode::STREAM,
             OpenFlags::READ_WRITE,
+            cred,
         )
     }
 
@@ -795,6 +797,7 @@ mod epoll_tests {
                 Arc::new(TestFile::new(kind)),
                 FMode::READ | FMode::WRITE | FMode::STREAM,
                 OpenFlags::empty(),
+                kcred::initial_cred(),
             )
             .expect("test file opens")
     }
@@ -805,7 +808,7 @@ mod epoll_tests {
 
     #[def_test]
     fn test_epoll_creation() {
-        let file = Epoll::new_file().expect("epoll file opens");
+        let file = Epoll::new_file(kcred::initial_cred()).expect("epoll file opens");
         assert_eq!(
             file.path().absolute_path().unwrap().as_str(),
             "anon_inode:[eventpoll]"
@@ -1141,14 +1144,14 @@ mod epoll_tests {
     #[def_test]
     fn test_epoll_delete_nonexistent() {
         let epoll = Epoll::new();
-        let dummy = Epoll::new_file().expect("epoll file opens");
+        let dummy = Epoll::new_file(kcred::initial_cred()).expect("epoll file opens");
         assert!(epoll.delete(999, dummy).is_err());
     }
 
     #[def_test]
     fn test_epoll_modify_nonexistent() {
         let epoll = Epoll::new();
-        let dummy = Epoll::new_file().expect("epoll file opens");
+        let dummy = Epoll::new_file(kcred::initial_cred()).expect("epoll file opens");
         let event = EpollEvent {
             events: IoEvents::IN,
             user_data: 42,

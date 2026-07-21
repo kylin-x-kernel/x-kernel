@@ -44,7 +44,13 @@ fn kernel_random_seed() -> TeeResult<[u8; RNG_SEED_SIZE]> {
     let fs_guard = fs_context::init_fs();
     let fs = fs_guard.lock();
     let file = Filename::new("/dev/urandom")
-        .open_with_flags_at(fs.root(), fs.pwd(), 0, NodePermission::empty())
+        .open_with_flags_at(
+            fs.root(),
+            fs.pwd(),
+            0,
+            NodePermission::empty(),
+            kcred::initial_cred(),
+        )
         .map_err(|_| TEE_ERROR_GENERIC)?;
     drop(fs);
 

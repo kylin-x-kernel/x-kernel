@@ -15,14 +15,11 @@ use alloc::{sync::Arc, vec};
 use core::ffi::{c_char, c_int};
 
 use iov_iter::{IovSink, IovSource, iov_iter_dest, iov_iter_source};
-use kcred::AccessIdKind;
 use kerrno::{KError, KResult, LinuxError};
 use kfd_objects::pipe::current_pipe_endpoint;
 use kio::prelude::*;
 use kpoll::IoEvents;
-use kvfs::{
-    FMode, Filename, LookupFlags, LookupIntent, OpenFlags, Permission, VfsFile, check_permission,
-};
+use kvfs::{FMode, Filename, LookupFlags, LookupIntent, OpenFlags, VfsFile};
 use linux_raw_sys::general::__kernel_off_t;
 use linux_sysno::Sysno;
 use osvm::{VirtPtr, VmBytes, VmBytesMut};
@@ -225,17 +222,15 @@ pub fn sys_truncate(path: UserConstPtr<c_char>, length: __kernel_off_t) -> KResu
     }
     let fs_struct = kprocess::current_user_process_fs_context();
     let fs = fs_struct.lock();
+    let cred = kprocess::current_cred();
     let loc = Filename::new(path.as_str()).lookup_at(
         fs.root(),
         fs.pwd(),
         LookupIntent::Open,
         LookupFlags::follow(),
+        &cred,
     )?;
-    let metadata = loc.getattr()?;
-    let credentials =
-        kprocess::with_current_credentials(|creds| creds.access_snapshot(AccessIdKind::Filesystem));
-    check_permission(&metadata, Permission::MAY_WRITE, &credentials)?;
-    loc.truncate(length as _)?;
+    loc.truncate(length as _, &cred)?;
     Ok(0)
 }
 
@@ -247,8 +242,7 @@ pub fn sys_ftruncate(fd: c_int, length: __kernel_off_t) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
     let f = kprocess::current_resources().get_file(fd)?;
-    f.verify_mode(FMode::WRITE)?;
-    f.path().truncate(length as _)?;
+    f.truncate(length as _)?;
     Ok(0)
 }
 
@@ -334,7 +328,7 @@ pub fn sys_fallocate(
             }
 
             if !keep_size && target_end > old_size {
-                f.path().truncate(target_end)?;
+                f.truncate(target_end)?;
             }
 
             write_zeros_range(&f, start, target_end)?;

@@ -139,6 +139,7 @@ pub fn read_ta_head_if_applicable(path: &str) -> KResult<Option<Vec<u8>>> {
         fs.pwd(),
         0,
         NodePermission::empty(),
+        kcred::initial_cred(),
     )?;
     drop(fs);
     let len = file.size();

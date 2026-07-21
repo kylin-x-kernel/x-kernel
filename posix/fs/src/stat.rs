@@ -8,13 +8,16 @@ use core::ffi::{c_char, c_int};
 
 use kerrno::{KError, KResult};
 use kprocess::current_user_process;
-use kvfs::{Filename, LookupFlags, LookupIntent, MountFlags, NodePermission, Path, StatFsFlags};
+use kvfs::{
+    Filename, LookupFlags, LookupIntent, MountFlags, NodeType, Path, Permission, StatFsFlags,
+};
 use linux_raw_sys::general::{
-    __kernel_fsid_t, AT_EMPTY_PATH, R_OK, W_OK, X_OK, stat, statfs, statx,
+    __kernel_fsid_t, AT_EACCESS, AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, R_OK, W_OK, X_OK, stat,
+    statfs, statx,
 };
 use posix_types::{UserConstPtr, UserPtr};
 
-use crate::path::resolve_at;
+use crate::path::{resolve_at, resolve_at_with_cred};
 
 /// Get the file metadata by `path` and write into `statbuf`.
 #[cfg(target_arch = "x86_64")]
@@ -80,7 +83,12 @@ pub fn sys_statx(
 pub fn sys_access(path: UserConstPtr<c_char>, mode: u32) -> KResult<isize> {
     use linux_raw_sys::general::AT_FDCWD;
 
-    sys_faccessat2(AT_FDCWD, path, mode, 0)
+    sys_faccessat(AT_FDCWD, path, mode)
+}
+
+/// Checks file accessibility relative to a directory file descriptor.
+pub fn sys_faccessat(dirfd: c_int, path: UserConstPtr<c_char>, mode: u32) -> KResult<isize> {
+    sys_faccessat2(dirfd, path, mode, 0)
 }
 
 /// Checks file accessibility with additional flags.
@@ -96,24 +104,49 @@ pub fn sys_faccessat2(
         .transpose()?;
     debug!("sys_faccessat2 <= dirfd: {dirfd}, path: {path:?}, mode: {mode}, flags: {flags}");
 
-    let file = resolve_at(dirfd, path.as_deref(), flags)?;
-
-    if mode == 0 {
-        return Ok(0);
+    if mode & !(R_OK | W_OK | X_OK) != 0
+        || flags & !(AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0
+    {
+        return Err(KError::InvalidInput);
     }
-    let mut required_mode = NodePermission::empty();
+
+    let current = kprocess::current_cred();
+    let real_id_cred;
+    let access_cred = if flags & AT_EACCESS != 0 {
+        current.as_ref()
+    } else {
+        real_id_cred = current.for_access();
+        &real_id_cred
+    };
+    let path = resolve_at_with_cred(dirfd, path.as_deref(), flags, access_cred)?.into_path()?;
+
+    let mut permission = Permission::MAY_ACCESS;
     if mode & R_OK != 0 {
-        required_mode |= NodePermission::OWNER_READ;
+        permission |= Permission::MAY_READ;
     }
     if mode & W_OK != 0 {
-        required_mode |= NodePermission::OWNER_WRITE;
+        permission |= Permission::MAY_WRITE;
     }
     if mode & X_OK != 0 {
-        required_mode |= NodePermission::OWNER_EXEC;
+        permission |= Permission::MAY_EXEC;
     }
-    let required_mode = required_mode.bits();
-    if (file.stat()?.mode as u16 & required_mode) != required_mode {
+
+    if permission.contains(Permission::MAY_EXEC)
+        && path.is_regular_file()
+        && path.mount().flags().contains(MountFlags::NOEXEC)
+    {
         return Err(KError::PermissionDenied);
+    }
+    path.permission(permission, access_cred)?;
+
+    if permission.contains(Permission::MAY_WRITE)
+        && path.mount().flags().contains(MountFlags::RDONLY)
+        && matches!(
+            path.node_type(),
+            NodeType::RegularFile | NodeType::Directory | NodeType::Symlink
+        )
+    {
+        return Err(KError::ReadOnlyFilesystem);
     }
 
     Ok(0)
@@ -186,11 +219,13 @@ pub fn sys_statfs(path: UserConstPtr<c_char>, buf: UserPtr<statfs>) -> KResult<i
     let process = current_user_process();
     let fs_struct = process.fs_context()?;
     let fs = fs_struct.lock();
+    let cred = kprocess::current_cred();
     let location = Filename::new(path.as_str()).lookup_at(
         fs.root(),
         fs.pwd(),
         LookupIntent::Stat,
         LookupFlags::follow(),
+        &cred,
     )?;
     buf.write_vm(statfs(&location.mount().root_path())?)?;
     Ok(0)

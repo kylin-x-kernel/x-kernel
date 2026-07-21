@@ -21,7 +21,10 @@ pub fn sys_pidfd_open(pid: u32, flags: u32) -> KResult<isize> {
 
     let process = kprocess::pidfd::open_target_process(pid)?;
     kprocess::current_resources()
-        .add_file(PidFd::new_file(&process, O_RDWR)?, true)
+        .add_file(
+            PidFd::new_file(&process, O_RDWR, kprocess::current_cred())?,
+            true,
+        )
         .map(|fd| fd as _)
 }
 

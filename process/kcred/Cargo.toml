@@ -9,5 +9,6 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+kerrno.workspace = true
 klazy.workspace = true
 unittest.workspace = true

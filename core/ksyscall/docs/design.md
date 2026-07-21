@@ -103,6 +103,7 @@ ksyscall::dispatch_irq_syscall
 3. `copyin/copyout`、flag 校验、compat 分支属于 adapter 层。
 4. 资源对象的状态机、不变量和生命周期必须留在 owner crate。
 5. 不因 syscall 名字相似就把不同资源 owner 混进同一目录。
+6. 每个 syscall number 按自己的 ABI 参数个数解码；旧 ABI 未定义的参数寄存器不得被当作扩展 flags 使用。
 
 ## 当前 owner 对齐
 
@@ -169,6 +170,10 @@ ksyscall::dispatch_irq_syscall
 - `task/sched.rs`
   - `sched_yield` / `sched_*affinity` / `sched_*scheduler` / `getcpu` / `getpriority` / `setpriority`
   - owner 在 `ktask` 调度接口、`kprocess` 进程/线程状态和 `khal` CPU 查询
+  - `PRIO_PROCESS` 按 TID 选择单个 task；`PRIO_PGRP` 与 `PRIO_USER` 按每个已发布 task
+    遍历，不能用进程代表线程代替 per-thread nice 或 real UID
+  - `setpriority` 以调用者 effective UID 对比目标 real/effective UID；当前用 root 近似
+    `CAP_SYS_NICE`，非特权调用者不能降低 nice 值来提高优先级
 - `sync/futex.rs`
   - `futex` / `get_robust_list` / `set_robust_list`
   - compound op（`REQUEUE` / `CMP_REQUEUE` / `WAKE_OP`）在单次

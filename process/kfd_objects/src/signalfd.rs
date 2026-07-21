@@ -8,6 +8,7 @@ use alloc::sync::Arc;
 use core::{mem, task::Context};
 
 use bitflags::bitflags;
+use kcred::Cred;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use kprocess::AsThread;
@@ -116,7 +117,8 @@ impl Signalfd {
         })
     }
 
-    pub fn new_file(mask: SignalSet, open_flags: u32) -> KResult<Arc<VfsFile>> {
+    /// Creates a signalfd file and captures `cred` as its open credential.
+    pub fn new_file(mask: SignalSet, open_flags: u32, cred: Arc<Cred>) -> KResult<Arc<VfsFile>> {
         let open_flags = OpenFlags::from_bits(open_flags).ok_or(KError::InvalidInput)?;
         AnonInodeFs::global().get_file(
             "[signalfd]",
@@ -124,6 +126,7 @@ impl Signalfd {
             Self::new(mask),
             FMode::READ | FMode::STREAM,
             open_flags,
+            cred,
         )
     }
 
@@ -252,7 +255,8 @@ mod tests {
 
     #[def_test]
     fn test_signalfd_poll_empty() {
-        let file = Signalfd::new_file(SignalSet::default(), 0).expect("signalfd file opens");
+        let file = Signalfd::new_file(SignalSet::default(), 0, kcred::initial_cred())
+            .expect("signalfd file opens");
         assert!(file.poll().contains(IoEvents::ERR));
     }
 
@@ -264,7 +268,8 @@ mod tests {
 
     #[def_test]
     fn test_signalfd_nonblocking() {
-        let file = Signalfd::new_file(SignalSet::default(), 0).expect("signalfd file opens");
+        let file = Signalfd::new_file(SignalSet::default(), 0, kcred::initial_cred())
+            .expect("signalfd file opens");
         assert!(!file.is_nonblocking());
         file.set_nonblocking(true);
         assert!(file.is_nonblocking());
@@ -274,7 +279,8 @@ mod tests {
 
     #[def_test]
     fn test_signalfd_write_returns_error() {
-        let file = Signalfd::new_file(SignalSet::default(), 0).expect("signalfd file opens");
+        let file = Signalfd::new_file(SignalSet::default(), 0, kcred::initial_cred())
+            .expect("signalfd file opens");
         let mut pos = 0;
         assert!(file.write_from(b"test", &mut pos).is_err());
     }

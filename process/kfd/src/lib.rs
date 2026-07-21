@@ -45,6 +45,7 @@ mod tests {
                 alloc::sync::Arc::new(()),
                 FMode::READ,
                 OpenFlags::NONBLOCK,
+                kcred::initial_cred(),
             )
             .expect("snapshot test anon inode file opens")
     }

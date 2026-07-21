@@ -1981,7 +1981,7 @@ mod tests {
         let inode = filesystem
             .allocate_inode(
                 Some(parent_inode),
-                InodeInitialization::regular_file(0o644),
+                InodeInitialization::regular_file(0o644, 0, 0),
                 &mut handle,
             )
             .expect("allocate an inode from Linux image");
@@ -2088,6 +2088,8 @@ mod tests {
                 &root,
                 b"kext4-created.txt",
                 0o644,
+                1000,
+                1001,
                 crate::Ext4Timestamp::new(123, 0),
             )
             .expect("create regular file in linear root directory");
@@ -2095,6 +2097,8 @@ mod tests {
         assert_eq!(created.child().kind(), InodeKind::RegularFile);
         assert_eq!(created.child().links_count(), 1);
         assert_eq!(created.child().size(), 0);
+        assert_eq!(created.child().uid(), 1000);
+        assert_eq!(created.child().gid(), 1001);
         let entry = filesystem
             .lookup(created.parent(), "kext4-created.txt")
             .expect("lookup created file")
@@ -2129,6 +2133,8 @@ mod tests {
                 &root,
                 b"kext4-dir",
                 0o755,
+                0,
+                0,
                 crate::Ext4Timestamp::new(124, 0),
             )
             .expect("create linear directory");
@@ -2171,6 +2177,8 @@ mod tests {
                 &root,
                 b"kext4-unlink.txt",
                 0o644,
+                0,
+                0,
                 crate::Ext4Timestamp::new(125, 0),
             )
             .expect("create unlink target");
@@ -2255,6 +2263,8 @@ mod tests {
                 &root,
                 b"kext4-recovery-orphan",
                 0o644,
+                0,
+                0,
                 crate::Ext4Timestamp::new(130, 0),
             )
             .expect("create orphan recovery target");
@@ -2324,6 +2334,8 @@ mod tests {
                 &root,
                 b"kext4-rmdir",
                 0o755,
+                0,
+                0,
                 crate::Ext4Timestamp::new(128, 0),
             )
             .expect("create rmdir target");
@@ -2371,6 +2383,8 @@ mod tests {
                 &root,
                 b"kext4-link-src.txt",
                 0o644,
+                0,
+                0,
                 crate::Ext4Timestamp::new(130, 0),
             )
             .expect("create hard link source");
@@ -2430,17 +2444,33 @@ mod tests {
         let mut filesystem = Ext4Filesystem::mount(block_device).expect("mount rename image");
         let root = filesystem.root_inode().expect("read root inode");
         let left = filesystem
-            .create_directory(&root, b"left", 0o755, crate::Ext4Timestamp::new(133, 0))
+            .create_directory(
+                &root,
+                b"left",
+                0o755,
+                0,
+                0,
+                crate::Ext4Timestamp::new(133, 0),
+            )
             .expect("create left directory");
         let root = left.parent().clone();
         let right = filesystem
-            .create_directory(&root, b"right", 0o755, crate::Ext4Timestamp::new(134, 0))
+            .create_directory(
+                &root,
+                b"right",
+                0o755,
+                0,
+                0,
+                crate::Ext4Timestamp::new(134, 0),
+            )
             .expect("create right directory");
         let left_file = filesystem
             .create_regular_file(
                 left.child(),
                 b"move-me.txt",
                 0o644,
+                0,
+                0,
                 crate::Ext4Timestamp::new(135, 0),
             )
             .expect("create file to rename");
@@ -2490,6 +2520,8 @@ mod tests {
                 &root,
                 b"rename-src.txt",
                 0o644,
+                0,
+                0,
                 crate::Ext4Timestamp::new(145, 0),
             )
             .expect("create rename source");
@@ -2498,6 +2530,8 @@ mod tests {
                 source.parent(),
                 b"rename-dst.txt",
                 0o644,
+                0,
+                0,
                 crate::Ext4Timestamp::new(146, 0),
             )
             .expect("create rename target");
@@ -2562,17 +2596,33 @@ mod tests {
         let root = filesystem.root_inode().expect("read root inode");
         let old_root_links = root.links_count();
         let left = filesystem
-            .create_directory(&root, b"left", 0o755, crate::Ext4Timestamp::new(137, 0))
+            .create_directory(
+                &root,
+                b"left",
+                0o755,
+                0,
+                0,
+                crate::Ext4Timestamp::new(137, 0),
+            )
             .expect("create left directory");
         let root = left.parent().clone();
         let right = filesystem
-            .create_directory(&root, b"right", 0o755, crate::Ext4Timestamp::new(138, 0))
+            .create_directory(
+                &root,
+                b"right",
+                0o755,
+                0,
+                0,
+                crate::Ext4Timestamp::new(138, 0),
+            )
             .expect("create right directory");
         let child = filesystem
             .create_directory(
                 left.child(),
                 b"child",
                 0o755,
+                0,
+                0,
                 crate::Ext4Timestamp::new(139, 0),
             )
             .expect("create child directory to rename");
@@ -2626,6 +2676,8 @@ mod tests {
                 &root,
                 b"rename-src-dir",
                 0o755,
+                0,
+                0,
                 crate::Ext4Timestamp::new(148, 0),
             )
             .expect("create rename source directory");
@@ -2634,6 +2686,8 @@ mod tests {
                 source.parent(),
                 b"rename-dst-dir",
                 0o755,
+                0,
+                0,
                 crate::Ext4Timestamp::new(149, 0),
             )
             .expect("create rename target directory");
@@ -2694,6 +2748,8 @@ mod tests {
                 &root,
                 b"kext4-symlink",
                 b"target/path",
+                0,
+                0,
                 crate::Ext4Timestamp::new(141, 0),
             )
             .expect("create fast symlink");
@@ -2734,6 +2790,8 @@ mod tests {
                 &root,
                 b"kext4-block-symlink",
                 &target,
+                0,
+                0,
                 crate::Ext4Timestamp::new(144, 0),
             )
             .expect("create block-mapped symlink");
@@ -2776,9 +2834,10 @@ mod tests {
             .create_special_file(
                 &root,
                 b"kext4-fifo",
-                InodeKind::Fifo,
+                (InodeKind::Fifo, None),
                 0o644,
-                None,
+                0,
+                0,
                 crate::Ext4Timestamp::new(142, 0),
             )
             .expect("create fifo");
@@ -2786,9 +2845,13 @@ mod tests {
             .create_special_file(
                 fifo.parent(),
                 b"kext4-null",
-                InodeKind::CharacterDevice,
+                (
+                    InodeKind::CharacterDevice,
+                    Some(crate::Ext4DeviceId::new(1, 3)),
+                ),
                 0o666,
-                Some(crate::Ext4DeviceId::new(1, 3)),
+                0,
+                0,
                 crate::Ext4Timestamp::new(143, 0),
             )
             .expect("create char device");
@@ -2849,6 +2912,8 @@ mod tests {
                     &parent,
                     &last_name,
                     0o644,
+                    0,
+                    0,
                     crate::Ext4Timestamp::new(144 + index, 0),
                 )
                 .expect("create regular file in indexed directory");
@@ -2915,6 +2980,8 @@ mod tests {
                 &root,
                 b"kext4-big",
                 0o755,
+                0,
+                0,
                 crate::Ext4Timestamp::new(500, 0),
             )
             .expect("create directory before htree conversion");
@@ -2927,6 +2994,8 @@ mod tests {
                     &parent,
                     &last_name,
                     0o644,
+                    0,
+                    0,
                     crate::Ext4Timestamp::new(501 + index, 0),
                 )
                 .expect("create regular file during htree conversion");
@@ -3106,7 +3175,7 @@ mod tests {
         let regular = filesystem
             .allocate_inode(
                 Some(InodeNumber::new(40)),
-                InodeInitialization::regular_file(0o644),
+                InodeInitialization::regular_file(0o644, 0, 0),
                 &mut regular_handle,
             )
             .unwrap();
@@ -3125,7 +3194,7 @@ mod tests {
         let directory = filesystem
             .allocate_inode(
                 None,
-                InodeInitialization::directory(0o755),
+                InodeInitialization::directory(0o755, 0, 0),
                 &mut directory_handle,
             )
             .unwrap();
@@ -3151,7 +3220,11 @@ mod tests {
 
         for _ in 0..4 {
             let allocation = filesystem
-                .allocate_inode(None, InodeInitialization::directory(0o755), &mut handle)
+                .allocate_inode(
+                    None,
+                    InodeInitialization::directory(0o755, 0, 0),
+                    &mut handle,
+                )
                 .unwrap();
             allocated_groups.push(allocation.group().get());
         }
@@ -3182,7 +3255,7 @@ mod tests {
             .allocate_named_inode(
                 Some(InodeNumber::new(2)),
                 child_name,
-                InodeInitialization::directory(0o755),
+                InodeInitialization::directory(0o755, 0, 0),
                 &mut handle,
             )
             .unwrap();
@@ -3215,7 +3288,11 @@ mod tests {
         let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
 
         let allocation = filesystem
-            .allocate_inode(None, InodeInitialization::directory(0o755), &mut handle)
+            .allocate_inode(
+                None,
+                InodeInitialization::directory(0o755, 0, 0),
+                &mut handle,
+            )
             .unwrap();
 
         assert_eq!(allocation.group(), BlockGroupNumber::new(1));
@@ -3254,7 +3331,7 @@ mod tests {
         let allocation = filesystem
             .allocate_inode(
                 Some(InodeNumber::new(11)),
-                InodeInitialization::regular_file(0o644),
+                InodeInitialization::regular_file(0o644, 0, 0),
                 &mut handle,
             )
             .unwrap();
@@ -3289,7 +3366,7 @@ mod tests {
         let allocation = filesystem
             .allocate_inode(
                 Some(InodeNumber::new(65)),
-                InodeInitialization::regular_file(0o644),
+                InodeInitialization::regular_file(0o644, 0, 0),
                 &mut handle,
             )
             .unwrap();
@@ -3627,7 +3704,11 @@ mod tests {
         let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
 
         assert_eq!(
-            filesystem.allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle),
+            filesystem.allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle
+            ),
             Err(Ext4Error::InsufficientJournalCredits)
         );
         assert_eq!(handle.remaining_credits(), 3);
@@ -3928,7 +4009,7 @@ mod tests {
         assert_eq!(
             filesystem.allocate_inode_in_group(
                 BlockGroupNumber::new(0),
-                InodeInitialization::regular_file(0o644),
+                InodeInitialization::regular_file(0o644, 0, 0),
                 &mut handle,
             ),
             Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeBitmap))
@@ -3955,7 +4036,7 @@ mod tests {
         assert_eq!(
             filesystem.allocate_inode_in_group(
                 BlockGroupNumber::new(0),
-                InodeInitialization::regular_file(0o644),
+                InodeInitialization::regular_file(0o644, 0, 0),
                 &mut handle,
             ),
             Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeBitmap))
@@ -4001,7 +4082,7 @@ mod tests {
         let allocation = filesystem
             .allocate_inode_in_group(
                 BlockGroupNumber::new(0),
-                InodeInitialization::regular_file(0o644),
+                InodeInitialization::regular_file(0o644, 0, 0),
                 &mut handle,
             )
             .unwrap();
@@ -4036,7 +4117,7 @@ mod tests {
         let allocation = filesystem
             .allocate_inode(
                 Some(InodeNumber::new(33)),
-                InodeInitialization::regular_file(0o644),
+                InodeInitialization::regular_file(0o644, 0, 0),
                 &mut handle,
             )
             .unwrap();
@@ -4081,13 +4162,17 @@ mod tests {
         assert_eq!(
             filesystem.allocate_inode_in_group(
                 BlockGroupNumber::new(0),
-                InodeInitialization::regular_file(0o644),
+                InodeInitialization::regular_file(0o644, 0, 0),
                 &mut handle,
             ),
             Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeBitmap))
         );
         assert_eq!(
-            filesystem.allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle),
+            filesystem.allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle
+            ),
             Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeBitmap))
         );
         assert_eq!(handle.remaining_credits(), 4);
@@ -4118,7 +4203,11 @@ mod tests {
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
 
         let allocation = filesystem
-            .allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle)
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
             .unwrap();
 
         assert_eq!(allocation.group(), BlockGroupNumber::new(1));
@@ -4137,7 +4226,7 @@ mod tests {
         let allocation = filesystem
             .allocate_inode_in_group(
                 BlockGroupNumber::new(0),
-                InodeInitialization::regular_file(0o644)
+                InodeInitialization::regular_file(0o644, 0, 0)
                     .with_owner(1000, 1001)
                     .with_timestamp_seconds(123)
                     .with_generation(77),
@@ -4200,7 +4289,11 @@ mod tests {
         let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
 
         let allocation = filesystem
-            .allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle)
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
             .unwrap();
         assert_eq!(allocation.inode(), InodeNumber::new(11));
         assert_eq!(filesystem.groups()[0].free_inodes_count(), 21);
@@ -4210,7 +4303,11 @@ mod tests {
             .abort(Ext4Error::Device(block::DriverError::Io))
             .expect("inode allocation recorded undo");
         assert!(matches!(
-            filesystem.allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle),
+            filesystem.allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle
+            ),
             Err(Ext4Error::JournalAborted)
         ));
         drop(handle);
@@ -4249,7 +4346,11 @@ mod tests {
 
         let block = filesystem.allocate_block(None, &mut handle).unwrap();
         let inode_allocation = filesystem
-            .allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle)
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
             .unwrap();
         let inode = filesystem
             .internal_inode(inode_allocation.inode())
@@ -4283,7 +4384,11 @@ mod tests {
         let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
         let transaction = handle.id();
         let inode_allocation = filesystem
-            .allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle)
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
             .unwrap();
         let mut inode = filesystem
             .internal_inode(inode_allocation.inode())
@@ -4354,7 +4459,11 @@ mod tests {
         let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
         let physical = allocate_contiguous_blocks(&mut filesystem, 6, &mut handle);
         let inode_allocation = filesystem
-            .allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle)
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
             .unwrap();
         let mut inode = filesystem.internal_inode(inode_allocation.inode()).unwrap();
 
@@ -4407,7 +4516,11 @@ mod tests {
         let mut handle = journal.begin(JournalCredits::new(128)).unwrap();
         let physical = allocate_contiguous_blocks(&mut filesystem, 10, &mut handle);
         let inode_allocation = filesystem
-            .allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle)
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
             .unwrap();
         let inode = filesystem.internal_inode(inode_allocation.inode()).unwrap();
         let inode = filesystem
@@ -4436,7 +4549,11 @@ mod tests {
         let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
         let physical = allocate_contiguous_blocks(&mut filesystem, 6, &mut handle);
         let inode_allocation = filesystem
-            .allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle)
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
             .unwrap();
         let mut inode = filesystem.internal_inode(inode_allocation.inode()).unwrap();
         let free_after_allocation = filesystem.superblock().free_blocks_count();
@@ -4493,7 +4610,11 @@ mod tests {
         let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
         let physical = allocate_contiguous_blocks(&mut filesystem, 6, &mut handle);
         let inode_allocation = filesystem
-            .allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle)
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
             .unwrap();
         let mut inode = filesystem.internal_inode(inode_allocation.inode()).unwrap();
         let free_after_allocation = filesystem.superblock().free_blocks_count();
@@ -4546,7 +4667,11 @@ mod tests {
         let journal = Journal::new(TransactionId::new(465));
         let mut handle = journal.begin(JournalCredits::new(100_000)).unwrap();
         let inode_allocation = filesystem
-            .allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle)
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
             .unwrap();
         let mut inode = filesystem.internal_inode(inode_allocation.inode()).unwrap();
         let mut mappings = Vec::new();
@@ -4830,7 +4955,11 @@ mod tests {
         let transaction = handle.id();
         let physical = allocate_contiguous_blocks(&mut filesystem, 1, &mut handle);
         let allocation = filesystem
-            .allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle)
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
             .unwrap();
         let mut inode = filesystem.internal_inode(allocation.inode()).unwrap();
         inode = filesystem
@@ -5331,7 +5460,7 @@ mod tests {
         let allocation = filesystem
             .allocate_inode_in_group(
                 BlockGroupNumber::new(0),
-                InodeInitialization::directory(0o755),
+                InodeInitialization::directory(0o755, 0, 0),
                 &mut handle,
             )
             .unwrap();
@@ -5784,11 +5913,11 @@ mod tests {
     }
 
     fn allocate_checkpointed_regular_inode(filesystem: &mut Ext4Filesystem) -> crate::Ext4Inode {
-        allocate_checkpointed_inode(filesystem, InodeInitialization::regular_file(0o644))
+        allocate_checkpointed_inode(filesystem, InodeInitialization::regular_file(0o644, 0, 0))
     }
 
     fn allocate_checkpointed_directory_inode(filesystem: &mut Ext4Filesystem) -> crate::Ext4Inode {
-        allocate_checkpointed_inode(filesystem, InodeInitialization::directory(0o755))
+        allocate_checkpointed_inode(filesystem, InodeInitialization::directory(0o755, 0, 0))
     }
 
     fn allocate_checkpointed_inode(

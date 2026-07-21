@@ -81,6 +81,17 @@ pub struct SimpleFsNode {
 impl SimpleFsNode {
     /// Creates a new filesystem node.
     pub fn new(fs: Arc<SimpleFs>, node_type: NodeType, mode: NodePermission) -> Self {
+        Self::new_with_owner(fs, node_type, mode, 0, 0)
+    }
+
+    /// Creates a new filesystem node with an explicit owner.
+    pub fn new_with_owner(
+        fs: Arc<SimpleFs>,
+        node_type: NodeType,
+        mode: NodePermission,
+        uid: u32,
+        gid: u32,
+    ) -> Self {
         let ino = fs.alloc_inode();
         let metadata = Metadata {
             device: 0,
@@ -91,8 +102,8 @@ impl SimpleFsNode {
                 1
             },
             mode: crate::Umode::new(node_type, mode),
-            uid: 0,
-            gid: 0,
+            uid,
+            gid,
             size: 0,
             block_size: 0,
             blocks: 0,
@@ -111,6 +122,10 @@ impl SimpleFsNode {
     /// Updates the special-file `i_rdev` stored in this node's metadata.
     pub fn set_rdev(&self, rdev: DeviceId) {
         self.metadata.lock().rdev = rdev;
+    }
+
+    pub(crate) fn filesystem(&self) -> Arc<SimpleFs> {
+        self.fs.clone()
     }
 
     /// Returns this node's `inode::i_ino`.

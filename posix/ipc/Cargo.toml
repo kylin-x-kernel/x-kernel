@@ -11,6 +11,7 @@ documentation.workspace = true
 
 [dependencies]
 filemap = { workspace = true }
+kcred = { workspace = true }
 kerrno = { workspace = true }
 khal = { workspace = true }
 klogger = { workspace = true }

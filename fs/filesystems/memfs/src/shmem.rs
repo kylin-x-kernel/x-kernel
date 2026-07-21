@@ -6,6 +6,7 @@
 
 use alloc::{string::String, sync::Arc};
 
+use kcred::Cred;
 use ksync::{Mutex, static_lock};
 use kvfs::{Mount, NodePermission, Path, SuperBlock, VfsFile, VfsResult, dentry_open};
 use linux_raw_sys::general::{
@@ -231,8 +232,8 @@ impl ShmemObject {
     }
 
     /// Opens this anonymous regular file and consumes the wrapper object.
-    pub fn into_file(self) -> VfsResult<Arc<VfsFile>> {
-        dentry_open(self.location, O_RDWR)
+    pub fn into_file(self, cred: Arc<Cred>) -> VfsResult<Arc<VfsFile>> {
+        dentry_open(self.location, O_RDWR, cred)
     }
 }
 
@@ -250,6 +251,7 @@ fn create_anonymous_file(
     name: &str,
     permission: NodePermission,
     initial_seals: ShmemSealSet,
+    cred: Arc<Cred>,
 ) -> VfsResult<ShmemObject> {
     // Kernel-owned shm files share a single tmpfs instance to avoid
     // leaking Mount/SuperBlock references on each create/destroy cycle.
@@ -268,8 +270,13 @@ fn create_anonymous_file(
             Path::new(Mount::new_root(&fs), fs.root_dir())
         }
     };
-    let file =
-        kvfs::Filename::new(name).open_with_flags_at(&root, &root, O_CREAT | O_EXCL, permission)?;
+    let file = kvfs::Filename::new(name).open_with_flags_at(
+        &root,
+        &root,
+        O_CREAT | O_EXCL,
+        permission,
+        cred,
+    )?;
     let location = file.path().clone();
     let state = attach_state(&location, kind, name, initial_seals)?;
     Ok(ShmemObject {
@@ -282,7 +289,11 @@ fn create_anonymous_file(
 ///
 /// When sealing is not allowed, the object is initialized with the
 /// default `F_SEAL_SEAL`.
-pub fn create_memfd_file(name: &str, allow_sealing: bool) -> VfsResult<ShmemObject> {
+pub fn create_memfd_file(
+    name: &str,
+    allow_sealing: bool,
+    cred: Arc<Cred>,
+) -> VfsResult<ShmemObject> {
     let initial_seals = if allow_sealing {
         ShmemSealSet::empty()
     } else {
@@ -293,16 +304,22 @@ pub fn create_memfd_file(name: &str, allow_sealing: bool) -> VfsResult<ShmemObje
         name,
         NodePermission::from_bits_truncate(0o600),
         initial_seals,
+        cred,
     )
 }
 
 /// Creates a kernel-owned shmem file object for SysV shm-style users.
-pub fn create_kernel_file(name: &str, permission: NodePermission) -> VfsResult<ShmemObject> {
+pub fn create_kernel_file(
+    name: &str,
+    permission: NodePermission,
+    cred: Arc<Cred>,
+) -> VfsResult<ShmemObject> {
     create_anonymous_file(
         ShmemObjectKind::Kernel,
         name,
         permission,
         ShmemSealSet::empty(),
+        cred,
     )
 }
 
@@ -549,7 +566,7 @@ mod tests {
 
     #[def_test]
     fn memfd_write_seal_blocks_write_policy() {
-        let shmem = create_memfd_file("memfd:test", true).unwrap();
+        let shmem = create_memfd_file("memfd:test", true, kcred::initial_cred()).unwrap();
         let location = shmem.location();
 
         assert_eq!(check_write_allowed(location), Ok(()));
@@ -563,7 +580,7 @@ mod tests {
 
     #[def_test]
     fn memfd_resize_seals_block_growth_and_shrink_policy() {
-        let shmem = create_memfd_file("memfd:test", true).unwrap();
+        let shmem = create_memfd_file("memfd:test", true, kcred::initial_cred()).unwrap();
         let location = shmem.location();
 
         assert_eq!(

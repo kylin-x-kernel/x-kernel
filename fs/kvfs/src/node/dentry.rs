@@ -769,23 +769,33 @@ impl Dentry {
     }
 
     /// Creates a regular-file child dentry below this directory.
-    pub fn create(&self, name: &str, permission: NodePermission) -> VfsResult<Dentry> {
+    pub fn create(
+        &self,
+        name: &str,
+        permission: NodePermission,
+        cred: &kcred::Cred,
+    ) -> VfsResult<Dentry> {
         self.as_dir()?;
         Self::verify_child_name(name)?;
         let dir_inode = self.vfs_inode();
         let _namespace_guard = dir_inode.lock_namespace_exclusive();
-        let entry = dir_inode.create(self, name, permission)?;
+        let entry = dir_inode.create(self, name, permission, cred)?;
         self.insert_cache(name.to_owned(), entry.clone());
         Ok(entry)
     }
 
     /// Creates a directory child dentry below this directory.
-    pub fn mkdir(&self, name: &str, permission: NodePermission) -> VfsResult<Dentry> {
+    pub fn mkdir(
+        &self,
+        name: &str,
+        permission: NodePermission,
+        cred: &kcred::Cred,
+    ) -> VfsResult<Dentry> {
         self.as_dir()?;
         Self::verify_child_name(name)?;
         let dir_inode = self.vfs_inode();
         let _namespace_guard = dir_inode.lock_namespace_exclusive();
-        let entry = dir_inode.mkdir(self, name, permission)?;
+        let entry = dir_inode.mkdir(self, name, permission, cred)?;
         self.insert_cache(name.to_owned(), entry.clone());
         Ok(entry)
     }
@@ -797,23 +807,24 @@ impl Dentry {
         node_type: NodeType,
         permission: NodePermission,
         device: DeviceId,
+        cred: &kcred::Cred,
     ) -> VfsResult<Dentry> {
         self.as_dir()?;
         Self::verify_child_name(name)?;
         let dir_inode = self.vfs_inode();
         let _namespace_guard = dir_inode.lock_namespace_exclusive();
-        let entry = dir_inode.mknod(self, name, node_type, permission, device)?;
+        let entry = dir_inode.mknod(self, name, node_type, permission, device, cred)?;
         self.insert_cache(name.to_owned(), entry.clone());
         Ok(entry)
     }
 
     /// Creates a symbolic-link child dentry below this directory.
-    pub fn symlink(&self, name: &str, target: &str) -> VfsResult<Dentry> {
+    pub fn symlink(&self, name: &str, target: &str, cred: &kcred::Cred) -> VfsResult<Dentry> {
         self.as_dir()?;
         Self::verify_child_name(name)?;
         let dir_inode = self.vfs_inode();
         let _namespace_guard = dir_inode.lock_namespace_exclusive();
-        let entry = dir_inode.symlink(self, name, target)?;
+        let entry = dir_inode.symlink(self, name, target, cred)?;
         self.insert_cache(name.to_owned(), entry.clone());
         Ok(entry)
     }
@@ -1303,6 +1314,7 @@ mod tests_dentry {
             _dentry: &LockedDentry<'_>,
             _mode: crate::Umode,
             _exclusive: bool,
+            _cred: &kcred::Cred,
         ) -> VfsResult<Dentry> {
             Err(VfsError::OperationNotSupported)
         }

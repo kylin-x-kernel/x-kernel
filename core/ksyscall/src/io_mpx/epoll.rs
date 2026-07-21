@@ -32,7 +32,7 @@ pub fn sys_epoll_create1(flags: u32) -> KResult<isize> {
 
     kprocess::current_resources()
         .add_file(
-            Epoll::new_file()?,
+            Epoll::new_file(kprocess::current_cred())?,
             flags.contains(EpollCreateFlags::CLOEXEC),
         )
         .map(|fd| fd as isize)

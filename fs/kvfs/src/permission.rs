@@ -4,10 +4,10 @@
 
 //! VFS permission request and DAC checks.
 
-use kcred::AccessCredentials;
+use kcred::Cred;
 use kerrno::{KError, KResult};
 
-use crate::{Metadata, NodePermission, NodeType};
+use crate::{Metadata, NodePermission, NodeType, VfsInode};
 
 bitflags::bitflags! {
     /// Requested access permissions for a filesystem node.
@@ -30,16 +30,15 @@ bitflags::bitflags! {
     }
 }
 
-/// Checks DAC permissions for a filesystem node.
+/// Applies the generic DAC permission policy to an inode.
 ///
-/// Follows the POSIX owner, group, and other permission cascade. The caller
-/// supplies the credential IDs used for the check, such as fsuid/fsgid for VFS
-/// operations or real IDs for `access(2)`-style checks.
-pub fn check_permission(
-    metadata: &Metadata,
-    permission: Permission,
-    credentials: &AccessCredentials,
-) -> KResult<()> {
+/// Filesystems that do not override [`crate::InodeOperations::permission`]
+/// reach this implementation.
+pub fn generic_permission(inode: &VfsInode, permission: Permission, cred: &Cred) -> KResult<()> {
+    check_dac_permission(&inode.metadata(), permission, cred)
+}
+
+fn check_dac_permission(metadata: &Metadata, permission: Permission, cred: &Cred) -> KResult<()> {
     let permission = permission
         .intersection(Permission::MAY_READ | Permission::MAY_WRITE | Permission::MAY_EXEC);
     let mode = metadata.mode.permission();
@@ -47,7 +46,7 @@ pub fn check_permission(
         return Ok(());
     }
 
-    if credentials.uid() == 0 {
+    if cred.fsuid() == 0 {
         if permission.contains(Permission::MAY_EXEC)
             && metadata.mode.node_type() != NodeType::Directory
             && !has_any_exec_bit(metadata)
@@ -57,9 +56,9 @@ pub fn check_permission(
         return Ok(());
     }
 
-    let is_allowed = if credentials.uid() == metadata.uid {
+    let is_allowed = if cred.fsuid() == metadata.uid {
         owner_allows(mode, permission)
-    } else if credentials.has_group(metadata.gid) {
+    } else if cred.in_group(metadata.gid) {
         group_allows(mode, permission)
     } else {
         other_allows(mode, permission)
@@ -140,17 +139,19 @@ fn allows(
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::sync::Arc;
+    use alloc::vec::Vec;
     use core::time::Duration;
 
-    use kcred::AccessCredentials;
+    use kcred::Cred;
     use unittest::def_test;
 
-    use super::{Permission, check_permission};
+    use super::{Permission, check_dac_permission};
     use crate::{DeviceId, Metadata, NodePermission, NodeType, Umode};
 
-    fn creds(uid: u32, gid: u32, groups: &[u32]) -> AccessCredentials {
-        AccessCredentials::new(uid, gid, Arc::from(groups))
+    fn creds(uid: u32, gid: u32, groups: &[u32]) -> Cred {
+        let mut cred = Cred::new(uid, gid);
+        cred.set_supplementary_groups(Vec::from(groups));
+        cred
     }
 
     fn meta(uid: u32, gid: u32, mode: u16) -> Metadata {
@@ -177,93 +178,95 @@ mod tests {
     #[def_test]
     fn test_owner_read_allowed() {
         let m = meta(1000, 1000, 0o400);
-        assert!(check_permission(&m, Permission::MAY_READ, &creds(1000, 2000, &[])).is_ok());
+        assert!(check_dac_permission(&m, Permission::MAY_READ, &creds(1000, 2000, &[])).is_ok());
     }
 
     #[def_test]
     fn test_owner_read_denied_when_bit_clear() {
         let m = meta(1000, 1000, 0o000);
-        assert!(check_permission(&m, Permission::MAY_READ, &creds(1000, 2000, &[])).is_err());
+        assert!(check_dac_permission(&m, Permission::MAY_READ, &creds(1000, 2000, &[])).is_err());
     }
 
     #[def_test]
     fn test_owner_write_allowed() {
         let m = meta(1000, 1000, 0o200);
-        assert!(check_permission(&m, Permission::MAY_WRITE, &creds(1000, 2000, &[])).is_ok());
+        assert!(check_dac_permission(&m, Permission::MAY_WRITE, &creds(1000, 2000, &[])).is_ok());
     }
 
     #[def_test]
     fn test_owner_exec_allowed() {
         let m = meta(1000, 1000, 0o100);
-        assert!(check_permission(&m, Permission::MAY_EXEC, &creds(1000, 2000, &[])).is_ok());
+        assert!(check_dac_permission(&m, Permission::MAY_EXEC, &creds(1000, 2000, &[])).is_ok());
     }
 
     #[def_test]
     fn test_group_read_allowed_via_gid() {
         let m = meta(0, 2000, 0o040);
-        assert!(check_permission(&m, Permission::MAY_READ, &creds(1000, 2000, &[])).is_ok());
+        assert!(check_dac_permission(&m, Permission::MAY_READ, &creds(1000, 2000, &[])).is_ok());
     }
 
     #[def_test]
     fn test_group_read_allowed_via_supplementary() {
         let m = meta(0, 3000, 0o040);
-        assert!(check_permission(&m, Permission::MAY_READ, &creds(1000, 2000, &[3000])).is_ok());
+        assert!(
+            check_dac_permission(&m, Permission::MAY_READ, &creds(1000, 2000, &[3000])).is_ok()
+        );
     }
 
     #[def_test]
     fn test_group_read_denied_when_not_member() {
         let m = meta(0, 3000, 0o040);
-        assert!(check_permission(&m, Permission::MAY_READ, &creds(1000, 2000, &[])).is_err());
+        assert!(check_dac_permission(&m, Permission::MAY_READ, &creds(1000, 2000, &[])).is_err());
     }
 
     #[def_test]
     fn test_other_read_allowed() {
         let m = meta(0, 0, 0o004);
-        assert!(check_permission(&m, Permission::MAY_READ, &creds(1000, 2000, &[])).is_ok());
+        assert!(check_dac_permission(&m, Permission::MAY_READ, &creds(1000, 2000, &[])).is_ok());
     }
 
     #[def_test]
     fn test_other_write_denied_when_bit_clear() {
         let m = meta(0, 0, 0o004);
-        assert!(check_permission(&m, Permission::MAY_WRITE, &creds(1000, 2000, &[])).is_err());
+        assert!(check_dac_permission(&m, Permission::MAY_WRITE, &creds(1000, 2000, &[])).is_err());
     }
 
     #[def_test]
     fn test_root_read_bypasses_zero_mode() {
         let m = meta(1000, 1000, 0o000);
-        assert!(check_permission(&m, Permission::MAY_READ, &creds(0, 0, &[])).is_ok());
+        assert!(check_dac_permission(&m, Permission::MAY_READ, &creds(0, 0, &[])).is_ok());
     }
 
     #[def_test]
     fn test_root_write_bypasses_zero_mode() {
         let m = meta(1000, 1000, 0o000);
-        assert!(check_permission(&m, Permission::MAY_WRITE, &creds(0, 0, &[])).is_ok());
+        assert!(check_dac_permission(&m, Permission::MAY_WRITE, &creds(0, 0, &[])).is_ok());
     }
 
     #[def_test]
     fn test_root_exec_denied_when_no_exec_bit() {
         let m = meta(1000, 1000, 0o666);
-        assert!(check_permission(&m, Permission::MAY_EXEC, &creds(0, 0, &[])).is_err());
+        assert!(check_dac_permission(&m, Permission::MAY_EXEC, &creds(0, 0, &[])).is_err());
     }
 
     #[def_test]
     fn test_root_dir_search_bypasses_missing_exec_bit() {
         let mut m = meta(1000, 1000, 0o000);
         m.mode = m.mode.with_node_type(NodeType::Directory);
-        assert!(check_permission(&m, Permission::MAY_EXEC, &creds(0, 0, &[])).is_ok());
+        assert!(check_dac_permission(&m, Permission::MAY_EXEC, &creds(0, 0, &[])).is_ok());
     }
 
     #[def_test]
     fn test_root_exec_allowed_when_any_exec_bit_set() {
         let m = meta(1000, 1000, 0o711);
-        assert!(check_permission(&m, Permission::MAY_EXEC, &creds(0, 0, &[])).is_ok());
+        assert!(check_dac_permission(&m, Permission::MAY_EXEC, &creds(0, 0, &[])).is_ok());
     }
 
     #[def_test]
     fn test_owner_rw_allowed() {
         let m = meta(1000, 1000, 0o600);
         assert!(
-            check_permission(
+            check_dac_permission(
                 &m,
                 Permission::MAY_READ | Permission::MAY_WRITE,
                 &creds(1000, 2000, &[])
@@ -275,50 +278,52 @@ mod tests {
     #[def_test]
     fn test_empty_request_always_allowed() {
         let m = meta(1000, 1000, 0o000);
-        assert!(check_permission(&m, Permission::empty(), &creds(1000, 2000, &[])).is_ok());
+        assert!(check_dac_permission(&m, Permission::empty(), &creds(1000, 2000, &[])).is_ok());
     }
 
     #[def_test]
     fn test_group_write_allowed_via_gid() {
         let m = meta(0, 2000, 0o020);
-        assert!(check_permission(&m, Permission::MAY_WRITE, &creds(1000, 2000, &[])).is_ok());
+        assert!(check_dac_permission(&m, Permission::MAY_WRITE, &creds(1000, 2000, &[])).is_ok());
     }
 
     #[def_test]
     fn test_group_exec_allowed_via_supplementary() {
         let m = meta(0, 3000, 0o010);
-        assert!(check_permission(&m, Permission::MAY_EXEC, &creds(1000, 2000, &[3000])).is_ok());
+        assert!(
+            check_dac_permission(&m, Permission::MAY_EXEC, &creds(1000, 2000, &[3000])).is_ok()
+        );
     }
 
     #[def_test]
     fn test_other_exec_allowed() {
         let m = meta(0, 0, 0o001);
-        assert!(check_permission(&m, Permission::MAY_EXEC, &creds(1000, 2000, &[])).is_ok());
+        assert!(check_dac_permission(&m, Permission::MAY_EXEC, &creds(1000, 2000, &[])).is_ok());
     }
 
     #[def_test]
     fn test_other_exec_denied_when_bit_clear() {
         let m = meta(0, 0, 0o006);
-        assert!(check_permission(&m, Permission::MAY_EXEC, &creds(1000, 2000, &[])).is_err());
+        assert!(check_dac_permission(&m, Permission::MAY_EXEC, &creds(1000, 2000, &[])).is_err());
     }
 
     #[def_test]
     fn test_dir_search_allowed_for_owner() {
         let mut m = meta(1000, 1000, 0o100);
         m.mode = m.mode.with_node_type(NodeType::Directory);
-        assert!(check_permission(&m, Permission::MAY_EXEC, &creds(1000, 2000, &[])).is_ok());
+        assert!(check_dac_permission(&m, Permission::MAY_EXEC, &creds(1000, 2000, &[])).is_ok());
     }
 
     #[def_test]
     fn test_dir_search_denied_when_exec_bit_clear() {
         let mut m = meta(1000, 1000, 0o600);
         m.mode = m.mode.with_node_type(NodeType::Directory);
-        assert!(check_permission(&m, Permission::MAY_EXEC, &creds(1000, 2000, &[])).is_err());
+        assert!(check_dac_permission(&m, Permission::MAY_EXEC, &creds(1000, 2000, &[])).is_err());
     }
 
     #[def_test]
     fn test_owner_bits_used_when_uid_matches_even_if_group_denies() {
         let m = meta(1000, 1000, 0o040);
-        assert!(check_permission(&m, Permission::MAY_READ, &creds(1000, 1000, &[])).is_err());
+        assert!(check_dac_permission(&m, Permission::MAY_READ, &creds(1000, 1000, &[])).is_err());
     }
 }

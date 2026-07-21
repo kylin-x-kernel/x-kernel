@@ -7,6 +7,7 @@
 use alloc::{format, string::String, sync::Arc};
 use core::{any::Any, time::Duration};
 
+use kcred::Cred;
 use klazy::Once;
 
 use crate::{
@@ -76,13 +77,14 @@ impl AnonInodeFs {
         private_data: Arc<T>,
         flags: FMode,
         open_flags: OpenFlags,
+        cred: Arc<Cred>,
     ) -> VfsResult<Arc<VfsFile>>
     where
         T: Any + Send + Sync + 'static,
     {
         let open_flags =
             open_flags & (OpenFlags::WRITE_ONLY | OpenFlags::READ_WRITE | OpenFlags::NONBLOCK);
-        let file = self.alloc_file(name, flags, open_flags, fops)?;
+        let file = self.alloc_file(name, flags, open_flags, fops, cred)?;
         file.set_private_data(private_data);
         Ok(file)
     }
@@ -93,15 +95,20 @@ impl AnonInodeFs {
         flags: FMode,
         open_flags: OpenFlags,
         fops: Arc<dyn FileOperations>,
+        cred: Arc<Cred>,
     ) -> VfsResult<Arc<VfsFile>> {
-        self.mount.alloc_file_pseudo_with_dentry_operations(
+        let file = self.mount.alloc_file_pseudo(
             self.singleton_inode.clone(),
             name,
             flags,
             open_flags,
             fops,
-            self.dentry_operations.clone(),
-        )
+            cred,
+        )?;
+        file.path()
+            .dentry()
+            .set_operations(self.dentry_operations.clone());
+        Ok(file)
     }
 }
 

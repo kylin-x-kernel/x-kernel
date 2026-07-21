@@ -212,6 +212,7 @@ fn bpf_map_create(attr_ptr: usize, size: u32) -> KResult<isize> {
             attr.value_size,
             attr.max_entries,
             attr.map_flags,
+            kprocess::current_cred(),
         )?,
         true,
     )?;
@@ -304,7 +305,12 @@ fn bpf_prog_load(attr_ptr: usize, size: u32) -> KResult<isize> {
 
     let arc_insns: Arc<[u8]> = insns.into_boxed_slice().into();
     let fd = kprocess::current_resources().add_file(
-        BpfProgram::new_file(arc_insns, prefix.prog_type, map_values)?,
+        BpfProgram::new_file(
+            arc_insns,
+            prefix.prog_type,
+            map_values,
+            kprocess::current_cred(),
+        )?,
         true,
     )?;
     Ok(fd as isize)
@@ -321,10 +327,11 @@ fn bpf_obj_pin(attr_ptr: usize, size: u32) -> KResult<isize> {
 
     let fs_struct = kprocess::current_fs_context();
     let fs = fs_struct.lock();
+    let cred = kprocess::current_cred();
     let (parent, name) = Filename::new(pathname.as_str())
-        .parent_at(fs.root(), fs.pwd(), LookupIntent::Open)?
+        .parent_at(fs.root(), fs.pwd(), LookupIntent::Open, &cred)?
         .into_normal()?;
-    bpffs::pin_program(&parent, name.as_str(), program)?;
+    bpffs::pin_program(&parent, name.as_str(), program, &cred)?;
     Ok(0)
 }
 
@@ -337,14 +344,16 @@ fn bpf_obj_get(attr_ptr: usize, size: u32) -> KResult<isize> {
 
     let fs_struct = kprocess::current_fs_context();
     let fs = fs_struct.lock();
+    let cred = kprocess::current_cred();
     let location = Filename::new(pathname.as_str()).lookup_at(
         fs.root(),
         fs.pwd(),
         LookupIntent::Open,
         LookupFlags::follow(),
+        &cred,
     )?;
     let program = bpffs::program_from_location(&location)?;
-    let fd = kprocess::current_resources().add_file(program.into_file()?, true)?;
+    let fd = kprocess::current_resources().add_file(program.into_file(cred)?, true)?;
     Ok(fd as isize)
 }
 

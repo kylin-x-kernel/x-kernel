@@ -405,7 +405,11 @@ pub fn sys_signalfd4(
         return Ok(fd as _);
     }
 
-    let file = Signalfd::new_file(mask, O_RDWR | (flags.bits() & O_NONBLOCK))?;
+    let file = Signalfd::new_file(
+        mask,
+        O_RDWR | (flags.bits() & O_NONBLOCK),
+        kprocess::current_cred(),
+    )?;
 
     kprocess::current_resources()
         .add_file(file, flags.contains(SignalfdFlags::CLOEXEC))

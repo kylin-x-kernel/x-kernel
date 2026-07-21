@@ -7,8 +7,9 @@
 它维护 process、thread、process group、session、父子关系、线程组成员、退出状态、
 publication/registry、signal targeting、timer delivery glue、controlling terminal 绑定。
 当前 `Process` 自身保留一个强类型的弱 runtime 引用
-（`Weak<ProcessRuntime>`），并直接对外提供 fs/mm/signal/timer/credential
-等 capability 方法；但外部 `live process` 语义不再以弱 runtime 引用为判据，
+（`Weak<ProcessRuntime>`），并直接对外提供 fs/mm/signal/timer
+等 capability 方法；每个 `Thread` 则持有自己的 objective/subjective credential
+指针。外部 `live process` 语义不以弱 runtime 引用为判据，
 而是以 `Process` 生命周期状态是否已经进入 zombie 为准。
 `current_user_*` helpers 显式要求当前 task 必须已经安装 user-thread runtime。
 `posix/process`、`ksyscall`、`ktty`、procfs 等模块只通过 `Process` 公开 API
@@ -77,6 +78,10 @@ Process
   ├─ group: Arc<ProcessGroup>
   └─ runtime_ref: Option<Weak<ProcessRuntime>>
               │
+              ├─ Thread
+              │    ├─ real_cred: RwLock<Arc<Cred>>
+              │    └─ cred: RwLock<Arc<Cred>>
+              │
               v
         ProcessGroup
           ├─ processes: WeakMap<Pid, Weak<Process>>
@@ -97,6 +102,7 @@ Process
 | `procfs` / `scheduler` / `job_control` / `pidfd` / `process_signals` / `resource_limits` / `process_exit` / `wait_reap` / `system_view` | 面向外部领域语义的窄接口层；外部模块通过这些模块表达“要做什么”，而不是自己理解 `published/live` |
 | `ProcessLifecycleState` | 保存子进程退出事件、进程退出事件、已退出线程 CPU time 和已回收子进程 CPU time |
 | `ThreadGroup` | 保存进程自有的 published 线程成员表（`tid -> weak task`）、进程退出码和 group-exit 标志 |
+| `Thread` | 保存 task identity、所属 process/runtime、objective `real_cred`、subjective `cred` 和线程私有状态 |
 | `ProcessGroup` | 保存 PGID、所属 session 和弱引用进程成员表 |
 | `Session` | 保存 SID、弱引用进程组表和 controlling terminal |
 | `INIT_PROC` | 保存全局 init 进程，供退出 reparent 和 `init_proc` 查询 |
@@ -156,14 +162,16 @@ Inherited group
    task/PID identity 层，而不是 `NsProxy`。
 3. 再创建子进程稳定身份、加入 group 的 weak member 表、挂到父进程 children 表。
 4. 然后在同一个 owner 域内创建 `ProcessRuntime`、地址空间、文件表和信号状态，并把弱 runtime 引用登记到新 `Process`。
-5. syscall 层通过 staged publication 事务先完成 publication，使 PID/TID 与 group/session lookup 对外一致可见；随后执行 `CLONE_PARENT_SETTID` / `CLONE_PIDFD` 等父侧 writeback，成功后才把 task 变为 runnable，失败则回滚 publication 与 owner-side child membership。顺序对齐 Linux `kernel_clone()` 的“先完成 parent-side return setup，再 `wake_up_new_task()`”约束。
+5. child `Thread` 取得调用线程 subjective credential 的同一 `Arc<Cred>` 快照，并分别安装为自己的 `real_cred` 和 `cred`。
+6. syscall 层通过 staged publication 事务先完成 publication，使 PID/TID 与 group/session lookup 对外一致可见；随后执行 `CLONE_PARENT_SETTID` / `CLONE_PIDFD` 等父侧 writeback，成功后才把 task 变为 runnable，失败则回滚 publication 与 owner-side child membership。顺序对齐 Linux `kernel_clone()` 的“先完成 parent-side return setup，再 `wake_up_new_task()`”约束。
 
 ### 创建同进程线程
 
 1. process-domain owner 为 sibling thread 分配新的 thread `PidHandle`。
 2. 新 `Thread` 复用所属 `Process` 与 `ProcessRuntime`，并要求 task-owned identity 与 thread identity 保持一致。
-3. `prepare_user_task()` 在发布前校验 task identity / thread identity 一致性。
-4. publication 在单次 owner-side 事务里同时更新 task/process/group/session 可见性，并把 task 挂入 `Process` 自有线程成员表；事务对象在 activation 前若失败或被丢弃，会自动回滚 task/process 可见性以及未提交 child 的 owner-side 成员关系。可观测方应通过语义 helper 查询 published thread，而不是扫描全局 task 目录反推成员关系。
+3. 新 `Thread` 初始共享调用线程的 committed credential `Arc`，之后任一线程提交新凭据时只替换自己的两个指针。
+4. `prepare_user_task()` 在发布前校验 task identity / thread identity 一致性。
+5. publication 在单次 owner-side 事务里同时更新 task/process/group/session 可见性，并把 task 挂入 `Process` 自有线程成员表；事务对象在 activation 前若失败或被丢弃，会自动回滚 task/process 可见性以及未提交 child 的 owner-side 成员关系。可观测方应通过语义 helper 查询 published thread，而不是扫描全局 task 目录反推成员关系。
 
 ### 创建 session
 
@@ -192,6 +200,7 @@ Inherited group
 - `PidHandle` 已能携带 namespace 链，但 `kprocess` 对外 `pid()/tid()` 仍固定返回 root/global 编号；在 wait、kill、procfs、registry 全部 namespace-aware 之前，不把 namespace-visible 编号暴露到对外主语义。
 - `ProcessLifecycleState` 的 wait 事件通过 `Arc<PollSet>` 共享，已退出线程和已回收 child CPU time 使用 relaxed 原子累计。
 - `ProcessGroup::processes` 和 `Session::process_groups` 使用 `WeakMap`，避免 group/session 成员表延长成员生命周期。
+- `Thread::real_cred` 与 `Thread::cred` 分别使用 `RwLock<Arc<Cred>>`；读路径只克隆 `Arc`，写路径按固定顺序同时替换两个指针。
 - `Session::terminal` 使用 `SpinNoIrq<Option<Arc<dyn Any + Send + Sync>>>`，controlling terminal 只能设置一次，清除时要求对象指针匹配。
 - `is_zombie` 使用 `AtomicBool`，`exit` 使用 Release 写入，`is_zombie` 使用 Acquire 读取。
 - `set_group` 同时修改当前 process、旧 group 和新 group，调用者应避免在外部持有这些对象的成员锁后再调用 group mutation API。
@@ -201,12 +210,26 @@ Inherited group
 ### 关系对象独立于运行时资源
 
 `kprocess` 只维护进程身份关系和生命周期摘要。
-地址空间 capability 留在 `kprocess` runtime，文件描述符、credential 和信号处理
-分别由 `kresources`、`kcred`、`ksignal` 拥有；non-PI futex waiter 由 `kfutex`
+地址空间 capability 留在 `kprocess` runtime，文件描述符和信号处理
+分别由 `kresources`、`ksignal` 拥有；credential 的数据与转换策略由 `kcred` 定义，
+task 级 committed credential 指针由 `Thread` 拥有；non-PI futex waiter 由 `kfutex`
 全局固定 bucket 独立拥有，不再保存 process-owned futex table。
 这种分层让 job-control 关系能够被多个上层模块共享，也避免 `kprocess` 变成进程运行时状态集合。
 保留弱 runtime 引用是为了让稳定 `Process` 对象自己承载“升级到运行态 capability”的入口，
 而不是让外部再依赖额外 trait 或第二层全局 registry 真相。
+
+### 凭据归属于 task
+
+Linux 的 `task_struct` 同时持有 objective `real_cred` 与 subjective `cred`。x-kernel 将
+这两个引用直接放在 `Thread`，而不是 `ProcessRuntime` 或文件系统对象中。
+`current_cred()` / `current_real_cred()` 只负责从当前 `Thread` 克隆 committed `Arc`；
+`prepare_creds()` 返回未提交副本，`commit_creds()` 在转换成功后原子替换当前线程的
+两个指针。当前没有 override credential，因此提交时要求两个旧指针相同。
+
+VFS 处于 `kprocess` 下层，不能调用这些 current helpers。syscall 入口取得一次快照后
+显式传入 `kvfs`。匿名 fd 的资源 owner 同样接收显式 `Arc<Cred>`，pidfd 构造也由
+syscall adapter 提供快照；credential 最终只保存在 `VfsFile::f_cred`，不复制进资源对象。
+这样既保持单向依赖和一次操作的身份一致性，也允许内核任务明确选择其凭据。
 
 ### 查询策略层与领域接口层分离
 

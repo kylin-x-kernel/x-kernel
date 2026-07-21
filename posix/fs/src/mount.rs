@@ -112,6 +112,7 @@ pub fn sys_mount(
         _ => return Err(KError::NoSuchDevice),
     };
     let process = current_user_process();
+    let cred = kprocess::current_cred();
     let fs_struct = process.fs_context()?;
     let fs = fs_struct.lock();
     let target = Filename::new(target.as_str()).lookup_at(
@@ -119,6 +120,7 @@ pub fn sys_mount(
         fs.pwd(),
         LookupIntent::Open,
         LookupFlags::follow(),
+        &cred,
     )?;
     process
         .mnt_ns()?
@@ -147,6 +149,7 @@ pub fn sys_umount2(target: UserConstPtr<c_char>, flags: i32) -> KResult<isize> {
     debug!("sys_umount2 <= target: {target:?}");
 
     let process = current_user_process();
+    let cred = kprocess::current_cred();
     let fs_struct = process.fs_context()?;
     let fs = fs_struct.lock();
     let target = Filename::new(target.as_str()).lookup_at(
@@ -154,6 +157,7 @@ pub fn sys_umount2(target: UserConstPtr<c_char>, flags: i32) -> KResult<isize> {
         fs.pwd(),
         LookupIntent::Open,
         LookupFlags::follow(),
+        &cred,
     )?;
     process.mnt_ns()?.detach(&target)?;
     Ok(0)

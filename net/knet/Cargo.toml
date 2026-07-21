@@ -23,6 +23,7 @@ khal = { workspace = true }
 ksync = { workspace = true }
 ktask = { workspace = true }
 kprocess = { workspace = true }
+kcred = { workspace = true }
 kerrno = { workspace = true }
 kvfs = { workspace = true }
 kio = { workspace = true, features = ["alloc"] }

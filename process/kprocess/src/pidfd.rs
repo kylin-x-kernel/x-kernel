@@ -5,6 +5,7 @@
 use alloc::sync::Arc;
 use core::task::Context;
 
+use kcred::Cred;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ktask::KtaskRef;
@@ -28,7 +29,13 @@ impl PidFd {
     }
 
     /// Create the anonymous-inode file used by `pidfd_open`.
-    pub fn new_file(process: &Arc<Process>, open_flags: u32) -> KResult<Arc<VfsFile>> {
+    ///
+    /// `cred` is captured as the new file's immutable open credential.
+    pub fn new_file(
+        process: &Arc<Process>,
+        open_flags: u32,
+        cred: Arc<Cred>,
+    ) -> KResult<Arc<VfsFile>> {
         let open_flags = OpenFlags::from_bits(open_flags).ok_or(KError::InvalidInput)?;
         AnonInodeFs::global().get_file(
             "[pidfd]",
@@ -36,6 +43,7 @@ impl PidFd {
             Arc::new(Self::new(process)),
             FMode::READ | FMode::STREAM,
             open_flags,
+            cred,
         )
     }
 

@@ -11,7 +11,7 @@ use core::{
 };
 
 use kerrno::{KError, KResult};
-use kvfs::{DirContext, Filename, LookupFlags, LookupIntent, NodePermission, NodeType};
+use kvfs::{DirContext, Filename, LookupFlags, LookupIntent, NodePermission, NodeType, Permission};
 use linux_raw_sys::general::*;
 use osvm::VirtPtr;
 use posix_types::{UserConstPtr, UserPtr};
@@ -22,6 +22,7 @@ use crate::path::with_fs;
 pub fn sys_chdir(path: UserConstPtr<c_char>) -> KResult<isize> {
     let path = path.load_string()?;
     debug!("sys_chdir <= path: {path}");
+    let cred = kprocess::current_cred();
 
     let entry = with_fs(AT_FDCWD, |fs| {
         Filename::new(path.as_str()).lookup_at(
@@ -29,8 +30,10 @@ pub fn sys_chdir(path: UserConstPtr<c_char>) -> KResult<isize> {
             fs.pwd(),
             LookupIntent::Open,
             LookupFlags::follow(),
+            &cred,
         )
     })?;
+    entry.permission(Permission::MAY_EXEC | Permission::MAY_CHDIR, &cred)?;
     kprocess::current_user_process()
         .fs_context()?
         .lock()
@@ -43,6 +46,10 @@ pub fn sys_fchdir(dirfd: i32) -> KResult<isize> {
     debug!("sys_fchdir <= dirfd: {dirfd}");
 
     let entry = with_fs(dirfd, |fs| Ok(fs.pwd().clone()))?;
+    entry.permission(
+        Permission::MAY_EXEC | Permission::MAY_CHDIR,
+        &kprocess::current_cred(),
+    )?;
     kprocess::current_user_process()
         .fs_context()?
         .lock()
@@ -59,6 +66,7 @@ pub fn sys_mkdir(path: UserConstPtr<c_char>, mode: u32) -> KResult<isize> {
 pub fn sys_chroot(path: UserConstPtr<c_char>) -> KResult<isize> {
     let path = path.load_string()?;
     debug!("sys_chroot <= path: {path}");
+    let cred = kprocess::current_cred();
 
     let loc = with_fs(AT_FDCWD, |fs| {
         Filename::new(path.as_str()).lookup_at(
@@ -66,10 +74,15 @@ pub fn sys_chroot(path: UserConstPtr<c_char>) -> KResult<isize> {
             fs.pwd(),
             LookupIntent::Open,
             LookupFlags::follow(),
+            &cred,
         )
     })?;
     if !loc.is_dir() {
         return Err(KError::NotADirectory);
+    }
+    loc.permission(Permission::MAY_EXEC, &cred)?;
+    if !cred.is_privileged() {
+        return Err(KError::OperationNotPermitted);
     }
     kprocess::current_user_process()
         .fs_context()?
@@ -85,6 +98,7 @@ pub fn sys_mkdirat(dirfd: i32, path: UserConstPtr<c_char>, mode: u32) -> KResult
 
     let mode = mode & !kprocess::current_umask();
     let mode = NodePermission::from_bits_truncate(mode as u16);
+    let cred = kprocess::current_cred();
 
     with_fs(dirfd, |fs| {
         let path_exists = || {
@@ -94,6 +108,7 @@ pub fn sys_mkdirat(dirfd: i32, path: UserConstPtr<c_char>, mode: u32) -> KResult
                     fs.pwd(),
                     LookupIntent::Open,
                     LookupFlags::no_follow(),
+                    &cred,
                 )
                 .is_ok()
         };
@@ -102,6 +117,7 @@ pub fn sys_mkdirat(dirfd: i32, path: UserConstPtr<c_char>, mode: u32) -> KResult
             fs.pwd(),
             LookupIntent::Open,
             LookupFlags::DIRECTORY,
+            &cred,
         ) {
             Ok(parent) => parent,
             Err(KError::InvalidInput) if !path.is_empty() && path_exists() => {
@@ -109,7 +125,7 @@ pub fn sys_mkdirat(dirfd: i32, path: UserConstPtr<c_char>, mode: u32) -> KResult
             }
             Err(err) => return Err(err),
         };
-        match dir.mkdir(&name, mode) {
+        match dir.mkdir(&name, mode, &cred) {
             Ok(_) => Ok(0),
             Err(KError::InvalidInput) if !path.is_empty() && path_exists() => {
                 Err(KError::AlreadyExists)

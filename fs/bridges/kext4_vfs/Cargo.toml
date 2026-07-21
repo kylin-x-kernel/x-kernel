@@ -18,6 +18,7 @@ block.workspace = true
 fs_block.workspace = true
 iov_iter.workspace = true
 kclass = { workspace = true, features = ["block"] }
+kcred.workspace = true
 kerrno.workspace = true
 kext4.workspace = true
 khal = { workspace = true, optional = true }

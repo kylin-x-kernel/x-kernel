@@ -113,7 +113,7 @@ core/kruntime
 | `GeneralOptions` | 统一管理 nonblock、reuseaddr、超时和设备 mask |
 | `SocketOps` | 上层 socket syscall 使用的统一操作接口 |
 | `netlink` | 提供 AF_NETLINK socket、kobject uevent 和有限 rtnetlink 控制面 |
-| `unix` | 提供 Unix domain stream 与 datagram transport |
+| `unix` | 提供 Unix domain stream 与 datagram transport；pathname 地址通过 kvfs 查找或创建 socket inode |
 | `vsock` | 在 `vsock` feature 下提供 virtio-vsock stream 支持 |
 
 ## 调用约束 / 执行上下文
@@ -141,6 +141,10 @@ core/kruntime
   的共享访问主要依赖全局锁和原子状态，
   但 syscall 语义相关路径仍由 `posix/net`
   负责提供进程文件描述符与凭据语境。
+- **pathname Unix socket 需要文件系统与凭据语境**：
+  用户态 `bind` / `connect` 必须在具有当前线程和 fs context 的任务中调用；
+  不具有当前用户任务的内核调用者必须使用 `bind_with_cred`
+  显式传入凭据，并保证调用环境具有可用的 fs context。
 - **可重入性受全局锁约束**：
   允许多执行路径并发进入 crate，
   但同一时刻对 `Service`、`SocketSet`
@@ -236,6 +240,20 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 6. POSIX 层通过 `AcceptOptions` 传入监听文件的 nonblocking 状态；accept 队列为空时，
    nonblocking 调用返回 `WouldBlock`，由用户态 poll/epoll 负责等待下一次可读事件。
 
+### Unix pathname bind 和 connect
+
+1. 用户态 `SocketOps::bind` 在操作入口获取一次当前线程的 `Arc<Cred>` 快照，并计算
+   `0777 & !umask`，随后调用 `bind_with_cred`。
+2. `bind_with_cred` 使用同一份 `&Cred` 和明确 mode，通过 `parent_at` 与 `Path::mknod`
+   排他创建 socket inode；任意已有路径都映射为 `EADDRINUSE`，不会复用已有 socket inode。
+3. kvfs 负责检查每一级目录的 search 权限、父目录的 write/search 权限，并以
+   `fsuid` / `fsgid` 初始化新 inode 的属主。
+4. 不具有当前用户任务的内核调用者显式传入凭据和 mode；例如 devfs 创建 `/dev/log`
+   时传入 `initial_cred()` 与 `0755`，不尝试读取不存在的当前线程凭据。
+5. pathname `connect` 和 datagram `sendto` 在操作入口获取凭据；kvfs 使用该快照完成
+   全路径查找，并要求最终 socket inode 具有 `MAY_WRITE` 后才查询内存 binding。
+6. abstract 地址不进入 VFS，因此不执行 pathname DAC 检查。
+
 ### rtnetlink 请求
 
 1. `NetlinkSocket::send` 把用户请求交给 `handle_route_request`。
@@ -268,6 +286,15 @@ smoltcp 已提供 no_std TCP、UDP、raw socket 和 interface poll 模型。
 rtnetlink mutation 先更新 `RtnetlinkState`，再同步到 `Service`、`Router`、smoltcp `Interface` 和 `NetDevice`。
 这种结构让 netlink dump 有稳定的 ABI presentation，也让路由表和设备地址能通过同一状态来源重建。
 代价是 dump 当前读取控制面状态，运行时统计、驱动瞬时状态和 smoltcp 内部计数没有完整反查。
+
+### pathname Unix socket 显式传递凭据
+
+Linux 可从任务上下文隐式读取 `current_cred()`，但 knet 也服务于启动期内核调用者。
+因此用户态入口只在操作开始时获取一次凭据快照，pathname VFS 路径继续显式接收 `&Cred`；
+内核调用者通过 `bind_with_cred` 选择明确的凭据。
+凭据不保存在 Unix socket、pathname lookup 状态或 dentry 中，避免凭据生命周期与路径状态耦合。
+`sock_alloc_file` 也显式接收 `Arc<Cred>`，只把它交给 `VfsFile::f_cred`；socket 对象不保存
+第二份 credential，也不在 knet 内部读取当前 task。
 
 ### 设备 mask 驱动 RX 唤醒
 

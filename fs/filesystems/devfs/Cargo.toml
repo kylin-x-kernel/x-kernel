@@ -18,6 +18,7 @@ dice = ["dep:dice_driver", "dep:klazy", "dep:tee_crypto"]
 
 [dependencies]
 kalloc.workspace = true
+kcred.workspace = true
 kexec.workspace = true
 kerrno.workspace = true
 khal.workspace = true

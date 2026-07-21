@@ -141,6 +141,7 @@ fn main() {
 
     {
         let fs_struct = fs_context::init_fs().lock().clone_for_process();
+        let cred = kcred::initial_cred();
 
         warn!("Cleaning up stale coverage data if exists...");
         let remove_result = kvfs::Filename::new("/.llvm-cov/default.profraw")
@@ -149,12 +150,13 @@ fn main() {
                 fs_struct.pwd(),
                 kvfs::LookupIntent::Open,
                 kvfs::LookupFlags::no_follow(),
+                &cred,
             )
             .and_then(|file| {
                 let name = file.name();
                 file.parent()
                     .ok_or(kvfs::VfsError::IsADirectory)?
-                    .unlink(&name)
+                    .unlink(&name, &cred)
             });
         if let Err(err) = remove_result {
             if err.canonicalize() != kvfs::VfsError::NotFound {
@@ -335,6 +337,7 @@ fn main() {
         error!("write_profraw failed: {:?}", e);
     } else if !cov.is_empty() {
         let fs_struct = fs_context::init_fs().lock().clone_for_process();
+        let cred = kcred::initial_cred();
         let write_result = (|| -> kvfs::VfsResult<()> {
             let _ = kvfs::Filename::new("/.llvm-cov")
                 .create_at(
@@ -342,8 +345,9 @@ fn main() {
                     fs_struct.pwd(),
                     kvfs::LookupIntent::Open,
                     kvfs::LookupFlags::DIRECTORY,
+                    &cred,
                 )
-                .and_then(|(dir, name)| dir.mkdir(&name, kvfs::NodePermission::default()));
+                .and_then(|(dir, name)| dir.mkdir(&name, kvfs::NodePermission::default(), &cred));
             let file = kvfs::Filename::new("/.llvm-cov/default.profraw").open_with_flags_at(
                 fs_struct.root(),
                 fs_struct.pwd(),
@@ -351,6 +355,7 @@ fn main() {
                     | linux_raw_sys::general::O_CREAT
                     | linux_raw_sys::general::O_TRUNC,
                 kvfs::NodePermission::from_bits_truncate(0o644),
+                cred.clone(),
             )?;
             let mut pos = 0;
             file.write_from(cov.as_slice(), &mut pos)?;

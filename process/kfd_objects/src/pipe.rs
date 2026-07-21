@@ -7,6 +7,7 @@
 use alloc::{collections::VecDeque, sync::Arc};
 use core::task::Context;
 
+use kcred::Cred;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksignal::{Signo, send_sig_current};
@@ -334,9 +335,12 @@ fn pipe_close_writer(pipe: &PipeObject) {
 }
 
 /// Create the read and write VFS files for an anonymous pipe.
+///
+/// Both file views capture the same `cred` as their open credential.
 pub fn create_pipe_files(
     read_flags: u32,
     write_flags: u32,
+    cred: Arc<Cred>,
 ) -> KResult<(Arc<VfsFile>, Arc<VfsFile>)> {
     let read_flags = OpenFlags::from_bits(read_flags).ok_or(KError::InvalidInput)?;
     let write_flags = OpenFlags::from_bits(write_flags).ok_or(KError::InvalidInput)?;
@@ -348,6 +352,7 @@ pub fn create_pipe_files(
         pipe.clone(),
         FMode::WRITE | FMode::STREAM,
         write_flags,
+        cred,
     )?;
 
     let read_file = write_file.alloc_clone_with_private_data(
@@ -380,7 +385,8 @@ mod tests {
     use super::*;
 
     fn pipe_files() -> (Arc<VfsFile>, Arc<VfsFile>, Arc<PipeObject>) {
-        let (read_file, write_file) = create_pipe_files(0, 0).expect("anonymous pipe files open");
+        let (read_file, write_file) =
+            create_pipe_files(0, 0, kcred::initial_cred()).expect("anonymous pipe files open");
         let pipe = PipeObject::from_file(&read_file).expect("pipe private data is installed");
         (read_file, write_file, pipe)
     }

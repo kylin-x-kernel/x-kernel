@@ -11,6 +11,7 @@ use core::{
     time::Duration,
 };
 
+use kcred::Cred;
 use kerrno::{KError, KResult};
 use khal::time::{self, monotonic_time, wall_time};
 use kpoll::{IoEvents, PollSet, Pollable};
@@ -98,8 +99,8 @@ impl TimerFd {
         })
     }
 
-    /// Create the anonymous-inode file used by `timerfd_create`.
-    pub fn new_file(clock_id: u32, open_flags: u32) -> KResult<Arc<VfsFile>> {
+    /// Creates the timerfd anonymous-inode file and captures `cred` as its open credential.
+    pub fn new_file(clock_id: u32, open_flags: u32, cred: Arc<Cred>) -> KResult<Arc<VfsFile>> {
         let open_flags = OpenFlags::from_bits(open_flags).ok_or(KError::InvalidInput)?;
         AnonInodeFs::global().get_file(
             "[timerfd]",
@@ -107,6 +108,7 @@ impl TimerFd {
             Self::new(clock_id),
             FMode::READ | FMode::STREAM,
             open_flags,
+            cred,
         )
     }
 
@@ -323,7 +325,8 @@ mod timerfd_tests {
 
     #[def_test]
     fn test_timerfd_nonblocking() {
-        let file = TimerFd::new_file(CLOCK_MONOTONIC, 0).expect("timerfd file opens");
+        let file = TimerFd::new_file(CLOCK_MONOTONIC, 0, kcred::initial_cred())
+            .expect("timerfd file opens");
         assert!(!file.is_nonblocking());
         file.set_nonblocking(true);
         assert!(file.is_nonblocking());
@@ -356,7 +359,8 @@ mod timerfd_tests {
 
     #[def_test]
     fn test_timerfd_read_small_buffer() {
-        let file = TimerFd::new_file(CLOCK_MONOTONIC, 0).expect("timerfd file opens");
+        let file = TimerFd::new_file(CLOCK_MONOTONIC, 0, kcred::initial_cred())
+            .expect("timerfd file opens");
         let mut small_out = [0u8; 4];
         let mut pos = 0;
         assert_eq!(
@@ -367,7 +371,8 @@ mod timerfd_tests {
 
     #[def_test]
     fn test_timerfd_write_returns_error() {
-        let file = TimerFd::new_file(CLOCK_MONOTONIC, 0).expect("timerfd file opens");
+        let file = TimerFd::new_file(CLOCK_MONOTONIC, 0, kcred::initial_cred())
+            .expect("timerfd file opens");
         let data = b"test1234";
         let mut pos = 0;
         assert!(file.write_from(data, &mut pos).is_err());

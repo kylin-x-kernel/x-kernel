@@ -48,14 +48,14 @@ pub use node::{
     Dentry, DentryOperations, DeviceFileOps, DirContext, DirEntrySink, GetattrQueryFlags,
     GetattrRequestMask, InodeCache, InodeDirOperations, InodeLookupFlags, InodeOperations,
     InodeSymlinkOperations, LockedDentry, MmapMapper, NodeFlags, RenameFlags, VfsInode,
-    VfsInodeInit, WeakVfsInode, bdev_add, bdev_del, cdev_add, cdev_del,
+    VfsInodeInit, WeakVfsInode, bdev_add, bdev_del, cdev_add, cdev_del, inode_init_owner,
 };
 pub(crate) use node::{
     DentryKey, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive,
 };
 pub use open_flags::OpenFlags;
 pub(crate) use open_flags::{AccMode, OpenHow, OpenParams};
-pub use permission::{Permission, check_permission, open_access_to_permission};
+pub use permission::{Permission, generic_permission, open_access_to_permission};
 pub use seq_file::{SeqFile, SeqFileInode, SeqIterator, seq_open};
 pub use simple_dir::{
     ChainedDirOps, DirMaker, DirMapping, IntoDirMappingEntry, SimpleDir, SimpleDirEntry,
@@ -68,7 +68,7 @@ pub use super_block::{
     default_evict_inode, super_block_registry, sync_filesystems,
 };
 pub(crate) use type_map::TypeMap;
-pub use types::{DeviceId, Metadata, MetadataUpdate, NodePermission, NodeType, Umode};
+pub use types::{DeviceId, Metadata, MetadataUpdate, NodePermission, NodeType, SetattrTime, Umode};
 
 pub type VfsError = kerrno::KError;
 pub type VfsResult<T> = Result<T, VfsError>;

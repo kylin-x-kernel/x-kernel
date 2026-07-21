@@ -13,6 +13,7 @@ documentation.workspace = true
 bitflags.workspace = true
 hashbrown.workspace = true
 kerrno.workspace = true
+kcred.workspace = true
 khal.workspace = true
 kio.workspace = true
 klogger.workspace = true

@@ -21,8 +21,9 @@
 
 ```text
 sys_shmget()
+  -> snapshots current Arc<Cred>
   -> ShmManager allocates shmid / key mapping
-       -> ShmInner::new()
+       -> ShmInner::new(cred)
             -> memfs::shmem::create_kernel_file("SYSV...")
        -> shmem object into opened VfsFile
        -> set file length to page-aligned segment size
@@ -46,11 +47,18 @@ physical pages or an anonymous shared object. The file is a private
 tmpfs/shmem-style regular inode whose content is owned by inode-scoped
 `pagecache::Mapping`.
 
+`ShmInner::new()` receives the operation's credential snapshot explicitly. It uses
+the snapshot for the backing file and initializes `shm_perm.uid/gid/cuid/cgid`
+from effective IDs, matching Linux `ipc_addid()`. The credential itself is not
+stored as duplicate `ShmInner` state; the opened `VfsFile` owns its `f_cred`.
+
 ## 执行上下文
 
 - SysV IPC syscall runs in process context.
 - `shmget` may allocate IPC metadata, shmem inode state and page-cache owner
   metadata.
+- Unit-test and kernel-task callers must explicitly choose `initial_cred()` or
+  another credential instead of implicitly reading a nonexistent user thread.
 - `shmat` may allocate VMA metadata and file-backed runtime state.
 - These syscalls must not run from interrupt context.
 

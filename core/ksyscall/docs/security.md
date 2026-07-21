@@ -41,6 +41,7 @@ resource owners
 3. syscall adapter 负责 ABI 级错误码分支，不越权实现 owner 逻辑。
 4. adapter 目录结构应反映 owner 归属，而不是历史 API 分类。
 5. 涉及 current process/thread 的 helper 只能在明确上下文下调用。
+6. syscall 解码只能读取该 ABI 定义的参数；不能信任旧 ABI 未使用寄存器中的残留值。
 
 ## 主要风险
 
@@ -51,11 +52,13 @@ resource owners
 | T-03 | adapter 重复实现 owner 状态机，造成双重语义源 | 高 | 文档明确 `ksyscall` 不拥有长期状态；仅做 ABI 适配 |
 | T-04 | current-thread/process helper 在错误上下文调用 | 中 | 复用 `kprocess` 现有约束，并在 syscall 入口保持 task-context 假设 |
 | T-05 | 不同 syscall 被历史目录误导，后续继续堆入错误模块 | 中 | crate-local design 文档固定 `vfs/ipc/time/task` 的 adapter 语义 |
+| T-06 | `setpriority` 通过进程代表线程漏检目标身份 | 高 | per-thread credential 下仍按 process representative 授权 | `PRIO_*` 选择和扫描均落到具体 task，逐 task 比较 caller euid 与 target real/effective UID，并单独检查提高优先级权限 |
 
 ## 审计清单
 
 - [ ] 新增 syscall 实现是否只做 ABI 适配，而不是复制 owner 状态机？
 - [ ] 新增 adapter 是否放在贴近 owner 的目录，而不是历史 API 杂项目录？
 - [ ] 用户指针访问是否都通过现有封装类型？
+- [ ] 合并相近 syscall 路径时，是否分别遵守各自的参数个数和 flags ABI？
 - [ ] current process/thread helper 的调用上下文是否明确？
 - [ ] 如果修改了 owner 路由关系，是否同步更新本 crate 和 owner crate 文档？

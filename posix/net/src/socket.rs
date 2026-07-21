@@ -48,6 +48,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
     let ty = raw_ty & 0xFF;
 
     let pid = kprocess::current_user_thread().pid();
+    let cred = kprocess::current_cred();
     // Create the appropriate socket type based on domain and type
     let socket = match (domain, ty) {
         (AF_INET, SOCK_STREAM) => {
@@ -88,9 +89,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             knet::Socket::Netlink(Box::new(NetlinkSocket::new(proto as i32)))
         }
         (AF_PACKET, SOCK_RAW) | (AF_PACKET, SOCK_DGRAM) => {
-            if !kprocess::current_user_process()
-                .with_credentials(|credentials| credentials.is_privileged())?
-            {
+            if !cred.is_privileged() {
                 return Err(KError::from(LinuxError::EPERM));
             }
             if proto > u16::MAX as u32 {
@@ -120,7 +119,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
     };
     let cloexec = raw_ty & O_CLOEXEC != 0;
 
-    let file = sock_alloc_file(socket, O_RDWR | (raw_ty & O_NONBLOCK))?;
+    let file = sock_alloc_file(socket, O_RDWR | (raw_ty & O_NONBLOCK), cred)?;
     kprocess::current_resources()
         .add_file(file, cloexec)
         .map(|fd| fd as isize)
@@ -187,7 +186,11 @@ pub fn sys_accept4(
     })?;
 
     let remote_addr = socket.peer_addr()?;
-    let file = sock_alloc_file(socket, O_RDWR | (flags & O_NONBLOCK))?;
+    let file = sock_alloc_file(
+        socket,
+        O_RDWR | (flags & O_NONBLOCK),
+        kprocess::current_cred(),
+    )?;
     let fd = kprocess::current_resources()
         .add_file(file, cloexec)
         .map(|fd| fd as isize)?;
@@ -245,8 +248,9 @@ pub fn sys_socketpair(
     let sock2 = knet::Socket::Unix(Box::new(sock2));
 
     let cloexec = raw_ty & O_CLOEXEC != 0;
-    let file1 = sock_alloc_file(sock1, O_RDWR | (raw_ty & O_NONBLOCK))?;
-    let file2 = sock_alloc_file(sock2, O_RDWR | (raw_ty & O_NONBLOCK))?;
+    let cred = kprocess::current_cred();
+    let file1 = sock_alloc_file(sock1, O_RDWR | (raw_ty & O_NONBLOCK), cred.clone())?;
+    let file2 = sock_alloc_file(sock2, O_RDWR | (raw_ty & O_NONBLOCK), cred)?;
     let resources = kprocess::current_resources();
     let fd1 = resources.add_file(file1, cloexec)?;
     let fd2 = resources.add_file(file2, cloexec).inspect_err(|_| {

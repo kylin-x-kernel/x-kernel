@@ -6,10 +6,15 @@
 open file、路径解析和通用文件系统 helper。具体文件系统通过 inode/file operation
 traits 接入，POSIX 层负责把 syscall ABI 参数转换成 VFS 语义对象。
 
+权限模型与 Linux 保持同一层次：`kcred` 定义 `Cred`，syscall 层从当前 task 取得一次
+credential snapshot，`kvfs` 接收显式 `&Cred` 并完成路径遍历和通用 DAC。`kvfs` 不
+依赖 `kprocess`，因此可被 boot、内核伪文件系统和测试以明确身份复用。
+
 ## 范围
 
 - `src/open_flags.rs`：原始 `O_*` 参数的规范化与 open intent。
 - `src/namei.rs`：路径遍历和 open 流程。
+- `src/permission.rs`：owner/group/other DAC 与 open access 映射。
 - `src/node/`：dentry、inode、live inode identity cache 及文件系统 operation traits。
 - `src/address_space.rs`：inode-owned PageCache、writeback 与 truncate/invalidation 边界。
 - `src/file.rs`：打开文件及其可变状态。
@@ -20,9 +25,13 @@ traits 接入，POSIX 层负责把 syscall ABI 参数转换成 VFS 语义对象�
 ## 架构
 
 ```text
-POSIX syscall ABI (u32 flags)
-        |
-        +-- open --> OpenHow --> OpenParams --> namei --> VfsFile
+current task                          kcred::Cred
+    |                                     |
+    | one Arc snapshot                    | explicit &Cred
+    v                                     v
+POSIX syscall ABI --> Filename --> Nameidata methods --> Path/VfsInode::permission
+        |                                      |
+        +-- open --> OpenHow --> OpenParams ---+--> VfsFile { f_cred: Arc<Cred> }
                                   |
                                   +-- flags: OpenFlags
         |
@@ -52,11 +61,18 @@ link、rename 和重复 lookup 因此共享 AddressSpace/PageCache。具体文�
 `Arc<VfsInode>`。更新入口校验 positive state、inode number、node type、block size 和
 `rdev`，防止把一个 core inode 的结果写入另一 identity。
 
+`Nameidata` 只保存 Linux namei 所需的路径、root、组件与 lookup 状态，不保存
+credential。所有会解析或修改 namespace 的入口都把 `&Cred` 作为方法参数逐层传递。
+credential 的生命周期由 syscall 持有的 `Arc` 保证；对象字段不需要重复保存调用上下文。
+
 ## 调用约束 / 执行上下文
 
 路径操作会获取 mutex、分配对象并调用具体文件系统，可能阻塞，不适用于中断上下文。
 这些 API 依赖分配器和正常内核运行环境。POSIX 路径通常需要当前进程的 mount、root
 和 cwd；纯 VFS 对象方法只依赖显式传入的对象。
+
+一次完整 pathname 操作必须复用同一个 credential snapshot。调用者不能在每个路径
+组件重新查询 current task，否则并发 credential commit 可能让同一次解析混用身份。
 
 `init_anon_inodefs()` 必须在 boot/runtime 初始化阶段调用，早于普通任务和并行单元测试
 创建匿名 inode 文件。`AnonInodeFs::global()` 只读取已经初始化的 singleton，不会在
@@ -67,6 +83,52 @@ link、rename 和重复 lookup 因此共享 AddressSpace/PageCache。具体文�
 open 在入口清理 legacy flags，校验已知位，生成 access mode、open intent 和 lookup
 flags。namei 使用这些语义执行查找、创建和最终 open，不再直接组合 `O_CREAT` 与
 `O_EXCL`。
+
+### 路径遍历与 DAC
+
+namei 在进入每个目录并查找下一组件前检查目录 search permission (`MAY_EXEC`)；最终
+open 再按访问模式检查目标 inode。默认 `InodeOperations::permission` 进入
+`generic_permission()`，依次选择 owner、group（包括补充组）或 other 权限位。
+`fsuid == 0` 当前近似 Linux DAC override：读写可以越过普通 mode 位，普通文件执行
+仍要求至少一个 execute bit，目录 search 可越过 execute bit。
+
+namespace 修改由 `Path` 在调用文件系统回调前统一检查：create、mkdir、mknod、symlink、
+link、unlink、rmdir 和 rename 要求父目录 `MAY_WRITE | MAY_EXEC`。sticky 目录中的删除
+和替换还要求 root、目录所有者或 victim 所有者身份之一。
+
+inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `setattr` callback：
+
+- `chown` 只允许特权调用者改变 UID；owner 可保留原 UID，并把 GID 改为当前组或补充组；
+- `chmod` 要求 inode owner 或特权，非所属组调用者请求的 setgid 位会被清除；
+- `set_times` 区分 touch 与显式 times 数组。空 times 或两个当前时间允许 owner、特权或
+  对 inode 有写权限的调用者；显式值以及 `UTIME_NOW/UTIME_OMIT` 混合只允许 owner/特权。
+
+`SetattrTime` 只承载单次调用中“当前值/显式值”的授权信息，落盘的 `MetadataUpdate`
+仍只包含解析后的时间值，不在 inode 或 namei 状态中保存调用上下文。
+
+### 新 inode 所有者
+
+创建回调接收同一个 `&Cred`。后端通过 `inode_init_owner()` 得到初始 mode、UID 和 GID：
+
+- `mkdir` 在进入文件系统回调前清除调用者提供的 set-user-ID/set-group-ID 位；
+- UID 使用 `fsuid`；
+- 普通父目录下 GID 使用 `fsgid`；
+- setgid 父目录下继承父 GID；
+- setgid 父目录下创建子目录时由 `inode_init_owner()` 重新传播 setgid 位。
+
+支持 Unix owner 元数据的后端在分配 inode 时持久化这些值。不能表达 Unix owner 的
+文件系统仍受其磁盘格式限制。
+
+`SimpleDir` 的 `DirMapping` 可持久插入由 `mknod` 分配的 special inode，供 devfs 等
+内核简单文件系统承载 pathname Unix socket；未显式支持动态插入的 simple directory
+保持返回 `EPERM`。
+
+### pathname 与打开文件
+
+`VfsFile` 捕获 open 时使用的 `Arc<Cred>`，对应 Linux `file::f_cred`。path-based
+`Path::truncate()` 使用调用时 `&Cred` 检查写权限；descriptor-based
+`VfsFile::truncate()` 验证文件以写模式打开后，复用 open 已建立的 authority，不重复
+pathname DAC。`O_TRUNC` 已在 open 权限检查后执行同一 opened truncate 路径。
 
 rename 在 syscall 边界用 `RenameFlags::from_bits` 拒绝未知位，并拒绝互斥模式。
 VFS rename 入口再次检查组合不变量，文件系统 helper 再检查自身支持的子集。
@@ -101,7 +163,7 @@ dentry 的 inode、children 和可变 operation 状态由各自 mutex 保护。�
 生命周期，同时避免父子强引用环。`DentryKey` 通过持有 parent 的弱引用稳定对象身份，
 不需要为每个 dentry 分配额外 ID。`VfsFile` 的 position 和 private data 使用 mutex，
 `f_flags` 与 `f_mode` 使用原子整数存储，inode `write_count` 由打开与释放
-路径原子更新。bitflags 类型是按值复制的语义快照，不额外引入锁或分配。
+路径原子更新。bitflags 类型是按值复制的语义快照，不额外引入锁或分配。`VfsFile::f_cred` 是创建后不变的 `Arc<Cred>`，无需额外锁。
 
 匿名 inode pseudo fs 使用 `Once<AnonInodeFs>` 作为发布槽，但初始化只允许通过
 `init_anon_inodefs()` 在受控 boot 阶段发生。这样避免多个 runtime 调用者并发首次访问时
@@ -116,6 +178,11 @@ mutation result 同步到受影响的 live inode；dentry cache 的删除/rebind
 - ABI carrier 与内核语义类型分离，转换尽量靠近边界。
 - 不提供通用 raw-flags getter；只有写入 ABI 或底层存储时调用 `bits()`。
 - 不同 flags 家族不共享整数别名，使错误组合在编译期失败。
+- current task 定位只存在于 `kprocess`；`kvfs` 对所有安全相关操作显式接收 `&Cred`。
+- `Nameidata` 不保存 credential，避免把一次调用上下文变成冗余对象状态。
+- 通用 DAC、父目录修改检查、sticky policy 和初始 owner 由 VFS 统一实现，后端只负责
+  自身元数据与 operation callback。
+- 打开文件保存 `f_cred`；descriptor 权限与 pathname 权限使用不同入口表达。
 - 匿名 inode pseudo fs 采用显式预初始化，而不是 `Lazy` 首次访问初始化。该设计对齐
   复杂 VFS 全局对象的生命周期：启动时构造，运行时只复用。
 - PageCache resize 顺序由 AddressSpace operation 契约表达，不允许文件系统绕过 inode-owned
@@ -131,3 +198,10 @@ parent children 弱索引与 superblock dentry cache 中移除 dentry；仍有 P
 机会。默认实现只丢弃 inode PageCache，磁盘文件系统可在 nlink=0 时追加 journaled inode
 回收。per-open `FileOperations::release()` 先于 final inode eviction，不能代替后者。flags
 类型不拥有资源；inode 与文件系统私有资源仍由现有对象生命周期及文件系统回调负责。
+
+## 已知限制
+
+- 尚无 capability、LSM、ACL、user namespace ID 映射或 idmapped mount 权限语义。
+- FAT 等不能原生表达 Unix UID/GID 的后端不能完整持久化创建者身份。
+- 当前 POSIX rename 路径不支持 `RENAME_WHITEOUT`。
+- superblock dentry cache 尚无 Linux 风格 LRU/shrinker。

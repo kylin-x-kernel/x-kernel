@@ -45,8 +45,13 @@ pub fn sys_memfd_create(name: UserConstPtr<c_char>, flags: u32) -> KResult<isize
     let flags = MemfdFlags::from_raw(flags)?;
     let display_name = name.load_string_with_max_len(MEMFD_NAME_MAX_LEN)?;
     validate_memfd_name(&display_name)?;
-    let file = create_memfd_file(&format_memfd_name(&display_name), flags.allows_sealing())?
-        .into_file()?;
+    let cred = kprocess::current_cred();
+    let file = create_memfd_file(
+        &format_memfd_name(&display_name),
+        flags.allows_sealing(),
+        cred.clone(),
+    )?
+    .into_file(cred)?;
     current_user_process()
         .resources()?
         .add_file(file, flags.is_cloexec())

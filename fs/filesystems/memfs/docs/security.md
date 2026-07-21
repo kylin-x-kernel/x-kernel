@@ -1,7 +1,8 @@
 # memfs — 安全与可靠性分析
 ## 信任模型
 
-`memfs` 信任 VFS 已完成路径解析和权限检查。它负责维护目录结构、inode
+`memfs` 信任 VFS 已完成路径解析和父目录权限检查，并信任 callback 传入的 `Cred`
+是该次完整操作使用的稳定快照。它负责维护目录结构、inode
 生命周期、符号链接内容，以及 regular-file inode 与 VFS/pagecache content owner
 的绑定关系。
 
@@ -12,6 +13,7 @@
 - 匿名 tmpfs 文件对象创建
 - `VfsInode::i_mapping` 暴露的 address-space/page-cache owner
 - inode-owned `pagecache::Mapping` 暴露的 MM shared object identity
+- create/mkdir/mknod/symlink callback 的 mode 与 `&Cred`
 
 ## unsafe 代码清单
 
@@ -25,6 +27,8 @@
 - 所有指向同一 inode 的 open-file / mmap 路径都必须复用同一个 owner。
 - 符号链接不能进入 regular-file page-cache 路径。
 - 匿名文件不能挂入进程可见 mount namespace。
+- 新 inode 的 UID/GID 必须来自 `inode_init_owner()`；setgid 父目录的 GID 与 mode
+  传播必须在 inode 发布前完成。
 
 ## 线程安全
 
@@ -48,6 +52,10 @@
 4. 匿名文件对象意外暴露到全局路径空间。
    - 防护：`memfs::shmem` 使用私有 `MemoryFs("tmpfs")` root mount 创建
      regular file，并且不把该 mount 挂入进程可见命名空间。
+
+5. 新 inode 错误继承 root 或调用者 effective identity。
+   - 防护：所有创建 callback 使用显式 `&Cred` 调用 `inode_init_owner()`，普通创建取
+     `fsuid/fsgid`，setgid 父目录继承父 GID。
 
 ## 故障模式与影响分析（FMEA）
 
@@ -76,3 +84,5 @@
 - 同一 inode 的 MM 路径是否复用同一个 `pagecache::Mapping`。
 - 符号链接路径是否完全绕开 regular-file page cache。
 - 匿名文件 helper 是否始终返回未挂载到全局命名空间的对象。
+- 所有 inode 创建路径是否接收 `&Cred` 并在发布前调用 `inode_init_owner()`。
+- setgid 父目录的普通 child GID 和子目录 setgid bit 是否有测试覆盖。

@@ -144,8 +144,13 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> KResult<isize> {
 
     let fs_struct = current_user_process_fs_context();
     let fs = fs_struct.lock();
-    let file =
-        Filename::new(path).open_with_flags_at(fs.root(), fs.pwd(), 0, NodePermission::empty())?;
+    let file = Filename::new(path).open_with_flags_at(
+        fs.root(),
+        fs.pwd(),
+        0,
+        NodePermission::empty(),
+        kprocess::current_cred(),
+    )?;
     drop(fs);
     let mut kbuf = alloc::vec![0; len];
     let mut pos = 0;

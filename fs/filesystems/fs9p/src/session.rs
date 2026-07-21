@@ -174,6 +174,16 @@ impl P9Session {
     }
 
     pub fn create_dir_with_mode(&mut self, path: &str, mode: u32) -> Result<(), String> {
+        self.create_dir_with_mode_and_gid(path, mode, 0)
+    }
+
+    /// Creates a directory with the requested mode and owning group.
+    pub fn create_dir_with_mode_and_gid(
+        &mut self,
+        path: &str,
+        mode: u32,
+        gid: u32,
+    ) -> Result<(), String> {
         let (parent, name) = split_parent_name(path)?;
         let (fid, is_dir) = self.walk_path(parent)?;
         if !is_dir {
@@ -182,7 +192,7 @@ impl P9Session {
         }
 
         if self.p9_version.is_dotl() {
-            self.mkdir(fid, name, mode & 0o7777, 0)?;
+            self.mkdir(fid, name, mode & 0o7777, gid)?;
         } else {
             self.create(fid, name, OREAD, DMDIR | (mode & 0o777))?;
         }
@@ -229,7 +239,17 @@ impl P9Session {
     }
 
     pub fn create_file_with_mode(&mut self, path: &str, mode: u32) -> Result<u32, String> {
-        self.create_file_with_flags(path, ORDWR, P9_DOTL_RDWR | P9_DOTL_CREATE, mode)
+        self.create_file_with_mode_and_gid(path, mode, 0)
+    }
+
+    /// Creates a file with the requested mode and owning group.
+    pub fn create_file_with_mode_and_gid(
+        &mut self,
+        path: &str,
+        mode: u32,
+        gid: u32,
+    ) -> Result<u32, String> {
+        self.create_file_with_flags_and_gid(path, ORDWR, P9_DOTL_RDWR | P9_DOTL_CREATE, mode, gid)
     }
 
     pub fn create_file_with_flags(
@@ -239,6 +259,18 @@ impl P9Session {
         mode_dotl: u32,
         mode: u32,
     ) -> Result<u32, String> {
+        self.create_file_with_flags_and_gid(path, mode_9p, mode_dotl, mode, 0)
+    }
+
+    /// Creates a file with explicit 9P modes and owning group.
+    pub fn create_file_with_flags_and_gid(
+        &mut self,
+        path: &str,
+        mode_9p: u8,
+        mode_dotl: u32,
+        mode: u32,
+        gid: u32,
+    ) -> Result<u32, String> {
         let (parent, name) = split_parent_name(path)?;
         let (fid, is_dir) = self.walk_path(parent)?;
         if !is_dir {
@@ -247,7 +279,7 @@ impl P9Session {
         }
 
         let result = if self.p9_version.is_dotl() {
-            self.lcreate(fid, name, mode_dotl | P9_DOTL_CREATE, mode, 0)
+            self.lcreate(fid, name, mode_dotl | P9_DOTL_CREATE, mode, gid)
         } else {
             self.create(fid, name, mode_9p, mode & 0o777)
         };
@@ -323,6 +355,16 @@ impl P9Session {
     }
 
     pub fn symlink(&mut self, target: &str, link_path: &str) -> Result<(), String> {
+        self.symlink_with_gid(target, link_path, 0)
+    }
+
+    /// Creates a symbolic link with the requested owning group.
+    pub fn symlink_with_gid(
+        &mut self,
+        target: &str,
+        link_path: &str,
+        gid: u32,
+    ) -> Result<(), String> {
         if !self.p9_version.is_dotl() {
             return Err(String::from("symlink requires 9P2000.L"));
         }
@@ -338,7 +380,7 @@ impl P9Session {
         msg.push_u32(dfid);
         msg.push_str(name);
         msg.push_str(target);
-        msg.push_u32(0);
+        msg.push_u32(gid);
         let result = self.send_recv(msg.finish(), RSYMLINK, tag).map(|_| ());
 
         let _ = self.clunk(dfid);

@@ -21,9 +21,10 @@ fn open_path(
     path: &str,
     flags: u32,
     mode: __kernel_mode_t,
+    cred: Arc<kcred::Cred>,
 ) -> KResult<Arc<VfsFile>> {
     let permission = NodePermission::from_bits_truncate(mode as _);
-    Filename::new(path).open_with_flags_at(root, base, flags, permission)
+    Filename::new(path).open_with_flags_at(root, base, flags, permission, cred)
 }
 
 fn add_to_fd(file: Arc<VfsFile>, flags: u32) -> KResult<i32> {
@@ -42,9 +43,10 @@ pub fn sys_openat(
     let path = path.load_string()?;
     debug!("sys_openat <= {dirfd} {path:?} {flags:#o} {mode:#o}");
     let mode = mode & !kprocess::current_umask();
+    let cred = kprocess::current_cred();
 
     with_fs(dirfd, |fs| {
-        open_path(fs.root(), fs.pwd(), path.as_str(), flags as u32, mode)
+        open_path(fs.root(), fs.pwd(), path.as_str(), flags as u32, mode, cred)
     })
     .and_then(|it| add_to_fd(it, flags as _))
     .map(|fd| fd as isize)

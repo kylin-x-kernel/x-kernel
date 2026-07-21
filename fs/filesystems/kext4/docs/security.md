@@ -47,6 +47,8 @@ KVFS bridge 信任 KVFS 已经提供内核拥有的 path name、dentry、PageCac
   扣除 ext4 reserved blocks 和 bridge 尚未落盘的 reservation。
 - 从磁盘解码的 external xattr name 必须拒绝内嵌 NUL，保持与 Linux/e2fsck 的 corruption
   handling 一致。
+- 运行态 inode allocation 必须使用 bridge 已通过 `inode_init_owner()` 导出的显式
+  UID/GID；KExt4 core 不得把新 inode owner 默认为 root。
 
 ## 线程安全
 
@@ -69,6 +71,7 @@ ownership、journal handle、allocator bitmap 和 inode metadata 之间的顺序
 | T-06 | 设备写入/flush 失败让部分 metadata 可见 | 中 | commit、replay、checkpoint 或 xattr update 期间设备失败 | journal abort/rollback 保留 recovery state 或 pending checkpoint；测试覆盖 xattr fault retry 和 replay failure |
 | T-07 | clean journal 上残留 legacy orphan，mount 永久返回 `NeedsRecovery` | 中 | namespace transaction 已 checkpoint，但 final inode eviction 尚未发生 | 显式 recovery 无论 journal 是否需要 replay 都遍历 legacy orphan；zero-link entry 复用 journaled final-eviction 路径 |
 | T-08 | free-block aggregate 与 group descriptor 漂移导致 delayed-allocation 过量预留 | 中 | allocation/release 只更新一侧 counter，或 rollback 未恢复同一 savepoint | block mutation 同时更新 superblock 与 group descriptor；bridge 再扣除 ext4 reserved blocks 和运行态 reservation，`statfs()` 保留 group fold 作为独立统计路径 |
+| T-09 | 新建 inode 固定为 root，绕过调用者 owner 语义 | 高 | bridge 丢弃 credential 或 core constructor 隐式填入 UID/GID 0 | create/mkdir/mknod/symlink callback 使用 `inode_init_owner()`，显式 `uid`、`gid` 随同 namei transaction 持久化 |
 
 ## 故障模式与影响分析（FMEA）
 

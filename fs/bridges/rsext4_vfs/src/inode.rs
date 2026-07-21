@@ -12,11 +12,12 @@ use alloc::{
 };
 
 use iov_iter::{IovIterDest, IovIterSource};
+use kcred::Cred;
 use kvfs::{
     AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FileDirOperations,
     FileOperations, InodeDirOperations, InodeOperations, InodeSymlinkOperations, Kiocb,
     LockedDentry, Metadata, MetadataUpdate, NodeType, ReadaheadControl, VfsError, VfsFile,
-    VfsResult, WriteBeginRequest, WriteEndRequest, WritebackControl,
+    VfsResult, WriteBeginRequest, WriteEndRequest, WritebackControl, inode_init_owner,
 };
 use rsext4::{BLOCK_SIZE, Jbd2Dev};
 
@@ -79,6 +80,22 @@ impl Inode {
             {
                 inode.i_ctime = khal::time::wall_time().as_secs() as u32;
             }
+        })
+        .map_err(into_vfs_err)
+    }
+
+    fn set_initial_owner(
+        fs: &mut rsext4::Ext4FileSystem,
+        dev: &mut Jbd2Dev<Ext4Disk>,
+        ino: u32,
+        uid: u32,
+        gid: u32,
+    ) -> VfsResult<()> {
+        fs.modify_inode(dev, ino, |inode| {
+            inode.i_uid = (uid & 0xffff) as u16;
+            inode.l_i_uid_high = ((uid >> 16) & 0xffff) as u16;
+            inode.i_gid = (gid & 0xffff) as u16;
+            inode.l_i_gid_high = ((gid >> 16) & 0xffff) as u16;
         })
         .map_err(into_vfs_err)
     }
@@ -206,11 +223,13 @@ impl InodeDirOperations for Inode {
     fn create(
         &self,
         _idmap: &kvfs::MountIdmap,
-        _dir: &kvfs::VfsInode,
+        dir: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         _exclusive: bool,
+        cred: &Cred,
     ) -> VfsResult<Dentry> {
+        let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
         if mode.node_type() != NodeType::RegularFile {
@@ -238,6 +257,7 @@ impl InodeDirOperations for Inode {
                 Some(inode_mode),
             )
             .ok_or(VfsError::InvalidInput)?;
+            Self::set_initial_owner(fs, dev, ino, uid, gid)?;
             Self::update_ctime_with(fs, dev, ino)?;
             let inode = fs.get_inode_by_num(dev, ino).map_err(into_vfs_err)?;
             (ino, inode)
@@ -254,10 +274,12 @@ impl InodeDirOperations for Inode {
     fn mkdir(
         &self,
         _idmap: &kvfs::MountIdmap,
-        _dir: &kvfs::VfsInode,
+        dir: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
+        cred: &Cred,
     ) -> VfsResult<Dentry> {
+        let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
         if mode.node_type() != NodeType::Directory {
@@ -279,6 +301,10 @@ impl InodeDirOperations for Inode {
                 rsext4::dir::mkdir_with_ino(dev, fs, &path).ok_or(VfsError::InvalidInput)?;
             fs.modify_inode(dev, ino, |node| {
                 node.i_mode = mode.bits();
+                node.i_uid = (uid & 0xffff) as u16;
+                node.l_i_uid_high = ((uid >> 16) & 0xffff) as u16;
+                node.i_gid = (gid & 0xffff) as u16;
+                node.l_i_gid_high = ((gid >> 16) & 0xffff) as u16;
             })
             .map_err(into_vfs_err)?;
             Self::update_ctime_with(fs, dev, ino)?;
@@ -297,11 +323,13 @@ impl InodeDirOperations for Inode {
     fn mknod(
         &self,
         _idmap: &kvfs::MountIdmap,
-        _dir: &kvfs::VfsInode,
+        dir: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         device: DeviceId,
+        cred: &Cred,
     ) -> VfsResult<Dentry> {
+        let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
         let node_type = mode.node_type();
@@ -335,6 +363,10 @@ impl InodeDirOperations for Inode {
             )
             .ok_or(VfsError::InvalidInput)?;
             fs.modify_inode(dev, ino, |node| {
+                node.i_uid = (uid & 0xffff) as u16;
+                node.l_i_uid_high = ((uid >> 16) & 0xffff) as u16;
+                node.i_gid = (gid & 0xffff) as u16;
+                node.l_i_gid_high = ((gid >> 16) & 0xffff) as u16;
                 node.i_size_lo = 0;
                 node.i_size_high = 0;
                 node.i_blocks_lo = 0;
@@ -362,10 +394,19 @@ impl InodeDirOperations for Inode {
     fn symlink(
         &self,
         _idmap: &kvfs::MountIdmap,
-        _dir: &kvfs::VfsInode,
+        dir: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
         target: &str,
+        cred: &Cred,
     ) -> VfsResult<Dentry> {
+        let (_, uid, gid) = inode_init_owner(
+            dir,
+            kvfs::Umode::new(
+                NodeType::Symlink,
+                kvfs::NodePermission::from_bits_truncate(0o777),
+            ),
+            cred,
+        );
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
         let dir_path = parent.absolute_path()?.to_string();
@@ -374,6 +415,10 @@ impl InodeDirOperations for Inode {
             let mut state = self.fs.lock();
             let (fs, dev) = state.split();
             rsext4::file::create_symbol_link(dev, fs, target, &link_path).map_err(into_vfs_err)?;
+            let (ino, _) = rsext4::dir::get_inode_with_num(fs, dev, &link_path)
+                .map_err(into_vfs_err)?
+                .ok_or(VfsError::InvalidInput)?;
+            Self::set_initial_owner(fs, dev, ino, uid, gid)?;
         }
         self.lookup_locked(&parent, name)
     }

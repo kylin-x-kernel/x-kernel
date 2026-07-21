@@ -36,6 +36,7 @@ pub fn sys_eventfd2(initval: u32, flags: u32) -> KResult<isize> {
         initval as _,
         flags.contains(EventFdFlags::SEMAPHORE),
         O_RDWR | (flags.bits() & EFD_NONBLOCK),
+        kprocess::current_cred(),
     )?;
     kprocess::current_resources()
         .add_file(event_fd, flags.contains(EventFdFlags::CLOEXEC))

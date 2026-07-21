@@ -84,6 +84,7 @@ pub fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<Resol
         .filter(|path| !path.is_empty())
         .ok_or(KError::NotFound)?;
     let path = validate_tee_path(path)?;
+    let cred = kprocess::current_cred();
 
     with_fs(dirfd, |fs| {
         let lookup_flags = if flags & AT_SYMLINK_NOFOLLOW != 0 {
@@ -92,7 +93,7 @@ pub fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<Resol
             LookupFlags::follow()
         };
         Filename::new(path.as_str())
-            .lookup_at(fs.root(), fs.pwd(), LookupIntent::Stat, lookup_flags)
+            .lookup_at(fs.root(), fs.pwd(), LookupIntent::Stat, lookup_flags, &cred)
             .map(ResolveAtResult::File)
     })
 }

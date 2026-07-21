@@ -8,7 +8,7 @@
 
 use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
 
-use kcred::Credentials;
+use kcred::initial_cred;
 use ktask::{TaskInner, current, prepare_task};
 use unittest::{assert, assert_eq, def_test};
 
@@ -52,9 +52,7 @@ fn build_prepared_test_user_task() -> (Arc<Process>, TaskInner) {
     let signal_actions = parent
         .signal_actions()
         .expect("current process must expose live signal actions");
-    let credentials = parent
-        .credentials_snapshot()
-        .unwrap_or_else(|_| Credentials::root());
+    let credentials = crate::current_cred();
 
     let thread = build_process_thread(
         process.clone(),
@@ -87,7 +85,7 @@ fn publish_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskR
     let signal_actions = Arc::new(ksync::spin::SpinNoIrq::new(
         ksignal::api::SignalActions::default(),
     ));
-    let credentials = Credentials::root();
+    let credentials = initial_cred();
 
     let thread = build_process_thread(
         process.clone(),
@@ -691,7 +689,7 @@ fn test_prepare_user_task_rejects_mismatched_task_and_thread_identity() {
         Arc::new(ksync::spin::SpinNoIrq::new(
             ksignal::api::SignalActions::default(),
         )),
-        Credentials::root(),
+        initial_cred(),
     );
 
     let task = TaskInner::new_user(

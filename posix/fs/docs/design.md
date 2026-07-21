@@ -309,11 +309,27 @@ sys_fcntl(F_GET_SEALS/F_ADD_SEALS)
 `ShmemObjectState` 的普通文件返回错误。`F_ADD_SEALS` 只允许单调添加 seal；
 已有 `F_SEAL_SEAL` 时拒绝继续添加。
 
-### 当前创建者 ID 简化
+### 当前凭据与 VFS 授权
 
-`open.rs` 的 `current_effective_ids()` 当前返回 `(0, 0)`。
-因此通过 `OpenOptions::user(uid, gid)` 传入的创建者身份暂时固定为 root。
-当前未从 `kcred` 读取进程有效 UID/GID 或文件系统 UID/GID。
+每个 pathname syscall 在入口调用 `kprocess::current_cred()` 取得一个 committed
+`Arc<Cred>`，并把同一快照传给 `Filename`、`Nameidata` 和 `Path`。普通 open、路径
+遍历、创建、删除、链接、rename、pathname truncate 和 exec 检查使用该对象的
+`fsuid/fsgid` 与补充组；VFS 不反向查询当前 task。
+
+新 inode 由文件系统创建回调使用 `kvfs::inode_init_owner()` 初始化：UID 为 `fsuid`，
+GID 通常为 `fsgid`，setgid 父目录下继承父 GID，且新子目录传播 setgid 位。
+
+`faccessat2` 在解析路径之前选择检查身份：默认由 `Cred::for_access()` 使用 real IDs，
+`AT_EACCESS` 直接使用当前 committed credential，保留其 `fsuid/fsgid`。所选对象同时
+用于中间目录 search 和最终 inode 检查，补充组保持不变。
+
+`chown/chmod/utimensat` 同样在入口取得一次凭据快照，再由 `Path` 执行 Linux 风格的
+owner、group、write-permission 和显式时间授权。`chroot` 在目标目录 search 检查之后
+还要求特权；当前无 capability 模型，因此用 `euid == 0` 近似 `CAP_SYS_CHROOT`。
+
+`truncate(path)` 使用调用时凭据进行 pathname write DAC；`ftruncate(fd)` 验证打开文件
+具有 write mode 后直接使用 open file authority，不因调用者随后改变 UID 而重复执行
+pathname DAC。这对应 Linux `vfs_truncate()` 与 `do_ftruncate()` 的语义分工。
 
 ### 复制类 syscall 使用中间缓冲区
 
@@ -335,11 +351,11 @@ sys_fcntl(F_GET_SEALS/F_ADD_SEALS)
 
 ## 已知限制
 
-1. `current_effective_ids()` 尚未接入真实 POSIX 凭据。
-2. `fcntl` 文件锁和 `flock` 目前是兼容占位，不提供真实互斥。
-3. `copy_file_range` 尚未检查普通文件类型、同文件重叠和跨文件系统条件。
-4. `mount` 当前只支持 `tmpfs` 新挂载，不支持 bind、remount、move 和 propagation。
-5. `faccessat2` 当前按 owner 权限位构造检查掩码，尚未完整接入 UID/GID、补充组和 capability。
+1. 凭据 DAC 尚无 capability、LSM、ACL、user namespace ID 映射或 idmapped mount。
+2. FAT 等不能表达 Unix UID/GID 的后端无法完整持久化创建者身份。
+3. `fcntl` 文件锁和 `flock` 目前是兼容占位，不提供真实互斥。
+4. `copy_file_range` 尚未检查普通文件类型、同文件重叠和跨文件系统条件。
+5. `mount` 当前只支持 `tmpfs` 新挂载，不支持 bind、remount、move 和 propagation。
 6. `sendfile` 对非空 offset 保留 32 位范围限制，反映旧接口兼容约束。
 7. `F_ADD_SEALS` / `F_GET_SEALS` 已接入 shmem object state；shared
    writable mmap 和 `mprotect(PROT_WRITE)` seal enforcement 由 `mm/filemap`

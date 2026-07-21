@@ -186,6 +186,7 @@ impl InodeDirOperations for FatDirInode {
         dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         _exclusive: bool,
+        _cred: &kcred::Cred,
     ) -> VfsResult<Dentry> {
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
@@ -223,6 +224,7 @@ impl InodeDirOperations for FatDirInode {
         _dir: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
         _mode: kvfs::Umode,
+        _cred: &kcred::Cred,
     ) -> VfsResult<Dentry> {
         let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();

@@ -1609,6 +1609,7 @@ pub mod tests_tee_svc_storage {
     }
 
     fn cleanup_test_storage_root() {
+        let cred = kprocess::current_cred();
         let fs_struct = kprocess::current_fs_context();
         let fs = fs_struct.lock();
         let Ok(dir) = Filename::new(CFG_TEE_FS_PARENT_PATH).lookup_at(
@@ -1616,6 +1617,7 @@ pub mod tests_tee_svc_storage {
             fs.pwd(),
             LookupIntent::Open,
             LookupFlags::follow(),
+            &cred,
         ) else {
             drop(fs);
             let _ = FileVariant::create_dir(CFG_TEE_FS_PARENT_PATH);
@@ -1626,7 +1628,7 @@ pub mod tests_tee_svc_storage {
         let mut offset = 0;
         loop {
             let mut sink = TestStorageDirSink::default();
-            let Ok(file) = dentry_open(dir.clone(), 0) else {
+            let Ok(file) = dentry_open(dir.clone(), 0, cred.clone()) else {
                 break;
             };
             file.set_position(offset);

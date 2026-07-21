@@ -5,10 +5,11 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
+use kcred::Cred;
 use kerrno::KResult;
 use khal::time::TimeValue;
 use ksignal::{SignalStack, api::ThreadSignalManager};
-use ksync::Mutex;
+use ksync::{Mutex, RwLock};
 use ktask::KtaskRef;
 #[cfg(feature = "tee")]
 use tee_task_iface::TeeSessionCtxTrait;
@@ -65,6 +66,8 @@ pub struct Thread {
     task_number: Arc<kidentity::PidHandle>,
     process: Arc<Process>,
     runtime: Arc<ProcessRuntime>,
+    real_cred: RwLock<Arc<Cred>>,
+    cred: RwLock<Arc<Cred>>,
     clear_child_tid: AtomicUsize,
     robust_list_head: AtomicUsize,
     signal: Arc<ThreadSignalManager>,
@@ -85,6 +88,7 @@ impl Thread {
         process: Arc<Process>,
         runtime: Arc<ProcessRuntime>,
         task_number: Arc<kidentity::PidHandle>,
+        cred: Arc<Cred>,
     ) -> Box<Self> {
         let tid = task_number.root_nr();
         Box::new(Thread {
@@ -92,6 +96,8 @@ impl Thread {
             signal: ThreadSignalManager::new(tid, runtime.signal_manager().clone()),
             process,
             runtime,
+            real_cred: RwLock::new(cred.clone()),
+            cred: RwLock::new(cred),
             clear_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
             time: Mutex::new(CpuTimeStatistics::new()),
@@ -120,6 +126,7 @@ impl Thread {
             process_runtime.process().clone(),
             process_runtime,
             task_number.clone(),
+            self.subjective_cred(),
         );
         Ok(PreparedUserClone {
             thread,
@@ -140,6 +147,7 @@ impl Thread {
             self.process.clone(),
             self.runtime.clone(),
             task_number.clone(),
+            self.subjective_cred(),
         );
         Ok(PreparedUserClone {
             thread,
@@ -275,6 +283,27 @@ impl Thread {
     /// Returns the stable process identity that owns this thread.
     pub fn process(&self) -> &Arc<Process> {
         &self.process
+    }
+
+    /// Returns this task's objective credentials.
+    pub fn real_cred(&self) -> Arc<Cred> {
+        self.real_cred.read().clone()
+    }
+
+    pub(super) fn subjective_cred(&self) -> Arc<Cred> {
+        self.cred.read().clone()
+    }
+
+    pub(super) fn commit_cred(&self, new: Cred) {
+        let mut real_cred = self.real_cred.write();
+        let mut cred = self.cred.write();
+        assert!(
+            Arc::ptr_eq(&real_cred, &cred),
+            "committing credentials while subjective credentials are overridden"
+        );
+        let new = Arc::new(new);
+        *real_cred = new.clone();
+        *cred = new;
     }
 
     /// Returns the thread-level signal manager.

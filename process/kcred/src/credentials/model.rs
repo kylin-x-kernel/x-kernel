@@ -6,11 +6,17 @@
 
 use alloc::{sync::Arc, vec::Vec};
 
-use super::{CredentialError, Gid, Uid};
+use kerrno::{KError, KResult};
 
-/// POSIX credentials shared by all threads in a process.
+use super::{Gid, Uid};
+
+/// A Linux task security context.
+///
+/// A committed credential is held through [`Arc<Cred>`] and treated as
+/// immutable. Credential transitions operate on an uncommitted clone returned
+/// by [`Cred::prepare`].
 #[derive(Clone)]
-pub struct Credentials {
+pub struct Cred {
     ruid: Uid,
     euid: Uid,
     suid: Uid,
@@ -22,7 +28,7 @@ pub struct Credentials {
     supplementary_groups: Arc<[Gid]>,
 }
 
-impl Credentials {
+impl Cred {
     /// Creates root credentials for the initial process.
     pub fn root() -> Self {
         Self::new(0, 0)
@@ -41,6 +47,19 @@ impl Credentials {
             fsgid: gid,
             supplementary_groups: Arc::from([]),
         }
+    }
+
+    /// Prepares an uncommitted copy for a credential transition.
+    pub fn prepare(&self) -> Self {
+        self.clone()
+    }
+
+    /// Prepares credentials for an `access(2)` check using real IDs.
+    pub fn for_access(&self) -> Self {
+        let mut cred = self.prepare();
+        cred.fsuid = cred.ruid;
+        cred.fsgid = cred.rgid;
+        cred
     }
 
     /// Returns the real user ID.
@@ -88,9 +107,9 @@ impl Credentials {
         &self.supplementary_groups
     }
 
-    /// Returns a shared snapshot of the supplementary group list.
-    pub fn supplementary_groups_snapshot(&self) -> Arc<[Gid]> {
-        self.supplementary_groups.clone()
+    /// Returns whether `gid` matches the filesystem or supplementary groups.
+    pub fn in_group(&self, gid: Gid) -> bool {
+        self.fsgid == gid || self.supplementary_groups.binary_search(&gid).is_ok()
     }
 
     /// Returns whether the process is privileged for set-ID operations.
@@ -105,15 +124,15 @@ impl Credentials {
     ///
     /// A privileged process sets real, effective, saved, and filesystem UIDs.
     /// An unprivileged process may set only its effective/filesystem UID, and
-    /// only to one of its current real, effective, or saved set-user IDs.
-    pub fn set_uid(&mut self, uid: Uid) -> Result<(), CredentialError> {
+    /// only to its current real or saved set-user ID.
+    pub fn set_uid(&mut self, uid: Uid) -> KResult<()> {
         if self.is_privileged() {
             self.set_resuid_unchecked(Some(uid), Some(uid), Some(uid));
             return Ok(());
         }
 
-        if uid != self.ruid && uid != self.euid && uid != self.suid {
-            return Err(CredentialError::PermissionDenied);
+        if uid != self.ruid && uid != self.suid {
+            return Err(KError::OperationNotPermitted);
         }
 
         self.euid = uid;
@@ -125,15 +144,15 @@ impl Credentials {
     ///
     /// A privileged process sets real, effective, saved, and filesystem GIDs.
     /// An unprivileged process may set only its effective/filesystem GID, and
-    /// only to one of its current real, effective, or saved set-group IDs.
-    pub fn set_gid(&mut self, gid: Gid) -> Result<(), CredentialError> {
+    /// only to its current real or saved set-group ID.
+    pub fn set_gid(&mut self, gid: Gid) -> KResult<()> {
         if self.is_privileged() {
             self.set_resgid_unchecked(Some(gid), Some(gid), Some(gid));
             return Ok(());
         }
 
-        if gid != self.rgid && gid != self.egid && gid != self.sgid {
-            return Err(CredentialError::PermissionDenied);
+        if gid != self.rgid && gid != self.sgid {
+            return Err(KError::OperationNotPermitted);
         }
 
         self.egid = gid;
@@ -144,11 +163,7 @@ impl Credentials {
     /// Implements Linux `setreuid`.
     ///
     /// `None` means the corresponding syscall argument was `-1`.
-    pub fn set_reuid(
-        &mut self,
-        ruid: Option<Uid>,
-        euid: Option<Uid>,
-    ) -> Result<(), CredentialError> {
+    pub fn set_reuid(&mut self, ruid: Option<Uid>, euid: Option<Uid>) -> KResult<()> {
         let old_ruid = self.ruid;
         let old_euid = self.euid;
 
@@ -157,7 +172,7 @@ impl Credentials {
                 && ruid != old_ruid
                 && ruid != old_euid
             {
-                return Err(CredentialError::PermissionDenied);
+                return Err(KError::OperationNotPermitted);
             }
 
             if let Some(euid) = euid
@@ -165,7 +180,7 @@ impl Credentials {
                 && euid != old_euid
                 && euid != self.suid
             {
-                return Err(CredentialError::PermissionDenied);
+                return Err(KError::OperationNotPermitted);
             }
         }
 
@@ -178,20 +193,14 @@ impl Credentials {
         if ruid.is_some() || euid.is_some_and(|euid| euid != old_ruid) {
             self.suid = self.euid;
         }
-        if ruid.is_some() || euid.is_some() {
-            self.fsuid = self.euid;
-        }
+        self.fsuid = self.euid;
         Ok(())
     }
 
     /// Implements Linux `setregid`.
     ///
     /// `None` means the corresponding syscall argument was `-1`.
-    pub fn set_regid(
-        &mut self,
-        rgid: Option<Gid>,
-        egid: Option<Gid>,
-    ) -> Result<(), CredentialError> {
+    pub fn set_regid(&mut self, rgid: Option<Gid>, egid: Option<Gid>) -> KResult<()> {
         let old_rgid = self.rgid;
         let old_egid = self.egid;
 
@@ -200,7 +209,7 @@ impl Credentials {
                 && rgid != old_rgid
                 && rgid != old_egid
             {
-                return Err(CredentialError::PermissionDenied);
+                return Err(KError::OperationNotPermitted);
             }
 
             if let Some(egid) = egid
@@ -208,7 +217,7 @@ impl Credentials {
                 && egid != old_egid
                 && egid != self.sgid
             {
-                return Err(CredentialError::PermissionDenied);
+                return Err(KError::OperationNotPermitted);
             }
         }
 
@@ -221,9 +230,7 @@ impl Credentials {
         if rgid.is_some() || egid.is_some_and(|egid| egid != old_rgid) {
             self.sgid = self.egid;
         }
-        if rgid.is_some() || egid.is_some() {
-            self.fsgid = self.egid;
-        }
+        self.fsgid = self.egid;
         Ok(())
     }
 
@@ -235,7 +242,7 @@ impl Credentials {
         ruid: Option<Uid>,
         euid: Option<Uid>,
         suid: Option<Uid>,
-    ) -> Result<(), CredentialError> {
+    ) -> KResult<()> {
         if !self.is_privileged() {
             self.check_uid_change(ruid)?;
             self.check_uid_change(euid)?;
@@ -258,7 +265,7 @@ impl Credentials {
         rgid: Option<Gid>,
         egid: Option<Gid>,
         sgid: Option<Gid>,
-    ) -> Result<(), CredentialError> {
+    ) -> KResult<()> {
         if !self.is_privileged() {
             self.check_gid_change(rgid)?;
             self.check_gid_change(egid)?;
@@ -360,16 +367,18 @@ impl Credentials {
     pub fn apply_exec(&mut self) {
         // Future setuid/setgid executable support must update euid/egid before this reset.
         self.suid = self.euid;
+        self.fsuid = self.euid;
         self.sgid = self.egid;
+        self.fsgid = self.egid;
     }
 
-    fn check_uid_change(&self, uid: Option<Uid>) -> Result<(), CredentialError> {
+    fn check_uid_change(&self, uid: Option<Uid>) -> KResult<()> {
         if let Some(uid) = uid
             && uid != self.ruid
             && uid != self.euid
             && uid != self.suid
         {
-            return Err(CredentialError::PermissionDenied);
+            return Err(KError::OperationNotPermitted);
         }
         Ok(())
     }
@@ -380,13 +389,13 @@ impl Credentials {
             && suid.is_none_or(|suid| suid == self.suid)
     }
 
-    fn check_gid_change(&self, gid: Option<Gid>) -> Result<(), CredentialError> {
+    fn check_gid_change(&self, gid: Option<Gid>) -> KResult<()> {
         if let Some(gid) = gid
             && gid != self.rgid
             && gid != self.egid
             && gid != self.sgid
         {
-            return Err(CredentialError::PermissionDenied);
+            return Err(KError::OperationNotPermitted);
         }
         Ok(())
     }

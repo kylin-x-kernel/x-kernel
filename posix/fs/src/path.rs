@@ -7,6 +7,7 @@
 use core::ffi::c_int;
 
 use fs_context::FsStruct;
+use kcred::Cred;
 use kerrno::{KError, KResult};
 use kfd::Kstat;
 use kprocess::current_user_process;
@@ -63,21 +64,31 @@ fn resolve_empty_path(dirfd: c_int, flags: u32) -> KResult<ResolveAtResult> {
     Ok(ResolveAtResult::Path(file.path().clone()))
 }
 
-fn resolve_filesystem_path(dirfd: c_int, path: &str, flags: u32) -> KResult<Path> {
+fn resolve_filesystem_path(dirfd: c_int, path: &str, flags: u32, cred: &Cred) -> KResult<Path> {
     with_fs(dirfd, |fs| {
         let lookup_flags = if flags & AT_SYMLINK_NOFOLLOW != 0 {
             LookupFlags::no_follow()
         } else {
             LookupFlags::follow()
         };
-        Filename::new(path).lookup_at(fs.root(), fs.pwd(), LookupIntent::Stat, lookup_flags)
+        Filename::new(path).lookup_at(fs.root(), fs.pwd(), LookupIntent::Stat, lookup_flags, cred)
     })
 }
 
 pub(crate) fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<ResolveAtResult> {
+    let cred = kprocess::current_cred();
+    resolve_at_with_cred(dirfd, path, flags, &cred)
+}
+
+pub(crate) fn resolve_at_with_cred(
+    dirfd: c_int,
+    path: Option<&str>,
+    flags: u32,
+    cred: &Cred,
+) -> KResult<ResolveAtResult> {
     match path {
         Some(path) if !path.is_empty() => {
-            resolve_filesystem_path(dirfd, path, flags).map(ResolveAtResult::Path)
+            resolve_filesystem_path(dirfd, path, flags, cred).map(ResolveAtResult::Path)
         }
         _ => resolve_empty_path(dirfd, flags),
     }

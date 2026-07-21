@@ -11,6 +11,7 @@ repository.workspace = true
 anon = { workspace = true }
 karch = { workspace = true }
 kerrno = { workspace = true }
+kcred = { workspace = true }
 kvfs = { workspace = true }
 khal = { workspace = true }
 ksync = { workspace = true }
