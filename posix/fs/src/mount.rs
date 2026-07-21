@@ -8,7 +8,7 @@ use core::ffi::{c_char, c_void};
 
 use kerrno::{KError, KResult};
 use kprocess::current_user_process;
-use kvfs::{Filename, LookupFlags, LookupIntent, MountFlags, StatFsFlags};
+use kvfs::{Filename, LookupFlags, LookupIntent, MountFlags, StatFsFlags, path::PATH_MAX};
 use memfs::shmem;
 use posix_types::UserConstPtr;
 
@@ -99,7 +99,8 @@ pub fn sys_mount(
         return Err(KError::InvalidInput);
     }
 
-    let source = source.load_string()?;
+    let source = source.load_string_with_max_len(PATH_MAX).ok();
+    let source_ref = source.as_deref();
     let target = target.load_string()?;
     let fs_type = fs_type.load_string()?;
     debug!("sys_mount <= source: {source:?}, target: {target:?}, fs_type: {fs_type:?}");
@@ -124,7 +125,7 @@ pub fn sys_mount(
     )?;
     process
         .mnt_ns()?
-        .attach_with_flags(&target, &mount_fs, mount_flags)?;
+        .attach_with_flags_and_devname(&target, &mount_fs, mount_flags, source_ref)?;
 
     Ok(0)
 }

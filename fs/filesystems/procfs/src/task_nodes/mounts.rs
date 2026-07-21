@@ -67,11 +67,29 @@ impl ProcMountCollector {
     }
 }
 
+fn mangle(s: &str) -> String {
+    let mut result = String::new();
+    for c in s.chars() {
+        match c {
+            ' ' => result.push_str("\\040"),
+            '\t' => result.push_str("\\011"),
+            '\n' => result.push_str("\\012"),
+            '\\' => result.push_str("\\\\"),
+            '#' => result.push_str("\\043"),
+            _ => result.push(c),
+        }
+    }
+    result
+}
+
 fn show_mounts(item: &ProcMountEntry, buf: &mut String) -> core::fmt::Result {
     let mount_options = format_mount_options(item.mnt_flags, item.mount_ro || item.super_ro);
     buf.push_str(&format!(
         "{} {} {} {} 0 0\n",
-        item.source, item.mount_point, item.fs_type, mount_options
+        mangle(&item.source),
+        item.mount_point,
+        item.fs_type,
+        mount_options
     ));
     Ok(())
 }
@@ -89,7 +107,7 @@ fn show_mountinfo(item: &ProcMountEntry, buf: &mut String) -> core::fmt::Result 
         item.mount_point,
         mount_options,
         item.fs_type,
-        item.source,
+        mangle(&item.source),
         super_options,
     ));
     Ok(())
@@ -98,7 +116,9 @@ fn show_mountinfo(item: &ProcMountEntry, buf: &mut String) -> core::fmt::Result 
 fn show_mountstats(item: &ProcMountEntry, buf: &mut String) -> core::fmt::Result {
     buf.push_str(&format!(
         "device {} mounted on {} with fstype {}\n",
-        item.source, item.mount_point, item.fs_type
+        mangle(&item.source),
+        item.mount_point,
+        item.fs_type
     ));
     Ok(())
 }
@@ -137,16 +157,11 @@ fn mountpoint_path(mount: &Arc<Mount>) -> String {
     }
 }
 
-fn mount_source_for(is_root: bool, fs_type: &str) -> String {
-    if is_root {
-        "rootfs".to_string()
-    } else {
-        fs_type.to_string()
+fn mount_source(mount: &Arc<Mount>) -> Option<String> {
+    if let Some(devname) = mount.devname() {
+        return Some(devname.to_string());
     }
-}
-
-fn mount_source(mount: &Arc<Mount>, fs_type: &str) -> String {
-    mount_source_for(mount.is_root(), fs_type)
+    None
 }
 
 fn push_mount_option(options: &mut Vec<&'static str>, enabled: bool, name: &'static str) {
@@ -210,7 +225,7 @@ fn make_mount_entry(mount: &Arc<Mount>, parent_id: u64, mount_id: u64) -> ProcMo
         minor: mount.synthetic_device_id() as u32,
         root: "/".to_string(),
         mount_point: mount_point.clone(),
-        source: mount_source(mount, &fs_type),
+        source: mount_source(mount).unwrap_or_else(|| "none".to_string()),
         fs_type,
         mnt_flags,
         mount_ro,
@@ -247,20 +262,12 @@ impl SeqIterator for ProcMountIter {
 
 #[cfg(unittest)]
 mod tests {
-    use kvfs::MountFlags;
+    use alloc::{string::ToString, sync::Arc};
+
+    use kvfs::{DirMapping, Mount, MountFlags, SimpleDir, SimpleFs};
     use unittest::{assert_eq, def_test};
 
     use super::ProcMountEntry;
-
-    #[def_test]
-    fn test_mount_source_for_root_uses_rootfs() {
-        assert_eq!(super::mount_source_for(true, "proc"), "rootfs");
-    }
-
-    #[def_test]
-    fn test_mount_source_for_non_root_uses_fs_type() {
-        assert_eq!(super::mount_source_for(false, "proc"), "proc");
-    }
 
     #[def_test]
     fn test_format_mount_options_defaults_to_rw() {
@@ -348,5 +355,47 @@ mod tests {
         super::show_mountinfo(&entry, &mut buf).unwrap();
 
         assert_eq!(buf, "1 0 0:1 / / rw - ext4 rootfs ro\n");
+    }
+
+    #[def_test]
+    fn test_mount_source_uses_devname_when_set() {
+        // Create a simple filesystem for testing.
+        let fs = SimpleFs::new_with("test".into(), 0, |fs| {
+            SimpleDir::<DirMapping>::new_maker(fs, Arc::new(DirMapping::new()))
+        });
+
+        // Create a root mount to act as the parent.
+        let root_mount = Mount::new_root(&fs);
+        let parent_path = root_mount.root_path();
+
+        // Create a non-root child mount with a devname.
+        let mount = Mount::new_with_flags_and_devname(
+            &fs,
+            Some(parent_path),
+            MountFlags::empty(),
+            Some("virtio-blk-0"),
+        );
+
+        let result = super::mount_source(&mount);
+        assert_eq!(result, Some("virtio-blk-0".to_string()));
+    }
+
+    #[def_test]
+    fn test_mount_source_falls_back_to_none_when_no_devname() {
+        // Create a simple filesystem for testing.
+        let fs = SimpleFs::new_with("test".into(), 0, |fs| {
+            SimpleDir::<DirMapping>::new_maker(fs, Arc::new(DirMapping::new()))
+        });
+
+        // Create a root mount to act as the parent.
+        let root_mount = Mount::new_root(&fs);
+        let parent_path = root_mount.root_path();
+
+        // Create a non-root child mount without a devname.
+        let mount =
+            Mount::new_with_flags_and_devname(&fs, Some(parent_path), MountFlags::empty(), None);
+
+        let result = super::mount_source(&mount);
+        assert_eq!(result, None);
     }
 }

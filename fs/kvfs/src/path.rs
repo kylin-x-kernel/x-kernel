@@ -14,6 +14,9 @@ pub const DOTDOT: &str = "..";
 /// Maximum filename length.
 pub const MAX_NAME_LEN: usize = 255;
 
+/// chars in a path name including nul
+pub const PATH_MAX: usize = 4096;
+
 /// A borrowed pathname view.
 ///
 /// Different from [`std::path::Path`], this type is always UTF-8 encoded.

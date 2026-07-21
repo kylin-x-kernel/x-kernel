@@ -192,17 +192,18 @@ impl MntNamespace {
 
     /// Mounts a filesystem at a resolved mountpoint in this namespace.
     pub fn attach(&self, mountpoint: &Path, fs: &Arc<SuperBlock>) -> VfsResult<Arc<Mount>> {
-        self.attach_with_flags(mountpoint, fs, MountFlags::empty())
+        self.attach_with_flags_and_devname(mountpoint, fs, MountFlags::empty(), None)
     }
 
-    /// Mounts a filesystem with per-mount flags at a resolved mountpoint.
-    pub fn attach_with_flags(
+    /// Mounts a filesystem with per-mount flags and device name at a resolved mountpoint.
+    pub fn attach_with_flags_and_devname(
         &self,
         mountpoint: &Path,
         fs: &Arc<SuperBlock>,
         flags: MountFlags,
+        devname: Option<&str>,
     ) -> VfsResult<Arc<Mount>> {
-        let mount = mountpoint.mount_filesystem_with_flags(fs, flags)?;
+        let mount = mountpoint.mount_filesystem_with_flags_and_devname(fs, flags, devname)?;
         self.mounts.lock().insert(mount.mount_id(), mount.clone());
         Ok(mount)
     }
@@ -251,19 +252,21 @@ pub struct Mount {
     /// When a new mount is created at a location that already has a mount,
     /// the old mount is stored here so it can be restored on unmount.
     covers: Mutex<Option<Arc<Self>>>,
+    mnt_devname: Option<String>,
 }
 
 impl Mount {
     /// Creates a new mount for a filesystem at an optional parent path.
     pub fn new(fs: &Arc<SuperBlock>, location_in_parent: Option<Path>) -> Arc<Self> {
-        Self::new_with_flags(fs, location_in_parent, MountFlags::empty())
+        Self::new_with_flags_and_devname(fs, location_in_parent, MountFlags::empty(), None)
     }
 
-    /// Creates a new mount with per-mount flags.
-    pub fn new_with_flags(
+    /// Creates a new mount with per-mount flags and device name.
+    pub fn new_with_flags_and_devname(
         fs: &Arc<SuperBlock>,
         location_in_parent: Option<Path>,
         flags: MountFlags,
+        devname: Option<&str>,
     ) -> Arc<Self> {
         Arc::new(Self {
             mnt: VfsMount::new(fs, flags),
@@ -274,6 +277,7 @@ impl Mount {
             mnt_mounts: Mutex::default(),
             mnt_id: MOUNT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             covers: Mutex::default(),
+            mnt_devname: devname.map(|s| s.to_string()),
         })
     }
 
@@ -287,6 +291,7 @@ impl Mount {
             mnt_mounts: Mutex::default(),
             mnt_id: MOUNT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             covers: Mutex::default(),
+            mnt_devname: source.mnt_devname.clone(),
         })
     }
 
@@ -297,7 +302,7 @@ impl Mount {
 
     /// Creates a root mount with per-mount flags.
     pub fn new_root_with_flags(fs: &Arc<SuperBlock>, flags: MountFlags) -> Arc<Self> {
-        Self::new_with_flags(fs, None, flags)
+        Self::new_with_flags_and_devname(fs, None, flags, None)
     }
 
     /// Return a `Path` representing the mount root.
@@ -353,6 +358,11 @@ impl Mount {
     /// Returns the mount namespace identity assigned to this mount object.
     pub fn mount_id(self: &Arc<Self>) -> u64 {
         self.mnt_id
+    }
+
+    /// Returns the device name for this mount, if set.
+    pub fn devname(&self) -> Option<&str> {
+        self.mnt_devname.as_deref()
     }
 
     /// Returns the temporary VFS device identity exposed for inode metadata.
@@ -878,17 +888,17 @@ impl Path {
     /// Mount a filesystem at this path.
     #[cfg(unittest)]
     fn mount_filesystem(&self, fs: &Arc<SuperBlock>) -> VfsResult<Arc<Mount>> {
-        self.mount_filesystem_with_flags(fs, MountFlags::empty())
+        self.mount_filesystem_with_flags_and_devname(fs, MountFlags::empty(), None)
     }
 
-    /// Mount a filesystem with per-mount flags at this path.
-    fn mount_filesystem_with_flags(
+    fn mount_filesystem_with_flags_and_devname(
         &self,
         fs: &Arc<SuperBlock>,
         flags: MountFlags,
+        devname: Option<&str>,
     ) -> VfsResult<Arc<Mount>> {
         self.dentry.as_dir()?;
-        let result = Mount::new_with_flags(fs, Some(self.clone()), flags);
+        let result = Mount::new_with_flags_and_devname(fs, Some(self.clone()), flags, devname);
         if let Some(old) = self.mnt.install_child_mount(&self.dentry, &result) {
             *result.covers.lock() = Some(old);
         }
@@ -1313,7 +1323,7 @@ mod tests {
         let root_mount = Mount::new_root_with_flags(&root_fs, MountFlags::RDONLY);
         let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
         let child_mount = mount_dir
-            .mount_filesystem_with_flags(&child_fs, MountFlags::empty())
+            .mount_filesystem_with_flags_and_devname(&child_fs, MountFlags::empty(), None)
             .unwrap();
         let child_root = child_mount.root_path();
 
@@ -1386,7 +1396,7 @@ mod tests {
         assert!(Arc::ptr_eq(loc_a.mount(), &mount_a));
 
         let mount_b = mnt_loc
-            .mount_filesystem_with_flags(&fs_b, MountFlags::RDONLY)
+            .mount_filesystem_with_flags_and_devname(&fs_b, MountFlags::RDONLY, None)
             .unwrap();
         let loc_b = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
         assert!(Arc::ptr_eq(loc_b.mount(), &mount_b));
