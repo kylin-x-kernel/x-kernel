@@ -98,7 +98,7 @@ unsafe impl Sync for TcpSocket {}
 
 ### 2. Unix stream 写入 vacant ring buffer
 
-位置：`src/unix/stream.rs:255` 和 `src/unix/stream.rs:259`
+位置：`src/unix/stream.rs:351` 和 `src/unix/stream.rs:355`
 
 ```rust
 let mut count = src.read(unsafe { left.assume_init_mut() })?;
@@ -124,7 +124,7 @@ count += src.read(unsafe { right.assume_init_mut() })?;
 
 ### 3. Unix stream 推进 write index
 
-位置：`src/unix/stream.rs:264`
+位置：`src/unix/stream.rs:370`
 
 ```rust
 unsafe { chan.tx.advance_write_index(count) };
@@ -148,7 +148,7 @@ unsafe { chan.tx.advance_write_index(count) };
 
 ### 4. Unix stream 推进 read index
 
-位置：`src/unix/stream.rs:296`
+位置：`src/unix/stream.rs:402`
 
 ```rust
 unsafe { chan.rx.advance_read_index(count) };
@@ -201,7 +201,7 @@ unsafe {
 1. `SocketHandle` 生命周期：任何 smoltcp socket handle 在访问前必须仍存在于 `SOCKET_SET`。
 2. `SocketSet` 互斥访问：所有 `SocketSet` 读写必须经过 `SOCKET_SET.inner` 的 mutex。
 3. `Service` 互斥访问：smoltcp `Interface`、`Router` 和设备 dispatch 必须在 `SERVICE.lock()` 内推进。
-4. ring buffer publish 规则：Unix stream 和 vsock 只能发布已经写入的字节，只能消费当前 occupied 区域内的字节。
+4. ring buffer publish 规则：Unix stream 和 vsock 只能发布已经写入的字节，只能消费当前 occupied 区域内的字节。Unix stream 的 write index 发布、方向关闭和空队列 EOF 判定由同一个方向锁排序。
 5. driver buffer 生命周期：`NetBufHandle::data` 只在 handle 被 recycle 前使用，RX handle 必须在处理后归还。
 6. netlink message 边界：所有 payload 读取必须先经过 header 长度、attribute 长度和 family 校验。
 7. route index 边界：rtnetlink route 的 `oif` 转换成设备索引后必须检查 `dev < devices.len()`。
@@ -219,7 +219,7 @@ unsafe {
 | `TcpSocket` | 字段满足 Send | unsafe impl，依赖内部锁和 global socket set 串行化 |
 | `UdpSocket` | 字段满足 Send | `RwLock`、atomic 和 immutable handle 保护共享状态 |
 | `RawSocket` | 字段满足 Send | `RwLock`、atomic 和 immutable handle 保护共享状态 |
-| `StreamTransport` | 字段满足 Send | `Mutex<Option<Channel>>`、atomic 和 `PollSet` 保护共享状态 |
+| `StreamTransport` | 字段满足 Send | `Mutex<Option<Channel>>` 串行化本端操作，per-direction `SpinNoPreempt` 排序数据发布、半关闭与 EOF 判定，三组 `PollSet` 隔离读、写和连接状态 waiter |
 | `NetlinkSocket` | 字段满足 Send | `Arc<NetlinkSocketInner>` 内部使用 `RwLock`、`Mutex` 和 `PollSet` |
 | `Service` | 在 `Mutex<Service>` 内使用 | 通过全局 `Mutex` 提供共享访问 |
 | `Router` | 在 `Service` 内使用 | 通过 `Service` mutex 间接共享 |
@@ -230,7 +230,7 @@ unsafe {
 |------|----------|----------|----------|----------|
 | T-01 | 初始化顺序错误导致 `LazyInit` 访问未初始化对象 | 高 | socket 在 `init_network` 前创建或 poll | 启动路径由 `core/kruntime` 先调用 `init_network`；新增入口需保留该顺序 |
 | T-02 | smoltcp socket handle 已删除后继续访问 | 高 | listener 关闭、accepted child 清理与并发 socket 操作交错 | `SocketSet` 访问由 mutex 串行化；`ListenTable::unlisten` drain 后删除 handle；调用点需避免缓存 handle 后跨释放点使用 |
-| T-03 | ring buffer index 推进超过实际写入或读取长度 | 高 | `advance_write_index` 或 `advance_read_index` 的 count 与切片来源不一致 | count 由同一锁内的 read/write 返回值计算；unsafe 注释固定不变量 |
+| T-03 | ring buffer index 推进超过实际写入或读取长度 | 高 | `advance_write_index` 或 `advance_read_index` 的 count 与切片来源不一致 | count 由持有 channel mutex 时取得的同一批 slices 计算；unsafe 注释固定不变量 |
 | T-04 | 恶意 netlink 消息越界读取或构造非法状态 | 高 | 用户传入短 header、畸形 attr、非法 family、非法 ifindex | `NlMsgHeader::read`、`parse_attrs`、`parse_ip_by_family` 和 route index 检查拒绝非法输入 |
 | T-05 | ARP spoofing 污染 neighbor cache | 中 | 外部主机发送伪造 ARP reply 或 request | 当前校验 unicast MAC、广播和本机目标 IP；完整邻居安全策略仍依赖网络隔离 |
 | T-06 | listen backlog 被 SYN 洪泛占满 | 中 | 大量连接请求命中同一 listener | backlog 被 clamp 到 `LISTEN_QUEUE_SIZE`；超限丢弃并记录 warn |
@@ -246,6 +246,7 @@ unsafe {
 | T-16 | host 误判 port 0 handshake 结果 | 中 | 未读状态字节就发 payload；忽略 `[1]`；无 recv 超时导致永久阻塞 | 协议要求 host 先读单字节状态（`0`=成功，`1`=拒绝）；`libtrusty` 使用 `SO_RCVTIMEO`；CA 测试拒绝非 `[0]` 状态 |
 | T-17 | pathname Unix socket 绕过 inode/目录 DAC 或复用已有 inode | 高 | bind/connect/sendto 直接访问 binding 表，或 bind 接受已有路径 | bind 通过 `parent_at` 和 `Path::mknod` 排他创建；connect/sendto 在 lookup 后检查最终 inode `MAY_WRITE`；abstract 地址才直接访问内存 binding 表 |
 | T-18 | 内核任务隐式读取用户凭据 | 高 | 启动期 pathname bind 调用普通 `SocketOps::bind`，当前线程不存在或主体错误 | 内核调用者使用 `bind_with_cred` 显式传入 `initial_cred()` 等已选择凭据；普通入口只服务当前用户任务 |
+| T-19 | Unix stream 在 EOF 后发布数据 | 中 | send、shutdown 与 peer recv 并发交错，关闭状态和 write index 缺少共同排序 | 每个发送方向使用共享 `tx_order`；send 在锁内复检后发布，recv 在锁内复查 empty 和 closed，Channel 释放前先发布关闭状态 |
 
 影响等级定义：
 
@@ -266,7 +267,7 @@ unsafe {
 | F-07 | poll waker 丢失 | device mask 错误或 timeout 未注册 | socket 阻塞等待延迟 | 应用 IO latency 上升 | 3 | bind/connect 后更新 device mask；`Service::register_rx_waker` 同时注册 timeout poll |
 | F-08 | malformed netlink request | header 或 attr 长度非法 | 返回 empty response 或 netlink error | 调用者请求失败 | 4 | checked reader 和 error response 处理 |
 | F-09 | ROUTE_STATE 未初始化 | netlink route 请求早于 `init_route_state` | panic 或空状态 | netlink 功能不可用 | 2 | 初始化路径在 `init_network` 中创建初始 state；新增启动路径需保持顺序 |
-| F-10 | Unix stream peer 提前关闭 | channel 被 shutdown 或 drop | send 返回 `BrokenPipe`，recv 返回 EOF | 应用感知连接关闭 | 4 | shutdown 设置 atomic 并唤醒 peer poll set |
+| F-10 | Unix stream peer 提前关闭 | channel 被 shutdown 或 drop | send 在无发送进度时返回 `BrokenPipe`，已有进度时返回部分字节数；recv 排空本端缓冲后返回 EOF；peer 关闭时丢弃未读输入则返回一次 `ConnectionReset`；poll 报告 `RDHUP`、`HUP` 或 `ERR` | 应用感知连接关闭 | 4 | endpoint atomic 记录双方半关闭状态与待处理 reset；per-direction `tx_order` 统一关闭与数据顺序；三组 `PollSet` 按受影响事件定向唤醒 |
 | F-11 | 中断上下文执行重型网络推进 | IRQ 路径误调用 socket send、recv 或 `poll_interfaces` | 锁竞争、调度延迟或死锁 | 网络 IO 延迟上升，严重时系统卡顿 | 2 | IRQ 路径只做 waker notification，实际协议推进由 task 上下文执行 |
 | F-12 | RX buffer recycle 顺序错误 | frame payload 在 `recycle_rx` 后仍被引用 | 读取悬垂数据或数据损坏 | packet 解析异常，严重时破坏内存安全 | 1 | `EthernetDevice::poll_rx` 在 recycle 前完成解析和复制；新增设备适配需保持同样生命周期 |
 | F-13 | port 0 handshake 永久等待 | host 早于 TA publish 连接且未设 recv 超时；或 service 永不 publish | host `read` 阻塞；负例测试挂起 | CA/测试进程无响应 | 3 | dynamic connect 保留 `WAIT_FOR_PORT`；host 设 `TRUSTY_VSOCK_TIMEOUT_SEC`；明确拒绝场景回 `[1]` |
@@ -285,7 +286,7 @@ unsafe {
 - 普通输入错误使用 `KError` 和 `LinuxError` 返回，例如 `EINVAL`、`EAFNOSUPPORT`、`ENETUNREACH`、`EADDRINUSE`、`EWOULDBLOCK`。
 - malformed netlink 请求返回 netlink error response，短到无法读取 header 的请求返回空 response。
 - malformed Ethernet、ARP、IP、TCP 包在 RX 路径丢弃，并通过 warn 或 trace 记录。
-- smoltcp buffer full 映射为 `WouldBlock`，poller 负责等待 IO readiness。
+- smoltcp buffer 和 Unix stream ring buffer 满时映射为 `WouldBlock`，poller 负责等待 IO readiness；非阻塞 Unix stream send 已有进度时返回部分字节数。
 - loopback 和 Ethernet 队列满时丢包并记录 warn。
 - panic 路径主要来自初始化顺序、内部 invariant 破坏和 `expect` 断言；新增公开入口应先返回 `KError`，再进入内部断言区。
 
@@ -312,6 +313,7 @@ unsafe {
 - 新增 route 或 device mutation 通过 `update_route_state` 或等效同步路径更新 data-plane。
 - 新增 netlink parser 先校验 header 长度、attribute 长度、family 和 index。
 - 新增 ring buffer 操作的 advance count 来自同一锁内同一批 slices。
+- Unix stream 的 write index 发布、方向关闭和空队列 EOF 判定保持同一个 per-direction 排序点，方向锁内不执行用户复制或 `PollSet` 唤醒，shutdown 在释放 `channel` mutex 后执行 waiter 唤醒。
 - 新增外部网络输入使用 checked parser。
 - 新增 socket option 明确 errno、阻塞语义和 poll readiness。
 - 新增 pathname Unix socket 入口使用单次凭据快照，并让全部 VFS 操作显式接收该快照。

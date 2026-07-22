@@ -42,6 +42,9 @@ pub enum UnixAddr {
 #[enum_dispatch]
 pub trait UnixTransportOps: Configurable + Pollable + Send + Sync {
     fn bind(&self, slot: &BindEntry, local_endpoint: &UnixAddr) -> KResult;
+    fn listen(&self, _backlog: usize) -> KResult {
+        Err(KError::OperationNotSupported)
+    }
     fn connect(&self, slot: &BindEntry, local_endpoint: &UnixAddr) -> KResult;
 
     async fn accept(&self, nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)>;
@@ -289,8 +292,8 @@ impl SocketOps for UnixDomainSocket {
         Ok(())
     }
 
-    fn listen(&self, _backlog: usize) -> KResult {
-        Ok(())
+    fn listen(&self, backlog: usize) -> KResult {
+        self.transport.listen(backlog)
     }
 
     fn accept(&self, options: AcceptOptions) -> KResult<Socket> {

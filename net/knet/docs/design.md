@@ -269,7 +269,10 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 - `LISTEN_TABLE` 用 `Mutex<HashMap<...>>` 管理 listener，再用 per-entry `Mutex` 保护 backlog 队列。
 - TCP 状态转换使用 `StateLock` 的 atomic CAS，失败时返回当前状态。
 - socket option 和 shutdown 标志使用 atomics，跨线程读写只表达配置或关闭状态。
-- Unix stream 的 ring buffer producer 与 consumer 被 `channel: Mutex<Option<Channel>>` 包住，send 与 recv 对同一 channel 的 ring 操作串行执行。
+- Unix stream 的 `channel: Mutex<Option<Channel>>` 串行化同一 endpoint 发起的 send、recv、shutdown 和 channel 释放。
+- Unix stream 每个 endpoint 的 `tx_order: SpinNoPreempt<()>` 是对应发送方向的共享排序点。本端 write shutdown、对端 read shutdown、write index 发布和对端空队列 EOF 判定都经过该锁。固定锁序为 `channel` mutex 后取得单个 `tx_order`，两个方向的顺序锁不会同时持有。
+- Unix stream 的用户数据复制和 `PollSet` 唤醒在 `tx_order` 外执行。send 先写入未发布的 vacant 区域，再在锁内复检关闭状态并推进 write index；recv 读取为空后在锁内复查 occupied 长度和关闭状态；shutdown 完成状态发布并复制 peer endpoint 引用后释放 `channel` mutex，再执行 waiter 唤醒。
+- Unix stream 每个 endpoint 分别持有 readable、writable 和 connection-state 三组 `PollSet`。写入只唤醒 peer readable waiter，读取跨过发送缓冲低水位时只唤醒 peer writable waiter，半关闭只唤醒受影响方向，完整关闭通过 connection-state waiter 通知双方。
 - netlink `ROUTE_STATE` 使用 `RwLock`，rx queue 和 subscriber 列表使用 `Mutex`。
 - RX waker 由 `GeneralOptions::device_mask` 指向相关设备，`Service::register_rx_waker` 同时注册 timeout 和设备 IRQ waker。
 
@@ -307,6 +310,12 @@ Linux 可从任务上下文隐式读取 `current_cred()`，但 knet 也服务于
 监听 socket 和 accepted child socket 分开管理。
 `ListenTable` 根据收到的 SYN 创建 child smoltcp socket，把待完成连接放入 backlog 队列。
 这个设计让 POSIX accept 语义集中在 knet 内部，代价是 listen table 必须 snoop TCP 首包并清理 aborted child。
+
+### Unix stream 按 readiness 类别隔离 waiter
+
+Unix stream 的双向 channel 为两端保存独立的 `StreamEndpoint`，endpoint 通过 atomic 记录本地读写关闭状态、监听状态和待处理连接错误，并通过 `StreamPollSets` 分别维护 readable、writable 和 connection-state waiter。listener 的连接请求复用 endpoint readable 集合。读取事件只注册到 readable，写入事件只注册到 writable，仅请求连接状态的 waiter 注册到 connection-state，避免同一方向重复占用多个固定容量集合。数据进入 ring buffer 时只通知对端读取者，接收端读取数据使发送缓冲占用量从容量四分之一以上降到四分之一以下时通知对端写入者。连接的接收和发送方向均关闭或 endpoint 被释放时同时通知三个集合，使所有受连接状态影响的等待者重新检查 readiness。
+
+每个 `StreamEndpoint` 还保存本端发送方向的 `tx_order`。send 只在该锁内提交 write index，shutdown 只在对应方向锁内发布关闭状态，peer recv 只在同一锁内完成空队列和 EOF 的最终判定。该顺序保证已经发布的数据先于 EOF 被观察，关闭状态先取得方向锁时后续 send 返回 `BrokenPipe`。阻塞 send 已发布部分数据后遇到关闭时返回已发送字节数。非阻塞 send 在已有发送进度时返回部分字节数，零进展且 ring buffer 已满时返回 `WouldBlock`；连接存在且双方对应方向保持打开时，零长度发送返回 0。绑定只保留 Unix 地址，`listen` 单独开启连接接收；监听端关闭读取方向后拒绝新连接，并保留已入队连接供 `accept` 取出。
 
 ### Ethernet ARP pending queue
 
@@ -372,6 +381,6 @@ bridge v1 只转发 bytes，不转发 TIPC handles 或 memrefs。
 - `SocketSetWrapper::remove` 按 smoltcp handle 移除 socket。
 - TCP listener 关闭时，`ListenTable::unlisten` 标记 entry closed，drain child handles，并从 `SOCKET_SET` 删除。
 - Unix stream listener 在 `Drop` 中清空 bind slot，释放 pending connection request。
-- Unix stream channel 被 `Option<Channel>` 持有，双方 shutdown 后取出 channel 并唤醒 peer。
+- Unix stream channel 被 `Option<Channel>` 持有。shutdown 在对应方向锁内更新 endpoint 的读写关闭状态并唤醒受影响方向。`Channel::drop` 在释放 ring producer 和 consumer 前发布双向关闭状态并唤醒双方 connection-state waiter；peer 的 `recv` 先消费已发布数据，缓冲区耗尽后返回 EOF，`poll` 报告 `RDHUP`。关闭端丢弃自身接收队列中的未读数据时，对端记录一次 `ConnectionReset`，由 `recv` 或 `SO_ERROR` 消费。
 - UDP socket 通过 UDP error registry 注册异步错误状态，Drop 路径应保持 unregister 与 handle 生命周期一致。
 - Ethernet RX buffer 在 `poll_rx` 完成 frame 处理后调用 driver `recycle_rx` 归还。

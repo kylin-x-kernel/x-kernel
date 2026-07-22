@@ -21,6 +21,7 @@ device_res = { workspace = true }
 irq_notify = { workspace = true }
 khal = { workspace = true }
 ksync = { workspace = true }
+kspin = { workspace = true }
 ktask = { workspace = true }
 kprocess = { workspace = true }
 kcred = { workspace = true }
