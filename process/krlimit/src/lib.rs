@@ -66,9 +66,13 @@ impl Rlimits {
         // If stack growth or a resizable fd table is added, revisit these two
         // entries and align their hard limits with the defaults reported
         // through `prlimit64`.
+        //
+        // Keep `RLIMIT_NPROC` unlimited: musl `sysconf(_SC_CHILD_MAX)` returns
+        // `rlim_cur`, and a soft limit of 0 makes bash leave `bgpids.storage`
+        // unallocated then crash on `true & wait` (NULL+8 in `pshash_delindex`).
         result[RLIMIT_STACK] = (user_stack_size as u64).into();
         result[RLIMIT_CORE] = Rlimit::new(0, RLIM_INFINITY);
-        result[RLIMIT_NPROC] = Rlimit::new(0, 0);
+        result[RLIMIT_NPROC] = Rlimit::INFINITY;
         result[RLIMIT_NOFILE] = (FILE_LIMIT as u64).into();
         result[RLIMIT_MEMLOCK] = Rlimit::new(MLOCK_LIMIT_BYTES, MLOCK_LIMIT_BYTES);
         result[RLIMIT_MSGQUEUE] = Rlimit::new(MSGQUEUE_LIMIT_BYTES, MSGQUEUE_LIMIT_BYTES);
@@ -120,6 +124,7 @@ mod tests {
         assert_eq!(limits[RLIMIT_NOFILE].current, FILE_LIMIT as u64);
         assert_eq!(limits[linux_raw_sys::general::RLIMIT_CPU], Rlimit::INFINITY);
         assert_eq!(limits[RLIMIT_CORE], Rlimit::new(0, RLIM_INFINITY));
+        assert_eq!(limits[RLIMIT_NPROC], Rlimit::INFINITY);
     }
 
     #[def_test]
