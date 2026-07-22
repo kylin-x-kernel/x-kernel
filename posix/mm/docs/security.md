@@ -47,7 +47,7 @@
   present PTE residency, and backing object pages.
 - `memfd_create` 返回的文件对象必须持有有效 `Location`。
 - anonymous file `Location` 必须绑定到 regular-file inode。
-- anonymous file inode 的内容必须由 inode-owned `Mapping` 提供。
+- anonymous file inode 的内容必须由 inode-owned `kvfs::AddressSpace` 提供。
 - `memfd_create` 必须通过 `memfs::shmem` factory 创建匿名文件，不能在 syscall 层
   复制 private tmpfs 文件创建、重新打开 anonymous location，或绕过 inode-scoped
   shmem policy state。
@@ -59,7 +59,7 @@
 ## 线程安全
 
 - fd 安装通过进程资源表同步。
-- `memfs::shmem` state、VFS inode 与 `Mapping` 分别由各自锁保护。
+- `memfs::shmem` state、VFS inode 与 `AddressSpace` 分别由各自锁保护。
 - `posix-mm` 不额外缓存跨 syscall 的裸指针或未同步共享状态。
 
 ## 威胁分析
@@ -121,6 +121,6 @@
 - fixed-address mapping 是否仍拒绝未对齐地址。
 - `memfd_create` 是否仍不依赖 `/tmp` 或其它全局路径。
 - shmem factory 是否总是返回 private mount 上的 regular-file inode。
-- `memfd` regular-file inode 是否始终复用 inode-owned `Mapping`。
+- `memfd` regular-file inode 是否始终复用 inode-owned `AddressSpace`。
 - `MADV_DONTNEED` 是否只命中 private-anon object，并通过 object-driven
   invalidate 主线完成 PTE zap。

@@ -13,7 +13,7 @@ mod anon_inode;
 mod file;
 mod filename;
 mod kiocb;
-mod libfs;
+pub mod libfs;
 mod lookup;
 mod mount;
 mod namei;
@@ -31,16 +31,13 @@ mod type_map;
 mod types;
 
 pub use address_space::{
-    AddressSpace, AddressSpaceOperations, ReadaheadControl, WriteBeginRequest, WriteEndRequest,
-    WritebackControl, WritebackSyncMode,
+    AddressSpace, AddressSpaceOperations, AddressSpaceViewGuard, ReadaheadControl,
+    WriteBeginRequest, WriteEndRequest, WritebackControl, WritebackSyncMode,
 };
 pub use anon_inode::{AnonInodeFs, init_anon_inodefs};
 pub use file::{FMode, FileDirOperations, FileOperations, VfsFile, VfsFileBuilder};
 pub use filename::Filename;
 pub use kiocb::Kiocb;
-pub use libfs::{
-    simple_fsync_noflush, simple_getattr, simple_rename, simple_statfs_with_flags, simple_write_end,
-};
 pub use lookup::{LookupFlags, LookupIntent, MagicLinkOps, ResolvedObject};
 pub use mount::{MntNamespace, Mount, MountFlags, MountIdmap, NamespaceClone, Path};
 pub use namei::{DelayedCall, LastType, ParentLookup, dentry_open};

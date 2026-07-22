@@ -60,8 +60,8 @@ confidence 和 method limits。rsext4 只作为只读对比基线，不再为其
 
 - `fs/filesystems/kext4` 拥有 ext4 磁盘格式、校验、JBD2、metadata buffer、extent、allocator、
   orphan、xattr 和持久化不变量；core 不依赖 KVFS 对象。
-- KVFS 拥有 dentry、inode identity、open file、AddressSpace、PageCache、mmap view 和 mount
-  tree 生命周期。
+- KVFS 拥有 dentry、inode identity、open file、AddressSpace（含私有 `PageCache` folio
+  storage）、mmap view 和 mount tree 生命周期。
 - `fs/bridges/kext4_vfs` 只做语义适配、对象绑定、缓存属性同步和错误转换；bridge 不建立
   第二套 dentry cache、普通文件数据 cache 或 journal coordinator。
 - 普通文件数据只通过 inode-owned AddressSpace/PageCache；ext4 元数据只通过 KExt4
@@ -97,7 +97,7 @@ confidence 和 method limits。rsext4 只作为只读对比基线，不再为其
 - S0：适配 `LockedDentry`、typed flags、最新 inode constructors、statfs 和 max-file-size；
 - S1：一个 ext4 inode number 对应一个 live `VfsInode`/AddressSpace；
 - S1：core namespace removal 与 final inode eviction 分离；
-- S1：truncate 使用 core prepare → PageCache/mmap resize → core finish；
+- S1：truncate 使用 core prepare → `AddressSpace` i_size/unmap/cache/unmap transaction → core finish；
 - S1：legacy orphan recovery、open-unlink、hard-link identity 和 rename-overwrite identity 已有
   live 基线。
 
@@ -124,7 +124,7 @@ confidence 和 method limits。rsext4 只作为只读对比基线，不再为其
 POSIX / KVFS
     |
     +-- mount / dentry / VfsInode / VfsFile
-    +-- inode-owned AddressSpace / PageCache / mmap views
+    +-- inode-owned AddressSpace / private PageCache folio storage / mmap views
                          |
                          v
                   kext4_vfs::Inode
@@ -155,7 +155,7 @@ POSIX / KVFS
 | --- | --- |
 | `super_block` / `ext4_sb_info` | KVFS `SuperBlock` + KExt4 mount services；geometry 与可变 service state 分离 |
 | `ext4_inode_info` | bridge/core per-inode state；`i_size/i_disksize`、sync tids、delalloc/PA/extent-status |
-| `address_space` | KVFS/PageCache 唯一拥有；KExt4 提供 address-space operations |
+| `address_space` | KVFS `AddressSpace` 唯一拥有 identity/views；`PageCache` 是其私有 folio storage，KExt4 提供 address-space operations |
 | `jbd2_journal` | mount-wide persistent `JournalCoordinator` |
 | running/committing/checkpoint transaction | coordinator 和 metadata buffer 共同维护明确 ownership |
 | extent status tree | per-inode logical-range cache，不替代磁盘 extent tree |
@@ -168,7 +168,7 @@ POSIX / KVFS
 
 1. **Core architecture**：mount services、journal、metadata buffer、allocator、extent 和
    per-inode state，由 KExt4 主线推进。
-2. **Shared VFS/MM contracts**：PageCache invalidation、errseq 和 mount lifecycle，由对应
+2. **Shared VFS/MM contracts**：AddressSpace cache/mmap invalidation、errseq 和 mount lifecycle，由对应
    负责人实现通用接口；KExt4 只提供需求和适配。
 3. **Validation**：最小 sentinel、normal fio、fault/powercut 和长期 workload，按阶段逐级
    扩大，不把最终矩阵复制到每一个早期提交。

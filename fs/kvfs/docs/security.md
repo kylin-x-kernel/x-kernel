@@ -71,14 +71,21 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   检查 inode write permission。
 - dentry backing metadata refresh 必须先确认 positive state，再匹配 inode number、node
   type、block size 和 `rdev`；外部 filesystem bridge 不直接取得内部 `Arc<VfsInode>`。
-- split truncate 成功时必须恰好执行一次 PageCache resize；文件系统负责维护 prepare 后失败
-  的磁盘恢复协议。
+- split truncate 必须在 inode data lock 下恰好调用一次 `truncate_setsize()`；该入口先发布
+  `i_size`，并在 cache truncate 前后各执行一次 mmap invalidation。文件系统负责维护
+  backing prepare 后失败的磁盘恢复协议。
+- `VfsInode` 只拥有一个 `AddressSpace`，MM/filemap 只经 `VfsFile::mapping()` 获取它；
+  不得向 MM 暴露或额外强持有内部 `PageCache`。
 
 ## 线程安全
 
 共享 dentry、inode、mount 和 file 状态由 mutex、atomic、`Arc` 和 `Weak` 保护。
 children map 与 superblock dcache 不嵌套持锁；namespace 操作先更新 parent 弱索引，
 再更新 dcache 强所有权。类型化 flags 是不可变值快照，不提供共享可变状态。
+
+regular-file inode 的 data lock 覆盖 generic buffered write 和整个 set-length callback；
+具体文件系统锁在 data lock 内获取。因此同一 inode 的 write、i_size publish、两轮 mmap
+invalidation 和 cache truncate 不会交错成两个 EOF source。
 
 所有 namespace lock 都是 sleepable lock。全局顺序为 superblock topology、父目录、
 子目录、非目录 inode，最后才是 dentry cache/location。cross-directory 由 parent dentry
@@ -115,7 +122,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-13 | 非 owner 直接修改 inode owner、mode 或显式时间 | 高 | syscall 或调用者直接进入后端 `setattr` | `Path` metadata API 在 mount write check 后统一执行 Linux owner/group/write policy |
 | T-14 | pathname socket 或其它 special inode 固定为 root | 高 | simple filesystem 动态 mknod 绕过 owner helper | `SimpleDir` mknod 使用 `inode_init_owner()`，仅支持持久插入的目录实现开放创建 |
 | T-15 | core mutation result 污染错误的 live inode identity | 高 | bridge 把一个 inode 的 metadata 写入另一个 `VfsInode` | cached metadata refresh 校验 identity、node type、block geometry 和 `rdev` |
-| T-16 | truncate 先释放磁盘 block、后失效 PageCache/mmap，造成 stale access | 高 | 文件系统没有保持 split truncate 顺序 | 文件系统 `set_len()` 执行 backing prepare -> `truncate_pagecache()`/view invalidation -> backing finish |
+| T-16 | truncate 窗口内 private mmap 在新 EOF 后重新 fault | 高 | i_size 晚于 cache truncate 发布，或只执行一次 unmap | inode data lock 串行化 write/truncate；`truncate_setsize()` 执行 i_size publish -> unmap -> cache truncate -> unmap |
 | T-17 | unlink 时过早触发磁盘 inode 回收 | 高 | dentry removal 与最后 open-file 引用混为一谈 | `Arc` inode identity 延迟 final teardown，磁盘回收只在 superblock `evict_inode()` hook 中执行 |
 | T-18 | 并发 rename 创建目录环 | 高 | cross-directory rename 未序列化 topology 或未在锁内检查祖先关系 | topology mutex、稳定 parent lock 和 ancestry check 拒绝该操作 |
 | T-19 | create 与 lookup、删除或 replacement 竞争 | 高 | final lookup、对象校验和 mutation 分离持锁 | final lookup、validator、participant lock 和 callback 位于同一父目录 exclusive transaction；create callback 复用最终 negative dentry，create-only 错误仅在该对象仍为 negative 时返回 |
@@ -151,7 +158,7 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
   建立，但尚未定义额外语义位；当前调用使用 empty flags。
 - superblock dentry cache 尚未实现 Linux 风格的 LRU/shrinker，当前依赖 namespace
   删除和卸载路径主动驱逐。
-- KVFS 提供 Mapping view invalidation 通知，但各文件系统仍需用 live mmap/truncate
+- KVFS 提供 AddressSpace view invalidation 通知，但各文件系统仍需用 live mmap/truncate
   case 验证自身接线。
 - fast lookup 仍是 mutex-based，没有 RCU 或 rename sequence validation；同名 slow lookup
   通过 hashed candidate 的 owner/waiter 协议合并。
@@ -175,8 +182,10 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 - 新建 inode 是否使用 `inode_init_owner()`，后端是否持久化 UID/GID。
 - fd-based 操作是否使用 open file mode/`f_cred`，而不是重新执行 pathname 授权。
 - backing mutation 后是否刷新所有受影响的 live inode，而不是只返回新 dentry。
-- truncate 是否通过 `set_len()` 与 `truncate_pagecache()` 保持 backing prepare、Mapping
-  invalidation 和 backing finish 顺序。
+- truncate 是否通过 `set_len()` 与 `truncate_setsize()` 保持 backing prepare、i_size publish、
+  两轮 AddressSpace invalidation、cache truncate 和 backing finish 顺序。
+- file-backed MM runtime 是否只保存 `VfsFile`，并经 `VfsFile::mapping()` 访问唯一的
+  inode `AddressSpace`。
 - `release()` 与 final `evict_inode()` 是否保持为两个不同生命周期阶段。
 - 每个 namespace mutation 是否获取父目录 exclusive lock。
 - unlink/rmdir 和 rename replacement 是否锁住 victim inode。

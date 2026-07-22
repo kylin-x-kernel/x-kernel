@@ -3,8 +3,8 @@
 
 `memfs` 信任 VFS 已完成路径解析和父目录权限检查，并信任 callback 传入的 `Cred`
 是该次完整操作使用的稳定快照。它负责维护目录结构、inode
-生命周期、符号链接内容，以及 regular-file inode 与 VFS/pagecache content owner
-的绑定关系。
+生命周期、符号链接内容，以及 regular-file inode 与 VFS-owned `AddressSpace`
+（其私有 `PageCache` storage）的绑定关系。
 
 ## 外部边界 / 攻击面
 
@@ -12,7 +12,7 @@
 - regular-file read/write/truncate
 - 匿名 tmpfs 文件对象创建
 - `VfsInode::i_mapping` 暴露的 address-space/page-cache owner
-- inode-owned `pagecache::Mapping` 暴露的 MM shared object identity
+- inode-owned `kvfs::AddressSpace` 暴露的 MM shared object identity
 - create/mkdir/mknod/symlink callback 的 mode 与 `&Cred`
 
 ## unsafe 代码清单
@@ -23,7 +23,7 @@
 
 - 同一 regular-file inode 最多拥有一个 `VfsInode::i_mapping`
   `AddressSpace`。
-- 同一 address-space 最多拥有一个 inode-owned `pagecache::Mapping`。
+- 同一 inode `AddressSpace` 最多拥有一个私有 `PageCache` 实现组件。
 - 所有指向同一 inode 的 open-file / mmap 路径都必须复用同一个 owner。
 - 符号链接不能进入 regular-file page-cache 路径。
 - 匿名文件不能挂入进程可见 mount namespace。
@@ -35,7 +35,8 @@
 - inode metadata、目录项和 mapping state 都通过对应 owner 的锁保护。
 - regular-file content ownership 位于 `VfsInode::i_mapping` 下，不引入第二套
   file-backed content ownership。
-- `pagecache::Mapping` 只通过 `Arc` 传播，不暴露共享裸指针。
+- `kvfs::AddressSpace` 只通过 `Arc` 传播，不暴露共享裸指针或内部
+  `PageCache` storage。
 
 ## 威胁分析
 
@@ -43,7 +44,9 @@
    - 防护：不同 dentry 共享同一个 `VfsInode::i_mapping` address-space。
 
 2. 截断后内容残留。
-   - 防护：`Mapping::set_len()` 清零 surviving tail，并丢弃 EOF 之后 folio。
+   - 防护：`AddressSpace::truncate_setsize()` 先发布 inode size，再通过私有 cache storage
+     清零 surviving tail，并丢弃 EOF
+     之后 folio。
 
 3. 符号链接错误进入 page-cache 路径。
    - 防护：symlink target 保存在 `FileContent.symlink`，不通过
@@ -74,14 +77,14 @@
 
 - 匿名文件通过私有 tmpfs mount + regular file 表达，不提供独立的 VFS
   anonymous-inode 类型。
-- `memfs` regular-file 数据路径依赖 KFS/pagecache owner；`MemoryNode` 自身不直接
-  保存普通文件数据页。
+- `memfs` regular-file 数据路径依赖 KFS `AddressSpace` 及其私有 page-cache storage；
+  `MemoryNode` 自身不直接保存普通文件数据页。
 
 ## 审计清单
 
 - regular-file inode 是否总能复用同一个 `VfsInode::i_mapping`。
 - `lookup/create/link` 生成的新路径是否仍命中同一个 inode address-space。
-- 同一 inode 的 MM 路径是否复用同一个 `pagecache::Mapping`。
+- 同一 inode 的 MM 路径是否复用同一个 `kvfs::AddressSpace`。
 - 符号链接路径是否完全绕开 regular-file page cache。
 - 匿名文件 helper 是否始终返回未挂载到全局命名空间的对象。
 - 所有 inode 创建路径是否接收 `&Cred` 并在发布前调用 `inode_init_owner()`。

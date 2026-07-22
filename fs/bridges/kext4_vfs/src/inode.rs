@@ -589,14 +589,20 @@ impl AddressSpaceOperations for Inode {
     }
 
     fn write_end(&self, mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
-        let accepted = match kvfs::simple_write_end(mapping, request) {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                let block_size = self.block_size();
-                self.release_delalloc_range(request.pos(), request.len(), block_size)?;
+        let accepted = request.copied();
+        if accepted != 0 {
+            let end = match request.pos().checked_add(accepted as u64) {
+                Some(end) => end,
+                None => {
+                    self.release_delalloc_range(request.pos(), request.len(), self.block_size())?;
+                    return Err(VfsError::InvalidInput);
+                }
+            };
+            if let Err(error) = mapping.write_end_set_size(end) {
+                self.release_delalloc_range(request.pos(), request.len(), self.block_size())?;
                 return Err(error);
             }
-        };
+        }
         self.finish_delalloc_write(request, accepted)?;
         Ok(accepted)
     }
@@ -650,7 +656,7 @@ impl AddressSpaceOperations for Inode {
             fs.prepare_regular_inode_truncate(&inode, len, current_ext4_timestamp())
                 .map_err(into_vfs_err)?
         };
-        mapping.truncate_pagecache(len)?;
+        mapping.truncate_setsize(len)?;
         let inode = self
             .fs
             .lock()
@@ -721,7 +727,7 @@ impl FileOperations for Inode {
     }
 
     fn fsync(&self, file: &VfsFile, data_only: bool) -> VfsResult<()> {
-        kvfs::simple_fsync_noflush(file, data_only)?;
+        kvfs::libfs::simple_fsync_noflush(file, data_only)?;
         self.fs.sync_to_disk()
     }
 

@@ -1468,7 +1468,6 @@ dependencies = [
  "memaddr",
  "memfs",
  "memspace",
- "pagecache",
  "unittest",
  "vmobj",
 ]
@@ -2918,6 +2917,7 @@ dependencies = [
  "slab",
  "smallvec",
  "unittest",
+ "vmobj",
 ]
 
 [[package]]
@@ -3405,7 +3405,6 @@ dependencies = [
  "log",
  "memaddr",
  "unittest",
- "vmobj",
 ]
 
 [[package]]

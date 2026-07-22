@@ -34,7 +34,7 @@ X-Kernel 当前对应：
 ```text
 posix/mm
   -> memspace::{MmSpace, VmArea}
-  -> pagecache::Mapping / anon::* / vmobj::MappingView
+  -> kvfs::AddressSpace / anon::* / vmobj::MappingView
   -> page_table::PageTable
 ```
 
@@ -160,23 +160,23 @@ X-Kernel 当前落点：
 ```text
 File
   -> inode location
-  -> VfsInode::i_mapping / AddressSpace
-  -> pagecache::Mapping
-       -> vmobj::MappingView
+  -> VfsInode { i_size, i_mapping }
+       -> AddressSpace { host, a_ops, object_id, MappingView }
+            -> private pagecache::PageCache folio storage
        -> object invalidate work
 
 filemap
   -> builds file-backed VmArea + VmRuntimeRef
   -> registers MappingView
-  -> does not own Mapping
+  -> owns VfsFile reference, not the underlying PageCache
 ```
 
 当前语义：
 
-- `pagecache::Mapping` 是 file/shmem cached content owner。
+- `kvfs::AddressSpace` 是 file/shmem cached content owner。
 - `filemap::mmap_shared_file()` 创建 read-only shared file runtime。
 - `filemap::mmap_private_file()` 创建 private file runtime。
-- file-private initial bytes come from `pagecache::Mapping`。
+- file-private initial bytes come from `kvfs::AddressSpace`。
 - file truncate/resize invalidation starts from object side and reaches
   `MmSpace` through `vmobj` requests。
 
@@ -245,7 +245,7 @@ X-Kernel 当前用 `mm/vmobj` 提供公共语言：
 
 用途：
 
-- `pagecache` 用它表达 file object -> VMA view。
+- `kvfs::AddressSpace` 用它表达 file object -> VMA view。
 - `anon` 用它表达 anonymous object -> VMA view。
 - `memspace` 用它消费 object-side invalidation。
 
@@ -291,13 +291,13 @@ sys_mmap
   -> File::mmap callback
   -> FileSharedRuntime
   -> MmSpace::map_runtime_vma
-  -> fault reads pagecache::Mapping
+  -> fault reads kvfs::AddressSpace
 ```
 
 当前语义：
 
 - read-only shared file mappings are supported。
-- file source identity comes from inode-owned `pagecache::Mapping`。
+- file source identity comes from inode-owned `kvfs::AddressSpace`。
 - fault at or beyond file length returns object-level bad-address semantics。
 - object resize/truncate can invalidate mapped PTEs through registered views。
 
@@ -318,13 +318,13 @@ sys_mmap
   -> File::mmap callback
   -> FilePrivateRuntime
   -> MmSpace::map_runtime_vma
-  -> first fault reads pagecache::Mapping
+  -> first fault reads kvfs::AddressSpace
   -> private page committed into AnonPrivateObject
 ```
 
 当前语义：
 
-- initial file contents come from `pagecache::Mapping`。
+- initial file contents come from `kvfs::AddressSpace`。
 - final partial file page zero-tail behavior is handled in file-private runtime。
 - ELF/image `memsz > filesz` zero-fill is represented by private runtime source
   bounds。
@@ -375,8 +375,12 @@ sys_mmap MAP_PRIVATE|MAP_ANONYMOUS
 当前 object-driven invalidate path:
 
 ```text
-pagecache::Mapping::resize
-  -> produces object hit/work
+VfsInode data lock
+  -> kvfs::AddressSpace::truncate_setsize
+  -> publish inode::i_size
+  -> produces first object hit/work
+  -> truncate private cached-folio storage
+  -> produces second object hit/work
   -> MappingViewNotifier
   -> filemap::MmSpaceInvalidate
   -> memspace::InvalidateHandle
@@ -402,7 +406,7 @@ Use this checklist for current MM changes:
 
 1. Does syscall ABI policy stay in `posix/mm`?
 2. Does address-space shape stay in `mm/memspace`?
-3. Does file content identity stay in `pagecache::Mapping`?
+3. Does file content identity stay in `kvfs::AddressSpace`?
 4. Does anonymous private state stay in `AnonPrivateObject`?
 5. Does shared object/view/invalidate language use `vmobj`?
 6. Does `filemap` remain an adapter rather than content owner?

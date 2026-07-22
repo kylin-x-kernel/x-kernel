@@ -30,9 +30,9 @@ use super::{
 };
 use crate::{
     AddressSpace, AddressSpaceOperations, DelayedCall, Dentry, DeviceId, FileOperations,
-    LockedDentry, Metadata, MetadataUpdate, MountIdmap, Mutex, NodePermission, NodeType, Path,
-    Permission, RwLock, RwLockReadGuard, RwLockWriteGuard, SuperBlock, Umode, VfsError,
-    VfsFileBuilder, VfsResult,
+    LockedDentry, Metadata, MetadataUpdate, MountIdmap, Mutex, MutexGuard, NodePermission,
+    NodeType, Path, Permission, RwLock, RwLockReadGuard, RwLockWriteGuard, SuperBlock, Umode,
+    VfsError, VfsFileBuilder, VfsResult,
     address_space::{default_address_space_operations, empty_address_space_operations},
     generic_permission,
 };
@@ -621,42 +621,6 @@ impl InodeAttributes {
     }
 }
 
-struct InodeAddressSpaces {
-    mapping: Arc<AddressSpace>,
-}
-
-impl InodeAddressSpaces {
-    fn new(
-        owner: Weak<VfsInode>,
-        ops: Arc<dyn AddressSpaceOperations>,
-        flags: NodeFlags,
-        size: u64,
-    ) -> Self {
-        let mapping = AddressSpace::new_default(owner, ops, flags, size);
-        Self { mapping }
-    }
-
-    fn mapping(&self) -> Arc<AddressSpace> {
-        self.mapping.clone()
-    }
-
-    fn sync(&self, data_only: bool) -> VfsResult<()> {
-        self.mapping.writepages(data_only)
-    }
-
-    fn set_len(&self, len: u64) -> VfsResult<()> {
-        self.mapping.set_len(len)
-    }
-
-    fn set_cached_len(&self, len: u64) -> VfsResult<()> {
-        self.mapping.truncate_pagecache(len)
-    }
-
-    fn evict(&self) -> VfsResult<()> {
-        self.mapping.evict()
-    }
-}
-
 struct InodeSpecialState {
     character_device: Mutex<Option<Arc<dyn DeviceFileOps>>>,
     cached_link: Once<String>,
@@ -705,11 +669,12 @@ pub struct VfsInode {
     identity: InodeIdentity,
     attributes: InodeAttributes,
     write_count: AtomicUsize,
+    data_lock: Mutex<()>,
     namespace_lock: RwLock<()>,
     inode_operations: Arc<dyn InodeOperations>,
     file_operations: Arc<dyn FileOperations>,
     private_data: Arc<dyn Any + Send + Sync>,
-    address_spaces: InodeAddressSpaces,
+    mapping: Arc<AddressSpace>,
     special_state: InodeSpecialState,
 }
 
@@ -1077,16 +1042,12 @@ impl VfsInode {
             identity: InodeIdentity::new(init.number),
             attributes: InodeAttributes::new(init, flags),
             write_count: AtomicUsize::new(0),
+            data_lock: Mutex::new(()),
             namespace_lock: RwLock::new(()),
             inode_operations,
             file_operations: file_operations.unwrap_or_else(no_open_file_operations),
             private_data,
-            address_spaces: InodeAddressSpaces::new(
-                this.clone(),
-                address_space_operations,
-                flags,
-                init.size,
-            ),
+            mapping: AddressSpace::new_default(this.clone(), address_space_operations, flags),
             special_state: InodeSpecialState::new(),
         })
     }
@@ -1254,16 +1215,23 @@ impl VfsInode {
     }
 
     pub(crate) fn set_len(&self, len: u64) -> VfsResult<()> {
-        self.address_spaces.set_len(len)?;
-        self.set_size(len);
-        Ok(())
+        let _data_guard = self.data_lock.lock();
+        self.mapping.set_len(len)?;
+        if self.size() == len {
+            Ok(())
+        } else {
+            Err(VfsError::InvalidData)
+        }
     }
 
     /// Records a file length already changed by the backing filesystem.
     pub fn update_size_after_backing_change(&self, len: u64) -> VfsResult<()> {
-        self.address_spaces.set_cached_len(len)?;
-        self.set_size(len);
-        Ok(())
+        let _data_guard = self.data_lock.lock();
+        self.mapping.truncate_setsize(len)
+    }
+
+    pub(crate) fn lock_data(&self) -> MutexGuard<'_, ()> {
+        self.data_lock.lock()
     }
 
     /// Refreshes mutable cached attributes from a validated backing inode.
@@ -1325,7 +1293,7 @@ impl VfsInode {
 
     /// Synchronizes the file to disk.
     pub fn sync(&self, data_only: bool) -> VfsResult<()> {
-        self.address_spaces.sync(data_only)
+        self.mapping.writepages(data_only)
     }
 
     /// Returns the flags of the node.
@@ -1552,7 +1520,7 @@ impl VfsInode {
     }
 
     pub(crate) fn address_space(&self) -> Arc<AddressSpace> {
-        self.address_spaces.mapping()
+        self.mapping.clone()
     }
 
     /// Read a dentry's symlink target as a string.
@@ -1571,7 +1539,7 @@ impl VfsInode {
         if let Some(super_block) = self.identity.super_block() {
             super_block.evict_inode(self)
         } else {
-            self.address_spaces.evict()
+            self.mapping.evict()
         }
     }
 

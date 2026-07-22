@@ -32,8 +32,8 @@ use crate::{
 /// This is the Linux-aligned analogue of the `vm_operations_struct` role:
 /// the VMA holds an execution reference that knows how to materialize faults,
 /// adjust protections, clone for fork, and relocate for `mremap`, while the
-/// backing content object itself still lives in `Mapping` or anonymous/private
-/// objects rather than inside the VMA.
+/// backing content object itself still lives in the inode address space or
+/// anonymous/private objects rather than inside the VMA.
 pub trait VmRuntimeOps: Send + Sync {
     fn backing_info(&self) -> VmBackingInfo;
     fn map(&self, range: VirtAddrRange, flags: MappingFlags, pgtbl: &mut PageTableMut) -> KResult;

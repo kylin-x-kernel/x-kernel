@@ -12,8 +12,8 @@ use slab::Slab;
 
 use crate::{
     Dentry, DeviceId, InodeOperations, Metadata, MetadataUpdate, NodePermission, NodeType, StatFs,
-    StatFsFlags, SuperBlock, SuperBlockOperations, VfsInodeInit, VfsResult, simple_dir::DirMaker,
-    simple_statfs_with_flags,
+    StatFsFlags, SuperBlock, SuperBlockOperations, VfsInodeInit, VfsResult,
+    libfs::simple_statfs_with_flags, simple_dir::DirMaker,
 };
 
 /// A simple filesystem implementation that uses a slab allocator for inodes.

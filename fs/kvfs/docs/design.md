@@ -18,7 +18,8 @@ credential snapshot，`kvfs` 接收显式 `&Cred` 并完成路径遍历和通用
 - `src/namei.rs`：路径遍历和 open 流程。
 - `src/permission.rs`：owner/group/other DAC 与 open access 映射。
 - `src/node/`：dentry、inode、live inode identity cache 及文件系统 operation traits。
-- `src/address_space.rs`：inode-owned PageCache、writeback 与 truncate/invalidation 边界。
+- `src/address_space.rs`：inode-owned `AddressSpace`、其私有 `PageCache` 实现，以及
+  writeback 与 truncate/invalidation 边界。
 - `src/file.rs`：打开文件及其可变状态。
 - `src/mount.rs`、`src/super_block.rs`：挂载树和文件系统实例。
 - `src/anon_inode.rs`：匿名 inode pseudo filesystem，用于 eventfd、epoll、
@@ -68,10 +69,10 @@ filesystem operation traits
 
 `Dentry` 是可移动的 namespace 对象。rename 保留 source dentry 和 inode identity，只
 改变 dentry 的位置和 cache membership。inode 持有文件状态和 address space，因此
-rename 不会 flush 文件数据，也不会替换 PageCache identity。
+rename 不会 flush 文件数据，也不会替换 inode `AddressSpace` identity。
 
 每个 live backing inode number 通过 filesystem `InodeCache` 复用同一个 `VfsInode`；hard
-link、rename 和重复 lookup 因此共享 AddressSpace/PageCache。非目录 inode 可以有多个
+link、rename 和重复 lookup 因此共享同一个 `AddressSpace`。非目录 inode 可以有多个
 dentry alias；目录 inode 至多有一个 live alias，重复 lookup 复用该 dentry，对应 Linux
 `d_splice_alias()` 所依赖的目录单 alias 不变量。具体文件系统完成 mutation
 后，operation callback 已持有 `VfsInode` 时可用 `update_metadata_after_backing_change()` 或
@@ -203,11 +204,22 @@ VFS rename 入口再次检查组合不变量，文件系统 helper 再检查自�
 匿名 inode superblock、root dentry、singleton inode 和 root mount；后续
 `get_file()` 只分配 per-file dentry/file，并共享 singleton inode。
 
-`AddressSpaceOperations::set_len()` 负责文件系统自己的 truncate 顺序，并在 backing
-prepare 和 block removal 之间调用 `AddressSpace::truncate_pagecache()`；这对应 Linux
-文件系统 `setattr` 路径显式调用 `truncate_pagecache()`，不再增加第二层 truncate hook。
-PageCache resize 同时丢弃 EOF 后 folio、zero partial EOF tail，并通知已注册的 mmap view
-invalidation。
+`VfsInode` 的 data lock 串行化 buffered write 与 truncate。文件系统
+`AddressSpaceOperations::set_len()` 在 backing prepare 后、释放 block 前调用一次
+`AddressSpace::truncate_setsize()`。该入口按 Linux `truncate_setsize()` 顺序先发布唯一的
+`inode::i_size`，再执行第一次 mapped-view unmap、cached-folio truncate 和第二次
+unmap；第二轮用于清理 cache truncate 窗口中产生的 private COW PTE。
+
+`simple_write_end` 保留在 `kvfs::libfs`，只服务 ramfs/memfs 风格的 aops。
+块设备文件系统完成自己的 write-end 后，经 `AddressSpace::write_end_set_size()`
+在同一 generic-write data-lock 临界区发布接受后的 `i_size`，而不把 ext4 语义伪装成
+libfs helper。
+
+`AddressSpace` 自己持有 object-id、mapped views、`AddressSpaceOperations` 和私有
+`PageCache` storage。`PageCache` 不保存 length、object-id、views 或 invalidation
+lifecycle；writeback 的 EOF 也由 `AddressSpace` 从 inode 读取后传入。
+`VfsFile::mapping()` 借用 Linux `f_mapping` 对应物；MM 不接触底层 storage，只有确实需要
+超出 file borrow 的生命周期时才显式 clone 该 `Arc`。
 
 KVFS 在非 special file 的 writable open 进入文件系统 `open` callback 前增加
 inode `write_count`，成功后用 `FMode::WRITER` 记录当前 file 持有该计数，打开
@@ -270,8 +282,10 @@ child cache 仍使用 mutex。RCU、seqcount lookup 和 lock-free dcache travers
 - 打开文件保存 `f_cred`；descriptor 权限与 pathname 权限使用不同入口表达。
 - 匿名 inode pseudo fs 采用显式预初始化，而不是 `Lazy` 首次访问初始化。该设计对齐
   复杂 VFS 全局对象的生命周期：启动时构造，运行时只复用。
-- PageCache resize 顺序由 AddressSpace operation 契约表达，不允许文件系统绕过 inode-owned
-  Mapping 建立第二套数据 cache。
+- `AddressSpaceOperations::set_len()` 必须进入 `truncate_setsize()`；文件系统不能自行组合
+  i_size、cache resize 和 mmap invalidation，也不能建立第二套 EOF/cache owner。
+- `VfsInode` 直接保存唯一的 `Arc<AddressSpace>`，不增加单字段 address-space wrapper；
+  `VfsFile` 保存 Linux 风格的 `f_mapping` 引用，MM runtime 只保存 `VfsFile`。
 - 锁由语义 VFS 对象持有，而不是由 filesystem bridge 持有。
 - `RenameData` 对应 Linux `struct renamedata`，其一次性 `execute` 会消费操作对象并驱动
   VFS orchestration；辅助方法只借用该对象，不为它提供 `Clone`/`Copy`。
@@ -286,7 +300,8 @@ parent children 弱索引与 superblock dentry cache 中移除 dentry；仍有 P
 时对象继续存活，否则释放时沿 strong parent 链逐级归还引用。superblock 最终释放会
 整体丢弃剩余 dcache 和 root。dentry cache 与 open file 都持有 `VfsInode` 引用；最后一个
 引用消失后，`SuperBlockOperations::evict_inode()` 先获得 final teardown
-机会。默认实现只丢弃 inode PageCache，磁盘文件系统可在 nlink=0 时追加 journaled inode
+机会。默认实现只丢弃 inode `AddressSpace` 中的 cached folios，磁盘文件系统可在
+nlink=0 时追加 journaled inode
 回收。per-open `FileOperations::release()` 先于 final inode eviction，不能代替后者。flags
 类型不拥有资源；inode 与文件系统私有资源仍由现有对象生命周期及文件系统回调负责。
 

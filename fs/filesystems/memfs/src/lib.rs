@@ -23,8 +23,8 @@ use kvfs::{
     FileOperations, InodeCache, InodeDirOperations, InodeOperations, InodeSymlinkOperations, Kiocb,
     LockedDentry, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType, StatFs,
     StatFsFlags, SuperBlock, SuperBlockOperations, Umode, VfsError, VfsFile, VfsInodeInit,
-    VfsResult, WriteBeginRequest, WriteEndRequest, inode_init_owner, simple_getattr, simple_rename,
-    simple_statfs_with_flags, simple_write_end,
+    VfsResult, WriteBeginRequest, WriteEndRequest, inode_init_owner,
+    libfs::{simple_getattr, simple_rename, simple_statfs_with_flags, simple_write_end},
 };
 use slab::Slab;
 
@@ -775,7 +775,7 @@ impl AddressSpaceOperations for MemoryNode {
     fn set_len(&self, mapping: &AddressSpace, len: u64) -> VfsResult<()> {
         self.inode.as_file()?;
         self.inode.metadata.lock().size = len;
-        mapping.truncate_pagecache(len)
+        mapping.truncate_setsize(len)
     }
 
     fn write_begin(&self, _mapping: &AddressSpace, _request: WriteBeginRequest) -> VfsResult<()> {

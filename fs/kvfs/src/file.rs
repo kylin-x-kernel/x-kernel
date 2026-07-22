@@ -20,7 +20,6 @@ use kerrno::LinuxError;
 use kpoll::IoEvents;
 use linux_raw_sys::general::O_ACCMODE;
 use log::warn;
-use pagecache::Mapping;
 
 use crate::{
     AddressSpace, DirContext, Kiocb, MagicLinkOps, MmapMapper, Mutex, MutexGuard, NodeFlags,
@@ -295,8 +294,8 @@ impl FileLocation {
         &self.inode
     }
 
-    fn mapping(&self) -> Arc<AddressSpace> {
-        self.mapping.clone()
+    fn mapping(&self) -> &Arc<AddressSpace> {
+        &self.mapping
     }
 }
 
@@ -611,13 +610,12 @@ impl VfsFile {
         self.inode().size()
     }
 
-    pub(crate) fn mapping(&self) -> Arc<AddressSpace> {
+    /// Borrows this file's inode address space (`f_mapping`).
+    ///
+    /// Clone the returned [`Arc`] only when the mapping must outlive this
+    /// `VfsFile` borrow.
+    pub fn mapping(&self) -> &Arc<AddressSpace> {
         self.location.mapping()
-    }
-
-    /// Returns the page-cache object backing file mappings.
-    pub fn page_cache(&self) -> Arc<Mapping> {
-        self.mapping().page_cache()
     }
 
     /// Writes all dirty cached pages for this file.

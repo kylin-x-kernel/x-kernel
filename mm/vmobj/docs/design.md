@@ -21,7 +21,7 @@ Linux 对应关系：
 ## 架构
 
 ```text
-pagecache::Mapping / anon objects
+kvfs::AddressSpace / anon objects
     -> MappingView / ObjectViewHit / ObjectInvalidateWork
          -> MmSpace apply side
 ```
@@ -51,7 +51,7 @@ pagecache::Mapping / anon objects
    原因：notifier 是 view 的消费器，不是 view 的定义核心。
 
 5. `MappingViewId` 由 `mm/vmobj` 统一分配
-   原因：file-backed `pagecache::Mapping` 和 anonymous objects 都要登记到同一套
+   原因：file-backed `kvfs::AddressSpace` 和 anonymous objects 都要登记到同一套
    object-view/rmap 语言上；view identity 不能再由单个 object branch 私自起号。
 
 6. `MappingViewRange` / `ObjectViewHit` / `ObjectInvalidateWork` 的坐标不变量在

@@ -12,6 +12,7 @@ use khal::{
     paging::{MappingFlags, PageSize, PageTableMut, PagingError},
 };
 use ksync::Mutex;
+use kvfs::{AddressSpaceViewGuard, VfsFile};
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange};
 use memspace::{
     FaultContext, ForkCloneTarget, InvalidateHandle, MmObserver, MmSpace, VmArea, VmBackingInfo,
@@ -25,8 +26,9 @@ use memspace::{
         },
     },
 };
-use pagecache::{Mapping, MappingViewGuard};
 use vmobj::{MappingViewId, MappingViewKind, MappingViewSpec};
+
+use crate::runtime::FileRuntimeContext;
 
 #[derive(Clone)]
 pub(crate) struct FilePrivateRuntime {
@@ -34,30 +36,11 @@ pub(crate) struct FilePrivateRuntime {
     len: usize,
     size: PageSize,
     anon: Arc<AnonPrivateObject>,
-    file: Option<(Arc<Mapping>, u64, Option<u64>)>,
-    mapping_view: Option<MappingViewGuard>,
-    anon_view: Option<AnonPrivateViewGuard>,
-}
-
-#[derive(Clone)]
-pub(crate) struct FilePrivateSource {
-    mapping: Arc<Mapping>,
+    file: Arc<VfsFile>,
     file_start: u64,
     file_end: Option<u64>,
-}
-
-impl FilePrivateSource {
-    pub(crate) fn new(mapping: Arc<Mapping>, file_start: u64, file_end: Option<u64>) -> Self {
-        Self {
-            mapping,
-            file_start,
-            file_end,
-        }
-    }
-
-    fn into_tuple(self) -> (Arc<Mapping>, u64, Option<u64>) {
-        (self.mapping, self.file_start, self.file_end)
-    }
+    mapping_view: Option<AddressSpaceViewGuard>,
+    anon_view: Option<AnonPrivateViewGuard>,
 }
 
 impl FilePrivateRuntime {
@@ -69,9 +52,8 @@ impl FilePrivateRuntime {
         self.anon_view.as_ref().map(AnonPrivateViewGuard::id)
     }
 
-    fn file_len(&self) -> Option<KResult<u64>> {
-        let (mapping, _, file_end) = self.file.as_ref()?;
-        Some(file_end.map_or(Ok(mapping.len()), Ok))
+    fn file_len(&self) -> u64 {
+        self.file_end.unwrap_or_else(|| self.file.size())
     }
 
     fn alloc_new_frame(&self, zeroed: bool) -> KResult<PhysAddr> {
@@ -97,37 +79,37 @@ impl FilePrivateRuntime {
         let prepared = self.anon.prepare_first_touch_page(object_start)?;
         let frame = self.alloc_new_frame(true)?;
 
-        if let Some((mapping, file_start, file_end)) = &self.file {
-            // SAFETY: `frame` was freshly allocated for this page and has at
-            // least `self.size` bytes of kernel-mapped storage.
-            let buf = unsafe { slice::from_raw_parts_mut(p2v(frame).as_mut_ptr(), self.size as _) };
-            let start = page_data_offset
-                .unwrap_or_else(|| self.start.as_usize().saturating_sub(va.as_usize()));
-            assert!(start < self.size as _);
+        // SAFETY: `frame` was freshly allocated for this page and has at
+        // least `self.size` bytes of kernel-mapped storage.
+        let buf = unsafe { slice::from_raw_parts_mut(p2v(frame).as_mut_ptr(), self.size as _) };
+        let start =
+            page_data_offset.unwrap_or_else(|| self.start.as_usize().saturating_sub(va.as_usize()));
+        assert!(start < self.size as _);
 
-            let file_start = file_page_offset.unwrap_or_else(|| {
-                *file_start + va.as_usize().saturating_sub(self.start.as_usize()) as u64
-            });
-            let max_read = file_end
-                .map_or(u64::MAX, |end| end.saturating_sub(file_start))
-                .min((buf.len() - start) as u64) as usize;
+        let file_start = file_page_offset.unwrap_or_else(|| {
+            self.file_start + va.as_usize().saturating_sub(self.start.as_usize()) as u64
+        });
+        let max_read = self
+            .file_end
+            .map_or(u64::MAX, |end| end.saturating_sub(file_start))
+            .min((buf.len() - start) as u64) as usize;
+        let address_space = self.file.mapping();
 
-            let mut copied = 0usize;
-            while copied < max_read {
-                let object_offset = file_start + copied as u64;
-                let index = object_offset / PAGE_SIZE_4K as u64;
-                let page_off = (object_offset % PAGE_SIZE_4K as u64) as usize;
-                let step = (max_read - copied).min(PAGE_SIZE_4K - page_off);
-                if let Err(err) = mapping.with_folio_or_create(index, |folio| {
-                    buf[start + copied..start + copied + step]
-                        .copy_from_slice(&folio.data()[page_off..page_off + step]);
-                    Ok(())
-                }) {
-                    dealloc_frame(frame, self.size);
-                    return Err(err);
-                }
-                copied += step;
+        let mut copied = 0usize;
+        while copied < max_read {
+            let object_offset = file_start + copied as u64;
+            let index = object_offset / PAGE_SIZE_4K as u64;
+            let page_off = (object_offset % PAGE_SIZE_4K as u64) as usize;
+            let step = (max_read - copied).min(PAGE_SIZE_4K - page_off);
+            if let Err(err) = address_space.with_folio_or_create(index, |folio| {
+                buf[start + copied..start + copied + step]
+                    .copy_from_slice(&folio.data()[page_off..page_off + step]);
+                Ok(())
+            }) {
+                dealloc_frame(frame, self.size);
+                return Err(err);
             }
+            copied += step;
         }
         if let Err(err) = pgtbl.map(va, frame, self.size, flags) {
             dealloc_frame(frame, self.size);
@@ -153,10 +135,6 @@ impl FilePrivateRuntime {
         ctx: &FaultContext,
         addr: VirtAddr,
     ) -> KResult<(Option<u64>, Option<usize>)> {
-        let Some((_, _, file_end)) = &self.file else {
-            return Ok((None, None));
-        };
-
         let file_page_offset = ctx.page_file_offset(addr).ok_or(KError::BadAddress)?;
         let page_data_offset = ctx.page_data_offset().ok_or(KError::BadAddress)?;
 
@@ -164,13 +142,8 @@ impl FilePrivateRuntime {
         // describe a file-backed prefix followed by a valid anonymous
         // zero-fill tail (`memsz > filesz`). Those tail pages must remain
         // faultable instead of being rejected as EOF.
-        if file_end.is_none() {
-            let file_len = self
-                .file_len()
-                .expect("file-backed FilePrivateRuntime must report a file length")?;
-            if file_page_offset >= file_len {
-                return Err(KError::BadAddress);
-            }
+        if self.file_end.is_none() && file_page_offset >= self.file_len() {
+            return Err(KError::BadAddress);
         }
 
         Ok((Some(file_page_offset), Some(page_data_offset)))
@@ -211,6 +184,10 @@ impl FilePrivateRuntime {
         addr: VirtAddr,
         object_start: u64,
     ) -> FaultCompletionResult {
+        // Revalidate EOF before consulting retained private state. Truncate's
+        // second unmap removes a racing COW PTE, but the Rust anon object may
+        // still retain that page until a later reclaim pass.
+        let file_source = self.prepare_new_file_backed_page(ctx, addr)?;
         let existing = map_existing_private_object_page(
             &self.anon,
             object_start,
@@ -224,23 +201,22 @@ impl FilePrivateRuntime {
             return Ok(FaultCompletion::cow_conflict_retry());
         }
         if !existing.is_resolved() {
-            let (file_page_offset, page_data_offset) =
-                self.prepare_new_file_backed_page(ctx, addr)?;
+            let (file_page_offset, page_data_offset) = file_source;
             self.alloc_new_at(addr, file_page_offset, page_data_offset, flags, pgtbl)?;
         }
         Ok(FaultCompletion::from_populate((1, None)))
     }
 
     fn register_mapping_view(
-        file: &Option<(Arc<Mapping>, u64, Option<u64>)>,
-        mm_id: Option<u64>,
-        invalidate: Option<InvalidateHandle>,
-        observer: Option<&MmObserver>,
+        file: &Arc<VfsFile>,
+        file_start: u64,
+        file_end: Option<u64>,
+        context: Option<&FileRuntimeContext<'_>>,
         start: VirtAddr,
         len: usize,
-    ) -> Option<MappingViewGuard> {
-        let observer = observer?;
-        let (mapping, file_start, file_end) = file.as_ref()?;
+    ) -> Option<AddressSpaceViewGuard> {
+        let context = context?;
+        let address_space = file.mapping();
         let object_start = file_start / PageSize::Size4K as u64 * PageSize::Size4K as u64;
         let len = match file_end {
             Some(end) => end.saturating_sub(object_start).min(len as u64) as usize,
@@ -249,15 +225,16 @@ impl FilePrivateRuntime {
         if len == 0 {
             return None;
         }
-        let handle = invalidate.unwrap_or_else(|| observer.invalidate_handle());
-        Some(mapping.register_view(MappingViewSpec {
-            mm_id: mm_id?,
+        Some(address_space.register_view(MappingViewSpec {
+            mm_id: context.mm_id,
             vma_start: start.as_usize() as u64,
             vma_len: len,
             object_start,
             object_len: len,
             kind: MappingViewKind::Private,
-            notifier: Some(crate::invalidate::MmSpaceInvalidate::new(handle)),
+            notifier: Some(crate::invalidate::MmSpaceInvalidate::new(
+                context.invalidate.clone(),
+            )),
         }))
     }
 
@@ -297,17 +274,29 @@ impl FilePrivateRuntime {
         } else {
             self.anon.clone()
         };
+        let file_context =
+            new_mm_id
+                .zip(new_observer)
+                .map(|(mm_id, observer)| FileRuntimeContext {
+                    mm_id,
+                    observer,
+                    invalidate: invalidate
+                        .clone()
+                        .unwrap_or_else(|| observer.invalidate_handle()),
+                });
         Arc::new(Self {
             start: new_start,
             len: self.len,
             size: self.size,
             anon: anon.clone(),
             file: self.file.clone(),
+            file_start: self.file_start,
+            file_end: self.file_end,
             mapping_view: Self::register_mapping_view(
                 &self.file,
-                new_mm_id,
-                invalidate.clone(),
-                new_observer,
+                self.file_start,
+                self.file_end,
+                file_context.as_ref(),
                 new_start,
                 self.len,
             ),
@@ -329,18 +318,14 @@ impl FilePrivateRuntime {
     }
 
     fn backing_info_impl(&self) -> VmBackingInfo {
-        let kind = if let Some((file, ..)) = &self.file {
+        VmBackingInfo::new(
             VmBackingKind::FilePrivate {
-                file_object: file.identity().vm_object_id(),
+                file_object: self.file.mapping().object_id(),
                 anon_object: self.anon.id(),
                 anon_lineage: self.anon.lineage(),
-            }
-        } else {
-            VmBackingKind::AnonymousPrivate {
-                object: self.anon.id(),
-            }
-        };
-        VmBackingInfo::new(kind, self.page_size())
+            },
+            self.page_size(),
+        )
     }
 
     fn map_impl(
@@ -476,17 +461,26 @@ impl VmRuntimeOps for FilePrivateRuntime {
 
         let invalidate = target.invalidate;
         let observer = MmObserver::new(target.new_aspace);
+        let file_context = FileRuntimeContext {
+            mm_id: target.new_mm_id,
+            observer: &observer,
+            invalidate: invalidate
+                .clone()
+                .unwrap_or_else(|| observer.invalidate_handle()),
+        };
         Ok(Arc::new(Self {
             start: self.start,
             len: self.len,
             size: self.size,
             anon: child.clone(),
             file: self.file.clone(),
+            file_start: self.file_start,
+            file_end: self.file_end,
             mapping_view: Self::register_mapping_view(
                 &self.file,
-                Some(target.new_mm_id),
-                invalidate.clone(),
-                Some(&observer),
+                self.file_start,
+                self.file_end,
+                Some(&file_context),
                 self.start,
                 self.len,
             ),
@@ -506,13 +500,15 @@ pub(crate) fn new_private_runtime(
     start: VirtAddr,
     len: usize,
     size: PageSize,
-    file: FilePrivateSource,
-    mm_id: Option<u64>,
-    observer: Option<&MmObserver>,
-    invalidate: Option<InvalidateHandle>,
+    file: Arc<VfsFile>,
+    file_start: u64,
+    file_end: Option<u64>,
+    context: Option<FileRuntimeContext<'_>>,
 ) -> KResult<VmRuntimeRef> {
-    let file = Some(file.into_tuple());
     let anon = AnonPrivateObject::new_root();
+    let mm_id = context.as_ref().map(|context| context.mm_id);
+    let observer = context.as_ref().map(|context| context.observer);
+    let invalidate = context.as_ref().map(|context| context.invalidate.clone());
     Ok(VmRuntimeRef::new_file_private(Arc::new(
         FilePrivateRuntime {
             start,
@@ -521,9 +517,9 @@ pub(crate) fn new_private_runtime(
             anon: anon.clone(),
             mapping_view: FilePrivateRuntime::register_mapping_view(
                 &file,
-                mm_id,
-                invalidate.clone(),
-                observer,
+                file_start,
+                file_end,
+                context.as_ref(),
                 start,
                 len,
             ),
@@ -531,6 +527,8 @@ pub(crate) fn new_private_runtime(
                 &anon, mm_id, invalidate, observer, start, len,
             ),
             file,
+            file_start,
+            file_end,
         },
     )))
 }
@@ -576,7 +574,9 @@ mod tests {
             len: PAGE_SIZE_4K,
             size: PageSize::Size4K,
             anon: AnonPrivateObject::new_root(),
-            file: Some((file.page_cache(), 0, None)),
+            file,
+            file_start: 0,
+            file_end: None,
             mapping_view: None,
             anon_view: None,
         };
@@ -624,7 +624,9 @@ mod tests {
             len: PAGE_SIZE_4K,
             size: PageSize::Size4K,
             anon: AnonPrivateObject::new_root(),
-            file: Some((file.page_cache(), 0, Some(PAGE_SIZE_4K as u64))),
+            file,
+            file_start: 0,
+            file_end: Some(PAGE_SIZE_4K as u64),
             mapping_view: None,
             anon_view: None,
         };
@@ -770,6 +772,67 @@ mod tests {
             child
                 .unmap_impl(range, &mut pgtbl)
                 .expect("cleanup child mapping");
+        }
+    }
+
+    #[def_test]
+    fn private_refault_rechecks_i_size_before_reusing_retained_cow_page() {
+        let file = page_cache_file("truncate-private-refault");
+        let payload = vec![0x5au8; PAGE_SIZE_4K * 2];
+        let mut pos = 0;
+        file.write_from(&payload, &mut pos)
+            .expect("seed two cached pages");
+
+        let start = VirtAddr::from_usize(0x20_000);
+        let fault_addr = start + PAGE_SIZE_4K;
+        let flags = MappingFlags::READ | MappingFlags::WRITE;
+        let runtime = FilePrivateRuntime {
+            start,
+            len: PAGE_SIZE_4K * 2,
+            size: PageSize::Size4K,
+            anon: AnonPrivateObject::new_root(),
+            file: file.clone(),
+            file_start: 0,
+            file_end: None,
+            mapping_view: None,
+            anon_view: None,
+        };
+        let mut page_table = PageTable::try_new().expect("allocate page table");
+        let fault = FaultContext::new(fault_addr, PageFaultFlags::READ).with_backing(
+            Some(1),
+            Some(PAGE_SIZE_4K as u64),
+            Some(0),
+        );
+
+        {
+            let mut pgtbl = page_table.modify();
+            VmRuntimeOps::handle_fault(&runtime, fault, flags, &mut pgtbl)
+                .expect("initial private fault");
+        }
+        file.truncate(0).expect("truncate file to zero");
+        {
+            let mut pgtbl = page_table.modify();
+            let (_, _, page_size) = pgtbl.unmap(fault_addr).expect("remove racing private PTE");
+            assert_eq!(page_size, PageSize::Size4K);
+            pgtbl.finish();
+        }
+        assert!(
+            runtime.anon.page_at(PAGE_SIZE_4K as u64).is_some(),
+            "PTE invalidation alone intentionally leaves retained Rust object state"
+        );
+
+        {
+            let mut pgtbl = page_table.modify();
+            assert!(
+                VmRuntimeOps::handle_fault(&runtime, fault, flags, &mut pgtbl).is_err(),
+                "refault after truncate must not reuse the retained private page"
+            );
+            runtime
+                .unmap_impl(
+                    VirtAddrRange::from_start_size(fault_addr, PAGE_SIZE_4K),
+                    &mut pgtbl,
+                )
+                .expect("release retained private page");
         }
     }
 }

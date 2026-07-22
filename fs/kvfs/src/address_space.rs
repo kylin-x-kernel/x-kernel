@@ -8,16 +8,57 @@
 //! `inode->i_mapping`. This module provides the VFS-owned object for that
 //! attachment point.
 
-use alloc::sync::Arc;
+use alloc::{
+    collections::BTreeMap,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use iov_iter::{IovIterDest, IovIterSource};
 use kerrno::KResult;
 use memaddr::PAGE_SIZE_4K;
-use pagecache::{Folio, Mapping, MappingKind, MappingOps, PageIndex, WritebackStats};
+use pagecache::{Folio, PageCache, PageCacheKind, PageIndex, WritebackStats};
+use vmobj::{
+    FileObjectId, MappingView, MappingViewId, MappingViewNotifier, MappingViewRange,
+    MappingViewSpec, ObjectInvalidateWork, VmObjectId, next_mapping_view_id,
+};
 
-use crate::{Kiocb, NodeFlags, NodeType, VfsError, VfsResult, WeakVfsInode};
+use crate::{Kiocb, Mutex, NodeFlags, NodeType, VfsError, VfsResult, WeakVfsInode};
 
 const MAX_READAHEAD_BYTES: usize = 128 * 1024;
+static NEXT_ADDRESS_SPACE_ID: AtomicU64 = AtomicU64::new(1);
+
+struct AddressSpaceViewRegistration {
+    address_space: Weak<AddressSpace>,
+    id: MappingViewId,
+}
+
+/// Lifetime guard for a VMA registered in an inode address space.
+#[derive(Clone)]
+pub struct AddressSpaceViewGuard {
+    inner: Arc<AddressSpaceViewRegistration>,
+}
+
+impl AddressSpaceViewGuard {
+    /// Returns the stable registration id kept alive by this guard.
+    pub fn id(&self) -> MappingViewId {
+        self.inner.id
+    }
+}
+
+impl Drop for AddressSpaceViewRegistration {
+    fn drop(&mut self) {
+        if let Some(address_space) = self.address_space.upgrade() {
+            address_space.unregister_view(self.id);
+        }
+    }
+}
+
+struct RegisteredView {
+    view: MappingView,
+    notifier: Option<Arc<dyn MappingViewNotifier>>,
+}
 
 /// Writeback range and mode for `AddressSpaceOperations::writepages`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -118,15 +159,15 @@ impl WritebackControl {
 
 /// Readahead window for `AddressSpaceOperations::readahead`.
 pub struct ReadaheadControl {
-    mapping: Arc<Mapping>,
+    address_space: Arc<AddressSpace>,
     start_index: PageIndex,
     count: usize,
 }
 
 impl ReadaheadControl {
-    fn new(mapping: Arc<Mapping>, start_index: PageIndex, count: usize) -> Self {
+    fn new(address_space: Arc<AddressSpace>, start_index: PageIndex, count: usize) -> Self {
         Self {
-            mapping,
+            address_space,
             start_index,
             count,
         }
@@ -152,7 +193,9 @@ impl ReadaheadControl {
         if index < self.start_index || index >= end {
             return Ok(false);
         }
-        self.mapping.filemap_add_folio(index, offset, src)
+        self.address_space
+            .page_cache
+            .filemap_add_folio(index, offset, src)
     }
 }
 
@@ -260,12 +303,13 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
         })
     }
 
-    /// Changes the file length and resizes its page cache.
+    /// Changes the file length and updates its inode address space.
     ///
     /// Implementations own the filesystem-specific ordering and must call
-    /// [`AddressSpace::truncate_pagecache`] exactly once after the backing
-    /// inode is ready for cache invalidation and before freeing blocks that
-    /// could still be reachable through cached folios.
+    /// [`AddressSpace::truncate_setsize`] exactly once after the backing inode
+    /// is prepared and before freeing blocks that could still be reachable
+    /// through cached folios. That helper publishes `i_size` and performs both
+    /// mmap invalidation passes around cache truncation.
     fn set_len(&self, _mapping: &AddressSpace, _len: u64) -> VfsResult<()> {
         Err(VfsError::InvalidInput)
     }
@@ -294,7 +338,9 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
     /// Completes or cancels a buffered write.
     ///
     /// A `copied == 0` request can be a cancellation for a previously
-    /// successful [`Self::write_begin`] call.
+    /// successful [`Self::write_begin`] call. When accepting bytes that extend
+    /// the file, the implementation must publish the new visible size with
+    /// [`AddressSpace::write_end_set_size`].
     fn write_end(&self, _mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
         let _ = request;
         Err(VfsError::InvalidInput)
@@ -321,7 +367,9 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
 pub struct AddressSpace {
     inode: WeakVfsInode,
     ops: Arc<dyn AddressSpaceOperations>,
-    page_cache: Arc<Mapping>,
+    object_id: VmObjectId,
+    views: Mutex<BTreeMap<MappingViewId, RegisteredView>>,
+    page_cache: Arc<PageCache>,
 }
 
 impl AddressSpace {
@@ -329,18 +377,16 @@ impl AddressSpace {
     pub fn new(
         inode: WeakVfsInode,
         ops: Arc<dyn AddressSpaceOperations>,
-        kind: MappingKind,
-        len: u64,
+        kind: PageCacheKind,
     ) -> Arc<Self> {
-        Arc::new_cyclic(|this| {
-            let mapping_ops: Arc<dyn MappingOps> = Arc::new(AddressSpacePageCacheOps {
-                address_space: this.clone(),
-            });
-            Self {
-                inode,
-                ops,
-                page_cache: Mapping::new(kind, len, mapping_ops),
-            }
+        Arc::new(Self {
+            inode,
+            ops,
+            object_id: VmObjectId::File(FileObjectId::from_raw(
+                NEXT_ADDRESS_SPACE_ID.fetch_add(1, Ordering::Relaxed),
+            )),
+            views: Mutex::new(BTreeMap::new()),
+            page_cache: PageCache::new(kind),
         })
     }
 
@@ -349,9 +395,8 @@ impl AddressSpace {
         inode: WeakVfsInode,
         ops: Arc<dyn AddressSpaceOperations>,
         inode_flags: NodeFlags,
-        len: u64,
     ) -> Arc<Self> {
-        Self::new(inode, ops, address_space_mapping_kind(inode_flags), len)
+        Self::new(inode, ops, address_space_mapping_kind(inode_flags))
     }
 
     /// Returns the inode owning this address space.
@@ -359,13 +404,68 @@ impl AddressSpace {
         self.inode.upgrade()
     }
 
+    /// Returns the stable VM identity of this inode address space.
+    pub fn object_id(&self) -> VmObjectId {
+        self.object_id
+    }
+
     /// Returns `address_space::nrpages`.
     pub fn nrpages(&self) -> u64 {
         self.page_cache.nrpages()
     }
 
-    pub(crate) fn page_cache(&self) -> Arc<Mapping> {
-        self.page_cache.clone()
+    /// Registers a VMA view of this inode address space.
+    pub fn register_view(self: &Arc<Self>, spec: MappingViewSpec) -> AddressSpaceViewGuard {
+        let id = next_mapping_view_id();
+        self.views.lock().insert(
+            id,
+            RegisteredView {
+                view: MappingView::new(
+                    id,
+                    spec.mm_id,
+                    MappingViewRange {
+                        vma_start: spec.vma_start,
+                        vma_len: spec.vma_len,
+                        object_start: spec.object_start,
+                        object_len: spec.object_len,
+                    },
+                    spec.kind,
+                ),
+                notifier: spec.notifier,
+            },
+        );
+        AddressSpaceViewGuard {
+            inner: Arc::new(AddressSpaceViewRegistration {
+                address_space: Arc::downgrade(self),
+                id,
+            }),
+        }
+    }
+
+    fn unregister_view(&self, id: MappingViewId) {
+        self.views.lock().remove(&id);
+    }
+
+    /// Runs `f` with the cached folio at `index`, if present.
+    pub fn with_folio<R>(&self, index: PageIndex, f: impl FnOnce(Option<&mut Folio>) -> R) -> R {
+        self.page_cache.with_folio(index, f)
+    }
+
+    /// Runs `f` with the folio at `index`, materializing it when absent.
+    pub fn with_folio_or_create<R>(
+        &self,
+        index: PageIndex,
+        f: impl FnOnce(&mut Folio) -> KResult<R>,
+    ) -> KResult<R> {
+        self.page_cache.with_folio_or_create(
+            index,
+            |index| {
+                let mut folio = Folio::new_zeroed()?;
+                self.read_folio(&mut folio, index)?;
+                Ok(folio)
+            },
+            f,
+        )
     }
 
     fn read_folio(&self, folio: &mut Folio, index: PageIndex) -> VfsResult<usize> {
@@ -378,7 +478,7 @@ impl AddressSpace {
 
     /// Performs a buffered read from this address space into an iterator.
     pub(crate) fn read_iter(
-        &self,
+        self: &Arc<Self>,
         iocb: &mut Kiocb<'_>,
         iter: &mut IovIterDest<'_>,
     ) -> VfsResult<usize> {
@@ -397,7 +497,7 @@ impl AddressSpace {
     }
 
     fn read_from_page_cache(
-        &self,
+        self: &Arc<Self>,
         iter: &mut IovIterDest<'_>,
         mut offset: u64,
         file_len: u64,
@@ -418,7 +518,12 @@ impl AddressSpace {
         Ok(total)
     }
 
-    fn prepare_read_window(&self, offset: u64, count: usize, file_len: u64) -> VfsResult<()> {
+    fn prepare_read_window(
+        self: &Arc<Self>,
+        offset: u64,
+        count: usize,
+        file_len: u64,
+    ) -> VfsResult<()> {
         let count = u64::try_from(count).map_err(|_| VfsError::InvalidInput)?;
         let remaining =
             usize::try_from((file_len - offset).min(count)).map_err(|_| VfsError::InvalidInput)?;
@@ -435,11 +540,7 @@ impl AddressSpace {
         let count =
             usize::try_from(last_index - start_index).map_err(|_| VfsError::InvalidInput)?;
         if count > 1 && self.page_cache.cached_run_len(start_index, count) < count {
-            self.readahead(ReadaheadControl::new(
-                self.page_cache.clone(),
-                start_index,
-                count,
-            ))?;
+            self.readahead(ReadaheadControl::new(self.clone(), start_index, count))?;
         }
         Ok(())
     }
@@ -453,7 +554,7 @@ impl AddressSpace {
         let index = offset / PAGE_SIZE_4K as u64;
         let page_off = (offset % PAGE_SIZE_4K as u64) as usize;
         let step = Self::copy_len(offset, file_len)?;
-        self.page_cache.with_folio_or_create(index, |folio| {
+        self.with_folio_or_create(index, |folio| {
             iter.copy_to_iter(&folio.data()[page_off..page_off + step])
         })
     }
@@ -472,6 +573,8 @@ impl AddressSpace {
         iocb: &mut Kiocb<'_>,
         iter: &mut IovIterSource<'_>,
     ) -> VfsResult<usize> {
+        let inode = self.inode().ok_or(VfsError::InvalidInput)?;
+        let _data_guard = inode.lock_data();
         let count = self.write_checks(iocb, iter)?;
         if count == 0 {
             return Ok(0);
@@ -513,6 +616,7 @@ impl AddressSpace {
         len: usize,
     ) -> VfsResult<usize> {
         let mut written = 0usize;
+        let mut visible_len = self.visible_len()?;
         while written < len {
             let pos = offset
                 .checked_add(written as u64)
@@ -523,10 +627,14 @@ impl AddressSpace {
             let prepared_end = pos.checked_add(step as u64).ok_or(VfsError::InvalidInput)?;
             self.ops
                 .write_begin(self, WriteBeginRequest::new(pos, step))?;
-            if prepared_end > self.page_cache.len() {
-                self.page_cache.set_len(prepared_end)?;
+            if prepared_end > visible_len {
+                self.page_cache
+                    .resize_cached_folios(visible_len, prepared_end);
+                // Another iteration is reached only after `write_end` accepts
+                // this full range and publishes the same EOF under data_lock.
+                visible_len = prepared_end;
             }
-            let copied = match self.page_cache.with_folio_or_create(index, |folio| {
+            let copied = match self.with_folio_or_create(index, |folio| {
                 let data = folio.data();
                 let copied = iter.copy_from_iter(&mut data[page_off..page_off + step])?;
                 if copied != 0 {
@@ -594,15 +702,75 @@ impl AddressSpace {
         self.ops.set_len(self, len)
     }
 
-    /// Resizes the page cache after the backing filesystem has prepared a
-    /// file-length change.
+    /// Publishes `inode::i_size` and updates mapped/cache state in Linux order.
     ///
-    /// This is the X-Kernel analogue of Linux `truncate_pagecache()`.
-    /// Callers must preserve their filesystem's truncate recovery protocol if
-    /// invalidation fails.
-    pub fn truncate_pagecache(&self, len: u64) -> VfsResult<()> {
-        self.page_cache.set_len(len)?;
+    /// Filesystem `set_len` implementations call this after preparing their
+    /// backing-store mutation and before releasing blocks. Shrink performs
+    /// `i_size_write`, unmap, cache truncation, then a second unmap so a
+    /// concurrent private COW fault cannot survive beyond the new EOF.
+    pub fn truncate_setsize(&self, len: u64) -> VfsResult<()> {
+        let inode = self.inode().ok_or(VfsError::InvalidInput)?;
+        let old_len = inode.size();
+        inode.set_size(len);
+        self.truncate_pagecache(old_len, len);
         Ok(())
+    }
+
+    /// Publishes the size accepted by `AddressSpaceOperations::write_end`.
+    ///
+    /// The caller must be the generic write path, which holds the inode data
+    /// lock and has already prepared any cache bytes between the old EOF and
+    /// the completed write. This is the Rust equivalent of an aops
+    /// `write_end` implementation doing `i_size_write(mapping->host, len)`.
+    pub fn write_end_set_size(&self, len: u64) -> VfsResult<()> {
+        let inode = self.inode().ok_or(VfsError::InvalidInput)?;
+        if len > inode.size() {
+            inode.set_size(len);
+        }
+        Ok(())
+    }
+
+    fn truncate_pagecache(&self, old_len: u64, len: u64) {
+        let invalid_start = (len < old_len).then(|| {
+            len.div_ceil(PAGE_SIZE_4K as u64)
+                .saturating_mul(PAGE_SIZE_4K as u64)
+        });
+        if let Some(start) = invalid_start {
+            self.invalidate_mappings_from(start);
+        }
+        self.page_cache.resize_cached_folios(old_len, len);
+        if let Some(start) = invalid_start {
+            self.invalidate_mappings_from(start);
+        }
+    }
+
+    fn invalidate_mappings_from(&self, object_start: u64) {
+        let mut hits = Vec::new();
+        let mut notifiers = Vec::new();
+        let mut object_end = object_start;
+        for registered in self.views.lock().values() {
+            if registered.view.object_end() <= object_start {
+                continue;
+            }
+            let len =
+                usize::try_from(registered.view.object_end() - object_start).unwrap_or(usize::MAX);
+            let Some(hit) = registered.view.page_hit(object_start, len) else {
+                continue;
+            };
+            object_end = object_end.max(registered.view.object_end());
+            hits.push(hit.clone());
+            if let Some(notifier) = &registered.notifier {
+                notifiers.push((hit, notifier.clone()));
+            }
+        }
+        if hits.is_empty() {
+            return;
+        }
+        let len = usize::try_from(object_end - object_start).unwrap_or(usize::MAX);
+        let work = ObjectInvalidateWork::new(self.object_id, object_start, len, hits);
+        for (hit, notifier) in notifiers {
+            notifier.invalidate(&work, &hit);
+        }
     }
 
     /// Drops cached pages during final inode teardown.
@@ -626,6 +794,7 @@ impl AddressSpace {
         mut write_folio_fn: impl FnMut(PageIndex, &[u8], usize) -> VfsResult<()>,
     ) -> VfsResult<()> {
         let stats = self.page_cache.writeback_until(
+            self.visible_len()?,
             control.range_start(),
             control.range_end(),
             control.nr_to_write(),
@@ -643,6 +812,7 @@ impl AddressSpace {
         mut write_range_fn: impl FnMut(u64, &[u8]) -> VfsResult<()>,
     ) -> VfsResult<()> {
         let stats = self.page_cache.write_cache_pages(
+            self.visible_len()?,
             control.range_start(),
             control.range_end(),
             control.nr_to_write(),
@@ -655,7 +825,29 @@ impl AddressSpace {
 
     #[cfg(unittest)]
     fn write_cached_bytes(&self, offset: u64, src: &[u8]) -> VfsResult<usize> {
-        self.page_cache.write_from(offset, src)
+        let mut written = 0usize;
+        while written < src.len() {
+            let pos = offset
+                .checked_add(written as u64)
+                .ok_or(VfsError::InvalidInput)?;
+            let index = pos / PAGE_SIZE_4K as u64;
+            let page_off = (pos % PAGE_SIZE_4K as u64) as usize;
+            let step = (src.len() - written).min(PAGE_SIZE_4K - page_off);
+            self.with_folio_or_create(index, |folio| {
+                folio.data()[page_off..page_off + step]
+                    .copy_from_slice(&src[written..written + step]);
+                folio.mark_dirty();
+                Ok(())
+            })?;
+            written += step;
+        }
+        Ok(written)
+    }
+
+    fn visible_len(&self) -> VfsResult<u64> {
+        self.inode()
+            .map(|inode| inode.size())
+            .ok_or(VfsError::InvalidInput)
     }
 }
 
@@ -663,35 +855,17 @@ impl core::fmt::Debug for AddressSpace {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AddressSpace")
             .field("inode", &self.inode().map(|inode| inode.inode()))
-            .field("page_cache", &self.page_cache.identity())
+            .field("object_id", &self.object_id())
+            .field("nrpages", &self.nrpages())
             .finish()
     }
 }
 
-pub(crate) fn address_space_mapping_kind(inode_flags: NodeFlags) -> MappingKind {
+pub(crate) fn address_space_mapping_kind(inode_flags: NodeFlags) -> PageCacheKind {
     if inode_flags.contains(NodeFlags::ALWAYS_CACHE) {
-        MappingKind::InMemory
+        PageCacheKind::InMemory
     } else {
-        MappingKind::FileBacked
-    }
-}
-
-struct AddressSpacePageCacheOps {
-    address_space: alloc::sync::Weak<AddressSpace>,
-}
-
-impl AddressSpacePageCacheOps {
-    fn address_space(&self) -> VfsResult<Arc<AddressSpace>> {
-        self.address_space.upgrade().ok_or(VfsError::InvalidInput)
-    }
-}
-
-impl MappingOps for AddressSpacePageCacheOps {
-    fn instantiate_folio(&self, index: PageIndex) -> KResult<Folio> {
-        let address_space = self.address_space()?;
-        let mut folio = Folio::new_zeroed()?;
-        address_space.read_folio(&mut folio, index)?;
-        Ok(folio)
+        PageCacheKind::FileBacked
     }
 }
 
@@ -731,7 +905,7 @@ impl AddressSpaceOperations for InMemoryAddressSpaceOperations {
     }
 
     fn set_len(&self, mapping: &AddressSpace, len: u64) -> VfsResult<()> {
-        mapping.truncate_pagecache(len)
+        mapping.truncate_setsize(len)
     }
 
     fn write_begin(&self, _mapping: &AddressSpace, _request: WriteBeginRequest) -> VfsResult<()> {
@@ -739,7 +913,7 @@ impl AddressSpaceOperations for InMemoryAddressSpaceOperations {
     }
 
     fn write_end(&self, mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
-        crate::simple_write_end(mapping, request)
+        crate::libfs::simple_write_end(mapping, request)
     }
 }
 
@@ -767,10 +941,12 @@ mod tests {
     };
 
     use ksync::Mutex;
-    use pagecache::{Folio, MappingKind, PageIndex};
+    use pagecache::{Folio, PageCacheKind, PageIndex};
     use unittest::def_test;
+    use vmobj::{MappingViewKind, MappingViewNotifier, ObjectViewHit};
 
     use super::*;
+    use crate::{FileOperations, InodeOperations, NodePermission, Umode, VfsInode, VfsInodeInit};
 
     /// An `AddressSpaceOperations` that records whether `writepages` was
     /// called, and how many dirty folios were written back.
@@ -779,16 +955,36 @@ mod tests {
         writeback_count: Mutex<usize>,
     }
 
-    struct OrderedSetLenOps {
-        cached_pages: Mutex<Vec<u64>>,
+    struct TruncateOps;
+
+    impl InodeOperations for TruncateOps {}
+    impl FileOperations for TruncateOps {}
+
+    impl AddressSpaceOperations for TruncateOps {
+        fn set_len(&self, mapping: &AddressSpace, len: u64) -> VfsResult<()> {
+            mapping.truncate_setsize(len)
+        }
+
+        fn read_folio(&self, folio: &mut Folio, _index: PageIndex) -> VfsResult<usize> {
+            folio.data().fill(0);
+            Ok(folio.data().len())
+        }
     }
 
-    impl AddressSpaceOperations for OrderedSetLenOps {
-        fn set_len(&self, mapping: &AddressSpace, len: u64) -> VfsResult<()> {
-            self.cached_pages.lock().push(mapping.nrpages());
-            mapping.truncate_pagecache(len)?;
-            self.cached_pages.lock().push(mapping.nrpages());
-            Ok(())
+    struct RecordingNotifier {
+        address_space: Weak<AddressSpace>,
+        observed_sizes: Mutex<Vec<u64>>,
+    }
+
+    impl MappingViewNotifier for RecordingNotifier {
+        fn invalidate(&self, _work: &ObjectInvalidateWork, _hit: &ObjectViewHit) {
+            let size = self
+                .address_space
+                .upgrade()
+                .and_then(|mapping| mapping.inode())
+                .map(|inode| inode.size())
+                .expect("registered address space remains attached to its inode");
+            self.observed_sizes.lock().push(size);
         }
     }
 
@@ -821,6 +1017,23 @@ mod tests {
         }
     }
 
+    #[def_test]
+    fn address_space_identity_is_owned_by_address_space() {
+        let ops = TestOps::new_arc();
+        let first = AddressSpace::new(
+            Weak::new(),
+            ops.clone() as Arc<dyn AddressSpaceOperations>,
+            PageCacheKind::InMemory,
+        );
+        let second = AddressSpace::new(
+            Weak::new(),
+            ops as Arc<dyn AddressSpaceOperations>,
+            PageCacheKind::InMemory,
+        );
+
+        assert_ne!(first.object_id(), second.object_id());
+    }
+
     /// Verifies that final address-space teardown discards cached folios
     /// without forcing ordinary writeback.
     #[def_test]
@@ -829,8 +1042,7 @@ mod tests {
         let address_space = AddressSpace::new(
             Weak::new(),
             ops.clone() as Arc<dyn AddressSpaceOperations>,
-            MappingKind::InMemory,
-            4096,
+            PageCacheKind::InMemory,
         );
         address_space
             .write_cached_bytes(0, b"hello world")
@@ -859,8 +1071,7 @@ mod tests {
         let address_space = AddressSpace::new(
             Weak::new(),
             ops.clone() as Arc<dyn AddressSpaceOperations>,
-            MappingKind::InMemory,
-            0,
+            PageCacheKind::InMemory,
         );
 
         // Evict on a clean cache should succeed.
@@ -878,23 +1089,39 @@ mod tests {
     }
 
     #[def_test]
-    fn filesystem_can_order_pagecache_resize_inside_set_len() {
-        let ops = Arc::new(OrderedSetLenOps {
-            cached_pages: Mutex::new(Vec::new()),
-        });
-        let address_space = AddressSpace::new(
-            Weak::new(),
-            ops.clone() as Arc<dyn AddressSpaceOperations>,
-            MappingKind::InMemory,
-            8192,
+    fn truncate_publishes_i_size_before_two_mapping_invalidations() {
+        let inode = VfsInode::new_file_with_address_space_and_flags(
+            Arc::new(TruncateOps),
+            NodeFlags::ALWAYS_CACHE,
+            VfsInodeInit::new(
+                1,
+                (PAGE_SIZE_4K * 2) as u64,
+                Umode::new(NodeType::RegularFile, NodePermission::default()),
+            ),
         );
+        let address_space = inode.address_space();
         address_space
             .page_cache
             .filemap_add_folio(1, 0, b"cached tail")
-            .expect("page-cache insertion should succeed");
+            .expect("cache tail page");
+        let notifier = Arc::new(RecordingNotifier {
+            address_space: Arc::downgrade(&address_space),
+            observed_sizes: Mutex::new(Vec::new()),
+        });
+        let _view = address_space.register_view(MappingViewSpec {
+            mm_id: 1,
+            vma_start: 0x4000,
+            vma_len: PAGE_SIZE_4K * 2,
+            object_start: 0,
+            object_len: PAGE_SIZE_4K * 2,
+            kind: MappingViewKind::Private,
+            notifier: Some(notifier.clone()),
+        });
 
-        address_space.set_len(0).expect("ordered shrink succeeds");
+        inode.set_len(0).expect("truncate succeeds");
 
-        assert_eq!(*ops.cached_pages.lock(), [1, 0]);
+        assert_eq!(inode.size(), 0);
+        assert_eq!(address_space.nrpages(), 0);
+        assert_eq!(*notifier.observed_sizes.lock(), [0, 0]);
     }
 }

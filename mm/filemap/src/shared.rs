@@ -20,7 +20,6 @@ use crate::runtime::{SharedFileSourceAdapter, SharedFileSourceSpec};
 
 pub(crate) struct FileSharedRuntimeInner {
     source: SharedFileSourceAdapter,
-    flags: FMode,
     shared_ranges: Mutex<Vec<VirtAddrRange>>,
     writable_shared_ranges: Mutex<Vec<VirtAddrRange>>,
 }
@@ -163,7 +162,7 @@ impl FileSharedRuntime {
             required_flags |= FMode::WRITE;
         }
 
-        if !self.0.flags.contains(required_flags) {
+        if !self.0.source.file().mode().contains(required_flags) {
             return Err(KError::PermissionDenied);
         }
         Ok(())
@@ -197,7 +196,6 @@ impl FileSharedRuntime {
         let inner = Arc::new(FileSharedRuntimeInner {
             source: SharedFileSourceAdapter::new(
                 self.0.source.file_arc(),
-                self.0.source.mapping(),
                 SharedFileSourceSpec {
                     mm_id: new_mm_id,
                     start: new_start,
@@ -206,7 +204,6 @@ impl FileSharedRuntime {
                     invalidate: invalidate.clone(),
                 },
             ),
-            flags: self.0.flags,
             shared_ranges: Mutex::new(Vec::new()),
             writable_shared_ranges: Mutex::new(Vec::new()),
         });
@@ -293,7 +290,7 @@ impl FileSharedRuntime {
         }
         let pn = ctx.page_index().ok_or(KError::BadAddress)?;
         let mut populated = 0;
-        let mapping = self.0.source.mapping();
+        let address_space = self.0.source.address_space();
 
         match pgtbl.query(addr) {
             Ok((paddr, page_flags, _)) => {
@@ -301,7 +298,7 @@ impl FileSharedRuntime {
                     && !page_flags.contains(MappingFlags::WRITE)
                 {
                     self.check_shared_write_fault_allowed()?;
-                    mapping.with_folio(pn, |folio| {
+                    address_space.with_folio(pn, |folio| {
                         folio
                             .expect("file-backed PTE must have a cached folio")
                             .mark_dirty();
@@ -314,7 +311,7 @@ impl FileSharedRuntime {
                 }
             }
             Err(PagingError::NotMapped) => {
-                mapping.with_folio_or_create(pn, |folio| {
+                address_space.with_folio_or_create(pn, |folio| {
                     pgtbl
                         .map(
                             addr,
@@ -428,8 +425,6 @@ pub(crate) struct FileSharedRuntimeSpec {
     pub start: VirtAddr,
     pub len: usize,
     pub file: Arc<VfsFile>,
-    pub mapping: Arc<pagecache::Mapping>,
-    pub flags: FMode,
     pub offset: usize,
     pub mm_id: u64,
     pub invalidate: InvalidateHandle,
@@ -440,7 +435,6 @@ pub(crate) fn new_shared_runtime(spec: FileSharedRuntimeSpec) -> VmRuntimeRef {
     let inner = Arc::new(FileSharedRuntimeInner {
         source: SharedFileSourceAdapter::new(
             spec.file,
-            spec.mapping,
             SharedFileSourceSpec {
                 mm_id: spec.mm_id,
                 start: spec.start,
@@ -449,7 +443,6 @@ pub(crate) fn new_shared_runtime(spec: FileSharedRuntimeSpec) -> VmRuntimeRef {
                 invalidate: spec.invalidate.clone(),
             },
         ),
-        flags: spec.flags,
         shared_ranges: Mutex::new(Vec::new()),
         writable_shared_ranges: Mutex::new(Vec::new()),
     });
@@ -467,7 +460,7 @@ mod tests {
     use unittest::def_test;
     use vmobj::VmObjectId;
 
-    use super::{FMode, FileSharedRuntimeInner};
+    use super::FileSharedRuntimeInner;
     use crate::{
         new_file_private_vma, runtime::SharedFileSourceAdapter, test_support::page_cache_file,
     };
@@ -477,8 +470,12 @@ mod tests {
         let file = page_cache_file("cached-read-mapping-write");
         let mut pos = 0;
         file.write_from(&b"old"[..], &mut pos).expect("seed file");
-        file.page_cache()
-            .write_from(0, b"new")
+        file.mapping()
+            .with_folio_or_create(0, |folio| {
+                folio.data()[..3].copy_from_slice(b"new");
+                folio.mark_dirty();
+                Ok(())
+            })
             .expect("page-cache write");
 
         let mut out = [0u8; 3];
@@ -499,9 +496,13 @@ mod tests {
             .expect("cached write");
 
         let mut out = [0u8; 13];
+        let out_len = out.len();
         let read = file
-            .page_cache()
-            .read_into_or_create(0, &mut out)
+            .mapping()
+            .with_folio_or_create(0, |folio| {
+                out.copy_from_slice(&folio.data()[..out_len]);
+                Ok(out_len)
+            })
             .expect("mapping read");
 
         assert_eq!(read, out.len());
@@ -517,18 +518,14 @@ mod tests {
             .write_from(&payload[..], &mut pos)
             .expect("seed cached file with one page");
         assert_eq!(written, PAGE_SIZE_4K);
-        let mapping = file.page_cache();
-
         let shared = FileSharedRuntimeInner {
             source: SharedFileSourceAdapter::new_without_view(
                 file.clone(),
-                mapping.clone(),
                 1,
                 VirtAddr::from_usize(0x10000),
                 PAGE_SIZE_4K,
                 0,
             ),
-            flags: FMode::READ | FMode::WRITE,
             shared_ranges: Mutex::new(Vec::new()),
             writable_shared_ranges: Mutex::new(Vec::new()),
         };
@@ -562,10 +559,8 @@ mod tests {
     #[def_test]
     fn shared_file_source_adapter_and_private_runtime_agree_on_file_object() {
         let file = page_cache_file("shared-source-adapter-same-file-object");
-        let mapping = file.page_cache();
         let adapter = SharedFileSourceAdapter::new_without_view(
             file.clone(),
-            mapping,
             7,
             VirtAddr::from_usize(0x30000),
             PAGE_SIZE_4K,

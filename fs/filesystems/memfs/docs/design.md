@@ -2,7 +2,7 @@
 ## 定位
 
 `memfs` 提供纯内存文件系统的 inode 和目录树实现。普通文件内容通过
-`VfsInode::i_mapping -> kvfs::AddressSpace -> pagecache::Mapping` 提供
+`VfsInode::i_mapping -> kvfs::AddressSpace` 提供
 cached content 与 MM shared object identity。
 
 Linux 对应关系：
@@ -33,16 +33,15 @@ owner，而不是由每个 dentry 或 open file 单独拥有内容对象。
 MemoryFs
   -> Inode / VfsInode
        -> i_mapping: kvfs::AddressSpace
-            -> page_cache: pagecache::Mapping
+            -> page_cache: pagecache::PageCache (private implementation)
 
-File::page_cache_mapping()
-  -> VfsInode::i_mapping / AddressSpace
-  -> pagecache::Mapping
+VfsFile::mapping()
+  -> VfsInode::i_mapping / kvfs::AddressSpace
 ```
 
 `memfs` 自身不定义第二套 file-backed content owner。KFS 高层通过
-`File::page_cache_mapping()` 进入文件缓存路径后，只取得 inode address-space
-mapping；page cache、evict listener 与 MM shared object identity 的统一宿主是
+`VfsFile::mapping()` 进入文件缓存路径后，只取得 inode address-space；private
+page-cache storage、mapped views 与 MM shared object identity 的统一宿主是
 `VfsInode::i_mapping` 下的 `AddressSpace`。
 
 ## 调用约束 / 执行上下文
@@ -60,7 +59,7 @@ mapping；page cache、evict listener 与 MM shared object identity 的统一宿
    父目录的组继承与子目录 setgid 传播。
 3. `memfs` 创建对应 inode；`VfsInode` 构造时持有稳定的 `kvfs::AddressSpace`。
 4. 首次通过 KFS page-cache file path 进入文件缓存路径。
-5. `AddressSpace` 建立或复用唯一的 inode-owned `pagecache::Mapping`。
+5. `AddressSpace` 建立唯一的私有 `PageCache` 实现组件。
 6. open-file、mmap、truncate 和 evict 路径复用同一个 address-space mapping。
 
 ### 创建匿名文件
@@ -75,21 +74,21 @@ mapping；page cache、evict listener 与 MM shared object identity 的统一宿
 ### 读取普通文件
 
 1. KFS file path 找到 inode address-space mapping。
-2. `pagecache::Mapping` 读取或 materialize folio。
+2. `kvfs::AddressSpace` 读取或 materialize folio。
 3. 洞页返回零填充。
 
 ### 写入普通文件
 
 1. KFS file path 找到 inode address-space mapping。
-2. `pagecache::Mapping` 写入 folio 并标记 dirty。
-3. inode-owned `Mapping` 继续提供共享 object identity 与 mmap contract。
+2. `kvfs::AddressSpace` 写入 folio 并标记 dirty。
+3. inode-owned `AddressSpace` 继续提供共享 object identity 与 mmap contract。
 
 ## 并发模型
 
 - inode metadata 由 `Mutex<Metadata>` 保护。
 - 目录项表由 `Mutex<HashMap<...>>` 保护。
-- inode address-space page cache、evict listener 与 MM object identity 由
-  `pagecache::Mapping` 内部同步保护。
+- inode address-space 的 private page-cache storage、mapped views 与 MM object identity
+  由 `kvfs::AddressSpace` 内部同步保护。
 
 ## 设计决策
 
@@ -112,5 +111,5 @@ mapping；page cache、evict listener 与 MM shared object identity 的统一宿
 
 ## Drop / 资源释放
 
-- inode 释放时，`AddressSpace` 与其 `pagecache::Mapping` 随引用计数释放。
+- inode 释放时，`AddressSpace` 与其私有 `PageCache` 随引用计数释放。
 - 目录删除逻辑由 `InodeRef` 和 nlink 维护。

@@ -172,10 +172,11 @@ inode-body 或 single external-block 存储，维护 `i_file_acl`、`i_blocks`�
 
 Truncate 使用 legacy orphan list 保护 regular-file shrink。KExt4 的
 `AddressSpaceOperations::set_len()` 按
-`prepare_regular_inode_truncate()` → `AddressSpace::truncate_pagecache()`/mmap invalidation →
-`finish_regular_inode_truncate()` 排序；这与 Linux ext4 `setattr` 路径显式调用通用
-`truncate_pagecache()` 后再执行 filesystem block truncate 的职责层次一致，不增加第二个
-truncate operation hook。显式 recovery 在 journal 需要 replay 时先重放并保持 recovery flag，再遍历
+`prepare_regular_inode_truncate()` → `AddressSpace::truncate_setsize()`（先发布 VFS i_size，
+再执行 unmap/cache truncate/unmap）→
+`finish_regular_inode_truncate()` 排序；这与 Linux ext4 `setattr` 路径在
+`i_size_write()` 后执行其内部 `truncate_pagecache()`、再进行 filesystem block truncate
+的职责层次一致，不增加第二个 truncate operation hook。显式 recovery 在 journal 需要 replay 时先重放并保持 recovery flag，再遍历
 legacy orphan list；即使 journal 已 clean，只要 superblock 仍有 orphan head，也会执行同一
 cleanup。`nlink > 0` regular inode 完成中断的 truncate，`nlink == 0` inode 复用 final
 eviction 事务释放 external xattr、extent 和 inode bitmap。`recover()` 返回 `None` 只表示

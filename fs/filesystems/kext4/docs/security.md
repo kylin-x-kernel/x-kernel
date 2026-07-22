@@ -10,8 +10,8 @@ superblock feature bitmap 在进入文件系统逻辑时被包装为按 compat �
 flags。未知位不会在解码时丢弃，incompat 未支持位仍会导致挂载失败，从而避免因类型
 封装而放宽对不可信磁盘 feature 的校验。
 
-KVFS bridge 信任 KVFS 已经提供内核拥有的 path name、dentry、PageCache object 和文件
-生命周期回调。KExt4 核心不直接解引用用户态指针。
+KVFS bridge 信任 KVFS 已经提供内核拥有的 path name、dentry、inode `AddressSpace`
+（含私有 `PageCache` storage）和文件生命周期回调。KExt4 核心不直接解引用用户态指针。
 
 ## 外部边界 / 攻击面
 

@@ -19,6 +19,5 @@ log = { workspace = true }
 memfs = { workspace = true }
 memaddr = { workspace = true }
 memspace = { workspace = true }
-pagecache = { workspace = true }
 unittest = { workspace = true }
 vmobj = { workspace = true }

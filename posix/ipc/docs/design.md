@@ -45,7 +45,7 @@ sys_shmdt()
 `ShmInner` stores IPC metadata and an `Arc<kvfs::VfsFile>`. It does not store
 physical pages or an anonymous shared object. The file is a private
 tmpfs/shmem-style regular inode whose content is owned by inode-scoped
-`pagecache::Mapping`.
+`kvfs::AddressSpace`.
 
 `ShmInner::new()` receives the operation's credential snapshot explicitly. It uses
 the snapshot for the backing file and initializes `shm_perm.uid/gid/cuid/cgid`

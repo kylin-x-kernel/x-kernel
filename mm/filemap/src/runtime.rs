@@ -6,18 +6,17 @@ use alloc::sync::Arc;
 
 use kerrno::KResult;
 use khal::paging::{MappingFlags, PageSize};
-use kvfs::VfsFile;
+use kvfs::{AddressSpace, AddressSpaceViewGuard, VfsFile};
 use memaddr::VirtAddr;
 use memspace::{
     FileMappingInfo, InvalidateHandle, MmObserver, VmArea, VmBackingInfo, VmRuntimeRef,
 };
-use pagecache::{Mapping, MappingViewGuard};
 use vmobj::{MappingViewKind, MappingViewSpec, VmObjectId};
 
 use crate::{
     FileMappingMode,
     invalidate::MmSpaceInvalidate,
-    private::{FilePrivateSource, new_private_runtime},
+    private::new_private_runtime,
     shared::{FileSharedRuntimeSpec, new_shared_runtime},
 };
 
@@ -38,7 +37,7 @@ pub(crate) struct FileRuntimeContext<'a> {
     pub invalidate: InvalidateHandle,
 }
 
-pub(crate) struct CachedMappingViewSpec {
+pub(crate) struct AddressSpaceViewSpec {
     pub mm_id: u64,
     pub start: VirtAddr,
     pub len: usize,
@@ -59,23 +58,17 @@ pub(crate) struct SharedFileSourceAdapter {
     start: VirtAddr,
     len: usize,
     file: Arc<VfsFile>,
-    mapping: Arc<Mapping>,
     offset_page: u64,
-    object: VmObjectId,
-    _mapping_view: Option<MappingViewGuard>,
+    _mapping_view: Option<AddressSpaceViewGuard>,
 }
 
 impl SharedFileSourceAdapter {
-    pub(crate) fn new(
-        file: Arc<VfsFile>,
-        mapping: Arc<Mapping>,
-        spec: SharedFileSourceSpec,
-    ) -> Self {
-        let object = mapping.identity().vm_object_id();
-        let mapping_view = register_cached_mapping_view(
-            &mapping,
+    pub(crate) fn new(file: Arc<VfsFile>, spec: SharedFileSourceSpec) -> Self {
+        let address_space = file.mapping();
+        let mapping_view = register_address_space_view(
+            address_space,
             spec.invalidate,
-            CachedMappingViewSpec {
+            AddressSpaceViewSpec {
                 mm_id: spec.mm_id,
                 start: spec.start,
                 len: spec.len,
@@ -88,9 +81,7 @@ impl SharedFileSourceAdapter {
             start: spec.start,
             len: spec.len,
             file,
-            mapping,
             offset_page: spec.offset_page,
-            object,
             _mapping_view: mapping_view,
         }
     }
@@ -115,43 +106,39 @@ impl SharedFileSourceAdapter {
         self.file.clone()
     }
 
-    pub(crate) fn mapping(&self) -> Arc<Mapping> {
-        self.mapping.clone()
+    pub(crate) fn address_space(&self) -> &Arc<AddressSpace> {
+        self.file.mapping()
     }
 
-    pub(crate) const fn object(&self) -> VmObjectId {
-        self.object
+    pub(crate) fn object(&self) -> VmObjectId {
+        self.file.mapping().object_id()
     }
 
     #[cfg(unittest)]
     pub(crate) fn new_without_view(
         file: Arc<VfsFile>,
-        mapping: Arc<Mapping>,
         mm_id: u64,
         start: VirtAddr,
         len: usize,
         offset_page: u64,
     ) -> Self {
-        let object = mapping.identity().vm_object_id();
         let _ = mm_id;
         Self {
             start,
             len,
             file,
-            mapping,
             offset_page,
-            object,
             _mapping_view: None,
         }
     }
 }
 
-pub(crate) fn register_cached_mapping_view(
-    mapping: &Arc<Mapping>,
+pub(crate) fn register_address_space_view(
+    address_space: &Arc<AddressSpace>,
     handle: InvalidateHandle,
-    spec: CachedMappingViewSpec,
-) -> Option<MappingViewGuard> {
-    Some(mapping.register_view(MappingViewSpec {
+    spec: AddressSpaceViewSpec,
+) -> Option<AddressSpaceViewGuard> {
+    Some(address_space.register_view(MappingViewSpec {
         mm_id: spec.mm_id,
         vma_start: spec.start.as_usize() as u64,
         vma_len: spec.len,
@@ -171,14 +158,11 @@ pub(crate) fn build_file_runtime(
     mode: FileMappingMode,
     ctx: FileRuntimeContext<'_>,
 ) -> KResult<VmRuntimeRef> {
-    let mapping = file.page_cache();
     match mode {
         FileMappingMode::Shared => Ok(new_shared_runtime(FileSharedRuntimeSpec {
             start,
             len,
             file: file.clone(),
-            mapping,
-            flags: file.mode(),
             offset,
             mm_id: ctx.mm_id,
             invalidate: ctx.invalidate,
@@ -187,10 +171,10 @@ pub(crate) fn build_file_runtime(
             start,
             len,
             page_size,
-            FilePrivateSource::new(mapping, offset as u64, None),
-            Some(ctx.mm_id),
-            Some(ctx.observer),
-            Some(ctx.invalidate),
+            file.clone(),
+            offset as u64,
+            None,
+            Some(ctx),
         ),
     }
 }
@@ -221,17 +205,8 @@ pub fn new_file_private_vma(
     file_end: Option<u64>,
     flags: MappingFlags,
 ) -> KResult<(VmArea, VmRuntimeRef)> {
-    let mapping = file.page_cache();
-    let runtime = new_private_runtime(
-        start,
-        len,
-        page_size,
-        FilePrivateSource::new(mapping, offset, file_end),
-        None,
-        None,
-        None,
-    )
-    .expect("cached private file source must build runtime");
+    let runtime = new_private_runtime(start, len, page_size, file.clone(), offset, file_end, None)
+        .expect("cached private file source must build runtime");
     let vma = build_file_vma(
         FileVmaSpec {
             start,
@@ -272,10 +247,7 @@ mod tests {
         let cached = open_test_file(location.clone(), O_RDWR);
         let reopened = open_test_file(location, O_RDWR);
 
-        assert_eq!(
-            cached.page_cache().identity().vm_object_id(),
-            reopened.page_cache().identity().vm_object_id()
-        );
+        assert_eq!(cached.mapping().object_id(), reopened.mapping().object_id());
     }
 
     #[def_test]
@@ -315,10 +287,7 @@ mod tests {
             runtime.backing_info(),
         );
 
-        let expected = open_test_file(location, O_RDWR)
-            .page_cache()
-            .identity()
-            .vm_object_id();
+        let expected = open_test_file(location, O_RDWR).mapping().object_id();
         let VmBackingKind::FilePrivate { file_object, .. } = vma.backing().kind() else {
             panic!("expected file-private backing");
         };

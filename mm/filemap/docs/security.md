@@ -7,7 +7,7 @@
 - `posix/mm` syscall parsing;
 - `process/kexec` image mapping setup;
 - VFS `File::mmap()` callbacks;
-- inode-owned `pagecache::Mapping`;
+- inode-owned `kvfs::AddressSpace`;
 - `MmSpace` fault and clone/relocation paths.
 
 It must not trust raw user input directly. Syscall argument validation belongs
@@ -15,10 +15,11 @@ to `posix/mm`.
 
 ## Core Invariants
 
-- File content is owned by `pagecache::Mapping`, not by filemap runtimes.
+- File content is owned by `kvfs::AddressSpace`, not by filemap runtimes.
 - Private file post-write pages are owned by `AnonPrivateObject`.
 - Runtime backing identity must match `VmArea.backing()`.
-- File-backed object ids must come from inode-owned `MappingIdentity`.
+- File-backed object ids must come from the inode-owned
+  `kvfs::AddressSpace::object_id()`.
 - Object invalidation requests must be derived from registered mapping views,
   not from ad-hoc runtime-local object ids.
 - Writable regular-file `MAP_SHARED` must use write-fault dirty tracking:
@@ -40,6 +41,8 @@ to `posix/mm`.
 - Permission elevation above file flags returns permission errors.
 - File-backed faults past EOF return bad-address to the fault layer, which maps
   the condition to the bus-error class.
+- Private unmapped faults check the current inode size before reusing retained
+  COW state, so truncate's second PTE invalidation cannot be refaulted past EOF.
 - COW races return retry-class outcomes instead of corrupting object or PTE
   state.
 - Object invalidation apply failures are requeued by `MmSpace` rather than
@@ -50,17 +53,23 @@ to `posix/mm`.
 ## Lifetime Rules
 
 - `FileSharedRuntime` and `FilePrivateRuntime` live as VMA runtime references.
-- `SharedFileSourceAdapter` keeps a `MappingViewGuard`; dropping the runtime
-  unregisters the object view.
-- `FilePrivateRuntime` owns an `AnonPrivateObject` for private result pages but
-  does not own the file source object.
+- Both file runtimes keep an `Arc<VfsFile>` and reach the source only through
+  `VfsFile::mapping()`; neither runtime keeps a direct page-cache reference.
+- `SharedFileSourceAdapter` keeps an `AddressSpaceViewGuard`; dropping the
+  runtime unregisters the object view. The guard weakly references the owning
+  `AddressSpace` and is not a second content owner.
+- `FilePrivateRuntime` owns an `AnonPrivateObject` for private result pages and
+  keeps the Linux-like `vm_file` lifetime through `Arc<VfsFile>`; file content
+  remains owned by the inode address space.
 - `MmSpace` owns VMA metadata and page-table mutation sequencing.
 
 ## Locking Rules
 
 - Address-space shape and page-table operations are serialized by the `MmSpace`
   lock and page-table mutation guards.
-- `pagecache::Mapping` protects its folio tree, length, and registered views.
+- `VfsInode` owns the only visible file size and serializes write/truncate with
+  its data lock. `kvfs::AddressSpace` protects registered views and delegates
+  only folio storage to its private cache component.
 - Individual folios protect their bytes with per-folio locking.
 - Private anon publication and fork/COW state use `AnonPrivateObject`
   prepare/commit contracts.

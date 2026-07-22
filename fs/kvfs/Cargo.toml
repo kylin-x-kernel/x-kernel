@@ -27,3 +27,4 @@ unittest = { workspace = true}
 ksync = { workspace = true }
 memaddr = { workspace = true }
 pagecache = { workspace = true }
+vmobj = { workspace = true }

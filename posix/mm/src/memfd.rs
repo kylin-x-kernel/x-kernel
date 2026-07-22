@@ -39,7 +39,7 @@ impl MemfdFlags {
 /// Creates an anonymous in-memory file descriptor.
 ///
 /// This creates a private tmpfs-backed file object whose content is owned by an
-/// inode-backed `pagecache::Mapping`, similar to `shmem_file_setup()` in
+/// inode-backed `kvfs::AddressSpace`, similar to `shmem_file_setup()` in
 /// Linux `mm/shmem.c`.
 pub fn sys_memfd_create(name: UserConstPtr<c_char>, flags: u32) -> KResult<isize> {
     let flags = MemfdFlags::from_raw(flags)?;

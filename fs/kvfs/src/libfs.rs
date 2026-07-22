@@ -153,7 +153,11 @@ pub fn simple_fsync_noflush(file: &VfsFile, data_only: bool) -> VfsResult<()> {
     file.writeback_mapping(data_only)
 }
 
-/// `simple_write_end`: finish a buffered write and extend `inode::i_size`.
+/// `simple_write_end`: finish a buffered write for a libfs-style in-memory file.
+///
+/// This is the `fs/libfs.c` helper used by ramfs-like address-space
+/// operations. Block-backed filesystems must complete their own write-end
+/// work and publish the accepted size with [`AddressSpace::write_end_set_size`].
 pub fn simple_write_end(mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
     let copied = request.copied();
     let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
@@ -168,7 +172,7 @@ pub fn simple_write_end(mapping: &AddressSpace, request: WriteEndRequest) -> Vfs
     } else {
         old_size.max(last_pos)
     };
-    inode.update_size_after_backing_change(new_size)?;
+    mapping.write_end_set_size(new_size)?;
     Ok(copied)
 }
 

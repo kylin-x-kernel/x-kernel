@@ -16,7 +16,7 @@ must not bypass those layers by owning page frames directly.
 - `ShmInner` owns only IPC metadata plus an `Arc<kvfs::VfsFile>` backing object.
 - Segment construction receives an explicit immutable credential snapshot;
   `shm_perm` creator/owner IDs use its effective UID/GID.
-- SysV shm contents must flow through inode-owned `pagecache::Mapping`.
+- SysV shm contents must flow through inode-owned `kvfs::AddressSpace`.
 - `ShmInner.page_num` is derived from a page-aligned segment size.
 - `shm_nattch` must match the number of process attach records in
   `ShmInner.va_range`.

@@ -9,9 +9,11 @@ It is the X-Kernel counterpart of the Linux file mmap bridge spread across
 VMA-side `vm_operations_struct` setup.
 
 It is not a file content owner. File-backed content ownership belongs to the
-inode address-space object: `VfsInode::i_mapping -> kvfs::AddressSpace ->
-pagecache::Mapping`. `filemap` receives an opened `kvfs::VfsFile` and reaches
-the Linux-style `file->f_mapping` equivalent through `VfsFile::mapping()`.
+inode address-space object: `VfsInode::i_mapping -> kvfs::AddressSpace`.
+`filemap` receives an opened `kvfs::VfsFile` and borrows the Linux-style
+`file->f_mapping` equivalent through `VfsFile::mapping()`.
+It has no direct dependency on the `pagecache` crate and cannot retain the
+underlying cache container as a second owner.
 
 ## Responsibilities
 
@@ -21,12 +23,12 @@ the Linux-style `file->f_mapping` equivalent through `VfsFile::mapping()`.
 - Build file-backed VMA metadata, including file offset, inode id, and path.
 - Implement shared file runtime fault handling.
 - Implement shared file runtime `msync` dispatch into the inode-owned
-  `pagecache::Mapping`.
+  `kvfs::AddressSpace`.
 - Enforce shmem/memfd shared writable mapping seal policy through KFS
   inode-scoped checks.
 - Implement private file runtime first materialization, EOF checks, file prefix
   handling, and ELF `memsz > filesz` zero-fill semantics.
-- Register file object views so `pagecache::Mapping` truncate/invalidate work
+- Register file object views so `kvfs::AddressSpace` truncate/invalidate work
   can reach `MmSpace`.
 
 ## Non-Responsibilities
@@ -41,7 +43,7 @@ the Linux-style `file->f_mapping` equivalent through `VfsFile::mapping()`.
 Those responsibilities belong to:
 
 - `kvfs`: inode `i_mapping`, `AddressSpace`, and filesystem address-space ops.
-- `pagecache`: file-backed content object and `Mapping` identity.
+- `pagecache`: cache storage algorithms privately owned by `kvfs::AddressSpace`.
 - `kvfs`: VFS/open-file facade used by current file descriptor paths.
 - `vmobj`: object/view/invalidate language.
 - `anon`: private/shared anonymous object ownership.
@@ -64,7 +66,6 @@ FileSharedRuntime
   -> Arc<kvfs::VfsFile>
   -> VfsFile::mapping()
   -> VfsInode::i_mapping / AddressSpace
-  -> pagecache::Mapping
   -> map shared folio into PTE
 
 msync(MS_SYNC)
@@ -72,14 +73,18 @@ msync(MS_SYNC)
   -> FileSharedRuntime::msync()
   -> VfsInode::i_mapping / AddressSpace::writepages_range()
   -> AddressSpaceOperations::writepages()
-  -> pagecache::Mapping::writeback_range()
+  -> AddressSpace-owned page-cache writeback
 
 FilePrivateRuntime
-  -> file source pagecache::Mapping from inode address-space for first materialization
+  -> Arc<kvfs::VfsFile>
+  -> VfsFile::mapping() for first materialization
   -> AnonPrivateObject for post-write private state and fork COW
 
-pagecache::Mapping::resize()
-  -> MappingViewNotifier
+kvfs::AddressSpace::truncate_setsize()
+  -> publish inode::i_size
+  -> MappingViewNotifier (first unmap)
+  -> internal cached-folio truncate
+  -> MappingViewNotifier (second unmap)
   -> MmSpaceInvalidate
   -> InvalidateHandle
   -> MmSpace drain and PTE zap
@@ -138,7 +143,7 @@ sys_mmap
    returns object-level bad-address so `MmSpace` can report a bus-error class
    fault.
 5. Otherwise the runtime materializes a folio through inode-owned
-   `pagecache::Mapping` and maps the folio into the page table.
+   `kvfs::AddressSpace` and maps the folio into the page table.
 6. Shared writable mappings initially install the PTE without write permission.
    The first write fault marks the folio dirty and remaps the PTE writable.
 7. `mprotect(PROT_WRITE)` updates VMA permissions but keeps existing shared
@@ -151,21 +156,26 @@ sys_mmap
 
 1. `FilePrivateRuntime` computes the file source offset and VMA-local page
    prefix.
-2. If this is a valid file-backed portion, it copies initial bytes from the
-   file source `Mapping`.
+2. If this is a valid file-backed portion, it copies initial bytes through
+   `VfsFile::mapping()` from the inode address space.
 3. If this is an executable/image zero-fill tail (`memsz > filesz`), it keeps
    the page faultable and zero-filled.
 4. Private page state is prepared and committed through `AnonPrivateObject`.
 5. Later write faults use the shared private-anon COW helpers, not filemap-owned
    frame tables.
+6. Every unmapped refault rechecks current inode `i_size` before consulting a
+   retained private-anon page. This prevents the second truncate unmap from
+   being followed by reuse of stale private object state beyond the new EOF.
 
 ### Truncate / invalidate
 
-1. `pagecache::Mapping::resize()` emits object invalidation work.
-2. The registered view notifier calls `MmSpaceInvalidate`.
-3. `MmSpaceInvalidate` submits an `ObjectInvalidateRequest` through
+1. `kvfs::AddressSpace::truncate_setsize()` publishes inode `i_size` first.
+2. `AddressSpace` emits mapped-view invalidation, truncates its private cache
+   storage, then emits a second invalidation for a private COW race.
+3. The registered view notifier calls `MmSpaceInvalidate`.
+4. `MmSpaceInvalidate` submits an `ObjectInvalidateRequest` through
    `InvalidateHandle`.
-4. `MmSpace` drains the request and asks the matching runtime to unmap present
+5. `MmSpace` drains the request and asks the matching runtime to unmap present
    PTEs while preserving VMA metadata.
 
 ### `msync`

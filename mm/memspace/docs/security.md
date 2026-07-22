@@ -5,7 +5,8 @@
 
 - syscall、loader、kernel VM 调用方已完成输入来源校验；
 - `page_table` 正确执行 PTE 修改和 TLB finalization；
-- file/anon/pagecache/vmobj crate 正确维护各自 object lifetime；
+- KVFS file address-space、anon 与 vmobj crate 正确维护各自 object lifetime；
+  `pagecache` 只维护其私有 folio storage；
 - 调用方通过外层锁保证同一 `MmSpace` 的独占可变访问。
 
 `memspace` 负责：

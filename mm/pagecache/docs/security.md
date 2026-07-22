@@ -1,127 +1,65 @@
 # pagecache — 安全与可靠性分析
+
 ## 信任模型
 
-`pagecache` 信任调用方已经完成对象级权限校验。它不负责文件访问控制，只负责在一个已授权对象内部管理 cached folios 与长度语义。
+`pagecache` 信任 owning `kvfs::AddressSpace` 提供已经校验并串行化的 index、范围和
+visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生命周期。
 
 ## 外部边界 / 攻击面
 
-- `read_into(offset, len)`
-- `read_into_or_create(offset, len)`
-- `write_from(offset, data)`
-- `resize(len)` / `set_len(len)`
-- `truncate_final()`
-- `sync(data_only)`
-- `with_folio_or_create(index, ...)`
-- `filemap_add_folio(index, offset, data)`
-- `add_evict_listener(...)`
-
-这些接口都可能被不可信用户输入间接驱动，因此必须稳健处理越界、溢出和缺页分配失败。
+- folio index 和页内 offset；
+- owner 提供的 old/new length；
+- writeback range 和 visible length；
+- materialize/writeback closure 的失败结果。
 
 ## unsafe 代码清单
 
-1. `Folio::new_zeroed`
-   - 对分配到的整页执行 `write_bytes`
-   - 不变量：页分配器返回独占、可写的一页虚拟映射
-
-2. `Folio::data`
-   - 从 `VirtAddr` 构造 `&mut [u8]`
-   - 不变量：folio 独占这页内存，且调用方持有 `&mut Folio`
+1. `Folio::new_zeroed()`：对页分配器返回的独占可写页清零。
+2. `Folio::data()`：在持有 `&mut Folio` 时构造独占的页大小 mutable slice。
 
 ## 内存安全不变量
 
-- 每个 `Folio` 独占一页缓存页。
-- `Folio::data()` 只能在持有 `&mut Folio` 时调用。
-- `MappingInner.pages` 中每个页索引最多对应一个 folio 实例。
-- `len` 描述的是对象可见字节数，不等于缓存页数量。
-- dirty / under-writeback 状态在 folio lock 下更新；写回失败不能留下
-  under-writeback 状态。
-- evict listener lifetime 由 `EvictRegistration` guard 管理；guard drop 后
-  listener 不得再被调用。
+- 每个 `Folio` 独占一页；
+- 一个 page index 最多关联一个 cached folio；
+- folio bytes、dirty 和 writeback 状态只在 folio lock 下访问；
+- `PageCache` 中不存在可与 inode `i_size` 分歧的 length 字段；
+- VM object-id、views 和 notifier 不进入本 crate。
 
 ## 线程安全
 
-- `Mapping` 通过 `Mutex<MappingInner>` 串行化页树与长度更新。
-- 单个 `Folio` 通过自己的 `Mutex` 串行化页内容访问。
-- evict listener 注册和注销在 `MappingInner` 锁下完成；通知时只调用当时仍
-  注册的 listener。
-- 没有 `unsafe impl Send/Sync`；线程安全完全依赖现有同步原语。
+folio tree 与 folio data 分层加锁。文件系统 I/O 在 tree lock 外执行，避免把
+sleepable backing operation 放入缓存索引临界区。
 
 ## 威胁分析
 
-1. 越界读写
-   - 通过页内偏移和 `min()` 裁剪访问长度
-
-2. 长度扩展溢出
-   - 通过 `checked_add` 拒绝溢出
-
-3. 截断后尾页数据泄漏
-   - `resize`/`set_len` 对新 EOF 后的尾部清零
-
-4. 洞页读取返回未初始化数据
-   - 洞页直接返回零填充
-
-5. address-space writeback 短写
-   - `AddressSpaceOperations::writepages()` 必须把短写转换为错误；否则 dirty
-     folio 可能被错误清除
-
-6. range writeback 错误清 dirty
-   - `Mapping::writeback_range()` 只有在对应 folio writeback 成功后才能清除 dirty bit
-
-7. evict listener 泄漏或悬挂回调
-   - `add_evict_listener()` 返回 RAII guard，drop 自动 unregister，不向调用者暴露
-     需要手动管理的 public id
-
-8. ordinary invalidation 丢弃 dirty folio
-   - `invalidate_from_page()` 保持 clean-only 约束；final teardown 必须走
-     `truncate_final()`
-
-9. 写回失败后 folio 永久处于 under-writeback
-   - 所有同步写回错误路径都清除 under-writeback，并保留 dirty 供后续重试
-
-10. readahead completion 覆盖并发前台写入
-    - `filemap_add_folio()` 只在 index 缺失时插入；已存在 folio 始终获胜
+| 编号 | 威胁 | 控制 |
+|------|------|------|
+| T-01 | 页内 offset/length 越界 | checked arithmetic 和 page-size boundary 检查 |
+| T-02 | truncate 后尾页泄露旧数据 | shrink 清零 surviving tail |
+| T-03 | writeback 失败却清除 dirty | 失败路径恢复 dirty 并结束 writeback |
+| T-04 | readahead 覆盖前台 dirty folio | insert-if-absent，已缓存 folio 获胜 |
+| T-05 | 缓存层形成第二个 EOF/object owner | 不保存 length、object-id、views 或 notifier |
 
 ## 故障模式与影响分析（FMEA）
 
-| 故障 | 触发条件 | 当前处理 | 影响 |
-|---|---|---|---|
-| 页分配失败 | 内存不足 | 返回 `KError::NoMemory` | 上层可转成 `ENOMEM` 或 fault failure |
-| 长度计算溢出 | `offset + len` 溢出 | 返回 `KError::InvalidInput` | 拒绝本次写入 |
-| dirty folio 被 ordinary invalidation 释放 | address-space 未先 writeback | 断言拒绝 | 防止普通失效路径丢数据 |
-| dirty folio 被 final teardown 释放 | inode 生命周期结束 | 清 dirty 后丢弃 | 对象已退出生命周期，不再要求 writeback |
-| filesystem 短写 | file-backed dirty folio writeback | 返回错误并保留 dirty | 防止数据丢失 |
-| range writeback 失败 | `AddressSpaceOperations::writepages()` 返回错误 | 返回错误并保留当前 folio dirty | 调用者可重试 `msync` |
-| under-writeback 状态泄漏 | 后端写回返回错误 | 清除 under-writeback 并保留 dirty | 避免后续写回永久跳过该 folio |
-| readahead 与前台插入竞态 | backing read 完成前同一 index 被 read/write materialize | completion 返回 `false`，保留现有 folio | 防止陈旧 backing data 覆盖 dirty 数据 |
-
-## 故障管理
-
-- 本 crate 不 panic 处理普通输入错误。
-- 分配失败和输入错误通过 `KResult` 返回。
-- dirty folio 在 drop 时只告警，不尝试隐藏损坏。
+| 故障模式 | 当前处理 | 影响 |
+|----------|----------|------|
+| folio 分配失败 | 返回 `NoMemory` | 当前 I/O/fault 失败 |
+| range arithmetic 溢出 | 返回 `InvalidInput` | 拒绝本次操作 |
+| backing write 失败 | 保留 dirty | 后续可重试 |
+| final teardown 有 dirty folio | 明确清 dirty 后释放 | inode 已退出生命周期 |
 
 ## 已知限制
 
-1. 仅实现最小 in-memory/file-backed mapping 模型。
-2. 只有固定窗口 readahead completion，没有 Linux `file_ra_state` 自适应策略或 reclaim。
-3. 页树使用 `BTreeMap`，未做热点优化。
-4. 还没有 Linux `i_mmap` 那样的完整反向映射树，但 `resize` 现在已经能通过 registered-view notifier 触发最小版对象级 invalidate。
-5. registered file-backed views now record explicit object start bytes, so unaligned private executable prefixes are still included in object-driven truncate/invalidate coverage.
+- folio tree 使用 `BTreeMap`，尚未实现 Linux XArray/reclaim；
+- 没有自适应 readahead、swap、memcg、NUMA 或 THP；
+- inode/MM 一致性由 `kvfs::AddressSpace` 的事务保证，不在本 crate 重复实现。
 
 ## 审计清单
 
-- 是否所有 `unsafe` 都有具体不变量说明。
-- 是否所有长度扩展都经过 `checked_add`。
-- 是否截断路径对尾页剩余字节清零。
-- `resize` 返回的 `TruncatePlan` 是否准确覆盖被删除页和 surviving tail。
-- `affected_views()` / `invalidate_work()` 是否只包含真正覆盖 shrink 区间的 view hits，而不是无差别扩大 invalidate 范围。
-- `MappingViewRange.object_start/object_len` 是否准确覆盖了 private file prefix 的对齐页前缀，而不会因为只看 `vm_pgoff` 派生值漏掉仍属于 file-backed object 的字节。
-- registered view notifier 是否只拆掉超 EOF 的 present PTE，而不会错误移除仍然有效的 VMA 元数据。
-- evict listener 调用方是否保存 `EvictRegistration` guard，并依赖 drop 自动注销。
-- 是否洞页读取始终返回零而非未初始化内存。
-- `filemap_add_folio()` 是否保持 insert-if-absent，且 readahead completion 不覆盖现有 folio。
-- `writeback_range()` 是否只写回与请求范围相交的 dirty folio，并在失败时保留 dirty。
-- 写回预算耗尽后是否停止本次 pass，而不是无限制扫描/写回。
-- 写回失败路径是否清除 under-writeback 并保留 dirty。
-- ordinary invalidation 是否仍然拒绝 dirty folio，final teardown 是否只通过
-  `truncate_final()` 表达。
+- 是否重新加入了 length、object-id、view 或 invalidation state；
+- owner 是否传入当前 inode `i_size` 执行 writeback；
+- shrink 是否清零 partial tail 并删除 EOF 后整页；
+- writeback 失败是否保留 dirty；
+- 是否在 tree lock 下调用了可能阻塞的文件系统 I/O。
+

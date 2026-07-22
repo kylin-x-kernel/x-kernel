@@ -14,5 +14,4 @@ khal = { workspace = true }
 ksync = { workspace = true }
 log = { workspace = true }
 memaddr = { workspace = true }
-vmobj = { workspace = true }
 unittest = { workspace = true }

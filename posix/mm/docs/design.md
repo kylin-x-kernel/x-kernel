@@ -113,14 +113,14 @@ sys_memfd_create
        -> private tmpfs mount
        -> regular file under private root
        -> regular-file inode
-       -> inode-owned Mapping
+       -> inode-owned kvfs::AddressSpace
        -> inode-scoped ShmemObjectState
        -> opened VfsFile
   -> current process fd table install
 ```
 
 `memfd_create` 创建 fd-only 的 tmpfs/shmem 风格匿名文件对象。对象内容由
-regular-file inode 的 inode-owned `pagecache::Mapping` 提供。`posix-mm`
+regular-file inode 的 inode-owned `kvfs::AddressSpace` 提供。`posix-mm`
 只处理 syscall ABI、名字校验和 fd 安装；private tmpfs file 创建与 shmem
 policy state 由 `memfs::shmem` factory 拥有，并由 shmem 对象自己转换成
 opened `VfsFile`。名字只作为调试标签，不进入全局路径命名空间。

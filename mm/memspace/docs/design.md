@@ -5,7 +5,7 @@
 `VmArea`、页表根和 VMA-side runtime dispatch。
 
 它不拥有 file-backed cached content，也不拥有 anonymous page content。
-内容对象分别由 `pagecache::Mapping` 和 `mm/anon` 管理；`memspace` 只保存
+内容对象分别由 `kvfs::AddressSpace` 和 `mm/anon` 管理；`memspace` 只保存
 VMA metadata、运行时执行引用和页表状态。
 
 ## 背景
@@ -121,8 +121,9 @@ The three ownership layers are explicit:
 
 - `VmArea` metadata: this virtual range has a mapping role;
 - present PTE residency: this virtual page currently points at a frame;
-- backing object ownership: anon/file-private/pagecache object owns content
-  lineage.
+- backing object ownership: anonymous state is owned by anon objects; the
+  file-backed source and its object identity are owned by the inode
+  `kvfs::AddressSpace`.
 
 Relocation may change the first two layers without destroying the third.
 
@@ -151,7 +152,7 @@ FaultInput
 ### Object-driven invalidate
 
 ```text
-pagecache / anon object
+kvfs::AddressSpace / anon object
   -> vmobj::ObjectInvalidateRequest
   -> InvalidateHandle
   -> MmSpace invalidate sink

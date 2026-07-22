@@ -509,21 +509,13 @@ impl AddressSpaceOperations for Inode {
         )
         .map_err(into_vfs_err)?;
         drop(state);
-
-        let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
-        let old_size = inode.size();
-        let accepted = request.copied().min(request.len());
-        let end = request
-            .pos()
-            .checked_add(accepted as u64)
-            .ok_or(VfsError::InvalidInput)?;
-        let new_size = if accepted == 0 {
-            old_size
-        } else {
-            old_size.max(end)
-        };
-        inode.update_size_after_backing_change(new_size)?;
-
+        if request.copied() != 0 {
+            let end = request
+                .pos()
+                .checked_add(request.copied() as u64)
+                .ok_or(VfsError::InvalidInput)?;
+            mapping.write_end_set_size(end)?;
+        }
         Ok(request.copied())
     }
 
@@ -571,7 +563,7 @@ impl AddressSpaceOperations for Inode {
             let (fs, dev) = state.split();
             rsext4::file::truncate_with_ino(dev, fs, self.ino, len).map_err(into_vfs_err)?;
         }
-        mapping.truncate_pagecache(len)
+        mapping.truncate_setsize(len)
     }
 }
 
@@ -609,7 +601,7 @@ impl FileOperations for Inode {
     }
 
     fn fsync(&self, file: &VfsFile, data_only: bool) -> VfsResult<()> {
-        kvfs::simple_fsync_noflush(file, data_only)?;
+        kvfs::libfs::simple_fsync_noflush(file, data_only)?;
         self.fs.sync_to_disk()
     }
 

@@ -14,7 +14,7 @@ Linux 语义对应关系。
 1. `posix/mm`：Linux 用户态内存 ABI 与 errno policy。
 2. `mm/memspace`：进程地址空间、VMA 集合、fault dispatch、VMA 变形。
 3. `mm/filemap`：file-backed mmap adapter 与 file-backed runtime。
-4. `mm/pagecache`：inode-owned file/shmem cached object。
+4. `mm/pagecache`：`kvfs::AddressSpace` 私有使用的 folio storage/algorithm。
 5. `mm/anon`：anonymous object、private page state、fork/COW lineage。
 6. `mm/vmobj`：object id、mapping view、object-side invalidate 语言。
 7. `mm/page_table`：页表执行层。
@@ -22,7 +22,7 @@ Linux 语义对应关系。
 核心约束：
 
 - VMA 描述映射实例，不拥有页内容。
-- file-backed 内容由 inode-owned `pagecache::Mapping` 拥有。
+- file-backed 内容由 inode-owned `kvfs::AddressSpace` 拥有。
 - anonymous private/shared 内容由 `mm/anon` 拥有。
 - `filemap` 是 file-backed mmap adapter，不是 file object owner。
 - `memspace` 是地址空间 owner，不是 pagecache 或 anon object owner。
@@ -59,20 +59,19 @@ sys_mmap / sys_munmap / sys_mprotect / sys_brk
         +---------------------------+
         |                           |
         v                           v
-+-------+--------+           +------+------+
-|  mm/pagecache  |           |   mm/anon   |
-| file Mapping   |           | anon object |
-+-------+--------+           +------+------+
-        |                           |
-        +-------------+-------------+
-                      |
-                      v
-                 +----+-----+
-                 | mm/vmobj |
-                 | id/view/ |
-                 | invalidate
-                 +----------+
++------------------------+      +------+------+
+| fs/kvfs::AddressSpace  |      |   mm/anon   |
+| file source/id/views   |      | anon object |
++-----------+------------+      +------+------+
+            |
+            v
+    +-------+--------+
+    |  mm/pagecache  |
+    | folio storage  |
+    +----------------+
 ```
+
+`AddressSpace` and anon objects use `mm/vmobj` for id/view/invalidate work.
 
 ## Linux 对应关系
 
@@ -82,7 +81,7 @@ sys_mmap / sys_munmap / sys_mprotect / sys_brk
 | `MmSpace` | `mm_struct` | 一个进程地址空间 owner |
 | `VmArea` | `vm_area_struct` | 单个映射实例的范围、权限、backing metadata |
 | `VmRuntimeOps` | `vm_operations_struct` | VMA 侧 fault/map/unmap/protect/fork/mremap 执行入口 |
-| `pagecache::Mapping` | `struct address_space` | file/shmem cached object 与对象长度 |
+| `kvfs::AddressSpace` | `struct address_space` | host/a_ops/i_pages/i_mmap 与 file object identity；长度来自 host inode i_size |
 | `vmobj::MappingView` | `i_mmap` / rmap view | object 到 VMA 的映射视图 |
 | `anon::AnonPrivateObject` | `anon_vma` + private anon page owner | private anonymous state 与 COW lineage |
 | `page_table::PageTable` | arch page table helpers | PTE install/unmap/protect |
@@ -176,7 +175,7 @@ sys_mmap / sys_munmap / sys_mprotect / sys_brk
 - 实现 read-only `MAP_SHARED` file runtime。
 - 实现 `MAP_PRIVATE` file runtime 的首次 materialization、EOF 检查、
   file prefix、ELF `memsz > filesz` zero-fill。
-- 注册 file object view，让 `pagecache::Mapping` 的 resize/invalidate 能到达
+- 注册 file object view，让 `kvfs::AddressSpace` 的 resize/invalidate 能到达
   `MmSpace`。
 
 不拥有：
@@ -196,21 +195,20 @@ sys_mmap / sys_munmap / sys_mprotect / sys_brk
 
 核心类型：
 
-- `Mapping`
-- `MappingIdentity`
-- `MappingView`
-- `MappingViewNotifier`
-- `TruncatePlan`
+- `PageCache`
+- `PageCacheKind`
+- `Folio`
 
 职责：
 
-- 作为 inode-owned cached object。
-- 维护 file/shmem object identity。
-- 提供 sparse read、write、resize 和 object-visible length。
-- 为 truncate/resize 生成 object-side invalidation work。
+- 作为 `kvfs::AddressSpace` 私有持有的 cache storage/algorithm component。
+- 提供 sparse folio storage、dirty/writeback 和 cached-folio resize 算法。
+- 由 owning `AddressSpace` 传入当前 inode size 和 materialize/writeback callback。
 
 不拥有：
 
+- inode/address-space 语义生命周期；
+- file length、object identity、mapped views 或 invalidation lifecycle；
 - VMA tree；
 - syscall ABI；
 - page fault dispatch；
@@ -266,7 +264,7 @@ sys_mmap / sys_munmap / sys_mprotect / sys_brk
 - 提供 object-neutral identity。
 - 表达 object range 到 VMA range 的 view mapping。
 - 承载 object-side invalidate work。
-- 让 `pagecache`、`anon`、`memspace` 使用同一套 object/view 语言。
+- 让 `kvfs::AddressSpace`、`anon`、`memspace` 使用同一套 object/view 语言。
 
 不拥有：
 
@@ -330,8 +328,12 @@ trap
 ### File truncate / resize invalidation
 
 ```text
-pagecache::Mapping::resize
-  -> vmobj object hit / invalidate work
+VfsInode data lock
+  -> AddressSpace::truncate_setsize
+  -> publish inode::i_size
+  -> vmobj object hit / invalidate work (first unmap)
+  -> private cached-folio truncate
+  -> vmobj object hit / invalidate work (second unmap)
   -> filemap MmSpaceInvalidate adapter
   -> MmSpace invalidate queue
   -> MmSpace drains request and zaps present PTEs
@@ -341,7 +343,7 @@ pagecache::Mapping::resize
 
 ```text
 FilePrivateRuntime first fault
-  -> read initial bytes from pagecache::Mapping
+  -> read initial bytes from kvfs::AddressSpace
   -> commit page into AnonPrivateObject
 
 write/fork COW
@@ -379,7 +381,7 @@ write/fork COW
 2. VMA split/unmap/protect 必须保留 file metadata、object offset 和 backing kind。
 3. Page fault 必须先完成 VMA 查找和权限检查，再安装 PTE。
 4. File-backed shared/private 的 file source identity 来自 inode-owned
-   `pagecache::Mapping`。
+   `kvfs::AddressSpace`。
 5. File-private 写后页属于 `AnonPrivateObject`，不属于 `filemap` runtime。
 6. Object-side invalidate 必须通过 `vmobj` 语言表达，再由 `MmSpace` 执行 PTE
    zap。
