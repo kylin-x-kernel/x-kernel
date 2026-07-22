@@ -192,20 +192,6 @@ impl Ext4Filesystem {
         Ok(vfs_inode)
     }
 
-    pub(crate) fn make_dentry(
-        fs: &Arc<Self>,
-        parent: Option<Dentry>,
-        name: String,
-        inode: Ext4Inode,
-    ) -> VfsResult<Dentry> {
-        let inode = Self::iget_from_core_inode(fs, inode)?;
-        if inode.is_dir() {
-            Ok(Dentry::new_dir_from_inode(inode, parent, name))
-        } else {
-            Ok(Dentry::new_file_from_inode(inode, parent, name))
-        }
-    }
-
     pub(crate) fn sync_to_disk(&self) -> VfsResult<()> {
         self.lock().sync_filesystem().map_err(into_vfs_err)
     }

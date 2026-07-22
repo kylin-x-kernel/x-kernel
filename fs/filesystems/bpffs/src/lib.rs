@@ -226,14 +226,14 @@ impl BpfMap {
         flags: u32,
         cred: Arc<kcred::Cred>,
     ) -> KResult<Arc<VfsFile>> {
-        Ok(Arc::new(Self::new(
+        Arc::new(Self::new(
             map_type,
             key_size,
             value_size,
             max_entries,
             flags,
         )?)
-        .into_file(cred)?)
+        .into_file(cred)
     }
 
     /// Wraps this map as an anonymous inode file.
@@ -327,22 +327,18 @@ impl BpfNode {
         Arc::new(Self { fs, inode })
     }
 
-    fn new_entry(&self, parent: &Dentry, name: &str, entry: BpfEntry) -> VfsResult<Dentry> {
+    fn vfs_inode_for_entry(&self, entry: BpfEntry) -> Arc<VfsInode> {
         let inode = entry.inode();
-        let d_parent = Some(parent.clone());
-        let d_name = String::from(name);
 
-        Ok(match entry {
-            BpfEntry::Dir(_) => BpfNode::new(self.fs.clone(), inode).into_dentry(
-                NodeFlags::empty(),
-                d_parent,
-                d_name,
-            ),
+        match entry {
+            BpfEntry::Dir(_) => {
+                BpfNode::new(self.fs.clone(), inode).into_vfs_inode(NodeFlags::empty())
+            }
             BpfEntry::Program(_) => {
                 let node = BpfNode::new(self.fs.clone(), inode);
-                node.into_dentry(NodeFlags::NON_CACHEABLE, d_parent, d_name)
+                node.into_vfs_inode(NodeFlags::NON_CACHEABLE)
             }
-        })
+        }
     }
 
     fn into_vfs_inode(self: Arc<Self>, flags: NodeFlags) -> Arc<VfsInode> {
@@ -369,21 +365,6 @@ impl BpfNode {
                 flags,
                 init,
             )
-        }
-    }
-
-    fn into_dentry(
-        self: Arc<Self>,
-        flags: NodeFlags,
-        parent: Option<Dentry>,
-        name: String,
-    ) -> Dentry {
-        let is_dir = self.inode.is_dir();
-        let inode = self.into_vfs_inode(flags);
-        if is_dir {
-            Dentry::new_dir_from_inode(inode, parent, name)
-        } else {
-            Dentry::new_file_from_inode(inode, parent, name)
         }
     }
 
@@ -462,18 +443,14 @@ impl InodeDirOperations for BpfInodeOperations {
         _dir: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
         _flags: kvfs::InodeLookupFlags,
-    ) -> VfsResult<Dentry> {
-        let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<Option<Dentry>> {
         let name = dentry.name();
-        let entry = self
-            .node
-            .inode
-            .as_dir()?
-            .lock()
-            .get(name)
-            .cloned()
-            .ok_or(VfsError::NotFound)?;
-        self.node.new_entry(&dir, name, entry)
+        let entry = self.node.inode.as_dir()?.lock().get(name).cloned();
+        let Some(entry) = entry else {
+            return Ok(None);
+        };
+        let inode = self.node.vfs_inode_for_entry(entry);
+        dentry.instantiate_or_alias(inode)
     }
 
     fn mkdir(
@@ -483,8 +460,7 @@ impl InodeDirOperations for BpfInodeOperations {
         dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         cred: &kcred::Cred,
-    ) -> VfsResult<Dentry> {
-        let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<()> {
         let name = dentry.name();
         let (mode, uid, gid) = inode_init_owner(dir_inode, mode, cred);
         let inode = Inode::new_dir(self.node.fs.clone(), mode.permission(), uid, gid);
@@ -494,7 +470,9 @@ impl InodeDirOperations for BpfInodeOperations {
             return Err(VfsError::AlreadyExists);
         }
         entries.insert(name.to_string(), entry.clone());
-        self.node.new_entry(&dir, name, entry)
+        drop(entries);
+        let inode = self.node.vfs_inode_for_entry(entry);
+        dentry.instantiate(inode)
     }
 
     fn link(
@@ -502,7 +480,7 @@ impl InodeDirOperations for BpfInodeOperations {
         _old_dentry: &Dentry,
         _dir: &kvfs::VfsInode,
         _new_dentry: &LockedDentry<'_>,
-    ) -> VfsResult<Dentry> {
+    ) -> VfsResult<()> {
         Err(VfsError::OperationNotPermitted)
     }
 

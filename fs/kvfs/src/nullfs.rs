@@ -114,8 +114,8 @@ impl InodeDirOperations for NullFsRoot {
         _dir: &VfsInode,
         _dentry: &LockedDentry<'_>,
         _flags: InodeLookupFlags,
-    ) -> VfsResult<Dentry> {
-        Err(VfsError::NotFound)
+    ) -> VfsResult<Option<Dentry>> {
+        Ok(None)
     }
 }
 

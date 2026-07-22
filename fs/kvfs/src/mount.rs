@@ -526,9 +526,11 @@ impl Path {
 
         let name = name.to_string();
         let entry = create(&self.dentry, name.clone());
-        let inode = entry.inode();
-        self.dentry.insert_cache(name, entry);
-        inode
+        self.dentry
+            .insert_cache(name, entry.clone())
+            .filter(Dentry::is_really_positive)
+            .unwrap_or(entry)
+            .inode()
     }
 
     /// Returns metadata for the inode referenced by this location.
@@ -749,13 +751,6 @@ impl Path {
         }
     }
 
-    fn lookup_child_in_mount(&self, name: &str) -> VfsResult<Self> {
-        Ok(Self::new(
-            self.mnt.clone(),
-            self.dentry.as_dir()?.lookup(name)?,
-        ))
-    }
-
     /// Create a regular file under this directory path.
     pub fn create(&self, name: &str, permission: NodePermission, cred: &Cred) -> VfsResult<Self> {
         self.may_modify_directory(cred)?;
@@ -834,63 +829,55 @@ impl Path {
         if !Arc::ptr_eq(&self.mnt, &new_dir.mnt) {
             return Err(VfsError::CrossesDevices);
         }
-        self.may_modify_directory(cred)?;
-        if !self.ptr_eq(new_dir) {
-            new_dir.may_modify_directory(cred)?;
-        }
         self.check_writable_mount()?;
-        new_dir.check_writable_mount()?;
 
-        let old_path = self.lookup_child_in_mount(old_name)?;
-        self.check_sticky(&old_path, cred)?;
-        old_path.check_not_mountpoint()?;
-        if let Ok(new_path) = new_dir.lookup_child_in_mount(new_name) {
-            new_dir.check_sticky(&new_path, cred)?;
-            new_path.check_not_mountpoint()?;
-        }
-        if !self.ptr_eq(new_dir)
-            && old_path.is_dir()
-            && old_path.dentry.is_ancestor_of(&new_dir.dentry)?
-        {
-            return Err(VfsError::InvalidInput);
-        }
-        self.dentry
-            .as_dir()?
-            .rename(old_name, new_dir.dentry.as_dir()?, new_name, flags)
+        self.dentry.as_dir()?.rename_with(
+            old_name,
+            new_dir.dentry.as_dir()?,
+            new_name,
+            flags,
+            |source, target| {
+                self.may_modify_directory(cred)?;
+                if !self.ptr_eq(new_dir) {
+                    new_dir.may_modify_directory(cred)?;
+                }
+
+                let old_path = self.with_dentry(source.clone());
+                self.check_sticky(&old_path, cred)?;
+                old_path.check_not_mountpoint()?;
+                if target.is_really_positive() {
+                    let new_path = new_dir.with_dentry(target.clone());
+                    new_dir.check_sticky(&new_path, cred)?;
+                    new_path.check_not_mountpoint()?;
+                }
+                Ok(())
+            },
+        )
     }
 
     /// Remove a non-directory entry.
     pub fn unlink(&self, name: &str, cred: &Cred) -> VfsResult<()> {
-        self.may_modify_directory(cred)?;
         self.check_writable_mount()?;
-        let path = self.lookup_child_in_mount(name)?;
-        if path.is_dir() {
-            return Err(VfsError::IsADirectory);
-        }
-        self.check_sticky(&path, cred)?;
-        path.check_not_mountpoint()?;
-        self.dentry.as_dir()?.unlink(name, false)
+        self.dentry.as_dir()?.unlink_with(name, |victim| {
+            self.may_modify_directory(cred)?;
+            let victim_path = self.with_dentry(victim.clone());
+            self.check_sticky(&victim_path, cred)?;
+            victim_path.check_not_mountpoint()
+        })
     }
 
     /// Remove a directory entry.
     pub fn rmdir(&self, name: &str, cred: &Cred) -> VfsResult<()> {
-        self.may_modify_directory(cred)?;
         self.check_writable_mount()?;
-        let path = self.lookup_child_in_mount(name)?;
-        if !path.is_dir() {
-            return Err(VfsError::NotADirectory);
-        }
-        self.check_sticky(&path, cred)?;
-        path.check_not_mountpoint()?;
-        self.dentry.as_dir()?.unlink(name, true)
+        self.dentry.as_dir()?.rmdir_with(name, |victim| {
+            self.may_modify_directory(cred)?;
+            let victim_path = self.with_dentry(victim.clone());
+            self.check_sticky(&victim_path, cred)?;
+            victim_path.check_not_mountpoint()
+        })
     }
 
     /// Mount a filesystem at this path.
-    #[cfg(unittest)]
-    fn mount_filesystem(&self, fs: &Arc<SuperBlock>) -> VfsResult<Arc<Mount>> {
-        self.mount_filesystem_with_flags_and_devname(fs, MountFlags::empty(), None)
-    }
-
     fn mount_filesystem_with_flags_and_devname(
         &self,
         fs: &Arc<SuperBlock>,
@@ -898,6 +885,8 @@ impl Path {
         devname: Option<&str>,
     ) -> VfsResult<Arc<Mount>> {
         self.dentry.as_dir()?;
+        let inode = self.inode();
+        let _namespace_guard = inode.lock_namespace_exclusive();
         let result = Mount::new_with_flags_and_devname(fs, Some(self.clone()), flags, devname);
         if let Some(old) = self.mnt.install_child_mount(&self.dentry, &result) {
             *result.covers.lock() = Some(old);
@@ -1005,18 +994,6 @@ impl Path {
     }
 }
 
-/// Look up a child path without following symlinks.
-#[cfg(unittest)]
-fn lookup_no_follow(path: &Path, name: &str) -> VfsResult<Path> {
-    use crate::path::{DOT, DOTDOT};
-
-    Ok(match name {
-        DOT => path.clone(),
-        DOTDOT => path.parent().unwrap_or_else(|| path.clone()),
-        _ => path.lookup_child_in_mount(name)?.resolve_final_mount(),
-    })
-}
-
 fn collect_mount_tree(root: &Arc<Mount>) -> Vec<Arc<Mount>> {
     let mut mounts = vec![root.clone()];
     let mut index = 0;
@@ -1077,6 +1054,27 @@ mod tests {
         LockedDentry, Metadata, MetadataUpdate, NodePermission, NodeType, StatFs,
         SuperBlockOperations, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
     };
+
+    fn lookup_child_in_mount(path: &Path, name: &str) -> VfsResult<Path> {
+        path.dentry
+            .as_dir()?
+            .lookup(name)
+            .map(|dentry| path.with_dentry(dentry))
+    }
+
+    fn lookup_no_follow(path: &Path, name: &str) -> VfsResult<Path> {
+        use crate::path::{DOT, DOTDOT};
+
+        Ok(match name {
+            DOT => path.clone(),
+            DOTDOT => path.parent().unwrap_or_else(|| path.clone()),
+            _ => lookup_child_in_mount(path, name)?.resolve_final_mount(),
+        })
+    }
+
+    fn mount_filesystem(path: &Path, fs: &Arc<SuperBlock>) -> VfsResult<Arc<Mount>> {
+        path.mount_filesystem_with_flags_and_devname(fs, MountFlags::empty(), None)
+    }
 
     struct MockFilesystem {
         mount_flags: StatFsFlags,
@@ -1148,22 +1146,17 @@ mod tests {
             _dir: &VfsInode,
             dentry: &LockedDentry<'_>,
             _flags: crate::InodeLookupFlags,
-        ) -> VfsResult<Dentry> {
+        ) -> VfsResult<Option<Dentry>> {
             let name = dentry.name();
             if name != "mnt" {
-                return Err(VfsError::NotFound);
+                return Ok(None);
             }
 
-            let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
             let inode = VfsInode::new_openable_dir(
                 Arc::new(MockDirOps::new(self.mount_flags, self.inode + 1)),
                 inode_init(self.inode + 1),
             );
-            Ok(Dentry::new_dir_from_inode(
-                inode,
-                Some(dir.clone()),
-                String::from(name),
-            ))
+            dentry.instantiate_or_alias(inode)
         }
 
         fn create(
@@ -1174,7 +1167,7 @@ mod tests {
             _mode: crate::Umode,
             _exclusive: bool,
             _cred: &Cred,
-        ) -> VfsResult<Dentry> {
+        ) -> VfsResult<()> {
             Err(VfsError::OperationNotSupported)
         }
 
@@ -1185,8 +1178,7 @@ mod tests {
             dentry: &LockedDentry<'_>,
             mode: crate::Umode,
             cred: &Cred,
-        ) -> VfsResult<Dentry> {
-            let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+        ) -> VfsResult<()> {
             let (mode, uid, gid) = crate::inode_init_owner(dir, mode, cred);
             let inode = self.inode + 1;
             let init = VfsInodeInit::new(inode, 0, mode)
@@ -1196,11 +1188,7 @@ mod tests {
                 Arc::new(MockDirOps::new(self.mount_flags, inode)),
                 init,
             );
-            Ok(Dentry::new_dir_from_inode(
-                inode,
-                Some(parent.clone()),
-                String::from(dentry.name()),
-            ))
+            dentry.instantiate(inode)
         }
 
         fn link(
@@ -1208,7 +1196,7 @@ mod tests {
             _old_dentry: &Dentry,
             _dir: &VfsInode,
             _new_dentry: &LockedDentry<'_>,
-        ) -> VfsResult<Dentry> {
+        ) -> VfsResult<()> {
             Err(VfsError::OperationNotSupported)
         }
 
@@ -1391,7 +1379,7 @@ mod tests {
         let root_mount = Mount::new_root(&root_fs);
         let mnt_loc = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
 
-        let mount_a = mnt_loc.mount_filesystem(&fs_a).unwrap();
+        let mount_a = mount_filesystem(&mnt_loc, &fs_a).unwrap();
         let loc_a = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
         assert!(Arc::ptr_eq(loc_a.mount(), &mount_a));
 
@@ -1413,7 +1401,7 @@ mod tests {
         let child_fs = mock_filesystem(StatFsFlags::empty());
         let root_mount = Mount::new_root(&root_fs);
         let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
-        let child_mount = mount_dir.mount_filesystem(&child_fs).unwrap();
+        let child_mount = mount_filesystem(&mount_dir, &child_fs).unwrap();
         let child_root = child_mount.root_path();
         let child_path = child_root.absolute_path().unwrap();
 
@@ -1439,9 +1427,9 @@ mod tests {
 
         let root_mount = Mount::new_root(&root_fs);
         let first_mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
-        let child_mount = first_mount_dir.mount_filesystem(&child_fs).unwrap();
+        let child_mount = mount_filesystem(&first_mount_dir, &child_fs).unwrap();
         let second_mount_dir = lookup_no_follow(&child_mount.root_path(), "mnt").unwrap();
-        let grandchild_mount = second_mount_dir.mount_filesystem(&grandchild_fs).unwrap();
+        let grandchild_mount = mount_filesystem(&second_mount_dir, &grandchild_fs).unwrap();
         let grandchild_root = grandchild_mount.root_path();
         let grandchild_path = grandchild_root.absolute_path().unwrap();
 
@@ -1465,7 +1453,7 @@ mod tests {
         assert_eq!(root_mount.children().len(), 0);
 
         let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
-        let child_mount = mount_dir.mount_filesystem(&child_fs).unwrap();
+        let child_mount = mount_filesystem(&mount_dir, &child_fs).unwrap();
 
         let children = root_mount.children();
         assert_eq!(children.len(), 1);
@@ -1483,7 +1471,7 @@ mod tests {
 
         let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
         let root = namespace.root_path();
-        let mountpoint = root.lookup_child_in_mount("mnt").unwrap();
+        let mountpoint = lookup_child_in_mount(&root, "mnt").unwrap();
         let child_mount = namespace.attach(&mountpoint, &child_fs).unwrap();
         let pwd = lookup_no_follow(&root, "mnt").unwrap();
 
@@ -1526,9 +1514,9 @@ mod tests {
 
         let root_mount = Mount::new_root(&root_fs);
         let first_mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
-        let child_mount = first_mount_dir.mount_filesystem(&child_fs).unwrap();
+        let child_mount = mount_filesystem(&first_mount_dir, &child_fs).unwrap();
         let second_mount_dir = lookup_no_follow(&child_mount.root_path(), "mnt").unwrap();
-        let grandchild_mount = second_mount_dir.mount_filesystem(&grandchild_fs).unwrap();
+        let grandchild_mount = mount_filesystem(&second_mount_dir, &grandchild_fs).unwrap();
 
         assert_eq!(
             child_mount.root_path().unmount(),
@@ -1550,9 +1538,9 @@ mod tests {
 
         let root_mount = Mount::new_root(&root_fs);
         let first_mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
-        let child_mount = first_mount_dir.mount_filesystem(&child_fs).unwrap();
+        let child_mount = mount_filesystem(&first_mount_dir, &child_fs).unwrap();
         let second_mount_dir = lookup_no_follow(&child_mount.root_path(), "mnt").unwrap();
-        let grandchild_mount = second_mount_dir.mount_filesystem(&grandchild_fs).unwrap();
+        let grandchild_mount = mount_filesystem(&second_mount_dir, &grandchild_fs).unwrap();
 
         child_mount.root_path().unmount_tree().unwrap();
 
@@ -1575,8 +1563,8 @@ mod tests {
 
         let root_mount = Mount::new_root(&root_fs);
         let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
-        let mount_a = mount_dir.mount_filesystem(&fs_a).unwrap();
-        let mount_b = mount_dir.mount_filesystem(&fs_b).unwrap();
+        let mount_a = mount_filesystem(&mount_dir, &fs_a).unwrap();
+        let mount_b = mount_filesystem(&mount_dir, &fs_b).unwrap();
 
         assert_eq!(mount_a.root_path().unmount(), Err(VfsError::InvalidInput));
 
@@ -1592,7 +1580,7 @@ mod tests {
 
         let root_mount = Mount::new_root(&root_fs);
         let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
-        let child_mount = mount_dir.mount_filesystem(&child_fs).unwrap();
+        let child_mount = mount_filesystem(&mount_dir, &child_fs).unwrap();
         let child_root = child_mount.root_path();
 
         let root_metadata = root_mount.root_path().getattr().unwrap();
@@ -1710,7 +1698,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        let victim = root.lookup_child_in_mount("mnt").unwrap();
+        let victim = lookup_child_in_mount(&root, "mnt").unwrap();
         victim
             .dentry
             .update_metadata(MetadataUpdate {

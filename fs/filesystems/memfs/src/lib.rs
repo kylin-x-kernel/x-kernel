@@ -126,7 +126,8 @@ impl MemoryFs {
             0,
             DeviceId::default(),
         );
-        let root = MemoryNode::dentry_from_inode(&fs, None, String::new(), root_ino);
+        let root_inode = MemoryNode::vfs_inode_from_inode(&fs, root_ino);
+        let root = Dentry::new_dir_from_inode(root_inode, None, String::new());
         SuperBlock::new(fs, root)
     }
 
@@ -304,17 +305,12 @@ impl MemoryNode {
         Arc::new(Self { fs, inode })
     }
 
-    fn dentry_from_inode(
-        fs: &Arc<MemoryFs>,
-        d_parent: Option<Dentry>,
-        d_name: String,
-        inode: Arc<Inode>,
-    ) -> Dentry {
+    fn vfs_inode_from_inode(fs: &Arc<MemoryFs>, inode: Arc<Inode>) -> Arc<kvfs::VfsInode> {
         let metadata = inode.metadata.lock();
         let node_type = metadata.mode.node_type();
         let init = VfsInodeInit::from_metadata(&metadata);
         drop(metadata);
-        let vfs_inode = match node_type {
+        match node_type {
             NodeType::Directory => fs.inode_cache.get_or_insert_openable_dir_with_init(
                 NodeFlags::empty(),
                 init,
@@ -337,16 +333,7 @@ impl MemoryNode {
                 .get_or_insert_special_with_init(NodeFlags::empty(), init, || {
                     MemoryNode::new(fs.clone(), inode)
                 }),
-        };
-        if node_type == NodeType::Directory {
-            Dentry::new_dir_from_inode(vfs_inode, d_parent, d_name)
-        } else {
-            Dentry::new_file_from_inode(vfs_inode, d_parent, d_name)
         }
-    }
-
-    fn new_entry(&self, parent: &Dentry, name: &str, inode: Arc<Inode>) -> Dentry {
-        Self::dentry_from_inode(&self.fs, Some(parent.clone()), name.to_owned(), inode)
     }
 
     fn ramfs_get_inode(
@@ -376,8 +363,7 @@ impl MemoryNode {
         mode: kvfs::Umode,
         device: DeviceId,
         cred: &Cred,
-    ) -> VfsResult<Dentry> {
-        let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<()> {
         let name = dentry.name();
         let content = self.inode.as_dir()?;
         let mut entries = content.entries.lock();
@@ -388,7 +374,8 @@ impl MemoryNode {
         let inode = self.ramfs_get_inode(Some(self.inode.ino), dir_inode, mode, device, cred);
         entries.insert(name.into(), InodeRef::new(self.fs.clone(), inode.ino));
         drop(entries);
-        Ok(self.new_entry(&dir, name, inode))
+        let inode = Self::vfs_inode_from_inode(&self.fs, inode);
+        dentry.instantiate(inode)
     }
 
     fn remove_dir_links(inode: &Arc<Inode>) {
@@ -490,15 +477,18 @@ impl InodeDirOperations for MemoryNode {
         _dir: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
         _flags: kvfs::InodeLookupFlags,
-    ) -> VfsResult<Dentry> {
-        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<Option<Dentry>> {
         let name = dentry.name();
         let content = self.inode.as_dir()?;
         let entries = content.entries.lock();
 
-        let entry = entries.get(name).ok_or(VfsError::NotFound)?;
+        let Some(entry) = entries.get(name) else {
+            return Ok(None);
+        };
         let inode = entry.get();
-        Ok(self.new_entry(&parent, name, inode))
+        drop(entries);
+        let inode = Self::vfs_inode_from_inode(&self.fs, inode);
+        dentry.instantiate_or_alias(inode)
     }
 
     fn create(
@@ -509,7 +499,7 @@ impl InodeDirOperations for MemoryNode {
         mode: kvfs::Umode,
         _exclusive: bool,
         cred: &Cred,
-    ) -> VfsResult<Dentry> {
+    ) -> VfsResult<()> {
         let mode = mode.with_node_type(NodeType::RegularFile);
         self.ramfs_mknod(_dir, dentry, mode, DeviceId::default(), cred)
     }
@@ -521,11 +511,11 @@ impl InodeDirOperations for MemoryNode {
         dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         cred: &Cred,
-    ) -> VfsResult<Dentry> {
+    ) -> VfsResult<()> {
         let mode = mode.with_node_type(NodeType::Directory);
-        let entry = self.ramfs_mknod(dir_inode, dentry, mode, DeviceId::default(), cred)?;
+        self.ramfs_mknod(dir_inode, dentry, mode, DeviceId::default(), cred)?;
         dir_inode.increment_link_count();
-        Ok(entry)
+        Ok(())
     }
 
     fn mknod(
@@ -536,7 +526,7 @@ impl InodeDirOperations for MemoryNode {
         mode: kvfs::Umode,
         device: DeviceId,
         cred: &Cred,
-    ) -> VfsResult<Dentry> {
+    ) -> VfsResult<()> {
         self.ramfs_mknod(dir, dentry, mode, device, cred)
     }
 
@@ -547,8 +537,7 @@ impl InodeDirOperations for MemoryNode {
         dentry: &LockedDentry<'_>,
         target: &str,
         cred: &Cred,
-    ) -> VfsResult<Dentry> {
-        let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<()> {
         let name = dentry.name();
         let content = self.inode.as_dir()?;
         let mut entries = content.entries.lock();
@@ -574,7 +563,9 @@ impl InodeDirOperations for MemoryNode {
         *file.symlink.lock() = Some(target.to_owned());
         inode.metadata.lock().size = target.len() as u64;
         entries.insert(name.into(), InodeRef::new(self.fs.clone(), inode.ino));
-        Ok(self.new_entry(&dir, name, inode))
+        drop(entries);
+        let inode = Self::vfs_inode_from_inode(&self.fs, inode);
+        dentry.instantiate(inode)
     }
 
     fn link(
@@ -582,8 +573,7 @@ impl InodeDirOperations for MemoryNode {
         target_dentry: &Dentry,
         _dir: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
-    ) -> VfsResult<Dentry> {
-        let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<()> {
         let name = dentry.name();
         let content = self.inode.as_dir()?;
         let mut entries = content.entries.lock();
@@ -596,7 +586,9 @@ impl InodeDirOperations for MemoryNode {
         let inode = target.inode.clone();
         entries.insert(name.into(), InodeRef::new(self.fs.clone(), inode.ino));
         target_dentry.increment_link_count();
-        Ok(self.new_entry(&dir, name, inode))
+        drop(entries);
+        let inode = Self::vfs_inode_from_inode(&self.fs, inode);
+        dentry.instantiate(inode)
     }
 
     fn unlink(&self, dir_inode: &kvfs::VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {

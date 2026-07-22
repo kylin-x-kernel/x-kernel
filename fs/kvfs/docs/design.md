@@ -4,7 +4,9 @@
 
 `kvfs` 提供 Linux 风格的 VFS 对象模型，包括 superblock、mount、dentry、inode、
 open file、路径解析和通用文件系统 helper。具体文件系统通过 inode/file operation
-traits 接入，POSIX 层负责把 syscall ABI 参数转换成 VFS 语义对象。
+traits 接入，POSIX 层负责把 syscall ABI 参数转换成 VFS 语义对象。`kvfs` 同时拥有
+namespace validation、lock ordering、dcache identity、类型化 operation flags，以及
+`VfsInode` 上的 page-cache attachment。
 
 权限模型与 Linux 保持同一层次：`kcred` 定义 `Cred`，syscall 层从当前 task 取得一次
 credential snapshot，`kvfs` 接收显式 `&Cred` 并完成路径遍历和通用 DAC。`kvfs` 不
@@ -32,12 +34,23 @@ current task                          kcred::Cred
 POSIX syscall ABI --> Filename --> Nameidata methods --> Path/VfsInode::permission
         |                                      |
         +-- open --> OpenHow --> OpenParams ---+--> VfsFile { f_cred: Arc<Cred> }
-                                  |
-                                  +-- flags: OpenFlags
+        |                         |
+        |                         +-- flags: OpenFlags
         |
-        +-- rename --> RenameFlags --> Path/Dentry --> InodeDirOperations
+        +-- rename --> RenameFlags --> Path / Dentry --> InodeDirOperations
         |
         +-- statfs <---------------- StatFsFlags <---- filesystem
+
+Mount / Path
+    |
+    v
+Dentry ---- namespace location (parent, name)
+    |                         |
+    v                         v
+VfsInode                 child cache
+    |
+    v
+filesystem operation traits
 ```
 
 原始整数只存在于 ABI 或兼容入口。进入 VFS 后，不同 flags 家族由不同 bitflags
@@ -53,8 +66,14 @@ POSIX syscall ABI --> Filename --> Nameidata methods --> Path/VfsInode::permissi
 文件系统私有状态，不重复保存 root；这对应 Linux 中 `super_block.s_root` 的所有权
 边界，也避免私有状态和 root inode 之间形成引用环。
 
+`Dentry` 是可移动的 namespace 对象。rename 保留 source dentry 和 inode identity，只
+改变 dentry 的位置和 cache membership。inode 持有文件状态和 address space，因此
+rename 不会 flush 文件数据，也不会替换 PageCache identity。
+
 每个 live backing inode number 通过 filesystem `InodeCache` 复用同一个 `VfsInode`；hard
-link、rename 和重复 lookup 因此共享 AddressSpace/PageCache。具体文件系统完成 mutation
+link、rename 和重复 lookup 因此共享 AddressSpace/PageCache。非目录 inode 可以有多个
+dentry alias；目录 inode 至多有一个 live alias，重复 lookup 复用该 dentry，对应 Linux
+`d_splice_alias()` 所依赖的目录单 alias 不变量。具体文件系统完成 mutation
 后，operation callback 已持有 `VfsInode` 时可用 `update_metadata_after_backing_change()` 或
 不改变 size 的 `update_attributes_after_backing_change()` 刷新 VFS 缓存；只持有目标
 `Dentry` 时使用同名的 dentry metadata refresh。`Dentry` 不向外部 crate 暴露内部
@@ -67,12 +86,16 @@ credential 的生命周期由 syscall 持有的 `Arc` 保证；对象字段不�
 
 ## 调用约束 / 执行上下文
 
-路径操作会获取 mutex、分配对象并调用具体文件系统，可能阻塞，不适用于中断上下文。
-这些 API 依赖分配器和正常内核运行环境。POSIX 路径通常需要当前进程的 mount、root
-和 cwd；纯 VFS 对象方法只依赖显式传入的对象。
+路径和 namespace 操作会获取 sleepable lock、分配对象并调用具体文件系统，可能阻塞，
+不适用于中断上下文，也不能在持有 spinlock 时调用。这些 API 依赖调度器、分配器和
+正常内核运行环境。POSIX 路径通常需要当前进程的 mount、root 和 cwd；纯 VFS 对象
+方法只依赖显式传入的对象。
 
 一次完整 pathname 操作必须复用同一个 credential snapshot。调用者不能在每个路径
 组件重新查询 current task，否则并发 credential commit 可能让同一次解析混用身份。
+
+文件系统 callback 可在 I/O 上阻塞，但不能在持有同一组 VFS inode namespace lock 时
+重新进入这些 VFS namespace 操作，否则会形成自锁。
 
 `init_anon_inodefs()` 必须在 boot/runtime 初始化阶段调用，早于普通任务和并行单元测试
 创建匿名 inode 文件。`AnonInodeFs::global()` 只读取已经初始化的 singleton，不会在
@@ -84,6 +107,43 @@ open 在入口清理 legacy flags，校验已知位，生成 access mode、open 
 flags。namei 使用这些语义执行查找、创建和最终 open，不再直接组合 `O_CREAT` 与
 `O_EXCL`。
 
+VFS 采用 Linux directory-locking ownership model：
+
+- slow lookup 对父目录 inode 加 shared namespace lock；
+- create 对父目录 inode 加 exclusive namespace lock；
+- unlink 和 rmdir 先锁父目录，再锁 victim inode；
+- link 先锁新父目录，再锁非目录 source inode；
+- same-directory rename 按 parent dentry identity 判定并只锁一次父目录；
+- cross-directory rename 先获取 superblock topology mutex，再按拓扑顺序锁父目录。
+
+Slow lookup 对应 Linux `d_alloc_parallel()`：cache miss 的任务建立唯一 hashed negative
+dentry，设置 parallel-lookup 状态并持有该 dentry 的 lookup mutex 后调用 filesystem
+`lookup`；同名并发 lookup 复用该对象并等待 owner 完成。filesystem 以 `Ok(None)` 表达
+negative miss，找到 inode 时通常原位实例化 candidate；只有 `d_splice_alias()` 语义需要
+复用目录 alias 时才返回另一个 dentry。普通 lookup 和 namespace mutation 使用同一个
+locked lookup 对象方法，差别只在父目录分别持有 shared 或 exclusive namespace lock，
+不存在 mutation 专属的 negative-cache 路径。
+
+rename 在两个父目录稳定后解析 source 和 target，然后先锁参与的子目录，再锁非目录
+inode。目录单 alias 不变量保证不同 parent dentry 不会引用同一个目录 inode。participant
+最多是 source 和 target 两个 inode，直接按
+目录/非目录组合获取，不构造临时 `Vec`；两个非目录 inode 按指针值排序。父目录拓扑遍历
+同时给出锁顺序和 Linux `lock_two_directories()` 语义中的 `trap`，最终 source/target 直接与
+`trap` 比较，不再次遍历父链。类型、flag、祖先关系以及针对最终 source/target 的 Path
+policy 都在同一个 namespace transaction 内完成；filesystem callback 前已保存旧/新 cache
+key，成功后 VFS 只交换 dentry location 并原位替换已有 cache slot，不再分配 name 或插入
+新的 hash slot。目录是否为空由 filesystem rename/rmdir callback 判定，
+通用层不把 dentry child cache 当作后端目录内容。
+
+open-create 在同一个父目录 exclusive lock 下完成最终 lookup 和可能的 create，避免
+`O_EXCL` 与 lookup/create 竞争。`O_CREAT | O_EXCL` 跳过 speculative lookup，直接执行锁内
+最终 lookup；lookup 得到的同一个 negative dentry 会传给 filesystem create callback，不再
+按名称构造第二个对象。create、mkdir、mknod、symlink 和 link callback 都必须实例化该
+negative dentry；lookup 只有在复用既有目录 alias 时才返回另一个 dentry。read-only mount
+和创建权限属于 create-only 错误：只有锁内最终
+lookup 仍为 negative 时才检查；若名称已经变为 positive，普通 `O_CREAT` 打开现有对象，
+`O_CREAT | O_EXCL` 返回 `AlreadyExists`。
+
 ### 路径遍历与 DAC
 
 namei 在进入每个目录并查找下一组件前检查目录 search permission (`MAY_EXEC`)；最终
@@ -93,8 +153,10 @@ open 再按访问模式检查目标 inode。默认 `InodeOperations::permission`
 仍要求至少一个 execute bit，目录 search 可越过 execute bit。
 
 namespace 修改由 `Path` 在调用文件系统回调前统一检查：create、mkdir、mknod、symlink、
-link、unlink、rmdir 和 rename 要求父目录 `MAY_WRITE | MAY_EXEC`。sticky 目录中的删除
-和替换还要求 root、目录所有者或 victim 所有者身份之一。
+link、unlink、rmdir 和 rename 要求父目录 `MAY_WRITE | MAY_EXEC`。unlink、rmdir 和 rename
+把 Path policy 作为 validator 传入 Dentry 操作；validator 在父目录锁、所需 participant
+锁和最终 lookup 结果仍然有效时执行。sticky 目录中的删除和替换还要求 root、目录所有者
+或该最终 victim 的所有者身份之一，mountpoint 检查也针对同一个 dentry。
 
 inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `setattr` callback：
 
@@ -170,8 +232,31 @@ dentry 的 inode、children 和可变 operation 状态由各自 mutex 保护。�
 在 `Lazy` 初始化闭包中构造复杂 VFS 对象。
 
 Namespace callback 在 inode namespace lock 下运行。文件系统应在回调返回前把 core
-mutation result 同步到受影响的 live inode；dentry cache 的删除/rebind 仍由 KVFS 在成功
-返回后完成。
+mutation result 同步到受影响的 live inode，并通过 `LockedDentry::instantiate()` 完成创建
+对象的 inode attachment；dentry cache 的删除/rebind 仍由 KVFS 在成功返回后完成。
+
+全局 namespace lock 顺序为：
+
+```text
+superblock rename mutex
+    -> parent-directory namespace locks
+    -> child-directory namespace locks
+    -> non-directory namespace locks (pointer order)
+    -> per-dentry parallel-lookup mutex
+    -> mount topology lock
+    -> dentry cache and location locks
+```
+
+挂载操作与 namespace validator 都按 inode namespace lock 在外、mount topology lock 在内
+的顺序执行，挂载点检查不会引入反向嵌套。parallel-lookup mutex 只序列化同一个 hashed
+candidate 的 filesystem lookup callback，不会把不同名称的 slow lookup 串行化。
+`SuperBlock::rename_mutex` 对应 Linux `s_vfs_rename_mutex`，不是 dcache rename
+seqlock；它只在 cross-directory rename 中获取。`VfsInode::namespace_lock` 表达
+Linux `inode->i_rwsem` 中和 namespace 相关的子集。`DentryLocation` 用一个 `RwLock`
+同时保护 `parent` 和 `name`，读者不会观察到混合位置。
+
+child cache 仍使用 mutex。RCU、seqcount lookup 和 lock-free dcache traversal 在当前
+锁模型和回归覆盖稳定前保持在范围外。
 
 ## 设计决策
 
@@ -187,6 +272,12 @@ mutation result 同步到受影响的 live inode；dentry cache 的删除/rebind
   复杂 VFS 全局对象的生命周期：启动时构造，运行时只复用。
 - PageCache resize 顺序由 AddressSpace operation 契约表达，不允许文件系统绕过 inode-owned
   Mapping 建立第二套数据 cache。
+- 锁由语义 VFS 对象持有，而不是由 filesystem bridge 持有。
+- `RenameData` 对应 Linux `struct renamedata`，其一次性 `execute` 会消费操作对象并驱动
+  VFS orchestration；辅助方法只借用该对象，不为它提供 `Clone`/`Copy`。
+- validator closure 是 Path policy 与锁内 Dentry transaction 之间的窄接口，不新增持久
+  状态，也不在锁外保留 lookup 结果。
+- namespace lock 使用 blocking lock，因为文件系统 callback 可以执行 I/O。
 
 ## Drop / 资源释放
 
@@ -205,3 +296,7 @@ parent children 弱索引与 superblock dentry cache 中移除 dentry；仍有 P
 - FAT 等不能原生表达 Unix UID/GID 的后端不能完整持久化创建者身份。
 - 当前 POSIX rename 路径不支持 `RENAME_WHITEOUT`。
 - superblock dentry cache 尚无 Linux 风格 LRU/shrinker。
+- fast lookup 仍是 mutex-based，没有 RCU 或 rename sequence validation；slow lookup 已按
+  hashed candidate owner/waiter 模型合并同名并发 lookup。
+- layered filesystem 的跨文件系统 lock rank 尚未建模。
+- mount topology 同步与 superblock rename mutex 仍是不同机制。

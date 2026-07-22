@@ -121,23 +121,14 @@ impl Inode {
     }
 
     /// Look up a child entry via the 9P session.
-    fn lookup_locked(&self, parent: &Dentry, name: &str) -> VfsResult<Dentry> {
+    fn lookup_locked(&self, name: &str) -> VfsResult<Arc<VfsInode>> {
         let child_path = join_child_path(&self.dir_path()?, name);
         let mut session = self.fs.lock();
         let attr = session.getattr(&child_path).map_err(into_vfs_err)?;
-        Ok(self.create_entry_from_attr(parent, name, &attr, &child_path))
+        Ok(self.create_inode_from_attr(&attr, &child_path))
     }
 
-    /// Build a `Dentry` from 9P file attributes.
-    fn create_entry_from_attr(
-        &self,
-        parent: &Dentry,
-        name: &str,
-        attr: &FileAttr,
-        path: &str,
-    ) -> Dentry {
-        let d_parent = Some(parent.clone());
-        let d_name = String::from(name);
+    fn create_inode_from_attr(&self, attr: &FileAttr, path: &str) -> Arc<VfsInode> {
         let node_type = kvfs::Umode::from_bits(attr.mode as u16).node_type();
         let node = if node_type == NodeType::Directory {
             Inode::new_dir(self.fs.clone(), Some(path.into()))
@@ -149,19 +140,13 @@ impl Inode {
         } else {
             NodeFlags::empty()
         };
-        node.into_dentry(inode_init_from_attr(attr), flags, d_parent, d_name)
+        node.into_vfs_inode(flags, inode_init_from_attr(attr))
     }
 
     /// Create a Dentry for a symlink, using the 9P `TSYMLINK` operation.
     ///
     /// This is called from KFS path handling for the special symlink path.
-    fn create_symlink_entry(
-        &self,
-        parent: &Dentry,
-        name: &str,
-        target: &str,
-        gid: u32,
-    ) -> VfsResult<Dentry> {
+    fn create_symlink_inode(&self, name: &str, target: &str, gid: u32) -> VfsResult<Arc<VfsInode>> {
         let dir_path = self.dir_path()?;
         let link_path = join_child_path(&dir_path, name);
         let mut session = self.fs.lock();
@@ -172,12 +157,8 @@ impl Inode {
         drop(session);
 
         Ok(
-            Inode::new_file(self.fs.clone(), NodeType::Symlink, Some(link_path)).into_dentry(
-                inode_init_from_attr(&attr),
-                NodeFlags::empty(),
-                Some(parent.clone()),
-                String::from(name),
-            ),
+            Inode::new_file(self.fs.clone(), NodeType::Symlink, Some(link_path))
+                .into_vfs_inode(NodeFlags::empty(), inode_init_from_attr(&attr)),
         )
     }
 
@@ -354,16 +335,14 @@ impl InodeDirOperations for Inode {
         _dir: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
         _flags: kvfs::InodeLookupFlags,
-    ) -> VfsResult<Dentry> {
-        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<Option<Dentry>> {
         let name = dentry.name();
-        if name == "." {
-            return Ok(parent.clone());
-        }
-        if name == ".." {
-            return parent.parent().ok_or(VfsError::NotFound);
-        }
-        self.lookup_locked(&parent, name)
+        let inode = match self.lookup_locked(name) {
+            Ok(inode) => inode,
+            Err(err) if err.canonicalize() == VfsError::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        dentry.instantiate_or_alias(inode)
     }
 
     fn create(
@@ -374,9 +353,8 @@ impl InodeDirOperations for Inode {
         mode: kvfs::Umode,
         _exclusive: bool,
         cred: &Cred,
-    ) -> VfsResult<Dentry> {
+    ) -> VfsResult<()> {
         let (mode, _, gid) = inode_init_owner(dir, mode, cred);
-        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
         if mode.node_type() != NodeType::RegularFile {
             return Err(VfsError::InvalidInput);
@@ -393,14 +371,9 @@ impl InodeDirOperations for Inode {
         let attr = session.getattr(&child_path).map_err(into_vfs_err)?;
         drop(session);
 
-        Ok(
-            Inode::new_file(self.fs.clone(), NodeType::RegularFile, Some(child_path)).into_dentry(
-                inode_init_from_attr(&attr),
-                NodeFlags::NON_CACHEABLE,
-                Some(parent.clone()),
-                name.to_string(),
-            ),
-        )
+        let inode = Inode::new_file(self.fs.clone(), NodeType::RegularFile, Some(child_path))
+            .into_vfs_inode(NodeFlags::NON_CACHEABLE, inode_init_from_attr(&attr));
+        dentry.instantiate(inode)
     }
 
     fn mkdir(
@@ -410,9 +383,8 @@ impl InodeDirOperations for Inode {
         dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         cred: &Cred,
-    ) -> VfsResult<Dentry> {
+    ) -> VfsResult<()> {
         let (mode, _, gid) = inode_init_owner(dir, mode, cred);
-        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
         if mode.node_type() != NodeType::Directory {
             return Err(VfsError::InvalidInput);
@@ -427,14 +399,9 @@ impl InodeDirOperations for Inode {
         let attr = session.getattr(&child_path).map_err(into_vfs_err)?;
         drop(session);
 
-        Ok(
-            Inode::new_dir(self.fs.clone(), Some(child_path)).into_dentry(
-                inode_init_from_attr(&attr),
-                NodeFlags::empty(),
-                Some(parent.clone()),
-                name.to_string(),
-            ),
-        )
+        let inode = Inode::new_dir(self.fs.clone(), Some(child_path))
+            .into_vfs_inode(NodeFlags::empty(), inode_init_from_attr(&attr));
+        dentry.instantiate(inode)
     }
 
     fn mknod(
@@ -445,9 +412,8 @@ impl InodeDirOperations for Inode {
         mode: kvfs::Umode,
         device: DeviceId,
         cred: &Cred,
-    ) -> VfsResult<Dentry> {
+    ) -> VfsResult<()> {
         let (mode, _, gid) = inode_init_owner(dir, mode, cred);
-        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
         let node_type = mode.node_type();
         if matches!(
@@ -467,14 +433,9 @@ impl InodeDirOperations for Inode {
         let attr = session.getattr(&child_path).map_err(into_vfs_err)?;
         drop(session);
 
-        Ok(
-            Inode::new_file(self.fs.clone(), node_type, Some(child_path)).into_dentry(
-                inode_init_from_attr(&attr),
-                NodeFlags::empty(),
-                Some(parent.clone()),
-                name.to_string(),
-            ),
-        )
+        let inode = Inode::new_file(self.fs.clone(), node_type, Some(child_path))
+            .into_vfs_inode(NodeFlags::empty(), inode_init_from_attr(&attr));
+        dentry.instantiate(inode)
     }
 
     fn symlink(
@@ -484,15 +445,15 @@ impl InodeDirOperations for Inode {
         dentry: &LockedDentry<'_>,
         target: &str,
         cred: &Cred,
-    ) -> VfsResult<Dentry> {
-        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<()> {
         let name = dentry.name();
         let (_, _, gid) = inode_init_owner(
             dir,
             Umode::new(NodeType::Symlink, NodePermission::from_bits_truncate(0o777)),
             cred,
         );
-        self.create_symlink_entry(&parent, name, target, gid)
+        let inode = self.create_symlink_inode(name, target, gid)?;
+        dentry.instantiate(inode)
     }
 
     fn link(
@@ -500,8 +461,7 @@ impl InodeDirOperations for Inode {
         node: &Dentry,
         _dir: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
-    ) -> VfsResult<Dentry> {
-        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<()> {
         let name = dentry.name();
         let dir_path = self.dir_path()?;
         let link_path = join_child_path(&dir_path, name);
@@ -513,12 +473,13 @@ impl InodeDirOperations for Inode {
             .map_err(into_vfs_err)?;
         drop(session);
 
-        self.lookup_locked(&parent, name)
+        let inode = self.lookup_locked(name)?;
+        dentry.instantiate(inode)
     }
 
     fn unlink(&self, _dir: &kvfs::VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
         let dir_path = self.dir_path()?;
-        let child_path = join_child_path(&dir_path, &dentry.name());
+        let child_path = join_child_path(&dir_path, dentry.name());
         let mut session = self.fs.lock();
         session.remove_path(&child_path).map_err(into_vfs_err)
     }
@@ -537,8 +498,8 @@ impl InodeDirOperations for Inode {
         }
         let dst_dir = new_dentry.parent().ok_or(VfsError::InvalidInput)?;
         let dst_dir: Arc<Self> = dst_dir.downcast().map_err(|_| VfsError::InvalidInput)?;
-        let src_path = join_child_path(&self.dir_path()?, &old_dentry.name());
-        let dst_path = join_child_path(&dst_dir.dir_path()?, &new_dentry.name());
+        let src_path = join_child_path(&self.dir_path()?, old_dentry.name());
+        let dst_path = join_child_path(&dst_dir.dir_path()?, new_dentry.name());
         let mut session = self.fs.lock();
         session
             .rename_path(&src_path, &dst_path)

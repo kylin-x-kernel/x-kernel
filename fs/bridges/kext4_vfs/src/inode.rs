@@ -4,7 +4,7 @@
 
 //! KExt4 inode operations.
 
-use alloc::{borrow::ToOwned, collections::BTreeSet, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{collections::BTreeSet, string::String, sync::Arc, vec, vec::Vec};
 
 use iov_iter::{IovIterDest, IovIterSource};
 use kext4::{
@@ -59,7 +59,7 @@ impl Inode {
         self.number
     }
 
-    fn lookup_child(&self, parent: &Dentry, name: &str) -> VfsResult<Dentry> {
+    fn lookup_child(&self, name: &str) -> VfsResult<Arc<VfsInode>> {
         let entry = {
             let fs = self.fs.lock();
             let directory = fs.inode(self.number).map_err(into_vfs_err)?;
@@ -67,7 +67,7 @@ impl Inode {
         }
         .ok_or(VfsError::NotFound)?;
         let inode = self.fs.load_inode(entry.inode())?;
-        Ext4Filesystem::make_dentry(&self.fs, Some(parent.clone()), name.to_owned(), inode)
+        Ext4Filesystem::iget_from_core_inode(&self.fs, inode)
     }
 
     fn block_size(&self) -> u64 {
@@ -344,16 +344,14 @@ impl InodeDirOperations for Inode {
         _dir: &VfsInode,
         dentry: &LockedDentry<'_>,
         _flags: kvfs::InodeLookupFlags,
-    ) -> VfsResult<Dentry> {
-        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<Option<Dentry>> {
         let name = dentry.name();
-        if name == "." {
-            return Ok(parent.clone());
-        }
-        if name == ".." {
-            return parent.parent().ok_or(VfsError::NotFound);
-        }
-        self.lookup_child(&parent, name)
+        let inode = match self.lookup_child(name) {
+            Ok(inode) => inode,
+            Err(err) if err.canonicalize() == VfsError::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        dentry.instantiate_or_alias(inode)
     }
 
     fn create(
@@ -364,8 +362,7 @@ impl InodeDirOperations for Inode {
         mode: kvfs::Umode,
         _exclusive: bool,
         cred: &kcred::Cred,
-    ) -> VfsResult<Dentry> {
-        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<()> {
         let name = dentry.name();
         if mode.node_type() != NodeType::RegularFile {
             return Err(VfsError::InvalidInput);
@@ -385,12 +382,8 @@ impl InodeDirOperations for Inode {
             .map_err(into_vfs_err)?
         };
         self.fs.sync_vfs_directory(dir, created.parent())?;
-        Ext4Filesystem::make_dentry(
-            &self.fs,
-            Some(parent),
-            name.to_owned(),
-            created.child().clone(),
-        )
+        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, created.child().clone())?;
+        dentry.instantiate(inode)
     }
 
     fn mkdir(
@@ -400,8 +393,7 @@ impl InodeDirOperations for Inode {
         dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         cred: &kcred::Cred,
-    ) -> VfsResult<Dentry> {
-        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<()> {
         let name = dentry.name();
         let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
         let created = {
@@ -418,12 +410,8 @@ impl InodeDirOperations for Inode {
             .map_err(into_vfs_err)?
         };
         self.fs.sync_vfs_directory(dir, created.parent())?;
-        Ext4Filesystem::make_dentry(
-            &self.fs,
-            Some(parent),
-            name.to_owned(),
-            created.child().clone(),
-        )
+        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, created.child().clone())?;
+        dentry.instantiate(inode)
     }
 
     fn mknod(
@@ -434,8 +422,7 @@ impl InodeDirOperations for Inode {
         mode: kvfs::Umode,
         device: DeviceId,
         cred: &kcred::Cred,
-    ) -> VfsResult<Dentry> {
-        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<()> {
         let name = dentry.name();
         let kind = vfs_type_to_inode_kind(mode.node_type()).ok_or(VfsError::InvalidInput)?;
         let device = match mode.node_type() {
@@ -459,12 +446,8 @@ impl InodeDirOperations for Inode {
             .map_err(into_vfs_err)?
         };
         self.fs.sync_vfs_directory(dir, created.parent())?;
-        Ext4Filesystem::make_dentry(
-            &self.fs,
-            Some(parent),
-            name.to_owned(),
-            created.child().clone(),
-        )
+        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, created.child().clone())?;
+        dentry.instantiate(inode)
     }
 
     fn symlink(
@@ -474,8 +457,7 @@ impl InodeDirOperations for Inode {
         dentry: &LockedDentry<'_>,
         target: &str,
         cred: &kcred::Cred,
-    ) -> VfsResult<Dentry> {
-        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<()> {
         let name = dentry.name();
         let (_, uid, gid) = inode_init_owner(
             dir,
@@ -499,12 +481,8 @@ impl InodeDirOperations for Inode {
             .map_err(into_vfs_err)?
         };
         self.fs.sync_vfs_directory(dir, created.parent())?;
-        Ext4Filesystem::make_dentry(
-            &self.fs,
-            Some(parent),
-            name.to_owned(),
-            created.child().clone(),
-        )
+        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, created.child().clone())?;
+        dentry.instantiate(inode)
     }
 
     fn link(
@@ -512,8 +490,7 @@ impl InodeDirOperations for Inode {
         old_dentry: &Dentry,
         dir: &VfsInode,
         dentry: &LockedDentry<'_>,
-    ) -> VfsResult<Dentry> {
-        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<()> {
         let name = dentry.name();
         let target: Arc<Self> = old_dentry.downcast()?;
         let linked = {
@@ -530,12 +507,8 @@ impl InodeDirOperations for Inode {
         };
         self.fs.sync_vfs_directory(dir, linked.parent())?;
         sync_dentry_link_state(old_dentry, linked.target())?;
-        Ext4Filesystem::make_dentry(
-            &self.fs,
-            Some(parent),
-            name.to_owned(),
-            linked.target().clone(),
-        )
+        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, linked.target().clone())?;
+        dentry.instantiate(inode)
     }
 
     fn unlink(&self, dir: &VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {

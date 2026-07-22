@@ -191,12 +191,15 @@ pub struct StatFs {
 /// reaches page cache state through those inodes, matching Linux's
 /// `super_block` -> `inode` -> `address_space` layering. It also retains hashed
 /// dentries until namespace eviction, matching Linux dcache lifetime semantics.
+/// Cross-directory rename also uses the superblock's topology mutex,
+/// corresponding to Linux `s_vfs_rename_mutex`; same-directory rename does not
+/// take that mutex.
 pub struct SuperBlock {
     ops: Arc<dyn SuperBlockOperations>,
     root: Dentry,
     dentry_cache: Mutex<HashMap<DentryKey, Dentry>>,
     max_file_size: u64,
-    rename_lock: Mutex<()>,
+    rename_mutex: Mutex<()>,
     inodes: Mutex<Vec<Weak<VfsInode>>>,
 }
 
@@ -224,7 +227,7 @@ impl SuperBlock {
             root,
             dentry_cache: Mutex::default(),
             max_file_size,
-            rename_lock: Mutex::default(),
+            rename_mutex: Mutex::default(),
             inodes: Mutex::default(),
         });
         super_block.root.bind_super_block(&super_block);
@@ -246,13 +249,49 @@ impl SuperBlock {
         drop(removed);
     }
 
+    pub(crate) fn move_cached_dentry(
+        &self,
+        old_key: &DentryKey,
+        new_key: &DentryKey,
+        source: &Dentry,
+    ) {
+        let mut cache = self.dentry_cache.lock();
+        let removed = cache.remove(old_key);
+        if let Some(target_slot) = cache.get_mut(new_key) {
+            *target_slot = source.clone();
+        }
+        drop(cache);
+        drop(removed);
+    }
+
+    pub(crate) fn exchange_cached_dentries(
+        &self,
+        old_key: &DentryKey,
+        source: &Dentry,
+        new_key: &DentryKey,
+        target: &Dentry,
+    ) {
+        let mut cache = self.dentry_cache.lock();
+        if cache.contains_key(old_key) && cache.contains_key(new_key) {
+            *cache.get_mut(old_key).expect("checked cache entry") = target.clone();
+            *cache.get_mut(new_key).expect("checked cache entry") = source.clone();
+        } else {
+            let old = cache.remove(old_key);
+            let new = cache.remove(new_key);
+            drop(cache);
+            drop(old);
+            drop(new);
+        }
+    }
+
     /// Returns this superblock's maximum regular-file size.
     pub fn max_file_size(&self) -> u64 {
         self.max_file_size
     }
 
-    pub(crate) fn lock_rename(&self) -> MutexGuard<'_, ()> {
-        self.rename_lock.lock()
+    /// Serializes directory-tree topology changes across different parents.
+    pub(crate) fn lock_rename_topology(&self) -> MutexGuard<'_, ()> {
+        self.rename_mutex.lock()
     }
 
     /// Tracks an inode attached to this superblock.

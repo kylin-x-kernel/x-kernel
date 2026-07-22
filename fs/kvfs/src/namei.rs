@@ -15,7 +15,8 @@ use kcred::Cred;
 use crate::{
     AccMode, FMode, Filename, LookupFlags, LookupIntent, MountFlags, NodePermission, NodeType,
     OpenFlags, OpenHow, OpenParams, Path, ResolvedObject, VfsError, VfsFile, VfsFileBuilder,
-    VfsInode, VfsResult, d_inode, d_is_dir, d_is_negative, d_is_symlink, path::PathBuf,
+    VfsInode, VfsResult, d_inode, d_is_dir, d_is_negative, d_is_symlink, node::LookupCreateResult,
+    path::PathBuf,
 };
 
 /// Deferred cleanup context used while resolving symbolic-link targets.
@@ -700,29 +701,39 @@ impl<'a> Nameidata<'a> {
             .map(Qstr::as_str)
             .ok_or(VfsError::InvalidInput)?;
         let dir = self.path.dentry().as_dir()?;
-        match dir.lookup(name) {
-            Ok(entry) => return Ok(self.path.with_dentry(entry)),
-            Err(err) if err.canonicalize() == VfsError::NotFound => {}
-            Err(err) => return Err(err),
+        if !flags.is_exclusive_create() {
+            match dir.lookup(name) {
+                Ok(entry) => return Ok(self.path.with_dentry(entry)),
+                Err(err) if err.canonicalize() == VfsError::NotFound => {}
+                Err(err) => return Err(err),
+            }
         }
 
         if !flags.will_create() {
             return Err(VfsError::NotFound);
         }
-        if !got_write {
-            return Err(VfsError::ReadOnlyFilesystem);
-        }
-        self.path.permission(
-            crate::Permission::MAY_WRITE | crate::Permission::MAY_EXEC,
-            cred,
-        )?;
 
-        let inode = dir.vfs_inode();
-        let entry =
-            inode.create_with_mode(dir, name, flags.mode(), flags.is_exclusive_create(), cred)?;
-        dir.insert_cache(name.to_owned(), entry.clone());
-        file.mark_created();
-        Ok(self.path.with_dentry(entry))
+        match dir.lookup_or_create_with_mode(
+            name,
+            flags.mode(),
+            flags.is_exclusive_create(),
+            cred,
+            || {
+                if !got_write {
+                    return Err(VfsError::ReadOnlyFilesystem);
+                }
+                self.path.permission(
+                    crate::Permission::MAY_WRITE | crate::Permission::MAY_EXEC,
+                    cred,
+                )
+            },
+        )? {
+            LookupCreateResult::Existing(entry) => Ok(self.path.with_dentry(entry)),
+            LookupCreateResult::Created(entry) => {
+                file.mark_created();
+                Ok(self.path.with_dentry(entry))
+            }
+        }
     }
 
     fn open_last_lookups(
@@ -838,6 +849,9 @@ pub fn dentry_open(path: Path, flags: u32, cred: Arc<Cred>) -> VfsResult<Arc<Vfs
 
 impl Filename {
     /// Opens this filename from raw `O_*` flag bits and creation permissions.
+    ///
+    /// Create-only mount and permission errors are reported only after the
+    /// locked final lookup confirms that the final component is still absent.
     pub fn open_with_flags_at(
         &self,
         root: &Path,
@@ -988,12 +1002,12 @@ mod tests {
             _dir: &VfsInode,
             dentry: &LockedDentry<'_>,
             _flags: crate::InodeLookupFlags,
-        ) -> VfsResult<Dentry> {
-            self.children
-                .lock()
-                .get(dentry.name())
-                .cloned()
-                .ok_or(VfsError::NotFound)
+        ) -> VfsResult<Option<Dentry>> {
+            let entry = self.children.lock().get(dentry.name()).cloned();
+            let Some(entry) = entry else {
+                return Ok(None);
+            };
+            dentry.instantiate_or_alias(entry.vfs_inode())
         }
 
         fn create(
@@ -1004,7 +1018,7 @@ mod tests {
             _mode: crate::Umode,
             _exclusive: bool,
             _cred: &Cred,
-        ) -> VfsResult<Dentry> {
+        ) -> VfsResult<()> {
             Err(VfsError::OperationNotSupported)
         }
 
@@ -1013,7 +1027,7 @@ mod tests {
             _old_dentry: &Dentry,
             _dir: &VfsInode,
             _new_dentry: &LockedDentry<'_>,
-        ) -> VfsResult<Dentry> {
+        ) -> VfsResult<()> {
             Err(VfsError::OperationNotSupported)
         }
 
@@ -1213,6 +1227,7 @@ mod tests {
     }
 
     struct TestTree {
+        fs: Arc<SuperBlock>,
         root: Path,
         base: Path,
         target: Path,
@@ -1325,6 +1340,7 @@ mod tests {
         root_ops.insert("magicdir", magic_dir_entry);
 
         TestTree {
+            fs,
             root: root_location.clone(),
             base: root_location,
             target: target_location,
@@ -1418,6 +1434,36 @@ mod tests {
     }
 
     #[def_test]
+    fn open_create_existing_precedes_create_only_errors() {
+        let tree = test_tree();
+        let mount = Mount::new_root_with_flags(&tree.fs, crate::MountFlags::RDONLY);
+        let root = mount.root_path();
+
+        let existing = Filename::new("/target").open_with_flags_at(
+            &root,
+            &root,
+            linux_raw_sys::general::O_CREAT | linux_raw_sys::general::O_RDONLY,
+            NodePermission::empty(),
+            kcred::initial_cred(),
+        );
+        assert_eq!(existing.map(|_| ()), Ok(()));
+
+        let tree = test_tree();
+        let mount = Mount::new_root_with_flags(&tree.fs, crate::MountFlags::RDONLY);
+        let root = mount.root_path();
+        let exclusive = Filename::new("/target").open_with_flags_at(
+            &root,
+            &root,
+            linux_raw_sys::general::O_CREAT
+                | linux_raw_sys::general::O_EXCL
+                | linux_raw_sys::general::O_RDONLY,
+            NodePermission::empty(),
+            kcred::initial_cred(),
+        );
+        assert!(matches!(exclusive, Err(VfsError::AlreadyExists)));
+    }
+
+    #[def_test]
     fn final_symlink_follow_policy_is_typed() {
         let tree = test_tree();
 
@@ -1430,7 +1476,7 @@ mod tests {
                 &kcred::initial_cred(),
             )
             .unwrap();
-        assert!(followed.ptr_eq(&tree.target));
+        assert!(followed.dentry().is_same_inode(tree.target.dentry()));
 
         let link = Filename::new("/link")
             .lookup_at(

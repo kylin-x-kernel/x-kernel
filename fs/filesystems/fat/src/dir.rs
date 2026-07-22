@@ -43,15 +43,12 @@ impl FatDirInode {
         })
     }
 
-    fn create_entry(
+    fn create_inode(
         &self,
-        parent: &Dentry,
         entry: ff::DirEntry<'_>,
-        name: impl Into<String>,
         inode_number: u64,
         block_size: u64,
-    ) -> Dentry {
-        let d_name = name.into();
+    ) -> Arc<VfsInode> {
         if entry.is_file() {
             let mut file = entry.to_file();
             let init = VfsInodeInit::from_metadata(&file_metadata(
@@ -60,13 +57,12 @@ impl FatDirInode {
                 &mut file,
                 NodeType::RegularFile,
             ));
-            let vfs_inode = VfsInode::new_file(
+            VfsInode::new_file(
                 FatFileInode::new(self.fs.clone(), self.fs.as_ref(), file, inode_number),
                 init,
-            );
-            Dentry::new_file_from_inode(vfs_inode, Some(parent.clone()), d_name)
+            )
         } else {
-            let vfs_inode = VfsInode::new_openable_dir(
+            VfsInode::new_openable_dir(
                 FatDirInode::new(
                     self.fs.clone(),
                     self.fs.as_ref(),
@@ -74,8 +70,23 @@ impl FatDirInode {
                     inode_number,
                 ),
                 dir_init(inode_number, block_size),
-            );
-            Dentry::new_dir_from_inode(vfs_inode, Some(parent.clone()), d_name)
+            )
+        }
+    }
+
+    fn create_entry(
+        &self,
+        parent: &Dentry,
+        entry: ff::DirEntry<'_>,
+        name: String,
+        inode_number: u64,
+        block_size: u64,
+    ) -> Dentry {
+        let inode = self.create_inode(entry, inode_number, block_size);
+        if inode.is_dir() {
+            Dentry::new_dir_from_inode(inode, Some(parent.clone()), name)
+        } else {
+            Dentry::new_file_from_inode(inode, Some(parent.clone()), name)
         }
     }
 
@@ -160,13 +171,13 @@ impl InodeDirOperations for FatDirInode {
         _dir: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
         _flags: kvfs::InodeLookupFlags,
-    ) -> VfsResult<Dentry> {
-        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<Option<Dentry>> {
         let name = dentry.name();
         let mut fs = self.fs.lock();
         let block_size = fs.inner.cluster_size() as u64;
         let dir = self.inner.borrow(&fs);
-        dir.iter()
+        let entry = dir
+            .iter()
             .find_map(|entry| {
                 entry
                     .ok()
@@ -174,9 +185,13 @@ impl InodeDirOperations for FatDirInode {
             })
             .map(|entry| {
                 let inode = fs.alloc_inode();
-                self.create_entry(&parent, entry, name.to_ascii_lowercase(), inode, block_size)
-            })
-            .ok_or(VfsError::NotFound)
+                self.create_inode(entry, inode, block_size)
+            });
+        let Some(entry) = entry else {
+            return Ok(None);
+        };
+        drop(fs);
+        dentry.instantiate_or_alias(entry)
     }
 
     fn create(
@@ -187,12 +202,10 @@ impl InodeDirOperations for FatDirInode {
         mode: kvfs::Umode,
         _exclusive: bool,
         _cred: &kcred::Cred,
-    ) -> VfsResult<Dentry> {
-        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<()> {
         let name = dentry.name();
         let mut fs = self.fs.lock();
         let dir = self.inner.borrow(&fs);
-        let d_name = name.to_ascii_lowercase();
         match mode.node_type() {
             NodeType::RegularFile => {
                 let mut file = dir.create_file(name).map_err(into_vfs_err)?;
@@ -208,11 +221,8 @@ impl InodeDirOperations for FatDirInode {
                     FatFileInode::new(self.fs.clone(), self.fs.as_ref(), file, inode_number),
                     init,
                 );
-                Ok(Dentry::new_file_from_inode(
-                    vfs_inode,
-                    Some(parent.clone()),
-                    d_name,
-                ))
+                drop(fs);
+                dentry.instantiate(vfs_inode)
             }
             _ => Err(VfsError::InvalidInput),
         }
@@ -225,8 +235,7 @@ impl InodeDirOperations for FatDirInode {
         dentry: &LockedDentry<'_>,
         _mode: kvfs::Umode,
         _cred: &kcred::Cred,
-    ) -> VfsResult<Dentry> {
-        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+    ) -> VfsResult<()> {
         let name = dentry.name();
         let mut fs = self.fs.lock();
         let dir = self.inner.borrow(&fs);
@@ -237,11 +246,8 @@ impl InodeDirOperations for FatDirInode {
             FatDirInode::new(self.fs.clone(), self.fs.as_ref(), child, inode_number),
             dir_init(inode_number, block_size),
         );
-        Ok(Dentry::new_dir_from_inode(
-            vfs_inode,
-            Some(parent),
-            name.to_ascii_lowercase(),
-        ))
+        drop(fs);
+        dentry.instantiate(vfs_inode)
     }
 
     fn link(
@@ -249,7 +255,7 @@ impl InodeDirOperations for FatDirInode {
         _old_dentry: &Dentry,
         _dir: &kvfs::VfsInode,
         _new_dentry: &LockedDentry<'_>,
-    ) -> VfsResult<Dentry> {
+    ) -> VfsResult<()> {
         //  EPERM  The filesystem containing oldpath and newpath does not
         //         support the creation of hard links.
         Err(VfsError::PermissionDenied)
@@ -284,13 +290,13 @@ impl InodeDirOperations for FatDirInode {
 
         // The default implementation throws EEXIST if dst exists, so we need to
         // dispatch_irq it
-        match dst_dir.inner.borrow(&fs).remove(&dst_name) {
+        match dst_dir.inner.borrow(&fs).remove(dst_name) {
             Ok(_) => {}
             Err(fatfs::Error::NotFound) => {}
             Err(err) => return Err(into_vfs_err(err)),
         }
 
-        dir.rename(&src_name, dst_dir.inner.borrow(&fs), &dst_name)
+        dir.rename(src_name, dst_dir.inner.borrow(&fs), dst_name)
             .map_err(into_vfs_err)
     }
 }

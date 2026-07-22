@@ -430,10 +430,15 @@ impl<O: SimpleDirOps> InodeDirOperations for SimpleDirInodeOperations<O> {
         _dir: &crate::VfsInode,
         dentry: &LockedDentry<'_>,
         _flags: crate::InodeLookupFlags,
-    ) -> VfsResult<Dentry> {
+    ) -> VfsResult<Option<Dentry>> {
         let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
         let name = dentry.name();
-        self.dir.ops.lookup_child(SimpleDirLookup::new(&dir), name)
+        let entry = match self.dir.ops.lookup_child(SimpleDirLookup::new(&dir), name) {
+            Ok(entry) => entry,
+            Err(err) if err.canonicalize() == VfsError::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        Ok(Some(entry))
     }
 
     fn mknod(
@@ -444,7 +449,7 @@ impl<O: SimpleDirOps> InodeDirOperations for SimpleDirInodeOperations<O> {
         mode: Umode,
         device: DeviceId,
         cred: &kcred::Cred,
-    ) -> VfsResult<Dentry> {
+    ) -> VfsResult<()> {
         if !matches!(
             mode.node_type(),
             NodeType::CharacterDevice | NodeType::BlockDevice | NodeType::Fifo | NodeType::Socket
@@ -464,9 +469,13 @@ impl<O: SimpleDirOps> InodeDirOperations for SimpleDirInodeOperations<O> {
         node.set_rdev(device);
         let init = node.inode_init();
         let inode = VfsInode::new_special(node, NodeFlags::empty(), init);
-        self.dir
-            .ops
-            .create_inode_child(SimpleDirLookup::new(&parent), dentry.name(), inode)
+        let entry =
+            self.dir
+                .ops
+                .create_inode_child(SimpleDirLookup::new(&parent), dentry.name(), inode)?;
+        let inode = entry.vfs_inode();
+        drop(entry);
+        dentry.instantiate(inode)
     }
 
     fn link(
@@ -474,7 +483,7 @@ impl<O: SimpleDirOps> InodeDirOperations for SimpleDirInodeOperations<O> {
         _old_dentry: &Dentry,
         _dir: &crate::VfsInode,
         _new_dentry: &LockedDentry<'_>,
-    ) -> VfsResult<Dentry> {
+    ) -> VfsResult<()> {
         Err(VfsError::OperationNotPermitted)
     }
 
