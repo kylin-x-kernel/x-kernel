@@ -43,6 +43,9 @@ crate 本身只保证编号分配与 namespace 链表达的一致性。
 - 发布顺序错误：如果上层在 identity 稳定前就让 task runnable，
   可能破坏 PID/TID 可观测一致性。
   该 crate 通过 ownership 分层把这项责任留给 `kprocess` 等 owner。
+- init 身份分配过晚：如果某个 Linux-visible task 在 PID 1 init 创建前消耗 root
+  PID，则全局 init 无法成为 PID 1。该错误由 init 创建路径的 PID 断言暴露；
+  `kidentity` 不维护 init 专用全局状态。
 - 错误 namespace 查询：调用方若拿非祖先 namespace 调用 `nr_in()`，
   会得到 `None`，不会伪造编号。
 
@@ -52,6 +55,7 @@ crate 本身只保证编号分配与 namespace 链表达的一致性。
 |---|---|---|---|---|
 | 编号溢出 | `next_nr` 到达 `u32::MAX` | 当前 identity 分配失败 | 新建任务或进程失败 | 返回 `KError::WouldBlock` |
 | namespace 链为空 root | 构造逻辑被破坏 | `root_nr()` panic | 内核逻辑错误暴露 | 依赖 `allocate_in` / `fixed_root` 保持不变量 |
+| init 身份分配过晚 | Linux-visible task 在 init 前抢先分配 root PID | init PID 1 断言 panic | 启动中止，避免错误 init 身份进入用户态 | boot、idle、late-init 和普通内核 worker 使用 PID-less identity |
 | 使用错误 namespace 查询 | 调用方传入无关 namespace | 返回 `None` | 上层需决定错误处理 | 显式 `Option` 返回 |
 
 ## 故障管理
@@ -71,6 +75,7 @@ crate 本身只保证编号分配与 namespace 链表达的一致性。
 - 当前不支持 PID reuse。
 - `nr_in()` 是线性扫描。
 - crate 不维护生命周期回收策略，也不负责 publication 事务。
+- 全局 init PID 语义由 boot lifecycle 保证；`kidentity` 只提供普通分配器。
 
 ## 审计清单
 
@@ -78,3 +83,4 @@ crate 本身只保证编号分配与 namespace 链表达的一致性。
 - 检查新引入的 namespace 操作是否保持 root-visible 编号始终存在。
 - 检查任何未来的 PID reuse 设计是否破坏当前只读 `PidHandle` 假设。
 - 检查并发分配路径是否仍只依赖 `AtomicU32`，没有引入额外共享状态竞态。
+- 检查 PID 1/2 task 创建之前是否没有普通 root PID 分配路径（late init 的 kthread 必须落在 PID >= 3）。

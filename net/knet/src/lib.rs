@@ -80,12 +80,14 @@ pub fn init_network() {
     ));
 
     let mut eth0_mac = None;
+    let mut eth0_irq = None;
     let eth0_ip = if let Some(handle) = net_devs.pop() {
         let device_id = handle.id();
         info!("  use NIC 0: {:?}", handle.name());
 
         let eth0_address = wire::MacAddress(handle.mac().0);
         eth0_mac = Some(handle.mac().0);
+        eth0_irq = handle.irq();
         let eth0_ip = Ipv4Cidr::new(IP.parse().expect("Invalid IPv4 address"), IP_PREFIX);
 
         let eth0_dev = router.add_device(Box::new(EthernetDevice::new(
@@ -140,6 +142,10 @@ pub fn init_network() {
     SOCKET_SET.init_once(SocketSetWrapper::new());
     LISTEN_TABLE.init_once(ListenTable::new());
     udp_err::init_udp_error_registry();
+
+    if let Some(irq) = eth0_irq {
+        EthernetDevice::spawn_rx_task(irq);
+    }
 }
 
 fn to_smoltcp_ipv4_cidr(cidr: Ipv4Cidr) -> smoltcp::wire::IpCidr {

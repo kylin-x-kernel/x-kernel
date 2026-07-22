@@ -171,8 +171,8 @@ Inherited group
 1. owner 为 init task 分配 leader `PidHandle`，保证首个 root-visible leader 为 `pid/tid 1`。
 2. 创建新的 `Session` 和 `ProcessGroup`，并建立稳定 init `Process` 身份。
 3. 创建 init `Thread` 与 `ProcessRuntime`，并把弱 runtime 引用登记到该 `Process`。
-4. 调用 `TaskInner::new_user(..., thread)`；构造器在返回前建立带有 `UserTaskRuntime` 的用户 task，因此不存在可见的半初始化状态。
-5. 调用方完成 tty / stdio 等外部 owner 设置后，再调用 `start_user_task(task)`。
+4. 用同一个 `PidHandle` 和上一步的 `Thread` 通过 `new_user(...)` 构造一个全新的 `User` 身份 task（runtime 在构造时一次性装入 `UserRuntimeSlot`）；完成 tty / stdio 等外部 owner 设置后，经 `publish_user_task(task).commit(...)` 发布并激活。
+5. process publication 在进入用户态前完成，使 PID/TID 与 group/session lookup 对外一致可见。
 
 ### fork 子进程
 

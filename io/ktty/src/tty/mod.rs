@@ -7,7 +7,7 @@ use core::{ops::Deref, sync::atomic::Ordering, task::Context};
 
 use kerrno::{KError, KResult, LinuxError};
 use kpoll::{IoEvents, Pollable};
-use kprocess::{ControllingTerminal, Process, SetTerminalResult};
+use kprocess::{ControllingTerminal, Process, ProcessGroup, SetTerminalResult};
 use ksync::Mutex;
 use kvfs::{DeviceFileOps, NodeFlags, VfsFile, VfsFileBuilder, VfsInode};
 use osvm::{VirtMutPtr, VirtPtr};
@@ -90,7 +90,6 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
         if session.sid() != proc.pid() {
             return Err(KError::OperationNotPermitted);
         }
-
         let terminal: Arc<dyn ControllingTerminal> = self.clone();
         let installed_job_session = self.terminal.job_control.ensure_session(&session)?;
         match session.set_terminal(&terminal) {
@@ -103,14 +102,22 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
             }
         }
 
-        if let Err(err) = self.terminal.job_control.set_foreground(&pg) {
-            session.unset_terminal(&terminal);
-            if installed_job_session {
-                self.terminal.job_control.clear_session_if_matches(&session);
-            }
-            return Err(err);
-        }
+        // Per POSIX/Linux, TIOCSCTTY only establishes the controlling-terminal
+        // relationship; it does not set the foreground process group. That is a
+        // separate TIOCSPGRP ioctl, so callers that need a foreground group
+        // (e.g. the init bootstrap) must set it explicitly after `bind_to`.
         Ok(())
+    }
+
+    /// Set `pg` as the foreground process group of this terminal.
+    ///
+    /// This is the explicit companion to [`bind_to`](Self::bind_to): since
+    /// `bind_to` only establishes the controlling-terminal relationship, a
+    /// caller that also wants a foreground group (e.g. the init bootstrap) must
+    /// set it separately, mirroring how `TIOCSPGRP` is independent of
+    /// `TIOCSCTTY`.
+    pub fn set_foreground(self: &Arc<Self>, pg: &Arc<ProcessGroup>) -> KResult<()> {
+        self.terminal.job_control.set_foreground(pg)
     }
 
     /// Get the pseudo-terminal slave number

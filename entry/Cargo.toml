@@ -19,6 +19,7 @@ fs_context.workspace = true
 xcover.workspace = true
 kfeat.workspace = true
 khal.workspace = true
+kiface.workspace = true
 klogger.workspace = true
 kruntime.workspace = true
 ktask.workspace = true

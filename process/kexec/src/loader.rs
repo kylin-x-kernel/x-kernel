@@ -467,36 +467,6 @@ pub fn clear_elf_cache() {
     tee_task_iface::tasign::clear_ta_head_cache();
 }
 
-/// Load the user app to the user address space.
-///
-/// # Arguments
-///
-/// - `uspace`: The address space of the user app.
-/// - `args`: The arguments of the user app. The first argument is the path of
-///   the user app.
-/// - `envs`: The environment variables of the user app.
-///
-/// # Returns
-///
-/// - The entry point of the user app.
-/// - The stack pointer of the user app.
-pub fn load_user_app(
-    uspace: &mut MmSpace,
-    path: Option<&str>,
-    args: &[String],
-    envs: &[String],
-    cred: Arc<Cred>,
-) -> KResult<(VirtAddr, VirtAddr)> {
-    let path = path
-        .or_else(|| args.first().map(String::as_str))
-        .ok_or(KError::InvalidInput)?;
-    load_user_app_request_inner(
-        uspace,
-        ExecRequest::from_path(path.to_owned(), args.to_vec(), envs.to_vec(), cred),
-        0,
-    )
-}
-
 /// Load a user app from an owned executable request.
 ///
 /// This is the exec-facing entry point when the caller has already resolved

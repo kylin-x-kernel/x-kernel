@@ -105,3 +105,11 @@ PidHandle
 这保留了简单、可审计的 publish-before-runnable 模型；
 后续如果引入 PID reuse，
 也应维持 identity 在对外可见前已经稳定这一不变量。
+
+### PID 1 由 boot lifecycle 保证
+
+root namespace 的普通分配器从 1 开始。boot、idle、late-init 和普通内核
+worker 都使用 PID-less identity，因此 `SystemInitEntry` 创建 init 时的第一笔
+普通分配必须得到 PID 1。后续 PID 不承载启动期固定角色，按正常分配顺序产生。
+如果未来某条早期路径在 init 创建前启动 Linux-visible task，init 侧的 PID 1
+断言会暴露启动顺序破坏；`kidentity` 本身不保存 init 专用全局 handle。

@@ -23,9 +23,10 @@
 ## 内存安全不变量
 
 - robust futex 地址必须能转换成当前进程 futex key。
-- 初始用户进程的 `Thread` 必须与 task identity 匹配，并作为 `new_user_task(..., thread, ...)`
-  的构造参数；`TaskInner::new_user` 在返回前将它作为用户 task 的必备 runtime 保存，再通过
-  `start_user_task(...)` 完成受控发布。
+- 初始用户进程（PID 1）的 `Thread` 必须与构造时分配的 `PidHandle` 匹配，并随
+  `new_user(...)` 在 task 构造时一次性装入 `UserRuntimeSlot`，再经
+  `publish_user_task(...).commit(...)` 发布到 process registry 后才激活，不存在
+  runnable 后补装 runtime 的路径。
 - 最后线程退出前必须先关闭 fd，再标记进程退出，避免外部等待者持有悬挂资源语义。
 - `SHM_MANAGER` 清理仅针对已退出进程 PID。
 
@@ -50,7 +51,7 @@
 - 退出路径漏关 fd：会破坏 pipe EOF / wait 语义；当前实现先 `close_all_fds()`。
 - 父进程通知丢失：通过退出信号和 `child_exit_event()` 双路径通知。
 - group-exit 未广播：会留下残余线程；当前实现遍历线程组发 `SIGKILL`。
-- init 进程启动前缺少 user runtime：会导致用户线程 runtime 前提失效；当前构造器将 `Thread` 与 `TaskInner` 一次性绑定，随后 `start_user_task(...)` 保证“先 publish、后 runnable”。
+- init 进程启动前缺少 user runtime：会导致用户线程 runtime 前提失效；当前 PID 1 路径在进入用户态前校验 identity、安装 runtime、发布 process/task 可见性，并同步当前页表。
 
 ## 故障管理
 

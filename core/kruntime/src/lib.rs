@@ -3,8 +3,8 @@
 // See LICENSES for license details.
 
 //! Runtime orchestration for x-kernel: primary/secondary CPU bring-up, subsystem
-//! init ordering, and handoff to the application [`main`] symbol (provided by the
-//! `entry` crate).
+//! init ordering, and handoff to the system-init entry supplied by the `entry`
+//! crate.
 //!
 //! For architecture, boot flow, and security analysis, see `docs/design.md` and
 //! `docs/security.md` in the crate source directory.
@@ -47,6 +47,7 @@ mod dma_integration;
 mod init_setup;
 
 use boot_info::BootConsoleTransport;
+use kcpu_id_map::KCpuMaskExt;
 use kernel_boot::PrimaryKernelEntry;
 use khal::mem::MemFlags;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr};
@@ -78,13 +79,6 @@ const LOGO: &str = r#"
  %%%%%%        %%%%%%%  %%%%#*
  %%%%%%                %%%%%%+=
 "#;
-
-// SAFETY: The linker script exports the final application entry symbol as a
-// valid `extern "C" fn()` named `main`.
-unsafe extern "C" {
-    /// Application's entry point.
-    fn main();
-}
 
 #[kiface::provide]
 impl klogger::LoggerAdapter {
@@ -121,6 +115,17 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 static INITED_CPUS: AtomicUsize = AtomicUsize::new(0);
 
+/// High-level system-init handoff performed after runtime bring-up.
+///
+/// The provider owns policy-level startup such as runtime feature init and
+/// spawning the first user program (PID 1) as a fresh user task. The provider
+/// returns once init has been published and activated.
+#[kiface::interface]
+pub trait SystemInitEntry {
+    /// Spawn PID 1 and return once it is runnable.
+    fn enter();
+}
+
 const MAX_REGION_LOG_SUMMARIES: usize = 64;
 const REGION_LOG_SUMMARY_THRESHOLD: usize = 8;
 
@@ -156,6 +161,95 @@ fn is_init_ok() -> bool {
     // the platform describes fewer CPUs than `NR_CPUS` (e.g. a smaller QEMU
     // `-smp`), because those slots never increment the counter.
     INITED_CPUS.load(Ordering::Acquire) == kcpu_id_map::nr_cpus()
+}
+
+/// Run late subsystem initialization on the PID-less late-init bootstrap thread.
+///
+/// The thread starts in kernel context, brings up secondary CPUs and late
+/// subsystems, then crosses [`SystemInitEntry`], which spawns PID 1 init, before
+/// returning. Because the late-init thread holds an `Internal` identity and
+/// allocates no root PID itself, init receives the system's first root PID.
+fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
+    #[cfg(feature = "smp")]
+    {
+        self::mp::start_secondary_cpus(cpu_id).unwrap_or_else(|err| {
+            panic!(
+                "failed to start secondary CPUs after boot CPU {} init: {err:?}",
+                cpu_id.as_usize()
+            )
+        });
+    }
+
+    kdriver::init_drivers();
+    #[cfg(feature = "char")]
+    ktty::tty::try_handoff_console();
+
+    #[cfg(feature = "display")]
+    fbdevice::fb_init();
+    #[cfg(feature = "input")]
+    inputdev::init_input();
+
+    #[cfg(feature = "fs")]
+    {
+        fs_boot::prepare_namespace();
+        fs_boot::mount_virtual_filesystems();
+    }
+
+    #[cfg(feature = "fs9p")]
+    fs_boot::mount_host_share("/mnt/hostshare");
+
+    #[cfg(feature = "net")]
+    knet::init_network();
+    #[cfg(feature = "vsock")]
+    knet::init_vsock();
+
+    #[cfg(feature = "ipi")]
+    kipi::init();
+
+    #[cfg(feature = "smp")]
+    kipi::tlb::mark_all_cpus_started();
+
+    #[cfg(feature = "watchdog")]
+    watchdog::init_primary();
+
+    init_setup::init_cb();
+    finish_allocator_init();
+    log_memory_regions();
+
+    info!("Primary CPU {} init OK.", cpu_id.as_usize());
+    INITED_CPUS.fetch_add(1, Ordering::Release);
+
+    while !is_init_ok() {
+        core::hint::spin_loop();
+    }
+
+    // Depends on cross-CPU task spawn, so it must run after every secondary CPU
+    // has registered its run queue (the `is_init_ok` barrier above).
+    #[cfg(feature = "vsock_tipc_bridge")]
+    knet::start_vsock_bridge();
+
+    // Spawn PID 1 after all PID-less late initialization has completed.
+    // `enter()` returns after the init task has been published and activated.
+    SystemInitEntry::enter();
+
+    // The late-init thread has finished its job; `task_entry` will exit it.
+}
+
+/// Prepare the PID-less late-init bootstrap thread on the boot CPU.
+///
+/// This task runs all late subsystem initialization, spawns PID 1 init, then
+/// exits. It carries an `Internal` identity, so it consumes no root PID number.
+/// Secondary run queues are not registered at activation time, so the thread
+/// is pinned to the boot CPU via a one-shot CPU mask.
+fn prepare_late_init_on_primary(cpu_id: kcpu_id_map::LogicalCpuId) -> ktask::KtaskRef {
+    let task = ktask::TaskInner::new_pidless_kthread(
+        move || late_init_main(cpu_id),
+        "late_init".into(),
+        kbuild_config::TASK_STACK_SIZE,
+    );
+    let task = ktask::prepare_task(task);
+    task.set_cpumask(ktask::KCpuMask::one_shot_logical(cpu_id));
+    task
 }
 
 fn register_boot_console_runtime_region(boot_info: &boot_info::BootInfo) {
@@ -258,72 +352,23 @@ pub fn rust_main(arg: usize) -> ! {
     khal::final_init(boot_info);
 
     ktask::init_scheduler();
-
-    #[cfg(feature = "smp")]
-    {
-        self::mp::start_secondary_cpus(cpu_id).unwrap_or_else(|err| {
-            panic!(
-                "failed to start secondary CPUs after boot CPU {} init: {err:?}",
-                cpu_id.as_usize()
-            )
-        });
-    }
-
-    kdriver::init_drivers();
-    #[cfg(feature = "char")]
-    ktty::tty::try_handoff_console();
-
-    #[cfg(feature = "display")]
-    fbdevice::fb_init();
-    #[cfg(feature = "input")]
-    inputdev::init_input();
-
-    #[cfg(feature = "fs")]
-    {
-        fs_boot::prepare_namespace();
-        fs_boot::mount_virtual_filesystems();
-    }
-
-    #[cfg(feature = "fs9p")]
-    fs_boot::mount_host_share("/mnt/hostshare");
-
-    #[cfg(feature = "net")]
-    knet::init_network();
-    #[cfg(feature = "vsock")]
-    knet::init_vsock();
-
-    #[cfg(feature = "ipi")]
-    kipi::init();
-
-    #[cfg(feature = "smp")]
-    kipi::tlb::mark_all_cpus_started();
-
     info!("Initialize interrupt handlers...");
     init_interrupt();
 
-    #[cfg(feature = "watchdog")]
-    watchdog::init_primary();
+    // PID 0 is the scheduler-internal boot task. Activate a single PID-less
+    // late-init bootstrap thread (Internal identity, no root PID) that brings
+    // up late subsystems and then spawns PID 1 init. Pinning it to the boot CPU
+    // keeps it independent of secondary run queues, which are not registered
+    // yet.
+    let late_init = prepare_late_init_on_primary(cpu_id);
+    ktask::activate_task(&late_init);
+    info!("Started late-init bootstrap thread.");
 
-    init_setup::init_cb();
-    finish_allocator_init();
-    log_memory_regions();
-
-    info!("Primary CPU {} init OK.", cpu_id.as_usize());
-    INITED_CPUS.fetch_add(1, Ordering::Release);
-
-    while !is_init_ok() {
-        core::hint::spin_loop();
-    }
-
-    #[cfg(feature = "vsock_tipc_bridge")]
-    knet::start_vsock_bridge();
-
-    // SAFETY: The linker exported `main` as the final application entry, and
-    // runtime initialization above has established the execution environment it
-    // expects before control is transferred.
-    unsafe { main() };
-
-    ktask::exit(0);
+    // The boot task is PID 0 and remains outside the ordinary PID namespace.
+    // Once the late-init thread is runnable it has no further initialization
+    // role.
+    ktask::future::block_on(core::future::pending::<()>());
+    unreachable!("PID 0 boot task must remain parked");
 }
 
 #[kiface::provide]

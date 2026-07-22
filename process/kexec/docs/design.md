@@ -53,12 +53,10 @@ ExecRequest
        -> open and pin executable kvfs::VfsFile
        -> build BinPrm
 
-load_user_app()
-  -> ExecRequest::from_path()
-  -> internal request loader
-
 load_user_app_request()
   -> caller-provided ExecRequest
+       ExecSource::Path    — resolve from a path string (used by PID 1 init)
+       ExecSource::Resolved — reuse an already-resolved Location (used by execve)
   -> ExecRequest::prepare()
   -> ElfLoader::prepare_binprm()
        -> load/cache ELF headers and program headers
@@ -126,11 +124,13 @@ mm/memspace
 
 该阶段不清空或修改目标 `MmSpace`。
 
-`load_user_app()` 保留路径字符串入口，适用于仍以路径字符串发起 exec 的调用方，
-内部也使用 `LookupIntent::Exec`。`load_user_app_request()` 接收完整
-`ExecRequest`，适用于 syscall 层已经完成 `LookupIntent::Exec` namei 策略的入口，
-包括 procfd magic-link、内核初始化路径、后续 `fexecve`/`AT_EMPTY_PATH` 以及其它
-open-executable 来源。
+`load_user_app_request()` 是唯一的装载入口，exec 与 PID 1 初始化路径共用。
+通过 `ExecSource` 区分两种来源：`ExecSource::Path` 由路径字符串经
+`LookupIntent::Exec` 自行解析（PID 1 init 使用），`ExecSource::Resolved`
+复用调用方已完成 namei 的 `Location`，适用于 syscall 层已解析入口，包括
+procfd magic-link、后续 `fexecve`/`AT_EMPTY_PATH` 以及其它 open-executable
+来源。PID 1 在装载前先 `prepare()` 取得 `BinPrm` 元数据，再以
+`ExecSource::Resolved` 喂回 loader，避免二次解析。
 
 对于 `ExecSource::Resolved`，调用方必须同时传入用户显示路径；loader 不重新解释
 procfs 路径字符串，也不单独实现 magic-link 修正。
@@ -176,7 +176,7 @@ procfs 路径字符串，也不单独实现 magic-link 修正。
 ## 并发模型
 
 - `ElfLoader` 内部的 LRU cache 由外部静态 `Mutex` 序列化。
-- 单次 `load_user_app()` / `load_user_app_request()` 对传入 `MmSpace` 做独占修改。
+- 单次 `load_user_app_request()` 对传入 `MmSpace` 做独占修改。
 - 本 crate 不维护跨进程共享的 VMA 或 page-table 状态。
 
 ## 设计决策

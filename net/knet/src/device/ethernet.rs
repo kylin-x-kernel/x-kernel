@@ -55,31 +55,29 @@ impl EthernetDevice {
 
     /// Create a new Ethernet device wrapper.
     pub fn new(name: String, inner: ClassDevice<NetDeviceImpl>, ip: Ipv4Cidr) -> Self {
-        // Capture the IRQ before `inner` moves into `Self`.
-        let irq = inner.irq();
-        let dev = Self {
+        Self {
             name,
             inner,
             neighbors: HashMap::new(),
             ip,
             pending_tx: VecDeque::with_capacity(ETHERNET_MAX_PENDING_PACKETS),
-        };
-
-        if let Some(irq) = irq {
-            let _ = ktask::spawn_with_name(
-                move || {
-                    use core::{future::poll_fn, task::Poll};
-                    ktask::future::block_on(poll_fn(move |cx| {
-                        crate::poll_interfaces();
-                        irq_notify::register_source_waker(irq, NET_RX_IRQ_SOURCE, cx.waker());
-                        crate::poll_interfaces();
-                        Poll::<()>::Pending
-                    }));
-                },
-                "knet-rx".into(),
-            );
         }
-        dev
+    }
+
+    /// Spawn the RX poll task for an initialized network stack.
+    pub(crate) fn spawn_rx_task(irq: usize) {
+        let _ = ktask::spawn_with_name(
+            move || {
+                use core::{future::poll_fn, task::Poll};
+                ktask::future::block_on(poll_fn(move |cx| {
+                    crate::poll_interfaces();
+                    irq_notify::register_source_waker(irq, NET_RX_IRQ_SOURCE, cx.waker());
+                    crate::poll_interfaces();
+                    Poll::<()>::Pending
+                }));
+            },
+            "knet-rx".into(),
+        );
     }
 
     #[inline]

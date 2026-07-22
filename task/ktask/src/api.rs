@@ -225,19 +225,24 @@ pub fn activate_task(task: &KtaskRef) {
     select_run_queue::<NoPreemptIrqSave>(task).add_task(task.clone());
 }
 
-/// Spawns a new kernel thread with the given parameters.
+/// Spawns a PID-less kernel worker thread with the given parameters.
 ///
-/// The new thread receives a Linux-visible TID from the root/default PID
-/// namespace. User threads must not use this helper; they must be created
-/// through the process-domain staged publication path.
+/// The new thread carries an `Internal` identity and therefore allocates no
+/// root PID handle, mirroring FreeBSD's `kthread_add` (which attaches the
+/// thread to the kernel's PID-0 process). This keeps the ordinary PID number
+/// space reserved for user processes and explicitly visible kernel threads.
+/// The thread is otherwise a normal runnable
+/// kernel-context task: it gets time-sliced, may block, and exits normally.
+///
+/// Kernel threads that must own a Linux-visible PID should be built explicitly
+/// with [`TaskInner::new_kthread`].
+/// User threads must not use this helper; they must be created through the
+/// process-domain staged publication path.
 pub fn spawn_raw<F>(f: F, name: String, stack_size: usize) -> KtaskRef
 where
     F: FnOnce() + Send + 'static,
 {
-    spawn_task(
-        TaskInner::new_kthread(f, name, stack_size)
-            .expect("kernel thread identity allocation failed"),
-    )
+    spawn_task(TaskInner::new_pidless_kthread(f, name, stack_size))
 }
 
 /// Spawns a new task with the given name and the default stack size ([`kbuild_config::TASK_STACK_SIZE`]).

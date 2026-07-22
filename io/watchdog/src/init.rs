@@ -131,15 +131,14 @@ pub fn init_softlockup_detection() {
     // Sleep 4s between touches instead of yielding — the softlockup threshold
     // is 20s, so this gives 5 wakeup chances (20s / 4s) before a false positive while
     // keeping the CPU truly idle when there is no other work.
-    let watchdog_task = TaskInner::new_kthread(
+    let watchdog_task = TaskInner::new_pidless_kthread(
         move || loop {
             crate::touch_softlockup(khal::time::monotonic_time_nanos());
             ktask::sleep(core::time::Duration::from_secs(4));
         },
         "watchdog".into(),
         kbuild_config::TASK_STACK_SIZE,
-    )
-    .expect("watchdog thread identity allocation failed");
+    );
 
     // Bind watchdog task to the local CPU.
     watchdog_task.set_cpumask(KCpuMask::one_shot(this_cpu_id().as_usize()));

@@ -18,6 +18,13 @@ mod runtime;
 #[cfg(feature = "unittest")]
 mod unittest_simple;
 
+#[kiface::provide]
+impl kruntime::SystemInitEntry {
+    fn enter() {
+        kernel_main()
+    }
+}
+
 #[cfg(feature = "unittest")]
 fn unittest_crate_filter() -> Option<&'static str> {
     match option_env!("UNITTEST_CRATE") {
@@ -84,8 +91,7 @@ fn print_boot_info() {
 }
 
 #[cfg(not(feature = "unittest"))]
-#[unsafe(no_mangle)]
-fn main() {
+fn kernel_main() {
     use alloc::{borrow::ToOwned, vec::Vec};
 
     print_boot_info();
@@ -111,24 +117,28 @@ fn main() {
         .collect::<Vec<_>>();
     let envs = [];
 
-    let exit_code = posix_process::run_init_process(&args, &envs, ksyscall::dispatch_irq_syscall);
-    info!("Init process exited with code: {exit_code:?}");
-
-    let namespace = kvfs::MntNamespace::initial().expect("mount namespace must be initialized");
-    kvfs::sync_filesystems().expect("Failed to flush mounted filesystems");
-    let root = namespace.visible_root_path();
-    namespace
-        .detach_tree(&root)
-        .expect("Failed to unmount all filesystems");
-    root.sync_filesystem().expect("Failed to flush rootfs");
-
-    info!("Init process finished, powering off...");
-    khal::power::shutdown();
+    // Spawn PID 1 as a fresh user task and return. This runs on the PID-less
+    // late-init bootstrap thread, which is not transformed into init.
+    posix_process::spawn_init_process(&args, &envs, ksyscall::dispatch_irq_syscall, || {
+        if let Err(err) = kvfs::sync_filesystems() {
+            warn!("sync filesystems after init exit failed: {err:?}");
+        }
+        if let Ok(namespace) = kvfs::MntNamespace::initial() {
+            let root = namespace.visible_root_path();
+            if let Err(err) = namespace.detach_tree(&root) {
+                warn!("unmount all filesystems failed: {err:?}");
+            }
+            if let Err(err) = root.sync_filesystem() {
+                warn!("flush rootfs failed: {err:?}");
+            }
+        }
+        info!("Init process finished, powering off...");
+        khal::power::shutdown();
+    });
 }
 
 #[cfg(feature = "unittest")]
-#[unsafe(no_mangle)]
-fn main() {
+fn kernel_main() {
     use alloc::{sync::Arc, vec::Vec};
     use core::sync::atomic::{AtomicBool, Ordering};
 

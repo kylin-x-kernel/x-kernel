@@ -83,6 +83,14 @@ task_tick() → set_preempt_pending   blocked_resched / unblock_task / resched
 这样需要额外发布步骤的调用方可以先完成 registry 或其它外部可见状态更新，
 再让 task 对调度器可见。用户进程创建路径必须遵守这个顺序。
 
+PID 1 不再有特殊的 bootstrap 转换路径：late-init 线程通过
+`posix-process::spawn_init_process` 构造一个全新的 `User` 身份任务，runtime 在
+`new_user()` 构造时一次性就绪。`UserRuntimeSlot` 因此简化为构造时填充的不可变容器
+（`ready()` 建造，`get()` 只读），不再有 `EMPTY -> INSTALLING -> READY` 状态机或
+事后 `install_user_runtime()` 补装。页表由调度器在首次 switch-in 时通过
+`switch_page_table_root` 自动激活，无需 `activate_current_user_page_table` 这类
+"运行中任务热切页表"的特例接口。
+
 ## 核心流程
 
 ### 1) 初始化流程
@@ -219,10 +227,11 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
 
 `UserTaskRuntime` 是 `ktask` 的用户运行时接口。其 scheduler hook 可在关闭抢占的切换上下文
 调用，因此实现不得阻塞、递归调度或依赖普通的 current-process 上下文。`TaskIdentity::User`
-将 `PidHandle` 与非可选 `Box<dyn UserTaskRuntime>` 放在同一分支；
-`TaskInner::new_user(..., user_runtime)` 返回后不存在没有 runtime 的用户 task。内核 task 可以不带
-runtime。需要用户执行上下文的 unittest 通过正常的 `TaskInner::new_user` 构造并启动独立用户
-task；测试完成后由调用方等待该 task 退出，不再向 non-user task 临时注入 runtime。
+将 `PidHandle` 与 `UserRuntimeSlot` 放在同一分支；任何用户 task（包括 PID 1 init）都由
+`TaskInner::new_user(..., user_runtime)` 在构造时一次性填充 runtime，不存在事后补装路径。
+内核 task（`KernelThread` / `Internal`）不带 runtime。需要用户执行上下文
+的 unittest 通过正常的 `TaskInner::new_user` 构造并启动独立用户 task；测试完成后由调用方等待
+该 task 退出，不再向 non-user task 临时注入 runtime。
 
 调度算法默认由 Kconfig 选择（默认 EEVDF）。
 

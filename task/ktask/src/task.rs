@@ -41,7 +41,7 @@ enum TaskIdentity {
     },
     User {
         task_number: Arc<kidentity::PidHandle>,
-        user_runtime: Box<dyn UserTaskRuntime>,
+        user_runtime: UserRuntimeSlot,
     },
 }
 
@@ -66,7 +66,7 @@ impl TaskIdentity {
 
     fn user_runtime(&self) -> Option<&dyn UserTaskRuntime> {
         match self {
-            Self::User { user_runtime, .. } => Some(user_runtime.as_ref()),
+            Self::User { user_runtime, .. } => user_runtime.get(),
             Self::Idle | Self::Internal | Self::KernelThread { .. } => None,
         }
     }
@@ -109,6 +109,42 @@ pub trait UserTaskRuntime: Send + Sync + Any {
     /// Returns this runtime as [`Any`] for process-domain type recovery.
     fn as_any(&self) -> &dyn Any;
 }
+
+/// Holds the user runtime attached to a `User`-identity task.
+///
+/// A user task always carries its runtime from construction (see
+/// [`TaskInner::new_user`]); there is no longer an empty state that gets filled
+/// in later, so this is effectively an immutable, single-shot container.
+struct UserRuntimeSlot {
+    value: UnsafeCell<Option<Box<dyn UserTaskRuntime>>>,
+}
+
+impl UserRuntimeSlot {
+    fn ready(user_runtime: Box<dyn UserTaskRuntime>) -> Self {
+        Self {
+            value: UnsafeCell::new(Some(user_runtime)),
+        }
+    }
+
+    fn get(&self) -> Option<&dyn UserTaskRuntime> {
+        // SAFETY: this type does not establish synchronization on its own. Its
+        // soundness relies on the surrounding invariant that a `UserRuntimeSlot`
+        // is populated by `ready()` before the owning `TaskInner` is shared, and
+        // that sharing happens via `Arc<TaskInner>` publication — the `Arc`
+        // atomic ref-count store provides the happens-before edge that lets
+        // readers on other threads observe the value written here. Once
+        // published the runtime is never replaced, so the returned shared
+        // reference remains valid for the task's lifetime.
+        unsafe { (&*self.value.get()).as_deref() }
+    }
+}
+
+// SAFETY: the runtime is set once before the task is shared and is never
+// mutated afterwards; readers only observe it through shared references.
+unsafe impl Send for UserRuntimeSlot {}
+// SAFETY: see `Send` above — the runtime is immutable after construction and
+// only shared references are exposed, so concurrent access is sound.
+unsafe impl Sync for UserRuntimeSlot {}
 
 // How many held locks we track per task (debug only).
 #[cfg(feature = "snapshot")]
@@ -269,6 +305,27 @@ impl TaskInner {
         Self::new_with_identity(entry, name, stack_size, TaskIdentity::Internal)
     }
 
+    /// Creates a PID-less kernel thread.
+    ///
+    /// Unlike [`Self::new_kthread`], this task carries an `Internal` identity and
+    /// therefore does **not** allocate a root PID handle — it mirrors FreeBSD's
+    /// `kthread_add`, which attaches a kernel worker to the kernel's PID-0
+    /// process rather than giving it its own PID. This keeps the ordinary PID
+    /// number space reserved for user processes and explicitly visible kernel
+    /// threads.
+    ///
+    /// Use this for ordinary kernel worker threads (RX/TX pollers, deferred
+    /// handlers, lazy initializers) and for the single boot-time thread that
+    /// runs late subsystem initialization. The thread is otherwise a normal
+    /// runnable kernel-context task: it gets time-sliced, may block, and exits
+    /// normally when its work is done.
+    pub fn new_pidless_kthread<F>(entry: F, name: String, stack_size: usize) -> Self
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        Self::new_internal(entry, name, stack_size)
+    }
+
     /// Creates a Linux-visible kernel thread in the root/default PID namespace.
     ///
     /// This constructor is for `ktask`-owned kernel-thread creation paths.
@@ -293,7 +350,7 @@ impl TaskInner {
     /// Callers must allocate the thread identity in the correct PID namespace
     /// before constructing the task, so process/thread-group/publication state
     /// can be built around the same handle before the task becomes runnable.
-    /// The runtime is installed as the task extension during construction;
+    /// The runtime is installed during construction;
     /// a user task can therefore never be observed without its runtime.
     pub fn new_user<F>(
         entry: F,
@@ -311,7 +368,7 @@ impl TaskInner {
             stack_size,
             TaskIdentity::User {
                 task_number,
-                user_runtime,
+                user_runtime: UserRuntimeSlot::ready(user_runtime),
             },
         )
     }

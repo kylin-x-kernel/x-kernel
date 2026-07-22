@@ -9,88 +9,164 @@ use alloc::{
     sync::Arc,
 };
 
-use fs_context::{copy_init_fs_struct, init_fs};
+use fs_context::copy_init_fs_struct;
+use kcpu_id_map::KCpuMaskExt;
 use kcred::initial_cred;
-use kexec::load_user_app;
+use kexec::{ExecRequest, load_user_app_request};
 use khal::uspace::UserContext;
-use kidentity::allocate_root_pid_handle;
-use kprocess::{Process, UserThreadRuntimeAction, build_process_thread, start_user_task};
+use kprocess::{UserThreadRuntimeAction, build_process_thread, publish_user_task};
 use ksync::Mutex;
 use ktty::tty::N_TTY;
-use kvfs::{Filename, LookupFlags, LookupIntent, Permission};
 use posix_fs::file::add_stdio;
 
-use crate::new_user_task;
+use crate::runtime::run_user_thread_loop;
 
-/// Create, start, and wait for the initial user process.
-pub fn run_init_process(
+/// Spawns the initial user program as a fresh PID 1 user task.
+///
+/// This allocates the PID 1 root handle (it must be the first root PID
+/// allocation in the system, which is guaranteed by running this from the
+/// PID-less late-init bootstrap thread), builds a complete process and thread
+/// runtime around it, and activates a new user task pinned to the current CPU.
+/// The task enters user space on its own kernel stack through the normal
+/// scheduler switch-in path, the same one fork uses.
+///
+/// Unlike the old in-place "transform current into init" model, this does **not**
+/// touch the caller: it follows the FreeBSD-style "the bootstrap thread forks
+/// init" model. The caller is expected to be a kernel thread (typically the
+/// late-init bootstrap thread) and remains free to continue or exit after the
+/// spawn.
+///
+/// `after_init_exit` runs on the spawned init task after its user loop exits and
+/// is expected to perform system shutdown or another non-returning terminal
+/// action.
+///
+/// # Panics
+///
+/// Panics if the allocated PID is not 1, if init process construction,
+/// executable loading, publication, terminal binding, or stdio setup fails, or
+/// if the spawned process does not register as the global init.
+pub fn spawn_init_process(
     args: &[String],
     envs: &[String],
     dispatch_syscall: impl FnMut(&mut UserContext) -> UserThreadRuntimeAction + Send + 'static,
-) -> i32 {
+    after_init_exit: impl FnOnce() + Send + 'static,
+) {
+    // PID 1: must be the first root PID allocation in the system. The late-init
+    // bootstrap thread holds an `Internal` identity and allocates none, so this
+    // call naturally receives root_nr 1.
+    let pid_handle =
+        kidentity::allocate_root_pid_handle().expect("failed to allocate init PID handle");
+    assert_eq!(pid_handle.root_nr(), 1, "init must be the first root PID");
+
     let mut uspace =
         memspace::MmSpace::new_user_empty().expect("Failed to create user address space");
 
-    let fs_guard = init_fs();
-    let fs = fs_guard.lock();
     let cred = initial_cred();
-    let loc = Filename::new(args[0].as_str())
-        .lookup_at(
-            fs.root(),
-            fs.pwd(),
-            LookupIntent::Exec,
-            LookupFlags::follow(),
-            &cred,
-        )
-        .expect("Failed to resolve executable path");
-    loc.permission(Permission::MAY_EXEC, &cred)
-        .expect("Init executable is not executable");
-    let path = loc
+    // Resolve the executable through the shared `ExecRequest` path so that the
+    // metadata (basename / absolute path) and the actual load come from one and
+    // the same source. The caller is a kernel thread without a user runtime, so
+    // `current_fs_context()` falls back to the global `INIT_FS`.
+    let init_path = args
+        .first()
+        .expect("init spawn requires a non-empty args vector with the exe path");
+    let binprm = ExecRequest::from_path(
+        init_path.clone(),
+        args.to_vec(),
+        envs.to_vec(),
+        cred.clone(),
+    )
+    .prepare()
+    .unwrap_or_else(|e| panic!("Failed to resolve init executable: {e}"));
+    let name = binprm.location().name().to_string();
+    let path = binprm
+        .location()
         .absolute_path()
-        .expect("Failed to get executable absolute path");
-    let name = loc.name();
-    drop(fs);
+        .map(|p| p.to_string())
+        .unwrap_or_else(|_| init_path.clone());
 
-    let (entry_vaddr, ustack_top) = load_user_app(&mut uspace, None, args, envs, cred.clone())
-        .unwrap_or_else(|e| panic!("Failed to load user app: {}", e));
+    // Load the image through the same loader entry point used by exec, reusing
+    // the resolved location (and the args/envs already cloned into `binprm`) to
+    // avoid a redundant lookup and a second full copy of args/envs.
+    let (entry_vaddr, ustack_top) = load_user_app_request(
+        &mut uspace,
+        ExecRequest::from_resolved(
+            binprm.location().clone(),
+            binprm.args().to_vec(),
+            binprm.envs().to_vec(),
+            cred.clone(),
+        ),
+    )
+    .unwrap_or_else(|e| panic!("Failed to load init image: {e}"));
 
     let uctx = UserContext::new(entry_vaddr.into(), ustack_top, 0);
     let page_table_root = uspace.page_table_hw_root();
 
-    let task_number = allocate_root_pid_handle().expect("Failed to allocate init PID");
-    let process = Process::new_init_with_task_number(task_number.clone());
     let fs_context = copy_init_fs_struct();
+    let process = kprocess::Process::new_init_with_task_number(pid_handle.clone());
+    assert!(
+        process.is_init(),
+        "spawned init process must register as INIT_PROC"
+    );
     let thread = build_process_thread(
         process.clone(),
-        task_number.clone(),
-        path.to_string(),
+        pid_handle.clone(),
+        path,
         Arc::new(args.to_vec()),
         Arc::new(Mutex::new(uspace)),
         fs_context,
         Arc::default(),
         cred,
     );
-    let mut task = new_user_task(&name, uctx, 0, task_number, thread, dispatch_syscall);
-    task.ctx_mut().set_page_table_root(page_table_root);
 
     N_TTY.bind_to(&process).expect("Failed to bind ntty");
+    // `bind_to` only establishes the controlling-terminal relationship (per
+    // POSIX TIOCSCTTY); the foreground process group is a separate concern, so
+    // set it explicitly here so init becomes the foreground group.
+    N_TTY
+        .set_foreground(&process.group())
+        .expect("Failed to set init as foreground process group");
 
     {
-        let fs_struct = process
+        let fs_context_ref = process
             .fs_context()
-            .expect("init process must expose filesystem context");
-        let fs_struct = fs_struct.lock();
-        let resources = process
-            .resources()
-            .expect("init process must expose resources");
-        add_stdio(&mut resources.fd_table().write(), &fs_struct).expect("Failed to add stdio");
+            .expect("init process must have a live fs context");
+        let fs_context = fs_context_ref.lock();
+        add_stdio(
+            &mut process
+                .resources()
+                .expect("init process must have live resources")
+                .fd_table()
+                .write(),
+            &fs_context,
+        )
+        .expect("Failed to add stdio");
     }
-    let task = start_user_task(task);
 
-    // TODO: wait for all processes to finish
-    let exit_code = task.join();
-    if let Err(err) = kvfs::sync_filesystems() {
-        warn!("sync filesystems after init exit failed: {err:?}");
-    }
-    exit_code
+    // Build a fresh user task carrying the runtime from construction (no
+    // in-place install). The entry closure runs the user loop on the spawned
+    // task's own kernel stack, then performs the post-init shutdown.
+    let entry = move || {
+        run_user_thread_loop(uctx, 0, dispatch_syscall);
+        after_init_exit();
+        ktask::exit(0);
+    };
+    let mut task = ktask::TaskInner::new_user(
+        entry,
+        name,
+        kbuild_config::TASK_STACK_SIZE,
+        pid_handle,
+        thread,
+    );
+    // Seed the saved context with init's page-table root; the scheduler writes
+    // it to the hardware register on first switch-in, same as fork does.
+    task.ctx_mut().set_page_table_root(page_table_root);
+    // Pin to the current (boot) CPU, matching the rest of the boot tasks; this
+    // keeps the spawn independent of whether secondary run queues exist yet.
+    let boot_cpu = khal::percpu::this_cpu_id();
+    task.set_cpumask(ktask::KCpuMask::one_shot_logical(boot_cpu));
+
+    // Publish and activate through the standard fork path (caller-agnostic).
+    publish_user_task(task)
+        .commit(|_| Ok(()))
+        .expect("Failed to publish init process");
 }

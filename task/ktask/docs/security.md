@@ -72,7 +72,19 @@ ksched algorithms / karch context switch / allocator
 2. 当前任务指针在每 CPU 上始终指向有效任务对象；
 3. 栈释放发生在任务不再运行且无引用后（由 gc task + `Arc::try_unwrap` 保证）。
 
-### 4) `timers.rs` / `task_registry.rs` / `snapshot`
+### 4) `task.rs`：用户 runtime 的不可变 slot
+
+`UserRuntimeSlot` 使用 `UnsafeCell<Option<Box<dyn UserTaskRuntime>>>` 保存 runtime。runtime 在
+`TaskInner::new_user()` 构造时一次性写入，之后不再修改，因此 slot 不再需要发布状态机
+（旧的 `EMPTY -> INSTALLING -> READY` 协议与 `install_user_runtime()` 已移除）。
+
+**不变量**：
+
+1. `UserRuntimeSlot::ready()` 是唯一的构造路径，runtime 在 task 共享前就已填入；
+2. task 发布（`publish_user_task` / `activate_task`）提供 readers 的 happens-before 边界；
+3. runtime 在 task 生命周期内不可变，因此 `get()` 返回的共享引用稳定有效。
+
+### 5) `timers.rs` / `task_registry.rs` / `snapshot`
 
 - `timers` 使用 per-CPU callback 容器原始引用；
 - `task_registry` 使用 `Box::into_raw/from_raw` 存放弱引用槽位；
@@ -93,7 +105,9 @@ ksched algorithms / karch context switch / allocator
 5. **退出回收隔离**：退出任务先进入 `EXITED_TASKS`，由每 CPU `gc_task` 延迟回收，避免切换路径直接 drop。
 6. **idle 任务特判**：idle 不入普通调度实体路径，不参与 `task_tick`，避免算法元数据污染。
 7. **发布先于 runnable**：需要额外注册对象图的调用方必须先 `prepare_task()`，
-   完成外部 publish 后再 `activate_task()`，避免 task 先运行、后补注册。
+   完成外部 publish 后再 `activate_task()`，避免 task 先运行、后补注册。PID 1 同样
+   遵守此约束：它由 `new_user()` 一次性构造完整 runtime，再经 `publish_user_task()`
+   发布后才激活，不存在 runnable 后补装 extension 的路径。
 
 ## 威胁分析
 

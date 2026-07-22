@@ -29,123 +29,130 @@ use posix_ipc::SHM_MANAGER;
 /// Create a new user task that runs in user space and handles traps.
 pub fn new_user_task(
     name: &str,
-    mut uctx: UserContext,
+    uctx: UserContext,
     set_child_tid: usize,
     task_number: Arc<PidHandle>,
     thread: Box<Thread>,
-    mut dispatch_syscall: impl FnMut(&mut UserContext) -> UserThreadRuntimeAction + Send + 'static,
+    dispatch_syscall: impl FnMut(&mut UserContext) -> UserThreadRuntimeAction + Send + 'static,
 ) -> TaskInner {
     TaskInner::new_user(
         move || {
-            let curr = current();
-            let thr = current_user_thread();
-
-            if let Some(tid) = (set_child_tid as *mut Pid).check_non_null() {
-                tid.write_vm(thr.tid()).ok();
-            }
-
-            info!("Enter user space: ip={:#x}, sp={:#x}", uctx.ip(), uctx.sp());
-
-            while !thr.is_exiting() {
-                let reason = uctx.run();
-                let mut runtime_action = UserThreadRuntimeAction::Continue;
-
-                thr.set_cpu_state(CpuTimeState::Kernel);
-
-                match reason {
-                    ReturnReason::Syscall => {
-                        uctx.save_syscall_args();
-                        runtime_action = dispatch_syscall(&mut uctx);
-                    }
-                    ReturnReason::PageFault(addr, flags) => {
-                        let address_space = thr
-                            .process()
-                            .address_space()
-                            .expect("current user thread must still expose process address space");
-                        let outcome = address_space.lock().handle_page_fault(addr, flags);
-                        if outcome.is_retryable() {
-                            thr.set_cpu_state(CpuTimeState::User);
-                            ktask::check_preempt_pending();
-                            continue;
-                        } else if !outcome.is_resolved() {
-                            let signo = match outcome {
-                                PageFaultOutcome::BusError => Signo::SIGBUS,
-                                _ => Signo::SIGSEGV,
-                            };
-                            let exe_path = thr.process().exe_path().unwrap_or_default();
-                            warn!(
-                                "segfault at {:#x} ip {:#x} sp {:#x} in {} pid={} outcome={:?} \
-                                 flags={:?}",
-                                addr,
-                                uctx.ip(),
-                                uctx.sp(),
-                                exe_path,
-                                thr.pid(),
-                                outcome,
-                                flags,
-                            );
-                            raise_signal_fatal(SignalInfo::new_kernel(signo))
-                                .expect("Failed to send fatal fault signal");
-                        }
-                    }
-                    ReturnReason::Interrupt => {
-                        ktask::check_preempt_pending();
-                    }
-                    #[allow(unused_labels)]
-                    ReturnReason::Exception(exc_info) => 'exc: {
-                        let signo = match exc_info.kind() {
-                            ExceptionKind::Misaligned => {
-                                #[cfg(target_arch = "loongarch64")]
-                                // SAFETY: This path only runs for a LoongArch misaligned-access
-                                // exception reported by `uctx.run()`. The user context still
-                                // contains the faulting instruction state, which is exactly the
-                                // precondition required by `emulate_unaligned`.
-                                if unsafe { uctx.emulate_unaligned() }.is_ok() {
-                                    break 'exc;
-                                }
-                                Signo::SIGBUS
-                            }
-                            ExceptionKind::Breakpoint => Signo::SIGTRAP,
-                            ExceptionKind::IllegalInstruction => Signo::SIGILL,
-                            _ => Signo::SIGTRAP,
-                        };
-                        raise_signal_fatal(SignalInfo::new_kernel(signo))
-                            .expect("Failed to send SIGTRAP");
-                    }
-                    reason => {
-                        warn!("Unexpected return reason: {reason:?}");
-                        raise_signal_fatal(SignalInfo::new_kernel(Signo::SIGSEGV))
-                            .expect("Failed to send SIGSEGV");
-                    }
-                }
-
-                // Normally we check for pending signals after every trap return. The
-                // exception is `rt_sigreturn`: it restores the pre-signal context, so
-                // running `check_signals` here would see the same pending signal that the
-                // handler just finished processing and immediately re-enter the handler,
-                // looping forever. Skipping this check once is safe because the restored
-                // context already has the correct signal state.
-                if runtime_action != UserThreadRuntimeAction::SkipSignalCheckOnce {
-                    let mut handled_signal = false;
-                    while check_signals(&thr, &mut uctx, None) {
-                        handled_signal = true;
-                    }
-                    if !handled_signal {
-                        restart_syscall_without_signal(&mut uctx);
-                    }
-                }
-
-                thr.set_cpu_state(CpuTimeState::User);
-                poll_cpu_timers();
-                curr.clear_interrupt();
-                ktask::check_preempt_pending();
-            }
+            run_user_thread_loop(uctx, set_child_tid, dispatch_syscall);
         },
         name.into(),
         KERNEL_STACK_SIZE,
         task_number,
         thread,
     )
+}
+
+/// Runs the current task as a user thread until the process exits.
+pub(crate) fn run_user_thread_loop(
+    mut uctx: UserContext,
+    set_child_tid: usize,
+    mut dispatch_syscall: impl FnMut(&mut UserContext) -> UserThreadRuntimeAction,
+) {
+    let curr = current();
+    let thr = current_user_thread();
+
+    if let Some(tid) = (set_child_tid as *mut Pid).check_non_null() {
+        tid.write_vm(thr.tid()).ok();
+    }
+
+    info!("Enter user space: ip={:#x}, sp={:#x}", uctx.ip(), uctx.sp());
+
+    while !thr.is_exiting() {
+        let reason = uctx.run();
+        let mut runtime_action = UserThreadRuntimeAction::Continue;
+
+        thr.set_cpu_state(CpuTimeState::Kernel);
+
+        match reason {
+            ReturnReason::Syscall => {
+                uctx.save_syscall_args();
+                runtime_action = dispatch_syscall(&mut uctx);
+            }
+            ReturnReason::PageFault(addr, flags) => {
+                let address_space = thr
+                    .process()
+                    .address_space()
+                    .expect("current user thread must still expose process address space");
+                let outcome = address_space.lock().handle_page_fault(addr, flags);
+                if outcome.is_retryable() {
+                    thr.set_cpu_state(CpuTimeState::User);
+                    ktask::check_preempt_pending();
+                    continue;
+                } else if !outcome.is_resolved() {
+                    let signo = match outcome {
+                        PageFaultOutcome::BusError => Signo::SIGBUS,
+                        _ => Signo::SIGSEGV,
+                    };
+                    let exe_path = thr.process().exe_path().unwrap_or_default();
+                    warn!(
+                        "segfault at {:#x} ip {:#x} sp {:#x} in {} pid={} outcome={:?} flags={:?}",
+                        addr,
+                        uctx.ip(),
+                        uctx.sp(),
+                        exe_path,
+                        thr.pid(),
+                        outcome,
+                        flags,
+                    );
+                    raise_signal_fatal(SignalInfo::new_kernel(signo))
+                        .expect("Failed to send fatal fault signal");
+                }
+            }
+            ReturnReason::Interrupt => {
+                ktask::check_preempt_pending();
+            }
+            #[allow(unused_labels)]
+            ReturnReason::Exception(exc_info) => 'exc: {
+                let signo = match exc_info.kind() {
+                    ExceptionKind::Misaligned => {
+                        #[cfg(target_arch = "loongarch64")]
+                        // SAFETY: This path only runs for a LoongArch misaligned-access
+                        // exception reported by `uctx.run()`. The user context still
+                        // contains the faulting instruction state, which is exactly the
+                        // precondition required by `emulate_unaligned`.
+                        if unsafe { uctx.emulate_unaligned() }.is_ok() {
+                            break 'exc;
+                        }
+                        Signo::SIGBUS
+                    }
+                    ExceptionKind::Breakpoint => Signo::SIGTRAP,
+                    ExceptionKind::IllegalInstruction => Signo::SIGILL,
+                    _ => Signo::SIGTRAP,
+                };
+                raise_signal_fatal(SignalInfo::new_kernel(signo)).expect("Failed to send SIGTRAP");
+            }
+            reason => {
+                warn!("Unexpected return reason: {reason:?}");
+                raise_signal_fatal(SignalInfo::new_kernel(Signo::SIGSEGV))
+                    .expect("Failed to send SIGSEGV");
+            }
+        }
+
+        // Normally we check for pending signals after every trap return. The
+        // exception is `rt_sigreturn`: it restores the pre-signal context, so
+        // running `check_signals` here would see the same pending signal that the
+        // handler just finished processing and immediately re-enter the handler,
+        // looping forever. Skipping this check once is safe because the restored
+        // context already has the correct signal state.
+        if runtime_action != UserThreadRuntimeAction::SkipSignalCheckOnce {
+            let mut handled_signal = false;
+            while check_signals(&thr, &mut uctx, None) {
+                handled_signal = true;
+            }
+            if !handled_signal {
+                restart_syscall_without_signal(&mut uctx);
+            }
+        }
+
+        thr.set_cpu_state(CpuTimeState::User);
+        poll_cpu_timers();
+        curr.clear_interrupt();
+        ktask::check_preempt_pending();
+    }
 }
 
 /// Robust futex list node for robust mutexes.
