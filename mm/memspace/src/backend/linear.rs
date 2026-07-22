@@ -12,7 +12,7 @@ use memaddr::{MemoryAddr, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange};
 
 use crate::{
     FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmBackingInfo, VmBackingKind,
-    backend::{BackendOps, FaultCompletion, FaultCompletionResult, map_paging_err},
+    backend::{BackendOps, FaultCompletion, FaultCompletionResult, map_paging_err, pages_in},
     vma::VmRuntimeOps,
 };
 
@@ -73,9 +73,12 @@ impl BackendOps for LinearBackend {
     fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> KResult {
         let pa_range = PhysAddrRange::from_start_size(self.pa(range.start), range.size());
         debug!("Linear::unmap: {range:?} -> {pa_range:?}");
-        pgtbl
-            .unmap_region(range.start, range.size())
-            .map_err(map_paging_err)?;
+        for vaddr in pages_in(range, PageSize::Size4K)? {
+            match pgtbl.unmap(vaddr) {
+                Ok(_) | Err(PagingError::NotMapped) => {}
+                Err(err) => return Err(map_paging_err(err)),
+            }
+        }
         Ok(())
     }
 

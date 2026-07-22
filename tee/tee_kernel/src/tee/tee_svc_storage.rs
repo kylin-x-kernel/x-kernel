@@ -1608,20 +1608,18 @@ pub mod tests_tee_svc_storage {
         }
     }
 
-    fn cleanup_test_storage_root() {
+    fn list_test_storage_entries(path: &str) -> Vec<(String, NodeType)> {
         let cred = kprocess::current_cred();
         let fs_struct = kprocess::current_fs_context();
         let fs = fs_struct.lock();
-        let Ok(dir) = Filename::new(CFG_TEE_FS_PARENT_PATH).lookup_at(
+        let Ok(dir) = Filename::new(path).lookup_at(
             fs.root(),
             fs.pwd(),
             LookupIntent::Open,
             LookupFlags::follow(),
             &cred,
         ) else {
-            drop(fs);
-            let _ = FileVariant::create_dir(CFG_TEE_FS_PARENT_PATH);
-            return;
+            return Vec::new();
         };
 
         let mut entries = Vec::new();
@@ -1645,16 +1643,35 @@ pub mod tests_tee_svc_storage {
             }
             offset = next_offset;
         }
-        drop(fs);
+        entries
+    }
 
-        for (name, node_type) in entries {
-            let path = alloc::format!("{CFG_TEE_FS_PARENT_PATH}{name}");
+    fn join_test_storage_path(parent: &str, name: &str) -> String {
+        if parent.ends_with('/') {
+            alloc::format!("{parent}{name}")
+        } else {
+            alloc::format!("{parent}/{name}")
+        }
+    }
+
+    fn cleanup_test_storage_contents(path: &str) {
+        for (name, node_type) in list_test_storage_entries(path) {
+            let path = join_test_storage_path(path, &name);
             if node_type == NodeType::Directory {
-                let _ = FileVariant::remove_dir(&path);
+                remove_test_storage_tree(&path);
             } else {
                 let _ = FileVariant::remove_file(&path);
             }
         }
+    }
+
+    fn remove_test_storage_tree(path: &str) {
+        cleanup_test_storage_contents(path);
+        let _ = FileVariant::remove_dir(path);
+    }
+
+    fn cleanup_test_storage_root() {
+        cleanup_test_storage_contents(CFG_TEE_FS_PARENT_PATH);
         let _ = FileVariant::create_dir(CFG_TEE_FS_PARENT_PATH);
     }
 

@@ -1665,7 +1665,7 @@ mod tests {
     use alloc::sync::Arc;
 
     use khal::{
-        paging::{MappingFlags, PageSize},
+        paging::{MappingFlags, PageSize, PagingError},
         trap::PageFaultFlags,
     };
     use ksync::Mutex;
@@ -2092,5 +2092,30 @@ mod tests {
             pinned_mm_id, original_mm_id,
             "pin should still keep the mm object observable"
         );
+    }
+
+    #[def_test]
+    fn clear_tolerates_zapped_linear_mapping() {
+        let start = VirtAddr::from_usize(0x4000);
+        let flags = MappingFlags::READ | MappingFlags::EXECUTE | MappingFlags::USER;
+        let frame =
+            crate::backend::alloc_frame(true, PageSize::Size4K).expect("allocate linear frame");
+        let mut aspace =
+            MmSpace::new_empty_user(start, PAGE_SIZE_4K * 2).expect("allocate test address space");
+
+        aspace
+            .map_linear(start, frame, PAGE_SIZE_4K, flags)
+            .expect("map linear page");
+        assert!(aspace.page_table().query(start).is_ok());
+        aspace
+            .invalidate_present(start, PAGE_SIZE_4K)
+            .expect("zap linear page while retaining VMA metadata");
+        assert_eq!(
+            aspace.page_table().query(start),
+            Err(PagingError::NotMapped)
+        );
+
+        aspace.clear();
+        crate::backend::dealloc_frame(frame, PageSize::Size4K);
     }
 }

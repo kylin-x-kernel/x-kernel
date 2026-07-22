@@ -207,8 +207,9 @@ fn main() {
         let failed = Arc::new(AtomicUsize::new(0));
         let ignored = Arc::new(AtomicUsize::new(0));
 
-        // Flatten to a Vec of &'static TestDescriptor to satisfy 'static bound.
-        let flat: Vec<&'static unittest::TestDescriptor> = grouped
+        // Flatten to owned descriptors so test execution never reads the
+        // writable linker registration section after discovery.
+        let flat: Vec<unittest::TestDescriptor> = grouped
             .iter()
             .flat_map(|(_, tests)| tests.iter().copied())
             .collect();
@@ -225,8 +226,8 @@ fn main() {
         // Serial: explicitly marked serial OR user execution mode.
         // Only Standard-mode tests without serial flag run in parallel.
         let (serial_tests, parallel_tests): (
-            Vec<&'static unittest::TestDescriptor>,
-            Vec<&'static unittest::TestDescriptor>,
+            Vec<unittest::TestDescriptor>,
+            Vec<unittest::TestDescriptor>,
         ) = flat
             .into_iter()
             .partition(|t| t.serial || t.execution_mode != unittest::TestExecutionMode::Standard);
@@ -267,38 +268,57 @@ fn main() {
             }
         }
 
-        // Run parallel tests concurrently
-        let mut tasks: Vec<ktask::KtaskRef> = Vec::with_capacity(parallel_tests.len());
-        for test in parallel_tests {
+        // Run parallel tests on a bounded worker set. Spawning every test at
+        // once makes the runner sensitive to task-lifetime bugs and obscures
+        // the failing descriptor when a worker faults before printing a result.
+        let parallel_tests = Arc::new(parallel_tests);
+        let next_test = Arc::new(AtomicUsize::new(0));
+        let worker_count = core::cmp::min(
+            parallel_tests.len(),
+            core::cmp::max(1, kcpu_id_map::nr_cpus() * 4),
+        );
+        let mut tasks: Vec<ktask::KtaskRef> = Vec::with_capacity(worker_count);
+
+        for _ in 0..worker_count {
+            let tests = parallel_tests.clone();
+            let next = next_test.clone();
             let p = passed.clone();
             let f = failed.clone();
             let ig = ignored.clone();
-            let module_name = test.module;
-            let test_name = test.name();
 
             tasks.push(task_spawn(move || {
-                let result = test.run();
-                match result {
-                    TestResult::Ok => {
-                        p.fetch_add(1, Ordering::Relaxed);
-                        unittest::print_unittest_message(format_args!(
-                            "      {}::{} ... ok",
-                            module_name, test_name
-                        ));
+                loop {
+                    let test_idx = next.fetch_add(1, Ordering::Relaxed);
+                    if test_idx >= tests.len() {
+                        break;
                     }
-                    TestResult::Failed => {
-                        f.fetch_add(1, Ordering::Relaxed);
-                        unittest::print_unittest_error(format_args!(
-                            "      {}::{} ... FAILED",
-                            module_name, test_name
-                        ));
-                    }
-                    TestResult::Ignored => {
-                        ig.fetch_add(1, Ordering::Relaxed);
-                        unittest::print_unittest_message(format_args!(
-                            "      {}::{} ... ignored",
-                            module_name, test_name
-                        ));
+
+                    let test = &tests[test_idx];
+                    let module_name = test.module;
+                    let test_name = test.name();
+                    let result = test.run();
+                    match result {
+                        TestResult::Ok => {
+                            p.fetch_add(1, Ordering::Relaxed);
+                            unittest::print_unittest_message(format_args!(
+                                "      {}::{} ... ok",
+                                module_name, test_name
+                            ));
+                        }
+                        TestResult::Failed => {
+                            f.fetch_add(1, Ordering::Relaxed);
+                            unittest::print_unittest_error(format_args!(
+                                "      {}::{} ... FAILED",
+                                module_name, test_name
+                            ));
+                        }
+                        TestResult::Ignored => {
+                            ig.fetch_add(1, Ordering::Relaxed);
+                            unittest::print_unittest_message(format_args!(
+                                "      {}::{} ... ignored",
+                                module_name, test_name
+                            ));
+                        }
                     }
                 }
             }));

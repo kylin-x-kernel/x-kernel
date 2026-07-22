@@ -191,6 +191,7 @@ pub trait Testable {
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct TestDescriptor {
+    pub magic: u64,
     pub name: &'static str,
     pub module: &'static str,
     pub test_fn: fn() -> TestResult,
@@ -201,6 +202,10 @@ pub struct TestDescriptor {
 }
 
 impl TestDescriptor {
+    /// Marker for descriptors emitted by `#[def_test]`, encoded as the ASCII
+    /// bytes `XUNITTES` in big-endian hex form.
+    pub const MAGIC: u64 = 0x5855_4e49_5454_4553;
+
     pub const fn new(
         name: &'static str,
         module: &'static str,
@@ -211,6 +216,7 @@ impl TestDescriptor {
         execution_mode: TestExecutionMode,
     ) -> Self {
         Self {
+            magic: Self::MAGIC,
             name,
             module,
             test_fn,

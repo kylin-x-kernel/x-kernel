@@ -59,7 +59,7 @@ fn try_lock_works() {
     assert_eq!(c.as_ref().map(|r| **r), Some(42));
 }
 
-#[def_test]
+#[def_test(serial)]
 fn guard_state_restored() {
     let m = TestSpinIrq::new(());
     let _a = m.lock();
@@ -68,7 +68,7 @@ fn guard_state_restored() {
     assert_eq!(IRQ_CNT.load(Ordering::Relaxed), 0);
 }
 
-#[def_test]
+#[def_test(serial)]
 fn rwlock_allows_multiple_readers() {
     let lock = TestRwSpinIrq::new(42);
     let first = lock.read();
@@ -83,7 +83,7 @@ fn rwlock_allows_multiple_readers() {
     assert_eq!(IRQ_CNT.load(Ordering::Relaxed), 0);
 }
 
-#[def_test]
+#[def_test(serial)]
 fn rwlock_writer_excludes_readers_and_writers() {
     let lock = TestRwSpinIrq::new(1);
     let mut writer = lock.write();
@@ -98,7 +98,7 @@ fn rwlock_writer_excludes_readers_and_writers() {
     assert_eq!(IRQ_CNT.load(Ordering::Relaxed), 0);
 }
 
-#[def_test]
+#[def_test(serial)]
 fn rwlock_try_write_fails_when_reader_is_active() {
     let lock = TestRwSpinIrq::new(());
     let reader = lock.read();
@@ -111,7 +111,7 @@ fn rwlock_try_write_fails_when_reader_is_active() {
     assert_eq!(IRQ_CNT.load(Ordering::Relaxed), 0);
 }
 
-#[def_test]
+#[def_test(serial)]
 #[cfg(feature = "smp")]
 fn failed_try_lock_restores_state() {
     let m = TestSpinIrq::new(());
