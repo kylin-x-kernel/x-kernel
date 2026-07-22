@@ -17,8 +17,11 @@
 /.cache/
 /code-stats/
 
-# Cargo lock
-Cargo.lock
+# Cargo lock — the workspace root lockfile (./Cargo.lock) is tracked for
+# reproducible builds; keep ignoring nested lockfiles of excluded std
+# tooling crates (each is an independent cargo project).
+/xtask/**/Cargo.lock
+/tee_apps/**/Cargo.lock
 
 # Python
 __pycache__
