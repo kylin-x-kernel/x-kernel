@@ -6,9 +6,18 @@
 
 extern crate self as unittest;
 
-#[macro_use]
-extern crate log;
 extern crate alloc;
+
+/// Prints one line through the registered unittest printer.
+#[macro_export]
+macro_rules! ktest_println {
+    () => {
+        $crate::__print_unittest(format_args!(""))
+    };
+    ($($arg:tt)+) => {
+        $crate::__print_unittest(format_args!($($arg)+))
+    };
+}
 
 pub mod runner;
 pub mod test_framework;
@@ -17,14 +26,12 @@ pub mod test_framework;
 pub use macros::{def_test, mod_test};
 // Re-export the test runner function
 pub use runner::{collect_tests, test_run, test_run_filtered, test_run_ok, test_run_ok_filtered};
-// Re-export hidden helper functions for assertion macros
-// These are used internally by the assertion macros and should not be called directly
 #[doc(hidden)]
-pub use test_framework::{__log_assert_eq_failure, __log_assert_failure, __log_assert_ne_failure};
+pub use test_framework::__print_unittest;
 // Re-export commonly used types
 pub use test_framework::{
-    TestDescriptor, TestExecutionMode, TestRunner, TestStats, Testable, print_unittest_error,
-    print_unittest_message, print_unittest_status, register_user_test_executor,
+    TestDescriptor, TestExecutionMode, TestRunner, TestStats, Testable, UnittestPrintFn,
+    register_user_test_executor, set_printer,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]

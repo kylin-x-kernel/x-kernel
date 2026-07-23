@@ -40,6 +40,11 @@ fn unittest_crate_filter() -> Option<&'static str> {
     }
 }
 
+#[cfg(feature = "unittest")]
+fn print_unittest(args: core::fmt::Arguments<'_>) {
+    kprintln!("{}", args);
+}
+
 #[cfg(not(feature = "unittest"))]
 pub const CMDLINE: &[&str] = &["/bin/sh", "-c", include_str!("init.sh")];
 
@@ -148,6 +153,7 @@ fn kernel_main() {
 
     runtime::init_runtime();
     runtime::register_unittest_runtime();
+    unittest::set_printer(print_unittest);
 
     {
         let fs_struct = fs_context::init_fs().lock().clone_for_process();
@@ -186,32 +192,23 @@ fn kernel_main() {
 
         let crate_filter = unittest_crate_filter();
         if let Some(crate_filter) = crate_filter {
-            unittest::print_unittest_message(format_args!(
-                "Running unit tests with crate filter: {}",
-                crate_filter
-            ));
+            unittest::ktest_println!("Running unit tests with crate filter: {}", crate_filter);
         }
 
         let grouped = unittest::collect_tests(crate_filter);
 
         if grouped.is_empty() {
-            unittest::print_unittest_message(format_args!("No tests found!"));
-            unittest::print_unittest_status(false);
+            unittest::ktest_println!("No tests found!");
+            unittest::ktest_println!("=== UNITTEST_STATUS: TESTS_FAILED ===");
             finished_clone.store(true, Ordering::Release);
             return;
         }
 
         let total_tests: usize = grouped.values().map(|v| v.len()).sum();
-        unittest::print_unittest_message(format_args!("================================"));
-        unittest::print_unittest_message(format_args!(
-            "Starting unit tests [unittest] (parallel)..."
-        ));
-        unittest::print_unittest_message(format_args!(
-            "  {} module(s), {} test(s)",
-            grouped.len(),
-            total_tests
-        ));
-        unittest::print_unittest_message(format_args!("================================"));
+        unittest::ktest_println!("================================");
+        unittest::ktest_println!("Starting unit tests [unittest] (parallel)...");
+        unittest::ktest_println!("  {} module(s), {} test(s)", grouped.len(), total_tests);
+        unittest::ktest_println!("================================");
 
         let passed = Arc::new(AtomicUsize::new(0));
         let failed = Arc::new(AtomicUsize::new(0));
@@ -225,11 +222,7 @@ fn kernel_main() {
             .collect();
 
         for (module, tests) in &grouped {
-            unittest::print_unittest_message(format_args!(
-                "  [{}] ({} tests)",
-                module,
-                tests.len()
-            ));
+            unittest::ktest_println!("  [{}] ({} tests)", module, tests.len());
         }
 
         // Split into serial and parallel tests.
@@ -241,13 +234,11 @@ fn kernel_main() {
         ) = flat
             .into_iter()
             .partition(|t| t.serial || t.execution_mode != unittest::TestExecutionMode::Standard);
+        let mut failed_serial_tests = Vec::new();
 
         // Run serial tests sequentially first
         if !serial_tests.is_empty() {
-            unittest::print_unittest_message(format_args!(
-                "  Running {} serial test(s)...",
-                serial_tests.len()
-            ));
+            unittest::ktest_println!("  Running {} serial test(s)...", serial_tests.len());
             for test in &serial_tests {
                 let module_name = test.module;
                 let test_name = test.name();
@@ -255,24 +246,20 @@ fn kernel_main() {
                 match result {
                     TestResult::Ok => {
                         passed.fetch_add(1, Ordering::Relaxed);
-                        unittest::print_unittest_message(format_args!(
-                            "      {}::{} ... ok",
-                            module_name, test_name
-                        ));
+                        unittest::ktest_println!("      {}::{} ... ok", module_name, test_name);
                     }
                     TestResult::Failed => {
                         failed.fetch_add(1, Ordering::Relaxed);
-                        unittest::print_unittest_error(format_args!(
-                            "      {}::{} ... FAILED",
-                            module_name, test_name
-                        ));
+                        failed_serial_tests.push(*test);
+                        unittest::ktest_println!("      {}::{} ... FAILED", module_name, test_name);
                     }
                     TestResult::Ignored => {
                         ignored.fetch_add(1, Ordering::Relaxed);
-                        unittest::print_unittest_message(format_args!(
+                        unittest::ktest_println!(
                             "      {}::{} ... ignored",
-                            module_name, test_name
-                        ));
+                            module_name,
+                            test_name
+                        );
                     }
                 }
             }
@@ -282,6 +269,11 @@ fn kernel_main() {
         // once makes the runner sensitive to task-lifetime bugs and obscures
         // the failing descriptor when a worker faults before printing a result.
         let parallel_tests = Arc::new(parallel_tests);
+        let parallel_test_failed = Arc::new(
+            (0..parallel_tests.len())
+                .map(|_| AtomicBool::new(false))
+                .collect::<Vec<_>>(),
+        );
         let next_test = Arc::new(AtomicUsize::new(0));
         let worker_count = core::cmp::min(
             parallel_tests.len(),
@@ -295,6 +287,7 @@ fn kernel_main() {
             let p = passed.clone();
             let f = failed.clone();
             let ig = ignored.clone();
+            let test_failed = parallel_test_failed.clone();
 
             tasks.push(task_spawn(move || {
                 loop {
@@ -310,24 +303,24 @@ fn kernel_main() {
                     match result {
                         TestResult::Ok => {
                             p.fetch_add(1, Ordering::Relaxed);
-                            unittest::print_unittest_message(format_args!(
-                                "      {}::{} ... ok",
-                                module_name, test_name
-                            ));
+                            unittest::ktest_println!("      {}::{} ... ok", module_name, test_name);
                         }
                         TestResult::Failed => {
                             f.fetch_add(1, Ordering::Relaxed);
-                            unittest::print_unittest_error(format_args!(
+                            test_failed[test_idx].store(true, Ordering::Release);
+                            unittest::ktest_println!(
                                 "      {}::{} ... FAILED",
-                                module_name, test_name
-                            ));
+                                module_name,
+                                test_name
+                            );
                         }
                         TestResult::Ignored => {
                             ig.fetch_add(1, Ordering::Relaxed);
-                            unittest::print_unittest_message(format_args!(
+                            unittest::ktest_println!(
                                 "      {}::{} ... ignored",
-                                module_name, test_name
-                            ));
+                                module_name,
+                                test_name
+                            );
                         }
                     }
                 }
@@ -343,14 +336,31 @@ fn kernel_main() {
         let ig = ignored.load(Ordering::Relaxed);
         let total = p + f + ig;
 
-        unittest::print_unittest_message(format_args!(""));
-        unittest::print_unittest_message(format_args!(
+        unittest::ktest_println!();
+        unittest::ktest_println!(
             "  >>> Test results: {} passed, {} failed, {} ignored, {} total",
-            p, f, ig, total
-        ));
+            p,
+            f,
+            ig,
+            total
+        );
 
         let test_passed = f == 0;
-        unittest::print_unittest_status(test_passed);
+        if test_passed {
+            unittest::ktest_println!("=== UNITTEST_STATUS: ALL_TESTS_PASSED ===");
+        } else {
+            unittest::ktest_println!("=== UNITTEST_STATUS: TESTS_FAILED ===");
+            unittest::ktest_println!("=== FAILED_TESTS: {} ===", f);
+            for test in &failed_serial_tests {
+                unittest::ktest_println!("  {}::{}", test.module, test.name());
+            }
+            for (test_idx, test) in parallel_tests.iter().enumerate() {
+                if parallel_test_failed[test_idx].load(Ordering::Acquire) {
+                    unittest::ktest_println!("  {}::{}", test.module, test.name());
+                }
+            }
+            unittest::ktest_println!("=== FAILED_TESTS_END ===");
+        }
 
         finished_clone.store(true, Ordering::Release);
     });

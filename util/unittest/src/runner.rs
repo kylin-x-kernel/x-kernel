@@ -15,7 +15,6 @@ use core::{
 
 use crate::test_framework::{
     TEST_FAILED_FLAG, TestDescriptor, TestExecutionMode, TestRunner, TestStats,
-    print_unittest_error, print_unittest_message,
 };
 
 // External symbols defined in the linker script
@@ -192,7 +191,7 @@ fn select_tests_by_crate(tests: &[TestDescriptor], crate_filters: &[&str]) -> Ve
 ///
 /// This function discovers all tests marked with `#[unittest]` and runs them.
 /// Tests are grouped by module and run together.
-/// It prints test results and statistics to the log.
+/// It prints test results and statistics through `ktest_println!`.
 ///
 /// # Returns
 /// `TestStats` containing the results of all tests
@@ -219,9 +218,9 @@ pub fn test_run_filtered(crate_filter: Option<&str>) -> TestStats {
     let tests = get_tests();
 
     if tests.is_empty() {
-        print_unittest_message(format_args!("================================"));
-        print_unittest_message(format_args!("No tests found!"));
-        print_unittest_message(format_args!("================================"));
+        crate::ktest_println!("================================");
+        crate::ktest_println!("No tests found!");
+        crate::ktest_println!("================================");
         return TestStats::new();
     }
 
@@ -229,24 +228,18 @@ pub fn test_run_filtered(crate_filter: Option<&str>) -> TestStats {
     let selected_tests = select_tests_by_crate(&tests, &crate_filters);
 
     if selected_tests.is_empty() {
-        let log_no_tests = |msg: &str| {
-            if crate_filters.is_empty() {
-                print_unittest_message(format_args!("{}", msg));
-            } else {
-                print_unittest_error(format_args!("{}", msg));
-            }
-        };
+        let print_no_tests = |msg: &str| crate::ktest_println!("{}", msg);
 
-        log_no_tests("================================");
+        print_no_tests("================================");
         if crate_filters.is_empty() {
-            log_no_tests("No tests found!");
+            print_no_tests("No tests found!");
         } else {
-            print_unittest_error(format_args!(
+            crate::ktest_println!(
                 "No tests found for crate filter: {}",
                 crate_filters.join(",")
-            ));
+            );
         }
-        log_no_tests("================================");
+        print_no_tests("================================");
         return TestStats::new();
     }
 

@@ -9,51 +9,28 @@
 //! This module implements a custom unit test framework for Rust code.
 //! The framework supports manual test case registration and provides basic assertion functionality.
 
-use alloc::{collections::BTreeMap, format, vec::Vec};
+use alloc::{collections::BTreeMap, vec::Vec};
 use core::{
     cell::UnsafeCell,
     fmt::{Arguments, Write},
     hint::spin_loop,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use super::TestResult;
 
-const UNITTEST_LOG_TARGET: &str = "unittest";
+/// Function used to print a formatted unit-test message.
+///
+/// The callback must consume `args` synchronously. It must not call back into
+/// `ktest_println!`, which would recurse through the registered printer.
+pub type UnittestPrintFn = for<'a> fn(Arguments<'a>);
 
-fn log_unittest(level: log::Level, args: Arguments<'_>) {
-    log!(target: UNITTEST_LOG_TARGET, level, "{}", args);
-}
+static UNITTEST_PRINTER: AtomicUsize = AtomicUsize::new(0);
 
-fn force_log_unittest(level: log::Level, args: Arguments<'_>) {
-    let record = log::Record::builder()
-        .args(args)
-        .level(level)
-        .target(UNITTEST_LOG_TARGET)
-        .module_path_static(Some(UNITTEST_LOG_TARGET))
-        .build();
-    log::logger().log(&record);
-}
-
-pub fn print_unittest_message(args: Arguments<'_>) {
-    log_unittest(log::Level::Warn, args);
-}
-
-pub fn print_unittest_error(args: Arguments<'_>) {
-    log_unittest(log::Level::Error, args);
-}
-
-pub fn print_unittest_status(passed: bool) {
-    if passed {
-        force_log_unittest(
-            log::Level::Error,
-            format_args!("=== UNITTEST_STATUS: ALL_TESTS_PASSED ==="),
-        );
-    } else {
-        force_log_unittest(
-            log::Level::Error,
-            format_args!("=== UNITTEST_STATUS: TESTS_FAILED ==="),
-        );
+#[doc(hidden)]
+pub fn __print_unittest(args: Arguments<'_>) {
+    if let Some(printer_fn) = unittest_printer() {
+        printer_fn(args);
     }
 }
 
@@ -160,6 +137,28 @@ unsafe impl<T: Copy> Sync for TestExecutorSlot<T> {}
 
 static USER_TEST_EXECUTOR: TestExecutorSlot<UserTestExecutor> = TestExecutorSlot::new();
 
+/// Registers the callback used for all unittest framework output.
+///
+/// The callback may be invoked concurrently by parallel test workers. Calls
+/// made before a printer is registered produce no output, so callers should
+/// register it before starting tests.
+pub fn set_printer(printer_fn: UnittestPrintFn) {
+    UNITTEST_PRINTER.store(printer_fn as usize, Ordering::Release);
+}
+
+fn unittest_printer() -> Option<UnittestPrintFn> {
+    let printer_addr = UNITTEST_PRINTER.load(Ordering::Acquire);
+    if printer_addr == 0 {
+        return None;
+    }
+
+    // SAFETY: `UNITTEST_PRINTER` is private and is only written by
+    // `set_printer`, which stores a valid `UnittestPrintFn` address. Zero is
+    // handled above, and all supported targets represent function pointers in
+    // one `usize`.
+    Some(unsafe { core::mem::transmute::<usize, UnittestPrintFn>(printer_addr) })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TestExecutionMode {
@@ -242,12 +241,10 @@ impl Testable for TestDescriptor {
             TestExecutionMode::Standard => (self.test_fn)(),
             TestExecutionMode::User => user_test_executor().map_or_else(
                 || {
-                    log_unittest(
-                        log::Level::Error,
-                        format_args!(
-                            "test {}::{} failed: user test executor is not registered",
-                            self.module, self.name
-                        ),
+                    crate::ktest_println!(
+                        "test {}::{} failed: user test executor is not registered",
+                        self.module,
+                        self.name
                     );
                     TestResult::Failed
                 },
@@ -338,7 +335,7 @@ impl TestRunner {
             test.name()
         )
         .ok();
-        self.print_message(self.output.as_str());
+        crate::ktest_println!("{}", self.output.as_str());
 
         // Run the test
         let result = test.run();
@@ -374,10 +371,7 @@ impl TestRunner {
                 .ok();
             }
         }
-        match result {
-            TestResult::Failed => self.print_error(self.output.as_str()),
-            _ => self.print_message(self.output.as_str()),
-        }
+        crate::ktest_println!("{}", self.output.as_str());
 
         // Update statistics
         self.stats.add_result(result);
@@ -388,8 +382,8 @@ impl TestRunner {
     pub fn run_tests_descriptors(&mut self, name: &str, tests: &[TestDescriptor]) {
         self.stats = TestStats::new();
 
-        self.print_message("--------------------------------");
-        self.print_message(format!("Starting unit tests [{}]...", name).as_str());
+        crate::ktest_println!("--------------------------------");
+        crate::ktest_println!("Starting unit tests [{}]...", name);
 
         for test in tests {
             self.run_test(test);
@@ -405,7 +399,7 @@ impl TestRunner {
     }
 
     /// Run tests grouped by module.
-    /// Passing tests run silently; only failures are logged before the final summary.
+    /// Passing tests run silently; only failures are printed before the final summary.
     pub fn run_tests_grouped(
         &mut self,
         _name: &str,
@@ -429,16 +423,16 @@ impl TestRunner {
             }
 
             saw_failure = true;
-            self.print_message("");
-            self.print_message(format!("  [{}] ({} tests)", module, tests.len()).as_str());
-            self.print_message("  --------------------------------");
+            crate::ktest_println!();
+            crate::ktest_println!("  [{}] ({} tests)", module, tests.len());
+            crate::ktest_println!("  --------------------------------");
             for (test, result) in module_failures {
                 self.print_failed_test(test, result);
             }
         }
 
         if saw_failure {
-            self.print_message("");
+            crate::ktest_println!();
         }
         self.print_final_stats();
 
@@ -450,17 +444,17 @@ impl TestRunner {
     fn print_failed_test(&mut self, test: &TestDescriptor, result: TestResult) {
         self.output.clear();
         write!(self.output, "    {}", test.name()).ok();
-        self.print_message(self.output.as_str());
+        crate::ktest_println!("{}", self.output.as_str());
 
         self.output.clear();
         match result {
             TestResult::Failed => {
                 write!(self.output, "      => FAILED").ok();
-                self.print_error(self.output.as_str());
+                crate::ktest_println!("{}", self.output.as_str());
             }
             TestResult::Ignored => {
                 write!(self.output, "      => IGNORED").ok();
-                self.print_message(self.output.as_str());
+                crate::ktest_println!("{}", self.output.as_str());
             }
             TestResult::Ok => {}
         }
@@ -472,7 +466,7 @@ impl TestRunner {
 
         // Print test name only
         write!(self.output, "    {}", test.name()).ok();
-        self.print_message(self.output.as_str());
+        crate::ktest_println!("{}", self.output.as_str());
 
         // Run the test
         let result = test.run();
@@ -496,10 +490,7 @@ impl TestRunner {
                 write!(self.output, "      {} ... ignored", test.name()).ok();
             }
         }
-        match result {
-            TestResult::Failed => self.print_error(self.output.as_str()),
-            _ => self.print_message(self.output.as_str()),
-        }
+        crate::ktest_println!("{}", self.output.as_str());
 
         // Update statistics
         self.stats.add_result(result);
@@ -515,25 +506,15 @@ impl TestRunner {
             self.stats.passed, self.stats.failed, self.stats.ignored, self.stats.total
         )
         .ok();
-        if self.stats.failed > 0 {
-            self.print_summary(log::Level::Error, self.output.as_str());
-            self.print_summary(log::Level::Error, "  >>> Unit tests FAILED");
-        } else {
-            self.print_summary(log::Level::Warn, self.output.as_str());
-            self.print_summary(log::Level::Warn, "  >>> Unit tests PASSED");
-        }
-    }
-
-    fn print_message(&self, msg: &str) {
-        log_unittest(log::Level::Warn, format_args!("{}", msg));
-    }
-
-    fn print_error(&self, msg: &str) {
-        log_unittest(log::Level::Error, format_args!("{}", msg));
-    }
-
-    fn print_summary(&self, level: log::Level, msg: &str) {
-        force_log_unittest(level, format_args!("{}", msg));
+        crate::ktest_println!("{}", self.output.as_str());
+        crate::ktest_println!(
+            "  >>> Unit tests {}",
+            if self.stats.failed > 0 {
+                "FAILED"
+            } else {
+                "PASSED"
+            }
+        );
     }
 
     pub fn get_stats(&self) -> TestStats {
@@ -547,53 +528,6 @@ impl Default for TestRunner {
     }
 }
 
-// Helper functions for assertion macros (hidden from docs)
-// These allow assertions to work without the caller needing to depend on `log`
-
-#[doc(hidden)]
-pub fn __log_assert_eq_failure<T: core::fmt::Debug, U: core::fmt::Debug>(
-    file: &str,
-    line: u32,
-    left_expr: &str,
-    left_val: &T,
-    right_expr: &str,
-    right_val: &U,
-) {
-    log_unittest(
-        log::Level::Error,
-        format_args!(
-            "assert_eq! failed at {}:{}: {} ({:x?}) == {} ({:x?})",
-            file, line, left_expr, left_val, right_expr, right_val
-        ),
-    );
-}
-
-#[doc(hidden)]
-pub fn __log_assert_ne_failure<T: core::fmt::Debug, U: core::fmt::Debug>(
-    file: &str,
-    line: u32,
-    left_expr: &str,
-    left_val: &T,
-    right_expr: &str,
-    right_val: &U,
-) {
-    log_unittest(
-        log::Level::Error,
-        format_args!(
-            "assert_ne! failed at {}:{}: {} ({:x?}) != {} ({:x?})",
-            file, line, left_expr, left_val, right_expr, right_val
-        ),
-    );
-}
-
-#[doc(hidden)]
-pub fn __log_assert_failure(file: &str, line: u32, cond_expr: &str) {
-    log_unittest(
-        log::Level::Error,
-        format_args!("assert! failed at {}:{}: {}", file, line, cond_expr),
-    );
-}
-
 // Basic assertion macros
 #[macro_export]
 macro_rules! assert_eq {
@@ -601,13 +535,14 @@ macro_rules! assert_eq {
         let left_val = &$left;
         let right_val = &$right;
         if left_val != right_val {
-            $crate::__log_assert_eq_failure(
+            $crate::ktest_println!(
+                "assert_eq! failed at {}:{}: {} ({:x?}) == {} ({:x?})",
                 file!(),
                 line!(),
                 stringify!($left),
                 left_val,
                 stringify!($right),
-                right_val,
+                right_val
             );
             return $crate::TestResult::Failed;
         }
@@ -616,13 +551,14 @@ macro_rules! assert_eq {
         let left_val = &$left;
         let right_val = &$right;
         if left_val != right_val {
-            $crate::__log_assert_eq_failure(
+            $crate::ktest_println!(
+                "assert_eq! failed at {}:{}: {} ({:x?}) == {} ({:x?})",
                 file!(),
                 line!(),
                 stringify!($left),
                 left_val,
                 stringify!($right),
-                right_val,
+                right_val
             );
             return $crate::TestResult::Failed;
         }
@@ -635,13 +571,14 @@ macro_rules! assert_ne {
         let left_val = &$left;
         let right_val = &$right;
         if left_val == right_val {
-            $crate::__log_assert_ne_failure(
+            $crate::ktest_println!(
+                "assert_ne! failed at {}:{}: {} ({:x?}) != {} ({:x?})",
                 file!(),
                 line!(),
                 stringify!($left),
                 left_val,
                 stringify!($right),
-                right_val,
+                right_val
             );
             return $crate::TestResult::Failed;
         }
@@ -650,13 +587,14 @@ macro_rules! assert_ne {
         let left_val = &$left;
         let right_val = &$right;
         if left_val == right_val {
-            $crate::__log_assert_ne_failure(
+            $crate::ktest_println!(
+                "assert_ne! failed at {}:{}: {} ({:x?}) != {} ({:x?})",
                 file!(),
                 line!(),
                 stringify!($left),
                 left_val,
                 stringify!($right),
-                right_val,
+                right_val
             );
             return $crate::TestResult::Failed;
         }
@@ -667,13 +605,23 @@ macro_rules! assert_ne {
 macro_rules! assert {
     ($cond:expr) => {
         if !$cond {
-            $crate::__log_assert_failure(file!(), line!(), stringify!($cond));
+            $crate::ktest_println!(
+                "assert! failed at {}:{}: {}",
+                file!(),
+                line!(),
+                stringify!($cond)
+            );
             return $crate::TestResult::Failed;
         }
     };
     ($cond:expr, $($arg:tt)*) => {
         if !$cond {
-            $crate::__log_assert_failure(file!(), line!(), stringify!($cond));
+            $crate::ktest_println!(
+                "assert! failed at {}:{}: {}",
+                file!(),
+                line!(),
+                stringify!($cond)
+            );
             return $crate::TestResult::Failed;
         }
     };
