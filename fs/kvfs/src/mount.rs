@@ -79,6 +79,14 @@ impl VfsMount {
             mnt_flags: mount.mnt.mnt_flags,
         }
     }
+
+    fn bind_from_path(source: &Path) -> Self {
+        Self {
+            mnt_root: source.dentry.clone(),
+            mnt_sb: source.super_block().clone(),
+            mnt_flags: source.mnt.flags(),
+        }
+    }
 }
 
 static INIT_MNT_NS: Once<Arc<MntNamespace>> = Once::new();
@@ -208,6 +216,13 @@ impl MntNamespace {
         Ok(mount)
     }
 
+    /// Creates a non-recursive bind mount of `source` at `mountpoint`.
+    pub fn attach_bind(&self, source: &Path, mountpoint: &Path) -> VfsResult<Arc<Mount>> {
+        let mount = mountpoint.mount_bind(source)?;
+        self.mounts.lock().insert(mount.mount_id(), mount.clone());
+        Ok(mount)
+    }
+
     /// Unmounts one visible mount from this namespace.
     pub fn detach(&self, path: &Path) -> VfsResult<()> {
         let removed = path.mount().clone();
@@ -253,6 +268,7 @@ pub struct Mount {
     /// the old mount is stored here so it can be restored on unmount.
     covers: Mutex<Option<Arc<Self>>>,
     mnt_devname: Option<String>,
+    is_bound: bool,
 }
 
 impl Mount {
@@ -278,6 +294,7 @@ impl Mount {
             mnt_id: MOUNT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             covers: Mutex::default(),
             mnt_devname: devname.map(|s| s.to_string()),
+            is_bound: false,
         })
     }
 
@@ -292,6 +309,20 @@ impl Mount {
             mnt_id: MOUNT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             covers: Mutex::default(),
             mnt_devname: source.mnt_devname.clone(),
+            is_bound: source.is_bound,
+        })
+    }
+
+    fn new_bind(source: &Path, location_in_parent: Path) -> Arc<Self> {
+        Arc::new(Self {
+            mnt: VfsMount::bind_from_path(source),
+            mnt_parent: Some(Arc::downgrade(&location_in_parent.mnt)),
+            mnt_mountpoint: Some(location_in_parent.dentry.clone()),
+            mnt_mounts: Mutex::default(),
+            mnt_id: MOUNT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
+            covers: Mutex::default(),
+            mnt_devname: source.mnt.mnt_devname.clone(),
+            is_bound: true,
         })
     }
 
@@ -550,7 +581,7 @@ impl Path {
 
     /// Returns the parent location, if any.
     pub fn parent(&self) -> Option<Self> {
-        if !self.dentry.is_root_of_mount() {
+        if !self.dentry.ptr_eq(&self.mnt.mnt.mnt_root) {
             return Some(self.with_dentry(self.dentry.parent()?));
         }
         self.mnt.location()?.parent()
@@ -894,11 +925,28 @@ impl Path {
         Ok(result)
     }
 
+    fn mount_bind(&self, source: &Path) -> VfsResult<Arc<Mount>> {
+        self.check_writable_mount()?;
+        if source.is_dir() != self.is_dir() {
+            // Describe the *source* object's type so the error is unambiguous;
+            // Linux `mount(2)` returns `ENOTDIR` for a dir/non-dir mismatch.
+            return Err(if source.is_dir() {
+                VfsError::IsADirectory
+            } else {
+                VfsError::NotADirectory
+            });
+        }
+        let inode = self.inode();
+        let _namespace_guard = inode.lock_namespace_exclusive();
+        let result = Mount::new_bind(source, self.clone());
+        if let Some(old) = self.mnt.install_child_mount(&self.dentry, &result) {
+            *result.covers.lock() = Some(old);
+        }
+        Ok(result)
+    }
+
     /// Unmount the filesystem rooted at this path.
     fn unmount(&self) -> VfsResult<()> {
-        if !self.dentry.is_root_of_mount() {
-            return Err(VfsError::InvalidInput);
-        }
         if !self.dentry.ptr_eq(&self.mnt.mnt.mnt_root) {
             return Err(VfsError::InvalidInput);
         }
@@ -925,13 +973,18 @@ impl Path {
                 }
             }
         }
-        self.dentry.as_dir()?.forget();
+        if !self.mnt.is_bound {
+            self.dentry.as_dir()?.forget();
+        }
         Ok(())
     }
 
     /// Recursively unmount this filesystem and all children.
     fn unmount_tree(&self) -> VfsResult<()> {
-        if !self.dentry.is_root_of_mount() {
+        // Match `unmount()`: a bind mount's root dentry need not be the root of
+        // the source filesystem, so test against this mount's own root rather
+        // than `is_root_of_mount()` (which would reject non-root bind sources).
+        if !self.dentry.ptr_eq(&self.mnt.mnt.mnt_root) {
             return Err(VfsError::InvalidInput);
         }
         let remaining: Vec<_> = self
@@ -1461,6 +1514,29 @@ mod tests {
 
         child_mount.root_path().unmount().unwrap();
         assert_eq!(root_mount.children().len(), 0);
+    }
+
+    #[def_test]
+    fn test_bind_mount_unmount_preserves_source_dentry() {
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
+        let root = namespace.root_path();
+        let mountpoint = lookup_child_in_mount(&root, "mnt").unwrap();
+
+        let bind = namespace.attach_bind(&root, &mountpoint).unwrap();
+        assert!(bind.is_bound);
+        assert_eq!(bind.root_path().inode_key(), root.inode_key());
+        assert!(Arc::ptr_eq(
+            lookup_no_follow(&root, "mnt").unwrap().mount(),
+            &bind
+        ));
+
+        namespace.detach(&bind.root_path()).unwrap();
+        assert_eq!(
+            lookup_no_follow(&root, "mnt").unwrap().node_type(),
+            NodeType::Directory
+        );
+        assert_eq!(root.node_type(), NodeType::Directory);
     }
 
     #[def_test]

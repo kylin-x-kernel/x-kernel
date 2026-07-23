@@ -186,6 +186,10 @@ inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `seta
 内核简单文件系统承载 pathname Unix socket；未显式支持动态插入的 simple directory
 保持返回 `EPERM`。
 
+非递归 bind mount 创建新的 `Mount`，共享源 path 的 superblock 与 root dentry，但拥有
+独立 mount ID、父挂载位置和覆盖关系。卸载 bind mount 只移除 topology 节点，不对共享的
+源 dentry 执行 `forget()`；普通 filesystem mount 仍在卸载时释放其独占 mount-root dentry。
+
 ### pathname 与打开文件
 
 `VfsFile` 捕获 open 时使用的 `Arc<Cred>`，对应 Linux `file::f_cred`。path-based
