@@ -85,7 +85,7 @@ core/ksyscall
 | `open` | 将 Linux open 参数交给 `kvfs::Filename`，并把打开结果加入当前进程 fd 表 |
 | `io` | 处理普通、向量、定点和 fd-to-fd 数据传输 syscall |
 | `fd_ops` | 维护 fd 生命周期、复制、`CLOEXEC`、非阻塞标志和部分 `fcntl` 行为 |
-| `dir` | 维护当前目录、根目录、目录创建和 `linux_dirent64` 输出 |
+| `dir` | 维护当前目录、根目录、目录/节点创建和 `linux_dirent64` 输出；`mknodat` 应用 umask，并限制设备节点为特权调用 |
 | `namei` | 处理链接、删除、符号链接和重命名等命名空间变更 |
 | `metadata` | 修改所有者、权限和时间戳 |
 | `mount` | 把 Linux mount flags 映射到 `kvfs::MountFlags`，并分派当前明确支持的 tmpfs/bpffs nodev mount |

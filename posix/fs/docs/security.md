@@ -141,6 +141,7 @@ kfd resources / kvfs / device and pipe implementations
 | T-15 | `ftruncate` 在 UID 改变后错误重做 pathname DAC | fd/VFS | 中 | fd 操作调用 `Path::truncate(cred)` | `VfsFile::truncate()` 只验证 open write mode，再使用 opened-file authority |
 | T-16 | 非 owner 绕过 VFS 直接修改 mode、owner 或时间 | metadata | 高 | syscall 直接调用后端 `setattr` | syscall 只做 ABI 转换，`Path::chown/chmod/set_times` 统一执行 owner、group 和 write authorization |
 | T-17 | 普通用户改变进程 root | chroot | 高 | 只验证目标目录可搜索 | 完成目录 DAC 后额外要求 `euid == 0`，近似 Linux `CAP_SYS_CHROOT` |
+| T-18 | 普通用户通过 `mknodat` 创建设备节点 | namespace / device | 高 | 仅按 mode 创建 special inode | character/block device 要求 privileged credential；其它节点类型仍应用 umask 与 VFS 目录授权 |
 
 影响等级定义：
 

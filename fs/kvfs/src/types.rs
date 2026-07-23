@@ -116,6 +116,17 @@ impl Umode {
         NodeType::from_mode_type(((self.0 & NODE_TYPE_MASK) >> NODE_TYPE_SHIFT) as u8)
     }
 
+    /// Returns whether the file-type field is entirely absent.
+    ///
+    /// A zero `S_IFMT` field is distinct from [`NodeType::Unknown`], which also
+    /// covers illegal type encodings. Creation syscalls such as `mknodat(2)`
+    /// treat an absent type field as a request for a regular file while
+    /// rejecting an illegal encoding, so this predicate lets a caller tell the
+    /// two apart without re-deriving the mask.
+    pub const fn type_field_is_absent(self) -> bool {
+        self.0 & NODE_TYPE_MASK == 0
+    }
+
     /// Returns the permission bits encoded in this mode.
     pub const fn permission(self) -> NodePermission {
         NodePermission::from_bits_truncate(self.0 & PERMISSION_MASK)
@@ -237,7 +248,7 @@ impl Debug for DeviceId {
 
 #[cfg(unittest)]
 mod tests {
-    use unittest::{assert_eq, def_test};
+    use unittest::{assert, assert_eq, def_test};
 
     use super::*;
     use crate::{SuperBlock, VfsError};
@@ -253,6 +264,20 @@ mod tests {
         assert_eq!(NodeType::from(0o14), NodeType::Socket);
         assert_eq!(NodeType::from(0o0), NodeType::Unknown);
         assert_eq!(NodeType::from(0o77), NodeType::Unknown);
+    }
+
+    #[def_test]
+    fn test_umode_type_field_is_absent() {
+        // A zero S_IFMT field is absent regardless of the permission bits.
+        assert!(Umode::from_bits(0).type_field_is_absent());
+        assert!(Umode::from_bits(0o644).type_field_is_absent());
+        assert!(Umode::from_bits(0o7777).type_field_is_absent());
+
+        // Any concrete file type clears the predicate.
+        assert!(!Umode::from_bits(0o100644).type_field_is_absent()); // regular file
+        assert!(!Umode::from_bits(0o040000).type_field_is_absent()); // directory
+        assert!(!Umode::from_bits(0o120000).type_field_is_absent()); // symlink
+        assert!(!Umode::from_bits(0o020000).type_field_is_absent()); // char device
     }
 
     #[def_test]
