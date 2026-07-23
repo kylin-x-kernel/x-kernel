@@ -270,27 +270,26 @@ ifeq ($(ACCEL),)
   endif
 endif
 
-# KVM/HVF acceleration — only when host arch matches target arch.
-ifeq ($(findstring KFEAT_VMM=y,$(CONFIG_VALUES)),KFEAT_VMM=y)
-  HOST_ARCH := $(shell uname -m)
-  ifeq ($(shell uname), Darwin)
-    ifeq ($(filter $(HOST_ARCH),arm64 aarch64),$(HOST_ARCH))
-      ifeq ($(ARCH), aarch64)
-        qemu_args-$(ACCEL) += -cpu host -accel hvf
-      endif
-    else ifeq ($(HOST_ARCH), x86_64)
-      ifeq ($(ARCH), x86_64)
-        qemu_args-$(ACCEL) += -cpu host -accel hvf
-      endif
+# KVM/HVF acceleration — when ACCEL=y and the host arch matches the guest.
+# Independent of KFEAT_VMM (that flag only enables nested virt / VMX exposure).
+HOST_ARCH := $(shell uname -m)
+ifeq ($(shell uname), Darwin)
+  ifeq ($(filter $(HOST_ARCH),arm64 aarch64),$(HOST_ARCH))
+    ifeq ($(ARCH), aarch64)
+      qemu_args-$(ACCEL) += -cpu host -accel hvf
     endif
-  else ifneq ($(wildcard /dev/kvm),)
-    ifeq ($(HOST_ARCH):$(ARCH),x86_64:x86_64)
-      qemu_args-$(ACCEL) += -cpu host -accel kvm
-    else ifeq ($(filter $(HOST_ARCH),arm64 aarch64):$(ARCH),$(HOST_ARCH):aarch64)
-      qemu_args-$(ACCEL) += -cpu host -accel kvm
-    else ifeq ($(HOST_ARCH):$(ARCH),riscv64:riscv64)
-      qemu_args-$(ACCEL) += -cpu host -accel kvm
+  else ifeq ($(HOST_ARCH), x86_64)
+    ifeq ($(ARCH), x86_64)
+      qemu_args-$(ACCEL) += -cpu host -accel hvf
     endif
+  endif
+else ifneq ($(wildcard /dev/kvm),)
+  ifeq ($(HOST_ARCH):$(ARCH),x86_64:x86_64)
+    qemu_args-$(ACCEL) += -cpu host -accel kvm
+  else ifeq ($(filter $(HOST_ARCH),arm64 aarch64):$(ARCH),$(HOST_ARCH):aarch64)
+    qemu_args-$(ACCEL) += -cpu host -accel kvm
+  else ifeq ($(HOST_ARCH):$(ARCH),riscv64:riscv64)
+    qemu_args-$(ACCEL) += -cpu host -accel kvm
   endif
 endif
 

@@ -169,7 +169,7 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
 
 - `future::block_on` 在 `Poll::Pending` 下走 `blocked_resched()`，把当前任务置为 `Blocked`。
 - waker 触发时通过 `select_wake_run_queue(...).unblock_task(..., true)` 将任务恢复为 `Ready`。
-- SMP 下唤醒优先入任务阻塞时的 home CPU（`task.cpu_id()`）；若 cpumask 已不含该 CPU，则回退到普通 `select_run_queue` 轮询选队。
+- SMP 下唤醒优先入任务阻塞时保留的 owner CPU（`task.cpu_id()`）；若 cpumask 已不含该 CPU，则回退到普通 `select_run_queue` 轮询选队。
 - `unblock_task(..., true)` 对本 CPU 设置 `need_resched`；对远端 CPU 在 `ipi + preempt` 可用时请求远端设置 `need_resched`。
 - `WaitQueue` 基于 `event_listener` 封装等待与通知，支持超时与条件等待。
 
@@ -187,6 +187,16 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
 ## SMP 语义
 
 - 每 CPU 一个 `RUN_QUEUE`、`IDLE_TASK`、`EXITED_TASKS`、`WAIT_FOR_EXIT`。
+- `task.cpu_id` 表示 **runqueue ownership**，不是业务路径各自维护的辅助字段：
+  - runnable / running：任务当前归属的 run queue CPU
+  - blocked：保留上一次归属 CPU，供 `select_wake_run_queue` 做 wake affinity
+- 所有 ownership 更新收敛到 `RunQueue` 封装入口，调用方不得直接 `Scheduler::add_task` /
+  `put_prev_task` 或散落调用 `set_cpu_id`：
+  - `publish_task`：新任务首次入队（`spawn` / per-CPU gc）
+  - `enqueue_task`：yield / preempt / unblock / affinity migrate 重新入队
+  - `switch_to_local`：不经 ready 队列、直接 `switch_to` 的本地 helper（如 migration task）
+  - `set_owner_cpu`：仅用于 run queue 尚未建立时的 boot bring-up（main / idle）
+- `switch_to` 在 SMP 下检查 `next_task.cpu_id() == rq.cpu_id`，防止错队列切换。
 - `select_run_queue` 依据任务 `cpumask` 在允许 CPU 集内做轮询选队。
 - `select_wake_run_queue` 用于 wait/future 唤醒路径，优先选择任务阻塞时的 home CPU，避免 waker 继续占用 CPU 导致 wakee 在 waker 核排队。
 - 当前实现无主动负载均衡器；任务跨核迁移主要由 affinity 变化触发。

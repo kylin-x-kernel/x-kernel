@@ -441,9 +441,12 @@ impl TaskInner {
         self.kstack.as_ref().map(|s| s.top())
     }
 
-    /// Returns the CPU ID where the task is running or will run.
+    /// Returns the owner CPU of this task's run queue.
     ///
-    /// Note: the task may not be running on the CPU, it just exists in the run queue.
+    /// While the task is runnable or running, this is the CPU whose run queue
+    /// currently owns the task. While blocked, it retains the last owner CPU
+    /// and is used as the wake-affinity preference by
+    /// [`crate::select_wake_run_queue`].
     #[inline]
     pub fn cpu_id(&self) -> LogicalCpuId {
         LogicalCpuId::new(self.cpu_id.load(Ordering::Acquire) as usize)
@@ -760,7 +763,10 @@ impl TaskInner {
         self.ctx.as_mut_ptr()
     }
 
-    /// Set the CPU ID where the task is running or will run.
+    /// Set the run-queue owner CPU.
+    ///
+    /// Do not call from new ktask paths. Ownership updates go through
+    /// `RunQueue::{publish_task,enqueue_task,switch_to_local,set_owner_cpu}`.
     #[cfg(feature = "smp")]
     #[inline]
     pub(crate) fn set_cpu_id(&self, cpu_id: LogicalCpuId) {

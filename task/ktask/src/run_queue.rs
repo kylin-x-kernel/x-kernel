@@ -409,6 +409,10 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'s
 }
 
 /// Selects a run queue for a task that is becoming runnable from a wakeup.
+///
+/// Prefers the task's owner CPU (`task.cpu_id()`, retained while blocked) when
+/// it is still allowed by the affinity mask; otherwise falls back to
+/// [`select_run_queue`] load-balancing selection.
 #[inline]
 pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'static, G> {
     let irq_state = G::acquire();
@@ -570,7 +574,7 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
         }
         #[cfg(feature = "sched_stat")]
         sched_stat_inc(&sched_stat_cpu(self.inner.cpu_id).add_task);
-        self.inner.scheduler.lock().add_task(task);
+        self.inner.publish_task(task);
     }
 
     /// Unblock one task by inserting it into the run queue.
@@ -655,8 +659,8 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         // but, do not put current task to the scheduler of this run queue.
         curr.set_state(TaskState::Ready);
 
-        // Call `switch_to` to reschedule to the migration task that performs the migration directly.
-        self.inner.switch_to(crate::current(), migration_task);
+        // Migration helper is switched to without enqueue; attach ownership first.
+        self.inner.switch_to_local(crate::current(), migration_task);
     }
 
     /// Preempts the current task and reschedules.
@@ -794,12 +798,64 @@ impl RunQueue {
         // gc task should be pinned to the current CPU.
         gc_task.set_cpumask(KCpuMask::one_shot_logical(cpu_id));
 
-        let mut scheduler = Scheduler::new();
-        scheduler.add_task(gc_task);
-        Self {
+        let mut rq = Self {
             cpu_id,
-            scheduler: SpinRaw::new(scheduler),
-        }
+            scheduler: SpinRaw::new(Scheduler::new()),
+        };
+        // Publish through the ownership-aware entry so secondary-CPU gc tasks
+        // do not keep the default `cpu_id == 0`.
+        rq.publish_task(gc_task);
+        rq
+    }
+
+    /// Sole writer of [`TaskInner::cpu_id`] for run-queue ownership.
+    ///
+    /// Semantics of the ownership field:
+    /// - runnable / running: CPU whose run queue currently owns the task
+    /// - blocked: last owner CPU, used as wake-affinity preference by
+    ///   [`select_wake_run_queue`]
+    ///
+    /// Call sites outside `publish_task` / `enqueue_task` / `switch_to_local`
+    /// are limited to boot bring-up before a run queue exists.
+    #[cfg(feature = "smp")]
+    #[inline]
+    fn set_owner_cpu(task: &TaskInner, cpu_id: LogicalCpuId) {
+        task.set_cpu_id(cpu_id);
+    }
+
+    /// Attach this run queue as the task's owner before publish / enqueue / local switch.
+    #[cfg(feature = "smp")]
+    #[inline]
+    fn attach_owner(&self, task: &KtaskRef) {
+        Self::set_owner_cpu(task, self.cpu_id);
+    }
+
+    /// Publish a newly runnable task onto this run queue's scheduler.
+    ///
+    /// This is the only path that should call `Scheduler::add_task` from ktask.
+    fn publish_task(&mut self, task: KtaskRef) {
+        #[cfg(feature = "smp")]
+        self.attach_owner(&task);
+        self.scheduler.lock().add_task(task);
+    }
+
+    /// Enqueue a ready task onto this run queue (yield / preempt / unblock / migrate).
+    ///
+    /// This is the only path that should call `Scheduler::put_prev_task` from ktask.
+    fn enqueue_task(&mut self, task: KtaskRef, preempt: bool) {
+        #[cfg(feature = "smp")]
+        self.attach_owner(&task);
+        self.scheduler.lock().put_prev_task(task, preempt);
+    }
+
+    /// Attach a local helper task and switch to it without enqueueing.
+    ///
+    /// Used for per-CPU helpers such as the affinity migration task that are
+    /// entered via `switch_to` rather than the ready queue.
+    fn switch_to_local(&mut self, prev_task: CurrentTask, next_task: KtaskRef) {
+        #[cfg(feature = "smp")]
+        self.attach_owner(&next_task);
+        self.switch_to(prev_task, next_task);
     }
 
     /// Puts target task into current run queue with `Ready` state
@@ -838,9 +894,7 @@ impl RunQueue {
                 }
             }
             // TODO: priority
-            #[cfg(feature = "smp")]
-            task.set_cpu_id(self.cpu_id);
-            self.scheduler.lock().put_prev_task(task, preempt);
+            self.enqueue_task(task, preempt);
             true
         } else {
             false
@@ -875,6 +929,15 @@ impl RunQueue {
         assert!(
             !karch::local_irq_enabled(),
             "IRQs must be disabled during scheduling"
+        );
+        #[cfg(feature = "smp")]
+        debug_assert_eq!(
+            next_task.cpu_id(),
+            self.cpu_id,
+            "next task {} owner cpu {} != run queue {}",
+            next_task.id_name(),
+            next_task.cpu_id().as_usize(),
+            self.cpu_id.as_usize()
         );
         trace!(
             "context switch: {} -> {}",
@@ -1013,14 +1076,12 @@ fn poll_gc(cx: &mut Context<'_>) -> Poll<()> {
 /// The task routine for migrating the current task to the correct CPU.
 ///
 /// It calls `select_run_queue` to get the correct run queue for the task, and
-/// then puts the task to the scheduler of target run queue.
+/// then enqueues the task through the ownership-aware entry.
 #[cfg(feature = "smp")]
 pub(crate) fn migrate_entry(migrated_task: KtaskRef) {
     select_run_queue::<kspin::NoPreemptIrqSave>(&migrated_task)
         .inner
-        .scheduler
-        .lock()
-        .put_prev_task(migrated_task, false)
+        .enqueue_task(migrated_task, false);
 }
 
 /// Clear the `on_cpu` field of previous task running on this CPU.
@@ -1048,6 +1109,8 @@ pub(crate) fn init() {
     let idle_task = TaskInner::new_idle(|| crate::run_idle(), "idle".into(), IDLE_TASK_STACK_SIZE);
     // idle task should be pinned to the current CPU.
     idle_task.set_cpumask(KCpuMask::one_shot_logical(cpu_id));
+    #[cfg(feature = "smp")]
+    RunQueue::set_owner_cpu(&idle_task, cpu_id);
     IDLE_TASK.with_current(|i| {
         i.init_once(idle_task.into_arc());
     });
@@ -1056,7 +1119,7 @@ pub(crate) fn init() {
     let main_task = TaskInner::new_boot("main".into()).into_arc();
     main_task.set_state(TaskState::Running);
     #[cfg(feature = "smp")]
-    main_task.set_cpu_id(cpu_id);
+    RunQueue::set_owner_cpu(&main_task, cpu_id);
     #[cfg(feature = "snapshot")]
     crate::task_registry::record_tracked_task(&main_task);
     // SAFETY: scheduler bring-up installs the first current task for this CPU
@@ -1076,7 +1139,7 @@ pub(crate) fn init_secondary() {
     let idle_task = TaskInner::new_current_idle("idle".into()).into_arc();
     idle_task.set_state(TaskState::Running);
     #[cfg(feature = "smp")]
-    idle_task.set_cpu_id(cpu_id);
+    RunQueue::set_owner_cpu(&idle_task, cpu_id);
     #[cfg(feature = "snapshot")]
     crate::task_registry::record_tracked_task(&idle_task);
     IDLE_TASK.with_current(|i| {
