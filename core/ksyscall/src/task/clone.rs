@@ -179,7 +179,12 @@ impl CloneRequest {
     /// Consume this request and execute the clone operation.
     pub fn do_clone(mut self, uctx: &UserContext) -> KResult<isize> {
         if self.flags.contains(CloneFlags::VFORK) {
-            debug!("do_clone: CLONE_VFORK slow path");
+            // TODO: Implement Linux vfork semantics: keep the mm shared, block
+            // the parent until the child successfully execs or exits, and wake
+            // it after the child has detached from the shared mm. execve
+            // currently modifies its process mm in place, so sharing it here
+            // would let the child replace the parent's address space.
+            debug!("do_clone: CLONE_VFORK uses private-mm fallback");
             self.flags.remove(CloneFlags::VM);
         }
 
@@ -443,6 +448,15 @@ pub fn sys_clone(
 #[cfg(target_arch = "x86_64")]
 pub fn sys_fork(uctx: &UserContext) -> KResult<isize> {
     sys_clone(uctx, SIGCHLD, 0, 0, 0, 0)
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn sys_vfork(uctx: &UserContext) -> KResult<isize> {
+    let mut request = CloneRequest::new();
+    request
+        .set_flags(CloneFlags::VM | CloneFlags::VFORK)
+        .set_exit_signal(SIGCHLD as u64);
+    request.do_clone(uctx)
 }
 
 #[cfg(unittest)]
