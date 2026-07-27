@@ -335,7 +335,7 @@ QEMU-related variables commonly used with `make run`:
 | `GRAPHIC` | `n` | Enable virtio-gpu display |
 | `VIRTIO_BUS` | `pci` | Device bus: `pci` or `mmio` |
 | `MEM` | `1g` | Memory size |
-| `ACCEL` | auto | Hardware acceleration: `y` or `n` |
+| `ACCEL` | auto | Hardware acceleration: `y` or `n`. Auto enables KVM only when `/dev/kvm` is a character device (not a path stub/directory). |
 | `DISK_IMG` | `$(PWD)/disk.img` | Virtual disk image path |
 | `UEFI` | `n` | x86_64 UEFI boot |
 | `NET_DEV` | `user` | Network backend: `user`, `tap`, `bridge` |

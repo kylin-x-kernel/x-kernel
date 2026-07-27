@@ -272,7 +272,13 @@ endif
 
 # KVM/HVF acceleration — when ACCEL=y and the host arch matches the guest.
 # Independent of KFEAT_VMM (that flag only enables nested virt / VMX exposure).
+#
+# Require a real KVM character device (`test -c`), not merely path existence.
+# Make's $(wildcard /dev/kvm) matches directories too; some built-in CI images
+# ship `/dev/kvm` as a directory stub, and explicit `-accel kvm` then fails
+# hard with no TCG fallback.
 HOST_ARCH := $(shell uname -m)
+KVM_CHARDEV := $(shell test -c /dev/kvm && echo y)
 ifeq ($(shell uname), Darwin)
   ifeq ($(filter $(HOST_ARCH),arm64 aarch64),$(HOST_ARCH))
     ifeq ($(ARCH), aarch64)
@@ -283,7 +289,7 @@ ifeq ($(shell uname), Darwin)
       qemu_args-$(ACCEL) += -cpu host -accel hvf
     endif
   endif
-else ifneq ($(wildcard /dev/kvm),)
+else ifeq ($(KVM_CHARDEV),y)
   ifeq ($(HOST_ARCH):$(ARCH),x86_64:x86_64)
     qemu_args-$(ACCEL) += -cpu host -accel kvm
   else ifeq ($(filter $(HOST_ARCH),arm64 aarch64):$(ARCH),$(HOST_ARCH):aarch64)
