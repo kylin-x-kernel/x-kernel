@@ -4458,7 +4458,11 @@ mod tests {
         let journal = Journal::new(TransactionId::new(4611));
         let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
         let inode_allocation = filesystem
-            .allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle)
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
             .unwrap();
         let mut inode = filesystem
             .internal_inode(inode_allocation.inode())
@@ -4535,7 +4539,11 @@ mod tests {
         let journal = Journal::new(TransactionId::new(4612));
         let mut handle = journal.begin(JournalCredits::new(100_000)).unwrap();
         let inode_allocation = filesystem
-            .allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle)
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
             .unwrap();
         let mut inode = filesystem
             .internal_inode(inode_allocation.inode())
@@ -4738,7 +4746,11 @@ mod tests {
         let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
         let physical = allocate_contiguous_blocks(&mut filesystem, 3, &mut handle);
         let inode_allocation = filesystem
-            .allocate_inode(None, InodeInitialization::regular_file(0o644), &mut handle)
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
             .unwrap();
         let mut inode = filesystem.internal_inode(inode_allocation.inode()).unwrap();
         inode = filesystem
@@ -6528,6 +6540,171 @@ mod tests {
 
     fn put_be_u32(output: &mut [u8], offset: usize, value: u32) {
         output[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+    }
+
+    /// Builds an unlinked (links_count == 0) regular-file inode carrying the
+    /// given extents, with an internal journal installed, ready for the
+    /// three-phase eviction protocol.  Each extent is allocated contiguously.
+    fn eviction_test_unlinked_inode(
+        extents: &[(u64, u32)],
+    ) -> (Ext4Filesystem, crate::InodeNumber, crate::Ext4Timestamp) {
+        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        install_test_internal_journal(&mut filesystem, 2000);
+        let journal = Journal::new(TransactionId::new(2000));
+        let mut handle = journal.begin(JournalCredits::new(100_000)).unwrap();
+        let transaction = handle.id();
+
+        let inode_allocation = filesystem
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
+            .unwrap();
+        let mut inode = filesystem.internal_inode(inode_allocation.inode()).unwrap();
+
+        for (logical, len) in extents {
+            let physical = allocate_contiguous_blocks(&mut filesystem, *len, &mut handle);
+            inode = filesystem
+                .insert_extent_mapping(
+                    &inode,
+                    LogicalBlock::new(*logical),
+                    physical,
+                    BlockCount::new(*len),
+                    ExtentMappingState::Initialized,
+                    &mut handle,
+                )
+                .unwrap();
+        }
+
+        let timestamp = crate::Ext4Timestamp::new(2000, 0);
+        inode = filesystem
+            .update_inode_links_count_ctime_metadata(&inode, 0, timestamp, &mut handle)
+            .unwrap();
+
+        drop(handle);
+        let commit = journal.force_commit(transaction).unwrap();
+        filesystem
+            .metadata_io
+            .checkpoint_committed(&commit)
+            .unwrap();
+        journal.finish_checkpoint(&commit).unwrap();
+
+        // Reset the internal journal so the eviction protocol begins from a
+        // clean journal with a fresh sequence, matching the installed
+        // superblock (mirrors the per-phase reinstall used elsewhere).
+        install_test_internal_journal(&mut filesystem, 2001);
+
+        (filesystem, inode_allocation.inode(), timestamp)
+    }
+
+    #[test]
+    fn eviction_release_batch_partial_extent_split() {
+        let (mut filesystem, number, timestamp) = eviction_test_unlinked_inode(&[(0, 100)]);
+        let mut evict = filesystem.eviction_prepare(number, timestamp).unwrap();
+
+        // max_blocks = 40 < 100, so only the tail 40 blocks are released.
+        let (freed, done) = filesystem.eviction_release_batch(&mut evict, 40).unwrap();
+        assert_eq!(freed, 40);
+        assert!(!done);
+
+        // The remaining extent must keep logical [0, 60).
+        let inode = filesystem.referenced_inode(number).unwrap();
+        let collected = filesystem.collect_extent_tree(&inode).unwrap();
+        assert_eq!(collected.extents.len(), 1);
+        assert_eq!(collected.extents[0].logical, 0);
+        assert_eq!(collected.extents[0].len, 60);
+
+        // Drain the rest under a bounded loop.
+        let mut batches = 1;
+        loop {
+            let (_, done) = filesystem.eviction_release_batch(&mut evict, 40).unwrap();
+            batches += 1;
+            assert!(batches <= 10, "eviction must terminate");
+            if done {
+                break;
+            }
+        }
+
+        let inode = filesystem.referenced_inode(number).unwrap();
+        let collected = filesystem.collect_extent_tree(&inode).unwrap();
+        assert!(collected.extents.is_empty());
+        filesystem.eviction_finish(evict).unwrap();
+    }
+
+    #[test]
+    fn eviction_release_batch_single_batch_empties_tree() {
+        // 3 extents of 10 blocks = 30 blocks total, well within max_blocks.
+        let (mut filesystem, number, timestamp) =
+            eviction_test_unlinked_inode(&[(0, 10), (10, 10), (20, 10)]);
+        let mut evict = filesystem.eviction_prepare(number, timestamp).unwrap();
+
+        // All extents fit in one batch, so the tree is emptied and done = true.
+        let (freed, done) = filesystem.eviction_release_batch(&mut evict, 256).unwrap();
+        assert_eq!(freed, 30);
+        assert!(done);
+
+        let inode = filesystem.referenced_inode(number).unwrap();
+        let collected = filesystem.collect_extent_tree(&inode).unwrap();
+        assert!(collected.extents.is_empty());
+        filesystem.eviction_finish(evict).unwrap();
+    }
+
+    #[test]
+    fn eviction_release_batch_multi_batch_drains_tree() {
+        // 10 extents of 10 blocks = 100 blocks, released in max_blocks = 30
+        // batches, exercising the keep_count != 0 / keep_count != extents.len()
+        // branch across multiple iterations.
+        let extents: [(u64, u32); 10] = [
+            (0, 10),
+            (10, 10),
+            (20, 10),
+            (30, 10),
+            (40, 10),
+            (50, 10),
+            (60, 10),
+            (70, 10),
+            (80, 10),
+            (90, 10),
+        ];
+        let (mut filesystem, number, timestamp) = eviction_test_unlinked_inode(&extents);
+        let mut evict = filesystem.eviction_prepare(number, timestamp).unwrap();
+
+        let mut batches = 0;
+        loop {
+            let (_, done) = filesystem.eviction_release_batch(&mut evict, 30).unwrap();
+            batches += 1;
+            assert!(
+                batches <= 10,
+                "eviction must terminate within bounded batches"
+            );
+            if done {
+                break;
+            }
+        }
+        assert!(
+            batches >= 2,
+            "expected more than one batch for 100 blocks at 30/batch"
+        );
+
+        let inode = filesystem.referenced_inode(number).unwrap();
+        let collected = filesystem.collect_extent_tree(&inode).unwrap();
+        assert!(collected.extents.is_empty());
+        filesystem.eviction_finish(evict).unwrap();
+    }
+
+    #[test]
+    fn eviction_release_batch_no_data_blocks_fast_path() {
+        // No extents inserted: an unlinked inode with zero data blocks must
+        // take the fast path and report (0, true) without touching the tree.
+        let (mut filesystem, number, timestamp) = eviction_test_unlinked_inode(&[]);
+        let mut evict = filesystem.eviction_prepare(number, timestamp).unwrap();
+
+        let (freed, done) = filesystem.eviction_release_batch(&mut evict, 256).unwrap();
+        assert_eq!(freed, 0);
+        assert!(done);
+
+        filesystem.eviction_finish(evict).unwrap();
     }
 }
 

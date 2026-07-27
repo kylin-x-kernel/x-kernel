@@ -9,7 +9,7 @@ use alloc::{string::String, sync::Arc};
 use block::BlockDevice;
 use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
 use kext4::{Ext4Error, Ext4Filesystem as KExt4Core, Ext4Inode, InodeNumber, SymlinkStorage};
-use ksync::{Mutex, MutexGuard};
+use ksync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use kvfs::{
     Dentry, DeviceId, InodeCache, Metadata, NodeFlags, NodeType, StatFs, StatFsFlags, SuperBlock,
     SuperBlockOperations, Umode, VfsError, VfsInode, VfsInodeInit, VfsResult, default_evict_inode,
@@ -26,13 +26,17 @@ use super::{
 const EXT4_ROOT_INO: u32 = 2;
 const EXT4_LOGICAL_BLOCK_COUNT: u64 = u32::MAX as u64 + 1;
 
+/// Per-batch maximum for phased eviction block release.
+/// 256 blocks × 4 KiB = 1 MiB of block allocation work per transaction.
+const EVICTION_BATCH_BLOCKS: u32 = 256;
+
 fn extent_max_file_size_bytes(block_size: u32) -> u64 {
     EXT4_LOGICAL_BLOCK_COUNT * u64::from(block_size)
 }
 
 /// Ext4 filesystem implementation backed by the checked KExt4 core.
 pub struct Ext4Filesystem {
-    inner: Mutex<KExt4Core>,
+    inner: RwLock<KExt4Core>,
     block_size: u32,
     delalloc_reserved_blocks: Mutex<u64>,
     inode_cache: InodeCache,
@@ -65,7 +69,7 @@ impl Ext4Filesystem {
 
         let block_size = core.layout().block_size();
         let fs = Arc::new(Self {
-            inner: Mutex::new(core),
+            inner: RwLock::new(core),
             block_size,
             delalloc_reserved_blocks: Mutex::new(0),
             inode_cache: InodeCache::new(),
@@ -79,8 +83,16 @@ impl Ext4Filesystem {
         Ok(SuperBlock::new(fs, root))
     }
 
-    pub(crate) fn lock(&self) -> MutexGuard<'_, KExt4Core> {
-        self.inner.lock()
+    pub(crate) fn lock(&self) -> RwLockWriteGuard<'_, KExt4Core> {
+        self.inner.write()
+    }
+
+    /// Acquires the shared (read) lock for read-only operations such as
+    /// `statfs`, inode loads, directory lookups, and extent/hole queries.
+    /// Multiple readers run concurrently, mirroring Linux ext4's read-side
+    /// concurrency for statfs and the per-inode extent tree.
+    pub(crate) fn read_lock(&self) -> RwLockReadGuard<'_, KExt4Core> {
+        self.inner.read()
     }
 
     pub(crate) const fn block_size(&self) -> u64 {
@@ -88,7 +100,7 @@ impl Ext4Filesystem {
     }
 
     pub(crate) fn load_inode(&self, number: InodeNumber) -> VfsResult<Ext4Inode> {
-        self.lock().inode(number).map_err(into_vfs_err)
+        self.read_lock().inode(number).map_err(into_vfs_err)
     }
 
     fn metadata_from_core_inode(&self, inode: &Ext4Inode) -> VfsResult<Metadata> {
@@ -163,7 +175,7 @@ impl Ext4Filesystem {
                     Inode::new(fs.clone(), number, node_type)
                 }),
             NodeType::Symlink => {
-                let cached_link = match fs.lock().symlink_storage(&inode) {
+                let cached_link = match fs.read_lock().symlink_storage(&inode) {
                     Ok(SymlinkStorage::Fast(target)) => {
                         core::str::from_utf8(target).ok().map(String::from)
                     }
@@ -226,7 +238,7 @@ impl SuperBlockOperations for Ext4Filesystem {
     }
 
     fn statfs(&self) -> VfsResult<StatFs> {
-        let fs = self.lock();
+        let fs = self.read_lock();
         let stat = fs.statfs().map_err(into_vfs_err)?;
         let reserved = *self.delalloc_reserved_blocks.lock();
         Ok(StatFs {
@@ -258,9 +270,33 @@ impl SuperBlockOperations for Ext4Filesystem {
         if inode.metadata().nlink != 0 {
             return Ok(());
         }
-        self.lock()
-            .evict_unlinked_inode(ext4_inode.number(), current_ext4_timestamp())
-            .map_err(into_vfs_err)
+
+        let number = ext4_inode.number();
+        let timestamp = current_ext4_timestamp();
+
+        // Phase A: orphan + xattr (extent tree is NOT truncated — it
+        // serves as the persistent record of blocks to free)
+        let mut handle = self
+            .lock()
+            .eviction_prepare(number, timestamp)
+            .map_err(into_vfs_err)?;
+
+        // Phase B: atomically truncate extent tree in batches, each
+        // releasing both extent mappings and underlying physical blocks
+        // in a single transaction (lock released between batches)
+        loop {
+            let (_, done) = {
+                let mut core = self.lock();
+                core.eviction_release_batch(&mut handle, EVICTION_BATCH_BLOCKS)
+                    .map_err(into_vfs_err)?
+            };
+            if done {
+                break;
+            }
+        }
+
+        // Phase C: update metadata, remove orphan, release inode slot
+        self.lock().eviction_finish(handle).map_err(into_vfs_err)
     }
 }
 

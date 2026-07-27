@@ -23,6 +23,41 @@ use crate::{
 
 const EXT4_LINK_MAX: u16 = 65_000;
 
+/// Handle for the three-phase eviction protocol.
+///
+/// Phase A (`eviction_prepare`) adds the inode to the orphan list and
+/// releases the external xattr block.  The extent tree is deliberately
+/// **not** truncated in this phase — the extent tree itself serves as the
+/// persistent record of blocks to free, so that a crash between phases does
+/// not leak physical blocks.
+///
+/// Phase B (`eviction_release_batch`) atomically truncates the extent tree
+/// in batches, each in a fresh journal transaction.  Each batch both removes
+/// a portion of the extent mappings and releases the corresponding physical
+/// blocks in a single atomic transaction.  The `KExt4Core` lock is released
+/// between batches to prevent watchdog false positives.  If a crash occurs
+/// mid-batch, the orphan inode recovery (`evict_zero_link_inode`) will
+/// find the remaining extent tree and complete the truncation.
+///
+/// Phase C (`eviction_finish`) updates the inode metadata, removes the inode
+/// from the orphan list, and releases the inode table slot.
+pub struct EvictionHandle {
+    truncated_inode: Ext4Inode,
+    timestamp: Ext4Timestamp,
+}
+
+/// Credit ceiling for the Phase A eviction prepare transaction.
+///
+/// Phase A only adds the orphan record and releases the external xattr block
+/// (if present).  The extent tree is not touched in this phase.
+const EVICTION_PREPARE_CREDITS: u32 = 512;
+
+/// Credit total for the Phase C eviction finish transaction.
+///
+/// `update_unlinked_inode_metadata` (1) + `remove_orphan` (2) +
+/// `release_allocated_inode` (8).
+const EVICTION_FINISH_CREDITS: u32 = 11;
+
 struct Ext4Credits;
 
 impl Ext4Credits {
@@ -1166,6 +1201,214 @@ impl Ext4Filesystem {
                     journal,
                     transaction,
                     recovery_flag_policy,
+                )
+            }
+            Err(error) => Err(self.abort_namei_transaction(&journal, error)),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  Three-phase eviction API
+    // ------------------------------------------------------------------
+
+    /// Phase A — prepare eviction.
+    ///
+    /// In a single journal transaction:
+    /// 1. Read and verify the zero-link inode.
+    /// 2. `add_namespace_orphan` — persist the orphan link.
+    /// 3. `release_external_xattr_block_for_eviction` — free the xattr block.
+    ///
+    /// The extent tree is **not** truncated in this phase.  It remains on disk
+    /// as the persistent record of blocks to free.  If a crash occurs before
+    /// Phase B completes, the orphan inode recovery will find the extent tree
+    /// and finish the truncation.
+    ///
+    /// After this call the inode is orphaned.  The caller should release the
+    /// `KExt4Core` lock before calling Phase B.
+    pub fn eviction_prepare(
+        &mut self,
+        number: InodeNumber,
+        timestamp: Ext4Timestamp,
+    ) -> Ext4Result<EvictionHandle> {
+        let inode = self.orphan_inode(number)?;
+        if inode.links_count() != 0 {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
+        }
+        self.ensure_unlinked_inode_eviction_supported(&inode)?;
+
+        let journal = self.namei_metadata_journal()?;
+        let credits = JournalCredits::new(EVICTION_PREPARE_CREDITS);
+        let mut handle = journal.begin(credits)?;
+        let transaction = handle.id();
+
+        let result = (|| -> Ext4Result<EvictionHandle> {
+            let orphaned = self.add_namespace_orphan(&inode, &mut handle)?;
+            let truncated_inode =
+                self.release_external_xattr_block_for_eviction(&orphaned, &mut handle)?;
+            Ok(EvictionHandle {
+                truncated_inode,
+                timestamp,
+            })
+        })();
+
+        match result {
+            Ok(handle_ret) => {
+                drop(handle);
+                self.commit_namei_transaction_with_policy(
+                    journal,
+                    transaction,
+                    crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+                )?;
+                Ok(handle_ret)
+            }
+            Err(error) => Err(self.abort_namei_transaction(&journal, error)),
+        }
+    }
+
+    /// Phase B — atomically truncate extent tree in batches.
+    ///
+    /// Each batch removes at most `max_blocks` physical blocks' worth of
+    /// extent mappings from the tail of the file and releases the underlying
+    /// physical blocks in a single atomic journal transaction.  This approach
+    /// is crash-safe: the extent tree on disk always reflects exactly the
+    /// blocks that have not yet been freed.
+    ///
+    /// Returns `(freed, done)` where:
+    /// - `freed` is the number of blocks actually released (best-effort
+    ///   upper bound; the actual count may be slightly higher if an extent
+    ///   crosses the `max_blocks` boundary),
+    /// - `done` is `true` when the extent tree is fully empty.
+    ///
+    /// The caller should release the `KExt4Core` lock between batches.
+    pub fn eviction_release_batch(
+        &mut self,
+        handle: &mut EvictionHandle,
+        max_blocks: u32,
+    ) -> Ext4Result<(u32, bool)> {
+        // Fast check: no data blocks remaining.
+        if self.unlinked_inode_data_blocks(&handle.truncated_inode)? == 0 {
+            return Ok((0, true));
+        }
+
+        // Collect current extent tree to determine how much to release.
+        let collected = self.collect_extent_tree(&handle.truncated_inode)?;
+
+        // From the tail, accumulate at most `max_blocks` physical blocks.
+        let mut physical_count = 0u32;
+        let mut keep_count = collected.extents.len();
+        for i in (0..collected.extents.len()).rev() {
+            let extent_blocks = collected.extents[i].len;
+            if physical_count.saturating_add(extent_blocks) > max_blocks {
+                break;
+            }
+            physical_count += extent_blocks;
+            keep_count = i;
+        }
+
+        // Determine the truncation point.
+        let (new_blocks, estimated_freed) = if keep_count == collected.extents.len() {
+            // Even the last extent alone exceeds max_blocks.  Truncate a
+            // portion of it by computing a logical block inside the extent.
+            let last = collected
+                .extents
+                .last()
+                .copied()
+                .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidExtent))?;
+            let release_len = max_blocks.min(last.len);
+            let keep_logical = last
+                .logical
+                .checked_add(last.len.saturating_sub(release_len))
+                .ok_or(Ext4Error::Overflow)?;
+            (LogicalBlock::new(u64::from(keep_logical)), release_len)
+        } else if keep_count == 0 {
+            // All remaining extents fit in this batch.
+            (LogicalBlock::new(0), physical_count)
+        } else {
+            // Truncate from the first extent in the release batch.
+            let start = collected.extents[keep_count].logical;
+            (LogicalBlock::new(u64::from(start)), physical_count)
+        };
+
+        // Get conservative credits for this truncation scope, reusing the tree
+        // already collected above to avoid a second full tree walk.
+        let credits = self.extent_truncate_metadata_credits_from(&collected, new_blocks)?;
+        // Fast check above confirmed there are data blocks, so a zero-credit
+        // result means the extent tree is inconsistent with the inode block
+        // count — refuse to proceed.
+        if credits == 0 {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
+        }
+
+        let journal = self.namei_metadata_journal()?;
+        let mut jh = journal.begin(JournalCredits::new(credits))?;
+        let transaction = jh.id();
+
+        let result = (|| -> Ext4Result<(u32, bool)> {
+            let truncated = self.truncate_extent_mappings_with(
+                &handle.truncated_inode,
+                &collected,
+                new_blocks,
+                &mut jh,
+            )?;
+            handle.truncated_inode = truncated;
+            let done = self.unlinked_inode_data_blocks(&handle.truncated_inode)? == 0;
+            let freed = estimated_freed;
+            Ok((freed, done))
+        })();
+
+        match result {
+            Ok(r) => {
+                drop(jh);
+                self.commit_namei_transaction_with_policy(
+                    journal,
+                    transaction,
+                    crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+                )?;
+                Ok(r)
+            }
+            Err(error) => Err(self.abort_namei_transaction(&journal, error)),
+        }
+    }
+
+    /// Phase C — finish eviction.
+    ///
+    /// In a single journal transaction:
+    /// 1. `update_unlinked_inode_metadata` — update ctime (i_size left as-is;
+    ///    orphan recovery will handle it on crash).
+    /// 2. `remove_orphan` — remove from the orphan list.
+    /// 3. `release_allocated_inode` — free the inode table slot + bit.
+    ///
+    /// Consumes `handle` (it is no longer valid after this call).
+    pub fn eviction_finish(&mut self, handle: EvictionHandle) -> Ext4Result<()> {
+        // Phase B must have emptied the extent tree.
+        if self.unlinked_inode_data_blocks(&handle.truncated_inode)? != 0 {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
+        }
+
+        let journal = self.namei_metadata_journal()?;
+        let credits = JournalCredits::new(EVICTION_FINISH_CREDITS);
+        let mut jh = journal.begin(credits)?;
+        let transaction = jh.id();
+
+        let result = (|| -> Ext4Result<()> {
+            let unlinked = self.update_unlinked_inode_metadata(
+                &handle.truncated_inode,
+                None,
+                handle.timestamp,
+                &mut jh,
+            )?;
+            let unlinked = self.remove_orphan(&unlinked, &mut jh)?;
+            self.release_allocated_inode(unlinked.number(), unlinked.kind(), &mut jh)?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                drop(jh);
+                self.commit_namei_transaction_with_policy(
+                    journal,
+                    transaction,
+                    crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
                 )
             }
             Err(error) => Err(self.abort_namei_transaction(&journal, error)),

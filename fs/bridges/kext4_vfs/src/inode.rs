@@ -61,7 +61,7 @@ impl Inode {
 
     fn lookup_child(&self, name: &str) -> VfsResult<Arc<VfsInode>> {
         let entry = {
-            let fs = self.fs.lock();
+            let fs = self.fs.read_lock();
             let directory = fs.inode(self.number).map_err(into_vfs_err)?;
             fs.lookup(&directory, name).map_err(into_vfs_err)?
         }
@@ -92,7 +92,7 @@ impl Inode {
             return Ok(Vec::new());
         }
 
-        let fs = self.fs.lock();
+        let fs = self.fs.read_lock();
         let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
         let mut holes = Vec::new();
         for block in candidates {
@@ -326,7 +326,7 @@ impl InodeSymlinkOperations for Inode {
         _inode: &VfsInode,
         _done: &mut kvfs::DelayedCall,
     ) -> VfsResult<String> {
-        let fs = self.fs.lock();
+        let fs = self.fs.read_lock();
         let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
         let mut target =
             vec![0; usize::try_from(inode.size()).map_err(|_| VfsError::InvalidInput)?];
@@ -571,7 +571,7 @@ impl InodeDirOperations for Inode {
 
 impl AddressSpaceOperations for Inode {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
-        let fs = self.fs.lock();
+        let fs = self.fs.read_lock();
         let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
         match self.node_type {
             NodeType::RegularFile => fs.read_at(&inode, offset, buf).map_err(into_vfs_err),
@@ -757,7 +757,7 @@ impl FileOperations for Inode {
 
 impl FileDirOperations for Inode {
     fn iterate_shared(&self, _file: &VfsFile, ctx: &mut DirContext<'_>) -> VfsResult<usize> {
-        let fs = self.fs.lock();
+        let fs = self.fs.read_lock();
         let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
         let mut sink = KvfsDirSink { ctx, count: 0 };
         fs.read_dir_from(&inode, Ext4DirPos::new(sink.ctx.pos()), &mut sink)

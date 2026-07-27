@@ -107,7 +107,10 @@ pub use file::Ext4SyncIntent;
 pub use inode::{
     Ext4DeviceId, Ext4Inode, Ext4InodeMetadataUpdate, Ext4Timestamp, InodeKind, SymlinkStorage,
 };
-pub use namei::{Ext4NamespaceCreate, Ext4NamespaceLink, Ext4NamespaceRemove, Ext4NamespaceRename};
+pub use namei::{
+    EvictionHandle, Ext4NamespaceCreate, Ext4NamespaceLink, Ext4NamespaceRemove,
+    Ext4NamespaceRename,
+};
 pub use superblock::{
     Ext4Filesystem, Ext4RecoveryReport, Ext4StatFs, FilesystemLayout, JournalLocation,
     JournalStatus,
