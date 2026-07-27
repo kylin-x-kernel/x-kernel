@@ -19,9 +19,9 @@ superblock、inode、address-space 和 file operations，但不拥有 ext4 磁�
 KExt4 的目标是在 X-Kernel 中逐步替代兼容层 ext4 后端，同时保持 Rust 受检代码、
 明确的 feature negotiation、日志化元数据更新，以及 e2fsprogs/e2fsck 互操作能力。
 KExt4 当前通过独立 Kconfig 选项进入运行态。N0 已补齐 VFS inode identity、cached
-attributes、两阶段 truncate 和 open-unlink/final-evict 基线。后续先在 N1/N2 建立
-persistent journal、mount service ownership 和 buffered 并发执行框架，再在 N3 集中补齐
-crash recovery、错误观察和 unmount/freeze；不为旧后端扩展新语义。
+attributes、两阶段 truncate 和 open-unlink/final-evict 基线。N1 已建立 persistent journal
+和 mount/journal 生命周期边界，N2 继续建立 buffered 并发执行框架，再在 N3 集中补齐 crash
+recovery、错误观察和 unmount/freeze；不为旧后端扩展新语义。
 
 ## 范围
 
@@ -58,23 +58,26 @@ KVFS syscall / PageCache
 fs/bridges/kext4_vfs
     |
     v
-kext4 mount services
-    |-- immutable layout / feature negotiation / device capability
-    |-- persistent journal coordinator
-    |     |-- running transaction
-    |     |-- committing transaction
-    |     `-- checkpoint queue / journal tail
+Ext4Filesystem (mount state，类似 ext4_sb_info)
+    |-- layout / feature negotiation / device
     |-- metadata buffer / checksum validation
-    |-- per-group allocator state
+    |-- group descriptors / allocator state
+    |-- MountedJournal (类似 journal_t)
+    |     |-- internal journal mapping / on-disk superblock
+    |     |-- transaction state
+    |     |     `-- one object: Running -> Committing -> Checkpoint -> Finished
+    |     `-- FIFO checkpoint queue / runtime head-tail state
     `-- inode / extent / orphan / namei / xattr / truncate
     v
 block::BlockDevice
 ```
 
-核心修改路径通过 `JournalHandle` 进入事务，先经 buffer 层取得元数据撤销/写入访问权，
-再修改元数据字节和内存中的布局状态。目标架构由 mount-owned coordinator 冻结 running
-transaction、持久化 commit，并把 frozen metadata image 放入独立 checkpoint 队列；普通
-mutation 不负责同步完成 home-block checkpoint。
+核心修改路径通过 `JournalHandle` 进入事务，先经 buffer 层取得元数据创建/写入访问权，
+再修改元数据字节和内存中的布局状态。`MountedJournal` 是生产路径唯一的 journal identity：
+它拥有磁盘 superblock、ring 运行态和 transaction 状态。一个 transaction 对象依次经历
+Running、Committing、Checkpoint 和 Finished phase；FIFO 队列只保存该对象本身，持久化证据
+属于它的 Checkpoint phase，不复制 commit payload，也不保存指回另一 coordinator 的引用。
+普通 mutation 不负责同步完成 home-block checkpoint。
 
 ## 调用约束 / 执行上下文
 
@@ -86,10 +89,11 @@ KExt4 核心 API 可能执行块设备 I/O、内存分配、JBD2 事务、checkp
 不能假设已有 per-inode 或 per-group 级别的并行修改。可写文件打开计数由
 KVFS `VfsInode` 拥有，bridge 只在 release callback 中读取它。
 
-该挂载级 mutex 是过渡实现而不是长期调用契约。N1 先把 journal、metadata cache、allocator
-和 immutable geometry 的 ownership 从 catch-all aggregate 中拆开；N2 再由各 service 的
-内部同步和 per-inode/per-group 锁替代 bridge 全局串行化。所有这些路径仍属于可阻塞的任务
-上下文，不能从中断上下文调用。
+该挂载级 mutex 是过渡实现而不是长期调用契约。N1 已把磁盘 journal、transaction engine 和
+checkpoint queue 收进同一个 `MountedJournal` 生命周期边界；metadata、allocator、device 和
+geometry 继续由 `Ext4Filesystem` mount state 持有，对应 Linux `ext4_sb_info` 的聚合角色。
+N2 根据真实执行者建立 journal、per-inode、metadata-buffer 和 per-group 锁，替代 bridge
+全局串行化。所有这些路径仍属于可阻塞的任务上下文，不能从中断上下文调用。
 
 ## 状态机
 
@@ -97,10 +101,11 @@ KVFS `VfsInode` 拥有，bridge 只在 release callback 中读取它。
 
 ```text
 加入或创建 running transaction，并预留 credits
-  -> 取得元数据撤销/写入访问权
+  -> 取得元数据创建/写入访问权
   -> 修改元数据字节和内存计数器
-  -> 记录受影响 inode / ordered-data dependency
+  -> 完成 ordered-data dependency
   -> 根据 credits、age、space 或 explicit sync 冻结 transaction
+  -> 首次写日志前把 clean journal 激活为可恢复状态
   -> 持久化 journal commit
   -> 独立推进 checkpoint / journal tail
 ```
@@ -110,20 +115,75 @@ KVFS `VfsInode` 拥有，bridge 只在 release callback 中读取它。
 1. Handle 加入 mount-wide running transaction，并根据 mutation 类型预留 journal credits。
 2. 每个被修改的元数据 block 通过 buffer 层记录撤销/写入访问权。
 3. 元数据字节和内存计数器在同一事务内更新。
-4. 相关 inode 保存 sync/datasync transaction id，ordered data 在 metadata commit 前完成。
+4. ordered data 在使其可达的 metadata commit 前完成。
 5. Commit 只冻结并持久化对应 transaction，随后允许新的 running transaction。
 6. Checkpoint 独立写 home blocks；`fsync`、`syncfs`、unmount 和 journal-space pressure 按
    各自 durability intent 等待相关状态。
 
-当前实现仍在 mutation 前 drain 旧 checkpoint、为本次 mutation 新建 `Journal`，并在 commit
-后同步推进 checkpoint。N1 会先用同步调用者驱动的 coordinator 替换该模型，再引入后台
-worker；这样状态机和 worker 生命周期不会在同一个切片中同时变化。
+当前实现已由 mount 持有唯一 `MountedJournal`，journal sequence、单一 transaction phase
+状态和 checkpoint 完成水位不再随每次 mutation 重建。磁盘日志能从运行态 append head
+连续追加多个 committed transaction：活跃 journal superblock 只持久化指向最老未 checkpoint
+transaction 的 sequence/start；`s_head` 是 clean/unmount 信息，不被当作活跃期运行态 head。
+下一次追加位置由最近一次持久化 commit 以及 mount 内存状态确定。FIFO checkpoint 只推进 tail，
+直到最后一个 transaction 完成才清零 start、写入 clean head 并清除 ext4 `needs_recovery`。
+环形空间计算始终保留一个空 block，避免 head 追上 tail 后覆盖仍可 replay 的 descriptor。
+clean journal 的首次 commit 会先持久化并 flush 非零 `s_start`，再写 descriptor/data/commit；
+因此在激活和 commit block 之间掉电时，恢复会把日志识别为 active 并忽略未完成 transaction，
+而不会错误地按空 journal 跳过扫描。
 
-该同步 drain 也是当前兼容不带 JBD2 revoke feature 镜像的安全前提：释放 extent/xattr
+设置 ext4 recovery feature 时只更新磁盘 recovery evidence 和内存 feature 状态，不再用尚未
+checkpoint 的旧 home-block superblock 覆盖较新的内存 allocator counters。真实 Linux ext4
+镜像测试覆盖了两个 committed transaction 同时可扫描、逐个推进 tail、最终 clean 和 e2fsck。
+若 transaction 包含 primary superblock，persist 路径会把 recovery feature 同时合并进 journal
+记录和该 transaction 的 frozen checkpoint image；因此较老 checkpoint 在后续 commit 仍 pending
+时不会把磁盘 `needs_recovery` 错误清零。只有 journal tail 真正清空后才单独清除该标志。
+
+普通 mutation 在 handle 内决定成功或失败，并可与后续 mutation 共享同一个 running
+transaction。新 handle 加入前按 journal 格式开销采用约三分之一日志容量作为普通 transaction
+上界；handle stop 会归还未使用 credits，因此 outstanding credits 表达仍在事务中占用的真实
+容量。不再以固定 operation 数或“半个 journal”触发普通提交。home-block checkpoint
+仍留在 FIFO queue；`syncfs`/unmount 会先提交当前 running transaction，再 drain 全部 pending
+checkpoint；journal 空间不足时提交者同步推进最老 checkpoint 后重试 append。当前仍由调用者
+同步驱动，没有 background worker 和基于时间的 age trigger。
+
+精准 `fsync`/`fdatasync` transaction id 的所有权不在 journal 的 inode-number 全局表，而应在
+VFS runtime inode identity 上，对应 Linux inode 内的 sync/datasync tid。现有 KVFS inode 尚未
+提供该运行态字段以及“mutation 完成后发布 tid”的接口，因此 KExt4 当前采用保守语义：bridge
+先回写目标 inode 的 PageCache，core 再提交当时的整个 running transaction 并 flush 设备。
+这保证 durability，但可能连带提交无关 inode 的 metadata。待共享 VFS runtime inode 接口具备
+后，再实现目标 transaction 等待；不能重新引入按 inode number 索引的 mount-wide cursor map。
+`syncfs` 和 unmount 仍提交 running transaction 并 drain 全部 checkpoint。当前 ordered-data
+dependency 是同步基线：数据块写入发生在使其可达的 metadata transaction 完成之前；异步
+dependency 对象和后台 writeback 属于后续阶段。
+
+operation savepoint、operation token 和 operation-local metadata byte copy 已删除。ext4
+mutation 在首次 metadata access 前完成格式、目标状态、空间、credits 和 extent path
+可表达性检查；allocator 在私有 bitmap/descriptor/superblock bytes 与 free-extent cache 副本上
+完成计算后再发布。JBD2 handle 只维护 credits 和 metadata/revoke membership，显式 stop
+归还未使用 credits 并返回 accounting 错误；journal 自身维护 abort 状态。多个 handle 可独立
+stop。transaction membership 一旦发布，就不能由某个 handle
+按路径局部删除，因为其他 handle 可能已共享同一 metadata block；后续 metadata access 失败会
+abort journal。设备/checksum/状态机错误，以及任何发生在 metadata 已发布后的普通错误，同样
+会永久 abort；内存中已经发布的 bytes、buffer ownership 和其他已成功 operation 的修改不会
+跨 syscall 回滚。尚未发布的私有副本或刚取得但未发布的 ext4 资源仍由具体算法显式清理。
+这与 Linux JBD2 一致：handle 负责 credits 和 buffer membership，失败通过 journal abort
+传播，而不是建立第二套 syscall 事务系统；崩溃后一致性由磁盘 recovery evidence 和 replay
+保证。
+
+Linux 创建的 clean v2 journal 若尚未声明 revoke feature，首个 mutation 会先持久化开启该
+feature，再允许 transaction/checkpoint 重叠；v1 journal 无 feature bitmap，继续退化为每次
+commit 后同步 checkpoint。这样 metadata block 释放/复用仍满足下面的 revoke/reuse 约束。
+普通 mutation 不再无条件 force-commit；成功 handle 关闭后修改留在 running transaction，
+credits、journal space 和 explicit filesystem sync 决定同步阶段的 commit 时机。
+truncate 的 orphan + `i_disksize` 更新仍强制 commit，保证释放旧 block mapping 前已有持久化
+恢复点；recovery-time orphan cleanup 仍同步完成 commit/checkpoint。基于时间的 trigger 与后台
+worker 留到同步驱动状态机稳定之后。
+
+不带 JBD2 revoke feature 且无法升级的 journal 仍以同步 drain 作为安全前提：释放 extent/xattr
 metadata block 时，core 从当前 handle 的 metadata 集合中 forget 已淘汰的 block，而不生成
 磁盘不支持的 revoke record。因为新 mutation 开始前不存在更老的未 checkpoint transaction，
-recovery 没有旧 metadata image 需要抑制。N1 一旦允许 transaction/checkpoint 重叠，就必须
-改为启用并持久化 revoke，或用等价的 journal tail/reuse 约束替代这个前提。
+recovery 没有旧 metadata image 需要抑制。可升级的 v2 journal 则在任何 transaction 重叠前
+flush revoke feature，后续释放路径必须写 revoke record。
 
 `ExtentPath` 保存从 inline root 到目标叶子的各层 buffer、选中 entry 和逻辑上下界，并负责
 叶子重写、索引 key 传播、均衡 split 与空叶 prune。路径查找把每层 bytes 直接移入路径，避免
@@ -227,9 +287,10 @@ descriptor，提供独立的实时统计与一致性观察面。
 遍历时不持有挂载级 core mutex；PageCache 在释放 mapping/folio mutex 后调用 batch writer，
 batch writer 才短暂取得 core mutex，并在释放 core mutex 后更新 delalloc accounting。这样
 普通 cache miss 的 `MappingInner -> core` 路径不会与 writeback 形成反向锁序。
-N1 的 service split 必须先固定谁拥有 journal sequence、transaction、checkpoint queue、
-metadata buffer 和 allocator state；N2 才建立 per-inode、journal、metadata-buffer 和
-per-group 锁顺序。不得在 spinlock 下执行块 I/O、等待 PageCache 或获取 sleepable lock。
+N1 已将 journal mapping/superblock、transaction engine 和 checkpoint queue 固定到同一
+`MountedJournal`。N2 才根据后台 commit/checkpoint、inode writeback、metadata buffer 和 group
+allocator 的实际并发关系建立锁顺序；不以字段分组预设锁域。不得在 spinlock 下执行块 I/O、
+等待 PageCache 或获取 sleepable lock。
 
 ## 设计决策
 
@@ -238,8 +299,13 @@ per-group 锁顺序。不得在 spinlock 下执行块 I/O、等待 PageCache 或
 - 未实现的 ext4 格式能力通过显式 unsupported error 暴露，避免把不完整格式误挂载为可写。
 - KExt4 的新生命周期与 I/O 语义只在 KExt4 core/bridge 落地；旧 ext4 backend 不随本计划
   做功能性迁移。
+- `Ext4Filesystem` 保留类似 Linux `ext4_sb_info` 的 mount 总状态；只有具有独立事务状态机和
+  生命周期不变量的 journal 聚合为 `MountedJournal`，不为代码分组机械创建 service。
+- KExt4 只通过通用 `BlockDevice` 表达块读写和 flush；异步 request、完成通知和 VirtIO
+  中断队列属于 block/driver 层。KExt4 可合并请求并在通用接口可用后接入，但不建立私有驱动
+  旁路。
 - errseq、clean unmount/freeze 和完整 fault matrix 依赖最终的后台执行图，集中放在 N3；它们
-  不阻塞 N1 persistent journal 和 mount ownership 重构，但仍是替换旧后端前的强制门槛。
+  不阻塞 N2 主路径，但仍是替换旧后端前的强制门槛。
 
 ## Drop / 资源释放
 

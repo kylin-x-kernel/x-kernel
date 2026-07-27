@@ -8,9 +8,7 @@ use alloc::vec;
 
 use crate::{
     BlockMapping, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Inode, Ext4Result, FilesystemBlock,
-    LogicalBlock, UnsupportedKind,
-    file::RegularWriteMetadata,
-    jbd2::{Journal, JournalCredits, TransactionId},
+    LogicalBlock, UnsupportedKind, file::RegularWriteMetadata, jbd2::JournalCredits,
 };
 
 const INODE_UPDATE_CREDITS: u32 = 1;
@@ -194,29 +192,21 @@ impl Ext4Filesystem {
         }
 
         let credits = JournalCredits::for_preallocation_discard(self, inode)?;
-        let journal = self.metadata_journal()?;
+        let journal = self.metadata_journal_for_mutation(
+            credits,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )?;
         let mut handle = journal.begin(credits)?;
-        let transaction = handle.id();
-        let updated = match self.truncate_inode_mappings_to(
-            TailZeroed {
-                inode: inode.clone(),
-            },
-            inode.disk_size(),
-            &mut handle,
-        ) {
-            Ok(truncated) => truncated.inode,
-            Err(error) => {
-                drop(handle);
-                return Err(self.abort_truncate_transaction(&journal, error));
-            }
-        };
-        if let Err(error) = handle.mark_inode_sync(updated.number()) {
-            drop(handle);
-            return Err(self.abort_truncate_transaction(&journal, error));
-        }
-        drop(handle);
-        self.commit_truncate_transaction(journal, transaction)?;
-        Ok(updated)
+        let result = self
+            .truncate_inode_mappings_to(
+                TailZeroed {
+                    inode: inode.clone(),
+                },
+                inode.disk_size(),
+                &mut handle,
+            )
+            .map(|truncated| truncated.inode);
+        self.complete_metadata_mutation(handle, result)
     }
 
     pub(crate) fn cleanup_regular_file_orphan_from_head(
@@ -243,27 +233,11 @@ impl Ext4Filesystem {
         )?;
 
         let credits = JournalCredits::for_regular_truncate(self, inode, target_size)?;
-        let journal = self.metadata_journal()?;
+        let journal = self.metadata_journal_for_mutation(credits, recovery_flag_policy)?;
         let mut handle = journal.begin(credits)?;
-        let transaction = handle.id();
-        let updated_inode = match self.cleanup_orphaned_inode_from_head_metadata(
-            tail_zeroed,
-            target_size,
-            &mut handle,
-        ) {
-            Ok(updated_inode) => updated_inode,
-            Err(error) => {
-                drop(handle);
-                return Err(self.abort_truncate_transaction(&journal, error));
-            }
-        };
-        if let Err(error) = handle.mark_inode_sync(inode.number()) {
-            drop(handle);
-            return Err(self.abort_truncate_transaction(&journal, error));
-        }
-        drop(handle);
-        self.commit_truncate_transaction_with_policy(journal, transaction, recovery_flag_policy)?;
-        Ok(updated_inode)
+        let result =
+            self.cleanup_orphaned_inode_from_head_metadata(tail_zeroed, target_size, &mut handle);
+        self.complete_metadata_mutation_with_policy(handle, result, recovery_flag_policy)
     }
 
     fn truncate_regular_inode_shrink_committed(
@@ -274,25 +248,13 @@ impl Ext4Filesystem {
         let credits = JournalCredits::for_regular_truncate(self, &inode, new_size)?;
         let tail_zeroed = self.zero_committed_inode_tail(DiskSizeCommitted { inode }, new_size)?;
 
-        let journal = self.metadata_journal()?;
+        let journal = self.metadata_journal_for_mutation(
+            credits,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )?;
         let mut handle = journal.begin(credits)?;
-        let transaction = handle.id();
-        let updated_inode =
-            match self.finish_regular_inode_shrink_metadata(tail_zeroed, new_size, &mut handle) {
-                Ok(updated_inode) => updated_inode,
-                Err(error) => {
-                    drop(handle);
-                    return Err(self.abort_truncate_transaction(&journal, error));
-                }
-            };
-        if let Err(error) = handle.mark_inode_sync(updated_inode.number()) {
-            drop(handle);
-            return Err(self.abort_truncate_transaction(&journal, error));
-        }
-        drop(handle);
-
-        self.commit_truncate_transaction(journal, transaction)?;
-        Ok(updated_inode)
+        let result = self.finish_regular_inode_shrink_metadata(tail_zeroed, new_size, &mut handle);
+        self.complete_metadata_mutation(handle, result)
     }
 
     fn commit_orphan_size_update(
@@ -301,33 +263,43 @@ impl Ext4Filesystem {
         new_size: u64,
         timestamp: crate::Ext4Timestamp,
     ) -> Ext4Result<DiskSizeCommitted> {
-        let journal = self.metadata_journal()?;
-        let mut handle = journal.begin(JournalCredits::for_orphan_size_update())?;
+        self.validate_inode_timestamp_update(inode, timestamp)?;
+        let credits = JournalCredits::for_orphan_size_update();
+        let journal = self.metadata_journal_for_mutation(
+            credits,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )?;
+        let mut handle = journal.begin(credits)?;
         let transaction = handle.id();
-        let updated_inode =
-            match self
-                .add_truncate_orphan(inode, &mut handle)
-                .and_then(|orphaned| {
-                    self.commit_orphaned_disk_size(
-                        orphaned,
-                        new_size,
-                        RegularWriteMetadata::Full { timestamp },
-                        &mut handle,
-                    )
-                }) {
-                Ok(committed) => committed.inode,
-                Err(error) => {
-                    drop(handle);
-                    return Err(self.abort_truncate_transaction(&journal, error));
-                }
-            };
-        if let Err(error) = handle.mark_inode_sync(inode.number()) {
-            drop(handle);
-            return Err(self.abort_truncate_transaction(&journal, error));
-        }
-        drop(handle);
+        let result = self
+            .add_truncate_orphan(inode, &mut handle)
+            .and_then(|orphaned| {
+                self.commit_orphaned_disk_size(
+                    orphaned,
+                    new_size,
+                    RegularWriteMetadata::Full { timestamp },
+                    &mut handle,
+                )
+            })
+            .map(|committed| committed.inode);
+        let has_updates = handle.has_updates();
+        let updated_inode = match result {
+            Ok(updated_inode) => {
+                drop(handle);
+                updated_inode
+            }
+            Err(error) => {
+                let error = self.fail_metadata_mutation(has_updates, error);
+                drop(handle);
+                return Err(error);
+            }
+        };
 
-        self.commit_truncate_transaction(journal, transaction)?;
+        // The orphan entry and reduced on-disk size must be durable before a
+        // later transaction is allowed to free the old block mappings.
+        if let Err(error) = self.commit_metadata_transaction(transaction) {
+            return Err(self.fail_metadata_mutation(has_updates, error));
+        }
         Ok(DiskSizeCommitted {
             inode: updated_inode,
         })
@@ -448,36 +420,6 @@ impl Ext4Filesystem {
                 self.flush_device()
             }
         }
-    }
-
-    fn commit_truncate_transaction(
-        &mut self,
-        journal: Journal,
-        transaction: TransactionId,
-    ) -> Ext4Result<()> {
-        self.commit_truncate_transaction_with_policy(
-            journal,
-            transaction,
-            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
-        )
-    }
-
-    fn commit_truncate_transaction_with_policy(
-        &mut self,
-        journal: Journal,
-        transaction: TransactionId,
-        recovery_flag_policy: crate::journal::RecoveryFlagPolicy,
-    ) -> Ext4Result<()> {
-        self.commit_metadata_transaction_with_policy(journal, transaction, recovery_flag_policy)
-    }
-
-    fn abort_truncate_transaction(&mut self, journal: &Journal, error: Ext4Error) -> Ext4Error {
-        if let Some(undo) = journal.abort(error)
-            && let Err(rollback_error) = self.rollback_metadata_undo(&undo)
-        {
-            return rollback_error;
-        }
-        error
     }
 }
 

@@ -77,6 +77,9 @@ impl Ext4Filesystem {
 
         let new_tree_blocks =
             extent_tree_metadata_block_count(remaining_extents.len(), self.device.block_size())?;
+        if u64::from(new_tree_blocks) > self.superblock().free_blocks_count() {
+            return Err(Ext4Error::NoSpace);
+        }
         let old_tree_blocks =
             u32::try_from(collected.metadata_blocks.len()).map_err(|_| Ext4Error::Overflow)?;
         let released_group_count =
@@ -101,6 +104,62 @@ impl Ext4Filesystem {
             })
             .and_then(|credits| credits.checked_add(SUPERBLOCK_CREDITS))
             .and_then(|credits| credits.checked_add(ALLOCATOR_API_HEADROOM))
+            .ok_or(Ext4Error::Overflow)
+    }
+
+    /// Validates one prospective extent insertion before its data blocks are
+    /// allocated and returns a conservative metadata-block reservation.
+    pub(crate) fn extent_insert_metadata_block_bound(
+        &self,
+        inode: &Ext4Inode,
+        logical: LogicalBlock,
+        len: BlockCount,
+    ) -> Ext4Result<u64> {
+        self.ensure_extent_mutation_supported(inode)?;
+        let logical = logical_block_u32(logical)?;
+        let placeholder_physical = PhysicalBlock::new(
+            u64::MAX
+                .checked_sub(u64::from(len.get()))
+                .ok_or(Ext4Error::Overflow)?,
+        );
+        let new_extents = MutableExtent::from_run(
+            logical,
+            placeholder_physical,
+            len,
+            ExtentMappingState::Unwritten,
+            |_, _| true,
+        )?;
+        let first = new_extents
+            .first()
+            .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidExtent))?;
+        let last = new_extents
+            .last()
+            .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidExtent))?;
+        let path = self.locate_extent_path(inode, first.logical)?;
+        if path
+            .upper_lblk
+            .is_some_and(|upper| last.end().map_or(true, |end| end > upper))
+        {
+            return Err(Ext4Error::Unsupported(UnsupportedKind::ExtentMutation));
+        }
+
+        let header = path.leaf_header()?;
+        let mut extents = path.decode_leaf_extents(self, inode)?;
+        insert_extent_run(&mut extents, &new_extents)?;
+        if extents.len() <= usize::from(header.max()) {
+            return Ok(0);
+        }
+        if !path.is_split_supported(self, &extents)? {
+            return Err(Ext4Error::Unsupported(UnsupportedKind::ExtentDepth));
+        }
+
+        // A split reuses at most one block at each existing level. Reserving
+        // two fresh blocks for the leaf and every parent/root level is a
+        // bounded overestimate that keeps NoSpace ahead of metadata access.
+        u64::try_from(path.parents.len())
+            .map_err(|_| Ext4Error::Overflow)?
+            .checked_add(2)
+            .and_then(|levels| levels.checked_mul(2))
             .ok_or(Ext4Error::Overflow)
     }
 
@@ -143,7 +202,7 @@ impl Ext4Filesystem {
         self.insert_extent_mapping_path_local(inode, &new_extents, handle)
     }
 
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     pub(crate) fn insert_inline_extent_mapping(
         &mut self,
         inode: &Ext4Inode,
@@ -200,7 +259,7 @@ impl Ext4Filesystem {
         )
     }
 
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     pub(crate) fn remove_extent_range(
         &mut self,
         inode: &Ext4Inode,
@@ -850,9 +909,9 @@ impl Ext4Filesystem {
             if self.journal_supports_revoke() {
                 self.release_inode_metadata_block(inode.number(), block, handle)?;
             } else {
-                // The current coordinator checkpoints every older transaction
-                // before opening this handle, so there is no older journaled
-                // image that recovery must suppress for a reused block.
+                // The transaction engine checkpoints every older transaction
+                // before opening this handle, so recovery has no older image
+                // to suppress for a reused block.
                 self.release_inode_metadata_block_without_revoke(inode.number(), block, handle)?;
             }
         }
@@ -2110,6 +2169,8 @@ fn encode_extent_len(len: u32, is_unwritten: bool) -> Ext4Result<u16> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::{balanced_partition_ranges, ordered_writeback_credit_bound};
 
     #[test]

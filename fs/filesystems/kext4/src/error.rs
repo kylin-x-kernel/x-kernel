@@ -162,7 +162,7 @@ pub enum Ext4Error {
     DirectoryNotEmpty,
     /// A caller-provided ext4 name is not valid for this operation.
     InvalidName,
-    /// A journal operation cannot complete while a transaction is still active.
+    /// A journal operation must wait for active handles or checkpoint space.
     JournalBusy,
     /// A journal operation referenced a transaction that is not known here.
     InvalidJournalTransaction,
@@ -221,7 +221,9 @@ impl fmt::Display for Ext4Error {
             Self::NotFound => formatter.write_str("ext4 directory entry was not found"),
             Self::DirectoryNotEmpty => formatter.write_str("ext4 directory is not empty"),
             Self::InvalidName => formatter.write_str("invalid ext4 directory entry name"),
-            Self::JournalBusy => formatter.write_str("ext4 journal transaction is busy"),
+            Self::JournalBusy => {
+                formatter.write_str("ext4 journal must wait for transaction or checkpoint progress")
+            }
             Self::InvalidJournalTransaction => {
                 formatter.write_str("invalid ext4 journal transaction")
             }

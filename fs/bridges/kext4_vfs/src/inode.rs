@@ -728,7 +728,8 @@ impl FileOperations for Inode {
 
     fn fsync(&self, file: &VfsFile, data_only: bool) -> VfsResult<()> {
         kvfs::libfs::simple_fsync_noflush(file, data_only)?;
-        self.fs.sync_to_disk()
+        self.fs
+            .sync_inode_to_disk(self.number, Ext4SyncIntent::from_data_only(data_only))
     }
 
     fn release(&self, inode: &VfsInode, file: &VfsFile) -> VfsResult<()> {

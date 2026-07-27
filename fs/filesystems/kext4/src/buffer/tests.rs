@@ -12,7 +12,7 @@ use super::*;
 use crate::{
     Ext4Error, FilesystemBlock, UnsupportedKind,
     io::FilesystemDevice,
-    jbd2::{Journal, JournalCredits, TransactionId},
+    jbd2::{JournalCredits, JournalTransactions, TransactionId},
 };
 
 const TEST_BLOCK_SIZE: usize = 512;
@@ -401,7 +401,7 @@ fn writeback_failure_records_buffer_error() {
 fn metadata_io_write_access_consumes_journal_handle_credit() {
     let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
     let metadata_io = metadata_io_for(device);
-    let journal = Journal::new(TransactionId::new(21));
+    let journal = JournalTransactions::new(TransactionId::new(21));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
     let block = FilesystemBlock::new(1);
 
@@ -425,11 +425,11 @@ fn metadata_io_write_access_consumes_journal_handle_credit() {
 }
 
 #[test]
-fn metadata_io_write_access_refunds_credit_on_buffer_conflict() {
+fn metadata_io_write_conflict_requires_transaction_abort_after_publication() {
     let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
     let metadata_io = metadata_io_for(device);
-    let first_journal = Journal::new(TransactionId::new(31));
-    let second_journal = Journal::new(TransactionId::new(41));
+    let first_journal = JournalTransactions::new(TransactionId::new(31));
+    let second_journal = JournalTransactions::new(TransactionId::new(41));
     let mut first = first_journal.begin(JournalCredits::new(1)).unwrap();
     let mut second = second_journal.begin(JournalCredits::new(1)).unwrap();
     let block = FilesystemBlock::new(1);
@@ -441,97 +441,67 @@ fn metadata_io_write_access_refunds_credit_on_buffer_conflict() {
             UnsupportedKind::ConcurrentMetadataTransaction
         ))
     ));
-    assert_eq!(second.remaining_credits(), 1);
+    assert_eq!(second.remaining_credits(), 0);
+    assert!(second.has_updates());
+    second_journal.abort(Ext4Error::InvalidJournalTransaction);
+    assert!(second_journal.is_aborted());
 }
 
 #[test]
-fn undo_access_records_one_committed_copy_and_rollback_restores_cache() {
+fn journal_abort_does_not_rewind_successful_prior_metadata_update() {
     let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
     let metadata_io = metadata_io_for(device);
-    let journal = Journal::new(TransactionId::new(111));
-    let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
-    let block = FilesystemBlock::new(1);
+    let journal = JournalTransactions::new(TransactionId::new(111));
+    let first_block = FilesystemBlock::new(1);
+    let second_block = FilesystemBlock::new(2);
 
-    let first = metadata_io.undo_access(block, &mut handle).unwrap();
+    let mut first_handle = journal.begin(JournalCredits::new(1)).unwrap();
+    let first = metadata_io
+        .write_access(first_block, &mut first_handle)
+        .unwrap();
     first
-        .update_bytes(|old, bytes| {
-            assert_eq!(old[7], 7);
+        .update_bytes(|_, bytes| {
             bytes[7] = 0xaa;
             Ok(())
         })
         .unwrap();
     drop(first);
-    let second = metadata_io.undo_access(block, &mut handle).unwrap();
+    first_handle.stop().unwrap();
+
+    let mut second_handle = journal.begin(JournalCredits::new(1)).unwrap();
+    let second = metadata_io
+        .write_access(second_block, &mut second_handle)
+        .unwrap();
     second
-        .update_bytes(|old, bytes| {
-            assert_eq!(old[7], 0xaa);
+        .update_bytes(|_, bytes| {
             bytes[7] = 0xbb;
             Ok(())
         })
         .unwrap();
     drop(second);
 
-    let undo = journal
-        .abort(Ext4Error::Device(DriverError::Io))
-        .expect("running transaction has undo blocks");
-    assert_eq!(undo.transaction(), TransactionId::new(111));
-    assert_eq!(undo.blocks().len(), 1);
-    assert_eq!(undo.blocks()[0].block(), block);
-    assert_eq!(undo.blocks()[0].bytes()[7], 7);
-
-    metadata_io.rollback_undo(&undo).unwrap();
-    let restored = metadata_io.read_block(block).unwrap();
-    assert_eq!(restored.as_ref()[7], 7);
+    journal.abort(Ext4Error::Device(DriverError::Io));
+    second_handle.stop().unwrap();
     assert_eq!(
-        metadata_io.cache.buffer_state(block).unwrap(),
-        MetadataBufferState::Clean
+        metadata_io.read_block(first_block).unwrap().as_ref()[7],
+        0xaa
+    );
+    assert_eq!(
+        metadata_io.cache.buffer_state(first_block).unwrap(),
+        MetadataBufferState::Dirty(TransactionId::new(111))
     );
     assert!(matches!(
-        metadata_io.write_access(FilesystemBlock::new(2), &mut handle),
+        journal.begin(JournalCredits::new(1)),
         Err(Ext4Error::JournalAborted)
     ));
 }
 
 #[test]
-fn committed_undo_restores_cache_before_checkpoint() {
+fn metadata_io_create_conflict_requires_transaction_abort_after_publication() {
     let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
     let metadata_io = metadata_io_for(device);
-    let journal = Journal::new(TransactionId::new(112));
-    let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
-    let transaction = handle.id();
-    let block = FilesystemBlock::new(1);
-
-    let access = metadata_io.undo_access(block, &mut handle).unwrap();
-    access
-        .update_bytes(|old, bytes| {
-            assert_eq!(old[9], 9);
-            bytes[9] = 0xcc;
-            Ok(())
-        })
-        .unwrap();
-    drop(access);
-    drop(handle);
-
-    let commit = journal.force_commit(transaction).unwrap();
-    assert_eq!(commit.undo_blocks().len(), 1);
-    assert_eq!(commit.undo_blocks()[0].block(), block);
-    assert_eq!(commit.undo_blocks()[0].bytes()[9], 9);
-
-    metadata_io.rollback_undo(&commit.undo()).unwrap();
-    let restored = metadata_io.read_block(block).unwrap();
-    assert_eq!(restored.as_ref()[9], 9);
-    assert_eq!(
-        metadata_io.cache.buffer_state(block).unwrap(),
-        MetadataBufferState::Clean
-    );
-}
-
-#[test]
-fn metadata_io_create_access_consumes_credit_and_refunds_on_conflict() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
-    let metadata_io = metadata_io_for(device);
-    let first_journal = Journal::new(TransactionId::new(81));
-    let second_journal = Journal::new(TransactionId::new(91));
+    let first_journal = JournalTransactions::new(TransactionId::new(81));
+    let second_journal = JournalTransactions::new(TransactionId::new(91));
     let mut first = first_journal.begin(JournalCredits::new(1)).unwrap();
     let mut second = second_journal.begin(JournalCredits::new(1)).unwrap();
     let block = FilesystemBlock::new(2);
@@ -549,14 +519,17 @@ fn metadata_io_create_access_consumes_credit_and_refunds_on_conflict() {
             UnsupportedKind::ConcurrentMetadataTransaction
         ))
     ));
-    assert_eq!(second.remaining_credits(), 1);
+    assert_eq!(second.remaining_credits(), 0);
+    assert!(second.has_updates());
+    second_journal.abort(Ext4Error::InvalidJournalTransaction);
+    assert!(second_journal.is_aborted());
 }
 
 #[test]
 fn metadata_io_forget_records_revoke_without_cached_buffer() {
     let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
     let metadata_io = metadata_io_for(device);
-    let journal = Journal::new(TransactionId::new(82));
+    let journal = JournalTransactions::new(TransactionId::new(82));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
     let transaction = handle.id();
     let block = FilesystemBlock::new(3);
@@ -568,15 +541,15 @@ fn metadata_io_forget_records_revoke_without_cached_buffer() {
     drop(handle);
 
     let commit = journal.force_commit(transaction).unwrap();
-    assert!(commit.metadata_blocks().is_empty());
-    assert_eq!(commit.revoked_blocks(), &[block]);
+    assert!(commit.metadata_blocks().unwrap().as_ref().is_empty());
+    assert_eq!(commit.revoked_blocks().unwrap().as_ref(), &[block]);
 }
 
 #[test]
 fn metadata_io_forget_drops_cached_current_transaction_state() {
     let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
     let metadata_io = metadata_io_for(device);
-    let journal = Journal::new(TransactionId::new(83));
+    let journal = JournalTransactions::new(TransactionId::new(83));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
     let transaction = handle.id();
     let block = FilesystemBlock::new(3);
@@ -597,8 +570,8 @@ fn metadata_io_forget_drops_cached_current_transaction_state() {
     drop(handle);
 
     let commit = journal.force_commit(transaction).unwrap();
-    assert!(commit.metadata_blocks().is_empty());
-    assert_eq!(commit.revoked_blocks(), &[block]);
+    assert!(commit.metadata_blocks().unwrap().as_ref().is_empty());
+    assert_eq!(commit.revoked_blocks().unwrap().as_ref(), &[block]);
     assert!(
         metadata_io
             .journal_commit_blocks(&commit)
@@ -611,7 +584,7 @@ fn metadata_io_forget_drops_cached_current_transaction_state() {
 fn metadata_io_forget_without_revoke_drops_current_transaction_update() {
     let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
     let metadata_io = metadata_io_for(device);
-    let journal = Journal::new(TransactionId::new(88));
+    let journal = JournalTransactions::new(TransactionId::new(88));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
     let transaction = handle.id();
     let block = FilesystemBlock::new(3);
@@ -633,8 +606,8 @@ fn metadata_io_forget_without_revoke_drops_current_transaction_update() {
     drop(handle);
 
     let commit = journal.force_commit(transaction).unwrap();
-    assert!(commit.metadata_blocks().is_empty());
-    assert!(commit.revoked_blocks().is_empty());
+    assert!(commit.metadata_blocks().unwrap().as_ref().is_empty());
+    assert!(commit.revoked_blocks().unwrap().as_ref().is_empty());
     assert!(
         metadata_io
             .journal_commit_blocks(&commit)
@@ -647,7 +620,7 @@ fn metadata_io_forget_without_revoke_drops_current_transaction_update() {
 fn metadata_io_forget_suppresses_older_checkpoint_home_write() {
     let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
     let metadata_io = metadata_io_for(device.clone());
-    let journal = Journal::new(TransactionId::new(85));
+    let journal = JournalTransactions::new(TransactionId::new(85));
     let block = FilesystemBlock::new(2);
 
     let mut first_handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -662,6 +635,7 @@ fn metadata_io_forget_suppresses_older_checkpoint_home_write() {
     drop(first);
     drop(first_handle);
     let first_commit = journal.force_commit(first_transaction).unwrap();
+    journal.start_checkpoint_for_test(&first_commit).unwrap();
     assert_eq!(
         metadata_io.journal_commit_blocks(&first_commit).unwrap()[0].bytes()[0],
         0x85
@@ -675,18 +649,18 @@ fn metadata_io_forget_suppresses_older_checkpoint_home_write() {
     drop(second_handle);
 
     let second_commit = journal.force_commit(second_transaction).unwrap();
-    assert_eq!(second_commit.revoked_blocks(), &[block]);
+    assert_eq!(second_commit.revoked_blocks().unwrap().as_ref(), &[block]);
     metadata_io.checkpoint_committed(&first_commit).unwrap();
     assert_eq!(device.write_count.load(Ordering::Relaxed), 0);
     assert_eq!(device.flush_count.load(Ordering::Relaxed), 1);
-    journal.finish_checkpoint(&first_commit).unwrap();
+    journal.finish_checkpoint_for_test(&first_commit).unwrap();
 }
 
 #[test]
 fn metadata_io_create_reuses_block_with_only_revoke_skipped_checkpoint_snapshot() {
     let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
     let metadata_io = metadata_io_for(device.clone());
-    let journal = Journal::new(TransactionId::new(86));
+    let journal = JournalTransactions::new(TransactionId::new(86));
     let block = FilesystemBlock::new(2);
 
     let mut first_handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -701,6 +675,7 @@ fn metadata_io_create_reuses_block_with_only_revoke_skipped_checkpoint_snapshot(
     drop(first);
     drop(first_handle);
     let first_commit = journal.force_commit(first_transaction).unwrap();
+    journal.start_checkpoint_for_test(&first_commit).unwrap();
     assert_eq!(
         metadata_io.journal_commit_blocks(&first_commit).unwrap()[0].bytes()[0],
         0x86
@@ -713,7 +688,8 @@ fn metadata_io_create_reuses_block_with_only_revoke_skipped_checkpoint_snapshot(
         .unwrap();
     drop(second_handle);
     let second_commit = journal.force_commit(second_transaction).unwrap();
-    assert_eq!(second_commit.revoked_blocks(), &[block]);
+    journal.start_checkpoint_for_test(&second_commit).unwrap();
+    assert_eq!(second_commit.revoked_blocks().unwrap().as_ref(), &[block]);
 
     let mut third_handle = journal.begin(JournalCredits::new(1)).unwrap();
     let third_transaction = third_handle.id();
@@ -733,9 +709,11 @@ fn metadata_io_create_reuses_block_with_only_revoke_skipped_checkpoint_snapshot(
 
     metadata_io.checkpoint_committed(&first_commit).unwrap();
     assert_eq!(device.write_count.load(Ordering::Relaxed), 0);
-    journal.finish_checkpoint(&first_commit).unwrap();
+    journal.finish_checkpoint_for_test(&first_commit).unwrap();
+    metadata_io.checkpoint_committed(&second_commit).unwrap();
+    journal.finish_checkpoint_for_test(&second_commit).unwrap();
     metadata_io.checkpoint_committed(&third_commit).unwrap();
-    journal.finish_checkpoint(&third_commit).unwrap();
+    journal.finish_checkpoint_for_test(&third_commit).unwrap();
 
     let device_offset = usize::try_from(block.get()).unwrap() * TEST_BLOCK_SIZE;
     assert_eq!(device.byte_at(device_offset), 0x87);
@@ -746,7 +724,7 @@ fn metadata_io_create_reuses_block_with_only_revoke_skipped_checkpoint_snapshot(
 fn metadata_io_forget_rejects_in_flight_checkpoint_writeback() {
     let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
     let metadata_io = metadata_io_for(device);
-    let journal = Journal::new(TransactionId::new(87));
+    let journal = JournalTransactions::new(TransactionId::new(87));
     let block = FilesystemBlock::new(2);
 
     let mut first_handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -779,7 +757,7 @@ fn metadata_io_forget_keeps_cached_block_when_revoke_credit_is_missing() {
     let metadata_io = metadata_io_for(device);
     let block = FilesystemBlock::new(3);
     let _cached = metadata_io.read_block(block).unwrap();
-    let journal = Journal::new(TransactionId::new(84));
+    let journal = JournalTransactions::new(TransactionId::new(84));
     let mut handle = journal.begin(JournalCredits::new(0)).unwrap();
 
     assert_eq!(
@@ -797,7 +775,7 @@ fn metadata_io_forget_keeps_cached_block_when_revoke_credit_is_missing() {
 fn checkpoint_committed_writes_dirty_metadata_and_flushes() {
     let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
     let metadata_io = metadata_io_for(device.clone());
-    let journal = Journal::new(TransactionId::new(51));
+    let journal = JournalTransactions::new(TransactionId::new(51));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
     let transaction = handle.id();
     let block = FilesystemBlock::new(2);
@@ -815,7 +793,7 @@ fn checkpoint_committed_writes_dirty_metadata_and_flushes() {
 
     let commit = journal.force_commit(transaction).unwrap();
     metadata_io.checkpoint_committed(&commit).unwrap();
-    journal.finish_checkpoint(&commit).unwrap();
+    journal.finish_checkpoint_for_test(&commit).unwrap();
 
     let device_offset = usize::try_from(block.get()).unwrap() * TEST_BLOCK_SIZE;
     assert_eq!(device.byte_at(device_offset), 0x5a);
@@ -832,7 +810,7 @@ fn checkpoint_committed_writes_dirty_metadata_and_flushes() {
 fn checkpoint_committed_writes_frozen_snapshot_while_next_transaction_stays_dirty() {
     let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
     let metadata_io = metadata_io_for(device.clone());
-    let journal = Journal::new(TransactionId::new(52));
+    let journal = JournalTransactions::new(TransactionId::new(52));
     let block = FilesystemBlock::new(2);
 
     let mut first_handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -847,6 +825,7 @@ fn checkpoint_committed_writes_frozen_snapshot_while_next_transaction_stays_dirt
     drop(first);
     drop(first_handle);
     let first_commit = journal.force_commit(first_transaction).unwrap();
+    journal.start_checkpoint_for_test(&first_commit).unwrap();
     let first_blocks = metadata_io.journal_commit_blocks(&first_commit).unwrap();
     assert_eq!(first_blocks[0].bytes()[0], 0x52);
 
@@ -881,7 +860,7 @@ fn checkpoint_committed_writes_frozen_snapshot_while_next_transaction_stays_dirt
 fn checkpoint_committed_preserves_multiple_frozen_transactions_in_order() {
     let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
     let metadata_io = metadata_io_for(device.clone());
-    let journal = Journal::new(TransactionId::new(53));
+    let journal = JournalTransactions::new(TransactionId::new(53));
     let block = FilesystemBlock::new(2);
 
     let mut first_handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -896,6 +875,7 @@ fn checkpoint_committed_preserves_multiple_frozen_transactions_in_order() {
     drop(first);
     drop(first_handle);
     let first_commit = journal.force_commit(first_transaction).unwrap();
+    journal.start_checkpoint_for_test(&first_commit).unwrap();
     assert_eq!(
         metadata_io.journal_commit_blocks(&first_commit).unwrap()[0].bytes()[0],
         0x53
@@ -913,6 +893,7 @@ fn checkpoint_committed_preserves_multiple_frozen_transactions_in_order() {
     drop(second);
     drop(second_handle);
     let second_commit = journal.force_commit(second_transaction).unwrap();
+    journal.start_checkpoint_for_test(&second_commit).unwrap();
     assert_eq!(
         metadata_io.journal_commit_blocks(&second_commit).unwrap()[0].bytes()[0],
         0x54
@@ -962,7 +943,7 @@ fn checkpoint_committed_preserves_multiple_frozen_transactions_in_order() {
 fn checkpoint_committed_writes_created_initialized_metadata_without_reading_old_block() {
     let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
     let metadata_io = metadata_io_for(device.clone());
-    let journal = Journal::new(TransactionId::new(101));
+    let journal = JournalTransactions::new(TransactionId::new(101));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
     let transaction = handle.id();
     let block = FilesystemBlock::new(2);
@@ -981,7 +962,7 @@ fn checkpoint_committed_writes_created_initialized_metadata_without_reading_old_
 
     let commit = journal.force_commit(transaction).unwrap();
     metadata_io.checkpoint_committed(&commit).unwrap();
-    journal.finish_checkpoint(&commit).unwrap();
+    journal.finish_checkpoint_for_test(&commit).unwrap();
 
     let device_offset = usize::try_from(block.get()).unwrap() * TEST_BLOCK_SIZE;
     assert_eq!(device.byte_at(device_offset), 0xca);
@@ -999,7 +980,7 @@ fn checkpoint_committed_writes_created_initialized_metadata_without_reading_old_
 fn journal_commit_blocks_capture_transaction_owned_metadata_snapshot() {
     let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
     let metadata_io = metadata_io_for(device);
-    let journal = Journal::new(TransactionId::new(71));
+    let journal = JournalTransactions::new(TransactionId::new(71));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
     let transaction = handle.id();
     let block = FilesystemBlock::new(2);
@@ -1027,7 +1008,7 @@ fn journal_commit_blocks_capture_transaction_owned_metadata_snapshot() {
 fn checkpoint_committed_releases_unchanged_journaled_buffer_without_write() {
     let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
     let metadata_io = metadata_io_for(device.clone());
-    let journal = Journal::new(TransactionId::new(61));
+    let journal = JournalTransactions::new(TransactionId::new(61));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
     let transaction = handle.id();
     let block = FilesystemBlock::new(2);

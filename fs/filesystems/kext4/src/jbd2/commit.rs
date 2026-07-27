@@ -11,7 +11,7 @@ use crate::{
     disk::checksum,
     error::{CorruptKind, UnsupportedKind},
     jbd2::{
-        JournalCommit,
+        RuntimeTransaction,
         log::JournalBlockReader,
         mapper::{JournalBlock, JournalTargetBlock, TransactionId},
         superblock::{
@@ -121,10 +121,9 @@ impl JournalLogCommit {
 }
 
 /// Evidence that an online commit is discoverable by recovery.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct JournalPersistedCommit {
     log: JournalLogCommit,
-    superblock: JournalSuperblock,
 }
 
 impl JournalPersistedCommit {
@@ -133,88 +132,112 @@ impl JournalPersistedCommit {
     pub(crate) const fn log(&self) -> JournalLogCommit {
         self.log
     }
-
-    /// Returns the updated active journal superblock.
-    pub(crate) fn superblock(&self) -> &JournalSuperblock {
-        &self.superblock
-    }
 }
 
-/// Writes a committed transaction and persists the journal as active.
+/// Persists a committing transaction and leaves the journal active.
 ///
 /// The returned state means that a later crash can discover the committed
 /// transaction through `scan_journal`. The caller must not checkpoint home
-/// metadata blocks until this function succeeds.
+/// metadata blocks until this function succeeds. An active journal requires
+/// `previous` to identify its latest persisted transaction so the new record
+/// can be appended at the current head without crossing the live tail.
 pub(crate) fn persist_journal_commit(
     superblock: &JournalSuperblock,
     journal: &impl JournalIo,
-    commit: &JournalCommit,
+    previous: Option<&JournalPersistedCommit>,
+    commit: &RuntimeTransaction,
     blocks: &[JournalCommitBlock],
-) -> Ext4Result<JournalPersistedCommit> {
-    if superblock.has_nonzero_log_start() {
-        return Err(Ext4Error::JournalBusy);
+) -> Ext4Result<(JournalPersistedCommit, JournalSuperblock)> {
+    let required_blocks = journal_blocks_required(superblock, commit, blocks)?;
+    let capacity = log_capacity(superblock)?;
+    if required_blocks >= capacity {
+        return Err(Ext4Error::Unsupported(UnsupportedKind::JournalTooLarge));
     }
-    let start = clean_log_head(superblock);
-    let log = write_journal_commit(superblock, journal, start, commit, blocks)?;
-    let active_superblock = write_journal_superblock_active(superblock, journal, &log)?;
-    Ok(JournalPersistedCommit {
-        log,
-        superblock: active_superblock,
-    })
+
+    let (sequence, tail, start, needs_activation) = match superblock.start() {
+        JournalStart::Zero => {
+            if previous.is_some() || commit.id() != superblock.sequence() {
+                return Err(Ext4Error::InvalidJournalTransaction);
+            }
+            let start = clean_log_head(superblock);
+            (commit.id(), start, start, true)
+        }
+        JournalStart::Block(tail) => {
+            let previous = previous.ok_or(Ext4Error::InvalidJournalTransaction)?;
+            if commit.id() != previous.log.next_sequence() {
+                return Err(Ext4Error::InvalidJournalTransaction);
+            }
+            (superblock.sequence(), tail, previous.log.head(), false)
+        }
+    };
+    ensure_log_space(superblock, tail, start, required_blocks)?;
+    // A clean journal must become discoverable before its first transaction is
+    // emitted. If power is lost after activation but before the commit block,
+    // recovery scans an incomplete transaction instead of incorrectly treating
+    // the journal as empty.
+    let active_superblock = if needs_activation {
+        write_journal_superblock_active(superblock, journal, sequence, tail)?
+    } else {
+        superblock.clone()
+    };
+    let log = write_journal_commit(&active_superblock, journal, start, commit, blocks)?;
+    Ok((JournalPersistedCommit { log }, active_superblock))
 }
 
 /// Marks a persisted transaction checkpointed in the journal superblock.
 ///
 /// The caller must complete and flush home-block checkpoint I/O before calling
-/// this function. Once it succeeds, recovery will treat the journal as clean.
+/// this function. When another persisted transaction remains, the journal tail
+/// advances to `next_oldest`; otherwise the journal becomes clean.
 pub(crate) fn finish_journal_checkpoint(
     superblock: &JournalSuperblock,
     journal: &impl JournalIo,
     persisted: &JournalPersistedCommit,
+    next_oldest: Option<&JournalPersistedCommit>,
 ) -> Ext4Result<JournalSuperblock> {
-    if superblock.start() != JournalStart::Block(persisted.log.start()) {
+    if superblock.sequence() != persisted.log.transaction()
+        || superblock.start() != JournalStart::Block(persisted.log.start())
+    {
         return Err(Ext4Error::InvalidJournalTransaction);
     }
-    write_journal_superblock_empty(superblock, journal, &persisted.log)
+    let Some(next_oldest) = next_oldest else {
+        return write_journal_superblock_empty(superblock, journal, &persisted.log);
+    };
+    if next_oldest.log.transaction() != persisted.log.next_sequence()
+        || next_oldest.log.start() != persisted.log.head()
+    {
+        return Err(Ext4Error::InvalidJournalTransaction);
+    }
+    write_journal_superblock_active(
+        superblock,
+        journal,
+        next_oldest.log.transaction(),
+        next_oldest.log.start(),
+    )
 }
 
-/// Writes descriptor, data, and commit blocks for one committed transaction.
+/// Writes descriptor, data, and commit blocks for one committing transaction.
 ///
 /// The caller is responsible for selecting a free log range. This function
-/// validates that the supplied metadata images exactly match the committed
+/// validates that the supplied metadata images exactly match the frozen
 /// transaction record, writes a JBD2 transaction that current recovery code can
 /// scan, and flushes the journal device after the commit block is written.
 pub(crate) fn write_journal_commit(
     superblock: &JournalSuperblock,
     writer: &impl JournalBlockWriter,
     start: JournalBlock,
-    commit: &JournalCommit,
+    commit: &RuntimeTransaction,
     blocks: &[JournalCommitBlock],
 ) -> Ext4Result<JournalLogCommit> {
-    validate_supported_features(superblock)?;
-    if !commit.revoked_blocks().is_empty() && !has_revoke(superblock) {
-        return Err(Ext4Error::InvalidJournalTransaction);
-    }
     validate_start(superblock, start)?;
-    validate_commit_blocks(superblock, commit, blocks)?;
+    let total_journal_blocks = journal_blocks_required(superblock, commit, blocks)?;
+    let journal_block_count =
+        u32::try_from(total_journal_blocks).map_err(|_| Ext4Error::Overflow)?;
 
     let block_size = usize::try_from(superblock.block_size()).map_err(|_| Ext4Error::Overflow)?;
     let descriptor_capacity = descriptor_tag_capacity(superblock, block_size)?;
     let revoke_capacity = revoke_block_capacity(superblock, block_size)?;
-    let descriptor_count = blocks.len().div_ceil(descriptor_capacity);
-    let revoke_block_count = commit.revoked_blocks().len().div_ceil(revoke_capacity);
-    let total_journal_blocks = descriptor_count
-        .checked_add(blocks.len())
-        .and_then(|count| count.checked_add(revoke_block_count))
-        .and_then(|count| count.checked_add(1))
-        .ok_or(Ext4Error::Overflow)?;
-    let log_capacity = log_capacity(superblock)?;
-    if total_journal_blocks > log_capacity {
-        return Err(Ext4Error::Unsupported(UnsupportedKind::JournalTooLarge));
-    }
-    let journal_block_count =
-        u32::try_from(total_journal_blocks).map_err(|_| Ext4Error::Overflow)?;
-
+    let revoked_blocks = commit.revoked_blocks()?;
     let checksum_seed = checksum::crc32c(u32::MAX, &superblock.uuid());
     let mut cursor = start;
     let mut offset = 0usize;
@@ -233,15 +256,15 @@ pub(crate) fn write_journal_commit(
         offset += group_len;
     }
     let mut revoke_offset = 0usize;
-    while revoke_offset < commit.revoked_blocks().len() {
-        let remaining = commit.revoked_blocks().len() - revoke_offset;
+    while revoke_offset < revoked_blocks.len() {
+        let remaining = revoked_blocks.len() - revoke_offset;
         let group_len = remaining.min(revoke_capacity);
         cursor = write_revoke_block(
             superblock,
             writer,
             cursor,
             commit.id(),
-            &commit.revoked_blocks()[revoke_offset..revoke_offset + group_len],
+            &revoked_blocks[revoke_offset..revoke_offset + group_len],
             checksum_seed,
             block_size,
         )?;
@@ -259,7 +282,7 @@ pub(crate) fn write_journal_commit(
         head,
         next_sequence: TransactionId::new(commit.id().get().wrapping_add(1)),
         update_count: blocks.len(),
-        revoke_count: commit.revoked_blocks().len(),
+        revoke_count: revoked_blocks.len(),
         journal_block_count,
     })
 }
@@ -287,10 +310,11 @@ fn clean_log_head(superblock: &JournalSuperblock) -> JournalBlock {
 fn write_journal_superblock_active(
     superblock: &JournalSuperblock,
     journal: &impl JournalIo,
-    log: &JournalLogCommit,
+    sequence: TransactionId,
+    start: JournalBlock,
 ) -> Ext4Result<JournalSuperblock> {
     update_journal_superblock(superblock, journal, |bytes| {
-        mark_superblock_active(bytes, log.transaction(), log.start(), log.head())
+        mark_superblock_active(bytes, sequence, start)
     })
 }
 
@@ -333,21 +357,22 @@ fn validate_start(superblock: &JournalSuperblock, start: JournalBlock) -> Ext4Re
 
 fn validate_commit_blocks(
     superblock: &JournalSuperblock,
-    commit: &JournalCommit,
+    commit: &RuntimeTransaction,
     blocks: &[JournalCommitBlock],
 ) -> Ext4Result<()> {
     let block_size = usize::try_from(superblock.block_size()).map_err(|_| Ext4Error::Overflow)?;
-    if blocks.len() != commit.metadata_blocks().len() {
+    let metadata_blocks = commit.metadata_blocks()?;
+    let revoked_blocks = commit.revoked_blocks()?;
+    if blocks.len() != metadata_blocks.len() {
         return Err(Ext4Error::InvalidJournalTransaction);
     }
-    if commit
-        .revoked_blocks()
+    if revoked_blocks
         .iter()
-        .any(|revoked| commit.metadata_blocks().contains(revoked))
+        .any(|revoked| metadata_blocks.contains(revoked))
     {
         return Err(Ext4Error::InvalidJournalTransaction);
     }
-    for (expected, block) in commit.metadata_blocks().iter().zip(blocks) {
+    for (expected, block) in metadata_blocks.iter().zip(blocks) {
         if *expected != block.target() {
             return Err(Ext4Error::InvalidJournalTransaction);
         }
@@ -359,6 +384,72 @@ fn validate_commit_blocks(
         }
     }
     Ok(())
+}
+
+fn journal_blocks_required(
+    superblock: &JournalSuperblock,
+    commit: &RuntimeTransaction,
+    blocks: &[JournalCommitBlock],
+) -> Ext4Result<usize> {
+    validate_supported_features(superblock)?;
+    let revoked_blocks = commit.revoked_blocks()?;
+    if !revoked_blocks.is_empty() && !has_revoke(superblock) {
+        return Err(Ext4Error::InvalidJournalTransaction);
+    }
+    validate_commit_blocks(superblock, commit, blocks)?;
+
+    let block_size = usize::try_from(superblock.block_size()).map_err(|_| Ext4Error::Overflow)?;
+    let descriptor_capacity = descriptor_tag_capacity(superblock, block_size)?;
+    let revoke_capacity = revoke_block_capacity(superblock, block_size)?;
+    let descriptor_count = blocks.len().div_ceil(descriptor_capacity);
+    let revoke_block_count = revoked_blocks.len().div_ceil(revoke_capacity);
+    let total = descriptor_count
+        .checked_add(blocks.len())
+        .and_then(|count| count.checked_add(revoke_block_count))
+        .and_then(|count| count.checked_add(1))
+        .ok_or(Ext4Error::Overflow)?;
+    if total > log_capacity(superblock)? {
+        return Err(Ext4Error::Unsupported(UnsupportedKind::JournalTooLarge));
+    }
+    Ok(total)
+}
+
+fn ensure_log_space(
+    superblock: &JournalSuperblock,
+    tail: JournalBlock,
+    head: JournalBlock,
+    required_blocks: usize,
+) -> Ext4Result<()> {
+    validate_start(superblock, tail)?;
+    validate_start(superblock, head)?;
+    let used_blocks = log_distance(superblock, tail, head)?;
+    let free_blocks = log_capacity(superblock)?
+        .checked_sub(used_blocks)
+        .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?;
+
+    // Keep one block free so an active ring never has an ambiguous head ==
+    // tail state and an append cannot overwrite the oldest live descriptor.
+    if required_blocks >= free_blocks {
+        return Err(Ext4Error::JournalBusy);
+    }
+    Ok(())
+}
+
+fn log_distance(
+    superblock: &JournalSuperblock,
+    start: JournalBlock,
+    end: JournalBlock,
+) -> Ext4Result<usize> {
+    let distance = if end.get() >= start.get() {
+        end.get() - start.get()
+    } else {
+        superblock
+            .max_blocks()
+            .checked_sub(start.get())
+            .and_then(|tail| tail.checked_add(end.get() - superblock.first_log_block().get()))
+            .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?
+    };
+    usize::try_from(distance).map_err(|_| Ext4Error::Overflow)
 }
 
 fn log_capacity(superblock: &JournalSuperblock) -> Ext4Result<usize> {
@@ -720,14 +811,13 @@ fn checked_offset(offset: usize, len: usize) -> Ext4Result<usize> {
 mod tests {
     use std::{cell::RefCell, collections::BTreeMap};
 
+    use block::DriverError;
+
     use super::*;
-    use crate::{
-        InodeNumber,
-        jbd2::{
-            Journal, JournalBlockReader, JournalCredits, JournalReplayBlockWriter,
-            JournalSuperblock, replay_scanned_journal, scan_journal,
-            superblock::JOURNAL_SUPERBLOCK_SIZE,
-        },
+    use crate::jbd2::{
+        JournalBlockReader, JournalCredits, JournalReplayBlockWriter, JournalSuperblock,
+        JournalTransactions, replay_scanned_journal, scan_journal,
+        superblock::JOURNAL_SUPERBLOCK_SIZE,
     };
 
     const UUID: [u8; 16] = [0x5a; 16];
@@ -737,6 +827,8 @@ mod tests {
 
     struct TestJournal {
         blocks: RefCell<BTreeMap<u32, Vec<u8>>>,
+        write_order: RefCell<Vec<JournalBlock>>,
+        fail_write_at: RefCell<Option<usize>>,
         flush_count: RefCell<usize>,
     }
 
@@ -748,6 +840,8 @@ mod tests {
         fn new() -> Self {
             Self {
                 blocks: RefCell::new(BTreeMap::new()),
+                write_order: RefCell::new(Vec::new()),
+                fail_write_at: RefCell::new(None),
                 flush_count: RefCell::new(0),
             }
         }
@@ -762,6 +856,10 @@ mod tests {
             let block = encoded_journal_superblock(superblock);
             self.blocks.borrow_mut().insert(0, block);
         }
+
+        fn fail_write_at(&self, write_index: usize) {
+            *self.fail_write_at.borrow_mut() = Some(write_index);
+        }
     }
 
     impl JournalBlockWriter for TestJournal {
@@ -772,6 +870,10 @@ mod tests {
                     actual: input.len(),
                 });
             }
+            if *self.fail_write_at.borrow() == Some(self.write_order.borrow().len()) {
+                return Err(Ext4Error::Device(DriverError::Io));
+            }
+            self.write_order.borrow_mut().push(block);
             self.blocks.borrow_mut().insert(block.get(), input.to_vec());
             Ok(())
         }
@@ -1090,22 +1192,60 @@ mod tests {
         let (commit, blocks) =
             committed_blocks(&[(FilesystemBlock::new(800), vec![0x88; BLOCK_SIZE])]);
 
-        let persisted = persist_journal_commit(&superblock, &journal, &commit, &blocks).unwrap();
+        let (persisted, active_superblock) =
+            persist_journal_commit(&superblock, &journal, None, &commit, &blocks).unwrap();
 
         assert_eq!(persisted.log().start(), JournalBlock::new(1));
         assert_eq!(persisted.log().head(), JournalBlock::new(4));
         assert_eq!(
-            persisted.superblock().start(),
+            active_superblock.start(),
             JournalStart::Block(JournalBlock::new(1))
         );
-        assert_eq!(persisted.superblock().head(), JournalBlock::new(4));
+        assert_eq!(active_superblock.head(), JournalBlock::new(1));
         assert_eq!(*journal.flush_count.borrow(), 2);
+        assert_eq!(
+            journal.write_order.borrow().first().copied(),
+            Some(JournalBlock::new(0))
+        );
 
-        let scan = scan_journal(persisted.superblock(), &journal).unwrap();
+        let scan = scan_journal(&active_superblock, &journal).unwrap();
         assert_eq!(scan.transactions().len(), 1);
         let replay = TestReplayWriter::new();
         replay_scanned_journal(&journal, &replay, &scan, BLOCK_SIZE).unwrap();
         assert_eq!(replay.blocks.borrow().get(&800).unwrap()[0], 0x88);
+    }
+
+    #[test]
+    fn power_loss_after_first_activation_does_not_look_like_a_clean_journal() {
+        let superblock = journal_superblock(0, 0, SEQUENCE);
+        let journal = TestJournal::with_superblock(&superblock);
+        let (commit, blocks) =
+            committed_blocks(&[(FilesystemBlock::new(800), vec![0x88; BLOCK_SIZE])]);
+        // Write 0 activates and flushes the journal; write 1 is the first
+        // descriptor block and models power loss in the reviewed window.
+        journal.fail_write_at(1);
+        assert!(matches!(
+            persist_journal_commit(&superblock, &journal, None, commit.as_ref(), &blocks),
+            Err(Ext4Error::Device(DriverError::Io))
+        ));
+
+        let mut bytes = vec![0; BLOCK_SIZE];
+        journal
+            .read_journal_block(JournalBlock::new(0), &mut bytes)
+            .unwrap();
+        let active =
+            JournalSuperblock::decode(&bytes, BLOCK_SIZE as u32, JOURNAL_BLOCKS, UUID).unwrap();
+        let start = clean_log_head(&superblock);
+        assert_eq!(active.start(), JournalStart::Block(start));
+        assert_eq!(*journal.flush_count.borrow(), 1);
+        assert_eq!(
+            journal.write_order.borrow().as_slice(),
+            &[JournalBlock::new(0)]
+        );
+
+        let scan = scan_journal(&active, &journal).unwrap();
+        assert!(scan.transactions().is_empty());
+        assert_eq!(scan.next_sequence(), TransactionId::new(SEQUENCE));
     }
 
     #[test]
@@ -1115,9 +1255,10 @@ mod tests {
         let (commit, blocks) =
             committed_blocks(&[(FilesystemBlock::new(900), vec![0x99; BLOCK_SIZE])]);
 
-        let persisted = persist_journal_commit(&superblock, &journal, &commit, &blocks).unwrap();
+        let (persisted, active_superblock) =
+            persist_journal_commit(&superblock, &journal, None, &commit, &blocks).unwrap();
         let clean =
-            finish_journal_checkpoint(persisted.superblock(), &journal, &persisted).unwrap();
+            finish_journal_checkpoint(&active_superblock, &journal, &persisted, None).unwrap();
 
         assert_eq!(clean.start(), JournalStart::Zero);
         assert_eq!(clean.sequence(), TransactionId::new(SEQUENCE + 1));
@@ -1128,33 +1269,107 @@ mod tests {
     }
 
     #[test]
-    fn persist_commit_rejects_already_active_journal() {
+    fn persist_commit_rejects_active_journal_without_latest_commit() {
         let superblock = journal_superblock(1, 0, SEQUENCE);
         let journal = TestJournal::with_superblock(&superblock);
         let (commit, blocks) =
             committed_blocks(&[(FilesystemBlock::new(1000), vec![0xaa; BLOCK_SIZE])]);
 
         assert_eq!(
-            persist_journal_commit(&superblock, &journal, &commit, &blocks).map(|_| ()),
+            persist_journal_commit(&superblock, &journal, None, &commit, &blocks).map(|_| ()),
+            Err(Ext4Error::InvalidJournalTransaction)
+        );
+    }
+
+    #[test]
+    fn append_space_keeps_one_block_between_head_and_tail() {
+        let superblock = journal_superblock(1, 0, SEQUENCE);
+
+        assert_eq!(
+            ensure_log_space(
+                &superblock,
+                JournalBlock::new(1),
+                JournalBlock::new(JOURNAL_BLOCKS - 2),
+                2,
+            ),
             Err(Ext4Error::JournalBusy)
         );
+        ensure_log_space(
+            &superblock,
+            JournalBlock::new(1),
+            JournalBlock::new(JOURNAL_BLOCKS - 2),
+            1,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn appends_commits_and_advances_checkpoint_tail_in_order() {
+        let superblock = journal_superblock(0, FEATURE_INCOMPAT_CSUM_V3, SEQUENCE);
+        let journal = TestJournal::with_superblock(&superblock);
+        let (first_commit, first_blocks) =
+            committed_blocks(&[(FilesystemBlock::new(1100), vec![0xab; BLOCK_SIZE])]);
+        let (second_commit, second_blocks) = committed_blocks_with_sequence(
+            SEQUENCE.wrapping_add(1),
+            &[(FilesystemBlock::new(1200), vec![0xbc; BLOCK_SIZE])],
+        );
+
+        let (first, first_superblock) =
+            persist_journal_commit(&superblock, &journal, None, &first_commit, &first_blocks)
+                .unwrap();
+        let (second, second_superblock) = persist_journal_commit(
+            &first_superblock,
+            &journal,
+            Some(&first),
+            &second_commit,
+            &second_blocks,
+        )
+        .unwrap();
+
+        assert_eq!(second_superblock.sequence(), first.log().transaction());
+        assert_eq!(
+            second_superblock.start(),
+            JournalStart::Block(first.log().start())
+        );
+        assert_eq!(second_superblock.head(), JournalBlock::new(1));
+        let scan = scan_journal(&second_superblock, &journal).unwrap();
+        assert_eq!(scan.transactions().len(), 2);
+
+        let second_is_oldest =
+            finish_journal_checkpoint(&second_superblock, &journal, &first, Some(&second)).unwrap();
+        assert_eq!(second_is_oldest.sequence(), second.log().transaction());
+        assert_eq!(
+            second_is_oldest.start(),
+            JournalStart::Block(second.log().start())
+        );
+        assert_eq!(second_is_oldest.head(), JournalBlock::new(1));
+        let scan = scan_journal(&second_is_oldest, &journal).unwrap();
+        assert_eq!(scan.transactions().len(), 1);
+        assert_eq!(
+            scan.transactions()[0].sequence(),
+            second.log().transaction()
+        );
+
+        let clean = finish_journal_checkpoint(&second_is_oldest, &journal, &second, None).unwrap();
+        assert_eq!(clean.start(), JournalStart::Zero);
+        assert_eq!(clean.sequence(), second.log().next_sequence());
+        assert_eq!(clean.head(), second.log().head());
     }
 
     fn committed_blocks(
         input: &[(FilesystemBlock, Vec<u8>)],
-    ) -> (JournalCommit, Vec<JournalCommitBlock>) {
+    ) -> (Arc<RuntimeTransaction>, Vec<JournalCommitBlock>) {
         committed_blocks_with_sequence(SEQUENCE, input)
     }
 
     fn committed_blocks_with_sequence(
         sequence: u32,
         input: &[(FilesystemBlock, Vec<u8>)],
-    ) -> (JournalCommit, Vec<JournalCommitBlock>) {
-        let journal = Journal::new(TransactionId::new(sequence));
+    ) -> (Arc<RuntimeTransaction>, Vec<JournalCommitBlock>) {
+        let journal = JournalTransactions::new(TransactionId::new(sequence));
         let mut handle = journal
             .begin(JournalCredits::new(input.len() as u32))
             .unwrap();
-        handle.mark_inode_sync(InodeNumber::new(12)).unwrap();
         for (block, _) in input {
             handle.consume_metadata_credit(*block).unwrap();
         }
@@ -1173,8 +1388,8 @@ mod tests {
     fn committed_revokes_with_sequence(
         sequence: u32,
         revoked: &[FilesystemBlock],
-    ) -> JournalCommit {
-        let journal = Journal::new(TransactionId::new(sequence));
+    ) -> Arc<RuntimeTransaction> {
+        let journal = JournalTransactions::new(TransactionId::new(sequence));
         let mut handle = journal
             .begin(JournalCredits::new(revoked.len() as u32))
             .unwrap();

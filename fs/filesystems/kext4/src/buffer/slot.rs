@@ -195,6 +195,37 @@ impl MetadataBufferSlot {
         }
     }
 
+    pub(super) fn replace_checkpoint_bytes(
+        &self,
+        transaction: TransactionId,
+        new_bytes: Arc<[u8]>,
+    ) -> Ext4Result<()> {
+        let mut contents = lock(&self.contents);
+        match &mut *contents {
+            BufferContents::Ready { checkpoints, .. } => {
+                let snapshot = checkpoints
+                    .iter_mut()
+                    .find(|snapshot| snapshot.transaction == transaction)
+                    .ok_or(buffer_state_error())?;
+                if snapshot.is_writeback {
+                    return Err(transaction_conflict_error());
+                }
+                if snapshot.bytes.len() != new_bytes.len() {
+                    return Err(Ext4Error::InvalidBufferLength {
+                        expected: snapshot.bytes.len(),
+                        actual: new_bytes.len(),
+                    });
+                }
+                snapshot.bytes = new_bytes;
+                Ok(())
+            }
+            BufferContents::Failed(error) => Err(*error),
+            BufferContents::Loading => {
+                unreachable!("metadata buffer must finish loading before checkpoint replacement")
+            }
+        }
+    }
+
     pub(super) fn replace_bytes(
         &self,
         transaction: TransactionId,
@@ -501,61 +532,6 @@ impl MetadataBufferSlot {
             BufferContents::Failed(error) => Err(*error),
             BufferContents::Loading => {
                 unreachable!("metadata buffer must finish loading before checkpoint")
-            }
-        }
-    }
-
-    pub(super) fn restore_undo(
-        &self,
-        transaction: TransactionId,
-        undo_bytes: Arc<[u8]>,
-    ) -> Ext4Result<()> {
-        let mut contents = lock(&self.contents);
-        match &mut *contents {
-            BufferContents::Ready {
-                bytes,
-                state,
-                checkpoints,
-            } => {
-                if bytes.len() != undo_bytes.len() {
-                    return Err(Ext4Error::InvalidBufferLength {
-                        expected: bytes.len(),
-                        actual: undo_bytes.len(),
-                    });
-                }
-                if let Some(snapshot) = checkpoints.front() {
-                    if snapshot.transaction != transaction
-                        || checkpoints.len() != 1
-                        || !matches!(*state, MetadataBufferState::Clean)
-                    {
-                        return Err(transaction_conflict_error());
-                    }
-                    checkpoints.pop_front();
-                    self.notify_all();
-                }
-                match *state {
-                    MetadataBufferState::Journaled(owner)
-                    | MetadataBufferState::Created(owner)
-                    | MetadataBufferState::Dirty(owner)
-                        if owner == transaction =>
-                    {
-                        *bytes = undo_bytes;
-                        *state = MetadataBufferState::Clean;
-                        Ok(())
-                    }
-                    MetadataBufferState::Clean => {
-                        *bytes = undo_bytes;
-                        Ok(())
-                    }
-                    MetadataBufferState::Journaled(_)
-                    | MetadataBufferState::Created(_)
-                    | MetadataBufferState::Dirty(_)
-                    | MetadataBufferState::Writeback(_) => Err(transaction_conflict_error()),
-                }
-            }
-            BufferContents::Failed(error) => Err(*error),
-            BufferContents::Loading => {
-                unreachable!("metadata buffer must finish loading before undo restore")
             }
         }
     }

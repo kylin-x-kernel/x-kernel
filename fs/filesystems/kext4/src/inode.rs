@@ -9,8 +9,8 @@ use crate::{
     InodeNumber, UnsupportedKind,
     disk::{checksum, codec, extent as disk_extent, inode as disk_inode},
     file::RegularWriteMetadata,
-    jbd2::{Journal, JournalCredits, JournalHandle},
-    superblock::{metadata_access_bytes, replace_metadata_access_bytes},
+    jbd2::{JournalCredits, JournalHandle},
+    superblock::replace_metadata_access_bytes,
 };
 
 const EXT4_ENCODED_DEV_MAJOR_MAX: u32 = 0x0fff;
@@ -879,6 +879,22 @@ impl Ext4Filesystem {
         self.update_regular_inode_size_metadata(inode, new_disk_size, metadata, handle)
     }
 
+    pub(crate) fn validate_inode_timestamp_update(
+        &self,
+        inode: &Ext4Inode,
+        timestamp: Ext4Timestamp,
+    ) -> Ext4Result<()> {
+        let inode_table_block = self.inode_table_entry_block(inode.number())?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
+        self.update_referenced_inode_table_entry(&mut inode_table_bytes, inode, |inode_bytes| {
+            update_inode_ctime_mtime_bytes(inode_bytes, timestamp)
+        })?;
+        Ok(())
+    }
+
     pub(crate) fn update_regular_inode_size_metadata(
         &self,
         inode: &Ext4Inode,
@@ -889,8 +905,10 @@ impl Ext4Filesystem {
         self.ensure_regular_file_mutation_supported(inode)?;
 
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let inode_table_access = self.metadata_io.undo_access(inode_table_block, handle)?;
-        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access)?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
         let updated_inode = self.update_referenced_inode_table_entry(
             &mut inode_table_bytes,
             inode,
@@ -918,6 +936,7 @@ impl Ext4Filesystem {
                 }
             },
         )?;
+        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
         Ok(updated_inode)
     }
@@ -930,8 +949,10 @@ impl Ext4Filesystem {
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<Ext4Inode> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let inode_table_access = self.metadata_io.undo_access(inode_table_block, handle)?;
-        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access)?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
         let updated_inode = self.update_referenced_inode_table_entry(
             &mut inode_table_bytes,
             inode,
@@ -940,6 +961,7 @@ impl Ext4Filesystem {
                 update_inode_ctime_mtime_bytes(inode_bytes, timestamp)
             },
         )?;
+        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
         Ok(updated_inode)
     }
@@ -951,13 +973,16 @@ impl Ext4Filesystem {
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<Ext4Inode> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let inode_table_access = self.metadata_io.undo_access(inode_table_block, handle)?;
-        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access)?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
         let updated_inode = self.update_referenced_inode_table_entry(
             &mut inode_table_bytes,
             inode,
             |inode_bytes| update_inode_ctime_mtime_bytes(inode_bytes, timestamp),
         )?;
+        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
         Ok(updated_inode)
     }
@@ -969,13 +994,16 @@ impl Ext4Filesystem {
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<Ext4Inode> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let inode_table_access = self.metadata_io.undo_access(inode_table_block, handle)?;
-        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access)?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
         let updated_inode = self.update_referenced_inode_table_entry(
             &mut inode_table_bytes,
             inode,
             |inode_bytes| update_inode_ctime_bytes(inode_bytes, timestamp),
         )?;
+        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
         Ok(updated_inode)
     }
@@ -990,26 +1018,14 @@ impl Ext4Filesystem {
             return Ok(inode.clone());
         }
 
-        let journal = self.metadata_journal()?;
-        let mut handle = journal.begin(JournalCredits::new(2))?;
-        let transaction = handle.id();
-
-        let updated_inode =
-            match self.update_inode_metadata_in_transaction(inode, update, &mut handle) {
-                Ok(updated_inode) => updated_inode,
-                Err(error) => {
-                    drop(handle);
-                    return Err(self.abort_inode_metadata_update(&journal, error));
-                }
-            };
-        if let Err(error) = handle.mark_inode_sync(inode.number()) {
-            drop(handle);
-            return Err(self.abort_inode_metadata_update(&journal, error));
-        }
-        drop(handle);
-
-        self.commit_metadata_transaction(journal, transaction)?;
-        Ok(updated_inode)
+        let credits = JournalCredits::new(2);
+        let journal = self.metadata_journal_for_mutation(
+            credits,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )?;
+        let mut handle = journal.begin(credits)?;
+        let result = self.update_inode_metadata_in_transaction(inode, update, &mut handle);
+        self.complete_metadata_mutation(handle, result)
     }
 
     fn update_inode_metadata_in_transaction(
@@ -1019,8 +1035,10 @@ impl Ext4Filesystem {
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<Ext4Inode> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let inode_table_access = self.metadata_io.undo_access(inode_table_block, handle)?;
-        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access)?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
         let updated_inode = self.update_referenced_inode_table_entry(
             &mut inode_table_bytes,
             inode,
@@ -1062,17 +1080,9 @@ impl Ext4Filesystem {
                 )
             },
         )?;
+        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
         Ok(updated_inode)
-    }
-
-    fn abort_inode_metadata_update(&mut self, journal: &Journal, error: Ext4Error) -> Ext4Error {
-        if let Some(undo) = journal.abort(error)
-            && let Err(rollback_error) = self.rollback_metadata_undo(&undo)
-        {
-            return rollback_error;
-        }
-        error
     }
 
     pub(crate) fn update_inode_flags_timestamps_metadata(
@@ -1083,8 +1093,10 @@ impl Ext4Filesystem {
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<Ext4Inode> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let inode_table_access = self.metadata_io.undo_access(inode_table_block, handle)?;
-        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access)?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
         let updated_inode = self.update_referenced_inode_table_entry(
             &mut inode_table_bytes,
             inode,
@@ -1093,6 +1105,7 @@ impl Ext4Filesystem {
                 update_inode_ctime_mtime_bytes(inode_bytes, timestamp)
             },
         )?;
+        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
         Ok(updated_inode)
     }
@@ -1105,13 +1118,16 @@ impl Ext4Filesystem {
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<Ext4Inode> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let inode_table_access = self.metadata_io.undo_access(inode_table_block, handle)?;
-        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access)?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
         let updated_inode =
             self.update_inode_table_entry(&mut inode_table_bytes, inode.number(), |inode_bytes| {
                 put_u16(inode_bytes, 0x1a, links_count)?;
                 update_inode_ctime_mtime_bytes(inode_bytes, timestamp)
             })?;
+        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
         Ok(updated_inode)
     }
@@ -1124,13 +1140,16 @@ impl Ext4Filesystem {
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<Ext4Inode> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let inode_table_access = self.metadata_io.undo_access(inode_table_block, handle)?;
-        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access)?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
         let updated_inode =
             self.update_inode_table_entry(&mut inode_table_bytes, inode.number(), |inode_bytes| {
                 put_u16(inode_bytes, 0x1a, links_count)?;
                 update_inode_ctime_bytes(inode_bytes, timestamp)
             })?;
+        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
         Ok(updated_inode)
     }
@@ -1143,8 +1162,10 @@ impl Ext4Filesystem {
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<Ext4Inode> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let inode_table_access = self.metadata_io.undo_access(inode_table_block, handle)?;
-        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access)?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
         let updated_inode = self.update_inode_table_entry_allow_zero_links(
             &mut inode_table_bytes,
             inode.number(),
@@ -1156,6 +1177,7 @@ impl Ext4Filesystem {
                 update_inode_ctime_bytes(inode_bytes, timestamp)
             },
         )?;
+        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
         Ok(updated_inode)
     }
@@ -1167,13 +1189,16 @@ impl Ext4Filesystem {
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<Ext4Inode> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
-        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access)?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
         let updated_inode = self.update_referenced_inode_table_entry(
             &mut inode_table_bytes,
             inode,
             |inode_bytes| update_inode_blocks_bytes(inode_bytes, blocks),
         )?;
+        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
         Ok(updated_inode)
     }
@@ -1186,13 +1211,16 @@ impl Ext4Filesystem {
     ) -> Ext4Result<Ext4Inode> {
         let next = next.map_or(0, |inode| inode.get());
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let inode_table_access = self.metadata_io.undo_access(inode_table_block, handle)?;
-        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access)?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
         let updated_inode = self.update_inode_table_entry_allow_zero_links(
             &mut inode_table_bytes,
             inode.number(),
             |inode_bytes| put_u32(inode_bytes, disk_inode::DTIME_OFFSET, next),
         )?;
+        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
         Ok(updated_inode)
     }

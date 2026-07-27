@@ -9,7 +9,7 @@ use crate::{
     UnsupportedKind,
     extent::{BlockMapping, ExtentMappingState},
     inode::{Ext4Inode, Ext4Timestamp, InodeKind, SymlinkStorage},
-    jbd2::{Journal, JournalCredits},
+    jbd2::JournalCredits,
     mballoc::{Ext4AllocationFlags, Ext4AllocationRequest},
 };
 
@@ -113,17 +113,16 @@ impl Ext4Filesystem {
         Ok(())
     }
 
-    /// Flushes storage after inode metadata transactions have reached checkpoint.
-    pub fn sync_inode(&self, inode: &Ext4Inode, _intent: Ext4SyncIntent) -> Ext4Result<()> {
-        match inode.kind() {
-            InodeKind::RegularFile
-            | InodeKind::Directory
-            | InodeKind::Symlink
-            | InodeKind::CharacterDevice
-            | InodeKind::BlockDevice
-            | InodeKind::Fifo
-            | InodeKind::Socket => self.flush_device(),
-        }
+    /// Commits metadata needed by this inode without forcing a checkpoint.
+    ///
+    /// KExt4 currently commits the whole running transaction because sync tids
+    /// belong to the runtime inode rather than the mount-wide journal. The VFS
+    /// inode will own targeted cursors once mutation completion reports tids;
+    /// committing the shared transaction is conservative and correct meanwhile.
+    pub fn sync_inode(&mut self, inode: &Ext4Inode, intent: Ext4SyncIntent) -> Ext4Result<()> {
+        let _ = (inode, intent);
+        self.commit_running_metadata_transaction()?;
+        self.flush_device()
     }
 
     /// Reads bytes from a regular file inode.
@@ -374,6 +373,9 @@ impl Ext4Filesystem {
         if write_end > visible_size || visible_size < inode.disk_size() {
             return Err(Ext4Error::Unsupported(UnsupportedKind::UnallocatedWrite));
         }
+        if intent.requires_full_metadata() {
+            self.validate_inode_timestamp_update(inode, timestamp)?;
+        }
 
         if input.is_empty() {
             if intent.is_data_only() && visible_size == inode.disk_size() {
@@ -411,13 +413,23 @@ impl Ext4Filesystem {
             }
             return Ok(inode.clone());
         }
-        let journal = self.metadata_journal()?;
         let logical_blocks = block_count_for_byte_span(0, input.len().max(1), block_size_usize)?;
         let credits = self.extent_writeback_metadata_credits(inode, logical_blocks)?;
-        let mut handle = journal.begin(JournalCredits::new(credits))?;
-        let transaction = handle.id();
+        let max_extra_prealloc_blocks = self.preflight_ordered_writeback_allocations(
+            inode,
+            offset,
+            input.len(),
+            block_size_usize,
+            max_extra_prealloc_blocks,
+        )?;
+        let credits = JournalCredits::new(credits);
+        let journal = self.metadata_journal_for_mutation(
+            credits,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )?;
+        let mut handle = journal.begin(credits)?;
 
-        let updated_inode = match self.writeback_ordered_metadata_range(
+        let result = self.writeback_ordered_metadata_range(
             inode,
             offset,
             input,
@@ -426,21 +438,107 @@ impl Ext4Filesystem {
             block_size_usize,
             max_extra_prealloc_blocks,
             &mut handle,
-        ) {
-            Ok(updated_inode) => updated_inode,
-            Err(error) => {
-                drop(handle);
-                return Err(self.abort_ordered_writeback(&journal, error));
-            }
-        };
-        if let Err(error) = handle.mark_inode_sync(inode.number()) {
-            drop(handle);
-            return Err(self.abort_ordered_writeback(&journal, error));
-        }
-        drop(handle);
+        );
+        self.complete_metadata_mutation(handle, result)
+    }
 
-        self.commit_metadata_transaction(journal, transaction)?;
-        Ok(updated_inode)
+    fn preflight_ordered_writeback_allocations(
+        &self,
+        inode: &Ext4Inode,
+        offset: u64,
+        input_len: usize,
+        block_size_usize: usize,
+        requested_extra_blocks: u32,
+    ) -> Ext4Result<u32> {
+        let block_size = u64::try_from(block_size_usize).map_err(|_| Ext4Error::Overflow)?;
+        let write_end = offset
+            .checked_add(u64::try_from(input_len).map_err(|_| Ext4Error::Overflow)?)
+            .ok_or(Ext4Error::Overflow)?;
+        let mut logical = offset / block_size;
+        let logical_end = write_end
+            .checked_add(block_size.checked_sub(1).ok_or(Ext4Error::Overflow)?)
+            .ok_or(Ext4Error::Overflow)?
+            / block_size;
+        let mut holes = Vec::new();
+        let mut required_data_blocks = 0u64;
+        let mut required_metadata_blocks = 0u64;
+
+        while logical < logical_end {
+            let mapping = self.map_blocks(inode, LogicalBlock::new(logical))?;
+            let mapping_len = match mapping {
+                BlockMapping::Mapped { len, .. }
+                | BlockMapping::Unwritten { len, .. }
+                | BlockMapping::Hole { len } => len.get(),
+            };
+            if mapping_len == 0 {
+                return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
+            }
+            let remaining = logical_end
+                .checked_sub(logical)
+                .ok_or(Ext4Error::Overflow)?;
+            let covered = u64::from(mapping_len).min(remaining);
+            let covered_u32 = u32::try_from(covered).map_err(|_| Ext4Error::Overflow)?;
+            if matches!(mapping, BlockMapping::Hole { .. }) {
+                required_data_blocks = required_data_blocks
+                    .checked_add(covered)
+                    .ok_or(Ext4Error::Overflow)?;
+                required_metadata_blocks = required_metadata_blocks
+                    .checked_add(self.extent_insert_metadata_block_bound(
+                        inode,
+                        LogicalBlock::new(logical),
+                        BlockCount::new(covered_u32),
+                    )?)
+                    .ok_or(Ext4Error::Overflow)?;
+                holes.push((logical, covered_u32, mapping_len));
+            }
+            logical = logical.checked_add(covered).ok_or(Ext4Error::Overflow)?;
+        }
+
+        let free_blocks = self.superblock().free_blocks_count();
+        let required = required_data_blocks
+            .checked_add(required_metadata_blocks)
+            .ok_or(Ext4Error::Overflow)?;
+        if required > free_blocks {
+            return Err(Ext4Error::NoSpace);
+        }
+        let mut extra_budget = u32::try_from(
+            free_blocks
+                .checked_sub(required)
+                .ok_or(Ext4Error::Overflow)?
+                .min(u64::from(requested_extra_blocks)),
+        )
+        .map_err(|_| Ext4Error::Overflow)?;
+
+        // Validate the widest range optional preallocation may insert. If that
+        // wider split would need more metadata than remains free, retain the
+        // required dirty-range reservation and disable the optional tail.
+        let mut remaining_extra = extra_budget;
+        let mut planned_data_blocks = required_data_blocks;
+        let mut planned_metadata_blocks = 0u64;
+        for (logical, requested, hole_len) in holes {
+            let normalized = normalize_write_allocation_len(requested, hole_len, true);
+            let extra = normalized.saturating_sub(requested).min(remaining_extra);
+            let planned = requested.checked_add(extra).ok_or(Ext4Error::Overflow)?;
+            planned_data_blocks = planned_data_blocks
+                .checked_add(u64::from(extra))
+                .ok_or(Ext4Error::Overflow)?;
+            planned_metadata_blocks = planned_metadata_blocks
+                .checked_add(self.extent_insert_metadata_block_bound(
+                    inode,
+                    LogicalBlock::new(logical),
+                    BlockCount::new(planned),
+                )?)
+                .ok_or(Ext4Error::Overflow)?;
+            remaining_extra -= extra;
+        }
+        if planned_data_blocks
+            .checked_add(planned_metadata_blocks)
+            .ok_or(Ext4Error::Overflow)?
+            > free_blocks
+        {
+            extra_budget = 0;
+        }
+        Ok(extra_budget)
     }
 
     /// Commits regular-file size and timestamps after ordered data writeback.
@@ -454,26 +552,18 @@ impl Ext4Filesystem {
         if disk_size < inode.disk_size() {
             return Err(Ext4Error::Unsupported(UnsupportedKind::FileSizeShrink));
         }
-        let journal = self.metadata_journal()?;
-        let mut handle = journal.begin(JournalCredits::for_regular_inode_write_metadata())?;
-        let transaction = handle.id();
-        let updated_inode =
-            match self.update_regular_inode_write_metadata(inode, disk_size, metadata, &mut handle)
-            {
-                Ok(updated_inode) => updated_inode,
-                Err(error) => {
-                    drop(handle);
-                    return Err(self.abort_ordered_writeback(&journal, error));
-                }
-            };
-        if let Err(error) = handle.mark_inode_sync(inode.number()) {
-            drop(handle);
-            return Err(self.abort_ordered_writeback(&journal, error));
+        if let RegularWriteMetadata::Full { timestamp } = metadata {
+            self.validate_inode_timestamp_update(inode, timestamp)?;
         }
-        drop(handle);
-
-        self.commit_metadata_transaction(journal, transaction)?;
-        Ok(updated_inode)
+        let credits = JournalCredits::for_regular_inode_write_metadata();
+        let journal = self.metadata_journal_for_mutation(
+            credits,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )?;
+        let mut handle = journal.begin(credits)?;
+        let result =
+            self.update_regular_inode_write_metadata(inode, disk_size, metadata, &mut handle);
+        self.complete_metadata_mutation(handle, result)
     }
 
     fn writeback_range_needs_metadata(
@@ -705,15 +795,6 @@ impl Ext4Filesystem {
             }
             BlockMapping::Hole { .. } => Ok(None),
         }
-    }
-
-    fn abort_ordered_writeback(&mut self, journal: &Journal, error: Ext4Error) -> Ext4Error {
-        if let Some(undo) = journal.abort(error)
-            && let Err(rollback_error) = self.rollback_metadata_undo(&undo)
-        {
-            return rollback_error;
-        }
-        error
     }
 
     fn collect_allocated_write_runs(

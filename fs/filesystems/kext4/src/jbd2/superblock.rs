@@ -243,25 +243,49 @@ pub(crate) fn mark_superblock_empty(
     update_superblock_checksum(input, feature_incompat)
 }
 
+/// Enables revoke records on a version-2 journal superblock.
+///
+/// Version-1 journals have no feature bitmap and return `false` unchanged.
+pub(crate) fn enable_superblock_revoke(input: &mut [u8]) -> Ext4Result<bool> {
+    let raw = RawJournalSuperblock::try_from(&*input)?;
+    if be_u32(raw.bytes, 0x00)? != JBD2_MAGIC_NUMBER {
+        return Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal));
+    }
+    match be_u32(raw.bytes, 0x04)? {
+        JBD2_SUPERBLOCK_V1 => return Ok(false),
+        JBD2_SUPERBLOCK_V2 => {}
+        _ => return Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal)),
+    }
+    if be_u32(raw.bytes, START_OFFSET)? != 0 {
+        return Err(Ext4Error::JournalBusy);
+    }
+
+    let compat = be_u32(raw.bytes, 0x24)?;
+    let incompat = be_u32(raw.bytes, 0x28)?;
+    let read_only_compat = be_u32(raw.bytes, 0x2c)?;
+    validate_features(compat, incompat, read_only_compat)?;
+    let incompat = incompat | FEATURE_INCOMPAT_REVOKE;
+    validate_features(compat, incompat, read_only_compat)?;
+    put_be_u32(input, 0x28, incompat)?;
+    update_superblock_checksum(input, incompat)?;
+    Ok(true)
+}
+
 pub(crate) fn mark_superblock_active(
     input: &mut [u8],
     sequence: TransactionId,
     start: JournalBlock,
-    head: JournalBlock,
 ) -> Ext4Result<()> {
     let raw = RawJournalSuperblock::try_from(&*input)?;
     let first_log_block = be_u32(raw.bytes, 0x14)?;
     let max_blocks = be_u32(raw.bytes, 0x10)?;
-    if !(first_log_block..max_blocks).contains(&start.get())
-        || !(first_log_block..max_blocks).contains(&head.get())
-    {
+    if !(first_log_block..max_blocks).contains(&start.get()) {
         return Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal));
     }
     let feature_incompat = validate_mutable_superblock(input)?;
 
     put_be_u32(input, SEQUENCE_OFFSET, sequence.get())?;
     put_be_u32(input, START_OFFSET, start.get())?;
-    put_be_u32(input, HEAD_OFFSET, head.get())?;
     update_superblock_checksum(input, feature_incompat)
 }
 
@@ -456,16 +480,55 @@ mod tests {
     }
 
     #[test]
+    fn enables_revoke_feature_on_v2_journal() {
+        let mut bytes = valid_journal_superblock();
+
+        assert!(enable_superblock_revoke(&mut bytes).unwrap());
+
+        let journal = JournalSuperblock::decode(&bytes, 4096, 1024, UUID).unwrap();
+        assert_ne!(journal.feature_incompat() & FEATURE_INCOMPAT_REVOKE, 0);
+    }
+
+    #[test]
+    fn enabling_revoke_updates_v3_superblock_checksum() {
+        let mut bytes = valid_journal_superblock();
+        put_be_u32(&mut bytes, 0x28, FEATURE_INCOMPAT_CSUM_V3);
+        bytes[0x50] = JBD2_CRC32C_CHECKSUM;
+        let checksum = journal_superblock_checksum(&bytes).unwrap();
+        put_be_u32(&mut bytes, CHECKSUM_OFFSET, checksum);
+
+        assert!(enable_superblock_revoke(&mut bytes).unwrap());
+
+        let journal = JournalSuperblock::decode(&bytes, 4096, 1024, UUID).unwrap();
+        assert_ne!(journal.feature_incompat() & FEATURE_INCOMPAT_REVOKE, 0);
+    }
+
+    #[test]
+    fn enabling_revoke_rejects_active_journal() {
+        let mut bytes = valid_journal_superblock();
+        put_be_u32(&mut bytes, START_OFFSET, 1);
+
+        assert_eq!(
+            enable_superblock_revoke(&mut bytes),
+            Err(Ext4Error::JournalBusy)
+        );
+    }
+
+    #[test]
+    fn leaves_v1_journal_without_feature_bitmap_unchanged() {
+        let mut bytes = valid_journal_superblock();
+        put_be_u32(&mut bytes, 0x04, JBD2_SUPERBLOCK_V1);
+        let before = bytes;
+
+        assert!(!enable_superblock_revoke(&mut bytes).unwrap());
+        assert_eq!(bytes, before);
+    }
+
+    #[test]
     fn marks_journal_superblock_active() {
         let mut bytes = valid_journal_superblock();
 
-        mark_superblock_active(
-            &mut bytes,
-            TransactionId::new(9),
-            JournalBlock::new(7),
-            JournalBlock::new(8),
-        )
-        .unwrap();
+        mark_superblock_active(&mut bytes, TransactionId::new(9), JournalBlock::new(7)).unwrap();
 
         let journal = JournalSuperblock::decode(&bytes, 4096, 1024, UUID).unwrap();
         assert_eq!(journal.sequence(), TransactionId::new(9));
@@ -478,21 +541,7 @@ mod tests {
         let mut bytes = valid_journal_superblock();
 
         assert_eq!(
-            mark_superblock_active(
-                &mut bytes,
-                TransactionId::new(9),
-                JournalBlock::new(0),
-                JournalBlock::new(8),
-            ),
-            Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal))
-        );
-        assert_eq!(
-            mark_superblock_active(
-                &mut bytes,
-                TransactionId::new(9),
-                JournalBlock::new(7),
-                JournalBlock::new(1024),
-            ),
+            mark_superblock_active(&mut bytes, TransactionId::new(9), JournalBlock::new(0),),
             Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal))
         );
     }
@@ -522,13 +571,7 @@ mod tests {
         let checksum = journal_superblock_checksum(&bytes).unwrap();
         put_be_u32(&mut bytes, CHECKSUM_OFFSET, checksum);
 
-        mark_superblock_active(
-            &mut bytes,
-            TransactionId::new(9),
-            JournalBlock::new(7),
-            JournalBlock::new(8),
-        )
-        .unwrap();
+        mark_superblock_active(&mut bytes, TransactionId::new(9), JournalBlock::new(7)).unwrap();
 
         let journal = JournalSuperblock::decode(&bytes, 4096, 1024, UUID).unwrap();
         assert_eq!(journal.sequence(), TransactionId::new(9));

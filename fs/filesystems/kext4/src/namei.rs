@@ -4,7 +4,7 @@
 
 //! Linux-style namespace mutation helpers for ext4 directories.
 
-use alloc::{vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 
 use crate::{
     BlockCount, BlockMapping, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Result, FilesystemBlock,
@@ -15,7 +15,8 @@ use crate::{
     inode::{
         Ext4DeviceId, Ext4Inode, Ext4Timestamp, InodeInitialization, InodeKind, inode_checksum_seed,
     },
-    jbd2::{Journal, JournalCredits, TransactionId},
+    jbd2::JournalCredits,
+    journal::MountedJournal,
     mballoc::{Ext4AllocationFlags, Ext4AllocationRequest},
     superblock::{metadata_access_bytes, replace_metadata_access_bytes},
     xattr::external_xattr_eviction_credits,
@@ -291,7 +292,8 @@ impl Ext4Filesystem {
     ///
     /// This is the first R7 namei write path. It keeps ext4-specific work in
     /// the storage core: inode allocation, directory-entry update, parent
-    /// timestamps, JBD2 commit, and rollback on any failed intermediate step.
+    /// timestamps, prevalidation, and transaction-wide abort on a failure
+    /// after metadata publication.
     /// HTree insertion, mkdir/link/unlink/rename, and zero-link eviction remain
     /// separate R7 steps.
     pub fn create_regular_file(
@@ -307,10 +309,13 @@ impl Ext4Filesystem {
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
         }
+        timestamp_seconds_u32(timestamp)?;
+        self.validate_inode_timestamp_update(parent, timestamp)?;
+        self.ensure_namespace_insert_capacity(parent, name, 0)?;
 
-        let journal = self.namei_metadata_journal()?;
-        let mut handle = journal.begin(Ext4Credits::create(self, parent))?;
-        let transaction = handle.id();
+        let credits = Ext4Credits::create(self, parent);
+        let journal = self.namei_metadata_journal(credits)?;
+        let mut handle = journal.begin(credits)?;
         let result = self.create_regular_file_in_transaction(
             parent,
             name,
@@ -320,15 +325,7 @@ impl Ext4Filesystem {
             timestamp,
             &mut handle,
         );
-
-        match result {
-            Ok(created) => {
-                drop(handle);
-                self.commit_namei_transaction(journal, transaction)?;
-                Ok(created)
-            }
-            Err(error) => Err(self.abort_namei_transaction(&journal, error)),
-        }
+        self.complete_metadata_mutation(handle, result)
     }
 
     /// Creates a subdirectory in a linear ext4 directory.
@@ -345,10 +342,18 @@ impl Ext4Filesystem {
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
         }
+        timestamp_seconds_u32(timestamp)?;
+        self.validate_inode_timestamp_update(parent, timestamp)?;
+        parent
+            .links_count()
+            .checked_add(1)
+            .filter(|links| *links <= EXT4_LINK_MAX)
+            .ok_or(Ext4Error::Unsupported(UnsupportedKind::LinkCountLimit))?;
+        self.ensure_namespace_insert_capacity(parent, name, 1)?;
 
-        let journal = self.namei_metadata_journal()?;
-        let mut handle = journal.begin(Ext4Credits::mkdir(self, parent))?;
-        let transaction = handle.id();
+        let credits = Ext4Credits::mkdir(self, parent);
+        let journal = self.namei_metadata_journal(credits)?;
+        let mut handle = journal.begin(credits)?;
         let result = self.create_directory_in_transaction(
             parent,
             name,
@@ -358,15 +363,7 @@ impl Ext4Filesystem {
             timestamp,
             &mut handle,
         );
-
-        match result {
-            Ok(created) => {
-                drop(handle);
-                self.commit_namei_transaction(journal, transaction)?;
-                Ok(created)
-            }
-            Err(error) => Err(self.abort_namei_transaction(&journal, error)),
-        }
+        self.complete_metadata_mutation(handle, result)
     }
 
     /// Creates a symbolic link in a linear ext4 directory.
@@ -430,10 +427,13 @@ impl Ext4Filesystem {
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
         }
+        timestamp_seconds_u32(timestamp)?;
+        self.validate_inode_timestamp_update(parent, timestamp)?;
+        self.ensure_namespace_insert_capacity(parent, name, 1)?;
 
-        let journal = self.namei_metadata_journal()?;
-        let mut handle = journal.begin(Ext4Credits::block_mapped_symlink(self, parent))?;
-        let transaction = handle.id();
+        let credits = Ext4Credits::block_mapped_symlink(self, parent);
+        let journal = self.namei_metadata_journal(credits)?;
+        let mut handle = journal.begin(credits)?;
         let result = self.create_block_mapped_symlink_in_transaction(
             parent,
             name,
@@ -443,15 +443,7 @@ impl Ext4Filesystem {
             timestamp,
             &mut handle,
         );
-
-        match result {
-            Ok(created) => {
-                drop(handle);
-                self.commit_namei_transaction(journal, transaction)?;
-                Ok(created)
-            }
-            Err(error) => Err(self.abort_namei_transaction(&journal, error)),
-        }
+        self.complete_metadata_mutation(handle, result)
     }
 
     /// Creates a FIFO, socket, character device, or block device in a linear directory.
@@ -491,22 +483,17 @@ impl Ext4Filesystem {
         if target.links_count() >= EXT4_LINK_MAX {
             return Err(Ext4Error::Unsupported(UnsupportedKind::LinkCountLimit));
         }
+        self.validate_inode_timestamp_update(parent, timestamp)?;
+        self.validate_inode_timestamp_update(target, timestamp)?;
         let file_type = directory_file_type_for_inode_kind(target.kind());
+        self.ensure_namespace_insert_capacity(parent, name, 0)?;
 
-        let journal = self.namei_metadata_journal()?;
-        let mut handle = journal.begin(Ext4Credits::link(self, parent, target))?;
-        let transaction = handle.id();
+        let credits = Ext4Credits::link(self, parent, target);
+        let journal = self.namei_metadata_journal(credits)?;
+        let mut handle = journal.begin(credits)?;
         let result =
             self.link_in_transaction(parent, name, target, file_type, timestamp, &mut handle);
-
-        match result {
-            Ok(linked) => {
-                drop(handle);
-                self.commit_namei_transaction(journal, transaction)?;
-                Ok(linked)
-            }
-            Err(error) => Err(self.abort_namei_transaction(&journal, error)),
-        }
+        self.complete_metadata_mutation(handle, result)
     }
 
     /// Unlinks a non-directory child from a linear ext4 directory.
@@ -528,20 +515,14 @@ impl Ext4Filesystem {
             return Err(Ext4Error::Unsupported(UnsupportedKind::InodeKind));
         }
         self.ensure_unlinked_inode_eviction_supported(&child)?;
+        self.validate_inode_timestamp_update(parent, timestamp)?;
+        self.validate_inode_timestamp_update(&child, timestamp)?;
 
-        let journal = self.namei_metadata_journal()?;
-        let mut handle = journal.begin(Ext4Credits::unlink(self, parent, &child))?;
-        let transaction = handle.id();
+        let credits = Ext4Credits::unlink(self, parent, &child);
+        let journal = self.namei_metadata_journal(credits)?;
+        let mut handle = journal.begin(credits)?;
         let result = self.unlink_in_transaction(parent, name, &child, timestamp, &mut handle);
-
-        match result {
-            Ok(removed) => {
-                drop(handle);
-                self.commit_namei_transaction(journal, transaction)?;
-                Ok(removed)
-            }
-            Err(error) => Err(self.abort_namei_transaction(&journal, error)),
-        }
+        self.complete_metadata_mutation(handle, result)
     }
 
     /// Removes an empty subdirectory from a linear ext4 directory.
@@ -564,21 +545,15 @@ impl Ext4Filesystem {
         }
         self.ensure_empty_linear_directory(parent, &child)?;
         self.ensure_unlinked_inode_eviction_supported(&child)?;
+        self.validate_inode_timestamp_update(parent, timestamp)?;
+        self.validate_inode_timestamp_update(&child, timestamp)?;
 
-        let journal = self.namei_metadata_journal()?;
-        let mut handle = journal.begin(Ext4Credits::rmdir(self, parent, &child))?;
-        let transaction = handle.id();
+        let credits = Ext4Credits::rmdir(self, parent, &child);
+        let journal = self.namei_metadata_journal(credits)?;
+        let mut handle = journal.begin(credits)?;
         let result =
             self.remove_directory_in_transaction(parent, name, &child, timestamp, &mut handle);
-
-        match result {
-            Ok(removed) => {
-                drop(handle);
-                self.commit_namei_transaction(journal, transaction)?;
-                Ok(removed)
-            }
-            Err(error) => Err(self.abort_namei_transaction(&journal, error)),
-        }
+        self.complete_metadata_mutation(handle, result)
     }
 
     /// Renames a child between supported linear ext4 directories.
@@ -628,6 +603,14 @@ impl Ext4Filesystem {
             });
         }
 
+        self.validate_inode_timestamp_update(source_parent, timestamp)?;
+        if !same_parent {
+            self.validate_inode_timestamp_update(target_parent, timestamp)?;
+        }
+        self.validate_inode_timestamp_update(&moved, timestamp)?;
+        if let Some(target) = target_inode.as_ref() {
+            self.validate_inode_timestamp_update(target, timestamp)?;
+        }
         self.ensure_rename_type_supported(&moved, target_inode.as_ref())?;
         if let Some(target) = target_inode.as_ref() {
             if target.kind() == InodeKind::Directory {
@@ -637,15 +620,30 @@ impl Ext4Filesystem {
                 self.ensure_unlinked_inode_eviction_supported(target)?;
             }
         }
-        let journal = self.namei_metadata_journal()?;
-        let mut handle = journal.begin(Ext4Credits::rename(
+        if target_inode.is_none() {
+            self.ensure_namespace_insert_capacity(target_parent, target_name, 0)?;
+        }
+        if moved.kind() == InodeKind::Directory
+            && !same_parent
+            && target_inode
+                .as_ref()
+                .is_none_or(|target| target.kind() != InodeKind::Directory)
+        {
+            target_parent
+                .links_count()
+                .checked_add(1)
+                .filter(|links| *links <= EXT4_LINK_MAX)
+                .ok_or(Ext4Error::Unsupported(UnsupportedKind::LinkCountLimit))?;
+        }
+        let credits = Ext4Credits::rename(
             self,
             source_parent,
             target_parent,
             &moved,
             target_inode.as_ref(),
-        ))?;
-        let transaction = handle.id();
+        );
+        let journal = self.namei_metadata_journal(credits)?;
+        let mut handle = journal.begin(credits)?;
         let result = self.rename_in_transaction(
             source_parent,
             source_name,
@@ -656,15 +654,7 @@ impl Ext4Filesystem {
             timestamp,
             &mut handle,
         );
-
-        match result {
-            Ok(renamed) => {
-                drop(handle);
-                self.commit_namei_transaction(journal, transaction)?;
-                Ok(renamed)
-            }
-            Err(error) => Err(self.abort_namei_transaction(&journal, error)),
-        }
+        self.complete_metadata_mutation(handle, result)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -750,10 +740,12 @@ impl Ext4Filesystem {
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
         }
+        self.validate_inode_timestamp_update(parent, timestamp)?;
+        self.ensure_namespace_insert_capacity(parent, name, 0)?;
 
-        let journal = self.namei_metadata_journal()?;
-        let mut handle = journal.begin(Ext4Credits::create(self, parent))?;
-        let transaction = handle.id();
+        let credits = Ext4Credits::create(self, parent);
+        let journal = self.namei_metadata_journal(credits)?;
+        let mut handle = journal.begin(credits)?;
         let result = self.create_initialized_child_in_transaction(
             parent,
             name,
@@ -762,15 +754,7 @@ impl Ext4Filesystem {
             timestamp,
             &mut handle,
         );
-
-        match result {
-            Ok(created) => {
-                drop(handle);
-                self.commit_namei_transaction(journal, transaction)?;
-                Ok(created)
-            }
-            Err(error) => Err(self.abort_namei_transaction(&journal, error)),
-        }
+        self.complete_metadata_mutation(handle, result)
     }
 
     fn create_initialized_child_in_transaction(
@@ -1188,23 +1172,13 @@ impl Ext4Filesystem {
         recovery_flag_policy: crate::journal::RecoveryFlagPolicy,
     ) -> Ext4Result<()> {
         self.ensure_unlinked_inode_eviction_supported(inode)?;
+        self.validate_inode_timestamp_update(inode, timestamp)?;
 
-        let journal = self.namei_metadata_journal()?;
-        let mut handle =
-            journal.begin(Ext4Credits::credits(Ext4Credits::zero_link_eviction(inode)))?;
-        let transaction = handle.id();
+        let credits = Ext4Credits::credits(Ext4Credits::zero_link_eviction(inode));
+        let journal = self.namei_metadata_journal_with_policy(credits, recovery_flag_policy)?;
+        let mut handle = journal.begin(credits)?;
         let result = self.evict_zero_link_inode(inode, None, timestamp, &mut handle);
-        match result {
-            Ok(()) => {
-                drop(handle);
-                self.commit_namei_transaction_with_policy(
-                    journal,
-                    transaction,
-                    recovery_flag_policy,
-                )
-            }
-            Err(error) => Err(self.abort_namei_transaction(&journal, error)),
-        }
+        self.complete_metadata_mutation_with_policy(handle, result, recovery_flag_policy)
     }
 
     // ------------------------------------------------------------------
@@ -1236,10 +1210,9 @@ impl Ext4Filesystem {
         }
         self.ensure_unlinked_inode_eviction_supported(&inode)?;
 
-        let journal = self.namei_metadata_journal()?;
         let credits = JournalCredits::new(EVICTION_PREPARE_CREDITS);
+        let journal = self.namei_metadata_journal(credits)?;
         let mut handle = journal.begin(credits)?;
-        let transaction = handle.id();
 
         let result = (|| -> Ext4Result<EvictionHandle> {
             let orphaned = self.add_namespace_orphan(&inode, &mut handle)?;
@@ -1251,18 +1224,11 @@ impl Ext4Filesystem {
             })
         })();
 
-        match result {
-            Ok(handle_ret) => {
-                drop(handle);
-                self.commit_namei_transaction_with_policy(
-                    journal,
-                    transaction,
-                    crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
-                )?;
-                Ok(handle_ret)
-            }
-            Err(error) => Err(self.abort_namei_transaction(&journal, error)),
-        }
+        self.complete_metadata_mutation_and_commit_with_policy(
+            handle,
+            result,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )
     }
 
     /// Phase B — atomically truncate extent tree in batches.
@@ -1339,9 +1305,9 @@ impl Ext4Filesystem {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
         }
 
-        let journal = self.namei_metadata_journal()?;
-        let mut jh = journal.begin(JournalCredits::new(credits))?;
-        let transaction = jh.id();
+        let credits = JournalCredits::new(credits);
+        let journal = self.namei_metadata_journal(credits)?;
+        let mut jh = journal.begin(credits)?;
 
         let result = (|| -> Ext4Result<(u32, bool)> {
             let truncated = self.truncate_extent_mappings_with(
@@ -1356,18 +1322,11 @@ impl Ext4Filesystem {
             Ok((freed, done))
         })();
 
-        match result {
-            Ok(r) => {
-                drop(jh);
-                self.commit_namei_transaction_with_policy(
-                    journal,
-                    transaction,
-                    crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
-                )?;
-                Ok(r)
-            }
-            Err(error) => Err(self.abort_namei_transaction(&journal, error)),
-        }
+        self.complete_metadata_mutation_and_commit_with_policy(
+            jh,
+            result,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )
     }
 
     /// Phase C — finish eviction.
@@ -1385,10 +1344,9 @@ impl Ext4Filesystem {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
         }
 
-        let journal = self.namei_metadata_journal()?;
         let credits = JournalCredits::new(EVICTION_FINISH_CREDITS);
+        let journal = self.namei_metadata_journal(credits)?;
         let mut jh = journal.begin(credits)?;
-        let transaction = jh.id();
 
         let result = (|| -> Ext4Result<()> {
             let unlinked = self.update_unlinked_inode_metadata(
@@ -1402,17 +1360,11 @@ impl Ext4Filesystem {
             Ok(())
         })();
 
-        match result {
-            Ok(()) => {
-                drop(jh);
-                self.commit_namei_transaction_with_policy(
-                    journal,
-                    transaction,
-                    crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
-                )
-            }
-            Err(error) => Err(self.abort_namei_transaction(&journal, error)),
-        }
+        self.complete_metadata_mutation_and_commit_with_policy(
+            jh,
+            result,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )
     }
 
     fn initialize_directory_data_block(
@@ -1654,7 +1606,7 @@ impl Ext4Filesystem {
 
         let access = self
             .metadata_io
-            .undo_access(FilesystemBlock::new(physical.get()), handle)?;
+            .write_access(FilesystemBlock::new(physical.get()), handle)?;
         let mut bytes = metadata_access_bytes(&access)?;
         let root_count_limit = if directory.has_indexed_directory() {
             let count_limit = self.decode_htree_root_for_write(directory, &bytes, block_size)?;
@@ -1706,6 +1658,135 @@ impl Ext4Filesystem {
             );
         }
         self.insert_linear_directory_entry(directory, name, inode, file_type, timestamp, handle)
+    }
+
+    fn ensure_namespace_insert_capacity(
+        &self,
+        directory: &Ext4Inode,
+        name: &[u8],
+        additional_blocks: u64,
+    ) -> Ext4Result<()> {
+        let directory_blocks = self.preflight_directory_entry_insert(directory, name)?;
+        let required = directory_blocks
+            .checked_add(additional_blocks)
+            .ok_or(Ext4Error::Overflow)?;
+        if required > self.superblock().free_blocks_count() {
+            return Err(Ext4Error::NoSpace);
+        }
+        Ok(())
+    }
+
+    fn preflight_directory_entry_insert(
+        &self,
+        directory: &Ext4Inode,
+        name: &[u8],
+    ) -> Ext4Result<u64> {
+        let block_size =
+            usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
+        let block_size_u64 = u64::try_from(block_size).map_err(|_| Ext4Error::Overflow)?;
+
+        if directory.has_indexed_directory() {
+            let target = self.probe_htree_insert_target(directory, name, block_size)?;
+            let mut leaf = vec![0; block_size];
+            let read_len = self.read_directory_block_for_write(
+                directory,
+                target.leaf_logical,
+                target.leaf_physical,
+                block_size,
+                &mut leaf,
+            )?;
+            if read_len != block_size {
+                return Err(Ext4Error::Corrupt(CorruptKind::Truncated));
+            }
+            if find_linear_insert_slot(&leaf, block_size, name.len())?.is_some() {
+                return Ok(0);
+            }
+            if usize::from(target.parent.count_limit.count())
+                >= usize::from(target.parent.count_limit.limit())
+            {
+                return Err(Ext4Error::Unsupported(UnsupportedKind::LargeDir));
+            }
+
+            let mut records = collect_leaf_records_for_split(
+                &leaf,
+                block_size,
+                target.hash_version,
+                self.superblock().hash_seed(),
+                self.superblock().inodes_count(),
+            )?;
+            records.sort_by_key(|record| record.hash);
+            let split = htree_leaf_split_index(&records, block_size)?;
+            let hash2 = records
+                .get(split)
+                .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry))?
+                .hash;
+            let selected_records = if target.hash.major() >= hash2 {
+                &records[split..]
+            } else {
+                &records[..split]
+            };
+            let mut selected_leaf = vec![0; block_size];
+            write_leaf_records(
+                &mut selected_leaf,
+                selected_records,
+                block_size,
+                self.superblock().features().has_metadata_checksum(),
+            )?;
+            if find_linear_insert_slot(&selected_leaf, block_size, name.len())?.is_none() {
+                return Err(Ext4Error::NoSpace);
+            }
+
+            let logical = directory_block_count_exact(directory.size(), block_size_u64)?;
+            let extent_blocks = self.extent_insert_metadata_block_bound(
+                directory,
+                LogicalBlock::new(logical),
+                BlockCount::new(1),
+            )?;
+            return extent_blocks.checked_add(1).ok_or(Ext4Error::Overflow);
+        }
+
+        let block_count = directory_block_count_exact(directory.size(), block_size_u64)?;
+        if block_count == 0 {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
+        }
+        let mut block = vec![0; block_size];
+        for logical in 0..block_count {
+            let physical = self.mapped_directory_block(directory, logical)?;
+            let read_len = self.read_directory_block_for_write(
+                directory, logical, physical, block_size, &mut block,
+            )?;
+            if read_len != block_size {
+                return Err(Ext4Error::Corrupt(CorruptKind::Truncated));
+            }
+            if find_linear_insert_slot(&block, block_size, name.len())?.is_some() {
+                return Ok(0);
+            }
+        }
+
+        if block_count == 1 && self.superblock().features().has_dir_index() {
+            let conversion = collect_linear_records_for_index_conversion(
+                &block,
+                block_size,
+                self.superblock().inodes_count(),
+            )?;
+            let mut leaf = vec![0; block_size];
+            write_leaf_records(
+                &mut leaf,
+                &conversion.records,
+                block_size,
+                self.superblock().features().has_metadata_checksum(),
+            )?;
+            if find_linear_insert_slot(&leaf, block_size, name.len())?.is_none() {
+                return Err(Ext4Error::NoSpace);
+            }
+        }
+
+        let extent_blocks = self.extent_insert_metadata_block_bound(
+            directory,
+            LogicalBlock::new(block_count),
+            BlockCount::new(1),
+        )?;
+        extent_blocks.checked_add(1).ok_or(Ext4Error::Overflow)
     }
 
     fn replace_directory_entry(
@@ -1777,7 +1858,7 @@ impl Ext4Filesystem {
         let block_size =
             usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
         let filesystem_block = FilesystemBlock::new(physical.get());
-        let access = self.metadata_io.undo_access(filesystem_block, handle)?;
+        let access = self.metadata_io.write_access(filesystem_block, handle)?;
         let mut bytes = metadata_access_bytes(&access)?;
         self.verify_directory_block(directory, logical, &bytes)?;
         let slot =
@@ -1835,7 +1916,7 @@ impl Ext4Filesystem {
             }
             if let Some(slot) = find_linear_insert_slot(&block, block_size, name.len())? {
                 let filesystem_block = FilesystemBlock::new(physical.get());
-                let access = self.metadata_io.undo_access(filesystem_block, handle)?;
+                let access = self.metadata_io.write_access(filesystem_block, handle)?;
                 let mut bytes = metadata_access_bytes(&access)?;
                 self.verify_directory_block(directory, logical, &bytes)?;
                 slot.write(&mut bytes, block_size, inode, file_type, name)?;
@@ -1915,7 +1996,7 @@ impl Ext4Filesystem {
 
         let root_access = self
             .metadata_io
-            .undo_access(FilesystemBlock::new(root_physical.get()), handle)?;
+            .write_access(FilesystemBlock::new(root_physical.get()), handle)?;
         replace_metadata_access_bytes(&root_access, root)?;
 
         let leaf_access = self
@@ -2006,7 +2087,7 @@ impl Ext4Filesystem {
             }
 
             let filesystem_block = FilesystemBlock::new(physical.get());
-            let access = self.metadata_io.undo_access(filesystem_block, handle)?;
+            let access = self.metadata_io.write_access(filesystem_block, handle)?;
             let mut bytes = metadata_access_bytes(&access)?;
             self.verify_directory_block(directory, logical, &bytes)?;
             let slot = find_linear_remove_slot(
@@ -2117,7 +2198,7 @@ impl Ext4Filesystem {
         }
 
         let filesystem_block = FilesystemBlock::new(physical.get());
-        let access = self.metadata_io.undo_access(filesystem_block, handle)?;
+        let access = self.metadata_io.write_access(filesystem_block, handle)?;
         let mut bytes = metadata_access_bytes(&access)?;
         self.verify_directory_block(directory, logical, &bytes)?;
         let slot =
@@ -2451,7 +2532,7 @@ impl Ext4Filesystem {
 
         let access = self
             .metadata_io
-            .undo_access(FilesystemBlock::new(physical.get()), handle)?;
+            .write_access(FilesystemBlock::new(physical.get()), handle)?;
         let mut bytes = metadata_access_bytes(&access)?;
         self.verify_directory_block(directory, logical, &bytes)?;
         let slot = find_linear_insert_slot(&bytes, block_size, name.len())?
@@ -2530,8 +2611,6 @@ impl Ext4Filesystem {
             .size()
             .checked_div(block_size_u64)
             .ok_or(Ext4Error::Overflow)?;
-        let allocation = self.allocate_block(None, handle)?;
-        let new_physical = allocation.block();
 
         if target.hash.major() >= hash2 {
             let slot = find_linear_insert_slot(&right_bytes, block_size, name.len())?
@@ -2544,10 +2623,12 @@ impl Ext4Filesystem {
         }
         self.update_directory_block_checksum(directory, &mut left_bytes)?;
         self.update_directory_block_checksum(directory, &mut right_bytes)?;
+        let allocation = self.allocate_block(None, handle)?;
+        let new_physical = allocation.block();
 
         let old_access = self
             .metadata_io
-            .undo_access(FilesystemBlock::new(target.leaf_physical.get()), handle)?;
+            .write_access(FilesystemBlock::new(target.leaf_physical.get()), handle)?;
         replace_metadata_access_bytes(&old_access, left_bytes)?;
 
         let new_access = self
@@ -2575,7 +2656,7 @@ impl Ext4Filesystem {
 
         let parent_access = self
             .metadata_io
-            .undo_access(FilesystemBlock::new(target.parent.physical.get()), handle)?;
+            .write_access(FilesystemBlock::new(target.parent.physical.get()), handle)?;
         let mut parent_bytes = metadata_access_bytes(&parent_access)?;
         self.verify_htree_block_checksum(
             &directory,
@@ -2810,34 +2891,22 @@ impl Ext4Filesystem {
         )
     }
 
-    fn namei_metadata_journal(&mut self) -> Ext4Result<Journal> {
-        self.metadata_journal()
+    fn namei_metadata_journal(
+        &mut self,
+        credits: JournalCredits,
+    ) -> Ext4Result<Arc<MountedJournal>> {
+        self.namei_metadata_journal_with_policy(
+            credits,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )
     }
 
-    fn commit_namei_transaction(
+    fn namei_metadata_journal_with_policy(
         &mut self,
-        journal: Journal,
-        transaction: TransactionId,
-    ) -> Ext4Result<()> {
-        self.commit_metadata_transaction(journal, transaction)
-    }
-
-    fn commit_namei_transaction_with_policy(
-        &mut self,
-        journal: Journal,
-        transaction: TransactionId,
+        credits: JournalCredits,
         recovery_flag_policy: crate::journal::RecoveryFlagPolicy,
-    ) -> Ext4Result<()> {
-        self.commit_metadata_transaction_with_policy(journal, transaction, recovery_flag_policy)
-    }
-
-    fn abort_namei_transaction(&mut self, journal: &Journal, error: Ext4Error) -> Ext4Error {
-        if let Some(undo) = journal.abort(error)
-            && let Err(rollback_error) = self.rollback_metadata_undo(&undo)
-        {
-            return rollback_error;
-        }
-        error
+    ) -> Ext4Result<Arc<MountedJournal>> {
+        self.metadata_journal_for_mutation(credits, recovery_flag_policy)
     }
 }
 

@@ -9,8 +9,8 @@ use crate::{
     PhysicalBlock, UnsupportedKind,
     disk::{checksum, codec, inode as disk_inode, xattr as disk_xattr},
     inode::{Ext4Inode, Ext4Timestamp, update_inode_ctime_bytes},
-    jbd2::{Journal, JournalCredits, JournalHandle},
-    superblock::{metadata_access_bytes, replace_metadata_access_bytes},
+    jbd2::{JournalCredits, JournalHandle},
+    superblock::replace_metadata_access_bytes,
 };
 
 const XATTR_INODE_UPDATE_CREDITS: u32 = 1;
@@ -172,31 +172,19 @@ impl Ext4Filesystem {
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<Ext4Inode> {
         validate_settable_xattr(namespace, name)?;
-        let credits = self.xattr_mutation_credits(inode, |xattrs| {
+        self.validate_inode_timestamp_update(inode, timestamp)?;
+        let credits = self.xattr_mutation_credits(inode, timestamp, |xattrs| {
             set_xattr_value(xattrs, namespace, name, value)
         })?;
-        let journal = self.metadata_journal()?;
+        let journal = self.metadata_journal_for_mutation(
+            credits,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )?;
         let mut handle = journal.begin(credits)?;
-        let transaction = handle.id();
-
-        let updated_inode =
-            match self.update_xattr_in_transaction(inode, timestamp, &mut handle, |xattrs| {
-                set_xattr_value(xattrs, namespace, name, value)
-            }) {
-                Ok(updated_inode) => updated_inode,
-                Err(error) => {
-                    drop(handle);
-                    return Err(self.abort_xattr_update(&journal, error));
-                }
-            };
-        if let Err(error) = handle.mark_inode_sync(inode.number()) {
-            drop(handle);
-            return Err(self.abort_xattr_update(&journal, error));
-        }
-        drop(handle);
-
-        self.commit_metadata_transaction(journal, transaction)?;
-        Ok(updated_inode)
+        let result = self.update_xattr_in_transaction(inode, timestamp, &mut handle, |xattrs| {
+            set_xattr_value(xattrs, namespace, name, value)
+        });
+        self.complete_metadata_mutation(handle, result)
     }
 
     /// Removes an extended attribute.
@@ -208,30 +196,19 @@ impl Ext4Filesystem {
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<Ext4Inode> {
         validate_settable_xattr(namespace, name)?;
-        let credits = self
-            .xattr_mutation_credits(inode, |xattrs| remove_xattr_value(xattrs, namespace, name))?;
-        let journal = self.metadata_journal()?;
+        self.validate_inode_timestamp_update(inode, timestamp)?;
+        let credits = self.xattr_mutation_credits(inode, timestamp, |xattrs| {
+            remove_xattr_value(xattrs, namespace, name)
+        })?;
+        let journal = self.metadata_journal_for_mutation(
+            credits,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )?;
         let mut handle = journal.begin(credits)?;
-        let transaction = handle.id();
-
-        let updated_inode =
-            match self.update_xattr_in_transaction(inode, timestamp, &mut handle, |xattrs| {
-                remove_xattr_value(xattrs, namespace, name)
-            }) {
-                Ok(updated_inode) => updated_inode,
-                Err(error) => {
-                    drop(handle);
-                    return Err(self.abort_xattr_update(&journal, error));
-                }
-            };
-        if let Err(error) = handle.mark_inode_sync(inode.number()) {
-            drop(handle);
-            return Err(self.abort_xattr_update(&journal, error));
-        }
-        drop(handle);
-
-        self.commit_metadata_transaction(journal, transaction)?;
-        Ok(updated_inode)
+        let result = self.update_xattr_in_transaction(inode, timestamp, &mut handle, |xattrs| {
+            remove_xattr_value(xattrs, namespace, name)
+        });
+        self.complete_metadata_mutation(handle, result)
     }
 
     fn update_xattr_in_transaction(
@@ -265,9 +242,64 @@ impl Ext4Filesystem {
             self.drop_external_xattr_block(inode, old_external_block, handle)?;
         }
 
+        let (inode_table_block, inode_table_bytes, updated_inode) =
+            self.prepare_xattr_inode_update(inode, &xattrs, new_external_block, timestamp)?;
+        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
+        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
+        Ok(updated_inode)
+    }
+
+    fn xattr_mutation_credits(
+        &self,
+        inode: &Ext4Inode,
+        timestamp: Ext4Timestamp,
+        update: impl FnOnce(&mut Vec<Ext4Xattr>) -> Ext4Result<()>,
+    ) -> Ext4Result<JournalCredits> {
+        let old_external_block = inode.file_acl_block();
+        let mut xattrs = self.read_xattrs(inode)?;
+        let old_layout = if old_external_block == 0 {
+            xattr_inline_layout(&xattrs)
+        } else {
+            let refcount = self.external_xattr_block_refcount(inode, old_external_block)?;
+            XattrStorageLayout::External {
+                shared: refcount > 1,
+            }
+        };
+        update(&mut xattrs)?;
+        let new_layout = xattr_layout_after_update(&xattrs, inode.inline_xattr_bytes().len())?;
+        if matches!(new_layout, XattrStorageLayout::External { .. }) {
+            let block_size =
+                usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
+            if external_xattr_encoded_len(&xattrs)? > block_size {
+                return Err(Ext4Error::Unsupported(UnsupportedKind::ExternalXattrBlock));
+            }
+            let reuses_existing =
+                matches!(old_layout, XattrStorageLayout::External { shared: false });
+            if !reuses_existing && self.superblock().free_blocks_count() == 0 {
+                return Err(Ext4Error::NoSpace);
+            }
+        }
+        let planned_external_block = matches!(new_layout, XattrStorageLayout::External { .. })
+            .then_some(FilesystemBlock::new(old_external_block.max(1)));
+        self.prepare_xattr_inode_update(inode, &xattrs, planned_external_block, timestamp)?;
+        Ok(JournalCredits::new(xattr_mutation_credit_count(
+            old_layout, new_layout,
+        )))
+    }
+
+    fn prepare_xattr_inode_update(
+        &self,
+        inode: &Ext4Inode,
+        xattrs: &[Ext4Xattr],
+        new_external_block: Option<FilesystemBlock>,
+        timestamp: Ext4Timestamp,
+    ) -> Ext4Result<(FilesystemBlock, Vec<u8>, Ext4Inode)> {
+        let old_external_block = inode.file_acl_block();
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let inode_table_access = self.metadata_io.undo_access(inode_table_block, handle)?;
-        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access)?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
         let updated_inode = self.update_referenced_inode_table_entry(
             &mut inode_table_bytes,
             inode,
@@ -293,7 +325,7 @@ impl Ext4Filesystem {
                         },
                     )?;
                 } else {
-                    encode_inline_xattrs(&xattrs, inline_xattr_bytes)?;
+                    encode_inline_xattrs(xattrs, inline_xattr_bytes)?;
                     update_inode_xattr_block_bytes(
                         inode_bytes,
                         &raw,
@@ -307,34 +339,10 @@ impl Ext4Filesystem {
                         },
                     )?;
                 }
-                update_inode_ctime_bytes(inode_bytes, timestamp)?;
-                Ok(())
+                update_inode_ctime_bytes(inode_bytes, timestamp)
             },
         )?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        Ok(updated_inode)
-    }
-
-    fn xattr_mutation_credits(
-        &self,
-        inode: &Ext4Inode,
-        update: impl FnOnce(&mut Vec<Ext4Xattr>) -> Ext4Result<()>,
-    ) -> Ext4Result<JournalCredits> {
-        let old_external_block = inode.file_acl_block();
-        let mut xattrs = self.read_xattrs(inode)?;
-        let old_layout = if old_external_block == 0 {
-            xattr_inline_layout(&xattrs)
-        } else {
-            let refcount = self.external_xattr_block_refcount(inode, old_external_block)?;
-            XattrStorageLayout::External {
-                shared: refcount > 1,
-            }
-        };
-        update(&mut xattrs)?;
-        let new_layout = xattr_layout_after_update(&xattrs, inode.inline_xattr_bytes().len())?;
-        Ok(JournalCredits::new(xattr_mutation_credit_count(
-            old_layout, new_layout,
-        )))
+        Ok((inode_table_block, inode_table_bytes, updated_inode))
     }
 
     fn create_external_xattr_block(
@@ -370,8 +378,7 @@ impl Ext4Filesystem {
         if !self.is_inode_owned_system_zone_block(block, inode.number()) {
             self.add_system_zone(block.get(), 1, Some(inode.number()))?;
         }
-        let access = self.metadata_io.write_access(block, handle)?;
-        let mut bytes = metadata_access_bytes(&access)?;
+        let mut bytes = self.read_metadata_block(block)?.as_ref().to_vec();
         encode_external_xattr_block(
             xattrs,
             block.get(),
@@ -379,6 +386,7 @@ impl Ext4Filesystem {
             self.superblock().features().has_metadata_checksum(),
             &mut bytes,
         )?;
+        let access = self.metadata_io.write_access(block, handle)?;
         replace_metadata_access_bytes(&access, bytes)?;
         Ok(())
     }
@@ -408,10 +416,7 @@ impl Ext4Filesystem {
         validate_xattr_block_header(header)?;
         self.verify_xattr_block_checksum(inode, block, buffer.as_ref(), header)?;
         if header.refcount() > 1 {
-            let access = self
-                .metadata_io
-                .write_access(FilesystemBlock::new(block), handle)?;
-            let mut bytes = metadata_access_bytes(&access)?;
+            let mut bytes = buffer.as_ref().to_vec();
             put_u32(&mut bytes, 0x04, header.refcount() - 1)?;
             update_xattr_block_checksum(
                 block,
@@ -419,6 +424,9 @@ impl Ext4Filesystem {
                 self.superblock().features().has_metadata_checksum(),
                 &mut bytes,
             )?;
+            let access = self
+                .metadata_io
+                .write_access(FilesystemBlock::new(block), handle)?;
             replace_metadata_access_bytes(&access, bytes)?;
             return Ok(());
         }
@@ -448,10 +456,11 @@ impl Ext4Filesystem {
             return Ok(inode.clone());
         }
 
-        self.drop_external_xattr_block(inode, block, handle)?;
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let inode_table_access = self.metadata_io.undo_access(inode_table_block, handle)?;
-        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access)?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
         let updated_inode = self.update_referenced_inode_table_entry(
             &mut inode_table_bytes,
             inode,
@@ -471,17 +480,10 @@ impl Ext4Filesystem {
                 )
             },
         )?;
+        self.drop_external_xattr_block(inode, block, handle)?;
+        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
         Ok(updated_inode)
-    }
-
-    fn abort_xattr_update(&mut self, journal: &Journal, error: Ext4Error) -> Ext4Error {
-        if let Some(undo) = journal.abort(error)
-            && let Err(rollback_error) = self.rollback_metadata_undo(&undo)
-        {
-            return rollback_error;
-        }
-        error
     }
 
     fn read_inline_xattrs(&self, inode: &Ext4Inode, output: &mut Vec<Ext4Xattr>) -> Ext4Result<()> {

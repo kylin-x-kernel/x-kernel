@@ -4,6 +4,8 @@
 
 //! Block allocator entry points for the mounted ext4 filesystem.
 
+use alloc::vec;
+
 use crate::{
     bitmap_allocator::{self, BlockAllocation, BlockGroupRange, BlockRunAllocation},
     disk::{
@@ -15,8 +17,8 @@ use crate::{
     mballoc::{Ext4AllocationFlags, Ext4AllocationRequest},
     superblock::{
         Ext4Filesystem, bitmap_bit_capacity, count_clear_ext4_bitmap_bits, ensure_metadata_credits,
-        ext4_bitmap_checksum_matches, ext4_mark_bitmap_end, metadata_access_bytes,
-        replace_metadata_access_bytes, set_ext4_bitmap_bit, validate_ext4_bitmap_range_set,
+        ext4_bitmap_checksum_matches, ext4_mark_bitmap_end, replace_metadata_access_bytes,
+        set_ext4_bitmap_bit, validate_ext4_bitmap_range_set,
     },
     types::{BlockCount, BlockGroupNumber, FilesystemBlock, InodeNumber, PhysicalBlock},
 };
@@ -95,17 +97,14 @@ impl Ext4Filesystem {
             self.primary_superblock_location()?;
 
         let had_uninit_block_bitmap = descriptor.has_uninit_block_bitmap();
-        if !had_uninit_block_bitmap {
+        let mut bitmap_bytes = if had_uninit_block_bitmap {
+            vec![0; usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?]
+        } else {
             let bitmap = self.read_metadata_block(bitmap_block)?;
             self.verify_block_bitmap_checksum_for_group(&descriptor, bitmap.as_ref())?;
             self.validate_block_bitmap_for_group(range, bitmap.as_ref())?;
-        }
-
-        let bitmap_access = self.metadata_io.undo_access(bitmap_block, handle)?;
-        let descriptor_access = self.metadata_io.undo_access(descriptor_block, handle)?;
-        let superblock_access = self.metadata_io.undo_access(superblock_block, handle)?;
-
-        let mut bitmap_bytes = metadata_access_bytes(&bitmap_access)?;
+            bitmap.as_ref().to_vec()
+        };
         if had_uninit_block_bitmap {
             self.prepare_block_bitmap_for_group(range, &mut bitmap_bytes, true)?;
         }
@@ -136,7 +135,10 @@ impl Ext4Filesystem {
             Err(error) => return Err(error),
         };
 
-        let mut descriptor_bytes = metadata_access_bytes(&descriptor_access)?;
+        let mut descriptor_bytes = self
+            .read_metadata_block(descriptor_block)?
+            .as_ref()
+            .to_vec();
         let descriptor_slice = descriptor_bytes
             .get_mut(descriptor_offset..descriptor_offset + descriptor_len)
             .ok_or(Ext4Error::OutOfBounds)?;
@@ -168,7 +170,10 @@ impl Ext4Filesystem {
             &bitmap_bytes,
         )?;
 
-        let mut superblock_bytes = metadata_access_bytes(&superblock_access)?;
+        let mut superblock_bytes = self
+            .read_metadata_block(superblock_block)?
+            .as_ref()
+            .to_vec();
         let superblock_slice = superblock_bytes
             .get_mut(superblock_offset..superblock_offset + superblock_len)
             .ok_or(Ext4Error::OutOfBounds)?;
@@ -190,15 +195,22 @@ impl Ext4Filesystem {
             superblock_slice,
             allocation.block_count().get(),
         )?;
+        let mut updated_free_cache = self
+            .block_free_extent_caches
+            .get(group_index)
+            .and_then(Option::as_ref)
+            .cloned()
+            .ok_or(Ext4Error::OutOfBounds)?;
+        updated_free_cache
+            .mark_allocated(allocation.first_bitmap_bit(), allocation.block_count())?;
 
+        let bitmap_access = self.metadata_io.write_access(bitmap_block, handle)?;
+        let descriptor_access = self.metadata_io.write_access(descriptor_block, handle)?;
+        let superblock_access = self.metadata_io.write_access(superblock_block, handle)?;
         replace_metadata_access_bytes(&bitmap_access, bitmap_bytes)?;
         replace_metadata_access_bytes(&descriptor_access, descriptor_bytes)?;
         replace_metadata_access_bytes(&superblock_access, superblock_bytes)?;
-        self.block_free_extent_caches
-            .get_mut(group_index)
-            .and_then(Option::as_mut)
-            .ok_or(Ext4Error::OutOfBounds)?
-            .mark_allocated(allocation.first_bitmap_bit(), allocation.block_count())?;
+        self.block_free_extent_caches[group_index] = Some(updated_free_cache);
         self.groups[group_index] = updated_descriptor;
         self.superblock = updated_superblock;
         Ok(allocation)
@@ -291,11 +303,7 @@ impl Ext4Filesystem {
         self.verify_block_bitmap_checksum_for_group(&descriptor, bitmap.as_ref())?;
         self.validate_block_bitmap_for_group(range, bitmap.as_ref())?;
 
-        let bitmap_access = self.metadata_io.undo_access(bitmap_block, handle)?;
-        let descriptor_access = self.metadata_io.undo_access(descriptor_block, handle)?;
-        let superblock_access = self.metadata_io.undo_access(superblock_block, handle)?;
-
-        let mut bitmap_bytes = metadata_access_bytes(&bitmap_access)?;
+        let mut bitmap_bytes = bitmap.as_ref().to_vec();
         self.ensure_block_group_free_cache(group, range, &bitmap_bytes)?;
         let released = bitmap_allocator::release_block_to_bitmap(
             &mut bitmap_bytes,
@@ -304,7 +312,10 @@ impl Ext4Filesystem {
             |candidate| self.is_system_zone_block(candidate) && candidate != block,
         )?;
 
-        let mut descriptor_bytes = metadata_access_bytes(&descriptor_access)?;
+        let mut descriptor_bytes = self
+            .read_metadata_block(descriptor_block)?
+            .as_ref()
+            .to_vec();
         let descriptor_slice = descriptor_bytes
             .get_mut(descriptor_offset..descriptor_offset + descriptor_len)
             .ok_or(Ext4Error::OutOfBounds)?;
@@ -329,12 +340,25 @@ impl Ext4Filesystem {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap));
         }
 
-        let mut superblock_bytes = metadata_access_bytes(&superblock_access)?;
+        let mut superblock_bytes = self
+            .read_metadata_block(superblock_block)?
+            .as_ref()
+            .to_vec();
         let superblock_slice = superblock_bytes
             .get_mut(superblock_offset..superblock_offset + superblock_len)
             .ok_or(Ext4Error::OutOfBounds)?;
         let updated_superblock = superblock::increment_free_blocks_count(superblock_slice, 1)?;
+        let mut updated_free_cache = self
+            .block_free_extent_caches
+            .get(group_index)
+            .and_then(Option::as_ref)
+            .cloned()
+            .ok_or(Ext4Error::OutOfBounds)?;
+        updated_free_cache.mark_free(released.bitmap_bit())?;
 
+        let bitmap_access = self.metadata_io.write_access(bitmap_block, handle)?;
+        let descriptor_access = self.metadata_io.write_access(descriptor_block, handle)?;
+        let superblock_access = self.metadata_io.write_access(superblock_block, handle)?;
         if revoke_metadata {
             self.metadata_io.forget_metadata_block(block, handle)?;
         } else if forget_metadata {
@@ -344,11 +368,7 @@ impl Ext4Filesystem {
         replace_metadata_access_bytes(&bitmap_access, bitmap_bytes)?;
         replace_metadata_access_bytes(&descriptor_access, descriptor_bytes)?;
         replace_metadata_access_bytes(&superblock_access, superblock_bytes)?;
-        self.block_free_extent_caches
-            .get_mut(group_index)
-            .and_then(Option::as_mut)
-            .ok_or(Ext4Error::OutOfBounds)?
-            .mark_free(released.bitmap_bit())?;
+        self.block_free_extent_caches[group_index] = Some(updated_free_cache);
         self.groups[group_index] = updated_descriptor;
         self.superblock = updated_superblock;
         if is_owned_metadata_zone {

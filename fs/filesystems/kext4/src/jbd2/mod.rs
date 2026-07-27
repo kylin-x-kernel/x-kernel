@@ -20,5 +20,9 @@ pub(crate) use mapper::{JournalBlock, JournalBlockMapper, JournalTargetBlock, Tr
 pub(crate) use replay::{
     JournalReplayApplied, JournalReplayBlockWriter, JournalReplayReport, replay_scanned_journal,
 };
-pub(crate) use superblock::{JournalStart, JournalSuperblock, mark_superblock_empty};
-pub(crate) use transaction::{Journal, JournalCommit, JournalCredits, JournalHandle, JournalUndo};
+pub(crate) use superblock::{
+    JournalStart, JournalSuperblock, enable_superblock_revoke, mark_superblock_empty,
+};
+pub(crate) use transaction::{
+    JournalCredits, JournalHandle, JournalTransactions, RuntimeTransaction,
+};

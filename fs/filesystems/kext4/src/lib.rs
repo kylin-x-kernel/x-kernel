@@ -58,9 +58,20 @@
 //! hooks, a background checkpoint worker, oversized xattr, EA-inode, inline-data
 //! write contracts, and Linux-style errseq/forced-readonly reporting remain
 //! later stages. The core R10 sync baseline can flush checkpointed metadata and
-//! device state. Metadata commits feed a pending checkpoint queue with
-//! synchronous drain/failure-retain semantics, and the current KVFS bridge wires
-//! that through `SuperBlockOperations::sync_fs`.
+//! device state. One mount-lifetime journal identity owns the internal mapping,
+//! transaction engine, and FIFO checkpoint queue. Pending work shares the
+//! committed transaction instead of cloning it or retaining a second journal
+//! owner. Expected mutation failures are validated before the first metadata
+//! access; a normal error after metadata publication is treated as an invariant
+//! violation and aborts the journal without rewinding metadata already published
+//! by this or earlier successful operations. Handles retain only credits and
+//! buffer/revoke membership and return accounting failures through explicit
+//! stop. Durable commit is separate from home-block checkpoint,
+//! while queue progress remains synchronously driven until N2 introduces
+//! background execution. Precise per-inode sync tids still require KVFS
+//! runtime-inode storage, so the current sync path conservatively commits the
+//! running transaction. The current KVFS bridge wires filesystem drain through
+//! `SuperBlockOperations::sync_fs`.
 //! Crate-internal tests keep a raw allocated-data overwrite helper for
 //! validating storage plumbing; it is not exported as an ext4 API.
 

@@ -8,7 +8,9 @@ use alloc::{string::String, sync::Arc};
 
 use block::BlockDevice;
 use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
-use kext4::{Ext4Error, Ext4Filesystem as KExt4Core, Ext4Inode, InodeNumber, SymlinkStorage};
+use kext4::{
+    Ext4Error, Ext4Filesystem as KExt4Core, Ext4Inode, Ext4SyncIntent, InodeNumber, SymlinkStorage,
+};
 use ksync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use kvfs::{
     Dentry, DeviceId, InodeCache, Metadata, NodeFlags, NodeType, StatFs, StatFsFlags, SuperBlock,
@@ -206,6 +208,16 @@ impl Ext4Filesystem {
 
     pub(crate) fn sync_to_disk(&self) -> VfsResult<()> {
         self.lock().sync_filesystem().map_err(into_vfs_err)
+    }
+
+    pub(crate) fn sync_inode_to_disk(
+        &self,
+        number: InodeNumber,
+        intent: Ext4SyncIntent,
+    ) -> VfsResult<()> {
+        let mut fs = self.lock();
+        let inode = fs.referenced_inode(number).map_err(into_vfs_err)?;
+        fs.sync_inode(&inode, intent).map_err(into_vfs_err)
     }
 
     pub(crate) fn reserve_delalloc_blocks(&self, blocks: u64) -> VfsResult<()> {

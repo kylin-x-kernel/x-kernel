@@ -4,6 +4,8 @@
 
 //! Inode allocator entry points for the mounted ext4 filesystem.
 
+use alloc::vec;
+
 use crate::{
     bitmap_allocator::{self, InodeAllocation},
     disk::{
@@ -17,8 +19,8 @@ use crate::{
     inode::{InodeInitialization, InodeKind},
     superblock::{
         Ext4Filesystem, bitmap_bit_capacity, count_clear_ext4_bitmap_bits, ensure_metadata_credits,
-        ext4_bitmap_checksum_matches, ext4_mark_bitmap_end, metadata_access_bytes,
-        replace_metadata_access_bytes, validate_ext4_bitmap_range_set,
+        ext4_bitmap_checksum_matches, ext4_mark_bitmap_end, replace_metadata_access_bytes,
+        validate_ext4_bitmap_range_set,
     },
     types::{BlockGroupNumber, FilesystemBlock, InodeNumber},
 };
@@ -132,25 +134,14 @@ impl Ext4Filesystem {
             self.primary_superblock_location()?;
 
         let had_uninit_inode_bitmap = descriptor.has_uninit_inode_bitmap();
-        if !had_uninit_inode_bitmap {
-            let bitmap = self.read_metadata_block(inode_bitmap_block)?;
-            self.verify_inode_bitmap_checksum_for_group(&descriptor, bitmap.as_ref())?;
-            self.validate_inode_bitmap_for_group(range, bitmap.as_ref())?;
-        }
-
-        let bitmap_access = self.metadata_io.undo_access(inode_bitmap_block, handle)?;
-        let block_bitmap_access = if descriptor.has_uninit_block_bitmap() {
-            Some(self.metadata_io.undo_access(block_bitmap_block, handle)?)
-        } else {
-            None
-        };
-        let descriptor_access = self.metadata_io.undo_access(descriptor_block, handle)?;
-        let superblock_access = self.metadata_io.undo_access(superblock_block, handle)?;
-
         let mut prepared_block_bitmap = None;
         let mut prepared_block_free_count = None;
-        if let Some(access) = block_bitmap_access.as_ref() {
-            let mut block_bitmap_bytes = metadata_access_bytes(access)?;
+        if descriptor.has_uninit_block_bitmap() {
+            let mut block_bitmap_bytes = vec![
+                0;
+                usize::try_from(self.layout().block_size())
+                    .map_err(|_| Ext4Error::Overflow)?
+            ];
             self.prepare_block_bitmap_for_group(block_range, &mut block_bitmap_bytes, true)?;
             prepared_block_free_count = Some(count_clear_ext4_bitmap_bits(
                 &block_bitmap_bytes,
@@ -159,7 +150,14 @@ impl Ext4Filesystem {
             prepared_block_bitmap = Some(block_bitmap_bytes);
         }
 
-        let mut bitmap_bytes = metadata_access_bytes(&bitmap_access)?;
+        let mut bitmap_bytes = if had_uninit_inode_bitmap {
+            vec![0; usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?]
+        } else {
+            let bitmap = self.read_metadata_block(inode_bitmap_block)?;
+            self.verify_inode_bitmap_checksum_for_group(&descriptor, bitmap.as_ref())?;
+            self.validate_inode_bitmap_for_group(range, bitmap.as_ref())?;
+            bitmap.as_ref().to_vec()
+        };
         if had_uninit_inode_bitmap {
             self.prepare_inode_bitmap_for_group(range, &mut bitmap_bytes, true)?;
         }
@@ -176,15 +174,20 @@ impl Ext4Filesystem {
             Err(error) => return Err(error),
         };
         let inode_table_block = self.inode_table_entry_block(allocation.inode())?;
-        let inode_table_access = self.metadata_io.undo_access(inode_table_block, handle)?;
-        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access)?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
         self.initialize_inode_table_entry(
             &mut inode_table_bytes,
             allocation.inode(),
             initialization,
         )?;
 
-        let mut descriptor_bytes = metadata_access_bytes(&descriptor_access)?;
+        let mut descriptor_bytes = self
+            .read_metadata_block(descriptor_block)?
+            .as_ref()
+            .to_vec();
         let descriptor_slice = descriptor_bytes
             .get_mut(descriptor_offset..descriptor_offset + descriptor_len)
             .ok_or(Ext4Error::OutOfBounds)?;
@@ -239,7 +242,10 @@ impl Ext4Filesystem {
             )?;
         }
 
-        let mut superblock_bytes = metadata_access_bytes(&superblock_access)?;
+        let mut superblock_bytes = self
+            .read_metadata_block(superblock_block)?
+            .as_ref()
+            .to_vec();
         let superblock_slice = superblock_bytes
             .get_mut(superblock_offset..superblock_offset + superblock_len)
             .ok_or(Ext4Error::OutOfBounds)?;
@@ -259,6 +265,15 @@ impl Ext4Filesystem {
         }
         let updated_superblock = superblock::decrement_free_inodes_count(superblock_slice, 1)?;
 
+        let bitmap_access = self.metadata_io.write_access(inode_bitmap_block, handle)?;
+        let block_bitmap_access = if descriptor.has_uninit_block_bitmap() {
+            Some(self.metadata_io.write_access(block_bitmap_block, handle)?)
+        } else {
+            None
+        };
+        let descriptor_access = self.metadata_io.write_access(descriptor_block, handle)?;
+        let superblock_access = self.metadata_io.write_access(superblock_block, handle)?;
+        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&bitmap_access, bitmap_bytes)?;
         if let (Some(access), Some(block_bitmap_bytes)) =
             (block_bitmap_access.as_ref(), prepared_block_bitmap)
@@ -307,20 +322,21 @@ impl Ext4Filesystem {
         self.verify_inode_bitmap_checksum_for_group(&descriptor, bitmap.as_ref())?;
         self.validate_inode_bitmap_for_group(range, bitmap.as_ref())?;
 
-        let bitmap_access = self.metadata_io.undo_access(inode_bitmap_block, handle)?;
-        let descriptor_access = self.metadata_io.undo_access(descriptor_block, handle)?;
-        let superblock_access = self.metadata_io.undo_access(superblock_block, handle)?;
-        let inode_table_access = self.metadata_io.undo_access(inode_table_block, handle)?;
-
-        let mut bitmap_bytes = metadata_access_bytes(&bitmap_access)?;
+        let mut bitmap_bytes = bitmap.as_ref().to_vec();
         let released =
             bitmap_allocator::release_inode_to_bitmap(&mut bitmap_bytes, range, inode, |inode| {
                 self.is_reserved_inode(inode)
             })?;
-        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access)?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
         self.clear_inode_table_entry(&mut inode_table_bytes, inode)?;
 
-        let mut descriptor_bytes = metadata_access_bytes(&descriptor_access)?;
+        let mut descriptor_bytes = self
+            .read_metadata_block(descriptor_block)?
+            .as_ref()
+            .to_vec();
         let descriptor_slice = descriptor_bytes
             .get_mut(descriptor_offset..descriptor_offset + descriptor_len)
             .ok_or(Ext4Error::OutOfBounds)?;
@@ -354,12 +370,19 @@ impl Ext4Filesystem {
             )?;
         }
 
-        let mut superblock_bytes = metadata_access_bytes(&superblock_access)?;
+        let mut superblock_bytes = self
+            .read_metadata_block(superblock_block)?
+            .as_ref()
+            .to_vec();
         let superblock_slice = superblock_bytes
             .get_mut(superblock_offset..superblock_offset + superblock_len)
             .ok_or(Ext4Error::OutOfBounds)?;
         let updated_superblock = superblock::increment_free_inodes_count(superblock_slice, 1)?;
 
+        let bitmap_access = self.metadata_io.write_access(inode_bitmap_block, handle)?;
+        let descriptor_access = self.metadata_io.write_access(descriptor_block, handle)?;
+        let superblock_access = self.metadata_io.write_access(superblock_block, handle)?;
+        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&bitmap_access, bitmap_bytes)?;
         replace_metadata_access_bytes(&descriptor_access, descriptor_bytes)?;
         replace_metadata_access_bytes(&superblock_access, superblock_bytes)?;

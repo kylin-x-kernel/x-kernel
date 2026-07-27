@@ -394,6 +394,15 @@ impl Superblock {
         self.features
     }
 
+    /// Marks only the decoded runtime feature state as needing recovery.
+    pub(crate) fn mark_needs_recovery(&mut self) {
+        self.features = FeatureSet::new(
+            self.features.compat().bits(),
+            self.features.incompat().bits() | features::IncompatFeatures::RECOVER.bits(),
+            self.features.read_only_compat().bits(),
+        );
+    }
+
     /// Returns the filesystem UUID.
     pub const fn uuid(&self) -> [u8; 16] {
         self.uuid

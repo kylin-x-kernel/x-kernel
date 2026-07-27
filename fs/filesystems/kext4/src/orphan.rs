@@ -155,7 +155,7 @@ impl Ext4Filesystem {
         }
 
         let (block, offset, len) = self.primary_superblock_location()?;
-        let access = self.metadata_io.undo_access(block, handle)?;
+        let access = self.metadata_io.write_access(block, handle)?;
         let mut block_bytes = metadata_access_bytes(&access)?;
         let superblock_bytes = block_bytes
             .get_mut(offset..offset + len)

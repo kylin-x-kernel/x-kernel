@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{collections::VecDeque, sync::Arc, vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::num::NonZeroU32;
 
 use block::BlockDevice;
@@ -20,6 +20,7 @@ use crate::{
         JournalBlock, JournalBlockMapper, JournalLogScan, JournalReplayApplied,
         JournalReplayReport, JournalStart, JournalSuperblock, replay_scanned_journal, scan_journal,
     },
+    journal::MountedJournal,
     mballoc::BlockGroupFreeExtentCache,
     types::{BlockGroupNumber, FilesystemBlock, InodeNumber, LogicalBlock},
 };
@@ -324,16 +325,42 @@ impl JournalBlockMapper for InternalJournal {
     }
 }
 
+impl InternalJournal {
+    pub(crate) fn validate_physical_bounds(&self, filesystem_block_count: u64) -> Ext4Result<()> {
+        let mut next_logical = 0u32;
+        for extent in &self.extents {
+            if extent.len == 0 || extent.logical_start != next_logical {
+                return Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal));
+            }
+            next_logical = next_logical
+                .checked_add(extent.len)
+                .ok_or(Ext4Error::Overflow)?;
+            let physical_end = extent
+                .physical_start
+                .checked_add(u64::from(extent.len))
+                .ok_or(Ext4Error::Overflow)?;
+            if physical_end > filesystem_block_count {
+                return Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal));
+            }
+        }
+        // Linux JBD2 permits the backing inode to be larger than `s_maxlen`;
+        // only the journal-addressable prefix must be fully mapped.
+        if next_logical < self.block_count {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal));
+        }
+        Ok(())
+    }
+}
+
 /// A validated ext4 filesystem mount core.
 pub struct Ext4Filesystem {
     pub(crate) device: Arc<FilesystemDevice>,
     pub(crate) metadata_io: Ext4MetadataIo,
-    pub(crate) journal: Option<InternalJournal>,
+    pub(crate) journal: Option<Arc<MountedJournal>>,
     pub(crate) superblock: Superblock,
     pub(crate) layout: FilesystemLayout,
     pub(crate) groups: Vec<BlockGroupDescriptor>,
     pub(crate) block_free_extent_caches: Vec<Option<BlockGroupFreeExtentCache>>,
-    pub(crate) pending_checkpoints: VecDeque<crate::journal::PendingMetadataCheckpoint>,
     system_zones: Vec<SystemZone>,
 }
 
@@ -467,7 +494,6 @@ impl Ext4Filesystem {
             superblock,
             layout,
             block_free_extent_caches: vec![None; groups.len()],
-            pending_checkpoints: VecDeque::new(),
             groups,
             system_zones: Vec::new(),
         };
@@ -484,7 +510,10 @@ impl Ext4Filesystem {
         }
         filesystem.journal = match journal_location {
             JournalLocation::None => None,
-            JournalLocation::Internal { inode } => Some(filesystem.load_internal_journal(inode)?),
+            JournalLocation::Internal { inode } => Some(MountedJournal::new(
+                filesystem.load_internal_journal(inode)?,
+                filesystem.layout.block_count,
+            )?),
             JournalLocation::External { .. } => {
                 return Err(Ext4Error::Unsupported(UnsupportedKind::ExternalJournal));
             }
@@ -516,7 +545,7 @@ impl Ext4Filesystem {
     pub fn journal_status(&self) -> Option<JournalStatus> {
         self.journal
             .as_ref()
-            .map(|journal| JournalStatus::from(&journal.superblock))
+            .map(|journal| JournalStatus::from(&journal.superblock()))
     }
 
     /// Returns the filesystem block containing the internal journal superblock.
@@ -540,21 +569,12 @@ impl Ext4Filesystem {
             .journal
             .as_ref()
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?;
-        scan_journal(&journal.superblock, self)
+        scan_journal(&journal.superblock(), self)
     }
 
     pub(crate) fn replay_internal_journal_updates(&self) -> Ext4Result<JournalReplayApplied> {
         let scan = self.scan_internal_journal()?;
         replay_scanned_journal(self, self.device.as_ref(), &scan, self.device.block_size())
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn rollback_metadata_undo(
-        &mut self,
-        undo: &crate::jbd2::JournalUndo,
-    ) -> Ext4Result<()> {
-        self.metadata_io.rollback_undo(undo)?;
-        self.reload_mutable_metadata_state()
     }
 
     /// Reclaims up to `limit` metadata blocks with no active readers.
@@ -1658,12 +1678,13 @@ mod tests {
         extent::ExtentMappingState,
         file::RegularWriteMetadata,
         inode::InodeInitialization,
-        jbd2::{Journal, JournalCredits, TransactionId},
+        jbd2::{JournalCredits, JournalTransactions, TransactionId},
         mballoc::{Ext4AllocationFlags, Ext4AllocationRequest},
     };
 
     const TEST_BLOCK_SIZE: usize = 4096;
     const TEST_BLOCK_COUNT: usize = 32;
+    const TEST_JOURNAL_FILESYSTEM_BLOCK_COUNT: usize = 2048;
     const TEST_FREE_BLOCKS: u32 = 26;
     const TEST_FREE_INODES: u32 = 22;
     const LINUX_IMAGE_DEVICE_BLOCK_SIZE: usize = 512;
@@ -1892,6 +1913,11 @@ mod tests {
         let journal = filesystem
             .metadata_journal()
             .expect("open metadata journal");
+        assert!(filesystem.journal_supports_revoke());
+        let same_journal = filesystem
+            .metadata_journal()
+            .expect("reopen metadata journal");
+        assert!(Arc::ptr_eq(&journal, &same_journal));
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
         let transaction = handle.id();
         let block_goal =
@@ -1902,7 +1928,7 @@ mod tests {
             .expect("allocate a block from journaled Linux image");
         drop(handle);
         filesystem
-            .enqueue_metadata_checkpoint_for_test(journal, transaction)
+            .enqueue_metadata_checkpoint_for_test(transaction)
             .expect("enqueue checkpoint");
 
         assert_eq!(filesystem.pending_checkpoint_count(), 1);
@@ -1914,7 +1940,295 @@ mod tests {
 
         assert_eq!(filesystem.pending_checkpoint_count(), 0);
         assert!(device.flush_count() > flush_count);
+        let next_handle = journal.begin(JournalCredits::new(1)).unwrap();
+        let next_transaction = next_handle.id();
+        assert_eq!(next_transaction.get(), transaction.get().wrapping_add(1));
+        drop(next_handle);
+        assert_eq!(
+            journal.running_transaction().unwrap(),
+            Some(next_transaction)
+        );
         fs::remove_file(image).expect("remove syncfs-pending-checkpoint image");
+    }
+
+    #[test]
+    fn successful_operations_share_running_transaction_until_sync() {
+        let mke2fs = require_e2fsprogs("mke2fs");
+        let e2fsck = require_e2fsprogs("e2fsck");
+        let image = temporary_image_path("journal-running-transaction-batch");
+        create_journaled_allocator_test_image(&mke2fs, &image);
+
+        let bytes = fs::read(&image).expect("read generated journaled allocator image");
+        let device = Arc::new(LinuxImageDevice::new(bytes));
+        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let mut filesystem =
+            Ext4Filesystem::mount(block_device).expect("mount generated journaled image");
+        let credits = JournalCredits::new(4);
+        let block_goal =
+            FilesystemBlock::new(u64::from(filesystem.superblock().blocks_per_group()) + 10);
+
+        let journal = filesystem
+            .metadata_journal_for_mutation(
+                credits,
+                crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+            )
+            .expect("prepare first metadata mutation");
+        let mut first_handle = journal.begin(credits).unwrap();
+        let transaction = first_handle.id();
+        let first_allocation = filesystem
+            .allocate_block(Some(block_goal), &mut first_handle)
+            .expect("allocate first block");
+        filesystem
+            .complete_metadata_mutation(first_handle, Ok(()))
+            .expect("finish first metadata mutation");
+        assert_eq!(filesystem.pending_checkpoint_count(), 0);
+        assert_eq!(journal.running_transaction().unwrap(), Some(transaction));
+
+        let second_journal = filesystem
+            .metadata_journal_for_mutation(
+                credits,
+                crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+            )
+            .expect("prepare second metadata mutation");
+        let mut second_handle = second_journal.begin(credits).unwrap();
+        assert_eq!(second_handle.id(), transaction);
+        let second_allocation = filesystem
+            .allocate_block(Some(block_goal), &mut second_handle)
+            .expect("allocate second block");
+        filesystem
+            .complete_metadata_mutation(second_handle, Ok(()))
+            .expect("finish second metadata mutation");
+
+        assert_ne!(first_allocation.block(), second_allocation.block());
+        assert_eq!(filesystem.pending_checkpoint_count(), 0);
+        filesystem
+            .sync_filesystem()
+            .expect("commit and checkpoint running transaction");
+        assert_eq!(journal.running_transaction().unwrap(), None);
+        assert_eq!(filesystem.pending_checkpoint_count(), 0);
+        assert!(
+            !filesystem
+                .journal_status()
+                .expect("clean journal status")
+                .has_nonzero_log_start()
+        );
+
+        let cleanup_credits = JournalCredits::new(8);
+        let cleanup_journal = filesystem
+            .metadata_journal_for_mutation(
+                cleanup_credits,
+                crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+            )
+            .expect("prepare cleanup metadata mutation");
+        let mut cleanup_handle = cleanup_journal.begin(cleanup_credits).unwrap();
+        filesystem
+            .release_allocated_block(first_allocation.block(), &mut cleanup_handle)
+            .expect("release first block");
+        filesystem
+            .release_allocated_block(second_allocation.block(), &mut cleanup_handle)
+            .expect("release second block");
+        filesystem
+            .complete_metadata_mutation(cleanup_handle, Ok(()))
+            .expect("finish cleanup metadata mutation");
+        filesystem.sync_filesystem().expect("sync cleanup");
+        drop(filesystem);
+
+        fs::write(&image, device.bytes()).expect("write batched journal image");
+        run_e2fsck_read_only(&e2fsck, &image);
+        fs::remove_file(image).expect("remove batched journal image");
+    }
+
+    #[test]
+    fn inode_sync_conservatively_commits_the_current_running_transaction() {
+        let mke2fs = require_e2fsprogs("mke2fs");
+        let e2fsck = require_e2fsprogs("e2fsck");
+        let image = temporary_image_path("inode-conservative-journal-sync");
+        create_journaled_linear_namespace_test_image(&mke2fs, &image);
+
+        let bytes = fs::read(&image).expect("read generated namespace image");
+        let device = Arc::new(LinuxImageDevice::new(bytes));
+        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let mut filesystem =
+            Ext4Filesystem::mount(block_device).expect("mount generated namespace image");
+        let root = filesystem.root_inode().expect("read root inode");
+        let first = filesystem
+            .create_regular_file(
+                &root,
+                b"first.txt",
+                0o644,
+                1000,
+                1000,
+                crate::Ext4Timestamp::new(1, 0),
+            )
+            .expect("create first file");
+        let journal = filesystem
+            .metadata_journal()
+            .expect("open metadata journal");
+        let first_transaction = journal
+            .running_transaction()
+            .unwrap()
+            .expect("first transaction remains running");
+
+        filesystem
+            .sync_inode(first.child(), Ext4SyncIntent::FullMetadata)
+            .expect("sync first inode transaction");
+
+        assert_eq!(journal.running_transaction().unwrap(), None);
+        assert_eq!(filesystem.pending_checkpoint_count(), 1);
+
+        let root = filesystem.root_inode().expect("reload root inode");
+        let _second = filesystem
+            .create_regular_file(
+                &root,
+                b"second.txt",
+                0o644,
+                1000,
+                1000,
+                crate::Ext4Timestamp::new(2, 0),
+            )
+            .expect("create second file");
+        let second_transaction = journal
+            .running_transaction()
+            .unwrap()
+            .expect("second transaction remains running");
+        assert_ne!(second_transaction, first_transaction);
+
+        filesystem
+            .sync_inode(first.child(), Ext4SyncIntent::FullMetadata)
+            .expect("conservatively sync current transaction");
+
+        assert_eq!(journal.running_transaction().unwrap(), None);
+        assert_eq!(filesystem.pending_checkpoint_count(), 2);
+
+        filesystem.sync_filesystem().expect("sync remaining work");
+        assert_eq!(filesystem.pending_checkpoint_count(), 0);
+        drop(filesystem);
+
+        fs::write(&image, device.bytes()).expect("write conservative sync image");
+        run_e2fsck_read_only(&e2fsck, &image);
+        fs::remove_file(image).expect("remove conservative sync image");
+    }
+
+    #[test]
+    fn journal_queue_appends_two_commits_and_advances_tail() {
+        let mke2fs = require_e2fsprogs("mke2fs");
+        let e2fsck = require_e2fsprogs("e2fsck");
+        let image = temporary_image_path("journal-two-pending-commits");
+        create_journaled_allocator_test_image(&mke2fs, &image);
+
+        let bytes = fs::read(&image).expect("read generated journaled allocator image");
+        let device = Arc::new(LinuxImageDevice::new(bytes));
+        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let mut filesystem =
+            Ext4Filesystem::mount(block_device).expect("mount generated journaled image");
+        let journal = filesystem
+            .metadata_journal()
+            .expect("open metadata journal");
+        let free_blocks_before = filesystem.superblock().free_blocks_count();
+        let block_goal =
+            FilesystemBlock::new(u64::from(filesystem.superblock().blocks_per_group()) + 10);
+
+        let mut first_handle = journal.begin(JournalCredits::new(4)).unwrap();
+        let first_transaction = first_handle.id();
+        let first_allocation = filesystem
+            .allocate_block(Some(block_goal), &mut first_handle)
+            .expect("allocate first journaled block");
+        drop(first_handle);
+        filesystem
+            .commit_metadata_transaction(first_transaction)
+            .expect("commit first journal transaction");
+        assert_eq!(filesystem.pending_checkpoint_count(), 1);
+
+        let second_journal = filesystem
+            .metadata_journal()
+            .expect("join coordinator with pending checkpoint");
+        assert!(Arc::ptr_eq(&journal, &second_journal));
+        assert_eq!(filesystem.pending_checkpoint_count(), 1);
+        let mut second_handle = second_journal.begin(JournalCredits::new(4)).unwrap();
+        let second_transaction = second_handle.id();
+        let second_allocation = filesystem
+            .allocate_block(Some(block_goal), &mut second_handle)
+            .expect("allocate second journaled block");
+        drop(second_handle);
+        filesystem
+            .commit_metadata_transaction(second_transaction)
+            .expect("commit second journal transaction");
+
+        assert_ne!(first_allocation.block(), second_allocation.block());
+        assert_eq!(filesystem.pending_checkpoint_count(), 2);
+        assert_eq!(
+            filesystem.superblock().free_blocks_count(),
+            free_blocks_before - 2
+        );
+        assert!(filesystem.superblock().features().needs_recovery());
+        let status = filesystem.journal_status().expect("journal status");
+        assert_eq!(status.sequence(), first_transaction.get());
+        assert!(status.has_nonzero_log_start());
+        let scan = filesystem
+            .scan_internal_journal()
+            .expect("scan two commits");
+        assert_eq!(scan.transactions().len(), 2);
+
+        filesystem
+            .run_checkpoint_worker_for_test()
+            .expect("checkpoint first transaction");
+        assert_eq!(filesystem.pending_checkpoint_count(), 1);
+        assert!(filesystem.superblock().features().needs_recovery());
+        let on_disk_bytes = device.bytes();
+        let on_disk_superblock =
+            Superblock::decode(&on_disk_bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                .expect("decode checkpointed primary superblock");
+        assert!(on_disk_superblock.features().needs_recovery());
+        let status = filesystem.journal_status().expect("journal status");
+        assert_eq!(status.sequence(), second_transaction.get());
+        assert!(status.has_nonzero_log_start());
+        let scan = filesystem
+            .scan_internal_journal()
+            .expect("scan remaining commit");
+        assert_eq!(scan.transactions().len(), 1);
+        assert_eq!(scan.transactions()[0].sequence(), second_transaction);
+
+        filesystem
+            .sync_filesystem()
+            .expect("checkpoint remaining transaction");
+        assert_eq!(filesystem.pending_checkpoint_count(), 0);
+        assert!(!filesystem.superblock().features().needs_recovery());
+        assert!(
+            !filesystem
+                .journal_status()
+                .expect("clean journal status")
+                .has_nonzero_log_start()
+        );
+        assert_eq!(
+            filesystem.superblock().free_blocks_count(),
+            free_blocks_before - 2
+        );
+
+        let mut cleanup_handle = journal.begin(JournalCredits::new(8)).unwrap();
+        let cleanup_transaction = cleanup_handle.id();
+        filesystem
+            .release_allocated_block(first_allocation.block(), &mut cleanup_handle)
+            .expect("release first test block");
+        filesystem
+            .release_allocated_block(second_allocation.block(), &mut cleanup_handle)
+            .expect("release second test block");
+        drop(cleanup_handle);
+        filesystem
+            .commit_metadata_transaction(cleanup_transaction)
+            .expect("commit cleanup transaction");
+        assert_eq!(filesystem.pending_checkpoint_count(), 1);
+        filesystem
+            .sync_filesystem()
+            .expect("checkpoint cleanup transaction");
+        assert_eq!(
+            filesystem.superblock().free_blocks_count(),
+            free_blocks_before
+        );
+        drop(filesystem);
+
+        fs::write(&image, device.bytes()).expect("write two-commit journal image");
+        run_e2fsck_read_only(&e2fsck, &image);
+        fs::remove_file(image).expect("remove two-commit journal image");
     }
 
     #[test]
@@ -1941,7 +2255,7 @@ mod tests {
             .expect("allocate a block from journaled Linux image");
         drop(handle);
         filesystem
-            .enqueue_metadata_checkpoint_for_test(journal, transaction)
+            .enqueue_metadata_checkpoint_for_test(transaction)
             .expect("enqueue checkpoint");
         device.fail_flush_at(device.flush_count() + 1);
 
@@ -1965,7 +2279,7 @@ mod tests {
         let block_device: Arc<dyn BlockDevice> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount generated allocator image");
-        let journal = Journal::new(TransactionId::new(701));
+        let journal = JournalTransactions::new(TransactionId::new(701));
         let mut handle = journal.begin(JournalCredits::new(14)).unwrap();
         let transaction = handle.id();
         let block_goal =
@@ -1995,7 +2309,7 @@ mod tests {
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
         drop(filesystem);
 
         fs::write(&image, device.bytes()).expect("write allocator-round-trip image");
@@ -3025,13 +3339,9 @@ mod tests {
         let block_device: Arc<dyn BlockDevice> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount generated journaled image");
-        let first_transaction = TransactionId::new(
-            filesystem
-                .journal_status()
-                .expect("journaled test image has an internal journal")
-                .sequence(),
-        );
-        let journal = Journal::new(first_transaction);
+        let journal = filesystem
+            .metadata_journal()
+            .expect("journaled test image has an internal journal");
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
         let transaction = handle.id();
         let block_goal =
@@ -3047,8 +3357,8 @@ mod tests {
         let bitmap_bit = allocation.bitmap_bit();
         drop(handle);
 
-        let commit = journal.force_commit(transaction).unwrap();
-        let expected_replay_updates = commit.metadata_blocks().len();
+        let commit = journal.force_commit_for_test(transaction).unwrap();
+        let expected_replay_updates = commit.metadata_blocks().unwrap().as_ref().len();
         filesystem
             .persist_metadata_journal_commit(&commit)
             .expect("persist allocator metadata to the journal");
@@ -3106,7 +3416,7 @@ mod tests {
                 inode_bitmap: [0, 0, 0, 0],
             },
         ]);
-        let journal = Journal::new(TransactionId::new(801));
+        let journal = JournalTransactions::new(TransactionId::new(801));
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
 
         let allocation = filesystem
@@ -3137,7 +3447,7 @@ mod tests {
                 inode_bitmap: [0, 0, 0, 0],
             },
         ]);
-        let journal = Journal::new(TransactionId::new(811));
+        let journal = JournalTransactions::new(TransactionId::new(811));
         let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
 
         let allocation = filesystem
@@ -3170,7 +3480,7 @@ mod tests {
             },
         ]);
 
-        let journal = Journal::new(TransactionId::new(821));
+        let journal = JournalTransactions::new(TransactionId::new(821));
         let mut regular_handle = journal.begin(JournalCredits::new(4)).unwrap();
         let regular = filesystem
             .allocate_inode(
@@ -3188,7 +3498,7 @@ mod tests {
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
 
         let mut directory_handle = journal.begin(JournalCredits::new(4)).unwrap();
         let directory = filesystem
@@ -3214,7 +3524,7 @@ mod tests {
         }; 4];
         groups[0].inode_bitmap = [0xff, 0x03, 0, 0];
         let (mut filesystem, _device) = allocator_multigroup_test_filesystem(&groups);
-        let journal = Journal::new(TransactionId::new(822));
+        let journal = JournalTransactions::new(TransactionId::new(822));
         let mut handle = journal.begin(JournalCredits::new(32)).unwrap();
         let mut allocated_groups = Vec::new();
 
@@ -3248,7 +3558,7 @@ mod tests {
         let (mut filesystem, _device) = allocator_multigroup_test_filesystem(&groups);
         let child_name = b"hashed-top-level-dir";
         let expected_flex = filesystem.orlov_top_level_start_flex(Some(child_name));
-        let journal = Journal::new(TransactionId::new(826));
+        let journal = JournalTransactions::new(TransactionId::new(826));
         let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
 
         let allocation = filesystem
@@ -3284,7 +3594,7 @@ mod tests {
         };
         let (mut filesystem, _device) = allocator_multigroup_test_filesystem(&groups);
         enable_allocator_flex_bg(&mut filesystem, 1);
-        let journal = Journal::new(TransactionId::new(825));
+        let journal = JournalTransactions::new(TransactionId::new(825));
         let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
 
         let allocation = filesystem
@@ -3325,7 +3635,7 @@ mod tests {
             inode_bitmap: [0, 0, 0, 0],
         };
         let (mut filesystem, _device) = allocator_multigroup_test_filesystem(&groups);
-        let journal = Journal::new(TransactionId::new(823));
+        let journal = JournalTransactions::new(TransactionId::new(823));
         let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
 
         let allocation = filesystem
@@ -3360,7 +3670,7 @@ mod tests {
         };
         let (mut filesystem, _device) = allocator_multigroup_test_filesystem(&groups);
         enable_allocator_flex_bg(&mut filesystem, 1);
-        let journal = Journal::new(TransactionId::new(824));
+        let journal = JournalTransactions::new(TransactionId::new(824));
         let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
 
         let allocation = filesystem
@@ -3378,7 +3688,7 @@ mod tests {
     fn block_allocator_journals_bitmap_group_and_superblock_updates() {
         let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let available_before = filesystem.blocks_available_for_reservation();
-        let journal = Journal::new(TransactionId::new(101));
+        let journal = JournalTransactions::new(TransactionId::new(101));
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
         let transaction = handle.id();
 
@@ -3397,9 +3707,9 @@ mod tests {
         drop(handle);
 
         let commit = journal.force_commit(transaction).unwrap();
-        assert_eq!(commit.used_credits(), 3);
+        assert_eq!(commit.used_credits().unwrap(), 3);
         assert_eq!(
-            commit.metadata_blocks(),
+            commit.metadata_blocks().unwrap().as_ref(),
             &[
                 FilesystemBlock::new(0),
                 FilesystemBlock::new(1),
@@ -3411,7 +3721,7 @@ mod tests {
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
 
         let bytes = device.bytes();
         assert_eq!(bytes[2 * TEST_BLOCK_SIZE] & 0b0100_0000, 0b0100_0000);
@@ -3422,7 +3732,7 @@ mod tests {
     #[test]
     fn mballoc_allocates_goal_aligned_contiguous_run() {
         let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(111));
+        let journal = JournalTransactions::new(TransactionId::new(111));
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
         let transaction = handle.id();
         let request = Ext4AllocationRequest::new(
@@ -3450,12 +3760,12 @@ mod tests {
         drop(handle);
 
         let commit = journal.force_commit(transaction).unwrap();
-        assert_eq!(commit.used_credits(), 3);
+        assert_eq!(commit.used_credits().unwrap(), 3);
         filesystem
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
 
         let bytes = device.bytes();
         assert_eq!(bytes[2 * TEST_BLOCK_SIZE + 1] & 0b0000_1111, 0b0000_1111);
@@ -3474,7 +3784,7 @@ mod tests {
                 block_bitmap: [0xff, 0b1111_1100, 0xff, 0xff],
                 inode_bitmap: [0xff, 0x03, 0, 0],
             }]);
-        let journal = Journal::new(TransactionId::new(112));
+        let journal = JournalTransactions::new(TransactionId::new(112));
         let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
         let request = Ext4AllocationRequest::new(
             LogicalBlock::new(11),
@@ -3518,7 +3828,7 @@ mod tests {
                 inode_bitmap: [0, 0, 0, 0],
             },
         ]);
-        let journal = Journal::new(TransactionId::new(113));
+        let journal = JournalTransactions::new(TransactionId::new(113));
         let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
         let request = Ext4AllocationRequest::new(
             LogicalBlock::new(12),
@@ -3559,7 +3869,7 @@ mod tests {
     #[test]
     fn block_allocator_releases_allocated_block_through_same_metadata_path() {
         let (mut filesystem, device) = allocator_test_filesystem(25, 0b0111_1111);
-        let journal = Journal::new(TransactionId::new(201));
+        let journal = JournalTransactions::new(TransactionId::new(201));
         let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
         let transaction = handle.id();
 
@@ -3578,7 +3888,7 @@ mod tests {
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
 
         let bytes = device.bytes();
         assert_eq!(bytes[2 * TEST_BLOCK_SIZE] & 0b0100_0000, 0);
@@ -3589,7 +3899,7 @@ mod tests {
     #[test]
     fn block_allocator_releases_metadata_block_with_revoke_record() {
         let (mut filesystem, device) = allocator_test_filesystem(25, 0b0111_1111);
-        let journal = Journal::new(TransactionId::new(202));
+        let journal = JournalTransactions::new(TransactionId::new(202));
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
         let transaction = handle.id();
 
@@ -3602,22 +3912,25 @@ mod tests {
         drop(handle);
 
         let commit = journal.force_commit(transaction).unwrap();
-        assert_eq!(commit.used_credits(), 4);
+        assert_eq!(commit.used_credits().unwrap(), 4);
         assert_eq!(
-            commit.metadata_blocks(),
+            commit.metadata_blocks().unwrap().as_ref(),
             &[
                 FilesystemBlock::new(0),
                 FilesystemBlock::new(1),
                 FilesystemBlock::new(2),
             ]
         );
-        assert_eq!(commit.revoked_blocks(), &[FilesystemBlock::new(6)]);
+        assert_eq!(
+            commit.revoked_blocks().unwrap().as_ref(),
+            &[FilesystemBlock::new(6)]
+        );
 
         filesystem
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
 
         let bytes = device.bytes();
         assert_eq!(bytes[2 * TEST_BLOCK_SIZE] & 0b0100_0000, 0);
@@ -3626,50 +3939,148 @@ mod tests {
     }
 
     #[test]
-    fn block_allocator_abort_rollback_restores_bitmap_and_counters() {
-        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(211));
-        let mut handle = journal.begin(JournalCredits::new(6)).unwrap();
+    fn expected_error_before_metadata_access_does_not_poison_mount_journal() {
+        let (mut filesystem, _device) = journal_allocator_test_filesystem(0, 0xff);
+        install_test_internal_journal(&mut filesystem, 250);
+        let journal = filesystem.metadata_journal().unwrap();
+        let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
+        let transaction = handle.id();
+
+        assert_eq!(
+            filesystem.allocate_block(None, &mut handle),
+            Err(Ext4Error::NoSpace)
+        );
+        assert!(!handle.has_updates());
+        assert_eq!(
+            filesystem.complete_metadata_mutation(handle, Err::<(), _>(Ext4Error::NoSpace)),
+            Err(Ext4Error::NoSpace)
+        );
+        assert_eq!(filesystem.groups()[0].free_blocks_count(), 0);
+        assert!(!journal.is_aborted());
+        assert_eq!(journal.running_transaction().unwrap(), Some(transaction));
+
+        let retry = journal.begin(JournalCredits::new(4)).unwrap();
+        assert_eq!(retry.id(), transaction);
+        drop(retry);
+    }
+
+    #[test]
+    fn expected_error_on_empty_handle_does_not_abort_other_active_handle() {
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        install_test_internal_journal(&mut filesystem, 251);
+        let journal = filesystem.metadata_journal().unwrap();
+
+        let mut first = journal.begin(JournalCredits::new(4)).unwrap();
+        let transaction = first.id();
+        let allocation = filesystem.allocate_block(None, &mut first).unwrap();
+        let second = journal.begin(JournalCredits::new(1)).unwrap();
+        assert_eq!(
+            filesystem.complete_metadata_mutation(second, Err::<(), _>(Ext4Error::NoSpace)),
+            Err(Ext4Error::NoSpace)
+        );
+        assert!(!journal.is_aborted());
+        assert_eq!(journal.running_transaction().unwrap(), Some(transaction));
+        assert_eq!(
+            filesystem.groups()[0].free_blocks_count(),
+            TEST_FREE_BLOCKS - 1
+        );
+        assert_eq!(allocation.block(), PhysicalBlock::new(6));
+
+        filesystem
+            .complete_metadata_mutation(first, Ok(()))
+            .expect("finish surviving metadata mutation");
+        assert!(!journal.is_aborted());
+    }
+
+    #[test]
+    fn successful_handle_can_finish_while_another_handle_remains_active() {
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        install_test_internal_journal(&mut filesystem, 252);
+        let journal = filesystem.metadata_journal().unwrap();
+
+        let mut first = journal.begin(JournalCredits::new(4)).unwrap();
+        let transaction = first.id();
+        let second = journal.begin(JournalCredits::new(1)).unwrap();
+        filesystem.allocate_block(None, &mut first).unwrap();
+
+        filesystem
+            .complete_metadata_mutation(first, Ok(()))
+            .expect("finish first handle while second remains active");
+        assert!(!journal.is_aborted());
+        assert_eq!(journal.running_transaction().unwrap(), Some(transaction));
+
+        filesystem
+            .complete_metadata_mutation(second, Ok(()))
+            .expect("finish last handle below the transaction limit");
+        assert!(!journal.is_aborted());
+        assert_eq!(journal.running_transaction().unwrap(), Some(transaction));
+    }
+
+    #[test]
+    fn expected_error_after_metadata_access_aborts_without_rewinding_state() {
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        install_test_internal_journal(&mut filesystem, 253);
+        let journal = filesystem.metadata_journal().unwrap();
+        let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
 
         let allocation = filesystem.allocate_block(None, &mut handle).unwrap();
         assert_eq!(allocation.block(), PhysicalBlock::new(6));
-        assert_eq!(filesystem.groups()[0].free_blocks_count(), 25);
-        assert_eq!(filesystem.superblock().free_blocks_count(), 25);
-
-        let undo = journal
-            .abort(Ext4Error::Device(block::DriverError::Io))
-            .expect("allocator transaction recorded undo");
         assert_eq!(
-            filesystem.allocate_block(None, &mut handle),
-            Err(Ext4Error::JournalAborted)
+            filesystem.groups()[0].free_blocks_count(),
+            TEST_FREE_BLOCKS - 1
         );
-        drop(handle);
 
-        filesystem.rollback_metadata_undo(&undo).unwrap();
-        assert_eq!(filesystem.groups()[0].free_blocks_count(), TEST_FREE_BLOCKS);
+        assert_eq!(
+            filesystem.complete_metadata_mutation(handle, Err::<(), _>(Ext4Error::NoSpace)),
+            Err(Ext4Error::InvalidJournalTransaction)
+        );
+        assert!(journal.is_aborted());
+        assert_eq!(
+            filesystem.groups()[0].free_blocks_count(),
+            TEST_FREE_BLOCKS - 1
+        );
         assert_eq!(
             filesystem.superblock().free_blocks_count(),
-            u64::from(TEST_FREE_BLOCKS)
+            u64::from(TEST_FREE_BLOCKS - 1)
         );
+        assert!(matches!(
+            journal.begin(JournalCredits::new(1)),
+            Err(Ext4Error::JournalAborted)
+        ));
+    }
 
-        let bitmap = filesystem
-            .read_metadata_block(FilesystemBlock::new(2))
-            .unwrap();
-        assert_eq!(bitmap.as_ref()[0], 0b0011_1111);
-        let descriptor = filesystem
-            .read_metadata_block(FilesystemBlock::new(1))
-            .unwrap();
-        assert_eq!(le_u16(descriptor.as_ref(), 12), TEST_FREE_BLOCKS as u16);
-        let superblock = filesystem
-            .read_metadata_block(FilesystemBlock::new(0))
-            .unwrap();
-        assert_eq!(le_u32(superblock.as_ref(), 1024 + 0x0c), TEST_FREE_BLOCKS);
+    #[test]
+    fn commit_failure_after_metadata_publication_aborts_mount_journal() {
+        let (mut filesystem, device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        install_test_internal_journal(&mut filesystem, 254);
+        let journal = filesystem.metadata_journal().unwrap();
+        let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
+        filesystem.allocate_block(None, &mut handle).unwrap();
+        device.fail_flush_at(device.flush_count() + 1);
+
+        assert_eq!(
+            filesystem.complete_metadata_mutation_with_policy(
+                handle,
+                Ok(()),
+                crate::journal::RecoveryFlagPolicy::PreserveDuringRecovery,
+            ),
+            Err(Ext4Error::Device(DriverError::Io))
+        );
+        assert!(journal.is_aborted());
+        assert!(matches!(
+            journal.begin(JournalCredits::new(1)),
+            Err(Ext4Error::JournalAborted)
+        ));
     }
 
     #[test]
     fn block_allocator_rejects_releasing_system_zone_without_consuming_credits() {
         let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(301));
+        let journal = JournalTransactions::new(TransactionId::new(301));
         let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
 
         assert_eq!(
@@ -3682,7 +4093,7 @@ mod tests {
     #[test]
     fn block_allocator_rejects_insufficient_credits_before_metadata_access() {
         let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(311));
+        let journal = JournalTransactions::new(TransactionId::new(311));
         let mut handle = journal.begin(JournalCredits::new(2)).unwrap();
 
         assert_eq!(
@@ -3700,7 +4111,7 @@ mod tests {
     #[test]
     fn inode_allocator_rejects_insufficient_credits_before_metadata_access() {
         let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(312));
+        let journal = JournalTransactions::new(TransactionId::new(312));
         let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
 
         assert_eq!(
@@ -3758,7 +4169,7 @@ mod tests {
             0,
             TEST_EXT4_BG_BLOCK_UNINIT,
         );
-        let journal = Journal::new(TransactionId::new(321));
+        let journal = JournalTransactions::new(TransactionId::new(321));
         let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
 
         assert_eq!(
@@ -3788,7 +4199,7 @@ mod tests {
                 inode_bitmap: [0xff; 4],
             },
         ]);
-        let journal = Journal::new(TransactionId::new(324));
+        let journal = JournalTransactions::new(TransactionId::new(324));
         let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
         let transaction = handle.id();
 
@@ -3808,7 +4219,7 @@ mod tests {
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
 
         let bytes = device.bytes();
         let group1_descriptor_offset = TEST_BLOCK_SIZE + 64;
@@ -3842,7 +4253,7 @@ mod tests {
                 inode_bitmap: [0xff; 4],
             },
         ]);
-        let journal = Journal::new(TransactionId::new(334));
+        let journal = JournalTransactions::new(TransactionId::new(334));
         let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
         let transaction = handle.id();
         let request = Ext4AllocationRequest::new(
@@ -3872,7 +4283,7 @@ mod tests {
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
 
         let bytes = device.bytes();
         let group1_descriptor_offset = TEST_BLOCK_SIZE + 64;
@@ -3894,7 +4305,7 @@ mod tests {
     fn block_allocator_rejects_initialized_bitmap_with_cleared_tail_bit() {
         let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         device.bytes.lock().unwrap()[2 * TEST_BLOCK_SIZE + 4] = 0;
-        let journal = Journal::new(TransactionId::new(325));
+        let journal = JournalTransactions::new(TransactionId::new(325));
         let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
 
         assert_eq!(
@@ -3912,7 +4323,7 @@ mod tests {
     #[test]
     fn block_allocator_rejects_initialized_bitmap_with_cleared_system_zone_bit() {
         let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1011);
-        let journal = Journal::new(TransactionId::new(326));
+        let journal = JournalTransactions::new(TransactionId::new(326));
         let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
 
         assert_eq!(
@@ -3939,7 +4350,7 @@ mod tests {
             true,
             false,
         );
-        let journal = Journal::new(TransactionId::new(327));
+        let journal = JournalTransactions::new(TransactionId::new(327));
         let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
 
         assert_eq!(
@@ -3966,7 +4377,7 @@ mod tests {
             true,
             false,
         );
-        let journal = Journal::new(TransactionId::new(328));
+        let journal = JournalTransactions::new(TransactionId::new(328));
         let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
 
         assert_eq!(
@@ -3983,7 +4394,7 @@ mod tests {
     #[test]
     fn block_allocator_skips_bitmap_checksum_without_metadata_csum() {
         let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(329));
+        let journal = JournalTransactions::new(TransactionId::new(329));
         let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
 
         let allocation = filesystem
@@ -4003,7 +4414,7 @@ mod tests {
             0,
             TEST_EXT4_BG_INODE_UNINIT,
         );
-        let journal = Journal::new(TransactionId::new(322));
+        let journal = JournalTransactions::new(TransactionId::new(322));
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
 
         assert_eq!(
@@ -4030,7 +4441,7 @@ mod tests {
             false,
             true,
         );
-        let journal = Journal::new(TransactionId::new(330));
+        let journal = JournalTransactions::new(TransactionId::new(330));
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
 
         assert_eq!(
@@ -4058,7 +4469,7 @@ mod tests {
             false,
             true,
         );
-        let journal = Journal::new(TransactionId::new(331));
+        let journal = JournalTransactions::new(TransactionId::new(331));
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
 
         assert_eq!(
@@ -4076,7 +4487,7 @@ mod tests {
     #[test]
     fn inode_allocator_skips_bitmap_checksum_without_metadata_csum() {
         let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(332));
+        let journal = JournalTransactions::new(TransactionId::new(332));
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
 
         let allocation = filesystem
@@ -4110,7 +4521,7 @@ mod tests {
                 inode_bitmap: [0; 4],
             },
         ]);
-        let journal = Journal::new(TransactionId::new(323));
+        let journal = JournalTransactions::new(TransactionId::new(323));
         let mut handle = journal.begin(JournalCredits::new(5)).unwrap();
         let transaction = handle.id();
 
@@ -4136,7 +4547,7 @@ mod tests {
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
 
         let bytes = device.bytes();
         let group1_descriptor_offset = TEST_BLOCK_SIZE + 64;
@@ -4156,7 +4567,7 @@ mod tests {
     fn inode_allocator_rejects_initialized_bitmap_with_cleared_tail_bit() {
         let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         device.bytes.lock().unwrap()[3 * TEST_BLOCK_SIZE + 4] = 0;
-        let journal = Journal::new(TransactionId::new(327));
+        let journal = JournalTransactions::new(TransactionId::new(327));
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
 
         assert_eq!(
@@ -4199,7 +4610,7 @@ mod tests {
                 inode_bitmap: [0, 0, 0, 0],
             },
         ]);
-        let journal = Journal::new(TransactionId::new(328));
+        let journal = JournalTransactions::new(TransactionId::new(328));
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
 
         let allocation = filesystem
@@ -4219,7 +4630,7 @@ mod tests {
     #[test]
     fn inode_allocator_journals_bitmap_group_and_superblock_updates() {
         let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(401));
+        let journal = JournalTransactions::new(TransactionId::new(401));
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
         let transaction = handle.id();
 
@@ -4250,9 +4661,9 @@ mod tests {
         drop(handle);
 
         let commit = journal.force_commit(transaction).unwrap();
-        assert_eq!(commit.used_credits(), 4);
+        assert_eq!(commit.used_credits().unwrap(), 4);
         assert_eq!(
-            commit.metadata_blocks(),
+            commit.metadata_blocks().unwrap().as_ref(),
             &[
                 FilesystemBlock::new(0),
                 FilesystemBlock::new(1),
@@ -4264,7 +4675,7 @@ mod tests {
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
 
         let bytes = device.bytes();
         assert_eq!(bytes[3 * TEST_BLOCK_SIZE + 1], 0x07);
@@ -4283,65 +4694,9 @@ mod tests {
     }
 
     #[test]
-    fn inode_allocator_abort_rollback_restores_bitmap_table_and_counters() {
-        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(411));
-        let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
-
-        let allocation = filesystem
-            .allocate_inode(
-                None,
-                InodeInitialization::regular_file(0o644, 0, 0),
-                &mut handle,
-            )
-            .unwrap();
-        assert_eq!(allocation.inode(), InodeNumber::new(11));
-        assert_eq!(filesystem.groups()[0].free_inodes_count(), 21);
-        assert_eq!(filesystem.superblock().free_inodes_count(), 21);
-
-        let undo = journal
-            .abort(Ext4Error::Device(block::DriverError::Io))
-            .expect("inode allocation recorded undo");
-        assert!(matches!(
-            filesystem.allocate_inode(
-                None,
-                InodeInitialization::regular_file(0o644, 0, 0),
-                &mut handle
-            ),
-            Err(Ext4Error::JournalAborted)
-        ));
-        drop(handle);
-
-        filesystem.rollback_metadata_undo(&undo).unwrap();
-        assert_eq!(filesystem.groups()[0].free_inodes_count(), TEST_FREE_INODES);
-        assert_eq!(
-            filesystem.superblock().free_inodes_count(),
-            TEST_FREE_INODES
-        );
-
-        let inode_bitmap = filesystem
-            .read_metadata_block(FilesystemBlock::new(3))
-            .unwrap();
-        assert_eq!(inode_bitmap.as_ref()[1], 0x03);
-        let inode_table = filesystem
-            .read_metadata_block(FilesystemBlock::new(4))
-            .unwrap();
-        let inode_offset = 10 * 256;
-        assert_eq!(le_u16(inode_table.as_ref(), inode_offset), 0);
-        let descriptor = filesystem
-            .read_metadata_block(FilesystemBlock::new(1))
-            .unwrap();
-        assert_eq!(le_u16(descriptor.as_ref(), 14), TEST_FREE_INODES as u16);
-        let superblock = filesystem
-            .read_metadata_block(FilesystemBlock::new(0))
-            .unwrap();
-        assert_eq!(le_u32(superblock.as_ref(), 1024 + 0x10), TEST_FREE_INODES);
-    }
-
-    #[test]
     fn inline_extent_mutation_journals_inode_table_update() {
         let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(451));
+        let journal = JournalTransactions::new(TransactionId::new(451));
         let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
 
         let block = filesystem.allocate_block(None, &mut handle).unwrap();
@@ -4380,7 +4735,7 @@ mod tests {
     #[test]
     fn extent_root_grow_without_revoke_journals_only_live_leaf_block() {
         let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(461));
+        let journal = JournalTransactions::new(TransactionId::new(461));
         let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
         let transaction = handle.id();
         let inode_allocation = filesystem
@@ -4430,17 +4785,19 @@ mod tests {
         drop(handle);
 
         let commit = journal.force_commit(transaction).unwrap();
-        assert!(commit.revoked_blocks().is_empty());
+        assert!(commit.revoked_blocks().unwrap().as_ref().is_empty());
         assert!(
             commit
                 .metadata_blocks()
+                .unwrap()
+                .as_ref()
                 .contains(&FilesystemBlock::new(extent_block))
         );
         filesystem
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
 
         let bytes = device.bytes();
         let extent_block_offset = usize::try_from(extent_block).unwrap() * TEST_BLOCK_SIZE;
@@ -4455,7 +4812,7 @@ mod tests {
     #[test]
     fn extent_point_mutations_keep_existing_leaf_block() {
         let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(4611));
+        let journal = JournalTransactions::new(TransactionId::new(4611));
         let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
         let inode_allocation = filesystem
             .allocate_inode(
@@ -4536,7 +4893,7 @@ mod tests {
         }; 16];
         groups[0].inode_bitmap = [0xff, 0x03, 0, 0];
         let (mut filesystem, _device) = allocator_multigroup_test_filesystem(&groups);
-        let journal = Journal::new(TransactionId::new(4612));
+        let journal = JournalTransactions::new(TransactionId::new(4612));
         let mut handle = journal.begin(JournalCredits::new(100_000)).unwrap();
         let inode_allocation = filesystem
             .allocate_inode(
@@ -4591,7 +4948,7 @@ mod tests {
     #[test]
     fn extent_unwritten_conversion_splits_only_requested_range() {
         let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(462));
+        let journal = JournalTransactions::new(TransactionId::new(462));
         let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
         let physical = allocate_contiguous_blocks(&mut filesystem, 6, &mut handle);
         let inode_allocation = filesystem
@@ -4648,7 +5005,7 @@ mod tests {
     #[test]
     fn allocation_goal_after_previous_extent_uses_requested_logical_block() {
         let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(463));
+        let journal = JournalTransactions::new(TransactionId::new(463));
         let mut handle = journal.begin(JournalCredits::new(128)).unwrap();
         let physical = allocate_contiguous_blocks(&mut filesystem, 10, &mut handle);
         let inode_allocation = filesystem
@@ -4681,7 +5038,7 @@ mod tests {
     #[test]
     fn extent_remove_range_splits_mapping_and_releases_data_blocks() {
         let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(463));
+        let journal = JournalTransactions::new(TransactionId::new(463));
         let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
         let physical = allocate_contiguous_blocks(&mut filesystem, 6, &mut handle);
         let inode_allocation = filesystem
@@ -4742,7 +5099,7 @@ mod tests {
     #[test]
     fn extent_remove_range_splits_full_inline_leaf() {
         let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(4631));
+        let journal = JournalTransactions::new(TransactionId::new(4631));
         let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
         let physical = allocate_contiguous_blocks(&mut filesystem, 3, &mut handle);
         let inode_allocation = filesystem
@@ -4805,7 +5162,7 @@ mod tests {
     #[test]
     fn extent_truncate_releases_tail_range() {
         let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(464));
+        let journal = JournalTransactions::new(TransactionId::new(464));
         let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
         let physical = allocate_contiguous_blocks(&mut filesystem, 6, &mut handle);
         let inode_allocation = filesystem
@@ -4863,7 +5220,7 @@ mod tests {
         }; 16];
         groups[0].inode_bitmap = [0xff, 0x03, 0, 0];
         let (mut filesystem, _device) = allocator_multigroup_test_filesystem(&groups);
-        let journal = Journal::new(TransactionId::new(465));
+        let journal = JournalTransactions::new(TransactionId::new(465));
         let mut handle = journal.begin(JournalCredits::new(100_000)).unwrap();
         let inode_allocation = filesystem
             .allocate_inode(
@@ -4905,7 +5262,8 @@ mod tests {
 
     #[test]
     fn ordered_writeback_allocates_hole_and_commits_written_size_before_final_size() {
-        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 701);
         let input = vec![0x5a; TEST_BLOCK_SIZE];
@@ -4972,7 +5330,8 @@ mod tests {
 
     #[test]
     fn ordered_writeback_append_preserves_existing_partial_block_data() {
-        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 711);
         let timestamp = crate::Ext4Timestamp::new(5678, 0);
@@ -4992,7 +5351,8 @@ mod tests {
 
     #[test]
     fn ordered_writeback_preallocates_and_discards_unwritten_tail() {
-        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 712);
         let input = vec![0x42; TEST_BLOCK_SIZE * 4];
@@ -5057,7 +5417,8 @@ mod tests {
 
     #[test]
     fn ordered_writeback_prealloc_budget_zero_allocates_only_dirty_blocks() {
-        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 713);
         let input = vec![0x34; TEST_BLOCK_SIZE * 4];
@@ -5097,7 +5458,8 @@ mod tests {
 
     #[test]
     fn ordered_writeback_reuses_preallocated_unwritten_tail() {
-        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 714);
         let first = vec![0x41; TEST_BLOCK_SIZE * 4];
@@ -5148,8 +5510,9 @@ mod tests {
 
     #[test]
     fn ordered_writeback_converts_unwritten_extent_and_zero_fills_partial_block() {
-        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(721));
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let journal = JournalTransactions::new(TransactionId::new(721));
         let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
         let transaction = handle.id();
         let physical = allocate_contiguous_blocks(&mut filesystem, 1, &mut handle);
@@ -5177,7 +5540,7 @@ mod tests {
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
         install_test_internal_journal(&mut filesystem, 722);
 
         let updated = filesystem
@@ -5205,7 +5568,8 @@ mod tests {
 
     #[test]
     fn truncate_grow_keeps_new_range_sparse_and_zero_reading() {
-        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 731);
         let timestamp = crate::Ext4Timestamp::new(17, 0);
@@ -5236,7 +5600,8 @@ mod tests {
 
     #[test]
     fn truncate_grow_zeroes_mapped_old_eof_tail() {
-        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 732);
         let input = vec![0x6d; TEST_BLOCK_SIZE];
@@ -5251,7 +5616,7 @@ mod tests {
             )
             .unwrap();
         install_test_internal_journal(&mut filesystem, 733);
-        let journal = Journal::new(TransactionId::new(734));
+        let journal = JournalTransactions::new(TransactionId::new(734));
         let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
         let transaction = handle.id();
         let stale_tail_inode = filesystem
@@ -5262,14 +5627,13 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        handle.mark_inode_sync(stale_tail_inode.number()).unwrap();
         drop(handle);
         let commit = journal.force_commit(transaction).unwrap();
         filesystem
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
         install_test_internal_journal(&mut filesystem, 735);
 
         let grown = filesystem
@@ -5291,7 +5655,8 @@ mod tests {
 
     #[test]
     fn truncate_shrink_releases_tail_blocks_and_zeroes_partial_eof_block() {
-        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 741);
         let input = vec![0xa5; TEST_BLOCK_SIZE * 3];
@@ -5344,7 +5709,8 @@ mod tests {
 
     #[test]
     fn orphan_cleanup_finishes_committed_shrink_after_crash_point() {
-        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 751);
         let input = vec![0x5c; TEST_BLOCK_SIZE * 3];
@@ -5363,7 +5729,7 @@ mod tests {
         let free_before_orphan_cleanup = filesystem.superblock().free_blocks_count();
         let new_size = u64::try_from(TEST_BLOCK_SIZE + 9).unwrap();
 
-        let journal = Journal::new(TransactionId::new(753));
+        let journal = JournalTransactions::new(TransactionId::new(753));
         let mut handle = journal.begin(JournalCredits::new(16)).unwrap();
         let transaction = handle.id();
         let orphaned = filesystem.add_orphan(&written, &mut handle).unwrap();
@@ -5377,14 +5743,13 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        handle.mark_inode_sync(orphaned.number()).unwrap();
         drop(handle);
         let commit = journal.force_commit(transaction).unwrap();
         filesystem
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
 
         assert_eq!(filesystem.orphan_head(), Some(written.number()));
         assert_eq!(orphaned.size(), new_size);
@@ -5441,7 +5806,8 @@ mod tests {
 
     #[test]
     fn truncate_rejects_orphan_file_feature() {
-        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 766);
         let input = vec![0x3f; TEST_BLOCK_SIZE];
@@ -5485,7 +5851,8 @@ mod tests {
 
     #[test]
     fn regular_file_mutation_accepts_huge_file_feature_for_sector_accounted_inode() {
-        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 768);
         set_allocator_feature_bits(
@@ -5511,7 +5878,8 @@ mod tests {
 
     #[test]
     fn regular_file_mutation_rejects_inode_using_huge_file_accounting() {
-        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 769);
         set_allocator_feature_bits(
@@ -5520,7 +5888,7 @@ mod tests {
             features::ReadOnlyCompatFeatures::HUGE_FILE,
         );
 
-        let journal = Journal::new(TransactionId::new(770));
+        let journal = JournalTransactions::new(TransactionId::new(770));
         let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
         let transaction = handle.id();
         let flagged = filesystem
@@ -5531,14 +5899,13 @@ mod tests {
                 &mut handle,
             )
             .expect("set huge-file inode flag");
-        handle.mark_inode_sync(flagged.number()).unwrap();
         drop(handle);
         let commit = journal.force_commit(transaction).unwrap();
         filesystem
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
 
         assert_eq!(
             filesystem.writeback_ordered_at(
@@ -5555,23 +5922,23 @@ mod tests {
 
     #[test]
     fn legacy_orphan_cleanup_preserving_recovery_evicts_zero_link_inode() {
-        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 769);
         let free_inodes_before_cleanup = filesystem.superblock().free_inodes_count();
-        let journal = Journal::new(TransactionId::new(770));
+        let journal = JournalTransactions::new(TransactionId::new(770));
         let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
         let transaction = handle.id();
         let orphaned = filesystem.add_orphan(&inode, &mut handle).unwrap();
-        let unlinked = update_test_inode_links_count(&mut filesystem, &orphaned, 0, &mut handle);
-        handle.mark_inode_sync(unlinked.number()).unwrap();
+        let _unlinked = update_test_inode_links_count(&mut filesystem, &orphaned, 0, &mut handle);
         drop(handle);
         let commit = journal.force_commit(transaction).unwrap();
         filesystem
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
 
         assert_eq!(
             filesystem
@@ -5589,6 +5956,44 @@ mod tests {
     }
 
     #[test]
+    fn recovery_rebases_transaction_sequence_before_regular_orphan_cleanup() {
+        let mke2fs = require_e2fsprogs("mke2fs");
+        let image = temporary_image_path("replay-then-orphan-cleanup");
+        create_journaled_allocator_test_image(&mke2fs, &image);
+
+        let bytes = fs::read(&image).expect("read generated recovery image");
+        let device = Arc::new(LinuxImageDevice::new(bytes));
+        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let mut filesystem =
+            Ext4Filesystem::mount(block_device).expect("mount generated recovery image");
+        let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+        let journal = filesystem.metadata_journal().expect("open mounted journal");
+        let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
+        let transaction = handle.id();
+        let orphaned = filesystem.add_orphan(&inode, &mut handle).unwrap();
+        let _unlinked = update_test_inode_links_count(&mut filesystem, &orphaned, 0, &mut handle);
+        drop(handle);
+        let commit = journal.force_commit_for_test(transaction).unwrap();
+        filesystem
+            .persist_metadata_journal_commit(&commit)
+            .expect("persist orphan transaction without checkpoint");
+        drop(filesystem);
+
+        let recovery_device: Arc<dyn BlockDevice> = device.clone();
+        let report = Ext4Filesystem::recover(recovery_device)
+            .expect("replay and orphan cleanup")
+            .expect("active journal report");
+        assert!(report.update_count() > 0);
+
+        let mount_device: Arc<dyn BlockDevice> = device.clone();
+        let recovered = Ext4Filesystem::mount(mount_device).expect("mount recovered image");
+        assert_eq!(recovered.orphan_head(), None);
+        assert_eq!(recovered.inode(inode.number()), Err(Ext4Error::NotFound));
+        assert!(!recovered.superblock().features().needs_recovery());
+        fs::remove_file(image).expect("remove recovery image");
+    }
+
+    #[test]
     fn recover_keeps_recovery_feature_when_regular_orphan_cleanup_fails() {
         let mke2fs = require_e2fsprogs("mke2fs");
         let image = temporary_image_path("orphan-cleanup-failed-recovery");
@@ -5600,19 +6005,14 @@ mod tests {
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount generated recovery image");
         let inode = allocate_checkpointed_directory_inode(&mut filesystem);
-        let journal = Journal::new(TransactionId::new(
-            filesystem
-                .journal_status()
-                .expect("test journal installed")
-                .sequence(),
-        ));
+        let journal = filesystem.metadata_journal().expect("open mounted journal");
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
         let transaction = handle.id();
         filesystem
             .set_orphan_head(Some(inode.number()), &mut handle)
             .unwrap();
         drop(handle);
-        let commit = journal.force_commit(transaction).unwrap();
+        let commit = journal.force_commit_for_test(transaction).unwrap();
         filesystem
             .persist_metadata_journal_commit(&commit)
             .expect("persist orphan head update to journal");
@@ -5652,7 +6052,7 @@ mod tests {
     #[test]
     fn inode_allocator_updates_directory_count_and_release_reverses_it() {
         let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(501));
+        let journal = JournalTransactions::new(TransactionId::new(501));
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
         let allocate_transaction = handle.id();
 
@@ -5678,7 +6078,7 @@ mod tests {
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
 
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
         let release_transaction = handle.id();
@@ -5700,7 +6100,7 @@ mod tests {
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
 
         let bytes = device.bytes();
         assert_eq!(bytes[3 * TEST_BLOCK_SIZE + 1], 0x03);
@@ -5721,7 +6121,7 @@ mod tests {
     #[test]
     fn inode_allocator_rejects_releasing_reserved_inode_without_consuming_credits() {
         let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let journal = Journal::new(TransactionId::new(601));
+        let journal = JournalTransactions::new(TransactionId::new(601));
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
 
         assert_eq!(
@@ -5817,6 +6217,57 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn mounted_journal_rejects_extent_beyond_filesystem_device() {
+        let storage = InternalJournal {
+            superblock: test_journal_superblock(900),
+            extents: vec![JournalExtent {
+                logical_start: 0,
+                physical_start: 16,
+                len: 1024,
+            }],
+            block_count: 1024,
+        };
+
+        assert!(matches!(
+            MountedJournal::new(storage, 32),
+            Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal))
+        ));
+    }
+
+    #[test]
+    fn mounted_journal_accepts_inode_capacity_larger_than_s_maxlen() {
+        let storage = InternalJournal {
+            superblock: test_journal_superblock(900),
+            extents: vec![JournalExtent {
+                logical_start: 0,
+                physical_start: 16,
+                len: 1025,
+            }],
+            block_count: 1024,
+        };
+
+        assert!(MountedJournal::new(storage, 2048).is_ok());
+    }
+
+    #[test]
+    fn mounted_journal_rejects_mapping_shorter_than_s_maxlen() {
+        let storage = InternalJournal {
+            superblock: test_journal_superblock(900),
+            extents: vec![JournalExtent {
+                logical_start: 0,
+                physical_start: 16,
+                len: 1023,
+            }],
+            block_count: 1024,
+        };
+
+        assert!(matches!(
+            MountedJournal::new(storage, 2048),
+            Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal))
+        ));
     }
 
     #[test]
@@ -6003,7 +6454,75 @@ mod tests {
             superblock,
             layout,
             block_free_extent_caches: vec![None; groups.len()],
-            pending_checkpoints: VecDeque::new(),
+            groups,
+            system_zones: Vec::new(),
+        };
+        filesystem.build_system_zones().unwrap();
+        (filesystem, block_device)
+    }
+
+    fn journal_allocator_test_filesystem(
+        free_blocks: u32,
+        block_bitmap_first_byte: u8,
+    ) -> (Ext4Filesystem, Arc<TestDevice>) {
+        let mut image = vec![0; TEST_BLOCK_SIZE * TEST_JOURNAL_FILESYSTEM_BLOCK_COUNT];
+        let mut superblock_bytes = allocator_superblock_with_geometry(
+            TEST_JOURNAL_FILESYSTEM_BLOCK_COUNT as u32,
+            32,
+            free_blocks,
+            TEST_FREE_INODES,
+        );
+        put_u32(
+            &mut superblock_bytes,
+            0x20,
+            TEST_JOURNAL_FILESYSTEM_BLOCK_COUNT as u32,
+        );
+        put_u32(
+            &mut superblock_bytes,
+            0x24,
+            TEST_JOURNAL_FILESYSTEM_BLOCK_COUNT as u32,
+        );
+        image[1024..1024 + superblock::SUPERBLOCK_SIZE].copy_from_slice(&superblock_bytes);
+
+        let descriptor = allocator_group_descriptor(free_blocks, TEST_FREE_INODES, 0, 0);
+        image[TEST_BLOCK_SIZE..TEST_BLOCK_SIZE + descriptor.len()].copy_from_slice(&descriptor);
+
+        let block_bitmap = &mut image[2 * TEST_BLOCK_SIZE..3 * TEST_BLOCK_SIZE];
+        block_bitmap.fill(0xff);
+        block_bitmap[0] = block_bitmap_first_byte;
+        let mut remaining = free_blocks.saturating_sub(block_bitmap_first_byte.count_zeros());
+        for block in 8..TEST_JOURNAL_FILESYSTEM_BLOCK_COUNT {
+            if (16..1040).contains(&block) || remaining == 0 {
+                continue;
+            }
+            block_bitmap[block / 8] &= !(1 << (block % 8));
+            remaining -= 1;
+        }
+        assert_eq!(remaining, 0);
+
+        write_allocator_bitmap(&mut image, 3 * TEST_BLOCK_SIZE, &[0xff, 0x03, 0, 0], true);
+
+        let block_device = Arc::new(TestDevice::new(image));
+        let device: Arc<dyn BlockDevice> = block_device.clone();
+        let filesystem_device = Arc::new(
+            FilesystemDevice::open(
+                device,
+                TEST_BLOCK_SIZE,
+                TEST_JOURNAL_FILESYSTEM_BLOCK_COUNT as u64,
+            )
+            .unwrap(),
+        );
+        let metadata_io = Ext4MetadataIo::new(filesystem_device.clone());
+        let superblock = Superblock::decode(&superblock_bytes).unwrap();
+        let layout = FilesystemLayout::derive(&superblock).unwrap();
+        let groups = vec![BlockGroupDescriptor::decode(&descriptor, true).unwrap()];
+        let mut filesystem = Ext4Filesystem {
+            device: filesystem_device,
+            metadata_io,
+            journal: None,
+            superblock,
+            layout,
+            block_free_extent_caches: vec![None; groups.len()],
             groups,
             system_zones: Vec::new(),
         };
@@ -6076,7 +6595,6 @@ mod tests {
             superblock,
             layout,
             block_free_extent_caches: vec![None; groups.len()],
-            pending_checkpoints: VecDeque::new(),
             groups,
             system_zones: Vec::new(),
         };
@@ -6123,7 +6641,7 @@ mod tests {
         filesystem: &mut Ext4Filesystem,
         initialization: InodeInitialization,
     ) -> crate::Ext4Inode {
-        let journal = Journal::new(TransactionId::new(690));
+        let journal = JournalTransactions::new(TransactionId::new(690));
         let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
         let transaction = handle.id();
         let allocation = filesystem
@@ -6135,12 +6653,19 @@ mod tests {
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
         filesystem.internal_inode(allocation.inode()).unwrap()
     }
 
     fn install_test_internal_journal(filesystem: &mut Ext4Filesystem, sequence: u32) {
         let journal_block = FilesystemBlock::new(16);
+        let journal_blocks = 1024;
+        assert!(journal_block.get() + u64::from(journal_blocks) <= filesystem.layout.block_count);
+        if !filesystem.is_system_zone_block(journal_block) {
+            filesystem
+                .add_system_zone(journal_block.get(), u64::from(journal_blocks), None)
+                .unwrap();
+        }
         let (block, offset, len) = filesystem.primary_superblock_location().unwrap();
         let end = offset + len;
         let mut bytes = vec![0; filesystem.device.block_size()];
@@ -6160,15 +6685,21 @@ mod tests {
         filesystem
             .write_contiguous_blocks(journal_block, 1, &journal_block_bytes)
             .unwrap();
-        filesystem.journal = Some(InternalJournal {
-            superblock: test_journal_superblock(sequence),
-            extents: vec![JournalExtent {
-                logical_start: 0,
-                physical_start: journal_block.get(),
-                len: 1024,
-            }],
-            block_count: 1024,
-        });
+        filesystem.journal = Some(
+            MountedJournal::new(
+                InternalJournal {
+                    superblock: test_journal_superblock(sequence),
+                    extents: vec![JournalExtent {
+                        logical_start: 0,
+                        physical_start: journal_block.get(),
+                        len: journal_blocks,
+                    }],
+                    block_count: journal_blocks,
+                },
+                filesystem.layout.block_count,
+            )
+            .unwrap(),
+        );
     }
 
     fn persist_test_orphan_head(
@@ -6176,7 +6707,7 @@ mod tests {
         head: Option<InodeNumber>,
         sequence: u32,
     ) {
-        let journal = Journal::new(TransactionId::new(sequence));
+        let journal = JournalTransactions::new(TransactionId::new(sequence));
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
         let transaction = handle.id();
         filesystem.set_orphan_head(head, &mut handle).unwrap();
@@ -6186,7 +6717,7 @@ mod tests {
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
     }
 
     fn update_test_inode_links_count(
@@ -6198,7 +6729,7 @@ mod tests {
         let inode_table_block = filesystem.inode_table_entry_block(inode.number()).unwrap();
         let inode_table_access = filesystem
             .metadata_io
-            .undo_access(inode_table_block, handle)
+            .write_access(inode_table_block, handle)
             .unwrap();
         let mut inode_table_bytes = metadata_access_bytes(&inode_table_access).unwrap();
         let updated = filesystem
@@ -6550,7 +7081,7 @@ mod tests {
     ) -> (Ext4Filesystem, crate::InodeNumber, crate::Ext4Timestamp) {
         let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         install_test_internal_journal(&mut filesystem, 2000);
-        let journal = Journal::new(TransactionId::new(2000));
+        let journal = JournalTransactions::new(TransactionId::new(2000));
         let mut handle = journal.begin(JournalCredits::new(100_000)).unwrap();
         let transaction = handle.id();
 
@@ -6588,7 +7119,7 @@ mod tests {
             .metadata_io
             .checkpoint_committed(&commit)
             .unwrap();
-        journal.finish_checkpoint(&commit).unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
 
         // Reset the internal journal so the eviction protocol begins from a
         // clean journal with a fresh sequence, matching the installed

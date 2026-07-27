@@ -11,7 +11,7 @@ use super::{
 use crate::{
     Ext4Result, FilesystemBlock,
     io::FilesystemDevice,
-    jbd2::{JournalCommit, JournalCommitBlock, JournalHandle, JournalUndo, TransactionId},
+    jbd2::{JournalCommitBlock, JournalHandle, RuntimeTransaction, TransactionId},
 };
 
 /// Ext4-local adapter for physical metadata I/O.
@@ -48,36 +48,7 @@ impl Ext4MetadataIo {
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<MetadataWriteAccess> {
         handle.consume_metadata_credit(block)?;
-        match self.cache.write_access(block, handle.id()) {
-            Ok(access) => Ok(access),
-            Err(error) => {
-                handle.refund_metadata_credit(block);
-                Err(error)
-            }
-        }
-    }
-
-    /// Obtains journal write access and records the pre-transaction image.
-    #[allow(dead_code)]
-    pub(crate) fn undo_access(
-        &self,
-        block: FilesystemBlock,
-        handle: &mut JournalHandle<'_>,
-    ) -> Ext4Result<MetadataWriteAccess> {
-        handle.consume_metadata_credit(block)?;
-        match self.cache.undo_access(block, handle.id()) {
-            Ok((access, committed)) => {
-                if let Err(error) = handle.record_undo_block(block, committed.into_bytes()) {
-                    handle.refund_metadata_credit(block);
-                    return Err(error);
-                }
-                Ok(access)
-            }
-            Err(error) => {
-                handle.refund_metadata_credit(block);
-                Err(error)
-            }
-        }
+        self.cache.write_access(block, handle.id())
     }
 
     /// Obtains journal create access to one newly allocated metadata block.
@@ -91,13 +62,7 @@ impl Ext4MetadataIo {
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<MetadataWriteAccess> {
         handle.consume_metadata_credit(block)?;
-        match self.cache.create_access(block, handle.id()) {
-            Ok(access) => Ok(access),
-            Err(error) => {
-                handle.refund_metadata_credit(block);
-                Err(error)
-            }
-        }
+        self.cache.create_access(block, handle.id())
     }
 
     /// Records that a freed metadata block must suppress older journal replay.
@@ -108,11 +73,9 @@ impl Ext4MetadataIo {
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
         handle.ensure_revoke_metadata_credit(block)?;
-        let revoke = handle.revoke_metadata_block(block)?;
-        if let Err(error) = self.cache.forget_or_revoke_checkpointed(block, handle.id()) {
-            handle.cancel_revoke_metadata_block(block, revoke);
-            return Err(error);
-        }
+        handle.revoke_metadata_block(block)?;
+        self.cache
+            .forget_or_revoke_checkpointed(block, handle.id())?;
         Ok(())
     }
 
@@ -126,11 +89,9 @@ impl Ext4MetadataIo {
         block: FilesystemBlock,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
-        let forget = handle.forget_metadata_block_without_revoke(block)?;
-        if let Err(error) = self.cache.forget_or_revoke_checkpointed(block, handle.id()) {
-            handle.cancel_forget_metadata_block_without_revoke(block, forget);
-            return Err(error);
-        }
+        handle.forget_metadata_block_without_revoke(block)?;
+        self.cache
+            .forget_or_revoke_checkpointed(block, handle.id())?;
         Ok(())
     }
 
@@ -150,8 +111,9 @@ impl Ext4MetadataIo {
     /// buffers are released. The flush at the end is the stable-storage
     /// boundary that later `fsync` and `syncfs` code can build on.
     #[allow(dead_code)]
-    pub(crate) fn checkpoint_committed(&self, commit: &JournalCommit) -> Ext4Result<()> {
-        for block in commit.metadata_blocks() {
+    pub(crate) fn checkpoint_committed(&self, commit: &RuntimeTransaction) -> Ext4Result<()> {
+        let metadata_blocks = commit.metadata_blocks()?;
+        for block in metadata_blocks.iter() {
             self.cache.checkpoint_block(*block, commit.id())?;
         }
         self.cache.flush_device()
@@ -161,13 +123,24 @@ impl Ext4MetadataIo {
     #[allow(dead_code)]
     pub(crate) fn journal_commit_blocks(
         &self,
-        commit: &JournalCommit,
+        commit: &RuntimeTransaction,
     ) -> Ext4Result<alloc::vec::Vec<JournalCommitBlock>> {
-        commit
-            .metadata_blocks()
+        let metadata_blocks = commit.metadata_blocks()?;
+        metadata_blocks
             .iter()
             .map(|block| self.cache.journal_commit_block(*block, commit.id()))
             .collect()
+    }
+
+    /// Replaces a frozen home-block image before its checkpoint can start.
+    pub(crate) fn replace_checkpoint_bytes(
+        &self,
+        block: FilesystemBlock,
+        transaction: TransactionId,
+        bytes: Arc<[u8]>,
+    ) -> Ext4Result<()> {
+        self.cache
+            .replace_checkpoint_bytes(block, transaction, bytes)
     }
 
     pub(crate) fn reclaim_unused(&self, limit: usize) -> usize {
@@ -176,10 +149,5 @@ impl Ext4MetadataIo {
 
     pub(crate) fn invalidate_all(&self) {
         self.cache.invalidate_all();
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn rollback_undo(&self, undo: &JournalUndo) -> Ext4Result<()> {
-        self.cache.rollback_undo(undo)
     }
 }

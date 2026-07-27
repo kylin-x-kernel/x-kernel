@@ -14,7 +14,7 @@ use super::{
 use crate::{
     Ext4Result, FilesystemBlock,
     io::FilesystemDevice,
-    jbd2::{JournalCommitBlock, JournalUndo, TransactionId},
+    jbd2::{JournalCommitBlock, TransactionId},
 };
 
 struct MetadataBlockCacheInner {
@@ -88,17 +88,6 @@ impl MetadataBlockCache {
         transaction: TransactionId,
     ) -> Ext4Result<MetadataWriteAccess> {
         self.load_slot(block)?.begin_write_access(transaction)
-    }
-
-    pub(super) fn undo_access(
-        &self,
-        block: FilesystemBlock,
-        transaction: TransactionId,
-    ) -> Ext4Result<(MetadataWriteAccess, MetadataBuffer)> {
-        let slot = self.load_slot(block)?;
-        let access = slot.begin_write_access(transaction)?;
-        let committed = access.snapshot()?;
-        Ok((access, committed))
     }
 
     #[allow(dead_code)]
@@ -205,6 +194,16 @@ impl MetadataBlockCache {
         Ok(JournalCommitBlock::new(block, snapshot.into_bytes()))
     }
 
+    pub(super) fn replace_checkpoint_bytes(
+        &self,
+        block: FilesystemBlock,
+        transaction: TransactionId,
+        bytes: Arc<[u8]>,
+    ) -> Ext4Result<()> {
+        self.load_slot(block)?
+            .replace_checkpoint_bytes(transaction, bytes)
+    }
+
     #[cfg(test)]
     pub(super) fn cached_block_count(&self) -> usize {
         lock(&self.inner.entries).len()
@@ -236,14 +235,6 @@ impl MetadataBlockCache {
 
     pub(super) fn flush_device(&self) -> Ext4Result<()> {
         self.inner.device.flush()
-    }
-
-    pub(super) fn rollback_undo(&self, undo: &JournalUndo) -> Ext4Result<()> {
-        for undo_block in undo.blocks() {
-            let slot = self.load_slot(undo_block.block())?;
-            slot.restore_undo(undo.transaction(), undo_block.bytes())?;
-        }
-        Ok(())
     }
 
     #[cfg(test)]
