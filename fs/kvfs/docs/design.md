@@ -182,9 +182,9 @@ inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `seta
 支持 Unix owner 元数据的后端在分配 inode 时持久化这些值。不能表达 Unix owner 的
 文件系统仍受其磁盘格式限制。
 
-`SimpleDir` 的 `DirMapping` 可持久插入由 `mknod` 分配的 special inode，供 devfs 等
-内核简单文件系统承载 pathname Unix socket；未显式支持动态插入的 simple directory
-保持返回 `EPERM`。
+`SimpleDir` 的 `DirMapping` 可持久插入由 `mknod` 分配的 special inode，也可插入
+不可变目标的 symbolic link，供 devfs 等简单文件系统创建 FIFO、pathname Unix socket
+以及 `/dev/fd` 一类启动期链接；未显式支持动态插入的 simple directory 保持返回 `EPERM`。
 
 非递归 bind mount 创建新的 `Mount`，共享源 path 的 superblock 与 root dentry，但拥有
 独立 mount ID、父挂载位置和覆盖关系。卸载 bind mount 只移除 topology 节点，不对共享的

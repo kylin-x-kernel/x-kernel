@@ -99,6 +99,22 @@ impl SimpleFile {
         Self::new(fs, NodeType::RegularFile, ops)
     }
 
+    /// Creates an owned symbolic-link node with immutable target contents.
+    pub fn new_symlink(
+        fs: Arc<SimpleFs>,
+        target: String,
+        permission: NodePermission,
+        uid: u32,
+        gid: u32,
+    ) -> Arc<Self> {
+        let node = SimpleFsNode::new_with_owner(fs, NodeType::Symlink, permission, uid, gid);
+        node.metadata.lock().size = target.len() as u64;
+        Arc::new(Self {
+            node,
+            ops: Arc::new(move || Ok(target.clone())),
+        })
+    }
+
     /// Returns the inode fields used when materializing this simple file.
     pub fn inode_init(&self) -> VfsInodeInit {
         self.node.inode_init()

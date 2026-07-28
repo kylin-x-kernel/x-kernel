@@ -19,8 +19,8 @@ use ksync::Mutex;
 use crate::{
     Dentry, DeviceId, DirContext, DirEntrySink, FileDirOperations, FileOperations,
     InodeDirOperations, InodeOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags,
-    NodePermission, NodeType, SeqFileInode, Umode, VfsError, VfsFile, VfsInode, VfsResult,
-    inode_init_owner,
+    NodePermission, NodeType, SeqFileInode, SimpleFile, Umode, VfsError, VfsFile, VfsInode,
+    VfsResult, inode_init_owner,
     libfs::{generic_read_dir, noop_fsync},
     path::{DOT, DOTDOT},
     simple_fs::{SimpleFs, SimpleFsNode},
@@ -469,6 +469,42 @@ impl<O: SimpleDirOps> InodeDirOperations for SimpleDirInodeOperations<O> {
         node.set_rdev(device);
         let init = node.inode_init();
         let inode = VfsInode::new_special(node, NodeFlags::empty(), init);
+        let entry =
+            self.dir
+                .ops
+                .create_inode_child(SimpleDirLookup::new(&parent), dentry.name(), inode)?;
+        let inode = entry.vfs_inode();
+        drop(entry);
+        dentry.instantiate(inode)
+    }
+
+    fn symlink(
+        &self,
+        _idmap: &crate::MountIdmap,
+        dir: &VfsInode,
+        dentry: &LockedDentry<'_>,
+        target: &str,
+        cred: &kcred::Cred,
+    ) -> VfsResult<()> {
+        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+        let (mode, uid, gid) = inode_init_owner(
+            dir,
+            Umode::new(NodeType::Symlink, NodePermission::from_bits_truncate(0o777)),
+            cred,
+        );
+        let node = SimpleFile::new_symlink(
+            self.dir.node.filesystem(),
+            target.to_owned(),
+            mode.permission(),
+            uid,
+            gid,
+        );
+        let init = node.inode_init();
+        let inode = VfsInode::new_file_with_flags(node, NodeFlags::empty(), init);
+        // The target is immutable, so cache it on the inode. `read_link` then
+        // serves it directly and skips `get_link`, avoiding the per-readlink
+        // `target.clone()` + `to_owned()` pair.
+        inode.set_cached_link(target.to_owned());
         let entry =
             self.dir
                 .ops
