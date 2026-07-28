@@ -12,6 +12,7 @@ repository.workspace = true
 default = []
 arm-el2 = []
 pmr = []
+smp = []
 
 [dependencies]
 cfg-if = { workspace = true }

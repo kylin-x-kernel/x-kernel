@@ -17,10 +17,11 @@
 /.cache/
 /code-stats/
 
-# Cargo lock — the workspace root lockfile (./Cargo.lock) is tracked for
-# reproducible builds; keep ignoring nested lockfiles of excluded std
-# tooling crates (each is an independent cargo project).
-/xtask/**/Cargo.lock
+# Cargo locks — the kernel and xtask workspace lockfiles are tracked for
+# reproducible builds; keep ignoring lockfiles of other excluded standalone
+# projects.
+!/xtask/Cargo.lock
+/xtask/*/Cargo.lock
 /tee_apps/**/Cargo.lock
 /uapps/**/Cargo.lock
 

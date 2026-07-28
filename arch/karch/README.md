@@ -45,3 +45,5 @@ building block for other crates.
 ## Features
 
 - `arm-el2`: Enable AArch64 EL2 (hypervisor) variants of TLB flush, page table root, and trap vector operations.
+- `smp`: Delegate remote instruction-cache flushes to the `kipi` provider. Without
+  this feature, `karch` installs a uniprocessor no-op provider for remote flushes.

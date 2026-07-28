@@ -7,6 +7,8 @@ use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
 #[cfg(feature = "smp")]
 use kerrno::KResult;
 use khal::mem::PhysAddr;
+#[cfg(feature = "smp")]
+use khal::mem::pa;
 use kplat::sys::SysCtrl;
 
 const GED_PADDR: usize = 0x100E_001C;

@@ -10,10 +10,19 @@
 #![doc = include_str!("../README.md")]
 #![no_std]
 
-/// `kiface` for cross-PE pipeline synchronisation. Implemented by `kipi`.
+/// `kiface` for cross-PE pipeline synchronisation.
+///
+/// SMP builds use the provider implemented by `kipi`; uniprocessor builds use
+/// the local no-op provider below because there are no remote PEs to flush.
 #[kiface::interface]
 pub trait IcacheFlushIf {
     fn flush_others();
+}
+
+#[cfg(not(feature = "smp"))]
+#[kiface::provide]
+impl IcacheFlushIf {
+    fn flush_others() {}
 }
 
 /// Sends IPIs to all other PEs requesting they flush their instruction pipeline.

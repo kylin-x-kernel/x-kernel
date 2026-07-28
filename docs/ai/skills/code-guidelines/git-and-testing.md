@@ -12,9 +12,10 @@ bug-fix validation, or commit/PR structuring guidance.
 
 ## Cargo.lock
 
-The workspace root `Cargo.lock` is tracked for reproducible builds.
-It is machine-generated and must stay consistent with `Cargo.toml`;
-never hand-edit it — it records exact versions and content checksums,
+The kernel workspace root `Cargo.lock` and the independent
+`xtask/Cargo.lock` are tracked for reproducible builds.
+They are machine-generated and must stay consistent with their `Cargo.toml` files;
+never hand-edit them — they record exact versions and content checksums,
 and a manual merge can leave it inconsistent or unparseable.
 
 The kernel builds for four targets

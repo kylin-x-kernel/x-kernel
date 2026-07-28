@@ -8,8 +8,25 @@ use lazyinit::LazyInit;
 use loongArch64::{register::tcfg, time::Time};
 
 const TIMER_IRQ: usize = 11;
+const MIN_TIMER_TICKS: u64 = 4;
 
 static NANOS_PER_TICK: LazyInit<u64> = LazyInit::new();
+
+#[inline]
+fn now_ticks() -> u64 {
+    Time::read() as _
+}
+
+#[inline]
+fn t2ns(ticks: u64) -> u64 {
+    ticks * *NANOS_PER_TICK
+}
+
+#[inline]
+fn ns2t(nanos: u64) -> u64 {
+    nanos / *NANOS_PER_TICK
+}
+
 pub(super) fn init_percpu() {
     tcfg::set_init_val(0);
     tcfg::set_periodic(false);
@@ -57,11 +74,19 @@ fn init_rtc() {
         .unwrap()
         .with_nanosecond(extract_bits(toy_low, 0..4) * NANOS_PER_MILLIS as u32)
         .unwrap();
-    if let Some(epoch_time_nanos) = date_time.timestamp_nanos_opt() {
-        rtc_driver::init_offset_ns(
-            epoch_time_nanos as u64 - GlobalTimerImpl::t2ns(GlobalTimerImpl::now_ticks()),
-        );
-    }
+    let Some(epoch_time_nanos) = date_time.timestamp_nanos_opt() else {
+        warn!("RTC date is outside the supported nanosecond range");
+        return;
+    };
+    let Ok(epoch_time_nanos) = u64::try_from(epoch_time_nanos) else {
+        warn!("RTC date precedes the Unix epoch");
+        return;
+    };
+    let Some(offset_ns) = epoch_time_nanos.checked_sub(t2ns(now_ticks())) else {
+        warn!("RTC date precedes the monotonic boot time");
+        return;
+    };
+    rtc_driver::init_offset_ns(offset_ns);
 }
 pub(super) fn early_init() {
     NANOS_PER_TICK.init_once(NANOS_PER_SEC / loongArch64::time::get_timer_freq() as u64);
@@ -71,15 +96,15 @@ pub(super) fn early_init() {
 #[kplat::impl_dev_interface]
 impl MonotonicTimerIf {
     fn now_ticks() -> u64 {
-        Time::read() as _
+        now_ticks()
     }
 
     fn t2ns(ticks: u64) -> u64 {
-        ticks * *NANOS_PER_TICK
+        t2ns(ticks)
     }
 
     fn ns2t(nanos: u64) -> u64 {
-        nanos / *NANOS_PER_TICK
+        ns2t(nanos)
     }
 
     fn freq() -> u64 {
@@ -91,9 +116,14 @@ impl MonotonicTimerIf {
     }
 
     fn arm_timer(deadline_ns: u64) {
-        let ticks_now = Self::now_ticks();
-        let ticks_deadline = Self::ns2t(deadline_ns);
-        let init_value = ticks_deadline - ticks_now;
+        let ticks_now = now_ticks();
+        let ticks_deadline = ns2t(deadline_ns);
+        let init_value = ticks_deadline
+            .saturating_sub(ticks_now)
+            .max(MIN_TIMER_TICKS)
+            .saturating_add(MIN_TIMER_TICKS - 1)
+            / MIN_TIMER_TICKS
+            * MIN_TIMER_TICKS;
         tcfg::set_init_val(init_value as _);
         tcfg::set_en(true);
     }

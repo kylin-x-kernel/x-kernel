@@ -13,7 +13,7 @@ default = []
 
 [dependencies]
 kiface.workspace = true
-karch = { workspace = true }
+karch = { workspace = true, features = ["smp"] }
 khal = { workspace = true, features = ["ipi"] }
 kcpu_id_map.workspace = true
 kspin.workspace = true

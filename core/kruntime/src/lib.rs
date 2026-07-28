@@ -49,6 +49,8 @@ mod init_setup;
 use boot_info::BootConsoleTransport;
 use kcpu_id_map::KCpuMaskExt;
 use kernel_boot::PrimaryKernelEntry;
+#[cfg(not(feature = "smp"))]
+use kernel_boot::SecondaryKernelEntry;
 use khal::mem::MemFlags;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 
@@ -375,6 +377,14 @@ pub fn rust_main(arg: usize) -> ! {
 impl PrimaryKernelEntry {
     fn enter(boot_info: usize) -> ! {
         rust_main(boot_info)
+    }
+}
+
+#[cfg(not(feature = "smp"))]
+#[kiface::provide]
+impl SecondaryKernelEntry {
+    fn enter(_logical_cpu_id: kcpu_id_map::LogicalCpuId) -> ! {
+        panic!("secondary CPU entered a uniprocessor kernel")
     }
 }
 
