@@ -842,6 +842,49 @@ fn test_exit_cleanup_preserves_clone_vm_address_space_until_last_runtime_user() 
 }
 
 #[def_test(serial)]
+fn test_clone_fs_shares_the_filesystem_context_umask() {
+    let (parent, parent_task) = process_with_address_space(8_136, mapped_test_address_space());
+    parent
+        .replace_umask(0o7000)
+        .expect("parent runtime must expose its filesystem context");
+    assert_eq!(
+        parent
+            .umask()
+            .expect("parent runtime must expose its filesystem context"),
+        0,
+        "FsStruct must truncate umask to permission bits"
+    );
+
+    let child = parent_task
+        .as_thread()
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Private,
+            fs: ForkFs::Shared,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::empty(),
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+        })
+        .expect("CLONE_FS test child should prepare");
+    let child_process = child.process().clone();
+    child_process
+        .replace_umask(0o077)
+        .expect("child runtime must expose the shared filesystem context");
+
+    assert_eq!(
+        parent
+            .umask()
+            .expect("parent runtime must expose the shared filesystem context"),
+        0o077
+    );
+
+    child_process.discard_unpublished();
+    process_exit::finalize_process_exit(&parent);
+    wait_reap::assert_reap_zombie_process(&parent);
+}
+
+#[def_test(serial)]
 fn test_failed_shared_vm_fork_rolls_back_tree_relation() {
     let shared_address_space = mapped_test_address_space();
     let (parent, parent_task) = process_with_address_space(8_134, shared_address_space);
@@ -1256,7 +1299,7 @@ fn test_current_process_mutation_helpers_preserve_process_boundary() {
     let (process, _task) = process_with_address_space(741, mapped_test_address_space());
 
     let old_umask = process
-        .replace_umask(0o077)
+        .replace_umask(0o7077)
         .expect("current process must expose a live umask");
     assert_eq!(
         process

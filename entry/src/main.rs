@@ -160,20 +160,11 @@ fn kernel_main() {
         let cred = kcred::initial_cred();
 
         warn!("Cleaning up stale coverage data if exists...");
-        let remove_result = kvfs::Filename::new("/.llvm-cov/default.profraw")
-            .lookup_at(
-                fs_struct.root(),
-                fs_struct.pwd(),
-                kvfs::LookupIntent::Open,
-                kvfs::LookupFlags::no_follow(),
-                &cred,
-            )
-            .and_then(|file| {
-                let name = file.name();
-                file.parent()
-                    .ok_or(kvfs::VfsError::IsADirectory)?
-                    .unlink(&name, &cred)
-            });
+        let remove_result = kvfs::Filename::new("/.llvm-cov/default.profraw").unlink_at(
+            fs_struct.root(),
+            fs_struct.pwd(),
+            &cred,
+        );
         if let Err(err) = remove_result {
             if err.canonicalize() != kvfs::VfsError::NotFound {
                 warn!("Failed to remove stale coverage data: {:?}", err);
@@ -379,15 +370,13 @@ fn kernel_main() {
         let fs_struct = fs_context::init_fs().lock().clone_for_process();
         let cred = kcred::initial_cred();
         let write_result = (|| -> kvfs::VfsResult<()> {
-            let _ = kvfs::Filename::new("/.llvm-cov")
-                .create_at(
-                    fs_struct.root(),
-                    fs_struct.pwd(),
-                    kvfs::LookupIntent::Open,
-                    kvfs::LookupFlags::DIRECTORY,
-                    &cred,
-                )
-                .and_then(|(dir, name)| dir.mkdir(&name, kvfs::NodePermission::default(), &cred));
+            let _ = kvfs::Filename::new("/.llvm-cov").mkdir_at(
+                fs_struct.root(),
+                fs_struct.pwd(),
+                kvfs::NodePermission::default(),
+                kvfs::NodePermission::empty(),
+                &cred,
+            );
             let file = kvfs::Filename::new("/.llvm-cov/default.profraw").open_with_flags_at(
                 fs_struct.root(),
                 fs_struct.pwd(),
@@ -395,6 +384,7 @@ fn kernel_main() {
                     | linux_raw_sys::general::O_CREAT
                     | linux_raw_sys::general::O_TRUNC,
                 kvfs::NodePermission::from_bits_truncate(0o644),
+                kvfs::NodePermission::empty(),
                 cred.clone(),
             )?;
             let mut pos = 0;

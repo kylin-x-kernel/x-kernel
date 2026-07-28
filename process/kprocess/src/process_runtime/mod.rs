@@ -311,21 +311,6 @@ impl ProcessRuntime {
         self.exec_metadata().cmdline().clone()
     }
 
-    /// Returns the process umask.
-    pub fn umask(&self) -> u32 {
-        self.posix_state.umask()
-    }
-
-    /// Sets the process umask.
-    pub fn set_umask(&self, umask: u32) {
-        self.posix_state.set_umask(umask);
-    }
-
-    /// Sets the process umask and returns the old value.
-    pub fn replace_umask(&self, umask: u32) -> u32 {
-        self.posix_state.replace_umask(umask)
-    }
-
     /// Returns the process OOM score adjustment.
     pub fn oom_score_adj(&self) -> i32 {
         self.posix_state.oom_score_adj()
@@ -549,7 +534,6 @@ fn finish_fork_runtime(
         ProcessRuntimeConfig::default(),
         fs_namespaces.nsproxy,
     );
-    process_runtime.set_umask(parent.umask());
     process_runtime.set_oom_score_adj(parent.oom_score_adj());
     process_runtime.set_heap_top(parent.heap_top());
 

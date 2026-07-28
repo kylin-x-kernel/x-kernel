@@ -127,8 +127,9 @@ kprocess / posix/process / ksyscall / ktty
 ## 隐私分析
 
 `kprocess` 保存 PID、父子关系、线程 ID、退出码、进程组、session、terminal 绑定，
-每个线程的 credential 引用、exec path/cmdline metadata、umask 和 OOM score
-adjustment。credential 包含数值 UID/GID 和补充组，但不包含用户名、用户 payload、
+每个线程的 credential 引用、exec path/cmdline metadata 和 OOM score adjustment。
+umask 由独立的 `fs_context::FsStruct` 与 root/pwd 一起持有。credential 包含数值
+UID/GID 和补充组，但不包含用户名、用户 payload、
 文件内容或地址空间内容。上述身份和元数据会被 procfs、wait、
 signal、scheduler 和 job-control 路径读取，调用者需要在上层执行可见性和权限控制。
 

@@ -136,14 +136,24 @@ key，成功后 VFS 只交换 dentry location 并原位替换已有 cache slot�
 新的 hash slot。目录是否为空由 filesystem rename/rmdir callback 判定，
 通用层不把 dentry child cache 当作后端目录内容。
 
-open-create 在同一个父目录 exclusive lock 下完成最终 lookup 和可能的 create，避免
-`O_EXCL` 与 lookup/create 竞争。`O_CREAT | O_EXCL` 跳过 speculative lookup，直接执行锁内
-最终 lookup；lookup 得到的同一个 negative dentry 会传给 filesystem create callback，不再
-按名称构造第二个对象。create、mkdir、mknod、symlink 和 link callback 都必须实例化该
-negative dentry；lookup 只有在复用既有目录 alias 时才返回另一个 dentry。read-only mount
-和创建权限属于 create-only 错误：只有锁内最终
-lookup 仍为 negative 时才检查；若名称已经变为 positive，普通 `O_CREAT` 打开现有对象，
-`O_CREAT | O_EXCL` 返回 `AlreadyExists`。
+open-create 和独占 namespace create 复用同一个父目录锁内最终 lookup 骨架，避免
+`O_EXCL`、`mknodat`、`linkat`、`symlinkat` 与 lookup/create 竞争。
+`O_CREAT | O_EXCL` 跳过 speculative lookup，直接执行锁内最终 lookup；独占创建在
+positive dentry 上先返回 `AlreadyExists`，只有 negative dentry 才执行创建 callback。
+`Filename` 只做 parent resolution 和 pathname-specific errno，Dentry 只把锁内最终
+negative dentry 交给 callback，不额外暴露 parent inode。`Path::vfs_create()`、
+`Path::vfs_mkdir()`、`Path::vfs_mknod()`、`Path::vfs_symlink()` 与
+`Path::vfs_link()` 从 parent Path 自身取得 inode，负责 mount write、父目录 DAC、
+设备节点授权、mode preparation 以及 inode callback。
+lookup 得到的同一个 negative dentry 会传给 callback，不再按名称构造第二个对象；
+regular `mknodat` 传递
+`exclusive=true`。create、mkdir、mknod、symlink 和 link callback 都必须实例化该 negative
+dentry；lookup 只有在复用既有目录 alias 时才返回另一个 dentry。create-only 错误只在
+锁内最终 lookup 仍为 negative 时检查。
+
+unlink 和 rmdir 同样由 `Filename::unlink_at()` / `Filename::rmdir_at()` 先解析 parent，
+再由 Dentry 在父目录 exclusive namespace lock 下唯一一次解析 victim。syscall 不先取得
+完整目标 Path 后再按名称查找，因此不会在 replacement 竞争中删除另一个同名 inode。
 
 ### 路径遍历与 DAC
 
@@ -153,11 +163,13 @@ open 再按访问模式检查目标 inode。默认 `InodeOperations::permission`
 `fsuid == 0` 当前近似 Linux DAC override：读写可以越过普通 mode 位，普通文件执行
 仍要求至少一个 execute bit，目录 search 可越过 execute bit。
 
-namespace 修改由 `Path` 在调用文件系统回调前统一检查：create、mkdir、mknod、symlink、
-link、unlink、rmdir 和 rename 要求父目录 `MAY_WRITE | MAY_EXEC`。unlink、rmdir 和 rename
-把 Path policy 作为 validator 传入 Dentry 操作；validator 在父目录锁、所需 participant
-锁和最终 lookup 结果仍然有效时执行。sticky 目录中的删除和替换还要求 root、目录所有者
-或该最终 victim 的所有者身份之一，mountpoint 检查也针对同一个 dentry。
+namespace 修改由 `Path` 或 `Filename` 在调用文件系统回调前统一检查：
+create、mkdir、mknod、symlink、link、unlink、rmdir 和 rename 要求父目录
+`MAY_WRITE | MAY_EXEC`。所有 create-like 操作由锁内 callback 调用共同的 `Path::vfs_*`
+能力；unlink、rmdir 和 rename 把 Path policy 作为 validator 传入 Dentry 操作。
+这些 policy 在父目录锁、所需 participant lock 和最终 lookup 结果仍然有效时执行。
+sticky 目录中的删除和替换还要求 root、目录所有者或该最终 victim 的所有者身份之一，
+mountpoint 检查也针对同一个 dentry。
 
 inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `setattr` callback：
 
@@ -173,7 +185,12 @@ inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `seta
 
 创建回调接收同一个 `&Cred`。后端通过 `inode_init_owner()` 得到初始 mode、UID 和 GID：
 
-- `mkdir` 在进入文件系统回调前清除调用者提供的 set-user-ID/set-group-ID 位；
+- open-create、`mkdirat`、regular `mknodat` 和 special-node `mknodat` 都进入对应的
+  `Path::vfs_*` 能力；parent inode 的 mode-preparation 方法依次处理 setgid、调用者
+  umask、VFS allowed-permission mask 和 callback node type，当前没有 POSIX ACL 延迟
+  umask 的分支；
+- `vfs_mkdir` 通过 allowed-permission mask 排除调用者提供的 set-user-ID/set-group-ID
+  位，而不是在 Path 层再次手工修改结果；
 - UID 使用 `fsuid`；
 - 普通父目录下 GID 使用 `fsgid`；
 - setgid 父目录下继承父 GID；
@@ -293,8 +310,13 @@ child cache 仍使用 mutex。RCU、seqcount lookup 和 lock-free dcache travers
 - 锁由语义 VFS 对象持有，而不是由 filesystem bridge 持有。
 - `RenameData` 对应 Linux `struct renamedata`，其一次性 `execute` 会消费操作对象并驱动
   VFS orchestration；辅助方法只借用该对象，不为它提供 `Clone`/`Copy`。
-- validator closure 是 Path policy 与锁内 Dentry transaction 之间的窄接口，不新增持久
-  状态，也不在锁外保留 lookup 结果。
+- callback closure 是 Path policy 与锁内 Dentry final lookup 之间的窄接口，不新增持久
+  状态，也不在锁外保留 lookup 结果；parent inode 由 Path 自身解析，调用者不能传入
+  不一致的 Path/inode/dentry 组合。
+- `mknodat` 直接由 `Filename` 驱动上述 transaction，不新增 syscall 专用类型或
+  transaction 状态结构；`Umode::mknod_node_type()` 只解码 type bits，
+  namei 层的 `may_mknod()` 统一分配 Linux 错误并返回通过校验的 `NodeType`。
+  syscall 边界将该类型写回现有 `Umode` 后再开始 `dirfd`/pathname 解析。
 - namespace lock 使用 blocking lock，因为文件系统 callback 可以执行 I/O。
 
 ## Drop / 资源释放

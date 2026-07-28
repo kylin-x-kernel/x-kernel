@@ -24,8 +24,8 @@ use hashbrown::HashMap;
 
 use super::{DirEntrySink, NodeFlags, VfsInode};
 use crate::{
-    DeviceId, Metadata, MetadataUpdate, Mutex, NodePermission, NodeType, RenameFlags, RwLock,
-    RwLockReadGuard, SuperBlock, Umode, VfsError, VfsResult,
+    Metadata, MetadataUpdate, Mutex, NodeType, RenameFlags, RwLock, RwLockReadGuard, SuperBlock,
+    VfsError, VfsResult,
     path::{DOT, DOTDOT, MAX_NAME_LEN, PathBuf},
 };
 
@@ -1026,147 +1026,70 @@ impl Dentry {
         }
     }
 
-    /// Creates a regular-file child dentry below this directory.
-    pub fn create(
+    fn with_locked_child<R>(
         &self,
         name: &str,
-        permission: NodePermission,
-        cred: &kcred::Cred,
-    ) -> VfsResult<Dentry> {
+        operation_fn: impl FnOnce(&Dentry) -> VfsResult<R>,
+    ) -> VfsResult<R> {
         self.as_dir()?;
         Self::verify_child_name(name)?;
         let dir_inode = self.vfs_inode();
         let _namespace_guard = dir_inode.lock_namespace_exclusive();
         let candidate = self.lookup_locked(&dir_inode, name)?;
-        if candidate.is_really_positive() {
-            return Err(VfsError::AlreadyExists);
-        }
-        dir_inode.create(&candidate, permission, cred)?;
-        if candidate.is_negative() {
-            return Err(VfsError::InvalidInput);
-        }
-        Ok(candidate)
+        operation_fn(&candidate)
     }
 
-    pub(crate) fn lookup_or_create_with_mode<F>(
+    /// Runs an exclusive child-creation callback after a locked final lookup.
+    ///
+    /// The callback receives a negative dentry and runs while the parent
+    /// directory namespace lock is held. It must instantiate that dentry
+    /// before returning success.
+    pub(crate) fn create_exclusive_with(
         &self,
         name: &str,
-        mode: Umode,
+        create_fn: impl FnOnce(&Dentry) -> VfsResult<()>,
+    ) -> VfsResult<Dentry> {
+        self.with_locked_child(name, |candidate| {
+            if candidate.is_really_positive() {
+                return Err(VfsError::AlreadyExists);
+            }
+            create_fn(candidate)?;
+            if candidate.is_negative() {
+                return Err(VfsError::InvalidInput);
+            }
+            Ok(candidate.clone())
+        })
+    }
+
+    pub(crate) fn lookup_or_create_with<F>(
+        &self,
+        name: &str,
         exclusive: bool,
-        cred: &kcred::Cred,
-        may_create_fn: F,
+        create_fn: F,
     ) -> VfsResult<LookupCreateResult>
     where
-        F: FnOnce() -> VfsResult<()>,
+        F: FnOnce(&Dentry) -> VfsResult<()>,
     {
-        self.as_dir()?;
-        Self::verify_child_name(name)?;
-        let dir_inode = self.vfs_inode();
-        let _namespace_guard = dir_inode.lock_namespace_exclusive();
-        let candidate = self.lookup_locked(&dir_inode, name)?;
-        if candidate.is_really_positive() {
-            return if exclusive {
-                Err(VfsError::AlreadyExists)
-            } else {
-                Ok(LookupCreateResult::Existing(candidate))
-            };
-        }
+        self.with_locked_child(name, |candidate| {
+            if candidate.is_really_positive() {
+                return if exclusive {
+                    Err(VfsError::AlreadyExists)
+                } else {
+                    Ok(LookupCreateResult::Existing(candidate.clone()))
+                };
+            }
 
-        may_create_fn()?;
-        dir_inode.create_with_mode(&candidate, mode, exclusive, cred)?;
-        if candidate.is_negative() {
-            return Err(VfsError::InvalidInput);
-        }
-        Ok(LookupCreateResult::Created(candidate))
-    }
-
-    /// Creates a directory child dentry below this directory.
-    pub fn mkdir(
-        &self,
-        name: &str,
-        permission: NodePermission,
-        cred: &kcred::Cred,
-    ) -> VfsResult<Dentry> {
-        self.as_dir()?;
-        Self::verify_child_name(name)?;
-        let dir_inode = self.vfs_inode();
-        let _namespace_guard = dir_inode.lock_namespace_exclusive();
-        let candidate = self.lookup_locked(&dir_inode, name)?;
-        if candidate.is_really_positive() {
-            return Err(VfsError::AlreadyExists);
-        }
-        dir_inode.mkdir(&candidate, permission, cred)?;
-        if candidate.is_negative() {
-            return Err(VfsError::InvalidInput);
-        }
-        Ok(candidate)
-    }
-
-    /// Creates a special child dentry below this directory.
-    pub fn mknod(
-        &self,
-        name: &str,
-        node_type: NodeType,
-        permission: NodePermission,
-        device: DeviceId,
-        cred: &kcred::Cred,
-    ) -> VfsResult<Dentry> {
-        self.as_dir()?;
-        Self::verify_child_name(name)?;
-        let dir_inode = self.vfs_inode();
-        let _namespace_guard = dir_inode.lock_namespace_exclusive();
-        let candidate = self.lookup_locked(&dir_inode, name)?;
-        if candidate.is_really_positive() {
-            return Err(VfsError::AlreadyExists);
-        }
-        dir_inode.mknod(&candidate, node_type, permission, device, cred)?;
-        if candidate.is_negative() {
-            return Err(VfsError::InvalidInput);
-        }
-        Ok(candidate)
-    }
-
-    /// Creates a symbolic-link child dentry below this directory.
-    pub fn symlink(&self, name: &str, target: &str, cred: &kcred::Cred) -> VfsResult<Dentry> {
-        self.as_dir()?;
-        Self::verify_child_name(name)?;
-        let dir_inode = self.vfs_inode();
-        let _namespace_guard = dir_inode.lock_namespace_exclusive();
-        let candidate = self.lookup_locked(&dir_inode, name)?;
-        if candidate.is_really_positive() {
-            return Err(VfsError::AlreadyExists);
-        }
-        dir_inode.symlink(&candidate, target, cred)?;
-        if candidate.is_negative() {
-            return Err(VfsError::InvalidInput);
-        }
-        Ok(candidate)
-    }
-
-    /// Creates a hard link below this directory.
-    pub fn link(&self, name: &str, node: &Dentry) -> VfsResult<Dentry> {
-        self.as_dir()?;
-        Self::verify_child_name(name)?;
-        if node.is_dir() {
-            return Err(VfsError::OperationNotPermitted);
-        }
-        let dir_inode = self.vfs_inode();
-        let _namespace_guard = dir_inode.lock_namespace_exclusive();
-        let candidate = self.lookup_locked(&dir_inode, name)?;
-        if candidate.is_really_positive() {
-            return Err(VfsError::AlreadyExists);
-        }
-        let source_inode = node.vfs_inode();
-        let _source_guard = source_inode.lock_namespace_exclusive();
-        dir_inode.link(&candidate, node)?;
-        if candidate.is_negative() {
-            return Err(VfsError::InvalidInput);
-        }
-        Ok(candidate)
+            create_fn(candidate)?;
+            if candidate.is_negative() {
+                return Err(VfsError::InvalidInput);
+            }
+            Ok(LookupCreateResult::Created(candidate.clone()))
+        })
     }
 
     /// Unlinks a non-directory child by name.
-    pub fn unlink(&self, name: &str) -> VfsResult<()> {
+    #[cfg(unittest)]
+    fn unlink(&self, name: &str) -> VfsResult<()> {
         self.unlink_with(name, |_| Ok(()))
     }
 
@@ -1197,7 +1120,8 @@ impl Dentry {
     ///
     /// The filesystem `rmdir` callback is authoritative for whether the
     /// directory is empty.
-    pub fn rmdir(&self, name: &str) -> VfsResult<()> {
+    #[cfg(unittest)]
+    fn rmdir(&self, name: &str) -> VfsResult<()> {
         self.rmdir_with(name, |_| Ok(()))
     }
 
@@ -1240,7 +1164,8 @@ impl Dentry {
     /// The filesystem callback is authoritative for target-directory
     /// emptiness; the generic namespace layer only validates common topology,
     /// type, and flag rules.
-    pub fn rename(
+    #[cfg(unittest)]
+    fn rename(
         &self,
         src_name: &str,
         dst_dir: &Self,
@@ -1617,7 +1542,7 @@ mod tests_dentry {
         AddressSpaceOperations, DirContext, FileDirOperations, FileOperations, InodeCache,
         InodeDirOperations, InodeOperations, InodeSymlinkOperations, LockedDentry, Metadata,
         MetadataUpdate, NodeFlags, NodePermission, NodeType, RenameFlags, StatFs, SuperBlock,
-        SuperBlockOperations, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
+        SuperBlockOperations, Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
     };
 
     struct MockFilesystem;
@@ -2119,7 +2044,14 @@ mod tests_dentry {
         assert!(matches!(root.lookup("created"), Err(VfsError::NotFound)));
         let negative = root.lookup_cache("created").unwrap();
         let created = root
-            .create("created", NodePermission::default(), &kcred::initial_cred())
+            .create_exclusive_with("created", |candidate| {
+                root.vfs_inode().create_with_mode(
+                    candidate,
+                    Umode::new(NodeType::RegularFile, NodePermission::default()),
+                    true,
+                    &kcred::initial_cred(),
+                )
+            })
             .unwrap();
 
         assert!(created.ptr_eq(&negative));

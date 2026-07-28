@@ -13,10 +13,10 @@ use alloc::{borrow::ToOwned, string::String, sync::Arc, vec::Vec};
 use kcred::Cred;
 
 use crate::{
-    AccMode, FMode, Filename, LookupFlags, LookupIntent, MountFlags, NodePermission, NodeType,
-    OpenFlags, OpenHow, OpenParams, Path, ResolvedObject, VfsError, VfsFile, VfsFileBuilder,
-    VfsInode, VfsResult, d_inode, d_is_dir, d_is_negative, d_is_symlink, node::LookupCreateResult,
-    path::PathBuf,
+    AccMode, DeviceId, FMode, Filename, LookupFlags, LookupIntent, MountFlags, NodePermission,
+    NodeType, OpenFlags, OpenHow, OpenParams, Path, ResolvedObject, Umode, VfsError, VfsFile,
+    VfsFileBuilder, VfsInode, VfsResult, d_inode, d_is_dir, d_is_negative, d_is_symlink,
+    node::LookupCreateResult, path::PathBuf,
 };
 
 /// Deferred cleanup context used while resolving symbolic-link targets.
@@ -114,34 +114,11 @@ impl ParentLookup {
         Ok((self.parent, self.last.as_str().to_owned()))
     }
 
-    fn prepare_create(
-        &self,
-        name: &Filename,
-        lookup_flags: LookupFlags,
-    ) -> VfsResult<(Path, String)> {
-        if self.last_type() != LastType::Norm {
+    fn into_create(self) -> VfsResult<(Path, Qstr, bool)> {
+        if self.last_type != LastType::Norm {
             return Err(VfsError::AlreadyExists);
         }
-        let parent = self.parent().clone();
-        let last = self.name();
-        match parent.dentry().as_dir()?.lookup(last) {
-            Ok(_) => return Err(VfsError::AlreadyExists),
-            Err(err)
-                if err.canonicalize() == VfsError::NotFound
-                    && self.has_trailing_slash()
-                    && !lookup_flags.contains(LookupFlags::DIRECTORY) =>
-            {
-                return Err(VfsError::NotFound);
-            }
-            Err(err) if err.canonicalize() == VfsError::NotFound => {}
-            Err(err) => return Err(err),
-        }
-        let pathname = name.as_pathname();
-        let last = pathname
-            .file_name()
-            .filter(|file_name| *file_name == self.name())
-            .ok_or(VfsError::InvalidInput)?;
-        Ok((parent, last.to_owned()))
+        Ok((self.parent, self.last, self.has_trailing_slash))
     }
 }
 
@@ -690,7 +667,7 @@ impl<'a> Nameidata<'a> {
         &mut self,
         file: &mut VfsFileBuilder,
         flags: &OpenParams,
-        got_write: bool,
+        umask: NodePermission,
         cred: &Cred,
     ) -> VfsResult<Path> {
         file.clear_created();
@@ -713,21 +690,15 @@ impl<'a> Nameidata<'a> {
             return Err(VfsError::NotFound);
         }
 
-        match dir.lookup_or_create_with_mode(
-            name,
-            flags.mode(),
-            flags.is_exclusive_create(),
-            cred,
-            || {
-                if !got_write {
-                    return Err(VfsError::ReadOnlyFilesystem);
-                }
-                self.path.permission(
-                    crate::Permission::MAY_WRITE | crate::Permission::MAY_EXEC,
-                    cred,
-                )
-            },
-        )? {
+        match dir.lookup_or_create_with(name, flags.is_exclusive_create(), |candidate| {
+            self.path.vfs_create(
+                candidate,
+                flags.mode(),
+                umask,
+                flags.is_exclusive_create(),
+                cred,
+            )
+        })? {
             LookupCreateResult::Existing(entry) => Ok(self.path.with_dentry(entry)),
             LookupCreateResult::Created(entry) => {
                 file.mark_created();
@@ -740,6 +711,7 @@ impl<'a> Nameidata<'a> {
         &mut self,
         file: &mut VfsFileBuilder,
         flags: &OpenParams,
+        umask: NodePermission,
         cred: &Cred,
     ) -> VfsResult<Option<PathBuf>> {
         if self.last_type != LastType::Norm {
@@ -750,8 +722,7 @@ impl<'a> Nameidata<'a> {
         let path = if let Some(path) = self.lookup_fast_for_open(flags)? {
             path
         } else {
-            let got_write = flags.needs_write_mount() && self.path.check_writable_mount().is_ok();
-            self.lookup_open(file, flags, got_write, cred)?
+            self.lookup_open(file, flags, umask, cred)?
         };
 
         if file.was_created() {
@@ -780,6 +751,7 @@ impl<'a> Nameidata<'a> {
         filename: &Filename,
         mut file: VfsFileBuilder,
         flags: &OpenParams,
+        umask: NodePermission,
         cred: &Cred,
     ) -> VfsResult<Arc<VfsFile>> {
         let mut name = filename.clone();
@@ -795,7 +767,7 @@ impl<'a> Nameidata<'a> {
             );
             nd.total_link_count = total_link_count;
             nd.link_path_walk(&walk_base, cred)?;
-            let Some(next) = nd.open_last_lookups(&mut file, flags, cred)? else {
+            let Some(next) = nd.open_last_lookups(&mut file, flags, umask, cred)? else {
                 let path = nd.path.clone();
                 let may_open = Self::may_open_resolved(&path, flags, file.was_created(), cred)?;
                 let opened = file.vfs_open(path)?;
@@ -830,13 +802,14 @@ impl<'a> Nameidata<'a> {
         base: &Path,
         filename: &Filename,
         flags: &OpenParams,
+        umask: NodePermission,
         cred: Arc<Cred>,
     ) -> VfsResult<Arc<VfsFile>> {
         let file = VfsFileBuilder::allocate(flags.file_flags(), cred.clone())?;
         if flags.is_path() {
             Self::do_o_path(root, base, filename, file, flags, &cred)
         } else {
-            Self::open_path(root, base, filename, file, flags, &cred)
+            Self::open_path(root, base, filename, file, flags, umask, &cred)
         }
     }
 }
@@ -858,10 +831,11 @@ impl Filename {
         base: &Path,
         flags: u32,
         mode: NodePermission,
+        umask: NodePermission,
         cred: Arc<Cred>,
     ) -> VfsResult<Arc<VfsFile>> {
         let flags = OpenHow::from_legacy(flags, mode).into_open_params()?;
-        Nameidata::path_openat(root, base, self, &flags, cred)
+        Nameidata::path_openat(root, base, self, &flags, umask, cred)
     }
 
     /// Resolves this filename relative to `root` and `base`.
@@ -887,22 +861,198 @@ impl Filename {
         Nameidata::parent_lookup(root, base, self, intent, cred)
     }
 
-    /// Resolves this filename to the parent directory of a to-be-created component.
-    pub fn create_at(
+    /// Creates a directory with the final lookup and VFS policy under the
+    /// parent directory namespace lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::AlreadyExists`] when the final component already
+    /// exists, or the pathname, mount, authorization, or filesystem error from
+    /// the corresponding VFS stage.
+    pub fn mkdir_at(
         &self,
         root: &Path,
         base: &Path,
-        intent: LookupIntent,
-        lookup_flags: LookupFlags,
+        permission: NodePermission,
+        umask: NodePermission,
         cred: &Cred,
-    ) -> VfsResult<(Path, String)> {
-        let lookup = self.parent_at(root, base, intent, cred)?;
-        lookup.prepare_create(self, lookup_flags)
+    ) -> VfsResult<Path> {
+        let (parent, last, _) = self
+            .parent_at(root, base, LookupIntent::Open, cred)?
+            .into_create()?;
+        let name = last.as_str();
+
+        parent
+            .dentry()
+            .as_dir()?
+            .create_exclusive_with(name, |candidate| {
+                parent.vfs_mkdir(candidate, permission, umask, cred)
+            })
+            .map(|entry| parent.with_dentry(entry))
+    }
+
+    /// Creates a node accepted by Linux `mknodat(2)` semantics.
+    ///
+    /// This method validates `mode` before pathname lookup. A syscall caller
+    /// must additionally perform the same validation before selecting a
+    /// directory file descriptor so an invalid type takes error precedence over
+    /// an invalid `dirfd`.
+    /// The final component lookup, directory authorization, device-node
+    /// privilege check, mode preparation, and filesystem callback run as one
+    /// parent-directory operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::OperationNotPermitted`] for a directory mode or an
+    /// unprivileged device-node request, [`VfsError::InvalidInput`] for another
+    /// unsupported type, and the error produced by the corresponding pathname,
+    /// authorization, mount, or filesystem stage.
+    pub fn mknod_at(
+        &self,
+        root: &Path,
+        base: &Path,
+        mode: Umode,
+        device: DeviceId,
+        umask: NodePermission,
+        cred: &Cred,
+    ) -> VfsResult<Path> {
+        let node_type = may_mknod(mode)?;
+        let mode = mode.with_node_type(node_type);
+        let (parent, last, has_trailing_slash) = self
+            .parent_at(root, base, LookupIntent::Open, cred)?
+            .into_create()?;
+        let name = last.as_str();
+        let device = if matches!(node_type, NodeType::CharacterDevice | NodeType::BlockDevice) {
+            device
+        } else {
+            DeviceId::default()
+        };
+
+        parent
+            .dentry()
+            .as_dir()?
+            .create_exclusive_with(name, |candidate| {
+                if has_trailing_slash {
+                    return Err(VfsError::NotFound);
+                }
+                if node_type == NodeType::RegularFile {
+                    parent.vfs_create(candidate, mode, umask, true, cred)
+                } else {
+                    parent.vfs_mknod(candidate, mode, device, umask, cred)
+                }
+            })
+            .map(|entry| parent.with_dentry(entry))
+    }
+
+    /// Creates a symbolic link with a single locked final lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::AlreadyExists`] when the destination exists,
+    /// [`VfsError::NotFound`] for an absent destination with trailing slashes,
+    /// or the pathname, authorization, mount, or filesystem error.
+    pub fn symlink_at(
+        &self,
+        root: &Path,
+        base: &Path,
+        target: &str,
+        cred: &Cred,
+    ) -> VfsResult<Path> {
+        let (parent, last, has_trailing_slash) = self
+            .parent_at(root, base, LookupIntent::Open, cred)?
+            .into_create()?;
+        let name = last.as_str();
+
+        parent
+            .dentry()
+            .as_dir()?
+            .create_exclusive_with(name, |candidate| {
+                if has_trailing_slash {
+                    return Err(VfsError::NotFound);
+                }
+                parent.vfs_symlink(candidate, target, cred)
+            })
+            .map(|entry| parent.with_dentry(entry))
+    }
+
+    /// Creates a hard link with a single locked target lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::AlreadyExists`] when the destination exists,
+    /// [`VfsError::CrossesDevices`] when source and destination mounts differ,
+    /// or the pathname, authorization, mount, or filesystem error.
+    pub fn link_at(&self, root: &Path, base: &Path, source: &Path, cred: &Cred) -> VfsResult<Path> {
+        let (parent, last, has_trailing_slash) = self
+            .parent_at(root, base, LookupIntent::Open, cred)?
+            .into_create()?;
+        let name = last.as_str();
+
+        parent
+            .dentry()
+            .as_dir()?
+            .create_exclusive_with(name, |candidate| {
+                if has_trailing_slash {
+                    return Err(VfsError::NotFound);
+                }
+                parent.vfs_link(candidate, source, cred)
+            })
+            .map(|entry| parent.with_dentry(entry))
+    }
+
+    /// Unlinks a non-directory entry with a single locked final lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns the pathname, target-type, authorization, mount, or filesystem
+    /// error for the final entry protected by the parent namespace lock.
+    pub fn unlink_at(&self, root: &Path, base: &Path, cred: &Cred) -> VfsResult<()> {
+        let lookup = self.parent_at(root, base, LookupIntent::Open, cred)?;
+        if lookup.last_type != LastType::Norm {
+            return Err(VfsError::IsADirectory);
+        }
+        lookup
+            .parent
+            .unlink_with_pathname(lookup.last.as_str(), lookup.has_trailing_slash, cred)
+    }
+
+    /// Removes a directory with a single locked final lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns Linux-compatible errors for root, dot, and dotdot final
+    /// components, or the pathname, authorization, mount, or filesystem error.
+    pub fn rmdir_at(&self, root: &Path, base: &Path, cred: &Cred) -> VfsResult<()> {
+        let lookup = self.parent_at(root, base, LookupIntent::Open, cred)?;
+        match lookup.last_type {
+            LastType::Norm => lookup.parent.rmdir(lookup.last.as_str(), cred),
+            LastType::Dotdot => Err(VfsError::DirectoryNotEmpty),
+            LastType::Dot => Err(VfsError::InvalidInput),
+            LastType::Root => Err(VfsError::ResourceBusy),
+        }
     }
 
     /// Reads the display target of this symlink or magic link.
     pub fn readlink_at(&self, root: &Path, base: &Path, cred: &Cred) -> VfsResult<String> {
         Nameidata::readlink(root, base, self, cred)
+    }
+}
+
+/// Validates a mode for Linux `mknod(2)` and returns its canonical node type.
+///
+/// # Errors
+///
+/// Returns [`VfsError::OperationNotPermitted`] for a directory request and
+/// [`VfsError::InvalidInput`] for another unsupported type encoding.
+pub fn may_mknod(mode: Umode) -> VfsResult<NodeType> {
+    match mode.mknod_node_type() {
+        node_type @ (NodeType::RegularFile
+        | NodeType::CharacterDevice
+        | NodeType::BlockDevice
+        | NodeType::Fifo
+        | NodeType::Socket) => Ok(node_type),
+        NodeType::Directory => Err(VfsError::OperationNotPermitted),
+        NodeType::Unknown | NodeType::Symlink => Err(VfsError::InvalidInput),
     }
 }
 
@@ -956,6 +1106,14 @@ mod tests {
     struct TestDir {
         inode: u64,
         children: crate::Mutex<HashMap<String, Dentry>>,
+        creations: crate::Mutex<Vec<CreateRecord>>,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct CreateRecord {
+        mode: Umode,
+        exclusive: bool,
+        device: DeviceId,
     }
 
     impl TestDir {
@@ -963,11 +1121,33 @@ mod tests {
             Self {
                 inode,
                 children: crate::Mutex::default(),
+                creations: crate::Mutex::default(),
             }
         }
 
         fn insert(&self, name: &str, entry: Dentry) {
             self.children.lock().insert(String::from(name), entry);
+        }
+
+        fn creations(&self) -> Vec<CreateRecord> {
+            self.creations.lock().clone()
+        }
+
+        fn instantiate_created(
+            &self,
+            dentry: &LockedDentry<'_>,
+            mode: Umode,
+            device: DeviceId,
+        ) -> VfsResult<()> {
+            let inode = self.inode + self.creations.lock().len() as u64 + 100;
+            let init = VfsInodeInit::new(inode, 0, mode)
+                .with_owner_links_and_rdev(0, 0, 1, device)
+                .with_stat_data(4096, 1, Duration::ZERO, Duration::ZERO, Duration::ZERO);
+            let inode = VfsInode::new_file(
+                Arc::new(TestFile::new(inode, mode.node_type(), &[], None)),
+                init,
+            );
+            dentry.instantiate(inode)
         }
     }
 
@@ -1014,12 +1194,57 @@ mod tests {
             &self,
             _idmap: &crate::MountIdmap,
             _dir: &VfsInode,
-            _dentry: &LockedDentry<'_>,
-            _mode: crate::Umode,
-            _exclusive: bool,
+            dentry: &LockedDentry<'_>,
+            mode: crate::Umode,
+            exclusive: bool,
             _cred: &Cred,
         ) -> VfsResult<()> {
-            Err(VfsError::OperationNotSupported)
+            self.creations.lock().push(CreateRecord {
+                mode,
+                exclusive,
+                device: DeviceId::default(),
+            });
+            self.instantiate_created(dentry, mode, DeviceId::default())
+        }
+
+        fn mkdir(
+            &self,
+            _idmap: &crate::MountIdmap,
+            _dir: &VfsInode,
+            dentry: &LockedDentry<'_>,
+            mode: Umode,
+            _cred: &Cred,
+        ) -> VfsResult<()> {
+            self.creations.lock().push(CreateRecord {
+                mode,
+                exclusive: true,
+                device: DeviceId::default(),
+            });
+            let inode = self.inode + self.creations.lock().len() as u64 + 100;
+            let inode = VfsInode::new_openable_dir(
+                Arc::new(TestDir::new(inode)),
+                VfsInodeInit::new(inode, 0, mode)
+                    .with_owner_links_and_rdev(0, 0, 1, DeviceId::default())
+                    .with_stat_data(4096, 1, Duration::ZERO, Duration::ZERO, Duration::ZERO),
+            );
+            dentry.instantiate(inode)
+        }
+
+        fn mknod(
+            &self,
+            _idmap: &crate::MountIdmap,
+            _dir: &VfsInode,
+            dentry: &LockedDentry<'_>,
+            mode: Umode,
+            device: DeviceId,
+            _cred: &Cred,
+        ) -> VfsResult<()> {
+            self.creations.lock().push(CreateRecord {
+                mode,
+                exclusive: true,
+                device,
+            });
+            self.instantiate_created(dentry, mode, device)
         }
 
         fn link(
@@ -1389,15 +1614,15 @@ mod tests {
     }
 
     #[def_test]
-    fn create_at_reports_existing_root() {
+    fn mkdir_at_reports_existing_root() {
         let tree = test_tree();
 
         let err = Filename::new("/")
-            .create_at(
+            .mkdir_at(
                 &tree.root,
                 &tree.base,
-                LookupIntent::Open,
-                LookupFlags::empty(),
+                NodePermission::default(),
+                NodePermission::empty(),
                 &kcred::initial_cred(),
             )
             .unwrap_err();
@@ -1406,31 +1631,341 @@ mod tests {
     }
 
     #[def_test]
-    fn create_at_preserves_trailing_slash_policy() {
+    fn create_operations_preserve_trailing_slash_policy() {
         let tree = test_tree();
 
         let err = Filename::new("/missing/")
-            .create_at(
-                &tree.root,
-                &tree.base,
-                LookupIntent::Open,
-                LookupFlags::empty(),
-                &kcred::initial_cred(),
-            )
+            .symlink_at(&tree.root, &tree.base, "target", &kcred::initial_cred())
             .unwrap_err();
         assert_eq!(err, VfsError::NotFound);
 
-        let (parent, name) = Filename::new("/missing/")
-            .create_at(
+        let created = Filename::new("/missing/")
+            .mkdir_at(
                 &tree.root,
                 &tree.base,
-                LookupIntent::Open,
-                LookupFlags::DIRECTORY,
+                NodePermission::default(),
+                NodePermission::empty(),
                 &kcred::initial_cred(),
             )
             .unwrap();
-        assert!(parent.ptr_eq(&tree.root));
-        assert_eq!(name, "missing");
+        assert!(created.parent().unwrap().ptr_eq(&tree.root));
+        assert_eq!(created.name(), "missing");
+    }
+
+    #[def_test]
+    fn may_mknod_assigns_linux_errors_to_decoded_types() {
+        assert_eq!(
+            may_mknod(Umode::from_bits(0o600)),
+            Ok(NodeType::RegularFile)
+        );
+        assert_eq!(
+            may_mknod(Umode::from_bits(0o040700)),
+            Err(VfsError::OperationNotPermitted)
+        );
+        assert_eq!(
+            may_mknod(Umode::from_bits(0o120777)),
+            Err(VfsError::InvalidInput)
+        );
+        assert_eq!(
+            may_mknod(Umode::from_bits(0o030600)),
+            Err(VfsError::InvalidInput)
+        );
+    }
+
+    #[def_test]
+    fn mknod_at_dispatches_types_and_prepares_callback_arguments() {
+        let tree = test_tree();
+        let root_ops = tree.root.downcast_node::<TestDir>().unwrap();
+        let cred = kcred::initial_cred();
+        let umask = NodePermission::from_bits_truncate(0o027);
+
+        let regular = Filename::new("/regular")
+            .mknod_at(
+                &tree.root,
+                &tree.base,
+                Umode::new(
+                    NodeType::RegularFile,
+                    NodePermission::from_bits_truncate(0o6754),
+                ),
+                DeviceId::new(8, 1),
+                umask,
+                &cred,
+            )
+            .unwrap();
+        assert_eq!(regular.node_type(), NodeType::RegularFile);
+
+        let fifo = Filename::new("/fifo")
+            .mknod_at(
+                &tree.root,
+                &tree.base,
+                Umode::new(NodeType::Fifo, NodePermission::from_bits_truncate(0o666)),
+                DeviceId::new(8, 2),
+                umask,
+                &cred,
+            )
+            .unwrap();
+        assert_eq!(fifo.node_type(), NodeType::Fifo);
+
+        let device = DeviceId::new(8, 3);
+        let character = Filename::new("/character")
+            .mknod_at(
+                &tree.root,
+                &tree.base,
+                Umode::new(
+                    NodeType::CharacterDevice,
+                    NodePermission::from_bits_truncate(0o666),
+                ),
+                device,
+                umask,
+                &cred,
+            )
+            .unwrap();
+        assert_eq!(character.node_type(), NodeType::CharacterDevice);
+
+        let creations = root_ops.creations();
+        assert_eq!(creations.len(), 3);
+        assert_eq!(creations[0].mode, Umode::from_bits(0o106750));
+        assert!(creations[0].exclusive);
+        assert_eq!(creations[0].device, DeviceId::default());
+        assert_eq!(creations[1].mode, Umode::from_bits(0o010640));
+        assert_eq!(creations[1].device, DeviceId::default());
+        assert_eq!(creations[2].mode, Umode::from_bits(0o020640));
+        assert_eq!(creations[2].device, device);
+    }
+
+    #[def_test]
+    fn mkdir_at_uses_locked_vfs_mode_preparation() {
+        let tree = test_tree();
+        let cred = kcred::initial_cred();
+        let created = Filename::new("/created-dir/")
+            .mkdir_at(
+                &tree.root,
+                &tree.base,
+                NodePermission::from_bits_truncate(0o7777),
+                NodePermission::from_bits_truncate(0o027),
+                &cred,
+            )
+            .unwrap();
+
+        assert!(created.is_dir());
+        assert_eq!(
+            created.metadata().mode.permission().bits(),
+            NodePermission::from_bits_truncate(0o1750).bits()
+        );
+
+        let existing = Filename::new("/target").mkdir_at(
+            &tree.root,
+            &tree.base,
+            NodePermission::from_bits_truncate(0o755),
+            NodePermission::empty(),
+            &cred,
+        );
+        assert!(matches!(existing, Err(VfsError::AlreadyExists)));
+    }
+
+    #[def_test]
+    fn mknod_at_preserves_linux_error_precedence() {
+        let tree = test_tree();
+        tree.root
+            .dentry()
+            .update_metadata(MetadataUpdate {
+                mode: Some(NodePermission::from_bits_truncate(0o777)),
+                ..Default::default()
+            })
+            .unwrap();
+        let cred = kcred::Cred::new(1000, 1000);
+
+        let existing = Filename::new("/target").mknod_at(
+            &tree.root,
+            &tree.base,
+            Umode::new(
+                NodeType::CharacterDevice,
+                NodePermission::from_bits_truncate(0o600),
+            ),
+            DeviceId::new(1, 3),
+            NodePermission::empty(),
+            &cred,
+        );
+        assert!(matches!(existing, Err(VfsError::AlreadyExists)));
+
+        let existing_with_trailing_slash = Filename::new("/target/").mknod_at(
+            &tree.root,
+            &tree.base,
+            Umode::new(
+                NodeType::RegularFile,
+                NodePermission::from_bits_truncate(0o600),
+            ),
+            DeviceId::default(),
+            NodePermission::empty(),
+            &cred,
+        );
+        assert!(matches!(
+            existing_with_trailing_slash,
+            Err(VfsError::AlreadyExists)
+        ));
+
+        let denied = Filename::new("/device").mknod_at(
+            &tree.root,
+            &tree.base,
+            Umode::new(
+                NodeType::CharacterDevice,
+                NodePermission::from_bits_truncate(0o600),
+            ),
+            DeviceId::new(1, 3),
+            NodePermission::empty(),
+            &cred,
+        );
+        assert!(matches!(denied, Err(VfsError::OperationNotPermitted)));
+
+        let trailing = Filename::new("/absent/").mknod_at(
+            &tree.root,
+            &tree.base,
+            Umode::new(
+                NodeType::RegularFile,
+                NodePermission::from_bits_truncate(0o600),
+            ),
+            DeviceId::default(),
+            NodePermission::empty(),
+            &cred,
+        );
+        assert!(matches!(trailing, Err(VfsError::NotFound)));
+
+        let readonly_mount = Mount::new_root_with_flags(&tree.fs, crate::MountFlags::RDONLY);
+        let readonly_root = readonly_mount.root_path();
+        let existing_readonly = Filename::new("/target").mknod_at(
+            &readonly_root,
+            &readonly_root,
+            Umode::new(
+                NodeType::RegularFile,
+                NodePermission::from_bits_truncate(0o600),
+            ),
+            DeviceId::default(),
+            NodePermission::empty(),
+            &cred,
+        );
+        assert!(matches!(existing_readonly, Err(VfsError::AlreadyExists)));
+        let absent_readonly = Filename::new("/readonly").mknod_at(
+            &readonly_root,
+            &readonly_root,
+            Umode::new(
+                NodeType::RegularFile,
+                NodePermission::from_bits_truncate(0o600),
+            ),
+            DeviceId::default(),
+            NodePermission::empty(),
+            &cred,
+        );
+        assert!(matches!(absent_readonly, Err(VfsError::ReadOnlyFilesystem)));
+    }
+
+    #[def_test]
+    fn mknod_at_strips_setgid_like_linux_vfs_prepare_mode() {
+        let tree = test_tree();
+        tree.root
+            .dentry()
+            .update_metadata(MetadataUpdate {
+                mode: Some(NodePermission::from_bits_truncate(0o2777)),
+                owner: Some((0, 4242)),
+                ..Default::default()
+            })
+            .unwrap();
+        let cred = kcred::Cred::new(1000, 1000);
+
+        let stripped = Filename::new("/stripped")
+            .mknod_at(
+                &tree.root,
+                &tree.base,
+                Umode::new(
+                    NodeType::RegularFile,
+                    NodePermission::from_bits_truncate(0o2770),
+                ),
+                DeviceId::default(),
+                NodePermission::empty(),
+                &cred,
+            )
+            .unwrap();
+        assert_eq!(
+            stripped.metadata().mode.permission().bits(),
+            NodePermission::from_bits_truncate(0o770).bits()
+        );
+
+        let preserved = Filename::new("/preserved")
+            .mknod_at(
+                &tree.root,
+                &tree.base,
+                Umode::new(
+                    NodeType::RegularFile,
+                    NodePermission::from_bits_truncate(0o2760),
+                ),
+                DeviceId::default(),
+                NodePermission::empty(),
+                &cred,
+            )
+            .unwrap();
+        assert_eq!(
+            preserved.metadata().mode.permission().bits(),
+            NodePermission::from_bits_truncate(0o2760).bits()
+        );
+
+        tree.root
+            .dentry()
+            .update_metadata(MetadataUpdate {
+                mode: Some(NodePermission::from_bits_truncate(0o0777)),
+                owner: Some((0, 4242)),
+                ..Default::default()
+            })
+            .unwrap();
+        let preserved_without_parent_setgid = Filename::new("/ordinary-parent")
+            .mknod_at(
+                &tree.root,
+                &tree.base,
+                Umode::new(
+                    NodeType::RegularFile,
+                    NodePermission::from_bits_truncate(0o2770),
+                ),
+                DeviceId::default(),
+                NodePermission::empty(),
+                &cred,
+            )
+            .unwrap();
+        assert_eq!(
+            preserved_without_parent_setgid
+                .metadata()
+                .mode
+                .permission()
+                .bits(),
+            NodePermission::from_bits_truncate(0o2770).bits()
+        );
+    }
+
+    #[def_test]
+    fn open_create_uses_shared_vfs_mode_preparation() {
+        let tree = test_tree();
+        tree.root
+            .dentry()
+            .update_metadata(MetadataUpdate {
+                mode: Some(NodePermission::from_bits_truncate(0o2777)),
+                owner: Some((0, 4242)),
+                ..Default::default()
+            })
+            .unwrap();
+        let file = Filename::new("/open-created")
+            .open_with_flags_at(
+                &tree.root,
+                &tree.base,
+                linux_raw_sys::general::O_CREAT
+                    | linux_raw_sys::general::O_EXCL
+                    | linux_raw_sys::general::O_WRONLY,
+                NodePermission::from_bits_truncate(0o2776),
+                NodePermission::from_bits_truncate(0o006),
+                Arc::new(kcred::Cred::new(1000, 1000)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            file.path().metadata().mode.permission().bits(),
+            NodePermission::from_bits_truncate(0o770).bits()
+        );
     }
 
     #[def_test]
@@ -1443,6 +1978,7 @@ mod tests {
             &root,
             &root,
             linux_raw_sys::general::O_CREAT | linux_raw_sys::general::O_RDONLY,
+            NodePermission::empty(),
             NodePermission::empty(),
             kcred::initial_cred(),
         );
@@ -1457,6 +1993,7 @@ mod tests {
             linux_raw_sys::general::O_CREAT
                 | linux_raw_sys::general::O_EXCL
                 | linux_raw_sys::general::O_RDONLY,
+            NodePermission::empty(),
             NodePermission::empty(),
             kcred::initial_cred(),
         );
@@ -1659,6 +2196,7 @@ mod tests {
             &tree.base,
             linux_raw_sys::general::O_RDONLY,
             NodePermission::empty(),
+            NodePermission::empty(),
             Arc::new(kcred::Cred::new(2000, 2000)),
         );
         assert!(matches!(denied, Err(VfsError::PermissionDenied)));
@@ -1669,6 +2207,7 @@ mod tests {
                 &tree.root,
                 &tree.base,
                 linux_raw_sys::general::O_RDONLY,
+                NodePermission::empty(),
                 NodePermission::empty(),
                 cred.clone(),
             )

@@ -192,9 +192,11 @@ Inherited group
 4. tree attach 后，`fork_process_runtime` 使用 RAII rollback guard 覆盖后续
    fallible 准备窗口；随后按 `ForkAddressSpace` 准备私有/共享地址空间状态，
    按 `ForkSignalActions` 准备私有/共享 signal action 表，最后创建
-   `ProcessRuntime`、继承 umask / oom score / heap top，并按 `ForkFdTable`
+   `ProcessRuntime`、继承 oom score / heap top，并按 `ForkFdTable`
    安装共享或克隆的 fd table。若 runtime 输入准备失败，guard 会撤销未发布 child
    的 parent/group 关系，避免 parent children 残留不会运行的半构造进程。
+   umask 不属于 `ProcessRuntime`：它与 root/pwd 一起由前一步准备的 `FsStruct`
+   共享或复制，因此 `CLONE_FS` 自动共享 umask。
 5. child `Thread` 取得调用线程 subjective credential 的同一 `Arc<Cred>` 快照，并分别安装为自己的 `real_cred` 和 `cred`。
 6. syscall 层通过 staged publication 事务先完成 publication，使 PID/TID 与 group/session lookup 对外一致可见；随后执行 `CLONE_PARENT_SETTID` / `CLONE_PIDFD` 等父侧 writeback，成功后才把 task 变为 runnable，失败则回滚 publication 与 owner-side child membership。顺序对齐 Linux `kernel_clone()` 的“先完成 parent-side return setup，再 `wake_up_new_task()`”约束。
 

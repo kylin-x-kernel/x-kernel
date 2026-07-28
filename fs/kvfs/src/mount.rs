@@ -25,8 +25,8 @@ pub struct MountIdmap;
 use crate::{
     Dentry, DentryKey, DeviceId, FMode, FileOperations, GetattrQueryFlags, GetattrRequestMask,
     Metadata, MetadataUpdate, Mutex, NodeFlags, NodePermission, NodeType, OpenFlags, Permission,
-    RenameFlags, SetattrTime, StatFs, StatFsFlags, SuperBlock, VfsError, VfsFile, VfsFileBuilder,
-    VfsInode, VfsResult, nullfs, path::PathBuf,
+    RenameFlags, SetattrTime, StatFs, StatFsFlags, SuperBlock, Umode, VfsError, VfsFile,
+    VfsFileBuilder, VfsInode, VfsResult, nullfs, path::PathBuf,
 };
 
 bitflags::bitflags! {
@@ -768,6 +768,96 @@ impl Path {
         self.permission(Permission::MAY_WRITE | Permission::MAY_EXEC, cred)
     }
 
+    pub(crate) fn vfs_create(
+        &self,
+        candidate: &Dentry,
+        mode: Umode,
+        umask: NodePermission,
+        exclusive: bool,
+        cred: &Cred,
+    ) -> VfsResult<()> {
+        self.check_writable_mount()?;
+        self.may_modify_directory(cred)?;
+        let dir_inode = self.inode();
+        let mode = dir_inode.prepare_create_mode(
+            mode,
+            umask,
+            NodePermission::all(),
+            NodeType::RegularFile,
+            cred,
+        );
+        dir_inode.create_with_mode(candidate, mode, exclusive, cred)
+    }
+
+    pub(crate) fn vfs_mknod(
+        &self,
+        candidate: &Dentry,
+        mode: Umode,
+        device: DeviceId,
+        umask: NodePermission,
+        cred: &Cred,
+    ) -> VfsResult<()> {
+        self.check_writable_mount()?;
+        self.may_modify_directory(cred)?;
+        let node_type = mode.node_type();
+        if matches!(node_type, NodeType::CharacterDevice | NodeType::BlockDevice)
+            && !cred.is_privileged()
+        {
+            return Err(VfsError::OperationNotPermitted);
+        }
+        let dir_inode = self.inode();
+        let mode = dir_inode.prepare_create_mode(mode, umask, mode.permission(), node_type, cred);
+        dir_inode.mknod_with_mode(candidate, mode, device, cred)
+    }
+
+    pub(crate) fn vfs_mkdir(
+        &self,
+        candidate: &Dentry,
+        permission: NodePermission,
+        umask: NodePermission,
+        cred: &Cred,
+    ) -> VfsResult<()> {
+        self.check_writable_mount()?;
+        self.may_modify_directory(cred)?;
+        let dir_inode = self.inode();
+        let allowed_permission =
+            NodePermission::all() & !(NodePermission::SET_UID | NodePermission::SET_GID);
+        let mode = dir_inode.prepare_create_mode(
+            Umode::new(NodeType::Directory, permission),
+            umask,
+            allowed_permission,
+            NodeType::Directory,
+            cred,
+        );
+        dir_inode.mkdir(candidate, mode, cred)
+    }
+
+    pub(crate) fn vfs_symlink(
+        &self,
+        candidate: &Dentry,
+        target: &str,
+        cred: &Cred,
+    ) -> VfsResult<()> {
+        self.check_writable_mount()?;
+        self.may_modify_directory(cred)?;
+        let dir_inode = self.inode();
+        dir_inode.symlink(candidate, target, cred)
+    }
+
+    pub(crate) fn vfs_link(&self, candidate: &Dentry, source: &Self, cred: &Cred) -> VfsResult<()> {
+        if !Arc::ptr_eq(&self.mnt, &source.mnt) {
+            return Err(VfsError::CrossesDevices);
+        }
+        self.check_writable_mount()?;
+        self.may_modify_directory(cred)?;
+        if source.is_dir() {
+            return Err(VfsError::OperationNotPermitted);
+        }
+        let source_inode = source.inode();
+        let _source_guard = source_inode.lock_namespace_exclusive();
+        self.inode().link(candidate, &source.dentry)
+    }
+
     fn check_sticky(&self, victim: &Self, cred: &Cred) -> VfsResult<()> {
         let dir = self.metadata();
         if !dir.mode.permission().contains(NodePermission::STICKY) {
@@ -782,33 +872,36 @@ impl Path {
         }
     }
 
-    /// Create a regular file under this directory path.
+    /// Creates a regular file under this directory path.
+    ///
+    /// The final lookup and authorization are serialized by the parent
+    /// directory namespace lock, and the filesystem receives an exclusive
+    /// create request.
     pub fn create(&self, name: &str, permission: NodePermission, cred: &Cred) -> VfsResult<Self> {
-        self.may_modify_directory(cred)?;
-        self.check_writable_mount()?;
+        let mode = Umode::new(NodeType::RegularFile, permission);
         self.dentry
             .as_dir()?
-            .create(name, permission, cred)
+            .create_exclusive_with(name, |candidate| {
+                self.vfs_create(candidate, mode, NodePermission::empty(), true, cred)
+            })
             .map(|entry| self.with_dentry(entry))
     }
 
-    /// Create a directory under this directory path.
-    pub fn mkdir(
-        &self,
-        name: &str,
-        mut permission: NodePermission,
-        cred: &Cred,
-    ) -> VfsResult<Self> {
-        self.may_modify_directory(cred)?;
-        self.check_writable_mount()?;
-        permission.remove(NodePermission::SET_UID | NodePermission::SET_GID);
+    /// Creates a directory under this directory path.
+    pub fn mkdir(&self, name: &str, permission: NodePermission, cred: &Cred) -> VfsResult<Self> {
         self.dentry
             .as_dir()?
-            .mkdir(name, permission, cred)
+            .create_exclusive_with(name, |candidate| {
+                self.vfs_mkdir(candidate, permission, NodePermission::empty(), cred)
+            })
             .map(|entry| self.with_dentry(entry))
     }
 
-    /// Create a non-regular filesystem node under this directory path.
+    /// Creates a non-regular filesystem node under this directory path.
+    ///
+    /// Character and block device creation requires a privileged credential.
+    /// The existence check takes precedence over create-only authorization
+    /// failures.
     pub fn mknod(
         &self,
         name: &str,
@@ -817,34 +910,28 @@ impl Path {
         device: DeviceId,
         cred: &Cred,
     ) -> VfsResult<Self> {
-        self.may_modify_directory(cred)?;
-        self.check_writable_mount()?;
+        let mode = Umode::new(node_type, permission);
         self.dentry
             .as_dir()?
-            .mknod(name, node_type, permission, device, cred)
+            .create_exclusive_with(name, |candidate| {
+                self.vfs_mknod(candidate, mode, device, NodePermission::empty(), cred)
+            })
             .map(|entry| self.with_dentry(entry))
     }
 
-    /// Create a hard link to an existing path.
+    /// Creates a hard link to an existing path.
     pub fn link(&self, name: &str, source: &Self, cred: &Cred) -> VfsResult<Self> {
-        if !Arc::ptr_eq(&self.mnt, &source.mnt) {
-            return Err(VfsError::CrossesDevices);
-        }
-        self.may_modify_directory(cred)?;
-        self.check_writable_mount()?;
         self.dentry
             .as_dir()?
-            .link(name, &source.dentry)
+            .create_exclusive_with(name, |candidate| self.vfs_link(candidate, source, cred))
             .map(|entry| self.with_dentry(entry))
     }
 
-    /// Create a symbolic link under this directory path.
+    /// Creates a symbolic link under this directory path.
     pub fn symlink(&self, name: &str, target: &str, cred: &Cred) -> VfsResult<Self> {
-        self.may_modify_directory(cred)?;
-        self.check_writable_mount()?;
         self.dentry
             .as_dir()?
-            .symlink(name, target, cred)
+            .create_exclusive_with(name, |candidate| self.vfs_symlink(candidate, target, cred))
             .map(|entry| self.with_dentry(entry))
     }
 
@@ -888,8 +975,20 @@ impl Path {
 
     /// Remove a non-directory entry.
     pub fn unlink(&self, name: &str, cred: &Cred) -> VfsResult<()> {
+        self.unlink_with_pathname(name, false, cred)
+    }
+
+    pub(crate) fn unlink_with_pathname(
+        &self,
+        name: &str,
+        has_trailing_slash: bool,
+        cred: &Cred,
+    ) -> VfsResult<()> {
         self.check_writable_mount()?;
         self.dentry.as_dir()?.unlink_with(name, |victim| {
+            if has_trailing_slash {
+                return Err(VfsError::NotADirectory);
+            }
             self.may_modify_directory(cred)?;
             let victim_path = self.with_dentry(victim.clone());
             self.check_sticky(&victim_path, cred)?;

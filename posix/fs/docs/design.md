@@ -68,7 +68,7 @@ core/ksyscall
 │  Process context                                         │
 │   ├─ kprocess::current_user_process()                     │
 │   ├─ kprocess::current_resources()                        │
-│   └─ fs_context::FsStruct and process umask               │
+│   └─ fs_context::FsStruct { root, pwd, umask, in_exec }    │
 │                                                          │
 │  Internal object dispatch                                │
 │   ├─ kfd::FileLike                                       │
@@ -81,11 +81,11 @@ core/ksyscall
 
 | 子模块 | 职责 |
 |--------|------|
-| `path` | 统一处理 `AT_FDCWD`、`AT_EMPTY_PATH`、`AT_SYMLINK_NOFOLLOW`、`O_NOFOLLOW` 和 VFS magic-link follow |
+| `path` | 统一处理绝对路径忽略 `dirfd`、`AT_FDCWD`、`AT_EMPTY_PATH`、`AT_SYMLINK_NOFOLLOW`、`O_NOFOLLOW` 和 VFS magic-link follow |
 | `open` | 将 Linux open 参数交给 `kvfs::Filename`，并把打开结果加入当前进程 fd 表 |
 | `io` | 处理普通、向量、定点和 fd-to-fd 数据传输 syscall |
 | `fd_ops` | 维护 fd 生命周期、复制、`CLOEXEC`、非阻塞标志和部分 `fcntl` 行为 |
-| `dir` | 维护当前目录、根目录、目录/节点创建和 `linux_dirent64` 输出；`mknodat` 应用 umask，并限制设备节点为特权调用 |
+| `dir` | 维护当前目录、根目录、目录/节点创建和 `linux_dirent64` 输出；`mknodat` 只转换 ABI 参数，创建策略由 KVFS 执行 |
 | `namei` | 处理链接、删除、符号链接和重命名等命名空间变更 |
 | `metadata` | 修改所有者、权限和时间戳 |
 | `mount` | 把 Linux mount flags 映射到 `kvfs::MountFlags`，并分派当前明确支持的 tmpfs/bpffs nodev mount |
@@ -169,12 +169,14 @@ FileLike::read/write
 ### `openat`
 
 1. 从用户指针读取路径字符串。
-2. 使用当前进程 `umask` 修正 mode。
-3. 将 Linux open flags 和 mode 交给 `kvfs::Filename` 的 open 入口。
+2. 通过 `with_fs_at` 取得包含 root、pwd 和 umask 的完整 `FsStruct` snapshot。
+3. 将 Linux open flags、原始 mode 和 snapshot umask 交给 `kvfs::Filename` 的
+   open 入口；umask 不在 syscall 层提前应用。
 4. `kvfs` 内部构造 namei open 参数，使用 `LookupIntent::Open` 与
    `LookupFlags` 处理 `O_NOFOLLOW`、`O_PATH`、普通 symlink 和 VFS
    magic-link。
-5. 对普通路径调用 `with_fs(dirfd, ...)` 在正确 root/cwd 上下文下打开。
+5. 对普通路径调用 `with_fs_at(dirfd, filename, ...)`：绝对路径从 root 开始且不访问
+   `dirfd`，相对路径才校验并使用 `dirfd`。
 6. 设备节点的特殊 open 语义由对应 VFS/device file operations 处理。
 7. 根据 `O_NONBLOCK`、`O_CLOEXEC` 设置对象和 descriptor 标志。
 8. 把打开的 file 加入当前进程 fd 表并返回 fd。
@@ -184,17 +186,55 @@ FileLike::read/write
 1. `None` 或空路径必须配合 `AT_EMPTY_PATH`，否则返回 `NotFound`。
 2. 非空路径进入 `kvfs::namei`，携带 syscall 对应的 `LookupIntent` 和
    `LookupFlags`。
-3. namei 在同一条路径中处理 final/non-final symlink、magic-link、
+3. 绝对非空路径不读取 `dirfd`；相对非空路径使用 `dirfd` 选择 base。
+4. namei 在同一条路径中处理 final/non-final symlink、magic-link、
    `AT_SYMLINK_NOFOLLOW` 和 `NO_MAGIC_LINKS`。
 5. 空路径配合 `AT_EMPTY_PATH` 返回 fd 对象对应的 VFS `Location` 或非 VFS
    `FileLike`。
 
 ### `mkdirat`
 
-`mkdirat` 先按当前 `FsStruct` 和 `dirfd` 解析待创建项的父目录，并应用当前
-进程 `umask`。如果路径已经可解析为现有对象，包括 `/`、`.`、`..` 这类没有普通
-final component 的目录路径，syscall 边界返回 `AlreadyExists`，对应 Linux
-`EEXIST`。
+`mkdirat` 把原始 permission bits 和 `FsStruct` umask 交给
+`Filename::mkdir_at()`。该入口在父目录 namespace lock 下完成 final lookup，再由
+`Path::vfs_mkdir()` 执行 mount、父目录 DAC、mode preparation 和 filesystem callback。
+如果路径已经可解析为现有对象，包括 `/`、`.`、`..` 这类没有普通 final component
+的目录路径，则返回 `AlreadyExists`，对应 Linux `EEXIST`。
+
+### `mknodat`
+
+syscall 入口只复制 pathname，并把 32 位 ABI mode/device 截断或转换为
+`Umode` 和 `DeviceId`，随后在任何 `dirfd` 访问前调用
+namei 层的 `may_mknod()` 执行 Linux 类型校验，并把验证后的 `NodeType` 写回
+现有 `Umode` 的类型位。`Umode::mknod_node_type()` 仅负责纯类型解码，不依赖
+VFS errno。规范化后的 mode、`FsStruct` umask 和 credential snapshot 传给
+`Filename::mknod_at()`：
+
+1. syscall 边界在路径解析前按原始 `S_IFMT` 位拒绝目录、符号链接和非法类型；
+2. 在父目录 exclusive namespace lock 下完成最终 lookup；
+3. positive dentry 先返回 `AlreadyExists`，negative dentry 才检查 mount write、
+   `MAY_WRITE | MAY_EXEC` 和 character/block device 特权；
+4. 与 open-create 共用 `Path::vfs_create()` / `Path::vfs_mknod()`，按 setgid 后
+   umask 的顺序准备 mode；
+5. regular file 使用 exclusive create callback，FIFO/socket 清零 device，
+   character/block device 保留 ABI device。
+
+当前 capability 模型仍以 `euid == 0` 近似 Linux `CAP_MKNOD`。
+
+### `linkat`、`symlinkat`、`unlinkat`
+
+这些 namespace syscall 不再通过通用 `create_at()` 或完整目标 lookup 做一次锁外
+final lookup。syscall 复制并校验 ABI 参数后调用对应的
+`Filename::link_at()`、`Filename::symlink_at()`、`Filename::unlink_at()` 或
+`Filename::rmdir_at()`：
+
+1. Filename 解析 parent 和 final-component 类型；
+2. Dentry 在 parent exclusive namespace lock 下执行唯一 final lookup；
+3. positive/negative、trailing slash 和特殊 final component 的 errno 在该最终对象上决定；
+4. Path 执行 mount、DAC、cross-mount、sticky 和 mountpoint 策略；
+5. VfsInode 只进入 filesystem callback。
+
+`linkat` 只接受 `AT_SYMLINK_FOLLOW | AT_EMPTY_PATH`；默认不跟随 source final symlink，
+`AT_SYMLINK_FOLLOW` 才启用 follow。
 
 ### exec path source
 
@@ -241,7 +281,10 @@ final component 的目录路径，syscall 边界返回 `AlreadyExists`，对应 
 并发控制由下层资源对象负责：
 
 - fd 表和 descriptor flags 由 `kfd`/进程 resources 内部锁保护；
-- `FsStruct` 通过进程状态中的锁串行化当前目录、根目录和解析基准更新；
+- `FsStruct` 通过进程状态中的锁串行化当前目录、根目录、umask 和解析基准更新；
+  它是 umask 的唯一 owner，`CLONE_FS` 通过共享同一个 `Arc<Mutex<FsStruct>>`
+  同时共享 root、pwd 和 umask。非共享 fork 使用 `clone_for_process()` 复制状态；
+  单次 `*at` 操作使用完整 `snapshot()`，不会把 umask 重置成默认值；
 - 目录流 offset 由 `Directory::offset` 锁保护；
 - 文件、pipe、设备、mountpoint 和 VFS 节点的内部并发由各自实现负责；
 - 用户内存访问由 `posix_types` / `osvm` 在当前进程地址空间下执行。

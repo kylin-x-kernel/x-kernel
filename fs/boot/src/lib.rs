@@ -146,15 +146,15 @@ impl BootVfs {
 
     fn mkdir_path(&self, path: impl AsRef<str>) -> kvfs::VfsResult<()> {
         let cred = kcred::initial_cred();
-        let (dir, name) = Filename::new(path.as_ref()).create_at(
-            &self.root,
-            &self.root,
-            LookupIntent::Open,
-            LookupFlags::DIRECTORY,
-            &cred,
-        )?;
-        dir.mkdir(&name, NodePermission::from_bits_truncate(0o755), &cred)?;
-        Ok(())
+        Filename::new(path.as_ref())
+            .mkdir_at(
+                &self.root,
+                &self.root,
+                NodePermission::from_bits_truncate(0o755),
+                NodePermission::empty(),
+                &cred,
+            )
+            .map(|_| ())
     }
 
     fn ensure_directory_path(&self, path: &str) -> kvfs::VfsResult<()> {
@@ -171,11 +171,8 @@ impl BootVfs {
     fn mount_at(&self, path: &str, fs: Arc<SuperBlock>) -> kvfs::VfsResult<()> {
         let mountpoint = match self.lookup(path) {
             Ok(loc) if loc.is_dir() => loc,
-            Ok(loc) => {
-                let name = loc.name();
-                loc.parent()
-                    .ok_or(kvfs::VfsError::InvalidInput)?
-                    .unlink(&name, &kcred::initial_cred())?;
+            Ok(_) => {
+                Filename::new(path).unlink_at(&self.root, &self.root, &kcred::initial_cred())?;
                 self.mkdir_path(path)?;
                 self.lookup(path)?
             }
@@ -192,14 +189,7 @@ impl BootVfs {
         self.ensure_directory_path("/sys/class/graphics/fb0/device")?;
         let cred = kcred::initial_cred();
         let symlink_result = Filename::new("/sys/class/graphics/fb0/device/subsystem")
-            .create_at(
-                &self.root,
-                &self.root,
-                LookupIntent::Open,
-                LookupFlags::empty(),
-                &cred,
-            )
-            .and_then(|(dir, name)| dir.symlink(&name, "whatever", &cred));
+            .symlink_at(&self.root, &self.root, "whatever", &cred);
         if let Err(err) = symlink_result
             && err != kvfs::VfsError::AlreadyExists
         {

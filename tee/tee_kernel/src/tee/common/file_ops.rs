@@ -9,7 +9,7 @@ use kerrno::{KError, KResult};
 use klazy::lazy_static;
 use kprocess;
 use ksync::RwLock;
-use kvfs::{Filename, LookupFlags, LookupIntent, NodePermission, VfsError, VfsFile};
+use kvfs::{Filename, NodePermission, VfsError, VfsFile};
 use linux_raw_sys::general::*;
 use slab::Slab;
 use tee_raw_sys::{TEE_ERROR_GENERIC, TEE_ERROR_ITEM_NOT_FOUND};
@@ -40,6 +40,7 @@ fn open_path(
         fs.pwd(),
         flags,
         permission,
+        fs.node_umask(),
         kprocess::current_cred(),
     )
 }
@@ -89,7 +90,6 @@ impl FileVariant {
             mode
         );
         let path = validate_tee_path(path).map_err(|_| VfsError::InvalidInput)?;
-        let mode = mode & !kprocess::current_umask();
 
         let fd = with_fs(AT_FDCWD, |fs| {
             open_path(fs, &path, flags, mode as __kernel_mode_t)
@@ -114,18 +114,7 @@ impl FileVariant {
         let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
         let cred = kprocess::current_cred();
         match with_fs(AT_FDCWD, |fs| {
-            let entry = Filename::new(path.as_str()).lookup_at(
-                fs.root(),
-                fs.pwd(),
-                LookupIntent::Open,
-                LookupFlags::no_follow(),
-                &cred,
-            )?;
-            let name = entry.name();
-            entry
-                .parent()
-                .ok_or(VfsError::IsADirectory)?
-                .unlink(&name, &cred)
+            Filename::new(path.as_str()).unlink_at(fs.root(), fs.pwd(), &cred)
         }) {
             Ok(()) => Ok(()),
             Err(VfsError::NotFound) => {
@@ -151,18 +140,7 @@ impl FileVariant {
         let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
         let cred = kprocess::current_cred();
         with_fs(AT_FDCWD, |fs| {
-            let entry = Filename::new(path.as_str()).lookup_at(
-                fs.root(),
-                fs.pwd(),
-                LookupIntent::Open,
-                LookupFlags::no_follow(),
-                &cred,
-            )?;
-            let name = entry.name();
-            entry
-                .parent()
-                .ok_or(VfsError::ResourceBusy)?
-                .rmdir(&name, &cred)
+            Filename::new(path.as_str()).rmdir_at(fs.root(), fs.pwd(), &cred)
         })
         .inspect_err(|e| error!("remove dir failed: {:?}", e))
         .map_err(|_| TEE_ERROR_GENERIC)?;
@@ -188,18 +166,13 @@ impl FileVariant {
         let mode = NodePermission::from_bits_truncate(0o755);
         let cred = kprocess::current_cred();
         with_fs(AT_FDCWD, |fs| {
-            let (dir, name) = match Filename::new(path.as_str()).create_at(
+            match Filename::new(path.as_str()).mkdir_at(
                 fs.root(),
                 fs.pwd(),
-                LookupIntent::Open,
-                LookupFlags::DIRECTORY,
+                mode,
+                NodePermission::empty(),
                 &cred,
             ) {
-                Ok(location) => location,
-                Err(VfsError::AlreadyExists) => return Ok(()),
-                Err(err) => return Err(err),
-            };
-            match dir.mkdir(&name, mode, &cred) {
                 Ok(_) => Ok(()),
                 Err(VfsError::AlreadyExists) => {
                     // Directory already exists, return success (idempotent)

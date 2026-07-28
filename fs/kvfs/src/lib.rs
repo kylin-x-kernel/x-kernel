@@ -40,7 +40,7 @@ pub use filename::Filename;
 pub use kiocb::Kiocb;
 pub use lookup::{LookupFlags, LookupIntent, MagicLinkOps, ResolvedObject};
 pub use mount::{MntNamespace, Mount, MountFlags, MountIdmap, NamespaceClone, Path};
-pub use namei::{DelayedCall, LastType, ParentLookup, dentry_open};
+pub use namei::{DelayedCall, LastType, ParentLookup, dentry_open, may_mknod};
 pub use node::{
     Dentry, DentryOperations, DeviceFileOps, DirContext, DirEntrySink, GetattrQueryFlags,
     GetattrRequestMask, InodeCache, InodeDirOperations, InodeLookupFlags, InodeOperations,

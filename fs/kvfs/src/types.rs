@@ -84,13 +84,6 @@ const NODE_TYPE_SHIFT: u16 = 12;
 const NODE_TYPE_MASK: u16 = 0o170000;
 const PERMISSION_MASK: u16 = 0o7777;
 
-impl NodePermission {
-    /// Returns the mode bits kept by legacy open-style creation.
-    pub fn valid_mode_bits(self) -> Self {
-        Self::from_bits_truncate(self.bits() & PERMISSION_MASK)
-    }
-}
-
 /// Inode mode value encoded with Linux `umode_t` layout.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Umode(u16);
@@ -116,15 +109,20 @@ impl Umode {
         NodeType::from_mode_type(((self.0 & NODE_TYPE_MASK) >> NODE_TYPE_SHIFT) as u8)
     }
 
-    /// Returns whether the file-type field is entirely absent.
+    const fn type_bits(self) -> u16 {
+        self.0 & NODE_TYPE_MASK
+    }
+
+    /// Returns the node type requested through a Linux `mknod(2)` mode.
     ///
-    /// A zero `S_IFMT` field is distinct from [`NodeType::Unknown`], which also
-    /// covers illegal type encodings. Creation syscalls such as `mknodat(2)`
-    /// treat an absent type field as a request for a regular file while
-    /// rejecting an illegal encoding, so this predicate lets a caller tell the
-    /// two apart without re-deriving the mask.
-    pub const fn type_field_is_absent(self) -> bool {
-        self.0 & NODE_TYPE_MASK == 0
+    /// An absent type field denotes a regular file. Unsupported or malformed
+    /// type fields are returned as their decoded [`NodeType`] so the namei
+    /// boundary can assign the operation-specific error.
+    pub const fn mknod_node_type(self) -> NodeType {
+        match self.type_bits() {
+            0 => NodeType::RegularFile,
+            _ => self.node_type(),
+        }
     }
 
     /// Returns the permission bits encoded in this mode.
@@ -267,20 +265,6 @@ mod tests {
     }
 
     #[def_test]
-    fn test_umode_type_field_is_absent() {
-        // A zero S_IFMT field is absent regardless of the permission bits.
-        assert!(Umode::from_bits(0).type_field_is_absent());
-        assert!(Umode::from_bits(0o644).type_field_is_absent());
-        assert!(Umode::from_bits(0o7777).type_field_is_absent());
-
-        // Any concrete file type clears the predicate.
-        assert!(!Umode::from_bits(0o100644).type_field_is_absent()); // regular file
-        assert!(!Umode::from_bits(0o040000).type_field_is_absent()); // directory
-        assert!(!Umode::from_bits(0o120000).type_field_is_absent()); // symlink
-        assert!(!Umode::from_bits(0o020000).type_field_is_absent()); // char device
-    }
-
-    #[def_test]
     fn test_node_permission_bitflags() {
         let rwx =
             NodePermission::OWNER_READ | NodePermission::OWNER_WRITE | NodePermission::OWNER_EXEC;
@@ -302,6 +286,43 @@ mod tests {
         assert!(special.contains(NodePermission::SET_UID));
         assert!(special.contains(NodePermission::SET_GID));
         assert!(special.contains(NodePermission::STICKY));
+    }
+
+    #[def_test]
+    fn mknod_node_type_decodes_linux_type_field() {
+        assert_eq!(
+            Umode::from_bits(0o600).mknod_node_type(),
+            NodeType::RegularFile
+        );
+        assert_eq!(
+            Umode::from_bits(0o100600).mknod_node_type(),
+            NodeType::RegularFile
+        );
+        assert_eq!(Umode::from_bits(0o010600).mknod_node_type(), NodeType::Fifo);
+        assert_eq!(
+            Umode::from_bits(0o020600).mknod_node_type(),
+            NodeType::CharacterDevice
+        );
+        assert_eq!(
+            Umode::from_bits(0o060600).mknod_node_type(),
+            NodeType::BlockDevice
+        );
+        assert_eq!(
+            Umode::from_bits(0o140600).mknod_node_type(),
+            NodeType::Socket
+        );
+        assert_eq!(
+            Umode::from_bits(0o040700).mknod_node_type(),
+            NodeType::Directory
+        );
+        assert_eq!(
+            Umode::from_bits(0o120777).mknod_node_type(),
+            NodeType::Symlink
+        );
+        assert_eq!(
+            Umode::from_bits(0o030600).mknod_node_type(),
+            NodeType::Unknown
+        );
     }
 
     #[def_test]

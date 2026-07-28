@@ -85,7 +85,7 @@ impl OpenHow {
     pub(crate) fn from_legacy(flags: u32, mode: NodePermission) -> Self {
         let mut how = Self {
             flags: u64::from(flags & VALID_OPEN_FLAGS),
-            mode: mode.valid_mode_bits(),
+            mode,
         };
         if OpenFlags::from_bits_retain(how.flags as u32).contains(OpenFlags::PATH) {
             how.flags &= u64::from(O_PATH_FLAGS.bits());
@@ -195,12 +195,6 @@ impl OpenParams {
 
     pub(crate) const fn is_path(&self) -> bool {
         self.flags.contains(OpenFlags::PATH)
-    }
-
-    pub(crate) const fn needs_write_mount(&self) -> bool {
-        self.flags
-            .intersects(OpenFlags::CREATE.union(OpenFlags::TRUNCATE))
-            || self.acc_mode.requires_write()
     }
 
     pub(crate) const fn file_flags(&self) -> OpenFlags {

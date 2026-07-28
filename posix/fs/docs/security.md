@@ -98,20 +98,23 @@ kfd resources / kvfs / device and pipe implementations
 2. `O_NONBLOCK` 和 `F_SETFL(O_NONBLOCK)` 必须修改 open file description 的
    `VfsFile::f_flags`，`nonblocking()` 只能从该字段派生。
 3. `AT_EMPTY_PATH` 是空路径按 fd 解析的必要条件。
-4. `AT_SYMLINK_NOFOLLOW` / `O_NOFOLLOW` 必须影响符号链接和 VFS magic-link follow。
-5. `mount` 不得静默忽略会改变语义的 unsupported operation flags。
-6. 创建文件和目录时应应用当前进程 `umask`。
-7. `chroot` 目标必须是目录，且当前 capability 模型下调用者必须满足 `euid == 0`。
-8. `chown/chmod/utimensat` 必须把同一个 credential snapshot 传给 VFS metadata
+4. 非空绝对 `*at` pathname 必须忽略 `dirfd`；只有相对 pathname 才允许
+   `dirfd` 查找失败影响结果。
+5. `AT_SYMLINK_NOFOLLOW` / `O_NOFOLLOW` 必须影响符号链接和 VFS magic-link follow。
+6. `mount` 不得静默忽略会改变语义的 unsupported operation flags。
+7. 创建文件和目录时应应用 `FsStruct` 中的当前 umask；写入 umask 必须截断为
+   `0777`，`CLONE_FS` 必须与 root/pwd 一起共享它。
+8. `chroot` 目标必须是目录，且当前 capability 模型下调用者必须满足 `euid == 0`。
+9. `chown/chmod/utimensat` 必须把同一个 credential snapshot 传给 VFS metadata
    授权，不能直接调用后端 `setattr`。
-9. `F_ADD_SEALS` 只能单调添加 memfd seals，且必须尊重 `F_SEAL_SEAL`。
+10. `F_ADD_SEALS` 只能单调添加 memfd seals，且必须尊重 `F_SEAL_SEAL`。
 
 ## 线程安全
 
 | 资源 | 并发条件 | 风险 |
 |------|----------|------|
 | fd 表 | 由当前进程 resources 内部锁保护 | close/dup/lookup 竞态会导致 fd 复用或对象泄漏 |
-| `FsStruct` | 通过进程 fs_struct 锁访问 | `chdir`、`chroot` 与相对路径解析并发 |
+| `FsStruct` | 通过进程 fs_struct 锁访问 | `chdir`、`chroot`、umask 与相对路径解析并发；`CLONE_FS` 共享同一对象 |
 | 目录 offset | `Directory::offset` 锁保护 | `getdents64` 和目录 `lseek` 并发更新 |
 | `FileLike` 对象 | 由具体文件、pipe、设备实现负责 | 阻塞、非阻塞状态和 offset 更新语义 |
 | procfs magic-link target | procfs/kfd snapshot 持有目标 `FileLike` 引用 | 目标进程退出或 fd 关闭时的生命周期 |
@@ -142,6 +145,12 @@ kfd resources / kvfs / device and pipe implementations
 | T-16 | 非 owner 绕过 VFS 直接修改 mode、owner 或时间 | metadata | 高 | syscall 直接调用后端 `setattr` | syscall 只做 ABI 转换，`Path::chown/chmod/set_times` 统一执行 owner、group 和 write authorization |
 | T-17 | 普通用户改变进程 root | chroot | 高 | 只验证目标目录可搜索 | 完成目录 DAC 后额外要求 `euid == 0`，近似 Linux `CAP_SYS_CHROOT` |
 | T-18 | 普通用户通过 `mknodat` 创建设备节点 | namespace / device | 高 | 仅按 mode 创建 special inode | character/block device 要求 privileged credential；其它节点类型仍应用 umask 与 VFS 目录授权 |
+| T-19 | 绝对 `*at` 路径错误访问无效 `dirfd` | pathname / fd | 中 | 在判断 pathname 是否绝对之前解析 `dirfd` | 所有非空 pathname 入口复用 `with_fs_at`；绝对路径强制选择进程 cwd snapshot 并由 KVFS 从 root 开始 |
+| T-20 | `mknodat` 锁外授权与最终名称状态竞争 | namespace / device | 高 | syscall 先做特权/DAC，再由 VFS 查找或创建 | syscall 只转换 ABI；KVFS 在父目录 exclusive lock 内按 positive-first 顺序执行最终 lookup、授权、mode 准备和 callback |
+| T-21 | 非法 mknod 类型被无效 dirfd 错误遮蔽 | syscall / fd | 中 | 进入 `with_fs_at` 后才执行 `may_mknod` | 复制 pathname 后立即调用 namei 层 `may_mknod()`，验证成功后才允许解析相对路径的 `dirfd` |
+| T-22 | umask 出现两份 owner 或被高位污染 | process / fs context | 高 | process runtime 与 FsStruct 各保存一份，或 `sys_umask` 未截断 | `FsStruct` 是唯一 owner，`replace_umask` 统一执行 `mask & 0777`；fork/clone 与 pathname snapshot 都复制或共享该对象 |
+| T-23 | namespace syscall 对 final name 做两次 lookup 并操作同名替代对象 | pathname / namespace | 高 | syscall 先解析完整目标或锁外确认目标不存在，再由 Path 按名称重新查找 | link/symlink/unlink/rmdir 调用专用 `Filename::*_at`；Dentry 在父目录 exclusive lock 下执行唯一 final lookup |
+| T-24 | `linkat` 默认错误跟随 source symlink 或静默接受未知 flags | pathname flags | 中 | 通用 resolve helper 默认 follow，或 syscall 只记录 warning | syscall 只接受 `AT_SYMLINK_FOLLOW | AT_EMPTY_PATH`；默认显式使用 no-follow，未知位返回 `EINVAL` |
 
 影响等级定义：
 
@@ -215,7 +224,8 @@ kfd resources / kvfs / device and pipe implementations
 
 - [ ] 新增用户指针访问只通过 `UserPtr`、`UserConstPtr`、`VmBytes` 或 `IoVectorBuf`。
 - [ ] 新增 `unsafe` 块有 `SAFETY:` 注释，并补充到本文 unsafe 清单。
-- [ ] 新增路径解析入口正确处理 `AT_EMPTY_PATH`、`AT_SYMLINK_NOFOLLOW` 和 `AT_FDCWD`。
+- [ ] 新增路径解析入口正确处理绝对路径忽略 `dirfd`、`AT_EMPTY_PATH`、
+  `AT_SYMLINK_NOFOLLOW` 和 `AT_FDCWD`。
 - [ ] 新增 open/stat/namei 入口明确普通路径与 procfd 路径的差异。
 - [ ] fd 表修改失败时不会留下半创建对象或错误 descriptor flags。
 - [ ] 涉及 offset/len 的路径检查负数、溢出和 0 长度语义。

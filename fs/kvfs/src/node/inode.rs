@@ -219,17 +219,13 @@ pub trait InodeDirOperations: Send + Sync {
 /// set-group-ID bit to newly created subdirectories, matching
 /// `inode_init_owner()` in Linux.
 pub fn inode_init_owner(dir: &VfsInode, mode: Umode, cred: &Cred) -> (Umode, u32, u32) {
-    let dir_metadata = dir.metadata();
+    let (parent_permission, parent_gid) = dir.attributes.creation_mode_context();
     let mut permission = mode.permission();
-    let gid = if dir_metadata
-        .mode
-        .permission()
-        .contains(NodePermission::SET_GID)
-    {
+    let gid = if parent_permission.contains(NodePermission::SET_GID) {
         if mode.node_type() == NodeType::Directory {
             permission.insert(NodePermission::SET_GID);
         }
-        dir_metadata.gid
+        parent_gid
     } else {
         cred.fsgid()
     };
@@ -513,6 +509,12 @@ impl InodeAttributes {
     fn owner(&self) -> (u32, u32) {
         let owner = *self.owner.lock();
         (owner.uid, owner.gid)
+    }
+
+    fn creation_mode_context(&self) -> (NodePermission, u32) {
+        let permission = self.mode().permission();
+        let gid = self.owner.lock().gid;
+        (permission, gid)
     }
 
     fn set_owner(&self, uid: u32, gid: u32) {
@@ -1420,47 +1422,53 @@ impl VfsInode {
         )
     }
 
+    /// Applies the VFS SGID, umask, permission-mask, and node-type policy.
+    pub(crate) fn prepare_create_mode(
+        &self,
+        mode: Umode,
+        umask: NodePermission,
+        allowed_permission: NodePermission,
+        node_type: NodeType,
+        cred: &Cred,
+    ) -> Umode {
+        let (parent_permission, parent_gid) = self.attributes.creation_mode_context();
+        let mut permission = mode.permission();
+        // Linux `mode_strip_sgid()` reaches the credential check only for a
+        // non-directory SGID+group-executable mode below an SGID directory.
+        let should_strip_set_gid = mode.node_type() != NodeType::Directory
+            && permission.contains(NodePermission::SET_GID | NodePermission::GROUP_EXEC)
+            && parent_permission.contains(NodePermission::SET_GID)
+            && !cred.in_group(parent_gid)
+            && !cred.is_privileged();
+        if should_strip_set_gid {
+            permission.remove(NodePermission::SET_GID);
+        }
+        permission.remove(umask);
+        permission &= allowed_permission;
+        Umode::new(node_type, permission)
+    }
+
     pub(crate) fn lookup_child(&self, dentry: &Dentry) -> VfsResult<Option<Dentry>> {
         let dentry = dentry.lock_location();
         self.require_directory_operations()?
             .lookup(self, &dentry, InodeLookupFlags::empty())
     }
 
-    /// Create a regular-file child below this directory inode.
-    pub(crate) fn create(
-        &self,
-        dentry: &Dentry,
-        permission: NodePermission,
-        cred: &Cred,
-    ) -> VfsResult<()> {
-        let mode = Umode::new(NodeType::RegularFile, permission);
-        self.create_with_mode(dentry, mode, false, cred)
-    }
-
     /// Create a directory child below this directory inode.
-    pub(crate) fn mkdir(
-        &self,
-        dentry: &Dentry,
-        permission: NodePermission,
-        cred: &Cred,
-    ) -> VfsResult<()> {
+    pub(crate) fn mkdir(&self, dentry: &Dentry, mode: Umode, cred: &Cred) -> VfsResult<()> {
         let dentry = dentry.lock_location();
-        let mode = Umode::new(NodeType::Directory, permission);
         self.require_directory_operations()?
             .mkdir(&MountIdmap, self, &dentry, mode, cred)
     }
 
-    /// Create a special child below this directory inode.
-    pub(crate) fn mknod(
+    pub(crate) fn mknod_with_mode(
         &self,
         dentry: &Dentry,
-        node_type: NodeType,
-        permission: NodePermission,
+        mode: Umode,
         device: DeviceId,
         cred: &Cred,
     ) -> VfsResult<()> {
         let dentry = dentry.lock_location();
-        let mode = Umode::new(node_type, permission);
         self.require_directory_operations()?
             .mknod(&MountIdmap, self, &dentry, mode, device, cred)
     }
@@ -1480,19 +1488,19 @@ impl VfsInode {
     }
 
     /// Unlink a child below this directory inode.
-    pub fn unlink(&self, dentry: &Dentry) -> VfsResult<()> {
+    pub(crate) fn unlink(&self, dentry: &Dentry) -> VfsResult<()> {
         let dentry = dentry.lock_location();
         self.require_directory_operations()?.unlink(self, &dentry)
     }
 
     /// Remove a directory child below this directory inode.
-    pub fn rmdir(&self, dentry: &Dentry) -> VfsResult<()> {
+    pub(crate) fn rmdir(&self, dentry: &Dentry) -> VfsResult<()> {
         let dentry = dentry.lock_location();
         self.require_directory_operations()?.rmdir(self, &dentry)
     }
 
     /// Rename a child from this directory inode to another directory inode.
-    pub fn rename(
+    pub(crate) fn rename(
         &self,
         old_dentry: &Dentry,
         new_dir: &VfsInode,

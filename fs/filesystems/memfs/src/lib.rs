@@ -810,6 +810,7 @@ mod tests {
                 &root,
                 O_WRONLY | O_CREAT | O_EXCL,
                 NodePermission::from_bits_truncate(0o600),
+                NodePermission::empty(),
                 kcred::initial_cred(),
             )
             .unwrap();
@@ -871,7 +872,7 @@ mod tests {
     #[def_test]
     fn rename_rejects_nonempty_directory_after_child_handle_is_dropped() {
         let fs = MemoryFs::new();
-        let root = fs.root_dir();
+        let root = kvfs::Path::new(kvfs::Mount::new_root(&fs), fs.root_dir());
         let permission = NodePermission::from_bits_truncate(0o755);
         let cred = kcred::initial_cred();
         let source = root.mkdir("source", permission, &cred).unwrap();
@@ -881,7 +882,7 @@ mod tests {
         drop(source);
 
         assert_eq!(
-            root.rename("source", &root, "target", kvfs::RenameFlags::empty(),),
+            root.rename("source", &root, "target", kvfs::RenameFlags::empty(), &cred,),
             Err(VfsError::DirectoryNotEmpty)
         );
     }

@@ -13,13 +13,13 @@ use core::{
 use kerrno::{KError, KResult};
 use kvfs::{
     DeviceId, DirContext, Filename, LookupFlags, LookupIntent, NodePermission, NodeType,
-    Permission, Umode,
+    Permission, Umode, may_mknod,
 };
 use linux_raw_sys::general::*;
 use osvm::VirtPtr;
 use posix_types::{UserConstPtr, UserPtr};
 
-use crate::path::with_fs;
+use crate::path::{with_fs, with_fs_at};
 
 /// Changes the current working directory.
 pub fn sys_chdir(path: UserConstPtr<c_char>) -> KResult<isize> {
@@ -99,98 +99,15 @@ pub fn sys_mkdirat(dirfd: i32, path: UserConstPtr<c_char>, mode: u32) -> KResult
     let path = path.load_string()?;
     debug!("sys_mkdirat <= dirfd: {dirfd}, path: {path}, mode: {mode}");
 
-    let mode = mode & !kprocess::current_umask();
     let mode = NodePermission::from_bits_truncate(mode as u16);
     let cred = kprocess::current_cred();
+    let filename = Filename::new(path.as_str());
 
-    with_fs(dirfd, |fs| {
-        let path_exists = || {
-            Filename::new(path.as_str())
-                .lookup_at(
-                    fs.root(),
-                    fs.pwd(),
-                    LookupIntent::Open,
-                    LookupFlags::no_follow(),
-                    &cred,
-                )
-                .is_ok()
-        };
-        let (dir, name) = match Filename::new(path.as_str()).create_at(
-            fs.root(),
-            fs.pwd(),
-            LookupIntent::Open,
-            LookupFlags::DIRECTORY,
-            &cred,
-        ) {
-            Ok(parent) => parent,
-            Err(KError::InvalidInput) if !path.is_empty() && path_exists() => {
-                return Err(KError::AlreadyExists);
-            }
-            Err(err) => return Err(err),
-        };
-        match dir.mkdir(&name, mode, &cred) {
-            Ok(_) => Ok(0),
-            Err(KError::InvalidInput) if !path.is_empty() && path_exists() => {
-                Err(KError::AlreadyExists)
-            }
-            Err(err) => Err(err),
-        }
+    with_fs_at(dirfd, &filename, |fs| {
+        filename
+            .mkdir_at(fs.root(), fs.pwd(), mode, fs.node_umask(), &cred)
+            .map(|_| 0)
     })
-}
-
-/// The kind of node that `mknodat(2)` is asked to create.
-///
-/// This is the narrow, pre-validated counterpart to [`NodeType`] for the
-/// node-creation syscalls: by construction it holds only the types such a
-/// syscall may produce, never a directory, a symlink, or the `Unknown`
-/// catch-all. Building it via [`MknodKind::resolve`] centralizes the Linux
-/// `may_mknod` rules (see `fs/namei.c` in the upstream kernel): a zero `S_IFMT`
-/// field is treated as a request for a regular file, a directory request fails
-/// with `EPERM`, and a symlink or any other illegal type encoding fails with
-/// `EINVAL`.
-#[derive(Debug, Clone, Copy)]
-enum MknodKind {
-    RegularFile,
-    Fifo,
-    Socket,
-    CharacterDevice,
-    BlockDevice,
-}
-
-impl MknodKind {
-    /// Resolves a creation kind from a raw mode, applying the `may_mknod` rules.
-    ///
-    /// Returns `EINVAL` for a symlink or illegal type encoding and `EPERM` for a
-    /// directory request, matching `mknodat(2)`.
-    fn resolve(mode: Umode) -> KResult<Self> {
-        Ok(match mode.node_type() {
-            NodeType::Unknown if mode.type_field_is_absent() => Self::RegularFile,
-            NodeType::RegularFile => Self::RegularFile,
-            NodeType::Fifo => Self::Fifo,
-            NodeType::Socket => Self::Socket,
-            NodeType::CharacterDevice => Self::CharacterDevice,
-            NodeType::BlockDevice => Self::BlockDevice,
-            NodeType::Unknown | NodeType::Symlink => return Err(KError::InvalidInput),
-            NodeType::Directory => return Err(KError::OperationNotPermitted),
-        })
-    }
-
-    /// Returns whether this kind is a device special file.
-    const fn is_device(self) -> bool {
-        matches!(self, Self::CharacterDevice | Self::BlockDevice)
-    }
-}
-
-impl From<MknodKind> for NodeType {
-    fn from(kind: MknodKind) -> Self {
-        match kind {
-            MknodKind::RegularFile => NodeType::RegularFile,
-            MknodKind::Fifo => NodeType::Fifo,
-            MknodKind::Socket => NodeType::Socket,
-            MknodKind::CharacterDevice => NodeType::CharacterDevice,
-            MknodKind::BlockDevice => NodeType::BlockDevice,
-        }
-    }
 }
 
 /// Creates a filesystem node relative to a directory file descriptor.
@@ -202,63 +119,25 @@ pub fn sys_mknodat(
 ) -> KResult<isize> {
     let path = path.load_string()?;
     let mode = Umode::from_bits(mode as u16);
-
-    // Resolve and validate the creation kind. `MknodKind::resolve` encodes the
-    // Linux `may_mknod` rules; see its documentation for the type-field handling.
-    let kind = MknodKind::resolve(mode)?;
-
+    let mode = mode.with_node_type(may_mknod(mode)?);
     let cred = kprocess::current_cred();
-    if kind.is_device() && !cred.is_privileged() {
-        return Err(KError::OperationNotPermitted);
-    }
-
-    let permission = NodePermission::from_bits_truncate(
-        mode.permission().bits() & !(kprocess::current_umask() as u16),
-    );
+    let filename = Filename::new(path.as_str());
     debug!(
-        "sys_mknodat <= dirfd: {dirfd}, path: {path:?}, type: {kind:?}, mode: {:#o}, device: \
-         {device:#x}",
+        "sys_mknodat <= dirfd: {dirfd}, path: {path:?}, mode: {:#o}, device: {device:#x}",
         mode.bits()
     );
 
-    // TODO: this authorizes device creation and resolves the parent before the
-    // final locked lookup, so other `Path::mknod()` callers could bypass the
-    // device policy and concurrent creators may see the wrong errno. The
-    // privilege/permission checks should move under the parent directory's
-    // exclusive lock via a validator closure, as the open-create path does.
-    with_fs(dirfd, |fs| {
-        let (dir, name) = Filename::new(path.as_str()).create_at(
-            fs.root(),
-            fs.pwd(),
-            LookupIntent::Open,
-            LookupFlags::empty(),
-            &cred,
-        )?;
-        match kind {
-            MknodKind::RegularFile => {
-                // TODO: regular-file creation has exclusive-create semantics,
-                // but `create()` currently fixes exclusive=false; a local
-                // negative-dentry check cannot stand in for the backend's
-                // exclusive guarantee on remote/independent-namespace filesystems.
-                dir.create(&name, permission, &cred)?;
-            }
-            MknodKind::CharacterDevice | MknodKind::BlockDevice => {
-                // Only device nodes carry a device number; the 32-bit `dev_t`
-                // from the ABI is widened into the 64-bit `DeviceId`.
-                dir.mknod(
-                    &name,
-                    kind.into(),
-                    permission,
-                    DeviceId(device as u64),
-                    &cred,
-                )?;
-            }
-            MknodKind::Fifo | MknodKind::Socket => {
-                // FIFO / socket take no device number.
-                dir.mknod(&name, kind.into(), permission, DeviceId::default(), &cred)?;
-            }
-        }
-        Ok(0)
+    with_fs_at(dirfd, &filename, |fs| {
+        filename
+            .mknod_at(
+                fs.root(),
+                fs.pwd(),
+                mode,
+                DeviceId(device as u64),
+                fs.node_umask(),
+                &cred,
+            )
+            .map(|_| 0)
     })
 }
 

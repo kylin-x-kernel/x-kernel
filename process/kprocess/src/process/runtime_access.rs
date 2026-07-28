@@ -222,12 +222,16 @@ impl Process {
 
     /// Returns the current process umask while runtime remains attached.
     pub fn umask(&self) -> KResult<u32> {
-        self.runtime().map(|runtime| runtime.umask())
+        let fs_context = self.fs_context()?;
+        let umask = fs_context.lock().umask();
+        Ok(umask)
     }
 
     /// Replaces the current process umask and returns the previous value.
     pub fn replace_umask(&self, umask: u32) -> KResult<u32> {
-        self.runtime().map(|runtime| runtime.replace_umask(umask))
+        let fs_context = self.fs_context()?;
+        let old_umask = fs_context.lock().replace_umask(umask);
+        Ok(old_umask)
     }
 
     /// Returns the current process heap top while runtime remains attached.

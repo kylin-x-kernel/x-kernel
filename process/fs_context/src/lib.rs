@@ -15,7 +15,7 @@ use alloc::sync::Arc;
 
 use klazy::Lazy;
 use ksync::Mutex;
-use kvfs::{Path, VfsError, VfsResult};
+use kvfs::{NodePermission, Path, VfsError, VfsResult};
 
 const UMASK_BITS: u32 = 0o777;
 
@@ -32,7 +32,7 @@ pub fn copy_init_fs_struct() -> Arc<Mutex<FsStruct>> {
     Arc::new(Mutex::new(init_fs().lock().clone_for_process()))
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum FsLocation {
     Unmounted,
     Mounted { root: Path, pwd: Path },
@@ -79,16 +79,17 @@ impl FsStruct {
 
     /// Clones this context for a process that does not share `CLONE_FS`.
     pub fn clone_for_process(&self) -> Self {
+        let mut clone = self.snapshot();
+        clone.in_exec = false;
+        clone
+    }
+
+    /// Takes a complete snapshot of this filesystem context.
+    pub fn snapshot(&self) -> Self {
         Self {
             umask: self.umask,
-            in_exec: false,
-            location: match &self.location {
-                FsLocation::Unmounted => FsLocation::Unmounted,
-                FsLocation::Mounted { root, pwd } => FsLocation::Mounted {
-                    root: root.clone(),
-                    pwd: pwd.clone(),
-                },
-            },
+            in_exec: self.in_exec,
+            location: self.location.clone(),
         }
     }
 
@@ -128,9 +129,9 @@ impl FsStruct {
         self.umask
     }
 
-    /// Sets the file creation mask.
-    pub fn set_umask(&mut self, umask: u32) {
-        self.umask = umask & UMASK_BITS;
+    /// Returns the file creation mask in the VFS permission representation.
+    pub const fn node_umask(&self) -> NodePermission {
+        NodePermission::from_bits_truncate(self.umask as u16)
     }
 
     /// Replaces the file creation mask and returns the previous value.
@@ -183,7 +184,7 @@ impl FsStruct {
 
     /// Clones this context and replaces pwd in the clone.
     pub fn clone_with_pwd(&self, pwd: Path) -> VfsResult<Self> {
-        let mut fs = self.clone_for_process();
+        let mut fs = self.snapshot();
         fs.set_pwd(pwd)?;
         Ok(fs)
     }

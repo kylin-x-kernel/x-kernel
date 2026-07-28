@@ -49,6 +49,7 @@ fn kernel_random_seed() -> TeeResult<[u8; RNG_SEED_SIZE]> {
             fs.pwd(),
             0,
             NodePermission::empty(),
+            NodePermission::empty(),
             kcred::initial_cred(),
         )
         .map_err(|_| TEE_ERROR_GENERIC)?;

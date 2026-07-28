@@ -100,6 +100,7 @@ fn get_process_hash() -> KResult<Vec<u8>> {
             fs.pwd(),
             O_RDONLY,
             NodePermission::empty(),
+            NodePermission::empty(),
             kprocess::current_cred(),
         )
         .map_err(|_| KError::NotFound)?;

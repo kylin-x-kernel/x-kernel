@@ -149,6 +149,7 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> KResult<isize> {
         fs.pwd(),
         0,
         NodePermission::empty(),
+        NodePermission::empty(),
         kprocess::current_cred(),
     )?;
     drop(fs);

@@ -275,6 +275,7 @@ fn create_anonymous_file(
         &root,
         O_CREAT | O_EXCL,
         permission,
+        NodePermission::empty(),
         cred,
     )?;
     let location = file.path().clone();

@@ -5,7 +5,7 @@
 //! POSIX-facing state owned by a process runtime.
 
 use alloc::{string::String, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicI32, Ordering};
 
 use ksync::RwLock;
 
@@ -36,7 +36,6 @@ impl ExecMetadata {
 /// POSIX-facing state shared by all threads in a process.
 pub(super) struct ProcessPosixState {
     exec_metadata: RwLock<ExecMetadata>,
-    umask: AtomicU32,
     oom_score_adj: AtomicI32,
 }
 
@@ -45,7 +44,6 @@ impl ProcessPosixState {
     pub(super) fn new(exe_path: String, cmdline: Arc<Vec<String>>) -> Self {
         Self {
             exec_metadata: RwLock::new(ExecMetadata::new(exe_path, cmdline)),
-            umask: AtomicU32::new(0o022),
             oom_score_adj: AtomicI32::new(0),
         }
     }
@@ -58,23 +56,6 @@ impl ProcessPosixState {
     /// Updates executable metadata after a successful exec.
     pub(super) fn set_exec_metadata(&self, exe_path: String, cmdline: Arc<Vec<String>>) {
         *self.exec_metadata.write() = ExecMetadata::new(exe_path, cmdline);
-    }
-
-    /// Returns the process umask.
-    pub(super) fn umask(&self) -> u32 {
-        // `umask` is an independent process attribute and does not publish or
-        // order any other state.
-        self.umask.load(Ordering::Relaxed)
-    }
-
-    /// Sets the process umask.
-    pub(super) fn set_umask(&self, umask: u32) {
-        self.umask.store(umask, Ordering::Relaxed);
-    }
-
-    /// Sets the process umask and returns the old value.
-    pub(super) fn replace_umask(&self, umask: u32) -> u32 {
-        self.umask.swap(umask, Ordering::Relaxed)
     }
 
     /// Returns the process OOM score adjustment.
