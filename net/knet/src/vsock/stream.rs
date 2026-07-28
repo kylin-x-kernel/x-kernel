@@ -221,11 +221,12 @@ impl VsockTransportOps for VsockStreamTransport {
         }
 
         let conn_id = self.conn_id.lock().ok_or(KError::NotConnected)?;
+        let tx_wait_queue = conn_guard.tx_wait_queue();
         drop(conn_guard);
 
         // now virtio-driver only support non-blocking send
         let result = src.write_to(&mut kio::write_fn(|buf| {
-            crate::device::vsock_send(conn_id, buf)
+            crate::device::vsock_send(conn_id, buf, &tx_wait_queue)
         }));
         conn.lock().add_tx_bytes(result.unwrap_or(0));
         result

@@ -37,7 +37,7 @@ pub struct Connection {
     rx_consumer: HeapCons<u8>,
 
     /// wait queues for tx due to InsufficientBufferSpaceInPeer
-    tx_wait_queue: WaitQueue,
+    tx_wait_queue: Arc<WaitQueue>,
 
     /// Waker lists
     rx_wakers: PollSet,
@@ -63,7 +63,7 @@ impl Connection {
             peer_addr,
             rx_producer,
             rx_consumer,
-            tx_wait_queue: WaitQueue::default(),
+            tx_wait_queue: Arc::new(WaitQueue::default()),
             rx_wakers: PollSet::new(),
             connect_wakers: PollSet::new(),
             rx_closed: false,
@@ -127,14 +127,8 @@ impl Connection {
     }
 
     #[inline]
-    pub fn wait_for_tx(&self) {
-        self.tx_wait_queue
-            .wait_timeout(core::time::Duration::from_millis(10));
-    }
-
-    #[inline]
-    pub fn tx_wait_queue_notify(&mut self) {
-        self.tx_wait_queue.notify_all(true);
+    pub fn tx_wait_queue(&self) -> Arc<WaitQueue> {
+        self.tx_wait_queue.clone()
     }
 
     #[inline]
@@ -501,8 +495,9 @@ impl VsockConnectionManager {
     /// notify which tasks failed to be sent due to credit not being updated
     pub fn on_credit_update(&mut self, conn_id: VsockConnId) -> KResult<()> {
         if let Some(conn) = self.connections.get(&conn_id) {
-            let mut conn_guard = conn.lock();
-            conn_guard.tx_wait_queue_notify();
+            let tx_wait_queue = conn.lock().tx_wait_queue();
+            // The connection lock is dropped before waking, so no forced reschedule is needed.
+            tx_wait_queue.notify_all(false);
             trace!("Connection {:?} tx wait queue notified", conn_id);
         }
         Ok(())

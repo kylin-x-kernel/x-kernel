@@ -5,7 +5,7 @@
 //! Vsock device integration helpers.
 use alloc::collections::VecDeque;
 use core::{
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -24,7 +24,7 @@ static_lock! {
     static VSOCK_EVENT_QUEUE: Mutex<VecDeque<VsockDriverEventType>> = Mutex::new(VecDeque::new());
 }
 static_lock! {
-    static POLL_USERS: Mutex<usize> = Mutex::new(0);
+    static POLLER_STATE: Mutex<PollerState> = Mutex::new(PollerState::new());
 }
 
 const VSOCK_RX_SCRATCH_SIZE: usize = 0x1000; // 4KiB scratch buffer for vsock receive
@@ -51,12 +51,26 @@ pub fn unregister_vsock_dev(id: DeviceId) -> bool {
     }
     *guard = None;
     VSOCK_EVENT_QUEUE.lock().clear();
-    *POLL_USERS.lock() = 0;
+    let mut state = POLLER_STATE.lock();
+    state.ref_count = 0;
     true
 }
 
-static POLL_ACTIVE: AtomicBool = AtomicBool::new(false);
 static POLL_BACKOFF: PollBackoff = PollBackoff::new();
+
+struct PollerState {
+    ref_count: usize,
+    active: bool,
+}
+
+impl PollerState {
+    const fn new() -> Self {
+        Self {
+            ref_count: 0,
+            active: false,
+        }
+    }
+}
 
 struct PollBackoff {
     consecutive_idle: AtomicU64,
@@ -97,43 +111,50 @@ impl PollBackoff {
 
 /// Start the background vsock polling task if needed.
 pub fn start_vsock_polling() {
-    let mut count = POLL_USERS.lock();
-    *count += 1;
-    let new_count = *count;
-    debug!("start_vsock_polling: ref_count -> {}", new_count);
-    if new_count == 1 {
-        if !POLL_ACTIVE.swap(true, Ordering::SeqCst) {
-            drop(count);
+    let mut state = POLLER_STATE.lock();
+    state.ref_count += 1;
+    debug!("start_vsock_polling: ref_count -> {}", state.ref_count);
+    if state.ref_count == 1 {
+        if !state.active {
+            state.active = true;
+            drop(state);
             debug!("Starting vsock poll task");
             ktask::spawn_with_name(vsock_poll_task, "vsock-poll".to_string());
         } else {
-            warn!("Poll task already running!");
+            debug!("Poll task already running");
         }
     }
 }
 
 pub fn stop_vsock_polling() {
-    let mut count = POLL_USERS.lock();
-    if *count == 0 {
+    let mut state = POLLER_STATE.lock();
+    if state.ref_count == 0 {
         // this should not happen, log a warning
         warn!("stop_vsock_polling called but ref_count already 0");
         return;
     }
-    *count -= 1;
-    let new_count = *count;
-    debug!("stop_vsock_polling: ref_count -> {new_count}");
+    state.ref_count -= 1;
+    debug!("stop_vsock_polling: ref_count -> {}", state.ref_count);
 }
 
 fn vsock_poll_task() {
     loop {
-        let ref_count = *POLL_USERS.lock();
-        if ref_count == 0 {
-            POLL_ACTIVE.store(false, Ordering::SeqCst);
-            debug!("Vsock poll task exiting (no active connections)");
+        if should_stop_vsock_poll_task() {
             break;
         }
+
         let _ = block_on(interruptible(poll_vsock_adaptive()));
     }
+}
+
+fn should_stop_vsock_poll_task() -> bool {
+    let mut state = POLLER_STATE.lock();
+    if state.ref_count != 0 {
+        return false;
+    }
+    state.active = false;
+    debug!("Vsock poll task exiting (no active connections)");
+    true
 }
 
 async fn poll_vsock_adaptive() -> KResult<()> {
@@ -279,7 +300,11 @@ pub fn vsock_connect(conn_id: VsockConnId) -> KResult<()> {
     dev.connect(conn_id).map_err(map_dev_err)
 }
 
-pub fn vsock_send(conn_id: VsockConnId, buf: &[u8]) -> KResult<usize> {
+pub fn vsock_send(
+    conn_id: VsockConnId,
+    buf: &[u8],
+    tx_wait_queue: &ktask::WaitQueue,
+) -> KResult<usize> {
     let max_retries = 10; // Tests have shown that no more than two retries will be notified
     for _ in 0..max_retries {
         let result = {
@@ -289,11 +314,7 @@ pub fn vsock_send(conn_id: VsockConnId, buf: &[u8]) -> KResult<usize> {
         match result {
             Ok(len) => return Ok(len),
             Err(DriverError::WouldBlock) => {
-                let manager = VSOCK_CONN_MANAGER.lock();
-                if let Some(conn) = manager.get_connection(conn_id) {
-                    drop(manager);
-                    conn.lock().wait_for_tx();
-                };
+                tx_wait_queue.wait_timeout(Duration::from_millis(10));
             }
             Err(e) => return Err(map_dev_err(e)),
         }
