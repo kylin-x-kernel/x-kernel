@@ -5,20 +5,16 @@
 use boot_info::BootInfo;
 use kernel_boot::bootln;
 
-use super::{CMDLINE_BUF_SIZE, DTB_CAPTURE_SIZE, state};
+use super::{CMDLINE_BUF_SIZE, state};
 
 pub(super) fn init(boot_info: &BootInfo) {
     if let Some(ptr) = boot_info.dtb_ptr() {
         bootln!("firmware: DTB at {:#x}", boot_info.dtb_addr);
-        state::init_dtb_capture(boot_info.dtb_addr, boot_info.dtb_vaddr, DTB_CAPTURE_SIZE);
-        bootln!(
-            "firmware: DTB capture region={:#x}..{:#x}",
-            boot_info.dtb_addr,
-            boot_info.dtb_addr + DTB_CAPTURE_SIZE
-        );
         // SAFETY: `ptr` comes from validated boot info and points to the
         // immutable device-tree blob selected for early firmware parsing.
-        let _ = unsafe { of::init_device_tree_ptr(ptr) };
+        if let Err(err) = unsafe { of::init_device_tree_ptr(ptr) } {
+            bootln!("firmware: failed to initialize DTB: {err:?}");
+        }
         if let Some(stdout_path) = of::chosen_stdout_path() {
             bootln!("firmware: chosen stdout-path={}", stdout_path);
         } else {

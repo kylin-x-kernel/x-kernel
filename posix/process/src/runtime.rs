@@ -8,7 +8,6 @@ use alloc::{boxed::Box, sync::Arc};
 use core::ffi::c_long;
 
 use bytemuck::AnyBitPattern;
-use kbuild_config::KERNEL_STACK_SIZE;
 use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
 use kidentity::PidHandle;
@@ -40,7 +39,6 @@ pub fn new_user_task(
             run_user_thread_loop(uctx, set_child_tid, dispatch_syscall);
         },
         name.into(),
-        KERNEL_STACK_SIZE,
         task_number,
         thread,
     )

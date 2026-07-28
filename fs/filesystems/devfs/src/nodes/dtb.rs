@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc, vec};
+use alloc::{boxed::Box, sync::Arc};
 
 use kvfs::{
     DeviceFileOps, DeviceId, DirMapping, NodeFlags, NodeType, SimpleFs, VfsFile, VfsResult,
@@ -14,24 +14,18 @@ use crate::{DeviceFile, add_device_entry};
 static DTB_SNAPSHOT: LazyInit<Box<[u8]>> = LazyInit::new();
 
 pub(crate) fn capture_snapshot() {
-    let Some((paddr, vaddr, size)) = khal::firmware::dtb_capture_region() else {
+    let Some(dtb) = khal::firmware::dtb_bytes() else {
         return;
     };
     if DTB_SNAPSHOT.get().is_some() {
         return;
     }
 
-    let mut snapshot = vec![0u8; size];
-    let src = vaddr as *const u8;
-    // SAFETY: firmware reports `vaddr..vaddr+size` as the captured DTB region,
-    // and `snapshot` owns a distinct writable buffer of exactly `size` bytes.
-    unsafe {
-        core::ptr::copy_nonoverlapping(src, snapshot.as_mut_ptr(), size);
-    }
-    DTB_SNAPSHOT.init_once(snapshot.into_boxed_slice());
+    DTB_SNAPSHOT.init_once(dtb.to_vec().into_boxed_slice());
     info!(
-        "Captured DTB snapshot: paddr={:#x} vaddr={:#x} size={:#x}",
-        paddr, vaddr, size
+        "Captured DTB snapshot: vaddr={:#x} size={:#x}",
+        dtb.as_ptr() as usize,
+        dtb.len()
     );
 }
 

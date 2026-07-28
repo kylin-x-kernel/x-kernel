@@ -87,7 +87,6 @@ fn run_in_user_task(test: &TestDescriptor, init_thread: InitTestThreadHook) -> T
             *result_ref.lock() = Some(outcome);
         },
         format!("unittest-user-{pid}"),
-        64 * 1024,
         task_number,
         thread,
     );

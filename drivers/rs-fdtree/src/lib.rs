@@ -50,11 +50,17 @@ impl<'a> LinuxFdt<'a> {
 
         if !header.valid_magic() {
             return Err(FdtError::BadMagic);
-        } else if data.len() < header.totalsize.get() as usize {
+        }
+
+        let total_size = header.totalsize.get() as usize;
+        if data.len() < total_size {
             return Err(FdtError::BufferTooSmall);
         }
 
-        Ok(Self { data, header })
+        Ok(Self {
+            data: &data[..total_size],
+            header,
+        })
     }
 
     /// # Safety
@@ -86,6 +92,11 @@ impl<'a> LinuxFdt<'a> {
     /// Total size of the devicetree in bytes
     pub fn total_size(&self) -> usize {
         self.header.totalsize.get() as usize
+    }
+
+    /// Returns the complete flattened device-tree blob.
+    pub fn as_bytes(&self) -> &'a [u8] {
+        &self.data[..self.total_size()]
     }
 
     /// Returns interrupt controller node.

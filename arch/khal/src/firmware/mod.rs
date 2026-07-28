@@ -15,13 +15,11 @@ mod memory_source;
 mod state;
 
 const CMDLINE_BUF_SIZE: usize = 2048;
-#[cfg(target_os = "none")]
-const DTB_CAPTURE_SIZE: usize = 0x20_0000;
 const MAX_MEMORY_RAM_REGIONS: usize = 128;
 const MAX_MEMORY_RESERVED_REGIONS: usize = 128;
 const FIRMWARE_RESERVED_NAME: &str = "firmware reserved";
 
-pub use state::{cmdline, dtb_capture_region};
+pub use state::{cmdline, dtb_bytes};
 
 #[cfg(target_os = "none")]
 pub fn init(boot_info: &boot_info::BootInfo) {

@@ -19,6 +19,16 @@ fn setup_crosvm() -> LinuxFdt<'static> {
 fn parse_fdt() {
     let fdt = setup();
     assert_eq!(fdt.total_size(), DTB_DATA.len());
+    assert_eq!(fdt.as_bytes(), DTB_DATA);
+}
+
+#[test]
+fn fdt_bytes_exclude_trailing_buffer_data() {
+    let mut data = DTB_DATA.to_vec();
+    data.extend_from_slice(&[0xaa; 16]);
+
+    let fdt = LinuxFdt::new(&data).unwrap();
+    assert_eq!(fdt.as_bytes(), DTB_DATA);
 }
 
 #[test]

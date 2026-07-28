@@ -150,13 +150,7 @@ pub fn spawn_init_process(
         after_init_exit();
         ktask::exit(0);
     };
-    let mut task = ktask::TaskInner::new_user(
-        entry,
-        name,
-        kbuild_config::TASK_STACK_SIZE,
-        pid_handle,
-        thread,
-    );
+    let mut task = ktask::TaskInner::new_user(entry, name, pid_handle, thread);
     // Seed the saved context with init's page-table root; the scheduler writes
     // it to the hardware register on first switch-in, same as fork does.
     task.ctx_mut().set_page_table_root(page_table_root);

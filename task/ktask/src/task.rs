@@ -350,12 +350,13 @@ impl TaskInner {
     /// Callers must allocate the thread identity in the correct PID namespace
     /// before constructing the task, so process/thread-group/publication state
     /// can be built around the same handle before the task becomes runnable.
+    /// User tasks always receive the kernel-configured kernel stack size;
+    /// callers cannot weaken that execution invariant.
     /// The runtime is installed during construction;
     /// a user task can therefore never be observed without its runtime.
     pub fn new_user<F>(
         entry: F,
         name: String,
-        stack_size: usize,
         task_number: Arc<kidentity::PidHandle>,
         user_runtime: Box<dyn UserTaskRuntime>,
     ) -> Self
@@ -365,7 +366,7 @@ impl TaskInner {
         Self::new_with_identity(
             entry,
             name,
-            stack_size,
+            kbuild_config::KERNEL_STACK_SIZE,
             TaskIdentity::User {
                 task_number,
                 user_runtime: UserRuntimeSlot::ready(user_runtime),

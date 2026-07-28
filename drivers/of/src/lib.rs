@@ -244,8 +244,8 @@ pub fn dtb_total_size() -> Option<usize> {
 /// `ptr` must point to a valid DTB blob that remains accessible for the rest of
 /// the program lifetime.
 pub unsafe fn init_device_tree_ptr(ptr: *const u8) -> Result<(), FirmwareInitError> {
-    // SAFETY: The caller guarantees `ptr` points to a valid DTB blob that
-    // remains accessible for the rest of the program lifetime.
+    // SAFETY: The caller guarantees `ptr` points to a valid, readable DTB blob
+    // that remains accessible for the rest of the program lifetime.
     let fdt = unsafe { LinuxFdt::from_ptr(ptr) }.map_err(FirmwareInitError::BadDeviceTree)?;
     FDT.init_once(fdt);
     Ok(())

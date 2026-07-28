@@ -262,13 +262,7 @@ fn build_prepared_test_user_task() -> (Arc<Process>, TaskInner) {
         signal_actions,
         initial_cred(),
     );
-    let task = TaskInner::new_user(
-        || {},
-        String::from("test-user-thread"),
-        16 * 1024,
-        task_number,
-        thread,
-    );
+    let task = TaskInner::new_user(|| {}, String::from("test-user-thread"), task_number, thread);
 
     task.set_name(format!("test-user-thread-{pid}").as_str());
     (process, task)
@@ -295,13 +289,7 @@ fn publish_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskR
         signal_actions,
         credentials,
     );
-    let task = TaskInner::new_user(
-        || {},
-        format!("test-thread-{tid}"),
-        16 * 1024,
-        task_number,
-        thread,
-    );
+    let task = TaskInner::new_user(|| {}, format!("test-thread-{tid}"), task_number, thread);
 
     let task = prepare_task(task);
     process_publication().publish_task(&task);
@@ -349,7 +337,6 @@ fn process_with_address_space(
     let task = TaskInner::new_user(
         || {},
         format!("test-user-thread-{pid}"),
-        16 * 1024,
         task_number,
         thread,
     );
@@ -650,7 +637,6 @@ fn test_clone_parent_inherits_callers_exit_signal_contract() {
     let task = TaskInner::new_user(
         || {},
         String::from("clone-parent-test"),
-        16 * 1024,
         parent_task_number,
         thread,
     );
@@ -1382,13 +1368,7 @@ fn test_prepare_thread_clone_defers_tid_visibility_until_publication() {
     );
 
     let (cloned, task_number) = prepared.into_parts();
-    let task = TaskInner::new_user(
-        || {},
-        String::from("prepared-thread"),
-        16 * 1024,
-        task_number,
-        cloned,
-    );
+    let task = TaskInner::new_user(|| {}, String::from("prepared-thread"), task_number, cloned);
     let published = prepare_user_task(task).publish();
 
     let is_last = process.exit_thread(tid, 0);
@@ -1606,7 +1586,6 @@ fn test_prepare_user_task_rejects_mismatched_task_and_thread_identity() {
     let task = TaskInner::new_user(
         || {},
         String::from("mismatched-user-thread"),
-        16 * 1024,
         task_number.clone(),
         thread,
     );
