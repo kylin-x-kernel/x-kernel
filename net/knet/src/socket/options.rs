@@ -87,6 +87,7 @@ define_options! {
     // ---- IP options ----
     Ttl(u8),
     RecvErr(bool),
+    MtuDiscover(u8),
 
     // ---- Packet socket options (PACKET_*) ----
     PacketStatistics(PacketStatistics),

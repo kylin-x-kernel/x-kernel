@@ -7,12 +7,10 @@
 use alloc::vec;
 
 use event_listener::Event;
-use kerrno::{KError, KResult};
 use ksync::Mutex;
 use smoltcp::{
     iface::{SocketHandle, SocketSet},
-    socket::{AnySocket, Socket},
-    wire::IpAddress,
+    socket::AnySocket,
 };
 
 pub(crate) struct SocketSetWrapper<'a> {
@@ -41,26 +39,6 @@ impl<'a> SocketSetWrapper<'a> {
         let mut set = self.inner.lock();
         let socket = set.get_mut(dispatch_irq);
         f(socket)
-    }
-
-    pub fn udp_bind_check(&self, addr: IpAddress, port: u16) -> KResult {
-        if port == 0 {
-            return Ok(());
-        }
-
-        // TODO(mivik): optimize
-        let mut sockets = self.inner.lock();
-        for (_, socket) in sockets.iter_mut() {
-            match socket {
-                Socket::Udp(s) => {
-                    if s.endpoint().addr == Some(addr) && s.endpoint().port == port {
-                        return Err(KError::AddrInUse);
-                    }
-                }
-                _ => continue,
-            };
-        }
-        Ok(())
     }
 
     pub fn remove(&self, dispatch_irq: SocketHandle) {

@@ -93,9 +93,11 @@ impl TcpSocket {
         };
         let bound_endpoint = endpoint_from_ip_endpoint(local_endpoint);
         *result.bound_endpoint.lock() = bound_endpoint;
-        result
-            .general
-            .set_device_mask(SERVICE.lock().device_mask_for_addr(&remote_endpoint.addr));
+        result.general.set_device_mask(
+            SERVICE
+                .lock()
+                .smoltcp_device_mask_for_addr(&remote_endpoint.addr),
+        );
         result
     }
 }
@@ -281,7 +283,7 @@ impl SocketOps for TcpSocket {
                 self.register_bound_endpoint(endpoint)?;
                 *self.bound_endpoint.lock() = endpoint;
                 self.general
-                    .set_device_mask(SERVICE.lock().device_mask_for(&endpoint));
+                    .set_device_mask(SERVICE.lock().smoltcp_device_mask_for(&endpoint));
                 Ok(())
             })
     }
@@ -304,8 +306,11 @@ impl SocketOps for TcpSocket {
                 let remote_endpoint = IpEndpoint::from(remote_addr);
                 let mut bound_endpoint = *self.bound_endpoint.lock();
                 if bound_endpoint.addr.is_none() {
-                    bound_endpoint.addr =
-                        Some(SERVICE.lock().get_source_address(&remote_endpoint.addr)?);
+                    bound_endpoint.addr = Some(
+                        SERVICE
+                            .lock()
+                            .get_smoltcp_source_address(&remote_endpoint.addr)?,
+                    );
                 }
                 if bound_endpoint.port == 0 {
                     let local_addr = bound_endpoint
@@ -344,8 +349,11 @@ impl SocketOps for TcpSocket {
                 if should_register {
                     self.bound_registered.store(true, Ordering::Release);
                 }
-                self.general
-                    .set_device_mask(SERVICE.lock().device_mask_for_addr(&remote_endpoint.addr));
+                self.general.set_device_mask(
+                    SERVICE
+                        .lock()
+                        .smoltcp_device_mask_for_addr(&remote_endpoint.addr),
+                );
                 Ok(())
             })?;
 
@@ -391,7 +399,7 @@ impl SocketOps for TcpSocket {
                     self.bound_registered.store(true, Ordering::Release);
                 }
                 self.general
-                    .set_device_mask(SERVICE.lock().device_mask_for(&bound_endpoint));
+                    .set_device_mask(SERVICE.lock().smoltcp_device_mask_for(&bound_endpoint));
                 Ok(())
             })?;
         } else {

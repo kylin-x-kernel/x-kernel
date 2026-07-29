@@ -14,7 +14,10 @@ use smoltcp::{
     wire::{IpAddress as SmoltcpIpAddress, IpProtocol, Ipv6Packet, TcpPacket},
 };
 
-use super::ipv4::{self, Icmpv4Error, Ipv4Error, Ipv4Header};
+use super::{
+    fragment::{Ipv4Reassembler, Ipv4ReassemblyResult},
+    ipv4::{self, Icmpv4Error, Ipv4Error, Ipv4Header},
+};
 use crate::{
     LISTEN_TABLE,
     buf::{PacketBuf, PacketOwner},
@@ -22,7 +25,7 @@ use crate::{
     device::NetDevice,
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
     netlink::{RT_TABLE_MAIN, RTN_UNICAST, RtnetlinkState},
-    udp_err,
+    udp, udp_err,
 };
 
 #[derive(Debug)]
@@ -31,6 +34,7 @@ pub struct Rule {
     pub via: Option<IpAddress>,
     pub dev: usize,
     pub src: IpAddress,
+    pub mtu: usize,
 }
 
 impl Rule {
@@ -40,6 +44,7 @@ impl Rule {
             via,
             dev,
             src,
+            mtu: STANDARD_MTU,
         }
     }
 }
@@ -85,6 +90,8 @@ pub struct Router {
     rx_queue: VecDeque<PacketBuf>,
     tx_queue: VecDeque<PacketBuf>,
     local_ipv4_addrs: Vec<Ipv4Cidr>,
+    ipv4_reassembler: Ipv4Reassembler,
+    next_ipv4_identification: u16,
     pub(crate) devices: Vec<Box<dyn NetDevice>>,
     pub(crate) table: RouteTable,
 }
@@ -94,9 +101,40 @@ impl Router {
             rx_queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
             tx_queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
             local_ipv4_addrs: Vec::new(),
+            ipv4_reassembler: Ipv4Reassembler::new(),
+            next_ipv4_identification: 1,
             devices: Vec::new(),
             table: RouteTable::new(),
         }
+    }
+
+    pub fn route_mtu(&self, dst: &IpAddress) -> Option<usize> {
+        self.table.lookup(dst).map(|rule| rule.mtu)
+    }
+
+    pub fn can_enqueue_tx_packet(&self) -> bool {
+        self.tx_queue.len() < SOCKET_BUFFER_SIZE
+    }
+
+    pub fn can_enqueue_tx_packets(&self, packet_count: usize) -> bool {
+        self.tx_queue
+            .len()
+            .checked_add(packet_count)
+            .is_some_and(|len| len <= SOCKET_BUFFER_SIZE)
+    }
+
+    pub fn queue_ipv4_packet(&mut self, packet: Vec<u8>) -> KResult {
+        let packets = self.fragment_ipv4_packet_for_output(packet)?;
+        if !self.can_enqueue_tx_packets(packets.len()) {
+            return Err(KError::WouldBlock);
+        }
+
+        self.tx_queue.extend(
+            packets
+                .into_iter()
+                .map(|packet| PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack)),
+        );
+        Ok(())
     }
 
     pub fn add_rule(&mut self, rule: Rule) {
@@ -178,16 +216,30 @@ impl Router {
                 })
                 .map(super::from_smoltcp_ip_address)
                 .unwrap_or(filter.address());
-            self.table.add_rule(Rule::new(
+            let mut rule = Rule::new(
                 filter,
                 route.gateway.map(super::from_smoltcp_ip_address),
                 dev,
                 src,
-            ));
+            );
+            rule.mtu = state
+                .links
+                .iter()
+                .find(|link| link.index == route.oif as i32)
+                .map_or(STANDARD_MTU, |link| link.mtu as usize);
+            self.table.add_rule(rule);
         }
     }
 
     pub fn poll(&mut self, timestamp: TimeValue, sockets: &mut SocketSet<'_>) {
+        for expired in self.ipv4_reassembler.remove_expired(timestamp) {
+            self.queue_icmpv4_error(
+                Icmpv4Error::FragmentReassemblyTimeout,
+                expired.packet_type,
+                expired.header,
+                &expired.packet,
+            );
+        }
         for dev_index in 0..self.devices.len() {
             let ifindex = dev_index as i32 + 1;
             while self.rx_queue.len() < SOCKET_BUFFER_SIZE {
@@ -202,7 +254,7 @@ impl Router {
                     continue;
                 };
                 match ipv4::ip_version(ip_packet) {
-                    Some(4) => self.handle_ipv4_input(packet, sockets),
+                    Some(4) => self.handle_ipv4_input(timestamp, packet, sockets),
                     Some(6) => self.handle_ipv6_input(packet, sockets),
                     _ => debug!("Dropping packet with invalid IP version"),
                 }
@@ -271,7 +323,12 @@ impl Router {
         poll_next
     }
 
-    fn handle_ipv4_input(&mut self, mut packet: PacketBuf, sockets: &mut SocketSet<'_>) {
+    fn handle_ipv4_input(
+        &mut self,
+        timestamp: TimeValue,
+        mut packet: PacketBuf,
+        sockets: &mut SocketSet<'_>,
+    ) {
         let header = match Ipv4Header::validate_input_packet(&mut packet) {
             Ok(header) => header,
             Err(Ipv4Error::Malformed | Ipv4Error::BadChecksum) => return,
@@ -279,6 +336,40 @@ impl Router {
 
         if !self.is_local_ipv4_destination(header.dst_addr()) {
             return;
+        }
+
+        if header.is_fragmented() {
+            match self.ipv4_reassembler.reassemble(packet, header, timestamp) {
+                Ipv4ReassemblyResult::Complete(packet) => {
+                    self.handle_ipv4_input(timestamp, packet, sockets)
+                }
+                Ipv4ReassemblyResult::Pending | Ipv4ReassemblyResult::Dropped => {}
+            }
+            return;
+        }
+
+        if header.protocol() == ipv4::PROTOCOL_UDP {
+            let packet_type = packet.packet_type();
+            let (disposition, returned_packet) = udp::handle_ipv4_packet(header, packet);
+            match disposition {
+                udp::InputDisposition::Accepted | udp::InputDisposition::Malformed => return,
+                udp::InputDisposition::NoSocket if !header.is_broadcast_or_multicast() => {
+                    let Some(packet) = returned_packet else {
+                        return;
+                    };
+                    let Some(ip_packet) = packet.network_packet() else {
+                        return;
+                    };
+                    self.queue_icmpv4_error(
+                        Icmpv4Error::PortUnreachable,
+                        packet_type,
+                        header,
+                        ip_packet,
+                    );
+                    return;
+                }
+                udp::InputDisposition::NoSocket => return,
+            }
         }
 
         if self.should_emit_protocol_unreachable(header) {
@@ -353,6 +444,26 @@ impl Router {
         let next_hop = rule.via.unwrap_or(dst_addr);
         let dev = &mut self.devices[rule.dev];
         dev.send_ip_packet(rule.dev as i32 + 1, next_hop, packet, timestamp)
+    }
+
+    fn fragment_ipv4_packet_for_output(&mut self, packet: Vec<u8>) -> KResult<Vec<Vec<u8>>> {
+        let header = Ipv4Header::parse_output(&packet).map_err(|_| KError::InvalidInput)?;
+        let dst_addr = IpAddress::Ipv4(header.dst_addr());
+        let Some(mtu) = self.route_mtu(&dst_addr) else {
+            return Ok(vec![packet]);
+        };
+        if packet.len() <= mtu {
+            return Ok(vec![packet]);
+        }
+
+        let identification = self.next_ipv4_identification;
+        self.next_ipv4_identification = self.next_ipv4_identification.wrapping_add(1).max(1);
+        ipv4::fragment_output_packet(&packet, mtu, identification).map_err(|err| match err {
+            ipv4::Ipv4FragmentError::Malformed => KError::InvalidInput,
+            ipv4::Ipv4FragmentError::DontFragment | ipv4::Ipv4FragmentError::MtuTooSmall => {
+                LinuxError::EMSGSIZE.into()
+            }
+        })
     }
 
     fn queue_icmpv4_error(

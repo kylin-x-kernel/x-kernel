@@ -9,7 +9,7 @@
 ## 背景
 
 x-kernel 运行在 `no_std` 内核环境中，无法直接使用 Linux 内核网络栈或标准库网络类型。
-当前实现以 smoltcp 作为 TCP、UDP、raw IP 的协议引擎，并在 crate 内补齐内核需要的设备适配、监听表、poller、socket option、rtnetlink 控制面、Unix socket 和 vsock glue。
+当前实现由 crate 内 IPv4、UDP 和 ICMPv4 数据路径处理 UDP 收发、分片与差错报告，smoltcp 继续处理 TCP、raw IP、IPv6 和 DNS，并提供兼容期 interface poll 模型。
 
 ## 范围
 
@@ -42,6 +42,7 @@ net/knet/
     │   ├── options.rs
     │   └── state.rs
     ├── stack/
+    │   ├── fragment.rs
     │   ├── ipv4.rs
     │   ├── mod.rs
     │   ├── service.rs
@@ -51,7 +52,15 @@ net/knet/
     ├── transport/
     │   ├── mod.rs
     │   ├── tcp.rs
-    │   ├── udp.rs
+    │   ├── udp/
+    │   │   ├── input.rs
+    │   │   ├── mod.rs
+    │   │   ├── output.rs
+    │   │   ├── pcb.rs
+    │   │   ├── registry.rs
+    │   │   ├── state.rs
+    │   │   ├── socket.rs
+    │   │   └── wait.rs
     │   ├── raw.rs
     │   └── udp_err.rs
     ├── unix/
@@ -62,7 +71,8 @@ net/knet/
         └── stream.rs
 ```
 
-测试辅助代码位于 `socket/test_options.rs`、`socket/test_state.rs` 和 `netlink/tests.rs`。
+测试辅助代码位于 `socket/test_options.rs`、`socket/test_state.rs`、`netlink/tests.rs`，
+IPv4、分片重组和 UDP 的回归测试与对应实现放在同一模块内。
 
 ## 架构
 
@@ -83,15 +93,16 @@ core/kruntime
 │  ├─ RouteTable           │
 │  ├─ LoopbackDevice       │
 │  └─ EthernetDevice       │
-└──────────┬───────────────┘
-           │
-           v
-┌──────────────────────────┐
-│ SocketSetWrapper         │
-│  └─ smoltcp SocketSet    │
-└──────────┬───────────────┘
-           │
-           v
+└──────┬──────────────┬────┘
+       │ UDP / ICMPv4 │ TCP / raw / IPv6 / DNS
+       v              v
+┌──────────────────┐  ┌──────────────────────────┐
+│ UDP PCB registry │  │ SocketSetWrapper         │
+│ and socket queues│  │  └─ smoltcp SocketSet    │
+└────────┬─────────┘  └──────────┬───────────────┘
+         │                       │
+         └───────────┬───────────┘
+                     v
 ┌──────────────────────────┐
 │ SocketOps implementations│
 │ TCP / UDP / raw / Unix   │
@@ -103,11 +114,13 @@ core/kruntime
 |------|------|
 | `init_network` | 创建 loopback 与首个 Ethernet 设备，建立默认路由，初始化 `Service`、`SocketSetWrapper`、`ListenTable` 和 rtnetlink 初始状态 |
 | `Service` | 持有 smoltcp `Interface`、`Router`、poll timeout 和 RX waker 注册入口 |
-| `Router` | 管理设备列表、路由表、`PacketBuf` RX/TX 队列、IPv4 输入校验、next-hop 选择和设备 dispatch |
+| `Router` | 管理设备列表、带 MTU 的路由表、`PacketBuf` RX/TX 队列、IPv4 输入校验、分片重组、输出分片、next-hop 选择和设备 dispatch |
 | `NetDevice` | 抽象 loopback、Ethernet 和 feature gated vsock 设备后端，通过 `PacketBuf` 转移报文所有权，并使用 crate 内地址类型和 `TimeValue` 表达设备边界 |
 | `PacketBuf` | 保存报文数据、协议偏移、接口索引、包类型、校验状态和当前所有者 |
 | `link::wire` | 使用 `zerocopy` 校验和构造 Ethernet 与 Ethernet/IPv4 ARP 头部 |
-| `stack::ipv4` | 使用 `etherparse` 校验和构造 IPv4 与 ICMPv4 头部，并提供最终版分片相关 API |
+| `stack::ipv4` | 使用 `etherparse` 校验和构造 IPv4 与 ICMPv4 头部，并执行输出分片 |
+| `stack::fragment` | 按源地址、目的地址、标识、协议和接口重组本地 IPv4 分片，并限制队列数量、内存和存活时间 |
+| `transport::udp` | 维护 UDP PCB registry、接收队列、bind 与 connect 状态、校验和、socket option、异步错误和 IPv4 收发 |
 | `SocketSetWrapper` | 串行化 smoltcp socket set 访问，并在新增 socket 时通知等待者 |
 | `ListenTable` | 管理 TCP listen backlog、SYN 队列、accept 队列和 accept waker |
 | `GeneralOptions` | 统一管理 nonblock、reuseaddr、超时和设备 mask |
@@ -204,29 +217,32 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 3. 从 `DeviceContainer<NetDevice>` 取首个 NIC，包装成 `EthernetDevice`，注册默认 IPv4 路由。
 4. 创建 `Service`，把 loopback 和 Ethernet 地址写入 smoltcp `Interface`。
 5. 初始化 rtnetlink 初始状态，并同步到 `Service`、`Router` 和设备。
-6. 初始化全局 `SOCKET_SET`、`LISTEN_TABLE` 和 UDP 异步错误 registry。
+6. 初始化全局 `SOCKET_SET`、`LISTEN_TABLE` 和 UDP PCB registry。
 
 ### RX 推进
 
 1. `poll_interfaces` 获取 `SERVICE` 和 `SOCKET_SET` 锁。
 2. `Service::poll` 调用 `Router::poll`，设备以 `PacketBuf` 形式逐包转移 RX 所有权。
-3. `Router::poll` 根据网络层版本分流，IPv4 包先校验头部、长度、校验和和本地目的地址，再执行 UDP error snoop 和 TCP listen snoop。
-4. 校验后的 IPv4 或 IPv6 数据复制到 smoltcp RX adapter，`Interface::poll` 驱动现有协议 socket。
-5. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
-6. `Router::dispatch` 把 smoltcp 生成的 TX IP 包按路由发到设备。
-7. loopback 或设备 TX 触发后继续返回 `true`，外层循环继续推进。
+3. `Router::poll` 根据网络层版本分流，IPv4 包先校验头部、长度、校验和和本地目的地址。
+4. IPv4 分片进入 `Ipv4Reassembler`。完整数据报进入 crate 内 UDP 分流，未命中 socket 的单播 UDP 触发 ICMPv4 Port Unreachable。
+5. UDP PCB 按 FIFO 保留已入队的数据报；`connect` 更新后续入包的 peer 匹配，不重排或丢弃连接前已入队的数据报。
+6. TCP、raw IP、ICMP 和 IPv6 数据继续进入 smoltcp RX adapter，`Interface::poll` 驱动兼容期协议 socket。
+7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
+8. `Router::dispatch` 把 crate 内 UDP 和 smoltcp 生成的 TX IP 包按路由发到设备。
+9. loopback 或设备 TX 触发后继续返回 `true`，外层循环继续推进。
 
 ### TX 路由
 
-1. smoltcp 把待发 IP 包写入 `Router` 的 `PacketBuf` TX 队列。
-2. `Router::dispatch` 接管所有权，并按 IP 版本解析目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和。
-3. 广播或组播包复制到所有设备。
-4. 单播包通过 `RouteTable::lookup` 选择最长前缀路由。
-5. Ethernet 设备先查 ARP neighbor cache，命中后通过 `link::wire` 封装 Ethernet frame。
-6. 未命中时发送 ARP request，并把 IP 包放入 `pending_tx` 等待 neighbor 解析。
+1. crate 内 UDP 根据目的地址选择源地址和匹配路由的 MTU，在单个预分配 buffer 中写入 payload、UDP 头和 IPv4 头后提交到 `Router` 的 TX 队列。smoltcp 协议也通过同一队列提交 IP 包。
+2. `IP_MTU_DISCOVER` 决定 UDP IPv4 头部的 DF 标志。超出路由 MTU 且允许分片的包由 `fragment_output_packet` 拆分，DF 包返回 `EMSGSIZE`。
+3. `Router::dispatch` 接管所有权，并按 IP 版本解析目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和。
+4. 广播或组播包复制到所有设备。
+5. 单播包通过 `RouteTable::lookup` 选择最长前缀路由。
+6. Ethernet 设备先查 ARP neighbor cache，命中后通过 `link::wire` 封装 Ethernet frame。
+7. 未命中时发送 ARP request，并把 IP 包放入 `pending_tx` 等待 neighbor 解析。
 
-当前 PR 保留 smoltcp TCP、UDP、raw socket 和 IPv6 推进。`PacketBuf`、`link::wire`
-和 `stack::ipv4` 使用最终接口，后续协议迁移直接复用这些类型和 parser/emitter。
+当前实现保留 smoltcp TCP、raw socket 和 IPv6 推进。UDP、IPv4 分片重组、输出分片和 ICMPv4 UDP 差错报告使用 crate 内实现。
+`PacketBuf`、`link::wire` 和 `stack::ipv4` 提供设备与 crate 内 IPv4/UDP 数据路径共用的报文表示和 parser/emitter。
 路由表和设备接口使用 `crate::ip` 地址类型，设备时间使用 `khal::time::TimeValue`。
 `Router`、`Service` 和初始化入口在 smoltcp 兼容边界完成地址与时间转换。
 
@@ -266,6 +282,8 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 
 - 全局 `SERVICE` 是 `LazyInit<Mutex<Service>>`，串行化 smoltcp `Interface` 和 `Router` 访问。
 - 全局 `SOCKET_SET` 内部使用 `Mutex<SocketSet>`，所有 smoltcp socket handle 访问都通过 `with_socket_mut` 串行化。
+- `UDP_PCB_REGISTRY` 按端口分为 256 个 bucket，每个 bucket 独立加锁；每个 UDP PCB 的接收队列、endpoint、错误队列和 option 状态分别受锁或 atomic 保护。
+- `Ipv4Reassembler` 位于 `Router` 内，并由 `SERVICE` mutex 串行访问。
 - `LISTEN_TABLE` 用 `Mutex<HashMap<...>>` 管理 listener，再用 per-entry `Mutex` 保护 backlog 队列。
 - TCP 状态转换使用 `StateLock` 的 atomic CAS，失败时返回当前状态。
 - socket option 和 shutdown 标志使用 atomics，跨线程读写只表达配置或关闭状态。
@@ -278,11 +296,11 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 
 ## 设计决策
 
-### smoltcp 作为协议引擎
+### UDP 与 IPv4 数据路径迁出 smoltcp
 
-smoltcp 已提供 no_std TCP、UDP、raw socket 和 interface poll 模型。
-`knet` 在它之上补齐内核对象生命周期、Linux errno 映射、poller、listen backlog、rtnetlink 和设备 glue。
-代价是 socket set 必须通过全局锁和 handle 间接访问，并且协议推进依赖显式 `poll_interfaces` 调用。
+UDP PCB、bind 冲突检查、收发队列、IPv4 校验、分片重组、输出分片和 ICMPv4 差错均由 crate 内类型管理。
+TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推进仍依赖显式 `poll_interfaces` 调用。
+该边界让 UDP 不再依赖 smoltcp socket handle，同时保留现有 TCP 和 raw socket 行为。
 
 ### 控制面状态与 data-plane 同步
 
@@ -382,5 +400,5 @@ bridge v1 只转发 bytes，不转发 TIPC handles 或 memrefs。
 - TCP listener 关闭时，`ListenTable::unlisten` 标记 entry closed，drain child handles，并从 `SOCKET_SET` 删除。
 - Unix stream listener 在 `Drop` 中清空 bind slot，释放 pending connection request。
 - Unix stream channel 被 `Option<Channel>` 持有。shutdown 在对应方向锁内更新 endpoint 的读写关闭状态并唤醒受影响方向。`Channel::drop` 在释放 ring producer 和 consumer 前发布双向关闭状态并唤醒双方 connection-state waiter；peer 的 `recv` 先消费已发布数据，缓冲区耗尽后返回 EOF，`poll` 报告 `RDHUP`。关闭端丢弃自身接收队列中的未读数据时，对端记录一次 `ConnectionReset`，由 `recv` 或 `SO_ERROR` 消费。
-- UDP socket 通过 UDP error registry 注册异步错误状态，Drop 路径应保持 unregister 与 handle 生命周期一致。
+- UDP socket Drop 时从 PCB registry 注销，PCB 销毁时释放接收队列与异步错误队列。
 - Ethernet RX buffer 在 `poll_rx` 完成 frame 处理后调用 driver `recycle_rx` 归还。

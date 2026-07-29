@@ -17,12 +17,19 @@ use smoltcp::{
     iface::{Interface, SocketSet},
     time::Instant,
     wire::{
-        HardwareAddress, IpAddress as SmoltcpIpAddress, IpCidr,
+        HardwareAddress, IpAddress as SmoltcpIpAddress, IpCidr as SmoltcpIpCidr,
         IpListenEndpoint as SmoltcpIpListenEndpoint,
     },
 };
 
-use crate::{LISTEN_TABLE, SOCKET_SET, netlink::RtnetlinkState, router::Router};
+use crate::{
+    LISTEN_TABLE, SOCKET_SET,
+    ip::{IpAddress, IpListenEndpoint},
+    netlink::RtnetlinkState,
+    router::Router,
+};
+
+const IPV4_HEADER_LEN: usize = 20;
 
 fn now() -> Instant {
     Instant::from_micros_const((monotonic_time_nanos() / NANOS_PER_MICROS) as i64)
@@ -60,7 +67,10 @@ impl Service {
         self.router.dispatch(device_timestamp)
     }
 
-    pub fn get_source_address(&self, dst_addr: &SmoltcpIpAddress) -> KResult<SmoltcpIpAddress> {
+    pub fn get_smoltcp_source_address(
+        &self,
+        dst_addr: &SmoltcpIpAddress,
+    ) -> KResult<SmoltcpIpAddress> {
         let dst_addr = super::from_smoltcp_ip_address(*dst_addr);
         self.router
             .table
@@ -69,19 +79,80 @@ impl Service {
             .ok_or(KError::from(LinuxError::ENETUNREACH))
     }
 
-    pub fn device_mask_for(&self, endpoint: &SmoltcpIpListenEndpoint) -> u32 {
+    pub fn smoltcp_device_mask_for(&self, endpoint: &SmoltcpIpListenEndpoint) -> u32 {
+        match endpoint.addr {
+            Some(addr) => self.smoltcp_device_mask_for_addr(&addr),
+            None => u32::MAX,
+        }
+    }
+
+    pub fn smoltcp_device_mask_for_addr(&self, addr: &SmoltcpIpAddress) -> u32 {
+        let addr = super::from_smoltcp_ip_address(*addr);
+        self.router
+            .table
+            .lookup(&addr)
+            .map_or(u32::MAX, |it| 1u32 << it.dev)
+    }
+
+    pub fn get_source_address(&self, dst_addr: &IpAddress) -> KResult<IpAddress> {
+        self.router
+            .table
+            .lookup(dst_addr)
+            .map(|rule| rule.src)
+            .ok_or(KError::from(LinuxError::ENETUNREACH))
+    }
+
+    pub fn can_send_ip_packet(&self) -> bool {
+        self.router.can_enqueue_tx_packet()
+    }
+
+    pub fn prepare_ipv4_packet_send(
+        &self,
+        bound_src: Option<IpAddress>,
+        dst_addr: &IpAddress,
+        packet_len: usize,
+    ) -> KResult<IpAddress> {
+        if !self.router.can_enqueue_tx_packet() {
+            return Err(KError::WouldBlock);
+        }
+
+        let source_addr = match bound_src {
+            Some(addr) => addr,
+            None => self
+                .router
+                .table
+                .lookup(dst_addr)
+                .map(|rule| rule.src)
+                .ok_or(KError::from(LinuxError::ENETUNREACH))?,
+        };
+        let packet_count = output_ipv4_packet_count(&self.router, dst_addr, packet_len)?;
+        if !self.router.can_enqueue_tx_packets(packet_count) {
+            return Err(KError::WouldBlock);
+        }
+
+        Ok(source_addr)
+    }
+
+    pub fn send_ipv4_packet(&mut self, packet: alloc::vec::Vec<u8>) -> KResult {
+        self.router.queue_ipv4_packet(packet)
+    }
+
+    pub fn ipv4_route_mtu(&self, dst_addr: &IpAddress) -> Option<usize> {
+        self.router.route_mtu(dst_addr)
+    }
+
+    pub fn device_mask_for(&self, endpoint: &IpListenEndpoint) -> u32 {
         match endpoint.addr {
             Some(addr) => self.device_mask_for_addr(&addr),
             None => u32::MAX,
         }
     }
 
-    pub fn device_mask_for_addr(&self, addr: &SmoltcpIpAddress) -> u32 {
-        let addr = super::from_smoltcp_ip_address(*addr);
+    pub fn device_mask_for_addr(&self, addr: &IpAddress) -> u32 {
         self.router
             .table
-            .lookup(&addr)
-            .map_or(u32::MAX, |it| 1u32 << it.dev)
+            .lookup(addr)
+            .map_or(u32::MAX, |rule| 1u32 << rule.dev)
     }
 
     pub fn register_rx_waker(&mut self, mask: u32, waker: &Waker) {
@@ -134,7 +205,7 @@ impl Service {
             ip_addrs.clear();
             for addr in &state.addrs {
                 if let SmoltcpIpAddress::Ipv4(ipv4) = addr.address {
-                    let _ = ip_addrs.push(IpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
+                    let _ = ip_addrs.push(SmoltcpIpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
                         ipv4,
                         addr.prefix_len,
                     )));
@@ -150,4 +221,34 @@ impl Service {
     pub fn send_link_frame(&mut self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
         self.router.send_link_frame(ifindex, frame)
     }
+}
+
+fn output_ipv4_packet_count(
+    router: &Router,
+    dst_addr: &IpAddress,
+    packet_len: usize,
+) -> KResult<usize> {
+    if packet_len > u16::MAX as usize {
+        return Err(LinuxError::EMSGSIZE.into());
+    }
+
+    let Some(mtu) = router.route_mtu(dst_addr) else {
+        return Ok(1);
+    };
+    if packet_len <= mtu {
+        return Ok(1);
+    }
+
+    let payload_len = packet_len
+        .checked_sub(IPV4_HEADER_LEN)
+        .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?;
+    let max_fragment_payload_len = mtu
+        .checked_sub(IPV4_HEADER_LEN)
+        .map(|len| len / 8 * 8)
+        .filter(|len| *len > 0)
+        .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?;
+    Ok(payload_len
+        .checked_add(max_fragment_payload_len - 1)
+        .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?
+        / max_fragment_payload_len)
 }

@@ -313,6 +313,7 @@ impl SocketAddrExt for SocketAddrEx {
     /// Read any type of socket address from user space
     fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<Self> {
         match read_family(addr, addrlen)? as u32 {
+            AF_UNSPEC => Ok(Self::Unspecified),
             AF_INET | AF_INET6 => SocketAddr::read_from_user(addr, addrlen).map(Self::Ip),
             AF_UNIX => UnixAddr::read_from_user(addr, addrlen).map(Self::Unix),
             AF_NETLINK => NetlinkAddr::read_from_user(addr, addrlen).map(Self::Netlink),
@@ -326,6 +327,7 @@ impl SocketAddrExt for SocketAddrEx {
     /// Write any type of socket address to user space
     fn write_to_user(&self, addr: UserPtr<sockaddr>, addrlen: &mut socklen_t) -> KResult<()> {
         match self {
+            SocketAddrEx::Unspecified => Err(KError::InvalidInput),
             SocketAddrEx::Ip(ip_addr) => ip_addr.write_to_user(addr, addrlen),
             SocketAddrEx::Unix(unix_addr) => unix_addr.write_to_user(addr, addrlen),
             SocketAddrEx::Netlink(netlink_addr) => netlink_addr.write_to_user(addr, addrlen),

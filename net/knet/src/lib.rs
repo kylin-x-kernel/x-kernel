@@ -43,7 +43,7 @@ pub use socket::{
     options, *,
 };
 pub(crate) use socket::{general, state};
-pub(crate) use stack::{listen_table, router, service, wrapper};
+pub(crate) use stack::{ipv4, listen_table, router, service, wrapper};
 pub(crate) use transport::udp_err;
 pub use transport::{raw, tcp, udp};
 
@@ -141,7 +141,7 @@ pub fn init_network() {
 
     SOCKET_SET.init_once(SocketSetWrapper::new());
     LISTEN_TABLE.init_once(ListenTable::new());
-    udp_err::init_udp_error_registry();
+    udp::init_udp_registry();
 
     if let Some(irq) = eth0_irq {
         EthernetDevice::spawn_rx_task(irq);

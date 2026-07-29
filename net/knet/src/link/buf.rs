@@ -74,6 +74,17 @@ impl PacketBuf {
         }
     }
 
+    pub(crate) fn from_ip_packet_vec_with_type(
+        ifindex: i32,
+        data: Vec<u8>,
+        owner: PacketOwner,
+        packet_type: PacketType,
+    ) -> Self {
+        let mut packet = Self::from_ip_packet_vec(ifindex, data, owner);
+        packet.packet_type = packet_type;
+        packet
+    }
+
     pub(crate) fn from_ethernet_frame(
         ifindex: i32,
         frame: &[u8],

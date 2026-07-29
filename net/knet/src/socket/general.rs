@@ -86,6 +86,11 @@ impl GeneralOptions {
         SERVICE.lock().register_rx_waker(self.device_mask(), waker);
     }
 
+    /// Register a waker for network progress that may free transmit capacity.
+    pub fn register_tx_waker(&self, waker: &Waker) {
+        SERVICE.lock().register_rx_waker(u32::MAX, waker);
+    }
+
     /// Poll for send readiness and run the provided operation.
     pub fn send_poller<P: Pollable, F: FnMut() -> KResult<T>, T>(
         &self,

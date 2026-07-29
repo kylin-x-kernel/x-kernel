@@ -177,6 +177,7 @@ macro_rules! call_dispatch {
 
             (PROTO_IP, IP_TTL) => Ttl as Int<u8>,
             (PROTO_IP, IP_RECVERR) => RecvErr as IntBool,
+            (PROTO_IP, IP_MTU_DISCOVER) => MtuDiscover as Int<u8>,
 
             (SOL_PACKET, PACKET_STATISTICS) => PacketStatistics as PacketStats,
             (SOL_PACKET, PACKET_ADD_MEMBERSHIP) => PacketAddMembership as PacketMembershipConv,

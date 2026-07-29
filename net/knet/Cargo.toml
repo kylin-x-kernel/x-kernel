@@ -59,7 +59,6 @@ features = [
   "auto-icmp-echo-reply",
   "socket-raw",
   "socket-icmp",
-  "socket-udp",
   "socket-tcp",
   "socket-dns",
   # "fragmentation-buffer-size-65536", "proto-ipv4-fragmentation",

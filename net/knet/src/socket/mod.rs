@@ -41,6 +41,7 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub enum SocketAddrEx {
+    Unspecified,
     Ip(SocketAddr),
     Unix(UnixAddr),
     Netlink(NetlinkAddr),
@@ -52,6 +53,7 @@ pub enum SocketAddrEx {
 impl SocketAddrEx {
     pub fn into_ip(self) -> KResult<SocketAddr> {
         match self {
+            SocketAddrEx::Unspecified => Err(KError::from(LinuxError::EAFNOSUPPORT)),
             SocketAddrEx::Ip(addr) => Ok(addr),
             SocketAddrEx::Unix(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
             SocketAddrEx::Netlink(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
@@ -63,6 +65,7 @@ impl SocketAddrEx {
 
     pub fn into_unix(self) -> KResult<UnixAddr> {
         match self {
+            SocketAddrEx::Unspecified => Err(KError::from(LinuxError::EAFNOSUPPORT)),
             SocketAddrEx::Unix(addr) => Ok(addr),
             SocketAddrEx::Ip(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
             SocketAddrEx::Netlink(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
@@ -89,6 +92,7 @@ impl SocketAddrEx {
     #[cfg(feature = "vsock")]
     pub fn into_vsock(self) -> KResult<VsockAddr> {
         match self {
+            SocketAddrEx::Unspecified => Err(KError::from(LinuxError::EAFNOSUPPORT)),
             SocketAddrEx::Ip(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
             SocketAddrEx::Unix(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
             SocketAddrEx::Netlink(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),

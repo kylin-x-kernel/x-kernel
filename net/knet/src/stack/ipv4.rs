@@ -7,8 +7,9 @@
 use alloc::{vec, vec::Vec};
 
 use etherparse::{
-    Icmpv4Header, Icmpv4Type, IpFragOffset, IpNumber, Ipv4Header as EtherIpv4Header,
-    Ipv4HeaderSlice, icmpv4::DestUnreachableHeader,
+    Icmpv4Header, Icmpv4Type, IpEcn, IpFragOffset, IpNumber, Ipv4Header as EtherIpv4Header,
+    Ipv4HeaderSlice,
+    icmpv4::{DestUnreachableHeader, TimeExceededCode},
 };
 
 use crate::{
@@ -23,6 +24,8 @@ pub(crate) const PROTOCOL_UDP: u8 = 17;
 pub(crate) const IPV4_MIN_HEADER_LEN: usize = 20;
 const IPV4_DEFAULT_TTL: u8 = 64;
 const ICMPV4_ERROR_QUOTE_BYTES: usize = 8;
+// ICMPv4 types through Address Mask Reply have explicit request, reply, or
+// error policy below. Higher values are conservatively treated as errors.
 const ICMPV4_EXPLICIT_POLICY_MAX_TYPE: u8 = 18;
 const IPV4_FRAGMENT_OFFSET_UNIT: usize = 8;
 
@@ -63,6 +66,7 @@ pub(crate) enum Ipv4FragmentError {
 pub(crate) enum Icmpv4Error {
     ProtocolUnreachable,
     PortUnreachable,
+    FragmentReassemblyTimeout,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,15 +77,37 @@ pub(crate) struct Ipv4Header {
     ttl: u8,
     header_len: usize,
     total_len: usize,
+    identification: u16,
     fragment_offset: usize,
     more_fragments: bool,
     dont_fragment: bool,
+    dscp_ecn: u8,
     is_fragmented: bool,
 }
 
 impl Ipv4Header {
     pub(crate) fn parse_input(packet: &[u8]) -> Result<Self, Ipv4Error> {
         Self::parse(packet, true)
+    }
+
+    /// Parses the original IPv4 header quoted by an ICMP error.
+    ///
+    /// ICMP only guarantees that the quote contains the IPv4 header and the
+    /// first eight payload bytes, so the original `total_len` may exceed the
+    /// available quote while the header itself still has to be complete and
+    /// checksum-valid.
+    pub(crate) fn parse_icmp_quote(packet: &[u8]) -> Result<Self, Ipv4Error> {
+        let header_slice = Ipv4HeaderSlice::from_slice(packet).map_err(|_| Ipv4Error::Malformed)?;
+        let header_len = header_slice.slice().len();
+        let total_len = header_slice.total_len() as usize;
+        if total_len < header_len {
+            return Err(Ipv4Error::Malformed);
+        }
+        if header_slice.header_checksum() != header_slice.to_header().calc_header_checksum() {
+            return Err(Ipv4Error::BadChecksum);
+        }
+
+        Ok(Self::from_slice(&header_slice, total_len))
     }
 
     pub(crate) fn validate_input_packet(packet: &mut PacketBuf) -> Result<Self, Ipv4Error> {
@@ -133,8 +159,13 @@ impl Ipv4Header {
         self.header_len
     }
 
+    #[cfg(unittest)]
     pub(crate) fn total_len(self) -> usize {
         self.total_len
+    }
+
+    pub(crate) fn identification(self) -> u16 {
+        self.identification
     }
 
     pub(crate) fn fragment_offset(self) -> usize {
@@ -147,6 +178,10 @@ impl Ipv4Header {
 
     pub(crate) fn dont_fragment(self) -> bool {
         self.dont_fragment
+    }
+
+    pub(crate) fn ecn(self) -> u8 {
+        self.dscp_ecn & 0b11
     }
 
     pub(crate) fn is_fragmented(self) -> bool {
@@ -182,10 +217,12 @@ impl Ipv4Header {
             ttl: header_slice.ttl(),
             header_len: header_slice.slice().len(),
             total_len,
+            identification: header_slice.identification(),
             fragment_offset: usize::from(header_slice.fragments_offset().value())
                 * IPV4_FRAGMENT_OFFSET_UNIT,
             more_fragments: header_slice.more_fragments(),
             dont_fragment: header_slice.dont_fragment(),
+            dscp_ecn: header_slice.slice()[1],
             is_fragmented: header_slice.is_fragmenting_payload(),
         }
     }
@@ -247,6 +284,9 @@ pub(crate) fn build_icmpv4_error_packet(
         Icmpv4Error::PortUnreachable => {
             Icmpv4Type::DestinationUnreachable(DestUnreachableHeader::Port)
         }
+        Icmpv4Error::FragmentReassemblyTimeout => {
+            Icmpv4Type::TimeExceeded(TimeExceededCode::FragmentReassemblyTimeExceeded)
+        }
     };
     let icmp_header = Icmpv4Header::with_checksum(icmp_type, quoted_packet);
     let icmp = &mut packet[IPV4_MIN_HEADER_LEN..];
@@ -256,6 +296,7 @@ pub(crate) fn build_icmpv4_error_packet(
     Some(packet)
 }
 
+#[cfg(unittest)]
 pub(crate) fn build_ipv4_packet(
     src_addr: Ipv4Address,
     dst_addr: Ipv4Address,
@@ -265,19 +306,12 @@ pub(crate) fn build_ipv4_packet(
 ) -> Option<Vec<u8>> {
     let total_len = IPV4_MIN_HEADER_LEN.checked_add(payload.len())?;
     let mut packet = vec![0u8; total_len];
-    write_ipv4_header(
-        &mut packet[..IPV4_MIN_HEADER_LEN],
-        src_addr,
-        dst_addr,
-        protocol,
-        ttl,
-        payload.len(),
-        Ipv4HeaderFragment::NONE,
-    )?;
+    write_ipv4_packet_header(&mut packet, src_addr, dst_addr, protocol, ttl, false)?;
     packet[IPV4_MIN_HEADER_LEN..].copy_from_slice(payload);
     Some(packet)
 }
 
+#[cfg(unittest)]
 pub(crate) fn build_ipv4_packet_dont_fragment(
     src_addr: Ipv4Address,
     dst_addr: Ipv4Address,
@@ -287,15 +321,7 @@ pub(crate) fn build_ipv4_packet_dont_fragment(
 ) -> Option<Vec<u8>> {
     let total_len = IPV4_MIN_HEADER_LEN.checked_add(payload.len())?;
     let mut packet = vec![0u8; total_len];
-    write_ipv4_header(
-        &mut packet[..IPV4_MIN_HEADER_LEN],
-        src_addr,
-        dst_addr,
-        protocol,
-        ttl,
-        payload.len(),
-        Ipv4HeaderFragment::DONT_FRAGMENT,
-    )?;
+    write_ipv4_packet_header(&mut packet, src_addr, dst_addr, protocol, ttl, true)?;
     packet[IPV4_MIN_HEADER_LEN..].copy_from_slice(payload);
     Some(packet)
 }
@@ -383,13 +409,39 @@ fn can_send_icmpv4_error(
         return false;
     };
 
-    !suppress_icmpv4_error_response(icmp_type)
+    !is_icmpv4_error_type(icmp_type)
 }
 
-fn suppress_icmpv4_error_response(icmp_type: u8) -> bool {
-    // Suppress responses to ICMP error and discarded control types to prevent
-    // error generation from recurring on packets the stack does not handle.
+fn is_icmpv4_error_type(icmp_type: u8) -> bool {
+    // Unknown or discarded ICMP control types are treated as errors so that
+    // error generation cannot recurse on packets the stack will not handle.
     matches!(icmp_type, 1..=7 | 9..=12) || icmp_type > ICMPV4_EXPLICIT_POLICY_MAX_TYPE
+}
+
+/// Writes an IPv4 header into a complete preallocated packet.
+pub(crate) fn write_ipv4_packet_header(
+    packet: &mut [u8],
+    src_addr: Ipv4Address,
+    dst_addr: Ipv4Address,
+    protocol: u8,
+    ttl: u8,
+    dont_fragment: bool,
+) -> Option<()> {
+    let payload_len = packet.len().checked_sub(IPV4_MIN_HEADER_LEN)?;
+    let fragment = if dont_fragment {
+        Ipv4HeaderFragment::DONT_FRAGMENT
+    } else {
+        Ipv4HeaderFragment::NONE
+    };
+    write_ipv4_header(
+        packet.get_mut(..IPV4_MIN_HEADER_LEN)?,
+        src_addr,
+        dst_addr,
+        protocol,
+        ttl,
+        payload_len,
+        fragment,
+    )
 }
 
 fn write_ipv4_header(
@@ -462,22 +514,54 @@ fn build_ipv4_fragment(
     Ok(fragment)
 }
 
+pub(crate) fn rewrite_reassembled_header(
+    packet: &mut [u8],
+    payload_len: usize,
+    ecn: u8,
+) -> Result<(), Ipv4Error> {
+    let header_slice = Ipv4HeaderSlice::from_slice(packet).map_err(|_| Ipv4Error::Malformed)?;
+    let mut header = header_slice.to_header();
+    let total_len = header
+        .header_len()
+        .checked_add(payload_len)
+        .and_then(|len| u16::try_from(len).ok())
+        .ok_or(Ipv4Error::Malformed)?;
+    header.total_len = total_len;
+    header.ecn = IpEcn::try_new(ecn).map_err(|_| Ipv4Error::Malformed)?;
+    header.more_fragments = false;
+    header.fragment_offset = IpFragOffset::ZERO;
+    header.header_checksum = header.calc_header_checksum();
+    let header_len = header.header_len();
+    packet
+        .get_mut(..header_len)
+        .ok_or(Ipv4Error::Malformed)?
+        .copy_from_slice(&header.to_bytes());
+    Ok(())
+}
+
 #[cfg(unittest)]
 mod tests {
+    use alloc::vec;
+
     use unittest::def_test;
 
     use super::*;
     use crate::buf::PacketOwner;
 
     fn ipv4_packet(protocol: u8, payload: &[u8]) -> Vec<u8> {
-        build_ipv4_packet(
+        let mut packet = vec![0u8; IPV4_MIN_HEADER_LEN + payload.len()];
+        write_ipv4_header(
+            &mut packet[..IPV4_MIN_HEADER_LEN],
             Ipv4Address::new(192, 0, 2, 1),
             Ipv4Address::new(192, 0, 2, 2),
             protocol,
             64,
-            payload,
+            payload.len(),
+            Ipv4HeaderFragment::NONE,
         )
-        .unwrap()
+        .unwrap();
+        packet[IPV4_MIN_HEADER_LEN..].copy_from_slice(payload);
+        packet
     }
 
     fn dont_fragment_ipv4_packet(protocol: u8, payload: &[u8]) -> Vec<u8> {
@@ -555,21 +639,16 @@ mod tests {
         let fragments = fragment_output_packet(&packet, IPV4_MIN_HEADER_LEN + 18, 0x1234).unwrap();
 
         assert_eq!(fragments.len(), 3);
-        let mut fragmented_payload = Vec::new();
+        let mut reassembled = Vec::new();
         for (idx, fragment) in fragments.iter().enumerate() {
             let header = Ipv4Header::parse_input(fragment).unwrap();
-            assert_eq!(
-                Ipv4HeaderSlice::from_slice(fragment)
-                    .unwrap()
-                    .identification(),
-                0x1234
-            );
+            assert_eq!(header.identification(), 0x1234);
             assert_eq!(header.fragment_offset(), idx * 16);
             assert_eq!(header.more_fragments(), idx != 2);
             assert!(!header.dont_fragment());
-            fragmented_payload.extend_from_slice(payload(fragment, &header).unwrap());
+            reassembled.extend_from_slice(payload(fragment, &header).unwrap());
         }
-        assert_eq!(fragmented_payload, original_payload);
+        assert_eq!(reassembled, original_payload);
     }
 
     #[def_test]
@@ -606,22 +685,6 @@ mod tests {
         assert_eq!(
             error[IPV4_MIN_HEADER_LEN + 1],
             etherparse::icmpv4::CODE_DST_UNREACH_PROTOCOL
-        );
-    }
-
-    #[def_test]
-    fn test_build_icmpv4_port_unreachable() {
-        let offending = ipv4_packet(PROTOCOL_UDP, &[1, 2, 3, 4]);
-        let header = Ipv4Header::parse_input(&offending).unwrap();
-
-        assert!(
-            build_icmpv4_error_packet(
-                Icmpv4Error::PortUnreachable,
-                PacketType::Host,
-                header,
-                &offending,
-            )
-            .is_some()
         );
     }
 }

@@ -4,227 +4,91 @@
 
 //! UDP asynchronous error queue support.
 
-use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
-use core::{
-    net::{SocketAddr, SocketAddrV4},
-    sync::atomic::{AtomicBool, AtomicI32, Ordering},
-};
-
+use ::core::net::{SocketAddr, SocketAddrV4};
+use etherparse::{Icmpv4Slice, Icmpv4Type, UdpHeaderSlice};
 use kerrno::LinuxError;
-use kpoll::PollSet;
-use ksync::{Mutex, RwLock};
-use lazyinit::LazyInit;
-use smoltcp::{
-    iface::SocketHandle,
-    wire::{
-        Icmpv4DstUnreachable, Icmpv4Message, Icmpv4Packet, Icmpv4TimeExceeded, IpAddress,
-        IpEndpoint, IpProtocol, Ipv4Packet, UdpPacket,
-    },
+
+use super::udp::{self, UdpSocketQueuedError};
+use crate::{
+    SocketErrorInfo, SocketErrorOrigin,
+    ipv4::{self, Ipv4Header},
 };
 
-use crate::{SocketErrorInfo, SocketErrorOrigin};
+const ICMPV4_DST_UNREACHABLE: u8 = 3;
+const ICMPV4_TIME_EXCEEDED: u8 = 11;
+#[cfg(unittest)]
+const ICMPV4_ECHO_REQUEST: u8 = 8;
+const ICMPV4_CODE_NET_UNREACHABLE: u8 = 0;
+const ICMPV4_CODE_HOST_UNREACHABLE: u8 = 1;
+const ICMPV4_CODE_PROTO_UNREACHABLE: u8 = 2;
+const ICMPV4_CODE_PORT_UNREACHABLE: u8 = 3;
+const ICMPV4_CODE_FRAG_REQUIRED: u8 = 4;
+const ICMPV4_CODE_SR_FAILED: u8 = 5;
+const ICMPV4_CODE_DST_NET_UNKNOWN: u8 = 6;
+const ICMPV4_CODE_DST_HOST_UNKNOWN: u8 = 7;
+const ICMPV4_CODE_SRC_HOST_ISOLATED: u8 = 8;
+const ICMPV4_CODE_NET_PROHIBITED: u8 = 9;
+const ICMPV4_CODE_HOST_PROHIBITED: u8 = 10;
+const ICMPV4_CODE_NET_UNREACH_TO_S: u8 = 11;
+const ICMPV4_CODE_HOST_UNREACH_TO_S: u8 = 12;
+const ICMPV4_CODE_COMM_PROHIBITED: u8 = 13;
+const ICMPV4_CODE_HOST_PRECEDENCE: u8 = 14;
+const ICMPV4_CODE_PRECEDENCE_CUTOFF: u8 = 15;
+const ICMPV4_CODE_TTL_EXPIRED: u8 = 0;
+const ICMPV4_CODE_FRAG_EXPIRED: u8 = 1;
 
-static UDP_REGISTRY: LazyInit<RwLock<Vec<Arc<UdpErrorState>>>> = LazyInit::new();
-
-pub(crate) fn init_udp_error_registry() {
-    UDP_REGISTRY.call_once(|| RwLock::new(Vec::new()));
-}
-
-#[derive(Clone)]
-pub(crate) struct QueuedUdpError {
-    pub(crate) payload: Vec<u8>,
-    pub(crate) addr: SocketAddr,
-    pub(crate) ancillary: SocketErrorInfo,
-}
-
-#[derive(Clone, Copy)]
-struct UdpErrorAddr {
-    local: Option<IpEndpoint>,
-    peer: Option<(IpEndpoint, IpAddress)>,
-}
-
-pub(crate) struct UdpErrorState {
-    dispatch_irq: SocketHandle,
-    addr: RwLock<UdpErrorAddr>,
-    recv_err: AtomicBool,
-    socket_error: AtomicI32,
-    error_queue: Mutex<VecDeque<QueuedUdpError>>,
-    error_poll: PollSet,
-}
-
-impl UdpErrorState {
-    pub(crate) fn new(dispatch_irq: SocketHandle) -> Self {
-        Self {
-            dispatch_irq,
-            addr: RwLock::new(UdpErrorAddr {
-                local: None,
-                peer: None,
-            }),
-            recv_err: AtomicBool::new(false),
-            socket_error: AtomicI32::new(0),
-            error_queue: Mutex::new(VecDeque::new()),
-            error_poll: PollSet::new(),
-        }
-    }
-
-    pub(crate) fn set_local_addr(&self, local_addr: Option<IpEndpoint>) {
-        self.addr.write().local = local_addr;
-    }
-
-    pub(crate) fn set_peer_addr(&self, peer_addr: Option<(IpEndpoint, IpAddress)>) {
-        self.addr.write().peer = peer_addr;
-    }
-
-    pub(crate) fn recv_err_enabled(&self) -> bool {
-        self.recv_err.load(Ordering::Relaxed)
-    }
-
-    pub(crate) fn set_recv_err(&self, enabled: bool) {
-        self.recv_err.store(enabled, Ordering::Relaxed);
-    }
-
-    pub(crate) fn has_pending_error(&self) -> bool {
-        !self.error_queue.lock().is_empty()
-    }
-
-    pub(crate) fn peek_error(&self) -> Option<QueuedUdpError> {
-        self.error_queue.lock().front().cloned()
-    }
-
-    pub(crate) fn pop_error(&self) -> Option<QueuedUdpError> {
-        let mut queue = self.error_queue.lock();
-        let error = queue.pop_front();
-        self.refresh_socket_error(&queue);
-        error
-    }
-
-    pub(crate) fn consume_socket_error(&self) -> i32 {
-        self.socket_error.swap(0, Ordering::AcqRel)
-    }
-
-    pub(crate) fn register_error_waker(&self, waker: &core::task::Waker) {
-        self.error_poll.register(waker);
-    }
-
-    fn enqueue_error(&self, error: QueuedUdpError) {
-        if !self.recv_err_enabled() {
-            return;
-        }
-
-        let mut queue = self.error_queue.lock();
-        const MAX_UDP_ERROR_QUEUE: usize = 32;
-        if queue.len() >= MAX_UDP_ERROR_QUEUE {
-            queue.pop_front();
-        }
-        queue.push_back(error);
-        self.refresh_socket_error(&queue);
-        drop(queue);
-        self.error_poll.wake();
-    }
-
-    fn refresh_socket_error(&self, queue: &VecDeque<QueuedUdpError>) {
-        let errno = queue
-            .front()
-            .map(|error| error.ancillary.errno.into_raw())
-            .unwrap_or(0);
-        self.socket_error.store(errno, Ordering::Release);
-    }
-}
-
-pub(crate) fn register_udp_error_state(state: Arc<UdpErrorState>) {
-    UDP_REGISTRY.write().push(state);
-}
-
-pub(crate) fn unregister_udp_error_state(dispatch_irq: SocketHandle) {
-    UDP_REGISTRY
-        .write()
-        .retain(|state| state.dispatch_irq != dispatch_irq);
-}
-
-fn local_endpoint_matches(bound: IpEndpoint, local: SocketAddrV4) -> bool {
-    if bound.port != local.port() {
-        return false;
-    }
-    bound.addr.is_unspecified() || bound.addr == IpAddress::Ipv4(*local.ip())
-}
-
-fn peer_endpoint_matches(bound: IpEndpoint, remote: SocketAddrV4) -> bool {
-    (bound.addr.is_unspecified() || bound.addr == IpAddress::Ipv4(*remote.ip()))
-        && (bound.port == 0 || bound.port == remote.port())
-}
+pub(crate) type QueuedUdpError = UdpSocketQueuedError;
 
 fn queue_ipv4_error(local: SocketAddrV4, remote: SocketAddrV4, error: QueuedUdpError) {
-    let selected = {
-        let registry = UDP_REGISTRY.read();
-        let mut selected = None;
-
-        for state in registry.iter() {
-            let addr = *state.addr.read();
-            let Some(bound) = addr.local else {
-                continue;
-            };
-            if !local_endpoint_matches(bound, local) {
-                continue;
-            }
-
-            let peer_match = match addr.peer {
-                Some((peer, _)) if peer_endpoint_matches(peer, remote) => Some(true),
-                Some(_) => Some(false),
-                None => None,
-            };
-            match peer_match {
-                Some(true) => {
-                    selected = Some(state.clone());
-                    break;
-                }
-                Some(false) => continue,
-                None => {
-                    if selected.is_none() {
-                        selected = Some(state.clone());
-                    }
-                }
-            }
+    if let Some(state) = udp::lookup_udp_error_state(local.into(), remote.into()) {
+        if state.peer_endpoint().is_some() {
+            state.record_socket_error(error.ancillary.errno);
         }
-
-        selected
-    };
-
-    if let Some(state) = selected {
         state.enqueue_error(error);
     }
 }
 
-fn icmpv4_errno(packet: &Icmpv4Packet<&[u8]>) -> Option<(LinuxError, u32)> {
-    match packet.msg_type() {
-        Icmpv4Message::DstUnreachable => {
-            let reason = Icmpv4DstUnreachable::from(packet.msg_code());
-            let result = match reason {
-                Icmpv4DstUnreachable::PortUnreachable => (LinuxError::ECONNREFUSED, 0),
-                Icmpv4DstUnreachable::FragRequired => {
-                    let mtu_bytes: [u8; 2] = packet.as_ref().get(6..8)?.try_into().unwrap();
-                    let mtu = u16::from_be_bytes(mtu_bytes) as u32;
+fn icmpv4_errno(icmp: &Icmpv4Slice<'_>) -> Option<(LinuxError, u32)> {
+    let error_type = icmp.type_u8();
+    let error_code = icmp.code_u8();
+    match error_type {
+        ICMPV4_DST_UNREACHABLE => {
+            let result = match error_code {
+                ICMPV4_CODE_NET_UNREACHABLE => (LinuxError::ENETUNREACH, 0),
+                ICMPV4_CODE_HOST_UNREACHABLE => (LinuxError::EHOSTUNREACH, 0),
+                ICMPV4_CODE_PROTO_UNREACHABLE => (LinuxError::ENOPROTOOPT, 0),
+                ICMPV4_CODE_PORT_UNREACHABLE => (LinuxError::ECONNREFUSED, 0),
+                ICMPV4_CODE_FRAG_REQUIRED => {
+                    let mtu = match icmp.icmp_type() {
+                        Icmpv4Type::DestinationUnreachable(
+                            etherparse::icmpv4::DestUnreachableHeader::FragmentationNeeded {
+                                next_hop_mtu,
+                            },
+                        ) => next_hop_mtu as u32,
+                        _ => 0,
+                    };
                     (LinuxError::EMSGSIZE, mtu)
                 }
-                Icmpv4DstUnreachable::NetUnreachable
-                | Icmpv4DstUnreachable::DstNetUnknown
-                | Icmpv4DstUnreachable::NetProhibited
-                | Icmpv4DstUnreachable::NetUnreachToS => (LinuxError::ENETUNREACH, 0),
-                Icmpv4DstUnreachable::CommProhibited => (LinuxError::EACCES, 0),
-                Icmpv4DstUnreachable::ProtoUnreachable => (LinuxError::EPROTO, 0),
+                ICMPV4_CODE_SR_FAILED => (LinuxError::EOPNOTSUPP, 0),
+                ICMPV4_CODE_DST_NET_UNKNOWN => (LinuxError::ENETUNREACH, 0),
+                ICMPV4_CODE_DST_HOST_UNKNOWN => (LinuxError::EHOSTDOWN, 0),
+                ICMPV4_CODE_SRC_HOST_ISOLATED => (LinuxError::ENONET, 0),
+                ICMPV4_CODE_NET_PROHIBITED => (LinuxError::ENETUNREACH, 0),
+                ICMPV4_CODE_HOST_PROHIBITED => (LinuxError::EHOSTUNREACH, 0),
+                ICMPV4_CODE_NET_UNREACH_TO_S => (LinuxError::ENETUNREACH, 0),
+                ICMPV4_CODE_HOST_UNREACH_TO_S => (LinuxError::EHOSTUNREACH, 0),
+                ICMPV4_CODE_COMM_PROHIBITED
+                | ICMPV4_CODE_HOST_PRECEDENCE
+                | ICMPV4_CODE_PRECEDENCE_CUTOFF => (LinuxError::EHOSTUNREACH, 0),
                 _ => (LinuxError::EHOSTUNREACH, 0),
             };
             Some(result)
         }
-        Icmpv4Message::TimeExceeded => {
-            let reason = Icmpv4TimeExceeded::from(packet.msg_code());
-            let errno = match reason {
-                Icmpv4TimeExceeded::TtlExpired | Icmpv4TimeExceeded::FragExpired => {
-                    LinuxError::EHOSTUNREACH
-                }
-                Icmpv4TimeExceeded::Unknown(_) => LinuxError::EPROTO,
-            };
-            Some((errno, 0))
+        ICMPV4_TIME_EXCEEDED if error_code == ICMPV4_CODE_TTL_EXPIRED => {
+            Some((LinuxError::EHOSTUNREACH, 0))
         }
+        ICMPV4_TIME_EXCEEDED if error_code == ICMPV4_CODE_FRAG_EXPIRED => None,
+        ICMPV4_TIME_EXCEEDED => Some((LinuxError::EPROTO, 0)),
         _ => None,
     }
 }
@@ -240,40 +104,54 @@ fn icmpv4_errno(packet: &Icmpv4Packet<&[u8]>) -> Option<(LinuxError, u32)> {
 /// This mirrors Linux's ICMP-to-socket error delivery path in `net/ipv4/icmp.c`
 /// and `ip_icmp_error()` in `net/ipv4/ip_sockglue.c`.
 pub(crate) fn inspect_icmpv4_error(packet: &[u8]) {
-    let ip_packet = match Ipv4Packet::new_checked(packet) {
-        Ok(packet) if packet.next_header() == IpProtocol::Icmp => packet,
+    let ip_packet = match Ipv4Header::parse_input(packet) {
+        Ok(header) if header.protocol() == ipv4::PROTOCOL_ICMP => header,
         _ => return,
     };
-    let icmp_packet = match Icmpv4Packet::new_checked(ip_packet.payload()) {
-        Ok(packet) => packet,
+    let icmp_packet = match ipv4::payload(packet, &ip_packet) {
+        Some(payload) => payload,
+        _ => return,
+    };
+    let icmp = match Icmpv4Slice::from_slice(icmp_packet) {
+        Ok(icmp) => icmp,
         Err(_) => return,
     };
-    let Some((errno, info)) = icmpv4_errno(&icmp_packet) else {
+    if icmp.icmp_type().calc_checksum(icmp.payload()) != icmp.checksum() {
+        return;
+    }
+    let error_type = icmp.type_u8();
+    let error_code = icmp.code_u8();
+    let Some((errno, info)) = icmpv4_errno(&icmp) else {
         return;
     };
 
-    let original_ip = match Ipv4Packet::new_checked(icmp_packet.data()) {
-        Ok(packet) if packet.next_header() == IpProtocol::Udp => packet,
+    let original_packet = icmp.payload();
+    let original_ip = match Ipv4Header::parse_icmp_quote(original_packet) {
+        Ok(header) if header.protocol() == ipv4::PROTOCOL_UDP => header,
         _ => return,
     };
-    let original_udp = match UdpPacket::new_checked(original_ip.payload()) {
-        Ok(packet) => packet,
-        Err(_) => return,
+    let original_udp = match original_packet.get(original_ip.header_len()..) {
+        Some(payload) => payload,
+        _ => return,
+    };
+    let udp_header = match UdpHeaderSlice::from_slice(original_udp) {
+        Ok(header) => header,
+        _ => return,
     };
 
-    let local = SocketAddrV4::new(original_ip.src_addr(), original_udp.src_port());
-    let remote = SocketAddrV4::new(original_ip.dst_addr(), original_udp.dst_port());
+    let local = SocketAddrV4::new(original_ip.src_addr().into(), udp_header.source_port());
+    let remote = SocketAddrV4::new(original_ip.dst_addr().into(), udp_header.destination_port());
     // ICMP has no transport-layer port, so Linux reports the offender as the
     // ICMP source address with `sin_port` set to zero.
-    let offender = SocketAddr::V4(SocketAddrV4::new(ip_packet.src_addr(), 0));
+    let offender = SocketAddr::V4(SocketAddrV4::new(ip_packet.src_addr().into(), 0));
     let error = QueuedUdpError {
-        payload: original_udp.payload().to_vec(),
+        payload: original_udp[udp_header.slice().len()..].to_vec(),
         addr: SocketAddr::V4(remote),
         ancillary: SocketErrorInfo {
             errno,
             origin: SocketErrorOrigin::Icmp,
-            error_type: ip_packet.payload()[0],
-            error_code: ip_packet.payload()[1],
+            error_type,
+            error_code,
             info,
             data: 0,
             offender: Some(offender),
@@ -286,28 +164,36 @@ pub(crate) fn inspect_icmpv4_error(packet: &[u8]) {
 mod tests {
     extern crate alloc;
 
-    use alloc::{sync::Arc, vec};
-    use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+    use alloc::vec;
 
-    use smoltcp::wire::{Icmpv4DstUnreachable, Icmpv4Message, Icmpv4TimeExceeded};
+    use ::core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use unittest::def_test;
 
     use super::*;
-    use crate::SocketErrorOrigin;
+    use crate::{
+        SocketErrorOrigin,
+        buf::PacketType,
+        ip::{IpAddress, IpEndpoint},
+        ipv4::{Icmpv4Error, Ipv4Header},
+        udp::{UdpSocketState, register_udp_state_for_test},
+    };
 
     fn endpoint(addr: Ipv4Addr, port: u16) -> IpEndpoint {
         SocketAddrV4::new(addr, port).into()
     }
 
-    fn icmp_packet(ty: Icmpv4Message, code: u8, info: u16) -> [u8; 8] {
+    fn icmp_packet(ty: u8, code: u8, info: u16) -> [u8; 8] {
         let mut bytes = [0; 8];
-        {
-            let mut packet = Icmpv4Packet::new_unchecked(&mut bytes[..]);
-            packet.set_msg_type(ty);
-            packet.set_msg_code(code);
-        }
+        bytes[0] = ty;
+        bytes[1] = code;
         bytes[6..8].copy_from_slice(&info.to_be_bytes());
         bytes
+    }
+
+    fn assert_icmpv4_errno(ty: u8, code: u8, info: u16, expected: Option<(LinuxError, u32)>) {
+        let bytes = icmp_packet(ty, code, info);
+        let icmp = Icmpv4Slice::from_slice(&bytes).unwrap();
+        assert_eq!(icmpv4_errno(&icmp), expected);
     }
 
     fn queued_error(errno: LinuxError, payload_byte: u8) -> QueuedUdpError {
@@ -330,103 +216,64 @@ mod tests {
     }
 
     fn clear_registry() {
-        init_udp_error_registry();
-        UDP_REGISTRY.write().clear();
+        udp::clear_udp_registry_for_test();
     }
 
     #[def_test]
     fn test_icmpv4_errno_maps_error_types() {
-        let bytes = icmp_packet(
-            Icmpv4Message::DstUnreachable,
-            Icmpv4DstUnreachable::PortUnreachable.into(),
+        assert_icmpv4_errno(
+            ICMPV4_DST_UNREACHABLE,
+            ICMPV4_CODE_PORT_UNREACHABLE,
             0,
+            Some((LinuxError::ECONNREFUSED, 0)),
         );
-        let packet = Icmpv4Packet::new_checked(&bytes[..]).unwrap();
-        assert_eq!(icmpv4_errno(&packet), Some((LinuxError::ECONNREFUSED, 0)));
-
-        let bytes = icmp_packet(
-            Icmpv4Message::DstUnreachable,
-            Icmpv4DstUnreachable::FragRequired.into(),
+        assert_icmpv4_errno(
+            ICMPV4_DST_UNREACHABLE,
+            ICMPV4_CODE_FRAG_REQUIRED,
             1400,
+            Some((LinuxError::EMSGSIZE, 1400)),
         );
-        let packet = Icmpv4Packet::new_checked(&bytes[..]).unwrap();
-        assert_eq!(icmpv4_errno(&packet), Some((LinuxError::EMSGSIZE, 1400)));
-
-        let bytes = icmp_packet(
-            Icmpv4Message::TimeExceeded,
-            Icmpv4TimeExceeded::TtlExpired.into(),
+        assert_icmpv4_errno(
+            ICMPV4_DST_UNREACHABLE,
+            ICMPV4_CODE_PROTO_UNREACHABLE,
             0,
+            Some((LinuxError::ENOPROTOOPT, 0)),
         );
-        let packet = Icmpv4Packet::new_checked(&bytes[..]).unwrap();
-        assert_eq!(icmpv4_errno(&packet), Some((LinuxError::EHOSTUNREACH, 0)));
-
-        let bytes = icmp_packet(Icmpv4Message::EchoRequest, 0, 0);
-        let packet = Icmpv4Packet::new_checked(&bytes[..]).unwrap();
-        assert_eq!(icmpv4_errno(&packet), None);
+        assert_icmpv4_errno(
+            ICMPV4_DST_UNREACHABLE,
+            ICMPV4_CODE_SR_FAILED,
+            0,
+            Some((LinuxError::EOPNOTSUPP, 0)),
+        );
+        assert_icmpv4_errno(
+            ICMPV4_TIME_EXCEEDED,
+            ICMPV4_CODE_TTL_EXPIRED,
+            0,
+            Some((LinuxError::EHOSTUNREACH, 0)),
+        );
+        assert_icmpv4_errno(ICMPV4_TIME_EXCEEDED, ICMPV4_CODE_FRAG_EXPIRED, 0, None);
+        assert_icmpv4_errno(ICMPV4_ECHO_REQUEST, 0, 0, None);
     }
 
-    #[def_test]
-    fn test_udp_error_endpoint_matching() {
-        let local = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 8080);
-        assert!(local_endpoint_matches(
-            endpoint(Ipv4Addr::UNSPECIFIED, 8080),
-            local
-        ));
-        assert!(local_endpoint_matches(
-            endpoint(Ipv4Addr::new(10, 0, 0, 2), 8080),
-            local
-        ));
-        assert!(!local_endpoint_matches(
-            endpoint(Ipv4Addr::new(10, 0, 0, 3), 8080),
-            local
-        ));
-        assert!(!local_endpoint_matches(
-            endpoint(Ipv4Addr::UNSPECIFIED, 9090),
-            local
-        ));
-
-        let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 5353);
-        assert!(peer_endpoint_matches(
-            endpoint(Ipv4Addr::UNSPECIFIED, 0),
-            remote
-        ));
-        assert!(peer_endpoint_matches(
-            endpoint(Ipv4Addr::new(192, 0, 2, 1), 0),
-            remote
-        ));
-        assert!(peer_endpoint_matches(
-            endpoint(Ipv4Addr::new(192, 0, 2, 1), 5353),
-            remote
-        ));
-        assert!(!peer_endpoint_matches(
-            endpoint(Ipv4Addr::new(192, 0, 2, 2), 5353),
-            remote
-        ));
-        assert!(!peer_endpoint_matches(
-            endpoint(Ipv4Addr::new(192, 0, 2, 1), 5354),
-            remote
-        ));
-    }
-
-    #[def_test]
+    #[def_test(serial)]
     fn test_connected_udp_error_state_takes_precedence() {
         clear_registry();
 
         let local = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 8080);
         let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 5353);
-        let bound = Arc::new(UdpErrorState::new(Default::default()));
+        let bound = UdpSocketState::new();
         bound.set_recv_err(true);
-        bound.set_local_addr(Some(endpoint(*local.ip(), local.port())));
-        let connected = Arc::new(UdpErrorState::new(Default::default()));
+        bound.set_local_endpoint(Some(endpoint(*local.ip(), local.port())));
+        let connected = UdpSocketState::new();
         connected.set_recv_err(true);
-        connected.set_local_addr(Some(endpoint(*local.ip(), local.port())));
-        connected.set_peer_addr(Some((
+        connected.set_local_endpoint(Some(endpoint(*local.ip(), local.port())));
+        connected.set_peer_endpoint(Some((
             endpoint(*remote.ip(), remote.port()),
-            IpAddress::Ipv4(*local.ip()),
+            IpAddress::Ipv4((*local.ip()).into()),
         )));
 
-        register_udp_error_state(bound.clone());
-        register_udp_error_state(connected.clone());
+        register_udp_state_for_test(bound.clone());
+        register_udp_state_for_test(connected.clone());
         queue_ipv4_error(local, remote, queued_error(LinuxError::ECONNREFUSED, 1));
 
         assert!(!bound.has_pending_error());
@@ -435,9 +282,83 @@ mod tests {
         clear_registry();
     }
 
+    #[def_test(serial)]
+    fn test_connected_udp_error_sets_socket_error_without_recverr() {
+        clear_registry();
+
+        let local = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 8080);
+        let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 5353);
+        let connected = UdpSocketState::new();
+        connected.set_local_endpoint(Some(endpoint(*local.ip(), local.port())));
+        connected.set_peer_endpoint(Some((
+            endpoint(*remote.ip(), remote.port()),
+            IpAddress::Ipv4((*local.ip()).into()),
+        )));
+
+        register_udp_state_for_test(connected.clone());
+        queue_ipv4_error(local, remote, queued_error(LinuxError::ECONNREFUSED, 1));
+
+        assert_eq!(
+            connected.consume_socket_error(),
+            LinuxError::ECONNREFUSED.into_raw()
+        );
+        assert!(!connected.has_pending_error());
+
+        clear_registry();
+    }
+
+    #[def_test(serial)]
+    fn test_icmpv4_error_accepts_truncated_original_datagram() {
+        clear_registry();
+
+        let local = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 8080);
+        let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 5353);
+        let connected = UdpSocketState::new();
+        connected.set_recv_err(true);
+        connected.set_local_endpoint(Some(endpoint(*local.ip(), local.port())));
+        connected.set_peer_endpoint(Some((
+            endpoint(*remote.ip(), remote.port()),
+            IpAddress::Ipv4((*local.ip()).into()),
+        )));
+        register_udp_state_for_test(connected.clone());
+
+        let mut udp = vec![0u8; 24];
+        let udp_len = udp.len() as u16;
+        udp[0..2].copy_from_slice(&local.port().to_be_bytes());
+        udp[2..4].copy_from_slice(&remote.port().to_be_bytes());
+        udp[4..6].copy_from_slice(&udp_len.to_be_bytes());
+        let original = ipv4::build_ipv4_packet(
+            (*local.ip()).into(),
+            (*remote.ip()).into(),
+            ipv4::PROTOCOL_UDP,
+            64,
+            &udp,
+        )
+        .unwrap();
+        let original_header = Ipv4Header::parse_input(&original).unwrap();
+        let error = ipv4::build_icmpv4_error_packet(
+            Icmpv4Error::PortUnreachable,
+            PacketType::Host,
+            original_header,
+            &original,
+        )
+        .unwrap();
+
+        inspect_icmpv4_error(&error);
+
+        assert_eq!(
+            connected.consume_socket_error(),
+            LinuxError::ECONNREFUSED.into_raw()
+        );
+        let queued = connected.pop_error().unwrap();
+        assert!(queued.payload.is_empty());
+        assert_eq!(queued.addr, SocketAddr::V4(remote));
+        clear_registry();
+    }
+
     #[def_test]
     fn test_udp_error_queue_drops_oldest_entry_when_full() {
-        let state = UdpErrorState::new(Default::default());
+        let state = UdpSocketState::new();
         state.set_recv_err(true);
 
         for byte in 0..33 {
@@ -450,7 +371,7 @@ mod tests {
 
     #[def_test]
     fn test_udp_socket_error_is_read_and_clear() {
-        let state = UdpErrorState::new(Default::default());
+        let state = UdpSocketState::new();
         state.set_recv_err(true);
         state.enqueue_error(queued_error(LinuxError::ECONNREFUSED, 1));
 

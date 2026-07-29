@@ -89,13 +89,13 @@ impl Ipv6Address {
 
 impl From<Ipv6Addr> for Ipv6Address {
     fn from(addr: Ipv6Addr) -> Self {
-        Self(addr.octets())
+        Self::from_octets(addr.octets())
     }
 }
 
 impl From<Ipv6Address> for Ipv6Addr {
     fn from(addr: Ipv6Address) -> Self {
-        Self::from(addr.0)
+        Self::from(addr.octets())
     }
 }
 
