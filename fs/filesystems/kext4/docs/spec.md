@@ -3,13 +3,14 @@
 本文是 KExt4 唯一的执行计划。它只维护当前事实、目标架构、阶段依赖和验收门槛；稳定的
 架构与安全不变量分别维护在 `design.md` 和 `security.md`，公共 API 契约放在 rustdoc。
 
-最后审计日期：2026-07-24。
+最后审计日期：2026-07-28。
 
-当前基线：KExt4 N1。S0/S1 已恢复 KExt4 与重构后 KVFS 的连接，并建立 inode identity、
+当前基线：KExt4 N1.5 + N2.0 + N2.1。S0/S1 已恢复 KExt4 与重构后 KVFS 的连接，并建立 inode identity、
 truncate、open-unlink 和 final eviction 基线；N1 已建立 persistent journal transaction、
 commit/checkpoint 分离、per-inode sync/datasync transaction cursor 的正确所有权边界，以及与 Linux
-`ext4_sb_info -> journal_t` 对应的 mount/journal 生命周期边界。N2.0 dirty-folio index 由
-独立分支维护，不属于本 N1 基线。
+`ext4_sb_info -> journal_t` 对应的 mount/journal 生命周期边界；N1.5 已收口 metadata mutation
+失败语义；N2.0 已建立 dirty-folio index；N2.1 已在同步 block-device 约束内完成 journal
+write batching、superblock image 复用和重复 flush 消除。
 2026-07-13 形成但未提交的旧 S2 reservation/errseq/PageCache 原型已单独保存，不属于本
 路线图的实现基线；后续只按新架构选择性复用其中的状态机和接口经验。
 
@@ -113,7 +114,7 @@ confidence 和 method limits。rsext4 只作为只读对比基线，不再为其
 | mount-wide 串行化 | bridge 用一个 `Mutex<kext4::Ext4Filesystem>` 包住所有 core 调用 | journal、allocator、不同 inode 和只读路径无法并行 |
 | commit batching 仍为同步驱动 | 普通 mutation 可共享 mount-wide running transaction；真实 outstanding credits、日志空间和显式 sync 可触发 commit | 尚无基于时间的 age trigger 和后台 commit worker，低负载 transaction 仍依赖后续操作或显式 sync 推进 |
 | checkpoint 仍由调用者驱动 | mutation 返回后可保留 pending checkpoint，`syncfs`/unmount 或 journal-space pressure 同步推进 | 没有后台 writeback/checkpoint，home-block 脏状态和尾部回收仍会阻塞触发者 |
-| journal 请求与 flush 过碎 | commit/checkpoint 仍在调用栈中发出多次小块读写和设备 flush | `fsync=1` 会重复支付请求提交、等待和 flush 成本；需要先在 KExt4 内合并连续 journal I/O、减少重复 superblock/flush |
+| journal 提交仍受同步 block API 限制 | N2.1 已把连续 journal blocks 聚合为不超过 128 KiB 的请求，并复用 journal-superblock image、去除 commit 后的重复 flush | 请求数量已降低，但每个 batch 仍在调用栈中同步完成；没有多请求 in-flight、后台 commit/checkpoint 或驱动 completion |
 | durability 等待仍为同步基线 | runtime inode 尚无 sync/datasync tid，`fsync/fdatasync` 保守提交整个 running transaction 并 flush；`syncfs` 仍推进全文件系统 | 尚无目标 transaction 等待、异步 ordered-data dependency、后台 commit/checkpoint 和 errseq，等待者仍在当前调用栈执行设备 I/O |
 | PageCache writeback 基础有限 | 固定 batch copy、无后台 dirty control、无 transaction dependency | fio 的吞吐和内存压力都不可控 |
 | block/driver 接口只有同步完成路径 | KExt4 只能通过当前 `BlockDevice` 接口逐请求等待，VirtIO 完成通知和多请求 in-flight 不属于 filesystem 层 | KExt4 可以减少和聚合请求，但无法在 filesystem 内消除驱动 busy-poll/同步等待；需由 block/VirtIO owner 提供通用异步接口 |
@@ -276,8 +277,9 @@ N5 advanced I/O / common features -> N6 replacement
   internal-journal extent 同时校验至少覆盖 JBD2 `s_maxlen` 的 logical range 和 filesystem
   device physical bounds，并允许 backing inode 的预分配容量大于 `s_maxlen`；
 - 普通 mutation 在 handle 内完成成功/失败决定后即可返回；触发 commit 时只要求 journal
-  commit durable，home-block checkpoint 保留在 FIFO queue；`syncfs`/unmount 会先提交 running
-  transaction 再 drain 全队列，journal-space pressure 会推进最老 checkpoint 后重试 append；
+  commit durable，home-block checkpoint 保留在 FIFO queue；`syncfs` 和 KVFS unmount
+  writeback 会先提交 running transaction 再 drain 全队列，普通 mount 的 dentry eviction
+  后再同步一次；journal-space pressure 会推进最老 checkpoint 后重试 append；
 - clean v2 journal 在首个 mutation 前持久化开启 revoke feature，再允许 transaction/checkpoint
   重叠；无 feature bitmap 的 v1 journal 保留每个 operation 同步 commit/checkpoint 退化路径；
 - truncate 的 orphan + `i_disksize` 更新保留强制 commit 边界，确保后续释放旧映射前已有可
@@ -363,6 +365,8 @@ syscall 级局部回滚。
 
 ### N2：建立 buffered runtime 与并发框架
 
+状态：N2.0、N2.1 已完成；N2.2 及后续待实现。
+
 目标：把 PageCache、delalloc、ordered transaction、后台执行和局部锁连成主数据路径，达到
 normal-path buffered fio 可用，而不是先追求所有故障边界。
 
@@ -390,6 +394,18 @@ normal-path buffered fio 可用，而不是先追求所有故障边界。
   request/completion 接口后，KExt4 只负责形成和提交批次，不在 filesystem 内实现 VirtIO
   completion 或 busy-poll 替代逻辑。
 
+N2.1 已完成项：
+
+- commit encoder 把 descriptor、data、revoke 和 commit blocks 形成不超过 128 KiB 的
+  journal write batch，并在 journal ring wrap 和 internal-journal physical extent 边界拆分；
+- `JournalSuperblock` 保存挂载时已校验的完整 block image，sequence/start/feature 更新不再
+  重读 journal block 0；仅读取 feature/credit limit 的热路径也不复制完整 image；
+- 保留 clean-journal activation flush 和 transaction 最终 durability flush；inode sync 在
+  metadata commit 已提供最终 barrier 时不再紧接一次重复 flush，没有 metadata commit 时仍
+  显式 flush；
+- sentinel tests 记录 write-request block count、superblock read count、ring-wrap 拆分和
+  128 KiB 上界；批量测试后端仍按 logical block 保留失败注入语义。
+
 G2 退出条件：
 
 - fixed normal-path buffered fio：seq write/read verify、rand write/read、2/4-job randrw 和
@@ -410,7 +426,8 @@ G2 退出条件：
 - AddressSpace writeback error、SuperBlock filesystem error 和 per-file errseq sample/cursor；
 - journal/checkpoint abort 后的 forced-readonly 和新写入 gate；
 - KVFS clean unmount/freeze：阻止新引用或写入，drain PageCache、inode metadata、running
-  transaction、commit/checkpoint worker 和 orphan，再 detach/freeze；
+  transaction、commit/checkpoint worker 和 orphan，再 detach/freeze；当前同步 unmount
+  已保证 writeback 失败不拆 topology，仍需补引用 gate、freeze 和后台 worker 协调；
 - short copy、redirty-during-writeback、invalidate/reclaim/truncate、ENOSPC 和 retry；
 - block read/write/flush、journal persist、checkpoint、bitmap/counter、extent split 和 orphan
   故障注入；

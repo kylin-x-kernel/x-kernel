@@ -212,6 +212,10 @@ inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `seta
 per-mount flags。文件系统后端固定报告只读时，切换到读写会返回 `ReadOnlyFilesystem`。
 卸载 bind mount 只移除 topology 节点，不对共享的
 源 dentry 执行 `forget()`；普通 filesystem mount 仍在卸载时释放其独占 mount-root dentry。
+修改 mount topology 前，卸载路径先通过 `SuperBlock::sync_fs()` 写回 live inode、filesystem
+metadata 和 journal；普通 mount 清理 dentry cache 可能触发 zero-link inode 的 final eviction，
+因此会在 `forget()` 后再同步一次。任一同步失败时 mount topology 保持连接，用户可以修复
+设备错误后重试；bind mount 不清理共享 dentry，只需要第一次全 superblock 同步。
 
 ### pathname 与打开文件
 

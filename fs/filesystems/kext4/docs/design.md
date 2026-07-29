@@ -131,6 +131,14 @@ clean journal 的首次 commit 会先持久化并 flush 非零 `s_start`，再�
 因此在激活和 commit block 之间掉电时，恢复会把日志识别为 active 并忽略未完成 transaction，
 而不会错误地按空 journal 跳过扫描。
 
+同步 commit 会把 descriptor、data、revoke 和 commit block 聚合为不超过 128 KiB 的有界
+write batch；batch 在 journal ring wrap 和 internal-journal 不连续 physical extent 处拆分，
+不会为了减少请求而跨越非连续磁盘映射。挂载时已校验的完整 journal-superblock block image
+由 `JournalSuperblock` 缓存，后续 sequence/start/feature 更新基于该 image 生成并重新解码，
+不在 commit 热路径重复读取 journal block 0。clean-journal activation flush 和 transaction
+最终 durability flush 仍是两个独立边界；`sync_inode` 只在 commit 已经完成最终 flush 时省略
+紧随其后的重复设备 flush，没有 metadata transaction 的 mapped-data overwrite 仍会显式 flush。
+
 设置 ext4 recovery feature 时只更新磁盘 recovery evidence 和内存 feature 状态，不再用尚未
 checkpoint 的旧 home-block superblock 覆盖较新的内存 allocator counters。真实 Linux ext4
 镜像测试覆盖了两个 committed transaction 同时可扫描、逐个推进 tail、最终 clean 和 e2fsck。
@@ -142,9 +150,11 @@ checkpoint 的旧 home-block superblock 覆盖较新的内存 allocator counters
 transaction。新 handle 加入前按 journal 格式开销采用约三分之一日志容量作为普通 transaction
 上界；handle stop 会归还未使用 credits，因此 outstanding credits 表达仍在事务中占用的真实
 容量。不再以固定 operation 数或“半个 journal”触发普通提交。home-block checkpoint
-仍留在 FIFO queue；`syncfs`/unmount 会先提交当前 running transaction，再 drain 全部 pending
-checkpoint；journal 空间不足时提交者同步推进最老 checkpoint 后重试 append。当前仍由调用者
-同步驱动，没有 background worker 和基于时间的 age trigger。
+仍留在 FIFO queue；`syncfs` 和 KVFS unmount writeback 会先提交当前 running transaction，
+再 drain 全部 pending checkpoint；普通 mount 在 dentry eviction 后再次执行同一同步路径，
+以覆盖 final inode eviction 产生的新 metadata。journal 空间不足时提交者同步推进最老
+checkpoint 后重试 append。当前仍由调用者同步驱动，没有 background worker 和基于时间的
+age trigger。
 
 精准 `fsync`/`fdatasync` transaction id 的所有权不在 journal 的 inode-number 全局表，而应在
 VFS runtime inode identity 上，对应 Linux inode 内的 sync/datasync tid。现有 KVFS inode 尚未
@@ -152,19 +162,22 @@ VFS runtime inode identity 上，对应 Linux inode 内的 sync/datasync tid。�
 先回写目标 inode 的 PageCache，core 再提交当时的整个 running transaction 并 flush 设备。
 这保证 durability，但可能连带提交无关 inode 的 metadata。待共享 VFS runtime inode 接口具备
 后，再实现目标 transaction 等待；不能重新引入按 inode number 索引的 mount-wide cursor map。
-`syncfs` 和 unmount 仍提交 running transaction 并 drain 全部 checkpoint。当前 ordered-data
-dependency 是同步基线：数据块写入发生在使其可达的 metadata transaction 完成之前；异步
-dependency 对象和后台 writeback 属于后续阶段。
+`syncfs` 和 KVFS unmount writeback 仍提交 running transaction 并 drain 全部 checkpoint。
+当前 ordered-data dependency 是同步基线：数据块写入发生在使其可达的 metadata transaction
+完成之前；异步 dependency 对象和后台 writeback 属于后续阶段。
 
 operation savepoint、operation token 和 operation-local metadata byte copy 已删除。ext4
 mutation 在首次 metadata access 前完成格式、目标状态、空间、credits 和 extent path
 可表达性检查；allocator 在私有 bitmap/descriptor/superblock bytes 与 free-extent cache 副本上
 完成计算后再发布。JBD2 handle 只维护 credits 和 metadata/revoke membership，显式 stop
 归还未使用 credits 并返回 accounting 错误；journal 自身维护 abort 状态。多个 handle 可独立
-stop。transaction membership 一旦发布，就不能由某个 handle
+stop。每次成功 metadata/revoke access 都标记当前 handle 已发布更新，即使对应 block 已由
+同一 running transaction 的前序 handle 加入；transaction membership 一旦发布，就不能由某个 handle
 按路径局部删除，因为其他 handle 可能已共享同一 metadata block；后续 metadata access 失败会
 abort journal。设备/checksum/状态机错误，以及任何发生在 metadata 已发布后的普通错误，同样
-会永久 abort；内存中已经发布的 bytes、buffer ownership 和其他已成功 operation 的修改不会
+会永久 abort；commit 或 checkpoint I/O 失败也在返回错误前记录 abort，后续 sync 和 mutation
+不能把残留的 `committing`/checkpoint state 当作成功。内存中已经发布的 bytes、buffer
+ownership 和其他已成功 operation 的修改不会
 跨 syscall 回滚。尚未发布的私有副本或刚取得但未发布的 ext4 资源仍由具体算法显式清理。
 这与 Linux JBD2 一致：handle 负责 credits 和 buffer membership，失败通过 journal abort
 传播，而不是建立第二套 syscall 事务系统；崩溃后一致性由磁盘 recovery evidence 和 replay
@@ -212,7 +225,11 @@ namespace transaction
 
 Namespace transaction 不释放 inode number、xattr 或 data block。`referenced_inode()` 只供
 已经持有 VFS inode identity 的路径读取 zero-link inode，使 open fd 在 unlink 后仍可读写；
-新的 namespace lookup 仍使用严格的 `inode()`，不会把 orphan 重新实例化为可达文件。
+新的 namespace lookup 仍使用严格的 `inode()`，不会把 orphan 重新实例化为可达文件。对应的
+namespace credits 只覆盖 dirent、nlink 和 orphan metadata；不能把后续 final eviction 的
+extent、external xattr 和 inode bitmap 工作提前计入 rename/unlink/rmdir reservation。旧的
+单事务 recovery/测试 eviction 路径按当前 extent tree 的实际 metadata targets 估算，运行态
+bridge 则继续使用有界的三阶段 eviction。
 
 ## 算法流程
 

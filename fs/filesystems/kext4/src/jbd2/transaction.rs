@@ -454,6 +454,9 @@ impl JournalTransactions {
         incoming_credits: JournalCredits,
         max_reserved_credits: u32,
     ) -> Ext4Result<Option<TransactionId>> {
+        if incoming_credits.get() > max_reserved_credits {
+            return Err(Ext4Error::InsufficientJournalCredits);
+        }
         let inner = lock(&self.inner);
         check_not_aborted(&inner)?;
         let Some(running) = inner.running.as_ref() else {
@@ -929,9 +932,9 @@ impl<'a> JournalHandle<'a> {
     }
 
     pub(crate) fn consume_metadata_credit(&mut self, block: FilesystemBlock) -> Ext4Result<()> {
-        let inserted = self.journal.with_running(self.id, |running| {
+        self.journal.with_running(self.id, |running| {
             if running.metadata_blocks.contains(&block) {
-                return Ok(false);
+                return Ok(());
             }
             let reused_revoke_credit = running.remove_revoke_block(block);
             if !reused_revoke_credit {
@@ -942,9 +945,12 @@ impl<'a> JournalHandle<'a> {
                 self.remaining_credits -= JournalCredits::one().get();
             }
             running.metadata_blocks.insert(block);
-            Ok(true)
+            Ok(())
         })?;
-        self.has_updates |= inserted;
+        // Access to an already-owned block can still publish new bytes for this
+        // handle. Track access rather than transaction-wide set insertion so a
+        // later ordinary error cannot leave those bytes commit-eligible.
+        self.has_updates = true;
         Ok(())
     }
 
@@ -962,9 +968,9 @@ impl<'a> JournalHandle<'a> {
     }
 
     pub(crate) fn revoke_metadata_block(&mut self, block: FilesystemBlock) -> Ext4Result<()> {
-        let inserted = self.journal.with_running(self.id, |running| {
+        self.journal.with_running(self.id, |running| {
             if running.revoked_blocks.contains(&block) {
-                return Ok(false);
+                return Ok(());
             }
             let reused_metadata_credit = running.metadata_blocks.remove(&block);
             if !reused_metadata_credit {
@@ -975,9 +981,9 @@ impl<'a> JournalHandle<'a> {
                 self.remaining_credits -= JournalCredits::one().get();
             }
             running.revoked_blocks.insert(block);
-            Ok(true)
+            Ok(())
         })?;
-        self.has_updates |= inserted;
+        self.has_updates = true;
         Ok(())
     }
 
@@ -1087,7 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn handles_cannot_withdraw_shared_metadata_membership() {
+    fn shared_metadata_access_marks_each_handle_without_duplicate_membership() {
         let journal = JournalTransactions::new(TransactionId::new(11));
         let mut first = journal.begin(JournalCredits::new(1)).unwrap();
         let transaction = first.id();
@@ -1097,7 +1103,7 @@ mod tests {
         let mut second = journal.begin(JournalCredits::new(1)).unwrap();
         second.consume_metadata_credit(block).unwrap();
         assert!(first.has_updates());
-        assert!(!second.has_updates());
+        assert!(second.has_updates());
         drop(first);
         drop(second);
 
@@ -1440,8 +1446,25 @@ mod tests {
     }
 
     #[test]
-    fn admission_allows_active_handles_below_limit_and_waits_at_limit() {
+    fn admission_rejects_one_handle_that_exceeds_limit() {
         let journal = JournalTransactions::new(TransactionId::new(33));
+
+        assert_eq!(
+            journal
+                .transaction_to_commit_before_reservation(JournalCredits::new(4), 4)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            journal.transaction_to_commit_before_reservation(JournalCredits::new(5), 4),
+            Err(Ext4Error::InsufficientJournalCredits)
+        );
+        assert_eq!(journal.running_transaction().unwrap(), None);
+    }
+
+    #[test]
+    fn admission_allows_active_handles_below_limit_and_waits_at_limit() {
+        let journal = JournalTransactions::new(TransactionId::new(34));
         let mut handle = journal.begin(JournalCredits::new(2)).unwrap();
         let transaction = handle.id();
         handle
@@ -1473,7 +1496,7 @@ mod tests {
 
     #[test]
     fn completion_requests_commit_only_after_the_last_handle_closes() {
-        let journal = JournalTransactions::new(TransactionId::new(34));
+        let journal = JournalTransactions::new(TransactionId::new(35));
         let mut first = journal.begin(JournalCredits::new(2)).unwrap();
         let transaction = first.id();
         first

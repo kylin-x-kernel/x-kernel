@@ -140,6 +140,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-22 | 目录 alias 形成两套 child cache 或绕过 topology 序列化 | 高 | 同一目录 inode 建立多个 live dentry | inode alias 表强制目录单 alias；lookup 复用已有 alias，rename topology 按 parent dentry identity 判定 |
 | T-23 | filesystem callback 替换 VFS 已检查的创建对象 | 高 | callback 返回另一个 parent/name 下的 dentry | create-like callback 只能实例化事务 negative dentry；lookup alternate result 校验 positive state、parent 和 name |
 | T-24 | 并发 slow lookup 建立重复 dentry | 高 | cache miss 检查与 candidate 发布分离，或等待者提前观察未完成对象 | candidate 在 callback 前原子加入 dcache；owner 保持 parallel-lookup 状态和 lookup mutex，等待者只在 lookup done 后读取结果 |
+| T-29 | 卸载先拆 topology 后发现后端写回失败 | 高 | running journal、dirty inode 或 final eviction metadata 尚未持久化 | topology 修改前执行全 superblock sync；普通 mount 在 dentry forget 后再次 sync；任一步失败都保留原 mount tree |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -153,6 +154,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | F-06 | 权限检查失败 | mode、owner 或组不允许请求 | 当前 VFS 操作返回 `PermissionDenied` | namespace 和 inode 状态保持不变 | 3 | 在后端 mutation 前完成通用检查并传播错误 |
 | F-07 | 后端不能保存 Unix owner | 磁盘格式没有 UID/GID | getattr 无法完整反映创建身份 | DAC 语义受文件系统能力限制 | 3 | 文档明确后端限制；支持 owner 的后端必须持久化 helper 结果 |
 | F-08 | split truncate 在 backing prepare 后 cache invalidation 失败 | 分配或 mapping invalidation 错误 | 当前 truncate 返回失败 | backing inode 可能保持 orphan/recovery state | 2 | 由具体文件系统的持久化 recovery protocol 收敛，禁止静默执行 finish |
+| F-09 | unmount writeback 失败 | 设备或 filesystem sync 错误 | 当前 unmount 返回失败 | mount 继续可见且可重试，不会静默丢弃 dirty state | 2 | dentry forget 和 topology detach 前同步；普通 mount 的 forget 后再同步一次 |
 
 校验失败会在 filesystem callback 前返回 typed VFS error。后端失败时 dentry cache
 location 保持不变，因为 cache commit 只在 callback 成功后执行；rename 所需 key 和 cache

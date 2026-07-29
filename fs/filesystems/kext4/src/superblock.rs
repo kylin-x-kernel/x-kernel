@@ -2069,12 +2069,22 @@ mod tests {
             .unwrap()
             .expect("first transaction remains running");
 
+        let flushes_before_first_sync = device.flush_count();
         filesystem
             .sync_inode(first.child(), Ext4SyncIntent::FullMetadata)
             .expect("sync first inode transaction");
+        // Persist ext4 recovery evidence, activate the clean journal, and
+        // finish the log commit. No fourth sync_inode-only flush is needed.
+        assert_eq!(device.flush_count(), flushes_before_first_sync + 3);
 
         assert_eq!(journal.running_transaction().unwrap(), None);
         assert_eq!(filesystem.pending_checkpoint_count(), 1);
+
+        let flushes_before_data_only_sync = device.flush_count();
+        filesystem
+            .sync_inode(first.child(), Ext4SyncIntent::DataOnly)
+            .expect("sync inode without a running metadata transaction");
+        assert_eq!(device.flush_count(), flushes_before_data_only_sync + 1);
 
         let root = filesystem.root_inode().expect("reload root inode");
         let _second = filesystem
@@ -2093,9 +2103,13 @@ mod tests {
             .expect("second transaction remains running");
         assert_ne!(second_transaction, first_transaction);
 
+        let flushes_before_second_sync = device.flush_count();
         filesystem
             .sync_inode(first.child(), Ext4SyncIntent::FullMetadata)
             .expect("conservatively sync current transaction");
+        // The next metadata mutation refreshes recovery evidence before its
+        // commit. The commit barrier again replaces a trailing inode flush.
+        assert_eq!(device.flush_count(), flushes_before_second_sync + 2);
 
         assert_eq!(journal.running_transaction().unwrap(), None);
         assert_eq!(filesystem.pending_checkpoint_count(), 2);
@@ -2264,6 +2278,8 @@ mod tests {
             Err(Ext4Error::Device(DriverError::Io))
         );
         assert_eq!(filesystem.pending_checkpoint_count(), 1);
+        assert!(journal.is_aborted());
+        assert_eq!(filesystem.sync_filesystem(), Err(Ext4Error::JournalAborted));
         fs::remove_file(image).expect("remove syncfs-pending-checkpoint-failure image");
     }
 
@@ -2817,7 +2833,7 @@ mod tests {
     }
 
     #[test]
-    fn e2fsck_accepts_linear_regular_file_rename_overwrite_on_linux_image() {
+    fn rename_overwrite_defers_data_victim_eviction_credits() {
         let mke2fs = require_e2fsprogs("mke2fs");
         let e2fsck = require_e2fsprogs("e2fsck");
         let image = temporary_image_path("namei-rename-file-overwrite-round-trip");
@@ -2860,6 +2876,8 @@ mod tests {
             )
             .expect("write data to rename target");
         assert!(target_with_data.blocks() > 0);
+        // Namespace replacement only records the victim as a zero-link
+        // orphan. Its extent cleanup belongs to final eviction below.
         let renamed = filesystem
             .rename(
                 target.parent(),
@@ -4075,6 +4093,56 @@ mod tests {
             journal.begin(JournalCredits::new(1)),
             Err(Ext4Error::JournalAborted)
         ));
+    }
+
+    #[test]
+    fn explicit_sync_commit_failure_aborts_mount_journal() {
+        let (mut filesystem, device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        install_test_internal_journal(&mut filesystem, 255);
+        let journal = filesystem.metadata_journal().unwrap();
+        let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
+        filesystem.allocate_block(None, &mut handle).unwrap();
+        filesystem
+            .complete_metadata_mutation(handle, Ok(()))
+            .expect("leave successful metadata in the running transaction");
+        device.fail_flush_at(device.flush_count() + 1);
+
+        assert_eq!(
+            filesystem.sync_filesystem(),
+            Err(Ext4Error::Device(DriverError::Io))
+        );
+        assert!(journal.is_aborted());
+        assert_eq!(filesystem.sync_filesystem(), Err(Ext4Error::JournalAborted));
+        assert!(matches!(
+            journal.begin(JournalCredits::new(1)),
+            Err(Ext4Error::JournalAborted)
+        ));
+    }
+
+    #[test]
+    fn failed_handle_reusing_shared_metadata_aborts_mount_journal() {
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        install_test_internal_journal(&mut filesystem, 256);
+        let journal = filesystem.metadata_journal().unwrap();
+
+        let mut first = journal.begin(JournalCredits::new(4)).unwrap();
+        let transaction = first.id();
+        filesystem.allocate_block(None, &mut first).unwrap();
+        filesystem
+            .complete_metadata_mutation(first, Ok(()))
+            .expect("retain the first allocation in the running transaction");
+
+        let mut second = journal.begin(JournalCredits::new(4)).unwrap();
+        assert_eq!(second.id(), transaction);
+        filesystem.allocate_block(None, &mut second).unwrap();
+        assert!(second.has_updates());
+        assert_eq!(
+            filesystem.complete_metadata_mutation(second, Err::<(), _>(Ext4Error::NoSpace)),
+            Err(Ext4Error::InvalidJournalTransaction)
+        );
+        assert!(journal.is_aborted());
     }
 
     #[test]

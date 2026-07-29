@@ -121,8 +121,16 @@ impl Ext4Filesystem {
     /// committing the shared transaction is conservative and correct meanwhile.
     pub fn sync_inode(&mut self, inode: &Ext4Inode, intent: Ext4SyncIntent) -> Ext4Result<()> {
         let _ = (inode, intent);
-        self.commit_running_metadata_transaction()?;
-        self.flush_device()
+        let result = match self.commit_running_metadata_transaction() {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                // A mapped overwrite may dirty only file data and therefore have no
+                // metadata transaction whose commit barrier can carry durability.
+                self.flush_device()
+            }
+            Err(error) => Err(error),
+        };
+        result.map_err(|error| self.fail_journal_operation(error))
     }
 
     /// Reads bytes from a regular file inode.

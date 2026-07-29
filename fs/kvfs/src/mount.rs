@@ -1143,6 +1143,18 @@ impl Path {
             if !self.mnt.mnt_mounts.lock().is_empty() {
                 return Err(VfsError::ResourceBusy);
             }
+        }
+
+        let super_block = self.super_block().clone();
+        super_block.sync_fs()?;
+        if !self.mnt.is_bound {
+            self.dentry.as_dir()?.forget();
+            // Dentry eviction may release the final zero-link inode and publish
+            // new filesystem metadata, so drain that work before detaching.
+            super_block.sync_fs()?;
+        }
+
+        if let Some(parent_path) = self.mnt.location() {
             let covered = self.mnt.covers.lock().take();
             match covered {
                 Some(ref mount) => {
@@ -1154,9 +1166,6 @@ impl Path {
                     parent_path.mnt.remove_child_mount(&parent_path.dentry);
                 }
             }
-        }
-        if !self.mnt.is_bound {
-            self.dentry.as_dir()?.forget();
         }
         Ok(())
     }
@@ -1315,6 +1324,28 @@ mod tests {
         mount_flags: StatFsFlags,
     }
 
+    struct SyncTrackingFilesystem {
+        sync_count: Mutex<usize>,
+        should_fail_sync: Mutex<bool>,
+    }
+
+    impl SyncTrackingFilesystem {
+        fn new() -> Self {
+            Self {
+                sync_count: Mutex::new(0),
+                should_fail_sync: Mutex::new(false),
+            }
+        }
+
+        fn sync_count(&self) -> usize {
+            *self.sync_count.lock()
+        }
+
+        fn fail_sync(&self) {
+            *self.should_fail_sync.lock() = true;
+        }
+    }
+
     impl SuperBlockOperations for MockFilesystem {
         fn name(&self) -> &str {
             "mockfs"
@@ -1322,6 +1353,25 @@ mod tests {
 
         fn statfs(&self) -> VfsResult<StatFs> {
             statfs(self.mount_flags)
+        }
+    }
+
+    impl SuperBlockOperations for SyncTrackingFilesystem {
+        fn name(&self) -> &str {
+            "sync-tracking-fs"
+        }
+
+        fn statfs(&self) -> VfsResult<StatFs> {
+            statfs(StatFsFlags::empty())
+        }
+
+        fn sync_fs(&self) -> VfsResult<()> {
+            *self.sync_count.lock() += 1;
+            if *self.should_fail_sync.lock() {
+                Err(VfsError::Io)
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -1489,6 +1539,17 @@ mod tests {
         SuperBlock::new(Arc::new(MockFilesystem { mount_flags }), root)
     }
 
+    fn sync_tracking_filesystem() -> (Arc<SuperBlock>, Arc<SyncTrackingFilesystem>) {
+        let inode = VfsInode::new_openable_dir(
+            Arc::new(MockDirOps::new(StatFsFlags::empty(), 1)),
+            inode_init(1),
+        );
+        let root = Dentry::new_dir_from_inode(inode, None, String::new());
+        let operations = Arc::new(SyncTrackingFilesystem::new());
+        let super_block = SuperBlock::new(operations.clone(), root);
+        (super_block, operations)
+    }
+
     fn statfs(mount_flags: StatFsFlags) -> VfsResult<StatFs> {
         Ok(StatFs {
             fs_type: 0,
@@ -1628,6 +1689,35 @@ mod tests {
         mount_b.root_path().unmount().unwrap();
         let loc_a_again = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
         assert!(Arc::ptr_eq(loc_a_again.mount(), &mount_a));
+    }
+
+    #[def_test]
+    fn test_unmount_syncs_filesystem_before_detaching_mount() {
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let (child_fs, sync_tracking) = sync_tracking_filesystem();
+        let root_mount = Mount::new_root(&root_fs);
+        let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
+        let child_mount = mount_filesystem(&mount_dir, &child_fs).unwrap();
+
+        child_mount.root_path().unmount().unwrap();
+
+        assert_eq!(sync_tracking.sync_count(), 2);
+        assert_eq!(root_mount.children().len(), 0);
+    }
+
+    #[def_test]
+    fn test_unmount_sync_failure_preserves_mount_tree() {
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let (child_fs, sync_tracking) = sync_tracking_filesystem();
+        let root_mount = Mount::new_root(&root_fs);
+        let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
+        let child_mount = mount_filesystem(&mount_dir, &child_fs).unwrap();
+        sync_tracking.fail_sync();
+
+        assert_eq!(child_mount.root_path().unmount(), Err(VfsError::Io));
+        assert_eq!(sync_tracking.sync_count(), 1);
+        assert_eq!(root_mount.children().len(), 1);
+        assert!(Arc::ptr_eq(&root_mount.children()[0], &child_mount));
     }
 
     #[def_test]

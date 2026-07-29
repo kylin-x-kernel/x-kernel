@@ -64,7 +64,6 @@ struct Ext4Credits;
 impl Ext4Credits {
     const DIRECTORY_BLOCK_GROW: u32 = 4;
     const DIRECTORY_BLOCK_UPDATE: u32 = 1;
-    const EXTENT_TREE_DELETE_CEILING: u32 = 4096;
     const FILE_BLOCK_ALLOCATOR: u32 = 8;
     const FILE_EXTENT_UPDATE: u32 = 8;
     const HTREE_INDEX_EXTRA: u32 = 8;
@@ -115,7 +114,7 @@ impl Ext4Credits {
         victim: &Ext4Inode,
     ) -> JournalCredits {
         let zero_link = if victim.links_count() == 1 {
-            Self::zero_link_eviction(victim)
+            Self::namespace_zero_link_update()
         } else {
             Self::INODE_UPDATE
         };
@@ -125,10 +124,12 @@ impl Ext4Credits {
     fn rmdir(
         _filesystem: &Ext4Filesystem,
         directory: &Ext4Inode,
-        victim: &Ext4Inode,
+        _victim: &Ext4Inode,
     ) -> JournalCredits {
         Self::credits(
-            Self::dirent_update(directory) + Self::INODE_UPDATE + Self::zero_link_eviction(victim),
+            Self::dirent_update(directory)
+                + Self::INODE_UPDATE
+                + Self::namespace_zero_link_update(),
         )
     }
 
@@ -146,7 +147,7 @@ impl Ext4Credits {
         };
         let replaced_update = replaced.map_or(0, |victim| {
             if victim.links_count() == 1 || victim.kind() == InodeKind::Directory {
-                Self::zero_link_eviction(victim)
+                Self::namespace_zero_link_update()
             } else {
                 Self::INODE_UPDATE
             }
@@ -174,17 +175,28 @@ impl Ext4Credits {
             }
     }
 
-    fn zero_link_eviction(inode: &Ext4Inode) -> u32 {
-        let extent_delete = if inode.blocks() == 0 {
+    // Namespace removal persists the orphan before the last VFS reference
+    // releases data, xattrs, and the inode in final eviction.
+    const fn namespace_zero_link_update() -> u32 {
+        Self::ORPHAN_LINK_UPDATE + Self::INODE_UPDATE
+    }
+
+    fn final_eviction(
+        filesystem: &Ext4Filesystem,
+        inode: &Ext4Inode,
+    ) -> Ext4Result<JournalCredits> {
+        let extent_delete = if filesystem.unlinked_inode_data_blocks(inode)? == 0 {
             0
         } else {
-            Self::EXTENT_TREE_DELETE_CEILING
+            filesystem.extent_truncate_metadata_credits(inode, LogicalBlock::new(0))?
         };
-        Self::ORPHAN_LINK_UPDATE
-            + Self::INODE_UPDATE
-            + Self::INODE_FREE
-            + external_xattr_eviction_credits(inode)
-            + extent_delete
+        let credits = Self::ORPHAN_LINK_UPDATE
+            .checked_add(Self::INODE_UPDATE)
+            .and_then(|credits| credits.checked_add(Self::INODE_FREE))
+            .and_then(|credits| credits.checked_add(external_xattr_eviction_credits(inode)))
+            .and_then(|credits| credits.checked_add(extent_delete))
+            .ok_or(Ext4Error::Overflow)?;
+        Ok(Self::credits(credits))
     }
 }
 
@@ -1174,7 +1186,7 @@ impl Ext4Filesystem {
         self.ensure_unlinked_inode_eviction_supported(inode)?;
         self.validate_inode_timestamp_update(inode, timestamp)?;
 
-        let credits = Ext4Credits::credits(Ext4Credits::zero_link_eviction(inode));
+        let credits = Ext4Credits::final_eviction(self, inode)?;
         let journal = self.namei_metadata_journal_with_policy(credits, recovery_flag_policy)?;
         let mut handle = journal.begin(credits)?;
         let result = self.evict_zero_link_inode(inode, None, timestamp, &mut handle);

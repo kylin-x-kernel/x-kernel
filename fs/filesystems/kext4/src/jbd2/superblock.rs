@@ -2,6 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::num::NonZeroU32;
 
 use crate::{
@@ -64,6 +65,7 @@ pub enum JournalStart {
 /// Validated geometry and state from a JBD2 journal superblock.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JournalSuperblock {
+    encoded: Arc<[u8]>,
     block_size: NonZeroU32,
     max_blocks: NonZeroU32,
     first_log_block: JournalBlock,
@@ -84,6 +86,7 @@ impl JournalSuperblock {
         journal_inode_blocks: u32,
         filesystem_uuid: [u8; 16],
     ) -> Ext4Result<Self> {
+        let encoded_input = input;
         let raw = RawJournalSuperblock::try_from(input)?;
         let input = raw.bytes;
         if be_u32(input, 0x00)? != JBD2_MAGIC_NUMBER {
@@ -99,6 +102,16 @@ impl JournalSuperblock {
         if block_size.get() != filesystem_block_size {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal));
         }
+        let encoded_len = usize::try_from(block_size.get()).map_err(|_| Ext4Error::Overflow)?;
+        let encoded = match encoded_input.get(..encoded_len) {
+            Some(encoded) => Arc::from(encoded),
+            None if encoded_input.len() == JOURNAL_SUPERBLOCK_SIZE => {
+                let mut encoded = vec![0; encoded_len];
+                encoded[..JOURNAL_SUPERBLOCK_SIZE].copy_from_slice(encoded_input);
+                Arc::from(encoded)
+            }
+            None => return Err(Ext4Error::Corrupt(CorruptKind::Truncated)),
+        };
 
         let max_blocks = NonZeroU32::new(be_u32(input, 0x10)?)
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?;
@@ -151,6 +164,7 @@ impl JournalSuperblock {
         }
 
         Ok(Self {
+            encoded,
             block_size,
             max_blocks,
             first_log_block,
@@ -163,6 +177,25 @@ impl JournalSuperblock {
             feature_read_only_compat,
             uuid,
         })
+    }
+
+    /// Returns the validated in-memory journal superblock image.
+    ///
+    /// Runtime updates clone this image instead of reading journal block zero
+    /// again. The bytes always cover one complete journal block.
+    pub(crate) fn encoded(&self) -> &[u8] {
+        &self.encoded
+    }
+
+    /// Applies an update to the cached image and validates the resulting state.
+    pub(crate) fn updated(
+        &self,
+        update: impl FnOnce(&mut [u8]) -> Ext4Result<()>,
+    ) -> Ext4Result<(Vec<u8>, Self)> {
+        let mut bytes = self.encoded.to_vec();
+        update(&mut bytes)?;
+        let updated = Self::decode(&bytes, self.block_size(), self.max_blocks(), self.uuid())?;
+        Ok((bytes, updated))
     }
 
     /// Returns the journal block size.
@@ -380,6 +413,23 @@ mod tests {
         assert_eq!(journal.max_blocks(), 1024);
         assert_eq!(journal.first_log_block(), JournalBlock::new(1));
         assert!(!journal.has_nonzero_log_start());
+        assert_eq!(journal.encoded().len(), 4096);
+        assert!(
+            journal.encoded()[JOURNAL_SUPERBLOCK_SIZE..]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+    }
+
+    #[test]
+    fn preserves_complete_journal_block_image() {
+        let superblock = valid_journal_superblock();
+        let mut block = [0xa5; 4096];
+        block[..JOURNAL_SUPERBLOCK_SIZE].copy_from_slice(&superblock);
+
+        let journal = JournalSuperblock::decode(&block, 4096, 1024, UUID).unwrap();
+
+        assert_eq!(journal.encoded(), block.as_slice());
     }
 
     #[test]

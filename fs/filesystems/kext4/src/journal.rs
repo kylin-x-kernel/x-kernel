@@ -84,6 +84,23 @@ impl MountedJournal {
         lock(&self.state).storage.superblock.clone()
     }
 
+    fn supports_revoke(&self) -> bool {
+        lock(&self.state).storage.superblock.feature_incompat() & JBD2_FEATURE_INCOMPAT_REVOKE != 0
+    }
+
+    fn transaction_credit_limit(&self) -> Ext4Result<u32> {
+        let state = lock(&self.state);
+        let superblock = &state.storage.superblock;
+        let log_blocks = superblock
+            .max_blocks()
+            .checked_sub(superblock.first_log_block().get())
+            .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?;
+        // Linux bounds a normal transaction below roughly one third of the
+        // journal so descriptor, revoke, and commit overhead still fit while a
+        // checkpoint can make progress.
+        Ok((log_blocks / 3).max(1))
+    }
+
     fn replace_superblock(&self, superblock: JournalSuperblock) {
         lock(&self.state).storage.superblock = superblock;
     }
@@ -186,32 +203,26 @@ impl MountedJournal {
 impl Ext4Filesystem {
     /// Returns whether the mounted journal can persist revoke records.
     pub(crate) fn journal_supports_revoke(&self) -> bool {
-        self.journal.as_ref().is_some_and(|journal| {
-            journal.superblock().feature_incompat() & JBD2_FEATURE_INCOMPAT_REVOKE != 0
-        })
+        self.journal
+            .as_ref()
+            .is_some_and(|journal| journal.supports_revoke())
     }
 
     /// Synchronizes filesystem-owned state with stable storage.
     ///
     /// Metadata mutations enqueue committed journal records for checkpointing.
-    /// Until a kernel background worker is wired in, `syncfs`, unmount, and
-    /// journal-space pressure drive the queue. Freeze should call the same
-    /// drain path once that lifecycle hook exists in the shared KVFS layer.
+    /// Until a kernel background worker is wired in, `syncfs`, KVFS unmount
+    /// writeback, and journal-space pressure drive the queue. Freeze should
+    /// call the same drain path once that lifecycle hook exists in KVFS.
     pub fn sync_filesystem(&mut self) -> Ext4Result<()> {
-        self.commit_running_metadata_transaction()?;
-        self.drain_pending_checkpoints()?;
-        self.flush_device()?;
-        let _ = self.metadata_io.reclaim_unused(usize::MAX);
-        Ok(())
-    }
-
-    /// Flushes and cleans filesystem-owned state before unmount.
-    pub fn unmount_filesystem(&mut self) -> Ext4Result<()> {
-        self.drain_pending_checkpoints()?;
-        self.sync_filesystem()?;
-        self.cleanup_legacy_orphans()?;
-        self.drain_pending_checkpoints()?;
-        self.sync_filesystem()
+        let result = (|| {
+            self.commit_running_metadata_transaction()?;
+            self.drain_pending_checkpoints()?;
+            self.flush_device()?;
+            let _ = self.metadata_io.reclaim_unused(usize::MAX);
+            Ok(())
+        })();
+        result.map_err(|error| self.fail_journal_operation(error))
     }
 
     pub(crate) fn metadata_journal(&mut self) -> Ext4Result<Arc<MountedJournal>> {
@@ -248,19 +259,10 @@ impl Ext4Filesystem {
     }
 
     fn running_transaction_credit_limit(&self) -> Ext4Result<u32> {
-        let superblock = self
-            .journal
+        self.journal
             .as_ref()
             .ok_or(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite))?
-            .superblock();
-        let log_blocks = superblock
-            .max_blocks()
-            .checked_sub(superblock.first_log_block().get())
-            .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?;
-        // Linux bounds a normal transaction below roughly one third of the
-        // journal so descriptor, revoke, and commit overhead still fit while a
-        // checkpoint can make progress.
-        Ok((log_blocks / 3).max(1))
+            .transaction_credit_limit()
     }
 
     fn enable_journal_revoke_feature(&mut self) -> Ext4Result<()> {
@@ -276,8 +278,7 @@ impl Ext4Filesystem {
             return Ok(());
         }
 
-        let mut bytes = vec![0; self.device.block_size()];
-        self.read_journal_block(JournalBlock::new(0), &mut bytes)?;
+        let mut bytes = superblock.encoded().to_vec();
         if !enable_superblock_revoke(&mut bytes)? {
             return Ok(());
         }
@@ -402,7 +403,7 @@ impl Ext4Filesystem {
         }
     }
 
-    pub(crate) fn commit_running_metadata_transaction(&mut self) -> Ext4Result<()> {
+    pub(crate) fn commit_running_metadata_transaction(&mut self) -> Ext4Result<bool> {
         self.commit_running_metadata_transaction_with_policy(
             RecoveryFlagPolicy::ClearAfterCheckpoint,
         )
@@ -411,14 +412,15 @@ impl Ext4Filesystem {
     fn commit_running_metadata_transaction_with_policy(
         &mut self,
         recovery_flag_policy: RecoveryFlagPolicy,
-    ) -> Ext4Result<()> {
+    ) -> Ext4Result<bool> {
         let Some(journal) = self.journal.as_ref().cloned() else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(transaction) = journal.transactions.running_transaction()? else {
-            return Ok(());
+            return Ok(false);
         };
-        self.commit_metadata_transaction_with_policy(transaction, recovery_flag_policy)
+        self.commit_metadata_transaction_with_policy(transaction, recovery_flag_policy)?;
+        Ok(true)
     }
 
     #[cfg(test)]
@@ -450,6 +452,15 @@ impl Ext4Filesystem {
     }
 
     fn append_metadata_checkpoint(
+        &mut self,
+        transaction: TransactionId,
+        recovery_flag_policy: RecoveryFlagPolicy,
+    ) -> Ext4Result<()> {
+        let result = self.append_metadata_checkpoint_inner(transaction, recovery_flag_policy);
+        result.map_err(|error| self.fail_journal_operation(error))
+    }
+
+    fn append_metadata_checkpoint_inner(
         &mut self,
         transaction: TransactionId,
         recovery_flag_policy: RecoveryFlagPolicy,
@@ -507,14 +518,15 @@ impl Ext4Filesystem {
             // internal transaction failure instead of exposing partial state.
             Ext4Error::InvalidJournalTransaction
         };
-        let Some(journal) = self.journal.as_ref().cloned() else {
-            return Ext4Error::Unsupported(UnsupportedKind::JournaledWrite);
-        };
-        journal.transactions.abort(abort_error);
-        abort_error
+        self.abort_metadata_journal(abort_error)
     }
 
     fn run_checkpoint_worker(&mut self) -> Ext4Result<()> {
+        let result = self.run_checkpoint_worker_inner();
+        result.map_err(|error| self.fail_journal_operation(error))
+    }
+
+    fn run_checkpoint_worker_inner(&mut self) -> Ext4Result<()> {
         let Some((commit, persisted)) = self
             .journal
             .as_ref()
@@ -550,6 +562,21 @@ impl Ext4Filesystem {
         journal.remove_checkpoint_policy(transaction)?;
         let _ = self.metadata_io.reclaim_unused(usize::MAX);
         Ok(())
+    }
+
+    pub(crate) fn fail_journal_operation(&self, error: Ext4Error) -> Ext4Error {
+        if mutation_error_requires_abort(error) {
+            self.abort_metadata_journal(error)
+        } else {
+            error
+        }
+    }
+
+    fn abort_metadata_journal(&self, error: Ext4Error) -> Ext4Error {
+        if let Some(journal) = self.journal.as_ref() {
+            journal.transactions.abort(error);
+        }
+        error
     }
 
     #[cfg(test)]
@@ -744,7 +771,7 @@ impl Ext4Filesystem {
         &self,
         report: JournalReplayReport,
     ) -> Ext4Result<(FilesystemBlock, alloc::vec::Vec<u8>, JournalSuperblock)> {
-        let (physical, block_count) = {
+        let (physical, block_count, mut bytes) = {
             let journal = self
                 .journal
                 .as_ref()
@@ -752,10 +779,9 @@ impl Ext4Filesystem {
             (
                 journal.map_block(JournalBlock::new(0))?,
                 journal.block_count(),
+                journal.superblock().encoded().to_vec(),
             )
         };
-        let mut bytes = vec![0; self.device.block_size()];
-        self.device.read_blocks(physical, 1, &mut bytes)?;
         mark_superblock_empty(&mut bytes, report.next_sequence(), report.head())?;
         let superblock = JournalSuperblock::decode(
             &bytes,
@@ -919,7 +945,87 @@ impl JournalBlockWriter for Ext4Filesystem {
         self.device.write_contiguous_blocks(physical, 1, input)
     }
 
+    fn write_journal_blocks(
+        &self,
+        start: JournalBlock,
+        block_count: u32,
+        input: &[u8],
+    ) -> Ext4Result<()> {
+        let block_size =
+            usize::try_from(self.layout.block_size()).map_err(|_| Ext4Error::Overflow)?;
+        let expected = usize::try_from(block_count)
+            .map_err(|_| Ext4Error::Overflow)?
+            .checked_mul(block_size)
+            .ok_or(Ext4Error::Overflow)?;
+        if input.len() != expected {
+            return Err(Ext4Error::InvalidBufferLength {
+                expected,
+                actual: input.len(),
+            });
+        }
+        if block_count == 0 {
+            return Ok(());
+        }
+
+        let mut run_first_input_block = 0u32;
+        let mut run_physical = self.map_journal_block(start)?;
+        let mut previous_physical = run_physical;
+        for index in 1..block_count {
+            let logical = start
+                .get()
+                .checked_add(index)
+                .map(JournalBlock::new)
+                .ok_or(Ext4Error::Overflow)?;
+            let physical = self.map_journal_block(logical)?;
+            if previous_physical.get().checked_add(1) != Some(physical.get()) {
+                self.write_journal_physical_run(
+                    run_physical,
+                    run_first_input_block,
+                    index - run_first_input_block,
+                    block_size,
+                    input,
+                )?;
+                run_first_input_block = index;
+                run_physical = physical;
+            }
+            previous_physical = physical;
+        }
+        self.write_journal_physical_run(
+            run_physical,
+            run_first_input_block,
+            block_count - run_first_input_block,
+            block_size,
+            input,
+        )
+    }
+
     fn flush_journal(&self) -> Ext4Result<()> {
         self.flush_device()
+    }
+}
+
+impl Ext4Filesystem {
+    fn write_journal_physical_run(
+        &self,
+        physical: FilesystemBlock,
+        first_input_block: u32,
+        block_count: u32,
+        block_size: usize,
+        input: &[u8],
+    ) -> Ext4Result<()> {
+        let start = usize::try_from(first_input_block)
+            .map_err(|_| Ext4Error::Overflow)?
+            .checked_mul(block_size)
+            .ok_or(Ext4Error::Overflow)?;
+        let len = usize::try_from(block_count)
+            .map_err(|_| Ext4Error::Overflow)?
+            .checked_mul(block_size)
+            .ok_or(Ext4Error::Overflow)?;
+        let end = start.checked_add(len).ok_or(Ext4Error::Overflow)?;
+        self.device.write_contiguous_blocks(
+            physical,
+            block_count,
+            input.get(start..end).ok_or(Ext4Error::OutOfBounds)?,
+        )
     }
 }

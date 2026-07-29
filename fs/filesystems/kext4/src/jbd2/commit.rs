@@ -34,10 +34,59 @@ const JBD2_FLAG_ESCAPE: u32 = 1;
 const JBD2_FLAG_SAME_UUID: u32 = 2;
 const JBD2_FLAG_LAST_TAG: u32 = 8;
 
+/// Bounds one submitted journal write batch.
+const MAX_JOURNAL_WRITE_BYTES: usize = 128 * 1024;
+
 /// Writes logical blocks into one JBD2 journal.
 pub(crate) trait JournalBlockWriter {
     /// Writes one complete journal block.
     fn write_journal_block(&self, block: JournalBlock, input: &[u8]) -> Ext4Result<()>;
+
+    /// Writes consecutive journal blocks in one request when supported.
+    ///
+    /// The logical range must not cross the circular-log boundary. The default
+    /// preserves compatibility for implementations that only write one block
+    /// at a time; the mounted journal overrides it with physical-run writes.
+    fn write_journal_blocks(
+        &self,
+        start: JournalBlock,
+        block_count: u32,
+        input: &[u8],
+    ) -> Ext4Result<()> {
+        if block_count == 0 {
+            return if input.is_empty() {
+                Ok(())
+            } else {
+                Err(Ext4Error::InvalidBufferLength {
+                    expected: 0,
+                    actual: input.len(),
+                })
+            };
+        }
+        let block_count = usize::try_from(block_count).map_err(|_| Ext4Error::Overflow)?;
+        let block_size = input
+            .len()
+            .checked_div(block_count)
+            .ok_or(Ext4Error::Overflow)?;
+        let expected = block_size
+            .checked_mul(block_count)
+            .ok_or(Ext4Error::Overflow)?;
+        if block_size == 0 || input.len() != expected {
+            return Err(Ext4Error::InvalidBufferLength {
+                expected,
+                actual: input.len(),
+            });
+        }
+        for (index, bytes) in input.chunks_exact(block_size).enumerate() {
+            let block = start
+                .get()
+                .checked_add(u32::try_from(index).map_err(|_| Ext4Error::Overflow)?)
+                .map(JournalBlock::new)
+                .ok_or(Ext4Error::Overflow)?;
+            self.write_journal_block(block, bytes)?;
+        }
+        Ok(())
+    }
 
     /// Flushes journal writes through the device barrier used by this stage.
     fn flush_journal(&self) -> Ext4Result<()>;
@@ -46,6 +95,82 @@ pub(crate) trait JournalBlockWriter {
 pub(crate) trait JournalIo: JournalBlockReader + JournalBlockWriter {}
 
 impl<T: JournalBlockReader + JournalBlockWriter> JournalIo for T {}
+
+struct JournalWriteBatch<'a, W: JournalBlockWriter> {
+    superblock: &'a JournalSuperblock,
+    writer: &'a W,
+    start: Option<JournalBlock>,
+    next: JournalBlock,
+    block_size: usize,
+    max_blocks: usize,
+    bytes: Vec<u8>,
+}
+
+impl<'a, W: JournalBlockWriter> JournalWriteBatch<'a, W> {
+    fn new(
+        superblock: &'a JournalSuperblock,
+        writer: &'a W,
+        start: JournalBlock,
+    ) -> Ext4Result<Self> {
+        validate_start(superblock, start)?;
+        let block_size =
+            usize::try_from(superblock.block_size()).map_err(|_| Ext4Error::Overflow)?;
+        let max_blocks = (MAX_JOURNAL_WRITE_BYTES / block_size).max(1);
+        let capacity = max_blocks
+            .checked_mul(block_size)
+            .ok_or(Ext4Error::Overflow)?;
+        Ok(Self {
+            superblock,
+            writer,
+            start: None,
+            next: start,
+            block_size,
+            max_blocks,
+            bytes: Vec::with_capacity(capacity),
+        })
+    }
+
+    fn push(&mut self, input: &[u8]) -> Ext4Result<()> {
+        if input.len() != self.block_size {
+            return Err(Ext4Error::InvalidBufferLength {
+                expected: self.block_size,
+                actual: input.len(),
+            });
+        }
+        if self.bytes.is_empty() {
+            self.start = Some(self.next);
+        }
+
+        let current = self.next;
+        self.bytes.extend_from_slice(input);
+        self.next = next_log_block(self.superblock, current);
+
+        let block_count = self.bytes.len() / self.block_size;
+        let did_wrap = current.get().checked_add(1) == Some(self.superblock.max_blocks());
+        if block_count == self.max_blocks || did_wrap {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Ext4Result<JournalBlock> {
+        self.flush()?;
+        Ok(self.next)
+    }
+
+    fn flush(&mut self) -> Ext4Result<()> {
+        let Some(start) = self.start else {
+            return Ok(());
+        };
+        let block_count =
+            u32::try_from(self.bytes.len() / self.block_size).map_err(|_| Ext4Error::Overflow)?;
+        self.writer
+            .write_journal_blocks(start, block_count, &self.bytes)?;
+        self.bytes.clear();
+        self.start = None;
+        Ok(())
+    }
+}
 
 /// One committed metadata image that must be copied into the journal.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -239,15 +364,14 @@ pub(crate) fn write_journal_commit(
     let revoke_capacity = revoke_block_capacity(superblock, block_size)?;
     let revoked_blocks = commit.revoked_blocks()?;
     let checksum_seed = checksum::crc32c(u32::MAX, &superblock.uuid());
-    let mut cursor = start;
+    let mut batch = JournalWriteBatch::new(superblock, writer, start)?;
     let mut offset = 0usize;
     while offset < blocks.len() {
         let remaining = blocks.len() - offset;
         let group_len = remaining.min(descriptor_capacity);
-        cursor = write_descriptor_group(
+        write_descriptor_group(
             superblock,
-            writer,
-            cursor,
+            &mut batch,
             commit.id(),
             &blocks[offset..offset + group_len],
             checksum_seed,
@@ -259,10 +383,9 @@ pub(crate) fn write_journal_commit(
     while revoke_offset < revoked_blocks.len() {
         let remaining = revoked_blocks.len() - revoke_offset;
         let group_len = remaining.min(revoke_capacity);
-        cursor = write_revoke_block(
+        write_revoke_block(
             superblock,
-            writer,
-            cursor,
+            &mut batch,
             commit.id(),
             &revoked_blocks[revoke_offset..revoke_offset + group_len],
             checksum_seed,
@@ -272,8 +395,8 @@ pub(crate) fn write_journal_commit(
     }
 
     let commit_block = encode_commit_block(superblock, commit.id(), checksum_seed, block_size)?;
-    writer.write_journal_block(cursor, &commit_block)?;
-    let head = next_log_block(superblock, cursor);
+    batch.push(&commit_block)?;
+    let head = batch.finish()?;
     writer.flush_journal()?;
 
     Ok(JournalLogCommit {
@@ -333,18 +456,10 @@ fn update_journal_superblock(
     journal: &impl JournalIo,
     update: impl FnOnce(&mut [u8]) -> Ext4Result<()>,
 ) -> Ext4Result<JournalSuperblock> {
-    let block_size = usize::try_from(superblock.block_size()).map_err(|_| Ext4Error::Overflow)?;
-    let mut bytes = vec![0; block_size];
-    journal.read_journal_block(JournalBlock::new(0), &mut bytes)?;
-    update(&mut bytes)?;
+    let (bytes, updated) = superblock.updated(update)?;
     journal.write_journal_block(JournalBlock::new(0), &bytes)?;
     journal.flush_journal()?;
-    JournalSuperblock::decode(
-        &bytes,
-        superblock.block_size(),
-        superblock.max_blocks(),
-        superblock.uuid(),
-    )
+    Ok(updated)
 }
 
 fn validate_start(superblock: &JournalSuperblock, start: JournalBlock) -> Ext4Result<()> {
@@ -515,15 +630,14 @@ fn descriptor_payload_end(superblock: &JournalSuperblock, block_size: usize) -> 
     }
 }
 
-fn write_descriptor_group(
+fn write_descriptor_group<W: JournalBlockWriter>(
     superblock: &JournalSuperblock,
-    writer: &impl JournalBlockWriter,
-    descriptor_block: JournalBlock,
+    batch: &mut JournalWriteBatch<'_, W>,
     transaction: TransactionId,
     blocks: &[JournalCommitBlock],
     checksum_seed: u32,
     block_size: usize,
-) -> Ext4Result<JournalBlock> {
+) -> Ext4Result<()> {
     let mut descriptor = block_header(JBD2_DESCRIPTOR_BLOCK, transaction, block_size)?;
     let mut data_blocks = Vec::with_capacity(blocks.len());
     let mut tag_offset = JBD2_HEADER_SIZE;
@@ -564,25 +678,21 @@ fn write_descriptor_group(
         data_blocks.push(data);
     }
     set_control_block_checksum(superblock, &mut descriptor, checksum_seed)?;
-    writer.write_journal_block(descriptor_block, &descriptor)?;
-
-    let mut cursor = next_log_block(superblock, descriptor_block);
+    batch.push(&descriptor)?;
     for data in data_blocks {
-        writer.write_journal_block(cursor, &data)?;
-        cursor = next_log_block(superblock, cursor);
+        batch.push(&data)?;
     }
-    Ok(cursor)
+    Ok(())
 }
 
-fn write_revoke_block(
+fn write_revoke_block<W: JournalBlockWriter>(
     superblock: &JournalSuperblock,
-    writer: &impl JournalBlockWriter,
-    revoke_block: JournalBlock,
+    batch: &mut JournalWriteBatch<'_, W>,
     transaction: TransactionId,
     revoked_blocks: &[FilesystemBlock],
     checksum_seed: u32,
     block_size: usize,
-) -> Ext4Result<JournalBlock> {
+) -> Ext4Result<()> {
     let mut block = block_header(JBD2_REVOKE_BLOCK, transaction, block_size)?;
     let entry_size = revoke_entry_size(superblock);
     let count = JBD2_REVOKE_HEADER_SIZE
@@ -613,8 +723,7 @@ fn write_revoke_block(
         offset = offset.checked_add(entry_size).ok_or(Ext4Error::Overflow)?;
     }
     set_control_block_checksum(superblock, &mut block, checksum_seed)?;
-    writer.write_journal_block(revoke_block, &block)?;
-    Ok(next_log_block(superblock, revoke_block))
+    batch.push(&block)
 }
 
 fn escape_journal_data(data: &mut [u8]) -> bool {
@@ -828,6 +937,8 @@ mod tests {
     struct TestJournal {
         blocks: RefCell<BTreeMap<u32, Vec<u8>>>,
         write_order: RefCell<Vec<JournalBlock>>,
+        write_request_block_counts: RefCell<Vec<u32>>,
+        read_request_count: RefCell<usize>,
         fail_write_at: RefCell<Option<usize>>,
         flush_count: RefCell<usize>,
     }
@@ -841,6 +952,8 @@ mod tests {
             Self {
                 blocks: RefCell::new(BTreeMap::new()),
                 write_order: RefCell::new(Vec::new()),
+                write_request_block_counts: RefCell::new(Vec::new()),
+                read_request_count: RefCell::new(0),
                 fail_write_at: RefCell::new(None),
                 flush_count: RefCell::new(0),
             }
@@ -853,17 +966,15 @@ mod tests {
         }
 
         fn insert_superblock(&self, superblock: &JournalSuperblock) {
-            let block = encoded_journal_superblock(superblock);
+            let block = superblock.encoded().to_vec();
             self.blocks.borrow_mut().insert(0, block);
         }
 
         fn fail_write_at(&self, write_index: usize) {
             *self.fail_write_at.borrow_mut() = Some(write_index);
         }
-    }
 
-    impl JournalBlockWriter for TestJournal {
-        fn write_journal_block(&self, block: JournalBlock, input: &[u8]) -> Ext4Result<()> {
+        fn write_one(&self, block: JournalBlock, input: &[u8]) -> Ext4Result<()> {
             if input.len() != BLOCK_SIZE {
                 return Err(Ext4Error::InvalidBufferLength {
                     expected: BLOCK_SIZE,
@@ -877,6 +988,48 @@ mod tests {
             self.blocks.borrow_mut().insert(block.get(), input.to_vec());
             Ok(())
         }
+    }
+
+    impl JournalBlockWriter for TestJournal {
+        fn write_journal_block(&self, block: JournalBlock, input: &[u8]) -> Ext4Result<()> {
+            self.write_request_block_counts.borrow_mut().push(1);
+            self.write_one(block, input)
+        }
+
+        fn write_journal_blocks(
+            &self,
+            start: JournalBlock,
+            block_count: u32,
+            input: &[u8],
+        ) -> Ext4Result<()> {
+            let expected = usize::try_from(block_count)
+                .map_err(|_| Ext4Error::Overflow)?
+                .checked_mul(BLOCK_SIZE)
+                .ok_or(Ext4Error::Overflow)?;
+            if input.len() != expected {
+                return Err(Ext4Error::InvalidBufferLength {
+                    expected,
+                    actual: input.len(),
+                });
+            }
+            self.write_request_block_counts
+                .borrow_mut()
+                .push(block_count);
+            for index in 0..block_count {
+                let block = start
+                    .get()
+                    .checked_add(index)
+                    .map(JournalBlock::new)
+                    .ok_or(Ext4Error::Overflow)?;
+                let offset = usize::try_from(index)
+                    .map_err(|_| Ext4Error::Overflow)?
+                    .checked_mul(BLOCK_SIZE)
+                    .ok_or(Ext4Error::Overflow)?;
+                let end = offset.checked_add(BLOCK_SIZE).ok_or(Ext4Error::Overflow)?;
+                self.write_one(block, input.get(offset..end).ok_or(Ext4Error::OutOfBounds)?)?;
+            }
+            Ok(())
+        }
 
         fn flush_journal(&self) -> Ext4Result<()> {
             *self.flush_count.borrow_mut() += 1;
@@ -886,6 +1039,7 @@ mod tests {
 
     impl JournalBlockReader for TestJournal {
         fn read_journal_block(&self, block: JournalBlock, output: &mut [u8]) -> Ext4Result<()> {
+            *self.read_request_count.borrow_mut() += 1;
             if output.len() != BLOCK_SIZE {
                 return Err(Ext4Error::InvalidBufferLength {
                     expected: BLOCK_SIZE,
@@ -945,6 +1099,7 @@ mod tests {
         assert_eq!(report.update_count(), 2);
         assert_eq!(report.journal_block_count(), 4);
         assert_eq!(*journal.flush_count.borrow(), 1);
+        assert_eq!(journal.write_request_block_counts.borrow().as_slice(), &[4]);
 
         let scan = scan_journal(&superblock, &journal).unwrap();
         assert_eq!(scan.transactions().len(), 1);
@@ -964,6 +1119,42 @@ mod tests {
                 .map(|update| update.log_block())
                 .collect::<Vec<_>>(),
             vec![JournalBlock::new(2), JournalBlock::new(3)]
+        );
+    }
+
+    #[test]
+    fn bounds_journal_write_batches() {
+        let superblock = journal_superblock(1, 0, SEQUENCE);
+        let journal = TestJournal::new();
+        let input = (0..140)
+            .map(|index| {
+                (
+                    FilesystemBlock::new(1_000 + index),
+                    vec![index as u8; BLOCK_SIZE],
+                )
+            })
+            .collect::<Vec<_>>();
+        let (commit, blocks) = committed_blocks(&input);
+
+        let report = write_journal_commit(
+            &superblock,
+            &journal,
+            JournalBlock::new(1),
+            &commit,
+            &blocks,
+        )
+        .unwrap();
+
+        let request_blocks = journal.write_request_block_counts.borrow();
+        assert!(request_blocks.len() > 1);
+        assert!(
+            request_blocks
+                .iter()
+                .all(|count| *count as usize * BLOCK_SIZE <= MAX_JOURNAL_WRITE_BYTES)
+        );
+        assert_eq!(
+            request_blocks.iter().copied().sum::<u32>(),
+            report.journal_block_count()
         );
     }
 
@@ -1152,6 +1343,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.head(), JournalBlock::new(3));
+        assert_eq!(
+            journal.write_request_block_counts.borrow().as_slice(),
+            &[1, 2]
+        );
         assert!(journal.blocks.borrow().contains_key(&1023));
         assert!(journal.blocks.borrow().contains_key(&1));
         assert!(journal.blocks.borrow().contains_key(&2));
@@ -1203,6 +1398,11 @@ mod tests {
         );
         assert_eq!(active_superblock.head(), JournalBlock::new(1));
         assert_eq!(*journal.flush_count.borrow(), 2);
+        assert_eq!(
+            journal.write_request_block_counts.borrow().as_slice(),
+            &[1, 3]
+        );
+        assert_eq!(*journal.read_request_count.borrow(), 0);
         assert_eq!(
             journal.write_order.borrow().first().copied(),
             Some(JournalBlock::new(0))
@@ -1404,19 +1604,6 @@ mod tests {
     fn journal_superblock(start: u32, incompat: u32, sequence: u32) -> JournalSuperblock {
         let bytes = journal_superblock_bytes(start, incompat, sequence);
         JournalSuperblock::decode(&bytes, BLOCK_SIZE as u32, JOURNAL_BLOCKS, UUID).unwrap()
-    }
-
-    fn encoded_journal_superblock(superblock: &JournalSuperblock) -> Vec<u8> {
-        journal_superblock_bytes(
-            match superblock.start() {
-                JournalStart::Zero => 0,
-                JournalStart::Block(block) => block.get(),
-            },
-            superblock.feature_incompat(),
-            superblock.sequence().get(),
-        )
-        .into_iter()
-        .collect()
     }
 
     fn journal_superblock_bytes(
