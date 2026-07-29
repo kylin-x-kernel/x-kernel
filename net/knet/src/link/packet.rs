@@ -13,12 +13,11 @@ use alloc::{
 use ::core::{
     ops::Range,
     sync::atomic::{AtomicU32, AtomicUsize, Ordering},
-    task::Context,
 };
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
 use klazy::lazy_static;
-use kpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::{Mutex, RwLock};
 
 use crate::{
@@ -413,13 +412,18 @@ impl Pollable for PacketSocket {
         events
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if events.contains(IoEvents::IN) {
-            self.inner.poll_rx.register(context.waker());
+            context.register(&self.inner.poll_rx)?;
             if !self.inner.rx_queue.lock().is_empty() {
                 self.inner.poll_rx.wake();
             }
         }
+        Ok(())
     }
 }
 

@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::{format, string::ToString, sync::Arc, vec};
-use core::{task::Context, time::Duration};
+use core::time::Duration;
 
 use bitmaps::Bitmap;
 use kclass::ClassDevice;
@@ -12,7 +12,7 @@ use kclass::prelude::{DriverError, Event, EventType, InputDevice, InputDeviceId,
 use kdevice::subscribe_device_removed;
 use kerrno::{KError, KResult};
 use khal::time::wall_time;
-use kpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;
 use kvfs::{
     DeviceFileOps, DeviceId, DirMapping, NodeFlags, NodeType, SimpleDir, SimpleFs, VfsFile,
@@ -65,6 +65,7 @@ impl Inner {
 pub struct EventDev {
     inner: Mutex<Inner>,
     ev_bits: Bitmap<{ EventType::COUNT as usize }>,
+    poll_set: PollSet,
 }
 
 impl EventDev {
@@ -89,6 +90,7 @@ impl EventDev {
                 key_state: Bitmap::new(),
             }),
             ev_bits,
+            poll_set: PollSet::new(),
         }
     }
 
@@ -112,6 +114,8 @@ impl EventDev {
         inner.device = None;
         inner.read_ahead = None;
         inner.key_state = Bitmap::new();
+        drop(inner);
+        self.poll_set.wake();
         true
     }
 
@@ -336,8 +340,13 @@ impl DeviceFileOps for EventDev {
         Pollable::poll(self)
     }
 
-    fn register_poll(&self, _file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
-        Pollable::register(self, context, events);
+    fn register_poll(
+        &self,
+        _file: &VfsFile,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
+        Pollable::register(self, context, events)
     }
 }
 
@@ -348,10 +357,18 @@ impl Pollable for EventDev {
         events
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if events.contains(IoEvents::IN) {
-            context.waker().wake_by_ref();
+            context.register(&self.poll_set)?;
+            // Input devices do not expose a callback-based wake source yet,
+            // so retain the existing prompt-repoll behavior for this waiter only.
+            context.wake_by_ref();
         }
+        Ok(())
     }
 }
 

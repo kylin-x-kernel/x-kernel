@@ -136,7 +136,9 @@ fn new_n_tty() -> Arc<NTtyDriver> {
             reader: Console,
             writer: Console,
             process_mode: if let Some(irq) = khal::console::interrupt_id() {
-                ProcessMode::External(Box::new(move |waker| register_irq_waker(irq, &waker)) as _)
+                ProcessMode::External(Box::new(move |context: &mut kpoll::PollContext<'_>| {
+                    register_irq_waker(irq, context)
+                }))
             } else {
                 ProcessMode::Manual
             },

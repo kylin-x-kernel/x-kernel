@@ -3,11 +3,11 @@
 // See LICENSES for license details.
 
 use alloc::{format, sync::Arc, vec, vec::Vec};
-use core::{sync::atomic::Ordering, task::Context};
+use core::sync::atomic::Ordering;
 
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
-use kpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 
 use super::{
     NETLINK_KOBJECT_UEVENT, NETLINK_ROUTE, NetlinkAddr, NetlinkPacket, NetlinkRxQueue,
@@ -196,9 +196,14 @@ impl Pollable for NetlinkSocket {
         events
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if events.contains(IoEvents::IN) && self.inner.rx_queue.lock().is_empty() {
-            self.inner.poll_rx.register(context.waker());
+            context.register(&self.inner.poll_rx)?;
         }
+        Ok(())
     }
 }

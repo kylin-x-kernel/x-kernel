@@ -3,10 +3,10 @@
 // See LICENSES for license details.
 
 use alloc::sync::{Arc, Weak};
-use core::{ops::Deref, sync::atomic::Ordering, task::Context};
+use core::{ops::Deref, sync::atomic::Ordering};
 
 use kerrno::{KError, KResult, LinuxError};
-use kpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use kprocess::{ControllingTerminal, Process, ProcessGroup, SetTerminalResult};
 use ksync::Mutex;
 use kvfs::{DeviceFileOps, NodeFlags, VfsFile, VfsFileBuilder, VfsInode};
@@ -237,8 +237,13 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
         Pollable::poll(self)
     }
 
-    fn register_poll(&self, _file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
-        Pollable::register(self, context, events);
+    fn register_poll(
+        &self,
+        _file: &VfsFile,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
+        Pollable::register(self, context, events)
     }
 }
 
@@ -251,13 +256,18 @@ impl<R: TtyRead, W: TtyWrite> Pollable for Tty<R, W> {
         events
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if !self.is_ptm {
-            self.terminal.job_control.register(context, events);
+            self.terminal.job_control.register(context, events)?;
         }
         if events.contains(IoEvents::IN) {
-            self.ldisc.lock().register_rx_waker(context.waker());
+            self.ldisc.lock().register_rx(context)?;
         }
+        Ok(())
     }
 }
 
@@ -301,9 +311,16 @@ impl DeviceFileOps for CurrentTty {
         }
     }
 
-    fn register_poll(&self, file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+    fn register_poll(
+        &self,
+        file: &VfsFile,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if let Ok(tty) = tty_file_private(file) {
-            tty.tty.register_poll(file, context, events);
+            tty.tty.register_poll(file, context, events)
+        } else {
+            Ok(())
         }
     }
 }

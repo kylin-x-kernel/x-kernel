@@ -5,11 +5,10 @@
 //! `pipe` object implementation.
 
 use alloc::{collections::VecDeque, sync::Arc};
-use core::task::Context;
 
 use kcred::Cred;
 use kerrno::{KError, KResult};
-use kpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksignal::{Signo, send_sig_current};
 use ksync::Mutex;
 use ktask::future::{block_on, poll_io};
@@ -201,13 +200,18 @@ impl Pollable for PipeObject {
         events
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if events.contains(IoEvents::IN) {
-            self.rd_wait.register(context.waker());
+            context.register(&self.rd_wait)?;
         }
         if events.contains(IoEvents::OUT) {
-            self.wr_wait.register(context.waker());
+            context.register(&self.wr_wait)?;
         }
+        Ok(())
     }
 }
 
@@ -292,10 +296,16 @@ impl FileOperations for PipeFileOperations {
         PipeObject::from_file(file).map_or(IoEvents::ERR, |pipe| Self::poll_for(file, &pipe))
     }
 
-    fn register_poll(&self, file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+    fn register_poll(
+        &self,
+        file: &VfsFile,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if let Ok(pipe) = PipeObject::from_file(file) {
-            pipe.register(context, events);
+            pipe.register(context, events)?;
         }
+        Ok(())
     }
 
     fn release(&self, _inode: &VfsInode, file: &VfsFile) -> VfsResult<()> {

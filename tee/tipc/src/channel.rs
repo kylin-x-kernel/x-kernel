@@ -9,10 +9,10 @@ use alloc::{
 use core::{
     any::Any,
     sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
-    task::Context,
 };
 
 use kerrno::{KError, KResult};
+use kpoll::{PollContext, PollRegisterError, PollRegistrations};
 use kspin::SpinNoIrq;
 use log::warn;
 use tipc_handle::HandleWaitState;
@@ -338,6 +338,7 @@ impl IpcChan {
 
     /// Waits synchronously until an asynchronous connect is accepted or closed.
     pub fn wait_connected(&self) -> KResult {
+        let mut registrations = PollRegistrations::new();
         loop {
             match self.state() {
                 IpcChanState::Connected => return Ok(()),
@@ -346,16 +347,22 @@ impl IpcChan {
                     // Register through a short-lived poll future to avoid a
                     // separate wait primitive in the core object.
                     ktask::future::block_on(core::future::poll_fn(|cx| {
-                        self.register(cx, HandleEventMask::READY | HandleEventMask::HUP);
+                        let mut context = registrations.context(cx);
+                        if self
+                            .register(&mut context, HandleEventMask::READY | HandleEventMask::HUP)
+                            .is_err()
+                        {
+                            return core::task::Poll::Ready(Err(KError::NoMemory));
+                        }
                         if matches!(
                             self.state(),
                             IpcChanState::Connected | IpcChanState::Disconnecting
                         ) {
-                            core::task::Poll::Ready(())
+                            core::task::Poll::Ready(Ok(()))
                         } else {
                             core::task::Poll::Pending
                         }
-                    }));
+                    }))?;
                 }
             }
         }
@@ -396,8 +403,12 @@ impl Handle for IpcChan {
         event
     }
 
-    fn register(&self, cx: &mut Context<'_>, _event_mask: HandleEventMask) {
-        self.handle.register(cx);
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        _event_mask: HandleEventMask,
+    ) -> Result<(), PollRegisterError> {
+        self.handle.register(context)
     }
 
     fn close(&self) {

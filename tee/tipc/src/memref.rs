@@ -3,9 +3,10 @@
 // See LICENSES for license details.
 
 use alloc::sync::Arc;
-use core::{any::Any, task::Context};
+use core::any::Any;
 
 use kerrno::{KError, KResult};
+use kpoll::{PollContext, PollRegisterError};
 use tipc_handle::HandleWaitState;
 
 use crate::{Handle, HandleEventMask, HandleKind};
@@ -122,8 +123,12 @@ impl Handle for MemRef {
         HandleEventMask::empty()
     }
 
-    fn register(&self, cx: &mut Context<'_>, _event_mask: HandleEventMask) {
-        self.handle.register(cx);
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        _event_mask: HandleEventMask,
+    ) -> Result<(), PollRegisterError> {
+        self.handle.register(context)
     }
 
     fn close(&self) {

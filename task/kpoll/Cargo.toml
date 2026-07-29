@@ -19,5 +19,6 @@ linux-raw-sys = { version = "0.11", default-features = false, features = [
     "general",
 ] }
 kspin = { workspace = true }
+smallvec = { workspace = true }
 unittest.workspace = true
 

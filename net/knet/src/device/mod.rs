@@ -56,7 +56,12 @@ pub trait NetDevice: Send + Sync {
         Err(kerrno::KError::OperationNotSupported)
     }
 
-    /// Register a waker for receive readiness.
+    /// Registers the aggregated Service RX/timeout waker for this device.
+    ///
+    /// Callers must install the same upstream source waker used by
+    /// [`crate::stack::service::Service::register_rx_waker`] (the Service
+    /// `timeout_poll`). Devices are not multi-waiter hubs; task fan-out stays
+    /// on that aggregated [`kpoll::PollSet`].
     fn register_rx_waker(&self, waker: &Waker);
 
     /// Synchronizes device state prepared by the control-plane adapter.

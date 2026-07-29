@@ -81,9 +81,9 @@ pub fn create_pty_pair() -> (Arc<PtyDriver>, Arc<PtyDriver>) {
         TtyConfig {
             reader: PtyReader::new(master_to_slave),
             writer: PtyWriter::new(slave_to_master, poll_rx_master),
-            process_mode: ProcessMode::External(Box::new(move |waker| {
-                poll_rx_slave.register(&waker)
-            })),
+            process_mode: ProcessMode::External(Box::new(
+                move |context: &mut kpoll::PollContext<'_>| context.register(&poll_rx_slave),
+            )),
         },
     );
 

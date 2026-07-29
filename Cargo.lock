@@ -2569,6 +2569,7 @@ dependencies = [
  "bitflags 2.13.1",
  "kspin 0.2.0-dev",
  "linux-raw-sys",
+ "smallvec",
  "unittest",
 ]
 
@@ -4874,6 +4875,7 @@ dependencies = [
  "kerrno",
  "khal",
  "klazy",
+ "kpoll",
  "kprocess",
  "kspin 0.2.0-dev",
  "ktask",

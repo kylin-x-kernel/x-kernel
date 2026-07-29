@@ -227,6 +227,7 @@ quote = "1.0"
 
 safe-mmio = "0.3.0"
 slab = { version = "0.4.9", default-features = false }
+smallvec = { version = "1.15", default-features = false, features = ["const_generics", "const_new", "union"] }
 smoltcp = { version = "=0.13.0", default-features = false }
 smccc = "0.2.3"
 strum = { version = "0.27", default-features = false, features = ["derive"] }

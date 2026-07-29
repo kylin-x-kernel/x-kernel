@@ -8,11 +8,10 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::task::Context;
 
 use hashbrown::HashMap;
 use kerrno::LinuxError;
-use kpoll::IoEvents;
+use kpoll::{IoEvents, PollContext, PollRegisterError};
 use memaddr::PhysAddrRange;
 
 use crate::{
@@ -206,8 +205,13 @@ impl FileOperations for ChrdevFileOperations {
         self.ops.poll(file)
     }
 
-    fn register_poll(&self, file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
-        self.ops.register_poll(file, context, events);
+    fn register_poll(
+        &self,
+        file: &VfsFile,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
+        self.ops.register_poll(file, context, events)
     }
 }
 
@@ -332,7 +336,14 @@ pub trait DeviceFileOps: Send + Sync {
     }
 
     /// Registers a poll waiter for an open device file.
-    fn register_poll(&self, _file: &VfsFile, _context: &mut Context<'_>, _events: IoEvents) {}
+    fn register_poll(
+        &self,
+        _file: &VfsFile,
+        _context: &mut PollContext<'_>,
+        _events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
+        Ok(())
+    }
 
     /// Returns the inode flags used when a filesystem materializes this device node.
     fn flags(&self) -> NodeFlags {

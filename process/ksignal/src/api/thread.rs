@@ -316,7 +316,8 @@ impl ThreadSignalManager {
         *self.saved_sigmask.lock() = Some(sigmask);
     }
 
-    pub(crate) fn take_saved_sigmask(&self) -> Option<SignalSet> {
+    /// Takes and clears the saved blocked-mask snapshot, if any.
+    pub fn take_saved_sigmask(&self) -> Option<SignalSet> {
         self.saved_sigmask.lock().take()
     }
 

@@ -14,7 +14,7 @@ use core::{
 
 use unittest::{assert, assert_eq, def_test};
 
-use super::{POLL_SET_CAPACITY, PollSet, PollSetGroup};
+use super::PollSet;
 
 fn new_counter() -> &'static AtomicUsize {
     Box::leak(Box::new(AtomicUsize::new(0)))
@@ -25,19 +25,13 @@ unsafe fn waker_clone(data: *const ()) -> RawWaker {
 }
 
 unsafe fn waker_wake(data: *const ()) {
-    // SAFETY: `data` is the waker data pointer installed by `make_waker`,
-    // which stores a `&'static AtomicUsize` leaked via `Box::leak`. It is
-    // non-null, properly aligned, valid for `'static`, and only mutated
-    // through atomic operations, so a shared reference is sound.
+    // SAFETY: `make_waker` installs a leaked, aligned `AtomicUsize` pointer.
     let counter = unsafe { &*(data as *const AtomicUsize) };
     counter.fetch_add(1, Ordering::SeqCst);
 }
 
 unsafe fn waker_wake_by_ref(data: *const ()) {
-    // SAFETY: `data` is the waker data pointer installed by `make_waker`,
-    // which stores a `&'static AtomicUsize` leaked via `Box::leak`. It is
-    // non-null, properly aligned, valid for `'static`, and only mutated
-    // through atomic operations, so a shared reference is sound.
+    // SAFETY: `make_waker` installs a leaked, aligned `AtomicUsize` pointer.
     let counter = unsafe { &*(data as *const AtomicUsize) };
     counter.fetch_add(1, Ordering::SeqCst);
 }
@@ -49,67 +43,129 @@ static WAKER_VTABLE: RawWakerVTable =
 
 fn make_waker(counter: &'static AtomicUsize) -> Waker {
     let raw = RawWaker::new(counter as *const _ as *const (), &WAKER_VTABLE);
-    // SAFETY: `raw` is built from `WAKER_VTABLE`, whose clone/wake/wake_by_ref
-    // callbacks return valid `RawWaker`s and whose drop callback is a no-op for
-    // the `'static` `AtomicUsize` data pointer that is never deallocated, so
-    // the `RawWaker` contract required by `Waker::from_raw` is upheld.
+    // SAFETY: all vtable operations preserve the leaked AtomicUsize pointer.
     unsafe { Waker::from_raw(raw) }
 }
 
 #[def_test]
-fn test_pollset_register_and_wake() {
+fn test_registration_drop_unregisters_waiter() {
     let set = PollSet::new();
     let counter = new_counter();
     let waker = make_waker(counter);
 
-    set.register(&waker);
-    set.register(&waker);
-
-    let woke = set.wake();
-    unittest::assert_eq!(woke, 1);
-    unittest::assert_eq!(counter.load(Ordering::SeqCst), 1);
+    let registration = set.register(&waker).unwrap();
+    assert!(registration.cancel());
+    assert_eq!(set.wake(), 0);
+    assert_eq!(counter.load(Ordering::SeqCst), 0);
 }
 
 #[def_test]
-fn test_pollset_capacity_eviction_drops_old() {
+fn test_same_waker_has_independent_registrations() {
     let set = PollSet::new();
-    let mut old_counters = Vec::new();
+    let counter = new_counter();
+    let waker = make_waker(counter);
 
-    for _ in 0..POLL_SET_CAPACITY {
+    let first = set.register(&waker).unwrap();
+    let _second = set.register(&waker).unwrap();
+    assert!(first.cancel());
+    assert_eq!(set.wake(), 1);
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+}
+
+/// More than the former 64-slot limit must remain registered.
+#[def_test]
+fn test_many_waiters_all_woken() {
+    const N: usize = 80;
+    let set = PollSet::new();
+    let mut registrations = Vec::new();
+    let mut counters = Vec::new();
+
+    for _ in 0..N {
         let counter = new_counter();
         let waker = make_waker(counter);
-        set.register(&waker);
-        old_counters.push(counter);
+        registrations.push(set.register(&waker).unwrap());
+        counters.push(counter);
     }
 
-    let counter_new = new_counter();
-    let waker_new = make_waker(counter_new);
-    set.register(&waker_new);
-
-    assert_eq!(old_counters[0].load(Ordering::SeqCst), 0);
-    assert_eq!(set.wake(), POLL_SET_CAPACITY);
-    assert_eq!(old_counters[0].load(Ordering::SeqCst), 0);
-    for counter in old_counters.iter().skip(1) {
+    assert_eq!(set.wake(), N);
+    for counter in &counters {
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
-    assert_eq!(counter_new.load(Ordering::SeqCst), 1);
 }
 
 #[def_test]
-fn test_pollset_group_wake_all() {
-    let mut group = PollSetGroup::new();
-    let set_a = PollSet::new();
-    let set_b = PollSet::new();
+fn test_old_guard_cannot_cancel_reused_slot() {
+    let set = PollSet::new();
+    let first_counter = new_counter();
+    let first = set.register(&make_waker(first_counter)).unwrap();
 
-    group.add(set_a);
-    group.add(set_b);
+    assert_eq!(set.wake(), 1);
+    let second_counter = new_counter();
+    let _second = set.register(&make_waker(second_counter)).unwrap();
+    drop(first);
 
+    assert_eq!(set.wake(), 1);
+    assert_eq!(first_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(second_counter.load(Ordering::SeqCst), 1);
+}
+
+struct ReentrantWake {
+    set: &'static PollSet,
+    count: AtomicUsize,
+}
+
+unsafe fn reentrant_clone(data: *const ()) -> RawWaker {
+    RawWaker::new(data, &REENTRANT_VTABLE)
+}
+
+unsafe fn reentrant_wake(data: *const ()) {
+    // SAFETY: the pointer is created from a leaked `ReentrantWake`.
+    let state = unsafe { &*(data as *const ReentrantWake) };
+    state.count.fetch_add(1, Ordering::SeqCst);
+    // Use core::assert: unittest macros return TestResult and cannot appear
+    // inside RawWaker callbacks.
+    core::assert!(state.set.wake() == 0);
+}
+
+unsafe fn reentrant_wake_by_ref(data: *const ()) {
+    // SAFETY: same invariant as `reentrant_wake`.
+    unsafe { reentrant_wake(data) };
+}
+
+unsafe fn reentrant_drop(_data: *const ()) {}
+
+static REENTRANT_VTABLE: RawWakerVTable = RawWakerVTable::new(
+    reentrant_clone,
+    reentrant_wake,
+    reentrant_wake_by_ref,
+    reentrant_drop,
+);
+
+#[def_test]
+fn test_wake_is_reentrant_after_unlock() {
+    let set = Box::leak(Box::new(PollSet::new()));
+    let state = Box::leak(Box::new(ReentrantWake {
+        set,
+        count: AtomicUsize::new(0),
+    }));
+    let raw = RawWaker::new(state as *const _ as *const (), &REENTRANT_VTABLE);
+    // SAFETY: the vtable operates on the leaked `ReentrantWake`.
+    let waker = unsafe { Waker::from_raw(raw) };
+    let _registration = set.register(&waker).unwrap();
+
+    assert_eq!(set.wake(), 1);
+    assert_eq!(state.count.load(Ordering::SeqCst), 1);
+}
+
+#[def_test]
+fn test_source_drop_wakes_waiter() {
     let counter = new_counter();
-    let waker = make_waker(counter);
-
-    group.register_all(&waker);
-
-    let woke = group.wake_all();
-    assert_eq!(woke, 2);
-    assert!(counter.load(Ordering::SeqCst) >= 2);
+    let registration = {
+        let set = PollSet::new();
+        let registration = set.register(&make_waker(counter)).unwrap();
+        drop(set);
+        registration
+    };
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+    assert!(!registration.cancel());
 }

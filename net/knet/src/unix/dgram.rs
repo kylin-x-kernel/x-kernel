@@ -4,13 +4,12 @@
 
 //! Unix datagram socket transport.
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::task::Context;
 
 use async_channel::TryRecvError;
 use async_trait::async_trait;
 use kerrno::{KError, KResult};
 use kio::{Read, Write};
-use kpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::{Mutex, RwLock};
 
 use crate::{
@@ -271,12 +270,17 @@ impl Pollable for DgramTransport {
         events
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if let Some((_, poll)) = self.rx.lock().as_ref()
             && events.contains(IoEvents::IN)
         {
-            poll.register(context.waker());
+            context.register(poll)?;
         }
+        Ok(())
     }
 }
 

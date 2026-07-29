@@ -18,6 +18,7 @@ bitflags.workspace = true
 khal.workspace = true
 kerrno.workspace = true
 klazy.workspace = true
+kpoll.workspace = true
 kprocess = { workspace = true, features = ["tipc"] }
 memaddr.workspace = true
 kspin.workspace = true

@@ -17,10 +17,9 @@ use core::{
     ops::Deref,
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering},
-    task::{Context, Poll},
+    task::Poll,
 };
 
-use futures_util::task::AtomicWaker;
 #[cfg(feature = "smp")]
 use kcpu_id_map::KCpuMaskExt;
 use kcpu_id_map::LogicalCpuId;
@@ -28,10 +27,11 @@ use kerrno::KResult;
 use khal::context::TaskContext;
 #[cfg(feature = "tls")]
 use khal::tls::TlsArea;
+use kpoll::{PollRegistrations, PollSet};
 use kspin::SpinNoIrq;
 use memaddr::{VirtAddr, align_up_4k};
 
-use crate::{KCpuMask, KTask, KtaskRef, future::block_on};
+use crate::{KCpuMask, KTask, KtaskRef, future::block_on, yield_now};
 
 enum TaskIdentity {
     Idle,
@@ -234,10 +234,10 @@ pub struct TaskInner {
     preempt_disable_count: AtomicUsize,
 
     interrupted: AtomicBool,
-    interrupt_waker: AtomicWaker,
+    interrupt_waker: PollSet,
 
     exit_code: AtomicI32,
-    wait_for_exit: AtomicWaker,
+    wait_for_exit: PollSet,
 
     kstack: Option<TaskStack>,
     ctx: TaskContextCell,
@@ -410,12 +410,26 @@ impl TaskInner {
     ///
     /// It will return immediately if the task has already exited (but not dropped).
     pub fn join(&self) -> i32 {
+        let mut registrations = PollRegistrations::new();
         block_on(poll_fn(|cx| {
-            if self.state() == TaskState::Exited {
-                return Poll::Ready(self.exit_code.load(Ordering::Acquire));
+            loop {
+                if self.state() == TaskState::Exited {
+                    return Poll::Ready(self.exit_code.load(Ordering::Acquire));
+                }
+                let mut context = registrations.context(cx);
+                if context.register(&self.wait_for_exit).is_err() {
+                    drop(context);
+                    // Under memory pressure, yield and retry rather than
+                    // busy-spinning on `wake_by_ref` without a registration.
+                    yield_now();
+                    continue;
+                }
+                drop(context);
+                if self.state() == TaskState::Exited {
+                    return Poll::Ready(self.exit_code.load(Ordering::Acquire));
+                }
+                return Poll::Pending;
             }
-            self.wait_for_exit.register(cx.waker());
-            Poll::Pending
         }))
     }
 
@@ -472,12 +486,19 @@ impl TaskInner {
 
     /// Polls whether the task has been interrupted.
     #[inline]
-    pub fn poll_interrupt(&self, cx: &Context) -> Poll<()> {
+    pub fn poll_interrupt(
+        &self,
+        context: &mut kpoll::PollContext<'_>,
+    ) -> Result<Poll<()>, kpoll::PollRegisterError> {
         if self.interrupted.swap(false, Ordering::AcqRel) {
-            Poll::Ready(())
+            Ok(Poll::Ready(()))
         } else {
-            self.interrupt_waker.register(cx.waker());
-            Poll::Pending
+            context.register(&self.interrupt_waker)?;
+            if self.interrupted.swap(false, Ordering::AcqRel) {
+                Ok(Poll::Ready(()))
+            } else {
+                Ok(Poll::Pending)
+            }
         }
     }
 
@@ -608,9 +629,9 @@ impl TaskInner {
             #[cfg(feature = "preempt")]
             preempt_disable_count: AtomicUsize::new(0),
             interrupted: AtomicBool::new(false),
-            interrupt_waker: AtomicWaker::new(),
+            interrupt_waker: PollSet::new(),
             exit_code: AtomicI32::new(0),
-            wait_for_exit: AtomicWaker::new(),
+            wait_for_exit: PollSet::new(),
             kstack: None,
             ctx: TaskContextCell::new(),
             #[cfg(feature = "tls")]

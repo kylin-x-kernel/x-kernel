@@ -7,11 +7,11 @@ use core::{
     future::poll_fn,
     ops::Range,
     sync::atomic::{AtomicBool, Ordering},
-    task::{Poll, Waker},
+    task::Poll,
 };
 
 use kerrno::{KError, KResult};
-use kpoll::PollSet;
+use kpoll::{PollContext, PollRegisterError, PollRegistrations, PollSet};
 use ksignal::SignalInfo;
 use ktask::future::block_on;
 use linux_raw_sys::general::{
@@ -28,6 +28,9 @@ const BUF_SIZE: usize = 80;
 
 type ReadBuf = Arc<ringbuf::StaticRb<u8, BUF_SIZE>>;
 
+type ExternalRegisterFn =
+    Box<dyn for<'a> Fn(&'a mut PollContext<'_>) -> Result<(), PollRegisterError> + Send + Sync>;
+
 /// How should we process inputs?
 pub enum ProcessMode {
     /// Process inputs only on call to `read`
@@ -42,7 +45,7 @@ pub enum ProcessMode {
     ///
     /// In this mode a dedicated task is spawned to dispatch_irq inputs. When there's
     /// nothing to read the argument is invoked to register rx waker.
-    External(Box<dyn Fn(Waker) + Send + Sync>),
+    External(ExternalRegisterFn),
     /// Do not process inputs.
     ///
     /// This is only used by the master side of pseudo tty. The argument is the
@@ -249,12 +252,22 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
                         let poll_rx = poll_rx.clone();
                         let poll_tx = poll_tx.clone();
                         move || {
+                            let mut registrations = PollRegistrations::new();
                             block_on(poll_fn(|cx| {
                                 while reader.poll() {
                                     poll_rx.wake();
                                 }
-                                poll_tx.register(cx.waker());
-                                register(cx.waker().clone());
+                                let mut context = registrations.context(cx);
+                                if let Err(error) = context
+                                    .register(&poll_tx)
+                                    .and_then(|()| register(&mut context))
+                                {
+                                    warn!("Failed to register TTY input waiter: {error}");
+                                    // Retry after scheduler yields; do not exit the reader.
+                                    context.wake_by_ref();
+                                    return Poll::Pending;
+                                }
+                                drop(context);
                                 while reader.poll() {
                                     poll_rx.wake();
                                 }
@@ -312,15 +325,18 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
         vmin == 0 || self.buf_rx.occupied_len() >= vmin
     }
 
-    pub fn register_rx_waker(&self, waker: &Waker) {
+    pub fn register_rx(&self, context: &mut PollContext<'_>) -> Result<(), PollRegisterError> {
         match &self.processor {
             Processor::Manual(_) => {
-                waker.wake_by_ref();
+                // Manual mode has no external wake source, so force an immediate
+                // recheck by waking the current waiter.
+                context.wake_by_ref();
             }
             Processor::External(set) | Processor::None(_, set) => {
-                set.register(waker);
+                context.register(set)?;
             }
         }
+        Ok(())
     }
 
     pub fn read(&mut self, buf: &mut [u8]) -> KResult<usize> {
@@ -368,10 +384,10 @@ mod ldisc_tests {
     use core::{
         mem,
         sync::atomic::{AtomicBool, Ordering},
-        task::Waker,
+        task::{Context, Waker},
     };
 
-    use kpoll::PollSet;
+    use kpoll::{PollRegistrations, PollSet};
     use kspin::SpinNoIrq;
     use linux_raw_sys::general::{
         ECHO, ICANON, IGNCR, ISIG, IXON, ONLCR, OPOST, speed_t, tcflag_t,
@@ -679,12 +695,15 @@ mod ldisc_tests {
     }
 
     #[def_test]
-    fn test_manual_register_rx_waker_wakes_immediately() {
+    fn test_manual_register_rx_wakes_immediately() {
         let (ldisc, _) = new_manual_ldisc(b"", |_| {});
         let wake_counter = Arc::new(WakeCounter::default());
         let waker = Waker::from(wake_counter.clone());
+        let cx = Context::from_waker(&waker);
+        let mut registrations = PollRegistrations::new();
+        let mut context = registrations.context(&cx);
 
-        ldisc.register_rx_waker(&waker);
+        ldisc.register_rx(&mut context).unwrap();
 
         assert!(wake_counter.woke.load(Ordering::Relaxed));
     }

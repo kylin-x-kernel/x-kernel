@@ -69,11 +69,28 @@ impl EthernetDevice {
         let _ = ktask::spawn_with_name(
             move || {
                 use core::{future::poll_fn, task::Poll};
+
+                use kpoll::PollRegistrations;
+
+                let mut registrations = PollRegistrations::new();
                 ktask::future::block_on(poll_fn(move |cx| {
-                    crate::poll_interfaces();
-                    irq_notify::register_source_waker(irq, NET_RX_IRQ_SOURCE, cx.waker());
-                    crate::poll_interfaces();
-                    Poll::<()>::Pending
+                    loop {
+                        crate::poll_interfaces();
+                        let mut context = registrations.context(cx);
+                        if irq_notify::register_source_waker(irq, NET_RX_IRQ_SOURCE, &mut context)
+                            .is_err()
+                        {
+                            drop(context);
+                            // Sleeping without an IRQ registration would stall
+                            // RX forever; yield and retry under memory pressure.
+                            ktask::yield_now();
+                            continue;
+                        }
+                        drop(context);
+                        // Recheck after register to close the IRQ/register race.
+                        crate::poll_interfaces();
+                        return Poll::<()>::Pending;
+                    }
                 }));
             },
             "knet-rx".into(),
@@ -404,8 +421,11 @@ impl NetDeviceOps for EthernetDevice {
     }
 
     fn register_rx_waker(&self, waker: &Waker) {
-        if let Some(irq) = self.inner.irq() {
-            irq_notify::register_source_waker(irq, NET_RX_IRQ_SOURCE, waker);
+        if let Some(irq) = self.inner.irq()
+            && irq_notify::bind_source_waker(irq, NET_RX_IRQ_SOURCE, waker).is_err()
+        {
+            // Binding failed; force a recheck so the caller can retry later.
+            waker.wake_by_ref();
         }
     }
 

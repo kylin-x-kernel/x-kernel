@@ -17,15 +17,12 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{
-    sync::atomic::{AtomicU32, AtomicU64, Ordering},
-    task::Context,
-};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use bytemuck::bytes_of;
 use kalloc::GlobalPage;
 use khal::mem::v2p;
-use kpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;
 use kvfs::{DeviceFileOps, MmapMapper, NodeFlags, VfsError, VfsFile, VfsResult};
 use memaddr::{PAGE_SIZE_4K, PhysAddrRange};
@@ -520,8 +517,13 @@ impl DeviceFileOps for Card0 {
         Pollable::poll(self)
     }
 
-    fn register_poll(&self, _file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
-        Pollable::register(self, context, events);
+    fn register_poll(
+        &self,
+        _file: &VfsFile,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
+        Pollable::register(self, context, events)
     }
 }
 
@@ -532,10 +534,15 @@ impl Pollable for Card0 {
         events
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if events.contains(IoEvents::IN) {
-            self.poll_rx.register(context.waker());
+            context.register(&self.poll_rx)?;
         }
+        Ok(())
     }
 }
 

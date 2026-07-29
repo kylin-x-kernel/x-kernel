@@ -4,10 +4,10 @@
 
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 
-use ::core::{net::SocketAddr, task::Context};
+use ::core::net::SocketAddr;
 use kerrno::{KError, KResult, LinuxError, k_bail};
 use kio::prelude::*;
-use kpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 
 use super::{
     IPV4_HEADER_LEN, UDP_HEADER_LEN, UDP_MAX_PAYLOAD_LEN,
@@ -558,12 +558,16 @@ impl Pollable for UdpSocket {
         self.state().readiness(events)
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if events.intersects(IoEvents::IN | IoEvents::RDNORM | IoEvents::RDBAND) {
-            self.state().register_rx_waker(context.waker());
+            self.state().register_rx_waker(context)?;
         }
         if events.intersects(IoEvents::OUT | IoEvents::WRNORM | IoEvents::WRBAND) {
-            self.state().register_tx_waker(context.waker());
+            self.state().register_tx_waker(context)?;
         }
         // Network progress and socket-local state changes use separate wake
         // sources, so a read-write waiter is intentionally registered in both.
@@ -578,8 +582,9 @@ impl Pollable for UdpSocket {
                 | IoEvents::HUP
                 | IoEvents::RDHUP,
         ) {
-            self.state().register_waiter(context.waker(), events);
+            self.state().register_waiter(context, events)?;
         }
+        Ok(())
     }
 }
 

@@ -10,7 +10,7 @@ use core::{
 };
 
 use kerrno::KResult;
-use kpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use ktask::future::{block_on, poll_io, timeout};
 
 use crate::{
@@ -81,14 +81,22 @@ impl GeneralOptions {
         self.device_mask.load(Ordering::Acquire)
     }
 
-    /// Register a waker for receive readiness.
-    pub fn register_rx_waker(&self, waker: &Waker) {
-        SERVICE.lock().register_rx_waker(self.device_mask(), waker);
+    /// Registers the current poll operation for receive readiness.
+    pub fn register_rx_waker(
+        &self,
+        context: &mut PollContext<'_>,
+    ) -> Result<Waker, PollRegisterError> {
+        SERVICE
+            .lock()
+            .register_rx_waker(self.device_mask(), context)
     }
 
-    /// Register a waker for network progress that may free transmit capacity.
-    pub fn register_tx_waker(&self, waker: &Waker) {
-        SERVICE.lock().register_rx_waker(u32::MAX, waker);
+    /// Registers for network progress that may free transmit capacity.
+    pub fn register_tx_waker(
+        &self,
+        context: &mut PollContext<'_>,
+    ) -> Result<Waker, PollRegisterError> {
+        SERVICE.lock().register_rx_waker(u32::MAX, context)
     }
 
     /// Poll for send readiness and run the provided operation.

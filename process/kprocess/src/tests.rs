@@ -9,7 +9,7 @@
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use core::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-    task::{RawWaker, RawWakerVTable, Waker},
+    task::{Context, RawWaker, RawWakerVTable, Waker},
 };
 
 use kcred::initial_cred;
@@ -17,6 +17,7 @@ use khal::{
     mem::{PAGE_SIZE_4K, VirtAddr},
     paging::MappingFlags,
 };
+use kpoll::PollRegistrations;
 use ktask::{TaskInner, prepare_task};
 use memspace::VmRuntimeRef;
 use unittest::{assert, assert_eq, def_test};
@@ -80,6 +81,13 @@ fn counter_waker(counter: &'static AtomicUsize) -> Waker {
     // SAFETY: `raw` is built from callbacks that preserve the `RawWaker`
     // contract for a leaked `'static` `AtomicUsize`.
     unsafe { Waker::from_raw(raw) }
+}
+
+fn register_poll_set(set: &kpoll::PollSet, waker: &Waker) -> PollRegistrations {
+    let mut registrations = PollRegistrations::new();
+    let cx = Context::from_waker(waker);
+    registrations.context(&cx).register(set).unwrap();
+    registrations
 }
 
 struct ExitAccountingObserver {
@@ -986,17 +994,19 @@ fn test_process_exit_notifies_pidfd_and_parent_waiters() {
 
     let parent_counter = new_wake_counter();
     let parent_waker = counter_waker(parent_counter);
-    init.child_exit_event().register(&parent_waker);
+    let _parent_registration = register_poll_set(init.child_exit_event(), &parent_waker);
 
     let child_counter = new_wake_counter();
     let child_waker = counter_waker(child_counter);
-    child.exit_event().register(&child_waker);
+    let _child_registration = register_poll_set(child.exit_event(), &child_waker);
 
     let accounting_observer = new_exit_accounting_observer(child.clone(), 77, 88);
     let accounting_parent_waker = accounting_waker(accounting_observer);
-    init.child_exit_event().register(&accounting_parent_waker);
+    let _accounting_parent_registration =
+        register_poll_set(init.child_exit_event(), &accounting_parent_waker);
     let accounting_child_waker = accounting_waker(accounting_observer);
-    child.exit_event().register(&accounting_child_waker);
+    let _accounting_child_registration =
+        register_poll_set(child.exit_event(), &accounting_child_waker);
 
     process_exit::finalize_process_exit(&child);
 
@@ -1033,8 +1043,8 @@ fn test_complete_process_exit_wakes_parent_after_child_is_waitable() {
     let child = init.fork(579);
 
     let observer = new_child_exit_wake_observer(init.clone(), child.clone());
-    init.child_exit_event()
-        .register(&child_exit_waker(observer));
+    let observer_waker = child_exit_waker(observer);
+    let _observer_registration = register_poll_set(init.child_exit_event(), &observer_waker);
 
     let autoreap = process_exit::complete_process_exit(&child);
 
@@ -1200,7 +1210,7 @@ fn test_finalize_process_exit_is_idempotent_after_autoreap() {
 
     let child_counter = new_wake_counter();
     let child_waker = counter_waker(child_counter);
-    child.exit_event().register(&child_waker);
+    let _child_registration = register_poll_set(child.exit_event(), &child_waker);
 
     process_exit::finalize_process_exit_with_publication(
         &child,

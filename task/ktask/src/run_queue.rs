@@ -15,10 +15,10 @@ use core::{
     task::{Context, Poll},
 };
 
-use futures_util::task::AtomicWaker;
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use khal::percpu::this_cpu_id;
 use klazy::Once;
+use kpoll::{PollRegistrations, PollSet};
 use ksched::BaseScheduler;
 use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 use lazyinit::LazyInit;
@@ -199,7 +199,7 @@ macro_rules! percpu_static {
 percpu_static! {
     RUN_QUEUE: LazyInit<RunQueue> = LazyInit::new(),
     EXITED_TASKS: VecDeque<KtaskRef> = VecDeque::new(),
-    WAIT_FOR_EXIT: AtomicWaker = AtomicWaker::new(),
+    WAIT_FOR_EXIT: LazyInit<PollSet> = LazyInit::new(),
     IDLE_TASK: LazyInit<KtaskRef> = LazyInit::new(),
     /// Stores the weak reference to the previous task that is running on this CPU.
     #[cfg(feature = "smp")]
@@ -260,10 +260,10 @@ fn current_exited_tasks_mut() -> &'static mut VecDeque<KtaskRef> {
 }
 
 #[inline(always)]
-fn current_wait_for_exit() -> &'static AtomicWaker {
-    // SAFETY: the current CPU's percpu `WAIT_FOR_EXIT` waker is initialized
+fn current_wait_for_exit() -> &'static PollSet {
+    // SAFETY: the current CPU's percpu `WAIT_FOR_EXIT` PollSet is initialized
     // during scheduler bring-up before GC or exit paths use it.
-    unsafe { WAIT_FOR_EXIT.current_ref_raw() }
+    unsafe { WAIT_FOR_EXIT.current_ref_raw().get_unchecked() }
 }
 
 #[inline(always)]
@@ -790,13 +790,20 @@ impl RunQueue {
     /// The run queue is initialized with a per-CPU gc task in its scheduler.
     fn new(cpu_id: LogicalCpuId) -> Self {
         let gc_task = TaskInner::new_internal(
-            || block_on(poll_fn(poll_gc)),
+            || {
+                let mut registrations = PollRegistrations::new();
+                block_on(poll_fn(move |cx| poll_gc(cx, &mut registrations)))
+            },
             "gc".into(),
             kbuild_config::TASK_STACK_SIZE,
         )
         .into_arc();
         // gc task should be pinned to the current CPU.
         gc_task.set_cpumask(KCpuMask::one_shot_logical(cpu_id));
+
+        WAIT_FOR_EXIT.with_current(|wait_for_exit| {
+            wait_for_exit.init_once(PollSet::new());
+        });
 
         let mut rq = Self {
             cpu_id,
@@ -1026,7 +1033,7 @@ impl RunQueue {
     }
 }
 
-fn poll_gc(cx: &mut Context<'_>) -> Poll<()> {
+fn poll_gc(cx: &mut Context<'_>, registrations: &mut PollRegistrations) -> Poll<()> {
     loop {
         // Drop all exited tasks and recycle resources.
         let n = EXITED_TASKS.with_current(|exited_tasks| exited_tasks.len());
@@ -1059,7 +1066,15 @@ fn poll_gc(cx: &mut Context<'_>) -> Poll<()> {
         // use `current_ref_raw` to get the `WAIT_FOR_EXIT`'s reference here to avoid
         // the use of `NoPreemptGuard`. Since gc task is pinned to the current
         // CPU, there is no affection if the gc task is preempted during the process.
-        current_wait_for_exit().register(cx.waker());
+        let mut context = registrations.context(cx);
+        if context.register(current_wait_for_exit()).is_err() {
+            drop(context);
+            // Retry after yielding rather than sleeping without a registration
+            // or busy-spinning on `wake_by_ref`.
+            crate::yield_now();
+            continue;
+        }
+        drop(context);
 
         // New tasks might be added during the above section, recheck it to
         // prevent us from sleeping indefinitely.

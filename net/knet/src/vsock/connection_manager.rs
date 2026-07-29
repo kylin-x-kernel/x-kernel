@@ -6,7 +6,7 @@
 use alloc::{collections::BTreeMap, sync::Arc};
 
 use kerrno::{KError, KResult, k_bail};
-use kpoll::PollSet;
+use kpoll::{PollContext, PollRegisterError, PollSet};
 use ksync::{Mutex, static_lock};
 use ktask::WaitQueue;
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
@@ -75,13 +75,19 @@ impl Connection {
     }
 
     /// Register a waker for receive Events
-    pub fn register_rx_poll(&mut self, context: &mut core::task::Context<'_>) {
-        self.rx_wakers.register(context.waker());
+    pub fn register_rx_poll(
+        &mut self,
+        context: &mut PollContext<'_>,
+    ) -> Result<(), PollRegisterError> {
+        context.register(&self.rx_wakers)
     }
 
     /// Register a waker for connect Events
-    pub fn register_connect_poll(&mut self, _context: &mut core::task::Context<'_>) {
-        self.connect_wakers.register(_context.waker());
+    pub fn register_connect_poll(
+        &mut self,
+        context: &mut PollContext<'_>,
+    ) -> Result<(), PollRegisterError> {
+        context.register(&self.connect_wakers)
     }
 
     /// Get the free space in the receive buffer
@@ -251,8 +257,11 @@ impl ListenQueue {
         self.wakers.wake();
     }
 
-    pub fn register_poll(&mut self, context: &mut core::task::Context<'_>) {
-        self.wakers.register(context.waker());
+    pub fn register_poll(
+        &mut self,
+        context: &mut PollContext<'_>,
+    ) -> Result<(), PollRegisterError> {
+        context.register(&self.wakers)
     }
 }
 

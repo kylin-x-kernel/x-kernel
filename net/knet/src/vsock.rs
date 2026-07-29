@@ -15,13 +15,12 @@ pub(crate) mod connection_manager;
 pub(crate) mod stream;
 
 use alloc::boxed::Box;
-use core::task::Context;
 
 use enum_dispatch::enum_dispatch;
 pub use kclass::prelude::{VsockAddr, VsockConnId};
 use kerrno::{KError, KResult};
 use kio::{IoBuf, IoBufMut, Read, Write};
-use kpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 
 pub use self::stream::VsockStreamTransport;
 use crate::{
@@ -57,7 +56,11 @@ impl Pollable for VsockTransport {
         }
     }
 
-    fn register(&self, context: &mut core::task::Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         match self {
             VsockTransport::Stream(stream) => stream.register(context, events),
             // VsockTransport::Dgram(dgram) => dgram.register(context, events),
@@ -144,7 +147,11 @@ impl Pollable for VsockSocket {
         self.transport.poll()
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
-        self.transport.register(context, events);
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
+        self.transport.register(context, events)
     }
 }

@@ -3,10 +3,11 @@
 // See LICENSES for license details.
 
 use alloc::{collections::VecDeque, string::String, sync::Arc};
-use core::{any::Any, task::Context};
+use core::any::Any;
 
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
+use kpoll::{PollContext, PollRegisterError};
 use kspin::SpinNoIrq;
 use log::*;
 use tipc_handle::HandleWaitState;
@@ -191,8 +192,12 @@ impl Handle for IpcPort {
         event
     }
 
-    fn register(&self, cx: &mut Context<'_>, _event_mask: HandleEventMask) {
-        self.handle.register(cx);
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        _event_mask: HandleEventMask,
+    ) -> Result<(), PollRegisterError> {
+        self.handle.register(context)
     }
 
     fn close(&self) {

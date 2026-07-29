@@ -13,6 +13,7 @@ use core::{
 };
 
 use kerrno::KError;
+use kpoll::{PollRegisterError, PollRegistrations};
 use kspin::{NoPreemptIrqSave, SpinNoIrq};
 
 use crate::{KtaskRef, WeakKtaskRef, current, current_run_queue, select_wake_run_queue};
@@ -44,7 +45,10 @@ impl Wake for KWaker {
 
     fn wake_by_ref(self: &Arc<Self>) {
         if let Some(task) = self.task.upgrade() {
-            *self.woke.lock() = true;
+            {
+                let mut woke = self.woke.lock();
+                *woke = true;
+            }
             select_wake_run_queue::<NoPreemptIrqSave>(&task).unblock_task(task, true);
         }
     }
@@ -95,19 +99,34 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
 
 /// Error returned by [`interruptible`].
 #[derive(Debug, PartialEq, Eq)]
-pub struct Interrupted;
+pub struct Interrupted(InterruptCause);
+
+#[derive(Debug, PartialEq, Eq)]
+enum InterruptCause {
+    Signal,
+    Registration(PollRegisterError),
+}
 
 impl fmt::Display for Interrupted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "interrupted")
+        match self.0 {
+            InterruptCause::Signal => write!(f, "interrupted"),
+            InterruptCause::Registration(error) => write!(f, "{error}"),
+        }
     }
 }
 
 impl core::error::Error for Interrupted {}
 
 impl From<Interrupted> for KError {
-    fn from(_: Interrupted) -> Self {
-        KError::Interrupted
+    fn from(error: Interrupted) -> Self {
+        match error.0 {
+            InterruptCause::Signal => KError::Interrupted,
+            InterruptCause::Registration(
+                PollRegisterError::NoMemory | PollRegisterError::IdExhausted,
+            ) => KError::NoMemory,
+            InterruptCause::Registration(PollRegisterError::InvalidState) => KError::InvalidInput,
+        }
     }
 }
 
@@ -115,10 +134,17 @@ impl From<Interrupted> for KError {
 pub async fn interruptible<F: IntoFuture>(f: F) -> Result<F::Output, Interrupted> {
     let mut f = pin!(f.into_future());
     let curr = current();
+    let mut registrations = PollRegistrations::new();
     poll_fn(|cx| {
-        if curr.poll_interrupt(cx).is_ready() {
-            return Poll::Ready(Err(Interrupted));
+        let mut context = registrations.context(cx);
+        match curr.poll_interrupt(&mut context) {
+            Ok(Poll::Ready(())) => return Poll::Ready(Err(Interrupted(InterruptCause::Signal))),
+            Ok(Poll::Pending) => {}
+            Err(error) => {
+                return Poll::Ready(Err(Interrupted(InterruptCause::Registration(error))));
+            }
         }
+        drop(context);
         f.as_mut().poll(cx).map(Ok)
     })
     .await

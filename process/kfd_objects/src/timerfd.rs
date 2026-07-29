@@ -5,16 +5,12 @@
 //! `timerfd` object implementation.
 
 use alloc::{sync::Arc, task::Wake};
-use core::{
-    mem::size_of,
-    task::{Context, Waker},
-    time::Duration,
-};
+use core::{mem::size_of, task::Waker, time::Duration};
 
 use kcred::Cred;
 use kerrno::{KError, KResult};
 use khal::time::{self, monotonic_time, wall_time};
-use kpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use kspin::SpinNoIrq;
 use ktask::future::{TimerHandle, block_on, cancel_timer, poll_io, register_timer};
 use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
@@ -235,10 +231,15 @@ impl Pollable for TimerFd {
         events
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if events.contains(IoEvents::IN) {
-            self.poll_rx.register(context.waker());
+            context.register(&self.poll_rx)?;
         }
+        Ok(())
     }
 }
 
@@ -289,10 +290,16 @@ impl FileOperations for TimerfdFops {
         Self::timerfd(file).map_or(IoEvents::ERR, |timerfd| timerfd.poll())
     }
 
-    fn register_poll(&self, file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+    fn register_poll(
+        &self,
+        file: &VfsFile,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if let Ok(timerfd) = Self::timerfd(file) {
-            timerfd.register(context, events);
+            timerfd.register(context, events)?;
         }
+        Ok(())
     }
 }
 

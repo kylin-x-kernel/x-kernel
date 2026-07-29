@@ -4,11 +4,10 @@
 
 //! Vsock stream socket implementation.
 use alloc::sync::Arc;
-use core::task::Context;
 
 use kerrno::{KError, KResult, k_bail, k_err_type};
 use kio::prelude::*;
-use kpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use ksync::Mutex;
 
 use super::connection_manager::*;
@@ -386,9 +385,13 @@ impl Pollable for VsockStreamTransport {
         events
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         let Ok(conn) = self.get_connection() else {
-            return;
+            return Ok(());
         };
 
         // Register all potentially relevant wakers unconditionally, without
@@ -397,17 +400,18 @@ impl Pollable for VsockStreamTransport {
         // could cause the wrong waker (or no waker at all) to be registered
         // and leave the caller stuck forever.  Unused wakers simply never fire.
         if events.contains(IoEvents::IN) {
-            conn.lock().register_rx_poll(context);
+            conn.lock().register_rx_poll(context)?;
             // Also register on the listen queue for accept() support.
             if let Some(conn_id) = *self.conn_id.lock()
                 && let Some(queue) = VSOCK_CONN_MANAGER
                     .lock()
                     .get_listen_queue(conn_id.local_port)
             {
-                queue.lock().register_poll(context);
+                queue.lock().register_poll(context)?;
             }
         }
-        conn.lock().register_connect_poll(context);
+        conn.lock().register_connect_poll(context)?;
+        Ok(())
     }
 }
 

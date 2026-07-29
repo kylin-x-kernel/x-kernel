@@ -11,13 +11,12 @@ use alloc::sync::Arc;
 use core::{
     any::Any,
     sync::atomic::{AtomicU32, Ordering},
-    task::Context,
 };
 
 use iov_iter::{IovIterDest, IovIterSource, iov_iter_kvec_dest, iov_iter_kvec_source};
 use kcred::Cred;
 use kerrno::LinuxError;
-use kpoll::IoEvents;
+use kpoll::{IoEvents, PollContext, PollRegisterError};
 use linux_raw_sys::general::O_ACCMODE;
 use log::warn;
 
@@ -252,9 +251,10 @@ pub trait FileOperations: Send + Sync + 'static {
     fn register_poll(
         &self,
         _file: &VfsFile,
-        _context: &mut core::task::Context<'_>,
+        _context: &mut PollContext<'_>,
         _events: IoEvents,
-    ) {
+    ) -> Result<(), PollRegisterError> {
+        Ok(())
     }
 }
 
@@ -929,7 +929,11 @@ impl VfsFile {
     }
 
     /// Registers a poll waiter for this open file.
-    pub fn register_poll(&self, context: &mut Context<'_>, events: IoEvents) {
+    pub fn register_poll(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         self.operations().register_poll(self, context, events)
     }
 }

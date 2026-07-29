@@ -11,7 +11,7 @@ use core::{
 
 use kerrno::{KError, KResult, LinuxError};
 use khal::time::{NANOS_PER_MICROS, TimeValue, monotonic_time, monotonic_time_nanos};
-use kpoll::PollSet;
+use kpoll::{PollContext, PollRegisterError, PollSet};
 use ktask::future::sleep;
 use smoltcp::{
     iface::{Interface, SocketSet},
@@ -155,8 +155,13 @@ impl Service {
             .map_or(u32::MAX, |rule| 1u32 << rule.dev)
     }
 
-    pub fn register_rx_waker(&mut self, mask: u32, waker: &Waker) {
-        self.timeout_poll.register(waker);
+    pub fn register_rx_waker(
+        &mut self,
+        mask: u32,
+        context: &mut PollContext<'_>,
+    ) -> Result<Waker, PollRegisterError> {
+        context.register(&self.timeout_poll)?;
+        let source_waker = Waker::from(self.timeout_poll.clone());
 
         let current = now();
         let next = self.iface.poll_at(current, &SOCKET_SET.inner.lock());
@@ -182,7 +187,7 @@ impl Service {
                 if fut.as_mut().poll(&mut cx).is_ready() {
                     self.timeout_deadline = None;
                     self.timeout_poll.wake();
-                    return;
+                    return Ok(source_waker);
                 } else {
                     self.timeout = Some(fut);
                 }
@@ -194,9 +199,12 @@ impl Service {
 
         for (i, device) in self.router.devices.iter().enumerate() {
             if mask & (1 << i) != 0 {
-                device.register_rx_waker(waker);
+                // Same timeout_poll-backed waker every time; loopback/ethernet
+                // store this single upstream kick, not per-task waiters.
+                device.register_rx_waker(&source_waker);
             }
         }
+        Ok(source_waker)
     }
 
     pub fn sync_netlink(&mut self, state: &RtnetlinkState) {

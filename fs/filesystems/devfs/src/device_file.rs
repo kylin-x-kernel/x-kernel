@@ -8,7 +8,7 @@
 use alloc::{string::String, sync::Arc};
 
 use inherit_methods_macro::inherit_methods;
-use kpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use kvfs::{
     Dentry, DeviceFileOps, DeviceId, DirMapping, InodeOperations, Metadata, MetadataUpdate,
     MmapMapper, NodeFlags, NodePermission, NodeType, SimpleDirLookup, SimpleFs, SimpleFsNode,
@@ -118,7 +118,13 @@ impl Pollable for DeviceFile {
         IoEvents::IN | IoEvents::OUT
     }
 
-    fn register(&self, _context: &mut core::task::Context<'_>, _events: IoEvents) {}
+    fn register(
+        &self,
+        _context: &mut PollContext<'_>,
+        _events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
+        Ok(())
+    }
 }
 
 pub(crate) fn device_dentry(

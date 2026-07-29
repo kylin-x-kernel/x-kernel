@@ -88,12 +88,19 @@ timer runtime 回调与 `read/poll/settime` 可能并发发生。
 
 - `SpinNoPreempt<HashMap<...>>` 保护 interest table；
 - `SpinNoPreempt<VecDeque<...>>` 保护 ready queue；
+- `Mutex<()>` ctl lock 串行化 `ADD` / `MOD` / `DEL` 的 table 更新、
+  registration 重装和失败回滚；
+- 每个 `EpollInterest` 内的 `SpinNoPreempt` config 保护 event mask、user data
+  和 trigger mode 的原地更新；
 - `AtomicBool` 跟踪 interest 是否已经入队；
 - `PollSet` 维护 `epoll_wait` 侧唤醒。
 
 watched file 的 fd table 解析现在由 syscall adapter 完成。
 因此 backend 只需围绕 interest 键值稳定性、ready queue 去重和
 watched file 失效后的清理维护同一个状态机。
+`MOD` 保持 interest identity 稳定，只重置配置和 registration；失败时在同一个
+ctl lock 临界区内恢复旧配置，避免 ready queue 或旧 source wake 引用到被替换的
+旧对象，也避免并发 `MOD` rollback 覆盖另一个成功更新。
 
 ## 主要风险
 
@@ -110,7 +117,7 @@ watched file 失效后的清理维护同一个状态机。
 | T-09 | pipe 写端在无 reader 时未正确抛出 `SIGPIPE` / `BrokenPipe` | 中 | 在写路径同一锁内检查 `readers == 0`，并统一走 signal + error 分支 |
 | T-10 | `signalfd` mask 更新与 `read/poll` 观察不一致 | 中 | mask 经 `RwLock` 更新，并在更新后唤醒 poller 重新观察 |
 | T-11 | `signalfd` 将不可捕获信号暴露给用户态 fd 语义 | 低 | syscall adapter 统一移除 `SIGKILL` / `SIGSTOP` |
-| T-12 | `epoll` ready queue 去重失效导致重复唤醒、事件风暴或 `MOD` 后丢失事件 | 中 | `in_ready_queue` 位与 ready queue 统一维护；`MOD` 替换已入队 interest 时同步替换 ready queue 中的 `Weak` |
+| T-12 | `epoll` ready queue 去重失效导致重复唤醒、事件风暴或 `MOD` 后返回旧事件配置 | 中 | `in_ready_queue` 位与 ready queue 统一维护；`MOD` 原地更新稳定 interest identity 并重装 registration |
 | T-13 | `epoll` oneshot / edge-triggered 状态机错误 | 高 | `TriggerMode` 集中建模并在消费路径统一更新 |
 | T-14 | watched file 失效后 interest 清理不完整 | 中 | ready 消费路径在 `Weak` 升级失败后立即回收 interest |
 | T-15 | 内核任务创建匿名 fd 时因隐式读取当前用户凭据而 panic | 高 | 构造函数调用 `current_cred()`，但当前 task 不是 `Thread` | 构造函数接收显式 `Arc<Cred>`；syscall adapter 传当前快照，内核调用者选择初始或其它明确凭据 |

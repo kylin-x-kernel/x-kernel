@@ -4,8 +4,7 @@
 
 //! Socket wait sets and readiness calculation.
 
-use ::core::task::Waker;
-use kpoll::{IoEvents, PollSet};
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet};
 
 use super::state::UdpSocketLifecycle;
 
@@ -27,19 +26,24 @@ impl UdpSocketWaiters {
         }
     }
 
-    pub(crate) fn register(&self, waker: &Waker, events: IoEvents) {
+    pub(crate) fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if events.intersects(IoEvents::IN | IoEvents::RDNORM | IoEvents::RDBAND) {
-            self.read.register(waker);
+            context.register(&self.read)?;
         }
         if events.intersects(IoEvents::OUT | IoEvents::WRNORM | IoEvents::WRBAND) {
-            self.write.register(waker);
+            context.register(&self.write)?;
         }
         if events.contains(IoEvents::ERR) {
-            self.error.register(waker);
+            context.register(&self.error)?;
         }
         if events.intersects(IoEvents::HUP | IoEvents::RDHUP) {
-            self.hup.register(waker);
+            context.register(&self.hup)?;
         }
+        Ok(())
     }
 
     pub(crate) fn wake_read(&self) {
@@ -83,9 +87,10 @@ mod tests {
     use alloc::boxed::Box;
     use core::{
         sync::atomic::{AtomicUsize, Ordering},
-        task::{RawWaker, RawWakerVTable, Waker},
+        task::{Context, RawWaker, RawWakerVTable, Waker},
     };
 
+    use kpoll::PollRegistrations;
     use unittest::{assert_eq, def_test};
 
     use super::*;
@@ -143,9 +148,15 @@ mod tests {
         let second_counter = new_counter();
         let first_waker = make_waker(first_counter);
         let second_waker = make_waker(second_counter);
+        let first_cx = Context::from_waker(&first_waker);
+        let second_cx = Context::from_waker(&second_waker);
+        let mut first_regs = PollRegistrations::new();
+        let mut second_regs = PollRegistrations::new();
+        let mut first_poll = first_regs.context(&first_cx);
+        let mut second_poll = second_regs.context(&second_cx);
 
-        waiters.register(&first_waker, IoEvents::IN);
-        waiters.register(&second_waker, IoEvents::IN);
+        waiters.register(&mut first_poll, IoEvents::IN).unwrap();
+        waiters.register(&mut second_poll, IoEvents::IN).unwrap();
         waiters.wake_read();
 
         assert_eq!(first_counter.load(Ordering::SeqCst), 1);
@@ -164,9 +175,15 @@ mod tests {
         let hup_counter = new_counter();
         let read_waker = make_waker(read_counter);
         let hup_waker = make_waker(hup_counter);
+        let read_cx = Context::from_waker(&read_waker);
+        let hup_cx = Context::from_waker(&hup_waker);
+        let mut read_regs = PollRegistrations::new();
+        let mut hup_regs = PollRegistrations::new();
+        let mut read_poll = read_regs.context(&read_cx);
+        let mut hup_poll = hup_regs.context(&hup_cx);
 
-        waiters.register(&read_waker, IoEvents::IN);
-        waiters.register(&hup_waker, IoEvents::HUP);
+        waiters.register(&mut read_poll, IoEvents::IN).unwrap();
+        waiters.register(&mut hup_poll, IoEvents::HUP).unwrap();
         waiters.wake_hup();
 
         assert_eq!(read_counter.load(Ordering::SeqCst), 0);

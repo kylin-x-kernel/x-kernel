@@ -2,10 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{collections::BTreeMap, sync::Arc};
-use core::{any::Any, task::Context};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use core::any::Any;
 
 use kerrno::{KError, KResult};
+use kpoll::{PollContext, PollRegisterError};
 use kspin::SpinNoIrq;
 
 use crate::{Handle, HandleEventMask, HandleKind, HandleWaitState};
@@ -144,7 +145,8 @@ impl HandleSet {
     }
 
     pub(crate) fn remove_handle_id(&self, handle_id: i32) {
-        if self.entries.lock().remove(&handle_id).is_some() {
+        let removed = self.entries.lock().remove(&handle_id).is_some();
+        if removed {
             self.handle.notify();
         }
     }
@@ -184,11 +186,27 @@ impl Handle for HandleSet {
         }
     }
 
-    fn register(&self, cx: &mut Context<'_>, _event_mask: HandleEventMask) {
-        self.handle.register(cx);
-        for entry in self.entries.lock().values() {
-            entry.handle.register(cx, entry.event);
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        _event_mask: HandleEventMask,
+    ) -> Result<(), PollRegisterError> {
+        self.handle.register(context)?;
+        let entries = {
+            let entries = self.entries.lock();
+            let mut snapshot = Vec::new();
+            snapshot
+                .try_reserve(entries.len())
+                .map_err(|_| PollRegisterError::NoMemory)?;
+            for entry in entries.values() {
+                snapshot.push((Arc::clone(&entry.handle), entry.event));
+            }
+            snapshot
+        };
+        for (handle, event) in entries {
+            handle.register(context, event)?;
         }
+        Ok(())
     }
 
     fn close(&self) {

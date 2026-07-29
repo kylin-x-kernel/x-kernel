@@ -9,6 +9,7 @@ use core::{future::poll_fn, task::Poll};
 use kerrno::{KError, KResult, LinuxError};
 use kfd_objects::signalfd::{Signalfd, SignalfdFlags};
 use khal::uspace::UserContext;
+use kpoll::PollRegistrations;
 use kprocess::Pid;
 use ksignal::{SignalInfo, SignalSet, SignalStack, Signo};
 use linux_raw_sys::general::{
@@ -243,6 +244,10 @@ pub fn sys_rt_sigreturn(uctx: &mut UserContext) -> KResult<isize> {
 
 /// Waits for a signal from a specified set with an optional timeout.
 ///
+/// Waiter registration failure yields and retries instead of returning
+/// `ENOMEM`, which [`rt_sigtimedwait(2)`](https://man7.org/linux/man-pages/man2/rt_sigtimedwait.2.html)
+/// does not list as a valid errno.
+///
 /// See <https://man7.org/linux/man-pages/man2/rt_sigtimedwait.2.html>.
 pub fn sys_rt_sigtimedwait(
     uctx: &mut UserContext,
@@ -271,24 +276,43 @@ pub fn sys_rt_sigtimedwait(
     signal.set_blocked(old_blocked & !set);
 
     uctx.set_retval(-LinuxError::EINTR.into_raw() as usize);
+    let mut registrations = PollRegistrations::new();
     let wait_signal = poll_fn(|cx| {
-        if let Some(sig) = signal.dequeue_signal(&set) {
-            signal.set_blocked(old_blocked);
-            Poll::Ready(Some(sig))
-        } else if check_signals(&current_thread, uctx, Some(old_blocked)) {
-            Poll::Ready(None)
-        } else {
-            let _ = current.poll_interrupt(cx);
-            Poll::Pending
+        loop {
+            if let Some(sig) = signal.dequeue_signal(&set) {
+                signal.set_blocked(old_blocked);
+                return Poll::Ready(Some(sig));
+            }
+            if check_signals(&current_thread, uctx, Some(old_blocked)) {
+                return Poll::Ready(None);
+            }
+
+            let mut context = registrations.context(cx);
+            match current.poll_interrupt(&mut context) {
+                // Interrupt won the check/register race: recheck pending signals
+                // in this poll instead of sleeping without a registration.
+                Ok(Poll::Ready(())) => continue,
+                Ok(Poll::Pending) => return Poll::Pending,
+                Err(_) => {
+                    // Keep the temporary mask and retry; do not surface ENOMEM.
+                    // `continue` re-enters dequeue/`check_signals`, so a signal
+                    // that arrived around registration failure is not skipped
+                    // the way the old restore-and-return-ENOMEM path could.
+                    drop(context);
+                    ktask::yield_now();
+                    continue;
+                }
+            }
         }
     });
 
-    let Ok(sig) = ktask::future::block_on(ktask::future::timeout(timeout, wait_signal)) else {
-        signal.set_blocked(old_blocked);
-        return Err(KError::WouldBlock);
-    };
-    let Some(sig) = sig else {
-        return Ok(0);
+    let sig = match ktask::future::block_on(ktask::future::timeout(timeout, wait_signal)) {
+        Err(_) => {
+            signal.set_blocked(old_blocked);
+            return Err(KError::WouldBlock);
+        }
+        Ok(None) => return Ok(0),
+        Ok(Some(sig)) => sig,
     };
     let signo = sig.signo();
 
@@ -300,6 +324,10 @@ pub fn sys_rt_sigtimedwait(
 }
 
 /// Replaces the signal mask and suspends execution until a signal is delivered.
+///
+/// Completes with [`LinuxError::ERESTARTNOHAND`] so userspace observes `EINTR`,
+/// matching POSIX `sigsuspend(2)`. Waiter registration failure yields and retries
+/// instead of returning `ENOMEM`, which this syscall must not surface.
 ///
 /// See <https://man7.org/linux/man-pages/man2/sigsuspend.2.html>.
 pub fn sys_rt_sigsuspend(
@@ -317,12 +345,28 @@ pub fn sys_rt_sigsuspend(
     let old_blocked = signal.set_blocked(set);
     signal.set_saved_sigmask(old_blocked);
 
+    let mut registrations = PollRegistrations::new();
     ktask::future::block_on(poll_fn(|cx| {
-        if !(signal.pending() & !signal.blocked()).is_empty() {
-            return Poll::Ready(());
+        loop {
+            if !(signal.pending() & !signal.blocked()).is_empty() {
+                return Poll::Ready(());
+            }
+            let mut context = registrations.context(cx);
+            match current.poll_interrupt(&mut context) {
+                // Interrupt won the check/register race: recheck pending signals
+                // in this poll instead of sleeping without a registration.
+                Ok(Poll::Ready(())) => continue,
+                Ok(Poll::Pending) => return Poll::Pending,
+                Err(_) => {
+                    // Cannot sleep without a registration. Yield and retry
+                    // rather than returning ENOMEM: POSIX/Linux require
+                    // sigsuspend to surface only EINTR (via ERESTARTNOHAND).
+                    drop(context);
+                    ktask::yield_now();
+                    continue;
+                }
+            }
         }
-        let _ = current.poll_interrupt(cx);
-        Poll::Pending
     }));
 
     Err(KError::from(LinuxError::ERESTARTNOHAND))

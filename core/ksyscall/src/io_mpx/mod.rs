@@ -15,9 +15,8 @@ mod poll;
 mod select;
 
 use alloc::{sync::Arc, vec::Vec};
-use core::task::Context;
 
-use kpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use kvfs::VfsFile;
 
 pub use self::{epoll::*, poll::*, select::*};
@@ -28,9 +27,14 @@ impl Pollable for FdPollSet {
         unreachable!()
     }
 
-    fn register(&self, context: &mut Context<'_>, _events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        _events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         for (file, events) in &self.0 {
-            file.register_poll(context, *events);
+            file.register_poll(context, *events)?;
         }
+        Ok(())
     }
 }

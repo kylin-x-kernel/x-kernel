@@ -7,7 +7,7 @@ use alloc::{collections::VecDeque, sync::Arc, vec, vec::Vec};
 
 use hashbrown::HashMap;
 use kerrno::{KError, KResult};
-use kpoll::PollSet;
+use kpoll::{PollContext, PollRegisterError, PollSet};
 use ksync::Mutex;
 use smoltcp::{
     iface::{SocketHandle, SocketSet},
@@ -20,13 +20,22 @@ use crate::{
     consts::{LISTEN_QUEUE_SIZE, TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
 };
 
+/// Mutable listen backlog state. The accept wakeup source lives on
+/// [`ListenEntry`] outside this mutex so register paths can clone it without
+/// holding the queue lock.
 struct ListenTableEntry {
     syn_queue: VecDeque<PendingConn>,
     accept_queue: VecDeque<PendingConn>,
-    accept_poll: PollSet,
     backlog: usize,
     touched: bool,
     closed: bool,
+}
+
+/// One listening endpoint: lock-free accept poll source plus guarded queues.
+struct ListenEntry {
+    /// Shared with waiters via [`PollSet::clone`]; not behind `state`.
+    accept_poll: PollSet,
+    state: Mutex<ListenTableEntry>,
 }
 
 /// The result of accepting a TCP connection from the listen table.
@@ -51,7 +60,6 @@ impl ListenTableEntry {
         Self {
             syn_queue: VecDeque::with_capacity(backlog),
             accept_queue: VecDeque::with_capacity(backlog),
-            accept_poll: PollSet::new(),
             backlog,
             touched: false,
             closed: false,
@@ -59,11 +67,18 @@ impl ListenTableEntry {
     }
 }
 
-pub struct ListenTable {
-    entries: Mutex<HashMap<IpListenEndpoint, ListenEntry>>,
+impl ListenEntry {
+    fn new(backlog: usize) -> Self {
+        Self {
+            accept_poll: PollSet::new(),
+            state: Mutex::new(ListenTableEntry::new(backlog)),
+        }
+    }
 }
 
-type ListenEntry = Arc<Mutex<ListenTableEntry>>;
+pub struct ListenTable {
+    entries: Mutex<HashMap<IpListenEndpoint, Arc<ListenEntry>>>,
+}
 
 impl ListenTable {
     /// Create an empty listen table.
@@ -88,10 +103,7 @@ impl ListenTable {
             return Err(KError::AddrInUse);
         }
 
-        entries.insert(
-            listen_endpoint,
-            Arc::new(Mutex::new(ListenTableEntry::new(backlog))),
-        );
+        entries.insert(listen_endpoint, Arc::new(ListenEntry::new(backlog)));
         Ok(())
     }
 
@@ -106,9 +118,9 @@ impl ListenTable {
         };
 
         let handles = {
-            let mut entry = entry.lock();
-            entry.closed = true;
-            entry.drain_handles()
+            let mut state = entry.state.lock();
+            state.closed = true;
+            state.drain_handles()
         };
 
         for handle in handles {
@@ -122,8 +134,8 @@ impl ListenTable {
             return Err(KError::InvalidInput);
         };
 
-        let entry = entry.lock();
-        Ok(entry
+        let state = entry.state.lock();
+        Ok(state
             .accept_queue
             .iter()
             .any(|conn| is_acceptable_in_socket_set(conn.accepted.handle, sockets)))
@@ -133,20 +145,26 @@ impl ListenTable {
         &self,
         endpoint: IpListenEndpoint,
         sockets: &SocketSet<'_>,
-        waker: &core::task::Waker,
-    ) -> KResult<()> {
+        context: &mut PollContext<'_>,
+    ) -> Result<(), PollRegisterError> {
         let Some(entry) = self.get_entry(&endpoint) else {
             warn!("register accept waker before listen");
-            return Err(KError::InvalidInput);
+            // Do not report success: sleeping without a registration hangs accept.
+            return Err(PollRegisterError::InvalidState);
         };
 
-        let entry = entry.lock();
-        entry.accept_poll.register(waker);
-        if entry
-            .accept_queue
-            .iter()
-            .any(|conn| is_acceptable_in_socket_set(conn.accepted.handle, sockets))
-        {
+        // Clone outside `state`: accept_poll is not behind the queue mutex.
+        // Register first, then recheck readiness under the lock so a connection
+        // that arrives between the sample and register still wakes us.
+        context.register(&entry.accept_poll)?;
+        let should_wake = {
+            let state = entry.state.lock();
+            state
+                .accept_queue
+                .iter()
+                .any(|conn| is_acceptable_in_socket_set(conn.accepted.handle, sockets))
+        };
+        if should_wake {
             entry.accept_poll.wake();
         }
         Ok(())
@@ -162,11 +180,11 @@ impl ListenTable {
             return Err(KError::InvalidInput);
         };
 
-        let mut entry = entry.lock();
-        let mut has_aborted_conn = refresh_entry_for_accept(&mut entry, sockets);
+        let mut state = entry.state.lock();
+        let mut has_aborted_conn = refresh_entry_for_accept(&mut state, sockets);
 
         loop {
-            let conn = match entry.accept_queue.pop_front() {
+            let conn = match state.accept_queue.pop_front() {
                 Some(conn) => conn,
                 None if has_aborted_conn => return Err(KError::ConnectionAborted),
                 None => return Err(KError::WouldBlock),
@@ -186,7 +204,7 @@ impl ListenTable {
             return;
         };
 
-        entry.lock().touched = true;
+        entry.state.lock().touched = true;
     }
 
     pub fn wake_touched_acceptors(&self, sockets: &mut SocketSet<'_>) {
@@ -196,12 +214,15 @@ impl ListenTable {
         };
 
         for entry in entries {
-            let mut entry = entry.lock();
-            if entry.closed || !entry.touched {
-                continue;
-            }
-            entry.touched = false;
-            if refresh_entry_in_socket_set(&mut entry, sockets) {
+            let should_wake = {
+                let mut state = entry.state.lock();
+                if state.closed || !state.touched {
+                    continue;
+                }
+                state.touched = false;
+                refresh_entry_in_socket_set(&mut state, sockets)
+            };
+            if should_wake {
                 entry.accept_poll.wake();
             }
         }
@@ -217,23 +238,23 @@ impl ListenTable {
             return;
         };
 
-        let mut entry = entry.lock();
-        if entry.closed {
+        let mut state = entry.state.lock();
+        if state.closed {
             return;
         }
 
-        prune_closed_in_socket_set(&mut entry.syn_queue, sockets);
-        prune_closed_in_socket_set(&mut entry.accept_queue, sockets);
-        if entry
+        prune_closed_in_socket_set(&mut state.syn_queue, sockets);
+        prune_closed_in_socket_set(&mut state.accept_queue, sockets);
+        if state
             .syn_queue
             .iter()
-            .chain(entry.accept_queue.iter())
+            .chain(state.accept_queue.iter())
             .any(|conn| conn.accepted.remote_endpoint == src && conn.accepted.local_endpoint == dst)
         {
             return;
         }
         // TODO(mivik): accept address check
-        if entry.syn_queue.len() + entry.accept_queue.len() >= entry.backlog {
+        if state.syn_queue.len() + state.accept_queue.len() >= state.backlog {
             warn!("listen backlog overflow!");
             return;
         }
@@ -250,7 +271,7 @@ impl ListenTable {
             return;
         }
         let dispatch_irq = sockets.add(socket);
-        entry.syn_queue.push_back(PendingConn {
+        state.syn_queue.push_back(PendingConn {
             accepted: AcceptedTcp {
                 handle: dispatch_irq,
                 local_endpoint: dst,
@@ -259,12 +280,12 @@ impl ListenTable {
         });
     }
 
-    fn get_entry(&self, endpoint: &IpListenEndpoint) -> Option<ListenEntry> {
+    fn get_entry(&self, endpoint: &IpListenEndpoint) -> Option<Arc<ListenEntry>> {
         let entries = self.entries.lock();
         entries.get(endpoint).cloned()
     }
 
-    fn lookup_entry(&self, dst: IpEndpoint) -> Option<(IpListenEndpoint, ListenEntry)> {
+    fn lookup_entry(&self, dst: IpEndpoint) -> Option<(IpListenEndpoint, Arc<ListenEntry>)> {
         let entries = self.entries.lock();
         Self::lookup_endpoint(&entries, dst).and_then(|endpoint| {
             entries
@@ -275,7 +296,7 @@ impl ListenTable {
     }
 
     fn lookup_endpoint(
-        entries: &HashMap<IpListenEndpoint, ListenEntry>,
+        entries: &HashMap<IpListenEndpoint, Arc<ListenEntry>>,
         dst: IpEndpoint,
     ) -> Option<IpListenEndpoint> {
         // This only selects a candidate endpoint; callers must re-check the entry
@@ -296,7 +317,7 @@ impl ListenTable {
     }
 
     fn listen_conflicts(
-        entries: &HashMap<IpListenEndpoint, ListenEntry>,
+        entries: &HashMap<IpListenEndpoint, Arc<ListenEntry>>,
         endpoint: IpListenEndpoint,
     ) -> bool {
         entries.keys().any(|old| {

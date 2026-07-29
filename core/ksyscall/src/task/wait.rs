@@ -16,6 +16,7 @@ use core::{future::poll_fn, task::Poll};
 
 use bitflags::bitflags;
 use kerrno::{KError, KResult, LinuxError};
+use kpoll::PollRegistrations;
 use kprocess::{Pid, Process, wait_reap};
 use ktask::{current, future::block_on};
 use linux_raw_sys::general::{
@@ -199,8 +200,20 @@ fn wait_on_matching_children(
         WaitScanResult::NoWaitableChild => Ok(None),
     };
 
+    let mut registrations = PollRegistrations::new();
+    let mut interrupt_registrations = PollRegistrations::new();
     block_on(poll_fn(|cx| {
-        proc.child_exit_event().register(cx.waker());
+        // Check before registering so a ready zombie does not fail with ENOMEM
+        // merely because waiter growth could not allocate.
+        if let Some(res) = check_children().transpose() {
+            return Poll::Ready(res);
+        }
+
+        let mut context = registrations.context(cx);
+        if context.register(proc.child_exit_event()).is_err() {
+            return Poll::Ready(Err(KError::NoMemory));
+        }
+        drop(context);
         #[cfg(unittest)]
         wait_test_sync::pause_after_register_if_armed();
 
@@ -210,12 +223,17 @@ fn wait_on_matching_children(
 
         // Match Linux wait semantics: re-scan children before honoring an
         // interrupt so a concurrent SIGCHLD cannot hide an already waitable child.
-        if current.poll_interrupt(cx).is_ready() {
-            return Poll::Ready(
-                check_children()
-                    .transpose()
-                    .unwrap_or_else(|| Err(KError::from(LinuxError::ERESTARTSYS))),
-            );
+        let mut interrupt_context = interrupt_registrations.context(cx);
+        match current.poll_interrupt(&mut interrupt_context) {
+            Ok(Poll::Ready(())) => {
+                return Poll::Ready(
+                    check_children()
+                        .transpose()
+                        .unwrap_or_else(|| Err(KError::from(LinuxError::ERESTARTSYS))),
+                );
+            }
+            Ok(Poll::Pending) => {}
+            Err(_) => return Poll::Ready(Err(KError::NoMemory)),
         }
 
         Poll::Pending
@@ -462,7 +480,6 @@ mod tests_wait {
         let parent = current_user_process();
         let child = parent.fork(8_122);
         let child_pid = child.pid();
-        process_exit::finalize_process_exit(&child);
 
         let reaped = Arc::new(AtomicUsize::new(0));
         let echld = Arc::new(AtomicUsize::new(0));
@@ -506,9 +523,13 @@ mod tests_wait {
         let waiter_a = spawn_waiter();
         let waiter_b = spawn_waiter();
 
+        // Wait path checks for a ready child before registering. Keep the child
+        // live until both waiters have registered, otherwise they return early
+        // and never hit the barrier (hanging this test).
         while wait_test_sync::register_barrier_arrivals() < 2 {
             ktask::yield_now();
         }
+        process_exit::finalize_process_exit(&child);
         wait_test_sync::release_register_barrier();
 
         finished_wq.wait_until(|| finished.load(Ordering::Acquire) == 2);

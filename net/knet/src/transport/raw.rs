@@ -8,12 +8,11 @@ use alloc::vec;
 use core::{
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::atomic::{AtomicBool, Ordering},
-    task::Context,
 };
 
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
-use kpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use ksync::RwLock;
 pub use smoltcp::wire::{IpProtocol, IpVersion};
 use smoltcp::{
@@ -378,18 +377,23 @@ impl Pollable for RawSocket {
         events
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
-        self.with_smol_socket(|socket| {
-            if events.contains(IoEvents::IN) {
-                socket.register_recv_waker(context.waker());
-            }
-            if events.contains(IoEvents::OUT) {
-                socket.register_send_waker(context.waker());
-            }
-        });
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if events.intersects(IoEvents::IN | IoEvents::OUT) {
-            self.general.register_rx_waker(context.waker());
+            let source_waker = self.general.register_rx_waker(context)?;
+            self.with_smol_socket(|socket| {
+                if events.contains(IoEvents::IN) {
+                    socket.register_recv_waker(&source_waker);
+                }
+                if events.contains(IoEvents::OUT) {
+                    socket.register_send_waker(&source_waker);
+                }
+            });
         }
+        Ok(())
     }
 }
 

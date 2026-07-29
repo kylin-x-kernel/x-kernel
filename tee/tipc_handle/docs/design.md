@@ -76,7 +76,8 @@ tee/tipc
 ## 调用约束 / 执行上下文
 
 - 本 crate 是 `no_std` 内核 crate，依赖 `alloc`、`kpoll`、`kspin`、`kerrno` 和 `smallvec`。
-- `Handle::register` 依赖当前 task/future 的 waker 语义，调用方需要位于调度器可用之后。
+- `Handle::register` 接收短生命周期 `PollContext` 并返回注册错误；调用方需要位于
+  调度器可用之后，并持有 `PollRegistrations` 跨越 `Pending`。
 - `HandleSet` 使用 `SpinNoIrq` 保护 registration，适合短临界区，不适合在锁内执行阻塞操作。
 - `HandleTable` 不内置锁，调用方通常把它放入 process-local `RwLock`。
 - 本 crate 不要求当前进程线程；只有持有 `HandleTable` 的上层调用者才决定 process-local 归属。

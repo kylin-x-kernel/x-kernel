@@ -7,14 +7,13 @@ use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::{
     net::{Ipv4Addr, SocketAddr},
     sync::atomic::{AtomicBool, Ordering},
-    task::Context,
 };
 
 use hashbrown::HashMap;
 use kerrno::{KError, KResult, k_bail, k_err_type};
 use kio::prelude::*;
 use klazy::lazy_static;
-use kpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::{Mutex, static_lock};
 use smoltcp::{
     iface::SocketHandle,
@@ -583,20 +582,25 @@ impl Pollable for TcpSocket {
         events
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if events.intersects(IoEvents::IN | IoEvents::OUT | IoEvents::RDHUP) {
-            self.general.register_rx_waker(context.waker());
+            self.general.register_rx_waker(context)?;
         }
         if self.is_listening()
             && events.contains(IoEvents::IN)
             && let Ok(endpoint) = self.bound_endpoint()
         {
             let sockets = SOCKET_SET.inner.lock();
-            let _ = LISTEN_TABLE.register_accept_waker(endpoint, &sockets, context.waker());
+            LISTEN_TABLE.register_accept_waker(endpoint, &sockets, context)?;
         }
         if events.contains(IoEvents::RDHUP) {
-            self.poll_rx_closed.register(context.waker());
+            context.register(&self.poll_rx_closed)?;
         }
+        Ok(())
     }
 }
 

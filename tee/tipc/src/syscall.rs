@@ -5,16 +5,11 @@
 //! TIPC syscall ABI adapters.
 
 use alloc::{sync::Arc, vec::Vec};
-use core::{
-    any::Any,
-    ffi::c_char,
-    future::poll_fn,
-    task::{Context, Poll},
-    time::Duration,
-};
+use core::{any::Any, ffi::c_char, future::poll_fn, task::Poll, time::Duration};
 
 use kerrno::{KError, KResult};
 use khal::{paging::MappingFlags, uspace::UserContext};
+use kpoll::{PollContext, PollRegisterError, PollRegistrations};
 use linux_sysno::Sysno;
 use memaddr::VirtAddr;
 use posix_types::{IoVec, UserConstPtr, UserPtr};
@@ -153,13 +148,24 @@ fn timeout_duration(timeout_ms: u32) -> Option<Duration> {
 
 fn wait_for_event(
     timeout_ms: u32,
-    wait: impl FnMut(&mut Context<'_>) -> Poll<KResult<UserEvent>>,
+    mut wait: impl FnMut(&mut PollContext<'_>) -> Poll<KResult<UserEvent>>,
 ) -> KResult<UserEvent> {
+    let mut registrations = PollRegistrations::new();
     ktask::future::block_on(ktask::future::timeout(
         timeout_duration(timeout_ms),
-        poll_fn(wait),
+        poll_fn(move |cx| {
+            let mut context = registrations.context(cx);
+            wait(&mut context)
+        }),
     ))
     .map_err(KError::from)?
+}
+
+fn map_register_error(error: PollRegisterError) -> KError {
+    match error {
+        PollRegisterError::NoMemory | PollRegisterError::IdExhausted => KError::NoMemory,
+        PollRegisterError::InvalidState => KError::InvalidInput,
+    }
 }
 
 fn poll_handle_event(handle_id: i32, handle: &Arc<dyn Handle>) -> Option<UserEvent> {
@@ -459,7 +465,9 @@ fn sys_tipc_wait(
             Ok(None) => {}
             Err(err) => return Poll::Ready(Err(err)),
         }
-        handle.register(cx, HandleEventMask::READY);
+        if let Err(error) = handle.register(cx, HandleEventMask::READY) {
+            return Poll::Ready(Err(map_register_error(error)));
+        }
         match poll_handle_or_set_event(handle_id, &handle) {
             Ok(Some(event)) => Poll::Ready(Ok(event)),
             Ok(None) => Poll::Pending,
@@ -489,15 +497,22 @@ fn sys_tipc_wait_any(user_event: UserPtr<UserEvent>, timeout_ms: u32) -> KResult
             }
         }
         for (_, handle) in snapshot.iter() {
-            handle.register(cx, HandleEventMask::READY);
+            if let Err(error) = handle.register(cx, HandleEventMask::READY) {
+                return Poll::Ready(Err(map_register_error(error)));
+            }
         }
         // A handle may be installed after the snapshot was taken. Register for
         // table changes as well, because its readiness cannot be observed by
         // any handle registration above.
-        if let Err(err) = kprocess::current_user_process().with_tipc_handles(|handles| {
-            handles.read().register_wait_any_table_change(cx);
-        }) {
-            return Poll::Ready(Err(err));
+        let table_registration = kprocess::current_user_process().with_tipc_handles(|handles| {
+            handles
+                .read()
+                .register_wait_any_table_change(cx)
+                .map_err(map_register_error)
+        });
+        match table_registration {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) | Err(err) => return Poll::Ready(Err(err)),
         }
         // Re-acquire the cached snapshot and poll once more after all wakers
         // are registered. This closes the check-then-register race for both a

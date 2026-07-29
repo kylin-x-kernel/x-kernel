@@ -9,10 +9,9 @@ use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use ::core::{
     net::SocketAddr,
     sync::atomic::{AtomicBool, AtomicI32, Ordering},
-    task::Waker,
 };
 use kerrno::{KError, KResult, LinuxError};
-use kpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use ksync::{Mutex, RwLock};
 
 use super::wait::UdpSocketWaiters;
@@ -214,8 +213,12 @@ impl UdpSocketState {
         )
     }
 
-    pub(crate) fn register_waiter(&self, waker: &Waker, events: IoEvents) {
-        self.waiters.register(waker, events);
+    pub(crate) fn register_waiter(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
+        self.waiters.register(context, events)
     }
 
     pub(crate) fn wake_read(&self) {
@@ -230,12 +233,18 @@ impl UdpSocketState {
         self.options.set_device_mask(mask);
     }
 
-    pub(crate) fn register_rx_waker(&self, waker: &Waker) {
-        self.options.register_rx_waker(waker);
+    pub(crate) fn register_rx_waker(
+        &self,
+        context: &mut PollContext<'_>,
+    ) -> Result<(), PollRegisterError> {
+        self.options.register_rx_waker(context).map(|_| ())
     }
 
-    pub(crate) fn register_tx_waker(&self, waker: &Waker) {
-        self.options.register_tx_waker(waker);
+    pub(crate) fn register_tx_waker(
+        &self,
+        context: &mut PollContext<'_>,
+    ) -> Result<(), PollRegisterError> {
+        self.options.register_tx_waker(context).map(|_| ())
     }
 
     pub(crate) fn send_poller_with_nonblocking<P: Pollable, F: FnMut() -> KResult<T>, T>(

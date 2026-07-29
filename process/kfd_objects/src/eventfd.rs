@@ -8,12 +8,11 @@ use alloc::sync::Arc;
 use core::{
     mem::size_of,
     sync::atomic::{AtomicU64, Ordering},
-    task::Context,
 };
 
 use kcred::Cred;
 use kerrno::{KError, KResult};
-use kpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ktask::future::{block_on, poll_io};
 use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile};
 
@@ -162,10 +161,16 @@ impl FileOperations for EventfdFops {
             .unwrap_or_else(|_| IoEvents::empty())
     }
 
-    fn register_poll(&self, file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+    fn register_poll(
+        &self,
+        file: &VfsFile,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if let Ok(state) = Self::state(file) {
-            state.register(context, events);
+            state.register(context, events)?;
         }
+        Ok(())
     }
 }
 
@@ -178,13 +183,18 @@ impl Pollable for EventFd {
         events
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if events.contains(IoEvents::IN) {
-            self.poll_rx.register(context.waker());
+            context.register(&self.poll_rx)?;
         }
         if events.contains(IoEvents::OUT) {
-            self.poll_tx.register(context.waker());
+            context.register(&self.poll_tx)?;
         }
+        Ok(())
     }
 }
 
@@ -192,7 +202,7 @@ impl Pollable for EventFd {
 mod eventfd_tests {
     use core::task::{Context, RawWaker, Waker};
 
-    use kpoll::IoEvents;
+    use kpoll::{IoEvents, PollRegistrations};
     use unittest::def_test;
 
     use super::*;
@@ -287,11 +297,15 @@ mod eventfd_tests {
         // SAFETY: The dummy raw waker uses no-op callbacks and a null data pointer that
         // is never dereferenced. It is used only to exercise registration paths in tests.
         let waker = unsafe { Waker::from_raw(raw_waker) };
-        let mut context = Context::from_waker(&waker);
+        let context = Context::from_waker(&waker);
+        let mut registrations = PollRegistrations::new();
+        let mut context = registrations.context(&context);
 
-        eventfd.register(&mut context, IoEvents::IN);
-        eventfd.register(&mut context, IoEvents::OUT);
-        eventfd.register(&mut context, IoEvents::IN | IoEvents::OUT);
+        eventfd.register(&mut context, IoEvents::IN).unwrap();
+        eventfd.register(&mut context, IoEvents::OUT).unwrap();
+        eventfd
+            .register(&mut context, IoEvents::IN | IoEvents::OUT)
+            .unwrap();
     }
 
     #[def_test]

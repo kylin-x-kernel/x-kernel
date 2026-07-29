@@ -5,12 +5,12 @@
 //! Linux `signalfd` object support.
 
 use alloc::sync::Arc;
-use core::{mem, task::Context};
+use core::mem;
 
 use bitflags::bitflags;
 use kcred::Cred;
 use kerrno::{KError, KResult};
-use kpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use kprocess::AsThread;
 use ksignal::{SignalInfo, SignalSet, api::ThreadSignalManager};
 use ksync::RwLock;
@@ -172,10 +172,15 @@ impl Pollable for SignalfdAccess {
         events
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if events.contains(IoEvents::IN) {
-            self.signalfd.poll_rx.register(context.waker());
+            context.register(&self.signalfd.poll_rx)?;
         }
+        Ok(())
     }
 }
 
@@ -240,10 +245,16 @@ impl FileOperations for SignalfdFops {
         Self::access(file).map_or(IoEvents::ERR, |access| access.poll())
     }
 
-    fn register_poll(&self, file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+    fn register_poll(
+        &self,
+        file: &VfsFile,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if let Ok(access) = Self::access(file) {
-            access.register(context, events);
+            access.register(context, events)?;
         }
+        Ok(())
     }
 }
 

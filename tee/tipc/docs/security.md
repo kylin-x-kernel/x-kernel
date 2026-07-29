@@ -126,6 +126,8 @@ tipc-handle / ktask / kspin / alloc
 
 - 参数错误使用 `KResult` 返回 `InvalidInput`、`OutOfRange`、`NameTooLong` 等 typed error。
 - 队列暂不可用使用 `WouldBlock`，由调用方结合 poll/wait 处理。
+- poll source 注册失败映射为 `NoMemory` 并终止当前 wait，避免在没有 wakeup
+  registration 的情况下进入 `Pending`。
 - 对端关闭或 peer weak upgrade 失败返回 `NotConnected`。
 - stale registry entry 不 panic，publish/connect 路径会忽略或清理。
 - close/drop 路径唤醒等待者，使 poll/wait 能观察 ERROR/HUP。

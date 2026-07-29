@@ -3,10 +3,9 @@
 // See LICENSES for license details.
 
 use alloc::sync::{Arc, Weak};
-use core::task::Context;
 
 use kerrno::{KError, KResult, k_bail};
-use kpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use kprocess::{ProcessGroup, Session};
 use kspin::SpinNoIrq;
 
@@ -115,9 +114,14 @@ impl Pollable for JobControl {
         events
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if events.contains(IoEvents::IN) {
-            self.poll_fg.register(context.waker());
+            context.register(&self.poll_fg)?;
         }
+        Ok(())
     }
 }

@@ -3,11 +3,10 @@
 // See LICENSES for license details.
 
 use alloc::sync::Arc;
-use core::task::Context;
 
 use kcred::Cred;
 use kerrno::{KError, KResult};
-use kpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ktask::KtaskRef;
 use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
 
@@ -84,10 +83,15 @@ impl Pollable for PidFd {
         events
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if events.contains(IoEvents::IN) {
-            self.exit_event.register(context.waker());
+            context.register(&self.exit_event)?;
         }
+        Ok(())
     }
 }
 
@@ -108,10 +112,16 @@ impl FileOperations for PidfdFops {
         Self::pidfd(file).map_or(IoEvents::ERR, |pidfd| pidfd.poll())
     }
 
-    fn register_poll(&self, file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+    fn register_poll(
+        &self,
+        file: &VfsFile,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if let Ok(pidfd) = Self::pidfd(file) {
-            pidfd.register(context, events);
+            pidfd.register(context, events)?;
         }
+        Ok(())
     }
 }
 

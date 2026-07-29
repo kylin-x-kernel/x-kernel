@@ -148,6 +148,14 @@ read/poll/close via generic fd syscalls
 - level / edge / oneshot 触发状态；
 - `poll(IN)` 与 ready queue 可见性的对应关系。
 
+每个 watched fd 在 `ADD` 到 `DEL` 之间对应一个稳定的 `EpollInterest` 对象。
+`MOD` 不替换 interest identity，而是在对象内原地更新 event mask、user data 和
+trigger mode；ready queue 中的 weak entry 因此始终指向同一个 interest。该模型
+与 Linux eventpoll 的 `epitem` 原地修改思路一致，避免旧 interest registration
+在 `MOD` 发布窗口内被唤醒后返回旧配置。
+`ADD` / `MOD` / `DEL` 通过 epoll 实例内的 sleepable ctl lock 串行化，保证
+registration 重装、失败回滚和 interest table 更新不会被另一个 epoll_ctl 操作交错。
+
 它不处理：
 
 - `epoll_*` 的 syscall 参数校验；

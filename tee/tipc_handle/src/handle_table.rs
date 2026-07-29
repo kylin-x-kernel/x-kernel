@@ -7,9 +7,9 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::task::Context;
 
 use kerrno::{KError, KResult};
+use kpoll::{PollContext, PollRegisterError};
 use smallvec::SmallVec;
 
 use crate::{Handle, HandleSet, HandleWaitState};
@@ -32,7 +32,10 @@ pub struct HandleTable {
 
 impl HandleTable {
     /// Creates an empty table.
-    pub const fn new() -> Self {
+    ///
+    /// Not `const`: [`HandleWaitState`] embeds a [`kpoll::PollSet`] that
+    /// allocates on construction.
+    pub fn new() -> Self {
         Self {
             next_id: 0,
             handles: BTreeMap::new(),
@@ -146,8 +149,11 @@ impl HandleTable {
     /// Callers must recheck readiness after registering. An install or removal
     /// may race with registration, and the recheck turns that race into an
     /// immediate result instead of a missed wakeup.
-    pub fn register_wait_any_table_change(&self, cx: &mut Context<'_>) {
-        self.wait_any_handle.register(cx);
+    pub fn register_wait_any_table_change(
+        &self,
+        context: &mut PollContext<'_>,
+    ) -> Result<(), PollRegisterError> {
+        self.wait_any_handle.register(context)
     }
 
     fn invalidate_wait_any_snapshot(&mut self) {

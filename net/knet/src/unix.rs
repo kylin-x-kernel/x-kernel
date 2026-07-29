@@ -7,7 +7,6 @@ pub(crate) mod dgram;
 pub(crate) mod stream;
 
 use alloc::{boxed::Box, sync::Arc};
-use core::task::Context;
 
 use async_trait::async_trait;
 use enum_dispatch::enum_dispatch;
@@ -15,7 +14,7 @@ use hashbrown::HashMap;
 use kerrno::{KError, KResult};
 use kio::{IoBuf, Read, Write};
 use klazy::lazy_static;
-use kpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use ksync::Mutex;
 use ktask::future::{block_on, interruptible};
 use kvfs::{
@@ -71,7 +70,11 @@ impl Pollable for UnixTransport {
         }
     }
 
-    fn register(&self, context: &mut core::task::Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         match self {
             UnixTransport::Stream(stream) => stream.register(context, events),
             UnixTransport::Dgram(dgram) => dgram.register(context, events),
@@ -332,7 +335,11 @@ impl Pollable for UnixDomainSocket {
         self.transport.poll()
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
-        self.transport.register(context, events);
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
+        self.transport.register(context, events)
     }
 }

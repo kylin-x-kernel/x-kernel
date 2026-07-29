@@ -4,15 +4,12 @@
 
 //! Unix stream socket transport.
 use alloc::{boxed::Box, sync::Arc};
-use core::{
-    sync::atomic::{AtomicBool, AtomicI32, Ordering},
-    task::Context,
-};
+use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use async_trait::async_trait;
 use kerrno::{KError, KResult, LinuxError};
 use kio::{IoBuf, Read, Write};
-use kpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use kspin::SpinNoPreempt;
 use ksync::Mutex;
 use ringbuf::{
@@ -51,21 +48,26 @@ struct StreamPollSets {
 }
 
 impl StreamPollSets {
-    fn register(&self, waker: &core::task::Waker, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         let has_read_events =
             events.intersects(IoEvents::IN | IoEvents::RDNORM | IoEvents::RDBAND | IoEvents::RDHUP);
         let has_write_events =
             events.intersects(IoEvents::OUT | IoEvents::WRNORM | IoEvents::WRBAND);
         if has_read_events {
-            self.readable.register(waker);
+            context.register(&self.readable)?;
         }
         if has_write_events {
-            self.writable.register(waker);
+            context.register(&self.writable)?;
         }
         if !has_read_events && !has_write_events && events.intersects(IoEvents::ERR | IoEvents::HUP)
         {
-            self.state.register(waker);
+            context.register(&self.state)?;
         }
+        Ok(())
     }
 
     fn wake_state_change(&self) {
@@ -579,8 +581,12 @@ impl Pollable for StreamTransport {
         events
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
-        self.endpoint.polls.register(context.waker(), events);
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
+        self.endpoint.polls.register(context, events)
     }
 }
 
@@ -618,7 +624,7 @@ mod tests {
 
     use kerrno::{KError, KResult, LinuxError};
     use kio::Write;
-    use kpoll::{IoEvents, PollSet, Pollable};
+    use kpoll::{IoEvents, PollRegistrations, PollSet, Pollable};
     use ksync::Mutex;
     use ringbuf::traits::Observer;
     use unittest::{assert, assert_eq, def_test};
@@ -690,24 +696,46 @@ mod tests {
         }
     }
 
-    fn register(socket: &StreamTransport, events: IoEvents) -> Arc<WakeCounter> {
+    struct Registration {
+        counter: Arc<WakeCounter>,
+        _registrations: PollRegistrations,
+    }
+
+    impl core::ops::Deref for Registration {
+        type Target = WakeCounter;
+
+        fn deref(&self) -> &Self::Target {
+            &self.counter
+        }
+    }
+
+    fn register(socket: &StreamTransport, events: IoEvents) -> Registration {
         let counter = Arc::new(WakeCounter::default());
         let waker = Waker::from(counter.clone());
-        let mut context = Context::from_waker(&waker);
-        socket.register(&mut context, events);
-        counter
+        let context = Context::from_waker(&waker);
+        let mut registrations = PollRegistrations::new();
+        socket
+            .register(&mut registrations.context(&context), events)
+            .unwrap();
+        Registration {
+            counter,
+            _registrations: registrations,
+        }
     }
 
     fn register_channel_lock_probe(
         poll_set: &PollSet,
         socket: &Arc<StreamTransport>,
-    ) -> Arc<ChannelLockProbe> {
+    ) -> (Arc<ChannelLockProbe>, PollRegistrations) {
         let probe = Arc::new(ChannelLockProbe {
             socket: Arc::downgrade(socket),
             was_unlocked: AtomicBool::new(false),
         });
-        poll_set.register(&Waker::from(probe.clone()));
-        probe
+        let waker = Waker::from(probe.clone());
+        let context = Context::from_waker(&waker);
+        let mut registrations = PollRegistrations::new();
+        registrations.context(&context).register(poll_set).unwrap();
+        (probe, registrations)
     }
 
     fn wait_until(mut predicate: impl FnMut() -> bool) -> bool {
@@ -854,9 +882,9 @@ mod tests {
     fn unix_stream_shutdown_wakes_after_releasing_channel_lock() {
         let (left, right) = StreamTransport::new_pair(1);
         let left = Arc::new(left);
-        let local_wake_saw_unlocked =
+        let (local_wake_saw_unlocked, _local_registration) =
             register_channel_lock_probe(&left.endpoint.polls.writable, &left);
-        let peer_wake_saw_unlocked =
+        let (peer_wake_saw_unlocked, _peer_registration) =
             register_channel_lock_probe(&right.endpoint.polls.readable, &left);
 
         left.shutdown(Shutdown::Write).unwrap();

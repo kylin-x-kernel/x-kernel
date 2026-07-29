@@ -8,7 +8,7 @@ use alloc::collections::{BTreeMap, btree_map::Entry};
 use core::{future::poll_fn, task::Poll};
 
 use kerrno::{KError, KResult};
-use kpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollRegistrations, PollSet, Pollable};
 use kspin::SpinNoIrq;
 
 /// A helper to wrap a synchronous non-blocking I/O function into an
@@ -28,13 +28,18 @@ pub async fn poll_io<P: Pollable, F: FnMut() -> KResult<T>, T>(
     non_blocking: bool,
     mut f: F,
 ) -> KResult<T> {
+    let mut registrations = PollRegistrations::new();
     super::interruptible(poll_fn(move |cx| match f() {
         Ok(value) => Poll::Ready(Ok(value)),
         Err(KError::WouldBlock) => {
             if non_blocking {
                 return Poll::Ready(Err(KError::WouldBlock));
             }
-            pollable.register(cx, events);
+            let mut context = registrations.context(cx);
+            if let Err(error) = pollable.register(&mut context, events) {
+                return Poll::Ready(Err(map_register_error(error)));
+            }
+            drop(context);
             match f() {
                 Ok(value) => Poll::Ready(Ok(value)),
                 Err(KError::WouldBlock) => Poll::Pending,
@@ -46,25 +51,46 @@ pub async fn poll_io<P: Pollable, F: FnMut() -> KResult<T>, T>(
     .await?
 }
 
+fn map_register_error(error: PollRegisterError) -> KError {
+    match error {
+        PollRegisterError::NoMemory | PollRegisterError::IdExhausted => KError::NoMemory,
+        PollRegisterError::InvalidState => KError::InvalidInput,
+    }
+}
+
 /// Registers a waker for the given IRQ number.
-pub fn register_irq_waker(irq: usize, waker: &core::task::Waker) {
+pub fn register_irq_waker(
+    irq: usize,
+    context: &mut PollContext<'_>,
+) -> Result<(), PollRegisterError> {
     static POLL_IRQ: SpinNoIrq<BTreeMap<usize, PollSet>> = SpinNoIrq::new(BTreeMap::new());
 
     fn irq_hook(irq: usize) {
-        if let Some(set) = POLL_IRQ.lock().get(&irq) {
+        let set = { POLL_IRQ.lock().get(&irq).cloned() };
+        if let Some(set) = set {
             set.wake();
         }
     }
 
-    match POLL_IRQ.lock().entry(irq) {
-        Entry::Vacant(e) => {
-            assert!(
-                khal::irq::subscribe_wakeup(irq, irq_hook),
-                "failed to subscribe IRQ wakeup for irq={irq}"
-            );
-            e.insert(PollSet::new())
+    let set = {
+        let sets = POLL_IRQ.lock();
+        if let Some(existing) = sets.get(&irq) {
+            existing.clone()
+        } else {
+            drop(sets);
+            let set = PollSet::new();
+            let mut sets = POLL_IRQ.lock();
+            match sets.entry(irq) {
+                Entry::Vacant(entry) => {
+                    assert!(
+                        khal::irq::subscribe_wakeup(irq, irq_hook),
+                        "failed to subscribe IRQ wakeup for irq={irq}"
+                    );
+                    entry.insert(set).clone()
+                }
+                Entry::Occupied(entry) => entry.get().clone(),
+            }
         }
-        Entry::Occupied(e) => e.into_mut(),
-    }
-    .register(waker);
+    };
+    context.register(&set)
 }

@@ -148,7 +148,10 @@ core/kruntime
   不应直接执行完整的协议推进或阻塞式 socket 语义。
 - **允许阻塞的路径依赖 poll/waker 语义**：
   阻塞式 socket 操作依赖 `PollSet`、waker
-  和 timeout 注册机制，调用者必须保证相应调度/等待环境可用。
+  和 timeout 注册机制。`Pollable::register` 只能通过调用方提供的
+  `PollContext` 注册源；调用方必须让对应 `PollRegistrations`
+  跨 `Pending` 存活，并在注册后复查 readiness，以同时保证取消清理
+  和关闭 check/register 竞态。
 - **不要求固定当前进程线程才能访问全局状态**：
   `SERVICE`、`SOCKET_SET` 和 `ROUTE_STATE`
   的共享访问主要依赖全局锁和原子状态，
@@ -284,7 +287,10 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 - 全局 `SOCKET_SET` 内部使用 `Mutex<SocketSet>`，所有 smoltcp socket handle 访问都通过 `with_socket_mut` 串行化。
 - `UDP_PCB_REGISTRY` 按端口分为 256 个 bucket，每个 bucket 独立加锁；每个 UDP PCB 的接收队列、endpoint、错误队列和 option 状态分别受锁或 atomic 保护。
 - `Ipv4Reassembler` 位于 `Router` 内，并由 `SERVICE` mutex 串行访问。
-- `LISTEN_TABLE` 用 `Mutex<HashMap<...>>` 管理 listener，再用 per-entry `Mutex` 保护 backlog 队列。
+- `LISTEN_TABLE` 用 `Mutex<HashMap<...>>` 管理 listener；每个 entry 的 `accept_poll`
+  放在 entry 级 `Mutex` 之外，backlog 队列仍由该 `Mutex` 保护。`register_accept_waker`
+  先无锁注册到 `accept_poll`，再短持锁做 readiness recheck，避免在队列锁内做
+  `Waker::clone` / `PollSet` 工作，同时保留 register-recheck。
 - TCP 状态转换使用 `StateLock` 的 atomic CAS，失败时返回当前状态。
 - socket option 和 shutdown 标志使用 atomics，跨线程读写只表达配置或关闭状态。
 - Unix stream 的 `channel: Mutex<Option<Channel>>` 串行化同一 endpoint 发起的 send、recv、shutdown 和 channel 释放。
@@ -292,7 +298,7 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 - Unix stream 的用户数据复制和 `PollSet` 唤醒在 `tx_order` 外执行。send 先写入未发布的 vacant 区域，再在锁内复检关闭状态并推进 write index；recv 读取为空后在锁内复查 occupied 长度和关闭状态；shutdown 完成状态发布并复制 peer endpoint 引用后释放 `channel` mutex，再执行 waiter 唤醒。
 - Unix stream 每个 endpoint 分别持有 readable、writable 和 connection-state 三组 `PollSet`。写入只唤醒 peer readable waiter，读取跨过发送缓冲低水位时只唤醒 peer writable waiter，半关闭只唤醒受影响方向，完整关闭通过 connection-state waiter 通知双方。
 - netlink `ROUTE_STATE` 使用 `RwLock`，rx queue 和 subscriber 列表使用 `Mutex`。
-- RX waker 由 `GeneralOptions::device_mask` 指向相关设备，`Service::register_rx_waker` 同时注册 timeout 和设备 IRQ waker。
+- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 通过 `PollContext` 把当前等待注册到聚合 `timeout_poll`，再把该内部源的 waker 交给 timeout 和设备 IRQ，避免设备层保留调用方的裸 waker。loopback 因此只保存这一份聚合 waker（`Mutex<Option<Waker>>`），多任务广播仍由 `timeout_poll` 完成；不得绕过 `Service` 向设备注册互不等价的 task waker。
 
 ## 设计决策
 

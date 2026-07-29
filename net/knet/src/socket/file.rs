@@ -5,11 +5,10 @@
 //! Open file operations for network sockets.
 
 use alloc::{format, sync::Arc};
-use core::task::Context;
 
 use kcred::Cred;
 use kerrno::{KError, KResult};
-use kpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile, VfsResult};
 
 use crate::{RecvFlags, RecvOptions, SendFlags, SendOptions, Socket, SocketOps};
@@ -76,10 +75,16 @@ impl FileOperations for SocketFileOps {
             .unwrap_or_else(|_| IoEvents::ERR)
     }
 
-    fn register_poll(&self, file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+    fn register_poll(
+        &self,
+        file: &VfsFile,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         if let Ok(socket) = Self::socket(file) {
-            socket.register(context, events);
+            socket.register(context, events)?;
         }
+        Ok(())
     }
 }
 
@@ -97,7 +102,11 @@ impl Pollable for Socket {
         }
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
         match self {
             Socket::Tcp(tcp) => tcp.register(context, events),
             Socket::Udp(udp) => udp.register(context, events),

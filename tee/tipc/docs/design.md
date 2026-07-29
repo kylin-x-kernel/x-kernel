@@ -114,8 +114,10 @@ process/kprocess ProcessRuntime owns per-process HandleTable
 
 - 本 crate 是 `no_std` 内核 crate，依赖 `alloc`、`kspin`、`kpoll` 和 `ktask`。
 - API 面向 task/syscall 生命周期路径，不应在中断上下文调用。
-- `IpcChan::wait_connected` 会通过 `ktask::future::block_on` 等待连接完成，调用方必须处在允许阻塞的上下文。
-- `tipc_handle::Handle::register` 依赖当前 future/task 的 waker 语义；poll/wait 调用方需要位于调度器可用之后。
+- `IpcChan::wait_connected` 会通过 `ktask::future::block_on` 等待连接完成，内部
+  `PollRegistrations` 跨越 `Pending`；调用方必须处在允许阻塞的上下文。
+- `tipc_handle::Handle::register` 使用 `PollContext` 并可返回注册错误；poll/wait
+  调用方需要位于调度器可用之后，并在每轮 poll 刷新 registration context。
 - `tipc_handle::HandleTable` 本身不持锁，调用方负责把它放入 process-local 锁保护中。
 - `syscall` 模块依赖 `kprocess`、`khal`、`linux_sysno` 和 `posix-types`，只能在用户线程 syscall 上下文使用。
 - `PortRegistry` 是全局命名空间，路径、端口发布和 waiting client 操作由内部 `SpinNoIrq` 串行化。

@@ -27,7 +27,7 @@ use core::{
 use kclass::{ClassDevice, prelude::*};
 use kerrno::{KError, KResult};
 use klazy::Lazy;
-use kpoll::PollSet;
+use kpoll::{PollRegisterError, PollRegistrations, PollSet};
 use ksync::Mutex;
 use ktask::future::block_on;
 use tipc::{
@@ -265,30 +265,49 @@ impl VsockBridge {
         self.rx_waiters.wake();
     }
 
-    fn pop_rx_event(&self) -> VsockBridgeEvent {
+    fn pop_rx_event(&self) -> Result<VsockBridgeEvent, PollRegisterError> {
+        let mut registrations = PollRegistrations::new();
         block_on(poll_fn(|cx| {
             if let Some(event) = self.rx_queue.lock().pop_front() {
-                Poll::Ready(event)
+                return Poll::Ready(Ok(event));
+            }
+
+            if let Err(err) = registrations.context(cx).register(&self.rx_waiters) {
+                return Poll::Ready(Err(err));
+            }
+            if let Some(event) = self.rx_queue.lock().pop_front() {
+                Poll::Ready(Ok(event))
             } else {
-                self.rx_waiters.register(cx.waker());
                 Poll::Pending
             }
         }))
     }
 
     fn wait_handle_event(&self) -> UEvent {
+        let mut registrations = PollRegistrations::new();
         loop {
             match self.handle_set.poll_one() {
                 Ok(Some(event)) => return event,
                 Ok(None) | Err(KError::NotFound) => {
-                    block_on(poll_fn(|cx| {
-                        self.handle_set.register(cx, HandleEventMask::READY);
+                    let wait_result = block_on(poll_fn(|cx| {
+                        let mut context = registrations.context(cx);
+                        if let Err(err) = self
+                            .handle_set
+                            .register(&mut context, HandleEventMask::READY)
+                        {
+                            return Poll::Ready(Err(err));
+                        }
+                        drop(context);
                         if self.handle_set.poll(false).contains(HandleEventMask::READY) {
-                            Poll::Ready(())
+                            Poll::Ready(Ok(()))
                         } else {
                             Poll::Pending
                         }
                     }));
+                    if let Err(err) = wait_result {
+                        warn!("vsock bridge handle-set register failed: {err:?}");
+                        ktask::sleep(Duration::from_millis(10));
+                    }
                 }
                 Err(err) => {
                     warn!("vsock bridge handle-set poll failed: {err:?}");
@@ -791,8 +810,13 @@ impl VsockBridge {
 
 fn rx_task() {
     loop {
-        let event = VSOCK_BRIDGE.pop_rx_event();
-        VSOCK_BRIDGE.handle_rx_event(event);
+        match VSOCK_BRIDGE.pop_rx_event() {
+            Ok(event) => VSOCK_BRIDGE.handle_rx_event(event),
+            Err(err) => {
+                warn!("vsock bridge receive registration failed: {err}");
+                ktask::yield_now();
+            }
+        }
     }
 }
 

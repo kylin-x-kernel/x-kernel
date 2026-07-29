@@ -61,7 +61,7 @@ kpoll / kspin / alloc
 |------|----------|----------|
 | handle table map | 调用方外部锁 | `HandleTable` 不自带锁，通常由 `RwLock` 包装 |
 | handle set entries | `SpinNoIrq<BTreeMap<...>>` | add/delete/modify/poll 串行化 |
-| handle waiters | `kpoll::PollSet` | `HandleWaitState::notify` 唤醒注册者 |
+| handle waiters | `kpoll::PollSet` + caller-owned `PollRegistrations` | `HandleWaitState::notify` 唤醒注册者，owner drop 注销等待者 |
 | handle cookie | `AtomicUsize` | Acquire/Release 读写 caller cookie |
 
 `HandleSet` 锁内只做 map 更新和短路径 poll，不应在锁内调用可能阻塞的操作。

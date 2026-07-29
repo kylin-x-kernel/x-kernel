@@ -5,11 +5,10 @@
 use core::{
     any::Any,
     sync::atomic::{AtomicUsize, Ordering},
-    task::Context,
 };
 
 use bitflags::bitflags;
-use kpoll::PollSet;
+use kpoll::{PollContext, PollRegisterError, PollSet};
 
 bitflags! {
     /// Events reported by TIPC handles.
@@ -68,7 +67,15 @@ pub trait Handle: Any + Send + Sync {
     fn poll(&self, finalize: bool) -> HandleEventMask;
 
     /// Registers the current task for an event transition.
-    fn register(&self, cx: &mut Context<'_>, event_mask: HandleEventMask);
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the waiter registration cannot be retained.
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        event_mask: HandleEventMask,
+    ) -> Result<(), PollRegisterError>;
 
     /// Closes the object. Calling this more than once is harmless.
     fn close(&self);
@@ -96,16 +103,20 @@ pub struct HandleWaitState {
 
 impl HandleWaitState {
     /// Creates an empty wait state.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             poll_set: PollSet::new(),
             cookie: AtomicUsize::new(0),
         }
     }
 
-    /// Registers the current task waker for a future event.
-    pub fn register(&self, cx: &mut Context<'_>) {
-        self.poll_set.register(cx.waker());
+    /// Registers the current task for a future event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the waiter registration cannot be retained.
+    pub fn register(&self, context: &mut PollContext<'_>) -> Result<(), PollRegisterError> {
+        context.register(&self.poll_set)
     }
 
     /// Wakes all tasks registered on this handle.
