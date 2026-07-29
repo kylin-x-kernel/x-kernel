@@ -80,6 +80,11 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
 ## 线程安全
 
 共享 dentry、inode、mount 和 file 状态由 mutex、atomic、`Arc` 和 `Weak` 保护。
+可变 per-mount flags 由私有 `AtomicMountFlags` 封装；原子存储只接受和返回强类型
+`MountFlags`，并使用 relaxed ordering，因为 flags 不发布或保护其他 mount 状态。
+reconfigure 在替换 flags 前校验目标是当前 mount namespace 中已注册 mount 的根路径。
+普通 remount 同步更新共享 superblock 的只读策略，bind remount 仅更新目标 mount；
+后端固定只读的 superblock 不允许被错误地切换为读写。
 children map 与 superblock dcache 不嵌套持锁；namespace 操作先更新 parent 弱索引，
 再更新 dcache 强所有权。类型化 flags 是不可变值快照，不提供共享可变状态。
 

@@ -17,9 +17,11 @@ ebpf = ["dep:bpffs"]
 [dependencies]
 bitflags.workspace = true
 bpffs = { workspace = true, optional = true }
+devfs.workspace = true
 kfd.workspace = true
 kfd_objects.workspace = true
 memfs.workspace = true
+procfs.workspace = true
 fs_context.workspace = true
 kerrno.workspace = true
 kcred.workspace = true

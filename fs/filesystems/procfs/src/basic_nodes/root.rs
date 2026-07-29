@@ -52,6 +52,17 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
             Ok(info)
         }),
     );
+    root.add(
+        "filesystems",
+        SimpleFile::new_regular(fs.clone(), || {
+            // Keep this in sync with the `fs_type` match in `sys_mount`
+            // (`posix/fs/src/mount.rs`): only list types the mount syscall
+            // actually accepts, so userspace probing is not misled.
+            Ok(String::from(
+                "nodev\tproc\nnodev\tsysfs\nnodev\ttmpfs\nnodev\tdevtmpfs\n",
+            ))
+        }),
+    );
     root.add("sys", {
         let mut sys = DirMapping::new();
 

@@ -38,9 +38,11 @@ impl SimpleFs {
     pub fn new_with_flags(
         name: String,
         fs_type: u32,
-        mount_flags: StatFsFlags,
+        mut mount_flags: StatFsFlags,
         root: impl FnOnce(Arc<Self>) -> DirMaker,
     ) -> Arc<SuperBlock> {
+        let is_readonly = mount_flags.contains(StatFsFlags::RDONLY);
+        mount_flags.remove(StatFsFlags::RDONLY);
         let fs = Arc::new(Self {
             name,
             fs_type,
@@ -49,7 +51,7 @@ impl SimpleFs {
         });
         let root = root(fs.clone());
         let root = Dentry::new_dir_from_inode(root(), None, String::new());
-        SuperBlock::new(fs, root)
+        SuperBlock::new_with_readonly(fs, root, is_readonly)
     }
 
     fn alloc_inode(&self) -> u64 {

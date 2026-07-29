@@ -107,9 +107,11 @@ impl MemoryFs {
     pub(crate) fn new_with_name_flags_and_root_mode(
         name: &'static str,
         fs_type: u32,
-        mount_flags: StatFsFlags,
+        mut mount_flags: StatFsFlags,
         root_mode: NodePermission,
     ) -> Arc<SuperBlock> {
+        let is_readonly = mount_flags.contains(StatFsFlags::RDONLY);
+        mount_flags.remove(StatFsFlags::RDONLY);
         let fs = Arc::new(Self {
             name,
             fs_type,
@@ -128,7 +130,7 @@ impl MemoryFs {
         );
         let root_inode = MemoryNode::vfs_inode_from_inode(&fs, root_ino);
         let root = Dentry::new_dir_from_inode(root_inode, None, String::new());
-        SuperBlock::new(fs, root)
+        SuperBlock::new_with_readonly(fs, root, is_readonly)
     }
 
     fn get(&self, ino: u64) -> Arc<Inode> {
@@ -796,9 +798,20 @@ impl AddressSpaceOperations for MemoryNode {
 #[cfg(unittest)]
 mod tests {
     use linux_raw_sys::general::{O_CREAT, O_EXCL, O_WRONLY};
-    use unittest::{assert_eq, def_test};
+    use unittest::{assert, assert_eq, def_test};
 
     use super::*;
+
+    #[def_test]
+    fn tmpfs_readonly_policy_can_be_reconfigured() {
+        let fs = shmem::new_tmpfs(StatFsFlags::RDONLY);
+
+        assert!(fs.stat().unwrap().mount_flags.contains(StatFsFlags::RDONLY));
+        fs.reconfigure_readonly(false).unwrap();
+        assert!(!fs.stat().unwrap().mount_flags.contains(StatFsFlags::RDONLY));
+        fs.reconfigure_readonly(true).unwrap();
+        assert!(fs.stat().unwrap().mount_flags.contains(StatFsFlags::RDONLY));
+    }
 
     #[def_test]
     fn tmpfs_write_end_updates_vfs_inode_size() {

@@ -63,6 +63,26 @@ fn per_mount_flags(flags: i32) -> MountFlags {
     mnt_flags
 }
 
+fn bind_mount_flags(source_flags: MountFlags, flags: i32) -> MountFlags {
+    let f = flags as u32;
+    let mut bind_flags = source_flags;
+
+    bind_flags |= per_mount_flags(flags) & !MountFlags::RELATIME;
+
+    if f & linux_raw_sys::general::MS_NOATIME != 0 {
+        bind_flags.remove(MountFlags::RELATIME);
+    }
+    if f & linux_raw_sys::general::MS_RELATIME != 0 {
+        bind_flags.remove(MountFlags::NOATIME);
+        bind_flags.insert(MountFlags::RELATIME);
+    }
+    if f & linux_raw_sys::general::MS_STRICTATIME != 0 {
+        bind_flags.remove(MountFlags::RELATIME | MountFlags::NOATIME);
+    }
+
+    bind_flags
+}
+
 /// Mount a filesystem at the specified target path.
 pub fn sys_mount(
     source: UserConstPtr<c_char>,
@@ -78,18 +98,11 @@ pub fn sys_mount(
         return Err(KError::InvalidInput);
     }
 
-    // Reject operation types that aren't yet implemented.
-    // Each of these dispatches to a separate handler.
-    if f & linux_raw_sys::general::MS_REMOUNT != 0 {
-        return Err(KError::InvalidInput);
-    }
-    if f & linux_raw_sys::general::MS_BIND != 0 {
-        return Err(KError::InvalidInput);
-    }
-    if f & linux_raw_sys::general::MS_MOVE != 0 {
-        return Err(KError::InvalidInput);
-    }
-    if f & (linux_raw_sys::general::MS_SHARED
+    // Reject operation types we do not implement. MS_MOVE and the
+    // shared/private/slave/unbindable (and recursive) propagation flags are
+    // unsupported; bind and remount each have a dedicated path below.
+    if f & (linux_raw_sys::general::MS_MOVE
+        | linux_raw_sys::general::MS_SHARED
         | linux_raw_sys::general::MS_PRIVATE
         | linux_raw_sys::general::MS_SLAVE
         | linux_raw_sys::general::MS_UNBINDABLE
@@ -99,14 +112,81 @@ pub fn sys_mount(
         return Err(KError::InvalidInput);
     }
 
-    let source = source.load_string_with_max_len(PATH_MAX).ok();
+    let source = if source.is_null() {
+        None
+    } else {
+        Some(source.load_string_with_max_len(PATH_MAX)?)
+    };
     let source_ref = source.as_deref();
     let target = target.load_string()?;
-    let fs_type = fs_type.load_string()?;
-    debug!("sys_mount <= source: {source:?}, target: {target:?}, fs_type: {fs_type:?}");
+    debug!("sys_mount <= source: {source:?}, target: {target:?}, flags: {f:#x}");
 
+    // Operation-type dispatch follows the Linux `do_mount()` order: remount is
+    // checked before bind so MS_REMOUNT|MS_BIND reaches the remount path. Both
+    // accept `fs_type == NULL`, so `fs_type` is loaded only for a fresh mount.
+
+    if f & linux_raw_sys::general::MS_REMOUNT != 0 {
+        let process = current_user_process();
+        let cred = kprocess::current_cred();
+        let fs_struct = process.fs_context()?;
+        let fs = fs_struct.lock();
+        let target = Filename::new(target.as_str()).lookup_at(
+            fs.root(),
+            fs.pwd(),
+            LookupIntent::Open,
+            LookupFlags::follow(),
+            &cred,
+        )?;
+        let mount_flags = per_mount_flags(flags);
+        if f & linux_raw_sys::general::MS_BIND != 0 {
+            process
+                .mnt_ns()?
+                .reconfigure_bind_mount(&target, mount_flags)?;
+        } else {
+            process.mnt_ns()?.reconfigure_mount(&target, mount_flags)?;
+        }
+        return Ok(0);
+    }
+
+    if f & linux_raw_sys::general::MS_BIND != 0 {
+        // An empty/NULL source is an invalid argument (EINVAL), not EFAULT.
+        let source = source
+            .filter(|source| !source.is_empty())
+            .ok_or(KError::InvalidInput)?;
+        let process = current_user_process();
+        let cred = kprocess::current_cred();
+        let fs_struct = process.fs_context()?;
+        let fs = fs_struct.lock();
+        let source = Filename::new(source.as_str()).lookup_at(
+            fs.root(),
+            fs.pwd(),
+            LookupIntent::Open,
+            LookupFlags::follow(),
+            &cred,
+        )?;
+        let target = Filename::new(target.as_str()).lookup_at(
+            fs.root(),
+            fs.pwd(),
+            LookupIntent::Open,
+            LookupFlags::follow(),
+            &cred,
+        )?;
+        let mount_flags = bind_mount_flags(source.mount().flags(), flags);
+        process
+            .mnt_ns()?
+            .attach_bind(&source, &target, mount_flags)?;
+        return Ok(0);
+    }
+
+    let fs_type = fs_type.load_string()?;
     let mount_flags = per_mount_flags(flags);
     let mount_fs = match fs_type.as_str() {
+        "devfs" | "devtmpfs" => devfs::new_devfs(),
+        "proc" => procfs::new_procfs(),
+        "sysfs" => memfs::ramfs::new_ramfs_with_name_and_flags(
+            "sysfs",
+            superblock_flags_from_sys_mount(flags),
+        ),
         "tmpfs" => shmem::new_tmpfs(superblock_flags_from_sys_mount(flags)),
         #[cfg(feature = "ebpf")]
         "bpf" => bpffs::new_bpffs(),
@@ -202,5 +282,22 @@ mod tests {
         assert!(result.contains(MountFlags::RDONLY));
         assert!(result.contains(MountFlags::NODEV));
         assert!(result.contains(MountFlags::NOEXEC));
+    }
+
+    #[def_test]
+    fn test_bind_mount_flags_preserve_source_and_apply_requested_options() {
+        let source = MountFlags::NOSUID | MountFlags::NOATIME;
+        let flags = (linux_raw_sys::general::MS_BIND
+            | linux_raw_sys::general::MS_NODEV
+            | linux_raw_sys::general::MS_NOEXEC
+            | linux_raw_sys::general::MS_RELATIME) as i32;
+
+        let result = super::bind_mount_flags(source, flags);
+
+        assert!(result.contains(MountFlags::NOSUID));
+        assert!(result.contains(MountFlags::NODEV));
+        assert!(result.contains(MountFlags::NOEXEC));
+        assert!(result.contains(MountFlags::RELATIME));
+        assert!(!result.contains(MountFlags::NOATIME));
     }
 }

@@ -7,6 +7,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use hashbrown::HashMap;
 use klazy::Lazy;
@@ -197,6 +198,8 @@ pub struct StatFs {
 pub struct SuperBlock {
     ops: Arc<dyn SuperBlockOperations>,
     root: Dentry,
+    /// Independent policy bit; it neither publishes nor guards other state.
+    readonly: AtomicBool,
     dentry_cache: Mutex<HashMap<DentryKey, Dentry>>,
     max_file_size: u64,
     rename_mutex: Mutex<()>,
@@ -216,15 +219,29 @@ impl SuperBlock {
 
     /// Returns filesystem statistics for this superblock.
     pub fn stat(&self) -> VfsResult<StatFs> {
-        self.ops.statfs()
+        let mut stat = self.ops.statfs()?;
+        if self.readonly.load(Ordering::Relaxed) {
+            stat.mount_flags.insert(StatFsFlags::RDONLY);
+        }
+        Ok(stat)
     }
 
     /// Creates a superblock and transfers ownership of its root dentry to it.
     pub fn new(ops: Arc<dyn SuperBlockOperations>, root: Dentry) -> Arc<Self> {
+        Self::new_with_readonly(ops, root, false)
+    }
+
+    /// Creates a superblock with an initial VFS-wide read-only policy.
+    pub fn new_with_readonly(
+        ops: Arc<dyn SuperBlockOperations>,
+        root: Dentry,
+        is_readonly: bool,
+    ) -> Arc<Self> {
         let max_file_size = ops.max_file_size().min(MAX_LFS_FILESIZE);
         let super_block = Arc::new(Self {
             ops,
             root,
+            readonly: AtomicBool::new(is_readonly),
             dentry_cache: Mutex::default(),
             max_file_size,
             rename_mutex: Mutex::default(),
@@ -233,6 +250,16 @@ impl SuperBlock {
         super_block.root.bind_super_block(&super_block);
         super_block_registry().register(&super_block);
         super_block
+    }
+
+    /// Changes the VFS-wide read-only policy shared by every mount of this superblock.
+    pub fn reconfigure_readonly(&self, is_readonly: bool) -> VfsResult<()> {
+        if !is_readonly && self.ops.statfs()?.mount_flags.contains(StatFsFlags::RDONLY) {
+            return Err(crate::VfsError::ReadOnlyFilesystem);
+        }
+
+        self.readonly.store(is_readonly, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Retains a hashed dentry until it is explicitly evicted from the dcache.

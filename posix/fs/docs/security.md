@@ -134,7 +134,7 @@ kfd resources / kvfs / device and pipe implementations
 | T-05 | `O_NOFOLLOW` 被忽略导致符号链接或 magic-link 被跟随 | 路径 flags | 高 | open/at flags 没有传入解析层 | syscall 层统一把 flags 转成 `LookupFlags`，`kvfs::namei` 按 `LookupIntent` 处理 final/non-final symlink 与 magic-link |
 | T-06 | `fallocate` offset/len 溢出破坏文件大小或范围操作 | scalar 参数 / VFS | 高 | 负数或 `offset + len` 溢出 | 校验非负并用 `checked_add` |
 | T-07 | `copy_file_range` 同文件重叠复制造成数据破坏 | fd-to-fd 复制 | 中 | 同文件重叠检查未实现 | 已在设计文档列为限制；非零 flags 在边界被拒绝；当前不宣称等价 Linux |
-| T-08 | 未实现的 mount/umount flags 被静默忽略 | mount flags | 高 | 用户态请求 bind、remount、detach 等语义 | 对未实现 operation flags 返回 `InvalidInput` |
+| T-08 | 未实现的 mount/umount flags 被静默忽略 | mount flags | 高 | 用户态请求 move、propagation、detach 等语义 | 对未实现 operation flags 返回 `InvalidInput`；bind 应用请求的 per-mount flags；普通 remount 更新共享只读策略，bind remount 仅更新目标 mount flags |
 | T-09 | 文件锁占位返回成功导致应用误以为互斥成立 | fd_ops | 中 | `fcntl`/`flock` 锁语义未实现 | 文档列为限制；锁相关返回路径必须按当前占位语义审计 |
 | T-10 | 创建文件使用错误所有者导致 DAC 语义错误 | open/create | 高 | 固定 root owner，或忽略 setgid 父目录 | syscall 传递当前 `Cred`，后端用 `inode_init_owner()` 初始化 fsuid/fsgid 与继承组 |
 | T-11 | `faccessat2` 权限检查使用错误身份 | access | 高 | 默认错误使用 filesystem IDs，或 `AT_EACCESS` 强行覆盖显式 fs ID | 默认构造 real-ID credential；`AT_EACCESS` 直接使用当前 credential 的 `fsuid/fsgid`，并用于完整遍历与最终检查 |
@@ -212,7 +212,7 @@ kfd resources / kvfs / device and pipe implementations
 2. FAT 等不能表达 Unix owner 的后端无法完整保存创建者 UID/GID。
 3. `fcntl` 文件锁和 `flock` 未实现真实锁。
 4. `copy_file_range` 对普通文件类型、同文件重叠和跨文件系统限制仍为 TODO。
-5. `mount` 只支持 `tmpfs`，不支持 bind、remount、move、propagation 和 lazy/force unmount。
+5. `mount` 支持 devfs/proc/sysfs/tmpfs、非递归 bind、普通只读 remount 和 bind remount；不支持 move、recursive bind、propagation、文件系统专用 reconfigure 和 lazy/force unmount。
 6. `preadv2` / `pwritev2` 当前只支持 `flags == 0`，
    非零 flags 返回 `Unsupported`。
 7. memfd `F_ADD_SEALS` / `F_GET_SEALS` 已接入；shared writable mmap 和

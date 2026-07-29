@@ -3592,6 +3592,7 @@ version = "0.2.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "bpffs",
+ "devfs",
  "fs_context",
  "iov_iter",
  "kcred",
@@ -3609,6 +3610,7 @@ dependencies = [
  "memfs",
  "osvm",
  "posix-types",
+ "procfs",
  "unittest",
 ]
 

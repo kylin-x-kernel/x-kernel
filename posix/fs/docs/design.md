@@ -88,7 +88,7 @@ core/ksyscall
 | `dir` | 维护当前目录、根目录、目录/节点创建和 `linux_dirent64` 输出；`mknodat` 只转换 ABI 参数，创建策略由 KVFS 执行 |
 | `namei` | 处理链接、删除、符号链接和重命名等命名空间变更 |
 | `metadata` | 修改所有者、权限和时间戳 |
-| `mount` | 把 Linux mount flags 映射到 `kvfs::MountFlags`，并分派当前明确支持的 tmpfs/bpffs nodev mount |
+| `mount` | 把 Linux mount flags 映射到 `kvfs::MountFlags`，分派 devfs/proc/sysfs/tmpfs/bpffs，并处理非递归 bind 与 remount |
 | `stat` | 转换 VFS metadata、access 检查和 statfs 信息 |
 | `ioctl` | 处理 `FIONBIO` 并把其它命令转交 `FileLike::ioctl` |
 | `sync` | 将同步请求转发到文件系统或打开对象所在文件系统 |
@@ -269,11 +269,11 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
 
 ### `mount`
 
-1. 拒绝 `MS_NOUSER` 和尚未实现的 remount、bind、move、propagation 操作。
-2. 从用户空间读取 source、target、fs_type。
-3. 当前只接受 `tmpfs`。
-4. 将 Linux mount flags 拆分为 superblock flags 和 per-mount flags。
-5. 创建 `MemoryFs` 并挂载到目标 `Location`。
+1. 拒绝 `MS_NOUSER` 和尚未实现的 move、propagation 操作。
+2. `MS_REMOUNT` 要求 target 解析到已注册 mount 的根路径，并替换该 mount 的 per-mount flags。
+3. 非递归 `MS_BIND` 要求非空 source，继承源 mount flags 并应用本次请求的 per-mount flags 后创建共享源 dentry 的 bind mount。
+4. 普通挂载读取 source、target、fs_type，支持 devfs/devtmpfs、proc、sysfs、tmpfs 和可选 bpffs。
+5. 将 Linux mount flags 拆分为 superblock flags 和 per-mount flags后挂载到目标路径。
 
 ## 并发模型
 
@@ -322,9 +322,13 @@ VFS/文件 syscall 与 fd-backed object 之间的互操作接线。
 实际目标 fd snapshot、readlink display 和 follow 行为由 procfs/kfd/kvfs 协作完成。
 这样能保留 live procfd 对象语义，同时避免 syscall 层复制 procfs 路径规则。
 
-### 不支持的 mount 操作显式拒绝
+### mount 操作的兼容边界
 
-`sys_mount` 对 remount、bind、move 和 propagation flags 返回 `InvalidInput`，
+`sys_mount` 实现非递归 bind mount、普通 remount 和 bind remount。remount target 必须是
+当前 mount namespace 中已注册 mount 的根路径；普通目录返回 `InvalidInput`。普通 remount
+同时更新目标的 per-mount flags 和共享 superblock 的只读策略，bind remount 只更新目标
+mount 的 flags。
+move、recursive bind 和 propagation flags 返回 `InvalidInput`，
 `sys_umount2` 对 force、detach、expire、nofollow 返回 `InvalidInput`。
 显式拒绝比静默忽略更安全，
 因为静默忽略会让用户态误以为已经获得异步卸载或 bind mount 等语义。
@@ -398,7 +402,7 @@ pathname DAC。这对应 Linux `vfs_truncate()` 与 `do_ftruncate()` 的语义�
 2. FAT 等不能表达 Unix UID/GID 的后端无法完整持久化创建者身份。
 3. `fcntl` 文件锁和 `flock` 目前是兼容占位，不提供真实互斥。
 4. `copy_file_range` 尚未检查普通文件类型、同文件重叠和跨文件系统条件。
-5. `mount` 当前只支持 `tmpfs` 新挂载，不支持 bind、remount、move 和 propagation。
+5. `mount` 尚不支持 move、recursive bind、propagation，以及只读策略之外的文件系统专用 reconfigure。
 6. `sendfile` 对非空 offset 保留 32 位范围限制，反映旧接口兼容约束。
 7. `F_ADD_SEALS` / `F_GET_SEALS` 已接入 shmem object state；shared
    writable mmap 和 `mprotect(PROT_WRITE)` seal enforcement 由 `mm/filemap`

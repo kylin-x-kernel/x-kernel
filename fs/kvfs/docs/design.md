@@ -204,7 +204,13 @@ inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `seta
 以及 `/dev/fd` 一类启动期链接；未显式支持动态插入的 simple directory 保持返回 `EPERM`。
 
 非递归 bind mount 创建新的 `Mount`，共享源 path 的 superblock 与 root dentry，但拥有
-独立 mount ID、父挂载位置和覆盖关系。卸载 bind mount 只移除 topology 节点，不对共享的
+独立 mount ID、per-mount flags、父挂载位置和覆盖关系。`Mount` 作为被 `Path`、打开文件
+和 namespace topology 共同引用的稳定身份，不在 remount 时替换。per-mount flags 通过
+私有 `AtomicMountFlags` 封装读写，对其余 mount 代码保持强类型 `MountFlags` 接口。
+普通 remount 只允许作用于已注册 mount 的根路径，原子替换目标 mount flags，并更新
+`SuperBlock` 上所有共享 mount 都能观察到的只读策略；bind remount 只替换目标的
+per-mount flags。文件系统后端固定报告只读时，切换到读写会返回 `ReadOnlyFilesystem`。
+卸载 bind mount 只移除 topology 节点，不对共享的
 源 dentry 执行 `forget()`；普通 filesystem mount 仍在卸载时释放其独占 mount-root dentry。
 
 ### pathname 与打开文件
