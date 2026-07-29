@@ -713,7 +713,11 @@ def build_stage_check_run_output(stage_name, ci_result, failed_stage_logs, detai
 
     base = (details_url or "").rstrip("/")
     stages_url = f"{base}/stages/" if base else ""
-    log_url = f"{base}/artifact/stage-logs/{sanitize_stage_file_name(stage_name)}.log" if base else ""
+    log_url = (
+        f"{base}/artifact/.ci/stage-logs/"
+        f"{sanitize_stage_file_name(stage_name)}.log"
+        if base else ""
+    )
 
     if status == "passed":
         summary = f"## ✅ {stage_name} 通过\n\n[查看 Jenkins Stages]({stages_url})"
@@ -740,7 +744,10 @@ def log_artifact_url(details_url, stage_name):
     base = (details_url or "").rstrip("/")
     if not base:
         return ""
-    return f"{base}/artifact/stage-logs/{sanitize_stage_file_name(stage_name)}.log"
+    return (
+        f"{base}/artifact/.ci/stage-logs/"
+        f"{sanitize_stage_file_name(stage_name)}.log"
+    )
 
 
 def check_run_started(ids_file, stage_name):

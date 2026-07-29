@@ -1,7 +1,7 @@
 # Necessary dependencies for the build system
 
 # Cargo binutils
-ifeq ($(shell cargo install --list | grep cargo-binutils),)
+ifeq ($(shell command -v cargo-objcopy),)
   $(info Installing cargo-binutils...)
   $(shell cargo install cargo-binutils)
 endif

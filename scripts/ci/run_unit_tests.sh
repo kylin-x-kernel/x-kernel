@@ -14,16 +14,9 @@ if [ -n "${STAGE_LOG:-}" ]; then
     exec > >(ansi_filter | tee -a "${STAGE_LOG}") 2>&1
 fi
 
-ROOTFS_VERSION=20260302
-ROOTFS_CACHE="/xkernel-target/rootfs-cache"
-ROOTFS_CACHED="${ROOTFS_CACHE}/rootfs-${arch}.img"
-mkdir -p "${ROOTFS_CACHE}"
-
-if [ ! -f "${ROOTFS_CACHED}" ]; then
-    IMG_URL="https://gitee.com/openkylin/x-kernel-image/releases/download/${ROOTFS_VERSION}"
-    curl -f -L "${IMG_URL}/rootfs-${arch}.img.xz" -o "${ROOTFS_CACHED}.xz"
-    xz -df "${ROOTFS_CACHED}.xz"
-fi
+ROOTFS_CACHE_DIR="${ROOTFS_CACHE_DIR:-${PWD}/.cache/rootfs}"
+ROOTFS_CACHED="${ROOTFS_CACHE_DIR}/rootfs-${arch}.img"
+scripts/ci/prepare_rootfs_cache.sh "${arch}"
 cp --reflink=auto "${ROOTFS_CACHED}" disk.img
 
 TIMEOUT=480

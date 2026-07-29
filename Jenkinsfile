@@ -8,8 +8,9 @@ import groovy.transform.Field
 pipeline {
     agent {
         docker {
-            image 'yeanwang/x-kernel-builder:v1.5'
-            args '-v /var/run/docker.sock:/var/run/docker.sock -v /var/jenkins_home/cargo/registry:/usr/local/cargo/registry -v /var/jenkins_home/cargo/config.toml:/usr/local/cargo/config.toml:ro -v /var/jenkins_home/.rustup/toolchains:/usr/local/rustup/toolchains -v /var/jenkins_home/xkernel-target:/xkernel-target --privileged -u root:root'
+            label 'xkernel-agent && docker && vhost-vsock && container-vsock'
+            image 'yeanwang/x-kernel-builder:v2.0.0-rc.4@sha256:31ea8c26f3a07ca83aa77602f19bd7c7114586ee837bc305537c91e73882ce22'
+            args '--dns 223.5.5.5 --mount type=volume,dst=/xkernel-target --mount type=volume,src=xkernel-cargo-home-v2,dst=/xkernel-cache/cargo --mount type=volume,src=xkernel-rustup-toolchains-v2,dst=/usr/local/rustup/toolchains --mount type=volume,src=xkernel-rootfs-cache-v2,dst=/xkernel-cache/rootfs --device=/dev/kvm --device=/dev/vhost-vsock --group-add 36 --security-opt seccomp=unconfined --security-opt no-new-privileges=true'
         }
     }
 
@@ -32,11 +33,6 @@ pipeline {
 
     environment {
         CI = 'true'
-        // Git ownership checks can fail before any pipeline step has a chance
-        // to call markSafeDirectory() inside the containerized workspace.
-        GIT_CONFIG_COUNT = '1'
-        GIT_CONFIG_KEY_0 = 'safe.directory'
-        GIT_CONFIG_VALUE_0 = '*'
         PROJECT_REPO = "${params.PROJECT_REPO}"
         DEFAULT_BRANCH = "${params.DEFAULT_BRANCH}"
         LIBUTEE_REPO = "${params.LIBUTEE_REPO}"
@@ -45,24 +41,32 @@ pipeline {
         AUX_RUST_TOOLCHAIN = 'nightly-2026-03-08'
         CARGO_TERM_COLOR = 'always'
         CARGO_TERM_QUIET = 'true'
-        CARGO_REGISTRIES_CRATES_IO_PROTOCOL = 'sparse'
+        CARGO_HTTP_TIMEOUT = '120'
+        CARGO_NET_RETRY = '3'
+        CARGO_NET_GIT_FETCH_WITH_CLI = 'true'
+        RUSTUP_DIST_SERVER = 'https://rsproxy.cn'
+        RUSTUP_UPDATE_ROOT = 'https://rsproxy.cn/rustup'
         RUSTUP_PERMIT_COPY_RENAME = '1'
         PYTHONUNBUFFERED = '1'
         TARGET_DIR = '/xkernel-target'
+        ROOTFS_CACHE_DIR = '/xkernel-cache/rootfs'
+        ROOTFS_VERSION = '20260302'
         HARNESS_JOBS = '2'
+        STARRY_ACCEL = 'n'
     }
 
     stages {
         stage('Source: Checkout & PR Base') {
             steps {
                 script {
-                    env.ROOT_WS = env.WORKSPACE
+                    env.ROOT_WS = pwd()
                     currentBuild.description = env.giteePullRequestIid?.trim()
                         ? "PR#${env.giteePullRequestIid}"
                         : "${env.DEFAULT_BRANCH} (manual)"
                     runCiStage(sourceStageName(), ciFailureDetail(sourceStageName()), false) {
+                        initializeCiWorkspace()
                         prepareSource()
-                        // 先创建 6 个并行检查占位（较早创建 -> Gitee 列表靠下）；顺序 3 项在后续 start/finish
+                        // 先创建并行检查占位（较早创建 -> Gitee 列表靠下）；顺序 3 项在后续 start/finish
                         giteeStartParallelCheckRuns()
                         giteeStartCheckRun(sourceStageName())
                     }
@@ -113,6 +117,8 @@ pipeline {
             script {
                 finalizeCiBuild()
             }
+        }
+        cleanup {
             cleanWs deleteDirs: true, disableDeferredWipeout: true, notFailBuild: true
         }
     }
@@ -126,6 +132,30 @@ def runtimeTestArchitectures() { return ['x86_64', 'aarch64', 'riscv64'] }
 def teeTestArchitectures() { return ['x86_64', 'aarch64'] }
 def teeTestBinaries() { return ['storage_test', 'cryp_test'] }
 def docCheckEnabled() { return params.ENABLE_DOC_CHECK?.toString()?.toBoolean() ?: false }
+
+def rootWorkspace() {
+    return env.ROOT_WS?.trim() ?: env.WORKSPACE
+}
+
+def ciRootDir() {
+    return "${rootWorkspace()}/.ci"
+}
+
+def ciSourceDir() {
+    return "${ciRootDir()}/source"
+}
+
+def ciWorkRoot() {
+    return "${ciRootDir()}/work"
+}
+
+def ciStageLogRoot() {
+    return "${ciRootDir()}/stage-logs"
+}
+
+def ciGiteeRoot() {
+    return "${ciRootDir()}/gitee"
+}
 
 def ciSequentialStages() {
     return [
@@ -223,34 +253,27 @@ def ciFailureDetail(String stageName) {
 def archiveArtifactPatterns() {
     def patterns = [
         'ci-summary.md',
-        'stage-logs/**/*.log',
-        '**/artifacts/**/*',
-        '**/logs/**/*',
-        '**/unittest-output.log',
-        '**/tee-test-output.log',
-        '**/coverage-html/**/*',
-        '**/coverage.info',
-        '**/coverage.xml',
-        '**/coverage.txt',
+        '.ci/stage-logs/**/*.log',
+        'artifacts/**/*',
+        '.ci/work/**/artifacts/**/*',
+        '.ci/work/**/logs/**/*',
+        '.ci/work/**/unittest-output.log',
+        '.ci/work/**/tee-test-output.log',
     ]
-    if (docCheckEnabled()) {
-        patterns << '**/doc-artifacts/**/*'
-    }
     return patterns
 }
 
 def finalizeCiBuild() {
     restoreReplayGiteeEnv()
-    fixWorkspaceOwnership(env.WORKSPACE)
 
     def failedStageLogs = archiveFailedStageLogs(ciResults)
-    archiveArtifacts artifacts: archiveArtifactPatterns().join(','), allowEmptyArchive: true
-
-    deleteOldCiComments()
     def coverageSummary = collectCoverageSummary()
     def built = buildCombinedComment(ciResults, coverageSummary, failedStageLogs)
     writeFile file: 'ci-summary.md', text: built.comment.replaceFirst(/^<!-- x-kernel-ci -->\n/, '')
     currentBuild.description = buildShortBuildDescription(ciResults)
+    archiveArtifacts artifacts: archiveArtifactPatterns().join(','), allowEmptyArchive: true
+
+    deleteOldCiComments()
     notifyGiteePullRequest(built.comment)
 
     giteeFinalizeAllCheckRuns(ciResults, failedStageLogs)
@@ -263,7 +286,6 @@ def finalizeCiBuild() {
         giteeTestReset()
     }
 
-    fixWorkspaceOwnership(env.WORKSPACE)
 }
 
 def buildShortBuildDescription(Map results) {
@@ -403,26 +425,24 @@ def runParallelCiStage(String stageName, String failedDetail, Closure body) {
 }
 
 def withCleanSourceWorkspace(String relativePath, Closure body) {
-    ws("${env.ROOT_WS}/${relativePath}") {
+    ws("${ciWorkRoot()}/${relativePath}") {
         def stageWorkspace = pwd()
-        try {
-            deleteDir()
-            restoreSource()
-            body.call(stageWorkspace)
-        } finally {
-            fixWorkspaceOwnership(stageWorkspace)
-        }
+        deleteDir()
+        restoreSource()
+        body.call(stageWorkspace)
     }
 }
 
 def checkBuildEnvironment() {
     initStageLog(setupStageName())
+    def rootfsArches = runtimeTestArchitectures().join(' ')
     withCleanSourceWorkspace('env-check') {
         sh label: 'Install Rust toolchains and targets', script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(setupStageName())}
-scripts/ci/check_build_environment.sh
-ln -sf /usr/local/bin/riscv64-linux-musl-gcc /usr/local/bin/riscv64gc-linux-musl-gcc
+flock -x /usr/local/rustup/toolchains/.jenkins-install.lock \
+  scripts/ci/check_build_environment.sh
+scripts/ci/prepare_rootfs_cache.sh ${rootfsArches}
 """
     }
 }
@@ -509,12 +529,11 @@ def runRuntimeTests(String arch) {
         withEnv(["TARGET_DIR=${runtimeTargetDir}", "STAGE_LOG=${stageLog}"]) {
             restoreKernelArtifact(artifactNameForNormal(arch))
             dir('test-harness') {
-                gitCheckoutWithToken(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH)
-                markSafeDirectory()
+                gitCheckoutPublic(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH)
 
                 withEnv(["XKERNEL_REMOTE=${pwd()}/..", "ARCH=${arch}",
                          "STARRY_SKIP_BUILD=1",
-                         "ROOTFS_CACHE_DIR=/xkernel-target/rootfs-cache",
+                         "ROOTFS_CACHE_DIR=${env.ROOTFS_CACHE_DIR}",
                          "GUEST_CASES_TARGET_DIR=/xkernel-target/guest-cases-${arch}",
                          "JOBS=${env.HARNESS_JOBS}"]) {
                     sh label: "Run starry-test-harness ${arch}", script: """#!/bin/bash
@@ -606,16 +625,19 @@ echo "HTML coverage report generated at ${htmlOut}/"
 def copyCoverageToWorkspace(String arch, String baseDir = targetDirForArch(arch)) {
     def triple = targetTripleFor(arch)
     def srcDir = "${baseDir}/${triple}/release"
-    sh label: "Collect coverage artifacts ${arch}", script: """#!/bin/bash
+    def outputDir = "${rootWorkspace()}/artifacts/coverage/${arch}"
+    withEnv(["_CI_COVERAGE_OUTPUT=${outputDir}"]) {
+        sh label: "Collect coverage artifacts ${arch}", script: """#!/bin/bash
 set -euo pipefail
-mkdir -p coverage-artifacts
+mkdir -p "\${_CI_COVERAGE_OUTPUT}"
 for f in coverage-html coverage.info coverage.xml coverage.txt; do
     src="${srcDir}/\${f}"
     if [ -e "\${src}" ]; then
-        cp -r "\${src}" coverage-artifacts/
+        cp -r "\${src}" "\${_CI_COVERAGE_OUTPUT}/"
     fi
 done
 """
+    }
 }
 
 def runGendoc(String stageName, String targetDir, String arch) {
@@ -629,17 +651,20 @@ cargo run --manifest-path xtask/gendoc/Cargo.toml -- --target-dir '${targetDir}'
 }
 
 def copyDocArtifactsToWorkspace(String targetDir, String arch) {
-    sh label: 'Collect doc artifacts', script: """#!/bin/bash
+    def outputDir = "${rootWorkspace()}/artifacts/docs/${arch}"
+    withEnv(["_CI_DOC_OUTPUT=${outputDir}"]) {
+        sh label: 'Collect doc artifacts', script: """#!/bin/bash
 set -euo pipefail
 doc_src="${targetDir}/doc"
 if [ ! -d "\${doc_src}" ]; then
     echo "No doc directory found at \${doc_src}"
     exit 1
 fi
-mkdir -p doc-artifacts
-cp -r "\${doc_src}" doc-artifacts/
-echo "Rust docs collected at doc-artifacts/doc/index.html"
+mkdir -p "\${_CI_DOC_OUTPUT}"
+cp -r "\${doc_src}" "\${_CI_DOC_OUTPUT}/"
+echo "Rust docs collected at artifacts/docs/${arch}/doc/index.html"
 """
+    }
 }
 
 def restoreReplayGiteeEnv() {
@@ -668,19 +693,13 @@ def restoreReplayGiteeEnv() {
 
 def prepareSource() {
     initStageLog(sourceStageName())
-    ws("${env.ROOT_WS}/source-cache") {
-        def sourceWorkspace = pwd()
-        try {
-            deleteDir()
-            checkoutProject()
-            markSafeDirectory()
-            env.GIT_COMMIT = sh(label: 'Resolve checked-out commit', script: 'git rev-parse HEAD', returnStdout: true).trim()
-            echo "Checked out HEAD: ${env.GIT_COMMIT}"
-            if (env.giteePullRequestIid?.trim()) {
-                checkNotDiverged(sourceStageName())
-            }
-        } finally {
-            fixWorkspaceOwnership(sourceWorkspace)
+    ws(ciSourceDir()) {
+        deleteDir()
+        checkoutProject()
+        env.GIT_COMMIT = sh(label: 'Resolve checked-out commit', script: 'git rev-parse HEAD', returnStdout: true).trim()
+        echo "Checked out HEAD: ${env.GIT_COMMIT}"
+        if (env.giteePullRequestIid?.trim()) {
+            checkNotDiverged(sourceStageName())
         }
     }
 }
@@ -691,35 +710,28 @@ def checkNotDiverged(String stageName = '') {
     def remoteName = forkPr ? 'upstream' : 'origin'
     def teeLine = stageName ? stageLogTeeLine(stageName) : ''
     def result
+    def targetRepo = targetRepoUrl()
 
-    if (forkPr) {
-        def targetRepo = targetRepoUrl()
-        withCredentials([string(credentialsId: 'gitee-token-secret', variable: 'GIT_TOKEN')]) {
-            def authUrl = targetRepo.replace('https://', "https://oauth2:${GIT_TOKEN}@")
-            result = sh(label: 'Check PR branch is rebased', script: """#!/bin/bash
-set -euo pipefail
-${teeLine}
-if ! git remote get-url upstream >/dev/null 2>&1; then
-    git remote add upstream '${authUrl}'
-else
-    git remote set-url upstream '${authUrl}'
-fi
-git fetch ${remoteName} ${targetBranch} --quiet --no-recurse-submodules --no-tags
-git remote set-url upstream '${targetRepo}'
-BASE=\$(git merge-base HEAD ${remoteName}/${targetBranch})
-TARGET=\$(git rev-parse ${remoteName}/${targetBranch})
-if [ "\$BASE" != "\$TARGET" ]; then
-    echo "DIVERGED"
-fi
-""", returnStdout: true).trim()
-        }
-    } else {
+    withEnv([
+        "_CI_TARGET_BRANCH=${targetBranch}",
+        "_CI_TARGET_REPO=${targetRepo}",
+        "_CI_REMOTE_NAME=${remoteName}",
+        "_CI_FORK_PR=${forkPr}",
+    ]) {
         result = sh(label: 'Check PR branch is rebased', script: """#!/bin/bash
 set -euo pipefail
 ${teeLine}
-git fetch ${remoteName} ${targetBranch} --quiet
-BASE=\$(git merge-base HEAD ${remoteName}/${targetBranch})
-TARGET=\$(git rev-parse ${remoteName}/${targetBranch})
+if [ "\${_CI_FORK_PR}" = "true" ]; then
+    if git remote get-url upstream >/dev/null 2>&1; then
+        git remote set-url upstream "\${_CI_TARGET_REPO}"
+    else
+        git remote add upstream "\${_CI_TARGET_REPO}"
+    fi
+fi
+git fetch "\${_CI_REMOTE_NAME}" "\${_CI_TARGET_BRANCH}" \
+    --quiet --no-recurse-submodules --no-tags
+BASE=\$(git merge-base HEAD "\${_CI_REMOTE_NAME}/\${_CI_TARGET_BRANCH}")
+TARGET=\$(git rev-parse "\${_CI_REMOTE_NAME}/\${_CI_TARGET_BRANCH}")
 if [ "\$BASE" != "\$TARGET" ]; then
     echo "DIVERGED"
 fi
@@ -727,7 +739,7 @@ fi
     }
 
     if (result == 'DIVERGED') {
-        error("该 PR 与目标分支 `${targetBranch}` 存在冲突，请先执行 rebase 后再重新提交。")
+        error("该 PR 未包含目标分支 `${targetBranch}` 的最新提交，请先执行 rebase 后再重新提交。")
     }
 }
 
@@ -762,8 +774,12 @@ def targetRepoUrl() {
 }
 
 def restoreSource() {
-    sh label: 'Restore source snapshot', script: "tar cf - -C '${env.ROOT_WS}/source-cache' . | tar xf -"
-    markSafeDirectory()
+    withEnv(["_CI_SOURCE_DIR=${ciSourceDir()}"]) {
+        sh label: 'Restore source snapshot', script: '''#!/bin/bash
+set -euo pipefail
+tar cf - -C "${_CI_SOURCE_DIR}" . | tar xf -
+'''
+    }
 }
 
 def checkoutProject() {
@@ -771,54 +787,64 @@ def checkoutProject() {
         def sourceRepo = env.giteeSourceRepoHttpUrl ?: env.PROJECT_REPO
         def sourceBranch = env.giteeSourceBranch
         if (!sourceBranch?.trim()) {
-            echo "WARN: giteeSourceBranch not set, falling back to checkout scm"
-            checkout scm
-            return
+            error('giteeSourceBranch is required for a Gitee PR build')
         }
-        gitCheckoutWithToken(sourceRepo, sourceBranch)
+        gitCheckoutPublic(sourceRepo, sourceBranch)
         return
     }
 
-    gitCheckoutWithToken(env.PROJECT_REPO, env.DEFAULT_BRANCH)
+    gitCheckoutPublic(env.PROJECT_REPO, env.DEFAULT_BRANCH)
 }
 
-def gitCheckoutWithToken(String repoUrl, String branch) {
-    withCredentials([string(credentialsId: 'gitee-token-secret', variable: 'GIT_TOKEN')]) {
-        def authUrl = repoUrl.replace('https://', "https://oauth2:${GIT_TOKEN}@")
-        checkout([
-            $class: 'GitSCM',
-            branches: [[name: "*/${branch}"]],
-            userRemoteConfigs: [[url: authUrl]]
-        ])
+def gitCheckoutPublic(String repoUrl, String branch) {
+    if (!repoUrl?.trim()) {
+        error('Repository URL is required')
     }
-}
+    if (!branch?.trim()) {
+        error('Repository branch is required')
+    }
 
-def markSafeDirectory() {
-    sh label: 'Mark Git safe.directory', script: '''#!/bin/bash
+    withEnv([
+        "_CI_CHECKOUT_REPO=${repoUrl.trim()}",
+        "_CI_CHECKOUT_BRANCH=${branch.trim()}",
+    ]) {
+        sh(label: 'Checkout source branch', script: '''#!/bin/bash
 set -euo pipefail
 
-dir="$(pwd)"
-errfile=$(mktemp /tmp/git-safe-dir.XXXXXX)
-trap 'rm -f "$errfile"' EXIT
+git check-ref-format "refs/heads/${_CI_CHECKOUT_BRANCH}" >/dev/null
+git init --quiet .
+git remote add origin "${_CI_CHECKOUT_REPO}"
 
-for i in $(seq 1 20); do
-    if git config --global --add safe.directory "$dir" 2>"$errfile"; then
-        exit 0
+refspec="+refs/heads/${_CI_CHECKOUT_BRANCH}:refs/remotes/origin/${_CI_CHECKOUT_BRANCH}"
+fetch_ok=false
+for attempt in 1 2 3; do
+    if git fetch \
+        --force \
+        --prune \
+        --no-tags \
+        --no-recurse-submodules \
+        origin "${refspec}"; then
+        fetch_ok=true
+        break
     fi
-
-    if grep -q "could not lock config file" "$errfile"; then
-        sleep 0.2
-        continue
+    if [[ "${attempt}" -lt 3 ]]; then
+        delay=$((attempt * 5))
+        echo "Source fetch failed (attempt ${attempt}/3); retrying in ${delay}s" >&2
+        sleep "${delay}"
     fi
-
-    cat "$errfile" >&2 || true
-    exit 1
 done
 
-echo "WARN: failed to set git safe.directory due to persistent lock contention" >&2
-cat "$errfile" >&2 || true
-exit 1
+if [[ "${fetch_ok}" != true ]]; then
+    echo "Source fetch failed after 3 attempts" >&2
+    exit 1
+fi
+
+remote_ref="refs/remotes/origin/${_CI_CHECKOUT_BRANCH}"
+git checkout --quiet --force -B "${_CI_CHECKOUT_BRANCH}" "${remote_ref}"
+git reset --quiet --hard "${remote_ref}"
 '''
+        )
+    }
 }
 
 def deleteOldCiComments() {
@@ -933,8 +959,9 @@ def restoreKernelArtifact(String artifactName) {
     // or restore the full cargo/boot TARGET_DIR tree.
     //
     // The current pipeline relies on all stages sharing the same top-level
-    // docker agent and the same /xkernel-target mount, so build-stage outputs
-    // under TARGET_DIR remain available to later Run & Test stages.
+    // docker agent and its build-scoped anonymous /xkernel-target volume, so
+    // build-stage outputs under TARGET_DIR remain available to later Run &
+    // Test stages without being shared with another Jenkins build.
     //
     // If we later split build and test across different agents/containers,
     // this is no longer sufficient: the target-dir contents (boot artifacts,
@@ -1001,16 +1028,22 @@ def resolveHeadSha() {
     if (env.giteePullRequestLastCommit?.trim()) return env.giteePullRequestLastCommit.trim()
     if (env.giteeAfterCommitSha?.trim()) return env.giteeAfterCommitSha.trim()
     if (env.sha?.trim()) return env.sha.trim()
-    def sourceCache = "${env.ROOT_WS}/source-cache"
+    def sourceCache = ciSourceDir()
     if (env.ROOT_WS?.trim() && fileExists("${sourceCache}/.git")) {
-        return sh(label: 'Resolve cached source commit', script: "git -C '${sourceCache}' rev-parse HEAD", returnStdout: true).trim()
+        return withEnv(["_CI_SOURCE_DIR=${sourceCache}"]) {
+            sh(
+                label: 'Resolve cached source commit',
+                script: 'git -C "${_CI_SOURCE_DIR}" rev-parse HEAD',
+                returnStdout: true
+            ).trim()
+        }
     }
     return null
 }
 
 def resolveGiteeCheckRunsScript() {
     def candidates = [
-        "${env.ROOT_WS}/source-cache/scripts/ci/gitee_check_runs.py",
+        "${ciSourceDir()}/scripts/ci/gitee_check_runs.py",
         'scripts/ci/gitee_check_runs.py',
     ]
     for (path in candidates) {
@@ -1022,33 +1055,24 @@ def resolveGiteeCheckRunsScript() {
 }
 
 def giteeCheckIdsFile() {
-    def ws = env.ROOT_WS?.trim() ?: env.WORKSPACE
-    return "${ws}/gitee-check-ids.json"
+    return "${ciGiteeRoot()}/check-ids.json"
 }
 
 def giteeManifestFile(String action, String stageName = null) {
-    def ws = env.ROOT_WS?.trim() ?: env.WORKSPACE
     def label = stageName?.trim() ?: action
     def slug = sanitizeStageFileName("${action}-${label}")
     def unique = java.util.UUID.randomUUID().toString()
-    return "${ws}/gitee-manifests/${slug}-${unique}.json"
+    return "${ciGiteeRoot()}/manifests/${slug}-${unique}.json"
 }
 
 def prepareGiteeManifestDirectory() {
-    def ws = env.ROOT_WS?.trim() ?: env.WORKSPACE
-    withEnv(["_GITEE_MANIFEST_DIR=${ws}/gitee-manifests"]) {
+    withEnv([
+        "_GITEE_ROOT=${ciGiteeRoot()}",
+        "_GITEE_MANIFEST_DIR=${ciGiteeRoot()}/manifests",
+    ]) {
         sh label: 'Prepare Gitee manifest directory', script: '''#!/bin/bash
 set -euo pipefail
-manifest_dir="${_GITEE_MANIFEST_DIR}"
-mkdir -p "${manifest_dir}"
-
-parent_dir="$(dirname "${manifest_dir}")"
-if [[ -e "${parent_dir}" ]]; then
-    owner="$(stat -c '%u:%g' "${parent_dir}")"
-    chown "${owner}" "${manifest_dir}" || true
-fi
-
-chmod 0777 "${manifest_dir}" || true
+install -d -m 0700 "${_GITEE_ROOT}" "${_GITEE_MANIFEST_DIR}"
 '''
     }
 }
@@ -1100,7 +1124,7 @@ def giteeCheck(String action, String stageName = null, Map ciResults = null, Map
         pr_iid: env.giteePullRequestIid?.trim(),
         details_url: env.BUILD_URL ?: '',
         ids_file: giteeCheckIdsFile(),
-        root_ws: env.ROOT_WS?.trim() ?: env.WORKSPACE,
+        root_ws: ciRootDir(),
         sequential_stages: ciSequentialStageOrder(),
         parallel_stages: ciParallelStageOrder(),
         ci_results: ciResults ?: [:],
@@ -1175,36 +1199,23 @@ echo "Gitee test ${label}: HTTP \$code"
     }
 }
 
-def fixWorkspaceOwnership(String workspacePath) {
-    if (!workspacePath?.trim()) {
-        return
-    }
-
-    withEnv(["_FIX_WS_PATH=${workspacePath}"]) {
-        sh label: 'Fix workspace ownership', script: '''#!/bin/bash
+def initializeCiWorkspace() {
+    // The declarative Docker agent has already bind-mounted WORKSPACE.
+    // Deleting the mount point replaces its inode and makes later docker exec
+    // calls fail. Remove only its contents so the bind mount remains valid.
+    sh(
+        label: 'Clean CI workspace contents',
+        script: '''#!/bin/bash
 set -euo pipefail
-workspace_path="${_FIX_WS_PATH}"
-reference_path="$(dirname "${workspace_path}")"
 
-if [[ ! -e "${reference_path}" ]]; then
-    exit 0
+if [[ -z "${WORKSPACE:-}" || "${PWD}" != "${WORKSPACE}" ]]; then
+    echo "Refusing to clean unexpected workspace: PWD=${PWD}, WORKSPACE=${WORKSPACE:-unset}" >&2
+    exit 2
 fi
 
-if [[ ! -e "${workspace_path}" ]]; then
-    exit 0
-fi
-
-owner="$(stat -c '%u:%g' "${reference_path}")"
-chown -R "${owner}" "${workspace_path}" || true
-chmod -R u+rwX "${workspace_path}" || true
-
-tmp_path="${workspace_path}@tmp"
-if [[ -e "${tmp_path}" ]]; then
-    chown -R "${owner}" "${tmp_path}" || true
-    chmod -R u+rwX "${tmp_path}" || true
-fi
+find "${WORKSPACE}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 '''
-    }
+    )
 }
 
 def targetTripleFor(String archOrPlatform) {
@@ -1342,7 +1353,7 @@ def sanitizeStageLogForDisplay(String text) {
 }
 
 def stageLogFile(String stageName) {
-    return "${env.ROOT_WS}/stage-logs/${sanitizeStageFileName(stageName)}.log"
+    return "${ciStageLogRoot()}/${sanitizeStageFileName(stageName)}.log"
 }
 
 def initStageLog(String stageName) {
@@ -1350,11 +1361,17 @@ def initStageLog(String stageName) {
         return
     }
     def logFile = stageLogFile(stageName)
-    sh label: "Prepare stage log: ${stageName}", script: """#!/bin/bash
+    withEnv([
+        "_CI_STAGE_LOG_DIR=${ciStageLogRoot()}",
+        "_CI_STAGE_LOG_FILE=${logFile}",
+    ]) {
+        sh label: "Prepare stage log: ${stageName}", script: '''#!/bin/bash
 set -euo pipefail
-mkdir -p '${env.ROOT_WS}/stage-logs'
-: > '${logFile}'
-"""
+install -d -m 0755 "${_CI_STAGE_LOG_DIR}"
+: >"${_CI_STAGE_LOG_FILE}"
+chmod 0644 "${_CI_STAGE_LOG_FILE}"
+'''
+    }
 }
 
 def stageLogTeeLine(String stageName) {
@@ -1391,8 +1408,11 @@ def archiveFailedStageLogs(Map ciResults) {
             return failedLogs
         }
 
-        sh label: 'Prepare failed stage log archive', script: "mkdir -p '${env.ROOT_WS}/stage-logs' stage-logs || true"
-        fixWorkspaceOwnership(env.WORKSPACE)
+        withEnv(["_CI_STAGE_LOG_DIR=${ciStageLogRoot()}"]) {
+            sh label: 'Prepare failed stage log archive', script: '''
+mkdir -p "${_CI_STAGE_LOG_DIR}" || true
+'''
+        }
 
         failedStages.each { stageName ->
             def logContent = resolveFailedStageLog(stageName, ciResults)
@@ -1453,14 +1473,14 @@ ${rows}
     def coverageBlock = ''
     if (coverageSummary?.trim()) {
         def links = ['x86_64', 'aarch64'].collect { arch ->
-            "[${arch} HTML 报告](${baseUrl}/${arch}/coverage-artifacts/coverage-html/index.html)"
+            "[${arch} HTML 报告](${baseUrl}/artifacts/coverage/${arch}/coverage-html/index.html)"
         }.join(' | ')
         coverageBlock = "\n### 📊 代码覆盖率\n\n${coverageSummary}\n\n${links}\n"
     }
 
     def docBlock = ''
     if (allPassed && docCheckEnabled()) {
-        docBlock = "\n### 📚 Rust 文档\n\n[aarch64 API 文档](${baseUrl}/doc-aarch64/doc-artifacts/doc/index.html)\n"
+        docBlock = "\n### 📚 Rust 文档\n\n[aarch64 API 文档](${baseUrl}/artifacts/docs/aarch64/doc/index.html)\n"
     }
 
     def errorBlocks = stageOrder.findAll { name ->
