@@ -7,7 +7,7 @@
 # 2. We're not running a Kconfig/utility target
 ifneq ($(wildcard .config),)
   # Read .config once and extract ARCH and PLAT in a single pass
-  CONFIG_VALUES := $(shell awk '/ARCH_[A-Z0-9_]+=y/ { print $$0 } /PLATFORM_[A-Z0-9_]+=y/ { print $$0 } /BUILD_TYPE_[A-Z]+=y/ { print $$0 }' .config 2>/dev/null)
+  CONFIG_VALUES := $(shell awk '/ARCH_[A-Z0-9_]+=y/ { print $$0 } /BUILD_TYPE_[A-Z]+=y/ { print $$0 }' .config 2>/dev/null)
 
   # APPEND NR_CPUS TO CONFIG_VALUES
   CONFIG_VALUES += $(shell awk '/NR_CPUS=[0-9]+/ { print $$0 }' .config 2>/dev/null)
@@ -27,20 +27,11 @@ ifneq ($(wildcard .config),)
       ARCH_FROM_CONFIG := loongarch64
     endif
 
-    # Parse platform
-    ifeq ($(findstring PLATFORM_AARCH64_QEMU_VIRT=y,$(CONFIG_VALUES)),PLATFORM_AARCH64_QEMU_VIRT=y)
-      PLAT_FROM_CONFIG := aarch64-qemu-virt
-    else ifeq ($(findstring PLATFORM_AARCH64_CROSVM_VIRT=y,$(CONFIG_VALUES)),PLATFORM_AARCH64_CROSVM_VIRT=y)
-      PLAT_FROM_CONFIG := aarch64-crosvm-virt
-    else ifeq ($(findstring PLATFORM_AARCH64_RASPI=y,$(CONFIG_VALUES)),PLATFORM_AARCH64_RASPI=y)
-      PLAT_FROM_CONFIG := aarch64-raspi
-    else ifeq ($(findstring PLATFORM_RISCV64_QEMU_VIRT=y,$(CONFIG_VALUES)),PLATFORM_RISCV64_QEMU_VIRT=y)
-      PLAT_FROM_CONFIG := riscv64-qemu-virt
-    else ifeq ($(findstring PLATFORM_X86_64_QEMU_VIRT=y,$(CONFIG_VALUES)),PLATFORM_X86_64_QEMU_VIRT=y)
-      PLAT_FROM_CONFIG := x86_64-qemu-virt
-    else ifeq ($(findstring PLATFORM_LOONGARCH64_QEMU_VIRT=y,$(CONFIG_VALUES)),PLATFORM_LOONGARCH64_QEMU_VIRT=y)
-      PLAT_FROM_CONFIG := loongarch64-qemu-virt
-    endif
+    # The arch HAL crate (kplat-<arch>) is derived from ARCH. There is no longer
+    # a separate PLATFORM symbol: the old PLATFORM_KPLAT_<ARCH> was a redundant
+    # 1:1 echo of ARCH and has been removed. The board / machine dimension is the
+    # MACHINE string parsed below.
+    PLAT_FROM_CONFIG := kplat-$(ARCH_FROM_CONFIG)
 
     # Parse mode: BUILD_TYPE_RELEASE or BUILD_TYPE_DEBUG
     ifeq ($(findstring BUILD_TYPE_DEBUG=y,$(CONFIG_VALUES)),BUILD_TYPE_DEBUG=y)
@@ -62,6 +53,11 @@ ifneq ($(wildcard .config),)
         $(error "`NR_CPUS` is not defined in the .config file")
     endif
 
+    # Parse MACHINE (the target board, e.g. qemu / rk3588). It is a
+    # Kconfig string and appears in .config as MACHINE="<name>". Together with
+    # ARCH it forms the kernel artifact stem: xkernel_<arch>-<machine>.elf.
+    MACHINE_FROM_CONFIG := $(shell awk -F= '/^MACHINE=/ { gsub(/"/, "", $$2); print $$2 }' .config 2>/dev/null)
+
     # SMP (the QEMU `-smp` value) is independent of the NR_CPUS cap: the kernel
     # discovers the actual CPU count at runtime from the device tree / ACPI
     # MADT, so `make run SMP=N` neither has to match NR_CPUS nor requires a
@@ -74,15 +70,17 @@ ifneq ($(wildcard .config),)
     ARCH ?= $(ARCH_FROM_CONFIG)
     PLAT ?= $(PLAT_FROM_CONFIG)
     PLAT_NAME ?= $(PLAT)
+    MACHINE ?= $(MACHINE_FROM_CONFIG)
     MODE ?= $(BUILD_TYPE_FROM_CONFIG)
     DWARF ?= $(DWARF_FROM_CONFIG)
     $(info CONFIG_VALUES: $(CONFIG_VALUES))
     $(info "ARCH from .config: $(ARCH)")
     $(info "PLAT from .config: $(PLAT)")
+    $(info "MACHINE from .config: $(MACHINE)")
     $(info "MODE from .config: $(MODE)")
     $(info "DWARF from .config: $(DWARF)")
     $(info "SMP (QEMU -smp, defaults to NR_CPUS, overridable): $(SMP)")
-    export ARCH PLAT MODE SMP DWARF
+    export ARCH PLAT MACHINE MODE SMP DWARF
   endif
 endif
 

@@ -13,6 +13,7 @@ rust-kbuild brings the powerful Linux kernel Kconfig system to Rust projects. In
 ### Why rust-kbuild?
 
 **Problem**: Large Rust projects with many compile-time options become unmaintainable with Cargo features:
+
 ```toml
 # Cargo.toml becomes a mess
 [features]
@@ -26,6 +27,7 @@ network_grpc = ["network"]
 ```
 
 **Solution**: Use Kconfig for clean, hierarchical configuration:
+
 ```
 menu "Logging Configuration"
     config ENABLE_LOGGING
@@ -116,6 +118,7 @@ xconf oldconfig
 ```
 
 With auto-defaults:
+
 ```bash
 xconf oldconfig --auto-defaults
 # Automatically applies default values to new options
@@ -199,6 +202,7 @@ fn main() {
 ## 📚 Commands Reference
 
 ### `xconf saveconfig`
+
 Generate configuration files with default values from Kconfig.
 
 ```bash
@@ -211,11 +215,13 @@ Options:
 ```
 
 **Example:**
+
 ```bash
 xconf saveconfig --output my.config --kconfig MyKconfig
 ```
 
 ### `xconf oldconfig`
+
 Update existing configuration when Kconfig changes.
 
 ```bash
@@ -229,12 +235,14 @@ Options:
 ```
 
 **What it does:**
+
 - Detects new symbols added to Kconfig
 - Detects removed symbols (no longer in Kconfig)
 - Preserves existing values
 - Shows summary of changes
 
 **Example:**
+
 ```bash
 # Interactive mode (prompts for new options)
 xconf oldconfig
@@ -244,6 +252,7 @@ xconf oldconfig --auto-defaults
 ```
 
 ### `xconf generate`
+
 Generate auto.conf and autoconf.h from existing .config.
 
 ```bash
@@ -256,11 +265,13 @@ Options:
 ```
 
 **Example:**
+
 ```bash
 xconf generate --config production.config
 ```
 
 ### `xconf parse`
+
 Parse and validate Kconfig syntax (debugging tool).
 
 ```bash
@@ -272,11 +283,13 @@ Options:
 ```
 
 **Example:**
+
 ```bash
 xconf parse --kconfig Kconfig
 ```
 
 ### `xconf menuconfig`
+
 Interactive terminal UI for configuration.
 
 ```bash
@@ -288,6 +301,7 @@ Options:
 ```
 
 **Features:**
+
 - Modern three-panel layout (menu tree, details, status bar)
 - Intuitive navigation with arrow keys or vim-style (hjkl) keys
 - Live search with fuzzy matching (press `/`)
@@ -299,6 +313,7 @@ Options:
 See [MENUCONFIG_GUIDE.md](MENUCONFIG_GUIDE.md) for detailed usage.
 
 ### `xconf defconfig` *(Coming Soon)*
+
 Apply a defconfig file.
 
 ```bash
@@ -327,6 +342,7 @@ MAX_CONNECTIONS=100
 ```
 
 **Key differences from Linux Kconfig:**
+
 - ✅ No `CONFIG_` prefix (cleaner for Rust)
 - ✅ Backward compatible reader (accepts both formats)
 - ✅ Clean, minimalist output
@@ -365,6 +381,7 @@ examples/sample_project/
 ```
 
 **Try it:**
+
 ```bash
 cd examples/sample_project
 xconf saveconfig
@@ -374,6 +391,7 @@ cat .config
 ## 📝 Supported Kconfig Syntax
 
 ### Configuration Types
+
 - `bool` - Boolean (y/n)
 - `tristate` - Three-state (y/m/n)
 - `string` - String values
@@ -381,6 +399,7 @@ cat .config
 - `hex` - Hexadecimal values
 
 ### Directives
+
 - `config` - Define a configuration option
 - `menuconfig` - Config option with sub-menu
 - `choice` / `endchoice` - Mutually exclusive options
@@ -390,6 +409,7 @@ cat .config
 - `mainmenu` - Top-level menu title
 
 ### Dependencies
+
 - `depends on` - Conditional visibility
 - `select` - Force enable another option
 - `imply` - Weak dependency
@@ -397,11 +417,13 @@ cat .config
 - `default` - Default value
 
 ### Expressions
+
 - Logical: `&&`, `||`, `!`
 - Comparison: `=`, `!=`, `<`, `<=`, `>`, `>=`
 - Grouping: `( )`
 
 ### Example Kconfig
+
 ```
 config NET_SUPPORT
     bool "Networking support"
@@ -436,23 +458,26 @@ XCONFIG_DEBUG=1 xconf menuconfig
 ```
 
 **Debug output includes:**
+
 - `process_entries` calls with parent_id, depth, and entry count
 - Menu tree insertions with all items being inserted
 - Key overwrite warnings (if any duplicate keys are detected)
 - `get_items_for_path` lookups showing which items are returned for each navigation
 
 **Example debug output:**
+
 ```
 🔹 process_entries: parent_id='menu_Platform Selection', depth=1, entries_count=5
 🔹 Inserting into menu_tree: key='menu_Platform Selection', items_count=12
-    [0] id='choice_PLATFORM_AARCH64_QEMU_VIRT', label='AArch64 Platform', kind="Choice"
-    [1] id='PLATFORM_AARCH64_QEMU_VIRT', label='QEMU ARM64 Virtual Machine', kind="Config"
+    [0] id='choice_PLATFORM_KPLAT_AARCH64', label='AArch64 Platform', kind="Choice"
+    [1] id='PLATFORM_KPLAT_AARCH64', label='QEMU ARM64 Virtual Machine', kind="Config"
     ...
 🔍 get_items_for_path: key='menu_Platform Selection', path=["menu_Platform Selection"]
 📋 Returning 12 items for key 'menu_Platform Selection'
 ```
 
 **Use cases:**
+
 - Debugging menu navigation issues
 - Verifying correct menu tree structure
 - Identifying configuration parsing problems
@@ -487,6 +512,7 @@ cargo doc --open
 ## 🗺️ Roadmap
 
 ### ✅ Implemented
+
 - Complete Kconfig lexer and parser
 - Full syntax support (bool, tristate, string, int, hex)
 - Source directive recursion with cycle detection
@@ -501,9 +527,11 @@ cargo doc --open
 - Comprehensive test suite
 
 ### 🚧 In Progress
+
 - Defconfig support
 
 ### 📋 Planned
+
 - Dependency resolution and validation
 - Export to JSON/YAML
 - VS Code extension
@@ -526,6 +554,7 @@ Licensed under the [Apache License, Version 2.0](LICENSE)
 ## 🙏 Acknowledgments
 
 This project is inspired by:
+
 - [kbuild-standalone](https://github.com/WangNan0/kbuild-standalone) - Original C implementation
 - [Linux Kconfig](https://www.kernel.org/doc/html/latest/kbuild/kconfig-language.html) - Official Kconfig documentation
 

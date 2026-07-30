@@ -68,7 +68,7 @@ fn print_boot_info() {
     kprintln!(
         indoc::indoc! {"
             arch = {}
-            platform = {}
+            machine = {}
             target = {}
             build_mode = {}
             build_machine = {}
@@ -79,7 +79,7 @@ fn print_boot_info() {
             virt = {}
         "},
         kbuild_config::ARCH,
-        kbuild_config::PLATFORM,
+        kbuild_config::MACHINE,
         option_env!("K_TARGET").unwrap_or(""),
         option_env!("K_MODE").unwrap_or(""),
         option_env!("KBUILD_BUILD_MACHINE").unwrap_or("unknown"),

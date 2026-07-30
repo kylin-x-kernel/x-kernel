@@ -34,12 +34,12 @@ if [[ -z "${OVMF_CODE}" || -z "${OVMF_VARS_TEMPLATE}" ]]; then
     exit 1
 fi
 
-cp platforms/x86-csv/defconfig .config
+cp platforms/kplat-x86_64/qemu_csv_defconfig .config
 make defconfig
 make build UEFI=y
 
-UEFI_IMG="${ROOT_DIR}/xkernel_x86-csv.uefi.img"
-OVMF_VARS="${ROOT_DIR}/target/OVMF_VARS_x86-csv.fd"
+UEFI_IMG="${ROOT_DIR}/xkernel_x86_64-qemu.uefi.img"
+OVMF_VARS="${ROOT_DIR}/target/OVMF_VARS_kplat-x86_64.fd"
 cp "${OVMF_VARS_TEMPLATE}" "${OVMF_VARS}"
 
 SEV_SESSION_FILE="${SEV_SESSION_FILE:-cvm_1_launch_blob.bin}"

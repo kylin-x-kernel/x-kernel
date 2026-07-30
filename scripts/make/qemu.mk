@@ -14,6 +14,14 @@ ACCEL ?= y
 ICOUNT ?= n
 QEMU_ARGS ?=
 
+# Optional external device tree blob (aarch64). When set, QEMU is started with
+# `-dtb $(DTB)` instead of its auto-generated one, so different boards (e.g.
+# RK3588) can boot under the unified aarch64 platform.
+DTB ?=
+# Default guest CPU model for aarch64. Override for board-specific cores
+# (e.g. QEMU_CPU=cortex-a76).
+QEMU_CPU ?= cortex-a76
+
 export DISK_IMG ?= $(PWD)/disk.img
 QEMU_LOG ?= n
 NET_DUMP ?= n
@@ -32,8 +40,8 @@ QEMU_RUN_DEPS :=
 
 ifeq ($(ARCH), x86_64)
   UEFI_CFG := $(TARGET_DIR)/axboot_$(PLAT_NAME).toml
-  OUT_UEFI_IMG := $(OUT_DIR)/$(APP_NAME)_$(PLAT_NAME).uefi.img
-  OUT_LINUXBOOT := $(OUT_DIR)/$(APP_NAME)_$(PLAT_NAME).bzimg
+  OUT_UEFI_IMG := $(OUT_DIR)/$(APP_NAME)_$(OUT_STEM).uefi.img
+  OUT_LINUXBOOT := $(OUT_DIR)/$(APP_NAME)_$(OUT_STEM).bzimg
   UEFI_IMG_SIZE_MIB ?= 256
   X86_LINUXBOOT_TOOLPREFIX ?= $(CROSS_COMPILE)
   X86_LINUXBOOT_CC ?= $(X86_LINUXBOOT_TOOLPREFIX)gcc
@@ -104,9 +112,7 @@ ifeq ($(ARCH), x86_64)
 else ifeq ($(ARCH), riscv64)
   machine := virt
 else ifeq ($(ARCH), aarch64)
-  ifeq ($(PLAT_NAME), aarch64-raspi4)
-    machine := raspi4b
-  else ifeq ($(findstring KFEAT_VMM=y,$(CONFIG_VALUES)),KFEAT_VMM=y)
+  ifeq ($(findstring KFEAT_VMM=y,$(CONFIG_VALUES)),KFEAT_VMM=y)
     machine := virt,virtualization=on
   else
     machine := virt,gic-version=3
@@ -139,9 +145,10 @@ qemu_args-riscv64 := \
   -kernel $(FINAL_IMG)
 
 qemu_args-aarch64 := \
-  -cpu cortex-a76 \
+  -cpu $(QEMU_CPU) \
   -machine $(machine) \
-  -kernel $(FINAL_IMG)
+  -kernel $(FINAL_IMG) \
+  $(if $(DTB),-dtb $(DTB))
 
 qemu_args-loongarch64 := \
   -machine $(machine) \

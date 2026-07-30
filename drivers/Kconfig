@@ -59,6 +59,27 @@ config BOOT_CONSOLE_ADDR
       For BOOT_CONSOLE_TYPE="mmio", this is a physical MMIO base address.
       For BOOT_CONSOLE_TYPE="ioport", this is a legacy I/O port base.
 
+config BOOT_CONSOLE_BAUDRATE
+    hex "Boot console baud rate (bits/s)"
+    default 0x0
+    help
+      The baud rate of the boot console UART. The early boot console (which runs
+      before the runtime console driver and cannot poll the TX-ready bit) uses
+      this to pace output at one byte time per character, so a fast core does not
+      overrun the UART TX FIFO and drop characters. Set to 0 to disable pacing
+      (emulated UARTs and PL011s with deep FIFOs do not need it). Only relevant
+      for real MMIO 16550 consoles such as the RK3588 DesignWare UART.
+
+config BOOT_CONSOLE_REG_IO_WIDTH
+    usize "Boot console MMIO access width"
+    default 1
+    help
+      The byte width used by the minimal AArch64 early boot console when it
+      writes the UART data register before the runtime device-tree console
+      driver is available. This mirrors the device-tree `reg-io-width`
+      property for real MMIO UARTs such as the RK3588 DesignWare UART. Set to
+      1 for byte accesses and 4 for 32-bit accesses.
+
 config RTC_PADDR
     hex "RTC Base Address"
     help
@@ -194,8 +215,8 @@ comment "Character drivers"
 
 config KFEAT_DRIVER_CONSOLE_PL011
     bool "PL011 UART backend (early console)"
-    depends on KFEAT_CHAR
-    default y if PLATFORM_AARCH64_QEMU_VIRT
+    depends on KFEAT_CHAR && ARCH_AARCH64
+    default y if MACHINE_AARCH64_QEMU
     help
       Build the PL011 UART backend used by the early-boot console and the
       per-instance serial driver.
@@ -203,8 +224,9 @@ config KFEAT_DRIVER_CONSOLE_PL011
 config KFEAT_DRIVER_CONSOLE_NS16550_MMIO
     bool "NS16550 MMIO UART backend (early console)"
     depends on KFEAT_CHAR
-    default y if PLATFORM_RISCV64_QEMU_VIRT
-    default y if PLATFORM_LOONGARCH64_QEMU_VIRT
+    default y if MACHINE_AARCH64_RK3588
+    default y if MACHINE_RISCV64_QEMU
+    default y if MACHINE_LOONGARCH64_QEMU
     help
       Build the NS16550 MMIO UART backend used by the early-boot console and
       the per-instance serial driver.
@@ -212,16 +234,16 @@ config KFEAT_DRIVER_CONSOLE_NS16550_MMIO
 config KFEAT_DRIVER_CONSOLE_NS16550_IOPORT
     bool "NS16550 I/O-port UART backend (early console)"
     depends on KFEAT_CHAR && ARCH_X86_64
-    default y if PLATFORM_X86_64_QEMU_VIRT
+    default y if MACHINE_X86_64_QEMU
     help
       Build the NS16550 I/O-port UART backend used by the early-boot console
       and the per-instance serial driver.
 
 config KFEAT_DRIVER_SERIAL_PL011
     bool "PL011 per-instance serial driver"
-    depends on KFEAT_CHAR
+    depends on KFEAT_CHAR && ARCH_AARCH64
     select KFEAT_DRIVER_CONSOLE_PL011
-    default y if PLATFORM_AARCH64_QEMU_VIRT
+    default y if MACHINE_AARCH64_QEMU
     help
       Enable the kdriver per-instance serial driver for PL011 UARTs. Each UART
       node becomes a character device; the stdout UART shares the early-boot
@@ -231,8 +253,9 @@ config KFEAT_DRIVER_SERIAL_NS16550_MMIO
     bool "NS16550 MMIO per-instance serial driver"
     depends on KFEAT_CHAR
     select KFEAT_DRIVER_CONSOLE_NS16550_MMIO
-    default y if PLATFORM_RISCV64_QEMU_VIRT
-    default y if PLATFORM_LOONGARCH64_QEMU_VIRT
+    default y if MACHINE_AARCH64_RK3588
+    default y if MACHINE_RISCV64_QEMU
+    default y if MACHINE_LOONGARCH64_QEMU
     help
       Enable the kdriver per-instance serial driver for NS16550 MMIO UARTs.
 
@@ -240,7 +263,7 @@ config KFEAT_DRIVER_SERIAL_NS16550_IOPORT
     bool "NS16550 I/O-port per-instance serial driver"
     depends on KFEAT_CHAR && ARCH_X86_64
     select KFEAT_DRIVER_CONSOLE_NS16550_IOPORT
-    default y if PLATFORM_X86_64_QEMU_VIRT
+    default y if MACHINE_X86_64_QEMU
     help
       Enable the kdriver per-instance serial driver for the NS16550 I/O-port
       (x86 ISA COM) UART.

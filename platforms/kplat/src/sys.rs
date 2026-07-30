@@ -4,7 +4,9 @@
 
 //! Platform system control interface.
 
+#[cfg(feature = "smp")]
 use kcpu_id_map::LogicalCpuId;
+#[cfg(feature = "smp")]
 use kerrno::KResult;
 use kplat_macros::device_interface;
 

@@ -12,7 +12,7 @@ documentation.workspace = true
 [features]
 default = []
 pl011 = ["dep:arm_pl011"]
-ns16550-mmio = ["dep:uart_16550"]
+ns16550-mmio = []
 ns16550-ioport = ["dep:uart_16550"]
 
 [dependencies]

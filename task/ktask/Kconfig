@@ -67,7 +67,7 @@ config KFEAT_PMU
 config KFEAT_WATCHDOG_HARDLOCKUP
     bool "Watchdog hard lockup detection"
     depends on KFEAT_WATCHDOG
-    depends on PLATFORM_AARCH64_QEMU_VIRT
+    depends on MACHINE_AARCH64_QEMU
     select KFEAT_PMU
     help
       Enable the hard lockup watchdog backend. On AArch64 QEMU virt this is

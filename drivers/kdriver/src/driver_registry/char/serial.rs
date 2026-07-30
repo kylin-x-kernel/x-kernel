@@ -95,9 +95,22 @@ fn resolve_port(device: &DeviceObject, kind: SerialKind) -> DriverResult<Arc<Ser
         }
         #[cfg(feature = "serial-ns16550-mmio")]
         SerialKind::Ns16550Mmio => {
+            let layout = console_driver::ns16550_mmio_layout_for_paddr(mmio.base)
+                .ok_or(DriverError::InvalidInput)?;
             // SAFETY: `vaddr` is the device's exclusively-mapped NS16550 MMIO
-            // window returned by `devm_iomap`.
-            unsafe { SerialPort::new_mmio_ns16550(vaddr, paddr, mmio.size, SerialRole::Auxiliary) }
+            // window returned by `devm_iomap`. `layout` was decoded from the
+            // matching device-tree node and supplies the register stride and
+            // access width.
+            unsafe {
+                SerialPort::new_mmio_ns16550(
+                    vaddr,
+                    paddr,
+                    mmio.size,
+                    SerialRole::Auxiliary,
+                    layout.reg_shift,
+                    layout.reg_width,
+                )
+            }
         }
     };
     Ok(Arc::new(port))

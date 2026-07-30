@@ -94,6 +94,10 @@ pub fn pci_config_space() -> (u64, u8, PciConfigSource) {
         return (host.ecam_base, host.bus_end, PciConfigSource::Firmware);
     }
 
+    if kbuild_config::PCI_ECAM_BASE == 0 {
+        log::info!("PCI: no firmware PCI host and PCI_ECAM_BASE=0; skipping PCI");
+        return (0, 0, PciConfigSource::Static);
+    }
     log::info!(
         "PCI config from kbuild: ecam={:#x} bus_end={:#x}",
         kbuild_config::PCI_ECAM_BASE as u64,
@@ -143,6 +147,10 @@ pub struct PciBus {
 impl PciBus {
     pub fn new(cam: Cam) -> Result<Self, PciInitError> {
         let (config_base, bus_end, source) = pci_config_space();
+        if config_base == 0 {
+            log::info!("PCI: no config space available; skipping PCI bus init");
+            return Err(PciInitError::InvalidRange);
+        }
         if source == PciConfigSource::Firmware
             && let Some(host) = fw::pci_host()
         {

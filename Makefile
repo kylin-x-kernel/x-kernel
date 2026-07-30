@@ -169,7 +169,12 @@ GEN_CARGO_FLAGS := --ld-script="$(LD_SCRIPT)" $(if $(filter y,$(UNITTEST)),--uni
 CONFIG_RS := $(KBUILD_CONFIG_DIR)/config.rs
 
 APP_NAME := xkernel
-OUT_ELF := $(OUT_DIR)/$(APP_NAME)_$(PLAT_NAME).elf
+# Artifact stem carries both ARCH and MACHINE (e.g. aarch64-rk3588,
+# x86_64-qemu), restoring the machine/board info the kernel image name
+# should expose. PLAT_NAME (kplat-<arch>) stays as the arch HAL crate id used
+# for the linker script, kbuild config dir, and QEMU build-intermediate paths.
+OUT_STEM := $(ARCH)-$(MACHINE)
+OUT_ELF := $(OUT_DIR)/$(APP_NAME)_$(OUT_STEM).elf
 OUT_BIN := $(patsubst %.elf,%.bin,$(OUT_ELF))
 OUT_UIMG := $(patsubst %.elf,%.uimg,$(OUT_ELF))
 ifeq ($(UIMAGE), y)
@@ -185,11 +190,6 @@ include scripts/make/utils.mk
 include scripts/make/build.mk
 include scripts/make/qemu.mk
 include scripts/make/unittest.mk
-ifeq ($(PLAT_NAME), aarch64-raspi4)
-  include scripts/make/raspi4.mk
-else ifeq ($(PLAT_NAME), aarch64-bsta1000b)
-  include scripts/make/bsta1000b-fada.mk
-endif
 
 ROOTFS_URL = https://gitee.com/openkylin/x-kernel-image/releases/download/rootfs
 ROOTFS_VARIANT ?= alpine-busybox

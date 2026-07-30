@@ -43,7 +43,7 @@ fi
 if [ "${SKIP_CLIPPY:-0}" != "1" ]; then
 	if [ ! -f .config ]; then
 		echo "⚠️  pre-commit: no .config found; 'make clippy' needs one — skipping clippy this commit." >&2
-		echo "    CI still runs clippy: run 'cp platforms/<plat>/defconfig .config && make defconfig' before pushing." >&2
+		echo "    CI still runs clippy: run 'cp platforms/<plat>/qemu_defconfig .config && make defconfig' before pushing." >&2
 	elif ! make clippy; then
 		echo "❌ pre-commit: 'make clippy' failed. Fix the issues above, then re-run 'git commit'." >&2
 		echo "   bypass with: SKIP_CLIPPY=1 git commit ..." >&2

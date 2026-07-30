@@ -43,7 +43,7 @@ const EFER: u64 = EferFlags::LONG_MODE_ENABLE.bits() | EferFlags::NO_EXECUTE_ENA
 
 /// AMD SEV / CSV C-bit mask for page table entries.
 /// Set to `1 << SEV_CBIT_POS` when SEV/CSV is active; zero otherwise.
-/// Use `SEV_CBIT_POS=0` in defconfig to disable (qemu-virt).
+/// Use `SEV_CBIT_POS=0` in defconfig to disable (baseline qemu).
 pub const SEV_CBIT_MASK: u64 = if SEV_CBIT_POS == 0 {
     0
 } else {

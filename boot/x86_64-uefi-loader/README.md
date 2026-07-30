@@ -17,14 +17,14 @@ UEFI 启动加载器（x86_64），用于加载并启动内核镜像（ELF）。
 生成的 EFI 文件在：
 
 - `target/x86_64-unknown-uefi/release/x86_64-uefi-loader.efi`
-- 对应的 UEFI 启动盘产物为：`xkernel_<platform>.uefi.img`
+- 对应的 UEFI 启动盘产物为：`xkernel_<arch>-<machine>.uefi.img`
 
 ## 运行要求
 
 1. `make build` 生成的 UEFI FAT 启动盘会自动放置：
    - `EFI/BOOT/BOOTX64.EFI`
    - 根目录下的 `axboot.toml`
-   - 根目录下的平台内核 ELF（例如 `xkernel_x86_64-qemu-virt.elf`）
+   - 根目录下的平台内核 ELF（例如 `xkernel_x86_64-qemu.elf`）
 2. `make run UEFI=y` 会自动使用 OVMF 从该 FAT 启动盘启动。
 
 ## 内核加载策略

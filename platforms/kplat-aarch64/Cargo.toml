@@ -1,0 +1,50 @@
+[package]
+name = "kplat-aarch64"
+description = "AArch64 platform implementation and peripheral drivers for the `kplat` hardware abstraction layer."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+fp-simd = ["kcpu/fp-simd", "kernel_boot/fp-simd"]
+rtc = ["rtc_driver/pl031"]
+smp = ["kplat/smp"]
+nmi = ["nmi-pmu", "irq_driver/nmi-pmu", "kplat/nmi", "pmu"]
+pmu = ["kplat/pmu", "dep:aarch64-pmuv3"]
+pmr = []
+nmi-pmu = ["pmr", "pmu"]
+nmi-sdei = []
+console-pl011 = ["console_driver/pl011"]
+console-ns16550-mmio = ["console_driver/ns16550-mmio"]
+kvm-guest-mem-share = []
+kvm-mmio-guard = []
+vmm = ["timer_driver/vmm"]
+
+[dependencies]
+log = "0.4"
+console_driver = { workspace = true }
+irq_driver = { workspace = true }
+of = { workspace = true }
+khal = { workspace = true }
+kcpu = { workspace = true }
+kcpu_id_map = { workspace = true }
+kerrno = { workspace = true }
+kplat = { workspace = true }
+kbuild_config = { workspace = true }
+kernel_boot = { workspace = true }
+klazy = { workspace = true }
+rtc_driver = { workspace = true }
+timer_driver = { workspace = true }
+memaddr = { workspace = true }
+lazyinit = "0.2"
+heapless = "0.9"
+karch = { workspace = true }
+aarch64-pmuv3 = { workspace = true, optional = true }
+percpu = { workspace = true }
+
+[package.metadata.docs.rs]
+targets = ["aarch64-unknown-none"]

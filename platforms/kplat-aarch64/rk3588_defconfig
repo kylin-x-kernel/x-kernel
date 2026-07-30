@@ -1,0 +1,61 @@
+#
+# RK3588 (Orange Pi 5 Plus) minimal boot configuration.
+#
+# Brings up console (UART2 / DesignWare APB UART @ 0xfeb50000) + GICv3 +
+# ARM generic timer + SMP via PSCI. All four are device-tree driven, so no
+# RK3588 SoC driver is needed for this minimal milestone (U-Boot has already
+# configured the CRU; the kernel inherits reset defaults).
+#
+# Inherits ARCH_AARCH64 from the AArch64 choice default; selects the RK3588
+# machine. Boot this image through U-Boot `booti` on the real board with the
+# matching board device tree.
+#
+# ARCH_LOONGARCH64 is not set
+# ARCH_RISCV64 is not set
+# ARCH_X86_64 is not set
+MACHINE_AARCH64_RK3588=y
+BOOT_CONSOLE_ADDR=0xfeb50000
+BOOT_CONSOLE_REG_IO_WIDTH=4
+BOOT_CONSOLE_TYPE="mmio"
+# UART2 console line rate (1.5 Mbaud). Drives early-console TX pacing so the
+# fast cores don't overrun the 16550 TX FIFO before the polled runtime console
+# is up. 0x16e360 = 1500000.
+BOOT_CONSOLE_BAUDRATE=0x16e360
+BOOT_STACK_SIZE=0x40000
+NR_CPUS=8
+# BUILD_TYPE_DEBUG is not set
+KERNEL_STACK_SIZE=0x40000
+# Character device class (the NS16550 MMIO console driver depends on it).
+KFEAT_CHAR=y
+# RK3588 UART2 is a DesignWare APB UART (16550-compatible) -> ns16550-mmio.
+KFEAT_DRIVER_CONSOLE_NS16550_MMIO=y
+# KFEAT_DRIVER_CONSOLE_PL011 is not set
+# KFEAT_ALLOC_BUDDY is not set
+# KFEAT_ALLOC_TLSF is not set
+# KFEAT_DICE is not set
+# KFEAT_FS_FAT is not set
+# KFEAT_DWARF is not set
+KFEAT_FS_TIMES=y
+# KFEAT_NET is not set
+# KFEAT_SCHED_CFS is not set
+# KFEAT_SCHED_FIFO is not set
+# KFEAT_SCHED_RR is not set
+# KFEAT_TA_VERIFY_WITH_ROOT is not set
+# KFEAT_TEE is not set
+# KFEAT_TEE_TA_SIGN is not set
+# KFEAT_VIRTCCA_HUK_KEY is not set
+# KFEAT_VIRTIO_BUS_MMIO is not set
+# KFEAT_VSOCK is not set
+# LOG_LEVEL_DEBUG is not set
+# LOG_LEVEL_ERROR is not set
+# LOG_LEVEL_INFO is not set
+# LOG_LEVEL_TRACE is not set
+# No generic ECAM PCI host on RK3588 (its PCIe needs the rockchip,rk3588-pcie
+# driver, not yet ported). PCI_ECAM_BASE=0 makes the PCI subsystem skip
+# gracefully instead of mapping a bogus ECAM window.
+PCI_BUS_END=0x0
+PCI_ECAM_BASE=0x0
+PCI_RANGES=[]
+PHYS_BUS_OFFSET=0x0
+RTC_PADDR=0x0
+TASK_STACK_SIZE=0x40000

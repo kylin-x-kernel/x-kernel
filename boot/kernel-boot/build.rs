@@ -9,16 +9,18 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let workspace_root = Path::new(&manifest_dir).parent().unwrap().parent().unwrap();
-    let plat_name = kbuild_config::PLATFORM;
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    // The arch HAL crate id (kplat-<arch>). This used to be the PLATFORM Kconfig
+    // string; that was a redundant 1:1 echo of ARCH and has been removed, so
+    // derive it from the target arch (same scheme as util/kbuild_config).
+    let plat_name = format!("kplat-{}", arch);
     let target_config_path = workspace_root
         .join("target/kbuild")
-        .join(plat_name)
+        .join(&plat_name)
         .join("config.rs");
     println!("cargo:rerun-if-changed={}", target_config_path.display());
-    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
-    let platform = kbuild_config::PLATFORM;
-    if platform != "unknown" {
-        gen_linker_script(&arch, platform).unwrap();
+    if arch != "unknown" {
+        gen_linker_script(&arch, &plat_name).unwrap();
     }
 }
 

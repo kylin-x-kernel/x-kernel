@@ -1,2 +1,2 @@
 # bootloader config
-kernel_paths = ["xkernel_x86_64-qemu-virt.elf"]
+kernel_paths = ["xkernel_x86_64-qemu.elf"]

@@ -6,6 +6,8 @@
 
 extern crate alloc;
 
+#[cfg(feature = "ns16550-mmio")]
+mod ns16550_mmio;
 pub mod runtime;
 pub mod serial;
 
@@ -17,6 +19,8 @@ use khal::irq::IrqDesc;
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 use khal::mem::PhysAddr;
 use kspin::SpinNoIrq;
+#[cfg(feature = "ns16550-mmio")]
+pub use ns16550_mmio::SerialRegWidth;
 pub use serial::{SerialIdent, SerialPort, SerialRole};
 
 #[cfg(not(any(
@@ -40,12 +44,30 @@ enum StdoutKind {
 
 /// Parsed device-tree stdout node: just enough to build a [`SerialPort`] and
 /// wire its input interrupt.
+#[allow(dead_code)]
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 struct StdoutDesc {
     kind: StdoutKind,
     paddr: PhysAddr,
     size: usize,
+    /// 16550 register stride as `1 << reg-shift` (each register is that many
+    /// bytes apart). The RK3588 DesignWare UART uses `reg-shift = 2` (4-byte
+    /// stride). Ignored by the PL011 backend.
+    reg_shift: u32,
+    /// 16550 MMIO register access width from `reg-io-width`.
+    #[cfg(feature = "ns16550-mmio")]
+    reg_width: SerialRegWidth,
     irq: Option<IrqDesc>,
+}
+
+/// Device-tree MMIO layout for an NS16550-compatible UART.
+#[cfg(feature = "ns16550-mmio")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SerialMmioLayout {
+    /// Device-tree `reg-shift`: adjacent register offset is `1 << reg_shift`.
+    pub reg_shift: u32,
+    /// Device-tree `reg-io-width` decoded as a typed MMIO access width.
+    pub reg_width: SerialRegWidth,
 }
 
 static INPUT_IRQ_REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -102,6 +124,12 @@ fn stdout_desc_from_device_tree() -> Option<StdoutDesc> {
     let reg = node.reg()?.next()?;
     let paddr = PhysAddr::from_usize(reg.starting_address as usize);
     let irq = of::first_interrupt_desc(node).map(device_tree_irq_desc);
+    // Register stride: each UART register is `1 << reg-shift` bytes apart
+    // (RK3588's DesignWare UART uses reg-shift = 2 -> 4-byte stride). PL011
+    // does not use this property; it is recorded but ignored by that backend.
+    let reg_shift = node.property_u32("reg-shift").unwrap_or(0);
+    #[cfg(feature = "ns16550-mmio")]
+    let reg_width = serial_reg_width_from_node(node)?;
 
     #[cfg(feature = "pl011")]
     if node
@@ -112,6 +140,9 @@ fn stdout_desc_from_device_tree() -> Option<StdoutDesc> {
             kind: StdoutKind::Pl011,
             paddr,
             size: reg.size,
+            reg_shift,
+            #[cfg(feature = "ns16550-mmio")]
+            reg_width,
             irq,
         });
     }
@@ -127,11 +158,59 @@ fn stdout_desc_from_device_tree() -> Option<StdoutDesc> {
             kind: StdoutKind::Ns16550Mmio,
             paddr,
             size: reg.size,
+            reg_shift,
+            #[cfg(feature = "ns16550-mmio")]
+            reg_width,
             irq,
         });
     }
 
     None
+}
+
+#[cfg(feature = "ns16550-mmio")]
+fn serial_reg_width_from_node(node: of::FdtNode<'static, 'static>) -> Option<SerialRegWidth> {
+    SerialRegWidth::from_bytes(node.property_u32("reg-io-width").unwrap_or(1))
+}
+
+/// Read the NS16550 MMIO DT layout for the node whose MMIO base matches
+/// `paddr`. Returns 8-bit, unshifted access when the node is not found, matching
+/// the Linux 8250 default for absent firmware properties.
+///
+/// Used by the runtime serial driver to honor `reg-shift` and `reg-io-width`
+/// for auxiliary (non-stdout) 16550 ports that were not covered by the
+/// early-boot DT parse.
+#[cfg(feature = "ns16550-mmio")]
+pub fn ns16550_mmio_layout_for_paddr(paddr: usize) -> Option<SerialMmioLayout> {
+    let Some(fdt) = of::fdt() else {
+        return Some(SerialMmioLayout {
+            reg_shift: 0,
+            reg_width: SerialRegWidth::U8,
+        });
+    };
+    for node in fdt.all_nodes() {
+        if !(node.is_compatible("snps,dw-apb-uart")
+            || node.is_compatible("ns16550a")
+            || node.is_compatible("ns16550")
+            || node.is_compatible("mrvl,mmp-uart"))
+        {
+            continue;
+        }
+        if let Some(reg) = node.reg() {
+            for entry in reg {
+                if entry.starting_address as usize == paddr {
+                    return Some(SerialMmioLayout {
+                        reg_shift: node.property_u32("reg-shift").unwrap_or(0),
+                        reg_width: serial_reg_width_from_node(node)?,
+                    });
+                }
+            }
+        }
+    }
+    Some(SerialMmioLayout {
+        reg_shift: 0,
+        reg_width: SerialRegWidth::U8,
+    })
 }
 
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
@@ -172,7 +251,14 @@ fn build_stdout_port(desc: &StdoutDesc) -> SerialPort {
             // SAFETY: `uart_base` is the exclusively-mapped NS16550 MMIO
             // window for this stdout node, returned by `memspace::iomap_device`.
             unsafe {
-                SerialPort::new_mmio_ns16550(uart_base, desc.paddr, desc.size, SerialRole::Stdout)
+                SerialPort::new_mmio_ns16550(
+                    uart_base,
+                    desc.paddr,
+                    desc.size,
+                    SerialRole::Stdout,
+                    desc.reg_shift,
+                    desc.reg_width,
+                )
             }
         }
     }

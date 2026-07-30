@@ -293,7 +293,7 @@ pub fn dispatch_irq_by_gic_version(_unused: usize) -> Option<(usize, usize)> {
     };
     #[cfg(feature = "nmi-pmu")]
     if let Some((irq, _)) = res
-        && irq != kbuild_config::PMU_IRQ
+        && irq != of::pmu_irq_or(kbuild_config::PMU_IRQ)
     {
         open_nmi_window();
     }
@@ -318,10 +318,11 @@ pub fn complete_irq(completion_cookie: usize) {
             // the INTID before comparing — keeping this consistent with
             // dispatch_irq_by_gic_version which also compares the INTID.
             GicVersion::V2 => {
-                gicv2::intid_from_cookie(completion_cookie) as usize == kbuild_config::PMU_IRQ
+                gicv2::intid_from_cookie(completion_cookie) as usize
+                    == of::pmu_irq_or(kbuild_config::PMU_IRQ)
             }
             // GICv3: cookie is directly the INTID (dispatch returns (irq, irq)).
-            GicVersion::V3 => completion_cookie == kbuild_config::PMU_IRQ,
+            GicVersion::V3 => completion_cookie == of::pmu_irq_or(kbuild_config::PMU_IRQ),
         };
         if !is_pmu {
             close_nmi_window();

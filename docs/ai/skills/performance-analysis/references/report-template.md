@@ -7,7 +7,7 @@
 [One sentence: symptom, hypothesis, success criterion]
 
 ## Environment
-- Platform / defconfig: [e.g. aarch64-qemu-virt]
+- Platform / defconfig: [e.g. aarch64-qemu]
 - SMP CPUs: [N]
 - Kernel change under test: [commit / patch / none]
 - Workload: [harness CASE or guest script, duration, env overrides]

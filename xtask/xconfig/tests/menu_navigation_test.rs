@@ -42,36 +42,36 @@ fn test_menu_content_alignment() {
     let root_items = config_state.get_items_for_path(&[]);
     assert!(!root_items.is_empty(), "Root menu should have items");
 
-    // Find Platform Selection menu
-    let platform_menu = root_items
+    // Find Machine / Board Selection menu
+    let machine_menu = root_items
         .iter()
-        .find(|item| item.label == "Platform Selection");
+        .find(|item| item.label == "Machine / Board Selection");
     assert!(
-        platform_menu.is_some(),
-        "Platform Selection menu should exist in root"
+        machine_menu.is_some(),
+        "Machine / Board Selection menu should exist in root"
     );
-    let platform_menu = platform_menu.unwrap();
+    let machine_menu = machine_menu.unwrap();
     assert!(
-        platform_menu.has_children,
-        "Platform Selection should have children"
-    );
-
-    // Navigate into Platform Selection
-    let platform_items = config_state.get_items_for_path(&[platform_menu.id.clone()]);
-    assert!(
-        !platform_items.is_empty(),
-        "Platform Selection menu should have items"
+        machine_menu.has_children,
+        "Machine / Board Selection should have children"
     );
 
-    // Check that Platform Selection contains platform-related items (choice blocks or PLATFORM config)
-    let has_platform_choices = platform_items.iter().any(|item| {
-        // Check for a Choice block (the platform choice menus) or the PLATFORM string config
-        matches!(item.kind, MenuItemKind::Choice { .. }) || item.id == "PLATFORM"
+    // Navigate into Machine / Board Selection
+    let machine_items = config_state.get_items_for_path(&[machine_menu.id.clone()]);
+    assert!(
+        !machine_items.is_empty(),
+        "Machine / Board Selection menu should have items"
+    );
+
+    // Check that it contains machine-related items (choice blocks or the MACHINE string config)
+    let has_machine_choices = machine_items.iter().any(|item| {
+        // Check for a Choice block (the per-arch machine choices) or the MACHINE string config
+        matches!(item.kind, MenuItemKind::Choice { .. }) || item.id == "MACHINE"
     });
     assert!(
-        has_platform_choices,
-        "Platform Selection should contain platform config items, but got: {:?}",
-        platform_items.iter().map(|i| &i.id).collect::<Vec<_>>()
+        has_machine_choices,
+        "Machine / Board Selection should contain machine config items, but got: {:?}",
+        machine_items.iter().map(|i| &i.id).collect::<Vec<_>>()
     );
 
     // Find Kernel Features menu
@@ -127,11 +127,11 @@ fn test_menu_content_alignment() {
     );
 
     // Verify that menus don't have wrong content
-    // Platform Selection should NOT have Kernel Features content
-    let platform_has_kernel_config = platform_items.iter().any(|item| item.id == "NR_CPUS");
+    // Machine / Board Selection should NOT have Kernel Features content
+    let machine_has_kernel_config = machine_items.iter().any(|item| item.id == "NR_CPUS");
     assert!(
-        !platform_has_kernel_config,
-        "Platform Selection should NOT contain Kernel Features content"
+        !machine_has_kernel_config,
+        "Machine / Board Selection should NOT contain Kernel Features content"
     );
 
     // Kernel Features should NOT have RTC_PADDR

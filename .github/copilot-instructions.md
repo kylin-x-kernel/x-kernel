@@ -3,7 +3,7 @@
 - Prefer changing the shared driver/HAL layer before adding platform-local forks. Platform crates should mostly provide `BootHandler` glue, firmware/static discovery, and board-specific fallback values.
 
 ## Build and validation
-- Always copy a platform defconfig to `.config` and then run `make defconfig` before build, run, lint, or unit-test commands. Common entries are `platforms/aarch64-qemu-virt/defconfig`, `platforms/aarch64-crosvm-virt/defconfig`, `platforms/x86_64-qemu-virt/defconfig`, and `platforms/x86-csv/defconfig`.
+- Always copy a platform defconfig to `.config` and then run `make defconfig` before build, run, lint, or unit-test commands. Common entries are `platforms/kplat-aarch64/qemu_defconfig`, `platforms/kplat-aarch64/qemu_crosvm_defconfig`, `platforms/kplat-x86_64/qemu_defconfig`, and `platforms/kplat-x86_64/qemu_csv_defconfig`.
 - Main commands:
   - `make build`
   - `make run`
@@ -12,7 +12,7 @@
   - `cargo +nightly-2026-03-08 fmt --all`
 - `make build`, `make run`, `make clippy`, and unit-test Make targets require a prepared `.config`; copying a defconfig without running `make defconfig` is not sufficient.
 - x86 image generation depends on LinuxBoot/UEFI helpers and host tools such as `x86_64-linux-musl-gcc`, `rust-objcopy`, `mtools`, `dosfstools`, `xz`, and `python3`.
-- QEMU-based validation is the normal path for `x86_64-qemu-virt`, `x86-csv`, `aarch64-qemu-virt`, and `riscv64-qemu-virt`.
+- QEMU-based validation is the normal path for the qemu machines (aarch64, x86_64, riscv64) and QEMU defconfig feature variants such as x86_64 CSV.
 
 ## Architecture and ownership
 - `boot/` contains early boot code and boot protocol handoff. `boot/x86-boot-common` and `boot/x86_64-boot-stub` handle x86 early boot; `boot/kernel-boot` handles common boot handoff.

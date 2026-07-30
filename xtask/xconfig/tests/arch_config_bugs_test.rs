@@ -267,8 +267,8 @@ fn test_broken_defconfig_arch_auto_corrected() {
     let broken_config = "\
 ARCH=\"aarch64\"
 ARCH_X86_64=y
-PLATFORM=\"aarch64-qemu-virt\"
-PLATFORM_X86_64_QEMU_VIRT=y
+PLATFORM=\"kplat-aarch64\"
+PLATFORM_KPLAT_X86_64=y
 ";
     fs::write(&config_path, broken_config).unwrap();
 
@@ -281,11 +281,11 @@ PLATFORM_X86_64_QEMU_VIRT=y
         "Broken defconfig: ARCH should be auto-corrected to 'x86_64' (derived symbol)"
     );
 
-    // PLATFORM is derived (no prompt): must be recalculated to "x86_64-qemu-virt"
+    // PLATFORM is derived (no prompt): must be recalculated to "kplat-x86_64"
     assert_eq!(
         symbol_table.get_value("PLATFORM"),
-        Some("x86_64-qemu-virt".to_string()),
-        "Broken defconfig: PLATFORM should be auto-corrected to 'x86_64-qemu-virt' (derived \
+        Some("kplat-x86_64".to_string()),
+        "Broken defconfig: PLATFORM should be auto-corrected to 'kplat-x86_64' (derived \
          symbol)"
     );
 }
@@ -300,7 +300,7 @@ fn test_arch_value_correct_for_x86_64_defconfig() {
     let config_path = temp_dir.path().join(".config");
 
     // Minimal defconfig with only ARCH_X86_64=y (no explicit ARCH= line)
-    let defconfig_content = "ARCH_X86_64=y\nPLATFORM_X86_64_QEMU_VIRT=y\n";
+    let defconfig_content = "ARCH_X86_64=y\nPLATFORM_KPLAT_X86_64=y\n";
     fs::write(&config_path, defconfig_content).unwrap();
 
     let symbol_table = simulate_menuconfig_load(&kconfig_path, &srctree, &config_path);
@@ -331,11 +331,7 @@ fn test_defconfig_to_output_recomputes_cross_arch_derived_values() {
     let defconfig_path = temp_dir.path().join("defconfig");
     let output_path = temp_dir.path().join(".config");
 
-    fs::write(
-        &defconfig_path,
-        "ARCH_X86_64=y\nPLATFORM_X86_64_QEMU_VIRT=y\n",
-    )
-    .unwrap();
+    fs::write(&defconfig_path, "ARCH_X86_64=y\nPLATFORM_KPLAT_X86_64=y\n").unwrap();
 
     defconfig_to_output(defconfig_path, output_path.clone(), kconfig_path, srctree).unwrap();
 
@@ -343,9 +339,9 @@ fn test_defconfig_to_output_recomputes_cross_arch_derived_values() {
     assert!(config.contains("ARCH=\"x86_64\""));
     assert!(config.contains("ARCH_X86_64=y"));
     assert!(config.contains("# ARCH_AARCH64 is not set"));
-    assert!(config.contains("PLATFORM=\"x86_64-qemu-virt\""));
-    assert!(config.contains("PLATFORM_X86_64_QEMU_VIRT=y"));
-    assert!(config.contains("# PLATFORM_AARCH64_QEMU_VIRT is not set"));
+    assert!(config.contains("PLATFORM=\"kplat-x86_64\""));
+    assert!(config.contains("PLATFORM_KPLAT_X86_64=y"));
+    assert!(config.contains("# PLATFORM_KPLAT_AARCH64 is not set"));
 }
 
 /// Bug 1: When loading a defconfig with ARCH_AARCH64=y, ARCH should be "aarch64"
@@ -357,7 +353,7 @@ fn test_arch_value_correct_for_aarch64_defconfig() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join(".config");
 
-    let defconfig_content = "ARCH_AARCH64=y\nPLATFORM_AARCH64_QEMU_VIRT=y\n";
+    let defconfig_content = "ARCH_AARCH64=y\nPLATFORM_KPLAT_AARCH64=y\n";
     fs::write(&config_path, defconfig_content).unwrap();
 
     let symbol_table = simulate_menuconfig_load(&kconfig_path, &srctree, &config_path);
@@ -382,7 +378,7 @@ fn test_cross_arch_pollution_filtered() {
     // x86_64 defconfig that was copied from aarch64 (has aarch64-specific entries)
     let polluted_defconfig = "\
 ARCH_X86_64=y
-PLATFORM_AARCH64_QEMU_VIRT=y
+PLATFORM_KPLAT_AARCH64=y
 PMU_IRQ=23
 PSCI_METHOD=hvc
 ";
@@ -399,9 +395,9 @@ PSCI_METHOD=hvc
 
     // aarch64-specific platform should be filtered out (set to "n")
     assert_ne!(
-        symbol_table.get_value("PLATFORM_AARCH64_QEMU_VIRT"),
+        symbol_table.get_value("PLATFORM_KPLAT_AARCH64"),
         Some("y".to_string()),
-        "Bug 2: PLATFORM_AARCH64_QEMU_VIRT should be filtered when ARCH_X86_64=y"
+        "Bug 2: PLATFORM_KPLAT_AARCH64 should be filtered when ARCH_X86_64=y"
     );
 
     // aarch64-specific int config should be cleared
@@ -430,7 +426,7 @@ fn test_aarch64_configs_preserved_for_aarch64() {
 
     let aarch64_defconfig = "\
 ARCH_AARCH64=y
-PLATFORM_AARCH64_QEMU_VIRT=y
+PLATFORM_KPLAT_AARCH64=y
 PMU_IRQ=23
 PSCI_METHOD=hvc
 ";
@@ -444,9 +440,9 @@ PSCI_METHOD=hvc
         "ARCH_AARCH64 should be set"
     );
     assert_eq!(
-        symbol_table.get_value("PLATFORM_AARCH64_QEMU_VIRT"),
+        symbol_table.get_value("PLATFORM_KPLAT_AARCH64"),
         Some("y".to_string()),
-        "PLATFORM_AARCH64_QEMU_VIRT should be preserved for aarch64"
+        "PLATFORM_KPLAT_AARCH64 should be preserved for aarch64"
     );
     assert_eq!(
         symbol_table.get_value("PMU_IRQ"),

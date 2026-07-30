@@ -21,11 +21,11 @@ fn main() {
         .unwrap_or_else(|_| workspace_root.join("target").to_string_lossy().into_owned());
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let default_plat_name = match target_arch.as_str() {
-        "x86_64" => "x86_64-qemu-virt",
-        "aarch64" => "aarch64-qemu-virt",
-        "riscv64" => "riscv64-qemu-virt",
-        "loongarch64" => "loongarch64-qemu-virt",
-        _ => "aarch64-qemu-virt",
+        "x86_64" => "kplat-x86_64",
+        "aarch64" => "kplat-aarch64",
+        "riscv64" => "kplat-riscv64",
+        "loongarch64" => "kplat-loongarch64",
+        _ => "kplat-aarch64",
     };
     let plat_name = env::var("K_PLAT_NAME").unwrap_or_else(|_| default_plat_name.to_string());
     let target_config_path = Path::new(&target_dir)

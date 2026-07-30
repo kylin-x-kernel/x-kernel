@@ -62,19 +62,33 @@ config ARCH
     help
       The name of the selected architecture.
 
-menu "Platform Selection"
+# NOTE on the ARCH / MACHINE split (decoupled from the old PLATFORM concept):
+#
+# The CPU ARCH (aarch64 / x86_64 / riscv64 / loongarch64) implicitly selects
+# the arch HAL crate (kplat-<arch>) -- there is no longer a separate, redundant
+# PLATFORM symbol that merely echoed ARCH. What users choose here is the real
+# target MACHINE / BOARD (qemu, rk3588, ...). QEMU-hosted variants such as
+# CrosVM, virtCCA, and CSV are defconfig feature combinations layered on top of
+# the qemu machine, not separate machines.
+menu "Machine / Board Selection"
 
 if ARCH_AARCH64
 
 choice
-    prompt "AArch64 Platform"
-    default PLATFORM_AARCH64_QEMU_VIRT
+    prompt "AArch64 Machine / Board"
+    default MACHINE_AARCH64_QEMU
 
-    config PLATFORM_AARCH64_QEMU_VIRT
-        bool "QEMU ARM64 Virtual Machine"
+config MACHINE_AARCH64_QEMU
+    bool "QEMU"
+    help
+      QEMU 'virt' virtual machine. Console over PL011.
 
-    config PLATFORM_AARCH64_RASPI
-        bool "Raspberry Pi 4B"
+config MACHINE_AARCH64_RK3588
+    bool "RK3588 (Orange Pi 5 Plus)"
+    help
+      Rockchip RK3588 SoC. Console over UART2 (DesignWare / NS16550 MMIO).
+      Board differences are conveyed by the device tree passed at boot.
+
 endchoice
 
 endif # ARCH_AARCH64
@@ -82,11 +96,13 @@ endif # ARCH_AARCH64
 if ARCH_RISCV64
 
 choice
-    prompt "RISC-V 64 Platform"
-    default PLATFORM_RISCV64_QEMU_VIRT
+    prompt "RISC-V 64 Machine / Board"
+    default MACHINE_RISCV64_QEMU
 
-config PLATFORM_RISCV64_QEMU_VIRT
-    bool "QEMU RISC-V 64 Virtual Machine"
+config MACHINE_RISCV64_QEMU
+    bool "QEMU"
+    help
+      QEMU RISC-V 'virt' virtual machine. Console over NS16550 MMIO.
 
 endchoice
 
@@ -95,11 +111,13 @@ endif # ARCH_RISCV64
 if ARCH_X86_64
 
 choice
-    prompt "x86_64 Platform"
-    default PLATFORM_X86_64_QEMU_VIRT
+    prompt "x86_64 Machine / Board"
+    default MACHINE_X86_64_QEMU
 
-config PLATFORM_X86_64_QEMU_VIRT
-    bool "QEMU x86_64 Virtual Machine"
+config MACHINE_X86_64_QEMU
+    bool "QEMU"
+    help
+      QEMU x86_64 q35 machine. Console over NS16550 I/O port (ISA COM).
 
 endchoice
 
@@ -108,27 +126,40 @@ endif # ARCH_X86_64
 if ARCH_LOONGARCH64
 
 choice
-    prompt "LoongArch64 Platform"
-    default PLATFORM_LOONGARCH64_QEMU_VIRT
+    prompt "LoongArch64 Machine / Board"
+    default MACHINE_LOONGARCH64_QEMU
 
-config PLATFORM_LOONGARCH64_QEMU_VIRT
-    bool "QEMU LoongArch64 Virtual Machine"
+config MACHINE_LOONGARCH64_QEMU
+    bool "QEMU"
+    help
+      QEMU LoongArch 'virt' virtual machine. Console over NS16550 MMIO.
 
 endchoice
 
 endif # ARCH_LOONGARCH64
 
-config PLATFORM
-    string
-    default "aarch64-qemu-virt" if PLATFORM_AARCH64_QEMU_VIRT
-    default "aarch64-raspi4b" if PLATFORM_AARCH64_RASPI
-    default "riscv64-qemu-virt" if PLATFORM_RISCV64_QEMU_VIRT
-    default "x86_64-qemu-virt" if PLATFORM_X86_64_QEMU_VIRT
-    default "loongarch64-qemu-virt" if PLATFORM_LOONGARCH64_QEMU_VIRT
+config MACHINE_QEMU
+    bool
+    default y if MACHINE_AARCH64_QEMU
+    default y if MACHINE_RISCV64_QEMU
+    default y if MACHINE_X86_64_QEMU
+    default y if MACHINE_LOONGARCH64_QEMU
     help
-      The name of the selected platform.
+      Hidden aggregate for settings shared by QEMU-hosted machines.
 
-endmenu # Platform Selection
+config MACHINE
+    string
+    default "qemu" if MACHINE_AARCH64_QEMU
+    default "rk3588" if MACHINE_AARCH64_RK3588
+    default "qemu" if MACHINE_RISCV64_QEMU
+    default "qemu" if MACHINE_X86_64_QEMU
+    default "qemu" if MACHINE_LOONGARCH64_QEMU
+    help
+      The selected machine / board name. Together with ARCH it forms the kernel
+      artifact stem: xkernel_<arch>-<machine>.elf (e.g.
+      xkernel_aarch64-rk3588.elf).
+
+endmenu # Machine / Board Selection
 
 menu "Kernel Features"
 

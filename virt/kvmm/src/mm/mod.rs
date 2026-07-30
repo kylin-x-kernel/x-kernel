@@ -30,6 +30,11 @@ pub mod mmio;
 ///
 /// `pa` must be the physical address of a page originally allocated by
 /// `GlobalPage::alloc*` and not currently owned by another `GlobalPage`.
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "x86_64",
+    target_arch = "riscv64"
+))]
 pub(crate) unsafe fn free_pt_page(pa: u64) {
     let va = kaddr_layout::p2v(pa as usize);
     // SAFETY: caller guarantees `pa` came from GlobalPage::alloc and is uniquely owned.

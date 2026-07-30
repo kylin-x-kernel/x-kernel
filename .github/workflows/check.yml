@@ -60,9 +60,9 @@ jobs:
       - name: Prepare .config
         run: |
           if [ "${{ matrix.arch }}" = "aarch64" ]; then
-            cp ./platforms/aarch64-qemu-virt/defconfig .config
+            cp ./platforms/kplat-aarch64/qemu_defconfig .config
           elif [ "${{ matrix.arch }}" = "x86_64" ]; then
-            cp ./platforms/x86_64-qemu-virt/defconfig .config
+            cp ./platforms/kplat-x86_64/qemu_defconfig .config
           fi
           make defconfig
 

@@ -15,7 +15,7 @@ evidence is needed.
 ## Enable
 
 ```bash
-cp platforms/aarch64-qemu-virt/defconfig .config
+cp platforms/kplat-aarch64/qemu_defconfig .config
 make defconfig
 make menuconfig   # Task Scheduler → Task Diagnostics → Lock contention statistics
 # or append to .config: CONFIG_KFEAT_LOCK_STAT=y

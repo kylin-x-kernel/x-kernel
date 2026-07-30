@@ -21,51 +21,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "aarch64-peripherals"
-version = "0.2.0-dev"
-dependencies = [
- "aarch64-pmuv3",
- "heapless",
- "irq-driver",
- "karch",
- "kcpu_id_map",
- "kerrno",
- "khal",
- "klazy",
- "kplat",
- "lazyinit",
- "log",
- "memaddr",
- "of",
- "percpu",
-]
-
-[[package]]
 name = "aarch64-pmuv3"
 version = "0.1.0"
 dependencies = [
  "log",
  "tock-registers 0.10.1",
-]
-
-[[package]]
-name = "aarch64-qemu-virt"
-version = "0.2.0-dev"
-dependencies = [
- "aarch64-peripherals",
- "console-driver",
- "irq-driver",
- "kbuild_config",
- "kcpu",
- "kcpu_id_map",
- "kernel-boot",
- "kerrno",
- "khal",
- "klazy",
- "kplat",
- "log",
- "rtc-driver",
- "timer-driver",
 ]
 
 [[package]]
@@ -2324,8 +2284,6 @@ dependencies = [
 name = "kfeat"
 version = "0.2.0-dev"
 dependencies = [
- "aarch64-peripherals",
- "aarch64-qemu-virt",
  "alloc-engine",
  "backtrace",
  "devfs",
@@ -2338,6 +2296,10 @@ dependencies = [
  "khal",
  "kipi",
  "knet",
+ "kplat-aarch64",
+ "kplat-loongarch64",
+ "kplat-riscv64",
+ "kplat-x86_64",
  "kprocess",
  "kruntime",
  "kspin 0.2.0-dev",
@@ -2346,13 +2308,10 @@ dependencies = [
  "ktask",
  "ktracing",
  "linux_sysno",
- "loongarch64-qemu-virt",
  "memspace",
  "procfs",
- "riscv64-qemu-virt",
  "tee_kernel",
  "tee_task_iface",
- "x86_64-qemu-virt",
 ]
 
 [[package]]
@@ -2554,12 +2513,106 @@ dependencies = [
 ]
 
 [[package]]
+name = "kplat-aarch64"
+version = "0.2.0-dev"
+dependencies = [
+ "aarch64-pmuv3",
+ "console-driver",
+ "heapless",
+ "irq-driver",
+ "karch",
+ "kbuild_config",
+ "kcpu",
+ "kcpu_id_map",
+ "kernel-boot",
+ "kerrno",
+ "khal",
+ "klazy",
+ "kplat",
+ "lazyinit",
+ "log",
+ "memaddr",
+ "of",
+ "percpu",
+ "rtc-driver",
+ "timer-driver",
+]
+
+[[package]]
+name = "kplat-loongarch64"
+version = "0.2.0-dev"
+dependencies = [
+ "chrono",
+ "console-driver",
+ "kaddr_layout",
+ "karch",
+ "kbuild_config",
+ "kcpu",
+ "kcpu_id_map",
+ "kernel-boot",
+ "kerrno",
+ "khal",
+ "kplat",
+ "kspin 0.2.0-dev",
+ "lazyinit",
+ "log",
+ "loongArch64",
+ "memspace",
+ "rtc-driver",
+]
+
+[[package]]
 name = "kplat-macros"
 version = "0.2.0-dev"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "kplat-riscv64"
+version = "0.2.0-dev"
+dependencies = [
+ "console-driver",
+ "irq-driver",
+ "karch",
+ "kcpu",
+ "kcpu_id_map",
+ "kernel-boot",
+ "kerrno",
+ "khal",
+ "kplat",
+ "log",
+ "rtc-driver",
+ "sbi-rt",
+ "timer-driver",
+]
+
+[[package]]
+name = "kplat-x86_64"
+version = "0.2.0-dev"
+dependencies = [
+ "bitflags 2.13.1",
+ "boot-info",
+ "console-driver",
+ "irq-driver",
+ "karch",
+ "kbuild_config",
+ "kcpu",
+ "kcpu_id_map",
+ "kernel-boot",
+ "kerrno",
+ "khal",
+ "klazy",
+ "kplat",
+ "kspin 0.2.0-dev",
+ "log",
+ "multiboot2",
+ "rtc-driver",
+ "timer-driver",
+ "x86-apic",
+ "x86_64",
 ]
 
 [[package]]
@@ -2663,6 +2716,7 @@ dependencies = [
  "ktty",
  "memaddr",
  "memspace",
+ "of",
  "percpu",
  "rsext4_vfs",
  "timer-driver",
@@ -3036,29 +3090,6 @@ checksum = "236e72a07bb26b68662f7cc9dcb58cea50cf5e3d8b698e1b51ff7c36d633dd92"
 dependencies = [
  "bit_field",
  "bitflags 2.13.1",
-]
-
-[[package]]
-name = "loongarch64-qemu-virt"
-version = "0.2.0-dev"
-dependencies = [
- "chrono",
- "console-driver",
- "kaddr_layout",
- "karch",
- "kbuild_config",
- "kcpu",
- "kcpu_id_map",
- "kernel-boot",
- "kerrno",
- "khal",
- "kplat",
- "kspin 0.2.0-dev",
- "lazyinit",
- "log",
- "loongArch64",
- "memspace",
- "rtc-driver",
 ]
 
 [[package]]
@@ -4099,25 +4130,6 @@ name = "riscv-pac"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8188909339ccc0c68cfb5a04648313f09621e8b87dc03095454f1a11f6c5d436"
-
-[[package]]
-name = "riscv64-qemu-virt"
-version = "0.2.0-dev"
-dependencies = [
- "console-driver",
- "irq-driver",
- "karch",
- "kcpu",
- "kcpu_id_map",
- "kernel-boot",
- "kerrno",
- "khal",
- "kplat",
- "log",
- "rtc-driver",
- "sbi-rt",
- "timer-driver",
-]
 
 [[package]]
 name = "riscv_goldfish"
@@ -5470,19 +5482,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "x86-peripherals"
-version = "0.2.0-dev"
-dependencies = [
- "boot-info",
- "kcpu_id_map",
- "khal",
- "klazy",
- "log",
- "multiboot2",
- "x86-apic",
-]
-
-[[package]]
 name = "x86_64"
 version = "0.15.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5504,30 +5503,6 @@ dependencies = [
  "kbuild_config",
  "multiboot2",
  "x86-boot-common",
-]
-
-[[package]]
-name = "x86_64-qemu-virt"
-version = "0.2.0-dev"
-dependencies = [
- "bitflags 2.13.1",
- "console-driver",
- "irq-driver",
- "karch",
- "kbuild_config",
- "kcpu",
- "kcpu_id_map",
- "kernel-boot",
- "kerrno",
- "khal",
- "kplat",
- "kspin 0.2.0-dev",
- "log",
- "rtc-driver",
- "timer-driver",
- "x86-apic",
- "x86-peripherals",
- "x86_64",
 ]
 
 [[package]]

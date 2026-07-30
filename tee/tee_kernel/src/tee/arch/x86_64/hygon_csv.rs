@@ -39,12 +39,11 @@
 //! bounded `&[u8]`, validate `len >= size_of::<Report>()`, then extract fields by
 //! offset; ignore `reserved` on read and never expose it as writable storage.
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 use core::mem::size_of;
 
 use bytemuck::{Pod, Zeroable, bytes_of};
 use khal::mem::{VirtAddr, v2p};
-use ksync::Mutex;
 use memoffset::offset_of;
 use static_assertions::{const_assert, const_assert_eq};
 use tee_crypto::{
@@ -52,12 +51,7 @@ use tee_crypto::{
     hkdf,
     mac::HmacSm3,
 };
-use tee_raw_sys::{
-    TEE_ALG_HMAC_SM3, TEE_ALG_SM3, TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_BAD_STATE,
-    TEE_OperationMode,
-    TEE_OperationMode::{TEE_MODE_DIGEST, TEE_MODE_MAC},
-    TEE_TYPE_HMAC_SM3, TEE_TYPE_SM4,
-};
+use tee_raw_sys::TEE_ERROR_BAD_PARAMETERS;
 
 use super::hygon_csv_bindings::{
     PAGE_SIZE, csv_attestation_report_t, csv_guest_user_data_attestation_t,

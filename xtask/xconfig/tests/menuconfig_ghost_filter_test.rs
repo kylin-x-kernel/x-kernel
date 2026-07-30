@@ -181,9 +181,9 @@ if ARCH_AARCH64
 
 choice
     prompt "AArch64 Platform"
-    default PLATFORM_AARCH64_QEMU_VIRT
+    default PLATFORM_KPLAT_AARCH64
 
-config PLATFORM_AARCH64_QEMU_VIRT
+config PLATFORM_KPLAT_AARCH64
     bool "QEMU ARM64 Virtual Machine"
 
 endchoice
@@ -194,9 +194,9 @@ if ARCH_X86_64
 
 choice
     prompt "x86_64 Platform"
-    default PLATFORM_X86_64_QEMU_VIRT
+    default PLATFORM_KPLAT_X86_64
 
-config PLATFORM_X86_64_QEMU_VIRT
+config PLATFORM_KPLAT_X86_64
     bool "QEMU x86_64 Virtual Machine"
 
 endchoice
@@ -209,7 +209,7 @@ config KFEAT_CHAR
 config KFEAT_DRIVER_CONSOLE_PL011
     bool "PL011 runtime console handoff"
     depends on KFEAT_CHAR
-    default y if PLATFORM_AARCH64_QEMU_VIRT
+    default y if PLATFORM_KPLAT_AARCH64
 "#;
     let kconfig_path = temp_dir.path().join("Kconfig");
     fs::write(&kconfig_path, kconfig_content).unwrap();
@@ -218,8 +218,8 @@ config KFEAT_DRIVER_CONSOLE_PL011
 # ARCH_AARCH64 is not set
 ARCH_X86_64=y
 KFEAT_CHAR=y
-# PLATFORM_AARCH64_QEMU_VIRT is not set
-PLATFORM_X86_64_QEMU_VIRT=y
+# PLATFORM_KPLAT_AARCH64 is not set
+PLATFORM_KPLAT_X86_64=y
 "#;
     let config_path = temp_dir.path().join(".config");
     fs::write(&config_path, config_content).unwrap();

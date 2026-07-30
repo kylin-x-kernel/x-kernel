@@ -32,9 +32,17 @@ awk -F= '
             sub(/^KFEAT_/, "", feature)
             print tolower(feature)
         }
-        /^PLATFORM_[A-Z][A-Z0-9_]*=y$/ {
-            platform = $1
-            sub(/^PLATFORM_/, "", platform)
-            print "platform_" tolower(platform)
+        /^ARCH_[A-Z][A-Z0-9_]*=y$/ {
+            arch = $1
+            sub(/^ARCH_/, "", arch)
+            # Arch HAL crate feature. The old PLATFORM_KPLAT_ARCH symbol was a
+            # redundant 1:1 echo of ARCH and has been removed; the crate is now
+            # selected by ARCH directly. The feature name stays platform_kplat_arch
+            # so api/kfeat (Cargo.toml plus extern crate) needs no change. This
+            # must mirror xtask/xconfig gen_cargo extract_kfeat_features.
+            if (arch == "AARCH64") print "platform_kplat_aarch64"
+            else if (arch == "X86_64") print "platform_kplat_x86_64"
+            else if (arch == "RISCV64") print "platform_kplat_riscv64"
+            else if (arch == "LOONGARCH64") print "platform_kplat_loongarch64"
         }
     ' "$config_path" | sort -u | paste -sd' ' -

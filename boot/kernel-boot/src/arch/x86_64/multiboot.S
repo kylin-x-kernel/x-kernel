@@ -1,8 +1,8 @@
 # Bootstrapping from 32-bit with the Multiboot2 specification.
 #
-# Unified Multiboot2 entry for x86_64-qemu-virt and x86-csv.
+# Unified Multiboot2 entry for the x86_64 qemu machine and its defconfig variants.
 # The {cbit_mask} argument is 0 for non-SEV platforms and (1 << SEV_CBIT_POS)
-# for CSV/SEV platforms such as x86-csv.
+# for CSV/SEV feature variants on the x86_64 qemu machine.
 
 .section .text.boot
 .code32

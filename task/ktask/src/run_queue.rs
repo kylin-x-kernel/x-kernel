@@ -169,7 +169,12 @@ pub(crate) fn record_preempt_pending_blocked(can_preempt: bool, in_exception: bo
 #[inline]
 pub(crate) fn record_preempt_pending_blocked(_can_preempt: bool, _in_exception: bool) {}
 
-#[cfg(feature = "sched_stat")]
+#[cfg(all(
+    feature = "preempt",
+    feature = "smp",
+    feature = "ipi",
+    feature = "sched_stat"
+))]
 #[inline]
 fn record_remote_resched(cpu_id: LogicalCpuId, failed: bool) {
     let stats = sched_stat_cpu(cpu_id);
@@ -179,7 +184,12 @@ fn record_remote_resched(cpu_id: LogicalCpuId, failed: bool) {
     }
 }
 
-#[cfg(not(feature = "sched_stat"))]
+#[cfg(all(
+    feature = "preempt",
+    feature = "smp",
+    feature = "ipi",
+    not(feature = "sched_stat")
+))]
 #[inline]
 fn record_remote_resched(_cpu_id: LogicalCpuId, _failed: bool) {}
 
@@ -859,6 +869,7 @@ impl RunQueue {
     ///
     /// Used for per-CPU helpers such as the affinity migration task that are
     /// entered via `switch_to` rather than the ready queue.
+    #[cfg(feature = "smp")]
     fn switch_to_local(&mut self, prev_task: CurrentTask, next_task: KtaskRef) {
         #[cfg(feature = "smp")]
         self.attach_owner(&next_task);

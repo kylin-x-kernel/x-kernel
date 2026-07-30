@@ -124,16 +124,17 @@ fn resolve_target(arch: &str) -> Option<&'static str> {
 }
 
 fn resolve_plat_name(config: &HashMap<String, String>) -> &'static str {
-    if config.get("PLATFORM_AARCH64_QEMU_VIRT") == Some(&"y".to_string()) {
-        "aarch64-qemu-virt"
-    } else if config.get("PLATFORM_AARCH64_RASPI") == Some(&"y".to_string()) {
-        "aarch64-raspi"
-    } else if config.get("PLATFORM_RISCV64_QEMU_VIRT") == Some(&"y".to_string()) {
-        "riscv64-qemu-virt"
-    } else if config.get("PLATFORM_X86_64_QEMU_VIRT") == Some(&"y".to_string()) {
-        "x86_64-qemu-virt"
-    } else if config.get("PLATFORM_LOONGARCH64_QEMU_VIRT") == Some(&"y".to_string()) {
-        "loongarch64-qemu-virt"
+    // The arch HAL crate (kplat-<arch>) is derived from ARCH. There is no longer
+    // a separate PLATFORM symbol: PLATFORM_KPLAT_<ARCH> was a redundant 1:1 echo
+    // of ARCH and has been removed; the crate is now selected by ARCH directly.
+    if config.get("ARCH_AARCH64") == Some(&"y".to_string()) {
+        "kplat-aarch64"
+    } else if config.get("ARCH_RISCV64") == Some(&"y".to_string()) {
+        "kplat-riscv64"
+    } else if config.get("ARCH_X86_64") == Some(&"y".to_string()) {
+        "kplat-x86_64"
+    } else if config.get("ARCH_LOONGARCH64") == Some(&"y".to_string()) {
+        "kplat-loongarch64"
     } else {
         "unknown"
     }
@@ -146,10 +147,7 @@ fn generate_rust_analyzer_config(config: &HashMap<String, String>) -> Result<()>
     };
 
     let features = extract_kfeat_features(config);
-    let feature_values: Vec<String> = features
-        .iter()
-        .map(|f| format!("kfeat/{}", f))
-        .collect();
+    let feature_values: Vec<String> = features.iter().map(|f| format!("kfeat/{}", f)).collect();
 
     let managed_keys = [
         "rust-analyzer.cargo.target",
@@ -192,10 +190,7 @@ fn generate_rust_analyzer_config(config: &HashMap<String, String>) -> Result<()>
         ),
     );
     settings.insert("rust-analyzer.cfg.setTest".into(), Value::Bool(false));
-    settings.insert(
-        "rust-analyzer.check.allTargets".into(),
-        Value::Bool(false),
-    );
+    settings.insert("rust-analyzer.check.allTargets".into(), Value::Bool(false));
 
     if !vscode_dir.exists() {
         std::fs::create_dir(vscode_dir).map_err(KconfigError::Io)?;
@@ -226,10 +221,7 @@ fn generate_cargo_config(config: &HashMap<String, String>, opts: &BuildOpts) -> 
     let plat_name = resolve_plat_name(config);
 
     let features = extract_kfeat_features(config);
-    let feature_values: Vec<String> = features
-        .iter()
-        .map(|f| format!("kfeat/{}", f))
-        .collect();
+    let feature_values: Vec<String> = features.iter().map(|f| format!("kfeat/{}", f)).collect();
 
     let dot_cargo_dir = std::path::Path::new(".cargo");
     if !dot_cargo_dir.exists() {
@@ -366,8 +358,8 @@ fn generate_cargo_config(config: &HashMap<String, String>, opts: &BuildOpts) -> 
 /// Extract cargo feature names from .config entries, mirroring
 /// `scripts/make/kfeat_features.sh`.
 ///
-/// Maps `KFEAT_<NAME>=y` to feature `<name>` (lowercase) and
-/// `PLATFORM_<NAME>=y` to feature `platform_<name>` (lowercase),
+/// Maps `KFEAT_<NAME>=y` to feature `<name>` (lowercase) and the selected
+/// `ARCH_<ARCH>=y` to the arch HAL crate feature `platform_kplat_<arch>`,
 /// skipping build-time-only keys.
 fn extract_kfeat_features(config: &HashMap<String, String>) -> Vec<String> {
     const SKIP_KEYS: &[&str] = &["KFEAT_FS", "KFEAT_VIRTIO_BUS_PCI", "KFEAT_VIRTIO_BUS_MMIO"];
@@ -393,17 +385,21 @@ fn extract_kfeat_features(config: &HashMap<String, String>) -> Vec<String> {
                 continue;
             }
             features.push(name.to_lowercase());
-        } else if let Some(name) = key.strip_prefix("PLATFORM_") {
-            if name.is_empty() {
-                continue;
+        } else if let Some(name) = key.strip_prefix("ARCH_") {
+            // The arch HAL crate is selected by ARCH (the redundant
+            // PLATFORM_KPLAT_<ARCH> symbol has been removed). The cargo feature
+            // name stays `platform_kplat_<arch>` so api/kfeat (Cargo.toml +
+            // extern crate) and the crate cfg gates need no change.
+            let feat = match name {
+                "AARCH64" => Some("platform_kplat_aarch64"),
+                "X86_64" => Some("platform_kplat_x86_64"),
+                "RISCV64" => Some("platform_kplat_riscv64"),
+                "LOONGARCH64" => Some("platform_kplat_loongarch64"),
+                _ => None,
+            };
+            if let Some(f) = feat {
+                features.push(f.to_string());
             }
-            if !name
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-            {
-                continue;
-            }
-            features.push(format!("platform_{}", name.to_lowercase()));
         }
     }
 

@@ -52,21 +52,47 @@ debug workflows, or architecture-specific bring-up notes.
 
 ## Supported Platforms
 
-Platforms with checked-in defconfig:
+The CPU **ARCH** (`aarch64` / `x86_64` / `riscv64` / `loongarch64`) implicitly
+selects the arch HAL crate under `platforms/kplat-<arch>/`. The target
+**machine / board** is chosen separately (it selects board-specific drivers
+such as the UART backend) and supplies the machine token of the kernel
+artifact name: `xkernel_<arch>-<machine>.elf`. QEMU-hosted variants such as
+CrosVM, virtCCA, and CSV are defconfig feature combinations layered on top of
+the `qemu` machine, not separate machines.
 
-| Platform | Description |
-|---|---|
-| `aarch64-qemu-virt` | QEMU ARM64 Virtual Machine |
-| `riscv64-qemu-virt` | QEMU RISC-V 64 Virtual Machine |
-| `x86_64-qemu-virt` | QEMU x86_64 (q35) |
-| `x86-csv` | Hygon CSV (SEV) Platform |
+Checked-in defconfigs (`platforms/kplat-<arch>/<machine>[_<feature>]_defconfig`):
 
-Additional checked-in defconfig variants:
+| Defconfig | ARCH | Machine | Feature set | Artifact stem |
+|---|---|---|---|---|
+| `platforms/kplat-aarch64/qemu_defconfig` | aarch64 | qemu | baseline | `aarch64-qemu` |
+| `platforms/kplat-aarch64/rk3588_defconfig` | aarch64 | rk3588 (Orange Pi 5 Plus) | baseline | `aarch64-rk3588` |
+| `platforms/kplat-aarch64/qemu_crosvm_defconfig` | aarch64 | qemu | crosvm | `aarch64-qemu` |
+| `platforms/kplat-aarch64/qemu_virtcca_defconfig` | aarch64 | qemu | virtcca | `aarch64-qemu` |
+| `platforms/kplat-x86_64/qemu_defconfig` | x86_64 | qemu (q35) | baseline | `x86_64-qemu` |
+| `platforms/kplat-x86_64/qemu_csv_defconfig` | x86_64 | qemu | csv (Hygon SEV) | `x86_64-qemu` |
+| `platforms/kplat-riscv64/qemu_defconfig` | riscv64 | qemu | baseline | `riscv64-qemu` |
+| `platforms/kplat-loongarch64/qemu_defconfig` | loongarch64 | qemu | baseline | `loongarch64-qemu` |
 
-| Defconfig Path | Description |
-|---|---|
-| `platforms/aarch64-qemu-virt/crosvm_defconfig` | Capability bundle for the legacy CrosVM guest setup, built on the shared `aarch64-qemu-virt` platform crate |
-| `platforms/aarch64-qemu-virt/ramdisk_defconfig` | RAM disk as the root filesystem: `KFEAT_DRIVER_RAMDISK_STATIC=y` (ext4 image embedded via `make ramdisk_img`) with `KFEAT_ROOT_BLOCK="ramdisk"`. virtio-blk may stay enabled (it coexists as a secondary data disk); boot with `make run` |
+### CI stage naming
+
+The CI pipeline (`Jenkinsfile`) names each stage from the same
+`<arch>-<machine>` artifact stem, so the CI report — the Gitee PR comment
+table and the Gitee check runs — shows the target machine, not just the arch:
+
+- `Build Artifact: <arch>-<machine>` / `... unittest`
+- `Runtime Test: <arch>-<machine>`
+- `Unit Tests: <arch>-<machine>`
+- `TEE Tests: <arch>-<machine>`
+- `Build Check: <arch>-<machine>-<feature>` (e.g. `aarch64-qemu-crosvm`,
+  `aarch64-qemu-virtcca`)
+
+The runtime / unittest / TEE / build-artifact stages all target the
+**default machine `qemu`** (the `qemu_defconfig` row above); `crosvm` and
+`virtcca` exist only as QEMU defconfig build-check stages. Each runtime stage
+spec carries an explicit `machine` field that drives its stage name and kernel
+artifact stem. The runtime stage also writes a harness-only `PLATFORM` entry
+into the restored `.config` so Starry Test Harness resolves the same artifact
+stem. Variant build-check stages pass an explicit defconfig path.
 
 ## Required Preparation
 
@@ -77,7 +103,7 @@ prepare `.config` from a platform defconfig.
 Default example:
 
 ```bash
-cp platforms/aarch64-qemu-virt/defconfig .config
+cp platforms/kplat-aarch64/qemu_defconfig .config
 make defconfig
 ```
 
@@ -89,20 +115,15 @@ the copied file is only a minimal seed and must be expanded
 with `make defconfig` before Make-based build, run, lint,
 or unit-test commands.
 
-Exception:
-
-- `loongarch64-qemu-virt` currently has no checked-in platform defconfig;
-  start from `make menuconfig` instead of copying `platforms/<platform>/defconfig`.
-
 ## Defconfig Workflow
 
 In this repository,
-`platforms/*/defconfig` files are minimal, checked-in baseline configurations.
+`platforms/*/qemu_defconfig` files are minimal, checked-in baseline configurations.
 They are not the full configuration consumed by the build.
 
 The normal relationship is:
 
-- `platforms/<platform>/defconfig`:
+- `platforms/<platform>/qemu_defconfig`:
   minimal platform baseline stored in the repository;
 - `.config`:
   expanded working configuration in the repository root;
@@ -122,7 +143,7 @@ to have already happened.
 Typical usage:
 
 ```bash
-cp platforms/aarch64-qemu-virt/defconfig .config
+cp platforms/kplat-aarch64/qemu_defconfig .config
 make defconfig
 ```
 
@@ -206,7 +227,7 @@ and writes the result to `./defconfig`.
 Typical usage:
 
 ```bash
-cp platforms/aarch64-qemu-virt/defconfig .config
+cp platforms/kplat-aarch64/qemu_defconfig .config
 make menuconfig
 make savedefconfig
 ```
@@ -229,7 +250,7 @@ Use it when:
 Important:
 
 - `make savedefconfig` does not update
-  `platforms/<platform>/defconfig` automatically.
+  `platforms/<platform>/qemu_defconfig` automatically.
 - Run `make defconfig`, `make menuconfig`, `make oldconfig`,
   `make olddefconfig`, or `make saveconfig` before `make savedefconfig`;
   `savedefconfig` is only valid on a prepared working `.config`.
@@ -240,18 +261,18 @@ Important:
 Typical update flow for a platform defconfig:
 
 ```bash
-cp platforms/aarch64-qemu-virt/defconfig .config
+cp platforms/kplat-aarch64/qemu_defconfig .config
 make defconfig
 make menuconfig
 make savedefconfig
-cp defconfig platforms/aarch64-qemu-virt/defconfig
+cp defconfig platforms/kplat-aarch64/qemu_defconfig
 ```
 
 Before committing an updated platform defconfig,
 re-run the standard expansion flow to verify it is self-consistent:
 
 ```bash
-cp platforms/aarch64-qemu-virt/defconfig .config
+cp platforms/kplat-aarch64/qemu_defconfig .config
 make defconfig
 make build
 ```
@@ -275,9 +296,9 @@ Expected build outputs may include:
 
 | File | Description |
 |---|---|
-| `xkernel_<platform>.elf` | ELF binary |
-| `xkernel_<platform>.bin` | Raw binary image |
-| `xkernel_<platform>.uimg` | U-Boot image when `UIMAGE=y` |
+| `xkernel_<arch>-<machine>.elf` | ELF binary |
+| `xkernel_<arch>-<machine>.bin` | Raw binary image |
+| `xkernel_<arch>-<machine>.uimg` | U-Boot image when `UIMAGE=y` |
 | `xkernel_x86_64-*.bzimg` | x86_64 LinuxBoot image |
 | `xkernel_x86_64-*.uefi.img` | x86_64 UEFI boot disk when `UEFI=y` |
 
@@ -483,13 +504,13 @@ When an agent needs to validate a code change:
 
 When an agent changes checked-in platform configuration:
 
-1. Start from `platforms/<platform>/defconfig`.
+1. Start from `platforms/<platform>/qemu_defconfig`.
 2. Copy it to `.config`.
 3. Expand it into `.config` with `make defconfig`.
 4. Make the intended config changes.
 5. Run `make savedefconfig`.
 6. Move the generated root `./defconfig`
-   into `platforms/<platform>/defconfig`.
+   into `platforms/<platform>/qemu_defconfig`.
 7. Re-expand and validate again before finishing.
 
 Examples:
@@ -534,5 +555,5 @@ Examples:
 
 - `AGENTS.md`
 - `rust-toolchain.toml`
-- `platforms/*/defconfig`
+- `platforms/kplat-*/*_defconfig`
 - `README.md`

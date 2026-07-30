@@ -68,7 +68,7 @@ env -u CARGO_BUILD_TARGET RUSTFLAGS= cargo run --release \
 
 if [ "${SKIP_KERNEL_BUILD:-0}" != "1" ]; then
     echo "==> Building kernel..."
-    cp "platforms/${arch}-qemu-virt/defconfig" .config
+    cp "platforms/kplat-${arch}/qemu_defconfig" .config
     make build
 else
     echo "==> Reusing prebuilt kernel artifact..."

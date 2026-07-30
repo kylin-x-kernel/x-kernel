@@ -31,7 +31,7 @@ target platform defconfig.
 Default preparation for the normal ARM64 QEMU platform:
 
 ```bash
-cp platforms/aarch64-qemu-virt/defconfig .config
+cp platforms/kplat-aarch64/qemu_defconfig .config
 make defconfig
 ```
 

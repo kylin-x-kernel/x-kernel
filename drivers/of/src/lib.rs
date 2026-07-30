@@ -6,6 +6,8 @@
 
 #![no_std]
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use lazyinit::LazyInit;
 pub use rs_fdtree::{
     Chosen, Dice, FdtError, FdtNode, InterruptController, LinuxFdt, MemoryRegion, NodeProperty,
@@ -319,6 +321,45 @@ pub fn first_interrupt_desc(node: FdtNode<'static, 'static>) -> Option<Interrupt
     }
 
     None
+}
+
+/// Cached PMU interrupt IRQ. `0` means "not yet resolved"; a real PMU IRQ is
+/// never 0 on a GIC (SGIs start at 0 but the PMU uses an SPI/PPI >= 16).
+static PMU_IRQ_CACHE: AtomicUsize = AtomicUsize::new(0);
+
+fn is_arm_cpu_pmu_compatible(compatible: &str) -> bool {
+    compatible == "arm,armv8-pmuv3"
+        || (compatible.starts_with("arm,cortex-") && compatible.ends_with("-pmu"))
+        || (compatible.starts_with("arm,neoverse-") && compatible.ends_with("-pmu"))
+        || (compatible.starts_with("arm,c1-") && compatible.ends_with("-pmu"))
+}
+
+/// Resolve the PMU interrupt IRQ from an ARM CPU PMU device-tree node.
+///
+/// Linux's ARM PMU drivers match explicit CPU PMU compatibles such as
+/// `arm,armv8-pmuv3`, `arm,cortex-a55-pmu`, and `arm,cortex-a76-pmu`; do the
+/// same here instead of accepting any node whose compatible merely contains
+/// `pmu`, which can also match SoC power-management blocks.
+fn resolve_pmu_irq() -> Option<usize> {
+    let fdt = fdt()?;
+    fdt.all_nodes()
+        .filter(|node| node.compatibles().any(is_arm_cpu_pmu_compatible))
+        .find_map(|node| first_interrupt_desc(node).map(|info| info.irq))
+}
+
+/// Return the PMU interrupt IRQ number, resolved once from the device tree and
+/// cached for subsequent (hot-path) calls. Falls back to `fallback` (e.g. the
+/// Kconfig default) when the device tree has no PMU node.
+pub fn pmu_irq_or(fallback: usize) -> usize {
+    let cached = PMU_IRQ_CACHE.load(Ordering::Acquire);
+    if cached != 0 {
+        return cached;
+    }
+    let resolved = resolve_pmu_irq().unwrap_or(fallback);
+    if resolved != 0 {
+        PMU_IRQ_CACHE.store(resolved, Ordering::Release);
+    }
+    resolved
 }
 
 pub fn generic_pci_host_info() -> Option<PciHostInfo> {

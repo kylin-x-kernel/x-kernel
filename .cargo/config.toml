@@ -20,20 +20,52 @@ rustdocflags = [
     "--check-cfg",
     "cfg(unittest)",
     "--check-cfg",
-    'cfg(k_plat_name, values("aarch64-qemu-virt", "loongarch64-qemu-virt", "riscv64-qemu-virt", "x86_64-qemu-virt"))',
+    'cfg(k_plat_name, values("kplat-aarch64", "kplat-loongarch64", "kplat-riscv64", "kplat-x86_64"))',
 ]
 
 [target.aarch64-unknown-none-softfloat]
-rustflags = ["-C", "force-frame-pointers", "-C", "debuginfo=2", "-C", "strip=none"]
+rustflags = [
+    "-C",
+    "force-frame-pointers",
+    "-C",
+    "debuginfo=2",
+    "-C",
+    "strip=none",
+]
 
 [target.riscv64gc-unknown-none-elf]
-rustflags = ["-C", "force-frame-pointers", "-C", "debuginfo=2", "-C", "strip=none"]
+rustflags = [
+    "-C",
+    "force-frame-pointers",
+    "-C",
+    "debuginfo=2",
+    "-C",
+    "strip=none",
+]
 
 [target.loongarch64-unknown-none-softfloat]
-rustflags = ["-C", "force-frame-pointers", "-C", "debuginfo=2", "-C", "strip=none"]
+rustflags = [
+    "-C",
+    "force-frame-pointers",
+    "-C",
+    "debuginfo=2",
+    "-C",
+    "strip=none",
+]
 
 [target.x86_64-unknown-none]
-rustflags = ["--cfg", "aes_backend=\"soft\"", "--cfg", "curve25519_dalek_backend=\"serial\"", "-C", "force-frame-pointers", "-C", "debuginfo=2", "-C", "strip=none"]
+rustflags = [
+    "--cfg",
+    "aes_backend=\"soft\"",
+    "--cfg",
+    "curve25519_dalek_backend=\"serial\"",
+    "-C",
+    "force-frame-pointers",
+    "-C",
+    "debuginfo=2",
+    "-C",
+    "strip=none",
+]
 
 [alias]
 xconfig = "run --manifest-path xtask/xconfig/Cargo.toml --"

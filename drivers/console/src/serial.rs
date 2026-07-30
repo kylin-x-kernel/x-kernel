@@ -22,10 +22,11 @@ use khal::mem::VirtAddr;
 use khal::{irq::IrqDesc, mem::PhysAddr};
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
-#[cfg(feature = "ns16550-mmio")]
-use uart_16550::MmioSerialPort;
 #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
 use uart_16550::SerialPort as SerialPort16550;
+
+#[cfg(feature = "ns16550-mmio")]
+use crate::ns16550_mmio::{Port as Ns16550MmioPort, SerialRegWidth};
 
 /// Physical identity of a UART.
 ///
@@ -54,7 +55,7 @@ enum Backend {
     #[cfg(feature = "pl011")]
     Pl011(Pl011Uart),
     #[cfg(feature = "ns16550-mmio")]
-    Ns16550Mmio(MmioSerialPort),
+    Ns16550Mmio(Ns16550MmioPort),
     #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
     Ns16550IoPort(SerialPort16550),
 }
@@ -114,7 +115,7 @@ fn pl011_putchar(uart: &mut Pl011Uart, c: u8) {
 }
 
 #[cfg(feature = "ns16550-mmio")]
-fn ns16550_mmio_putchar(uart: &mut MmioSerialPort, c: u8) {
+fn ns16550_mmio_putchar(uart: &mut Ns16550MmioPort, c: u8) {
     match c {
         b'\n' => {
             uart.send(b'\r');
@@ -154,6 +155,13 @@ impl SerialPort {
 
     /// Build an NS16550 MMIO port over an already-mapped window.
     ///
+    /// `reg_shift` is the device-tree `reg-shift` value; each register is
+    /// `1 << reg_shift` bytes apart (RK3588's DesignWare UART uses 2). The baud
+    /// divisor is left untouched — firmware already programmed it.
+    ///
+    /// `reg_width` is the device-tree `reg-io-width` value decoded as a typed
+    /// MMIO access width. Rockchip DesignWare UARTs use 32-bit accesses.
+    ///
     /// # Safety
     ///
     /// `uart_base` must name a valid, exclusively-mapped NS16550 MMIO register
@@ -164,10 +172,18 @@ impl SerialPort {
         paddr: PhysAddr,
         size: usize,
         role: SerialRole,
+        reg_shift: u32,
+        reg_width: SerialRegWidth,
     ) -> Self {
-        // SAFETY: caller guarantees `uart_base` is an exclusive NS16550 MMIO map.
-        let mut uart = unsafe { MmioSerialPort::new(uart_base.as_usize()) };
-        uart.init();
+        let stride = 1usize << reg_shift;
+        // SAFETY: caller guarantees `uart_base` is an exclusive NS16550 MMIO
+        // map. The decoded DT layout supplies the register stride and access
+        // width used for all volatile register operations.
+        let uart = unsafe { Ns16550MmioPort::new(uart_base.as_usize(), stride, reg_width) };
+        // SAFETY: the port was constructed from the same exclusive MMIO window;
+        // line/FIFO/interrupt setup is programmed without touching the baud
+        // divisor configured by firmware.
+        unsafe { uart.init_preserve_baud() };
         Self::new(
             Backend::Ns16550Mmio(uart),
             SerialIdent::Mmio { paddr, size },

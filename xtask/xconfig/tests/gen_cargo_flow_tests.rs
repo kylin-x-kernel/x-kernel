@@ -42,13 +42,13 @@ config ARCH
 
 choice
     prompt "Platform"
-    default PLATFORM_AARCH64_QEMU_VIRT
+    default PLATFORM_KPLAT_AARCH64
 
-config PLATFORM_AARCH64_QEMU_VIRT
+config PLATFORM_KPLAT_AARCH64
     bool "aarch64 qemu"
     depends on ARCH_AARCH64
 
-config PLATFORM_X86_64_QEMU_VIRT
+config PLATFORM_KPLAT_X86_64
     bool "x86_64 qemu"
     depends on ARCH_X86_64
 endchoice
@@ -59,18 +59,14 @@ config KFEAT_CHAR
 
 config KFEAT_DRIVER_CONSOLE_PL011
     bool
-    depends on KFEAT_CHAR && PLATFORM_AARCH64_QEMU_VIRT
-    default y if PLATFORM_AARCH64_QEMU_VIRT
+    depends on KFEAT_CHAR && PLATFORM_KPLAT_AARCH64
+    default y if PLATFORM_KPLAT_AARCH64
 "#,
     )
     .unwrap();
 
     let config_path = temp_dir.path().join(".config");
-    fs::write(
-        &config_path,
-        "ARCH_AARCH64=y\nPLATFORM_AARCH64_QEMU_VIRT=y\n",
-    )
-    .unwrap();
+    fs::write(&config_path, "ARCH_AARCH64=y\nPLATFORM_KPLAT_AARCH64=y\n").unwrap();
 
     env::set_current_dir(temp_dir.path()).unwrap();
     let result = gen_cargo_command(config_path, false, None, false);
@@ -79,7 +75,7 @@ config KFEAT_DRIVER_CONSOLE_PL011
 
     let cargo_config = fs::read_to_string(temp_dir.path().join(".cargo/.xconfig.toml")).unwrap();
     assert!(cargo_config.contains("kfeat/driver_console_pl011"));
-    assert!(cargo_config.contains("kfeat/platform_aarch64_qemu_virt"));
+    assert!(cargo_config.contains("kfeat/platform_kplat_aarch64"));
 }
 
 #[test]
@@ -104,13 +100,13 @@ endchoice
 
 choice
     prompt "Platform"
-    default PLATFORM_AARCH64_QEMU_VIRT
+    default PLATFORM_KPLAT_AARCH64
 
-config PLATFORM_AARCH64_QEMU_VIRT
+config PLATFORM_KPLAT_AARCH64
     bool "aarch64 qemu"
     depends on ARCH_AARCH64
 
-config PLATFORM_X86_64_QEMU_VIRT
+config PLATFORM_KPLAT_X86_64
     bool "x86_64 qemu"
     depends on ARCH_X86_64
 endchoice
@@ -132,7 +128,7 @@ config KFEAT_ROOT
     let config_path = temp_dir.path().join(".config");
     fs::write(
         &config_path,
-        "ARCH_AARCH64=y\nPLATFORM_AARCH64_QEMU_VIRT=y\nKFEAT_ROOT=y\n",
+        "ARCH_AARCH64=y\nPLATFORM_KPLAT_AARCH64=y\nKFEAT_ROOT=y\n",
     )
     .unwrap();
 

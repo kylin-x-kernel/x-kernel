@@ -69,7 +69,7 @@ Always prepare `.config` from a platform defconfig before build, run, or
 QEMU-based unit-test commands.
 
 ```bash
-cp platforms/aarch64-qemu-virt/defconfig .config
+cp platforms/kplat-aarch64/qemu_defconfig .config
 make defconfig
 ```
 

@@ -19,60 +19,49 @@ smp = [
     "kruntime/smp",
     "ktask?/smp",
     "kspin/smp",
-    "aarch64-qemu-virt?/smp",
-    "loongarch64-qemu-virt?/smp",
-    "riscv64-qemu-virt?/smp",
-    "x86_64-qemu-virt?/smp",
+    "kplat-aarch64?/smp",
+    "kplat-loongarch64?/smp",
+    "kplat-riscv64?/smp",
+    "kplat-x86_64?/smp",
 ]
 
 # Floating point/SIMD
 fp-simd = ["khal/fp-simd"]
 
 # Virtualization (VMM)
-vmm = ["khal/vmm", "aarch64-qemu-virt?/vmm", "x86_64-qemu-virt?/vmm", "riscv64-qemu-virt?/vmm"]
+vmm = [
+    "khal/vmm",
+    "kplat-aarch64?/vmm",
+    "kplat-x86_64?/vmm",
+    "kplat-riscv64?/vmm",
+]
 
 
 # Interrupts
 ipi = ["dep:kipi", "khal/ipi", "kruntime/ipi", "ktask?/ipi"]
 dma-trace = ["kdriver/dma-trace"]
 dev_log = ["devfs/dev-log"]
-dice = ["dep:kalloc", "dep:tee_kernel", "kalloc/dice", "tee_kernel/dice_huk_key", "devfs/dice"]
-kvm_guest_mem_share = [
-    "aarch64-qemu-virt?/kvm-guest-mem-share",
-    "aarch64-peripherals?/kvm-guest-mem-share",
+dice = [
+    "dep:kalloc",
+    "dep:tee_kernel",
+    "kalloc/dice",
+    "tee_kernel/dice_huk_key",
+    "devfs/dice",
 ]
-kvm_mmio_guard = [
-    "aarch64-qemu-virt?/kvm-mmio-guard",
-    "aarch64-peripherals?/kvm-mmio-guard",
+kvm_guest_mem_share = ["kplat-aarch64?/kvm-guest-mem-share"]
+kvm_mmio_guard = ["kplat-aarch64?/kvm-mmio-guard"]
+arm_timer_resume_fixup = [
+    "kruntime/arm-timer-resume-fixup",
+    "ktask?/arm-timer-resume-fixup",
 ]
-arm_timer_resume_fixup = ["kruntime/arm-timer-resume-fixup", "ktask?/arm-timer-resume-fixup"]
 rootfs_secondary_block = ["kruntime/rootfs-secondary-block"]
 pci_non_ecam = ["kdriver/pci-non-ecam"]
 
 # Platform wiring
-platform_aarch64_qemu_virt = [
-    "dep:aarch64-qemu-virt",
-    "fp-simd",
-    "smp",
-    "dev_log",
-]
-platform_x86_64_qemu_virt = [
-    "dep:x86_64-qemu-virt",
-    "fp-simd",
-    "smp",
-    "dev_log",
-]
-platform_riscv64_qemu_virt = [
-    "dep:riscv64-qemu-virt",
-    "fp-simd",
-    "smp",
-    "dev_log",
-]
-platform_loongarch64_qemu_virt = [
-    "dep:loongarch64-qemu-virt",
-    "fp-simd",
-    "dev_log",
-]
+platform_kplat_aarch64 = ["dep:kplat-aarch64", "fp-simd", "smp", "dev_log"]
+platform_kplat_x86_64 = ["dep:kplat-x86_64", "fp-simd", "smp", "dev_log"]
+platform_kplat_riscv64 = ["dep:kplat-riscv64", "fp-simd", "smp", "dev_log"]
+platform_kplat_loongarch64 = ["dep:kplat-loongarch64", "fp-simd", "dev_log"]
 
 # Memory
 alloc = ["dep:alloc-engine", "dep:kalloc"]
@@ -104,12 +93,7 @@ fs_times = ["kruntime/fs_times"]
 # Subsystem-only. The NIC / vsock transport driver is selected separately via
 # the `driver_*` features below.
 net = ["dep:knet", "kruntime/net"]
-vsock = [
-    "net",
-    "kruntime/vsock",
-    "knet/vsock",
-    "ksyscall/vsock",
-]
+vsock = ["net", "kruntime/vsock", "knet/vsock", "ksyscall/vsock"]
 
 # Display (subsystem only; pick a driver via `driver_*`).
 display = ["dep:fbdevice", "kruntime/display"]
@@ -159,10 +143,7 @@ memtrack = ["dep:kalloc", "kalloc/tracking", "devfs/memtrack"]
 snapshot = ["ktask/snapshot"]
 sysrq = ["dep:procfs", "procfs/sysrq"]
 watchdog = ["kruntime/watchdog", "ksync/watchdog"]
-watchdog_hardlockup = [
-    "kruntime/watchdog_hardlockup",
-    "aarch64-qemu-virt?/nmi",
-]
+watchdog_hardlockup = ["kruntime/watchdog_hardlockup", "kplat-aarch64?/nmi"]
 lock_stat = [
     "dep:procfs",
     "procfs/lock_stat",
@@ -173,13 +154,12 @@ lock_stat = [
 ]
 
 # TEE
-tee = [
-    "dep:tee_kernel",
-    "dep:tee_task_iface",
-    "kexec/tee",
-    "ksyscall/tee",
+tee = ["dep:tee_kernel", "dep:tee_task_iface", "kexec/tee", "ksyscall/tee"]
+tee_ta_sign = [
+    "kexec/tee_ta_sign",
+    "ksyscall/tee_ta_sign",
+    "tee_task_iface/tee_ta_sign",
 ]
-tee_ta_sign = ["kexec/tee_ta_sign", "ksyscall/tee_ta_sign", "tee_task_iface/tee_ta_sign"]
 csv_huk_key = ["tee_kernel/csv_huk_key"]
 virtcca_huk_key = ["tee_kernel/virtcca_huk_key"]
 ta_verify_with_root = ["tee_ta_sign", "tee_task_iface/ta_verify_with_root"]
@@ -205,20 +185,19 @@ backtrace.workspace = true
 fbdevice = { workspace = true, optional = true }
 kdriver.workspace = true
 kprocess.workspace = true
-aarch64-qemu-virt = { workspace = true, optional = true, features = [
+kplat-aarch64 = { workspace = true, optional = true, features = [
     "fp-simd",
     "rtc",
 ] }
-aarch64-peripherals = { workspace = true, optional = true }
-x86_64-qemu-virt = { workspace = true, optional = true, features = [
+kplat-x86_64 = { workspace = true, optional = true, features = [
     "fp-simd",
     "rtc",
 ] }
-riscv64-qemu-virt = { workspace = true, optional = true, features = [
+kplat-riscv64 = { workspace = true, optional = true, features = [
     "fp-simd",
     "rtc",
 ] }
-loongarch64-qemu-virt = { workspace = true, optional = true, features = [
+kplat-loongarch64 = { workspace = true, optional = true, features = [
     "fp-simd",
     "rtc",
 ] }

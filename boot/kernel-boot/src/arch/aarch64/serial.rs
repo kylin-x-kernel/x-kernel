@@ -212,6 +212,98 @@ pub struct Uart {
     base_address: usize,
 }
 
+/// Read the ARM generic physical counter.
+///
+/// It always runs, is readable at EL1/EL2 without setup, and touches only a
+/// register, so it is safe to call from early `.idmap.text` to measure time
+/// independently of the core clock.
+#[inline]
+#[unsafe(link_section = ".idmap.text")]
+fn phys_count() -> u64 {
+    let v;
+    // SAFETY: `mrs` of a read-only counter register; no memory or control
+    // side effects.
+    unsafe {
+        core::arch::asm!(
+            "mrs {0}, CNTPCT_EL0",
+            out(reg) v,
+            options(nostack, preserves_flags)
+        );
+    }
+    v
+}
+
+/// Read the frequency (`CNTFRQ_EL0`) of the ARM generic counter.
+#[inline]
+#[unsafe(link_section = ".idmap.text")]
+fn phys_freq() -> u64 {
+    let v;
+    // SAFETY: `mrs` of a read-only register; no side effects.
+    unsafe {
+        core::arch::asm!(
+            "mrs {0}, CNTFRQ_EL0",
+            out(reg) v,
+            options(nostack, preserves_flags)
+        );
+    }
+    v
+}
+
+/// Pace early-console output to roughly one byte time.
+///
+/// The early console is deliberately UART-family-agnostic: it cannot poll the
+/// LSR/FR TX-ready bit, so without pacing a fast core overruns a real UART's TX
+/// FIFO and drops characters (heavy garble on a 1.5 Mbaud UART like RK3588's).
+/// The wait is derived from [`kbuild_config::BOOT_CONSOLE_BAUDRATE`] and measured
+/// with the always-running generic counter, so it is correct regardless of the
+/// core clock. A baud rate of 0 disables pacing: emulated UARTs and PL011s with
+/// deep FIFOs are not overrun and need no delay.
+#[inline]
+#[unsafe(link_section = ".idmap.text")]
+fn pace_one_byte() {
+    let baud = kbuild_config::BOOT_CONSOLE_BAUDRATE;
+    if baud == 0 {
+        return;
+    }
+    let baud = baud as u64;
+    // One 8N1 byte is 10 bit times. Wait *at least* that long (ceiling) so the
+    // inject rate never exceeds the line rate and the FIFO cannot overflow.
+    let wait = phys_freq().saturating_mul(10).div_ceil(baud);
+    let start = phys_count();
+    while phys_count().wrapping_sub(start) < wait {
+        core::hint::spin_loop();
+    }
+}
+
+#[inline]
+#[unsafe(link_section = ".idmap.text")]
+fn write_data_reg(base_address: usize, c: u8) {
+    match kbuild_config::BOOT_CONSOLE_REG_IO_WIDTH {
+        4 => {
+            let ptr = base_address as *mut u32;
+            // SAFETY: `base_address` is the configured UART data register and
+            // `BOOT_CONSOLE_REG_IO_WIDTH=4` states that firmware/board data
+            // requires naturally-aligned 32-bit MMIO writes.
+            unsafe { ptr.write_volatile(c as u32) };
+        }
+        2 => {
+            let ptr = base_address as *mut u16;
+            // SAFETY: `base_address` is the configured UART data register and
+            // `BOOT_CONSOLE_REG_IO_WIDTH=2` states that firmware/board data
+            // requires naturally-aligned 16-bit MMIO writes.
+            unsafe { ptr.write_volatile(c as u16) };
+        }
+        _ => {
+            let ptr = base_address as *mut u8;
+            // SAFETY: `base_address` is the configured UART data register.
+            // The default early-console access mode is byte MMIO, matching the
+            // historical behavior and Linux 8250's default when `reg-io-width`
+            // is absent.
+            unsafe { ptr.write_volatile(c) };
+        }
+    }
+}
+
 impl Uart {
     #[unsafe(link_section = ".idmap.text")]
     pub const fn new(base_address: usize) -> Self {
@@ -220,23 +312,15 @@ impl Uart {
 
     #[unsafe(link_section = ".idmap.text")]
     pub fn put(&self, c: u8) -> Option<u8> {
-        let ptr = self.base_address as *mut u8;
-        // SAFETY: `base_address` is the configured UART MMIO data register and
-        // early boot uses volatile stores for side-effecting device access.
-        unsafe {
-            ptr.write_volatile(c);
-        }
+        write_data_reg(self.base_address, c);
+        pace_one_byte();
         Some(c)
     }
 
     #[unsafe(link_section = ".idmap.text")]
     pub fn put_idmap(&self, c: u8) -> Option<u8> {
-        let ptr = self.base_address as *mut u8;
-        // SAFETY: `base_address` is the configured UART MMIO data register and
-        // early boot uses volatile stores for side-effecting device access.
-        unsafe {
-            ptr.write_volatile(c);
-        }
+        write_data_reg(self.base_address, c);
+        pace_one_byte();
         Some(c)
     }
 }

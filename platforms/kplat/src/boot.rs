@@ -5,6 +5,7 @@
 //! Platform boot-stage interface definitions.
 
 pub use boot_info::BootInfo;
+#[cfg(feature = "smp")]
 use kcpu_id_map::LogicalCpuId;
 use kplat_macros::device_interface;
 

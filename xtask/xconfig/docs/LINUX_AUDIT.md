@@ -43,9 +43,9 @@ configuration, not from the raw parsed input.
 Symptoms:
 
 - minimal cross-arch `defconfig` inputs such as
-  `ARCH_X86_64=y` + `PLATFORM_X86_64_QEMU_VIRT=y`
+  `ARCH_X86_64=y` + `PLATFORM_KPLAT_X86_64=y`
   could still expand with `ARCH="aarch64"` and
-  `PLATFORM="aarch64-qemu-virt"`.
+  `PLATFORM="kplat-aarch64"`.
 
 Cause:
 

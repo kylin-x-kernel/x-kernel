@@ -167,17 +167,17 @@ def ciSequentialStages() {
 
 def ciBuildStages() {
     def stages = [[
-        name: 'Build Check: aarch64-crosvm-virt',
+        name: 'Build Check: aarch64-qemu-crosvm',
         failure: 'clippy 或 build 失败',
         type: 'build',
-        platform: 'aarch64-crosvm-virt',
-        defconfig: 'platforms/aarch64-qemu-virt/crosvm_defconfig',
+        platform: 'aarch64-qemu-crosvm',
+        defconfig: 'platforms/kplat-aarch64/qemu_crosvm_defconfig',
     ], [
-        name: 'Build Check: aarch64-qemu-virt-virtcca',
+        name: 'Build Check: aarch64-qemu-virtcca',
         failure: 'clippy 或 build 失败',
         type: 'build',
-        platform: 'aarch64-qemu-virt-virtcca',
-        defconfig: 'platforms/aarch64-qemu-virt/virtcca_defconfig',
+        platform: 'aarch64-qemu-virtcca',
+        defconfig: 'platforms/kplat-aarch64/qemu_virtcca_defconfig',
     ]]
 
     if (docCheckEnabled()) {
@@ -190,17 +190,21 @@ def ciBuildStages() {
     }
 
     runtimeTestArchitectures().each { arch ->
+        def machine = defaultMachine()
+        def stem = stageStem(arch, machine)
         stages << [
-            name: "Build Artifact: ${arch}-qemu-virt",
+            name: "Build Artifact: ${stem}",
             failure: 'clippy 或 normal build 失败',
             type: 'build_artifact',
             arch: arch,
+            machine: machine,
         ]
         stages << [
-            name: "Build Artifact: ${arch}-qemu-virt unittest",
+            name: "Build Artifact: ${stem} unittest",
             failure: 'unittest build 失败',
             type: 'unittest_build',
             arch: arch,
+            machine: machine,
         ]
     }
 
@@ -211,26 +215,33 @@ def ciRunStages() {
     def stages = []
 
     runtimeTestArchitectures().each { arch ->
+        def machine = defaultMachine()
+        def stem = stageStem(arch, machine)
         stages << [
-            name: "Runtime Test: ${arch}-qemu-virt",
+            name: "Runtime Test: ${stem}",
             failure: 'runtime 测试失败',
             type: 'runtime_run',
             arch: arch,
+            machine: machine,
         ]
         stages << [
-            name: "Unit Tests: ${arch}-qemu-virt",
+            name: "Unit Tests: ${stem}",
             failure: '单元测试或覆盖率生成失败',
             type: 'unittest_run',
             arch: arch,
+            machine: machine,
         ]
     }
 
     teeTestArchitectures().each { arch ->
+        def machine = defaultMachine()
+        def stem = stageStem(arch, machine)
         stages << [
-            name: "TEE Tests: ${arch}",
+            name: "TEE Tests: ${stem}",
             failure: 'TEE 测试失败',
             type: 'tee_run',
             arch: arch,
+            machine: machine,
         ]
     }
 
@@ -396,19 +407,19 @@ def runCiWorkload(Map spec) {
             runGendocStage(spec.arch)
             break
         case 'build_artifact':
-            runBuildArtifact(spec.arch)
+            runBuildArtifact(spec.arch, spec.machine, spec.name)
             break
         case 'unittest_build':
-            runUnittestBuildArtifact(spec.arch)
+            runUnittestBuildArtifact(spec.arch, spec.machine, spec.name)
             break
         case 'runtime_run':
-            runRuntimeTests(spec.arch)
+            runRuntimeTests(spec.arch, spec.machine, spec.name)
             break
         case 'unittest_run':
-            runUnitTestStage(spec.arch)
+            runUnitTestStage(spec.arch, spec.name)
             break
         case 'tee_run':
-            teeResults[spec.arch] = runTeeStorageTest(spec.arch)
+            teeResults[spec.arch] = runTeeStorageTest(spec.arch, spec.name)
             break
         default:
             error("Unsupported CI stage type: ${spec.type}")
@@ -476,58 +487,54 @@ stdbuf -oL -eL make build
     }
 }
 
-def runBuildArtifact(String arch) {
-    def platform = "${arch}-qemu-virt"
-    def stageName = "Build Artifact: ${platform}"
+def runBuildArtifact(String arch, String machine, String stageName) {
     initStageLog(stageName)
     def runtimeTargetDir = targetDirForArch(arch)
 
     withCleanSourceWorkspace("build-artifact-${arch}") {
         withEnv(["TARGET_DIR=${runtimeTargetDir}"]) {
-            sh label: "Clippy and build ${platform}", script: """#!/bin/bash
+            sh label: "Clippy and build ${stageName}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
-cp platforms/${platform}/defconfig .config
+cp ${defconfigFor(arch, machine)} .config
 make defconfig
 make clippy
 stdbuf -oL -eL make build
 """
-            publishKernelArtifact(artifactNameForNormal(arch), platform)
+            publishKernelArtifact(artifactNameForNormal(arch), stageStem(arch, machine))
         }
     }
 }
 
-def runUnittestBuildArtifact(String arch) {
-    def platform = "${arch}-qemu-virt"
-    def stageName = "Build Artifact: ${platform} unittest"
+def runUnittestBuildArtifact(String arch, String machine, String stageName) {
     initStageLog(stageName)
     def unittestTargetDir = targetDirForUnittest(arch)
 
     withCleanSourceWorkspace("build-artifact-${arch}-unittest") {
         withEnv(["TARGET_DIR=${unittestTargetDir}"]) {
-            sh label: "Build unittest artifact ${platform}", script: """#!/bin/bash
+            sh label: "Build unittest artifact ${stageName}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
-cp platforms/${platform}/defconfig .config
+cp ${defconfigFor(arch, machine)} .config
 scripts/ci/prepare_unittest_config.sh .config
 make defconfig
 stdbuf -oL -eL make UNITTEST=y VSOCK=n NET=n build
 """
-            publishKernelArtifact(artifactNameForUnittest(arch), platform)
+            publishKernelArtifact(artifactNameForUnittest(arch), stageStem(arch, machine))
         }
     }
 }
 
-def runRuntimeTests(String arch) {
-    def platform = "${arch}-qemu-virt"
-    def stageName = "Runtime Test: ${platform}"
+def runRuntimeTests(String arch, String machine, String stageName) {
     def stageLog = stageLogFile(stageName)
     initStageLog(stageName)
     def runtimeTargetDir = targetDirForArch(arch)
+    def stem = stageStem(arch, machine)
 
     withCleanSourceWorkspace("runtime-${arch}") {
         withEnv(["TARGET_DIR=${runtimeTargetDir}", "STAGE_LOG=${stageLog}"]) {
             restoreKernelArtifact(artifactNameForNormal(arch))
+            writeHarnessPlatformConfig(stem)
             dir('test-harness') {
                 gitCheckoutPublic(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH)
 
@@ -536,7 +543,7 @@ def runRuntimeTests(String arch) {
                          "ROOTFS_CACHE_DIR=${env.ROOTFS_CACHE_DIR}",
                          "GUEST_CASES_TARGET_DIR=/xkernel-target/guest-cases-${arch}",
                          "JOBS=${env.HARNESS_JOBS}"]) {
-                    sh label: "Run starry-test-harness ${arch}", script: """#!/bin/bash
+                    sh label: "Run starry-test-harness ${stageName}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
 stdbuf -oL -eL make ci-test run
@@ -547,9 +554,18 @@ stdbuf -oL -eL make ci-test run
     }
 }
 
-def runUnitTestStage(String arch) {
-    def platform = "${arch}-qemu-virt"
-    def stageName = "Unit Tests: ${platform}"
+def writeHarnessPlatformConfig(String stem) {
+    sh label: "Write harness platform ${stem}", script: """#!/bin/bash
+set -euo pipefail
+if grep -q '^PLATFORM=' .config; then
+    sed -i 's|^PLATFORM=.*|PLATFORM="${stem}"|' .config
+else
+    printf '\\nPLATFORM="${stem}"\\n' >> .config
+fi
+"""
+}
+
+def runUnitTestStage(String arch, String stageName) {
     def stageLog = stageLogFile(stageName)
     initStageLog(stageName)
     def unittestTargetDir = targetDirForUnittest(arch)
@@ -570,7 +586,7 @@ def runGendocStage(String arch) {
     def docTargetDir = targetDirForDoc(arch)
     def hostTarget = sh(script: "rustc -vV | sed -n 's|host: ||p'", returnStdout: true).trim()
     def targetTriple = targetTripleFor(arch)
-    def platform = "${arch}-qemu-virt"
+    def platform = "kplat-${arch}"
     def ldScript = "${docTargetDir}/${targetTriple}/release/linker_${platform}.lds"
     def kbuildConfigDir = "${docTargetDir}/kbuild/${platform}"
 
@@ -898,11 +914,34 @@ def notifyGiteePullRequest(String message) {
 }
 
 def defconfigFor(String arch) {
-    return "platforms/${arch}-qemu-virt/defconfig"
+    return "platforms/kplat-${arch}/qemu_defconfig"
+}
+
+// 默认机器：runtime / unittest / TEE 阶段当前都构建并运行在 qemu 上。
+def defaultMachine() {
+    return 'qemu'
+}
+
+// 阶段名与产物名共用的 <arch>-<machine> 词干（即 xkernel_<arch>-<machine>.elf）。
+def stageStem(String arch, String machine) {
+    return "${arch}-${machine}"
+}
+
+// 机器 -> defconfig 文件名：qemu -> qemu_defconfig，rk3588 -> rk3588_defconfig。
+// QEMU feature 变体使用 qemu_<feature>_defconfig，并由显式 stage spec 传入。
+def defconfigFileForMachine(String machine) {
+    return "${machine}_defconfig"
+}
+
+// arch + machine -> defconfig 路径（与已有单参 defconfigFor(arch) 形成重载，互不影响）。
+def defconfigFor(String arch, String machine) {
+    return "platforms/kplat-${arch}/${defconfigFileForMachine(machine)}"
 }
 
 def defconfigForPlatform(String platform) {
-    return "platforms/${platform}/defconfig"
+    if (platform == 'aarch64-qemu-crosvm') return 'platforms/kplat-aarch64/qemu_crosvm_defconfig'
+    if (platform == 'aarch64-qemu-virtcca') return 'platforms/kplat-aarch64/qemu_virtcca_defconfig'
+    return "platforms/${platform}/qemu_defconfig"
 }
 
 def archForPlatform(String platform) {
@@ -936,7 +975,7 @@ def artifactNameForUnittest(String arch) {
     return "${arch}-unittest"
 }
 
-def publishKernelArtifact(String artifactName, String platform) {
+def publishKernelArtifact(String artifactName, String stem) {
     def artifactDir = "${ciArtifactRoot()}/${artifactName}"
     sh label: "Publish artifact ${artifactName}", script: """#!/bin/bash
 set -euo pipefail
@@ -945,7 +984,7 @@ rm -rf "\${artifact_dir}"
 mkdir -p "\${artifact_dir}"
 cp .config .config.prepared auto.conf autoconf.h "\${artifact_dir}/"
 shopt -s nullglob
-for image in xkernel_${platform}.*; do
+for image in xkernel_${stem}.*; do
     cp "\${image}" "\${artifact_dir}/"
 done
 """
@@ -1225,8 +1264,7 @@ def targetTripleFor(String archOrPlatform) {
     error("Unsupported arch/platform: ${archOrPlatform}")
 }
 
-def runTeeStorageTest(String arch) {
-    def stageName = "TEE Tests: ${arch}"
+def runTeeStorageTest(String arch, String stageName) {
     initStageLog(stageName)
     def result = [arch: arch, passed: 0, failed: 0, status: 'unknown', errorSnippet: '', missingApps: []]
     def teeTargetDir = targetDirForArch(arch)
@@ -1241,7 +1279,7 @@ def runTeeStorageTest(String arch) {
                  "TEE_TEST_BINS=${testBins.join(' ')}",
                  "SKIP_KERNEL_BUILD=1"]) {
             restoreKernelArtifact(artifactNameForNormal(arch))
-            sh label: "Run TEE tests ${arch}", script: """#!/bin/bash
+            sh label: "Run TEE tests ${stageName}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
 scripts/ci/run_tee_storage_test.sh '${arch}'
@@ -1278,7 +1316,7 @@ scripts/ci/run_tee_storage_test.sh '${arch}'
         }
 
         if (result.status != 'passed') {
-            error("TEE Tests ${arch}: ${result.status} (passed=${result.passed}, failed=${result.failed})")
+            error("${stageName}: ${result.status} (passed=${result.passed}, failed=${result.failed})")
         }
     }
 

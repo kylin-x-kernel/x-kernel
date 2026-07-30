@@ -27,9 +27,9 @@ if ARCH_AARCH64
 
 choice
     prompt "AArch64 Platform"
-    default PLATFORM_AARCH64_QEMU_VIRT
+    default PLATFORM_KPLAT_AARCH64
 
-config PLATFORM_AARCH64_QEMU_VIRT
+config PLATFORM_KPLAT_AARCH64
     bool "QEMU ARM64 Virtual Machine"
 
 endchoice
@@ -48,9 +48,9 @@ if ARCH_X86_64
 
 choice
     prompt "x86_64 Platform"
-    default PLATFORM_X86_64_QEMU_VIRT
+    default PLATFORM_KPLAT_X86_64
 
-config PLATFORM_X86_64_QEMU_VIRT
+config PLATFORM_KPLAT_X86_64
     bool "QEMU x86_64 Virtual Machine"
 
 endchoice
@@ -61,5 +61,5 @@ endmenu
 
 config PLATFORM
     string
-    default "aarch64-qemu-virt" if PLATFORM_AARCH64_QEMU_VIRT
-    default "x86_64-qemu-virt" if PLATFORM_X86_64_QEMU_VIRT
+    default "kplat-aarch64" if PLATFORM_KPLAT_AARCH64
+    default "kplat-x86_64" if PLATFORM_KPLAT_X86_64

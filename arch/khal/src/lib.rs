@@ -10,10 +10,10 @@
 //!
 //! Currently supported platforms (specify by cargo features):
 //!
-//! - `x86-pc`: Standard PC with x86_64 ISA.
-//! - `riscv64-qemu-virt`: QEMU virt machine with RISC-V ISA.
-//! - `aarch64-qemu-virt`: QEMU virt machine with AArch64 ISA.
-//! - `aarch64-raspi`: Raspberry Pi with AArch64 ISA.
+//! - `kplat-x86_64`: QEMU q35 machine with x86_64 ISA.
+//! - `kplat-riscv64`: QEMU virt machine with RISC-V ISA.
+//! - `kplat-aarch64`: QEMU virt and RK3588 machines with AArch64 ISA.
+//! - `kplat-loongarch64`: QEMU virt machine with LoongArch64 ISA.
 //! - `dummy`: If none of the above platform is selected, the dummy platform
 //!   will be used. In this platform, most of the operations are no-op or
 //!   `unimplemented!()`. This platform is mainly used for [cargo test].
