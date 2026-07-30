@@ -64,4 +64,12 @@ pub trait BaseScheduler {
 
     /// set priority for a task
     fn set_priority(&mut self, task: &Self::SchedItem, prio: isize) -> bool;
+
+    /// Accounts for a running task that is leaving the CPU without being
+    /// requeued (typically sleep / block).
+    ///
+    /// Fair schedulers such as EEVDF use this to snapshot virtual lag so the
+    /// later [`Self::put_prev_task`] wake path can place the task correctly.
+    /// The default implementation is a no-op.
+    fn account_sleep(&mut self, _task: &Self::SchedItem) {}
 }

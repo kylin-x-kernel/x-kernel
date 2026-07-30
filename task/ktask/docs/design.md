@@ -66,7 +66,7 @@ task_tick() → set_preempt_pending   blocked_resched / unblock_task / resched
 |------|------|
 | `TaskInner` / `CurrentTask` | 任务元数据、状态机、上下文、抢占计数 |
 | `RunQueue` | 每 CPU 调度容器；维护算法实例与切换过程 |
-| `Scheduler` (`ksched`) | `add_task/pick_next/task_tick/put_prev` 算法策略 |
+| `Scheduler` (`ksched`) | `add_task/pick_next/task_tick/put_prev/account_sleep` 算法策略（EEVDF 阻塞前 `account_sleep` 记 vlag；放置用的系统虚拟时间 V 含已离队的当前运行任务 curr） |
 | `future::block_on` | 将 `Future` pending 映射为任务阻塞/唤醒 |
 | `WaitQueue` | 事件型阻塞等待 API |
 | `timers` | tick 回调与定时事件检查 |

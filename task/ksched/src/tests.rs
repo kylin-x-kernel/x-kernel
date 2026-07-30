@@ -315,6 +315,143 @@ fn eevdf_deadline_preemption_triggers() {
     assert!(sched.task_tick(&running));
 }
 
+#[def_test]
+fn eevdf_tick_preempts_eligible_non_head() {
+    let mut sched = EevdfScheduler::<usize, SLICE>::new();
+    let t_run = Arc::new(EevdfEntity::new(1usize));
+    sched.add_task(t_run.clone());
+    let running = sched.pick_next_task().unwrap();
+    // Late deadline so an eligible ready task can beat us.
+    running.set_deadline_for_test(1_000_000);
+
+    // Global min-deadline task is ineligible (vruntime ≫ V).
+    let t_head = Arc::new(EevdfEntity::new(2usize));
+    t_head.set_vruntime_for_test(500_000);
+    t_head.set_deadline_for_test(0);
+    sched.inject_ready_for_test(t_head);
+
+    // Eligible task with tighter deadline than current.
+    let t_elig = Arc::new(EevdfEntity::new(3usize));
+    t_elig.set_vruntime_for_test(0);
+    t_elig.set_deadline_for_test(100);
+    sched.inject_ready_for_test(t_elig);
+
+    assert!(sched.task_tick(&running));
+}
+
+#[def_test]
+fn eevdf_wake_places_positive_lag_task_first() {
+    let mut sched = EevdfScheduler::<usize, SLICE>::new();
+    let t1 = Arc::new(EevdfEntity::new(1usize));
+    let t2 = Arc::new(EevdfEntity::new(2usize));
+    sched.add_task(t1.clone());
+    sched.add_task(t2.clone());
+
+    // Run t1 for a full slice so it pulls ahead of t2.
+    let a = sched.pick_next_task().unwrap();
+    assert_eq!(*a.inner(), 1);
+    for _ in 0..SLICE {
+        let _ = sched.task_tick(&a);
+    }
+    sched.put_prev_task(a, false);
+
+    // t2 is behind → positive lag on sleep.
+    let b = sched.pick_next_task().unwrap();
+    assert_eq!(*b.inner(), 2);
+    sched.account_sleep(&b);
+    assert!(b.needs_place_for_test());
+    assert!(b.vlag_for_test() > 0);
+
+    // Let t1 run further while t2 sleeps.
+    let a2 = sched.pick_next_task().unwrap();
+    assert_eq!(*a2.inner(), 1);
+    for _ in 0..SLICE {
+        let _ = sched.task_tick(&a2);
+    }
+    sched.put_prev_task(a2, false);
+
+    // Wake t2 with PLACE_LAG; it should be selected next.
+    sched.put_prev_task(b, false);
+    assert!(!t2.needs_place_for_test());
+    let next = sched.pick_next_task().unwrap();
+    assert_eq!(*next.inner(), 2);
+}
+
+#[def_test]
+fn eevdf_new_task_placement_must_include_current_in_virtual_time() {
+    let mut sched = EevdfScheduler::<usize, SLICE>::new();
+
+    // Running task becomes curr, then advances to 0x1400.
+    let t_run = Arc::new(EevdfEntity::new(1usize));
+    sched.add_task(t_run.clone());
+    let curr = sched.pick_next_task().unwrap();
+    assert!(Arc::ptr_eq(&curr, &t_run));
+    curr.set_vruntime_for_test(0x1400);
+
+    // Ready peer at vruntime 0 (equal weight).
+    let t_ready = Arc::new(EevdfEntity::new(2usize));
+    t_ready.set_vruntime_for_test(0);
+    t_ready.set_deadline_for_test(1);
+    sched.inject_ready_for_test(t_ready);
+
+    // V = (0 + 0x1400) / 2 = 0xa00 when curr is included.
+    let t_new = Arc::new(EevdfEntity::new(3usize));
+    sched.add_task(t_new.clone());
+    assert_eq!(t_new.vruntime_for_test(), 0xa00);
+}
+
+#[def_test]
+fn eevdf_zero_lag_wake_placement_must_include_current() {
+    let mut sched = EevdfScheduler::<usize, SLICE>::new();
+
+    let t_run = Arc::new(EevdfEntity::new(1usize));
+    sched.add_task(t_run.clone());
+    let curr = sched.pick_next_task().unwrap();
+    curr.set_vruntime_for_test(0x1400);
+
+    let t_ready = Arc::new(EevdfEntity::new(2usize));
+    t_ready.set_vruntime_for_test(0);
+    t_ready.set_deadline_for_test(1);
+    sched.inject_ready_for_test(t_ready);
+
+    let t_wake = Arc::new(EevdfEntity::new(3usize));
+    t_wake.set_vlag_for_test(0);
+    t_wake.set_needs_place_for_test(true);
+    sched.put_prev_task(t_wake.clone(), false);
+    assert!(!t_wake.needs_place_for_test());
+    assert_eq!(t_wake.vruntime_for_test(), 0xa00);
+}
+
+#[def_test]
+fn eevdf_zero_lag_wake_with_only_curr_places_at_curr_vruntime() {
+    let mut sched = EevdfScheduler::<usize, SLICE>::new();
+
+    let t_run = Arc::new(EevdfEntity::new(1usize));
+    sched.add_task(t_run.clone());
+    let curr = sched.pick_next_task().unwrap();
+    curr.set_vruntime_for_test(0x1400);
+
+    let t_wake = Arc::new(EevdfEntity::new(2usize));
+    t_wake.set_vlag_for_test(0);
+    t_wake.set_needs_place_for_test(true);
+    sched.put_prev_task(t_wake.clone(), false);
+    assert_eq!(t_wake.vruntime_for_test(), 0x1400);
+}
+
+#[def_test]
+fn eevdf_shorter_request_gets_earlier_deadline() {
+    let mut sched = EevdfScheduler::<usize, SLICE>::new();
+    let t_long = Arc::new(EevdfEntity::new(1usize));
+    let t_short = Arc::new(EevdfEntity::new(2usize));
+    assert!(t_short.set_request_ticks(1));
+    sched.add_task(t_long.clone());
+    sched.add_task(t_short.clone());
+
+    let next = sched.pick_next_task().unwrap();
+    assert_eq!(*next.inner(), 2);
+    assert!(t_short.deadline() < t_long.deadline());
+}
+
 // ============================================================================
 // EEVDF stats tests
 // ============================================================================

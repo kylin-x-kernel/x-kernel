@@ -767,6 +767,10 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         #[cfg(feature = "preempt")]
         assert!(curr.can_preempt(2));
 
+        // Snapshot fair-scheduler lag while still Running / current, before any
+        // concurrent wake can requeue us. EEVDF uses this in put_prev_task.
+        self.inner.scheduler.lock().account_sleep(curr);
+
         // Mark the task as blocked, this has to be done before adding it to the wait queue
         // while holding the lock of the wait queue.
         curr.set_state(TaskState::Blocked);
