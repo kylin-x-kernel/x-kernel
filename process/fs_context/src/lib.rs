@@ -7,7 +7,7 @@
 //! This crate owns the Rust counterpart of Linux `struct fs_struct`: root,
 //! current working directory, file creation mask, and exec transition state.
 
-#![cfg_attr(all(not(test), not(doc)), no_std)]
+#![cfg_attr(any(not(test), doc), no_std)]
 
 extern crate alloc;
 

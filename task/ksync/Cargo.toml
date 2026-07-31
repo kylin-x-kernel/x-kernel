@@ -9,6 +9,9 @@ repository.workspace = true
 documentation.workspace = true
 description = "x-kernel synchronization primitives"
 
+[package.metadata.cargo-shear]
+ignored = ["linkme"]
+
 [features]
 default = []
 watchdog = ["dep:khal"]

@@ -2,10 +2,7 @@
 resolver = "2"
 members = [
     "xconfig",
-    "convert_cov",
-    "crate_rootfs",
-    "dwarf_embed",
-    "gendoc",
+    "xkmake",
     "uapp",
 ]
 
@@ -17,5 +14,5 @@ authors = ["KylinSoft Co., Ltd. <https://www.kylinos.cn/>"]
 homepage = "https://gitee.com/openkylin/x-kernel"
 repository = "https://gitee.com/openkylin/x-kernel"
 
-[workspace.dependencies]
-rsext4 = { path = "../fs/filesystems/rsext4", default-features = false }
+[profile.dev.package.sha2]
+opt-level = 3

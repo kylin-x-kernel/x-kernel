@@ -16,6 +16,12 @@ pub struct ConfigChanges {
     pub removed_symbols: Vec<String>, // Symbols removed from Kconfig
 }
 
+impl Default for ConfigChanges {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConfigChanges {
     pub fn new() -> Self {
         Self {

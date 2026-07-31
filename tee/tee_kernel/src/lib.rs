@@ -3,6 +3,7 @@
 // See LICENSES for license details.
 
 #![no_std]
+#![cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #![allow(missing_docs)]
 
 #[macro_use]

@@ -23,16 +23,14 @@ kiface.workspace = true
 klogger.workspace = true
 kruntime.workspace = true
 ktask.workspace = true
-cfg-if.workspace = true
 kprocess.workspace = true
 kuaccess.workspace = true
 ksyscall.workspace = true
 kbuild_config.workspace = true
+kernel-image-metadata = { workspace = true, features = ["kernel"] }
 kcpu_id_map.workspace = true
 linux-raw-sys.workspace = true
 posix-process.workspace = true
-indoc = "2"
-backtrace.workspace = true
 unittest = { workspace = true, optional = true }
 unittest_support = { workspace = true, optional = true }
 

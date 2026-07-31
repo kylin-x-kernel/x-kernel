@@ -21,7 +21,7 @@ use crate::{BufRead, IoBuf, Read, Result};
 /// This struct is generally created by calling [`chain`] on a reader.
 /// Please see the documentation of [`chain`] for more details.
 ///
-/// See [`std::io::Chain`] for more details.
+/// See [`std::io::Chain`](https://doc.rust-lang.org/std/io/struct.Chain.html) for more details.
 ///
 /// [`chain`]: Read::chain
 #[derive(Debug)]

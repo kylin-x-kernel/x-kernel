@@ -1,0 +1,20 @@
+change_in_place: true
+excludes: []
+
+licenses:
+  - files: any
+    ident: Apache-2.0
+    authors:
+      - name: KylinSoft Co., Ltd.
+    template: |
+      SPDX-License-Identifier: [ident]
+      Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+      See LICENSES for license details.
+    unwrap_text: false
+
+comments:
+  - extension: rs
+    commenter:
+      type: line
+      comment_char: "//"
+      trailing_lines: 1

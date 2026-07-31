@@ -21,7 +21,8 @@ type Buffer = heapless::Vec<u8, DEFAULT_BUF_SIZE, u16>;
 
 /// Wraps a writer and buffers its output.
 ///
-/// See [std::io::BufWriter] for more details.
+/// See [`std::io::BufWriter`](https://doc.rust-lang.org/std/io/struct.BufWriter.html)
+/// for more details.
 pub struct BufWriter<W: ?Sized + Write> {
     // The buffer.
     buf: Buffer,

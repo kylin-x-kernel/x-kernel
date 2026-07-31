@@ -23,7 +23,8 @@ use crate::{BufRead, DEFAULT_BUF_SIZE, IoBuf, Read, Result, Seek, SeekFrom};
 
 /// The `BufReader<R>` struct adds buffering to any reader.
 ///
-/// See [`std::io::BufReader`] for more details.
+/// See [`std::io::BufReader`](https://doc.rust-lang.org/std/io/struct.BufReader.html)
+/// for more details.
 pub struct BufReader<R: ?Sized> {
     buf: Buffer,
     inner: R,

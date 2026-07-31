@@ -5,4 +5,3 @@ edition = "2024"
 
 [dependencies]
 tock-registers = "0.10.1"
-log = "0.4"

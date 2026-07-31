@@ -49,7 +49,3 @@ karch = { workspace = true }
 memaddr = { workspace = true }
 of = { workspace = true }
 page_table = { workspace = true }
-
-[build-dependencies]
-kbuild_config.workspace = true
-kaddr_layout.workspace = true

@@ -52,7 +52,7 @@ pub fn default_stream_len<T: Seek + ?Sized>(this: &mut T) -> Result<u64> {
 /// The `Seek` trait provides a cursor which can be moved within a stream of
 /// bytes.
 ///
-/// See [`std::io::Seek`] for more details.
+/// See [`std::io::Seek`](https://doc.rust-lang.org/std/io/trait.Seek.html) for more details.
 pub trait Seek {
     /// Seek to an offset, in bytes, in a stream.
     fn seek(&mut self, pos: SeekFrom) -> Result<u64>;

@@ -65,7 +65,6 @@ kaddr_layout = { workspace = true }
 klogger.workspace = true
 memspace = { workspace = true }
 knet = { workspace = true, optional = true }
-kplat = { workspace = true }
 ktask = { workspace = true }
 rsext4_vfs = { workspace = true, optional = true }
 timer_driver = { workspace = true }
@@ -73,7 +72,6 @@ watchdog = { workspace = true, optional = true }
 chrono.workspace = true
 kiface.workspace = true
 heapless = "0.9"
-percpu.workspace = true
 kbuild_config = { workspace = true }
 karch = { workspace = true }
 kernel_boot = { workspace = true }

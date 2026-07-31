@@ -9,6 +9,10 @@ repository.workspace = true
 documentation.workspace = true
 description = "Hardware abstraction layer, provides unified APIs for platform-specific operations"
 
+[package.metadata.cargo-shear]
+ignored = ["linkme"]
+ignored-paths = ["src/dummy.rs"]
+
 [features]
 default = []
 smp = ["kplat/smp",]
@@ -16,7 +20,7 @@ fp-simd = ["kcpu/fp-simd",]
 vmm = ["kernel_boot/vmm"]
 rtc = []
 nmi = ["kplat/nmi", "kspin/pmr"]
-pmu = []
+pmu = ["kplat/pmu"]
 tls = ["kcpu/tls"]
 
 ipi = []
@@ -34,7 +38,7 @@ cfg-if.workspace = true
 heapless = "0.9"
 kspin.workspace = true
 lazyinit.workspace = true
-linkme = { version = "0.3.33" }
+linkme.workspace = true
 log.workspace = true
 memaddr.workspace = true
 kaddr_layout.workspace = true

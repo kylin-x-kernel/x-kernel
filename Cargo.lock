@@ -24,7 +24,6 @@ dependencies = [
 name = "aarch64-pmuv3"
 version = "0.1.0"
 dependencies = [
- "log",
  "tock-registers 0.10.1",
 ]
 
@@ -34,7 +33,6 @@ version = "0.2.0-dev"
 dependencies = [
  "kaddr_layout",
  "lazyinit",
- "log",
 ]
 
 [[package]]
@@ -103,11 +101,20 @@ name = "alloc-engine"
 version = "0.2.0-dev"
 dependencies = [
  "buddy_system_allocator",
- "criterion",
+ "criterion 0.5.1",
  "kerrno",
  "rand",
  "rlsf",
  "unittest",
+]
+
+[[package]]
+name = "alloca"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5a7d05ea6aea7e9e64d25b9156ba2fee3fdd659e34e41063cd2fc7cd020d7f4"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -231,7 +238,6 @@ name = "backtrace"
 version = "0.2.0-dev"
 dependencies = [
  "addr2line",
- "cfg-if",
  "gimli 0.32.3",
  "klazy",
  "log",
@@ -492,7 +498,6 @@ name = "char_driver"
 version = "0.2.0-dev"
 dependencies = [
  "driver_base",
- "log",
 ]
 
 [[package]]
@@ -760,7 +765,7 @@ dependencies = [
  "cast",
  "ciborium",
  "clap",
- "criterion-plot",
+ "criterion-plot 0.5.0",
  "is-terminal",
  "itertools 0.10.5",
  "num-traits",
@@ -777,6 +782,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "criterion"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "950046b2aa2492f9a536f5f4f9a3de7b9e2476e575e05bd6c333371add4d98f3"
+dependencies = [
+ "alloca",
+ "anes",
+ "cast",
+ "ciborium",
+ "clap",
+ "criterion-plot 0.8.2",
+ "itertools 0.13.0",
+ "num-traits",
+ "oorandom",
+ "page_size",
+ "plotters",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "tinytemplate",
+ "walkdir",
+]
+
+[[package]]
 name = "criterion-plot"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -784,6 +814,16 @@ checksum = "6b50826342786a51a89e2da3a28f1c32b06e387201bc2d19791f622c673706b1"
 dependencies = [
  "cast",
  "itertools 0.10.5",
+]
+
+[[package]]
+name = "criterion-plot"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8d80a2f4f5b554395e47b5d8305bc3d27813bacb73493eb1001e8f76dae29ea"
+dependencies = [
+ "cast",
+ "itertools 0.13.0",
 ]
 
 [[package]]
@@ -1107,7 +1147,7 @@ dependencies = [
  "osvm",
  "posix-types",
  "rand_chacha 0.3.1",
- "tee_crypto",
+ "tee_crypto 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "unittest",
  "zerocopy",
 ]
@@ -1271,13 +1311,11 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 name = "entry"
 version = "0.2.0-dev"
 dependencies = [
- "backtrace",
- "cfg-if",
  "fs_context",
- "indoc",
  "kbuild_config",
  "kcpu_id_map",
  "kcred",
+ "kernel-image-metadata",
  "kfeat",
  "khal",
  "kiface",
@@ -1807,15 +1845,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "indoc"
-version = "2.0.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79cf5c93f93228cf8efb3ba362535fb11199ac548a09ce117c9b1adc3030d706"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "inherit-methods-macro"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2161,6 +2190,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernel-image-metadata"
+version = "0.2.0-dev"
+
+[[package]]
 name = "kernel_guard"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2452,7 +2485,6 @@ dependencies = [
  "async-channel",
  "async-trait",
  "bitflags 2.13.1",
- "cfg-if",
  "device-res",
  "enum_dispatch",
  "etherparse",
@@ -2593,7 +2625,6 @@ dependencies = [
 name = "kplat-x86_64"
 version = "0.2.0-dev"
 dependencies = [
- "bitflags 2.13.1",
  "boot-info",
  "console-driver",
  "irq-driver",
@@ -2711,13 +2742,11 @@ dependencies = [
  "kipi",
  "klogger",
  "knet",
- "kplat",
  "ktask",
  "ktty",
  "memaddr",
  "memspace",
  "of",
- "percpu",
  "rsext4_vfs",
  "timer-driver",
  "unittest",
@@ -2729,7 +2758,6 @@ name = "ksched"
 version = "0.2.0-dev"
 dependencies = [
  "linked_list_r4l",
- "log",
  "unittest",
 ]
 
@@ -2770,7 +2798,6 @@ dependencies = [
 name = "kspin"
 version = "0.2.0-dev"
 dependencies = [
- "cfg-if",
  "karch",
  "kiface",
  "klockstat",
@@ -2839,7 +2866,6 @@ name = "ktask"
 version = "0.2.0-dev"
 dependencies = [
  "backtrace",
- "cfg-if",
  "event-listener",
  "futures-util",
  "karch",
@@ -2955,7 +2981,6 @@ name = "kvfs"
 version = "0.2.0-dev"
 dependencies = [
  "bitflags 2.13.1",
- "cfg-if",
  "hashbrown 0.15.5",
  "inherit-methods-macro",
  "iov_iter",
@@ -2995,7 +3020,6 @@ version = "0.2.0-dev"
 dependencies = [
  "kaddr_layout",
  "kalloc",
- "kbuild_config",
  "kcpu_id_map",
  "khal",
  "ksync",
@@ -3409,6 +3433,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "page_size"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30d5b2194ed13191c1999ae0704b7839fb18384fa22e49b57eeaa97d79ce40da"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "page_table"
 version = "0.2.0-dev"
 dependencies = [
@@ -3420,7 +3454,6 @@ dependencies = [
  "kcpu_id_map",
  "kerrno",
  "kiface",
- "log",
  "memaddr",
  "unittest",
  "x86_64",
@@ -3712,7 +3745,6 @@ version = "0.2.0-dev"
 dependencies = [
  "bytemuck",
  "fs_context",
- "kbuild_config",
  "kcpu_id_map",
  "kcred",
  "kerrno",
@@ -4185,7 +4217,6 @@ dependencies = [
 name = "rsext4"
 version = "0.1.0-pre.0"
 dependencies = [
- "bitflags 2.13.1",
  "log",
 ]
 
@@ -4702,9 +4733,56 @@ dependencies = [
  "rasn-cms",
  "rasn-pkix",
  "spki",
- "tee_crypto",
+ "tee_crypto 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror",
  "x509-cert",
+]
+
+[[package]]
+name = "tee_crypto"
+version = "0.1.4"
+dependencies = [
+ "aead",
+ "aes",
+ "ccm",
+ "cipher",
+ "cmac",
+ "criterion 0.8.2",
+ "crypto-bigint",
+ "crypto-primes",
+ "ctr",
+ "curve25519-dalek",
+ "der",
+ "des",
+ "digest 0.11.3",
+ "ecdsa",
+ "ed25519-dalek",
+ "elliptic-curve",
+ "ghash",
+ "hex",
+ "hmac",
+ "md-5",
+ "p192",
+ "p224",
+ "p256",
+ "p384",
+ "p521",
+ "pbkdf2",
+ "pkcs1",
+ "pkcs8",
+ "rand_chacha 0.10.0",
+ "rand_core 0.10.1",
+ "rsa",
+ "sha1",
+ "sha2 0.11.0",
+ "signature 3.0.0",
+ "sm2",
+ "sm3",
+ "sm4",
+ "spki",
+ "subtle",
+ "x509-cert",
+ "zeroize",
 ]
 
 [[package]]
@@ -4758,7 +4836,6 @@ dependencies = [
 name = "tee_kernel"
 version = "0.2.0-dev"
 dependencies = [
- "bitflags 2.13.1",
  "bytemuck",
  "cfg-if",
  "cty",
@@ -4788,7 +4865,7 @@ dependencies = [
  "smccc",
  "static_assertions",
  "subtle",
- "tee_crypto",
+ "tee_crypto 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "tee_raw_sys",
  "tee_task_iface",
  "unittest",
@@ -5147,7 +5224,6 @@ dependencies = [
  "display",
  "driver_base",
  "input",
- "khal",
  "kspin 0.2.0-dev",
  "kvirtiodrivers",
  "log",
@@ -5178,7 +5254,6 @@ name = "vsock"
 version = "0.2.0-dev"
 dependencies = [
  "driver_base",
- "log",
 ]
 
 [[package]]
@@ -5246,7 +5321,6 @@ dependencies = [
 name = "watchdog"
 version = "0.2.0-dev"
 dependencies = [
- "cfg-if",
  "kbuild_config",
  "kcpu_id_map",
  "khal",
@@ -5272,6 +5346,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "winapi"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419"
+dependencies = [
+ "winapi-i686-pc-windows-gnu",
+ "winapi-x86_64-pc-windows-gnu",
+]
+
+[[package]]
+name = "winapi-i686-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
+
+[[package]]
 name = "winapi-util"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5279,6 +5369,12 @@ checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
  "windows-sys",
 ]
+
+[[package]]
+name = "winapi-x86_64-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows"
@@ -5537,7 +5633,7 @@ dependencies = [
 name = "xdice"
 version = "0.0.0"
 dependencies = [
- "tee_crypto",
+ "tee_crypto 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "unittest",
  "zeroize",
 ]

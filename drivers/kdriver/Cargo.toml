@@ -9,6 +9,9 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 
+[package.metadata.cargo-shear]
+ignored = ["display", "input", "kalloc", "vsock"]
+
 [features]
 pci-non-ecam = []
 net = ["dep:net", "kclass/net"]

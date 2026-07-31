@@ -25,7 +25,7 @@ use crate::{BufReader, BufWriter, DEFAULT_BUF_SIZE, Error, Read, Result, Write};
 /// On success, the total number of bytes that were copied from
 /// `reader` to `writer` is returned.
 ///
-/// See [`std::io::copy`] for more details.
+/// See [`std::io::copy`](https://doc.rust-lang.org/std/io/fn.copy.html) for more details.
 pub fn copy<R, W>(reader: &mut R, writer: &mut W) -> Result<u64>
 where
     R: Read + ?Sized,

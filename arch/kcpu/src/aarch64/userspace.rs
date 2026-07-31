@@ -191,7 +191,7 @@ impl UserContext {
     }
 
     /// Snapshot x0 before entering the syscall dispatch so that it can
-    /// be restored later by [`rollback_syscall`].
+    /// be restored later by [`Self::rollback_syscall`].
     pub fn save_syscall_args(&mut self) {
         self.saved_syscall_arg0 = self.tf.x[0];
     }

@@ -27,7 +27,7 @@ pub struct Empty;
 
 /// Creates a value that is always at EOF for reads, and ignores all data written.
 ///
-/// See [`std::io::empty()`] for more details.
+/// See [`std::io::empty()`](https://doc.rust-lang.org/std/io/fn.empty.html) for more details.
 #[must_use]
 pub const fn empty() -> Empty {
     Empty

@@ -37,7 +37,6 @@ backtrace = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }
 kpoll = { workspace = true }
 ksched = { workspace = true }
-cfg-if.workspace = true
 kiface = { workspace = true }
 event-listener = { workspace = true }
 futures-util = { version = "0.3", default-features = false, features = [

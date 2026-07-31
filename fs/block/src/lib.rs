@@ -7,7 +7,7 @@
 //! [`SeekableDisk`] adapts block I/O to byte-oriented filesystem libraries.
 //! [`FileSystemType`] is the Kconfig-selected block filesystem mount contract;
 //! the selected filesystem crate supplies its implementation at link time.
-#![cfg_attr(all(not(test), not(doc)), no_std)]
+#![cfg_attr(any(not(test), doc), no_std)]
 
 extern crate alloc;
 

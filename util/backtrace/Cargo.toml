@@ -14,7 +14,6 @@ description = "Backtrace Catching for X-kernel"
 dwarf = ["dep:addr2line", "dep:gimli", "dep:paste"]
 
 [dependencies]
-cfg-if = { workspace = true }
 log = { workspace = true }
 klazy.workspace= true
 unittest.workspace = true

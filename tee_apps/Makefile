@@ -19,8 +19,6 @@ SH_APP := sh
 TEE_APP_NAMES := $(filter-out $(SH_APP),$(APP_NAMES))
 TEE_INIT_APPS := $(shell printf '/tee/%s,' $(TEE_APP_NAMES) | sed 's/,$$//')
 APP_BINS := $(foreach name,$(APP_NAMES),$(TARGET_DIR)/$(TARGET)/release/$(name))
-COPY_ARGS := --copy $(TARGET_DIR)/$(TARGET)/release/$(SH_APP):/bin/$(SH_APP) \
-$(foreach name,$(TEE_APP_NAMES),--copy $(TARGET_DIR)/$(TARGET)/release/$(name):/tee/$(name))
 
 TARGET_UPPER := $(shell echo $(TARGET) | tr a-z- A-Z_)
 LINKER_ENV := CARGO_TARGET_$(TARGET_UPPER)_LINKER
@@ -48,5 +46,14 @@ tee_apps:
 		fi; \
 	done; \
 	echo "==> Creating $(DISK_IMG)"; \
-	cd $(ROOT_DIR) && env -u CARGO_BUILD_TARGET RUSTFLAGS= cargo run --release --manifest-path xtask/crate_rootfs/Cargo.toml -- \
-		--image $(DISK_IMG) --size-bytes $(ROOTFS_SIZE) $(COPY_ARGS)
+	staging="$(TARGET_DIR)/rootfs-staging"; \
+	rm -rf "$$staging"; \
+	mkdir -p "$$staging/bin" "$$staging/tee"; \
+	cp "$(TARGET_DIR)/$(TARGET)/release/$(SH_APP)" "$$staging/bin/$(SH_APP)"; \
+	chmod 0755 "$$staging/bin/$(SH_APP)"; \
+	for name in $(TEE_APP_NAMES); do \
+		cp "$(TARGET_DIR)/$(TARGET)/release/$$name" "$$staging/tee/$$name"; \
+		chmod 0755 "$$staging/tee/$$name"; \
+	done; \
+	truncate -s "$(ROOTFS_SIZE)" "$(DISK_IMG)"; \
+	mkfs.ext4 -q -F -b 4096 -O ^metadata_csum,^64bit -d "$$staging" "$(DISK_IMG)"

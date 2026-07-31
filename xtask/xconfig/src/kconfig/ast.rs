@@ -27,6 +27,7 @@ pub enum SymbolType {
 
 /// Represents the element type of a rangetype config.
 #[derive(Debug, Clone, PartialEq)]
+#[derive(Default)]
 pub enum RangeType {
     /// Array of string slices: `["&str"]` or `["String"]`
     StringArray,
@@ -35,14 +36,10 @@ pub enum RangeType {
     /// Array of a single primitive type: `[u32]`, `[usize]`, etc.
     Primitive(RustType),
     /// Type not yet determined (placeholder before the default is parsed).
+    #[default]
     Unknown,
 }
 
-impl Default for RangeType {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
 
 /// Represents a Rust primitive or string type used inside rangetype annotations.
 #[derive(Debug, Clone, PartialEq)]
@@ -109,6 +106,7 @@ pub struct DefaultValue {
 }
 
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct Property {
     pub prompt: Option<String>,
     pub defaults: Vec<DefaultValue>,
@@ -119,19 +117,6 @@ pub struct Property {
     pub help: Option<String>,
 }
 
-impl Default for Property {
-    fn default() -> Self {
-        Self {
-            prompt: None,
-            defaults: Vec::new(),
-            depends: None,
-            select: Vec::new(),
-            imply: Vec::new(),
-            range: None,
-            help: None,
-        }
-    }
-}
 
 impl Property {
     /// Evaluate conditional defaults in order and return the first matching value
@@ -159,11 +144,10 @@ impl Property {
                     }
                 }
                 Expr::ShellExpr(shell) => {
-                    if let Ok(value) = evaluate_shell_expr(shell, symbol_table) {
-                        if !value.is_empty() {
+                    if let Ok(value) = evaluate_shell_expr(shell, symbol_table)
+                        && !value.is_empty() {
                             return Some(value);
                         }
-                    }
                 }
                 _ => {}
             }

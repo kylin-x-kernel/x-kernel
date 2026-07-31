@@ -37,7 +37,7 @@ impl FuzzySearcher {
             })
             .collect();
 
-        results.sort_by(|a, b| b.score.cmp(&a.score));
+        results.sort_by_key(|b| std::cmp::Reverse(b.score));
         results
     }
 
@@ -89,7 +89,7 @@ impl FuzzySearcher {
             let mut matched = 0;
 
             for query_char in query.chars() {
-                if let Some(_) = label_chars.find(|&c| c == query_char) {
+                if label_chars.find(|&c| c == query_char).is_some() {
                     matched += 1;
                 }
             }

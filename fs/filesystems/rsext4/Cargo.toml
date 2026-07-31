@@ -21,5 +21,4 @@ own_assert = []
 CONFIG_META_CSUM_ENABLE = []
 
 [dependencies]
-bitflags = "2.10"
 log = "0.4"

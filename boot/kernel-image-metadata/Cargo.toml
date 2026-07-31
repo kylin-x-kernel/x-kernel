@@ -1,0 +1,11 @@
+[package]
+name = "kernel-image-metadata"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Versioned metadata ABI for X-Kernel ELF images"
+
+[features]
+kernel = []
+
+[dependencies]

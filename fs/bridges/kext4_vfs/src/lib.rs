@@ -8,7 +8,7 @@
 //! to KVFS and provides the KExt4 implementation of
 //! [`fs_block::FileSystemType`] when selected by Kconfig.
 
-#![cfg_attr(all(not(test), not(doc)), no_std)]
+#![cfg_attr(any(not(test), doc), no_std)]
 
 extern crate alloc;
 

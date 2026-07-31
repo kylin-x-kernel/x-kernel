@@ -502,13 +502,13 @@ impl ConfigState {
             for select in &item.selects {
                 selected_by_map
                     .entry(select.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(item.id.clone());
             }
             for imply in &item.implies {
                 implied_by_map
                     .entry(imply.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(item.id.clone());
             }
         }

@@ -262,7 +262,7 @@ pub fn default_read_to_string<R: Read + ?Sized>(
 
 /// The `Read` trait allows for reading bytes from a source.
 ///
-/// See [`std::io::Read`] for more details.
+/// See [`std::io::Read`](https://doc.rust-lang.org/std/io/trait.Read.html) for more details.
 pub trait Read {
     /// Pull some bytes from this source into the specified buffer
     fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
@@ -323,7 +323,8 @@ pub trait Read {
 ///
 /// This is a convenience function for [`Read::read_to_string`].
 ///
-/// See [`std::io::read_to_string`] for more details.
+/// See [`std::io::read_to_string`](https://doc.rust-lang.org/std/io/fn.read_to_string.html)
+/// for more details.
 #[cfg(feature = "alloc")]
 pub fn read_to_string<R: Read>(mut reader: R) -> Result<String> {
     let mut buf = String::new();
@@ -334,7 +335,8 @@ pub fn read_to_string<R: Read>(mut reader: R) -> Result<String> {
 /// A `BufRead` is a type of `Read`er which has an internal buffer, allowing it
 /// to perform extra ways of reading.
 ///
-/// See [`std::io::BufRead`] for more details.
+/// See [`std::io::BufRead`](https://doc.rust-lang.org/std/io/trait.BufRead.html)
+/// for more details.
 pub trait BufRead: Read {
     /// Returns the contents of the internal buffer, filling it with more data, via `Read` methods,
     /// if empty.

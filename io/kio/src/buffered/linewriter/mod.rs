@@ -28,7 +28,8 @@ use crate::{BufWriter, IntoInnerError, IoBufMut, Result, Write};
 /// If there's still a partial line in the buffer when the `LineWriter` is
 /// dropped, it will flush those contents.
 ///
-/// See [`std::io::LineWriter`] for more details.
+/// See [`std::io::LineWriter`](https://doc.rust-lang.org/std/io/struct.LineWriter.html)
+/// for more details.
 pub struct LineWriter<W: ?Sized + Write> {
     inner: BufWriter<W>,
 }

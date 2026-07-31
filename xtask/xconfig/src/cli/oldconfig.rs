@@ -164,18 +164,15 @@ fn find_next_prompt(
             Entry::Menu(menu) => {
                 if expr_is_visible(menu.depends.as_ref(), symbols)
                     && expr_is_visible(menu.visible.as_ref(), symbols)
-                {
-                    if let Some(prompt) = find_next_prompt(&menu.entries, symbols, asked) {
+                    && let Some(prompt) = find_next_prompt(&menu.entries, symbols, asked) {
                         return Some(prompt);
                     }
-                }
             }
             Entry::If(if_entry) => {
-                if evaluate_expr(&if_entry.condition, symbols).unwrap_or(false) {
-                    if let Some(prompt) = find_next_prompt(&if_entry.entries, symbols, asked) {
+                if evaluate_expr(&if_entry.condition, symbols).unwrap_or(false)
+                    && let Some(prompt) = find_next_prompt(&if_entry.entries, symbols, asked) {
                         return Some(prompt);
                     }
-                }
             }
             _ => {}
         }

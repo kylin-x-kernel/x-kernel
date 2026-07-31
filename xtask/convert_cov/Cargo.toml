@@ -1,9 +1,0 @@
-[package]
-name = "convert_cov"
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
-
-[dependencies]
-clap = { version = "4.5", features = ["derive"] }
-lcov2cobertura = "1.0.9"

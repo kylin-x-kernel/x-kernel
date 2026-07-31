@@ -10,6 +10,9 @@ keywords = ["synchronization", "spinlock", "no-irq"]
 description = "Spinlocks used for kernel space that can disable preemption or IRQs in the critical section."
 categories = ["os", "no-std"]
 
+[package.metadata.cargo-shear]
+ignored = ["linkme"]
+
 [features]
 preempt = []
 smp = []
@@ -18,7 +21,6 @@ stats = ["dep:klockstat", "dep:linkme", "klockstat/stats"]
 default = []
 
 [dependencies]
-cfg-if = { workspace = true }
 kiface = { workspace = true }
 karch = { workspace = true }
 klockstat = { workspace = true, optional = true }

@@ -9,7 +9,6 @@
 //! long-lived state machines behind those syscalls.
 
 #![no_std]
-#![allow(missing_docs)]
 
 #[macro_use]
 extern crate klogger;

@@ -6,7 +6,7 @@
 //!
 //! When selected by Kconfig, this crate provides the rsext4 implementation of
 //! [`fs_block::FileSystemType`].
-#![cfg_attr(all(not(test), not(doc)), no_std)]
+#![cfg_attr(any(not(test), doc), no_std)]
 #![allow(clippy::new_ret_no_self)]
 
 extern crate alloc;

@@ -58,7 +58,7 @@ pub(crate) fn default_write_fmt<W: Write + ?Sized>(
 
 /// A trait for objects which are byte-oriented sinks.
 ///
-/// See [`std::io::Write`] for more details.
+/// See [`std::io::Write`](https://doc.rust-lang.org/std/io/trait.Write.html) for more details.
 pub trait Write {
     fn write(&mut self, buf: &[u8]) -> Result<usize>;
 

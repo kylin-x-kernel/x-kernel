@@ -16,4 +16,3 @@ default = []
 
 [dependencies]
 driver_base.workspace = true
-log.workspace = true

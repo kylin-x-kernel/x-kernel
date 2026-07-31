@@ -103,11 +103,10 @@ impl SymbolTable {
             symbol.value = Some(value.clone());
 
             // Track if value actually changed
-            if old_value != Some(value) {
-                if !self.changed_symbols.contains(&name.to_string()) {
+            if old_value != Some(value)
+                && !self.changed_symbols.contains(&name.to_string()) {
                     self.changed_symbols.push(name.to_string());
                 }
-            }
         }
     }
 

@@ -9,6 +9,7 @@
 //! `tipc-handle`.
 
 #![no_std]
+#![cfg(target_arch = "aarch64")]
 #![deny(missing_docs)]
 
 extern crate alloc;

@@ -120,13 +120,12 @@ impl MenuConfigApp {
                 let symbol_type = symbol_type.clone();
                 let had_value = Self::initialize_item_value(item, &symbol_type, &symbol_table);
                 // Store original value for tracking modifications
-                if had_value {
-                    if let Some(value) = symbol_table.get_value(&item.id) {
+                if had_value
+                    && let Some(value) = symbol_table.get_value(&item.id) {
                         config_state
                             .original_values
                             .insert(item.id.clone(), value.clone());
                     }
-                }
             }
         }
 
@@ -282,16 +281,14 @@ impl MenuConfigApp {
             .filter(|item| {
                 // Rule 1: Config/MenuConfig items without prompts are never shown
                 match &item.kind {
-                    MenuItemKind::Config { .. } | MenuItemKind::MenuConfig { .. } => {
-                        if !item.has_prompt {
+                    MenuItemKind::Config { .. } | MenuItemKind::MenuConfig { .. }
+                        if !item.has_prompt => {
                             return false;
                         }
-                    }
-                    MenuItemKind::Choice { .. } => {
-                        if !item.has_prompt {
+                    MenuItemKind::Choice { .. }
+                        if !item.has_prompt => {
                             return false;
                         }
-                    }
                     _ => {} // Menus and Comments are always visible if dependencies are met
                 }
 
@@ -319,14 +316,13 @@ impl MenuConfigApp {
         loop {
             terminal.draw(|f| self.render(f))?;
 
-            if event::poll(Duration::from_millis(100))? {
-                if let Event::Key(key) = event::read()? {
+            if event::poll(Duration::from_millis(100))?
+                && let Event::Key(key) = event::read()? {
                     match self.handle_key(key)? {
                         EventResult::Quit => break,
                         EventResult::Continue => {}
                     }
                 }
-            }
         }
 
         Ok(())
@@ -1044,11 +1040,10 @@ impl MenuConfigApp {
                     } else if !c.is_ascii_digit() {
                         return Ok(EventResult::Continue);
                     }
-                } else if let Some(DialogType::EditHex { .. }) = &self.dialog_type {
-                    if !c.is_ascii_hexdigit() && c != 'x' && c != 'X' {
+                } else if let Some(DialogType::EditHex { .. }) = &self.dialog_type
+                    && !c.is_ascii_hexdigit() && c != 'x' && c != 'X' {
                         return Ok(EventResult::Continue);
                     }
-                }
 
                 self.input_buffer.insert(self.input_cursor, c);
                 self.input_cursor += 1;
@@ -1523,11 +1518,9 @@ impl MenuConfigApp {
         for item in &mut self.config_state.all_items {
             if let MenuItemKind::Config { symbol_type } | MenuItemKind::MenuConfig { symbol_type } =
                 &item.kind
-            {
-                if let Some(value) = self.engine.get_value(&item.id) {
+                && let Some(value) = self.engine.get_value(&item.id) {
                     item.value = Some(Self::parse_value(&value, symbol_type));
                 }
-            }
         }
 
         // Update menu_tree
@@ -1535,11 +1528,9 @@ impl MenuConfigApp {
             for item in items {
                 if let MenuItemKind::Config { symbol_type }
                 | MenuItemKind::MenuConfig { symbol_type } = &item.kind
-                {
-                    if let Some(value) = self.engine.get_value(&item.id) {
+                    && let Some(value) = self.engine.get_value(&item.id) {
                         item.value = Some(Self::parse_value(&value, symbol_type));
                     }
-                }
             }
         }
 

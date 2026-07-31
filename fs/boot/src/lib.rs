@@ -10,7 +10,7 @@
 //! backend names. Direct tmpfs, procfs, devfs, and bpffs construction here is
 //! initial namespace layout policy rather than filesystem-type dispatch.
 
-#![cfg_attr(all(not(test), not(doc)), no_std)]
+#![cfg_attr(any(not(test), doc), no_std)]
 
 extern crate alloc;
 

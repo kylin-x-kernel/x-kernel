@@ -1,559 +1,307 @@
 # Build Workflow
 
-Use this skill when an AI agent needs to configure, build, run,
-lint, or format the X-Kernel project.
+Use this skill to configure, build, and run X-Kernel through the repository
+Makefile and XKMake.
 
-This skill is the canonical workflow for basic project operations.
-Agents should follow it instead of inventing ad hoc cargo commands.
+## Architecture
 
-## Scope
+```text
+Makefile -> xkmake -> xconfig + Cargo + image tools + QEMU
+```
 
-This skill covers:
+- `xconfig` owns Kconfig evaluation and generated configuration.
+- `xkmake` owns build, bundle, rustdoc, and QEMU orchestration.
+- Cargo owns Rust compilation and incremental builds.
 
-- preparing `.config` from a platform defconfig;
-- interactively changing or refreshing configuration;
-- building the kernel with the repository Makefile flow;
-- running the kernel locally;
-- running clippy with project configuration;
-- formatting Rust code with the pinned toolchain.
+During an XKMake build, xconfig parses and evaluates Kconfig once. All
+generated configuration files consume the resulting resolved snapshot; build
+stages must not call the standalone `gen-const` or `gen-cargo` CLI paths.
+XKMake also renders the target linker script from the repository-root
+`linker.lds.S` and that snapshot before Cargo runs. It must preserve the
+existing file and mtime when the rendered content is unchanged so consecutive
+builds remain incremental.
 
-This skill does not replace subsystem-specific test procedures,
-debug workflows, or architecture-specific bring-up notes.
-
-## Repository Assumptions
-
-- The repository root contains `Kconfig`, `Makefile`,
-  `.cargo/.xconfig.toml`, and `rust-toolchain.toml`.
-- Kconfig-generated settings are part of the normal build flow.
-- Bare `cargo check -p <crate>` is not a reliable substitute
-  for the project Makefile flow.
+Do not use a bare `cargo check -p <crate>` as the main kernel validation path.
 
 ## Prerequisites
 
-- Rust toolchain `1.93.1` as pinned by `rust-toolchain.toml`
-- Rust targets:
-  `x86_64-unknown-none`,
-  `aarch64-unknown-none-softfloat`,
-  `riscv64gc-unknown-none-elf`,
-  `loongarch64-unknown-none-softfloat`
-- `cargo-binutils`
-  (the build system may auto-install it if missing)
-- a musl cross-compilation toolchain for the target architecture
-- QEMU for run and QEMU-based test flows
+- the Rust toolchain and targets from `rust-toolchain.toml`;
+- `cargo-binutils` and `rust-objcopy`;
+- the target architecture's musl cross toolchain;
+- the matching QEMU system emulator for `make run`;
+- `cargo-shear 1.13.2` and `licensure 0.8.1` for repository hygiene checks;
+- an ext4 `disk.img` when the configured virtio block device is enabled.
+- for unit-test coverage: `debugfs`, `rust-profdata`, and `rust-cov`;
+- for x86_64 boot media: `mkfs.fat`, mtools (`mmd` and `mcopy`), and OVMF/EDK2
+  firmware for UEFI execution.
 
-## Architecture-Target Mapping
-
-| `.config` `ARCH` | Rust target | `CROSS_COMPILE` |
-|---|---|---|
-| `aarch64` | `aarch64-unknown-none-softfloat` | `aarch64-linux-musl-` |
-| `riscv64` | `riscv64gc-unknown-none-elf` | `riscv64-linux-musl-` |
-| `x86_64` | `x86_64-unknown-none` | `x86_64-linux-musl-` |
-| `loongarch64` | `loongarch64-unknown-none-softfloat` | `loongarch64-linux-musl-` |
-
-## Supported Platforms
-
-The CPU **ARCH** (`aarch64` / `x86_64` / `riscv64` / `loongarch64`) implicitly
-selects the arch HAL crate under `platforms/kplat-<arch>/`. The target
-**machine / board** is chosen separately (it selects board-specific drivers
-such as the UART backend) and supplies the machine token of the kernel
-artifact name: `xkernel_<arch>-<machine>.elf`. QEMU-hosted variants such as
-CrosVM, virtCCA, and CSV are defconfig feature combinations layered on top of
-the `qemu` machine, not separate machines.
-
-Checked-in defconfigs (`platforms/kplat-<arch>/<machine>[_<feature>]_defconfig`):
-
-| Defconfig | ARCH | Machine | Feature set | Artifact stem |
-|---|---|---|---|---|
-| `platforms/kplat-aarch64/qemu_defconfig` | aarch64 | qemu | baseline | `aarch64-qemu` |
-| `platforms/kplat-aarch64/rk3588_defconfig` | aarch64 | rk3588 (Orange Pi 5 Plus) | baseline | `aarch64-rk3588` |
-| `platforms/kplat-aarch64/qemu_crosvm_defconfig` | aarch64 | qemu | crosvm | `aarch64-qemu` |
-| `platforms/kplat-aarch64/qemu_virtcca_defconfig` | aarch64 | qemu | virtcca | `aarch64-qemu` |
-| `platforms/kplat-x86_64/qemu_defconfig` | x86_64 | qemu (q35) | baseline | `x86_64-qemu` |
-| `platforms/kplat-x86_64/qemu_csv_defconfig` | x86_64 | qemu | csv (Hygon SEV) | `x86_64-qemu` |
-| `platforms/kplat-riscv64/qemu_defconfig` | riscv64 | qemu | baseline | `riscv64-qemu` |
-| `platforms/kplat-loongarch64/qemu_defconfig` | loongarch64 | qemu | baseline | `loongarch64-qemu` |
-
-### CI stage naming
-
-The CI pipeline (`Jenkinsfile`) names each stage from the same
-`<arch>-<machine>` artifact stem, so the CI report — the Gitee PR comment
-table and the Gitee check runs — shows the target machine, not just the arch:
-
-- `Build Artifact: <arch>-<machine>` / `... unittest`
-- `Runtime Test: <arch>-<machine>`
-- `Unit Tests: <arch>-<machine>`
-- `TEE Tests: <arch>-<machine>`
-- `Build Check: <arch>-<machine>-<feature>` (e.g. `aarch64-qemu-crosvm`,
-  `aarch64-qemu-virtcca`)
-
-The runtime / unittest / TEE / build-artifact stages all target the
-**default machine `qemu`** (the `qemu_defconfig` row above); `crosvm` and
-`virtcca` exist only as QEMU defconfig build-check stages. Each runtime stage
-spec carries an explicit `machine` field that drives its stage name and kernel
-artifact stem. The runtime stage also writes a harness-only `PLATFORM` entry
-into the restored `.config` so Starry Test Harness resolves the same artifact
-stem. Variant build-check stages pass an explicit defconfig path.
-
-## Required Preparation
-
-Before `make build`, `make run`, `make clippy`, `make unittest`,
-or QEMU-based unit-test commands,
-prepare `.config` from a platform defconfig.
-
-Default example:
+Install the pinned repository hygiene tools with:
 
 ```bash
-cp platforms/kplat-aarch64/qemu_defconfig .config
+make install-tools
+```
+
+This delegates to XKMake so the installer and version checks share the same
+pinned version constants. Cargo installs these executables under
+`~/.cargo/bin` by default; that directory must be present in `PATH` for
+`make clippy` and the standalone hygiene targets.
+
+## Configuration
+
+Start from an explicit platform defconfig:
+
+```bash
+cp platforms/aarch64-qemu-virt/defconfig .config
 make defconfig
 ```
 
-If the task targets a different platform,
-replace the defconfig path accordingly.
-Do not assume an existing `.config` is correct for the requested target.
-Copying a platform defconfig alone is not sufficient;
-the copied file is only a minimal seed and must be expanded
-with `make defconfig` before Make-based build, run, lint,
-or unit-test commands.
-
-## Defconfig Workflow
-
-In this repository,
-`platforms/*/qemu_defconfig` files are minimal, checked-in baseline configurations.
-They are not the full configuration consumed by the build.
-
-The normal relationship is:
-
-- `platforms/<platform>/qemu_defconfig`:
-  minimal platform baseline stored in the repository;
-- `.config`:
-  expanded working configuration in the repository root;
-- `./defconfig`:
-  a minimized configuration generated from the current `.config`
-  by `make savedefconfig`.
-
-### `make defconfig`
-
-`make defconfig` does not choose a platform by itself.
-It expects `.config` to already exist,
-usually because a platform `defconfig` was copied there first.
-In this repository, `make build`, `make run`, `make clippy`,
-and unit-test Make targets expect that expansion step
-to have already happened.
-
-Typical usage:
+Supported configuration commands:
 
 ```bash
-cp platforms/kplat-aarch64/qemu_defconfig .config
 make defconfig
-```
-
-What it does:
-
-- reads the current root `.config`;
-- fills in omitted symbols from `Kconfig` defaults;
-- writes back a complete expanded `.config`.
-
-Use it when:
-
-- starting work on a specific platform;
-- switching from one platform to another;
-- resetting the working config to a known platform baseline.
-
-If `.config` does not exist,
-the Makefile will fail and ask you to copy a platform defconfig first.
-
-### `make olddefconfig`
-
-Use `make olddefconfig` when `.config` already exists
-and you want to refresh only newly added Kconfig symbols
-from their defaults without replacing the rest of the current configuration.
-
-Typical usage:
-
-```bash
-make olddefconfig
-```
-
-Use it when:
-
-- rebasing onto upstream changes that introduced new Kconfig options;
-- keeping an existing local `.config`
-  while accepting default values for new symbols.
-
-Do not use `olddefconfig` as a substitute
-for selecting a different platform baseline.
-
-### `make menuconfig`
-
-Use `make menuconfig` when you need to interactively inspect
-or modify configuration values.
-
-Typical usage:
-
-```bash
-make menuconfig
-```
-
-Use it when:
-
-- changing configuration intentionally;
-- exploring available Kconfig options;
-- starting configuration for targets
-  that do not have a checked-in platform defconfig.
-
-### `make oldconfig`
-
-Use `make oldconfig` when `.config` already exists
-and you want the Linux-style interactive refresh flow
-for newly introduced Kconfig symbols.
-
-Typical usage:
-
-```bash
 make oldconfig
-```
-
-Use it when:
-
-- rebasing onto upstream changes that introduced new Kconfig options;
-- you want to review each newly introduced symbol manually
-  instead of accepting defaults automatically.
-
-### `make savedefconfig`
-
-`make savedefconfig` minimizes the current root `.config`
-and writes the result to `./defconfig`.
-
-Typical usage:
-
-```bash
-cp platforms/kplat-aarch64/qemu_defconfig .config
+make olddefconfig
 make menuconfig
+make saveconfig
 make savedefconfig
 ```
 
-What it does:
+`make build` also expands an existing seed `.config` automatically. It does
+not silently select a platform when `.config` is missing.
 
-- compares the current `.config`
-  against Kconfig defaults;
-- keeps only non-default selections;
-- writes the minimized result to a file named `defconfig`
-  in the repository root.
-
-Use it when:
-
-- you intentionally changed configuration values;
-- you want to update a checked-in platform defconfig;
-- you need a reviewable minimal config delta
-  instead of committing a full expanded `.config`.
-
-Important:
-
-- `make savedefconfig` does not update
-  `platforms/<platform>/qemu_defconfig` automatically.
-- Run `make defconfig`, `make menuconfig`, `make oldconfig`,
-  `make olddefconfig`, or `make saveconfig` before `make savedefconfig`;
-  `savedefconfig` is only valid on a prepared working `.config`.
-- After generating `./defconfig`,
-  compare it with the target platform defconfig
-  and copy it into the correct platform directory if appropriate.
-
-Typical update flow for a platform defconfig:
-
-```bash
-cp platforms/kplat-aarch64/qemu_defconfig .config
-make defconfig
-make menuconfig
-make savedefconfig
-cp defconfig platforms/kplat-aarch64/qemu_defconfig
-```
-
-Before committing an updated platform defconfig,
-re-run the standard expansion flow to verify it is self-consistent:
-
-```bash
-cp platforms/kplat-aarch64/qemu_defconfig .config
-make defconfig
-make build
-```
-
-## Standard Commands
-
-Build:
+## Build
 
 ```bash
 make build
 ```
 
-Verbose build output:
+The canonical output is a bundle:
 
-```bash
-make build V=1
-make build V=2
+```text
+target/xkmake/<platform>/<profile>/
+├── bundle.toml
+├── kernel.elf
+└── kernel.bin
 ```
 
-Expected build outputs may include:
+x86_64 bundles additionally contain both supported boot media:
 
-| File | Description |
-|---|---|
-| `xkernel_<arch>-<machine>.elf` | ELF binary |
-| `xkernel_<arch>-<machine>.bin` | Raw binary image |
-| `xkernel_<arch>-<machine>.uimg` | U-Boot image when `UIMAGE=y` |
-| `xkernel_x86_64-*.bzimg` | x86_64 LinuxBoot image |
-| `xkernel_x86_64-*.uefi.img` | x86_64 UEFI boot disk when `UEFI=y` |
-
-Clippy:
-
-```bash
-make clippy
+```text
+kernel.bzimg
+kernel.uefi.img
 ```
 
-Notes:
+Successful builds also refresh compatibility copies in the repository root:
 
-- `make clippy` also enforces `clippy::undocumented_unsafe_blocks`;
-  `unsafe { ... }` blocks should carry a nearby `SAFETY:` explanation.
+```text
+xkernel_<platform>.elf
+xkernel_<platform>.bin
+xkernel_<platform>.bzimg      # x86_64 only
+xkernel_<platform>.uefi.img   # x86_64 only
+```
 
-Run:
+The bundle remains the canonical output; Jenkins and existing repository tools
+use the root-level names for artifact handoff compatibility.
+
+Each bundle ELF contains an allocated `.note.xkernel.build-info` note and a
+SHA-256 `.note.gnu.build-id`. Inspect them with:
+
+```bash
+readelf -n target/xkmake/<platform>/<profile>/kernel.elf
+```
+
+XKMake always invokes Cargo, allowing Cargo to validate source freshness. It
+reuses the image-processing result when the resolved configuration, build
+inputs, Cargo ELF, and bundle manifest still match.
+
+Normal `build` reuse is a trusted local-cache fast path. It validates the
+atomically published manifest, artifact names, sizes, mtimes, and build inputs
+without hashing the complete ELF. `run --no-build` is an artifact-consumption
+boundary and recomputes the loadable-image SHA-256 before accepting the bundle.
+
+The embedded `build_time` is the UTC time at which XKMake actually regenerates
+the bundle. Automatic wall-clock time does not participate in cache matching:
+an unchanged build reuses the existing ELF, Build ID, and build time. Explicit
+`KBUILD_BUILD_TIME` and `SOURCE_DATE_EPOCH` values are build inputs and can
+force regeneration when they differ from the bundled value.
+
+Direct tool invocation is available for diagnostics:
+
+```bash
+cargo xkmake build -v
+cargo xkmake build --dry-run -v
+```
+
+## Documentation
+
+Generate workspace rustdoc with the resolved Kconfig feature set:
+
+```bash
+make doc
+make doc XKMAKE_ARGS='--open'
+```
+
+Enforce rustdoc coverage on public APIs in addition to broken-link checks:
+
+```bash
+make doc_check_missing
+```
+
+XKMake consumes the same one-pass resolved configuration snapshot and Rust
+target used by the build flow. Documentation stages must not recover features
+by parsing `.cargo/.xconfig.toml` or document kernel crates for the host target.
+
+## Run
 
 ```bash
 make run
 ```
 
-Run without rebuilding:
+XKMake supports QEMU boot for:
 
-```bash
-make justrun
-```
+- `aarch64-qemu-virt`;
+- `riscv64-qemu-virt`;
+- `loongarch64-qemu-virt`;
+- `x86_64-qemu-virt`.
 
-Host prerequisites for `make run`:
-
-- the host must allow QEMU to access the configured `vhost-vsock` device;
-- TCP/UDP port `5555` must be free for QEMU `hostfwd`;
-- do not start multiple QEMU instances in parallel
-  with the default networking arguments,
-  or they may contend for the same forwarded port.
-
-Useful variants:
+x86_64 defaults to LinuxBoot. Select the UEFI image with either form:
 
 ```bash
 make run UEFI=y
-make run VSOCK=n
+make run XKMAKE_ARGS='--boot uefi'
 ```
 
-Notes:
+XKMake locates common OVMF/EDK2 installations automatically. Use
+`--ovmf-code` and `--ovmf-vars-template`, or the corresponding
+`OVMF_CODE`/`OVMF_VARS_TEMPLATE` Make variables, for custom firmware paths.
 
-- `make run UEFI=y` is relevant for x86_64 UEFI boot.
-- `make run VSOCK=n` is useful on hosts
-  where vsock is unsupported or intentionally disabled,
-  such as some macOS environments.
-
-QEMU-related variables commonly used with `make run`:
-
-| Variable | Default | Description |
-|---|---|---|
-| `BLK` | `y` | Enable virtio-blk storage |
-| `NET` | `y` | Enable virtio-net networking |
-| `GRAPHIC` | `n` | Enable virtio-gpu display |
-| `VIRTIO_BUS` | `pci` | Device bus: `pci` or `mmio` |
-| `MEM` | `1g` | Memory size |
-| `ACCEL` | auto | Hardware acceleration: `y` or `n`. Auto enables KVM only when `/dev/kvm` is a character device (not a path stub/directory). |
-| `DISK_IMG` | `$(PWD)/disk.img` | Virtual disk image path |
-| `UEFI` | `n` | x86_64 UEFI boot |
-| `NET_DEV` | `user` | Network backend: `user`, `tap`, `bridge` |
-| `IP` | `10.0.2.15` | Guest IPv4 |
-| `GW` | `10.0.2.2` | Gateway IPv4 |
-| `QEMU_LOG` | `n` | QEMU log to `qemu.log` |
-| `NET_DUMP` | `n` | Packet capture to `netdump.pcap` |
-
-Examples:
+Pass options through `XKMAKE_ARGS`:
 
 ```bash
-make run MEM=2g NET=n GRAPHIC=y
-make run NET_DEV=tap
-make run QEMU_LOG=y NET_DUMP=y
+make run XKMAKE_ARGS='--memory 2g --smp 2'
+make run XKMAKE_ARGS='--no-net --no-block'
+make run XKMAKE_ARGS='--disk-image images/rootfs.img'
+make run XKMAKE_ARGS='--no-vsock'
+make run ACCEL=n
+make run QEMU_ARGS='-d guest_errors'
+make run QEMU_ARGS='-no-reboot'
 ```
 
-Run unit tests through QEMU:
+`QEMU_ARGS` forwards arbitrary extra arguments straight to the QEMU invocation
+(they are appended after `--`), covering ad-hoc devices or debug flags that
+don't have a dedicated Make variable.
+
+Important defaults:
+
+- memory: `1g`;
+- SMP: configured `NR_CPUS`;
+- disk image: `disk.img`;
+- virtio block and network: enabled when compiled into the kernel;
+- vsock: automatically attached when the kernel driver and selected QEMU
+  device model both support it; otherwise XKMake warns and continues;
+- display: serial/nographic unless `--graphic` is supplied;
+- guest IP: `10.0.2.15`;
+- gateway: `10.0.2.2`.
+
+Guest IP and gateway are currently build inputs because the network stack uses
+compile-time environment values:
 
 ```bash
-make UNITTEST=y run
+make build XKMAKE_ARGS='--guest-ip 10.0.2.20 --gateway 10.0.2.2'
 ```
 
-Filter QEMU unit tests by crate:
+## Repository Utilities
+
+The thin Makefile retains repository-level utility targets that do not own
+kernel configuration or QEMU policy:
 
 ```bash
-make UNITTEST=y run UNITTEST_CRATE=kvfs
-make UNITTEST=y run UNITTEST_CRATE=kvfs,kprocess
+make rootfs
+make uapps
+make rootfs-uapps
+make teefs
+make disk_img
+make ramdisk_img
+make install-tools
+make check_deps
+make check_header
+make doc
+make doc_check_missing
+make fmt
+make clean
+make distclean
 ```
 
-Host prerequisites for `make UNITTEST=y run`:
+`make check_deps` runs the pinned `cargo-shear 1.13.2` analyzer through
+`xkmake hygiene deps`. Use `make deps` to apply its unused-dependency fixes.
+The check covers the root, `xtask`, `tee_apps`, and `uapps/hello` Cargo
+workspaces. Cargo-shear warnings remain advisory; dependency errors fail the
+command.
 
-- the host must allow QEMU to access the configured `vhost-vsock` device;
-- TCP/UDP port `5555` must be free for QEMU `hostfwd`;
-- do not run it in parallel with `make run`
-  or another `make UNITTEST=y run`
-  unless the QEMU networking arguments are changed.
+`make check_header` runs the pinned `licensure 0.8.1` analyzer through
+`xkmake hygiene header`. Use `make header` to add or update the configured
+three-line header. XKMake passes tracked and non-ignored untracked Rust source
+files to licensure; deleted worktree paths and non-Rust files are not checked.
 
-Run the unit-test target:
+`make unittest` means a kernel unit-test build followed by QEMU execution. It
+is equivalent to the former `make run UNITTEST=y` workflow:
 
 ```bash
 make unittest
+make unittest UNITTEST_CRATE=kvfs,kprocess
 ```
 
-Additional test variants:
+After a successful unit-test QEMU run, XKMake extracts
+`/.llvm-cov/default.profraw` from the configured disk image and writes these
+artifacts under `target/<rust-target>/<profile>/`:
+
+```text
+default.profraw
+default.profdata
+coverage.txt
+coverage.info
+coverage.xml
+```
+
+Extraction or report-generation failures fail the run. Old coverage artifacts
+are removed before processing so they cannot be mistaken for current output.
+
+`make justrun` runs an existing bundle without invoking Cargo.
+`make debug` builds first, starts QEMU with the GDB stub paused, and attaches
+the configured `GDB` command. `make disasm` consumes the bundle ELF.
+
+`make ci-test` builds the kernel, clones or updates the Starry test harness
+into the ignored `ci-test/` directory, and runs its complete `ci-test` suite
+against the current X-Kernel tree. Override `CI_TEST_REPO`, `CI_TEST_BRANCH`,
+`CI_TEST_ARCH`, `CI_TEST_CASES`, or `CI_TEST_JOBS` when narrowing or
+relocating the run.
 
 ```bash
-make unittest_no_fail_fast
+make ci-test
+CI_TEST_ARCH=riscv64 CI_TEST_CASES=timerfd-semantics make ci-test
 ```
 
-Notes:
+## Validation
 
-- `make unittest` is the host-side Rust test entry.
-- `make unittest_no_fail_fast` is the host-side variant
-  that continues after individual test failures.
-- `UNITTEST_CRATE` is for the QEMU kernel-unit-test path
-  (`make UNITTEST=y run`),
-  not the host-side `make unittest` path.
+For build-system changes, run:
 
-Format Rust code:
+```bash
+cargo test --manifest-path xtask/Cargo.toml -p xconfig -p xkmake
+cargo clippy --manifest-path xtask/Cargo.toml -p xkmake --no-deps -- -D warnings
+make build
+make run
+```
+
+Use a bounded QEMU run in automation and verify kernel boot output before
+terminating it.
+
+## Formatting
+
+Use the repository-pinned formatter:
 
 ```bash
 cargo +nightly-2026-03-08 fmt --all
 ```
 
-Pre-commit hooks (shared, auto-enabled):
-
-A shared `pre-commit` hook is committed under `.githooks/` and runs
-`make fmt` (auto-formats and re-stages the staged Rust files) followed by
-`make clippy`, so commits that would fail CI on those two checks are
-blocked locally first.
-
-- It is enabled automatically on any `make ...` invocation — no manual
-  setup is needed after `git clone` or `git pull`. To (re)enable it
-  explicitly in a clone, run `make hooks`.
-- It only runs when at least one `*.rs` file is staged.
-- Skip a check for a single commit with environment variables:
-  - `SKIP_FMT=1 git commit ...` — skip `make fmt`;
-  - `SKIP_CLIPPY=1 git commit ...` — skip `make clippy`;
-  - `SKIP_ALL=1 git commit ...` — skip both.
-- `make clippy` requires a `.config`; if none is present the hook skips
-  clippy for that commit (CI still checks it, so prepare a `.config`
-  before pushing).
-
-Clean generated artifacts:
-
-```bash
-make clean
-make distclean
-make clean_c
-```
-
-Debug-oriented commands:
-
-```bash
-make debug
-make disasm
-make justrun QEMU_ARGS="-s -S"
-```
-
-Root filesystem helpers:
-
-```bash
-make rootfs
-make disk_img
-make ramdisk_img
-```
-
-`make ramdisk_img` builds the filesystem image (`ramdisk.img`) embedded into
-the kernel as the RAM disk root filesystem when
-`KFEAT_DRIVER_RAMDISK_STATIC=y` is selected. The image path, size, and format
-are configurable:
-
-| Variable | Default | Description |
-|---|---|---|
-| `RAMDISK_IMG` | `$(PWD)/ramdisk.img` | Image embedded into the RAM disk |
-| `RAMDISK_IMG_SIZE` | `8` | Image size in MiB |
-| `RAMDISK_IMG_FS` | `ext4` | Image format (`ext4` or `fat32`) |
-| `RAMDISK_ROOTFS` | `$(DISK_IMG)` | Source image to extract a minimal shell from |
-
-When `RAMDISK_ROOTFS` exists and `RAMDISK_IMG_FS=ext4`, `make ramdisk_img`
-extracts `/bin/busybox` plus the musl runtime (`/lib/ld-musl-aarch64.so.1`)
-from it and injects them (with applet symlinks and standard directories) into
-the image via `mkfs.ext4 -d`, so the default ramdisk boots to a shell without
-embedding a full rootfs. Set `RAMDISK_ROOTFS=` to build a truly empty image.
-
-`RAMDISK_IMG_FS` must match the selected filesystem backend
-(`KFEAT_FS_EXT4` / `KFEAT_FS_FAT`). Override `RAMDISK_IMG` to embed a custom
-image. The image is embedded in `.data`, so the kernel binary grows by roughly
-the image size.
-
-For rootfs-based runtime customization,
-the repository also documents workflows
-that inject files into `disk.img`
-without changing kernel source code.
-
-## Agent Rules
-
-When an agent needs to validate a code change:
-
-1. Select the appropriate platform defconfig.
-2. Copy it to the repository root as `.config`.
-3. Refresh `.config` with `make defconfig`.
-4. Run the narrowest meaningful validation for the task.
-5. Prefer Makefile targets over bare cargo commands.
-
-When an agent changes checked-in platform configuration:
-
-1. Start from `platforms/<platform>/qemu_defconfig`.
-2. Copy it to `.config`.
-3. Expand it into `.config` with `make defconfig`.
-4. Make the intended config changes.
-5. Run `make savedefconfig`.
-6. Move the generated root `./defconfig`
-   into `platforms/<platform>/qemu_defconfig`.
-7. Re-expand and validate again before finishing.
-
-Examples:
-
-- For a normal compile fix, run `make build`.
-- For lint-related changes, run `make clippy`.
-- For formatting-only edits, run the pinned `cargo fmt` command.
-- For boot or runtime changes, run `make run`
-  or the relevant unit-test flow.
-- For host-side Rust unit tests, run `make unittest`
-  or `make unittest_no_fail_fast`.
-- For kernel-side unit tests with crate filtering,
-  run `make UNITTEST=y run UNITTEST_CRATE=<crate-list>`.
-- Before `make build`, `make run`, `make clippy`,
-  or `make UNITTEST=y run`,
-  prepare `.config` by copying the platform defconfig
-  and then running `make defconfig`.
-- Before `make run` or `make UNITTEST=y run`,
-  check host prerequisites such as `vhost-vsock` access
-  and whether port `5555` is already in use.
-
-## Avoid
-
-- Do not use bare `cargo check -p <crate>`
-  as the main validation path.
-- Do not skip `make defconfig` after copying a platform defconfig.
-- Do not skip `.config` preparation before Make-based build,
-  run, lint, or unit-test commands.
-- Do not commit a hand-edited expanded `.config`
-  as a substitute for updating a platform `defconfig`.
-- Do not assume `make savedefconfig`
-  writes directly into `platforms/<platform>/defconfig`.
-- Do not run multiple QEMU-based commands in parallel
-  with the default `hostfwd` settings.
-- Do not assume `make run` or `make UNITTEST=y run`
-  will work on a host without `vhost-vsock` access.
-- Do not silently switch toolchains;
-  use the version pinned by `rust-toolchain.toml`
-  or the explicitly documented formatting command.
-
-## Related Documents
-
-- `AGENTS.md`
-- `rust-toolchain.toml`
-- `platforms/kplat-*/*_defconfig`
-- `README.md`
+When formatting only host tools during development, avoid unrelated formatting
+churn in untouched xtask crates.

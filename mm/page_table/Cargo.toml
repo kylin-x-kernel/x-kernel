@@ -20,7 +20,6 @@ bitflags = "2.9"
 bitmaps = { version = "3.2", default-features = false, optional = true }
 kiface.workspace = true
 kcpu_id_map.workspace = true
-log = "0.4"
 memaddr = { workspace = true }
 kerrno = { workspace = true, optional = true }
 kbuild_config = { workspace = true }

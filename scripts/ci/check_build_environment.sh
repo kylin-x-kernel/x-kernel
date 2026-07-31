@@ -3,6 +3,8 @@ set -euo pipefail
 
 echo "==> Checking Rust build environment..."
 NIGHTLY_TOOLCHAIN="${AUX_RUST_TOOLCHAIN}"
+CARGO_SHEAR_VERSION="1.13.2"
+LICENSURE_VERSION="0.8.1"
 
 retry() {
     local attempts="$1"
@@ -76,6 +78,28 @@ echo "==> Active default toolchain"
 cargo --version
 rustc --version
 rustup show active-toolchain
+
+# The builder image ships these tools as binaries under /usr/local/cargo/bin
+# (on PATH) while CARGO_HOME points at a separate cache volume, so
+# `cargo install --list` cannot see them and would recompile from source on
+# every run. Detect via the binary version instead of the install registry.
+if [ "$(cargo-shear --version 2>/dev/null | awk '{print $NF}')" != "${CARGO_SHEAR_VERSION}" ]; then
+    echo "==> Installing cargo-shear ${CARGO_SHEAR_VERSION}"
+    retry 3 cargo install cargo-shear \
+        --version "${CARGO_SHEAR_VERSION}" --locked --force
+fi
+
+echo "==> Dependency analyzer"
+cargo-shear --version
+
+if [ "$(licensure --version 2>/dev/null | awk '{print $NF}')" != "${LICENSURE_VERSION}" ]; then
+    echo "==> Installing licensure ${LICENSURE_VERSION}"
+    retry 3 cargo install licensure \
+        --version "${LICENSURE_VERSION}" --locked --force
+fi
+
+echo "==> License header analyzer"
+licensure --version
 
 echo "==> Installed default targets"
 rustup target list --installed

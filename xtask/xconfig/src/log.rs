@@ -86,8 +86,8 @@ pub fn debug_log_file() -> Option<&'static std::sync::Mutex<std::fs::File>> {
 #[macro_export]
 macro_rules! debug_log {
     ($($arg:tt)*) => {
-        if crate::log::is_debug_enabled() {
-            if let Some(file_mutex) = crate::log::debug_log_file() {
+        if $crate::log::is_debug_enabled() {
+            if let Some(file_mutex) = $crate::log::debug_log_file() {
                 if let Ok(mut file) = file_mutex.lock() {
                     let _ = writeln!(file, $($arg)*);
                 }

@@ -8,6 +8,9 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+[package.metadata.cargo-shear]
+ignored = ["linkme"]
+
 [dependencies]
 extern-trait = "0.3"
 kerrno.workspace = true

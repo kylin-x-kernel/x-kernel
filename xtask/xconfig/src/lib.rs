@@ -2,6 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+pub mod build_config;
 pub mod cli;
 pub mod config;
 pub mod error;

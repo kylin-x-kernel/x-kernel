@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! VFS bridge for the 9P client library.
-#![cfg_attr(all(not(test), not(doc)), no_std)]
+#![cfg_attr(any(not(test), doc), no_std)]
 #![feature(likely_unlikely)]
 #![allow(clippy::new_ret_no_self)]
 

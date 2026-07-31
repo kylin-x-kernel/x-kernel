@@ -137,7 +137,7 @@ impl DependencyResolver {
                 // Build reverse map
                 self.reverse_select_map
                     .entry(selected_symbol.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(name.to_string());
             }
             self.select_map.insert(name.to_string(), selections);
@@ -191,16 +191,14 @@ impl DependencyResolver {
         if let Some(deps) = self.depends_map.get(symbol) {
             // Note: All deps have the same condition (the full depends expression),
             // so we only need to check it once
-            if let Some(first_dep) = deps.first() {
-                if let Some(condition) = &first_dep.condition {
-                    if !self.expr_evaluator.evaluate(condition, symbol_table) {
+            if let Some(first_dep) = deps.first()
+                && let Some(condition) = &first_dep.condition
+                    && !self.expr_evaluator.evaluate(condition, symbol_table) {
                         return Err(DependencyError::ConditionNotMet {
                             symbol: symbol.to_string(),
                             condition: self.format_expr(condition),
                         });
                     }
-                }
-            }
         }
 
         Ok(())
@@ -400,6 +398,12 @@ impl std::error::Error for DependencyError {}
 
 /// Simple expression evaluator
 pub struct ExprEvaluator;
+
+impl Default for ExprEvaluator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ExprEvaluator {
     pub fn new() -> Self {

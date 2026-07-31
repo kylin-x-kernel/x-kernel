@@ -224,8 +224,8 @@ impl ConfigEngine {
         let mut violations = Vec::new();
 
         for (symbol_name, _symbol) in self.symbols.all_symbols() {
-            if self.symbols.is_enabled(symbol_name) {
-                if let Err(err) = self
+            if self.symbols.is_enabled(symbol_name)
+                && let Err(err) = self
                     .dependency_resolver
                     .can_enable(symbol_name, &self.symbols)
                 {
@@ -237,7 +237,6 @@ impl ConfigEngine {
                     }
                     violations.push(format!("{}: {}", symbol_name, err));
                 }
-            }
         }
 
         violations
@@ -367,8 +366,8 @@ impl ConfigEngine {
                 .iter()
                 .all(|cond| evaluate_expr(cond, &self.symbols).unwrap_or(false));
 
-            if !all_satisfied {
-                if let Some(symbol) = self.symbols.get_symbol(name) {
+            if !all_satisfied
+                && let Some(symbol) = self.symbols.get_symbol(name) {
                     match symbol.symbol_type {
                         crate::kconfig::ast::SymbolType::Bool
                         | crate::kconfig::ast::SymbolType::Tristate => {
@@ -379,7 +378,6 @@ impl ConfigEngine {
                         }
                     }
                 }
-            }
         }
     }
 
@@ -485,16 +483,14 @@ fn collect_symbol_if_conditions(
 ) {
     for entry in entries {
         match entry {
-            Entry::Config(config) => {
-                if !parent_conditions.is_empty() {
+            Entry::Config(config)
+                if !parent_conditions.is_empty() => {
                     result.insert(config.name.clone(), parent_conditions.to_vec());
                 }
-            }
-            Entry::MenuConfig(menuconfig) => {
-                if !parent_conditions.is_empty() {
+            Entry::MenuConfig(menuconfig)
+                if !parent_conditions.is_empty() => {
                     result.insert(menuconfig.name.clone(), parent_conditions.to_vec());
                 }
-            }
             Entry::Choice(choice) => {
                 for option in &choice.options {
                     if !parent_conditions.is_empty() {
@@ -524,8 +520,8 @@ fn prompted_symbol_names_in_order(entries: &[Entry]) -> Vec<String> {
 fn collect_prompted_symbol_names(entries: &[Entry], result: &mut Vec<String>) {
     for entry in entries {
         match entry {
-            Entry::Config(config) => {
-                if config.properties.prompt.is_some() {
+            Entry::Config(config)
+                if config.properties.prompt.is_some() => {
                     result.push(
                         config
                             .name
@@ -534,9 +530,8 @@ fn collect_prompted_symbol_names(entries: &[Entry], result: &mut Vec<String>) {
                             .to_string(),
                     );
                 }
-            }
-            Entry::MenuConfig(menuconfig) => {
-                if menuconfig.properties.prompt.is_some() {
+            Entry::MenuConfig(menuconfig)
+                if menuconfig.properties.prompt.is_some() => {
                     result.push(
                         menuconfig
                             .name
@@ -545,7 +540,6 @@ fn collect_prompted_symbol_names(entries: &[Entry], result: &mut Vec<String>) {
                             .to_string(),
                     );
                 }
-            }
             Entry::Choice(choice) => {
                 for option in &choice.options {
                     if option.properties.prompt.is_some() {
@@ -580,13 +574,12 @@ fn reevaluate_defaults_inner(entries: &[Entry], symbol_table: &mut SymbolTable) 
                         .get_symbol(&config.name)
                         .map(|s| s.from_config)
                         .unwrap_or(false);
-                    if config.is_derived() || !from_config {
-                        if let Some(default_value) =
+                    if (config.is_derived() || !from_config)
+                        && let Some(default_value) =
                             config.properties.evaluate_default(symbol_table)
                         {
                             symbol_table.set_value(&config.name, default_value);
                         }
-                    }
                 }
             }
             Entry::MenuConfig(menuconfig) => {
@@ -600,13 +593,12 @@ fn reevaluate_defaults_inner(entries: &[Entry], symbol_table: &mut SymbolTable) 
                         .get_symbol(&menuconfig.name)
                         .map(|s| s.from_config)
                         .unwrap_or(false);
-                    if menuconfig.is_derived() || !from_config {
-                        if let Some(default_value) =
+                    if (menuconfig.is_derived() || !from_config)
+                        && let Some(default_value) =
                             menuconfig.properties.evaluate_default(symbol_table)
                         {
                             symbol_table.set_value(&menuconfig.name, default_value);
                         }
-                    }
                 }
             }
             Entry::Menu(menu) => reevaluate_defaults_inner(&menu.entries, symbol_table),
@@ -716,11 +708,10 @@ fn validate_symbol_range(
         return;
     };
 
-    if let Some(condition) = condition {
-        if !evaluate_expr(condition, symbol_table).unwrap_or(false) {
+    if let Some(condition) = condition
+        && !evaluate_expr(condition, symbol_table).unwrap_or(false) {
             return;
         }
-    }
 
     let Some(current_value) = symbol_table.get_value(name) else {
         return;

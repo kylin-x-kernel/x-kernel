@@ -14,6 +14,7 @@ extern crate kfeat;
 extern crate kruntime;
 extern crate kuaccess;
 
+mod image_metadata;
 mod runtime;
 #[cfg(feature = "unittest")]
 mod unittest_simple;
@@ -49,50 +50,7 @@ fn print_unittest(args: core::fmt::Arguments<'_>) {
 pub const CMDLINE: &[&str] = &["/bin/sh", "-c", include_str!("init.sh")];
 
 fn print_boot_info() {
-    const fn configured_log_level() -> &'static str {
-        if kbuild_config::LOG_LEVEL_ERROR {
-            "error"
-        } else if kbuild_config::LOG_LEVEL_WARN {
-            "warn"
-        } else if kbuild_config::LOG_LEVEL_INFO {
-            "info"
-        } else if kbuild_config::LOG_LEVEL_DEBUG {
-            "debug"
-        } else if kbuild_config::LOG_LEVEL_TRACE {
-            "trace"
-        } else {
-            "off"
-        }
-    }
-
-    kprintln!(
-        indoc::indoc! {"
-            arch = {}
-            machine = {}
-            target = {}
-            build_mode = {}
-            build_machine = {}
-            build_time = {}
-            log_level = {}
-            backtrace = {}
-            smp = {}
-            virt = {}
-        "},
-        kbuild_config::ARCH,
-        kbuild_config::MACHINE,
-        option_env!("K_TARGET").unwrap_or(""),
-        option_env!("K_MODE").unwrap_or(""),
-        option_env!("KBUILD_BUILD_MACHINE").unwrap_or("unknown"),
-        option_env!("KBUILD_BUILD_TIME").unwrap_or("unknown"),
-        configured_log_level(),
-        backtrace::is_enabled(),
-        kcpu_id_map::nr_cpus(),
-        if kbuild_config::KFEAT_VMM {
-            "on"
-        } else {
-            "off"
-        },
-    );
+    image_metadata::print();
 }
 
 #[cfg(not(feature = "unittest"))]

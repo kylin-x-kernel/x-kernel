@@ -167,16 +167,16 @@ def ciSequentialStages() {
 
 def ciBuildStages() {
     def stages = [[
-        name: 'Build Check: aarch64-qemu-crosvm',
+        name: 'Build Check: aarch64-crosvm-virt',
         failure: 'clippy 或 build 失败',
         type: 'build',
-        platform: 'aarch64-qemu-crosvm',
+        platform: 'aarch64-crosvm-virt',
         defconfig: 'platforms/kplat-aarch64/qemu_crosvm_defconfig',
     ], [
-        name: 'Build Check: aarch64-qemu-virtcca',
+        name: 'Build Check: kplat-aarch64-virtcca',
         failure: 'clippy 或 build 失败',
         type: 'build',
-        platform: 'aarch64-qemu-virtcca',
+        platform: 'kplat-aarch64-virtcca',
         defconfig: 'platforms/kplat-aarch64/qemu_virtcca_defconfig',
     ]]
 
@@ -190,21 +190,17 @@ def ciBuildStages() {
     }
 
     runtimeTestArchitectures().each { arch ->
-        def machine = defaultMachine()
-        def stem = stageStem(arch, machine)
         stages << [
-            name: "Build Artifact: ${stem}",
+            name: "Build Artifact: kplat-${arch}",
             failure: 'clippy 或 normal build 失败',
             type: 'build_artifact',
             arch: arch,
-            machine: machine,
         ]
         stages << [
-            name: "Build Artifact: ${stem} unittest",
+            name: "Build Artifact: kplat-${arch} unittest",
             failure: 'unittest build 失败',
             type: 'unittest_build',
             arch: arch,
-            machine: machine,
         ]
     }
 
@@ -215,33 +211,26 @@ def ciRunStages() {
     def stages = []
 
     runtimeTestArchitectures().each { arch ->
-        def machine = defaultMachine()
-        def stem = stageStem(arch, machine)
         stages << [
-            name: "Runtime Test: ${stem}",
+            name: "Runtime Test: kplat-${arch}",
             failure: 'runtime 测试失败',
             type: 'runtime_run',
             arch: arch,
-            machine: machine,
         ]
         stages << [
-            name: "Unit Tests: ${stem}",
+            name: "Unit Tests: kplat-${arch}",
             failure: '单元测试或覆盖率生成失败',
             type: 'unittest_run',
             arch: arch,
-            machine: machine,
         ]
     }
 
     teeTestArchitectures().each { arch ->
-        def machine = defaultMachine()
-        def stem = stageStem(arch, machine)
         stages << [
-            name: "TEE Tests: ${stem}",
+            name: "TEE Tests: ${arch}",
             failure: 'TEE 测试失败',
             type: 'tee_run',
             arch: arch,
-            machine: machine,
         ]
     }
 
@@ -404,22 +393,22 @@ def runCiWorkload(Map spec) {
             runClippyAndBuild(spec.platform, spec.defconfig ?: defconfigForPlatform(spec.platform))
             break
         case 'doc':
-            runGendocStage(spec.arch)
+            runDocStage(spec.arch)
             break
         case 'build_artifact':
-            runBuildArtifact(spec.arch, spec.machine, spec.name)
+            runBuildArtifact(spec.arch)
             break
         case 'unittest_build':
-            runUnittestBuildArtifact(spec.arch, spec.machine, spec.name)
+            runUnittestBuildArtifact(spec.arch)
             break
         case 'runtime_run':
-            runRuntimeTests(spec.arch, spec.machine, spec.name)
+            runRuntimeTests(spec.arch)
             break
         case 'unittest_run':
-            runUnitTestStage(spec.arch, spec.name)
+            runUnitTestStage(spec.arch)
             break
         case 'tee_run':
-            teeResults[spec.arch] = runTeeStorageTest(spec.arch, spec.name)
+            teeResults[spec.arch] = runTeeStorageTest(spec.arch)
             break
         default:
             error("Unsupported CI stage type: ${spec.type}")
@@ -487,54 +476,58 @@ stdbuf -oL -eL make build
     }
 }
 
-def runBuildArtifact(String arch, String machine, String stageName) {
+def runBuildArtifact(String arch) {
+    def platform = "kplat-${arch}"
+    def stageName = "Build Artifact: ${platform}"
     initStageLog(stageName)
     def runtimeTargetDir = targetDirForArch(arch)
 
     withCleanSourceWorkspace("build-artifact-${arch}") {
         withEnv(["TARGET_DIR=${runtimeTargetDir}"]) {
-            sh label: "Clippy and build ${stageName}", script: """#!/bin/bash
+            sh label: "Clippy and build ${platform}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
-cp ${defconfigFor(arch, machine)} .config
+cp platforms/${platform}/qemu_defconfig .config
 make defconfig
 make clippy
 stdbuf -oL -eL make build
 """
-            publishKernelArtifact(artifactNameForNormal(arch), stageStem(arch, machine))
+            publishKernelArtifact(artifactNameForNormal(arch), platform)
         }
     }
 }
 
-def runUnittestBuildArtifact(String arch, String machine, String stageName) {
+def runUnittestBuildArtifact(String arch) {
+    def platform = "kplat-${arch}"
+    def stageName = "Build Artifact: ${platform} unittest"
     initStageLog(stageName)
     def unittestTargetDir = targetDirForUnittest(arch)
 
     withCleanSourceWorkspace("build-artifact-${arch}-unittest") {
         withEnv(["TARGET_DIR=${unittestTargetDir}"]) {
-            sh label: "Build unittest artifact ${stageName}", script: """#!/bin/bash
+            sh label: "Build unittest artifact ${platform}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
-cp ${defconfigFor(arch, machine)} .config
+cp platforms/${platform}/qemu_defconfig .config
 scripts/ci/prepare_unittest_config.sh .config
 make defconfig
 stdbuf -oL -eL make UNITTEST=y VSOCK=n NET=n build
 """
-            publishKernelArtifact(artifactNameForUnittest(arch), stageStem(arch, machine))
+            publishKernelArtifact(artifactNameForUnittest(arch), platform)
         }
     }
 }
 
-def runRuntimeTests(String arch, String machine, String stageName) {
+def runRuntimeTests(String arch) {
+    def platform = "kplat-${arch}"
+    def stageName = "Runtime Test: ${platform}"
     def stageLog = stageLogFile(stageName)
     initStageLog(stageName)
     def runtimeTargetDir = targetDirForArch(arch)
-    def stem = stageStem(arch, machine)
 
     withCleanSourceWorkspace("runtime-${arch}") {
         withEnv(["TARGET_DIR=${runtimeTargetDir}", "STAGE_LOG=${stageLog}"]) {
             restoreKernelArtifact(artifactNameForNormal(arch))
-            writeHarnessPlatformConfig(stem)
             dir('test-harness') {
                 gitCheckoutPublic(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH)
 
@@ -543,7 +536,7 @@ def runRuntimeTests(String arch, String machine, String stageName) {
                          "ROOTFS_CACHE_DIR=${env.ROOTFS_CACHE_DIR}",
                          "GUEST_CASES_TARGET_DIR=/xkernel-target/guest-cases-${arch}",
                          "JOBS=${env.HARNESS_JOBS}"]) {
-                    sh label: "Run starry-test-harness ${stageName}", script: """#!/bin/bash
+                    sh label: "Run starry-test-harness ${arch}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
 stdbuf -oL -eL make ci-test run
@@ -554,18 +547,9 @@ stdbuf -oL -eL make ci-test run
     }
 }
 
-def writeHarnessPlatformConfig(String stem) {
-    sh label: "Write harness platform ${stem}", script: """#!/bin/bash
-set -euo pipefail
-if grep -q '^PLATFORM=' .config; then
-    sed -i 's|^PLATFORM=.*|PLATFORM="${stem}"|' .config
-else
-    printf '\\nPLATFORM="${stem}"\\n' >> .config
-fi
-"""
-}
-
-def runUnitTestStage(String arch, String stageName) {
+def runUnitTestStage(String arch) {
+    def platform = "kplat-${arch}"
+    def stageName = "Unit Tests: ${platform}"
     def stageLog = stageLogFile(stageName)
     initStageLog(stageName)
     def unittestTargetDir = targetDirForUnittest(arch)
@@ -580,33 +564,20 @@ def runUnitTestStage(String arch, String stageName) {
     }
 }
 
-def runGendocStage(String arch) {
+def runDocStage(String arch) {
     def stageName = "Doc Check: ${arch}"
     initStageLog(stageName)
     def docTargetDir = targetDirForDoc(arch)
-    def hostTarget = sh(script: "rustc -vV | sed -n 's|host: ||p'", returnStdout: true).trim()
-    def targetTriple = targetTripleFor(arch)
-    def platform = "kplat-${arch}"
-    def ldScript = "${docTargetDir}/${targetTriple}/release/linker_${platform}.lds"
-    def kbuildConfigDir = "${docTargetDir}/kbuild/${platform}"
 
     withCleanSourceWorkspace("doc-${arch}") {
         withEnv(["TARGET_DIR=${docTargetDir}"]) {
-            sh label: "Prepare config for gendoc ${arch}", script: """#!/bin/bash
+            sh label: "Prepare config for docs ${arch}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
 cp ${defconfigFor(arch)} .config
 make defconfig
-env CARGO_BUILD_TARGET='${hostTarget}' RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= \
-  cargo run --target-dir '${docTargetDir}/tools/xconf' \
-  --manifest-path xtask/xconfig/Cargo.toml --bin xconf -- \
-  gen-const --output-dir='${kbuildConfigDir}'
-env CARGO_BUILD_TARGET='${hostTarget}' RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= \
-  cargo run --target-dir '${docTargetDir}/tools/xconf' \
-  --manifest-path xtask/xconfig/Cargo.toml --bin xconf -- \
-  gen-cargo --ld-script='${ldScript}'
 """
-            runGendoc(stageName, docTargetDir, arch)
+            runDocs(stageName)
             copyDocArtifactsToWorkspace(docTargetDir, arch)
         }
     }
@@ -656,22 +627,21 @@ done
     }
 }
 
-def runGendoc(String stageName, String targetDir, String arch) {
+def runDocs(String stageName) {
     sh label: 'Generate Rust docs', script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
-# rustdoc runs on the host target with --cfg doc (see .cargo/config.toml).
-# Do not pass --target: bare-metal triples have no std, but kio uses std under cfg(doc).
-cargo run --manifest-path xtask/gendoc/Cargo.toml -- --target-dir '${targetDir}'
+make doc
 """
 }
 
 def copyDocArtifactsToWorkspace(String targetDir, String arch) {
+    def targetTriple = targetTripleFor(arch)
     def outputDir = "${rootWorkspace()}/artifacts/docs/${arch}"
     withEnv(["_CI_DOC_OUTPUT=${outputDir}"]) {
         sh label: 'Collect doc artifacts', script: """#!/bin/bash
 set -euo pipefail
-doc_src="${targetDir}/doc"
+doc_src="${targetDir}/${targetTriple}/doc"
 if [ ! -d "\${doc_src}" ]; then
     echo "No doc directory found at \${doc_src}"
     exit 1
@@ -917,30 +887,7 @@ def defconfigFor(String arch) {
     return "platforms/kplat-${arch}/qemu_defconfig"
 }
 
-// 默认机器：runtime / unittest / TEE 阶段当前都构建并运行在 qemu 上。
-def defaultMachine() {
-    return 'qemu'
-}
-
-// 阶段名与产物名共用的 <arch>-<machine> 词干（即 xkernel_<arch>-<machine>.elf）。
-def stageStem(String arch, String machine) {
-    return "${arch}-${machine}"
-}
-
-// 机器 -> defconfig 文件名：qemu -> qemu_defconfig，rk3588 -> rk3588_defconfig。
-// QEMU feature 变体使用 qemu_<feature>_defconfig，并由显式 stage spec 传入。
-def defconfigFileForMachine(String machine) {
-    return "${machine}_defconfig"
-}
-
-// arch + machine -> defconfig 路径（与已有单参 defconfigFor(arch) 形成重载，互不影响）。
-def defconfigFor(String arch, String machine) {
-    return "platforms/kplat-${arch}/${defconfigFileForMachine(machine)}"
-}
-
 def defconfigForPlatform(String platform) {
-    if (platform == 'aarch64-qemu-crosvm') return 'platforms/kplat-aarch64/qemu_crosvm_defconfig'
-    if (platform == 'aarch64-qemu-virtcca') return 'platforms/kplat-aarch64/qemu_virtcca_defconfig'
     return "platforms/${platform}/qemu_defconfig"
 }
 
@@ -975,37 +922,36 @@ def artifactNameForUnittest(String arch) {
     return "${arch}-unittest"
 }
 
-def publishKernelArtifact(String artifactName, String stem) {
+def publishKernelArtifact(String artifactName, String platform) {
     def artifactDir = "${ciArtifactRoot()}/${artifactName}"
     sh label: "Publish artifact ${artifactName}", script: """#!/bin/bash
 set -euo pipefail
 artifact_dir='${artifactDir}'
 rm -rf "\${artifact_dir}"
 mkdir -p "\${artifact_dir}"
-cp .config .config.prepared auto.conf autoconf.h "\${artifact_dir}/"
+cp .config auto.conf autoconf.h "\${artifact_dir}/"
 shopt -s nullglob
-for image in xkernel_${stem}.*; do
+for image in xkernel_*; do
     cp "\${image}" "\${artifact_dir}/"
 done
+# Archive the xkmake bundle (release images + manifest, and any runtime
+# state such as OVMF vars) so later test stages can `xkmake run --no-build`
+# without relying on a shared TARGET_DIR mount across agents.
+bundle_src="\${TARGET_DIR}/xkmake/${platform}"
+if [ -d "\${bundle_src}" ]; then
+    tar -cf "\${artifact_dir}/bundle.tar" -C "\${TARGET_DIR}/xkmake" "${platform}"
+else
+    echo "warning: xkmake bundle dir not found at \${bundle_src}; skipping bundle archive" >&2
+fi
 """
 }
 
 def restoreKernelArtifact(String artifactName) {
     def artifactDir = "${ciArtifactRoot()}/${artifactName}"
-    // NOTE:
-    // This only restores workspace-level runtime inputs (.config, generated
-    // Kconfig side files, and final xkernel_* images). It does NOT snapshot
-    // or restore the full cargo/boot TARGET_DIR tree.
-    //
-    // The current pipeline relies on all stages sharing the same top-level
-    // docker agent and its build-scoped anonymous /xkernel-target volume, so
-    // build-stage outputs under TARGET_DIR remain available to later Run &
-    // Test stages without being shared with another Jenkins build.
-    //
-    // If we later split build and test across different agents/containers,
-    // this is no longer sufficient: the target-dir contents (boot artifacts,
-    // OVMF vars, linker outputs, cargo intermediates, etc.) must either be
-    // archived/restored explicitly or rebuilt on the test-side agent.
+    // Restores workspace-level runtime inputs (.config, generated Kconfig
+    // side files, final xkernel_* images) plus the xkmake bundle archived by
+    // publishKernelArtifact (bundle.tar), so `xkmake run --no-build` works
+    // even when build and test stages do not share a TARGET_DIR mount.
     sh label: "Restore artifact ${artifactName}", script: """#!/bin/bash
 set -euo pipefail
 artifact_dir='${artifactDir}'
@@ -1014,13 +960,19 @@ if [ ! -d "\${artifact_dir}" ]; then
     exit 1
 fi
 cp "\${artifact_dir}/.config" .
-cp "\${artifact_dir}/.config.prepared" .
 cp "\${artifact_dir}/auto.conf" .
 cp "\${artifact_dir}/autoconf.h" .
 shopt -s nullglob
 for image in "\${artifact_dir}"/xkernel_*; do
     cp "\${image}" .
 done
+# Restore the xkmake bundle (release/ + runtime/) under TARGET_DIR/xkmake
+# so `xkmake run --no-build` finds a compatible bundle.
+bundle_tar="\${artifact_dir}/bundle.tar"
+if [ -f "\${bundle_tar}" ]; then
+    mkdir -p "\${TARGET_DIR}/xkmake"
+    tar -xf "\${bundle_tar}" -C "\${TARGET_DIR}/xkmake"
+fi
 """
 }
 
@@ -1264,7 +1216,8 @@ def targetTripleFor(String archOrPlatform) {
     error("Unsupported arch/platform: ${archOrPlatform}")
 }
 
-def runTeeStorageTest(String arch, String stageName) {
+def runTeeStorageTest(String arch) {
+    def stageName = "TEE Tests: ${arch}"
     initStageLog(stageName)
     def result = [arch: arch, passed: 0, failed: 0, status: 'unknown', errorSnippet: '', missingApps: []]
     def teeTargetDir = targetDirForArch(arch)
@@ -1279,7 +1232,7 @@ def runTeeStorageTest(String arch, String stageName) {
                  "TEE_TEST_BINS=${testBins.join(' ')}",
                  "SKIP_KERNEL_BUILD=1"]) {
             restoreKernelArtifact(artifactNameForNormal(arch))
-            sh label: "Run TEE tests ${stageName}", script: """#!/bin/bash
+            sh label: "Run TEE tests ${arch}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
 scripts/ci/run_tee_storage_test.sh '${arch}'
@@ -1316,7 +1269,7 @@ scripts/ci/run_tee_storage_test.sh '${arch}'
         }
 
         if (result.status != 'passed') {
-            error("${stageName}: ${result.status} (passed=${result.passed}, failed=${result.failed})")
+            error("TEE Tests ${arch}: ${result.status} (passed=${result.passed}, failed=${result.failed})")
         }
     }
 

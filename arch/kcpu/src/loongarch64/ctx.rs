@@ -250,7 +250,7 @@ impl ExceptionContext {
         self.from_syscall = from_syscall;
     }
 
-    /// Snapshot a0 before syscall dispatch so that [`rollback_syscall`] can
+    /// Snapshot a0 before syscall dispatch so that [`Self::rollback_syscall`] can
     /// restore it after the return value overwrites it.
     pub fn save_syscall_args(&mut self) {
         self.saved_syscall_arg0 = self.regs.a0;

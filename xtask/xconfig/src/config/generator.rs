@@ -2,9 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use std::{collections::HashMap, fs::File, io::Write, path::Path};
+use std::{collections::HashMap, fmt::Write, path::Path};
 
 use crate::{
+    config::write_if_changed,
     error::{KconfigError, Result},
     kconfig::{
         SymbolTable,
@@ -22,59 +23,65 @@ pub struct ConfigGenerator;
 
 impl ConfigGenerator {
     pub fn generate_auto_conf(path: impl AsRef<Path>, symbols: &SymbolTable) -> Result<()> {
-        let mut file = File::create(path)?;
+        let mut content = String::new();
 
-        writeln!(file, "#")?;
-        writeln!(file, "# Automatically generated file; DO NOT EDIT.")?;
-        writeln!(file, "#")?;
+        writeln!(content, "#").unwrap();
+        writeln!(content, "# Automatically generated file; DO NOT EDIT.").unwrap();
+        writeln!(content, "#").unwrap();
 
-        for (name, symbol) in symbols.all_symbols() {
+        let mut sorted_symbols = symbols.all_symbols().collect::<Vec<_>>();
+        sorted_symbols.sort_by_key(|(name, _)| *name);
+        for (name, symbol) in sorted_symbols {
             // Strip CONFIG_ prefix if present
             let clean_name = name.strip_prefix("CONFIG_").unwrap_or(name);
 
-            if let Some(value) = &symbol.value {
-                if value != "n" {
-                    writeln!(file, "{}={}", clean_name, value)?;
-                }
+            if let Some(value) = &symbol.value
+                && value != "n"
+            {
+                writeln!(content, "{}={}", clean_name, value).unwrap();
             }
         }
 
+        write_if_changed(path.as_ref(), &content)?;
         Ok(())
     }
 
     pub fn generate_autoconf_h(path: impl AsRef<Path>, symbols: &SymbolTable) -> Result<()> {
-        let mut file = File::create(path)?;
+        let mut content = String::new();
 
-        writeln!(file, "/*")?;
-        writeln!(file, " * Automatically generated file; DO NOT EDIT.")?;
-        writeln!(file, " */")?;
-        writeln!(file)?;
+        writeln!(content, "/*").unwrap();
+        writeln!(content, " * Automatically generated file; DO NOT EDIT.").unwrap();
+        writeln!(content, " */").unwrap();
+        writeln!(content).unwrap();
 
-        for (name, symbol) in symbols.all_symbols() {
+        let mut sorted_symbols = symbols.all_symbols().collect::<Vec<_>>();
+        sorted_symbols.sort_by_key(|(name, _)| *name);
+        for (name, symbol) in sorted_symbols {
             // Strip CONFIG_ prefix if present
             let clean_name = name.strip_prefix("CONFIG_").unwrap_or(name);
 
             if let Some(value) = &symbol.value {
                 match value.as_str() {
                     "y" => {
-                        writeln!(file, "#define {} 1", clean_name)?;
+                        writeln!(content, "#define {} 1", clean_name).unwrap();
                     }
                     "m" => {
                         // Treat modules as 'y' (no module support in rust-kbuild)
                         // This is a simplification compared to Linux Kconfig which would
                         // generate a separate _MODULE define
-                        writeln!(file, "#define {} 1", clean_name)?;
+                        writeln!(content, "#define {} 1", clean_name).unwrap();
                     }
                     "n" => {
                         // Don't define anything for disabled options
                     }
                     _ => {
-                        writeln!(file, "#define {} \"{}\"", clean_name, value)?;
+                        writeln!(content, "#define {} \"{}\"", clean_name, value).unwrap();
                     }
                 }
             }
         }
 
+        write_if_changed(path.as_ref(), &content)?;
         Ok(())
     }
 
@@ -114,17 +121,17 @@ impl ConfigGenerator {
             let clean_key = key.strip_prefix("CONFIG_").unwrap_or(key.as_str());
 
             // Try to emit using the authoritative SymbolType from Kconfig
-            if let Some(symbol_type) = type_map.get(clean_key) {
-                if Self::emit_typed_const(&mut content, key, value, symbol_type)? {
-                    continue;
-                }
+            if let Some(symbol_type) = type_map.get(clean_key)
+                && Self::emit_typed_const(&mut content, key, value, symbol_type)?
+            {
+                continue;
             }
 
             // Fallback: use heuristics when no type information is available
             Self::emit_heuristic_const(&mut content, key, value)?;
         }
 
-        std::fs::write(&config_rs_path, content)?;
+        write_if_changed(&config_rs_path, &content)?;
 
         println!("📝 Generated config.rs at: {}", config_rs_path.display());
 

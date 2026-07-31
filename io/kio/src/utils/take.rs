@@ -22,7 +22,7 @@ use crate::{BufRead, Error, IoBuf, Read, Result, Seek, SeekFrom};
 /// This struct is generally created by calling [`take`] on a reader.
 /// Please see the documentation of [`take`] for more details.
 ///
-/// See [`std::io::Take`] for more details.
+/// See [`std::io::Take`](https://doc.rust-lang.org/std/io/struct.Take.html) for more details.
 ///
 /// [`take`]: Read::take
 #[derive(Debug)]

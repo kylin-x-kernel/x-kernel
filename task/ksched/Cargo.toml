@@ -14,5 +14,4 @@ default = []
 
 [dependencies]
 linked_list_r4l.workspace = true
-log.workspace = true
 unittest = { workspace = true }

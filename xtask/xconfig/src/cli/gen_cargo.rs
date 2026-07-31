@@ -78,11 +78,10 @@ fn load_effective_build_config(config: &Path) -> Result<HashMap<String, String>>
 
 /// Write `content` to `path` only if it differs from the current file content.
 fn write_if_changed(path: &std::path::Path, content: &str) -> std::io::Result<bool> {
-    if let Ok(existing) = std::fs::read_to_string(path) {
-        if existing == content {
+    if let Ok(existing) = std::fs::read_to_string(path)
+        && existing == content {
             return Ok(false);
         }
-    }
     std::fs::write(path, content)?;
     Ok(true)
 }
@@ -225,7 +224,7 @@ fn generate_cargo_config(config: &HashMap<String, String>, opts: &BuildOpts) -> 
 
     let dot_cargo_dir = std::path::Path::new(".cargo");
     if !dot_cargo_dir.exists() {
-        std::fs::create_dir(dot_cargo_dir).map_err(|e| KconfigError::Io(e))?;
+        std::fs::create_dir(dot_cargo_dir).map_err(KconfigError::Io)?;
     }
 
     let mut all_plat_names: Vec<String> = Vec::new();
@@ -237,11 +236,10 @@ fn generate_cargo_config(config: &HashMap<String, String>, opts: &BuildOpts) -> 
                 && std::fs::read_to_string(path.join("src/lib.rs"))
                     .map(|c| c.contains("k_plat_name"))
                     .unwrap_or(false);
-            if has_defconfig || has_plat_cfg {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if (has_defconfig || has_plat_cfg)
+                && let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     all_plat_names.push(name.to_string());
                 }
-            }
         }
     }
     all_plat_names.sort();

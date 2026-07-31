@@ -40,14 +40,12 @@ echo "==> Building TEE tests for ${musl_target}: ${tee_test_bins[*]}"
 )
 
 tee_init_apps=""
-copy_args=(--copy "${TARGET_DIR}/tee-apps/${musl_target}/release/sh":/bin/sh)
 for bin in "${tee_test_bins[@]}"; do
     app_path="/tee/${bin}"
     if [ -n "${tee_init_apps}" ]; then
         tee_init_apps+=","
     fi
     tee_init_apps+="${app_path}"
-    copy_args+=(--copy "${libutee_dir}/target/${musl_target}/release/${bin}:${app_path}")
 done
 
 echo "==> Building tee_apps/sh with TEE_INIT_APPS=${tee_init_apps}..."
@@ -60,11 +58,17 @@ env \
   --target-dir "${TARGET_DIR}/tee-apps"
 
 echo "==> Creating rootfs..."
-env -u CARGO_BUILD_TARGET RUSTFLAGS= cargo run --release \
-  --manifest-path xtask/crate_rootfs/Cargo.toml \
-  --target-dir "${TARGET_DIR}/crate-rootfs" -- \
-  --image disk.img --size-bytes 64M \
-  "${copy_args[@]}"
+staging_dir="${TARGET_DIR}/rootfs-staging"
+rm -rf "${staging_dir}"
+mkdir -p "${staging_dir}/bin" "${staging_dir}/tee"
+cp "${TARGET_DIR}/tee-apps/${musl_target}/release/sh" "${staging_dir}/bin/sh"
+chmod 0755 "${staging_dir}/bin/sh"
+for bin in "${tee_test_bins[@]}"; do
+    cp "${libutee_dir}/target/${musl_target}/release/${bin}" "${staging_dir}/tee/${bin}"
+    chmod 0755 "${staging_dir}/tee/${bin}"
+done
+truncate -s 64M disk.img
+mkfs.ext4 -q -F -b 4096 -O ^metadata_csum,^64bit -d "${staging_dir}" disk.img
 
 if [ "${SKIP_KERNEL_BUILD:-0}" != "1" ]; then
     echo "==> Building kernel..."

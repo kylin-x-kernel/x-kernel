@@ -29,7 +29,7 @@ pub fn evaluate_shell_expr(expr: &str, symbols: &SymbolTable) -> Result<String> 
     // Handle $(VAR_NAME) variable references
     if trimmed.starts_with("$(") && trimmed.ends_with(')') {
         let var_name = &trimmed[2..trimmed.len() - 1];
-        let value = symbols.get_value(var_name).unwrap_or_else(|| String::new());
+        let value = symbols.get_value(var_name).unwrap_or_default();
         return Ok(value);
     }
 
@@ -87,9 +87,9 @@ fn split_if_parts(input: &str) -> Result<Vec<String>> {
     let mut depth = 0;
     let mut in_string = false;
     let mut escape_next = false;
-    let mut chars = input.chars().peekable();
+    let chars = input.chars().peekable();
 
-    while let Some(ch) = chars.next() {
+    for ch in chars {
         if escape_next {
             // Previous character was a backslash, so this character is escaped
             current.push(ch);

@@ -2,24 +2,24 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use std::{fs::File, io::Write, path::Path};
+use std::{fmt::Write, path::Path};
 
-use crate::{error::Result, kconfig::SymbolTable};
+use crate::{config::write_if_changed, error::Result, kconfig::SymbolTable};
 
 pub struct ConfigWriter;
 
 impl ConfigWriter {
     pub fn write(path: impl AsRef<Path>, symbols: &SymbolTable) -> Result<()> {
-        let mut file = File::create(path)?;
+        let mut content = String::new();
 
-        writeln!(file, "#")?;
-        writeln!(file, "# Automatically generated file; DO NOT EDIT.")?;
-        writeln!(file, "# Rust Kbuild Configuration")?;
-        writeln!(file, "#")?;
+        writeln!(content, "#").unwrap();
+        writeln!(content, "# Automatically generated file; DO NOT EDIT.").unwrap();
+        writeln!(content, "# Rust Kbuild Configuration").unwrap();
+        writeln!(content, "#").unwrap();
 
         // Sort keys alphabetically for stable output
         let mut sorted_symbols: Vec<_> = symbols.all_symbols().collect();
-        sorted_symbols.sort_by(|(name_a, _), (name_b, _)| name_a.cmp(name_b));
+        sorted_symbols.sort_by_key(|(name, _)| *name);
 
         for (name, symbol) in sorted_symbols {
             let clean_name = name.strip_prefix("CONFIG_").unwrap_or(name);
@@ -27,10 +27,10 @@ impl ConfigWriter {
             if let Some(value) = &symbol.value {
                 match value.as_str() {
                     "y" | "m" => {
-                        writeln!(file, "{}={}", clean_name, value)?;
+                        writeln!(content, "{}={}", clean_name, value).unwrap();
                     }
                     "n" => {
-                        writeln!(file, "# {} is not set", clean_name)?;
+                        writeln!(content, "# {} is not set", clean_name).unwrap();
                     }
                     _ => {
                         use crate::kconfig::ast::SymbolType;
@@ -46,23 +46,23 @@ impl ConfigWriter {
                                         // If parsing fails, use the value as-is
                                         value.to_string()
                                     };
-                                writeln!(file, "{}={}", clean_name, normalized_hex)?;
+                                writeln!(content, "{}={}", clean_name, normalized_hex).unwrap();
                             }
                             ref ty if ty.is_integer_type() => {
                                 // Integer: NO quotes, decimal format
-                                writeln!(file, "{}={}", clean_name, value)?;
+                                writeln!(content, "{}={}", clean_name, value).unwrap();
                             }
                             SymbolType::String => {
                                 // String: Keep quotes
-                                writeln!(file, "{}=\"{}\"", clean_name, value)?;
+                                writeln!(content, "{}=\"{}\"", clean_name, value).unwrap();
                             }
                             SymbolType::Range(_) => {
                                 // Range: [a,b,c] format without extra quotes
-                                writeln!(file, "{}={}", clean_name, value)?;
+                                writeln!(content, "{}={}", clean_name, value).unwrap();
                             }
                             _ => {
                                 // Fallback for other types
-                                writeln!(file, "{}=\"{}\"", clean_name, value)?;
+                                writeln!(content, "{}=\"{}\"", clean_name, value).unwrap();
                             }
                         }
                     }
@@ -72,7 +72,7 @@ impl ConfigWriter {
                 use crate::kconfig::ast::SymbolType;
                 match symbol.symbol_type {
                     SymbolType::Bool | SymbolType::Tristate => {
-                        writeln!(file, "# {} is not set", clean_name)?;
+                        writeln!(content, "# {} is not set", clean_name).unwrap();
                     }
                     _ => {
                         // For other types (string, int, hex, range), skip writing to keep the config clean
@@ -81,6 +81,7 @@ impl ConfigWriter {
             }
         }
 
+        write_if_changed(path.as_ref(), &content)?;
         Ok(())
     }
 }

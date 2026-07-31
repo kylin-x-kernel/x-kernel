@@ -9,6 +9,9 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 
+[package.metadata.cargo-shear]
+ignored = ["kalloc"]
+
 [features]
 default = ["linux_sysno/tee", "kalloc/tee", "tee_ss_smx"]
 tee_cfg_memtag = []
@@ -36,7 +39,6 @@ khal.workspace = true
 klogger.workspace = true
 knet.workspace = true
 ksync.workspace = true
-bitflags.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
 cfg-if.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }

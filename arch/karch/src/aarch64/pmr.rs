@@ -67,7 +67,7 @@ pub fn is_ready() -> bool {
 /// `true` and the fast IRQ mask/unmask path (PMR-based instead of DAIF) is active
 /// on this CPU.
 ///
-/// Called from [`init`] (GICv2) and from [`gic::init_current_cpu`] (both GICv2
+/// Called from [`init`] (GICv2) and from `gic::init_current_cpu` (both GICv2
 /// and GICv3) during per-CPU bringup.
 #[inline]
 pub fn mark_ready() {
@@ -86,7 +86,7 @@ pub fn mark_ready() {
 ///
 /// **Call at most once.** The GIC version (v2 → MMIO, v3 → `ICC_PMR_EL1`) is
 /// a platform property determined at boot and never changes.  This function must
-/// only be called by the GICv2 driver ([`gicv2::init`]); the GICv3 driver never
+/// only be called by the GICv2 driver's `gicv2::init`; the GICv3 driver never
 /// calls it — it goes through [`mark_ready`] alone during per-CPU bringup.
 ///
 /// # Memory ordering

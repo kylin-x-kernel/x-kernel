@@ -32,7 +32,6 @@ kpoll = { workspace = true }
 tipc = { workspace = true, optional = true }
 linux-raw-sys = { workspace = true, features = ["general"] }
 bitflags = { workspace = true }
-cfg-if = { workspace = true }
 enum_dispatch = { workspace = true }
 etherparse = { workspace = true }
 hashbrown = "0.16"

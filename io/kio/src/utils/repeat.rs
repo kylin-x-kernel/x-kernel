@@ -21,7 +21,7 @@ pub struct Repeat {
 /// All reads from this reader will succeed by filling the specified buffer with
 /// the given byte.
 ///
-/// See [`std::io::repeat()`] for more details.
+/// See [`std::io::repeat()`](https://doc.rust-lang.org/std/io/fn.repeat.html) for more details.
 #[must_use]
 pub const fn repeat(byte: u8) -> Repeat {
     Repeat { byte }

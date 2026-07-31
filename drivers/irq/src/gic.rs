@@ -272,8 +272,9 @@ fn close_nmi_window() {
 
 /// Dispatch the current hardware interrupt.
 ///
-/// The `_unused` parameter exists only to satisfy the [`IntrManagerIf::dispatch_irq`]
-/// trait signature, which passes an IRQ identifier used by architectures like x86.
+/// The `_unused` parameter exists only to satisfy the
+/// [`khal::irq::IntrManagerIf::dispatch_irq`] trait signature, which passes an
+/// IRQ identifier used by architectures like x86.
 /// On GIC (both v2 and v3), the pending interrupt ID is read directly from the
 /// hardware acknowledge register (IAR), so the parameter is never consumed.
 /// It is intentionally kept unnamed to avoid a register move on this hot path;
@@ -281,10 +282,10 @@ fn close_nmi_window() {
 ///
 /// # NMI window (feature = `nmi-pmu`)
 ///
-/// For non‑PMU interrupts this calls [`open_nmi_window()`].  The caller
+/// For non‑PMU interrupts this calls `open_nmi_window()`. The caller
 /// **must** ensure the returned `completion_cookie` is eventually passed to
 /// [`complete_irq()`] (or `DispatchedIrq::complete` / `Drop`) to invoke
-/// [`close_nmi_window()`].  See [`open_nmi_window()`] for the full pairing
+/// `close_nmi_window()`. See `open_nmi_window()` for the full pairing
 /// contract and the `panic = "abort"` caveat.
 pub fn dispatch_irq_by_gic_version(_unused: usize) -> Option<(usize, usize)> {
     let res = match active_version() {
@@ -302,8 +303,8 @@ pub fn dispatch_irq_by_gic_version(_unused: usize) -> Option<(usize, usize)> {
 
 /// Complete (deactivate) a previously dispatched interrupt.
 ///
-/// For non‑PMU interrupts this calls [`close_nmi_window()`] to restore PMR
-/// and re‑mask `DAIF.I`, pairing with the [`open_nmi_window()`] call in
+/// For non‑PMU interrupts this calls `close_nmi_window()` to restore PMR
+/// and re‑mask `DAIF.I`, pairing with the `open_nmi_window()` call in
 /// [`dispatch_irq_by_gic_version()`].
 ///
 /// The `completion_cookie` is decoded per GIC version before comparing with

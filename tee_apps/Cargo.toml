@@ -18,6 +18,3 @@ keywords = [
     "user-space app",
 ]
 categories = ["os", "no-std", "user-space app"]
-
-[workspace.dependencies]
-rsext4 = { path = "../fs/filesystems/rsext4", default-features = false }

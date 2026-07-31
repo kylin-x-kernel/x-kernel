@@ -47,10 +47,6 @@ if grep -q "UNITTEST_STATUS: TESTS_FAILED" unittest-output.log; then
     exit 1
 fi
 
-if grep -q "UNITTEST_STATUS: ALL_TESTS_PASSED" unittest-output.log; then
-    exit 0
-fi
-
 if grep -q "panicked at" unittest-output.log; then
     echo "Kernel panic detected during unit tests"
     exit 1
@@ -61,13 +57,17 @@ if grep -q "test result:.*FAILED" unittest-output.log; then
     exit 1
 fi
 
-if grep -q "test result: ok" unittest-output.log; then
+if [ "${status}" -ne 0 ]; then
+    echo "Unit test command or coverage generation exited with status ${status}"
+    exit 1
+fi
+
+if grep -q "UNITTEST_STATUS: ALL_TESTS_PASSED" unittest-output.log; then
     exit 0
 fi
 
-if [ "${status}" -ne 0 ]; then
-    echo "Unit test command exited with status ${status}"
-    exit 1
+if grep -q "test result: ok" unittest-output.log; then
+    exit 0
 fi
 
 echo "Unable to determine test result from unit test output"

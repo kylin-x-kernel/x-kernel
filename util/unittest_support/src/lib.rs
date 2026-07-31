@@ -3,7 +3,6 @@
 // See LICENSES for license details.
 
 #![no_std]
-#![allow(missing_docs)]
 
 extern crate alloc;
 

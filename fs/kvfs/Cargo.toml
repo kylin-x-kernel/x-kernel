@@ -15,7 +15,6 @@ khal.workspace = true
 kpoll = { workspace = true }
 klazy = { workspace = true }
 bitflags = "2.10"
-cfg-if = "1"
 hashbrown = "0.15"
 inherit-methods-macro = "0.1"
 iov_iter = { workspace = true }

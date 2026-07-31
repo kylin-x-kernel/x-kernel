@@ -15,7 +15,6 @@ nmi = ["khal/nmi"]
 [dependencies]
 khal.workspace = true
 ktask = { workspace = true, features = ["watchdog"] }
-cfg-if.workspace = true
 log.workspace = true
 percpu.workspace = true
 kbuild_config = { workspace = true }

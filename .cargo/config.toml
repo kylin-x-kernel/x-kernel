@@ -69,7 +69,5 @@ rustflags = [
 
 [alias]
 xconfig = "run --manifest-path xtask/xconfig/Cargo.toml --"
-convert-cov = "run --manifest-path xtask/convert_cov/Cargo.toml --"
-crate-rootfs = "run --manifest-path xtask/crate_rootfs/Cargo.toml --"
-gendoc = "run --manifest-path xtask/gendoc/Cargo.toml --"
 uapp = "run --manifest-path xtask/uapp/Cargo.toml --"
+xkmake = "run --manifest-path xtask/xkmake/Cargo.toml --"

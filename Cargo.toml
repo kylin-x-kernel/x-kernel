@@ -5,6 +5,7 @@ members = [
     "entry",
     # boot and loader
     "boot/*",
+    "tee/tee_crypto",
 ]
 exclude = [
     # platform-specific boot code that is not intended to be built as part of the main workspace
@@ -129,7 +130,6 @@ watchdog = { path = "io/watchdog" }
 
 # Internal: drivers
 aarch64-pmuv3 = { path = "drivers/aarch64-pmuv3" }
-arm-gic = { path = "drivers/arm-gic" }
 block = { path = "drivers/block" }
 char_driver = { path = "drivers/char" }
 display = { path = "drivers/display" }
@@ -178,6 +178,7 @@ tipc_handle = { path = "tee/tipc_handle" }
 # Internal: utilities and tooling
 backtrace = { path = "util/backtrace" }
 kbuild_config = { path = "util/kbuild_config" }
+kernel-image-metadata = { path = "boot/kernel-image-metadata" }
 kerrno = { path = "util/kerrno" }
 kiface = { path = "util/kiface" }
 kidentity = { path = "process/kidentity" }
@@ -235,7 +236,6 @@ virtio-drivers = { version = "0.13.1", default-features = false, package = "kvir
 x86_64 = { version = "=0.15.4", features = ["instructions"] }
 ktracepoint = "0.5"
 static-keys = "0.8"
-downcast-rs = { version = "2.0", default-features = false, features = ["sync"] }
 flatten_objects = "0.2.4"
 weak-map = "0.1.1"
 tock-registers = "0.10.1"
