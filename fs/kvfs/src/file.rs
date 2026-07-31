@@ -5,7 +5,7 @@
 //! Open-file objects.
 //!
 //! `VfsFile` owns opened-file state: `f_path`, `f_inode`, `f_mapping`,
-//! `f_op`, `f_flags`, `f_pos`, and `private_data`.
+//! `f_op`, `f_flags`, `f_pos`, `f_pipe`, and `private_data`.
 
 use alloc::sync::Arc;
 use core::{
@@ -320,6 +320,7 @@ pub struct VfsFileBuilder {
     private_data: TypeMap,
     flags: OpenFlags,
     position: u64,
+    pipe_generation: u64,
 }
 
 impl VfsFileBuilder {
@@ -333,6 +334,7 @@ impl VfsFileBuilder {
             private_data: TypeMap::default(),
             flags: open_flags,
             position: 0,
+            pipe_generation: 0,
         }
     }
 
@@ -397,6 +399,11 @@ impl VfsFileBuilder {
     /// Returns the access mode requested for this in-progress open.
     pub fn mode(&self) -> FMode {
         self.mode
+    }
+
+    /// Returns whether this open request has normalized nonblocking semantics.
+    pub fn is_nonblocking(&self) -> bool {
+        self.flags.contains(OpenFlags::NONBLOCK)
     }
 
     pub(crate) fn was_created(&self) -> bool {
@@ -488,6 +495,10 @@ impl VfsFileBuilder {
         self.mode |= FMode::STREAM;
     }
 
+    pub(crate) fn set_pipe_generation(&mut self, generation: u64) {
+        self.pipe_generation = generation;
+    }
+
     pub(crate) fn disable_pwrite(&mut self) {
         self.mode &= !FMode::PWRITE;
     }
@@ -518,6 +529,7 @@ impl VfsFileBuilder {
             private_data,
             flags,
             position,
+            pipe_generation,
         } = self;
 
         let operations = operations.ok_or(VfsError::InvalidInput)?;
@@ -530,6 +542,7 @@ impl VfsFileBuilder {
             private_data: Mutex::new(private_data),
             flags: AtomicU32::new(flags.bits()),
             position: Mutex::new(position),
+            pipe_generation,
         }))
     }
 }
@@ -543,6 +556,7 @@ pub struct VfsFile {
     private_data: Mutex<TypeMap>,
     flags: AtomicU32,
     position: Mutex<u64>,
+    pipe_generation: u64,
 }
 
 impl VfsFile {
@@ -706,7 +720,14 @@ impl VfsFile {
             return Err(VfsError::InvalidInput);
         }
         self.verify_io_area(pos, count)?;
-        self.path().check_writable_mount()
+        if matches!(
+            self.node_type(),
+            NodeType::CharacterDevice | NodeType::BlockDevice | NodeType::Fifo | NodeType::Socket
+        ) {
+            Ok(())
+        } else {
+            self.path().check_writable_mount()
+        }
     }
 
     /// Reads from this open file and advances `f_pos` when applicable.
@@ -798,6 +819,16 @@ impl VfsFile {
         Ok(())
     }
 
+    pub(crate) fn file_accessed(&self) {
+        if !self.flags().contains(OpenFlags::NO_ATIME) {
+            self.path().touch_atime();
+        }
+    }
+
+    pub(crate) fn file_update_time(&self) -> VfsResult<()> {
+        self.path().update_cmtime()
+    }
+
     /// Runs directory iteration for this open file description.
     pub fn iterate_dir(&self, ctx: &mut DirContext<'_>) -> VfsResult<usize> {
         if self.inode().node_type() != NodeType::Directory {
@@ -831,6 +862,10 @@ impl VfsFile {
     /// Returns this file's `f_pos`.
     pub fn position(&self) -> u64 {
         *self.position.lock()
+    }
+
+    pub(crate) fn pipe_generation(&self) -> u64 {
+        self.pipe_generation
     }
 
     /// Sets this file's `f_pos`.

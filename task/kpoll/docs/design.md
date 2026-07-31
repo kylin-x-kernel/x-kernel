@@ -40,7 +40,7 @@ task/kpoll/
 - `task/ktask`：`poll_io`、`interruptible`、task interrupt/join、GC wait；
 - `fs/kvfs`：`FileOperations::register_poll`；
 - `core/ksyscall`：poll/select、wait、signal；
-- `process/kfd_objects`：pipe/eventfd/epoll 等；
+- `process/kfd_objects`：eventfd/epoll 等；`fs/kvfs`：pipe/FIFO；
 - `net/knet`、`io/ktty`、`drivers/irq-notify`、`tee/tipc*`。
 
 ## 架构

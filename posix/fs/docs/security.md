@@ -81,7 +81,8 @@ kfd resources / kvfs / device and pipe implementations
    fd 查找得到的对象在当前操作期间由引用计数保持存活。
 4. **类型相关操作先 downcast 校验**：
    `ftruncate`、`fstatfs`、定点 I/O 和目录 seek 等路径先确认对象是 `File`、
-   `Directory` 或 pipe endpoint，类型不匹配返回错误。
+   `Directory`；pipe 专用操作确认 `VfsFile::private_data` 中存在 `PipeObject`，
+   类型不匹配返回错误。
 5. **范围和溢出必须显式处理**：
    `fallocate` 对负 offset/len 和 `offset + len` 溢出返回 `InvalidInput`；
    `lseek` 目录 offset 使用 `checked_add_signed`；
@@ -151,6 +152,7 @@ kfd resources / kvfs / device and pipe implementations
 | T-22 | umask 出现两份 owner 或被高位污染 | process / fs context | 高 | process runtime 与 FsStruct 各保存一份，或 `sys_umask` 未截断 | `FsStruct` 是唯一 owner，`replace_umask` 统一执行 `mask & 0777`；fork/clone 与 pathname snapshot 都复制或共享该对象 |
 | T-23 | namespace syscall 对 final name 做两次 lookup 并操作同名替代对象 | pathname / namespace | 高 | syscall 先解析完整目标或锁外确认目标不存在，再由 Path 按名称重新查找 | link/symlink/unlink/rmdir 调用专用 `Filename::*_at`；Dentry 在父目录 exclusive lock 下执行唯一 final lookup |
 | T-24 | `linkat` 默认错误跟随 source symlink 或静默接受未知 flags | pathname flags | 中 | 通用 resolve helper 默认 follow，或 syscall 只记录 warning | syscall 只接受 `AT_SYMLINK_FOLLOW | AT_EMPTY_PATH`；默认显式使用 no-follow，未知位返回 `EINVAL` |
+| T-25 | FIFO open 根据第一次错误重新解析 pathname | pathname/open | 高 | 两次 lookup 之间目标被 rename 或 symlink replacement | syscall open 只调用一次 `Filename::open_with_flags_at`；FIFO dispatch 在 KVFS 已授权的 resolved inode 上完成 |
 
 影响等级定义：
 

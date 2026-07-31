@@ -16,10 +16,9 @@ use core::ffi::{c_char, c_int};
 
 use iov_iter::{IovSink, IovSource, iov_iter_dest, iov_iter_source};
 use kerrno::{KError, KResult, LinuxError};
-use kfd_objects::pipe::current_pipe_endpoint;
 use kio::prelude::*;
 use kpoll::IoEvents;
-use kvfs::{FMode, Filename, LookupFlags, LookupIntent, OpenFlags, VfsFile};
+use kvfs::{FMode, Filename, LookupFlags, LookupIntent, OpenFlags, VfsFile, pipe::PipeObject};
 use linux_raw_sys::general::__kernel_off_t;
 use linux_sysno::Sysno;
 use osvm::{VirtPtr, VmBytes, VmBytesMut};
@@ -417,7 +416,8 @@ pub fn sys_fadvise64(
     debug!("sys_fadvise64 <= fd: {fd}, offset: {offset}, len: {len}, advice: {advice}");
     // Provide hints to kernel about how file will be accessed
     // Currently not fully implemented - pipes are not supported
-    if current_pipe_endpoint(fd).is_ok() {
+    let file = kprocess::current_resources().get_file(fd)?;
+    if PipeObject::from_file(&file).is_ok() {
         return Err(KError::BrokenPipe);
     }
     if advice > 5 {
@@ -744,15 +744,13 @@ pub fn sys_splice(
         }
         SendFile::Offset(resources.get_file(fd_in)?, off_in.cast())
     } else {
-        // Try to use as pipe first
-        if let Ok(src) = current_pipe_endpoint(fd_in) {
-            if !src.is_read() {
+        let file = resources.get_file(fd_in)?;
+        if PipeObject::from_file(&file).is_ok() {
+            if !file.mode().contains(FMode::READ) {
                 return Err(KError::BadFileDescriptor);
             }
             has_pipe = true;
         }
-        // Path-only files (opened without O_RDWR/O_WRONLY) cannot be spliced
-        let file = resources.get_file(fd_in)?;
         if file.is_path() {
             return Err(KError::InvalidInput);
         }
@@ -767,21 +765,18 @@ pub fn sys_splice(
         }
         SendFile::Offset(resources.get_file(fd_out)?, off_out.cast())
     } else {
-        // Try to use as pipe first
-        if let Ok(dst) = current_pipe_endpoint(fd_out) {
-            if !dst.is_write() {
+        let file = resources.get_file(fd_out)?;
+        if PipeObject::from_file(&file).is_ok() {
+            if !file.mode().contains(FMode::WRITE) {
                 return Err(KError::BadFileDescriptor);
             }
             has_pipe = true;
         }
-        // APPEND mode files cannot be spliced (offset cannot be changed)
-        let f = resources.get_file(fd_out)?;
-        if f.flags().contains(OpenFlags::APPEND) {
+        if file.flags().contains(OpenFlags::APPEND) {
             return Err(KError::InvalidInput);
         }
-        // Verify destination is writable with a write probe
-        f.write(b"")?;
-        SendFile::Direct(f)
+        file.write(b"")?;
+        SendFile::Direct(file)
     };
 
     // At least one of source or destination must be a pipe

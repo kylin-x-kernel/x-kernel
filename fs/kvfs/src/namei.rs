@@ -1493,6 +1493,16 @@ mod tests {
         Dentry::new_file_from_inode(inode, Some(parent.clone()), String::from(name))
     }
 
+    fn fifo_entry(inode: u64, parent: &Dentry, name: &str) -> Dentry {
+        let node = Arc::new(TestFile::new(inode, NodeType::Fifo, &[], None));
+        let inode = VfsInode::new_special(
+            node,
+            crate::NodeFlags::empty(),
+            inode_init(inode, NodeType::Fifo, 0),
+        );
+        Dentry::new_file_from_inode(inode, Some(parent.clone()), String::from(name))
+    }
+
     fn dir_entry(inode: u64, parent: &Dentry, name: &str) -> (Dentry, Arc<TestDir>) {
         let ops = Arc::new(TestDir::new(inode));
         let inode =
@@ -1731,6 +1741,33 @@ mod tests {
         assert_eq!(creations[1].device, DeviceId::default());
         assert_eq!(creations[2].mode, Umode::from_bits(0o020640));
         assert_eq!(creations[2].device, device);
+    }
+
+    #[def_test]
+    fn fifo_open_preserves_resolved_path_and_inode_identity() {
+        let tree = test_tree();
+        let root_ops = tree.root.downcast_node::<TestDir>().unwrap();
+        let fifo = fifo_entry(20, tree.root.dentry(), "fifo-open");
+        let expected = tree.root.with_dentry(fifo.clone());
+        root_ops.insert("fifo-open", fifo);
+
+        let file = Filename::new("/fifo-open")
+            .open_with_flags_at(
+                &tree.root,
+                &tree.base,
+                linux_raw_sys::general::O_RDWR | linux_raw_sys::general::O_NONBLOCK,
+                NodePermission::empty(),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            )
+            .unwrap();
+
+        assert_eq!(file.path().display_path().unwrap(), "/fifo-open");
+        assert!(Arc::ptr_eq(file.inode(), &expected.inode()));
+        assert_eq!(file.node_type(), NodeType::Fifo);
+        assert_eq!(file.path().metadata().inode, 20);
+        assert!(file.is_stream());
+        assert!(file.mode().contains(FMode::READ | FMode::WRITE));
     }
 
     #[def_test]

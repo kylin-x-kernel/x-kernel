@@ -22,6 +22,7 @@ mod nullfs;
 mod open_flags;
 pub mod path;
 mod permission;
+pub mod pipe;
 mod seq_file;
 mod simple_dir;
 mod simple_file;
@@ -44,8 +45,8 @@ pub use namei::{DelayedCall, LastType, ParentLookup, dentry_open, may_mknod};
 pub use node::{
     Dentry, DentryOperations, DeviceFileOps, DirContext, DirEntrySink, GetattrQueryFlags,
     GetattrRequestMask, InodeCache, InodeDirOperations, InodeLookupFlags, InodeOperations,
-    InodeSymlinkOperations, LockedDentry, MmapMapper, NodeFlags, RenameFlags, VfsInode,
-    VfsInodeInit, WeakVfsInode, bdev_add, bdev_del, cdev_add, cdev_del, inode_init_owner,
+    InodeSymlinkOperations, InodeUpdateTime, LockedDentry, MmapMapper, NodeFlags, RenameFlags,
+    VfsInode, VfsInodeInit, WeakVfsInode, bdev_add, bdev_del, cdev_add, cdev_del, inode_init_owner,
 };
 pub(crate) use node::{
     DentryKey, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive,

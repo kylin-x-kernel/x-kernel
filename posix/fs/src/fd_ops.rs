@@ -13,8 +13,7 @@ use core::ffi::c_int;
 
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
-use kfd_objects::pipe::current_pipe_endpoint;
-use kvfs::{FMode, OpenFlags};
+use kvfs::{FMode, OpenFlags, pipe::PipeObject};
 use linux_raw_sys::general::*;
 use memfs::shmem;
 use posix_types::UserPtr;
@@ -149,11 +148,13 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
             Ok(0)
         }
         F_GETPIPE_SZ => {
-            let pipe = current_pipe_endpoint(fd)?;
+            let file = kprocess::current_resources().get_file(fd)?;
+            let pipe = PipeObject::from_file(&file)?;
             Ok(pipe.capacity() as _)
         }
         F_SETPIPE_SZ => {
-            let pipe = current_pipe_endpoint(fd)?;
+            let file = kprocess::current_resources().get_file(fd)?;
+            let pipe = PipeObject::from_file(&file)?;
             pipe.resize(arg)?;
             Ok(pipe.capacity() as _)
         }

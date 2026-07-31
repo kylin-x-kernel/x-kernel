@@ -8,7 +8,7 @@ use core::ffi::c_int;
 
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
-use kfd_objects::pipe::create_pipe_files;
+use kvfs::pipe::create_pipe_files;
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK, O_RDONLY, O_WRONLY};
 use posix_types::UserPtr;
 

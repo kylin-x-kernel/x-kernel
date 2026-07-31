@@ -18,6 +18,5 @@ extern crate alloc;
 
 pub mod epoll;
 pub mod eventfd;
-pub mod pipe;
 pub mod signalfd;
 pub mod timerfd;

@@ -6,9 +6,9 @@
 它承接那些通过进程 fd table 暴露给用户态、实现 VFS `FileOperations` / `Pollable`，
 但本质上不属于路径/VFS 对象的数据和状态机。
 
-当前该 crate 先承接 `TimerFd`、`EventFd`、`PipeObject`、`Signalfd` 和 `Epoll`。
+当前该 crate 承接 `TimerFd`、`EventFd`、`Signalfd` 和 `Epoll`。
 目标读者是维护 `ksyscall` syscall adapter、`kfd`/`kresources` fd table，
-以及 `timerfd`、`eventfd`、`pipe`、`pidfd` 等匿名对象实现的开发者。
+以及 `timerfd`、`eventfd`、`signalfd`、`epoll` 等匿名对象实现的开发者。
 
 ## 背景
 
@@ -33,7 +33,6 @@ process/kfd_objects/
 │   ├── lib.rs
 │   ├── epoll.rs
 │   ├── eventfd.rs
-│   ├── pipe.rs
 │   ├── signalfd.rs
 │   └── timerfd.rs
 └── docs/
@@ -45,10 +44,10 @@ process/kfd_objects/
 
 ```text
 core/ksyscall adapter
-    │ eventfd2 / timerfd_* / pipe2 / epoll_* ABI binding
+    │ eventfd2 / timerfd_* / signalfd4 / epoll_* ABI binding
     v
-process/kfd_objects::{Epoll, EventFd, PipeObject, Signalfd, TimerFd}
-    │ owns epoll/timer/event/pipe/signalfd state and FileOperations/Pollable behavior
+process/kfd_objects::{Epoll, EventFd, Signalfd, TimerFd}
+    │ owns epoll/timer/event/signalfd state and FileOperations/Pollable behavior
     v
 kfd / kresources fd table
     │ stores Arc<VfsFile>
@@ -100,26 +99,6 @@ read/poll/close via generic fd syscalls
 - `eventfd2` flags ABI 解析；
 - fd table 分配策略；
 - syscall 层错误码和参数边界。
-
-## `PipeObject` 角色
-
-`PipeObject` 拥有：
-
-- pipe ring buffer；
-- 读端/写端计数和生命周期；
-- `poll(IN/OUT/HUP/ERR)` 就绪状态；
-- `SIGPIPE`、EOF 和 `PIPE_BUF` 原子写入语义；
-- 容量调整与上限检查。
-
-读端/写端 `VfsFile` 是 fd table 中暴露给用户态的 capability view。
-它们共享同一个 `PipeObject`，并通过对象自己的 `FileOperations` 接入通用
-`read/write/poll/ioctl/close` fd 路径。
-
-它不处理：
-
-- `pipe2` flags ABI 解析；
-- fd table 分配策略；
-- `fcntl(F_GETPIPE_SZ/F_SETPIPE_SZ)` 的 syscall ABI 路由。
 
 ## `Signalfd` 角色
 

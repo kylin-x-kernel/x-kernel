@@ -75,14 +75,14 @@ core/ksyscall
 │   ├─ kvfs::{Filename, VfsFile, MetadataUpdate, MountFlags}  │
 │   ├─ supported nodev filesystem constructors               │
 │   ├─ fs_context::FsStruct                                │
-│   └─ kfd_objects::PipeEndpoint interop for splice/fcntl  │
+│   └─ kvfs::pipe::PipeObject interop for splice/fcntl     │
 └──────────────────────────────────────────────────────────┘
 ```
 
 | 子模块 | 职责 |
 |--------|------|
 | `path` | 统一处理绝对路径忽略 `dirfd`、`AT_FDCWD`、`AT_EMPTY_PATH`、`AT_SYMLINK_NOFOLLOW`、`O_NOFOLLOW` 和 VFS magic-link follow |
-| `open` | 将 Linux open 参数交给 `kvfs::Filename`，并把打开结果加入当前进程 fd 表 |
+| `open` | 将 Linux open 参数交给 `kvfs::Filename`，并把 VFS 返回的打开结果加入当前进程 fd 表；不重新解析 special-file pathname |
 | `io` | 处理普通、向量、定点和 fd-to-fd 数据传输 syscall |
 | `fd_ops` | 维护 fd 生命周期、复制、`CLOEXEC`、非阻塞标志和部分 `fcntl` 行为 |
 | `dir` | 维护当前目录、根目录、目录/节点创建和 `linux_dirent64` 输出；`mknodat` 只转换 ABI 参数，创建策略由 KVFS 执行 |
@@ -308,11 +308,11 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
 ### fd-backed object 与文件系统状态分离
 
 通过 fd 向用户态暴露对象，并不自动意味着该对象属于文件系统 owner。
-`timerfd`、`eventfd` 和 `pipe` 已迁移到 `kfd_objects`，因为它们的核心状态分别是
-timer runtime、event counter、pipe buffer 与 endpoint 生命周期，
-而不是路径、inode、mount 或文件偏移。
-`posix-fs` 对这类对象保留的职责，仅限于像 `splice`、`fcntl(F_*PIPE_SZ)` 这样的
-VFS/文件 syscall 与 fd-backed object 之间的互操作接线。
+`timerfd` 和 `eventfd` 位于 `kfd_objects`，其核心状态分别属于 timer runtime 与 event
+counter。pipe 则位于 `kvfs::pipe`：匿名 pipe 与 pathname FIFO 共享
+`pipe_inode_info` 等价状态，而 pathname FIFO session 由 inode 持有，因此属于 fs-core，
+不能由 process fd-object 层拥有。`posix-fs` 对这些对象保留的职责仅限于
+`splice`、`fcntl(F_*PIPE_SZ)` 等 syscall 与底层对象之间的互操作接线。
 
 ### procfd 作为 VFS magic-link
 

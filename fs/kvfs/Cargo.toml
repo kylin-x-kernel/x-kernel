@@ -13,17 +13,20 @@ kcred = { workspace = true }
 kerrno = { workspace = true}
 khal.workspace = true
 kpoll = { workspace = true }
+ksignal.workspace = true
 klazy = { workspace = true }
 bitflags = "2.10"
 hashbrown = "0.15"
 inherit-methods-macro = "0.1"
 iov_iter = { workspace = true }
 log = "0.4"
-linux-raw-sys = { workspace = true, features = ["general"] }
+linux-raw-sys = { workspace = true, features = ["general", "ioctl"] }
+osvm.workspace = true
 smallvec = "1.15"
 slab.workspace = true
 unittest = { workspace = true}
 ksync = { workspace = true }
+ktask.workspace = true
 memaddr = { workspace = true }
 pagecache = { workspace = true }
 vmobj = { workspace = true }

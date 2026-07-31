@@ -35,10 +35,20 @@ use crate::{
     VfsError, VfsFileBuilder, VfsResult,
     address_space::{default_address_space_operations, empty_address_space_operations},
     generic_permission,
+    pipe::{PipeObject, fifo_file_operations},
 };
 
 const IOP_CACHED_LINK: u16 = 0x0040;
 const INODE_BYTES_PER_BLOCK: u64 = 512;
+
+/// Timestamp operation requested by an automatic VFS time update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InodeUpdateTime {
+    /// Update the access time.
+    Access,
+    /// Update the modification and status-change times.
+    ChangeAndModification,
+}
 
 bitflags! {
     /// Flags describing special inode behaviors.
@@ -273,6 +283,30 @@ pub trait InodeOperations: Send + Sync + 'static {
         _attr: MetadataUpdate,
     ) -> VfsResult<()> {
         Err(VfsError::OperationNotSupported)
+    }
+
+    /// Applies an automatic VFS timestamp update.
+    fn update_time(
+        &self,
+        idmap: &MountIdmap,
+        dentry: &Dentry,
+        timestamp: Duration,
+        update: InodeUpdateTime,
+    ) -> VfsResult<()> {
+        let (atime, mtime, ctime) = match update {
+            InodeUpdateTime::Access => (Some(timestamp), None, None),
+            InodeUpdateTime::ChangeAndModification => (None, Some(timestamp), Some(timestamp)),
+        };
+        self.setattr(
+            idmap,
+            dentry,
+            MetadataUpdate {
+                atime,
+                mtime,
+                ctime,
+                ..Default::default()
+            },
+        )
     }
 
     /// Returns metadata for this inode.
@@ -625,6 +659,7 @@ impl InodeAttributes {
 
 struct InodeSpecialState {
     character_device: Mutex<Option<Arc<dyn DeviceFileOps>>>,
+    fifo_pipe: Mutex<Option<Arc<PipeObject>>>,
     cached_link: Once<String>,
 }
 
@@ -632,6 +667,7 @@ impl InodeSpecialState {
     fn new() -> Self {
         Self {
             character_device: Mutex::new(None),
+            fifo_pipe: Mutex::new(None),
             cached_link: Once::new(),
         }
     }
@@ -705,7 +741,8 @@ fn init_special_inode(
     match node_type {
         NodeType::CharacterDevice => (Some(character_device_file_operations()), rdev),
         NodeType::BlockDevice => (Some(block_device_file_operations()), rdev),
-        NodeType::Fifo | NodeType::Socket => (None, DeviceId::default()),
+        NodeType::Fifo => (Some(fifo_file_operations()), DeviceId::default()),
+        NodeType::Socket => (None, DeviceId::default()),
         _ => (None, DeviceId::default()),
     }
 }
@@ -1064,6 +1101,29 @@ impl VfsInode {
         debug_assert_ne!(previous, 0);
     }
 
+    pub(crate) fn acquire_fifo_pipe(&self) -> VfsResult<Arc<PipeObject>> {
+        let mut fifo_pipe = self.special_state.fifo_pipe.lock();
+        let pipe = fifo_pipe.clone().unwrap_or_else(PipeObject::new_fifo);
+        pipe.acquire_file()?;
+        if fifo_pipe.is_none() {
+            *fifo_pipe = Some(pipe.clone());
+        }
+        Ok(pipe)
+    }
+
+    pub(crate) fn release_fifo_pipe(&self, pipe: &Arc<PipeObject>) {
+        let mut fifo_pipe = self.special_state.fifo_pipe.lock();
+        assert!(
+            fifo_pipe
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(active, pipe)),
+            "released FIFO pipe is not attached to its inode"
+        );
+        if pipe.release_file() {
+            *fifo_pipe = None;
+        }
+    }
+
     /// Returns the number of open files holding write access to this inode.
     pub fn write_count(&self) -> usize {
         self.write_count.load(Ordering::Acquire)
@@ -1166,7 +1226,7 @@ impl VfsInode {
     }
 
     /// Updates the metadata of the node.
-    pub fn update_metadata(&self, dentry: &Dentry, update: MetadataUpdate) -> VfsResult<()> {
+    pub fn update_metadata(&self, dentry: &Dentry, mut update: MetadataUpdate) -> VfsResult<()> {
         let size = update.size;
         let mode = update.mode;
         let owner = update.owner;
@@ -1177,6 +1237,10 @@ impl VfsInode {
             || owner.is_some()
             || atime.is_some()
             || mtime.is_some();
+        if changed && update.ctime.is_none() {
+            update.ctime = Some(wall_time());
+        }
+        let ctime = update.ctime;
         self.inode_operations
             .as_ref()
             .setattr(&MountIdmap, dentry, update)?;
@@ -1189,14 +1253,34 @@ impl VfsInode {
         if let Some(mtime) = mtime {
             self.set_modified_at(mtime);
         }
+        if let Some(ctime) = ctime {
+            self.set_changed_at(ctime);
+        }
         if let Some(mode) = mode {
             self.attributes.set_permission(mode);
         }
         if let Some((uid, gid)) = owner {
             self.attributes.set_owner(uid, gid);
         }
-        if changed {
-            self.set_changed_at_to_now();
+        Ok(())
+    }
+
+    pub(crate) fn update_time(
+        &self,
+        dentry: &Dentry,
+        timestamp: Duration,
+        update: InodeUpdateTime,
+    ) -> VfsResult<()> {
+        self.inode_operations
+            .update_time(&MountIdmap, dentry, timestamp, update)?;
+        match update {
+            InodeUpdateTime::Access => {
+                self.set_accessed_at(timestamp);
+            }
+            InodeUpdateTime::ChangeAndModification => {
+                self.set_modified_at(timestamp);
+                self.set_changed_at(timestamp);
+            }
         }
         Ok(())
     }

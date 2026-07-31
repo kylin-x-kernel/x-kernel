@@ -21,6 +21,8 @@ credential snapshot，`kvfs` 接收显式 `&Cred` 并完成路径遍历和通用
 - `src/address_space.rs`：inode-owned `AddressSpace`、其私有 `PageCache` 实现，以及
   writeback 与 truncate/invalidation 边界。
 - `src/file.rs`：打开文件及其可变状态。
+- `src/pipe.rs`：匿名 pipe 与 pathname FIFO 共享的数据通路、会话状态及无状态
+  file-operation 对象。
 - `src/mount.rs`、`src/super_block.rs`：挂载树和文件系统实例。
 - `src/anon_inode.rs`：匿名 inode pseudo filesystem，用于 eventfd、epoll、
   timerfd、pidfd 等内核创建的匿名文件。
@@ -53,6 +55,27 @@ VfsInode                 child cache
     v
 filesystem operation traits
 ```
+
+pipe/FIFO 遵循 Linux `inode`、`pipe_inode_info` 与 `file` 的三层所有权：
+
+```text
+VfsInode
+├── shared stateless FifoFileOperations
+└── fifo_pipe: Option<Arc<PipeObject>>
+
+PipeObject
+└── buffer, files, readers/writers, r_counter/w_counter, rd_wait/wr_wait
+
+VfsFile
+├── mode
+├── pipe_generation
+└── private_data -> PipeObject
+```
+
+`PipeObject` 对应 `pipe_inode_info`，而不是 file-operation table。pipe 模块必须和
+`VfsInode` 位于同一个 fs-core crate：inode 需要持有具体的 pipe session，pipe file
+operations 又需要 VFS file/inode 接口；拆成相互依赖的 crate 只会迫使实现增加 factory
+或类型擦除。
 
 原始整数只存在于 ABI 或兼容入口。进入 VFS 后，不同 flags 家族由不同 bitflags
 类型表达，调用者通过 `contains`、`intersects` 或组合语义方法读取，避免重新解释
@@ -107,6 +130,19 @@ credential 的生命周期由 syscall 持有的 `Arc` 保证；对象字段不�
 open 在入口清理 legacy flags，校验已知位，生成 access mode、open intent 和 lookup
 flags。namei 使用这些语义执行查找、创建和最终 open，不再直接组合 `O_CREAT` 与
 `O_EXCL`。
+
+pathname FIFO 不通过 syscall fallback 或第二次 lookup 打开。所有 FIFO inode 共享一张
+无运行时字段的 file-operation table；每个 inode 在 special state 中持有当前活动
+`PipeObject`，对应 Linux `inode->i_pipe`。namei 在同一个 resolved `Path` 上完成
+`may_open` 后进入该 table 的 `open()`。operation table 可以修改现有
+`VfsFileBuilder` 的 stream mode、private data 和最终 file operations，但不得替换
+builder 已绑定的 path。由此 pathname DAC、实际使用的 inode 和 opened-file identity
+属于同一次 open transaction。
+
+FIFO open 在 inode pipe-slot 锁内创建或复用 session 并增加 `files`，随后
+`PipeObject::open_fifo()` 根据 builder 的 `f_mode` 完成 reader/writer rendezvous。
+最后一个 file release 在同一 slot 锁域内减少 `files` 并清空 inode slot，防止旧
+release 与新 open 交错后把仍在使用的 session 清除。
 
 VFS 采用 Linux directory-locking ownership model：
 
@@ -179,7 +215,9 @@ inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `seta
   对 inode 有写权限的调用者；显式值以及 `UTIME_NOW/UTIME_OMIT` 混合只允许 owner/特权。
 
 `SetattrTime` 只承载单次调用中“当前值/显式值”的授权信息，落盘的 `MetadataUpdate`
-仍只包含解析后的时间值，不在 inode 或 namei 状态中保存调用上下文。
+只包含解析后的 atime/mtime/ctime 值，不在 inode 或 namei 状态中保存调用上下文。
+自动 I/O 时间更新使用 Linux `FS_UPD_ATIME` / `FS_UPD_CMTIME` 对应的
+`InodeUpdateTime`，并经 filesystem `update_time` callback 落盘。
 
 ### 新 inode 所有者
 
@@ -223,6 +261,17 @@ metadata 和 journal；普通 mount 清理 dentry cache 可能触发 zero-link i
 `Path::truncate()` 使用调用时 `&Cred` 检查写权限；descriptor-based
 `VfsFile::truncate()` 验证文件以写模式打开后，复用 open 已建立的 authority，不重复
 pathname DAC。`O_TRUNC` 已在 open 权限检查后执行同一 opened truncate 路径。
+
+pipe/FIFO 的访问方向只读取 `VfsFile::mode`，private data 只保存 `PipeObject`。
+`VfsFile::pipe_generation` 对应 Linux `file->f_pipe`：无 writer 的非阻塞只读 FIFO
+open 记录当前 `w_counter`，poll 仅在此 file 存活期间见过新的 writer generation 且
+当前 writer 数为零时报告 HUP。poll waiter 依据 `f_mode` 注册 `rd_wait`/`wr_wait`，
+用户请求的 event mask 只过滤最终 readiness，不能取消 HUP/ERR 所需的唤醒来源。
+
+匿名 pipe 与 pathname FIFO 复用 `PipeObject` 的 read/write 核心。只有 pathname FIFO
+的 file-operation wrapper 在一次成功的对外 `read`/`read_iter` 后执行统一 atime
+策略，在一次成功的 `write`/`write_iter` 后执行 mtime/ctime 更新；迭代 I/O 内部的
+4 KiB chunk 不各自更新时间。
 
 rename 在 syscall 边界用 `RenameFlags::from_bits` 拒绝未知位，并拒绝互斥模式。
 VFS rename 入口再次检查组合不变量，文件系统 helper 再检查自身支持的子集。
@@ -298,6 +347,12 @@ seqlock；它只在 cross-directory rename 中获取。`VfsInode::namespace_lock
 Linux `inode->i_rwsem` 中和 namespace 相关的子集。`DentryLocation` 用一个 `RwLock`
 同时保护 `parent` 和 `name`，读者不会观察到混合位置。
 
+pathname FIFO 的锁顺序是 inode `fifo_pipe` slot lock 在外、`PipeObject` state lock
+在内。release 先在 pipe state 下减少 reader/writer，释放该锁后再进入 slot lock 完成
+`files`/slot 生命周期更新，禁止形成反向嵌套。buffer、reader/writer 数、
+`r_counter/w_counter` 以及 poll 状态只由 `PipeObject` state lock 保护；waiter wake
+在释放 state lock 后执行。
+
 child cache 仍使用 mutex。RCU、seqcount lookup 和 lock-free dcache traversal 在当前
 锁模型和回归覆盖稳定前保持在范围外。
 
@@ -311,6 +366,10 @@ child cache 仍使用 mutex。RCU、seqcount lookup 和 lock-free dcache travers
 - 通用 DAC、父目录修改检查、sticky policy 和初始 owner 由 VFS 统一实现，后端只负责
   自身元数据与 operation callback。
 - 打开文件保存 `f_cred`；descriptor 权限与 pathname 权限使用不同入口表达。
+- pathname special file 的 `FileOperations::open()` 必须保留 namei 已解析的 `Path`；
+  FIFO 使用共享无状态 operation table，runtime session 由 inode 的 typed pipe slot
+  持有；禁止使用 per-inode stateful fops、全局 factory、裸指针 key 或 anonymous inode
+  替换原 opened-file identity。
 - 匿名 inode pseudo fs 采用显式预初始化，而不是 `Lazy` 首次访问初始化。该设计对齐
   复杂 VFS 全局对象的生命周期：启动时构造，运行时只复用。
 - `AddressSpaceOperations::set_len()` 必须进入 `truncate_setsize()`；文件系统不能自行组合
@@ -340,6 +399,8 @@ parent children 弱索引与 superblock dentry cache 中移除 dentry；仍有 P
 nlink=0 时追加 journaled inode
 回收。per-open `FileOperations::release()` 先于 final inode eviction，不能代替后者。flags
 类型不拥有资源；inode 与文件系统私有资源仍由现有对象生命周期及文件系统回调负责。
+FIFO 最后一个 open file 关闭时清空 inode pipe slot，`Arc<PipeObject>` 随最后一个引用
+释放；hard link 因共享同一 `VfsInode` 而共享同一活动 session。
 
 ## 已知限制
 

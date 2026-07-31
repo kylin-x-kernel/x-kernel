@@ -76,6 +76,14 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   backing prepare 后失败的磁盘恢复协议。
 - `VfsInode` 只拥有一个 `AddressSpace`，MM/filemap 只经 `VfsFile::mapping()` 获取它；
   不得向 MM 暴露或额外强持有内部 `PageCache`。
+- pathname FIFO 的活动 `PipeObject` 必须由 `VfsInode` 的 typed slot 持有；共享
+  `FifoFileOperations` 不得保存 session 状态。
+- pipe 访问方向只能来自 `VfsFile::mode`，HUP generation snapshot 只能来自
+  `VfsFile::pipe_generation`，private data 只保存 `PipeObject`。
+- 无 writer 的非阻塞 reader 在 writer generation 未变化前不得报告 HUP；poll waiter
+  必须按 file mode 注册队列，不能由用户 event mask 删除 HUP/ERR 的唤醒来源。
+- pathname FIFO 的自动 atime/mtime/ctime 更新必须经过 VFS mount/time policy 和
+  filesystem `update_time` callback；匿名 pipe 不得更新 pathname inode metadata。
 
 ## 线程安全
 
@@ -100,6 +108,11 @@ mount topology lock 始终在相关 inode namespace lock 之后获取。
 
 匿名 inode pseudo fs 的 singleton 由 `Once` 发布，但不允许普通运行时路径触发初始化；
 并发创建匿名文件只共享已经发布的 mount/inode，不竞争初始化闭包。
+
+FIFO session 生命周期使用 inode pipe-slot lock 串行化 get/create/`files` transition 与
+release/clear，slot lock 获取后才可获取 pipe state lock。reader/writer close 先释放
+pipe state lock，再进入 slot 生命周期路径，避免反向嵌套。同一 inode 因此不能同时发布
+两个活动 pipe session。
 
 Credential 本身是不可变 `Arc` 快照。权限检查期间不持有 task credential 锁，也不
 重新读取 current task，因此并发 `commit_creds()` 只能影响下一次操作。
@@ -135,6 +148,11 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-26 | 设备节点授权在锁外检查导致错误优先级错误或绕过 | 高 | syscall 先检查特权，或其它 `Path::mknod` 调用者不检查 | `Filename::mknod_at` 与 `Path::mknod` 都在锁内 negative-dentry callback 中进入唯一的 `Path::vfs_mknod`；现有目标先返回 `AlreadyExists` |
 | T-27 | open、mkdir 与 mknodat 产生不同 callback mode | 高 | 各入口各自准备 mode/type，或直接调用 inode callback | open、mkdir、regular mknod 和 special mknod 都通过对应的 `Path::vfs_*` 能力执行同一套 DAC、setgid、umask、allowed-permission 与 node-type 策略 |
 | T-28 | unlink/rmdir 删除 pathname 初次解析后的同名替代对象 | 高 | syscall 先解析完整目标，再按 parent/name 执行第二次 lookup | `Filename::unlink_at/rmdir_at` 只解析 parent；Dentry 在 parent exclusive lock 下唯一一次解析并操作最终 victim |
+| T-29 | pathname FIFO 在授权后重新 lookup 并打开替代 inode | 高 | syscall 根据第一次 open 错误执行第二次路径解析 | FIFO file operations 在 namei 已授权的同一个 `Path` 和 `VfsFileBuilder` 上完成 open，不存在 fallback lookup |
+| T-30 | pathname FIFO fd 丢失原 inode 身份 | 中 | special open 创建 anonymous-inode-backed file | 共享 FIFO operations 只修改原 builder 的 stream/private state，保留原 path、inode 和 filesystem |
+| T-31 | 同一 FIFO inode 同时发布两个 pipe session | 高 | 最后 release 与新 open 分别修改 slot 和 file count | get/create/increment 与 decrement/clear 都在 inode pipe-slot lock 域内完成 |
+| T-32 | 从未连接 writer 的非阻塞 reader 立即得到 HUP | 中 | poll 仅检查 `writers == 0` | file 保存 open 时的 `w_counter` snapshot，HUP 同时检查 generation 已变化 |
+| T-33 | 只等待 HUP/ERR 的 poll 永不被 peer close 唤醒 | 中 | 按用户 event mask 选择 wait queue | 按 `f_mode` 注册 reader/writer wait queue，event mask 只过滤 readiness |
 | T-20 | 反向 cross-directory rename 死锁 | 高 | 两个线程按相反顺序锁父目录 | 一个 topology mutex 串行化 topology mutation，父目录按拓扑顺序加锁 |
 | T-21 | dentry name 和 parent 不一致 | 中 | parent/name 分开更新或读者观察中间状态 | 两个字段在同一个 location write lock 下替换 |
 | T-22 | 目录 alias 形成两套 child cache 或绕过 topology 序列化 | 高 | 同一目录 inode 建立多个 live dentry | inode alias 表强制目录单 alias；lookup 复用已有 alias，rename topology 按 parent dentry identity 判定 |
@@ -192,6 +210,11 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 - 中间目录 search、最终 inode 和父目录 mutation 权限是否分别在正确阶段检查。
 - 新建 inode 是否使用 `inode_init_owner()`，后端是否持久化 UID/GID。
 - fd-based 操作是否使用 open file mode/`f_cred`，而不是重新执行 pathname 授权。
+- FIFO session 是否只归 inode pipe slot，fops 是否保持共享且无状态。
+- pipe private data 是否只保存 `PipeObject`，方向和 HUP snapshot 是否分别只来自
+  `f_mode` 与 `pipe_generation`。
+- FIFO poll 注册是否按 file mode 选择 wait queue，而不是按用户 event mask。
+- pathname FIFO 时间更新是否只在一次成功的对外 I/O 后经 VFS policy 执行。
 - backing mutation 后是否刷新所有受影响的 live inode，而不是只返回新 dentry。
 - truncate 是否通过 `set_len()` 与 `truncate_setsize()` 保持 backing prepare、i_size publish、
   两轮 AddressSpace invalidation、cache truncate 和 backing finish 顺序。

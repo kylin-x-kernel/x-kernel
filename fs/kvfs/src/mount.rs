@@ -12,10 +12,12 @@ use alloc::{
 use core::{
     iter,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
+    time::Duration,
 };
 
 use hashbrown::HashMap;
 use kcred::{Cred, NamespaceId, UserNamespace, initial_user_namespace};
+use khal::time::wall_time;
 use klazy::Once;
 
 /// Mount idmapping context passed into inode namespace operations.
@@ -24,9 +26,9 @@ pub struct MountIdmap;
 
 use crate::{
     Dentry, DentryKey, DeviceId, FMode, FileOperations, GetattrQueryFlags, GetattrRequestMask,
-    Metadata, MetadataUpdate, Mutex, NodeFlags, NodePermission, NodeType, OpenFlags, Permission,
-    RenameFlags, SetattrTime, StatFs, StatFsFlags, SuperBlock, Umode, VfsError, VfsFile,
-    VfsFileBuilder, VfsInode, VfsResult, nullfs, path::PathBuf,
+    InodeUpdateTime, Metadata, MetadataUpdate, Mutex, NodeFlags, NodePermission, NodeType,
+    OpenFlags, Permission, RenameFlags, SetattrTime, StatFs, StatFsFlags, SuperBlock, Umode,
+    VfsError, VfsFile, VfsFileBuilder, VfsInode, VfsResult, nullfs, path::PathBuf,
 };
 
 bitflags::bitflags! {
@@ -732,6 +734,59 @@ impl Path {
             return Err(VfsError::ReadOnlyFilesystem);
         }
         Ok(())
+    }
+
+    pub(crate) fn touch_atime(&self) {
+        if self.is_effectively_readonly() {
+            return;
+        }
+
+        let mount_flags = self.mnt.flags();
+        let stat_flags = self
+            .super_block()
+            .stat()
+            .map_or(StatFsFlags::empty(), |stat| stat.mount_flags);
+        if mount_flags.contains(MountFlags::NOATIME)
+            || stat_flags.contains(StatFsFlags::NOATIME)
+            || (self.inode().node_type() == NodeType::Directory
+                && (mount_flags.contains(MountFlags::NODIRATIME)
+                    || stat_flags.contains(StatFsFlags::NODIRATIME)))
+        {
+            return;
+        }
+
+        let metadata = self.metadata();
+        let now = wall_time();
+        let uses_relatime = mount_flags.contains(MountFlags::RELATIME)
+            || stat_flags.contains(StatFsFlags::RELATIME);
+        if uses_relatime
+            && metadata.atime > metadata.mtime
+            && metadata.atime > metadata.ctime
+            && now.saturating_sub(metadata.atime) <= Duration::from_secs(24 * 60 * 60)
+        {
+            return;
+        }
+        if metadata.atime == now {
+            return;
+        }
+
+        let _ = self
+            .inode()
+            .update_time(self.dentry(), now, InodeUpdateTime::Access);
+    }
+
+    pub(crate) fn update_cmtime(&self) -> VfsResult<()> {
+        if self.is_effectively_readonly() {
+            return Ok(());
+        }
+
+        let metadata = self.metadata();
+        let now = wall_time();
+        if metadata.mtime == now && metadata.ctime == now {
+            return Ok(());
+        }
+        self.inode()
+            .update_time(self.dentry(), now, InodeUpdateTime::ChangeAndModification)
     }
 
     /// Changes this inode's owner after applying Linux chown/chgrp authorization.

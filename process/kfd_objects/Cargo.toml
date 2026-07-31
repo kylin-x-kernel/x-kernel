@@ -24,7 +24,6 @@ kspin.workspace = true
 ksync.workspace = true
 ktask.workspace = true
 kprocess.workspace = true
-linux-raw-sys = { workspace = true, features = ["general", "ioctl"] }
-osvm.workspace = true
+linux-raw-sys = { workspace = true, features = ["general"] }
 unittest.workspace = true
 zerocopy.workspace = true

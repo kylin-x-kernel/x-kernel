@@ -300,7 +300,11 @@ impl InodeOperations for Inode {
         let mut fs = self.fs.lock();
         let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
 
-        let mut metadata = Ext4InodeMetadataUpdate::new(current_ext4_timestamp());
+        let ctime = update
+            .ctime
+            .map(duration_to_ext4)
+            .unwrap_or_else(|| inode.ctime());
+        let mut metadata = Ext4InodeMetadataUpdate::new(ctime);
         if let Some(mode) = update.mode {
             metadata = metadata.with_mode(mode.bits());
         }
