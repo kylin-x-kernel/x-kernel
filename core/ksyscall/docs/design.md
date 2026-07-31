@@ -118,6 +118,7 @@ ksyscall::dispatch_irq_syscall
   - owner 在 `kfd_objects::EventFd`
 - `sys.rs`
   - `sethostname` 路由到当前 UTS namespace
+  - `reboot` 校验 Linux magic/command 后路由到平台 power 接口
 - `time/timerfd.rs`
   - `timerfd_*`
   - owner 在 `kfd_objects::TimerFd`

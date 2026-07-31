@@ -539,6 +539,12 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         Sysno::setgroups => sys_setgroups(uctx.arg0() as _, uctx.arg1().into()),
         Sysno::uname => sys_uname(uctx.arg0().into()),
         Sysno::sethostname => sys_sethostname(uctx.arg0().into(), uctx.arg1() as _),
+        Sysno::reboot => sys_reboot(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3().into(),
+        ),
         Sysno::sysinfo => sys_sysinfo(uctx.arg0().into()),
         Sysno::syslog => sys_syslog(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
         Sysno::getrandom => sys_getrandom(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),

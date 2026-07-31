@@ -8,6 +8,7 @@
 //! - System information (uname, sysinfo, etc.)
 //! - Process information queries
 //! - Hostname management
+//! - Power and reboot control
 
 use core::{mem::MaybeUninit, slice};
 
@@ -18,7 +19,12 @@ use kprocess::{current_user_process, current_user_process_fs_context};
 use kvfs::{Filename, NodePermission};
 use linux_raw_sys::{
     ctypes::c_char,
-    general::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM},
+    general::{
+        GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM, LINUX_REBOOT_CMD_CAD_OFF,
+        LINUX_REBOOT_CMD_CAD_ON, LINUX_REBOOT_CMD_HALT, LINUX_REBOOT_CMD_POWER_OFF,
+        LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_MAGIC2A, LINUX_REBOOT_MAGIC2B,
+        LINUX_REBOOT_MAGIC2C,
+    },
     system::{new_utsname, sysinfo},
 };
 use osvm::{VirtPtr, write_vm_mem};
@@ -148,6 +154,49 @@ pub fn sys_sethostname(name: UserConstPtr<u8>, len: usize) -> KResult<isize> {
         .set_nodename(&buf[..len])
         .map_err(|_| KError::InvalidInput)?;
     Ok(0)
+}
+
+/// Applies a Linux reboot control command supported by the current platform.
+///
+/// Requires a privileged credential and a valid reboot magic pair
+/// (`LINUX_REBOOT_MAGIC1` plus one of the `MAGIC2*` values), matching the
+/// `reboot(2)` ABI. Only `HALT`, `POWER_OFF` and the `CAD_ON`/`CAD_OFF`
+/// toggles are handled here; other commands (`RESTART`, `RESTART2`, `KEXEC`,
+/// `SW_SUSPEND`) are rejected with `EINVAL`, since `reboot(2)` returns
+/// `EINVAL` — not `ENOSYS` — for an unsupported command.
+pub fn sys_reboot(
+    magic1: u32,
+    magic2: u32,
+    command: u32,
+    _argument: UserConstPtr<c_char>,
+) -> KResult<isize> {
+    if !kprocess::current_cred().is_privileged() {
+        return Err(KError::OperationNotPermitted);
+    }
+    if magic1 != LINUX_REBOOT_MAGIC1
+        || !matches!(
+            magic2,
+            LINUX_REBOOT_MAGIC2
+                | LINUX_REBOOT_MAGIC2A
+                | LINUX_REBOOT_MAGIC2B
+                | LINUX_REBOOT_MAGIC2C
+        )
+    {
+        return Err(KError::InvalidInput);
+    }
+
+    match command {
+        // CAD_ON/CAD_OFF toggle the Ctrl-Alt-Del behaviour. There is no kernel
+        // CAD-state variable yet, so these are accepted as an intentional stub.
+        LINUX_REBOOT_CMD_CAD_ON | LINUX_REBOOT_CMD_CAD_OFF => Ok(0),
+        LINUX_REBOOT_CMD_HALT | LINUX_REBOOT_CMD_POWER_OFF => {
+            // TODO: flush/sync filesystems (e.g. sys_sync) before pulling the
+            // plug; `shutdown()` never returns, so cleanup must happen first.
+            warn!("reboot: initiating platform shutdown (command {command:#x})");
+            khal::power::shutdown()
+        }
+        _ => Err(KError::InvalidInput),
+    }
 }
 
 bitflags::bitflags! {
