@@ -26,13 +26,11 @@
 
 extern crate alloc;
 
-// Kconfig selects exactly one crate to provide `fs_block::FileSystemType`.
+// The root filesystem choice selects exactly one `fs_block::FileSystemType` provider.
 #[cfg(feature = "fs_fat")]
 extern crate fat as _;
-#[cfg(feature = "fs_ext4_kext4")]
+#[cfg(feature = "fs_ext4")]
 extern crate kext4_vfs as _;
-#[cfg(feature = "fs_ext4_rsext4")]
-extern crate rsext4_vfs as _;
 
 #[macro_use]
 extern crate klogger;

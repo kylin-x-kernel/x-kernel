@@ -23,23 +23,6 @@ config KFEAT_FS_FAT
 
 endchoice
 
-choice
-    prompt "Ext4 implementation"
-    depends on KFEAT_FS_EXT4
-    default KFEAT_FS_EXT4_KEXT4
-
-config KFEAT_FS_EXT4_RSEXT4
-    bool "rsext4 compatibility backend"
-    help
-      Use the current writable rsext4 compatibility backend.
-
-config KFEAT_FS_EXT4_KEXT4
-    bool "KExt4 checked backend (experimental)"
-    help
-      Use the checked KExt4 core through its KVFS adapter.
-
-endchoice
-
 config KFEAT_FS_TIMES
     bool "Enable filesystem timestamps"
     depends on KFEAT_FS

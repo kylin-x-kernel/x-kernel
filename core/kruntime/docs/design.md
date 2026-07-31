@@ -189,7 +189,7 @@ SecondaryKernelEntry::enter(logical_cpu_id)
 | `klogger::LoggerAdapter` | `lib.rs` | 日志输出到 `khal::console`，附带 CPU/任务 ID |
 | `kernel_boot::PrimaryKernelEntry` | `lib.rs` | 主核从 boot 层进入 `rust_main` |
 | `kernel_boot::SecondaryKernelEntry` | `mp.rs` | 从核从 boot 层进入 `rust_main_secondary` |
-| `fs_block::FileSystemType` | Kconfig 所选 `kext4_vfs` / `rsext4_vfs` / `fat` crate | 提供 root block filesystem mount，避免 boot 按实现分支 |
+| `fs_block::FileSystemType` | Kconfig 所选 `kext4_vfs` / `fat` crate | 提供 root block filesystem mount，避免 boot 按实现分支 |
 | `kruntime::SystemInitEntry` | `entry/src/main.rs` | runtime 就绪后进入系统级 init 策略层 |
 均为链接期 exactly-one 单实现，非运行时注册。
 

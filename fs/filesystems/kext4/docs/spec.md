@@ -3,7 +3,7 @@
 本文是 KExt4 唯一的执行计划。它只维护当前事实、目标架构、阶段依赖和验收门槛；稳定的
 架构与安全不变量分别维护在 `design.md` 和 `security.md`，公共 API 契约放在 rustdoc。
 
-最后审计日期：2026-07-28。
+最后审计日期：2026-07-31。
 
 当前基线：KExt4 N1.5 + N2.0 + N2.1。S0/S1 已恢复 KExt4 与重构后 KVFS 的连接，并建立 inode identity、
 truncate、open-unlink 和 final eviction 基线；N1 已建立 persistent journal transaction、
@@ -16,8 +16,8 @@ write batching、superblock image 复用和重复 flush 消除。
 
 ## 总目标
 
-KExt4 的长期目标是实现一个遵循 Linux ext4/JBD2 核心架构、可恢复且高效的 Rust ext4
-后端，并最终替代 rsext4。开发顺序以结构性风险和主 workload 为中心，而不是按 syscall
+KExt4 是 X-Kernel 唯一的 ext4 后端。长期目标仍是完善遵循 Linux ext4/JBD2 核心架构、
+可恢复且高效的 Rust 实现；开发顺序以结构性风险和主 workload 为中心，而不是按 syscall
 数量或功能表逐项补齐。
 
 路线图设置以下门槛：
@@ -28,7 +28,7 @@ KExt4 的长期目标是实现一个遵循 Linux ext4/JBD2 核心架构、可恢
 | G1：核心框架成形 | mount ownership、persistent journal 和 transaction/checkpoint 分层稳定 | 普通 mutation 不再每次创建独立 journal 并同步 checkpoint；显式 sync 可推进全部状态 |
 | G2：buffered fio 可用 | normal-path buffered I/O 和并发执行框架打通 | 固定 seq/rand/randrw/fsync smoke verify 通过；性能只记录，不先设阈值 |
 | G3：可靠性闭环 | 异步错误、lifecycle、ENOSPC、crash/recovery 可验证 | errseq、clean unmount/freeze、fault/powercut/e2fsck 矩阵通过 |
-| G4：默认后端 | 高级 I/O、常用格式和持续性能达到替换要求 | syscall/fio/fsstress/互操作/恢复矩阵持续通过，完成替换说明 |
+| G4：发布收口 | 高级 I/O、常用格式和持续性能达到发布要求 | syscall/fio/fsstress/互操作/恢复矩阵持续通过，完成单后端发布说明 |
 
 `direct=1`、mmap/shared-write 和 range operations 不属于 G2。buffered fio 通过不能被用来
 宣称 direct I/O 或完整 Linux ext4 语义已经实现。
@@ -58,7 +58,7 @@ running/committing/checkpointing transaction、ordered-data dependency、per-ino
 
 结构性瓶颈可以从代码确认并优先消除；具体优化和阈值必须使用相同平台、SMP、镜像、fio
 版本和 job 参数比较 baseline/after。每次只改变一个主要变量，报告 observation、inference、
-confidence 和 method limits。rsext4 只作为只读对比基线，不再为其扩展或修复新功能。
+confidence 和 method limits。对比使用固定的 KExt4 历史基线，不保留旧后端作为可执行基线。
 
 ## 不可破坏的 ownership 边界
 
@@ -70,7 +70,7 @@ confidence 和 method limits。rsext4 只作为只读对比基线，不再为其
   第二套 dentry cache、普通文件数据 cache 或 journal coordinator。
 - 普通文件数据只通过 inode-owned AddressSpace/PageCache；ext4 元数据只通过 KExt4
   metadata buffer 和 JBD2 transaction 修改。
-- KExt4 的新接口和行为不要求同步修复 rsext4；最终目标是替换它。
+- KExt4 是 ext4 行为和接口的唯一实现，不保留旧后端兼容路径。
 - 不通过关闭 journal、checksum、barrier/flush、跳过 e2fsck 或扩大一个全局锁来伪造结果。
 - 重构、行为和性能提交分开；公共层修改必须表达通用 VFS/MM 契约，而不是 KExt4 旁路。
 
@@ -461,7 +461,7 @@ G3 退出条件：
 
 - buffered fio 和 metadata workload 达到项目在首轮稳定基线后记录的阈值；
 - 性能提升不能关闭 journal/checksum/barrier，也不能破坏 N3 gates；
-- rsext4 只用作对比，不为其新增修复。
+- 性能对比只使用固定 workload 形成的 KExt4 历史基线。
 
 ### N5：高级 I/O 与常用功能
 
@@ -475,16 +475,16 @@ G3 退出条件：
 - 每项格式能力必须同时考虑 feature negotiation、checksum、journal credits、recovery 和
   Linux/e2fsprogs 互操作。
 
-### N6：替换门槛
+### N6：唯一后端收口
 
-目标：以持续回归和迁移方案替换 rsext4，而不是继续双线扩展。
+目标：在移除旧后端后，以持续回归和迁移验证保证 KExt4 单线演进。
 
 退出条件：
 
 - 常见 rootfs、package/build、fio、fsstress 和目标应用长期稳定；
 - syscall、format、fault/recovery 和 performance matrix 进入持续 CI；
-- 有默认后端切换、回退和镜像兼容说明；
-- 达到 G4 后才停用旧 backend。
+- rootfs 配置、文档和持续集成只引用 KExt4，并保留镜像兼容说明；
+- 达到 G4 后把 KExt4 的长期性能和可靠性门槛纳入发布要求。
 
 ## 交给 VFS/MM 负责人的公共需求
 
@@ -504,8 +504,8 @@ G3 退出条件：
 5. **Filesystem lifecycle**：unmount/freeze 能 gate 新引用/写入，drain VFS-owned data 和
    filesystem hook，只有成功后才 detach/标记 frozen，失败可以恢复 active state。
 
-KExt4 bridge 只消费这些通用接口，不为 KExt4 建立私有 VFS/PageCache 旁路，也不要求修改
-rsext4。
+KExt4 bridge 只消费这些通用接口，不为 KExt4 建立私有 VFS/PageCache 旁路，也不保留
+旧后端兼容路径。
 
 ## 交给 block/VirtIO 负责人的外部依赖
 

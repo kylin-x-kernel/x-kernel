@@ -16,12 +16,12 @@ superblock、inode、address-space 和 file operations，但不拥有 ext4 磁�
 
 ## 背景
 
-KExt4 的目标是在 X-Kernel 中逐步替代兼容层 ext4 后端，同时保持 Rust 受检代码、
-明确的 feature negotiation、日志化元数据更新，以及 e2fsprogs/e2fsck 互操作能力。
-KExt4 当前通过独立 Kconfig 选项进入运行态。N0 已补齐 VFS inode identity、cached
+KExt4 是 X-Kernel 唯一的 ext4 后端，保持 Rust 受检代码、明确的 feature negotiation、
+日志化元数据更新，以及 e2fsprogs/e2fsck 互操作能力。`KFEAT_FS_EXT4` 直接把 KExt4
+core/bridge 链入运行态，不再经过实现选择层。N0 已补齐 VFS inode identity、cached
 attributes、两阶段 truncate 和 open-unlink/final-evict 基线。N1 已建立 persistent journal
 和 mount/journal 生命周期边界，N2 继续建立 buffered 并发执行框架，再在 N3 集中补齐 crash
-recovery、错误观察和 unmount/freeze；不为旧后端扩展新语义。
+recovery、错误观察和 unmount/freeze。
 
 ## 范围
 
@@ -314,8 +314,7 @@ allocator 的实际并发关系建立锁顺序；不以字段分组预设锁域�
 - ext4 磁盘格式和一致性不变量由 `kext4` 核心负责，KVFS 对象生命周期由 bridge 负责。
 - `kext4` crate 使用 `#![forbid(unsafe_code)]`，unsafe 或设备相关细节留在核心边界之外。
 - 未实现的 ext4 格式能力通过显式 unsupported error 暴露，避免把不完整格式误挂载为可写。
-- KExt4 的新生命周期与 I/O 语义只在 KExt4 core/bridge 落地；旧 ext4 backend 不随本计划
-  做功能性迁移。
+- KExt4 的新生命周期与 I/O 语义只在 KExt4 core/bridge 落地，不保留第二套 ext4 实现路径。
 - `Ext4Filesystem` 保留类似 Linux `ext4_sb_info` 的 mount 总状态；只有具有独立事务状态机和
   生命周期不变量的 journal 聚合为 `MountedJournal`，不为代码分组机械创建 service。
 - KExt4 只通过通用 `BlockDevice` 表达块读写和 flush；异步 request、完成通知和 VirtIO

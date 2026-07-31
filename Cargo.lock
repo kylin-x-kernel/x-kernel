@@ -2747,7 +2747,6 @@ dependencies = [
  "memaddr",
  "memspace",
  "of",
- "rsext4_vfs",
  "timer-driver",
  "unittest",
  "watchdog",
@@ -4211,28 +4210,6 @@ dependencies = [
  "signature 3.0.0",
  "spki",
  "zeroize",
-]
-
-[[package]]
-name = "rsext4"
-version = "0.1.0-pre.0"
-dependencies = [
- "log",
-]
-
-[[package]]
-name = "rsext4_vfs"
-version = "0.2.0-dev"
-dependencies = [
- "fs_block",
- "iov_iter",
- "kclass",
- "kcred",
- "kerrno",
- "khal",
- "ksync",
- "kvfs",
- "rsext4",
 ]
 
 [[package]]

@@ -104,7 +104,6 @@ fs_boot = { path = "fs/boot" }
 procfs = { path = "fs/filesystems/procfs" }
 devfs = { path = "fs/filesystems/devfs" }
 fs9p = { path = "fs/filesystems/fs9p", default-features = false }
-rsext4_vfs = { path = "fs/bridges/rsext4_vfs" }
 kext4_vfs = { path = "fs/bridges/kext4_vfs" }
 v9fs = { path = "fs/bridges/v9fs" }
 memaddr = { path = "mm/memaddr" }
@@ -114,7 +113,6 @@ filemap = { path = "mm/filemap" }
 pagecache = { path = "mm/pagecache" }
 page_table = { path = "mm/page_table" }
 vmobj = { path = "mm/vmobj" }
-rsext4 = { path = "fs/filesystems/rsext4", default-features = false }
 kext4 = { path = "fs/filesystems/kext4", default-features = false }
 
 # Internal: IO and network subsystem

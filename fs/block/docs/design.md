@@ -20,7 +20,6 @@ fs/Kconfig choice
 kfeat / kruntime links exactly one provider
         |
         +-- kext4_vfs
-        +-- rsext4_vfs
         `-- fat
                 |
                 v

@@ -85,8 +85,6 @@ sched_stat = ["ktask/sched_stat"]
 # `KFEAT_FS` is a Kconfig-only dependency gate. Cargo features expose concrete
 # filesystem capabilities and let kruntime pull in its internal fs core.
 fs_ext4 = ["kruntime/fs_ext4"]
-fs_ext4_rsext4 = ["fs_ext4", "kruntime/fs_ext4_rsext4"]
-fs_ext4_kext4 = ["fs_ext4", "kruntime/fs_ext4_kext4"]
 fs_fat = ["kruntime/fs_fat"]
 fs_9p = ["kruntime/fs9p"]
 fs_times = ["kruntime/fs_times"]

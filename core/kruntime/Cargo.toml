@@ -19,9 +19,7 @@ char = ["kdriver/char", "dep:ktty"]
 display = ["kdriver/display", "dep:fbdevice"]
 input = ["kdriver/input", "dep:inputdev"]
 fs = ["kdriver/block", "dep:fs_boot"]
-fs_ext4 = ["fs"]
-fs_ext4_rsext4 = ["fs_ext4", "dep:rsext4_vfs"]
-fs_ext4_kext4 = ["fs_ext4", "dep:kext4_vfs"]
+fs_ext4 = ["fs", "dep:kext4_vfs"]
 fs_fat = ["fs", "dep:fat"]
 # 9P runtime glue only. The transport driver is selected at the top level via
 # `kfeat/driver_virtio_9p` (or any future 9P transport driver feature).
@@ -29,7 +27,7 @@ fs9p = [
     "fs",
     "fs_boot/fs9p",
 ]
-fs_times = ["fs", "rsext4_vfs?/times", "kext4_vfs?/times"]
+fs_times = ["fs", "kext4_vfs?/times"]
 fs_ebpf = ["fs", "fs_boot/ebpf"]
 net = ["kdriver/net", "dep:knet"]
 vsock = ["net", "kdriver/vsock"]
@@ -66,7 +64,6 @@ klogger.workspace = true
 memspace = { workspace = true }
 knet = { workspace = true, optional = true }
 ktask = { workspace = true }
-rsext4_vfs = { workspace = true, optional = true }
 timer_driver = { workspace = true }
 watchdog = { workspace = true, optional = true }
 chrono.workspace = true
