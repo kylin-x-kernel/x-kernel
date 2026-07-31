@@ -55,6 +55,7 @@ resource owners
 | T-06 | `setpriority` 通过进程代表线程漏检目标身份 | 高 | per-thread credential 下仍按 process representative 授权 | `PRIO_*` 选择和扫描均落到具体 task，逐 task 比较 caller euid 与 target real/effective UID，并单独检查提高优先级权限 |
 | T-07 | 非特权进程修改主机名 | 高 | `sethostname` 直接写 UTS namespace | syscall 边界检查 privileged credential，并限制 nodename 长度与用户缓冲区访问 |
 | T-08 | 非特权进程改变电源状态 | 高 | `reboot` 直接进入平台 power 接口 | 检查 privileged credential、Linux magic 和受支持命令集合 |
+| T-09 | 非特权进程修改墙钟 | 高 | wall-clock setter 直接修改 RTC offset | `settimeofday` 与 `clock_settime` 在共享 setter 中检查 privileged credential |
 
 ## 审计清单
 

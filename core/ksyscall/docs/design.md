@@ -123,8 +123,8 @@ ksyscall::dispatch_irq_syscall
   - `timerfd_*`
   - owner 在 `kfd_objects::TimerFd`
 - `time/queries.rs`
-  - `clock_gettime` / `gettimeofday` / `clock_getres`
-  - owner 在 `khal` 时钟源与 `kprocess` CPU-time 查询
+  - `clock_gettime` / `gettimeofday` / `clock_getres` / `clock_settime` / `settimeofday`
+  - owner 在 `khal` 时钟源、RTC wall-clock offset 与 `kprocess` CPU-time 查询
 - `time/sleep.rs`
   - `nanosleep` / `clock_nanosleep`
   - owner 在 `ktask` sleep runtime 与 `khal` 时钟查询

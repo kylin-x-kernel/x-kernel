@@ -2,16 +2,16 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Time query syscall adapters.
+//! Time query and setter syscall adapters.
 
 use kerrno::{KError, KResult};
 use khal::time::{TimeValue, monotonic_time, wall_time};
 use linux_raw_sys::general::{
     __kernel_clockid_t, CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_MONOTONIC_COARSE,
     CLOCK_MONOTONIC_RAW, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_REALTIME_COARSE,
-    CLOCK_THREAD_CPUTIME_ID, timespec, timeval,
+    CLOCK_THREAD_CPUTIME_ID, timespec, timeval, timezone,
 };
-use posix_types::{TimeValueLike, UserPtr};
+use posix_types::{TimeValueLike, UserConstPtr, UserPtr};
 
 /// Returns the current time from the specified clock.
 pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: UserPtr<timespec>) -> KResult<isize> {
@@ -35,6 +35,55 @@ pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: UserPtr<timespec>) ->
 pub fn sys_gettimeofday(ts: UserPtr<timeval>) -> KResult<isize> {
     ts.write_vm(timeval::from_time_value(wall_time()))?;
     Ok(0)
+}
+
+fn set_wall_time(value: TimeValue) -> KResult<isize> {
+    if !kprocess::current_cred().is_privileged() {
+        return Err(KError::OperationNotPermitted);
+    }
+    let desired_ns = value.as_nanos();
+    let now_ns = khal::time::now_ns() as u128;
+    // Linux 4.3+ rejects setting the wall clock to before CLOCK_MONOTONIC.
+    if desired_ns < now_ns {
+        return Err(KError::InvalidInput);
+    }
+    // `try_into_time_value()` validated `tv_sec` as a non-negative value that
+    // fits the kernel's TimeValue, and `desired_ns >= now_ns` above, so the
+    // offset is in `u64` range without a runtime check.
+    khal::rtc::set_offset_ns((desired_ns - now_ns) as u64);
+    Ok(0)
+}
+
+/// Sets the wall clock from a `timeval` value.
+pub fn sys_settimeofday(
+    ts: UserConstPtr<timeval>,
+    timezone: UserConstPtr<timezone>,
+) -> KResult<isize> {
+    // Linux no longer allows setting the timezone; a non-NULL one is rejected.
+    if timezone.check_non_null().is_some() {
+        return Err(KError::InvalidInput);
+    }
+    // A NULL `tv` leaves the clock unchanged and needs no privilege check,
+    // matching Linux `do_sys_settimeofday64()`.
+    let Some(ts) = ts.check_non_null() else {
+        return Ok(0);
+    };
+    set_wall_time(ts.read_vm()?.try_into_time_value()?)
+}
+
+/// Sets `CLOCK_REALTIME` (or its coarse variant) from a `timespec` value.
+pub fn sys_clock_settime(
+    clock_id: __kernel_clockid_t,
+    ts: UserConstPtr<timespec>,
+) -> KResult<isize> {
+    // Keep symmetry with `sys_clock_gettime`: both realtime clocks are settable.
+    if !matches!(clock_id as u32, CLOCK_REALTIME | CLOCK_REALTIME_COARSE) {
+        return Err(KError::InvalidInput);
+    }
+    let Some(ts) = ts.check_non_null() else {
+        return Err(KError::BadAddress);
+    };
+    set_wall_time(ts.read_vm()?.try_into_time_value()?)
 }
 
 /// Returns the resolution of the specified clock.

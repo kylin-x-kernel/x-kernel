@@ -50,6 +50,8 @@ impl crate::rtc::RtcIf {
     fn offset_ns() -> u64 {
         0
     }
+
+    fn set_offset_ns(_offset_ns: u64) {}
 }
 
 #[impl_dev_interface]

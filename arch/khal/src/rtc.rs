@@ -6,9 +6,17 @@
 pub trait RtcIf {
     /// Returns the wall-clock offset in nanoseconds relative to monotonic time.
     fn offset_ns() -> u64;
+    /// Updates the wall-clock offset in nanoseconds relative to monotonic time.
+    fn set_offset_ns(offset_ns: u64);
 }
 
 #[inline]
 pub fn offset_ns() -> u64 {
     RtcIf::offset_ns()
+}
+
+/// Updates the wall-clock offset in nanoseconds relative to monotonic time.
+#[inline]
+pub fn set_offset_ns(offset_ns: u64) {
+    RtcIf::set_offset_ns(offset_ns)
 }

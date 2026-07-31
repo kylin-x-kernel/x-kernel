@@ -22,6 +22,10 @@ impl khal::rtc::RtcIf {
     fn offset_ns() -> u64 {
         offset_ns()
     }
+
+    fn set_offset_ns(offset_ns: u64) {
+        set_offset_ns(offset_ns);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +89,13 @@ pub fn offset_ns() -> u64 {
 
 #[inline]
 pub fn init_offset_ns(offset: u64) {
-    RTC_EPOCHOFFSET_NANOS.store(offset, Ordering::Relaxed);
+    set_offset_ns(offset);
+}
+
+/// Updates the wall-clock offset in nanoseconds relative to monotonic time.
+#[inline]
+pub fn set_offset_ns(offset_ns: u64) {
+    RTC_EPOCHOFFSET_NANOS.store(offset_ns, Ordering::Relaxed);
 }
 
 #[inline]
