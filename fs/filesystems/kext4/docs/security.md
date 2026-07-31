@@ -115,7 +115,7 @@ ownership、journal handle、allocator bitmap 和 inode metadata 之间的顺序
 | T-04 | journal credits 估算不足或按 data blocks 过度估算，导致 metadata update 在事务中途失败或被错误拒绝 | 中 | namespace remove、writeback、truncate、preallocation discard 或 final eviction 修改 orphan、xattr、extent 和 inode metadata | namespace reservation 只覆盖 dirent、nlink 和 orphan metadata，不包含后续 final eviction；ordered writeback 固定为 path-local 算法并按 logical blocks 与最大路径深度估算，禁止固定上限截断；legacy final eviction 和 extent truncate 按实际 tree blocks、需要 revoke 的旧 tree blocks 与 affected groups 计算；victim 带 external xattr 时 final eviction 预算包含 EA 清理 |
 | T-05 | 恶意 extent 或 bitmap metadata 导致释放不属于该 inode 的 block | 高 | 损坏镜像把 extent/xattr block 指向 system zone 或非法 group | release 或 mutation 前执行 block ownership、system-zone、bitmap 和 checksum 校验 |
 | T-06 | 设备写入/flush 失败让部分 metadata 可见 | 中 | commit、replay、checkpoint、显式 sync 或 xattr update 期间设备失败 | journal abort 保留 recovery state 或 pending checkpoint；后续 sync/mutation 返回 aborted，不跨 syscall 回滚内存修改；测试覆盖 explicit-sync commit、checkpoint、xattr 和 replay failure |
-| T-07 | clean journal 上残留 legacy orphan，mount 永久返回 `NeedsRecovery` | 中 | namespace transaction 已 checkpoint，但 final inode eviction 尚未发生 | 显式 recovery 无论 journal 是否需要 replay 都遍历 legacy orphan；zero-link entry 复用 journaled final-eviction 路径 |
+| T-07 | clean journal 上残留 legacy orphan，mount 永久返回 `NeedsRecovery` | 中 | namespace transaction 已 checkpoint，但 final inode eviction 尚未发生 | 显式 recovery 无论 journal 是否需要 replay 都遍历 legacy orphan；clean 分支以 `PreserveDuringRecovery` 建立 recovery evidence，逐个同步 commit/checkpoint，确认 journal start 清零后才清除 recovery feature；zero-link entry 复用 journaled final-eviction 路径 |
 | T-08 | free-block aggregate 与 group descriptor 漂移导致 delayed-allocation 过量预留 | 中 | allocation/release 只更新一侧 counter，或发布后才发现普通错误 | block mutation 先在私有 bytes/cache 副本完成校验，再同时发布 superblock 与 group descriptor；发布后错误永久 abort journal；bridge 再扣除 ext4 reserved blocks 和运行态 reservation，`statfs()` 保留 group fold 作为独立统计路径 |
 | T-09 | 新建 inode 固定为 root，绕过调用者 owner 语义 | 高 | bridge 丢弃 credential 或 core constructor 隐式填入 UID/GID 0 | create/mkdir/mknod/symlink callback 使用 `inode_init_owner()`，显式 `uid`、`gid` 随同 namei transaction 持久化 |
 | T-10 | journal head 追上 tail 并覆盖尚未 checkpoint 的 commit | 高 | 多个 committed transaction 占满环形日志，追加仍继续写入 | 依据 oldest tail/current head 计算 live 空间，始终保留一个空 block；空间不足时先 checkpoint 最老 transaction 再重试，不发出覆盖写；真实 ext4 镜像测试覆盖双 transaction tail 推进 |
@@ -126,7 +126,7 @@ ownership、journal handle、allocator bitmap 和 inode metadata 之间的顺序
 |------|----------|----------|----------|----------|--------|----------|
 | F-01 | 对 Linux ext4 有效 feature 返回 unsupported | EA inode、bigalloc、orphan-file、inline-data write 等 feature 尚未实现 | 当前操作失败 | filesystem 仍保持可审计状态，但该能力不可用 | 3 | feature negotiation 和显式 `UnsupportedKind` |
 | F-02 | journal commit 或 checkpoint 失败 | 设备写入/flush 错误 | committing 或 pending checkpoint 状态保留并 abort journal | 当前 mount 后续 sync/mutation 拒绝继续，重新挂载时依赖 recovery | 2 | 失败返回前永久 abort；保留 recovery evidence 和 pending state，禁止后续 sync 假成功 |
-| F-03 | recovery-time zero-link cleanup 失败 | crash 发生在 namespace commit 之后、final cleanup 之前，且 metadata 损坏、设备失败或 inode 使用尚未支持的格式 | recovery 保留 orphan/recovery evidence 并返回错误 | filesystem 不会被当作可写 root 暴露 | 2 | legacy orphan cleanup 使用独立 journal transaction；checkpoint 后在保留 recovery flag 的同时重载 mutable metadata state，成功后再继续下一个 orphan，N3 在最终执行图上补齐 fault/powercut 矩阵 |
+| F-03 | recovery-time zero-link cleanup 失败 | crash 发生在 namespace commit 之后、final cleanup 之前，且 metadata 损坏、设备失败或 inode 使用尚未支持的格式 | recovery 保留 orphan/recovery evidence 并返回错误 | filesystem 不会被当作可写 root 暴露 | 2 | legacy orphan cleanup 使用独立 journal transaction；checkpoint 后在保留 recovery flag 的同时重载 mutable metadata state，成功后再继续下一个 orphan；clean-journal flush-failure 回归测试验证失败可观察、证据保留和重试成功，N3 在最终执行图上补齐其余 fault/powercut 矩阵 |
 | F-04 | 粗粒度 mutex 串行化慢 I/O | live bridge 在 blocking filesystem work 周围持有 mount-level core lock | 吞吐下降 | 其他 KExt4 operation 等待 | 4 | N1 固定 `MountedJournal` 生命周期；N2 根据实际 worker 和共享状态建立 per-inode/per-group/journal/metadata-buffer 锁域；锁拆分前不宣称并发性能 |
 | F-05 | journal reservation 空间不足 | operation 的实际 metadata targets 超过空 journal 容量，或 reservation 混入另一个 lifecycle 阶段的工作 | transaction 在修改 metadata 前失败 | 正常 writeback、fsync、rename-overwrite、truncate 或 orphan cleanup 返回错误；已有磁盘状态保持不变 | 3 | namespace 与 final eviction 分开预算；ordered writeback 只走 path-local update，并按最大路径深度计算不截断预算；跨叶 truncate 在首个 metadata 写入前选择按 tree blocks/groups 估算的全树路径；由 rename-overwrite、fragmented-writeback、balanced-split 和 preallocation-tail credit 回归测试约束 |
 | F-06 | PageCache 与 filesystem core 锁序反转 | writeback 持有 core mutex 等待 mapping mutex，同时 cache miss 持有 mapping mutex 进入 backing read | 并发 buffered I/O 和 `sync()` 停止推进 | watchdog 报告 mutex deadlock，filesystem workload 无法继续 | 2 | bridge 不在 PageCache traversal 外层持有 core mutex；同 inode writeback 独立串行化，batch callback 在 mapping/folio mutex 释放后才进入核心；VFS/MM 后续仍需消除 tree lock 下的 backing I/O |
@@ -143,7 +143,10 @@ Commit/checkpoint failure 会保留 committing 或 pending work 并永久 abort 
 丢失尚未落盘的 metadata；后续 sync 和 mutation 都观察 `JournalAborted`，不能把内存中的
 transaction 当作 durable。多个 pending commit 存在时，完成最老 transaction 只推进 journal
 tail；只有最后一个完成后才清除 journal start 和 ext4 recovery evidence。当前 inode sync
-采用提交整个 running transaction 的保守语义。
+采用提交整个 running transaction 的保守语义。显式 recovery 同样只有在 legacy orphan
+cleanup 全部完成 commit/checkpoint、确认 journal start 为零，并 flush 最终 superblock
+状态之后才能返回成功；在 cleanup durable 之前失败会保留 orphan head 或 recovery feature
+作为下一次恢复入口，最终状态 flush 失败也必须向调用方返回错误。
 
 N1 已完成的 `MountedJournal` 边界必须继续保留 recovery evidence、revoke 和
 checkpoint-failure-retain 不变量。后续 N2 后台化不能以暂时缺少 N3 完整 fault matrix 为理由

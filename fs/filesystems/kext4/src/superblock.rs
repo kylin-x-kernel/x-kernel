@@ -388,7 +388,7 @@ impl Ext4Filesystem {
         Self::open(device, false)
     }
 
-    /// Replays a filesystem journal and cleans the legacy orphan list.
+    /// Recovers a filesystem journal and cleans the legacy orphan list.
     ///
     /// This entry point performs metadata writes. It is intentionally separate
     /// from [`mount`](Self::mount), which keeps the read-only mount path from
@@ -396,6 +396,12 @@ impl Ext4Filesystem {
     /// still contain legacy orphan entries left by a committed unlink or
     /// truncate. In that case this method performs journaled orphan cleanup and
     /// returns `Ok(None)` because no journal replay report was produced.
+    ///
+    /// A successful return means that orphan cleanup has completed its journal
+    /// commit and home-block checkpoint, the journal is marked empty, and the
+    /// ext4 recovery feature has been cleared on stable storage. On failure,
+    /// the method does not intentionally clear the final on-disk recovery
+    /// evidence before the corresponding journal or orphan work is durable.
     pub fn recover(device: Arc<dyn BlockDevice>) -> Ext4Result<Option<Ext4RecoveryReport>> {
         Ext4Recovery::open(device)?.replay()
     }
@@ -2588,6 +2594,7 @@ mod tests {
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount orphan recovery image");
         let root = filesystem.root_inode().expect("read root inode");
+        let free_inodes_before_create = filesystem.superblock().free_inodes_count();
         let created = filesystem
             .create_regular_file(
                 &root,
@@ -2618,8 +2625,23 @@ mod tests {
         assert_eq!(removed.removed_inode(), written.number());
         assert_eq!(removed.removed().links_count(), 0);
         assert_eq!(filesystem.orphan_head(), Some(written.number()));
+        assert!(filesystem.journal_supports_revoke());
+        assert!(!filesystem.superblock().features().needs_recovery());
+        filesystem
+            .sync_filesystem()
+            .expect("persist clean journal and legacy orphan");
+        assert_eq!(filesystem.pending_checkpoint_count(), 0);
+        assert_eq!(filesystem.orphan_head(), Some(written.number()));
         assert!(!filesystem.superblock().features().needs_recovery());
         drop(filesystem);
+
+        {
+            let bytes = device.bytes();
+            let persisted = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                .expect("decode persisted clean orphan superblock");
+            assert_eq!(persisted.last_orphan(), written.number().get());
+            assert!(!persisted.features().needs_recovery());
+        }
 
         let mount_device: Arc<dyn BlockDevice> = device.clone();
         assert_eq!(
@@ -2629,11 +2651,28 @@ mod tests {
         let recovery_device: Arc<dyn BlockDevice> = device.clone();
         assert_eq!(Ext4Filesystem::recover(recovery_device), Ok(None));
 
+        {
+            let bytes = device.bytes();
+            let persisted = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                .expect("decode recovered clean orphan superblock");
+            assert_eq!(persisted.last_orphan(), 0);
+            assert!(!persisted.features().needs_recovery());
+        }
+
         let recovered_device: Arc<dyn BlockDevice> = device.clone();
         let recovered =
             Ext4Filesystem::mount(recovered_device).expect("mount orphan-cleaned image");
         assert_eq!(recovered.orphan_head(), None);
-        assert_eq!(recovered.inode(written.number()), Err(Ext4Error::NotFound));
+        assert!(
+            !recovered
+                .journal_status()
+                .expect("recovered image has an internal journal")
+                .has_nonzero_log_start()
+        );
+        assert_eq!(
+            recovered.superblock().free_inodes_count(),
+            free_inodes_before_create
+        );
         assert_eq!(
             recovered
                 .lookup(&recovered.root_inode().unwrap(), "kext4-recovery-orphan")
@@ -2645,6 +2684,101 @@ mod tests {
         fs::write(&image, device.bytes()).expect("write recovered orphan image");
         run_e2fsck_read_only(&e2fsck, &image);
         fs::remove_file(image).expect("remove clean-zero-link-orphan-recovery image");
+    }
+
+    #[test]
+    fn clean_orphan_recovery_flush_failure_preserves_evidence_and_retries() {
+        let mke2fs = require_e2fsprogs("mke2fs");
+        let e2fsck = require_e2fsprogs("e2fsck");
+        let image = temporary_image_path("clean-orphan-recovery-flush-failure");
+        create_journaled_linear_namespace_test_image(&mke2fs, &image);
+
+        let bytes = fs::read(&image).expect("read generated orphan recovery image");
+        let device = Arc::new(LinuxImageDevice::new(bytes));
+        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let mut filesystem =
+            Ext4Filesystem::mount(block_device).expect("mount orphan recovery image");
+        let root = filesystem.root_inode().expect("read root inode");
+        let free_inodes_before_create = filesystem.superblock().free_inodes_count();
+        let created = filesystem
+            .create_regular_file(
+                &root,
+                b"kext4-recovery-flush-failure",
+                0o644,
+                0,
+                0,
+                crate::Ext4Timestamp::new(133, 0),
+            )
+            .expect("create orphan recovery target");
+        let removed = filesystem
+            .unlink(
+                created.parent(),
+                b"kext4-recovery-flush-failure",
+                crate::Ext4Timestamp::new(134, 0),
+            )
+            .expect("leave zero-link inode on the legacy orphan list");
+        let orphan = removed.removed_inode();
+        assert_eq!(filesystem.orphan_head(), Some(orphan));
+        assert!(filesystem.journal_supports_revoke());
+        filesystem
+            .sync_filesystem()
+            .expect("persist clean journal and legacy orphan");
+        assert!(!filesystem.superblock().features().needs_recovery());
+        drop(filesystem);
+
+        device.fail_flush_at(device.flush_count() + 1);
+        let recovery_device: Arc<dyn BlockDevice> = device.clone();
+        assert_eq!(
+            Ext4Filesystem::recover(recovery_device),
+            Err(Ext4Error::Device(DriverError::Io))
+        );
+
+        {
+            let bytes = device.bytes();
+            let persisted = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                .expect("decode recovery-failed superblock");
+            assert_eq!(persisted.last_orphan(), orphan.get());
+            assert!(persisted.features().needs_recovery());
+        }
+
+        let mount_device: Arc<dyn BlockDevice> = device.clone();
+        assert_eq!(
+            Ext4Filesystem::mount(mount_device).map(|_| ()),
+            Err(Ext4Error::NeedsRecovery)
+        );
+
+        let retry_device: Arc<dyn BlockDevice> = device.clone();
+        Ext4Filesystem::recover(retry_device).expect("retry clean orphan recovery");
+
+        let recovered_device: Arc<dyn BlockDevice> = device.clone();
+        let recovered =
+            Ext4Filesystem::mount(recovered_device).expect("mount retried recovery image");
+        assert_eq!(recovered.orphan_head(), None);
+        assert!(!recovered.superblock().features().needs_recovery());
+        assert!(
+            !recovered
+                .journal_status()
+                .expect("recovered image has an internal journal")
+                .has_nonzero_log_start()
+        );
+        assert_eq!(
+            recovered.superblock().free_inodes_count(),
+            free_inodes_before_create
+        );
+        assert_eq!(
+            recovered
+                .lookup(
+                    &recovered.root_inode().expect("read recovered root inode"),
+                    "kext4-recovery-flush-failure",
+                )
+                .expect("lookup recovered namespace"),
+            None
+        );
+        drop(recovered);
+
+        fs::write(&image, device.bytes()).expect("write retried recovery image");
+        run_e2fsck_read_only(&e2fsck, &image);
+        fs::remove_file(image).expect("remove clean-orphan recovery failure image");
     }
 
     #[test]
@@ -6016,7 +6150,6 @@ mod tests {
         );
         assert_eq!(filesystem.orphan_head(), None);
         assert!(filesystem.superblock().features().needs_recovery());
-        assert_eq!(filesystem.inode(inode.number()), Err(Ext4Error::NotFound));
         assert_eq!(
             filesystem.superblock().free_inodes_count(),
             free_inodes_before_cleanup + 1
@@ -6034,6 +6167,7 @@ mod tests {
         let block_device: Arc<dyn BlockDevice> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount generated recovery image");
+        let free_inodes_before_allocation = filesystem.superblock().free_inodes_count();
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         let journal = filesystem.metadata_journal().expect("open mounted journal");
         let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
@@ -6056,7 +6190,10 @@ mod tests {
         let mount_device: Arc<dyn BlockDevice> = device.clone();
         let recovered = Ext4Filesystem::mount(mount_device).expect("mount recovered image");
         assert_eq!(recovered.orphan_head(), None);
-        assert_eq!(recovered.inode(inode.number()), Err(Ext4Error::NotFound));
+        assert_eq!(
+            recovered.superblock().free_inodes_count(),
+            free_inodes_before_allocation
+        );
         assert!(!recovered.superblock().features().needs_recovery());
         fs::remove_file(image).expect("remove recovery image");
     }

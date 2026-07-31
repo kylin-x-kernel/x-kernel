@@ -261,7 +261,7 @@ impl fmt::Display for Ext4Error {
                  ro_compat={read_only_compat:#010x}"
             ),
             Self::Unsupported(kind) => write!(formatter, "unsupported ext4 semantics: {kind:?}"),
-            Self::NeedsRecovery => formatter.write_str("ext4 journal recovery is required"),
+            Self::NeedsRecovery => formatter.write_str("ext4 recovery is required"),
             Self::ChecksumMismatch {
                 target,
                 expected,

@@ -284,12 +284,16 @@ N5 advanced I/O / common features -> N6 replacement
   重叠；无 feature bitmap 的 v1 journal 保留每个 operation 同步 commit/checkpoint 退化路径；
 - truncate 的 orphan + `i_disksize` 更新保留强制 commit 边界，确保后续释放旧映射前已有可
   恢复状态；recovery-time orphan cleanup 也保持同步 commit/checkpoint，不加入普通 batch。
+  即使 JBD2 已 clean，只要 legacy orphan head 非零，首个 cleanup transaction 也会采用
+  `PreserveDuringRecovery` 建立 recovery evidence；全部 cleanup 完成后确认 journal start 为零，
+  再清除并 flush ext4 recovery feature；
 - journal 不再保存 inode-number keyed sync/datasync cursor；bridge `fsync/fdatasync` 先完成
   目标 inode PageCache writeback，再保守提交整个 running transaction 并 flush。精准 target
   transaction 等待需由 runtime inode 保存 tid，并在 mutation 完成后发布；
 - unit test 和真实 Linux ext4 镜像测试覆盖修改前预期错误、修改后 invariant abort、credit
   归还、多 handle 独立 stop、transaction-id wrap、FIFO checkpoint、replay 后 orphan cleanup，
-  以及最终 `syncfs` drain 后的 e2fsck。
+  clean journal 上持久化的 legacy orphan、recovery flush 失败后的证据保留与重试，以及最终
+  `syncfs` drain/recovery 后的 e2fsck。
 
 移交 N2 的后续工作：
 

@@ -58,7 +58,7 @@ impl Ext4Filesystem {
                 match KExt4Core::mount(device) {
                     Ok(core) => core,
                     Err(err) => {
-                        error!("KExt4 mount after journal recovery failed: {err:?}");
+                        error!("KExt4 mount after filesystem recovery failed: {err:?}");
                         return Err(into_vfs_err(err));
                     }
                 }

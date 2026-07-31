@@ -257,9 +257,13 @@ Truncate 使用 legacy orphan list 保护 regular-file shrink。KExt4 的
 legacy orphan list；即使 journal 已 clean，只要 superblock 仍有 orphan head，也会执行同一
 cleanup。`nlink > 0` regular inode 完成中断的 truncate，`nlink == 0` inode 复用 final
 eviction 事务释放 external xattr、extent 和 inode bitmap。`recover()` 返回 `None` 只表示
-没有 journal replay report，不表示没有执行 orphan cleanup。Recovery cleanup 的 transaction
-在 checkpoint 后保持 recovery flag，并从已落盘的 superblock/group descriptors 重新建立
-内存状态，避免旧 orphan head 或 allocator counter 被 checkpoint 前的快照重新带回循环。
+没有 journal replay report，不表示没有执行 orphan cleanup，也不降低成功返回的持久性保证。
+clean-journal cleanup 的首个 transaction 会先建立 ext4 recovery evidence；所有 recovery
+cleanup transaction 都采用 `PreserveDuringRecovery`，逐个同步完成 commit/checkpoint，并从
+已落盘的 superblock/group descriptors 重新建立内存状态，避免旧 orphan head 或 allocator
+counter 被 checkpoint 前的快照重新带回循环。全部 orphan 清理完成后，recovery 再确认 JBD2
+`s_start` 为零，最后清除并 flush ext4 recovery feature；任一步失败都会返回错误，而不会先
+清除最终的磁盘恢复证据。
 
 Truncate 和 unwritten preallocation discard 的 journal credits 按实际 extent 结构计算：inode
 root、重建后的 extent-tree blocks、需要 revoke 的旧 tree blocks，以及释放范围覆盖的不同 block

@@ -693,6 +693,7 @@ impl Ext4Filesystem {
                 // Setting the recovery bit reads the pre-checkpoint superblock
                 // from disk. Rebase after the home blocks land so the next
                 // orphan sees the checkpointed head and allocator counters.
+                self.metadata_io.invalidate_all();
                 self.reload_mutable_metadata_state()
             }
         };
@@ -871,6 +872,13 @@ impl Ext4Recovery {
         })
     }
 
+    fn recover_clean_legacy_orphans(&mut self) -> Ext4Result<()> {
+        self.filesystem
+            .cleanup_legacy_orphans_preserving_recovery()?;
+        self.filesystem.ensure_journal_superblock_has_zero_start()?;
+        self.filesystem.clear_ext4_needs_recovery_feature_on_disk()
+    }
+
     pub(super) fn replay(mut self) -> Ext4Result<Option<Ext4RecoveryReport>> {
         let features = self.filesystem.superblock.features();
         if features.has_orphan_file() || features.has_orphan_present() {
@@ -878,7 +886,7 @@ impl Ext4Recovery {
         }
         if !features.needs_recovery() {
             if self.filesystem.orphan_head().is_some() {
-                self.filesystem.cleanup_legacy_orphans()?;
+                self.recover_clean_legacy_orphans()?;
             }
             return Ok(None);
         }

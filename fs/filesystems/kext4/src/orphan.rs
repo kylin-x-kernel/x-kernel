@@ -62,6 +62,7 @@ impl Ext4Filesystem {
         self.remove_orphan_inner(inode, true, handle)
     }
 
+    #[cfg(test)]
     pub(crate) fn cleanup_legacy_orphans(&mut self) -> Ext4Result<usize> {
         self.cleanup_legacy_orphans_with_policy(RecoveryFlagPolicy::ClearAfterCheckpoint)
     }
