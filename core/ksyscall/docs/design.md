@@ -116,6 +116,8 @@ ksyscall::dispatch_irq_syscall
 - `ipc/eventfd.rs`
   - `eventfd2`
   - owner 在 `kfd_objects::EventFd`
+- `sys.rs`
+  - `sethostname` 路由到当前 UTS namespace
 - `time/timerfd.rs`
   - `timerfd_*`
   - owner 在 `kfd_objects::TimerFd`

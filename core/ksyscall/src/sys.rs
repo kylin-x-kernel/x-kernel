@@ -9,8 +9,10 @@
 //! - Process information queries
 //! - Hostname management
 
+use core::{mem::MaybeUninit, slice};
+
 use kbuild_config::ARCH;
-use kerrno::KResult;
+use kerrno::{KError, KResult};
 use khal::mem;
 use kprocess::{current_user_process, current_user_process_fs_context};
 use kvfs::{Filename, NodePermission};
@@ -19,8 +21,15 @@ use linux_raw_sys::{
     general::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM},
     system::{new_utsname, sysinfo},
 };
-use osvm::write_vm_mem;
-use posix_types::UserPtr;
+use osvm::{VirtPtr, write_vm_mem};
+use posix_types::{UserConstPtr, UserPtr};
+
+/// Maximum hostname length in bytes accepted by `sethostname(2)`.
+///
+/// Matches `UTS_LEN - 1` enforced by the UTS namespace owner
+/// (`process/kns/src/uts.rs`); kept as a local constant rather than exposing
+/// the owner's internal limit across crates.
+const MAX_HOSTNAME_LEN: usize = 64;
 
 // Static kernel build constants for uname fields that never change per namespace.
 const UTS_SYSNAME: &[u8] = b"Linux";
@@ -113,6 +122,31 @@ pub fn sys_sysinfo(info: UserPtr<sysinfo>) -> KResult<isize> {
 
 /// Access kernel log buffer (syslog)
 pub fn sys_syslog(_type: i32, _buf: *mut c_char, _len: usize) -> KResult<isize> {
+    Ok(0)
+}
+
+/// Sets the hostname in the calling process's UTS namespace.
+pub fn sys_sethostname(name: UserConstPtr<u8>, len: usize) -> KResult<isize> {
+    if !kprocess::current_cred().is_privileged() {
+        return Err(KError::OperationNotPermitted);
+    }
+    if len > MAX_HOSTNAME_LEN {
+        return Err(KError::InvalidInput);
+    }
+
+    // Hostnames are short (<= 64 B); read into a stack buffer instead of
+    // allocating a `Vec`, mirroring `sys_uname`'s stack-buffer style.
+    let mut buf = [0u8; MAX_HOSTNAME_LEN];
+    // SAFETY: `buf` is a live `[u8; N]` of trivially-initializable bytes, so its
+    // first `len` slots may be reborrowed as `MaybeUninit<u8>` for copy-from-user
+    // (same pattern as `devfs/nodes/loop.rs`). Only `buf[..len]` is read below.
+    let uninit =
+        unsafe { slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<MaybeUninit<u8>>(), len) };
+    osvm::read_vm_bytes(name.as_ptr(), uninit)?;
+    kprocess::current_user_process()
+        .uts_ns()?
+        .set_nodename(&buf[..len])
+        .map_err(|_| KError::InvalidInput)?;
     Ok(0)
 }
 
