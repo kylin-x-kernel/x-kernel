@@ -30,9 +30,9 @@ use kclass::{BlockDeviceImpl, ClassDevice};
 impl fs_block::FileSystemType {
     fn mount_bdev(
         device: ClassDevice<BlockDeviceImpl>,
-        _flags: kvfs::StatFsFlags,
+        flags: kvfs::SuperBlockFlags,
     ) -> kvfs::VfsResult<alloc::sync::Arc<kvfs::SuperBlock>> {
-        Ok(FatFilesystem::mount_bdev(device))
+        Ok(FatFilesystem::mount_bdev(device, flags))
     }
 }
 

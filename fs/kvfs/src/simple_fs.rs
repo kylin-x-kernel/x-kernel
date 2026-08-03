@@ -12,15 +12,14 @@ use slab::Slab;
 
 use crate::{
     Dentry, DeviceId, InodeOperations, Metadata, MetadataUpdate, NodePermission, NodeType, StatFs,
-    StatFsFlags, SuperBlock, SuperBlockOperations, VfsInodeInit, VfsResult,
-    libfs::simple_statfs_with_flags, simple_dir::DirMaker,
+    SuperBlock, SuperBlockFlags, SuperBlockOperations, VfsInodeInit, VfsResult,
+    libfs::simple_statfs, simple_dir::DirMaker,
 };
 
 /// A simple filesystem implementation that uses a slab allocator for inodes.
 pub struct SimpleFs {
     name: String,
     fs_type: u32,
-    mount_flags: StatFsFlags,
     inodes: Mutex<Slab<()>>,
 }
 
@@ -31,27 +30,24 @@ impl SimpleFs {
         fs_type: u32,
         root: impl FnOnce(Arc<Self>) -> DirMaker,
     ) -> Arc<SuperBlock> {
-        Self::new_with_flags(name, fs_type, StatFsFlags::empty(), root)
+        Self::new_with_superblock_flags(name, fs_type, SuperBlockFlags::empty(), root)
     }
 
-    /// Creates a superblock backed by a simple filesystem with explicit mount flags.
-    pub fn new_with_flags(
+    /// Creates a superblock backed by a simple filesystem with explicit flags.
+    pub fn new_with_superblock_flags(
         name: String,
         fs_type: u32,
-        mut mount_flags: StatFsFlags,
+        superblock_flags: SuperBlockFlags,
         root: impl FnOnce(Arc<Self>) -> DirMaker,
     ) -> Arc<SuperBlock> {
-        let is_readonly = mount_flags.contains(StatFsFlags::RDONLY);
-        mount_flags.remove(StatFsFlags::RDONLY);
         let fs = Arc::new(Self {
             name,
             fs_type,
-            mount_flags,
             inodes: Mutex::new(Slab::new()),
         });
         let root = root(fs.clone());
         let root = Dentry::new_dir_from_inode(root(), None, String::new());
-        SuperBlock::new_with_readonly(fs, root, is_readonly)
+        SuperBlock::new_with_flags(fs, root, superblock_flags)
     }
 
     fn alloc_inode(&self) -> u64 {
@@ -69,7 +65,7 @@ impl SuperBlockOperations for SimpleFs {
     }
 
     fn statfs(&self) -> VfsResult<StatFs> {
-        Ok(simple_statfs_with_flags(self.fs_type, self.mount_flags))
+        Ok(simple_statfs(self.fs_type))
     }
 }
 

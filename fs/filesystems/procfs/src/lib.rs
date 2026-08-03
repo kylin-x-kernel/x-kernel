@@ -18,16 +18,11 @@ mod trace_nodes;
 
 use alloc::sync::Arc;
 
-use kvfs::{SimpleFs, StatFsFlags, SuperBlock};
-
-const PROC_MOUNT_FLAGS: StatFsFlags = StatFsFlags::NOSUID
-    .union(StatFsFlags::NODEV)
-    .union(StatFsFlags::NOEXEC)
-    .union(StatFsFlags::RELATIME);
+use kvfs::{SimpleFs, SuperBlock, SuperBlockFlags};
 
 /// Creates a procfs superblock for process information.
-pub fn new_procfs() -> Arc<SuperBlock> {
-    SimpleFs::new_with_flags("proc".into(), 0x9fa0, PROC_MOUNT_FLAGS, root::builder)
+pub fn new_procfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
+    SimpleFs::new_with_superblock_flags("proc".into(), 0x9fa0, superblock_flags, root::builder)
 }
 
 #[cfg(unittest)]
@@ -38,11 +33,10 @@ mod tests {
 
     #[def_test]
     fn test_new_procfs_has_expected_name_and_flags() {
-        let fs = new_procfs();
+        let fs = new_procfs(SuperBlockFlags::empty());
 
         assert_eq!(fs.name(), "proc");
         let stat = fs.stat().unwrap();
         assert_eq!(stat.fs_type, 0x9fa0);
-        assert_eq!(stat.mount_flags, PROC_MOUNT_FLAGS);
     }
 }

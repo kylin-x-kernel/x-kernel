@@ -32,6 +32,13 @@ impl NodeType {
             _ => Self::Unknown,
         }
     }
+
+    pub(crate) const fn is_special(self) -> bool {
+        matches!(
+            self,
+            Self::CharacterDevice | Self::BlockDevice | Self::Fifo | Self::Socket
+        )
+    }
 }
 
 impl From<u8> for NodeType {

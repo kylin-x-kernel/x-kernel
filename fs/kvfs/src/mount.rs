@@ -27,7 +27,7 @@ pub struct MountIdmap;
 use crate::{
     Dentry, DentryKey, DeviceId, FMode, FileOperations, GetattrQueryFlags, GetattrRequestMask,
     InodeUpdateTime, Metadata, MetadataUpdate, Mutex, NodeFlags, NodePermission, NodeType,
-    OpenFlags, Permission, RenameFlags, SetattrTime, StatFs, StatFsFlags, SuperBlock, Umode,
+    OpenFlags, Permission, RenameFlags, SetattrTime, StatFs, SuperBlock, SuperBlockFlags, Umode,
     VfsError, VfsFile, VfsFileBuilder, VfsInode, VfsResult, nullfs, path::PathBuf,
 };
 
@@ -221,9 +221,9 @@ impl MntNamespace {
         self.root_path().resolve_final_mount()
     }
 
-    /// Mounts a filesystem at a resolved mountpoint in this namespace.
+    /// Mounts a filesystem at a resolved mountpoint with the default relatime policy.
     pub fn attach(&self, mountpoint: &Path, fs: &Arc<SuperBlock>) -> VfsResult<Arc<Mount>> {
-        self.attach_with_flags_and_devname(mountpoint, fs, MountFlags::empty(), None)
+        self.attach_with_flags_and_devname(mountpoint, fs, MountFlags::RELATIME, None)
     }
 
     /// Mounts a filesystem with per-mount flags and device name at a resolved mountpoint.
@@ -340,9 +340,9 @@ pub struct Mount {
 }
 
 impl Mount {
-    /// Creates a new mount for a filesystem at an optional parent path.
+    /// Creates a new mount with the default relatime policy at an optional parent path.
     pub fn new(fs: &Arc<SuperBlock>, location_in_parent: Option<Path>) -> Arc<Self> {
-        Self::new_with_flags_and_devname(fs, location_in_parent, MountFlags::empty(), None)
+        Self::new_with_flags_and_devname(fs, location_in_parent, MountFlags::RELATIME, None)
     }
 
     /// Creates a new mount with per-mount flags and device name.
@@ -411,6 +411,11 @@ impl Mount {
 
     pub(crate) fn super_block(&self) -> &Arc<SuperBlock> {
         &self.mnt.mnt_sb
+    }
+
+    /// Returns the VFS-wide flags for this mount's superblock.
+    pub fn super_block_flags(&self) -> SuperBlockFlags {
+        self.super_block().flags()
     }
 
     /// Returns the filesystem type name for this mount.
@@ -721,11 +726,7 @@ impl Path {
 
     /// Returns whether this path is effectively read-only.
     pub fn is_effectively_readonly(&self) -> bool {
-        self.is_mount_readonly()
-            || self
-                .super_block()
-                .stat()
-                .is_ok_and(|stat| stat.mount_flags.contains(StatFsFlags::RDONLY))
+        self.is_mount_readonly() || self.super_block().is_readonly()
     }
 
     /// Ensures this path's mount allows modification.
@@ -742,27 +743,22 @@ impl Path {
         }
 
         let mount_flags = self.mnt.flags();
-        let stat_flags = self
-            .super_block()
-            .stat()
-            .map_or(StatFsFlags::empty(), |stat| stat.mount_flags);
+        let super_block_flags = self.super_block().flags();
         if mount_flags.contains(MountFlags::NOATIME)
-            || stat_flags.contains(StatFsFlags::NOATIME)
+            || super_block_flags.contains(SuperBlockFlags::NOATIME)
             || (self.inode().node_type() == NodeType::Directory
                 && (mount_flags.contains(MountFlags::NODIRATIME)
-                    || stat_flags.contains(StatFsFlags::NODIRATIME)))
+                    || super_block_flags.contains(SuperBlockFlags::NODIRATIME)))
         {
             return;
         }
 
         let metadata = self.metadata();
         let now = wall_time();
-        let uses_relatime = mount_flags.contains(MountFlags::RELATIME)
-            || stat_flags.contains(StatFsFlags::RELATIME);
-        if uses_relatime
-            && metadata.atime > metadata.mtime
-            && metadata.atime > metadata.ctime
-            && now.saturating_sub(metadata.atime) <= Duration::from_secs(24 * 60 * 60)
+        if mount_flags.contains(MountFlags::RELATIME)
+            && metadata.mtime < metadata.atime
+            && metadata.ctime < metadata.atime
+            && now.saturating_sub(metadata.atime) < Duration::from_secs(24 * 60 * 60)
         {
             return;
         }
@@ -770,6 +766,8 @@ impl Path {
             return;
         }
 
+        // Linux treats atime persistence as best effort so a read that already
+        // completed is never converted into an update-time failure.
         let _ = self
             .inode()
             .update_time(self.dentry(), now, InodeUpdateTime::Access);
@@ -1350,8 +1348,9 @@ mod tests {
     use super::*;
     use crate::{
         Dentry, DirContext, FileDirOperations, FileOperations, InodeDirOperations, InodeOperations,
-        LockedDentry, Metadata, MetadataUpdate, NodePermission, NodeType, StatFs,
-        SuperBlockOperations, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
+        LockedDentry, Metadata, MetadataUpdate, NodePermission, NodeType, StatFs, StatFsFlags,
+        SuperBlockFlags, SuperBlockOperations, VfsError, VfsFile, VfsInode, VfsInodeInit,
+        VfsResult,
     };
 
     fn lookup_child_in_mount(path: &Path, name: &str) -> VfsResult<Path> {
@@ -1407,7 +1406,16 @@ mod tests {
         }
 
         fn statfs(&self) -> VfsResult<StatFs> {
-            statfs(self.mount_flags)
+            statfs()
+        }
+
+        fn reconfigure(&self, flags: SuperBlockFlags, _changed: SuperBlockFlags) -> VfsResult<()> {
+            if self.mount_flags.contains(StatFsFlags::RDONLY)
+                && !flags.contains(SuperBlockFlags::RDONLY)
+            {
+                return Err(VfsError::ReadOnlyFilesystem);
+            }
+            Ok(())
         }
     }
 
@@ -1417,7 +1425,7 @@ mod tests {
         }
 
         fn statfs(&self) -> VfsResult<StatFs> {
-            statfs(StatFsFlags::empty())
+            statfs()
         }
 
         fn sync_fs(&self) -> VfsResult<()> {
@@ -1591,7 +1599,15 @@ mod tests {
         let inode =
             VfsInode::new_openable_dir(Arc::new(MockDirOps::new(mount_flags, 1)), inode_init(1));
         let root = Dentry::new_dir_from_inode(inode, None, String::new());
-        SuperBlock::new(Arc::new(MockFilesystem { mount_flags }), root)
+        let mut superblock_flags = SuperBlockFlags::empty();
+        if mount_flags.contains(StatFsFlags::RDONLY) {
+            superblock_flags.insert(SuperBlockFlags::RDONLY);
+        }
+        SuperBlock::new_with_flags(
+            Arc::new(MockFilesystem { mount_flags }),
+            root,
+            superblock_flags,
+        )
     }
 
     fn sync_tracking_filesystem() -> (Arc<SuperBlock>, Arc<SyncTrackingFilesystem>) {
@@ -1605,7 +1621,7 @@ mod tests {
         (super_block, operations)
     }
 
-    fn statfs(mount_flags: StatFsFlags) -> VfsResult<StatFs> {
+    fn statfs() -> VfsResult<StatFs> {
         Ok(StatFs {
             fs_type: 0,
             block_size: 0,
@@ -1616,7 +1632,6 @@ mod tests {
             free_file_count: 0,
             name_length: 255,
             fragment_size: 0,
-            mount_flags,
         })
     }
 
@@ -1632,7 +1647,7 @@ mod tests {
         let mount = Mount::new_root(&fs);
         let root = mount.root_path();
 
-        assert_eq!(mount.flags(), MountFlags::empty());
+        assert_eq!(mount.flags(), MountFlags::RELATIME);
         assert!(!mount.is_readonly());
         assert!(!root.is_mount_readonly());
         assert!(!root.is_effectively_readonly());

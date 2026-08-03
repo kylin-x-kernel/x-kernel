@@ -84,17 +84,23 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   `VfsFile::pipe_generation`，private data 只保存 `PipeObject`。
 - 无 writer 的非阻塞 reader 在 writer generation 未变化前不得报告 HUP；poll waiter
   必须按 file mode 注册队列，不能由用户 event mask 删除 HUP/ERR 的唤醒来源。
+- `PIPE_BUF` 原子性必须按完整用户写请求判定，不能因 iterator 的内部暂存 chunk 而把
+  大写入变成原子写；部分写入后必须回退未提交的 source iterator 进度。
 - pathname FIFO 的自动 atime/mtime/ctime 更新必须经过 VFS mount/time policy 和
   filesystem `update_time` callback；匿名 pipe 不得更新 pathname inode metadata。
 
 ## 线程安全
 
 共享 dentry、inode、mount 和 file 状态由 mutex、atomic、`Arc` 和 `Weak` 保护。
-可变 per-mount flags 由私有 `AtomicMountFlags` 封装；原子存储只接受和返回强类型
-`MountFlags`，并使用 relaxed ordering，因为 flags 不发布或保护其他 mount 状态。
-reconfigure 在替换 flags 前校验目标是当前 mount namespace 中已注册 mount 的根路径。
-普通 remount 同步更新共享 superblock 的只读策略，bind remount 仅更新目标 mount；
-后端固定只读的 superblock 不允许被错误地切换为读写。
+可变 per-mount flags 与 superblock flags 分别由私有 `AtomicMountFlags` 和
+`AtomicSuperBlockFlags` 封装；原子存储只接受和返回强类型 `MountFlags`/
+`SuperBlockFlags`，并使用 relaxed ordering，因为 flags 不发布或保护其他状态。
+reconfigure 在替换 flags 前校验目标是当前 mount namespace 中已注册 mount 的根路径，并在
+发布拟议的 superblock flags 前调用 filesystem `reconfigure` hook。普通 remount 同步更新
+共享 superblock 的只读策略，bind remount 仅更新目标 mount。默认 hook 与 Linux 缺少
+reconfigure callback 时一致，接受纯 VFS flags 变更；固定只读介质的后端必须覆盖该 hook
+并拒绝读写转换。每个 superblock 的 reconfigure lock 串行化这一 hook 与 flags 发布，
+对应 Linux `s_umount` 的重挂载序列化职责。
 children map 与 superblock dcache 不嵌套持锁；namespace 操作先更新 parent 弱索引，
 再更新 dcache 强所有权。类型化 flags 是不可变值快照，不提供共享可变状态。
 

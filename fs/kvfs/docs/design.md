@@ -42,7 +42,11 @@ POSIX syscall ABI --> Filename --> Nameidata methods --> Path/VfsInode::permissi
         |
         +-- rename --> RenameFlags --> Path / Dentry --> InodeDirOperations
         |
-        +-- statfs <---------------- StatFsFlags <---- filesystem
+        +-- statfs <----- StatFs (filesystem statistics)
+                         SuperBlockFlags + MountFlags
+                                      |
+                                      v
+                                StatFsFlags (ABI output)
 
 Mount / Path
     |
@@ -88,7 +92,18 @@ operations 又需要 VFS file/inode 接口；拆成相互依赖的 crate 只会�
 
 `SuperBlock` 在创建时接管调用者提供的 root dentry。文件系统 operation 对象只保存
 文件系统私有状态，不重复保存 root；这对应 Linux 中 `super_block.s_root` 的所有权
-边界，也避免私有状态和 root inode 之间形成引用环。
+边界，也避免私有状态和 root inode 之间形成引用环。`SuperBlockFlags` 对应
+`super_block.s_flags`，当前承载 `SB_RDONLY`、`SB_NOATIME` 和 `SB_NODIRATIME`；
+`MountFlags` 对应 `vfsmount.mnt_flags`，承载 `MNT_RELATIME` 等 per-mount 策略。
+`SuperBlockOperations::statfs()` 只返回文件系统统计数据，POSIX 导出时才由 VFS 将
+superblock/mount 状态转换为 `StatFsFlags`。该转换遵循 Linux `fs/statfs.c`：当前建模的
+superblock 位只有 `RDONLY` 导出为 `ST_RDONLY`；`ST_NOATIME`/`ST_NODIRATIME` 只由
+per-mount 位导出，即使同名 superblock 位仍参与 inode atime 决策。重挂载在发布新
+`SuperBlockFlags` 前调用 filesystem 的 `reconfigure` hook，对应 Linux
+filesystem-context 的 `reconfigure`；该 hook 接收拟议 flags 和 changed mask，对应
+`sb_flags`/`sb_flags_mask`，并与 flags 发布由 superblock 内的 reconfigure lock 串行化，
+对应 `s_umount` 的职责。和 Linux 未提供 callback 时的行为一样，默认 hook 接受纯 VFS
+flags 变更；固定只读介质的文件系统必须覆盖该 hook 并拒绝读写目标。
 
 `Dentry` 是可移动的 namespace 对象。rename 保留 source dentry 和 inode identity，只
 改变 dentry 的位置和 cache membership。inode 持有文件状态和 address space，因此
@@ -249,9 +264,10 @@ inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `seta
 独立 mount ID、per-mount flags、父挂载位置和覆盖关系。`Mount` 作为被 `Path`、打开文件
 和 namespace topology 共同引用的稳定身份，不在 remount 时替换。per-mount flags 通过
 私有 `AtomicMountFlags` 封装读写，对其余 mount 代码保持强类型 `MountFlags` 接口。
-普通 remount 只允许作用于已注册 mount 的根路径，原子替换目标 mount flags，并更新
-`SuperBlock` 上所有共享 mount 都能观察到的只读策略；bind remount 只替换目标的
-per-mount flags。文件系统后端固定报告只读时，切换到读写会返回 `ReadOnlyFilesystem`。
+普通 remount 只允许作用于已注册 mount 的根路径，原子替换目标 mount flags，并在
+filesystem `reconfigure` 接受后更新 `SuperBlock` 上所有共享 mount 都能观察到的只读策略；
+bind remount 只替换目标的 per-mount flags。只读 filesystem 可以在该 hook 中拒绝切换到
+读写并返回 `ReadOnlyFilesystem`。
 卸载 bind mount 只移除 topology 节点，不对共享的
 源 dentry 执行 `forget()`；普通 filesystem mount 仍在卸载时释放其独占 mount-root dentry。
 修改 mount topology 前，卸载路径先通过 `SuperBlock::sync_fs()` 写回 live inode、filesystem
@@ -271,11 +287,16 @@ pipe/FIFO 的访问方向只读取 `VfsFile::mode`，private data 只保存 `Pip
 open 记录当前 `w_counter`，poll 仅在此 file 存活期间见过新的 writer generation 且
 当前 writer 数为零时报告 HUP。poll waiter 依据 `f_mode` 注册 `rd_wait`/`wr_wait`，
 用户请求的 event mask 只过滤最终 readiness，不能取消 HUP/ERR 所需的唤醒来源。
+`r_counter` 与 `w_counter` 都从一开始就是非零，保留默认 `f_pipe` snapshot 为零的
+匿名 pipe HUP 语义。
 
 匿名 pipe 与 pathname FIFO 复用 `PipeObject` 的 read/write 核心。只有 pathname FIFO
 的 file-operation wrapper 在一次成功的对外 `read`/`read_iter` 后执行统一 atime
 策略，在一次成功的 `write`/`write_iter` 后执行 mtime/ctime 更新；迭代 I/O 内部的
-4 KiB chunk 不各自更新时间。
+4 KiB chunk 不各自更新时间。`PIPE_BUF` 原子性按调用开始时的完整写请求判定，内部
+暂存 chunk 不会把大写入错误地提升为原子写；发生部分写入时，未提交的 source iterator
+进度会回退。atime 热路径只读取 `MountFlags` 和 `SuperBlockFlags`，不调用 `statfs`；
+RELATIME 使用 Linux 的 `mtime/ctime >= atime` 与“至少 24 小时”边界。
 
 rename 在 syscall 边界用 `RenameFlags::from_bits` 拒绝未知位，并拒绝互斥模式。
 VFS rename 入口再次检查组合不变量，文件系统 helper 再检查自身支持的子集。

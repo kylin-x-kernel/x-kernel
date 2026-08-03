@@ -9,7 +9,7 @@ use alloc::{
     vec::Vec,
 };
 
-use kvfs::{Mount, MountFlags, Path, SeqIterator, StatFsFlags};
+use kvfs::{Mount, MountFlags, Path, SeqIterator, SuperBlockFlags};
 
 #[derive(Clone)]
 pub(crate) struct ProcMountEntry {
@@ -212,12 +212,8 @@ fn make_mount_entry(mount: &Arc<Mount>, parent_id: u64, mount_id: u64) -> ProcMo
     let mount_point = mountpoint_path(mount);
     let fs_type = mount.filesystem_name().to_string();
     let mnt_flags = mount.flags();
-    let st_flags = mount
-        .filesystem_stat()
-        .ok()
-        .map_or(StatFsFlags::empty(), |stat| stat.mount_flags);
     let mount_ro = mnt_flags.contains(MountFlags::RDONLY);
-    let super_ro = st_flags.contains(StatFsFlags::RDONLY);
+    let super_ro = mount.super_block_flags().contains(SuperBlockFlags::RDONLY);
     ProcMountEntry {
         mount_id,
         parent_id,

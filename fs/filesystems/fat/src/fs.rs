@@ -13,7 +13,7 @@ use core::{
 use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
 use ksync::{Mutex, MutexGuard};
 use kvfs::{
-    Dentry, NodePermission, NodeType, StatFs, StatFsFlags, SuperBlock, SuperBlockOperations,
+    Dentry, NodePermission, NodeType, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations,
     VfsInode, VfsInodeInit, VfsResult, path::MAX_NAME_LEN,
 };
 use slab::Slab;
@@ -71,7 +71,10 @@ impl DerefMut for FatFilesystemGuard<'_> {
 
 impl FatFilesystem {
     /// Mount a FAT filesystem backed by a block device.
-    pub fn mount_bdev(dev: ClassDevice<KBlockDevice>) -> Arc<SuperBlock> {
+    pub fn mount_bdev(
+        dev: ClassDevice<KBlockDevice>,
+        superblock_flags: SuperBlockFlags,
+    ) -> Arc<SuperBlock> {
         let mut inner = FatFilesystemInner {
             inner: ff::FileSystem::new(FatDisk::new(dev), fatfs::FsOptions::new())
                 .expect("failed to initialize FAT filesystem"),
@@ -106,7 +109,7 @@ impl FatFilesystem {
             ),
         );
         let root_dir = Dentry::new_dir_from_inode(root_inode, None, String::new());
-        SuperBlock::new(result, root_dir)
+        SuperBlock::new_with_flags(result, root_dir, superblock_flags)
     }
 }
 
@@ -139,7 +142,6 @@ impl SuperBlockOperations for FatFilesystem {
 
             name_length: MAX_NAME_LEN as _,
             fragment_size: 0,
-            mount_flags: StatFsFlags::RELATIME,
         })
     }
 }

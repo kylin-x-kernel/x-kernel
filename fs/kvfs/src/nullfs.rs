@@ -10,9 +10,9 @@ use core::time::Duration;
 use crate::{
     Dentry, DirContext, FileDirOperations, FileOperations, GetattrQueryFlags, GetattrRequestMask,
     InodeDirOperations, InodeLookupFlags, InodeOperations, LockedDentry, Metadata, MetadataUpdate,
-    MountIdmap, NodeFlags, NodePermission, NodeType, StatFs, StatFsFlags, SuperBlock,
-    SuperBlockOperations, Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
-    libfs::{generic_read_dir, noop_fsync, simple_statfs_with_flags},
+    MountIdmap, NodeFlags, NodePermission, NodeType, StatFs, SuperBlock, SuperBlockOperations,
+    Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
+    libfs::{generic_read_dir, noop_fsync, simple_statfs},
     path::{DOT, DOTDOT},
 };
 
@@ -20,7 +20,6 @@ const NULLFS_NAME: &str = "nullfs";
 const NULLFS_MAGIC: u32 = 0x4E55_4C4C;
 const NULLFS_ROOT_INO: u64 = 1;
 const NULLFS_BLOCK_SIZE: u64 = 4096;
-const NULLFS_MOUNT_FLAGS: StatFsFlags = StatFsFlags::NODEV.union(StatFsFlags::NOEXEC);
 
 /// Creates the single-purpose filesystem used as the initial namespace root.
 pub(crate) fn new_superblock() -> Arc<SuperBlock> {
@@ -35,7 +34,7 @@ impl SuperBlockOperations for NullFs {
     }
 
     fn statfs(&self) -> VfsResult<StatFs> {
-        Ok(simple_statfs_with_flags(NULLFS_MAGIC, NULLFS_MOUNT_FLAGS))
+        Ok(simple_statfs(NULLFS_MAGIC))
     }
 }
 
@@ -192,6 +191,5 @@ mod tests {
         assert_eq!(root.metadata().mode.node_type(), NodeType::Directory);
         assert!(root.lookup("anything").is_err());
         assert_eq!(fs.stat().unwrap().fs_type, NULLFS_MAGIC);
-        assert_eq!(fs.stat().unwrap().mount_flags, NULLFS_MOUNT_FLAGS);
     }
 }

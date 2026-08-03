@@ -8,7 +8,9 @@ use alloc::{string::String, sync::Arc};
 
 use kcred::Cred;
 use ksync::{Mutex, static_lock};
-use kvfs::{Mount, NodePermission, Path, SuperBlock, VfsFile, VfsResult, dentry_open};
+use kvfs::{
+    Mount, NodePermission, Path, SuperBlock, SuperBlockFlags, VfsFile, VfsResult, dentry_open,
+};
 use linux_raw_sys::general::{
     F_SEAL_FUTURE_WRITE, F_SEAL_GROW, F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_WRITE, O_CREAT, O_EXCL,
     O_RDWR,
@@ -34,11 +36,11 @@ bitflags::bitflags! {
 }
 
 /// Creates a tmpfs superblock.
-pub fn new_tmpfs(mount_flags: kvfs::StatFsFlags) -> Arc<SuperBlock> {
-    MemoryFs::new_with_name_flags_and_root_mode(
+pub fn new_tmpfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
+    MemoryFs::new_with_name_superblock_flags_and_root_mode(
         "tmpfs",
         TMPFS_MAGIC,
-        mount_flags,
+        superblock_flags,
         NodePermission::from_bits_truncate(0o1777),
     )
 }
@@ -259,14 +261,14 @@ fn create_anonymous_file(
         ShmemObjectKind::Kernel => {
             let mut guard = KERNEL_SHM_FS.lock();
             if guard.is_none() {
-                let fs = new_tmpfs(kvfs::StatFsFlags::empty());
+                let fs = new_tmpfs(SuperBlockFlags::empty());
                 let root = Path::new(Mount::new_root(&fs), fs.root_dir());
                 *guard = Some((fs, root.clone()));
             }
             guard.as_ref().unwrap().1.clone()
         }
         ShmemObjectKind::Memfd => {
-            let fs = new_tmpfs(kvfs::StatFsFlags::empty());
+            let fs = new_tmpfs(SuperBlockFlags::empty());
             Path::new(Mount::new_root(&fs), fs.root_dir())
         }
     };

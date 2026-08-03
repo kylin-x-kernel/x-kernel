@@ -1103,12 +1103,9 @@ impl VfsInode {
 
     pub(crate) fn acquire_fifo_pipe(&self) -> VfsResult<Arc<PipeObject>> {
         let mut fifo_pipe = self.special_state.fifo_pipe.lock();
-        let pipe = fifo_pipe.clone().unwrap_or_else(PipeObject::new_fifo);
+        let pipe = fifo_pipe.get_or_insert_with(PipeObject::new_fifo);
         pipe.acquire_file()?;
-        if fifo_pipe.is_none() {
-            *fifo_pipe = Some(pipe.clone());
-        }
-        Ok(pipe)
+        Ok(pipe.clone())
     }
 
     pub(crate) fn release_fifo_pipe(&self, pipe: &Arc<PipeObject>) {

@@ -12,8 +12,8 @@ use klazy::Once;
 
 use crate::{
     Dentry, DentryOperations, FMode, FileOperations, InodeOperations, Metadata, Mount, MountIdmap,
-    NodeFlags, NodePermission, NodeType, OpenFlags, Path, StatFs, StatFsFlags, SuperBlock,
-    SuperBlockOperations, Umode, VfsFile, VfsInode, VfsInodeInit, VfsResult,
+    NodeFlags, NodePermission, NodeType, OpenFlags, Path, StatFs, SuperBlock, SuperBlockOperations,
+    Umode, VfsFile, VfsInode, VfsInodeInit, VfsResult,
 };
 
 static ANON_INODE_FS: Once<AnonInodeFs> = Once::new();
@@ -233,7 +233,6 @@ impl SuperBlockOperations for AnonInodeSuperBlock {
             free_file_count: 0,
             name_length: ANON_INODE_NAME_LEN,
             fragment_size: ANON_INODE_BLOCK_SIZE_U32,
-            mount_flags: StatFsFlags::NODEV | StatFsFlags::NOEXEC,
         })
     }
 }

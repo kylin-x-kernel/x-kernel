@@ -10,6 +10,7 @@ use kerrno::{KError, KResult};
 use kprocess::current_user_process;
 use kvfs::{
     Filename, LookupFlags, LookupIntent, MountFlags, NodeType, Path, Permission, StatFsFlags,
+    SuperBlockFlags,
 };
 use linux_raw_sys::general::{
     __kernel_fsid_t, AT_EACCESS, AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, R_OK, W_OK, X_OK, stat,
@@ -152,16 +153,19 @@ pub fn sys_faccessat2(
     Ok(0)
 }
 
-fn superblock_statfs_flags(st_flags: StatFsFlags) -> StatFsFlags {
+fn superblock_statfs_flags(superblock_flags: SuperBlockFlags) -> StatFsFlags {
+    // Match Linux `fs/statfs.c::flags_by_sb()`: `SB_NOATIME` and
+    // `SB_NODIRATIME` affect inode behavior but their `ST_*` counterparts are
+    // exported only from the per-mount flags.
     let mut flags = StatFsFlags::empty();
-    if st_flags.contains(StatFsFlags::RDONLY) {
+    if superblock_flags.contains(SuperBlockFlags::RDONLY) {
         flags.insert(StatFsFlags::RDONLY);
     }
     flags
 }
 
-fn statfs_flags(mnt_flags: MountFlags, st_flags: StatFsFlags) -> StatFsFlags {
-    let mut flags = StatFsFlags::VALID | superblock_statfs_flags(st_flags);
+fn statfs_flags(mnt_flags: MountFlags, superblock_flags: SuperBlockFlags) -> StatFsFlags {
+    let mut flags = StatFsFlags::VALID | superblock_statfs_flags(superblock_flags);
     if mnt_flags.contains(MountFlags::RDONLY) {
         flags.insert(StatFsFlags::RDONLY);
     }
@@ -207,7 +211,7 @@ fn statfs(loc: &Path) -> KResult<statfs> {
     };
     result.f_namelen = stat.name_length as _;
     result.f_frsize = stat.fragment_size as _;
-    result.f_flags = statfs_flags(loc.mount().flags(), stat.mount_flags).bits() as _;
+    result.f_flags = statfs_flags(loc.mount().flags(), loc.mount().super_block_flags()).bits() as _;
     Ok(result)
 }
 
@@ -243,7 +247,7 @@ pub fn sys_fstatfs(fd: i32, buf: UserPtr<statfs>) -> KResult<isize> {
 
 #[cfg(unittest)]
 mod tests {
-    use kvfs::{MountFlags, StatFsFlags};
+    use kvfs::{MountFlags, StatFsFlags, SuperBlockFlags};
     use unittest::{assert, assert_eq, def_test};
 
     #[def_test]
@@ -256,7 +260,7 @@ mod tests {
             | MountFlags::NODIRATIME
             | MountFlags::RELATIME
             | MountFlags::NOSYMFOLLOW;
-        let result = super::statfs_flags(flags, StatFsFlags::empty());
+        let result = super::statfs_flags(flags, SuperBlockFlags::empty());
 
         assert!(result.contains(StatFsFlags::RDONLY));
         assert!(result.contains(StatFsFlags::NOSUID));
@@ -272,7 +276,7 @@ mod tests {
     #[def_test]
     fn test_statfs_flags_preserve_supported_superblock_flags() {
         assert_eq!(
-            super::statfs_flags(MountFlags::NODEV, StatFsFlags::RDONLY),
+            super::statfs_flags(MountFlags::NODEV, SuperBlockFlags::RDONLY),
             StatFsFlags::VALID | StatFsFlags::RDONLY | StatFsFlags::NODEV
         );
     }
@@ -281,10 +285,7 @@ mod tests {
     fn test_superblock_statfs_flags_filter_mount_only_flags() {
         assert_eq!(
             super::superblock_statfs_flags(
-                StatFsFlags::RDONLY
-                    | StatFsFlags::NODEV
-                    | StatFsFlags::NOEXEC
-                    | StatFsFlags::RELATIME
+                SuperBlockFlags::RDONLY | SuperBlockFlags::NOATIME | SuperBlockFlags::NODIRATIME
             ),
             StatFsFlags::RDONLY
         );

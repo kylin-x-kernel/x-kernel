@@ -1563,7 +1563,6 @@ mod tests_dentry {
                 free_file_count: 0,
                 name_length: 255,
                 fragment_size: 0,
-                mount_flags: crate::StatFsFlags::empty(),
             })
         }
     }

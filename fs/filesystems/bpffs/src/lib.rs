@@ -24,17 +24,13 @@ use ksync::Mutex;
 use kvfs::{
     AnonInodeFs, Dentry, DirContext, FMode, FileDirOperations, FileOperations, InodeDirOperations,
     InodeOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType,
-    OpenFlags, SimpleFs, SimpleFsNode, StatFsFlags, SuperBlock, VfsError, VfsFile, VfsInode,
+    OpenFlags, SimpleFs, SimpleFsNode, SuperBlock, SuperBlockFlags, VfsError, VfsFile, VfsInode,
     VfsResult, inode_init_owner,
 };
 
 /// Linux `BPF_FS_MAGIC`.
 const BPF_FS_MAGIC: u32 = 0xcafe4a11;
 
-const BPF_MOUNT_FLAGS: StatFsFlags = StatFsFlags::NOSUID
-    .union(StatFsFlags::NODEV)
-    .union(StatFsFlags::NOEXEC)
-    .union(StatFsFlags::RELATIME);
 const DIR_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o755);
 const PIN_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o600);
 
@@ -595,8 +591,8 @@ impl FileDirOperations for BpfFileOperations {
 }
 
 /// Creates a bpffs superblock.
-pub fn new_bpffs() -> Arc<SuperBlock> {
-    SimpleFs::new_with_flags("bpf".into(), BPF_FS_MAGIC, BPF_MOUNT_FLAGS, |fs| {
+pub fn new_bpffs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
+    SimpleFs::new_with_superblock_flags("bpf".into(), BPF_FS_MAGIC, superblock_flags, |fs| {
         let root = Inode::new_dir(fs.clone(), DIR_PERMISSION, 0, 0);
         Arc::new(move || {
             let node = BpfNode::new(fs.clone(), root.clone());

@@ -25,8 +25,8 @@ pub use fs::Ext4Filesystem;
 impl fs_block::FileSystemType {
     fn mount_bdev(
         device: kclass::ClassDevice<kclass::BlockDeviceImpl>,
-        _flags: kvfs::StatFsFlags,
+        flags: kvfs::SuperBlockFlags,
     ) -> kvfs::VfsResult<alloc::sync::Arc<kvfs::SuperBlock>> {
-        Ext4Filesystem::mount_bdev(device)
+        Ext4Filesystem::mount_bdev(device, flags)
     }
 }

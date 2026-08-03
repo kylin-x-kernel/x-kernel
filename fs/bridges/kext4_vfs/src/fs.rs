@@ -13,8 +13,9 @@ use kext4::{
 };
 use ksync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use kvfs::{
-    Dentry, DeviceId, InodeCache, Metadata, NodeFlags, NodeType, StatFs, StatFsFlags, SuperBlock,
-    SuperBlockOperations, Umode, VfsError, VfsInode, VfsInodeInit, VfsResult, default_evict_inode,
+    Dentry, DeviceId, InodeCache, Metadata, NodeFlags, NodeType, StatFs, SuperBlock,
+    SuperBlockFlags, SuperBlockOperations, Umode, VfsError, VfsInode, VfsInodeInit, VfsResult,
+    default_evict_inode,
 };
 
 use super::{
@@ -46,7 +47,10 @@ pub struct Ext4Filesystem {
 
 impl Ext4Filesystem {
     /// Mount a KExt4 filesystem backed by a block device.
-    pub fn mount_bdev(dev: ClassDevice<KBlockDevice>) -> VfsResult<Arc<SuperBlock>> {
+    pub fn mount_bdev(
+        dev: ClassDevice<KBlockDevice>,
+        superblock_flags: SuperBlockFlags,
+    ) -> VfsResult<Arc<SuperBlock>> {
         let device: Arc<dyn BlockDevice> = Arc::new(dev);
         let core = match KExt4Core::mount(device.clone()) {
             Ok(core) => core,
@@ -82,7 +86,7 @@ impl Ext4Filesystem {
         let root_inode = Self::iget_from_core_inode(&fs, root_inode)
             .inspect_err(|err| error!("KExt4 root inode VFS initialization failed: {err:?}"))?;
         let root = Dentry::new_dir_from_inode(root_inode, None, String::new());
-        Ok(SuperBlock::new(fs, root))
+        Ok(SuperBlock::new_with_flags(fs, root, superblock_flags))
     }
 
     pub(crate) fn lock(&self) -> RwLockWriteGuard<'_, KExt4Core> {
@@ -263,7 +267,6 @@ impl SuperBlockOperations for Ext4Filesystem {
             free_file_count: stat.files_free,
             name_length: stat.max_name_len,
             fragment_size: stat.fragment_size,
-            mount_flags: StatFsFlags::RELATIME,
         })
     }
 

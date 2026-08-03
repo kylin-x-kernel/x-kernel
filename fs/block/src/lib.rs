@@ -15,7 +15,7 @@ use alloc::{boxed::Box, sync::Arc, vec};
 use core::mem;
 
 use kclass::{BlockDeviceImpl, ClassDevice, prelude::*};
-use kvfs::{StatFsFlags, SuperBlock, VfsResult};
+use kvfs::{SuperBlock, SuperBlockFlags, VfsResult};
 
 /// The block-backed filesystem type selected by Kconfig.
 ///
@@ -31,7 +31,7 @@ pub trait FileSystemType {
     /// Returns a filesystem-specific error when the device cannot be mounted.
     fn mount_bdev(
         device: ClassDevice<BlockDeviceImpl>,
-        flags: StatFsFlags,
+        flags: SuperBlockFlags,
     ) -> VfsResult<Arc<SuperBlock>>;
 }
 

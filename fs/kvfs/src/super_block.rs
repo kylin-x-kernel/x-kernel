@@ -7,7 +7,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use hashbrown::HashMap;
 use klazy::Lazy;
@@ -94,6 +94,19 @@ pub trait SuperBlockOperations: Send + Sync + 'static {
     /// Returns filesystem statistics.
     fn statfs(&self) -> VfsResult<StatFs>;
 
+    /// Validates and applies a proposed superblock reconfiguration.
+    ///
+    /// This corresponds to Linux's filesystem-context `reconfigure` operation.
+    /// The VFS invokes it before publishing the proposed flags, so a filesystem
+    /// that cannot transition from read-only to read-write can reject the
+    /// change without exposing an intermediate state. `changed` corresponds to
+    /// Linux `fs_context::sb_flags_mask`. Like Linux's absent callback, the
+    /// default accepts VFS-only flag changes; a filesystem backed by permanently
+    /// read-only media must override this method and reject a read-write target.
+    fn reconfigure(&self, _flags: SuperBlockFlags, _changed: SuperBlockFlags) -> VfsResult<()> {
+        Ok(())
+    }
+
     /// Writes back superblock-owned dirty state.
     ///
     /// [`SuperBlock::sync_fs`] calls this hook only after writing back dirty
@@ -135,7 +148,48 @@ pub fn default_evict_inode(inode: &VfsInode) -> VfsResult<()> {
 pub const MAX_LFS_FILESIZE: u64 = i64::MAX as u64;
 
 bitflags::bitflags! {
-    /// Filesystem-wide flags reported through `statfs`.
+    /// VFS superblock flags corresponding to Linux `super_block::s_flags`.
+    ///
+    /// Per-mount policy belongs to [`crate::MountFlags`] instead. In
+    /// particular, `RELATIME` is a mount flag rather than a superblock flag.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct SuperBlockFlags: u32 {
+        /// Filesystem is read-only.
+        const RDONLY = 1 << 0;
+        /// Do not update access times.
+        const NOATIME = 1 << 10;
+        /// Do not update directory access times.
+        const NODIRATIME = 1 << 11;
+    }
+}
+
+/// Atomic storage that preserves [`SuperBlockFlags`] as the semantic interface.
+///
+/// Relaxed ordering is sufficient because the flags neither publish nor guard
+/// other superblock state.
+#[derive(Debug)]
+struct AtomicSuperBlockFlags(AtomicU32);
+
+impl AtomicSuperBlockFlags {
+    fn new(flags: SuperBlockFlags) -> Self {
+        Self(AtomicU32::new(flags.bits()))
+    }
+
+    fn load(&self) -> SuperBlockFlags {
+        SuperBlockFlags::from_bits_truncate(self.0.load(Ordering::Relaxed))
+    }
+
+    fn store(&self, flags: SuperBlockFlags) {
+        self.0.store(flags.bits(), Ordering::Relaxed);
+    }
+}
+
+bitflags::bitflags! {
+    /// User-visible `statfs(2)` `f_flags` (`ST_*`) bits.
+    ///
+    /// This is an ABI output type. It must not be used to configure
+    /// superblock or mount state; VFS derives it from [`SuperBlockFlags`] and
+    /// [`crate::MountFlags`] when exporting `statfs`.
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct StatFsFlags: u32 {
         /// Filesystem is read-only.
@@ -160,6 +214,9 @@ bitflags::bitflags! {
 }
 
 /// Filesystem statistics returned by [`SuperBlockOperations::statfs`].
+///
+/// VFS derives user-visible `statfs(2)` flags from the containing mount and
+/// superblock after obtaining these filesystem-owned values.
 pub struct StatFs {
     /// Filesystem type identifier.
     pub fs_type: u32,
@@ -181,8 +238,6 @@ pub struct StatFs {
     pub name_length: u32,
     /// Fragment size (bytes).
     pub fragment_size: u32,
-    /// Mount flags in effect.
-    pub mount_flags: StatFsFlags,
 }
 
 /// VFS superblock object.
@@ -198,8 +253,10 @@ pub struct StatFs {
 pub struct SuperBlock {
     ops: Arc<dyn SuperBlockOperations>,
     root: Dentry,
-    /// Independent policy bit; it neither publishes nor guards other state.
-    readonly: AtomicBool,
+    /// VFS-wide state corresponding to Linux `super_block::s_flags`.
+    flags: AtomicSuperBlockFlags,
+    /// Serializes filesystem reconfiguration, corresponding to Linux `s_umount`.
+    reconfigure_lock: Mutex<()>,
     dentry_cache: Mutex<HashMap<DentryKey, Dentry>>,
     max_file_size: u64,
     rename_mutex: Mutex<()>,
@@ -219,29 +276,36 @@ impl SuperBlock {
 
     /// Returns filesystem statistics for this superblock.
     pub fn stat(&self) -> VfsResult<StatFs> {
-        let mut stat = self.ops.statfs()?;
-        if self.readonly.load(Ordering::Relaxed) {
-            stat.mount_flags.insert(StatFsFlags::RDONLY);
-        }
-        Ok(stat)
+        self.ops.statfs()
+    }
+
+    /// Returns whether this superblock is read-only without issuing `statfs`.
+    pub(crate) fn is_readonly(&self) -> bool {
+        self.flags().contains(SuperBlockFlags::RDONLY)
+    }
+
+    /// Returns VFS superblock flags without issuing `statfs`.
+    pub fn flags(&self) -> SuperBlockFlags {
+        self.flags.load()
     }
 
     /// Creates a superblock and transfers ownership of its root dentry to it.
     pub fn new(ops: Arc<dyn SuperBlockOperations>, root: Dentry) -> Arc<Self> {
-        Self::new_with_readonly(ops, root, false)
+        Self::new_with_flags(ops, root, SuperBlockFlags::empty())
     }
 
-    /// Creates a superblock with an initial VFS-wide read-only policy.
-    pub fn new_with_readonly(
+    /// Creates a superblock with initial VFS-wide flags.
+    pub fn new_with_flags(
         ops: Arc<dyn SuperBlockOperations>,
         root: Dentry,
-        is_readonly: bool,
+        flags: SuperBlockFlags,
     ) -> Arc<Self> {
         let max_file_size = ops.max_file_size().min(MAX_LFS_FILESIZE);
         let super_block = Arc::new(Self {
             ops,
             root,
-            readonly: AtomicBool::new(is_readonly),
+            flags: AtomicSuperBlockFlags::new(flags),
+            reconfigure_lock: Mutex::default(),
             dentry_cache: Mutex::default(),
             max_file_size,
             rename_mutex: Mutex::default(),
@@ -254,11 +318,16 @@ impl SuperBlock {
 
     /// Changes the VFS-wide read-only policy shared by every mount of this superblock.
     pub fn reconfigure_readonly(&self, is_readonly: bool) -> VfsResult<()> {
-        if !is_readonly && self.ops.statfs()?.mount_flags.contains(StatFsFlags::RDONLY) {
-            return Err(crate::VfsError::ReadOnlyFilesystem);
+        let _reconfigure_guard = self.reconfigure_lock.lock();
+        let mut flags = self.flags();
+        if is_readonly {
+            flags.insert(SuperBlockFlags::RDONLY);
+        } else {
+            flags.remove(SuperBlockFlags::RDONLY);
         }
 
-        self.readonly.store(is_readonly, Ordering::Relaxed);
+        self.ops.reconfigure(flags, SuperBlockFlags::RDONLY)?;
+        self.flags.store(flags);
         Ok(())
     }
 

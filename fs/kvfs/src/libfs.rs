@@ -10,12 +10,12 @@ use memaddr::PAGE_SIZE_4K;
 
 use crate::{
     AddressSpace, Dentry, GetattrQueryFlags, GetattrRequestMask, LockedDentry, Metadata,
-    MountIdmap, Path, RenameFlags, StatFs, StatFsFlags, VfsError, VfsFile, VfsInode, VfsResult,
-    WriteEndRequest, d_really_is_positive, path::MAX_NAME_LEN,
+    MountIdmap, Path, RenameFlags, StatFs, VfsError, VfsFile, VfsInode, VfsResult, WriteEndRequest,
+    d_really_is_positive, path::MAX_NAME_LEN,
 };
 
-/// `simple_statfs` with explicit superblock mount flags.
-pub fn simple_statfs_with_flags(fs_type: u32, mount_flags: StatFsFlags) -> StatFs {
+/// `simple_statfs` for simple in-kernel filesystems.
+pub fn simple_statfs(fs_type: u32) -> StatFs {
     StatFs {
         fs_type,
         block_size: PAGE_SIZE_4K as u32,
@@ -26,7 +26,6 @@ pub fn simple_statfs_with_flags(fs_type: u32, mount_flags: StatFsFlags) -> StatF
         free_file_count: 0,
         name_length: MAX_NAME_LEN as u32,
         fragment_size: 0,
-        mount_flags,
     }
 }
 

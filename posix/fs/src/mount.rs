@@ -8,16 +8,16 @@ use core::ffi::{c_char, c_void};
 
 use kerrno::{KError, KResult};
 use kprocess::current_user_process;
-use kvfs::{Filename, LookupFlags, LookupIntent, MountFlags, StatFsFlags, path::PATH_MAX};
+use kvfs::{Filename, LookupFlags, LookupIntent, MountFlags, SuperBlockFlags, path::PATH_MAX};
 use memfs::shmem;
 use posix_types::UserConstPtr;
 
-fn superblock_flags_from_sys_mount(flags: i32) -> StatFsFlags {
+fn superblock_flags_from_sys_mount(flags: i32) -> SuperBlockFlags {
     let f = flags as u32;
-    let mut sb_flags = StatFsFlags::empty();
+    let mut sb_flags = SuperBlockFlags::empty();
 
     if f & linux_raw_sys::general::MS_RDONLY != 0 {
-        sb_flags.insert(StatFsFlags::RDONLY);
+        sb_flags.insert(SuperBlockFlags::RDONLY);
     }
     sb_flags
 }
@@ -180,16 +180,16 @@ pub fn sys_mount(
 
     let fs_type = fs_type.load_string()?;
     let mount_flags = per_mount_flags(flags);
+    let superblock_flags = superblock_flags_from_sys_mount(flags);
     let mount_fs = match fs_type.as_str() {
-        "devfs" | "devtmpfs" => devfs::new_devfs(),
-        "proc" => procfs::new_procfs(),
-        "sysfs" => memfs::ramfs::new_ramfs_with_name_and_flags(
-            "sysfs",
-            superblock_flags_from_sys_mount(flags),
-        ),
-        "tmpfs" => shmem::new_tmpfs(superblock_flags_from_sys_mount(flags)),
+        "devfs" | "devtmpfs" => devfs::new_devfs(superblock_flags),
+        "proc" => procfs::new_procfs(superblock_flags),
+        "sysfs" => {
+            memfs::ramfs::new_ramfs_with_name_and_superblock_flags("sysfs", superblock_flags)
+        }
+        "tmpfs" => shmem::new_tmpfs(superblock_flags),
         #[cfg(feature = "ebpf")]
-        "bpf" => bpffs::new_bpffs(),
+        "bpf" => bpffs::new_bpffs(superblock_flags),
         _ => return Err(KError::NoSuchDevice),
     };
     let process = current_user_process();
@@ -246,7 +246,7 @@ pub fn sys_umount2(target: UserConstPtr<c_char>, flags: i32) -> KResult<isize> {
 
 #[cfg(unittest)]
 mod tests {
-    use kvfs::{MountFlags, StatFsFlags};
+    use kvfs::{MountFlags, SuperBlockFlags};
     use unittest::{assert, assert_eq, def_test};
 
     #[def_test]
@@ -260,7 +260,7 @@ mod tests {
 
         assert_eq!(
             super::superblock_flags_from_sys_mount(flags),
-            StatFsFlags::empty()
+            SuperBlockFlags::empty()
         );
     }
 
@@ -268,7 +268,7 @@ mod tests {
     fn test_superblock_flags_preserve_readonly() {
         assert_eq!(
             super::superblock_flags_from_sys_mount(linux_raw_sys::general::MS_RDONLY as i32),
-            StatFsFlags::RDONLY
+            SuperBlockFlags::RDONLY
         );
     }
 

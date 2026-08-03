@@ -27,13 +27,26 @@ use kclass::{Virtio9pDevice as _, Virtio9pDeviceImpl, virtio_9p_devices};
 use kdevice::{DeviceId, subscribe_device_removed};
 use ksync::{Mutex, static_lock};
 use kvfs::{
-    Filename, LookupFlags, LookupIntent, MntNamespace, NodePermission, Path, StatFsFlags,
-    SuperBlock, path::PathBuf,
+    Filename, LookupFlags, LookupIntent, MntNamespace, MountFlags, NodePermission, Path,
+    SuperBlock, SuperBlockFlags, path::PathBuf,
 };
 
 static_lock! {
     static FS_BACKING_DEVICES: Mutex<Vec<DeviceId>> = Mutex::new(Vec::new());
 }
+
+const PSEUDO_FS_MOUNT_FLAGS: MountFlags = MountFlags::NOSUID
+    .union(MountFlags::NODEV)
+    .union(MountFlags::NOEXEC)
+    .union(MountFlags::RELATIME);
+// Linux's safe devtmpfs policy is `nosuid,noexec`; `nodev` would prevent the
+// device filesystem from serving its defining purpose.
+const DEVFS_MOUNT_FLAGS: MountFlags = MountFlags::NOSUID
+    .union(MountFlags::NOEXEC)
+    .union(MountFlags::RELATIME);
+const TMPFS_MOUNT_FLAGS: MountFlags = MountFlags::NOSUID
+    .union(MountFlags::NODEV)
+    .union(MountFlags::RELATIME);
 
 #[cfg(feature = "fs9p")]
 struct Virtio9pTransport(Mutex<ClassDevice<Virtio9pDeviceImpl>>);
@@ -83,33 +96,37 @@ impl BootVfs {
     }
 
     fn mount_virtual_filesystems(&self) {
-        self.mount_at("/dev", devfs::new_devfs())
-            .expect("Failed to mount devfs");
+        self.mount_at(
+            "/dev",
+            devfs::new_devfs(SuperBlockFlags::empty()),
+            DEVFS_MOUNT_FLAGS,
+        )
+        .expect("Failed to mount devfs");
         self.mount_at(
             "/dev/shm",
-            memfs::shmem::new_tmpfs(
-                StatFsFlags::NOSUID | StatFsFlags::NODEV | StatFsFlags::RELATIME,
-            ),
+            memfs::shmem::new_tmpfs(SuperBlockFlags::empty()),
+            TMPFS_MOUNT_FLAGS,
         )
         .expect("Failed to mount /dev/shm");
         self.mount_at(
             "/tmp",
-            memfs::shmem::new_tmpfs(
-                StatFsFlags::NOSUID | StatFsFlags::NODEV | StatFsFlags::RELATIME,
-            ),
+            memfs::shmem::new_tmpfs(SuperBlockFlags::empty()),
+            TMPFS_MOUNT_FLAGS,
         )
         .expect("Failed to mount /tmp");
-        self.mount_at("/proc", procfs::new_procfs())
-            .expect("Failed to mount procfs");
+        self.mount_at(
+            "/proc",
+            procfs::new_procfs(SuperBlockFlags::empty()),
+            PSEUDO_FS_MOUNT_FLAGS,
+        )
+        .expect("Failed to mount procfs");
         self.mount_at(
             "/sys",
-            memfs::ramfs::new_ramfs_with_name_and_flags(
+            memfs::ramfs::new_ramfs_with_name_and_superblock_flags(
                 "sysfs",
-                StatFsFlags::NOSUID
-                    | StatFsFlags::NODEV
-                    | StatFsFlags::NOEXEC
-                    | StatFsFlags::RELATIME,
+                SuperBlockFlags::empty(),
             ),
+            PSEUDO_FS_MOUNT_FLAGS,
         )
         .expect("Failed to mount sysfs");
 
@@ -119,8 +136,12 @@ impl BootVfs {
                 self.mkdir_path("/sys/fs")
                     .expect("Failed to create /sys/fs");
             }
-            self.mount_at("/sys/fs/bpf", bpffs::new_bpffs())
-                .expect("Failed to mount bpffs");
+            self.mount_at(
+                "/sys/fs/bpf",
+                bpffs::new_bpffs(SuperBlockFlags::empty()),
+                PSEUDO_FS_MOUNT_FLAGS,
+            )
+            .expect("Failed to mount bpffs");
         }
         self.create_sys_graphics_links()
             .expect("Failed to create sys graphics links");
@@ -168,7 +189,7 @@ impl BootVfs {
         })
     }
 
-    fn mount_at(&self, path: &str, fs: Arc<SuperBlock>) -> kvfs::VfsResult<()> {
+    fn mount_at(&self, path: &str, fs: Arc<SuperBlock>, flags: MountFlags) -> kvfs::VfsResult<()> {
         let mountpoint = match self.lookup(path) {
             Ok(loc) if loc.is_dir() => loc,
             Ok(_) => {
@@ -181,7 +202,8 @@ impl BootVfs {
                 self.lookup(path)?
             }
         };
-        self.namespace.attach(&mountpoint, &fs)?;
+        self.namespace
+            .attach_with_flags_and_devname(&mountpoint, &fs, flags, None)?;
         Ok(())
     }
 
@@ -221,7 +243,7 @@ fn mount_root_super_block() -> Arc<kvfs::SuperBlock> {
         handle.location(),
     );
 
-    let fs = match fs_block::FileSystemType::mount_bdev(handle, StatFsFlags::empty()) {
+    let fs = match fs_block::FileSystemType::mount_bdev(handle, SuperBlockFlags::empty()) {
         Ok(fs) => fs,
         Err(e) => {
             error!("Failed to mount root filesystem: {e:?}");

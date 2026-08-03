@@ -62,8 +62,8 @@ pub use simple_dir::{
 pub use simple_file::{RwFile, SimpleFile, SimpleFileOperation, SimpleFileOps};
 pub use simple_fs::{SimpleFs, SimpleFsNode};
 pub use super_block::{
-    MAX_LFS_FILESIZE, StatFs, StatFsFlags, SuperBlock, SuperBlockOperations, SuperBlockRegistry,
-    default_evict_inode, super_block_registry, sync_filesystems,
+    MAX_LFS_FILESIZE, StatFs, StatFsFlags, SuperBlock, SuperBlockFlags, SuperBlockOperations,
+    SuperBlockRegistry, default_evict_inode, super_block_registry, sync_filesystems,
 };
 pub(crate) use type_map::TypeMap;
 pub use types::{DeviceId, Metadata, MetadataUpdate, NodePermission, NodeType, SetattrTime, Umode};

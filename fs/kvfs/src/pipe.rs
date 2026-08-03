@@ -14,6 +14,7 @@ use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksignal::{Signo, send_sig_current};
 use ktask::future::{block_on, poll_io};
 use linux_raw_sys::ioctl::FIONREAD;
+use memaddr::PAGE_SIZE_4K;
 use osvm::VirtMutPtr;
 
 use crate::{
@@ -22,13 +23,13 @@ use crate::{
 };
 
 /// Initial pipe buffer capacity in bytes.
-pub const RING_BUFFER_INIT_SIZE: usize = 65536;
+pub(crate) const RING_BUFFER_INIT_SIZE: usize = 65536;
 /// Maximum pipe buffer capacity in bytes.
-pub const PIPE_MAX_SIZE: usize = 1024 * 1024;
+pub(crate) const PIPE_MAX_SIZE: usize = 1024 * 1024;
 /// Maximum size of an atomic pipe write.
-pub const PIPE_BUF: usize = 4096;
-
-const PAGE_SIZE_4K: usize = 4096;
+///
+/// See `PIPE_BUF` in <https://man7.org/linux/man-pages/man7/pipe.7.html>.
+pub(crate) const PIPE_BUF: usize = 4096;
 
 struct PipeState {
     buffer: VecDeque<u8>,
@@ -38,6 +39,76 @@ struct PipeState {
     writers: usize,
     r_counter: u64,
     w_counter: u64,
+}
+
+impl PipeState {
+    fn available(&self) -> usize {
+        self.capacity.saturating_sub(self.buffer.len())
+    }
+
+    fn read_into(&mut self, dst: &mut [u8]) -> usize {
+        let count = dst.len().min(self.buffer.len());
+        if count == 0 {
+            return 0;
+        }
+
+        let (head, tail) = self.buffer.as_slices();
+        let head_len = count.min(head.len());
+        dst[..head_len].copy_from_slice(&head[..head_len]);
+        let tail_len = count - head_len;
+        if tail_len != 0 {
+            dst[head_len..count].copy_from_slice(&tail[..tail_len]);
+        }
+        drop(self.buffer.drain(..count));
+        count
+    }
+
+    fn read_to_iter(&mut self, iter: &mut IovIterDest<'_>) -> KResult<usize> {
+        // Keep destination copying and buffer consumption in one serialized
+        // operation, matching Linux `anon_pipe_read()`. Copying through a
+        // staging buffer after unlocking would consume data before a possible
+        // destination fault and would let concurrent readers interleave.
+        let count = iter.count().min(self.buffer.len());
+        if count == 0 {
+            return Ok(0);
+        }
+
+        let (head_len, head_read) = {
+            let (head, _) = self.buffer.as_slices();
+            let head_len = count.min(head.len());
+            (head_len, iter.copy_to_iter(&head[..head_len])?)
+        };
+        if head_read < head_len {
+            drop(self.buffer.drain(..head_read));
+            return Ok(head_read);
+        }
+
+        let tail_len = count - head_len;
+        let tail_read = if tail_len == 0 {
+            0
+        } else {
+            let (_, tail) = self.buffer.as_slices();
+            match iter.copy_to_iter(&tail[..tail_len]) {
+                Ok(read) => read,
+                // `anon_pipe_read()` returns bytes already copied before a
+                // later user-memory fault instead of discarding that progress.
+                Err(_) if head_read != 0 => {
+                    drop(self.buffer.drain(..head_read));
+                    return Ok(head_read);
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let read = head_read + tail_read;
+        drop(self.buffer.drain(..read));
+        Ok(read)
+    }
+
+    fn write_from(&mut self, src: &[u8]) {
+        debug_assert!(src.len() <= self.available());
+        // `VecDeque` specializes extending from a slice into wrapped bulk copies.
+        self.buffer.extend(src);
+    }
 }
 
 /// State shared by every open file description in one pipe session.
@@ -82,6 +153,8 @@ impl PipeObject {
                 files: 0,
                 readers: 0,
                 writers: 0,
+                // Match Linux `pipe_inode_info`: an uninitialized `file::f_pipe`
+                // snapshot is zero, so both connection counters start at one.
                 r_counter: 1,
                 w_counter: 1,
             }),
@@ -173,22 +246,16 @@ impl PipeObject {
         self.state.lock().buffer.len()
     }
 
-    fn read(&self, nonblocking: bool, buf: &mut [u8]) -> KResult<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-
+    fn read_with(
+        &self,
+        nonblocking: bool,
+        mut read: impl FnMut(&mut PipeState) -> KResult<usize>,
+    ) -> KResult<usize> {
         block_on(poll_io(self, IoEvents::IN, nonblocking, || {
             let (read, has_writers) = {
                 let mut state = self.state.lock();
-                let count = buf.len().min(state.buffer.len());
-                for slot in &mut buf[..count] {
-                    *slot = state
-                        .buffer
-                        .pop_front()
-                        .expect("pipe readable length changed");
-                }
-                (count, state.writers > 0)
+                let read = read(&mut state)?;
+                (read, state.writers > 0)
             };
 
             if read > 0 {
@@ -202,7 +269,21 @@ impl PipeObject {
         }))
     }
 
-    fn write(&self, nonblocking: bool, buf: &[u8]) -> KResult<usize> {
+    fn read(&self, nonblocking: bool, buf: &mut [u8]) -> KResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        self.read_with(nonblocking, |state| Ok(state.read_into(buf)))
+    }
+
+    fn read_iter(&self, nonblocking: bool, iter: &mut IovIterDest<'_>) -> KResult<usize> {
+        if iter.count() == 0 {
+            return Ok(0);
+        }
+        self.read_with(nonblocking, |state| state.read_to_iter(iter))
+    }
+
+    fn write(&self, nonblocking: bool, request_is_atomic: bool, buf: &[u8]) -> KResult<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
@@ -215,19 +296,19 @@ impl PipeObject {
                 if state.readers == 0 {
                     None
                 } else {
-                    let available = state.capacity.saturating_sub(state.buffer.len());
-                    if written_total == 0 && size <= PIPE_BUF && available < size {
+                    let available = state.available();
+                    if request_is_atomic && written_total == 0 && available < size {
                         return Err(KError::WouldBlock);
                     }
                     let count = available.min(size - written_total);
-                    state
-                        .buffer
-                        .extend(buf[written_total..written_total + count].iter().copied());
+                    state.write_from(&buf[written_total..written_total + count]);
                     Some(count)
                 }
             };
 
             let Some(written) = written else {
+                // Linux treats SIGPIPE delivery as best effort: write(2) must
+                // still report EPIPE or the already completed byte count.
                 let _ = send_sig_current(Signo::SIGPIPE);
                 if written_total > 0 {
                     return Ok(written_total);
@@ -245,6 +326,11 @@ impl PipeObject {
 
             Err(KError::WouldBlock)
         }))
+        .or_else(|error| {
+            // `anon_pipe_write()` returns a partial count instead of an
+            // interruption or wait-registration error after making progress.
+            (written_total != 0).then_some(written_total).ok_or(error)
+        })
     }
 
     fn wake(&self, wake_readers: bool, wake_writers: bool) {
@@ -407,53 +493,62 @@ fn pipe_read(file: &VfsFile, buf: &mut [u8]) -> VfsResult<usize> {
 }
 
 fn pipe_write(file: &VfsFile, buf: &[u8]) -> VfsResult<usize> {
+    pipe_write_with_atomicity(file, buf.len() <= PIPE_BUF, buf)
+}
+
+fn pipe_write_with_atomicity(
+    file: &VfsFile,
+    request_is_atomic: bool,
+    buf: &[u8],
+) -> VfsResult<usize> {
     file.verify_mode(FMode::WRITE)?;
-    PipeObject::from_file(file)?.write(file.is_nonblocking(), buf)
+    PipeObject::from_file(file)?.write(file.is_nonblocking(), request_is_atomic, buf)
 }
 
 fn pipe_read_iter(iocb: &mut Kiocb<'_>, iter: &mut IovIterDest<'_>) -> VfsResult<usize> {
-    let mut total = 0usize;
-    let mut chunk = [0u8; PAGE_SIZE_4K];
-    while iter.count() != 0 {
-        let want = chunk.len().min(iter.count());
-        let read = match pipe_read(iocb.file(), &mut chunk[..want]) {
-            Ok(read) => read,
-            Err(_) if total != 0 => break,
-            Err(error) => return Err(error),
-        };
-        if read == 0 {
-            break;
-        }
-        let copied = iter.copy_to_iter(&chunk[..read])?;
-        total += copied;
-        iocb.advance(copied);
-        if copied < read || read < want {
-            break;
-        }
-    }
-    Ok(total)
+    let read = {
+        let file = iocb.file();
+        file.verify_mode(FMode::READ)?;
+        PipeObject::from_file(file)?.read_iter(file.is_nonblocking(), iter)?
+    };
+    iocb.advance(read);
+    Ok(read)
 }
 
 fn pipe_write_iter(iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> VfsResult<usize> {
     let mut total = 0usize;
     let mut chunk = [0u8; PAGE_SIZE_4K];
+    let request_is_atomic = iter.count() <= PIPE_BUF;
     while iter.count() != 0 {
         let want = chunk.len().min(iter.count());
-        let copied = iter.copy_from_iter(&mut chunk[..want])?;
-        if copied == 0 {
-            break;
-        }
-        let written = match pipe_write(iocb.file(), &chunk[..copied]) {
-            Ok(written) => written,
+        let copied = match iter.copy_from_iter(&mut chunk[..want]) {
+            Ok(copied) => copied,
+            // Preserve already committed pipe data when a later user-memory
+            // fetch fails, like `anon_pipe_write()` does for a short copy.
             Err(_) if total != 0 => break,
             Err(error) => return Err(error),
         };
+        if copied == 0 {
+            break;
+        }
+        let written =
+            match pipe_write_with_atomicity(iocb.file(), request_is_atomic, &chunk[..copied]) {
+                Ok(written) => written,
+                Err(error) => {
+                    iter.revert(copied)?;
+                    if total != 0 {
+                        break;
+                    }
+                    return Err(error);
+                }
+            };
         if written == 0 {
             return Err(KError::WriteZero);
         }
         total += written;
         iocb.advance(written);
         if written < copied {
+            iter.revert(copied - written)?;
             break;
         }
     }
@@ -464,7 +559,8 @@ fn pipe_ioctl(file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
     let pipe = PipeObject::from_file(file)?;
     match cmd {
         FIONREAD => {
-            (arg as *mut u32).write_vm(pipe.readable_len() as u32)?;
+            // `write_vm` validates typed user-pointer alignment before writing.
+            (arg as *mut i32).write_vm(pipe.readable_len() as i32)?;
             Ok(0)
         }
         _ => Err(KError::NotATty),
@@ -482,7 +578,10 @@ fn pipe_poll(file: &VfsFile) -> IoEvents {
         events.set(IoEvents::IN, !state.buffer.is_empty());
         events.set(
             IoEvents::HUP,
-            state.writers == 0 && file.pipe_generation() != state.w_counter,
+            // Zero is the Linux-compatible uninitialized `f_pipe` snapshot
+            // used by anonymous pipes and blocking FIFO opens.
+            state.writers == 0
+                && (file.pipe_generation() == 0 || file.pipe_generation() != state.w_counter),
         );
     }
     if mode.contains(FMode::WRITE) {
@@ -556,6 +655,7 @@ impl FileOperations for PipeFileOperations {
     fn release(&self, _inode: &VfsInode, file: &VfsFile) -> VfsResult<()> {
         let pipe = PipeObject::from_file(file)?;
         pipe.close(file.mode())?;
+        // Anonymous pipes have no inode slot to clear when the final file drops.
         let _ = pipe.release_file();
         Ok(())
     }

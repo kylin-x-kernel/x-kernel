@@ -320,6 +320,7 @@ pub struct VfsFileBuilder {
     private_data: TypeMap,
     flags: OpenFlags,
     position: u64,
+    /// FIFO writer-generation snapshot, corresponding to Linux `file::f_pipe`.
     pipe_generation: u64,
 }
 
@@ -564,6 +565,7 @@ pub struct VfsFile {
     private_data: Mutex<TypeMap>,
     flags: AtomicU32,
     position: Mutex<u64>,
+    /// FIFO writer-generation snapshot, corresponding to Linux `file::f_pipe`.
     pipe_generation: u64,
 }
 
@@ -728,10 +730,7 @@ impl VfsFile {
             return Err(VfsError::InvalidInput);
         }
         self.verify_io_area(pos, count)?;
-        if matches!(
-            self.node_type(),
-            NodeType::CharacterDevice | NodeType::BlockDevice | NodeType::Fifo | NodeType::Socket
-        ) {
+        if self.node_type().is_special() {
             Ok(())
         } else {
             self.path().check_writable_mount()

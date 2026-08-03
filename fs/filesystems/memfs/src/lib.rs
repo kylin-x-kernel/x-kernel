@@ -22,9 +22,9 @@ use kvfs::{
     AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FileDirOperations,
     FileOperations, InodeCache, InodeDirOperations, InodeOperations, InodeSymlinkOperations, Kiocb,
     LockedDentry, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType, StatFs,
-    StatFsFlags, SuperBlock, SuperBlockOperations, Umode, VfsError, VfsFile, VfsInodeInit,
+    SuperBlock, SuperBlockFlags, SuperBlockOperations, Umode, VfsError, VfsFile, VfsInodeInit,
     VfsResult, WriteBeginRequest, WriteEndRequest, inode_init_owner,
-    libfs::{simple_getattr, simple_rename, simple_statfs_with_flags, simple_write_end},
+    libfs::{simple_getattr, simple_rename, simple_statfs, simple_write_end},
 };
 use slab::Slab;
 
@@ -72,7 +72,6 @@ impl Borrow<str> for FileName {
 pub struct MemoryFs {
     name: &'static str,
     fs_type: u32,
-    mount_flags: StatFsFlags,
     inodes: Mutex<Slab<Arc<Inode>>>,
     inode_cache: InodeCache,
 }
@@ -81,41 +80,38 @@ impl MemoryFs {
     /// Creates an in-memory superblock.
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> Arc<SuperBlock> {
-        Self::new_with_name_and_flags("memfs", StatFsFlags::empty())
+        Self::new_with_name_and_superblock_flags("memfs", SuperBlockFlags::empty())
     }
 
-    /// Creates an in-memory superblock with explicit mount flags.
+    /// Creates an in-memory superblock with explicit VFS-wide flags.
     #[allow(clippy::new_ret_no_self)]
-    pub fn new_with_flags(mount_flags: StatFsFlags) -> Arc<SuperBlock> {
-        Self::new_with_name_and_flags("memfs", mount_flags)
+    pub fn new_with_superblock_flags(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
+        Self::new_with_name_and_superblock_flags("memfs", superblock_flags)
     }
 
-    /// Creates an in-memory superblock with a custom name and mount flags.
+    /// Creates an in-memory superblock with a custom name and VFS-wide flags.
     #[allow(clippy::new_ret_no_self)]
-    pub fn new_with_name_and_flags(
+    pub fn new_with_name_and_superblock_flags(
         name: &'static str,
-        mount_flags: StatFsFlags,
+        superblock_flags: SuperBlockFlags,
     ) -> Arc<SuperBlock> {
-        Self::new_with_name_flags_and_root_mode(
+        Self::new_with_name_superblock_flags_and_root_mode(
             name,
             RAMFS_MAGIC,
-            mount_flags,
+            superblock_flags,
             NodePermission::from_bits_truncate(0o755),
         )
     }
 
-    pub(crate) fn new_with_name_flags_and_root_mode(
+    pub(crate) fn new_with_name_superblock_flags_and_root_mode(
         name: &'static str,
         fs_type: u32,
-        mut mount_flags: StatFsFlags,
+        superblock_flags: SuperBlockFlags,
         root_mode: NodePermission,
     ) -> Arc<SuperBlock> {
-        let is_readonly = mount_flags.contains(StatFsFlags::RDONLY);
-        mount_flags.remove(StatFsFlags::RDONLY);
         let fs = Arc::new(Self {
             name,
             fs_type,
-            mount_flags,
             inodes: Mutex::new(Slab::new()),
             inode_cache: InodeCache::new(),
         });
@@ -130,7 +126,7 @@ impl MemoryFs {
         );
         let root_inode = MemoryNode::vfs_inode_from_inode(&fs, root_ino);
         let root = Dentry::new_dir_from_inode(root_inode, None, String::new());
-        SuperBlock::new_with_readonly(fs, root, is_readonly)
+        SuperBlock::new_with_flags(fs, root, superblock_flags)
     }
 
     fn get(&self, ino: u64) -> Arc<Inode> {
@@ -144,7 +140,7 @@ impl SuperBlockOperations for MemoryFs {
     }
 
     fn statfs(&self) -> VfsResult<StatFs> {
-        Ok(simple_statfs_with_flags(self.fs_type, self.mount_flags))
+        Ok(simple_statfs(self.fs_type))
     }
 }
 
@@ -807,18 +803,18 @@ mod tests {
 
     #[def_test]
     fn tmpfs_readonly_policy_can_be_reconfigured() {
-        let fs = shmem::new_tmpfs(StatFsFlags::RDONLY);
+        let fs = shmem::new_tmpfs(SuperBlockFlags::RDONLY);
 
-        assert!(fs.stat().unwrap().mount_flags.contains(StatFsFlags::RDONLY));
+        assert!(fs.flags().contains(SuperBlockFlags::RDONLY));
         fs.reconfigure_readonly(false).unwrap();
-        assert!(!fs.stat().unwrap().mount_flags.contains(StatFsFlags::RDONLY));
+        assert!(!fs.flags().contains(SuperBlockFlags::RDONLY));
         fs.reconfigure_readonly(true).unwrap();
-        assert!(fs.stat().unwrap().mount_flags.contains(StatFsFlags::RDONLY));
+        assert!(fs.flags().contains(SuperBlockFlags::RDONLY));
     }
 
     #[def_test]
     fn tmpfs_write_end_updates_vfs_inode_size() {
-        let fs = shmem::new_tmpfs(StatFsFlags::empty());
+        let fs = shmem::new_tmpfs(SuperBlockFlags::empty());
         let root = kvfs::Path::new(kvfs::Mount::new_root(&fs), fs.root_dir());
         let file = kvfs::Filename::new("tmp")
             .open_with_flags_at(
