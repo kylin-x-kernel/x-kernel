@@ -7,6 +7,7 @@ use alloc::collections::VecDeque;
 
 use ::core::task::Waker;
 use khal::time::TimeValue;
+use kpoll::{PollContext, PollRegisterError};
 use ksync::Mutex;
 
 use crate::{
@@ -82,7 +83,11 @@ impl NetDevice for LoopbackDevice {
         true
     }
 
-    fn register_rx_waker(&self, waker: &Waker) {
+    fn register_rx_waker(
+        &self,
+        source_waker: &Waker,
+        _context: &mut PollContext<'_>,
+    ) -> Result<(), PollRegisterError> {
         let mut registered = self.rx_waker.lock();
         // Polarity matters:
         // - `will_wake == true`  → same aggregated Service `timeout_poll` waker;
@@ -94,15 +99,16 @@ impl NetDevice for LoopbackDevice {
         debug_assert!(
             registered
                 .as_ref()
-                .is_none_or(|current| current.will_wake(waker)),
+                .is_none_or(|current| current.will_wake(source_waker)),
             "loopback RX waker replaced by a non-equivalent waker; only Service's aggregated \
              timeout_poll waker is supported"
         );
         if !registered
             .as_ref()
-            .is_some_and(|current| current.will_wake(waker))
+            .is_some_and(|current| current.will_wake(source_waker))
         {
-            *registered = Some(waker.clone());
+            *registered = Some(source_waker.clone());
         }
+        Ok(())
     }
 }

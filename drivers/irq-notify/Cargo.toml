@@ -16,3 +16,4 @@ name = "irq_notify"
 device_res = { workspace = true }
 kpoll = { workspace = true }
 kspin = { workspace = true }
+unittest = { workspace = true }

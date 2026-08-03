@@ -1927,6 +1927,7 @@ dependencies = [
  "device-res",
  "kpoll",
  "kspin 0.2.0-dev",
+ "unittest",
 ]
 
 [[package]]

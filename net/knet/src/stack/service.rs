@@ -199,9 +199,9 @@ impl Service {
 
         for (i, device) in self.router.devices.iter().enumerate() {
             if mask & (1 << i) != 0 {
-                // Same timeout_poll-backed waker every time; loopback/ethernet
-                // store this single upstream kick, not per-task waiters.
-                device.register_rx_waker(&source_waker);
+                // Ethernet registers the current context directly on the IRQ
+                // source. Loopback keeps the timeout_poll-backed source waker.
+                device.register_rx_waker(&source_waker, context)?;
             }
         }
         Ok(source_waker)

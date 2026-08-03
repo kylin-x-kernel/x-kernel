@@ -6,6 +6,7 @@
 use ::core::task::Waker;
 use kerrno::KResult;
 use khal::time::TimeValue;
+use kpoll::{PollContext, PollRegisterError};
 
 mod ethernet;
 mod loopback;
@@ -56,13 +57,16 @@ pub trait NetDevice: Send + Sync {
         Err(kerrno::KError::OperationNotSupported)
     }
 
-    /// Registers the aggregated Service RX/timeout waker for this device.
+    /// Registers the current RX wait with this device.
     ///
-    /// Callers must install the same upstream source waker used by
-    /// [`crate::stack::service::Service::register_rx_waker`] (the Service
-    /// `timeout_poll`). Devices are not multi-waiter hubs; task fan-out stays
-    /// on that aggregated [`kpoll::PollSet`].
-    fn register_rx_waker(&self, waker: &Waker);
+    /// Devices backed by a multi-waiter source register `context` directly.
+    /// Single-waker devices retain `source_waker`, which fans out through the
+    /// Service RX/timeout poll set.
+    fn register_rx_waker(
+        &self,
+        source_waker: &Waker,
+        context: &mut PollContext<'_>,
+    ) -> Result<(), PollRegisterError>;
 
     /// Synchronizes device state prepared by the control-plane adapter.
     fn sync_netlink(

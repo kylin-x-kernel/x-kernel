@@ -100,8 +100,8 @@
    为 Arc 引用计数。
 3. 单次 `wake` 广播成本仍是 O(n)；lifecycle guard 防止无限累积。锁内成本只包括
    detach slot table 和重置元数据，实际遍历/唤醒在锁外执行。
-4. 设备层仍保留 `bind_source_waker(&Waker)` 桥接入口，用于把派生 waker
-   挂到 IRQ `PollSet`；该路径由 irq-notify 自己持有 `PollRegistration`。
+4. IRQ 等多等待者事件源通过调用方提供的 `PollContext` 直接注册，
+   registration 生命周期由跨越 `Pending` 的 `PollRegistrations` 管理。
 
 ## 审计清单
 

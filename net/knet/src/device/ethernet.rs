@@ -5,7 +5,6 @@
 //! Ethernet device adapter.
 use alloc::{collections::VecDeque, string::String, vec::Vec};
 
-use ::core::task::Waker;
 use device_res::IrqEventSource;
 use hashbrown::HashMap;
 use kclass::{ClassDevice, prelude::*};
@@ -420,13 +419,17 @@ impl NetDeviceOps for EthernetDevice {
         Ok(frame.len())
     }
 
-    fn register_rx_waker(&self, waker: &Waker) {
-        if let Some(irq) = self.inner.irq()
-            && irq_notify::bind_source_waker(irq, NET_RX_IRQ_SOURCE, waker).is_err()
-        {
-            // Binding failed; force a recheck so the caller can retry later.
-            waker.wake_by_ref();
+    fn register_rx_waker(
+        &self,
+        _source_waker: &core::task::Waker,
+        context: &mut kpoll::PollContext<'_>,
+    ) -> Result<(), kpoll::PollRegisterError> {
+        // Ethernet registers each waiting task directly on its IRQ source;
+        // the aggregated `source_waker` is only used by single-waker devices.
+        if let Some(irq) = self.inner.irq() {
+            irq_notify::register_source_waker(irq, NET_RX_IRQ_SOURCE, context)?;
         }
+        Ok(())
     }
 
     fn sync_netlink(

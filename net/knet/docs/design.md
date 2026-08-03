@@ -298,7 +298,7 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 - Unix stream 的用户数据复制和 `PollSet` 唤醒在 `tx_order` 外执行。send 先写入未发布的 vacant 区域，再在锁内复检关闭状态并推进 write index；recv 读取为空后在锁内复查 occupied 长度和关闭状态；shutdown 完成状态发布并复制 peer endpoint 引用后释放 `channel` mutex，再执行 waiter 唤醒。
 - Unix stream 每个 endpoint 分别持有 readable、writable 和 connection-state 三组 `PollSet`。写入只唤醒 peer readable waiter，读取跨过发送缓冲低水位时只唤醒 peer writable waiter，半关闭只唤醒受影响方向，完整关闭通过 connection-state waiter 通知双方。
 - netlink `ROUTE_STATE` 使用 `RwLock`，rx queue 和 subscriber 列表使用 `Mutex`。
-- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 通过 `PollContext` 把当前等待注册到聚合 `timeout_poll`，再把该内部源的 waker 交给 timeout 和设备 IRQ，避免设备层保留调用方的裸 waker。loopback 因此只保存这一份聚合 waker（`Mutex<Option<Waker>>`），多任务广播仍由 `timeout_poll` 完成；不得绕过 `Service` 向设备注册互不等价的 task waker。
+- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 使用调用方传入的同一个 `PollContext` 注册聚合 `timeout_poll` 和相关 Ethernet IRQ source，registration 由跨越 `Pending` 的 `PollRegistrations` 统一管理。loopback 仍保存 `timeout_poll` 的聚合 waker（`Mutex<Option<Waker>>`），多任务广播由 `timeout_poll` 完成；设备层不得保存调用方的裸 waker或绕过 `Service` 注册互不等价的 task waker。
 
 ## 设计决策
 

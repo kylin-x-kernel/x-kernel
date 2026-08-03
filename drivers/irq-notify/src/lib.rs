@@ -14,19 +14,15 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::task::Waker;
 
 use device_res::{IRQ_EVENT_SOURCES, IrqEventSource};
-use kpoll::{PollContext, PollRegisterError, PollRegistration, PollSet};
+use kpoll::{PollContext, PollRegisterError, PollSet};
 use kspin::SpinNoIrq;
 
 struct IrqSourcePollSet {
     irq: usize,
     source: IrqEventSource,
     poll_set: PollSet,
-    /// Long-lived bridge registration used by device layers that still hand a
-    /// derived [`Waker`] rather than a caller-owned [`PollContext`].
-    bridge: Option<PollRegistration>,
 }
 
 static IRQ_SOURCE_WAITERS: SpinNoIrq<Vec<IrqSourcePollSet>> = SpinNoIrq::new(Vec::new());
@@ -50,7 +46,6 @@ fn insert_new(
         irq,
         source,
         poll_set,
-        bridge: None,
     });
     Ok(waiters.len() - 1)
 }
@@ -89,37 +84,6 @@ pub fn register_source_waker(
     context.register(&poll_set)
 }
 
-/// Installs a long-lived bridge waker for a device IRQ source.
-///
-/// Device backends that only receive a derived [`Waker`] use this entry point.
-/// The previous bridge registration, if any, is replaced.
-///
-/// # Errors
-///
-/// Returns an error when the waiter registration cannot be retained.
-pub fn bind_source_waker(
-    irq: usize,
-    source: IrqEventSource,
-    waker: &Waker,
-) -> Result<(), PollRegisterError> {
-    let poll_set = lookup_or_insert(irq, source)?;
-    // Register outside the table lock, then publish the bridge guard under it.
-    let registration = poll_set.register(waker)?;
-    {
-        let mut waiters = IRQ_SOURCE_WAITERS.lock();
-        let Some(index) = find_index(&waiters, irq, source) else {
-            // Entry removed underfoot; keep the registration alive via drop.
-            return Ok(());
-        };
-        waiters[index].bridge = Some(registration);
-    }
-    // Close the publish/IRQ race: an interrupt between register and publish
-    // would not yet see this bridge as the device layer's retained waiter, and
-    // one-shot wake may already have detached it. Prompt the bound task.
-    waker.wake_by_ref();
-    Ok(())
-}
-
 /// Wake waiters whose logical IRQ source bits fired.
 ///
 /// Called from IRQ dispatch. Matching [`PollSet`]s are cloned into a fixed
@@ -146,5 +110,86 @@ pub fn dispatch_sources(irq: usize, sources: u8) {
     }
     for set in to_wake.into_iter().flatten() {
         set.wake();
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use alloc::boxed::Box;
+    use core::{
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{Context, RawWaker, RawWakerVTable, Waker},
+    };
+
+    use kpoll::PollRegistrations;
+    use unittest::{assert_eq, def_test};
+
+    use super::{dispatch_sources, register_source_waker};
+
+    const TEST_IRQ: usize = 0x5a5a;
+    const TEST_SOURCE: u8 = 0;
+
+    unsafe fn clone_waker(data: *const ()) -> RawWaker {
+        RawWaker::new(data, &WAKER_VTABLE)
+    }
+
+    unsafe fn wake_waker(data: *const ()) {
+        // SAFETY: `make_waker` installs a leaked, aligned `AtomicUsize` pointer.
+        let counter = unsafe { &*(data as *const AtomicUsize) };
+        counter.fetch_add(1, Ordering::SeqCst);
+    }
+
+    unsafe fn wake_waker_by_ref(data: *const ()) {
+        // SAFETY: same invariant as `wake_waker`.
+        unsafe { wake_waker(data) };
+    }
+
+    unsafe fn drop_waker(_data: *const ()) {}
+
+    static WAKER_VTABLE: RawWakerVTable =
+        RawWakerVTable::new(clone_waker, wake_waker, wake_waker_by_ref, drop_waker);
+
+    fn make_waker(counter: &'static AtomicUsize) -> Waker {
+        let raw = RawWaker::new(counter as *const _ as *const (), &WAKER_VTABLE);
+        // SAFETY: all vtable operations preserve the leaked AtomicUsize pointer.
+        unsafe { Waker::from_raw(raw) }
+    }
+
+    #[def_test]
+    fn source_registration_wakes_current_waiter() {
+        let counter = Box::leak(Box::new(AtomicUsize::new(0)));
+        let waker = make_waker(counter);
+        let cx = Context::from_waker(&waker);
+        let mut registrations = PollRegistrations::new();
+
+        {
+            let mut context = registrations.context(&cx);
+            register_source_waker(TEST_IRQ, TEST_SOURCE, &mut context).unwrap();
+        }
+        dispatch_sources(TEST_IRQ, 1 << TEST_SOURCE);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        {
+            let mut context = registrations.context(&cx);
+            register_source_waker(TEST_IRQ, TEST_SOURCE, &mut context).unwrap();
+        }
+        dispatch_sources(TEST_IRQ, 1 << TEST_SOURCE);
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[def_test]
+    fn source_registration_is_cancelled_by_owner() {
+        let counter = Box::leak(Box::new(AtomicUsize::new(0)));
+        let waker = make_waker(counter);
+        let cx = Context::from_waker(&waker);
+        let mut registrations = PollRegistrations::new();
+
+        {
+            let mut context = registrations.context(&cx);
+            register_source_waker(TEST_IRQ + 1, TEST_SOURCE, &mut context).unwrap();
+        }
+        registrations.clear();
+        dispatch_sources(TEST_IRQ + 1, 1 << TEST_SOURCE);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
 }
