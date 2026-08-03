@@ -1904,7 +1904,6 @@ version = "0.2.0-dev"
 dependencies = [
  "arm-gic-driver",
  "karch",
- "kbuild_config",
  "kcpu_id_map",
  "khal",
  "kplat",

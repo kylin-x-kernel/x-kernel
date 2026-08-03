@@ -23,9 +23,8 @@ pub struct ExceptionContext {
     pub elr: u64,
     /// Saved Process Status Register (SPSR_EL1).
     pub spsr: u64,
-
-    /// Padding to keep the structure 16-byte aligned.
-    pub __pad: u64,
+    /// PMR snapshot at exception entry, restored before eret.
+    pub pmr: u64,
 }
 
 impl fmt::Debug for ExceptionContext {
@@ -39,7 +38,7 @@ impl fmt::Debug for ExceptionContext {
 
         write!(f, "elr: {:#x}, ", self.elr)?;
         write!(f, "spsr: {:#x}, ", self.spsr)?;
-        write!(f, "pad: {:#x} }}", self.__pad)
+        write!(f, "pmr: {:#x} }}", self.pmr)
     }
 }
 

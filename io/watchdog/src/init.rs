@@ -38,8 +38,10 @@ fn init_nmi_watchdog() {
     crate::register_hardlockup_detection_task();
 
     // TODO: read CPU max frequency from DT OPP table (opp-hz).
-    // For now assume 1 GHz — correct for QEMU, conservative for hardware.
-    let cpu_freq_hz: u64 = 1_000_000_000;
+    // For now assume 2.5 GHz.  The hardlockup period is threshold_ns × freq,
+    // so over-estimating the cycle frequency stretches the real-time window
+    // and makes the detector less sensitive.
+    let cpu_freq_hz: u64 = 2_500_000_000;
     // Use u128 intermediate to avoid overflow when threshold_ns × cpu_freq_hz
     // exceeds u64::MAX (e.g. ≥ 1.85 GHz with the 10 s default threshold).
     let nmi_period_cycles = (crate::lockup_detection::DEFAULT_HARDLOCKUP_THRESH_NS as u128

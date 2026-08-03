@@ -31,6 +31,9 @@ enum ArchTrapOrigin {
 core::arch::global_asm!(
     include_str!("excp.S"),
     trapframe_size = const core::mem::size_of::<ExceptionContext>(),
+    // GICv3-only: mrs/msr ICC_PMR_EL1. GICv2 has no sysreg interface —
+    // enabling pmr on GICv2 will cause undefined-instruction exceptions.
+    PMR_SYSREG = const if cfg!(feature = "pmr") { 1u64 } else { 0u64 },
     TRAP_KIND_SYNC = const ArchTrap::Synchronous as u8,
     TRAP_KIND_IRQ = const ArchTrap::Irq as u8,
     TRAP_KIND_FIQ = const ArchTrap::Fiq as u8,
@@ -87,6 +90,19 @@ fn dispatch_exception(tf: &mut ExceptionContext, kind: ArchTrap, source: ArchTra
             panic!("Unhandled exception {:?}:\n{:#x?}", kind, tf);
         }
         ArchTrap::Irq => {
+            #[cfg(feature = "pmr")]
+            if tf.spsr & (1 << 7) != 0
+                || (karch::pmr::is_ready() && tf.pmr as u8 <= karch::pmr::NMI_ONLY)
+            {
+                // PMR <= NMI_ONLY means only interrupts with priority below
+                // that threshold could have been delivered — i.e. pseudo‑NMI
+                // sources.  This relies on the invariant that NMI sources are
+                // programmed at priority 0 while every other interrupt stays
+                // at or above IRQ_THRESHOLD, enforced by the GIC init
+                // defaults and irq_driver::gic::set_prio.
+                dispatch_irq_trap!(NMI, 0);
+                return;
+            }
             dispatch_irq_trap!(IRQ, 0);
         }
         ArchTrap::Synchronous => {

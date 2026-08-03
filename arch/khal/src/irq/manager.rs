@@ -9,14 +9,14 @@ use core::marker::PhantomData;
 
 #[cfg(feature = "ipi")]
 pub use kbuild_config::IPI_IRQ;
-use kcpu::excp::{IRQ, register_trap_handler};
-use kspin::SpinNoIrq;
+use kcpu::excp::{IRQ, NMI, register_trap_handler};
+use kspin::{SpinNoIrq, SpinRaw};
 
 #[cfg(feature = "ipi")]
 pub use self::TargetCpu as IpiTarget;
 use super::{
-    Hwirq, IntoIrqDesc, IrqAffinity, IrqController, IrqDesc, IrqDomainId, IrqHandler, IrqPolarity,
-    IrqSource, IrqTrigger, Virq,
+    Hwirq, IntoIrqDesc, IrqAffinity, IrqController, IrqDesc, IrqDomainId, IrqFlags, IrqHandler,
+    IrqPolarity, IrqSource, IrqTrigger, Virq,
 };
 
 /// IRQ handler invoked on dispatch.
@@ -117,6 +117,12 @@ pub trait IntrManagerIf {
     fn enable(id: usize, on: bool);
     /// Claims a pending interrupt and returns a guard that completes it on drop.
     fn dispatch_irq(id: usize) -> Option<DispatchedIrq>;
+    /// Claims a pending NMI, returning the raw hwirq and completion cookie.
+    ///
+    /// Unlike [`dispatch_irq`], this bypasses virq translation and never
+    /// opens the NMI window — it is only called from the NMI entry path
+    /// where normal IRQs are already masked.
+    fn dispatch_nmi(id: usize) -> Option<DispatchedIrq>;
     /// Completes a claimed interrupt with its opaque completion cookie.
     fn complete_irq(completion_cookie: usize);
     /// Sends an IPI to another CPU.
@@ -173,6 +179,11 @@ fn platform_dispatch_irq(id: usize) -> Option<DispatchedIrq> {
 }
 
 #[inline]
+fn platform_dispatch_nmi(id: usize) -> Option<DispatchedIrq> {
+    IntrManagerIf::dispatch_nmi(id)
+}
+
+#[inline]
 fn platform_complete_irq(completion_cookie: usize) {
     IntrManagerIf::complete_irq(completion_cookie)
 }
@@ -189,6 +200,24 @@ pub fn set_prio(id: usize, prio: u8) {
 
 static IRQ_STATE: SpinNoIrq<IrqState> = SpinNoIrq::new(IrqState::new());
 pub const DYNAMIC_VIRQ_BASE: Virq = 4096;
+
+/// NMI handler table, keyed by hwirq.
+///
+/// # Locking invariant
+///
+/// - **WRITES**: boot‑time registration via [`register_nmi`] /
+///   [`unregister_nmi`], or — rarely — from an NMI handler itself (see
+///   [`dispatch_nmi_handler`]).  The normal IRQ path and process context never write
+///   this table.
+/// - **READS**: NMI context only, via [`dispatch_nmi_handler`].  The lock is never
+///   acquired from a normal IRQ handler, so a pseudo‑NMI that preempts a
+///   normal IRQ never contends on this lock.
+///
+/// [`SpinRaw`] (no IRQ / preempt guards) is therefore safe: boot‑time writers
+/// run before any NMI can be delivered, and a pseudo‑NMI cannot preempt
+/// another pseudo‑NMI on the same CPU, so a writer and a reader never run
+/// concurrently on the same CPU.
+static NMI_TABLE: SpinRaw<BTreeMap<Hwirq, Handler>> = SpinRaw::new(BTreeMap::new());
 
 type WakeHandler = fn(usize);
 
@@ -385,8 +414,15 @@ pub fn map(desc: impl IntoIrqDesc) -> Virq {
 }
 
 /// Returns the mapped logical IRQ number for a domain-local hardware IRQ.
+///
+/// NMI-safe: if `IRQ_STATE` is already held (NMI re-entered a normal IRQ
+/// handler on the same CPU), returns `None` instead of blocking.  Callers
+/// such as [`resolve_hwirq`] then fall back to the raw hwirq themselves;
+/// returning the untranslated hwirq here would misreport a dynamically
+/// allocated virq (≥ [`DYNAMIC_VIRQ_BASE`]) as the hwirq.
 pub fn translate_hwirq(domain: IrqDomainId, hwirq: Hwirq) -> Option<Virq> {
-    IRQ_STATE.lock().translated_hwirq(domain, hwirq)
+    let state = IRQ_STATE.try_lock()?;
+    state.translated_hwirq(domain, hwirq)
 }
 
 /// Resolves a hardware IRQ to a logical IRQ, falling back to the raw hardware
@@ -479,6 +515,135 @@ pub fn unregister(desc: impl IntoIrqDesc) -> Option<Handler> {
     handler
 }
 
+/// Register an NMI handler for a hardware interrupt.
+///
+/// The interrupt is configured as a pseudo‑NMI with the highest GIC priority
+/// and routed through the lock‑free [`dispatch_nmi_handler`] path.  Unlike [`register`],
+/// this function **never** acquires `IRQ_STATE.lock()` during dispatch — the
+/// handler is stored in a separate [`NMI_TABLE`] keyed by hwirq.
+///
+/// # Safety constraints
+///
+/// - NMI handlers must be **per‑CPU** (enforced by tagging the descriptor with
+///   `IrqFlags::PER_CPU`).
+/// - NMI handlers **cannot be shared** — duplicate registration on the same
+///   hwirq is rejected.
+/// - Refuses to overwrite a regular handler already registered on the same
+///   line (mirroring [`register`]), and rejects duplicates before touching
+///   any internal state.
+/// - Normally called **at boot time**, before `enable_local_irq()`, so that
+///   no NMI can fire before registration is complete.  It may also be called
+///   from an NMI handler itself — a pseudo‑NMI cannot preempt another
+///   pseudo‑NMI on the same CPU, so the registration cannot race a reader.
+pub fn register_nmi(desc: impl IntoIrqDesc, handler: Handler) -> bool {
+    let desc = desc.into_irq_desc();
+    let hwirq = desc.hwirq;
+
+    // Reject duplicate NMI registrations before touching any state, so a
+    // failed registration cannot leave IRQ_STATE or NMI_TABLE inconsistent.
+    if NMI_TABLE.lock().contains_key(&hwirq) {
+        warn!("register_nmi: handler already exists for hwirq {hwirq}");
+        return false;
+    }
+
+    // Resolve descriptor in IRQ_STATE (metadata tracking + fallback handler
+    // for when nmi-pmu is not enabled and dispatch goes through the normal path).
+    let mut state = IRQ_STATE.lock();
+    // Refuse to overwrite an existing regular handler on this line, mirroring
+    // register()'s entry.handler.is_some() check.
+    if let Some(virq) = state.lookup_virq(desc)
+        && state
+            .descs
+            .get(&virq)
+            .is_some_and(|entry| entry.handler.is_some())
+    {
+        warn!("register_nmi: handler already registered for irq {virq}");
+        return false;
+    }
+    let desc = state.resolve_desc(desc.with_flags(IrqFlags::PER_CPU));
+    let virq = desc.logical_irq().unwrap();
+    let entry = state
+        .descs
+        .get_mut(&virq)
+        .expect("descriptor state must exist after resolve_desc");
+    // Tag the remembered descriptor so descriptor() queries see the NMI flag.
+    entry.desc = desc;
+    // Store a fallback handler for the non‑NMI dispatch path.
+    entry.handler = Some(handler.clone());
+    drop(state);
+
+    // Store handler in NMI table (keyed by hwirq).
+    NMI_TABLE.lock().insert(hwirq, handler);
+
+    // Pass the resolved descriptor so platform binding/configuration also
+    // applies when the line only carries a dynamically allocated virq.
+    configure_and_enable_platform_irq(desc, true);
+    true
+}
+
+/// Remove a previously registered NMI handler.
+///
+/// Besides removing the [`NMI_TABLE`] entry, this clears the fallback handler
+/// and `IrqFlags::PER_CPU` tag that [`register_nmi`] stored in `IRQ_STATE`,
+/// so a re‑enabled or re‑triggered IRQ no longer dispatches the removed
+/// handler through the normal path.  The platform line is disabled when it is
+/// no longer used, using the full stored descriptor.
+pub fn unregister_nmi(desc: impl IntoIrqDesc) -> bool {
+    let desc = desc.into_irq_desc();
+    let hwirq = desc.hwirq;
+    let removed = {
+        let mut table = NMI_TABLE.lock();
+        table.remove(&hwirq).is_some()
+    };
+    if !removed {
+        return false;
+    }
+
+    // Also clear the IRQ_STATE fallback handler and PER_CPU tag installed by
+    // register_nmi, so a re-enabled or re-triggered IRQ no longer dispatches
+    // the removed handler through the normal path.
+    let mut state = IRQ_STATE.lock();
+    let Some(virq) = state.lookup_virq(desc) else {
+        return true;
+    };
+    if let Some(entry) = state.descs.get_mut(&virq)
+        && entry.handler.is_some()
+    {
+        entry.handler = None;
+        entry.desc = IrqDesc {
+            flags: entry.desc.flags - IrqFlags::PER_CPU,
+            ..entry.desc
+        };
+    }
+    let disable = state.descs.get(&virq).is_some_and(IrqStateDesc::is_unused);
+    let stored_desc = state.descs.get(&virq).map(|entry| entry.desc);
+    state.remove_if_unused(virq);
+    drop(state);
+    if disable && let Some(stored_desc) = stored_desc {
+        // Carry the full stored descriptor so the disable is not silently
+        // skipped for lines whose hwirq falls above DYNAMIC_VIRQ_BASE.
+        disable_platform_irq(stored_desc);
+    }
+    true
+}
+
+/// Dispatch a registered NMI handler without touching [`IRQ_STATE`].
+///
+/// The handler is cloned out of [`NMI_TABLE`] before the lock is released,
+/// so the handler itself may safely (but rarely) call `register_nmi` /
+/// `unregister_nmi` without self‑deadlock.
+fn dispatch_nmi_handler(hwirq: Hwirq) {
+    let handler = {
+        let table = NMI_TABLE.lock();
+        table.get(&hwirq).cloned()
+    };
+    if let Some(handler) = handler {
+        let _ = handler.handle();
+    } else {
+        warn!("Unhandled NMI for hwirq {hwirq}");
+    }
+}
+
 // Wakeup subscriptions do not install a regular IRQ handler. They keep the IRQ
 // bound so the IRQ core can observe the event and run the wakeup callback path.
 fn subscribe_wakeup_mode(desc: impl IntoIrqDesc, mode: WakeupMode, handler: WakeHandler) -> bool {
@@ -536,7 +701,31 @@ pub fn unsubscribe_wakeup(desc: impl IntoIrqDesc) -> bool {
     false
 }
 
-/// IRQ handler.
+/// Pseudo‑NMI handler.
+///
+/// Invoked from the exception entry layer when `dispatch_exception` detects
+/// that normal IRQs were masked (PMR ≤ NMI_ONLY) at the moment the interrupt
+/// fired — a pseudo‑NMI preempting a critical section.  The handler uses the
+/// lock‑free [`dispatch_nmi_handler`] path which only touches [`NMI_TABLE`], never
+/// [`IRQ_STATE`].
+#[register_trap_handler(NMI)]
+pub fn nmi_handler(vector: usize) -> bool {
+    let guard = kspin::NoPreempt::new();
+
+    if let Some(dispatched_irq) = platform_dispatch_nmi(vector) {
+        dispatch_nmi_handler(dispatched_irq.irq());
+        dispatched_irq.complete();
+    }
+
+    let _ = guard;
+    true
+}
+
+/// Normal IRQ handler.
+///
+/// Invoked when the interrupted context had normal IRQs enabled (PMR >
+/// NMI_ONLY).  No critical‑section locks are held, so it is safe to acquire
+/// [`IRQ_STATE`].
 ///
 /// # Warn
 ///

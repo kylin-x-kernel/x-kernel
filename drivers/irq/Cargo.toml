@@ -15,7 +15,6 @@ nmi-pmu = ["pmr", "kplat/nmi"]
 
 [dependencies]
 karch = { workspace = true }
-kbuild_config = { workspace = true }
 khal = { workspace = true }
 kcpu_id_map = { workspace = true }
 kplat = { workspace = true }

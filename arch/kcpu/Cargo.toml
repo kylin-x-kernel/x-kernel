@@ -13,6 +13,7 @@ default = []
 fp-simd = []
 tls = []
 arm-el2 = ["karch/arm-el2"]
+pmr = ["karch/pmr"]
 
 [dependencies]
 backtrace = { workspace = true }

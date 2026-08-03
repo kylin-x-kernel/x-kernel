@@ -105,6 +105,10 @@ impl crate::irq::IntrManagerIf {
         None
     }
 
+    fn dispatch_nmi(_irq: usize) -> Option<crate::irq::DispatchedIrq> {
+        None
+    }
+
     fn complete_irq(_completion_cookie: usize) {}
 
     fn notify_cpu(_irq: usize, _target: TargetCpu) {}

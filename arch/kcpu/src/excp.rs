@@ -16,6 +16,14 @@ pub use crate::TrapFrame;
 #[def_trap_handler]
 pub static IRQ: [fn(usize) -> bool];
 
+/// A slice of pseudo-NMI handler functions.
+///
+/// These fire when an IRQ exception is taken while normal (sub‑NMI priority)
+/// IRQs are masked by PMR, indicating a pseudo‑NMI preempted a critical
+/// section.  Handlers must use the lock‑free [`NMI_TABLE`] dispatch path.
+#[def_trap_handler]
+pub static NMI: [fn(usize) -> bool];
+
 /// A slice of page fault handler functions.
 #[def_trap_handler]
 pub static PAGE_FAULT: [fn(VirtAddr, PageFaultFlags) -> bool];

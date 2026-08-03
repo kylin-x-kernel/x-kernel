@@ -204,9 +204,12 @@ pub fn write(v: u8) {
 
 pub const ALL: u8 = 0xff;
 pub const NMI_ONLY: u8 = 0x80;
-/// GIC default IRQ priority.  PMR values > this mean normal IRQs are unmasked.
-#[cfg(feature = "pmr")]
-pub(crate) const IRQ_THRESHOLD: u8 = 0xa0;
+/// GIC default IRQ priority, and the floor for non‑NMI interrupt priorities.
+///
+/// Interrupts programmed below this threshold (other than NMI sources, which
+/// use priority 0) would be delivered and misclassified as NMIs while PMR is
+/// lowered to [`NMI_ONLY`].  PMR values > this mean normal IRQs are unmasked.
+pub const IRQ_THRESHOLD: u8 = 0xa0;
 #[cfg(feature = "pmr")]
 pub(crate) const TOKEN_BIT: usize = 1 << 31;
 #[cfg(feature = "pmr")]

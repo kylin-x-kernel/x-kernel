@@ -543,8 +543,8 @@ fn init_interrupt() {
     );
 
     #[cfg(feature = "pmu")]
-    khal::irq::register(
-        of::pmu_irq_or(kbuild_config::PMU_IRQ),
+    khal::irq::register_nmi(
+        khal::irq::gic_level_irq_desc(kbuild_config::PMU_IRQ),
         alloc::sync::Arc::new(|| {
             debug!(
                 "PMU interrupt received on cpu {}",

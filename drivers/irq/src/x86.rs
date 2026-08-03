@@ -93,6 +93,10 @@ impl khal::irq::IntrManagerIf {
         dispatch_irq(vector)
     }
 
+    fn dispatch_nmi(_irq: usize) -> Option<khal::irq::DispatchedIrq> {
+        None
+    }
+
     fn complete_irq(completion_cookie: usize) {
         if completion_cookie != 0 {
             x86_apic::end_of_interrupt();

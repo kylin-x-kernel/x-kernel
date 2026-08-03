@@ -68,7 +68,9 @@ pub fn set_prio(_irq: usize, _priority: u8) {
     unreachable!()
 }
 
-pub fn dispatch_irq() -> Option<(usize, usize)> {
+/// IRQ path: ack + early EOI.  GICv2 has no pseudo‑NMI support.
+/// Returns (hwirq, cookie, false).  Mirrors `__gic_handle_irq_from_irqson`.
+pub fn dispatch_irq_from_irqson() -> Option<(usize, usize, bool)> {
     let ack = TRAP_OP.ack();
     if ack.is_special() {
         return None;
@@ -86,29 +88,35 @@ pub fn dispatch_irq() -> Option<(usize, usize)> {
     TRAP_OP.eoi(ack);
     // SAFETY: `isb` only orders the acknowledged interrupt before the handler.
     unsafe { core::arch::asm!("isb", options(nomem, nostack)) };
-    Some((irq, u32::from(ack) as usize))
+    Some((irq, u32::from(ack) as usize, false))
+}
+
+/// NMI path: lower PMR to NMI_ONLY before ack, then restore.
+/// Mirrors `__gic_handle_irq_from_irqsoff`.
+pub fn dispatch_irq_from_irqsoff() -> Option<(usize, usize)> {
+    #[cfg(feature = "nmi-pmu")]
+    let saved_pmr = karch::pmr::read();
+    #[cfg(feature = "nmi-pmu")]
+    {
+        karch::pmr::write(karch::pmr::NMI_ONLY);
+        // SAFETY: isb ensures PMR write is visible before IAR read.
+        unsafe { core::arch::asm!("isb", options(nomem, nostack)) };
+    }
+
+    let result = dispatch_irq_from_irqson();
+
+    // Restore PMR even on a spurious/EOI-only ack so the NMI window does
+    // not leak into the interrupted context.
+    #[cfg(feature = "nmi-pmu")]
+    karch::pmr::write(saved_pmr);
+
+    let (irq, cookie, _) = result?;
+    Some((irq, cookie))
 }
 
 pub fn complete_irq(completion_cookie: usize) {
     let ack = Ack::from(completion_cookie as u32);
     TRAP_OP.dir(ack);
-}
-
-/// Decode the INTID from a GICv2 completion cookie.
-///
-/// `dispatch_irq()` returns `u32::from(Ack)` as the cookie, which encodes the
-/// interrupt ID differently for [`Ack::Other`] and [`Ack::SGI`].  This helper
-/// reconstructs the `Ack` and extracts the raw INTID so callers can compare
-/// against a known IRQ number (e.g. `PMU_IRQ`) without depending on the
-/// serialisation format.
-#[cfg(feature = "nmi-pmu")]
-#[inline]
-pub fn intid_from_cookie(cookie: usize) -> u32 {
-    let ack = Ack::from(cookie as u32);
-    match ack {
-        Ack::Other(intid) => intid.to_u32(),
-        Ack::SGI { intid, .. } => intid.to_u32(),
-    }
 }
 
 pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {

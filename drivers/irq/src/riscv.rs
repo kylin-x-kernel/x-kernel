@@ -197,6 +197,10 @@ impl khal::irq::IntrManagerIf {
         )
     }
 
+    fn dispatch_nmi(_irq: usize) -> Option<khal::irq::DispatchedIrq> {
+        None
+    }
+
     fn complete_irq(completion_cookie: usize) {
         if completion_cookie == PLIC_COMPLETE_SKIP {
             return;

@@ -62,16 +62,67 @@ pub fn set_prio(irq: usize, priority: u8) {
     gic.set_priority(intid, priority);
 }
 
-pub fn dispatch_irq() -> Option<(usize, usize)> {
+/// IRQ path: ack1 → check RPR → early EOI1.
+/// Returns (hwirq, cookie, is_nmi).  Caller decides window based on is_nmi.
+/// Mirrors `__gic_handle_irq_from_irqson`.
+pub fn dispatch_irq_from_irqson() -> Option<(usize, usize, bool)> {
     let ack = TRAP_OP.ack1();
     if ack.is_special() {
         return None;
     }
     let irq = ack.to_u32() as usize;
+
+    // After ack, running priority reflects this interrupt's priority.  NMI
+    // sources are programmed at priority 0.  The RPR read only decides
+    // whether to open the NMI window, which exists solely under `nmi-pmu`;
+    // skip it otherwise to keep the IRQ hot path free of system-register
+    // traffic.
+    #[cfg(feature = "nmi-pmu")]
+    let is_nmi = {
+        let rpr: u64;
+        // SAFETY: reading ICC_RPR_EL1, a read-only system register.
+        unsafe { core::arch::asm!("mrs {}, ICC_RPR_EL1", out(reg) rpr, options(nomem, nostack)) };
+        rpr == 0
+    };
+    #[cfg(not(feature = "nmi-pmu"))]
+    let is_nmi = false;
+
     TRAP_OP.eoi1(ack);
     // SAFETY: `isb` only orders the acknowledged interrupt before the handler.
     unsafe { core::arch::asm!("isb", options(nomem, nostack)) };
-    Some((irq, irq))
+    Some((irq, irq, is_nmi))
+}
+
+/// NMI path: lower PMR to NMI_ONLY before ack1, then restore.
+/// Mirrors `__gic_handle_irq_from_irqsoff`.
+pub fn dispatch_irq_from_irqsoff() -> Option<(usize, usize)> {
+    #[cfg(feature = "nmi-pmu")]
+    let saved_pmr = karch::pmr::read();
+    #[cfg(feature = "nmi-pmu")]
+    {
+        karch::pmr::write(karch::pmr::NMI_ONLY);
+        // SAFETY: isb ensures PMR write is visible before IAR read.
+        unsafe { core::arch::asm!("isb", options(nomem, nostack)) };
+    }
+
+    let ack = TRAP_OP.ack1();
+    let result = if ack.is_special() {
+        None
+    } else {
+        // Ack without re-reading ICC_RPR_EL1: the caller already knows this
+        // is an NMI, and the read would otherwise be duplicated on every
+        // pseudo-NMI.
+        let irq = ack.to_u32() as usize;
+        TRAP_OP.eoi1(ack);
+        // SAFETY: `isb` only orders the acknowledged interrupt before the handler.
+        unsafe { core::arch::asm!("isb", options(nomem, nostack)) };
+        Some((irq, irq))
+    };
+
+    #[cfg(feature = "nmi-pmu")]
+    karch::pmr::write(saved_pmr);
+
+    result
 }
 
 pub fn complete_irq(completion_cookie: usize) {

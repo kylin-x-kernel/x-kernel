@@ -155,6 +155,8 @@ SECTIONS
 SECTIONS {
     linkme_IRQ : { KEEP(*(linkme_IRQ)) }
     linkm2_IRQ : { KEEP(*(linkm2_IRQ)) }
+    linkme_NMI : { KEEP(*(linkme_NMI)) }
+    linkm2_NMI : { KEEP(*(linkm2_NMI)) }
     linkme_PAGE_FAULT : { KEEP(*(linkme_PAGE_FAULT)) }
     linkm2_PAGE_FAULT : { KEEP(*(linkm2_PAGE_FAULT)) }
     linkme_INIT_TRAP : { KEEP(*(linkme_INIT_TRAP)) }

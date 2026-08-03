@@ -1,3 +1,7 @@
+// Pseudo-NMI (PMR save/restore via ICC_PMR_EL1) is GICv3-only.
+// GICv2 has no system register interface; building with pmr feature on
+// GICv2 will cause undefined-instruction exceptions on mrs/msr ICC_PMR_EL1.
+//
 // This exception entry code uses conventional register save/restore sequences
 // and standard trap prologue/epilogue patterns that are common in low-level
 // operating system code for AArch64. The load/store layout follows established
@@ -25,9 +29,21 @@
     mrs     x9, elr_el1
     mrs     x10, spsr_el1
     stp     x9, x10, [sp, 31 * 8]
+    .if {PMR_SYSREG}
+        mrs     x11, ICC_PMR_EL1
+        str     x11, [sp, 33 * 8]
+        mov     x11, #0xff
+        msr     ICC_PMR_EL1, x11
+    .endif
 .endm
 
 .macro RESTORE_REGS
+    .if {PMR_SYSREG}
+        msr daifset, #2
+        ldr     x9, [sp, 33 * 8]
+        msr     ICC_PMR_EL1, x9
+        ldp     x8, x9, [sp, 8 * 8]
+    .endif
     ldp     x9, x10, [sp, 31 * 8]
     msr     elr_el1, x9
     msr     spsr_el1, x10
