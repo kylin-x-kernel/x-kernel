@@ -465,6 +465,8 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         Sysno::getsid => sys_getsid(uctx.arg0() as i32),
         Sysno::setsid => sys_setsid(),
         Sysno::getpgid => sys_getpgid(uctx.arg0() as i32),
+        #[cfg(target_arch = "x86_64")]
+        Sysno::getpgrp => sys_getpgrp(),
         Sysno::setpgid => sys_setpgid(uctx.arg0() as i32, uctx.arg1() as i32),
 
         // signal
@@ -556,6 +558,8 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         Sysno::membarrier => sys_membarrier(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
 
         // time
+        #[cfg(target_arch = "x86_64")]
+        Sysno::time => sys_time(uctx.arg0().into()),
         Sysno::gettimeofday => sys_gettimeofday(uctx.arg0().into()),
         Sysno::settimeofday => sys_settimeofday(uctx.arg0().into(), uctx.arg1().into()),
         Sysno::times => sys_times(uctx.arg0().into()),

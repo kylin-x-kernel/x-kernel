@@ -9,6 +9,7 @@ use core::sync::atomic::AtomicU32;
 
 use bytemuck::AnyBitPattern;
 use kspin::SpinNoPreempt;
+use ksync::Mutex;
 
 pub mod job;
 pub mod ldisc;
@@ -24,6 +25,7 @@ pub struct WindowSize {
 }
 
 pub struct Terminal {
+    pub(crate) association: Mutex<()>,
     pub job_control: job::JobControl,
     pub window_size: SpinNoPreempt<WindowSize>,
     pub termios: SpinNoPreempt<Arc<termios::Termios2>>,
@@ -32,6 +34,7 @@ pub struct Terminal {
 impl Default for Terminal {
     fn default() -> Self {
         Self {
+            association: Mutex::new(()),
             job_control: job::JobControl::new(),
             window_size: SpinNoPreempt::new(WindowSize {
                 ws_row: 28,

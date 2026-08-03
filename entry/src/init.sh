@@ -22,6 +22,12 @@ if [ -x /sbin/init ] && command -v openrc >/dev/null 2>&1; then
     exec /sbin/init
 fi
 
+# PID 1 inherited console file descriptions opened by the kernel bootstrap,
+# which intentionally did not claim a controlling terminal. Reopen the console
+# from user context so the session leader acquires it before starting an
+# interactive fallback shell. The OpenRC path above remains free for getty.
+exec </dev/console >/dev/console 2>&1
+
 # Use bash if available, otherwise fall back to sh
 if [ -x /bin/bash ]; then
     exec /bin/bash -l

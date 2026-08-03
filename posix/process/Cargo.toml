@@ -28,7 +28,6 @@ kuaccess.workspace = true
 ksignal.workspace = true
 ksync.workspace = true
 ktask.workspace = true
-ktty.workspace = true
 linux-raw-sys.workspace = true
 linux_sysno.workspace = true
 memspace.workspace = true

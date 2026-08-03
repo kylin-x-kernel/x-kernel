@@ -139,6 +139,10 @@ pathname FIFO 不通过 syscall fallback 或第二次 lookup 打开。所有 FIF
 builder 已绑定的 path。由此 pathname DAC、实际使用的 inode 和 opened-file identity
 属于同一次 open transaction。
 
+设备 open callback 可通过 `VfsFileBuilder::requests_no_controlling_tty()` 检查瞬态
+`O_NOCTTY` 请求。该检查发生在 callback 内；open 完成后，`O_NOCTTY` 与其他创建期
+flags 会从最终 `f_flags` 中移除。
+
 FIFO open 在 inode pipe-slot 锁内创建或复用 session 并增加 `files`，随后
 `PipeObject::open_fifo()` 根据 builder 的 `f_mode` 完成 reader/writer rendezvous。
 最后一个 file release 在同一 slot 锁域内减少 `files` 并清空 inode slot，防止旧

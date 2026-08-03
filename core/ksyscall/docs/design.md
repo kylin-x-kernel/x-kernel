@@ -123,7 +123,8 @@ ksyscall::dispatch_irq_syscall
   - `timerfd_*`
   - owner 在 `kfd_objects::TimerFd`
 - `time/queries.rs`
-  - `clock_gettime` / `gettimeofday` / `clock_getres` / `clock_settime` / `settimeofday`
+  - `time` / `clock_gettime` / `gettimeofday` / `clock_getres` / `clock_settime` /
+    `settimeofday`
   - owner 在 `khal` 时钟源、RTC wall-clock offset 与 `kprocess` CPU-time 查询
 - `time/sleep.rs`
   - `nanosleep` / `clock_nanosleep`
@@ -147,7 +148,7 @@ ksyscall::dispatch_irq_syscall
   - `getpid` / `getppid`
   - owner 在 `kprocess` 当前线程与父子进程关系
 - `task/job.rs`
-  - `getsid` / `setsid` / `getpgid` / `setpgid`
+  - `getsid` / `setsid` / `getpgid` / `getpgrp` / `setpgid`
   - owner 在 `kprocess` 进程组与 session 状态
 - `task/thread.rs`
   - `gettid` / `set_tid_address` / `arch_prctl`

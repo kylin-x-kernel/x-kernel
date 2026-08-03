@@ -51,6 +51,12 @@ pub fn sys_getpgid(pid: i32) -> KResult<isize> {
     Ok(proc.group().pgid() as _)
 }
 
+/// Returns the process group ID of the calling process.
+#[cfg(target_arch = "x86_64")]
+pub fn sys_getpgrp() -> KResult<isize> {
+    Ok(kprocess::current_user_process().group().pgid() as _)
+}
+
 /// Sets the process group ID of the given process.
 pub fn sys_setpgid(pid: i32, pgid: i32) -> KResult<isize> {
     if pgid < 0 {
@@ -94,6 +100,12 @@ mod tests {
     fn test_getpgid_zero_targets_current_process() {
         let proc = kprocess::current_user_process();
         assert_eq!(sys_getpgid(0).unwrap(), proc.group().pgid() as isize);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[def_test(user, serial)]
+    fn test_getpgrp_returns_current_process_group() {
+        assert_eq!(super::sys_getpgrp().unwrap(), sys_getpgid(0).unwrap());
     }
 
     #[def_test(user, serial)]

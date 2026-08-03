@@ -40,7 +40,7 @@ entry / ksyscall
   - 先构造 matching `Thread`，再通过 `new_user_task(..., thread, ...)` 一次性构造 task 与 `UserTaskRuntime`
   - 调用 `start_user_task(...)`
   - `kprocess` 内部先完成 publish，再使 task runnable
-- `spawn_init_process()` 依赖 rootfs、TTY 和默认 stdio 初始化路径可用；它由 PID-less 的 late-init 线程调用，分配 PID 1 并构造一个全新的 `User` 身份用户任务（走与 fork 相同的 `new_user` + `publish_user_task().commit()` 路径），不再原地转换 current task。
+- `spawn_init_process()` 依赖 rootfs、TTY 和默认 stdio 初始化路径可用；它由 PID-less 的 late-init 线程调用，分配 PID 1 并构造一个全新的 `User` 身份用户任务（走与 fork 相同的 `new_user` + `publish_user_task().commit()` 路径），不再原地转换 current task。PID 1 只继承 console stdio，不预先绑定 controlling TTY 或设置 foreground process group，后续 getty 通过标准 session/TTY ioctl 获取控制终端。
 - `do_exit()`、`check_signals()` 依赖 current task 是携带 `UserTaskRuntime` 的用户 task。
 - 这些接口会访问地址空间、信号状态、fd 表和共享内存管理器，可阻塞，不适用于中断上下文。
 

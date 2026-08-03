@@ -15,6 +15,8 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
 
 - `Filename::open_with_flags_at` 和 `dentry_open` 是保留 raw `O_*` 的兼容入口，会把
   原始位规范化为 `OpenParams` 与 `OpenFlags`。
+- 设备 open callback 只能通过 `VfsFileBuilder` 的窄接口检查瞬态 `O_NOCTTY`，避免
+  暴露或误用完整的创建期 flag 集合。
 - `sys_renameat2` 将 raw rename bits 转换为 `RenameFlags` 后才进入 VFS。
 - 文件系统 operation traits 可返回磁盘、网络或设备后端产生的错误与元数据。
 - 所有 pathname 与 namespace mutation API 的 `&Cred` 是权限边界；省略或替换它会改变

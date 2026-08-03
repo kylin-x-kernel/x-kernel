@@ -3757,7 +3757,6 @@ dependencies = [
  "ksignal",
  "ksync",
  "ktask",
- "ktty",
  "kuaccess",
  "linux-raw-sys",
  "linux_sysno",

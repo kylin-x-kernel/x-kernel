@@ -52,6 +52,7 @@
 - 父进程通知丢失：通过退出信号和 `child_exit_event()` 双路径通知。
 - group-exit 未广播：会留下残余线程；当前实现遍历线程组发 `SIGKILL`。
 - init 进程启动前缺少 user runtime：会导致用户线程 runtime 前提失效；当前 PID 1 路径在进入用户态前校验 identity、安装 runtime、发布 process/task 可见性，并同步当前页表。
+- init 进程预占 controlling TTY：会阻止 OpenRC getty 建立新 session 并获取 console；初始进程只安装 stdio，控制终端所有权留给 getty 的 `setsid`/TTY ioctl 流程。
 
 ## 故障管理
 

@@ -43,6 +43,30 @@ impl JobControl {
         self.foreground.lock().upgrade()
     }
 
+    /// Returns the foreground group when `caller_session` owns this terminal.
+    pub fn foreground_for(&self, caller_session: &Arc<Session>) -> KResult<Arc<ProcessGroup>> {
+        let foreground = self.foreground.lock();
+        let terminal_session = self.session.lock().upgrade().ok_or(KError::NotATty)?;
+        if !Arc::ptr_eq(caller_session, &terminal_session) {
+            return Err(KError::NotATty);
+        }
+        foreground.upgrade().ok_or(KError::NotATty)
+    }
+
+    /// Get the session currently associated with this terminal
+    pub fn session(&self) -> Option<Arc<Session>> {
+        self.session.lock().upgrade()
+    }
+
+    /// Returns the associated session when it matches `caller_session`.
+    pub fn session_for(&self, caller_session: &Arc<Session>) -> KResult<Arc<Session>> {
+        let terminal_session = self.session.lock().upgrade().ok_or(KError::NotATty)?;
+        if !Arc::ptr_eq(caller_session, &terminal_session) {
+            return Err(KError::NotATty);
+        }
+        Ok(terminal_session)
+    }
+
     /// Set the foreground process group for this terminal
     pub fn set_foreground(&self, pg: &Arc<ProcessGroup>) -> KResult<()> {
         let mut guard = self.foreground.lock();
@@ -68,6 +92,24 @@ impl JobControl {
         drop(guard);
         self.poll_fg.wake();
         Ok(())
+    }
+
+    /// Sets the foreground process group on behalf of a caller in `caller_session`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ENOTTY` when the caller does not belong to the session that
+    /// owns this terminal, and `EPERM` when `pg` belongs to another session.
+    pub(crate) fn set_foreground_for(
+        &self,
+        caller_session: &Arc<Session>,
+        pg: &Arc<ProcessGroup>,
+    ) -> KResult<()> {
+        let terminal_session = self.session.lock().upgrade().ok_or(KError::NotATty)?;
+        if !Arc::ptr_eq(caller_session, &terminal_session) {
+            return Err(KError::NotATty);
+        }
+        self.set_foreground(pg)
     }
 
     /// Ensures this terminal is associated with `session`.

@@ -406,6 +406,14 @@ impl VfsFileBuilder {
         self.flags.contains(OpenFlags::NONBLOCK)
     }
 
+    /// Returns whether this open request forbids controlling-terminal assignment.
+    ///
+    /// Device `open` callbacks use this before the transient `O_NOCTTY` flag is
+    /// removed from the finalized open-file status flags.
+    pub fn requests_no_controlling_tty(&self) -> bool {
+        self.flags.contains(OpenFlags::NO_CONTROLLING_TTY)
+    }
+
     pub(crate) fn was_created(&self) -> bool {
         self.mode.contains(FMode::CREATED)
     }

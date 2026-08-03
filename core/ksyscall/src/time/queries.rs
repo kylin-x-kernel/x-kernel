@@ -37,6 +37,16 @@ pub fn sys_gettimeofday(ts: UserPtr<timeval>) -> KResult<isize> {
     Ok(0)
 }
 
+/// Returns the current wall-clock time in seconds since the Unix epoch.
+#[cfg(target_arch = "x86_64")]
+pub fn sys_time(tloc: UserPtr<linux_raw_sys::general::__kernel_time_t>) -> KResult<isize> {
+    let seconds = wall_time().as_secs() as linux_raw_sys::general::__kernel_time_t;
+    if let Some(tloc) = tloc.check_non_null() {
+        tloc.write_vm(seconds)?;
+    }
+    Ok(seconds as isize)
+}
+
 fn set_wall_time(value: TimeValue) -> KResult<isize> {
     if !kprocess::current_cred().is_privileged() {
         return Err(KError::OperationNotPermitted);
@@ -106,4 +116,19 @@ pub fn sys_clock_getres(clock_id: __kernel_clockid_t, res: UserPtr<timespec>) ->
         res.write_vm(timespec::from_time_value(TimeValue::from_micros(1)))?;
     }
     Ok(0)
+}
+
+#[cfg(all(unittest, target_arch = "x86_64"))]
+mod tests {
+    use posix_types::UserPtr;
+    use unittest::def_test;
+
+    #[def_test]
+    fn time_with_null_tloc_returns_current_epoch_seconds() {
+        let before = khal::time::wall_time().as_secs() as isize;
+        let seconds = super::sys_time(UserPtr::default()).expect("time(NULL) must succeed");
+        let after = khal::time::wall_time().as_secs() as isize;
+
+        assert!((before..=after).contains(&seconds));
+    }
 }

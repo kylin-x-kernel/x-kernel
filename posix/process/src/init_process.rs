@@ -16,7 +16,6 @@ use kexec::{ExecRequest, load_user_app_request};
 use khal::uspace::UserContext;
 use kprocess::{UserThreadRuntimeAction, build_process_thread, publish_user_task};
 use ksync::Mutex;
-use ktty::tty::N_TTY;
 use posix_fs::file::add_stdio;
 
 use crate::runtime::run_user_thread_loop;
@@ -117,14 +116,6 @@ pub fn spawn_init_process(
         Arc::default(),
         cred,
     );
-
-    N_TTY.bind_to(&process).expect("Failed to bind ntty");
-    // `bind_to` only establishes the controlling-terminal relationship (per
-    // POSIX TIOCSCTTY); the foreground process group is a separate concern, so
-    // set it explicitly here so init becomes the foreground group.
-    N_TTY
-        .set_foreground(&process.group())
-        .expect("Failed to set init as foreground process group");
 
     {
         let fs_context_ref = process
