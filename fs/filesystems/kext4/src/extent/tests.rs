@@ -4,9 +4,20 @@
 
 use super::{
     BlockMapping, ExtentMappingState,
+    legacy::legacy_max_file_size,
+    map::extent_max_file_size,
     mutate::insert_inline_extent_bytes,
     validate::{decode_header, decode_leaf, find_index, map_leaf, validate_extent_entries},
 };
+
+#[test]
+fn max_file_sizes_match_linux_ext4_limits() {
+    assert_eq!(extent_max_file_size(4096, true), Ok(17_592_186_040_320));
+    assert_eq!(extent_max_file_size(4096, false), Ok(2_199_023_251_456));
+    assert_eq!(legacy_max_file_size(1024, false), Ok(17_247_252_480));
+    assert_eq!(legacy_max_file_size(4096, false), Ok(2_196_873_666_560));
+    assert_eq!(legacy_max_file_size(4096, true), Ok(4_402_345_721_856));
+}
 use crate::{
     BlockCount, CorruptKind, Ext4Error, PhysicalBlock, UnsupportedKind, disk::extent as disk_extent,
 };
@@ -119,6 +130,7 @@ fn insert_inline_extent_keeps_leaf_order() {
         Ok(BlockMapping::Mapped {
             physical: PhysicalBlock::new(150),
             len: BlockCount::new(3),
+            flags: crate::BlockMappingFlags::empty(),
         })
     );
 }
@@ -194,6 +206,7 @@ fn insert_inline_extent_splits_run_larger_than_extent_entry() {
         Ok(BlockMapping::Mapped {
             physical: PhysicalBlock::new(100 + 0x8000),
             len: BlockCount::new(2),
+            flags: crate::BlockMappingFlags::empty(),
         })
     );
 }

@@ -5,6 +5,7 @@
 use super::{
     BlockMapping,
     checksum::verify_extent_block_checksum,
+    legacy::legacy_max_file_size,
     validate::{decode_header, find_index, map_leaf, min_lblk, validate_extent_entries},
 };
 use crate::{
@@ -13,6 +14,30 @@ use crate::{
 };
 
 impl Ext4Filesystem {
+    /// Returns the Linux-compatible maximum byte size for this inode format.
+    pub fn max_file_size(&self, inode: &Ext4Inode) -> Ext4Result<u64> {
+        if inode.has_extents() {
+            return self.extent_max_file_size();
+        }
+        self.legacy_max_file_size()
+    }
+
+    /// Returns the superblock-wide maximum size used by extent-format inodes.
+    pub fn extent_max_file_size(&self) -> Ext4Result<u64> {
+        extent_max_file_size(
+            self.layout().block_size(),
+            self.superblock().features().has_huge_file(),
+        )
+    }
+
+    /// Returns the superblock-wide maximum size for legacy block-map inodes.
+    pub fn legacy_max_file_size(&self) -> Ext4Result<u64> {
+        legacy_max_file_size(
+            self.layout().block_size(),
+            self.superblock().features().has_huge_file(),
+        )
+    }
+
     /// Maps a logical inode block without allocating or modifying metadata.
     pub fn map_blocks(&self, inode: &Ext4Inode, logical: LogicalBlock) -> Ext4Result<BlockMapping> {
         if inode.has_extents() {
@@ -65,4 +90,27 @@ impl Ext4Filesystem {
             child_upper_lblk,
         )
     }
+}
+
+pub(super) fn extent_max_file_size(block_size: u32, has_huge_file: bool) -> Ext4Result<u64> {
+    let block_bits = ext4_block_bits(block_size)?;
+    let upper_limit = if has_huge_file {
+        i64::MAX as u64
+    } else {
+        ((1_u64 << 32) - 1)
+            .checked_shr(block_bits.checked_sub(9).ok_or(Ext4Error::Overflow)?)
+            .and_then(|blocks| blocks.checked_shl(block_bits))
+            .ok_or(Ext4Error::Overflow)?
+    };
+    ((1_u64 << 32) - 1)
+        .checked_shl(block_bits)
+        .map(|max_bytes| max_bytes.min(upper_limit))
+        .ok_or(Ext4Error::Overflow)
+}
+
+pub(super) fn ext4_block_bits(block_size: u32) -> Ext4Result<u32> {
+    if block_size < 512 || !block_size.is_power_of_two() {
+        return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockSize));
+    }
+    Ok(block_size.trailing_zeros())
 }

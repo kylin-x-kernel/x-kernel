@@ -666,7 +666,8 @@ impl Ext4Inode {
         Ok(Some(decode_new_device_id(codec::le_u32(&self.block, 4)?)))
     }
 
-    pub(crate) const fn has_extents(&self) -> bool {
+    /// Returns whether this inode uses the ext4 extent-tree format.
+    pub const fn has_extents(&self) -> bool {
         self.flags & disk_inode::EXT4_EXTENTS_FL != 0
     }
 

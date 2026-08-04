@@ -20,6 +20,7 @@ credential snapshot，`kvfs` 接收显式 `&Cred` 并完成路径遍历和通用
 - `src/node/`：dentry、inode、live inode identity cache 及文件系统 operation traits。
 - `src/address_space.rs`：inode-owned `AddressSpace`、其私有 `PageCache` 实现，以及
   writeback 与 truncate/invalidation 边界。
+- `src/fiemap.rs`：与用户 ABI 解耦的 inode FIEMAP 请求状态、标志和安全输出接口。
 - `src/file.rs`：打开文件及其可变状态。
 - `src/pipe.rs`：匿名 pipe 与 pathname FIFO 共享的数据通路、会话状态及无状态
   file-operation 对象。
@@ -85,6 +86,11 @@ operations 又需要 VFS file/inode 接口；拆成相互依赖的 crate 只会�
 原始整数只存在于 ABI 或兼容入口。进入 VFS 后，不同 flags 家族由不同 bitflags
 类型表达，调用者通过 `contains`、`intersects` 或组合语义方法读取，避免重新解释
 裸整数和误传其他 flags 家族。
+
+FIEMAP 的原始 C 布局和用户指针留在 POSIX 层。KVFS 以可选
+`InodeOperations::fiemap_operations()` 表达 inode capability，并把类型化 flags、容量、
+计数器和借用的安全 writer 收敛到 `FiemapExtentInfo`。文件系统后端只调用
+`fill_next_extent()`，不接触或保存用户地址。
 
 `OpenParams` 对应 Linux namei 中规范化后的完整 open 参数。其字段保持私有，创建
 意图、exclusive-create、lookup 行为和 mount 写入需求只能通过窄接口读取。
@@ -175,6 +181,19 @@ FIFO open 在 inode pipe-slot 锁内创建或复用 session 并增加 `files`，
 `PipeObject::open_fifo()` 根据 builder 的 `f_mode` 完成 reader/writer rendezvous。
 最后一个 file release 在同一 slot 锁域内减少 `files` 并清空 inode slot，防止旧
 release 与新 open 交错后把仍在使用的 session 清除。
+
+### 文件 extent 查询
+
+调用方先从 `VfsInode::fiemap_capability()` 取得可选 inode capability，再用
+`FiemapExtentInfo` 发起查询。普通文件在 inode data shared lock 下执行，目录在 namespace
+shared lock 下执行；因此同一机制既覆盖 regular inode，也覆盖 directory inode，而不把
+FIEMAP 错挂到 open-file operation。文件系统把 inode 创建时确定的格式上限传给
+`FiemapExtentInfo::prepare()`；该 helper 先校验长度、最大文件大小和文件系统支持的 flags，
+最后才按需执行 data-only writeback。
+
+后端只输出与查询范围相交的 mapped、unwritten 或 delayed extent，跳过 hole。
+`extent_count == 0` 时 `FiemapExtentInfo` 只计数；数组满后正常停止，只有已确认遍历结束的
+最后一个 extent 才添加 `LAST`。
 
 VFS 采用 Linux directory-locking ownership model：
 
@@ -351,11 +370,14 @@ VFS rename 入口再次检查组合不变量，文件系统 helper 再检查自�
 匿名 inode superblock、root dentry、singleton inode 和 root mount；后续
 `get_file()` 只分配 per-file dentry/file，并共享 singleton inode。
 
-`VfsInode` 的 data lock 串行化 buffered write 与 truncate。文件系统
-`AddressSpaceOperations::set_len()` 在 backing prepare 后、释放 block 前调用一次
+`VfsInode` 的 data lock 串行化 buffered write 与 truncate。shared-file write fault 不取得
+该独占锁；`AddressSpace::page_mkwrite()` 取得 address-space invalidate shared lock，再在
+folio lock 内重新检查 EOF、调用文件系统 mapping-prepare callback、标脏 folio并完成 PTE
+更新。文件系统 `AddressSpaceOperations::set_len()` 在 address-space invalidate exclusive
+lock 下执行，并在 backing prepare 后、释放 block 前调用一次
 `AddressSpace::truncate_setsize()`。该入口按 Linux `truncate_setsize()` 顺序先发布唯一的
-`inode::i_size`，再执行第一次 mapped-view unmap、cached-folio truncate 和第二次
-unmap；第二轮用于清理 cache truncate 窗口中产生的 private COW PTE。
+`inode::i_size`，再执行第一次 mapped-view unmap、cached-folio truncate 和第二次 unmap；
+第二轮用于清理 cache truncate 窗口中产生的 private COW PTE。
 
 `simple_write_end` 保留在 `kvfs::libfs`，只服务 ramfs/memfs 风格的 aops。
 块设备文件系统完成自己的 write-end 后，经 `AddressSpace::write_end_set_size()`
@@ -367,6 +389,11 @@ libfs helper。
 lifecycle；writeback 的 EOF 也由 `AddressSpace` 从 inode 读取后传入。
 `VfsFile::mapping()` 借用 Linux `f_mapping` 对应物；MM 不接触底层 storage，只有确实需要
 超出 file borrow 的生命周期时才显式 clone 该 `Arc`。
+
+Generic buffered-write limit check 只读取 `SuperBlock` 创建时缓存的最大文件大小。
+需要按 inode 格式进一步收紧范围的文件系统由 `FileOperations::write_iter()` 调用
+`generic_file_write_iter_with_checks()`；该文件系统检查在同一个 inode data critical section
+内、进入 page-cache write 前执行，不把 open-file 写策略下沉到 address-space operation。
 
 KVFS 在非 special file 的 writable open 进入文件系统 `open` callback 前增加
 inode `write_count`，成功后用 `FMode::WRITER` 记录当前 file 持有该计数，打开
@@ -385,6 +412,10 @@ dentry 的 inode、children 和可变 operation 状态由各自 mutex 保护。�
 不需要为每个 dentry 分配额外 ID。`VfsFile` 的 position 和 private data 使用 mutex，
 `f_flags` 与 `f_mode` 使用原子整数存储，inode `write_count` 由打开与释放
 路径原子更新。bitflags 类型是按值复制的语义快照，不额外引入锁或分配。`VfsFile::f_cred` 是创建后不变的 `Arc<Cred>`，无需额外锁。
+FIEMAP writer 只在一次同步调用中借用，不由 VFS 或文件系统保存。inode capability 持有
+对应 inode 的 shared lock 覆盖整个回调，避免 `SYNC` 写回后、extent 遍历前插入 mapping
+修改；buffered write、shared write fault 和 truncate 都从 exclusive 侧更新 mapping 状态，
+同时不扩大成文件系统挂载级写阻塞。
 
 匿名 inode pseudo fs 使用 `Once<AnonInodeFs>` 作为发布槽，但初始化只允许通过
 `init_anon_inodefs()` 在受控 boot 阶段发生。这样避免多个 runtime 调用者并发首次访问时
@@ -440,6 +471,8 @@ child cache 仍使用 mutex。RCU、seqcount lookup 和 lock-free dcache travers
 ## 设计决策
 
 - ABI carrier 与内核语义类型分离，转换尽量靠近边界。
+- FIEMAP 使用 `FiemapExtentInfo` 和安全 writer 连接 ABI 与 inode operation，避免把用户
+  指针下传，也避免按用户声明容量在 VFS 中分配临时 extent 数组。
 - 不提供通用 raw-flags getter；只有写入 ABI 或底层存储时调用 `bits()`。
 - 不同 flags 家族不共享整数别名，使错误组合在编译期失败。
 - current task 定位只存在于 `kprocess`；`kvfs` 对所有安全相关操作显式接收 `&Cred`。

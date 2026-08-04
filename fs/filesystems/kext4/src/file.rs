@@ -241,7 +241,7 @@ impl Ext4Filesystem {
                         return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
                     }
                 },
-                BlockMapping::Mapped { physical, len } => {
+                BlockMapping::Mapped { physical, len, .. } => {
                     if physical.get() == 0 || len.get() == 0 {
                         return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
                     }
@@ -593,7 +593,7 @@ impl Ext4Filesystem {
                 usize::try_from(absolute % block_size).map_err(|_| Ext4Error::Overflow)?;
             match self.map_blocks(inode, LogicalBlock::new(logical))? {
                 BlockMapping::Hole { .. } | BlockMapping::Unwritten { .. } => return Ok(true),
-                BlockMapping::Mapped { physical, len } => {
+                BlockMapping::Mapped { physical, len, .. } => {
                     if physical.get() == 0 || len.get() == 0 {
                         return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
                     }
@@ -637,7 +637,7 @@ impl Ext4Filesystem {
             let in_block =
                 usize::try_from(absolute % block_size).map_err(|_| Ext4Error::Overflow)?;
             match self.map_blocks(&current_inode, logical)? {
-                BlockMapping::Mapped { physical, len } => {
+                BlockMapping::Mapped { physical, len, .. } => {
                     if physical.get() == 0 || len.get() == 0 {
                         return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
                     }
@@ -668,7 +668,7 @@ impl Ext4Filesystem {
                         .checked_add(write_len)
                         .ok_or(Ext4Error::Overflow)?;
                 }
-                BlockMapping::Unwritten { physical, len } => {
+                BlockMapping::Unwritten { physical, len, .. } => {
                     if physical.get() == 0 || len.get() == 0 {
                         return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
                     }
@@ -827,7 +827,7 @@ impl Ext4Filesystem {
                 BlockMapping::Hole { .. } | BlockMapping::Unwritten { .. } => {
                     return Err(Ext4Error::Unsupported(UnsupportedKind::UnallocatedWrite));
                 }
-                BlockMapping::Mapped { physical, len } => {
+                BlockMapping::Mapped { physical, len, .. } => {
                     if physical.get() == 0 || len.get() == 0 {
                         return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
                     }

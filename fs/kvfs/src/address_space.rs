@@ -24,7 +24,7 @@ use vmobj::{
     MappingViewSpec, ObjectInvalidateWork, VmObjectId, next_mapping_view_id,
 };
 
-use crate::{Kiocb, Mutex, NodeFlags, NodeType, VfsError, VfsResult, WeakVfsInode};
+use crate::{Kiocb, Mutex, NodeFlags, NodeType, RwLock, VfsError, VfsResult, WeakVfsInode};
 
 const MAX_READAHEAD_BYTES: usize = 128 * 1024;
 static NEXT_ADDRESS_SPACE_ID: AtomicU64 = AtomicU64::new(1);
@@ -206,6 +206,35 @@ pub struct WriteBeginRequest {
     len: usize,
 }
 
+/// Shared writable-mapping fault preparation request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PageMkwriteRequest {
+    pos: u64,
+    len: usize,
+}
+
+impl PageMkwriteRequest {
+    /// Creates a request for the valid file bytes in one cached folio.
+    pub const fn new(pos: u64, len: usize) -> Self {
+        Self { pos, len }
+    }
+
+    /// Returns the file byte offset at which preparation starts.
+    pub const fn pos(self) -> u64 {
+        self.pos
+    }
+
+    /// Returns the number of valid file bytes to prepare.
+    pub const fn len(self) -> usize {
+        self.len
+    }
+
+    /// Returns whether the request contains no valid file bytes.
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
+}
+
 impl WriteBeginRequest {
     pub const fn new(pos: u64, len: usize) -> Self {
         Self { pos, len }
@@ -305,11 +334,12 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
 
     /// Changes the file length and updates its inode address space.
     ///
-    /// Implementations own the filesystem-specific ordering and must call
-    /// [`AddressSpace::truncate_setsize`] exactly once after the backing inode
-    /// is prepared and before freeing blocks that could still be reachable
-    /// through cached folios. That helper publishes `i_size` and performs both
-    /// mmap invalidation passes around cache truncation.
+    /// [`AddressSpace`] invokes this callback while holding its invalidate lock
+    /// exclusively. Implementations own the filesystem-specific ordering and
+    /// must call [`AddressSpace::truncate_setsize`] exactly once after the
+    /// backing inode is prepared and before freeing blocks that could still be
+    /// reachable through cached folios. That helper publishes `i_size` and
+    /// performs both mmap invalidation passes around cache truncation.
     fn set_len(&self, _mapping: &AddressSpace, _len: u64) -> VfsResult<()> {
         Err(VfsError::InvalidInput)
     }
@@ -319,6 +349,14 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
         let was_dirty = folio.is_dirty();
         folio.mark_dirty();
         Ok(!was_dirty)
+    }
+
+    /// Prepares filesystem mapping state before a shared folio becomes writable.
+    ///
+    /// The address-space invalidate lock is held for reading and the target
+    /// folio is locked while this callback runs.
+    fn page_mkwrite(&self, _mapping: &AddressSpace, _request: PageMkwriteRequest) -> VfsResult<()> {
+        Ok(())
     }
 
     /// Starts readahead for the supplied folio window.
@@ -368,6 +406,7 @@ pub struct AddressSpace {
     inode: WeakVfsInode,
     ops: Arc<dyn AddressSpaceOperations>,
     object_id: VmObjectId,
+    invalidate_lock: RwLock<()>,
     views: Mutex<BTreeMap<MappingViewId, RegisteredView>>,
     page_cache: Arc<PageCache>,
 }
@@ -385,6 +424,7 @@ impl AddressSpace {
             object_id: VmObjectId::File(FileObjectId::from_raw(
                 NEXT_ADDRESS_SPACE_ID.fetch_add(1, Ordering::Relaxed),
             )),
+            invalidate_lock: RwLock::new(()),
             views: Mutex::new(BTreeMap::new()),
             page_cache: PageCache::new(kind),
         })
@@ -466,6 +506,41 @@ impl AddressSpace {
             },
             f,
         )
+    }
+
+    /// Prepares and dirties a cached folio for a shared write fault.
+    ///
+    /// The address-space invalidate lock excludes truncate and cache
+    /// invalidation, while the folio lock covers the EOF recheck, filesystem
+    /// preparation, dirtying, and the caller's PTE update.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::BadAddress`] if truncate moved the folio beyond EOF,
+    /// or propagates filesystem preparation, dirtying, and PTE-update errors.
+    pub fn page_mkwrite<R>(
+        &self,
+        index: PageIndex,
+        f: impl FnOnce(&mut Folio) -> VfsResult<R>,
+    ) -> VfsResult<R> {
+        let inode = self.inode().ok_or(VfsError::InvalidInput)?;
+        let pos = index
+            .checked_mul(PAGE_SIZE_4K as u64)
+            .ok_or(VfsError::InvalidInput)?;
+        let _invalidate_guard = self.invalidate_lock.read();
+        self.with_folio(index, |folio| {
+            let folio = folio.ok_or(VfsError::InvalidData)?;
+            let file_len = inode.size();
+            if pos >= file_len {
+                return Err(VfsError::BadAddress);
+            }
+            let len = usize::try_from((file_len - pos).min(PAGE_SIZE_4K as u64))
+                .map_err(|_| VfsError::InvalidInput)?;
+            self.ops
+                .page_mkwrite(self, PageMkwriteRequest::new(pos, len))?;
+            self.dirty_folio(folio)?;
+            f(folio)
+        })
     }
 
     fn read_folio(&self, folio: &mut Folio, index: PageIndex) -> VfsResult<usize> {
@@ -573,9 +648,24 @@ impl AddressSpace {
         iocb: &mut Kiocb<'_>,
         iter: &mut IovIterSource<'_>,
     ) -> VfsResult<usize> {
+        self.write_iter_with_checks(iocb, iter, |_, _| Ok(()))
+    }
+
+    pub(crate) fn write_iter_with_checks(
+        &self,
+        iocb: &mut Kiocb<'_>,
+        iter: &mut IovIterSource<'_>,
+        checks: impl FnOnce(u64, &mut usize) -> VfsResult<()>,
+    ) -> VfsResult<usize> {
         let inode = self.inode().ok_or(VfsError::InvalidInput)?;
         let _data_guard = inode.lock_data();
-        let count = self.write_checks(iocb, iter)?;
+        let mut count = iter.count();
+        self.generic_write_check_limits(iocb, &mut count)?;
+        if count != 0 {
+            checks(iocb.ki_pos(), &mut count)?;
+        }
+        iter.truncate(count);
+        let count = iter.count();
         if count == 0 {
             return Ok(0);
         }
@@ -585,14 +675,7 @@ impl AddressSpace {
         Ok(written)
     }
 
-    fn write_checks(&self, iocb: &Kiocb<'_>, iter: &mut IovIterSource<'_>) -> VfsResult<usize> {
-        let mut count = iter.count();
-        self.write_check_limits(iocb, &mut count)?;
-        iter.truncate(count);
-        Ok(iter.count())
-    }
-
-    fn write_check_limits(&self, iocb: &Kiocb<'_>, count: &mut usize) -> VfsResult<()> {
+    fn generic_write_check_limits(&self, iocb: &Kiocb<'_>, count: &mut usize) -> VfsResult<()> {
         if *count == 0 {
             return Ok(());
         }
@@ -699,21 +782,30 @@ impl AddressSpace {
 
     /// Changes the backing file length through this address space.
     pub fn set_len(&self, len: u64) -> VfsResult<()> {
+        let _invalidate_guard = self.invalidate_lock.write();
         self.ops.set_len(self, len)
     }
 
     /// Publishes `inode::i_size` and updates mapped/cache state in Linux order.
     ///
     /// Filesystem `set_len` implementations call this after preparing their
-    /// backing-store mutation and before releasing blocks. Shrink performs
-    /// `i_size_write`, unmap, cache truncation, then a second unmap so a
-    /// concurrent private COW fault cannot survive beyond the new EOF.
+    /// backing-store mutation and before releasing blocks. The enclosing
+    /// [`Self::set_len`] call holds the address-space invalidate lock
+    /// exclusively. Shrink performs `i_size_write`, unmap, cache truncation,
+    /// then a second unmap so a concurrent private COW fault cannot survive
+    /// beyond the new EOF.
     pub fn truncate_setsize(&self, len: u64) -> VfsResult<()> {
         let inode = self.inode().ok_or(VfsError::InvalidInput)?;
         let old_len = inode.size();
         inode.set_size(len);
         self.truncate_pagecache(old_len, len);
         Ok(())
+    }
+
+    /// Publishes a backing-store size change made outside the split set-length path.
+    pub(crate) fn truncate_setsize_after_backing_change(&self, len: u64) -> VfsResult<()> {
+        let _invalidate_guard = self.invalidate_lock.write();
+        self.truncate_setsize(len)
     }
 
     /// Publishes the size accepted by `AddressSpaceOperations::write_end`.
@@ -784,6 +876,7 @@ impl AddressSpace {
 
     /// Drops cached pages during final inode teardown.
     pub fn truncate_final(&self) -> VfsResult<()> {
+        let _invalidate_guard = self.invalidate_lock.write();
         self.page_cache.truncate_final()?;
         Ok(())
     }

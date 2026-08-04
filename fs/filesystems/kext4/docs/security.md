@@ -21,6 +21,7 @@ KVFS bridge 信任 KVFS 已经提供内核拥有的 path name、dentry、inode `
 - JBD2 journal replay record 和 checksum 字段；
 - 从磁盘读取的 directory name 和 dirent file type；
 - extent tree entry 和 block mapping；
+- KVFS FIEMAP 请求范围，以及从磁盘 mapping 与 bridge delayed set 组合出的 extent；
 - xattr name、value、external xattr block header、refcount 和 checksum；
 - KVFS 运行态操作，例如 create、unlink、rename、truncate、writeback、fsync 和 syncfs；
 - transaction commit、journal replay 或 checkpoint 期间的设备写入/flush 失败。
@@ -95,6 +96,8 @@ KVFS bridge 信任 KVFS 已经提供内核拥有的 path name、dentry、inode `
   handling 一致。
 - 运行态 inode allocation 必须使用 bridge 已通过 `inode_init_owner()` 导出的显式
   UID/GID；KExt4 core 不得把新 inode owner 默认为 root。
+- FIEMAP 的 logical/physical/length 乘法和加法必须 checked；遍历必须同时受请求末端与
+  inode 创建时缓存的格式上限约束，损坏 mapping 不得越界输出。
 
 ## 线程安全
 
@@ -104,6 +107,11 @@ KVFS bridge 信任 KVFS 已经提供内核拥有的 path name、dentry、inode `
 串行化；writeback 扫描 PageCache 时不持有 core mutex，batch writer 只在 PageCache 释放
 mapping/folio mutex 后进入核心。后续引入细粒度锁时，必须保持该跨层边界，以及 buffer
 ownership、journal handle、allocator bitmap 和 inode metadata 之间的顺序约束。
+FIEMAP 由 VFS inode shared lock 稳定单 inode mapping；core read lock 和 delayed-block
+mutex 只分别短暂取得，并在安全 writer 访问用户页前释放。不得把用户内存访问放进挂载级
+core lock 或 delayed-block mutex。Buffered write 和 shared write fault 都必须在 inode
+exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，不能以 dirty-folio
+扫描替代 filesystem mapping prepare。
 
 ## 威胁分析
 
@@ -119,6 +127,7 @@ ownership、journal handle、allocator bitmap 和 inode metadata 之间的顺序
 | T-08 | free-block aggregate 与 group descriptor 漂移导致 delayed-allocation 过量预留 | 中 | allocation/release 只更新一侧 counter，或发布后才发现普通错误 | block mutation 先在私有 bytes/cache 副本完成校验，再同时发布 superblock 与 group descriptor；发布后错误永久 abort journal；bridge 再扣除 ext4 reserved blocks 和运行态 reservation，`statfs()` 保留 group fold 作为独立统计路径 |
 | T-09 | 新建 inode 固定为 root，绕过调用者 owner 语义 | 高 | bridge 丢弃 credential 或 core constructor 隐式填入 UID/GID 0 | create/mkdir/mknod/symlink callback 使用 `inode_init_owner()`，显式 `uid`、`gid` 随同 namei transaction 持久化 |
 | T-10 | journal head 追上 tail 并覆盖尚未 checkpoint 的 commit | 高 | 多个 committed transaction 占满环形日志，追加仍继续写入 | 依据 oldest tail/current head 计算 live 空间，始终保留一个空 block；空间不足时先 checkpoint 最老 transaction 再重试，不发出覆盖写；真实 ext4 镜像测试覆盖双 transaction tail 推进 |
+| T-11 | 损坏 extent 或超大 FIEMAP 范围造成算术溢出、错误物理地址或无界遍历 | 高 | disk mapping 长度越过格式容量，或字节/块换算未检查 | core 暴露 Linux 对等的 inode 格式相关最大字节数；bridge 对每次加法、乘法和输出字段做 checked 校验，并把 mapping 截断到请求与格式边界 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -131,6 +140,7 @@ ownership、journal handle、allocator bitmap 和 inode metadata 之间的顺序
 | F-05 | journal reservation 空间不足 | operation 的实际 metadata targets 超过空 journal 容量，或 reservation 混入另一个 lifecycle 阶段的工作 | transaction 在修改 metadata 前失败 | 正常 writeback、fsync、rename-overwrite、truncate 或 orphan cleanup 返回错误；已有磁盘状态保持不变 | 3 | namespace 与 final eviction 分开预算；ordered writeback 只走 path-local update，并按最大路径深度计算不截断预算；跨叶 truncate 在首个 metadata 写入前选择按 tree blocks/groups 估算的全树路径；由 rename-overwrite、fragmented-writeback、balanced-split 和 preallocation-tail credit 回归测试约束 |
 | F-06 | PageCache 与 filesystem core 锁序反转 | writeback 持有 core mutex 等待 mapping mutex，同时 cache miss 持有 mapping mutex 进入 backing read | 并发 buffered I/O 和 `sync()` 停止推进 | watchdog 报告 mutex deadlock，filesystem workload 无法继续 | 2 | bridge 不在 PageCache traversal 外层持有 core mutex；同 inode writeback 独立串行化，batch callback 在 mapping/folio mutex 释放后才进入核心；VFS/MM 后续仍需消除 tree lock 下的 backing I/O |
 | F-07 | committed journal 占满可追加空间 | checkpoint 落后于 commit，head 接近 oldest tail | 新 transaction 暂时不能持久化 | mutation 等待 checkpoint progress | 3 | append 前按环形 live range 校验空间并保留一个空 block；提交路径捕获 `JournalBusy`，同步推进最老 pending checkpoint 后重试 |
+| F-08 | FIEMAP 查询遇到损坏 mapping | extent tree/legacy pointer 返回非法长度或物理范围 | 当前 ioctl 返回数据错误 | 文件内容不被修改，调用方不能取得布局 | 3 | 复用 core mapping 校验；bridge 拒绝零进度和算术溢出，不输出未经检查的 extent |
 
 ## 故障管理
 
@@ -182,4 +192,9 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
   inode bitmap state？
 - zero-link inode 是否只能由既有 VFS identity 访问，并在最后引用消失前保持 inode number、
   extent 和 xattr 有效？
+- FIEMAP 是否受查询末端和 inode 格式最大文件大小双重限制，并正确区分 mapped、
+  unwritten、delayed、hole 与截断结果的 `LAST`？
+- MAP_SHARED 写缺页是否先通过 `page_mkwrite()` 建立 delayed reservation，再发布 writable
+  PTE；该过程是否持有 address-space invalidate shared lock 与 folio lock，而不取得 inode
+  exclusive data lock，使非 `SYNC` FIEMAP 不漏报脏 hole？
 - 文档是否区分了 core support、live KVFS syscall exposure 和路线图能力？

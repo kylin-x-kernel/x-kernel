@@ -27,20 +27,17 @@ use super::{
 };
 
 const EXT4_ROOT_INO: u32 = 2;
-const EXT4_LOGICAL_BLOCK_COUNT: u64 = u32::MAX as u64 + 1;
 
 /// Per-batch maximum for phased eviction block release.
 /// 256 blocks × 4 KiB = 1 MiB of block allocation work per transaction.
 const EVICTION_BATCH_BLOCKS: u32 = 256;
 
-fn extent_max_file_size_bytes(block_size: u32) -> u64 {
-    EXT4_LOGICAL_BLOCK_COUNT * u64::from(block_size)
-}
-
 /// Ext4 filesystem implementation backed by the checked KExt4 core.
 pub struct Ext4Filesystem {
     inner: RwLock<KExt4Core>,
     block_size: u32,
+    extent_max_file_size: u64,
+    legacy_max_file_size: u64,
     delalloc_reserved_blocks: Mutex<u64>,
     inode_cache: InodeCache,
 }
@@ -74,9 +71,13 @@ impl Ext4Filesystem {
         };
 
         let block_size = core.layout().block_size();
+        let extent_max_file_size = core.extent_max_file_size().map_err(into_vfs_err)?;
+        let legacy_max_file_size = core.legacy_max_file_size().map_err(into_vfs_err)?;
         let fs = Arc::new(Self {
             inner: RwLock::new(core),
             block_size,
+            extent_max_file_size,
+            legacy_max_file_size,
             delalloc_reserved_blocks: Mutex::new(0),
             inode_cache: InodeCache::new(),
         });
@@ -99,6 +100,14 @@ impl Ext4Filesystem {
     /// concurrency for statfs and the per-inode extent tree.
     pub(crate) fn read_lock(&self) -> RwLockReadGuard<'_, KExt4Core> {
         self.inner.read()
+    }
+
+    pub(crate) const fn max_file_size_for_format(&self, has_extents: bool) -> u64 {
+        if has_extents {
+            self.extent_max_file_size
+        } else {
+            self.legacy_max_file_size
+        }
     }
 
     pub(crate) const fn block_size(&self) -> u64 {
@@ -158,6 +167,7 @@ impl Ext4Filesystem {
             return Ok(vfs_inode);
         }
         let node_type = inode_kind_to_vfs(inode.kind());
+        let has_extents = inode.has_extents();
         let metadata = fs.metadata_from_core_inode(&inode)?;
         let init = VfsInodeInit::new(u64::from(number.get()), metadata.size, metadata.mode)
             .with_owner_links_and_rdev(metadata.uid, metadata.gid, metadata.nlink, metadata.rdev)
@@ -173,12 +183,12 @@ impl Ext4Filesystem {
             NodeType::Directory => fs.inode_cache.get_or_insert_openable_dir_with_init(
                 NodeFlags::empty(),
                 init,
-                || Inode::new(fs.clone(), number, node_type),
+                || Inode::new(fs.clone(), number, node_type, has_extents),
             ),
             NodeType::RegularFile | NodeType::Unknown => fs
                 .inode_cache
                 .get_or_insert_file_with_init(NodeFlags::empty(), init, || {
-                    Inode::new(fs.clone(), number, node_type)
+                    Inode::new(fs.clone(), number, node_type, has_extents)
                 }),
             NodeType::Symlink => {
                 let cached_link = match fs.read_lock().symlink_storage(&inode) {
@@ -190,7 +200,7 @@ impl Ext4Filesystem {
                 let vfs_inode = fs.inode_cache.get_or_insert_symlink_with_init(
                     NodeFlags::empty(),
                     init,
-                    || Inode::new(fs.clone(), number, node_type),
+                    || Inode::new(fs.clone(), number, node_type, has_extents),
                 );
                 if let Some(link) = cached_link {
                     vfs_inode.set_cached_link(link);
@@ -203,7 +213,7 @@ impl Ext4Filesystem {
             | NodeType::Socket => {
                 fs.inode_cache
                     .get_or_insert_special_with_init(NodeFlags::empty(), init, || {
-                        Inode::new(fs.clone(), number, node_type)
+                        Inode::new(fs.clone(), number, node_type, has_extents)
                     })
             }
         };
@@ -275,7 +285,7 @@ impl SuperBlockOperations for Ext4Filesystem {
     }
 
     fn max_file_size(&self) -> u64 {
-        extent_max_file_size_bytes(self.block_size)
+        self.extent_max_file_size
     }
 
     fn evict_inode(&self, inode: &VfsInode) -> VfsResult<()> {
@@ -312,18 +322,5 @@ impl SuperBlockOperations for Ext4Filesystem {
 
         // Phase C: update metadata, remove orphan, release inode slot
         self.lock().eviction_finish(handle).map_err(into_vfs_err)
-    }
-}
-
-#[cfg(unittest)]
-mod tests {
-    use unittest::def_test;
-
-    use super::extent_max_file_size_bytes;
-
-    #[def_test]
-    fn extent_file_size_limit_covers_all_logical_blocks() {
-        assert_eq!(extent_max_file_size_bytes(1024), 1_u64 << 42);
-        assert_eq!(extent_max_file_size_bytes(4096), 1_u64 << 44);
     }
 }

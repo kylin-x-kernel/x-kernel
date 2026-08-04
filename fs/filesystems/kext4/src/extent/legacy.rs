@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use super::BlockMapping;
+use super::{BlockMapping, BlockMappingFlags, map::ext4_block_bits};
 use crate::{
     BlockCount, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Result, FilesystemBlock, LogicalBlock,
     PhysicalBlock, disk::codec, inode::Ext4Inode,
@@ -13,6 +13,79 @@ const LEGACY_DIRECT_BLOCKS: u64 = 12;
 const LEGACY_SINGLE_INDIRECT_INDEX: usize = 12;
 const LEGACY_DOUBLE_INDIRECT_INDEX: usize = 13;
 const LEGACY_TRIPLE_INDIRECT_INDEX: usize = 14;
+
+pub(super) fn legacy_max_file_size(block_size: u32, has_huge_file: bool) -> Ext4Result<u64> {
+    let block_bits = ext4_block_bits(block_size)?;
+    let pointers_per_block = 1_u64
+        .checked_shl(block_bits.checked_sub(2).ok_or(Ext4Error::Overflow)?)
+        .ok_or(Ext4Error::Overflow)?;
+    let pointer_square = pointers_per_block
+        .checked_mul(pointers_per_block)
+        .ok_or(Ext4Error::Overflow)?;
+    let pointer_cube = pointer_square
+        .checked_mul(pointers_per_block)
+        .ok_or(Ext4Error::Overflow)?;
+    let mut upper_limit = if has_huge_file {
+        (1_u64 << 48) - 1
+    } else {
+        ((1_u64 << 32) - 1)
+            .checked_shr(block_bits.checked_sub(9).ok_or(Ext4Error::Overflow)?)
+            .ok_or(Ext4Error::Overflow)?
+    };
+    let tree_capacity = LEGACY_DIRECT_BLOCKS
+        .checked_add(pointers_per_block)
+        .and_then(|blocks| blocks.checked_add(pointer_square))
+        .and_then(|blocks| blocks.checked_add(pointer_cube))
+        .ok_or(Ext4Error::Overflow)?;
+    let tree_metadata = 3_u64
+        .checked_add(
+            pointers_per_block
+                .checked_mul(2)
+                .ok_or(Ext4Error::Overflow)?,
+        )
+        .and_then(|blocks| blocks.checked_add(pointer_square))
+        .ok_or(Ext4Error::Overflow)?;
+
+    let data_blocks = if tree_capacity
+        .checked_add(tree_metadata)
+        .is_some_and(|total| total <= upper_limit)
+    {
+        tree_capacity
+    } else {
+        let sector_limit = upper_limit;
+        upper_limit = upper_limit
+            .checked_sub(LEGACY_DIRECT_BLOCKS)
+            .and_then(|blocks| blocks.checked_sub(pointers_per_block))
+            .ok_or(Ext4Error::Overflow)?;
+        let mut metadata_blocks = 1_u64;
+        if upper_limit < pointer_square {
+            metadata_blocks = metadata_blocks
+                .checked_add(1)
+                .and_then(|blocks| blocks.checked_add(upper_limit.div_ceil(pointers_per_block)))
+                .ok_or(Ext4Error::Overflow)?;
+        } else {
+            metadata_blocks = metadata_blocks
+                .checked_add(1 + pointers_per_block)
+                .ok_or(Ext4Error::Overflow)?;
+            upper_limit = upper_limit
+                .checked_sub(pointer_square)
+                .ok_or(Ext4Error::Overflow)?;
+            metadata_blocks = metadata_blocks
+                .checked_add(1)
+                .and_then(|blocks| blocks.checked_add(upper_limit.div_ceil(pointers_per_block)))
+                .and_then(|blocks| blocks.checked_add(upper_limit.div_ceil(pointer_square)))
+                .ok_or(Ext4Error::Overflow)?;
+        }
+        sector_limit
+            .checked_sub(metadata_blocks)
+            .ok_or(Ext4Error::Overflow)?
+    };
+
+    data_blocks
+        .checked_shl(block_bits)
+        .map(|bytes| bytes.min(i64::MAX as u64))
+        .ok_or(Ext4Error::Overflow)
+}
 
 impl Ext4Filesystem {
     pub(super) fn map_legacy_blocks(
@@ -199,6 +272,7 @@ impl Ext4Filesystem {
         Ok(BlockMapping::Mapped {
             physical: PhysicalBlock::new(u64::from(physical)),
             len: BlockCount::new(len),
+            flags: BlockMappingFlags::MERGED,
         })
     }
 

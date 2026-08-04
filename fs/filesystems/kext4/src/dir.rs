@@ -547,7 +547,7 @@ impl Ext4Filesystem {
         };
 
         match self.map_blocks(inode, LogicalBlock::new(logical_block))? {
-            BlockMapping::Mapped { physical, len } if len.get() != 0 => {
+            BlockMapping::Mapped { physical, len, .. } if len.get() != 0 => {
                 let buffer = self.read_metadata_block(FilesystemBlock::new(physical.get()))?;
                 output[..read_len].copy_from_slice(&buffer.as_ref()[..read_len]);
             }

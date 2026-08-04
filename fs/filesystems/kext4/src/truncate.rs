@@ -402,7 +402,7 @@ impl Ext4Filesystem {
             usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
         match self.map_blocks(inode, logical)? {
             BlockMapping::Hole { .. } | BlockMapping::Unwritten { .. } => Ok(()),
-            BlockMapping::Mapped { physical, len } => {
+            BlockMapping::Mapped { physical, len, .. } => {
                 if physical.get() == 0 || len.get() == 0 {
                     return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
                 }

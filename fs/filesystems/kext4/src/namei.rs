@@ -1586,7 +1586,7 @@ impl Ext4Filesystem {
             usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
         let mut block = vec![0; block_size];
         let physical = match self.map_blocks(directory, LogicalBlock::new(0))? {
-            BlockMapping::Mapped { physical, len } if physical.get() != 0 && len.get() != 0 => {
+            BlockMapping::Mapped { physical, len, .. } if physical.get() != 0 && len.get() != 0 => {
                 physical
             }
             BlockMapping::Mapped { .. } => {
@@ -1910,7 +1910,9 @@ impl Ext4Filesystem {
         let mut block = vec![0; block_size];
         for logical in 0..block_count {
             let physical = match self.map_blocks(directory, LogicalBlock::new(logical))? {
-                BlockMapping::Mapped { physical, len } if physical.get() != 0 && len.get() != 0 => {
+                BlockMapping::Mapped { physical, len, .. }
+                    if physical.get() != 0 && len.get() != 0 =>
+                {
                     physical
                 }
                 BlockMapping::Mapped { .. } => {
@@ -2076,7 +2078,9 @@ impl Ext4Filesystem {
         let mut block = vec![0; block_size];
         for logical in 0..block_count {
             let physical = match self.map_blocks(directory, LogicalBlock::new(logical))? {
-                BlockMapping::Mapped { physical, len } if physical.get() != 0 && len.get() != 0 => {
+                BlockMapping::Mapped { physical, len, .. }
+                    if physical.get() != 0 && len.get() != 0 =>
+                {
                     physical
                 }
                 BlockMapping::Mapped { .. } => {
@@ -2789,7 +2793,7 @@ impl Ext4Filesystem {
         logical: u64,
     ) -> Ext4Result<PhysicalBlock> {
         match self.map_blocks(directory, LogicalBlock::new(logical))? {
-            BlockMapping::Mapped { physical, len } if physical.get() != 0 && len.get() != 0 => {
+            BlockMapping::Mapped { physical, len, .. } if physical.get() != 0 && len.get() != 0 => {
                 Ok(physical)
             }
             BlockMapping::Mapped { .. } => Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent)),

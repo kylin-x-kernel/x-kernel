@@ -471,7 +471,7 @@ G3 退出条件：
 
 目标：在稳定的 buffered/journal/lifecycle 架构上补齐常见 Linux I/O 和 metadata 语义。
 
-- shared writable mmap、write fault、msync 和 truncate coherence；
+- shared writable mmap 的高级 writeback、msync 和 truncate coherence；
 - direct I/O、buffered/direct overlap 和 ordered-data completion；
 - fallocate、preallocation、punch-hole 及其他按 workload 需要的 range operations；
 - xattr syscall surface、ACL permission/inheritance、security namespace policy；

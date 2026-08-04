@@ -113,7 +113,7 @@ pub use disk::{
 pub use error::{
     ChecksumTarget, CorruptKind, Ext4Error, Ext4Result, FeatureClass, UnsupportedKind,
 };
-pub use extent::BlockMapping;
+pub use extent::{BlockMapping, BlockMappingFlags};
 pub use file::Ext4SyncIntent;
 pub use inode::{
     Ext4DeviceId, Ext4Inode, Ext4InodeMetadataUpdate, Ext4Timestamp, InodeKind, SymlinkStorage,

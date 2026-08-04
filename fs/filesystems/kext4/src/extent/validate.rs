@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use super::BlockMapping;
+use super::{BlockMapping, BlockMappingFlags};
 use crate::{
     BlockCount, CorruptKind, Ext4Error, Ext4Result, PhysicalBlock, disk::extent as disk_extent,
 };
@@ -192,11 +192,13 @@ pub(super) fn map_leaf(
                 return Ok(BlockMapping::Unwritten {
                     physical: PhysicalBlock::new(physical),
                     len: BlockCount::new(mapped_len),
+                    flags: BlockMappingFlags::empty(),
                 });
             }
             return Ok(BlockMapping::Mapped {
                 physical: PhysicalBlock::new(physical),
                 len: BlockCount::new(mapped_len),
+                flags: BlockMappingFlags::empty(),
             });
         }
     }

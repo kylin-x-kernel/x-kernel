@@ -1584,7 +1584,7 @@ fn collect_journal_extents(
     let mut logical = 0u32;
     while logical < journal_blocks {
         match map(logical)? {
-            BlockMapping::Mapped { physical, len } if len.get() != 0 => {
+            BlockMapping::Mapped { physical, len, .. } if len.get() != 0 => {
                 let run_len = len.get().min(journal_blocks - logical);
                 extents.push(JournalExtent {
                     logical_start: logical,
@@ -4929,6 +4929,7 @@ mod tests {
             Ok(crate::BlockMapping::Mapped {
                 physical: block.block(),
                 len: BlockCount::new(1),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         assert_eq!(handle.remaining_credits(), 3);
@@ -4981,6 +4982,7 @@ mod tests {
                 Ok(crate::BlockMapping::Mapped {
                     physical,
                     len: BlockCount::new(1),
+                    flags: crate::BlockMappingFlags::empty(),
                 })
             );
         }
@@ -5143,6 +5145,7 @@ mod tests {
             Ok(crate::BlockMapping::Mapped {
                 physical: inserted.block(),
                 len: BlockCount::new(1),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
     }
@@ -5186,6 +5189,7 @@ mod tests {
             Ok(crate::BlockMapping::Unwritten {
                 physical,
                 len: BlockCount::new(2),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         assert_eq!(
@@ -5193,6 +5197,7 @@ mod tests {
             Ok(crate::BlockMapping::Mapped {
                 physical: PhysicalBlock::new(physical.get() + 2),
                 len: BlockCount::new(2),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         assert_eq!(
@@ -5200,6 +5205,7 @@ mod tests {
             Ok(crate::BlockMapping::Unwritten {
                 physical: PhysicalBlock::new(physical.get() + 4),
                 len: BlockCount::new(2),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
     }
@@ -5277,6 +5283,7 @@ mod tests {
             Ok(crate::BlockMapping::Mapped {
                 physical,
                 len: BlockCount::new(2),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         assert_eq!(
@@ -5290,6 +5297,7 @@ mod tests {
             Ok(crate::BlockMapping::Mapped {
                 physical: PhysicalBlock::new(physical.get() + 4),
                 len: BlockCount::new(2),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         assert_eq!(
@@ -5357,6 +5365,7 @@ mod tests {
             Ok(crate::BlockMapping::Mapped {
                 physical: PhysicalBlock::new(physical.get() + 2),
                 len: BlockCount::new(1),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
     }
@@ -5396,6 +5405,7 @@ mod tests {
             Ok(crate::BlockMapping::Mapped {
                 physical,
                 len: BlockCount::new(3),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         assert_eq!(
@@ -5457,6 +5467,7 @@ mod tests {
                 Ok(crate::BlockMapping::Mapped {
                     physical,
                     len: BlockCount::new(1),
+                    flags: crate::BlockMappingFlags::empty(),
                 })
             );
         }
@@ -5492,6 +5503,7 @@ mod tests {
             Ok(crate::BlockMapping::Mapped {
                 physical: PhysicalBlock::new(6),
                 len: BlockCount::new(1),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         let mut output = vec![0; TEST_BLOCK_SIZE];
@@ -5578,6 +5590,7 @@ mod tests {
             Ok(crate::BlockMapping::Mapped {
                 physical: PhysicalBlock::new(6),
                 len: BlockCount::new(4),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         assert_eq!(
@@ -5585,6 +5598,7 @@ mod tests {
             Ok(crate::BlockMapping::Unwritten {
                 physical: PhysicalBlock::new(10),
                 len: BlockCount::new(4),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         assert_eq!(
@@ -5644,6 +5658,7 @@ mod tests {
             Ok(crate::BlockMapping::Mapped {
                 physical: PhysicalBlock::new(6),
                 len: BlockCount::new(4),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         assert_eq!(
@@ -5699,6 +5714,7 @@ mod tests {
             Ok(crate::BlockMapping::Mapped {
                 physical: PhysicalBlock::new(6),
                 len: BlockCount::new(8),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         let mut output = vec![0; TEST_BLOCK_SIZE * 8];
@@ -5761,6 +5777,7 @@ mod tests {
             Ok(crate::BlockMapping::Mapped {
                 physical,
                 len: BlockCount::new(1),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         let mut output = vec![0xff; 4];
@@ -6379,10 +6396,12 @@ mod tests {
             BlockMapping::Unwritten {
                 physical: PhysicalBlock::new(100),
                 len: BlockCount::new(1),
+                flags: crate::BlockMappingFlags::empty(),
             },
             BlockMapping::Mapped {
                 physical: PhysicalBlock::new(100),
                 len: BlockCount::new(0),
+                flags: crate::BlockMappingFlags::empty(),
             },
         ] {
             assert_eq!(
@@ -6398,10 +6417,12 @@ mod tests {
             0 => Ok(BlockMapping::Mapped {
                 physical: PhysicalBlock::new(100),
                 len: BlockCount::new(2),
+                flags: crate::BlockMappingFlags::empty(),
             }),
             2 => Ok(BlockMapping::Mapped {
                 physical: PhysicalBlock::new(200),
                 len: BlockCount::new(4),
+                flags: crate::BlockMappingFlags::empty(),
             }),
             _ => unreachable!(),
         })

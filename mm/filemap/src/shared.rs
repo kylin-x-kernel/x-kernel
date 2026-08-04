@@ -298,10 +298,7 @@ impl FileSharedRuntime {
                     && !page_flags.contains(MappingFlags::WRITE)
                 {
                     self.check_shared_write_fault_allowed()?;
-                    address_space.with_folio(pn, |folio| {
-                        folio
-                            .expect("file-backed PTE must have a cached folio")
-                            .mark_dirty();
+                    address_space.page_mkwrite(pn, |_folio| {
                         pgtbl.remap(addr, paddr, flags).map_err(map_paging_err)?;
                         populated = 1;
                         KResult::Ok(())

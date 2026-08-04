@@ -24,8 +24,10 @@ to `posix/mm`.
   not from ad-hoc runtime-local object ids.
 - Writable regular-file `MAP_SHARED` must use write-fault dirty tracking:
   initial shared file PTEs are installed without write permission, and the
-  first write fault marks the inode-owned folio dirty before making the PTE
-  writable.
+  first write fault must hold the address-space invalidate lock shared and the
+  target folio lock while completing filesystem `page_mkwrite` preparation,
+  marking the inode-owned folio dirty, and making the PTE writable. Truncate
+  and cache invalidation take the invalidate lock exclusively.
 - `mprotect()` must not upgrade existing shared file PTEs directly to writable;
   VMA permissions may become writable, but the PTE remains write-protected
   until a write fault marks the folio dirty.
@@ -68,8 +70,10 @@ to `posix/mm`.
 - Address-space shape and page-table operations are serialized by the `MmSpace`
   lock and page-table mutation guards.
 - `VfsInode` owns the only visible file size and serializes write/truncate with
-  its data lock. `kvfs::AddressSpace` protects registered views and delegates
-  only folio storage to its private cache component.
+  its data lock. Shared write faults hold that same lock across EOF recheck,
+  filesystem mapping preparation, dirtying, and PTE publication.
+  `kvfs::AddressSpace` protects registered views and delegates only folio
+  storage to its private cache component.
 - Individual folios protect their bytes with per-folio locking.
 - Private anon publication and fork/COW state use `AnonPrivateObject`
   prepare/commit contracts.

@@ -289,9 +289,11 @@ Callback 已持有 inode identity 时直接使用 `VfsInode` refresh；link/unli
 引用。`InodeCache` 保证一个 live ext4 inode number 只对应一个 `VfsInode` 和一个
 AddressSpace。
 
-Bridge 在 mount 时缓存 filesystem block size；该 geometry 在 mount 生命周期内不可变，普通
-inode metadata、write completion 和 writeback 路径因此不需要只为读取 block size 再取得
-挂载级 core mutex。每个 live inode 用一个 logical-block set 保存最小的 delayed extent 状态，
+Bridge 在 mount 时缓存 filesystem block size 以及 extent/legacy 两个文件系统级上限；
+bridge inode 只保存从已加载 core inode 得到的 extent-format 状态。write、truncate、FIEMAP
+和 `page_mkwrite` 通过同一个 helper 按该格式状态选择上限，既不复制派生的 per-inode
+maxbytes，也不为上限查询重新读取 inode-table 或取得挂载级 core lock。
+每个 live inode 用一个 logical-block set 保存最小的 delayed extent 状态，
 对应 Linux `ext4_inode_info::i_es_tree` 中的 delayed entries；集合大小同时就是该 inode 的
 reserved data blocks，不另存派生 prefix 或计数字段。挂载级 reservation aggregate 对应 Linux
 `s_dirtyclusters_counter`，用于 admission 与 `statfs()`，不是第二份 extent identity。
@@ -299,6 +301,23 @@ Delayed-allocation admission 使用 primary superblock 的 free-block counter �
 blocks 和 bridge 已有 reservation。该 counter 与 group descriptor 由同一
 allocation/release mutation 更新，因此 admission 是常数时间；显式 `statfs()` 仍遍历 group
 descriptor，提供独立的实时统计与一致性观察面。
+
+Buffered write 在 `FileOperations::write_iter()` 中、generic write 的 inode data critical
+section 内应用 inode-format 上限，再由 `write_begin()` 查询 core mapping。shared-file write
+fault 则在 address-space invalidate shared lock 和 folio lock 内应用同一上限并调用
+`page_mkwrite()`。两个入口都会把 hole block 加入同一个 delayed set；因此非 `SYNC`
+FIEMAP 能统一报告两种写入口产生的 `DELALLOC | UNKNOWN`，不扫描 dirty folio猜测 allocation
+状态。
+
+FIEMAP 查询通过 inode operation 进入，并复用与 write/truncate 相同的已缓存 inode 格式上限：
+extent 格式按 `(2^32 - 1) << block_bits` 及 `i_blocks` 上限计算，legacy
+格式同时计入 indirect metadata blocks、`huge_file` 与 `MAX_LFS_FILESIZE` 上限。随后按请求
+范围调用只读 `map_blocks()`。Hole 被跳过；mapped extent 输出物理块范围，unwritten extent
+添加 `UNWRITTEN`，尚在 bridge delayed set 中的块输出
+`DELALLOC | UNKNOWN`。Legacy pointer 映射按连续 logical/physical block 合并并添加
+`BlockMappingFlags::MERGED`，bridge 将其转换为 `FIEMAP_EXTENT_MERGED`。遍历保留一个
+pending extent，只有确认查询范围内没有后续映射时才添加 `LAST`；输出容量满时立即停止且
+不误标 `LAST`。
 
 ## 并发模型
 
@@ -308,6 +327,12 @@ descriptor，提供独立的实时统计与一致性观察面。
 遍历时不持有挂载级 core mutex；PageCache 在释放 mapping/folio mutex 后调用 batch writer，
 batch writer 才短暂取得 core mutex，并在释放 core mutex 后更新 delalloc accounting。这样
 普通 cache miss 的 `MappingInner -> core` 路径不会与 writeback 形成反向锁序。
+FIEMAP 在 VFS inode shared lock 下执行，regular inode 另以 `writeback_lock` 稳定磁盘
+mapping；每次 core mapping 查询和 delayed-set 查询只短暂持有各自的锁，并在调用安全输出
+writer 前释放。Buffered write 和 truncate 使用 inode data lock 的 exclusive 侧；
+`page_mkwrite` 使用 address-space invalidate shared lock 和 folio lock，truncate 同时使用
+invalidate exclusive 侧。三条路径通过同一个 delayed-set lock 发布 mapping/reservation
+状态。用户页错误或大输出因此不会持有挂载级 core read lock。
 N1 已将 journal mapping/superblock、transaction engine 和 checkpoint queue 固定到同一
 `MountedJournal`。N2 才根据后台 commit/checkpoint、inode writeback、metadata buffer 和 group
 allocator 的实际并发关系建立锁顺序；不以字段分组预设锁域。不得在 spinlock 下执行块 I/O、
@@ -319,6 +344,8 @@ allocator 的实际并发关系建立锁顺序；不以字段分组预设锁域�
 - `kext4` crate 使用 `#![forbid(unsafe_code)]`，unsafe 或设备相关细节留在核心边界之外。
 - 未实现的 ext4 格式能力通过显式 unsupported error 暴露，避免把不完整格式误挂载为可写。
 - KExt4 的新生命周期与 I/O 语义只在 KExt4 core/bridge 落地，不保留第二套 ext4 实现路径。
+- KExt4 core 只提供 inode 格式相关的最大文件大小和带 mapping flags 的 `BlockMapping`；Linux FIEMAP ABI、
+  用户指针与输出容量留在 POSIX/KVFS 边界，bridge 只负责把 mapping 语义转换为 extent。
 - `Ext4Filesystem` 保留类似 Linux `ext4_sb_info` 的 mount 总状态；只有具有独立事务状态机和
   生命周期不变量的 journal 聚合为 `MountedJournal`，不为代码分组机械创建 service。
 - KExt4 只通过通用 `BlockDevice` 表达块读写和 flush；异步 request、完成通知和 VirtIO

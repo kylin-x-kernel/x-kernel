@@ -29,8 +29,8 @@ use super::{
     device::{block_device_file_operations, character_device_file_operations},
 };
 use crate::{
-    AddressSpace, AddressSpaceOperations, DelayedCall, Dentry, DeviceId, FileOperations,
-    LockedDentry, Metadata, MetadataUpdate, MountIdmap, Mutex, MutexGuard, NodePermission,
+    AddressSpace, AddressSpaceOperations, DelayedCall, Dentry, DeviceId, FiemapExtentInfo,
+    FileOperations, LockedDentry, Metadata, MetadataUpdate, MountIdmap, Mutex, NodePermission,
     NodeType, Path, Permission, RwLock, RwLockReadGuard, RwLockWriteGuard, SuperBlock, Umode,
     VfsError, VfsFileBuilder, VfsResult,
     address_space::{default_address_space_operations, empty_address_space_operations},
@@ -252,6 +252,41 @@ pub trait InodeSymlinkOperations: Send + Sync {
     ) -> VfsResult<String>;
 }
 
+/// Inode-scoped FIEMAP operation.
+pub trait InodeFiemapOperations: Send + Sync {
+    /// Reports allocated extents intersecting the requested byte range.
+    fn fiemap(
+        &self,
+        inode: &VfsInode,
+        info: &mut FiemapExtentInfo<'_>,
+        start: u64,
+        length: u64,
+    ) -> VfsResult<()>;
+}
+
+/// Optional FIEMAP capability borrowed from a VFS inode.
+pub struct FiemapCapability<'a> {
+    inode: &'a VfsInode,
+    operations: &'a dyn InodeFiemapOperations,
+}
+
+impl FiemapCapability<'_> {
+    /// Runs FIEMAP under the inode lock that serializes mapping changes.
+    pub fn map(&self, info: &mut FiemapExtentInfo<'_>, start: u64, length: u64) -> VfsResult<()> {
+        match self.inode.node_type() {
+            NodeType::RegularFile => {
+                let _data_guard = self.inode.data_lock.read();
+                self.operations.fiemap(self.inode, info, start, length)
+            }
+            NodeType::Directory => {
+                let _namespace_guard = self.inode.lock_namespace_shared();
+                self.operations.fiemap(self.inode, info, start, length)
+            }
+            _ => Err(VfsError::OperationNotSupported),
+        }
+    }
+}
+
 /// Inode operation table installed on VFS inodes.
 pub trait InodeOperations: Send + Sync + 'static {
     /// Checks access to this inode for the supplied task credentials.
@@ -272,6 +307,11 @@ pub trait InodeOperations: Send + Sync + 'static {
 
     /// Returns symlink operations when this inode supports link following.
     fn symlink_operations(&self) -> Option<&dyn InodeSymlinkOperations> {
+        None
+    }
+
+    /// Returns FIEMAP operations when this inode exposes extent mappings.
+    fn fiemap_operations(&self) -> Option<&dyn InodeFiemapOperations> {
         None
     }
 
@@ -707,7 +747,7 @@ pub struct VfsInode {
     identity: InodeIdentity,
     attributes: InodeAttributes,
     write_count: AtomicUsize,
-    data_lock: Mutex<()>,
+    data_lock: RwLock<()>,
     namespace_lock: RwLock<()>,
     inode_operations: Arc<dyn InodeOperations>,
     file_operations: Arc<dyn FileOperations>,
@@ -1101,7 +1141,7 @@ impl VfsInode {
             identity: InodeIdentity::new(init.number),
             attributes: InodeAttributes::new(init, flags),
             write_count: AtomicUsize::new(0),
-            data_lock: Mutex::new(()),
+            data_lock: RwLock::new(()),
             namespace_lock: RwLock::new(()),
             inode_operations,
             file_operations: file_operations.unwrap_or_else(no_open_file_operations),
@@ -1318,7 +1358,7 @@ impl VfsInode {
     }
 
     pub(crate) fn set_len(&self, len: u64) -> VfsResult<()> {
-        let _data_guard = self.data_lock.lock();
+        let _data_guard = self.data_lock.write();
         self.mapping.set_len(len)?;
         if self.size() == len {
             Ok(())
@@ -1329,12 +1369,12 @@ impl VfsInode {
 
     /// Records a file length already changed by the backing filesystem.
     pub fn update_size_after_backing_change(&self, len: u64) -> VfsResult<()> {
-        let _data_guard = self.data_lock.lock();
-        self.mapping.truncate_setsize(len)
+        let _data_guard = self.data_lock.write();
+        self.mapping.truncate_setsize_after_backing_change(len)
     }
 
-    pub(crate) fn lock_data(&self) -> MutexGuard<'_, ()> {
-        self.data_lock.lock()
+    pub(crate) fn lock_data(&self) -> RwLockWriteGuard<'_, ()> {
+        self.data_lock.write()
     }
 
     /// Refreshes mutable cached attributes from a validated backing inode.
@@ -1392,6 +1432,16 @@ impl VfsInode {
         self.inode_operations
             .as_ref()
             .getattr(&MountIdmap, Some(path), request_mask, query_flags)
+    }
+
+    /// Returns this inode's optional FIEMAP capability.
+    pub fn fiemap_capability(&self) -> Option<FiemapCapability<'_>> {
+        self.inode_operations
+            .fiemap_operations()
+            .map(|operations| FiemapCapability {
+                inode: self,
+                operations,
+            })
     }
 
     /// Synchronizes the file to disk.

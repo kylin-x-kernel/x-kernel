@@ -52,6 +52,7 @@ kfd resources / kvfs / device and pipe implementations
 | 当前进程状态 | `chdir`、`openat`、`close_range` | 进程资源锁、fs_struct 更新、umask 和当前目录语义 |
 | VFS magic link | `/proc/self/fd/<fd>`、`/proc/<pid>/fd/<fd>` | 跨进程 fd 访问、目标进程退出、fd 表并发变化、no-follow 策略 |
 | VFS/设备对象 | `open`、`ioctl`、`mount`、`syncfs` | 设备特定 ioctl、终端对象、mount flags、文件系统实现差异 |
+| FIEMAP 可变长输出 | `ioctl(FS_IOC_FIEMAP)` | 用户声明的 extent 数量、header 后数组地址、后端返回的块映射 |
 | fd-to-fd 复制 | `sendfile`、`copy_file_range`、`splice` | 源目标类型错误、offset 指针 TOCTOU、同文件重叠、阻塞语义 |
 
 本 crate 不直接访问 MMIO、PIO、DMA、固件表或架构内联汇编。
@@ -62,6 +63,8 @@ kfd resources / kvfs / device and pipe implementations
 |------|----------|------|-------------------|
 | `dir.rs::DirBuffer::write_entry` | `sys_getdents64 -> Directory::read_dir -> DirBuffer::write_entry` | 在临时 `Vec<u8>` 中按 `linux_dirent64` ABI 写目录项 | 写入前计算记录长度并检查 `remaining_space >= len`；`entry_ptr` 位于 `Vec` 已分配范围内；记录按 `align_of::<linux_dirent64>()` 对齐；文件名复制长度来自 `name.as_bytes().len()`；尾部写入 NUL；写完后只增加 `offset` 到已检查范围 |
 | `stat.rs::statfs` | `sys_statfs` / `sys_fstatfs` | 用零初始化创建 Linux `statfs` ABI 结构 | `statfs` 是 C ABI plain data 结构；零值用于初始化 padding 和暂未显式设置字段；函数随后逐项写入返回给用户态的可见字段 |
+| `ioctl.rs::FiemapHeader` 的 `UserRead`/`UserWrite` 实现 | `sys_ioctl(FS_IOC_FIEMAP)` | 复制 Linux FIEMAP header | `repr(C)` 结构仅含整数，末尾显式 `reserved` 覆盖 ABI 对齐且任意 bit pattern 有效；每个字节都属于已初始化字段 |
+| `ioctl.rs::FiemapExtent` 的 `UserWrite` 实现 | FIEMAP writer 输出 | 复制 Linux FIEMAP extent | `repr(C)` 结构所有 ABI reserved 区域都由显式整数数组覆盖并在每次输出时清零，不存在未初始化 padding |
 
 新增 `unsafe` 块必须同时满足：
 
@@ -91,6 +94,9 @@ kfd resources / kvfs / device and pipe implementations
 6. **临时 ABI 结构不能泄露未初始化内存**：
    `statfs` 使用零初始化；
    `getdents64` 的临时 `Vec` 初始为零，目录项记录显式写入尾部 NUL。
+7. **FIEMAP 可变长输出必须使用 checked arithmetic**：
+   `fm_extent_count` 先受 Linux UAPI 总字节上限约束，header 地址、数组字节数和每项
+   offset 均用 `checked_add`/`checked_mul`；每个输出 extent 的 reserved 字段显式清零。
 
 ## 权限与语义不变量
 
@@ -155,6 +161,7 @@ kfd resources / kvfs / device and pipe implementations
 | T-23 | namespace syscall 对 final name 做两次 lookup 并操作同名替代对象 | pathname / namespace | 高 | syscall 先解析完整目标或锁外确认目标不存在，再由 Path 按名称重新查找 | link/symlink/unlink/rmdir 调用专用 `Filename::*_at`；Dentry 在父目录 exclusive lock 下执行唯一 final lookup |
 | T-24 | `linkat` 默认错误跟随 source symlink 或静默接受未知 flags | pathname flags | 中 | 通用 resolve helper 默认 follow，或 syscall 只记录 warning | syscall 只接受 `AT_SYMLINK_FOLLOW | AT_EMPTY_PATH`；默认显式使用 no-follow，未知位返回 `EINVAL` |
 | T-25 | FIFO open 根据第一次错误重新解析 pathname | pathname/open | 高 | 两次 lookup 之间目标被 rename 或 symlink replacement | syscall open 只调用一次 `Filename::open_with_flags_at`；FIFO dispatch 在 KVFS 已授权的 resolved inode 上完成 |
+| T-26 | FIEMAP 数量或地址计算溢出导致越界写或内核数据泄漏 | ioctl / 用户输出 | 高 | 信任 `fm_extent_count`、用未检查指针运算或复制未初始化 reserved 字段 | 限制最大数量，所有地址运算使用 checked arithmetic，输出结构显式初始化全部字段；用户地址只通过 `UserPtr` 写入 |
 
 影响等级定义：
 
@@ -177,6 +184,7 @@ kfd resources / kvfs / device and pipe implementations
 | F-09 | `copy_file_range` 语义不完整 | 重叠和普通文件检查 TODO | 可能出现与 Linux 不一致的数据结果 | 相关应用复制行为异常 | 2 | 非零 flags 显式拒绝；其余限制实现前需要补充测试 |
 | F-10 | `fcntl` unsupported cmd 返回成功 | 兼容占位 | 应用误判某些控制操作已生效 | 可能产生行为差异 | 2 | warning 记录；有安全影响的命令应显式实现或拒绝 |
 | F-11 | `close_range(UNSHARE)` 资源复制失败 | 下层 unshare 实现异常 | 当前 API 没有错误承载 | fd 表隔离语义不完整 | 2 | `unshare_fd_table` 当前按不可失败路径使用 |
+| F-12 | FIEMAP 输出容量不足或中途遇到坏用户页 | 调用者提供较小数组或不可写地址 | 返回已统计数量或 `BadAddress` | 当前查询失败，文件系统状态不变 | 3 | `FiemapExtentInfo` 达到容量后正常停止；writer 每项通过 `UserPtr` 写入并传播 copy fault |
 
 严重度定义：
 
@@ -235,6 +243,7 @@ kfd resources / kvfs / device and pipe implementations
 - [ ] 新增 open/stat/namei 入口明确普通路径与 procfd 路径的差异。
 - [ ] fd 表修改失败时不会留下半创建对象或错误 descriptor flags。
 - [ ] 涉及 offset/len 的路径检查负数、溢出和 0 长度语义。
+- [ ] FIEMAP flag 在 ABI 边界显式支持或按 `EBADR` 规则拒绝，输出 reserved 字段全部初始化。
 - [ ] 跨 fd 复制路径检查源目标类型、阻塞语义和用户 offset 写回。
 - [ ] 元数据和 access 改动与 `kcred` 凭据模型保持同步。
 - [ ] 每个多步 pathname 操作只取得一次 credential snapshot，并传递给完整解析过程。

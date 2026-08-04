@@ -44,7 +44,7 @@ posix/fs/
 │   ├── metadata.rs     # chown/chmod/utime/utimensat
 │   ├── mount.rs        # mount/umount2
 │   ├── stat.rs         # stat/fstatat/statx/access/statfs
-│   ├── ioctl.rs        # ioctl dispatch and FIONBIO handling
+│   ├── ioctl.rs        # ioctl dispatch、FIONBIO 与 FIEMAP ABI handling
 │   └── sync.rs         # sync/syncfs
 └── docs/
     ├── design.md
@@ -90,7 +90,7 @@ core/ksyscall
 | `metadata` | 修改所有者、权限和时间戳 |
 | `mount` | 把 Linux mount flags 映射到 `kvfs::MountFlags`，按注册的 `FileSystemType` 查找实现，并处理非递归 bind 与 remount |
 | `stat` | 转换 VFS metadata、access 检查和 statfs 信息 |
-| `ioctl` | 处理 `FIONBIO` 并把其它命令转交 `FileLike::ioctl` |
+| `ioctl` | 处理 `FIONBIO`、inode FIEMAP，并把其它命令转交 `FileLike::ioctl` |
 | `sync` | 将同步请求转发到文件系统或打开对象所在文件系统 |
 
 ## 调用约束 / 执行上下文
@@ -266,6 +266,18 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
 3. 普通预分配和 `UNSHARE_RANGE` 通过必要时写入最后一个零字节推进 EOF。
 4. `PUNCH_HOLE` 和 `ZERO_RANGE` 用分块写零模拟。
 5. `COLLAPSE_RANGE`、`INSERT_RANGE` 委托 `File` 的范围操作。
+
+### `FS_IOC_FIEMAP`
+
+1. 先检查 inode 是否暴露 FIEMAP capability；不支持时在访问用户 header 前返回
+   `EOPNOTSUPP`，保持 Linux 错误优先级。
+2. 通过 `UserPtr` 复制 32 字节 Linux `fiemap` header，校验 `fm_extent_count` 不超过
+   UAPI 可表达的数组上限，并用 checked arithmetic 验证 header 后的 extent 数组地址范围。
+3. 把 raw flags、容量和安全用户输出 writer 封装为 `FiemapExtentInfo`，由 inode operation
+   决定支持的 flags；不兼容位通过 `fm_flags` 写回并返回 `EBADR`。
+4. writer 逐项构造 56 字节 `fiemap_extent`，显式清零全部 reserved 字段并通过 `UserPtr`
+   写回；容量为零时由 `FiemapExtentInfo` 只统计数量。
+5. 无论后端成功还是失败，都先写回当前 `fm_flags` 和 `fm_mapped_extents`，再传播结果。
 
 ### `mount`
 

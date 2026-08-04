@@ -145,7 +145,10 @@ sys_mmap
 5. Otherwise the runtime materializes a folio through inode-owned
    `kvfs::AddressSpace` and maps the folio into the page table.
 6. Shared writable mappings initially install the PTE without write permission.
-   The first write fault marks the folio dirty and remaps the PTE writable.
+   The first write fault enters `kvfs::AddressSpace::page_mkwrite()`, which
+   takes the address-space invalidate lock shared, locks the target folio,
+   rechecks EOF, invokes the filesystem preparation callback, marks the folio
+   dirty, and only then remaps the PTE writable.
 7. `mprotect(PROT_WRITE)` updates VMA permissions but keeps existing shared
    file PTEs write-protected, so write-fault dirty tracking is preserved.
 8. For shmem/memfd files, `F_SEAL_WRITE` and `F_SEAL_FUTURE_WRITE` reject new
@@ -169,7 +172,8 @@ sys_mmap
 
 ### Truncate / invalidate
 
-1. `kvfs::AddressSpace::truncate_setsize()` publishes inode `i_size` first.
+1. The set-length path takes the address-space invalidate lock exclusively,
+   then `kvfs::AddressSpace::truncate_setsize()` publishes inode `i_size`.
 2. `AddressSpace` emits mapped-view invalidation, truncates its private cache
    storage, then emits a second invalidation for a private COW race.
 3. The registered view notifier calls `MmSpaceInvalidate`.
@@ -194,6 +198,7 @@ Supported now:
 
 - read-only file `MAP_SHARED`;
 - writable regular-file `MAP_SHARED` with write-fault dirty tracking;
+- filesystem `page_mkwrite` preparation for shared write faults;
 - memfd/shmem `F_SEAL_WRITE` and `F_SEAL_FUTURE_WRITE` enforcement for new
   shared writable mappings and `mprotect(PROT_WRITE)`;
 - memfd/shmem `F_SEAL_WRITE` refusal while writable shared mappings are active,
@@ -206,7 +211,6 @@ Supported now:
 
 Not supported by the current filemap runtime:
 
-- Linux `page_mkwrite` filesystem callback semantics;
 - readahead/fault-around;
 - hole-punch/collapse-range;
 - DAX, THP, reclaim, swap, memcg, NUMA.

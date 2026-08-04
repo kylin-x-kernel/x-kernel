@@ -54,4 +54,19 @@ impl<'a> Kiocb<'a> {
         let mapping = self.file().mapping();
         mapping.write_iter(self, iter)
     }
+
+    /// Performs a generic buffered write with open-file-specific checks.
+    ///
+    /// `checks` runs after the generic superblock limit check and while the
+    /// inode data lock remains held. A filesystem file operation can narrow
+    /// `count` before the page-cache write starts without adding policy to
+    /// [`crate::AddressSpaceOperations`].
+    pub fn generic_file_write_iter_with_checks(
+        &mut self,
+        iter: &mut IovIterSource<'_>,
+        checks: impl FnOnce(u64, &mut usize) -> VfsResult<()>,
+    ) -> VfsResult<usize> {
+        let mapping = self.file().mapping();
+        mapping.write_iter_with_checks(self, iter, checks)
+    }
 }

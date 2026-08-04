@@ -1283,6 +1283,9 @@ impl Path {
         }
 
         let inode = self.inode();
+        if len > self.max_file_size() {
+            return Err(VfsError::FileTooLarge);
+        }
         if self.is_regular_file() && !inode.flags().contains(NodeFlags::NON_CACHEABLE) {
             inode.set_len(len)?;
         } else {

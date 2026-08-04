@@ -4,7 +4,7 @@
 
 用户提供的路径、open flags、rename flags 和 mount flags 不可信。POSIX syscall 层
 负责复制用户内存并完成 ABI 初步校验；`kvfs` 接收内核所有的字符串和类型化 flags。
-具体文件系统返回的目录项与元数据也必须视为可能失败的外部输入。`kvfs` 在提交
+具体文件系统返回的目录项、extent 与元数据也必须视为可能失败的外部输入。`kvfs` 在提交
 namespace 状态前校验 name、mount relationship、类型、topology 和 operation flags。
 
 `Cred` 来自可信 task 状态，但其 UID/GID 不是“特权保证”，只能作为 DAC 输入。
@@ -19,6 +19,9 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   暴露或误用完整的创建期 flag 集合。
 - `sys_renameat2` 将 raw rename bits 转换为 `RenameFlags` 后才进入 VFS。
 - 文件系统 operation traits 可返回磁盘、网络或设备后端产生的错误与元数据。
+- 可选 `InodeOperations::fiemap_operations()` 可输出后端块映射，但只能通过借用的
+  `FiemapExtentInfo` 和安全 writer 传递经过检查的字段，不能保留 writer 或接触用户指针；
+  回调运行在 inode shared lock 内。
 - 所有 pathname 与 namespace mutation API 的 `&Cred` 是权限边界；省略或替换它会改变
   当前操作的授权主体。
 - `VfsFile::cred()` 暴露 open 时捕获的不可变 credential，供需要 Linux `f_cred` 语义
@@ -53,6 +56,11 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
 - 未知 open/rename 位不得进入内部 namespace 或 open 算法。
 - `AtomicU32` 中的 `f_flags` 只通过 `OpenFlags` API 读写。
 - 不同 flags 类型不得通过 `.bits()` 在 VFS 内互相转换。
+- `FiemapExtentInfo::fill_next_extent()` 必须拒绝零长度及 logical/physical 末端溢出；
+  delayed、encrypted 和 inline/tail 状态必须补齐 Linux FIEMAP 规定的隐含 flags。
+- FIEMAP `SYNC` 写回和 extent 遍历必须由同一次 inode data read lock 覆盖，不能在两阶段
+  之间允许 buffered write 建立新的 delayed allocation；shared write fault 通过文件系统
+  mapping lock 和 delayed-state lock 发布 reservation，不依赖 inode data lock。
 - live child dentry 强持有 parent，parent 只保存 child 的弱索引；superblock dcache
   强持有 hashed dentry，驱逐时必须同时移除弱索引和 dcache 所有权。
 - `AnonInodeFs` singleton 必须先完成 `init_anon_inodefs()` 发布，后续 `global()`
@@ -75,9 +83,9 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   检查 inode write permission。
 - dentry backing metadata refresh 必须先确认 positive state，再匹配 inode number、node
   type、block size 和 `rdev`；外部 filesystem bridge 不直接取得内部 `Arc<VfsInode>`。
-- split truncate 必须在 inode data lock 下恰好调用一次 `truncate_setsize()`；该入口先发布
-  `i_size`，并在 cache truncate 前后各执行一次 mmap invalidation。文件系统负责维护
-  backing prepare 后失败的磁盘恢复协议。
+- split truncate 必须在 inode data lock 与 address-space invalidate exclusive lock 下恰好
+  调用一次 `truncate_setsize()`；该入口先发布 `i_size`，并在 cache truncate 前后各执行
+  一次 mmap invalidation。文件系统负责维护 backing prepare 后失败的磁盘恢复协议。
 - `VfsInode` 只拥有一个 `AddressSpace`，MM/filemap 只经 `VfsFile::mapping()` 获取它；
   不得向 MM 暴露或额外强持有内部 `PageCache`。
 - pathname FIFO 的活动 `PipeObject` 必须由 `VfsInode` 的 typed slot 持有；共享
@@ -120,9 +128,10 @@ membership TOCTOU。递归 detach 把 child mountpoint 的 overmount stack 一�
 更新 parent 弱索引，再更新 dcache 强所有权。类型化 flags 是不可变值快照，不提供共享
 可变状态。
 
-regular-file inode 的 data lock 覆盖 generic buffered write 和整个 set-length callback；
-具体文件系统锁在 data lock 内获取。因此同一 inode 的 write、i_size publish、两轮 mmap
-invalidation 和 cache truncate 不会交错成两个 EOF source。
+regular-file inode 的 data lock 覆盖 generic buffered write 和整个 set-length callback。
+address-space invalidate lock 的 shared 侧保护 `page_mkwrite`，exclusive 侧保护 truncate、
+mapped-view invalidation 与 page-cache truncate；目标 folio lock 串行化 fault preparation、
+dirty 与 PTE publish。具体文件系统的 mapping/reservation lock 在这些边界内获取。
 
 所有 namespace lock 都是 sleepable lock。mount tree 操作先取 mount-namespace registry
 mutex；其后全局顺序为 superblock topology、父目录、子目录、非目录 inode，最后才是
@@ -191,6 +200,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-31 | immutable symlink target 出现两份可分离状态 | 中 | simple-file closure 和 inode cache 分别保存目标 | 创建时直接构造 cached-link inode；目标只存于 inode，node 只保存长度等元数据 |
 | T-34 | 最后一个 mount 释放时丢失 dirty page、inode metadata 或 journal checkpoint | 高 | topology detach 后 superblock 没有 active 生命周期，Weak registry 也无法保活 | `VfsMount` 获取/释放 superblock active 引用；最后一个引用在 umount lock 下执行 writeback、dcache eviction 和最终 filesystem/device sync；错误记录后仍完成 teardown |
 | T-35 | 递归卸载 overmount 子树留下 registry 中不可达 mount | 高 | 只遍历 visible children，或边遍历边修改 topology | 收集每个 child mountpoint 的完整 covers 链，先验证全部 registry membership，再执行无失败分支的 topology commit |
+| T-36 | 文件系统输出畸形 extent 导致范围溢出或 ABI 层错误解释 | 中 | 后端返回零长度或 logical/physical 末端越界 | `FiemapExtentInfo::fill_next_extent()` 集中检查非零长度和两个范围的 `checked_add`；ABI writer 只接收校验后的字段 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -205,6 +215,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | F-07 | 后端不能保存 Unix owner | 磁盘格式没有 UID/GID | getattr 无法完整反映创建身份 | DAC 语义受文件系统能力限制 | 3 | 文档明确后端限制；支持 owner 的后端必须持久化 helper 结果 |
 | F-08 | split truncate 在 backing prepare 后 cache invalidation 失败 | 分配或 mapping invalidation 错误 | 当前 truncate 返回失败 | backing inode 可能保持 orphan/recovery state | 2 | 由具体文件系统的持久化 recovery protocol 收敛，禁止静默执行 finish |
 | F-09 | 文件系统类型重复注册 | 启动接线重复或名称冲突 | 注册返回 `ResourceBusy` | boot 在用户态启动前停止 | 2 | boot 对每个内建类型恰好注册一次并把失败视为初始化错误 |
+| F-10 | FIEMAP writer 容量耗尽 | 用户输出容量小于映射数量 | 返回已装入的 extent，遍历停止 | 调用方可增加容量重试 | 4 | `fill_next_extent()` 用布尔返回值表达容量，不把正常截断当成后端错误 |
 
 校验失败会在 filesystem callback 前返回 typed VFS error。后端失败时 dentry cache
 location 保持不变，因为 cache commit 只在 callback 成功后执行；rename 所需 key 和 cache
@@ -268,3 +279,8 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 - directory lock 是否先于 non-directory lock 获取。
 - callback 是否避免重新进入同一组 VFS namespace 对象。
 - cache commit 是否只在 backend success 后执行。
+- FIEMAP 后端是否只调用 `fill_next_extent()`，并在返回 `false` 后立即停止。
+- FIEMAP 后端是否在 VFS 持有的 inode data read lock 内完成请求的 `SYNC` 写回，再开始遍历。
+- shared-file write fault 是否在 address-space invalidate shared lock 和 folio lock 内完成
+  filesystem `page_mkwrite` prepare、folio dirty 和 writable PTE publish，且不取得 inode
+  exclusive data lock。

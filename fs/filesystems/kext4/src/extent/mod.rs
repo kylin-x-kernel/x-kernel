@@ -13,6 +13,15 @@ mod tests;
 
 use crate::{BlockCount, PhysicalBlock};
 
+bitflags::bitflags! {
+    /// Semantics attached to a logical-block mapping result.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct BlockMappingFlags: u32 {
+        /// The returned run was coalesced from adjacent mappings.
+        const MERGED = 1 << 0;
+    }
+}
+
 /// Query-only logical block mapping result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlockMapping {
@@ -22,11 +31,13 @@ pub enum BlockMapping {
     Mapped {
         physical: PhysicalBlock,
         len: BlockCount,
+        flags: BlockMappingFlags,
     },
     /// The logical range is preallocated but reads as zeroes.
     Unwritten {
         physical: PhysicalBlock,
         len: BlockCount,
+        flags: BlockMappingFlags,
     },
 }
 

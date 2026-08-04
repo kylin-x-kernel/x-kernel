@@ -10,6 +10,7 @@ extern crate alloc;
 
 mod address_space;
 mod anon_inode;
+mod fiemap;
 mod file;
 mod file_system_type;
 mod filename;
@@ -33,10 +34,11 @@ mod type_map;
 mod types;
 
 pub use address_space::{
-    AddressSpace, AddressSpaceOperations, AddressSpaceViewGuard, ReadaheadControl,
-    WriteBeginRequest, WriteEndRequest, WritebackControl, WritebackSyncMode,
+    AddressSpace, AddressSpaceOperations, AddressSpaceViewGuard, PageMkwriteRequest,
+    ReadaheadControl, WriteBeginRequest, WriteEndRequest, WritebackControl, WritebackSyncMode,
 };
 pub use anon_inode::{AnonInodeFs, init_anon_inodefs};
+pub use fiemap::{FiemapExtentFlags, FiemapExtentInfo, FiemapExtentWriter, FiemapFlags};
 pub use file::{FMode, FileDirOperations, FileOperations, VfsFile, VfsFileBuilder};
 pub use file_system_type::{
     FileSystemType, get_filesystem_type, register_filesystem, registered_filesystems,
@@ -47,10 +49,11 @@ pub use lookup::{LookupFlags, LookupIntent, MagicLinkOps, ResolvedObject};
 pub use mount::{MntNamespace, Mount, MountFlags, MountIdmap, NamespaceClone, Path};
 pub use namei::{DelayedCall, LastType, ParentLookup, dentry_open, may_mknod};
 pub use node::{
-    Dentry, DentryOperations, DeviceFileOps, DirContext, DirEntrySink, GetattrQueryFlags,
-    GetattrRequestMask, InodeCache, InodeDirOperations, InodeLookupFlags, InodeOperations,
-    InodeSymlinkOperations, InodeUpdateTime, LockedDentry, MmapMapper, NodeFlags, RenameFlags,
-    VfsInode, VfsInodeInit, WeakVfsInode, bdev_add, bdev_del, cdev_add, cdev_del, inode_init_owner,
+    Dentry, DentryOperations, DeviceFileOps, DirContext, DirEntrySink, FiemapCapability,
+    GetattrQueryFlags, GetattrRequestMask, InodeCache, InodeDirOperations, InodeFiemapOperations,
+    InodeLookupFlags, InodeOperations, InodeSymlinkOperations, InodeUpdateTime, LockedDentry,
+    MmapMapper, NodeFlags, RenameFlags, VfsInode, VfsInodeInit, WeakVfsInode, bdev_add, bdev_del,
+    cdev_add, cdev_del, inode_init_owner,
 };
 pub(crate) use node::{
     DentryKey, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive,
