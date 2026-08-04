@@ -26,6 +26,7 @@ owner，而不是由每个 dentry 或 open file 单独拥有内容对象。
 - 目录、链接、符号链接和元数据维护
 - 基于 VFS `Cred` callback 的 inode owner 初始化
 - fd-only tmpfs/shmem anonymous regular-file factory and opened-file conversion
+- `tmpfs` 和 `sysfs` 的静态 KVFS `FileSystemType` 描述符
 
 ## 架构
 
@@ -43,6 +44,14 @@ VfsFile::mapping()
 `VfsFile::mapping()` 进入文件缓存路径后，只取得 inode address-space；private
 page-cache storage、mapped views 与 MM shared object identity 的统一宿主是
 `VfsInode::i_mapping` 下的 `AddressSpace`。
+
+`TMPFS_TYPE` 和 `SYSFS_TYPE` 只描述 canonical name 与 nodev superblock factory；
+类型注册和 mount policy 由 boot/KVFS 拥有，不写入 `MemoryFs` inode 状态。
+tmpfs 每次 mount 创建独立实例；sysfs 在当前无 network namespace 分化的模型中通过
+`Once<(Arc<SuperBlock>, Arc<Mount>)>` 复用同一棵树。tuple 中的 root mount 是 internal
+active 引用：当前 memfs sysfs 没有独立于 superblock 的 kernfs root，因此可见 mount 全部
+卸载时不能 teardown 内核仍在维护的 `/sys` 树。这一现有 `Mount` 对象承担 Linux kernfs
+root 长生命周期的对应职责，不增加第二套目录树或 lifecycle 字段。
 
 ## 调用约束 / 执行上下文
 
@@ -89,6 +98,8 @@ page-cache storage、mapped views 与 MM shared object identity 的统一宿主�
 - 目录项表由 `Mutex<HashMap<...>>` 保护。
 - inode address-space 的 private page-cache storage、mapped views 与 MM object identity
   由 `kvfs::AddressSpace` 内部同步保护。
+- sysfs superblock 与 internal root mount 由同一个 `Once` 原子发布；对外只克隆
+  superblock `Arc`，internal mount 保持一个 active 引用。
 
 ## 设计决策
 
@@ -108,6 +119,12 @@ page-cache storage、mapped views 与 MM shared object identity 的统一宿主�
 4. `memfs` 不保存“当前凭据”。
    原因：当前 task 属于上层 `kprocess`；创建者身份由每次 VFS callback 的 `&Cred`
    显式提供，inode 只持久化派生出的 UID/GID。
+
+5. filesystem type 描述符不保存 mount flags。
+   原因：`nosuid`、`nodev`、`noexec` 和 atime policy 属于每个 KVFS `Mount`，
+   nodev factory 只选择或创建 filesystem/superblock。sysfs 复用共享实例，tmpfs 创建
+   新实例，对应各自的 Linux get-tree 语义；sysfs internal mount 防止共享树因最后一个
+   可见 mount 释放而 shutdown。
 
 ## Drop / 资源释放
 

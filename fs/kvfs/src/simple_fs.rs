@@ -139,7 +139,7 @@ impl SimpleFsNode {
     /// Returns this node's `inode::i_size`.
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> VfsResult<u64> {
-        Ok(0)
+        Ok(self.metadata.lock().size)
     }
 
     /// Writes back this simple node's inode-owned state.
@@ -155,6 +155,10 @@ impl Drop for SimpleFsNode {
 }
 
 impl InodeOperations for SimpleFsNode {
+    fn symlink_operations(&self) -> Option<&dyn crate::InodeSymlinkOperations> {
+        (self.metadata.lock().mode.node_type() == NodeType::Symlink).then_some(self)
+    }
+
     fn getattr(
         &self,
         _idmap: &crate::MountIdmap,
@@ -162,9 +166,7 @@ impl InodeOperations for SimpleFsNode {
         _request_mask: crate::GetattrRequestMask,
         _query_flags: crate::GetattrQueryFlags,
     ) -> VfsResult<Metadata> {
-        let mut metadata = self.metadata.lock().clone();
-        metadata.size = self.len()?;
-        Ok(metadata)
+        Ok(self.metadata.lock().clone())
     }
 
     fn setattr(
@@ -194,5 +196,16 @@ impl InodeOperations for SimpleFsNode {
             metadata.ctime = ctime;
         }
         Ok(())
+    }
+}
+
+impl crate::InodeSymlinkOperations for SimpleFsNode {
+    fn get_link(
+        &self,
+        _dentry: Option<&Dentry>,
+        inode: &crate::VfsInode,
+        _done: &mut crate::DelayedCall,
+    ) -> VfsResult<String> {
+        inode.cached_link().ok_or(crate::VfsError::InvalidData)
     }
 }

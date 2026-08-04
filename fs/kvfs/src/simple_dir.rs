@@ -19,8 +19,8 @@ use ksync::Mutex;
 use crate::{
     Dentry, DeviceId, DirContext, DirEntrySink, FileDirOperations, FileOperations,
     InodeDirOperations, InodeOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags,
-    NodePermission, NodeType, SeqFileInode, SimpleFile, Umode, VfsError, VfsFile, VfsInode,
-    VfsResult, inode_init_owner,
+    NodePermission, NodeType, SeqFileInode, Umode, VfsError, VfsFile, VfsInode, VfsResult,
+    inode_init_owner,
     libfs::{generic_read_dir, noop_fsync},
     path::{DOT, DOTDOT},
     simple_fs::{SimpleFs, SimpleFsNode},
@@ -492,19 +492,16 @@ impl<O: SimpleDirOps> InodeDirOperations for SimpleDirInodeOperations<O> {
             Umode::new(NodeType::Symlink, NodePermission::from_bits_truncate(0o777)),
             cred,
         );
-        let node = SimpleFile::new_symlink(
+        let node = Arc::new(SimpleFsNode::new_with_owner(
             self.dir.node.filesystem(),
-            target.to_owned(),
+            NodeType::Symlink,
             mode.permission(),
             uid,
             gid,
-        );
+        ));
+        node.metadata.lock().size = target.len() as u64;
         let init = node.inode_init();
-        let inode = VfsInode::new_file_with_flags(node, NodeFlags::empty(), init);
-        // The target is immutable, so cache it on the inode. `read_link` then
-        // serves it directly and skips `get_link`, avoiding the per-readlink
-        // `target.clone()` + `to_owned()` pair.
-        inode.set_cached_link(target.to_owned());
+        let inode = VfsInode::new_cached_symlink(node, NodeFlags::empty(), init, target.to_owned());
         let entry =
             self.dir
                 .ops

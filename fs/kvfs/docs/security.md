@@ -25,6 +25,8 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   的文件操作读取。
 - `AnonInodeFs::global()` 是运行时匿名文件创建入口，但它只接受已经由 boot 阶段
   初始化好的 singleton；不从用户输入直接触发全局 VFS 初始化。
+- 文件系统类型注册表只接受内核构造的静态描述符；用户提供的类型名只能执行精确查找，
+  不能安装或替换注册项。
 - 文件系统 mutation result 会进入 VFS cached inode attributes；错误 identity 或 immutable
   geometry 不可信。
 
@@ -88,28 +90,43 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   大写入变成原子写；部分写入后必须回退未提交的 source iterator 进度。
 - pathname FIFO 的自动 atime/mtime/ctime 更新必须经过 VFS mount/time policy 和
   filesystem `update_time` callback；匿名 pipe 不得更新 pathname inode metadata。
+- immutable simple symlink 的目标只由 `VfsInode` cached-link 状态持有；
+  `SimpleFsNode::i_size` 必须与目标字节长度一致，不能再由 closure 或额外字段保存副本。
 
 ## 线程安全
 
 共享 dentry、inode、mount 和 file 状态由 mutex、atomic、`Arc` 和 `Weak` 保护。
-可变 per-mount flags 与 superblock flags 分别由私有 `AtomicMountFlags` 和
-`AtomicSuperBlockFlags` 封装；原子存储只接受和返回强类型 `MountFlags`/
-`SuperBlockFlags`，并使用 relaxed ordering，因为 flags 不发布或保护其他状态。
-reconfigure 在替换 flags 前校验目标是当前 mount namespace 中已注册 mount 的根路径，并在
-发布拟议的 superblock flags 前调用 filesystem `reconfigure` hook。普通 remount 同步更新
-共享 superblock 的只读策略，bind remount 仅更新目标 mount。默认 hook 与 Linux 缺少
-reconfigure callback 时一致，接受纯 VFS flags 变更；固定只读介质的后端必须覆盖该 hook
-并拒绝读写转换。每个 superblock 的 reconfigure lock 串行化这一 hook 与 flags 发布，
-对应 Linux `s_umount` 的重挂载序列化职责。
-children map 与 superblock dcache 不嵌套持锁；namespace 操作先更新 parent 弱索引，
-再更新 dcache 强所有权。类型化 flags 是不可变值快照，不提供共享可变状态。
+可变 per-mount flags 存储在 `VfsMount::mnt_flags`，由 `flags()` 和 `set_flags()` 封装为
+强类型 `MountFlags`，并使用 relaxed ordering，因为 flags 不发布或保护其他 mount 状态。
+remount/reconfigure 在替换 flags 前校验目标是当前 mount namespace 中已注册 mount
+的根路径。普通 remount 独立接收 superblock flags 和 per-mount flags，并同步更新共享
+superblock 的只读策略；`MS_REMOUNT|MS_BIND` 仅更新目标 mount 的 per-mount flags。
+superblock flags 由 `AtomicSuperBlockFlags` 封装为强类型 `SuperBlockFlags`；普通 remount
+在发布拟议 flags 前调用 filesystem `reconfigure` hook，并由每个 superblock 的
+umount lock 串行化 hook、发布与最终 shutdown。最后 active 引用先在 lifecycle lock 下
+判定，在取得 umount lock 后重新校验并切换到 dying；shutdown callback 不持有 lifecycle
+lock，dying/dead 状态拒绝新的 mount activation。默认 hook 接受纯 VFS flags 变更，固定
+只读介质的后端必须拒绝读写转换。显式 filesystem sync 和全局 Weak registry sync snapshot
+也通过同一 umount lock 与 final shutdown 串行化，并跳过 dying/dead superblock。
+mount attach/detach 在 mountpoint inode namespace lock 下修改 topology。每个 child mount
+只用一个 mutex 保护完整 parent `Path`，parent child map 保存 `Weak<Mount>`，namespace
+registry 保存可见 mount 的 `Arc<Mount>`；detach 移除 registry 引用前先清空 parent path。
+attach、bind、remount 和 detach 都先用现有 registry 校验涉及的 mount 属于当前
+`MntNamespace`，并让 registry mutex 覆盖校验、topology 修改和 registry 提交，避免
+membership TOCTOU。递归 detach 把 child mountpoint 的 overmount stack 一并纳入收集，
+并在任何 topology 修改前验证完整集合；commit 阶段不再执行可失败校验。registry mutex
+在可能触发最后一个 mount 引用释放前显式释放。dentry children map 与 superblock dcache
+不嵌套持锁；namespace 操作先
+更新 parent 弱索引，再更新 dcache 强所有权。类型化 flags 是不可变值快照，不提供共享
+可变状态。
 
 regular-file inode 的 data lock 覆盖 generic buffered write 和整个 set-length callback；
 具体文件系统锁在 data lock 内获取。因此同一 inode 的 write、i_size publish、两轮 mmap
 invalidation 和 cache truncate 不会交错成两个 EOF source。
 
-所有 namespace lock 都是 sleepable lock。全局顺序为 superblock topology、父目录、
-子目录、非目录 inode，最后才是 dentry cache/location。cross-directory 由 parent dentry
+所有 namespace lock 都是 sleepable lock。mount tree 操作先取 mount-namespace registry
+mutex；其后全局顺序为 superblock topology、父目录、子目录、非目录 inode，最后才是
+dentry cache/location。cross-directory 由 parent dentry
 identity 决定，父目录锁按 ancestor-first 顺序；互不为祖先时先锁 source parent。目录
 inode 依赖单 alias 不变量，非目录 alias 对应的 inode lock 按 identity 去重并按指针值排序。
 mount topology lock 始终在相关 inode namespace lock 之后获取。
@@ -121,6 +138,9 @@ FIFO session 生命周期使用 inode pipe-slot lock 串行化 get/create/`files
 release/clear，slot lock 获取后才可获取 pipe state lock。reader/writer close 先释放
 pipe state lock，再进入 slot 生命周期路径，避免反向嵌套。同一 inode 因此不能同时发布
 两个活动 pipe session。
+
+文件系统类型注册表由独立 mutex 保护。boot 串行注册，查找返回按值复制的静态描述符，
+枚举返回快照；注册表锁内不调用 mount factory，避免把文件系统初始化带入全局临界区。
 
 Credential 本身是不可变 `Arc` 快照。权限检查期间不持有 task credential 锁，也不
 重新读取 current task，因此并发 `commit_creds()` 只能影响下一次操作。
@@ -147,7 +167,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-12 | `ftruncate` 因当前 pathname DAC 被错误拒绝或绕过写模式 | 中 | fd 操作复用 pathname truncate | `VfsFile::truncate` 先验证 `FMode::WRITE`，再走 opened truncate |
 | T-13 | 非 owner 直接修改 inode owner、mode 或显式时间 | 高 | syscall 或调用者直接进入后端 `setattr` | `Path` metadata API 在 mount write check 后统一执行 Linux owner/group/write policy |
 | T-14 | pathname socket 或其它 special inode 固定为 root | 高 | simple filesystem 动态 mknod 绕过 owner helper | `SimpleDir` mknod 使用 `inode_init_owner()`，仅支持持久插入的目录实现开放创建 |
-| T-25 | bind mount 卸载破坏源路径 | 高 | bind root 与源路径共享 dentry，却按独占 mount root 回收 | bind mount 带显式类型标记，卸载只移除 topology，不调用共享 dentry 的 `forget()` |
+| T-25 | 一个 mount 卸载破坏同一 superblock 的其它 mount | 高 | bind root 与源路径共享 dentry，却按 mount 创建来源选择性清理 dcache | mount 不保存 bind 来源标记；每个 `VfsMount` 持有 active 引用，只有计数归零才执行一次 superblock shutdown |
 | T-15 | core mutation result 污染错误的 live inode identity | 高 | bridge 把一个 inode 的 metadata 写入另一个 `VfsInode` | cached metadata refresh 校验 identity、node type、block geometry 和 `rdev` |
 | T-16 | truncate 窗口内 private mmap 在新 EOF 后重新 fault | 高 | i_size 晚于 cache truncate 发布，或只执行一次 unmap | inode data lock 串行化 write/truncate；`truncate_setsize()` 执行 i_size publish -> unmap -> cache truncate -> unmap |
 | T-17 | unlink 时过早触发磁盘 inode 回收 | 高 | dentry removal 与最后 open-file 引用混为一谈 | `Arc` inode identity 延迟 final teardown，磁盘回收只在 superblock `evict_inode()` hook 中执行 |
@@ -166,7 +186,11 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-22 | 目录 alias 形成两套 child cache 或绕过 topology 序列化 | 高 | 同一目录 inode 建立多个 live dentry | inode alias 表强制目录单 alias；lookup 复用已有 alias，rename topology 按 parent dentry identity 判定 |
 | T-23 | filesystem callback 替换 VFS 已检查的创建对象 | 高 | callback 返回另一个 parent/name 下的 dentry | create-like callback 只能实例化事务 negative dentry；lookup alternate result 校验 positive state、parent 和 name |
 | T-24 | 并发 slow lookup 建立重复 dentry | 高 | cache miss 检查与 candidate 发布分离，或等待者提前观察未完成对象 | candidate 在 callback 前原子加入 dcache；owner 保持 parallel-lookup 状态和 lookup mutex，等待者只在 lookup done 后读取结果 |
-| T-29 | 卸载先拆 topology 后发现后端写回失败 | 高 | running journal、dirty inode 或 final eviction metadata 尚未持久化 | topology 修改前执行全 superblock sync；普通 mount 在 dentry forget 后再次 sync；任一步失败都保留原 mount tree |
+| T-29 | detached mount 仍可沿旧 parent 返回原 namespace | 高 | 卸载只删除 parent child map，却保留 mount 中的 parent/mountpoint 状态 | parent 和 mountpoint 合并为一个受 mutex 保护的 `Option<Path>`；detach 在 mountpoint namespace lock 下移除 topology 并清空该 location |
+| T-30 | mount 支持集合与 `/proc/filesystems` 漂移 | 中 | syscall 和 procfs 各自维护文件系统名称或构造分支 | 两者都读取同一个 `FileSystemType` 注册表；重复名称注册失败 |
+| T-31 | immutable symlink target 出现两份可分离状态 | 中 | simple-file closure 和 inode cache 分别保存目标 | 创建时直接构造 cached-link inode；目标只存于 inode，node 只保存长度等元数据 |
+| T-34 | 最后一个 mount 释放时丢失 dirty page、inode metadata 或 journal checkpoint | 高 | topology detach 后 superblock 没有 active 生命周期，Weak registry 也无法保活 | `VfsMount` 获取/释放 superblock active 引用；最后一个引用在 umount lock 下执行 writeback、dcache eviction 和最终 filesystem/device sync；错误记录后仍完成 teardown |
+| T-35 | 递归卸载 overmount 子树留下 registry 中不可达 mount | 高 | 只遍历 visible children，或边遍历边修改 topology | 收集每个 child mountpoint 的完整 covers 链，先验证全部 registry membership，再执行无失败分支的 topology commit |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -180,7 +204,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | F-06 | 权限检查失败 | mode、owner 或组不允许请求 | 当前 VFS 操作返回 `PermissionDenied` | namespace 和 inode 状态保持不变 | 3 | 在后端 mutation 前完成通用检查并传播错误 |
 | F-07 | 后端不能保存 Unix owner | 磁盘格式没有 UID/GID | getattr 无法完整反映创建身份 | DAC 语义受文件系统能力限制 | 3 | 文档明确后端限制；支持 owner 的后端必须持久化 helper 结果 |
 | F-08 | split truncate 在 backing prepare 后 cache invalidation 失败 | 分配或 mapping invalidation 错误 | 当前 truncate 返回失败 | backing inode 可能保持 orphan/recovery state | 2 | 由具体文件系统的持久化 recovery protocol 收敛，禁止静默执行 finish |
-| F-09 | unmount writeback 失败 | 设备或 filesystem sync 错误 | 当前 unmount 返回失败 | mount 继续可见且可重试，不会静默丢弃 dirty state | 2 | dentry forget 和 topology detach 前同步；普通 mount 的 forget 后再同步一次 |
+| F-09 | 文件系统类型重复注册 | 启动接线重复或名称冲突 | 注册返回 `ResourceBusy` | boot 在用户态启动前停止 | 2 | boot 对每个内建类型恰好注册一次并把失败视为初始化错误 |
 
 校验失败会在 filesystem callback 前返回 typed VFS error。后端失败时 dentry cache
 location 保持不变，因为 cache commit 只在 callback 成功后执行；rename 所需 key 和 cache
@@ -193,8 +217,8 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 - FAT 等后端不能完整表达 Unix UID/GID owner。
 - 当前 POSIX rename 路径不支持 `RENAME_WHITEOUT`。inode lookup 和 getattr 的类型已
   建立，但尚未定义额外语义位；当前调用使用 empty flags。
-- superblock dentry cache 尚未实现 Linux 风格的 LRU/shrinker，当前依赖 namespace
-  删除和卸载路径主动驱逐。
+- superblock dentry cache 尚未实现 Linux 风格的 LRU/shrinker，当前依赖 unlink、rename
+  等 namespace 删除路径和最后 active mount shutdown 主动驱逐。
 - KVFS 提供 AddressSpace view invalidation 通知，但各文件系统仍需用 live mmap/truncate
   case 验证自身接线。
 - fast lookup 仍是 mutex-based，没有 RCU 或 rename sequence validation；同名 slow lookup
@@ -202,6 +226,7 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 - layered filesystem 的 lock ordering 尚未建模。
 - mount topology synchronization 与 superblock rename mutex 是不同机制，但均遵循已记录的
   inode-then-topology 嵌套顺序。
+- 文件系统类型当前不支持运行时卸载；注册项及其函数入口必须具有整个内核生命周期。
 
 ## 审计清单
 
@@ -211,6 +236,8 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 - 新 flags 组合是否补充冲突校验与行为测试。
 - dentry cache 插入、rename、unlink、forget 是否保持 parent 弱索引与 superblock
   强所有权同步。
+- mount attach/detach 是否校验当前 namespace membership、持有 mountpoint inode
+  namespace lock，并在 detach 后清空 parent location。
 - 没有外部 `Dentry` 引用时，hashed child 是否仍能参与目录非空判断。
 - 新增匿名 inode 使用点是否只调用 `AnonInodeFs::global()`，且不重新引入 lazy 首次访问
   初始化。
@@ -229,7 +256,13 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 - file-backed MM runtime 是否只保存 `VfsFile`，并经 `VfsFile::mapping()` 访问唯一的
   inode `AddressSpace`。
 - `release()` 与 final `evict_inode()` 是否保持为两个不同生命周期阶段。
+- 每个 `VfsMount` 是否恰好取得和释放一次 superblock active 引用，非最后 mount 是否避免
+  teardown，最后一个引用是否只执行一次 shutdown。
+- 递归 detach 是否包含 child overmount stack，并在修改 topology 前完成完整 registry 校验。
 - 每个 namespace mutation 是否获取父目录 exclusive lock。
+- 新文件系统是否只注册一个 canonical name，且 mount lookup 与
+  `/proc/filesystems` 没有新增平行分支。
+- immutable symlink target 是否只存于 inode cached-link 状态，metadata size 是否同步。
 - unlink/rmdir 和 rename replacement 是否锁住 victim inode。
 - cross-directory rename 是否先获取 topology mutex，再获取 inode lock。
 - directory lock 是否先于 non-directory lock 获取。

@@ -958,6 +958,26 @@ impl VfsInode {
         )
     }
 
+    /// Constructs a cached symbolic-link inode with no file or address-space operations.
+    pub(crate) fn new_cached_symlink<T>(
+        node: Arc<T>,
+        flags: NodeFlags,
+        init: VfsInodeInit,
+        target: String,
+    ) -> Arc<Self>
+    where
+        T: Any + Send + Sync + InodeOperations,
+    {
+        debug_assert_eq!(init.mode.node_type(), NodeType::Symlink);
+        debug_assert!(node.symlink_operations().is_some());
+        let private_data: Arc<dyn Any + Send + Sync> = node.clone();
+        let inode_operations: Arc<dyn InodeOperations> = node;
+        let inode =
+            Self::new_file_with_operation_tables(private_data, inode_operations, None, flags, init);
+        inode.set_cached_link(target);
+        inode
+    }
+
     /// Construct a special inode from filesystem-filled inode fields.
     pub fn new_special<T>(node: Arc<T>, flags: NodeFlags, mut init: VfsInodeInit) -> Arc<Self>
     where
@@ -1422,7 +1442,7 @@ impl VfsInode {
         self.attributes.insert_operation_flags(IOP_CACHED_LINK);
     }
 
-    fn cached_link(&self) -> Option<String> {
+    pub(crate) fn cached_link(&self) -> Option<String> {
         self.special_state.cached_link()
     }
 

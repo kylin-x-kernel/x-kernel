@@ -55,12 +55,21 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     root.add(
         "filesystems",
         SimpleFile::new_regular(fs.clone(), || {
-            // Keep this in sync with the `fs_type` match in `sys_mount`
-            // (`posix/fs/src/mount.rs`): only list types the mount syscall
-            // actually accepts, so userspace probing is not misled.
-            Ok(String::from(
-                "nodev\tproc\nnodev\tsysfs\nnodev\ttmpfs\nnodev\tdevtmpfs\n",
-            ))
+            let mut info = String::new();
+            for file_system_type in kvfs::registered_filesystems() {
+                writeln!(
+                    info,
+                    "{}\t{}",
+                    if file_system_type.requires_device() {
+                        ""
+                    } else {
+                        "nodev"
+                    },
+                    file_system_type.name(),
+                )
+                .unwrap();
+            }
+            Ok(info)
         }),
     );
     root.add("sys", {

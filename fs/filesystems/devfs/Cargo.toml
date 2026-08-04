@@ -14,7 +14,7 @@ input = ["dep:inputdev", "kclass/input"]
 serial = ["kclass/char", "dep:console_driver"]
 memtrack = ["kalloc/tracking", "dep:gimli"]
 dev-log = []
-dice = ["dep:dice_driver", "dep:klazy", "dep:tee_crypto"]
+dice = ["dep:dice_driver", "dep:tee_crypto"]
 
 [dependencies]
 kalloc.workspace = true
@@ -48,7 +48,7 @@ backtrace.workspace = true
 gimli = { version = "*", default-features = false, optional = true }
 dice_driver = { workspace = true, optional = true }
 inputdev = { workspace = true, optional = true }
-klazy = { workspace = true, optional = true }
+klazy.workspace = true
 rand_chacha = { version = "0.3", default-features = false }
 tee_crypto = { workspace = true, features = ["alloc"], optional = true }
 kclass.workspace = true

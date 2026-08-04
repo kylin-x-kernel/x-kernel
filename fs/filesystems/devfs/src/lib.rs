@@ -20,19 +20,36 @@ use alloc::sync::Arc;
 
 pub use device_file::DeviceFile;
 pub(crate) use device_file::{add_device_entry, device_dentry};
-use kvfs::{SimpleFs, SuperBlock, SuperBlockFlags};
+use klazy::Once;
+use kvfs::{FileSystemType, Mount, SimpleFs, SuperBlock, SuperBlockFlags, VfsResult};
 pub use nodes::pts::Ptmx;
 
 const DEVFS_MAGIC: u32 = 0x0102_1994;
+static DEVFS: Once<(Arc<SuperBlock>, Arc<Mount>)> = Once::new();
 
-/// Creates a devfs superblock for device access.
+fn mount_nodev(superblock_flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
+    Ok(new_devfs(superblock_flags))
+}
+
+/// Registered devtmpfs filesystem type.
+pub const FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("devtmpfs", mount_nodev);
+
+/// Returns the shared devtmpfs superblock for device access.
+///
+/// The singleton retains the internal root mount used for kernel device-node
+/// updates, corresponding to Linux's private devtmpfs mount.
 pub fn new_devfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
-    SimpleFs::new_with_superblock_flags(
-        "devfs".into(),
-        DEVFS_MAGIC,
-        superblock_flags,
-        root::builder,
-    )
+    let (super_block, _internal_mount) = DEVFS.call_once(|| {
+        let super_block = SimpleFs::new_with_superblock_flags(
+            "devtmpfs".into(),
+            DEVFS_MAGIC,
+            superblock_flags,
+            root::builder,
+        );
+        let internal_mount = Mount::new_root(&super_block);
+        (super_block, internal_mount)
+    });
+    super_block.clone()
 }
 
 /// Capture a snapshot of the firmware device tree blob.

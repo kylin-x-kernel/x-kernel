@@ -11,6 +11,7 @@ extern crate alloc;
 mod address_space;
 mod anon_inode;
 mod file;
+mod file_system_type;
 mod filename;
 mod kiocb;
 pub mod libfs;
@@ -37,6 +38,9 @@ pub use address_space::{
 };
 pub use anon_inode::{AnonInodeFs, init_anon_inodefs};
 pub use file::{FMode, FileDirOperations, FileOperations, VfsFile, VfsFileBuilder};
+pub use file_system_type::{
+    FileSystemType, get_filesystem_type, register_filesystem, registered_filesystems,
+};
 pub use filename::Filename;
 pub use kiocb::Kiocb;
 pub use lookup::{LookupFlags, LookupIntent, MagicLinkOps, ResolvedObject};

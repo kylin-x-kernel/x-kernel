@@ -32,6 +32,13 @@ use kvfs::{
 const BPF_FS_MAGIC: u32 = 0xcafe4a11;
 
 const DIR_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o755);
+
+fn mount_nodev(superblock_flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
+    Ok(new_bpffs(superblock_flags))
+}
+
+/// Registered BPF filesystem type.
+pub const FILE_SYSTEM_TYPE: kvfs::FileSystemType = kvfs::FileSystemType::nodev("bpf", mount_nodev);
 const PIN_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o600);
 
 /// Read-only map value snapshot bound to a loaded BPF program.

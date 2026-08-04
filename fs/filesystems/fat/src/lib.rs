@@ -5,7 +5,7 @@
 //! FAT filesystem implementation.
 //!
 //! When selected as the root filesystem, this crate provides
-//! [`fs_block::FileSystemType`].
+//! [`fs_block::RootFileSystem`].
 #![cfg_attr(any(not(test), doc), no_std)]
 #![feature(likely_unlikely)]
 #![allow(clippy::new_ret_no_self)]
@@ -27,7 +27,11 @@ use fs_block::SeekableDisk;
 use kclass::{BlockDeviceImpl, ClassDevice};
 
 #[fs_block::kiface::provide]
-impl fs_block::FileSystemType {
+impl fs_block::RootFileSystem {
+    fn name() -> &'static str {
+        "vfat"
+    }
+
     fn mount_bdev(
         device: ClassDevice<BlockDeviceImpl>,
         flags: kvfs::SuperBlockFlags,

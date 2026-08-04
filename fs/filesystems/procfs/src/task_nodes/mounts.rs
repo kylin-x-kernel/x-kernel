@@ -360,17 +360,8 @@ mod tests {
             SimpleDir::<DirMapping>::new_maker(fs, Arc::new(DirMapping::new()))
         });
 
-        // Create a root mount to act as the parent.
-        let root_mount = Mount::new_root(&fs);
-        let parent_path = root_mount.root_path();
-
-        // Create a non-root child mount with a devname.
-        let mount = Mount::new_with_flags_and_devname(
-            &fs,
-            Some(parent_path),
-            MountFlags::empty(),
-            Some("virtio-blk-0"),
-        );
+        let mount =
+            Mount::new_root_with_flags_and_devname(&fs, MountFlags::empty(), Some("virtio-blk-0"));
 
         let result = super::mount_source(&mount);
         assert_eq!(result, Some("virtio-blk-0".to_string()));
@@ -383,13 +374,7 @@ mod tests {
             SimpleDir::<DirMapping>::new_maker(fs, Arc::new(DirMapping::new()))
         });
 
-        // Create a root mount to act as the parent.
-        let root_mount = Mount::new_root(&fs);
-        let parent_path = root_mount.root_path();
-
-        // Create a non-root child mount without a devname.
-        let mount =
-            Mount::new_with_flags_and_devname(&fs, Some(parent_path), MountFlags::empty(), None);
+        let mount = Mount::new_root_with_flags_and_devname(&fs, MountFlags::empty(), None);
 
         let result = super::mount_source(&mount);
         assert_eq!(result, None);

@@ -19,7 +19,7 @@ tee = [
     "tipc?/tee",
 ]
 tee_ta_sign = ["tee_task_iface?/tee_ta_sign"]
-ebpf = ["dep:posix-bpf", "posix-bpf/ebpf", "posix-fs/ebpf"]
+ebpf = ["dep:posix-bpf", "posix-bpf/ebpf"]
 
 [dependencies]
 kalloc.workspace = true

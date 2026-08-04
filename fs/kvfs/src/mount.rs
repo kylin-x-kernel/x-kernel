@@ -57,58 +57,48 @@ bitflags::bitflags! {
     }
 }
 
-/// Atomic storage that preserves [`MountFlags`] as the semantic interface.
-///
-/// Relaxed ordering is sufficient because the flags neither publish nor guard
-/// any other mount state.
-#[derive(Debug)]
-struct AtomicMountFlags(AtomicU32);
-
-impl AtomicMountFlags {
-    fn new(flags: MountFlags) -> Self {
-        Self(AtomicU32::new(flags.bits()))
-    }
-
-    fn load(&self) -> MountFlags {
-        MountFlags::from_bits_truncate(self.0.load(Ordering::Relaxed))
-    }
-
-    fn store(&self, flags: MountFlags) {
-        self.0.store(flags.bits(), Ordering::Relaxed);
-    }
-}
-
 /// `struct vfsmount`.
 #[derive(Debug)]
 pub struct VfsMount {
     mnt_root: Dentry,
     mnt_sb: Arc<SuperBlock>,
-    mnt_flags: AtomicMountFlags,
+    mnt_flags: AtomicU32,
 }
 
 impl VfsMount {
     fn new(fs: &Arc<SuperBlock>, flags: MountFlags) -> Self {
+        fs.activate_mount();
         Self {
             mnt_root: fs.root_dir(),
             mnt_sb: fs.clone(),
-            mnt_flags: AtomicMountFlags::new(flags),
+            mnt_flags: AtomicU32::new(flags.bits()),
         }
     }
 
-    fn clone_from_mount(mount: &Mount) -> Self {
-        Self {
-            mnt_root: mount.mnt.mnt_root.clone(),
-            mnt_sb: mount.mnt.mnt_sb.clone(),
-            mnt_flags: AtomicMountFlags::new(mount.flags()),
-        }
-    }
-
-    fn bind_from_path(source: &Path, flags: MountFlags) -> Self {
+    fn clone_from_path(source: &Path) -> Self {
+        let super_block = source.super_block().clone();
+        super_block.activate_mount();
         Self {
             mnt_root: source.dentry.clone(),
-            mnt_sb: source.super_block().clone(),
-            mnt_flags: AtomicMountFlags::new(flags),
+            mnt_sb: super_block,
+            mnt_flags: AtomicU32::new(source.mount().flags().bits()),
         }
+    }
+
+    // Mount flags neither publish nor guard other state, so relaxed ordering
+    // is sufficient for both snapshots and replacements.
+    fn flags(&self) -> MountFlags {
+        MountFlags::from_bits_truncate(self.mnt_flags.load(Ordering::Relaxed))
+    }
+
+    fn set_flags(&self, flags: MountFlags) {
+        self.mnt_flags.store(flags.bits(), Ordering::Relaxed);
+    }
+}
+
+impl Drop for VfsMount {
+    fn drop(&mut self) {
+        self.mnt_sb.deactivate_mount();
     }
 }
 
@@ -158,7 +148,12 @@ impl MntNamespace {
     fn build_initial_mount_tree(root_fs: &Arc<SuperBlock>) -> VfsResult<Arc<Self>> {
         let namespace_root = new_initial_nullfs_superblock();
         let namespace = Self::new_root(&namespace_root, initial_user_namespace());
-        namespace.attach(&namespace.root_path(), root_fs)?;
+        namespace.attach_with_flags_and_devname(
+            &namespace.root_path(),
+            root_fs,
+            MountFlags::RELATIME,
+            None,
+        )?;
         Ok(namespace)
     }
 
@@ -169,6 +164,7 @@ impl MntNamespace {
     /// shared with the source filesystem instances, matching Linux's mount-tree
     /// copy semantics.
     pub fn clone_with_root_and_pwd(&self, root: &Path, pwd: &Path) -> VfsResult<NamespaceClone> {
+        let _mounts_guard = self.mounts.lock();
         let mut mount_map = HashMap::new();
         let cloned_root = clone_mount_tree(&self.root, None, &mut mount_map);
         let namespace = Arc::new(Self {
@@ -221,9 +217,9 @@ impl MntNamespace {
         self.root_path().resolve_final_mount()
     }
 
-    /// Mounts a filesystem at a resolved mountpoint with the default relatime policy.
+    /// Mounts a filesystem at a resolved mountpoint without per-mount flags.
     pub fn attach(&self, mountpoint: &Path, fs: &Arc<SuperBlock>) -> VfsResult<Arc<Mount>> {
-        self.attach_with_flags_and_devname(mountpoint, fs, MountFlags::RELATIME, None)
+        self.attach_with_flags_and_devname(mountpoint, fs, MountFlags::empty(), None)
     }
 
     /// Mounts a filesystem with per-mount flags and device name at a resolved mountpoint.
@@ -234,79 +230,98 @@ impl MntNamespace {
         flags: MountFlags,
         devname: Option<&str>,
     ) -> VfsResult<Arc<Mount>> {
+        let mut mounts = self.mounts.lock();
+        Self::require_mount(&mounts, mountpoint.mount())?;
         let mount = mountpoint.mount_filesystem_with_flags_and_devname(fs, flags, devname)?;
-        self.mounts.lock().insert(mount.mount_id(), mount.clone());
+        mounts.insert(mount.mount_id(), mount.clone());
         Ok(mount)
     }
 
     /// Creates a non-recursive bind mount of `source` at `mountpoint`.
     ///
-    /// The new mount shares the source dentry and superblock while using the
-    /// caller-provided per-mount `flags`.
-    pub fn attach_bind(
-        &self,
-        source: &Path,
-        mountpoint: &Path,
-        flags: MountFlags,
-    ) -> VfsResult<Arc<Mount>> {
-        let mount = mountpoint.mount_bind(source, flags)?;
-        self.mounts.lock().insert(mount.mount_id(), mount.clone());
+    /// The new mount shares the source dentry and superblock and inherits the
+    /// source mount's per-mount flags.
+    pub fn attach_bind(&self, source: &Path, mountpoint: &Path) -> VfsResult<Arc<Mount>> {
+        let mut mounts = self.mounts.lock();
+        Self::require_mount(&mounts, source.mount())?;
+        Self::require_mount(&mounts, mountpoint.mount())?;
+        let mount = mountpoint.mount_bind(source)?;
+        mounts.insert(mount.mount_id(), mount.clone());
         Ok(mount)
     }
 
-    /// Reconfigures the mount and shared superblock rooted at `target`.
+    /// Remounts `target` with independent superblock and per-mount flags.
     ///
     /// Returns [`VfsError::InvalidInput`] unless `target` is the root path of
     /// a mount registered in this namespace.
-    pub fn reconfigure_mount(&self, target: &Path, flags: MountFlags) -> VfsResult<()> {
-        let mount = self.registered_mount_at(target)?;
+    pub fn remount(
+        &self,
+        target: &Path,
+        superblock_flags: SuperBlockFlags,
+        mount_flags: MountFlags,
+    ) -> VfsResult<()> {
+        let mounts = self.mounts.lock();
+        let mount = Self::registered_mount_at(&mounts, target)?;
         mount
             .super_block()
-            .reconfigure_readonly(flags.contains(MountFlags::RDONLY))?;
+            .reconfigure_readonly(superblock_flags.contains(SuperBlockFlags::RDONLY))?;
+        mount.set_flags(mount_flags);
+        Ok(())
+    }
+
+    /// Replaces only the per-mount flags of the mount rooted at `target`.
+    pub fn reconfigure_mount(&self, target: &Path, flags: MountFlags) -> VfsResult<()> {
+        let mounts = self.mounts.lock();
+        let mount = Self::registered_mount_at(&mounts, target)?;
         mount.set_flags(flags);
         Ok(())
     }
 
-    /// Replaces only the per-mount flags of a bind mount rooted at `target`.
-    pub fn reconfigure_bind_mount(&self, target: &Path, flags: MountFlags) -> VfsResult<()> {
-        let mount = self.registered_mount_at(target)?;
-        mount.set_flags(flags);
-        Ok(())
-    }
-
-    fn registered_mount_at<'a>(&self, target: &'a Path) -> VfsResult<&'a Arc<Mount>> {
+    fn registered_mount_at<'a>(
+        mounts: &HashMap<u64, Arc<Mount>>,
+        target: &'a Path,
+    ) -> VfsResult<&'a Arc<Mount>> {
         if !target.is_mount_root() {
             return Err(VfsError::InvalidInput);
         }
 
         let mount = target.mount();
-        if !self
-            .mounts
-            .lock()
+        Self::require_mount(mounts, mount)?;
+        Ok(mount)
+    }
+
+    fn require_mount(mounts: &HashMap<u64, Arc<Mount>>, mount: &Arc<Mount>) -> VfsResult<()> {
+        mounts
             .get(&mount.mount_id())
             .is_some_and(|registered| Arc::ptr_eq(registered, mount))
-        {
-            return Err(VfsError::InvalidInput);
-        }
-        Ok(mount)
+            .then_some(())
+            .ok_or(VfsError::InvalidInput)
     }
 
     /// Unmounts one visible mount from this namespace.
     pub fn detach(&self, path: &Path) -> VfsResult<()> {
-        let removed = path.mount().clone();
+        let mut mounts = self.mounts.lock();
+        let removed = Self::registered_mount_at(&mounts, path)?.clone();
         path.unmount()?;
-        self.mounts.lock().remove(&removed.mount_id());
+        mounts.remove(&removed.mount_id());
+        drop(mounts);
         Ok(())
     }
 
     /// Unmounts a visible mount tree from this namespace.
     pub fn detach_tree(&self, path: &Path) -> VfsResult<()> {
-        let removed = collect_mount_tree(path.mount());
-        path.unmount_tree()?;
         let mut mounts = self.mounts.lock();
-        for mount in removed {
+        let root = Self::registered_mount_at(&mounts, path)?.clone();
+        let removed = root.collect_subtree();
+        for mount in &removed {
+            Self::require_mount(&mounts, mount)?;
+        }
+
+        path.detach_mount_subtree(&removed)?;
+        for mount in &removed {
             mounts.remove(&mount.mount_id());
         }
+        drop(mounts);
         Ok(())
     }
 }
@@ -326,8 +341,7 @@ pub struct NamespaceClone {
 #[derive(Debug)]
 pub struct Mount {
     mnt: VfsMount,
-    mnt_parent: Option<Weak<Mount>>,
-    mnt_mountpoint: Option<Dentry>,
+    mnt_location: Mutex<Option<Path>>,
     mnt_mounts: Mutex<HashMap<DentryKey, Weak<Self>>>,
     mnt_id: u64,
     /// Mount that this one covers (for overmount).
@@ -336,72 +350,53 @@ pub struct Mount {
     /// the old mount is stored here so it can be restored on unmount.
     covers: Mutex<Option<Arc<Self>>>,
     mnt_devname: Option<String>,
-    is_bound: bool,
 }
 
 impl Mount {
-    /// Creates a new mount with the default relatime policy at an optional parent path.
-    pub fn new(fs: &Arc<SuperBlock>, location_in_parent: Option<Path>) -> Arc<Self> {
-        Self::new_with_flags_and_devname(fs, location_in_parent, MountFlags::RELATIME, None)
-    }
-
-    /// Creates a new mount with per-mount flags and device name.
-    pub fn new_with_flags_and_devname(
+    /// Creates a root mount with per-mount flags and device name.
+    pub fn new_root_with_flags_and_devname(
         fs: &Arc<SuperBlock>,
-        location_in_parent: Option<Path>,
         flags: MountFlags,
         devname: Option<&str>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new(Self::new_detached(fs, flags, devname))
+    }
+
+    fn new_detached(fs: &Arc<SuperBlock>, flags: MountFlags, devname: Option<&str>) -> Self {
+        Self {
             mnt: VfsMount::new(fs, flags),
-            mnt_parent: location_in_parent
-                .as_ref()
-                .map(|path| Arc::downgrade(&path.mnt)),
-            mnt_mountpoint: location_in_parent.as_ref().map(|path| path.dentry.clone()),
+            mnt_location: Mutex::default(),
             mnt_mounts: Mutex::default(),
             mnt_id: MOUNT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             covers: Mutex::default(),
             mnt_devname: devname.map(|s| s.to_string()),
-            is_bound: false,
-        })
+        }
     }
 
-    fn clone_mount(source: &Arc<Self>, location_in_parent: Option<Path>) -> Arc<Self> {
-        Arc::new(Self {
-            mnt: VfsMount::clone_from_mount(source),
-            mnt_parent: location_in_parent
-                .as_ref()
-                .map(|path| Arc::downgrade(&path.mnt)),
-            mnt_mountpoint: location_in_parent.as_ref().map(|path| path.dentry.clone()),
+    fn clone_mnt(source: &Path) -> Self {
+        Self {
+            mnt: VfsMount::clone_from_path(source),
+            mnt_location: Mutex::default(),
             mnt_mounts: Mutex::default(),
             mnt_id: MOUNT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             covers: Mutex::default(),
-            mnt_devname: source.mnt_devname.clone(),
-            is_bound: source.is_bound,
-        })
+            mnt_devname: source.mount().mnt_devname.clone(),
+        }
     }
 
-    fn new_bind(source: &Path, location_in_parent: Path, flags: MountFlags) -> Arc<Self> {
-        Arc::new(Self {
-            mnt: VfsMount::bind_from_path(source, flags),
-            mnt_parent: Some(Arc::downgrade(&location_in_parent.mnt)),
-            mnt_mountpoint: Some(location_in_parent.dentry.clone()),
-            mnt_mounts: Mutex::default(),
-            mnt_id: MOUNT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
-            covers: Mutex::default(),
-            mnt_devname: source.mnt.mnt_devname.clone(),
-            is_bound: true,
-        })
+    fn into_arc_at(mut self, location_in_parent: Option<Path>) -> Arc<Self> {
+        self.mnt_location = Mutex::new(location_in_parent);
+        Arc::new(self)
     }
 
     /// Creates a root mount for a filesystem.
     pub fn new_root(fs: &Arc<SuperBlock>) -> Arc<Self> {
-        Self::new(fs, None)
+        Self::new_root_with_flags_and_devname(fs, MountFlags::empty(), None)
     }
 
     /// Creates a root mount with per-mount flags.
     pub fn new_root_with_flags(fs: &Arc<SuperBlock>, flags: MountFlags) -> Arc<Self> {
-        Self::new_with_flags_and_devname(fs, None, flags, None)
+        Self::new_root_with_flags_and_devname(fs, flags, None)
     }
 
     /// Return a `Path` representing the mount root.
@@ -448,15 +443,12 @@ impl Mount {
 
     /// Returns the path in the parent mount.
     pub fn location(&self) -> Option<Path> {
-        Some(Path::new(
-            self.mnt_parent.as_ref()?.upgrade()?,
-            self.mnt_mountpoint.as_ref()?.clone(),
-        ))
+        self.mnt_location.lock().clone()
     }
 
     /// Returns whether this mount has no parent mount.
     pub fn is_root(&self) -> bool {
-        self.mnt_parent.is_none()
+        self.mnt_location.lock().is_none()
     }
 
     /// Returns the mount namespace identity assigned to this mount object.
@@ -479,11 +471,11 @@ impl Mount {
 
     /// Returns this mount's flags.
     pub fn flags(&self) -> MountFlags {
-        self.mnt.mnt_flags.load()
+        self.mnt.flags()
     }
 
     fn set_flags(&self, flags: MountFlags) {
-        self.mnt.mnt_flags.store(flags);
+        self.mnt.set_flags(flags);
     }
 
     /// Returns whether this mountpoint is mounted read-only.
@@ -502,6 +494,23 @@ impl Mount {
 
     fn covered_mount(&self) -> Option<Arc<Self>> {
         self.covers.lock().clone()
+    }
+
+    fn collect_subtree(self: &Arc<Self>) -> Vec<Arc<Self>> {
+        let mut mounts = vec![self.clone()];
+        let mut index = 0;
+        while index < mounts.len() {
+            let mount = mounts[index].clone();
+            for child in mount.children() {
+                let mut layer = Some(child);
+                while let Some(mount) = layer {
+                    layer = mount.covered_mount();
+                    mounts.push(mount);
+                }
+            }
+            index += 1;
+        }
+        mounts
     }
 
     fn child_mount_at(&self, dentry: &Dentry) -> Option<Arc<Self>> {
@@ -523,6 +532,10 @@ impl Mount {
 
     fn remove_child_mount(&self, mountpoint: &Dentry) {
         self.mnt_mounts.lock().remove(&mountpoint.key());
+    }
+
+    fn detach(&self) {
+        self.mnt_location.lock().take();
     }
 }
 
@@ -677,7 +690,7 @@ impl Path {
         self.mnt.location()?.parent()
     }
 
-    /// Returns `true` if this is the global root location.
+    /// Returns `true` if this is the root of a mount tree.
     pub fn is_root(&self) -> bool {
         self.mnt.is_root() && self.dentry.is_root_of_mount()
     }
@@ -1150,30 +1163,22 @@ impl Path {
         flags: MountFlags,
         devname: Option<&str>,
     ) -> VfsResult<Arc<Mount>> {
-        self.dentry.as_dir()?;
-        let inode = self.inode();
-        let _namespace_guard = inode.lock_namespace_exclusive();
-        let result = Mount::new_with_flags_and_devname(fs, Some(self.clone()), flags, devname);
-        if let Some(old) = self.mnt.install_child_mount(&self.dentry, &result) {
-            *result.covers.lock() = Some(old);
-        }
-        Ok(result)
+        self.graft_tree(Mount::new_detached(fs, flags, devname))
     }
 
-    fn mount_bind(&self, source: &Path, flags: MountFlags) -> VfsResult<Arc<Mount>> {
-        self.check_writable_mount()?;
-        if source.is_dir() != self.is_dir() {
-            // Describe the *source* object's type so the error is unambiguous;
-            // Linux `mount(2)` returns `ENOTDIR` for a dir/non-dir mismatch.
-            return Err(if source.is_dir() {
-                VfsError::IsADirectory
-            } else {
-                VfsError::NotADirectory
-            });
-        }
+    fn mount_bind(&self, source: &Path) -> VfsResult<Arc<Mount>> {
+        self.graft_tree(Mount::clone_mnt(source))
+    }
+
+    fn graft_tree(&self, mount: Mount) -> VfsResult<Arc<Mount>> {
         let inode = self.inode();
         let _namespace_guard = inode.lock_namespace_exclusive();
-        let result = Mount::new_bind(source, self.clone(), flags);
+        if mount.mnt.mnt_root.as_dir().is_ok() != self.is_dir() {
+            // Linux `graft_tree()` returns `ENOTDIR` for either direction of
+            // a directory/non-directory mismatch.
+            return Err(VfsError::NotADirectory);
+        }
+        let result = mount.into_arc_at(Some(self.clone()));
         if let Some(old) = self.mnt.install_child_mount(&self.dentry, &result) {
             *result.covers.lock() = Some(old);
         }
@@ -1185,75 +1190,84 @@ impl Path {
         if !self.dentry.ptr_eq(&self.mnt.mnt.mnt_root) {
             return Err(VfsError::InvalidInput);
         }
-        if let Some(parent_path) = self.mnt.location() {
-            if !parent_path
-                .mnt
-                .child_mount_at(&parent_path.dentry)
-                .is_some_and(|mount| Arc::ptr_eq(&mount, &self.mnt))
-            {
-                return Err(VfsError::InvalidInput);
-            }
-            if !self.mnt.mnt_mounts.lock().is_empty() {
-                return Err(VfsError::ResourceBusy);
-            }
+        let parent_path = self.mnt.location().ok_or(VfsError::InvalidInput)?;
+        let inode = parent_path.inode();
+        let _namespace_guard = inode.lock_namespace_exclusive();
+        if !parent_path
+            .mnt
+            .child_mount_at(&parent_path.dentry)
+            .is_some_and(|mount| Arc::ptr_eq(&mount, &self.mnt))
+        {
+            return Err(VfsError::InvalidInput);
+        }
+        if !self.mnt.mnt_mounts.lock().is_empty() {
+            return Err(VfsError::ResourceBusy);
         }
 
-        let super_block = self.super_block().clone();
-        super_block.sync_fs()?;
-        if !self.mnt.is_bound {
-            self.dentry.as_dir()?.forget();
-            // Dentry eviction may release the final zero-link inode and publish
-            // new filesystem metadata, so drain that work before detaching.
-            super_block.sync_fs()?;
-        }
-
-        if let Some(parent_path) = self.mnt.location() {
-            let covered = self.mnt.covers.lock().take();
-            match covered {
-                Some(ref mount) => {
-                    parent_path
-                        .mnt
-                        .install_child_mount(&parent_path.dentry, mount);
-                }
-                None => {
-                    parent_path.mnt.remove_child_mount(&parent_path.dentry);
-                }
+        let covered = self.mnt.covers.lock().take();
+        match covered {
+            Some(ref mount) => {
+                parent_path
+                    .mnt
+                    .install_child_mount(&parent_path.dentry, mount);
+            }
+            None => {
+                parent_path.mnt.remove_child_mount(&parent_path.dentry);
             }
         }
+        self.mnt.detach();
         Ok(())
     }
 
     /// Recursively unmount this filesystem and all children.
+    #[cfg(unittest)]
     fn unmount_tree(&self) -> VfsResult<()> {
-        // Match `unmount()`: a bind mount's root dentry need not be the root of
-        // the source filesystem, so test against this mount's own root rather
-        // than `is_root_of_mount()` (which would reject non-root bind sources).
+        let mounts = self.mnt.collect_subtree();
+        self.detach_mount_subtree(&mounts)
+    }
+
+    fn detach_mount_subtree(&self, mounts: &[Arc<Mount>]) -> VfsResult<()> {
         if !self.dentry.ptr_eq(&self.mnt.mnt.mnt_root) {
             return Err(VfsError::InvalidInput);
         }
-        let remaining: Vec<_> = self
+        if !mounts
+            .first()
+            .is_some_and(|root| Arc::ptr_eq(root, &self.mnt))
+        {
+            return Err(VfsError::InvalidInput);
+        }
+
+        let parent_path = self.mnt.location().ok_or(VfsError::InvalidInput)?;
+        let inode = parent_path.inode();
+        let _namespace_guard = inode.lock_namespace_exclusive();
+        if !parent_path
             .mnt
-            .mnt_mounts
-            .lock()
-            .iter()
-            .map(|(key, child)| (key.clone(), child.clone()))
-            .collect();
-        let mut failed = false;
-        for (key, child) in remaining {
-            if let Some(mount) = child.upgrade()
-                && let Err(_e) = mount.root_path().unmount_tree()
-            {
-                failed = true;
-                self.mnt
-                    .mnt_mounts
-                    .lock()
-                    .insert(key, Arc::downgrade(&mount));
+            .child_mount_at(&parent_path.dentry)
+            .is_some_and(|mount| Arc::ptr_eq(&mount, &self.mnt))
+        {
+            return Err(VfsError::InvalidInput);
+        }
+
+        let covered = self.mnt.covers.lock().take();
+        match covered {
+            Some(ref mount) => {
+                parent_path
+                    .mnt
+                    .install_child_mount(&parent_path.dentry, mount);
             }
+            None => parent_path.mnt.remove_child_mount(&parent_path.dentry),
         }
-        if failed {
-            return Err(VfsError::ResourceBusy);
+
+        // All fallible checks complete before this commit phase. The namespace
+        // entry point also validates registry membership for every layer. The
+        // remaining operations are infallible, so an overmount cannot be
+        // restored halfway and leave stale registry entries.
+        for mount in mounts {
+            mount.mnt_mounts.lock().clear();
+            mount.covers.lock().take();
+            mount.detach();
         }
-        self.unmount()
+        Ok(())
     }
 
     /// Changes a regular file length through the VFS truncate path.
@@ -1291,23 +1305,12 @@ impl Path {
     }
 }
 
-fn collect_mount_tree(root: &Arc<Mount>) -> Vec<Arc<Mount>> {
-    let mut mounts = vec![root.clone()];
-    let mut index = 0;
-    while index < mounts.len() {
-        let mount = mounts[index].clone();
-        mounts.extend(mount.children());
-        index += 1;
-    }
-    mounts
-}
-
 fn clone_mount_tree(
     source: &Arc<Mount>,
     location_in_parent: Option<Path>,
     mount_map: &mut HashMap<usize, Arc<Mount>>,
 ) -> Arc<Mount> {
-    let cloned = Mount::clone_mount(source, location_in_parent);
+    let cloned = Mount::clone_mnt(&source.root_path()).into_arc_at(location_in_parent);
     mount_map.insert(Arc::as_ptr(source) as usize, cloned.clone());
 
     if let Some(covered) = source.covered_mount() {
@@ -1318,10 +1321,9 @@ fn clone_mount_tree(
 
     for child in source.children() {
         let mountpoint = child
-            .mnt_mountpoint
-            .as_ref()
+            .location()
             .expect("child mount must have mountpoint")
-            .clone();
+            .dentry;
         let location = Path::new(cloned.clone(), mountpoint.clone());
         let cloned_child = clone_mount_tree(&child, Some(location), mount_map);
         cloned.install_child_mount(&mountpoint, &cloned_child);
@@ -1378,28 +1380,6 @@ mod tests {
         mount_flags: StatFsFlags,
     }
 
-    struct SyncTrackingFilesystem {
-        sync_count: Mutex<usize>,
-        should_fail_sync: Mutex<bool>,
-    }
-
-    impl SyncTrackingFilesystem {
-        fn new() -> Self {
-            Self {
-                sync_count: Mutex::new(0),
-                should_fail_sync: Mutex::new(false),
-            }
-        }
-
-        fn sync_count(&self) -> usize {
-            *self.sync_count.lock()
-        }
-
-        fn fail_sync(&self) {
-            *self.should_fail_sync.lock() = true;
-        }
-    }
-
     impl SuperBlockOperations for MockFilesystem {
         fn name(&self) -> &str {
             "mockfs"
@@ -1416,25 +1396,6 @@ mod tests {
                 return Err(VfsError::ReadOnlyFilesystem);
             }
             Ok(())
-        }
-    }
-
-    impl SuperBlockOperations for SyncTrackingFilesystem {
-        fn name(&self) -> &str {
-            "sync-tracking-fs"
-        }
-
-        fn statfs(&self) -> VfsResult<StatFs> {
-            statfs()
-        }
-
-        fn sync_fs(&self) -> VfsResult<()> {
-            *self.sync_count.lock() += 1;
-            if *self.should_fail_sync.lock() {
-                Err(VfsError::Io)
-            } else {
-                Ok(())
-            }
         }
     }
 
@@ -1610,17 +1571,6 @@ mod tests {
         )
     }
 
-    fn sync_tracking_filesystem() -> (Arc<SuperBlock>, Arc<SyncTrackingFilesystem>) {
-        let inode = VfsInode::new_openable_dir(
-            Arc::new(MockDirOps::new(StatFsFlags::empty(), 1)),
-            inode_init(1),
-        );
-        let root = Dentry::new_dir_from_inode(inode, None, String::new());
-        let operations = Arc::new(SyncTrackingFilesystem::new());
-        let super_block = SuperBlock::new(operations.clone(), root);
-        (super_block, operations)
-    }
-
     fn statfs() -> VfsResult<StatFs> {
         Ok(StatFs {
             fs_type: 0,
@@ -1647,7 +1597,7 @@ mod tests {
         let mount = Mount::new_root(&fs);
         let root = mount.root_path();
 
-        assert_eq!(mount.flags(), MountFlags::RELATIME);
+        assert_eq!(mount.flags(), MountFlags::empty());
         assert!(!mount.is_readonly());
         assert!(!root.is_mount_readonly());
         assert!(!root.is_effectively_readonly());
@@ -1762,35 +1712,6 @@ mod tests {
     }
 
     #[def_test]
-    fn test_unmount_syncs_filesystem_before_detaching_mount() {
-        let root_fs = mock_filesystem(StatFsFlags::empty());
-        let (child_fs, sync_tracking) = sync_tracking_filesystem();
-        let root_mount = Mount::new_root(&root_fs);
-        let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
-        let child_mount = mount_filesystem(&mount_dir, &child_fs).unwrap();
-
-        child_mount.root_path().unmount().unwrap();
-
-        assert_eq!(sync_tracking.sync_count(), 2);
-        assert_eq!(root_mount.children().len(), 0);
-    }
-
-    #[def_test]
-    fn test_unmount_sync_failure_preserves_mount_tree() {
-        let root_fs = mock_filesystem(StatFsFlags::empty());
-        let (child_fs, sync_tracking) = sync_tracking_filesystem();
-        let root_mount = Mount::new_root(&root_fs);
-        let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
-        let child_mount = mount_filesystem(&mount_dir, &child_fs).unwrap();
-        sync_tracking.fail_sync();
-
-        assert_eq!(child_mount.root_path().unmount(), Err(VfsError::Io));
-        assert_eq!(sync_tracking.sync_count(), 1);
-        assert_eq!(root_mount.children().len(), 1);
-        assert!(Arc::ptr_eq(&root_mount.children()[0], &child_mount));
-    }
-
-    #[def_test]
     fn test_mount_root_keeps_root_dentry_name_and_dotdot_crosses_mount() {
         let root_fs = mock_filesystem(StatFsFlags::empty());
         let child_fs = mock_filesystem(StatFsFlags::empty());
@@ -1865,12 +1786,8 @@ mod tests {
         let root = namespace.root_path();
         let mountpoint = lookup_child_in_mount(&root, "mnt").unwrap();
 
-        let bind_flags = MountFlags::NODEV | MountFlags::NOEXEC;
-        let bind = namespace
-            .attach_bind(&root, &mountpoint, bind_flags)
-            .unwrap();
-        assert!(bind.is_bound);
-        assert_eq!(bind.flags(), bind_flags);
+        let bind = namespace.attach_bind(&root, &mountpoint).unwrap();
+        assert_eq!(bind.flags(), root.mount().flags());
         assert_eq!(bind.root_path().inode_key(), root.inode_key());
         assert!(Arc::ptr_eq(
             lookup_no_follow(&root, "mnt").unwrap().mount(),
@@ -1886,7 +1803,7 @@ mod tests {
     }
 
     #[def_test]
-    fn test_reconfigure_updates_mount_and_shared_superblock_flags() {
+    fn test_remount_updates_mount_and_shared_superblock_flags() {
         let root_fs = mock_filesystem(StatFsFlags::empty());
         let child_fs = mock_filesystem(StatFsFlags::empty());
         let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
@@ -1894,7 +1811,7 @@ mod tests {
         let mountpoint = lookup_child_in_mount(&root, "mnt").unwrap();
 
         assert_eq!(
-            namespace.reconfigure_mount(&mountpoint, MountFlags::RDONLY),
+            namespace.remount(&mountpoint, SuperBlockFlags::RDONLY, MountFlags::RDONLY),
             Err(VfsError::InvalidInput)
         );
 
@@ -1902,12 +1819,16 @@ mod tests {
         let child_root = child.root_path();
         let bind_mountpoint = lookup_child_in_mount(&child_root, "mnt").unwrap();
         let bind = namespace
-            .attach_bind(&child_root, &bind_mountpoint, MountFlags::empty())
+            .attach_bind(&child_root, &bind_mountpoint)
             .unwrap();
         let bind_root = bind.root_path();
 
         namespace
-            .reconfigure_mount(&child_root, MountFlags::RDONLY | MountFlags::NOEXEC)
+            .remount(
+                &child_root,
+                SuperBlockFlags::RDONLY,
+                MountFlags::RDONLY | MountFlags::NOEXEC,
+            )
             .unwrap();
 
         assert_eq!(child.flags(), MountFlags::RDONLY | MountFlags::NOEXEC);
@@ -1922,13 +1843,13 @@ mod tests {
         );
 
         namespace
-            .reconfigure_mount(&child_root, MountFlags::NOEXEC)
+            .remount(&child_root, SuperBlockFlags::empty(), MountFlags::NOEXEC)
             .unwrap();
         assert!(child_root.check_writable_mount().is_ok());
         assert!(bind_root.check_writable_mount().is_ok());
 
         namespace
-            .reconfigure_bind_mount(&bind_root, MountFlags::RDONLY)
+            .reconfigure_mount(&bind_root, MountFlags::RDONLY)
             .unwrap();
         assert!(child_root.check_writable_mount().is_ok());
         assert_eq!(
@@ -1947,7 +1868,11 @@ mod tests {
         let child = namespace.attach(&mountpoint, &child_fs).unwrap();
 
         assert_eq!(
-            namespace.reconfigure_mount(&child.root_path(), MountFlags::empty()),
+            namespace.remount(
+                &child.root_path(),
+                SuperBlockFlags::empty(),
+                MountFlags::empty()
+            ),
             Err(VfsError::ReadOnlyFilesystem)
         );
     }

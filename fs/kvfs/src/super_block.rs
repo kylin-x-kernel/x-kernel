@@ -240,6 +240,50 @@ pub struct StatFs {
     pub fragment_size: u32,
 }
 
+#[derive(Debug)]
+enum SuperBlockLifecycle {
+    Available { active_mounts: usize },
+    Dying,
+    Dead,
+}
+
+impl SuperBlockLifecycle {
+    fn acquire_mount(&mut self) {
+        let Self::Available { active_mounts } = self else {
+            panic!("a dying or dead superblock must not acquire an active mount");
+        };
+        *active_mounts = active_mounts
+            .checked_add(1)
+            .expect("active mount count must not overflow");
+    }
+
+    fn release_unless_last(&mut self) -> bool {
+        let Self::Available { active_mounts } = self else {
+            panic!("every active mount release must match an acquisition");
+        };
+        match *active_mounts {
+            0 => panic!("every active mount release must match an acquisition"),
+            1 => true,
+            _ => {
+                *active_mounts -= 1;
+                false
+            }
+        }
+    }
+
+    fn begin_shutdown(&mut self) -> bool {
+        if !self.release_unless_last() {
+            return false;
+        }
+        *self = Self::Dying;
+        true
+    }
+
+    fn is_available(&self) -> bool {
+        matches!(self, Self::Available { .. })
+    }
+}
+
 /// VFS superblock object.
 ///
 /// A superblock owns one filesystem instance and the live inode set attached to
@@ -255,8 +299,12 @@ pub struct SuperBlock {
     root: Dentry,
     /// VFS-wide state corresponding to Linux `super_block::s_flags`.
     flags: AtomicSuperBlockFlags,
-    /// Serializes filesystem reconfiguration, corresponding to Linux `s_umount`.
-    reconfigure_lock: Mutex<()>,
+    /// Active mount references and shutdown state, corresponding to Linux
+    /// `super_block::s_active` together with `SB_DYING` and `SB_DEAD`.
+    lifecycle: Mutex<SuperBlockLifecycle>,
+    /// Serializes reconfiguration and final shutdown, corresponding to Linux
+    /// `super_block::s_umount`.
+    umount_lock: Mutex<()>,
     dentry_cache: Mutex<HashMap<DentryKey, Dentry>>,
     max_file_size: u64,
     rename_mutex: Mutex<()>,
@@ -305,7 +353,8 @@ impl SuperBlock {
             ops,
             root,
             flags: AtomicSuperBlockFlags::new(flags),
-            reconfigure_lock: Mutex::default(),
+            lifecycle: Mutex::new(SuperBlockLifecycle::Available { active_mounts: 0 }),
+            umount_lock: Mutex::default(),
             dentry_cache: Mutex::default(),
             max_file_size,
             rename_mutex: Mutex::default(),
@@ -316,9 +365,57 @@ impl SuperBlock {
         super_block
     }
 
+    /// Acquires the active superblock reference owned by one `VfsMount`.
+    pub(crate) fn activate_mount(&self) {
+        self.lifecycle.lock().acquire_mount();
+    }
+
+    /// Releases one active mount reference and shuts down the last active mount.
+    ///
+    /// This is the object-lifetime counterpart of Linux
+    /// `cleanup_mnt() -> deactivate_super() -> generic_shutdown_super()`.
+    /// Shutdown errors cannot be returned from `Drop`; they are logged, while
+    /// topology detach remains committed as it does for Linux `umount(2)`.
+    pub(crate) fn deactivate_mount(&self) {
+        // Like Linux `deactivate_super()`, do not consume the final active
+        // reference until final shutdown is serialized by `s_umount`.
+        if !self.lifecycle.lock().release_unless_last() {
+            return;
+        }
+
+        let _umount_guard = self.umount_lock.lock();
+        // A concurrent activation may have made this reference non-final while
+        // the umount lock was being acquired.
+        if !self.lifecycle.lock().begin_shutdown() {
+            return;
+        }
+
+        let shutdown_result = self.shutdown();
+        *self.lifecycle.lock() = SuperBlockLifecycle::Dead;
+        if let Err(err) = shutdown_result {
+            log::warn!(
+                "failed to shut down {} after its last active mount: {err:?}",
+                self.name()
+            );
+        }
+    }
+
+    /// Performs the filesystem-independent part of final active-mount shutdown.
+    fn shutdown(&self) -> VfsResult<()> {
+        // X-Kernel does not retain dirty inodes independently of dentries yet,
+        // so write back before dropping dcache ownership. Eviction can publish
+        // additional filesystem metadata, which requires the second sync.
+        let writeback_result = self.sync_fs_locked();
+        if let Ok(root) = self.root.as_dir() {
+            root.forget();
+        }
+        let flush_result = self.sync_fs_locked();
+        writeback_result.and(flush_result)
+    }
+
     /// Changes the VFS-wide read-only policy shared by every mount of this superblock.
     pub fn reconfigure_readonly(&self, is_readonly: bool) -> VfsResult<()> {
-        let _reconfigure_guard = self.reconfigure_lock.lock();
+        let _umount_guard = self.umount_lock.lock();
         let mut flags = self.flags();
         if is_readonly {
             flags.insert(SuperBlockFlags::RDONLY);
@@ -430,7 +527,18 @@ impl SuperBlock {
     }
 
     /// Synchronizes inode page-cache state and then filesystem-owned state.
+    ///
+    /// The operation is serialized with reconfiguration and final shutdown by
+    /// the superblock umount lock.
     pub fn sync_fs(&self) -> VfsResult<()> {
+        let _umount_guard = self.umount_lock.lock();
+        if !self.lifecycle.lock().is_available() {
+            return Ok(());
+        }
+        self.sync_fs_locked()
+    }
+
+    fn sync_fs_locked(&self) -> VfsResult<()> {
         let inodes = self.live_inodes();
         Self::writeback_inodes(&inodes, false)?;
         self.writeback_inode_metadata(&inodes, false)?;

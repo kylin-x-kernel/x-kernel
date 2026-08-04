@@ -103,12 +103,14 @@ kfd resources / kvfs / device and pipe implementations
    `dirfd` 查找失败影响结果。
 5. `AT_SYMLINK_NOFOLLOW` / `O_NOFOLLOW` 必须影响符号链接和 VFS magic-link follow。
 6. `mount` 不得静默忽略会改变语义的 unsupported operation flags。
-7. 创建文件和目录时应应用 `FsStruct` 中的当前 umask；写入 umask 必须截断为
+7. 普通新挂载只能精确查找已注册的 filesystem type；syscall 层不得维护与
+   `/proc/filesystems` 分离的构造分支。
+8. 创建文件和目录时应应用 `FsStruct` 中的当前 umask；写入 umask 必须截断为
    `0777`，`CLONE_FS` 必须与 root/pwd 一起共享它。
-8. `chroot` 目标必须是目录，且当前 capability 模型下调用者必须满足 `euid == 0`。
-9. `chown/chmod/utimensat` 必须把同一个 credential snapshot 传给 VFS metadata
+9. `chroot` 目标必须是目录，且当前 capability 模型下调用者必须满足 `euid == 0`。
+10. `chown/chmod/utimensat` 必须把同一个 credential snapshot 传给 VFS metadata
    授权，不能直接调用后端 `setattr`。
-10. `F_ADD_SEALS` 只能单调添加 memfd seals，且必须尊重 `F_SEAL_SEAL`。
+11. `F_ADD_SEALS` 只能单调添加 memfd seals，且必须尊重 `F_SEAL_SEAL`。
 
 ## 线程安全
 
@@ -135,7 +137,7 @@ kfd resources / kvfs / device and pipe implementations
 | T-05 | `O_NOFOLLOW` 被忽略导致符号链接或 magic-link 被跟随 | 路径 flags | 高 | open/at flags 没有传入解析层 | syscall 层统一把 flags 转成 `LookupFlags`，`kvfs::namei` 按 `LookupIntent` 处理 final/non-final symlink 与 magic-link |
 | T-06 | `fallocate` offset/len 溢出破坏文件大小或范围操作 | scalar 参数 / VFS | 高 | 负数或 `offset + len` 溢出 | 校验非负并用 `checked_add` |
 | T-07 | `copy_file_range` 同文件重叠复制造成数据破坏 | fd-to-fd 复制 | 中 | 同文件重叠检查未实现 | 已在设计文档列为限制；非零 flags 在边界被拒绝；当前不宣称等价 Linux |
-| T-08 | 未实现的 mount/umount flags 被静默忽略 | mount flags | 高 | 用户态请求 move、propagation、detach 等语义 | 对未实现 operation flags 返回 `InvalidInput`；bind 应用请求的 per-mount flags；普通 remount 更新共享只读策略，bind remount 仅更新目标 mount flags |
+| T-08 | mount flags 被错误分层、类型分派漂移或 unsupported 语义被静默忽略 | mount flags / filesystem type | 高 | 用户态把 move、propagation 或 recursive bit 与 bind/remount/new mount 组合，或 syscall/procfs 各自维护支持集合 | `path_mount` 在任何 operation dispatch 前统一拒绝未实现位，再独立生成 superblock/per-mount flags；初次 bind 按 Linux 继承源 flags 并忽略普通请求位，bind remount 才替换 flags；普通 remount 仅默认保留 atime mask；新挂载和 `/proc/filesystems` 共用 KVFS registry |
 | T-09 | 文件锁占位返回成功导致应用误以为互斥成立 | fd_ops | 中 | `fcntl`/`flock` 锁语义未实现 | 文档列为限制；锁相关返回路径必须按当前占位语义审计 |
 | T-10 | 创建文件使用错误所有者导致 DAC 语义错误 | open/create | 高 | 固定 root owner，或忽略 setgid 父目录 | syscall 传递当前 `Cred`，后端用 `inode_init_owner()` 初始化 fsuid/fsgid 与继承组 |
 | T-11 | `faccessat2` 权限检查使用错误身份 | access | 高 | 默认错误使用 filesystem IDs，或 `AT_EACCESS` 强行覆盖显式 fs ID | 默认构造 real-ID credential；`AT_EACCESS` 直接使用当前 credential 的 `fsuid/fsgid`，并用于完整遍历与最终检查 |
@@ -170,7 +172,7 @@ kfd resources / kvfs / device and pipe implementations
 | F-04 | 设备 open 失败 | 设备 file operations 拒绝 open 或初始化失败 | open 返回错误 | 终端相关程序无法打开目标设备 | 3 | 错误传播；设备语义由对应设备实现维护 |
 | F-05 | `fallocate` 后端写零返回 0 | 底层文件系统无法前进写入 | 返回 `WriteZero` | 操作失败但文件不应继续无限循环 | 2 | `write_zeros_range` 检测 0 字节写 |
 | F-06 | `sendfile`/`splice` 遇到 `WouldBlock` | 非阻塞源暂时无数据 | 已写入部分则返回部分进度，否则返回错误 | 调用方可轮询后重试 | 4 | `do_send` 保留部分写入语义 |
-| F-07 | `mount` 请求当前未支持的文件系统类型 | 类型不在 tmpfs/bpffs nodev 支持集合内 | 返回 `NoSuchDevice` | 用户态 mount 失败 | 3 | syscall 边界显式限制当前支持集合，不把 boot root provider 当成通用用户 mount registry |
+| F-07 | `mount` 请求未知或当前不能由 legacy 路径创建的文件系统类型 | 名称未注册，或类型需要尚未解析的 backing device | 返回 `NoSuchDevice` | 用户态 mount 失败 | 3 | 按 KVFS registry 精确查找；nodev 类型调用描述符 factory，device-backed 类型显式失败 |
 | F-08 | `syncfs` 目标不是文件或目录 | fd 指向 pipe/socket/设备 | 返回 `InvalidInput` | 当前同步请求失败 | 4 | downcast 后只 flush 文件系统对象 |
 | F-09 | `copy_file_range` 语义不完整 | 重叠和普通文件检查 TODO | 可能出现与 Linux 不一致的数据结果 | 相关应用复制行为异常 | 2 | 非零 flags 显式拒绝；其余限制实现前需要补充测试 |
 | F-10 | `fcntl` unsupported cmd 返回成功 | 兼容占位 | 应用误判某些控制操作已生效 | 可能产生行为差异 | 2 | warning 记录；有安全影响的命令应显式实现或拒绝 |
@@ -214,7 +216,9 @@ kfd resources / kvfs / device and pipe implementations
 2. FAT 等不能表达 Unix owner 的后端无法完整保存创建者 UID/GID。
 3. `fcntl` 文件锁和 `flock` 未实现真实锁。
 4. `copy_file_range` 对普通文件类型、同文件重叠和跨文件系统限制仍为 TODO。
-5. `mount` 支持 devfs/proc/sysfs/tmpfs、非递归 bind、普通只读 remount 和 bind remount；不支持 move、recursive bind、propagation、文件系统专用 reconfigure 和 lazy/force unmount。
+5. `mount` 支持已注册 nodev filesystem、非递归 bind、普通只读 remount 和 bind remount；
+   不支持 device-backed 新挂载、move、recursive bind、propagation、文件系统专用
+   reconfigure 和 lazy/force unmount。
 6. `preadv2` / `pwritev2` 当前只支持 `flags == 0`，
    非零 flags 返回 `Unsupported`。
 7. memfd `F_ADD_SEALS` / `F_GET_SEALS` 已接入；shared writable mmap 和
@@ -236,5 +240,7 @@ kfd resources / kvfs / device and pipe implementations
 - [ ] 每个多步 pathname 操作只取得一次 credential snapshot，并传递给完整解析过程。
 - [ ] pathname 与 descriptor 操作没有混淆调用时 DAC 和 open-file authority。
 - [ ] mount/umount 新 flags 要么完整实现，要么显式拒绝。
+- [ ] 新 filesystem type 通过 KVFS registry 接入，不在 syscall 层增加具体 crate 依赖或
+  与 `/proc/filesystems` 分离的名称表。
 - [ ] 新增日志不输出文件内容或敏感用户缓冲区。
 - [ ] 若修复当前已知限制，同步更新本文和 `design.md`。

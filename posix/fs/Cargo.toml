@@ -11,16 +11,10 @@ documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
-[features]
-ebpf = ["dep:bpffs"]
-
 [dependencies]
 bitflags.workspace = true
-bpffs = { workspace = true, optional = true }
-devfs.workspace = true
 kfd.workspace = true
 memfs.workspace = true
-procfs.workspace = true
 fs_context.workspace = true
 kerrno.workspace = true
 kcred.workspace = true

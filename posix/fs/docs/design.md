@@ -73,7 +73,7 @@ core/ksyscall
 │  Internal object dispatch                                │
 │   ├─ kfd::FileLike                                       │
 │   ├─ kvfs::{Filename, VfsFile, MetadataUpdate, MountFlags}  │
-│   ├─ supported nodev filesystem constructors               │
+│   ├─ kvfs::FileSystemType registry                         │
 │   ├─ fs_context::FsStruct                                │
 │   └─ kvfs::pipe::PipeObject interop for splice/fcntl     │
 └──────────────────────────────────────────────────────────┘
@@ -88,7 +88,7 @@ core/ksyscall
 | `dir` | 维护当前目录、根目录、目录/节点创建和 `linux_dirent64` 输出；`mknodat` 只转换 ABI 参数，创建策略由 KVFS 执行 |
 | `namei` | 处理链接、删除、符号链接和重命名等命名空间变更 |
 | `metadata` | 修改所有者、权限和时间戳 |
-| `mount` | 把 Linux mount flags 映射到 `kvfs::MountFlags`，分派 devfs/proc/sysfs/tmpfs/bpffs，并处理非递归 bind 与 remount |
+| `mount` | 把 Linux mount flags 映射到 `kvfs::MountFlags`，按注册的 `FileSystemType` 查找实现，并处理非递归 bind 与 remount |
 | `stat` | 转换 VFS metadata、access 检查和 statfs 信息 |
 | `ioctl` | 处理 `FIONBIO` 并把其它命令转交 `FileLike::ioctl` |
 | `sync` | 将同步请求转发到文件系统或打开对象所在文件系统 |
@@ -269,11 +269,26 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
 
 ### `mount`
 
-1. 拒绝 `MS_NOUSER` 和尚未实现的 move、propagation 操作。
-2. `MS_REMOUNT` 要求 target 解析到已注册 mount 的根路径，并替换该 mount 的 per-mount flags。
-3. 非递归 `MS_BIND` 要求非空 source，继承源 mount flags 并应用本次请求的 per-mount flags 后创建共享源 dentry 的 bind mount。
-4. 普通挂载读取 source、target、fs_type，支持 devfs/devtmpfs、proc、sysfs、tmpfs 和可选 bpffs。
-5. 将 Linux mount flags 拆分为 superblock flags 和 per-mount flags后挂载到目标路径。
+1. `sys_mount()` 只复制 nullable source/fs type 和 target，捕获一次 process/credential
+   上下文后进入 `do_mount()`。
+2. `do_mount()` 按当前 `FsStruct` 解析 target，再把 resolved `Path` 交给
+   `path_mount()`；对应 Linux 的 syscall、`do_mount()` 和 `path_mount()` 分层。
+3. `path_mount()` 丢弃旧 mount magic，拒绝 `MS_NOUSER`，并在操作分派前统一拒绝当前未实现
+   的 move、propagation 和 recursive bits；随后从同一份 `MS_*` 参数分别生成 superblock
+   flags 和 per-mount `MountFlags`。remount 未显式指定
+   atime 选项时保留目标 mount 当前的 atime flags；其它 user-settable per-mount flags
+   按本次请求整体替换，对应 Linux `set_mount_attributes()`。
+4. 已验证的请求按 `MS_REMOUNT|MS_BIND`、普通 `MS_REMOUNT`、`MS_BIND`、普通新挂载分派；
+   对应操作分别调用 namespace 的
+   `reconfigure_mount()`、`remount()`、`attach_bind()` 或
+   `attach_with_flags_and_devname()` 对象方法。
+5. 非递归 bind 要求非空 source，解析 source 后克隆源 mount；副本继承源 mount
+   flags，初次 `MS_BIND` 的普通 mount flags 不应用到副本。
+6. 普通挂载像 Linux `do_new_mount()` 一样按 canonical type name 查询 KVFS
+   `FileSystemType` 注册表，再调用类型描述符的 nodev 创建入口。注册表和
+   `/proc/filesystems` 都只使用 canonical name，例如 `devtmpfs`。
+7. nodev 创建入口接收已经提取的 `SuperBlockFlags`，在构造 superblock 时应用 VFS-wide
+   策略；随后把带 per-mount flags 的 detached mount graft 到 target。
 
 ## 并发模型
 
@@ -324,11 +339,21 @@ counter。pipe 则位于 `kvfs::pipe`：匿名 pipe 与 pathname FIFO 共享
 
 ### mount 操作的兼容边界
 
-`sys_mount` 实现非递归 bind mount、普通 remount 和 bind remount。remount target 必须是
-当前 mount namespace 中已注册 mount 的根路径；普通目录返回 `InvalidInput`。普通 remount
-同时更新目标的 per-mount flags 和共享 superblock 的只读策略，bind remount 只更新目标
-mount 的 flags。
-move、recursive bind 和 propagation flags 返回 `InvalidInput`，
+`sys_mount` 的 ABI 入口、`do_mount` 的 target lookup 和 `path_mount` 的 flags
+归一化/操作分派对应 Linux 同名层次；不为请求参数增加额外持久状态对象。它实现非递归
+bind mount、普通 remount 和 bind remount。remount target 必须是当前 mount namespace
+中已注册 mount 的根路径；普通目录返回 `InvalidInput`。普通 remount 分别传递
+superblock flags 和 per-mount flags，bind remount 只更新目标 mount flags；未显式给出
+atime 选项的 remount 只保留目标当前 atime mask，其它 user-settable flags 按请求重建；
+普通 remount 未给出 `MS_RDONLY` 时请求把 superblock 切换为读写。这是 raw Linux
+`mount(2)` 语义，用户态 `mount(8)` 是否补齐旧选项属于其自身策略。
+初次 bind 继承源 mount flags，不应用同次调用的普通 mount flags；修改 bind mount flags
+需要第二次 `MS_REMOUNT|MS_BIND` 调用。
+普通新挂载不再依赖 devfs、procfs、bpffs 等具体 crate；`do_new_mount` 只解析 canonical
+type 并使用 KVFS registry，对应 Linux `get_fs_type()` 后进入 filesystem type 的创建入口。
+这使 mount 支持集合与 `/proc/filesystems` 保持同一事实源。
+move、recursive bind 和 propagation flags 在任何 operation dispatch 前返回 `InvalidInput`；
+因此 `MS_BIND|MS_MOVE`、`MS_REMOUNT|MS_SHARED` 和普通新挂载携带 `MS_REC` 都不会执行部分请求，
 `sys_umount2` 对 force、detach、expire、nofollow 返回 `InvalidInput`。
 显式拒绝比静默忽略更安全，
 因为静默忽略会让用户态误以为已经获得异步卸载或 bind mount 等语义。
@@ -394,7 +419,8 @@ pathname DAC。这对应 Linux `vfs_truncate()` 与 `do_ftruncate()` 的语义�
 - `close`/`close_range` 从当前进程 fd 表移除 `Arc<dyn FileLike>`；
 - fd 复制和打开路径通过 `Arc` 共享文件、目录、pipe 或设备对象；
 - 临时 `Vec`、路径 `String`、`CString` 和中间 I/O 缓冲区在函数返回时释放；
-- mount/unmount 的生命周期由 `kvfs::Location` 和 mountpoint 管理。
+- mount/unmount 的 topology 由 `kvfs::Path` 和 `Mount` 管理；`VfsMount` 最后释放时归还
+  superblock active 引用，并在最后一个引用消失时执行 shutdown。
 
 ## 已知限制
 
@@ -402,7 +428,10 @@ pathname DAC。这对应 Linux `vfs_truncate()` 与 `do_ftruncate()` 的语义�
 2. FAT 等不能表达 Unix UID/GID 的后端无法完整持久化创建者身份。
 3. `fcntl` 文件锁和 `flock` 目前是兼容占位，不提供真实互斥。
 4. `copy_file_range` 尚未检查普通文件类型、同文件重叠和跨文件系统条件。
-5. `mount` 尚不支持 move、recursive bind、propagation，以及只读策略之外的文件系统专用 reconfigure。
+5. `mount` 尚不支持 move、recursive bind、propagation，以及只读策略之外的文件系统专用
+   reconfigure。registry 中需要 block device 的 root filesystem 会列在
+   `/proc/filesystems`，但 legacy `mount(2)` 尚未实现 source block-device 解析，因此
+   当前返回 `NoSuchDevice`。
 6. `sendfile` 对非空 offset 保留 32 位范围限制，反映旧接口兼容约束。
 7. `F_ADD_SEALS` / `F_GET_SEALS` 已接入 shmem object state；shared
    writable mmap 和 `mprotect(PROT_WRITE)` seal enforcement 由 `mm/filemap`

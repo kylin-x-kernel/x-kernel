@@ -17,19 +17,51 @@ use core::{borrow::Borrow, cmp::Ordering, time::Duration};
 use hashbrown::HashMap;
 use iov_iter::{IovIterDest, IovIterSource};
 use kcred::Cred;
+use klazy::Once;
 use ksync::Mutex;
 use kvfs::{
     AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FileDirOperations,
-    FileOperations, InodeCache, InodeDirOperations, InodeOperations, InodeSymlinkOperations, Kiocb,
-    LockedDentry, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType, StatFs,
-    SuperBlock, SuperBlockFlags, SuperBlockOperations, Umode, VfsError, VfsFile, VfsInodeInit,
-    VfsResult, WriteBeginRequest, WriteEndRequest, inode_init_owner,
+    FileOperations, FileSystemType, InodeCache, InodeDirOperations, InodeOperations,
+    InodeSymlinkOperations, Kiocb, LockedDentry, Metadata, MetadataUpdate, Mount, NodeFlags,
+    NodePermission, NodeType, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations, Umode,
+    VfsError, VfsFile, VfsInodeInit, VfsResult, WriteBeginRequest, WriteEndRequest,
+    inode_init_owner,
     libfs::{simple_getattr, simple_rename, simple_statfs, simple_write_end},
 };
 use slab::Slab;
 
 pub(crate) const RAMFS_MAGIC: u32 = 0x8584_58f6;
 pub(crate) const TMPFS_MAGIC: u32 = 0x0102_1994;
+static SYSFS: Once<(Arc<SuperBlock>, Arc<Mount>)> = Once::new();
+
+fn mount_tmpfs_nodev(superblock_flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
+    Ok(shmem::new_tmpfs(superblock_flags))
+}
+
+fn mount_sysfs_nodev(superblock_flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
+    Ok(new_sysfs(superblock_flags))
+}
+
+/// Registered tmpfs filesystem type.
+pub const TMPFS_TYPE: FileSystemType = FileSystemType::nodev("tmpfs", mount_tmpfs_nodev);
+
+/// Registered sysfs filesystem type.
+pub const SYSFS_TYPE: FileSystemType = FileSystemType::nodev("sysfs", mount_sysfs_nodev);
+
+/// Returns the shared sysfs superblock.
+///
+/// The singleton retains an internal root mount because the directory tree is
+/// owned by this superblock rather than by a separate kernfs root. Visible
+/// mounts therefore cannot tear down the shared kernel-populated tree.
+pub fn new_sysfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
+    let (super_block, _internal_mount) = SYSFS.call_once(|| {
+        let super_block =
+            ramfs::new_ramfs_with_name_and_superblock_flags("sysfs", superblock_flags);
+        let internal_mount = Mount::new_root(&super_block);
+        (super_block, internal_mount)
+    });
+    super_block.clone()
+}
 
 #[derive(PartialEq, Eq, Hash, Clone)]
 struct FileName(String);

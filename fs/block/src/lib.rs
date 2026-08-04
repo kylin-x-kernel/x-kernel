@@ -5,7 +5,7 @@
 //! Block-device adaptation for filesystems.
 //!
 //! [`SeekableDisk`] adapts block I/O to byte-oriented filesystem libraries.
-//! [`FileSystemType`] is the Kconfig-selected block filesystem mount contract;
+//! [`RootFileSystem`] is the Kconfig-selected block filesystem mount contract;
 //! the selected filesystem crate supplies its implementation at link time.
 #![cfg_attr(any(not(test), doc), no_std)]
 
@@ -17,13 +17,12 @@ use core::mem;
 use kclass::{BlockDeviceImpl, ClassDevice, prelude::*};
 use kvfs::{SuperBlock, SuperBlockFlags, VfsResult};
 
-/// The block-backed filesystem type selected by Kconfig.
-///
-/// This is the mount capability of Linux `struct file_system_type`, expressed
-/// as a Rust single-provider interface because the current Kconfig model
-/// selects exactly one root filesystem implementation per kernel image.
+/// The block-backed root filesystem provider selected by Kconfig.
 #[kiface::interface]
-pub trait FileSystemType {
+pub trait RootFileSystem {
+    /// Returns the registered filesystem type name.
+    fn name() -> &'static str;
+
     /// Mounts the selected filesystem from a block device.
     ///
     /// # Errors

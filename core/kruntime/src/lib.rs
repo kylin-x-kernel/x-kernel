@@ -26,7 +26,7 @@
 
 extern crate alloc;
 
-// The root filesystem choice selects exactly one `fs_block::FileSystemType` provider.
+// The root filesystem choice selects exactly one `fs_block::RootFileSystem` provider.
 #[cfg(feature = "fs_fat")]
 extern crate fat as _;
 #[cfg(feature = "fs_ext4")]

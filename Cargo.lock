@@ -3173,6 +3173,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "iov_iter",
  "kcred",
+ "klazy",
  "ksync",
  "kvfs",
  "linux-raw-sys",
@@ -3657,8 +3658,6 @@ name = "posix-fs"
 version = "0.2.0-dev"
 dependencies = [
  "bitflags 2.13.1",
- "bpffs",
- "devfs",
  "fs_context",
  "iov_iter",
  "kcred",
@@ -3675,7 +3674,6 @@ dependencies = [
  "memfs",
  "osvm",
  "posix-types",
- "procfs",
  "unittest",
 ]
 

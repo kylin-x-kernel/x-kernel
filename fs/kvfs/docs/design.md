@@ -23,6 +23,7 @@ credential snapshot，`kvfs` 接收显式 `&Cred` 并完成路径遍历和通用
 - `src/file.rs`：打开文件及其可变状态。
 - `src/pipe.rs`：匿名 pipe 与 pathname FIFO 共享的数据通路、会话状态及无状态
   file-operation 对象。
+- `src/file_system_type.rs`：已注册文件系统类型及其创建入口。
 - `src/mount.rs`、`src/super_block.rs`：挂载树和文件系统实例。
 - `src/anon_inode.rs`：匿名 inode pseudo filesystem，用于 eventfd、epoll、
   timerfd、pidfd 等内核创建的匿名文件。
@@ -101,9 +102,18 @@ superblock 位只有 `RDONLY` 导出为 `ST_RDONLY`；`ST_NOATIME`/`ST_NODIRATIM
 per-mount 位导出，即使同名 superblock 位仍参与 inode atime 决策。重挂载在发布新
 `SuperBlockFlags` 前调用 filesystem 的 `reconfigure` hook，对应 Linux
 filesystem-context 的 `reconfigure`；该 hook 接收拟议 flags 和 changed mask，对应
-`sb_flags`/`sb_flags_mask`，并与 flags 发布由 superblock 内的 reconfigure lock 串行化，
-对应 `s_umount` 的职责。和 Linux 未提供 callback 时的行为一样，默认 hook 接受纯 VFS
+`sb_flags`/`sb_flags_mask`，并与 flags 发布、最终 shutdown 由 superblock 内的 umount lock
+串行化，对应 `s_umount` 的职责。和 Linux 未提供 callback 时的行为一样，默认 hook 接受纯 VFS
 flags 变更；固定只读介质的文件系统必须覆盖该 hook 并拒绝读写目标。
+
+`FileSystemType` 对应 Linux `struct file_system_type`，描述文件系统实现的名称、
+是否需要 backing device 及当前可用的 nodev 创建入口。全局注册表对应 Linux
+`file_systems` list，是按类型名挂载和 `/proc/filesystems` 的共同事实源。
+nodev 创建入口接收从 `mount(2)` 提取的 `SuperBlockFlags`，对应 Linux
+`fs_context_for_mount(type, sb_flags)` 在 `get_tree` 前携带 superblock flags；
+`SuperBlockRegistry` 只跟踪已经创建的 superblock 实例，两者不合并，也不互相复制状态。
+具体 type factory 负责决定一次 mount 是创建新 superblock 还是复用已有实例，KVFS
+registry 不增加第二套实例缓存。
 
 `Dentry` 是可移动的 namespace 对象。rename 保留 source dentry 和 inode identity，只
 改变 dentry 的位置和 cache membership。inode 持有文件状态和 address space，因此
@@ -139,6 +149,9 @@ credential 的生命周期由 syscall 持有的 `Arc` 保证；对象字段不�
 `init_anon_inodefs()` 必须在 boot/runtime 初始化阶段调用，早于普通任务和并行单元测试
 创建匿名 inode 文件。`AnonInodeFs::global()` 只读取已经初始化的 singleton，不会在
 运行时首次访问路径中构造 VFS 对象；未初始化时会 panic 暴露启动顺序错误。
+
+内建文件系统类型也必须在用户进程启动前注册完成。运行期查找只读取注册表，不负责
+加载实现或补做启动初始化。
 
 ## 算法流程
 
@@ -258,22 +271,51 @@ inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `seta
 
 `SimpleDir` 的 `DirMapping` 可持久插入由 `mknod` 分配的 special inode，也可插入
 不可变目标的 symbolic link，供 devfs 等简单文件系统创建 FIFO、pathname Unix socket
-以及 `/dev/fd` 一类启动期链接；未显式支持动态插入的 simple directory 保持返回 `EPERM`。
+以及 `/dev/fd` 一类启动期链接。快速链接目标只存入 `VfsInode` cached-link 状态，
+对应 Linux `inode::i_link`；`SimpleFsNode` 只保存 inode number、mode、owner 和
+`i_size` 等元数据，不再用 `SimpleFile` closure 保存第二份目标。未显式支持动态插入的
+simple directory 保持返回 `EPERM`。
 
 非递归 bind mount 创建新的 `Mount`，共享源 path 的 superblock 与 root dentry，但拥有
-独立 mount ID、per-mount flags、父挂载位置和覆盖关系。`Mount` 作为被 `Path`、打开文件
-和 namespace topology 共同引用的稳定身份，不在 remount 时替换。per-mount flags 通过
-私有 `AtomicMountFlags` 封装读写，对其余 mount 代码保持强类型 `MountFlags` 接口。
-普通 remount 只允许作用于已注册 mount 的根路径，原子替换目标 mount flags，并在
-filesystem `reconfigure` 接受后更新 `SuperBlock` 上所有共享 mount 都能观察到的只读策略；
-bind remount 只替换目标的 per-mount flags。只读 filesystem 可以在该 hook 中拒绝切换到
-读写并返回 `ReadOnlyFilesystem`。
-卸载 bind mount 只移除 topology 节点，不对共享的
-源 dentry 执行 `forget()`；普通 filesystem mount 仍在卸载时释放其独占 mount-root dentry。
-修改 mount topology 前，卸载路径先通过 `SuperBlock::sync_fs()` 写回 live inode、filesystem
-metadata 和 journal；普通 mount 清理 dentry cache 可能触发 zero-link inode 的 final eviction，
-因此会在 `forget()` 后再同步一次。任一同步失败时 mount topology 保持连接，用户可以修复
-设备错误后重试；bind mount 不清理共享 dentry，只需要第一次全 superblock 同步。
+独立 mount ID、父挂载位置和覆盖关系，并继承源 mount 的 per-mount flags。对应 Linux
+`clone_mnt(old, root, clone_flags)`，namespace 复制与 bind mount 复用
+`Mount::clone_mnt`：它只构造 detached `Mount`，不同时写入 parent topology；
+`Path::graft_tree()` 再执行 root/target 类型检查并把对象发布到 mountpoint。新文件系统
+挂载也先构造 detached `Mount`，再走同一个 graft 阶段，避免出现“已有父路径但未进入
+parent child map”的半挂载状态。和当前 Linux `graft_tree()` 一样，root/target 的目录性
+不一致时两个方向都返回 `ENOTDIR`，不在 bind 路径另建 errno 分支。非递归 bind 不复制
+源 path 下的 child mount，初次 `MS_BIND` 也不把同次调用的普通 mount flags 应用到副本。
+
+`Mount` 作为被 `Path`、打开文件和 namespace topology 共同引用的稳定身份，不在 remount
+时替换。父 mount 和 mountpoint 由一个 `Mutex<Option<Path>>` 表示，attach 时一次设置，
+detach 时清空；不再分别保存可能失配的 parent/mountpoint 字段。namespace 操作通过已有
+mount ID registry 校验 source、target 和 detach 对象属于当前 `MntNamespace`；同一把
+registry mutex 覆盖校验、topology 修改和 registry 提交，作为 namespace 级事务边界。
+递归 detach 先从目标 mount 收集每个 child mountpoint 的完整 overmount stack，再校验所有
+对象仍在 registry 中；校验成功后才执行不再返回错误的 topology commit，最后删除 registry
+引用。目标 mount 自身覆盖的旧层不属于待删除子树，commit 时恢复到 parent mountpoint。
+`VfsMount::flags()` 与 `set_flags()` 在 `mnt_flags` 字段上封装原子读写，对其余 mount
+代码保持强类型 `MountFlags` 接口。
+
+普通 remount 只允许作用于已注册 mount 的根路径，由 `MntNamespace::remount()` 分别接收
+superblock flags 和 per-mount flags，更新 `SuperBlock` 上所有共享 mount 都能观察到的
+只读策略并原子替换目标 mount flags；`MS_REMOUNT|MS_BIND` 通过
+`MntNamespace::reconfigure_mount()` 只替换目标的 per-mount flags，不要求目标本身由
+bind 创建。superblock flags 由 `AtomicSuperBlockFlags` 保存；普通 remount 在发布新 flags
+前调用 filesystem `reconfigure` hook，并由 per-superblock umount lock 串行化 hook
+和发布。文件系统后端固定报告只读时，切换到读写会返回 `ReadOnlyFilesystem`。
+mount 不保存“是否由 bind 创建”的来源状态；所有 mount 卸载都只移除 topology 节点，
+`VfsMount` 创建和复制时取得一个 superblock active 引用，最后释放时归还，对应 Linux
+`cleanup_mnt()` 中的 `dput(mnt_root)` 和 `deactivate_super(mnt_sb)`。非最后一个 mount
+释放不重复 teardown；active 计数归零时，在 umount lock 下先写回 inode/page cache 和
+filesystem 状态，再驱逐 dcache 所有权，最后再次同步 eviction 产生的 metadata、journal
+checkpoint 和设备状态，对应 `generic_shutdown_super()` 与 block-device final flush 的职责。
+`Path::unmount()` 不在 topology 层调用 `sync_fs()`，所以打开文件或其它 `Path` 持有 detached
+mount 时会像 Linux 一样推迟 final shutdown。shutdown 的 sync 错误被记录但不回滚已提交的
+topology；清理和最终 flush 仍继续执行。
+卸载在 parent mountpoint 的 inode namespace lock 下移除 parent child 索引、恢复被覆盖的
+mount，并清空 detached mount 的 parent location，使仍持有该 mount 的打开路径不能沿旧
+parent 返回已经离开的 namespace。
 
 ### pathname 与打开文件
 
@@ -348,6 +390,10 @@ dentry 的 inode、children 和可变 operation 状态由各自 mutex 保护。�
 `init_anon_inodefs()` 在受控 boot 阶段发生。这样避免多个 runtime 调用者并发首次访问时
 在 `Lazy` 初始化闭包中构造复杂 VFS 对象。
 
+文件系统类型注册表使用独立 mutex 保护。内建类型在 boot CPU 串行阶段写入；按名称查找
+在锁内复制一个静态描述符，枚举则取得列表快照后再格式化输出，不在持锁期间创建
+superblock 或执行文件系统代码。
+
 Namespace callback 在 inode namespace lock 下运行。文件系统应在回调返回前把 core
 mutation result 同步到受影响的 live inode，并通过 `LockedDentry::instantiate()` 完成创建
 对象的 inode attachment；dentry cache 的删除/rebind 仍由 KVFS 在成功返回后完成。
@@ -355,7 +401,8 @@ mutation result 同步到受影响的 live inode，并通过 `LockedDentry::inst
 全局 namespace lock 顺序为：
 
 ```text
-superblock rename mutex
+mount-namespace registry mutex（仅 mount tree 操作）
+    -> superblock rename mutex（仅 rename）
     -> parent-directory namespace locks
     -> child-directory namespace locks
     -> non-directory namespace locks (pointer order)
@@ -363,6 +410,15 @@ superblock rename mutex
     -> mount topology lock
     -> dentry cache and location locks
 ```
+
+detach transaction 在丢弃其收集的 `Arc<Mount>` 前先释放 namespace registry mutex。
+superblock active lifecycle 对应 Linux `s_active`、`SB_DYING` 和 `SB_DEAD`：非最后引用直接
+递减；最后引用候选保留计数为一并释放 lifecycle lock，取得 umount lock 后重新校验，再
+切换到 dying。shutdown callback 运行期间不持有 lifecycle lock，避免 inode eviction
+反向进入 mount release；dying/dead superblock 不能取得新的 active 引用。显式 filesystem
+sync 和 Weak registry 的全局 sync snapshot 也获取 umount lock，不能与 final dcache
+eviction 交错，并在取得锁后跳过已经 dying/dead 的 superblock。shutdown 不反向获取
+mount-namespace registry mutex。
 
 挂载操作与 namespace validator 都按 inode namespace lock 在外、mount topology lock 在内
 的顺序执行，挂载点检查不会引入反向嵌套。parallel-lookup mutex 只序列化同一个 hashed
@@ -397,6 +453,10 @@ child cache 仍使用 mutex。RCU、seqcount lookup 和 lock-free dcache travers
   替换原 opened-file identity。
 - 匿名 inode pseudo fs 采用显式预初始化，而不是 `Lazy` 首次访问初始化。该设计对齐
   复杂 VFS 全局对象的生命周期：启动时构造，运行时只复用。
+- `FileSystemType` 保留 Linux 的“类型描述符 + 全局注册表”层次；POSIX mount 不依赖
+  具体文件系统 crate，`/proc/filesystems` 也不维护平行的名称表。
+- 不为 immutable simple symlink 增加文件系统私有 target 字段；cached-link 是唯一目标
+  owner，operation table 只标识并读取该 inode 状态。
 - `AddressSpaceOperations::set_len()` 必须进入 `truncate_setsize()`；文件系统不能自行组合
   i_size、cache resize 和 mmap invalidation，也不能建立第二套 EOF/cache owner。
 - `VfsInode` 直接保存唯一的 `Arc<AddressSpace>`，不增加单字段 address-space wrapper；
@@ -417,8 +477,10 @@ child cache 仍使用 mutex。RCU、seqcount lookup 和 lock-free dcache travers
 
 VFS 对象通过 `Arc`/`Weak` 管理生命周期。unlink、rename replacement 和 forget 会从
 parent children 弱索引与 superblock dentry cache 中移除 dentry；仍有 Path/File 引用
-时对象继续存活，否则释放时沿 strong parent 链逐级归还引用。superblock 最终释放会
-整体丢弃剩余 dcache 和 root。dentry cache 与 open file 都持有 `VfsInode` 引用；最后一个
+时对象继续存活，否则释放时沿 strong parent 链逐级归还引用。每个 `VfsMount` 持有一个
+superblock active 引用；最后一个 active mount 释放时执行 writeback、dcache eviction 和
+最终 filesystem/device sync。superblock 对象的 `Arc` 最终释放只负责丢弃已经 shutdown 的
+root 和私有状态。dentry cache 与 open file 都持有 `VfsInode` 引用；最后一个
 引用消失后，`SuperBlockOperations::evict_inode()` 先获得 final teardown
 机会。默认实现只丢弃 inode `AddressSpace` 中的 cached folios，磁盘文件系统可在
 nlink=0 时追加 journaled inode
@@ -437,3 +499,5 @@ FIFO 最后一个 open file 关闭时清空 inode pipe slot，`Arc<PipeObject>` 
   hashed candidate owner/waiter 模型合并同名并发 lookup。
 - layered filesystem 的跨文件系统 lock rank 尚未建模。
 - mount topology 同步与 superblock rename mutex 仍是不同机制。
+- 文件系统类型当前都是静态内建实现，尚无 Linux module autoload、引用计数和
+  `unregister_filesystem()` 生命周期。

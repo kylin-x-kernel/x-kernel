@@ -6,9 +6,10 @@
 //!
 //! This crate selects the root block device and builds the initial mount
 //! namespace. The concrete root filesystem is supplied through
-//! [`fs_block::FileSystemType`], so boot code does not branch on filesystem or
-//! backend names. Direct tmpfs, procfs, devfs, and bpffs construction here is
-//! initial namespace layout policy rather than filesystem-type dispatch.
+//! [`fs_block::RootFileSystem`], so boot code does not branch on filesystem or
+//! backend names. Boot registers built-in filesystem type descriptors before
+//! constructing tmpfs, procfs, devtmpfs, and bpffs at fixed initial-namespace
+//! paths; those direct constructors express layout policy, not type dispatch.
 
 #![cfg_attr(any(not(test), doc), no_std)]
 
@@ -60,8 +61,22 @@ impl v9fs::Transport for Virtio9pTransport {
     }
 }
 
+fn register_filesystem_types() {
+    kvfs::register_filesystem(kvfs::FileSystemType::device_backed(
+        fs_block::RootFileSystem::name(),
+    ))
+    .expect("root filesystem type must register once");
+    kvfs::register_filesystem(devfs::FILE_SYSTEM_TYPE).expect("devtmpfs type must register once");
+    kvfs::register_filesystem(procfs::FILE_SYSTEM_TYPE).expect("proc type must register once");
+    kvfs::register_filesystem(memfs::SYSFS_TYPE).expect("sysfs type must register once");
+    kvfs::register_filesystem(memfs::TMPFS_TYPE).expect("tmpfs type must register once");
+    #[cfg(feature = "ebpf")]
+    kvfs::register_filesystem(bpffs::FILE_SYSTEM_TYPE).expect("bpf type must register once");
+}
+
 /// Prepares the initial mount namespace and init fs_struct.
 pub fn prepare_namespace() {
+    register_filesystem_types();
     let root_fs = mount_root_super_block();
     BootVfs::install_initial_root(root_fs);
     kvfs::init_anon_inodefs();
@@ -122,10 +137,7 @@ impl BootVfs {
         .expect("Failed to mount procfs");
         self.mount_at(
             "/sys",
-            memfs::ramfs::new_ramfs_with_name_and_superblock_flags(
-                "sysfs",
-                SuperBlockFlags::empty(),
-            ),
+            memfs::new_sysfs(SuperBlockFlags::empty()),
             PSEUDO_FS_MOUNT_FLAGS,
         )
         .expect("Failed to mount sysfs");
@@ -223,7 +235,12 @@ impl BootVfs {
     #[cfg(feature = "fs9p")]
     fn mount_host_share(&self, mount_path: &str, fs: Arc<SuperBlock>) -> kvfs::VfsResult<()> {
         self.ensure_directory_path(mount_path)?;
-        self.namespace.attach(&self.lookup(mount_path)?, &fs)?;
+        self.namespace.attach_with_flags_and_devname(
+            &self.lookup(mount_path)?,
+            &fs,
+            MountFlags::RELATIME,
+            None,
+        )?;
         Ok(())
     }
 }
@@ -243,7 +260,7 @@ fn mount_root_super_block() -> Arc<kvfs::SuperBlock> {
         handle.location(),
     );
 
-    let fs = match fs_block::FileSystemType::mount_bdev(handle, SuperBlockFlags::empty()) {
+    let fs = match fs_block::RootFileSystem::mount_bdev(handle, SuperBlockFlags::empty()) {
         Ok(fs) => fs,
         Err(e) => {
             error!("Failed to mount root filesystem: {e:?}");

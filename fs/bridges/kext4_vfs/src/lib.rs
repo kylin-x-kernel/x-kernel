@@ -6,7 +6,7 @@
 //!
 //! The crate adapts KExt4 superblock, inode, file, and address-space operations
 //! to KVFS and provides the KExt4 implementation of
-//! [`fs_block::FileSystemType`] when selected by Kconfig.
+//! [`fs_block::RootFileSystem`] when selected by Kconfig.
 
 #![cfg_attr(any(not(test), doc), no_std)]
 
@@ -22,7 +22,11 @@ mod util;
 pub use fs::Ext4Filesystem;
 
 #[fs_block::kiface::provide]
-impl fs_block::FileSystemType {
+impl fs_block::RootFileSystem {
+    fn name() -> &'static str {
+        "ext4"
+    }
+
     fn mount_bdev(
         device: kclass::ClassDevice<kclass::BlockDeviceImpl>,
         flags: kvfs::SuperBlockFlags,
