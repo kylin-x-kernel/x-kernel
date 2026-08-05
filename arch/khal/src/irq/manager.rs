@@ -6,6 +6,8 @@
 
 use alloc::{collections::BTreeMap, sync::Arc};
 use core::marker::PhantomData;
+#[cfg(unittest)]
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(feature = "ipi")]
 pub use kbuild_config::IPI_IRQ;
@@ -16,7 +18,7 @@ use kspin::{SpinNoIrq, SpinRaw};
 pub use self::TargetCpu as IpiTarget;
 use super::{
     Hwirq, IntoIrqDesc, IrqAffinity, IrqController, IrqDesc, IrqDomainId, IrqFlags, IrqHandler,
-    IrqPolarity, IrqSource, IrqTrigger, Virq,
+    IrqPolarity, IrqRef, IrqSource, IrqTrigger, Virq,
 };
 
 /// IRQ handler invoked on dispatch.
@@ -111,12 +113,84 @@ impl Drop for DispatchedIrq {
     }
 }
 
+/// A pending interrupt claimed by the platform, before subscriber dispatch.
+///
+/// The platform reports the raw claim ([`IrqRef`]); the core resolves it to a
+/// logical IRQ through the domain's lock-free reverse map and only then runs
+/// subscribers. Resolution returning `None` must be reported as unhandled —
+/// it never silently becomes an identity mapping.
+///
+/// Completion (EOI / deactivate) must happen on the CPU that claimed the
+/// interrupt; like [`DispatchedIrq`], completion is idempotent and also runs
+/// from `Drop` so early-return paths cannot leak an un-EOI'd interrupt.
+#[derive(Debug)]
+pub struct PendingIrq {
+    source: IrqRef,
+    completion_cookie: usize,
+    completed: bool,
+    _not_send: PhantomData<*mut ()>,
+}
+
+impl PendingIrq {
+    /// Creates a pending IRQ claim with an opaque completion cookie.
+    pub const fn new(source: IrqRef, completion_cookie: usize) -> Self {
+        Self {
+            source,
+            completion_cookie,
+            completed: false,
+            _not_send: PhantomData,
+        }
+    }
+
+    /// The raw claim source.
+    pub const fn source(&self) -> IrqRef {
+        self.source
+    }
+
+    /// Lock-free resolution to the OS-visible logical IRQ.
+    ///
+    /// `None` means the domain has no mapping for this hardware IRQ and no
+    /// identity policy; callers must report the interrupt as unhandled and
+    /// still complete the claim. Safe to call from hardirq / irqson NMI
+    /// context.
+    pub fn resolve(&self) -> Option<Virq> {
+        match self.source {
+            IrqRef::Virq(virq) => Some(virq),
+            IrqRef::Domain(domain_id, hwirq) => super::domain::resolve(domain_id, hwirq),
+        }
+    }
+
+    /// Completes the claim; idempotent, also run by `Drop`.
+    pub fn complete(mut self) {
+        self.complete_inner();
+    }
+
+    fn complete_inner(&mut self) {
+        if self.completed {
+            return;
+        }
+        self.completed = true;
+        platform_complete_irq(self.completion_cookie);
+    }
+}
+
+impl Drop for PendingIrq {
+    fn drop(&mut self) {
+        self.complete_inner();
+    }
+}
+
 #[kiface::interface]
 pub trait IntrManagerIf {
     fn configure(desc: IrqDesc);
     fn enable(id: usize, on: bool);
-    /// Claims a pending interrupt and returns a guard that completes it on drop.
-    fn dispatch_irq(id: usize) -> Option<DispatchedIrq>;
+    /// Claims a pending interrupt without resolving it.
+    ///
+    /// The platform reports the raw [`IrqRef`]; the core resolves it through
+    /// the domain's lock-free reverse map before subscriber dispatch, so a
+    /// mapping lookup can never fail spuriously or fall back to the raw
+    /// hardware number.
+    fn dispatch_irq(id: usize) -> Option<PendingIrq>;
     /// Claims a pending NMI, returning the raw hwirq and completion cookie.
     ///
     /// Unlike [`dispatch_irq`], this bypasses virq translation and never
@@ -174,7 +248,7 @@ fn disable_platform_irq(desc: IrqDesc) {
 }
 
 #[inline]
-fn platform_dispatch_irq(id: usize) -> Option<DispatchedIrq> {
+fn platform_dispatch_irq(id: usize) -> Option<PendingIrq> {
     IntrManagerIf::dispatch_irq(id)
 }
 
@@ -183,8 +257,25 @@ fn platform_dispatch_nmi(id: usize) -> Option<DispatchedIrq> {
     IntrManagerIf::dispatch_nmi(id)
 }
 
+/// Test-only EOI observability, keyed on the spurious GIC INTID (0x3FF).
+///
+/// Real GIC dispatch filters the spurious ID before claiming, so no live
+/// interrupt ever completes with this cookie; PLIC/IO-APIC sources are far
+/// below it as well. Gating the counter on it keeps the completion-invariant
+/// tests immune to timer/IPI EOIs firing concurrently during the unittest
+/// run. The platform `complete_irq` ignores the write for this cookie.
+#[cfg(unittest)]
+const TEST_COMPLETION_COOKIE: usize = 0x3FF;
+
+#[cfg(unittest)]
+static TEST_COMPLETE_IRQ_CALLS: AtomicUsize = AtomicUsize::new(0);
+
 #[inline]
 fn platform_complete_irq(completion_cookie: usize) {
+    #[cfg(unittest)]
+    if completion_cookie == TEST_COMPLETION_COOKIE {
+        TEST_COMPLETE_IRQ_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
     IntrManagerIf::complete_irq(completion_cookie)
 }
 
@@ -198,7 +289,7 @@ pub fn set_prio(id: usize, prio: u8) {
     IntrManagerIf::set_prio(id, prio)
 }
 
-static IRQ_STATE: SpinNoIrq<IrqState> = SpinNoIrq::new(IrqState::new());
+static IRQ_CTL: SpinNoIrq<IrqState> = SpinNoIrq::new(IrqState::new());
 pub const DYNAMIC_VIRQ_BASE: Virq = 4096;
 
 /// NMI handler table, keyed by hwirq.
@@ -268,6 +359,9 @@ impl IrqStateDesc {
 struct IrqState {
     descs: BTreeMap<Virq, IrqStateDesc>,
     mappings: BTreeMap<MappingKey, Virq>,
+    /// Set when `resolve_desc` inserted a new domain mapping; cleared by
+    /// [`IrqState::take_mappings_dirty`] after the snapshot is republished.
+    mappings_dirty: bool,
     next_virq: Virq,
 }
 
@@ -276,6 +370,7 @@ impl IrqState {
         Self {
             descs: BTreeMap::new(),
             mappings: BTreeMap::new(),
+            mappings_dirty: false,
             next_virq: DYNAMIC_VIRQ_BASE,
         }
     }
@@ -305,12 +400,14 @@ impl IrqState {
                 return existing;
             }
             if let Some(domain) = desc.domain {
-                self.mappings
-                    .entry(MappingKey {
-                        domain,
-                        hwirq: desc.hwirq,
-                    })
-                    .or_insert(virq);
+                use alloc::collections::btree_map::Entry;
+                if let Entry::Vacant(entry) = self.mappings.entry(MappingKey {
+                    domain,
+                    hwirq: desc.hwirq,
+                }) {
+                    entry.insert(virq);
+                    self.mappings_dirty = true;
+                }
             }
             virq
         } else if let Some(domain) = desc.domain {
@@ -323,6 +420,7 @@ impl IrqState {
             } else {
                 let virq = self.alloc_virq();
                 self.mappings.insert(key, virq);
+                self.mappings_dirty = true;
                 virq
             }
         } else {
@@ -353,8 +451,10 @@ impl IrqState {
         self.descs.get(&virq).map(|state| state.desc)
     }
 
-    fn translated_hwirq(&self, domain: IrqDomainId, hwirq: Hwirq) -> Option<Virq> {
-        self.mappings.get(&MappingKey { domain, hwirq }).copied()
+    fn take_mappings_dirty(&mut self) -> bool {
+        let dirty = self.mappings_dirty;
+        self.mappings_dirty = false;
+        dirty
     }
 
     fn remove_if_unused(&mut self, virq: Virq) {
@@ -364,9 +464,64 @@ impl IrqState {
     }
 }
 
-fn dispatch_subscribers(virq: Virq) {
-    let (desc, regular_handler, wake_subscription) = {
-        let mut state = IRQ_STATE.lock();
+/// Resolves a descriptor and, when it introduced a new domain mapping,
+/// republishes that domain's reverse-map snapshot under the control lock.
+///
+/// Called from control-plane paths (`map`, `register`, `enable`, NMI
+/// registration, wakeup subscription) and — through `enable()` — from the
+/// dispatch path's one-shot wakeup disable in [`dispatch_subscribers`]. On
+/// that data-path call the line was registered earlier, so `resolve_desc`
+/// only reuses the existing mapping: no new mapping is inserted, no snapshot
+/// is rebuilt or published, and no allocation happens. Any future data-path
+/// caller must preserve that "mapping already exists, never publish" shape.
+fn resolve_and_publish(state: &mut IrqState, desc: IrqDesc) -> IrqDesc {
+    let domain_id = desc.domain;
+    let desc = state.resolve_desc(desc);
+    if let Some(domain_id) = domain_id
+        && state.take_mappings_dirty()
+    {
+        let published = super::domain::publish_snapshot(domain_id, mappings_of(state, domain_id));
+        if !published {
+            // The mapping was inserted and a virq allocated, but the data path
+            // can never resolve it: `domain_id` is absent from the static
+            // domain registry, so every dispatch of this line reports
+            // `Unhandled`. Fail loudly instead of silently "succeeding".
+            warn!(
+                "resolve_and_publish: unregistered irq domain {domain_id:?}; the mapping will \
+                 never resolve on the data path"
+            );
+        }
+    }
+    desc
+}
+
+/// Yields the build-table mappings of one domain.
+fn mappings_of(
+    state: &IrqState,
+    domain_id: IrqDomainId,
+) -> impl Iterator<Item = (Hwirq, Virq)> + '_ {
+    state
+        .mappings
+        .iter()
+        .filter(move |(key, _)| key.domain == domain_id)
+        .map(|(key, &virq)| (key.hwirq, virq))
+}
+
+/// Dispatches a claimed interrupt to its subscribers.
+///
+/// Resolution and the handler-table lookup run in one `IRQ_CTL` critical
+/// section, so a concurrent `unregister` cannot interleave between them: the
+/// dispatch observes either the full pre-unregister state (handler present) or
+/// the post-unregister state (line unregistered, reported unhandled), never a
+/// resolved mapping whose descriptor has already been removed. The handler
+/// itself runs outside the lock.
+fn dispatch_subscribers(pending: &PendingIrq) {
+    let (virq, desc, regular_handler, wake_subscription) = {
+        let mut state = IRQ_CTL.lock();
+        let Some(virq) = pending.resolve() else {
+            warn!("Unhandled IRQ {:?}", pending.source());
+            return;
+        };
         let Some(entry) = state.descs.get_mut(&virq) else {
             warn!("Unhandled IRQ {virq}");
             return;
@@ -388,7 +543,7 @@ fn dispatch_subscribers(virq: Virq) {
         if wake_subscription.is_none() {
             state.remove_if_unused(virq);
         }
-        (desc, regular_handler, wake_subscription)
+        (virq, desc, regular_handler, wake_subscription)
     };
     let has_regular_handler = regular_handler.is_some();
 
@@ -409,26 +564,8 @@ fn dispatch_subscribers(virq: Virq) {
 /// Maps a hardware IRQ resource into the OS-visible logical IRQ namespace.
 pub fn map(desc: impl IntoIrqDesc) -> Virq {
     let desc = desc.into_irq_desc();
-    let mut state = IRQ_STATE.lock();
-    state.resolve_desc(desc).logical_irq().unwrap()
-}
-
-/// Returns the mapped logical IRQ number for a domain-local hardware IRQ.
-///
-/// NMI-safe: if `IRQ_STATE` is already held (NMI re-entered a normal IRQ
-/// handler on the same CPU), returns `None` instead of blocking.  Callers
-/// such as [`resolve_hwirq`] then fall back to the raw hwirq themselves;
-/// returning the untranslated hwirq here would misreport a dynamically
-/// allocated virq (≥ [`DYNAMIC_VIRQ_BASE`]) as the hwirq.
-pub fn translate_hwirq(domain: IrqDomainId, hwirq: Hwirq) -> Option<Virq> {
-    let state = IRQ_STATE.try_lock()?;
-    state.translated_hwirq(domain, hwirq)
-}
-
-/// Resolves a hardware IRQ to a logical IRQ, falling back to the raw hardware
-/// number when no explicit mapping exists yet.
-pub fn resolve_hwirq(domain: IrqDomainId, hwirq: Hwirq) -> Virq {
-    translate_hwirq(domain, hwirq).unwrap_or(hwirq)
+    let mut state = IRQ_CTL.lock();
+    resolve_and_publish(&mut state, desc).logical_irq().unwrap()
 }
 
 /// Configure and enable or disable an IRQ line.
@@ -439,15 +576,15 @@ pub fn resolve_hwirq(domain: IrqDomainId, hwirq: Hwirq) -> Virq {
 #[inline]
 pub fn enable(desc: impl IntoIrqDesc, on: bool) {
     let desc = {
-        let mut state = IRQ_STATE.lock();
-        state.resolve_desc(desc.into_irq_desc())
+        let mut state = IRQ_CTL.lock();
+        resolve_and_publish(&mut state, desc.into_irq_desc())
     };
     configure_and_enable_platform_irq(desc, on);
 }
 
 /// Return the descriptor currently remembered for an IRQ line, if any.
 pub fn descriptor(virq: Virq) -> Option<IrqDesc> {
-    IRQ_STATE.lock().stored_desc(virq)
+    IRQ_CTL.lock().stored_desc(virq)
 }
 
 /// Register the regular OS IRQ handler for an IRQ line.
@@ -459,8 +596,8 @@ pub fn descriptor(virq: Virq) -> Option<IrqDesc> {
 /// directly on dispatch, while wakeup subscribers only participate in the wakeup
 /// notification path.
 pub fn register(desc: impl IntoIrqDesc, handler: Handler) -> bool {
-    let mut state = IRQ_STATE.lock();
-    let desc = state.resolve_desc(desc.into_irq_desc());
+    let mut state = IRQ_CTL.lock();
+    let desc = resolve_and_publish(&mut state, desc.into_irq_desc());
     let virq = desc.logical_irq().unwrap();
     let entry = state
         .descs
@@ -480,7 +617,7 @@ pub fn register(desc: impl IntoIrqDesc, handler: Handler) -> bool {
 /// Remove the regular OS IRQ handler for an IRQ line.
 pub fn unregister(desc: impl IntoIrqDesc) -> Option<Handler> {
     let desc = desc.into_irq_desc();
-    let mut state = IRQ_STATE.lock();
+    let mut state = IRQ_CTL.lock();
     let virq = state.lookup_virq(desc)?;
     let (handler, removed_wakeup) = state
         .descs
@@ -519,7 +656,7 @@ pub fn unregister(desc: impl IntoIrqDesc) -> Option<Handler> {
 ///
 /// The interrupt is configured as a pseudo‑NMI with the highest GIC priority
 /// and routed through the lock‑free [`dispatch_nmi_handler`] path.  Unlike [`register`],
-/// this function **never** acquires `IRQ_STATE.lock()` during dispatch — the
+/// this function **never** acquires `IRQ_CTL.lock()` during dispatch — the
 /// handler is stored in a separate [`NMI_TABLE`] keyed by hwirq.
 ///
 /// # Safety constraints
@@ -540,15 +677,15 @@ pub fn register_nmi(desc: impl IntoIrqDesc, handler: Handler) -> bool {
     let hwirq = desc.hwirq;
 
     // Reject duplicate NMI registrations before touching any state, so a
-    // failed registration cannot leave IRQ_STATE or NMI_TABLE inconsistent.
+    // failed registration cannot leave IRQ_CTL or NMI_TABLE inconsistent.
     if NMI_TABLE.lock().contains_key(&hwirq) {
         warn!("register_nmi: handler already exists for hwirq {hwirq}");
         return false;
     }
 
-    // Resolve descriptor in IRQ_STATE (metadata tracking + fallback handler
+    // Resolve descriptor in IRQ_CTL (metadata tracking + fallback handler
     // for when nmi-pmu is not enabled and dispatch goes through the normal path).
-    let mut state = IRQ_STATE.lock();
+    let mut state = IRQ_CTL.lock();
     // Refuse to overwrite an existing regular handler on this line, mirroring
     // register()'s entry.handler.is_some() check.
     if let Some(virq) = state.lookup_virq(desc)
@@ -560,7 +697,7 @@ pub fn register_nmi(desc: impl IntoIrqDesc, handler: Handler) -> bool {
         warn!("register_nmi: handler already registered for irq {virq}");
         return false;
     }
-    let desc = state.resolve_desc(desc.with_flags(IrqFlags::PER_CPU));
+    let desc = resolve_and_publish(&mut state, desc.with_flags(IrqFlags::PER_CPU));
     let virq = desc.logical_irq().unwrap();
     let entry = state
         .descs
@@ -584,7 +721,7 @@ pub fn register_nmi(desc: impl IntoIrqDesc, handler: Handler) -> bool {
 /// Remove a previously registered NMI handler.
 ///
 /// Besides removing the [`NMI_TABLE`] entry, this clears the fallback handler
-/// and `IrqFlags::PER_CPU` tag that [`register_nmi`] stored in `IRQ_STATE`,
+/// and `IrqFlags::PER_CPU` tag that [`register_nmi`] stored in `IRQ_CTL`,
 /// so a re‑enabled or re‑triggered IRQ no longer dispatches the removed
 /// handler through the normal path.  The platform line is disabled when it is
 /// no longer used, using the full stored descriptor.
@@ -599,10 +736,10 @@ pub fn unregister_nmi(desc: impl IntoIrqDesc) -> bool {
         return false;
     }
 
-    // Also clear the IRQ_STATE fallback handler and PER_CPU tag installed by
+    // Also clear the IRQ_CTL fallback handler and PER_CPU tag installed by
     // register_nmi, so a re-enabled or re-triggered IRQ no longer dispatches
     // the removed handler through the normal path.
-    let mut state = IRQ_STATE.lock();
+    let mut state = IRQ_CTL.lock();
     let Some(virq) = state.lookup_virq(desc) else {
         return true;
     };
@@ -627,7 +764,7 @@ pub fn unregister_nmi(desc: impl IntoIrqDesc) -> bool {
     true
 }
 
-/// Dispatch a registered NMI handler without touching [`IRQ_STATE`].
+/// Dispatch a registered NMI handler without touching [`IRQ_CTL`].
 ///
 /// The handler is cloned out of [`NMI_TABLE`] before the lock is released,
 /// so the handler itself may safely (but rarely) call `register_nmi` /
@@ -647,8 +784,8 @@ fn dispatch_nmi_handler(hwirq: Hwirq) {
 // Wakeup subscriptions do not install a regular IRQ handler. They keep the IRQ
 // bound so the IRQ core can observe the event and run the wakeup callback path.
 fn subscribe_wakeup_mode(desc: impl IntoIrqDesc, mode: WakeupMode, handler: WakeHandler) -> bool {
-    let mut state = IRQ_STATE.lock();
-    let desc = state.resolve_desc(desc.into_irq_desc());
+    let mut state = IRQ_CTL.lock();
+    let desc = resolve_and_publish(&mut state, desc.into_irq_desc());
     let virq = desc.logical_irq().unwrap();
     let entry = state
         .descs
@@ -679,7 +816,7 @@ pub fn subscribe_wakeup_once(desc: impl IntoIrqDesc, handler: WakeHandler) -> bo
 
 pub fn unsubscribe_wakeup(desc: impl IntoIrqDesc) -> bool {
     let desc = desc.into_irq_desc();
-    let mut state = IRQ_STATE.lock();
+    let mut state = IRQ_CTL.lock();
     let Some(virq) = state.lookup_virq(desc) else {
         return false;
     };
@@ -707,7 +844,7 @@ pub fn unsubscribe_wakeup(desc: impl IntoIrqDesc) -> bool {
 /// that normal IRQs were masked (PMR ≤ NMI_ONLY) at the moment the interrupt
 /// fired — a pseudo‑NMI preempting a critical section.  The handler uses the
 /// lock‑free [`dispatch_nmi_handler`] path which only touches [`NMI_TABLE`], never
-/// [`IRQ_STATE`].
+/// [`IRQ_CTL`].
 #[register_trap_handler(NMI)]
 pub fn nmi_handler(vector: usize) -> bool {
     let guard = kspin::NoPreempt::new();
@@ -724,8 +861,9 @@ pub fn nmi_handler(vector: usize) -> bool {
 /// Normal IRQ handler.
 ///
 /// Invoked when the interrupted context had normal IRQs enabled (PMR >
-/// NMI_ONLY).  No critical‑section locks are held, so it is safe to acquire
-/// [`IRQ_STATE`].
+/// NMI_ONLY). The claim is resolved inside [`dispatch_subscribers`]'s single
+/// `IRQ_CTL` critical section together with the handler-table lookup; the
+/// domain resolution itself remains lock-free.
 ///
 /// # Warn
 ///
@@ -734,9 +872,9 @@ pub fn nmi_handler(vector: usize) -> bool {
 pub fn irq_handler(vector: usize) -> bool {
     let guard = kspin::NoPreempt::new();
 
-    if let Some(dispatched_irq) = platform_dispatch_irq(vector) {
-        dispatch_subscribers(dispatched_irq.irq());
-        dispatched_irq.complete();
+    if let Some(pending) = platform_dispatch_irq(vector) {
+        dispatch_subscribers(&pending);
+        pending.complete();
     }
 
     let _ = guard; // rescheduling may occur when preemption is re-enabled.
@@ -753,8 +891,12 @@ pub mod tests_irq {
     use unittest::def_test;
 
     use super::{
-        IRQ_STATE, IrqDesc, IrqStateDesc, WakeSubscription, WakeupMode, dispatch_subscribers,
-        irq_handler, unregister,
+        IRQ_CTL, IrqDesc, IrqRef, IrqStateDesc, PendingIrq, WakeSubscription, WakeupMode,
+        dispatch_subscribers, irq_handler, map, unregister,
+    };
+    use crate::irq::{
+        DYNAMIC_VIRQ_BASE, GIC_ROOT_DOMAIN, IO_APIC_DOMAIN, IrqTrigger, gic_irq_desc,
+        io_apic_irq_desc,
     };
 
     static REGULAR_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -769,7 +911,11 @@ pub mod tests_irq {
         WAKE_CALLS.fetch_add(1, Ordering::Relaxed);
     }
 
-    #[def_test]
+    // Every test in this module mutates the global domain registry / IRQ_CTL
+    // state (maps persist across tests and snapshots accumulate), so they must
+    // run sequentially. `serial` marks them so a future parallel test runner
+    // will not interleave them.
+    #[def_test(serial)]
     fn test_irq_handler_returns_true() {
         #[cfg(target_arch = "riscv64")]
         const IRQ_NUM: usize = (1usize << (usize::BITS - 1)) + 1;
@@ -786,11 +932,109 @@ pub mod tests_irq {
         assert!(irq_handler(IRQ_NUM));
     }
 
-    #[def_test]
+    #[def_test(serial)]
+    fn test_domain_resolve_mapped_and_unmapped() {
+        let virq = map(gic_irq_desc(33, IrqTrigger::LevelHigh));
+        assert!(virq >= DYNAMIC_VIRQ_BASE);
+
+        let mapped = PendingIrq::new(IrqRef::Domain(GIC_ROOT_DOMAIN, 33), 0);
+        assert_eq!(mapped.resolve(), Some(virq));
+        core::mem::forget(mapped);
+
+        // GIC domain has an explicit identity policy for unmapped lines
+        // (arch timer / IPI are registered as plain numbers).
+        let identity = PendingIrq::new(IrqRef::Domain(GIC_ROOT_DOMAIN, 999), 0);
+        assert_eq!(identity.resolve(), Some(999));
+        core::mem::forget(identity);
+
+        // IO-APIC is strict: unmapped lines are explicit misses.
+        let unmapped = PendingIrq::new(IrqRef::Domain(IO_APIC_DOMAIN, 999), 0);
+        assert_eq!(unmapped.resolve(), None);
+        core::mem::forget(unmapped);
+
+        let direct = PendingIrq::new(IrqRef::Virq(7), 0);
+        assert_eq!(direct.resolve(), Some(7));
+        core::mem::forget(direct);
+    }
+
+    /// The regression invariant: resolution must not depend on the control
+    /// lock. If the data path ever went back to a blocking `IRQ_CTL` lookup,
+    /// this test would deadlock while holding the lock.
+    #[def_test(serial)]
+    fn test_resolve_ignores_control_lock() {
+        let virq = map(io_apic_irq_desc(4));
+        let _ctl = IRQ_CTL.lock();
+        let pending = PendingIrq::new(IrqRef::Domain(IO_APIC_DOMAIN, 4), 0);
+        assert_eq!(pending.resolve(), Some(virq));
+        core::mem::forget(pending);
+    }
+
+    #[def_test(serial)]
+    fn test_domain_snapshot_append_visible() {
+        let first = map(gic_irq_desc(10, IrqTrigger::LevelHigh));
+        let second = map(gic_irq_desc(11, IrqTrigger::LevelHigh));
+
+        // Duplicate map reuses the first virq.
+        assert_eq!(map(gic_irq_desc(10, IrqTrigger::LevelHigh)), first);
+
+        // A snapshot published after the second map sees both lines.
+        let pending = PendingIrq::new(IrqRef::Domain(GIC_ROOT_DOMAIN, 11), 0);
+        assert_eq!(pending.resolve(), Some(second));
+        core::mem::forget(pending);
+    }
+
+    /// The completion invariants the design relies on: an unhandled claim
+    /// (strict domain, unmapped line) is still completed by the caller,
+    /// `complete()` runs the EOI exactly once (the implicit Drop afterwards
+    /// is a no-op), and `Drop` backstops early-return paths that never call
+    /// `complete()`.
+    ///
+    /// Uses the spurious-INTID cookie so concurrent timer/IPI completions
+    /// during the unittest run cannot perturb the counter.
+    #[def_test(serial)]
+    fn test_pending_irq_completion_invariants() {
+        let before = super::TEST_COMPLETE_IRQ_CALLS.load(Ordering::Relaxed);
+
+        // Strict-domain unmapped line: dispatch reports unhandled but must
+        // not complete the claim itself; completion stays the caller's job.
+        let pending = PendingIrq::new(
+            IrqRef::Domain(IO_APIC_DOMAIN, 999),
+            super::TEST_COMPLETION_COOKIE,
+        );
+        dispatch_subscribers(&pending);
+        assert_eq!(
+            super::TEST_COMPLETE_IRQ_CALLS.load(Ordering::Relaxed),
+            before
+        );
+
+        // Explicit complete runs the EOI exactly once; the `completed` flag
+        // makes the implicit Drop inside `complete()` a no-op.
+        pending.complete();
+        assert_eq!(
+            super::TEST_COMPLETE_IRQ_CALLS.load(Ordering::Relaxed),
+            before + 1
+        );
+
+        // Drop alone completes the claim: an early-return path cannot leak an
+        // un-EOI'd interrupt.
+        let pending = PendingIrq::new(
+            IrqRef::Domain(IO_APIC_DOMAIN, 999),
+            super::TEST_COMPLETION_COOKIE,
+        );
+        drop(pending);
+        assert_eq!(
+            super::TEST_COMPLETE_IRQ_CALLS.load(Ordering::Relaxed),
+            before + 2
+        );
+    }
+
+    #[def_test(serial)]
     fn test_unregister_clears_wakeup_subscription() {
-        let virq = 0x2001;
+        // Fixed virq below DYNAMIC_VIRQ_BASE: dynamic allocations start at
+        // 4096, so parallel tests can never collide with this slot.
+        let virq = 0x101;
         {
-            let mut state = IRQ_STATE.lock();
+            let mut state = IRQ_CTL.lock();
             state.descs.insert(
                 virq,
                 IrqStateDesc {
@@ -806,17 +1050,19 @@ pub mod tests_irq {
         }
 
         assert!(unregister(virq).is_some());
-        assert!(!IRQ_STATE.lock().descs.contains_key(&virq));
+        assert!(!IRQ_CTL.lock().descs.contains_key(&virq));
     }
 
-    #[def_test]
+    #[def_test(serial)]
     fn test_oneshot_wakeup_is_removed_after_dispatch() {
-        let virq = 0x2002;
+        // See test_unregister_clears_wakeup_subscription: fixed virq below
+        // DYNAMIC_VIRQ_BASE keeps this test collision-free.
+        let virq = 0x102;
         REGULAR_CALLS.store(0, Ordering::Relaxed);
         WAKE_CALLS.store(0, Ordering::Relaxed);
 
         {
-            let mut state = IRQ_STATE.lock();
+            let mut state = IRQ_CTL.lock();
             state.descs.insert(
                 virq,
                 IrqStateDesc {
@@ -831,11 +1077,13 @@ pub mod tests_irq {
             );
         }
 
-        dispatch_subscribers(virq);
+        let pending = PendingIrq::new(IrqRef::Virq(virq), 0);
+        dispatch_subscribers(&pending);
+        core::mem::forget(pending);
 
         assert_eq!(REGULAR_CALLS.load(Ordering::Relaxed), 1);
         assert_eq!(WAKE_CALLS.load(Ordering::Relaxed), 1);
-        let state = IRQ_STATE.lock();
+        let state = IRQ_CTL.lock();
         let entry = state
             .descs
             .get(&virq)

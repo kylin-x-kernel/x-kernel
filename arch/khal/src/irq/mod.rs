@@ -5,6 +5,7 @@
 //! Interrupt management.
 
 mod desc;
+mod domain;
 mod manager;
 
 pub use desc::{
@@ -13,4 +14,5 @@ pub use desc::{
     PLIC_ROOT_DOMAIN, Virq, gic_edge_irq_desc, gic_irq_desc, gic_level_irq_desc, io_apic_irq_desc,
     plic_irq_desc,
 };
+pub use domain::IrqRef;
 pub use manager::*;

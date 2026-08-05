@@ -54,27 +54,38 @@ fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
     }
 }
 
-fn dispatch_irq(vector: usize) -> Option<khal::irq::DispatchedIrq> {
+fn dispatch_irq(vector: usize) -> Option<khal::irq::PendingIrq> {
     if vector >= x86_apic::APIC_TIMER_VECTOR as usize {
         trace!("LAPIC IRQ {}", vector);
         x86_apic::end_of_interrupt();
-        return Some(khal::irq::DispatchedIrq::new(vector, 0));
+        return Some(khal::irq::PendingIrq::new(
+            khal::irq::IrqRef::Virq(vector),
+            0,
+        ));
     }
     if vector >= x86_apic::MSIX_VECTOR_BASE as usize {
         trace!("MSI-X IRQ {}", vector);
         x86_apic::end_of_interrupt();
-        return Some(khal::irq::DispatchedIrq::new(vector, 0));
+        return Some(khal::irq::PendingIrq::new(
+            khal::irq::IrqRef::Virq(vector),
+            0,
+        ));
     }
     if vector >= x86_apic::IO_APIC_VECTOR_BASE {
         let hwirq = vector - x86_apic::IO_APIC_VECTOR_BASE;
-        let irq = khal::irq::resolve_hwirq(IO_APIC_DOMAIN, hwirq);
         if x86_apic::irq_trigger_mode(hwirq) == Some(x86_apic::IoApicTriggerMode::Level) {
             trace!("IRQ {} (level)", hwirq);
-            return Some(khal::irq::DispatchedIrq::new(irq, 1));
+            return Some(khal::irq::PendingIrq::new(
+                khal::irq::IrqRef::Domain(IO_APIC_DOMAIN, hwirq),
+                1,
+            ));
         }
         trace!("IRQ {} (edge)", hwirq);
         x86_apic::end_of_interrupt();
-        return Some(khal::irq::DispatchedIrq::new(irq, 0));
+        return Some(khal::irq::PendingIrq::new(
+            khal::irq::IrqRef::Domain(IO_APIC_DOMAIN, hwirq),
+            0,
+        ));
     }
     None
 }
@@ -89,7 +100,7 @@ impl khal::irq::IntrManagerIf {
         enable(irq, enabled);
     }
 
-    fn dispatch_irq(vector: usize) -> Option<khal::irq::DispatchedIrq> {
+    fn dispatch_irq(vector: usize) -> Option<khal::irq::PendingIrq> {
         dispatch_irq(vector)
     }
 

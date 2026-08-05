@@ -68,7 +68,7 @@ impl khal::irq::IntrManagerIf {
         }
     }
 
-    fn dispatch_irq(irq: usize) -> Option<khal::irq::DispatchedIrq> {
+    fn dispatch_irq(irq: usize) -> Option<khal::irq::PendingIrq> {
         let mut irq = IrqType::new(irq);
         if matches!(irq, IrqType::Io) {
             let Some(ex_irq) = eiointc::claim_irq() else {
@@ -87,7 +87,10 @@ impl khal::irq::IntrManagerIf {
                 eiointc::complete_irq(irq);
             }
         }
-        Some(khal::irq::DispatchedIrq::new(irq.as_usize(), 0))
+        Some(khal::irq::PendingIrq::new(
+            khal::irq::IrqRef::Virq(irq.as_usize()),
+            0,
+        ))
     }
 
     fn dispatch_nmi(_irq: usize) -> Option<khal::irq::DispatchedIrq> {

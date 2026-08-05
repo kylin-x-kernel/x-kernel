@@ -164,19 +164,19 @@ impl khal::irq::IntrManagerIf {
         );
     }
 
-    fn dispatch_irq(irq: usize) -> Option<khal::irq::DispatchedIrq> {
+    fn dispatch_irq(irq: usize) -> Option<khal::irq::PendingIrq> {
         with_cause!(
             irq,
             @S_TIMER => {
                 trace!("IRQ: timer");
-                Some(khal::irq::DispatchedIrq::new(irq, PLIC_COMPLETE_SKIP))
+                Some(khal::irq::PendingIrq::new(khal::irq::IrqRef::Virq(irq), PLIC_COMPLETE_SKIP))
             },
             @S_SOFT => {
                 trace!("IRQ: IPI");
                 // SAFETY: the current trap cause is a pending supervisor
                 // software interrupt, so clearing that CSR bit acknowledges it.
                 unsafe { sip::clear_ssoft() };
-                Some(khal::irq::DispatchedIrq::new(irq, PLIC_COMPLETE_SKIP))
+                Some(khal::irq::PendingIrq::new(khal::irq::IrqRef::Virq(irq), PLIC_COMPLETE_SKIP))
             },
             @S_EXT => {
                 let mut plic = plic().lock();
@@ -186,8 +186,8 @@ impl khal::irq::IntrManagerIf {
                 };
                 trace!("IRQ: external {irq}");
                 let hwirq = irq.get() as usize;
-                Some(khal::irq::DispatchedIrq::new(
-                    khal::irq::resolve_hwirq(PLIC_DOMAIN, hwirq),
+                Some(khal::irq::PendingIrq::new(
+                    khal::irq::IrqRef::Domain(PLIC_DOMAIN, hwirq),
                     hwirq,
                 ))
             },

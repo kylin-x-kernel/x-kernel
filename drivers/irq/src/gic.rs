@@ -300,7 +300,7 @@ impl khal::irq::IntrManagerIf {
     /// Uses GIC RPR to detect NMIs: if NMI, skip the NMI window
     /// (we ARE the NMI) and go through dispatch_subscribers (safe —
     /// no locks held in IRQ-enabled context).
-    fn dispatch_irq(irq: usize) -> Option<khal::irq::DispatchedIrq> {
+    fn dispatch_irq(irq: usize) -> Option<khal::irq::PendingIrq> {
         let (hwirq, completion_cookie, is_nmi) = crate::gic::gic_handle_irq_from_irqson(irq)?;
 
         // Linux: open window only for non-NMI, after NMI is handled.
@@ -309,8 +309,8 @@ impl khal::irq::IntrManagerIf {
             crate::gic::open_nmi_window();
         }
 
-        Some(khal::irq::DispatchedIrq::new(
-            khal::irq::resolve_hwirq(GIC_ROOT_DOMAIN, hwirq),
+        Some(khal::irq::PendingIrq::new(
+            khal::irq::IrqRef::Domain(GIC_ROOT_DOMAIN, hwirq),
             completion_cookie,
         ))
     }

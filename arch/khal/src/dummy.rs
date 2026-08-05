@@ -92,7 +92,7 @@ impl crate::irq::IntrManagerIf {
 
     fn enable(_irq: usize, _enabled: bool) {}
 
-    fn dispatch_irq(_irq: usize) -> Option<crate::irq::DispatchedIrq> {
+    fn dispatch_irq(_irq: usize) -> Option<crate::irq::PendingIrq> {
         None
     }
 
