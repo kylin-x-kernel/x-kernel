@@ -4,18 +4,19 @@
 
 //! Futex and robust-list syscall adapters.
 
-use core::{mem::size_of, time::Duration};
+use core::mem::size_of;
 
 use kerrno::{KError, KResult, LinuxError};
 use kfutex::{FutexKey, FutexWakeOp, global_table};
 use kprocess::{AsThread, current_user_mm_id, current_user_process_address_space};
+use ktime_types::TimeSpan;
 use linux_raw_sys::general::{
     FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_PRIVATE_FLAG, FUTEX_REQUEUE,
     FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, FUTEX_WAKE_OP, robust_list_head,
     timespec,
 };
 use osvm::VirtPtr;
-use posix_types::{TimeValueLike, UserConstPtr, UserPtr};
+use posix_types::{TimeSpanLike, UserConstPtr, UserPtr};
 
 /// Converts a wake-style count from the syscall `u32` ABI.
 ///
@@ -79,21 +80,27 @@ fn parse_timeout(
     command: u32,
     is_realtime: bool,
     timeout_address: usize,
-) -> KResult<Option<Duration>> {
+) -> KResult<Option<TimeSpan>> {
     let Some(timeout) = UserConstPtr::<timespec>::from(timeout_address).check_non_null() else {
         return Ok(None);
     };
-    let timeout = timeout.read_vm()?.try_into_time_value()?;
+    let timeout = timeout.read_vm()?;
     // `FUTEX_WAIT` is always relative; `FUTEX_CLOCK_REALTIME` only selects the
     // clock used to measure that relative interval. `FUTEX_WAIT_BITSET` is
     // always an absolute deadline on the selected clock.
     Ok(Some(match command {
-        FUTEX_WAIT => timeout,
-        FUTEX_WAIT_BITSET => timeout.saturating_sub(if is_realtime {
-            khal::time::wall_time()
-        } else {
-            khal::time::monotonic_time()
-        }),
+        FUTEX_WAIT => timeout.try_into_time_span()?,
+        FUTEX_WAIT_BITSET => {
+            if is_realtime {
+                posix_types::try_into_realtime_deadline(timeout)?
+                    .duration_since(ktime::realtime())
+                    .unwrap_or(TimeSpan::ZERO)
+            } else {
+                timeout
+                    .try_into_time_span()?
+                    .saturating_sub(khal::time::monotonic_time().span_since_origin())
+            }
+        }
         _ => return Err(KError::InvalidInput),
     }))
 }

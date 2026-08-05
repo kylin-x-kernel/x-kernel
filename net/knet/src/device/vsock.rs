@@ -4,16 +4,14 @@
 
 //! Vsock device integration helpers.
 use alloc::collections::VecDeque;
-use core::{
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use kclass::{ClassDevice, prelude::*};
 use kdevice::DeviceId;
 use kerrno::{KError, KResult, k_bail};
 use ksync::{Mutex, static_lock};
 use ktask::future::{block_on, interruptible};
+use ktime_types::TimeSpan;
 
 use crate::{alloc::string::ToString, vsock::connection_manager::VSOCK_CONN_MANAGER};
 
@@ -83,7 +81,7 @@ impl PollBackoff {
         }
     }
 
-    fn next_interval(&self) -> Duration {
+    fn next_interval(&self) -> TimeSpan {
         let idle = self.consecutive_idle.load(Ordering::Relaxed);
         let interval_us = match idle {
             0..=3 => 100,     //  3 ：100μs
@@ -91,7 +89,7 @@ impl PollBackoff {
             11..=20 => 2_000, // 11-20 ：2ms
             _ => 10_000,      // 20+ ：10ms
         };
-        Duration::from_micros(interval_us)
+        TimeSpan::from_micros(interval_us)
     }
 
     fn on_activity(&self) {
@@ -314,7 +312,7 @@ pub fn vsock_send(
         match result {
             Ok(len) => return Ok(len),
             Err(DriverError::WouldBlock) => {
-                tx_wait_queue.wait_timeout(Duration::from_millis(10));
+                tx_wait_queue.wait_timeout(TimeSpan::from_millis(10));
             }
             Err(e) => return Err(map_dev_err(e)),
         }

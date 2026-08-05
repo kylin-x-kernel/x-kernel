@@ -8,7 +8,6 @@ use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::mem::size_of;
 
 use kerrno::{KError, KResult, LinuxError};
-use khal::time::monotonic_time_nanos;
 use kprocess::{Pid, current_user_process};
 use ksync::{Mutex, static_lock};
 use linux_raw_sys::general::*;
@@ -17,7 +16,7 @@ use posix_types::{IpcPerm, UserConstPtr, UserPtr, msgbuf, msginfo, msqid_ds};
 
 use super::{
     IPC_CREAT, IPC_EXCL, IPC_INFO, IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, MSG_INFO, MSG_STAT,
-    has_ipc_permission, next_ipc_id,
+    current_unix_seconds, has_ipc_permission, next_ipc_id,
 };
 
 pub struct Message {
@@ -50,7 +49,7 @@ impl MessageQueue {
                 },
                 msg_stime: 0,
                 msg_rtime: 0,
-                msg_ctime: monotonic_time_nanos() as __kernel_time_t,
+                msg_ctime: current_unix_seconds(),
                 msg_cbytes: 0,
                 msg_qnum: 0,
                 msg_qbytes: MSGMNB as __kernel_size_t,
@@ -356,7 +355,7 @@ pub fn sys_msgsnd(
 
     msg_queue.msqid_ds.msg_lspid = current_pid as _;
 
-    msg_queue.msqid_ds.msg_stime = monotonic_time_nanos() as _;
+    msg_queue.msqid_ds.msg_stime = current_unix_seconds();
 
     warn!("sys_msgsnd: wakeup of waiting receivers not implemented");
     Ok(0)
@@ -468,12 +467,12 @@ pub fn sys_msgrcv(
 
     if should_remove {
         msg_queue.msqid_ds.msg_lrpid = current_pid as _;
-        msg_queue.msqid_ds.msg_rtime = monotonic_time_nanos() as _;
+        msg_queue.msqid_ds.msg_rtime = current_unix_seconds();
 
         warn!("sys_msgrcv: wakeup of waiting senders not implemented");
     } else {
         msg_queue.msqid_ds.msg_lrpid = current_pid as _;
-        msg_queue.msqid_ds.msg_rtime = monotonic_time_nanos() as _;
+        msg_queue.msqid_ds.msg_rtime = current_unix_seconds();
     }
 
     Ok(copy_len as isize)
@@ -615,7 +614,7 @@ pub fn sys_msgctl(msqid: i32, cmd: i32, buf: UserPtr<u8>) -> KResult<isize> {
             msg_queue.msqid_ds.msg_qbytes = user_buf.msg_qbytes;
         }
 
-        msg_queue.msqid_ds.msg_ctime = monotonic_time_nanos() as _;
+        msg_queue.msqid_ds.msg_ctime = current_unix_seconds();
 
         return Ok(0);
     }
@@ -635,7 +634,7 @@ pub fn sys_msgctl(msqid: i32, cmd: i32, buf: UserPtr<u8>) -> KResult<isize> {
             return Ok(0);
         }
 
-        msg_queue.msqid_ds.msg_ctime = monotonic_time_nanos() as _;
+        msg_queue.msqid_ds.msg_ctime = current_unix_seconds();
 
         return Ok(0);
     }

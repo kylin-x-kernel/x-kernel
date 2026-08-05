@@ -102,7 +102,7 @@ fn advance_pc(vcpu: &mut Aarch64Vcpu, esr: u64) {
 
 fn handle_wfi(vcpu: &mut Aarch64Vcpu, esr: u64) -> ExitAction {
     advance_pc(vcpu, esr);
-    ktask::sleep(core::time::Duration::from_millis(1));
+    ktask::sleep(ktime_types::TimeSpan::from_millis(1));
     ExitAction::Resume
 }
 

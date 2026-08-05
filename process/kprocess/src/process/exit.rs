@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 
 use kpoll::PollSet;
 use ksignal::Signo;
+use ktime_types::TimeSpan;
 
 use super::{INIT_PROC, Process};
 use crate::{Pid, process_domain};
@@ -155,8 +156,8 @@ pub struct WaitedChild {
     process: Arc<Process>,
     pid: Pid,
     exit_code: i32,
-    total_utime_ns: u64,
-    total_stime_ns: u64,
+    total_utime: TimeSpan,
+    total_stime: TimeSpan,
     consumed: bool,
 }
 
@@ -177,8 +178,8 @@ impl WaitedChild {
     }
 
     /// Returns the total user/kernel CPU time to charge to the parent.
-    pub fn total_cpu_time_ns(&self) -> (u64, u64) {
-        (self.total_utime_ns, self.total_stime_ns)
+    pub fn total_cpu_time(&self) -> (TimeSpan, TimeSpan) {
+        (self.total_utime, self.total_stime)
     }
 
     /// Returns whether this wait result consumed the child.
@@ -234,24 +235,23 @@ impl Process {
     }
 
     /// Adds exited-thread CPU time to this process's accumulated counters.
-    pub(crate) fn accumulate_exited_thread_time(&self, utime_ns: u64, stime_ns: u64) {
-        self.lifecycle
-            .accumulate_exited_thread_time(utime_ns, stime_ns);
+    pub(crate) fn accumulate_exited_thread_time(&self, utime: TimeSpan, stime: TimeSpan) {
+        self.lifecycle.accumulate_exited_thread_time(utime, stime);
     }
 
-    /// Returns accumulated exited-thread user and kernel time in nanoseconds.
-    pub fn exited_thread_time_ns(&self) -> (u64, u64) {
-        self.lifecycle.exited_thread_time_ns()
+    /// Returns accumulated exited-thread user and kernel time.
+    pub fn exited_thread_time(&self) -> (TimeSpan, TimeSpan) {
+        self.lifecycle.exited_thread_time()
     }
 
     /// Adds reaped-child CPU time to this process's accumulated counters.
-    pub(crate) fn accumulate_child_time(&self, utime_ns: u64, stime_ns: u64) {
-        self.lifecycle.accumulate_child_time(utime_ns, stime_ns);
+    pub(crate) fn accumulate_child_time(&self, utime: TimeSpan, stime: TimeSpan) {
+        self.lifecycle.accumulate_child_time(utime, stime);
     }
 
-    /// Returns accumulated reaped-children user and kernel time in nanoseconds.
-    pub fn child_time_ns(&self) -> (u64, u64) {
-        self.lifecycle.child_time_ns()
+    /// Returns accumulated reaped-children user and kernel time.
+    pub fn child_time(&self) -> (TimeSpan, TimeSpan) {
+        self.lifecycle.child_time()
     }
 
     /// Terminates the [`Process`] with the requested publication mode.
@@ -506,14 +506,14 @@ impl Process {
         };
 
         let exit_code = child.exit_code();
-        let (thread_utime_ns, thread_stime_ns) = child.exited_thread_time_ns();
-        let (child_utime_ns, child_stime_ns) = child.child_time_ns();
+        let (thread_utime, thread_stime) = child.exited_thread_time();
+        let (child_utime, child_stime) = child.child_time();
         let waited = WaitedChild {
             process: child.clone(),
             pid,
             exit_code,
-            total_utime_ns: thread_utime_ns.saturating_add(child_utime_ns),
-            total_stime_ns: thread_stime_ns.saturating_add(child_stime_ns),
+            total_utime: thread_utime.saturating_add(child_utime),
+            total_stime: thread_stime.saturating_add(child_stime),
             consumed: mode == WaitReapMode::Consume,
         };
 

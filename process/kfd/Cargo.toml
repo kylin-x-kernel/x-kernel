@@ -12,6 +12,7 @@ documentation.workspace = true
 [dependencies]
 flatten_objects.workspace = true
 kvfs.workspace = true
+ktime_types.workspace = true
 kerrno.workspace = true
 kcred.workspace = true
 kpoll.workspace = true

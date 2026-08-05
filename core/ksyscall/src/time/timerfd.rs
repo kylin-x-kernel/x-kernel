@@ -15,7 +15,7 @@ use linux_raw_sys::general::{
     CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_REALTIME, O_RDWR, TFD_CLOEXEC, TFD_NONBLOCK,
     TFD_TIMER_ABSTIME, itimerspec, timespec,
 };
-use posix_types::{TimeValueLike, UserConstPtr, UserPtr};
+use posix_types::{TimeSpanLike, UserConstPtr, UserPtr};
 
 /// Creates a timerfd file descriptor.
 pub fn sys_timerfd_create(clock_id: i32, flags: u32) -> KResult<isize> {
@@ -59,17 +59,17 @@ pub fn sys_timerfd_settime(
     let absolute = flags & TFD_TIMER_ABSTIME != 0;
 
     let new = new_value.read_vm()?;
-    let value = new.it_value.try_into_time_value()?;
-    let interval = new.it_interval.try_into_time_value()?;
+    let value = new.it_value.try_into_time_span()?;
+    let interval = new.it_interval.try_into_time_span()?;
 
     let file = kprocess::current_resources().get_file(fd)?;
     let tfd = TimerFd::from_file(&file)?;
-    let (old_interval, old_remaining) = tfd.settime(absolute, value, interval);
+    let (old_interval, old_remaining) = tfd.settime(absolute, value, interval)?;
 
     if let Some(old_value) = old_value.check_non_null() {
         old_value.write_vm(itimerspec {
-            it_interval: timespec::from_time_value(old_interval),
-            it_value: timespec::from_time_value(old_remaining),
+            it_interval: timespec::from_time_span(old_interval),
+            it_value: timespec::from_time_span(old_remaining),
         })?;
     }
 
@@ -85,8 +85,8 @@ pub fn sys_timerfd_gettime(fd: i32, curr_value: UserPtr<itimerspec>) -> KResult<
     let (interval, remaining) = tfd.gettime();
 
     curr_value.write_vm(itimerspec {
-        it_interval: timespec::from_time_value(interval),
-        it_value: timespec::from_time_value(remaining),
+        it_interval: timespec::from_time_span(interval),
+        it_value: timespec::from_time_span(remaining),
     })?;
 
     Ok(0)

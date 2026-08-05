@@ -80,7 +80,10 @@ unsafe impl IxgbeHal for IxgbeHalImpl {
     }
 
     fn wait_until(duration: core::time::Duration) -> Result<(), &'static str> {
-        khal::time::busy_wait_until(duration);
+        let deadline = ktime_types::MonotonicInstant::from_span_since_origin(
+            ktime_types::TimeSpan::from_core(duration),
+        );
+        khal::time::busy_wait_until(deadline);
         Ok(())
     }
 }

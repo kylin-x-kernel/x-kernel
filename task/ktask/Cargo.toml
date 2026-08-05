@@ -32,6 +32,8 @@ test = ["percpu/sp-naive"]
 kerrno.workspace = true
 kidentity.workspace = true
 khal.workspace = true
+ktime_types.workspace = true
+ktime.workspace = true
 kcpu_id_map.workspace = true
 backtrace = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }

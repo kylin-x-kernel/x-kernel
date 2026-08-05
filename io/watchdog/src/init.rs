@@ -8,11 +8,11 @@ use khal::percpu::this_cpu_id;
 use ktask::{KCpuMask, TaskInner};
 use log::debug;
 
-/// Per-CPU timestamp of the last softlockup report (nanoseconds).
+/// Per-CPU timestamp of the last softlockup report.
 /// Rate-limits reports to one per threshold period so a genuine lockup
 /// doesn't dump on every timer tick.
 #[percpu::def_percpu]
-static LAST_SOFTLOCKUP_REPORT_NS: u64 = 0;
+static LAST_SOFTLOCKUP_REPORT: Option<ktime_types::MonotonicInstant> = None;
 
 /// Common watchdog initialization for both primary and secondary CPUs.
 ///
@@ -38,15 +38,16 @@ fn init_nmi_watchdog() {
     crate::register_hardlockup_detection_task();
 
     // TODO: read CPU max frequency from DT OPP table (opp-hz).
-    // For now assume 2.5 GHz.  The hardlockup period is threshold_ns × freq,
+    // TODO: read CPU max frequency from DT OPP table (opp-hz).
+    // For now assume 2.5 GHz.  The hardlockup period is threshold × freq,
     // so over-estimating the cycle frequency stretches the real-time window
     // and makes the detector less sensitive.
     let cpu_freq_hz: u64 = 2_500_000_000;
-    // Use u128 intermediate to avoid overflow when threshold_ns × cpu_freq_hz
-    // exceeds u64::MAX (e.g. ≥ 1.85 GHz with the 10 s default threshold).
-    let nmi_period_cycles = (crate::lockup_detection::DEFAULT_HARDLOCKUP_THRESH_NS as u128
-        * cpu_freq_hz as u128
-        / khal::time::NANOS_PER_SEC as u128) as u64;
+    // Use u128 intermediate to avoid overflow when threshold × cpu_freq_hz
+    // exceeds u64::MAX (e.g. ≥ 1.85 GHz with the 10 s default threshold).
+    let nmi_period_cycles = (crate::lockup_detection::DEFAULT_HARDLOCKUP_THRESHOLD.as_nanos()
+        * u128::from(cpu_freq_hz)
+        / ktime_types::NANOS_PER_SEC as u128) as u64;
     khal::nmi::init(nmi_period_cycles);
     khal::nmi::enable();
 
@@ -109,14 +110,19 @@ fn init_nmi_watchdog() {
 pub fn init_softlockup_detection() {
     // Timer callback used to detect soft lockup conditions.
     ktask::register_timer_callback(|_| {
-        let now_ns = khal::time::monotonic_time_nanos();
+        let now = khal::time::monotonic_time();
         crate::timer_tick();
 
-        if crate::check_softlockup(now_ns) {
+        if crate::check_softlockup(now) {
             // SAFETY: timer callbacks run with interrupts disabled on the
             // current CPU, so per-CPU raw access is safe from migration.
-            let last = unsafe { LAST_SOFTLOCKUP_REPORT_NS.read_current_raw() };
-            if now_ns.saturating_sub(last) > crate::lockup_detection::DEFAULT_SOFTLOCKUP_THRESH_NS {
+            // SAFETY: timer callbacks run with interrupts disabled and cannot
+            // migrate while accessing the current CPU's report timestamp.
+            let last = unsafe { *LAST_SOFTLOCKUP_REPORT.current_ref_raw() };
+            if last.is_none_or(|last| {
+                now.saturating_duration_since(last)
+                    > crate::lockup_detection::DEFAULT_SOFTLOCKUP_THRESHOLD
+            }) {
                 log::error!(
                     "[watchdog] softlockup detected on cpu {}",
                     this_cpu_id().as_usize()
@@ -124,7 +130,9 @@ pub fn init_softlockup_detection() {
                 ktask::dump_sched_stats();
                 // SAFETY: timer callback, IRQs disabled, same CPU as the
                 // `read_current_raw` above — cannot race with migration.
-                unsafe { LAST_SOFTLOCKUP_REPORT_NS.write_current_raw(now_ns) };
+                // SAFETY: the same non-migrating timer callback exclusively
+                // updates this CPU's report timestamp.
+                unsafe { *LAST_SOFTLOCKUP_REPORT.current_ref_mut_raw() = Some(now) };
                 ktask::snapshot::dump_cpu_tasks(this_cpu_id());
             }
         }
@@ -135,8 +143,8 @@ pub fn init_softlockup_detection() {
     // keeping the CPU truly idle when there is no other work.
     let watchdog_task = TaskInner::new_pidless_kthread(
         move || loop {
-            crate::touch_softlockup(khal::time::monotonic_time_nanos());
-            ktask::sleep(core::time::Duration::from_secs(4));
+            crate::touch_softlockup(khal::time::monotonic_time());
+            ktask::sleep(ktime_types::TimeSpan::from_secs(4));
         },
         "watchdog".into(),
         kbuild_config::TASK_STACK_SIZE,

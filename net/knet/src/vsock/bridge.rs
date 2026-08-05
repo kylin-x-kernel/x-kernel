@@ -21,7 +21,6 @@ use core::{
     str,
     sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     task::Poll,
-    time::Duration,
 };
 
 use kclass::{ClassDevice, prelude::*};
@@ -30,6 +29,7 @@ use klazy::Lazy;
 use kpoll::{PollRegisterError, PollRegistrations, PollSet};
 use ksync::Mutex;
 use ktask::future::block_on;
+use ktime_types::TimeSpan;
 use tipc::{
     Handle, HandleEventMask, HandleSet, HandleSetCommand, HandleSetEntry, IPC_CHAN_MAX_BUF_SIZE,
     IPC_PORT_PATH_MAX, IpcChan, IpcConnectFlags, IpcMsgInfo, IpcPort, IpcPortFlags, IpcUuid,
@@ -306,12 +306,12 @@ impl VsockBridge {
                     }));
                     if let Err(err) = wait_result {
                         warn!("vsock bridge handle-set register failed: {err:?}");
-                        ktask::sleep(Duration::from_millis(10));
+                        ktask::sleep(TimeSpan::from_millis(10));
                     }
                 }
                 Err(err) => {
                     warn!("vsock bridge handle-set poll failed: {err:?}");
-                    ktask::sleep(Duration::from_millis(10));
+                    ktask::sleep(TimeSpan::from_millis(10));
                 }
             }
         }
@@ -376,7 +376,7 @@ impl VsockBridge {
                 BridgeConnectionState::TipcConnecting | BridgeConnectionState::TipcSendBlocked,
             ) => {
                 self.push_rx_event(VsockBridgeEvent::Received(conn_id, len));
-                ktask::sleep(Duration::from_millis(10));
+                ktask::sleep(TimeSpan::from_millis(10));
             }
             Some(_) => {
                 warn!("vsock bridge received data in invalid state for {conn_id:?}");

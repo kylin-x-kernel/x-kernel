@@ -6,7 +6,7 @@
 use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
 
 use kerrno::{KError, KResult, LinuxError};
-use khal::time::TimeValue;
+use ktime_types::MonotonicInstant;
 use smoltcp::{
     iface::SocketSet,
     phy::{DeviceCapabilities, Medium},
@@ -231,7 +231,7 @@ impl Router {
         }
     }
 
-    pub fn poll(&mut self, timestamp: TimeValue, sockets: &mut SocketSet<'_>) {
+    pub fn poll(&mut self, timestamp: MonotonicInstant, sockets: &mut SocketSet<'_>) {
         for expired in self.ipv4_reassembler.remove_expired(timestamp) {
             self.queue_icmpv4_error(
                 Icmpv4Error::FragmentReassemblyTimeout,
@@ -274,7 +274,7 @@ impl Router {
         dev.send_link_frame(ifindex, frame)
     }
 
-    pub fn dispatch(&mut self, timestamp: TimeValue) -> bool {
+    pub fn dispatch(&mut self, timestamp: MonotonicInstant) -> bool {
         let mut poll_next = false;
         while let Some(mut packet) = self.tx_queue.pop_front() {
             packet.set_owner(PacketOwner::DeviceTx);
@@ -325,7 +325,7 @@ impl Router {
 
     fn handle_ipv4_input(
         &mut self,
-        timestamp: TimeValue,
+        timestamp: MonotonicInstant,
         mut packet: PacketBuf,
         sockets: &mut SocketSet<'_>,
     ) {
@@ -400,7 +400,7 @@ impl Router {
         self.rx_queue.push_back(packet);
     }
 
-    fn dispatch_ipv4_packet(&mut self, mut packet: PacketBuf, timestamp: TimeValue) -> bool {
+    fn dispatch_ipv4_packet(&mut self, mut packet: PacketBuf, timestamp: MonotonicInstant) -> bool {
         let header = match Ipv4Header::prepare_output_packet(&mut packet) {
             Ok(header) => header,
             Err(Ipv4Error::Malformed | Ipv4Error::BadChecksum) => return false,

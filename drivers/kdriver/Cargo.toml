@@ -88,6 +88,7 @@ pci = { workspace = true }
 vsock = { workspace = true, optional = true }
 virtio = { workspace = true, optional = true }
 khal = { workspace = true }
+ktime_types = { workspace = true }
 memspace = { workspace = true }
 kspin.workspace = true
 lazyinit.workspace = true

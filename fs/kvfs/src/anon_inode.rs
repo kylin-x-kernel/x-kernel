@@ -5,10 +5,11 @@
 //! Anonymous inode file allocation.
 
 use alloc::{format, string::String, sync::Arc};
-use core::{any::Any, time::Duration};
+use core::any::Any;
 
 use kcred::Cred;
 use klazy::Once;
+use ktime_types::SystemTime;
 
 use crate::{
     Dentry, DentryOperations, FMode, FileOperations, InodeOperations, Metadata, Mount, MountIdmap,
@@ -146,9 +147,9 @@ impl AnonInode {
         .with_stat_data(
             ANON_INODE_BLOCK_SIZE,
             0,
-            Duration::ZERO,
-            Duration::ZERO,
-            Duration::ZERO,
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH,
         )
     }
 
@@ -164,9 +165,9 @@ impl AnonInode {
             block_size: ANON_INODE_BLOCK_SIZE,
             blocks: 0,
             rdev: Default::default(),
-            atime: Duration::ZERO,
-            mtime: Duration::ZERO,
-            ctime: Duration::ZERO,
+            atime: SystemTime::UNIX_EPOCH,
+            mtime: SystemTime::UNIX_EPOCH,
+            ctime: SystemTime::UNIX_EPOCH,
         }
     }
 }
@@ -209,9 +210,9 @@ fn anon_inode_root_init() -> VfsInodeInit {
     .with_stat_data(
         ANON_INODE_BLOCK_SIZE,
         0,
-        Duration::ZERO,
-        Duration::ZERO,
-        Duration::ZERO,
+        SystemTime::UNIX_EPOCH,
+        SystemTime::UNIX_EPOCH,
+        SystemTime::UNIX_EPOCH,
     )
 }
 

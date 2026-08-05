@@ -78,7 +78,7 @@ ktracepoint::define_event_trace!(
     TP_STRUCT__entry { woken_tid: u64, ts_ns: u64 },
     TP_fast_assign {
         woken_tid: woken_tid,
-        ts_ns: khal::time::monotonic_time_nanos(),
+        ts_ns: khal::time::monotonic_time().as_nanos_u64_saturating(),
     },
     TP_ident(__entry),
     TP_printk(format_args!(
@@ -102,7 +102,7 @@ ktracepoint::define_event_trace!(
     TP_fast_assign {
         prev_tid: prev_tid,
         next_tid: next_tid,
-        ts_ns: khal::time::monotonic_time_nanos(),
+        ts_ns: khal::time::monotonic_time().as_nanos_u64_saturating(),
     },
     TP_ident(__entry),
     TP_printk(format_args!(
@@ -207,7 +207,7 @@ pub struct Kops;
 
 impl KernelTraceOps for Kops {
     fn time_now() -> u64 {
-        khal::time::monotonic_time_nanos()
+        khal::time::monotonic_time().as_nanos_u64_saturating()
     }
 
     fn cpu_id() -> u32 {

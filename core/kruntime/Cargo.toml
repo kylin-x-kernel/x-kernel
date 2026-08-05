@@ -57,6 +57,8 @@ kdma.workspace = true
 memaddr.workspace = true
 khal.workspace = true
 of = { workspace = true, optional = true }
+ktime_types.workspace = true
+ktime.workspace = true
 kcpu.workspace = true
 kipi = { workspace = true, optional = true }
 kaddr_layout = { workspace = true }

@@ -13,15 +13,14 @@ use core::{
     any::Any,
     fmt,
     sync::atomic::{AtomicU16, AtomicUsize, Ordering},
-    time::Duration,
 };
 
 use bitflags::bitflags;
 use hashbrown::HashMap;
 use kcred::Cred;
 use kerrno::LinuxError;
-use khal::time::wall_time;
 use klazy::Once;
+use ktime_types::SystemTime;
 
 use super::{
     DeviceFileOps,
@@ -330,7 +329,7 @@ pub trait InodeOperations: Send + Sync + 'static {
         &self,
         idmap: &MountIdmap,
         dentry: &Dentry,
-        timestamp: Duration,
+        timestamp: SystemTime,
         update: InodeUpdateTime,
     ) -> VfsResult<()> {
         let (atime, mtime, ctime) = match update {
@@ -368,7 +367,7 @@ impl InodeOperations for EmptyInodeOperations {}
 
 #[derive(Clone, Copy, Debug)]
 struct InodeTimestamp {
-    sec: u64,
+    sec: i64,
     nsec: u32,
 }
 
@@ -377,15 +376,16 @@ impl InodeTimestamp {
         Self { sec: 0, nsec: 0 }
     }
 
-    fn from_duration(value: Duration) -> Self {
+    fn from_system_time(value: SystemTime) -> Self {
         Self {
-            sec: value.as_secs(),
+            sec: value.unix_seconds(),
             nsec: value.subsec_nanos(),
         }
     }
 
-    fn as_duration(self) -> Duration {
-        Duration::new(self.sec, self.nsec)
+    fn as_system_time(self) -> SystemTime {
+        SystemTime::from_unix_parts(self.sec, self.nsec)
+            .expect("cached inode timestamp is normalized")
     }
 }
 
@@ -630,21 +630,21 @@ impl InodeAttributes {
         *self.size.lock() = size;
     }
 
-    fn set_accessed_at(&self, value: Duration) -> Duration {
+    fn set_accessed_at(&self, value: SystemTime) -> SystemTime {
         let mut times = self.times.lock();
-        times.accessed_at = InodeTimestamp::from_duration(value);
+        times.accessed_at = InodeTimestamp::from_system_time(value);
         value
     }
 
-    fn set_modified_at(&self, value: Duration) -> Duration {
+    fn set_modified_at(&self, value: SystemTime) -> SystemTime {
         let mut times = self.times.lock();
-        times.modified_at = InodeTimestamp::from_duration(value);
+        times.modified_at = InodeTimestamp::from_system_time(value);
         value
     }
 
-    fn set_changed_at(&self, value: Duration) -> Duration {
+    fn set_changed_at(&self, value: SystemTime) -> SystemTime {
         let mut times = self.times.lock();
-        times.changed_at = InodeTimestamp::from_duration(value);
+        times.changed_at = InodeTimestamp::from_system_time(value);
         value
     }
 
@@ -690,9 +690,9 @@ impl InodeAttributes {
             block_size: 1_u64 << self.block_bits(),
             blocks: self.blocks(),
             rdev: self.rdev(),
-            atime: times.accessed_at.as_duration(),
-            mtime: times.modified_at.as_duration(),
-            ctime: times.changed_at.as_duration(),
+            atime: times.accessed_at.as_system_time(),
+            mtime: times.modified_at.as_system_time(),
+            ctime: times.changed_at.as_system_time(),
         }
     }
 }
@@ -882,13 +882,13 @@ impl VfsInodeInit {
         mut self,
         block_size: u64,
         blocks: u64,
-        atime: Duration,
-        mtime: Duration,
-        ctime: Duration,
+        atime: SystemTime,
+        mtime: SystemTime,
+        ctime: SystemTime,
     ) -> Self {
-        self.accessed_at = InodeTimestamp::from_duration(atime);
-        self.modified_at = InodeTimestamp::from_duration(mtime);
-        self.changed_at = InodeTimestamp::from_duration(ctime);
+        self.accessed_at = InodeTimestamp::from_system_time(atime);
+        self.modified_at = InodeTimestamp::from_system_time(mtime);
+        self.changed_at = InodeTimestamp::from_system_time(ctime);
         self.block_bits = inode_blkbits(block_size);
         self.blocks = blocks;
         self
@@ -1295,7 +1295,7 @@ impl VfsInode {
             || atime.is_some()
             || mtime.is_some();
         if changed && update.ctime.is_none() {
-            update.ctime = Some(wall_time());
+            update.ctime = Some(ktime::realtime());
         }
         let ctime = update.ctime;
         self.inode_operations
@@ -1325,7 +1325,7 @@ impl VfsInode {
     pub(crate) fn update_time(
         &self,
         dentry: &Dentry,
-        timestamp: Duration,
+        timestamp: SystemTime,
         update: InodeUpdateTime,
     ) -> VfsResult<()> {
         self.inode_operations
@@ -1720,23 +1720,23 @@ impl VfsInode {
     }
 
     /// Sets the access timestamp.
-    pub fn set_accessed_at(&self, timestamp: Duration) -> Duration {
+    pub fn set_accessed_at(&self, timestamp: SystemTime) -> SystemTime {
         self.attributes.set_accessed_at(timestamp)
     }
 
     /// Sets the modification timestamp.
-    pub fn set_modified_at(&self, timestamp: Duration) -> Duration {
+    pub fn set_modified_at(&self, timestamp: SystemTime) -> SystemTime {
         self.attributes.set_modified_at(timestamp)
     }
 
     /// Sets the change timestamp.
-    pub fn set_changed_at(&self, timestamp: Duration) -> Duration {
+    pub fn set_changed_at(&self, timestamp: SystemTime) -> SystemTime {
         self.attributes.set_changed_at(timestamp)
     }
 
     /// Sets the change timestamp to the current wall-clock time.
-    pub fn set_changed_at_to_now(&self) -> Duration {
-        self.set_changed_at(wall_time())
+    pub fn set_changed_at_to_now(&self) -> SystemTime {
+        self.set_changed_at(ktime::realtime())
     }
 
     /// Sets the link count.
@@ -1963,8 +1963,8 @@ impl InodeCache {
 #[cfg(unittest)]
 mod tests {
     use alloc::sync::Arc;
-    use core::time::Duration;
 
+    use ktime_types::SystemTime;
     use unittest::{assert_eq, def_test};
 
     use super::*;
@@ -2086,9 +2086,9 @@ mod tests {
         updated.uid = 1000;
         updated.gid = 1001;
         updated.blocks = 7;
-        updated.atime = Duration::new(11, 1);
-        updated.mtime = Duration::new(12, 2);
-        updated.ctime = Duration::new(13, 3);
+        updated.atime = SystemTime::from_unix_parts(11, 1).unwrap();
+        updated.mtime = SystemTime::from_unix_parts(12, 2).unwrap();
+        updated.ctime = SystemTime::from_unix_parts(13, 3).unwrap();
 
         inode
             .update_attributes_after_backing_change(&updated)
@@ -2099,9 +2099,9 @@ mod tests {
         assert_eq!(cached.mode.permission().bits(), 0o640);
         assert_eq!((cached.uid, cached.gid), (1000, 1001));
         assert_eq!(cached.blocks, 7);
-        assert_eq!(cached.atime, Duration::new(11, 1));
-        assert_eq!(cached.mtime, Duration::new(12, 2));
-        assert_eq!(cached.ctime, Duration::new(13, 3));
+        assert_eq!(cached.atime, SystemTime::from_unix_parts(11, 1).unwrap());
+        assert_eq!(cached.mtime, SystemTime::from_unix_parts(12, 2).unwrap());
+        assert_eq!(cached.ctime, SystemTime::from_unix_parts(13, 3).unwrap());
 
         updated.inode = 8;
         assert_eq!(

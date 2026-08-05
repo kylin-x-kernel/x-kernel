@@ -3,15 +3,29 @@
 // See LICENSES for license details.
 
 //! FAT metadata and name helpers.
-use core::time::Duration;
 
 use chrono::{DateTime, Datelike, Timelike};
+use ktime_types::SystemTime;
 use kvfs::{DeviceId, Metadata, MetadataUpdate, NodePermission, NodeType, VfsError};
 
 use super::ff;
 
-pub(crate) fn unix_to_dos(datetime: Duration) -> fatfs::DateTime {
-    let dt = DateTime::UNIX_EPOCH + datetime;
+pub(crate) fn unix_to_dos(datetime: SystemTime) -> fatfs::DateTime {
+    const DOS_MIN_SECONDS: i64 = 315_532_800;
+    const DOS_MAX_SECONDS: i64 = 4_354_819_199;
+
+    let unix_seconds = datetime
+        .unix_seconds()
+        .clamp(DOS_MIN_SECONDS, DOS_MAX_SECONDS);
+    let nanoseconds = if unix_seconds == datetime.unix_seconds() {
+        datetime.subsec_nanos()
+    } else if unix_seconds == DOS_MIN_SECONDS {
+        0
+    } else {
+        999_999_999
+    };
+    let dt = DateTime::from_timestamp(unix_seconds, nanoseconds)
+        .expect("clamped FAT timestamp is representable by chrono");
     let dt = dt.naive_local();
 
     fatfs::DateTime::new(
@@ -49,9 +63,9 @@ pub(crate) fn file_metadata(
         // would be enough for now.
         blocks: size / block_size,
         rdev: DeviceId::default(),
-        atime: Duration::default(),
-        mtime: Duration::default(),
-        ctime: Duration::default(),
+        atime: SystemTime::UNIX_EPOCH,
+        mtime: SystemTime::UNIX_EPOCH,
+        ctime: SystemTime::UNIX_EPOCH,
     }
 }
 

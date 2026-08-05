@@ -47,8 +47,8 @@ impl DeviceFileOps for Rtc {
     fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
         match cmd {
             RTC_RD_TIME => {
-                let wall =
-                    chrono::DateTime::from_timestamp_nanos(khal::time::wall_time_nanos() as _);
+                let unix_nanos = i64::try_from(ktime::realtime().unix_nanos()).unwrap_or(i64::MAX);
+                let wall = chrono::DateTime::from_timestamp_nanos(unix_nanos);
                 (arg as *mut rtc_time).write_vm(rtc_time {
                     tm_sec: wall.second() as _,
                     tm_min: wall.minute() as _,

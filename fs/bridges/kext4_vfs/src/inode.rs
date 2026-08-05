@@ -23,8 +23,8 @@ use kvfs::{
 use super::{
     fs::Ext4Filesystem,
     util::{
-        current_ext4_timestamp, device_id_to_ext4, dir_entry_type_to_vfs, duration_to_ext4,
-        ext4_timestamp_to_duration, into_vfs_err, vfs_type_to_inode_kind,
+        current_ext4_timestamp, device_id_to_ext4, dir_entry_type_to_vfs,
+        ext4_timestamp_to_system_time, into_vfs_err, system_time_to_ext4, vfs_type_to_inode_kind,
     },
 };
 
@@ -496,22 +496,22 @@ fn validate_live_inode_number(live_number: u64, core_inode: &Ext4Inode) -> VfsRe
 
 fn sync_dentry_ctime(dentry: &Dentry, core_inode: &Ext4Inode) -> VfsResult<()> {
     validate_live_inode_number(dentry.inode(), core_inode)?;
-    dentry.set_changed_at(ext4_timestamp_to_duration(core_inode.ctime()));
+    dentry.set_changed_at(ext4_timestamp_to_system_time(core_inode.ctime()));
     Ok(())
 }
 
 fn sync_dentry_link_state(dentry: &Dentry, core_inode: &Ext4Inode) -> VfsResult<()> {
     validate_live_inode_number(dentry.inode(), core_inode)?;
     dentry.set_link_count(u64::from(core_inode.links_count()));
-    dentry.set_changed_at(ext4_timestamp_to_duration(core_inode.ctime()));
+    dentry.set_changed_at(ext4_timestamp_to_system_time(core_inode.ctime()));
     Ok(())
 }
 
 fn sync_vfs_inode_writeback_state(vfs_inode: &VfsInode, core_inode: &Ext4Inode) -> VfsResult<()> {
     validate_live_inode_number(vfs_inode.inode(), core_inode)?;
     vfs_inode.set_allocated_bytes(core_inode.blocks().saturating_mul(512));
-    vfs_inode.set_modified_at(ext4_timestamp_to_duration(core_inode.mtime()));
-    vfs_inode.set_changed_at(ext4_timestamp_to_duration(core_inode.ctime()));
+    vfs_inode.set_modified_at(ext4_timestamp_to_system_time(core_inode.mtime()));
+    vfs_inode.set_changed_at(ext4_timestamp_to_system_time(core_inode.ctime()));
     Ok(())
 }
 
@@ -562,7 +562,7 @@ impl InodeOperations for Inode {
 
         let ctime = update
             .ctime
-            .map(duration_to_ext4)
+            .map(system_time_to_ext4)
             .unwrap_or_else(|| inode.ctime());
         let mut metadata = Ext4InodeMetadataUpdate::new(ctime);
         if let Some(mode) = update.mode {
@@ -572,10 +572,10 @@ impl InodeOperations for Inode {
             metadata = metadata.with_owner(uid, gid);
         }
         if let Some(atime) = update.atime {
-            metadata = metadata.with_atime(duration_to_ext4(atime));
+            metadata = metadata.with_atime(system_time_to_ext4(atime));
         }
         if let Some(mtime) = update.mtime {
-            metadata = metadata.with_mtime(duration_to_ext4(mtime));
+            metadata = metadata.with_mtime(system_time_to_ext4(mtime));
         }
         fs.update_inode_metadata(&inode, metadata)
             .map_err(into_vfs_err)?;

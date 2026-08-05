@@ -7,7 +7,7 @@ use alloc::{sync::Arc, vec::Vec};
 use ::core::net::{IpAddr, SocketAddr};
 use hashbrown::HashMap;
 use kerrno::{KResult, k_bail};
-use khal::time::monotonic_time_nanos;
+use khal::time::monotonic_time;
 use ksync::Mutex;
 use lazyinit::LazyInit;
 
@@ -61,7 +61,7 @@ impl UdpPcbRegistry {
         }
         Self {
             buckets,
-            port_rand: Mutex::new(UdpPortRand::new(monotonic_time_nanos())),
+            port_rand: Mutex::new(UdpPortRand::new(monotonic_time().as_nanos_u64_saturating())),
         }
     }
 

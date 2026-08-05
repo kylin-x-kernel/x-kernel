@@ -5,9 +5,9 @@
 //! Simple filesystem scaffolding for the in-kernel VFS.
 
 use alloc::{string::String, sync::Arc};
-use core::time::Duration;
 
 use ksync::Mutex;
+use ktime_types::SystemTime;
 use slab::Slab;
 
 use crate::{
@@ -106,9 +106,9 @@ impl SimpleFsNode {
             block_size: 0,
             blocks: 0,
             rdev: DeviceId::default(),
-            atime: Duration::default(),
-            mtime: Duration::default(),
-            ctime: Duration::default(),
+            atime: SystemTime::UNIX_EPOCH,
+            mtime: SystemTime::UNIX_EPOCH,
+            ctime: SystemTime::UNIX_EPOCH,
         };
         Self {
             fs,

@@ -7,13 +7,14 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 
 use kerrno::{KError, KResult};
-use khal::time::{TimeValue, monotonic_time_nanos};
+use khal::time::monotonic_time;
+use ktime_types::{ProcessCpuInstant, TimeSpan};
 use posix_types::ITimerType;
 
 use crate::{
     Pid,
     delivery::{TimerDelivery, TimerSignal},
-    interval_timer::{ITIMER_SIGNAL_CAPACITY, ITimer, timer_signal},
+    interval_timer::{ITIMER_SIGNAL_CAPACITY, ITimer, TimerInstant, timer_signal},
     posix_timer::{PosixTimer, PosixTimerClock, PosixTimerCreateNotify},
 };
 
@@ -46,13 +47,13 @@ impl ProcessTimerManager {
     pub fn get_itimer(
         &self,
         timer_type: ITimerType,
-        process_utime_ns: u64,
-        process_stime_ns: u64,
-    ) -> (TimeValue, TimeValue) {
-        self.itimers[timer_type as usize].snapshot(Self::timer_clock_now_ns(
+        process_utime: TimeSpan,
+        process_stime: TimeSpan,
+    ) -> (TimeSpan, TimeSpan) {
+        self.itimers[timer_type as usize].snapshot(Self::timer_clock_now(
             timer_type,
-            process_utime_ns,
-            process_stime_ns,
+            process_utime,
+            process_stime,
         ))
     }
 
@@ -60,18 +61,20 @@ impl ProcessTimerManager {
     pub fn set_itimer(
         &mut self,
         timer_type: ITimerType,
-        interval_ns: usize,
-        remaining_ns: usize,
-        process_utime_ns: u64,
-        process_stime_ns: u64,
-    ) -> (TimeValue, TimeValue) {
-        let now_ns = Self::timer_clock_now_ns(timer_type, process_utime_ns, process_stime_ns);
-        let deadline_ns = (remaining_ns as u64)
-            .checked_add(now_ns)
-            .filter(|_| remaining_ns != 0);
+        interval: TimeSpan,
+        remaining: TimeSpan,
+        process_utime: TimeSpan,
+        process_stime: TimeSpan,
+    ) -> (TimeSpan, TimeSpan) {
+        let now = Self::timer_clock_now(timer_type, process_utime, process_stime);
+        let deadline = if remaining.is_zero() {
+            None
+        } else {
+            now.checked_add(remaining)
+        };
         let owner_pid = self.owner_pid;
         let timer = &mut self.itimers[timer_type as usize];
-        let old = timer.set(now_ns, interval_ns as u64, deadline_ns);
+        let old = timer.set(now, interval, deadline);
         if matches!(timer_type, ITimerType::Real) {
             Self::arm_itimer_real(timer, owner_pid);
         }
@@ -82,7 +85,7 @@ impl ProcessTimerManager {
     pub fn poll_wall_clock(&mut self) -> Vec<TimerDelivery> {
         let mut deliveries = Vec::new();
         let owner_pid = self.owner_pid;
-        if self.itimers[ITIMER_REAL_INDEX].update(monotonic_time_nanos()) > 0 {
+        if self.itimers[ITIMER_REAL_INDEX].update(TimerInstant::Monotonic(monotonic_time())) > 0 {
             Self::arm_itimer_real(&mut self.itimers[ITIMER_REAL_INDEX], owner_pid);
             deliveries.push(TimerDelivery::Process(TimerSignal::Legacy {
                 signo: timer_signal(ITimerType::Real),
@@ -95,7 +98,7 @@ impl ProcessTimerManager {
             }
 
             // Wall-clock timers read their own clock internally; CPU time args are unused.
-            let expirations = timer.update(0, 0);
+            let expirations = timer.update(TimeSpan::ZERO, TimeSpan::ZERO);
             if expirations == 0 {
                 continue;
             }
@@ -111,18 +114,22 @@ impl ProcessTimerManager {
     /// Polls the CPU-based interval timers against aggregated process CPU time.
     pub fn poll_cpu_timers(
         &mut self,
-        process_utime_ns: u64,
-        process_stime_ns: u64,
+        process_utime: TimeSpan,
+        process_stime: TimeSpan,
     ) -> Vec<TimerDelivery> {
         let mut deliveries = Vec::new();
 
-        if self.itimers[ITIMER_VIRTUAL_INDEX].update(process_utime_ns) > 0 {
+        if self.itimers[ITIMER_VIRTUAL_INDEX].update(TimerInstant::ProcessCpu(
+            ProcessCpuInstant::from_span_since_origin(process_utime),
+        )) > 0
+        {
             deliveries.push(TimerDelivery::Process(TimerSignal::Legacy {
                 signo: timer_signal(ITimerType::Virtual),
             }));
         }
-        if self.itimers[ITIMER_PROF_INDEX].update(process_utime_ns.saturating_add(process_stime_ns))
-            > 0
+        if self.itimers[ITIMER_PROF_INDEX].update(TimerInstant::ProcessCpu(
+            ProcessCpuInstant::from_span_since_origin(process_utime.saturating_add(process_stime)),
+        )) > 0
         {
             deliveries.push(TimerDelivery::Process(TimerSignal::Legacy {
                 signo: timer_signal(ITimerType::Prof),
@@ -134,7 +141,7 @@ impl ProcessTimerManager {
                 continue;
             }
 
-            let expirations = timer.update(process_utime_ns, process_stime_ns);
+            let expirations = timer.update(process_utime, process_stime);
             if expirations == 0 {
                 continue;
             }
@@ -167,12 +174,12 @@ impl ProcessTimerManager {
     pub fn get_posix_timer(
         &self,
         timer_id: i32,
-        process_utime_ns: u64,
-        process_stime_ns: u64,
-    ) -> KResult<(TimeValue, TimeValue)> {
+        process_utime: TimeSpan,
+        process_stime: TimeSpan,
+    ) -> KResult<(TimeSpan, TimeSpan)> {
         self.posix_timers
             .get(&timer_id)
-            .map(|timer| timer.snapshot(process_utime_ns, process_stime_ns))
+            .map(|timer| timer.snapshot(process_utime, process_stime))
             .ok_or(KError::InvalidInput)
     }
 
@@ -180,29 +187,28 @@ impl ProcessTimerManager {
         &mut self,
         timer_id: i32,
         absolute: bool,
-        interval_ns: usize,
-        value_ns: usize,
-        process_utime_ns: u64,
-        process_stime_ns: u64,
-    ) -> KResult<((TimeValue, TimeValue), Option<TimerDelivery>)> {
+        interval: TimeSpan,
+        value: TimeSpan,
+        process_utime: TimeSpan,
+        process_stime: TimeSpan,
+    ) -> KResult<((TimeSpan, TimeSpan), Option<TimerDelivery>)> {
+        let owner_pid = self.owner_pid;
+        let old = self
+            .posix_timers
+            .get_mut(&timer_id)
+            .ok_or(KError::InvalidInput)?
+            .settime(absolute, interval, value, process_utime, process_stime)?;
+
         let signal_seq = self.allocate_posix_signal_seq();
         let timer = self
             .posix_timers
             .get_mut(&timer_id)
-            .ok_or(KError::InvalidInput)?;
-        let owner_pid = self.owner_pid;
+            .expect("POSIX timer was validated before allocating its signal sequence");
         timer.set_signal_seq(signal_seq);
-        let old = timer.settime(
-            absolute,
-            interval_ns,
-            value_ns,
-            process_utime_ns,
-            process_stime_ns,
-        );
         timer.arm_deadline(owner_pid);
         // The timer may have already expired; update() advances the deadline
         // if so, requiring a second arm to register the new deadline.
-        let expirations = timer.update(process_utime_ns, process_stime_ns);
+        let expirations = timer.update(process_utime, process_stime);
         let delivery = timer.collect_delivery(timer_id, expirations);
         timer.arm_deadline(owner_pid);
         Ok((old, delivery))
@@ -237,15 +243,21 @@ impl ProcessTimerManager {
         false
     }
 
-    fn timer_clock_now_ns(
+    fn timer_clock_now(
         timer_type: ITimerType,
-        process_utime_ns: u64,
-        process_stime_ns: u64,
-    ) -> u64 {
+        process_utime: TimeSpan,
+        process_stime: TimeSpan,
+    ) -> TimerInstant {
         match timer_type {
-            ITimerType::Real => monotonic_time_nanos(),
-            ITimerType::Virtual => process_utime_ns,
-            ITimerType::Prof => process_utime_ns.saturating_add(process_stime_ns),
+            ITimerType::Real => TimerInstant::Monotonic(monotonic_time()),
+            ITimerType::Virtual => {
+                TimerInstant::ProcessCpu(ProcessCpuInstant::from_span_since_origin(process_utime))
+            }
+            ITimerType::Prof => {
+                TimerInstant::ProcessCpu(ProcessCpuInstant::from_span_since_origin(
+                    process_utime.saturating_add(process_stime),
+                ))
+            }
         }
     }
 
@@ -274,18 +286,18 @@ impl ProcessTimerManager {
     }
 
     fn arm_itimer_real(timer: &mut ITimer, owner_pid: Pid) {
-        timer.set_alarm(
-            timer
-                .deadline_ns()
-                .map(|deadline_ns| deadline_ns.min(usize::MAX as u64) as usize),
-            Some(owner_pid),
-        );
+        let deadline = timer.deadline().map(|deadline| match deadline {
+            TimerInstant::Monotonic(deadline) => deadline,
+            _ => panic!("ITIMER_REAL deadline must use the monotonic clock"),
+        });
+        timer.set_alarm(deadline, Some(owner_pid));
     }
 }
 
 #[cfg(unittest)]
 mod tests {
     use ksignal::Signo;
+    use ktime_types::TimeSpan;
     use linux_raw_sys::general::CLOCK_PROCESS_CPUTIME_ID;
     use posix_types::ITimerType;
     use unittest::def_test;
@@ -300,15 +312,28 @@ mod tests {
     fn test_process_timer_manager_set_itimer_returns_previous_values() {
         let mut manager = ProcessTimerManager::new(1);
 
-        let (old_interval, old_remained) = manager.set_itimer(ITimerType::Virtual, 11, 22, 0, 0);
+        let (old_interval, old_remained) = manager.set_itimer(
+            ITimerType::Virtual,
+            TimeSpan::from_nanos(11),
+            TimeSpan::from_nanos(22),
+            TimeSpan::ZERO,
+            TimeSpan::ZERO,
+        );
         assert_eq!(old_interval.as_secs(), 0);
         assert_eq!(old_remained.as_secs(), 0);
 
-        let (old_interval, old_remained) = manager.set_itimer(ITimerType::Virtual, 33, 44, 0, 0);
+        let (old_interval, old_remained) = manager.set_itimer(
+            ITimerType::Virtual,
+            TimeSpan::from_nanos(33),
+            TimeSpan::from_nanos(44),
+            TimeSpan::ZERO,
+            TimeSpan::ZERO,
+        );
         assert_eq!(old_interval.subsec_nanos(), 11);
         assert_eq!(old_remained.subsec_nanos(), 22);
 
-        let (interval, remained) = manager.get_itimer(ITimerType::Virtual, 0, 0);
+        let (interval, remained) =
+            manager.get_itimer(ITimerType::Virtual, TimeSpan::ZERO, TimeSpan::ZERO);
         assert_eq!(interval.subsec_nanos(), 33);
         assert_eq!(remained.subsec_nanos(), 44);
     }
@@ -327,12 +352,19 @@ mod tests {
             )
             .unwrap();
         let (_, delivery) = manager
-            .set_posix_timer(timer_id, false, 0, 1, 0, 0)
+            .set_posix_timer(
+                timer_id,
+                false,
+                TimeSpan::ZERO,
+                TimeSpan::from_nanos(1),
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+            )
             .unwrap();
         assert!(delivery.is_none());
 
         let delivery = manager
-            .poll_cpu_timers(1, 0)
+            .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO)
             .into_iter()
             .next()
             .expect("timer delivery");
@@ -342,7 +374,14 @@ mod tests {
         };
 
         let _ = manager
-            .set_posix_timer(timer_id, false, 0, 10, 1, 0)
+            .set_posix_timer(
+                timer_id,
+                false,
+                TimeSpan::ZERO,
+                TimeSpan::from_nanos(10),
+                TimeSpan::from_nanos(1),
+                TimeSpan::ZERO,
+            )
             .unwrap();
         assert!(!manager.on_timer_signal_dequeued(timer_id, stale_signal_seq));
     }

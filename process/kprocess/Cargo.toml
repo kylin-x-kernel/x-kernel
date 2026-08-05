@@ -22,6 +22,7 @@ kcred.workspace = true
 kerrno.workspace = true
 kfd.workspace = true
 khal.workspace = true
+ktime_types.workspace = true
 klazy.workspace = true
 kpoll.workspace = true
 kidentity.workspace = true

@@ -34,11 +34,9 @@ impl BootHandler {
             // over i2c), not the pl031 MMIO RTC this driver probes, so it
             // typically finds nothing. Don't panic the whole boot over a
             // missing RTC; just record it for bring-up diagnostics.
-            if rtc_driver::init_from_device_tree(timer_driver::arm_generic::t2ns(
-                timer_driver::arm_generic::now_ticks(),
-            ))
-            .is_none()
-            {
+            if let Some(sample) = rtc_driver::read_from_device_tree() {
+                ktime::initialize_realtime(sample);
+            } else {
                 kernel_boot::bootln!("rtc init skipped (non-fatal): no pl031 RTC in device tree");
             }
         }

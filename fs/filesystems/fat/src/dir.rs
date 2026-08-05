@@ -4,8 +4,8 @@
 
 //! FAT directory inode implementation.
 use alloc::{string::String, sync::Arc};
-use core::time::Duration;
 
+use ktime_types::SystemTime;
 use kvfs::{
     Dentry, DeviceId, DirContext, DirEntrySink, FileDirOperations, FileOperations,
     InodeDirOperations, InodeOperations, LockedDentry, Metadata, MetadataUpdate, NodePermission,
@@ -148,9 +148,9 @@ impl InodeOperations for FatDirInode {
             block_size,
             blocks: 1,
             rdev: DeviceId::default(),
-            atime: Duration::default(),
-            mtime: Duration::default(),
-            ctime: Duration::default(),
+            atime: SystemTime::UNIX_EPOCH,
+            mtime: SystemTime::UNIX_EPOCH,
+            ctime: SystemTime::UNIX_EPOCH,
         })
     }
 
@@ -311,9 +311,9 @@ fn dir_init(inode: u64, block_size: u64) -> VfsInodeInit {
     .with_stat_data(
         block_size,
         1,
-        Duration::ZERO,
-        Duration::ZERO,
-        Duration::ZERO,
+        SystemTime::UNIX_EPOCH,
+        SystemTime::UNIX_EPOCH,
+        SystemTime::UNIX_EPOCH,
     )
 }
 

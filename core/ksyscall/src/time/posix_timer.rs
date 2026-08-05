@@ -13,24 +13,23 @@ use ktimer::{PosixTimerCreateNotify, PosixTimerSigValue, TimerSigValue};
 use linux_raw_sys::general::{
     SIGEV_NONE, SIGEV_SIGNAL, SIGEV_THREAD_ID, TIMER_ABSTIME, itimerspec,
 };
-use posix_types::{TimeValueLike, UserConstPtr, UserPtr, k_sigevent};
+use posix_types::{TimeSpanLike, UserConstPtr, UserPtr, k_sigevent};
 
 fn parse_signo(signo: i32) -> KResult<Signo> {
     Signo::from_repr(signo as u8).ok_or(KError::InvalidInput)
 }
 
-fn parse_timespec_ns(ts: linux_raw_sys::general::timespec) -> KResult<usize> {
-    let tv = ts.try_into_time_value()?;
-    usize::try_from(tv.as_nanos()).map_err(|_| KError::InvalidInput)
+fn parse_timespec(ts: linux_raw_sys::general::timespec) -> KResult<ktime_types::TimeSpan> {
+    ts.try_into_time_span()
 }
 
 fn build_itimerspec(
-    interval: khal::time::TimeValue,
-    remaining: khal::time::TimeValue,
+    interval: ktime_types::TimeSpan,
+    remaining: ktime_types::TimeSpan,
 ) -> itimerspec {
     itimerspec {
-        it_interval: linux_raw_sys::general::timespec::from_time_value(interval),
-        it_value: linux_raw_sys::general::timespec::from_time_value(remaining),
+        it_interval: linux_raw_sys::general::timespec::from_time_span(interval),
+        it_value: linux_raw_sys::general::timespec::from_time_span(remaining),
     }
 }
 
@@ -112,13 +111,13 @@ pub fn sys_timer_settime(
     }
 
     let new_value = new_value.read_vm()?;
-    let interval_ns = parse_timespec_ns(new_value.it_interval)?;
-    let value_ns = parse_timespec_ns(new_value.it_value)?;
+    let interval = parse_timespec(new_value.it_interval)?;
+    let value = parse_timespec(new_value.it_value)?;
     let absolute = flags & TIMER_ABSTIME as i32 != 0;
 
     let current_thread = kprocess::current_user_thread();
     let process = current_thread.process().clone();
-    let (old, delivery) = process.set_posix_timer(timerid, absolute, interval_ns, value_ns)?;
+    let (old, delivery) = process.set_posix_timer(timerid, absolute, interval, value)?;
 
     if let Some(old_value) = old_value.check_non_null() {
         old_value.write_vm(build_itimerspec(old.0, old.1))?;

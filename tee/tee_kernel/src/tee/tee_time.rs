@@ -4,7 +4,8 @@
 
 use alloc::vec;
 
-use khal::time::{TimeValue, wall_time};
+use khal::time::monotonic_time;
+use ktime_types::{SystemTime, TimeSpan};
 use osvm::MemError;
 use posix_types::{UserConstPtr, UserPtr};
 use tee_raw_sys::{
@@ -23,11 +24,11 @@ fn map_user_mem_error(err: MemError) -> u32 {
     }
 }
 
-pub fn tee_time_get_sys_time() -> khal::time::TimeValue {
-    wall_time()
+pub fn tee_time_get_sys_time() -> SystemTime {
+    ktime::realtime()
 }
-fn tee_time_get_ree_time() -> khal::time::TimeValue {
-    wall_time()
+fn tee_time_get_ree_time() -> SystemTime {
+    ktime::realtime()
 }
 
 /// Get the current time from the specified time category
@@ -41,8 +42,8 @@ pub fn sys_tee_scn_get_time(cat: u64, teetime: *mut TeeTime) -> TeeResult {
             // UTEE_TIME_CAT_SYSTEM
             let sys_time = tee_time_get_sys_time();
             Ok(TeeTime {
-                seconds: sys_time.as_secs() as u32,
-                millis: sys_time.subsec_millis(),
+                seconds: sys_time.unix_seconds() as u32,
+                millis: sys_time.subsec_nanos() / 1_000_000,
             })
         }
         1 => {
@@ -53,8 +54,8 @@ pub fn sys_tee_scn_get_time(cat: u64, teetime: *mut TeeTime) -> TeeResult {
             // UTEE_TIME_CAT_REE
             let ree_time = tee_time_get_ree_time();
             Ok(TeeTime {
-                seconds: ree_time.as_secs() as u32,
-                millis: ree_time.subsec_millis(),
+                seconds: ree_time.unix_seconds() as u32,
+                millis: ree_time.subsec_nanos() / 1_000_000,
             })
         }
         _ => return Err(TEE_ERROR_BAD_PARAMETERS),
@@ -69,8 +70,8 @@ pub fn sys_tee_scn_get_time(cat: u64, teetime: *mut TeeTime) -> TeeResult {
             // Copy data even on overflow
             let time_value = tee_time_get_sys_time();
             let fallback_time = TeeTime {
-                seconds: time_value.as_secs() as u32,
-                millis: time_value.subsec_millis(),
+                seconds: time_value.unix_seconds() as u32,
+                millis: time_value.subsec_nanos() / 1_000_000,
             };
             UserPtr::<TeeTime>::from(teetime)
                 .write_vm(fallback_time)
@@ -181,47 +182,18 @@ pub fn tee_time_get_ta_time(uuid: &TEE_UUID) -> TeeResult<TeeTime> {
     let (offs, positive) = tee_time_ta_get_offs(uuid)?;
     let t = tee_time_get_sys_time();
 
-    // Execute time calculation
+    let offset = TimeSpan::new(offs.seconds as u64, offs.millis * 1_000_000);
     let t2 = if positive {
-        // Check overflow and execute addition
-        let seconds_sum = t.as_secs() + offs.seconds as u64;
-        let millis_sum = t.subsec_millis() + offs.millis;
-
-        // Handle millisecond carry
-        let (final_seconds, final_millis) = if millis_sum >= 1000 {
-            (seconds_sum + (millis_sum / 1000) as u64, millis_sum % 1000)
-        } else {
-            (seconds_sum, millis_sum)
-        };
-
-        // Detect overflow
-        if final_seconds < t.as_secs() {
-            return Err(TEE_ERROR_OVERFLOW);
-        }
-
-        TimeValue::new(final_seconds, final_millis * 1_000_000)
+        t.checked_add(offset)
     } else {
-        // Execute subtraction
-        let mut seconds_diff = t.as_secs().saturating_sub(offs.seconds as u64);
-        let mut millis_diff = t.subsec_millis();
-
-        if millis_diff < offs.millis {
-            if seconds_diff > 0 {
-                seconds_diff -= 1;
-                millis_diff += 1000 - offs.millis;
-            } else {
-                millis_diff = 0; // Prevent underflow
-            }
-        } else {
-            millis_diff -= offs.millis;
-        }
-
-        TimeValue::new(seconds_diff, millis_diff as u32 * 1_000_000)
-    };
+        t.checked_sub(offset)
+    }
+    .ok_or(TEE_ERROR_OVERFLOW)?;
+    let seconds = u32::try_from(t2.unix_seconds()).map_err(|_| TEE_ERROR_OVERFLOW)?;
 
     Ok(TeeTime {
-        seconds: t2.as_secs() as u32,
-        millis: t2.subsec_millis(),
+        seconds,
+        millis: t2.subsec_nanos() / 1_000_000,
     })
 }
 
@@ -233,60 +205,37 @@ pub fn tee_time_set_ta_time(uuid: &TEE_UUID, time: &TeeTime) -> TeeResult {
     }
 
     let t = tee_time_get_sys_time();
-    let time_value = TimeValue::new(time.seconds as u64, time.millis * 1_000_000);
-
-    if t.as_secs() < time_value.as_secs()
-        || (t.as_secs() == time_value.as_secs() && t.subsec_millis() < time_value.subsec_millis())
-    {
-        // Calculate positive offset
-        let seconds_diff = time_value.as_secs() - t.as_secs();
-        let millis_diff = if time_value.subsec_millis() >= t.subsec_millis() {
-            time_value.subsec_millis() - t.subsec_millis()
-        } else {
-            (1000 + time_value.subsec_millis()) - t.subsec_millis()
-        };
-
-        let offs = TeeTime {
-            seconds: seconds_diff as u32,
-            millis: millis_diff,
-        };
-
-        tee_time_ta_set_offs(uuid, &offs, true)
+    let time_value = SystemTime::from_unix_parts(time.seconds as i64, time.millis * 1_000_000)
+        .ok_or(TEE_ERROR_BAD_PARAMETERS)?;
+    let (duration, positive) = if time_value >= t {
+        (
+            time_value
+                .duration_since(t)
+                .map_err(|_| TEE_ERROR_OVERFLOW)?,
+            true,
+        )
     } else {
-        // Calculate negative offset
-        let seconds_diff = t.as_secs() - time_value.as_secs();
-        let millis_diff = if t.subsec_millis() >= time_value.subsec_millis() {
-            t.subsec_millis() - time_value.subsec_millis()
-        } else {
-            (1000 + t.subsec_millis()) - time_value.subsec_millis()
-        };
-
-        let offs = TeeTime {
-            seconds: seconds_diff as u32,
-            millis: millis_diff,
-        };
-
-        tee_time_ta_set_offs(uuid, &offs, false)
-    }
+        (
+            t.duration_since(time_value)
+                .map_err(|_| TEE_ERROR_OVERFLOW)?,
+            false,
+        )
+    };
+    let offs = TeeTime {
+        seconds: u32::try_from(duration.as_secs()).map_err(|_| TEE_ERROR_OVERFLOW)?,
+        millis: duration.subsec_nanos() / 1_000_000,
+    };
+    tee_time_ta_set_offs(uuid, &offs, positive)
 }
 
 // Busy wait function
 pub fn tee_time_busy_wait(milliseconds_delay: u32) -> TeeResult {
-    let start_time = tee_time_get_sys_time();
-    let delay_seconds = milliseconds_delay / 1000;
-    let delay_millis = milliseconds_delay % 1000;
-
-    let delay_duration = TimeValue::new(delay_seconds as u64, delay_millis * 1_000_000);
-
-    let end_time = TimeValue::from_nanos(
-        (start_time.as_nanos() + delay_duration.as_nanos())
-            .try_into()
-            .unwrap_or(u64::MAX),
-    );
+    let start_time = monotonic_time();
+    let delay = TimeSpan::from_millis(milliseconds_delay as u64);
+    let end_time = start_time.checked_add(delay).ok_or(TEE_ERROR_OVERFLOW)?;
 
     loop {
-        let current_time = tee_time_get_sys_time();
-        if current_time.as_nanos() >= end_time.as_nanos() {
+        if monotonic_time() >= end_time {
             break Ok(());
         }
         // Can add brief CPU yield here to avoid excessive CPU usage

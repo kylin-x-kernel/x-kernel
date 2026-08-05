@@ -10,12 +10,12 @@ use core::{
     hash::{Hash, Hasher},
     pin::Pin,
     task::{Context, Poll},
-    time::Duration,
 };
 
 use kerrno::{KError, KResult};
 use kspin::SpinNoPreempt;
 use ktask::future::{self, block_on, interruptible};
+use ktime_types::TimeSpan;
 use kuaccess::{atomic_cmpxchg_u32_nofault, atomic_load_u32, atomic_u32_eq, atomic_u32_eq_nofault};
 
 use crate::{
@@ -49,7 +49,7 @@ pub(crate) struct FutexTable {
 
 impl FutexTable {
     fn new() -> Self {
-        let seed = khal::time::monotonic_time().as_nanos() as u64 ^ HASH_MIX;
+        let seed = khal::time::monotonic_time().as_nanos_u64_saturating() ^ HASH_MIX;
         Self {
             buckets: core::array::from_fn(|_| FutexBucket::new()),
             hash_seed: seed,
@@ -76,7 +76,7 @@ impl FutexTable {
         uaddr: usize,
         expected: u32,
         match_mask: u32,
-        timeout: Option<Duration>,
+        timeout: Option<TimeSpan>,
     ) -> KResult<bool> {
         if !atomic_u32_eq(uaddr, expected).map_err(KError::from)? {
             return Ok(false);
@@ -551,7 +551,7 @@ impl GlobalFutexTable {
         uaddr: usize,
         expected: u32,
         match_mask: u32,
-        timeout: Option<Duration>,
+        timeout: Option<TimeSpan>,
     ) -> KResult<bool> {
         FUTEX_TABLE.wait(key, uaddr, expected, match_mask, timeout)
     }

@@ -15,12 +15,12 @@
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use khal::time::TimeValue;
+use ktime_types::{MonotonicInstant, TimeSpan};
 
 use super::ipv4::{self, Ipv4Header};
 use crate::buf::{PacketBuf, PacketOwner, PacketType};
 
-const IPV4_REASSEMBLY_TIMEOUT: TimeValue = TimeValue::from_secs(30);
+const IPV4_REASSEMBLY_TIMEOUT: TimeSpan = TimeSpan::from_secs(30);
 const IPV4_REASSEMBLY_HIGH_BYTES: usize = 4 * 1024 * 1024;
 const IPV4_REASSEMBLY_LOW_BYTES: usize = 3 * 1024 * 1024;
 const IPV4_REASSEMBLY_MAX_QUEUES: usize = 64;
@@ -44,7 +44,7 @@ struct Ipv4ReassemblyQueue {
     received_len: usize,
     total_payload_len: Option<usize>,
     ecn_mask: u8,
-    expires_at: TimeValue,
+    expires_at: MonotonicInstant,
     memory_bytes: usize,
 }
 
@@ -85,7 +85,7 @@ impl Ipv4Reassembler {
         &mut self,
         packet: PacketBuf,
         header: Ipv4Header,
-        now: TimeValue,
+        now: MonotonicInstant,
     ) -> Ipv4ReassemblyResult {
         let key = Ipv4FragKey {
             src_addr: header.src_addr().octets(),
@@ -180,7 +180,7 @@ impl Ipv4Reassembler {
         Ipv4ReassemblyResult::Pending
     }
 
-    pub(crate) fn remove_expired(&mut self, now: TimeValue) -> Vec<ExpiredIpv4Fragment> {
+    pub(crate) fn remove_expired(&mut self, now: MonotonicInstant) -> Vec<ExpiredIpv4Fragment> {
         let keys: Vec<_> = self
             .queues
             .iter()
@@ -355,7 +355,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use etherparse::{IpFragOffset, IpNumber, Ipv4Header as EtherIpv4Header};
-    use khal::time::TimeValue;
+    use ktime_types::{MonotonicInstant, TimeSpan};
     use unittest::def_test;
 
     use super::*;
@@ -386,7 +386,7 @@ mod tests {
 
     fn reassemble(parts: &[(usize, bool, &[u8])]) -> Ipv4ReassemblyResult {
         let mut reassembler = Ipv4Reassembler::new();
-        let now = TimeValue::from_secs(1);
+        let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(1));
         let mut result = Ipv4ReassemblyResult::Pending;
         for (offset, more, payload) in parts {
             let (packet, header) = fragment(*offset, *more, payload);
@@ -430,7 +430,7 @@ mod tests {
     #[def_test]
     fn test_ipv4_reassembly_keeps_queue_on_duplicate_fragment() {
         let mut reassembler = Ipv4Reassembler::new();
-        let now = TimeValue::from_secs(1);
+        let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(1));
         let (packet, header) = fragment(0, true, b"abcdefgh");
         assert!(matches!(
             reassembler.reassemble(packet, header, now),
@@ -451,7 +451,7 @@ mod tests {
     #[def_test]
     fn test_ipv4_reassembly_expires_first_fragment() {
         let mut reassembler = Ipv4Reassembler::new();
-        let now = TimeValue::from_secs(1);
+        let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(1));
         let (packet, header) = fragment(0, true, b"abcdefgh");
         assert!(matches!(
             reassembler.reassemble(packet, header, now),

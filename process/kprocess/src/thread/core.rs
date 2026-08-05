@@ -7,10 +7,10 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
 use kcred::Cred;
 use kerrno::KResult;
-use khal::time::TimeValue;
 use ksignal::{SignalStack, api::ThreadSignalManager};
 use ksync::{Mutex, RwLock};
 use ktask::KtaskRef;
+use ktime_types::TimeSpan;
 #[cfg(feature = "tee")]
 use tee_task_iface::TeeSessionCtxTrait;
 
@@ -433,20 +433,15 @@ impl Thread {
         self.process().pid()
     }
 
-    /// Returns sampled user and kernel CPU time in nanoseconds.
-    pub fn sample_cpu_time_ns(&self) -> (u64, u64) {
-        self.time.lock().sample_nanos()
-    }
-
     /// Returns sampled user and kernel CPU time.
-    pub fn sample_cpu_time(&self) -> (TimeValue, TimeValue) {
+    pub fn sample_cpu_time(&self) -> (TimeSpan, TimeSpan) {
         self.time.lock().sample()
     }
 
     /// Returns the sum of user and kernel CPU time consumed by this thread.
-    pub fn cpu_time(&self) -> TimeValue {
+    pub fn cpu_time(&self) -> TimeSpan {
         let (utime, stime) = self.sample_cpu_time();
-        utime + stime
+        utime.saturating_add(stime)
     }
 
     /// Updates the accounting state used for subsequent CPU-time samples.

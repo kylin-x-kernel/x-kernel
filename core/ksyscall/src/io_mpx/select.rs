@@ -10,13 +10,13 @@
 //! - Timeout and signal handling
 
 use alloc::vec::Vec;
-use core::time::Duration;
 
 use kerrno::{KError, KResult};
 use kpoll::IoEvents;
 use ktask::future::{self, block_on, poll_io};
+use ktime_types::TimeSpan;
 use linux_raw_sys::general::*;
-use posix_types::{FdSet, SignalSetWithSize, TimeValueLike, UserConstPtr, UserPtr};
+use posix_types::{FdSet, SignalSetWithSize, TimeSpanLike, UserConstPtr, UserPtr};
 
 use super::FdPollSet;
 
@@ -37,7 +37,7 @@ fn do_select(
     readfds: UserPtr<FdSet>,
     writefds: UserPtr<FdSet>,
     exceptfds: UserPtr<FdSet>,
-    timeout: Option<Duration>,
+    timeout: Option<TimeSpan>,
     sigmask: UserConstPtr<SignalSetWithSize>,
 ) -> KResult<isize> {
     let nfds = nfds as usize;
@@ -167,7 +167,7 @@ pub fn sys_select(
         if timeout.is_null() {
             None
         } else {
-            Some(timeout.read_vm()?.try_into_time_value()?)
+            Some(timeout.read_vm()?.try_into_time_span()?)
         },
         0.into(),
     )
@@ -190,7 +190,7 @@ pub fn sys_pselect6(
         if timeout.is_null() {
             None
         } else {
-            Some(timeout.read_vm()?.try_into_time_value()?)
+            Some(timeout.read_vm()?.try_into_time_span()?)
         },
         sigmask,
     )

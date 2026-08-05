@@ -40,6 +40,7 @@ use khal::{
     percpu::this_cpu_id,
 };
 use kspin::NoPreempt;
+use ktime_types::TimeSpan;
 use memaddr::VirtAddr;
 use page_table::TlbFlushIf;
 
@@ -62,7 +63,7 @@ static PENDING_EPOCH_BY_CPU: [AtomicU64; kbuild_config::NR_CPUS] =
 #[percpu::def_percpu]
 static LAST_HANDLED_PENDING_EPOCH: u64 = 0;
 
-const SHOOTDOWN_WARN_NS: u64 = 1_000_000_000;
+const SHOOTDOWN_WARN: TimeSpan = TimeSpan::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RequestSeq(u64);
@@ -414,12 +415,12 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
                 khal::irq::notify_cpu(IPI_IRQ, TargetCpu::Specific(target.as_usize()));
             }
 
-            let start_ns = khal::time::monotonic_time_nanos();
+            let start = khal::time::monotonic_time();
             let mut warned = false;
             for target in targets.iter().flatten() {
                 while !active_slot.is_acked_by(target.as_usize(), request_seq) {
-                    let elapsed_ns = khal::time::monotonic_time_nanos().wrapping_sub(start_ns);
-                    if !warned && elapsed_ns >= SHOOTDOWN_WARN_NS {
+                    let elapsed = khal::time::monotonic_time().saturating_duration_since(start);
+                    if !warned && elapsed >= SHOOTDOWN_WARN {
                         warned = true;
                         warn!(
                             "tlb shootdown wait: initiator_cpu={} stuck_on_target_cpu={} \

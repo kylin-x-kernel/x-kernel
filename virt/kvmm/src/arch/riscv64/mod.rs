@@ -86,7 +86,7 @@ pub fn hext_init() {
 }
 fn handle_wfi(vcpu: &mut RiscvVcpu) -> ExitAction {
     vcpu.vsepc += 4;
-    ktask::sleep(core::time::Duration::from_millis(1));
+    ktask::sleep(ktime_types::TimeSpan::from_millis(1));
     ExitAction::Resume
 }
 

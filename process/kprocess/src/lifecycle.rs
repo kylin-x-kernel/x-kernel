@@ -8,6 +8,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use kpoll::PollSet;
+use ktime_types::TimeSpan;
 
 /// Process lifecycle state shared by all threads in a process.
 pub(crate) struct ProcessLifecycleState {
@@ -67,14 +68,13 @@ impl ProcessLifecycleState {
     }
 
     /// Adds exited-thread CPU time to the accumulated counters.
-    pub(crate) fn accumulate_exited_thread_time(&self, utime_ns: u64, stime_ns: u64) {
-        self.cpu_totals
-            .accumulate_exited_thread_time(utime_ns, stime_ns);
+    pub(crate) fn accumulate_exited_thread_time(&self, utime: TimeSpan, stime: TimeSpan) {
+        self.cpu_totals.accumulate_exited_thread_time(utime, stime);
     }
 
-    /// Returns accumulated exited-thread user and kernel time in nanoseconds.
-    pub(crate) fn exited_thread_time_ns(&self) -> (u64, u64) {
-        self.cpu_totals.exited_thread_time_ns()
+    /// Returns accumulated exited-thread user and kernel time.
+    pub(crate) fn exited_thread_time(&self) -> (TimeSpan, TimeSpan) {
+        self.cpu_totals.exited_thread_time()
     }
 
     /// Adds CPU time from a child reaped via `wait*()` to the accumulated
@@ -83,13 +83,13 @@ impl ProcessLifecycleState {
     /// Mirrors Linux `kernel/exit.c`, where the parent's child CPU totals are
     /// incremented by the reaped thread-group time plus the child's own
     /// accumulated descendant totals.
-    pub(crate) fn accumulate_child_time(&self, utime_ns: u64, stime_ns: u64) {
-        self.cpu_totals.accumulate_child_time(utime_ns, stime_ns);
+    pub(crate) fn accumulate_child_time(&self, utime: TimeSpan, stime: TimeSpan) {
+        self.cpu_totals.accumulate_child_time(utime, stime);
     }
 
-    /// Returns accumulated reaped-children user and kernel time in nanoseconds.
-    pub(crate) fn child_time_ns(&self) -> (u64, u64) {
-        self.cpu_totals.child_time_ns()
+    /// Returns accumulated reaped-children user and kernel time.
+    pub(crate) fn child_time(&self) -> (TimeSpan, TimeSpan) {
+        self.cpu_totals.child_time()
     }
 }
 
@@ -128,29 +128,35 @@ impl ProcessCpuTotals {
         }
     }
 
-    fn accumulate_exited_thread_time(&self, utime_ns: u64, stime_ns: u64) {
+    fn accumulate_exited_thread_time(&self, utime: TimeSpan, stime: TimeSpan) {
         self.exited_thread_utime_ns
-            .fetch_add(utime_ns, Ordering::Relaxed);
+            .fetch_add(span_to_raw_nanos(utime), Ordering::Relaxed);
         self.exited_thread_stime_ns
-            .fetch_add(stime_ns, Ordering::Relaxed);
+            .fetch_add(span_to_raw_nanos(stime), Ordering::Relaxed);
     }
 
-    fn exited_thread_time_ns(&self) -> (u64, u64) {
+    fn exited_thread_time(&self) -> (TimeSpan, TimeSpan) {
         (
-            self.exited_thread_utime_ns.load(Ordering::Relaxed),
-            self.exited_thread_stime_ns.load(Ordering::Relaxed),
+            TimeSpan::from_nanos(self.exited_thread_utime_ns.load(Ordering::Relaxed)),
+            TimeSpan::from_nanos(self.exited_thread_stime_ns.load(Ordering::Relaxed)),
         )
     }
 
-    fn accumulate_child_time(&self, utime_ns: u64, stime_ns: u64) {
-        self.child_utime_ns.fetch_add(utime_ns, Ordering::Relaxed);
-        self.child_stime_ns.fetch_add(stime_ns, Ordering::Relaxed);
+    fn accumulate_child_time(&self, utime: TimeSpan, stime: TimeSpan) {
+        self.child_utime_ns
+            .fetch_add(span_to_raw_nanos(utime), Ordering::Relaxed);
+        self.child_stime_ns
+            .fetch_add(span_to_raw_nanos(stime), Ordering::Relaxed);
     }
 
-    fn child_time_ns(&self) -> (u64, u64) {
+    fn child_time(&self) -> (TimeSpan, TimeSpan) {
         (
-            self.child_utime_ns.load(Ordering::Relaxed),
-            self.child_stime_ns.load(Ordering::Relaxed),
+            TimeSpan::from_nanos(self.child_utime_ns.load(Ordering::Relaxed)),
+            TimeSpan::from_nanos(self.child_stime_ns.load(Ordering::Relaxed)),
         )
     }
+}
+
+fn span_to_raw_nanos(span: TimeSpan) -> u64 {
+    span.as_nanos_u64_saturating()
 }

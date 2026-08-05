@@ -12,19 +12,19 @@
 use alloc::vec::Vec;
 
 use kerrno::{KError, KResult};
-use khal::time::TimeValue;
 use kpoll::IoEvents;
 use ksignal::SignalSet;
 use ktask::future::{self, block_on, poll_io};
+use ktime_types::TimeSpan;
 use linux_raw_sys::general::{POLLNVAL, pollfd, timespec};
-use posix_types::{TimeValueLike, UserConstPtr, UserPtr, k_sigset};
+use posix_types::{TimeSpanLike, UserConstPtr, UserPtr, k_sigset};
 
 use super::FdPollSet;
 
 /// Monitor multiple file descriptors for I/O events with optional timeout
 fn do_poll(
     poll_fds: &mut [pollfd],
-    timeout: Option<TimeValue>,
+    timeout: Option<TimeSpan>,
     sigmask: Option<SignalSet>,
 ) -> KResult<isize> {
     debug!("do_poll fds={poll_fds:?} timeout={timeout:?}");
@@ -103,7 +103,7 @@ pub fn sys_poll(fds: UserPtr<pollfd>, nfds: u32, timeout: i32) -> KResult<isize>
     let timeout = if timeout < 0 {
         None
     } else {
-        Some(TimeValue::from_millis(timeout as u64))
+        Some(TimeSpan::from_millis(timeout as u64))
     };
     let result = do_poll(&mut poll_fds, timeout, None);
     if result.is_ok() {
@@ -126,7 +126,7 @@ pub fn sys_ppoll(
     let timeout = if timeout.is_null() {
         None
     } else {
-        Some(timeout.read_vm()?.try_into_time_value()?)
+        Some(timeout.read_vm()?.try_into_time_span()?)
     };
     // TODO: dispatch_irq signal
     let sigmask = if sigmask.is_null() {

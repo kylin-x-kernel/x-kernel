@@ -19,6 +19,7 @@ mod shm;
 
 use core::sync::atomic::{AtomicI32, Ordering};
 
+use linux_raw_sys::general::__kernel_time_t;
 use posix_types::IpcPerm;
 
 pub use self::{msg::*, shm::*};
@@ -27,6 +28,11 @@ static IPC_ID: AtomicI32 = AtomicI32::new(0);
 
 fn next_ipc_id() -> i32 {
     IPC_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+#[inline]
+fn current_unix_seconds() -> __kernel_time_t {
+    ktime::realtime().unix_seconds() as __kernel_time_t
 }
 
 // IPC command constants

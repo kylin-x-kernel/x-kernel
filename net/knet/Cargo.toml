@@ -20,6 +20,7 @@ kdevice = { workspace = true }
 device_res = { workspace = true }
 irq_notify = { workspace = true }
 khal = { workspace = true }
+ktime_types = { workspace = true }
 ksync = { workspace = true }
 kspin = { workspace = true }
 ktask = { workspace = true }

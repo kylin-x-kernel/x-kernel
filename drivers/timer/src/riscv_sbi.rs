@@ -14,31 +14,31 @@ static NANOS_PER_TICK: AtomicU64 = AtomicU64::new(0);
 
 #[kplat::impl_dev_interface]
 impl khal::time::MonotonicTimerIf {
-    fn now_ticks() -> u64 {
+    fn now_ticks() -> khal::time::TimerTicks {
         now_ticks()
     }
 
-    fn t2ns(ticks: u64) -> u64 {
-        t2ns(ticks)
+    fn ticks_to_span(ticks: khal::time::TimerTicks) -> ktime_types::TimeSpan {
+        ktime_types::TimeSpan::from_nanos(ticks_to_nanos(ticks.as_raw()))
     }
 
     fn freq() -> u64 {
         freq()
     }
 
-    fn ns2t(nanos: u64) -> u64 {
-        ns2t(nanos)
+    fn span_to_ticks(span: ktime_types::TimeSpan) -> khal::time::TimerTicks {
+        khal::time::TimerTicks::from_raw(nanos_to_ticks(span.as_nanos_u64_saturating()))
     }
 
     fn interrupt_id() -> usize {
         interrupt_id()
     }
 
-    fn arm_timer(deadline_ns: u64) {
-        arm_timer(deadline_ns)
+    fn arm_timer(deadline: ktime_types::MonotonicInstant) {
+        arm_timer(deadline)
     }
 
-    fn handle_idle_return(_previous_ticks: u64) -> bool {
+    fn handle_idle_return(_previous_ticks: khal::time::TimerTicks) -> bool {
         false
     }
 }
@@ -68,7 +68,10 @@ pub fn init(config: TimerConfig) {
     );
     TIMER_IRQ.store(config.irq, Ordering::Relaxed);
     TIMER_FREQ_HZ.store(config.frequency_hz, Ordering::Relaxed);
-    NANOS_PER_TICK.store(1_000_000_000 / config.frequency_hz, Ordering::Relaxed);
+    NANOS_PER_TICK.store(
+        ktime_types::NANOS_PER_SEC / config.frequency_hz,
+        Ordering::Relaxed,
+    );
 }
 
 pub fn init_percpu() {
@@ -76,17 +79,22 @@ pub fn init_percpu() {
 }
 
 #[inline]
-pub fn now_ticks() -> u64 {
+pub fn now_ticks() -> khal::time::TimerTicks {
+    khal::time::TimerTicks::from_raw(read_timer_ticks_raw())
+}
+
+#[inline]
+fn read_timer_ticks_raw() -> u64 {
     time::read() as u64
 }
 
 #[inline]
-pub fn t2ns(ticks: u64) -> u64 {
+pub(crate) fn ticks_to_nanos(ticks: u64) -> u64 {
     ticks * NANOS_PER_TICK.load(Ordering::Relaxed)
 }
 
 #[inline]
-pub fn ns2t(nanos: u64) -> u64 {
+pub(crate) fn nanos_to_ticks(nanos: u64) -> u64 {
     nanos / NANOS_PER_TICK.load(Ordering::Relaxed)
 }
 
@@ -102,11 +110,7 @@ pub fn interrupt_id() -> usize {
     irq
 }
 
-pub fn arm_timer(deadline_ns: u64) {
-    sbi_rt::set_timer(ns2t(deadline_ns));
-}
-
-#[inline]
-pub fn rtc_now_nanos() -> u64 {
-    t2ns(now_ticks())
+pub fn arm_timer(deadline: ktime_types::MonotonicInstant) {
+    let deadline_ns = deadline.as_nanos_u64_saturating();
+    sbi_rt::set_timer(nanos_to_ticks(deadline_ns));
 }

@@ -15,6 +15,7 @@ default = []
 kiface.workspace = true
 karch = { workspace = true, features = ["smp"] }
 khal = { workspace = true, features = ["ipi"] }
+ktime_types.workspace = true
 kcpu_id_map.workspace = true
 kspin.workspace = true
 lazyinit.workspace = true

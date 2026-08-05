@@ -18,6 +18,7 @@ vsock = ["knet/vsock"]
 bytemuck = { workspace = true, features = ["derive"] }
 kerrno.workspace = true
 khal.workspace = true
+ktime_types.workspace = true
 kio.workspace = true
 klogger.workspace = true
 knet.workspace = true

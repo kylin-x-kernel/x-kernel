@@ -31,6 +31,8 @@ console_driver = { workspace = true, features = ["ns16550-ioport"] }
 kbuild_config = { workspace = true }
 irq_driver = { workspace = true }
 khal = { workspace = true }
+ktime_types = { workspace = true }
+ktime = { workspace = true }
 x86_apic = { workspace = true }
 rtc_driver = { workspace = true }
 timer_driver = { workspace = true }

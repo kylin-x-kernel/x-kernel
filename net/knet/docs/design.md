@@ -115,7 +115,7 @@ core/kruntime
 | `init_network` | 创建 loopback 与首个 Ethernet 设备，建立默认路由，初始化 `Service`、`SocketSetWrapper`、`ListenTable` 和 rtnetlink 初始状态 |
 | `Service` | 持有 smoltcp `Interface`、`Router`、poll timeout 和 RX waker 注册入口 |
 | `Router` | 管理设备列表、带 MTU 的路由表、`PacketBuf` RX/TX 队列、IPv4 输入校验、分片重组、输出分片、next-hop 选择和设备 dispatch |
-| `NetDevice` | 抽象 loopback、Ethernet 和 feature gated vsock 设备后端，通过 `PacketBuf` 转移报文所有权，并使用 crate 内地址类型和 `TimeValue` 表达设备边界 |
+| `NetDevice` | 抽象 loopback、Ethernet 和 feature gated vsock 设备后端，通过 `PacketBuf` 转移报文所有权，并使用 crate 内地址类型和 `MonotonicInstant` 表达设备边界 |
 | `PacketBuf` | 保存报文数据、协议偏移、接口索引、包类型、校验状态和当前所有者 |
 | `link::wire` | 使用 `zerocopy` 校验和构造 Ethernet 与 Ethernet/IPv4 ARP 头部 |
 | `stack::ipv4` | 使用 `etherparse` 校验和构造 IPv4 与 ICMPv4 头部，并执行输出分片 |
@@ -246,7 +246,7 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 
 当前实现保留 smoltcp TCP、raw socket 和 IPv6 推进。UDP、IPv4 分片重组、输出分片和 ICMPv4 UDP 差错报告使用 crate 内实现。
 `PacketBuf`、`link::wire` 和 `stack::ipv4` 提供设备与 crate 内 IPv4/UDP 数据路径共用的报文表示和 parser/emitter。
-路由表和设备接口使用 `crate::ip` 地址类型，设备时间使用 `khal::time::TimeValue`。
+路由表和设备接口使用 `crate::ip` 地址类型，设备时间使用 `ktime::MonotonicInstant`。
 `Router`、`Service` 和初始化入口在 smoltcp 兼容边界完成地址与时间转换。
 
 ### TCP listen 和 accept
@@ -327,6 +327,9 @@ Linux 可从任务上下文隐式读取 `current_cred()`，但 knet 也服务于
 
 每个 socket 根据 bind 或 connect 结果记录设备 mask。
 等待 RX 时只向相关设备注册 waker，同时注册 smoltcp poll timeout。
+smoltcp `poll_at` 使用传入 timestamp 的同一 epoch 返回期限；兼容边界在
+`SmoltcpInstant` 与 `MonotonicInstant` 之间直接映射时间点。过期的 smoltcp deadline
+因此仍是过期的单调 deadline，不再计算有符号 delay，也不会经过 `as u64` 窄化。
 这个设计减少无关设备中断唤醒，但依赖路由和地址同步保持 mask 准确。
 
 ### TCP listen 表独立于 smoltcp listener socket

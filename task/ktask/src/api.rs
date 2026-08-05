@@ -108,13 +108,24 @@ pub fn init_scheduler_secondary() {
     crate::run_queue::init_secondary();
 }
 
-/// Nanoseconds per periodic scheduler tick (`Kconfig` `TICKS_PER_SECOND`).
-const PERIODIC_INTERVAL_NANOS: u64 =
-    khal::time::NANOS_PER_SEC / kbuild_config::TICKS_PER_SECOND as u64;
+/// Duration of one periodic scheduler tick (`Kconfig` `TICKS_PER_SECOND`).
+const PERIODIC_INTERVAL: ktime_types::TimeSpan = ktime_types::TimeSpan::from_nanos(
+    ktime_types::NANOS_PER_SEC / kbuild_config::TICKS_PER_SECOND as u64,
+);
 
-/// Absolute monotonic deadline (ns) of the next periodic scheduler tick, per CPU.
+/// Absolute monotonic deadline of the next periodic scheduler tick.
 #[percpu::def_percpu]
-static NEXT_TICK_DEADLINE: u64 = 0;
+static NEXT_TICK_DEADLINE: Option<ktime_types::MonotonicInstant> = None;
+
+unsafe fn next_tick_deadline() -> Option<ktime_types::MonotonicInstant> {
+    // SAFETY: the caller guarantees that preemption is disabled on this CPU.
+    unsafe { *NEXT_TICK_DEADLINE.current_ref_raw() }
+}
+
+unsafe fn set_next_tick_deadline(deadline: ktime_types::MonotonicInstant) {
+    // SAFETY: the caller guarantees that preemption is disabled on this CPU.
+    unsafe { *NEXT_TICK_DEADLINE.current_ref_mut_raw() = Some(deadline) };
+}
 
 /// Re-arms the local CPU hardware timer to fire at the earlier of the next
 /// periodic tick deadline and `earliest_soft_deadline` (if any).
@@ -122,19 +133,17 @@ static NEXT_TICK_DEADLINE: u64 = 0;
 /// # IRQ safety
 /// The caller MUST hold the local timer-wheel `SpinNoIrq` lock (or otherwise
 /// guarantee IRQs are masked on this CPU), so the timer IRQ handler cannot race
-/// the `NEXT_TICK_DEADLINE` read or the hardware register write.
-pub(crate) fn rearm_local_timer(earliest_soft_deadline: Option<khal::time::TimeValue>) {
+/// the periodic deadline read or the hardware register write.
+pub(crate) fn rearm_local_timer(earliest_soft_deadline: Option<ktime_types::MonotonicInstant>) {
     // SAFETY: the caller guarantees IRQs are masked on this CPU (the wheel lock
     // is held or we run in IRQ context), so the timer IRQ cannot re-enter and
     // observe a half-updated slot. Only this CPU's own slot is touched.
-    let next_tick_ns = unsafe { NEXT_TICK_DEADLINE.read_current_raw() };
-    let deadline_ns = match earliest_soft_deadline {
-        // `TimeValue` is `core::time::Duration`, whose `as_nanos()` returns
-        // `u128`; monotonic time since boot always fits in `u64`.
-        Some(e) => next_tick_ns.min(e.as_nanos() as u64),
-        None => next_tick_ns,
-    };
-    khal::time::arm_timer(deadline_ns);
+    let next_tick =
+        unsafe { next_tick_deadline() }.unwrap_or(ktime_types::MonotonicInstant::ORIGIN);
+    let deadline = earliest_soft_deadline
+        .map(|soft| soft.min(next_tick))
+        .unwrap_or(next_tick);
+    khal::time::arm_timer(deadline);
 }
 
 /// Hardware-timer IRQ entry. Drives the timer in a tick-bounded NOHZ style:
@@ -149,7 +158,7 @@ pub(crate) fn rearm_local_timer(earliest_soft_deadline: Option<khal::time::TimeV
 ///   pending soft deadline, which is what makes sub-tick timeouts wake on time.
 pub fn on_timer_fire() {
     use kspin::NoOp;
-    let now_ns = khal::time::monotonic_time_nanos();
+    let now = khal::time::monotonic_time();
 
     // Per-tick callbacks (ns-driven, safe to run on every hardware fire).
     crate::timers::check_events();
@@ -167,13 +176,17 @@ pub fn on_timer_fire() {
     // init (avoids a catch-up loop while the slot still holds the sentinel).
     // SAFETY: the timer IRQ runs with IRQs (and preemption) disabled on this
     // CPU, so raw per-CPU access cannot race a migration to another CPU.
-    let cur = unsafe { NEXT_TICK_DEADLINE.read_current_raw() };
-    if cur == 0 || now_ns >= cur {
+    // SAFETY: timer IRQ handling runs with preemption disabled on this CPU.
+    let current_deadline = unsafe { next_tick_deadline() };
+    if current_deadline.is_none_or(|deadline| now >= deadline) {
         // IRQ and preemption are both disabled here, so the default `NoOp`
         // spin guard suffices for obtaining the current run queue.
         current_run_queue::<NoOp>().scheduler_timer_tick();
+        let next_deadline = now.checked_add(PERIODIC_INTERVAL).unwrap_or_else(|| {
+            ktime_types::MonotonicInstant::from_span_since_origin(ktime_types::TimeSpan::MAX)
+        });
         // SAFETY: as above.
-        unsafe { NEXT_TICK_DEADLINE.write_current_raw(now_ns + PERIODIC_INTERVAL_NANOS) };
+        unsafe { set_next_tick_deadline(next_deadline) };
     }
 
     // Re-arm the hardware timer. `rearm_local_timer` requires IRQs off
@@ -333,12 +346,12 @@ pub fn yield_now() {
 }
 
 /// Current task is going to sleep for the given duration.
-pub fn sleep(dur: core::time::Duration) {
+pub fn sleep(dur: ktime_types::TimeSpan) {
     sleep_until(khal::time::monotonic_time() + dur);
 }
 
 /// Current task is going to sleep, it will be woken up at the given deadline.
-pub fn sleep_until(deadline: khal::time::TimeValue) {
+pub fn sleep_until(deadline: ktime_types::MonotonicInstant) {
     crate::future::block_on(crate::future::sleep_until(deadline));
 }
 
@@ -365,9 +378,9 @@ pub fn run_idle() -> ! {
                 warn!(
                     "[PM-DBG] idle WFI returned with counter regression! before={}, after={}, \
                      delta={}",
-                    cntpct_before,
-                    cntpct_after,
-                    cntpct_before.wrapping_sub(cntpct_after)
+                    cntpct_before.as_raw(),
+                    cntpct_after.as_raw(),
+                    cntpct_before.wrapping_duration_since(cntpct_after).as_raw()
                 );
             }
         }
@@ -384,7 +397,7 @@ pub fn dump_sched_stats() {
 ///
 /// Note: this is a *heuristic* watchdog check, not a full deadlock detector.
 #[cfg(feature = "watchdog")]
-pub fn check_mutex_deadlock(now: usize) -> bool {
+pub fn check_mutex_deadlock(now: khal::time::TimerTicks) -> bool {
     let mut ok = true;
     crate::task_registry::for_each_tracked_task(khal::percpu::this_cpu_id(), |weaktask| {
         if !ok {
@@ -395,8 +408,8 @@ pub fn check_mutex_deadlock(now: usize) -> bool {
                 return;
             };
 
-            let blocked = now.saturating_sub(since);
-            if khal::time::t2ns(blocked as u64) > 20_000_000_000 {
+            let blocked = now.wrapping_duration_since(since);
+            if khal::time::ticks_to_span(blocked) > ktime_types::TimeSpan::from_secs(20) {
                 // suspect stall (20s)
                 ok = false;
             }

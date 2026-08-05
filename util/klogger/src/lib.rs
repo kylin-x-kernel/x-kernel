@@ -66,7 +66,7 @@ enum AnsiBrightColor {
 #[kiface::interface]
 pub trait LoggerAdapter {
     fn write_str(s: &str);
-    fn now() -> core::time::Duration;
+    fn now() -> ktime_types::TimeSpan;
     fn cpu_id() -> Option<usize>;
     fn task_id() -> Option<u64>;
 }

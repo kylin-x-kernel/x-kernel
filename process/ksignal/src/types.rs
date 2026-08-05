@@ -6,6 +6,7 @@
 use core::{fmt, mem};
 
 use derive_more::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
+use ktime_types::TimeSpan;
 use linux_raw_sys::general::{
     CLD_DUMPED, CLD_EXITED, CLD_KILLED, SI_KERNEL, SI_TIMER, SS_DISABLE, SS_ONSTACK,
     kernel_sigset_t, siginfo_t,
@@ -239,10 +240,10 @@ pub struct ChildExitInfo {
     code: i32,
     /// Exit status for `CLD_EXITED`, or terminating signal number otherwise.
     status: i32,
-    /// User CPU time in clock ticks.
-    utime_ticks: u64,
-    /// System CPU time in clock ticks.
-    stime_ticks: u64,
+    /// User CPU time consumed by the child.
+    utime: TimeSpan,
+    /// System CPU time consumed by the child.
+    stime: TimeSpan,
 }
 
 impl ChildExitInfo {
@@ -251,8 +252,8 @@ impl ChildExitInfo {
         pid: u32,
         uid: u32,
         wait_status: i32,
-        utime_ticks: u64,
-        stime_ticks: u64,
+        utime: TimeSpan,
+        stime: TimeSpan,
     ) -> Self {
         let signal_status = wait_status & 0x7f;
         let (code, status) = if wait_status & 0x80 != 0 {
@@ -268,8 +269,8 @@ impl ChildExitInfo {
             uid,
             code,
             status,
-            utime_ticks,
-            stime_ticks,
+            utime,
+            stime,
         }
     }
 
@@ -293,14 +294,14 @@ impl ChildExitInfo {
         self.status
     }
 
-    /// Returns user CPU time in clock ticks.
-    pub fn utime_ticks(&self) -> u64 {
-        self.utime_ticks
+    /// Returns user CPU time consumed by the child.
+    pub fn utime(&self) -> TimeSpan {
+        self.utime
     }
 
-    /// Returns system CPU time in clock ticks.
-    pub fn stime_ticks(&self) -> u64 {
-        self.stime_ticks
+    /// Returns system CPU time consumed by the child.
+    pub fn stime(&self) -> TimeSpan {
+        self.stime
     }
 }
 
@@ -328,8 +329,8 @@ impl ChildExitSignalInfo {
         sigchld._pid = child.pid() as _;
         sigchld._uid = child.uid() as _;
         sigchld._status = child.status();
-        sigchld._utime = child.utime_ticks() as _;
-        sigchld._stime = child.stime_ticks() as _;
+        sigchld._utime = posix_types::PosixClockTicks::from_time_span(child.utime()).as_raw() as _;
+        sigchld._stime = posix_types::PosixClockTicks::from_time_span(child.stime()).as_raw() as _;
         Self { info }
     }
 
@@ -552,8 +553,8 @@ impl SignalInfo {
                 uid: sigchld._uid,
                 code: self.code(),
                 status: sigchld._status,
-                utime_ticks: sigchld._utime as u64,
-                stime_ticks: sigchld._stime as u64,
+                utime: posix_types::PosixClockTicks::from_raw(sigchld._utime as u64).to_time_span(),
+                stime: posix_types::PosixClockTicks::from_raw(sigchld._stime as u64).to_time_span(),
             }
         })
     }

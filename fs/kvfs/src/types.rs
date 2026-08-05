@@ -3,7 +3,9 @@
 // See LICENSES for license details.
 
 //! Common VFS data types.
-use core::{fmt::Debug, time::Duration};
+use core::fmt::Debug;
+
+use ktime_types::SystemTime;
 
 /// Filesystem node type values.
 #[repr(u8)]
@@ -173,11 +175,11 @@ pub struct Metadata {
     pub rdev: DeviceId,
 
     /// Time of last access
-    pub atime: Duration,
+    pub atime: SystemTime,
     /// Time of last modification
-    pub mtime: Duration,
+    pub mtime: SystemTime,
     /// Time of last status change
-    pub ctime: Duration,
+    pub ctime: SystemTime,
 }
 
 /// Filesystem node metadata update.
@@ -191,25 +193,25 @@ pub struct MetadataUpdate {
     pub owner: Option<(u32, u32)>,
 
     /// Time of last access
-    pub atime: Option<Duration>,
+    pub atime: Option<SystemTime>,
     /// Time of last modification
-    pub mtime: Option<Duration>,
+    pub mtime: Option<SystemTime>,
     /// Time of last status change
-    pub ctime: Option<Duration>,
+    pub ctime: Option<SystemTime>,
 }
 
 /// Requested timestamp value together with its authorization semantics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SetattrTime {
     /// Set the timestamp to the current wall-clock value.
-    Current(Duration),
+    Current(SystemTime),
     /// Set the timestamp to a caller-supplied value.
-    Explicit(Duration),
+    Explicit(SystemTime),
 }
 
 impl SetattrTime {
     /// Returns the resolved timestamp written to the filesystem.
-    pub const fn value(self) -> Duration {
+    pub const fn value(self) -> SystemTime {
         match self {
             Self::Current(value) | Self::Explicit(value) => value,
         }

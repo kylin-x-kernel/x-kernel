@@ -27,12 +27,13 @@ kcpu = { workspace = true }
 karch = { workspace = true }
 kaddr_layout = { workspace = true }
 khal = { workspace = true }
+ktime_types = { workspace = true }
+ktime = { workspace = true }
 kcpu_id_map = { workspace = true }
 kerrno = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
 kernel_boot = { workspace = true }
-rtc_driver = { workspace = true }
 memspace = { workspace = true }
 
 [target.'cfg(target_arch = "loongarch64")'.dependencies]

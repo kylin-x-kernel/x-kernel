@@ -20,9 +20,8 @@ pub use self::{
 
 #[cfg(unittest)]
 mod tests {
-    use core::time::Duration;
-
     use kpoll::IoEvents;
+    use ktime_types::SystemTime;
     use kvfs::{AnonInodeFs, DeviceId, FMode, FileOperations, OpenFlags, VfsFile};
     use linux_raw_sys::general::stat;
     use unittest::def_test;
@@ -62,9 +61,9 @@ mod tests {
         assert_eq!(kstat.size, 0);
         assert_eq!(kstat.blksize, 4096);
         assert_eq!(kstat.blocks, 0);
-        assert_eq!(kstat.atime, Duration::default());
-        assert_eq!(kstat.mtime, Duration::default());
-        assert_eq!(kstat.ctime, Duration::default());
+        assert_eq!(kstat.atime, SystemTime::UNIX_EPOCH);
+        assert_eq!(kstat.mtime, SystemTime::UNIX_EPOCH);
+        assert_eq!(kstat.ctime, SystemTime::UNIX_EPOCH);
     }
 
     #[def_test]
@@ -80,9 +79,9 @@ mod tests {
             blksize: 512,
             blocks: 8,
             rdev: DeviceId::default(),
-            atime: Duration::new(1000, 500_000_000),
-            mtime: Duration::new(2000, 0),
-            ctime: Duration::new(3000, 123_456_789),
+            atime: SystemTime::from_unix_parts(1000, 500_000_000).unwrap(),
+            mtime: SystemTime::from_unix_seconds(2000),
+            ctime: SystemTime::from_unix_parts(3000, 123_456_789).unwrap(),
         };
 
         let s: stat = kstat.into();

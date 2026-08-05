@@ -19,6 +19,7 @@ kalloc.workspace = true
 kcpu_id_map.workspace = true
 ksync.workspace = true
 khal.workspace = true
+ktime_types.workspace = true
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 percpu.workspace = true

@@ -10,12 +10,13 @@ use core::{
 };
 
 use kerrno::{KError, KResult, LinuxError};
-use khal::time::{NANOS_PER_MICROS, TimeValue, monotonic_time, monotonic_time_nanos};
+use khal::time::monotonic_time;
 use kpoll::{PollContext, PollRegisterError, PollSet};
-use ktask::future::sleep;
+use ktask::future::sleep_until;
+use ktime_types::{MonotonicInstant, TimeSpan};
 use smoltcp::{
     iface::{Interface, SocketSet},
-    time::Instant,
+    time::Instant as SmoltcpInstant,
     wire::{
         HardwareAddress, IpAddress as SmoltcpIpAddress, IpCidr as SmoltcpIpCidr,
         IpListenEndpoint as SmoltcpIpListenEndpoint,
@@ -31,21 +32,28 @@ use crate::{
 
 const IPV4_HEADER_LEN: usize = 20;
 
-fn now() -> Instant {
-    Instant::from_micros_const((monotonic_time_nanos() / NANOS_PER_MICROS) as i64)
+fn to_smoltcp_instant(instant: MonotonicInstant) -> SmoltcpInstant {
+    let micros = instant.span_since_origin().as_micros();
+    let micros = i64::try_from(micros).unwrap_or(i64::MAX);
+    SmoltcpInstant::from_micros_const(micros)
+}
+
+fn from_smoltcp_instant(instant: SmoltcpInstant) -> MonotonicInstant {
+    let micros = u64::try_from(instant.total_micros()).unwrap_or(0);
+    MonotonicInstant::from_span_since_origin(TimeSpan::from_micros(micros))
 }
 
 pub struct Service {
     pub iface: Interface,
     router: Router,
     timeout: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
-    timeout_deadline: Option<TimeValue>,
+    timeout_deadline: Option<MonotonicInstant>,
     timeout_poll: Arc<PollSet>,
 }
 impl Service {
     pub fn new(mut router: Router) -> Self {
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
-        let iface = Interface::new(config, &mut router, now());
+        let iface = Interface::new(config, &mut router, to_smoltcp_instant(monotonic_time()));
 
         Self {
             iface,
@@ -57,14 +65,14 @@ impl Service {
     }
 
     pub fn poll(&mut self, sockets: &mut SocketSet) -> bool {
-        let smoltcp_timestamp = now();
-        let device_timestamp = monotonic_time();
+        let current = monotonic_time();
+        let smoltcp_timestamp = to_smoltcp_instant(current);
 
-        self.router.poll(device_timestamp, sockets);
+        self.router.poll(current, sockets);
         self.iface
             .poll(smoltcp_timestamp, &mut self.router, sockets);
         LISTEN_TABLE.wake_touched_acceptors(sockets);
-        self.router.dispatch(device_timestamp)
+        self.router.dispatch(current)
     }
 
     pub fn get_smoltcp_source_address(
@@ -163,24 +171,24 @@ impl Service {
         context.register(&self.timeout_poll)?;
         let source_waker = Waker::from(self.timeout_poll.clone());
 
-        let current = now();
-        let next = self.iface.poll_at(current, &SOCKET_SET.inner.lock());
+        let current = monotonic_time();
+        let next = self
+            .iface
+            .poll_at(to_smoltcp_instant(current), &SOCKET_SET.inner.lock());
 
         if let Some(t) = next {
-            let delay_micros = t.total_micros().saturating_sub(current.total_micros()) as u64;
-            let delay = core::time::Duration::from_micros(delay_micros);
-            let deadline = monotonic_time() + delay;
+            let deadline = from_smoltcp_instant(t);
 
             let should_reset = match self.timeout_deadline {
                 None => true,
-                Some(old_deadline) => monotonic_time() >= old_deadline || deadline < old_deadline,
+                Some(old_deadline) => current >= old_deadline || deadline < old_deadline,
             };
 
             if should_reset {
                 self.timeout = None;
                 self.timeout_deadline = Some(deadline);
 
-                let mut fut = Box::pin(sleep(delay));
+                let mut fut = Box::pin(sleep_until(deadline));
                 let wake = Waker::from(self.timeout_poll.clone());
                 let mut cx = Context::from_waker(&wake);
 
@@ -259,4 +267,30 @@ fn output_ipv4_packet_count(
         .checked_add(max_fragment_payload_len - 1)
         .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?
         / max_fragment_payload_len)
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test]
+    fn test_smoltcp_deadline_clamps_expired_delay() {
+        let current = MonotonicInstant::from_span_since_origin(TimeSpan::from_micros(10_000));
+        let deadline = from_smoltcp_instant(SmoltcpInstant::from_micros_const(9_999));
+
+        assert_eq!(deadline.saturating_duration_since(current), TimeSpan::ZERO);
+    }
+
+    #[def_test]
+    fn test_smoltcp_deadline_preserves_future_delay() {
+        let current = MonotonicInstant::from_span_since_origin(TimeSpan::from_micros(10_000));
+        let deadline = from_smoltcp_instant(SmoltcpInstant::from_micros_const(12_500));
+
+        assert_eq!(
+            deadline.checked_duration_since(current),
+            Some(TimeSpan::from_micros(2_500))
+        );
+    }
 }

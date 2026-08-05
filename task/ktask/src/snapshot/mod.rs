@@ -71,7 +71,7 @@ static TRAP_FRAMES: TrapFrames = TrapFrames::new();
 static SNAPSHOT_SEQ: AtomicUsize = AtomicUsize::new(1);
 
 #[cfg(feature = "ipi")]
-const SNAPSHOT_WAIT_TIMEOUT_NS: usize = 200_000_000;
+const SNAPSHOT_WAIT_TIMEOUT: ktime_types::TimeSpan = ktime_types::TimeSpan::from_millis(200);
 
 struct SnapshotGuard;
 
@@ -137,17 +137,16 @@ fn collect_local() {
     COLLECTED.fetch_or(bit, Ordering::Release);
 }
 
-fn wait_mask(timeout_ns: usize) -> usize {
+fn wait_mask(timeout: ktime_types::TimeSpan) -> usize {
     let expect = present_mask();
-    let start = khal::time::monotonic_time_nanos();
-    let timeout_ns = timeout_ns as u64;
+    let start = khal::time::monotonic_time();
 
     loop {
         let mask = COLLECTED.load(Ordering::Acquire);
         if mask & expect == expect {
             return mask;
         }
-        if khal::time::monotonic_time_nanos().wrapping_sub(start) >= timeout_ns {
+        if khal::time::monotonic_time().saturating_duration_since(start) >= timeout {
             return mask;
         }
         core::hint::spin_loop();
@@ -206,7 +205,7 @@ pub fn trigger(reason: &str) {
             // synchronously before broadcasting to the other CPUs, so one call
             // is sufficient to collect both the triggering CPU and all remotes.
             match kipi::run_on_each_cpu(nmi_collect_local) {
-                Ok(()) => Some(wait_mask(SNAPSHOT_WAIT_TIMEOUT_NS)),
+                Ok(()) => Some(wait_mask(SNAPSHOT_WAIT_TIMEOUT)),
                 Err(err) => {
                     khal::kprint_atomic!("[snapshot {seq}] failed to broadcast snapshot: {err}\n");
                     None

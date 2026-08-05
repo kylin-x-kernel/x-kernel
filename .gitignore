@@ -6,6 +6,11 @@
 *.dbg
 **/target/
 *.img
+# Release rootfs images (e.g. rootfs-aarch64.img.release); `*.img` does not
+# match the `.release` suffix.
+*.img.release
+# OCI bundle build output.
+/uapps/mini-oci/out/
 /kernel-rv
 /kernel-la
 /.crates*

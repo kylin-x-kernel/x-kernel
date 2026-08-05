@@ -41,6 +41,7 @@ ktask timer runtime / generic fd readiness
 - `read()` 只有在存在未消费 expiration 时才成功返回 8 字节计数。
 - `poll(IN)` 与“是否有未消费 expiration”保持一致。
 - `settime(disarm)` 后不再保留旧的 pending handle。
+- `settime()` 的 deadline 校验失败时保留原有 state 和 pending handle。
 - `drop` 必须取消底层 timer handle，避免悬挂回调。
 - `gettime()` 返回对象视角的 interval/remaining，而不是 syscall 临时状态。
 - `EventFd::read/write/poll` 必须围绕同一计数器上限与 semaphore 语义保持一致。
@@ -95,7 +96,7 @@ ctl lock 临界区内恢复旧配置，避免 ready queue 或旧 source wake 引
 | 编号 | 风险 | 影响 | 缓解 |
 |------|------|------|------|
 | T-01 | timer 到期与 `read()` 并发，导致 expiration 丢失或重复消费 | 中 | 统一在 `inner` 锁内 tick/consume |
-| T-02 | `settime()` 重编程时旧 handle 未取消 | 中 | 先 `cancel_pending_timer()` 再更新状态 |
+| T-02 | `settime()` 重编程失败后旧 timer 被意外取消 | 中 | 先验证新 deadline；成功后再取消旧 handle 并更新状态，失败时保持原 timer 不变 |
 | T-03 | `drop` 后底层仍保留回调 | 高 | `Drop` 中取消 handle |
 | T-04 | `poll()` 与 `read()` 对 readiness 观察不一致 | 中 | 两者都先 `tick(clock_now(...))` 再判断 |
 | T-05 | `eventfd` 计数溢出或 `poll(OUT)` 与写入条件不一致 | 中 | `fetch_update` 与 `poll()` 共享同一上限判断 |

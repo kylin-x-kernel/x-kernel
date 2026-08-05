@@ -86,8 +86,8 @@ impl klogger::LoggerAdapter {
         khal::console::write_data(s.as_bytes());
     }
 
-    fn now() -> core::time::Duration {
-        khal::time::monotonic_time()
+    fn now() -> ktime_types::TimeSpan {
+        khal::time::monotonic_time().span_since_origin()
     }
 
     fn cpu_id() -> Option<usize> {
@@ -312,7 +312,9 @@ pub fn rust_main(arg: usize) -> ! {
     #[cfg(feature = "rtc")]
     kprintln!(
         "Boot at {}\n",
-        chrono::DateTime::from_timestamp_nanos(khal::time::wall_time_nanos() as _),
+        chrono::DateTime::from_timestamp_nanos(
+            i64::try_from(ktime::realtime().unix_nanos()).unwrap_or(i64::MAX)
+        ),
     );
 
     klogger::init_klogger();

@@ -106,7 +106,7 @@ input = ["dep:inputdev", "kruntime/input", "devfs/input"]
 char = ["kruntime/char", "devfs/serial"]
 
 # Real Time Clock (RTC) Driver.
-rtc = ["khal/rtc", "kruntime/rtc"]
+rtc = ["kruntime/rtc"]
 
 # Device drivers
 #

@@ -327,7 +327,7 @@ impl Dentry {
 
     /// Sets the instantiated inode change time from a backing-filesystem
     /// namespace mutation.
-    pub fn set_changed_at(&self, timestamp: core::time::Duration) {
+    pub fn set_changed_at(&self, timestamp: ktime_types::SystemTime) {
         self.vfs_inode().set_changed_at(timestamp);
     }
 
@@ -1530,11 +1530,9 @@ impl RenameData<'_> {
 #[cfg(unittest)]
 mod tests_dentry {
     use alloc::{string::String, sync::Arc, vec::Vec};
-    use core::{
-        sync::atomic::{AtomicUsize, Ordering},
-        time::Duration,
-    };
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
+    use ktime_types::SystemTime;
     use unittest::{assert, def_test};
 
     use super::{Dentry, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive};
@@ -1618,9 +1616,9 @@ mod tests_dentry {
                 block_size: 512,
                 blocks: 1,
                 rdev: Default::default(),
-                atime: Duration::ZERO,
-                mtime: Duration::ZERO,
-                ctime: Duration::ZERO,
+                atime: SystemTime::UNIX_EPOCH,
+                mtime: SystemTime::UNIX_EPOCH,
+                ctime: SystemTime::UNIX_EPOCH,
             })
         }
 
@@ -1764,9 +1762,9 @@ mod tests_dentry {
                 block_size: 512,
                 blocks: 1,
                 rdev: Default::default(),
-                atime: Duration::ZERO,
-                mtime: Duration::ZERO,
-                ctime: Duration::ZERO,
+                atime: SystemTime::UNIX_EPOCH,
+                mtime: SystemTime::UNIX_EPOCH,
+                ctime: SystemTime::UNIX_EPOCH,
             })
         }
 
@@ -1939,7 +1937,13 @@ mod tests_dentry {
             crate::Umode::new(node_type, NodePermission::default()),
         )
         .with_owner_links_and_rdev(0, 0, 1, Default::default())
-        .with_stat_data(4096, 1, Duration::ZERO, Duration::ZERO, Duration::ZERO)
+        .with_stat_data(
+            4096,
+            1,
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH,
+        )
     }
 
     #[def_test]

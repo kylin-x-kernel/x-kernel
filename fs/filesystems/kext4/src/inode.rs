@@ -319,9 +319,8 @@ impl Ext4Timestamp {
     pub(crate) fn encode(self, has_extra: bool) -> Ext4Result<EncodedTimestamp> {
         const EXT4_EPOCH_BITS: u32 = 2;
         const EXT4_EPOCH_COUNT: i64 = 1 << EXT4_EPOCH_BITS;
-        const NSEC_PER_SEC: u32 = 1_000_000_000;
 
-        if self.nanos >= NSEC_PER_SEC {
+        if self.nanos >= ktime_types::NANOS_PER_SEC as u32 {
             return Err(Ext4Error::Unsupported(UnsupportedKind::TimestampRange));
         }
 
@@ -377,7 +376,6 @@ impl TryFrom<RawTimestampFields> for Ext4Timestamp {
     fn try_from(raw: RawTimestampFields) -> Ext4Result<Self> {
         const EXT4_EPOCH_BITS: u32 = 2;
         const EXT4_EPOCH_MASK: u32 = (1 << EXT4_EPOCH_BITS) - 1;
-        const NSEC_PER_SEC: u32 = 1_000_000_000;
 
         let mut seconds = i64::from(i32::from_le_bytes(raw.base_seconds.to_le_bytes()));
         let nanos = if let Some(extra) = raw.extra {
@@ -388,7 +386,7 @@ impl TryFrom<RawTimestampFields> for Ext4Timestamp {
                     .ok_or(Ext4Error::Overflow)?;
             }
             let nanos = extra >> EXT4_EPOCH_BITS;
-            if nanos >= NSEC_PER_SEC {
+            if nanos >= ktime_types::NANOS_PER_SEC as u32 {
                 return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
             }
             nanos

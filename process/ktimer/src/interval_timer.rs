@@ -4,8 +4,8 @@
 
 //! Legacy `setitimer` state and scheduling policy.
 
-use khal::time::TimeValue;
 use ksignal::Signo;
+use ktime_types::{BoottimeInstant, MonotonicInstant, ProcessCpuInstant, SystemTime, TimeSpan};
 use posix_types::ITimerType;
 
 use crate::{Pid, runtime};
@@ -20,97 +20,142 @@ pub(crate) fn timer_signal(timer_type: ITimerType) -> Signo {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TimerInstant {
+    Realtime(SystemTime),
+    Monotonic(MonotonicInstant),
+    Boottime(BoottimeInstant),
+    ProcessCpu(ProcessCpuInstant),
+}
+
+impl TimerInstant {
+    pub(crate) fn checked_add(self, duration: TimeSpan) -> Option<Self> {
+        match self {
+            Self::Realtime(now) => now.checked_add(duration).map(Self::Realtime),
+            Self::Monotonic(now) => now.checked_add(duration).map(Self::Monotonic),
+            Self::Boottime(now) => now.checked_add(duration).map(Self::Boottime),
+            Self::ProcessCpu(now) => now.checked_add(duration).map(Self::ProcessCpu),
+        }
+    }
+
+    pub(crate) fn saturating_duration_since(self, earlier: Self) -> TimeSpan {
+        match (self, earlier) {
+            (Self::Realtime(now), Self::Realtime(earlier)) => {
+                now.duration_since(earlier).unwrap_or(TimeSpan::ZERO)
+            }
+            (Self::Monotonic(now), Self::Monotonic(earlier)) => {
+                now.saturating_duration_since(earlier)
+            }
+            (Self::Boottime(now), Self::Boottime(earlier)) => {
+                now.saturating_duration_since(earlier)
+            }
+            (Self::ProcessCpu(now), Self::ProcessCpu(earlier)) => {
+                now.saturating_duration_since(earlier)
+            }
+            (now, earlier) => {
+                panic!("timer instant clock-domain mismatch: {now:?} vs {earlier:?}")
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct ITimer {
-    interval_ns: u64,
-    deadline_ns: Option<u64>,
-    runtime_deadline_ns: Option<usize>,
+    interval: TimeSpan,
+    deadline: Option<TimerInstant>,
+    runtime_deadline: Option<MonotonicInstant>,
     alarm_pid: Option<Pid>,
 }
 
 impl ITimer {
-    pub(crate) fn snapshot(&self, now_ns: u64) -> (TimeValue, TimeValue) {
-        (
-            TimeValue::from_nanos(self.interval_ns),
-            TimeValue::from_nanos(self.remaining_ns(now_ns)),
-        )
+    pub(crate) fn snapshot(&self, now: TimerInstant) -> (TimeSpan, TimeSpan) {
+        (self.interval, self.remaining(now))
     }
 
-    pub(crate) fn remaining_ns(&self, now_ns: u64) -> u64 {
-        self.deadline_ns
-            .map(|deadline_ns| deadline_ns.saturating_sub(now_ns))
-            .unwrap_or(0)
+    pub(crate) fn remaining(&self, now: TimerInstant) -> TimeSpan {
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(now))
+            .unwrap_or(TimeSpan::ZERO)
     }
 
     pub(crate) fn set(
         &mut self,
-        now_ns: u64,
-        interval_ns: u64,
-        deadline_ns: Option<u64>,
-    ) -> (TimeValue, TimeValue) {
-        let old = self.snapshot(now_ns);
+        now: TimerInstant,
+        interval: TimeSpan,
+        deadline: Option<TimerInstant>,
+    ) -> (TimeSpan, TimeSpan) {
+        let old = self.snapshot(now);
 
         *self = Self {
-            interval_ns,
-            deadline_ns,
-            runtime_deadline_ns: None,
+            interval,
+            deadline,
+            runtime_deadline: None,
             alarm_pid: None,
         };
         old
     }
 
-    pub(crate) fn update(&mut self, now_ns: u64) -> usize {
-        let Some(deadline_ns) = self.deadline_ns else {
+    pub(crate) fn update(&mut self, now: TimerInstant) -> usize {
+        let Some(deadline) = self.deadline else {
             return 0;
         };
 
-        if now_ns < deadline_ns {
+        let overdue = now.saturating_duration_since(deadline);
+        if overdue.is_zero() && now != deadline {
             return 0;
         }
 
-        self.runtime_deadline_ns = None;
+        self.runtime_deadline = None;
         self.alarm_pid = None;
 
-        if self.interval_ns == 0 {
-            self.deadline_ns = None;
+        if self.interval.is_zero() {
+            self.deadline = None;
             1
         } else {
-            let overdue_ns = now_ns.saturating_sub(deadline_ns);
-            let skipped_periods = overdue_ns
-                .checked_div(self.interval_ns)
-                .map(|periods| periods + 1)
-                .expect("interval timers divide by a non-zero interval");
-            let advance_ns = self.interval_ns.saturating_mul(skipped_periods);
-            self.deadline_ns = deadline_ns.checked_add(advance_ns);
-            skipped_periods.min(usize::MAX as u64) as usize
+            let skipped_periods = overdue.as_nanos() / self.interval.as_nanos() + 1;
+            let advance =
+                TimeSpan::try_from_nanos(self.interval.as_nanos().saturating_mul(skipped_periods))
+                    .unwrap_or(TimeSpan::MAX);
+            self.deadline = deadline.checked_add(advance);
+            skipped_periods.min(usize::MAX as u128) as usize
         }
     }
 
-    pub(crate) fn deadline_ns(&self) -> Option<u64> {
-        self.deadline_ns
+    pub(crate) fn deadline(&self) -> Option<TimerInstant> {
+        self.deadline
     }
 
-    pub(crate) fn set_alarm(&mut self, runtime_deadline_ns: Option<usize>, pid: Option<Pid>) {
-        self.runtime_deadline_ns = runtime_deadline_ns;
+    pub(crate) fn set_alarm(
+        &mut self,
+        runtime_deadline: Option<MonotonicInstant>,
+        pid: Option<Pid>,
+    ) {
+        self.runtime_deadline = runtime_deadline;
         self.alarm_pid = pid;
         self.renew_alarm();
     }
 
     fn renew_alarm(&self) {
-        if let (Some(runtime_deadline_ns), Some(pid)) = (self.runtime_deadline_ns, self.alarm_pid) {
-            runtime::enqueue_alarm(runtime_deadline_ns, pid);
+        if let (Some(runtime_deadline), Some(pid)) = (self.runtime_deadline, self.alarm_pid) {
+            runtime::enqueue_alarm(runtime_deadline, pid);
         }
     }
 }
 
 #[cfg(unittest)]
 mod tests {
-    use khal::time::TimeValue;
     use ksignal::Signo;
+    use ktime_types::{ProcessCpuInstant, TimeSpan};
     use posix_types::ITimerType;
     use unittest::def_test;
 
-    use super::{ITimer, timer_signal};
+    use super::{ITimer, TimerInstant, timer_signal};
+
+    fn cpu_instant(nanos: u64) -> TimerInstant {
+        TimerInstant::ProcessCpu(ProcessCpuInstant::from_span_since_origin(
+            TimeSpan::from_nanos(nanos),
+        ))
+    }
 
     #[def_test]
     fn test_timer_signal_mapping() {
@@ -121,21 +166,21 @@ mod tests {
 
     #[def_test]
     fn test_time_value_from_nanos_basic() {
-        let tv = TimeValue::from_nanos(0);
+        let tv = TimeSpan::from_nanos(0);
         assert_eq!(tv.as_secs(), 0);
         assert_eq!(tv.subsec_nanos(), 0);
     }
 
     #[def_test]
     fn test_time_value_from_nanos_subsec() {
-        let tv = TimeValue::from_nanos(500_000_000);
+        let tv = TimeSpan::from_nanos(500_000_000);
         assert_eq!(tv.as_secs(), 0);
         assert_eq!(tv.subsec_nanos(), 500_000_000);
     }
 
     #[def_test]
     fn test_time_value_from_nanos_multi_sec() {
-        let tv = TimeValue::from_nanos(2_500_000_000);
+        let tv = TimeSpan::from_nanos(2_500_000_000);
         assert_eq!(tv.as_secs(), 2);
         assert_eq!(tv.subsec_nanos(), 500_000_000);
     }
@@ -143,56 +188,56 @@ mod tests {
     #[def_test]
     fn test_itimer_update_zero_remained() {
         let mut timer = ITimer::default();
-        assert_eq!(timer.update(100), 0);
+        assert_eq!(timer.update(cpu_instant(100)), 0);
     }
 
     #[def_test]
     fn test_itimer_update_counts_down_without_firing() {
         let mut timer = ITimer {
-            interval_ns: 0,
-            deadline_ns: Some(10),
-            runtime_deadline_ns: None,
+            interval: TimeSpan::ZERO,
+            deadline: Some(cpu_instant(10)),
+            runtime_deadline: None,
             alarm_pid: None,
         };
-        assert_eq!(timer.update(3), 0);
-        assert_eq!(timer.remaining_ns(3), 7);
+        assert_eq!(timer.update(cpu_instant(3)), 0);
+        assert_eq!(timer.remaining(cpu_instant(3)), TimeSpan::from_nanos(7));
     }
 
     #[def_test]
     fn test_itimer_update_fires_and_resets_to_interval() {
         let mut timer = ITimer {
-            interval_ns: 0,
-            deadline_ns: Some(5),
-            runtime_deadline_ns: None,
+            interval: TimeSpan::ZERO,
+            deadline: Some(cpu_instant(5)),
+            runtime_deadline: None,
             alarm_pid: None,
         };
-        assert_eq!(timer.update(5), 1);
-        assert_eq!(timer.remaining_ns(5), 0);
+        assert_eq!(timer.update(cpu_instant(5)), 1);
+        assert_eq!(timer.remaining(cpu_instant(5)), TimeSpan::ZERO);
     }
 
     #[def_test]
     fn test_itimer_update_rearms_from_previous_deadline() {
         let mut timer = ITimer {
-            interval_ns: 10,
-            deadline_ns: Some(10),
-            runtime_deadline_ns: None,
+            interval: TimeSpan::from_nanos(10),
+            deadline: Some(cpu_instant(10)),
+            runtime_deadline: None,
             alarm_pid: None,
         };
 
-        assert_eq!(timer.update(35), 3);
-        assert_eq!(timer.remaining_ns(35), 5);
+        assert_eq!(timer.update(cpu_instant(35)), 3);
+        assert_eq!(timer.remaining(cpu_instant(35)), TimeSpan::from_nanos(5));
     }
 
     #[def_test]
     fn test_itimer_update_periodic_rearms_from_previous_deadline() {
         let mut timer = ITimer {
-            interval_ns: 5,
-            deadline_ns: Some(3),
-            runtime_deadline_ns: None,
+            interval: TimeSpan::from_nanos(5),
+            deadline: Some(cpu_instant(3)),
+            runtime_deadline: None,
             alarm_pid: None,
         };
 
-        assert_eq!(timer.update(8), 2);
-        assert_eq!(timer.remaining_ns(8), 5);
+        assert_eq!(timer.update(cpu_instant(8)), 2);
+        assert_eq!(timer.remaining(cpu_instant(8)), TimeSpan::from_nanos(5));
     }
 }

@@ -16,6 +16,7 @@ tee = ["kprocess/tee"]
 [dependencies]
 bitflags.workspace = true
 khal.workspace = true
+ktime_types.workspace = true
 kerrno.workspace = true
 klazy.workspace = true
 kpoll.workspace = true

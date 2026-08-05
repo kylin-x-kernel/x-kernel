@@ -15,4 +15,5 @@ cfg-if.workspace = true
 chrono = { workspace = true, default-features = true, optional = true }
 kiface.workspace = true
 kspin.workspace = true
+ktime_types.workspace = true
 log.workspace = true

@@ -95,8 +95,12 @@ impl SignalfdSiginfo {
             ssi_status: child_exit.map(|child| child.status()).unwrap_or(0),
             ssi_int,
             ssi_ptr,
-            ssi_utime: child_exit.map(|child| child.utime_ticks()).unwrap_or(0),
-            ssi_stime: child_exit.map(|child| child.stime_ticks()).unwrap_or(0),
+            ssi_utime: child_exit
+                .map(|child| posix_types::PosixClockTicks::from_time_span(child.utime()).as_raw())
+                .unwrap_or(0),
+            ssi_stime: child_exit
+                .map(|child| posix_types::PosixClockTicks::from_time_span(child.stime()).as_raw())
+                .unwrap_or(0),
             ssi_addr: 0,
             ssi_addr_lsb: 0,
             _pad: [0; 46],
@@ -308,7 +312,13 @@ mod tests {
 
     #[def_test]
     fn test_signalfd_siginfo_from_child_exit_signal_info() {
-        let child = ChildExitInfo::from_wait_status(42, 1000, 9 << 8, 11, 13);
+        let child = ChildExitInfo::from_wait_status(
+            42,
+            1000,
+            9 << 8,
+            ktime_types::TimeSpan::from_millis(20),
+            ktime_types::TimeSpan::from_millis(30),
+        );
         let sig = ChildExitSignalInfo::new_sigchld(child);
         let info = SignalfdSiginfo::from_signal_info(sig.as_child_exit_signal().as_signal_info());
 
@@ -317,7 +327,15 @@ mod tests {
         assert_eq!(info.ssi_pid, 42);
         assert_eq!(info.ssi_uid, 1000);
         assert_eq!(info.ssi_status, 9);
-        assert_eq!(info.ssi_utime, 11);
-        assert_eq!(info.ssi_stime, 13);
+        assert_eq!(
+            info.ssi_utime,
+            posix_types::PosixClockTicks::from_time_span(ktime_types::TimeSpan::from_millis(20))
+                .as_raw()
+        );
+        assert_eq!(
+            info.ssi_stime,
+            posix_types::PosixClockTicks::from_time_span(ktime_types::TimeSpan::from_millis(30))
+                .as_raw()
+        );
     }
 }

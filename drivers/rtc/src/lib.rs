@@ -2,61 +2,81 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#![no_std]
+//! Persistent real-time clock discovery and sampling.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+#![no_std]
+#![warn(missing_docs)]
 
 use khal::mem::{PhysAddr, VirtAddr};
+use ktime_types::SystemTime;
 
 #[cfg(all(feature = "cmos", target_arch = "x86_64"))]
-pub mod cmos;
+mod cmos;
 #[cfg(feature = "goldfish")]
-pub mod goldfish;
+mod goldfish;
 #[cfg(feature = "pl031")]
-pub mod pl031;
+mod pl031;
 
-static RTC_EPOCHOFFSET_NANOS: AtomicU64 = AtomicU64::new(0);
-
-#[kplat::impl_dev_interface]
-impl khal::rtc::RtcIf {
-    fn offset_ns() -> u64 {
-        offset_ns()
-    }
-
-    fn set_offset_ns(offset_ns: u64) {
-        set_offset_ns(offset_ns);
-    }
+fn system_time_from_unsigned_seconds(seconds: u64) -> Option<SystemTime> {
+    i64::try_from(seconds)
+        .ok()
+        .map(SystemTime::from_unix_seconds)
 }
 
+/// Supported persistent RTC device kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RtcKind {
+    /// Goldfish virtual RTC.
     Goldfish,
+    /// ARM PrimeCell PL031 RTC.
     Pl031,
+    /// PC-compatible CMOS RTC.
     Cmos,
 }
 
+/// Transport used to access an RTC device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RtcTransport {
-    Mmio { paddr: PhysAddr, size: usize },
-    MmioMapped { vaddr: VirtAddr },
+    /// An unmapped MMIO register range.
+    Mmio {
+        /// Physical base address of the register range.
+        paddr: PhysAddr,
+        /// Size of the register range in bytes.
+        size: usize,
+    },
+    /// A mapped MMIO register range.
+    MmioMapped {
+        /// Virtual base address of the mapped register range.
+        vaddr: VirtAddr,
+    },
+    /// A platform-defined transport such as x86 I/O ports.
     Platform,
 }
 
+/// Firmware or platform source of an RTC description.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RtcSource {
+    /// Device-tree discovery.
     DeviceTree,
+    /// ACPI discovery.
     Acpi,
+    /// Static platform configuration.
     PlatformStatic,
 }
 
+/// RTC device configuration and transport description.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RtcConfig {
+    /// RTC device kind.
     pub kind: RtcKind,
+    /// RTC access transport.
     pub transport: RtcTransport,
+    /// Source of this configuration.
     pub source: RtcSource,
 }
 
 impl RtcConfig {
+    /// Creates an unmapped MMIO RTC configuration.
     pub const fn mmio(kind: RtcKind, paddr: PhysAddr, size: usize, source: RtcSource) -> Self {
         Self {
             kind,
@@ -65,6 +85,7 @@ impl RtcConfig {
         }
     }
 
+    /// Creates a platform-transport RTC configuration.
     pub const fn platform(kind: RtcKind, source: RtcSource) -> Self {
         Self {
             kind,
@@ -73,6 +94,7 @@ impl RtcConfig {
         }
     }
 
+    /// Creates an already-mapped MMIO RTC configuration.
     pub const fn mmio_mapped(kind: RtcKind, vaddr: VirtAddr, source: RtcSource) -> Self {
         Self {
             kind,
@@ -82,29 +104,9 @@ impl RtcConfig {
     }
 }
 
-#[inline]
-pub fn offset_ns() -> u64 {
-    RTC_EPOCHOFFSET_NANOS.load(Ordering::Relaxed)
-}
-
-#[inline]
-pub fn init_offset_ns(offset: u64) {
-    set_offset_ns(offset);
-}
-
-/// Updates the wall-clock offset in nanoseconds relative to monotonic time.
-#[inline]
-pub fn set_offset_ns(offset_ns: u64) {
-    RTC_EPOCHOFFSET_NANOS.store(offset_ns, Ordering::Relaxed);
-}
-
-#[inline]
-pub fn init_unix_timestamp_offset(unix_seconds: u64, now_nanos: u64) {
-    let epoch_time_nanos = unix_seconds.saturating_mul(1_000_000_000);
-    init_offset_ns(epoch_time_nanos.saturating_sub(now_nanos));
-}
-
-pub fn config_from_device_tree() -> Option<RtcConfig> {
+/// Discovers an RTC configuration from the device tree.
+#[cfg(any(feature = "pl031", feature = "goldfish"))]
+fn config_from_device_tree() -> Option<RtcConfig> {
     #[cfg(feature = "pl031")]
     if let Some(config) = pl031_config_from_device_tree() {
         return Some(config);
@@ -145,8 +147,17 @@ fn pl031_config_from_device_tree() -> Option<RtcConfig> {
     ))
 }
 
+/// Discovers, maps, and samples the RTC described by the device tree.
+///
+/// Returns `None` when no supported RTC is present or the device does not
+/// provide a usable sample.
+///
+/// # Panics
+///
+/// Panics if the discovered register range cannot be mapped or its RTC
+/// configuration is unsupported.
 #[cfg(any(feature = "pl031", feature = "goldfish"))]
-pub fn init_from_device_tree(now_nanos: u64) -> Option<RtcConfig> {
+pub fn read_from_device_tree() -> Option<SystemTime> {
     let config = config_from_device_tree()?;
     let mapped = match config {
         RtcConfig {
@@ -168,27 +179,43 @@ pub fn init_from_device_tree(now_nanos: u64) -> Option<RtcConfig> {
         }
         other => panic!("unsupported rtc configuration: {other:?}"),
     };
-    init(mapped, now_nanos);
-    Some(mapped)
+    read(mapped)
 }
 
-pub fn init(config: RtcConfig, _now_nanos: u64) {
+/// Samples an RTC using an initialized configuration.
+///
+/// Returns `None` when a mapped configuration has no usable address.
+///
+/// # Panics
+///
+/// Panics if support for the configured RTC kind or transport is not enabled.
+pub fn read(config: RtcConfig) -> Option<SystemTime> {
     match (config.kind, config.transport) {
         #[cfg(feature = "goldfish")]
-        (RtcKind::Goldfish, RtcTransport::MmioMapped { vaddr }) => {
-            goldfish::init_mapped(vaddr, _now_nanos);
-        }
+        (RtcKind::Goldfish, RtcTransport::MmioMapped { vaddr }) => goldfish::read_mapped(vaddr),
         #[cfg(feature = "pl031")]
-        (RtcKind::Pl031, RtcTransport::MmioMapped { vaddr }) => {
-            pl031::init_mapped(vaddr, _now_nanos);
-        }
+        (RtcKind::Pl031, RtcTransport::MmioMapped { vaddr }) => pl031::read_mapped(vaddr),
         #[cfg(all(feature = "cmos", target_arch = "x86_64"))]
-        (RtcKind::Cmos, RtcTransport::Platform) => {
-            cmos::init_platform(_now_nanos);
-        }
+        (RtcKind::Cmos, RtcTransport::Platform) => cmos::read_platform(),
         (kind, transport) => {
             panic!("unsupported rtc configuration: kind={kind:?} transport={transport:?}");
         }
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn unsigned_seconds_reject_values_outside_system_time() {
+        assert_eq!(
+            system_time_from_unsigned_seconds(i64::MAX as u64),
+            Some(SystemTime::from_unix_seconds(i64::MAX))
+        );
+        assert_eq!(system_time_from_unsigned_seconds(u64::MAX), None);
     }
 }
 

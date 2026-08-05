@@ -5,17 +5,17 @@
 //! Epoll syscalls.
 
 use alloc::vec;
-use core::time::Duration;
 
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
 use kfd_objects::epoll::{Epoll, EpollEvent, EpollFlags};
 use kpoll::IoEvents;
 use ktask::future::{self, block_on, poll_io};
+use ktime_types::TimeSpan;
 use linux_raw_sys::general::{
     EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, epoll_event, timespec,
 };
-use posix_types::{TimeValueLike, UserConstPtr, UserPtr, k_sigset};
+use posix_types::{TimeSpanLike, UserConstPtr, UserPtr, k_sigset};
 
 bitflags! {
     // Flags for the `epoll_create1` syscall.
@@ -85,7 +85,7 @@ fn do_epoll_wait(
     epfd: i32,
     events: UserPtr<epoll_event>,
     maxevents: i32,
-    timeout: Option<Duration>,
+    timeout: Option<TimeSpan>,
     sigmask: UserConstPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
@@ -135,7 +135,7 @@ pub fn sys_epoll_pwait(
 ) -> KResult<isize> {
     let timeout = match timeout {
         -1 => None,
-        t if t >= 0 => Some(Duration::from_millis(t as u64)),
+        t if t >= 0 => Some(TimeSpan::from_millis(t as u64)),
         _ => return Err(KError::InvalidInput),
     };
     do_epoll_wait(epfd, events, maxevents, timeout, sigmask, sigsetsize)
@@ -154,7 +154,7 @@ pub fn sys_epoll_pwait2(
         .check_non_null()
         .map(UserConstPtr::read_vm)
         .transpose()?
-        .map(|timeout| timeout.try_into_time_value())
+        .map(|timeout| timeout.try_into_time_span())
         .transpose()?;
     do_epoll_wait(epfd, events, maxevents, timeout, sigmask, sigsetsize)
 }

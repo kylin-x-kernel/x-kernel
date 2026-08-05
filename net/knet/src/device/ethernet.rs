@@ -9,7 +9,7 @@ use device_res::IrqEventSource;
 use hashbrown::HashMap;
 use kclass::{ClassDevice, prelude::*};
 use kerrno::{KError, KResult, LinuxError};
-use khal::time::{Duration, TimeValue};
+use ktime_types::{MonotonicInstant, TimeSpan};
 
 use crate::{
     buf::{PacketBuf, PacketOwner},
@@ -29,7 +29,7 @@ const NET_RX_IRQ_SOURCE: IrqEventSource = 0;
 struct ArpNeighbor {
     hardware_address: MacAddress,
     /// When this entry expires (TTL = 300s).
-    expires_at: TimeValue,
+    expires_at: MonotonicInstant,
 }
 
 /// Queued IP packet awaiting ARP resolution.
@@ -50,7 +50,7 @@ pub struct EthernetDevice {
 }
 
 impl EthernetDevice {
-    const NEIGHBOR_TTL: Duration = Duration::from_secs(300);
+    const NEIGHBOR_TTL: TimeSpan = TimeSpan::from_secs(300);
 
     /// Create a new Ethernet device wrapper.
     pub fn new(name: String, inner: ClassDevice<NetDeviceImpl>, ip: Ipv4Cidr) -> Self {
@@ -166,7 +166,7 @@ impl EthernetDevice {
         &mut self,
         ifindex: i32,
         frame_data: &[u8],
-        timestamp: TimeValue,
+        timestamp: MonotonicInstant,
     ) -> Option<PacketBuf> {
         let Some(frame) = EthernetFrameRef::new_checked(frame_data) else {
             warn!("Dropping malformed Ethernet frame");
@@ -231,7 +231,7 @@ impl EthernetDevice {
         self.neighbors.insert(target_ip, None);
     }
 
-    fn handle_arp_packet(&mut self, ifindex: i32, payload: &[u8], now: TimeValue) {
+    fn handle_arp_packet(&mut self, ifindex: i32, payload: &[u8], now: MonotonicInstant) {
         let Some(packet) = ArpIpv4Packet::parse(payload) else {
             debug!("Dropping malformed ARP packet");
             return;
@@ -347,7 +347,7 @@ impl NetDeviceOps for EthernetDevice {
         Some(self.inner.id())
     }
 
-    fn poll_rx(&mut self, ifindex: i32, timestamp: TimeValue) -> Option<PacketBuf> {
+    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> Option<PacketBuf> {
         loop {
             let rx_buf: NetBufHandle = match self.inner.recv() {
                 Ok(buf) => buf,
@@ -373,7 +373,7 @@ impl NetDeviceOps for EthernetDevice {
         ifindex: i32,
         next_hop: IpAddress,
         mut packet: PacketBuf,
-        timestamp: TimeValue,
+        timestamp: MonotonicInstant,
     ) -> bool {
         if !matches!(next_hop, IpAddress::Ipv4(_)) {
             warn!("Dropping IPv6 packet on IPv4-only Ethernet device");
@@ -452,7 +452,9 @@ impl NetDeviceOps for EthernetDevice {
                 *dst_addr,
                 Some(ArpNeighbor {
                     hardware_address: MacAddress(*hardware_addr),
-                    expires_at: TimeValue::from_secs(u64::MAX / 2),
+                    expires_at: MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(
+                        u64::MAX / 2,
+                    )),
                 }),
             );
         }

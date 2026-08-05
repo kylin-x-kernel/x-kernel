@@ -17,9 +17,10 @@ cmos = ["dep:x86_rtc"]
 
 [dependencies]
 khal = { workspace = true }
-kplat = { workspace = true }
+ktime_types = { workspace = true }
 of = { workspace = true }
 memspace = { workspace = true }
 riscv_goldfish = { version = "0.1", optional = true }
 arm_pl031 = { version = "0.2", optional = true }
 x86_rtc = { version = "0.1", optional = true }
+unittest.workspace = true

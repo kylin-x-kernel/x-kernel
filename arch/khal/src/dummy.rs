@@ -46,26 +46,17 @@ impl crate::console::ConsoleIf {
 }
 
 #[impl_dev_interface]
-impl crate::rtc::RtcIf {
-    fn offset_ns() -> u64 {
-        0
-    }
-
-    fn set_offset_ns(_offset_ns: u64) {}
-}
-
-#[impl_dev_interface]
 impl crate::time::MonotonicTimerIf {
-    fn now_ticks() -> u64 {
-        0
+    fn now_ticks() -> crate::time::TimerTicks {
+        crate::time::TimerTicks::from_raw(0)
     }
 
-    fn t2ns(ticks: u64) -> u64 {
-        ticks
+    fn ticks_to_span(ticks: crate::time::TimerTicks) -> ktime_types::TimeSpan {
+        ktime_types::TimeSpan::from_nanos(ticks.as_raw())
     }
 
-    fn ns2t(nanos: u64) -> u64 {
-        nanos
+    fn span_to_ticks(span: ktime_types::TimeSpan) -> crate::time::TimerTicks {
+        crate::time::TimerTicks::from_raw(span.as_nanos_u64_saturating())
     }
 
     fn freq() -> u64 {
@@ -76,9 +67,9 @@ impl crate::time::MonotonicTimerIf {
         0
     }
 
-    fn arm_timer(_deadline_ns: u64) {}
+    fn arm_timer(_deadline: crate::time::MonotonicInstant) {}
 
-    fn handle_idle_return(_previous_ticks: u64) -> bool {
+    fn handle_idle_return(_previous_ticks: crate::time::TimerTicks) -> bool {
         false
     }
 }

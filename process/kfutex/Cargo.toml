@@ -11,6 +11,7 @@ documentation.workspace = true
 
 [dependencies]
 khal.workspace = true
+ktime_types.workspace = true
 kerrno.workspace = true
 klazy.workspace = true
 kspin.workspace = true

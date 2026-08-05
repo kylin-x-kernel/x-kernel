@@ -41,13 +41,14 @@ impl BootHandler {
         );
         kernel_boot::bootln!("console driver init");
         #[cfg(feature = "rtc")]
-        rtc_driver::init(
-            rtc_driver::RtcConfig::platform(
+        {
+            let sample = rtc_driver::read(rtc_driver::RtcConfig::platform(
                 rtc_driver::RtcKind::Cmos,
                 rtc_driver::RtcSource::PlatformStatic,
-            ),
-            timer_driver::x86_lapic_tsc::t2ns(timer_driver::x86_lapic_tsc::now_ticks()),
-        );
+            ))
+            .expect("failed to read platform rtc");
+            ktime::initialize_realtime(sample);
+        }
         kernel_boot::bootln!("rtc init");
     }
 

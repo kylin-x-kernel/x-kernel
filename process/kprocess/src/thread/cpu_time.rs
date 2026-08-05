@@ -4,7 +4,8 @@
 
 //! Thread CPU-time accounting state.
 
-use khal::time::{TimeValue, monotonic_time_nanos};
+use khal::time::monotonic_time;
+use ktime_types::{MonotonicInstant, TimeSpan};
 
 /// Represents the current CPU-accounting state of a thread.
 #[derive(Debug, Clone, Copy)]
@@ -19,9 +20,9 @@ pub enum CpuTimeState {
 
 /// Per-thread CPU-time accounting state.
 pub(crate) struct CpuTimeStatistics {
-    utime_ns: u64,
-    stime_ns: u64,
-    last_wall_ns: Option<u64>,
+    utime: TimeSpan,
+    stime: TimeSpan,
+    last_wall: Option<MonotonicInstant>,
     state: CpuTimeState,
 }
 
@@ -35,45 +36,37 @@ impl CpuTimeStatistics {
     /// Creates a new [`CpuTimeStatistics`].
     pub(crate) fn new() -> Self {
         Self {
-            utime_ns: 0,
-            stime_ns: 0,
-            last_wall_ns: None,
+            utime: TimeSpan::ZERO,
+            stime: TimeSpan::ZERO,
+            last_wall: None,
             state: CpuTimeState::None,
         }
     }
 
-    /// Returns the current user time and system time as a tuple of [`TimeValue`].
-    pub(crate) fn output(&self) -> (TimeValue, TimeValue) {
-        let utime = TimeValue::from_nanos(self.utime_ns);
-        let stime = TimeValue::from_nanos(self.stime_ns);
-        (utime, stime)
+    /// Returns the current user time and system time as a tuple of [`TimeSpan`].
+    pub(crate) fn output(&self) -> (TimeSpan, TimeSpan) {
+        (self.utime, self.stime)
     }
 
-    /// Returns the sampled user and system CPU time in nanoseconds.
-    pub(crate) fn sample_nanos(&mut self) -> (u64, u64) {
-        self.update();
-        (self.utime_ns, self.stime_ns)
-    }
-
-    /// Returns the sampled user and system CPU time as a tuple of [`TimeValue`].
-    pub(crate) fn sample(&mut self) -> (TimeValue, TimeValue) {
+    /// Returns the sampled user and system CPU time as a tuple of [`TimeSpan`].
+    pub(crate) fn sample(&mut self) -> (TimeSpan, TimeSpan) {
         self.update();
         self.output()
     }
 
     fn update(&mut self) {
-        let now_ns = monotonic_time_nanos();
-        let Some(last_wall_ns) = self.last_wall_ns.replace(now_ns) else {
+        let now = monotonic_time();
+        let Some(last_wall) = self.last_wall.replace(now) else {
             return;
         };
-        let delta = now_ns.saturating_sub(last_wall_ns);
+        let delta = now.saturating_duration_since(last_wall);
 
         match self.state {
             CpuTimeState::User => {
-                self.utime_ns = self.utime_ns.saturating_add(delta);
+                self.utime = self.utime.saturating_add(delta);
             }
             CpuTimeState::Kernel => {
-                self.stime_ns = self.stime_ns.saturating_add(delta);
+                self.stime = self.stime.saturating_add(delta);
             }
             CpuTimeState::None => {}
         }

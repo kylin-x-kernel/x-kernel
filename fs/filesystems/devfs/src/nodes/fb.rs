@@ -85,7 +85,7 @@ struct FixScreenInfo {
 }
 
 async fn refresh_task() {
-    let delay = core::time::Duration::from_secs_f32(1. / 60.);
+    let delay = ktime_types::TimeSpan::from_nanos(1_000_000_000 / 60);
     loop {
         if !fbdevice::fb_flush() {
             warn!("Failed to refresh framebuffer");

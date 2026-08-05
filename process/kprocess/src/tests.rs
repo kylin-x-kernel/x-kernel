@@ -19,6 +19,7 @@ use khal::{
 };
 use kpoll::PollRegistrations;
 use ktask::{TaskInner, prepare_task};
+use ktime_types::TimeSpan;
 use memspace::VmRuntimeRef;
 use unittest::{assert, assert_eq, def_test};
 
@@ -92,20 +93,20 @@ fn register_poll_set(set: &kpoll::PollSet, waker: &Waker) -> PollRegistrations {
 
 struct ExitAccountingObserver {
     process: Arc<Process>,
-    expected_utime_ns: u64,
-    expected_stime_ns: u64,
+    expected_utime: TimeSpan,
+    expected_stime: TimeSpan,
     failures: AtomicUsize,
 }
 
 fn new_exit_accounting_observer(
     process: Arc<Process>,
-    expected_utime_ns: u64,
-    expected_stime_ns: u64,
+    expected_utime: TimeSpan,
+    expected_stime: TimeSpan,
 ) -> &'static ExitAccountingObserver {
     Box::leak(Box::new(ExitAccountingObserver {
         process,
-        expected_utime_ns,
-        expected_stime_ns,
+        expected_utime,
+        expected_stime,
         failures: AtomicUsize::new(0),
     }))
 }
@@ -126,8 +127,8 @@ unsafe fn accounting_waker_wake(data: *const ()) {
     // SAFETY: `data` points to a leaked `'static` observer used only through
     // shared references and atomics.
     let observer = unsafe { &*(data as *const ExitAccountingObserver) };
-    let observed = observer.process.exited_thread_time_ns();
-    if observed != (observer.expected_utime_ns, observer.expected_stime_ns) {
+    let observed = observer.process.exited_thread_time();
+    if observed != (observer.expected_utime, observer.expected_stime) {
         observer.failures.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -990,7 +991,7 @@ fn test_process_exit_notifies_pidfd_and_parent_waiters() {
     let init = ensure_init();
     let child = init.fork(580);
     let _leader_task = publish_test_thread(&child, 580);
-    child.accumulate_exited_thread_time(77, 88);
+    child.accumulate_exited_thread_time(TimeSpan::from_nanos(77), TimeSpan::from_nanos(88));
 
     let parent_counter = new_wake_counter();
     let parent_waker = counter_waker(parent_counter);
@@ -1000,7 +1001,11 @@ fn test_process_exit_notifies_pidfd_and_parent_waiters() {
     let child_waker = counter_waker(child_counter);
     let _child_registration = register_poll_set(child.exit_event(), &child_waker);
 
-    let accounting_observer = new_exit_accounting_observer(child.clone(), 77, 88);
+    let accounting_observer = new_exit_accounting_observer(
+        child.clone(),
+        TimeSpan::from_nanos(77),
+        TimeSpan::from_nanos(88),
+    );
     let accounting_parent_waker = accounting_waker(accounting_observer);
     let _accounting_parent_registration =
         register_poll_set(init.child_exit_event(), &accounting_parent_waker);
@@ -1246,13 +1251,19 @@ fn test_lifecycle_accumulates_exited_thread_and_child_cpu_time() {
     let init = ensure_init();
     let proc = init.fork(600);
 
-    proc.accumulate_exited_thread_time(11, 22);
-    proc.accumulate_exited_thread_time(33, 44);
-    proc.accumulate_child_time(55, 66);
-    proc.accumulate_child_time(77, 88);
+    proc.accumulate_exited_thread_time(TimeSpan::from_nanos(11), TimeSpan::from_nanos(22));
+    proc.accumulate_exited_thread_time(TimeSpan::from_nanos(33), TimeSpan::from_nanos(44));
+    proc.accumulate_child_time(TimeSpan::from_nanos(55), TimeSpan::from_nanos(66));
+    proc.accumulate_child_time(TimeSpan::from_nanos(77), TimeSpan::from_nanos(88));
 
-    assert_eq!(proc.exited_thread_time_ns(), (44, 66));
-    assert_eq!(proc.child_time_ns(), (132, 154));
+    assert_eq!(
+        proc.exited_thread_time(),
+        (TimeSpan::from_nanos(44), TimeSpan::from_nanos(66))
+    );
+    assert_eq!(
+        proc.child_time(),
+        (TimeSpan::from_nanos(132), TimeSpan::from_nanos(154))
+    );
 
     proc.exit_with_publication(ProcessExitPublication::WaitableZombie);
     proc.free();

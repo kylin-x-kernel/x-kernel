@@ -3,7 +3,6 @@
 // See LICENSES for license details.
 
 use alloc::{format, string::ToString, sync::Arc, vec};
-use core::time::Duration;
 
 use bitmaps::Bitmap;
 use kclass::ClassDevice;
@@ -11,9 +10,9 @@ use kclass::ClassDevice;
 use kclass::prelude::{DriverError, Event, EventType, InputDevice, InputDeviceId, InputDeviceImpl};
 use kdevice::subscribe_device_removed;
 use kerrno::{KError, KResult};
-use khal::time::wall_time;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;
+use ktime_types::SystemTime;
 use kvfs::{
     DeviceFileOps, DeviceId, DirMapping, NodeFlags, NodeType, SimpleDir, SimpleFs, VfsFile,
     VfsFileBuilder, VfsInode, VfsResult,
@@ -31,7 +30,7 @@ const KEY_CNT: usize = EventType::Key.bits_count();
 
 struct Inner {
     device: Option<ClassDevice<InputDeviceImpl>>,
-    read_ahead: Option<(Duration, Event)>,
+    read_ahead: Option<(SystemTime, Event)>,
     key_state: Bitmap<KEY_CNT>,
 }
 impl Inner {
@@ -50,7 +49,7 @@ impl Inner {
                             self.key_state.set(event.code as usize, true);
                         }
                     }
-                    self.read_ahead = Some((wall_time(), event));
+                    self.read_ahead = Some((ktime::realtime(), event));
                 }
                 Err(DriverError::WouldBlock) => {}
                 Err(err) => {
@@ -208,8 +207,8 @@ impl DeviceFileOps for EventDev {
             };
             let input_event = InputEvent {
                 time: KernelTimeval {
-                    tv_sec: time.as_secs() as _,
-                    tv_usec: time.subsec_micros() as _,
+                    tv_sec: time.unix_seconds() as _,
+                    tv_usec: (time.subsec_nanos() / 1_000) as _,
                 },
                 event_type: event.event_type,
                 code: event.code,

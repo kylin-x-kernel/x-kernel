@@ -330,8 +330,8 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
     // CPU-accounting interval before any parent waiter can observe and reap the
     // zombie.
     thr.set_cpu_state(kprocess::CpuTimeState::None);
-    let (thread_utime_ns, thread_stime_ns) = thr.sample_cpu_time_ns();
-    process_exit::record_exited_thread_cpu_time(process, thread_utime_ns, thread_stime_ns);
+    let (thread_utime, thread_stime) = thr.sample_cpu_time();
+    process_exit::record_exited_thread_cpu_time(process, thread_utime, thread_stime);
 
     if is_last_thread {
         if let Err(err) = process.close_all_fds() {

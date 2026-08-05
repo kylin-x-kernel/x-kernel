@@ -65,7 +65,7 @@ pub fn slice_fmt(data: &[u8]) -> String {
 
 #[cfg(feature = "csv_huk_key")]
 pub fn random_bytes(data: &mut [u8]) {
-    let seed = khal::time::now_ticks();
+    let seed = khal::time::now_ticks().as_raw();
     let mut rng = DeterministicRng::seed_from_u64(seed);
     rng.fill_bytes(data);
 }

@@ -30,7 +30,7 @@ mod conv {
     use kerrno::{KError, KResult};
     use knet::options::{PacketMembership, PacketStatistics, UnixCredentials};
     use linux_raw_sys::{general::timeval, net::ucred};
-    use posix_types::{TimeValueLike, UserRead};
+    use posix_types::{TimeSpanLike, UserRead};
 
     pub struct Int<T>(T);
 
@@ -59,12 +59,12 @@ mod conv {
     pub struct Duration;
 
     impl Duration {
-        pub fn sys_to_rust(val: timeval) -> KResult<core::time::Duration> {
-            val.try_into_time_value()
+        pub fn sys_to_rust(val: timeval) -> KResult<ktime_types::TimeSpan> {
+            val.try_into_time_span()
         }
 
-        pub fn rust_to_sys(val: core::time::Duration) -> KResult<timeval> {
-            Ok(timeval::from_time_value(val))
+        pub fn rust_to_sys(val: ktime_types::TimeSpan) -> KResult<timeval> {
+            Ok(timeval::from_time_span(val))
         }
     }
 

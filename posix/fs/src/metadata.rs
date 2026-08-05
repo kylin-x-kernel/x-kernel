@@ -5,16 +5,13 @@
 //! Filesystem metadata update syscalls.
 
 use core::ffi::{c_char, c_long};
-#[cfg(target_arch = "x86_64")]
-use core::time::Duration;
 
 use kerrno::KResult;
-use khal::time::wall_time;
 use kvfs::{NodePermission, SetattrTime};
 use linux_raw_sys::general::*;
+use posix_types::{SystemTimeLike, UserConstPtr};
 #[cfg(target_arch = "x86_64")]
-use posix_types::utimbuf;
-use posix_types::{TimeValueLike, UserConstPtr};
+use {ktime_types::SystemTime, posix_types::utimbuf};
 
 use crate::path::resolve_at_with_cred;
 
@@ -103,11 +100,11 @@ pub fn sys_utime(path: UserConstPtr<c_char>, times: UserConstPtr<utimbuf>) -> KR
     let (atime, mtime) = if let Some(times) = times.check_non_null() {
         let times = times.read_vm()?;
         (
-            SetattrTime::Explicit(Duration::from_secs(times.actime as _)),
-            SetattrTime::Explicit(Duration::from_secs(times.modtime as _)),
+            SetattrTime::Explicit(SystemTime::from_unix_seconds(times.actime)),
+            SetattrTime::Explicit(SystemTime::from_unix_seconds(times.modtime)),
         )
     } else {
-        let time = wall_time();
+        let time = ktime::realtime();
         (SetattrTime::Current(time), SetattrTime::Current(time))
     };
     update_times(AT_FDCWD, path, Some(atime), Some(mtime), 0)?;
@@ -119,11 +116,11 @@ pub fn sys_utimes(path: UserConstPtr<c_char>, times: UserConstPtr<[timeval; 2]>)
     let (atime, mtime) = if let Some(times) = times.check_non_null() {
         let [atime, mtime] = times.read_vm()?;
         (
-            SetattrTime::Explicit(atime.try_into_time_value()?),
-            SetattrTime::Explicit(mtime.try_into_time_value()?),
+            SetattrTime::Explicit(atime.try_into_system_time()?),
+            SetattrTime::Explicit(mtime.try_into_system_time()?),
         )
     } else {
-        let time = wall_time();
+        let time = ktime::realtime();
         (SetattrTime::Current(time), SetattrTime::Current(time))
     };
     update_times(AT_FDCWD, path, Some(atime), Some(mtime), 0)?;
@@ -143,8 +140,8 @@ pub fn sys_utimensat(
     fn utime_to_update(time: &timespec) -> Option<KResult<SetattrTime>> {
         match time.tv_nsec {
             val if val == UTIME_OMIT as c_long => None,
-            val if val == UTIME_NOW as c_long => Some(Ok(SetattrTime::Current(wall_time()))),
-            _ => Some(time.try_into_time_value().map(SetattrTime::Explicit)),
+            val if val == UTIME_NOW as c_long => Some(Ok(SetattrTime::Current(ktime::realtime()))),
+            _ => Some((*time).try_into_system_time().map(SetattrTime::Explicit)),
         }
     }
 
@@ -155,7 +152,7 @@ pub fn sys_utimensat(
             utime_to_update(&mtime).transpose()?,
         )
     } else {
-        let time = wall_time();
+        let time = ktime::realtime();
         (
             Some(SetattrTime::Current(time)),
             Some(SetattrTime::Current(time)),

@@ -11,7 +11,8 @@ repository.workspace = true
 [dependencies]
 kcred = { workspace = true }
 kerrno = { workspace = true}
-khal.workspace = true
+ktime_types.workspace = true
+ktime.workspace = true
 kpoll = { workspace = true }
 ksignal.workspace = true
 klazy = { workspace = true }

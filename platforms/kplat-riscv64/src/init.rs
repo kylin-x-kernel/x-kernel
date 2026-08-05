@@ -24,8 +24,11 @@ impl BootHandler {
             .expect("failed to parse console from device tree");
         console_driver::register_input_irq_handler();
         #[cfg(feature = "rtc")]
-        rtc_driver::init_from_device_tree(timer_driver::riscv_sbi::rtc_now_nanos())
-            .expect("failed to parse rtc from device tree");
+        {
+            let sample =
+                rtc_driver::read_from_device_tree().expect("failed to read rtc from device tree");
+            ktime::initialize_realtime(sample);
+        }
     }
 
     fn final_init(_boot_info: &BootInfo) {

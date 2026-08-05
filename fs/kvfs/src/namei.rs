@@ -1059,9 +1059,9 @@ pub fn may_mknod(mode: Umode) -> VfsResult<NodeType> {
 #[cfg(unittest)]
 mod tests {
     use alloc::{string::String, sync::Arc, vec::Vec};
-    use core::time::Duration;
 
     use hashbrown::HashMap;
+    use ktime_types::SystemTime;
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
@@ -1141,7 +1141,13 @@ mod tests {
             let inode = self.inode + self.creations.lock().len() as u64 + 100;
             let init = VfsInodeInit::new(inode, 0, mode)
                 .with_owner_links_and_rdev(0, 0, 1, device)
-                .with_stat_data(4096, 1, Duration::ZERO, Duration::ZERO, Duration::ZERO);
+                .with_stat_data(
+                    4096,
+                    1,
+                    SystemTime::UNIX_EPOCH,
+                    SystemTime::UNIX_EPOCH,
+                    SystemTime::UNIX_EPOCH,
+                );
             let inode = VfsInode::new_file(
                 Arc::new(TestFile::new(inode, mode.node_type(), &[], None)),
                 init,
@@ -1224,7 +1230,13 @@ mod tests {
                 Arc::new(TestDir::new(inode)),
                 VfsInodeInit::new(inode, 0, mode)
                     .with_owner_links_and_rdev(0, 0, 1, DeviceId::default())
-                    .with_stat_data(4096, 1, Duration::ZERO, Duration::ZERO, Duration::ZERO),
+                    .with_stat_data(
+                        4096,
+                        1,
+                        SystemTime::UNIX_EPOCH,
+                        SystemTime::UNIX_EPOCH,
+                        SystemTime::UNIX_EPOCH,
+                    ),
             );
             dentry.instantiate(inode)
         }
@@ -1471,9 +1483,9 @@ mod tests {
             block_size: 4096,
             blocks: 1,
             rdev: Default::default(),
-            atime: Duration::ZERO,
-            mtime: Duration::ZERO,
-            ctime: Duration::ZERO,
+            atime: SystemTime::UNIX_EPOCH,
+            mtime: SystemTime::UNIX_EPOCH,
+            ctime: SystemTime::UNIX_EPOCH,
         }
     }
 
@@ -1517,7 +1529,13 @@ mod tests {
             crate::Umode::new(node_type, NodePermission::default()),
         )
         .with_owner_links_and_rdev(0, 0, 1, Default::default())
-        .with_stat_data(4096, 1, Duration::ZERO, Duration::ZERO, Duration::ZERO)
+        .with_stat_data(
+            4096,
+            1,
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH,
+        )
     }
 
     fn test_tree() -> TestTree {

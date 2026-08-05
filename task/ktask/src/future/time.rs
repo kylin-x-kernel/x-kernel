@@ -9,18 +9,18 @@ use core::{
     fmt,
     pin::Pin,
     task::{Context, Poll, Waker},
-    time::Duration,
 };
 
 use futures_util::{FutureExt, select_biased};
 use kcpu_id_map::LogicalCpuId;
 use kerrno::KError;
-use khal::time::{TimeValue, monotonic_time};
+use khal::time::monotonic_time;
 use kspin::SpinNoIrq;
+use ktime_types::{MonotonicInstant, TimeSpan};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct TimerKey {
-    deadline: TimeValue,
+    deadline: MonotonicInstant,
     key: u64,
 }
 
@@ -43,7 +43,7 @@ impl TimerRuntime {
         }
     }
 
-    fn add(&mut self, deadline: TimeValue) -> Option<TimerKey> {
+    fn add(&mut self, deadline: MonotonicInstant) -> Option<TimerKey> {
         if deadline <= monotonic_time() {
             return None;
         }
@@ -67,7 +67,7 @@ impl TimerRuntime {
         }
     }
 
-    fn add_with_waker(&mut self, deadline: TimeValue, waker: Waker) -> Option<TimerKey> {
+    fn add_with_waker(&mut self, deadline: MonotonicInstant, waker: Waker) -> Option<TimerKey> {
         if deadline <= monotonic_time() {
             return None;
         }
@@ -103,7 +103,7 @@ impl TimerRuntime {
     ///
     /// `TimerKey` orders by `deadline` first, so `first_key_value()` is the
     /// minimum-deadline entry.
-    fn earliest_deadline(&self) -> Option<TimeValue> {
+    fn earliest_deadline(&self) -> Option<MonotonicInstant> {
         self.wheel.first_key_value().map(|(k, _)| k.deadline)
     }
 }
@@ -126,7 +126,7 @@ fn timer_runtime(cpu_id: LogicalCpuId) -> &'static SpinNoIrq<TimerRuntime> {
 /// (outside the lock) before re-arming the hardware.
 pub(crate) fn drain_expired_and_get_earliest(
     cpu_id: kcpu_id_map::LogicalCpuId,
-) -> (BTreeMap<TimerKey, Waker>, Option<TimeValue>) {
+) -> (BTreeMap<TimerKey, Waker>, Option<MonotonicInstant>) {
     let mut guard = timer_runtime(cpu_id).lock();
     let wakers = guard.take_expired_wakers();
     let earliest = guard.earliest_deadline();
@@ -135,7 +135,7 @@ pub(crate) fn drain_expired_and_get_earliest(
 
 /// Registers a timer that fires `waker` when `deadline` is reached.
 /// Returns `None` if `deadline` has already passed.
-pub fn register_timer(deadline: TimeValue, waker: Waker) -> Option<TimerHandle> {
+pub fn register_timer(deadline: MonotonicInstant, waker: Waker) -> Option<TimerHandle> {
     let cpu_id = khal::percpu::this_cpu_id();
     let mut guard = timer_runtime(cpu_id).lock();
     let key = guard.add_with_waker(deadline, waker)?;
@@ -194,12 +194,12 @@ impl Drop for TimerFuture {
 }
 
 /// Waits until `duration` has elapsed.
-pub async fn sleep(duration: Duration) {
+pub async fn sleep(duration: TimeSpan) {
     sleep_until(monotonic_time() + duration).await
 }
 
 /// Waits until `deadline` is reached.
-pub async fn sleep_until(deadline: TimeValue) {
+pub async fn sleep_until(deadline: MonotonicInstant) {
     let cpu_id = khal::percpu::this_cpu_id();
     // Register the timer and re-arm the hardware while still under the wheel
     // lock, then drop the guard before awaiting: a `SpinNoIrq` guard must not
@@ -237,11 +237,11 @@ impl From<Elapsed> for KError {
 
 /// Requires a `Future` to complete before the specified duration has elapsed.
 pub async fn timeout<F: IntoFuture>(
-    duration: Option<Duration>,
+    duration: Option<TimeSpan>,
     f: F,
 ) -> Result<F::Output, Elapsed> {
     timeout_at(
-        duration.and_then(|x| x.checked_add(khal::time::monotonic_time())),
+        duration.and_then(|duration| khal::time::monotonic_time().checked_add(duration)),
         f,
     )
     .await
@@ -249,7 +249,7 @@ pub async fn timeout<F: IntoFuture>(
 
 /// Requires a `Future` to complete before the specified deadline.
 pub async fn timeout_at<F: IntoFuture>(
-    deadline: Option<TimeValue>,
+    deadline: Option<MonotonicInstant>,
     f: F,
 ) -> Result<F::Output, Elapsed> {
     if let Some(deadline) = deadline {
@@ -265,9 +265,10 @@ pub async fn timeout_at<F: IntoFuture>(
 #[cfg(unittest)]
 #[allow(missing_docs)]
 mod tests_subtick_precision {
-    use core::{future::pending, time::Duration};
+    use core::future::pending;
 
     use khal::time::monotonic_time;
+    use ktime_types::TimeSpan;
     use unittest::{assert, def_test};
 
     use super::{sleep, timeout};
@@ -287,16 +288,16 @@ mod tests_subtick_precision {
     /// sub-tick wait is rounded up to the next 10 ms boundary and the median
     /// lands near a full tick (~10 ms) — the LTP `futex_wait05` "slept too long"
     /// failure. This bound sits between the two regimes.
-    const SUBTICK_LIMIT: Duration = Duration::from_millis(6);
+    const SUBTICK_LIMIT: TimeSpan = TimeSpan::from_millis(6);
 
     struct TimingStats {
-        min: Duration,
-        median: Duration,
-        max: Duration,
+        min: TimeSpan,
+        median: TimeSpan,
+        max: TimeSpan,
     }
 
     /// Sorts `samples` in place and derives min / median / max.
-    fn stats_of(samples: &mut [Duration]) -> TimingStats {
+    fn stats_of(samples: &mut [TimeSpan]) -> TimingStats {
         samples.sort();
         let last = samples.len() - 1;
         TimingStats {
@@ -310,14 +311,14 @@ mod tests_subtick_precision {
     /// direct probe of sub-tick precision.
     #[def_test(serial)]
     fn test_subtick_sleep_is_not_rounded_to_tick() {
-        const REQUEST: Duration = Duration::from_millis(1);
+        const REQUEST: TimeSpan = TimeSpan::from_millis(1);
 
         // Warm up so the loop reaches its steady-state phase alignment before
         // recording: a task woken on a tick re-issues the wait immediately, so
         // under the tick-only wheel every sample lands on the next 10 ms tick.
         block_on(sleep(REQUEST));
 
-        let mut samples = [Duration::ZERO; SAMPLES];
+        let mut samples = [TimeSpan::ZERO; SAMPLES];
         for slot in &mut samples {
             let start = monotonic_time();
             block_on(sleep(REQUEST));
@@ -346,12 +347,12 @@ mod tests_subtick_precision {
     /// never woken, relying on the timeout).
     #[def_test(serial)]
     fn test_subtick_timeout_is_not_rounded_to_tick() {
-        const REQUEST: Duration = Duration::from_millis(2);
+        const REQUEST: TimeSpan = TimeSpan::from_millis(2);
 
         // Warm up: expected to time out (`Err(Elapsed)`) since `pending()` never
         // resolves; the exact result is intentionally discarded.
         let _ = block_on(timeout(Some(REQUEST), pending::<()>()));
-        let mut samples = [Duration::ZERO; SAMPLES];
+        let mut samples = [TimeSpan::ZERO; SAMPLES];
         for slot in &mut samples {
             let start = monotonic_time();
             let result = block_on(timeout(Some(REQUEST), pending::<()>()));

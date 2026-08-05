@@ -140,9 +140,9 @@ fn allows(
 #[cfg(unittest)]
 mod tests {
     use alloc::vec::Vec;
-    use core::time::Duration;
 
     use kcred::Cred;
+    use ktime_types::SystemTime;
     use unittest::def_test;
 
     use super::{Permission, check_dac_permission};
@@ -169,9 +169,9 @@ mod tests {
             block_size: 512,
             blocks: 1,
             rdev: DeviceId::default(),
-            atime: Duration::ZERO,
-            mtime: Duration::ZERO,
-            ctime: Duration::ZERO,
+            atime: SystemTime::UNIX_EPOCH,
+            mtime: SystemTime::UNIX_EPOCH,
+            ctime: SystemTime::UNIX_EPOCH,
         }
     }
 

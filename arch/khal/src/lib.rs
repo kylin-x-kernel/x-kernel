@@ -24,7 +24,6 @@
 //! - `fp-simd`: Enable floating-point and SIMD support.
 //! - `paging`: Enable page table manipulation.
 //! - `tls`: Enable kernel space thread-local storage support.
-//! - `rtc`: Enable real-time clock support.
 //! - User space support is always enabled.
 
 #![no_std]
@@ -46,7 +45,6 @@ pub mod console;
 pub mod firmware;
 pub mod mem;
 pub mod percpu;
-pub mod rtc;
 pub mod time;
 
 #[cfg(feature = "tls")]

@@ -44,7 +44,9 @@ impl RandomState {
         }
 
         self.write_counter = self.write_counter.wrapping_add(1);
-        let ticks = now_ticks().wrapping_add(self.write_counter.rotate_left(17));
+        let ticks = now_ticks()
+            .as_raw()
+            .wrapping_add(self.write_counter.rotate_left(17));
         for (index, byte) in ticks.to_le_bytes().iter().enumerate() {
             seed[index] ^= *byte;
         }
@@ -55,7 +57,7 @@ impl RandomState {
 
 fn initial_seed() -> [u8; 32] {
     let mut seed = [0u8; 32];
-    let mut state = now_ticks() ^ 0x9e37_79b9_7f4a_7c15;
+    let mut state = now_ticks().as_raw() ^ 0x9e37_79b9_7f4a_7c15;
 
     for chunk in seed.chunks_mut(8) {
         state ^= state.rotate_left(7);

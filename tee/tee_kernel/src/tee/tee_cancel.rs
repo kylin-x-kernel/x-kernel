@@ -6,7 +6,6 @@
 
 use core::ffi::c_uint;
 
-use khal::time::wall_time;
 use osvm::MemError;
 use posix_types::UserPtr;
 use tee_raw_sys::TeeTime;
@@ -100,9 +99,9 @@ fn tee_ta_session_is_cancelled(ctx: &TeeSessionCtx, curr_time: Option<&TeeTime>)
 }
 
 fn tee_time_get_sys_time() -> TeeTime {
-    let systiem = wall_time();
+    let systiem = ktime::realtime();
     TeeTime {
-        seconds: systiem.as_secs() as u32,
-        millis: systiem.subsec_millis(),
+        seconds: systiem.unix_seconds() as u32,
+        millis: systiem.subsec_nanos() / 1_000_000,
     }
 }

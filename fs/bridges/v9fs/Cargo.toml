@@ -17,4 +17,5 @@ fs9p.workspace = true
 kcred.workspace = true
 kerrno.workspace = true
 ksync.workspace = true
+ktime_types.workspace = true
 kvfs.workspace = true

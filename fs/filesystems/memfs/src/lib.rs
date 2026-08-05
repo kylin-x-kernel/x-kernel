@@ -12,13 +12,14 @@ pub mod ramfs;
 pub mod shmem;
 
 use alloc::{borrow::ToOwned, string::String, sync::Arc};
-use core::{borrow::Borrow, cmp::Ordering, time::Duration};
+use core::{borrow::Borrow, cmp::Ordering};
 
 use hashbrown::HashMap;
 use iov_iter::{IovIterDest, IovIterSource};
 use kcred::Cred;
 use klazy::Once;
 use ksync::Mutex;
+use ktime_types::SystemTime;
 use kvfs::{
     AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FileDirOperations,
     FileOperations, FileSystemType, InodeCache, InodeDirOperations, InodeOperations,
@@ -238,9 +239,9 @@ impl Inode {
             block_size: 0,
             blocks: 0,
             rdev,
-            atime: Duration::default(),
-            mtime: Duration::default(),
-            ctime: Duration::default(),
+            atime: SystemTime::UNIX_EPOCH,
+            mtime: SystemTime::UNIX_EPOCH,
+            ctime: SystemTime::UNIX_EPOCH,
         };
         let content = match node_type {
             NodeType::Directory => Some(InodeContent::Dir(DirContent::default())),

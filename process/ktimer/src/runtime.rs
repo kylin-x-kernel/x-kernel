@@ -12,18 +12,19 @@
 extern crate alloc;
 
 use alloc::{borrow::ToOwned, collections::binary_heap::BinaryHeap};
-use core::{cmp::Ordering, time::Duration};
+use core::cmp::Ordering;
 
 use event_listener::{Event, listener};
 use khal::time::monotonic_time;
 use klazy::Once;
 use ksync::{Mutex, static_lock};
 use ktask::future::{block_on, timeout_at};
+use ktime_types::MonotonicInstant;
 
 use crate::Pid;
 
 struct Entry {
-    deadline: Duration,
+    deadline: MonotonicInstant,
     pid: Pid,
 }
 
@@ -57,8 +58,7 @@ static_lock! {
 static EVENT_NEW_TIMER: Event = Event::new();
 static EXPIRED_TASK_HANDLER: Once<fn(Pid)> = Once::new();
 
-pub(super) fn enqueue_alarm(runtime_deadline_ns: usize, pid: Pid) {
-    let deadline = Duration::from_nanos(runtime_deadline_ns as u64);
+pub(super) fn enqueue_alarm(deadline: MonotonicInstant, pid: Pid) {
     let mut guard = ALARM_LIST.lock();
     let should_wake = guard.peek().is_none_or(|it| it.deadline > deadline);
     guard.push(Entry { deadline, pid });

@@ -18,7 +18,7 @@ use linux_raw_sys::general::{
 };
 use posix_process::check_signals;
 use posix_types::{
-    TimeValueLike, UserConstPtr, UserPtr, k_sigaction, k_sigaltstack, k_siginfo, k_sigset,
+    TimeSpanLike, UserConstPtr, UserPtr, k_sigaction, k_sigaltstack, k_siginfo, k_sigset,
 };
 
 /// Converts a numeric signal number to [`Signo`].
@@ -261,7 +261,7 @@ pub fn sys_rt_sigtimedwait(
     let set: SignalSet = set.read_vm()?.into();
     let timeout = if let Some(ts) = timeout.check_non_null() {
         let ts = ts.read_vm()?;
-        Some(ts.try_into_time_value()?)
+        Some(ts.try_into_time_span()?)
     } else {
         None
     };

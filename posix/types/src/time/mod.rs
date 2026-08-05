@@ -5,11 +5,13 @@
 //! Time-related POSIX/Linux ABI types.
 
 mod abi;
+mod clock_ticks;
 mod itimer;
 mod tms;
 
-pub use abi::TimeValueLike;
 #[cfg(target_arch = "x86_64")]
 pub use abi::utimbuf;
+pub use abi::{SystemTimeLike, TimeSpanLike, try_into_realtime_deadline};
+pub use clock_ticks::{PosixClockTicks, USER_HZ};
 pub use itimer::ITimerType;
 pub use tms::Tms;

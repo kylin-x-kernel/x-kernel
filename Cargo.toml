@@ -54,6 +54,8 @@ x86_boot_common = { path = "boot/x86-boot-common", package = "x86-boot-common" }
 kcred = { path = "process/kcred" }
 kruntime = { path = "core/kruntime" }
 klazy = { path = "util/klazy" }
+ktime_types = { path = "util/ktime_types" }
+ktime = { path = "core/ktime" }
 
 # Internal: tracing and debugging
 ktracing = { path = "core/ktracing" }

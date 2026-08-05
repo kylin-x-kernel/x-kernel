@@ -5,56 +5,109 @@
 //! `timerfd` object implementation.
 
 use alloc::{sync::Arc, task::Wake};
-use core::{mem::size_of, task::Waker, time::Duration};
+use core::{mem::size_of, task::Waker};
 
 use kcred::Cred;
 use kerrno::{KError, KResult};
-use khal::time::{self, monotonic_time, wall_time};
+use khal::time::monotonic_time;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use kspin::SpinNoIrq;
 use ktask::future::{TimerHandle, block_on, cancel_timer, poll_io, register_timer};
+use ktime_types::{MonotonicInstant, SystemTime, TimeSpan};
 use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
 use linux_raw_sys::general::{CLOCK_BOOTTIME, CLOCK_MONOTONIC};
 
-fn clock_now(clock_id: u32) -> Duration {
-    match clock_id {
-        CLOCK_MONOTONIC | CLOCK_BOOTTIME => monotonic_time(),
-        _ => wall_time(),
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TimerDeadline {
+    Monotonic(MonotonicInstant),
+    Realtime(SystemTime),
+}
+
+impl TimerDeadline {
+    fn from_absolute(clock_id: u32, value: TimeSpan) -> Option<Self> {
+        match clock_id {
+            CLOCK_MONOTONIC | CLOCK_BOOTTIME => Some(Self::Monotonic(
+                MonotonicInstant::from_span_since_origin(value),
+            )),
+            _ => Some(Self::Realtime(SystemTime::from_unix_parts(
+                i64::try_from(value.as_secs()).ok()?,
+                value.subsec_nanos(),
+            )?)),
+        }
+    }
+
+    fn checked_add(self, span: TimeSpan) -> Option<Self> {
+        match self {
+            Self::Monotonic(instant) => instant.checked_add(span).map(Self::Monotonic),
+            Self::Realtime(time) => time.checked_add(span).map(Self::Realtime),
+        }
+    }
+
+    fn checked_duration_since(self, earlier: Self) -> Option<TimeSpan> {
+        match (self, earlier) {
+            (Self::Monotonic(now), Self::Monotonic(then)) => now.checked_duration_since(then),
+            (Self::Realtime(now), Self::Realtime(then)) => now.duration_since(then).ok(),
+            _ => None,
+        }
+    }
+
+    fn is_before(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Monotonic(lhs), Self::Monotonic(rhs)) => lhs < rhs,
+            (Self::Realtime(lhs), Self::Realtime(rhs)) => lhs < rhs,
+            _ => false,
+        }
+    }
+
+    fn monotonic_deadline(self) -> MonotonicInstant {
+        match self {
+            Self::Monotonic(deadline) => deadline,
+            Self::Realtime(deadline) => ktime::realtime_deadline_to_monotonic(deadline),
+        }
     }
 }
 
-fn to_timer_deadline(clock_id: u32, deadline: Duration) -> Duration {
+fn clock_now(clock_id: u32) -> TimerDeadline {
     match clock_id {
-        CLOCK_MONOTONIC | CLOCK_BOOTTIME => deadline,
-        _ => deadline.saturating_sub(Duration::from_nanos(time::offset_ns())),
+        CLOCK_MONOTONIC | CLOCK_BOOTTIME => TimerDeadline::Monotonic(monotonic_time()),
+        _ => TimerDeadline::Realtime(ktime::realtime()),
     }
 }
 
 struct TimerFdInner {
     expirations: u64,
-    interval: Duration,
-    deadline: Option<Duration>,
+    interval: TimeSpan,
+    deadline: Option<TimerDeadline>,
 }
 
 impl TimerFdInner {
-    fn tick(&mut self, now: Duration) -> bool {
+    fn tick(&mut self, now: TimerDeadline) -> bool {
         let deadline = match self.deadline {
             Some(deadline) => deadline,
             None => return self.expirations > 0,
         };
-        if now < deadline {
+        if now.is_before(deadline) {
             return self.expirations > 0;
         }
 
         if self.interval.is_zero() {
-            self.expirations += 1;
+            self.expirations = self.expirations.saturating_add(1);
             self.deadline = None;
         } else {
-            let overdue = now - deadline;
+            let overdue = now
+                .checked_duration_since(deadline)
+                .expect("timerfd clock domain is fixed at creation");
             let periods = overdue.as_nanos() / self.interval.as_nanos() + 1;
-            self.expirations += periods as u64;
-            let advance_nanos = self.interval.as_nanos() * periods;
-            self.deadline = Some(deadline + Duration::from_nanos(advance_nanos as u64));
+            self.expirations = self
+                .expirations
+                .saturating_add(u64::try_from(periods).unwrap_or(u64::MAX));
+            let advance = self
+                .interval
+                .as_nanos()
+                .checked_mul(periods)
+                .and_then(TimeSpan::try_from_nanos)
+                .unwrap_or(TimeSpan::MAX);
+            self.deadline = deadline.checked_add(advance);
         }
         true
     }
@@ -87,7 +140,7 @@ impl TimerFd {
             clock_id,
             inner: SpinNoIrq::new(TimerFdInner {
                 deadline: None,
-                interval: Duration::ZERO,
+                interval: TimeSpan::ZERO,
                 expirations: 0,
             }),
             poll_rx: PollSet::new(),
@@ -131,10 +184,7 @@ impl TimerFd {
                 None => return,
             };
 
-            let handle = register_timer(
-                to_timer_deadline(self.clock_id, deadline),
-                self.make_waker(),
-            );
+            let handle = register_timer(deadline.monotonic_deadline(), self.make_waker());
             if let Some(handle) = handle {
                 *self.timer_handle.lock() = Some(handle);
                 return;
@@ -164,30 +214,47 @@ impl TimerFd {
     }
 
     /// Program the timer and return the previous `(interval, remaining)` pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::InvalidInput`] if the requested deadline cannot be
+    /// represented. Validation failures leave the existing timer unchanged.
     pub fn settime(
         self: &Arc<Self>,
         absolute: bool,
-        value: Duration,
-        interval: Duration,
-    ) -> (Duration, Duration) {
+        value: TimeSpan,
+        interval: TimeSpan,
+    ) -> KResult<(TimeSpan, TimeSpan)> {
+        let now = clock_now(self.clock_id);
+        let deadline = if value.is_zero() {
+            None
+        } else {
+            Some(
+                if absolute {
+                    TimerDeadline::from_absolute(self.clock_id, value)
+                } else {
+                    now.checked_add(value)
+                }
+                .ok_or(KError::InvalidInput)?,
+            )
+        };
+
         self.cancel_pending_timer();
 
-        let now = clock_now(self.clock_id);
         let mut inner = self.inner.lock();
         let old_interval = inner.interval;
         let old_remaining = inner
             .deadline
-            .and_then(|deadline| deadline.checked_sub(now))
-            .unwrap_or(Duration::ZERO);
+            .and_then(|deadline| deadline.checked_duration_since(now))
+            .unwrap_or(TimeSpan::ZERO);
 
-        if value.is_zero() {
+        let Some(deadline) = deadline else {
             inner.deadline = None;
-            inner.interval = Duration::ZERO;
+            inner.interval = TimeSpan::ZERO;
             inner.expirations = 0;
-            return (old_interval, old_remaining);
-        }
+            return Ok((old_interval, old_remaining));
+        };
 
-        let deadline = if absolute { value } else { now + value };
         inner.deadline = Some(deadline);
         inner.interval = interval;
         inner.expirations = 0;
@@ -200,16 +267,16 @@ impl TimerFd {
         }
         self.arm_or_fire();
 
-        (old_interval, old_remaining)
+        Ok((old_interval, old_remaining))
     }
 
     /// Query the current timer setting as `(interval, remaining)`.
-    pub fn gettime(&self) -> (Duration, Duration) {
+    pub fn gettime(&self) -> (TimeSpan, TimeSpan) {
         let inner = self.inner.lock();
         let remaining = inner
             .deadline
-            .and_then(|deadline| deadline.checked_sub(clock_now(self.clock_id)))
-            .unwrap_or(Duration::ZERO);
+            .and_then(|deadline| deadline.checked_duration_since(clock_now(self.clock_id)))
+            .unwrap_or(TimeSpan::ZERO);
         (inner.interval, remaining)
     }
 }
@@ -310,6 +377,10 @@ mod timerfd_tests {
 
     use super::*;
 
+    fn monotonic(span: TimeSpan) -> TimerDeadline {
+        TimerDeadline::Monotonic(MonotonicInstant::from_span_since_origin(span))
+    }
+
     #[def_test]
     fn test_timerfd_creation() {
         let tfd = TimerFd::new(CLOCK_MONOTONIC);
@@ -344,12 +415,13 @@ mod timerfd_tests {
     #[def_test]
     fn test_timerfd_settime_disarm() {
         let tfd = TimerFd::new(CLOCK_MONOTONIC);
-        let (old_interval, old_remaining) =
-            tfd.settime(false, Duration::from_secs(10), Duration::ZERO);
+        let (old_interval, old_remaining) = tfd
+            .settime(false, TimeSpan::from_secs(10), TimeSpan::ZERO)
+            .unwrap();
         assert!(old_interval.is_zero());
         assert!(old_remaining.is_zero());
 
-        let (old_interval, _) = tfd.settime(false, Duration::ZERO, Duration::ZERO);
+        let (old_interval, _) = tfd.settime(false, TimeSpan::ZERO, TimeSpan::ZERO).unwrap();
         assert!(old_interval.is_zero());
 
         let (interval, remaining) = tfd.gettime();
@@ -358,9 +430,32 @@ mod timerfd_tests {
     }
 
     #[def_test]
+    fn test_timerfd_invalid_deadline_preserves_state() {
+        let tfd = TimerFd::new(linux_raw_sys::general::CLOCK_REALTIME);
+        let deadline = TimerDeadline::Realtime(SystemTime::from_unix_seconds(100));
+        {
+            let mut inner = tfd.inner.lock();
+            inner.deadline = Some(deadline);
+            inner.interval = TimeSpan::from_secs(2);
+            inner.expirations = 3;
+        }
+
+        assert_eq!(
+            tfd.settime(true, TimeSpan::MAX, TimeSpan::ZERO),
+            Err(KError::InvalidInput)
+        );
+
+        let inner = tfd.inner.lock();
+        assert_eq!(inner.deadline, Some(deadline));
+        assert_eq!(inner.interval, TimeSpan::from_secs(2));
+        assert_eq!(inner.expirations, 3);
+    }
+
+    #[def_test]
     fn test_timerfd_already_expired() {
         let tfd = TimerFd::new(CLOCK_MONOTONIC);
-        tfd.settime(false, Duration::from_nanos(1), Duration::ZERO);
+        tfd.settime(false, TimeSpan::from_nanos(1), TimeSpan::ZERO)
+            .unwrap();
         assert!(tfd.poll().contains(IoEvents::IN));
     }
 
@@ -389,14 +484,14 @@ mod timerfd_tests {
     fn test_timerfd_tick_oneshot() {
         let mut inner = TimerFdInner {
             expirations: 0,
-            interval: Duration::ZERO,
-            deadline: Some(Duration::from_secs(100)),
+            interval: TimeSpan::ZERO,
+            deadline: Some(monotonic(TimeSpan::from_secs(100))),
         };
-        assert!(!inner.tick(Duration::from_secs(99)));
+        assert!(!inner.tick(monotonic(TimeSpan::from_secs(99))));
         assert_eq!(inner.expirations, 0);
         assert!(inner.deadline.is_some());
 
-        assert!(inner.tick(Duration::from_secs(100)));
+        assert!(inner.tick(monotonic(TimeSpan::from_secs(100))));
         assert_eq!(inner.expirations, 1);
         assert!(inner.deadline.is_none());
     }
@@ -405,33 +500,38 @@ mod timerfd_tests {
     fn test_timerfd_tick_periodic() {
         let mut inner = TimerFdInner {
             expirations: 0,
-            interval: Duration::from_millis(100),
-            deadline: Some(Duration::from_secs(10)),
+            interval: TimeSpan::from_millis(100),
+            deadline: Some(monotonic(TimeSpan::from_secs(10))),
         };
-        assert!(inner.tick(Duration::from_millis(10_350)));
+        assert!(inner.tick(monotonic(TimeSpan::from_millis(10_350))));
         assert_eq!(inner.expirations, 4);
-        assert_eq!(inner.deadline, Some(Duration::from_millis(10_400)));
+        assert_eq!(
+            inner.deadline,
+            Some(monotonic(TimeSpan::from_millis(10_400)))
+        );
     }
 
     #[def_test]
     fn test_timerfd_tick_periodic_accumulates() {
         let mut inner = TimerFdInner {
             expirations: 2,
-            interval: Duration::from_millis(100),
-            deadline: Some(Duration::from_secs(10)),
+            interval: TimeSpan::from_millis(100),
+            deadline: Some(monotonic(TimeSpan::from_secs(10))),
         };
-        assert!(inner.tick(Duration::from_millis(10_050)));
+        assert!(inner.tick(monotonic(TimeSpan::from_millis(10_050))));
         assert_eq!(inner.expirations, 3);
     }
 
     #[def_test]
     fn test_timerfd_settime_rearm_returns_old() {
         let tfd = TimerFd::new(CLOCK_MONOTONIC);
-        tfd.settime(false, Duration::from_secs(10), Duration::from_secs(1));
+        tfd.settime(false, TimeSpan::from_secs(10), TimeSpan::from_secs(1))
+            .unwrap();
 
-        let (old_interval, old_remaining) =
-            tfd.settime(false, Duration::from_secs(5), Duration::ZERO);
-        assert_eq!(old_interval, Duration::from_secs(1));
-        assert!(old_remaining > Duration::ZERO);
+        let (old_interval, old_remaining) = tfd
+            .settime(false, TimeSpan::from_secs(5), TimeSpan::ZERO)
+            .unwrap();
+        assert_eq!(old_interval, TimeSpan::from_secs(1));
+        assert!(old_remaining > TimeSpan::ZERO);
     }
 }

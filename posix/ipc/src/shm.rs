@@ -9,10 +9,7 @@ use alloc::{collections::btree_map::BTreeMap, format, sync::Arc, vec::Vec};
 use filemap::{FileMmapRequest, mmap_shared_file};
 use kcred::Cred;
 use kerrno::{KError, KResult};
-use khal::{
-    paging::{MappingFlags, PageSize},
-    time::monotonic_time_nanos,
-};
+use khal::paging::{MappingFlags, PageSize};
 use kprocess::{Pid, current_user_process, current_user_thread};
 use ksync::{Mutex, static_lock};
 use kvfs::VfsFile;
@@ -22,7 +19,7 @@ use memfs::shmem::create_kernel_file;
 use osvm::VirtPtr;
 use posix_types::{IpcPerm, UserPtr, shmid_ds};
 
-use super::{IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, next_ipc_id};
+use super::{IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, current_unix_seconds, next_ipc_id};
 
 fn new_shmid_ds(
     key: i32,
@@ -47,7 +44,7 @@ fn new_shmid_ds(
         shm_segsz: size as __kernel_size_t,
         shm_atime: 0,
         shm_dtime: 0,
-        shm_ctime: 0,
+        shm_ctime: current_unix_seconds(),
         shm_cpid: pid,
         shm_lpid: pid,
         shm_nattch: 0,
@@ -146,14 +143,14 @@ impl ShmInner {
         self.va_range.entry(pid).or_default().push(va_range);
         self.shmid_ds.shm_nattch += 1;
         self.shmid_ds.shm_lpid = pid as __kernel_pid_t;
-        self.shmid_ds.shm_atime = monotonic_time_nanos() as __kernel_time_t;
+        self.shmid_ds.shm_atime = current_unix_seconds();
     }
 
     pub fn detach_all_for_pid(&mut self, pid: Pid) {
         if let Some(ranges) = self.va_range.remove(&pid) {
             self.shmid_ds.shm_nattch -= ranges.len() as u16;
             self.shmid_ds.shm_lpid = pid as __kernel_pid_t;
-            self.shmid_ds.shm_dtime = monotonic_time_nanos() as __kernel_time_t;
+            self.shmid_ds.shm_dtime = current_unix_seconds();
         }
     }
 
@@ -167,7 +164,7 @@ impl ShmInner {
             }
             self.shmid_ds.shm_nattch -= 1;
             self.shmid_ds.shm_lpid = pid as __kernel_pid_t;
-            self.shmid_ds.shm_dtime = monotonic_time_nanos() as __kernel_time_t;
+            self.shmid_ds.shm_dtime = current_unix_seconds();
         }
     }
 }
@@ -504,7 +501,7 @@ pub fn sys_shmctl(shmid: i32, cmd: u32, buf: UserPtr<shmid_ds>) -> KResult<isize
     let cmd = cmd as i32;
     if cmd == IPC_SET {
         shm_inner.shmid_ds = buf.read_vm()?;
-        shm_inner.shmid_ds.shm_ctime = monotonic_time_nanos() as __kernel_time_t;
+        shm_inner.shmid_ds.shm_ctime = current_unix_seconds();
     } else if cmd == IPC_STAT {
         if let Some(buf) = buf.check_non_null() {
             buf.write_vm(shm_inner.shmid_ds)?;

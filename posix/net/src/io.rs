@@ -11,15 +11,16 @@
 //! - Ancillary data (control messages)
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::{any::TypeId, net::Ipv4Addr, time::Duration};
+use core::{any::TypeId, net::Ipv4Addr};
 
 use kerrno::{KError, KResult, LinuxError};
-use khal::time::wall_time;
+use khal::time::monotonic_time;
 use kio::prelude::*;
 use knet::{
     AncillaryData, KernelAncillaryData, RecvFlags, RecvOptions, SendFlags, SendOptions,
     SocketAddrEx, SocketErrorInfo, SocketOps, sock_from_file,
 };
+use ktime_types::TimeSpan;
 use kvfs::VfsFile;
 use linux_raw_sys::{
     general::timespec,
@@ -29,7 +30,7 @@ use linux_raw_sys::{
     },
 };
 use osvm::{VirtPtr, VmBytes, VmBytesMut, write_vm_mem};
-use posix_types::{IoVec, IoVectorBuf, TimeValueLike, UserConstPtr, UserPtr};
+use posix_types::{IoVec, IoVectorBuf, TimeSpanLike, UserConstPtr, UserPtr};
 
 use crate::{
     addr::SocketAddrExt,
@@ -47,12 +48,11 @@ fn parse_send_flags(flags: u32) -> SendFlags {
     send_flags
 }
 
-fn parse_recvmmsg_timeout(timeout: UserConstPtr<timespec>) -> KResult<Option<Duration>> {
+fn parse_recvmmsg_timeout(timeout: UserConstPtr<timespec>) -> KResult<Option<TimeSpan>> {
     if timeout.is_null() {
         return Ok(None);
     }
-    let tv = timeout.read_vm()?.try_into_time_value()?;
-    Ok(Some(Duration::new(tv.as_secs(), tv.subsec_nanos())))
+    Ok(Some(timeout.read_vm()?.try_into_time_span()?))
 }
 
 fn parse_send_cmsgs(
@@ -471,13 +471,13 @@ pub fn sys_recvmmsg(
     // recv_impl blocks waiting for data (socket has nothing to read), the
     // deadline cannot interrupt it. Needs a non-blocking recv path or
     // SO_RCVTIMEO support at the socket layer to fix.
-    let deadline = timeout.map(|t| wall_time() + t);
+    let deadline = timeout.and_then(|span| monotonic_time().checked_add(span));
 
     let mut msgvec_value = msgvec.load_vm_vec(vlen as usize)?;
     let mut received = 0;
     for msg in msgvec_value.iter_mut() {
         if let Some(deadline) = deadline
-            && wall_time() >= deadline
+            && monotonic_time() >= deadline
         {
             if received == 0 {
                 return Err(KError::WouldBlock);

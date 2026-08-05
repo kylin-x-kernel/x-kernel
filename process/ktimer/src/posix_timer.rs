@@ -4,8 +4,9 @@
 
 //! POSIX timer configuration, clock mapping, and overrun bookkeeping.
 
-use khal::time::{self, TimeValue, monotonic_time_nanos, wall_time};
+use kerrno::{KError, KResult};
 use ksignal::Signo;
+use ktime_types::{BoottimeInstant, MonotonicInstant, ProcessCpuInstant, SystemTime, TimeSpan};
 use linux_raw_sys::general::{
     CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME,
 };
@@ -14,7 +15,7 @@ use posix_types::k_sigval;
 use crate::{
     Pid, Tid,
     delivery::{TimerDelivery, TimerSignal},
-    interval_timer::ITimer,
+    interval_timer::{ITimer, TimerInstant},
 };
 
 #[derive(Clone, Copy)]
@@ -80,23 +81,50 @@ impl PosixTimerClock {
         }
     }
 
-    fn now_ns(self, process_utime_ns: u64, process_stime_ns: u64) -> u64 {
+    fn now(self, process_utime: TimeSpan, process_stime: TimeSpan) -> TimerInstant {
         match self {
-            Self::Realtime => wall_time().as_nanos() as u64,
-            Self::Monotonic | Self::Boottime => monotonic_time_nanos(),
-            Self::ProcessCpu => process_utime_ns.saturating_add(process_stime_ns),
+            Self::Realtime => TimerInstant::Realtime(ktime::realtime()),
+            Self::Monotonic => TimerInstant::Monotonic(khal::time::monotonic_time()),
+            Self::Boottime => TimerInstant::Boottime(BoottimeInstant::from_span_since_origin(
+                khal::time::monotonic_time().span_since_origin(),
+            )),
+            Self::ProcessCpu => {
+                TimerInstant::ProcessCpu(ProcessCpuInstant::from_span_since_origin(
+                    process_utime.saturating_add(process_stime),
+                ))
+            }
         }
     }
 
-    fn runtime_deadline_ns(self, deadline_ns: u64) -> Option<usize> {
+    fn absolute_deadline(self, value: TimeSpan) -> Option<TimerInstant> {
         match self {
-            Self::Realtime => Some(
-                deadline_ns
-                    .saturating_sub(time::offset_ns())
-                    .min(usize::MAX as u64) as usize,
+            Self::Realtime => Some(TimerInstant::Realtime(SystemTime::from_unix_parts(
+                i64::try_from(value.as_secs()).ok()?,
+                value.subsec_nanos(),
+            )?)),
+            Self::Monotonic => Some(TimerInstant::Monotonic(
+                MonotonicInstant::from_span_since_origin(value),
+            )),
+            Self::Boottime => Some(TimerInstant::Boottime(
+                BoottimeInstant::from_span_since_origin(value),
+            )),
+            Self::ProcessCpu => Some(TimerInstant::ProcessCpu(
+                ProcessCpuInstant::from_span_since_origin(value),
+            )),
+        }
+    }
+
+    fn runtime_deadline(self, deadline: TimerInstant) -> Option<MonotonicInstant> {
+        match (self, deadline) {
+            (Self::Realtime, TimerInstant::Realtime(deadline)) => {
+                Some(ktime::realtime_deadline_to_monotonic(deadline))
+            }
+            (Self::Monotonic, TimerInstant::Monotonic(deadline)) => Some(deadline),
+            (Self::Boottime, TimerInstant::Boottime(deadline)) => Some(
+                MonotonicInstant::from_span_since_origin(deadline.span_since_origin()),
             ),
-            Self::Monotonic | Self::Boottime => Some(deadline_ns.min(usize::MAX as u64) as usize),
-            Self::ProcessCpu => None,
+            (Self::ProcessCpu, TimerInstant::ProcessCpu(_)) => None,
+            _ => panic!("POSIX timer deadline clock-domain mismatch"),
         }
     }
 
@@ -161,39 +189,44 @@ impl PosixTimer {
 
     pub(crate) fn snapshot(
         &self,
-        process_utime_ns: u64,
-        process_stime_ns: u64,
-    ) -> (TimeValue, TimeValue) {
+        process_utime: TimeSpan,
+        process_stime: TimeSpan,
+    ) -> (TimeSpan, TimeSpan) {
         self.spec
-            .snapshot(self.clock.now_ns(process_utime_ns, process_stime_ns))
+            .snapshot(self.clock.now(process_utime, process_stime))
     }
 
     pub(crate) fn settime(
         &mut self,
         absolute: bool,
-        interval_ns: usize,
-        value_ns: usize,
-        process_utime_ns: u64,
-        process_stime_ns: u64,
-    ) -> (TimeValue, TimeValue) {
-        let now_ns = self.clock.now_ns(process_utime_ns, process_stime_ns);
-        let deadline_ns = if value_ns == 0 {
+        interval: TimeSpan,
+        value: TimeSpan,
+        process_utime: TimeSpan,
+        process_stime: TimeSpan,
+    ) -> KResult<(TimeSpan, TimeSpan)> {
+        let now = self.clock.now(process_utime, process_stime);
+        let deadline = if value.is_zero() {
             None
-        } else if absolute {
-            Some(value_ns as u64)
         } else {
-            (value_ns as u64).checked_add(now_ns)
+            Some(
+                if absolute {
+                    self.clock.absolute_deadline(value)
+                } else {
+                    now.checked_add(value)
+                }
+                .ok_or(KError::InvalidInput)?,
+            )
         };
-        let old = self.spec.set(now_ns, interval_ns as u64, deadline_ns);
+        let old = self.spec.set(now, interval, deadline);
         self.pending_signal = false;
         self.queued_overrun = 0;
         self.last_overrun = 0;
-        old
+        Ok(old)
     }
 
-    pub(crate) fn update(&mut self, process_utime_ns: u64, process_stime_ns: u64) -> usize {
+    pub(crate) fn update(&mut self, process_utime: TimeSpan, process_stime: TimeSpan) -> usize {
         self.spec
-            .update(self.clock.now_ns(process_utime_ns, process_stime_ns))
+            .update(self.clock.now(process_utime, process_stime))
     }
 
     pub(crate) fn needs_alarm_task(&self) -> bool {
@@ -205,12 +238,12 @@ impl PosixTimer {
     }
 
     pub(crate) fn arm_deadline(&mut self, owner_pid: Pid) {
-        let runtime_deadline_ns = self
+        let runtime_deadline = self
             .spec
-            .deadline_ns()
-            .and_then(|deadline_ns| self.clock.runtime_deadline_ns(deadline_ns));
+            .deadline()
+            .and_then(|deadline| self.clock.runtime_deadline(deadline));
         self.spec
-            .set_alarm(runtime_deadline_ns, runtime_deadline_ns.map(|_| owner_pid));
+            .set_alarm(runtime_deadline, runtime_deadline.map(|_| owner_pid));
     }
 
     pub(crate) fn set_signal_seq(&mut self, signal_seq: u32) {
@@ -283,5 +316,51 @@ impl PosixTimer {
             Some(tid) => TimerDelivery::Thread { tid, signal },
             None => TimerDelivery::Process(signal),
         })
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test]
+    fn relative_realtime_overflow_preserves_timer_state() {
+        let mut timer = PosixTimer::new(
+            PosixTimerClock::Realtime,
+            PosixTimerCreateNotify::None,
+            1,
+            1,
+        );
+        timer
+            .settime(
+                false,
+                TimeSpan::from_secs(2),
+                TimeSpan::from_secs(10),
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+            )
+            .unwrap();
+        let deadline = timer.spec.deadline();
+
+        assert_eq!(
+            timer.settime(
+                false,
+                TimeSpan::ZERO,
+                TimeSpan::from_secs(i64::MAX as u64),
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+            ),
+            Err(KError::InvalidInput)
+        );
+        assert_eq!(timer.spec.deadline(), deadline);
+        assert_eq!(
+            timer
+                .spec
+                .snapshot(timer.clock.now(TimeSpan::ZERO, TimeSpan::ZERO))
+                .0,
+            TimeSpan::from_secs(2)
+        );
     }
 }

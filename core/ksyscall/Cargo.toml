@@ -30,6 +30,8 @@ kbuild_config = { workspace = true }
 kcred.workspace = true
 kerrno.workspace = true
 khal.workspace = true
+ktime_types.workspace = true
+ktime.workspace = true
 klogger.workspace = true
 kns.workspace = true
 kpoll.workspace = true

@@ -5,7 +5,7 @@
 //! TIPC syscall ABI adapters.
 
 use alloc::{sync::Arc, vec::Vec};
-use core::{any::Any, ffi::c_char, future::poll_fn, task::Poll, time::Duration};
+use core::{any::Any, ffi::c_char, future::poll_fn, task::Poll};
 
 use kerrno::{KError, KResult};
 use khal::{paging::MappingFlags, uspace::UserContext};
@@ -142,8 +142,8 @@ fn handle_set_command(command: u32) -> KResult<HandleSetCommand> {
     }
 }
 
-fn timeout_duration(timeout_ms: u32) -> Option<Duration> {
-    (timeout_ms != u32::MAX).then(|| Duration::from_millis(timeout_ms as u64))
+fn timeout_duration(timeout_ms: u32) -> Option<ktime_types::TimeSpan> {
+    (timeout_ms != u32::MAX).then(|| ktime_types::TimeSpan::from_millis(timeout_ms as u64))
 }
 
 fn wait_for_event(

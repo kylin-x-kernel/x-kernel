@@ -32,6 +32,10 @@ static IPI_FIXUP_PENDING: AtomicUsize = AtomicUsize::new(0);
 static CNTPCT_TO_NANOS_RATIO: Once<Ratio> = Once::new();
 static NANOS_TO_CNTPCT_RATIO: Once<Ratio> = Once::new();
 
+// CNTP_TVAL_EL0 and CNTV_TVAL_EL0 interpret their low 32 bits as a signed
+// countdown value. Values above i32::MAX therefore describe an expired timer.
+const MAX_TIMER_INTERVAL_TICKS: u64 = i32::MAX as u64;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum TimerMode {
@@ -103,37 +107,37 @@ impl TimerConfig {
 
 #[kplat::impl_dev_interface]
 impl khal::time::MonotonicTimerIf {
-    fn now_ticks() -> u64 {
+    fn now_ticks() -> khal::time::TimerTicks {
         now_ticks()
     }
 
-    fn t2ns(ticks: u64) -> u64 {
-        t2ns(ticks)
+    fn ticks_to_span(ticks: khal::time::TimerTicks) -> ktime_types::TimeSpan {
+        ktime_types::TimeSpan::from_nanos(ticks_to_nanos(ticks.as_raw()))
     }
 
     fn freq() -> u64 {
         freq()
     }
 
-    fn ns2t(nanos: u64) -> u64 {
-        ns2t(nanos)
+    fn span_to_ticks(span: ktime_types::TimeSpan) -> khal::time::TimerTicks {
+        khal::time::TimerTicks::from_raw(nanos_to_ticks(span.as_nanos_u64_saturating()))
     }
 
     fn interrupt_id() -> usize {
         interrupt_id()
     }
 
-    fn arm_timer(deadline_ns: u64) {
-        arm_timer(deadline_ns)
+    fn arm_timer(deadline: ktime_types::MonotonicInstant) {
+        arm_timer(deadline)
     }
 
     #[cfg(feature = "arm-timer-resume-fixup")]
-    fn handle_idle_return(previous_ticks: u64) -> bool {
-        handle_idle_return(previous_ticks)
+    fn handle_idle_return(previous_ticks: khal::time::TimerTicks) -> bool {
+        handle_idle_return(previous_ticks.as_raw())
     }
 
     #[cfg(not(feature = "arm-timer-resume-fixup"))]
-    fn handle_idle_return(_previous_ticks: u64) -> bool {
+    fn handle_idle_return(_previous_ticks: khal::time::TimerTicks) -> bool {
         false
     }
 }
@@ -157,7 +161,8 @@ pub fn init(config: TimerConfig) {
         "ARM generic timer frequency must fit in u32"
     );
     TIMER_FREQ_HZ.store(freq, Ordering::Relaxed);
-    let ratio = CNTPCT_TO_NANOS_RATIO.call_once(|| Ratio::new(1_000_000_000u32, freq as u32));
+    let ratio = CNTPCT_TO_NANOS_RATIO
+        .call_once(|| Ratio::new(ktime_types::NANOS_PER_SEC as u32, freq as u32));
     NANOS_TO_CNTPCT_RATIO.call_once(|| ratio.inverse());
 }
 
@@ -190,7 +195,12 @@ fn rearm_local_timer_irq() {
 }
 
 #[inline]
-pub fn now_ticks() -> u64 {
+pub fn now_ticks() -> khal::time::TimerTicks {
+    khal::time::TimerTicks::from_raw(now_ticks_raw())
+}
+
+#[inline]
+fn now_ticks_raw() -> u64 {
     #[cfg(feature = "arm-timer-resume-fixup")]
     {
         track_logical_ticks(logical_ticks(
@@ -206,7 +216,7 @@ pub fn now_ticks() -> u64 {
 }
 
 #[cfg(feature = "arm-timer-resume-fixup")]
-pub fn handle_idle_return(previous_ticks: u64) -> bool {
+fn handle_idle_return(previous_ticks: u64) -> bool {
     let raw = raw_now_ticks();
     let cpu_id = khal::percpu::this_cpu_id();
     let old_offset = TICK_RESUME_OFFSET.load(Ordering::Relaxed);
@@ -229,7 +239,7 @@ pub fn handle_idle_return(previous_ticks: u64) -> bool {
             current_ticks,
             fixed_ticks,
             repair_ticks,
-            t2ns(repair_ticks),
+            ticks_to_nanos(repair_ticks),
             raw,
             old_offset,
             new_offset
@@ -261,7 +271,7 @@ pub fn handle_ipi_fixup() {
 }
 
 #[inline]
-pub fn t2ns(ticks: u64) -> u64 {
+pub(crate) fn ticks_to_nanos(ticks: u64) -> u64 {
     CNTPCT_TO_NANOS_RATIO
         .get()
         .expect("ARM generic timer conversion ratio is not initialized")
@@ -269,7 +279,7 @@ pub fn t2ns(ticks: u64) -> u64 {
 }
 
 #[inline]
-pub fn ns2t(nanos: u64) -> u64 {
+pub(crate) fn nanos_to_ticks(nanos: u64) -> u64 {
     NANOS_TO_CNTPCT_RATIO
         .get()
         .expect("ARM generic timer inverse conversion ratio is not initialized")
@@ -288,12 +298,12 @@ pub fn interrupt_id() -> usize {
     irq
 }
 
-pub fn arm_timer(deadline_ns: u64) {
-    let current_ticks = now_ticks();
-    let deadline_ticks = ns2t(deadline_ns);
+pub fn arm_timer(deadline: ktime_types::MonotonicInstant) {
+    let current_ticks = now_ticks_raw();
+    let deadline_ns = deadline.as_nanos_u64_saturating();
+    let deadline_ticks = nanos_to_ticks(deadline_ns);
     if current_ticks < deadline_ticks {
-        let interval = deadline_ticks - current_ticks;
-        debug_assert!(interval <= u32::MAX as u64);
+        let interval = (deadline_ticks - current_ticks).min(MAX_TIMER_INTERVAL_TICKS);
         match mode() {
             TimerMode::Physical => CNTP_TVAL_EL0.set(interval),
             TimerMode::Virtual => CNTV_TVAL_EL0.set(interval),

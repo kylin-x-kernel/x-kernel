@@ -188,8 +188,9 @@ pub(crate) fn noop_fsync(_data_only: bool) -> VfsResult<()> {
 #[cfg(unittest)]
 mod tests {
     use alloc::{string::String, sync::Arc};
-    use core::{any::Any, time::Duration};
+    use core::any::Any;
 
+    use ktime_types::SystemTime;
     use unittest::def_test;
 
     use super::*;
@@ -233,9 +234,9 @@ mod tests {
                 block_size: 4096,
                 blocks: 0,
                 rdev: DeviceId::default(),
-                atime: Duration::ZERO,
-                mtime: Duration::ZERO,
-                ctime: Duration::ZERO,
+                atime: SystemTime::UNIX_EPOCH,
+                mtime: SystemTime::UNIX_EPOCH,
+                ctime: SystemTime::UNIX_EPOCH,
             })
         }
     }
@@ -249,7 +250,13 @@ mod tests {
         };
         VfsInodeInit::new(inode, 0, Umode::new(node_type, mode))
             .with_owner_links_and_rdev(0, 0, nlink, DeviceId::default())
-            .with_stat_data(4096, 0, Duration::ZERO, Duration::ZERO, Duration::ZERO)
+            .with_stat_data(
+                4096,
+                0,
+                SystemTime::UNIX_EPOCH,
+                SystemTime::UNIX_EPOCH,
+                SystemTime::UNIX_EPOCH,
+            )
     }
 
     fn dir_inode(inode: u64, nlink: u64) -> Arc<VfsInode> {

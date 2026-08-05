@@ -85,7 +85,7 @@ fn handle_hlt(vcpu: &mut Vcpu<X86Vmx>) -> ExitAction {
     // Intel SDM §24.11.2: vmclear before VMCS may migrate to another CPU.
     vmx::vmclear(vcpu.arch.vmcs_pa);
     vcpu.launched = false;
-    ktask::sleep(core::time::Duration::from_millis(1));
+    ktask::sleep(ktime_types::TimeSpan::from_millis(1));
     ExitAction::Resume
 }
 

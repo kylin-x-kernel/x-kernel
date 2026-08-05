@@ -5,8 +5,8 @@
 //! Network device abstractions.
 use ::core::task::Waker;
 use kerrno::KResult;
-use khal::time::TimeValue;
 use kpoll::{PollContext, PollRegisterError};
+use ktime_types::MonotonicInstant;
 
 mod ethernet;
 mod loopback;
@@ -33,7 +33,7 @@ pub trait NetDevice: Send + Sync {
     }
 
     /// Polls one received packet from the device.
-    fn poll_rx(&mut self, ifindex: i32, timestamp: TimeValue) -> Option<PacketBuf>;
+    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> Option<PacketBuf>;
     /// Sends an IP packet to the next hop.
     ///
     /// Returns `true` if this operation resulted in the readiness of receive
@@ -44,7 +44,7 @@ pub trait NetDevice: Send + Sync {
         ifindex: i32,
         next_hop: IpAddress,
         packet: PacketBuf,
-        timestamp: TimeValue,
+        timestamp: MonotonicInstant,
     ) -> bool;
 
     /// Sends a link-layer frame through the device.

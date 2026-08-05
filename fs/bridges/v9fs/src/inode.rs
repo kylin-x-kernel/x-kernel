@@ -12,6 +12,7 @@ use alloc::{
 
 use fs9p::FileAttr;
 use kcred::Cred;
+use ktime_types::SystemTime;
 use kvfs::{
     Dentry, DeviceId, DirContext, FileDirOperations, FileOperations, InodeDirOperations,
     InodeOperations, InodeSymlinkOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags,
@@ -35,10 +36,14 @@ pub(crate) fn inode_init_from_attr(attr: &FileAttr) -> VfsInodeInit {
         .with_stat_data(
             block_size,
             attr.blocks,
-            core::time::Duration::from_secs(attr.atime_sec),
-            core::time::Duration::from_secs(attr.mtime_sec),
-            core::time::Duration::from_secs(attr.ctime_sec),
+            system_time_from_9p(attr.atime_sec),
+            system_time_from_9p(attr.mtime_sec),
+            system_time_from_9p(attr.ctime_sec),
         )
+}
+
+fn system_time_from_9p(seconds: u64) -> SystemTime {
+    SystemTime::from_unix_seconds(i64::try_from(seconds).unwrap_or(i64::MAX))
 }
 
 /// A VFS inode backed by a 9P session.
@@ -288,9 +293,9 @@ impl InodeOperations for Inode {
             },
             blocks: attr.blocks,
             rdev: dotl_decode_dev(attr.rdev),
-            atime: core::time::Duration::from_secs(attr.atime_sec),
-            mtime: core::time::Duration::from_secs(attr.mtime_sec),
-            ctime: core::time::Duration::from_secs(attr.ctime_sec),
+            atime: system_time_from_9p(attr.atime_sec),
+            mtime: system_time_from_9p(attr.mtime_sec),
+            ctime: system_time_from_9p(attr.ctime_sec),
         })
     }
 

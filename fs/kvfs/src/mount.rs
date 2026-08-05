@@ -12,13 +12,13 @@ use alloc::{
 use core::{
     iter,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
-    time::Duration,
 };
 
 use hashbrown::HashMap;
 use kcred::{Cred, NamespaceId, UserNamespace, initial_user_namespace};
-use khal::time::wall_time;
 use klazy::Once;
+use ktime::realtime;
+use ktime_types::TimeSpan;
 
 /// Mount idmapping context passed into inode namespace operations.
 #[derive(Debug)]
@@ -767,11 +767,12 @@ impl Path {
         }
 
         let metadata = self.metadata();
-        let now = wall_time();
+        let now = realtime();
         if mount_flags.contains(MountFlags::RELATIME)
             && metadata.mtime < metadata.atime
             && metadata.ctime < metadata.atime
-            && now.saturating_sub(metadata.atime) < Duration::from_secs(24 * 60 * 60)
+            && now.duration_since(metadata.atime).unwrap_or(TimeSpan::ZERO)
+                < TimeSpan::from_secs(24 * 60 * 60)
         {
             return;
         }
@@ -792,7 +793,7 @@ impl Path {
         }
 
         let metadata = self.metadata();
-        let now = wall_time();
+        let now = realtime();
         if metadata.mtime == now && metadata.ctime == now {
             return Ok(());
         }
@@ -1346,8 +1347,8 @@ mod tests {
     extern crate alloc;
 
     use alloc::{string::String, sync::Arc};
-    use core::time::Duration;
 
+    use ktime_types::SystemTime;
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
@@ -1436,9 +1437,9 @@ mod tests {
                 block_size: 512,
                 blocks: 1,
                 rdev: Default::default(),
-                atime: Duration::ZERO,
-                mtime: Duration::ZERO,
-                ctime: Duration::ZERO,
+                atime: SystemTime::UNIX_EPOCH,
+                mtime: SystemTime::UNIX_EPOCH,
+                ctime: SystemTime::UNIX_EPOCH,
             })
         }
 
@@ -1495,7 +1496,13 @@ mod tests {
             let inode = self.inode + 1;
             let init = VfsInodeInit::new(inode, 0, mode)
                 .with_owner_links_and_rdev(uid, gid, 1, Default::default())
-                .with_stat_data(512, 1, Duration::ZERO, Duration::ZERO, Duration::ZERO);
+                .with_stat_data(
+                    512,
+                    1,
+                    SystemTime::UNIX_EPOCH,
+                    SystemTime::UNIX_EPOCH,
+                    SystemTime::UNIX_EPOCH,
+                );
             let inode = VfsInode::new_openable_dir(
                 Arc::new(MockDirOps::new(self.mount_flags, inode)),
                 init,
@@ -1536,7 +1543,13 @@ mod tests {
             crate::Umode::new(NodeType::Directory, NodePermission::default()),
         )
         .with_owner_links_and_rdev(0, 0, 1, Default::default())
-        .with_stat_data(512, 1, Duration::ZERO, Duration::ZERO, Duration::ZERO)
+        .with_stat_data(
+            512,
+            1,
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH,
+        )
     }
 
     impl FileOperations for MockDirOps {
@@ -2185,17 +2198,17 @@ mod tests {
         let other = Cred::new(2000, 200);
 
         root.set_times(
-            Some(SetattrTime::Current(Duration::from_secs(10))),
-            Some(SetattrTime::Current(Duration::from_secs(11))),
+            Some(SetattrTime::Current(SystemTime::from_unix_seconds(10))),
+            Some(SetattrTime::Current(SystemTime::from_unix_seconds(11))),
             &other,
         )
         .unwrap();
         let metadata = root.metadata();
-        assert_eq!(metadata.atime, Duration::from_secs(10));
-        assert_eq!(metadata.mtime, Duration::from_secs(11));
+        assert_eq!(metadata.atime, SystemTime::from_unix_seconds(10));
+        assert_eq!(metadata.mtime, SystemTime::from_unix_seconds(11));
         assert_eq!(
             root.set_times(
-                Some(SetattrTime::Explicit(Duration::from_secs(20))),
+                Some(SetattrTime::Explicit(SystemTime::from_unix_seconds(20))),
                 None,
                 &other,
             ),
@@ -2203,7 +2216,7 @@ mod tests {
         );
         assert_eq!(
             root.set_times(
-                Some(SetattrTime::Current(Duration::from_secs(30))),
+                Some(SetattrTime::Current(SystemTime::from_unix_seconds(30))),
                 None,
                 &other,
             ),

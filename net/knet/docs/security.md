@@ -261,6 +261,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | F-15 | IPv4 分片重组超时 | 首片到达后 30 秒内缺少后续分片 | 当前数据报丢失 | UDP 接收超时 | 3 | 删除过期队列；首片存在且允许回复时发送 ICMPv4 Fragment Reassembly Timeout |
 | F-16 | UDP DF 数据报超过路由 MTU | `IP_MTU_DISCOVER` 要求 DF 且 packet 长度超过路由 MTU | 当前发送失败 | 应用收到 `EMSGSIZE` | 4 | 发送前读取路由 MTU，Router 拒绝对 DF 包执行输出分片 |
 | F-17 | 启动期 Unix pathname bind panic | 内核任务调用隐式 `current_cred()`，但尚无当前用户线程 | `/dev/log` 等内核 socket 无法绑定 | 启动中断 | 2 | 启动期调用 `bind_with_cred` 并显式传入 `initial_cred()`；保留可用的初始 fs context |
+| F-18 | smoltcp 过期 poll 期限变成超长等待 | 有符号微秒差值为负后通过 `as u64` 转换 | soft timer 被设置到远未来 | TCP 数据路径停顿，可能伴随 timer IRQ 异常 | 2 | 在同一 epoch 下直接把 `SmoltcpInstant` 映射为 `MonotonicInstant`，不计算无符号 delay；单测覆盖过期和未来期限 |
 
 严重度定义：
 

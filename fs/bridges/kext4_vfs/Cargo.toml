@@ -11,7 +11,7 @@ documentation.workspace = true
 
 [features]
 default = []
-times = ["dep:khal"]
+times = ["dep:ktime"]
 
 [dependencies]
 block.workspace = true
@@ -21,8 +21,9 @@ kclass = { workspace = true, features = ["block"] }
 kcred.workspace = true
 kerrno.workspace = true
 kext4.workspace = true
-khal = { workspace = true, optional = true }
 klogger.workspace = true
 ksync.workspace = true
 kvfs.workspace = true
+ktime_types.workspace = true
+ktime = { workspace = true, optional = true }
 unittest.workspace = true

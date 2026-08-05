@@ -10,6 +10,7 @@ use alloc::format;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kspin::SpinNoIrq;
+use ktime_types::TimeSpan;
 use unittest::{assert, assert_eq, def_test};
 
 use crate::{
@@ -36,22 +37,46 @@ fn record_dequeued_signal(sig: &SignalInfo) -> SignalDequeueAction {
 
 #[def_test]
 fn test_child_exit_info_decodes_wait_status() {
-    let exited = ChildExitInfo::from_wait_status(42, 1000, 7 << 8, 11, 13);
+    let exited = ChildExitInfo::from_wait_status(
+        42,
+        1000,
+        7 << 8,
+        TimeSpan::from_nanos(11),
+        TimeSpan::from_nanos(13),
+    );
     assert_eq!(exited.code(), linux_raw_sys::general::CLD_EXITED as i32);
     assert_eq!(exited.status(), 7);
 
-    let killed = ChildExitInfo::from_wait_status(42, 1000, Signo::SIGTERM as i32, 11, 13);
+    let killed = ChildExitInfo::from_wait_status(
+        42,
+        1000,
+        Signo::SIGTERM as i32,
+        TimeSpan::from_nanos(11),
+        TimeSpan::from_nanos(13),
+    );
     assert_eq!(killed.code(), linux_raw_sys::general::CLD_KILLED as i32);
     assert_eq!(killed.status(), Signo::SIGTERM as i32);
 
-    let dumped = ChildExitInfo::from_wait_status(42, 1000, Signo::SIGSEGV as i32 | 0x80, 11, 13);
+    let dumped = ChildExitInfo::from_wait_status(
+        42,
+        1000,
+        Signo::SIGSEGV as i32 | 0x80,
+        TimeSpan::from_nanos(11),
+        TimeSpan::from_nanos(13),
+    );
     assert_eq!(dumped.code(), linux_raw_sys::general::CLD_DUMPED as i32);
     assert_eq!(dumped.status(), Signo::SIGSEGV as i32);
 }
 
 #[def_test]
 fn test_signal_info_child_exit_payload() {
-    let child = ChildExitInfo::from_wait_status(42, 1000, 7 << 8, 11, 13);
+    let child = ChildExitInfo::from_wait_status(
+        42,
+        1000,
+        7 << 8,
+        TimeSpan::from_millis(20),
+        TimeSpan::from_millis(30),
+    );
     let sigchld = ChildExitSignalInfo::new_sigchld(child);
     let info = sigchld.as_child_exit_signal().as_signal_info();
     let payload = info.child_exit().expect("SIGCHLD must carry child payload");
@@ -61,12 +86,18 @@ fn test_signal_info_child_exit_payload() {
     assert_eq!(payload.pid(), 42);
     assert_eq!(payload.uid(), 1000);
     assert_eq!(payload.status(), 7);
-    assert_eq!(payload.utime_ticks(), 11);
-    assert_eq!(payload.stime_ticks(), 13);
+    assert_eq!(payload.utime(), TimeSpan::from_millis(20));
+    assert_eq!(payload.stime(), TimeSpan::from_millis(30));
 }
 
 fn new_sigchld_child_exit_signal() -> crate::SigchldChildExitSignalInfo {
-    let child = ChildExitInfo::from_wait_status(42, 1000, 7 << 8, 11, 13);
+    let child = ChildExitInfo::from_wait_status(
+        42,
+        1000,
+        7 << 8,
+        TimeSpan::from_millis(20),
+        TimeSpan::from_millis(30),
+    );
     ChildExitSignalInfo::new_sigchld(child)
 }
 

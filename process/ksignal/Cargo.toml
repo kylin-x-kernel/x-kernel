@@ -13,6 +13,7 @@ kaddr_layout.workspace = true
 kcpu.workspace = true
 kerrno.workspace = true
 khal.workspace = true
+ktime_types.workspace = true
 kiface.workspace = true
 bitflags = { workspace = true }
 cfg-if = { workspace = true }

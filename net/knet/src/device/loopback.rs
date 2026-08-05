@@ -6,9 +6,9 @@
 use alloc::collections::VecDeque;
 
 use ::core::task::Waker;
-use khal::time::TimeValue;
 use kpoll::{PollContext, PollRegisterError};
 use ksync::Mutex;
+use ktime_types::MonotonicInstant;
 
 use crate::{
     buf::{PacketBuf, PacketOwner},
@@ -54,7 +54,7 @@ impl NetDevice for LoopbackDevice {
         "lo"
     }
 
-    fn poll_rx(&mut self, _ifindex: i32, _timestamp: TimeValue) -> Option<PacketBuf> {
+    fn poll_rx(&mut self, _ifindex: i32, _timestamp: MonotonicInstant) -> Option<PacketBuf> {
         self.queue.pop_front()
     }
 
@@ -63,7 +63,7 @@ impl NetDevice for LoopbackDevice {
         ifindex: i32,
         next_hop: IpAddress,
         mut packet: PacketBuf,
-        _timestamp: TimeValue,
+        _timestamp: MonotonicInstant,
     ) -> bool {
         if self.queue.len() >= SOCKET_BUFFER_SIZE {
             warn!(

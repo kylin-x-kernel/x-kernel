@@ -10,8 +10,12 @@ pub use crate::process::{
 use crate::{Pid, Process, lookup};
 
 /// Records a reaped child's CPU time into its parent.
-pub fn record_reaped_child_cpu_time(parent: &Process, utime_ns: u64, stime_ns: u64) {
-    parent.accumulate_child_time(utime_ns, stime_ns);
+pub fn record_reaped_child_cpu_time(
+    parent: &Process,
+    utime: ktime_types::TimeSpan,
+    stime: ktime_types::TimeSpan,
+) {
+    parent.accumulate_child_time(utime, stime);
 }
 
 /// Releases a zombie process from its parent relation and PID directory.
@@ -64,8 +68,8 @@ pub fn scan_waitable_child(
     if let WaitChildScan::Ready(waited) = &scan
         && waited.was_consumed()
     {
-        let (utime_ns, stime_ns) = waited.total_cpu_time_ns();
-        record_reaped_child_cpu_time(parent, utime_ns, stime_ns);
+        let (utime, stime) = waited.total_cpu_time();
+        record_reaped_child_cpu_time(parent, utime, stime);
     }
     scan
 }

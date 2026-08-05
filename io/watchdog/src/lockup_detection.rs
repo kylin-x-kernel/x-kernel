@@ -3,15 +3,17 @@
 // See LICENSES for license details.
 
 //! Soft/hard lockup detection state and helpers.
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+use ktime_types::{MonotonicInstant, TimeSpan};
 
 use crate::watchdog_task::WatchdogTask;
 
-/// Default softlockup threshold in nanoseconds (20 seconds).
-pub const DEFAULT_SOFTLOCKUP_THRESH_NS: u64 = 20_000_000_000;
+/// Default soft-lockup detection threshold.
+pub const DEFAULT_SOFTLOCKUP_THRESHOLD: TimeSpan = TimeSpan::from_secs(20);
 
-/// Default hardlockup threshold in nanoseconds (10 seconds).
-pub const DEFAULT_HARDLOCKUP_THRESH_NS: u64 = 10_000_000_000;
+/// Default hard-lockup detection threshold.
+pub const DEFAULT_HARDLOCKUP_THRESHOLD: TimeSpan = TimeSpan::from_secs(10);
 
 /// Per-CPU lockup detection state.
 #[repr(C, align(64))]
@@ -20,6 +22,7 @@ pub struct LockupDetection {
     /// Timestamp when watchdog thread last ran (nanoseconds).
     /// Updated by watchdog thread, checked by timer interrupt.
     soft_timestamp: AtomicU64,
+    soft_timestamp_initialized: AtomicBool,
 
     // === Hardlockup Detection ===
     /// Timer interrupt counter (incremented in timer interrupt).
@@ -39,6 +42,7 @@ impl LockupDetection {
     pub const fn new() -> Self {
         Self {
             soft_timestamp: AtomicU64::new(0),
+            soft_timestamp_initialized: AtomicBool::new(false),
             hrtimer_interrupts: AtomicU32::new(0),
             hrtimer_interrupts_saved: AtomicU32::new(0),
         }
@@ -52,14 +56,22 @@ impl LockupDetection {
     ///
     /// The watchdog thread should call this every time it gets scheduled.
     #[inline]
-    pub fn touch_softlockup(&self, timestamp_ns: u64) {
-        self.soft_timestamp.store(timestamp_ns, Ordering::Release);
+    pub fn touch_softlockup(&self, timestamp: MonotonicInstant) {
+        self.soft_timestamp
+            .store(timestamp.as_nanos_u64_saturating(), Ordering::Relaxed);
+        self.soft_timestamp_initialized
+            .store(true, Ordering::Release);
     }
 
     /// Get the soft timestamp.
     #[inline]
-    pub fn soft_timestamp(&self) -> u64 {
-        self.soft_timestamp.load(Ordering::Acquire)
+    pub fn soft_timestamp(&self) -> Option<MonotonicInstant> {
+        if !self.soft_timestamp_initialized.load(Ordering::Acquire) {
+            return None;
+        }
+        Some(MonotonicInstant::from_span_since_origin(
+            TimeSpan::from_nanos(self.soft_timestamp.load(Ordering::Relaxed)),
+        ))
     }
 
     /// Check for softlockup condition.
@@ -67,13 +79,11 @@ impl LockupDetection {
     /// Call this from timer interrupt context.
     /// Returns true if softlockup is detected.
     #[inline]
-    pub fn check_softlockup(&self, now_ns: u64, threshold_ns: u64) -> bool {
-        let last = self.soft_timestamp.load(Ordering::Acquire);
-        if last == 0 {
-            // Not yet initialized
+    pub fn check_softlockup(&self, now: MonotonicInstant, threshold: TimeSpan) -> bool {
+        let Some(last) = self.soft_timestamp() else {
             return false;
-        }
-        now_ns.saturating_sub(last) > threshold_ns
+        };
+        now.saturating_duration_since(last) > threshold
     }
 
     // =========================================================================
@@ -113,14 +123,14 @@ pub static LOCKUP_DETECTION: LockupDetection = LockupDetection::new();
 
 /// Touch softlockup timestamp (called from watchdog thread).
 #[inline]
-pub fn touch_softlockup(timestamp_ns: u64) {
+pub fn touch_softlockup(timestamp: MonotonicInstant) {
     // SAFETY: `current_ref_mut_raw` accesses the per‑CPU instance for the
     // current CPU.  The watchdog thread is pinned to its CPU and runs with
     // preemption disabled, so the pointer cannot race with migration.
     unsafe {
         LOCKUP_DETECTION
             .current_ref_mut_raw()
-            .touch_softlockup(timestamp_ns);
+            .touch_softlockup(timestamp);
     }
 }
 
@@ -137,13 +147,13 @@ pub fn timer_tick() {
 
 /// Check softlockup of a CPU.
 #[inline]
-pub fn check_softlockup(now_ns: u64) -> bool {
+pub fn check_softlockup(now: MonotonicInstant) -> bool {
     // SAFETY: `current_ref_mut_raw` accesses the per‑CPU instance for the
     // current CPU from timer interrupt context (interrupts disabled).
     unsafe {
         LOCKUP_DETECTION
             .current_ref_mut_raw()
-            .check_softlockup(now_ns, DEFAULT_SOFTLOCKUP_THRESH_NS)
+            .check_softlockup(now, DEFAULT_SOFTLOCKUP_THRESHOLD)
     }
 }
 

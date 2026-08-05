@@ -21,7 +21,7 @@ use kvfs::{
 use super::{
     inode::Inode,
     util::{
-        current_ext4_timestamp, ext4_device_id_to_vfs, ext4_timestamp_to_duration,
+        current_ext4_timestamp, ext4_device_id_to_vfs, ext4_timestamp_to_system_time,
         inode_kind_to_vfs, into_vfs_err,
     },
 };
@@ -134,9 +134,9 @@ impl Ext4Filesystem {
             block_size: self.block_size(),
             blocks: inode.blocks(),
             rdev,
-            atime: ext4_timestamp_to_duration(inode.atime()),
-            mtime: ext4_timestamp_to_duration(inode.mtime()),
-            ctime: ext4_timestamp_to_duration(inode.ctime()),
+            atime: ext4_timestamp_to_system_time(inode.atime()),
+            mtime: ext4_timestamp_to_system_time(inode.mtime()),
+            ctime: ext4_timestamp_to_system_time(inode.ctime()),
         })
     }
 

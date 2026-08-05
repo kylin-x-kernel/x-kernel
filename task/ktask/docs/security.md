@@ -122,6 +122,7 @@ ksched algorithms / karch context switch / allocator
 | T-07 | affinity 迁移竞态导致任务丢失 | 中 | 迁移中状态被并发修改 | `migrate_current` 受 run queue 临界区保护 |
 | T-08 | tick 回调执行耗时过长拖慢调度 | 中 | callback 滥用 | API 文档约束“回调应短小”；系统仍可抢占恢复 |
 | T-09 | 远端唤醒后未及时调度 | 中 | 任务入远端 run queue 但远端 CPU 未到抢占安全点 | `ipi + preempt` 下请求远端 `need_resched`；无 IPI 时仍依赖 tick/安全点 |
+| T-10 | 绝对 timer deadline 在整数转换时截断 | 高 | `TimeSpan::as_nanos()` 的 `u128` 结果直接窄化为 `u64` | HAL 接口保持 `MonotonicInstant`；仅 timer backend 在寄存器边界执行钳制转换 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -133,6 +134,7 @@ ksched algorithms / karch context switch / allocator
 | F-04 | gc task 回收滞后 | 外部长期持有 `Arc` | `EXITED_TASKS` 堆积 | 内存增长 | 2 | `Arc::try_unwrap` 重试，join 语义释放 |
 | F-05 | 远端 resched 请求丢失 | IPI 不可用或远端未及时到达安全点 | 被唤醒任务调度延迟 | 吞吐/延迟波动 | 3 | `ipi + preempt` 下发送远端 pending 请求；无 IPI 配置依赖 tick |
 | F-06 | 算法 `task_tick` 行为异常 | 调度器实现 bug | 抢占策略失真 | 饥饿/抖动 | 2 | `ksched` 单测覆盖 + trace hook 诊断 |
+| F-07 | soft timer deadline 截断为已过期硬件时间 | deadline 超过硬件纳秒表示范围时发生截断 | timer 被立即重复触发 | IRQ 风暴、任务和网络路径停顿 | 1 | typed deadline 贯穿 HAL；backend 使用 checked conversion，超范围钳制到最远可表示期限 |
 
 ## 故障管理
 

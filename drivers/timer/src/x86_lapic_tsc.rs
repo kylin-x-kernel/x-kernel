@@ -16,36 +16,38 @@ static INIT_TICK: AtomicU64 = AtomicU64::new(0);
 static CPU_FREQ_MHZ: AtomicU64 = AtomicU64::new(0);
 static TSC_TICKS_TO_NANOS_RATIO: Once<Ratio> = Once::new();
 static NANOS_TO_TSC_TICKS_RATIO: Once<Ratio> = Once::new();
-static NANOS_TO_LAPIC_TICKS_RATIO: Once<Ratio> =
-    Once::initialized(Ratio::new(LAPIC_TICKS_PER_SEC as u32, 1_000_000_000u32));
+static NANOS_TO_LAPIC_TICKS_RATIO: Once<Ratio> = Once::initialized(Ratio::new(
+    LAPIC_TICKS_PER_SEC as u32,
+    ktime_types::NANOS_PER_SEC as u32,
+));
 
 #[kplat::impl_dev_interface]
 impl khal::time::MonotonicTimerIf {
-    fn now_ticks() -> u64 {
+    fn now_ticks() -> khal::time::TimerTicks {
         now_ticks()
     }
 
-    fn t2ns(ticks: u64) -> u64 {
-        t2ns(ticks)
+    fn ticks_to_span(ticks: khal::time::TimerTicks) -> ktime_types::TimeSpan {
+        ktime_types::TimeSpan::from_nanos(ticks_to_nanos(ticks.as_raw()))
     }
 
     fn freq() -> u64 {
         freq()
     }
 
-    fn ns2t(nanos: u64) -> u64 {
-        ns2t(nanos)
+    fn span_to_ticks(span: ktime_types::TimeSpan) -> khal::time::TimerTicks {
+        khal::time::TimerTicks::from_raw(nanos_to_ticks(span.as_nanos_u64_saturating()))
     }
 
     fn interrupt_id() -> usize {
         interrupt_id()
     }
 
-    fn arm_timer(deadline_ns: u64) {
-        arm_timer(deadline_ns)
+    fn arm_timer(deadline: ktime_types::MonotonicInstant) {
+        arm_timer(deadline)
     }
 
-    fn handle_idle_return(_previous_ticks: u64) -> bool {
+    fn handle_idle_return(_previous_ticks: khal::time::TimerTicks) -> bool {
         false
     }
 }
@@ -85,8 +87,10 @@ pub fn early_init(config: TimerConfig) {
     );
     CPU_FREQ_MHZ.store(freq_mhz, Ordering::Relaxed);
     let freq_mhz_u32 = freq_mhz as u32;
-    TSC_TICKS_TO_NANOS_RATIO.call_once(|| Ratio::new(1_000u32, freq_mhz_u32));
-    NANOS_TO_TSC_TICKS_RATIO.call_once(|| Ratio::new(freq_mhz_u32, 1_000u32));
+    TSC_TICKS_TO_NANOS_RATIO
+        .call_once(|| Ratio::new(ktime_types::NANOS_PER_MICROS as u32, freq_mhz_u32));
+    NANOS_TO_TSC_TICKS_RATIO
+        .call_once(|| Ratio::new(freq_mhz_u32, ktime_types::NANOS_PER_MICROS as u32));
     info!(
         "TSC frequency: {} MHz",
         CPU_FREQ_MHZ.load(Ordering::Relaxed)
@@ -124,14 +128,19 @@ pub fn init_secondary() {
 }
 
 #[inline]
-pub fn now_ticks() -> u64 {
+pub fn now_ticks() -> khal::time::TimerTicks {
+    khal::time::TimerTicks::from_raw(read_tsc_ticks_raw())
+}
+
+#[inline]
+fn read_tsc_ticks_raw() -> u64 {
     // SAFETY: `_rdtsc` is available on the x86_64 target and provides the current
     // monotonically increasing TSC value used by this timer source.
     unsafe { core::arch::x86_64::_rdtsc() - INIT_TICK.load(Ordering::Relaxed) }
 }
 
 #[inline]
-pub fn t2ns(ticks: u64) -> u64 {
+pub(crate) fn ticks_to_nanos(ticks: u64) -> u64 {
     TSC_TICKS_TO_NANOS_RATIO
         .get()
         .expect("x86 LAPIC/TSC timer conversion ratio is not initialized")
@@ -139,7 +148,7 @@ pub fn t2ns(ticks: u64) -> u64 {
 }
 
 #[inline]
-pub fn ns2t(nanos: u64) -> u64 {
+pub(crate) fn nanos_to_ticks(nanos: u64) -> u64 {
     NANOS_TO_TSC_TICKS_RATIO
         .get()
         .expect("x86 LAPIC/TSC timer conversion ratio is not initialized")
@@ -165,8 +174,9 @@ pub fn interrupt_id() -> usize {
     x86_apic::APIC_TIMER_VECTOR as usize
 }
 
-pub fn arm_timer(deadline_ns: u64) {
-    let now_ns = t2ns(now_ticks());
+pub fn arm_timer(deadline: ktime_types::MonotonicInstant) {
+    let now_ns = ticks_to_nanos(now_ticks().as_raw());
+    let deadline_ns = deadline.as_nanos_u64_saturating();
     // SAFETY: the local APIC timer is initialized before deadline programming, and
     // the helper holds the LAPIC lock while updating the timer registers.
     unsafe {
@@ -175,9 +185,9 @@ pub fn arm_timer(deadline_ns: u64) {
                 let apic_ticks = NANOS_TO_LAPIC_TICKS_RATIO
                     .get()
                     .expect("x86 LAPIC deadline ratio is not initialized")
-                    .mul_trunc(deadline_ns - now_ns);
-                assert!(apic_ticks <= u32::MAX as u64);
-                lapic.set_timer_initial(apic_ticks.max(1) as u32);
+                    .mul_trunc(deadline_ns - now_ns)
+                    .clamp(1, u32::MAX as u64);
+                lapic.set_timer_initial(apic_ticks as u32);
             } else {
                 lapic.set_timer_initial(1);
             }

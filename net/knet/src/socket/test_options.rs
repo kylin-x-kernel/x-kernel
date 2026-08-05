@@ -7,8 +7,8 @@
 #![cfg(unittest)]
 
 extern crate alloc;
-use core::time::Duration;
 
+use ktime_types::TimeSpan;
 use unittest::def_test;
 
 use crate::options::{GetSocketOption, SetSocketOption, UnixCredentials};
@@ -103,17 +103,17 @@ fn test_socket_option_variants_set() {
     }
 
     // Test timeout options
-    let send_timeout = Duration::from_secs(5);
+    let send_timeout = TimeSpan::from_secs(5);
     let set_opt = SetSocketOption::SendTimeout(&send_timeout);
     match set_opt {
-        SetSocketOption::SendTimeout(d) => assert_eq!(*d, Duration::from_secs(5)),
+        SetSocketOption::SendTimeout(d) => assert_eq!(*d, TimeSpan::from_secs(5)),
         _ => panic!("Expected SendTimeout variant"),
     }
 
-    let recv_timeout = Duration::from_millis(100);
+    let recv_timeout = TimeSpan::from_millis(100);
     let set_opt = SetSocketOption::ReceiveTimeout(&recv_timeout);
     match set_opt {
-        SetSocketOption::ReceiveTimeout(d) => assert_eq!(*d, Duration::from_millis(100)),
+        SetSocketOption::ReceiveTimeout(d) => assert_eq!(*d, TimeSpan::from_millis(100)),
         _ => panic!("Expected ReceiveTimeout variant"),
     }
 
@@ -136,7 +136,7 @@ fn test_socket_option_variants_set() {
 #[def_test]
 fn test_timeout_boundary_values() {
     // Test zero timeout
-    let zero_timeout = Duration::from_secs(0);
+    let zero_timeout = TimeSpan::from_secs(0);
     let set_opt = SetSocketOption::SendTimeout(&zero_timeout);
     match set_opt {
         SetSocketOption::SendTimeout(d) => {
@@ -147,7 +147,7 @@ fn test_timeout_boundary_values() {
     }
 
     // Test very large timeout
-    let large_timeout = Duration::from_secs(u64::MAX);
+    let large_timeout = TimeSpan::from_secs(u64::MAX);
     let set_opt = SetSocketOption::ReceiveTimeout(&large_timeout);
     match set_opt {
         SetSocketOption::ReceiveTimeout(d) => assert_eq!(d.as_secs(), u64::MAX),
@@ -155,7 +155,7 @@ fn test_timeout_boundary_values() {
     }
 
     // Test sub-second timeout
-    let micro_timeout = Duration::from_micros(1);
+    let micro_timeout = TimeSpan::from_micros(1);
     let set_opt = SetSocketOption::SendTimeout(&micro_timeout);
     match set_opt {
         SetSocketOption::SendTimeout(d) => {

@@ -6,12 +6,12 @@
 use core::{
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     task::Waker,
-    time::Duration,
 };
 
 use kerrno::KResult;
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use ktask::future::{block_on, poll_io, timeout};
+use ktime_types::TimeSpan;
 
 use crate::{
     SERVICE,
@@ -60,15 +60,15 @@ impl GeneralOptions {
     }
 
     /// Returns the configured send timeout.
-    pub fn send_timeout(&self) -> Option<Duration> {
+    pub fn send_timeout(&self) -> Option<TimeSpan> {
         let nanos = self.send_timeout_nanos.load(Ordering::Relaxed);
-        (nanos > 0).then(|| Duration::from_nanos(nanos))
+        (nanos > 0).then(|| TimeSpan::from_nanos(nanos))
     }
 
     /// Returns the configured receive timeout.
-    pub fn recv_timeout(&self) -> Option<Duration> {
+    pub fn recv_timeout(&self) -> Option<TimeSpan> {
         let nanos = self.recv_timeout_nanos.load(Ordering::Relaxed);
-        (nanos > 0).then(|| Duration::from_nanos(nanos))
+        (nanos > 0).then(|| TimeSpan::from_nanos(nanos))
     }
 
     /// Set the device mask used for receive waker registration.
@@ -165,10 +165,10 @@ impl Configurable for GeneralOptions {
                 **reuse = self.reuse_address();
             }
             O::SendTimeout(timeout) => {
-                **timeout = Duration::from_nanos(self.send_timeout_nanos.load(Ordering::Relaxed));
+                **timeout = TimeSpan::from_nanos(self.send_timeout_nanos.load(Ordering::Relaxed));
             }
             O::ReceiveTimeout(timeout) => {
-                **timeout = Duration::from_nanos(self.recv_timeout_nanos.load(Ordering::Relaxed));
+                **timeout = TimeSpan::from_nanos(self.recv_timeout_nanos.load(Ordering::Relaxed));
             }
             _ => return Ok(OptionHandled::No),
         }
@@ -187,11 +187,11 @@ impl Configurable for GeneralOptions {
             }
             O::SendTimeout(timeout) => {
                 self.send_timeout_nanos
-                    .store(timeout.as_nanos() as u64, Ordering::Relaxed);
+                    .store(timeout.as_nanos_u64_saturating(), Ordering::Relaxed);
             }
             O::ReceiveTimeout(timeout) => {
                 self.recv_timeout_nanos
-                    .store(timeout.as_nanos() as u64, Ordering::Relaxed);
+                    .store(timeout.as_nanos_u64_saturating(), Ordering::Relaxed);
             }
             O::SendBuffer(_) | O::ReceiveBuffer(_) => {
                 // TODO(mivik): implement buffer size options

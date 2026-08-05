@@ -4,8 +4,8 @@
 
 use alloc::sync::Arc;
 
-use khal::time::ns2t;
 use ksignal::{ChildExitInfo, ChildExitSignalInfo, SigchldChildExitSignalInfo, Signo};
+use ktime_types::TimeSpan;
 
 use crate::{Process, ProcessExitPublication, Tid, process_signals, wait_reap};
 
@@ -20,8 +20,8 @@ pub fn mark_group_exited(process: &Process) {
 }
 
 /// Records CPU time accumulated by a thread that has just exited.
-pub fn record_exited_thread_cpu_time(process: &Process, utime_ns: u64, stime_ns: u64) {
-    process.accumulate_exited_thread_time(utime_ns, stime_ns);
+pub fn record_exited_thread_cpu_time(process: &Process, utime: TimeSpan, stime: TimeSpan) {
+    process.accumulate_exited_thread_time(utime, stime);
 }
 
 /// Transitions the process into waitable zombie state and reparents surviving children.
@@ -107,16 +107,10 @@ pub(crate) fn sigchld_child_exit_signal_info(process: &Process) -> SigchldChildE
 }
 
 fn child_exit_info(process: &Process) -> ChildExitInfo {
-    let (utime_ns, stime_ns) = process.process_cpu_time_ns();
+    let (utime, stime) = process.process_cpu_times();
     let uid = process
         .credentials_snapshot()
         .map(|credentials| credentials.ruid())
         .unwrap_or(0);
-    ChildExitInfo::from_wait_status(
-        process.pid(),
-        uid,
-        process.exit_code(),
-        ns2t(utime_ns),
-        ns2t(stime_ns),
-    )
+    ChildExitInfo::from_wait_status(process.pid(), uid, process.exit_code(), utime, stime)
 }

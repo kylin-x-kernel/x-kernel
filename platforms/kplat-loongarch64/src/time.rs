@@ -3,7 +3,8 @@
 // See LICENSES for license details.
 
 use kbuild_config::RTC_PADDR;
-use khal::time::{MonotonicTimerIf, NANOS_PER_MILLIS, NANOS_PER_SEC};
+use khal::time::{MonotonicTimerIf, TimerTicks};
+use ktime_types::{MonotonicInstant, NANOS_PER_MILLIS, NANOS_PER_SEC, SystemTime};
 use lazyinit::LazyInit;
 use loongArch64::{register::tcfg, time::Time};
 
@@ -13,17 +14,17 @@ const MIN_TIMER_TICKS: u64 = 4;
 static NANOS_PER_TICK: LazyInit<u64> = LazyInit::new();
 
 #[inline]
-fn now_ticks() -> u64 {
+fn read_timer_ticks_raw() -> u64 {
     Time::read() as _
 }
 
 #[inline]
-fn t2ns(ticks: u64) -> u64 {
+fn ticks_to_nanos(ticks: u64) -> u64 {
     ticks * *NANOS_PER_TICK
 }
 
 #[inline]
-fn ns2t(nanos: u64) -> u64 {
+fn nanos_to_ticks(nanos: u64) -> u64 {
     nanos / *NANOS_PER_TICK
 }
 
@@ -34,7 +35,7 @@ pub(super) fn init_percpu() {
     khal::irq::enable(TIMER_IRQ, true);
 }
 #[cfg(feature = "rtc")]
-fn init_rtc() {
+fn read_rtc() -> SystemTime {
     use chrono::{TimeZone, Timelike, Utc};
     use khal::mem::PhysAddr;
     const SYS_TOY_READ0: usize = 0x2C;
@@ -74,37 +75,26 @@ fn init_rtc() {
         .unwrap()
         .with_nanosecond(extract_bits(toy_low, 0..4) * NANOS_PER_MILLIS as u32)
         .unwrap();
-    let Some(epoch_time_nanos) = date_time.timestamp_nanos_opt() else {
-        warn!("RTC date is outside the supported nanosecond range");
-        return;
-    };
-    let Ok(epoch_time_nanos) = u64::try_from(epoch_time_nanos) else {
-        warn!("RTC date precedes the Unix epoch");
-        return;
-    };
-    let Some(offset_ns) = epoch_time_nanos.checked_sub(t2ns(now_ticks())) else {
-        warn!("RTC date precedes the monotonic boot time");
-        return;
-    };
-    rtc_driver::init_offset_ns(offset_ns);
+    SystemTime::from_unix_parts(date_time.timestamp(), date_time.nanosecond())
+        .expect("chrono returns normalized nanoseconds")
 }
 pub(super) fn early_init() {
     NANOS_PER_TICK.init_once(NANOS_PER_SEC / loongArch64::time::get_timer_freq() as u64);
     #[cfg(feature = "rtc")]
-    init_rtc();
+    ktime::initialize_realtime(read_rtc());
 }
 #[kplat::impl_dev_interface]
 impl MonotonicTimerIf {
-    fn now_ticks() -> u64 {
-        now_ticks()
+    fn now_ticks() -> TimerTicks {
+        TimerTicks::from_raw(read_timer_ticks_raw())
     }
 
-    fn t2ns(ticks: u64) -> u64 {
-        t2ns(ticks)
+    fn ticks_to_span(ticks: TimerTicks) -> ktime_types::TimeSpan {
+        ktime_types::TimeSpan::from_nanos(ticks_to_nanos(ticks.as_raw()))
     }
 
-    fn ns2t(nanos: u64) -> u64 {
-        ns2t(nanos)
+    fn span_to_ticks(span: ktime_types::TimeSpan) -> TimerTicks {
+        TimerTicks::from_raw(nanos_to_ticks(span.as_nanos_u64_saturating()))
     }
 
     fn freq() -> u64 {
@@ -115,9 +105,10 @@ impl MonotonicTimerIf {
         TIMER_IRQ
     }
 
-    fn arm_timer(deadline_ns: u64) {
-        let ticks_now = now_ticks();
-        let ticks_deadline = ns2t(deadline_ns);
+    fn arm_timer(deadline: MonotonicInstant) {
+        let ticks_now = read_timer_ticks_raw();
+        let deadline_ns = deadline.as_nanos_u64_saturating();
+        let ticks_deadline = nanos_to_ticks(deadline_ns);
         let init_value = ticks_deadline
             .saturating_sub(ticks_now)
             .max(MIN_TIMER_TICKS)
@@ -128,7 +119,7 @@ impl MonotonicTimerIf {
         tcfg::set_en(true);
     }
 
-    fn handle_idle_return(_previous_ticks: u64) -> bool {
+    fn handle_idle_return(_previous_ticks: TimerTicks) -> bool {
         false
     }
 }

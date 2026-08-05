@@ -133,10 +133,15 @@ init_scheduler_secondary()
    timer wheel（两者都是 ns 驱动，与触发频率无关）。
 2. **仅**当周期 tick 截止时间已到（或首次触发的懒初始化）时，才调用
    `scheduler_timer_tick()` → 算法 `task_tick(current)`，并把下一个 tick 截止时间推进
-   `now + PERIODIC_INTERVAL_NANOS`。调度器按 tick 计数（slice/vruntime 以 tick 为单位），
+   `now + PERIODIC_INTERVAL`。调度器按 tick 计数（slice/vruntime 以 tick 为单位），
    因此子 tick 的 soft-timer 触发不会调用 `task_tick`，保证调度记账仍以固定 `TICKS_PER_SECOND`
    速率推进。
 3. 重新装填硬件定时器到 `min(下一个周期 tick, wheel 最早 soft deadline)`。
+
+该路径从 timer wheel 到 `MonotonicTimerIf::arm_timer` 始终传递 `MonotonicInstant`。
+具体 timer backend 仅在写 SBI、APIC 或体系结构 timer 寄存器前把 typed deadline
+钳制并转换为硬件 ticks。周期 deadline 的 per-CPU 槽直接保存
+`Option<MonotonicInstant>`，不使用整数编码或特殊数值作为未初始化哨兵。
 
 子 tick 精度的关键：`register_timer`/`sleep_until` 在入队后（仍持有 wheel 的 `SpinNoIrq`
 锁、IRQ 关闭）立即调 `rearm_local_timer()` 把硬件截止时间拉到新的最早 deadline；

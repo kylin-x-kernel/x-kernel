@@ -11,9 +11,10 @@ use alloc::{
 use fs_context::FsStruct;
 use kcred::Cred;
 use kerrno::{KError, KResult};
-use khal::{paging::MappingFlags, time::TimeValue};
+use khal::paging::MappingFlags;
 use ksignal::api::{ProcessSignalManager, SignalActions};
 use ksync::{Mutex, MutexGuard, spin::SpinNoIrq as KSyncSpinNoIrq};
+use ktime_types::TimeSpan;
 use ktimer::{PosixTimerCreateNotify, TimerDelivery};
 use memaddr::VirtAddr;
 use memspace::{
@@ -259,14 +260,13 @@ impl Process {
     }
 
     /// Returns the current POSIX timer state while runtime remains attached.
-    pub fn get_posix_timer(&self, timer_id: i32) -> KResult<(TimeValue, TimeValue)> {
-        let (process_utime_ns, process_stime_ns) = self.process_cpu_time_ns();
+    pub fn get_posix_timer(&self, timer_id: i32) -> KResult<(TimeSpan, TimeSpan)> {
+        let (process_utime, process_stime) = self.process_cpu_times();
         self.runtime().and_then(|runtime| {
-            runtime.timer_manager().lock().get_posix_timer(
-                timer_id,
-                process_utime_ns,
-                process_stime_ns,
-            )
+            runtime
+                .timer_manager()
+                .lock()
+                .get_posix_timer(timer_id, process_utime, process_stime)
         })
     }
 
@@ -275,18 +275,18 @@ impl Process {
         &self,
         timer_id: i32,
         absolute: bool,
-        interval_ns: usize,
-        value_ns: usize,
-    ) -> KResult<((TimeValue, TimeValue), Option<TimerDelivery>)> {
-        let (process_utime_ns, process_stime_ns) = self.process_cpu_time_ns();
+        interval: TimeSpan,
+        value: TimeSpan,
+    ) -> KResult<((TimeSpan, TimeSpan), Option<TimerDelivery>)> {
+        let (process_utime, process_stime) = self.process_cpu_times();
         self.runtime().and_then(|runtime| {
             runtime.timer_manager().lock().set_posix_timer(
                 timer_id,
                 absolute,
-                interval_ns,
-                value_ns,
-                process_utime_ns,
-                process_stime_ns,
+                interval,
+                value,
+                process_utime,
+                process_stime,
             )
         })
     }
@@ -308,14 +308,13 @@ impl Process {
     }
 
     /// Returns the current interval timer state while runtime remains attached.
-    pub fn get_itimer(&self, timer_type: ITimerType) -> KResult<(TimeValue, TimeValue)> {
-        let (process_utime_ns, process_stime_ns) = self.process_cpu_time_ns();
+    pub fn get_itimer(&self, timer_type: ITimerType) -> KResult<(TimeSpan, TimeSpan)> {
+        let (process_utime, process_stime) = self.process_cpu_times();
         self.runtime().map(|runtime| {
-            runtime.timer_manager().lock().get_itimer(
-                timer_type,
-                process_utime_ns,
-                process_stime_ns,
-            )
+            runtime
+                .timer_manager()
+                .lock()
+                .get_itimer(timer_type, process_utime, process_stime)
         })
     }
 
@@ -323,17 +322,17 @@ impl Process {
     pub fn set_itimer(
         &self,
         timer_type: ITimerType,
-        interval_ns: usize,
-        remaining_ns: usize,
-    ) -> KResult<(TimeValue, TimeValue)> {
-        let (process_utime_ns, process_stime_ns) = self.process_cpu_time_ns();
+        interval: TimeSpan,
+        remaining: TimeSpan,
+    ) -> KResult<(TimeSpan, TimeSpan)> {
+        let (process_utime, process_stime) = self.process_cpu_times();
         self.runtime().map(|runtime| {
             runtime.timer_manager().lock().set_itimer(
                 timer_type,
-                interval_ns,
-                remaining_ns,
-                process_utime_ns,
-                process_stime_ns,
+                interval,
+                remaining,
+                process_utime,
+                process_stime,
             )
         })
     }
@@ -346,12 +345,12 @@ impl Process {
 
     /// Polls CPU-driven timers while runtime remains attached.
     pub(crate) fn poll_cpu_timers(&self) -> KResult<Vec<TimerDelivery>> {
-        let (process_utime_ns, process_stime_ns) = self.process_cpu_time_ns();
+        let (process_utime, process_stime) = self.process_cpu_times();
         self.runtime().map(|runtime| {
             runtime
                 .timer_manager()
                 .lock()
-                .poll_cpu_timers(process_utime_ns, process_stime_ns)
+                .poll_cpu_timers(process_utime, process_stime)
         })
     }
 
@@ -460,32 +459,23 @@ impl Process {
         self.runtime().map(|runtime| runtime.with_tipc_handles(f))
     }
 
-    /// Returns sampled user and system CPU time in nanoseconds.
-    pub fn process_cpu_time_ns(&self) -> (u64, u64) {
-        let (utime_ns, stime_ns) = self.exited_thread_time_ns();
+    /// Returns sampled user and system CPU time.
+    pub fn process_cpu_times(&self) -> (TimeSpan, TimeSpan) {
+        let (utime, stime) = self.exited_thread_time();
         self.thread_tasks()
             .into_iter()
-            .fold((utime_ns, stime_ns), |(utime_ns, stime_ns), task| {
-                let (thread_utime_ns, thread_stime_ns) = task.as_thread().sample_cpu_time_ns();
+            .fold((utime, stime), |(utime, stime), task| {
+                let (thread_utime, thread_stime) = task.as_thread().sample_cpu_time();
                 (
-                    utime_ns.saturating_add(thread_utime_ns),
-                    stime_ns.saturating_add(thread_stime_ns),
+                    utime.saturating_add(thread_utime),
+                    stime.saturating_add(thread_stime),
                 )
             })
     }
 
-    /// Returns sampled user and system CPU time.
-    pub fn process_cpu_times(&self) -> (TimeValue, TimeValue) {
-        let (utime_ns, stime_ns) = self.process_cpu_time_ns();
-        (
-            TimeValue::from_nanos(utime_ns),
-            TimeValue::from_nanos(stime_ns),
-        )
-    }
-
     /// Returns the total sampled CPU time.
-    pub fn process_cpu_time(&self) -> TimeValue {
+    pub fn process_cpu_time(&self) -> TimeSpan {
         let (utime, stime) = self.process_cpu_times();
-        utime + stime
+        utime.saturating_add(stime)
     }
 }

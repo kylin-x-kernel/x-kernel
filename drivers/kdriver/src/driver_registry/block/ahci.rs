@@ -17,7 +17,7 @@ impl block::ahci::AhciHal for AhciHalImpl {
     }
 
     fn current_ms() -> u64 {
-        khal::time::monotonic_time_nanos() / 1_000_000
+        khal::time::monotonic_time().as_nanos_u64_saturating() / ktime_types::NANOS_PER_MILLIS
     }
 
     fn flush_dcache() {

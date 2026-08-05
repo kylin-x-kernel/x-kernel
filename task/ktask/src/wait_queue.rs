@@ -4,10 +4,9 @@
 
 //! Blocking wait queue built on event listeners and timers.
 
-use core::time::Duration;
-
 use event_listener::{Event, listener};
 use khal::time::monotonic_time;
+use ktime_types::TimeSpan;
 
 use crate::future::{block_on, timeout_at};
 
@@ -84,7 +83,7 @@ impl WaitQueue {
 
     /// Blocks the current task and put it into the wait queue, until other tasks
     /// notify it, or the given duration has elapsed.
-    pub fn wait_timeout(&self, dur: Duration) -> bool {
+    pub fn wait_timeout(&self, dur: TimeSpan) -> bool {
         let deadline = monotonic_time() + dur;
         block_on(async {
             listener!(self.event => listener);
@@ -97,7 +96,7 @@ impl WaitQueue {
     ///
     /// Note that even other tasks notify this task, it will not wake up until
     /// the above conditions are met.
-    pub fn wait_timeout_until<F>(&self, dur: Duration, mut condition: F) -> bool
+    pub fn wait_timeout_until<F>(&self, dur: TimeSpan, mut condition: F) -> bool
     where
         F: FnMut() -> bool,
     {

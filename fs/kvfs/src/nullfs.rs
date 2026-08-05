@@ -5,7 +5,8 @@
 //! Linux `nullfs` used as the immutable VFS hierarchy anchor.
 
 use alloc::sync::Arc;
-use core::time::Duration;
+
+use ktime_types::SystemTime;
 
 use crate::{
     Dentry, DirContext, FileDirOperations, FileOperations, GetattrQueryFlags, GetattrRequestMask,
@@ -54,9 +55,9 @@ impl NullFsRoot {
         .with_stat_data(
             NULLFS_BLOCK_SIZE,
             0,
-            Duration::ZERO,
-            Duration::ZERO,
-            Duration::ZERO,
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH,
         )
     }
 
@@ -75,9 +76,9 @@ impl NullFsRoot {
             block_size: NULLFS_BLOCK_SIZE,
             blocks: 0,
             rdev: Default::default(),
-            atime: Duration::ZERO,
-            mtime: Duration::ZERO,
-            ctime: Duration::ZERO,
+            atime: SystemTime::UNIX_EPOCH,
+            mtime: SystemTime::UNIX_EPOCH,
+            ctime: SystemTime::UNIX_EPOCH,
         }
     }
 }

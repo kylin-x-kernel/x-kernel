@@ -5,6 +5,8 @@
 //! Core task data structures and lifecycle helpers.
 
 use alloc::{boxed::Box, string::String, sync::Arc};
+#[cfg(feature = "snapshot")]
+use core::sync::atomic::AtomicU64;
 #[cfg(feature = "preempt")]
 use core::sync::atomic::AtomicUsize;
 use core::{
@@ -156,8 +158,8 @@ type HeldLocks = [AtomicUsize; HELD_LOCK_SLOTS];
 struct PerTaskRecording {
     /// 0 = not waiting, otherwise lock address.
     waiting_lock: AtomicUsize,
-    /// Tick timestamp when we started waiting on `waiting_lock`.
-    waiting_since: AtomicUsize,
+    /// Timer counter sample captured when waiting on `waiting_lock` began.
+    waiting_since: AtomicU64,
     held_locks: HeldLocks,
 }
 
@@ -166,7 +168,7 @@ impl PerTaskRecording {
     fn new() -> Self {
         Self {
             waiting_lock: AtomicUsize::new(0),
-            waiting_since: AtomicUsize::new(0),
+            waiting_since: AtomicU64::new(0),
             held_locks: [const { AtomicUsize::new(0) }; HELD_LOCK_SLOTS],
         }
     }
@@ -517,10 +519,12 @@ impl TaskInner {
 
     #[cfg(feature = "snapshot")]
     #[inline(always)]
-    pub fn set_waiting_lock(&self, lock: usize, now: usize) {
+    pub fn set_waiting_lock(&self, lock: usize, now: khal::time::TimerTicks) {
         // Publish `since` first, then `lock` with Release so readers that see
         // a non-zero lock also see the matching `since`.
-        self.record_lock.waiting_since.store(now, Ordering::Relaxed);
+        self.record_lock
+            .waiting_since
+            .store(now.as_raw(), Ordering::Relaxed);
         self.record_lock.waiting_lock.store(lock, Ordering::Release);
     }
 
@@ -536,7 +540,7 @@ impl TaskInner {
     /// A lock-free snapshot of the lock-wait state, safe for NMI/watchdog paths.
     #[cfg(feature = "snapshot")]
     #[inline(always)]
-    pub fn waiting_snapshot(&self) -> Option<(usize, usize)> {
+    pub fn waiting_snapshot(&self) -> Option<(usize, khal::time::TimerTicks)> {
         let lock = self.record_lock.waiting_lock.load(Ordering::Acquire);
         if lock == 0 {
             return None;
@@ -545,11 +549,7 @@ impl TaskInner {
         // relaxed load is ordered after the lock read and should see the
         // corresponding `since` in practice.
         let since = self.record_lock.waiting_since.load(Ordering::Relaxed);
-        if since == 0 {
-            None
-        } else {
-            Some((lock, since))
-        }
+        Some((lock, khal::time::TimerTicks::from_raw(since)))
     }
 
     /// Getter: current waiting lock address (0 means none).
@@ -559,11 +559,11 @@ impl TaskInner {
         self.record_lock.waiting_lock.load(Ordering::Acquire)
     }
 
-    /// Getter: tick when waiting started (0 means none).
+    /// Returns the timer counter sample captured when lock waiting began.
     #[cfg(feature = "snapshot")]
     #[inline(always)]
-    pub fn waiting_since(&self) -> usize {
-        self.record_lock.waiting_since.load(Ordering::Relaxed)
+    pub fn waiting_since(&self) -> khal::time::TimerTicks {
+        khal::time::TimerTicks::from_raw(self.record_lock.waiting_since.load(Ordering::Relaxed))
     }
 
     /// Record that this task now holds `addr`.

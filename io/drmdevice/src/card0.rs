@@ -840,13 +840,14 @@ impl DrmIoctl for DrmWaitVblank {
             raw_wait
         };
 
-        const FRAME_PERIOD_NS: u64 = 1_000_000_000 / 60;
+        const FRAME_PERIOD_NS: u64 = ktime_types::NANOS_PER_SEC / 60;
         let delay =
-            core::time::Duration::from_nanos(FRAME_PERIOD_NS.saturating_mul(wait_count as u64));
+            ktime_types::TimeSpan::from_nanos(FRAME_PERIOD_NS.saturating_mul(wait_count as u64));
         ktask::sleep(delay);
         dev.sequence.fetch_add(wait_count, Ordering::AcqRel);
 
         let now = khal::time::monotonic_time();
+        let now = now.span_since_origin();
         *request = DrmWaitVblank {
             rep_type: 0,
             sequence: dev.sequence.load(Ordering::Acquire),
@@ -1036,6 +1037,7 @@ impl Card0 {
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1);
         let now = khal::time::monotonic_time();
+        let now = now.span_since_origin();
         let ev = DrmEventVblank {
             base: DrmEvent {
                 event_type: DRM_EVENT_FLIP_COMPLETE,

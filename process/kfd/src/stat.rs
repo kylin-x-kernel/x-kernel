@@ -4,8 +4,7 @@
 
 //! File metadata types shared by descriptor-backed files.
 
-use core::time::Duration;
-
+use ktime_types::SystemTime;
 use kvfs::DeviceId;
 use linux_raw_sys::general::{
     S_IFMT, S_IFREG, STATX_ATTR_WRITE_ATOMIC, STATX_WRITE_ATOMIC, stat, statx, statx_timestamp,
@@ -35,11 +34,11 @@ pub struct Kstat {
     /// Device ID represented by this inode, for special files.
     pub rdev: DeviceId,
     /// Last access time.
-    pub atime: Duration,
+    pub atime: SystemTime,
     /// Last modification time.
-    pub mtime: Duration,
+    pub mtime: SystemTime,
     /// Last metadata change time.
-    pub ctime: Duration,
+    pub ctime: SystemTime,
 }
 
 impl From<kvfs::Metadata> for Kstat {
@@ -76,9 +75,9 @@ impl Default for Kstat {
             blksize: 4096,
             blocks: 0,
             rdev: DeviceId::default(),
-            atime: Duration::default(),
-            mtime: Duration::default(),
-            ctime: Duration::default(),
+            atime: SystemTime::UNIX_EPOCH,
+            mtime: SystemTime::UNIX_EPOCH,
+            ctime: SystemTime::UNIX_EPOCH,
         }
     }
 }
@@ -99,11 +98,11 @@ impl From<Kstat> for stat {
         stat.st_blocks = value.blocks as _;
         stat.st_rdev = value.rdev.0 as _;
 
-        stat.st_atime = value.atime.as_secs() as _;
+        stat.st_atime = value.atime.unix_seconds() as _;
         stat.st_atime_nsec = value.atime.subsec_nanos() as _;
-        stat.st_mtime = value.mtime.as_secs() as _;
+        stat.st_mtime = value.mtime.unix_seconds() as _;
         stat.st_mtime_nsec = value.mtime.subsec_nanos() as _;
-        stat.st_ctime = value.ctime.as_secs() as _;
+        stat.st_ctime = value.ctime.unix_seconds() as _;
         stat.st_ctime_nsec = value.ctime.subsec_nanos() as _;
         stat
     }
@@ -129,9 +128,9 @@ impl From<Kstat> for statx {
         statx.stx_rdev_major = value.rdev.major();
         statx.stx_rdev_minor = value.rdev.minor();
 
-        fn time_to_statx(time: &Duration) -> statx_timestamp {
+        fn time_to_statx(time: &SystemTime) -> statx_timestamp {
             statx_timestamp {
-                tv_sec: time.as_secs() as _,
+                tv_sec: time.unix_seconds() as _,
                 tv_nsec: time.subsec_nanos() as _,
                 __reserved: 0,
             }

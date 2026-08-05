@@ -4,10 +4,9 @@
 
 //! KExt4 adapter utilities.
 
-use core::time::Duration;
-
 use kerrno::LinuxError;
 use kext4::{DirectoryFileType, Ext4DeviceId, Ext4Error, Ext4Timestamp, InodeKind};
+use ktime_types::SystemTime;
 use kvfs::{DeviceId, NodeType, VfsError};
 
 pub(crate) fn into_vfs_err(err: Ext4Error) -> VfsError {
@@ -85,21 +84,18 @@ pub(crate) const fn ext4_device_id_to_vfs(device: Ext4DeviceId) -> DeviceId {
     DeviceId::new(device.major(), device.minor())
 }
 
-pub(crate) fn duration_to_ext4(timestamp: Duration) -> Ext4Timestamp {
-    Ext4Timestamp::new(timestamp.as_secs() as i64, timestamp.subsec_nanos())
+pub(crate) fn system_time_to_ext4(timestamp: SystemTime) -> Ext4Timestamp {
+    Ext4Timestamp::new(timestamp.unix_seconds(), timestamp.subsec_nanos())
 }
 
-pub(crate) fn ext4_timestamp_to_duration(timestamp: Ext4Timestamp) -> Duration {
-    if timestamp.seconds() <= 0 {
-        Duration::ZERO
-    } else {
-        Duration::new(timestamp.seconds() as u64, timestamp.nanos())
-    }
+pub(crate) fn ext4_timestamp_to_system_time(timestamp: Ext4Timestamp) -> SystemTime {
+    SystemTime::from_unix_parts(timestamp.seconds(), timestamp.nanos())
+        .expect("decoded ext4 timestamps have normalized nanoseconds")
 }
 
 #[cfg(feature = "times")]
 pub(crate) fn current_ext4_timestamp() -> Ext4Timestamp {
-    duration_to_ext4(khal::time::wall_time())
+    system_time_to_ext4(ktime::realtime())
 }
 
 #[cfg(not(feature = "times"))]

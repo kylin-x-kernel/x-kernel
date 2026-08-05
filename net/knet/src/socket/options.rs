@@ -4,10 +4,10 @@
 
 //! Socket option types and configuration helpers.
 use alloc::boxed::Box;
-use core::time::Duration;
 
 use enum_dispatch::enum_dispatch;
 use kerrno::{KError, KResult, LinuxError};
+use ktime_types::TimeSpan;
 
 macro_rules! define_options {
     ($($name:ident($value:ty),)*) => {
@@ -73,8 +73,8 @@ define_options! {
     SendBuffer(usize),
     ReceiveBuffer(usize),
     KeepAlive(bool),
-    SendTimeout(Duration),
-    ReceiveTimeout(Duration),
+    SendTimeout(TimeSpan),
+    ReceiveTimeout(TimeSpan),
     SendBufferForce(usize),
     PassCredentials(bool),
     PeerCredentials(UnixCredentials),

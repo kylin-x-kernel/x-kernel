@@ -4,13 +4,12 @@
 
 //! Shared x86 SMP bring-up helpers.
 
-use core::time::Duration;
-
 use kcpu_id_map::RawCpuId;
 use khal::{
     mem::{PAGE_SIZE_4K, PhysAddr, p2v, pa, v2p},
     time::spin_wait,
 };
+use ktime_types::TimeSpan;
 use x86_apic as apic;
 
 use crate::peripherals::bootmem::ap_trampoline_page_paddr;
@@ -85,11 +84,11 @@ pub fn start_secondary_cpu(raw_apic_id: RawCpuId, stack_top: PhysAddr) {
     // SAFETY: the local APIC was initialized on the bootstrap CPU before SMP
     // bring-up, and the helper serializes access while issuing the INIT IPI.
     unsafe { apic::with_local_apic(|lapic| lapic.send_init_ipi(apic_id)) };
-    spin_wait(Duration::from_millis(10));
+    spin_wait(TimeSpan::from_millis(10));
     // SAFETY: the trampoline page is prepared and `start_page_idx` names that
     // low-memory page, so sending the startup IPI is valid for this target APIC ID.
     unsafe { apic::with_local_apic(|lapic| lapic.send_sipi(start_page_idx, apic_id)) };
-    spin_wait(Duration::from_micros(200));
+    spin_wait(TimeSpan::from_micros(200));
     // SAFETY: x86 AP bring-up requires re-sending the same SIPI after the mandated
     // delay; the trampoline page and target APIC ID are unchanged.
     unsafe { apic::with_local_apic(|lapic| lapic.send_sipi(start_page_idx, apic_id)) };

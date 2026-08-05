@@ -354,8 +354,8 @@ pub trait DeviceFileOps: Send + Sync {
 #[cfg(unittest)]
 mod tests {
     use alloc::sync::Arc;
-    use core::time::Duration;
 
+    use ktime_types::SystemTime;
     use unittest::def_test;
 
     use super::*;
@@ -410,9 +410,9 @@ mod tests {
                 block_size: 0,
                 blocks: 0,
                 rdev: self.rdev,
-                atime: Duration::ZERO,
-                mtime: Duration::ZERO,
-                ctime: Duration::ZERO,
+                atime: SystemTime::UNIX_EPOCH,
+                mtime: SystemTime::UNIX_EPOCH,
+                ctime: SystemTime::UNIX_EPOCH,
             })
         }
 
