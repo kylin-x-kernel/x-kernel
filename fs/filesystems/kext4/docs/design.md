@@ -18,8 +18,8 @@ superblock、inode、address-space 和 file operations，但不拥有 ext4 磁�
 
 KExt4 是 X-Kernel 唯一的 ext4 后端，保持 Rust 受检代码、明确的 feature negotiation、
 日志化元数据更新，以及 e2fsprogs/e2fsck 互操作能力。`KFEAT_FS_EXT4` 直接把 KExt4
-core/bridge 链入运行态，不再经过实现选择层。N0 已补齐 VFS inode identity、cached
-attributes、两阶段 truncate 和 open-unlink/final-evict 基线。N1 已建立 persistent journal
+core/bridge 链入运行态，不再经过实现选择层。N0 已补齐 KVFS 单一 resident inode identity、
+cached attributes、两阶段 truncate 和 open-unlink/final-evict 基线。N1 已建立 persistent journal
 和 mount/journal 生命周期边界，N2 继续建立 buffered 并发执行框架，再在 N3 集中补齐 crash
 recovery、错误观察和 unmount/freeze。
 
@@ -67,7 +67,10 @@ Ext4Filesystem (mount state，类似 ext4_sb_info)
     |     |-- transaction state
     |     |     `-- one object: Running -> Committing -> Checkpoint -> Finished
     |     `-- FIFO checkpoint queue / runtime head-tail state
-    `-- inode / extent / orphan / namei / xattr / truncate
+    |-- delayed-allocation mount aggregate
+    `-- extent / orphan / namei / xattr / truncate algorithms
+           ^
+           `-- borrow Ext4Inode private state composed in the VFS inode
     v
 block::BlockDevice
 ```
@@ -85,17 +88,55 @@ KExt4 核心 API 可能执行块设备 I/O、内存分配、JBD2 事务、checkp
 因此属于任务上下文 API，允许阻塞，不适合在中断上下文调用。它也不适合在块设备、
 分配器和 journal 状态尚未可用的早期启动阶段调用。
 
-当前运行态 bridge 使用挂载级 `Mutex<kext4::Ext4Filesystem>` 串行化核心访问。调用者
-不能假设已有 per-inode 或 per-group 级别的并行修改。可写文件打开计数由
+当前运行态 bridge 使用挂载级 `RwLock<kext4::Ext4Filesystem>`：只读调用可共享进入，
+mutation 仍由 write guard 串行化。VFS inode 组合持有的 ext4 private state 以 sleepable mutex
+保护磁盘 metadata working state 和 delayed-allocation extents；resident lifecycle 完全归 KVFS。
+调用者不能假设 allocator 或 journal
+已有 per-group 级别的并行修改。可写文件打开计数由
 KVFS `VfsInode` 拥有，bridge 只在 release callback 中读取它。
 
-该挂载级 mutex 是过渡实现而不是长期调用契约。N1 已把磁盘 journal、transaction engine 和
+该挂载级读写锁是过渡实现而不是长期调用契约。N1 已把磁盘 journal、transaction engine 和
 checkpoint queue 收进同一个 `MountedJournal` 生命周期边界；metadata、allocator、device 和
 geometry 继续由 `Ext4Filesystem` mount state 持有，对应 Linux `ext4_sb_info` 的聚合角色。
 N2 根据真实执行者建立 journal、per-inode、metadata-buffer 和 per-group 锁，替代 bridge
 全局串行化。所有这些路径仍属于可阻塞的任务上下文，不能从中断上下文调用。
 
 ## 状态机
+
+### VFS resident inode 与 ext4 private state
+
+```text
+KVFS InodeCache::iget(ino)
+  -> absent: reserve New, decode one Ext4Inode private state, publish Live VfsInode
+  -> New: wait for initialization
+  -> Live: return the existing VfsInode
+  -> Freeing: wait for final eviction, then retry
+
+absent -> New -> Live -> Freeing -> absent
+```
+
+`VfsInode`/`AddressSpace` 是唯一 resident identity，状态层次对应 Linux `struct inode` 的
+`I_NEW`、普通可用状态和 `I_FREEING`。KVFS cache 先占据 `New` slot，再让唯一 initializer
+解码 `RawInode` 并构造 bridge private state；初始化失败会撤销 slot 并唤醒等待者。最后一个
+VFS 引用进入 drop 时，KVFS 在调用 filesystem eviction hook 前发布 `Freeing`；同号 lookup
+等待 cleanup 完成并重新查找，不把竞争暴露为 `EINVAL` 或 `ESTALE`。
+
+`RawInode` 只是经校验的磁盘表示。`Ext4Inode` 对应组合在 Linux `struct inode` 内的
+`ext4_inode_info` 私有部分：它没有 inode-number cache、resident lifecycle 或 eviction
+引用计数。普通 lookup 只允许 KVFS `New` slot 的 owner 从磁盘构造这份状态；unlink、rmdir、
+link 和 rename 必须传入 VFS 已持有的 child/moved/replaced private state，core 不按编号重新
+解码 live inode。Recovery 在尚未发布 mount/VFS identity 时可以构造临时状态处理 orphan。
+
+Metadata mutation 先 stage/publish journal buffer，再在同一 inode component 中发布结果。
+该组件同时承载 KVFS 通过 `InodeAttributeOperations` 访问的 generic fields，以及
+`i_disksize`、extent root、ext4 flags、xattr block 等 ext4-private fields；这对应 Linux
+`ext4_inode_info` 内嵌 `struct inode`，不是两份 attribute cache。`i_size` 可以在 ordered
+writeback 前领先 `i_disksize`，两者是 Linux 本来就有的不同字段。bridge 不再执行 mutation
+后的 metadata snapshot 回灌，也不创建备用 resident wrapper 或按 inode number 重载 live state。
+Regular-file metadata publish 只提交 `i_disksize` 等 ext4 状态，不能因为旧 `i_size ==
+i_disksize` 就顺带修改 `i_size`；后者只由 VFS `write_end_set_size()` 或
+`truncate_setsize()` 在 PageCache 顺序点发布。目录、符号链接等由 ext4 算法直接改变长度的
+对象则在对应 metadata mutation 中显式发布其可见长度。
 
 ### 元数据事务
 
@@ -223,9 +264,9 @@ namespace transaction
   -> 释放 inode bitmap entry
 ```
 
-Namespace transaction 不释放 inode number、xattr 或 data block。`referenced_inode()` 只供
-已经持有 VFS inode identity 的路径读取 zero-link inode，使 open fd 在 unlink 后仍可读写；
-新的 namespace lookup 仍使用严格的 `inode()`，不会把 orphan 重新实例化为可达文件。对应的
+Namespace transaction 不释放 inode number、xattr 或 data block。已有 VFS/open-file 引用继续
+持有同一个 `VfsInode` 及其组合的 ext4 private state，所以 zero-link 后仍可读写；新的
+namespace `iget()` 拒绝 zero-link inode，不会把 orphan 重新实例化为可达文件。对应的
 namespace credits 只覆盖 dirent、nlink 和 orphan metadata；不能把后续 final eviction 的
 extent、external xattr 和 inode bitmap 工作提前计入 rename/unlink/rmdir reservation。旧的
 单事务 recovery/测试 eviction 路径按当前 extent tree 的实际 metadata targets 估算，运行态
@@ -261,13 +302,23 @@ Truncate 使用 legacy orphan list 保护 regular-file shrink。KExt4 的
 `AddressSpaceOperations::set_len()` 按
 `prepare_regular_inode_truncate()` → `AddressSpace::truncate_setsize()`（先发布 VFS i_size，
 再执行 unmap/cache truncate/unmap）→
-`finish_regular_inode_truncate()` 排序；这与 Linux ext4 `setattr` 路径在
+delalloc extent-status 尾部删除 → `finish_regular_inode_shrink()` 排序。是否删除 delalloc
+以旧 `i_size` 为准，是否释放磁盘 mapping 以旧 `i_disksize` 为准；因此截断到
+`[i_disksize, old i_size)` 或恰好等于 `i_disksize` 仍会在 dirty folio 被丢弃后同步减少
+`i_reserved_data_blocks` 与 mount aggregate。这与 Linux ext4 `setattr` 路径在
 `i_size_write()` 后执行其内部 `truncate_pagecache()`、再进行 filesystem block truncate
-的职责层次一致，不增加第二个 truncate operation hook。显式 recovery 在 journal 需要 replay 时先重放并保持 recovery flag，再遍历
+的职责层次一致。`prepare_regular_inode_truncate()` 即使先提交了缩小后的 `i_disksize`，也必须
+保留旧 `i_size`，使随后 PageCache 能按真实旧 EOF 丢弃 folio、清零同页尾部并失效映射；不增加
+第二个 truncate operation hook。显式 recovery 在 journal 需要 replay 时先重放并保持 recovery flag，再遍历
 legacy orphan list；即使 journal 已 clean，只要 superblock 仍有 orphan head，也会执行同一
 cleanup。`nlink > 0` regular inode 完成中断的 truncate，`nlink == 0` inode 复用 final
 eviction 事务释放 external xattr、extent 和 inode bitmap。`recover()` 返回 `None` 只表示
 没有 journal replay report，不表示没有执行 orphan cleanup，也不降低成功返回的持久性保证。
+Legacy orphan 链的 `i_dtime` 是 journaled inode-table topology，不复制到 resident private
+state。链遍历直接读取 metadata cache 中的 inode-table bytes，前驱重连也按已经校验的 inode
+number 原位修改同一 bytes；它不会为了读取或更新前驱而构造另一个 `Ext4Inode`。因此两个同时
+open-unlink 的 inode 可以按任意顺序完成 final eviction，而不会从旧 private snapshot 恢复已经
+移除的 orphan next。
 clean-journal cleanup 的首个 transaction 会先建立 ext4 recovery evidence；所有 recovery
 cleanup transaction 都采用 `PreserveDuringRecovery`，逐个同步完成 commit/checkpoint，并从
 已落盘的 superblock/group descriptors 重新建立内存状态，避免旧 orphan head 或 allocator
@@ -292,23 +343,29 @@ extent，也不再用 512 截断所需预算。跨叶 range removal 的全树回
 `EXT4_HUGE_FILE_FL` 的普通 inode 仍以 512-byte sector 记录 `i_blocks`，KExt4 可以安全修改。
 真正设置该 inode flag、以 filesystem block 为单位计数的 inode 仍显式返回 unsupported。
 
-Namei、setattr、writeback 和 truncate mutation 返回的 `Ext4Inode` 通过 bridge 统一转换为
-KVFS `Metadata`，刷新同一 `VfsInode` 的 nlink、size、blocks、mode/owner 和 timestamps。
-Callback 已持有 inode identity 时直接使用 `VfsInode` refresh；link/unlink/rename 等只持有
-目标 dentry 的路径通过 `Dentry` semantic refresh，不向 bridge 暴露 KVFS 内部 inode
-引用。`InodeCache` 保证一个 live ext4 inode number 只对应一个 `VfsInode` 和一个
-AddressSpace。
+Namei、setattr、writeback 和 truncate mutation 原位更新 VFS inode 组合持有的 ext4 private
+state；完整 `stat/getattr` 通过 Linux `struct kstat` 对等的瞬时 `Ext4InodeStat` 在一次 inode-state
+临界区读取 nlink、size、blocks、mode/owner、rdev 和 timestamps。该值不驻留、不参与 identity，
+也不是 attribute cache。unlink/rmdir/rename 从已锁定 dentry 取得 victim/moved/replaced VFS
+inode 并把其 private state 显式传给 core，禁止 core 在 mutation 中按 inode number 重新加载。
+VFS `InodeCache` 因而独自保证一个 live inode number 只对应一个 `VfsInode`、一个
+`AddressSpace` 和一份 ext4 private state。
 
 Bridge 在 mount 时缓存 filesystem block size 以及 extent/legacy 两个文件系统级上限；
-bridge inode 只保存从已加载 core inode 得到的 extent-format 状态。write、truncate、FIEMAP
+bridge inode 通过其组合持有的 ext4 private state 查询 extent-format 状态。write、truncate、FIEMAP
 和 `page_mkwrite` 通过同一个 helper 按该格式状态选择上限，既不复制派生的 per-inode
 maxbytes，也不为上限查询重新读取 inode-table 或取得挂载级 core lock。
-每个 live inode 用一个 logical-block set 保存最小的 delayed extent 状态，
-对应 Linux `ext4_inode_info::i_es_tree` 中的 delayed entries；集合大小同时就是该 inode 的
-reserved data blocks，不另存派生 prefix 或计数字段。挂载级 reservation aggregate 对应 Linux
+Block mapping 热路径从同一 inode state 临界区一次取得 ext4 flags 与 60-byte `i_block` root；
+extent 和 legacy mapper 随后借用该局部 root 完成一次 run 查询，避免 direct-pointer 合并循环
+重复加锁或复制 `i_block`，也不在块设备 I/O 期间持有 inode state lock。
+每份 inode private state 用不重叠的 logical-block 区间保存 delayed extent，
+对应 Linux `ext4_inode_info::i_es_tree` 中的 delayed entries，并维护
+`i_reserved_data_blocks` 等价计数。挂载级 reservation aggregate 对应 Linux
 `s_dirtyclusters_counter`，用于 admission 与 `statfs()`，不是第二份 extent identity。
 Delayed-allocation admission 使用 primary superblock 的 free-block counter 减去 ext4 reserved
-blocks 和 bridge 已有 reservation。该 counter 与 group descriptor 由同一
+blocks 和 core mount aggregate。reserve/release/truncate/writeback/eviction 只能调用 core 的
+区间 API，由一次持有 mount mutation guard 的操作同时更新 inode 区间、per-inode count 和
+mount aggregate；bridge 不读取或调整任一计数。该 counter 与 group descriptor 由同一
 allocation/release mutation 更新，因此 admission 是常数时间；显式 `statfs()` 仍遍历 group
 descriptor，提供独立的实时统计与一致性观察面。
 
@@ -322,8 +379,10 @@ FIEMAP 能统一报告两种写入口产生的 `DELALLOC | UNKNOWN`，不扫描 
 FIEMAP 查询通过 inode operation 进入，并复用与 write/truncate 相同的已缓存 inode 格式上限：
 extent 格式按 `(2^32 - 1) << block_bits` 及 `i_blocks` 上限计算，legacy
 格式同时计入 indirect metadata blocks、`huge_file` 与 `MAX_LFS_FILESIZE` 上限。随后按请求
-范围调用只读 `map_blocks()`。Hole 被跳过；mapped extent 输出物理块范围，unwritten extent
-添加 `UNWRITTEN`，尚在 bridge delayed set 中的块输出
+范围调用只读 `report_mapping()`；它对应 Linux `ext4_iomap_begin_report()` 经
+`ext4_map_blocks()` 观察 `EXT4_MAP_DELAYED` 的层次，在 core 内把 inode extent-status 区间覆盖到
+磁盘 hole 的 `BlockMappingFlags::DELAYED`。Bridge 只遍历统一 mapping 结果：普通 hole 被跳过，
+mapped extent 输出物理块范围，unwritten 添加 `UNWRITTEN`，delayed hole 添加
 `DELALLOC | UNKNOWN`。Legacy pointer 映射按连续 logical/physical block 合并并添加
 `BlockMappingFlags::MERGED`，bridge 将其转换为 `FIEMAP_EXTENT_MERGED`。遍历保留一个
 pending extent，只有确认查询范围内没有后续映射时才添加 `LAST`；输出容量满时立即停止且
@@ -331,15 +390,20 @@ pending extent，只有确认查询范围内没有后续映射时才添加 `LAST
 
 ## 并发模型
 
-运行态 filesystem 调用当前通过 bridge mutex 粗粒度串行化。核心内部的 metadata buffer
+运行态 mutation 当前通过 bridge 挂载级 `RwLock` 的 write guard 粗粒度串行化，只读调用可
+共享 read guard。KVFS inode cache mutex 只保护 `New/Live/Freeing` identity state；每个 cache
+slot 使用自己的等待队列，等待发生在释放 cache mutex 之后，因此一个 inode 的状态变化不会
+唤醒其它 inode 的 `iget`。ext4 private state 使用独立 sleepable mutex，普通 metadata 读取或
+mutation 不进入另一张 inode cache。
+核心内部的 metadata buffer
 和 JBD2 transaction handle 仍会记录 buffer ownership、credit consumption 和 revoke 状态。
 同一 inode 的 `writepages()` 由 bridge 的 sleepable writeback mutex 串行化，但进入 PageCache
 遍历时不持有挂载级 core mutex；PageCache 在释放 mapping/folio mutex 后调用 batch writer，
-batch writer 才短暂取得 core mutex，并在释放 core mutex 后更新 delalloc accounting。这样
+batch writer 才短暂取得 core mutex，并由 core 在该 guard 内更新 delalloc accounting。这样
 普通 cache miss 的 `MappingInner -> core` 路径不会与 writeback 形成反向锁序。
 FIEMAP 在 VFS inode shared lock 下执行，regular inode 另以 `writeback_lock` 稳定磁盘
-mapping；每次 core mapping 查询和 delayed-set 查询只短暂持有各自的锁，并在调用安全输出
-writer 前释放。Buffered write 和 truncate 使用 inode data lock 的 exclusive 侧；
+mapping；core `report_mapping()` 只短暂读取 delayed extent lock，随后再查询磁盘 mapping，
+并在调用安全输出 writer 前释放 core 锁。Buffered write 和 truncate 使用 inode data lock 的 exclusive 侧；
 `page_mkwrite` 使用 address-space invalidate shared lock 和 folio lock，truncate 同时使用
 invalidate exclusive 侧。三条路径通过同一个 delayed-set lock 发布 mapping/reservation
 状态。用户页错误或大输出因此不会持有挂载级 core read lock。
@@ -350,7 +414,9 @@ allocator 的实际并发关系建立锁顺序；不以字段分组预设锁域�
 
 ## 设计决策
 
-- ext4 磁盘格式和一致性不变量由 `kext4` 核心负责，KVFS 对象生命周期由 bridge 负责。
+- ext4 磁盘格式、一致性不变量和 inode component 由 `kext4` 核心负责；resident identity、
+  generic attribute 语义、PageCache 和 open-file 引用生命周期只由 KVFS `VfsInode` 负责。
+  KVFS 通过 attribute operations 访问该组件里的唯一通用属性存储，不维护第二份 cache。
 - `kext4` crate 使用 `#![forbid(unsafe_code)]`，unsafe 或设备相关细节留在核心边界之外。
 - 未实现的 ext4 格式能力通过显式 unsupported error 暴露，避免把不完整格式误挂载为可写。
 - KExt4 的新生命周期与 I/O 语义只在 KExt4 core/bridge 落地，不保留第二套 ext4 实现路径。
@@ -375,5 +441,13 @@ extent-backed data，清理 inode metadata，最后释放 inode bitmap entry。
 reservation 时丢弃 EOF 后未使用的预分配，对应 Linux `ext4_release_file()`；
 close 不额外强制普通 dirty PageCache writeback，数据回写由 `fsync`/`syncfs` 和通用
 writeback 路径负责。`VfsInode` 最后一个引用消失时，superblock hook 先丢弃
-PageCache/剩余 delalloc accounting，再对 nlink=0
-inode 调用 core final eviction。nlink 非零的 cache eviction 不释放磁盘 inode。
+PageCache/剩余 delalloc accounting，再对 nlink=0 inode 组合持有的 ext4 private state 调用
+final eviction。KVFS 在 hook 前完成 `Live -> Freeing`，所以 cleanup 期间没有普通 VFS 能力；
+三阶段 core API 始终借用该 `VfsInode` 组合持有的同一 private component；它不返回可逃逸的
+eviction token 或另一种 inode handle。完成后 KVFS 精确删除旧 cache entry 并唤醒同号 `iget`。
+nlink 非零的 cache eviction 不释放磁盘 inode；后续 `iget` 可从仍分配的磁盘 inode构造新的
+private component。
+
+Recovery 不创建 resident inode 表。它在 mount/VFS identity 尚未发布时通过 orphan-aware decode
+取得临时 private state，复用正常 truncate 或 zero-link eviction。若 cleanup 失败，恢复证据
+保留并阻止该 filesystem 被当作成功挂载。

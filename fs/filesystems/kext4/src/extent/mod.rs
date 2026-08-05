@@ -19,6 +19,8 @@ bitflags::bitflags! {
     pub struct BlockMappingFlags: u32 {
         /// The returned run was coalesced from adjacent mappings.
         const MERGED = 1 << 0;
+        /// The hole is reserved for delayed allocation.
+        const DELAYED = 1 << 1;
     }
 }
 
@@ -26,7 +28,10 @@ bitflags::bitflags! {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlockMapping {
     /// The logical range has no physical blocks and reads as zeroes.
-    Hole { len: BlockCount },
+    Hole {
+        len: BlockCount,
+        flags: BlockMappingFlags,
+    },
     /// The logical range maps to initialized physical blocks.
     Mapped {
         physical: PhysicalBlock,

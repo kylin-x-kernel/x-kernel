@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 use super::{
-    BlockMapping, ExtentMappingState,
+    BlockMapping, BlockMappingFlags, ExtentMappingState,
     legacy::legacy_max_file_size,
     map::extent_max_file_size,
     mutate::insert_inline_extent_bytes,
@@ -45,7 +45,8 @@ fn map_leaf_caps_trailing_hole_at_parent_limit() {
     assert_eq!(
         map_leaf(&bytes, header, 150, Some(200)),
         Ok(BlockMapping::Hole {
-            len: BlockCount::new(50)
+            len: BlockCount::new(50),
+            flags: BlockMappingFlags::empty(),
         })
     );
 }

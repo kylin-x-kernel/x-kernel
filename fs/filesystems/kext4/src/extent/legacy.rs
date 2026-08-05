@@ -91,6 +91,7 @@ impl Ext4Filesystem {
     pub(super) fn map_legacy_blocks(
         &self,
         inode: &Ext4Inode,
+        block_root: &[u8],
         logical: LogicalBlock,
     ) -> Ext4Result<BlockMapping> {
         let block_size =
@@ -99,7 +100,7 @@ impl Ext4Filesystem {
         let logical = logical.get();
 
         if logical < LEGACY_DIRECT_BLOCKS {
-            return self.map_legacy_direct_blocks(inode, logical);
+            return self.map_legacy_direct_blocks(inode, block_root, logical);
         }
 
         let single_span = pointers_per_block;
@@ -110,7 +111,7 @@ impl Ext4Filesystem {
             .ok_or(Ext4Error::Overflow)?;
 
         if logical < single_span {
-            let root = legacy_inode_block_pointer(inode, LEGACY_SINGLE_INDIRECT_INDEX)?;
+            let root = legacy_inode_block_pointer(block_root, LEGACY_SINGLE_INDIRECT_INDEX)?;
             return self.map_legacy_indirect_tree(inode, root, 1, logical, pointers_per_block);
         }
         logical = logical
@@ -118,7 +119,7 @@ impl Ext4Filesystem {
             .ok_or(Ext4Error::Overflow)?;
 
         if logical < double_span {
-            let root = legacy_inode_block_pointer(inode, LEGACY_DOUBLE_INDIRECT_INDEX)?;
+            let root = legacy_inode_block_pointer(block_root, LEGACY_DOUBLE_INDIRECT_INDEX)?;
             return self.map_legacy_indirect_tree(inode, root, 2, logical, pointers_per_block);
         }
         logical = logical
@@ -126,7 +127,7 @@ impl Ext4Filesystem {
             .ok_or(Ext4Error::Overflow)?;
 
         if logical < triple_span {
-            let root = legacy_inode_block_pointer(inode, LEGACY_TRIPLE_INDIRECT_INDEX)?;
+            let root = legacy_inode_block_pointer(block_root, LEGACY_TRIPLE_INDIRECT_INDEX)?;
             return self.map_legacy_indirect_tree(inode, root, 3, logical, pointers_per_block);
         }
 
@@ -136,22 +137,24 @@ impl Ext4Filesystem {
     fn map_legacy_direct_blocks(
         &self,
         inode: &Ext4Inode,
+        block_root: &[u8],
         logical: u64,
     ) -> Ext4Result<BlockMapping> {
         let index = usize::try_from(logical).map_err(|_| Ext4Error::Overflow)?;
-        let physical = legacy_inode_block_pointer(inode, index)?;
+        let physical = legacy_inode_block_pointer(block_root, index)?;
         if physical == 0 {
             let mut run_len = 1u32;
             let mut next_index = index.checked_add(1).ok_or(Ext4Error::Overflow)?;
             while next_index
                 < usize::try_from(LEGACY_DIRECT_BLOCKS).map_err(|_| Ext4Error::Overflow)?
-                && legacy_inode_block_pointer(inode, next_index)? == 0
+                && legacy_inode_block_pointer(block_root, next_index)? == 0
             {
                 run_len = run_len.checked_add(1).ok_or(Ext4Error::Overflow)?;
                 next_index = next_index.checked_add(1).ok_or(Ext4Error::Overflow)?;
             }
             return Ok(BlockMapping::Hole {
                 len: BlockCount::new(run_len),
+                flags: BlockMappingFlags::empty(),
             });
         }
 
@@ -161,7 +164,7 @@ impl Ext4Filesystem {
             let expected = u64::from(physical)
                 .checked_add(u64::from(run_len))
                 .ok_or(Ext4Error::Overflow)?;
-            if u64::from(legacy_inode_block_pointer(inode, next_index)?) != expected {
+            if u64::from(legacy_inode_block_pointer(block_root, next_index)?) != expected {
                 break;
             }
             if !self.is_inode_physical_block_valid(
@@ -234,6 +237,7 @@ impl Ext4Filesystem {
             }
             return Ok(BlockMapping::Hole {
                 len: BlockCount::new(run_len),
+                flags: BlockMappingFlags::empty(),
             });
         }
 
@@ -314,14 +318,15 @@ fn legacy_hole(len: u64) -> Ext4Result<BlockMapping> {
     let len = u32::try_from(len).map_err(|_| Ext4Error::Overflow)?;
     Ok(BlockMapping::Hole {
         len: BlockCount::new(len),
+        flags: BlockMappingFlags::empty(),
     })
 }
 
-fn legacy_inode_block_pointer(inode: &Ext4Inode, index: usize) -> Ext4Result<u32> {
+fn legacy_inode_block_pointer(block_root: &[u8], index: usize) -> Ext4Result<u32> {
     let offset = index
         .checked_mul(LEGACY_BLOCK_POINTER_SIZE)
         .ok_or(Ext4Error::Overflow)?;
-    codec::le_u32(inode.raw_i_block(), offset)
+    codec::le_u32(block_root, offset)
 }
 
 fn legacy_pointer_block_entry(bytes: &[u8], index: u64) -> Ext4Result<u32> {

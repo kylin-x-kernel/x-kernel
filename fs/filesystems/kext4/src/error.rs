@@ -162,6 +162,8 @@ pub enum Ext4Error {
     DirectoryNotEmpty,
     /// A caller-provided ext4 name is not valid for this operation.
     InvalidName,
+    /// Inode and mount delayed-allocation accounting no longer agree.
+    InvalidDelayedAllocationState,
     /// A journal operation must wait for active handles or checkpoint space.
     JournalBusy,
     /// A journal operation referenced a transaction that is not known here.
@@ -221,6 +223,9 @@ impl fmt::Display for Ext4Error {
             Self::NotFound => formatter.write_str("ext4 directory entry was not found"),
             Self::DirectoryNotEmpty => formatter.write_str("ext4 directory is not empty"),
             Self::InvalidName => formatter.write_str("invalid ext4 directory entry name"),
+            Self::InvalidDelayedAllocationState => {
+                formatter.write_str("invalid ext4 delayed-allocation accounting")
+            }
             Self::JournalBusy => {
                 formatter.write_str("ext4 journal must wait for transaction or checkpoint progress")
             }

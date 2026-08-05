@@ -8,13 +8,11 @@ use alloc::{string::String, sync::Arc};
 
 use block::BlockDevice;
 use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
-use kext4::{
-    Ext4Error, Ext4Filesystem as KExt4Core, Ext4Inode, Ext4SyncIntent, InodeNumber, SymlinkStorage,
-};
-use ksync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use kext4::{Ext4Error, Ext4Filesystem as KExt4Core, Ext4Inode, Ext4SyncIntent, InodeNumber};
+use ksync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use kvfs::{
     Dentry, DeviceId, InodeCache, Metadata, NodeFlags, NodeType, StatFs, SuperBlock,
-    SuperBlockFlags, SuperBlockOperations, Umode, VfsError, VfsInode, VfsInodeInit, VfsResult,
+    SuperBlockFlags, SuperBlockOperations, Umode, VfsInode, VfsInodeInit, VfsResult,
     default_evict_inode,
 };
 
@@ -45,7 +43,6 @@ pub struct Ext4Filesystem {
     block_size: u32,
     extent_max_file_size: u64,
     legacy_max_file_size: u64,
-    delalloc_reserved_blocks: Mutex<u64>,
     inode_cache: InodeCache,
 }
 
@@ -85,13 +82,9 @@ impl Ext4Filesystem {
             block_size,
             extent_max_file_size,
             legacy_max_file_size,
-            delalloc_reserved_blocks: Mutex::new(0),
             inode_cache: InodeCache::new(),
         });
-        let root_inode = fs
-            .load_inode(InodeNumber::new(EXT4_ROOT_INO))
-            .inspect_err(|err| error!("KExt4 root inode load failed: {err:?}"))?;
-        let root_inode = Self::iget_from_core_inode(&fs, root_inode)
+        let root_inode = Self::iget(&fs, InodeNumber::new(EXT4_ROOT_INO))
             .inspect_err(|err| error!("KExt4 root inode VFS initialization failed: {err:?}"))?;
         let root = Dentry::new_dir_from_inode(root_inode, None, String::new());
         Ok(SuperBlock::new_with_flags(fs, root, superblock_flags))
@@ -121,48 +114,35 @@ impl Ext4Filesystem {
         self.block_size as u64
     }
 
-    pub(crate) fn load_inode(&self, number: InodeNumber) -> VfsResult<Ext4Inode> {
-        self.read_lock().inode(number).map_err(into_vfs_err)
-    }
-
-    fn metadata_from_core_inode(&self, inode: &Ext4Inode) -> VfsResult<Metadata> {
-        let rdev = inode
-            .device_id()
-            .map_err(into_vfs_err)?
-            .map_or(DeviceId::default(), ext4_device_id_to_vfs);
-        Ok(Metadata {
+    pub(crate) fn metadata_from_core_inode(&self, inode: &Ext4Inode) -> Metadata {
+        let stat = inode.stat();
+        let rdev = stat.rdev.map_or(DeviceId::default(), ext4_device_id_to_vfs);
+        Metadata {
             device: 0,
             inode: u64::from(inode.number().get()),
-            nlink: u64::from(inode.links_count()),
-            mode: Umode::from_bits(inode.mode()),
-            uid: inode.uid(),
-            gid: inode.gid(),
-            size: inode.size(),
+            nlink: u64::from(stat.links_count),
+            mode: Umode::from_bits(stat.mode),
+            uid: stat.uid,
+            gid: stat.gid,
+            size: stat.size,
             block_size: self.block_size(),
-            blocks: inode.blocks(),
+            blocks: stat.blocks,
             rdev,
-            atime: ext4_timestamp_to_system_time(inode.atime()),
-            mtime: ext4_timestamp_to_system_time(inode.mtime()),
-            ctime: ext4_timestamp_to_system_time(inode.ctime()),
-        })
+            atime: ext4_timestamp_to_system_time(stat.atime),
+            mtime: ext4_timestamp_to_system_time(stat.mtime),
+            ctime: ext4_timestamp_to_system_time(stat.ctime),
+        }
     }
 
-    pub(crate) fn sync_vfs_directory(
-        &self,
-        vfs_inode: &VfsInode,
-        core_inode: &Ext4Inode,
-    ) -> VfsResult<()> {
-        let metadata = self.metadata_from_core_inode(core_inode)?;
-        vfs_inode.update_metadata_after_backing_change(&metadata)
-    }
-
-    pub(crate) fn sync_vfs_inode_attributes(
-        &self,
-        vfs_inode: &VfsInode,
-        core_inode: &Ext4Inode,
-    ) -> VfsResult<()> {
-        let metadata = self.metadata_from_core_inode(core_inode)?;
-        vfs_inode.update_attributes_after_backing_change(&metadata)
+    pub(crate) fn iget(fs: &Arc<Self>, number: InodeNumber) -> VfsResult<Arc<VfsInode>> {
+        fs.inode_cache
+            .get_or_try_insert_with(u64::from(number.get()), || {
+                let inode = fs
+                    .read_lock()
+                    .load_inode_private(number)
+                    .map_err(into_vfs_err)?;
+                Self::new_vfs_inode(fs, inode)
+            })
     }
 
     pub(crate) fn iget_from_core_inode(
@@ -170,15 +150,18 @@ impl Ext4Filesystem {
         inode: Ext4Inode,
     ) -> VfsResult<Arc<VfsInode>> {
         let number = inode.number();
-        if let Some(vfs_inode) = fs.inode_cache.lookup(u64::from(number.get())) {
-            return Ok(vfs_inode);
-        }
+        fs.inode_cache
+            .get_or_try_insert_with(u64::from(number.get()), || Self::new_vfs_inode(fs, inode))
+    }
+
+    fn new_vfs_inode(fs: &Arc<Self>, inode: Ext4Inode) -> VfsResult<Arc<VfsInode>> {
+        let number = inode.number();
         let node_type = inode_kind_to_vfs(inode.kind());
-        let has_extents = inode.has_extents();
         let node_flags = node_flags_from_core_inode(&inode);
-        let metadata = fs.metadata_from_core_inode(&inode)?;
+        let metadata = fs.metadata_from_core_inode(&inode);
         let init = VfsInodeInit::new(u64::from(number.get()), metadata.size, metadata.mode)
             .with_owner_links_and_rdev(metadata.uid, metadata.gid, metadata.nlink, metadata.rdev)
+            .with_generation(inode.generation())
             .with_stat_data(
                 metadata.block_size,
                 metadata.blocks,
@@ -187,45 +170,22 @@ impl Ext4Filesystem {
                 metadata.ctime,
             );
 
-        let vfs_inode = match node_type {
-            NodeType::Directory => {
-                fs.inode_cache
-                    .get_or_insert_openable_dir_with_init(node_flags, init, || {
-                        Inode::new(fs.clone(), number, node_type, has_extents)
-                    })
+        let cached_link = if node_type == NodeType::Symlink {
+            match fs.read_lock().fast_symlink_target(&inode) {
+                Ok(Some(target)) => core::str::from_utf8(&target).ok().map(String::from),
+                _ => None,
             }
-            NodeType::RegularFile | NodeType::Unknown => fs
-                .inode_cache
-                .get_or_insert_file_with_init(node_flags, init, || {
-                    Inode::new(fs.clone(), number, node_type, has_extents)
-                }),
-            NodeType::Symlink => {
-                let cached_link = match fs.read_lock().symlink_storage(&inode) {
-                    Ok(SymlinkStorage::Fast(target)) => {
-                        core::str::from_utf8(target).ok().map(String::from)
-                    }
-                    _ => None,
-                };
-                let vfs_inode =
-                    fs.inode_cache
-                        .get_or_insert_symlink_with_init(node_flags, init, || {
-                            Inode::new(fs.clone(), number, node_type, has_extents)
-                        });
-                if let Some(link) = cached_link {
-                    vfs_inode.set_cached_link(link);
-                }
-                vfs_inode
-            }
-            NodeType::CharacterDevice
-            | NodeType::BlockDevice
-            | NodeType::Fifo
-            | NodeType::Socket => {
-                fs.inode_cache
-                    .get_or_insert_special_with_init(node_flags, init, || {
-                        Inode::new(fs.clone(), number, node_type, has_extents)
-                    })
-            }
+        } else {
+            None
         };
+        let vfs_inode = VfsInode::new_with_inode_attribute_operations(
+            Inode::new(fs.clone(), inode, node_type),
+            node_flags,
+            init,
+        );
+        if let Some(link) = cached_link {
+            vfs_inode.set_cached_link(link);
+        }
         Ok(vfs_inode)
     }
 
@@ -235,35 +195,11 @@ impl Ext4Filesystem {
 
     pub(crate) fn sync_inode_to_disk(
         &self,
-        number: InodeNumber,
+        inode: &Ext4Inode,
         intent: Ext4SyncIntent,
     ) -> VfsResult<()> {
         let mut fs = self.lock();
-        let inode = fs.referenced_inode(number).map_err(into_vfs_err)?;
-        fs.sync_inode(&inode, intent).map_err(into_vfs_err)
-    }
-
-    pub(crate) fn reserve_delalloc_blocks(&self, blocks: u64) -> VfsResult<()> {
-        if blocks == 0 {
-            return Ok(());
-        }
-
-        let blocks_available = self.lock().blocks_available_for_reservation();
-        let mut reserved = self.delalloc_reserved_blocks.lock();
-        let available = blocks_available.saturating_sub(*reserved);
-        if blocks > available {
-            return Err(VfsError::StorageFull);
-        }
-        *reserved = reserved.saturating_add(blocks);
-        Ok(())
-    }
-
-    pub(crate) fn release_delalloc_blocks(&self, blocks: u64) {
-        if blocks == 0 {
-            return;
-        }
-        let mut reserved = self.delalloc_reserved_blocks.lock();
-        *reserved = reserved.saturating_sub(blocks);
+        fs.sync_inode(inode, intent).map_err(into_vfs_err)
     }
 }
 
@@ -275,13 +211,12 @@ impl SuperBlockOperations for Ext4Filesystem {
     fn statfs(&self) -> VfsResult<StatFs> {
         let fs = self.read_lock();
         let stat = fs.statfs().map_err(into_vfs_err)?;
-        let reserved = *self.delalloc_reserved_blocks.lock();
         Ok(StatFs {
             fs_type: 0xef53,
             block_size: stat.block_size,
             blocks: stat.blocks,
-            blocks_free: stat.blocks_free.saturating_sub(reserved),
-            blocks_available: stat.blocks_available.saturating_sub(reserved),
+            blocks_free: stat.blocks_free,
+            blocks_available: stat.blocks_available,
             file_count: stat.files,
             free_file_count: stat.files_free,
             name_length: stat.max_name_len,
@@ -300,19 +235,19 @@ impl SuperBlockOperations for Ext4Filesystem {
     fn evict_inode(&self, inode: &VfsInode) -> VfsResult<()> {
         default_evict_inode(inode)?;
         let ext4_inode: Arc<Inode> = inode.downcast()?;
-        ext4_inode.release_delalloc_for_eviction();
-        if inode.metadata().nlink != 0 {
+        self.lock()
+            .release_all_delalloc(ext4_inode.core_inode())
+            .map_err(into_vfs_err)?;
+        if inode.link_count() != 0 {
             return Ok(());
         }
 
-        let number = ext4_inode.number();
         let timestamp = current_ext4_timestamp();
 
         // Phase A: orphan + xattr (extent tree is NOT truncated — it
         // serves as the persistent record of blocks to free)
-        let mut handle = self
-            .lock()
-            .eviction_prepare(number, timestamp)
+        self.lock()
+            .eviction_prepare(ext4_inode.core_inode())
             .map_err(into_vfs_err)?;
 
         // Phase B: atomically truncate extent tree in batches, each
@@ -321,7 +256,7 @@ impl SuperBlockOperations for Ext4Filesystem {
         loop {
             let (_, done) = {
                 let mut core = self.lock();
-                core.eviction_release_batch(&mut handle, EVICTION_BATCH_BLOCKS)
+                core.eviction_release_batch(ext4_inode.core_inode(), EVICTION_BATCH_BLOCKS)
                     .map_err(into_vfs_err)?
             };
             if done {
@@ -330,6 +265,8 @@ impl SuperBlockOperations for Ext4Filesystem {
         }
 
         // Phase C: update metadata, remove orphan, release inode slot
-        self.lock().eviction_finish(handle).map_err(into_vfs_err)
+        self.lock()
+            .eviction_finish(ext4_inode.core_inode(), timestamp)
+            .map_err(into_vfs_err)
     }
 }

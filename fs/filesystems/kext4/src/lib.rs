@@ -41,9 +41,16 @@
 //! persists nlink/orphan state without releasing an inode that still has a live
 //! VFS identity; final `SuperBlockOperations::evict_inode` releases xattrs,
 //! extents, and the inode bitmap after the last reference is gone. Core mutation
-//! results refresh the shared VFS inode attributes. The R8 write strategy adds
-//! per-group order-bucket free extent caches, bridge-side delayed-allocation
-//! reservation with statfs accounting, writeback-time physical allocation,
+//! results update the inode component composed into the sole resident KVFS
+//! inode; KVFS generic attribute operations read and update that same state,
+//! so the bridge has no second cached snapshot to refresh. KVFS owns
+//! `I_NEW`/`I_FREEING`-equivalent lookup and eviction; KExt4 owns no resident
+//! inode cache or lifecycle. Namespace mutation receives the already resident
+//! child/moved/replaced private state instead of reloading it by number.
+//! Recovery runs before VFS identity publication and uses temporary private
+//! state with the normal truncate/eviction algorithms. The R8 write strategy adds
+//! per-group order-bucket free extent caches, interval-based delayed-allocation
+//! reservation with core-owned inode/mount accounting, writeback-time physical allocation,
 //! normalized unwritten preallocation, EOF preallocation discard after the
 //! last writer has no delayed reservations, and
 //! Linux-style Orlov inode group selection with flex group, threshold,
@@ -103,6 +110,7 @@ mod mballoc;
 mod namei;
 mod orphan;
 mod superblock;
+mod sync;
 mod truncate;
 mod types;
 mod xattr;
@@ -118,17 +126,12 @@ pub use error::{
 pub use extent::{BlockMapping, BlockMappingFlags};
 pub use file::Ext4SyncIntent;
 pub use inode::{
-    Ext4DeviceId, Ext4Inode, Ext4InodeMetadataUpdate, Ext4Timestamp, InodeKind, SymlinkStorage,
-};
-pub use namei::{
-    EvictionHandle, Ext4NamespaceCreate, Ext4NamespaceLink, Ext4NamespaceRemove,
-    Ext4NamespaceRename,
+    Ext4DeviceId, Ext4Inode, Ext4InodeMetadataUpdate, Ext4InodeStat, Ext4Timestamp, InodeKind,
 };
 pub use superblock::{
     Ext4Filesystem, Ext4RecoveryReport, Ext4StatFs, FilesystemLayout, JournalLocation,
     JournalStatus,
 };
-pub use truncate::Ext4PreparedTruncate;
 pub use types::{
     BlockCount, BlockGroupNumber, FilesystemBlock, InodeNumber, LogicalBlock, PhysicalBlock,
 };

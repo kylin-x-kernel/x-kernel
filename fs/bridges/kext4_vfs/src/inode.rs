@@ -4,30 +4,32 @@
 
 //! KExt4 inode operations.
 
-use alloc::{collections::BTreeSet, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{string::String, sync::Arc, vec, vec::Vec};
 
 use iov_iter::{IovIterDest, IovIterSource};
 use kerrno::LinuxError;
 use kext4::{
     BlockMapping, BlockMappingFlags, Ext4DirEntryRef, Ext4DirPos, Ext4DirSink, Ext4Inode,
     Ext4InodeMetadataUpdate, Ext4SyncIntent, Ext4XattrNameRef, Ext4XattrNameSink,
-    Ext4XattrNamespace, Ext4XattrSetMode, InodeNumber, LogicalBlock,
+    Ext4XattrNamespace, Ext4XattrSetMode, LogicalBlock,
 };
 use ksync::Mutex;
+use ktime_types::SystemTime;
 use kvfs::{
     AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FMode, FiemapExtentFlags,
-    FiemapExtentInfo, FiemapFlags, FileDirOperations, FileOperations, InodeDirOperations,
-    InodeFiemapOperations, InodeOperations, InodeSymlinkOperations, Kiocb, LockedDentry, Metadata,
-    MetadataUpdate, NodeType, PageMkwriteRequest, ReadaheadControl, RenameFlags, VfsError, VfsFile,
-    VfsInode, VfsResult, WriteBeginRequest, WriteEndRequest, WritebackControl, XattrName,
-    XattrNameRef, XattrNameSink, XattrSetFlags, inode_init_owner,
+    FiemapExtentInfo, FiemapFlags, FileDirOperations, FileOperations, InodeAttributeOperations,
+    InodeDirOperations, InodeFiemapOperations, InodeOperations, InodeSymlinkOperations, Kiocb,
+    LockedDentry, Metadata, MetadataUpdate, NodePermission, NodeType, PageMkwriteRequest,
+    ReadaheadControl, RenameFlags, Umode, VfsError, VfsFile, VfsInode, VfsResult,
+    WriteBeginRequest, WriteEndRequest, WritebackControl, XattrName, XattrNameRef, XattrNameSink,
+    XattrSetFlags, inode_init_owner,
 };
 
 use super::{
     fs::Ext4Filesystem,
     util::{
-        current_ext4_timestamp, device_id_to_ext4, dir_entry_type_to_vfs,
-        ext4_timestamp_to_system_time, into_vfs_err, system_time_to_ext4, vfs_type_to_inode_kind,
+        current_ext4_timestamp, device_id_to_ext4, dir_entry_type_to_vfs, ext4_device_id_to_vfs,
+        into_vfs_err, system_time_to_ext4, vfs_type_to_inode_kind,
     },
 };
 
@@ -126,43 +128,44 @@ fn into_xattr_vfs_err(err: kext4::Ext4Error) -> VfsError {
 /// VFS inode wrapper for KExt4 nodes.
 pub(crate) struct Inode {
     fs: Arc<Ext4Filesystem>,
-    number: InodeNumber,
+    core_inode: Ext4Inode,
     node_type: NodeType,
-    has_extents: bool,
-    delayed_blocks: Mutex<BTreeSet<u64>>,
     writeback_lock: Mutex<()>,
 }
 
 impl Inode {
     pub(crate) fn new(
         fs: Arc<Ext4Filesystem>,
-        number: InodeNumber,
+        core_inode: Ext4Inode,
         node_type: NodeType,
-        has_extents: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             fs,
-            number,
+            core_inode,
             node_type,
-            has_extents,
-            delayed_blocks: Mutex::new(BTreeSet::new()),
             writeback_lock: Mutex::new(()),
         })
     }
 
-    pub(crate) const fn number(&self) -> InodeNumber {
-        self.number
+    pub(crate) fn core_inode(&self) -> &Ext4Inode {
+        &self.core_inode
+    }
+
+    fn ensure_same_filesystem(&self, other: &Self) -> VfsResult<()> {
+        if Arc::ptr_eq(&self.fs, &other.fs) {
+            Ok(())
+        } else {
+            Err(VfsError::Io)
+        }
     }
 
     fn lookup_child(&self, name: &str) -> VfsResult<Arc<VfsInode>> {
         let entry = {
             let fs = self.fs.read_lock();
-            let directory = fs.inode(self.number).map_err(into_vfs_err)?;
-            fs.lookup(&directory, name).map_err(into_vfs_err)?
+            fs.lookup(&self.core_inode, name).map_err(into_vfs_err)?
         }
         .ok_or(VfsError::NotFound)?;
-        let inode = self.fs.load_inode(entry.inode())?;
-        Ext4Filesystem::iget_from_core_inode(&self.fs, inode)
+        Ext4Filesystem::iget(&self.fs, entry.inode())
     }
 
     fn block_size(&self) -> u64 {
@@ -170,7 +173,8 @@ impl Inode {
     }
 
     fn max_file_size(&self) -> u64 {
-        self.fs.max_file_size_for_format(self.has_extents)
+        self.fs
+            .max_file_size_for_format(self.core_inode.has_extents())
     }
 
     fn check_write_limit(&self, pos: u64, count: &mut usize) -> VfsResult<()> {
@@ -187,112 +191,24 @@ impl Inode {
         Ok(())
     }
 
-    fn collect_hole_blocks(&self, pos: u64, len: usize) -> VfsResult<Vec<u64>> {
-        if len == 0 {
-            return Ok(Vec::new());
-        }
-
-        let block_size = self.block_size();
-        let (first, last) =
-            logical_block_bounds(pos, len, block_size)?.ok_or(VfsError::InvalidInput)?;
-        let candidates = {
-            let delayed_blocks = self.delayed_blocks.lock();
-            (first..=last)
-                .filter(|block| !delayed_blocks.contains(block))
-                .collect::<Vec<_>>()
-        };
-        if candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let fs = self.fs.read_lock();
-        let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
-        let mut holes = Vec::new();
-        for block in candidates {
-            if matches!(
-                fs.map_blocks(&inode, LogicalBlock::new(block))
-                    .map_err(into_vfs_err)?,
-                BlockMapping::Hole { .. }
-            ) {
-                holes.push(block);
-            }
-        }
-        Ok(holes)
-    }
-
-    fn reserve_delalloc_blocks(&self, blocks: Vec<u64>) -> VfsResult<()> {
-        if blocks.is_empty() {
+    fn reserve_delalloc_range(&self, pos: u64, len: usize) -> VfsResult<()> {
+        let Some((first, block_count)) = logical_block_range(pos, len, self.block_size())? else {
             return Ok(());
-        }
-
-        let candidates = {
-            let delayed_blocks = self.delayed_blocks.lock();
-            blocks
-                .into_iter()
-                .filter(|block| !delayed_blocks.contains(block))
-                .collect::<Vec<_>>()
-        };
-        if candidates.is_empty() {
-            return Ok(());
-        }
-
-        let candidate_count = candidates.len();
-        self.fs.reserve_delalloc_blocks(candidate_count as u64)?;
-        let inserted = {
-            let mut delayed_blocks = self.delayed_blocks.lock();
-            candidates
-                .into_iter()
-                .filter(|block| delayed_blocks.insert(*block))
-                .count()
         };
         self.fs
-            .release_delalloc_blocks(candidate_count.saturating_sub(inserted) as u64);
-        Ok(())
-    }
-
-    fn release_delalloc_blocks(&self, blocks: Vec<u64>) {
-        if blocks.is_empty() {
-            return;
-        }
-        let released = {
-            let mut delayed_blocks = self.delayed_blocks.lock();
-            blocks
-                .into_iter()
-                .filter(|block| delayed_blocks.remove(block))
-                .count()
-        };
-        self.fs.release_delalloc_blocks(released as u64);
+            .lock()
+            .reserve_delalloc_range(&self.core_inode, LogicalBlock::new(first), block_count)
+            .map_err(into_vfs_err)
     }
 
     fn release_delalloc_range(&self, pos: u64, len: usize, block_size: u64) -> VfsResult<()> {
-        self.release_delalloc_blocks(logical_blocks_for_range(pos, len, block_size)?);
-        Ok(())
-    }
-
-    fn release_delalloc_tail(&self, len: u64, block_size: u64) {
-        let first_unneeded = first_logical_block_after_len(len, block_size);
-        let released = {
-            let mut delayed_blocks = self.delayed_blocks.lock();
-            let tail = delayed_blocks
-                .range(first_unneeded..)
-                .copied()
-                .collect::<Vec<_>>();
-            for block in &tail {
-                delayed_blocks.remove(block);
-            }
-            tail.len()
+        let Some((first, block_count)) = logical_block_range(pos, len, block_size)? else {
+            return Ok(());
         };
-        self.fs.release_delalloc_blocks(released as u64);
-    }
-
-    pub(crate) fn release_delalloc_for_eviction(&self) {
-        let released = {
-            let mut delayed_blocks = self.delayed_blocks.lock();
-            let released = delayed_blocks.len();
-            delayed_blocks.clear();
-            released
-        };
-        self.fs.release_delalloc_blocks(released as u64);
+        self.fs
+            .lock()
+            .release_delalloc_range(&self.core_inode, LogicalBlock::new(first), block_count)
+            .map_err(into_vfs_err)
     }
 
     fn finish_delalloc_write(&self, request: WriteEndRequest, accepted: usize) -> VfsResult<()> {
@@ -301,39 +217,135 @@ impl Inode {
         }
 
         let block_size = self.block_size();
-        let keep = logical_blocks_for_range(request.pos(), accepted, block_size)?
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        let release = logical_blocks_for_range(request.pos(), request.len(), block_size)?
-            .into_iter()
-            .filter(|block| !keep.contains(block))
-            .collect::<Vec<_>>();
-        self.release_delalloc_blocks(release);
-        Ok(())
-    }
-
-    fn delayed_run_from(&self, start: u64, end_block: u64) -> VfsResult<Option<u64>> {
-        let delayed_blocks = self.delayed_blocks.lock();
-        if !delayed_blocks.contains(&start) {
-            return Ok(None);
+        let Some((first, requested_blocks)) =
+            logical_block_range(request.pos(), request.len(), block_size)?
+        else {
+            return Ok(());
+        };
+        let requested_end = first
+            .checked_add(requested_blocks)
+            .ok_or(VfsError::InvalidInput)?;
+        let release_start = if accepted == 0 {
+            first
+        } else {
+            let accepted_end = request
+                .pos()
+                .checked_add(accepted as u64)
+                .ok_or(VfsError::InvalidInput)?;
+            first_logical_block_after_len(accepted_end, block_size)
+        };
+        if release_start >= requested_end {
+            return Ok(());
         }
-        delayed_run_end(&delayed_blocks, start, end_block).map(Some)
-    }
-
-    fn next_delayed_block(&self, start: u64, end_block: u64) -> Option<u64> {
-        self.delayed_blocks
+        self.fs
             .lock()
-            .range(start..end_block)
-            .next()
-            .copied()
+            .release_delalloc_range(
+                &self.core_inode,
+                LogicalBlock::new(release_start),
+                requested_end - release_start,
+            )
+            .map_err(into_vfs_err)
     }
 }
 
-fn logical_blocks_for_range(pos: u64, len: usize, block_size: u64) -> VfsResult<Vec<u64>> {
+impl InodeAttributeOperations for Inode {
+    fn fill_metadata(&self, inode_number: u64) -> Metadata {
+        debug_assert_eq!(inode_number, u64::from(self.core_inode.number().get()));
+        self.fs.metadata_from_core_inode(&self.core_inode)
+    }
+
+    fn mode(&self) -> Umode {
+        Umode::from_bits(self.core_inode.mode())
+    }
+
+    fn owner(&self) -> (u32, u32) {
+        (self.core_inode.uid(), self.core_inode.gid())
+    }
+
+    fn link_count(&self) -> u64 {
+        u64::from(self.core_inode.links_count())
+    }
+
+    fn generation(&self) -> u32 {
+        self.core_inode.generation()
+    }
+
+    fn rdev(&self) -> DeviceId {
+        self.core_inode
+            .device_id()
+            .map_or(DeviceId::default(), ext4_device_id_to_vfs)
+    }
+
+    fn size(&self) -> u64 {
+        self.core_inode.size()
+    }
+
+    fn block_size(&self) -> u64 {
+        self.block_size()
+    }
+
+    fn blocks(&self) -> u64 {
+        self.core_inode.blocks()
+    }
+
+    fn set_permission(&self, permission: NodePermission) {
+        self.core_inode.set_permission(permission.bits());
+    }
+
+    fn set_owner(&self, uid: u32, gid: u32) {
+        self.core_inode.set_owner(uid, gid);
+    }
+
+    fn set_link_count(&self, link_count: u64) {
+        self.core_inode.set_links_count(link_count);
+    }
+
+    fn increment_link_count(&self) {
+        self.core_inode.increment_links_count();
+    }
+
+    fn decrement_link_count(&self) {
+        self.core_inode.decrement_links_count();
+    }
+
+    fn set_size(&self, size: u64) {
+        self.core_inode.set_size(size);
+    }
+
+    fn set_accessed_at(&self, value: SystemTime) {
+        self.core_inode.set_atime(system_time_to_ext4(value));
+    }
+
+    fn set_modified_at(&self, value: SystemTime) {
+        self.core_inode.set_mtime(system_time_to_ext4(value));
+    }
+
+    fn set_changed_at(&self, value: SystemTime) {
+        self.core_inode.set_ctime(system_time_to_ext4(value));
+    }
+
+    fn set_allocated_bytes(&self, bytes: u64) {
+        self.core_inode.set_allocated_bytes(bytes);
+    }
+
+    fn add_allocated_bytes(&self, bytes: u64) {
+        self.core_inode.add_allocated_bytes(bytes);
+    }
+
+    fn subtract_allocated_bytes(&self, bytes: u64) {
+        self.core_inode.subtract_allocated_bytes(bytes);
+    }
+}
+
+fn logical_block_range(pos: u64, len: usize, block_size: u64) -> VfsResult<Option<(u64, u64)>> {
     let Some((first, last)) = logical_block_bounds(pos, len, block_size)? else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
-    Ok((first..=last).collect())
+    let block_count = last
+        .checked_sub(first)
+        .and_then(|count| count.checked_add(1))
+        .ok_or(VfsError::InvalidInput)?;
+    Ok(Some((first, block_count)))
 }
 
 fn logical_block_bounds(pos: u64, len: usize, block_size: u64) -> VfsResult<Option<(u64, u64)>> {
@@ -357,7 +369,7 @@ fn first_logical_block_after_len(len: u64, block_size: u64) -> u64 {
 
 fn mapping_block_count(mapping: BlockMapping) -> VfsResult<u64> {
     let count = match mapping {
-        BlockMapping::Hole { len }
+        BlockMapping::Hole { len, .. }
         | BlockMapping::Mapped { len, .. }
         | BlockMapping::Unwritten { len, .. } => u64::from(len.get()),
     };
@@ -407,22 +419,6 @@ impl PendingExtent {
     fn with_added_flags(mut self, flags: FiemapExtentFlags) -> Self {
         self.flags.insert(flags);
         self
-    }
-}
-
-fn delayed_run_end(delayed_blocks: &BTreeSet<u64>, start: u64, end_block: u64) -> VfsResult<u64> {
-    debug_assert!(delayed_blocks.contains(&start));
-    let mut end = start;
-    for block in delayed_blocks.range(start..) {
-        if *block != end || end >= end_block {
-            break;
-        }
-        end = end.checked_add(1).ok_or(VfsError::InvalidInput)?;
-    }
-    if end == start {
-        Err(VfsError::InvalidData)
-    } else {
-        Ok(end)
     }
 }
 
@@ -477,28 +473,11 @@ struct ExtentWalkQuery {
 fn walk_file_extents(
     query: ExtentWalkQuery,
     mut map_blocks: impl FnMut(u64) -> VfsResult<BlockMapping>,
-    mut delayed_run_from: impl FnMut(u64, u64) -> VfsResult<Option<u64>>,
-    mut next_delayed_block: impl FnMut(u64, u64) -> Option<u64>,
     info: &mut FiemapExtentInfo<'_>,
 ) -> VfsResult<()> {
     let mut logical = query.start_block;
     let mut pending = None;
     while logical < query.end_block {
-        if let Some(run_end) = delayed_run_from(logical, query.end_block)? {
-            let extent = PendingExtent::from_blocks(
-                logical,
-                run_end - logical,
-                0,
-                query.block_size,
-                FiemapExtentFlags::DELALLOC,
-            )?;
-            if !queue_extent(&mut pending, extent, info)? {
-                return Ok(());
-            }
-            logical = run_end;
-            continue;
-        }
-
         let mapping = map_blocks(logical)?;
         let mapping_end = logical
             .checked_add(mapping_block_count(mapping)?)
@@ -509,24 +488,19 @@ fn walk_file_extents(
         }
 
         let extent = match mapping {
-            BlockMapping::Hole { .. } => {
-                while let Some(run_start) = next_delayed_block(logical, mapping_end) {
-                    let run_end =
-                        delayed_run_from(run_start, mapping_end)?.ok_or(VfsError::InvalidData)?;
-                    let extent = PendingExtent::from_blocks(
-                        run_start,
-                        run_end - run_start,
+            BlockMapping::Hole { flags, .. } => {
+                if flags.contains(BlockMappingFlags::DELAYED) {
+                    PendingExtent::from_blocks(
+                        logical,
+                        mapping_end - logical,
                         0,
                         query.block_size,
                         FiemapExtentFlags::DELALLOC,
-                    )?;
-                    if !queue_extent(&mut pending, extent, info)? {
-                        return Ok(());
-                    }
-                    logical = run_end;
+                    )?
+                } else {
+                    logical = mapping_end;
+                    continue;
                 }
-                logical = mapping_end;
-                continue;
             }
             BlockMapping::Mapped {
                 physical, flags, ..
@@ -578,35 +552,6 @@ fn supports_rename_flags(flags: RenameFlags) -> bool {
     flags.is_empty() || flags == RenameFlags::NOREPLACE
 }
 
-fn validate_live_inode_number(live_number: u64, core_inode: &Ext4Inode) -> VfsResult<()> {
-    if live_number == u64::from(core_inode.number().get()) {
-        Ok(())
-    } else {
-        Err(VfsError::InvalidInput)
-    }
-}
-
-fn sync_dentry_ctime(dentry: &Dentry, core_inode: &Ext4Inode) -> VfsResult<()> {
-    validate_live_inode_number(dentry.inode(), core_inode)?;
-    dentry.set_changed_at(ext4_timestamp_to_system_time(core_inode.ctime()));
-    Ok(())
-}
-
-fn sync_dentry_link_state(dentry: &Dentry, core_inode: &Ext4Inode) -> VfsResult<()> {
-    validate_live_inode_number(dentry.inode(), core_inode)?;
-    dentry.set_link_count(u64::from(core_inode.links_count()));
-    dentry.set_changed_at(ext4_timestamp_to_system_time(core_inode.ctime()));
-    Ok(())
-}
-
-fn sync_vfs_inode_writeback_state(vfs_inode: &VfsInode, core_inode: &Ext4Inode) -> VfsResult<()> {
-    validate_live_inode_number(vfs_inode.inode(), core_inode)?;
-    vfs_inode.set_allocated_bytes(core_inode.blocks().saturating_mul(512));
-    vfs_inode.set_modified_at(ext4_timestamp_to_system_time(core_inode.mtime()));
-    vfs_inode.set_changed_at(ext4_timestamp_to_system_time(core_inode.ctime()));
-    Ok(())
-}
-
 impl InodeOperations for Inode {
     fn directory_operations(&self) -> Option<&dyn InodeDirOperations> {
         if self.node_type == NodeType::Directory {
@@ -650,12 +595,11 @@ impl InodeOperations for Inode {
             return Err(VfsError::OperationNotSupported);
         }
         let mut fs = self.fs.lock();
-        let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
 
         let ctime = update
             .ctime
             .map(system_time_to_ext4)
-            .unwrap_or_else(|| inode.ctime());
+            .unwrap_or_else(|| self.core_inode.ctime());
         let mut metadata = Ext4InodeMetadataUpdate::new(ctime);
         if let Some(mode) = update.mode {
             metadata = metadata.with_mode(mode.bits());
@@ -669,7 +613,7 @@ impl InodeOperations for Inode {
         if let Some(mtime) = update.mtime {
             metadata = metadata.with_mtime(system_time_to_ext4(mtime));
         }
-        fs.update_inode_metadata(&inode, metadata)
+        fs.update_inode_metadata(&self.core_inode, metadata)
             .map_err(into_vfs_err)?;
         Ok(())
     }
@@ -682,8 +626,7 @@ impl InodeOperations for Inode {
     ) -> VfsResult<Vec<u8>> {
         let (namespace, suffix) = parse_xattr_name(name)?;
         let fs = self.fs.read_lock();
-        let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
-        fs.get_xattr(&inode, namespace, suffix)
+        fs.get_xattr(&self.core_inode, namespace, suffix)
             .map_err(into_xattr_vfs_err)?
             .ok_or_else(|| VfsError::from(LinuxError::ENODATA))
     }
@@ -695,19 +638,18 @@ impl InodeOperations for Inode {
         sink: &mut dyn XattrNameSink,
     ) -> VfsResult<()> {
         let fs = self.fs.read_lock();
-        let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
         let mut sink = VfsXattrNameSink {
             inner: sink,
             error: None,
         };
-        fs.list_xattrs(&inode, &mut sink)
+        fs.list_xattrs(&self.core_inode, &mut sink)
             .map_err(into_xattr_vfs_err)?;
         sink.finish()
     }
 
     fn set_xattr(
         &self,
-        dentry: &Dentry,
+        _dentry: &Dentry,
         _inode: &VfsInode,
         name: &XattrName,
         value: &[u8],
@@ -715,29 +657,28 @@ impl InodeOperations for Inode {
     ) -> VfsResult<()> {
         let (namespace, suffix) = parse_xattr_name(name)?;
         let mut fs = self.fs.lock();
-        let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
         let mode = xattr_set_mode(flags);
-        let updated = fs
-            .set_xattr_with_mode(
-                &inode,
-                namespace,
-                suffix,
-                value,
-                mode,
-                current_ext4_timestamp(),
-            )
-            .map_err(into_xattr_vfs_err)?;
-        sync_dentry_ctime(dentry, &updated)
+        fs.set_xattr_with_mode(
+            &self.core_inode,
+            namespace,
+            suffix,
+            value,
+            mode,
+            current_ext4_timestamp(),
+        )
+        .map_err(into_xattr_vfs_err)
     }
 
-    fn remove_xattr(&self, dentry: &Dentry, _inode: &VfsInode, name: &XattrName) -> VfsResult<()> {
+    fn remove_xattr(&self, _dentry: &Dentry, _inode: &VfsInode, name: &XattrName) -> VfsResult<()> {
         let (namespace, suffix) = parse_xattr_name(name)?;
         let mut fs = self.fs.lock();
-        let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
-        let updated = fs
-            .remove_xattr(&inode, namespace, suffix, current_ext4_timestamp())
-            .map_err(into_xattr_vfs_err)?;
-        sync_dentry_ctime(dentry, &updated)
+        fs.remove_xattr(
+            &self.core_inode,
+            namespace,
+            suffix,
+            current_ext4_timestamp(),
+        )
+        .map_err(into_xattr_vfs_err)
     }
 }
 
@@ -771,12 +712,9 @@ impl InodeFiemapOperations for Inode {
             },
             |logical| {
                 let fs = self.fs.read_lock();
-                let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
-                fs.map_blocks(&inode, LogicalBlock::new(logical))
+                fs.report_mapping(&self.core_inode, LogicalBlock::new(logical))
                     .map_err(into_vfs_err)
             },
-            |logical, end_block| self.delayed_run_from(logical, end_block),
-            |logical, end_block| self.next_delayed_block(logical, end_block),
             info,
         )
     }
@@ -790,11 +728,10 @@ impl InodeSymlinkOperations for Inode {
         _done: &mut kvfs::DelayedCall,
     ) -> VfsResult<String> {
         let fs = self.fs.read_lock();
-        let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
         let mut target =
-            vec![0; usize::try_from(inode.size()).map_err(|_| VfsError::InvalidInput)?];
+            vec![0; usize::try_from(self.core_inode.size()).map_err(|_| VfsError::InvalidInput)?];
         let read = fs
-            .read_link_at(&inode, 0, &mut target)
+            .read_link_at(&self.core_inode, 0, &mut target)
             .map_err(into_vfs_err)?;
         target.truncate(read);
         String::from_utf8(target).map_err(|_| VfsError::InvalidData)
@@ -831,11 +768,10 @@ impl InodeDirOperations for Inode {
             return Err(VfsError::InvalidInput);
         }
         let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
-        let created = {
+        let child = {
             let mut fs = self.fs.lock();
-            let parent_inode = fs.inode(self.number).map_err(into_vfs_err)?;
             fs.create_regular_file(
-                &parent_inode,
+                &self.core_inode,
                 name.as_bytes(),
                 mode.permission().bits(),
                 uid,
@@ -844,8 +780,7 @@ impl InodeDirOperations for Inode {
             )
             .map_err(into_vfs_err)?
         };
-        self.fs.sync_vfs_directory(dir, created.parent())?;
-        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, created.child().clone())?;
+        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, child)?;
         dentry.instantiate(inode)
     }
 
@@ -859,11 +794,10 @@ impl InodeDirOperations for Inode {
     ) -> VfsResult<()> {
         let name = dentry.name();
         let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
-        let created = {
+        let child = {
             let mut fs = self.fs.lock();
-            let parent_inode = fs.inode(self.number).map_err(into_vfs_err)?;
             fs.create_directory(
-                &parent_inode,
+                &self.core_inode,
                 name.as_bytes(),
                 mode.permission().bits(),
                 uid,
@@ -872,8 +806,7 @@ impl InodeDirOperations for Inode {
             )
             .map_err(into_vfs_err)?
         };
-        self.fs.sync_vfs_directory(dir, created.parent())?;
-        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, created.child().clone())?;
+        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, child)?;
         dentry.instantiate(inode)
     }
 
@@ -894,11 +827,10 @@ impl InodeDirOperations for Inode {
             _ => return Err(VfsError::InvalidInput),
         };
         let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
-        let created = {
+        let child = {
             let mut fs = self.fs.lock();
-            let parent_inode = fs.inode(self.number).map_err(into_vfs_err)?;
             fs.create_special_file(
-                &parent_inode,
+                &self.core_inode,
                 name.as_bytes(),
                 (kind, device),
                 mode.permission().bits(),
@@ -908,8 +840,7 @@ impl InodeDirOperations for Inode {
             )
             .map_err(into_vfs_err)?
         };
-        self.fs.sync_vfs_directory(dir, created.parent())?;
-        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, created.child().clone())?;
+        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, child)?;
         dentry.instantiate(inode)
     }
 
@@ -930,11 +861,10 @@ impl InodeDirOperations for Inode {
             ),
             cred,
         );
-        let created = {
+        let child = {
             let mut fs = self.fs.lock();
-            let parent_inode = fs.inode(self.number).map_err(into_vfs_err)?;
             fs.create_symlink(
-                &parent_inode,
+                &self.core_inode,
                 name.as_bytes(),
                 target.as_bytes(),
                 uid,
@@ -943,59 +873,64 @@ impl InodeDirOperations for Inode {
             )
             .map_err(into_vfs_err)?
         };
-        self.fs.sync_vfs_directory(dir, created.parent())?;
-        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, created.child().clone())?;
+        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, child)?;
         dentry.instantiate(inode)
     }
 
     fn link(
         &self,
         old_dentry: &Dentry,
-        dir: &VfsInode,
+        _dir: &VfsInode,
         dentry: &LockedDentry<'_>,
     ) -> VfsResult<()> {
         let name = dentry.name();
         let target: Arc<Self> = old_dentry.downcast()?;
-        let linked = {
+        self.ensure_same_filesystem(&target)?;
+        {
             let mut fs = self.fs.lock();
-            let parent_inode = fs.inode(self.number).map_err(into_vfs_err)?;
-            let target_inode = fs.inode(target.number).map_err(into_vfs_err)?;
             fs.link(
-                &parent_inode,
+                &self.core_inode,
                 name.as_bytes(),
-                &target_inode,
+                &target.core_inode,
                 current_ext4_timestamp(),
             )
             .map_err(into_vfs_err)?
-        };
-        self.fs.sync_vfs_directory(dir, linked.parent())?;
-        sync_dentry_link_state(old_dentry, linked.target())?;
-        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, linked.target().clone())?;
+        }
+        let inode = Ext4Filesystem::iget(&self.fs, target.core_inode.number())?;
         dentry.instantiate(inode)
     }
 
-    fn unlink(&self, dir: &VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
+    fn unlink(&self, _dir: &VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
         let name = dentry.name();
-        let removed = {
+        let child: Arc<Self> = dentry.downcast()?;
+        self.ensure_same_filesystem(&child)?;
+        {
             let mut fs = self.fs.lock();
-            let parent_inode = fs.inode(self.number).map_err(into_vfs_err)?;
             if dentry.is_dir() {
-                fs.remove_directory(&parent_inode, name.as_bytes(), current_ext4_timestamp())
-                    .map_err(into_vfs_err)?
+                fs.remove_directory(
+                    &self.core_inode,
+                    name.as_bytes(),
+                    &child.core_inode,
+                    current_ext4_timestamp(),
+                )
+                .map_err(into_vfs_err)?
             } else {
-                fs.unlink(&parent_inode, name.as_bytes(), current_ext4_timestamp())
-                    .map_err(into_vfs_err)?
+                fs.unlink(
+                    &self.core_inode,
+                    name.as_bytes(),
+                    &child.core_inode,
+                    current_ext4_timestamp(),
+                )
+                .map_err(into_vfs_err)?
             }
-        };
-        self.fs.sync_vfs_directory(dir, removed.parent())?;
-        sync_dentry_link_state(dentry, removed.removed())?;
+        }
         Ok(())
     }
 
     fn rename(
         &self,
         _idmap: &kvfs::MountIdmap,
-        old_dir: &VfsInode,
+        _old_dir: &VfsInode,
         old_dentry: &LockedDentry<'_>,
         new_dir: &VfsInode,
         new_dentry: &LockedDentry<'_>,
@@ -1005,28 +940,29 @@ impl InodeDirOperations for Inode {
             return Err(VfsError::OperationNotSupported);
         }
         let new_parent: Arc<Self> = new_dir.downcast()?;
-        let renamed = {
+        let moved: Arc<Self> = old_dentry.downcast()?;
+        let replaced: Option<Arc<Self>> = if new_dentry.is_really_positive() {
+            Some(new_dentry.downcast()?)
+        } else {
+            None
+        };
+        self.ensure_same_filesystem(&new_parent)?;
+        self.ensure_same_filesystem(&moved)?;
+        if let Some(replaced) = &replaced {
+            self.ensure_same_filesystem(replaced)?;
+        }
+        {
             let mut fs = self.fs.lock();
-            let source_parent = fs.inode(self.number).map_err(into_vfs_err)?;
-            let target_parent = fs.inode(new_parent.number).map_err(into_vfs_err)?;
             fs.rename(
-                &source_parent,
+                &self.core_inode,
                 old_dentry.name().as_bytes(),
-                &target_parent,
+                &moved.core_inode,
+                &new_parent.core_inode,
                 new_dentry.name().as_bytes(),
+                replaced.as_ref().map(|inode| &inode.core_inode),
                 current_ext4_timestamp(),
             )
             .map_err(into_vfs_err)?
-        };
-        self.fs
-            .sync_vfs_directory(old_dir, renamed.source_parent())?;
-        self.fs
-            .sync_vfs_directory(new_dir, renamed.target_parent())?;
-        sync_dentry_ctime(old_dentry, renamed.moved())?;
-        if new_dentry.is_really_positive()
-            && let Some(core_inode) = renamed.replaced()
-        {
-            sync_dentry_link_state(new_dentry, core_inode)?;
         }
         Ok(())
     }
@@ -1035,10 +971,13 @@ impl InodeDirOperations for Inode {
 impl AddressSpaceOperations for Inode {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
         let fs = self.fs.read_lock();
-        let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
         match self.node_type {
-            NodeType::RegularFile => fs.read_at(&inode, offset, buf).map_err(into_vfs_err),
-            NodeType::Symlink => fs.read_link_at(&inode, offset, buf).map_err(into_vfs_err),
+            NodeType::RegularFile => fs
+                .read_at(&self.core_inode, offset, buf)
+                .map_err(into_vfs_err),
+            NodeType::Symlink => fs
+                .read_link_at(&self.core_inode, offset, buf)
+                .map_err(into_vfs_err),
             _ => Err(VfsError::InvalidInput),
         }
     }
@@ -1049,16 +988,14 @@ impl AddressSpaceOperations for Inode {
         }
         let mut len = request.len();
         self.check_write_limit(request.pos(), &mut len)?;
-        let holes = self.collect_hole_blocks(request.pos(), len)?;
-        self.reserve_delalloc_blocks(holes)
+        self.reserve_delalloc_range(request.pos(), len)
     }
 
     fn write_begin(&self, _mapping: &AddressSpace, request: WriteBeginRequest) -> VfsResult<()> {
         if self.node_type != NodeType::RegularFile {
             return Err(VfsError::InvalidInput);
         }
-        let holes = self.collect_hole_blocks(request.pos(), request.len())?;
-        self.reserve_delalloc_blocks(holes)
+        self.reserve_delalloc_range(request.pos(), request.len())
     }
 
     fn write_end(&self, mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
@@ -1085,12 +1022,6 @@ impl AddressSpaceOperations for Inode {
         let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
         let intent = Ext4SyncIntent::from_data_only(control.is_data_only());
         let timestamp = current_ext4_timestamp();
-        let block_size = self.block_size();
-        let mut inode = self
-            .fs
-            .lock()
-            .referenced_inode(self.number)
-            .map_err(into_vfs_err)?;
 
         // A cache miss may enter `read_at()` while the PageCache mapping lock is
         // held. Keep the core mutex out of PageCache traversal so writeback
@@ -1099,48 +1030,57 @@ impl AddressSpaceOperations for Inode {
             // A filesystem-wide sync may reach this inode while another task
             // is still extending it, so sample the visible size per batch.
             let visible_size = vfs_inode.size();
-            let disk_size = inode.disk_size();
+            let disk_size = self.core_inode.disk_size();
             let write_end = offset.saturating_add(data.len() as u64);
-            inode = {
+            {
                 let mut fs = self.fs.lock();
-                fs.writeback_ordered_at(&inode, offset, data, visible_size, timestamp, intent)
-                    .inspect_err(|error| {
-                        error!(
-                            "KExt4 inode {} writeback at offset {offset} for {} bytes failed: \
-                             visible size {visible_size}, disk size {disk_size}, write end \
-                             {write_end}: {error:?}",
-                            self.number.get(),
-                            data.len()
-                        );
-                    })
-                    .map_err(into_vfs_err)?
-            };
-            self.release_delalloc_range(offset, data.len(), block_size)?;
+                fs.writeback_ordered_at(
+                    &self.core_inode,
+                    offset,
+                    data,
+                    visible_size,
+                    timestamp,
+                    intent,
+                )
+                .inspect_err(|error| {
+                    error!(
+                        "KExt4 inode {} writeback at offset {offset} for {} bytes failed: visible \
+                         size {visible_size}, disk size {disk_size}, write end {write_end}: \
+                         {error:?}",
+                        self.core_inode.number().get(),
+                        data.len()
+                    );
+                })
+                .map_err(into_vfs_err)?;
+            }
             Ok(())
         })?;
-        sync_vfs_inode_writeback_state(&vfs_inode, &inode)
+        Ok(())
     }
 
     fn set_len(&self, mapping: &AddressSpace, len: u64) -> VfsResult<()> {
         if len > self.max_file_size() {
             return Err(VfsError::FileTooLarge);
         }
-        let block_size = self.block_size();
-        let prepared = {
+        let is_visible_shrink = len < self.core_inode.size();
+        let is_disk_shrink = len < self.core_inode.disk_size();
+        {
             let mut fs = self.fs.lock();
-            let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
-            fs.prepare_regular_inode_truncate(&inode, len, current_ext4_timestamp())
+            fs.prepare_regular_inode_truncate(&self.core_inode, len, current_ext4_timestamp())
                 .map_err(into_vfs_err)?
-        };
+        }
         mapping.truncate_setsize(len)?;
-        let inode = self
-            .fs
-            .lock()
-            .finish_regular_inode_truncate(prepared)
-            .map_err(into_vfs_err)?;
-        self.release_delalloc_tail(len, block_size);
-        let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
-        self.fs.sync_vfs_inode_attributes(&vfs_inode, &inode)
+        let mut fs = self.fs.lock();
+        if is_visible_shrink {
+            let first_unneeded = first_logical_block_after_len(len, self.block_size());
+            fs.truncate_delalloc_range(&self.core_inode, LogicalBlock::new(first_unneeded))
+                .map_err(into_vfs_err)?;
+        }
+        if is_disk_shrink {
+            fs.finish_regular_inode_shrink(&self.core_inode, len)
+                .map_err(into_vfs_err)?;
+        }
+        Ok(())
     }
 
     fn readahead(&self, _mapping: &AddressSpace, control: ReadaheadControl) -> VfsResult<()> {
@@ -1207,7 +1147,7 @@ impl FileOperations for Inode {
     fn fsync(&self, file: &VfsFile, data_only: bool) -> VfsResult<()> {
         kvfs::libfs::simple_fsync_noflush(file, data_only)?;
         self.fs
-            .sync_inode_to_disk(self.number, Ext4SyncIntent::from_data_only(data_only))
+            .sync_inode_to_disk(&self.core_inode, Ext4SyncIntent::from_data_only(data_only))
     }
 
     fn release(&self, inode: &VfsInode, file: &VfsFile) -> VfsResult<()> {
@@ -1217,16 +1157,12 @@ impl FileOperations for Inode {
         if inode.write_count() != 1 {
             return Ok(());
         }
-        if !self.delayed_blocks.lock().is_empty() {
-            return Ok(());
-        }
         let mut fs = self.fs.lock();
-        let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
-        fs.discard_regular_inode_preallocations(&inode)
+        fs.discard_regular_inode_preallocations(&self.core_inode)
             .inspect_err(|error| {
                 error!(
                     "KExt4 inode {} preallocation discard failed: {error:?}",
-                    self.number.get()
+                    self.core_inode.number().get()
                 );
             })
             .map_err(into_vfs_err)?;
@@ -1237,9 +1173,8 @@ impl FileOperations for Inode {
 impl FileDirOperations for Inode {
     fn iterate_shared(&self, _file: &VfsFile, ctx: &mut DirContext<'_>) -> VfsResult<usize> {
         let fs = self.fs.read_lock();
-        let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
         let mut sink = KvfsDirSink { ctx, count: 0 };
-        fs.read_dir_from(&inode, Ext4DirPos::new(sink.ctx.pos()), &mut sink)
+        fs.read_dir_from(&self.core_inode, Ext4DirPos::new(sink.ctx.pos()), &mut sink)
             .map_err(into_vfs_err)?;
         Ok(sink.count)
     }
@@ -1280,7 +1215,7 @@ impl Ext4DirSink for KvfsDirSink<'_, '_> {
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::{collections::BTreeSet, vec::Vec};
+    use alloc::vec::Vec;
 
     use kerrno::LinuxError;
     use kext4::{
@@ -1294,8 +1229,7 @@ mod tests {
     use unittest::def_test;
 
     use super::{
-        ExtentWalkQuery, delayed_run_end, parse_xattr_name, supports_rename_flags,
-        walk_file_extents, xattr_set_mode,
+        ExtentWalkQuery, parse_xattr_name, supports_rename_flags, walk_file_extents, xattr_set_mode,
     };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1333,26 +1267,13 @@ mod tests {
 
     fn collect_extents(
         query: ExtentWalkQuery,
-        delayed_blocks: &BTreeSet<u64>,
         capacity: u32,
         map_blocks: impl FnMut(u64) -> VfsResult<BlockMapping>,
     ) -> VfsResult<Vec<CollectedExtent>> {
         let mut writer = CollectingWriter::default();
         {
             let mut info = FiemapExtentInfo::new(FiemapFlags::empty(), capacity, &mut writer);
-            walk_file_extents(
-                query,
-                map_blocks,
-                |start, end| {
-                    if delayed_blocks.contains(&start) {
-                        delayed_run_end(delayed_blocks, start, end).map(Some)
-                    } else {
-                        Ok(None)
-                    }
-                },
-                |start, end| delayed_blocks.range(start..end).next().copied(),
-                &mut info,
-            )?;
+            walk_file_extents(query, map_blocks, &mut info)?;
         }
         Ok(writer.extents)
     }
@@ -1372,7 +1293,6 @@ mod tests {
                 end_block: 6,
                 block_size: 4096,
             },
-            &BTreeSet::new(),
             u32::MAX,
             |logical| match logical {
                 0 => Ok(BlockMapping::Mapped {
@@ -1382,6 +1302,7 @@ mod tests {
                 }),
                 2 => Ok(BlockMapping::Hole {
                     len: BlockCount::new(2),
+                    flags: BlockMappingFlags::empty(),
                 }),
                 4 => Ok(BlockMapping::Unwritten {
                     physical: PhysicalBlock::new(20),
@@ -1405,19 +1326,27 @@ mod tests {
 
     #[def_test]
     fn fiemap_reports_delayed_allocation_with_unknown_location() {
-        let delayed_blocks = BTreeSet::from([2, 3]);
         let extents = collect_extents(
             ExtentWalkQuery {
                 start_block: 0,
                 end_block: 6,
                 block_size: 4096,
             },
-            &delayed_blocks,
             u32::MAX,
-            |_| {
-                Ok(BlockMapping::Hole {
-                    len: BlockCount::new(16),
-                })
+            |logical| match logical {
+                0 => Ok(BlockMapping::Hole {
+                    len: BlockCount::new(2),
+                    flags: BlockMappingFlags::empty(),
+                }),
+                2 => Ok(BlockMapping::Hole {
+                    len: BlockCount::new(2),
+                    flags: BlockMappingFlags::DELAYED,
+                }),
+                4 => Ok(BlockMapping::Hole {
+                    len: BlockCount::new(2),
+                    flags: BlockMappingFlags::empty(),
+                }),
+                _ => unreachable!("the mapping walk should advance by complete runs"),
             },
         )
         .expect("delayed mapping walk should succeed");
@@ -1434,38 +1363,28 @@ mod tests {
     }
 
     #[def_test]
-    fn delayed_run_stops_at_the_query_end() {
-        let delayed_blocks = BTreeSet::from([2, 3, 4, 5]);
-
-        let run_end = delayed_run_end(&delayed_blocks, 2, 4)
-            .expect("delayed run within the query should be valid");
-
-        assert_eq!(run_end, 4);
-    }
-
-    #[def_test]
-    fn fiemap_reuses_one_hole_mapping_for_separate_delayed_runs() {
-        let delayed_blocks = BTreeSet::from([1, 3]);
-        let mut map_calls = 0;
-
+    fn fiemap_reports_separate_delayed_runs() {
         let extents = collect_extents(
             ExtentWalkQuery {
                 start_block: 0,
                 end_block: 4,
                 block_size: 4096,
             },
-            &delayed_blocks,
             u32::MAX,
-            |_| {
-                map_calls += 1;
-                Ok(BlockMapping::Hole {
-                    len: BlockCount::new(16),
-                })
+            |logical| match logical {
+                0 | 2 => Ok(BlockMapping::Hole {
+                    len: BlockCount::new(1),
+                    flags: BlockMappingFlags::empty(),
+                }),
+                1 | 3 => Ok(BlockMapping::Hole {
+                    len: BlockCount::new(1),
+                    flags: BlockMappingFlags::DELAYED,
+                }),
+                _ => unreachable!("the mapping walk should advance by complete runs"),
             },
         )
         .expect("delayed mappings inside one hole should succeed");
 
-        assert_eq!(map_calls, 1);
         assert_eq!(extents.len(), 2);
         assert_eq!(extents[0].logical, 4096);
         assert_eq!(extents[1].logical, 3 * 4096);
@@ -1479,7 +1398,6 @@ mod tests {
                 end_block: 3,
                 block_size: 4096,
             },
-            &BTreeSet::new(),
             1,
             |logical| match logical {
                 0 => Ok(BlockMapping::Mapped {
@@ -1489,6 +1407,7 @@ mod tests {
                 }),
                 1 => Ok(BlockMapping::Hole {
                     len: BlockCount::new(1),
+                    flags: BlockMappingFlags::empty(),
                 }),
                 2 => Ok(BlockMapping::Mapped {
                     physical: PhysicalBlock::new(20),
@@ -1512,7 +1431,6 @@ mod tests {
                 end_block: 4,
                 block_size: 4096,
             },
-            &BTreeSet::new(),
             u32::MAX,
             |logical| match logical {
                 0 => Ok(BlockMapping::Mapped {
@@ -1547,7 +1465,6 @@ mod tests {
                 end_block: 2,
                 block_size: 4096,
             },
-            &BTreeSet::new(),
             u32::MAX,
             |_| {
                 Ok(BlockMapping::Mapped {

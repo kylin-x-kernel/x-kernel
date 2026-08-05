@@ -353,7 +353,11 @@ impl InternalJournal {
 }
 
 /// A validated ext4 filesystem mount core.
+///
+/// KVFS owns resident inode identity. This object owns ext4 superblock state,
+/// including the mount-wide delayed-allocation reservation aggregate.
 pub struct Ext4Filesystem {
+    pub(crate) delalloc_reserved_blocks: u64,
     pub(crate) device: Arc<FilesystemDevice>,
     pub(crate) metadata_io: Ext4MetadataIo,
     pub(crate) journal: Option<Arc<MountedJournal>>,
@@ -494,6 +498,7 @@ impl Ext4Filesystem {
         }
 
         let mut filesystem = Self {
+            delalloc_reserved_blocks: 0,
             device: filesystem_device,
             metadata_io,
             journal: None,
@@ -605,6 +610,7 @@ impl Ext4Filesystem {
             .blocks_count()
             .checked_sub(overhead)
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry))?;
+        let free_blocks = free_blocks.saturating_sub(self.delalloc_reserved_blocks);
         let blocks_available = free_blocks.saturating_sub(self.superblock.reserved_blocks_count());
 
         Ok(Ext4StatFs {
@@ -619,7 +625,7 @@ impl Ext4Filesystem {
         })
     }
 
-    /// Returns the free-block budget available after ext4 reserved blocks.
+    /// Returns the free-block budget available after ext4 and delayed-allocation reservations.
     ///
     /// Allocation and release paths update the primary superblock counter in
     /// the same metadata operation as their group descriptor. Delayed
@@ -628,6 +634,7 @@ impl Ext4Filesystem {
     pub fn blocks_available_for_reservation(&self) -> u64 {
         self.superblock
             .free_blocks_count()
+            .saturating_sub(self.delalloc_reserved_blocks)
             .saturating_sub(self.superblock.reserved_blocks_count())
     }
 
@@ -797,7 +804,7 @@ impl Ext4Filesystem {
     }
 
     fn load_internal_journal(&mut self, inode_number: InodeNumber) -> Ext4Result<InternalJournal> {
-        let journal_inode = self.internal_inode(inode_number)?;
+        let journal_inode = self.internal_iget(inode_number)?;
         if journal_inode.kind() != InodeKind::RegularFile {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal));
         }
@@ -1680,7 +1687,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        BlockCount, Ext4Inode, Ext4SyncIntent, LogicalBlock, PhysicalBlock,
+        BlockCount, BlockMappingFlags, Ext4Inode, Ext4SyncIntent, LogicalBlock, PhysicalBlock,
         extent::ExtentMappingState,
         file::RegularWriteMetadata,
         inode::InodeInitialization,
@@ -2077,7 +2084,7 @@ mod tests {
 
         let flushes_before_first_sync = device.flush_count();
         filesystem
-            .sync_inode(first.child(), Ext4SyncIntent::FullMetadata)
+            .sync_inode(&first, Ext4SyncIntent::FullMetadata)
             .expect("sync first inode transaction");
         // Persist ext4 recovery evidence, activate the clean journal, and
         // finish the log commit. No fourth sync_inode-only flush is needed.
@@ -2088,7 +2095,7 @@ mod tests {
 
         let flushes_before_data_only_sync = device.flush_count();
         filesystem
-            .sync_inode(first.child(), Ext4SyncIntent::DataOnly)
+            .sync_inode(&first, Ext4SyncIntent::DataOnly)
             .expect("sync inode without a running metadata transaction");
         assert_eq!(device.flush_count(), flushes_before_data_only_sync + 1);
 
@@ -2111,7 +2118,7 @@ mod tests {
 
         let flushes_before_second_sync = device.flush_count();
         filesystem
-            .sync_inode(first.child(), Ext4SyncIntent::FullMetadata)
+            .sync_inode(&first, Ext4SyncIntent::FullMetadata)
             .expect("conservatively sync current transaction");
         // The next metadata mutation refreshes recovery evidence before its
         // commit. The commit barrier again replaces a trailing inode flush.
@@ -2368,24 +2375,24 @@ mod tests {
             .expect("lookup truncate file")
             .expect("truncate file exists");
         let inode = filesystem
-            .inode(entry.inode())
+            .load_inode_private(entry.inode())
             .expect("read truncate inode");
         let free_before_truncate = filesystem.superblock().free_blocks_count();
         let new_size = u64::try_from(TEST_BLOCK_SIZE + 23).unwrap();
 
-        let truncated = filesystem
+        filesystem
             .truncate_regular_inode(&inode, new_size, crate::Ext4Timestamp::new(44, 0))
             .expect("truncate Linux-created file");
 
-        assert_eq!(truncated.size(), new_size);
-        assert_eq!(truncated.blocks(), 16);
+        assert_eq!(inode.size(), new_size);
+        assert_eq!(inode.blocks(), 16);
         assert_eq!(filesystem.orphan_head(), None);
         assert_eq!(
             filesystem.superblock().free_blocks_count(),
             free_before_truncate + 1
         );
         let crate::BlockMapping::Mapped { physical, .. } = filesystem
-            .map_blocks(&truncated, LogicalBlock::new(1))
+            .map_blocks(&inode, LogicalBlock::new(1))
             .expect("map partial EOF block")
         else {
             panic!("partial EOF block should remain mapped");
@@ -2430,16 +2437,16 @@ mod tests {
             )
             .expect("create regular file in linear root directory");
 
-        assert_eq!(created.child().kind(), InodeKind::RegularFile);
-        assert_eq!(created.child().links_count(), 1);
-        assert_eq!(created.child().size(), 0);
-        assert_eq!(created.child().uid(), 1000);
-        assert_eq!(created.child().gid(), 1001);
+        assert_eq!(created.kind(), InodeKind::RegularFile);
+        assert_eq!(created.links_count(), 1);
+        assert_eq!(created.size(), 0);
+        assert_eq!(created.uid(), 1000);
+        assert_eq!(created.gid(), 1001);
         let entry = filesystem
-            .lookup(created.parent(), "kext4-created.txt")
+            .lookup(&root, "kext4-created.txt")
             .expect("lookup created file")
             .expect("created file is visible");
-        assert_eq!(entry.inode(), created.child().number());
+        assert_eq!(entry.inode(), created.number());
         assert_eq!(entry.file_type(), crate::DirectoryFileType::RegularFile);
         drop(filesystem);
 
@@ -2475,19 +2482,19 @@ mod tests {
             )
             .expect("create linear directory");
 
-        assert_eq!(created.child().kind(), InodeKind::Directory);
-        assert_eq!(created.child().links_count(), 2);
-        assert_eq!(created.parent().links_count(), old_root_links + 1);
+        assert_eq!(created.kind(), InodeKind::Directory);
+        assert_eq!(created.links_count(), 2);
+        assert_eq!(root.links_count(), old_root_links + 1);
         let dot = filesystem
-            .lookup(created.child(), ".")
+            .lookup(&created, ".")
             .expect("lookup dot")
             .expect("dot exists");
         let dotdot = filesystem
-            .lookup(created.child(), "..")
+            .lookup(&created, "..")
             .expect("lookup dotdot")
             .expect("dotdot exists");
-        assert_eq!(dot.inode(), created.child().number());
-        assert_eq!(dotdot.inode(), created.parent().number());
+        assert_eq!(dot.inode(), created.number());
+        assert_eq!(dotdot.inode(), root.number());
         drop(filesystem);
 
         fs::write(&image, device.bytes()).expect("write mkdir image");
@@ -2518,9 +2525,10 @@ mod tests {
                 crate::Ext4Timestamp::new(125, 0),
             )
             .expect("create unlink target");
-        let written = filesystem
+        created.set_size(17);
+        filesystem
             .writeback_ordered_at(
-                created.child(),
+                &created,
                 0,
                 b"kext4 unlink data",
                 17,
@@ -2528,35 +2536,33 @@ mod tests {
                 crate::Ext4SyncIntent::FullMetadata,
             )
             .expect("write data before unlink");
-        assert!(written.blocks() > 0);
+        assert!(created.blocks() > 0);
 
-        let removed = filesystem
+        filesystem
             .unlink(
-                created.parent(),
+                &root,
                 b"kext4-unlink.txt",
+                &created,
                 crate::Ext4Timestamp::new(127, 0),
             )
             .expect("unlink regular file");
-        assert_eq!(removed.removed_inode(), written.number());
-        assert_eq!(removed.removed().links_count(), 0);
+        assert_eq!(created.links_count(), 0);
         assert_eq!(
             filesystem
-                .lookup(removed.parent(), "kext4-unlink.txt")
+                .lookup(&root, "kext4-unlink.txt")
                 .expect("lookup removed file"),
             None
         );
-        let held = filesystem
-            .referenced_inode(removed.removed_inode())
-            .expect("open reference can reload a zero-link inode");
         let mut original = [0; 17];
         assert_eq!(
-            filesystem.read_at(&held, 0, &mut original).unwrap(),
+            filesystem.read_at(&created, 0, &mut original).unwrap(),
             original.len()
         );
         assert_eq!(&original, b"kext4 unlink data");
-        let held = filesystem
+        created.set_size(30);
+        filesystem
             .writeback_ordered_at(
-                &held,
+                &created,
                 17,
                 b" remains open",
                 30,
@@ -2564,15 +2570,15 @@ mod tests {
                 crate::Ext4SyncIntent::FullMetadata,
             )
             .expect("write through open reference after unlink");
-        assert_eq!(held.links_count(), 0);
+        assert_eq!(created.links_count(), 0);
         let mut open_data = [0; 30];
         assert_eq!(
-            filesystem.read_at(&held, 0, &mut open_data).unwrap(),
+            filesystem.read_at(&created, 0, &mut open_data).unwrap(),
             open_data.len()
         );
         assert_eq!(&open_data, b"kext4 unlink data remains open");
         filesystem
-            .evict_unlinked_inode(removed.removed_inode(), crate::Ext4Timestamp::new(129, 0))
+            .evict_unlinked_inode(&created, crate::Ext4Timestamp::new(129, 0))
             .expect("evict unlinked regular file after final reference");
         drop(filesystem);
 
@@ -2605,9 +2611,10 @@ mod tests {
                 crate::Ext4Timestamp::new(130, 0),
             )
             .expect("create orphan recovery target");
-        let written = filesystem
+        created.set_size(23);
+        filesystem
             .writeback_ordered_at(
-                created.child(),
+                &created,
                 0,
                 b"recover zero-link inode",
                 23,
@@ -2615,23 +2622,23 @@ mod tests {
                 crate::Ext4SyncIntent::FullMetadata,
             )
             .expect("write ordinary inode on huge_file filesystem");
-        let removed = filesystem
+        filesystem
             .unlink(
-                created.parent(),
+                &root,
                 b"kext4-recovery-orphan",
+                &created,
                 crate::Ext4Timestamp::new(132, 0),
             )
             .expect("leave zero-link inode on the legacy orphan list");
-        assert_eq!(removed.removed_inode(), written.number());
-        assert_eq!(removed.removed().links_count(), 0);
-        assert_eq!(filesystem.orphan_head(), Some(written.number()));
+        assert_eq!(created.links_count(), 0);
+        assert_eq!(filesystem.orphan_head(), Some(created.number()));
         assert!(filesystem.journal_supports_revoke());
         assert!(!filesystem.superblock().features().needs_recovery());
         filesystem
             .sync_filesystem()
             .expect("persist clean journal and legacy orphan");
         assert_eq!(filesystem.pending_checkpoint_count(), 0);
-        assert_eq!(filesystem.orphan_head(), Some(written.number()));
+        assert_eq!(filesystem.orphan_head(), Some(created.number()));
         assert!(!filesystem.superblock().features().needs_recovery());
         drop(filesystem);
 
@@ -2639,7 +2646,7 @@ mod tests {
             let bytes = device.bytes();
             let persisted = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
                 .expect("decode persisted clean orphan superblock");
-            assert_eq!(persisted.last_orphan(), written.number().get());
+            assert_eq!(persisted.last_orphan(), created.number().get());
             assert!(!persisted.features().needs_recovery());
         }
 
@@ -2710,14 +2717,15 @@ mod tests {
                 crate::Ext4Timestamp::new(133, 0),
             )
             .expect("create orphan recovery target");
-        let removed = filesystem
+        filesystem
             .unlink(
-                created.parent(),
+                &root,
                 b"kext4-recovery-flush-failure",
+                &created,
                 crate::Ext4Timestamp::new(134, 0),
             )
             .expect("leave zero-link inode on the legacy orphan list");
-        let orphan = removed.removed_inode();
+        let orphan = created.number();
         assert_eq!(filesystem.orphan_head(), Some(orphan));
         assert!(filesystem.journal_supports_revoke());
         filesystem
@@ -2804,24 +2812,23 @@ mod tests {
             )
             .expect("create rmdir target");
 
-        let removed = filesystem
+        filesystem
             .remove_directory(
-                created.parent(),
+                &root,
                 b"kext4-rmdir",
+                &created,
                 crate::Ext4Timestamp::new(129, 0),
             )
             .expect("remove empty directory");
-        assert_eq!(removed.removed_inode(), created.child().number());
-        assert_eq!(removed.removed().links_count(), 0);
-        assert_eq!(removed.parent().links_count(), root.links_count());
+        assert_eq!(created.links_count(), 0);
         assert_eq!(
             filesystem
-                .lookup(removed.parent(), "kext4-rmdir")
+                .lookup(&root, "kext4-rmdir")
                 .expect("lookup removed directory"),
             None
         );
         filesystem
-            .evict_unlinked_inode(removed.removed_inode(), crate::Ext4Timestamp::new(130, 0))
+            .evict_unlinked_inode(&created, crate::Ext4Timestamp::new(130, 0))
             .expect("evict removed directory after final reference");
         drop(filesystem);
 
@@ -2852,40 +2859,40 @@ mod tests {
                 crate::Ext4Timestamp::new(130, 0),
             )
             .expect("create hard link source");
-        let linked = filesystem
+        filesystem
             .link(
-                created.parent(),
+                &root,
                 b"kext4-link-dst.txt",
-                created.child(),
+                &created,
                 crate::Ext4Timestamp::new(131, 0),
             )
             .expect("create hard link");
 
-        assert_eq!(linked.target().number(), created.child().number());
-        assert_eq!(linked.target().links_count(), 2);
+        assert_eq!(created.links_count(), 2);
         let source = filesystem
-            .lookup(linked.parent(), "kext4-link-src.txt")
+            .lookup(&root, "kext4-link-src.txt")
             .expect("lookup source")
             .expect("source remains visible");
         let target = filesystem
-            .lookup(linked.parent(), "kext4-link-dst.txt")
+            .lookup(&root, "kext4-link-dst.txt")
             .expect("lookup hard link")
             .expect("hard link is visible");
         assert_eq!(source.inode(), target.inode());
 
-        let removed = filesystem
+        filesystem
             .unlink(
-                linked.parent(),
+                &root,
                 b"kext4-link-src.txt",
+                &created,
                 crate::Ext4Timestamp::new(132, 0),
             )
             .expect("unlink one hard-link name");
         let remaining = filesystem
-            .lookup(removed.parent(), "kext4-link-dst.txt")
+            .lookup(&root, "kext4-link-dst.txt")
             .expect("lookup remaining hard link")
             .expect("remaining hard link is visible");
         let remaining_inode = filesystem
-            .inode(remaining.inode())
+            .load_inode_private(remaining.inode())
             .expect("read remaining hard-link inode");
         assert_eq!(remaining_inode.links_count(), 1);
         drop(filesystem);
@@ -2917,7 +2924,6 @@ mod tests {
                 crate::Ext4Timestamp::new(133, 0),
             )
             .expect("create left directory");
-        let root = left.parent().clone();
         let right = filesystem
             .create_directory(
                 &root,
@@ -2930,7 +2936,7 @@ mod tests {
             .expect("create right directory");
         let left_file = filesystem
             .create_regular_file(
-                left.child(),
+                &left,
                 b"move-me.txt",
                 0o644,
                 0,
@@ -2939,26 +2945,28 @@ mod tests {
             )
             .expect("create file to rename");
 
-        let renamed = filesystem
+        filesystem
             .rename(
-                left_file.parent(),
+                &left,
                 b"move-me.txt",
-                right.child(),
+                &left_file,
+                &right,
                 b"moved.txt",
+                None,
                 crate::Ext4Timestamp::new(136, 0),
             )
             .expect("rename file across directories");
         assert_eq!(
             filesystem
-                .lookup(renamed.source_parent(), "move-me.txt")
+                .lookup(&left, "move-me.txt")
                 .expect("lookup old file name"),
             None
         );
         let moved = filesystem
-            .lookup(renamed.target_parent(), "moved.txt")
+            .lookup(&right, "moved.txt")
             .expect("lookup moved file")
             .expect("moved file is visible");
-        assert_eq!(moved.inode(), left_file.child().number());
+        assert_eq!(moved.inode(), left_file.number());
         drop(filesystem);
 
         fs::write(&image, device.bytes()).expect("write file rename image");
@@ -2991,7 +2999,7 @@ mod tests {
             .expect("create rename source");
         let target = filesystem
             .create_regular_file(
-                source.parent(),
+                &root,
                 b"rename-dst.txt",
                 0o644,
                 0,
@@ -2999,9 +3007,10 @@ mod tests {
                 crate::Ext4Timestamp::new(146, 0),
             )
             .expect("create rename target");
-        let target_with_data = filesystem
+        target.set_size(18);
+        filesystem
             .writeback_ordered_at(
-                target.child(),
+                &target,
                 0,
                 b"rename victim data",
                 18,
@@ -3009,36 +3018,34 @@ mod tests {
                 crate::Ext4SyncIntent::FullMetadata,
             )
             .expect("write data to rename target");
-        assert!(target_with_data.blocks() > 0);
+        assert!(target.blocks() > 0);
         // Namespace replacement only records the victim as a zero-link
         // orphan. Its extent cleanup belongs to final eviction below.
-        let renamed = filesystem
+        filesystem
             .rename(
-                target.parent(),
+                &root,
                 b"rename-src.txt",
-                target.parent(),
+                &source,
+                &root,
                 b"rename-dst.txt",
+                Some(&target),
                 crate::Ext4Timestamp::new(148, 0),
             )
             .expect("rename file over existing file");
         assert_eq!(
             filesystem
-                .lookup(renamed.source_parent(), "rename-src.txt")
+                .lookup(&root, "rename-src.txt")
                 .expect("lookup overwritten source name"),
             None
         );
         let moved = filesystem
-            .lookup(renamed.target_parent(), "rename-dst.txt")
+            .lookup(&root, "rename-dst.txt")
             .expect("lookup overwritten target name")
             .expect("target name is still visible");
-        assert_eq!(moved.inode(), source.child().number());
-        let replaced = renamed
-            .replaced()
-            .expect("rename reports overwritten inode");
-        assert_eq!(replaced.number(), target_with_data.number());
-        assert_eq!(replaced.links_count(), 0);
+        assert_eq!(moved.inode(), source.number());
+        assert_eq!(target.links_count(), 0);
         filesystem
-            .evict_unlinked_inode(replaced.number(), crate::Ext4Timestamp::new(149, 0))
+            .evict_unlinked_inode(&target, crate::Ext4Timestamp::new(149, 0))
             .expect("evict overwritten regular file after final reference");
         drop(filesystem);
 
@@ -3071,7 +3078,6 @@ mod tests {
                 crate::Ext4Timestamp::new(137, 0),
             )
             .expect("create left directory");
-        let root = left.parent().clone();
         let right = filesystem
             .create_directory(
                 &root,
@@ -3084,7 +3090,7 @@ mod tests {
             .expect("create right directory");
         let child = filesystem
             .create_directory(
-                left.child(),
+                &left,
                 b"child",
                 0o755,
                 0,
@@ -3093,28 +3099,30 @@ mod tests {
             )
             .expect("create child directory to rename");
 
-        let renamed = filesystem
+        filesystem
             .rename(
-                child.parent(),
+                &left,
                 b"child",
-                right.child(),
+                &child,
+                &right,
                 b"child-renamed",
+                None,
                 crate::Ext4Timestamp::new(140, 0),
             )
             .expect("rename directory across parents");
         let moved = filesystem
-            .lookup(renamed.target_parent(), "child-renamed")
+            .lookup(&right, "child-renamed")
             .expect("lookup moved directory")
             .expect("moved directory is visible");
-        assert_eq!(moved.inode(), child.child().number());
+        assert_eq!(moved.inode(), child.number());
         let moved_inode = filesystem
-            .inode(moved.inode())
+            .load_inode_private(moved.inode())
             .expect("read moved directory");
         let dotdot = filesystem
             .lookup(&moved_inode, "..")
             .expect("lookup moved dotdot")
             .expect("moved dotdot exists");
-        assert_eq!(dotdot.inode(), right.child().number());
+        assert_eq!(dotdot.inode(), right.number());
         let root_after = filesystem.root_inode().expect("read updated root");
         assert_eq!(root_after.links_count(), old_root_links + 2);
         drop(filesystem);
@@ -3149,7 +3157,7 @@ mod tests {
             .expect("create rename source directory");
         let target = filesystem
             .create_directory(
-                source.parent(),
+                &root,
                 b"rename-dst-dir",
                 0o755,
                 0,
@@ -3157,38 +3165,33 @@ mod tests {
                 crate::Ext4Timestamp::new(149, 0),
             )
             .expect("create rename target directory");
-        let parent_links_before = target.parent().links_count();
-        let renamed = filesystem
+        let parent_links_before = root.links_count();
+        filesystem
             .rename(
-                target.parent(),
+                &root,
                 b"rename-src-dir",
-                target.parent(),
+                &source,
+                &root,
                 b"rename-dst-dir",
+                Some(&target),
                 crate::Ext4Timestamp::new(150, 0),
             )
             .expect("rename directory over existing empty directory");
-        assert_eq!(
-            renamed.target_parent().links_count(),
-            parent_links_before - 1
-        );
+        assert_eq!(root.links_count(), parent_links_before - 1);
         assert_eq!(
             filesystem
-                .lookup(renamed.source_parent(), "rename-src-dir")
+                .lookup(&root, "rename-src-dir")
                 .expect("lookup overwritten source directory name"),
             None
         );
         let moved = filesystem
-            .lookup(renamed.target_parent(), "rename-dst-dir")
+            .lookup(&root, "rename-dst-dir")
             .expect("lookup overwritten target directory name")
             .expect("target directory name is visible");
-        assert_eq!(moved.inode(), source.child().number());
-        let replaced = renamed
-            .replaced()
-            .expect("rename reports overwritten directory");
-        assert_eq!(replaced.number(), target.child().number());
-        assert_eq!(replaced.links_count(), 0);
+        assert_eq!(moved.inode(), source.number());
+        assert_eq!(target.links_count(), 0);
         filesystem
-            .evict_unlinked_inode(replaced.number(), crate::Ext4Timestamp::new(151, 0))
+            .evict_unlinked_inode(&target, crate::Ext4Timestamp::new(151, 0))
             .expect("evict overwritten directory after final reference");
         drop(filesystem);
 
@@ -3219,16 +3222,16 @@ mod tests {
                 crate::Ext4Timestamp::new(141, 0),
             )
             .expect("create fast symlink");
-        assert_eq!(created.child().kind(), InodeKind::Symlink);
-        assert_eq!(created.child().size(), 11);
+        assert_eq!(created.kind(), InodeKind::Symlink);
+        assert_eq!(created.size(), 11);
         let entry = filesystem
-            .lookup(created.parent(), "kext4-symlink")
+            .lookup(&root, "kext4-symlink")
             .expect("lookup symlink")
             .expect("symlink is visible");
         assert_eq!(entry.file_type(), crate::DirectoryFileType::Symlink);
         let mut target = [0; 16];
         let read = filesystem
-            .read_link_at(created.child(), 0, &mut target)
+            .read_link_at(&created, 0, &mut target)
             .expect("read fast symlink");
         assert_eq!(&target[..read], b"target/path");
         drop(filesystem);
@@ -3261,19 +3264,19 @@ mod tests {
                 crate::Ext4Timestamp::new(144, 0),
             )
             .expect("create block-mapped symlink");
-        assert_eq!(created.child().kind(), InodeKind::Symlink);
-        assert_eq!(created.child().size(), 128);
-        assert_ne!(created.child().blocks(), 0);
-        assert!(created.child().has_extents());
+        assert_eq!(created.kind(), InodeKind::Symlink);
+        assert_eq!(created.size(), 128);
+        assert_ne!(created.blocks(), 0);
+        assert!(created.has_extents());
 
         let entry = filesystem
-            .lookup(created.parent(), "kext4-block-symlink")
+            .lookup(&root, "kext4-block-symlink")
             .expect("lookup block symlink")
             .expect("block symlink is visible");
         assert_eq!(entry.file_type(), crate::DirectoryFileType::Symlink);
         let mut read_target = vec![0; target.len()];
         let read = filesystem
-            .read_link_at(created.child(), 0, &mut read_target)
+            .read_link_at(&created, 0, &mut read_target)
             .expect("read block-mapped symlink");
         assert_eq!(read, target.len());
         assert_eq!(read_target, target);
@@ -3309,7 +3312,7 @@ mod tests {
             .expect("create fifo");
         let char_device = filesystem
             .create_special_file(
-                fifo.parent(),
+                &root,
                 b"kext4-null",
                 (
                     InodeKind::CharacterDevice,
@@ -3321,13 +3324,10 @@ mod tests {
                 crate::Ext4Timestamp::new(143, 0),
             )
             .expect("create char device");
-        assert_eq!(fifo.child().kind(), InodeKind::Fifo);
-        assert_eq!(char_device.child().kind(), InodeKind::CharacterDevice);
+        assert_eq!(fifo.kind(), InodeKind::Fifo);
+        assert_eq!(char_device.kind(), InodeKind::CharacterDevice);
         assert_eq!(
-            char_device
-                .child()
-                .device_id()
-                .expect("decode char device id"),
+            char_device.device_id(),
             Some(crate::Ext4DeviceId::new(1, 3))
         );
         drop(filesystem);
@@ -3365,15 +3365,14 @@ mod tests {
             .expect("lookup indexed directory")
             .expect("indexed directory exists");
         let big = filesystem
-            .inode(big_entry.inode())
+            .load_inode_private(big_entry.inode())
             .expect("read indexed directory inode");
         assert!(big.has_indexed_directory());
-        let mut parent = big;
+        let parent = big;
         let mut last_name = Vec::new();
-        let mut created = None;
         for index in 0..300 {
             last_name = format!("kext4-added-{index:04}").into_bytes();
-            let next = filesystem
+            let _created = filesystem
                 .create_regular_file(
                     &parent,
                     &last_name,
@@ -3383,24 +3382,40 @@ mod tests {
                     crate::Ext4Timestamp::new(144 + index, 0),
                 )
                 .expect("create regular file in indexed directory");
-            parent = next.parent().clone();
-            created = Some(next);
         }
-        let renamed = filesystem
+        let moved_entry = filesystem
+            .lookup_bytes(&parent, b"f0000")
+            .expect("lookup indexed rename source")
+            .expect("indexed rename source exists");
+        let moved = filesystem
+            .load_inode_private(moved_entry.inode())
+            .expect("load indexed rename source");
+        filesystem
             .rename(
                 &parent,
                 b"f0000",
+                &moved,
                 &parent,
                 b"kext4-renamed",
+                None,
                 crate::Ext4Timestamp::new(600, 0),
             )
             .expect("rename inside indexed directory");
-        parent = renamed.target_parent().clone();
-        let removed = filesystem
-            .unlink(&parent, b"f0001", crate::Ext4Timestamp::new(601, 0))
+        let removed_entry = filesystem
+            .lookup_bytes(&parent, b"f0001")
+            .expect("lookup indexed unlink target")
+            .expect("indexed unlink target exists");
+        let removed_inode = filesystem
+            .load_inode_private(removed_entry.inode())
+            .expect("load indexed unlink target");
+        filesystem
+            .unlink(
+                &parent,
+                b"f0001",
+                &removed_inode,
+                crate::Ext4Timestamp::new(601, 0),
+            )
             .expect("unlink inside indexed directory");
-        parent = removed.parent().clone();
-        assert!(created.is_some());
         let entry = filesystem
             .lookup_bytes(&parent, &last_name)
             .expect("lookup indexed create")
@@ -3419,7 +3434,7 @@ mod tests {
                 .is_none()
         );
         filesystem
-            .evict_unlinked_inode(removed.removed_inode(), crate::Ext4Timestamp::new(602, 0))
+            .evict_unlinked_inode(&removed_inode, crate::Ext4Timestamp::new(602, 0))
             .expect("evict unlinked indexed-directory child");
         drop(filesystem);
 
@@ -3451,13 +3466,12 @@ mod tests {
                 crate::Ext4Timestamp::new(500, 0),
             )
             .expect("create directory before htree conversion");
-        let mut parent = directory.child().clone();
         let mut last_name = Vec::new();
         for index in 0..260 {
             last_name = format!("entry-{index:04}").into_bytes();
-            let next = filesystem
+            let _created = filesystem
                 .create_regular_file(
-                    &parent,
+                    &directory,
                     &last_name,
                     0o644,
                     0,
@@ -3465,11 +3479,10 @@ mod tests {
                     crate::Ext4Timestamp::new(501 + index, 0),
                 )
                 .expect("create regular file during htree conversion");
-            parent = next.parent().clone();
         }
-        assert!(parent.has_indexed_directory());
+        assert!(directory.has_indexed_directory());
         let entry = filesystem
-            .lookup_bytes(&parent, &last_name)
+            .lookup_bytes(&directory, &last_name)
             .expect("lookup converted indexed directory")
             .expect("converted indexed entry is visible");
         assert_eq!(entry.file_type(), crate::DirectoryFileType::RegularFile);
@@ -3879,6 +3892,170 @@ mod tests {
         assert_eq!(bytes[2 * TEST_BLOCK_SIZE] & 0b0100_0000, 0b0100_0000);
         assert_eq!(le_u16(&bytes, TEST_BLOCK_SIZE + 12), 25);
         assert_eq!(le_u32(&bytes, 1024 + 0x0c), 25);
+    }
+
+    #[test]
+    fn delayed_allocation_range_updates_inode_and_mount_accounting_together() {
+        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+        let free_before = filesystem.statfs().unwrap().blocks_free;
+
+        filesystem
+            .reserve_delalloc_range(&inode, LogicalBlock::new(0), 4)
+            .unwrap();
+        filesystem
+            .reserve_delalloc_range(&inode, LogicalBlock::new(2), 4)
+            .unwrap();
+        assert_eq!(filesystem.delalloc_reserved_blocks, 6);
+        assert_eq!(filesystem.statfs().unwrap().blocks_free, free_before - 6);
+        assert_eq!(
+            filesystem
+                .report_mapping(&inode, LogicalBlock::new(0))
+                .unwrap(),
+            BlockMapping::Hole {
+                len: BlockCount::new(6),
+                flags: BlockMappingFlags::DELAYED,
+            }
+        );
+
+        filesystem
+            .release_delalloc_range(&inode, LogicalBlock::new(1), 4)
+            .unwrap();
+        assert_eq!(filesystem.delalloc_reserved_blocks, 2);
+        assert_eq!(
+            filesystem
+                .report_mapping(&inode, LogicalBlock::new(1))
+                .unwrap(),
+            BlockMapping::Hole {
+                len: BlockCount::new(4),
+                flags: BlockMappingFlags::empty(),
+            }
+        );
+        filesystem
+            .truncate_delalloc_range(&inode, LogicalBlock::new(5))
+            .unwrap();
+        assert_eq!(filesystem.delalloc_reserved_blocks, 1);
+        filesystem.release_all_delalloc(&inode).unwrap();
+        assert_eq!(filesystem.delalloc_reserved_blocks, 0);
+        assert!(!inode.has_delalloc_reservations());
+    }
+
+    #[test]
+    fn truncate_releases_delalloc_beyond_visible_eof_even_without_disk_shrink() {
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+        install_test_internal_journal(&mut filesystem, 391);
+        let block_size = u64::try_from(TEST_BLOCK_SIZE).unwrap();
+        let visible_size = block_size * 6;
+        let truncated_size = block_size * 3;
+
+        inode.set_size(visible_size);
+        filesystem
+            .reserve_delalloc_range(&inode, LogicalBlock::new(0), 6)
+            .unwrap();
+        filesystem
+            .truncate_regular_inode(&inode, truncated_size, crate::Ext4Timestamp::new(10, 0))
+            .unwrap();
+
+        assert_eq!(inode.disk_size(), truncated_size);
+        assert_eq!(inode.size(), truncated_size);
+        assert_eq!(filesystem.delalloc_reserved_blocks, 3);
+        assert!(matches!(
+            filesystem.report_mapping(&inode, LogicalBlock::new(0)),
+            Ok(BlockMapping::Hole {
+                len,
+                flags: BlockMappingFlags::DELAYED,
+            }) if len == BlockCount::new(3)
+        ));
+        assert!(matches!(
+            filesystem.report_mapping(&inode, LogicalBlock::new(3)),
+            Ok(BlockMapping::Hole { flags, .. }) if flags.is_empty()
+        ));
+
+        inode.set_size(visible_size);
+        filesystem
+            .reserve_delalloc_range(&inode, LogicalBlock::new(3), 3)
+            .unwrap();
+        filesystem
+            .truncate_regular_inode(&inode, truncated_size, crate::Ext4Timestamp::new(11, 0))
+            .unwrap();
+
+        assert_eq!(inode.disk_size(), truncated_size);
+        assert_eq!(inode.size(), truncated_size);
+        assert_eq!(filesystem.delalloc_reserved_blocks, 3);
+        assert!(matches!(
+            filesystem.report_mapping(&inode, LogicalBlock::new(3)),
+            Ok(BlockMapping::Hole { flags, .. }) if flags.is_empty()
+        ));
+    }
+
+    #[test]
+    fn prepared_regular_shrink_leaves_visible_size_for_vfs_pagecache() {
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+        install_test_internal_journal(&mut filesystem, 392);
+        let block_size = u64::try_from(TEST_BLOCK_SIZE).unwrap();
+        let old_size = block_size * 2;
+        let new_size = block_size;
+
+        inode.set_size(old_size);
+        filesystem
+            .commit_regular_inode_write_metadata(
+                &inode,
+                old_size,
+                RegularWriteMetadata::Full {
+                    timestamp: crate::Ext4Timestamp::new(12, 0),
+                },
+            )
+            .unwrap();
+        filesystem
+            .prepare_regular_inode_truncate(&inode, new_size, crate::Ext4Timestamp::new(13, 0))
+            .unwrap();
+
+        assert_eq!(inode.disk_size(), new_size);
+        assert_eq!(inode.size(), old_size);
+
+        inode.set_size(new_size);
+        filesystem
+            .finish_regular_inode_shrink(&inode, new_size)
+            .unwrap();
+        assert_eq!(inode.disk_size(), new_size);
+        assert_eq!(inode.size(), new_size);
+    }
+
+    #[test]
+    fn removing_orphan_tail_does_not_restore_stale_predecessor_next() {
+        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let first = allocate_checkpointed_regular_inode(&mut filesystem);
+        let second = allocate_checkpointed_regular_inode(&mut filesystem);
+        let journal = JournalTransactions::new(TransactionId::new(390));
+        let mut handle = journal.begin(JournalCredits::new(32)).unwrap();
+        let transaction = handle.id();
+
+        filesystem.add_orphan(&first, &mut handle).unwrap();
+        filesystem.add_orphan(&second, &mut handle).unwrap();
+        assert_eq!(filesystem.orphan_head(), Some(second.number()));
+        assert_eq!(
+            filesystem.raw_inode(second.number()).unwrap().dtime(),
+            first.number().get()
+        );
+
+        filesystem.remove_orphan(&first, &mut handle).unwrap();
+        assert_eq!(filesystem.orphan_head(), Some(second.number()));
+        assert_eq!(filesystem.raw_inode(second.number()).unwrap().dtime(), 0);
+
+        filesystem.remove_orphan(&second, &mut handle).unwrap();
+        assert_eq!(filesystem.orphan_head(), None);
+
+        drop(handle);
+        let commit = journal.force_commit(transaction).unwrap();
+        filesystem
+            .metadata_io
+            .checkpoint_committed(&commit)
+            .unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
     }
 
     #[test]
@@ -4852,7 +5029,7 @@ mod tests {
         assert_eq!(allocation.bitmap_bit(), 10);
         assert_eq!(filesystem.groups()[0].free_inodes_count(), 21);
         assert_eq!(filesystem.superblock().free_inodes_count(), 21);
-        let inode = filesystem.internal_inode(allocation.inode()).unwrap();
+        let inode = filesystem.internal_iget(allocation.inode()).unwrap();
         assert_eq!(inode.kind(), InodeKind::RegularFile);
         assert_eq!(inode.mode(), 0o100644);
         assert_eq!(inode.uid(), 1000);
@@ -4910,10 +5087,10 @@ mod tests {
             )
             .unwrap();
         let inode = filesystem
-            .internal_inode(inode_allocation.inode())
+            .internal_iget(inode_allocation.inode())
             .expect("read initialized inode");
 
-        let updated_inode = filesystem
+        filesystem
             .insert_inline_extent_mapping(
                 &inode,
                 LogicalBlock::new(0),
@@ -4925,7 +5102,7 @@ mod tests {
             .expect("insert inline extent mapping");
 
         assert_eq!(
-            filesystem.map_blocks(&updated_inode, LogicalBlock::new(0)),
+            filesystem.map_blocks(&inode, LogicalBlock::new(0)),
             Ok(crate::BlockMapping::Mapped {
                 physical: block.block(),
                 len: BlockCount::new(1),
@@ -4948,14 +5125,14 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        let mut inode = filesystem
-            .internal_inode(inode_allocation.inode())
+        let inode = filesystem
+            .internal_iget(inode_allocation.inode())
             .expect("read initialized inode");
         let mut extents = Vec::new();
 
         for logical in [0, 2, 4, 6, 8, 10] {
             let block = filesystem.allocate_block(None, &mut handle).unwrap();
-            inode = filesystem
+            filesystem
                 .insert_extent_mapping(
                     &inode,
                     LogicalBlock::new(logical),
@@ -4968,12 +5145,12 @@ mod tests {
             extents.push((logical, block.block()));
         }
 
-        assert_eq!(le_u16(inode.extent_bytes(), 0x02), 1);
-        assert_eq!(le_u16(inode.extent_bytes(), 0x06), 1);
+        assert_eq!(le_u16(&inode.raw_i_block(), 0x02), 1);
+        assert_eq!(le_u16(&inode.raw_i_block(), 0x06), 1);
         let index_offset = crate::disk::extent::EXTENT_HEADER_SIZE;
-        assert_eq!(le_u32(inode.extent_bytes(), index_offset), 0);
-        let extent_block = u64::from(le_u32(inode.extent_bytes(), index_offset + 0x04))
-            | (u64::from(le_u16(inode.extent_bytes(), index_offset + 0x08)) << 32);
+        assert_eq!(le_u32(&inode.raw_i_block(), index_offset), 0);
+        let extent_block = u64::from(le_u32(&inode.raw_i_block(), index_offset + 0x04))
+            | (u64::from(le_u16(&inode.raw_i_block(), index_offset + 0x08)) << 32);
         assert!(filesystem.is_system_zone_block(FilesystemBlock::new(extent_block)));
 
         for (logical, physical) in extents {
@@ -5025,13 +5202,13 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        let mut inode = filesystem
-            .internal_inode(inode_allocation.inode())
+        let inode = filesystem
+            .internal_iget(inode_allocation.inode())
             .expect("read initialized inode");
 
         for logical in [0, 2, 4, 6, 8] {
             let block = filesystem.allocate_block(None, &mut handle).unwrap();
-            inode = filesystem
+            filesystem
                 .insert_extent_mapping(
                     &inode,
                     LogicalBlock::new(logical),
@@ -5043,11 +5220,11 @@ mod tests {
                 .unwrap();
         }
         let index_offset = crate::disk::extent::EXTENT_HEADER_SIZE;
-        let extent_block = u64::from(le_u32(inode.extent_bytes(), index_offset + 0x04))
-            | (u64::from(le_u16(inode.extent_bytes(), index_offset + 0x08)) << 32);
+        let extent_block = u64::from(le_u32(&inode.raw_i_block(), index_offset + 0x04))
+            | (u64::from(le_u16(&inode.raw_i_block(), index_offset + 0x08)) << 32);
 
         let data = filesystem.allocate_block(None, &mut handle).unwrap();
-        inode = filesystem
+        filesystem
             .insert_extent_mapping(
                 &inode,
                 LogicalBlock::new(10),
@@ -5057,7 +5234,7 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        inode = filesystem
+        filesystem
             .convert_unwritten_extent_range(
                 &inode,
                 LogicalBlock::new(10),
@@ -5065,7 +5242,7 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        inode = filesystem
+        filesystem
             .remove_extent_range(
                 &inode,
                 LogicalBlock::new(10),
@@ -5074,13 +5251,14 @@ mod tests {
             )
             .unwrap();
 
-        let current_extent_block = u64::from(le_u32(inode.extent_bytes(), index_offset + 0x04))
-            | (u64::from(le_u16(inode.extent_bytes(), index_offset + 0x08)) << 32);
+        let current_extent_block = u64::from(le_u32(&inode.raw_i_block(), index_offset + 0x04))
+            | (u64::from(le_u16(&inode.raw_i_block(), index_offset + 0x08)) << 32);
         assert_eq!(current_extent_block, extent_block);
         assert_eq!(
             filesystem.map_blocks(&inode, LogicalBlock::new(10)),
             Ok(crate::BlockMapping::Hole {
                 len: BlockCount::new(u32::MAX),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
     }
@@ -5106,15 +5284,15 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        let mut inode = filesystem
-            .internal_inode(inode_allocation.inode())
+        let inode = filesystem
+            .internal_iget(inode_allocation.inode())
             .expect("read initialized inode");
         let leaf_capacity =
             u64::from(crate::disk::extent::extent_block_capacity(TEST_BLOCK_SIZE).unwrap());
 
         for logical in 0..=leaf_capacity {
             let block = filesystem.allocate_block(None, &mut handle).unwrap();
-            inode = filesystem
+            filesystem
                 .insert_extent_mapping(
                     &inode,
                     LogicalBlock::new(logical * 2),
@@ -5125,10 +5303,10 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert_eq!(le_u16(inode.extent_bytes(), 0x02), 2);
+        assert_eq!(le_u16(&inode.raw_i_block(), 0x02), 2);
 
         let inserted = filesystem.allocate_block(None, &mut handle).unwrap();
-        inode = filesystem
+        filesystem
             .insert_extent_mapping(
                 &inode,
                 LogicalBlock::new(1),
@@ -5139,7 +5317,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(le_u16(inode.extent_bytes(), 0x02), 2);
+        assert_eq!(le_u16(&inode.raw_i_block(), 0x02), 2);
         assert_eq!(
             filesystem.map_blocks(&inode, LogicalBlock::new(1)),
             Ok(crate::BlockMapping::Mapped {
@@ -5163,9 +5341,9 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        let mut inode = filesystem.internal_inode(inode_allocation.inode()).unwrap();
+        let inode = filesystem.internal_iget(inode_allocation.inode()).unwrap();
 
-        inode = filesystem
+        filesystem
             .insert_extent_mapping(
                 &inode,
                 LogicalBlock::new(0),
@@ -5175,7 +5353,7 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        inode = filesystem
+        filesystem
             .convert_unwritten_extent_range(
                 &inode,
                 LogicalBlock::new(2),
@@ -5223,8 +5401,8 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        let inode = filesystem.internal_inode(inode_allocation.inode()).unwrap();
-        let inode = filesystem
+        let inode = filesystem.internal_iget(inode_allocation.inode()).unwrap();
+        filesystem
             .insert_extent_mapping(
                 &inode,
                 LogicalBlock::new(10),
@@ -5256,10 +5434,10 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        let mut inode = filesystem.internal_inode(inode_allocation.inode()).unwrap();
+        let inode = filesystem.internal_iget(inode_allocation.inode()).unwrap();
         let free_after_allocation = filesystem.superblock().free_blocks_count();
 
-        inode = filesystem
+        filesystem
             .insert_extent_mapping(
                 &inode,
                 LogicalBlock::new(0),
@@ -5269,7 +5447,7 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        inode = filesystem
+        filesystem
             .remove_extent_range(
                 &inode,
                 LogicalBlock::new(2),
@@ -5290,6 +5468,7 @@ mod tests {
             filesystem.map_blocks(&inode, LogicalBlock::new(2)),
             Ok(crate::BlockMapping::Hole {
                 len: BlockCount::new(2),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         assert_eq!(
@@ -5319,8 +5498,8 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        let mut inode = filesystem.internal_inode(inode_allocation.inode()).unwrap();
-        inode = filesystem
+        let inode = filesystem.internal_iget(inode_allocation.inode()).unwrap();
+        filesystem
             .insert_extent_mapping(
                 &inode,
                 LogicalBlock::new(0),
@@ -5332,7 +5511,7 @@ mod tests {
             .unwrap();
         for logical in [4, 6, 8] {
             let block = filesystem.allocate_block(None, &mut handle).unwrap();
-            inode = filesystem
+            filesystem
                 .insert_extent_mapping(
                     &inode,
                     LogicalBlock::new(logical),
@@ -5344,7 +5523,7 @@ mod tests {
                 .unwrap();
         }
 
-        inode = filesystem
+        filesystem
             .remove_extent_range(
                 &inode,
                 LogicalBlock::new(1),
@@ -5353,11 +5532,12 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(le_u16(inode.extent_bytes(), 0x06), 1);
+        assert_eq!(le_u16(&inode.raw_i_block(), 0x06), 1);
         assert_eq!(
             filesystem.map_blocks(&inode, LogicalBlock::new(1)),
             Ok(crate::BlockMapping::Hole {
                 len: BlockCount::new(1),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         assert_eq!(
@@ -5383,10 +5563,10 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        let mut inode = filesystem.internal_inode(inode_allocation.inode()).unwrap();
+        let inode = filesystem.internal_iget(inode_allocation.inode()).unwrap();
         let free_after_allocation = filesystem.superblock().free_blocks_count();
 
-        inode = filesystem
+        filesystem
             .insert_extent_mapping(
                 &inode,
                 LogicalBlock::new(0),
@@ -5396,7 +5576,7 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        inode = filesystem
+        filesystem
             .truncate_extent_mappings(&inode, LogicalBlock::new(3), &mut handle)
             .unwrap();
 
@@ -5412,6 +5592,7 @@ mod tests {
             filesystem.map_blocks(&inode, LogicalBlock::new(3)),
             Ok(crate::BlockMapping::Hole {
                 len: BlockCount::new(u32::MAX),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         assert_eq!(
@@ -5441,12 +5622,12 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        let mut inode = filesystem.internal_inode(inode_allocation.inode()).unwrap();
+        let inode = filesystem.internal_iget(inode_allocation.inode()).unwrap();
         let mut mappings = Vec::new();
 
         for logical in 0..350u64 {
             let block = filesystem.allocate_block(None, &mut handle).unwrap();
-            inode = filesystem
+            filesystem
                 .insert_extent_mapping(
                     &inode,
                     LogicalBlock::new(logical * 2),
@@ -5459,8 +5640,8 @@ mod tests {
             mappings.push((logical * 2, block.block()));
         }
 
-        assert_eq!(le_u16(inode.extent_bytes(), 0x02), 2);
-        assert_eq!(le_u16(inode.extent_bytes(), 0x06), 1);
+        assert_eq!(le_u16(&inode.raw_i_block(), 0x02), 2);
+        assert_eq!(le_u16(&inode.raw_i_block(), 0x06), 1);
         for (logical, physical) in mappings {
             assert_eq!(
                 filesystem.map_blocks(&inode, LogicalBlock::new(logical)),
@@ -5474,7 +5655,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_writeback_allocates_hole_and_commits_written_size_before_final_size() {
+    fn ordered_writeback_commits_disk_size_without_changing_visible_size() {
         let (mut filesystem, _device) =
             journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
@@ -5483,7 +5664,8 @@ mod tests {
         let visible_size = u64::try_from(TEST_BLOCK_SIZE * 2).unwrap();
         let timestamp = crate::Ext4Timestamp::new(1234, 0);
 
-        let updated = filesystem
+        inode.set_size(visible_size);
+        filesystem
             .writeback_ordered_at(
                 &inode,
                 0,
@@ -5494,12 +5676,13 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(updated.size(), TEST_BLOCK_SIZE as u64);
-        assert_eq!(updated.blocks(), (TEST_BLOCK_SIZE / 512) as u64);
-        assert_ne!(updated.ctime(), timestamp);
-        assert_ne!(updated.mtime(), timestamp);
+        assert_eq!(inode.size(), visible_size);
+        assert_eq!(inode.disk_size(), TEST_BLOCK_SIZE as u64);
+        assert_eq!(inode.blocks(), (TEST_BLOCK_SIZE / 512) as u64);
+        assert_ne!(inode.ctime(), timestamp);
+        assert_ne!(inode.mtime(), timestamp);
         assert_eq!(
-            filesystem.map_blocks(&updated, LogicalBlock::new(0)),
+            filesystem.map_blocks(&inode, LogicalBlock::new(0)),
             Ok(crate::BlockMapping::Mapped {
                 physical: PhysicalBlock::new(6),
                 len: BlockCount::new(1),
@@ -5508,25 +5691,25 @@ mod tests {
         );
         let mut output = vec![0; TEST_BLOCK_SIZE];
         assert_eq!(
-            filesystem.read_at(&updated, 0, &mut output).unwrap(),
+            filesystem.read_at(&inode, 0, &mut output).unwrap(),
             TEST_BLOCK_SIZE
         );
         assert_eq!(output, input);
 
-        let final_inode = filesystem
+        filesystem
             .commit_regular_inode_write_metadata(
-                &updated,
+                &inode,
                 visible_size,
                 RegularWriteMetadata::Full { timestamp },
             )
             .unwrap();
-        assert_eq!(final_inode.size(), visible_size);
-        assert_eq!(final_inode.blocks(), (TEST_BLOCK_SIZE / 512) as u64);
-        assert_eq!(final_inode.ctime(), timestamp);
-        assert_eq!(final_inode.mtime(), timestamp);
+        assert_eq!(inode.size(), visible_size);
+        assert_eq!(inode.blocks(), (TEST_BLOCK_SIZE / 512) as u64);
+        assert_eq!(inode.ctime(), timestamp);
+        assert_eq!(inode.mtime(), timestamp);
         assert_eq!(
             filesystem.commit_regular_inode_write_metadata(
-                &final_inode,
+                &inode,
                 visible_size - 1,
                 RegularWriteMetadata::SizeOnly,
             ),
@@ -5535,7 +5718,7 @@ mod tests {
         let mut sparse_tail = [0xff];
         assert_eq!(
             filesystem
-                .read_at(&final_inode, visible_size - 1, &mut sparse_tail)
+                .read_at(&inode, visible_size - 1, &mut sparse_tail)
                 .unwrap(),
             1
         );
@@ -5550,10 +5733,12 @@ mod tests {
         install_test_internal_journal(&mut filesystem, 711);
         let timestamp = crate::Ext4Timestamp::new(5678, 0);
 
-        let inode = filesystem
+        inode.set_size(3);
+        filesystem
             .writeback_ordered_at(&inode, 0, b"abc", 3, timestamp, Ext4SyncIntent::DataOnly)
             .unwrap();
-        let inode = filesystem
+        inode.set_size(6);
+        filesystem
             .writeback_ordered_at(&inode, 3, b"def", 6, timestamp, Ext4SyncIntent::DataOnly)
             .unwrap();
 
@@ -5572,7 +5757,8 @@ mod tests {
         let input = vec![0x42; TEST_BLOCK_SIZE * 4];
         let free_before_write = filesystem.superblock().free_blocks_count();
 
-        let written = filesystem
+        inode.set_size(input.len() as u64);
+        filesystem
             .writeback_ordered_at(
                 &inode,
                 0,
@@ -5583,10 +5769,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(written.size(), input.len() as u64);
-        assert_eq!(written.blocks(), (TEST_BLOCK_SIZE / 512 * 8) as u64);
+        assert_eq!(inode.size(), input.len() as u64);
+        assert_eq!(inode.blocks(), (TEST_BLOCK_SIZE / 512 * 8) as u64);
         assert_eq!(
-            filesystem.map_blocks(&written, LogicalBlock::new(0)),
+            filesystem.map_blocks(&inode, LogicalBlock::new(0)),
             Ok(crate::BlockMapping::Mapped {
                 physical: PhysicalBlock::new(6),
                 len: BlockCount::new(4),
@@ -5594,7 +5780,7 @@ mod tests {
             })
         );
         assert_eq!(
-            filesystem.map_blocks(&written, LogicalBlock::new(4)),
+            filesystem.map_blocks(&inode, LogicalBlock::new(4)),
             Ok(crate::BlockMapping::Unwritten {
                 physical: PhysicalBlock::new(10),
                 len: BlockCount::new(4),
@@ -5607,22 +5793,23 @@ mod tests {
         );
         assert!(
             filesystem
-                .extent_truncate_metadata_credits(&written, LogicalBlock::new(4))
+                .extent_truncate_metadata_credits(&inode, LogicalBlock::new(4))
                 .unwrap()
                 <= 16,
             "discard credits must follow the mapped tail structure, not total inode blocks"
         );
 
         install_test_internal_journal(&mut filesystem, 713);
-        let discarded = filesystem
-            .discard_regular_inode_preallocations(&written)
+        filesystem
+            .discard_regular_inode_preallocations(&inode)
             .unwrap();
 
-        assert_eq!(discarded.blocks(), (TEST_BLOCK_SIZE / 512 * 4) as u64);
+        assert_eq!(inode.blocks(), (TEST_BLOCK_SIZE / 512 * 4) as u64);
         assert_eq!(
-            filesystem.map_blocks(&discarded, LogicalBlock::new(4)),
+            filesystem.map_blocks(&inode, LogicalBlock::new(4)),
             Ok(crate::BlockMapping::Hole {
                 len: BlockCount::new(u32::MAX),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         assert_eq!(
@@ -5640,7 +5827,8 @@ mod tests {
         let input = vec![0x34; TEST_BLOCK_SIZE * 4];
         let free_before_write = filesystem.superblock().free_blocks_count();
 
-        let written = filesystem
+        inode.set_size(input.len() as u64);
+        filesystem
             .writeback_ordered_at_with_prealloc_budget(
                 &inode,
                 0,
@@ -5652,9 +5840,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(written.blocks(), (TEST_BLOCK_SIZE / 512 * 4) as u64);
+        assert_eq!(inode.blocks(), (TEST_BLOCK_SIZE / 512 * 4) as u64);
         assert_eq!(
-            filesystem.map_blocks(&written, LogicalBlock::new(0)),
+            filesystem.map_blocks(&inode, LogicalBlock::new(0)),
             Ok(crate::BlockMapping::Mapped {
                 physical: PhysicalBlock::new(6),
                 len: BlockCount::new(4),
@@ -5662,9 +5850,10 @@ mod tests {
             })
         );
         assert_eq!(
-            filesystem.map_blocks(&written, LogicalBlock::new(4)),
+            filesystem.map_blocks(&inode, LogicalBlock::new(4)),
             Ok(crate::BlockMapping::Hole {
                 len: BlockCount::new(u32::MAX),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         assert_eq!(
@@ -5683,7 +5872,8 @@ mod tests {
         let second = vec![0x62; TEST_BLOCK_SIZE * 4];
         let free_before_write = filesystem.superblock().free_blocks_count();
 
-        let written = filesystem
+        inode.set_size(first.len() as u64);
+        filesystem
             .writeback_ordered_at(
                 &inode,
                 0,
@@ -5694,9 +5884,10 @@ mod tests {
             )
             .unwrap();
         install_test_internal_journal(&mut filesystem, 715);
-        let appended = filesystem
+        inode.set_size((first.len() + second.len()) as u64);
+        filesystem
             .writeback_ordered_at(
-                &written,
+                &inode,
                 first.len() as u64,
                 &second,
                 (first.len() + second.len()) as u64,
@@ -5710,7 +5901,7 @@ mod tests {
             free_before_write - 8
         );
         assert_eq!(
-            filesystem.map_blocks(&appended, LogicalBlock::new(0)),
+            filesystem.map_blocks(&inode, LogicalBlock::new(0)),
             Ok(crate::BlockMapping::Mapped {
                 physical: PhysicalBlock::new(6),
                 len: BlockCount::new(8),
@@ -5719,7 +5910,7 @@ mod tests {
         );
         let mut output = vec![0; TEST_BLOCK_SIZE * 8];
         assert_eq!(
-            filesystem.read_at(&appended, 0, &mut output).unwrap(),
+            filesystem.read_at(&inode, 0, &mut output).unwrap(),
             output.len()
         );
         assert_eq!(&output[..first.len()], &first);
@@ -5741,8 +5932,8 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        let mut inode = filesystem.internal_inode(allocation.inode()).unwrap();
-        inode = filesystem
+        let inode = filesystem.internal_iget(allocation.inode()).unwrap();
+        filesystem
             .insert_extent_mapping(
                 &inode,
                 LogicalBlock::new(0),
@@ -5761,7 +5952,8 @@ mod tests {
         journal.finish_checkpoint_for_test(&commit).unwrap();
         install_test_internal_journal(&mut filesystem, 722);
 
-        let updated = filesystem
+        inode.set_size(4);
+        filesystem
             .writeback_ordered_at(
                 &inode,
                 2,
@@ -5773,7 +5965,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            filesystem.map_blocks(&updated, LogicalBlock::new(0)),
+            filesystem.map_blocks(&inode, LogicalBlock::new(0)),
             Ok(crate::BlockMapping::Mapped {
                 physical,
                 len: BlockCount::new(1),
@@ -5781,7 +5973,7 @@ mod tests {
             })
         );
         let mut output = vec![0xff; 4];
-        assert_eq!(filesystem.read_at(&updated, 0, &mut output).unwrap(), 4);
+        assert_eq!(filesystem.read_at(&inode, 0, &mut output).unwrap(), 4);
         assert_eq!(&output, &[0, 0, b'x', b'y']);
     }
 
@@ -5794,23 +5986,24 @@ mod tests {
         let timestamp = crate::Ext4Timestamp::new(17, 0);
         let new_size = u64::try_from(TEST_BLOCK_SIZE * 2 + 7).unwrap();
 
-        let updated = filesystem
+        filesystem
             .truncate_regular_inode(&inode, new_size, timestamp)
             .unwrap();
 
-        assert_eq!(updated.size(), new_size);
-        assert_eq!(updated.ctime(), timestamp);
-        assert_eq!(updated.mtime(), timestamp);
+        assert_eq!(inode.size(), new_size);
+        assert_eq!(inode.ctime(), timestamp);
+        assert_eq!(inode.mtime(), timestamp);
         assert_eq!(
-            filesystem.map_blocks(&updated, LogicalBlock::new(0)),
+            filesystem.map_blocks(&inode, LogicalBlock::new(0)),
             Ok(crate::BlockMapping::Hole {
                 len: BlockCount::new(u32::MAX),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         let mut output = [0xff; 4];
         assert_eq!(
             filesystem
-                .read_at(&updated, new_size - output.len() as u64, &mut output)
+                .read_at(&inode, new_size - output.len() as u64, &mut output)
                 .unwrap(),
             output.len()
         );
@@ -5824,7 +6017,8 @@ mod tests {
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 732);
         let input = vec![0x6d; TEST_BLOCK_SIZE];
-        let written = filesystem
+        inode.set_size(input.len() as u64);
+        filesystem
             .writeback_ordered_at(
                 &inode,
                 0,
@@ -5838,9 +6032,9 @@ mod tests {
         let journal = JournalTransactions::new(TransactionId::new(734));
         let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
         let transaction = handle.id();
-        let stale_tail_inode = filesystem
+        filesystem
             .update_regular_inode_size_metadata(
-                &written,
+                &inode,
                 23,
                 RegularWriteMetadata::SizeOnly,
                 &mut handle,
@@ -5854,10 +6048,11 @@ mod tests {
             .unwrap();
         journal.finish_checkpoint_for_test(&commit).unwrap();
         install_test_internal_journal(&mut filesystem, 735);
+        inode.set_size(23);
 
-        let grown = filesystem
+        filesystem
             .truncate_regular_inode(
-                &stale_tail_inode,
+                &inode,
                 TEST_BLOCK_SIZE as u64,
                 crate::Ext4Timestamp::new(19, 0),
             )
@@ -5865,7 +6060,7 @@ mod tests {
 
         let mut output = vec![0xff; TEST_BLOCK_SIZE];
         assert_eq!(
-            filesystem.read_at(&grown, 0, &mut output).unwrap(),
+            filesystem.read_at(&inode, 0, &mut output).unwrap(),
             TEST_BLOCK_SIZE
         );
         assert_eq!(&output[..23], &[0x6d; 23]);
@@ -5879,7 +6074,8 @@ mod tests {
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 741);
         let input = vec![0xa5; TEST_BLOCK_SIZE * 3];
-        let written = filesystem
+        inode.set_size(input.len() as u64);
+        filesystem
             .writeback_ordered_at(
                 &inode,
                 0,
@@ -5889,22 +6085,23 @@ mod tests {
                 Ext4SyncIntent::FullMetadata,
             )
             .unwrap();
-        assert_eq!(written.blocks(), (TEST_BLOCK_SIZE / 512 * 3) as u64);
+        assert_eq!(inode.blocks(), (TEST_BLOCK_SIZE / 512 * 3) as u64);
         install_test_internal_journal(&mut filesystem, 742);
         let free_before_truncate = filesystem.superblock().free_blocks_count();
         let new_size = u64::try_from(TEST_BLOCK_SIZE + 17).unwrap();
 
-        let truncated = filesystem
-            .truncate_regular_inode(&written, new_size, crate::Ext4Timestamp::new(22, 0))
+        filesystem
+            .truncate_regular_inode(&inode, new_size, crate::Ext4Timestamp::new(22, 0))
             .unwrap();
 
-        assert_eq!(truncated.size(), new_size);
-        assert_eq!(truncated.blocks(), (TEST_BLOCK_SIZE / 512 * 2) as u64);
+        assert_eq!(inode.size(), new_size);
+        assert_eq!(inode.blocks(), (TEST_BLOCK_SIZE / 512 * 2) as u64);
         assert_eq!(filesystem.orphan_head(), None);
         assert_eq!(
-            filesystem.map_blocks(&truncated, LogicalBlock::new(2)),
+            filesystem.map_blocks(&inode, LogicalBlock::new(2)),
             Ok(crate::BlockMapping::Hole {
                 len: BlockCount::new(u32::MAX),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         assert_eq!(
@@ -5912,9 +6109,8 @@ mod tests {
             free_before_truncate + 1
         );
 
-        let crate::BlockMapping::Mapped { physical, .. } = filesystem
-            .map_blocks(&truncated, LogicalBlock::new(1))
-            .unwrap()
+        let crate::BlockMapping::Mapped { physical, .. } =
+            filesystem.map_blocks(&inode, LogicalBlock::new(1)).unwrap()
         else {
             panic!("partial EOF block should remain mapped");
         };
@@ -5933,7 +6129,8 @@ mod tests {
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 751);
         let input = vec![0x5c; TEST_BLOCK_SIZE * 3];
-        let written = filesystem
+        inode.set_size(input.len() as u64);
+        filesystem
             .writeback_ordered_at(
                 &inode,
                 0,
@@ -5943,7 +6140,7 @@ mod tests {
                 Ext4SyncIntent::FullMetadata,
             )
             .unwrap();
-        assert_eq!(written.blocks(), (TEST_BLOCK_SIZE / 512 * 3) as u64);
+        assert_eq!(inode.blocks(), (TEST_BLOCK_SIZE / 512 * 3) as u64);
         install_test_internal_journal(&mut filesystem, 752);
         let free_before_orphan_cleanup = filesystem.superblock().free_blocks_count();
         let new_size = u64::try_from(TEST_BLOCK_SIZE + 9).unwrap();
@@ -5951,10 +6148,10 @@ mod tests {
         let journal = JournalTransactions::new(TransactionId::new(753));
         let mut handle = journal.begin(JournalCredits::new(16)).unwrap();
         let transaction = handle.id();
-        let orphaned = filesystem.add_orphan(&written, &mut handle).unwrap();
-        let orphaned = filesystem
+        filesystem.add_orphan(&inode, &mut handle).unwrap();
+        filesystem
             .update_regular_inode_size_metadata(
-                &orphaned,
+                &inode,
                 new_size,
                 RegularWriteMetadata::Full {
                     timestamp: crate::Ext4Timestamp::new(32, 0),
@@ -5962,6 +6159,7 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
+        inode.set_size(new_size);
         drop(handle);
         let commit = journal.force_commit(transaction).unwrap();
         filesystem
@@ -5970,12 +6168,12 @@ mod tests {
             .unwrap();
         journal.finish_checkpoint_for_test(&commit).unwrap();
 
-        assert_eq!(filesystem.orphan_head(), Some(written.number()));
-        assert_eq!(orphaned.size(), new_size);
+        assert_eq!(filesystem.orphan_head(), Some(inode.number()));
+        assert_eq!(inode.size(), new_size);
 
         assert_eq!(filesystem.cleanup_legacy_orphans().unwrap(), 1);
 
-        let recovered = filesystem.internal_inode(written.number()).unwrap();
+        let recovered = filesystem.internal_iget(inode.number()).unwrap();
         assert_eq!(recovered.size(), new_size);
         assert_eq!(recovered.blocks(), (TEST_BLOCK_SIZE / 512 * 2) as u64);
         assert_eq!(filesystem.orphan_head(), None);
@@ -5983,6 +6181,7 @@ mod tests {
             filesystem.map_blocks(&recovered, LogicalBlock::new(2)),
             Ok(crate::BlockMapping::Hole {
                 len: BlockCount::new(u32::MAX),
+                flags: crate::BlockMappingFlags::empty(),
             })
         );
         assert_eq!(
@@ -6030,7 +6229,8 @@ mod tests {
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 766);
         let input = vec![0x3f; TEST_BLOCK_SIZE];
-        let written = filesystem
+        inode.set_size(input.len() as u64);
+        filesystem
             .writeback_ordered_at(
                 &inode,
                 0,
@@ -6048,7 +6248,7 @@ mod tests {
         );
 
         assert_eq!(
-            filesystem.truncate_regular_inode(&written, 23, crate::Ext4Timestamp::new(34, 0)),
+            filesystem.truncate_regular_inode(&inode, 23, crate::Ext4Timestamp::new(34, 0)),
             Err(Ext4Error::Unsupported(UnsupportedKind::OrphanFile))
         );
     }
@@ -6080,7 +6280,8 @@ mod tests {
             features::ReadOnlyCompatFeatures::HUGE_FILE,
         );
 
-        let written = filesystem
+        inode.set_size(1);
+        filesystem
             .writeback_ordered_at(
                 &inode,
                 0,
@@ -6091,7 +6292,7 @@ mod tests {
             )
             .expect("write ordinary inode on huge_file filesystem");
         filesystem
-            .truncate_regular_inode(&written, 0, crate::Ext4Timestamp::new(36, 0))
+            .truncate_regular_inode(&inode, 0, crate::Ext4Timestamp::new(36, 0))
             .expect("truncate ordinary inode on huge_file filesystem");
     }
 
@@ -6110,7 +6311,7 @@ mod tests {
         let journal = JournalTransactions::new(TransactionId::new(770));
         let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
         let transaction = handle.id();
-        let flagged = filesystem
+        filesystem
             .update_inode_flags_timestamps_metadata(
                 &inode,
                 inode.flags() | crate::disk::inode::EXT4_HUGE_FILE_FL,
@@ -6128,7 +6329,7 @@ mod tests {
 
         assert_eq!(
             filesystem.writeback_ordered_at(
-                &flagged,
+                &inode,
                 0,
                 b"x",
                 1,
@@ -6149,8 +6350,8 @@ mod tests {
         let journal = JournalTransactions::new(TransactionId::new(770));
         let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
         let transaction = handle.id();
-        let orphaned = filesystem.add_orphan(&inode, &mut handle).unwrap();
-        let _unlinked = update_test_inode_links_count(&mut filesystem, &orphaned, 0, &mut handle);
+        filesystem.add_orphan(&inode, &mut handle).unwrap();
+        update_test_inode_links_count(&mut filesystem, &inode, 0, &mut handle);
         drop(handle);
         let commit = journal.force_commit(transaction).unwrap();
         filesystem
@@ -6159,12 +6360,13 @@ mod tests {
             .unwrap();
         journal.finish_checkpoint_for_test(&commit).unwrap();
 
-        assert_eq!(
-            filesystem
-                .cleanup_legacy_orphans_preserving_recovery()
-                .unwrap(),
-            1
-        );
+        let recovery_inode = filesystem.orphan_iget(inode.number()).unwrap();
+        filesystem
+            .cleanup_unlinked_orphan_from_head(
+                &recovery_inode,
+                crate::journal::RecoveryFlagPolicy::PreserveDuringRecovery,
+            )
+            .unwrap();
         assert_eq!(filesystem.orphan_head(), None);
         assert!(filesystem.superblock().features().needs_recovery());
         assert_eq!(
@@ -6189,8 +6391,8 @@ mod tests {
         let journal = filesystem.metadata_journal().expect("open mounted journal");
         let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
         let transaction = handle.id();
-        let orphaned = filesystem.add_orphan(&inode, &mut handle).unwrap();
-        let _unlinked = update_test_inode_links_count(&mut filesystem, &orphaned, 0, &mut handle);
+        filesystem.add_orphan(&inode, &mut handle).unwrap();
+        update_test_inode_links_count(&mut filesystem, &inode, 0, &mut handle);
         drop(handle);
         let commit = journal.force_commit_for_test(transaction).unwrap();
         filesystem
@@ -6287,10 +6489,7 @@ mod tests {
             .unwrap();
         assert_eq!(filesystem.groups()[0].used_directories_count(), 1);
         assert_eq!(
-            filesystem
-                .internal_inode(allocation.inode())
-                .unwrap()
-                .kind(),
+            filesystem.internal_iget(allocation.inode()).unwrap().kind(),
             InodeKind::Directory
         );
         drop(handle);
@@ -6392,6 +6591,7 @@ mod tests {
         for invalid in [
             BlockMapping::Hole {
                 len: BlockCount::new(1),
+                flags: crate::BlockMappingFlags::empty(),
             },
             BlockMapping::Unwritten {
                 physical: PhysicalBlock::new(100),
@@ -6674,6 +6874,7 @@ mod tests {
         let groups = vec![BlockGroupDescriptor::decode(&descriptor, true).unwrap()];
 
         let mut filesystem = Ext4Filesystem {
+            delalloc_reserved_blocks: 0,
             device: filesystem_device,
             metadata_io,
             journal: None,
@@ -6743,6 +6944,7 @@ mod tests {
         let layout = FilesystemLayout::derive(&superblock).unwrap();
         let groups = vec![BlockGroupDescriptor::decode(&descriptor, true).unwrap()];
         let mut filesystem = Ext4Filesystem {
+            delalloc_reserved_blocks: 0,
             device: filesystem_device,
             metadata_io,
             journal: None,
@@ -6815,6 +7017,7 @@ mod tests {
             .collect();
 
         let mut filesystem = Ext4Filesystem {
+            delalloc_reserved_blocks: 0,
             device: filesystem_device,
             metadata_io,
             journal: None,
@@ -6880,7 +7083,29 @@ mod tests {
             .checkpoint_committed(&commit)
             .unwrap();
         journal.finish_checkpoint_for_test(&commit).unwrap();
-        filesystem.internal_inode(allocation.inode()).unwrap()
+        filesystem.internal_iget(allocation.inode()).unwrap()
+    }
+
+    #[test]
+    fn inode_metadata_mutation_updates_the_inode_component_in_place() {
+        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+        let journal = JournalTransactions::new(TransactionId::new(691));
+        let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
+        let transaction = handle.id();
+
+        filesystem
+            .update_inode_size_metadata(&inode, 123, crate::Ext4Timestamp::new(691, 0), &mut handle)
+            .unwrap();
+
+        assert_eq!(inode.size(), 123);
+        drop(handle);
+        let commit = journal.force_commit(transaction).unwrap();
+        filesystem
+            .metadata_io
+            .checkpoint_committed(&commit)
+            .unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
     }
 
     fn install_test_internal_journal(filesystem: &mut Ext4Filesystem, sequence: u32) {
@@ -6951,7 +7176,7 @@ mod tests {
         inode: &Ext4Inode,
         links_count: u16,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Inode {
+    ) {
         let inode_table_block = filesystem.inode_table_entry_block(inode.number()).unwrap();
         let inode_table_access = filesystem
             .metadata_io
@@ -6969,7 +7194,7 @@ mod tests {
             )
             .unwrap();
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes).unwrap();
-        updated
+        filesystem.publish_inode_metadata(inode, updated).unwrap();
     }
 
     fn set_allocator_feature_bits(
@@ -7304,8 +7529,8 @@ mod tests {
     /// three-phase eviction protocol.  Each extent is allocated contiguously.
     fn eviction_test_unlinked_inode(
         extents: &[(u64, u32)],
-    ) -> (Ext4Filesystem, crate::InodeNumber, crate::Ext4Timestamp) {
-        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    ) -> (Ext4Filesystem, Ext4Inode, crate::Ext4Timestamp) {
+        let (mut filesystem, _device) = journal_allocator_test_filesystem(512, 0b0011_1111);
         install_test_internal_journal(&mut filesystem, 2000);
         let journal = JournalTransactions::new(TransactionId::new(2000));
         let mut handle = journal.begin(JournalCredits::new(100_000)).unwrap();
@@ -7318,11 +7543,23 @@ mod tests {
                 &mut handle,
             )
             .unwrap();
-        let mut inode = filesystem.internal_inode(inode_allocation.inode()).unwrap();
+        let inode = filesystem.internal_iget(inode_allocation.inode()).unwrap();
 
+        let mut next_physical = FilesystemBlock::new(1040);
         for (logical, len) in extents {
-            let physical = allocate_contiguous_blocks(&mut filesystem, *len, &mut handle);
-            inode = filesystem
+            let allocation = filesystem
+                .allocate_block_run_in_group(
+                    BlockGroupNumber::new(0),
+                    Some(next_physical),
+                    BlockCount::new(*len),
+                    BlockCount::new(*len),
+                    &mut handle,
+                )
+                .unwrap();
+            assert_eq!(allocation.first_block().get(), next_physical.get());
+            let physical = allocation.first_block();
+            next_physical = FilesystemBlock::new(next_physical.get() + u64::from(*len));
+            filesystem
                 .insert_extent_mapping(
                     &inode,
                     LogicalBlock::new(*logical),
@@ -7335,8 +7572,8 @@ mod tests {
         }
 
         let timestamp = crate::Ext4Timestamp::new(2000, 0);
-        inode = filesystem
-            .update_inode_links_count_ctime_metadata(&inode, 0, timestamp, &mut handle)
+        filesystem
+            .update_unlinked_inode_metadata(&inode, None, timestamp, &mut handle)
             .unwrap();
 
         drop(handle);
@@ -7352,21 +7589,20 @@ mod tests {
         // superblock (mirrors the per-phase reinstall used elsewhere).
         install_test_internal_journal(&mut filesystem, 2001);
 
-        (filesystem, inode_allocation.inode(), timestamp)
+        (filesystem, inode, timestamp)
     }
 
     #[test]
     fn eviction_release_batch_partial_extent_split() {
-        let (mut filesystem, number, timestamp) = eviction_test_unlinked_inode(&[(0, 100)]);
-        let mut evict = filesystem.eviction_prepare(number, timestamp).unwrap();
+        let (mut filesystem, inode, timestamp) = eviction_test_unlinked_inode(&[(0, 100)]);
+        filesystem.eviction_prepare(&inode).unwrap();
 
         // max_blocks = 40 < 100, so only the tail 40 blocks are released.
-        let (freed, done) = filesystem.eviction_release_batch(&mut evict, 40).unwrap();
+        let (freed, done) = filesystem.eviction_release_batch(&inode, 40).unwrap();
         assert_eq!(freed, 40);
         assert!(!done);
 
         // The remaining extent must keep logical [0, 60).
-        let inode = filesystem.referenced_inode(number).unwrap();
         let collected = filesystem.collect_extent_tree(&inode).unwrap();
         assert_eq!(collected.extents.len(), 1);
         assert_eq!(collected.extents[0].logical, 0);
@@ -7375,7 +7611,7 @@ mod tests {
         // Drain the rest under a bounded loop.
         let mut batches = 1;
         loop {
-            let (_, done) = filesystem.eviction_release_batch(&mut evict, 40).unwrap();
+            let (_, done) = filesystem.eviction_release_batch(&inode, 40).unwrap();
             batches += 1;
             assert!(batches <= 10, "eviction must terminate");
             if done {
@@ -7383,28 +7619,26 @@ mod tests {
             }
         }
 
-        let inode = filesystem.referenced_inode(number).unwrap();
         let collected = filesystem.collect_extent_tree(&inode).unwrap();
         assert!(collected.extents.is_empty());
-        filesystem.eviction_finish(evict).unwrap();
+        filesystem.eviction_finish(&inode, timestamp).unwrap();
     }
 
     #[test]
     fn eviction_release_batch_single_batch_empties_tree() {
         // 3 extents of 10 blocks = 30 blocks total, well within max_blocks.
-        let (mut filesystem, number, timestamp) =
+        let (mut filesystem, inode, timestamp) =
             eviction_test_unlinked_inode(&[(0, 10), (10, 10), (20, 10)]);
-        let mut evict = filesystem.eviction_prepare(number, timestamp).unwrap();
+        filesystem.eviction_prepare(&inode).unwrap();
 
         // All extents fit in one batch, so the tree is emptied and done = true.
-        let (freed, done) = filesystem.eviction_release_batch(&mut evict, 256).unwrap();
+        let (freed, done) = filesystem.eviction_release_batch(&inode, 256).unwrap();
         assert_eq!(freed, 30);
         assert!(done);
 
-        let inode = filesystem.referenced_inode(number).unwrap();
         let collected = filesystem.collect_extent_tree(&inode).unwrap();
         assert!(collected.extents.is_empty());
-        filesystem.eviction_finish(evict).unwrap();
+        filesystem.eviction_finish(&inode, timestamp).unwrap();
     }
 
     #[test]
@@ -7424,12 +7658,12 @@ mod tests {
             (80, 10),
             (90, 10),
         ];
-        let (mut filesystem, number, timestamp) = eviction_test_unlinked_inode(&extents);
-        let mut evict = filesystem.eviction_prepare(number, timestamp).unwrap();
+        let (mut filesystem, inode, timestamp) = eviction_test_unlinked_inode(&extents);
+        filesystem.eviction_prepare(&inode).unwrap();
 
         let mut batches = 0;
         loop {
-            let (_, done) = filesystem.eviction_release_batch(&mut evict, 30).unwrap();
+            let (_, done) = filesystem.eviction_release_batch(&inode, 30).unwrap();
             batches += 1;
             assert!(
                 batches <= 10,
@@ -7444,24 +7678,23 @@ mod tests {
             "expected more than one batch for 100 blocks at 30/batch"
         );
 
-        let inode = filesystem.referenced_inode(number).unwrap();
         let collected = filesystem.collect_extent_tree(&inode).unwrap();
         assert!(collected.extents.is_empty());
-        filesystem.eviction_finish(evict).unwrap();
+        filesystem.eviction_finish(&inode, timestamp).unwrap();
     }
 
     #[test]
     fn eviction_release_batch_no_data_blocks_fast_path() {
         // No extents inserted: an unlinked inode with zero data blocks must
         // take the fast path and report (0, true) without touching the tree.
-        let (mut filesystem, number, timestamp) = eviction_test_unlinked_inode(&[]);
-        let mut evict = filesystem.eviction_prepare(number, timestamp).unwrap();
+        let (mut filesystem, inode, timestamp) = eviction_test_unlinked_inode(&[]);
+        filesystem.eviction_prepare(&inode).unwrap();
 
-        let (freed, done) = filesystem.eviction_release_batch(&mut evict, 256).unwrap();
+        let (freed, done) = filesystem.eviction_release_batch(&inode, 256).unwrap();
         assert_eq!(freed, 0);
         assert!(done);
 
-        filesystem.eviction_finish(evict).unwrap();
+        filesystem.eviction_finish(&inode, timestamp).unwrap();
     }
 }
 

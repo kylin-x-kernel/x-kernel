@@ -2,15 +2,17 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
+use core::fmt;
 
 use crate::{
-    ChecksumTarget, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Result, FilesystemBlock,
-    InodeNumber, UnsupportedKind,
-    disk::{checksum, codec, extent as disk_extent, inode as disk_inode},
+    BlockMapping, ChecksumTarget, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Result,
+    FilesystemBlock, InodeNumber, LogicalBlock, UnsupportedKind,
+    disk::{checksum, extent as disk_extent, inode as disk_inode},
     file::RegularWriteMetadata,
     jbd2::{JournalCredits, JournalHandle},
     superblock::replace_metadata_access_bytes,
+    sync::{self, Mutex},
 };
 
 const EXT4_ENCODED_DEV_MAJOR_MAX: u32 = 0x0fff;
@@ -404,24 +406,19 @@ pub(crate) struct EncodedTimestamp {
     extra: Option<u32>,
 }
 
-/// Storage form used by a symbolic link target.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SymlinkStorage<'a> {
-    /// The target bytes are stored directly in the inode `i_block` area.
-    Fast(&'a [u8]),
-    /// The target bytes are stored in regular data blocks mapped by the inode.
-    BlockMapped,
-}
-
-/// Decoded read-only ext4 inode metadata.
+/// Decoded fields shared by the resident inode and its journaled table entry.
+///
+/// This is disk-algorithm state, not a second resident VFS identity. In
+/// particular, `disk_size` is Linux ext4's `i_disksize`; the visible `i_size`
+/// is stored separately in the same component and the generic inode lifecycle
+/// remains owned by KVFS.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Ext4Inode {
-    number: InodeNumber,
+pub(crate) struct Ext4InodeMetadata {
     kind: InodeKind,
     mode: u16,
     uid: u32,
     gid: u32,
-    size: u64,
+    disk_size: u64,
     blocks: u64,
     flags: u32,
     block: [u8; disk_inode::INODE_BLOCK_BYTES],
@@ -432,26 +429,10 @@ pub struct Ext4Inode {
     atime: Ext4Timestamp,
     ctime: Ext4Timestamp,
     mtime: Ext4Timestamp,
-    dtime: u32,
 }
 
-impl Ext4Inode {
-    pub(crate) fn from_raw(number: InodeNumber, raw: disk_inode::RawInode) -> Ext4Result<Self> {
-        Self::from_raw_inner(number, raw, false)
-    }
-
-    pub(crate) fn from_raw_allow_zero_links(
-        number: InodeNumber,
-        raw: disk_inode::RawInode,
-    ) -> Ext4Result<Self> {
-        Self::from_raw_inner(number, raw, true)
-    }
-
-    fn from_raw_inner(
-        number: InodeNumber,
-        raw: disk_inode::RawInode,
-        allow_zero_links: bool,
-    ) -> Ext4Result<Self> {
+impl Ext4InodeMetadata {
+    fn from_raw(raw: disk_inode::RawInode, allow_zero_links: bool) -> Ext4Result<Self> {
         if raw.links_count() == 0 && !allow_zero_links {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
         }
@@ -467,12 +448,11 @@ impl Ext4Inode {
         }
 
         Ok(Self {
-            number,
             kind,
             mode: raw.mode(),
             uid: raw.uid(),
             gid: raw.gid(),
-            size: raw.size(),
+            disk_size: raw.size(),
             blocks: raw.blocks(),
             flags: raw.flags(),
             block: *raw.block(),
@@ -492,33 +472,108 @@ impl Ext4Inode {
                 raw.mtime(),
                 raw.mtime_extra(),
             ))?,
-            dtime: raw.dtime(),
         })
+    }
+}
+
+struct Ext4InodeState {
+    metadata: Ext4InodeMetadata,
+    visible_size: u64,
+    delayed_extents: BTreeMap<u64, u64>,
+    reserved_data_blocks: u64,
+}
+
+/// A transient, lightweight inode attribute snapshot.
+///
+/// This is the kext4-side equivalent of Linux `struct kstat`: it is produced
+/// under one inode-state lock for VFS `stat/getattr`, and is neither resident
+/// storage nor a second inode identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Ext4InodeStat {
+    /// Raw Linux mode bits.
+    pub mode: u16,
+    /// Inode owner's user ID.
+    pub uid: u32,
+    /// Inode owner's group ID.
+    pub gid: u32,
+    /// VFS-visible size in bytes.
+    pub size: u64,
+    /// Allocated 512-byte block count.
+    pub blocks: u64,
+    /// Decoded character or block device ID.
+    pub rdev: Option<Ext4DeviceId>,
+    /// Inode link count.
+    pub links_count: u16,
+    /// Last-access timestamp.
+    pub atime: Ext4Timestamp,
+    /// Last-status-change timestamp.
+    pub ctime: Ext4Timestamp,
+    /// Last-modification timestamp.
+    pub mtime: Ext4Timestamp,
+}
+
+/// The composed inode component of one resident KVFS inode.
+///
+/// This is the object-oriented equivalent of Linux `ext4_inode_info` with its
+/// embedded `vfs_inode`: KVFS generic attribute operations and ext4 algorithms
+/// access this same object. It is composed directly into the bridge inode and
+/// has neither an independent resident identity nor an independent reference
+/// count.
+pub struct Ext4Inode {
+    number: InodeNumber,
+    state: Mutex<Ext4InodeState>,
+}
+
+impl Ext4Inode {
+    fn new(number: InodeNumber, metadata: Ext4InodeMetadata) -> Self {
+        let visible_size = metadata.disk_size;
+        Self {
+            number,
+            state: Mutex::new(Ext4InodeState {
+                metadata,
+                visible_size,
+                delayed_extents: BTreeMap::new(),
+                reserved_data_blocks: 0,
+            }),
+        }
+    }
+
+    fn metadata_snapshot(&self) -> Ext4InodeMetadata {
+        sync::lock(&self.state).metadata.clone()
+    }
+
+    fn with_metadata<T>(&self, read: impl FnOnce(&Ext4InodeMetadata) -> T) -> T {
+        read(&sync::lock(&self.state).metadata)
+    }
+
+    fn publish_metadata(&self, metadata: Ext4InodeMetadata) -> Ext4Result<()> {
+        sync::lock(&self.state).metadata = metadata;
+        Ok(())
     }
 
     /// Returns this inode's number.
-    pub const fn number(&self) -> InodeNumber {
+    pub fn number(&self) -> InodeNumber {
         self.number
     }
 
     /// Returns this inode's kind.
-    pub const fn kind(&self) -> InodeKind {
-        self.kind
+    pub fn kind(&self) -> InodeKind {
+        self.with_metadata(|metadata| metadata.kind)
     }
 
     /// Returns the raw Linux mode bits.
-    pub const fn mode(&self) -> u16 {
-        self.mode
+    pub fn mode(&self) -> u16 {
+        self.with_metadata(|metadata| metadata.mode)
     }
 
     /// Returns the inode owner's user ID.
-    pub const fn uid(&self) -> u32 {
-        self.uid
+    pub fn uid(&self) -> u32 {
+        self.with_metadata(|metadata| metadata.uid)
     }
 
     /// Returns the inode owner's group ID.
-    pub const fn gid(&self) -> u32 {
-        self.gid
+    pub fn gid(&self) -> u32 {
+        self.with_metadata(|metadata| metadata.gid)
     }
 
     /// Returns the ext4 on-disk inode size in bytes.
@@ -526,166 +581,437 @@ impl Ext4Inode {
     /// This is the kext4 equivalent of Linux ext4's `i_disksize`. A VFS inode
     /// may expose a newer visible `i_size` while buffered data is still waiting
     /// for ordered writeback.
-    pub const fn disk_size(&self) -> u64 {
-        self.size
+    pub fn disk_size(&self) -> u64 {
+        self.with_metadata(|metadata| metadata.disk_size)
     }
 
-    /// Returns the ext4 on-disk inode size in bytes.
-    pub const fn size(&self) -> u64 {
-        self.disk_size()
+    /// Returns the VFS-visible inode size in bytes.
+    pub fn size(&self) -> u64 {
+        sync::lock(&self.state).visible_size
+    }
+
+    /// Updates the VFS-visible inode size without changing `i_disksize`.
+    pub fn set_size(&self, size: u64) {
+        sync::lock(&self.state).visible_size = size;
+    }
+
+    /// Captures the generic inode attributes under one state lock.
+    pub fn stat(&self) -> Ext4InodeStat {
+        let state = sync::lock(&self.state);
+        let metadata = &state.metadata;
+        Ext4InodeStat {
+            mode: metadata.mode,
+            uid: metadata.uid,
+            gid: metadata.gid,
+            size: state.visible_size,
+            blocks: metadata.blocks,
+            rdev: device_id_from_metadata(metadata),
+            links_count: metadata.links_count,
+            atime: metadata.atime,
+            ctime: metadata.ctime,
+            mtime: metadata.mtime,
+        }
+    }
+
+    /// Updates permission bits in the single resident inode state.
+    pub fn set_permission(&self, permission: u16) {
+        let mut state = sync::lock(&self.state);
+        state.metadata.mode =
+            (state.metadata.mode & disk_inode::S_IFMT) | (permission & !disk_inode::S_IFMT);
+    }
+
+    /// Updates the owner in the single resident inode state.
+    pub fn set_owner(&self, uid: u32, gid: u32) {
+        let mut state = sync::lock(&self.state);
+        state.metadata.uid = uid;
+        state.metadata.gid = gid;
+    }
+
+    /// Updates the link count in the single resident inode state.
+    pub fn set_links_count(&self, link_count: u64) {
+        let link_count = u16::try_from(link_count).unwrap_or(u16::MAX);
+        sync::lock(&self.state).metadata.links_count = link_count;
+    }
+
+    /// Increments the resident link count.
+    pub fn increment_links_count(&self) {
+        let mut state = sync::lock(&self.state);
+        state.metadata.links_count = state.metadata.links_count.saturating_add(1);
+    }
+
+    /// Decrements the resident link count.
+    pub fn decrement_links_count(&self) {
+        let mut state = sync::lock(&self.state);
+        debug_assert_ne!(state.metadata.links_count, 0);
+        state.metadata.links_count = state.metadata.links_count.saturating_sub(1);
+    }
+
+    /// Updates the access time in the single resident inode state.
+    pub fn set_atime(&self, atime: Ext4Timestamp) {
+        sync::lock(&self.state).metadata.atime = atime;
+    }
+
+    /// Updates the modification time in the single resident inode state.
+    pub fn set_mtime(&self, mtime: Ext4Timestamp) {
+        sync::lock(&self.state).metadata.mtime = mtime;
+    }
+
+    /// Updates the status-change time in the single resident inode state.
+    pub fn set_ctime(&self, ctime: Ext4Timestamp) {
+        sync::lock(&self.state).metadata.ctime = ctime;
+    }
+
+    /// Updates generic allocated-block accounting in the resident inode.
+    pub fn set_allocated_bytes(&self, bytes: u64) {
+        debug_assert_eq!(bytes % 512, 0);
+        sync::lock(&self.state).metadata.blocks = bytes / 512;
+    }
+
+    /// Adds allocated bytes to the resident block count.
+    pub fn add_allocated_bytes(&self, bytes: u64) {
+        debug_assert_eq!(bytes % 512, 0);
+        let mut state = sync::lock(&self.state);
+        state.metadata.blocks = state.metadata.blocks.saturating_add(bytes / 512);
+    }
+
+    /// Subtracts allocated bytes from the resident block count.
+    pub fn subtract_allocated_bytes(&self, bytes: u64) {
+        debug_assert_eq!(bytes % 512, 0);
+        let mut state = sync::lock(&self.state);
+        state.metadata.blocks = state.metadata.blocks.saturating_sub(bytes / 512);
     }
 
     /// Returns the raw ext4 block accounting value.
-    pub const fn blocks(&self) -> u64 {
-        self.blocks
+    pub fn blocks(&self) -> u64 {
+        self.with_metadata(|metadata| metadata.blocks)
     }
 
     /// Returns the raw ext4 inode flags.
-    pub const fn flags(&self) -> u32 {
-        self.flags
+    pub fn flags(&self) -> u32 {
+        self.with_metadata(|metadata| metadata.flags)
     }
 
     /// Returns whether the inode carries the ext4 immutable flag.
-    pub const fn is_immutable(&self) -> bool {
-        self.flags & disk_inode::EXT4_IMMUTABLE_FL != 0
+    pub fn is_immutable(&self) -> bool {
+        self.flags() & disk_inode::EXT4_IMMUTABLE_FL != 0
     }
 
     /// Returns whether the inode carries the ext4 append-only flag.
-    pub const fn is_append_only(&self) -> bool {
-        self.flags & disk_inode::EXT4_APPEND_FL != 0
+    pub fn is_append_only(&self) -> bool {
+        self.flags() & disk_inode::EXT4_APPEND_FL != 0
     }
 
-    pub(crate) const fn extent_bytes(&self) -> &[u8; disk_inode::INODE_BLOCK_BYTES] {
-        &self.block
+    pub(crate) fn block_mapping_root(&self) -> (u32, [u8; disk_inode::INODE_BLOCK_BYTES]) {
+        self.with_metadata(|metadata| (metadata.flags, metadata.block))
     }
 
-    pub(crate) const fn file_acl_block(&self) -> u64 {
-        self.file_acl
+    pub(crate) fn file_acl_block(&self) -> u64 {
+        self.with_metadata(|metadata| metadata.file_acl)
     }
 
-    pub(crate) fn inline_xattr_bytes(&self) -> &[u8] {
-        &self.inline_xattr
+    pub(crate) fn inline_xattr_bytes(&self) -> Vec<u8> {
+        self.with_metadata(|metadata| metadata.inline_xattr.clone())
     }
 
-    pub(crate) const fn generation(&self) -> u32 {
-        self.generation
+    /// Returns the inode generation number.
+    pub fn generation(&self) -> u32 {
+        self.with_metadata(|metadata| metadata.generation)
     }
 
     /// Returns the link count from the inode table entry.
-    pub const fn links_count(&self) -> u16 {
-        self.links_count
+    pub fn links_count(&self) -> u16 {
+        self.with_metadata(|metadata| metadata.links_count)
     }
 
     /// Returns the last-access timestamp.
-    pub const fn atime(&self) -> Ext4Timestamp {
-        self.atime
+    pub fn atime(&self) -> Ext4Timestamp {
+        self.with_metadata(|metadata| metadata.atime)
     }
 
     /// Returns the last-status-change timestamp.
-    pub const fn ctime(&self) -> Ext4Timestamp {
-        self.ctime
+    pub fn ctime(&self) -> Ext4Timestamp {
+        self.with_metadata(|metadata| metadata.ctime)
     }
 
     /// Returns the last-modification timestamp.
-    pub const fn mtime(&self) -> Ext4Timestamp {
-        self.mtime
-    }
-
-    pub(crate) fn orphan_next(&self) -> Option<InodeNumber> {
-        match self.dtime {
-            0 => None,
-            next => Some(InodeNumber::new(next)),
-        }
+    pub fn mtime(&self) -> Ext4Timestamp {
+        self.with_metadata(|metadata| metadata.mtime)
     }
 
     /// Returns the raw inode `i_block` bytes.
     ///
     /// The interpretation depends on the inode kind and flags: extent root,
     /// block map, fast symlink target, or device number.
-    pub fn raw_i_block(&self) -> &[u8] {
-        &self.block
+    pub fn raw_i_block(&self) -> [u8; disk_inode::INODE_BLOCK_BYTES] {
+        self.with_metadata(|metadata| metadata.block)
     }
 
-    pub(crate) fn symlink_storage(
+    pub(crate) fn fast_symlink_target(
         &self,
         filesystem_block_size: u32,
         has_ea_inode_feature: bool,
-    ) -> Ext4Result<SymlinkStorage<'_>> {
-        if self.kind != InodeKind::Symlink {
+    ) -> Ext4Result<Option<Vec<u8>>> {
+        let metadata = self.metadata_snapshot();
+        if metadata.kind != InodeKind::Symlink {
             return Err(Ext4Error::Unsupported(UnsupportedKind::InodeKind));
         }
-        if self.flags & disk_inode::EXT4_INLINE_DATA_FL != 0 {
+        if metadata.flags & disk_inode::EXT4_INLINE_DATA_FL != 0 {
             return Err(Ext4Error::Unsupported(UnsupportedKind::InlineData));
         }
-        if self.flags & disk_inode::EXT4_ENCRYPT_FL != 0 {
+        if metadata.flags & disk_inode::EXT4_ENCRYPT_FL != 0 {
             return Err(Ext4Error::Unsupported(UnsupportedKind::EncryptedName));
         }
 
-        let ea_blocks = if self.file_acl == 0 {
+        let ea_blocks = if metadata.file_acl == 0 {
             0
         } else {
             u64::from(filesystem_block_size) / 512
         };
-        let data_blocks = self
+        let data_blocks = metadata
             .blocks
             .checked_sub(ea_blocks)
             .ok_or(Ext4Error::Overflow)?;
         let is_fast = if has_ea_inode_feature {
-            self.size != 0 && self.size < disk_inode::INODE_BLOCK_BYTES as u64
+            metadata.disk_size != 0 && metadata.disk_size < disk_inode::INODE_BLOCK_BYTES as u64
         } else {
             data_blocks == 0
         };
         if is_fast {
-            Ok(SymlinkStorage::Fast(self.validate_fast_symlink_target()?))
+            Ok(Some(
+                Self::validate_fast_symlink_target(&metadata)?.to_vec(),
+            ))
         } else {
-            Ok(SymlinkStorage::BlockMapped)
+            Ok(None)
         }
     }
 
-    fn validate_fast_symlink_target(&self) -> Ext4Result<&[u8]> {
-        let size = usize::try_from(self.size).map_err(|_| Ext4Error::Overflow)?;
+    fn validate_fast_symlink_target(metadata: &Ext4InodeMetadata) -> Ext4Result<&[u8]> {
+        let size = usize::try_from(metadata.disk_size).map_err(|_| Ext4Error::Overflow)?;
         if size == 0 || size >= disk_inode::INODE_BLOCK_BYTES {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
         }
 
-        let target_with_terminator = self
-            .raw_i_block()
+        let target_with_terminator = metadata
+            .block
             .get(..=size)
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidInode))?;
         if target_with_terminator.iter().position(|byte| *byte == 0) != Some(size) {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
         }
 
-        self.raw_i_block()
+        metadata
+            .block
             .get(..size)
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidInode))
     }
 
     /// Returns the device number encoded in a character or block device inode.
-    pub fn device_id(&self) -> Ext4Result<Option<Ext4DeviceId>> {
-        if self.kind != InodeKind::CharacterDevice && self.kind != InodeKind::BlockDevice {
-            return Ok(None);
-        }
-
-        let old_encoded = codec::le_u32(&self.block, 0)?;
-        if old_encoded != 0 {
-            return Ok(Some(decode_old_device_id(old_encoded)));
-        }
-        Ok(Some(decode_new_device_id(codec::le_u32(&self.block, 4)?)))
+    pub fn device_id(&self) -> Option<Ext4DeviceId> {
+        self.with_metadata(device_id_from_metadata)
     }
 
     /// Returns whether this inode uses the ext4 extent-tree format.
-    pub const fn has_extents(&self) -> bool {
-        self.flags & disk_inode::EXT4_EXTENTS_FL != 0
+    pub fn has_extents(&self) -> bool {
+        self.flags() & disk_inode::EXT4_EXTENTS_FL != 0
     }
 
-    pub(crate) const fn uses_huge_file_accounting(&self) -> bool {
-        self.flags & disk_inode::EXT4_HUGE_FILE_FL != 0
+    pub(crate) fn uses_huge_file_accounting(&self) -> bool {
+        self.flags() & disk_inode::EXT4_HUGE_FILE_FL != 0
     }
 
-    pub(crate) const fn has_indexed_directory(&self) -> bool {
-        self.flags & disk_inode::EXT4_INDEX_FL != 0
+    pub(crate) fn has_indexed_directory(&self) -> bool {
+        self.flags() & disk_inode::EXT4_INDEX_FL != 0
     }
+
+    fn unreserved_delalloc_extents(&self, start: u64, end: u64) -> Vec<(u64, u64)> {
+        let state = sync::lock(&self.state);
+        let mut extents = Vec::new();
+        let mut cursor = start;
+        for (&extent_start, &extent_end) in state.delayed_extents.range(..end) {
+            if extent_end <= cursor {
+                continue;
+            }
+            if extent_start > cursor {
+                extents.push((cursor, extent_start.min(end)));
+            }
+            cursor = cursor.max(extent_end);
+            if cursor >= end {
+                break;
+            }
+        }
+        if cursor < end {
+            extents.push((cursor, end));
+        }
+        extents
+    }
+
+    fn insert_unreserved_delalloc_extents(&self, extents: &[(u64, u64)]) -> Ext4Result<u64> {
+        let mut state = sync::lock(&self.state);
+        let mut previous_end = None;
+        let newly_reserved = extents.iter().try_fold(
+            0u64,
+            |total, &(extent_start, extent_end)| -> Ext4Result<u64> {
+                if extent_start >= extent_end
+                    || previous_end.is_some_and(|previous_end| previous_end > extent_start)
+                {
+                    return Err(Ext4Error::InvalidDelayedAllocationState);
+                }
+                let overlaps_left = state
+                    .delayed_extents
+                    .range(..extent_end)
+                    .next_back()
+                    .is_some_and(|(_, reserved_end)| *reserved_end > extent_start);
+                if overlaps_left {
+                    return Err(Ext4Error::InvalidDelayedAllocationState);
+                }
+                previous_end = Some(extent_end);
+                total
+                    .checked_add(
+                        extent_end
+                            .checked_sub(extent_start)
+                            .ok_or(Ext4Error::Overflow)?,
+                    )
+                    .ok_or(Ext4Error::Overflow)
+            },
+        )?;
+        let new_reserved_data_blocks = state
+            .reserved_data_blocks
+            .checked_add(newly_reserved)
+            .ok_or(Ext4Error::Overflow)?;
+
+        for &(extent_start, extent_end) in extents {
+            let left = state
+                .delayed_extents
+                .range(..extent_start)
+                .next_back()
+                .filter(|(_, reserved_end)| **reserved_end == extent_start)
+                .map(|(&reserved_start, _)| reserved_start);
+            let right = state.delayed_extents.remove(&extent_end);
+            let merged_start = left.unwrap_or(extent_start);
+            if let Some(left) = left {
+                state.delayed_extents.remove(&left);
+            }
+            state
+                .delayed_extents
+                .insert(merged_start, right.unwrap_or(extent_end));
+        }
+        state.reserved_data_blocks = new_reserved_data_blocks;
+        Ok(newly_reserved)
+    }
+
+    fn remove_delalloc_extent(&self, start: u64, end: u64) -> Ext4Result<u64> {
+        if start >= end {
+            return Ok(0);
+        }
+        let mut state = sync::lock(&self.state);
+        let overlapping = state
+            .delayed_extents
+            .range(..end)
+            .filter(|(extent_start, extent_end)| **extent_end > start && **extent_start < end)
+            .map(|(&extent_start, &extent_end)| (extent_start, extent_end))
+            .collect::<Vec<_>>();
+        let released = overlapping.iter().try_fold(
+            0u64,
+            |total, &(extent_start, extent_end)| -> Ext4Result<u64> {
+                let released_start = extent_start.max(start);
+                let released_end = extent_end.min(end);
+                total
+                    .checked_add(
+                        released_end
+                            .checked_sub(released_start)
+                            .ok_or(Ext4Error::Overflow)?,
+                    )
+                    .ok_or(Ext4Error::Overflow)
+            },
+        )?;
+        let new_reserved_data_blocks = state
+            .reserved_data_blocks
+            .checked_sub(released)
+            .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
+
+        for (extent_start, extent_end) in overlapping {
+            state.delayed_extents.remove(&extent_start);
+            let released_start = extent_start.max(start);
+            let released_end = extent_end.min(end);
+            if extent_start < released_start {
+                state.delayed_extents.insert(extent_start, released_start);
+            }
+            if released_end < extent_end {
+                state.delayed_extents.insert(released_end, extent_end);
+            }
+        }
+        state.reserved_data_blocks = new_reserved_data_blocks;
+        Ok(released)
+    }
+
+    fn remove_delalloc_from(&self, first_block: u64) -> Ext4Result<u64> {
+        self.remove_delalloc_extent(first_block, u64::MAX)
+    }
+
+    fn clear_delalloc_reservations(&self) -> u64 {
+        let mut state = sync::lock(&self.state);
+        let reserved = state.reserved_data_blocks;
+        state.delayed_extents.clear();
+        state.reserved_data_blocks = 0;
+        reserved
+    }
+
+    fn reserved_data_blocks(&self) -> u64 {
+        sync::lock(&self.state).reserved_data_blocks
+    }
+
+    pub(crate) fn has_delalloc_reservations(&self) -> bool {
+        sync::lock(&self.state).reserved_data_blocks != 0
+    }
+
+    pub(crate) fn next_delalloc_extent(&self, start: u64) -> Option<(u64, u64)> {
+        let state = sync::lock(&self.state);
+        if let Some((_, extent_end)) = state
+            .delayed_extents
+            .range(..=start)
+            .next_back()
+            .filter(|(_, extent_end)| **extent_end > start)
+        {
+            return Some((start, *extent_end));
+        }
+        state
+            .delayed_extents
+            .range(start..)
+            .next()
+            .map(|(extent_start, extent_end)| (*extent_start, *extent_end))
+    }
+}
+
+impl fmt::Debug for Ext4Inode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Ext4Inode")
+            .field("number", &self.number())
+            .field("metadata", &self.metadata_snapshot())
+            .finish_non_exhaustive()
+    }
+}
+
+fn device_id_from_metadata(metadata: &Ext4InodeMetadata) -> Option<Ext4DeviceId> {
+    if metadata.kind != InodeKind::CharacterDevice && metadata.kind != InodeKind::BlockDevice {
+        return None;
+    }
+
+    let old_encoded = u32::from_le_bytes([
+        metadata.block[0],
+        metadata.block[1],
+        metadata.block[2],
+        metadata.block[3],
+    ]);
+    if old_encoded != 0 {
+        return Some(decode_old_device_id(old_encoded));
+    }
+    Some(decode_new_device_id(u32::from_le_bytes([
+        metadata.block[4],
+        metadata.block[5],
+        metadata.block[6],
+        metadata.block[7],
+    ])))
 }
 
 fn decode_old_device_id(value: u32) -> Ext4DeviceId {
@@ -715,46 +1041,31 @@ fn ensure_ext4_device_id_representable(device: Ext4DeviceId) -> Ext4Result<()> {
 }
 
 impl Ext4Filesystem {
-    /// Classifies how a symbolic link target is stored.
-    pub fn symlink_storage<'a>(&self, inode: &'a Ext4Inode) -> Ext4Result<SymlinkStorage<'a>> {
-        inode.symlink_storage(
+    /// Returns an inline fast-symlink target, or `None` for a block-mapped target.
+    pub fn fast_symlink_target(&self, inode: &Ext4Inode) -> Ext4Result<Option<Vec<u8>>> {
+        inode.fast_symlink_target(
             self.layout().block_size(),
             self.superblock().features().has_ea_inode(),
         )
     }
 
-    /// Reads and validates the root inode.
+    /// Loads filesystem-private state for the root inode.
     pub fn root_inode(&self) -> Ext4Result<Ext4Inode> {
-        self.inode(InodeNumber::new(disk_inode::EXT4_ROOT_INO))
+        self.load_inode_private(InodeNumber::new(disk_inode::EXT4_ROOT_INO))
     }
 
-    /// Reads and validates one inode table entry.
-    pub fn inode(&self, number: InodeNumber) -> Ext4Result<Ext4Inode> {
-        let inode_number = number.get();
-        if inode_number == 0 || inode_number > self.superblock().inodes_count() {
-            return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeNumber));
-        }
-        if !self.is_public_inode_number(number) {
-            return Err(Ext4Error::Unsupported(UnsupportedKind::ReservedInode));
-        }
-        self.internal_inode(number)
-    }
-
-    pub(crate) fn internal_inode(&self, number: InodeNumber) -> Ext4Result<Ext4Inode> {
-        let raw = self.raw_inode(number)?;
-        Ext4Inode::from_raw(number, raw)
-    }
-
-    pub(crate) fn orphan_inode(&self, number: InodeNumber) -> Ext4Result<Ext4Inode> {
-        let raw = self.raw_inode(number)?;
-        Ext4Inode::from_raw_allow_zero_links(number, raw)
-    }
-
-    /// Reads an inode already held alive by an upper-layer inode reference.
+    /// Decodes filesystem-private state for a public inode number.
     ///
-    /// Unlike namespace lookup, this accepts a zero-link inode because an open
-    /// file may remain usable between unlink and final eviction.
-    pub fn referenced_inode(&self, number: InodeNumber) -> Ext4Result<Ext4Inode> {
+    /// KVFS callers must invoke this only from the initializer reserved by its
+    /// inode cache. KExt4 deliberately does not maintain a second resident
+    /// identity table. Zero-link inodes are rejected on this namespace-facing
+    /// path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed corruption or unsupported-format error for an invalid
+    /// inode table entry.
+    pub fn load_inode_private(&self, number: InodeNumber) -> Ext4Result<Ext4Inode> {
         let inode_number = number.get();
         if inode_number == 0 || inode_number > self.superblock().inodes_count() {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeNumber));
@@ -762,7 +1073,166 @@ impl Ext4Filesystem {
         if !self.is_public_inode_number(number) {
             return Err(Ext4Error::Unsupported(UnsupportedKind::ReservedInode));
         }
-        self.orphan_inode(number)
+        self.iget_inner(number, false)
+    }
+
+    pub(crate) fn internal_iget(&self, number: InodeNumber) -> Ext4Result<Ext4Inode> {
+        self.iget_inner(number, false)
+    }
+
+    pub(crate) fn orphan_iget(&self, number: InodeNumber) -> Ext4Result<Ext4Inode> {
+        self.iget_inner(number, true)
+    }
+
+    fn iget_inner(&self, number: InodeNumber, allow_zero_links: bool) -> Ext4Result<Ext4Inode> {
+        let metadata = Ext4InodeMetadata::from_raw(self.raw_inode(number)?, allow_zero_links)?;
+        Ok(Ext4Inode::new(number, metadata))
+    }
+
+    fn ensure_delalloc_accounting(&self, inode: &Ext4Inode) -> Ext4Result<()> {
+        if inode.reserved_data_blocks() <= self.delalloc_reserved_blocks {
+            Ok(())
+        } else {
+            Err(Ext4Error::InvalidDelayedAllocationState)
+        }
+    }
+
+    /// Reserves unallocated blocks in one logical range for delayed allocation.
+    ///
+    /// Per-inode extent state and the mount-wide aggregate are updated by this
+    /// operation as one ext4-owned invariant. Already allocated or already
+    /// reserved subranges do not consume another reservation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an extent-validation, overflow, accounting, or no-space error
+    /// without publishing a partial mount reservation.
+    pub fn reserve_delalloc_range(
+        &mut self,
+        inode: &Ext4Inode,
+        start: LogicalBlock,
+        block_count: u64,
+    ) -> Ext4Result<()> {
+        self.ensure_delalloc_accounting(inode)?;
+        if block_count == 0 {
+            return Ok(());
+        }
+        let end = start
+            .get()
+            .checked_add(block_count)
+            .ok_or(Ext4Error::Overflow)?;
+        let mut holes = Vec::new();
+        for (mut logical, extent_end) in inode.unreserved_delalloc_extents(start.get(), end) {
+            while logical < extent_end {
+                let mapping = self.map_blocks(inode, LogicalBlock::new(logical))?;
+                let mapping_len = match mapping {
+                    BlockMapping::Hole { len, .. }
+                    | BlockMapping::Mapped { len, .. }
+                    | BlockMapping::Unwritten { len, .. } => u64::from(len.get()),
+                };
+                if mapping_len == 0 {
+                    return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
+                }
+                let covered = mapping_len.min(extent_end - logical);
+                let next = logical.checked_add(covered).ok_or(Ext4Error::Overflow)?;
+                if matches!(mapping, BlockMapping::Hole { .. }) {
+                    if let Some((_, previous_end)) = holes.last_mut()
+                        && *previous_end == logical
+                    {
+                        *previous_end = next;
+                    } else {
+                        holes.push((logical, next));
+                    }
+                }
+                logical = next;
+            }
+        }
+
+        let reserved = holes.iter().try_fold(0u64, |total, (start, end)| {
+            total
+                .checked_add(end.checked_sub(*start).ok_or(Ext4Error::Overflow)?)
+                .ok_or(Ext4Error::Overflow)
+        })?;
+        if reserved > self.blocks_available_for_reservation() {
+            return Err(Ext4Error::NoSpace);
+        }
+        let new_total = self
+            .delalloc_reserved_blocks
+            .checked_add(reserved)
+            .ok_or(Ext4Error::Overflow)?;
+        let inserted_blocks = inode.insert_unreserved_delalloc_extents(&holes)?;
+        assert_eq!(
+            inserted_blocks, reserved,
+            "validated delayed-allocation holes must preserve their block count"
+        );
+        self.delalloc_reserved_blocks = new_total;
+        Ok(())
+    }
+
+    /// Releases delayed-allocation reservations overlapping a logical range.
+    ///
+    /// # Errors
+    ///
+    /// Returns an overflow or accounting-invariant error.
+    pub fn release_delalloc_range(
+        &mut self,
+        inode: &Ext4Inode,
+        start: LogicalBlock,
+        block_count: u64,
+    ) -> Ext4Result<()> {
+        self.ensure_delalloc_accounting(inode)?;
+        let end = start
+            .get()
+            .checked_add(block_count)
+            .ok_or(Ext4Error::Overflow)?;
+        let released = inode.remove_delalloc_extent(start.get(), end)?;
+        self.delalloc_reserved_blocks = self
+            .delalloc_reserved_blocks
+            .checked_sub(released)
+            .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
+        Ok(())
+    }
+
+    /// Releases delayed-allocation reservations at or beyond `first_block`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an accounting-invariant error.
+    pub fn truncate_delalloc_range(
+        &mut self,
+        inode: &Ext4Inode,
+        first_block: LogicalBlock,
+    ) -> Ext4Result<()> {
+        self.ensure_delalloc_accounting(inode)?;
+        let released = inode.remove_delalloc_from(first_block.get())?;
+        self.delalloc_reserved_blocks = self
+            .delalloc_reserved_blocks
+            .checked_sub(released)
+            .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
+        Ok(())
+    }
+
+    /// Releases every delayed-allocation reservation owned by an inode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an accounting-invariant error.
+    pub fn release_all_delalloc(&mut self, inode: &Ext4Inode) -> Ext4Result<()> {
+        self.ensure_delalloc_accounting(inode)?;
+        let released = inode.clear_delalloc_reservations();
+        self.delalloc_reserved_blocks = self
+            .delalloc_reserved_blocks
+            .checked_sub(released)
+            .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
+        Ok(())
+    }
+
+    pub(crate) fn publish_inode_metadata(
+        &self,
+        inode: &Ext4Inode,
+        metadata: Ext4InodeMetadata,
+    ) -> Ext4Result<()> {
+        inode.publish_metadata(metadata)
     }
 
     fn is_public_inode_number(&self, number: InodeNumber) -> bool {
@@ -818,7 +1288,7 @@ impl Ext4Filesystem {
         block_bytes: &mut [u8],
         number: InodeNumber,
         update: impl FnOnce(&mut [u8]) -> Ext4Result<()>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<Ext4InodeMetadata> {
         self.update_inode_table_entry_inner(block_bytes, number, false, update)
     }
 
@@ -827,7 +1297,7 @@ impl Ext4Filesystem {
         block_bytes: &mut [u8],
         number: InodeNumber,
         update: impl FnOnce(&mut [u8]) -> Ext4Result<()>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<Ext4InodeMetadata> {
         self.update_inode_table_entry_inner(block_bytes, number, true, update)
     }
 
@@ -836,7 +1306,7 @@ impl Ext4Filesystem {
         block_bytes: &mut [u8],
         inode: &Ext4Inode,
         update: impl FnOnce(&mut [u8]) -> Ext4Result<()>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<Ext4InodeMetadata> {
         self.update_inode_table_entry_inner(
             block_bytes,
             inode.number(),
@@ -851,7 +1321,7 @@ impl Ext4Filesystem {
         number: InodeNumber,
         allow_zero_links: bool,
         update: impl FnOnce(&mut [u8]) -> Ext4Result<()>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<Ext4InodeMetadata> {
         let location = self.inode_location(number)?;
         let inode_bytes = inode_entry_mut(block_bytes, location)?;
         let raw = disk_inode::RawInode::decode(inode_bytes)?;
@@ -866,11 +1336,7 @@ impl Ext4Filesystem {
             self.superblock().checksum_seed(),
         )?;
         let raw = disk_inode::RawInode::decode(inode_bytes)?;
-        if allow_zero_links {
-            Ext4Inode::from_raw_allow_zero_links(number, raw)
-        } else {
-            Ext4Inode::from_raw(number, raw)
-        }
+        Ext4InodeMetadata::from_raw(raw, allow_zero_links)
     }
 
     pub(crate) fn update_regular_inode_write_metadata(
@@ -879,7 +1345,7 @@ impl Ext4Filesystem {
         new_disk_size: u64,
         metadata: RegularWriteMetadata,
         handle: &mut JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         self.ensure_regular_file_mutation_supported(inode)?;
         if new_disk_size < inode.disk_size() {
             return Err(Ext4Error::Unsupported(UnsupportedKind::FileSizeShrink));
@@ -910,7 +1376,7 @@ impl Ext4Filesystem {
         new_disk_size: u64,
         metadata: RegularWriteMetadata,
         handle: &mut JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         self.ensure_regular_file_mutation_supported(inode)?;
 
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
@@ -947,7 +1413,7 @@ impl Ext4Filesystem {
         )?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        Ok(updated_inode)
+        self.publish_inode_metadata(inode, updated_inode)
     }
 
     pub(crate) fn update_inode_size_metadata(
@@ -956,7 +1422,7 @@ impl Ext4Filesystem {
         size: u64,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
         let mut inode_table_bytes = self
             .read_metadata_block(inode_table_block)?
@@ -972,7 +1438,9 @@ impl Ext4Filesystem {
         )?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        Ok(updated_inode)
+        self.publish_inode_metadata(inode, updated_inode)?;
+        inode.set_size(size);
+        Ok(())
     }
 
     pub(crate) fn update_inode_timestamps_metadata(
@@ -980,7 +1448,7 @@ impl Ext4Filesystem {
         inode: &Ext4Inode,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
         let mut inode_table_bytes = self
             .read_metadata_block(inode_table_block)?
@@ -993,7 +1461,7 @@ impl Ext4Filesystem {
         )?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        Ok(updated_inode)
+        self.publish_inode_metadata(inode, updated_inode)
     }
 
     pub(crate) fn update_inode_ctime_metadata(
@@ -1001,7 +1469,7 @@ impl Ext4Filesystem {
         inode: &Ext4Inode,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
         let mut inode_table_bytes = self
             .read_metadata_block(inode_table_block)?
@@ -1014,7 +1482,7 @@ impl Ext4Filesystem {
         )?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        Ok(updated_inode)
+        self.publish_inode_metadata(inode, updated_inode)
     }
 
     /// Applies a journaled inode metadata update.
@@ -1022,9 +1490,9 @@ impl Ext4Filesystem {
         &mut self,
         inode: &Ext4Inode,
         update: Ext4InodeMetadataUpdate,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         if update.is_empty() {
-            return Ok(inode.clone());
+            return Ok(());
         }
 
         let credits = JournalCredits::new(2);
@@ -1042,7 +1510,7 @@ impl Ext4Filesystem {
         inode: &Ext4Inode,
         update: Ext4InodeMetadataUpdate,
         handle: &mut JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
         let mut inode_table_bytes = self
             .read_metadata_block(inode_table_block)?
@@ -1091,7 +1559,7 @@ impl Ext4Filesystem {
         )?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        Ok(updated_inode)
+        self.publish_inode_metadata(inode, updated_inode)
     }
 
     pub(crate) fn update_inode_flags_timestamps_metadata(
@@ -1100,7 +1568,7 @@ impl Ext4Filesystem {
         flags: u32,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
         let mut inode_table_bytes = self
             .read_metadata_block(inode_table_block)?
@@ -1116,7 +1584,7 @@ impl Ext4Filesystem {
         )?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        Ok(updated_inode)
+        self.publish_inode_metadata(inode, updated_inode)
     }
 
     pub(crate) fn update_inode_links_count_metadata(
@@ -1125,7 +1593,7 @@ impl Ext4Filesystem {
         links_count: u16,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
         let mut inode_table_bytes = self
             .read_metadata_block(inode_table_block)?
@@ -1138,7 +1606,7 @@ impl Ext4Filesystem {
             })?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        Ok(updated_inode)
+        self.publish_inode_metadata(inode, updated_inode)
     }
 
     pub(crate) fn update_inode_links_count_ctime_metadata(
@@ -1147,7 +1615,7 @@ impl Ext4Filesystem {
         links_count: u16,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
         let mut inode_table_bytes = self
             .read_metadata_block(inode_table_block)?
@@ -1160,7 +1628,7 @@ impl Ext4Filesystem {
             })?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        Ok(updated_inode)
+        self.publish_inode_metadata(inode, updated_inode)
     }
 
     pub(crate) fn update_unlinked_inode_metadata(
@@ -1169,7 +1637,7 @@ impl Ext4Filesystem {
         size: Option<u64>,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
         let mut inode_table_bytes = self
             .read_metadata_block(inode_table_block)?
@@ -1188,7 +1656,7 @@ impl Ext4Filesystem {
         )?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        Ok(updated_inode)
+        self.publish_inode_metadata(inode, updated_inode)
     }
 
     pub(crate) fn update_inode_blocks_metadata(
@@ -1196,7 +1664,7 @@ impl Ext4Filesystem {
         inode: &Ext4Inode,
         blocks: u64,
         handle: &mut JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
         let mut inode_table_bytes = self
             .read_metadata_block(inode_table_block)?
@@ -1209,29 +1677,29 @@ impl Ext4Filesystem {
         )?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        Ok(updated_inode)
+        self.publish_inode_metadata(inode, updated_inode)
     }
 
     pub(crate) fn update_inode_orphan_next(
         &self,
-        inode: &Ext4Inode,
+        inode: InodeNumber,
         next: Option<InodeNumber>,
         handle: &mut JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let next = next.map_or(0, |inode| inode.get());
-        let inode_table_block = self.inode_table_entry_block(inode.number())?;
+        let inode_table_block = self.inode_table_entry_block(inode)?;
         let mut inode_table_bytes = self
             .read_metadata_block(inode_table_block)?
             .as_ref()
             .to_vec();
-        let updated_inode = self.update_inode_table_entry_allow_zero_links(
+        let _ = self.update_inode_table_entry_allow_zero_links(
             &mut inode_table_bytes,
-            inode.number(),
+            inode,
             |inode_bytes| put_u32(inode_bytes, disk_inode::DTIME_OFFSET, next),
         )?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        Ok(updated_inode)
+        Ok(())
     }
 
     pub(crate) fn clear_inode_table_entry(
@@ -1632,8 +2100,8 @@ fn inode_checksum(
 #[cfg(test)]
 mod tests {
     use super::{
-        EncodedTimestamp, Ext4DeviceId, Ext4Inode, Ext4Timestamp, InodeInitialization, InodeKind,
-        RawTimestampFields, SymlinkStorage, disk_inode,
+        EncodedTimestamp, Ext4DeviceId, Ext4Inode, Ext4InodeMetadata, Ext4Timestamp,
+        InodeInitialization, InodeKind, RawTimestampFields, disk_inode,
     };
     use crate::{CorruptKind, Ext4Error, InodeNumber, UnsupportedKind};
 
@@ -1659,10 +2127,10 @@ mod tests {
         let inode = symlink_inode(9, 0, 0, 0, block);
 
         let storage = inode
-            .symlink_storage(BLOCK_SIZE, false)
+            .fast_symlink_target(BLOCK_SIZE, false)
             .expect("classify symlink storage");
 
-        assert!(matches!(storage, SymlinkStorage::Fast(target) if target == b"hello.txt"));
+        assert_eq!(storage.as_deref(), Some(b"hello.txt".as_slice()));
     }
 
     #[test]
@@ -1670,10 +2138,10 @@ mod tests {
         let inode = symlink_inode(9, 8, disk_inode::EXT4_EXTENTS_FL, 0, [0; 60]);
 
         let storage = inode
-            .symlink_storage(BLOCK_SIZE, false)
+            .fast_symlink_target(BLOCK_SIZE, false)
             .expect("classify symlink storage");
 
-        assert_eq!(storage, SymlinkStorage::BlockMapped);
+        assert_eq!(storage, None);
     }
 
     #[test]
@@ -1682,10 +2150,10 @@ mod tests {
         let inode = symlink_inode(9, 8, 0, 42, block);
 
         let storage = inode
-            .symlink_storage(BLOCK_SIZE, false)
+            .fast_symlink_target(BLOCK_SIZE, false)
             .expect("classify symlink storage");
 
-        assert!(matches!(storage, SymlinkStorage::Fast(target) if target == b"hello.txt"));
+        assert_eq!(storage.as_deref(), Some(b"hello.txt".as_slice()));
     }
 
     #[test]
@@ -1694,10 +2162,10 @@ mod tests {
         let inode = symlink_inode(9, 8, 0, 0, block);
 
         let storage = inode
-            .symlink_storage(BLOCK_SIZE, true)
+            .fast_symlink_target(BLOCK_SIZE, true)
             .expect("classify symlink storage");
 
-        assert!(matches!(storage, SymlinkStorage::Fast(target) if target == b"hello.txt"));
+        assert_eq!(storage.as_deref(), Some(b"hello.txt".as_slice()));
     }
 
     #[test]
@@ -1705,10 +2173,10 @@ mod tests {
         let inode = symlink_inode(9, 8, disk_inode::EXT4_EA_INODE_FL, 0, [0; 60]);
 
         let storage = inode
-            .symlink_storage(BLOCK_SIZE, false)
+            .fast_symlink_target(BLOCK_SIZE, false)
             .expect("classify symlink storage");
 
-        assert_eq!(storage, SymlinkStorage::BlockMapped);
+        assert_eq!(storage, None);
     }
 
     #[test]
@@ -1716,7 +2184,7 @@ mod tests {
         let inode = symlink_inode(0, 0, 0, 0, fast_symlink_block(b"hello.txt"));
 
         assert_eq!(
-            inode.symlink_storage(BLOCK_SIZE, false),
+            inode.fast_symlink_target(BLOCK_SIZE, false),
             Err(Ext4Error::Corrupt(CorruptKind::InvalidInode))
         );
     }
@@ -1726,7 +2194,7 @@ mod tests {
         let inode = symlink_inode(60, 0, 0, 0, [b'a'; disk_inode::INODE_BLOCK_BYTES]);
 
         assert_eq!(
-            inode.symlink_storage(BLOCK_SIZE, false),
+            inode.fast_symlink_target(BLOCK_SIZE, false),
             Err(Ext4Error::Corrupt(CorruptKind::InvalidInode))
         );
     }
@@ -1738,7 +2206,7 @@ mod tests {
         let inode = symlink_inode(9, 0, 0, 0, block);
 
         assert_eq!(
-            inode.symlink_storage(BLOCK_SIZE, false),
+            inode.fast_symlink_target(BLOCK_SIZE, false),
             Err(Ext4Error::Corrupt(CorruptKind::InvalidInode))
         );
     }
@@ -1750,7 +2218,7 @@ mod tests {
         let inode = symlink_inode(9, 0, 0, 0, block);
 
         assert_eq!(
-            inode.symlink_storage(BLOCK_SIZE, false),
+            inode.fast_symlink_target(BLOCK_SIZE, false),
             Err(Ext4Error::Corrupt(CorruptKind::InvalidInode))
         );
     }
@@ -1761,10 +2229,7 @@ mod tests {
         put_u32(&mut block, 0, (12 << 8) | 34);
         let inode = special_inode(InodeKind::CharacterDevice, disk_inode::S_IFCHR, block);
 
-        let device = inode
-            .device_id()
-            .expect("decode device id")
-            .expect("character device has rdev");
+        let device = inode.device_id().expect("character device has rdev");
 
         assert_eq!(device.major(), 12);
         assert_eq!(device.minor(), 34);
@@ -1776,10 +2241,7 @@ mod tests {
         put_u32(&mut block, 4, encode_new_device_id(0xabc, 0xdef0));
         let inode = special_inode(InodeKind::BlockDevice, disk_inode::S_IFBLK, block);
 
-        let device = inode
-            .device_id()
-            .expect("decode device id")
-            .expect("block device has rdev");
+        let device = inode.device_id().expect("block device has rdev");
 
         assert_eq!(device.major(), 0xabc);
         assert_eq!(device.minor(), 0xdef0);
@@ -1903,13 +2365,12 @@ mod tests {
         file_acl: u64,
         block: [u8; disk_inode::INODE_BLOCK_BYTES],
     ) -> Ext4Inode {
-        Ext4Inode {
-            number: InodeNumber::new(12),
+        test_inode(Ext4InodeMetadata {
             kind: InodeKind::Symlink,
             mode: disk_inode::S_IFLNK,
             uid: 0,
             gid: 0,
-            size,
+            disk_size: size,
             blocks,
             flags,
             block,
@@ -1920,8 +2381,7 @@ mod tests {
             atime: timestamp(0, 0),
             ctime: timestamp(0, 0),
             mtime: timestamp(0, 0),
-            dtime: 0,
-        }
+        })
     }
 
     fn special_inode(
@@ -1929,13 +2389,12 @@ mod tests {
         mode: u16,
         block: [u8; disk_inode::INODE_BLOCK_BYTES],
     ) -> Ext4Inode {
-        Ext4Inode {
-            number: InodeNumber::new(12),
+        test_inode(Ext4InodeMetadata {
             kind,
             mode,
             uid: 0,
             gid: 0,
-            size: 0,
+            disk_size: 0,
             blocks: 0,
             flags: 0,
             block,
@@ -1946,8 +2405,60 @@ mod tests {
             atime: timestamp(0, 0),
             ctime: timestamp(0, 0),
             mtime: timestamp(0, 0),
-            dtime: 0,
+        })
+    }
+
+    fn test_inode(metadata: Ext4InodeMetadata) -> Ext4Inode {
+        Ext4Inode::new(InodeNumber::new(12), metadata)
+    }
+
+    fn regular_inode_metadata() -> Ext4InodeMetadata {
+        Ext4InodeMetadata {
+            kind: InodeKind::RegularFile,
+            mode: disk_inode::S_IFREG | 0o644,
+            uid: 0,
+            gid: 0,
+            disk_size: 0,
+            blocks: 0,
+            flags: disk_inode::EXT4_EXTENTS_FL,
+            block: [0; disk_inode::INODE_BLOCK_BYTES],
+            file_acl: 0,
+            inline_xattr: alloc::vec::Vec::new(),
+            generation: 1,
+            links_count: 1,
+            atime: timestamp(0, 0),
+            ctime: timestamp(0, 0),
+            mtime: timestamp(0, 0),
         }
+    }
+
+    #[test]
+    fn delayed_allocation_extents_merge_split_and_count_blocks() {
+        let inode = test_inode(regular_inode_metadata());
+        assert_eq!(
+            inode.insert_unreserved_delalloc_extents(&[(3, 8)]).unwrap(),
+            5
+        );
+        assert_eq!(
+            inode
+                .insert_unreserved_delalloc_extents(&[(10, 12)])
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            inode
+                .insert_unreserved_delalloc_extents(&[(8, 10)])
+                .unwrap(),
+            2
+        );
+        assert_eq!(inode.remove_delalloc_extent(5, 10).unwrap(), 5);
+        assert_eq!(
+            inode.unreserved_delalloc_extents(0, 13),
+            alloc::vec![(0, 3), (5, 10), (12, 13)]
+        );
+        assert_eq!(inode.remove_delalloc_from(4).unwrap(), 3);
+        assert_eq!(inode.clear_delalloc_reservations(), 1);
+        assert!(!inode.has_delalloc_reservations());
     }
 
     const fn timestamp(seconds: i64, nanos: u32) -> Ext4Timestamp {

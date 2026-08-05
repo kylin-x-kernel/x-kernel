@@ -106,7 +106,7 @@ fn overwrites_existing_linux_file_extent() {
         .expect("lookup hello")
         .expect("hello exists");
     let hello_inode = filesystem
-        .inode(hello_entry.inode())
+        .load_inode_private(hello_entry.inode())
         .expect("read hello inode");
     let old_ctime = hello_inode.ctime();
     let old_mtime = hello_inode.mtime();
@@ -127,7 +127,7 @@ fn overwrites_existing_linux_file_extent() {
         .expect("lookup overwritten hello")
         .expect("hello exists after overwrite");
     let hello_inode = filesystem
-        .inode(hello_entry.inode())
+        .load_inode_private(hello_entry.inode())
         .expect("read overwritten hello inode");
     let mut output = vec![0; hello_inode.size() as usize];
     let read = filesystem
@@ -167,7 +167,7 @@ fn overwrite_past_eof_is_noop_and_does_not_update_timestamps() {
         .expect("lookup hello")
         .expect("hello exists");
     let hello_inode = filesystem
-        .inode(hello_entry.inode())
+        .load_inode_private(hello_entry.inode())
         .expect("read hello inode");
     let old_ctime = hello_inode.ctime();
     let old_mtime = hello_inode.mtime();
@@ -188,7 +188,7 @@ fn overwrite_past_eof_is_noop_and_does_not_update_timestamps() {
         .expect("lookup hello after EOF no-op")
         .expect("hello exists after EOF no-op");
     let hello_inode = filesystem
-        .inode(hello_entry.inode())
+        .load_inode_private(hello_entry.inode())
         .expect("read hello inode after EOF no-op");
     assert_eq!(hello_inode.size(), b"hello from linux ext4\n".len() as u64);
     assert_eq!(hello_inode.ctime(), old_ctime);
@@ -227,7 +227,7 @@ fn overwrite_hole_returns_unallocated_write() {
         .expect("lookup sparse")
         .expect("sparse exists");
     let sparse_inode = filesystem
-        .inode(sparse_entry.inode())
+        .load_inode_private(sparse_entry.inode())
         .expect("read sparse inode");
 
     assert_eq!(
@@ -264,7 +264,7 @@ fn raw_overwrite_cross_hole_rejects_range_without_prefix_write() {
         .expect("lookup sparse")
         .expect("sparse exists");
     let sparse_inode = filesystem
-        .inode(sparse_entry.inode())
+        .load_inode_private(sparse_entry.inode())
         .expect("read sparse inode");
     let offset = u64::from(filesystem.layout().block_size()) - 2;
     let mut before = vec![0; 16];
@@ -279,7 +279,7 @@ fn raw_overwrite_cross_hole_rejects_range_without_prefix_write() {
 
     let filesystem = Ext4Filesystem::mount(device).expect("remount after failed raw overwrite");
     let sparse_inode = filesystem
-        .inode(sparse_entry.inode())
+        .load_inode_private(sparse_entry.inode())
         .expect("read sparse inode after failed raw overwrite");
     let mut after = vec![0; before.len()];
     filesystem

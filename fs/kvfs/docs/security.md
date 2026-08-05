@@ -88,6 +88,13 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
 - split truncate 必须在 inode data lock 与 address-space invalidate exclusive lock 下恰好
   调用一次 `truncate_setsize()`；该入口先发布 `i_size`，并在 cache truncate 前后各执行
   一次 mmap invalidation。文件系统负责维护 backing prepare 后失败的磁盘恢复协议。
+- `InodeCache` 是每个 filesystem 唯一的 resident inode identity table。缺失 entry 必须先发布
+  `New` 再运行 fallible initializer；局部 reservation guard 必须在错误或 panic unwind 时删除
+  未发布的 `New` 并唤醒等待者；`New` 和 `Freeing` 只能等待，不能返回普通 inode。
+- 使用 `InodeAttributeOperations` 的 filesystem 必须让 operations 描述待构造的同号、同类型
+  inode；KVFS 只保留该共享后端，不能同时分配另一份 generic attribute storage。
+- `VfsInode` final drop 必须在 filesystem eviction hook 前把精确匹配的 cache entry 从 `Live`
+  转为 `Freeing`，hook 返回后只删除该对象的 entry 并唤醒等待者；后端不得另建 resident cache。
 - `VfsInode` 只拥有一个 `AddressSpace`，MM/filemap 只经 `VfsFile::mapping()` 获取它；
   不得向 MM 暴露或额外强持有内部 `PageCache`。
 - pathname FIFO 的活动 `PipeObject` 必须由 `VfsInode` 的 typed slot 持有；共享
@@ -106,6 +113,10 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
 ## 线程安全
 
 共享 dentry、inode、mount 和 file 状态由 mutex、atomic、`Arc` 和 `Weak` 保护。
+Inode cache mutex 只保护 `New/Live/Freeing` entry；initializer、eviction hook 和 wait 均不持有
+该 mutex。每个 slot 有独立等待队列；未发布 reservation 的 drop 和正常状态迁移都在释放 mutex
+后只唤醒该 slot，等待者同时校验 slot generation，避免错过唤醒、跨 inode 惊群，或把已进入
+final drop、Weak upgrade 失败的 `Live` 当成 cache miss 并行重建。
 可变 per-mount flags 存储在 `VfsMount::mnt_flags`，由 `flags()` 和 `set_flags()` 封装为
 强类型 `MountFlags`，并使用 relaxed ordering，因为 flags 不发布或保护其他 mount 状态。
 remount/reconfigure 在替换 flags 前校验目标是当前 mount namespace 中已注册 mount
@@ -180,7 +191,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-14 | pathname socket 或其它 special inode 固定为 root | 高 | simple filesystem 动态 mknod 绕过 owner helper | `SimpleDir` mknod 使用 `inode_init_owner()`，仅支持持久插入的目录实现开放创建 |
 | T-25 | 一个 mount 卸载破坏同一 superblock 的其它 mount | 高 | bind root 与源路径共享 dentry，却按 mount 创建来源选择性清理 dcache | mount 不保存 bind 来源标记；每个 `VfsMount` 持有 active 引用，只有计数归零才执行一次 superblock shutdown |
 | T-15 | core mutation result 污染错误的 live inode identity | 高 | bridge 把一个 inode 的 metadata 写入另一个 `VfsInode` | cached metadata refresh 校验 identity、node type、block geometry 和 `rdev` |
-| T-16 | truncate 窗口内 private mmap 在新 EOF 后重新 fault | 高 | i_size 晚于 cache truncate 发布，或只执行一次 unmap | inode data lock 串行化 write/truncate；`truncate_setsize()` 执行 i_size publish -> unmap -> cache truncate -> unmap |
+| T-16 | truncate 窗口内 private mmap 在新 EOF 后重新 fault，或 shrink-regrow 暴露旧缓存数据 | 高 | i_size 晚于 cache truncate 发布、backing prepare 提前覆盖旧 i_size，或只执行一次 unmap | inode data lock 串行化 write/truncate；backing prepare 不修改 i_size；`truncate_setsize()` 执行 i_size publish -> unmap -> cache truncate/EOF zero -> unmap |
 | T-17 | unlink 时过早触发磁盘 inode 回收 | 高 | dentry removal 与最后 open-file 引用混为一谈 | `Arc` inode identity 延迟 final teardown，磁盘回收只在 superblock `evict_inode()` hook 中执行 |
 | T-18 | 并发 rename 创建目录环 | 高 | cross-directory rename 未序列化 topology 或未在锁内检查祖先关系 | topology mutex、稳定 parent lock 和 ancestry check 拒绝该操作 |
 | T-19 | create、link 或 symlink 与 lookup、删除或 replacement 竞争 | 高 | final lookup、对象校验和 mutation 分离持锁 | final lookup、validator、participant lock 和 callback 位于同一父目录 exclusive transaction；create-like callback 复用最终 negative dentry，create-only 错误仅在该对象仍为 negative 时返回 |
@@ -206,6 +217,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-37 | 非特权调用者伪造 `security.*` xattr | 高 | VFS 按 Linux 语义把授权委托给尚未实现的 LSM hook，后端直接接受该 namespace | KVFS 在 LSM/capability hook 接入前要求 privileged credential 才能 set/remove `security.*`；读操作仍保留委托语义，残余风险是缺少具体 LSM 的读取策略 |
 | T-38 | `listxattr` 为不可见名称或属性值建立中间副本，造成不必要的内存放大 | 中 | 后端先返回拥有 value 的属性向量，KVFS 再过滤 `trusted.*` | `InodeOperations::list_xattrs` 通过 borrowed name sink 输出；`Path` 在流中先过滤 `trusted.*`，调用者只接收可见名称 |
 | T-39 | immutable 或 append-only inode 的 xattr 仍可被修改 | 中 | namespace 特例在通用 inode 状态检查前直接授权，或文件系统未把磁盘 inode flags 映射到 KVFS | `check_xattr_permission()` 在所有 namespace 分支前检查 `NodeFlags::IMMUTABLE/APPEND_ONLY`，set/remove 统一返回 `EPERM`；具体 bridge 必须在建立 VFS inode identity 时映射后端 flags |
+| T-40 | inode 初始化或驱逐竞争产生第二个 resident identity，或全 cache 唤醒形成惊群 | 高 | cache miss 在构造后才占 slot、Weak upgrade 失败立即重建，或所有 inode 共用一个等待队列 | cache 先发布 `New`；并发 initializer 在该 slot 等待；最后引用 drop 发布 `Freeing` 后再调用 hook；同号 lookup 等待 entry 删除并重试；每 slot 队列只唤醒同号等待者，后端不接收 `EINVAL` 风格的竞争错误 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -271,12 +283,16 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
   inode data lock，`trusted.*` 是否对非特权 list/get 隐藏名称和存在性，`security.*`
   mutation 是否拒绝非特权 credential，immutable/append-only 是否在 namespace 分支前拒绝
   所有 mutation，list 后端是否只在 sink 回调期间借用名称？
-- backing mutation 后是否刷新所有受影响的 live inode，而不是只返回新 dentry。
+- backing mutation 后，共享 attribute backend 是否已原位更新；使用 KVFS-owned attributes 的
+  filesystem 是否刷新所有受影响的 live inode，而不是只返回新 dentry。
 - truncate 是否通过 `set_len()` 与 `truncate_setsize()` 保持 backing prepare、i_size publish、
   两轮 AddressSpace invalidation、cache truncate 和 backing finish 顺序。
 - file-backed MM runtime 是否只保存 `VfsFile`，并经 `VfsFile::mapping()` 访问唯一的
   inode `AddressSpace`。
 - `release()` 与 final `evict_inode()` 是否保持为两个不同生命周期阶段。
+- filesystem 是否通过同一个 `InodeCache` 的 fallible initializer 构造 private state，且没有
+  后端 inode-number resident cache？
+- `New/Freeing` 是否在 KVFS 内等待重试，eviction finish 是否只删除精确匹配的旧 entry？
 - 每个 `VfsMount` 是否恰好取得和释放一次 superblock active 引用，非最后 mount 是否避免
   teardown，最后一个引用是否只执行一次 shutdown。
 - 递归 detach 是否包含 child overmount stack，并在修改 topology 前完成完整 registry 校验。

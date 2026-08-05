@@ -156,6 +156,7 @@ pub(super) fn map_leaf(
         let len = hole_len_to(logical, upper_lblk)?;
         return Ok(BlockMapping::Hole {
             len: BlockCount::new(len),
+            flags: BlockMappingFlags::empty(),
         });
     }
 
@@ -210,6 +211,7 @@ pub(super) fn map_leaf(
     };
     Ok(BlockMapping::Hole {
         len: BlockCount::new(next.max(1)),
+        flags: BlockMappingFlags::empty(),
     })
 }
 

@@ -8,7 +8,7 @@ use crate::{
     BlockCount, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Result, FilesystemBlock, LogicalBlock,
     UnsupportedKind,
     extent::{BlockMapping, ExtentMappingState},
-    inode::{Ext4Inode, Ext4Timestamp, InodeKind, SymlinkStorage},
+    inode::{Ext4Inode, Ext4Timestamp, InodeKind},
     jbd2::JournalCredits,
     mballoc::{Ext4AllocationFlags, Ext4AllocationRequest},
 };
@@ -119,8 +119,7 @@ impl Ext4Filesystem {
     /// belong to the runtime inode rather than the mount-wide journal. The VFS
     /// inode will own targeted cursors once mutation completion reports tids;
     /// committing the shared transaction is conservative and correct meanwhile.
-    pub fn sync_inode(&mut self, inode: &Ext4Inode, intent: Ext4SyncIntent) -> Ext4Result<()> {
-        let _ = (inode, intent);
+    pub fn sync_inode(&mut self, _inode: &Ext4Inode, _intent: Ext4SyncIntent) -> Ext4Result<()> {
         let result = match self.commit_running_metadata_transaction() {
             Ok(true) => Ok(()),
             Ok(false) => {
@@ -148,9 +147,9 @@ impl Ext4Filesystem {
         offset: u64,
         output: &mut [u8],
     ) -> Ext4Result<usize> {
-        match self.symlink_storage(inode)? {
-            SymlinkStorage::Fast(target) => self.read_fast_symlink_target(target, offset, output),
-            SymlinkStorage::BlockMapped => self.read_inode_bytes_with_missing_block_policy(
+        match self.fast_symlink_target(inode)? {
+            Some(target) => self.read_fast_symlink_target(&target, offset, output),
+            None => self.read_inode_bytes_with_missing_block_policy(
                 inode,
                 offset,
                 output,
@@ -346,7 +345,7 @@ impl Ext4Filesystem {
         visible_size: u64,
         timestamp: Ext4Timestamp,
         intent: Ext4SyncIntent,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         self.writeback_ordered_at_with_prealloc_budget(
             inode,
             offset,
@@ -355,7 +354,24 @@ impl Ext4Filesystem {
             timestamp,
             intent,
             u32::MAX,
-        )
+        )?;
+        if !input.is_empty() {
+            let block_size = u64::from(self.layout().block_size());
+            let write_end = offset
+                .checked_add(u64::try_from(input.len()).map_err(|_| Ext4Error::Overflow)?)
+                .ok_or(Ext4Error::Overflow)?;
+            let first = offset / block_size;
+            let end = write_end
+                .checked_add(block_size - 1)
+                .ok_or(Ext4Error::Overflow)?
+                / block_size;
+            self.release_delalloc_range(
+                inode,
+                LogicalBlock::new(first),
+                end.checked_sub(first).ok_or(Ext4Error::Overflow)?,
+            )?;
+        }
+        Ok(())
     }
 
     /// Writes a dirty page-cache range through the ordered-data path with a
@@ -370,7 +386,7 @@ impl Ext4Filesystem {
         timestamp: Ext4Timestamp,
         intent: Ext4SyncIntent,
         max_extra_prealloc_blocks: u32,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         self.ensure_regular_file_mutation_supported(inode)?;
         if self.journal.is_none() && intent.requires_full_metadata() {
             return Err(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite));
@@ -387,7 +403,7 @@ impl Ext4Filesystem {
 
         if input.is_empty() {
             if intent.is_data_only() && visible_size == inode.disk_size() {
-                return Ok(inode.clone());
+                return Ok(());
             }
             return self.commit_regular_inode_write_metadata(
                 inode,
@@ -419,7 +435,7 @@ impl Ext4Filesystem {
                     PartialBlockWrite::PreserveExisting,
                 )?;
             }
-            return Ok(inode.clone());
+            return Ok(());
         }
         let logical_blocks = block_count_for_byte_span(0, input.len().max(1), block_size_usize)?;
         let credits = self.extent_writeback_metadata_credits(inode, logical_blocks)?;
@@ -476,7 +492,7 @@ impl Ext4Filesystem {
             let mapping_len = match mapping {
                 BlockMapping::Mapped { len, .. }
                 | BlockMapping::Unwritten { len, .. }
-                | BlockMapping::Hole { len } => len.get(),
+                | BlockMapping::Hole { len, .. } => len.get(),
             };
             if mapping_len == 0 {
                 return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
@@ -555,7 +571,7 @@ impl Ext4Filesystem {
         inode: &Ext4Inode,
         disk_size: u64,
         metadata: RegularWriteMetadata,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         self.ensure_regular_file_mutation_supported(inode)?;
         if disk_size < inode.disk_size() {
             return Err(Ext4Error::Unsupported(UnsupportedKind::FileSizeShrink));
@@ -624,10 +640,9 @@ impl Ext4Filesystem {
         block_size_usize: usize,
         mut extra_prealloc_budget: u32,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let block_size = u64::try_from(block_size_usize).map_err(|_| Ext4Error::Overflow)?;
         let mut input_offset = 0usize;
-        let mut current_inode = inode.clone();
 
         while input_offset < input.len() {
             let absolute = offset
@@ -636,7 +651,7 @@ impl Ext4Filesystem {
             let logical = LogicalBlock::new(absolute / block_size);
             let in_block =
                 usize::try_from(absolute % block_size).map_err(|_| Ext4Error::Overflow)?;
-            match self.map_blocks(&current_inode, logical)? {
+            match self.map_blocks(inode, logical)? {
                 BlockMapping::Mapped { physical, len, .. } => {
                     if physical.get() == 0 || len.get() == 0 {
                         return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
@@ -693,8 +708,8 @@ impl Ext4Filesystem {
                         block_size_usize,
                         PartialBlockWrite::ZeroFill,
                     )?;
-                    current_inode = self.convert_unwritten_extent_range(
-                        &current_inode,
+                    self.convert_unwritten_extent_range(
+                        inode,
                         logical,
                         BlockCount::new(block_count),
                         handle,
@@ -703,7 +718,7 @@ impl Ext4Filesystem {
                         .checked_add(write_len)
                         .ok_or(Ext4Error::Overflow)?;
                 }
-                BlockMapping::Hole { len } => {
+                BlockMapping::Hole { len, .. } => {
                     let remaining_blocks = block_count_for_byte_span(
                         in_block,
                         input.len() - input_offset,
@@ -713,9 +728,8 @@ impl Ext4Filesystem {
                     if requested == 0 {
                         return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
                     }
-                    let locality_group = self.block_group_for_inode(current_inode.number())?;
-                    let goal =
-                        self.allocation_goal_after_previous_extent(&current_inode, logical)?;
+                    let locality_group = self.block_group_for_inode(inode.number())?;
+                    let goal = self.allocation_goal_after_previous_extent(inode, logical)?;
                     let normalized =
                         normalize_write_allocation_len(requested, len.get(), goal.is_some());
                     let extra = normalized
@@ -733,8 +747,8 @@ impl Ext4Filesystem {
                     )?;
                     let allocation = self.allocate_blocks_for_write(request, handle)?;
                     let allocated_blocks = allocation.block_count();
-                    current_inode = self.insert_extent_mapping(
-                        &current_inode,
+                    self.insert_extent_mapping(
+                        inode,
                         logical,
                         allocation.physical_start(),
                         allocated_blocks,
@@ -767,8 +781,8 @@ impl Ext4Filesystem {
                         block_size_usize,
                         PartialBlockWrite::ZeroFill,
                     )?;
-                    current_inode = self.convert_unwritten_extent_range(
-                        &current_inode,
+                    self.convert_unwritten_extent_range(
+                        inode,
                         logical,
                         BlockCount::new(block_count),
                         handle,
@@ -781,7 +795,7 @@ impl Ext4Filesystem {
         }
 
         self.flush_device()?;
-        self.update_regular_inode_write_metadata(&current_inode, disk_size, metadata, handle)
+        self.update_regular_inode_write_metadata(inode, disk_size, metadata, handle)
     }
 
     pub(crate) fn allocation_goal_after_previous_extent(

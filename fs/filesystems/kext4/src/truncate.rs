@@ -14,70 +14,9 @@ use crate::{
 const INODE_UPDATE_CREDITS: u32 = 1;
 const ORPHAN_HEAD_UPDATE_CREDITS: u32 = 1;
 
-struct DiskSizeCommitted {
-    inode: Ext4Inode,
-}
-
-struct TailZeroed {
-    inode: Ext4Inode,
-}
-
-struct OrphanedInode {
-    inode: Ext4Inode,
-}
-
-struct ExtentsTruncated {
-    inode: Ext4Inode,
-}
-
-struct OrphanRemoved {
-    inode: Ext4Inode,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PreparedTruncateOperation {
-    Noop,
-    Grow,
-    Shrink,
-}
-
-/// Prepared regular-file truncate state held between VFS page-cache phases.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Ext4PreparedTruncate {
-    inode: Ext4Inode,
-    old_disk_size: u64,
-    new_disk_size: u64,
-    operation: PreparedTruncateOperation,
-}
-
-impl Ext4PreparedTruncate {
-    /// Returns the inode after the prepare phase.
-    pub const fn inode(&self) -> &Ext4Inode {
-        &self.inode
-    }
-
-    /// Returns the ext4 disk size before prepare.
-    pub const fn old_disk_size(&self) -> u64 {
-        self.old_disk_size
-    }
-
-    /// Returns the ext4 disk size committed by prepare.
-    pub const fn new_disk_size(&self) -> u64 {
-        self.new_disk_size
-    }
-}
-
-struct OrphanSizeUpdateCreditPlan;
-
-impl OrphanSizeUpdateCreditPlan {
-    const fn credit_limit(self) -> u32 {
-        INODE_UPDATE_CREDITS.saturating_add(ORPHAN_HEAD_UPDATE_CREDITS)
-    }
-}
-
 impl JournalCredits {
     const fn for_orphan_size_update() -> Self {
-        Self::new(OrphanSizeUpdateCreditPlan.credit_limit())
+        Self::new(INODE_UPDATE_CREDITS.saturating_add(ORPHAN_HEAD_UPDATE_CREDITS))
     }
 
     fn for_preallocation_discard(
@@ -113,60 +52,40 @@ impl Ext4Filesystem {
     /// Grow zeroes any mapped old EOF tail before committing a larger
     /// `i_disksize`. Shrink first links the inode on the legacy orphan list
     /// and commits the smaller `i_disksize`; the caller must resize the
-    /// generic page cache and then call [`Self::finish_regular_inode_truncate`]
+    /// generic page cache and then call [`Self::finish_regular_inode_shrink`]
     /// so the extents are truncated and the orphan entry is removed.
     pub fn prepare_regular_inode_truncate(
         &mut self,
         inode: &Ext4Inode,
         new_size: u64,
         timestamp: crate::Ext4Timestamp,
-    ) -> Ext4Result<Ext4PreparedTruncate> {
+    ) -> Ext4Result<()> {
         self.ensure_regular_file_mutation_supported(inode)?;
         let old_disk_size = inode.disk_size();
         if new_size == old_disk_size {
-            return Ok(Ext4PreparedTruncate {
-                inode: inode.clone(),
-                old_disk_size,
-                new_disk_size: new_size,
-                operation: PreparedTruncateOperation::Noop,
-            });
+            return Ok(());
         }
         if new_size > old_disk_size {
             self.zero_regular_inode_tail_data(inode, old_disk_size)?;
-            let inode = self.commit_regular_inode_write_metadata(
+            self.commit_regular_inode_write_metadata(
                 inode,
                 new_size,
                 RegularWriteMetadata::Full { timestamp },
             )?;
-            return Ok(Ext4PreparedTruncate {
-                inode,
-                old_disk_size,
-                new_disk_size: new_size,
-                operation: PreparedTruncateOperation::Grow,
-            });
+            return Ok(());
         }
 
-        let committed = self.commit_orphan_size_update(inode, new_size, timestamp)?;
-        Ok(Ext4PreparedTruncate {
-            inode: committed.inode,
-            old_disk_size,
-            new_disk_size: new_size,
-            operation: PreparedTruncateOperation::Shrink,
-        })
+        self.commit_orphan_size_update(inode, new_size, timestamp)
     }
 
-    /// Finishes a prepared regular-file disk-size change after page-cache work.
-    pub fn finish_regular_inode_truncate(
+    /// Finishes a prepared shrink after the VFS page cache has been truncated.
+    pub fn finish_regular_inode_shrink(
         &mut self,
-        prepared: Ext4PreparedTruncate,
-    ) -> Ext4Result<Ext4Inode> {
-        self.ensure_regular_file_mutation_supported(&prepared.inode)?;
-        match prepared.operation {
-            PreparedTruncateOperation::Noop | PreparedTruncateOperation::Grow => Ok(prepared.inode),
-            PreparedTruncateOperation::Shrink => {
-                self.truncate_regular_inode_shrink_committed(prepared.inode, prepared.new_disk_size)
-            }
-        }
+        inode: &Ext4Inode,
+        new_size: u64,
+    ) -> Ext4Result<()> {
+        self.ensure_regular_file_mutation_supported(inode)?;
+        self.truncate_regular_inode_shrink_committed(inode, new_size)
     }
 
     /// Changes a regular file's visible length using Linux-style orphan protection.
@@ -175,20 +94,33 @@ impl Ext4Filesystem {
         inode: &Ext4Inode,
         new_size: u64,
         timestamp: crate::Ext4Timestamp,
-    ) -> Ext4Result<Ext4Inode> {
-        let prepared = self.prepare_regular_inode_truncate(inode, new_size, timestamp)?;
-        self.finish_regular_inode_truncate(prepared)
+    ) -> Ext4Result<()> {
+        let is_visible_shrink = new_size < inode.size();
+        let is_disk_shrink = new_size < inode.disk_size();
+        self.prepare_regular_inode_truncate(inode, new_size, timestamp)?;
+        inode.set_size(new_size);
+        if is_visible_shrink {
+            let first_unneeded = file_block_count(new_size, self.layout().block_size())?;
+            self.truncate_delalloc_range(inode, LogicalBlock::new(first_unneeded))?;
+        }
+        if is_disk_shrink {
+            self.finish_regular_inode_shrink(inode, new_size)?;
+        }
+        Ok(())
     }
 
     /// Discards unwritten preallocation beyond a regular file's `i_disksize`.
-    pub fn discard_regular_inode_preallocations(
-        &mut self,
-        inode: &Ext4Inode,
-    ) -> Ext4Result<Ext4Inode> {
+    ///
+    /// Active delayed-allocation reservations make this operation a no-op so
+    /// allocation state cannot be discarded underneath dirty page-cache data.
+    pub fn discard_regular_inode_preallocations(&mut self, inode: &Ext4Inode) -> Ext4Result<()> {
         self.ensure_regular_file_mutation_supported(inode)?;
+        if inode.has_delalloc_reservations() {
+            return Ok(());
+        }
         let disk_blocks = file_block_count(inode.disk_size(), self.layout().block_size())?;
         if !self.has_extent_mapping_from(inode, LogicalBlock::new(disk_blocks))? {
-            return Ok(inode.clone());
+            return Ok(());
         }
 
         let credits = JournalCredits::for_preallocation_discard(self, inode)?;
@@ -197,15 +129,8 @@ impl Ext4Filesystem {
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
         )?;
         let mut handle = journal.begin(credits)?;
-        let result = self
-            .truncate_inode_mappings_to(
-                TailZeroed {
-                    inode: inode.clone(),
-                },
-                inode.disk_size(),
-                &mut handle,
-            )
-            .map(|truncated| truncated.inode);
+        let blocks = file_block_count(inode.disk_size(), self.layout().block_size())?;
+        let result = self.truncate_extent_mappings(inode, LogicalBlock::new(blocks), &mut handle);
         self.complete_metadata_mutation(handle, result)
     }
 
@@ -213,7 +138,7 @@ impl Ext4Filesystem {
         &mut self,
         inode: &Ext4Inode,
         recovery_flag_policy: crate::journal::RecoveryFlagPolicy,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         if self.orphan_head() != Some(inode.number()) {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
         }
@@ -225,35 +150,30 @@ impl Ext4Filesystem {
         }
 
         let target_size = inode.disk_size();
-        let tail_zeroed = self.zero_committed_inode_tail(
-            DiskSizeCommitted {
-                inode: inode.clone(),
-            },
-            target_size,
-        )?;
+        self.zero_regular_inode_tail_data(inode, target_size)?;
 
         let credits = JournalCredits::for_regular_truncate(self, inode, target_size)?;
         let journal = self.metadata_journal_for_mutation(credits, recovery_flag_policy)?;
         let mut handle = journal.begin(credits)?;
         let result =
-            self.cleanup_orphaned_inode_from_head_metadata(tail_zeroed, target_size, &mut handle);
+            self.cleanup_orphaned_inode_from_head_metadata(inode, target_size, &mut handle);
         self.complete_metadata_mutation_with_policy(handle, result, recovery_flag_policy)
     }
 
     fn truncate_regular_inode_shrink_committed(
         &mut self,
-        inode: Ext4Inode,
+        inode: &Ext4Inode,
         new_size: u64,
-    ) -> Ext4Result<Ext4Inode> {
-        let credits = JournalCredits::for_regular_truncate(self, &inode, new_size)?;
-        let tail_zeroed = self.zero_committed_inode_tail(DiskSizeCommitted { inode }, new_size)?;
+    ) -> Ext4Result<()> {
+        let credits = JournalCredits::for_regular_truncate(self, inode, new_size)?;
+        self.zero_regular_inode_tail_data(inode, new_size)?;
 
         let journal = self.metadata_journal_for_mutation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
         )?;
         let mut handle = journal.begin(credits)?;
-        let result = self.finish_regular_inode_shrink_metadata(tail_zeroed, new_size, &mut handle);
+        let result = self.finish_regular_inode_shrink_metadata(inode, new_size, &mut handle);
         self.complete_metadata_mutation(handle, result)
     }
 
@@ -262,7 +182,7 @@ impl Ext4Filesystem {
         inode: &Ext4Inode,
         new_size: u64,
         timestamp: crate::Ext4Timestamp,
-    ) -> Ext4Result<DiskSizeCommitted> {
+    ) -> Ext4Result<()> {
         self.validate_inode_timestamp_update(inode, timestamp)?;
         let credits = JournalCredits::for_orphan_size_update();
         let journal = self.metadata_journal_for_mutation(
@@ -271,22 +191,18 @@ impl Ext4Filesystem {
         )?;
         let mut handle = journal.begin(credits)?;
         let transaction = handle.id();
-        let result = self
-            .add_truncate_orphan(inode, &mut handle)
-            .and_then(|orphaned| {
-                self.commit_orphaned_disk_size(
-                    orphaned,
-                    new_size,
-                    RegularWriteMetadata::Full { timestamp },
-                    &mut handle,
-                )
-            })
-            .map(|committed| committed.inode);
+        let result = self.add_orphan(inode, &mut handle).and_then(|()| {
+            self.update_regular_inode_size_metadata(
+                inode,
+                new_size,
+                RegularWriteMetadata::Full { timestamp },
+                &mut handle,
+            )
+        });
         let has_updates = handle.has_updates();
-        let updated_inode = match result {
-            Ok(updated_inode) => {
+        match result {
+            Ok(()) => {
                 drop(handle);
-                updated_inode
             }
             Err(error) => {
                 let error = self.fail_metadata_mutation(has_updates, error);
@@ -300,93 +216,29 @@ impl Ext4Filesystem {
         if let Err(error) = self.commit_metadata_transaction(transaction) {
             return Err(self.fail_metadata_mutation(has_updates, error));
         }
-        Ok(DiskSizeCommitted {
-            inode: updated_inode,
-        })
-    }
-
-    fn add_truncate_orphan(
-        &mut self,
-        inode: &Ext4Inode,
-        handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<OrphanedInode> {
-        Ok(OrphanedInode {
-            inode: self.add_orphan(inode, handle)?,
-        })
-    }
-
-    fn commit_orphaned_disk_size(
-        &self,
-        orphaned: OrphanedInode,
-        new_size: u64,
-        metadata: RegularWriteMetadata,
-        handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<DiskSizeCommitted> {
-        Ok(DiskSizeCommitted {
-            inode: self.update_regular_inode_size_metadata(
-                &orphaned.inode,
-                new_size,
-                metadata,
-                handle,
-            )?,
-        })
-    }
-
-    fn zero_committed_inode_tail(
-        &self,
-        committed: DiskSizeCommitted,
-        size: u64,
-    ) -> Ext4Result<TailZeroed> {
-        self.zero_regular_inode_tail_data(&committed.inode, size)?;
-        Ok(TailZeroed {
-            inode: committed.inode,
-        })
+        Ok(())
     }
 
     fn finish_regular_inode_shrink_metadata(
         &mut self,
-        tail_zeroed: TailZeroed,
+        inode: &Ext4Inode,
         new_size: u64,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
-        let truncated = self.truncate_inode_mappings_to(tail_zeroed, new_size, handle)?;
-        Ok(self.remove_truncated_orphan(truncated, handle)?.inode)
+    ) -> Ext4Result<()> {
+        let blocks = file_block_count(new_size, self.layout().block_size())?;
+        self.truncate_extent_mappings(inode, LogicalBlock::new(blocks), handle)?;
+        self.remove_orphan(inode, handle)
     }
 
     fn cleanup_orphaned_inode_from_head_metadata(
         &mut self,
-        tail_zeroed: TailZeroed,
+        inode: &Ext4Inode,
         target_size: u64,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
-        let truncated = self.truncate_inode_mappings_to(tail_zeroed, target_size, handle)?;
-        Ok(self.remove_truncated_orphan(truncated, handle)?.inode)
-    }
-
-    fn truncate_inode_mappings_to(
-        &mut self,
-        tail_zeroed: TailZeroed,
-        size: u64,
-        handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<ExtentsTruncated> {
-        let blocks = file_block_count(size, self.layout().block_size())?;
-        Ok(ExtentsTruncated {
-            inode: self.truncate_extent_mappings(
-                &tail_zeroed.inode,
-                LogicalBlock::new(blocks),
-                handle,
-            )?,
-        })
-    }
-
-    fn remove_truncated_orphan(
-        &mut self,
-        truncated: ExtentsTruncated,
-        handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<OrphanRemoved> {
-        Ok(OrphanRemoved {
-            inode: self.remove_orphan(&truncated.inode, handle)?,
-        })
+    ) -> Ext4Result<()> {
+        let blocks = file_block_count(target_size, self.layout().block_size())?;
+        self.truncate_extent_mappings(inode, LogicalBlock::new(blocks), handle)?;
+        self.remove_orphan(inode, handle)
     }
 
     fn zero_regular_inode_tail_data(&self, inode: &Ext4Inode, new_size: u64) -> Ext4Result<()> {

@@ -8,7 +8,7 @@ use crate::{
     ChecksumTarget, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Result, FilesystemBlock,
     PhysicalBlock, UnsupportedKind,
     disk::{checksum, codec, inode as disk_inode, xattr as disk_xattr},
-    inode::{Ext4Inode, Ext4Timestamp, update_inode_ctime_bytes},
+    inode::{Ext4Inode, Ext4InodeMetadata, Ext4Timestamp, update_inode_ctime_bytes},
     jbd2::{JournalCredits, JournalHandle},
     superblock::replace_metadata_access_bytes,
 };
@@ -201,14 +201,15 @@ impl Ext4Filesystem {
 
     /// Walks supported extended-attribute names without materializing values.
     ///
-    /// Names borrow directly from validated inode or external-block metadata
+    /// Names borrow from validated inode snapshots or external-block metadata
     /// and remain valid only for the duration of each sink call.
     pub fn list_xattrs(
         &self,
         inode: &Ext4Inode,
         sink: &mut dyn Ext4XattrNameSink,
     ) -> Ext4Result<()> {
-        list_inline_xattr_names_from_bytes(inode.inline_xattr_bytes(), sink)?;
+        let inline_xattrs = inode.inline_xattr_bytes();
+        list_inline_xattr_names_from_bytes(&inline_xattrs, sink)?;
         self.list_external_xattr_names(inode, sink)
     }
 
@@ -239,7 +240,7 @@ impl Ext4Filesystem {
         name: &[u8],
         value: &[u8],
         timestamp: Ext4Timestamp,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         self.set_xattr_with_mode(
             inode,
             namespace,
@@ -259,14 +260,14 @@ impl Ext4Filesystem {
         value: &[u8],
         mode: Ext4XattrSetMode,
         timestamp: Ext4Timestamp,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         validate_settable_xattr(namespace, name)?;
         self.validate_inode_timestamp_update(inode, timestamp)?;
         let (credits, xattrs, mutation) = self.xattr_mutation_plan(inode, timestamp, |xattrs| {
             set_xattr_value_with_mode(xattrs, namespace, name, value, mode)
         })?;
         if mutation == XattrMutation::Unchanged {
-            return Ok(inode.clone());
+            return Ok(());
         }
         let journal = self.metadata_journal_for_mutation(
             credits,
@@ -284,7 +285,7 @@ impl Ext4Filesystem {
         namespace: Ext4XattrNamespace,
         name: &[u8],
         timestamp: Ext4Timestamp,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         validate_settable_xattr(namespace, name)?;
         self.validate_inode_timestamp_update(inode, timestamp)?;
         let (credits, xattrs, _) = self.xattr_mutation_plan(inode, timestamp, |xattrs| {
@@ -305,7 +306,7 @@ impl Ext4Filesystem {
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
         xattrs: Vec<Ext4Xattr>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let old_external_block = inode.file_acl_block();
 
         let inline_capacity = inode.inline_xattr_bytes().len();
@@ -332,7 +333,7 @@ impl Ext4Filesystem {
             self.prepare_xattr_inode_update(inode, &xattrs, new_external_block, timestamp)?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        Ok(updated_inode)
+        self.publish_inode_metadata(inode, updated_inode)
     }
 
     fn xattr_mutation_plan(
@@ -385,7 +386,7 @@ impl Ext4Filesystem {
         xattrs: &[Ext4Xattr],
         new_external_block: Option<FilesystemBlock>,
         timestamp: Ext4Timestamp,
-    ) -> Ext4Result<(FilesystemBlock, Vec<u8>, Ext4Inode)> {
+    ) -> Ext4Result<(FilesystemBlock, Vec<u8>, Ext4InodeMetadata)> {
         let old_external_block = inode.file_acl_block();
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
         let mut inode_table_bytes = self
@@ -542,10 +543,10 @@ impl Ext4Filesystem {
         &mut self,
         inode: &Ext4Inode,
         handle: &mut JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let block = inode.file_acl_block();
         if block == 0 {
-            return Ok(inode.clone());
+            return Ok(());
         }
 
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
@@ -575,11 +576,11 @@ impl Ext4Filesystem {
         self.drop_external_xattr_block(inode, block, handle)?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        Ok(updated_inode)
+        self.publish_inode_metadata(inode, updated_inode)
     }
 
     fn read_inline_xattrs(&self, inode: &Ext4Inode, output: &mut Vec<Ext4Xattr>) -> Ext4Result<()> {
-        output.extend(read_inline_xattrs_from_bytes(inode.inline_xattr_bytes())?);
+        output.extend(read_inline_xattrs_from_bytes(&inode.inline_xattr_bytes())?);
         Ok(())
     }
 

@@ -357,14 +357,15 @@ fn set_large_xattr_on_file(
     let entry = filesystem.lookup(&root, "file")?.ok_or(Ext4Error::Corrupt(
         kext4::CorruptKind::InvalidDirectoryEntry,
     ))?;
-    let inode = filesystem.inode(entry.inode())?;
+    let inode = filesystem.load_inode_private(entry.inode())?;
     filesystem.set_xattr(
         &inode,
         Ext4XattrNamespace::User,
         b"large",
         large_value,
         Ext4Timestamp::new(1_720_000_020, 0),
-    )
+    )?;
+    Ok(inode)
 }
 
 fn assert_large_xattr_absent(bytes: &[u8]) {
@@ -376,7 +377,7 @@ fn assert_large_xattr_absent(bytes: &[u8]) {
         .expect("lookup committed xattr file")
         .expect("committed xattr file exists");
     let inode = filesystem
-        .inode(entry.inode())
+        .load_inode_private(entry.inode())
         .expect("read committed xattr inode");
     assert!(
         filesystem
@@ -789,7 +790,7 @@ fn reads_linux_directory_and_regular_files() {
         .expect("hello exists");
     assert_eq!(hello_entry.file_type(), DirectoryFileType::RegularFile);
     let hello_inode = filesystem
-        .inode(hello_entry.inode())
+        .load_inode_private(hello_entry.inode())
         .expect("read hello inode");
     assert_eq!(hello_inode.kind(), InodeKind::RegularFile);
     let mut hello_bytes = vec![0; 64];
@@ -809,7 +810,7 @@ fn reads_linux_directory_and_regular_files() {
         .expect("lookup sparse")
         .expect("sparse exists");
     let sparse_inode = filesystem
-        .inode(sparse_entry.inode())
+        .load_inode_private(sparse_entry.inode())
         .expect("read sparse inode");
     let mut sparse_bytes = vec![0xff; 8196];
     let read = filesystem
@@ -825,14 +826,14 @@ fn reads_linux_directory_and_regular_files() {
         .expect("subdir exists");
     assert_eq!(subdir_entry.file_type(), DirectoryFileType::Directory);
     let subdir = filesystem
-        .inode(subdir_entry.inode())
+        .load_inode_private(subdir_entry.inode())
         .expect("read subdir inode");
     let nested_entry = filesystem
         .lookup(&subdir, "nested.txt")
         .expect("lookup nested")
         .expect("nested exists");
     let nested_inode = filesystem
-        .inode(nested_entry.inode())
+        .load_inode_private(nested_entry.inode())
         .expect("read nested inode");
     let mut nested_bytes = vec![0; 64];
     let read = filesystem
@@ -845,7 +846,7 @@ fn reads_linux_directory_and_regular_files() {
         .expect("lookup symbolic link")
         .expect("symbolic link exists");
     let symlink_inode = filesystem
-        .inode(symlink_entry.inode())
+        .load_inode_private(symlink_entry.inode())
         .expect("read symbolic link inode");
     assert_eq!(symlink_inode.kind(), InodeKind::Symlink);
     let mut target = [0; 32];
@@ -859,7 +860,7 @@ fn reads_linux_directory_and_regular_files() {
         .expect("lookup long symbolic link")
         .expect("long symbolic link exists");
     let long_symlink_inode = filesystem
-        .inode(long_symlink_entry.inode())
+        .load_inode_private(long_symlink_entry.inode())
         .expect("read long symbolic link inode");
     assert_eq!(long_symlink_inode.kind(), InodeKind::Symlink);
     let mut target = vec![0; long_symlink_inode.size() as usize];
@@ -969,7 +970,7 @@ fn reads_linux_inode_and_external_xattrs() {
         .expect("lookup corrupt xattr file")
         .expect("corrupt xattr file exists");
     let corrupt_inode = corrupt
-        .inode(corrupt_entry.inode())
+        .load_inode_private(corrupt_entry.inode())
         .expect("read corrupt xattr inode");
     assert!(matches!(
         corrupt.read_xattrs(&corrupt_inode),
@@ -986,7 +987,9 @@ fn reads_linux_inode_and_external_xattrs() {
         .lookup(&root, "file")
         .expect("lookup xattr file")
         .expect("xattr file exists");
-    let inode = filesystem.inode(entry.inode()).expect("read xattr inode");
+    let inode = filesystem
+        .load_inode_private(entry.inode())
+        .expect("read xattr inode");
 
     let alpha = filesystem
         .get_xattr(&inode, Ext4XattrNamespace::User, b"alpha")
@@ -1039,7 +1042,7 @@ fn journals_inline_xattr_set_and_remove() {
         fs::read(&image).expect("read generated xattr write image"),
     ));
     let timestamp = Ext4Timestamp::new(1_720_000_000, 0);
-    let updated = {
+    let inode_number = {
         let mut filesystem =
             Ext4Filesystem::mount(device.clone()).expect("mount xattr write image");
         let root = filesystem.root_inode().expect("read root inode");
@@ -1048,9 +1051,9 @@ fn journals_inline_xattr_set_and_remove() {
             .expect("lookup xattr write file")
             .expect("xattr write file exists");
         let inode = filesystem
-            .inode(entry.inode())
+            .load_inode_private(entry.inode())
             .expect("read xattr write inode");
-        let updated = filesystem
+        filesystem
             .set_xattr(
                 &inode,
                 Ext4XattrNamespace::User,
@@ -1061,30 +1064,34 @@ fn journals_inline_xattr_set_and_remove() {
             .expect("set inline xattr");
         assert_eq!(
             filesystem
-                .get_xattr(&updated, Ext4XattrNamespace::User, b"codex")
+                .get_xattr(&inode, Ext4XattrNamespace::User, b"codex")
                 .expect("read updated xattr")
                 .as_deref(),
             Some(&b"inline-value"[..])
         );
         let committed_after_set = device.committed_bytes();
-        let unchanged = filesystem
+        let ctime_after_set = inode.ctime();
+        filesystem
             .set_xattr(
-                &updated,
+                &inode,
                 Ext4XattrNamespace::User,
                 b"codex",
                 b"inline-value",
                 Ext4Timestamp::new(1_720_000_001, 0),
             )
             .expect("setting the same xattr value is a no-op");
-        assert_eq!(unchanged.ctime(), updated.ctime());
+        assert_eq!(inode.ctime(), ctime_after_set);
         assert_eq!(device.committed_bytes(), committed_after_set);
-        unchanged
+        filesystem
+            .sync_filesystem()
+            .expect("persist inline xattr set");
+        inode.number()
     };
 
     {
         let filesystem = Ext4Filesystem::mount(device.clone()).expect("remount after xattr set");
         let persisted = filesystem
-            .inode(updated.number())
+            .load_inode_private(inode_number)
             .expect("read persisted xattr inode");
         assert_eq!(
             filesystem
@@ -1098,9 +1105,9 @@ fn journals_inline_xattr_set_and_remove() {
     {
         let mut filesystem = Ext4Filesystem::mount(device.clone()).expect("mount for xattr remove");
         let persisted = filesystem
-            .inode(updated.number())
+            .load_inode_private(inode_number)
             .expect("read xattr inode before remove");
-        let removed = filesystem
+        filesystem
             .remove_xattr(
                 &persisted,
                 Ext4XattrNamespace::User,
@@ -1110,10 +1117,13 @@ fn journals_inline_xattr_set_and_remove() {
             .expect("remove inline xattr");
         assert!(
             filesystem
-                .get_xattr(&removed, Ext4XattrNamespace::User, b"codex")
+                .get_xattr(&persisted, Ext4XattrNamespace::User, b"codex")
                 .expect("read removed xattr")
                 .is_none()
         );
+        filesystem
+            .sync_filesystem()
+            .expect("persist inline xattr removal");
     }
 
     let filesystem = Ext4Filesystem::mount(device).expect("remount after xattr remove");
@@ -1125,7 +1135,7 @@ fn journals_inline_xattr_set_and_remove() {
         .expect("lookup xattr file after remove")
         .expect("xattr file exists after remove");
     let inode = filesystem
-        .inode(entry.inode())
+        .load_inode_private(entry.inode())
         .expect("read xattr inode after remove");
     assert!(
         filesystem
@@ -1166,11 +1176,11 @@ fn journals_external_xattr_block_and_acl_round_trips() {
             .expect("lookup external xattr write file")
             .expect("external xattr write file exists");
         let inode = filesystem
-            .inode(entry.inode())
+            .load_inode_private(entry.inode())
             .expect("read external xattr write inode");
         let original_blocks = inode.blocks();
         let external_blocks = u64::from(filesystem.layout().block_size()) / 512;
-        let updated = filesystem
+        filesystem
             .set_xattr(
                 &inode,
                 Ext4XattrNamespace::User,
@@ -1179,17 +1189,17 @@ fn journals_external_xattr_block_and_acl_round_trips() {
                 Ext4Timestamp::new(1_720_000_010, 0),
             )
             .expect("set large xattr into external block");
-        assert_eq!(updated.blocks(), original_blocks + external_blocks);
+        assert_eq!(inode.blocks(), original_blocks + external_blocks);
         assert_eq!(
             filesystem
-                .get_xattr(&updated, Ext4XattrNamespace::User, b"large")
+                .get_xattr(&inode, Ext4XattrNamespace::User, b"large")
                 .expect("read external xattr")
                 .as_deref(),
             Some(large_value.as_slice())
         );
-        let updated = filesystem
+        filesystem
             .set_xattr(
-                &updated,
+                &inode,
                 Ext4XattrNamespace::PosixAclAccess,
                 b"",
                 &acl_value,
@@ -1198,18 +1208,21 @@ fn journals_external_xattr_block_and_acl_round_trips() {
             .expect("set opaque ACL xattr");
         assert_eq!(
             filesystem
-                .get_xattr(&updated, Ext4XattrNamespace::PosixAclAccess, b"")
+                .get_xattr(&inode, Ext4XattrNamespace::PosixAclAccess, b"")
                 .expect("read opaque ACL xattr")
                 .as_deref(),
             Some(acl_value.as_slice())
         );
-        (updated.number(), original_blocks, external_blocks)
+        filesystem
+            .sync_filesystem()
+            .expect("persist external xattr updates");
+        (inode.number(), original_blocks, external_blocks)
     };
 
     {
         let filesystem = Ext4Filesystem::mount(device.clone()).expect("remount external xattr");
         let persisted = filesystem
-            .inode(inode_number)
+            .load_inode_private(inode_number)
             .expect("read persisted external xattr inode");
         assert_eq!(persisted.blocks(), original_blocks + external_blocks);
         assert_eq!(
@@ -1232,9 +1245,9 @@ fn journals_external_xattr_block_and_acl_round_trips() {
         let mut filesystem =
             Ext4Filesystem::mount(device.clone()).expect("mount for external xattr remove");
         let persisted = filesystem
-            .inode(inode_number)
+            .load_inode_private(inode_number)
             .expect("read external xattr inode before remove");
-        let removed = filesystem
+        filesystem
             .remove_xattr(
                 &persisted,
                 Ext4XattrNamespace::User,
@@ -1242,34 +1255,37 @@ fn journals_external_xattr_block_and_acl_round_trips() {
                 Ext4Timestamp::new(1_720_000_012, 0),
             )
             .expect("remove large xattr");
-        assert_eq!(removed.blocks(), original_blocks);
+        assert_eq!(persisted.blocks(), original_blocks);
         assert_eq!(
             filesystem
-                .get_xattr(&removed, Ext4XattrNamespace::PosixAclAccess, b"")
+                .get_xattr(&persisted, Ext4XattrNamespace::PosixAclAccess, b"")
                 .expect("read remaining ACL xattr")
                 .as_deref(),
             Some(acl_value.as_slice())
         );
-        let removed = filesystem
+        filesystem
             .remove_xattr(
-                &removed,
+                &persisted,
                 Ext4XattrNamespace::PosixAclAccess,
                 b"",
                 Ext4Timestamp::new(1_720_000_013, 0),
             )
             .expect("remove ACL xattr and release external block");
-        assert_eq!(removed.blocks(), original_blocks);
+        assert_eq!(persisted.blocks(), original_blocks);
         assert!(
             filesystem
-                .get_xattr(&removed, Ext4XattrNamespace::User, b"large")
+                .get_xattr(&persisted, Ext4XattrNamespace::User, b"large")
                 .expect("read missing large xattr")
                 .is_none()
         );
+        filesystem
+            .sync_filesystem()
+            .expect("persist external xattr removals");
     }
 
     let filesystem = Ext4Filesystem::mount(device).expect("remount after external xattr remove");
     let inode = filesystem
-        .inode(inode_number)
+        .load_inode_private(inode_number)
         .expect("read inode after external xattr remove");
     assert_eq!(inode.blocks(), original_blocks);
 
@@ -1315,9 +1331,9 @@ fn unlinks_and_rename_overwrites_external_xattr_inodes() {
             .expect("lookup external xattr unlink target")
             .expect("external xattr unlink target exists");
         let unlink_inode = filesystem
-            .inode(unlink_entry.inode())
+            .load_inode_private(unlink_entry.inode())
             .expect("read external xattr unlink target inode");
-        let unlink_inode = filesystem
+        filesystem
             .set_xattr(
                 &unlink_inode,
                 Ext4XattrNamespace::User,
@@ -1334,25 +1350,32 @@ fn unlinks_and_rename_overwrites_external_xattr_inodes() {
             Some(large_value.as_slice())
         );
 
-        let removed = filesystem
-            .unlink(&root, b"unlink-me", Ext4Timestamp::new(1_720_000_031, 0))
+        filesystem
+            .unlink(
+                &root,
+                b"unlink-me",
+                &unlink_inode,
+                Ext4Timestamp::new(1_720_000_031, 0),
+            )
             .expect("unlink inode with external xattr block");
-        let root = removed.parent().clone();
         assert!(
             filesystem
                 .lookup(&root, "unlink-me")
                 .expect("lookup removed external xattr file")
                 .is_none()
         );
+        filesystem
+            .evict_unlinked_inode(&unlink_inode, Ext4Timestamp::new(1_720_000_031, 1))
+            .expect("evict unlinked inode with external xattr block");
 
         let overwrite_entry = filesystem
             .lookup(&root, "overwrite-me")
             .expect("lookup external xattr rename target")
             .expect("external xattr rename target exists");
         let overwrite_inode = filesystem
-            .inode(overwrite_entry.inode())
+            .load_inode_private(overwrite_entry.inode())
             .expect("read external xattr rename target inode");
-        let overwrite_inode = filesystem
+        filesystem
             .set_xattr(
                 &overwrite_inode,
                 Ext4XattrNamespace::User,
@@ -1369,28 +1392,36 @@ fn unlinks_and_rename_overwrites_external_xattr_inodes() {
             Some(large_value.as_slice())
         );
 
-        let renamed = filesystem
+        let replacement_entry = filesystem
+            .lookup(&root, "replacement")
+            .expect("lookup rename source")
+            .expect("rename source exists");
+        let replacement_inode = filesystem
+            .load_inode_private(replacement_entry.inode())
+            .expect("read rename source inode");
+        filesystem
             .rename(
                 &root,
                 b"replacement",
+                &replacement_inode,
                 &root,
                 b"overwrite-me",
+                Some(&overwrite_inode),
                 Ext4Timestamp::new(1_720_000_033, 0),
             )
             .expect("rename over inode with external xattr block");
-        let root = renamed.target_parent();
         assert!(
             filesystem
-                .lookup(root, "replacement")
+                .lookup(&root, "replacement")
                 .expect("lookup moved-away replacement name")
                 .is_none()
         );
         let moved_entry = filesystem
-            .lookup(root, "overwrite-me")
+            .lookup(&root, "overwrite-me")
             .expect("lookup rename replacement")
             .expect("rename replacement exists");
         let moved_inode = filesystem
-            .inode(moved_entry.inode())
+            .load_inode_private(moved_entry.inode())
             .expect("read rename replacement inode");
         assert!(
             filesystem
@@ -1398,6 +1429,12 @@ fn unlinks_and_rename_overwrites_external_xattr_inodes() {
                 .expect("read replacement xattr")
                 .is_none()
         );
+        filesystem
+            .evict_unlinked_inode(&overwrite_inode, Ext4Timestamp::new(1_720_000_033, 1))
+            .expect("evict overwritten inode with external xattr block");
+        filesystem
+            .sync_filesystem()
+            .expect("persist external xattr namespace mutations");
     }
 
     fs::write(&image, device.committed_bytes()).expect("persist mutated external xattr image");
@@ -1546,7 +1583,7 @@ fn reads_linux_legacy_indirect_file_blocks() {
         .expect("lookup legacy indirect file")
         .expect("legacy indirect file exists");
     let inode = filesystem
-        .inode(entry.inode())
+        .load_inode_private(entry.inode())
         .expect("read legacy indirect inode");
     assert_eq!(inode.flags() & 0x0008_0000, 0);
 
@@ -1653,10 +1690,10 @@ fn rejects_public_access_to_reserved_journal_inode() {
     let bytes = fs::read(&image).expect("read generated ext4 image");
     let filesystem = Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes)))
         .expect("mount generated Linux ext4 image");
-    assert_eq!(
-        filesystem.inode(InodeNumber::new(8)),
+    assert!(matches!(
+        filesystem.load_inode_private(InodeNumber::new(8)),
         Err(Ext4Error::Unsupported(UnsupportedKind::ReservedInode))
-    );
+    ));
     fs::remove_file(image).expect("remove generated image");
 }
 
@@ -1687,7 +1724,9 @@ fn reads_linux_htree_directory() {
         .lookup(&root, "big")
         .expect("lookup big")
         .expect("big exists");
-    let big = filesystem.inode(big_entry.inode()).expect("read big inode");
+    let big = filesystem
+        .load_inode_private(big_entry.inode())
+        .expect("read big inode");
     assert_ne!(big.flags() & 0x0000_1000, 0);
 
     let entries = filesystem.read_dir(&big).expect("read htree directory");
@@ -1741,7 +1780,7 @@ fn reads_linux_htree_directory() {
         .expect("lookup corrupt big")
         .expect("corrupt big exists");
     let corrupt_big = corrupt
-        .inode(corrupt_big_entry.inode())
+        .load_inode_private(corrupt_big_entry.inode())
         .expect("read corrupt big inode");
     assert!(matches!(
         corrupt.read_dir(&corrupt_big),
@@ -1954,7 +1993,7 @@ fn journaled_update_image_bytes(
         .expect("lookup journaled file")
         .expect("journaled file exists");
     let inode = filesystem
-        .inode(entry.inode())
+        .load_inode_private(entry.inode())
         .expect("read journaled file inode");
 
     let mut targets = Vec::new();
@@ -2215,7 +2254,7 @@ fn legacy_indirect_inode_from_image(bytes: Vec<u8>, name: &str) -> (Ext4Filesyst
         .expect("lookup legacy indirect file")
         .expect("legacy indirect file exists");
     let inode = filesystem
-        .inode(entry.inode())
+        .load_inode_private(entry.inode())
         .expect("read legacy indirect inode");
     (filesystem, inode)
 }

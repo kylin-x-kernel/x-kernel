@@ -1030,6 +1030,7 @@ impl AddressSpaceOperations for EmptyAddressSpaceOperations {
 mod tests {
     use alloc::{
         sync::{Arc, Weak},
+        vec,
         vec::Vec,
     };
 
@@ -1216,5 +1217,79 @@ mod tests {
         assert_eq!(inode.size(), 0);
         assert_eq!(address_space.nrpages(), 0);
         assert_eq!(*notifier.observed_sizes.lock(), [0, 0]);
+    }
+
+    #[def_test]
+    fn truncate_shrink_then_regrow_does_not_reveal_discarded_cache() {
+        let old_len = (PAGE_SIZE_4K * 2) as u64;
+        let inode = VfsInode::new_file_with_address_space_and_flags(
+            Arc::new(TruncateOps),
+            NodeFlags::ALWAYS_CACHE,
+            VfsInodeInit::new(
+                2,
+                old_len,
+                Umode::new(NodeType::RegularFile, NodePermission::default()),
+            ),
+        );
+        let address_space = inode.address_space();
+        let stale = vec![0x5a; PAGE_SIZE_4K];
+        address_space
+            .page_cache
+            .filemap_add_folio(0, 0, &stale)
+            .expect("cache first page");
+        address_space
+            .page_cache
+            .filemap_add_folio(1, 0, &stale)
+            .expect("cache second page");
+
+        inode.set_len(0).expect("shrink succeeds");
+        assert_eq!(inode.size(), 0);
+        assert_eq!(address_space.nrpages(), 0);
+
+        inode.set_len(old_len).expect("regrow succeeds");
+        assert_eq!(inode.size(), old_len);
+        assert_eq!(address_space.nrpages(), 0);
+        address_space
+            .with_folio_or_create(0, |folio| {
+                assert!(folio.data().iter().all(|byte| *byte == 0));
+                Ok(())
+            })
+            .expect("read regrown sparse page");
+    }
+
+    #[def_test]
+    fn truncate_partial_page_growth_zeros_cached_old_eof() {
+        let old_len = (PAGE_SIZE_4K / 4) as u64;
+        let new_len = (PAGE_SIZE_4K / 2) as u64;
+        let inode = VfsInode::new_file_with_address_space_and_flags(
+            Arc::new(TruncateOps),
+            NodeFlags::ALWAYS_CACHE,
+            VfsInodeInit::new(
+                3,
+                old_len,
+                Umode::new(NodeType::RegularFile, NodePermission::default()),
+            ),
+        );
+        let address_space = inode.address_space();
+        let stale = vec![0x5a; PAGE_SIZE_4K];
+        address_space
+            .page_cache
+            .filemap_add_folio(0, 0, &stale)
+            .expect("cache partial EOF page");
+
+        inode
+            .set_len(new_len)
+            .expect("partial-page growth succeeds");
+
+        assert_eq!(inode.size(), new_len);
+        address_space.with_folio(0, |folio| {
+            let data = folio.expect("EOF folio remains cached").data();
+            assert!(data[..old_len as usize].iter().all(|byte| *byte == 0x5a));
+            assert!(
+                data[old_len as usize..new_len as usize]
+                    .iter()
+                    .all(|byte| *byte == 0)
+            );
+        });
     }
 }

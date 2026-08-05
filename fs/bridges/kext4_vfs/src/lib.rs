@@ -6,7 +6,10 @@
 //!
 //! The crate adapts KExt4 superblock, inode, file, address-space, and
 //! extended-attribute operations to KVFS and provides the KExt4 implementation
-//! of [`fs_block::RootFileSystem`] when selected by Kconfig.
+//! [`fs_block::RootFileSystem`] when selected by Kconfig. The KVFS inode cache
+//! is the sole resident identity table. Each cached VFS inode composes one
+//! `kext4::Ext4Inode` private state object; KExt4 has no second inode-number
+//! cache or resident lifecycle.
 
 #![cfg_attr(any(not(test), doc), no_std)]
 

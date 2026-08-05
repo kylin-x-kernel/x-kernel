@@ -24,35 +24,6 @@ use crate::{
 
 const EXT4_LINK_MAX: u16 = 65_000;
 
-/// Handle for the three-phase eviction protocol.
-///
-/// Phase A (`eviction_prepare`) adds the inode to the orphan list and
-/// releases the external xattr block.  The extent tree is deliberately
-/// **not** truncated in this phase — the extent tree itself serves as the
-/// persistent record of blocks to free, so that a crash between phases does
-/// not leak physical blocks.
-///
-/// Phase B (`eviction_release_batch`) atomically truncates the extent tree
-/// in batches, each in a fresh journal transaction.  Each batch both removes
-/// a portion of the extent mappings and releases the corresponding physical
-/// blocks in a single atomic transaction.  The `KExt4Core` lock is released
-/// between batches to prevent watchdog false positives.  If a crash occurs
-/// mid-batch, the orphan inode recovery (`evict_zero_link_inode`) will
-/// find the remaining extent tree and complete the truncation.
-///
-/// Phase C (`eviction_finish`) updates the inode metadata, removes the inode
-/// from the orphan list, and releases the inode table slot.
-pub struct EvictionHandle {
-    truncated_inode: Ext4Inode,
-    timestamp: Ext4Timestamp,
-}
-
-/// Credit ceiling for the Phase A eviction prepare transaction.
-///
-/// Phase A only adds the orphan record and releases the external xattr block
-/// (if present).  The extent tree is not touched in this phase.
-const EVICTION_PREPARE_CREDITS: u32 = 512;
-
 /// Credit total for the Phase C eviction finish transaction.
 ///
 /// `update_unlinked_inode_metadata` (1) + `remove_orphan` (2) +
@@ -181,6 +152,13 @@ impl Ext4Credits {
         Self::ORPHAN_LINK_UPDATE + Self::INODE_UPDATE
     }
 
+    fn eviction_prepare(inode: &Ext4Inode) -> Ext4Result<JournalCredits> {
+        Self::ORPHAN_LINK_UPDATE
+            .checked_add(external_xattr_eviction_credits(inode))
+            .map(Self::credits)
+            .ok_or(Ext4Error::Overflow)
+    }
+
     fn final_eviction(
         filesystem: &Ext4Filesystem,
         inode: &Ext4Inode,
@@ -197,105 +175,6 @@ impl Ext4Credits {
             .and_then(|credits| credits.checked_add(extent_delete))
             .ok_or(Ext4Error::Overflow)?;
         Ok(Self::credits(credits))
-    }
-}
-
-/// Result of creating a namespace entry in one parent directory.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Ext4NamespaceCreate {
-    parent: Ext4Inode,
-    child: Ext4Inode,
-}
-
-impl Ext4NamespaceCreate {
-    /// Returns the updated parent directory inode.
-    pub const fn parent(&self) -> &Ext4Inode {
-        &self.parent
-    }
-
-    /// Returns the newly allocated child inode.
-    pub const fn child(&self) -> &Ext4Inode {
-        &self.child
-    }
-}
-
-/// Result of removing one namespace entry from a parent directory.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Ext4NamespaceRemove {
-    parent: Ext4Inode,
-    removed: Ext4Inode,
-    removed_file_type: DirectoryFileType,
-}
-
-impl Ext4NamespaceRemove {
-    /// Returns the updated parent directory inode.
-    pub const fn parent(&self) -> &Ext4Inode {
-        &self.parent
-    }
-
-    /// Returns the inode number that was unlinked from the directory.
-    pub const fn removed_inode(&self) -> InodeNumber {
-        self.removed.number()
-    }
-
-    /// Returns the removed inode after its link-count update.
-    pub const fn removed(&self) -> &Ext4Inode {
-        &self.removed
-    }
-
-    /// Returns the removed directory entry file type.
-    pub const fn removed_file_type(&self) -> DirectoryFileType {
-        self.removed_file_type
-    }
-}
-
-/// Result of linking an existing inode into one parent directory.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Ext4NamespaceLink {
-    parent: Ext4Inode,
-    target: Ext4Inode,
-}
-
-impl Ext4NamespaceLink {
-    /// Returns the updated parent directory inode.
-    pub const fn parent(&self) -> &Ext4Inode {
-        &self.parent
-    }
-
-    /// Returns the target inode after its link count update.
-    pub const fn target(&self) -> &Ext4Inode {
-        &self.target
-    }
-}
-
-/// Result of renaming one namespace entry.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Ext4NamespaceRename {
-    source_parent: Ext4Inode,
-    target_parent: Ext4Inode,
-    moved: Ext4Inode,
-    replaced: Option<Ext4Inode>,
-}
-
-impl Ext4NamespaceRename {
-    /// Returns the updated source parent directory inode.
-    pub const fn source_parent(&self) -> &Ext4Inode {
-        &self.source_parent
-    }
-
-    /// Returns the updated target parent directory inode.
-    pub const fn target_parent(&self) -> &Ext4Inode {
-        &self.target_parent
-    }
-
-    /// Returns the moved inode after any directory-parent update.
-    pub const fn moved(&self) -> &Ext4Inode {
-        &self.moved
-    }
-
-    /// Returns the overwritten inode after its link-count update, if any.
-    pub const fn replaced(&self) -> Option<&Ext4Inode> {
-        self.replaced.as_ref()
     }
 }
 
@@ -316,7 +195,7 @@ impl Ext4Filesystem {
         uid: u32,
         gid: u32,
         timestamp: Ext4Timestamp,
-    ) -> Ext4Result<Ext4NamespaceCreate> {
+    ) -> Ext4Result<Ext4Inode> {
         self.ensure_namespace_create_supported(parent, name)?;
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
@@ -349,7 +228,7 @@ impl Ext4Filesystem {
         uid: u32,
         gid: u32,
         timestamp: Ext4Timestamp,
-    ) -> Ext4Result<Ext4NamespaceCreate> {
+    ) -> Ext4Result<Ext4Inode> {
         self.ensure_namespace_create_supported(parent, name)?;
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
@@ -387,7 +266,7 @@ impl Ext4Filesystem {
         uid: u32,
         gid: u32,
         timestamp: Ext4Timestamp,
-    ) -> Ext4Result<Ext4NamespaceCreate> {
+    ) -> Ext4Result<Ext4Inode> {
         validate_symlink_target(target)?;
         if target.len() < disk_inode::INODE_BLOCK_BYTES {
             return self.create_fast_symlink(parent, name, target, uid, gid, timestamp);
@@ -404,7 +283,7 @@ impl Ext4Filesystem {
         uid: u32,
         gid: u32,
         timestamp: Ext4Timestamp,
-    ) -> Ext4Result<Ext4NamespaceCreate> {
+    ) -> Ext4Result<Ext4Inode> {
         let initialization = InodeInitialization::fast_symlink(target, uid, gid)?
             .with_timestamp_seconds(timestamp_seconds_u32(timestamp)?);
         self.create_initialized_child(
@@ -425,7 +304,7 @@ impl Ext4Filesystem {
         uid: u32,
         gid: u32,
         timestamp: Ext4Timestamp,
-    ) -> Ext4Result<Ext4NamespaceCreate> {
+    ) -> Ext4Result<Ext4Inode> {
         validate_symlink_target(target)?;
         let block_size =
             usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
@@ -469,7 +348,7 @@ impl Ext4Filesystem {
         uid: u32,
         gid: u32,
         timestamp: Ext4Timestamp,
-    ) -> Ext4Result<Ext4NamespaceCreate> {
+    ) -> Ext4Result<Ext4Inode> {
         let (kind, device) = special;
         let initialization = InodeInitialization::special(kind, permissions, device, uid, gid)?
             .with_timestamp_seconds(timestamp_seconds_u32(timestamp)?);
@@ -484,7 +363,7 @@ impl Ext4Filesystem {
         name: &[u8],
         target: &Ext4Inode,
         timestamp: Ext4Timestamp,
-    ) -> Ext4Result<Ext4NamespaceLink> {
+    ) -> Ext4Result<()> {
         self.ensure_namespace_mutation_supported(parent, name)?;
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
@@ -509,12 +388,18 @@ impl Ext4Filesystem {
     }
 
     /// Unlinks a non-directory child from a linear ext4 directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed namespace, ownership, format, journal, or I/O error.
+    /// The supplied child must match the directory entry selected by `name`.
     pub fn unlink(
         &mut self,
         parent: &Ext4Inode,
         name: &[u8],
+        child: &Ext4Inode,
         timestamp: Ext4Timestamp,
-    ) -> Ext4Result<Ext4NamespaceRemove> {
+    ) -> Ext4Result<()> {
         self.ensure_namespace_mutation_supported(parent, name)?;
         let entry = self
             .lookup_bytes(parent, name)?
@@ -522,28 +407,36 @@ impl Ext4Filesystem {
         if entry.file_type() == DirectoryFileType::Directory {
             return Err(Ext4Error::Unsupported(UnsupportedKind::InodeKind));
         }
-        let child = self.inode(entry.inode())?;
+        if entry.inode() != child.number() {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
+        }
         if child.kind() == InodeKind::Directory {
             return Err(Ext4Error::Unsupported(UnsupportedKind::InodeKind));
         }
-        self.ensure_unlinked_inode_eviction_supported(&child)?;
+        self.ensure_unlinked_inode_eviction_supported(child)?;
         self.validate_inode_timestamp_update(parent, timestamp)?;
-        self.validate_inode_timestamp_update(&child, timestamp)?;
+        self.validate_inode_timestamp_update(child, timestamp)?;
 
-        let credits = Ext4Credits::unlink(self, parent, &child);
+        let credits = Ext4Credits::unlink(self, parent, child);
         let journal = self.namei_metadata_journal(credits)?;
         let mut handle = journal.begin(credits)?;
-        let result = self.unlink_in_transaction(parent, name, &child, timestamp, &mut handle);
+        let result = self.unlink_in_transaction(parent, name, child, timestamp, &mut handle);
         self.complete_metadata_mutation(handle, result)
     }
 
     /// Removes an empty subdirectory from a linear ext4 directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed namespace, ownership, format, journal, or I/O error.
+    /// The supplied child must match the directory entry selected by `name`.
     pub fn remove_directory(
         &mut self,
         parent: &Ext4Inode,
         name: &[u8],
+        child: &Ext4Inode,
         timestamp: Ext4Timestamp,
-    ) -> Ext4Result<Ext4NamespaceRemove> {
+    ) -> Ext4Result<()> {
         self.ensure_namespace_mutation_supported(parent, name)?;
         let entry = self
             .lookup_bytes(parent, name)?
@@ -551,80 +444,86 @@ impl Ext4Filesystem {
         if entry.file_type() != DirectoryFileType::Directory {
             return Err(Ext4Error::Unsupported(UnsupportedKind::InodeKind));
         }
-        let child = self.inode(entry.inode())?;
+        if entry.inode() != child.number() {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
+        }
         if child.kind() != InodeKind::Directory {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
         }
-        self.ensure_empty_linear_directory(parent, &child)?;
-        self.ensure_unlinked_inode_eviction_supported(&child)?;
+        self.ensure_empty_linear_directory(parent, child)?;
+        self.ensure_unlinked_inode_eviction_supported(child)?;
         self.validate_inode_timestamp_update(parent, timestamp)?;
-        self.validate_inode_timestamp_update(&child, timestamp)?;
+        self.validate_inode_timestamp_update(child, timestamp)?;
 
-        let credits = Ext4Credits::rmdir(self, parent, &child);
+        let credits = Ext4Credits::rmdir(self, parent, child);
         let journal = self.namei_metadata_journal(credits)?;
         let mut handle = journal.begin(credits)?;
         let result =
-            self.remove_directory_in_transaction(parent, name, &child, timestamp, &mut handle);
+            self.remove_directory_in_transaction(parent, name, child, timestamp, &mut handle);
         self.complete_metadata_mutation(handle, result)
     }
 
     /// Renames a child between supported linear ext4 directories.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed namespace, ownership, format, journal, or I/O error.
+    /// The supplied inodes must be the VFS-resident participants matching the
+    /// source and target directory entries.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "rename receives the complete set of VFS-locked namespace participants"
+    )]
     pub fn rename(
         &mut self,
         source_parent: &Ext4Inode,
         source_name: &[u8],
+        moved: &Ext4Inode,
         target_parent: &Ext4Inode,
         target_name: &[u8],
+        replaced: Option<&Ext4Inode>,
         timestamp: Ext4Timestamp,
-    ) -> Ext4Result<Ext4NamespaceRename> {
+    ) -> Ext4Result<()> {
         self.ensure_namespace_mutation_supported(source_parent, source_name)?;
         self.ensure_namespace_mutation_supported(target_parent, target_name)?;
         let same_parent = source_parent.number() == target_parent.number();
         if same_parent && source_name == target_name {
-            let moved = self
+            let entry = self
                 .lookup_bytes(source_parent, source_name)?
-                .ok_or(Ext4Error::NotFound)
-                .and_then(|entry| self.inode(entry.inode()))?;
-            return Ok(Ext4NamespaceRename {
-                source_parent: source_parent.clone(),
-                target_parent: target_parent.clone(),
-                moved,
-                replaced: None,
-            });
+                .ok_or(Ext4Error::NotFound)?;
+            if entry.inode() != moved.number() {
+                return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
+            }
+            return Ok(());
         }
 
         let source_entry = self
             .lookup_bytes(source_parent, source_name)?
             .ok_or(Ext4Error::NotFound)?;
-        let moved = self.inode(source_entry.inode())?;
+        if source_entry.inode() != moved.number() {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
+        }
         let target_entry = self.lookup_bytes(target_parent, target_name)?;
-        let target_inode = target_entry
-            .as_ref()
-            .map(|entry| self.inode(entry.inode()))
-            .transpose()?;
+        match (target_entry.as_ref(), replaced) {
+            (None, None) => {}
+            (Some(entry), Some(replaced)) if entry.inode() == replaced.number() => {}
+            _ => return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry)),
+        }
 
-        if target_inode
-            .as_ref()
-            .is_some_and(|target| target.number() == moved.number())
-        {
-            return Ok(Ext4NamespaceRename {
-                source_parent: source_parent.clone(),
-                target_parent: target_parent.clone(),
-                moved,
-                replaced: None,
-            });
+        if replaced.is_some_and(|target| target.number() == moved.number()) {
+            return Ok(());
         }
 
         self.validate_inode_timestamp_update(source_parent, timestamp)?;
         if !same_parent {
             self.validate_inode_timestamp_update(target_parent, timestamp)?;
         }
-        self.validate_inode_timestamp_update(&moved, timestamp)?;
-        if let Some(target) = target_inode.as_ref() {
+        self.validate_inode_timestamp_update(moved, timestamp)?;
+        if let Some(target) = replaced {
             self.validate_inode_timestamp_update(target, timestamp)?;
         }
-        self.ensure_rename_type_supported(&moved, target_inode.as_ref())?;
-        if let Some(target) = target_inode.as_ref() {
+        self.ensure_rename_type_supported(moved, replaced)?;
+        if let Some(target) = replaced {
             if target.kind() == InodeKind::Directory {
                 self.ensure_empty_linear_directory(target_parent, target)?;
                 self.ensure_unlinked_inode_eviction_supported(target)?;
@@ -632,14 +531,12 @@ impl Ext4Filesystem {
                 self.ensure_unlinked_inode_eviction_supported(target)?;
             }
         }
-        if target_inode.is_none() {
+        if replaced.is_none() {
             self.ensure_namespace_insert_capacity(target_parent, target_name, 0)?;
         }
         if moved.kind() == InodeKind::Directory
             && !same_parent
-            && target_inode
-                .as_ref()
-                .is_none_or(|target| target.kind() != InodeKind::Directory)
+            && replaced.is_none_or(|target| target.kind() != InodeKind::Directory)
         {
             target_parent
                 .links_count()
@@ -647,13 +544,7 @@ impl Ext4Filesystem {
                 .filter(|links| *links <= EXT4_LINK_MAX)
                 .ok_or(Ext4Error::Unsupported(UnsupportedKind::LinkCountLimit))?;
         }
-        let credits = Ext4Credits::rename(
-            self,
-            source_parent,
-            target_parent,
-            &moved,
-            target_inode.as_ref(),
-        );
+        let credits = Ext4Credits::rename(self, source_parent, target_parent, moved, replaced);
         let journal = self.namei_metadata_journal(credits)?;
         let mut handle = journal.begin(credits)?;
         let result = self.rename_in_transaction(
@@ -661,8 +552,8 @@ impl Ext4Filesystem {
             source_name,
             target_parent,
             target_name,
-            &moved,
-            target_inode.as_ref(),
+            moved,
+            replaced,
             timestamp,
             &mut handle,
         );
@@ -679,7 +570,7 @@ impl Ext4Filesystem {
         gid: u32,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4NamespaceCreate> {
+    ) -> Ext4Result<Ext4Inode> {
         let timestamp_seconds = timestamp_seconds_u32(timestamp)?;
         let allocation = self.allocate_named_inode(
             Some(parent.number()),
@@ -688,8 +579,8 @@ impl Ext4Filesystem {
                 .with_timestamp_seconds(timestamp_seconds),
             handle,
         )?;
-        let child = self.internal_inode(allocation.inode())?;
-        let parent = self.insert_directory_entry(
+        let child = self.internal_iget(allocation.inode())?;
+        self.insert_directory_entry(
             parent,
             name,
             child.number(),
@@ -697,8 +588,7 @@ impl Ext4Filesystem {
             timestamp,
             handle,
         )?;
-
-        Ok(Ext4NamespaceCreate { parent, child })
+        Ok(child)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -711,7 +601,7 @@ impl Ext4Filesystem {
         gid: u32,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4NamespaceCreate> {
+    ) -> Ext4Result<Ext4Inode> {
         let timestamp_seconds = timestamp_seconds_u32(timestamp)?;
         let allocation = self.allocate_named_inode(
             Some(parent.number()),
@@ -720,9 +610,9 @@ impl Ext4Filesystem {
                 .with_timestamp_seconds(timestamp_seconds),
             handle,
         )?;
-        let mut child = self.internal_inode(allocation.inode())?;
-        child = self.initialize_directory_data_block(&child, parent.number(), timestamp, handle)?;
-        let mut parent = self.insert_directory_entry(
+        let child = self.internal_iget(allocation.inode())?;
+        self.initialize_directory_data_block(&child, parent.number(), timestamp, handle)?;
+        self.insert_directory_entry(
             parent,
             name,
             child.number(),
@@ -734,10 +624,8 @@ impl Ext4Filesystem {
             .links_count()
             .checked_add(1)
             .ok_or(Ext4Error::Overflow)?;
-        parent =
-            self.update_inode_links_count_metadata(&parent, parent_links, timestamp, handle)?;
-
-        Ok(Ext4NamespaceCreate { parent, child })
+        self.update_inode_links_count_metadata(parent, parent_links, timestamp, handle)?;
+        Ok(child)
     }
 
     fn create_initialized_child(
@@ -747,7 +635,7 @@ impl Ext4Filesystem {
         initialization: InodeInitialization,
         file_type: DirectoryFileType,
         timestamp: Ext4Timestamp,
-    ) -> Ext4Result<Ext4NamespaceCreate> {
+    ) -> Ext4Result<Ext4Inode> {
         self.ensure_namespace_create_supported(parent, name)?;
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
@@ -777,19 +665,12 @@ impl Ext4Filesystem {
         file_type: DirectoryFileType,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4NamespaceCreate> {
+    ) -> Ext4Result<Ext4Inode> {
         let allocation =
             self.allocate_named_inode(Some(parent.number()), name, initialization, handle)?;
-        let child = self.internal_inode(allocation.inode())?;
-        let parent = self.insert_directory_entry(
-            parent,
-            name,
-            child.number(),
-            file_type,
-            timestamp,
-            handle,
-        )?;
-        Ok(Ext4NamespaceCreate { parent, child })
+        let child = self.internal_iget(allocation.inode())?;
+        self.insert_directory_entry(parent, name, child.number(), file_type, timestamp, handle)?;
+        Ok(child)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -802,7 +683,7 @@ impl Ext4Filesystem {
         gid: u32,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4NamespaceCreate> {
+    ) -> Ext4Result<Ext4Inode> {
         let timestamp_seconds = timestamp_seconds_u32(timestamp)?;
         let allocation = self.allocate_named_inode(
             Some(parent.number()),
@@ -811,9 +692,9 @@ impl Ext4Filesystem {
                 .with_timestamp_seconds(timestamp_seconds),
             handle,
         )?;
-        let child = self.internal_inode(allocation.inode())?;
-        let child = self.initialize_symlink_data_block(&child, target, handle)?;
-        let parent = self.insert_directory_entry(
+        let child = self.internal_iget(allocation.inode())?;
+        self.initialize_symlink_data_block(&child, target, handle)?;
+        self.insert_directory_entry(
             parent,
             name,
             child.number(),
@@ -821,7 +702,7 @@ impl Ext4Filesystem {
             timestamp,
             handle,
         )?;
-        Ok(Ext4NamespaceCreate { parent, child })
+        Ok(child)
     }
 
     fn link_in_transaction(
@@ -832,22 +713,13 @@ impl Ext4Filesystem {
         file_type: DirectoryFileType,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4NamespaceLink> {
+    ) -> Ext4Result<()> {
         let links_count = target
             .links_count()
             .checked_add(1)
             .ok_or(Ext4Error::Unsupported(UnsupportedKind::LinkCountLimit))?;
-        let target =
-            self.update_inode_links_count_ctime_metadata(target, links_count, timestamp, handle)?;
-        let parent = self.insert_directory_entry(
-            parent,
-            name,
-            target.number(),
-            file_type,
-            timestamp,
-            handle,
-        )?;
-        Ok(Ext4NamespaceLink { parent, target })
+        self.update_inode_links_count_ctime_metadata(target, links_count, timestamp, handle)?;
+        self.insert_directory_entry(parent, name, target.number(), file_type, timestamp, handle)
     }
 
     fn unlink_in_transaction(
@@ -857,18 +729,12 @@ impl Ext4Filesystem {
         child: &Ext4Inode,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4NamespaceRemove> {
+    ) -> Ext4Result<()> {
         let removed = self.remove_directory_entry(parent, name, timestamp, handle)?;
         if removed.inode != child.number() {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
         }
-        let removed_inode = self.finish_removed_inode(child, None, timestamp, handle)?;
-
-        Ok(Ext4NamespaceRemove {
-            parent: removed.parent,
-            removed: removed_inode,
-            removed_file_type: removed.file_type,
-        })
+        self.finish_removed_inode(child, None, timestamp, handle)
     }
 
     fn remove_directory_in_transaction(
@@ -878,29 +744,17 @@ impl Ext4Filesystem {
         child: &Ext4Inode,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4NamespaceRemove> {
+    ) -> Ext4Result<()> {
         let removed = self.remove_directory_entry(parent, name, timestamp, handle)?;
         if removed.inode != child.number() || removed.file_type != DirectoryFileType::Directory {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
         }
-        let parent_links = removed
-            .parent
+        let parent_links = parent
             .links_count()
             .checked_sub(1)
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidInode))?;
-        let parent = self.update_inode_links_count_metadata(
-            &removed.parent,
-            parent_links,
-            timestamp,
-            handle,
-        )?;
-        let removed_inode = self.finish_removed_inode(child, Some(0), timestamp, handle)?;
-
-        Ok(Ext4NamespaceRemove {
-            parent,
-            removed: removed_inode,
-            removed_file_type: removed.file_type,
-        })
+        self.update_inode_links_count_metadata(parent, parent_links, timestamp, handle)?;
+        self.finish_removed_inode(child, Some(0), timestamp, handle)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -914,152 +768,47 @@ impl Ext4Filesystem {
         replaced: Option<&Ext4Inode>,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4NamespaceRename> {
+    ) -> Ext4Result<()> {
         let same_parent = source_parent.number() == target_parent.number();
         let file_type = directory_file_type_for_inode_kind(moved.kind());
-        let (source, target) = self.rename_prepare(
-            source_parent,
-            source_name,
-            target_parent,
-            target_name,
-            moved,
-            replaced,
-            file_type,
-        );
-
-        let (mut target_parent_current, replaced_entry) =
-            self.setent_or_add_entry(&source, &target, timestamp, handle)?;
-        let mut source_parent_current = if same_parent {
-            target_parent_current.clone()
-        } else {
-            source_parent.clone()
-        };
-        let moved = self.update_inode_ctime_metadata(source.inode, timestamp, handle)?;
-
-        let removed_source =
-            self.rename_delete_old(&source, &source_parent_current, timestamp, handle)?;
-        source_parent_current = removed_source.parent;
-        if same_parent {
-            target_parent_current = source_parent_current.clone();
-        }
-
-        let (source_parent_current, target_parent_current, moved) = self.rename_dir_finish(
-            source_parent_current,
-            target_parent_current,
-            &moved,
-            target.parent,
-            target.replaced,
-            same_parent,
-            timestamp,
-            handle,
-        )?;
-        let replaced = target
-            .replaced
-            .map(|replaced| self.finish_replaced_inode(replaced, replaced_entry, timestamp, handle))
-            .transpose()?;
-
-        Ok(Ext4NamespaceRename {
-            source_parent: source_parent_current,
-            target_parent: target_parent_current,
-            moved,
-            replaced,
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn rename_prepare<'a>(
-        &self,
-        source_parent: &'a Ext4Inode,
-        source_name: &'a [u8],
-        target_parent: &'a Ext4Inode,
-        target_name: &'a [u8],
-        moved: &'a Ext4Inode,
-        replaced: Option<&'a Ext4Inode>,
-        file_type: DirectoryFileType,
-    ) -> (RenameEntry<'a>, RenameTarget<'a>) {
-        (
-            RenameEntry {
-                parent: source_parent,
-                name: source_name,
-                inode: moved,
+        let replaced_entry = if let Some(replaced) = replaced {
+            let entry = self.replace_directory_entry(
+                target_parent,
+                target_name,
+                moved.number(),
                 file_type,
-            },
-            RenameTarget {
-                parent: target_parent,
-                name: target_name,
-                replaced,
-            },
-        )
-    }
-
-    fn setent_or_add_entry(
-        &mut self,
-        source: &RenameEntry<'_>,
-        target: &RenameTarget<'_>,
-        timestamp: Ext4Timestamp,
-        handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<(Ext4Inode, Option<ReplacedDirectoryEntry>)> {
-        let Some(replaced) = target.replaced else {
-            let parent = self.insert_directory_entry(
-                target.parent,
-                target.name,
-                source.inode.number(),
-                source.file_type,
                 timestamp,
                 handle,
             )?;
-            return Ok((parent, None));
+            if entry.inode != replaced.number()
+                || entry.file_type != directory_file_type_for_inode_kind(replaced.kind())
+            {
+                return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
+            }
+            Some(entry)
+        } else {
+            self.insert_directory_entry(
+                target_parent,
+                target_name,
+                moved.number(),
+                file_type,
+                timestamp,
+                handle,
+            )?;
+            None
         };
+        self.update_inode_ctime_metadata(moved, timestamp, handle)?;
 
-        let replaced_entry = self.replace_directory_entry(
-            target.parent,
-            target.name,
-            source.inode.number(),
-            source.file_type,
-            timestamp,
-            handle,
-        )?;
-        if replaced_entry.inode != replaced.number()
-            || replaced_entry.file_type != directory_file_type_for_inode_kind(replaced.kind())
-        {
+        let removed = self.remove_directory_entry(source_parent, source_name, timestamp, handle)?;
+        if removed.inode != moved.number() || removed.file_type != file_type {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
         }
-        Ok((replaced_entry.parent.clone(), Some(replaced_entry)))
-    }
 
-    fn rename_delete_old(
-        &mut self,
-        source: &RenameEntry<'_>,
-        current_parent: &Ext4Inode,
-        timestamp: Ext4Timestamp,
-        handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<RemovedLinearDirectoryEntry> {
-        if current_parent.number() != source.parent.number() {
-            return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
-        }
-        let removed =
-            self.remove_directory_entry(current_parent, source.name, timestamp, handle)?;
-        if removed.inode != source.inode.number() || removed.file_type != source.file_type {
-            return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
-        }
-        Ok(removed)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn rename_dir_finish(
-        &mut self,
-        mut source_parent: Ext4Inode,
-        mut target_parent: Ext4Inode,
-        moved: &Ext4Inode,
-        target_parent_original: &Ext4Inode,
-        replaced: Option<&Ext4Inode>,
-        same_parent: bool,
-        timestamp: Ext4Timestamp,
-        handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<(Ext4Inode, Ext4Inode, Ext4Inode)> {
-        let mut moved = moved.clone();
         if moved.kind() != InodeKind::Directory {
-            return Ok((source_parent, target_parent, moved));
+            if let Some(replaced) = replaced {
+                self.finish_replaced_inode(replaced, replaced_entry, timestamp, handle)?;
+            }
+            return Ok(());
         }
 
         let replaced_directory = replaced.is_some_and(|inode| inode.kind() == InodeKind::Directory);
@@ -1068,15 +817,7 @@ impl Ext4Filesystem {
                 .links_count()
                 .checked_sub(1)
                 .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidInode))?;
-            source_parent = self.update_inode_links_count_metadata(
-                &source_parent,
-                source_links,
-                timestamp,
-                handle,
-            )?;
-            if same_parent {
-                target_parent = source_parent.clone();
-            }
+            self.update_inode_links_count_metadata(source_parent, source_links, timestamp, handle)?;
         }
 
         if !same_parent && !replaced_directory {
@@ -1084,24 +825,17 @@ impl Ext4Filesystem {
                 .links_count()
                 .checked_add(1)
                 .ok_or(Ext4Error::Overflow)?;
-            target_parent = self.update_inode_links_count_metadata(
-                &target_parent,
-                target_links,
-                timestamp,
-                handle,
-            )?;
+            self.update_inode_links_count_metadata(target_parent, target_links, timestamp, handle)?;
         }
 
         if !same_parent {
-            moved = self.update_directory_dotdot_entry(
-                &moved,
-                target_parent_original.number(),
-                timestamp,
-                handle,
-            )?;
+            self.update_directory_dotdot_entry(moved, target_parent.number(), timestamp, handle)?;
         }
 
-        Ok((source_parent, target_parent, moved))
+        if let Some(replaced) = replaced {
+            self.finish_replaced_inode(replaced, replaced_entry, timestamp, handle)?;
+        }
+        Ok(())
     }
 
     fn finish_replaced_inode(
@@ -1110,7 +844,7 @@ impl Ext4Filesystem {
         replaced_entry: Option<ReplacedDirectoryEntry>,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let replaced_entry =
             replaced_entry.ok_or(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry))?;
         if replaced_entry.inode != inode.number()
@@ -1132,7 +866,7 @@ impl Ext4Filesystem {
         zero_link_size: Option<u64>,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         if inode.kind() != InodeKind::Directory && inode.links_count() > 1 {
             let links_count = inode
                 .links_count()
@@ -1145,22 +879,25 @@ impl Ext4Filesystem {
                 handle,
             );
         }
-        let orphaned = self.add_namespace_orphan(inode, handle)?;
-        self.update_unlinked_inode_metadata(&orphaned, zero_link_size, timestamp, handle)
+        self.add_namespace_orphan(inode, handle)?;
+        self.update_unlinked_inode_metadata(inode, zero_link_size, timestamp, handle)
     }
 
     /// Releases a zero-link inode after its final VFS reference is gone.
+    ///
+    /// # Errors
+    ///
+    /// Format, journal, and device errors are propagated.
     pub fn evict_unlinked_inode(
         &mut self,
-        number: InodeNumber,
+        inode: &Ext4Inode,
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<()> {
-        let inode = self.orphan_inode(number)?;
         if inode.links_count() != 0 {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
         }
         self.evict_unlinked_inode_with_policy(
-            &inode,
+            inode,
             timestamp,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
         )
@@ -1211,29 +948,18 @@ impl Ext4Filesystem {
     ///
     /// After this call the inode is orphaned.  The caller should release the
     /// `KExt4Core` lock before calling Phase B.
-    pub fn eviction_prepare(
-        &mut self,
-        number: InodeNumber,
-        timestamp: Ext4Timestamp,
-    ) -> Ext4Result<EvictionHandle> {
-        let inode = self.orphan_inode(number)?;
+    pub fn eviction_prepare(&mut self, inode: &Ext4Inode) -> Ext4Result<()> {
         if inode.links_count() != 0 {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
         }
-        self.ensure_unlinked_inode_eviction_supported(&inode)?;
+        self.ensure_unlinked_inode_eviction_supported(inode)?;
 
-        let credits = JournalCredits::new(EVICTION_PREPARE_CREDITS);
+        let credits = Ext4Credits::eviction_prepare(inode)?;
         let journal = self.namei_metadata_journal(credits)?;
         let mut handle = journal.begin(credits)?;
-
-        let result = (|| -> Ext4Result<EvictionHandle> {
-            let orphaned = self.add_namespace_orphan(&inode, &mut handle)?;
-            let truncated_inode =
-                self.release_external_xattr_block_for_eviction(&orphaned, &mut handle)?;
-            Ok(EvictionHandle {
-                truncated_inode,
-                timestamp,
-            })
+        let result = (|| -> Ext4Result<()> {
+            self.add_namespace_orphan(inode, &mut handle)?;
+            self.release_external_xattr_block_for_eviction(inode, &mut handle)
         })();
 
         self.complete_metadata_mutation_and_commit_with_policy(
@@ -1260,16 +986,16 @@ impl Ext4Filesystem {
     /// The caller should release the `KExt4Core` lock between batches.
     pub fn eviction_release_batch(
         &mut self,
-        handle: &mut EvictionHandle,
+        inode: &Ext4Inode,
         max_blocks: u32,
     ) -> Ext4Result<(u32, bool)> {
         // Fast check: no data blocks remaining.
-        if self.unlinked_inode_data_blocks(&handle.truncated_inode)? == 0 {
+        if self.unlinked_inode_data_blocks(inode)? == 0 {
             return Ok((0, true));
         }
 
         // Collect current extent tree to determine how much to release.
-        let collected = self.collect_extent_tree(&handle.truncated_inode)?;
+        let collected = self.collect_extent_tree(inode)?;
 
         // From the tail, accumulate at most `max_blocks` physical blocks.
         let mut physical_count = 0u32;
@@ -1322,14 +1048,8 @@ impl Ext4Filesystem {
         let mut jh = journal.begin(credits)?;
 
         let result = (|| -> Ext4Result<(u32, bool)> {
-            let truncated = self.truncate_extent_mappings_with(
-                &handle.truncated_inode,
-                &collected,
-                new_blocks,
-                &mut jh,
-            )?;
-            handle.truncated_inode = truncated;
-            let done = self.unlinked_inode_data_blocks(&handle.truncated_inode)? == 0;
+            self.truncate_extent_mappings_with(inode, &collected, new_blocks, &mut jh)?;
+            let done = self.unlinked_inode_data_blocks(inode)? == 0;
             let freed = estimated_freed;
             Ok((freed, done))
         })();
@@ -1348,11 +1068,13 @@ impl Ext4Filesystem {
     ///    orphan recovery will handle it on crash).
     /// 2. `remove_orphan` — remove from the orphan list.
     /// 3. `release_allocated_inode` — free the inode table slot + bit.
-    ///
-    /// Consumes `handle` (it is no longer valid after this call).
-    pub fn eviction_finish(&mut self, handle: EvictionHandle) -> Ext4Result<()> {
+    pub fn eviction_finish(
+        &mut self,
+        inode: &Ext4Inode,
+        timestamp: Ext4Timestamp,
+    ) -> Ext4Result<()> {
         // Phase B must have emptied the extent tree.
-        if self.unlinked_inode_data_blocks(&handle.truncated_inode)? != 0 {
+        if self.unlinked_inode_data_blocks(inode)? != 0 {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
         }
 
@@ -1361,14 +1083,9 @@ impl Ext4Filesystem {
         let mut jh = journal.begin(credits)?;
 
         let result = (|| -> Ext4Result<()> {
-            let unlinked = self.update_unlinked_inode_metadata(
-                &handle.truncated_inode,
-                None,
-                handle.timestamp,
-                &mut jh,
-            )?;
-            let unlinked = self.remove_orphan(&unlinked, &mut jh)?;
-            self.release_allocated_inode(unlinked.number(), unlinked.kind(), &mut jh)?;
+            self.update_unlinked_inode_metadata(inode, None, timestamp, &mut jh)?;
+            self.remove_orphan(inode, &mut jh)?;
+            self.release_allocated_inode(inode.number(), inode.kind(), &mut jh)?;
             Ok(())
         })();
 
@@ -1385,7 +1102,7 @@ impl Ext4Filesystem {
         parent: InodeNumber,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let block_size =
             usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
         let block_size_u64 = u64::try_from(block_size).map_err(|_| Ext4Error::Overflow)?;
@@ -1401,7 +1118,7 @@ impl Ext4Filesystem {
         self.update_directory_block_checksum(directory, &mut bytes)?;
         replace_metadata_access_bytes(&access, bytes)?;
 
-        let inode = self.insert_extent_mapping(
+        self.insert_extent_mapping(
             directory,
             LogicalBlock::new(0),
             allocation.block(),
@@ -1409,7 +1126,7 @@ impl Ext4Filesystem {
             ExtentMappingState::Initialized,
             handle,
         )?;
-        self.update_inode_size_metadata(&inode, block_size_u64, timestamp, handle)
+        self.update_inode_size_metadata(directory, block_size_u64, timestamp, handle)
     }
 
     fn initialize_symlink_data_block(
@@ -1417,7 +1134,7 @@ impl Ext4Filesystem {
         symlink: &Ext4Inode,
         target: &[u8],
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let block_size =
             usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
         let locality_group = self.block_group_for_inode(symlink.number())?;
@@ -1562,16 +1279,14 @@ impl Ext4Filesystem {
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<()> {
         self.ensure_unlinked_inode_eviction_supported(inode)?;
-        let orphaned = self.add_namespace_orphan(inode, handle)?;
-        let without_xattr = self.release_external_xattr_block_for_eviction(&orphaned, handle)?;
-        let truncated = if self.unlinked_inode_data_blocks(&without_xattr)? == 0 {
-            without_xattr
-        } else {
-            self.truncate_extent_mappings(&without_xattr, LogicalBlock::new(0), handle)?
-        };
-        let unlinked = self.update_unlinked_inode_metadata(&truncated, size, timestamp, handle)?;
-        let unlinked = self.remove_orphan(&unlinked, handle)?;
-        self.release_allocated_inode(unlinked.number(), unlinked.kind(), handle)?;
+        self.add_namespace_orphan(inode, handle)?;
+        self.release_external_xattr_block_for_eviction(inode, handle)?;
+        if self.unlinked_inode_data_blocks(inode)? != 0 {
+            self.truncate_extent_mappings(inode, LogicalBlock::new(0), handle)?;
+        }
+        self.update_unlinked_inode_metadata(inode, size, timestamp, handle)?;
+        self.remove_orphan(inode, handle)?;
+        self.release_allocated_inode(inode.number(), inode.kind(), handle)?;
         Ok(())
     }
 
@@ -1581,7 +1296,7 @@ impl Ext4Filesystem {
         parent: InodeNumber,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let block_size =
             usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
         let mut block = vec![0; block_size];
@@ -1663,7 +1378,7 @@ impl Ext4Filesystem {
         file_type: DirectoryFileType,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         if directory.has_indexed_directory() {
             return self.insert_indexed_directory_entry(
                 directory, name, inode, file_type, timestamp, handle,
@@ -1879,9 +1594,8 @@ impl Ext4Filesystem {
         let replaced = slot.replace(&mut bytes, inode, file_type)?;
         self.update_directory_block_checksum(directory, &mut bytes)?;
         replace_metadata_access_bytes(&access, bytes)?;
-        let parent = self.update_inode_timestamps_metadata(directory, timestamp, handle)?;
+        self.update_inode_timestamps_metadata(directory, timestamp, handle)?;
         Ok(ReplacedDirectoryEntry {
-            parent,
             inode: replaced.inode,
             file_type: replaced.file_type,
         })
@@ -1895,7 +1609,7 @@ impl Ext4Filesystem {
         file_type: DirectoryFileType,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let block_size =
             usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
         let block_size_u64 = u64::try_from(block_size).map_err(|_| Ext4Error::Overflow)?;
@@ -1958,7 +1672,7 @@ impl Ext4Filesystem {
         file_type: DirectoryFileType,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let block_size =
             usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
         let block_size_u64 = u64::try_from(block_size).map_err(|_| Ext4Error::Overflow)?;
@@ -2018,7 +1732,7 @@ impl Ext4Filesystem {
             .create_access(FilesystemBlock::new(new_physical.get()), handle)?;
         replace_metadata_access_bytes(&leaf_access, leaf)?;
 
-        let directory = self.insert_extent_mapping(
+        self.insert_extent_mapping(
             directory,
             LogicalBlock::new(new_logical),
             new_physical,
@@ -2026,22 +1740,18 @@ impl Ext4Filesystem {
             ExtentMappingState::Initialized,
             handle,
         )?;
-        let directory = self.update_inode_size_metadata(
-            &directory,
-            directory
-                .size()
-                .checked_add(block_size_u64)
-                .ok_or(Ext4Error::Overflow)?,
-            timestamp,
-            handle,
-        )?;
-        let directory = self.update_inode_flags_timestamps_metadata(
-            &directory,
+        let new_size = directory
+            .size()
+            .checked_add(block_size_u64)
+            .ok_or(Ext4Error::Overflow)?;
+        self.update_inode_size_metadata(directory, new_size, timestamp, handle)?;
+        self.update_inode_flags_timestamps_metadata(
+            directory,
             directory.flags() | disk_inode::EXT4_INDEX_FL,
             timestamp,
             handle,
         )?;
-        self.insert_indexed_directory_entry(&directory, name, inode, file_type, timestamp, handle)
+        self.insert_indexed_directory_entry(directory, name, inode, file_type, timestamp, handle)
     }
 
     fn remove_directory_entry(
@@ -2116,9 +1826,8 @@ impl Ext4Filesystem {
             let removed = slot.remove(&mut bytes, block_size)?;
             self.update_directory_block_checksum(directory, &mut bytes)?;
             replace_metadata_access_bytes(&access, bytes)?;
-            let parent = self.update_inode_timestamps_metadata(directory, timestamp, handle)?;
+            self.update_inode_timestamps_metadata(directory, timestamp, handle)?;
             return Ok(RemovedLinearDirectoryEntry {
-                parent,
                 inode: removed.inode,
                 file_type: removed.file_type,
             });
@@ -2135,7 +1844,7 @@ impl Ext4Filesystem {
         file_type: DirectoryFileType,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let block_size =
             usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
         let target = self.probe_htree_insert_target(directory, name, block_size)?;
@@ -2223,9 +1932,8 @@ impl Ext4Filesystem {
         let removed = slot.remove(&mut bytes, block_size)?;
         self.update_directory_block_checksum(directory, &mut bytes)?;
         replace_metadata_access_bytes(&access, bytes)?;
-        let parent = self.update_inode_timestamps_metadata(directory, timestamp, handle)?;
+        self.update_inode_timestamps_metadata(directory, timestamp, handle)?;
         Ok(RemovedLinearDirectoryEntry {
-            parent,
             inode: removed.inode,
             file_type: removed.file_type,
         })
@@ -2569,7 +2277,7 @@ impl Ext4Filesystem {
         file_type: DirectoryFileType,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         if usize::from(target.parent.count_limit.count())
             >= usize::from(target.parent.count_limit.limit())
         {
@@ -2652,7 +2360,7 @@ impl Ext4Filesystem {
             .create_access(FilesystemBlock::new(new_physical.get()), handle)?;
         replace_metadata_access_bytes(&new_access, right_bytes)?;
 
-        let directory = self.insert_extent_mapping(
+        self.insert_extent_mapping(
             directory,
             LogicalBlock::new(new_logical),
             new_physical,
@@ -2660,22 +2368,18 @@ impl Ext4Filesystem {
             ExtentMappingState::Initialized,
             handle,
         )?;
-        let directory = self.update_inode_size_metadata(
-            &directory,
-            directory
-                .size()
-                .checked_add(block_size_u64)
-                .ok_or(Ext4Error::Overflow)?,
-            timestamp,
-            handle,
-        )?;
+        let new_size = directory
+            .size()
+            .checked_add(block_size_u64)
+            .ok_or(Ext4Error::Overflow)?;
+        self.update_inode_size_metadata(directory, new_size, timestamp, handle)?;
 
         let parent_access = self
             .metadata_io
             .write_access(FilesystemBlock::new(target.parent.physical.get()), handle)?;
         let mut parent_bytes = metadata_access_bytes(&parent_access)?;
         self.verify_htree_block_checksum(
-            &directory,
+            directory,
             target.parent.logical,
             &parent_bytes,
             target.parent.count_offset,
@@ -2690,13 +2394,13 @@ impl Ext4Filesystem {
             u32::try_from(new_logical).map_err(|_| Ext4Error::Overflow)?,
         )?;
         self.update_htree_block_checksum(
-            &directory,
+            directory,
             &mut parent_bytes,
             target.parent.count_offset,
             count_limit,
         )?;
         replace_metadata_access_bytes(&parent_access, parent_bytes)?;
-        self.update_inode_timestamps_metadata(&directory, timestamp, handle)
+        self.update_inode_timestamps_metadata(directory, timestamp, handle)
     }
 
     fn decode_htree_root_for_write(
@@ -2862,7 +2566,7 @@ impl Ext4Filesystem {
         file_type: DirectoryFileType,
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<Ext4Inode> {
+    ) -> Ext4Result<()> {
         let block_size =
             usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
         let block_size_u64 = u64::try_from(block_size).map_err(|_| Ext4Error::Overflow)?;
@@ -2888,7 +2592,7 @@ impl Ext4Filesystem {
         )?;
         self.update_directory_block_checksum(directory, &mut bytes)?;
         replace_metadata_access_bytes(&access, bytes)?;
-        let inode = self.insert_extent_mapping(
+        self.insert_extent_mapping(
             directory,
             LogicalBlock::new(logical),
             allocation.block(),
@@ -2897,7 +2601,7 @@ impl Ext4Filesystem {
             handle,
         )?;
         self.update_inode_size_metadata(
-            &inode,
+            directory,
             directory
                 .size()
                 .checked_add(block_size_u64)
@@ -2926,33 +2630,16 @@ impl Ext4Filesystem {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RemovedLinearDirectoryEntry {
-    parent: Ext4Inode,
     inode: InodeNumber,
     file_type: DirectoryFileType,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ReplacedDirectoryEntry {
-    parent: Ext4Inode,
     inode: InodeNumber,
     file_type: DirectoryFileType,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct RenameEntry<'a> {
-    parent: &'a Ext4Inode,
-    name: &'a [u8],
-    inode: &'a Ext4Inode,
-    file_type: DirectoryFileType,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct RenameTarget<'a> {
-    parent: &'a Ext4Inode,
-    name: &'a [u8],
-    replaced: Option<&'a Ext4Inode>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

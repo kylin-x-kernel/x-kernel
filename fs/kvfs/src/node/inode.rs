@@ -20,6 +20,7 @@ use hashbrown::HashMap;
 use kcred::Cred;
 use kerrno::LinuxError;
 use klazy::Once;
+use ktask::WaitQueue;
 use ktime_types::SystemTime;
 
 use super::{
@@ -448,12 +449,6 @@ impl InodeBlockAccounting {
         Self { bytes, blocks }
     }
 
-    fn allocated_bytes(&self) -> u64 {
-        self.blocks
-            .saturating_mul(INODE_BYTES_PER_BLOCK)
-            .saturating_add(u64::from(self.bytes))
-    }
-
     fn set_allocated_bytes(&mut self, bytes: u64) {
         self.blocks = bytes >> 9;
         self.bytes = (bytes & (INODE_BYTES_PER_BLOCK - 1)) as u16;
@@ -510,16 +505,13 @@ impl InodeMode {
         Umode::new(self.node_type, *self.permission.lock())
     }
 
-    fn node_type(&self) -> NodeType {
-        self.node_type
-    }
-
     fn set_permission(&self, permission: NodePermission) {
         *self.permission.lock() = permission;
     }
 }
 
 struct InodeIdentity {
+    inode_cache: Once<Weak<InodeCacheInner>>,
     super_block: Once<Weak<SuperBlock>>,
     number: u64,
     aliases: Mutex<Vec<DentryAlias>>,
@@ -528,6 +520,7 @@ struct InodeIdentity {
 impl InodeIdentity {
     fn new(number: u64) -> Self {
         Self {
+            inode_cache: Once::new(),
             super_block: Once::new(),
             number,
             aliases: Mutex::default(),
@@ -536,6 +529,20 @@ impl InodeIdentity {
 
     fn number(&self) -> u64 {
         self.number
+    }
+
+    fn bind_inode_cache(&self, inode_cache: &Arc<InodeCacheInner>) {
+        let bound = self.inode_cache.call_once(|| Arc::downgrade(inode_cache));
+        if let Some(bound) = bound.upgrade() {
+            assert!(
+                Arc::ptr_eq(&bound, inode_cache),
+                "one VFS inode identity must not belong to multiple inode caches"
+            );
+        }
+    }
+
+    fn inode_cache(&self) -> Option<Arc<InodeCacheInner>> {
+        self.inode_cache.get().and_then(Weak::upgrade)
     }
 
     fn bind_super_block(&self, super_block: &Arc<SuperBlock>) {
@@ -569,10 +576,79 @@ impl InodeIdentity {
     }
 }
 
-struct InodeAttributes {
+/// Filesystem-owned storage for the generic attributes of one VFS inode.
+///
+/// Filesystems whose private inode component already contains the generic
+/// inode fields can implement this interface so KVFS and the filesystem use
+/// one attribute state. This is the object-oriented equivalent of embedding
+/// Linux `struct inode` in a filesystem-private inode structure.
+pub trait InodeAttributeOperations: Send + Sync {
+    /// Builds a snapshot using the inode number owned by the VFS identity.
+    fn fill_metadata(&self, inode_number: u64) -> Metadata;
+
+    /// Returns the inode mode without requiring a full metadata snapshot.
+    fn mode(&self) -> Umode;
+
+    /// Returns the inode owner without requiring a full metadata snapshot.
+    fn owner(&self) -> (u32, u32);
+
+    /// Returns the inode link count without requiring a full metadata snapshot.
+    fn link_count(&self) -> u64;
+
+    /// Returns the inode generation number.
+    fn generation(&self) -> u32;
+
+    /// Returns the inode device number without requiring a full metadata snapshot.
+    fn rdev(&self) -> DeviceId;
+
+    /// Returns the visible inode size without requiring a full metadata snapshot.
+    fn size(&self) -> u64;
+
+    /// Returns the preferred I/O block size.
+    fn block_size(&self) -> u64;
+
+    /// Returns the allocated 512-byte block count.
+    fn blocks(&self) -> u64;
+
+    /// Updates permission bits without changing the inode type.
+    fn set_permission(&self, permission: NodePermission);
+
+    /// Updates the inode owner.
+    fn set_owner(&self, uid: u32, gid: u32);
+
+    /// Updates the link count.
+    fn set_link_count(&self, link_count: u64);
+
+    /// Increments the link count.
+    fn increment_link_count(&self);
+
+    /// Decrements the link count.
+    fn decrement_link_count(&self);
+
+    /// Updates the visible inode size.
+    fn set_size(&self, size: u64);
+
+    /// Updates the last-access timestamp.
+    fn set_accessed_at(&self, value: SystemTime);
+
+    /// Updates the last-modification timestamp.
+    fn set_modified_at(&self, value: SystemTime);
+
+    /// Updates the last-status-change timestamp.
+    fn set_changed_at(&self, value: SystemTime);
+
+    /// Updates the number of allocated bytes.
+    fn set_allocated_bytes(&self, bytes: u64);
+
+    /// Adds to allocated-byte accounting.
+    fn add_allocated_bytes(&self, bytes: u64);
+
+    /// Subtracts from allocated-byte accounting.
+    fn subtract_allocated_bytes(&self, bytes: u64);
+}
+
+struct OwnedInodeAttributes {
     mode: InodeMode,
-    operation_flags: AtomicU16,
-    flags: NodeFlags,
     owner: Mutex<InodeOwner>,
     link_count: Mutex<u64>,
     generation: u32,
@@ -583,12 +659,10 @@ struct InodeAttributes {
     block_bits: u8,
 }
 
-impl InodeAttributes {
-    fn new(init: VfsInodeInit, flags: NodeFlags) -> Self {
+impl OwnedInodeAttributes {
+    fn new(init: VfsInodeInit) -> Self {
         Self {
             mode: InodeMode::new(init.mode),
-            operation_flags: AtomicU16::new(0),
-            flags,
             owner: Mutex::new(InodeOwner::new(init.uid, init.gid)),
             link_count: Mutex::new(init.link_count),
             generation: init.generation,
@@ -608,22 +682,6 @@ impl InodeAttributes {
         self.mode.mode()
     }
 
-    fn node_type(&self) -> NodeType {
-        self.mode.node_type()
-    }
-
-    fn flags(&self) -> NodeFlags {
-        self.flags
-    }
-
-    fn operation_flags(&self) -> u16 {
-        self.operation_flags.load(Ordering::Acquire)
-    }
-
-    fn insert_operation_flags(&self, flags: u16) {
-        let _ = self.operation_flags.fetch_or(flags, Ordering::AcqRel);
-    }
-
     fn set_permission(&self, permission: NodePermission) {
         self.mode.set_permission(permission);
     }
@@ -631,12 +689,6 @@ impl InodeAttributes {
     fn owner(&self) -> (u32, u32) {
         let owner = *self.owner.lock();
         (owner.uid, owner.gid)
-    }
-
-    fn creation_mode_context(&self) -> (NodePermission, u32) {
-        let permission = self.mode().permission();
-        let gid = self.owner.lock().gid;
-        (permission, gid)
     }
 
     fn set_owner(&self, uid: u32, gid: u32) {
@@ -678,22 +730,19 @@ impl InodeAttributes {
         *self.size.lock() = size;
     }
 
-    fn set_accessed_at(&self, value: SystemTime) -> SystemTime {
+    fn set_accessed_at(&self, value: SystemTime) {
         let mut times = self.times.lock();
         times.accessed_at = InodeTimestamp::from_system_time(value);
-        value
     }
 
-    fn set_modified_at(&self, value: SystemTime) -> SystemTime {
+    fn set_modified_at(&self, value: SystemTime) {
         let mut times = self.times.lock();
         times.modified_at = InodeTimestamp::from_system_time(value);
-        value
     }
 
-    fn set_changed_at(&self, value: SystemTime) -> SystemTime {
+    fn set_changed_at(&self, value: SystemTime) {
         let mut times = self.times.lock();
         times.changed_at = InodeTimestamp::from_system_time(value);
-        value
     }
 
     fn block_bits(&self) -> u8 {
@@ -704,24 +753,28 @@ impl InodeAttributes {
         self.block_accounting.lock().blocks
     }
 
-    fn allocated_bytes(&self) -> u64 {
-        self.block_accounting.lock().allocated_bytes()
+    fn set_allocated_bytes(&self, bytes: u64) {
+        self.block_accounting.lock().set_allocated_bytes(bytes);
     }
 
     fn add_allocated_bytes(&self, bytes: u64) {
         let mut accounting = self.block_accounting.lock();
-        let bytes = accounting.allocated_bytes().saturating_add(bytes);
-        accounting.set_allocated_bytes(bytes);
+        let allocated = accounting
+            .blocks
+            .saturating_mul(INODE_BYTES_PER_BLOCK)
+            .saturating_add(u64::from(accounting.bytes))
+            .saturating_add(bytes);
+        accounting.set_allocated_bytes(allocated);
     }
 
     fn subtract_allocated_bytes(&self, bytes: u64) {
         let mut accounting = self.block_accounting.lock();
-        let bytes = accounting.allocated_bytes().saturating_sub(bytes);
-        accounting.set_allocated_bytes(bytes);
-    }
-
-    fn set_allocated_bytes(&self, bytes: u64) {
-        self.block_accounting.lock().set_allocated_bytes(bytes);
+        let allocated = accounting
+            .blocks
+            .saturating_mul(INODE_BYTES_PER_BLOCK)
+            .saturating_add(u64::from(accounting.bytes))
+            .saturating_sub(bytes);
+        accounting.set_allocated_bytes(allocated);
     }
 
     fn fill_metadata(&self, inode_number: u64) -> Metadata {
@@ -742,6 +795,222 @@ impl InodeAttributes {
             mtime: times.modified_at.as_system_time(),
             ctime: times.changed_at.as_system_time(),
         }
+    }
+}
+
+impl InodeAttributeOperations for OwnedInodeAttributes {
+    fn fill_metadata(&self, inode_number: u64) -> Metadata {
+        OwnedInodeAttributes::fill_metadata(self, inode_number)
+    }
+
+    fn mode(&self) -> Umode {
+        OwnedInodeAttributes::mode(self)
+    }
+
+    fn owner(&self) -> (u32, u32) {
+        OwnedInodeAttributes::owner(self)
+    }
+
+    fn link_count(&self) -> u64 {
+        OwnedInodeAttributes::link_count(self)
+    }
+
+    fn generation(&self) -> u32 {
+        OwnedInodeAttributes::generation(self)
+    }
+
+    fn rdev(&self) -> DeviceId {
+        OwnedInodeAttributes::rdev(self)
+    }
+
+    fn size(&self) -> u64 {
+        OwnedInodeAttributes::size(self)
+    }
+
+    fn block_size(&self) -> u64 {
+        1_u64 << OwnedInodeAttributes::block_bits(self)
+    }
+
+    fn blocks(&self) -> u64 {
+        OwnedInodeAttributes::blocks(self)
+    }
+
+    fn set_permission(&self, permission: NodePermission) {
+        OwnedInodeAttributes::set_permission(self, permission);
+    }
+
+    fn set_owner(&self, uid: u32, gid: u32) {
+        OwnedInodeAttributes::set_owner(self, uid, gid);
+    }
+
+    fn set_link_count(&self, link_count: u64) {
+        OwnedInodeAttributes::set_link_count(self, link_count);
+    }
+
+    fn increment_link_count(&self) {
+        OwnedInodeAttributes::increment_link_count(self);
+    }
+
+    fn decrement_link_count(&self) {
+        OwnedInodeAttributes::decrement_link_count(self);
+    }
+
+    fn set_size(&self, size: u64) {
+        OwnedInodeAttributes::set_size(self, size);
+    }
+
+    fn set_accessed_at(&self, value: SystemTime) {
+        OwnedInodeAttributes::set_accessed_at(self, value);
+    }
+
+    fn set_modified_at(&self, value: SystemTime) {
+        OwnedInodeAttributes::set_modified_at(self, value);
+    }
+
+    fn set_changed_at(&self, value: SystemTime) {
+        OwnedInodeAttributes::set_changed_at(self, value);
+    }
+
+    fn set_allocated_bytes(&self, bytes: u64) {
+        OwnedInodeAttributes::set_allocated_bytes(self, bytes);
+    }
+
+    fn add_allocated_bytes(&self, bytes: u64) {
+        OwnedInodeAttributes::add_allocated_bytes(self, bytes);
+    }
+
+    fn subtract_allocated_bytes(&self, bytes: u64) {
+        OwnedInodeAttributes::subtract_allocated_bytes(self, bytes);
+    }
+}
+
+struct InodeAttributes {
+    operations: Arc<dyn InodeAttributeOperations>,
+    operation_flags: AtomicU16,
+    flags: NodeFlags,
+}
+
+impl InodeAttributes {
+    fn new(init: VfsInodeInit, flags: NodeFlags) -> Self {
+        Self::from_operations(Arc::new(OwnedInodeAttributes::new(init)), flags)
+    }
+
+    fn from_operations(operations: Arc<dyn InodeAttributeOperations>, flags: NodeFlags) -> Self {
+        Self {
+            operations,
+            operation_flags: AtomicU16::new(0),
+            flags,
+        }
+    }
+
+    fn metadata(&self, inode_number: u64) -> Metadata {
+        self.operations.fill_metadata(inode_number)
+    }
+
+    fn mode(&self) -> Umode {
+        self.operations.mode()
+    }
+
+    fn node_type(&self) -> NodeType {
+        self.mode().node_type()
+    }
+
+    fn flags(&self) -> NodeFlags {
+        self.flags
+    }
+
+    fn operation_flags(&self) -> u16 {
+        self.operation_flags.load(Ordering::Acquire)
+    }
+
+    fn insert_operation_flags(&self, flags: u16) {
+        let _ = self.operation_flags.fetch_or(flags, Ordering::AcqRel);
+    }
+
+    fn set_permission(&self, permission: NodePermission) {
+        self.operations.set_permission(permission);
+    }
+
+    fn creation_mode_context(&self) -> (NodePermission, u32) {
+        let (_, gid) = self.operations.owner();
+        (self.operations.mode().permission(), gid)
+    }
+
+    fn set_owner(&self, uid: u32, gid: u32) {
+        self.operations.set_owner(uid, gid);
+    }
+
+    fn link_count(&self) -> u64 {
+        self.operations.link_count()
+    }
+
+    fn set_link_count(&self, link_count: u64) {
+        self.operations.set_link_count(link_count);
+    }
+
+    fn increment_link_count(&self) {
+        self.operations.increment_link_count();
+    }
+
+    fn decrement_link_count(&self) {
+        self.operations.decrement_link_count();
+    }
+
+    fn generation(&self) -> u32 {
+        self.operations.generation()
+    }
+
+    fn rdev(&self) -> DeviceId {
+        self.operations.rdev()
+    }
+
+    fn size(&self) -> u64 {
+        self.operations.size()
+    }
+
+    fn set_size(&self, size: u64) {
+        self.operations.set_size(size);
+    }
+
+    fn set_accessed_at(&self, value: SystemTime) -> SystemTime {
+        self.operations.set_accessed_at(value);
+        value
+    }
+
+    fn set_modified_at(&self, value: SystemTime) -> SystemTime {
+        self.operations.set_modified_at(value);
+        value
+    }
+
+    fn set_changed_at(&self, value: SystemTime) -> SystemTime {
+        self.operations.set_changed_at(value);
+        value
+    }
+
+    fn block_bits(&self) -> u8 {
+        inode_blkbits(self.operations.block_size())
+    }
+
+    fn allocated_bytes(&self) -> u64 {
+        self.operations
+            .blocks()
+            .saturating_mul(INODE_BYTES_PER_BLOCK)
+    }
+
+    fn add_allocated_bytes(&self, bytes: u64) {
+        self.operations.add_allocated_bytes(bytes);
+    }
+
+    fn subtract_allocated_bytes(&self, bytes: u64) {
+        self.operations.subtract_allocated_bytes(bytes);
+    }
+
+    fn set_allocated_bytes(&self, bytes: u64) {
+        self.operations.set_allocated_bytes(bytes);
+    }
+
+    fn fill_metadata(&self, inode_number: u64) -> Metadata {
+        self.metadata(inode_number)
     }
 }
 
@@ -953,6 +1222,65 @@ struct InodeParts {
 }
 
 impl VfsInode {
+    /// Constructs an inode whose filesystem operation object also stores its
+    /// generic attributes.
+    ///
+    /// This keeps filesystem-private and generic inode state in one composed
+    /// object instead of maintaining a second VFS attribute copy.
+    pub fn new_with_inode_attribute_operations<T>(
+        node: Arc<T>,
+        flags: NodeFlags,
+        mut init: VfsInodeInit,
+    ) -> Arc<Self>
+    where
+        T: Any
+            + Send
+            + Sync
+            + InodeOperations
+            + FileOperations
+            + AddressSpaceOperations
+            + InodeAttributeOperations,
+    {
+        let node_type = init.node_type();
+        let private_data: Arc<dyn Any + Send + Sync> = node.clone();
+        let inode_operations: Arc<dyn InodeOperations> = node.clone();
+        let attribute_operations: Arc<dyn InodeAttributeOperations> = node.clone();
+        let (file_operations, address_space_operations) = match node_type {
+            NodeType::Directory => {
+                let file_operations: Arc<dyn FileOperations> = node.clone();
+                (Some(file_operations), empty_address_space_operations())
+            }
+            NodeType::RegularFile | NodeType::Unknown => {
+                let file_operations: Arc<dyn FileOperations> = node.clone();
+                let address_space_operations: Arc<dyn AddressSpaceOperations> = node.clone();
+                (Some(file_operations), address_space_operations)
+            }
+            NodeType::Symlink => {
+                let address_space_operations: Arc<dyn AddressSpaceOperations> = node.clone();
+                (None, address_space_operations)
+            }
+            NodeType::CharacterDevice
+            | NodeType::BlockDevice
+            | NodeType::Fifo
+            | NodeType::Socket => {
+                let (file_operations, rdev) = init_special_inode(node_type, init.rdev);
+                init.rdev = rdev;
+                (file_operations, empty_address_space_operations())
+            }
+        };
+        Self::from_parts_with_attribute_operations(
+            InodeParts {
+                private_data,
+                inode_operations,
+                file_operations,
+                flags,
+                address_space_operations,
+                init,
+            },
+            attribute_operations,
+        )
+    }
+
     /// Construct an inode identity for a non-directory node.
     pub fn new_file<T>(node: Arc<T>, init: VfsInodeInit) -> Arc<Self>
     where
@@ -1177,6 +1505,30 @@ impl VfsInode {
     }
 
     fn from_parts(parts: InodeParts) -> Arc<Self> {
+        let init = parts.init;
+        let attributes = InodeAttributes::new(init, parts.flags);
+        Self::from_parts_with_attributes(parts, attributes)
+    }
+
+    fn from_parts_with_attribute_operations(
+        parts: InodeParts,
+        operations: Arc<dyn InodeAttributeOperations>,
+    ) -> Arc<Self> {
+        let metadata = operations.fill_metadata(parts.init.number);
+        assert_eq!(
+            metadata.inode, parts.init.number,
+            "inode attribute operations must describe the constructed inode"
+        );
+        assert_eq!(
+            metadata.mode.node_type(),
+            parts.init.node_type(),
+            "inode attribute operations must preserve the constructed inode type"
+        );
+        let attributes = InodeAttributes::from_operations(operations, parts.flags);
+        Self::from_parts_with_attributes(parts, attributes)
+    }
+
+    fn from_parts_with_attributes(parts: InodeParts, attributes: InodeAttributes) -> Arc<Self> {
         let InodeParts {
             private_data,
             inode_operations,
@@ -1187,7 +1539,7 @@ impl VfsInode {
         } = parts;
         Arc::new_cyclic(move |this| Self {
             identity: InodeIdentity::new(init.number),
-            attributes: InodeAttributes::new(init, flags),
+            attributes,
             write_count: AtomicUsize::new(0),
             data_lock: RwLock::new(()),
             namespace_lock: RwLock::new(()),
@@ -1874,63 +2226,291 @@ impl fmt::Debug for VfsInode {
 
 impl Drop for VfsInode {
     fn drop(&mut self) {
-        if let Err(err) = self.evict_inode() {
+        let inode_cache = self
+            .identity
+            .inode_cache()
+            .filter(|cache| cache.begin_eviction(self));
+        let result = self.evict_inode();
+        if let Some(inode_cache) = inode_cache {
+            inode_cache.finish_eviction(self);
+        }
+        if let Err(err) = result {
             log::warn!("failed to evict inode {}: {err:?}", self.inode());
+        }
+    }
+}
+
+enum CachedInodeState {
+    New,
+    Live(WeakVfsInode),
+    Freeing(WeakVfsInode),
+}
+
+struct CachedInode {
+    state: CachedInodeState,
+    waiters: Arc<WaitQueue>,
+}
+
+impl CachedInode {
+    fn new() -> Self {
+        Self {
+            state: CachedInodeState::New,
+            waiters: Arc::new(WaitQueue::new()),
+        }
+    }
+}
+
+#[derive(Default)]
+struct InodeCacheState {
+    inodes: HashMap<u64, CachedInode>,
+}
+
+struct InodeCacheInner {
+    state: Mutex<InodeCacheState>,
+}
+
+struct NewInodeReservation<'a> {
+    cache: &'a InodeCacheInner,
+    inode_number: u64,
+    is_published: bool,
+}
+
+impl<'a> NewInodeReservation<'a> {
+    fn new(cache: &'a InodeCacheInner, inode_number: u64) -> Self {
+        Self {
+            cache,
+            inode_number,
+            is_published: false,
+        }
+    }
+
+    fn publish(mut self, inode: &Arc<VfsInode>) {
+        let mut state = self.cache.state.lock();
+        let entry = state
+            .inodes
+            .get_mut(&self.inode_number)
+            .expect("an inode-cache reservation must retain its slot");
+        assert!(
+            matches!(entry.state, CachedInodeState::New),
+            "an inode-cache reservation must remain I_NEW until publication"
+        );
+        entry.state = CachedInodeState::Live(Arc::downgrade(inode));
+        let waiters = entry.waiters.clone();
+        self.is_published = true;
+        drop(state);
+        waiters.notify_all(false);
+    }
+}
+
+impl Drop for NewInodeReservation<'_> {
+    fn drop(&mut self) {
+        if self.is_published {
+            return;
+        }
+        let mut state = self.cache.state.lock();
+        let waiters = if matches!(
+            state.inodes.get(&self.inode_number),
+            Some(entry) if matches!(entry.state, CachedInodeState::New)
+        ) {
+            state
+                .inodes
+                .remove(&self.inode_number)
+                .map(|entry| entry.waiters)
+        } else {
+            None
+        };
+        drop(state);
+        if let Some(waiters) = waiters {
+            waiters.notify_all(false);
+        }
+    }
+}
+
+impl InodeCacheInner {
+    fn new() -> Self {
+        Self {
+            state: Mutex::default(),
+        }
+    }
+
+    fn wait_for_transition(&self, inode_number: u64, waiters: &Arc<WaitQueue>) {
+        waiters.wait_until(|| {
+            let state = self.state.lock();
+            match state.inodes.get(&inode_number) {
+                None => true,
+                Some(entry) if !Arc::ptr_eq(&entry.waiters, waiters) => true,
+                Some(entry) => match &entry.state {
+                    CachedInodeState::Live(inode) => inode.strong_count() != 0,
+                    CachedInodeState::New | CachedInodeState::Freeing(_) => false,
+                },
+            }
+        });
+    }
+
+    fn begin_eviction(&self, inode: &VfsInode) -> bool {
+        let mut state = self.state.lock();
+        let Some(entry) = state.inodes.get_mut(&inode.inode()) else {
+            return false;
+        };
+        let CachedInodeState::Live(cached) = &entry.state else {
+            return false;
+        };
+        if !core::ptr::eq(cached.as_ptr(), inode) {
+            return false;
+        }
+        let cached = cached.clone();
+        entry.state = CachedInodeState::Freeing(cached);
+        true
+    }
+
+    fn finish_eviction(&self, inode: &VfsInode) {
+        let mut state = self.state.lock();
+        let is_evicting_inode = matches!(
+            state.inodes.get(&inode.inode()),
+            Some(entry)
+                if matches!(
+                    &entry.state,
+                    CachedInodeState::Freeing(cached)
+                        if core::ptr::eq(cached.as_ptr(), inode)
+                )
+        );
+        let waiters = is_evicting_inode
+            .then(|| state.inodes.remove(&inode.inode()))
+            .flatten()
+            .map(|entry| entry.waiters);
+        drop(state);
+        if let Some(waiters) = waiters {
+            waiters.notify_all(false);
         }
     }
 }
 
 /// Per-filesystem cache for live VFS inode identities.
 ///
-/// The cache stores weak references so dentry and open-file lifetimes decide
-/// when an inode wrapper can disappear. Filesystems should route lookup,
-/// create, and hard-link paths through this cache when they can provide a
-/// stable inode number.
-#[derive(Default)]
+/// New identities remain private until their filesystem-specific state is
+/// initialized. Lookups wait while an inode is being initialized or freed,
+/// matching Linux `I_NEW` and `I_FREEING` semantics. The live cache entry is a
+/// weak reference, so dentry and open-file lifetimes still decide when final
+/// eviction starts.
 pub struct InodeCache {
-    inodes: Mutex<HashMap<u64, WeakVfsInode>>,
+    inner: Arc<InodeCacheInner>,
+}
+
+impl Default for InodeCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InodeCache {
     /// Create an empty inode cache.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            inner: Arc::new(InodeCacheInner::new()),
+        }
     }
 
-    /// Look up a live inode by inode number.
+    /// Looks up a live inode by inode number without loading it from disk.
+    ///
+    /// This method matches Linux `ilookup()`: it may sleep while the matching
+    /// identity is being initialized or freed, retries after an unhashed
+    /// identity, and returns `None` if no resident identity remains. Callers
+    /// that must load an absent inode use [`Self::get_or_try_insert_with`].
     pub fn lookup(&self, inode_number: u64) -> Option<Arc<VfsInode>> {
-        let mut inodes = self.inodes.lock();
-        let inode = inodes.get(&inode_number).and_then(WeakVfsInode::upgrade);
-        if inode.is_none() {
-            inodes.remove(&inode_number);
+        loop {
+            let waiters = {
+                let state = self.inner.state.lock();
+                match state.inodes.get(&inode_number) {
+                    None => return None,
+                    Some(entry) => match &entry.state {
+                        CachedInodeState::Live(inode) => match inode.upgrade() {
+                            Some(inode) => return Some(inode),
+                            None => entry.waiters.clone(),
+                        },
+                        CachedInodeState::New | CachedInodeState::Freeing(_) => {
+                            entry.waiters.clone()
+                        }
+                    },
+                }
+            };
+            self.inner.wait_for_transition(inode_number, &waiters);
         }
-        inode
     }
 
     /// Return the live inode for `inode_number`, or insert a newly created one.
     ///
-    /// The constructor runs outside the cache lock. A concurrent caller may win
-    /// the insert race; in that case this method returns the already cached
-    /// inode and drops the newly created one.
+    /// The cache reserves the inode number before running the constructor, so
+    /// exactly one caller initializes filesystem-private state. Concurrent
+    /// callers wait for that initialization instead of constructing duplicate
+    /// resident identities.
     pub fn get_or_insert_with(
         &self,
         inode_number: u64,
         create_inode_fn: impl FnOnce() -> Arc<VfsInode>,
     ) -> Arc<VfsInode> {
-        if let Some(inode) = self.lookup(inode_number) {
-            return inode;
+        match self.get_or_try_insert_with(inode_number, || {
+            Ok::<_, core::convert::Infallible>(create_inode_fn())
+        }) {
+            Ok(inode) => inode,
+            Err(error) => match error {},
+        }
+    }
+
+    /// Returns the live inode or fallibly initializes a new resident identity.
+    ///
+    /// Failed initialization removes the `I_NEW`-equivalent reservation and
+    /// wakes waiters, allowing a later lookup to retry from disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns the filesystem initializer's error without publishing an inode.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the initializer violates the internal VFS contract by
+    /// returning a different inode number or an identity already bound to
+    /// another inode cache.
+    pub fn get_or_try_insert_with<E>(
+        &self,
+        inode_number: u64,
+        create_inode_fn: impl FnOnce() -> Result<Arc<VfsInode>, E>,
+    ) -> Result<Arc<VfsInode>, E> {
+        loop {
+            let waiters = {
+                let mut state = self.inner.state.lock();
+                match state.inodes.get(&inode_number) {
+                    None => {
+                        state.inodes.insert(inode_number, CachedInode::new());
+                        None
+                    }
+                    Some(entry) => match &entry.state {
+                        CachedInodeState::Live(inode) => match inode.upgrade() {
+                            Some(inode) => return Ok(inode),
+                            None => Some(entry.waiters.clone()),
+                        },
+                        CachedInodeState::New | CachedInodeState::Freeing(_) => {
+                            Some(entry.waiters.clone())
+                        }
+                    },
+                }
+            };
+            let Some(waiters) = waiters else {
+                break;
+            };
+            self.inner.wait_for_transition(inode_number, &waiters);
         }
 
-        let new_inode = create_inode_fn();
-        debug_assert_eq!(new_inode.inode(), inode_number);
+        let reservation = NewInodeReservation::new(&self.inner, inode_number);
 
-        let mut inodes = self.inodes.lock();
-        if let Some(inode) = inodes.get(&inode_number).and_then(WeakVfsInode::upgrade) {
-            return inode;
-        }
-
-        inodes.insert(inode_number, Arc::downgrade(&new_inode));
-        new_inode
+        let new_inode = create_inode_fn()?;
+        assert_eq!(
+            new_inode.inode(),
+            inode_number,
+            "an inode-cache initializer must return the reserved inode number"
+        );
+        new_inode.identity.bind_inode_cache(&self.inner);
+        reservation.publish(&new_inode);
+        Ok(new_inode)
     }
 
     /// Return or create a symbolic-link inode from filesystem-filled inode fields.
@@ -2020,19 +2600,6 @@ impl InodeCache {
             VfsInode::new_openable_dir_with_flags(create_node_fn(), flags, init)
         })
     }
-
-    /// Remove dead cache entries and return the number removed.
-    pub fn prune_stale(&self) -> usize {
-        let mut removed = 0;
-        self.inodes.lock().retain(|_, inode| {
-            let is_live = inode.strong_count() > 0;
-            if !is_live {
-                removed += 1;
-            }
-            is_live
-        });
-        removed
-    }
 }
 
 #[cfg(unittest)]
@@ -2046,13 +2613,13 @@ mod tests {
     use crate::{GetattrQueryFlags, GetattrRequestMask, NodePermission};
 
     struct TestChrdevInode {
-        metadata: Metadata,
+        metadata: Mutex<Metadata>,
     }
 
     impl TestChrdevInode {
         fn new(rdev: DeviceId) -> Self {
             Self {
-                metadata: Metadata {
+                metadata: Mutex::new(Metadata {
                     device: 0,
                     inode: 42,
                     nlink: 1,
@@ -2069,7 +2636,7 @@ mod tests {
                     atime: Default::default(),
                     mtime: Default::default(),
                     ctime: Default::default(),
-                },
+                }),
             }
         }
     }
@@ -2082,7 +2649,7 @@ mod tests {
             _request_mask: GetattrRequestMask,
             _query_flags: GetattrQueryFlags,
         ) -> VfsResult<Metadata> {
-            Ok(self.metadata.clone())
+            Ok(self.metadata.lock().clone())
         }
 
         fn setattr(
@@ -2092,6 +2659,110 @@ mod tests {
             _update: MetadataUpdate,
         ) -> VfsResult<()> {
             Ok(())
+        }
+    }
+
+    impl FileOperations for TestChrdevInode {}
+
+    impl AddressSpaceOperations for TestChrdevInode {}
+
+    impl InodeAttributeOperations for TestChrdevInode {
+        fn fill_metadata(&self, inode_number: u64) -> Metadata {
+            let mut metadata = self.metadata.lock().clone();
+            metadata.inode = inode_number;
+            metadata
+        }
+
+        fn mode(&self) -> Umode {
+            self.metadata.lock().mode
+        }
+
+        fn owner(&self) -> (u32, u32) {
+            let metadata = self.metadata.lock();
+            (metadata.uid, metadata.gid)
+        }
+
+        fn link_count(&self) -> u64 {
+            self.metadata.lock().nlink
+        }
+
+        fn generation(&self) -> u32 {
+            17
+        }
+
+        fn rdev(&self) -> DeviceId {
+            self.metadata.lock().rdev
+        }
+
+        fn size(&self) -> u64 {
+            self.metadata.lock().size
+        }
+
+        fn block_size(&self) -> u64 {
+            self.metadata.lock().block_size
+        }
+
+        fn blocks(&self) -> u64 {
+            self.metadata.lock().blocks
+        }
+
+        fn set_permission(&self, permission: NodePermission) {
+            let mut metadata = self.metadata.lock();
+            metadata.mode = Umode::new(metadata.mode.node_type(), permission);
+        }
+
+        fn set_owner(&self, uid: u32, gid: u32) {
+            let mut metadata = self.metadata.lock();
+            metadata.uid = uid;
+            metadata.gid = gid;
+        }
+
+        fn set_link_count(&self, link_count: u64) {
+            self.metadata.lock().nlink = link_count;
+        }
+
+        fn increment_link_count(&self) {
+            let mut metadata = self.metadata.lock();
+            metadata.nlink = metadata.nlink.saturating_add(1);
+        }
+
+        fn decrement_link_count(&self) {
+            let mut metadata = self.metadata.lock();
+            metadata.nlink = metadata.nlink.saturating_sub(1);
+        }
+
+        fn set_size(&self, size: u64) {
+            self.metadata.lock().size = size;
+        }
+
+        fn set_accessed_at(&self, value: SystemTime) {
+            self.metadata.lock().atime = value;
+        }
+
+        fn set_modified_at(&self, value: SystemTime) {
+            self.metadata.lock().mtime = value;
+        }
+
+        fn set_changed_at(&self, value: SystemTime) {
+            self.metadata.lock().ctime = value;
+        }
+
+        fn set_allocated_bytes(&self, bytes: u64) {
+            self.metadata.lock().blocks = bytes / INODE_BYTES_PER_BLOCK;
+        }
+
+        fn add_allocated_bytes(&self, bytes: u64) {
+            let mut metadata = self.metadata.lock();
+            metadata.blocks = metadata
+                .blocks
+                .saturating_add(bytes / INODE_BYTES_PER_BLOCK);
+        }
+
+        fn subtract_allocated_bytes(&self, bytes: u64) {
+            let mut metadata = self.metadata.lock();
+            metadata.blocks = metadata
+                .blocks
+                .saturating_sub(bytes / INODE_BYTES_PER_BLOCK);
         }
     }
 
@@ -2108,7 +2779,78 @@ mod tests {
         )
         .with_owner_links_and_rdev(0, 0, 1, DeviceId::new(1, 3));
         let inode = VfsInode::new_special(node, NodeFlags::NON_CACHEABLE, init);
+        assert_eq!(inode.metadata().inode, 7);
         assert_eq!(inode.metadata().rdev, DeviceId::new(1, 3));
+    }
+
+    #[def_test]
+    fn filesystem_attribute_operations_are_the_vfs_inode_state() {
+        let node = Arc::new(TestChrdevInode::new(DeviceId::new(1, 3)));
+        let init = VfsInodeInit::new(
+            42,
+            0,
+            Umode::new(
+                NodeType::CharacterDevice,
+                NodePermission::from_bits_truncate(0o666),
+            ),
+        )
+        .with_owner_links_and_rdev(0, 0, 1, DeviceId::new(1, 3));
+        let inode = VfsInode::new_with_inode_attribute_operations(
+            node.clone(),
+            NodeFlags::NON_CACHEABLE,
+            init,
+        );
+
+        inode.set_link_count(5);
+        inode.set_size(23);
+        assert_eq!(node.metadata.lock().nlink, 5);
+        assert_eq!(node.metadata.lock().size, 23);
+
+        node.metadata.lock().uid = 1000;
+        node.metadata.lock().size = 41;
+        assert_eq!(inode.metadata().uid, 1000);
+        assert_eq!(inode.size(), 41);
+        assert_eq!(inode.generation(), 17);
+    }
+
+    #[def_test]
+    fn inode_cache_retries_failed_initialization_and_replaces_freed_identity() {
+        let cache = InodeCache::new();
+        let init = VfsInodeInit::new(
+            9,
+            0,
+            Umode::new(
+                NodeType::CharacterDevice,
+                NodePermission::from_bits_truncate(0o600),
+            ),
+        );
+        let failed = cache.get_or_try_insert_with(9, || Err::<Arc<VfsInode>, _>(7u8));
+        assert!(matches!(failed, Err(7)));
+
+        let inode = cache.get_or_insert_with(9, || {
+            VfsInode::new_special(
+                Arc::new(TestChrdevInode::new(DeviceId::default())),
+                NodeFlags::NON_CACHEABLE,
+                init,
+            )
+        });
+        assert!(Arc::ptr_eq(&cache.lookup(9).unwrap(), &inode));
+
+        let old_identity = Arc::downgrade(&inode);
+        drop(inode);
+        assert!(old_identity.upgrade().is_none());
+        assert!(cache.lookup(9).is_none());
+        let replacement = cache.get_or_insert_with(9, || {
+            VfsInode::new_special(
+                Arc::new(TestChrdevInode::new(DeviceId::default())),
+                NodeFlags::NON_CACHEABLE,
+                init,
+            )
+        });
+        assert!(!core::ptr::eq(
+            old_identity.as_ptr(),
+            Arc::as_ptr(&replacement)
+        ));
     }
 
     #[def_test]
