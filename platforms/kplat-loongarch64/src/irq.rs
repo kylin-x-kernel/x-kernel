@@ -90,6 +90,10 @@ impl khal::irq::IntrManagerIf {
         Some(khal::irq::DispatchedIrq::new(irq.as_usize(), 0))
     }
 
+    fn dispatch_nmi(_irq: usize) -> Option<khal::irq::DispatchedIrq> {
+        None
+    }
+
     fn complete_irq(_completion_cookie: usize) {}
 
     fn notify_cpu(_interrupt_id: usize, _target: TargetCpu) {
