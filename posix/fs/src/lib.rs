@@ -23,7 +23,9 @@ mod open;
 mod path;
 mod stat;
 mod sync;
+mod xattr;
 
 pub use self::{
     dir::*, fd_ops::*, io::*, ioctl::*, metadata::*, mount::*, namei::*, open::*, stat::*, sync::*,
+    xattr::*,
 };

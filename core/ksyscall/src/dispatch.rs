@@ -132,6 +132,53 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
             uctx.arg2().into(),
             uctx.arg3() as _,
         ),
+        Sysno::setxattr => sys_setxattr(
+            uctx.arg0().into(),
+            uctx.arg1().into(),
+            uctx.arg2().into(),
+            uctx.arg3() as _,
+            uctx.arg4() as _,
+        ),
+        Sysno::lsetxattr => sys_lsetxattr(
+            uctx.arg0().into(),
+            uctx.arg1().into(),
+            uctx.arg2().into(),
+            uctx.arg3() as _,
+            uctx.arg4() as _,
+        ),
+        Sysno::fsetxattr => sys_fsetxattr(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2().into(),
+            uctx.arg3() as _,
+            uctx.arg4() as _,
+        ),
+        Sysno::getxattr => sys_getxattr(
+            uctx.arg0().into(),
+            uctx.arg1().into(),
+            uctx.arg2().into(),
+            uctx.arg3() as _,
+        ),
+        Sysno::lgetxattr => sys_lgetxattr(
+            uctx.arg0().into(),
+            uctx.arg1().into(),
+            uctx.arg2().into(),
+            uctx.arg3() as _,
+        ),
+        Sysno::fgetxattr => sys_fgetxattr(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2().into(),
+            uctx.arg3() as _,
+        ),
+        Sysno::listxattr => sys_listxattr(uctx.arg0().into(), uctx.arg1().into(), uctx.arg2() as _),
+        Sysno::llistxattr => {
+            sys_llistxattr(uctx.arg0().into(), uctx.arg1().into(), uctx.arg2() as _)
+        }
+        Sysno::flistxattr => sys_flistxattr(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2() as _),
+        Sysno::removexattr => sys_removexattr(uctx.arg0().into(), uctx.arg1().into()),
+        Sysno::lremovexattr => sys_lremovexattr(uctx.arg0().into(), uctx.arg1().into()),
+        Sysno::fremovexattr => sys_fremovexattr(uctx.arg0() as _, uctx.arg1().into()),
 
         // fd ops
         #[cfg(target_arch = "x86_64")]

@@ -22,6 +22,7 @@ credential snapshot，`kvfs` 接收显式 `&Cred` 并完成路径遍历和通用
   writeback 与 truncate/invalidation 边界。
 - `src/fiemap.rs`：与用户 ABI 解耦的 inode FIEMAP 请求状态、标志和安全输出接口。
 - `src/file.rs`：打开文件及其可变状态。
+- `src/xattr.rs`：xattr 名称/标志、namespace 权限和 `Path` 语义入口。
 - `src/pipe.rs`：匿名 pipe 与 pathname FIFO 共享的数据通路、会话状态及无状态
   file-operation 对象。
 - `src/file_system_type.rs`：已注册文件系统类型及其创建入口。
@@ -269,6 +270,20 @@ inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `seta
 只包含解析后的 atime/mtime/ctime 值，不在 inode 或 namei 状态中保存调用上下文。
 自动 I/O 时间更新使用 Linux `FS_UPD_ATIME` / `FS_UPD_CMTIME` 对应的
 `InodeUpdateTime`，并经 filesystem `update_time` callback 落盘。
+
+Xattr 也由 `Path` 统一承载 mount、namespace 和 DAC 策略，再进入
+`InodeOperations::{get,list,set,remove}_xattr`。get/set/remove 输入名称以受检的内核
+`Vec<u8>` 保存；list 通过 `XattrNameRef` 与 `XattrNameSink` 逐项传递可分片借用的完整名称，
+从而允许后端零拷贝添加 namespace prefix，并在 `Path` 层把 `trusted.*` 过滤后才交给调用者。
+两种表示都完整保留非 UTF-8 suffix；`XattrSetFlags` 在进入后端前已从 ABI raw bits 转换，
+`CREATE|REPLACE` 组合保持为两个同时置位的约束交给后端。`user.*` 仅允许
+regular file、directory 和 socket，并对 sticky directory 写入执行 owner/privileged 检查；
+`trusted.*` 只对 privileged credential 可见；`security.*` 读操作保留 Linux VFS 的 LSM
+委托模型，但在 LSM/capability hook 尚未接入时，set/remove 使用 privileged credential
+近似阻止非特权调用者伪造安全属性；`system.*` 留给 filesystem 或 ACL 层授权。所有 namespace
+分支之前先执行通用写入检查：带 `NodeFlags::IMMUTABLE` 或 `NodeFlags::APPEND_ONLY` 的 inode
+拒绝 set/remove 并返回 `EPERM`，读取不受影响。Set/remove 在 inode data lock 内调用后端，
+具体文件系统必须在自己的事务或锁内原子完成四种 `CREATE`/`REPLACE` 组合的存在性判断。
 
 ### 新 inode 所有者
 
@@ -524,7 +539,8 @@ FIFO 最后一个 open file 关闭时清空 inode pipe slot，`Arc<PipeObject>` 
 
 ## 已知限制
 
-- 尚无 capability、LSM、ACL、user namespace ID 映射或 idmapped mount 权限语义。
+- 尚无完整 capability、LSM、ACL、user namespace ID 映射或 idmapped mount 权限语义；
+  `trusted.*` 访问和 `security.*` mutation 暂以 `euid == 0` 近似相应 capability。
 - FAT 等不能原生表达 Unix UID/GID 的后端不能完整持久化创建者身份。
 - 当前 POSIX rename 路径不支持 `RENAME_WHITEOUT`。
 - superblock dentry cache 尚无 Linux 风格 LRU/shrinker。

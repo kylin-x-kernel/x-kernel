@@ -7,9 +7,11 @@
 use alloc::{collections::BTreeSet, string::String, sync::Arc, vec, vec::Vec};
 
 use iov_iter::{IovIterDest, IovIterSource};
+use kerrno::LinuxError;
 use kext4::{
     BlockMapping, BlockMappingFlags, Ext4DirEntryRef, Ext4DirPos, Ext4DirSink, Ext4Inode,
-    Ext4InodeMetadataUpdate, Ext4SyncIntent, InodeNumber, LogicalBlock,
+    Ext4InodeMetadataUpdate, Ext4SyncIntent, Ext4XattrNameRef, Ext4XattrNameSink,
+    Ext4XattrNamespace, Ext4XattrSetMode, InodeNumber, LogicalBlock,
 };
 use ksync::Mutex;
 use kvfs::{
@@ -17,7 +19,8 @@ use kvfs::{
     FiemapExtentInfo, FiemapFlags, FileDirOperations, FileOperations, InodeDirOperations,
     InodeFiemapOperations, InodeOperations, InodeSymlinkOperations, Kiocb, LockedDentry, Metadata,
     MetadataUpdate, NodeType, PageMkwriteRequest, ReadaheadControl, RenameFlags, VfsError, VfsFile,
-    VfsInode, VfsResult, WriteBeginRequest, WriteEndRequest, WritebackControl, inode_init_owner,
+    VfsInode, VfsResult, WriteBeginRequest, WriteEndRequest, WritebackControl, XattrName,
+    XattrNameRef, XattrNameSink, XattrSetFlags, inode_init_owner,
 };
 
 use super::{
@@ -30,6 +33,95 @@ use super::{
 
 const PAGE_SIZE_4K: usize = 4096;
 const MAX_WRITEBACK_BYTES: usize = 128 * 1024;
+const XATTR_USER_PREFIX: &[u8] = b"user.";
+const XATTR_TRUSTED_PREFIX: &[u8] = b"trusted.";
+const XATTR_SECURITY_PREFIX: &[u8] = b"security.";
+
+fn parse_xattr_name(name: &XattrName) -> VfsResult<(Ext4XattrNamespace, &[u8])> {
+    let name = name.as_bytes();
+    let (namespace, suffix) = if let Some(suffix) = name.strip_prefix(XATTR_USER_PREFIX) {
+        (Ext4XattrNamespace::User, suffix)
+    } else if let Some(suffix) = name.strip_prefix(XATTR_TRUSTED_PREFIX) {
+        (Ext4XattrNamespace::Trusted, suffix)
+    } else if let Some(suffix) = name.strip_prefix(XATTR_SECURITY_PREFIX) {
+        (Ext4XattrNamespace::Security, suffix)
+    } else {
+        // POSIX ACLs require permission evaluation, mode synchronization, and
+        // inheritance. The core's opaque ACL storage is intentionally not
+        // exposed as a raw system.* xattr until that VFS layer exists.
+        return Err(VfsError::OperationNotSupported);
+    };
+    if suffix.is_empty() {
+        return Err(VfsError::InvalidInput);
+    }
+    Ok((namespace, suffix))
+}
+
+fn xattr_set_mode(flags: XattrSetFlags) -> Ext4XattrSetMode {
+    match (
+        flags.contains(XattrSetFlags::CREATE),
+        flags.contains(XattrSetFlags::REPLACE),
+    ) {
+        (false, false) => Ext4XattrSetMode::CreateOrReplace,
+        (true, false) => Ext4XattrSetMode::Create,
+        (false, true) => Ext4XattrSetMode::Replace,
+        (true, true) => Ext4XattrSetMode::CreateAndReplace,
+    }
+}
+
+fn xattr_namespace_prefix(namespace: Ext4XattrNamespace) -> Option<&'static [u8]> {
+    Some(match namespace {
+        Ext4XattrNamespace::User => XATTR_USER_PREFIX,
+        Ext4XattrNamespace::Trusted => XATTR_TRUSTED_PREFIX,
+        Ext4XattrNamespace::Security => XATTR_SECURITY_PREFIX,
+        _ => return None,
+    })
+}
+
+struct VfsXattrNameSink<'a> {
+    inner: &'a mut dyn XattrNameSink,
+    error: Option<VfsError>,
+}
+
+impl VfsXattrNameSink<'_> {
+    fn finish(self) -> VfsResult<()> {
+        self.error.map_or(Ok(()), Err)
+    }
+}
+
+impl Ext4XattrNameSink for VfsXattrNameSink<'_> {
+    fn emit(&mut self, name: Ext4XattrNameRef<'_>) -> kext4::Ext4Result<()> {
+        if self.error.is_some() {
+            return Ok(());
+        }
+        let Some(prefix) = xattr_namespace_prefix(name.namespace()) else {
+            return Ok(());
+        };
+        if name.name_bytes().is_empty() {
+            self.error = Some(VfsError::InvalidData);
+            return Ok(());
+        }
+        let name = match XattrNameRef::from_parts(prefix, name.name_bytes()) {
+            Ok(name) => name,
+            Err(_) => {
+                self.error = Some(VfsError::InvalidData);
+                return Ok(());
+            }
+        };
+        if let Err(error) = self.inner.emit(name) {
+            self.error = Some(error);
+        }
+        Ok(())
+    }
+}
+
+fn into_xattr_vfs_err(err: kext4::Ext4Error) -> VfsError {
+    if err == kext4::Ext4Error::NotFound {
+        VfsError::from(LinuxError::ENODATA)
+    } else {
+        into_vfs_err(err)
+    }
+}
 
 /// VFS inode wrapper for KExt4 nodes.
 pub(crate) struct Inode {
@@ -581,6 +673,72 @@ impl InodeOperations for Inode {
             .map_err(into_vfs_err)?;
         Ok(())
     }
+
+    fn get_xattr(
+        &self,
+        _dentry: &Dentry,
+        _inode: &VfsInode,
+        name: &XattrName,
+    ) -> VfsResult<Vec<u8>> {
+        let (namespace, suffix) = parse_xattr_name(name)?;
+        let fs = self.fs.read_lock();
+        let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
+        fs.get_xattr(&inode, namespace, suffix)
+            .map_err(into_xattr_vfs_err)?
+            .ok_or_else(|| VfsError::from(LinuxError::ENODATA))
+    }
+
+    fn list_xattrs(
+        &self,
+        _dentry: &Dentry,
+        _inode: &VfsInode,
+        sink: &mut dyn XattrNameSink,
+    ) -> VfsResult<()> {
+        let fs = self.fs.read_lock();
+        let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
+        let mut sink = VfsXattrNameSink {
+            inner: sink,
+            error: None,
+        };
+        fs.list_xattrs(&inode, &mut sink)
+            .map_err(into_xattr_vfs_err)?;
+        sink.finish()
+    }
+
+    fn set_xattr(
+        &self,
+        dentry: &Dentry,
+        _inode: &VfsInode,
+        name: &XattrName,
+        value: &[u8],
+        flags: XattrSetFlags,
+    ) -> VfsResult<()> {
+        let (namespace, suffix) = parse_xattr_name(name)?;
+        let mut fs = self.fs.lock();
+        let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
+        let mode = xattr_set_mode(flags);
+        let updated = fs
+            .set_xattr_with_mode(
+                &inode,
+                namespace,
+                suffix,
+                value,
+                mode,
+                current_ext4_timestamp(),
+            )
+            .map_err(into_xattr_vfs_err)?;
+        sync_dentry_ctime(dentry, &updated)
+    }
+
+    fn remove_xattr(&self, dentry: &Dentry, _inode: &VfsInode, name: &XattrName) -> VfsResult<()> {
+        let (namespace, suffix) = parse_xattr_name(name)?;
+        let mut fs = self.fs.lock();
+        let inode = fs.referenced_inode(self.number).map_err(into_vfs_err)?;
+        let updated = fs
+            .remove_xattr(&inode, namespace, suffix, current_ext4_timestamp())
+            .map_err(into_xattr_vfs_err)?;
+        sync_dentry_ctime(dentry, &updated)
+    }
 }
 
 impl InodeFiemapOperations for Inode {
@@ -1124,14 +1282,21 @@ impl Ext4DirSink for KvfsDirSink<'_, '_> {
 mod tests {
     use alloc::{collections::BTreeSet, vec::Vec};
 
-    use kext4::{BlockCount, BlockMapping, BlockMappingFlags, PhysicalBlock};
+    use kerrno::LinuxError;
+    use kext4::{
+        BlockCount, BlockMapping, BlockMappingFlags, Ext4XattrNamespace, Ext4XattrSetMode,
+        PhysicalBlock,
+    };
     use kvfs::{
         FiemapExtentFlags, FiemapExtentInfo, FiemapExtentWriter, FiemapFlags, RenameFlags,
-        VfsResult,
+        VfsResult, XattrName, XattrSetFlags,
     };
     use unittest::def_test;
 
-    use super::{ExtentWalkQuery, delayed_run_end, supports_rename_flags, walk_file_extents};
+    use super::{
+        ExtentWalkQuery, delayed_run_end, parse_xattr_name, supports_rename_flags,
+        walk_file_extents, xattr_set_mode,
+    };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     struct CollectedExtent {
@@ -1191,7 +1356,6 @@ mod tests {
         }
         Ok(writer.extents)
     }
-
     #[def_test]
     fn rename_support_is_limited_to_move_and_noreplace() {
         assert!(supports_rename_flags(RenameFlags::empty()));
@@ -1398,5 +1562,51 @@ mod tests {
         assert_eq!(extents.len(), 1);
         assert_eq!(extents[0].length, 2 * 4096);
         assert!(extents[0].flags.contains(FiemapExtentFlags::LAST));
+    }
+
+    #[def_test]
+    fn xattr_name_mapping_accepts_public_ext4_namespaces() {
+        for (name, namespace) in [
+            (&b"user.key"[..], Ext4XattrNamespace::User),
+            (&b"trusted.key"[..], Ext4XattrNamespace::Trusted),
+            (&b"security.key"[..], Ext4XattrNamespace::Security),
+        ] {
+            let name = XattrName::new(name.to_vec()).unwrap();
+            assert_eq!(parse_xattr_name(&name), Ok((namespace, &b"key"[..])));
+        }
+
+        for name in [&b"user."[..], &b"trusted."[..], &b"security."[..]] {
+            let name = XattrName::new(name.to_vec()).unwrap();
+            assert!(matches!(
+                parse_xattr_name(&name),
+                Err(err) if LinuxError::from(err) == LinuxError::EINVAL
+            ));
+        }
+
+        let acl = XattrName::new(b"system.posix_acl_access".to_vec()).unwrap();
+        assert!(matches!(
+            parse_xattr_name(&acl),
+            Err(err) if LinuxError::from(err) == LinuxError::EOPNOTSUPP
+        ));
+    }
+
+    #[def_test]
+    fn xattr_set_flags_preserve_all_four_combinations() {
+        assert_eq!(
+            xattr_set_mode(XattrSetFlags::empty()),
+            Ext4XattrSetMode::CreateOrReplace
+        );
+        assert_eq!(
+            xattr_set_mode(XattrSetFlags::CREATE),
+            Ext4XattrSetMode::Create
+        );
+        assert_eq!(
+            xattr_set_mode(XattrSetFlags::REPLACE),
+            Ext4XattrSetMode::Replace
+        );
+        assert_eq!(
+            xattr_set_mode(XattrSetFlags::CREATE | XattrSetFlags::REPLACE),
+            Ext4XattrSetMode::CreateAndReplace
+        );
     }
 }

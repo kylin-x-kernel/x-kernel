@@ -94,6 +94,10 @@ KVFS bridge 信任 KVFS 已经提供内核拥有的 path name、dentry、inode `
   扣除 ext4 reserved blocks 和 bridge 尚未落盘的 reservation。
 - 从磁盘解码的 external xattr name 必须拒绝内嵌 NUL，保持与 Linux/e2fsck 的 corruption
   handling 一致。
+- Xattr name-only 遍历仍必须验证 entry 末端、value range、external block header 和 checksum；
+  sink 只能在单次回调期间借用 name bytes，不能保存该引用。
+- 相同 xattr value 的允许替换必须在 journal credit 准备和 metadata access 前短路，不能更新
+  inode ctime，也不能产生无意义的 journal 写入。
 - 运行态 inode allocation 必须使用 bridge 已通过 `inode_init_owner()` 导出的显式
   UID/GID；KExt4 core 不得把新 inode owner 默认为 root。
 - FIEMAP 的 logical/physical/length 乘法和加法必须 checked；遍历必须同时受请求末端与
@@ -117,7 +121,7 @@ exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，
 
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 |------|----------|----------|----------|----------|
-| T-01 | 损坏镜像中的 xattr entry name 带内嵌 NUL，却被当成合法属性读入 | 中 | 恶意或损坏镜像在 `e_name` 中编码 NUL | `decode_xattr_entries()` 拒绝包含 `0` 的 name，并有畸形 entry 回归测试 |
+| T-01 | 损坏镜像中的 xattr entry name 或 value range 被 name-only list 路径当成合法属性 | 中 | 恶意或损坏镜像编码 NUL、越界/重叠 value 或无效 external block | `decode_xattr_entries()` 拒绝 NUL 和畸形 entry；name-only 遍历仍校验 value range、block header 与 checksum，并有回归测试 |
 | T-02 | external xattr block 在 unlink 或 rename overwrite 后泄漏，或 inode 继续引用已释放 block | 中 | zero-link victim 的 `i_file_acl != 0` | zero-link eviction 先释放或递减 EA block refcount，清 `i_file_acl`，更新 `i_blocks`，再释放 inode |
 | T-03 | 运行态 unlink 过早释放仍被打开 fd 引用的 inode | 中 | KExt4 运行态后端上 unlink 一个仍打开的 inode | namespace transaction 只持久化 nlink/orphan；已有 VFS identity 可用 `referenced_inode()` 继续 I/O，最后引用销毁才进入 superblock final eviction |
 | T-04 | journal credits 估算不足或按 data blocks 过度估算，导致 metadata update 在事务中途失败或被错误拒绝 | 中 | namespace remove、writeback、truncate、preallocation discard 或 final eviction 修改 orphan、xattr、extent 和 inode metadata | namespace reservation 只覆盖 dirent、nlink 和 orphan metadata，不包含后续 final eviction；ordered writeback 固定为 path-local 算法并按 logical blocks 与最大路径深度估算，禁止固定上限截断；legacy final eviction 和 extent truncate 按实际 tree blocks、需要 revoke 的旧 tree blocks 与 affected groups 计算；victim 带 external xattr 时 final eviction 预算包含 EA 清理 |
@@ -128,6 +132,7 @@ exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，
 | T-09 | 新建 inode 固定为 root，绕过调用者 owner 语义 | 高 | bridge 丢弃 credential 或 core constructor 隐式填入 UID/GID 0 | create/mkdir/mknod/symlink callback 使用 `inode_init_owner()`，显式 `uid`、`gid` 随同 namei transaction 持久化 |
 | T-10 | journal head 追上 tail 并覆盖尚未 checkpoint 的 commit | 高 | 多个 committed transaction 占满环形日志，追加仍继续写入 | 依据 oldest tail/current head 计算 live 空间，始终保留一个空 block；空间不足时先 checkpoint 最老 transaction 再重试，不发出覆盖写；真实 ext4 镜像测试覆盖双 transaction tail 推进 |
 | T-11 | 损坏 extent 或超大 FIEMAP 范围造成算术溢出、错误物理地址或无界遍历 | 高 | disk mapping 长度越过格式容量，或字节/块换算未检查 | core 暴露 Linux 对等的 inode 格式相关最大字节数；bridge 对每次加法、乘法和输出字段做 checked 校验，并把 mapping 截断到请求与格式边界 |
+| T-12 | 磁盘 inode 的 immutable/append-only 状态在 bridge 中丢失，导致 xattr 被修改 | 中 | iget 构造 KVFS inode 时总是使用空 `NodeFlags` | core 以语义方法暴露 `EXT4_IMMUTABLE_FL/EXT4_APPEND_FL`；bridge 在发布 VFS inode identity 时映射为 KVFS flags，由通用 xattr 权限层在 mutation 前返回 `EPERM` |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -170,8 +175,13 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
 
 ## 已知限制
 
-- 运行态 xattr syscall hook 尚未接入，因为 KVFS 还没有 xattr ops trait。
-- POSIX ACL 当前只是 opaque xattr bytes，不实现 ACL permission enforcement 或 inheritance。
+- 运行态已通过 KVFS 暴露 `user.*`、`trusted.*` 和 `security.*` xattr；namespace/DAC 在
+  KVFS 检查，缺少完整 LSM/capability 时 `security.*` set/remove 要求 privileged
+  credential，create/replace 的四种标志组合由 KExt4 core 在同一写锁的 mutation plan
+  中检查。磁盘 immutable/append-only flags 在 iget 时映射到 KVFS 并阻止 xattr mutation；
+  当前尚未实现 `FS_IOC_SETFLAGS`，因此不存在需要运行时刷新这些 flags 的修改入口。
+- POSIX ACL 当前只是 core 内的 opaque xattr bytes，不实现 ACL permission enforcement、
+  mode 同步或 inheritance，因此 bridge 不把 `system.posix_acl_*` 作为普通 xattr 暴露。
 - EA inode、oversized xattr、bigalloc、orphan-file、inline-data write、huge-file write
   block-unit accounting、encryption/casefold、direct I/O 和 mmap coherence 仍是后续工作。
 - KVFS unmount 已在 topology detach 前后同步 VFS 与 journal 状态，但阻止新引用/写入、
@@ -187,6 +197,9 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
 ## 审计清单
 
 - metadata parser 是否拒绝 truncated、out-of-bounds、unsorted 或 checksum-invalid input？
+- xattr list 是否只借用名称，同时继续校验 value range 和 external block checksum？相同值
+  set 是否在 journal/ctime 更新前返回？磁盘 immutable/append-only flags 是否在 iget 时
+  映射到 KVFS，并在任何 xattr mutation 前返回 `EPERM`？
 - 每个 mutation 是否为所有可能 dirty 或 revoke 的 metadata block 预留了足够 journal credits？
 - zero-link cleanup 是否在一个可审计事务中释放 data、external xattr block、orphan entry 和
   inode bitmap state？

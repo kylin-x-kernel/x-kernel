@@ -242,10 +242,20 @@ Create、mkdir、mknod 和 symlink 的 KVFS bridge callback 接收同一次操�
 再把显式 `uid`、`gid` 参数传入 KExt4 namei transaction。核心 inode constructor 不读取当前任务，
 也不提供固定 root owner 的运行态默认值；测试镜像构造必须显式传入其 fixture owner。
 
-Xattr 修改会先把 inline xattr 和 external xattr 解码到内存向量中，应用更新后再选择
-inode-body 或 single external-block 存储，维护 `i_file_acl`、`i_blocks`、block checksum
-和 refcount。Zero-link eviction 会复用 external xattr block 清理逻辑，先释放 EA block，
-再释放 inode bitmap entry。
+Xattr 修改会把 inline xattr 和 external xattr 解码一次，在同一份 mutation plan 中完成
+存在性检查、值更新、存储布局选择与 journal credits 计算，再选择 inode-body 或 single
+external-block 存储，维护 `i_file_acl`、`i_blocks`、block checksum 和 refcount。
+`Ext4XattrSetMode` 表达无标志、create、replace 和 create+replace 四种组合；组合标志在属性
+存在时返回 `EEXIST`，缺失时返回 `ENODATA`，不会通过 bridge 的锁外预查实现。允许替换时，
+若现有值逐字节相同，core 在 journal handle、metadata write 和 ctime 更新前返回原 inode。
+`Ext4Inode` 从磁盘 `i_flags` 暴露 immutable 和 append-only 状态；bridge 在 iget 时把它们映射
+为 KVFS `NodeFlags`，使通用 xattr 权限层在进入 namespace 或 KExt4 mutation 前返回 `EPERM`。
+
+`list_xattrs()` 使用 `Ext4XattrNameSink` 逐项借用已校验的磁盘名称，只验证 value range 而不
+复制 value。KVFS bridge 在 sink 中添加 `user.*`、`trusted.*`、`security.*` 前缀并继续流式
+传递，不构造 `Ext4Xattr` 或完整名称中间向量。成功 mutation 后 bridge 把 core inode ctime
+同步回共享 VFS identity。Zero-link eviction 会复用 external xattr block 清理逻辑，先释放
+EA block，再释放 inode bitmap entry。
 
 Truncate 使用 legacy orphan list 保护 regular-file shrink。KExt4 的
 `AddressSpaceOperations::set_len()` 按

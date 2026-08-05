@@ -47,6 +47,7 @@ kfd resources / kvfs / device and pipe implementations
 |------|----------|----------|
 | 用户路径字符串 | `openat`、`linkat`、`statx`、`mount` | 空指针、非 NUL 结尾、过长字符串、路径穿越、符号链接循环 |
 | 用户读写缓冲区 | `read`、`write`、`readlinkat`、`getdents64`、`statfs` | 坏地址、短缓冲区、跨页访问失败、内核信息写回格式错误 |
+| xattr 名称和值 | `set/get/list/remove*xattr` | 非 NUL 结尾、超长 name/value/list、非 UTF-8 suffix、短输出缓冲区、namespace 越权 |
 | 用户 iovec | `readv`、`writev`、`preadv2`、`pwritev2` | iovec 数量过大、范围溢出、读写方向错误 |
 | fd 编号 | 几乎所有 fd syscall | 已关闭 fd、类型不匹配、fd 复用、`CLOEXEC`/非阻塞标志混淆 |
 | 当前进程状态 | `chdir`、`openat`、`close_range` | 进程资源锁、fs_struct 更新、umask 和当前目录语义 |
@@ -117,6 +118,9 @@ kfd resources / kvfs / device and pipe implementations
 10. `chown/chmod/utimensat` 必须把同一个 credential snapshot 传给 VFS metadata
    授权，不能直接调用后端 `setattr`。
 11. `F_ADD_SEALS` 只能单调添加 memfd seals，且必须尊重 `F_SEAL_SEAL`。
+12. Xattr 输入 name/value 必须先复制到有上限的内核缓冲区；list name sink 的累计长度不得
+    超过 `XATTR_LIST_MAX`。`size == 0` 查询不得访问输出指针或物化名称序列，非零短缓冲区
+    必须返回 `ERANGE`，raw set flags 不得进入 KVFS。
 
 ## 线程安全
 
@@ -162,6 +166,7 @@ kfd resources / kvfs / device and pipe implementations
 | T-24 | `linkat` 默认错误跟随 source symlink 或静默接受未知 flags | pathname flags | 中 | 通用 resolve helper 默认 follow，或 syscall 只记录 warning | syscall 只接受 `AT_SYMLINK_FOLLOW | AT_EMPTY_PATH`；默认显式使用 no-follow，未知位返回 `EINVAL` |
 | T-25 | FIFO open 根据第一次错误重新解析 pathname | pathname/open | 高 | 两次 lookup 之间目标被 rename 或 symlink replacement | syscall open 只调用一次 `Filename::open_with_flags_at`；FIFO dispatch 在 KVFS 已授权的 resolved inode 上完成 |
 | T-26 | FIEMAP 数量或地址计算溢出导致越界写或内核数据泄漏 | ioctl / 用户输出 | 高 | 信任 `fm_extent_count`、用未检查指针运算或复制未初始化 reserved 字段 | 限制最大数量，所有地址运算使用 checked arithmetic，输出结构显式初始化全部字段；用户地址只通过 `UserPtr` 写入 |
+| T-27 | `listxattr` 的名称聚合溢出或 size query 产生无界中间分配 | xattr / 用户输出 | 中 | 先收集属性和值，再构造多个完整名称副本，或累计长度未检查 | KVFS borrowed-name sink 直接写入单个 `XattrListWriter`；逐项 checked_add 并限制 `XATTR_LIST_MAX`，`size == 0` 只计数 |
 
 影响等级定义：
 
@@ -231,6 +236,9 @@ kfd resources / kvfs / device and pipe implementations
    非零 flags 返回 `Unsupported`。
 7. memfd `F_ADD_SEALS` / `F_GET_SEALS` 已接入；shared writable mmap 和
    `mprotect(PROT_WRITE)` seal enforcement 由 `mm/filemap` 执行。
+8. POSIX ACL 与 LSM 尚未实现；`security.*`/`system.*` 的最终安全策略受这一限制。
+   KExt4 当前只对外暴露普通 `user.*`、`trusted.*` 和 `security.*` xattr，KVFS 在完整
+   LSM/capability hook 接入前要求 privileged credential 才能 set/remove `security.*`。
 
 ## 审计清单
 
@@ -252,4 +260,5 @@ kfd resources / kvfs / device and pipe implementations
 - [ ] 新 filesystem type 通过 KVFS registry 接入，不在 syscall 层增加具体 crate 依赖或
   与 `/proc/filesystems` 分离的名称表。
 - [ ] 新增日志不输出文件内容或敏感用户缓冲区。
+- [ ] xattr list 是否逐项检查累计长度、只使用一个输出缓冲区，并在 `size == 0` 时只计数？
 - [ ] 若修复当前已知限制，同步更新本文和 `design.md`。

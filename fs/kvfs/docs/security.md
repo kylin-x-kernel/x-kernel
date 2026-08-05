@@ -32,6 +32,8 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   不能安装或替换注册项。
 - 文件系统 mutation result 会进入 VFS cached inode attributes；错误 identity 或 immutable
   geometry 不可信。
+- Xattr 名称和值来自 syscall 边界；KVFS 只接受内核拥有的 `XattrName` 和 value slice，
+  namespace 权限必须在调用 filesystem callback 前完成。
 
 `kvfs` 不直接解引用用户指针，不直接访问 MMIO、PIO、DMA 或 architecture FFI。
 
@@ -201,6 +203,9 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-34 | 最后一个 mount 释放时丢失 dirty page、inode metadata 或 journal checkpoint | 高 | topology detach 后 superblock 没有 active 生命周期，Weak registry 也无法保活 | `VfsMount` 获取/释放 superblock active 引用；最后一个引用在 umount lock 下执行 writeback、dcache eviction 和最终 filesystem/device sync；错误记录后仍完成 teardown |
 | T-35 | 递归卸载 overmount 子树留下 registry 中不可达 mount | 高 | 只遍历 visible children，或边遍历边修改 topology | 收集每个 child mountpoint 的完整 covers 链，先验证全部 registry membership，再执行无失败分支的 topology commit |
 | T-36 | 文件系统输出畸形 extent 导致范围溢出或 ABI 层错误解释 | 中 | 后端返回零长度或 logical/physical 末端越界 | `FiemapExtentInfo::fill_next_extent()` 集中检查非零长度和两个范围的 `checked_add`；ABI writer 只接收校验后的字段 |
+| T-37 | 非特权调用者伪造 `security.*` xattr | 高 | VFS 按 Linux 语义把授权委托给尚未实现的 LSM hook，后端直接接受该 namespace | KVFS 在 LSM/capability hook 接入前要求 privileged credential 才能 set/remove `security.*`；读操作仍保留委托语义，残余风险是缺少具体 LSM 的读取策略 |
+| T-38 | `listxattr` 为不可见名称或属性值建立中间副本，造成不必要的内存放大 | 中 | 后端先返回拥有 value 的属性向量，KVFS 再过滤 `trusted.*` | `InodeOperations::list_xattrs` 通过 borrowed name sink 输出；`Path` 在流中先过滤 `trusted.*`，调用者只接收可见名称 |
+| T-39 | immutable 或 append-only inode 的 xattr 仍可被修改 | 中 | namespace 特例在通用 inode 状态检查前直接授权，或文件系统未把磁盘 inode flags 映射到 KVFS | `check_xattr_permission()` 在所有 namespace 分支前检查 `NodeFlags::IMMUTABLE/APPEND_ONLY`，set/remove 统一返回 `EPERM`；具体 bridge 必须在建立 VFS inode identity 时映射后端 flags |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -224,7 +229,8 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 
 ## 已知限制
 
-- 尚无 capability、LSM、POSIX ACL、user namespace ID 映射和 idmapped mount DAC。
+- 尚无完整 capability、LSM、POSIX ACL、user namespace ID 映射和 idmapped mount DAC；
+  `trusted.*` 访问和 `security.*` mutation 当前使用 `euid == 0` 近似相应 capability。
 - FAT 等后端不能完整表达 Unix UID/GID owner。
 - 当前 POSIX rename 路径不支持 `RENAME_WHITEOUT`。inode lookup 和 getattr 的类型已
   建立，但尚未定义额外语义位；当前调用使用 empty flags。
@@ -261,6 +267,10 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
   `f_mode` 与 `pipe_generation`。
 - FIFO poll 注册是否按 file mode 选择 wait queue，而不是按用户 event mask。
 - pathname FIFO 时间更新是否只在一次成功的对外 I/O 后经 VFS policy 执行。
+- xattr raw flags 是否先转换为 `XattrSetFlags`，set/remove 是否检查只读 mount 并持有
+  inode data lock，`trusted.*` 是否对非特权 list/get 隐藏名称和存在性，`security.*`
+  mutation 是否拒绝非特权 credential，immutable/append-only 是否在 namespace 分支前拒绝
+  所有 mutation，list 后端是否只在 sink 回调期间借用名称？
 - backing mutation 后是否刷新所有受影响的 live inode，而不是只返回新 dentry。
 - truncate 是否通过 `set_len()` 与 `truncate_setsize()` 保持 backing prepare、i_size publish、
   两轮 AddressSpace invalidation、cache truncate 和 backing finish 顺序。

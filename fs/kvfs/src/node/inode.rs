@@ -31,7 +31,7 @@ use crate::{
     AddressSpace, AddressSpaceOperations, DelayedCall, Dentry, DeviceId, FiemapExtentInfo,
     FileOperations, LockedDentry, Metadata, MetadataUpdate, MountIdmap, Mutex, NodePermission,
     NodeType, Path, Permission, RwLock, RwLockReadGuard, RwLockWriteGuard, SuperBlock, Umode,
-    VfsError, VfsFileBuilder, VfsResult,
+    VfsError, VfsFileBuilder, VfsResult, XattrName, XattrNameSink, XattrSetFlags,
     address_space::{default_address_space_operations, empty_address_space_operations},
     generic_permission,
     pipe::{PipeObject, fifo_file_operations},
@@ -76,6 +76,12 @@ bitflags! {
 
         /// Inode is an anonymous inode.
         const ANON_INODE = 0x0020;
+
+        /// Inode contents and metadata cannot be modified.
+        const IMMUTABLE = 0x0040;
+
+        /// Inode contents may only be extended by append operations.
+        const APPEND_ONLY = 0x0080;
     }
 }
 
@@ -358,6 +364,48 @@ pub trait InodeOperations: Send + Sync + 'static {
     ) -> VfsResult<Metadata> {
         let path = path.ok_or(VfsError::InvalidInput)?;
         Ok(path.metadata())
+    }
+
+    /// Reads an extended attribute from this inode.
+    fn get_xattr(
+        &self,
+        _dentry: &Dentry,
+        _inode: &VfsInode,
+        _name: &XattrName,
+    ) -> VfsResult<Vec<u8>> {
+        Err(VfsError::OperationNotSupported)
+    }
+
+    /// Streams complete extended-attribute names stored on this inode.
+    fn list_xattrs(
+        &self,
+        _dentry: &Dentry,
+        _inode: &VfsInode,
+        _sink: &mut dyn XattrNameSink,
+    ) -> VfsResult<()> {
+        Err(VfsError::OperationNotSupported)
+    }
+
+    /// Creates or replaces an extended attribute on this inode.
+    fn set_xattr(
+        &self,
+        _dentry: &Dentry,
+        _inode: &VfsInode,
+        _name: &XattrName,
+        _value: &[u8],
+        _flags: XattrSetFlags,
+    ) -> VfsResult<()> {
+        Err(VfsError::OperationNotSupported)
+    }
+
+    /// Removes an extended attribute from this inode.
+    fn remove_xattr(
+        &self,
+        _dentry: &Dentry,
+        _inode: &VfsInode,
+        _name: &XattrName,
+    ) -> VfsResult<()> {
+        Err(VfsError::OperationNotSupported)
     }
 }
 
@@ -1442,6 +1490,33 @@ impl VfsInode {
                 inode: self,
                 operations,
             })
+    }
+
+    pub(crate) fn get_xattr(&self, dentry: &Dentry, name: &XattrName) -> VfsResult<Vec<u8>> {
+        self.inode_operations.get_xattr(dentry, self, name)
+    }
+
+    pub(crate) fn list_xattrs(
+        &self,
+        dentry: &Dentry,
+        sink: &mut dyn XattrNameSink,
+    ) -> VfsResult<()> {
+        self.inode_operations.list_xattrs(dentry, self, sink)
+    }
+
+    pub(crate) fn set_xattr(
+        &self,
+        dentry: &Dentry,
+        name: &XattrName,
+        value: &[u8],
+        flags: XattrSetFlags,
+    ) -> VfsResult<()> {
+        self.inode_operations
+            .set_xattr(dentry, self, name, value, flags)
+    }
+
+    pub(crate) fn remove_xattr(&self, dentry: &Dentry, name: &XattrName) -> VfsResult<()> {
+        self.inode_operations.remove_xattr(dentry, self, name)
     }
 
     /// Synchronizes the file to disk.

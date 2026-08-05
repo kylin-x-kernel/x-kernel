@@ -51,9 +51,11 @@
 //! release and dirty throttling remain KVFS/PageCache accounting extensions.
 //! The R9 xattr baseline adds journaled inode-body and single external
 //! block set/remove for `user.*`, `trusted.*`, `security.*`, and opaque POSIX
-//! ACL xattrs. The live bridge under `fs/bridges/kext4_vfs` exposes the current
-//! KVFS superblock, inode, address-space, and file-operation surface; live xattr
-//! hooks still wait for a shared KVFS xattr API. This is still not a complete
+//! ACL xattrs. The live bridge under `fs/bridges/kext4_vfs` exposes
+//! `user.*`, `trusted.*`, and `security.*` through KVFS xattr operations,
+//! including atomic create/replace policy and ctime synchronization. Opaque ACL
+//! bytes remain a core-only foundation until KVFS has ACL permission and
+//! inheritance semantics. This is still not a complete
 //! Linux ext4 write mount: mmap/direct I/O coherence, freeze/unmount lifecycle
 //! hooks, a background checkpoint worker, oversized xattr, EA-inode, inline-data
 //! write contracts, and Linux-style errseq/forced-readonly reporting remain
@@ -130,4 +132,6 @@ pub use truncate::Ext4PreparedTruncate;
 pub use types::{
     BlockCount, BlockGroupNumber, FilesystemBlock, InodeNumber, LogicalBlock, PhysicalBlock,
 };
-pub use xattr::{Ext4Xattr, Ext4XattrNamespace};
+pub use xattr::{
+    Ext4Xattr, Ext4XattrNameRef, Ext4XattrNameSink, Ext4XattrNamespace, Ext4XattrSetMode,
+};

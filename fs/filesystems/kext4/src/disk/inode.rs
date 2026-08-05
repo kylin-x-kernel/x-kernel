@@ -29,6 +29,8 @@ pub(crate) const S_IFREG: u16 = 0x8000;
 pub(crate) const S_IFLNK: u16 = 0xa000;
 pub(crate) const S_IFSOCK: u16 = 0xc000;
 
+pub(crate) const EXT4_IMMUTABLE_FL: u32 = 0x0000_0010;
+pub(crate) const EXT4_APPEND_FL: u32 = 0x0000_0020;
 pub(crate) const EXT4_ENCRYPT_FL: u32 = 0x0000_0800;
 pub(crate) const EXT4_INDEX_FL: u32 = 0x0000_1000;
 pub(crate) const EXT4_HUGE_FILE_FL: u32 = 0x0004_0000;

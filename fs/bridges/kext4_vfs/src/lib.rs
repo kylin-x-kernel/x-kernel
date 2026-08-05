@@ -4,9 +4,9 @@
 
 //! KVFS bridge for the checked KExt4 filesystem core.
 //!
-//! The crate adapts KExt4 superblock, inode, file, and address-space operations
-//! to KVFS and provides the KExt4 implementation of
-//! [`fs_block::RootFileSystem`] when selected by Kconfig.
+//! The crate adapts KExt4 superblock, inode, file, address-space, and
+//! extended-attribute operations to KVFS and provides the KExt4 implementation
+//! of [`fs_block::RootFileSystem`] when selected by Kconfig.
 
 #![cfg_attr(any(not(test), doc), no_std)]
 

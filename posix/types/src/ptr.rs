@@ -330,6 +330,21 @@ impl UserConstPtr<c_char> {
     /// Load a null-terminated string whose byte length must not exceed
     /// `max_len`, excluding the terminator.
     pub fn load_string_with_max_len(self, max_len: usize) -> KResult<String> {
+        let bytes = self.load_bytes_with_max_len(max_len).map_err(|err| {
+            if err.canonicalize() == KError::OutOfRange {
+                KError::InvalidInput
+            } else {
+                err
+            }
+        })?;
+        String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)
+    }
+
+    /// Loads a NUL-terminated byte string with a bounded payload length.
+    ///
+    /// Unlike [`Self::load_string_with_max_len`], this preserves non-UTF-8
+    /// bytes for Linux ABI names whose value is an opaque byte sequence.
+    pub fn load_bytes_with_max_len(self, max_len: usize) -> KResult<Vec<u8>> {
         let mut bytes = Vec::new();
 
         for offset in 0..=max_len {
@@ -341,14 +356,14 @@ impl UserConstPtr<c_char> {
             let byte = unsafe { byte.assume_init() };
 
             if byte == 0 {
-                return String::from_utf8(bytes).map_err(|_| KError::IllegalBytes);
+                return Ok(bytes);
             }
             if bytes.len() == max_len {
-                return Err(KError::InvalidInput);
+                return Err(KError::OutOfRange);
             }
             bytes.push(byte);
         }
 
-        Err(KError::InvalidInput)
+        Err(KError::OutOfRange)
     }
 }

@@ -42,6 +42,7 @@ posix/fs/
 │   ├── dir.rs          # chdir/chroot/mkdir/getdents64/getcwd
 │   ├── namei.rs        # link/unlink/symlink/readlink/rename
 │   ├── metadata.rs     # chown/chmod/utime/utimensat
+│   ├── xattr.rs        # set/get/list/remove xattr syscall families
 │   ├── mount.rs        # mount/umount2
 │   ├── stat.rs         # stat/fstatat/statx/access/statfs
 │   ├── ioctl.rs        # ioctl dispatch、FIONBIO 与 FIEMAP ABI handling
@@ -88,6 +89,7 @@ core/ksyscall
 | `dir` | 维护当前目录、根目录、目录/节点创建和 `linux_dirent64` 输出；`mknodat` 只转换 ABI 参数，创建策略由 KVFS 执行 |
 | `namei` | 处理链接、删除、符号链接和重命名等命名空间变更 |
 | `metadata` | 修改所有者、权限和时间戳 |
+| `xattr` | 实现 pathname、no-follow 和 fd 三种目标形式的 set/get/list/remove xattr，复制有界输入名称和值，并用单个有界 writer 处理 list size query/`ERANGE` |
 | `mount` | 把 Linux mount flags 映射到 `kvfs::MountFlags`，按注册的 `FileSystemType` 查找实现，并处理非递归 bind 与 remount |
 | `stat` | 转换 VFS metadata、access 检查和 statfs 信息 |
 | `ioctl` | 处理 `FIONBIO`、inode FIEMAP，并把其它命令转交 `FileLike::ioctl` |
@@ -191,6 +193,20 @@ FileLike::read/write
    `AT_SYMLINK_NOFOLLOW` 和 `NO_MAGIC_LINKS`。
 5. 空路径配合 `AT_EMPTY_PATH` 返回 fd 对象对应的 VFS `Location` 或非 VFS
    `FileLike`。
+
+### xattr syscall family
+
+1. `setxattr/lsetxattr/fsetxattr`、`get*`、`list*` 和 `remove*` 共用四个语义 helper；
+   pathname 版本跟随 final symlink，`l*` 不跟随，`f*` 直接使用 fd 的 `Path`。
+2. Xattr name 按 Linux 255-byte 上限复制为原始 bytes，不要求 UTF-8；set value 和 list
+   分别执行 64 KiB 上限。
+3. `XATTR_CREATE`/`XATTR_REPLACE` 在 syscall 边界转换为 `XattrSetFlags`，未知位返回
+   `EINVAL`；两个已知位可同时设置，实际四种存在性策略由 filesystem 在同一 mutation
+   lock/transaction 内完成。
+4. `get/list` 的 `size == 0` 只返回所需长度；非零缓冲区不足返回 `ERANGE`，list 输出是
+   NUL 分隔的完整名称序列。List 直接把 KVFS name sink 写入唯一的有界内核缓冲区；
+   `size == 0` 时只累计长度，不物化名称序列。
+5. 用户指针只在 `posix-fs` 复制；KVFS 和文件系统后端不接收用户地址。
 
 ### `mkdirat`
 
@@ -448,3 +464,5 @@ pathname DAC。这对应 Linux `vfs_truncate()` 与 `do_ftruncate()` 的语义�
 7. `F_ADD_SEALS` / `F_GET_SEALS` 已接入 shmem object state；shared
    writable mmap 和 `mprotect(PROT_WRITE)` seal enforcement 由 `mm/filemap`
    执行。
+8. POSIX ACL 仍未实现权限计算、mode 同步和继承；KExt4 不把 core 中的 opaque ACL bytes
+   作为普通 `system.posix_acl_*` xattr 暴露。

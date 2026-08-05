@@ -1066,7 +1066,19 @@ fn journals_inline_xattr_set_and_remove() {
                 .as_deref(),
             Some(&b"inline-value"[..])
         );
-        updated
+        let committed_after_set = device.committed_bytes();
+        let unchanged = filesystem
+            .set_xattr(
+                &updated,
+                Ext4XattrNamespace::User,
+                b"codex",
+                b"inline-value",
+                Ext4Timestamp::new(1_720_000_001, 0),
+            )
+            .expect("setting the same xattr value is a no-op");
+        assert_eq!(unchanged.ctime(), updated.ctime());
+        assert_eq!(device.committed_bytes(), committed_after_set);
+        unchanged
     };
 
     {
@@ -1093,7 +1105,7 @@ fn journals_inline_xattr_set_and_remove() {
                 &persisted,
                 Ext4XattrNamespace::User,
                 b"codex",
-                Ext4Timestamp::new(1_720_000_001, 0),
+                Ext4Timestamp::new(1_720_000_002, 0),
             )
             .expect("remove inline xattr");
         assert!(

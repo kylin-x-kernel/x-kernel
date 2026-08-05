@@ -545,6 +545,16 @@ impl Ext4Inode {
         self.flags
     }
 
+    /// Returns whether the inode carries the ext4 immutable flag.
+    pub const fn is_immutable(&self) -> bool {
+        self.flags & disk_inode::EXT4_IMMUTABLE_FL != 0
+    }
+
+    /// Returns whether the inode carries the ext4 append-only flag.
+    pub const fn is_append_only(&self) -> bool {
+        self.flags & disk_inode::EXT4_APPEND_FL != 0
+    }
+
     pub(crate) const fn extent_bytes(&self) -> &[u8; disk_inode::INODE_BLOCK_BYTES] {
         &self.block
     }
@@ -1628,6 +1638,20 @@ mod tests {
     use crate::{CorruptKind, Ext4Error, InodeNumber, UnsupportedKind};
 
     const BLOCK_SIZE: u32 = 4096;
+
+    #[test]
+    fn exposes_immutable_and_append_only_inode_flags() {
+        let inode = symlink_inode(
+            9,
+            0,
+            disk_inode::EXT4_IMMUTABLE_FL | disk_inode::EXT4_APPEND_FL,
+            0,
+            fast_symlink_block(b"hello.txt"),
+        );
+
+        assert!(inode.is_immutable());
+        assert!(inode.is_append_only());
+    }
 
     #[test]
     fn classifies_fast_symlink_by_data_blocks_not_size_only() {

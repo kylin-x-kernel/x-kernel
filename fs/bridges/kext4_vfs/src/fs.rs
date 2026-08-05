@@ -32,6 +32,13 @@ const EXT4_ROOT_INO: u32 = 2;
 /// 256 blocks × 4 KiB = 1 MiB of block allocation work per transaction.
 const EVICTION_BATCH_BLOCKS: u32 = 256;
 
+fn node_flags_from_core_inode(inode: &Ext4Inode) -> NodeFlags {
+    let mut flags = NodeFlags::empty();
+    flags.set(NodeFlags::IMMUTABLE, inode.is_immutable());
+    flags.set(NodeFlags::APPEND_ONLY, inode.is_append_only());
+    flags
+}
+
 /// Ext4 filesystem implementation backed by the checked KExt4 core.
 pub struct Ext4Filesystem {
     inner: RwLock<KExt4Core>,
@@ -168,6 +175,7 @@ impl Ext4Filesystem {
         }
         let node_type = inode_kind_to_vfs(inode.kind());
         let has_extents = inode.has_extents();
+        let node_flags = node_flags_from_core_inode(&inode);
         let metadata = fs.metadata_from_core_inode(&inode)?;
         let init = VfsInodeInit::new(u64::from(number.get()), metadata.size, metadata.mode)
             .with_owner_links_and_rdev(metadata.uid, metadata.gid, metadata.nlink, metadata.rdev)
@@ -180,14 +188,15 @@ impl Ext4Filesystem {
             );
 
         let vfs_inode = match node_type {
-            NodeType::Directory => fs.inode_cache.get_or_insert_openable_dir_with_init(
-                NodeFlags::empty(),
-                init,
-                || Inode::new(fs.clone(), number, node_type, has_extents),
-            ),
+            NodeType::Directory => {
+                fs.inode_cache
+                    .get_or_insert_openable_dir_with_init(node_flags, init, || {
+                        Inode::new(fs.clone(), number, node_type, has_extents)
+                    })
+            }
             NodeType::RegularFile | NodeType::Unknown => fs
                 .inode_cache
-                .get_or_insert_file_with_init(NodeFlags::empty(), init, || {
+                .get_or_insert_file_with_init(node_flags, init, || {
                     Inode::new(fs.clone(), number, node_type, has_extents)
                 }),
             NodeType::Symlink => {
@@ -197,11 +206,11 @@ impl Ext4Filesystem {
                     }
                     _ => None,
                 };
-                let vfs_inode = fs.inode_cache.get_or_insert_symlink_with_init(
-                    NodeFlags::empty(),
-                    init,
-                    || Inode::new(fs.clone(), number, node_type, has_extents),
-                );
+                let vfs_inode =
+                    fs.inode_cache
+                        .get_or_insert_symlink_with_init(node_flags, init, || {
+                            Inode::new(fs.clone(), number, node_type, has_extents)
+                        });
                 if let Some(link) = cached_link {
                     vfs_inode.set_cached_link(link);
                 }
@@ -212,7 +221,7 @@ impl Ext4Filesystem {
             | NodeType::Fifo
             | NodeType::Socket => {
                 fs.inode_cache
-                    .get_or_insert_special_with_init(NodeFlags::empty(), init, || {
+                    .get_or_insert_special_with_init(node_flags, init, || {
                         Inode::new(fs.clone(), number, node_type, has_extents)
                     })
             }

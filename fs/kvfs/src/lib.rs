@@ -32,6 +32,7 @@ mod simple_fs;
 mod super_block;
 mod type_map;
 mod types;
+mod xattr;
 
 pub use address_space::{
     AddressSpace, AddressSpaceOperations, AddressSpaceViewGuard, PageMkwriteRequest,
@@ -74,6 +75,7 @@ pub use super_block::{
 };
 pub(crate) use type_map::TypeMap;
 pub use types::{DeviceId, Metadata, MetadataUpdate, NodePermission, NodeType, SetattrTime, Umode};
+pub use xattr::{XATTR_NAME_MAX, XattrName, XattrNameRef, XattrNameSink, XattrSetFlags};
 
 pub type VfsError = kerrno::KError;
 pub type VfsResult<T> = Result<T, VfsError>;

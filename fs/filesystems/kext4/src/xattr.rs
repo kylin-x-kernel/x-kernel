@@ -54,6 +54,24 @@ pub enum Ext4XattrNamespace {
     Unknown(u8),
 }
 
+/// Existence requirement for an extended-attribute update.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Ext4XattrSetMode {
+    /// Create a missing attribute or replace an existing value.
+    #[default]
+    CreateOrReplace,
+    /// Create a new attribute and fail if it already exists.
+    Create,
+    /// Replace an existing attribute and fail if it is absent.
+    Replace,
+    /// Require both creation and replacement semantics.
+    ///
+    /// This matches Linux when both `XATTR_CREATE` and `XATTR_REPLACE` are
+    /// supplied: an existing attribute fails with `EEXIST`, while a missing
+    /// attribute fails with `ENODATA`.
+    CreateAndReplace,
+}
+
 impl Ext4XattrNamespace {
     const fn from_index(index: u8) -> Self {
         match index {
@@ -113,10 +131,42 @@ impl Ext4Xattr {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ParsedXattrEntry {
+/// A borrowed ext4 extended-attribute name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Ext4XattrNameRef<'a> {
     namespace: Ext4XattrNamespace,
-    name: Vec<u8>,
+    name: &'a [u8],
+}
+
+impl<'a> Ext4XattrNameRef<'a> {
+    /// Returns the xattr namespace.
+    pub const fn namespace(self) -> Ext4XattrNamespace {
+        self.namespace
+    }
+
+    /// Returns the raw xattr name suffix without the namespace prefix.
+    pub const fn name_bytes(self) -> &'a [u8] {
+        self.name
+    }
+}
+
+/// Receives borrowed xattr names while KExt4 walks inode metadata.
+///
+/// Implementations must consume each borrowed name before `emit` returns.
+/// Disk-format and I/O failures are reported by [`Ext4Filesystem::list_xattrs`].
+pub trait Ext4XattrNameSink {
+    /// Consumes one xattr name without taking ownership of its bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the consumer cannot accept the name.
+    fn emit(&mut self, name: Ext4XattrNameRef<'_>) -> Ext4Result<()>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParsedXattrEntry<'a> {
+    namespace: Ext4XattrNamespace,
+    name: &'a [u8],
     value_offset: usize,
     value_size: usize,
 }
@@ -134,6 +184,12 @@ enum XattrStorageLayout {
     External { shared: bool },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum XattrMutation {
+    Changed,
+    Unchanged,
+}
+
 impl Ext4Filesystem {
     /// Reads all supported extended attributes stored on an inode.
     pub fn read_xattrs(&self, inode: &Ext4Inode) -> Ext4Result<Vec<Ext4Xattr>> {
@@ -141,6 +197,19 @@ impl Ext4Filesystem {
         self.read_inline_xattrs(inode, &mut xattrs)?;
         self.read_external_xattrs(inode, &mut xattrs)?;
         Ok(xattrs)
+    }
+
+    /// Walks supported extended-attribute names without materializing values.
+    ///
+    /// Names borrow directly from validated inode or external-block metadata
+    /// and remain valid only for the duration of each sink call.
+    pub fn list_xattrs(
+        &self,
+        inode: &Ext4Inode,
+        sink: &mut dyn Ext4XattrNameSink,
+    ) -> Ext4Result<()> {
+        list_inline_xattr_names_from_bytes(inode.inline_xattr_bytes(), sink)?;
+        self.list_external_xattr_names(inode, sink)
     }
 
     /// Reads one extended attribute by namespace and raw name suffix.
@@ -171,19 +240,40 @@ impl Ext4Filesystem {
         value: &[u8],
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<Ext4Inode> {
+        self.set_xattr_with_mode(
+            inode,
+            namespace,
+            name,
+            value,
+            Ext4XattrSetMode::CreateOrReplace,
+            timestamp,
+        )
+    }
+
+    /// Sets an extended attribute with an atomic existence requirement.
+    pub fn set_xattr_with_mode(
+        &mut self,
+        inode: &Ext4Inode,
+        namespace: Ext4XattrNamespace,
+        name: &[u8],
+        value: &[u8],
+        mode: Ext4XattrSetMode,
+        timestamp: Ext4Timestamp,
+    ) -> Ext4Result<Ext4Inode> {
         validate_settable_xattr(namespace, name)?;
         self.validate_inode_timestamp_update(inode, timestamp)?;
-        let credits = self.xattr_mutation_credits(inode, timestamp, |xattrs| {
-            set_xattr_value(xattrs, namespace, name, value)
+        let (credits, xattrs, mutation) = self.xattr_mutation_plan(inode, timestamp, |xattrs| {
+            set_xattr_value_with_mode(xattrs, namespace, name, value, mode)
         })?;
+        if mutation == XattrMutation::Unchanged {
+            return Ok(inode.clone());
+        }
         let journal = self.metadata_journal_for_mutation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
         )?;
         let mut handle = journal.begin(credits)?;
-        let result = self.update_xattr_in_transaction(inode, timestamp, &mut handle, |xattrs| {
-            set_xattr_value(xattrs, namespace, name, value)
-        });
+        let result = self.update_xattr_in_transaction(inode, timestamp, &mut handle, xattrs);
         self.complete_metadata_mutation(handle, result)
     }
 
@@ -197,17 +287,15 @@ impl Ext4Filesystem {
     ) -> Ext4Result<Ext4Inode> {
         validate_settable_xattr(namespace, name)?;
         self.validate_inode_timestamp_update(inode, timestamp)?;
-        let credits = self.xattr_mutation_credits(inode, timestamp, |xattrs| {
-            remove_xattr_value(xattrs, namespace, name)
+        let (credits, xattrs, _) = self.xattr_mutation_plan(inode, timestamp, |xattrs| {
+            remove_xattr_value(xattrs, namespace, name).map(|_| XattrMutation::Changed)
         })?;
         let journal = self.metadata_journal_for_mutation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
         )?;
         let mut handle = journal.begin(credits)?;
-        let result = self.update_xattr_in_transaction(inode, timestamp, &mut handle, |xattrs| {
-            remove_xattr_value(xattrs, namespace, name)
-        });
+        let result = self.update_xattr_in_transaction(inode, timestamp, &mut handle, xattrs);
         self.complete_metadata_mutation(handle, result)
     }
 
@@ -216,11 +304,9 @@ impl Ext4Filesystem {
         inode: &Ext4Inode,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
-        update: impl FnOnce(&mut Vec<Ext4Xattr>) -> Ext4Result<()>,
+        xattrs: Vec<Ext4Xattr>,
     ) -> Ext4Result<Ext4Inode> {
         let old_external_block = inode.file_acl_block();
-        let mut xattrs = self.read_xattrs(inode)?;
-        update(&mut xattrs)?;
 
         let inline_capacity = inode.inline_xattr_bytes().len();
         let needs_external_block =
@@ -249,23 +335,27 @@ impl Ext4Filesystem {
         Ok(updated_inode)
     }
 
-    fn xattr_mutation_credits(
+    fn xattr_mutation_plan(
         &self,
         inode: &Ext4Inode,
         timestamp: Ext4Timestamp,
-        update: impl FnOnce(&mut Vec<Ext4Xattr>) -> Ext4Result<()>,
-    ) -> Ext4Result<JournalCredits> {
+        update: impl FnOnce(&mut Vec<Ext4Xattr>) -> Ext4Result<XattrMutation>,
+    ) -> Ext4Result<(JournalCredits, Vec<Ext4Xattr>, XattrMutation)> {
         let old_external_block = inode.file_acl_block();
         let mut xattrs = self.read_xattrs(inode)?;
-        let old_layout = if old_external_block == 0 {
-            xattr_inline_layout(&xattrs)
+        let old_inline_layout = (old_external_block == 0).then(|| xattr_inline_layout(&xattrs));
+        let mutation = update(&mut xattrs)?;
+        if mutation == XattrMutation::Unchanged {
+            return Ok((JournalCredits::new(0), xattrs, mutation));
+        }
+        let old_layout = if let Some(layout) = old_inline_layout {
+            layout
         } else {
             let refcount = self.external_xattr_block_refcount(inode, old_external_block)?;
             XattrStorageLayout::External {
                 shared: refcount > 1,
             }
         };
-        update(&mut xattrs)?;
         let new_layout = xattr_layout_after_update(&xattrs, inode.inline_xattr_bytes().len())?;
         if matches!(new_layout, XattrStorageLayout::External { .. }) {
             let block_size =
@@ -282,9 +372,11 @@ impl Ext4Filesystem {
         let planned_external_block = matches!(new_layout, XattrStorageLayout::External { .. })
             .then_some(FilesystemBlock::new(old_external_block.max(1)));
         self.prepare_xattr_inode_update(inode, &xattrs, planned_external_block, timestamp)?;
-        Ok(JournalCredits::new(xattr_mutation_credit_count(
-            old_layout, new_layout,
-        )))
+        Ok((
+            JournalCredits::new(xattr_mutation_credit_count(old_layout, new_layout)),
+            xattrs,
+            mutation,
+        ))
     }
 
     fn prepare_xattr_inode_update(
@@ -517,6 +609,32 @@ impl Ext4Filesystem {
         )
     }
 
+    fn list_external_xattr_names(
+        &self,
+        inode: &Ext4Inode,
+        sink: &mut dyn Ext4XattrNameSink,
+    ) -> Ext4Result<()> {
+        let block = inode.file_acl_block();
+        if block == 0 {
+            return Ok(());
+        }
+        if !self.is_inode_physical_block_valid(inode.number(), block, 1) {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidXattr));
+        }
+        let buffer = self.read_metadata_block(FilesystemBlock::new(block))?;
+        let bytes = buffer.as_ref();
+        let header = disk_xattr::XattrBlockHeader::decode(bytes)?;
+        validate_xattr_block_header(header)?;
+        self.verify_xattr_block_checksum(inode, block, bytes, header)?;
+        emit_xattr_names_from_region(
+            bytes,
+            disk_xattr::XATTR_HEADER_SIZE,
+            0,
+            XattrEntryOrder::RequireSorted,
+            sink,
+        )
+    }
+
     fn verify_xattr_block_checksum(
         &self,
         inode: &Ext4Inode,
@@ -605,19 +723,81 @@ fn read_inline_xattrs_from_bytes(bytes: &[u8]) -> Ext4Result<Vec<Ext4Xattr>> {
     Ok(xattrs)
 }
 
+fn list_inline_xattr_names_from_bytes(
+    bytes: &[u8],
+    sink: &mut dyn Ext4XattrNameSink,
+) -> Ext4Result<()> {
+    if bytes.len() < disk_xattr::XATTR_IBODY_HEADER_SIZE {
+        return Ok(());
+    }
+    let magic = codec::le_u32(bytes, 0)?;
+    if magic == 0 {
+        return Ok(());
+    }
+    if magic != disk_xattr::XATTR_MAGIC {
+        return Err(Ext4Error::Corrupt(CorruptKind::InvalidXattr));
+    }
+    emit_xattr_names_from_region(
+        bytes,
+        disk_xattr::XATTR_IBODY_HEADER_SIZE,
+        disk_xattr::XATTR_IBODY_HEADER_SIZE,
+        XattrEntryOrder::Unchecked,
+        sink,
+    )
+}
+
+#[cfg(test)]
 fn set_xattr_value(
     xattrs: &mut Vec<Ext4Xattr>,
     namespace: Ext4XattrNamespace,
     name: &[u8],
     value: &[u8],
 ) -> Ext4Result<()> {
+    set_xattr_value_with_mode(
+        xattrs,
+        namespace,
+        name,
+        value,
+        Ext4XattrSetMode::CreateOrReplace,
+    )
+    .map(|_| ())
+}
+
+fn set_xattr_value_with_mode(
+    xattrs: &mut Vec<Ext4Xattr>,
+    namespace: Ext4XattrNamespace,
+    name: &[u8],
+    value: &[u8],
+    mode: Ext4XattrSetMode,
+) -> Ext4Result<XattrMutation> {
+    let existing = xattrs
+        .iter()
+        .find(|xattr| xattr.namespace == namespace && xattr.name == name);
+    let exists = existing.is_some();
+    let requires_create = matches!(
+        mode,
+        Ext4XattrSetMode::Create | Ext4XattrSetMode::CreateAndReplace
+    );
+    let requires_replace = matches!(
+        mode,
+        Ext4XattrSetMode::Replace | Ext4XattrSetMode::CreateAndReplace
+    );
+    if exists && requires_create {
+        return Err(Ext4Error::AlreadyExists);
+    }
+    if !exists && requires_replace {
+        return Err(Ext4Error::NotFound);
+    }
+    if existing.is_some_and(|xattr| xattr.value == value) {
+        return Ok(XattrMutation::Unchanged);
+    }
     xattrs.retain(|xattr| xattr.namespace != namespace || xattr.name != name);
     xattrs.push(Ext4Xattr {
         namespace,
         name: Vec::from(name),
         value: Vec::from(value),
     });
-    Ok(())
+    Ok(XattrMutation::Changed)
 }
 
 fn remove_xattr_value(
@@ -996,7 +1176,7 @@ fn collect_xattrs_from_region(
         };
         output.push(Ext4Xattr {
             namespace: entry.namespace,
-            name: entry.name,
+            name: Vec::from(entry.name),
             value,
         });
     }
@@ -1004,11 +1184,47 @@ fn collect_xattrs_from_region(
     Ok(())
 }
 
-fn decode_xattr_entries(
+fn emit_xattr_names_from_region(
     bytes: &[u8],
     entries_offset: usize,
+    value_base: usize,
     entry_order: XattrEntryOrder,
-    output: &mut Vec<ParsedXattrEntry>,
+    sink: &mut dyn Ext4XattrNameSink,
+) -> Ext4Result<()> {
+    let mut entries = Vec::new();
+    let entries_end = decode_xattr_entries(bytes, entries_offset, entry_order, &mut entries)?;
+    let mut value_ranges = Vec::new();
+    for entry in &entries {
+        if entry.value_size == 0 {
+            continue;
+        }
+        let value_start = value_base
+            .checked_add(entry.value_offset)
+            .ok_or(Ext4Error::Overflow)?;
+        let value_end = value_start
+            .checked_add(entry.value_size)
+            .ok_or(Ext4Error::Overflow)?;
+        if value_start < entries_end || value_end > bytes.len() {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidXattr));
+        }
+        value_ranges.push((value_start, value_end));
+    }
+    validate_non_overlapping_value_ranges(&mut value_ranges)?;
+
+    for entry in entries {
+        sink.emit(Ext4XattrNameRef {
+            namespace: entry.namespace,
+            name: entry.name,
+        })?;
+    }
+    Ok(())
+}
+
+fn decode_xattr_entries<'a>(
+    bytes: &'a [u8],
+    entries_offset: usize,
+    entry_order: XattrEntryOrder,
+    output: &mut Vec<ParsedXattrEntry<'a>>,
 ) -> Ext4Result<usize> {
     let mut offset = entries_offset;
     let mut previous_sort_key: Option<(u8, u8, &[u8])> = None;
@@ -1056,7 +1272,7 @@ fn decode_xattr_entries(
 
         output.push(ParsedXattrEntry {
             namespace: Ext4XattrNamespace::from_index(header.name_index()),
-            name: Vec::from(name),
+            name,
             value_offset: usize::from(header.value_offs()),
             value_size: usize::try_from(header.value_size()).map_err(|_| Ext4Error::Overflow)?,
         });
@@ -1084,6 +1300,17 @@ mod tests {
     use alloc::{vec, vec::Vec};
 
     use super::*;
+
+    #[derive(Default)]
+    struct NameCollector(Vec<(Ext4XattrNamespace, Vec<u8>)>);
+
+    impl Ext4XattrNameSink for NameCollector {
+        fn emit(&mut self, name: Ext4XattrNameRef<'_>) -> Ext4Result<()> {
+            self.0
+                .push((name.namespace(), Vec::from(name.name_bytes())));
+            Ok(())
+        }
+    }
 
     fn put_xattr_entry(
         bytes: &mut [u8],
@@ -1183,6 +1410,122 @@ mod tests {
     }
 
     #[test]
+    fn inline_xattr_listing_emits_only_borrowed_names() {
+        let mut bytes = vec![0; 128];
+        let xattrs = vec![
+            Ext4Xattr {
+                namespace: Ext4XattrNamespace::User,
+                name: Vec::from(&b"alpha"[..]),
+                value: Vec::from(&b"large-value-is-not-returned"[..]),
+            },
+            Ext4Xattr {
+                namespace: Ext4XattrNamespace::Security,
+                name: Vec::from(&b"beta"[..]),
+                value: Vec::new(),
+            },
+        ];
+        encode_inline_xattrs(&xattrs, &mut bytes).expect("encode inline xattrs");
+        let mut names = NameCollector::default();
+
+        list_inline_xattr_names_from_bytes(&bytes, &mut names).expect("list inline xattrs");
+
+        assert_eq!(
+            names.0,
+            vec![
+                (Ext4XattrNamespace::User, Vec::from(&b"alpha"[..])),
+                (Ext4XattrNamespace::Security, Vec::from(&b"beta"[..])),
+            ]
+        );
+    }
+
+    #[test]
+    fn xattr_set_mode_enforces_create_and_replace_atomically() {
+        let mut xattrs = Vec::new();
+        set_xattr_value_with_mode(
+            &mut xattrs,
+            Ext4XattrNamespace::User,
+            b"key",
+            b"initial",
+            Ext4XattrSetMode::Create,
+        )
+        .expect("create missing xattr");
+        assert_eq!(
+            set_xattr_value_with_mode(
+                &mut xattrs,
+                Ext4XattrNamespace::User,
+                b"key",
+                b"duplicate",
+                Ext4XattrSetMode::Create,
+            ),
+            Err(Ext4Error::AlreadyExists)
+        );
+        assert_eq!(xattrs[0].value(), b"initial");
+
+        set_xattr_value_with_mode(
+            &mut xattrs,
+            Ext4XattrNamespace::User,
+            b"key",
+            b"replacement",
+            Ext4XattrSetMode::Replace,
+        )
+        .expect("replace existing xattr");
+        assert_eq!(xattrs[0].value(), b"replacement");
+        assert_eq!(
+            set_xattr_value_with_mode(
+                &mut xattrs,
+                Ext4XattrNamespace::User,
+                b"missing",
+                b"value",
+                Ext4XattrSetMode::Replace,
+            ),
+            Err(Ext4Error::NotFound)
+        );
+
+        assert_eq!(
+            set_xattr_value_with_mode(
+                &mut xattrs,
+                Ext4XattrNamespace::User,
+                b"key",
+                b"value",
+                Ext4XattrSetMode::CreateAndReplace,
+            ),
+            Err(Ext4Error::AlreadyExists)
+        );
+        assert_eq!(
+            set_xattr_value_with_mode(
+                &mut xattrs,
+                Ext4XattrNamespace::User,
+                b"missing",
+                b"value",
+                Ext4XattrSetMode::CreateAndReplace,
+            ),
+            Err(Ext4Error::NotFound)
+        );
+    }
+
+    #[test]
+    fn replacing_an_identical_xattr_value_is_unchanged() {
+        let mut xattrs = vec![Ext4Xattr {
+            namespace: Ext4XattrNamespace::User,
+            name: Vec::from(&b"key"[..]),
+            value: Vec::from(&b"value"[..]),
+        }];
+
+        assert_eq!(
+            set_xattr_value_with_mode(
+                &mut xattrs,
+                Ext4XattrNamespace::User,
+                b"key",
+                b"value",
+                Ext4XattrSetMode::Replace,
+            ),
+            Ok(XattrMutation::Unchanged)
+        );
+        assert_eq!(xattrs.len(), 1);
+        assert_eq!(xattrs[0].value(), b"value");
+    }
+
+    #[test]
     fn inline_xattr_encode_orders_entries_for_linux_lookup() {
         let mut bytes = vec![0; 128];
         let xattrs = vec![
@@ -1215,7 +1558,7 @@ mod tests {
         assert_eq!(
             parsed
                 .iter()
-                .map(|entry| (entry.namespace, entry.name.as_slice()))
+                .map(|entry| (entry.namespace, entry.name))
                 .collect::<Vec<_>>(),
             vec![
                 (Ext4XattrNamespace::User, &b"a"[..]),
