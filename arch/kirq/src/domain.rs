@@ -192,6 +192,7 @@ static PLIC_IRQ_DOMAIN: IrqDomain =
     IrqDomain::new(super::desc::PLIC_ROOT_DOMAIN, UnmappedPolicy::Strict);
 static IO_APIC_IRQ_DOMAIN: IrqDomain =
     IrqDomain::new(super::desc::IO_APIC_DOMAIN, UnmappedPolicy::Strict);
+static MSI_IRQ_DOMAIN: IrqDomain = IrqDomain::new(super::desc::MSI_DOMAIN, UnmappedPolicy::Strict);
 
 /// Upper bound on the IO-APIC linear reverse-map size, indexed by hwirq.
 ///
@@ -208,6 +209,7 @@ pub(crate) fn domain(id: IrqDomainId) -> Option<&'static IrqDomain> {
         super::desc::GIC_ROOT_DOMAIN => Some(&GIC_IRQ_DOMAIN),
         super::desc::PLIC_ROOT_DOMAIN => Some(&PLIC_IRQ_DOMAIN),
         super::desc::IO_APIC_DOMAIN => Some(&IO_APIC_IRQ_DOMAIN),
+        super::desc::MSI_DOMAIN => Some(&MSI_IRQ_DOMAIN),
         _ => None,
     }
 }
@@ -225,8 +227,9 @@ pub(crate) fn resolve(domain_id: IrqDomainId, hwirq: Hwirq) -> Option<Virq> {
 ///
 /// Must be called with the IRQ control lock held (single writer). Readers on
 /// the data path never block: they observe either the previous or the new
-/// complete snapshot, and a stale read is still correct because mappings are
-/// only ever added, never edited or removed.
+/// complete snapshot. Ordinary IRQ unregister keeps mappings append-only, while
+/// MSI resource final free may remove a mapping and publish a replacement
+/// snapshot after the backend vector is no longer owned by the device.
 pub(crate) fn publish_snapshot(
     domain_id: IrqDomainId,
     entries: impl Iterator<Item = (Hwirq, Virq)>,
@@ -262,7 +265,7 @@ pub(crate) fn publish_snapshot(
     irq_domain.publish(Box::new(revmap));
     debug!(
         "published irq domain {} snapshot #{}",
-        irq_domain.id.0,
+        irq_domain.id.as_u32(),
         irq_domain.publish_count()
     );
     true
@@ -274,8 +277,7 @@ pub enum IrqRef {
     /// Resolve through the domain's published reverse map (lock-free).
     Domain(IrqDomainId, Hwirq),
     /// The claim is already an OS-visible logical IRQ — an explicit identity /
-    /// `NO_MAP` line (e.g. LAPIC timer, MSI-X vector, RISC-V timer/IPI,
-    /// LoongArch EXTIOI). Identity is a deliberate policy, not a fallback for
-    /// failed lookups.
+    /// `NO_MAP` line (e.g. LAPIC timer, RISC-V timer/IPI, LoongArch EXTIOI).
+    /// Identity is a deliberate policy, not a fallback for failed lookups.
     Virq(Virq),
 }

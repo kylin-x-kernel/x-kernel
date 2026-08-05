@@ -110,10 +110,10 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     }
 
     #[cfg(feature = "ipi")]
-    khal::irq::enable(kbuild_config::IPI_IRQ, true);
+    kirq::enable(kbuild_config::IPI_IRQ, true);
 
     #[cfg(feature = "pmu")]
-    khal::irq::enable(of::pmu_irq_or(kbuild_config::PMU_IRQ), true);
+    kirq::enable(of::pmu_irq_or(kbuild_config::PMU_IRQ), true);
 
     karch::enable_local_irq();
 

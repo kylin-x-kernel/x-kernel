@@ -15,9 +15,9 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use device_res::{Irq, IrqEvent, IrqResource, IrqTrigger};
-use khal::irq::IrqDesc;
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 use khal::mem::PhysAddr;
+use kirq::IrqDesc;
 use kspin::SpinNoIrq;
 #[cfg(feature = "ns16550-mmio")]
 pub use ns16550_mmio::SerialRegWidth;
@@ -217,23 +217,23 @@ pub fn ns16550_mmio_layout_for_paddr(paddr: usize) -> Option<SerialMmioLayout> {
 fn device_tree_irq_desc(info: of::InterruptInfo) -> IrqDesc {
     let desc = match info.controller {
         of::InterruptControllerKind::Gic => match info.trigger {
-            of::InterruptTrigger::EdgeRising => khal::irq::gic_edge_irq_desc(info.irq),
+            of::InterruptTrigger::EdgeRising => kirq::gic_edge_irq_desc(info.irq),
             of::InterruptTrigger::EdgeFalling => {
-                khal::irq::gic_irq_desc(info.irq, khal::irq::IrqTrigger::EdgeFalling)
+                kirq::gic_irq_desc(info.irq, kirq::IrqTrigger::EdgeFalling)
             }
-            of::InterruptTrigger::LevelHigh => khal::irq::gic_level_irq_desc(info.irq),
+            of::InterruptTrigger::LevelHigh => kirq::gic_level_irq_desc(info.irq),
             of::InterruptTrigger::LevelLow => {
-                khal::irq::gic_irq_desc(info.irq, khal::irq::IrqTrigger::LevelLow)
+                kirq::gic_irq_desc(info.irq, kirq::IrqTrigger::LevelLow)
             }
             of::InterruptTrigger::Unknown(flags) => {
-                khal::irq::gic_irq_desc(info.irq, khal::irq::IrqTrigger::Unknown(flags))
+                kirq::gic_irq_desc(info.irq, kirq::IrqTrigger::Unknown(flags))
             }
         },
-        of::InterruptControllerKind::Plic => khal::irq::plic_irq_desc(info.irq),
-        of::InterruptControllerKind::Unknown => khal::irq::IrqDesc::from_hwirq(info.irq),
+        of::InterruptControllerKind::Plic => kirq::plic_irq_desc(info.irq),
+        of::InterruptControllerKind::Unknown => kirq::IrqDesc::from_hwirq(info.irq),
     };
 
-    desc.with_source(khal::irq::IrqSource::DeviceTree)
+    desc.with_source(kirq::IrqSource::DeviceTree)
 }
 
 /// Map the stdout MMIO window and build the matching [`SerialPort`].
@@ -264,6 +264,16 @@ fn build_stdout_port(desc: &StdoutDesc) -> SerialPort {
     }
 }
 
+fn map_console_irq(desc: IrqDesc) -> Option<IrqDesc> {
+    match kirq::try_map(desc) {
+        Ok(virq) => Some(desc.with_virq(virq)),
+        Err(err) => {
+            log::warn!("failed to map console IRQ {desc:?}: {err:?}");
+            None
+        }
+    }
+}
+
 /// Bring up the stdout console from the device tree.
 ///
 /// Parses the `chosen` stdout node, builds the matching [`SerialPort`], and
@@ -274,7 +284,7 @@ fn build_stdout_port(desc: &StdoutDesc) -> SerialPort {
 pub fn init_stdout_from_device_tree() -> Option<()> {
     let desc = stdout_desc_from_device_tree()?;
     let port = build_stdout_port(&desc);
-    let irq = desc.irq.map(|desc| desc.with_virq(khal::irq::map(desc)));
+    let irq = desc.irq.and_then(map_console_irq);
     serial::register_early_stdout(Arc::new(port), irq);
     Some(())
 }
@@ -284,7 +294,7 @@ pub fn init_stdout_from_device_tree() -> Option<()> {
 pub fn init_stdout_ioport(port: u16, irq: Option<IrqDesc>) {
     // SAFETY: `port` is the platform-configured NS16550 I/O-port base.
     let uart = unsafe { SerialPort::new_ioport_ns16550(port, SerialRole::Stdout) };
-    let irq = irq.map(|desc| desc.with_virq(khal::irq::map(desc)));
+    let irq = irq.and_then(map_console_irq);
     serial::register_early_stdout(Arc::new(uart), irq);
 }
 
@@ -327,7 +337,7 @@ pub fn register_input_irq_handler() {
 
 #[cfg(all(unittest, any(feature = "pl011", feature = "ns16550-mmio")))]
 mod tests_irq_desc {
-    use khal::irq::IrqSource;
+    use kirq::IrqSource;
     use unittest::{assert_eq, def_test};
 
     use super::*;
@@ -335,7 +345,7 @@ mod tests_irq_desc {
     /// `device_tree_irq_desc` must tag every parsed interrupt as device-tree
     /// sourced and propagate the controller-local IRQ number. (It deliberately
     /// does not over-assert the trigger/polarity encoding, which is owned by
-    /// the `khal::irq` constructors.)
+    /// the `kirq` constructors.)
     #[def_test]
     fn device_tree_irq_desc_tags_source_and_propagates_hwirq() {
         let gic = of::InterruptInfo {

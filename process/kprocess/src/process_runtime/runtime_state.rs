@@ -9,8 +9,10 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use ksync::Mutex;
 use ktimer::ProcessTimerManager;
+#[cfg(unittest)]
+use memspace::MmSpace;
 use memspace::{
-    MmCpuResidencyRef, MmSpace,
+    MmCpuResidencyRef,
     process_lifetime::{MmPin, MmUserHandle},
 };
 
@@ -18,7 +20,8 @@ use crate::Pid;
 
 /// Process runtime execution state shared by all threads in a process.
 pub(super) struct ProcessRuntimeState {
-    mm_pin: MmPin,
+    /// Keeps the address-space object pinned for runtime-lifetime observers.
+    _mm_pin: MmPin,
     mm_user: Mutex<Option<MmUserHandle>>,
     /// Immutable address-space identity; safe to read without the aspace lock.
     mm_id: u64,
@@ -61,7 +64,7 @@ impl ProcessRuntimeState {
             .clone();
         drop(aspace);
         Self {
-            mm_pin,
+            _mm_pin: mm_pin,
             mm_user: Mutex::new(Some(mm_user)),
             mm_id,
             mm_cpu_residency,
@@ -73,8 +76,9 @@ impl ProcessRuntimeState {
     }
 
     /// Returns the pinned address-space object for stable observation.
+    #[cfg(unittest)]
     pub(super) fn pinned_address_space(&self) -> &Arc<Mutex<MmSpace>> {
-        self.mm_pin.address_space()
+        self._mm_pin.address_space()
     }
 
     /// Returns the immutable address-space identity used by private futex keys.

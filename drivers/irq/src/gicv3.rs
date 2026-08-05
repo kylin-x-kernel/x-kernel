@@ -6,7 +6,7 @@
 
 use arm_gic_driver::v3::*;
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
-use khal::irq::TargetCpu;
+use kirq::TargetCpu;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 

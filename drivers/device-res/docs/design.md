@@ -72,7 +72,7 @@ drivers/device-res/
 | 组件 | 职责 |
 |------|------|
 | `ResourceDesc` / `ResourceSet` | 描述单个设备的硬件资源（MMIO、I/O 端口、中断、DMA） |
-| `ResourceProvider` trait | host kernel 实现的资源操作后端（map/unmap、request/release IRQ、alloc/free DMA） |
+| `ResourceProvider` trait | host kernel 实现的资源操作后端（map/unmap、request/release IRQ、alloc/free DMA、alloc/free MSI-X） |
 | `Io` | MMIO 映射的 RAII handle，提供带 acquire/release fence 的寄存器读写方法 |
 | `Irq` | 中断注册的 RAII handle，drop 时自动释放 |
 | `DmaCoherent` | 一致性 DMA 缓冲区的 RAII handle，drop 时自动释放 |
@@ -200,3 +200,20 @@ volatile 访问，但不提供 CPU 侧的内存序保证。额外的 `fence(Acqu
 所有 drop 路径使用 `try_provider()` 避免在系统关闭时 panic。
 `Irq` 使用 `armed` 标志防止 `request_irq` 失败后 drop 时误调用 `release_irq`，
 并保存 provider 返回的 token，使共享 IRQ 释放时只移除当前注册的 handler。
+
+### MSI-X 资源
+
+`IrqOp::alloc_msix()` 返回 `MsiResource`：
+
+- `MsiResource::irq` 是 OS-visible IRQ，驱动或上层框架用它注册 handler；
+- `MsiResource::message` 是 device-visible MSI message，PCI/MSI-X 代码用它写设备
+  table 或 MSI register。
+
+`MsiResource` 是显式所有权资源，不实现 `Copy`。调用方可以在同一所有权链路中移动
+它，并必须在 IRQ handler 注销之后调用 `free_msix()` 释放；不能通过隐式复制制造多个
+同一 MSI allocation 的释放者。
+
+`device-res` 不暴露 APIC id、CPU vector 或 irqchip-private allocation cookie。
+这些属于 host IRQ core 和具体 backend 的内部状态。x-kernel 中该 provider 由
+`kdriver::resource` 实现，内部转到 `kirq::alloc_msix()`；`device-res` 本身仍保持
+OS-neutral，不依赖 `kirq`。

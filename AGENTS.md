@@ -61,6 +61,16 @@ ownership boundaries.
   `memspace`, `kuaccess`, or `kexec`.
 - Prefer shared driver, HAL, and memory-management layers over platform-local
   forks.
+- Treat `kirq` as X-Kernel's common interrupt core. Generic IRQ descriptor,
+  mapping, registration, dispatch, context, softirq, workerqueue, and threaded
+  IRQ semantics belong in `kirq`, not in `khal`, `device_res`, or irqchip
+  drivers.
+- Keep irqchip drivers below `kirq`: they implement concrete controller
+  behavior such as configure, mask/unmask, claim, complete, priority, and IPI
+  delivery through `kirq::IntrManagerIf`.
+- Keep `device_res` OS-agnostic. The driver framework exposes kernel IRQ
+  capability to drivers by adapting devres IRQ resources to `kirq` in
+  `kdriver::resource`; `kirq` must not depend on `device_res`.
 - Keep refactoring commits separate from feature or behavior commits.
 
 ## Build And Validation

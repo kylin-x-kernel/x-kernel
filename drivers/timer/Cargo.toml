@@ -17,6 +17,7 @@ vmm = []
 [dependencies]
 khal = { workspace = true }
 ktime_types = { workspace = true }
+kirq = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
 kcpu_id_map = { workspace = true }

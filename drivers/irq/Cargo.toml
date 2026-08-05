@@ -15,7 +15,7 @@ nmi-pmu = ["pmr", "kplat/nmi"]
 
 [dependencies]
 karch = { workspace = true }
-khal = { workspace = true }
+kirq = { workspace = true }
 kcpu_id_map = { workspace = true }
 kplat = { workspace = true }
 kspin = { workspace = true }

@@ -32,7 +32,7 @@ pub(super) fn init_percpu() {
     tcfg::set_init_val(0);
     tcfg::set_periodic(false);
     tcfg::set_en(true);
-    khal::irq::enable(TIMER_IRQ, true);
+    kirq::enable(TIMER_IRQ, true);
 }
 #[cfg(feature = "rtc")]
 fn read_rtc() -> SystemTime {

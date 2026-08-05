@@ -21,6 +21,7 @@ device_res = { workspace = true }
 kclass = { workspace = true, features = ["char"] }
 kdevice = { workspace = true }
 khal = { workspace = true }
+kirq = { workspace = true }
 kplat = { workspace = true }
 kspin = { workspace = true }
 lazyinit = { workspace = true }

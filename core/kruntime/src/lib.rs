@@ -521,39 +521,43 @@ fn finish_allocator_init() {
 }
 
 fn init_interrupt() {
+    if !kirq::softirq::init() {
+        warn!("softirq hardirq-exit runner was already installed");
+    }
+
     // Timer interrupt handler. All hardware-timer driving — periodic-tick
     // bookkeeping, soft-timer wheel drain, and hardware re-arm — lives in
     // `ktask::on_timer_fire`.
-    khal::irq::register(
+    kirq::register(
         khal::time::interrupt_id(),
         alloc::sync::Arc::new(|| {
             ktask::on_timer_fire();
-            khal::irq::IrqEvent::HANDLED
+            kirq::IrqEvent::HANDLED
         }),
     );
 
     #[cfg(feature = "ipi")]
-    khal::irq::register(
+    kirq::register(
         kbuild_config::IPI_IRQ,
         alloc::sync::Arc::new(|| {
             #[cfg(feature = "arm-timer-resume-fixup")]
             timer_driver::arm_generic::handle_ipi_fixup();
             #[cfg(feature = "ipi")]
             kipi::ipi_handler();
-            khal::irq::IrqEvent::HANDLED
+            kirq::IrqEvent::HANDLED
         }),
     );
 
     #[cfg(feature = "pmu")]
-    khal::irq::register_nmi(
-        khal::irq::gic_level_irq_desc(kbuild_config::PMU_IRQ),
+    kirq::register_nmi(
+        kirq::gic_level_irq_desc(kbuild_config::PMU_IRQ),
         alloc::sync::Arc::new(|| {
             debug!(
                 "PMU interrupt received on cpu {}",
                 khal::percpu::this_cpu_id().as_usize()
             );
             khal::pmu::dispatch_irq_overflows();
-            khal::irq::IrqEvent::HANDLED
+            kirq::IrqEvent::HANDLED
         }),
     );
 

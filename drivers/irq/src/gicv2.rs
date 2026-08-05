@@ -5,7 +5,7 @@
 //! GICv2 backend.
 
 use arm_gic_driver::v2::*;
-use khal::irq::TargetCpu;
+use kirq::TargetCpu;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 

@@ -7,7 +7,8 @@
 //! The OS-agnostic resource model in [`device_res`] describes *what* a driver
 //! needs; this module binds those operations to x-kernel's MMIO mapping, IRQ
 //! manager, and coherent DMA allocator, and installs the backend during driver
-//! init.
+//! init. For IRQs, this module is the adapter between `device_res` vocabulary
+//! and `kirq`; the IRQ core does not depend on devres.
 //!
 //! The `devm_*` helpers acquire a resource and tie its lifetime to a
 //! [`DeviceObject`] via its devres cleanup list, so a failed probe or a later
@@ -23,9 +24,10 @@ use core::{
 };
 
 use device_res::{
-    DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, IrqController, IrqEvent, IrqHandler,
-    IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, MmioMapping, MmioOp, MmioRegion, ResError,
-    ResResult,
+    DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, IrqController as DevIrqController,
+    IrqEvent as DevIrqEvent, IrqHandler as DevIrqHandler, IrqHandlerToken, IrqOp, IrqResource,
+    IrqRouteDesc, IrqTrigger as DevIrqTrigger, MmioMapping, MmioOp, MmioRegion, MsiResource,
+    ResError, ResResult,
 };
 use driver_base::{DriverError, DriverResult};
 use kdevice::DeviceObject;
@@ -49,14 +51,14 @@ struct IrqLineState {
 
 struct IrqLineHandler {
     token: IrqHandlerToken,
-    handler: Arc<dyn IrqHandler>,
+    handler: Arc<dyn DevIrqHandler>,
 }
 
 impl IrqLineState {
-    fn dispatch(&self, virq: usize) -> IrqEvent {
+    fn dispatch(&self, virq: usize) -> DevIrqEvent {
         let (handlers, handler_count) = {
             let registered = self.handlers.lock();
-            let mut handlers: [Option<Arc<dyn IrqHandler>>; IRQ_MAX_SHARED_HANDLERS] =
+            let mut handlers: [Option<Arc<dyn DevIrqHandler>>; IRQ_MAX_SHARED_HANDLERS] =
                 array::from_fn(|_| None);
             for (dst, src) in handlers.iter_mut().zip(registered.iter()) {
                 *dst = Some(src.handler.clone());
@@ -64,7 +66,7 @@ impl IrqLineState {
             (handlers, registered.len())
         };
 
-        let mut event = IrqEvent::NOT_HANDLED;
+        let mut event = DevIrqEvent::NOT_HANDLED;
         for handler in handlers.into_iter().take(handler_count).flatten() {
             event.merge(handler.handle());
         }
@@ -175,27 +177,34 @@ impl IrqOp for HostResourceProvider {
     fn request_irq(
         &self,
         irq: IrqResource,
-        handler: Arc<dyn IrqHandler>,
+        handler: Arc<dyn DevIrqHandler>,
     ) -> ResResult<IrqHandlerToken> {
-        let token = next_irq_handler_token()?;
         let mut lines = IRQ_LINES.lock();
         if let Some(line) = lines.iter().find(|line| line.virq == irq.number) {
             let mut handlers = line.state.handlers.lock();
             if handlers.len() >= IRQ_MAX_SHARED_HANDLERS {
                 return Err(ResError::Busy);
             }
+            let token = next_irq_handler_token()?;
             handlers.push(IrqLineHandler { token, handler });
             return Ok(token);
         }
 
+        let token = next_irq_handler_token()?;
         let state = Arc::new(IrqLineState {
             handlers: SpinNoIrq::new(vec![IrqLineHandler { token, handler }]),
         });
         let dispatch_state = state.clone();
         let virq = irq.number;
-        let dispatch_handler: Arc<dyn IrqHandler> = Arc::new(move || dispatch_state.dispatch(virq));
-        if !khal::irq::register(irq.number, dispatch_handler) {
-            return Err(ResError::Busy);
+        let dispatch_handler: Arc<dyn kirq::IrqHandler> =
+            Arc::new(move || map_devres_irq_event(dispatch_state.dispatch(virq)));
+        match kirq::try_register(map_irq_resource_to_desc(irq), dispatch_handler) {
+            Ok(true) => {}
+            Ok(false) => return Err(ResError::Busy),
+            Err(err) => {
+                log::warn!("failed to register IRQ handler for {irq:?}: {err:?}");
+                return Err(map_irq_desc_error(err));
+            }
         }
         lines.push(IrqLine { virq, state });
         Ok(token)
@@ -216,51 +225,65 @@ impl IrqOp for HostResourceProvider {
         }
         drop(handlers);
         lines.swap_remove(line_index);
-        if khal::irq::unregister(irq.number).is_none() {
+        if kirq::unregister(irq.number).is_none() {
             log::warn!("failed to unregister IRQ {}: no handler found", irq.number);
         }
     }
 
     fn set_irq_enabled(&self, irq: IrqResource, enabled: bool) {
-        khal::irq::enable(irq.number, enabled);
+        kirq::enable(map_irq_resource_to_desc(irq), enabled);
     }
 
     fn map_irq(&self, route: IrqRouteDesc) -> ResResult<IrqResource> {
-        // `route.trigger` / `route.controller` already use the shared `device_res`
-        // vocabulary that `khal::irq` re-exports, so no translation is needed —
-        // only the controller → domain wiring.
-        let domain = match route.controller {
-            IrqController::Gic => Some(khal::irq::GIC_ROOT_DOMAIN),
-            IrqController::Plic => Some(khal::irq::PLIC_ROOT_DOMAIN),
-            IrqController::IoApic => Some(khal::irq::IO_APIC_DOMAIN),
-            IrqController::LoongArchExtioi | IrqController::Unknown => None,
-        };
-        let mut desc =
-            khal::irq::IrqDesc::new(route.hwirq, route.trigger).with_controller(route.controller);
+        let domain = map_irq_domain(route.controller);
+        let mut desc = kirq::IrqDesc::new(route.hwirq, map_irq_trigger(route.trigger))
+            .with_controller(map_irq_controller(route.controller));
         if let Some(domain) = domain {
             desc = desc.with_domain(domain);
         }
-        let virq = khal::irq::map(desc);
+        let virq = kirq::try_map(desc).map_err(|err| {
+            log::warn!("failed to map IRQ route {route:?}: {err:?}");
+            map_irq_desc_error(err)
+        })?;
         Ok(IrqResource::new(virq, route.trigger)
             .with_controller(route.controller)
             .with_hwirq(route.hwirq))
     }
 
-    #[cfg(target_arch = "x86_64")]
-    fn alloc_msix_vector(&self) -> ResResult<u8> {
-        khal::irq::alloc_msix_vector().ok_or(ResError::NoMemory)
-    }
+    fn alloc_msix(&self) -> ResResult<MsiResource> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let allocation = kirq::alloc_msix(kirq::IrqAffinity::Any).ok_or(ResError::NoMemory)?;
+            let irq = IrqResource::new(allocation.virq(), DevIrqTrigger::EdgeRising)
+                .with_controller(DevIrqController::Unknown);
+            let message = allocation.message();
+            Ok(MsiResource::new(
+                irq,
+                device_res::MsiMessage::new(message.address(), message.data()),
+            ))
+        }
 
-    #[cfg(target_arch = "x86_64")]
-    fn free_msix_vector(&self, vector: u8) {
-        if !khal::irq::free_msix_vector(vector) {
-            log::warn!("failed to free MSI-X vector {:#x} (not allocated?)", vector);
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            Err(ResError::Unsupported)
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
-    fn current_apic_id(&self) -> u8 {
-        khal::irq::current_apic_id()
+    fn free_msix(&self, resource: MsiResource) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !kirq::free_msix(resource.irq.number) {
+                log::warn!(
+                    "failed to free MSI-X IRQ {} (not allocated?)",
+                    resource.irq.number
+                );
+            }
+        }
+
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = resource;
+        }
     }
 }
 
@@ -293,6 +316,17 @@ fn map_iomap_err(err: memspace::IoMapError) -> ResError {
     }
 }
 
+fn map_irq_desc_error(err: kirq::IrqDescError) -> ResError {
+    match err {
+        kirq::IrqDescError::VirqExhausted { .. } => ResError::NoMemory,
+        kirq::IrqDescError::HwirqConflict { .. }
+        | kirq::IrqDescError::DomainConflict { .. }
+        | kirq::IrqDescError::VirqConflict { .. }
+        | kirq::IrqDescError::MappingConflict { .. }
+        | kirq::IrqDescError::UnknownDomain { .. } => ResError::InvalidResource,
+    }
+}
+
 fn map_res_err(err: ResError) -> DriverError {
     match err {
         ResError::InvalidResource => DriverError::InvalidInput,
@@ -301,6 +335,64 @@ fn map_res_err(err: ResError) -> DriverError {
         ResError::Busy => DriverError::ResourceBusy,
         ResError::Unsupported => DriverError::Unsupported,
         ResError::NoProvider => DriverError::BadState,
+    }
+}
+
+fn map_irq_trigger(trigger: DevIrqTrigger) -> kirq::IrqTrigger {
+    match trigger {
+        DevIrqTrigger::EdgeRising => kirq::IrqTrigger::EdgeRising,
+        DevIrqTrigger::EdgeFalling => kirq::IrqTrigger::EdgeFalling,
+        DevIrqTrigger::LevelHigh => kirq::IrqTrigger::LevelHigh,
+        DevIrqTrigger::LevelLow => kirq::IrqTrigger::LevelLow,
+        DevIrqTrigger::Unknown(flags) => kirq::IrqTrigger::Unknown(flags),
+    }
+}
+
+fn map_irq_controller(controller: DevIrqController) -> kirq::IrqController {
+    match controller {
+        DevIrqController::Gic => kirq::IrqController::Gic,
+        DevIrqController::Plic => kirq::IrqController::Plic,
+        DevIrqController::IoApic => kirq::IrqController::IoApic,
+        DevIrqController::LoongArchExtioi => kirq::IrqController::LoongArchExtioi,
+        DevIrqController::Unknown => kirq::IrqController::Unknown,
+    }
+}
+
+fn map_irq_domain(controller: DevIrqController) -> Option<kirq::IrqDomainId> {
+    // `device_res::IrqDomainId` is provider-local. Only controllers with a
+    // registered kirq domain can produce data-plane-resolvable mappings here.
+    match controller {
+        DevIrqController::Gic => Some(kirq::GIC_ROOT_DOMAIN),
+        DevIrqController::Plic => Some(kirq::PLIC_ROOT_DOMAIN),
+        DevIrqController::IoApic => Some(kirq::IO_APIC_DOMAIN),
+        DevIrqController::LoongArchExtioi | DevIrqController::Unknown => None,
+    }
+}
+
+fn map_irq_resource_to_desc(resource: IrqResource) -> kirq::IrqDesc {
+    if resource.hwirq.is_none()
+        && resource.domain.is_none()
+        && resource.controller.unwrap_or(DevIrqController::Unknown) == DevIrqController::Unknown
+    {
+        return kirq::IrqDesc::from_virq(resource.number);
+    }
+
+    let hwirq = resource.hwirq.unwrap_or(resource.number);
+    let controller = resource.controller.unwrap_or(DevIrqController::Unknown);
+    let mut desc = kirq::IrqDesc::new(hwirq, map_irq_trigger(resource.trigger))
+        .with_controller(map_irq_controller(controller))
+        .with_virq(resource.number);
+    if let Some(domain) = map_irq_domain(controller) {
+        desc = desc.with_domain(domain);
+    }
+    desc
+}
+
+fn map_devres_irq_event(event: DevIrqEvent) -> kirq::IrqEvent {
+    if event.handled() {
+        kirq::IrqEvent::from_sources(event.sources())
+    } else {
+        kirq::IrqEvent::NOT_HANDLED
     }
 }
 
@@ -324,7 +416,7 @@ pub fn devm_iomap(
 pub fn devm_request_irq(
     device: &DeviceObject,
     irq: IrqResource,
-    handler: Arc<dyn IrqHandler>,
+    handler: Arc<dyn DevIrqHandler>,
 ) -> DriverResult<()> {
     device_res::devm_request_irq(device, irq, handler).map_err(map_res_err)
 }

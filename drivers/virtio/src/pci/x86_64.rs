@@ -2,7 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use device_res::{IrqController, IrqRouteDesc, IrqTrigger, irq_provider, try_irq_provider};
+use device_res::{
+    IrqController, IrqRouteDesc, IrqTrigger, MsiResource, irq_provider, try_irq_provider,
+};
 use pci::{
     PciConfigAccess,
     msix::{self, MsixCapability, MsixTable, MsixTableEntry, PCI_BAR_COUNT},
@@ -26,7 +28,7 @@ pub(super) struct PciMsixState {
     config: PciConfigAccess,
     cap: MsixCapability,
     bdf: DeviceFunction,
-    vector: u8,
+    msi: MsiResource,
 }
 
 pub(super) enum PciIrqState {
@@ -110,7 +112,7 @@ impl PciMsixState {
     pub(super) fn release(self) {
         self.disable();
         if let Some(p) = try_irq_provider() {
-            p.free_msix_vector(self.vector);
+            p.free_msix(self.msi);
         }
     }
 
@@ -333,8 +335,8 @@ pub(super) fn setup_msix<H: VirtIoHal, C: ConfigurationAccess>(
     root.set_command(bdf, command | Command::MEMORY_SPACE | Command::BUS_MASTER);
 
     // The IRQ provider is installed once during early init and never removed,
-    // so the same reference serves both vector allocation below and APIC id
-    // targeting afterwards — no need to re-query or fall back to a default.
+    // so the same reference serves allocation and release for the MSI-X
+    // resource — no need to re-query or fall back to a default.
     let provider = match irq_provider() {
         Ok(p) => p,
         Err(_) => {
@@ -374,19 +376,20 @@ pub(super) fn setup_msix<H: VirtIoHal, C: ConfigurationAccess>(
         // size was validated against the BAR size above.
         let table = unsafe { MsixTable::new(table_base, usize::from(cap.table_size)) };
 
-        let vector = provider.alloc_msix_vector().ok()?;
-        Some((common_cfg, table, vector))
+        let msi = provider.alloc_msix().ok()?;
+        Some((common_cfg, table, msi))
     })();
-    let Some((common_cfg, table, vector)) = prepared else {
+    let Some((common_cfg, table, msi)) = prepared else {
         root.set_command(bdf, command);
         return None;
     };
 
     msix::prepare_msix(root, config, bdf, &cap);
 
-    let apic_id = provider.current_apic_id();
     for entry in 0..usize::from(REQUIRED_MSIX_TABLE_ENTRIES) {
-        if msix::configure_msix_entry(&table, entry, vector, apic_id).is_some() {
+        if msix::configure_msix_entry(&table, entry, msi.message.address, msi.message.data)
+            .is_some()
+        {
             continue;
         }
 
@@ -396,26 +399,23 @@ pub(super) fn setup_msix<H: VirtIoHal, C: ConfigurationAccess>(
             entry
         );
         msix::disable_msix(root, config, bdf, &cap);
-        provider.free_msix_vector(vector);
+        provider.free_msix(msi);
         root.set_command(bdf, command);
         return None;
     }
 
+    let irq = msi.irq.number;
     let msix = PciMsixState {
         common_cfg,
         config: *config,
         cap,
         bdf,
-        vector,
+        msi,
     };
 
-    log::info!(
-        "PCI virtio device at {:?}: MSI-X vector = {:#x}",
-        bdf,
-        vector
-    );
+    log::info!("PCI virtio device at {:?}: MSI-X IRQ = {}", bdf, irq);
 
-    Some((vector as usize, msix))
+    Some((irq, msix))
 }
 
 /// Reads the PCI Interrupt Line register (config space offset 0x3C) for the

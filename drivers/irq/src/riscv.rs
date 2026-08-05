@@ -5,7 +5,7 @@
 use core::{num::NonZeroU32, ptr::NonNull};
 
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
-use khal::irq::TargetCpu;
+use kirq::TargetCpu;
 use kplat::cpu::id as this_cpu_id;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
@@ -18,7 +18,7 @@ use sbi_rt::HartMask;
 const PLIC_PADDR: usize = 0x0c00_0000;
 const PLIC_MMIO_SIZE: usize = 0x0400_0000;
 const PLIC_IOMAP_NAME: &str = "plic";
-pub const PLIC_DOMAIN: khal::irq::IrqDomainId = khal::irq::PLIC_ROOT_DOMAIN;
+pub const PLIC_DOMAIN: kirq::IrqDomainId = kirq::PLIC_ROOT_DOMAIN;
 pub const INTC_IRQ_BASE: usize = 1 << (usize::BITS - 1);
 #[allow(unused)]
 pub const S_SOFT: usize = INTC_IRQ_BASE + 1;
@@ -30,8 +30,8 @@ pub const S_EXT: usize = INTC_IRQ_BASE + 9;
 const PLIC_COMPLETE_SKIP: usize = 0;
 static PLIC: LazyInit<SpinNoIrq<Plic>> = LazyInit::new();
 
-pub const fn plic_irq_desc(hwirq: usize) -> khal::irq::IrqDesc {
-    khal::irq::plic_irq_desc(hwirq)
+pub const fn plic_irq_desc(hwirq: usize) -> kirq::IrqDesc {
+    kirq::plic_irq_desc(hwirq)
 }
 
 fn plic() -> &'static SpinNoIrq<Plic> {
@@ -129,8 +129,8 @@ macro_rules! with_cause {
 }
 
 #[kplat::impl_dev_interface]
-impl khal::irq::IntrManagerIf {
-    fn configure(_desc: khal::irq::IrqDesc) {}
+impl kirq::IntrManagerIf {
+    fn configure(_desc: kirq::IrqDesc) {}
 
     fn enable(irq: usize, enabled: bool) {
         with_cause!(
@@ -164,19 +164,19 @@ impl khal::irq::IntrManagerIf {
         );
     }
 
-    fn dispatch_irq(irq: usize) -> Option<khal::irq::PendingIrq> {
+    fn dispatch_irq(irq: usize) -> Option<kirq::PendingIrq> {
         with_cause!(
             irq,
             @S_TIMER => {
                 trace!("IRQ: timer");
-                Some(khal::irq::PendingIrq::new(khal::irq::IrqRef::Virq(irq), PLIC_COMPLETE_SKIP))
+                Some(kirq::PendingIrq::new(kirq::IrqRef::Virq(irq), PLIC_COMPLETE_SKIP))
             },
             @S_SOFT => {
                 trace!("IRQ: IPI");
                 // SAFETY: the current trap cause is a pending supervisor
                 // software interrupt, so clearing that CSR bit acknowledges it.
                 unsafe { sip::clear_ssoft() };
-                Some(khal::irq::PendingIrq::new(khal::irq::IrqRef::Virq(irq), PLIC_COMPLETE_SKIP))
+                Some(kirq::PendingIrq::new(kirq::IrqRef::Virq(irq), PLIC_COMPLETE_SKIP))
             },
             @S_EXT => {
                 let mut plic = plic().lock();
@@ -186,8 +186,8 @@ impl khal::irq::IntrManagerIf {
                 };
                 trace!("IRQ: external {irq}");
                 let hwirq = irq.get() as usize;
-                Some(khal::irq::PendingIrq::new(
-                    khal::irq::IrqRef::Domain(PLIC_DOMAIN, hwirq),
+                Some(kirq::PendingIrq::new(
+                    kirq::IrqRef::Domain(PLIC_DOMAIN, hwirq),
                     hwirq,
                 ))
             },
@@ -197,7 +197,7 @@ impl khal::irq::IntrManagerIf {
         )
     }
 
-    fn dispatch_nmi(_irq: usize) -> Option<khal::irq::DispatchedIrq> {
+    fn dispatch_nmi(_irq: usize) -> Option<kirq::DispatchedIrq> {
         None
     }
 

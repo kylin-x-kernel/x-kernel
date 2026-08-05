@@ -252,7 +252,7 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 3. x86_64 架构：尝试 MSI-X 设置（当前回退到 legacy IRQ）
    - 查找 MSI-X capability，分配 CPU 中断向量，配置 MSI-X 表项
    - 若 MSI-X 不可用或向量耗尽，读取 Interrupt Line 寄存器获取 legacy IRQ
-   - 通过 `khal::irq::map()` 将硬件 IRQ 映射为虚拟 IRQ
+   - 通过 `kirq::try_map()` 将硬件 IRQ 映射为虚拟 IRQ
 4. 其他架构：通过设备树或固定映射获取 IRQ
    - aarch64：`pci::legacy_interrupt_route()` 获取设备树路由，按触发类型创建 GIC 描述符
    - riscv64：映射为 PLIC 中断

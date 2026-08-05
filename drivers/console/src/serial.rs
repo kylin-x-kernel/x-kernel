@@ -17,9 +17,10 @@ use alloc::sync::Arc;
 
 #[cfg(feature = "pl011")]
 use arm_pl011::Pl011Uart;
+use khal::mem::PhysAddr;
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 use khal::mem::VirtAddr;
-use khal::{irq::IrqDesc, mem::PhysAddr};
+use kirq::IrqDesc;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]

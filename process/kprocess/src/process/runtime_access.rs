@@ -167,6 +167,7 @@ impl Process {
     }
 
     /// Returns the pinned address-space object for teardown-state observation.
+    #[cfg(unittest)]
     pub(crate) fn pinned_address_space_for_teardown_observation(
         &self,
     ) -> KResult<Arc<Mutex<MmSpace>>> {

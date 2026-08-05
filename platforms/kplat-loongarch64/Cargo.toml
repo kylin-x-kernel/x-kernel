@@ -29,6 +29,7 @@ kaddr_layout = { workspace = true }
 khal = { workspace = true }
 ktime_types = { workspace = true }
 ktime = { workspace = true }
+kirq = { workspace = true }
 kcpu_id_map = { workspace = true }
 kerrno = { workspace = true }
 kplat = { workspace = true }

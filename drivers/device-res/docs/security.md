@@ -42,6 +42,7 @@
 | MMIO 寄存器 | 设备输出 | `write_volatile` 写入设备可见的寄存器 |
 | DMA 缓冲区 | 设备可写内存 | 一致性 DMA 缓冲区可被设备并发修改 |
 | 中断 | 设备信号 | 中断处理器在中断上下文中被调用，频率由设备决定 |
+| MSI message | 设备输出 | `MsiResource::message` 被写入设备 MSI/MSI-X 寄存器或 table |
 | Firmware/ACPI 资源描述 | 引导元数据 | `ResourceDesc`（地址、大小、中断号）来自固件发现 |
 
 本模块：
@@ -135,6 +136,10 @@ unsafe { ptr.write_volatile(value) };
    已有 handle 持有的映射/中断/DMA 仍指向旧提供者。调用者需确保
    不在持有 handle 期间更换提供者。
 
+7. **MSI message 来源**：`MsiResource::message` 必须由 host IRQ core 或其
+   backend provider 生成。driver 不应自行读取 APIC id、CPU vector 或其它
+   controller-private 状态来构造 message。
+
 ## 线程安全
 
 | 类型 | `Send` | `Sync` | 说明 |
@@ -158,6 +163,8 @@ unsafe { ptr.write_volatile(value) };
 | T-06 | 重复映射同一 MMIO 区域 | 中 | 两个驱动请求重叠的 MMIO 区域 | 由 `ResourceProvider` 实现负责检测 `Busy` 并拒绝；本模块不做区域重叠检查 |
 | T-07 | 固件提供恶意或错误的资源描述 | 高 | 恶意或 buggy 固件报告错误的 MMIO 基地址、零大小区域或无效 IRQ 号 | `ResourceProvider` 实现应在 `map_mmio` / `request_irq` 中验证参数；本模块不校验 `ResourceDesc` 内容 |
 | T-08 | 提供者实现回调导致重入死锁 | 高 | `ResourceProvider` 实现的 `map_mmio` 等方法内部再次调用 `device-res` 函数（如 `provider()`），持锁期间重入获取同一把锁 | 模块无运行时检测；由提供者实现保证不在回调中调用 `device-res` 的全局 API |
+| T-09 | driver 自行构造 MSI message | 高 | driver 使用当前 APIC id 或裸 vector 写 MSI-X table | SMP/affinity/x2APIC 下投递目标错误或 vector 冲突 | API 只提供 provider 生成的 `MsiResource::message`，不提供 APIC id 查询 |
+| T-10 | MSI resource 隐式复制后重复释放 | 中 | resource 是 `Copy` 或被多个 owner 持有 | backend vector double-free 或 stale MSI message 被继续使用 | `MsiResource` 不实现 `Copy`，释放路径要求移动所有权 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -171,6 +178,7 @@ unsafe { ptr.write_volatile(value) };
 | F-06 | Drop 释放错误的共享 IRQ handler | 请求失败后仍构造 armed handle，或未保存提供者返回的 token | 当前 handler 未正确释放或同线其他 handler 被移除 | 设备中断功能异常 | 2 | 仅在 `request_irq` 成功后构造 `Irq`，并保存 token 供 Drop 精确释放 |
 | F-07 | 在中断上下文中调用 `Io::map` / `Irq::request` / `DmaCoherent::alloc` | 驱动在中断处理程序中获取资源 | `SpinNoIrq` 持锁期间禁止中断，若已被中断上下文占用则死锁 | 系统挂起 | 1 | 文档约束 `ResourceProvider` 方法仅可在正常上下文调用；无运行时检测 |
 | F-08 | 提供者实现回调重入 `device-res` 导致死锁 | `ResourceProvider` 方法内部调用 `provider()` 再次获取 `SpinNoIrq` 锁 | 自旋锁不可重入，死锁 | 系统挂起 | 1 | 由提供者实现保证不回调 `device-res` 全局 API；建议在提供者文档中显式声明此约束 |
+| F-09 | MSI resource 释放早于 IRQ handler 注销 | 驱动 teardown 顺序错误 | provider 可能释放 backend vector 时 OS-visible IRQ 仍被注册 | 后续 vector reuse 可能遇到旧 handler | 2 | host provider 应诊断该顺序问题；驱动应先 release handler 再 free MSI resource |
 
 ## 故障管理
 
@@ -181,6 +189,8 @@ unsafe { ptr.write_volatile(value) };
   这些是编程错误，不可恢复。
 - **Drop 安全**：所有 RAII handle 的 drop 使用 `try_provider()` 避免在
   提供者不可用时 panic。
+- **MSI message 封装**：MSI-X 申请返回 provider 生成的 `MsiResource`，驱动只消费
+  virq 和 message，不接触 irqchip-private vector/APIC id。
 - **无错误码映射**：不返回 POSIX 错误码，使用 `ResError` 枚举。
 
 ## 隐私分析
@@ -206,6 +216,9 @@ unsafe { ptr.write_volatile(value) };
 5. **中断上下文约束未强制**：`IrqHandler::handle` 文档声明不可阻塞，
    但模块层无运行时检查。
 
+6. **MSI-X 无 RAII handle**：当前 `MsiResource` 是显式 alloc/free 资源，不像
+   `Irq` 一样自带 RAII Drop。它不实现 `Copy`，但调用方仍必须按 provider 合同释放。
+
 ## 审计清单
 
 修改 `device-res` 时需验证：
@@ -215,5 +228,6 @@ unsafe { ptr.write_volatile(value) };
 - [ ] 新增的 MMIO 访问方法包含 acquire/release fence。
 - [ ] RAII handle 的 drop 路径使用 `try_provider()` 而非 `provider()`。
 - [ ] `Irq` 仅在 `request_irq` 成功后构造，并保存提供者返回的 handler token。
+- [ ] 新增 MSI API 不暴露 APIC id、CPU vector 或 controller-private cookie。
 - [ ] `devm_*` 函数在注册清理回调前完成资源获取（失败时不注册空回调）。
 - [ ] 新增 `ResourceProvider` 方法文档声明执行上下文约束。

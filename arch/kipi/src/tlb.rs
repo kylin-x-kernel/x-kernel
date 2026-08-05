@@ -34,11 +34,10 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+use kbuild_config::IPI_IRQ;
 use kcpu_id_map::{KCpuMask, KCpuMaskExt, LogicalCpuId, for_each_present_logical_cpu};
-use khal::{
-    irq::{IPI_IRQ, TargetCpu},
-    percpu::this_cpu_id,
-};
+use khal::percpu::this_cpu_id;
+use kirq::TargetCpu;
 use kspin::NoPreempt;
 use ktime_types::TimeSpan;
 use memaddr::VirtAddr;
@@ -412,7 +411,7 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
             // on each architecture, so the target cannot observe the IPI
             // before this request becomes visible.
             for target in targets.iter().flatten() {
-                khal::irq::notify_cpu(IPI_IRQ, TargetCpu::Specific(target.as_usize()));
+                kirq::notify_cpu(IPI_IRQ, TargetCpu::Specific(target.as_usize()));
             }
 
             let start = khal::time::monotonic_time();

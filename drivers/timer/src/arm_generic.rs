@@ -191,7 +191,7 @@ fn rearm_local_timer_irq() {
             CNTV_TVAL_EL0.set(0);
         }
     }
-    khal::irq::enable(irq, true);
+    kirq::enable(irq, true);
 }
 
 #[inline]
@@ -458,9 +458,9 @@ fn request_remote_timer_fixup() {
     }
 
     IPI_FIXUP_PENDING.fetch_or(remote_mask, Ordering::AcqRel);
-    khal::irq::notify_cpu(
+    kirq::notify_cpu(
         kbuild_config::IPI_IRQ,
-        khal::irq::TargetCpu::AllButSelf {
+        kirq::TargetCpu::AllButSelf {
             me: current_cpu.into(),
             total: kcpu_id_map::nr_cpus(),
         },

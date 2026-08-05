@@ -65,8 +65,6 @@ pub struct IrqResource {
     /// Hardware IRQ number within `controller` / `domain`, when distinct from
     /// the OS-visible `number`.
     pub hwirq: Option<usize>,
-    /// MSI-X vector index, for PCI devices using MSI-X signalling.
-    pub msi_vector: Option<u8>,
 }
 
 impl IrqResource {
@@ -78,7 +76,6 @@ impl IrqResource {
             controller: None,
             domain: None,
             hwirq: None,
-            msi_vector: None,
         }
     }
 
@@ -99,11 +96,37 @@ impl IrqResource {
         self.hwirq = Some(n);
         self
     }
+}
 
-    /// Builder: attach an MSI-X vector index.
-    pub const fn with_msi_vector(mut self, v: u8) -> Self {
-        self.msi_vector = Some(v);
-        self
+/// Device-visible MSI message returned by the host IRQ core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsiMessage {
+    /// Message address programmed into the device.
+    pub address: u64,
+    /// Message data programmed into the device.
+    pub data: u32,
+}
+
+impl MsiMessage {
+    /// Creates a device-visible MSI message.
+    pub const fn new(address: u64, data: u32) -> Self {
+        Self { address, data }
+    }
+}
+
+/// MSI/MSI-X interrupt resource allocated by the host IRQ core.
+#[derive(Debug, PartialEq, Eq)]
+pub struct MsiResource {
+    /// OS-visible IRQ used for handler registration.
+    pub irq: IrqResource,
+    /// Device-visible message to program into MSI/MSI-X registers.
+    pub message: MsiMessage,
+}
+
+impl MsiResource {
+    /// Creates an MSI resource from an IRQ and device message.
+    pub const fn new(irq: IrqResource, message: MsiMessage) -> Self {
+        Self { irq, message }
     }
 }
 
@@ -261,25 +284,20 @@ pub trait IrqOp: Sync {
         Ok(IrqResource::new(route.hwirq, route.trigger).with_controller(route.controller))
     }
 
-    /// Allocate an MSI-X vector, returning its index.
+    /// Allocate a PCI MSI-X interrupt resource.
     ///
-    /// Only meaningful on hosts / platforms with MSI-X support (e.g. x86 APIC).
-    /// Default: [`Unsupported`](ResError::Unsupported).
-    fn alloc_msix_vector(&self) -> ResResult<u8> {
+    /// The returned IRQ is OS-visible and suitable for handler registration.
+    /// The returned message is device-visible and suitable for programming an
+    /// MSI-X table entry. Controller-local vectors and APIC destination details
+    /// remain host IRQ-core implementation details.
+    fn alloc_msix(&self) -> ResResult<MsiResource> {
         Err(ResError::Unsupported)
     }
 
-    /// Release an MSI-X vector previously allocated by [`Self::alloc_msix_vector`].
+    /// Release an MSI-X resource previously allocated by [`Self::alloc_msix`].
     /// Default: no-op.
-    fn free_msix_vector(&self, vector: u8) {
-        let _ = vector;
-    }
-
-    /// The current CPU's APIC id, used to target MSI-X vectors.
-    ///
-    /// Default: `0`. Only meaningful on x86-style interrupt controllers.
-    fn current_apic_id(&self) -> u8 {
-        0
+    fn free_msix(&self, resource: MsiResource) {
+        let _ = resource;
     }
 }
 

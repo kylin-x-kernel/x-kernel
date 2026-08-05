@@ -13,7 +13,7 @@ extern crate log;
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use kcpu_id_map::RawCpuId;
+use kcpu_id_map::{LogicalCpuId, RawCpuId, raw_cpu_id};
 use kspin::{IrqSave, SpinNoIrq};
 use lazyinit::LazyInit;
 use memaddr::{PhysAddr, pa};
@@ -94,19 +94,68 @@ impl MsixVectorAllocator {
 }
 
 #[kiface::provide]
-impl khal::irq::X86ApicIf {
-    fn alloc_msix_vector() -> Option<u8> {
-        MSIX_VECTOR_ALLOCATOR.lock().alloc()
+impl kirq::MsiBackendIf {
+    fn alloc_msi_vector(
+        _token: kirq::MsiBackendToken,
+        kind: kirq::MsiKind,
+        _affinity: kirq::IrqAffinity,
+    ) -> Option<usize> {
+        match kind {
+            kirq::MsiKind::PciMsix => MSIX_VECTOR_ALLOCATOR.lock().alloc().map(usize::from),
+        }
     }
 
-    fn free_msix_vector(vector: u8) -> bool {
+    fn free_msi_vector(_token: kirq::MsiBackendToken, hwirq: usize) -> bool {
+        let Ok(vector) = u8::try_from(hwirq) else {
+            return false;
+        };
         MSIX_VECTOR_ALLOCATOR.lock().free(vector)
     }
 
-    fn current_apic_id() -> u8 {
-        raw_cpuid::CpuId::new()
-            .get_feature_info()
-            .map_or(0, |f| f.initial_local_apic_id())
+    fn compose_msi_message(
+        _token: kirq::MsiBackendToken,
+        hwirq: usize,
+        affinity: kirq::IrqAffinity,
+    ) -> Option<kirq::MsiMessage> {
+        let Ok(vector) = u8::try_from(hwirq) else {
+            return None;
+        };
+        if !(MSIX_VECTOR_BASE..APIC_TIMER_VECTOR).contains(&vector) {
+            return None;
+        }
+
+        let apic_id = apic_id_for_affinity(affinity)?;
+        let msg_addr = 0xFEE0_0000u64 | (u64::from(apic_id) << 12);
+        let msg_data = u32::from(vector);
+        Some(kirq::MsiMessage::new(msg_addr, msg_data))
+    }
+}
+
+fn fallback_local_apic_id() -> u8 {
+    raw_cpuid::CpuId::new()
+        .get_feature_info()
+        .map_or(0, |f| f.initial_local_apic_id())
+}
+
+fn apic_id_for_affinity(affinity: kirq::IrqAffinity) -> Option<u8> {
+    match affinity {
+        kirq::IrqAffinity::Any => Some(fallback_local_apic_id()),
+        kirq::IrqAffinity::Cpu(cpu) => {
+            let logical_cpu_id = LogicalCpuId::new(cpu);
+            let Some(raw) = raw_cpu_id(logical_cpu_id) else {
+                warn!("MSI affinity target CPU {cpu} has no raw APIC id");
+                return None;
+            };
+            let Ok(apic_id) = u8::try_from(raw.as_usize()) else {
+                warn!(
+                    "MSI affinity target CPU {cpu} raw APIC id {} exceeds xAPIC MSI destination \
+                     width",
+                    raw.as_usize()
+                );
+                return None;
+            };
+            Some(apic_id)
+        }
     }
 }
 

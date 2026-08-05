@@ -21,11 +21,10 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use kbuild_config::IPI_IRQ;
 use kcpu_id_map::{LogicalCpuId, for_each_present_logical_cpu, raw_cpu_id};
-use khal::{
-    irq::{IPI_IRQ, TargetCpu as IpiTarget},
-    percpu::this_cpu_id,
-};
+use khal::percpu::this_cpu_id;
+use kirq::TargetCpu as IpiTarget;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 
@@ -146,7 +145,7 @@ pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: LogicalCpuId, callback: T) -> Res
         unsafe { IPI_EVENT_QUEUE.remote_ref_raw(dest_cpu_index) }
             .lock()
             .push(this_cpu_id(), callback.into());
-        khal::irq::notify_cpu(IPI_IRQ, IpiTarget::Specific(dest_cpu_index));
+        kirq::notify_cpu(IPI_IRQ, IpiTarget::Specific(dest_cpu_index));
     }
 
     Ok(())
@@ -173,7 +172,7 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
     enqueue_broadcast_to_others(current_cpu_id, &callback);
 
     // Send IPI to all other CPUs to trigger their callbacks
-    khal::irq::notify_cpu(
+    kirq::notify_cpu(
         IPI_IRQ,
         IpiTarget::AllButSelf {
             me: current_cpu_id.as_usize(),
@@ -207,8 +206,8 @@ pub fn run_on_each_cpu_via_ipi<T: Into<MulticastCallback>>(callback: T) -> Resul
 
     enqueue_broadcast_to_others(current_cpu_id, &callback);
 
-    khal::irq::notify_cpu(IPI_IRQ, IpiTarget::Self_);
-    khal::irq::notify_cpu(
+    kirq::notify_cpu(IPI_IRQ, IpiTarget::Self_);
+    kirq::notify_cpu(
         IPI_IRQ,
         IpiTarget::AllButSelf {
             me: current_cpu_id.as_usize(),

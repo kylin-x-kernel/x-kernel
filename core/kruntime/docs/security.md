@@ -36,7 +36,7 @@ kernel-boot / 平台固件
 | `BootInfo` | CPU ID、内存表、boot console PA/VA/size | 错误内存映射、错误 CPU 初始化、MMIO 区域越界 | `khal::firmware::init`、`khal::mem::init` 和 `memspace` 负责校验；boot console VA/PA 页内偏移由 `assert_eq!` 检查 |
 | 链接符号 | `_stext`、`_etext`、`.init_array` 边界 | backtrace 范围错误、构造函数表越界、任意跳转 | 只取 ZST 符号地址；`.init_array` 通过链接脚本和 `#[register_init]` 约束 |
 | SMP bring-up | DT/ACPI 发现的 present CPU、AP 栈、`boot_ap` | 从核使用错误栈、AP 未启动导致主核自旋 | 每个 AP 使用独立 boot stack；`ENTERED_CPUS` 串行握手；全局完成由 `INITED_CPUS == nr_cpus()` 判断 |
-| 中断和 timer | timer/IPI/PMU IRQ 号与 handler | 未注册 handler 时中断、timer deadline 错乱 | `init_interrupt` 先注册 handler 再 `enable_local_irq()`；从核在完成本地 runtime 初始化和全局屏障后才开 IRQ |
+| 中断和 timer | softirq runner、timer/IPI/PMU IRQ 号与 handler | 未安装 runner 或未注册 handler 时中断 bottom-half、timer deadline 错乱 | `init_interrupt` 先安装 softirq runner 和注册 handler 再 `enable_local_irq()`；从核在完成本地 runtime 初始化和全局屏障后才开 IRQ |
 | DMA 页表属性 | `kdma` 传入的内核 VA、size、flags | 错误修改内核页表属性 | `DmaPageTableIf::protect` 委托 `memspace::kernel_layout().protect()` 进行范围和页表处理 |
 
 本 crate 不直接处理用户内存、用户提供指针、DMA buffer 内容或设备寄存器读写；相关 trust boundary 位于 `memspace`、`kdma`、`kdriver` 和具体 HAL/driver 中。它会注册 boot console 的固定 MMIO 映射元数据，但不直接访问该 MMIO。
@@ -127,7 +127,7 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 | T-03 | AP 未完成初始化时进入系统 init 或跨 CPU worker | 中 | `INITED_CPUS` 计数错误、CPU 数来源错误 | 等待 `INITED_CPUS == kcpu_id_map::nr_cpus()`；计数使用 Release/Acquire |
 | T-04 | 从核使用错误或重叠 boot stack | 高 | AP 启动循环越界、并发启动复用槽位 | `secondary_cpu_index < NR_CPUS - 1`；串行 `boot_ap` + `ENTERED_CPUS` 握手；每 AP 独立槽 |
 | T-05 | PID 1 被提前消耗 | 中 | late-init 线程或后台 worker 获得 Linux-visible identity；`SystemInitEntry` 未先创建 init | boot、idle、late-init 和普通内核 worker 使用 PID-less identity；init 创建路径断言 root PID 为 1 |
-| T-06 | IRQ 在 handler 注册前启用 | 高 | `init_interrupt` 顺序被改坏、平台提前开 IRQ | 主核先注册 timer/IPI/PMU handler 再开本地 IRQ；从核初始化完成后再开 IRQ |
+| T-06 | IRQ 在 handler 注册前启用 | 高 | `init_interrupt` 顺序被改坏、平台提前开 IRQ | 主核先安装 softirq hardirq-exit runner，再注册 timer/IPI/PMU handler，最后开本地 IRQ；从核初始化完成后再开 IRQ |
 | T-07 | per-CPU timer deadline raw access 在可迁移上下文运行 | 中 | handler 被改为普通线程调用或抢占语义变化 | unsafe 注释要求 IRQ/preemption 禁止迁移；审计 raw percpu 调用点 |
 | T-08 | `DmaPageTableIf::protect` 修改非法内核 VA 范围 | 高 | `kdma` 调用方传入错误地址或长度 | 委托 `memspace` 的内核 layout 锁和页表校验 |
 | T-09 | panic handler 在损坏栈上再次失败 | 中 | 栈溢出、页表损坏、backtrace 范围错误 | panic 后只做诊断并关机，不尝试恢复 |

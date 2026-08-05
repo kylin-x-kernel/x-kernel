@@ -22,7 +22,6 @@ nmi = ["kplat/nmi", "kspin/pmr", "kcpu/pmr"]
 pmu = ["kplat/pmu"]
 tls = ["kcpu/tls"]
 
-ipi = []
 irq = []
 
 [dependencies]
@@ -30,8 +29,8 @@ kalloc = { workspace = true }
 boot_info = { workspace = true }
 firmware_handoff = { workspace = true }
 kcpu = { workspace = true }
+kirq = { workspace = true }
 kplat.workspace = true
-kbuild_config.workspace = true
 kernel_boot.workspace = true
 cfg-if.workspace = true
 heapless = "0.9"
@@ -49,11 +48,6 @@ acpi = { workspace = true }
 of = { workspace = true }
 unittest.workspace = true
 bitflags = { workspace = true }
-device_res = { workspace = true }
-
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 multiboot2 = "0.24"
-
-[build-dependencies]
-kbuild_config.workspace = true

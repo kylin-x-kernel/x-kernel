@@ -4,15 +4,15 @@
 use core::sync::atomic::Ordering;
 
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
-use khal::irq::{IrqPolarity, IrqTrigger, TargetCpu};
+use kirq::{IrqPolarity, IrqTrigger, TargetCpu};
 
-pub const IO_APIC_DOMAIN: khal::irq::IrqDomainId = khal::irq::IO_APIC_DOMAIN;
+pub const IO_APIC_DOMAIN: kirq::IrqDomainId = kirq::IO_APIC_DOMAIN;
 
-pub const fn legacy_irq_desc(hwirq: usize) -> khal::irq::IrqDesc {
-    khal::irq::io_apic_irq_desc(hwirq)
+pub const fn legacy_irq_desc(hwirq: usize) -> kirq::IrqDesc {
+    kirq::io_apic_irq_desc(hwirq)
 }
 
-fn configure(desc: khal::irq::IrqDesc) {
+fn configure(desc: kirq::IrqDesc) {
     let trigger = match desc.trigger {
         IrqTrigger::EdgeRising | IrqTrigger::EdgeFalling => x86_apic::IoApicTriggerMode::Edge,
         IrqTrigger::LevelHigh | IrqTrigger::LevelLow => x86_apic::IoApicTriggerMode::Level,
@@ -54,20 +54,17 @@ fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
     }
 }
 
-fn dispatch_irq(vector: usize) -> Option<khal::irq::PendingIrq> {
+fn dispatch_irq(vector: usize) -> Option<kirq::PendingIrq> {
     if vector >= x86_apic::APIC_TIMER_VECTOR as usize {
         trace!("LAPIC IRQ {}", vector);
         x86_apic::end_of_interrupt();
-        return Some(khal::irq::PendingIrq::new(
-            khal::irq::IrqRef::Virq(vector),
-            0,
-        ));
+        return Some(kirq::PendingIrq::new(kirq::IrqRef::Virq(vector), 0));
     }
     if vector >= x86_apic::MSIX_VECTOR_BASE as usize {
         trace!("MSI-X IRQ {}", vector);
         x86_apic::end_of_interrupt();
-        return Some(khal::irq::PendingIrq::new(
-            khal::irq::IrqRef::Virq(vector),
+        return Some(kirq::PendingIrq::new(
+            kirq::IrqRef::Domain(kirq::MSI_DOMAIN, vector),
             0,
         ));
     }
@@ -75,15 +72,15 @@ fn dispatch_irq(vector: usize) -> Option<khal::irq::PendingIrq> {
         let hwirq = vector - x86_apic::IO_APIC_VECTOR_BASE;
         if x86_apic::irq_trigger_mode(hwirq) == Some(x86_apic::IoApicTriggerMode::Level) {
             trace!("IRQ {} (level)", hwirq);
-            return Some(khal::irq::PendingIrq::new(
-                khal::irq::IrqRef::Domain(IO_APIC_DOMAIN, hwirq),
+            return Some(kirq::PendingIrq::new(
+                kirq::IrqRef::Domain(IO_APIC_DOMAIN, hwirq),
                 1,
             ));
         }
         trace!("IRQ {} (edge)", hwirq);
         x86_apic::end_of_interrupt();
-        return Some(khal::irq::PendingIrq::new(
-            khal::irq::IrqRef::Domain(IO_APIC_DOMAIN, hwirq),
+        return Some(kirq::PendingIrq::new(
+            kirq::IrqRef::Domain(IO_APIC_DOMAIN, hwirq),
             0,
         ));
     }
@@ -91,8 +88,8 @@ fn dispatch_irq(vector: usize) -> Option<khal::irq::PendingIrq> {
 }
 
 #[kplat::impl_dev_interface]
-impl khal::irq::IntrManagerIf {
-    fn configure(desc: khal::irq::IrqDesc) {
+impl kirq::IntrManagerIf {
+    fn configure(desc: kirq::IrqDesc) {
         configure(desc);
     }
 
@@ -100,11 +97,11 @@ impl khal::irq::IntrManagerIf {
         enable(irq, enabled);
     }
 
-    fn dispatch_irq(vector: usize) -> Option<khal::irq::PendingIrq> {
+    fn dispatch_irq(vector: usize) -> Option<kirq::PendingIrq> {
         dispatch_irq(vector)
     }
 
-    fn dispatch_nmi(_irq: usize) -> Option<khal::irq::DispatchedIrq> {
+    fn dispatch_nmi(_irq: usize) -> Option<kirq::DispatchedIrq> {
         None
     }
 
@@ -114,7 +111,7 @@ impl khal::irq::IntrManagerIf {
         }
     }
 
-    fn notify_cpu(interrupt_id: usize, target: khal::irq::TargetCpu) {
+    fn notify_cpu(interrupt_id: usize, target: kirq::TargetCpu) {
         notify_cpu(interrupt_id, target);
     }
 

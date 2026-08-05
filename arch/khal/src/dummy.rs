@@ -4,7 +4,6 @@
 
 //! Dummy implementation of platform-related interfaces defined in [`kplat`].
 
-use crate::irq::TargetCpu;
 use kcpu_id_map::LogicalCpuId;
 use kplat::{
     boot::BootHandler,
@@ -87,22 +86,22 @@ impl SysCtrl {
 }
 
 #[impl_dev_interface]
-impl crate::irq::IntrManagerIf {
-    fn configure(_desc: crate::irq::IrqDesc) {}
+impl kirq::IntrManagerIf {
+    fn configure(_desc: kirq::IrqDesc) {}
 
     fn enable(_irq: usize, _enabled: bool) {}
 
-    fn dispatch_irq(_irq: usize) -> Option<crate::irq::PendingIrq> {
+    fn dispatch_irq(_irq: usize) -> Option<kirq::PendingIrq> {
         None
     }
 
-    fn dispatch_nmi(_irq: usize) -> Option<crate::irq::DispatchedIrq> {
+    fn dispatch_nmi(_irq: usize) -> Option<kirq::DispatchedIrq> {
         None
     }
 
     fn complete_irq(_completion_cookie: usize) {}
 
-    fn notify_cpu(_irq: usize, _target: TargetCpu) {}
+    fn notify_cpu(_irq: usize, _target: kirq::TargetCpu) {}
 
     fn set_prio(_irq: usize, _priority: u8) {}
 }

@@ -5,14 +5,113 @@
 //! OS-visible IRQ descriptors.
 
 use bitflags::bitflags;
-// The trigger / controller / domain vocabulary is owned by the OS-agnostic
-// `device_res` crate and re-exported here so `khal::irq` remains the single
-// import path for IRQ types. The composite `IrqDesc` and the arch-core state
-// it carries (polarity / source / affinity / flags / the virq namespace) stay
-// in `khal`.
-pub use device_res::{IrqController, IrqDomainId, IrqEvent, IrqHandler, IrqTrigger};
 
-/// OS-visible logical interrupt number managed by `khal::irq`.
+/// Interrupt trigger mode understood by the generic IRQ core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrqTrigger {
+    EdgeRising,
+    EdgeFalling,
+    LevelHigh,
+    LevelLow,
+    /// Trigger mode not described by firmware; carries preserved raw flag bits.
+    Unknown(u32),
+}
+
+/// Interrupt controller family for IRQ descriptor normalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrqController {
+    Gic,
+    Plic,
+    IoApic,
+    Msi,
+    LoongArchExtioi,
+    /// Controller not described by firmware or currently unknown.
+    Unknown,
+}
+
+/// Opaque identifier for an IRQ domain managed by the kernel IRQ core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct IrqDomainId(u32);
+
+impl IrqDomainId {
+    /// Creates an IRQ domain identifier from its stable numeric id.
+    pub const fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    /// Returns the stable numeric id.
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
+/// Outcome reported by an IRQ handler.
+///
+/// The source bitmap is interpreted by higher layers such as the devres-backed
+/// driver framework. `kirq` only uses `handled()` to distinguish claimed work
+/// from a shared-line miss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IrqEvent {
+    handled: bool,
+    sources: u8,
+}
+
+impl IrqEvent {
+    /// The handler claimed the interrupt but reports no specific source.
+    pub const HANDLED: Self = Self {
+        handled: true,
+        sources: 0,
+    };
+    /// The handler did not claim the interrupt.
+    pub const NOT_HANDLED: Self = Self {
+        handled: false,
+        sources: 0,
+    };
+
+    /// Claim the interrupt with a caller-defined source bitmap.
+    pub const fn from_sources(sources: u8) -> Self {
+        Self {
+            handled: true,
+            sources,
+        }
+    }
+
+    /// Returns whether this handler claimed and serviced the interrupt.
+    pub const fn handled(&self) -> bool {
+        self.handled
+    }
+
+    /// Returns the raw caller-defined source bitmap.
+    pub const fn sources(&self) -> u8 {
+        self.sources
+    }
+
+    /// Combines another IRQ event into this one.
+    pub fn merge(&mut self, other: IrqEvent) {
+        self.handled |= other.handled;
+        self.sources |= other.sources;
+    }
+}
+
+/// A kernel IRQ handler.
+///
+/// Handlers run in interrupt context and must not sleep. Any
+/// `Fn() -> IrqEvent + Send + Sync` implements this trait.
+pub trait IrqHandler: Send + Sync {
+    /// Service a fired interrupt and report whether it was handled.
+    fn handle(&self) -> IrqEvent;
+}
+
+impl<F> IrqHandler for F
+where
+    F: Fn() -> IrqEvent + Send + Sync,
+{
+    fn handle(&self) -> IrqEvent {
+        self()
+    }
+}
+
+/// OS-visible logical interrupt number managed by `kirq`.
 pub type Virq = usize;
 
 /// Controller-local hardware interrupt number.
@@ -27,9 +126,10 @@ pub enum IrqSource {
     Unknown,
 }
 
-pub const GIC_ROOT_DOMAIN: IrqDomainId = IrqDomainId(1);
-pub const PLIC_ROOT_DOMAIN: IrqDomainId = IrqDomainId(2);
-pub const IO_APIC_DOMAIN: IrqDomainId = IrqDomainId(3);
+pub const GIC_ROOT_DOMAIN: IrqDomainId = IrqDomainId::new(1);
+pub const PLIC_ROOT_DOMAIN: IrqDomainId = IrqDomainId::new(2);
+pub const IO_APIC_DOMAIN: IrqDomainId = IrqDomainId::new(3);
+pub const MSI_DOMAIN: IrqDomainId = IrqDomainId::new(4);
 
 /// Signal polarity described for an interrupt resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +180,34 @@ pub struct IrqDesc {
     pub domain: Option<IrqDomainId>,
     pub affinity: IrqAffinity,
     pub flags: IrqFlags,
+}
+
+/// Descriptor merge or mapping conflict detected by the IRQ core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrqDescError {
+    /// Two descriptors for the same logical IRQ name different hardware IRQs.
+    HwirqConflict { existing: Hwirq, newer: Hwirq },
+    /// Two descriptors name incompatible IRQ domains.
+    DomainConflict {
+        existing: Option<IrqDomainId>,
+        newer: Option<IrqDomainId>,
+    },
+    /// Two descriptors name incompatible logical IRQs.
+    VirqConflict {
+        existing: Option<Virq>,
+        newer: Option<Virq>,
+    },
+    /// A domain/hwirq mapping already points at a different logical IRQ.
+    MappingConflict {
+        domain: IrqDomainId,
+        hwirq: Hwirq,
+        existing: Virq,
+        newer: Virq,
+    },
+    /// Dynamic logical IRQ allocation reached the representable IRQ limit.
+    VirqExhausted { next: Virq },
+    /// The descriptor names an IRQ domain that is not registered in kirq.
+    UnknownDomain { domain: IrqDomainId },
 }
 
 impl IrqDesc {
@@ -165,14 +293,27 @@ impl IrqDesc {
         self.virq
     }
 
-    /// Merge newer descriptor metadata into this descriptor.
-    pub fn merge(self, newer: Self) -> Self {
-        debug_assert_eq!(self.hwirq, newer.hwirq);
-        debug_assert!(
-            self.domain == newer.domain || self.domain.is_none() || newer.domain.is_none()
-        );
-        debug_assert!(self.virq == newer.virq || self.virq.is_none() || newer.virq.is_none());
-        Self {
+    /// Try to merge newer descriptor metadata into this descriptor.
+    pub fn try_merge(self, newer: Self) -> Result<Self, IrqDescError> {
+        if self.hwirq != newer.hwirq {
+            return Err(IrqDescError::HwirqConflict {
+                existing: self.hwirq,
+                newer: newer.hwirq,
+            });
+        }
+        if self.domain != newer.domain && self.domain.is_some() && newer.domain.is_some() {
+            return Err(IrqDescError::DomainConflict {
+                existing: self.domain,
+                newer: newer.domain,
+            });
+        }
+        if self.virq != newer.virq && self.virq.is_some() && newer.virq.is_some() {
+            return Err(IrqDescError::VirqConflict {
+                existing: self.virq,
+                newer: newer.virq,
+            });
+        }
+        Ok(Self {
             virq: newer.virq.or(self.virq),
             hwirq: self.hwirq,
             trigger: match newer.trigger {
@@ -197,7 +338,7 @@ impl IrqDesc {
                 _ => newer.affinity,
             },
             flags: self.flags | newer.flags,
-        }
+        })
     }
 }
 

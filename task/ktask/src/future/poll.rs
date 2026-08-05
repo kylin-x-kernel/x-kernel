@@ -83,7 +83,7 @@ pub fn register_irq_waker(
             match sets.entry(irq) {
                 Entry::Vacant(entry) => {
                     assert!(
-                        khal::irq::subscribe_wakeup(irq, irq_hook),
+                        kirq::subscribe_wakeup(irq, irq_hook),
                         "failed to subscribe IRQ wakeup for irq={irq}"
                     );
                     entry.insert(set).clone()

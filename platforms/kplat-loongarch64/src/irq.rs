@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use khal::irq::TargetCpu;
+use kirq::TargetCpu;
 use loongArch64::register::{
     ecfg::{self, LineBasedInterrupt},
     ticlr,
@@ -41,8 +41,8 @@ impl IrqType {
     }
 }
 #[impl_dev_interface]
-impl khal::irq::IntrManagerIf {
-    fn configure(_desc: khal::irq::IrqDesc) {}
+impl kirq::IntrManagerIf {
+    fn configure(_desc: kirq::IrqDesc) {}
 
     fn enable(irq: usize, enabled: bool) {
         let irq = IrqType::new(irq);
@@ -68,7 +68,7 @@ impl khal::irq::IntrManagerIf {
         }
     }
 
-    fn dispatch_irq(irq: usize) -> Option<khal::irq::PendingIrq> {
+    fn dispatch_irq(irq: usize) -> Option<kirq::PendingIrq> {
         let mut irq = IrqType::new(irq);
         if matches!(irq, IrqType::Io) {
             let Some(ex_irq) = eiointc::claim_irq() else {
@@ -87,13 +87,10 @@ impl khal::irq::IntrManagerIf {
                 eiointc::complete_irq(irq);
             }
         }
-        Some(khal::irq::PendingIrq::new(
-            khal::irq::IrqRef::Virq(irq.as_usize()),
-            0,
-        ))
+        Some(kirq::PendingIrq::new(kirq::IrqRef::Virq(irq.as_usize()), 0))
     }
 
-    fn dispatch_nmi(_irq: usize) -> Option<khal::irq::DispatchedIrq> {
+    fn dispatch_nmi(_irq: usize) -> Option<kirq::DispatchedIrq> {
         None
     }
 

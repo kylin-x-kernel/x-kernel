@@ -9,7 +9,7 @@ mod gicv2;
 #[path = "gicv3.rs"]
 mod gicv3;
 
-use khal::irq::TargetCpu;
+use kirq::TargetCpu;
 use lazyinit::LazyInit;
 use memaddr::{PhysAddr, VirtAddr};
 use memspace::iomap_device;
@@ -20,18 +20,18 @@ const GICR_NAME: &str = "gicr";
 static GIC_INFO: LazyInit<GicConfig> = LazyInit::new();
 static ACTIVE_GIC: LazyInit<GicVersion> = LazyInit::new();
 
-pub const GIC_ROOT_DOMAIN: khal::irq::IrqDomainId = khal::irq::GIC_ROOT_DOMAIN;
+pub const GIC_ROOT_DOMAIN: kirq::IrqDomainId = kirq::GIC_ROOT_DOMAIN;
 
-pub const fn irq_desc(hwirq: usize, trigger: khal::irq::IrqTrigger) -> khal::irq::IrqDesc {
-    khal::irq::gic_irq_desc(hwirq, trigger)
+pub const fn irq_desc(hwirq: usize, trigger: kirq::IrqTrigger) -> kirq::IrqDesc {
+    kirq::gic_irq_desc(hwirq, trigger)
 }
 
-pub const fn level_irq_desc(hwirq: usize) -> khal::irq::IrqDesc {
-    khal::irq::gic_level_irq_desc(hwirq)
+pub const fn level_irq_desc(hwirq: usize) -> kirq::IrqDesc {
+    kirq::gic_level_irq_desc(hwirq)
 }
 
-pub const fn edge_irq_desc(hwirq: usize) -> khal::irq::IrqDesc {
-    khal::irq::gic_edge_irq_desc(hwirq)
+pub const fn edge_irq_desc(hwirq: usize) -> kirq::IrqDesc {
+    kirq::gic_edge_irq_desc(hwirq)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,16 +278,16 @@ pub fn set_prio(irq: usize, priority: u8) {
 }
 
 #[kplat::impl_dev_interface]
-impl khal::irq::IntrManagerIf {
-    fn configure(desc: khal::irq::IrqDesc) {
+impl kirq::IntrManagerIf {
+    fn configure(desc: kirq::IrqDesc) {
         match desc.trigger {
-            khal::irq::IrqTrigger::EdgeRising | khal::irq::IrqTrigger::EdgeFalling => {
+            kirq::IrqTrigger::EdgeRising | kirq::IrqTrigger::EdgeFalling => {
                 crate::gic::set_trigger(desc.hwirq, true);
             }
-            khal::irq::IrqTrigger::LevelHigh | khal::irq::IrqTrigger::LevelLow => {
+            kirq::IrqTrigger::LevelHigh | kirq::IrqTrigger::LevelLow => {
                 crate::gic::set_trigger(desc.hwirq, false);
             }
-            khal::irq::IrqTrigger::Unknown(_) => {}
+            kirq::IrqTrigger::Unknown(_) => {}
         }
     }
 
@@ -300,7 +300,7 @@ impl khal::irq::IntrManagerIf {
     /// Uses GIC RPR to detect NMIs: if NMI, skip the NMI window
     /// (we ARE the NMI) and go through dispatch_subscribers (safe —
     /// no locks held in IRQ-enabled context).
-    fn dispatch_irq(irq: usize) -> Option<khal::irq::PendingIrq> {
+    fn dispatch_irq(irq: usize) -> Option<kirq::PendingIrq> {
         let (hwirq, completion_cookie, is_nmi) = crate::gic::gic_handle_irq_from_irqson(irq)?;
 
         // Linux: open window only for non-NMI, after NMI is handled.
@@ -309,16 +309,16 @@ impl khal::irq::IntrManagerIf {
             crate::gic::open_nmi_window();
         }
 
-        Some(khal::irq::PendingIrq::new(
-            khal::irq::IrqRef::Domain(GIC_ROOT_DOMAIN, hwirq),
+        Some(kirq::PendingIrq::new(
+            kirq::IrqRef::Domain(GIC_ROOT_DOMAIN, hwirq),
             completion_cookie,
         ))
     }
 
     /// NMI path: IRQs were disabled → no lock, no NMI window, PMR protected.
-    fn dispatch_nmi(irq: usize) -> Option<khal::irq::DispatchedIrq> {
+    fn dispatch_nmi(irq: usize) -> Option<kirq::DispatchedIrq> {
         let (hwirq, completion_cookie) = crate::gic::gic_handle_irq_from_irqsoff(irq)?;
-        Some(khal::irq::DispatchedIrq::new(hwirq, completion_cookie))
+        Some(kirq::DispatchedIrq::new(hwirq, completion_cookie))
     }
 
     /// Deactivate the interrupt.  PMR is restored by exception exit.
@@ -326,7 +326,7 @@ impl khal::irq::IntrManagerIf {
         crate::gic::complete_irq(completion_cookie);
     }
 
-    fn notify_cpu(interrupt_id: usize, target: khal::irq::TargetCpu) {
+    fn notify_cpu(interrupt_id: usize, target: kirq::TargetCpu) {
         crate::gic::notify_cpu(interrupt_id, target);
     }
 

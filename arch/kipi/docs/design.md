@@ -8,7 +8,7 @@
 - I-cache 跨核失效的实现绑定；
 - TLB shootdown 的跨核通知与确认协议。
 
-它位于 `khal::irq::notify_cpu()` 之上、调度器和页表实现之旁，为内核中
+它位于 `kirq::notify_cpu()` 之上、调度器和页表实现之旁，为内核中
 “需要让别的 CPU 立刻执行一小段本地操作”的场景提供统一入口。
 
 ## 背景
@@ -58,13 +58,13 @@ arch/kipi/
    ├─ run_on_cpu / run_on_each_cpu
    │      │
    │      ├─ 向目标 CPU 的 IPI_EVENT_QUEUE 入队回调
-   │      └─ khal::irq::notify_cpu(IPI_IRQ, ...)
+   │      └─ kirq::notify_cpu(kbuild_config::IPI_IRQ, ...)
    │
    └─ tlb::flush_remote
           │
           ├─ 发布每发起 CPU request slot
           ├─ bump 每目标 CPU pending epoch
-          └─ khal::irq::notify_cpu(IPI_IRQ, ...)
+          └─ kirq::notify_cpu(kbuild_config::IPI_IRQ, ...)
                      │
                      v
 目标 CPU IPI handler
@@ -88,7 +88,7 @@ arch/kipi/
 
 - `init()` 必须在对应 CPU 上初始化本地 IPI 队列后才能接收远程投递。
 - `run_on_cpu()` / `run_on_each_cpu()` / `run_on_each_cpu_via_ipi()` 只能在
-  `khal::irq::notify_cpu()` 可用后使用。
+  `kirq::notify_cpu()` 可用后使用。
 - 回调必须足够短，不应依赖长时间阻塞语义；它们最终在 IPI handler 上执行。
 
 ### 执行上下文
@@ -147,7 +147,7 @@ inactive
 2. 若目标是当前 CPU，直接本地执行回调。
 3. 若目标是远程 CPU，检查其 IPI 队列是否已初始化。
 4. 将回调压入目标 CPU 的 `IPI_EVENT_QUEUE`。
-5. 调用 `khal::irq::notify_cpu(IPI_IRQ, Specific(...))` 发 IPI。
+5. 调用 `kirq::notify_cpu(kbuild_config::IPI_IRQ, Specific(...))` 发 IPI。
 
 ### `run_on_each_cpu`
 
@@ -220,7 +220,7 @@ inactive
 优点：
 
 - 避免为每类跨核控制流单独申请中断向量；
-- 统一平台层 `notify_cpu(IPI_IRQ, ...)` 用法；
+- 统一 `kirq::notify_cpu(kbuild_config::IPI_IRQ, ...)` 用法；
 - 让 IPI handler 成为单一跨核控制入口。
 
 代价：

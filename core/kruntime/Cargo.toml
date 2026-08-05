@@ -56,6 +56,7 @@ kdriver.workspace = true
 kdma.workspace = true
 memaddr.workspace = true
 khal.workspace = true
+kirq.workspace = true
 of = { workspace = true, optional = true }
 ktime_types.workspace = true
 ktime.workspace = true

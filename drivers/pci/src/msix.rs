@@ -83,9 +83,9 @@ impl MsixTableEntry {
         self.vector_ctrl.modify(MSIX_VECTOR_CTRL::MASK::CLEAR);
     }
 
-    fn write_message(&self, msg_addr: u32, msg_data: u32) {
-        self.msg_addr_lo.set(msg_addr);
-        self.msg_addr_hi.set(0);
+    fn write_message(&self, msg_addr: u64, msg_data: u32) {
+        self.msg_addr_lo.set(msg_addr as u32);
+        self.msg_addr_hi.set((msg_addr >> 32) as u32);
         self.msg_data.set(msg_data);
     }
 
@@ -274,48 +274,26 @@ fn restore_msix_message_control(
     config.write_word(bdf, cap.cap_offset, word);
 }
 
-/// Configures a single MSI-X table entry for x86_64.
+/// Configures a single MSI-X table entry.
 ///
-/// Writes the x86 MSI message address (targeting the given APIC) and the
-/// message data (the CPU interrupt vector), then unmasks the entry.
+/// Writes the IRQ-core-composed MSI message, then unmasks the entry.
 ///
 /// # Arguments
 ///
 /// * `table` - Mapped MSI-X table.
 /// * `index` - Table entry index (0-based).
-/// * `cpu_vector` - CPU interrupt vector number to deliver (e.g. 0x40..0xEF).
-/// * `dest_apic_id` - APIC ID of the target CPU (usually the boot CPU, 0).
+/// * `msg_addr` - MSI message address composed by the host IRQ core.
+/// * `msg_data` - MSI message data composed by the host IRQ core.
 ///
 /// Returns `None` if `index` is outside the mapped MSI-X table.
 #[cfg(target_arch = "x86_64")]
 pub fn configure_msix_entry(
     table: &MsixTable,
     index: usize,
-    cpu_vector: u8,
-    dest_apic_id: u8,
+    msg_addr: u64,
+    msg_data: u32,
 ) -> Option<()> {
-    assert!(
-        cpu_vector >= 32,
-        "invalid CPU vector {} for MSI-X",
-        cpu_vector
-    );
     let entry = table.entry(index)?;
-
-    // x86 MSI address format:
-    //   Bits 31:20 = 0xFEE (fixed)
-    //   Bits 19:12 = Destination ID (APIC ID)
-    //   Bits 11:4  = reserved/0
-    //   Bit  3     = Redirect Hint (0 = directed)
-    //   Bit  2     = Destination Mode (0 = physical)
-    //   Bits 1:0   = reserved/0
-    let msg_addr = 0xFEE0_0000u32 | ((dest_apic_id as u32) << 12);
-
-    // x86 MSI data format:
-    //   Bits 7:0   = Vector
-    //   Bits 10:8  = Delivery mode (000 = Fixed)
-    //   Bit  14    = Level (0 for edge)
-    //   Bit  15    = Trigger mode (0 = edge)
-    let msg_data = cpu_vector as u32;
 
     entry.mask();
     entry.write_message(msg_addr, msg_data);

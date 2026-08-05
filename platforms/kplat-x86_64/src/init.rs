@@ -33,10 +33,10 @@ impl BootHandler {
         console_driver::init_stdout_ioport(
             console_driver::boot_console_io_port(),
             Some(
-                khal::irq::IrqDesc::new(4, khal::irq::IrqTrigger::EdgeRising)
-                    .with_source(khal::irq::IrqSource::PlatformStatic)
-                    .with_controller(khal::irq::IrqController::IoApic)
-                    .with_domain(khal::irq::IO_APIC_DOMAIN),
+                kirq::IrqDesc::new(4, kirq::IrqTrigger::EdgeRising)
+                    .with_source(kirq::IrqSource::PlatformStatic)
+                    .with_controller(kirq::IrqController::IoApic)
+                    .with_domain(kirq::IO_APIC_DOMAIN),
             ),
         );
         kernel_boot::bootln!("console driver init");

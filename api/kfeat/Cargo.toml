@@ -41,7 +41,7 @@ vmm = [
 
 
 # Interrupts
-ipi = ["dep:kipi", "khal/ipi", "kruntime/ipi", "ktask?/ipi"]
+ipi = ["dep:kipi", "kruntime/ipi", "ktask?/ipi"]
 dma-trace = ["kdriver/dma-trace"]
 dev_log = ["devfs/dev-log"]
 dice = [

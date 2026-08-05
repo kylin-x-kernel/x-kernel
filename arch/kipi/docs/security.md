@@ -35,7 +35,7 @@
 `kipi` 不直接接收用户态输入，但它确实跨越了若干高风险边界：
 
 1. **中断控制器边界**  
-   通过 `khal::irq::notify_cpu()` 与 GIC/APIC/SBI 等后端交互，依赖其
+   通过 `kirq::notify_cpu()` 与 GIC/APIC/SBI 等后端交互，依赖其
    IPI 投递和发布顺序正确。
 
 2. **per-CPU 原始引用边界**  

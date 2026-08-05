@@ -103,7 +103,7 @@ drivers/kdriver/
 | `DriverRegistrar` | 驱动注册门面：把 `DeviceDriver` 实现注册到 `kdevice` 驱动核心 |
 | `PlatformBackend` | 统一平台总线：firmware 描述的(device-tree / ACPI) + 编译期已知的静态设备 |
 | `PciBackend` | PCI 总线：ECAM/MmioCam 枚举，BAR 分配，host bridge / PCI-to-PCI bridge adoption |
-| `HostResourceProvider` | x-kernel 资源提供者实现；对接 `memspace`(iomap)、`khal`(irq)、`kdma`(dma) |
+| `HostResourceProvider` | x-kernel 资源提供者实现；对接 `memspace`(iomap)、`kirq`(irq)、`kdma`(dma) |
 | VirtIO 驱动族 | 每条 VirtIO 设备类型生成 PCI/MMIO 两个 `DeviceDriver` 描述符，共享同一激活路径 |
 | Platform 驱动族 | ramdisk、AHCI、bcm2835-sdhci、sdmmc、fxmac 等平台设备驱动 |
 
@@ -258,21 +258,28 @@ VirtIO 驱动在 PCI 和 MMIO 两条传输路径上共享同一激活入口：
 `resource.rs` 提供 device-managed 资源分配，绑定到 `DeviceObject` 的 devres 清理链表：
 
 - **`devm_iomap`**：通过 `memspace::iomap_device` 映射 MMIO，probe 失败或设备 remove 时自动 `iounmap`。
-- **`devm_request_irq`**：注册中断处理函数到 provider 的共享 IRQ line state；每条 IRQ 由一个捕获 line state 的 handler 接入 `khal::irq`。
+- **`devm_request_irq`**：注册中断处理函数到 provider 的共享 IRQ line state；每条 IRQ 由一个捕获 line state 的 handler 接入 `kirq`。
+  `resource.rs` 是 devres IRQ resource 与 kernel IRQ core 的适配层，负责把
+  `device_res` 的 trigger/controller/event/handler 转换到 `kirq` 自有类型；`kirq`
+  不反向依赖 devres。
+  后续 IRQ core 能力扩展必须放在 `kirq`，驱动框架只通过该适配层向驱动暴露内核
+  IRQ 能力。
 - **`devm_alloc_coherent`**：通过 `kdma::allocate_dma_memory` 分配一致性 DMA 缓冲区，release 时调用 `kdma::deallocate_dma_memory`。
 
 释放顺序与申请顺序相反（LIFO），避免资源依赖错乱。
 
 ### IRQ 分发机制
 
-`khal::irq::register` 存储 `Arc<dyn IrqHandler>`。`HostResourceProvider` 为每条 IRQ
-创建一个共享 line state，并向 `khal` 注册一个捕获该 state 的代理 handler：
+`kirq::register` 存储 `Arc<dyn kirq::IrqHandler>`。`HostResourceProvider`
+为每条 IRQ 创建一个共享 line state，并向 `kirq` 注册一个捕获该 state 的代理
+handler：
 
 1. `request_irq` 为设备 handler 分配 token，并将其加入对应 line state；首个 handler
    注册代理 handler，后续共享 handler 复用同一个代理。
-2. 中断到达时，代理 handler 从 line state 复制最多 4 个 handler 到固定长度栈上快照，
-   依次执行并合并 `IrqEvent`；事件被认领后将 source bitmap 交给 `irq-notify`。
-3. `release_irq` 按 token 删除当前 handler；列表为空后注销 `khal` handler 并删除 line state。
+2. 中断到达时，代理 handler 从 line state 复制最多 4 个 devres handler 到固定长度
+   栈上快照，依次执行并合并 `device_res::IrqEvent`；事件被认领后将 source bitmap
+   交给 `irq-notify`，再把结果转换成 `kirq::IrqEvent` 返回给 IRQ core。
+3. `release_irq` 按 token 删除当前 handler；列表为空后注销 `kirq` handler 并删除 line state。
 
 注册和释放路径允许分配，IRQ dispatch 路径不分配堆内存。
 
@@ -354,7 +361,7 @@ VirtIO 驱动在 PCI 和 MMIO 两条传输路径上共享同一激活入口：
 
 ### IRQ handler 通过共享 line state 注册
 
-**选择**：`khal::irq` 保存捕获共享 line state 的代理 handler，provider 通过 token
+**选择**：`kirq` 保存捕获共享 line state 的代理 handler，provider 通过 token
 管理同一 IRQ 上的设备 handler。
 
 **Trade-off**：首次注册一条 IRQ 时创建 line state，设备 handler 注册会扩展列表，
@@ -372,7 +379,7 @@ slot 身份映射和硬编码 IRQ 总数上限。
 - devres 资源在 `DeviceObject` 的 remove 路径中按 LIFO 顺序释放。
 - `PciBackend` 不持有需在 drop 中释放的持久资源（`PciBus` 在 `enumerate` 返回时释放）。
 - `PlatformBackend` 仅持有 `LocalIdAlloc`（栈上 u16），无需显式释放。
-- 中断释放按 token 删除设备 handler，最后一个 handler 删除后注销 `khal` handler。
+- 中断释放按 token 删除设备 handler，最后一个 handler 删除后注销 `kirq` handler。
 - 共享 DMA buffer 在 last handle drop 后由 `kdma::deallocate_dma_memory` 回收。
 
 ## Feature 门控关系

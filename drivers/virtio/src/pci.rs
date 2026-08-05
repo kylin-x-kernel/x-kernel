@@ -289,7 +289,7 @@ fn fw_controller_to_kind(c: InterruptControllerKind) -> IrqController {
 fn legacy_irq_for_bdf(config: &PciConfigAccess, bdf: DeviceFunction) -> Option<usize> {
     // Prefer firmware-described routing (device-tree / ACPI). The provider's
     // `map_irq` translates the (hwirq, trigger, controller) route into an
-    // OS-visible virtual IRQ, replacing the per-architecture `khal::irq`
+    // OS-visible virtual IRQ, replacing per-architecture IRQ numbering.
     // descriptor constructors.
     if let Some(route) = legacy_interrupt_route(config, bdf) {
         let desc = IrqRouteDesc {
