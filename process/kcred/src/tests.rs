@@ -59,6 +59,7 @@ fn test_credentials_exec_resets_saved_ids() {
     let mut credentials = Cred::new(1000, 100);
     credentials.set_resuid_unchecked(None, Some(2000), Some(3000));
     credentials.set_resgid_unchecked(None, Some(200), Some(300));
+    credentials.keep_caps_enable().unwrap();
 
     credentials.apply_exec();
 
@@ -68,6 +69,20 @@ fn test_credentials_exec_resets_saved_ids() {
     assert_eq!(credentials.rgid(), 100);
     assert_eq!(credentials.egid(), 200);
     assert_eq!(credentials.sgid(), 200);
+    assert!(!credentials.keep_caps());
+}
+
+#[def_test]
+fn test_keep_caps_set_get_and_lock() {
+    let mut credentials = Cred::root();
+    assert!(!credentials.keep_caps());
+
+    credentials.keep_caps_enable().unwrap();
+    assert!(credentials.keep_caps());
+
+    credentials.lock_keep_caps_for_test();
+    assert!(credentials.keep_caps_disable().is_err());
+    assert!(credentials.keep_caps());
 }
 
 #[def_test]

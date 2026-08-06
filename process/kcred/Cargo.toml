@@ -9,6 +9,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+bitflags.workspace = true
 kerrno.workspace = true
 klazy.workspace = true
 unittest.workspace = true

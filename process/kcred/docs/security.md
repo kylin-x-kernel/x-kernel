@@ -3,7 +3,8 @@
 ## 概述
 
 `kcred` 没有 Rust `unsafe` 代码。主要风险来自凭据转换规则错误、已提交对象被原地
-修改、一次权限操作混用多个身份快照，以及补充组不变量被破坏。
+修改、一次权限操作混用多个身份快照、securebits 锁定位处理错误，以及补充组不变量
+被破坏。
 
 ## 信任边界
 
@@ -19,6 +20,8 @@ kvfs: explicit &Cred -> generic DAC / filesystem callbacks
 ```
 
 - syscall 层负责把 ABI 参数转换为 `Uid`、`Gid` 或 `None`，并限制补充组数量。
+- `prctl(PR_SET_KEEPCAPS)` 的 ABI 参数校验由 syscall 层完成，锁定位和 securebits 状态
+  转换由 `kcred` 完成。
 - `kcred` 负责 set-ID 规则和凭据内部不变量。
 - `kprocess` 负责当前任务定位、发布和替换 committed credential。
 - `kvfs` 负责基于 `fsuid/fsgid`、补充组和 inode 元数据执行 DAC。
@@ -40,6 +43,11 @@ kvfs: explicit &Cred -> generic DAC / filesystem callbacks
    明确的 `setfsuid/setfsgid` 除外。
 7. **access 不修改当前身份**：默认 access 只通过 `for_access()` 修改临时副本；
    `AT_EACCESS` 直接借用当前不可变快照并保留显式设置的 `fsuid/fsgid`。
+8. **securebits 状态受锁定位保护**：`SECBIT_KEEP_CAPS_LOCKED` 置位后，
+   `keep_caps_enable()` / `keep_caps_disable()` 返回 `OperationNotPermitted`，失败的
+   prepared credential 不会发布。
+9. **exec 清除 keep-capabilities**：`apply_exec()` 在提交 exec 凭据前清除
+   `SECBIT_KEEP_CAPS`。
 
 ## 线程安全
 
@@ -65,6 +73,7 @@ kvfs: explicit &Cred -> generic DAC / filesystem callbacks
 | T-06 | root 近似被误认为完整 capability 模型 | 权限边界过宽 | 文档明确限制；后续在策略边界接入 capability |
 | T-07 | exec 忘记固定 saved IDs | 特权恢复语义错误 | exec credential 副本调用 `apply_exec()` 后再提交 |
 | T-08 | 初始 root credential 被原地修改 | 全局权限破坏 | `initial_cred()` 只发布 `Arc<Cred>`，变更必须 prepare 新对象 |
+| T-09 | 锁定的 keep-capabilities 状态被修改 | 后续 exec 或 UID 转换的权限边界失效 | `keep_caps_enable()` / `keep_caps_disable()` 先检查 `SECBIT_KEEP_CAPS_LOCKED`，失败路径不提交凭据 |
 
 ## 故障模式与处理
 
@@ -72,6 +81,7 @@ kvfs: explicit &Cred -> generic DAC / filesystem callbacks
 |------|----------|------|
 | checked set-ID 被拒绝 | prepared 副本不提交 | 传播 `KError::OperationNotPermitted` |
 | `setfsuid/setfsgid` 目标不允许 | 字段不变 | 返回旧 ID，遵循 Linux ABI |
+| `PR_SET_KEEPCAPS` 参数非法或 securebits 已锁定 | prepared 副本不提交 | 分别返回 `InvalidInput` 或 `OperationNotPermitted` |
 | 补充组分配失败 | 内存压力下操作不能完成 | 当前分配器策略生效；未来可在可失败分配边界映射 `ENOMEM` |
 | override 状态下普通 commit | objective/subjective 语义可能被覆盖 | `kprocess` 当前以断言拒绝该未支持状态 |
 
@@ -79,7 +89,8 @@ kvfs: explicit &Cred -> generic DAC / filesystem callbacks
 
 ## 已知限制
 
-1. 无 capability、securebits、LSM 或 file capability。
+1. 无完整 capability 集合、LSM 或 file capability；securebits 仅覆盖
+   `KEEP_CAPS` 及其锁定位。
 2. 无 user namespace ID 映射和 idmapped mount DAC。
 3. 无临时 subjective credential override。
 4. setuid/setgid executable 尚未接入。
@@ -89,6 +100,7 @@ kvfs: explicit &Cred -> generic DAC / filesystem callbacks
 
 - 新转换是否只修改 prepared `Cred`，并在成功后一次提交。
 - UID/GID 检查是否使用正确的 real/effective/saved 集合。
+- keep-capabilities 锁定位是否阻止后续修改，exec 是否清除 `KEEP_CAPS`。
 - `fsuid/fsgid` 与补充组是否保持 DAC 所需不变量。
 - 多步检查是否复用同一个 `Arc<Cred>`。
 - 是否避免新增 current-task 全局依赖或冗余 access 快照类型。

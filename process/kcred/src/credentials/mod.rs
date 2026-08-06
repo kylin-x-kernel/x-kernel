@@ -6,6 +6,7 @@
 
 mod group;
 mod model;
+mod securebits;
 mod user;
 
 pub use group::Gid;

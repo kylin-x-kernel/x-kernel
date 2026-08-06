@@ -22,7 +22,7 @@ fn optional_id(id: u32) -> Option<u32> {
     (id != NO_CHANGE_ID).then_some(id)
 }
 
-fn update_current_cred(update: impl FnOnce(&mut Cred) -> KResult<()>) -> KResult<()> {
+pub(super) fn update_current_cred(update: impl FnOnce(&mut Cred) -> KResult<()>) -> KResult<()> {
     let current = kprocess::current_user_thread();
     let mut new = current.prepare_creds();
     update(&mut new)?;

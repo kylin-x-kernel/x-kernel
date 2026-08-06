@@ -56,6 +56,7 @@ resource owners
 | T-07 | 非特权进程修改主机名 | 高 | `sethostname` 直接写 UTS namespace | syscall 边界检查 privileged credential，并限制 nodename 长度与用户缓冲区访问 |
 | T-08 | 非特权进程改变电源状态 | 高 | `reboot` 直接进入平台 power 接口 | 检查 privileged credential、Linux magic 和受支持命令集合 |
 | T-09 | 非特权进程修改墙钟 | 高 | wall-clock setter 直接更新 realtime 时钟关联 | `settimeofday` 与 `clock_settime` 在共享 setter 中检查 privileged credential，并拒绝把墙钟移到 CLOCK_MONOTONIC 之前 |
+| T-10 | `PR_SET_KEEPCAPS` 传入非法值或绕过锁定位 | 中 | `ctl.rs` 拒绝大于 1 的设置值，`kcred::Cred::keep_caps_enable()` / `keep_caps_disable()` 校验锁定位并通过 prepared credential 一次提交 |
 
 ## 审计清单
 

@@ -73,6 +73,7 @@ pub fn sys_get_mempolicy(
 /// - PR_GET_NAME: get the name of the calling
 /// - PR_SET_SECCOMP: enable seccomp mode, with the mode specified in `arg2`
 /// - PR_CAPBSET_READ: return whether a capability is in the bounding set
+/// - PR_GET_KEEPCAPS / PR_SET_KEEPCAPS: query or set the keep-capabilities flag
 /// - PR_MCE_KILL: set the machine check exception policy
 /// - PR_SET_MM options: set various memory management options (start/end code/data/brk/stack)
 pub fn sys_prctl(
@@ -105,6 +106,20 @@ pub fn sys_prctl(
             }
             return Ok(1);
         }
+        PR_GET_KEEPCAPS => {
+            return Ok(isize::from(kprocess::current_cred().keep_caps()));
+        }
+        PR_SET_KEEPCAPS => {
+            // arg2 must be 0/1; refuse when locked; persist on the credential.
+            if arg2 > 1 {
+                return Err(KError::InvalidInput);
+            }
+            if arg2 != 0 {
+                super::credentials::update_current_cred(|cred| cred.keep_caps_enable())?;
+            } else {
+                super::credentials::update_current_cred(|cred| cred.keep_caps_disable())?;
+            }
+        }
         PR_MCE_KILL => {}
         PR_SET_VMA => {
             // Allow user space to set anonymous VMA names (e.g. Go runtime).
@@ -125,4 +140,34 @@ pub fn sys_prctl(
     }
 
     Ok(0)
+}
+
+#[cfg(unittest)]
+mod tests {
+    use kerrno::KError;
+    use linux_raw_sys::prctl::{PR_GET_KEEPCAPS, PR_SET_KEEPCAPS};
+    use unittest::{assert_eq, def_test};
+
+    use super::sys_prctl;
+
+    #[def_test(user, serial)]
+    fn test_prctl_keep_caps_set_get() {
+        assert_eq!(sys_prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0), Ok(0));
+        assert_eq!(sys_prctl(PR_GET_KEEPCAPS, 0, 0, 0, 0), Ok(0));
+
+        assert_eq!(sys_prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0), Ok(0));
+        assert_eq!(sys_prctl(PR_GET_KEEPCAPS, 0, 0, 0, 0), Ok(1));
+
+        assert_eq!(sys_prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0), Ok(0));
+    }
+
+    #[def_test(user, serial)]
+    fn test_prctl_keep_caps_rejects_invalid_value() {
+        assert_eq!(sys_prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0), Ok(0));
+        assert_eq!(
+            sys_prctl(PR_SET_KEEPCAPS, 2, 0, 0, 0),
+            Err(KError::InvalidInput)
+        );
+        assert_eq!(sys_prctl(PR_GET_KEEPCAPS, 0, 0, 0, 0), Ok(0));
+    }
 }

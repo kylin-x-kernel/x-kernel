@@ -144,6 +144,9 @@ ksyscall::dispatch_irq_syscall
 - `task/credentials.rs`
   - `get*id` / `set*id` / `getgroups` / `setgroups`
   - owner 在 `kprocess` 当前进程 credential helper 与 `kcred` credential 模型
+- `task/ctl.rs`
+  - `prctl` 的 `PR_GET_KEEPCAPS` / `PR_SET_KEEPCAPS`
+  - owner 在 `kprocess` 当前任务凭据发布路径与 `kcred` securebits 状态
 - `task/ids.rs`
   - `getpid` / `getppid`
   - owner 在 `kprocess` 当前线程与父子进程关系

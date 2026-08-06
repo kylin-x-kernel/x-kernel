@@ -3,8 +3,8 @@
 ## 定位
 
 `kcred` 是 x-kernel 的 Linux/POSIX 凭据数据与转换策略 crate。它定义 `Cred`，维护
-real、effective、saved 和 filesystem UID/GID 以及补充组，并实现 set-ID 与 exec
-相关的状态转换。
+real、effective、saved 和 filesystem UID/GID、补充组以及当前支持的 securebits 状态，
+并实现 set-ID 与 exec 相关的状态转换。
 
 `kcred` 不知道“当前线程”，也不保存进程或线程对象。当前任务的凭据指针由上层
 `kprocess::Thread` 持有；下层 `kvfs` 只依赖 `kcred`，通过显式 `&Cred` 参数执行 DAC。
@@ -47,6 +47,7 @@ Cred
   ruid/euid/suid/fsuid
   rgid/egid/sgid/fsgid
   supplementary_groups: Arc<[Gid]>
+  securebits: KEEP_CAPS / KEEP_CAPS_LOCKED
 ```
 
 已提交的凭据始终以 `Arc<Cred>` 存在，并按不可变对象使用。修改遵循 Linux
@@ -96,6 +97,11 @@ filesystem IDs，不创建一份 effective-ID credential。
 - 被拒绝的 checked 转换返回 `KError::OperationNotPermitted`，且不发布副本。
 - `setfsuid/setfsgid` 始终返回旧值；目标不允许时保持状态不变。
 - `apply_exec()` 令 saved IDs 跟随 effective IDs。
+- `Cred` 保存 `SECBIT_KEEP_CAPS` 和 `SECBIT_KEEP_CAPS_LOCKED`（`SecureBits` bitflags）。
+  `keep_caps_enable()` / `keep_caps_disable()` 在锁定位置位时拒绝修改，`apply_exec()`
+  清除 `SECBIT_KEEP_CAPS`。
+- 当前凭据模型尚未保存 capability 集合，完整的 set-ID capability fixup 留待 capability
+  状态接入时统一实现。
 
 ### 补充组
 
@@ -131,7 +137,8 @@ filesystem IDs，不创建一份 effective-ID credential。
 
 ## 已知限制
 
-1. 尚无 capability 和 securebits；特权转换使用 `euid == 0` 近似。
+1. 尚无完整 capability 集合、LSM 或 file capability；securebits 目前只实现
+   `KEEP_CAPS` 及其锁定位，特权转换使用 `euid == 0` 近似。
 2. user namespace 类型已经存在，但 UID/GID 转换与 VFS idmapping 尚未接入。
 3. 尚无临时 subjective credential override。
 4. 尚未实现 setuid/setgid executable 和 file capability。
@@ -145,3 +152,5 @@ filesystem IDs，不创建一份 effective-ID credential。
 - 补充组替换是否继续保持排序不变量。
 - VFS 入口是否显式接收 `&Cred`，且没有依赖 `kprocess`。
 - capability、namespace 或 override credential 接入时是否同时更新两类凭据角色。
+- capability 集合接入时是否在完整的 set-ID fixup 中同步维护 capability 状态，并保持 exec
+  清除 `KEEP_CAPS` 的行为。

@@ -8,7 +8,7 @@ use alloc::{sync::Arc, vec::Vec};
 
 use kerrno::{KError, KResult};
 
-use super::{Gid, Uid};
+use super::{Gid, Uid, securebits::SecureBits};
 
 /// A Linux task security context.
 ///
@@ -26,6 +26,8 @@ pub struct Cred {
     sgid: Gid,
     fsgid: Gid,
     supplementary_groups: Arc<[Gid]>,
+    /// Process secure-bits. Currently only KEEP_CAPS{,_LOCKED} are used.
+    securebits: SecureBits,
 }
 
 impl Cred {
@@ -46,6 +48,7 @@ impl Cred {
             sgid: gid,
             fsgid: gid,
             supplementary_groups: Arc::from([]),
+            securebits: SecureBits::empty(),
         }
     }
 
@@ -105,6 +108,45 @@ impl Cred {
     /// Returns the supplementary group list.
     pub fn supplementary_groups(&self) -> &[Gid] {
         &self.supplementary_groups
+    }
+
+    /// Returns whether the keep-capabilities flag is set.
+    pub fn keep_caps(&self) -> bool {
+        self.securebits.contains(SecureBits::KEEP_CAPS)
+    }
+
+    /// Returns whether the keep-capabilities flag is locked.
+    fn keep_caps_locked(&self) -> bool {
+        self.securebits.contains(SecureBits::KEEP_CAPS_LOCKED)
+    }
+
+    /// Enables the keep-capabilities flag (`prctl(PR_SET_KEEPCAPS, 1)`).
+    ///
+    /// Persists the flag on this credential. The capability-set fixup that
+    /// consumes this state will be added together with capability sets. The
+    /// bit is already process state: `PR_GET_KEEPCAPS` observes it, and exec
+    /// clears it.
+    pub fn keep_caps_enable(&mut self) -> KResult<()> {
+        if self.keep_caps_locked() {
+            return Err(KError::OperationNotPermitted);
+        }
+        self.securebits.insert(SecureBits::KEEP_CAPS);
+        Ok(())
+    }
+
+    /// Clears the keep-capabilities flag (`prctl(PR_SET_KEEPCAPS, 0)`).
+    pub fn keep_caps_disable(&mut self) -> KResult<()> {
+        if self.keep_caps_locked() {
+            return Err(KError::OperationNotPermitted);
+        }
+        self.securebits.remove(SecureBits::KEEP_CAPS);
+        Ok(())
+    }
+
+    /// Locks the keep-capabilities flag for credential-model tests.
+    #[cfg(unittest)]
+    pub(crate) fn lock_keep_caps_for_test(&mut self) {
+        self.securebits.insert(SecureBits::KEEP_CAPS_LOCKED);
     }
 
     /// Returns whether `gid` matches the filesystem or supplementary groups.
@@ -370,6 +412,8 @@ impl Cred {
         self.fsuid = self.euid;
         self.sgid = self.egid;
         self.fsgid = self.egid;
+        // Keep-capabilities does not survive exec.
+        self.securebits.remove(SecureBits::KEEP_CAPS);
     }
 
     fn check_uid_change(&self, uid: Option<Uid>) -> KResult<()> {
