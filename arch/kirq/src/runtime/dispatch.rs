@@ -5,6 +5,7 @@
 //! Regular IRQ dispatch and wake-subscription fanout.
 
 use crate::{
+    action::allows_wake_compat,
     platform::PendingIrq,
     state::{IRQ_STATE, WakeupMode},
 };
@@ -16,7 +17,7 @@ use crate::{
 /// reported as unhandled and return the resolved `virq` so diagnostics and
 /// deferred hooks can identify the claimed line.
 pub(super) fn dispatch_subscribers(pending: &PendingIrq) -> Option<crate::Virq> {
-    let (virq, desc, regular_handler, wake_subscription) = {
+    let (virq, snapshot) = {
         let mut state = IRQ_STATE.lock();
         let Some(virq) = pending.resolve() else {
             warn!("Unhandled IRQ {:?}", pending.source());
@@ -29,37 +30,33 @@ pub(super) fn dispatch_subscribers(pending: &PendingIrq) -> Option<crate::Virq> 
             // still completes the platform claim and runs IRQ-tail deferred work.
             return Some(virq);
         };
-        let desc = entry.desc;
-        let regular_handler = entry.handler.clone();
-        let wake_subscription = match entry.wake_subscription {
-            Some(subscription) if subscription.mode == WakeupMode::Persistent => Some(subscription),
-            Some(subscription) if subscription.armed => {
-                entry.wake_subscription = None;
-                Some(subscription)
-            }
-            Some(_) => {
-                entry.wake_subscription = None;
-                None
-            }
-            None => None,
-        };
-        if wake_subscription.is_none() {
+        let snapshot = entry.snapshot_dispatch();
+        if snapshot.wake_subscription.is_none() {
             state.remove_if_unused(virq);
         }
-        (virq, desc, regular_handler, wake_subscription)
+        (virq, snapshot)
     };
-    let has_regular_handler = regular_handler.is_some();
 
-    if let Some(handler) = regular_handler {
-        let _ = handler.handle();
-    }
+    let mut can_run_wake_compat = true;
+    let action_return = snapshot.regular_action.and_then(|action| {
+        if action.is_currently_dispatchable() {
+            Some(action.run_primary())
+        } else {
+            warn!("IRQ {virq} action has unsupported threaded state");
+            can_run_wake_compat = false;
+            None
+        }
+    });
 
-    if let Some(wake_subscription) = wake_subscription {
-        if !has_regular_handler && wake_subscription.mode == WakeupMode::OneShot {
-            crate::manager::enable(desc, false);
+    if can_run_wake_compat
+        && allows_wake_compat(action_return)
+        && let Some(wake_subscription) = snapshot.wake_subscription
+    {
+        if !snapshot.has_regular_action && wake_subscription.mode == WakeupMode::OneShot {
+            super::manager::enable(snapshot.desc, false);
         }
         (wake_subscription.handler)(virq);
-    } else if !has_regular_handler {
+    } else if !snapshot.has_regular_action {
         warn!("Unhandled IRQ {virq}");
     }
     Some(virq)

@@ -4,8 +4,9 @@
 
 //! IRQ manager public API and dispatch-entry orchestration.
 
-use super::{Hwirq, IntoIrqDesc, IrqDesc, IrqDescError, IrqDomainId, Virq};
 use crate::{
+    Hwirq, IrqDesc, IrqDescError, IrqDomainId, IrqSpec, Virq,
+    action::IrqAction,
     context::HardIrqContextGuard,
     dispatch::dispatch_subscribers,
     lifecycle::IrqLifecycleGuard,
@@ -34,10 +35,9 @@ pub use crate::{
     state::DYNAMIC_VIRQ_BASE,
 };
 /// Try to map a hardware IRQ resource into the OS-visible logical IRQ namespace.
-pub fn try_map(desc: impl IntoIrqDesc) -> Result<Virq, IrqDescError> {
-    let desc = desc.into_irq_desc();
+pub fn try_map(desc: IrqDesc) -> Result<Virq, IrqDescError> {
     let mut state = IRQ_STATE.lock();
-    Ok(try_resolve_and_publish(&mut state, desc)?
+    Ok(try_resolve_and_publish(&mut state, IrqSpec::Desc(desc))?
         .logical_irq()
         .unwrap())
 }
@@ -52,22 +52,25 @@ pub fn translate_hwirq(domain: IrqDomainId, hwirq: Hwirq) -> Option<Virq> {
 
 /// Configure and enable or disable an IRQ line.
 ///
-/// New code should pass a full [`IrqDesc`] so trigger and polarity metadata can
-/// be applied before the IRQ is enabled. Passing a plain `usize` keeps backward
-/// compatibility but carries no controller metadata.
+/// The input is an [`IrqSpec`]: `usize` means a plain OS-visible `virq` with no
+/// hardware metadata, while [`IrqDesc`] means a hardware IRQ resource that may
+/// carry domain, trigger, polarity, controller, affinity, or flag state. A
+/// plain `virq` still resolves to the stored identity descriptor used by older
+/// platform-static lines, so low-numbered identity IRQs may still reach the
+/// platform enable path; it simply does not contribute new metadata.
 #[inline]
-pub fn enable(desc: impl IntoIrqDesc, on: bool) {
-    if let Err(err) = try_enable(desc, on) {
+pub fn enable(spec: impl Into<IrqSpec>, on: bool) {
+    if let Err(err) = try_enable(spec, on) {
         warn!("enable IRQ failed: {err:?}");
     }
 }
 
 /// Try to configure and enable or disable an IRQ line.
 #[inline]
-pub fn try_enable(desc: impl IntoIrqDesc, on: bool) -> Result<(), IrqDescError> {
+pub fn try_enable(spec: impl Into<IrqSpec>, on: bool) -> Result<(), IrqDescError> {
     let desc = {
         let mut state = IRQ_STATE.lock();
-        try_resolve_and_publish(&mut state, desc.into_irq_desc())?
+        try_resolve_and_publish(&mut state, spec.into())?
     };
     configure_and_enable_platform_irq(desc, on);
     Ok(())
@@ -81,13 +84,15 @@ pub fn descriptor(virq: Virq) -> Option<IrqDesc> {
 /// Register the regular OS IRQ handler for an IRQ line.
 ///
 /// Each registration carries its own `Arc<dyn IrqHandler>` — the Rust-native
-/// counterpart of Linux's `dev_id` — with no side table or trampoline.
+/// counterpart of Linux's `dev_id` — and is stored internally as the line's
+/// sole regular IRQ action. The public API still accepts only one regular
+/// handler per IRQ line.
 ///
 /// This is different from wakeup subscription: the registered handler is invoked
 /// directly on dispatch, while wakeup subscribers only participate in the wakeup
 /// notification path.
-pub fn register(desc: impl IntoIrqDesc, handler: Handler) -> bool {
-    match try_register(desc, handler) {
+pub fn register(spec: impl Into<IrqSpec>, handler: Handler) -> bool {
+    match try_register(spec, handler) {
         Ok(registered) => registered,
         Err(err) => {
             warn!("register IRQ handler failed: {err:?}");
@@ -97,19 +102,20 @@ pub fn register(desc: impl IntoIrqDesc, handler: Handler) -> bool {
 }
 
 /// Try to register the regular OS IRQ handler for an IRQ line.
-pub fn try_register(desc: impl IntoIrqDesc, handler: Handler) -> Result<bool, IrqDescError> {
+pub fn try_register(spec: impl Into<IrqSpec>, handler: Handler) -> Result<bool, IrqDescError> {
     let mut state = IRQ_STATE.lock();
-    let desc = try_resolve_and_publish(&mut state, desc.into_irq_desc())?;
+    let desc = try_resolve_and_publish(&mut state, spec.into())?;
     let virq = desc.logical_irq().unwrap();
     let entry = state
         .descs
         .get_mut(&virq)
         .expect("descriptor state must exist after try_resolve_desc");
-    if entry.handler.is_some() {
+    if entry.has_regular_action() {
         warn!("register handler for IRQ {virq} failed");
         return Ok(false);
     }
-    entry.handler = Some(handler);
+    let installed = entry.install_regular_action(IrqAction::regular(handler));
+    debug_assert!(installed, "duplicate regular action was checked above");
     let desc = entry.desc;
     drop(state);
     configure_and_enable_platform_irq(desc, true);
@@ -117,48 +123,44 @@ pub fn try_register(desc: impl IntoIrqDesc, handler: Handler) -> Result<bool, Ir
 }
 
 /// Remove the regular OS IRQ handler for an IRQ line.
-pub fn unregister(desc: impl IntoIrqDesc) -> Option<Handler> {
-    let desc = desc.into_irq_desc();
+pub fn unregister(spec: impl Into<IrqSpec>) -> Option<Handler> {
+    let spec = spec.into();
     let mut state = IRQ_STATE.lock();
-    let virq = state.lookup_virq(desc)?;
-    let (handler, removed_wakeup) = state
+    let virq = state.lookup_virq(spec)?;
+    let (regular_action, removed_wakeup) = state
         .descs
         .get_mut(&virq)
         .map(|entry| {
             (
-                entry.handler.take(),
-                entry.wake_subscription.take().is_some(),
+                entry.take_regular_action(),
+                entry.take_wake_subscription().is_some(),
             )
         })
         .unwrap_or((None, false));
-    if handler.is_some() {
-        let disable = state.descs.get(&virq).is_some_and(IrqStateDesc::is_unused);
-        let desc = state.descs.get(&virq).map(|entry| entry.desc);
-        state.remove_if_unused(virq);
+    if regular_action.is_some() {
+        let disabled_desc = state.remove_if_unused_with_desc(virq);
         drop(state);
-        if disable && let Some(desc) = desc {
+        if let Some(desc) = disabled_desc {
             disable_platform_irq(desc);
         }
-        return handler;
+        return regular_action.map(IrqAction::into_primary);
     }
     if removed_wakeup {
         warn!("removed stale wakeup subscription for IRQ {virq} without regular handler");
-        let disable = state.descs.get(&virq).is_some_and(IrqStateDesc::is_unused);
-        let desc = state.descs.get(&virq).map(|entry| entry.desc);
-        state.remove_if_unused(virq);
+        let disabled_desc = state.remove_if_unused_with_desc(virq);
         drop(state);
-        if disable && let Some(desc) = desc {
+        if let Some(desc) = disabled_desc {
             disable_platform_irq(desc);
         }
     }
-    handler
+    regular_action.map(IrqAction::into_primary)
 }
 
 // Wakeup subscriptions do not install a regular IRQ handler. They keep the IRQ
 // bound so the IRQ core can observe the event and run the wakeup callback path.
-fn subscribe_wakeup_mode(desc: impl IntoIrqDesc, mode: WakeupMode, handler: WakeHandler) -> bool {
+fn subscribe_wakeup_mode(spec: impl Into<IrqSpec>, mode: WakeupMode, handler: WakeHandler) -> bool {
     let mut state = IRQ_STATE.lock();
-    let desc = match try_resolve_and_publish(&mut state, desc.into_irq_desc()) {
+    let desc = match try_resolve_and_publish(&mut state, spec.into()) {
         Ok(desc) => desc,
         Err(err) => {
             warn!("subscribe wakeup failed: {err:?}");
@@ -170,46 +172,45 @@ fn subscribe_wakeup_mode(desc: impl IntoIrqDesc, mode: WakeupMode, handler: Wake
         .descs
         .get_mut(&virq)
         .expect("descriptor state must exist after try_resolve_desc");
-    if entry.handler.is_none() {
+    if !entry.has_regular_action() {
         warn!("subscribe wakeup for IRQ {virq} without regular handler");
         return false;
     }
-    entry.wake_subscription = Some(WakeSubscription {
+    let installed = entry.install_wake_subscription(WakeSubscription {
         mode,
         armed: true,
         handler,
     });
+    debug_assert!(installed, "regular action was checked above");
     let desc = entry.desc;
     drop(state);
     configure_and_enable_platform_irq(desc, true);
     true
 }
 
-pub fn subscribe_wakeup(desc: impl IntoIrqDesc, handler: WakeHandler) -> bool {
-    subscribe_wakeup_mode(desc, WakeupMode::Persistent, handler)
+pub fn subscribe_wakeup(spec: impl Into<IrqSpec>, handler: WakeHandler) -> bool {
+    subscribe_wakeup_mode(spec, WakeupMode::Persistent, handler)
 }
 
-pub fn subscribe_wakeup_once(desc: impl IntoIrqDesc, handler: WakeHandler) -> bool {
-    subscribe_wakeup_mode(desc, WakeupMode::OneShot, handler)
+pub fn subscribe_wakeup_once(spec: impl Into<IrqSpec>, handler: WakeHandler) -> bool {
+    subscribe_wakeup_mode(spec, WakeupMode::OneShot, handler)
 }
 
-pub fn unsubscribe_wakeup(desc: impl IntoIrqDesc) -> bool {
-    let desc = desc.into_irq_desc();
+pub fn unsubscribe_wakeup(spec: impl Into<IrqSpec>) -> bool {
+    let spec = spec.into();
     let mut state = IRQ_STATE.lock();
-    let Some(virq) = state.lookup_virq(desc) else {
+    let Some(virq) = state.lookup_virq(spec) else {
         return false;
     };
     let removed = state
         .descs
         .get_mut(&virq)
-        .and_then(|entry| entry.wake_subscription.take())
+        .and_then(IrqStateDesc::take_wake_subscription)
         .is_some();
     if removed {
-        let disable = state.descs.get(&virq).is_some_and(IrqStateDesc::is_unused);
-        let desc = state.descs.get(&virq).map(|entry| entry.desc);
-        state.remove_if_unused(virq);
+        let disabled_desc = state.remove_if_unused_with_desc(virq);
         drop(state);
-        if disable && let Some(desc) = desc {
+        if let Some(desc) = disabled_desc {
             disable_platform_irq(desc);
         }
         return true;
@@ -223,7 +224,7 @@ pub fn unsubscribe_wakeup(desc: impl IntoIrqDesc) -> bool {
 /// Invoked from the exception entry layer when `dispatch_exception` detects
 /// that normal IRQs were masked (PMR <= NMI_ONLY) at the moment the interrupt
 /// fired — a pseudo-NMI preempting a critical section. The handler uses the
-/// lock-free NMI path which only touches the NMI table, never [`IRQ_STATE`].
+/// lock-free NMI path which only touches the NMI table, never `IRQ_STATE`.
 pub fn handle_nmi(vector: usize) -> bool {
     if let Some(dispatched_irq) = platform_dispatch_nmi(vector) {
         // The NMI backend returns a raw hwirq in the claimed IRQ object. Do not
@@ -243,9 +244,25 @@ pub fn handle_nmi(vector: usize) -> bool {
 /// masked for the duration of this call. No critical-section locks are held, so
 /// it is safe to acquire [`IRQ_STATE`].
 ///
-/// # Warn
+/// # Contract
 ///
-/// Make sure called in an interrupt context or hypervisor VM exit handler.
+/// Callers must be in a hardirq trap path or an equivalent hypervisor VM-exit
+/// path and must not hold locks that can be taken by driver IRQ handlers.
+/// `handle_irq()` itself is non-sleepable.
+///
+/// For a claimed normal IRQ, the generic ordering is:
+///
+/// 1. enter lifecycle hooks;
+/// 2. enter generic hardirq context;
+/// 3. claim and ack through [`IntrManagerIf::dispatch_irq`];
+/// 4. run regular action and wake compatibility fanout outside `IRQ_STATE`;
+/// 5. complete the controller claim through [`PendingIrq::complete`];
+/// 6. leave generic hardirq context;
+/// 7. run hardirq-exit deferred execution;
+/// 8. leave lifecycle hooks.
+///
+/// Spurious vectors that cannot be claimed skip handler fanout and deferred
+/// execution, but still preserve lifecycle enter/exit pairing.
 pub fn handle_irq(vector: usize) -> bool {
     let lifecycle_guard = IrqLifecycleGuard::enter();
     let hardirq_context_guard = HardIrqContextGuard::enter();
@@ -300,12 +317,14 @@ pub mod tests_irq {
 
     use super::{
         DYNAMIC_VIRQ_BASE, IRQ_STATE, IrqDesc, IrqDescError, IrqDomainId, IrqStateDesc,
-        WakeSubscription, WakeupMode, dispatch_subscribers, handle_irq, run_claimed_irq_tail,
-        try_map, unregister,
+        WakeSubscription, WakeupMode, dispatch_subscribers, run_claimed_irq_tail, try_map,
+        try_register, unregister,
     };
     use crate::{
         GIC_ROOT_DOMAIN, IrqEvent, IrqFlags, IrqLifecycleHooks, IrqRef, IrqTrigger, MSI_DOMAIN,
-        PendingIrq, clear_irq_lifecycle_hooks,
+        PendingIrq,
+        action::{IrqAction, IrqActionFlags, IrqThreadSlot},
+        clear_irq_lifecycle_hooks,
         lifecycle::IrqLifecycleGuard,
         register_irq_lifecycle_hooks,
         softirq::{
@@ -334,10 +353,21 @@ pub mod tests_irq {
     const IRQ_TAIL_TEST_VECTOR: usize = 0xdead;
     const IRQ_TAIL_TEST_VIRQ: usize = 0x2f02;
     const IRQ_TAIL_SOFTIRQ_VIRQ: usize = 0x2f03;
+    const IRQ_SIMULATED_TEST_VECTOR: usize = 0x5f00;
+    const IRQ_SIMULATED_TEST_VIRQ: usize = 0x5f01;
+    const IRQ_LIFECYCLE_TEST_VECTOR: usize = 0x5f10;
+    const IRQ_LIFECYCLE_TEST_VIRQ: usize = 0x5f11;
+    const MSI_TEST_HWIRQ_BASE: usize = 0x30_000;
+    const MSI_TEST_VIRQ_BASE: usize = 0x40_000;
 
     fn test_handler() -> IrqEvent {
         REGULAR_CALLS.fetch_add(1, Ordering::Relaxed);
         IrqEvent::HANDLED
+    }
+
+    fn test_not_handled_handler() -> IrqEvent {
+        REGULAR_CALLS.fetch_add(1, Ordering::Relaxed);
+        IrqEvent::NOT_HANDLED
     }
 
     fn test_wake_handler(_irq: usize) {
@@ -370,12 +400,12 @@ pub mod tests_irq {
 
     fn test_irq_tail_deferred_hook(ctx: crate::deferred::DeferredRunContext) {
         if ctx.vector() == IRQ_TAIL_TEST_VECTOR && ctx.resolved_irq() == Some(IRQ_TAIL_TEST_VIRQ) {
-            IRQ_TAIL_TEST_ACTIVE.store(1, Ordering::Relaxed);
             IRQ_TAIL_DEFERRED_IN_HARDIRQ.store(
                 usize::from(crate::context::is_in_hardirq()),
                 Ordering::Relaxed,
             );
             record_irq_tail_order(&IRQ_TAIL_DEFERRED_ORDER);
+            IRQ_TAIL_TEST_ACTIVE.store(1, Ordering::Release);
         }
     }
 
@@ -386,7 +416,10 @@ pub mod tests_irq {
     }
 
     fn test_irq_tail_lifecycle_exit_hook() {
-        if IRQ_TAIL_TEST_ACTIVE.load(Ordering::Relaxed) != 0 {
+        if IRQ_TAIL_TEST_ACTIVE
+            .compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
             record_irq_tail_order(&IRQ_TAIL_LIFECYCLE_EXIT_ORDER);
         }
     }
@@ -409,23 +442,49 @@ pub mod tests_irq {
         record_irq_tail_order(&IRQ_TAIL_SOFTIRQ_ACTION_ORDER);
     }
 
+    fn unused_msi_test_mapping(state: &crate::runtime::state::IrqState) -> Option<(usize, usize)> {
+        (0..1024).find_map(|offset| {
+            let hwirq = MSI_TEST_HWIRQ_BASE + offset;
+            let virq = MSI_TEST_VIRQ_BASE + offset;
+            (state.translated_hwirq(MSI_DOMAIN, hwirq).is_none()
+                && !state.descs.contains_key(&virq))
+            .then_some((hwirq, virq))
+        })
+    }
+
     #[def_test(serial)]
-    fn test_irq_handler_returns_true() {
+    fn test_simulated_irq_tail_dispatches_regular_handler() {
         let _irq_guard = kspin::NoPreemptIrqSave::new();
+        REGULAR_CALLS.store(0, Ordering::Relaxed);
+        crate::deferred::clear_deferred_executor();
 
-        #[cfg(target_arch = "riscv64")]
-        const IRQ_NUM: usize = (1usize << (usize::BITS - 1)) + 1;
+        {
+            let mut state = IRQ_STATE.lock();
+            state.descs.insert(
+                IRQ_SIMULATED_TEST_VIRQ,
+                IrqStateDesc::test_with_runtime(
+                    IrqDesc::from_virq(IRQ_SIMULATED_TEST_VIRQ),
+                    Some(IrqAction::regular(Arc::new(test_handler))),
+                    None,
+                ),
+            );
+        }
 
-        #[cfg(target_arch = "x86_64")]
-        const IRQ_NUM: usize = 0x10;
+        let pending = PendingIrq::new(
+            IrqRef::Virq(IRQ_SIMULATED_TEST_VIRQ),
+            IRQ_SIMULATED_TEST_VIRQ,
+        );
+        run_claimed_irq_tail(IRQ_SIMULATED_TEST_VECTOR, pending, |pending| {
+            pending.complete();
+        });
 
-        #[cfg(target_arch = "aarch64")]
-        const IRQ_NUM: usize = 0;
+        crate::deferred::clear_deferred_executor();
+        {
+            let mut state = IRQ_STATE.lock();
+            state.descs.remove(&IRQ_SIMULATED_TEST_VIRQ);
+        }
 
-        #[cfg(target_arch = "loongarch64")]
-        const IRQ_NUM: usize = 0;
-
-        assert!(handle_irq(IRQ_NUM));
+        assert_eq!(REGULAR_CALLS.load(Ordering::Relaxed), 1);
     }
 
     #[def_test(serial)]
@@ -466,11 +525,7 @@ pub mod tests_irq {
             let mut state = IRQ_STATE.lock();
             state.descs.insert(
                 virq,
-                IrqStateDesc {
-                    desc: IrqDesc::new(0x2f23, IrqTrigger::EdgeRising).with_virq(virq),
-                    handler: None,
-                    wake_subscription: None,
-                },
+                IrqStateDesc::new(IrqDesc::new(0x2f23, IrqTrigger::EdgeRising).with_virq(virq)),
             );
         }
 
@@ -482,6 +537,40 @@ pub mod tests_irq {
         assert!(matches!(err, IrqDescError::HwirqConflict { .. }));
         assert_eq!(IRQ_STATE.lock().translated_hwirq(domain, hwirq), None);
         IRQ_STATE.lock().descs.remove(&virq);
+    }
+
+    #[def_test(serial)]
+    fn test_try_map_rejects_reusing_virq_for_another_domain_mapping() {
+        let domain = GIC_ROOT_DOMAIN;
+        let existing_hwirq = 0x2f2a;
+        let newer_hwirq = 0x2f2b;
+        let virq =
+            try_map(IrqDesc::new(existing_hwirq, IrqTrigger::EdgeRising).with_domain(domain))
+                .expect("initial map should succeed");
+        IRQ_STATE.lock().descs.remove(&virq);
+
+        let err = try_map(
+            IrqDesc::new(newer_hwirq, IrqTrigger::EdgeRising)
+                .with_domain(domain)
+                .with_virq(virq),
+        )
+        .expect_err("virq already targeted by another mapping must fail");
+
+        assert!(matches!(
+            err,
+            IrqDescError::VirqMappingConflict {
+                virq: got_virq,
+                existing_domain,
+                existing_hwirq: got_existing_hwirq,
+                newer_domain,
+                newer_hwirq: got_newer_hwirq,
+            } if got_virq == virq
+                && existing_domain == domain
+                && got_existing_hwirq == existing_hwirq
+                && newer_domain == domain
+                && got_newer_hwirq == newer_hwirq
+        ));
+        assert_eq!(IRQ_STATE.lock().translated_hwirq(domain, newer_hwirq), None);
     }
 
     #[def_test(serial)]
@@ -523,34 +612,63 @@ pub mod tests_irq {
         assert_eq!(IRQ_STATE.lock().translated_hwirq(domain, hwirq), None);
     }
 
+    #[def_test]
+    fn test_descriptor_update_bumps_generation_on_metadata_change() {
+        let desc = IrqDesc::from_virq(0x2f2c);
+        let mut state_desc = IrqStateDesc::new(desc);
+        let initial_generation = state_desc.generation_for_tests();
+
+        state_desc.update_desc(desc);
+        assert_eq!(state_desc.generation_for_tests(), initial_generation);
+
+        state_desc.update_desc(desc.with_flags(IrqFlags::MSI));
+        assert!(state_desc.generation_for_tests() > initial_generation);
+    }
+
     #[def_test(serial)]
     fn test_irq_lifecycle_hooks_fire_around_normal_irq_handler() {
         let _test_guard = IRQ_LIFECYCLE_TEST_LOCK.lock();
         let _irq_guard = kspin::NoPreemptIrqSave::new();
 
-        #[cfg(target_arch = "riscv64")]
-        const IRQ_NUM: usize = (1usize << (usize::BITS - 1)) + 1;
-
-        #[cfg(target_arch = "x86_64")]
-        const IRQ_NUM: usize = 0x10;
-
-        #[cfg(target_arch = "aarch64")]
-        const IRQ_NUM: usize = 0;
-
-        #[cfg(target_arch = "loongarch64")]
-        const IRQ_NUM: usize = 0;
-
         clear_irq_lifecycle_hooks();
+        crate::deferred::clear_deferred_executor();
         let enter_before = IRQ_ENTER_CALLS.load(Ordering::Relaxed);
         let exit_before = IRQ_EXIT_CALLS.load(Ordering::Relaxed);
+        {
+            let mut state = IRQ_STATE.lock();
+            state.descs.insert(
+                IRQ_LIFECYCLE_TEST_VIRQ,
+                IrqStateDesc::test_with_runtime(
+                    IrqDesc::from_virq(IRQ_LIFECYCLE_TEST_VIRQ),
+                    Some(IrqAction::regular(Arc::new(test_handler))),
+                    None,
+                ),
+            );
+        }
 
         assert!(register_irq_lifecycle_hooks(IrqLifecycleHooks {
             on_irq_enter: Some(test_irq_enter_hook),
             on_irq_exit: Some(test_irq_exit_hook),
         }));
 
-        assert!(handle_irq(IRQ_NUM));
+        {
+            let lifecycle_guard = IrqLifecycleGuard::enter();
+            let pending = PendingIrq::new(
+                IrqRef::Virq(IRQ_LIFECYCLE_TEST_VIRQ),
+                IRQ_LIFECYCLE_TEST_VIRQ,
+            );
+            run_claimed_irq_tail(IRQ_LIFECYCLE_TEST_VECTOR, pending, |pending| {
+                pending.complete();
+            });
+            drop(lifecycle_guard);
+        }
+
+        crate::deferred::clear_deferred_executor();
         clear_irq_lifecycle_hooks();
+        {
+            let mut state = IRQ_STATE.lock();
+            state.descs.remove(&IRQ_LIFECYCLE_TEST_VIRQ);
+        }
 
         assert!(IRQ_ENTER_CALLS.load(Ordering::Relaxed) > enter_before);
         assert!(IRQ_EXIT_CALLS.load(Ordering::Relaxed) > exit_before);
@@ -593,11 +711,11 @@ pub mod tests_irq {
             let mut state = IRQ_STATE.lock();
             state.descs.insert(
                 IRQ_TAIL_TEST_VIRQ,
-                IrqStateDesc {
-                    desc: IrqDesc::from_virq(IRQ_TAIL_TEST_VIRQ),
-                    handler: Some(Arc::new(test_irq_tail_handler)),
-                    wake_subscription: None,
-                },
+                IrqStateDesc::test_with_runtime(
+                    IrqDesc::from_virq(IRQ_TAIL_TEST_VIRQ),
+                    Some(IrqAction::regular(Arc::new(test_irq_tail_handler))),
+                    None,
+                ),
             );
         }
         assert!(crate::deferred::register_deferred_executor(
@@ -654,7 +772,13 @@ pub mod tests_irq {
             }
         ));
 
-        let pending = PendingIrq::new(IrqRef::Domain(MSI_DOMAIN, 0x2f30), 0);
+        let unresolved_hwirq = {
+            let state = IRQ_STATE.lock();
+            unused_msi_test_mapping(&state)
+                .expect("MSI test mapping space exhausted")
+                .0
+        };
+        let pending = PendingIrq::new(IrqRef::Domain(MSI_DOMAIN, unresolved_hwirq), 0);
         run_claimed_irq_tail(IRQ_TAIL_TEST_VECTOR, pending, |pending| {
             test_irq_tail_complete();
             pending.complete();
@@ -683,11 +807,13 @@ pub mod tests_irq {
             let mut state = IRQ_STATE.lock();
             state.descs.insert(
                 IRQ_TAIL_SOFTIRQ_VIRQ,
-                IrqStateDesc {
-                    desc: IrqDesc::from_virq(IRQ_TAIL_SOFTIRQ_VIRQ),
-                    handler: Some(Arc::new(test_irq_tail_raise_softirq_handler)),
-                    wake_subscription: None,
-                },
+                IrqStateDesc::test_with_runtime(
+                    IrqDesc::from_virq(IRQ_TAIL_SOFTIRQ_VIRQ),
+                    Some(IrqAction::regular(Arc::new(
+                        test_irq_tail_raise_softirq_handler,
+                    ))),
+                    None,
+                ),
             );
         }
 
@@ -726,22 +852,113 @@ pub mod tests_irq {
         assert_eq!(drain_again, SoftirqRunResult::NoPending);
     }
 
-    #[def_test]
+    #[def_test(serial)]
+    fn test_duplicate_regular_handler_registration_is_rejected() {
+        let virq = 0x3101;
+        REGULAR_CALLS.store(0, Ordering::Relaxed);
+
+        assert!(try_register(virq, Arc::new(test_handler)).expect("first register should work"));
+        assert!(
+            !try_register(virq, Arc::new(test_not_handled_handler))
+                .expect("duplicate register should report compatibility false")
+        );
+
+        let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
+        dispatch_subscribers(&pending);
+
+        assert_eq!(REGULAR_CALLS.load(Ordering::Relaxed), 1);
+        assert!(unregister(virq).is_some());
+    }
+
+    #[def_test(serial)]
+    fn test_single_regular_action_dispatch_remains_compatible() {
+        let virq = 0x3102;
+        REGULAR_CALLS.store(0, Ordering::Relaxed);
+        WAKE_CALLS.store(0, Ordering::Relaxed);
+
+        {
+            let mut state = IRQ_STATE.lock();
+            state.descs.insert(
+                virq,
+                IrqStateDesc::test_with_runtime(
+                    IrqDesc::from_virq(virq),
+                    Some(IrqAction::regular(Arc::new(test_not_handled_handler))),
+                    Some(WakeSubscription {
+                        mode: WakeupMode::Persistent,
+                        armed: true,
+                        handler: test_wake_handler,
+                    }),
+                ),
+            );
+        }
+
+        let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
+        dispatch_subscribers(&pending);
+
+        assert_eq!(REGULAR_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(WAKE_CALLS.load(Ordering::Relaxed), 1);
+        assert!(unregister(virq).is_some());
+    }
+
+    #[def_test(serial)]
+    fn test_unsupported_threaded_action_does_not_consume_oneshot_wakeup() {
+        let virq = 0x3103;
+        REGULAR_CALLS.store(0, Ordering::Relaxed);
+        WAKE_CALLS.store(0, Ordering::Relaxed);
+
+        {
+            let mut state = IRQ_STATE.lock();
+            state.descs.insert(
+                virq,
+                IrqStateDesc::test_with_runtime(
+                    IrqDesc::from_virq(virq),
+                    Some(IrqAction::test_new(
+                        Arc::new(test_handler),
+                        Some(IrqThreadSlot),
+                        IrqActionFlags::NO_THREAD,
+                        Some("future-threaded"),
+                    )),
+                    Some(WakeSubscription {
+                        mode: WakeupMode::OneShot,
+                        armed: true,
+                        handler: test_wake_handler,
+                    }),
+                ),
+            );
+        }
+
+        let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
+        dispatch_subscribers(&pending);
+
+        assert_eq!(REGULAR_CALLS.load(Ordering::Relaxed), 0);
+        assert_eq!(WAKE_CALLS.load(Ordering::Relaxed), 0);
+        assert!(
+            IRQ_STATE
+                .lock()
+                .descs
+                .get(&virq)
+                .expect("descriptor must remain")
+                .has_wake_subscription()
+        );
+        assert!(unregister(virq).is_some());
+    }
+
+    #[def_test(serial)]
     fn test_unregister_clears_wakeup_subscription() {
         let virq = 0x2001;
         {
             let mut state = IRQ_STATE.lock();
             state.descs.insert(
                 virq,
-                IrqStateDesc {
-                    desc: IrqDesc::from_virq(virq),
-                    handler: Some(Arc::new(test_handler)),
-                    wake_subscription: Some(WakeSubscription {
+                IrqStateDesc::test_with_runtime(
+                    IrqDesc::from_virq(virq),
+                    Some(IrqAction::regular(Arc::new(test_handler))),
+                    Some(WakeSubscription {
                         mode: WakeupMode::Persistent,
                         armed: true,
                         handler: test_wake_handler,
                     }),
-                },
+                ),
             );
         }
 
@@ -751,23 +968,25 @@ pub mod tests_irq {
 
     #[def_test(serial)]
     fn test_unregister_keeps_msi_descriptor_for_free_msix() {
-        let virq = 0x2003;
-        let hwirq = 0x40;
-        let desc = IrqDesc::new(hwirq, IrqTrigger::EdgeRising)
-            .with_domain(MSI_DOMAIN)
-            .with_flags(IrqFlags::MSI)
-            .with_virq(virq);
-        {
+        let (hwirq, virq) = {
             let mut state = IRQ_STATE.lock();
+            let (hwirq, virq) =
+                unused_msi_test_mapping(&state).expect("MSI test mapping space exhausted");
+            let desc = IrqDesc::new(hwirq, IrqTrigger::EdgeRising)
+                .with_domain(MSI_DOMAIN)
+                .with_flags(IrqFlags::MSI)
+                .with_virq(virq);
             let desc = state
                 .try_resolve_desc(desc)
-                .expect("MSI descriptor should be accepted");
+                .expect("MSI descriptor should be accepted")
+                .into_desc();
             let entry = state
                 .descs
                 .get_mut(&desc.logical_irq().unwrap())
                 .expect("descriptor state must exist after try_resolve_desc");
-            entry.handler = Some(Arc::new(test_handler));
-        }
+            assert!(entry.install_regular_action(IrqAction::regular(Arc::new(test_handler))));
+            (hwirq, virq)
+        };
 
         assert!(unregister(virq).is_some());
         {
@@ -784,7 +1003,7 @@ pub mod tests_irq {
         }
     }
 
-    #[def_test]
+    #[def_test(serial)]
     fn test_oneshot_wakeup_is_removed_after_dispatch() {
         let virq = 0x2002;
         REGULAR_CALLS.store(0, Ordering::Relaxed);
@@ -794,15 +1013,15 @@ pub mod tests_irq {
             let mut state = IRQ_STATE.lock();
             state.descs.insert(
                 virq,
-                IrqStateDesc {
-                    desc: IrqDesc::from_virq(virq),
-                    handler: Some(Arc::new(test_handler)),
-                    wake_subscription: Some(WakeSubscription {
+                IrqStateDesc::test_with_runtime(
+                    IrqDesc::from_virq(virq),
+                    Some(IrqAction::regular(Arc::new(test_handler))),
+                    Some(WakeSubscription {
                         mode: WakeupMode::OneShot,
                         armed: true,
                         handler: test_wake_handler,
                     }),
-                },
+                ),
             );
         }
 
@@ -816,7 +1035,7 @@ pub mod tests_irq {
             .descs
             .get(&virq)
             .expect("descriptor must stay for regular handler");
-        assert!(entry.handler.is_some());
-        assert!(entry.wake_subscription.is_none());
+        assert!(entry.has_regular_action());
+        assert!(!entry.has_wake_subscription());
     }
 }

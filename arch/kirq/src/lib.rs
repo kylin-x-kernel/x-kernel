@@ -16,27 +16,24 @@
 extern crate log;
 extern crate alloc;
 
-pub mod context;
-pub mod deferred;
-mod desc;
-mod dispatch;
+mod backend;
+mod bottom_half;
 mod domain;
-pub mod lifecycle;
-mod manager;
-mod msi;
-mod nmi;
-mod platform;
-pub mod softirq;
-mod state;
+mod model;
+mod runtime;
 
-pub use desc::{
-    GIC_ROOT_DOMAIN, Hwirq, IO_APIC_DOMAIN, IntoIrqDesc, IrqAffinity, IrqController, IrqDesc,
-    IrqDescError, IrqDomainId, IrqEvent, IrqFlags, IrqHandler, IrqPolarity, IrqSource, IrqTrigger,
+pub use backend::msi::{MsiAllocation, MsiKind, MsiMessage, alloc_msix, free_msix};
+#[doc(hidden)]
+pub use backend::msi::{MsiBackendIf, MsiBackendToken};
+pub(crate) use backend::platform;
+pub use bottom_half::{context, deferred, lifecycle, softirq};
+pub use domain::IrqRef;
+pub(crate) use model::desc;
+pub use model::desc::{
+    GIC_ROOT_DOMAIN, Hwirq, IO_APIC_DOMAIN, IrqAffinity, IrqController, IrqDesc, IrqDescError,
+    IrqDomainId, IrqEvent, IrqFlags, IrqHandler, IrqPolarity, IrqSource, IrqSpec, IrqTrigger,
     MSI_DOMAIN, PLIC_ROOT_DOMAIN, Virq, gic_edge_irq_desc, gic_irq_desc, gic_level_irq_desc,
     io_apic_irq_desc, plic_irq_desc,
 };
-pub use domain::IrqRef;
-pub use manager::*;
-pub use msi::{MsiAllocation, MsiKind, MsiMessage, alloc_msix, free_msix};
-#[doc(hidden)]
-pub use msi::{MsiBackendIf, MsiBackendToken};
+pub use runtime::manager::*;
+pub(crate) use runtime::{action, dispatch, nmi, state};

@@ -8,11 +8,11 @@
 //! backends own CPU-vector allocation and architecture-specific MSI message
 //! composition.
 
-use super::{Hwirq, IrqAffinity, Virq};
 #[cfg(target_arch = "x86_64")]
-use super::{IrqController, IrqDesc, IrqFlags, IrqTrigger, MSI_DOMAIN};
+use crate::state;
+use crate::{Hwirq, IrqAffinity, Virq};
 #[cfg(target_arch = "x86_64")]
-use crate::state::IRQ_STATE;
+use crate::{IrqController, IrqDesc, IrqFlags, IrqTrigger, MSI_DOMAIN};
 
 /// Architecture-neutral MSI message programmed into a device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,28 +160,13 @@ fn free_msi(_virq: Virq) -> bool {
 
 #[cfg(target_arch = "x86_64")]
 fn free_msi(virq: Virq) -> bool {
-    let mut state = IRQ_STATE.lock();
-    let Some(desc) = state.stored_desc(virq) else {
-        return false;
-    };
-    if !desc.flags.contains(IrqFlags::MSI) {
-        return false;
-    }
-    if !state.is_unused(virq) {
-        warn!(
-            "refusing to free MSI IRQ {virq} while a handler or wake subscription is still \
-             registered"
-        );
-        return false;
-    }
-
-    let hwirq = desc.hwirq;
-    if !MsiBackendIf::free_msi_vector(MsiBackendToken::new(), hwirq) {
+    state::free_msi_if_unused(virq, |hwirq| {
+        if MsiBackendIf::free_msi_vector(MsiBackendToken::new(), hwirq) {
+            return true;
+        }
         warn!("failed to free backend MSI vector {hwirq} for IRQ {virq}");
-        return false;
-    }
-
-    state.remove_msi_if_unused(virq).is_some()
+        false
+    })
 }
 
 #[cfg(unittest)]

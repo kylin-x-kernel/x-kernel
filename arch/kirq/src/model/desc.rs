@@ -204,6 +204,14 @@ pub enum IrqDescError {
         existing: Virq,
         newer: Virq,
     },
+    /// A logical IRQ is already the target of another domain/hwirq mapping.
+    VirqMappingConflict {
+        virq: Virq,
+        existing_domain: IrqDomainId,
+        existing_hwirq: Hwirq,
+        newer_domain: IrqDomainId,
+        newer_hwirq: Hwirq,
+    },
     /// Dynamic logical IRQ allocation reached the representable IRQ limit.
     VirqExhausted { next: Virq },
     /// The descriptor names an IRQ domain that is not registered in kirq.
@@ -231,7 +239,12 @@ impl IrqDesc {
         Self::new(hwirq, IrqTrigger::Unknown(0))
     }
 
-    /// Creates a descriptor when only the logical IRQ number is currently known.
+    /// Creates the stored descriptor shape for an OS-visible `virq`.
+    ///
+    /// This constructor does not mean "plain IRQ API input". Public IRQ APIs
+    /// that accept a plain `virq` should receive `usize` or
+    /// [`IrqSpec::PlainVirq`], so the IRQ core can keep handle-only lookups
+    /// separate from full descriptor merge and mapping semantics.
     pub const fn from_virq(virq: Virq) -> Self {
         Self {
             virq: Some(virq),
@@ -368,33 +381,35 @@ pub const fn io_apic_irq_desc(hwirq: Hwirq) -> IrqDesc {
         .with_domain(IO_APIC_DOMAIN)
 }
 
-impl From<usize> for IrqDesc {
-    fn from(value: usize) -> Self {
-        Self::from_virq(value)
+/// IRQ API input.
+///
+/// A plain `virq` is an OS-visible handle with no new hardware metadata. A
+/// descriptor is a resource description that may update controller, domain,
+/// trigger, polarity, affinity, or flag state. Keeping these cases separate
+/// prevents the IRQ core from inferring caller intent from default
+/// `IrqDesc` fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrqSpec {
+    /// Use an already known OS-visible IRQ number.
+    PlainVirq(Virq),
+    /// Resolve or merge a full interrupt resource descriptor.
+    Desc(IrqDesc),
+}
+
+impl From<usize> for IrqSpec {
+    fn from(virq: usize) -> Self {
+        Self::PlainVirq(virq)
     }
 }
 
-/// Helper trait so IRQ APIs can take either a plain IRQ number or a full
-/// descriptor. New code should prefer passing [`IrqDesc`] when metadata such as
-/// trigger mode is available.
-pub trait IntoIrqDesc {
-    fn into_irq_desc(self) -> IrqDesc;
-}
-
-impl IntoIrqDesc for usize {
-    fn into_irq_desc(self) -> IrqDesc {
-        IrqDesc::from_virq(self)
+impl From<IrqDesc> for IrqSpec {
+    fn from(desc: IrqDesc) -> Self {
+        Self::Desc(desc)
     }
 }
 
-impl IntoIrqDesc for IrqDesc {
-    fn into_irq_desc(self) -> IrqDesc {
-        self
-    }
-}
-
-impl IntoIrqDesc for &IrqDesc {
-    fn into_irq_desc(self) -> IrqDesc {
-        *self
+impl From<&IrqDesc> for IrqSpec {
+    fn from(desc: &IrqDesc) -> Self {
+        Self::Desc(*desc)
     }
 }

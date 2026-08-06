@@ -198,7 +198,7 @@ impl IrqOp for HostResourceProvider {
         let virq = irq.number;
         let dispatch_handler: Arc<dyn kirq::IrqHandler> =
             Arc::new(move || map_devres_irq_event(dispatch_state.dispatch(virq)));
-        match kirq::try_register(map_irq_resource_to_desc(irq), dispatch_handler) {
+        match kirq::try_register(map_irq_resource_to_spec(irq), dispatch_handler) {
             Ok(true) => {}
             Ok(false) => return Err(ResError::Busy),
             Err(err) => {
@@ -231,7 +231,7 @@ impl IrqOp for HostResourceProvider {
     }
 
     fn set_irq_enabled(&self, irq: IrqResource, enabled: bool) {
-        kirq::enable(map_irq_resource_to_desc(irq), enabled);
+        kirq::enable(map_irq_resource_to_spec(irq), enabled);
     }
 
     fn map_irq(&self, route: IrqRouteDesc) -> ResResult<IrqResource> {
@@ -323,6 +323,7 @@ fn map_irq_desc_error(err: kirq::IrqDescError) -> ResError {
         | kirq::IrqDescError::DomainConflict { .. }
         | kirq::IrqDescError::VirqConflict { .. }
         | kirq::IrqDescError::MappingConflict { .. }
+        | kirq::IrqDescError::VirqMappingConflict { .. }
         | kirq::IrqDescError::UnknownDomain { .. } => ResError::InvalidResource,
     }
 }
@@ -369,12 +370,12 @@ fn map_irq_domain(controller: DevIrqController) -> Option<kirq::IrqDomainId> {
     }
 }
 
-fn map_irq_resource_to_desc(resource: IrqResource) -> kirq::IrqDesc {
+fn map_irq_resource_to_spec(resource: IrqResource) -> kirq::IrqSpec {
     if resource.hwirq.is_none()
         && resource.domain.is_none()
         && resource.controller.unwrap_or(DevIrqController::Unknown) == DevIrqController::Unknown
     {
-        return kirq::IrqDesc::from_virq(resource.number);
+        return kirq::IrqSpec::PlainVirq(resource.number);
     }
 
     let hwirq = resource.hwirq.unwrap_or(resource.number);
@@ -385,7 +386,7 @@ fn map_irq_resource_to_desc(resource: IrqResource) -> kirq::IrqDesc {
     if let Some(domain) = map_irq_domain(controller) {
         desc = desc.with_domain(domain);
     }
-    desc
+    kirq::IrqSpec::Desc(desc)
 }
 
 fn map_devres_irq_event(event: DevIrqEvent) -> kirq::IrqEvent {
@@ -430,4 +431,36 @@ pub fn devm_alloc_coherent(
     spec: DmaSpec,
 ) -> DriverResult<(NonNull<u8>, u64)> {
     device_res::devm_alloc_coherent(device, spec).map_err(map_res_err)
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn test_plain_irq_resource_maps_to_plain_virq_spec() {
+        let resource = IrqResource::new(32, DevIrqTrigger::Unknown(0));
+
+        let spec = map_irq_resource_to_spec(resource);
+
+        assert_eq!(spec, kirq::IrqSpec::PlainVirq(32));
+    }
+
+    #[def_test]
+    fn test_routed_irq_resource_maps_to_descriptor_spec() {
+        let resource = IrqResource::new(48, DevIrqTrigger::LevelHigh)
+            .with_controller(DevIrqController::Gic)
+            .with_hwirq(30);
+
+        let spec = map_irq_resource_to_spec(resource);
+        let kirq::IrqSpec::Desc(desc) = spec else {
+            panic!("routed IRQ resource should map to descriptor spec");
+        };
+
+        assert_eq!(desc.logical_irq(), Some(48));
+        assert_eq!(desc.hwirq, 30);
+        assert_eq!(desc.domain, Some(kirq::GIC_ROOT_DOMAIN));
+    }
 }

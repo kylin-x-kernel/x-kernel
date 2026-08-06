@@ -8,8 +8,9 @@ use alloc::collections::BTreeMap;
 
 use kspin::SpinRaw;
 
-use super::{Hwirq, IntoIrqDesc, IrqDesc, IrqFlags};
 use crate::{
+    Hwirq, IrqDesc, IrqFlags, IrqSpec,
+    action::IrqAction,
     platform::{Handler, configure_and_enable_platform_irq, disable_platform_irq},
     state::{IRQ_STATE, IrqStateDesc, try_resolve_and_publish},
 };
@@ -35,9 +36,9 @@ static NMI_TABLE: SpinRaw<BTreeMap<Hwirq, Handler>> = SpinRaw::new(BTreeMap::new
 /// Register an NMI handler for a hardware interrupt.
 ///
 /// The interrupt is configured as a pseudo-NMI with the highest GIC priority
-/// and routed through the lock-free [`dispatch_nmi_handler`] path. Unlike
+/// and routed through the lock-free `dispatch_nmi_handler` path. Unlike
 /// `register`, this function **never** acquires `IRQ_STATE.lock()` during
-/// dispatch — the handler is stored in a separate [`NMI_TABLE`] keyed by hwirq.
+/// dispatch — the handler is stored in a separate `NMI_TABLE` keyed by hwirq.
 ///
 /// # Safety constraints
 ///
@@ -51,8 +52,7 @@ static NMI_TABLE: SpinRaw<BTreeMap<Hwirq, Handler>> = SpinRaw::new(BTreeMap::new
 ///   no NMI can fire before registration is complete. It may also be called
 ///   from an NMI handler itself — a pseudo-NMI cannot preempt another
 ///   pseudo-NMI on the same CPU, so the registration cannot race a reader.
-pub fn register_nmi(desc: impl IntoIrqDesc, handler: Handler) -> bool {
-    let desc = desc.into_irq_desc();
+pub fn register_nmi(desc: IrqDesc, handler: Handler) -> bool {
     let hwirq = desc.hwirq;
 
     // Reject duplicate NMI registrations before touching any state, so a
@@ -65,18 +65,21 @@ pub fn register_nmi(desc: impl IntoIrqDesc, handler: Handler) -> bool {
     // Resolve descriptor in IRQ_STATE (metadata tracking + fallback handler
     // for when nmi-pmu is not enabled and dispatch goes through the normal path).
     let mut state = IRQ_STATE.lock();
-    // Refuse to overwrite an existing regular handler on this line, mirroring
-    // register()'s entry.handler.is_some() check.
-    if let Some(virq) = state.lookup_virq(desc)
+    // Refuse to overwrite an existing regular action on this line, mirroring
+    // register()'s duplicate regular-action check.
+    if let Some(virq) = state.lookup_virq(IrqSpec::Desc(desc))
         && state
             .descs
             .get(&virq)
-            .is_some_and(|entry| entry.handler.is_some())
+            .is_some_and(IrqStateDesc::has_regular_action)
     {
         warn!("register_nmi: handler already registered for irq {virq}");
         return false;
     }
-    let desc = match try_resolve_and_publish(&mut state, desc.with_flags(IrqFlags::PER_CPU)) {
+    let desc = match try_resolve_and_publish(
+        &mut state,
+        IrqSpec::Desc(desc.with_flags(IrqFlags::PER_CPU)),
+    ) {
         Ok(desc) => desc,
         Err(err) => {
             warn!("register_nmi: incompatible descriptor for hwirq {hwirq}: {err:?}");
@@ -89,9 +92,10 @@ pub fn register_nmi(desc: impl IntoIrqDesc, handler: Handler) -> bool {
         .get_mut(&virq)
         .expect("descriptor state must exist after try_resolve_desc");
     // Tag the remembered descriptor so descriptor() queries see the NMI flag.
-    entry.desc = desc;
+    entry.update_desc(desc);
     // Store a fallback handler for the non-NMI dispatch path.
-    entry.handler = Some(handler.clone());
+    let installed = entry.install_regular_action(IrqAction::regular(handler.clone()));
+    debug_assert!(installed, "regular action was checked above");
     drop(state);
 
     // Store handler in NMI table (keyed by hwirq).
@@ -105,13 +109,12 @@ pub fn register_nmi(desc: impl IntoIrqDesc, handler: Handler) -> bool {
 
 /// Remove a previously registered NMI handler.
 ///
-/// Besides removing the [`NMI_TABLE`] entry, this clears the fallback handler
+/// Besides removing the `NMI_TABLE` entry, this clears the fallback handler
 /// and `IrqFlags::PER_CPU` tag that [`register_nmi`] stored in `IRQ_STATE`,
 /// so a re-enabled or re-triggered IRQ no longer dispatches the removed
 /// handler through the normal path. The platform line is disabled when it is
 /// no longer used, using the full stored descriptor.
-pub fn unregister_nmi(desc: impl IntoIrqDesc) -> bool {
-    let desc = desc.into_irq_desc();
+pub fn unregister_nmi(desc: IrqDesc) -> bool {
     let hwirq = desc.hwirq;
     let removed = {
         let mut table = NMI_TABLE.lock();
@@ -125,23 +128,18 @@ pub fn unregister_nmi(desc: impl IntoIrqDesc) -> bool {
     // register_nmi, so a re-enabled or re-triggered IRQ no longer dispatches
     // the removed handler through the normal path.
     let mut state = IRQ_STATE.lock();
-    let Some(virq) = state.lookup_virq(desc) else {
+    let Some(virq) = state.lookup_virq(IrqSpec::Desc(desc)) else {
         return true;
     };
     if let Some(entry) = state.descs.get_mut(&virq)
-        && entry.handler.is_some()
+        && entry.has_regular_action()
     {
-        entry.handler = None;
-        entry.desc = IrqDesc {
-            flags: entry.desc.flags - IrqFlags::PER_CPU,
-            ..entry.desc
-        };
+        entry.take_regular_action();
+        entry.remove_flags(IrqFlags::PER_CPU);
     }
-    let disable = state.descs.get(&virq).is_some_and(IrqStateDesc::is_unused);
-    let stored_desc = state.descs.get(&virq).map(|entry| entry.desc);
-    state.remove_if_unused(virq);
+    let disabled_desc = state.remove_if_unused_with_desc(virq);
     drop(state);
-    if disable && let Some(stored_desc) = stored_desc {
+    if let Some(stored_desc) = disabled_desc {
         // Carry the full stored descriptor so the disable is not silently
         // skipped for lines whose hwirq falls above DYNAMIC_VIRQ_BASE.
         disable_platform_irq(stored_desc);

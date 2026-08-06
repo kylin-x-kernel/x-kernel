@@ -16,7 +16,7 @@ use core::{
     sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
 };
 
-use super::desc::{Hwirq, IrqDomainId, Virq};
+use crate::desc::{Hwirq, IrqDomainId, Virq};
 
 /// A frozen `hwirq -> virq` reverse map, published per domain.
 ///
@@ -187,12 +187,12 @@ impl IrqDomain {
 /// instance here, and [`domain`] is the single lookup entry point. New
 /// domains add one static plus one match arm.
 static GIC_IRQ_DOMAIN: IrqDomain =
-    IrqDomain::new(super::desc::GIC_ROOT_DOMAIN, UnmappedPolicy::Identity);
+    IrqDomain::new(crate::desc::GIC_ROOT_DOMAIN, UnmappedPolicy::Identity);
 static PLIC_IRQ_DOMAIN: IrqDomain =
-    IrqDomain::new(super::desc::PLIC_ROOT_DOMAIN, UnmappedPolicy::Strict);
+    IrqDomain::new(crate::desc::PLIC_ROOT_DOMAIN, UnmappedPolicy::Strict);
 static IO_APIC_IRQ_DOMAIN: IrqDomain =
-    IrqDomain::new(super::desc::IO_APIC_DOMAIN, UnmappedPolicy::Strict);
-static MSI_IRQ_DOMAIN: IrqDomain = IrqDomain::new(super::desc::MSI_DOMAIN, UnmappedPolicy::Strict);
+    IrqDomain::new(crate::desc::IO_APIC_DOMAIN, UnmappedPolicy::Strict);
+static MSI_IRQ_DOMAIN: IrqDomain = IrqDomain::new(crate::desc::MSI_DOMAIN, UnmappedPolicy::Strict);
 
 /// Upper bound on the IO-APIC linear reverse-map size, indexed by hwirq.
 ///
@@ -206,10 +206,10 @@ const MAX_IO_APIC_LINEAR_ENTRIES: usize = 0x1000;
 /// Returns the registered domain for `id`, if any.
 pub(crate) fn domain(id: IrqDomainId) -> Option<&'static IrqDomain> {
     match id {
-        super::desc::GIC_ROOT_DOMAIN => Some(&GIC_IRQ_DOMAIN),
-        super::desc::PLIC_ROOT_DOMAIN => Some(&PLIC_IRQ_DOMAIN),
-        super::desc::IO_APIC_DOMAIN => Some(&IO_APIC_IRQ_DOMAIN),
-        super::desc::MSI_DOMAIN => Some(&MSI_IRQ_DOMAIN),
+        crate::desc::GIC_ROOT_DOMAIN => Some(&GIC_IRQ_DOMAIN),
+        crate::desc::PLIC_ROOT_DOMAIN => Some(&PLIC_IRQ_DOMAIN),
+        crate::desc::IO_APIC_DOMAIN => Some(&IO_APIC_IRQ_DOMAIN),
+        crate::desc::MSI_DOMAIN => Some(&MSI_IRQ_DOMAIN),
         _ => None,
     }
 }
@@ -237,7 +237,7 @@ pub(crate) fn publish_snapshot(
     let Some(irq_domain) = domain(domain_id) else {
         return false;
     };
-    let revmap = if domain_id == super::desc::IO_APIC_DOMAIN {
+    let revmap = if domain_id == crate::desc::IO_APIC_DOMAIN {
         let collected: Vec<(Hwirq, Virq)> = entries.collect();
         let max_hwirq = collected.iter().map(|&(hwirq, _)| hwirq).max().unwrap_or(0);
         assert!(
@@ -253,11 +253,10 @@ pub(crate) fn publish_snapshot(
         ReverseMap::Linear(linear.into_boxed_slice())
     } else {
         let sparse: Vec<(Hwirq, Virq)> = entries.collect();
-        // `mappings_of` iterates a BTreeMap keyed by `(domain, hwirq)`, so a
-        // single-domain filter is already ordered by hwirq; the previous
-        // `sort_unstable()` was redundant. Keep a defensive check so a future
-        // caller that feeds unsorted entries fails loudly in debug builds
-        // instead of silently breaking the binary search in
+        // The control plane feeds entries from one domain's `hwirq_to_virq`
+        // BTreeMap, so they are already ordered by hwirq. Keep a defensive
+        // check so a future caller that feeds unsorted entries fails loudly in
+        // debug builds instead of silently breaking the binary search in
         // `ReverseMap::lookup`.
         debug_assert!(sparse.windows(2).all(|w| w[0].0 <= w[1].0));
         ReverseMap::Sparse(sparse.into_boxed_slice())

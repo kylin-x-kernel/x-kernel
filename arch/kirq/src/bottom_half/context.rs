@@ -9,6 +9,10 @@
 //! accounting: `kspin` guards still control task preemption, while this module
 //! answers whether the current CPU is inside a hardirq handler, serving softirq
 //! work, or running with local bottom halves disabled.
+//!
+//! Hardirq, softirq, and BH-disabled contexts are all non-sleepable. Future
+//! IRQ-thread execution will need its own sleepable context model instead of
+//! being represented by [`is_in_interrupt_context`].
 
 use core::{
     marker::PhantomData,
@@ -47,6 +51,8 @@ static IRQ_CONTEXT_STATE: IrqContextState = IrqContextState::empty();
 
 static CONTEXT_UNDERFLOW_WARNINGS: AtomicUsize = AtomicUsize::new(0);
 static BH_IN_HARDIRQ_WARNINGS: AtomicUsize = AtomicUsize::new(0);
+
+const INITIAL_CONTEXT_WARNING_LOGS: usize = 8;
 
 /// Snapshot of the current CPU's IRQ execution-context counters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -94,6 +100,10 @@ impl IrqContextSnapshot {
     }
 
     /// Returns whether this snapshot is interrupt-like for bottom-half gating.
+    ///
+    /// This is a non-sleepable predicate for hardirq, active softirq handling,
+    /// and BH-disabled task context. It must not be used as a future IRQ-thread
+    /// predicate because IRQ threads are sleepable execution contexts.
     #[inline]
     pub const fn is_in_interrupt_context(&self) -> bool {
         self.is_in_hardirq() || self.is_serving_softirq() || self.is_bh_disabled()
@@ -105,6 +115,8 @@ impl IrqContextSnapshot {
 pub enum InterruptContextLevel {
     /// Ordinary task context.
     Task,
+    /// Ordinary task context with local bottom halves disabled.
+    BhDisabled,
     /// Currently serving softirq work.
     Softirq,
     /// Currently serving a normal hardirq.
@@ -139,6 +151,8 @@ pub fn interrupt_context_level() -> InterruptContextLevel {
         InterruptContextLevel::Hardirq
     } else if snapshot.is_serving_softirq() {
         InterruptContextLevel::Softirq
+    } else if snapshot.is_bh_disabled() {
+        InterruptContextLevel::BhDisabled
     } else {
         InterruptContextLevel::Task
     }
@@ -165,7 +179,8 @@ pub fn is_bh_disabled() -> bool {
 /// Returns whether the current CPU is in hardirq, softirq, or BH-disabled state.
 ///
 /// Prefer the more specific query helpers in new code. This combined predicate
-/// is intended for bottom-half gating and diagnostics.
+/// is intended for bottom-half gating and diagnostics. A future sleepable IRQ
+/// thread must not be reported through this predicate.
 #[inline]
 pub fn is_in_interrupt_context() -> bool {
     irq_context_snapshot().is_in_interrupt_context()
@@ -275,8 +290,12 @@ impl LocalBhGuard {
         let no_preempt = NoPreempt::new();
         with_current_state(|state| {
             if state.hardirq_depth != 0 {
-                BH_IN_HARDIRQ_WARNINGS.fetch_add(1, Ordering::Relaxed);
-                warn!("local_bh_disable called from hardirq context");
+                let warning_count = BH_IN_HARDIRQ_WARNINGS.fetch_add(1, Ordering::Relaxed) + 1;
+                if should_log_context_warning(warning_count) {
+                    warn!(
+                        "local_bh_disable called from hardirq context ({warning_count} warnings)"
+                    );
+                }
             }
             state.bh_disable_depth = state.bh_disable_depth.saturating_add(1);
         });
@@ -353,8 +372,15 @@ pub(crate) fn restore_current_state_snapshot_irqoff(snapshot: IrqContextSnapshot
 }
 
 fn warn_context_underflow(context: &'static str) {
-    CONTEXT_UNDERFLOW_WARNINGS.fetch_add(1, Ordering::Relaxed);
-    warn!("IRQ context {context} depth underflow");
+    let warning_count = CONTEXT_UNDERFLOW_WARNINGS.fetch_add(1, Ordering::Relaxed) + 1;
+    if should_log_context_warning(warning_count) {
+        warn!("IRQ context {context} depth underflow ({warning_count} warnings)");
+    }
+}
+
+#[inline]
+fn should_log_context_warning(warning_count: usize) -> bool {
+    warning_count <= INITIAL_CONTEXT_WARNING_LOGS || warning_count.is_power_of_two()
 }
 
 #[cfg(unittest)]
@@ -439,10 +465,19 @@ pub mod tests_context {
             let _guard = local_bh_disable();
             assert!(is_bh_disabled());
             assert!(is_in_interrupt_context());
+            assert_eq!(interrupt_context_level(), InterruptContextLevel::BhDisabled);
             assert_eq!(irq_context_snapshot().bh_disable_depth(), 1);
         }
         assert!(!is_bh_disabled());
         assert!(!is_in_interrupt_context());
+    }
+
+    #[def_test(serial)]
+    fn test_softirq_level_takes_precedence_over_bh_disabled() {
+        clear_irq_context_diagnostics();
+        let _bh = local_bh_disable();
+        let _softirq = SoftIrqContextGuard::enter();
+        assert_eq!(interrupt_context_level(), InterruptContextLevel::Softirq);
     }
 
     #[def_test(serial)]

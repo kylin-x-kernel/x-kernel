@@ -61,12 +61,12 @@ pub fn clear_irq_lifecycle_hooks() {
     IRQ_LIFECYCLE_HOOKS_ACTIVE.store(false, Ordering::Release);
 }
 
-pub(super) struct IrqLifecycleGuard {
+pub(crate) struct IrqLifecycleGuard {
     on_irq_exit: Option<IrqLifecycleHook>,
 }
 
 impl IrqLifecycleGuard {
-    pub(super) fn enter() -> Self {
+    pub(crate) fn enter() -> Self {
         if !IRQ_LIFECYCLE_HOOKS_ACTIVE.load(Ordering::Acquire) {
             return Self { on_irq_exit: None };
         }

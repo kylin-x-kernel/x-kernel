@@ -157,6 +157,8 @@ pub mod tests_deferred {
     static SECOND_HOOK_CALLS: AtomicUsize = AtomicUsize::new(0);
     static CLEARING_HOOK_CALLS: AtomicUsize = AtomicUsize::new(0);
     static TARGET_CONTEXT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    const CLEARING_HOOK_TEST_VECTOR: usize = 0x5eed;
+    const CLEARING_HOOK_TEST_VIRQ: usize = 0x6eed;
 
     fn first_hook(ctx: DeferredRunContext) {
         FIRST_HOOK_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -169,9 +171,13 @@ pub mod tests_deferred {
         SECOND_HOOK_CALLS.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn clearing_hook(_ctx: DeferredRunContext) {
-        CLEARING_HOOK_CALLS.fetch_add(1, Ordering::Relaxed);
-        clear_deferred_executor();
+    fn clearing_hook(ctx: DeferredRunContext) {
+        if ctx.vector() == CLEARING_HOOK_TEST_VECTOR
+            && ctx.resolved_irq() == Some(CLEARING_HOOK_TEST_VIRQ)
+        {
+            CLEARING_HOOK_CALLS.fetch_add(1, Ordering::Relaxed);
+            clear_deferred_executor();
+        }
     }
 
     #[def_test(serial)]
@@ -247,12 +253,18 @@ pub mod tests_deferred {
             on_hardirq_exit: Some(clearing_hook),
         }));
         assert_eq!(
-            run_hardirq_exit_deferred(DeferredRunContext::new(5, Some(6))),
+            run_hardirq_exit_deferred(DeferredRunContext::new(
+                CLEARING_HOOK_TEST_VECTOR,
+                Some(CLEARING_HOOK_TEST_VIRQ)
+            )),
             DeferredRunResult::Ran
         );
         assert_eq!(CLEARING_HOOK_CALLS.load(Ordering::Relaxed), 1);
         assert_eq!(
-            run_hardirq_exit_deferred(DeferredRunContext::new(5, Some(6))),
+            run_hardirq_exit_deferred(DeferredRunContext::new(
+                CLEARING_HOOK_TEST_VECTOR,
+                Some(CLEARING_HOOK_TEST_VIRQ)
+            )),
             DeferredRunResult::NoExecutor
         );
     }
