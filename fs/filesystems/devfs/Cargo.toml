@@ -51,7 +51,7 @@ gimli = { version = "*", default-features = false, optional = true }
 dice_driver = { workspace = true, optional = true }
 inputdev = { workspace = true, optional = true }
 klazy.workspace = true
-rand_chacha = { version = "0.3", default-features = false }
+entropy.workspace = true
 tee_crypto = { workspace = true, features = ["alloc"], optional = true }
 kclass.workspace = true
 console_driver = { workspace = true, optional = true }

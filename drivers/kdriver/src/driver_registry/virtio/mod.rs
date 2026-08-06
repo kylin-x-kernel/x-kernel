@@ -238,6 +238,11 @@ fn dispatch_virtio_try_new<T: virtio::Transport + 'static>(
             use glue::VirtIo9p;
             kclass::publish_virtio_9p(parent, VirtIo9p::try_new(transport, irq)?)
         }
+        #[cfg(feature = "virtio-rng")]
+        DeviceKind::Char => {
+            use glue::VirtIoRng;
+            kclass::publish_char(parent, VirtIoRng::try_new(transport, irq)?)
+        }
         _ => Err(DriverError::Unsupported),
     }
 }
@@ -306,6 +311,16 @@ virtio_driver_pair!(
     "virtio-9p-mmio"
 );
 
+#[cfg(feature = "virtio-rng")]
+virtio_driver_pair!(
+    virtio_rng_pci_descriptor,
+    virtio_rng_mmio_descriptor,
+    DeviceKind::Char,
+    virtio_type::RNG,
+    "virtio-rng-pci",
+    "virtio-rng-mmio"
+);
+
 const DRIVER_FACTORIES: &[crate::driver_registry::DriverFactory] = &[
     #[cfg(feature = "virtio-net")]
     virtio_net_pci_descriptor,
@@ -331,6 +346,10 @@ const DRIVER_FACTORIES: &[crate::driver_registry::DriverFactory] = &[
     virtio_9p_pci_descriptor,
     #[cfg(feature = "virtio-9p")]
     virtio_9p_mmio_descriptor,
+    #[cfg(feature = "virtio-rng")]
+    virtio_rng_pci_descriptor,
+    #[cfg(feature = "virtio-rng")]
+    virtio_rng_mmio_descriptor,
 ];
 
 /// Register all enabled VirtIO drivers with the given registrar.

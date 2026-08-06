@@ -117,6 +117,23 @@ cfg_if! {
     }
 }
 
+cfg_if! {
+    if #[cfg(feature = "virtio-rng")] {
+        pub struct VirtIoRng;
+
+        impl VirtIoRng {
+            pub fn try_new<T: virtio::Transport + 'static>(
+                transport: T,
+                _irq: Option<usize>,
+            ) -> DriverResult<kclass::prelude::CharDeviceImpl> {
+                Ok(Box::new(virtio::VirtIoRngDev::<VirtIoHalImpl, T>::try_new(
+                    transport,
+                )?))
+            }
+        }
+    }
+}
+
 use memaddr::PAGE_SIZE_4K;
 pub struct VirtIoHalImpl;
 

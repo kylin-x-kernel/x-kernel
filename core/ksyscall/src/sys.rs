@@ -15,8 +15,7 @@ use core::{mem::MaybeUninit, slice};
 use kbuild_config::ARCH;
 use kerrno::{KError, KResult};
 use khal::mem;
-use kprocess::{current_user_process, current_user_process_fs_context};
-use kvfs::{Filename, NodePermission};
+use kprocess::current_user_process;
 use linux_raw_sys::{
     ctypes::c_char,
     general::{
@@ -208,41 +207,68 @@ bitflags::bitflags! {
     }
 }
 
-/// Get random bytes from the kernel random source.
+/// Linux getrandom(2) single-call caps from the man-page notes.
+const GETRANDOM_MAX_URANDOM: usize = (32 << 20) - 1; // 32 MiB - 1
+const GETRANDOM_MAX_RANDOM: usize = 512;
+/// Kernel scratch buffer size; avoids a single allocation up to the urandom cap.
+const GETRANDOM_CHUNK: usize = 64 * 1024;
+
+/// Get random bytes from the kernel entropy pool (`getrandom(2)`).
+///
+/// - Unknown `flags` bits, and `GRND_INSECURE|GRND_RANDOM`, return `EINVAL`.
+/// - Without `GRND_INSECURE`, the pool must be quality-seeded ([`entropy::is_ready`]).
+/// - With `GRND_NONBLOCK` and an unready pool, returns `EAGAIN` (`WouldBlock`).
+/// - Without `GRND_NONBLOCK`, blocks until the pool is ready (via
+///   [`entropy::wait_until_ready`]) before returning bytes.
+/// - `GRND_RANDOM` is accepted for ABI compatibility; output still comes from
+///   the same ChaCha20 pool as the default path.
+/// - Request length is clamped to the Linux single-call limits (`512` with
+///   `GRND_RANDOM`, otherwise `32 MiB - 1`) and copied in chunks.
 pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> KResult<isize> {
+    // Reject unknown bits and the nonsensical INSECURE|RANDOM combination
+    // (Linux getrandom(2) → EINVAL).
+    let flags = GetRandomFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
+    if flags.contains(GetRandomFlags::INSECURE) && flags.contains(GetRandomFlags::RANDOM) {
+        return Err(KError::InvalidInput);
+    }
+
     if len == 0 {
         return Ok(0);
     }
-    let flags = GetRandomFlags::from_bits_retain(flags);
 
     debug!("sys_getrandom <= buf: {buf:p}, len: {len}, flags: {flags:?}");
 
-    // TODO: replace this VFS fallback with a real kernel RNG backend.
-    // getrandom(2) should not depend on pathname lookup or /dev/random.
-    let path = if flags.contains(GetRandomFlags::RANDOM) {
-        "/dev/random"
+    let insecure = flags.contains(GetRandomFlags::INSECURE);
+    if !insecure && !entropy::is_ready() {
+        entropy::try_seed_from_hardware();
+        if !entropy::is_ready() {
+            if flags.contains(GetRandomFlags::NONBLOCK) {
+                return Err(KError::WouldBlock);
+            }
+            // Block until quality entropy is mixed; do not return bootstrap-only
+            // ChaCha output on the secure path.
+            entropy::wait_until_ready();
+        }
+    }
+
+    let max_len = if flags.contains(GetRandomFlags::RANDOM) {
+        GETRANDOM_MAX_RANDOM
     } else {
-        "/dev/urandom"
+        GETRANDOM_MAX_URANDOM
     };
+    let len = len.min(max_len);
 
-    let fs_struct = current_user_process_fs_context();
-    let fs = fs_struct.lock();
-    let file = Filename::new(path).open_with_flags_at(
-        fs.root(),
-        fs.pwd(),
-        0,
-        NodePermission::empty(),
-        NodePermission::empty(),
-        kprocess::current_cred(),
-    )?;
-    drop(fs);
-    let mut kbuf = alloc::vec![0; len];
-    let mut pos = 0;
-    let len = file.read_from(&mut kbuf, &mut pos)?;
+    let mut kbuf = alloc::vec![0u8; len.min(GETRANDOM_CHUNK)];
+    let mut written = 0usize;
+    while written < len {
+        let chunk = (len - written).min(kbuf.len());
+        let slice = &mut kbuf[..chunk];
+        entropy::fill_random(slice);
+        write_vm_mem(buf.wrapping_add(written), slice)?;
+        written += chunk;
+    }
 
-    write_vm_mem(buf, &kbuf)?;
-
-    Ok(len as _)
+    Ok(written as _)
 }
 
 /// Secure computing syscall for sandboxing (not fully implemented)

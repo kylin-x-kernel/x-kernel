@@ -13,3 +13,4 @@ pub mod nmi;
 pub mod pmu;
 pub mod psci;
 pub mod smccc;
+pub mod trng;

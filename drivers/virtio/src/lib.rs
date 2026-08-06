@@ -41,6 +41,11 @@ mod net;
 #[cfg(feature = "net")]
 pub use self::net::VirtIoNetDev;
 
+#[cfg(feature = "rng")]
+mod rng;
+#[cfg(feature = "rng")]
+pub use self::rng::VirtIoRngDev;
+
 mod pci;
 pub use self::pci::{PciTransport, probe_pci_device};
 
@@ -109,6 +114,7 @@ const fn as_device_kind(t: VirtIoDevType) -> Option<DeviceKind> {
     match t {
         Block => Some(DeviceKind::Block),
         Network => Some(DeviceKind::Net),
+        EntropySource => Some(DeviceKind::Char),
         GPU => Some(DeviceKind::Display),
         Input => Some(DeviceKind::Input),
         Socket => Some(DeviceKind::Vsock),

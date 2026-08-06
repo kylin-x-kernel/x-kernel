@@ -17,6 +17,7 @@ block = ["dep:block"]
 gpu = ["alloc", "display"]
 input = ["alloc", "dep:input"]
 net = ["alloc", "dep:net"]
+rng = ["alloc", "dep:char_driver"]
 socket = ["alloc", "dep:vsock"]
 virtio-9p = ["alloc"]
 
@@ -24,12 +25,15 @@ virtio-9p = ["alloc"]
 driver_base = { workspace = true }
 device_res = { workspace = true }
 block = { workspace = true, optional = true }
+char_driver = { workspace = true, optional = true }
 display = { workspace = true, optional = true }
 input = { workspace = true, optional = true }
 net = { workspace = true, optional = true }
 vsock = { workspace = true, optional = true }
 log = { workspace = true }
+khal = { workspace = true }
 kspin = { workspace = true }
+ktime_types = { workspace = true }
 virtio-drivers = { workspace = true }
 unittest = { workspace = true }
 pci = { workspace = true }

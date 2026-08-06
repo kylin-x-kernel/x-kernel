@@ -57,6 +57,7 @@ kruntime = { path = "core/kruntime" }
 klazy = { path = "util/klazy" }
 ktime_types = { path = "util/ktime_types" }
 ktime = { path = "core/ktime" }
+entropy = { path = "util/entropy" }
 
 # Internal: tracing and debugging
 ktracing = { path = "core/ktracing" }
@@ -224,6 +225,7 @@ paste = "1.0"
 percpu = "0.4"
 proc-macro2 = "1.0"
 quote = "1.0"
+rand_chacha = { version = "0.3", default-features = false }
 
 safe-mmio = "0.3.0"
 slab = { version = "0.4.9", default-features = false }

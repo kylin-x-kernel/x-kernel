@@ -336,8 +336,9 @@ fn add_devices(
     let needs_net = config.is_enabled("KFEAT_DRIVER_VIRTIO_NET") && !args.no_net;
     let needs_graphic = config.is_enabled("KFEAT_DRIVER_VIRTIO_GPU") && args.graphic;
     let wants_vsock = config.is_enabled("KFEAT_DRIVER_VIRTIO_SOCKET") && !args.no_vsock;
+    let needs_rng = config.is_enabled("KFEAT_DRIVER_VIRTIO_RNG");
 
-    let suffix = if needs_block || needs_net || needs_graphic || wants_vsock {
+    let suffix = if needs_block || needs_net || needs_graphic || wants_vsock || needs_rng {
         virtio_device_suffix(config.virtio_bus())?
     } else {
         ""
@@ -387,6 +388,13 @@ fn add_devices(
                 args.vsock_cid
             ));
         }
+    }
+
+    if needs_rng {
+        command
+            .args(["-object", "rng-random,id=host_rng0"])
+            .arg("-device")
+            .arg(format!("virtio-rng-{suffix},rng=host_rng0"));
     }
 
     Ok(())

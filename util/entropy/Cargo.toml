@@ -1,0 +1,29 @@
+[package]
+name = "entropy"
+description = "Kernel entropy pool for /dev/random, getrandom, and TEE consumers"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+char_driver.workspace = true
+kbuild_config.workspace = true
+kclass = { workspace = true, features = ["char"] }
+khal.workspace = true
+karch.workspace = true
+klazy.workspace = true
+ksync.workspace = true
+ktask.workspace = true
+log.workspace = true
+rand_chacha.workspace = true
+unittest.workspace = true
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+kplat-aarch64 = { workspace = true, default-features = false }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(unittest)'] }

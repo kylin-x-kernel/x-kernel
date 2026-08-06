@@ -6,89 +6,31 @@
 
 use alloc::sync::Arc;
 
-use khal::time::now_ticks;
-use ksync::Mutex;
+use entropy::{add_entropy, fill_random};
 use kvfs::{
     DeviceFileOps, DeviceId, DirMapping, NodeFlags, NodeType, SimpleFs, VfsFile, VfsResult,
-};
-use rand_chacha::{
-    ChaCha20Rng,
-    rand_core::{RngCore, SeedableRng},
 };
 
 use crate::{DeviceFile, add_device_entry};
 
-struct RandomState {
-    rng: ChaCha20Rng,
-    write_counter: u64,
-}
-
-impl RandomState {
-    fn new() -> Self {
-        Self {
-            rng: ChaCha20Rng::from_seed(initial_seed()),
-            write_counter: 0,
-        }
-    }
-
-    fn fill_bytes(&mut self, buf: &mut [u8]) {
-        self.rng.fill_bytes(buf);
-    }
-
-    fn mix_entropy(&mut self, input: &[u8]) {
-        let mut seed = [0u8; 32];
-        self.rng.fill_bytes(&mut seed);
-
-        for (index, byte) in input.iter().enumerate() {
-            seed[index % seed.len()] ^= *byte;
-        }
-
-        self.write_counter = self.write_counter.wrapping_add(1);
-        let ticks = now_ticks()
-            .as_raw()
-            .wrapping_add(self.write_counter.rotate_left(17));
-        for (index, byte) in ticks.to_le_bytes().iter().enumerate() {
-            seed[index] ^= *byte;
-        }
-
-        self.rng = ChaCha20Rng::from_seed(seed);
-    }
-}
-
-fn initial_seed() -> [u8; 32] {
-    let mut seed = [0u8; 32];
-    let mut state = now_ticks().as_raw() ^ 0x9e37_79b9_7f4a_7c15;
-
-    for chunk in seed.chunks_mut(8) {
-        state ^= state.rotate_left(7);
-        state = state.wrapping_mul(0xd134_2543_de82_ef95);
-        chunk.copy_from_slice(&state.to_le_bytes());
-    }
-
-    seed
-}
-
-/// /dev/random and /dev/urandom device - returns pseudo-random data.
-struct Random {
-    state: Mutex<RandomState>,
-}
+/// /dev/random and /dev/urandom device nodes backed by the kernel entropy pool.
+struct Random;
 
 impl Random {
-    /// Create a new random device seeded from timer entropy.
+    /// Create a new random device node.
     pub fn new() -> Self {
-        Self {
-            state: Mutex::new(RandomState::new()),
-        }
+        Self
     }
 
     fn read_bytes(&self, buf: &mut [u8]) -> VfsResult<usize> {
-        self.state.lock().fill_bytes(buf);
+        fill_random(buf);
         Ok(buf.len())
     }
 
     fn write_bytes(&self, buf: &[u8]) -> VfsResult<usize> {
-        // Writing to /dev/random mixes additional entropy into the PRNG.
-        self.state.lock().mix_entropy(buf);
+        // Writing mixes bytes into the pool for diversity but does not credit
+        // CRNG readiness (see `entropy::add_entropy`).
+        add_entropy(buf);
         Ok(buf.len())
     }
 }
@@ -140,7 +82,7 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
 
 #[cfg(unittest)]
 mod tests {
-    use unittest::def_test;
+    use unittest::{assert, assert_eq, assert_ne, def_test};
 
     use super::*;
 
@@ -154,11 +96,34 @@ mod tests {
     }
 
     #[def_test]
+    fn test_random_read_empty() {
+        let dev = Random::new();
+        let mut buf = [];
+        let n = dev.read_bytes(&mut buf).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[def_test]
     fn test_random_write_accepts_all() {
         let dev = Random::new();
         let data = [0u8; 32];
         let n = dev.write_bytes(&data).unwrap();
         assert_eq!(n, 32);
+    }
+
+    #[def_test]
+    fn test_random_write_empty() {
+        let dev = Random::new();
+        let n = dev.write_bytes(&[]).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[def_test]
+    fn test_random_supports_rw() {
+        let dev = Random::new();
+        assert!(dev.supports_read());
+        assert!(dev.supports_write());
+        assert!(dev.flags().contains(NodeFlags::NON_CACHEABLE));
     }
 
     #[def_test]
@@ -176,6 +141,7 @@ mod tests {
         let dev = Random::new();
         let mut before = [0u8; 32];
         let mut after = [0u8; 32];
+        entropy::init();
         dev.read_bytes(&mut before).unwrap();
         dev.write_bytes(b"entropy").unwrap();
         dev.read_bytes(&mut after).unwrap();

@@ -217,6 +217,17 @@ fn log_class_summary() {
         .filter(|r| r.state == kdevice::DeviceState::Active)
         .count();
     debug!("total devices: {} ({} active)", records.len(), active);
+
+    #[cfg(feature = "char")]
+    {
+        for device in kclass::char_devices() {
+            info!(
+                "char device ready: {} (driver={})",
+                device.name(),
+                device.driver_name()
+            );
+        }
+    }
 }
 
 fn log_device_core_summary() {

@@ -84,8 +84,12 @@ pub struct MockTransport {
 
 impl MockTransport {
     pub fn new() -> Self {
+        Self::new_with_type(DeviceType::Block)
+    }
+
+    pub fn new_with_type(device_type: DeviceType) -> Self {
         Self {
-            device_type: DeviceType::Block,
+            device_type,
             status: RefCell::new(DeviceStatus::empty()),
             features: 0,
             config_space: RefCell::new([0; 256]),

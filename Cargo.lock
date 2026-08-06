@@ -1120,6 +1120,7 @@ dependencies = [
  "dice-driver",
  "driver_base",
  "drmdevice",
+ "entropy",
  "fbdevice",
  "flatten_objects",
  "gimli 0.34.0",
@@ -1149,7 +1150,6 @@ dependencies = [
  "memaddr",
  "osvm",
  "posix-types",
- "rand_chacha 0.3.1",
  "tee_crypto 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "unittest",
  "zerocopy",
@@ -1310,6 +1310,24 @@ name = "embedded-io"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
+
+[[package]]
+name = "entropy"
+version = "0.2.0-dev"
+dependencies = [
+ "char_driver",
+ "karch",
+ "kbuild_config",
+ "kclass",
+ "khal",
+ "klazy",
+ "kplat-aarch64",
+ "ksync",
+ "ktask",
+ "log",
+ "rand_chacha 0.3.1",
+ "unittest",
+]
 
 [[package]]
 name = "entry"
@@ -2759,6 +2777,7 @@ dependencies = [
  "backtrace",
  "boot-info",
  "chrono",
+ "entropy",
  "fat",
  "fbdevice",
  "fs_boot",
@@ -2865,6 +2884,7 @@ name = "ksyscall"
 version = "0.2.0-dev"
 dependencies = [
  "bitflags 2.13.1",
+ "entropy",
  "kaddr_layout",
  "kalloc",
  "kbuild_config",
@@ -4889,11 +4909,11 @@ dependencies = [
  "cfg-if",
  "cty",
  "dice-driver",
+ "entropy",
  "fs_context",
  "hex",
  "kalloc",
  "kcpu",
- "kcred",
  "kerrno",
  "khal",
  "klazy",
@@ -4906,7 +4926,6 @@ dependencies = [
  "kvfs",
  "linux-raw-sys",
  "linux_sysno",
- "macros",
  "memoffset",
  "osvm",
  "posix-types",
@@ -5276,11 +5295,14 @@ name = "virtio"
 version = "0.2.0-dev"
 dependencies = [
  "block",
+ "char_driver",
  "device-res",
  "display",
  "driver_base",
  "input",
+ "khal",
  "kspin 0.2.0-dev",
+ "ktime_types",
  "kvirtiodrivers",
  "log",
  "net",

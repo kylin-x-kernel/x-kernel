@@ -17,6 +17,7 @@ use driver_base::DeviceKind;
 pub mod virtio_type {
     pub const NET: u32 = 1;
     pub const BLOCK: u32 = 2;
+    pub const RNG: u32 = 4;
     pub const NINEP: u32 = 9;
     pub const GPU: u32 = 16;
     pub const INPUT: u32 = 18;
@@ -33,6 +34,7 @@ pub fn pci_device_id_to_virtio_type(device_id: u16) -> Option<u32> {
     match device_id {
         0x1000 | 0x1041 => Some(virtio_type::NET),
         0x1001 | 0x1042 => Some(virtio_type::BLOCK),
+        0x1005 | 0x1044 => Some(virtio_type::RNG),
         0x1009 | 0x1049 => Some(virtio_type::NINEP),
         0x1050 => Some(virtio_type::GPU),
         0x1052 => Some(virtio_type::INPUT),
@@ -47,11 +49,11 @@ pub const fn device_kind_to_virtio_type(kind: DeviceKind) -> Option<u32> {
     match kind {
         DeviceKind::Net => Some(virtio_type::NET),
         DeviceKind::Block => Some(virtio_type::BLOCK),
+        DeviceKind::Char => Some(virtio_type::RNG),
         DeviceKind::Display => Some(virtio_type::GPU),
         DeviceKind::Input => Some(virtio_type::INPUT),
         DeviceKind::Vsock => Some(virtio_type::VSOCK),
         DeviceKind::Fs9p => Some(virtio_type::NINEP),
-        DeviceKind::Char => None,
         DeviceKind::Bus => None,
     }
 }

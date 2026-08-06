@@ -69,6 +69,7 @@ knet = { workspace = true, optional = true }
 ktask = { workspace = true }
 timer_driver = { workspace = true }
 watchdog = { workspace = true, optional = true }
+entropy.workspace = true
 chrono.workspace = true
 kiface.workspace = true
 heapless = "0.9"

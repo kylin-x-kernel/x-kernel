@@ -50,6 +50,7 @@ kexec.workspace = true
 kuaccess.workspace = true
 ktty.workspace = true
 kvfs.workspace = true
+entropy.workspace = true
 posix-fs.workspace = true
 posix-bpf = { workspace = true, optional = true }
 posix-ipc.workspace = true

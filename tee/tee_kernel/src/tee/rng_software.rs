@@ -2,67 +2,17 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use klazy::Lazy;
-use ksync::Mutex;
-use kvfs::{Filename, NodePermission};
-use macros::register_init;
+//! TEE software RNG backed by the kernel entropy pool.
+
+use entropy::fill_random;
 use tee_crypto::rng::{DeterministicRng, Infallible, Rng, TryCryptoRng, TryRng};
-use tee_raw_sys::TEE_ERROR_GENERIC;
 
 use crate::tee::TeeResult;
 
 const RNG_SEED_SIZE: usize = 32;
 
-static GLOBAL_TEE_SOFTWARE_RAND: Lazy<Mutex<DeterministicRng>> = Lazy::new(|| {
-    let seed = kernel_random_seed().expect("TEE software RNG seed unavailable");
-    Mutex::new(DeterministicRng::seed_from_bytes(&seed))
-});
-
 fn tee_software_get_rand(output: &mut [u8]) {
-    let mut rand = GLOBAL_TEE_SOFTWARE_RAND.lock();
-    rand.fill_bytes(output);
-}
-
-/// Eagerly initialize the global TEE software RNG at boot.
-///
-/// Registered via `#[register_init]`, this runs during `init_cb()` after devfs
-/// is mounted and before any task can issue a TEE syscall. Reading `/dev/urandom`
-/// here -- on a single CPU with no concurrent RNG caller alive -- cannot contend.
-/// Once `Ready`, every later `tee_software_get_rand` takes a fast non-blocking
-/// path and never touches the VFS, so the factory closure's `/dev/urandom` read
-/// (which acquires the sleeping `fs_context`/devfs mutexes) can no longer run
-/// inside a `klazy::Once` spin-wait or under a held TEE-object lock. That removes
-/// the SMP AB-BA inversion with the TEE storage path that hung the system under
-/// contention.
-#[register_init]
-fn init_tee_software_rand() {
-    Lazy::force(&GLOBAL_TEE_SOFTWARE_RAND);
-}
-
-fn kernel_random_seed() -> TeeResult<[u8; RNG_SEED_SIZE]> {
-    let mut seed = [0u8; RNG_SEED_SIZE];
-    let fs_guard = fs_context::init_fs();
-    let fs = fs_guard.lock();
-    let file = Filename::new("/dev/urandom")
-        .open_with_flags_at(
-            fs.root(),
-            fs.pwd(),
-            0,
-            NodePermission::empty(),
-            NodePermission::empty(),
-            kcred::initial_cred(),
-        )
-        .map_err(|_| TEE_ERROR_GENERIC)?;
-    drop(fs);
-
-    let mut pos = 0;
-    let len = file
-        .read_from(&mut seed, &mut pos)
-        .map_err(|_| TEE_ERROR_GENERIC)?;
-    if len != seed.len() {
-        return Err(TEE_ERROR_GENERIC);
-    }
-    Ok(seed)
+    fill_random(output);
 }
 
 fn software_rng_seed() -> [u8; RNG_SEED_SIZE] {
@@ -71,14 +21,7 @@ fn software_rng_seed() -> [u8; RNG_SEED_SIZE] {
     seed
 }
 
-/// read data from crypto RNG to buffer
-///
-/// # Arguments
-/// * `buf` - buffer to store read data
-///
-/// # Returns
-/// * `Ok(())` - success
-/// * `Err(TEE_ERROR_GENERIC)` - error
+/// Read data from the kernel entropy pool into `buf`.
 pub fn crypto_rng_read(buf: &mut [u8]) -> TeeResult {
     tee_software_get_rand(buf);
     Ok(())
@@ -116,10 +59,7 @@ impl TryRng for TeeSoftwareRng {
 
 impl TryCryptoRng for TeeSoftwareRng {}
 
-/// RNG backed by the global `GLOBAL_TEE_SOFTWARE_RAND`.
-///
-/// This reuses the persistent global CSPRNG so state is continuous across
-/// calls.
+/// RNG backed by the kernel entropy pool.
 pub struct GlobalSoftwareRng;
 
 impl TryRng for GlobalSoftwareRng {

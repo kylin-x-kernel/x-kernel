@@ -184,6 +184,10 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     #[cfg(feature = "char")]
     ktty::tty::try_handoff_console();
 
+    // Probe CPU / SMCCC / VirtIO / jitter sources after drivers are visible.
+    // Must run before TEE register_init paths that call fill_random().
+    entropy::init();
+
     #[cfg(feature = "display")]
     fbdevice::fb_init();
     #[cfg(feature = "input")]

@@ -34,6 +34,11 @@
 //!     - `driver_virtio_input`: virtio-input device driver (implies `input`).
 //!     - `driver_virtio_socket`: virtio-vsock transport driver (implies `vsock`).
 //!     - `driver_virtio_9p`: virtio-9p transport driver.
+//!     - `driver_virtio_rng`: virtio-rng entropy source driver (implies `char`).
+//!     - `entropy_arch_cpu`: CPU instruction entropy (AArch64 RNDR / x86 RDSEED·RDRAND).
+//!     - `entropy_smccc_trng`: ARM SMCCC TRNG 1.0 firmware entropy for the kernel pool.
+//!     - `entropy_trust_host`: mix VirtIO RNG into the kernel pool (development VMs).
+//!     - `entropy_jitter`: software timing jitter entropy for the kernel pool.
 //!     - `driver_ramdisk`: Use the RAM disk to emulate the block device.
 //!     - `driver-ixgbe`: Enable the Intel 82599 10Gbit NIC driver.
 //!     - `driver-bcm2835-sdhci`: Enable the BCM2835 SDHCI driver (Raspberry Pi SD card).

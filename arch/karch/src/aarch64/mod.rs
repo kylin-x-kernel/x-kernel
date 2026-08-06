@@ -11,6 +11,7 @@ mod fp;
 mod irq;
 mod mmu;
 pub mod pmr;
+mod rng;
 mod tlb;
 mod tls;
 mod trap;
@@ -33,6 +34,7 @@ pub use mmu::{
     HwPageTableRoot, read_kernel_page_table, read_user_page_table, write_kernel_page_table,
     write_user_page_table,
 };
+pub use rng::{cpu_rng_available, init_cpu_rng, read_cpu_random};
 pub use tlb::{flush_tlb, flush_tlb_asid, flush_tlb_va_asid};
 pub use tls::{read_thread_pointer, write_thread_pointer};
 pub use trap::write_trap_vector_base;

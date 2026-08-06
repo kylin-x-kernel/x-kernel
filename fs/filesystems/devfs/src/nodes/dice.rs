@@ -6,16 +6,11 @@
 use alloc::{sync::Arc, vec, vec::Vec};
 
 use dice_driver::{DICE_IOCTL_GET_HANDOVER, DICE_IOCTL_GET_RAW_HANDOVER};
+use entropy::fill_random;
 use kerrno::{KError, KResult};
-use klazy::Lazy;
-use ksync::Mutex;
 use kvfs::{DeviceFileOps, DirMapping, Filename, NodePermission, SimpleFs, VfsFile};
 use linux_raw_sys::general::O_RDONLY;
 use osvm::{VirtMutPtr, VirtPtr, write_vm_mem};
-use rand_chacha::{
-    ChaCha8Rng,
-    rand_core::{RngCore, SeedableRng},
-};
 
 use crate::{DeviceFile, add_device_entry};
 
@@ -123,16 +118,13 @@ fn get_process_hash() -> KResult<Vec<u8>> {
     Ok(sm3_result)
 }
 
-static GLOBAL_RAND: Lazy<Mutex<ChaCha8Rng>> = Lazy::new(|| {
-    let seed = khal::time::now_ticks().as_raw();
-    Mutex::new(ChaCha8Rng::seed_from_u64(seed))
-});
-
 #[unsafe(no_mangle)]
 pub extern "C" fn get_rand(output: usize, len: usize) -> u32 {
+    if len == 0 {
+        return 0;
+    }
     let mut buf = vec![0u8; len];
-    let mut rand = GLOBAL_RAND.lock();
-    rand.fill_bytes(&mut buf);
+    fill_random(&mut buf);
     write_vm_mem(output as *mut u8, &buf).map_or(1, |_| 0)
 }
 
