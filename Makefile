@@ -14,7 +14,8 @@
 # * QEMU / runtime — `make run`, `make justrun`, `make debug`:
 #     - DISK_IMG            virtio-blk backing disk image (see RAMDISK_IMG below)
 #     - NET / BLK / VSOCK   Enable virtio-net / virtio-blk / vhost-vsock (y/n)
-#     - ACCEL               Enable KVM (linux) / HVF (macOS) acceleration (y/n)
+#     - ACCEL               Enable KVM (linux) / HVF (macOS) acceleration (y/n;
+#                           default: n on macOS, y elsewhere)
 #     - GRAPHIC             Enable graphical output + virtio-gpu (y/n)
 #     - UEFI                Boot x86_64 via OVMF `.uefi.img` instead of LinuxBoot (y/n)
 #     - MEM                 Guest memory size (default 1g)
@@ -93,7 +94,12 @@ UNITTEST_CRATE ?=
 NET ?= y
 BLK ?= y
 VSOCK ?= y
+# HVF acceleration on macOS is often unstable, so it's disabled by default.
+ifeq ($(shell uname -s),Darwin)
+ACCEL ?= n
+else
 ACCEL ?= y
+endif
 UEFI ?= n
 GRAPHIC ?= n
 MEM ?=

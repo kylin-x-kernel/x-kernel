@@ -66,9 +66,50 @@ impl Process {
         self
     }
 
+    /// Renders the command line wrapped across multiple lines for display.
+    ///
+    /// Each `-flag value` group starts a new line terminated by a shell line
+    /// continuation (`\`), so the output stays readable on a narrow terminal
+    /// while remaining copy-pasteable into a shell.
+    pub(crate) fn command_lines(&self) -> String {
+        let parts = self.command_parts();
+        let mut lines: Vec<String> = Vec::new();
+        let mut current: Vec<String> = Vec::new();
+        for part in parts {
+            let is_flag = part.starts_with('-');
+            if is_flag && !current.is_empty() {
+                lines.push(current.join(" "));
+                current.clear();
+            }
+            current.push(part);
+        }
+        if !current.is_empty() {
+            lines.push(current.join(" "));
+        }
+        lines.join(" \\\n  ")
+    }
+
+    /// Returns the program followed by shell-quoted arguments, plus an optional
+    /// stdout redirection suffix.
+    fn command_parts(&self) -> Vec<String> {
+        let program = self.command.get_program().to_string_lossy();
+        let mut parts: Vec<String> = std::iter::once(program.into_owned())
+            .chain(
+                self.command
+                    .get_args()
+                    .map(|arg| shell_quote(arg.to_string_lossy().as_ref())),
+            )
+            .collect();
+        if let Some(path) = &self.stdout_path {
+            parts.push(format!("> {}", shell_quote(&path.display().to_string())));
+        }
+        parts
+    }
+
     pub(crate) fn run(&mut self) -> Result<()> {
         if self.verbosity > 0 || self.dry_run {
-            println!("+ {:#?}", self.command);
+            // Show the command once, in shell form, so it can be copy-pasted.
+            println!("{}", self.command_lines());
             if let Some(path) = &self.stdout_path {
                 println!("  stdout -> {}", path.display());
             }
@@ -139,6 +180,29 @@ fn pending_output_path(output_path: &Path) -> Result<PathBuf> {
     Ok(output_path.with_file_name(pending_name))
 }
 
+/// Quotes a single command-line argument for shell display.
+///
+/// Arguments without whitespace or shell metacharacters are returned as-is;
+/// anything else is wrapped in single quotes (with embedded single quotes
+/// escaped via the standard `'\''` idiom).
+fn shell_quote(arg: &str) -> String {
+    let needs_quoting = arg.is_empty()
+        || arg.chars().any(|c| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '\'' | '"' | '\\' | '$' | '`' | '|' | '&' | ';' | '<' | '>' | '(' | ')'
+                        | '*' | '?' | '[' | ']' | '~' | '#' | '!' | '^' | '{' | '}' | '=' | ':'
+                        | '%' | ',' | '+' | '@'
+                )
+        });
+    if !needs_quoting {
+        return arg.to_string();
+    }
+    let escaped = arg.replace('\'', "'\\''");
+    format!("'{escaped}'")
+}
+
 fn remove_pending_output(pending_stdout: Option<&(PathBuf, PathBuf)>) {
     if let Some((pending_path, _)) = pending_stdout {
         let _ = fs::remove_file(pending_path);
@@ -149,10 +213,69 @@ fn remove_pending_output(pending_stdout: Option<&(PathBuf, PathBuf)>) {
 mod tests {
     use std::fs;
 
-    use super::{Process, pending_output_path};
+    use super::{Process, pending_output_path, shell_quote};
 
     fn output_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("xkmake-process-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn shell_quote_leaves_safe_args_unquoted() {
+        assert_eq!(shell_quote("qemu-system-aarch64"), "qemu-system-aarch64");
+        assert_eq!(shell_quote("-m"), "-m");
+        assert_eq!(shell_quote("2G"), "2G");
+    }
+
+    #[test]
+    fn shell_quote_wraps_args_with_whitespace_or_metacharacters() {
+        assert_eq!(shell_quote("hello world"), "'hello world'");
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+        assert_eq!(shell_quote("file with space.img"), "'file with space.img'");
+        // An empty argument must be quoted so it is not dropped.
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn shell_quote_wraps_posix_metacharacters() {
+        // Each of these is a POSIX shell metacharacter that must trigger
+        // quoting so the rendered command line stays copy-pasteable even when
+        // a workspace or image path contains one.
+        assert_eq!(shell_quote("a;b"), "'a;b'");
+        assert_eq!(shell_quote("a(b)c"), "'a(b)c'");
+        assert_eq!(shell_quote("*.rs"), "'*.rs'");
+        assert_eq!(shell_quote("a?b"), "'a?b'");
+        assert_eq!(shell_quote("a[b]c"), "'a[b]c'");
+        assert_eq!(shell_quote("~root"), "'~root'");
+        assert_eq!(shell_quote("a#b"), "'a#b'");
+        assert_eq!(shell_quote("a!b"), "'a!b'");
+        assert_eq!(shell_quote("{a,b}"), "'{a,b}'");
+        assert_eq!(shell_quote("k=v"), "'k=v'");
+        assert_eq!(shell_quote("a:b"), "'a:b'");
+    }
+
+    #[test]
+    fn shell_quote_leaves_dotted_identifiers_unquoted() {
+        // Plain flags and dotted identifiers (version numbers, dotted paths)
+        // must still pass through untouched — only metacharacters trigger
+        // quoting, and `.` / `_` are not among them.
+        assert_eq!(shell_quote("qemu-system-x86_64"), "qemu-system-x86_64");
+        assert_eq!(shell_quote("--machine"), "--machine");
+        assert_eq!(shell_quote("2.5.1"), "2.5.1");
+    }
+
+    #[test]
+    fn command_lines_quotes_stdout_redirection_path() {
+        let mut process = Process::new("qemu-system-x86_64", false, 0);
+        process
+            .arg("-m")
+            .arg("2G")
+            .stdout_to_file("/tmp/xkmake output.log");
+        // The redirection target contains a space and must be shell-quoted so
+        // the rendered line stays copy-pasteable into a shell.
+        assert_eq!(
+            process.command_lines(),
+            "qemu-system-x86_64 \\\n  -m 2G > '/tmp/xkmake output.log'"
+        );
     }
 
     #[test]
@@ -169,6 +292,25 @@ mod tests {
         assert!(fs::read_to_string(&output).unwrap().starts_with("rustc "));
         assert!(!pending_output_path(&output).unwrap().exists());
         fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn command_lines_wraps_each_flag_group_with_continuation() {
+        let mut process = Process::new("qemu-system-aarch64", false, 0);
+        process
+            .arg("-m")
+            .arg("2G")
+            .arg("-smp")
+            .arg("4")
+            .arg("-kernel")
+            .arg("kernel.bin");
+        // The program name starts the first line; each `-flag value` group then
+        // breaks onto its own line, joined by shell continuations so the whole
+        // block stays copy-pasteable.
+        assert_eq!(
+            process.command_lines(),
+            "qemu-system-aarch64 \\\n  -m 2G \\\n  -smp 4 \\\n  -kernel kernel.bin"
+        );
     }
 
     #[test]

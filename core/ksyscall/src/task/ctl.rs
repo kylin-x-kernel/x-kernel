@@ -76,6 +76,13 @@ pub fn sys_get_mempolicy(
 /// - PR_GET_KEEPCAPS / PR_SET_KEEPCAPS: query or set the keep-capabilities flag
 /// - PR_MCE_KILL: set the machine check exception policy
 /// - PR_SET_MM options: set various memory management options (start/end code/data/brk/stack)
+///
+/// Many options below are answered with static defaults: this kernel has no
+/// dumpable flag, no securebits, and runs every task with full capabilities, so
+/// getters return their "fully privileged, nothing set" value while setters are
+/// accepted as no-ops. This matches the behavior user space expects from a
+/// Linux-like kernel on these (often merely probed) options, and avoids noisy
+/// warnings for each unimplemented option.
 pub fn sys_prctl(
     option: u32,
     arg2: usize,
@@ -100,12 +107,23 @@ pub fn sys_prctl(
             write_vm_mem(arg2 as _, &buf)?;
         }
         PR_SET_SECCOMP => {}
+        PR_GET_SECCOMP => {
+            // Seccomp is not enforced, so mode 0 (disabled). Linux returns the
+            // mode directly as the prctl return value and never writes user
+            // memory: arg2..arg5 must all be zero, otherwise EINVAL
+            // (kernel/sys.c), so this does not touch `arg2`.
+            if arg2 != 0 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
+                return Err(KError::InvalidInput);
+            }
+            return Ok(0);
+        }
         PR_CAPBSET_READ => {
             if arg2 > CAP_LAST_CAP {
                 return Err(KError::InvalidInput);
             }
             return Ok(1);
         }
+        PR_CAPBSET_DROP => {}
         PR_GET_KEEPCAPS => {
             return Ok(isize::from(kprocess::current_cred().keep_caps()));
         }
@@ -121,6 +139,46 @@ pub fn sys_prctl(
             }
         }
         PR_MCE_KILL => {}
+        // We do not track the process dumpable flag; report the Linux default
+        // (`SUID_DUMP_USER` semantics observed by user space as dumpable=1).
+        PR_GET_DUMPABLE => return Ok(1),
+        PR_SET_DUMPABLE => {}
+        // securebits are not tracked; nothing is set.
+        PR_GET_SECUREBITS => return Ok(0),
+        PR_SET_SECUREBITS => {}
+        // This kernel always grants full capabilities, so no_new_privs has no
+        // observable effect; report it as unset.
+        PR_GET_NO_NEW_PRIVS => return Ok(0),
+        PR_SET_NO_NEW_PRIVS => {}
+        // child subreaper semantics are not tracked.
+        PR_GET_CHILD_SUBREAPER => {
+            if arg2 != 0 {
+                write_vm_mem(arg2 as _, &[0u32])?;
+            }
+        }
+        PR_SET_CHILD_SUBREAPER => {}
+        // We do not expose a separate tid_address; report none.
+        PR_GET_TID_ADDRESS => {
+            if arg2 != 0 {
+                write_vm_mem(arg2 as _, &[0usize])?;
+            }
+        }
+        // Transparent hugepages are not supported; report disabled.
+        PR_GET_THP_DISABLE => return Ok(1),
+        PR_SET_THP_DISABLE => {}
+        // timerslack is not tracked; report the kernel default.
+        PR_GET_TIMERSLACK => return Ok(50_000),
+        PR_SET_TIMERSLACK => {}
+        PR_CAP_AMBIENT => {
+            // The ambient capability set is not tracked. Only the read
+            // sub-action produces a value; raise/lower/clear are accepted as
+            // no-ops since we always operate with full effective capabilities.
+            match arg2 as u32 {
+                PR_CAP_AMBIENT_IS_SET => return Ok(0),
+                PR_CAP_AMBIENT_RAISE | PR_CAP_AMBIENT_LOWER | PR_CAP_AMBIENT_CLEAR_ALL => {}
+                _ => return Err(KError::InvalidInput),
+            }
+        }
         PR_SET_VMA => {
             // Allow user space to set anonymous VMA names (e.g. Go runtime).
             // We currently do not persist VMA metadata, but returning success
@@ -145,7 +203,7 @@ pub fn sys_prctl(
 #[cfg(unittest)]
 mod tests {
     use kerrno::KError;
-    use linux_raw_sys::prctl::{PR_GET_KEEPCAPS, PR_SET_KEEPCAPS};
+    use linux_raw_sys::prctl::*;
     use unittest::{assert_eq, def_test};
 
     use super::sys_prctl;
@@ -169,5 +227,75 @@ mod tests {
             Err(KError::InvalidInput)
         );
         assert_eq!(sys_prctl(PR_GET_KEEPCAPS, 0, 0, 0, 0), Ok(0));
+    }
+
+    #[def_test(user, serial)]
+    fn prctl_get_seccomp_returns_mode_zero_without_writing_arg2() {
+        // Linux returns the seccomp mode as the prctl return value and never
+        // writes user memory; with arg2..arg5 zero it reports mode 0.
+        assert_eq!(sys_prctl(PR_GET_SECCOMP, 0, 0, 0, 0), Ok(0));
+    }
+
+    #[def_test(user, serial)]
+    fn prctl_get_seccomp_rejects_nonzero_args_with_einval() {
+        // Linux requires arg2..arg5 to be zero for PR_GET_SECCOMP.
+        assert_eq!(
+            sys_prctl(PR_GET_SECCOMP, 1, 0, 0, 0),
+            Err(KError::InvalidInput)
+        );
+    }
+
+    #[def_test(user, serial)]
+    fn prctl_get_dumpable_reports_default() {
+        assert_eq!(sys_prctl(PR_GET_DUMPABLE, 0, 0, 0, 0), Ok(1));
+    }
+
+    #[def_test(user, serial)]
+    fn prctl_get_securebits_reports_unset() {
+        assert_eq!(sys_prctl(PR_GET_SECUREBITS, 0, 0, 0, 0), Ok(0));
+    }
+
+    #[def_test(user, serial)]
+    fn prctl_get_no_new_privs_reports_unset() {
+        assert_eq!(sys_prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), Ok(0));
+    }
+
+    #[def_test(user, serial)]
+    fn prctl_get_thp_disable_reports_disabled() {
+        assert_eq!(sys_prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0), Ok(1));
+    }
+
+    #[def_test(user, serial)]
+    fn prctl_get_timerslack_reports_default() {
+        assert_eq!(sys_prctl(PR_GET_TIMERSLACK, 0, 0, 0, 0), Ok(50_000));
+    }
+
+    #[def_test(user, serial)]
+    fn prctl_capbset_read_reports_in_set() {
+        assert_eq!(sys_prctl(PR_CAPBSET_READ, 5, 0, 0, 0), Ok(1));
+    }
+
+    #[def_test(user, serial)]
+    fn prctl_capbset_read_rejects_unknown_capability_with_einval() {
+        assert_eq!(
+            sys_prctl(PR_CAPBSET_READ, 9999, 0, 0, 0),
+            Err(KError::InvalidInput)
+        );
+    }
+
+    #[def_test(user, serial)]
+    fn prctl_cap_ambient_is_set_reports_unset() {
+        assert_eq!(
+            sys_prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET as usize, 0, 0, 0),
+            Ok(0)
+        );
+    }
+
+    #[def_test(user, serial)]
+    fn prctl_cap_ambient_rejects_unknown_subcommand_with_einval() {
+        assert_eq!(
+            sys_prctl(PR_CAP_AMBIENT, 0xFFFF, 0, 0, 0),
+            Err(KError::InvalidInput)
+        );
     }
 }

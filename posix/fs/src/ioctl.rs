@@ -145,7 +145,11 @@ pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> KResult<isize> {
                 if cmd == TIOCGWINSZ || cmd == TCGETS {
                     return;
                 }
-                warn!("Unsupported ioctl command: {cmd} for fd: {fd}");
+                // Many programs probe for optional features (e.g. btrfs reflink
+                // ioctls with magic 0x94) by issuing the ioctl and falling back
+                // when it returns ENOTTY. That fallback path is expected, so log
+                // at debug rather than warning on every probe.
+                debug!("Unsupported ioctl command: {cmd} for fd: {fd}");
             }
         })
 }

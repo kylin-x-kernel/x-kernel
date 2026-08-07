@@ -161,9 +161,13 @@ fn reject_positioned_stream_io(file: &VfsFile) -> KResult<()> {
     }
 }
 
-/// Creates a dummy file descriptor for unsupported syscalls.
+/// Returns `ENOSYS` for syscalls that are deliberately not implemented
+/// (e.g. the new mount API: `fsopen`/`fspick`/`open_tree`, `io_uring_setup`,
+/// `fanotify_init`). User space probes these and falls back to a supported
+/// path on `ENOSYS`, so the failure is expected and not worth a warning per
+/// call. Logged at `debug!` for diagnosability.
 pub fn sys_dummy_fd(sysno: Sysno) -> KResult<isize> {
-    warn!("Unsupported syscall requested dummy fd: {sysno}");
+    debug!("Unsupported syscall requested dummy fd: {sysno}");
     Err(KError::Unsupported)
 }
 

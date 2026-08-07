@@ -55,6 +55,12 @@ pub(crate) fn run(bundle: &Bundle, args: &RunArgs) -> Result<()> {
         context.config.platform(),
         context.config.target()
     );
+    // In verbose/dry-run mode `command.run()` prints the command itself, so
+    // suppress it here to avoid a duplicate; otherwise show the command once so
+    // the user can see exactly what is being launched.
+    if context.verbosity == 0 && !context.dry_run {
+        println!("{}", command.command_lines());
+    }
     command.run()
 }
 
@@ -407,16 +413,15 @@ fn qemu_supports_device(qemu_program: &str, device: &str) -> bool {
     {
         Ok(output) => output,
         Err(error) => {
-            eprintln!(
-                "warning: cannot probe {qemu_program} for {device} support: {error}; skipping \
-                 vsock"
+            log::warn!(
+                "cannot probe {qemu_program} for {device} support: {error}; skipping vsock"
             );
             return false;
         }
     };
     if !output.status.success() {
-        eprintln!(
-            "warning: {qemu_program} device probe exited with {}; skipping vsock",
+        log::warn!(
+            "{qemu_program} device probe exited with {}; skipping vsock",
             output.status
         );
         return false;
@@ -425,8 +430,8 @@ fn qemu_supports_device(qemu_program: &str, device: &str) -> bool {
     let is_supported = output_contains_device(&output.stdout, device)
         || output_contains_device(&output.stderr, device);
     if !is_supported {
-        eprintln!(
-            "warning: {qemu_program} does not support {device}; continuing without a vsock device"
+        log::warn!(
+            "{qemu_program} does not support {device}; continuing without a vsock device"
         );
     }
     is_supported

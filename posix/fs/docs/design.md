@@ -92,7 +92,7 @@ core/ksyscall
 | `xattr` | 实现 pathname、no-follow 和 fd 三种目标形式的 set/get/list/remove xattr，复制有界输入名称和值，并用单个有界 writer 处理 list size query/`ERANGE` |
 | `mount` | 把 Linux mount flags 映射到 `kvfs::MountFlags`，按注册的 `FileSystemType` 查找实现，并处理非递归 bind 与 remount |
 | `stat` | 转换 VFS metadata、access 检查和 statfs 信息 |
-| `ioctl` | 处理 `FIONBIO`、inode FIEMAP，并把其它命令转交 `FileLike::ioctl` |
+| `ioctl` | 处理 `FIONBIO`、inode FIEMAP，并把其它命令转交 `FileLike::ioctl`；未识别命令返回 `ENOTTY`，仅 `debug!` 记录 |
 | `sync` | 将同步请求转发到文件系统或打开对象所在文件系统 |
 
 ## 调用约束 / 执行上下文

@@ -191,24 +191,26 @@ fn kernel_main() {
             for test in &serial_tests {
                 let module_name = test.module;
                 let test_name = test.name();
+                // Print the name *before* running the test so a hang or panic
+                // mid-test leaves a breadcrumb pointing at the culprit. Use
+                // `kprint!` (no trailing newline, flushed immediately) so the
+                // "ok"/"FAILED" result emitted after the test returns continues
+                // on the same line.
+                kprint!("      {}::{} ... ", module_name, test_name);
                 let result = test.run();
                 match result {
                     TestResult::Ok => {
                         passed.fetch_add(1, Ordering::Relaxed);
-                        unittest::ktest_println!("      {}::{} ... ok", module_name, test_name);
+                        unittest::ktest_println!("ok");
                     }
                     TestResult::Failed => {
                         failed.fetch_add(1, Ordering::Relaxed);
                         failed_serial_tests.push(*test);
-                        unittest::ktest_println!("      {}::{} ... FAILED", module_name, test_name);
+                        unittest::ktest_println!("FAILED");
                     }
                     TestResult::Ignored => {
                         ignored.fetch_add(1, Ordering::Relaxed);
-                        unittest::ktest_println!(
-                            "      {}::{} ... ignored",
-                            module_name,
-                            test_name
-                        );
+                        unittest::ktest_println!("ignored");
                     }
                 }
             }
@@ -248,28 +250,25 @@ fn kernel_main() {
                     let test = &tests[test_idx];
                     let module_name = test.module;
                     let test_name = test.name();
+                    // Print the name *before* running the test so a hang or
+                    // panic mid-test leaves a breadcrumb pointing at the
+                    // culprit (the trailing "ok"/"FAILED" line is only emitted
+                    // after it returns).
+                    kprint!("      {}::{} ... ", module_name, test_name);
                     let result = test.run();
                     match result {
                         TestResult::Ok => {
                             p.fetch_add(1, Ordering::Relaxed);
-                            unittest::ktest_println!("      {}::{} ... ok", module_name, test_name);
+                            unittest::ktest_println!("ok");
                         }
                         TestResult::Failed => {
                             f.fetch_add(1, Ordering::Relaxed);
                             test_failed[test_idx].store(true, Ordering::Release);
-                            unittest::ktest_println!(
-                                "      {}::{} ... FAILED",
-                                module_name,
-                                test_name
-                            );
+                            unittest::ktest_println!("FAILED");
                         }
                         TestResult::Ignored => {
                             ig.fetch_add(1, Ordering::Relaxed);
-                            unittest::ktest_println!(
-                                "      {}::{} ... ignored",
-                                module_name,
-                                test_name
-                            );
+                            unittest::ktest_println!("ignored");
                         }
                     }
                 }

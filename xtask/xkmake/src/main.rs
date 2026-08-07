@@ -19,6 +19,7 @@ mod qemu;
 mod x86;
 
 use clap::Parser;
+use env_logger::{Builder, Env};
 
 use crate::{
     cli::{Cli, Command, HygieneCommand},
@@ -26,8 +27,38 @@ use crate::{
 };
 
 fn main() {
+    // Initialize the logger before any work begins.
+    //
+    // The format is `warning:` / `error:` (lowercase, like `cargo`) with only
+    // the prefix colored when stderr is a terminal; no timestamp or module
+    // target, so the output stays compact. `Builder::from_env` (rather than
+    // `Builder::new`) is used so that `RUST_LOG` overrides level/per-module
+    // filtering and `RUST_LOG_STYLE` overrides coloring for debugging; the
+    // default floor is `info` so warnings and errors are always shown.
+    Builder::from_env(Env::default().default_filter_or("info"))
+        .format(|buf, record| {
+            use std::io::Write;
+            let prefix = match record.level() {
+                log::Level::Error => "error",
+                log::Level::Warn => "warning",
+                log::Level::Info => "info",
+                log::Level::Debug => "debug",
+                log::Level::Trace => "trace",
+            };
+            let style = buf.default_level_style(record.level());
+            writeln!(
+                buf,
+                "{}{}:{} {}",
+                style.render(),
+                prefix,
+                style.render_reset(),
+                record.args()
+            )
+        })
+        .init();
+
     if let Err(error) = run() {
-        eprintln!("error: {error}");
+        log::error!("{error}");
         std::process::exit(error.exit_code());
     }
 }
