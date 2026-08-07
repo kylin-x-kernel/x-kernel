@@ -1,6 +1,6 @@
 ---
 name: performance-analysis
-description: Analyze X-Kernel performance using workloads, baselines, and in-kernel diagnostics. Use when investigating latency regressions, soak benchmarks, throughput drops, scheduler or IO hotspots, lock_stat contention, or comparing before/after kernel changes with evidence.
+description: Analyze X-Kernel performance using workloads, baselines, and in-kernel diagnostics. Use when investigating latency regressions, soak benchmarks, throughput drops, scheduler hotspots (schbench/EEVDF), IO hotspots, lock_stat contention, or comparing before/after kernel changes with evidence.
 ---
 
 # Performance Analysis
@@ -23,11 +23,11 @@ For first-pass failure triage without a perf hypothesis, start with
 |--------|-------------|-----------|
 | **Workload / soak** | need reproducible CPU/IO/fork/concurrency pressure | [references/workloads.md](references/workloads.md) |
 | **lock_stat** | suspect Mutex/RwLock/Spin blocking or hot locks | [references/lock-stat.md](references/lock-stat.md) |
+| **调度（scheduler）** | schbench/hackbench、EEVDF 唤醒/交接、IRQ/affinity | [references/scheduler/README.md](references/scheduler/README.md) |
 | **Baseline comparison** | verify a regression or optimization claim | below |
 
-Additional tools (tracing, scheduler snapshots, etc.) may be added as
-sub-references under `references/` over time. Do not invent tools that are
-not documented in this repository.
+Additional tools may be added as sub-references under `references/` over
+time. Do not invent tools that are not documented in this repository.
 
 ## Prerequisites
 
@@ -70,7 +70,7 @@ Bad questions (too vague):
 | process lifecycle | fork/clone cost; PID table | fork storm |
 | block / FS IO | fio QPS/IOPS drop | fio-soak-ext4 |
 | metadata | create/unlink heavy | fs-soak-ext4 |
-| scheduling | wakeup latency; hackbench | schbench / hackbench (guest) |
+| scheduling | wakeup latency; hackbench | schbench / hackbench (guest); see [scheduler/](references/scheduler/README.md) |
 | locking (kernel) | unknown hotspot | lock_stat + targeted soak |
 
 ### Step 3 — Run a narrow workload
@@ -98,6 +98,14 @@ Full procedure: [references/lock-stat.md](references/lock-stat.md).
 
 Do not enable `KFEAT_LOCK_STAT` for every perf task — only when lock
 evidence is needed.
+
+Use the scheduler references when:
+
+- the symptom is guest wakeup / request latency or schbench RPS;
+- p50 and p99.9 move in opposite directions after a sched change;
+- you are about to touch EEVDF place/pick, wake affinity, or IRQ preempt.
+
+Entry: [references/scheduler/README.md](references/scheduler/README.md).
 
 ### Step 6 — Report
 
@@ -127,6 +135,7 @@ not raw `acquisitions` alone.
 | soak scripts | stability / pressure / rough regression | exact root cause |
 | lock_stat | which lock classes waited | hold time distribution |
 | guest benchmark | end-to-end user-visible latency | internal kernel line-level cause |
+| schbench + sched_stat | wake path / handoff class (p50 vs tail vs RPS) | exact line without a targeted patch |
 
 ### 5. Stop when localized
 

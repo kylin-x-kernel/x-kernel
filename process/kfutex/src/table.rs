@@ -417,9 +417,12 @@ impl FutexTable {
                 // Cancelled waiters are dropped here.
             }
         }
-        for waiter in to_wake {
-            waiter.wake_task();
-        }
+        // Futex wake implies the waker often sleeps next (Linux WF_SYNC).
+        ktask::with_wake_sync(|| {
+            for waiter in to_wake {
+                waiter.wake_task();
+            }
+        });
     }
 
     #[cfg(unittest)]

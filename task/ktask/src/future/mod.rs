@@ -82,14 +82,15 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
                     // and we'll re-enter the loop to poll again.
                     rq.blocked_resched(woke);
                 } else {
-                    // ③ woke = true: waker fired between poll() returning
-                    // Pending and us acquiring the lock.
-                    // Clear under the current lock hold, then drop.
-                    // If an interrupt sets woke=true after drop(), the next
-                    // loop iteration will see it correctly.
+                    // The waker fired after `poll()` returned Pending but before
+                    // this task committed to blocking. Re-poll immediately:
+                    // yielding here can hand a saturated CPU to an unrelated
+                    // runnable task even though this future is already ready,
+                    // turning a resolved wake-before-block race into scheduler
+                    // latency. If the wake was spurious, the next Pending poll
+                    // will take the normal blocking path.
                     *woke = false;
                     drop(woke);
-                    crate::yield_now();
                 }
             }
             Poll::Ready(output) => break output,

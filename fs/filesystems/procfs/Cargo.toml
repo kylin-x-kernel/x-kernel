@@ -13,6 +13,7 @@ default = []
 sysrq = ["ktask/snapshot"]
 tee = ["kprocess/tee", "dep:tee_task_iface"]
 lock_stat = ["dep:klockstat", "klockstat/stats"]
+sched_stat = ["ktask/sched_stat"]
 
 [dependencies]
 kbuild_config.workspace = true

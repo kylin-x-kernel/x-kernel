@@ -14,7 +14,6 @@ tee = ["kprocess/tee", "dep:tee_kernel"]
 
 [dependencies]
 bytemuck = { workspace = true, features = ["derive"] }
-kcpu_id_map.workspace = true
 kcred.workspace = true
 kerrno.workspace = true
 kexec.workspace = true

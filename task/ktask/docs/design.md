@@ -163,6 +163,11 @@ init_scheduler_secondary()
 guard 尚未释放时，抢占只保留 `need_resched` pending，不实际切换任务，避免普通任务观察到
 仍属于异常路径的 per-CPU trapframe。
 
+IRQ 分发完成并向中断控制器回写完成状态后，`khal` 在释放 IRQ handler 的 `NoPreempt`
+guard 前暂时挂起 active-exception 标记。这样 `enable_preempt` 可在 IRQ 尾部、IRQ 仍关闭
+的安全窗口消费 pending；被中断任务恢复后再还原标记并返回异常。若不做该尾部补查，
+IPI wake 在 EL1 exception 内只会留下 pending，可能一直等到下一个周期 tick。
+
 异常路径可能进入会阻塞的后端（例如用户缺页处理），任务也可能在 trap handler
 返回前被调度到其它 CPU。为避免原 CPU 上的 active-exception slot 变成 stale 状态，
 `switch_to()` 在切离当前任务、更新 `CurrentTask` 之前会挂起并清空当前 CPU 的
@@ -173,6 +178,7 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
 ### 5) 阻塞/唤醒与 WaitQueue/Future
 
 - `future::block_on` 在 `Poll::Pending` 下走 `blocked_resched()`，把当前任务置为 `Blocked`。
+- 若 waker 在 `Poll::Pending` 与提交阻塞之间触发，`block_on` 清除 wake 标志后立即重新 poll；不能先 yield，否则满载 CPU 会把已完成的 wake-before-block 竞态转换为无关 runnable task 的排队延迟。
 - waker 触发时通过 `select_wake_run_queue(...).unblock_task(..., true)` 将任务恢复为 `Ready`。
 - SMP 下唤醒优先入任务阻塞时保留的 owner CPU（`task.cpu_id()`）；若 cpumask 已不含该 CPU，则回退到普通 `select_run_queue` 轮询选队。
 - `unblock_task(..., true)` 对本 CPU 设置 `need_resched`；对远端 CPU 在 `ipi + preempt` 可用时请求远端设置 `need_resched`。
@@ -203,10 +209,33 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
   - `set_owner_cpu`：仅用于 run queue 尚未建立时的 boot bring-up（main / idle）
 - `switch_to` 在 SMP 下检查 `next_task.cpu_id() == rq.cpu_id`，防止错队列切换。
 - `select_run_queue` 依据任务 `cpumask` 在允许 CPU 集内做轮询选队。
-- `select_wake_run_queue` 用于 wait/future 唤醒路径，优先选择任务阻塞时的 home CPU，避免 waker 继续占用 CPU 导致 wakee 在 waker 核排队。
+- `select_wake_run_queue` **始终粘 home**（cpumask 不含 home 时才 fallback 轮询）。
+  任何 “home 忙 → idle” 溢出都会把 schbench RPS 从 ~450 打到 ~325。
+- `add_task` 首次入队后：若目标是远端 CPU，或本 CPU 当前为 idle，则 `request_resched`
+  （远端 IPI / 本地 pending）；本核忙碌时不额外 kick，交给 tick/yield。避免 RR 到远端
+  idle 后卡在 WFI，进而把 sticky wake 锁进坏布局。
+- EEVDF（`ksched`）对齐 Linux `pick_eevdf` / `place_entity`：
+  - 唤醒 `PLACE_LAG` 后 vruntime **钳到系统 V**，deadline 用**完整 request**
+    （`vd = ve + r/w`），不再造 1-tick 假短 deadline；
+  - **非自愿** `preempt_resched` 先 `peer_preempts_curr()`（`curr` 离树比 deadline），
+    仅当同伴更早才 `put_prev`+`pick`；否则清 pending 直接返回（避免无意义
+    再入队，也保证 `switch_to` 前 ready 队列持有 prev 的 `Arc`）；
+  - `task_tick` 仅在有等待同伴时对到期 deadline 抢占；
+  - 唤醒到 busy rq 时按 Linux `NEXT_BUDDY` / `set_preempt_buddy` 提名 wakee
+    （保留更早 deadline 的既有 buddy）；waker block 后 `pick` 优先 eligible buddy；
+  - futex 等路径用 `with_wake_sync`（Linux `WF_SYNC`）：eligible next buddy 可
+    sync-preempt 半截 curr（即使 deadline 更晚），缩短 “等 waker block” 的 p50，
+    仍不造 1-tick 假短 deadline / idle-seeking。
+- `exit_current` / `migrate_current` 在离开源 RQ 前调用 `account_sleep`，清除 EEVDF
+  `curr` 并（迁移场景）为目的端 PLACE_LAG 保存 `vlag`；`pick_next` 另有防御性清除。
 - 当前实现无主动负载均衡器；任务跨核迁移主要由 affinity 变化触发。
+- `set_task_affinity`：写 `cpumask` 后 `enforce_affinity_placement`——current 立即
+  `migrate_current`；ready 从旧 RQ `remove_task` 再 `migrate_entry`；远端 running
+  在 `preempt`+`ipi` 下 `request_resched`，由 `preempt_resched`/`yield_current`
+  发现 mask 不含本 CPU 后强制迁移，调用方自旋等到离开非法 CPU；迁不走返回
+  `false`（syscall 侧 `EBUSY`）。
 - 对 `Blocked` 任务重新入队时，SMP 下会等待 `task.on_cpu()` 清零，避免与远端 CPU 的切换过程并发冲突。
-- 远端 run queue 唤醒不会直接切换远端 CPU；在支持 IPI 和抢占时，通过远端 pending-resched 请求把切换推迟到远端安全点。
+- 远端 run queue 唤醒/首次入队都不会直接切换远端 CPU；在支持 IPI 和抢占时，通过远端 pending-resched 请求把切换推迟到远端安全点。
 - `TaskInner::on_cpu_mask()` 现在只表示 `ktask` 自己的调度驻留快照；用户地址空间
   的 TLB shootdown 目标集合由 `memspace::MmCpuResidency` 持有。当前实现只在
   switch-in 时保守聚合设置该 mask，允许 over-target，但不保证在 switch-away
@@ -222,6 +251,7 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
 | tick 触发 `task_tick` | 否（通常先设置 pending） |
 | 本 CPU waker 唤醒任务 | 否（设置 pending，安全点抢占） |
 | 远端 waker 唤醒任务 | 否（可通过 IPI 请求远端 pending） |
+| `add_task` 到远端 / 本核 idle | 否（`request_resched`；远端 IPI） |
 | `enable_preempt` 且 `need_resched` | 可能（触发 `preempt_resched`） |
 
 因此 `ktask` 不是“每个时钟中断必切换”模型，而是“tick 驱动 + 安全点执行”的工程化抢占模型。
@@ -258,7 +288,8 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
 
 ### 为何 tick 不直接切换
 
-中断上下文与临界区中直接切换会放大并发复杂度。延迟到 `enable_preempt` 安全点执行可减少重入风险并保持响应性。
+中断处理主体与临界区中直接切换会放大并发复杂度。调度延迟到 `enable_preempt` 安全点；
+IRQ handler 仅在设备完成、active-exception 标记已暂时挂起后提供一个尾部安全点。
 
 ### 为何唤醒路径优先选择当前 CPU
 
@@ -281,11 +312,10 @@ wait/future 唤醒通常发生在释放资源或发送事件的线程上下文�
 
 ## 调度统计
 
-启用 `sched_stat` feature 后，`ktask` 维护每 CPU 计数器，覆盖选核、唤醒、
-本地/远端 resched 请求、tick 抢占、抢占跳过原因和实际 switch 次数。
-watchdog 触发时会调用 `dump_sched_stats()` 输出这些计数。它用于回答“任务是否已
-Ready、是否踢到目标 CPU、是否因为 preempt disabled 或 exception context 被延迟”
-这类整体行为问题；一次性 ktrace 仍用于还原具体事件序列。
+启用 `sched_stat` feature 后，`ktask` 维护每 CPU 基础计数（选核、唤醒、
+本地/远端 resched、tick/抢占跳过、switch）。`/proc/sched_stat` 提供进程上下文
+快照；EEVDF 构建额外输出 `wake_handoff` / `wake_sync_preempt` 等算法计数。
+watchdog 触发时调用 `dump_sched_stats()` 做不分配内存的基础输出。
 
 ## 冗余与过载
 

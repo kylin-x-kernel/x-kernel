@@ -278,6 +278,10 @@ impl CloneRequest {
             thr,
             crate::dispatch_irq_syscall,
         );
+        // Linux copies the creator's CPU affinity into the child. schbench
+        // relies on this: the message thread pins itself to the worker CPU set
+        // before pthread_create, then re-pins itself to the message CPU.
+        new_task.set_cpumask(curr.cpumask());
         new_task.ctx_mut().set_page_table_root(page_table_root);
 
         let pidfd_install = if self.flags.contains(CloneFlags::PIDFD) {

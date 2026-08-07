@@ -56,7 +56,8 @@ config KFEAT_SCHED_STAT
     bool "Scheduler statistics"
     help
       Enable low-overhead per-CPU scheduler counters for diagnostics. The
-      watchdog prints these counters when reporting a soft lockup.
+      counters are exposed through `/proc/sched_stat`; the watchdog also
+      prints them when reporting a soft lockup.
 
 config KFEAT_PMU
     bool "PMU support"

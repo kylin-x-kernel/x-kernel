@@ -53,6 +53,7 @@ resource owners
 | T-04 | current-thread/process helper 在错误上下文调用 | 中 | 复用 `kprocess` 现有约束，并在 syscall 入口保持 task-context 假设 |
 | T-05 | 不同 syscall 被历史目录误导，后续继续堆入错误模块 | 中 | crate-local design 文档固定 `vfs/ipc/time/task` 的 adapter 语义 |
 | T-06 | `setpriority` 通过进程代表线程漏检目标身份 | 高 | per-thread credential 下仍按 process representative 授权 | `PRIO_*` 选择和扫描均落到具体 task，逐 task 比较 caller euid 与 target real/effective UID，并单独检查提高优先级权限 |
+| T-06a | 非特权进程改写任意任务 affinity | 高 | `sched_setaffinity` 对非 current 直接 `set_cpumask` | 解析目标后按 `check_same_owner` 语义比较 caller euid 与 target ruid/euid；root（近似 `CAP_SYS_NICE`）可绕过，否则 `EPERM` |
 | T-07 | 非特权进程修改主机名 | 高 | `sethostname` 直接写 UTS namespace | syscall 边界检查 privileged credential，并限制 nodename 长度与用户缓冲区访问 |
 | T-08 | 非特权进程改变电源状态 | 高 | `reboot` 直接进入平台 power 接口 | 检查 privileged credential、Linux magic 和受支持命令集合 |
 | T-09 | 非特权进程修改墙钟 | 高 | wall-clock setter 直接更新 realtime 时钟关联 | `settimeofday` 与 `clock_settime` 在共享 setter 中检查 privileged credential，并拒绝把墙钟移到 CLOCK_MONOTONIC 之前 |

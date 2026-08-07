@@ -78,7 +78,7 @@ sched_fifo = ["ktask/sched_fifo"]
 sched_rr = ["ktask/sched_rr"]
 sched_cfs = ["ktask/sched_cfs"]
 sched_eevdf = ["ktask/sched_eevdf"]
-sched_stat = ["ktask/sched_stat"]
+sched_stat = ["ktask/sched_stat", "dep:procfs", "procfs/sched_stat"]
 
 # File system
 #

@@ -49,7 +49,7 @@ STRESSNG_FORKHEAVY_PROCS=4 STRESSNG_FORKHEAVY_MAX_PROCS=128 \
 | concurrency soak | [lock-stat.md](lock-stat.md) — kfutex, registry |
 | fork storm | lock_stat — registry, aspace |
 | fio / fs soak | lock_stat — pagecache, ext4; also compare fio metrics |
-| scheduler guest bench | lock_stat optional; focus on bench numbers |
+| scheduler guest bench (schbench / hackbench) | [scheduler/](scheduler/README.md); lock_stat optional |
 
 ## SMP note
 

@@ -219,6 +219,13 @@ pub struct EevdfStats {
     pub preempt_by_deadline: u64,
     pub fallback_no_eligible: u64,
     pub slice_expired: u64,
+    /// Times `pick_next` preferred a one-shot wake buddy over EEVDF order.
+    pub wake_handoff: u64,
+    /// Times a new wake buddy was ignored because an earlier-deadline buddy
+    /// was already nominated.
+    pub wake_handoff_skipped_busy: u64,
+    /// Involuntary probes that sync-preempted for an eligible next buddy.
+    pub wake_sync_preempt: u64,
 }
 
 /// Per-task EEVDF (Earliest Eligible Virtual Deadline First) scheduler.
@@ -229,17 +236,37 @@ pub struct EevdfStats {
 /// tasks) and picks the task with the smallest deadline among those with
 /// `vruntime ≤ V` (eligible / non-negative lag).
 ///
-/// Unlike Linux CFS (where `curr` stays on the runqueue), this implementation
-/// dequeues the running task from the ready queue. [`Self::curr`] tracks that
-/// task so placement (`add_task` / wake `PLACE_LAG`) can still include it in
-/// **V**, matching Linux `avg_vruntime()` / `place_entity()`.
+/// The running task is dequeued from the ready tree and tracked in
+/// [`Self::curr`], matching Linux `cfs_rq->curr`. Placement (`PLACE_LAG`) and
+/// involuntary picks include `curr` in **V** / deadline comparison the same way
+/// Linux `avg_vruntime()` / `pick_eevdf()` do: **do not** put `curr` back onto
+/// the ready queue before deciding whether a wakee should preempt it.
 ///
 /// Sleep paths should call [`BaseScheduler::account_sleep`] so lag is saved;
 /// the matching wake then goes through [`BaseScheduler::put_prev_task`], which
-/// applies Linux-style `PLACE_LAG` placement before requeue.
+/// applies Linux-style `PLACE_LAG` with a **full request** deadline
+/// (`vd = ve + r/w`), not a synthetic one-tick hint.
 ///
 /// If no task is eligible, the one with the smallest deadline is chosen as
 /// a fallback to guarantee progress.
+///
+/// ## Wake latency
+///
+/// 1. **Eligibility** — wake placement clamps `vruntime` to at most system **V**
+///    so a wakee is not ignored while eligible peers run.
+/// 2. **Pick vs `curr`** — involuntary preemption probes with `curr` off-tree
+///    (`peer_preempts_curr`); only an earlier-deadline eligible wakee forces
+///    `put_prev`+`pick`, unless a sync wake armed an eligible next buddy.
+/// 3. **Next buddy** — like Linux `NEXT_BUDDY` / `set_preempt_buddy`, a wake
+///    onto a busy rq nominates the wakee as a one-shot pick hint when the waker
+///    blocks. Existing buddies with an earlier deadline are kept so concurrent
+///    wakes cannot leapfrog. Buddy pick still requires eligibility.
+/// 4. **WF_SYNC** — when the waker marks a sync wake (e.g. futex), an eligible
+///    next buddy may preempt `curr` even with a later deadline, so the wakee
+///    need not wait for the waker to block. Hint only: ineligible buddies never
+///    force preemption.
+/// 5. **Tick** — [`Self::task_tick`] reschedules on deadline expiry only when
+///    another eligible task is waiting, so a lone task is not thrashed every tick.
 ///
 /// `MAX_TIME_SLICE` is the default request length in timer ticks.
 pub struct EevdfScheduler<T, const MAX_TIME_SLICE: usize> {
@@ -258,6 +285,16 @@ pub struct EevdfScheduler<T, const MAX_TIME_SLICE: usize> {
     /// Running task that has been dequeued from the ready queue (Linux
     /// `cfs_rq->curr`). Included in placement **V** via [`Self::system_vruntime`].
     curr: Option<Arc<EevdfEntity<T, MAX_TIME_SLICE>>>,
+    /// One-shot preferred wakee for the next pick (same run queue only).
+    next_buddy: Option<Arc<EevdfEntity<T, MAX_TIME_SLICE>>>,
+    /// Armed by a `WF_SYNC` wake: eligible [`Self::next_buddy`] may preempt
+    /// `curr` even when its deadline is later (waker expects to sleep soon).
+    sync_preempt_pending: bool,
+    /// One-shot: after a sync preempt, the next pick may honour an eligible
+    /// buddy even when another ready task has an earlier deadline (the
+    /// just-preempted `curr` that was put back). Cleared by
+    /// [`Self::try_pick_wake_buddy`].
+    prefer_sync_buddy: bool,
     /// Monotonically increasing counter used as tie-breaker in queue keys.
     /// `u64` ensures wrap-around only after ~1.8×10¹⁹ scheduling events.
     id_pool: u64,
@@ -277,6 +314,9 @@ impl<T, const S: usize> EevdfScheduler<T, S> {
             total_weighted_vrt: 0,
             total_weight: 0,
             curr: None,
+            next_buddy: None,
+            sync_preempt_pending: false,
+            prefer_sync_buddy: false,
             id_pool: 0,
             stats_enabled: false,
             stats: EevdfStats {
@@ -284,6 +324,9 @@ impl<T, const S: usize> EevdfScheduler<T, S> {
                 preempt_by_deadline: 0,
                 fallback_no_eligible: 0,
                 slice_expired: 0,
+                wake_handoff: 0,
+                wake_handoff_skipped_busy: 0,
+                wake_sync_preempt: 0,
             },
             #[cfg(any(test, unittest))]
             debug_force_no_eligible: false,
@@ -355,6 +398,74 @@ impl<T, const S: usize> EevdfScheduler<T, S> {
         Some(task)
     }
 
+    fn clear_next_buddy_if(&mut self, task: &Arc<EevdfEntity<T, S>>) {
+        if self
+            .next_buddy
+            .as_ref()
+            .is_some_and(|buddy| Arc::ptr_eq(buddy, task))
+        {
+            self.next_buddy = None;
+        }
+    }
+
+    /// Linux `set_preempt_buddy`: nominate `wakee` for the next pick, keeping
+    /// an existing buddy that still has an earlier deadline.
+    fn nominate_wake_buddy(&mut self, wakee: Arc<EevdfEntity<T, S>>) {
+        // Only meaningful while a running task can hand off via block/yield.
+        if self.curr.is_none() {
+            return;
+        }
+        if let Some(existing) = self.next_buddy.as_ref()
+            && Self::entity_before(existing, &wakee)
+        {
+            Self::stat_inc(
+                &mut self.stats.wake_handoff_skipped_busy,
+                self.stats_enabled,
+            );
+            return;
+        }
+        self.next_buddy = Some(wakee);
+    }
+
+    /// Prefer a one-shot wake buddy if it is still queued and eligible.
+    ///
+    /// Matches Linux `pick_eevdf` NEXT_BUDDY intent: the buddy must not sort
+    /// *after* the earliest eligible ready entity (`entity_before(best, buddy)`
+    /// → ignore hint). The hint is always consumed (`take`), so a discarded
+    /// buddy is one-shot. [`Self::prefer_sync_buddy`] allows a later eligible
+    /// buddy after `WF_SYNC` forced preemption (otherwise the just-requeued
+    /// `curr` would win on deadline and undo the sync handoff).
+    fn try_pick_wake_buddy(&mut self) -> Option<Arc<EevdfEntity<T, S>>> {
+        let force_buddy = self.prefer_sync_buddy;
+        self.prefer_sync_buddy = false;
+        let buddy = self.next_buddy.take()?;
+
+        let v = self.avg_vruntime();
+        if buddy.vruntime() > v {
+            return None;
+        }
+
+        if !force_buddy {
+            let best_key = self.earliest_eligible_key(v)?;
+            let best = self.ready_queue.get(&best_key)?;
+            // Buddy loses to an earlier-deadline eligible peer: drop hint.
+            // When buddy *is* best, neither sorts before the other → honour it.
+            if Self::entity_before(best, &buddy) {
+                return None;
+            }
+        }
+
+        let key = (buddy.deadline(), buddy.id());
+        let picked = self.dequeue_by_key(key)?;
+        if Arc::ptr_eq(&picked, &buddy) {
+            Some(picked)
+        } else {
+            // Defensive: key matched a different task; restore and ignore buddy.
+            self.enqueue(picked);
+            None
+        }
+    }
+
     // ---- virtual time ----
 
     /// Ready-queue-only weighted average **V** (excludes [`Self::curr`]).
@@ -412,13 +523,12 @@ impl<T, const S: usize> EevdfScheduler<T, S> {
     /// Linux `PLACE_LAG`: place a waking task so its virtual lag is preserved
     /// after it joins the weighted average.
     ///
-    /// Uses [`Self::system_vruntime`] / [`Self::system_weight`] so **V** and
-    /// **W** include the dequeued running task. Inflates lag by `(W + w) / W`
-    /// before `vruntime = V - lag`, matching `kernel/sched/fair.c`
-    /// `place_entity()`.
-    fn place_waking_vruntime(&self, task: &EevdfEntity<T, S>) -> isize {
-        let avg = self.system_vruntime();
-        let load = self.system_weight();
+    /// `avg` / `load` are the caller's precomputed [`Self::system_vruntime`] /
+    /// [`Self::system_weight`] so wake placement can reuse them for the
+    /// eligibility / `min_vruntime` clamps without a second weighted average.
+    /// Inflates lag by `(W + w) / W` before `vruntime = V - lag`, matching
+    /// `kernel/sched/fair.c` `place_entity()`.
+    fn place_waking_vruntime(&self, task: &EevdfEntity<T, S>, avg: isize, load: i128) -> isize {
         if load <= 0 {
             return self.min_vruntime;
         }
@@ -445,6 +555,74 @@ impl<T, const S: usize> EevdfScheduler<T, S> {
             .range(..=(v, u64::MAX))
             .map(|&(_, id)| (self.id_to_deadline[&id], id))
             .min()
+    }
+
+    /// Linux `entity_before`: earlier virtual deadline wins (id tie-break).
+    #[inline]
+    fn entity_before(a: &EevdfEntity<T, S>, b: &EevdfEntity<T, S>) -> bool {
+        let ad = a.deadline();
+        let bd = b.deadline();
+        ad < bd || (ad == bd && a.id() < b.id())
+    }
+
+    /// Bind [`Self::curr`] to the task that is actually running on this CPU.
+    ///
+    /// Used before involuntary preemption checks so a desynced/stale `curr`
+    /// cannot skip requeueing the real running task (which would drop the
+    /// last `Arc` in `switch_to`).
+    pub fn sync_running_curr(&mut self, curr: Arc<EevdfEntity<T, S>>) {
+        self.curr = Some(curr);
+    }
+
+    /// Arm sync preemption after a `WF_SYNC` wake that nominated a next buddy.
+    ///
+    /// The next [`Self::peer_preempts_curr`] may then force a switch for an
+    /// eligible buddy even when its deadline is later than `curr`.
+    pub fn mark_sync_wake_preempt(&mut self) {
+        if self.next_buddy.is_some() {
+            self.sync_preempt_pending = true;
+        }
+    }
+
+    /// Linux-style wakeup/tick preemption probe: would an eligible ready peer
+    /// beat [`Self::curr`] on deadline **without** putting `curr` back first?
+    ///
+    /// Callers that get `true` should `put_prev` then `pick_next` (classic
+    /// path). Callers that get `false` must leave `curr` alone — requeueing it
+    /// before pick is what created the short-deadline leapfrog tails.
+    ///
+    /// A pending sync wake (eligible next buddy) also returns `true`.
+    pub fn peer_preempts_curr(&mut self) -> bool {
+        if self.curr.is_none() {
+            self.sync_preempt_pending = false;
+            return !self.ready_queue.is_empty();
+        }
+        if self.ready_queue.is_empty() {
+            self.sync_preempt_pending = false;
+            return false;
+        }
+
+        let v = self.system_vruntime();
+        if self.sync_preempt_pending {
+            self.sync_preempt_pending = false;
+            if let Some(buddy) = self.next_buddy.as_ref()
+                && buddy.vruntime() <= v
+            {
+                // Next pick must still prefer this buddy after `put_prev(curr)`.
+                self.prefer_sync_buddy = true;
+                Self::stat_inc(&mut self.stats.wake_sync_preempt, self.stats_enabled);
+                return true;
+            }
+        }
+
+        let peer_key = match self.earliest_eligible_key(v) {
+            Some(k) => k,
+            None => *self.ready_queue.keys().next().unwrap(),
+        };
+        let peer = self.ready_queue.get(&peer_key).unwrap();
+        let curr = self.curr.as_ref().unwrap();
+        let curr_eligible = curr.vruntime() <= v;
+        !(curr_eligible && Self::entity_before(curr, peer))
     }
 
     fn requeue(&mut self, task: Arc<EevdfEntity<T, S>>) {
@@ -478,8 +656,10 @@ impl<T, const S: usize> BaseScheduler for EevdfScheduler<T, S> {
     }
 
     fn remove_task(&mut self, task: &Self::SchedItem) -> Option<Self::SchedItem> {
-        // Snapshot lag against the average that still includes this task.
-        let v = self.avg_vruntime();
+        self.clear_next_buddy_if(task);
+        // Snapshot lag against the average that still includes this task and
+        // the dequeued running task (`curr`), matching Linux avg_vruntime().
+        let v = self.system_vruntime();
         let lag = v - task.vruntime();
         let removed = self.dequeue_by_key((task.deadline(), task.id()))?;
         removed.set_vlag(Self::clamp_vlag(
@@ -492,8 +672,9 @@ impl<T, const S: usize> BaseScheduler for EevdfScheduler<T, S> {
     }
 
     fn account_sleep(&mut self, task: &Self::SchedItem) {
-        // `task` is the running task leaving without requeue (block). Include it
-        // in V so lag matches Linux `update_entity_lag` for curr.
+        // `task` is the running task leaving without requeue (block / exit /
+        // migrate-away). Include it in V so lag matches Linux
+        // `update_entity_lag` for curr.
         let v = self.avg_vruntime_with(task);
         let lag = v - task.vruntime();
         task.set_vlag(Self::clamp_vlag(lag, task.weight(), task.request_ticks()));
@@ -504,16 +685,29 @@ impl<T, const S: usize> BaseScheduler for EevdfScheduler<T, S> {
     }
 
     fn pick_next_task(&mut self) -> Option<Self::SchedItem> {
+        // Involuntary preemption must `put_prev` in ktask *after* a
+        // [`Self::peer_preempts_curr`] probe, so `curr` is clear here.
+        // A leftover `curr` would mean a desynced exit/migrate path.
+        if self.curr.is_some() {
+            self.curr = None;
+        }
+
         if self.ready_queue.is_empty() {
+            self.next_buddy = None;
+            self.prefer_sync_buddy = false;
             return None;
         }
 
-        // After put_prev / account_sleep, `curr` is clear; eligible uses ready-only V.
+        if let Some(picked) = self.try_pick_wake_buddy() {
+            Self::stat_inc(&mut self.stats.picks_total, self.stats_enabled);
+            Self::stat_inc(&mut self.stats.wake_handoff, self.stats_enabled);
+            self.curr = Some(picked.clone());
+            return Some(picked);
+        }
+
         let v = self.avg_vruntime();
         let mut used_fallback = false;
-
         let first_key = *self.ready_queue.keys().next().unwrap();
-
         let eligible_key = self.earliest_eligible_key(v);
         #[cfg(any(test, unittest))]
         let eligible_key = if self.debug_force_no_eligible {
@@ -544,12 +738,22 @@ impl<T, const S: usize> BaseScheduler for EevdfScheduler<T, S> {
         if prev.needs_place() {
             // Wake / post-dequeue re-entry: place by saved vlag, start a new request.
             // Do not clear `curr` — the running task on this rq is still someone else.
-            let vr = self.place_waking_vruntime(&prev);
+            let avg = self.system_vruntime();
+            let load = self.system_weight();
+            let placed = self.place_waking_vruntime(&prev, avg, load);
+            // Cap at system V (eligible), then floor at `min_vruntime` last so a
+            // temporarily low V cannot punch through the ready-queue watermark.
+            let vr = placed.min(avg).max(self.min_vruntime);
             prev.set_vruntime(vr);
+            // Linux `place_entity`: vd = ve + r/w with a full request slice.
+            // Preempt decisions come from pick-vs-curr, not a fake short deadline.
             prev.reset_slice();
             prev.set_deadline(vr + deadline_delta(prev.request_ticks(), prev.weight()));
             prev.set_needs_place(false);
+            // Clone before requeue: both Arcs share the post-requeue id.
+            let wakee = prev.clone();
             self.requeue(prev);
+            self.nominate_wake_buddy(wakee);
             return;
         }
 
@@ -561,17 +765,9 @@ impl<T, const S: usize> BaseScheduler for EevdfScheduler<T, S> {
         prev.set_vruntime(vr);
 
         if preempt && prev.slice() > 0 {
-            // Task was preempted before its slice expired.
             if prev.deadline() <= vr {
-                // Deadline passed while the task was off-CPU (e.g. min_vruntime
-                // advanced).  Assign a new deadline proportional to the
-                // *remaining* slice, not the full request — using the full
-                // request would over-reward a task that already consumed part
-                // of its request.
                 prev.set_deadline(vr + deadline_delta(prev.slice() as usize, prev.weight()));
             }
-            // else: deadline still valid, preserve it so the task keeps its
-            // place in the deadline-ordered queue.
         } else {
             prev.reset_slice();
             prev.set_deadline(vr + deadline_delta(prev.request_ticks(), prev.weight()));
@@ -592,9 +788,12 @@ impl<T, const S: usize> BaseScheduler for EevdfScheduler<T, S> {
 
         // Same rule as pick_next: preempt for the earliest eligible deadline,
         // not only when the global min-deadline task happens to be eligible.
+        // Also treat an expired request (`vruntime >= deadline`) as preemptable
+        // when a peer is waiting — but never alone, or every short-deadline
+        // wakee pays an extra resched after one tick and throughput collapses.
         let v = self.avg_vruntime_with(current);
         if let Some((dl, _)) = self.earliest_eligible_key(v)
-            && dl < current.deadline()
+            && (dl < current.deadline() || current.vruntime() >= current.deadline())
         {
             Self::stat_inc(&mut self.stats.preempt_by_deadline, self.stats_enabled);
             return true;

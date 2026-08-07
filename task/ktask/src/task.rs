@@ -7,8 +7,6 @@
 use alloc::{boxed::Box, string::String, sync::Arc};
 #[cfg(feature = "snapshot")]
 use core::sync::atomic::AtomicU64;
-#[cfg(feature = "preempt")]
-use core::sync::atomic::AtomicUsize;
 use core::{
     alloc::Layout,
     any::Any,
@@ -18,7 +16,7 @@ use core::{
     mem::ManuallyDrop,
     ops::Deref,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering},
     task::Poll,
 };
 
@@ -234,6 +232,11 @@ pub struct TaskInner {
     need_resched: AtomicBool,
     #[cfg(feature = "preempt")]
     preempt_disable_count: AtomicUsize,
+
+    /// Nesting depth for Linux-style `WF_SYNC` wake scopes ([`crate::with_wake_sync`]).
+    /// When non-zero, wakees may sync-preempt an eligible next-buddy on the
+    /// target run queue (waker expects to sleep soon).
+    wake_sync_depth: AtomicUsize,
 
     interrupted: AtomicBool,
     interrupt_waker: PollSet,
@@ -628,6 +631,7 @@ impl TaskInner {
             need_resched: AtomicBool::new(false),
             #[cfg(feature = "preempt")]
             preempt_disable_count: AtomicUsize::new(0),
+            wake_sync_depth: AtomicUsize::new(0),
             interrupted: AtomicBool::new(false),
             interrupt_waker: PollSet::new(),
             exit_code: AtomicI32::new(0),
@@ -726,6 +730,25 @@ impl TaskInner {
     #[cfg(feature = "preempt")]
     pub(crate) fn set_preempt_pending(&self, pending: bool) {
         self.need_resched.store(pending, Ordering::Release)
+    }
+
+    /// Enter a nested Linux-style `WF_SYNC` wake scope.
+    #[inline]
+    pub(crate) fn begin_wake_sync(&self) {
+        self.wake_sync_depth.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Leave a nested `WF_SYNC` wake scope.
+    #[inline]
+    pub(crate) fn end_wake_sync(&self) {
+        let prev = self.wake_sync_depth.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(prev > 0, "wake_sync_depth underflow");
+    }
+
+    /// Whether the current task is inside [`crate::with_wake_sync`].
+    #[inline]
+    pub(crate) fn is_wake_sync(&self) -> bool {
+        self.wake_sync_depth.load(Ordering::Relaxed) > 0
     }
 
     #[inline]

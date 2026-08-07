@@ -10,7 +10,6 @@ use alloc::{
 };
 
 use fs_context::copy_init_fs_struct;
-use kcpu_id_map::KCpuMaskExt;
 use kcred::initial_cred;
 use kexec::{ExecRequest, load_user_app_request};
 use khal::uspace::UserContext;
@@ -25,9 +24,9 @@ use crate::runtime::run_user_thread_loop;
 /// This allocates the PID 1 root handle (it must be the first root PID
 /// allocation in the system, which is guaranteed by running this from the
 /// PID-less late-init bootstrap thread), builds a complete process and thread
-/// runtime around it, and activates a new user task pinned to the current CPU.
-/// The task enters user space on its own kernel stack through the normal
-/// scheduler switch-in path, the same one fork uses.
+/// runtime around it, and activates a new user task with the default
+/// all-online-CPU affinity. The task enters user space on its own kernel stack
+/// through the normal scheduler switch-in path, the same one fork uses.
 ///
 /// Unlike the old in-place "transform current into init" model, this does **not**
 /// touch the caller: it follows the FreeBSD-style "the bootstrap thread forks
@@ -145,10 +144,10 @@ pub fn spawn_init_process(
     // Seed the saved context with init's page-table root; the scheduler writes
     // it to the hardware register on first switch-in, same as fork does.
     task.ctx_mut().set_page_table_root(page_table_root);
-    // Pin to the current (boot) CPU, matching the rest of the boot tasks; this
-    // keeps the spawn independent of whether secondary run queues exist yet.
-    let boot_cpu = khal::percpu::this_cpu_id();
-    task.set_cpumask(ktask::KCpuMask::one_shot_logical(boot_cpu));
+    // Keep the default all-online-CPU affinity from `new_user`. Clone inherits
+    // the creator's mask, so pinning PID 1 to the boot CPU would freeze every
+    // later user process (and `get_nprocs()` via sched_getaffinity) onto one
+    // CPU. Secondary run queues are already registered when init is spawned.
 
     // Publish and activate through the standard fork path (caller-agnostic).
     publish_user_task(task)

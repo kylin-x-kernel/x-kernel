@@ -119,7 +119,8 @@ ksched algorithms / karch context switch / allocator
 | T-04 | `need_resched` 在错误时机触发重入调度 | 中 | 临界区内或异常/IRQ trapframe guard 未释放时直接抢占切换 | 仅设置 pending，`enable_preempt` 安全点检查，并在 active exception context 内延迟实际切换 |
 | T-05 | `task_registry` 指针槽位损坏 | 高 | 非法写入或重复释放 | CAS 协议 + 0/ptr 双态约束 + 弱引用升级校验 |
 | T-06 | snapshot 竞态读取错误 trap frame | 中 | 并发 snapshot session | begin/finish 会话串行 + per-CPU 槽位隔离 |
-| T-07 | affinity 迁移竞态导致任务丢失 | 中 | 迁移中状态被并发修改 | `migrate_current` 受 run queue 临界区保护 |
+| T-07 | affinity 迁移竞态导致任务丢失 | 中 | 迁移中状态被并发修改 | `migrate_current` 受 run queue 临界区保护；`enforce_affinity_placement` 对 ready 持 RQ 锁 `remove_task`，对 running 等远端 preempt 完成 |
+| T-07a | `setaffinity` 静默成功但任务仍在非法 CPU | 高 | 非 current 只写 mask | 成功路径要求 placement 合法，否则 `false`/`EBUSY`；`preempt_resched`/`yield` 强制 affinity migrate |
 | T-08 | tick 回调执行耗时过长拖慢调度 | 中 | callback 滥用 | API 文档约束“回调应短小”；系统仍可抢占恢复 |
 | T-09 | 远端唤醒后未及时调度 | 中 | 任务入远端 run queue 但远端 CPU 未到抢占安全点 | `ipi + preempt` 下请求远端 `need_resched`；无 IPI 时仍依赖 tick/安全点 |
 | T-10 | 绝对 timer deadline 在整数转换时截断 | 高 | `TimeSpan::as_nanos()` 的 `u128` 结果直接窄化为 `u64` | HAL 接口保持 `MonotonicInstant`；仅 timer backend 在寄存器边界执行钳制转换 |
@@ -129,10 +130,11 @@ ksched algorithms / karch context switch / allocator
 | 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
 |------|----------|----------|----------|----------|--------|----------|
 | F-01 | `RUN_QUEUES` 未初始化访问 | 初始化时序错误 | panic/UB | 调度不可用 | 1 | 在 `init/init_secondary` 后写入，调用路径约束 |
-| F-02 | `cpumask` 为空 | 调用方设置非法 affinity | 任务无可运行 CPU | API 失败或 panic | 2 | `set_current_affinity` 判空返回 false |
+| F-02 | `cpumask` 为空 | 调用方设置非法 affinity | 任务无可运行 CPU | API 失败或 panic | 2 | `set_task_affinity` 判空返回 false |
+| F-02a | 远端 running affinity 迁不走 | 无 preempt/IPI 或安全点过晚 | 调用方见失败 | 调用方可重试；mask 可能已更新 | 3 | `enforce_affinity_placement` 返回 false → syscall `EBUSY` |
 | F-03 | 长时间持有 NoPreempt 临界区 | 代码路径过重 | 抢占延迟增大 | 延迟抖动/实时性下降 | 3 | 缩短临界区，避免重计算 |
 | F-04 | gc task 回收滞后 | 外部长期持有 `Arc` | `EXITED_TASKS` 堆积 | 内存增长 | 2 | `Arc::try_unwrap` 重试，join 语义释放 |
-| F-05 | 远端 resched 请求丢失 | IPI 不可用或远端未及时到达安全点 | 被唤醒任务调度延迟 | 吞吐/延迟波动 | 3 | `ipi + preempt` 下发送远端 pending 请求；无 IPI 配置依赖 tick |
+| F-05 | 远端 resched 请求丢失/延迟消费 | IPI 不可用或 EL1 IRQ 退出前没有安全点 | 被唤醒任务调度延迟 | 吞吐/延迟波动 | 3 | `ipi + preempt` 下发送 pending，并在 IRQ 完成后挂起 exception 标记以执行尾部补查；无 IPI 配置依赖 tick |
 | F-06 | 算法 `task_tick` 行为异常 | 调度器实现 bug | 抢占策略失真 | 饥饿/抖动 | 2 | `ksched` 单测覆盖 + trace hook 诊断 |
 | F-07 | soft timer deadline 截断为已过期硬件时间 | deadline 超过硬件纳秒表示范围时发生截断 | timer 被立即重复触发 | IRQ 风暴、任务和网络路径停顿 | 1 | typed deadline 贯穿 HAL；backend 使用 checked conversion，超范围钳制到最远可表示期限 |
 
@@ -149,13 +151,19 @@ ksched algorithms / karch context switch / allocator
 
 - 任务名、任务 ID、CPU ID（日志与 tracing）
 - 回溯信息（snapshot/watchdog 启用时）
+- 每 CPU 聚合调度计数（`sched_stat` 启用时通过 `/proc/sched_stat` 暴露，不含任务身份）
 
 这些属于内核诊断输出，受日志通道与构建 feature 控制。
 
 ## 已知限制
 
 1. 当前无全局主动负载均衡线程；跨核主要依赖 affinity 与入队选核。
-2. `select_run_queue` 采用简单轮询，不基于实时队列负载。
+   `add_task` 对远端/本核 idle 目标会 `request_resched`，避免任务已入队而目标核停在 WFI。
+   EEVDF：唤醒 PLACE_LAG + 完整 request deadline；非自愿抢占先 peer_preempts_curr
+   再决定是否 put_prev；busy-rq 唤醒可提名 NEXT_BUDDY；`with_wake_sync`（futex）
+   可对 eligible buddy sync-preempt（仍要求 eligibility，不绕过 EEVDF）。
+2. `select_run_queue` 采用简单轮询；`select_wake_run_queue` 始终粘 home（无 idle
+   溢出）。
 3. 远端唤醒的抢占请求依赖 `ipi + preempt` feature；未启用时仍依赖 tick 或其它安全点推进。
 4. `unsafe` 边界仍较多，需持续收敛到更小封装点并补齐 `SAFETY` 说明。
 

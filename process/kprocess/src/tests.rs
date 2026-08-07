@@ -1406,6 +1406,66 @@ fn test_prepare_thread_clone_defers_tid_visibility_until_publication() {
     process_publication().cleanup();
 }
 
+/// `sched_setaffinity` resolves by tid first, then falls back to tgid/leader.
+/// A non-leader tid must not be mistaken for a process id (illegal tgid).
+#[def_test(user, serial)]
+fn test_scheduler_resolves_non_leader_tid_not_as_tgid() {
+    let process = ensure_init().fork(743);
+    let leader_task = publish_test_thread(&process, process.pid());
+    let prepared = leader_task
+        .as_thread()
+        .prepare_thread_clone()
+        .expect("sibling tid allocation");
+    let sibling_tid = prepared.tid();
+    assert_ne!(
+        sibling_tid,
+        process.pid(),
+        "sibling tid must differ from the process tgid/leader"
+    );
+
+    let (cloned, task_number) = prepared.into_parts();
+    let sibling = prepare_user_task(TaskInner::new_user(
+        || {},
+        String::from("affinity-sibling"),
+        task_number,
+        cloned,
+    ))
+    .publish();
+    let sibling_task = sibling.task().clone();
+
+    let by_tid = scheduler::task_by_tid(sibling_tid).expect("published sibling tid");
+    assert!(
+        Arc::ptr_eq(&by_tid, &sibling_task),
+        "tid lookup must return the sibling task, not the leader"
+    );
+    assert_eq!(by_tid.as_thread().tid(), sibling_tid);
+
+    // Fallback path used when tid lookup fails: this number is not a live tgid.
+    match scheduler::target_task(sibling_tid as i32) {
+        Err(kerrno::KError::NoSuchProcess) => {}
+        Ok(_) => panic!("non-leader tid must not resolve as a process/tgid"),
+        Err(other) => panic!("unexpected errno for illegal tgid: {other:?}"),
+    }
+
+    // tgid fallback returns a published thread of that process (any
+    // representative), not a foreign task keyed by the sibling tid.
+    let by_tgid = scheduler::target_task(process.pid() as i32).expect("live tgid");
+    assert_eq!(by_tgid.as_thread().pid(), process.pid());
+    assert!(
+        Arc::ptr_eq(&by_tgid, &leader_task) || Arc::ptr_eq(&by_tgid, &sibling_task),
+        "tgid lookup must stay inside the process thread group"
+    );
+
+    let _ = process.exit_thread(sibling_tid, 0);
+    drop(sibling);
+    process.exit_thread(process.pid(), 0);
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    process.free();
+    process_publication().unpublish_process(process.pid());
+    drop(leader_task);
+    process_publication().cleanup();
+}
+
 #[def_test(user, serial)]
 fn test_process_owns_tid_requires_published_task_binding() {
     let (process, _prepared) = build_prepared_test_user_task();

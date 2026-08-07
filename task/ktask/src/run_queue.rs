@@ -4,9 +4,13 @@
 
 //! Per-CPU run queue implementation and scheduling helpers.
 
+#[cfg(feature = "sched_stat")]
+use alloc::string::String;
 #[cfg(feature = "smp")]
 use alloc::sync::Weak;
 use alloc::{collections::VecDeque, sync::Arc};
+#[cfg(feature = "sched_stat")]
+use core::fmt::Write;
 #[cfg(feature = "sched_stat")]
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::{
@@ -100,8 +104,7 @@ fn sched_stat_inc(counter: &AtomicU64) {
 
 #[cfg(feature = "sched_stat")]
 pub(crate) fn dump_sched_stats() {
-    // Use atomic console output here because this diagnostic is emitted from
-    // watchdog paths where taking the regular logger locks can recurse or hang.
+    // Keep the watchdog path allocation-free and independent of logger locks.
     khal::kprint_atomic!("[sched_stat] begin\n");
     for (cpu, stats) in SCHED_CPU_STATS.iter().enumerate() {
         khal::kprint_atomic!(
@@ -136,8 +139,83 @@ pub(crate) fn dump_sched_stats() {
     khal::kprint_atomic!("[sched_stat] end\n");
 }
 
+#[cfg(feature = "sched_stat")]
+pub(crate) fn sched_stats_text() -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "[sched_stat] begin");
+    for (cpu, stats) in SCHED_CPU_STATS.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "[sched_stat] cpu={} select_task={} select_wakeup={} wakeup_last_cpu={} \
+             wakeup_fallback={} add_task={} unblock={} local_resched={} remote_resched={} \
+             remote_resched_fail={} tick_preempt={} preempt_check={} preempt_need={} \
+             preempt_skip_disabled={} preempt_skip_exception={} preempt_resched={} \
+             preempt_denied={} resched={} pick_idle={} switch={} switch_same={}",
+            cpu,
+            stats.select_task.load(Ordering::Relaxed),
+            stats.select_wakeup.load(Ordering::Relaxed),
+            stats.wakeup_last_cpu.load(Ordering::Relaxed),
+            stats.wakeup_fallback.load(Ordering::Relaxed),
+            stats.add_task.load(Ordering::Relaxed),
+            stats.unblock_task.load(Ordering::Relaxed),
+            stats.local_resched.load(Ordering::Relaxed),
+            stats.remote_resched.load(Ordering::Relaxed),
+            stats.remote_resched_fail.load(Ordering::Relaxed),
+            stats.tick_preempt.load(Ordering::Relaxed),
+            stats.preempt_check.load(Ordering::Relaxed),
+            stats.preempt_need.load(Ordering::Relaxed),
+            stats.preempt_skip_disabled.load(Ordering::Relaxed),
+            stats.preempt_skip_exception.load(Ordering::Relaxed),
+            stats.preempt_resched.load(Ordering::Relaxed),
+            stats.preempt_denied.load(Ordering::Relaxed),
+            stats.resched.load(Ordering::Relaxed),
+            stats.pick_idle.load(Ordering::Relaxed),
+            stats.switch.load(Ordering::Relaxed),
+            stats.switch_same.load(Ordering::Relaxed),
+        );
+    }
+
+    #[cfg(all(feature = "sched_eevdf", feature = "smp"))]
+    {
+        // Per-CPU guard + skip unregistered RQs: `/proc/sched_stat` must not
+        // hold IRQ/preempt off across all CPUs, nor panic on a present-but-not-
+        // brought-up CPU.
+        for cpu in 0..kcpu_id_map::nr_cpus() {
+            let stats = {
+                let _guard = kspin::NoPreemptIrqSave::new();
+                let Some(rq) = RUN_QUEUES.try_get(cpu) else {
+                    continue;
+                };
+                rq.scheduler.lock().stats()
+            };
+            let _ = writeln!(
+                out,
+                "[eevdf_stat] cpu={} picks={} deadline_preempt={} fallback_no_eligible={} \
+                 slice_expired={} wake_handoff={} wake_handoff_skipped_busy={} \
+                 wake_sync_preempt={}",
+                cpu,
+                stats.picks_total,
+                stats.preempt_by_deadline,
+                stats.fallback_no_eligible,
+                stats.slice_expired,
+                stats.wake_handoff,
+                stats.wake_handoff_skipped_busy,
+                stats.wake_sync_preempt,
+            );
+        }
+    }
+
+    let _ = writeln!(out, "[sched_stat] end");
+    out
+}
+
 #[cfg(not(feature = "sched_stat"))]
 pub(crate) fn dump_sched_stats() {}
+
+#[cfg(not(feature = "sched_stat"))]
+pub(crate) fn sched_stats_text() -> alloc::string::String {
+    "scheduler statistics disabled\n".into()
+}
 
 #[cfg(feature = "sched_stat")]
 #[inline]
@@ -229,9 +307,14 @@ impl RunQueueRegistry {
 
     #[cfg(feature = "smp")]
     fn get(&self, index: usize) -> &'static mut RunQueue {
-        let run_queue = *self.0[index]
-            .get()
-            .expect("run queue must be registered before cross-CPU lookup");
+        self.try_get(index)
+            .expect("run queue must be registered before cross-CPU lookup")
+    }
+
+    /// Returns the run queue for `index` if that CPU has finished scheduler bring-up.
+    #[cfg(feature = "smp")]
+    fn try_get(&self, index: usize) -> Option<&'static mut RunQueue> {
+        let run_queue = *self.0.get(index)?.get()?;
         // SAFETY:
         // - each slot is initialized exactly once during per-CPU scheduler
         //   bring-up before remote scheduling can reference it;
@@ -239,7 +322,7 @@ impl RunQueueRegistry {
         //   is the entire kernel run;
         // - callers use the returned reference under the scheduler's existing
         //   CPU ownership and IRQ/preemption exclusion rules.
-        unsafe { &mut *(run_queue as *mut RunQueue) }
+        Some(unsafe { &mut *(run_queue as *mut RunQueue) })
     }
 }
 
@@ -418,11 +501,28 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'s
     }
 }
 
+/// Sticky-home wake placement: `(run_queue_index, used_home)`.
+///
+/// Keeps the task's owner CPU when still allowed by `cpumask`; otherwise falls
+/// back to ordinary affinity RR. Exposed to unittest so the branch is covered
+/// without depending on `/proc/sched_stat` counter side effects alone.
+#[cfg(feature = "smp")]
+#[inline]
+pub(crate) fn wake_affinity_select(task: &KtaskRef) -> (usize, bool) {
+    let cpumask = task.cpumask();
+    let home = task.cpu_id();
+    if cpumask.get(home.as_usize()) {
+        (home.as_usize(), true)
+    } else {
+        (select_run_queue_index(&cpumask), false)
+    }
+}
+
 /// Selects a run queue for a task that is becoming runnable from a wakeup.
 ///
-/// Prefers the task's owner CPU (`task.cpu_id()`, retained while blocked) when
-/// it is still allowed by the affinity mask; otherwise falls back to
-/// [`select_run_queue`] load-balancing selection.
+/// Sticky home wake affinity (schbench ping-pong). Any "home busy → idle"
+/// overflow has repeatedly collapsed RPS (~450 → ~325); keep home unless the
+/// task's cpumask no longer contains it.
 #[inline]
 pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'static, G> {
     let irq_state = G::acquire();
@@ -437,26 +537,18 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueR
     }
     #[cfg(feature = "smp")]
     {
-        // Prefer the CPU where the task blocked; fall back to RR if affinity changed.
-        let last_cpu = task.cpu_id();
-        let index = if task.cpumask().get(last_cpu.as_usize()) {
-            #[cfg(feature = "sched_stat")]
-            {
-                let stats = sched_stat_cpu(last_cpu);
-                sched_stat_inc(&stats.select_wakeup);
+        let (index, sticky_home) = wake_affinity_select(task);
+        #[cfg(feature = "sched_stat")]
+        {
+            let stats = sched_stat_cpu(LogicalCpuId::new(index));
+            sched_stat_inc(&stats.select_wakeup);
+            if sticky_home {
                 sched_stat_inc(&stats.wakeup_last_cpu);
-            }
-            last_cpu.as_usize()
-        } else {
-            let index = select_run_queue_index(&task.cpumask());
-            #[cfg(feature = "sched_stat")]
-            {
-                let stats = sched_stat_cpu(LogicalCpuId::new(index));
-                sched_stat_inc(&stats.select_wakeup);
+            } else {
                 sched_stat_inc(&stats.wakeup_fallback);
             }
-            index
-        };
+        }
+        let _ = sticky_home;
         KRunQueueRef {
             inner: get_run_queue(index),
             state: irq_state,
@@ -585,6 +677,18 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
         #[cfg(feature = "sched_stat")]
         sched_stat_inc(&sched_stat_cpu(self.inner.cpu_id).add_task);
         self.inner.publish_task(task);
+
+        // Kick only when the target may otherwise miss the new task: a remote
+        // CPU (IPI / pending) or a local idle CPU stuck in WFI. A busy local
+        // CPU will pick the task up via tick/yield without an extra preempt.
+        #[cfg(feature = "preempt")]
+        {
+            let cpu_id = self.inner.cpu_id;
+            let is_remote = cpu_id != this_cpu_id();
+            if is_remote || crate::current().is_idle() {
+                request_resched(cpu_id);
+            }
+        }
     }
 
     /// Unblock one task by inserting it into the run queue.
@@ -614,6 +718,14 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
 
             // Fire the task wakeup tracepoint.
             fire_task_wakeup(task_id);
+
+            // Linux WF_SYNC: waker expects to sleep soon (e.g. futex). Arm
+            // eligible next-buddy sync preempt on this rq before requesting
+            // resched so the wakee need not wait for the waker to block.
+            #[cfg(feature = "sched_eevdf")]
+            if crate::current_may_uninit().is_some_and(|c| c.is_wake_sync()) {
+                self.inner.scheduler.lock().mark_sync_wake_preempt();
+            }
 
             #[cfg(feature = "preempt")]
             if resched {
@@ -646,6 +758,15 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         trace!("task yield: {}", curr.id_name());
         assert!(curr.is_running());
 
+        // Affinity may have been tightened by another thread; leave this CPU
+        // instead of requeueing onto a forbidden run queue.
+        #[cfg(feature = "smp")]
+        if !curr.cpumask().get(this_cpu_id().as_usize()) {
+            let migration_task = spawn_affinity_migration_task(curr.clone());
+            self.migrate_current(migration_task);
+            return;
+        }
+
         self.inner
             .put_task_with_state(curr.clone(), TaskState::Running, false);
 
@@ -664,6 +785,11 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         let curr = &self.current_task;
         trace!("task migrate: {}", curr.id_name());
         assert!(curr.is_running());
+
+        // Snapshot lag and clear EEVDF `curr` on the source RQ before the task
+        // leaves without a local requeue. Destination `enqueue_task` then applies
+        // PLACE_LAG via `needs_place`.
+        self.inner.scheduler.lock().account_sleep(curr);
 
         // Mark current task's state as `Ready`,
         // but, do not put current task to the scheduler of this run queue.
@@ -709,9 +835,40 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             can_preempt
         );
         if can_preempt {
-            self.inner
-                .put_task_with_state(curr.clone(), TaskState::Running, true);
-            self.inner.resched();
+            // Affinity violations always migrate, even when no ready peer would
+            // win an ordinary EEVDF probe (Linux `__set_cpus_allowed_ptr`).
+            #[cfg(feature = "smp")]
+            if !curr.cpumask().get(this_cpu_id().as_usize()) {
+                let migration_task = spawn_affinity_migration_task(curr.clone());
+                self.migrate_current(migration_task);
+                return;
+            }
+            #[cfg(feature = "sched_eevdf")]
+            {
+                // Linux pick_eevdf probe: compare curr (off-tree) with ready peers
+                // *before* put_prev. Only requeue+pick when a peer actually wins.
+                // Cloning curr also pins an Arc across the switch (CurrentTask is
+                // from_raw and does not contribute to strong_count).
+                let curr_arc = curr.clone();
+                let peer_wins = {
+                    let mut sched = self.inner.scheduler.lock();
+                    sched.sync_running_curr(curr_arc.clone());
+                    sched.peer_preempts_curr()
+                };
+                if !peer_wins {
+                    curr.set_preempt_pending(false);
+                    return;
+                }
+                self.inner
+                    .put_task_with_state(curr_arc, TaskState::Running, true);
+                self.inner.resched();
+            }
+            #[cfg(not(feature = "sched_eevdf"))]
+            {
+                self.inner
+                    .put_task_with_state(curr.clone(), TaskState::Running, true);
+                self.inner.resched();
+            }
         } else {
             curr.set_preempt_pending(true);
         }
@@ -743,6 +900,10 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             current_exited_tasks_mut().push_back(curr.clone());
             // Wake up the GC task to drop the exited tasks.
             current_wait_for_exit().wake();
+
+            // Clear fair-scheduler `curr` before picking the next task. Exit does
+            // not requeue, so without this EEVDF retains a ghost running entity.
+            self.inner.scheduler.lock().account_sleep(curr);
 
             // Schedule to next task.
             self.inner.resched();
@@ -819,9 +980,16 @@ impl RunQueue {
             wait_for_exit.init_once(PollSet::new());
         });
 
+        let scheduler = Scheduler::new();
+        #[cfg(all(feature = "sched_stat", feature = "sched_eevdf"))]
+        let scheduler = {
+            let mut scheduler = scheduler;
+            scheduler.set_stats_enabled(true);
+            scheduler
+        };
         let mut rq = Self {
             cpu_id,
-            scheduler: SpinRaw::new(Scheduler::new()),
+            scheduler: SpinRaw::new(scheduler),
         };
         // Publish through the ownership-aware entry so secondary-CPU gc tasks
         // do not keep the default `cpu_id == 0`.
@@ -1112,6 +1280,179 @@ pub(crate) fn migrate_entry(migrated_task: KtaskRef) {
     select_run_queue::<kspin::NoPreemptIrqSave>(&migrated_task)
         .inner
         .enqueue_task(migrated_task, false);
+}
+
+#[cfg(feature = "smp")]
+fn spawn_affinity_migration_task(migrated: KtaskRef) -> KtaskRef {
+    const MIGRATION_TASK_STACK_SIZE: usize = 4096;
+    TaskInner::new_internal(
+        move || migrate_entry(migrated),
+        "migration-task".into(),
+        MIGRATION_TASK_STACK_SIZE,
+    )
+    .into_arc()
+}
+
+#[cfg(feature = "smp")]
+fn try_remove_ready_task(task: &KtaskRef) -> Option<KtaskRef> {
+    let rq = task_run_queue::<kspin::NoPreemptIrqSave>(task);
+    if !task.is_ready() {
+        return None;
+    }
+    rq.inner.scheduler.lock().remove_task(task)
+}
+
+/// After [`KtaskRef::set_cpumask`], move the task off any CPU the new mask
+/// forbids.
+///
+/// - current: migrate immediately (same as historical `set_current_affinity`);
+/// - ready on a forbidden RQ: dequeue and `migrate_entry`;
+/// - running remotely: request resched and wait for the affinity migrate in
+///   [`CurrentRunQueueRef::preempt_resched`];
+/// - blocked/exited: mask-only (wake / teardown pick a legal CPU later).
+///
+/// Returns `false` when a remote running task cannot be migrated synchronously
+/// (no preempt/IPI path, or still on a forbidden CPU after the wait).
+#[cfg(feature = "smp")]
+pub(crate) fn enforce_affinity_placement(task: &KtaskRef) -> bool {
+    let cpumask = task.cpumask();
+
+    if crate::current().ptr_eq(task) {
+        if !cpumask.get(this_cpu_id().as_usize()) {
+            let migration_task = spawn_affinity_migration_task(task.clone());
+            current_run_queue::<kspin::NoPreemptIrqSave>().migrate_current(migration_task);
+            assert!(cpumask.get(this_cpu_id().as_usize()), "Migration failed");
+        }
+        return true;
+    }
+
+    if matches!(task.state(), TaskState::Blocked | TaskState::Exited) {
+        return true;
+    }
+
+    if cpumask.get(task.cpu_id().as_usize()) {
+        return true;
+    }
+
+    if let Some(removed) = try_remove_ready_task(task) {
+        migrate_entry(removed);
+    }
+
+    if task.is_running() && !cpumask.get(task.cpu_id().as_usize()) {
+        #[cfg(all(feature = "preempt", feature = "ipi"))]
+        {
+            request_resched(task.cpu_id());
+            // Same pattern as waiting on `on_cpu`: the remote CPU finishes the
+            // affinity migrate at its next preempt safe point.
+            while task.is_running() && !cpumask.get(task.cpu_id().as_usize()) {
+                core::hint::spin_loop();
+            }
+        }
+        #[cfg(not(all(feature = "preempt", feature = "ipi")))]
+        {
+            return false;
+        }
+    }
+
+    // A Running→Ready race may leave the task queued on the old RQ; requeue.
+    if !task.is_running()
+        && !matches!(task.state(), TaskState::Blocked | TaskState::Exited)
+        && !cpumask.get(task.cpu_id().as_usize())
+        && let Some(removed) = try_remove_ready_task(task)
+    {
+        migrate_entry(removed);
+    }
+
+    cpumask.get(task.cpu_id().as_usize())
+        || matches!(task.state(), TaskState::Blocked | TaskState::Exited)
+}
+
+#[cfg(all(feature = "smp", unittest))]
+mod tests_wake_affinity {
+    #[cfg(feature = "sched_stat")]
+    use core::sync::atomic::Ordering;
+
+    use kcpu_id_map::LogicalCpuId;
+    #[cfg(feature = "sched_stat")]
+    use kspin::NoPreemptIrqSave;
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::wake_affinity_select;
+    #[cfg(feature = "sched_stat")]
+    use super::{sched_stat_cpu, select_wake_run_queue};
+    use crate::{KCpuMask, KtaskRef, TaskInner};
+
+    fn test_task_on(home: usize) -> KtaskRef {
+        let task = TaskInner::new_internal(|| {}, "wake-aff".into(), 4096).into_arc();
+        task.set_cpu_id(LogicalCpuId::new(home));
+        task
+    }
+
+    #[def_test]
+    fn wake_affinity_sticks_to_home_when_allowed() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let task = test_task_on(1);
+            let mut mask = KCpuMask::new();
+            mask.set(0, true);
+            mask.set(1, true);
+            task.set_cpumask(mask);
+
+            let (idx, sticky) = wake_affinity_select(&task);
+            assert!(sticky);
+            assert_eq!(idx, 1);
+        }
+    }
+
+    #[def_test]
+    fn wake_affinity_falls_back_when_home_forbidden() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let task = test_task_on(1);
+            let mut mask = KCpuMask::new();
+            mask.set(0, true);
+            task.set_cpumask(mask);
+
+            let (idx, sticky) = wake_affinity_select(&task);
+            assert!(!sticky);
+            assert_eq!(idx, 0);
+        }
+    }
+
+    #[cfg(feature = "sched_stat")]
+    #[def_test]
+    fn select_wake_run_queue_counts_sticky_and_fallback() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let task = test_task_on(1);
+            let mut all = KCpuMask::new();
+            all.set(0, true);
+            all.set(1, true);
+            task.set_cpumask(all);
+
+            let before_last = sched_stat_cpu(LogicalCpuId::new(1))
+                .wakeup_last_cpu
+                .load(Ordering::Relaxed);
+            {
+                let _rq = select_wake_run_queue::<NoPreemptIrqSave>(&task);
+            }
+            let after_last = sched_stat_cpu(LogicalCpuId::new(1))
+                .wakeup_last_cpu
+                .load(Ordering::Relaxed);
+            assert_eq!(after_last, before_last + 1);
+
+            let mut only0 = KCpuMask::new();
+            only0.set(0, true);
+            task.set_cpumask(only0);
+            let before_fb = sched_stat_cpu(LogicalCpuId::new(0))
+                .wakeup_fallback
+                .load(Ordering::Relaxed);
+            {
+                let _rq = select_wake_run_queue::<NoPreemptIrqSave>(&task);
+            }
+            let after_fb = sched_stat_cpu(LogicalCpuId::new(0))
+                .wakeup_fallback
+                .load(Ordering::Relaxed);
+            assert_eq!(after_fb, before_fb + 1);
+        }
+    }
 }
 
 /// Clear the `on_cpu` field of previous task running on this CPU.

@@ -302,41 +302,48 @@ pub fn set_task_prio(task: &KtaskRef, prio: isize) -> bool {
     task_run_queue::<NoPreemptIrqSave>(task).set_task_priority(task, prio)
 }
 
-/// Set the affinity for the current task.
-/// [`KCpuMask`] is used to specify the CPU affinity.
-/// Returns `true` if the affinity is set successfully.
+/// Set the CPU affinity mask for `task`.
 ///
-/// TODO: support set the affinity for other tasks.
-pub fn set_current_affinity(cpumask: KCpuMask) -> bool {
+/// Returns `false` if `cpumask` is empty, or (on SMP) if a remote running task
+/// could not be migrated off a newly forbidden CPU. On success the task is not
+/// left running/queued on a CPU outside `cpumask` (blocked tasks only update
+/// the mask and pick a legal CPU on the next wake).
+pub fn set_task_affinity(task: &KtaskRef, cpumask: KCpuMask) -> bool {
     if cpumask.is_empty() {
-        false
-    } else {
-        let curr = current().clone();
-
-        curr.set_cpumask(cpumask);
-        // After setting the affinity, we need to check if current cpu matches
-        // the affinity. If not, we need to migrate the task to the correct CPU.
-        #[cfg(feature = "smp")]
-        if !cpumask.get(khal::percpu::this_cpu_id().as_usize()) {
-            const MIGRATION_TASK_STACK_SIZE: usize = 4096;
-            // Spawn a new migration task for migrating.
-            let migration_task = TaskInner::new_internal(
-                move || crate::run_queue::migrate_entry(curr),
-                "migration-task".into(),
-                MIGRATION_TASK_STACK_SIZE,
-            )
-            .into_arc();
-
-            // Migrate the current task to the correct CPU using the migration task.
-            current_run_queue::<NoPreemptIrqSave>().migrate_current(migration_task);
-
-            assert!(
-                cpumask.get(khal::percpu::this_cpu_id().as_usize()),
-                "Migration failed"
-            );
-        }
+        return false;
+    }
+    task.set_cpumask(cpumask);
+    #[cfg(feature = "smp")]
+    {
+        crate::run_queue::enforce_affinity_placement(task)
+    }
+    #[cfg(not(feature = "smp"))]
+    {
         true
     }
+}
+
+/// Set the affinity for the current task.
+///
+/// Equivalent to [`set_task_affinity`] on [`current`].
+pub fn set_current_affinity(cpumask: KCpuMask) -> bool {
+    set_task_affinity(&current().clone(), cpumask)
+}
+
+/// Run `f` under a Linux-style `WF_SYNC` wake hint.
+///
+/// Wakes issued while `f` runs may sync-preempt an eligible next-buddy on the
+/// wakee's run queue when the waker is expected to sleep soon (e.g. futex
+/// wake followed by wait). Nested calls are refcounted.
+pub fn with_wake_sync<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let curr = current();
+    curr.begin_wake_sync();
+    let result = f();
+    curr.end_wake_sync();
+    result
 }
 
 /// Current task gives up the CPU time voluntarily, and switches to another
@@ -390,6 +397,64 @@ pub fn run_idle() -> ! {
 /// Dumps aggregate scheduler behavior counters when scheduler statistics are enabled.
 pub fn dump_sched_stats() {
     crate::run_queue::dump_sched_stats();
+}
+
+/// Returns a text snapshot of per-CPU scheduler counters.
+///
+/// This is intended for process-context diagnostics such as
+/// `/proc/sched_stat`; unlike [`dump_sched_stats`], it may allocate.
+pub fn sched_stats_text() -> alloc::string::String {
+    crate::run_queue::sched_stats_text()
+}
+
+#[cfg(unittest)]
+mod tests_api {
+    use unittest::{assert, def_test};
+
+    use super::{current, sched_stats_text, with_wake_sync};
+
+    #[def_test(serial)]
+    fn with_wake_sync_nested_refcount() {
+        // `unittest::assert!` returns from the enclosing fn, so capture flags
+        // inside `with_wake_sync` closures instead of asserting there.
+        let mut outer_active = false;
+        let mut inner_active = false;
+        let mut after_inner_still_active = false;
+
+        assert!(!current().is_wake_sync());
+        with_wake_sync(|| {
+            outer_active = current().is_wake_sync();
+            with_wake_sync(|| {
+                inner_active = current().is_wake_sync();
+            });
+            after_inner_still_active = current().is_wake_sync();
+        });
+
+        assert!(outer_active);
+        assert!(inner_active);
+        assert!(after_inner_still_active);
+        assert!(!current().is_wake_sync());
+    }
+
+    #[def_test]
+    fn sched_stats_text_matches_feature_gates() {
+        let text = sched_stats_text();
+        #[cfg(feature = "sched_stat")]
+        {
+            assert!(text.contains("[sched_stat] begin"));
+            assert!(text.contains("wakeup_last_cpu="));
+            assert!(text.contains("wakeup_fallback="));
+            assert!(text.contains("[sched_stat] end"));
+            #[cfg(all(feature = "sched_eevdf", feature = "smp"))]
+            assert!(text.contains("[eevdf_stat]"));
+            #[cfg(not(all(feature = "sched_eevdf", feature = "smp")))]
+            assert!(!text.contains("[eevdf_stat]"));
+        }
+        #[cfg(not(feature = "sched_stat"))]
+        {
+            assert!(text.contains("disabled"));
+        }
+    }
 }
 
 /// Returns `true` when no suspicious long lock-waits are observed on this CPU.

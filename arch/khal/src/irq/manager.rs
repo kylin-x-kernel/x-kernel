@@ -29,6 +29,15 @@ pub fn nmi_handler(vector: usize) -> bool {
 pub fn irq_handler(vector: usize) -> bool {
     let guard = kspin::NoPreempt::new();
     let handled = kirq::handle_irq(vector);
-    let _ = guard; // rescheduling may occur when preemption is re-enabled.
+
+    // The architecture's EL1 exception guard is still active here. Dropping
+    // `NoPreempt` with that marker installed makes ktask reject a pending
+    // reschedule, and there is no second check after the guard later unwinds.
+    // Temporarily suspend the marker after the IRQ is completed so the normal
+    // enable-preempt hook can switch in this IRQ-tail safe point. If a switch
+    // occurs, this stack (and token) resume with the interrupted task.
+    let suspended_exception = crate::context::suspend_active_exception_context();
+    drop(guard);
+    crate::context::resume_active_exception_context(suspended_exception);
     handled
 }

@@ -25,6 +25,11 @@ pub fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         "lock_stat",
         SimpleFile::new_regular(fs.clone(), || Ok(klockstat::dump_lock_stat())),
     );
+    #[cfg(feature = "sched_stat")]
+    root.add(
+        "sched_stat",
+        SimpleFile::new_regular(fs.clone(), || Ok(ktask::sched_stats_text())),
+    );
     #[cfg(feature = "sysrq")]
     crate::sysrq_nodes::root::add_root_entries(&mut root, fs.clone());
 

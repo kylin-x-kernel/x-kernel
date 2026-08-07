@@ -23,7 +23,8 @@ Current shared skills:
   boot, panic, hang, regression, and performance problems.
 - `docs/ai/skills/performance-analysis/SKILL.md`:
   performance investigation workflow (workloads, baselines, reporting);
-  lock_stat is documented as a sub-item under `references/lock-stat.md`.
+  lock_stat is under `references/lock-stat.md`; scheduler (schbench /
+  EEVDF / IRQ / affinity) is under `references/scheduler/`.
 - `docs/ai/skills/linux-mm-design-knowledge/SKILL.md`:
   Linux memory-management semantic knowledge base for X-Kernel MM design,
   covering address space, VMA, mmap, faults, anonymous memory, file-backed
