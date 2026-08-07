@@ -1,0 +1,22 @@
+[package]
+name = "weston-start"
+description = "Start Weston DRM desktop from the guest autostart hook"
+enabled = true
+order = 90
+
+[[install]]
+src = "xk-weston-start"
+dest = "/usr/local/bin/xk-weston-start"
+mode = "0755"
+
+[[install]]
+src = "weston-terminal"
+dest = "/usr/bin/weston-terminal"
+mode = "0755"
+
+[[autostart]]
+name = "weston-start"
+command = "/usr/local/bin/xk-weston-start"
+background = false
+check_alive = true
+exit = false

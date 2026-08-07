@@ -4,10 +4,9 @@
 
 //! `/dev/dri/card0` — minimal DRM character device.
 //!
-//! Single-CRTC, single-connector, single-plane simpledrm-class driver
-//! over the existing `fbdevice` framebuffer. Covers legacy libdrm
-//! (`CREATE_DUMB → ADDFB2 → SETCRTC → PAGE_FLIP`) and the atomic-KMS
-//! path (`MODE_ATOMIC` + blob properties) used by modern compositors.
+//! Single-CRTC, single-connector, single-plane resource-backed DRM/KMS driver.
+//! Covers legacy libdrm (`CREATE_DUMB → ADDFB2 → SETCRTC → PAGE_FLIP`) and the
+//! atomic-KMS path (`MODE_ATOMIC` + blob properties) used by modern compositors.
 
 use alloc::{
     collections::{BTreeMap, VecDeque},
@@ -20,15 +19,74 @@ use alloc::{
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use bytemuck::bytes_of;
+use display::{DisplayDevice, ScanoutFormat, ScanoutRect, ScanoutResource};
 use kalloc::GlobalPage;
+use kclass::{ClassDevice, DisplayDeviceImpl, display_devices as class_display_devices};
+use kdevice::subscribe_device_removed;
 use khal::mem::v2p;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;
 use kvfs::{DeviceFileOps, MmapMapper, NodeFlags, VfsError, VfsFile, VfsResult};
+use lazyinit::LazyInit;
 use memaddr::{PAGE_SIZE_4K, PhysAddrRange};
 use posix_types::{UserPtr, UserRead, UserWrite};
 
 use super::{consts::*, drm::*};
+
+static DISPLAY_DEVICES: LazyInit<Mutex<Vec<ClassDevice<DisplayDeviceImpl>>>> = LazyInit::new();
+
+fn ensure_scanout_registry() {
+    // `call_once` returns `None` for every loser of the initialization race,
+    // so concurrent first callers (ioctl paths such as `DrmModeCreateDumb`,
+    // `present_fb`, `DrmModeCardRes`) cannot panic a second `init_once` and
+    // only the winning thread seeds the registry and subscribes.
+    if DISPLAY_DEVICES
+        .call_once(|| Mutex::new(Vec::new()))
+        .is_none()
+    {
+        return;
+    }
+    register_display_devices(class_display_devices());
+    kclass::subscribe_display_available(Arc::new(register_display_device));
+    subscribe_device_removed(Arc::new(|id| {
+        let mut devices = DISPLAY_DEVICES.lock();
+        if let Some(pos) = devices.iter().position(|device| device.id() == id) {
+            devices.swap_remove(pos);
+        }
+    }));
+}
+
+fn register_display_devices(devices: Vec<ClassDevice<DisplayDeviceImpl>>) {
+    for device in devices {
+        register_display_device(device);
+    }
+}
+
+fn register_display_device(handle: ClassDevice<DisplayDeviceImpl>) {
+    if !DISPLAY_DEVICES.is_inited() {
+        return;
+    }
+
+    let mut devices = DISPLAY_DEVICES.lock();
+    if devices.iter().any(|device| device.id() == handle.id()) {
+        return;
+    }
+    devices.push(handle);
+}
+
+pub(crate) fn scanout_available() -> bool {
+    ensure_scanout_registry();
+    !DISPLAY_DEVICES.lock().is_empty()
+}
+
+fn primary_scanout() -> VfsResult<ClassDevice<DisplayDeviceImpl>> {
+    ensure_scanout_registry();
+    DISPLAY_DEVICES
+        .lock()
+        .first()
+        .cloned()
+        .ok_or(VfsError::NoSuchDevice)
+}
 
 /// DRM ioctl handler trait. `const CMD` is injected by the `#[drm_ioctl]` attribute macro.
 trait DrmIoctl: Sized {
@@ -44,20 +102,6 @@ trait DrmIoctl: Sized {
         arg.write_vm(ptr).map_err(|_| kvfs::VfsError::BadAddress)?;
         result
     }
-}
-
-macro_rules! route_ioctls {
-    ($cmd:expr, $arg:expr, $dev:expr; [ $($ty:ty),* $(,)? ]) => {
-        match $cmd {
-            $(
-                <$ty as DrmIoctl>::CMD => {
-                    let user_ptr = posix_types::UserPtr::<$ty>::from($arg);
-                    <$ty as DrmIoctl>::handle_raw($dev, user_ptr)
-                }
-            )*
-            _ => Err(kvfs::VfsError::OperationNotSupported),
-        }
-    };
 }
 
 #[repr(transparent)]
@@ -175,7 +219,13 @@ impl DrmIoctl for DrmAuthMagic {
 impl DrmIoctl for DrmModeDirtyFB {
     const CMD: u32 = iowr::<DrmModeDirtyFB>(DRM_TYPE, 0xB1);
 
-    fn handle(_dev: &Card0, _dirty: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &Card0, dirty: &mut Self) -> VfsResult<usize> {
+        // Linux's drm_mode_dirtyfb_ioctl() rejects an unknown fb_id with
+        // -EINVAL; present_fb is best-effort, so validate before calling it.
+        if !dev.fbs.lock().contains_key(&dirty.fb_id) {
+            return Err(VfsError::InvalidInput);
+        }
+        dev.present_fb(dirty.fb_id);
         Ok(0)
     }
 }
@@ -263,12 +313,14 @@ struct DumbBuffer {
     pitch: u32,
     size: u64,
     offset: u64,
+    resource_id: u32,
     pages: Arc<GlobalPage>,
 }
 
 struct Framebuffer {
-    size: u64,
-    pages: Arc<GlobalPage>,
+    resource_id: u32,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -310,6 +362,7 @@ pub struct Card0 {
     next_offset: AtomicU64,
     fbs: Mutex<BTreeMap<u32, Framebuffer>>,
     next_fb_id: AtomicU32,
+    next_resource_id: AtomicU32,
     blobs: Mutex<BTreeMap<u32, Arc<Vec<u8>>>>,
     mode_id_blob_ref: Mutex<Option<Arc<Vec<u8>>>>,
     next_blob_id: AtomicU32,
@@ -333,6 +386,7 @@ impl Card0 {
             next_offset: AtomicU64::new(DUMB_BUFFER_OFFSET_STRIDE),
             fbs: Mutex::new(BTreeMap::new()),
             next_fb_id: AtomicU32::new(FIRST_FB_ID),
+            next_resource_id: AtomicU32::new(0x1000),
             blobs: Mutex::new(BTreeMap::new()),
             mode_id_blob_ref: Mutex::new(None),
             next_blob_id: AtomicU32::new(FIRST_BLOB_ID),
@@ -376,12 +430,12 @@ fn report_user_array<T: UserWrite + Copy>(
 }
 
 fn display_resolution() -> (u32, u32) {
-    if fbdevice::fb_available() {
-        let info = fbdevice::fb_info();
-        (info.width, info.height)
-    } else {
-        (640, 480)
-    }
+    primary_scanout()
+        .map(|device| {
+            let info = device.info();
+            (info.width, info.height)
+        })
+        .unwrap_or((640, 480))
 }
 
 fn current_mode() -> DrmModeModeInfo {
@@ -453,43 +507,128 @@ impl DeviceFileOps for Card0 {
 
     fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
         match cmd {
-            DRM_IOCTL_SET_MASTER | DRM_IOCTL_DROP_MASTER => return Ok(0),
-            _ => {}
-        }
-
-        route_ioctls! {
-            cmd, arg, self; [
-                DrmVersion,
-                DrmUnique,
-                DrmSetVersion,
-                DrmGetCap,
-                DrmSetClientCap,
-                DrmAuth,
-                DrmAuthMagic,
-                DrmModeDirtyFB,
-                DrmPrimeHandle,
-                DrmPrimeFdToHandle,
-                DrmModeCardRes,
-                DrmModeCrtc,
-                DrmModeSetCrtc,
-                DrmModeGetEncoder,
-                DrmModeGetConnector,
-                DrmModeRmFb,
-                DrmModeCrtcPageFlip,
-                DrmModeCreateDumb,
-                DrmModeMapDumb,
-                DrmModeDestroyDumb,
-                DrmModeGetPlaneRes,
-                DrmModeGetPlane,
-                DrmModeObjGetProperties,
-                DrmModeGetProperty,
-                DrmWaitVblank,
-                DrmModeAtomic,
-                DrmModeCreateBlob,
-                DrmModeDestroyBlob,
-                DrmModeGetBlob,
-                DrmModeFbCmd2,
-            ]
+            DRM_IOCTL_SET_MASTER | DRM_IOCTL_DROP_MASTER => Ok(0),
+            <DrmVersion as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmVersion>::from(arg);
+                <DrmVersion as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmUnique as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmUnique>::from(arg);
+                <DrmUnique as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmSetVersion as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmSetVersion>::from(arg);
+                <DrmSetVersion as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmGetCap as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmGetCap>::from(arg);
+                <DrmGetCap as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmSetClientCap as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmSetClientCap>::from(arg);
+                <DrmSetClientCap as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmAuth as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmAuth>::from(arg);
+                <DrmAuth as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmAuthMagic as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmAuthMagic>::from(arg);
+                <DrmAuthMagic as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeDirtyFB as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeDirtyFB>::from(arg);
+                <DrmModeDirtyFB as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmPrimeHandle as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmPrimeHandle>::from(arg);
+                <DrmPrimeHandle as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmPrimeFdToHandle as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmPrimeFdToHandle>::from(arg);
+                <DrmPrimeFdToHandle as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeCardRes as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeCardRes>::from(arg);
+                <DrmModeCardRes as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeCrtc as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeCrtc>::from(arg);
+                <DrmModeCrtc as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeSetCrtc as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeSetCrtc>::from(arg);
+                <DrmModeSetCrtc as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeGetEncoder as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeGetEncoder>::from(arg);
+                <DrmModeGetEncoder as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeGetConnector as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeGetConnector>::from(arg);
+                <DrmModeGetConnector as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeRmFb as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeRmFb>::from(arg);
+                <DrmModeRmFb as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeCrtcPageFlip as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeCrtcPageFlip>::from(arg);
+                <DrmModeCrtcPageFlip as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeCreateDumb as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeCreateDumb>::from(arg);
+                <DrmModeCreateDumb as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeMapDumb as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeMapDumb>::from(arg);
+                <DrmModeMapDumb as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeDestroyDumb as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeDestroyDumb>::from(arg);
+                <DrmModeDestroyDumb as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeGetPlaneRes as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeGetPlaneRes>::from(arg);
+                <DrmModeGetPlaneRes as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeGetPlane as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeGetPlane>::from(arg);
+                <DrmModeGetPlane as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeObjGetProperties as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeObjGetProperties>::from(arg);
+                <DrmModeObjGetProperties as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeGetProperty as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeGetProperty>::from(arg);
+                <DrmModeGetProperty as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmWaitVblank as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmWaitVblank>::from(arg);
+                <DrmWaitVblank as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeAtomic as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeAtomic>::from(arg);
+                <DrmModeAtomic as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeCreateBlob as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeCreateBlob>::from(arg);
+                <DrmModeCreateBlob as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeDestroyBlob as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeDestroyBlob>::from(arg);
+                <DrmModeDestroyBlob as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeGetBlob as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeGetBlob>::from(arg);
+                <DrmModeGetBlob as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            <DrmModeFbCmd2 as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeFbCmd2>::from(arg);
+                <DrmModeFbCmd2 as DrmIoctl>::handle_raw(self, user_ptr)
+            }
+            _ => Err(kvfs::VfsError::OperationNotSupported),
         }
     }
 
@@ -664,19 +803,16 @@ impl DrmIoctl for DrmModeCreateDumb {
     const CMD: u32 = iowr::<DrmModeCreateDumb>(DRM_TYPE, 0xB2);
 
     fn handle(dev: &Card0, c: &mut Self) -> VfsResult<usize> {
-        if c.width == 0
-            || c.height == 0
-            || c.bpp == 0
-            || c.bpp > 64
-            || !c.bpp.is_multiple_of(8)
-            || c.flags != 0
-        {
+        // Only BGRA8888 (32bpp) is supported, so the bpp == 0 / bpp > 64 /
+        // multiple-of-8 checks are subsumed by the bpp != 32 comparison and
+        // bytes_per_pixel is constant.
+        if c.width == 0 || c.height == 0 || c.bpp != 32 || c.flags != 0 {
             return Err(VfsError::InvalidInput);
         }
         if c.width > 16384 || c.height > 16384 {
             return Err(VfsError::InvalidInput);
         }
-        let bytes_per_pixel = c.bpp / 8;
+        let bytes_per_pixel = 4;
         let pitch = c
             .width
             .checked_mul(bytes_per_pixel)
@@ -694,6 +830,21 @@ impl DrmIoctl for DrmModeCreateDumb {
         let mut backing =
             GlobalPage::alloc_contiguous(pages, PAGE_SIZE_4K).map_err(|_| VfsError::NoMemory)?;
         backing.zero();
+        let paddr = v2p(backing.start_va()).as_usize() as u64;
+        let resource_id = dev.next_resource_id.fetch_add(1, Ordering::Relaxed);
+        primary_scanout()?
+            .create_scanout_resource(
+                ScanoutResource {
+                    id: resource_id,
+                    width: c.width,
+                    height: c.height,
+                    pitch: c.pitch,
+                    format: ScanoutFormat::Bgra8888,
+                },
+                paddr,
+                size_aligned as u32,
+            )
+            .map_err(|_| VfsError::Io)?;
         let pages_arc = Arc::new(backing);
         let offset = dev
             .next_offset
@@ -709,6 +860,7 @@ impl DrmIoctl for DrmModeCreateDumb {
                 pitch: c.pitch,
                 size: c.size,
                 offset,
+                resource_id,
                 pages: pages_arc,
             },
         );
@@ -736,8 +888,20 @@ impl DrmIoctl for DrmModeDestroyDumb {
     const CMD: u32 = iowr::<DrmModeDestroyDumb>(DRM_TYPE, 0xB4);
 
     fn handle(dev: &Card0, d: &mut Self) -> VfsResult<usize> {
-        if let Some(buf) = dev.dumbs.lock().remove(&d.handle) {
-            drop(buf);
+        let Some(resource_id) = dev.dumbs.lock().get(&d.handle).map(|b| b.resource_id) else {
+            return Ok(0);
+        };
+        // Resolve the display device *before* mutating guest state: if it is
+        // gone, fail the ioctl instead of dropping the backing while the host
+        // still holds a scanout resource for it (dangling backing + leak).
+        let device = primary_scanout()?;
+        dev.dumbs.lock().remove(&d.handle);
+        if let Err(err) = device.destroy_scanout_resource(resource_id) {
+            log::warn!(
+                "drm: failed to destroy scanout resource {}: {:?}",
+                resource_id,
+                err
+            );
         }
         Ok(0)
     }
@@ -982,13 +1146,32 @@ impl DrmIoctl for DrmModeFbCmd2 {
 
     fn handle(dev: &Card0, f: &mut Self) -> VfsResult<usize> {
         let handle = f.handles[0];
-        let (pages, size) = {
+        if handle == 0 || f.offsets[0] != 0 {
+            return Err(VfsError::InvalidInput);
+        }
+        for i in 1..4 {
+            if f.handles[i] != 0 || f.pitches[i] != 0 || f.offsets[i] != 0 {
+                return Err(VfsError::InvalidInput);
+            }
+        }
+        if !matches!(f.pixel_format, DRM_FORMAT_XRGB8888 | DRM_FORMAT_ARGB8888) {
+            return Err(VfsError::InvalidInput);
+        }
+        let (resource_id, width, height, pitch) = {
             let dumbs = dev.dumbs.lock();
             let Some(b) = dumbs.get(&handle) else {
                 return Err(VfsError::InvalidInput);
             };
-            (b.pages.clone(), b.size)
+            (b.resource_id, b.width, b.height, b.pitch)
         };
+        // The scanout resource is created at exactly the dumb buffer's size
+        // and pitch (no ANY_LAYOUT negotiation), and TRANSFER_TO_HOST_2D reads
+        // the backing row-by-row with the resource pitch. A sub-size
+        // framebuffer would be misread (garbled scanout) or rejected by the
+        // device, so the framebuffer must match the resource layout exactly.
+        if f.width != width || f.height != height || f.pitches[0] != pitch {
+            return Err(VfsError::InvalidInput);
+        }
         if f.flags & DRM_MODE_FB_MODIFIERS != 0 {
             for i in 0..4 {
                 if f.handles[i] == 0 {
@@ -1001,7 +1184,14 @@ impl DrmIoctl for DrmModeFbCmd2 {
             }
         }
         let fb_id = dev.next_fb_id.fetch_add(1, Ordering::Relaxed);
-        dev.fbs.lock().insert(fb_id, Framebuffer { size, pages });
+        dev.fbs.lock().insert(
+            fb_id,
+            Framebuffer {
+                resource_id,
+                width: f.width,
+                height: f.height,
+            },
+        );
         f.fb_id = fb_id;
         Ok(0)
     }
@@ -1009,26 +1199,26 @@ impl DrmIoctl for DrmModeFbCmd2 {
 
 impl Card0 {
     fn present_fb(&self, fb_id: u32) {
-        let (pages, size) = match self.fbs.lock().get(&fb_id) {
-            Some(fb) => (fb.pages.clone(), fb.size),
+        let (resource_id, width, height) = match self.fbs.lock().get(&fb_id) {
+            Some(fb) => (fb.resource_id, fb.width, fb.height),
             None => return,
         };
-        if !fbdevice::fb_available() {
+        let Ok(device) = primary_scanout() else {
             return;
         };
-        let info = fbdevice::fb_info();
-        let copy = (size as usize).min(info.fb_size);
-        // SAFETY: both framebuffer regions are valid for `copy` bytes and do
-        // not overlap: one is the DRM shadow buffer, the other is the mapped
-        // display framebuffer.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                pages.start_va().as_usize() as *const u8,
-                info.fb_base_vaddr as *mut u8,
-                copy,
+        let rect = ScanoutRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        if let Err(err) = device.present_scanout_resource(resource_id, rect) {
+            log::warn!(
+                "drm: failed to present scanout resource {}: {:?}",
+                resource_id,
+                err
             );
         }
-        let _ = fbdevice::fb_flush();
     }
 
     fn queue_flip_event(&self, user_data: u64) {

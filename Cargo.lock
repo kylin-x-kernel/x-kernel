@@ -1215,14 +1215,18 @@ name = "drmdevice"
 version = "0.2.0-dev"
 dependencies = [
  "bytemuck",
- "fbdevice",
+ "display",
  "kalloc",
+ "kclass",
+ "kdevice",
  "khal",
  "kpoll",
  "ksync",
  "ktask",
  "ktime_types",
  "kvfs",
+ "lazyinit",
+ "log",
  "macros",
  "memaddr",
  "posix-types",
@@ -1445,11 +1449,14 @@ dependencies = [
 name = "fbdevice"
 version = "0.2.0-dev"
 dependencies = [
+ "display",
+ "kalloc",
  "kclass",
- "kdevice",
- "ksync",
+ "khal",
+ "kspin 0.2.0-dev",
  "lazyinit",
  "log",
+ "memaddr",
 ]
 
 [[package]]
@@ -5293,6 +5300,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "virtio"
 version = "0.2.0-dev"
 dependencies = [
+ "bitflags 2.13.1",
  "block",
  "char_driver",
  "device-res",

@@ -84,38 +84,35 @@ struct FixScreenInfo {
     pub reserved: [u16; 2], // Reserved for future compatibility
 }
 
-async fn refresh_task() {
-    let delay = ktime_types::TimeSpan::from_nanos(1_000_000_000 / 60);
-    loop {
-        if !fbdevice::fb_flush() {
-            warn!("Failed to refresh framebuffer");
-        }
-        ktask::future::sleep(delay).await;
-    }
-}
-
-/// Framebuffer device for graphics output
+/// Framebuffer device for graphics output, backed by fbdev emulation's shadow
+/// buffer (see [`fbdevice`]).
+///
+/// This node only exposes the shadow buffer for userspace read/write/mmap; it
+/// deliberately does **not** run a background refresh task pushing the shadow
+/// to the scanout. A continuous `present_scanout_resource` would race a DRM
+/// compositor (e.g. Weston) for the single physical scanout and cause
+/// flickering. Instead the shadow is pushed to the scanout on explicit
+/// demand: `write()` to `/dev/fb0` and the `FBIOPAN_DISPLAY` ioctl both
+/// trigger [`fbdevice::fb_present`], so writes to the node stay visible while
+/// an active DRM master keeps the scanout to itself.
 pub struct FrameBuffer {
     base: VirtAddr,
     size: usize,
 }
 impl FrameBuffer {
     pub fn new() -> Self {
-        ktask::spawn_with_name(
-            || ktask::future::block_on(refresh_task()),
-            "fb-refresh".into(),
-        );
-        let info = fbdevice::fb_info();
-        Self {
-            base: VirtAddr::from(info.fb_base_vaddr),
-            size: info.fb_size,
-        }
+        // fb_available() is checked by the caller (add_root_entries) before
+        // constructing us, so the shadow is guaranteed present.
+        let base = fbdevice::fb_shadow_vaddr().expect("fbdev shadow missing");
+        let size = fbdevice::fb_shadow_size().expect("fbdev shadow missing");
+        Self { base, size }
     }
 
     #[allow(clippy::mut_from_ref)]
     fn as_mut_slice(&self) -> &mut [u8] {
-        // SAFETY: `base..base+size` comes from the framebuffer driver's mapped
-        // backing store and remains valid for the device lifetime.
+        // SAFETY: `base..base+size` is the fbdev emulation shadow buffer,
+        // which stays mapped for the kernel lifetime; concurrent userspace
+        // writes to a mapped page race here, matching legacy fbdev semantics.
         unsafe { slice::from_raw_parts_mut(self.base.as_mut_ptr(), self.size) }
     }
 }
@@ -144,6 +141,10 @@ impl DeviceFileOps for FrameBuffer {
         }
         let len = buf.len().min(slice.len() - offset as usize);
         slice[..len].copy_from_slice(&buf[..len]);
+        // Make the written pixels visible: write() is the fbdev "explicit
+        // demand" trigger (see module docs). Failure is not fatal for the
+        // write itself; the host may be busy presenting another resource.
+        fbdevice::fb_present();
         Ok(len)
     }
 
@@ -152,8 +153,10 @@ impl DeviceFileOps for FrameBuffer {
             // FBIOGET_VSCREENINFO
             0x4600 => {
                 let info = fbdevice::fb_info();
-                let line_length = (info.fb_size / info.height as usize) as u32;
-                let bpp = line_length / info.width;
+                // The shadow scanout buffer is always BGRA8888 (32bpp); the
+                // line length reported in FSCREENINFO is width * 4 with no
+                // row padding.
+                let bpp = 32u32;
                 (arg as *mut VarScreenInfo).write_vm(VarScreenInfo {
                     xres: info.width,
                     yres: info.height,
@@ -161,7 +164,7 @@ impl DeviceFileOps for FrameBuffer {
                     yres_virtual: info.height,
                     xoffset: 0,
                     yoffset: 0,
-                    bits_per_pixel: bpp * 8,
+                    bits_per_pixel: bpp,
                     grayscale: 0,
                     red: FrameBufferBitfield {
                         offset: 16,
@@ -208,17 +211,21 @@ impl DeviceFileOps for FrameBuffer {
             // FBIOGET_FSCREENINFO
             0x4602 => {
                 let info = fbdevice::fb_info();
+                let line_length = info.width.checked_mul(4).unwrap_or(0);
                 (arg as *mut FixScreenInfo).write_vm(FixScreenInfo {
                     id: *b"Virtio Framebuf\0",
-                    smem_start: info.fb_base_vaddr as u64,
-                    smem_len: info.fb_size as u32,
+                    // smem_start is the physical base of the shadow buffer, so
+                    // userspace (and the kernel mmap path) describe the same
+                    // backing memory the host scanout resource is bound to.
+                    smem_start: v2p(self.base).as_usize() as u64,
+                    smem_len: self.size as u32,
                     type_: 0,
                     type_aux: 0,
                     visual: 2, // FB_VISUAL_TRUECOLOR
                     xpanstep: 0,
                     ypanstep: 0,
                     ywrapstep: 0,
-                    line_length: (info.fb_size / info.height as usize) as u32,
+                    line_length,
                     mmio_start: 0,
                     mmio_len: 0,
                     accel: 0,
@@ -231,8 +238,14 @@ impl DeviceFileOps for FrameBuffer {
             0x4604 => Ok(0),
             // FBIOPUTCMAP
             0x4605 => Ok(0),
-            // FBIOPAN_DISPLAY
-            0x4606 => Err(KError::InvalidInput),
+            // FBIOPAN_DISPLAY: explicit "make the shadow visible" trigger for
+            // apps that mmap the framebuffer and draw directly (writes via
+            // write() present automatically). The framebuffer is a fixed
+            // full-screen buffer, so panning is a no-op pan + refresh.
+            0x4606 => {
+                fbdevice::fb_present();
+                Ok(0)
+            }
             // FBIOBLANK
             0x4611 => Err(KError::InvalidInput),
             _ => Err(KError::NotATty),
@@ -240,7 +253,8 @@ impl DeviceFileOps for FrameBuffer {
     }
 
     fn mmap(&self, _file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
-        mapper.map_physical(PhysAddrRange::from_start_size(v2p(self.base), self.size))
+        let paddr = fbdevice::fb_shadow_paddr().ok_or(VfsError::NoSuchDevice)?;
+        mapper.map_physical(PhysAddrRange::from_start_size(paddr, self.size))
     }
 
     fn flags(&self) -> NodeFlags {
@@ -249,16 +263,14 @@ impl DeviceFileOps for FrameBuffer {
 }
 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
-    if fbdevice::fb_available() {
-        add_device_entry(
-            root,
-            "fb0",
-            DeviceFile::new(
-                fs.clone(),
-                NodeType::CharacterDevice,
-                DeviceId::new(29, 0),
-                Arc::new(FrameBuffer::new()),
-            ),
-        );
+    if !fbdevice::fb_available() {
+        return;
     }
+    let fb0 = DeviceFile::new(
+        fs.clone(),
+        NodeType::CharacterDevice,
+        DeviceId::new(29, 0),
+        Arc::new(FrameBuffer::new()),
+    );
+    add_device_entry(root, "fb0", fb0);
 }

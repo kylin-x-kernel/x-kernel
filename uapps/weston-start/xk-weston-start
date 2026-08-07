@@ -1,0 +1,170 @@
+#!/bin/sh
+set -eu
+
+WL=/tmp/weston.log
+RD=/run/user/0
+echo "[weston-start] preparing runtime"
+
+has_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+install_deps() {
+    has_cmd weston && has_cmd seatd && has_cmd weston-simple-shm && has_cmd xterm && has_cmd xclock && return 0
+    has_cmd apk || {
+        echo "[weston-start] apk is not available; cannot install Weston"
+        return 1
+    }
+
+    echo "[weston-start] updating apk indexes"
+    apk update || return 1
+    echo "[weston-start] installing Weston packages"
+    apk add --no-cache weston weston-backend-drm weston-shell-desktop weston-clients \
+        weston-xwayland xwayland xterm xclock seatd ||
+        apk add --no-cache weston seatd
+
+    has_cmd weston && has_cmd seatd && has_cmd weston-simple-shm && has_cmd xterm && has_cmd xclock && return 0
+    echo "[weston-start] missing command after install:"
+    for c in weston seatd weston-simple-shm xterm xclock; do
+        has_cmd "$c" || echo "  $c"
+    done
+    return 1
+}
+
+install_deps || exit 1
+mkdir -p "$RD"
+chmod 700 "$RD"
+mkdir -p /tmp/.X11-unix
+chmod 1777 /tmp/.X11-unix
+WP=$(pgrep -x weston | head -n 1 || true)
+if [ -z "$WP" ]; then
+    rm -f "$RD"/wayland-* "$RD"/wayland-*.lock /run/seatd.sock
+    rm -f /tmp/.X11-unix/X0 /tmp/.X0-lock
+    rm -f "$WL" /tmp/weston-watch.log /tmp/xterm.log /tmp/xclock.log
+fi
+mkdir -p /run/udev/data
+cat >/run/udev/data/c13:1 <<'EOF'
+E:ID_INPUT=1
+E:ID_INPUT_MOUSE=1
+E:ID_SEAT=seat0
+EOF
+cat >/run/udev/data/c13:2 <<'EOF'
+E:ID_INPUT=1
+E:ID_INPUT_KEYBOARD=1
+E:ID_SEAT=seat0
+EOF
+
+pgrep seatd >/dev/null 2>&1 || {
+    echo "[weston-start] starting seatd"
+    seatd -g root -l debug >/tmp/seatd.log 2>&1 &
+    sleep 1
+}
+
+if [ -z "$WP" ]; then
+    echo "[weston-start] starting weston"
+    env XDG_RUNTIME_DIR="$RD" WESTON_DISABLE_ATOMIC=1 weston \
+        --backend=drm-backend.so --renderer=pixman --drm-device=card0 \
+        --seat=seat0 --continue-without-input --idle-time=0 --xwayland --log="$WL" &
+    WP=$!
+    (
+        while kill -0 "$WP" >/dev/null 2>&1; do
+            date
+            ps | grep -E 'weston|Xwayland|xterm|xclock' | grep -v grep || true
+            sleep 30
+        done
+    ) >/tmp/weston-watch.log 2>&1 &
+else
+    echo "[weston-start] weston already running"
+fi
+
+i=0
+WD=
+while [ "$i" -lt 50 ]; do
+    kill -0 "$WP" >/dev/null 2>&1 || {
+        echo "[weston-start] weston failed"
+        cat "$WL" 2>/dev/null || true
+        exit 1
+    }
+    C=$(find "$RD" -maxdepth 1 -type s -name 'wayland-*' 2>/dev/null | head -n 1)
+    [ -n "$C" ] && { WD=${C##*/}; break; }
+    i=$((i + 1))
+    sleep 0.1
+done
+
+[ -n "$WD" ] || exit 1
+CLIENT=${XK_WESTON_CLIENT:-xterm,xclock}
+if [ "$CLIENT" = "none" ]; then
+    echo "[weston-start] client startup disabled"
+    [ "${XK_WESTON_WAIT:-0}" = "1" ] && while kill -0 "$WP" >/dev/null 2>&1; do sleep 60; done
+    exit 0
+fi
+if [ "$CLIENT" = "xterm" ] || [ "$CLIENT" = "xclock" ] ||
+    [ "$CLIENT" = "xterm,xclock" ] || [ "$CLIENT" = "xclock,xterm" ]; then
+    i=0
+    while [ "$i" -lt 50 ] && [ ! -S /tmp/.X11-unix/X0 ]; do
+        kill -0 "$WP" >/dev/null 2>&1 || {
+            echo "[weston-start] weston failed"
+            cat "$WL" 2>/dev/null || true
+            exit 1
+        }
+        i=$((i + 1))
+        sleep 0.1
+    done
+    [ -S /tmp/.X11-unix/X0 ] || {
+        echo "[weston-start] Xwayland display :0 did not appear"
+        cat "$WL" 2>/dev/null || true
+        exit 1
+    }
+
+    # The Xwayland module exposes the X11 socket before the Xwayland process
+    # and Weston XWM are fully established.  Start one real client to trigger
+    # Xwayland, then wait for the WM handoff before starting the next client.
+    if [ "$CLIENT" = "xterm" ] || [ "$CLIENT" = "xterm,xclock" ] ||
+        [ "$CLIENT" = "xclock,xterm" ]; then
+        echo "[weston-start] starting xterm"
+        DISPLAY=:0 xterm -title "X-Kernel xterm" -geometry 52x15+20+230 \
+            -bg black -fg white -cr green -ls >/tmp/xterm.log 2>&1 &
+    elif [ "$CLIENT" = "xclock" ]; then
+        echo "[weston-start] starting xclock"
+        DISPLAY=:0 xclock -geometry 150x150+455+55 -update 1 >/tmp/xclock.log 2>&1 &
+    fi
+
+    i=0
+    while [ "$i" -lt 300 ] && ! grep -q 'created wm' "$WL" 2>/dev/null; do
+        kill -0 "$WP" >/dev/null 2>&1 || {
+            echo "[weston-start] weston failed"
+            cat "$WL" 2>/dev/null || true
+            exit 1
+        }
+        if [ "$i" -gt 0 ] && [ $((i % 50)) -eq 0 ]; then
+            echo "[weston-start] still waiting for Xwayland window manager ($((i / 10))s)"
+        fi
+        i=$((i + 1))
+        sleep 0.1
+    done
+    grep -q 'created wm' "$WL" 2>/dev/null || {
+        echo "[weston-start] Xwayland window manager did not become ready"
+        cat "$WL" 2>/dev/null || true
+        exit 1
+    }
+    sleep 1
+    sleep 3
+    if [ "$CLIENT" = "xclock" ] || [ "$CLIENT" = "xterm,xclock" ] ||
+        [ "$CLIENT" = "xclock,xterm" ]; then
+        echo "[weston-start] starting xclock"
+        DISPLAY=:0 xclock -geometry 150x150+455+55 -update 1 >/tmp/xclock.log 2>&1 &
+        sleep 3
+        if ! pgrep -x xclock >/dev/null 2>&1; then
+            echo "[weston-start] retrying xclock"
+            DISPLAY=:0 xclock -geometry 150x150+455+55 -update 1 >/tmp/xclock.log 2>&1 &
+        fi
+    fi
+elif [ "$CLIENT" = "weston-simple-shm" ]; then
+    echo "[weston-start] starting weston-simple-shm"
+    env XDG_RUNTIME_DIR="$RD" WAYLAND_DISPLAY="$WD" weston-simple-shm >/tmp/weston-simple-shm.log 2>&1 &
+else
+    echo "[weston-start] unsupported client: $CLIENT"
+    exit 1
+fi
+echo "[weston-start] weston is running"
+[ "${XK_WESTON_WAIT:-0}" = "1" ] && while kill -0 "$WP" >/dev/null 2>&1; do sleep 60; done

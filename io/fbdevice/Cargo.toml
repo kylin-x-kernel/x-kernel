@@ -8,8 +8,11 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-ksync.workspace = true
+display.workspace = true
+kalloc.workspace = true
 kclass = { workspace = true, features = ["display"] }
-kdevice = { workspace = true }
+khal.workspace = true
+kspin.workspace = true
 lazyinit.workspace = true
 log.workspace = true
+memaddr.workspace = true

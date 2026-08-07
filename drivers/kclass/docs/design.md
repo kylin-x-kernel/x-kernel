@@ -200,15 +200,20 @@ impl BlockDevice for ClassDevice<BlockDeviceImpl> {
 `with()` 方法通过 `&self.inner.runtime` 共享借用 runtime，不持有锁。
 runtime 内部的并发控制由驱动自行负责（通常通过 interior mutability）。
 
-### Display framebuffer 特殊处理
+### Display 设备的 framebuffer 路径
 
-`DisplayDevice::fb()` 与其他委托方法不同——它不委托到 runtime trait 方法，
-而是直接从 `DisplayInfo` 中获取 `(fb_base_vaddr, fb_size)` 并构造 `FrameBuffer`：
+`DisplayDevice` trait 只暴露分辨率 (`DisplayInfo { width, height }`) 与 scanout
+resource 接口（`create_scanout_resource` / `destroy_scanout_resource` /
+`present_scanout_resource`）。kclass 的 class adapter 对这些方法做纯委托，
+不持有任何 framebuffer 裸指针或直接内存映射。
 
-1. 调用 `self.info()` 获取 `DisplayInfo { fb_base_vaddr, fb_size }`。
-2. 通过 `display::FrameBuffer::from_raw_parts_mut` 构造可变 framebuffer 引用。
-3. SAFETY 不变量：framebuffer 映射是驱动 probe 时安装的稳定资源，
-   仅在设备 remove 时拆除；`ClassDevice` 持有 `Arc<DeviceObject>` 阻止 remove 提前发生。
+`/dev/fb0` 的 framebuffer 兼容层由 `fbdevice` crate 实现：它在 `fb_init` 时向主显示
+设备分配一块 shadow buffer，通过 `create_scanout_resource` 绑定为 host 可见的 2D
+resource，再按需通过 `fb_present` 推到 scanout（无后台刷新任务：持续
+`present_scanout_resource` 会与 DRM 合成器竞争单一物理 scanout 造成闪烁，因此
+`/dev/fb0` 的写入与 `FBIOPAN_DISPLAY` ioctl 才触发呈现）。这套
+"fbdev emulation over scanout" 模型对任何 `DisplayDevice` 统一适用，无需驱动自行暴露
+直接映射的 framebuffer，因此 kclass 不再需要 framebuffer 特殊处理或 unsafe 边界。
 
 ## 并发模型
 

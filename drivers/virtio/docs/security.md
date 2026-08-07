@@ -16,7 +16,6 @@
 │                                                              │
 │  ┌── unsafe 边界 ──────────────────────────────────────────┐ │
 │  │ probe_mmio_device: MmioTransport::new()                 │ │
-│  │ gpu.rs: FrameBuffer::from_raw_parts_mut()               │ │
 │  │ net.rs: NetBuf::from_handle()                           │ │
 │  │ net.rs: receive_begin() / receive_complete()            │ │
 │  │ net.rs: transmit_begin() / transmit_complete()          │ │
@@ -42,7 +41,7 @@
   设备 header、BAR、capability、IRQ 路由；
 - **DMA / 共享内存缓冲区**：
   virtqueue 描述符、网络收发 buffer、块设备 I/O buffer、
-  GPU framebuffer、9p 请求响应缓冲区；
+  GPU scanout resource backing、9p 请求响应缓冲区；
 - **设备返回的数据与状态**：
   VirtIO 队列完成状态、pkt 长度、mount tag、输入事件、vsock 事件；
 - **VMM / 虚拟设备行为**：
@@ -78,23 +77,22 @@ let transport = unsafe { MmioTransport::new(header, reg_size) }.ok()?;
 **调用者**：
 - 平台初始化代码 — 由固件/设备树保证地址有效
 
-### 2. `VirtIoGpuDev::fb()`（`gpu.rs:91`）
+### 2. VirtIO GPU scanout resource backing
 
-```rust
-unsafe {
-    FrameBuffer::from_raw_parts_mut(self.info.fb_base_vaddr as *mut u8, self.info.fb_size)
-}
-```
+当前 `DisplayDevice` trait 已移除 `fb()` 及 `FrameBuffer` 类型，不再从裸 framebuffer 指针构造切片。
+GPU 像素 backing 由 DRM dumb buffer（或 fbdev shadow buffer）分配，并以物理地址和长度传入
+`create_scanout_resource()`。virtio-gpu 驱动仅把这段 backing attach 到 2D resource，
+随后在 page flip 时提交 `TRANSFER_TO_HOST_2D`、`SET_SCANOUT` 和 `RESOURCE_FLUSH`。
 
-**不变量**：`fb_base_vaddr` 指向有效的帧缓冲区内存，大小为 `fb_size` 字节，
-且在设备存活期间保持有效。
+**不变量**：
 
-**为何安全**：`fb_base_vaddr` 和 `fb_size` 在 `try_new()` 中由
-`setup_framebuffer()` 返回，该函数保证返回有效的帧缓冲区。
-返回的 `FrameBuffer` 生命周期绑定到 `&self`，不会超过设备存活期。
+- backing 物理地址和长度由 DRM 层从 `GlobalPage::alloc_contiguous` 得到；
+- backing 生命周期覆盖 resource attach 到 destroy 的整个区间；
+- resource ID 由 DRM 层分配，destroy 时执行 detach/unref；
+- virtio-gpu control queue 访问由驱动内部锁串行化。
 
 **调用者**：
-- `DisplayDevice::fb()` 的实现 — 由 `try_new()` 保证地址有效
+- DRM dumb-buffer 生命周期管理代码
 
 ### 3. `VirtIoNetDev::try_new()` 中的 `receive_begin`（`net.rs:216`）
 
@@ -205,11 +203,9 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 1. **缓冲区-令牌对应**：`rx_buffers[token]` 和 `tx_buffers[token]` 中的缓冲区
    必须与 VirtIO 队列中对应 token 的缓冲区一致。违反此不变量会导致设备读写
    错误内存区域。
-2. **帧缓冲区有效性**：`VirtIoGpuDev.info.fb_base_vaddr` 指向的内存必须在设备
-   存活期间保持有效且可写。
-3. **MMIO 地址有效性**：`probe_mmio_device` 的 `reg_base` 必须指向有效的
+2. **MMIO 地址有效性**：`probe_mmio_device` 的 `reg_base` 必须指向有效的
    MMIO 寄存器区域，且在设备使用期间不被释放。
-4. **NetBuf handle 唯一性**：`NetBuf::from_handle` 的调用者必须保证传入的
+3. **NetBuf handle 唯一性**：`NetBuf::from_handle` 的调用者必须保证传入的
    handle 有效且未被重复使用。
 
 ## 线程安全
@@ -234,7 +230,7 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 | T-01 | 传入无效 MMIO 地址导致 `probe_mmio_device` 访问非法内存 | 高 | 调用者传入未映射或错误的物理地址 | 调用者（平台初始化）负责验证地址；`MmioTransport::new` 内部验证魔数 |
 | T-02 | 网络设备缓冲区-令牌不匹配导致设备 DMA 到错误内存 | 高 | `rx_buffers`/`tx_buffers` 数组索引与 VirtIO 队列 token 不一致 | `try_new()` 中 `assert_eq!(token, i as u16)` 验证初始映射；`recycle_rx`/`recycle_tx` 从数组取缓冲区时检查 `is_some()` |
 | T-03 | `NetBuf::from_handle` 使用无效或重复 handle | 高 | 上层网络栈重复使用已消费的 handle | 由调用者保证 handle 唯一性；`from_handle` 为 unsafe，调用者承担证明责任 |
-| T-04 | GPU 帧缓冲区指针悬空 | 高 | 设备 Drop 后仍持有 `FrameBuffer` 引用 | `FrameBuffer` 生命周期绑定 `&self`，Rust 借用检查器阻止悬空引用 |
+| T-04 | scanout resource backing 悬空 | 高 | backing 在 `destroy_scanout_resource` 前被释放 | backing 由 `GlobalPage` 持有，生命周期覆盖 attach 到 destroy 全程，由 DRM/fbdev 层保证；destroy 失败会记录日志而非静默吞掉 |
 | T-05 | 中断上下文与正常路径并发访问 net 设备导致数据竞争 | 中 | IRQ 回调与 `send`/`recv` 同时执行 | `InnerDev` 被 `SpinNoIrq` 包裹，所有访问通过 `lock()` 互斥 |
 | T-06 | IRQ 注册失败后仍使用设备 | 中 | `register_virtio_net_irq` 返回 `ResourceBusy` | `try_new()` 传播错误，设备不会被创建 |
 | T-07 | 网络设备 `free_tx_bufs` 耗尽导致发送失败 | 低 | 所有 tx 缓冲区都在飞行中 | `alloc_tx_buf` 返回 `DriverError::NoMemory`，上层应等待 `recycle_tx` 后重试 |

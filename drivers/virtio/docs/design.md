@@ -143,25 +143,29 @@ Idle ──read_block/write_block──> Pending ──设备响应──> Compl
 
 > 块设备为同步模型：每次请求阻塞等待完成，无并发请求。
 
-### GPU 设备帧缓冲状态
+### GPU 设备 scanout resource 状态
 
 ```
-Uninit ──setup_framebuffer──> FBReady ──fb()──> Mapped ──flush──> FBReady
-                                    │                          │
-                                    │    设备错误               │  设备错误
-                                    └─────> Failed <───────────┘
+Uninit ──probe/query resolution──> Ready
+Ready ──create_scanout_resource──> ResourceAttached
+ResourceAttached ──present_scanout_resource──> ScanningOut
+ScanningOut ──present_scanout_resource(new resource)──> ScanningOut
+ResourceAttached / ScanningOut ──destroy_scanout_resource──> Ready
+Ready / ResourceAttached / ScanningOut ──设备错误──> Failed
 ```
 
 | 从 | 到 | 触发条件 |
 |----|----|----------|
-| Uninit | FBReady | `try_new()` 中 `setup_framebuffer()` 成功，获取帧缓冲地址和分辨率 |
-| FBReady | Mapped | 调用 `fb()` 获取 `FrameBuffer` 可变引用，上层写入像素数据 |
-| Mapped | FBReady | `FrameBuffer` 引用生命周期结束（drop），缓冲区不再被借用 |
-| FBReady | FBReady | 调用 `flush()` 将脏区域刷新到显示设备 |
-| FBReady / Mapped | Failed | 设备返回不可恢复错误 |
+| Uninit | Ready | `try_new()` 完成 feature 协商、virtqueue 初始化并查询分辨率 |
+| Ready | ResourceAttached | DRM dumb buffer backing 被创建并 attach 到 virtio-gpu 2D resource |
+| ResourceAttached | ScanningOut | DRM modeset/page-flip 触发 transfer-to-host、set-scanout 和 flush |
+| ScanningOut | ScanningOut | page flip 切换到另一个已 attach 的 resource |
+| ResourceAttached / ScanningOut | Ready | dumb buffer 销毁，resource detach/unref |
+| Ready / ResourceAttached / ScanningOut | Failed | 设备返回不可恢复错误 |
 
-> GPU 设备的帧缓冲在 `try_new()` 时一次性分配，之后通过 `fb()` 返回引用供上层写入，
-> `flush()` 将修改刷新到显示。`FrameBuffer` 的生命周期绑定 `&self`，防止并发写入。
+> GPU 驱动不再在 `try_new()` 中创建固定 framebuffer。像素内存由 DRM dumb buffer
+> 分配并 mmap 给用户态，virtio-gpu resource 直接 attach 这段 backing。page flip
+> 只提交 transfer-to-host、set-scanout 和 resource-flush 命令，不再做 CPU framebuffer copy。
 
 ### Input 设备事件队列状态
 
@@ -294,23 +298,28 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 
 > 块设备为同步模型：每次请求阻塞等待完成，无并发 I/O。
 
-### GPU 设备帧缓冲
+### GPU 设备 scanout resource
 
 **初始化流程**：
 
-1. `try_new(transport)` → `InnerDev::new(transport)`：协商 feature、分配 VirtIO 队列
-2. `setup_framebuffer()`：向设备请求帧缓冲，获取 DMA 缓冲区指针和大小
-3. `resolution()`：查询显示分辨率 `(width, height)`
-4. 将 `fb_base_vaddr`、`fb_size`、`width`、`height` 封装为 `DisplayInfo`
+1. `try_new(transport)`：协商 feature、分配 control/cursor virtqueue
+2. `GET_DISPLAY_INFO`：查询显示分辨率 `(width, height)`
+3. 将 `width`、`height` 封装为 `DisplayInfo { width, height }`。
+   virtio-gpu 是 scanout-only 设备，不暴露直接 framebuffer 映射——`DisplayDevice`
+   trait 不再包含 `fb()` / 直接映射字段，所有像素输出经 scanout resource 路径
+   （由 `fbdevice` 的 fbdev emulation 和 `drmdevice` 共享使用）。
 
-**帧缓冲访问流程**：
+**resource-backed 显示流程**：
 
-1. 调用 `fb()` → 从 `DisplayInfo` 中的 `fb_base_vaddr` 和 `fb_size` 构造 `FrameBuffer<'_>`
-2. 上层通过 `FrameBuffer` 可变引用写入像素数据
-3. 写入完成后调用 `flush()`，将脏区域刷新到显示设备
-4. `FrameBuffer` 引用生命周期绑定 `&self`，drop 后自动释放借用
+1. DRM `CREATE_DUMB` 分配连续 guest pages，并调用 `create_scanout_resource()`
+2. virtio-gpu 发送 `RESOURCE_CREATE_2D` 和 `RESOURCE_ATTACH_BACKING`
+3. 用户态 mmap dumb buffer 并写入像素
+4. DRM modeset/page-flip 调用 `present_scanout_resource()`
+5. virtio-gpu 发送 `TRANSFER_TO_HOST_2D`、`SET_SCANOUT` 和 `RESOURCE_FLUSH`
+6. DRM `DESTROY_DUMB` 调用 `destroy_scanout_resource()`，发送 detach/unref
 
-> 帧缓冲在 `try_new()` 时一次性分配，`fb()` 仅返回引用，不涉及额外分配。
+> resource ID 由 DRM 层分配并随 dumb buffer 生命周期释放；virtio-gpu 驱动负责把这些
+> resource 命令串行提交到 control virtqueue。
 
 ### 输入设备事件读取
 

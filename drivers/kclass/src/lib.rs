@@ -326,29 +326,33 @@ impl DisplayDevice for ClassDevice<DisplayDeviceImpl> {
         self.with(|device| device.info())
     }
 
-    fn fb(&self) -> display::FrameBuffer<'_> {
-        let info = self.info();
-        // SAFETY: The framebuffer mapping `(fb_base_vaddr, fb_size)` is a
-        // stable runtime device resource installed by the display driver
-        // during probe and torn down only when the device is removed.
-        // While the returned `FrameBuffer` is alive the caller holds an
-        // `Arc<ClassDeviceInner<DisplayDeviceImpl>>` (via `Self`), so the
-        // underlying display device cannot be removed and the mapping is
-        // guaranteed to remain valid for `fb_size` bytes starting at
-        // `fb_base_vaddr`. The framebuffer is only mutated through
-        // `flush()`, and the driver serializes that access with its own
-        // interior lock, so no other code mutates this region concurrently.
-        unsafe {
-            display::FrameBuffer::from_raw_parts_mut(info.fb_base_vaddr as *mut u8, info.fb_size)
-        }
-    }
-
     fn need_flush(&self) -> bool {
         self.with(|device| device.need_flush())
     }
 
     fn flush(&self) -> DriverResult {
         self.with(|device| device.flush())
+    }
+
+    fn create_scanout_resource(
+        &self,
+        resource: display::ScanoutResource,
+        paddr: u64,
+        length: u32,
+    ) -> DriverResult {
+        self.with(|device| device.create_scanout_resource(resource, paddr, length))
+    }
+
+    fn destroy_scanout_resource(&self, resource_id: u32) -> DriverResult {
+        self.with(|device| device.destroy_scanout_resource(resource_id))
+    }
+
+    fn present_scanout_resource(
+        &self,
+        resource_id: u32,
+        rect: display::ScanoutRect,
+    ) -> DriverResult {
+        self.with(|device| device.present_scanout_resource(resource_id, rect))
     }
 }
 

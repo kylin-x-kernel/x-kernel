@@ -4,9 +4,9 @@
 
 //! DRM (Direct Rendering Manager) device subsystem.
 //!
-//! Provides a minimal simpledrm-class driver (`Card0`) over the existing
-//! `fbdevice` framebuffer. Covers legacy libdrm and atomic-KMS paths
-//! used by modern compositors.
+//! Provides a minimal resource-backed DRM/KMS driver (`Card0`) over the
+//! registered display scanout backend. Covers legacy libdrm and atomic-KMS
+//! paths used by modern compositors.
 
 #![no_std]
 
@@ -19,5 +19,5 @@ pub use card0::Card0;
 
 /// Returns whether a display device is available for DRM to use.
 pub fn available() -> bool {
-    fbdevice::fb_available()
+    card0::scanout_available()
 }

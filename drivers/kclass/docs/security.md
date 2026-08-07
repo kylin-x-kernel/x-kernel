@@ -18,10 +18,8 @@
 │  │   trait delegation       │
 │  └─ Event bridge dispatch   │
 │                             │
-│ unsafe boundary             │
-│  └─ DisplayDevice::fb()     │
-│      FrameBuffer from raw   │
-│      vaddr                   │
+│ (no unsafe boundary in      │
+│  kclass — see below)        │
 └──────────────┬──────────────┘
                │
                │ query / subscribe / trait calls
@@ -33,7 +31,6 @@
   `parent` 的 `driver_name()` / `driver_id()` 已设置且驱动匹配已通过 `kdevice` 校验。
 - `kclass` 信任 runtime trait object 实现了 `Send + Sync` 且内部并发安全。
 - `kclass` 信任 `kdevice` 的 `Activated` / `Removed` 事件在正确的时序分发。
-- `kclass` 信任 `display` crate 的 `FrameBuffer::from_raw_parts_mut` 调用者满足其 safety precondition。
 - 上层子系统信任 `kclass` 返回的 `ClassDevice<T>` 在设备 remove 后仍可安全访问（通过 `Arc<DeviceObject>` 持有保证）。
 
 ## 外部边界 / 攻击面
@@ -48,59 +45,21 @@
   kclass 信任 kdevice 在状态迁移完成后才分发事件。
 - **ClassDevice trait delegation**：上层子系统通过 `ClassDevice<T>` 调用 trait 方法时，
   委托到 runtime trait object。kclass 自身不做参数校验——信任各 subsystem 和驱动完成校验。
-- **framebuffer 裸指针**：`DisplayDevice::fb()` 从 `DisplayInfo` 中获取 `fb_base_vaddr` 和 `fb_size`
-  并构造 `FrameBuffer`。这是 kclass 唯一的 unsafe 边界。
 
 威胁分析重点应覆盖：
 
-- framebuffer 裸指针构造是否可能因驱动提供非法地址导致 UB；
 - 事件桥接的回调是否可能在错误的设备状态下被触发；
 - `ClassDevice` 的 `Arc` 生命周期是否可能在设备 remove 后产生悬垂引用；
 - 注册表 publish replace 语义是否可能丢失设备或触发双重回调。
 
 ## unsafe 代码清单
 
-### 1. DisplayDevice framebuffer — 从 raw vaddr 构造 FrameBuffer
-
-位置：`src/lib.rs:313-325`
-
-```rust
-// SAFETY: The framebuffer mapping `(fb_base_vaddr, fb_size)` is a
-// stable runtime device resource installed by the display driver
-// during probe and torn down only when the device is removed.
-// While the returned `FrameBuffer` is alive the caller holds an
-// `Arc<ClassDeviceInner<DisplayDeviceImpl>>` (via `Self`), so the
-// underlying display device cannot be removed and the mapping is
-// guaranteed to remain valid for `fb_size` bytes starting at
-// `fb_base_vaddr`.
-unsafe {
-    display::FrameBuffer::from_raw_parts_mut(info.fb_base_vaddr as *mut u8, info.fb_size)
-}
-```
-
-不变量：
-
-- `fb_base_vaddr` 和 `fb_size` 来自 `DisplayInfo`，由 display 驱动在 probe 阶段通过
-  `devm_iomap` 或等效路径分配，仅在设备 remove 时通过 devres LIFO 释放。
-- `ClassDevice` 持有 `Arc<ClassDeviceInner<DisplayDeviceImpl>>`，
-  `ClassDeviceInner` 持有 `Arc<DeviceObject>`。
-  只要 `ClassDevice` / `FrameBuffer` 存在，`DeviceObject` 的强引用就存在，
-  设备不会被 remove，framebuffer 映射保持有效。
-- `fb()` 返回的 `FrameBuffer` 生命周期受 Rust 借用规则约束：
-  调用者不能在持有 `FrameBuffer`（对 framebuffer 的可变引用）的同时
-  通过其他路径访问同一 framebuffer。
-- `fb_size` 字节从 `fb_base_vaddr` 开始的内存区域在映射生命周期内完全可访问。
-
-安全依据：
-
-- `from_raw_parts_mut` 的 safety precondition 要求指针指向有效、独占的可变内存且大小为 `fb_size`。
-  `devm_iomap` 保证映射到有效的物理 MMIO 区域；
-  `Arc<DeviceObject>` 生命周期保证映射在 `FrameBuffer` 存活期间不被释放。
-- 独占性由 display 驱动的内部锁保证——framebuffer 的并发访问由驱动串行化。
-
-调用者：
-
-- `DisplayDevice::fb()` → 被 display 消费者（如图形子系统）调用。
+kclass 自身不包含任何 `unsafe` 代码块。历史上 `DisplayDevice::fb()` 曾通过
+`display::FrameBuffer::from_raw_parts_mut` 从裸 vaddr 构造 framebuffer 引用，
+该路径已随 framebuffer 直接映射抽象的移除而删除：`/dev/fb0` 现由 `fbdevice` 的
+fbdev emulation（shadow buffer + scanout resource）实现，framebuffer 裸指针构造的
+unsafe 边界随之消失，相关安全责任转移到 `fbdevice`（shadow buffer 由 `GlobalPage`
+RAII 管理，生命周期与内核等长）。
 
 ## 内存安全不变量
 
@@ -113,13 +72,11 @@ unsafe {
    设备状态变为 `Removing`/`Removed` 后 trait 方法可能返回错误，但不会产生 UB。
 3. **注册表锁内操作不回调**：`publish`、`remove` 在 `SpinNoPreempt` 锁内完成，
    不调用外部 callback。callback 在锁外执行。
-4. **framebuffer vaddr 有效性**：`fb_base_vaddr` 仅在设备 remove 时释放；
-   `ClassDevice` 持有的 `Arc<DeviceObject>` 阻止提前释放。
-5. **事件分发无重入**：`notify_class_available` 在 callback 调用前已释放注册表锁，
+4. **事件分发无重入**：`notify_class_available` 在 callback 调用前已释放注册表锁，
    callback 中对同一注册表的访问不会死锁。
-6. **publish replace 原子性**：同一 `DeviceId` 的 replace 操作在单次锁持有中完成，
+5. **publish replace 原子性**：同一 `DeviceId` 的 replace 操作在单次锁持有中完成，
    外部观察者不会看到中间状态（旧设备已移除但新设备未插入）。
-7. **device_kind 校验**：`publish_<class>()` 在构造 `ClassDevice` 前校验 runtime 的
+6. **device_kind 校验**：`publish_<class>()` 在构造 `ClassDevice` 前校验 runtime 的
    `device_kind` 与注册表类型匹配，不匹配时返回 `InvalidInput` 而不发布。
 
 ## 线程安全
@@ -136,7 +93,6 @@ unsafe {
 
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 |------|----------|----------|----------|----------|
-| T-01 | display 驱动提供非法 `fb_base_vaddr` 导致 `from_raw_parts_mut` UB | 高 | 驱动 probe 中分配的 framebuffer 地址非法或映射已释放 | `fb_base_vaddr` 由 `devm_iomap` 保证合法性；`Arc<DeviceObject>` 生命周期保证映射在 `FrameBuffer` 存活期间有效 |
 | T-02 | 事件桥接在 `kdevice` 未初始化时被触发 | 高 | `ensure_event_bridge` 在 `kdevice::init_device_registry` 之前调用 | kdriver 调用 `publish_*` 前已执行 `init_device_registry`；`ACTIVATION_BRIDGE` 惰性初始化在首次 publish 时触发 |
 | T-03 | 注册表 publish 竞态导致设备丢失或重复 | 中 | 同一设备并发 publish | `SpinNoPreempt` 串行化，replace 语义保证同 ID 只有一个条目 |
 | T-04 | subscriber callback 中 panic 导致后续 subscriber 未被通知 | 中 | 某个 callback panic，其余 callback 在 `for` 循环中未执行 | callback 在 `catch_unwind` 之外执行；当前无 unwind 保护，依赖 subscriber 实现质量 |
@@ -159,7 +115,6 @@ unsafe {
 | F-02 | publish 时 device_kind 不匹配 | 驱动将 net 设备传入 `publish_block` | publish 返回 `InvalidInput` | 该设备无法发布 | 4 | `kind` 校验在构造 `ClassDevice` 前完成 |
 | F-03 | 事件桥接未注册 | `ensure_event_bridge` 未被调用（无 class feature 启用） | 无 Activated/Removed 事件分发 | 设备状态变更不影响 class 注册表 | 4 | `ensure_event_bridge` 在每个 `*_registry_fn()` 中调用 |
 | F-04 | subscriber 回调 panic | 回调实现有 bug 导致 unwinding | 后续 subscriber 未被通知 | 部分子系统可能未收到设备可用通知 | 3 | 回调按 Vec 顺序调用；当前未使用 `catch_unwind`；依赖 subscriber 质量 |
-| F-05 | framebuffer 映射在 fb() 调用时已释放 | 设备 remove 与 fb() 调用竞态 | `from_raw_parts_mut` 收到悬垂 vaddr | UB | 3 | `Arc<DeviceObject>` 强引用保证 remove 在有活跃引用时不能完成 |
 | F-06 | 注册表 `devices()` 返回过大的 Vec | 大量设备同时活跃 | 内存分配可能失败 | 调用者收到空 Vec（当前无 OOM 处理） | 4 | `Vec::collect` 可能失败；上层调用者应处理空结果 |
 | F-07 | publish replace 后旧 `ClassDevice` 仍被外部引用 | 正常行为：外部持有旧克隆 | 旧 `ClassDevice` 可能指向已废弃的 runtime | 取决于外部使用方如何处理旧引用 | 4 | 这是设计行为：replace 从注册表移除旧条目但不失效已有引用 |
 | F-08 | input metadata 缺失 | 非 input class 未实现 `class_metadata` 覆盖 | `physical_location()` / `unique_id()` 返回空字符串 | input 设备身份信息缺失 | 4 | `ClassRuntimeMetadata` 默认实现返回 `empty()`；input class 显式覆盖 |
@@ -178,7 +133,8 @@ unsafe {
 - subscriber callback 的 panic 当前无 unwind 保护，依赖 subscriber 实现质量。
 - `ClassDevice` 的 `driver_name()` / `driver_id()` 使用 `expect`——前提是 publish 时已校验，
   如果触发 expect 说明存在 bug（publish 路径未正确校验）。
-- framebuffer `from_raw_parts_mut` 是唯一可能产生 UB 的路径，依赖 SAFETY 注释中记录的不变量。
+- kclass 自身不含 `unsafe` 代码块，因此不会因 class adapter 逻辑产生 UB；
+  历史上的 framebuffer 裸指针路径已迁移到 `fbdevice` 的 fbdev emulation。
 
 ## 隐私分析
 

@@ -22,6 +22,7 @@ socket = ["alloc", "dep:vsock"]
 virtio-9p = ["alloc"]
 
 [dependencies]
+bitflags = { workspace = true }
 driver_base = { workspace = true }
 device_res = { workspace = true }
 block = { workspace = true, optional = true }

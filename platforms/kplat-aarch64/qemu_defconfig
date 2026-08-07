@@ -14,6 +14,9 @@ KERNEL_STACK_SIZE=0x40000
 # KFEAT_ALLOC_BUDDY is not set
 # KFEAT_ALLOC_TLSF is not set
 # KFEAT_DICE is not set
+# Weston graphics requires the virtio GPU and input drivers.
+KFEAT_DRIVER_VIRTIO_GPU=y
+KFEAT_DRIVER_VIRTIO_INPUT=y
 # KFEAT_FS_FAT is not set
 KFEAT_FS_TIMES=y
 KFEAT_NET=y
