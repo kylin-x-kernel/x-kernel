@@ -330,7 +330,11 @@ mod tests {
             let mut buf = alloc::vec![0u8; len];
             fill_random(&mut buf);
             assert_eq!(buf.len(), len);
-            assert!(buf.iter().any(|&b| b != 0), "all-zero output for len {len}");
+            // A single uniform random byte is zero with probability 1/256, so
+            // only assert non-degenerate output for multi-byte fills.
+            if len > 1 {
+                assert!(buf.iter().any(|&b| b != 0), "all-zero output for len {len}");
+            }
         }
     }
 
