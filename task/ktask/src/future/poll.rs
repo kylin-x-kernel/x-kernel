@@ -4,12 +4,10 @@
 
 //! Async helpers built on top of pollable I/O and IRQ wakers.
 
-use alloc::collections::{BTreeMap, btree_map::Entry};
 use core::{future::poll_fn, task::Poll};
 
 use kerrno::{KError, KResult};
-use kpoll::{IoEvents, PollContext, PollRegisterError, PollRegistrations, PollSet, Pollable};
-use kspin::SpinNoIrq;
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollRegistrations, Pollable};
 
 /// A helper to wrap a synchronous non-blocking I/O function into an
 /// asynchronous function.
@@ -63,34 +61,5 @@ pub fn register_irq_waker(
     irq: usize,
     context: &mut PollContext<'_>,
 ) -> Result<(), PollRegisterError> {
-    static POLL_IRQ: SpinNoIrq<BTreeMap<usize, PollSet>> = SpinNoIrq::new(BTreeMap::new());
-
-    fn irq_hook(irq: usize) {
-        let set = { POLL_IRQ.lock().get(&irq).cloned() };
-        if let Some(set) = set {
-            set.wake();
-        }
-    }
-
-    let set = {
-        let sets = POLL_IRQ.lock();
-        if let Some(existing) = sets.get(&irq) {
-            existing.clone()
-        } else {
-            drop(sets);
-            let set = PollSet::new();
-            let mut sets = POLL_IRQ.lock();
-            match sets.entry(irq) {
-                Entry::Vacant(entry) => {
-                    assert!(
-                        kirq::subscribe_wakeup(irq, irq_hook),
-                        "failed to subscribe IRQ wakeup for irq={irq}"
-                    );
-                    entry.insert(set).clone()
-                }
-                Entry::Occupied(entry) => entry.get().clone(),
-            }
-        }
-    };
-    context.register(&set)
+    kirq::register_irq_waker(irq, context)
 }

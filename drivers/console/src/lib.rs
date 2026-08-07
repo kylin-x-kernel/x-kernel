@@ -298,7 +298,7 @@ pub fn init_stdout_ioport(port: u16, irq: Option<IrqDesc>) {
     serial::register_early_stdout(Arc::new(uart), irq);
 }
 
-fn handle_input_irq() -> IrqEvent {
+fn handle_input_irq(_irq: usize) -> IrqEvent {
     if let Some(port) = serial::stdout_port() {
         port.ack_interrupt();
     }

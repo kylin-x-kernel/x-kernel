@@ -39,8 +39,8 @@ kprocess / posix/process / ksyscall / ktty
 3. **init 进程存在性**：普通进程 reparent 依赖 `INIT_PROC` 已初始化。
 4. **terminal 对象边界**：`Session::terminal` 保存 `Arc<dyn ControllingTerminal>`，只通过指针相等清除，不在 `kprocess` 内 downcast。
 5. **退出回收顺序**：`free` 只能作用于已退出进程，避免 still-running 子进程从父表中被移除。
-6. **lifecycle 事件归属稳定**：`child_exit_event` 与 `exit_event` 归属于 `Process`，
-   不依赖 `ProcessRuntime` 是否仍可升级。
+6. **lifecycle 事件归属稳定**：`child_exit_event` 事件流与 sticky `exit_event`
+   completion 归属于 `Process`，不依赖 `ProcessRuntime` 是否仍可升级。
 7. **弱 runtime 引用非拥有**：`Process` 只保存 `Weak<ProcessRuntime>`，
    不延长 runtime 生命周期；upgrade 失败时由上层折叠为 `NoSuchProcess` 等语义错误。
 8. **live 语义独立于弱 runtime 引用**：外部 `live process` 以 exited state 为准，
@@ -79,7 +79,7 @@ kprocess / posix/process / ksyscall / ktty
 | T-07 | wait 或 procfs 遍历读到过期 group member | 低 | WeakMap 中存在已释放对象的 weak entry | `ProcessGroup::processes` 通过 `WeakMap::values` 返回可升级对象，registry 另有 cleanup 路径 |
 | T-08 | 锁顺序误用导致死锁 | 中 | 外部持有 children、group 或 session 成员锁后调用 group/session mutation API | API 内部统一加锁；新增调用点应避免外层持有 `kprocess` 成员锁 |
 | T-09 | group-exit 退出码被普通线程退出覆盖 | 中 | group exit 后其他线程继续调用 `exit_thread` | `exit_thread` 在 `group_exited` 为 true 时不覆盖 `exit_code` |
-| T-10 | lifecycle 唤醒仍依赖 runtime-state 查找 | 中 | 退出路径先拿到 parent，却还要回查另一层状态对象 | lifecycle 事件已归属 `Process`，退出路径可直接 wake parent |
+| T-10 | lifecycle 唤醒仍依赖 runtime-state 查找 | 中 | 退出路径先拿到 parent，却还要回查另一层状态对象 | lifecycle 事件已归属 `Process`，退出路径可直接 wake parent；process exit observer 使用 sticky completion 支持 late pidfd waiter |
 | T-12 | 进程 live-state 入口依赖 thread-table 反推 | 中 | PID 可见后仍需通过线程集合和 task table 回查 live state | `Process` 现在直接持有 typed runtime attachment，避免把 task table 当作 live-state 真相 |
 | T-13 | 已退出进程因 runtime 尚未释放而被误判为 live | 中 | 退出尾段里当前线程仍强持有 `ProcessRuntime`，但进程已经进入 exited state | `live` 查询只看 exited state；runtime attachment 仅供内部 capability upgrade |
 | T-14 | 多目录分步发布暴露 task/process 可见性裂缝 | 中 | parent 已观察到新 tid/pidfd，但 task/process/group/session 目录仍未统一可见 | `ProcessPublication` 用单锁事务同时更新可观测目录；`clone` 在 publication 完成后才回写 `PARENT_SETTID` / `PIDFD` |

@@ -183,6 +183,12 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
 - SMP 下唤醒优先入任务阻塞时保留的 owner CPU（`task.cpu_id()`）；若 cpumask 已不含该 CPU，则回退到普通 `select_run_queue` 轮询选队。
 - `unblock_task(..., true)` 对本 CPU 设置 `need_resched`；对远端 CPU 在 `ipi + preempt` 可用时请求远端设置 `need_resched`。
 - `WaitQueue` 基于 `event_listener` 封装等待与通知，支持超时与条件等待。
+- `TaskInner::join()` 使用 `kpoll::Completion` 作为 per-task exit wait source。任务退出时先发布
+  `exit_code`，再把 state 切到 `Exited` 并 `complete_all()`；joiner 的真实完成条件仍是
+  `TaskState::Exited`，completion 只负责避免丢失 wake 并支持 late joiner。
+- `ktask` 通过 `kirq::IrqSyncWaitIf` 提供 completion-backed blocking wait，使
+  `kirq::synchronize_irq()` / `free_irq()` 能阻塞当前 task；IRQ descriptor 生命周期和
+  `in_flight` predicate 仍由 `kirq` 拥有。
 
 ### 6) 退出回收（GC task）
 
@@ -194,6 +200,8 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
 - 通过 `WAIT_FOR_EXIT` waker 休眠/唤醒
 
 这是一种延迟回收模型，避免在退出与切换关键路径直接执行慢释放。
+`WAIT_FOR_EXIT` 保持 `PollSet` 事件语义，因为同一 CPU 的 GC task 会连续观察多批退出任务；
+它不同于单个 task 的 sticky exit completion。
 
 ## SMP 语义
 

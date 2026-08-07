@@ -2,24 +2,31 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Poll readiness and one-shot waiter registration.
+//! Poll readiness, one-shot waiter registration, and completion sources.
 //!
 //! [`PollSet`] is an IRQ-safe broadcast source. Each logical wait owns a
 //! [`PollRegistrations`] value and uses a short-lived [`PollContext`] to
 //! register with one or more sources. This ownership model guarantees that
 //! timeout, interruption, successful rechecks, and future cancellation all
 //! unregister waiters.
+//!
+//! [`Completion`] adds Linux-like completion token semantics on top of the
+//! same poll registration model. It is intentionally scheduler-agnostic so
+//! low-level kernel subsystems can own completion state without depending on
+//! task blocking APIs.
 
 #![no_std]
 #![deny(missing_docs)]
 
 extern crate alloc;
 
+mod completion;
 mod events;
 mod registration;
 mod source;
 mod tests;
 
+pub use completion::Completion;
 pub use events::IoEvents;
 pub use registration::{PollContext, PollRegisterError, PollRegistration, PollRegistrations};
 pub use source::PollSet;

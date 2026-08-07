@@ -27,7 +27,7 @@ use kerrno::KResult;
 use khal::context::TaskContext;
 #[cfg(feature = "tls")]
 use khal::tls::TlsArea;
-use kpoll::{PollRegistrations, PollSet};
+use kpoll::{Completion, PollRegistrations, PollSet};
 use kspin::SpinNoIrq;
 use memaddr::{VirtAddr, align_up_4k};
 
@@ -242,7 +242,7 @@ pub struct TaskInner {
     interrupt_waker: PollSet,
 
     exit_code: AtomicI32,
-    wait_for_exit: PollSet,
+    wait_for_exit: Completion,
 
     kstack: Option<TaskStack>,
     ctx: TaskContextCell,
@@ -422,7 +422,7 @@ impl TaskInner {
                     return Poll::Ready(self.exit_code.load(Ordering::Acquire));
                 }
                 let mut context = registrations.context(cx);
-                if context.register(&self.wait_for_exit).is_err() {
+                if self.wait_for_exit.register(&mut context).is_err() {
                     drop(context);
                     // Under memory pressure, yield and retry rather than
                     // busy-spinning on `wake_by_ref` without a registration.
@@ -635,7 +635,7 @@ impl TaskInner {
             interrupted: AtomicBool::new(false),
             interrupt_waker: PollSet::new(),
             exit_code: AtomicI32::new(0),
-            wait_for_exit: PollSet::new(),
+            wait_for_exit: Completion::new(),
             kstack: None,
             ctx: TaskContextCell::new(),
             #[cfg(feature = "tls")]
@@ -798,9 +798,9 @@ impl TaskInner {
 
     /// Notify all tasks that join on this task.
     pub(crate) fn notify_exit(&self, exit_code: i32) {
-        self.set_state(TaskState::Exited);
         self.exit_code.store(exit_code, Ordering::Release);
-        self.wait_for_exit.wake();
+        self.set_state(TaskState::Exited);
+        self.wait_for_exit.complete_all();
     }
 
     #[inline]

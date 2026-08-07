@@ -1950,16 +1950,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "irq-notify"
-version = "0.2.0-dev"
-dependencies = [
- "device-res",
- "kpoll",
- "kspin 0.2.0-dev",
- "unittest",
-]
-
-[[package]]
 name = "is-terminal"
 version = "0.4.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2165,7 +2155,6 @@ dependencies = [
  "display",
  "driver_base",
  "input",
- "irq-notify",
  "kalloc",
  "kbuild_config",
  "kclass",
@@ -2488,6 +2477,7 @@ version = "0.2.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "kiface",
+ "kpoll",
  "kspin 0.2.0-dev",
  "log",
  "percpu",
@@ -2539,18 +2529,17 @@ dependencies = [
  "async-channel",
  "async-trait",
  "bitflags 2.13.1",
- "device-res",
  "enum_dispatch",
  "etherparse",
  "event-listener",
  "hashbrown 0.16.1",
- "irq-notify",
  "kclass",
  "kcred",
  "kdevice",
  "kerrno",
  "khal",
  "kio",
+ "kirq",
  "klazy",
  "kpoll",
  "kprocess",

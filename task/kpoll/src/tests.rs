@@ -9,12 +9,12 @@
 use alloc::{boxed::Box, vec::Vec};
 use core::{
     sync::atomic::{AtomicUsize, Ordering},
-    task::{RawWaker, RawWakerVTable, Waker},
+    task::{Context, RawWaker, RawWakerVTable, Waker},
 };
 
 use unittest::{assert, assert_eq, def_test};
 
-use super::PollSet;
+use super::{Completion, PollRegistrations, PollSet};
 
 fn new_counter() -> &'static AtomicUsize {
     Box::leak(Box::new(AtomicUsize::new(0)))
@@ -168,4 +168,149 @@ fn test_source_drop_wakes_waiter() {
     };
     assert_eq!(counter.load(Ordering::SeqCst), 1);
     assert!(!registration.cancel());
+}
+
+#[def_test]
+fn test_completion_initial_state_is_not_ready() {
+    let completion = Completion::new();
+
+    assert!(!completion.is_completed());
+    assert!(!completion.try_wait());
+}
+
+#[def_test]
+fn test_completion_complete_releases_one_token() {
+    let completion = Completion::new();
+
+    assert_eq!(completion.complete(), 0);
+    assert!(completion.is_completed());
+    assert!(completion.try_wait());
+    assert!(!completion.is_completed());
+    assert!(!completion.try_wait());
+}
+
+#[def_test]
+fn test_completion_accumulates_tokens() {
+    let completion = Completion::new();
+
+    assert_eq!(completion.complete(), 0);
+    assert_eq!(completion.complete(), 0);
+
+    assert!(completion.try_wait());
+    assert!(completion.try_wait());
+    assert!(!completion.try_wait());
+}
+
+#[def_test]
+fn test_completion_complete_all_is_permanent_until_reinit() {
+    let completion = Completion::new();
+
+    assert_eq!(completion.complete_all(), 0);
+    assert!(completion.try_wait());
+    assert!(completion.try_wait());
+    assert!(completion.is_completed());
+
+    completion.reinit();
+    assert!(!completion.is_completed());
+    assert!(!completion.try_wait());
+}
+
+#[def_test]
+fn test_completion_complete_all_defer_wake_delays_waiter_wake() {
+    let completion = Completion::new();
+    let counter = new_counter();
+    let waker = make_waker(counter);
+    let registrations = register_completion_waiter(&completion, &waker);
+
+    let wake_set = completion.complete_all_defer_wake();
+    assert!(completion.is_completed());
+    assert_eq!(counter.load(Ordering::SeqCst), 0);
+
+    assert_eq!(wake_set.wake(), 1);
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+    drop(registrations);
+    assert!(completion.try_wait());
+}
+
+fn register_completion_waiter(completion: &Completion, waker: &Waker) -> PollRegistrations {
+    let mut registrations = PollRegistrations::new();
+    let context = Context::from_waker(waker);
+    completion
+        .register(&mut registrations.context(&context))
+        .unwrap();
+    registrations
+}
+
+#[def_test]
+fn test_completion_register_then_complete_wakes_waiter() {
+    let completion = Completion::new();
+    let counter = new_counter();
+    let waker = make_waker(counter);
+    let registrations = register_completion_waiter(&completion, &waker);
+
+    assert_eq!(completion.complete(), 1);
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+    drop(registrations);
+    assert!(completion.try_wait());
+}
+
+struct ReentrantCompletionWake {
+    completion: &'static Completion,
+    count: AtomicUsize,
+}
+
+unsafe fn reentrant_completion_clone(data: *const ()) -> RawWaker {
+    RawWaker::new(data, &REENTRANT_COMPLETION_VTABLE)
+}
+
+unsafe fn reentrant_completion_wake(data: *const ()) {
+    // SAFETY: the pointer is created from a leaked `ReentrantCompletionWake`.
+    let state = unsafe { &*(data as *const ReentrantCompletionWake) };
+    state.count.fetch_add(1, Ordering::SeqCst);
+    core::assert!(state.completion.try_wait());
+}
+
+unsafe fn reentrant_completion_wake_by_ref(data: *const ()) {
+    // SAFETY: same invariant as `reentrant_completion_wake`.
+    unsafe { reentrant_completion_wake(data) };
+}
+
+unsafe fn reentrant_completion_drop(_data: *const ()) {}
+
+static REENTRANT_COMPLETION_VTABLE: RawWakerVTable = RawWakerVTable::new(
+    reentrant_completion_clone,
+    reentrant_completion_wake,
+    reentrant_completion_wake_by_ref,
+    reentrant_completion_drop,
+);
+
+#[def_test]
+fn test_completion_wake_is_reentrant_after_unlock() {
+    let completion = Box::leak(Box::new(Completion::new()));
+    let state = Box::leak(Box::new(ReentrantCompletionWake {
+        completion,
+        count: AtomicUsize::new(0),
+    }));
+    let raw = RawWaker::new(state as *const _ as *const (), &REENTRANT_COMPLETION_VTABLE);
+    // SAFETY: the vtable operates on the leaked `ReentrantCompletionWake`.
+    let waker = unsafe { Waker::from_raw(raw) };
+    let _registrations = register_completion_waiter(completion, &waker);
+
+    assert_eq!(completion.complete(), 1);
+    assert_eq!(state.count.load(Ordering::SeqCst), 1);
+    assert!(!completion.try_wait());
+}
+
+#[def_test]
+fn test_completion_recheck_observes_complete_before_register() {
+    let completion = Completion::new();
+    let counter = new_counter();
+    let waker = make_waker(counter);
+
+    assert!(!completion.try_wait());
+    assert_eq!(completion.complete(), 0);
+
+    let _registrations = register_completion_waiter(&completion, &waker);
+    assert!(completion.try_wait());
+    assert_eq!(counter.load(Ordering::SeqCst), 0);
 }

@@ -15,13 +15,8 @@
 //! removal releases the resource automatically and in reverse acquisition
 //! order.
 
-use alloc::{sync::Arc, vec, vec::Vec};
-use core::{
-    alloc::Layout,
-    array,
-    ptr::NonNull,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use alloc::sync::Arc;
+use core::{alloc::Layout, ptr::NonNull};
 
 use device_res::{
     DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, IrqController as DevIrqController,
@@ -31,63 +26,11 @@ use device_res::{
 };
 use driver_base::{DriverError, DriverResult};
 use kdevice::DeviceObject;
-use kspin::SpinNoIrq;
 
 /// x-kernel implementation of the OS-agnostic resource provider.
 struct HostResourceProvider;
 
 static HOST_PROVIDER: HostResourceProvider = HostResourceProvider;
-
-const IRQ_MAX_SHARED_HANDLERS: usize = 4;
-
-struct IrqLine {
-    virq: usize,
-    state: Arc<IrqLineState>,
-}
-
-struct IrqLineState {
-    handlers: SpinNoIrq<Vec<IrqLineHandler>>,
-}
-
-struct IrqLineHandler {
-    token: IrqHandlerToken,
-    handler: Arc<dyn DevIrqHandler>,
-}
-
-impl IrqLineState {
-    fn dispatch(&self, virq: usize) -> DevIrqEvent {
-        let (handlers, handler_count) = {
-            let registered = self.handlers.lock();
-            let mut handlers: [Option<Arc<dyn DevIrqHandler>>; IRQ_MAX_SHARED_HANDLERS] =
-                array::from_fn(|_| None);
-            for (dst, src) in handlers.iter_mut().zip(registered.iter()) {
-                *dst = Some(src.handler.clone());
-            }
-            (handlers, registered.len())
-        };
-
-        let mut event = DevIrqEvent::NOT_HANDLED;
-        for handler in handlers.into_iter().take(handler_count).flatten() {
-            event.merge(handler.handle());
-        }
-        if event.handled() {
-            irq_notify::dispatch_sources(virq, event.sources());
-        }
-        event
-    }
-}
-
-static IRQ_LINES: SpinNoIrq<Vec<IrqLine>> = SpinNoIrq::new(Vec::new());
-static NEXT_IRQ_HANDLER_TOKEN: AtomicUsize = AtomicUsize::new(1);
-
-fn next_irq_handler_token() -> ResResult<IrqHandlerToken> {
-    NEXT_IRQ_HANDLER_TOKEN
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-            current.checked_add(1)
-        })
-        .map(IrqHandlerToken::new)
-        .map_err(|_| ResError::NoMemory)
-}
 
 impl MmioOp for HostResourceProvider {
     fn map_mmio(&self, region: MmioRegion, name: &'static str) -> ResResult<MmioMapping> {
@@ -179,68 +122,47 @@ impl IrqOp for HostResourceProvider {
         irq: IrqResource,
         handler: Arc<dyn DevIrqHandler>,
     ) -> ResResult<IrqHandlerToken> {
-        let mut lines = IRQ_LINES.lock();
-        if let Some(line) = lines.iter().find(|line| line.virq == irq.number) {
-            let mut handlers = line.state.handlers.lock();
-            if handlers.len() >= IRQ_MAX_SHARED_HANDLERS {
-                return Err(ResError::Busy);
-            }
-            let token = next_irq_handler_token()?;
-            handlers.push(IrqLineHandler { token, handler });
-            return Ok(token);
-        }
-
-        let token = next_irq_handler_token()?;
-        let state = Arc::new(IrqLineState {
-            handlers: SpinNoIrq::new(vec![IrqLineHandler { token, handler }]),
+        let dispatch_handler: Arc<dyn kirq::IrqHandler> = Arc::new(move |virq| {
+            let event = handler.handle(virq);
+            dev_irq_event_to_kirq(event)
         });
-        let dispatch_state = state.clone();
-        let virq = irq.number;
-        let dispatch_handler: Arc<dyn kirq::IrqHandler> =
-            Arc::new(move || map_devres_irq_event(dispatch_state.dispatch(virq)));
-        match kirq::try_register(map_irq_resource_to_spec(irq), dispatch_handler) {
-            Ok(true) => {}
-            Ok(false) => return Err(ResError::Busy),
+        match kirq::try_register_shared(irq_resource_to_kirq_spec(irq), dispatch_handler) {
+            Ok(Some(token)) => Ok(IrqHandlerToken::new(token.id())),
+            Ok(None) => Err(ResError::Busy),
             Err(err) => {
                 log::warn!("failed to register IRQ handler for {irq:?}: {err:?}");
-                return Err(map_irq_desc_error(err));
+                Err(map_irq_desc_error(err))
             }
         }
-        lines.push(IrqLine { virq, state });
-        Ok(token)
     }
 
     fn release_irq(&self, irq: IrqResource, token: IrqHandlerToken) {
-        let mut lines = IRQ_LINES.lock();
-        let Some(line_index) = lines.iter().position(|line| line.virq == irq.number) else {
-            return;
-        };
-        let mut handlers = lines[line_index].state.handlers.lock();
-        let Some(handler_index) = handlers.iter().position(|handler| handler.token == token) else {
-            return;
-        };
-        handlers.swap_remove(handler_index);
-        if !handlers.is_empty() {
-            return;
-        }
-        drop(handlers);
-        lines.swap_remove(line_index);
-        if kirq::unregister(irq.number).is_none() {
-            log::warn!("failed to unregister IRQ {}: no handler found", irq.number);
+        let action_token = kirq::IrqActionToken::new(token.id());
+        match kirq::try_free_irq_action(irq_resource_to_kirq_spec(irq), action_token) {
+            Ok(Some(_handler)) => {}
+            Ok(None) => {
+                log::warn!(
+                    "IRQ {} action token {} was not registered or was not released",
+                    irq.number,
+                    token.id()
+                );
+            }
+            Err(err) => {
+                panic!(
+                    "failed to release IRQ {} action token {}: {err:?}",
+                    irq.number,
+                    token.id()
+                );
+            }
         }
     }
 
     fn set_irq_enabled(&self, irq: IrqResource, enabled: bool) {
-        kirq::enable(map_irq_resource_to_spec(irq), enabled);
+        kirq::enable(irq_resource_to_kirq_spec(irq), enabled);
     }
 
     fn map_irq(&self, route: IrqRouteDesc) -> ResResult<IrqResource> {
-        let domain = map_irq_domain(route.controller);
-        let mut desc = kirq::IrqDesc::new(route.hwirq, map_irq_trigger(route.trigger))
-            .with_controller(map_irq_controller(route.controller));
-        if let Some(domain) = domain {
-            desc = desc.with_domain(domain);
-        }
+        let desc = irq_route_to_kirq_desc(route);
         let virq = kirq::try_map(desc).map_err(|err| {
             log::warn!("failed to map IRQ route {route:?}: {err:?}");
             map_irq_desc_error(err)
@@ -287,6 +209,73 @@ impl IrqOp for HostResourceProvider {
     }
 }
 
+fn dev_irq_trigger_to_kirq(trigger: DevIrqTrigger) -> kirq::IrqTrigger {
+    match trigger {
+        DevIrqTrigger::EdgeRising => kirq::IrqTrigger::EdgeRising,
+        DevIrqTrigger::EdgeFalling => kirq::IrqTrigger::EdgeFalling,
+        DevIrqTrigger::LevelHigh => kirq::IrqTrigger::LevelHigh,
+        DevIrqTrigger::LevelLow => kirq::IrqTrigger::LevelLow,
+        DevIrqTrigger::Unknown(flags) => kirq::IrqTrigger::Unknown(flags),
+    }
+}
+
+fn dev_irq_controller_to_kirq(controller: DevIrqController) -> kirq::IrqController {
+    match controller {
+        DevIrqController::Gic => kirq::IrqController::Gic,
+        DevIrqController::Plic => kirq::IrqController::Plic,
+        DevIrqController::IoApic => kirq::IrqController::IoApic,
+        DevIrqController::LoongArchExtioi => kirq::IrqController::LoongArchExtioi,
+        DevIrqController::Unknown => kirq::IrqController::Unknown,
+    }
+}
+
+fn dev_irq_controller_to_kirq_domain(controller: DevIrqController) -> Option<kirq::IrqDomainId> {
+    // `device_res::IrqDomainId` is provider-local. Only controllers with a
+    // registered kirq domain can produce data-plane-resolvable mappings here.
+    match controller {
+        DevIrqController::Gic => Some(kirq::GIC_ROOT_DOMAIN),
+        DevIrqController::Plic => Some(kirq::PLIC_ROOT_DOMAIN),
+        DevIrqController::IoApic => Some(kirq::IO_APIC_DOMAIN),
+        DevIrqController::LoongArchExtioi | DevIrqController::Unknown => None,
+    }
+}
+
+fn irq_route_to_kirq_desc(route: IrqRouteDesc) -> kirq::IrqDesc {
+    let mut desc = kirq::IrqDesc::new(route.hwirq, dev_irq_trigger_to_kirq(route.trigger))
+        .with_controller(dev_irq_controller_to_kirq(route.controller));
+    if let Some(domain) = dev_irq_controller_to_kirq_domain(route.controller) {
+        desc = desc.with_domain(domain);
+    }
+    desc
+}
+
+fn irq_resource_to_kirq_spec(irq: IrqResource) -> kirq::IrqSpec {
+    if irq.hwirq.is_none()
+        && irq.domain.is_none()
+        && irq.controller.unwrap_or(DevIrqController::Unknown) == DevIrqController::Unknown
+    {
+        return kirq::IrqSpec::PlainVirq(irq.number);
+    }
+
+    let hwirq = irq.hwirq.unwrap_or(irq.number);
+    let controller = irq.controller.unwrap_or(DevIrqController::Unknown);
+    let mut desc = kirq::IrqDesc::new(hwirq, dev_irq_trigger_to_kirq(irq.trigger))
+        .with_controller(dev_irq_controller_to_kirq(controller))
+        .with_virq(irq.number);
+    if let Some(domain) = dev_irq_controller_to_kirq_domain(controller) {
+        desc = desc.with_domain(domain);
+    }
+    kirq::IrqSpec::Desc(desc)
+}
+
+fn dev_irq_event_to_kirq(event: DevIrqEvent) -> kirq::IrqEvent {
+    if event.handled() {
+        kirq::IrqEvent::from_sources(event.sources())
+    } else {
+        kirq::IrqEvent::NOT_HANDLED
+    }
+}
+
 /// Install the x-kernel resource provider backend.
 ///
 /// Must run before any driver acquires a resource. It is installed before the
@@ -324,7 +313,12 @@ fn map_irq_desc_error(err: kirq::IrqDescError) -> ResError {
         | kirq::IrqDescError::VirqConflict { .. }
         | kirq::IrqDescError::MappingConflict { .. }
         | kirq::IrqDescError::VirqMappingConflict { .. }
-        | kirq::IrqDescError::UnknownDomain { .. } => ResError::InvalidResource,
+        | kirq::IrqDescError::UnknownDomain { .. }
+        | kirq::IrqDescError::UnknownIrq
+        | kirq::IrqDescError::TeardownInProgress { .. }
+        | kirq::IrqDescError::NoIrqAction { .. }
+        | kirq::IrqDescError::InvalidContext { .. }
+        | kirq::IrqDescError::SyncWaitFailed { .. } => ResError::InvalidResource,
     }
 }
 
@@ -336,64 +330,6 @@ fn map_res_err(err: ResError) -> DriverError {
         ResError::Busy => DriverError::ResourceBusy,
         ResError::Unsupported => DriverError::Unsupported,
         ResError::NoProvider => DriverError::BadState,
-    }
-}
-
-fn map_irq_trigger(trigger: DevIrqTrigger) -> kirq::IrqTrigger {
-    match trigger {
-        DevIrqTrigger::EdgeRising => kirq::IrqTrigger::EdgeRising,
-        DevIrqTrigger::EdgeFalling => kirq::IrqTrigger::EdgeFalling,
-        DevIrqTrigger::LevelHigh => kirq::IrqTrigger::LevelHigh,
-        DevIrqTrigger::LevelLow => kirq::IrqTrigger::LevelLow,
-        DevIrqTrigger::Unknown(flags) => kirq::IrqTrigger::Unknown(flags),
-    }
-}
-
-fn map_irq_controller(controller: DevIrqController) -> kirq::IrqController {
-    match controller {
-        DevIrqController::Gic => kirq::IrqController::Gic,
-        DevIrqController::Plic => kirq::IrqController::Plic,
-        DevIrqController::IoApic => kirq::IrqController::IoApic,
-        DevIrqController::LoongArchExtioi => kirq::IrqController::LoongArchExtioi,
-        DevIrqController::Unknown => kirq::IrqController::Unknown,
-    }
-}
-
-fn map_irq_domain(controller: DevIrqController) -> Option<kirq::IrqDomainId> {
-    // `device_res::IrqDomainId` is provider-local. Only controllers with a
-    // registered kirq domain can produce data-plane-resolvable mappings here.
-    match controller {
-        DevIrqController::Gic => Some(kirq::GIC_ROOT_DOMAIN),
-        DevIrqController::Plic => Some(kirq::PLIC_ROOT_DOMAIN),
-        DevIrqController::IoApic => Some(kirq::IO_APIC_DOMAIN),
-        DevIrqController::LoongArchExtioi | DevIrqController::Unknown => None,
-    }
-}
-
-fn map_irq_resource_to_spec(resource: IrqResource) -> kirq::IrqSpec {
-    if resource.hwirq.is_none()
-        && resource.domain.is_none()
-        && resource.controller.unwrap_or(DevIrqController::Unknown) == DevIrqController::Unknown
-    {
-        return kirq::IrqSpec::PlainVirq(resource.number);
-    }
-
-    let hwirq = resource.hwirq.unwrap_or(resource.number);
-    let controller = resource.controller.unwrap_or(DevIrqController::Unknown);
-    let mut desc = kirq::IrqDesc::new(hwirq, map_irq_trigger(resource.trigger))
-        .with_controller(map_irq_controller(controller))
-        .with_virq(resource.number);
-    if let Some(domain) = map_irq_domain(controller) {
-        desc = desc.with_domain(domain);
-    }
-    kirq::IrqSpec::Desc(desc)
-}
-
-fn map_devres_irq_event(event: DevIrqEvent) -> kirq::IrqEvent {
-    if event.handled() {
-        kirq::IrqEvent::from_sources(event.sources())
-    } else {
-        kirq::IrqEvent::NOT_HANDLED
     }
 }
 
@@ -443,7 +379,7 @@ mod tests {
     fn test_plain_irq_resource_maps_to_plain_virq_spec() {
         let resource = IrqResource::new(32, DevIrqTrigger::Unknown(0));
 
-        let spec = map_irq_resource_to_spec(resource);
+        let spec = irq_resource_to_kirq_spec(resource);
 
         assert_eq!(spec, kirq::IrqSpec::PlainVirq(32));
     }
@@ -454,7 +390,7 @@ mod tests {
             .with_controller(DevIrqController::Gic)
             .with_hwirq(30);
 
-        let spec = map_irq_resource_to_spec(resource);
+        let spec = irq_resource_to_kirq_spec(resource);
         let kirq::IrqSpec::Desc(desc) = spec else {
             panic!("routed IRQ resource should map to descriptor spec");
         };

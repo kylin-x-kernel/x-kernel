@@ -56,6 +56,15 @@ pub struct IrqEvent {
     sources: u8,
 }
 
+/// A small opaque identifier for a logical interrupt event source.
+///
+/// Drivers assign meaning to these indices. The IRQ core treats them as source
+/// bitmap positions and never interprets the device-specific meaning.
+pub type IrqEventSource = u8;
+
+/// Maximum number of logical event sources represented by [`IrqEvent`].
+pub const IRQ_EVENT_SOURCES: usize = 8;
+
 impl IrqEvent {
     /// The handler claimed the interrupt but reports no specific source.
     pub const HANDLED: Self = Self {
@@ -95,19 +104,22 @@ impl IrqEvent {
 
 /// A kernel IRQ handler.
 ///
-/// Handlers run in interrupt context and must not sleep. Any
-/// `Fn() -> IrqEvent + Send + Sync` implements this trait.
+/// Handlers run in interrupt context and must not sleep. Normal IRQ handlers
+/// receive the resolved OS-visible [`Virq`]. Pseudo-NMI handlers reuse this
+/// trait and receive the raw hwirq because the NMI table is keyed outside the
+/// normal IRQ descriptor namespace. Any `Fn(Virq) -> IrqEvent + Send + Sync`
+/// implements this trait.
 pub trait IrqHandler: Send + Sync {
     /// Service a fired interrupt and report whether it was handled.
-    fn handle(&self) -> IrqEvent;
+    fn handle(&self, irq: Virq) -> IrqEvent;
 }
 
 impl<F> IrqHandler for F
 where
-    F: Fn() -> IrqEvent + Send + Sync,
+    F: Fn(Virq) -> IrqEvent + Send + Sync,
 {
-    fn handle(&self) -> IrqEvent {
-        self()
+    fn handle(&self, irq: Virq) -> IrqEvent {
+        self(irq)
     }
 }
 
@@ -182,7 +194,7 @@ pub struct IrqDesc {
     pub flags: IrqFlags,
 }
 
-/// Descriptor merge or mapping conflict detected by the IRQ core.
+/// Descriptor merge, mapping, or lifecycle error detected by the IRQ core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IrqDescError {
     /// Two descriptors for the same logical IRQ name different hardware IRQs.
@@ -216,6 +228,19 @@ pub enum IrqDescError {
     VirqExhausted { next: Virq },
     /// The descriptor names an IRQ domain that is not registered in kirq.
     UnknownDomain { domain: IrqDomainId },
+    /// The operation requires an existing IRQ descriptor, but none is mapped.
+    UnknownIrq,
+    /// The operation is rejected while the IRQ line is waiting for teardown.
+    TeardownInProgress { virq: Virq },
+    /// The operation requires at least one registered IRQ action on the line.
+    NoIrqAction { virq: Virq },
+    /// The operation cannot run from hardirq, softirq, or BH-disabled context.
+    InvalidContext { operation: &'static str },
+    /// The scheduler wait provider could not register or block for IRQ sync.
+    SyncWaitFailed {
+        operation: &'static str,
+        error: kpoll::PollRegisterError,
+    },
 }
 
 impl IrqDesc {

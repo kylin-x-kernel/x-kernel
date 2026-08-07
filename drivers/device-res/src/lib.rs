@@ -346,7 +346,7 @@ mod tests {
         assert_eq!(
             Irq::request(
                 IrqResource::new(1, IrqTrigger::EdgeRising),
-                Arc::new(|| IrqEvent::HANDLED),
+                Arc::new(|_| IrqEvent::HANDLED),
             )
             .unwrap_err(),
             ResError::NoProvider
@@ -395,7 +395,7 @@ mod tests {
         let irq = IrqResource::new(7, IrqTrigger::LevelHigh);
         let spec = DmaSpec::new(24, 8);
 
-        let guard = Irq::request(irq, Arc::new(|| IrqEvent::HANDLED)).unwrap();
+        let guard = Irq::request(irq, Arc::new(|_| IrqEvent::HANDLED)).unwrap();
         assert_eq!(guard.number(), 7);
         guard.set_enabled(false);
         drop(guard);
@@ -409,7 +409,7 @@ mod tests {
         let device = TestDevice::new(vec![ResourceDesc::Irq(irq), ResourceDesc::Dma(spec)]);
         assert_eq!(device.resources().len(), 2);
 
-        devm_request_irq(&device, irq, Arc::new(|| IrqEvent::HANDLED)).unwrap();
+        devm_request_irq(&device, irq, Arc::new(|_| IrqEvent::HANDLED)).unwrap();
         let (cpu_ptr, bus_addr) = devm_alloc_coherent(&device, spec).unwrap();
         assert_eq!(
             cpu_ptr.as_ptr() as usize,
@@ -465,7 +465,7 @@ mod tests {
             devm_request_irq(
                 &device,
                 IrqResource::new(9, IrqTrigger::EdgeRising),
-                Arc::new(|| IrqEvent::NOT_HANDLED),
+                Arc::new(|_| IrqEvent::NOT_HANDLED),
             )
             .unwrap_err(),
             ResError::Busy

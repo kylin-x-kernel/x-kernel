@@ -17,8 +17,7 @@ vsock_tipc_bridge = ["vsock", "dep:tipc"]
 unittest = { workspace = true }
 kclass = { workspace = true, features = ["net"] }
 kdevice = { workspace = true }
-device_res = { workspace = true }
-irq_notify = { workspace = true }
+kirq = { workspace = true }
 khal = { workspace = true }
 ktime_types = { workspace = true }
 ksync = { workspace = true }

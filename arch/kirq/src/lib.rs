@@ -30,10 +30,14 @@ pub use bottom_half::{context, deferred, lifecycle, softirq};
 pub use domain::IrqRef;
 pub(crate) use model::desc;
 pub use model::desc::{
-    GIC_ROOT_DOMAIN, Hwirq, IO_APIC_DOMAIN, IrqAffinity, IrqController, IrqDesc, IrqDescError,
-    IrqDomainId, IrqEvent, IrqFlags, IrqHandler, IrqPolarity, IrqSource, IrqSpec, IrqTrigger,
-    MSI_DOMAIN, PLIC_ROOT_DOMAIN, Virq, gic_edge_irq_desc, gic_irq_desc, gic_level_irq_desc,
-    io_apic_irq_desc, plic_irq_desc,
+    GIC_ROOT_DOMAIN, Hwirq, IO_APIC_DOMAIN, IRQ_EVENT_SOURCES, IrqAffinity, IrqController, IrqDesc,
+    IrqDescError, IrqDomainId, IrqEvent, IrqEventSource, IrqFlags, IrqHandler, IrqPolarity,
+    IrqSource, IrqSpec, IrqTrigger, MSI_DOMAIN, PLIC_ROOT_DOMAIN, Virq, gic_edge_irq_desc,
+    gic_irq_desc, gic_level_irq_desc, io_apic_irq_desc, plic_irq_desc,
 };
-pub use runtime::manager::*;
 pub(crate) use runtime::{action, dispatch, nmi, state};
+pub use runtime::{
+    manager::*,
+    notify::{register_irq_source_waker, register_irq_waker},
+    sync_wait::IrqSyncWaitIf,
+};

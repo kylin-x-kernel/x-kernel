@@ -7,7 +7,7 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use kpoll::PollSet;
+use kpoll::{Completion, PollSet};
 use ktime_types::TimeSpan;
 
 /// Process lifecycle state shared by all threads in a process.
@@ -18,7 +18,7 @@ pub(crate) struct ProcessLifecycleState {
 
 struct ProcessEvents {
     child_exit_event: Arc<PollSet>,
-    exit_event: Arc<PollSet>,
+    exit_event: Arc<Completion>,
 }
 
 struct ProcessCpuTotals {
@@ -58,7 +58,7 @@ impl ProcessLifecycleState {
     }
 
     /// Returns the process-exit event.
-    pub(crate) fn exit_event(&self) -> &Arc<PollSet> {
+    pub(crate) fn exit_event(&self) -> &Arc<Completion> {
         self.events.exit_event()
     }
 
@@ -109,12 +109,12 @@ impl ProcessEvents {
         self.child_exit_event.wake();
     }
 
-    fn exit_event(&self) -> &Arc<PollSet> {
+    fn exit_event(&self) -> &Arc<Completion> {
         &self.exit_event
     }
 
     fn notify_exit(&self) {
-        self.exit_event.wake();
+        self.exit_event.complete_all();
     }
 }
 

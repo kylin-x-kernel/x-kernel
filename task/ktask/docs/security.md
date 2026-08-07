@@ -115,7 +115,7 @@ ksched algorithms / karch context switch / allocator
 |------|----------|----------|----------|----------|
 | T-01 | per-CPU `&'static mut` 别名导致 UB | 高 | 同 CPU 并发可变借用 | guard + IRQ/preempt 约束；调用点集中封装 |
 | T-02 | 任务切换与唤醒并发，导致同任务重复入队 | 高 | 远端 CPU 尚在切换，当前 CPU 立即 unblock | `task.on_cpu()` 自旋等待 + `clear_prev_task_on_cpu` 配对 |
-| T-03 | 退出任务过早释放导致 UAF | 高 | 仍有 joiner/切换路径持有引用 | `EXITED_TASKS` + `gc_task` + `Arc::try_unwrap` |
+| T-03 | 退出任务过早释放导致 UAF | 高 | 仍有 joiner/切换路径持有引用 | per-task exit `Completion` 唤醒 joiner；`EXITED_TASKS` + `gc_task` + `Arc::try_unwrap` 延迟回收 |
 | T-04 | `need_resched` 在错误时机触发重入调度 | 中 | 临界区内或异常/IRQ trapframe guard 未释放时直接抢占切换 | 仅设置 pending，`enable_preempt` 安全点检查，并在 active exception context 内延迟实际切换 |
 | T-05 | `task_registry` 指针槽位损坏 | 高 | 非法写入或重复释放 | CAS 协议 + 0/ptr 双态约束 + 弱引用升级校验 |
 | T-06 | snapshot 竞态读取错误 trap frame | 中 | 并发 snapshot session | begin/finish 会话串行 + per-CPU 槽位隔离 |
@@ -123,6 +123,7 @@ ksched algorithms / karch context switch / allocator
 | T-07a | `setaffinity` 静默成功但任务仍在非法 CPU | 高 | 非 current 只写 mask | 成功路径要求 placement 合法，否则 `false`/`EBUSY`；`preempt_resched`/`yield` 强制 affinity migrate |
 | T-08 | tick 回调执行耗时过长拖慢调度 | 中 | callback 滥用 | API 文档约束“回调应短小”；系统仍可抢占恢复 |
 | T-09 | 远端唤醒后未及时调度 | 中 | 任务入远端 run queue 但远端 CPU 未到抢占安全点 | `ipi + preempt` 下请求远端 `need_resched`；无 IPI 时仍依赖 tick/安全点 |
+| T-09b | IRQ teardown 等待在错误上下文阻塞当前任务 | 高 | hardirq/softirq/BH-disabled 路径间接调用 `IrqSyncWaitIf` provider | `kirq` 在进入 provider 前执行 context gate；`ktask` 只提供阻塞机制，不放宽 IRQ 同步 API 约束 |
 | T-10 | 绝对 timer deadline 在整数转换时截断 | 高 | `TimeSpan::as_nanos()` 的 `u128` 结果直接窄化为 `u64` | HAL 接口保持 `MonotonicInstant`；仅 timer backend 在寄存器边界执行钳制转换 |
 
 ## 故障模式与影响分析（FMEA）

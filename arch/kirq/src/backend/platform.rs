@@ -231,17 +231,16 @@ fn needs_platform_binding(desc: IrqDesc) -> bool {
 }
 
 #[inline]
-pub(crate) fn configure_and_enable_platform_irq(desc: IrqDesc, on: bool) {
+pub(crate) fn configure_platform_irq(desc: IrqDesc) {
     if needs_platform_binding(desc) {
         platform_configure(desc);
-        platform_enable(desc.hwirq, on);
     }
 }
 
 #[inline]
-pub(crate) fn disable_platform_irq(desc: IrqDesc) {
+pub(crate) fn set_platform_irq_enabled(desc: IrqDesc, on: bool) {
     if needs_platform_binding(desc) {
-        platform_enable(desc.hwirq, false);
+        platform_enable(desc.hwirq, on);
     }
 }
 

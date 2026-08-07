@@ -5,10 +5,10 @@
 //! Ethernet device adapter.
 use alloc::{collections::VecDeque, string::String, vec::Vec};
 
-use device_res::IrqEventSource;
 use hashbrown::HashMap;
 use kclass::{ClassDevice, prelude::*};
 use kerrno::{KError, KResult, LinuxError};
+use kirq::IrqEventSource;
 use ktime_types::{MonotonicInstant, TimeSpan};
 
 use crate::{
@@ -76,7 +76,7 @@ impl EthernetDevice {
                     loop {
                         crate::poll_interfaces();
                         let mut context = registrations.context(cx);
-                        if irq_notify::register_source_waker(irq, NET_RX_IRQ_SOURCE, &mut context)
+                        if kirq::register_irq_source_waker(irq, NET_RX_IRQ_SOURCE, &mut context)
                             .is_err()
                         {
                             drop(context);
@@ -427,7 +427,7 @@ impl NetDeviceOps for EthernetDevice {
         // Ethernet registers each waiting task directly on its IRQ source;
         // the aggregated `source_waker` is only used by single-waker devices.
         if let Some(irq) = self.inner.irq() {
-            irq_notify::register_source_waker(irq, NET_RX_IRQ_SOURCE, context)?;
+            kirq::register_irq_source_waker(irq, NET_RX_IRQ_SOURCE, context)?;
         }
         Ok(())
     }

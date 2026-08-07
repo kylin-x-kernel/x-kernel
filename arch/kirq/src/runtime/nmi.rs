@@ -11,7 +11,7 @@ use kspin::SpinRaw;
 use crate::{
     Hwirq, IrqDesc, IrqFlags, IrqSpec,
     action::IrqAction,
-    platform::{Handler, configure_and_enable_platform_irq, disable_platform_irq},
+    platform::{Handler, configure_platform_irq, set_platform_irq_enabled},
     state::{IRQ_STATE, IrqStateDesc, try_resolve_and_publish},
 };
 
@@ -71,7 +71,7 @@ pub fn register_nmi(desc: IrqDesc, handler: Handler) -> bool {
         && state
             .descs
             .get(&virq)
-            .is_some_and(IrqStateDesc::has_regular_action)
+            .is_some_and(IrqStateDesc::has_actions)
     {
         warn!("register_nmi: handler already registered for irq {virq}");
         return false;
@@ -103,7 +103,8 @@ pub fn register_nmi(desc: IrqDesc, handler: Handler) -> bool {
 
     // Pass the resolved descriptor so platform binding/configuration also
     // applies when the line only carries a dynamically allocated virq.
-    configure_and_enable_platform_irq(desc, true);
+    configure_platform_irq(desc);
+    set_platform_irq_enabled(desc, true);
     true
 }
 
@@ -132,7 +133,7 @@ pub fn unregister_nmi(desc: IrqDesc) -> bool {
         return true;
     };
     if let Some(entry) = state.descs.get_mut(&virq)
-        && entry.has_regular_action()
+        && entry.has_actions()
     {
         entry.take_regular_action();
         entry.remove_flags(IrqFlags::PER_CPU);
@@ -142,7 +143,8 @@ pub fn unregister_nmi(desc: IrqDesc) -> bool {
     if let Some(stored_desc) = disabled_desc {
         // Carry the full stored descriptor so the disable is not silently
         // skipped for lines whose hwirq falls above DYNAMIC_VIRQ_BASE.
-        disable_platform_irq(stored_desc);
+        set_platform_irq_enabled(stored_desc, false);
+        super::notify::remove_irq_waiters(virq);
     }
     true
 }
@@ -158,7 +160,7 @@ pub(super) fn dispatch_nmi_handler(hwirq: Hwirq) {
         table.get(&hwirq).cloned()
     };
     if let Some(handler) = handler {
-        let _ = handler.handle();
+        let _ = handler.handle(hwirq);
     } else {
         warn!("Unhandled NMI for hwirq {hwirq}");
     }

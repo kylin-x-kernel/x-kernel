@@ -78,7 +78,6 @@ device_res = { workspace = true }
 driver_base = { workspace = true }
 kclass = { workspace = true }
 kdevice = { workspace = true }
-irq_notify = { workspace = true }
 kirq = { workspace = true }
 block = { workspace = true, optional = true }
 char_driver = { workspace = true, optional = true }

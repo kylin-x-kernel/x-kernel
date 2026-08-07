@@ -6,14 +6,41 @@
 
 use bitflags::bitflags;
 
-use crate::{IrqEvent, platform::Handler};
+use crate::{IrqEvent, Virq, platform::Handler};
+
+/// Public identity for one registered IRQ action on a line.
+///
+/// The token is interpreted together with the IRQ line it was returned for.
+/// It is the `kirq` equivalent of Linux's `dev_id` removal key for shared IRQs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IrqActionToken(usize);
+
+impl IrqActionToken {
+    /// Creates an action token from a line-local numeric id.
+    pub const fn new(id: usize) -> Self {
+        Self(id)
+    }
+
+    /// Returns the line-local numeric id.
+    pub const fn id(self) -> usize {
+        self.0
+    }
+}
 
 /// Internal identity for a registered IRQ action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct IrqActionId(usize);
+pub(super) struct IrqActionId(IrqActionToken);
 
 impl IrqActionId {
-    const REGULAR: Self = Self(0);
+    const REGULAR: Self = Self(IrqActionToken::new(0));
+
+    const fn shared(token: IrqActionToken) -> Self {
+        Self(token)
+    }
+
+    const fn token(self) -> IrqActionToken {
+        self.0
+    }
 }
 
 /// Future threaded-handler slot.
@@ -60,6 +87,27 @@ impl IrqAction {
         }
     }
 
+    /// Builds one shared IRQ action with an explicit removal token.
+    pub(super) fn shared(token: IrqActionToken, primary: Handler) -> Self {
+        Self {
+            id: IrqActionId::shared(token),
+            primary,
+            thread: None,
+            flags: IrqActionFlags::SHARED,
+            name: None,
+        }
+    }
+
+    /// Returns this action's line-local removal token.
+    pub(super) fn token(&self) -> IrqActionToken {
+        self.id.token()
+    }
+
+    /// Returns whether this action participates in shared IRQ fanout.
+    pub(super) fn is_shared(&self) -> bool {
+        self.flags.contains(IrqActionFlags::SHARED)
+    }
+
     /// Returns the primary handler.
     pub(super) fn primary(&self) -> &Handler {
         &self.primary
@@ -71,8 +119,8 @@ impl IrqAction {
     }
 
     /// Runs the primary handler and classifies its return value.
-    pub(super) fn run_primary(&self) -> IrqActionReturn {
-        IrqActionReturn::from_event(self.primary().handle())
+    pub(super) fn run_primary(&self, irq: Virq) -> IrqActionReturn {
+        IrqActionReturn::from_event(self.primary().handle(irq))
     }
 
     /// Returns whether this action is valid for the current non-threaded IRQ core.
@@ -147,14 +195,11 @@ impl IrqActionReturn {
             Self::Handled { sources } | Self::WakeThread { sources } => sources,
         }
     }
-}
 
-/// Returns whether a return classification may run the legacy wake callback.
-///
-/// `WakeThread` is a future-only semantic and must not be treated as a request
-/// to run the current wake compatibility callback.
-pub(super) const fn allows_wake_compat(action_return: Option<IrqActionReturn>) -> bool {
-    !matches!(action_return, Some(IrqActionReturn::WakeThread { .. }))
+    /// Returns whether this outcome claimed the interrupt.
+    pub(super) const fn handled(self) -> bool {
+        !matches!(self, Self::Unhandled)
+    }
 }
 
 #[cfg(unittest)]
@@ -164,10 +209,10 @@ mod tests {
 
     use unittest::def_test;
 
-    use super::{IrqAction, IrqActionFlags, IrqActionId, IrqActionReturn, allows_wake_compat};
-    use crate::IrqEvent;
+    use super::{IrqAction, IrqActionFlags, IrqActionId, IrqActionReturn, IrqActionToken};
+    use crate::{IrqEvent, Virq};
 
-    fn handled_handler() -> IrqEvent {
+    fn handled_handler(_irq: Virq) -> IrqEvent {
         IrqEvent::HANDLED
     }
 
@@ -176,8 +221,20 @@ mod tests {
         let action = IrqAction::regular(Arc::new(handled_handler));
 
         assert_eq!(action.id(), IrqActionId::REGULAR);
+        assert_eq!(action.token(), IrqActionToken::new(0));
         assert_eq!(action.flags(), IrqActionFlags::empty());
         assert_eq!(action.name(), None);
+        assert!(action.is_currently_dispatchable());
+    }
+
+    #[def_test]
+    fn test_irq_action_shared_construction_has_token() {
+        let token = IrqActionToken::new(7);
+        let action = IrqAction::shared(token, Arc::new(handled_handler));
+
+        assert_eq!(action.token(), token);
+        assert_eq!(action.flags(), IrqActionFlags::SHARED);
+        assert!(action.is_shared());
         assert!(action.is_currently_dispatchable());
     }
 
@@ -219,14 +276,12 @@ mod tests {
         let action_return = IrqActionReturn::from_event(IrqEvent::NOT_HANDLED);
 
         assert!(!matches!(action_return, IrqActionReturn::WakeThread { .. }));
-        assert!(allows_wake_compat(Some(action_return)));
     }
 
     #[def_test]
-    fn test_wake_thread_return_is_inert_for_wake_compat() {
+    fn test_wake_thread_return_keeps_sources() {
         let action_return = IrqActionReturn::WakeThread { sources: 0x5a };
 
         assert_eq!(action_return.sources(), 0x5a);
-        assert!(!allows_wake_compat(Some(action_return)));
     }
 }

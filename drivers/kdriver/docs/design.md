@@ -258,7 +258,8 @@ VirtIO 驱动在 PCI 和 MMIO 两条传输路径上共享同一激活入口：
 `resource.rs` 提供 device-managed 资源分配，绑定到 `DeviceObject` 的 devres 清理链表：
 
 - **`devm_iomap`**：通过 `memspace::iomap_device` 映射 MMIO，probe 失败或设备 remove 时自动 `iounmap`。
-- **`devm_request_irq`**：注册中断处理函数到 provider 的共享 IRQ line state；每条 IRQ 由一个捕获 line state 的 handler 接入 `kirq`。
+- **`devm_request_irq`**：把 devres IRQ handler 适配成 `kirq` shared action，并注册到
+  `kirq` 的 IRQ core action list。
   `resource.rs` 是 devres IRQ resource 与 kernel IRQ core 的适配层，负责把
   `device_res` 的 trigger/controller/event/handler 转换到 `kirq` 自有类型；`kirq`
   不反向依赖 devres。
@@ -270,16 +271,22 @@ VirtIO 驱动在 PCI 和 MMIO 两条传输路径上共享同一激活入口：
 
 ### IRQ 分发机制
 
-`kirq::register` 存储 `Arc<dyn kirq::IrqHandler>`。`HostResourceProvider`
-为每条 IRQ 创建一个共享 line state，并向 `kirq` 注册一个捕获该 state 的代理
-handler：
+`HostResourceProvider` 不维护本地共享 IRQ line state。它把
+`device_res::IrqResource` 转换为 `kirq::IrqSpec`，把 `device_res::IrqHandler`
+包装为 `kirq::IrqHandler`，并通过 `kirq::try_register_shared()` 注册到 IRQ core：
 
-1. `request_irq` 为设备 handler 分配 token，并将其加入对应 line state；首个 handler
-   注册代理 handler，后续共享 handler 复用同一个代理。
-2. 中断到达时，代理 handler 从 line state 复制最多 4 个 devres handler 到固定长度
-   栈上快照，依次执行并合并 `device_res::IrqEvent`；事件被认领后将 source bitmap
-   交给 `irq-notify`，再把结果转换成 `kirq::IrqEvent` 返回给 IRQ core。
-3. `release_irq` 按 token 删除当前 handler；列表为空后注销 `kirq` handler 并删除 line state。
+1. `request_irq` 调用 `kirq::try_register_shared()`，由 `kirq` 分配 line-local
+   `IrqActionToken` 并保存 action identity；provider 只把该 token 包装成
+   `device_res::IrqHandlerToken` 返回给 devres。
+2. 中断到达时，`kirq` 从 `IrqDescRuntimeState` 复制 shared action snapshot，按顺序
+   调用每个 handler，并把 resolved `virq` 作为 handler 参数传入。每个 wrapper 再把
+   devres handler 返回的 `device_res::IrqEvent` 转换为 `kirq::IrqEvent`。
+3. `kirq` 在整条 shared line fanout 完成后合并 source bitmap，并由 `kirq::notify`
+   直接唤醒 line/source waiter。`kdriver` 不再安装 dispatch hook，也不参与 async
+   wake bridge。
+4. `release_irq` 使用保存的 token 调用 `kirq::free_irq_action()`，只移除当前 devres
+   handler 对应的 action；最后一个 action 离开时由 `kirq` mask line、等待
+   `in_flight` 归零并清理 descriptor。
 
 注册和释放路径允许分配，IRQ dispatch 路径不分配堆内存。
 
@@ -287,7 +294,8 @@ handler：
 
 - `DeviceManager::bus_mgr` 使用 `SpinNoPreempt`：总线枚举、重扫描、quiesce、remove 操作在 process context 中执行，互斥访问。
 - `EnumerationContext` 自身没有 interior locking：它是总线后端和 probe 之间的单线程桥梁，仅在 `bus_mgr` 锁内被填充。
-- `IRQ_LINES` 使用 `SpinNoIrq` 串行化 line state 的创建和销毁，每条 line state 使用独立的 `SpinNoIrq` 保护 handler 列表。
+- IRQ shared action fanout、token teardown 和 `in_flight` 同步由 `kirq` 拥有；
+  `kdriver` 只保存 devres token 和 `kirq::IrqActionToken` 的适配关系。
 - `PCI_BAR_ALLOCATOR` 使用 `SpinNoPreempt`：BAR 分配仅在 process context（枚举或 probe）中发生。
 - `kdevice` 共享核心的内部锁由 `kdevice` crate 自行管理，`kdriver` 不直接持有其锁。
 
@@ -359,17 +367,21 @@ handler：
 该方案减少了描述符数量，但要求匹配器同时比较 bus type 和 VirtIO type，
 且 `probe_device` 入口需要分支处理 PCI 和 MMIO 两种传输初始化逻辑。
 
-### IRQ handler 通过共享 line state 注册
+### IRQ handler 通过 kirq shared action 注册
 
-**选择**：`kirq` 保存捕获共享 line state 的代理 handler，provider 通过 token
-管理同一 IRQ 上的设备 handler。
+**选择**：`kirq` 保存同一 IRQ line 上的 shared action list，provider 通过 token
+管理 devres handler 的生命周期。
 
-**Trade-off**：首次注册一条 IRQ 时创建 line state，设备 handler 注册会扩展列表，
-并获得以下特性：
+**Trade-off**：共享 IRQ fanout 从 `kdriver` 下沉到 `kirq`，使 IRQ core action state
+更复杂；但：
 
+- shared、oneshot、threaded IRQ、per-action stats 和 free/synchronize 语义都能集中在
+  IRQ core；
 - 设备 handler 自带上下文，不需要按 slot 生成 trampoline，也没有全局 IRQ 数量上限；
 - token 允许释放单个共享 handler，其他同线设备继续接收中断；
-- 固定长度栈上快照保证 dispatch 路径不分配。
+- 固定长度 action 快照保证 dispatch 路径不分配；
+- 中断释放按 token 删除设备 handler，最后一个 handler 删除后由 `kirq` 统一 mask 和
+  teardown。
 
 **拒绝的方案**：预分配静态 `IrqSlot` 数组并生成 trampoline。该方案需要维护
 slot 身份映射和硬编码 IRQ 总数上限。

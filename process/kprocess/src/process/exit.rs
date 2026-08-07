@@ -5,7 +5,7 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use kpoll::PollSet;
+use kpoll::{Completion, PollSet};
 use ksignal::Signo;
 use ktime_types::TimeSpan;
 
@@ -230,7 +230,7 @@ impl Process {
     }
 
     /// Returns the process-exit event for this process.
-    pub fn exit_event(&self) -> &Arc<PollSet> {
+    pub fn exit_event(&self) -> &Arc<Completion> {
         self.lifecycle.exit_event()
     }
 

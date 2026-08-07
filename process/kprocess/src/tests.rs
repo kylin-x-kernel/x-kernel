@@ -17,7 +17,7 @@ use khal::{
     mem::{PAGE_SIZE_4K, VirtAddr},
     paging::MappingFlags,
 };
-use kpoll::PollRegistrations;
+use kpoll::{Completion, PollRegistrations};
 use ktask::{TaskInner, prepare_task};
 use ktime_types::TimeSpan;
 use memspace::VmRuntimeRef;
@@ -88,6 +88,15 @@ fn register_poll_set(set: &kpoll::PollSet, waker: &Waker) -> PollRegistrations {
     let mut registrations = PollRegistrations::new();
     let cx = Context::from_waker(waker);
     registrations.context(&cx).register(set).unwrap();
+    registrations
+}
+
+fn register_completion(completion: &Completion, waker: &Waker) -> PollRegistrations {
+    let mut registrations = PollRegistrations::new();
+    let cx = Context::from_waker(waker);
+    completion
+        .register(&mut registrations.context(&cx))
+        .unwrap();
     registrations
 }
 
@@ -999,7 +1008,7 @@ fn test_process_exit_notifies_pidfd_and_parent_waiters() {
 
     let child_counter = new_wake_counter();
     let child_waker = counter_waker(child_counter);
-    let _child_registration = register_poll_set(child.exit_event(), &child_waker);
+    let _child_registration = register_completion(child.exit_event(), &child_waker);
 
     let accounting_observer = new_exit_accounting_observer(
         child.clone(),
@@ -1011,10 +1020,14 @@ fn test_process_exit_notifies_pidfd_and_parent_waiters() {
         register_poll_set(init.child_exit_event(), &accounting_parent_waker);
     let accounting_child_waker = accounting_waker(accounting_observer);
     let _accounting_child_registration =
-        register_poll_set(child.exit_event(), &accounting_child_waker);
+        register_completion(child.exit_event(), &accounting_child_waker);
 
     process_exit::finalize_process_exit(&child);
 
+    assert!(
+        child.exit_event().is_completed(),
+        "process exit completion must stay completed for late observers"
+    );
     assert_eq!(
         child_counter.load(Ordering::SeqCst),
         1,
@@ -1215,13 +1228,17 @@ fn test_finalize_process_exit_is_idempotent_after_autoreap() {
 
     let child_counter = new_wake_counter();
     let child_waker = counter_waker(child_counter);
-    let _child_registration = register_poll_set(child.exit_event(), &child_waker);
+    let _child_registration = register_completion(child.exit_event(), &child_waker);
 
     process_exit::finalize_process_exit_with_publication(
         &child,
         ProcessExitPublication::DetachedAutoreap,
     );
     assert!(child.is_exited());
+    assert!(
+        child.exit_event().is_completed(),
+        "autoreap exit completion must stay completed for late observers"
+    );
     assert!(
         !child.is_waitable_zombie(),
         "autoreap finalization must skip waitable zombie state"

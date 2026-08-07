@@ -134,6 +134,41 @@ fn test_task_join() {
 }
 
 #[test]
+fn test_kirq_sync_wait_provider_blocks_until_completion() {
+    let _lock = SERIAL.lock();
+    INIT.call_once(ktask::init_scheduler);
+
+    static WAITING: AtomicUsize = AtomicUsize::new(0);
+    static FINISHED: AtomicUsize = AtomicUsize::new(0);
+    let completion = std::sync::Arc::new(kpoll::Completion::new());
+    let waiter_completion = completion.clone();
+
+    WAITING.store(0, Ordering::Release);
+    FINISHED.store(0, Ordering::Release);
+    ktask::spawn(move || {
+        WAITING.store(1, Ordering::Release);
+        kirq::IrqSyncWaitIf::wait_for_completion(&waiter_completion)
+            .expect("completion wait should register with current task");
+        FINISHED.store(1, Ordering::Release);
+    });
+
+    while WAITING.load(Ordering::Acquire) == 0 {
+        ktask::yield_now();
+    }
+    ktask::yield_now();
+    assert_eq!(
+        FINISHED.load(Ordering::Acquire),
+        0,
+        "waiter must enter Pending before completion"
+    );
+
+    completion.complete_all();
+    while FINISHED.load(Ordering::Acquire) == 0 {
+        ktask::yield_now();
+    }
+}
+
+#[test]
 fn test_prepare_task_requires_activation() {
     let _lock = SERIAL.lock();
     INIT.call_once(ktask::init_scheduler);

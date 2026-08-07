@@ -223,19 +223,20 @@ impl Default for IrqEvent {
 /// A device interrupt handler.
 ///
 /// Handlers run in interrupt context: they must not block, must not allocate,
-/// and should defer heavy work to a thread. Any closure that is
-/// `Fn() -> IrqEvent + Send + Sync` implements this trait.
+/// and should defer heavy work to a thread. The argument is the OS-visible IRQ
+/// number that triggered the handler. Any closure that is
+/// `Fn(usize) -> IrqEvent + Send + Sync` implements this trait.
 pub trait IrqHandler: Send + Sync {
     /// Service a fired interrupt and report which event sources fired.
-    fn handle(&self) -> IrqEvent;
+    fn handle(&self, irq: usize) -> IrqEvent;
 }
 
 impl<F> IrqHandler for F
 where
-    F: Fn() -> IrqEvent + Send + Sync,
+    F: Fn(usize) -> IrqEvent + Send + Sync,
 {
-    fn handle(&self) -> IrqEvent {
-        self()
+    fn handle(&self, irq: usize) -> IrqEvent {
+        self(irq)
     }
 }
 

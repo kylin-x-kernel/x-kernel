@@ -28,6 +28,7 @@ extern crate alloc;
 #[macro_use]
 mod run_queue;
 mod api;
+mod irq_wait;
 #[cfg(feature = "snapshot")]
 pub mod snapshot;
 mod task;

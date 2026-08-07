@@ -39,7 +39,8 @@ firmware (DT / ACPI) / PCI config space
     kirq / khal / kdma / memspace / driver crates
 ```
 
-- `kdriver` 信任 `kirq::register` 校验中断线号合法性。
+- `kdriver` 信任 `kirq::try_register_shared()` 校验中断 descriptor、管理 shared action
+  fanout，并提供 token teardown 同步语义。
 - `kdriver` 信任 `memspace::iomap_device` 拒绝映射到非法物理地址范围。
 - `kdriver` 信任 `kdma::allocate_dma_memory` / `kdma::deallocate_dma_memory` 返回配对的有效 `(cpu_addr, bus_addr)`。
 - `kdriver` 信任 `virtio` crate 的 `probe_mmio_device` 在访问 MMIO 寄存器前已完成必要的 volatile read 安全检查。
@@ -61,8 +62,8 @@ firmware (DT / ACPI) / PCI config space
 - **VirtIO MMIO 寄存器**：MagicValue、Version、DeviceID、VendorID 等探测寄存器；
 - **设备驱动 probe 路径**：驱动通过 `iomap_first_mmio` / `devm_iomap` 映射的 MMIO 区域，
   以及 `devm_alloc_coherent` 分配的 DMA 缓冲区；
-- **中断注册**：firmware 或 PCI INTx routing 提供的中断线号，
-  通过共享 IRQ line state 接入 `kirq`；
+- **中断注册**：firmware 或 PCI INTx routing 提供的中断线号，经 `resource.rs`
+  转换为 `kirq::IrqSpec` 并通过 shared action 接入 `kirq`；
 - **编译期静态配置**：`kbuild_config::AHCI_PADDR`、`kbuild_config::SDMMC_PADDR` 等平台固定地址。
 
 本模块不直接解引用用户空间指针（设备发现均在 kernel process context 执行），
@@ -73,7 +74,7 @@ firmware (DT / ACPI) / PCI config space
 
 - firmware 提供的非法物理地址是否能通过 MMIO 映射覆盖内核关键数据结构；
 - PCI BAR 分配后的零地址是否能被绕过，导致 page zero 映射；
-- 共享 IRQ line state 注册与中断到达之间的竞态是否导致 handler 被错误调用或遗漏；
+- devres IRQ handler 与 `kirq` shared action token 的生命周期是否配对；
 - DMA buffer 的 alloc/free 配对是否可能因布局不一致导致内存破坏；
 - VirtIO HAL 实现的 share/unshare 配对是否能抵御设备侧恶意 DMA；
 - 设备 remove 路径的 devres 释放顺序是否可能产生 use-after-free。
@@ -331,9 +332,11 @@ unsafe impl IxgbeHal for IxgbeHalImpl { ... }
 1. **MMIO vaddr 生命周期**：`devm_iomap` 返回的 `NonNull<u8>` 仅在 `DeviceObject` 存活期间有效，probe 失败或设备 remove 时 `iounmap` 释放。
 2. **DMA buffer 独占所有权**：`devm_alloc_coherent` 返回的 `DmaAllocation` 由 devres 独占持有，无公开 clone/复制接口。
 3. **DMA alloc/free 配对**：`alloc_coherent` 和 `free_coherent` 使用相同的 `DmaSpec` 重建 `Layout`，保证 size/align 一致。
-4. **IRQ handler 注册顺序**：首个设备 handler 先写入 line state，再向 `kirq` 注册持有该 state 的代理 handler。
-5. **IRQ handler 释放**：按 token 删除当前 handler，仅在共享列表为空时注销整条 IRQ。
-6. **IRQ dispatch 无堆分配**：每条 IRQ 最多共享 4 个 handler，中断上下文使用固定长度栈上快照。
+4. **IRQ handler 注册顺序**：devres handler 先包装成 `kirq` shared action，再由
+   `kirq` 原子地插入 descriptor action list。
+5. **IRQ handler 释放**：按 token 删除当前 action，仅在 `kirq` action list 为空时
+   mask 整条 IRQ line。
+6. **IRQ dispatch 无堆分配**：共享 action fanout 由 `kirq` 使用固定长度栈上快照完成。
 7. **VirtIO DMA 清零**：`dma_alloc` 分配后用 `write_bytes(0)` 清零，防止设备读到内核残留数据。
 8. **VirtIO share/unshare 配对**：`share` 和 `unshare` 成对调用，方向一致，由 `virtio` crate 传输层保证。
 9. **PCI BAR 零地址拒绝**：枚举阶段分配后仍为 0 的 BAR 被跳过，不注册为有效资源。
@@ -348,8 +351,7 @@ unsafe impl IxgbeHal for IxgbeHalImpl { ... }
 | `BusManager` | `Vec<(BusId, Box<dyn BusBackend>)>` 满足 Send | 通过 `SpinNoPreempt` 提供共享访问 |
 | `EnumerationContext` | `Vec<DeviceDesc>` 满足 Send | 不实现 Sync（单线程使用） |
 | `DriverRegistrar` | 零大小类型 | 仅通过 `kdevice` 全局锁访问共享状态 |
-| `HostResourceProvider` | 零大小类型 | `IRQ_LINES` 和 line handler 列表由 `SpinNoIrq` 保护 |
-| `IrqLineState` | `Arc` 和内部 handler 满足 Send | `SpinNoIrq` 提供内部可变性 |
+| `HostResourceProvider` | 零大小类型 | IRQ shared action 状态由 `kirq` 保护 |
 | `PCI_BAR_ALLOCATOR` | `SpinNoPreempt<Option<PciRangeAllocator>>` 满足 Send + Sync | `SpinNoPreempt` 提供内部可变性 |
 | `PlatformBackend` | 字段 `LocalIdAlloc` 为 `Copy`，满足 Send | 不实现 Sync（通过 BusManager 锁串行访问） |
 | `PciBackend` | `Cam` 满足 Send | 不实现 Sync |
@@ -361,7 +363,7 @@ unsafe impl IxgbeHal for IxgbeHalImpl { ... }
 |------|----------|----------|----------|----------|
 | T-01 | firmware 提供非法物理地址，MMIO 映射覆盖内核关键数据结构 | 高 | DT/ACPI 描述恶意物理地址且 `memspace::iomap_device` 未拒绝 | `iomap_device` 校验地址是否在平台 MMIO 窗口内；非法范围返回 `InvalidRange` |
 | T-02 | PCI BAR 分配后仍为零地址导致 page zero 映射 | 高 | BAR 分配器耗尽或分配范围未初始化，且 BAR 配置逻辑未拒绝零地址 | `configure_pci_device_if_needed` 分配失败返回 `NoMemory`；枚举 pass 3 跳过 `address == 0` 的 BAR |
-| T-03 | IRQ 注册与中断到达竞态，handler 在未就绪时被调用 | 高 | 中断在 handler 装入前到达该 virq | 首个设备 handler 先写入 line state，随后注册持有该 state 的代理 handler |
+| T-03 | IRQ 注册与中断到达竞态，handler 在未就绪时被调用 | 高 | 中断在 action 装入前到达该 virq | `kirq::try_register_shared()` 在 IRQ core descriptor 内安装 action 后才按策略 enable line；复杂驱动可使用更精细的 core API 控制 enable 时机 |
 | T-04 | DMA double-free 导致内存破坏 | 高 | `free_coherent` 被多次调用或 layout 不匹配 | `DmaAllocation` 无 Clone，devres 独占所有权；`alloc`/`free` 使用相同 `DmaSpec` 重建 `Layout` |
 | T-05 | VirtIO 设备通过恶意 DMA 描述符访问非授权内核内存 | 高 | 恶意或故障 VirtIO 设备构造错误描述符链 | 当前无 IOMMU 隔离单个 VirtIO 设备；`dma_alloc` 清零防止信息泄露；`share`/`unshare` 通过 `kdma` 管理 |
 | T-06 | firmware 伪造设备 compatible 导致错误驱动绑定 | 中 | DT 提供虚假 compatible string 且恰好命中已注册的 `FirmwareMatchSpec` | 驱动 probe 会因硬件无响应而失败，设备进入 unclaimed 列表 |
@@ -390,7 +392,7 @@ unsafe impl IxgbeHal for IxgbeHalImpl { ... }
 | F-03 | 单个设备 probe 失败 | 驱动 `probe_device` 返回错误 | 该设备不可用 | 同总线其他设备正常激活 | 4 | probe 错误记录 warn 并进入 unclaimed 列表，不阻断后续设备 |
 | F-04 | PCI BAR 分配器未初始化 | `pci_bar_allocation_range()` 返回 None 且设备有未分配 MEM BAR | 该 PCI 设备被跳过 | 单个 PCI 设备不可用 | 3 | `configure_pci_device_if_needed` 返回 `NoMemory`，设备跳过 |
 | F-05 | VirtIO MMIO 探测返回空设备 | MMIO 区域不存在 VirtIO 设备或 MagicValue 不匹配 | 该 MMIO 区域跳过 | 不影响其他 platform 设备 | 4 | `probe_mmio_device` 返回 None → `virtio_mmio_registration` 返回 None，记录 trace 后跳过 |
-| F-06 | IRQ handler 注册失败 | `kirq` 拒绝首个代理 handler 或共享 handler 已达上限 | 设备无法接收中断 | 该设备功能不可用或降级到轮询 | 3 | `request_irq` 返回 `Busy`，驱动 probe 返回错误 |
+| F-06 | IRQ handler 注册失败 | `kirq` 拒绝 shared action 或共享 action 已达上限 | 设备无法接收中断 | 该设备功能不可用或降级到轮询 | 3 | `request_irq` 返回 `Busy`，驱动 probe 返回错误 |
 | F-07 | PCI host bridge adoption 失败 | platform 总线未注册或 `adopt_active_device` 错误 | PCI 设备无 host bridge parent | PCI 端点仍被枚举但设备树不完整 | 3 | adoption 失败记录 warn，枚举继续（parentless 布局） |
 | F-08 | 静态设备 MMIO 映射失败 | `kbuild_config` 地址非法或硬件不存在 | 该静态设备不可用 | 同总线其他设备正常 | 3 | `iomap_first_mmio` 返回错误，probe 失败 |
 | F-09 | 驱动注册时 bus type matcher 未就绪 | `register_bus_type` 在 driver 注册后调用 | 驱动匹配不到设备 | 设备进入 unclaimed 列表 | 2 | `default_bus_manager` 先注册 bus type matcher，再注册 bus backend，再在 `DeviceManager::new` 中注册 driver |
@@ -445,8 +447,10 @@ trace 日志会输出 firmware 遍历的 compatible string 和 VirtIO MMIO 探�
 - 每个 `unsafe` 块均有 `SAFETY:` 注释。
 - 新增 MMIO 映射路径使用 `devm_iomap` 或 `iomap_mmio`（内部校验物理地址合法性）。
 - 新增 DMA 分配路径通过 `devm_alloc_coherent` 或 `kdma::allocate_dma_memory`，且 `free` 时 layout 一致。
-- 新增 IRQ 注册先写入 line state，再向 `kirq` 注册持有该 state 的代理 handler。
-- 新增 IRQ 释放按 token 删除当前 handler，共享列表为空后再注销 IRQ。
+- 新增 IRQ 注册是否通过 `kirq::try_register_shared()` 进入 IRQ core action list，而不是
+  在 `kdriver` 中重新维护 line-local fanout。
+- 新增 IRQ 释放是否按 token 调用 `kirq::free_irq_action()`，由 `kirq` 负责最后一个
+  action 离开后的 mask/synchronize/cleanup。
 - 新增总线后端实现 `BusBackend` 时，`enumerate` 中对每个设备的错误不应阻断其他设备枚举。
 - 新增 PCI device ID 到 VirtIO 类型的映射在 `pci_device_id_to_virtio_type` 中添加。
 - 新增 firmware compatible 匹配规格在 `firmware_specs.rs` 中声明，并注册对应的 platform driver。

@@ -64,7 +64,7 @@ static NET_IRQ_GUARDS: SpinNoIrq<Vec<Irq>> = SpinNoIrq::new(Vec::new());
 const RX_SRC: IrqEventSource = 0;
 const TX_SRC: IrqEventSource = 1;
 
-fn handle_virtio_net_irq() -> IrqEvent {
+fn handle_virtio_net_irq(_irq: usize) -> IrqEvent {
     let handles = NET_IRQ_HANDLES.lock();
     let mut sources = 0;
     for irq_handle in handles.iter() {

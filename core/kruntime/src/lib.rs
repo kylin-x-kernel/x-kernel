@@ -538,7 +538,7 @@ fn init_interrupt() {
     // `ktask::on_timer_fire`.
     kirq::register(
         khal::time::interrupt_id(),
-        alloc::sync::Arc::new(|| {
+        alloc::sync::Arc::new(|_| {
             ktask::on_timer_fire();
             kirq::IrqEvent::HANDLED
         }),
@@ -547,7 +547,7 @@ fn init_interrupt() {
     #[cfg(feature = "ipi")]
     kirq::register(
         kbuild_config::IPI_IRQ,
-        alloc::sync::Arc::new(|| {
+        alloc::sync::Arc::new(|_| {
             #[cfg(feature = "arm-timer-resume-fixup")]
             timer_driver::arm_generic::handle_ipi_fixup();
             #[cfg(feature = "ipi")]
@@ -559,7 +559,7 @@ fn init_interrupt() {
     #[cfg(feature = "pmu")]
     kirq::register_nmi(
         kirq::gic_level_irq_desc(kbuild_config::PMU_IRQ),
-        alloc::sync::Arc::new(|| {
+        alloc::sync::Arc::new(|_| {
             debug!(
                 "PMU interrupt received on cpu {}",
                 khal::percpu::this_cpu_id().as_usize()

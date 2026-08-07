@@ -116,7 +116,7 @@ Process
 | `procfs` / `scheduler` / `job_control` / `pidfd` / `process_signals` / `resource_limits` / `process_exit` / `wait_reap` / `system_view` | 面向外部领域语义的窄接口层；外部模块通过这些模块表达“要做什么”，而不是自己理解 `published/live` |
 | `ParentRelation` | 封装 wait parent contract、当前 parent child-list slot 和预留 init reparent slot；这些状态只能在 process-domain 事务内作为同一父子关系更新 |
 | `GroupMembership` | 封装当前 `ProcessGroup` 和发布到 group 成员表的 slot；group move 通过该对象保持 group 指针与 member slot 成对切换 |
-| `ProcessLifecycleState` | 聚合进程生命周期事件和 CPU totals；内部 `ProcessEvents` 保存 child/process exit wait 事件，`ProcessCpuTotals` 保存已退出线程与已回收 child CPU time |
+| `ProcessLifecycleState` | 聚合进程生命周期事件和 CPU totals；内部 `ProcessEvents` 保存 child exit 事件流和 process exit completion，`ProcessCpuTotals` 保存已退出线程与已回收 child CPU time |
 | `ThreadMembership` | 保存进程自有的 published 线程成员表（`tid -> weak task`） |
 | `ThreadGroupExitState` | 保存进程退出码和 group-exit 标志，独立于线程成员表 |
 | `Thread` | 保存 task identity、所属 process/runtime、objective `real_cred`、subjective `cred` 和线程私有状态 |
@@ -334,7 +334,9 @@ path + 旧 argv 的混合状态。
 - `Process::runtime_ref` 使用 `SpinNoIrq<Option<Weak<ProcessRuntime>>>`，只保存非拥有型 runtime upgrade 入口，不承担对外 `live` 判定。
 - `kidentity` 当前按 namespace 线性分配 `PidHandle`；当前阶段不做回收，后续如引入 pid reuse，应仍保持 “publish before runnable” 不变量。
 - `PidHandle` 已能携带 namespace 链，但 `kprocess` 对外 `pid()/tid()` 仍固定返回 root/global 编号；在 wait、kill、procfs、registry 全部 namespace-aware 之前，不把 namespace-visible 编号暴露到对外主语义。
-- `ProcessLifecycleState` 的 wait 事件通过 `ProcessEvents` 中的 `Arc<PollSet>` 共享。已退出线程和已回收 child CPU time 对外统一使用 `TimeSpan`；`ProcessCpuTotals` 仅在内部以 relaxed `u64` 纳秒原子保存表示，加载后立即恢复为语义类型。
+- `ProcessLifecycleState` 的 `child_exit_event` 通过 `Arc<PollSet>` 表达父进程可连续观察的 child-exit 事件流；单个 process 自身的
+  `exit_event` 通过 `Arc<kpoll::Completion>` 表达 sticky completion，供 pidfd 和其它 late observer 注册。已退出线程和已回收 child CPU time
+  对外统一使用 `TimeSpan`；`ProcessCpuTotals` 仅在内部以 relaxed `u64` 纳秒原子保存表示，加载后立即恢复为语义类型。
 - `ProcessGroup::processes` 和 `Session::process_groups` 使用 `WeakMap`，避免 group/session 成员表延长成员生命周期。
 - `Thread::real_cred` 与 `Thread::cred` 分别使用 `RwLock<Arc<Cred>>`；读路径只克隆 `Arc`，写路径按固定顺序同时替换两个指针。
 - `Session::terminal` 使用 `SpinNoIrq<Option<Arc<dyn ControllingTerminal>>>`，controlling terminal 只能设置一次；`set_terminal` 只在短临界区内 compare-and-install 已构造好的 `Arc`，清除时要求对象指针匹配。`kprocess` 只持有 controlling-terminal trait object，不了解具体 TTY 类型；需要 downcast 的 `/dev/tty` 解析留在 `ktty` 边界完成。

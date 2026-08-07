@@ -32,11 +32,11 @@ kirq
   executor owner 是 softirq。
 - `device_res` / devres 是驱动框架适配层，不能成为 `kirq` 的依赖。驱动资源到
   kernel IRQ core 的转换由 `kdriver::resource` 负责。
-- `IrqAction`、`IrqDescRuntimeState` 和 `IrqDispatchSnapshot` 是 `kirq` 内部状态
+- `IrqAction`、`IrqDescRuntimeState` 和 `IrqActionSnapshot` 是 `kirq` 内部状态
   边界。驱动、devres 和 irqchip backend 不能直接复用或修改这些结构。
-- wakeup subscription 是 legacy compatibility bridge，不是 action、thread target
-  或 wake-only IRQ 语义。未来 async/wait notification 迁移完成前，只能维持兼容
-  行为，不能继续扩展。
+- `kirq::notify` 是当前 poll/future IRQ wake 的 owner；原 `irq_notify`
+  forwarding crate 已移除。该路径不能被扩展成 threaded IRQ、softirq 或 workerqueue
+  的所有权边界。
 
 ## 外部边界 / 攻击面
 
@@ -58,7 +58,7 @@ kirq
    架构格式。
 
 5. **内核 handler / hook 回调**
-   regular handler、wakeup handler、NMI handler、lifecycle hook 和 deferred
+   regular handler、NMI handler、lifecycle hook、waiter wake 和 deferred
    executor 都是内核提供的回调。IRQ core 只管理调用顺序，不验证回调内部是否睡眠
    或拿错锁。
 
@@ -105,18 +105,24 @@ per-CPU atomic pending mask。调用方在访问前 pin 当前 CPU；pending mas
 
 ## 内存安全不变量
 
-- regular IRQ handler 被包装成 `IrqAction` 后存入 `IRQ_STATE`；dispatch 前克隆
-  action，调用期间不借用 `IRQ_STATE` 内部存储。
+- regular/shared IRQ handler 被包装成 `IrqAction` 后存入 `IRQ_STATE`；dispatch 前
+  克隆 action list，调用期间不借用 `IRQ_STATE` 内部存储。
+- dispatch snapshot 若包含 regular/shared action，会增加 descriptor-local
+  `in_flight` 计数。`free_irq()` 返回前必须等待该计数归零，避免驱动释放 MMIO/DMA
+  后仍有旧 handler snapshot 运行。
 - 内部 `WakeThread` return 分类在当前里程碑是 inert future state，不能调度 task、
-  raise softirq、创建 workerqueue work，或触发 wakeup subscription callback。
+  raise softirq 或创建 workerqueue work。
 - `PendingIrq` / `DispatchedIrq` 不能跨线程/跨 CPU 发送，completion 必须在 claim
   它的 CPU 上完成。
 - `IntrManagerIf::complete_irq(cookie)` 必须只消费本次 dispatch 返回的 completion
   cookie。generic handler fanout 之前不能对 level-triggered line 做最终
   EOI/deactivate。
-- `IRQ_STATE` 中的 `virq -> IrqStateDesc` 和 `(domain, hwirq) -> virq` 映射必须保持一致。
+- `IRQ_STATE` 中的 `virq -> IrqStateDesc` 和 `domain -> hwirq -> virq` 映射必须保持一致。
 - 带 domain 的 descriptor 只能使用 `domain/mod.rs` 静态 registry 中已注册的 domain；
   未知 domain 必须返回 `IrqDescError::UnknownDomain`，不能创建数据面不可解析的映射。
+- `try_disable_irq_nosync()` 必须保持 lookup-only；未知 IRQ 返回
+  `IrqDescError::UnknownIrq`，不能在 hardirq-safe disable 路径中创建 descriptor 或
+  domain mapping。
 - Domain reverse-map snapshots are immutable views of the build table. Writers
   publish a replacement snapshot after mapping changes; old snapshots are never
   mutated or freed while data-plane readers may still hold them.
@@ -140,19 +146,29 @@ per-CPU atomic pending mask。调用方在访问前 pin 当前 CPU；pending mas
 
 ### normal IRQ state
 
-`IRQ_STATE` 使用 `SpinNoIrq` 保护 descriptor、regular action 和 wakeup subscription。
-dispatch path 在持锁期间解析 `PendingIrq`、查找 descriptor，并复制
-action/wakeup snapshot，然后释放锁再调用 handler。这样保留 resolve 与 descriptor
-lookup 的原子性，同时避免回调重入 IRQ API 时自锁。
+`IRQ_STATE` 使用 `SpinNoIrq` 保护 descriptor 和 action list。
+dispatch path 在持锁期间解析 `PendingIrq`、查找 descriptor，并复制 action
+snapshot，然后释放锁再调用 handler。这样保留 resolve 与 descriptor lookup 的原子性，
+同时避免回调重入 IRQ API 时自锁。
 
 Domain `hwirq -> virq` reverse maps are published as immutable snapshots.
 Dispatch resolves a `PendingIrq` through the snapshot rather than querying the
-control-plane `mappings` table; strict misses stay misses instead of falling
-back to identity dispatch.
+control-plane `domain_states` table; strict misses stay misses instead of falling
+back to identity dispatch. The control plane also keeps `virq_to_mapping` as the
+reverse index for the same mappings, so "one virq maps to at most one hardware
+line" is checked without scanning all domains.
+
+Waiting teardown APIs (`disable_irq()`, `synchronize_irq()`, and `free_irq()`)
+are valid only from ordinary kernel context. They reject hardirq, softirq, and
+BH-disabled callers before waiting on `in_flight`, because those contexts may be
+the same execution path that must exit to make progress.
+Callers must also avoid holding locks or resources that their IRQ handler may
+acquire while waiting; otherwise teardown can wait for a handler that is blocked
+behind the caller's own lock.
 
 MSI allocation 也通过 `IRQ_STATE` 建立 `(MSI_DOMAIN, backend_vector) -> virq`
 映射并发布到 MSI domain snapshot。普通 `unregister()` 不删除 MSI descriptor 或
-mapping；最终清理由 `free_msix()` 在确认 handler/wakeup subscription 已撤销后完成，
+mapping；最终清理由 `free_msix()` 在确认 handler state 已撤销后完成，
 先释放 backend vector，再移除 descriptor/domain mapping 并发布替换 snapshot。
 若仍有 handler 或 backend 释放失败，释放路径记录 warning 并保留 OS-side mapping，
 暴露 handler/resource 生命周期顺序或 backend 状态问题，并允许调用方重试。
@@ -208,7 +224,7 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | 编号 | 威胁 | 触发条件 | 影响 | 缓解 |
 |------|------|----------|------|------|
 | T-01 | IRQ metadata 配置错误 | 固件或平台提供错误 trigger/polarity/domain | 中断丢失、重复触发或无法 mask | `IrqDesc` 明确携带 metadata，平台 configure 只消费规范化描述 |
-| T-02 | handler 在全局 IRQ 锁内执行 | dispatch 未复制 action 就调用 | 回调重入注册/注销路径时死锁 | `dispatch_subscribers()` 先复制 action/wakeup，再释放 `IRQ_STATE` |
+| T-02 | handler 在全局 IRQ 锁内执行 | dispatch 未复制 action 就调用 | 回调重入注册/注销路径时死锁 | `dispatch_actions()` 先复制 action，再释放 `IRQ_STATE` |
 | T-03 | 数据面 mapping miss 被当作 identity virq | strict domain 未发布或缺失映射 | 错 handler 或错误确认中断 | `PendingIrq` 通过 domain snapshot 解析；strict miss 保持 unhandled |
 | T-04 | NMI path 获取 normal IRQ state | pseudo-NMI 打断 normal IRQ 持锁区 | 同 CPU 自锁或 NMI 延迟 | NMI 使用独立 `NMI_TABLE`，dispatch 不触碰 `IRQ_STATE` |
 | T-05 | claimed IRQ 未 complete | normal control flow 提前返回或忘记显式 complete | 控制器认为中断仍 active，后续中断异常 | claimed IRQ guard Drop 补偿 completion |
@@ -227,17 +243,32 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-18 | 未注册 domain 被映射成功 | 控制面接受未知 `IrqDomainId` | 驱动拿到永远不可达的 virq | `try_resolve_and_publish()` 在改状态前返回 `UnknownDomain` |
 | T-19 | BH-disabled 被误判为普通 task context | diagnostics 只区分 hardirq/softirq/task | sleepable future callback 可能在 BH-disabled 区间运行 | `InterruptContextLevel::BhDisabled` 和 docs 明确其 non-sleepable 语义 |
 | T-20 | context misuse 日志风暴 | underflow 或 hardirq 中反复 local_bh_disable | 日志淹没真实故障，拉长 IRQ 处理时间 | warning 计数保留，日志只输出初始样本和 2 的幂次样本 |
-| T-21 | wake compatibility 被当作 future IRQ thread target | 后续 threaded IRQ 直接复用 `subscribe_wakeup*()` | 缺少 thread lifecycle、dev-id teardown、oneshot mask 和 scheduler ownership，导致悬空唤醒或错误 teardown | 文档和 `WakeThread` gating 明确两者分离；wake path 只作为迁移桥 |
-| T-22 | reserved shared/oneshot runtime 字段被误当成已实现行为 | 后续代码只改计数或 flag，没有安装 action list/mask protocol | shared IRQ 丢 handler、oneshot IRQ 无法屏蔽重入或误解除 mask | review 要求 shared fanout、oneshot mask 和 action identity 在 `IrqDescRuntimeState` owner 内成组实现 |
+| T-21 | poll/future IRQ wake 被当作 future IRQ thread target | 后续 threaded IRQ 直接复用 poll/future wake bridge | 缺少 thread lifecycle、dev-id teardown、oneshot mask 和 scheduler ownership，导致悬空唤醒或错误 teardown | 文档明确 poll/future IRQ wake 只是临时 waiter notification；threaded IRQ、softirq 和 workerqueue 必须在 `kirq` 内形成独立所有权 |
+| T-22 | oneshot runtime 字段被误当成已实现行为 | 后续代码只改 flag，没有安装 mask protocol | oneshot IRQ 无法屏蔽重入或误解除 mask | review 要求 oneshot mask 和 thread identity 在 `IrqDescRuntimeState` owner 内成组实现 |
 | T-23 | threaded slot 提前保存 task/worker 指针 | 未建立线程生命周期、取消、CPU 亲和和退出同步 | handler return 后唤醒已释放对象，或在 hardirq 中触发 sleepable 路径 | 当前 `IrqThreadSlot` 不携带目标，带 slot 的 action 不会被当前 dispatch 路径同步执行；后续 milestone 必须先定义所有权和 teardown ordering |
-| T-24 | action snapshot 与 cleanup 分离不完整 | dispatch 多次取锁并依赖跨锁状态 | unregister/free 与 dispatch 交错后调用 stale callback 或保留 stale mapping | `IrqDispatchSnapshot` 在一个 `IRQ_STATE` 临界区内形成完整快照，回调只使用快照 |
+| T-24 | action snapshot 与 cleanup 分离不完整 | dispatch 多次取锁并依赖跨锁状态 | unregister/free 与 dispatch 交错后调用 stale callback 或保留 stale mapping | `IrqActionSnapshot` 在一个 `IRQ_STATE` 临界区内形成完整快照，回调只使用快照 |
+| T-25 | stale 平台 enable/disable 操作乱序 | register/enable/disable/unregister 在不同 CPU 上交错，平台操作在 `IRQ_STATE` 锁外执行 | 已释放或已 disable 的 line 被迟到 enable 重新打开 | 控制路径通过 `IRQ_CONTROL_LOCK -> IRQ_STATE -> platform op` 串行化；hardirq dispatch 不获取控制锁 |
+| T-26 | 驱动需要清 pending 后再开 IRQ，但 request 立即 enable | 复杂设备 request handler 后尚未初始化 DMA ring/MMIO 状态 | 中断 handler 观察未初始化设备状态 | `try_register_disabled()` 以 disable depth `1` 安装 handler，驱动完成初始化后显式 `try_enable_irq()` |
+| T-27 | handler teardown 后仍在运行 | free/unregister 只移除 `Arc`，不等待已经复制的 dispatch snapshot | 驱动释放 MMIO/DMA 后旧 handler 访问已释放状态 | dispatch guard 维护 `in_flight`，`free_irq()` 先 mask unused line，再通过 descriptor-local completion 等待计数归零；completion done state 在 `IRQ_STATE` 锁内发布、wake 在锁外执行 |
+| T-28 | 等待式 IRQ API 在 interrupt-like context 调用 | hardirq/softirq/BH-disabled 中调用 `disable_irq()`、`synchronize_irq()` 或 `free_irq()` | 当前 CPU 等待自己退出，导致死锁或长时间自旋 | `try_*` API 使用 `is_in_interrupt_context()` gating 并返回 `InvalidContext`；兼容 wrapper 记录 warning 后返回失败值 |
+| T-28b | IRQ sync wait provider 无 current task | scheduler 尚未初始化或非 task context 绕过上层 gate 调用等待 provider | provider 内部 `block_on()` panic，或等待 API 伪成功 | `ktask` provider 在阻塞前检查 current task，失败时返回 `PollRegisterError::InvalidState`，KIRQ 映射为 `SyncWaitFailed`；`free_irq*()` 在 action 已摘除后同步失败会 fail-stop，避免释放未同步设备状态 |
+| T-29 | shared IRQ token 释放错误 action | devres adapter 保存的 token 与 kirq action identity 不一致，或 token 在旧 action 同步前复用 | 释放错误 handler、旧 handler 继续访问已释放设备状态 | token 是 line-local `IrqActionToken`，free-by-token 先摘除 action 再等待 `in_flight`，token 单调递增且不回收 |
+| T-30 | shared 和 non-shared action 混用 | 普通 `register()` 后又注册 shared action，或反向混用 | dispatch/teardown 语义不明确，可能错误关闭 line | `try_register()` 只允许空 line，`try_register_shared()` 拒绝已有 non-shared action |
+| T-31 | IRQ waiter 在 fanout 完成前被唤醒 | 每个 shared action 返回后立即唤醒 waiter | waiter 观察到其它 shared action 尚未 ack/完成 | `kirq` 合并整条 line 的 `IrqEvent` sources，fanout 完成后通过 `kirq::notify` 统一唤醒一次 |
+| T-32 | free/register 在 teardown wait 窗口重叠 | action 已摘除但旧 snapshot 仍在运行时，同一 virq 被重新注册 | 新旧 handler 生命周期交叠，后续 threaded/worker teardown 难以定义 | `teardown_depth` gate 在等待期间阻止新 action 注册，并阻止 descriptor 被提前 cleanup |
+| T-33 | handler 无法识别触发的 IRQ | shared handler 回调没有 IRQ 参数，只能依赖外部状态推断 | 共享 line、diagnostics 或通用 wrapper 误判事件来源 | normal IRQ handler 统一接收 resolved `virq` 参数；NMI handler 接收 raw hwirq |
+| T-34 | 并发 shared teardown 漏掉平台 mask | 最后一个 action 离开时已有 teardown waiter，cleanup gate 被误用于 disable 判定 | descriptor 被清理但平台 line 仍 unmasked，后续中断落到 stale/unknown line | 平台 disable 只看 action list 是否为空；descriptor cleanup 才同时要求 `in_flight == 0` 和 `teardown_depth == 0` |
+| T-35 | teardown 期间失败注册仍修改 descriptor/mapping | 注册路径先 resolve/publish，再检查 teardown gate | 返回失败但留下 merged metadata 或新 domain mapping | 注册先做 lookup-only teardown gate，命中后不进入 resolve/publish |
+| T-36 | teardown wait 窗口重新 enable action-less line | 最后一个 action 已摘除并 mask 后，另一 CPU 调用 `enable_irq()` / legacy force-enable | descriptor 被删除后平台 line 又 unmasked，后续 unhandled IRQ 或 storm；或失败路径留下 merged metadata/domain mapping | `try_enable_irq()` lookup-only 解析已存在 descriptor，并拒绝 `teardown_depth != 0` 或 `action_count == 0` 的普通 enable；legacy force-enable 在 resolve/publish 前先检查已有 teardown descriptor |
+| T-37 | 等待式 teardown 持有 handler 需要的锁 | task context 持 driver lock 调用 `free_irq()` / `synchronize_irq()`，旧 handler snapshot 在另一 CPU 等同一把锁 | teardown 等 handler，handler 等 teardown caller，形成死锁 | public rustdoc 和设计文档明确等待时不能持有 handler 可能获取的锁或阻止 handler 退出的资源锁 |
+| T-38 | IRQ waiter 表拖慢所有 handled IRQ | fanout-complete path 对每个 IRQ 扫描全局 waiter 表，或已注销 IRQ 的 waiter entry 永久保留 | timer/IPI/设备 IRQ 在全局锁上竞争，运行时间越长 hot path 成本越高 | waiter table 按 `virq` 排序并用二分查找，空表通过 atomic entry-count hint 跳过锁；descriptor cleanup 在释放 `IRQ_STATE` 后移除对应 waiter entry 并唤醒遗留 waiter |
 
 ## 故障模式与影响分析（FMEA）
 
 | 编号 | 故障模式 | 局部影响 | 系统影响 | 检测/缓解 |
 |------|----------|----------|----------|-----------|
 | F-01 | duplicate regular handler 注册 | 第二个 action 被拒绝 | 设备初始化失败但不会覆盖已有 handler | `register()` 返回 `false` 并 warning |
-| F-02 | unregister 后仍有 wakeup subscription | stale wakeup 被清理 | 避免 descriptor 永久保留 | `unregister()` 同步移除 stale wakeup |
+| F-02 | duplicate shared action token 释放 | token 与目标 line 不匹配或已经释放 | 目标 handler 未移除或释放失败 | `free_irq_action()` 只按 line-local token 删除 action，失败返回 `None` |
 | F-03 | unknown IRQ dispatch | 无 handler 可调用 | 中断被 complete，但功能事件丢失 | warning 记录 `Unhandled IRQ` |
 | F-04 | NMI 未注册 | 无 NMI handler 可调用 | 性能计数等 NMI 事件丢失 | warning 记录 `Unhandled NMI` |
 | F-05 | 平台 backend 不 complete 或重复 complete | 控制器状态异常 | 可能中断风暴或中断停止 | claimed IRQ guard 内部 `completed` 标记防止重复 complete |
@@ -250,9 +281,15 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | F-12 | descriptor 使用未知 domain | `try_*` API 返回 `UnknownDomain` | 设备初始化失败但不会创建不可达 IRQ | domain registry 边界校验先于状态变更 |
 | F-13 | controller completion cookie 错配 | complete 错误 active IRQ 或 no-op | 中断丢失、重复触发或 priority/deactivate 状态泄漏 | `PendingIrq`/`DispatchedIrq` 持有 opaque cookie，generic IRQ core 只把原 cookie 交还 backend |
 | F-14 | spurious vector 运行 IRQ tail | 没有 claim 到真实 IRQ 却运行 handler/deferred | 错误 handler 调用或 pending work 时序混乱 | `dispatch_irq()` 返回 `None` 时 `handle_irq()` 不运行 fanout 和 deferred executor |
-| F-15 | OneShot wake cleanup 与 callback 顺序错误 | wake state 已移除但 descriptor/mapping 未清理，或 callback 在锁内运行 | descriptor 泄漏、自锁或回调重入死锁 | snapshot 阶段移除 OneShot，必要时先 cleanup；wake callback 在 `IRQ_STATE` 锁外运行 |
-| F-16 | future `WakeThread` 与 legacy wake 混线 | `WakeThread` return 触发 wake callback | future thread 未实现时错误唤醒，迁移路径语义不清 | `allows_wake_compat()` 禁止 `WakeThread` 触发 wake compatibility |
-| F-17 | action runtime 字段漂移 | `generation`、MSI marker、shared count 或 oneshot pending 与 descriptor 不一致 | MSI free 判断、shared/threaded 诊断或 cleanup 决策错误 | descriptor merge/update 统一经过 `IrqStateDesc` 方法，后续新增字段必须同步在该 owner 内维护 |
+| F-15 | IRQ waiter table owner 漂移 | fanout 已处理事件但没有通知 async waiter，或其它 crate 重新实现 wake bridge | poll/future 等待者可能延迟到下一次事件，或 shared fanout 顺序被破坏 | waiter table 和 fanout-complete dispatch 由 `kirq::notify` 持有；`kdriver` 和 devres 不参与 wake bridge |
+| F-16 | future `WakeThread` 被同步执行 | `WakeThread` return 被当成 handled primary work | future thread 未实现时错误唤醒或执行 sleepable work | 当前 `WakeThread` 分类保持 inert，threaded IRQ milestone 必须显式实现 thread ownership |
+| F-17 | action runtime 字段漂移 | `generation`、MSI marker、action list 或 oneshot pending 与 descriptor 不一致 | MSI free 判断、shared/threaded 诊断或 cleanup 决策错误 | descriptor merge/update 统一经过 `IrqStateDesc` 方法，后续新增字段必须同步在该 owner 内维护 |
+| F-18 | disable nesting 不配对 | 多次 disable 后只 enable 一次，或 legacy boolean API 语义不清 | IRQ line 长期 masked 或过早 unmask | `disable_depth` 在 `IrqDescRuntimeState` 中显式维护，`enable(spec,false)` 映射 nosync disable，`enable(spec,true)` 映射 depth-aware enable |
+| F-19 | free_irq 与 dispatch 并发 | teardown 移除 action 时另一个 CPU 已复制 handler snapshot | descriptor 被删除但旧 handler 仍执行 | `in_flight` 阻止 unused descriptor 删除，`free_irq()` 等待 snapshot guard drop 后再完成 cleanup |
+| F-20 | synchronize_irq 未先 disable | 等待期间设备继续触发新中断 | 调用可能长期等待或只能观察当前窗口 | 文档规定 `synchronize_irq()` 不 mask line；teardown 使用 `disable_irq()` / `free_irq()` |
+| F-21 | 释放 shared line 的一个 action 时关闭整条线 | free-by-token 不检查剩余 action | 其它共享设备中断丢失 | `free_irq_action()` 只在最后一个 action 移除后产生 platform disable plan |
+| F-22 | enable_irq 作用于未知或无 action descriptor | 显式 enable 创建 descriptor 或 unmask 没有 handler 的 line | 未处理 IRQ 或错误平台状态 | `try_enable_irq()` 不创建 descriptor，未知 IRQ 返回 `UnknownIrq`，无 action 返回 `NoIrqAction` |
+| F-23 | enable_irq 与 free_irq wait 重叠 | teardown 已 mask line 但 descriptor 尚未清理 | platform line 在 action 删除后被重新打开 | `teardown_depth` 让 `try_enable_irq()` 返回 `TeardownInProgress` |
 
 ## 故障管理
 
@@ -266,12 +303,23 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 - platform dispatch 返回 `None` 的 spurious vector 不运行 handler fanout 或 deferred
   executor。
 - context misuse 诊断使用 counters 保留完整次数，warning 输出限流。
+- `disable_irq()`、`synchronize_irq()` 和 `free_irq()` 在 interrupt-like context 中通过
+  `try_*` API 返回 `InvalidContext`；兼容 wrapper 记录 warning 后返回失败值。
+  `disable_irq_nosync()` 是唯一可在 hardirq-like 路径使用的 non-waiting disable API。
+- `free_irq()` 在移除最后一个 action 时先 mask non-MSI line，再等待
+  `in_flight` 归零并删除 unused descriptor。等待期间 `teardown_depth` 阻止同一 line
+  重新注册，也阻止 `enable_irq()` 重新打开 action-less line。普通 unregister 只是兼容
+  wrapper。等待式 API 调用方不能持有 handler 可能获取的锁。
 - MSI descriptor 不走普通 platform configure/enable；分配失败返回 `None` /
   `Unsupported`，message compose 失败时立即释放 backend vector 并在失败时 warning。
   正常释放由 `free_msix()` 先释放 backend vector，成功后再删除 descriptor、mapping
-  和 domain snapshot；backend 释放失败时保留 OS-side mapping 以便重试。
+  和 domain snapshot，并同步删除 `virq_to_mapping` reverse index；backend 释放失败时
+  保留 OS-side mapping 以便重试。
 - lifecycle hook 注册是单 owner；后续如果需要多个 consumer，应显式升级为
   notifier chain，而不是让多个子系统覆盖同一全局 hook。
+- IRQ waiter notification 由 `kirq::notify` 持有。fanout hot path 在 waiter table
+  锁内 clone 匹配的 `PollSet`，锁外 wake；兼容 crate 和 kdriver 不能另建 dispatch
+  owner。
 - deferred executor 注册是单 owner。`softirq::init()` 在启动路径安装默认 owner；
   重复注册返回 `false`，空 executor 也返回 `false`；runner 在未注册时返回
   `NoExecutor`。
@@ -284,34 +332,38 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
 
 ## 已知限制
 
-- 目前不支持多个 regular action 共享同一个 IRQ line；`IrqFlags::SHARED` 只是
-  descriptor metadata，内部 action flags 也只是 future state，尚未实现 shared
-  action list。
+- `kirq` 已支持同一 IRQ line 上的 fixed-capacity shared action list，但尚未提供
+  per-action statistics、procfs 输出、debug-shirq 注入或 Linux-style dev_id 指针 ABI。
 - MSI/MSI-X 当前只提供最小 allocation/message bridge，不支持 interrupt remapping、
   managed IRQ、affinity rebalance 或动态 post-enable MSI-X table entry 管理。
 - lifecycle hook 目前是单 owner 模型，不是 notifier chain。
 - deferred executor 目前是 softirq 的单 owner hardirq-exit handoff，不是
   workerqueue 或 threaded IRQ 实现。
 - `/proc/interrupts` 仍无 per-IRQ/per-CPU 统计输出。
-- wakeup subscription 当前依附 regular handler，尚未形成独立 wake-only IRQ 模型。
-- `WakeThread`、`IrqThreadSlot`、shared action count 和 oneshot pending 只是 foundation
-  state。它们尚未绑定 scheduler task、workerqueue、mask protocol、thread teardown、
-  CPU affinity 或 per-action statistics；带 future-only thread slot 的 action 在当前
-  core 中不可 dispatch，不能降级为 hardirq 同步 primary。
+- poll/future IRQ waiter notification 不是最终 waitqueue、softirq、workerqueue 或
+  threaded IRQ 模型；IRQ waiter table 当前由 `kirq::notify` 持有。
+- `synchronize_irq()` 通过 descriptor-local completion 和 `IrqSyncWaitIf` provider
+  等待 `in_flight` 归零；completion 只是 wake source，等待返回后仍必须重查
+  descriptor predicate。后续 IRQ thread / workerqueue 引入后可以复用同一等待边界，
+  但上下文禁止规则保持不变。
+- `WakeThread`、`IrqThreadSlot` 和 oneshot pending 只是 foundation state。它们尚未绑定
+  scheduler task、workerqueue、mask protocol、thread teardown、CPU affinity 或
+  per-action statistics；带 future-only thread slot 的 action 在当前 core 中不可
+  dispatch，不能降级为 hardirq 同步 primary。
 
 ## 审计清单
 
 - 新增 IRQ API 是否明确说明 hardirq/NMI/普通上下文约束。
 - 新增 dispatch 路径是否在调用 handler 前释放 `IRQ_STATE`。
 - 新增 action return 分类是否保持 `NOT_HANDLED` 为 unhandled，而不是 threaded wake。
-- 新增 `WakeThread` 处理是否仍和 legacy wake compatibility 分离，除非后续迁移设计
-  已经替换 `subscribe_wakeup*()`。
+- 新增 `WakeThread` 处理是否仍和 `kirq::notify` 迁移桥分离，除非 threaded IRQ 设计
+  已经建立独立所有权。
 - 新增 threaded IRQ 设计是否先定义 thread slot ownership、cancel/teardown ordering、
   oneshot mask/unmask、CPU affinity 和 sleepable context 边界。
 - 新增 shared IRQ 设计是否在 `IrqDescRuntimeState` 内维护 action list、dev-id identity
   和 fanout result aggregation，而不是只增加 flag 或计数。
 - 新增 wake notification 功能是否走新的 async/wait notification 机制，而不是扩展
-  legacy `subscribe_wakeup*()` API。
+  `kirq::notify` 迁移桥或重新引入 `subscribe_wakeup*()` API。
 - 新增 NMI 功能是否避免读取或写入 normal IRQ shared state。
 - 新增平台 backend 是否满足 `DispatchedIrq` completion 和 `notify_cpu`
   publish-before-notify 契约。

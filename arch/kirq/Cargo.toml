@@ -12,6 +12,7 @@ description = "Generic kernel IRQ core"
 [dependencies]
 bitflags = { workspace = true }
 kiface = { workspace = true }
+kpoll = { workspace = true }
 kspin = { workspace = true }
 log = { workspace = true }
 percpu = { workspace = true }
