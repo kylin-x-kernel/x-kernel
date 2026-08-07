@@ -368,6 +368,10 @@ pub fn rust_main(arg: usize) -> ! {
     // yet.
     let late_init = prepare_late_init_on_primary(cpu_id);
     ktask::activate_task(&late_init);
+    // The late-init thread is now owned by the run queue; drop our reference
+    // so its task can be reclaimed after exit instead of being pinned by this
+    // permanently parked frame.
+    drop(late_init);
     info!("Started late-init bootstrap thread.");
 
     // The boot task is PID 0 and remains outside the ordinary PID namespace.

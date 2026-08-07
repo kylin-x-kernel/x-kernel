@@ -164,14 +164,19 @@ pub fn seq_open<I: SeqIterator>(file: &mut VfsFileBuilder, iter: I) -> VfsResult
 /// File inode wrapper for [`SeqFile`].
 pub struct SeqFileInode<I: SeqIterator> {
     node: SimpleFsNode,
-    make_iter: Arc<dyn Fn() -> I + Send + Sync>,
+    make_iter: Arc<dyn Fn() -> VfsResult<I> + Send + Sync>,
 }
 
 impl<I: SeqIterator> SeqFileInode<I> {
     /// Creates a read-only regular sequential file.
+    ///
+    /// The iterator factory runs at `open` time and may fail: procfs files
+    /// backed by a process (e.g. `/proc/<pid>/maps`) must surface
+    /// `NoSuchProcess` there instead of opening an empty file once the task
+    /// has been reclaimed.
     pub fn new_regular(
         fs: Arc<SimpleFs>,
-        make_iter: impl Fn() -> I + Send + Sync + 'static,
+        make_iter: impl Fn() -> VfsResult<I> + Send + Sync + 'static,
     ) -> Arc<Self> {
         Arc::new(Self {
             node: SimpleFsNode::new(
@@ -214,7 +219,7 @@ impl<I: SeqIterator> InodeOperations for SeqFileInode<I> {
 
 impl<I: SeqIterator> FileOperations for SeqFileInode<I> {
     fn open(self: Arc<Self>, _inode: &crate::VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
-        let iter = (self.make_iter)();
+        let iter = (self.make_iter)()?;
         seq_open(file, iter)
     }
 

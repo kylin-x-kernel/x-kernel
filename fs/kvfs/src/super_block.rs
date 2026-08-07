@@ -442,6 +442,12 @@ impl SuperBlock {
         drop(removed);
     }
 
+    /// Returns whether `dentry` is currently retained by the dcache.
+    #[cfg(unittest)]
+    pub(crate) fn is_dentry_cached(&self, dentry: &Dentry) -> bool {
+        self.dentry_cache.lock().contains_key(&dentry.key())
+    }
+
     pub(crate) fn move_cached_dentry(
         &self,
         old_key: &DentryKey,

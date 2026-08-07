@@ -8,6 +8,7 @@ mod runtime_state;
 use alloc::{string::String, sync::Arc, vec::Vec};
 #[cfg(feature = "tee")]
 use core::any::Any;
+use core::sync::atomic::AtomicUsize;
 
 use fs_context::FsStruct;
 use kerrno::{KError, KResult};
@@ -368,6 +369,11 @@ impl ProcessRuntime {
     /// Returns the top address of the user heap.
     pub fn heap_top(&self) -> usize {
         self.runtime_state.heap_top()
+    }
+
+    /// Returns a shared handle to the heap top (live while the process runs).
+    pub fn heap_top_handle(&self) -> Arc<AtomicUsize> {
+        self.runtime_state.heap_top_handle()
     }
 
     /// Sets the top address of the user heap.

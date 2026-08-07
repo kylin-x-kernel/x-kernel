@@ -892,6 +892,11 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             // Notify the joiner task.
             curr.notify_exit(exit_code);
 
+            // Release the scheduler's cached reference to the exiting task
+            // (EEVDF `curr`), so the GC can drop it even when the ready queue
+            // is empty at the next reschedule.
+            self.inner.scheduler.lock().on_task_exit(curr);
+
             // SAFETY: `exit_current` runs under
             // `current_run_queue::<NoPreemptIrqSave>()`, so IRQs and
             // preemption are disabled while touching current-CPU percpu

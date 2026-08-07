@@ -28,7 +28,7 @@ pub(super) struct ProcessRuntimeState {
     mm_cpu_residency: MmCpuResidencyRef,
     #[cfg(target_arch = "aarch64")]
     user_asid_context: Arc<memspace::Aarch64UserAsidContext>,
-    heap_top: AtomicUsize,
+    heap_top: Arc<AtomicUsize>,
     timers: ProcessTimers,
 }
 
@@ -70,7 +70,7 @@ impl ProcessRuntimeState {
             mm_cpu_residency,
             #[cfg(target_arch = "aarch64")]
             user_asid_context,
-            heap_top: AtomicUsize::new(user_heap_base),
+            heap_top: Arc::new(AtomicUsize::new(user_heap_base)),
             timers: ProcessTimers::new(owner_pid),
         }
     }
@@ -110,6 +110,12 @@ impl ProcessRuntimeState {
     /// Returns the top address of the user heap.
     pub(super) fn heap_top(&self) -> usize {
         self.heap_top.load(Ordering::Acquire)
+    }
+
+    /// Returns a shared handle to the heap top, so procfs files can keep
+    /// reading the live value after the runtime itself has been detached.
+    pub(super) fn heap_top_handle(&self) -> Arc<AtomicUsize> {
+        self.heap_top.clone()
     }
 
     /// Sets the top address of the user heap.

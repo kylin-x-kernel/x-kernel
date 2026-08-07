@@ -16,6 +16,8 @@ use tee_task_iface::tee_procfs::{
     render_ta_head as tee_render_ta_head,
 };
 
+use super::root;
+
 pub fn has_ta_info(task: &KtaskRef) -> bool {
     task.as_thread()
         .process()
@@ -52,18 +54,30 @@ impl SimpleDirOps for TaInfoDir {
             return Err(VfsError::NotFound);
         }
         let fs = self.fs.clone();
-        let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
-        if !has_ta_info(&task) {
+        let task_weak = self.task.clone();
+        if task_weak.upgrade().is_none_or(|task| !has_ta_info(&task)) {
             return Err(VfsError::NotFound);
         }
         match name {
             "ta_head" => lookup.file(
                 name,
-                SimpleFile::new_regular(fs, move || Ok(render_ta_head(&task))),
+                SimpleFile::new_regular(fs, {
+                    let task_weak = task_weak.clone();
+                    move || {
+                        let task = root::upgrade_task(&task_weak)?;
+                        Ok(render_ta_head(&task))
+                    }
+                }),
             ),
             "uuid" => lookup.file(
                 name,
-                SimpleFile::new_regular(fs, move || Ok(render_ta_ctx_uuid(&task))),
+                SimpleFile::new_regular(fs, {
+                    let task_weak = task_weak.clone();
+                    move || {
+                        let task = root::upgrade_task(&task_weak)?;
+                        Ok(render_ta_ctx_uuid(&task))
+                    }
+                }),
             ),
             _ => return Err(VfsError::NotFound),
         }

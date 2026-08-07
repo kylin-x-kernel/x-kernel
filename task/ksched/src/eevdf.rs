@@ -366,6 +366,17 @@ impl<T, const S: usize> EevdfScheduler<T, S> {
         id
     }
 
+    /// Clears the cached current-task reference if it points at `task`.
+    ///
+    /// The running task is cached in `curr` while it is on the CPU; block,
+    /// exit, and requeue paths must drop that reference exactly once when the
+    /// task leaves the run queue.
+    fn clear_curr_if_current(&mut self, task: &Arc<EevdfEntity<T, S>>) {
+        if self.curr.as_ref().is_some_and(|c| Arc::ptr_eq(c, task)) {
+            self.curr = None;
+        }
+    }
+
     // ---- internal queue helpers (keep both indices + counters in sync) ----
 
     fn enqueue(&mut self, task: Arc<EevdfEntity<T, S>>) {
@@ -679,9 +690,14 @@ impl<T, const S: usize> BaseScheduler for EevdfScheduler<T, S> {
         let lag = v - task.vruntime();
         task.set_vlag(Self::clamp_vlag(lag, task.weight(), task.request_ticks()));
         task.set_needs_place(true);
-        if self.curr.as_ref().is_some_and(|c| Arc::ptr_eq(c, task)) {
-            self.curr = None;
-        }
+        self.clear_curr_if_current(task);
+    }
+
+    fn on_task_exit(&mut self, task: &Self::SchedItem) {
+        // An exiting task is never requeued, so drop the cached current-task
+        // reference. Without this, a task that exits while the ready queue is
+        // empty stays pinned by `curr` forever.
+        self.clear_curr_if_current(task);
     }
 
     fn pick_next_task(&mut self) -> Option<Self::SchedItem> {
@@ -757,9 +773,7 @@ impl<T, const S: usize> BaseScheduler for EevdfScheduler<T, S> {
             return;
         }
 
-        if self.curr.as_ref().is_some_and(|c| Arc::ptr_eq(c, &prev)) {
-            self.curr = None;
-        }
+        self.clear_curr_if_current(&prev);
 
         let vr = prev.vruntime().max(self.min_vruntime);
         prev.set_vruntime(vr);

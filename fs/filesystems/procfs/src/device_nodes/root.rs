@@ -415,21 +415,21 @@ fn format_identity(identity: &DeviceIdentity, transport: Option<TransportInfo>) 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     root.add(
         "devices",
-        SeqFileInode::new_regular(fs.clone(), DevicesIter::new),
+        SeqFileInode::new_regular(fs.clone(), || Ok(DevicesIter::new())),
     );
     root.add("bus", {
         let mut bus = DirMapping::new();
         bus.add(
             "devices",
-            SeqFileInode::new_regular(fs.clone(), BusDevicesIter::new),
+            SeqFileInode::new_regular(fs.clone(), || Ok(BusDevicesIter::new())),
         );
         bus.add(
             "drivers",
-            SeqFileInode::new_regular(fs.clone(), BusDriversIter::new),
+            SeqFileInode::new_regular(fs.clone(), || Ok(BusDriversIter::new())),
         );
         bus.add(
             "topology",
-            SeqFileInode::new_regular(fs.clone(), BusTopologyIter::new),
+            SeqFileInode::new_regular(fs.clone(), || Ok(BusTopologyIter::new())),
         );
         SimpleDir::new_maker(fs.clone(), Arc::new(bus))
     });

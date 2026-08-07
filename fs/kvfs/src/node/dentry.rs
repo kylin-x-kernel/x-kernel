@@ -574,7 +574,8 @@ impl Dentry {
 
     /// Attaches this dentry subtree to a superblock.
     pub(crate) fn bind_super_block(&self, super_block: &Arc<SuperBlock>) {
-        if let Some(inode) = self.0.inode.lock().clone() {
+        let inode = self.0.inode.lock().clone();
+        if let Some(inode) = &inode {
             inode.bind_super_block(super_block);
         }
         {
@@ -588,11 +589,22 @@ impl Dentry {
             }
         }
 
+        // Only publish children into the dcache when they are cacheable,
+        // mirroring `insert_cache`. `bind_super_block` must not defeat
+        // `NON_CACHEABLE` filesystems (e.g. procfs), where every child dentry
+        // would otherwise be retained by the superblock dcache forever.
+        // Negative dentries carry no inode; `can_cache_children` requires one,
+        // so check the already-held inode's flags directly instead.
+        let cache_children = inode
+            .as_ref()
+            .is_some_and(|inode| !inode.flags().contains(NodeFlags::NON_CACHEABLE));
         let children: Vec<_> = self.0.children.lock().values().cloned().collect();
         for child in children {
             if let Some(child) = child.upgrade().map(Dentry) {
                 child.bind_super_block(super_block);
-                super_block.cache_dentry(child);
+                if cache_children && child.can_cache_as_child() {
+                    super_block.cache_dentry(child);
+                }
             }
         }
     }
@@ -768,10 +780,10 @@ impl Dentry {
         {
             *children.get_mut(name).expect("checked cache entry") = Arc::downgrade(&entry.0);
         }
-        drop(children);
         if let Some(super_block) = candidate.super_block() {
             super_block.cache_dentry(entry.clone());
         }
+        drop(children);
     }
 
     fn uncache_lookup_candidate(&self, name: &str, candidate: &Dentry) {
@@ -993,24 +1005,36 @@ impl Dentry {
                         entry.is_really_positive() && has_expected_parent && location.name == name;
                     drop(location);
                     if is_valid {
-                        self.replace_lookup_candidate(name, &candidate, &entry);
+                        if self.can_cache_children() && entry.can_cache_as_child() {
+                            self.replace_lookup_candidate(name, &candidate, &entry);
+                        } else {
+                            // Non-cacheable entry (e.g. procfs): retract the
+                            // transient candidate without ever publishing the
+                            // entry into the children map or the dcache, so a
+                            // lookup performs no cache-then-uncache churn.
+                            self.uncache_lookup_candidate(name, &candidate);
+                        }
                         Ok(entry)
                     } else {
                         self.uncache_lookup_candidate(name, &candidate);
                         Err(VfsError::InvalidInput)
                     }
                 }
-                Ok(None) => Ok(candidate.clone()),
+                Ok(None) => {
+                    if !self.can_cache_children() {
+                        // Non-cacheable parent (e.g. procfs): do not retain
+                        // negative dentries either, or every failed name
+                        // lookup would accumulate a permanent dcache entry
+                        // and poison later lookups of the same name.
+                        self.uncache_lookup_candidate(name, &candidate);
+                    }
+                    Ok(candidate.clone())
+                }
                 Err(err) => {
                     self.uncache_lookup_candidate(name, &candidate);
                     Err(err)
                 }
             };
-            if let Ok(entry) = &result
-                && (!self.can_cache_children() || !entry.can_cache_as_child())
-            {
-                self.uncache_lookup_candidate(name, &candidate);
-            }
             candidate.end_parallel_lookup();
             drop(lookup_guard);
             return result;
@@ -1705,6 +1729,7 @@ mod tests_dentry {
         can_remove: bool,
         unlink_count: AtomicUsize,
         rmdir_count: AtomicUsize,
+        lookup_result: crate::Mutex<Option<Dentry>>,
     }
 
     impl MockDirOps {
@@ -1715,6 +1740,7 @@ mod tests_dentry {
                 can_remove: false,
                 unlink_count: AtomicUsize::new(0),
                 rmdir_count: AtomicUsize::new(0),
+                lookup_result: crate::Mutex::new(None),
             }
         }
 
@@ -1725,6 +1751,7 @@ mod tests_dentry {
                 can_remove: false,
                 unlink_count: AtomicUsize::new(0),
                 rmdir_count: AtomicUsize::new(0),
+                lookup_result: crate::Mutex::new(None),
             }
         }
 
@@ -1735,6 +1762,7 @@ mod tests_dentry {
                 can_remove: true,
                 unlink_count: AtomicUsize::new(0),
                 rmdir_count: AtomicUsize::new(0),
+                lookup_result: crate::Mutex::new(None),
             }
         }
     }
@@ -1785,7 +1813,7 @@ mod tests_dentry {
             _dentry: &LockedDentry<'_>,
             _flags: crate::InodeLookupFlags,
         ) -> VfsResult<Option<Dentry>> {
-            Ok(None)
+            Ok(self.lookup_result.lock().clone())
         }
 
         fn create(
@@ -2485,5 +2513,116 @@ mod tests_dentry {
 
         assert_ne!(entry1.key(), entry2.key());
         assert_eq!(entry1.key(), entry3.key());
+    }
+
+    fn make_non_cacheable_dir(
+        fs: Arc<MockFilesystem>,
+        inode: u64,
+        parent: Option<Dentry>,
+        name: &str,
+    ) -> (Dentry, Arc<MockDirOps>) {
+        let ops = Arc::new(MockDirOps::new(fs, inode));
+        let private_data: Arc<dyn core::any::Any + Send + Sync> = ops.clone();
+        let inode = VfsInode::new_dir_with_operations(
+            private_data,
+            ops.clone(),
+            ops.clone(),
+            NodeFlags::NON_CACHEABLE,
+            inode_init(inode, NodeType::Directory, 0),
+        );
+        (
+            Dentry::new_dir_from_inode(inode, parent, String::from(name)),
+            ops,
+        )
+    }
+
+    #[def_test]
+    fn test_lookup_non_cacheable_positive_retracts() {
+        let fs = Arc::new(MockFilesystem);
+        let (dir, ops) = make_non_cacheable_dir(fs.clone(), 2, None, "dir");
+        let sb = SuperBlock::new(fs.clone(), dir.clone());
+
+        let (child, _) = make_file_entry(fs, 3, Some(dir.clone()), "x");
+        *ops.lookup_result.lock() = Some(child.clone());
+
+        let found = dir.lookup("x").unwrap();
+        assert!(found.ptr_eq(&child));
+
+        // Neither the transient candidate nor the real entry may survive in
+        // the children map or the superblock dcache.
+        assert!(dir.lookup_cache_entry("x").is_none());
+        assert!(!sb.is_dentry_cached(&child));
+    }
+
+    #[def_test]
+    fn test_lookup_non_cacheable_negative_retracts() {
+        let fs = Arc::new(MockFilesystem);
+        let (dir, _) = make_non_cacheable_dir(fs.clone(), 2, None, "dir");
+        let sb = SuperBlock::new(fs, dir.clone());
+
+        // Default MockDirOps::lookup returns Ok(None).
+        assert!(matches!(dir.lookup("missing"), Err(VfsError::NotFound)));
+
+        // The negative candidate must not survive in the children map or the
+        // dcache (checked by key), and a repeated lookup must not be poisoned
+        // by a stale negative dentry.
+        assert!(dir.lookup_cache_entry("missing").is_none());
+        let probe = Dentry::new_negative(Some(dir.clone()), String::from("missing"));
+        assert!(!sb.is_dentry_cached(&probe));
+        assert!(matches!(dir.lookup("missing"), Err(VfsError::NotFound)));
+    }
+
+    #[def_test]
+    fn test_bind_super_block_skips_non_cacheable_children() {
+        let fs = Arc::new(MockFilesystem);
+        let (dir, _) = make_non_cacheable_dir(fs.clone(), 2, None, "dir");
+        let sb = SuperBlock::new(fs.clone(), dir.clone());
+        let (child, _) = make_file_entry(fs.clone(), 3, Some(dir.clone()), "child");
+        dir.0
+            .children
+            .lock()
+            .insert("child".into(), Arc::downgrade(&child.0));
+
+        dir.bind_super_block(&sb);
+        assert!(!sb.is_dentry_cached(&child));
+
+        // Control: a cacheable directory does publish its children.
+        let cacheable = make_dir_entry(fs.clone(), 4, "cacheable");
+        let sb2 = SuperBlock::new(fs.clone(), cacheable.clone());
+        let (child2, _) = make_file_entry(fs, 5, Some(cacheable.clone()), "child");
+        cacheable
+            .0
+            .children
+            .lock()
+            .insert("child".into(), Arc::downgrade(&child2.0));
+
+        cacheable.bind_super_block(&sb2);
+        assert!(sb2.is_dentry_cached(&child2));
+    }
+
+    #[def_test]
+    fn test_replace_lookup_candidate_preserves_replacer() {
+        let fs = Arc::new(MockFilesystem);
+        let dir = make_dir_entry(fs.clone(), 2, "dir");
+        let sb = SuperBlock::new(fs.clone(), dir.clone());
+
+        // Simulate the concurrent-replacement window: the children slot
+        // already holds another thread's candidate, so a stale replace must
+        // not clobber it.
+        let other = Dentry::new_negative(Some(dir.clone()), String::from("x"));
+        dir.0
+            .children
+            .lock()
+            .insert("x".into(), Arc::downgrade(&other.0));
+
+        let candidate = Dentry::new_negative(Some(dir.clone()), String::from("x"));
+        let (entry, _) = make_file_entry(fs, 3, Some(dir.clone()), "x");
+        dir.replace_lookup_candidate("x", &candidate, &entry);
+
+        // The children slot keeps the replacer; only the dcache key is
+        // (defensively) refreshed with our entry.
+        let cached = dir.0.children.lock().get("x").unwrap().upgrade().unwrap();
+        assert!(Arc::ptr_eq(&cached, &other.0));
+        assert!(sb.is_dentry_cached(&entry));
     }
 }

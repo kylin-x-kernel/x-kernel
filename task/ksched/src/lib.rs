@@ -72,4 +72,13 @@ pub trait BaseScheduler {
     /// later [`Self::put_prev_task`] wake path can place the task correctly.
     /// The default implementation is a no-op.
     fn account_sleep(&mut self, _task: &Self::SchedItem) {}
+
+    /// Releases any scheduler-owned references to a task that is exiting
+    /// without being requeued.
+    ///
+    /// Schedulers that cache the current task (e.g. EEVDF's `curr`) must drop
+    /// that reference here; otherwise an exiting task can be kept alive by the
+    /// scheduler after the CPU switched away, which strands its kernel stack
+    /// and address space. The default implementation is a no-op.
+    fn on_task_exit(&mut self, _task: &Self::SchedItem) {}
 }

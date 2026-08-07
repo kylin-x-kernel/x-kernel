@@ -191,6 +191,21 @@ fn eevdf_remove() {
 }
 
 #[def_test]
+fn eevdf_exit_releases_cached_current() {
+    let mut sched = EevdfScheduler::<usize, SLICE>::new();
+    let task = Arc::new(EevdfEntity::new(1usize));
+    sched.add_task(task.clone());
+    let picked = sched.pick_next_task().unwrap();
+    assert!(Arc::ptr_eq(&picked, &task));
+    drop(picked);
+
+    // The scheduler caches the running task in `curr`; `on_task_exit` must
+    // drop that reference, otherwise an exiting task stays pinned forever.
+    sched.on_task_exit(&task);
+    assert_eq!(Arc::strong_count(&task), 1);
+}
+
+#[def_test]
 fn eevdf_high_weight_gets_earlier_deadline() {
     let mut sched = EevdfScheduler::<usize, SLICE>::new();
     let t_bg = Arc::new(EevdfEntity::new(1usize));

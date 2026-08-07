@@ -285,12 +285,6 @@ impl GlobalAllocator {
                     layout.size(),
                     e
                 );
-                error!(
-                    "palloc state: total={} used={} free={}",
-                    self.palloc.lock().total_pages(),
-                    self.palloc.lock().used_pages(),
-                    self.palloc.lock().available_pages(),
-                );
             })?;
         // alloc_pages skips usages for RustHeap; track it here.
         self.usages

@@ -99,7 +99,7 @@ impl SeqIterator for MeminfoIter {
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     root.add(
         "meminfo",
-        SeqFileInode::new_regular(fs.clone(), MeminfoIter::new),
+        SeqFileInode::new_regular(fs.clone(), || Ok(MeminfoIter::new())),
     );
     root.add(
         "meminfo2",

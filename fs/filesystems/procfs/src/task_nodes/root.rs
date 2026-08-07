@@ -11,11 +11,15 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{ffi::CStr, iter, str};
+use core::{
+    ffi::CStr,
+    iter, str,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use kaddr_layout::{SIGNAL_TRAMPOLINE, USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
 use khal::paging::MappingFlags;
-use kprocess::{AsThread, Process, TaskStat, procfs};
+use kprocess::{AsThread, LiveAddressSpace, Process, TaskStat, procfs};
 use ktask::{KtaskRef, WeakKtaskRef, current};
 #[cfg(feature = "tee")]
 use kvfs::DirMapping;
@@ -27,8 +31,18 @@ use kvfs::{
 };
 
 #[cfg(feature = "tee")]
-use super::tee::{has_ta_info, make_ta_info_dir};
+use super::tee;
 use crate::task_nodes::mounts::ProcMountIter;
+
+/// Upgrades a weak task reference held by a procfs file closure.
+///
+/// Returns [`VfsError::NoSuchProcess`] (ESRCH) once the task has exited and
+/// been reclaimed, matching Linux `get_proc_task()` failure semantics for
+/// reads/writes on an already-open `/proc/<pid>/...` file. Lookup-time paths
+/// that materialize dentries instead keep returning `NotFound` (ENOENT).
+pub(super) fn upgrade_task(task_weak: &WeakKtaskRef) -> VfsResult<KtaskRef> {
+    task_weak.upgrade().ok_or(VfsError::NoSuchProcess)
+}
 
 struct ProcessTaskDir {
     fs: Arc<SimpleFs>,
@@ -90,6 +104,11 @@ fn format_task_status(name: &str, tgid: u32, pid: u64) -> String {
 fn format_oom_score_adj(value: i32) -> Vec<u8> {
     format!("{value}\n").into_bytes()
 }
+
+/// Linux `OOM_SCORE_ADJ_MIN` / `OOM_SCORE_ADJ_MAX`; writes outside this range
+/// are rejected with `-EINVAL` (fs/proc/base.c `oom_score_adj_write()`).
+const OOM_SCORE_ADJ_MIN: i32 = -1000;
+const OOM_SCORE_ADJ_MAX: i32 = 1000;
 
 fn parse_oom_score_adj_input(data: &[u8]) -> VfsResult<Option<i32>> {
     if data.is_empty() {
@@ -213,20 +232,28 @@ fn render_maps_line(item: &MapsEntry) -> String {
 }
 
 struct MapsIter {
-    task: WeakKtaskRef,
+    aspace: LiveAddressSpace,
+    heap_top: Arc<AtomicUsize>,
     entries: Vec<MapsEntry>,
     next_index: usize,
 }
 
 impl MapsIter {
-    fn new(task: WeakKtaskRef) -> Self {
-        let mut iter = Self {
-            task,
+    /// Holds the process mm alive, mirroring Linux `proc_maps_open()`
+    /// `get_task_mm()`: the file keeps working after the process exits, and
+    /// reads re-walk the current VMA list under the mm lock, so a live
+    /// process's new mmap/munmap operations show up on the next read.
+    ///
+    /// Fails with `NoSuchProcess` when the runtime is already detached (the
+    /// process is gone even though the task may not be reclaimed yet).
+    fn new(task: &KtaskRef) -> VfsResult<Self> {
+        let process = task.as_thread().process();
+        Ok(Self {
+            aspace: process.address_space()?,
+            heap_top: process.heap_top_handle()?,
             entries: Vec::new(),
             next_index: 0,
-        };
-        iter.rewind();
-        iter
+        })
     }
 }
 
@@ -236,17 +263,7 @@ impl SeqIterator for MapsIter {
     fn rewind(&mut self) {
         self.entries.clear();
         self.next_index = 0;
-
-        let Some(task) = self.task.upgrade() else {
-            return;
-        };
-
-        let process = task.as_thread().process();
-        let heap_top = process.heap_top().unwrap_or(0);
-        let Ok(aspace_ref) = process.address_space() else {
-            return;
-        };
-        let aspace = aspace_ref.lock();
+        let aspace = self.aspace.lock();
         for vma in aspace.vmas() {
             let start = vma.start().as_usize();
             let end = vma.end().as_usize();
@@ -258,7 +275,7 @@ impl SeqIterator for MapsIter {
                 offset,
                 inode,
                 path,
-                name: special_mapping_name(start, end, heap_top),
+                name: special_mapping_name(start, end, self.heap_top.load(Ordering::Relaxed)),
             });
         }
     }
@@ -482,12 +499,19 @@ fn make_thread_dir(
     };
 
     #[cfg(feature = "tee")]
-    if has_ta_info(task) {
+    if tee::has_ta_info(task) {
         let mut ext = DirMapping::new();
         ext.add_child("ta_info", {
             let fs = fs.clone();
             let task = Arc::downgrade(task);
-            move |lookup, name| Ok(make_ta_info_dir(lookup, name, fs.clone(), task.clone()))
+            move |lookup, name| {
+                Ok(tee::make_ta_info_dir(
+                    lookup,
+                    name,
+                    fs.clone(),
+                    task.clone(),
+                ))
+            }
         });
         return lookup.dir(
             name,
@@ -577,83 +601,121 @@ impl SimpleDirOps for ThreadDir {
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         let fs = self.fs.clone();
-        let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
+        let task_weak = self.task.clone();
         match name {
             "stat" => lookup.file(
                 name,
-                SimpleFile::new_regular(fs.clone(), move || {
-                    Ok(format!("{}", TaskStat::from_thread(&task)?).into_bytes())
+                SimpleFile::new_regular(fs.clone(), {
+                    let task_weak = task_weak.clone();
+                    move || {
+                        let task = upgrade_task(&task_weak)?;
+                        Ok(format!("{}", TaskStat::from_thread(&task)?).into_bytes())
+                    }
                 }),
             ),
             "status" => lookup.file(
                 name,
-                SimpleFile::new_regular(fs.clone(), move || Ok(task_status(&task))),
+                SimpleFile::new_regular(fs.clone(), {
+                    let task_weak = task_weak.clone();
+                    move || {
+                        let task = upgrade_task(&task_weak)?;
+                        Ok(task_status(&task))
+                    }
+                }),
             ),
             "oom_score_adj" => lookup.file(
                 name,
                 SimpleFile::new_regular(
                     fs.clone(),
-                    RwFile::new(move |req| match req {
-                        SimpleFileOperation::Read => {
-                            Ok(Some(format_oom_score_adj(task.as_thread().oom_score_adj())))
-                        }
-                        SimpleFileOperation::Write(data) => {
-                            if let Some(value) = parse_oom_score_adj_input(data)? {
-                                task.as_thread().set_oom_score_adj(value);
+                    RwFile::new({
+                        let task_weak = task_weak.clone();
+                        move |req| {
+                            let task = upgrade_task(&task_weak)?;
+                            match req {
+                                SimpleFileOperation::Read => {
+                                    Ok(Some(format_oom_score_adj(task.as_thread().oom_score_adj())))
+                                }
+                                SimpleFileOperation::Write(data) => {
+                                    if let Some(value) = parse_oom_score_adj_input(data)? {
+                                        if !(OOM_SCORE_ADJ_MIN..=OOM_SCORE_ADJ_MAX).contains(&value)
+                                        {
+                                            return Err(VfsError::InvalidInput);
+                                        }
+                                        task.as_thread().set_oom_score_adj(value);
+                                    }
+                                    Ok(None)
+                                }
                             }
-                            Ok(None)
                         }
                     }),
                 ),
             ),
-            "task" => Ok(lookup.dir(
-                name,
-                SimpleDir::new_maker(
-                    fs.clone(),
-                    Arc::new(ProcessTaskDir {
-                        fs: fs.clone(),
-                        process: Arc::downgrade(task.as_thread().process()),
-                    }),
-                ),
-            )),
+            "task" => {
+                let task = task_weak.upgrade().ok_or(VfsError::NotFound)?;
+                Ok(lookup.dir(
+                    name,
+                    SimpleDir::new_maker(
+                        fs.clone(),
+                        Arc::new(ProcessTaskDir {
+                            fs: fs.clone(),
+                            process: Arc::downgrade(task.as_thread().process()),
+                        }),
+                    ),
+                ))
+            }
             "maps" => lookup.file(
                 name,
-                SeqFileInode::new_regular(fs.clone(), move || MapsIter::new(Arc::downgrade(&task))),
+                SeqFileInode::new_regular(fs.clone(), {
+                    let task_weak = task_weak.clone();
+                    move || {
+                        let task = upgrade_task(&task_weak)?;
+                        MapsIter::new(&task)
+                    }
+                }),
             ),
             "mounts" => lookup.file(
                 name,
-                SeqFileInode::new_regular(fs.clone(), move || {
-                    let root = task
-                        .as_thread()
-                        .process()
-                        .fs_context()
-                        .ok()
-                        .map(|fs| fs.lock().root().clone());
-                    ProcMountIter::mounts(root)
+                SeqFileInode::new_regular(fs.clone(), {
+                    let task_weak = task_weak.clone();
+                    move || {
+                        let task = upgrade_task(&task_weak)?;
+                        let root = task
+                            .as_thread()
+                            .process()
+                            .fs_context()
+                            .map(|fs| fs.lock().root().clone())?;
+                        Ok(ProcMountIter::mounts(Some(root)))
+                    }
                 }),
             ),
             "mountinfo" => lookup.file(
                 name,
-                SeqFileInode::new_regular(fs.clone(), move || {
-                    let root = task
-                        .as_thread()
-                        .process()
-                        .fs_context()
-                        .ok()
-                        .map(|fs| fs.lock().root().clone());
-                    ProcMountIter::mountinfo(root)
+                SeqFileInode::new_regular(fs.clone(), {
+                    let task_weak = task_weak.clone();
+                    move || {
+                        let task = upgrade_task(&task_weak)?;
+                        let root = task
+                            .as_thread()
+                            .process()
+                            .fs_context()
+                            .map(|fs| fs.lock().root().clone())?;
+                        Ok(ProcMountIter::mountinfo(Some(root)))
+                    }
                 }),
             ),
             "mountstats" => lookup.file(
                 name,
-                SeqFileInode::new_regular(fs.clone(), move || {
-                    let root = task
-                        .as_thread()
-                        .process()
-                        .fs_context()
-                        .ok()
-                        .map(|fs| fs.lock().root().clone());
-                    ProcMountIter::mountstats(root)
+                SeqFileInode::new_regular(fs.clone(), {
+                    let task_weak = task_weak.clone();
+                    move || {
+                        let task = upgrade_task(&task_weak)?;
+                        let root = task
+                            .as_thread()
+                            .process()
+                            .fs_context()
+                            .map(|fs| fs.lock().root().clone())?;
+                        Ok(ProcMountIter::mountstats(Some(root)))
+                    }
                 }),
             ),
             "cgroup" => lookup.file(
@@ -666,62 +728,82 @@ impl SimpleDirOps for ThreadDir {
             )),
             "cmdline" => lookup.file(
                 name,
-                SimpleFile::new_regular(fs.clone(), move || {
-                    let cmdline = task.as_thread().process().cmdline()?;
-                    let mut buf = Vec::new();
-                    for arg in cmdline.iter() {
-                        buf.extend_from_slice(arg.as_bytes());
-                        buf.push(0);
+                SimpleFile::new_regular(fs.clone(), {
+                    let task_weak = task_weak.clone();
+                    move || {
+                        let task = upgrade_task(&task_weak)?;
+                        let cmdline = task.as_thread().process().cmdline()?;
+                        let mut buf = Vec::new();
+                        for arg in cmdline.iter() {
+                            buf.extend_from_slice(arg.as_bytes());
+                            buf.push(0);
+                        }
+                        Ok(buf)
                     }
-                    Ok(buf)
                 }),
             ),
             "comm" => lookup.file(
                 name,
                 SimpleFile::new_regular(
                     fs.clone(),
-                    RwFile::new(move |req| match req {
-                        SimpleFileOperation::Read => {
-                            let mut bytes = vec![0; 16];
-                            let name = task.name();
-                            let copy_len = name.len().min(15);
-                            bytes[..copy_len].copy_from_slice(&name.as_bytes()[..copy_len]);
-                            bytes[copy_len] = b'\n';
-                            Ok(Some(bytes))
-                        }
-                        SimpleFileOperation::Write(data) => {
-                            if !data.is_empty() {
-                                let mut input = [0; 16];
-                                let copy_len = data.len().min(15);
-                                input[..copy_len].copy_from_slice(&data[..copy_len]);
-                                task.set_name(
-                                    CStr::from_bytes_until_nul(&input)
-                                        .map_err(|_| VfsError::InvalidInput)?
-                                        .to_str()
-                                        .map_err(|_| VfsError::InvalidInput)?,
-                                );
+                    RwFile::new({
+                        let task_weak = task_weak.clone();
+                        move |req| {
+                            let task = upgrade_task(&task_weak)?;
+                            match req {
+                                SimpleFileOperation::Read => {
+                                    let mut bytes = vec![0; 16];
+                                    let name = task.name();
+                                    let copy_len = name.len().min(15);
+                                    bytes[..copy_len].copy_from_slice(&name.as_bytes()[..copy_len]);
+                                    bytes[copy_len] = b'\n';
+                                    Ok(Some(bytes))
+                                }
+                                SimpleFileOperation::Write(data) => {
+                                    if !data.is_empty() {
+                                        let mut input = [0; 16];
+                                        let copy_len = data.len().min(15);
+                                        input[..copy_len].copy_from_slice(&data[..copy_len]);
+                                        task.set_name(
+                                            CStr::from_bytes_until_nul(&input)
+                                                .map_err(|_| VfsError::InvalidInput)?
+                                                .to_str()
+                                                .map_err(|_| VfsError::InvalidInput)?,
+                                        );
+                                    }
+                                    Ok(None)
+                                }
                             }
-                            Ok(None)
                         }
                     }),
                 ),
             ),
             "exe" => lookup.file(
                 name,
-                SimpleFile::new(fs.clone(), NodeType::Symlink, move || {
-                    task.as_thread().process().exe_path()
+                SimpleFile::new(fs.clone(), NodeType::Symlink, {
+                    let task_weak = task_weak.clone();
+                    move || {
+                        // Linux proc_exe_link() returns ENOENT when the task
+                        // is gone: readlink is path resolution, unlike reads
+                        // on an already-open status file.
+                        let task = task_weak.upgrade().ok_or(VfsError::NotFound)?;
+                        task.as_thread().process().exe_path()
+                    }
                 }),
             ),
-            "fd" => Ok(lookup.dir(
-                name,
-                SimpleDir::new_maker(
-                    fs.clone(),
-                    Arc::new(ThreadFdDir {
-                        fs: fs.clone(),
-                        task: Arc::downgrade(&task),
-                    }),
-                ),
-            )),
+            "fd" => {
+                let task = task_weak.upgrade().ok_or(VfsError::NotFound)?;
+                Ok(lookup.dir(
+                    name,
+                    SimpleDir::new_maker(
+                        fs.clone(),
+                        Arc::new(ThreadFdDir {
+                            fs: fs.clone(),
+                            task: Arc::downgrade(&task),
+                        }),
+                    ),
+                ))
+            }
             _ => Err(VfsError::NotFound),
         }
     }

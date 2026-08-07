@@ -7,6 +7,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+use core::sync::atomic::AtomicUsize;
 
 use fs_context::FsStruct;
 use kcred::Cred;
@@ -239,6 +240,11 @@ impl Process {
     /// Returns the current process heap top while runtime remains attached.
     pub fn heap_top(&self) -> KResult<usize> {
         self.runtime().map(|runtime| runtime.heap_top())
+    }
+
+    /// Returns a shared handle to the heap top (live while the process runs).
+    pub fn heap_top_handle(&self) -> KResult<Arc<AtomicUsize>> {
+        self.runtime().map(|runtime| runtime.heap_top_handle())
     }
 
     /// Sets the current process heap top.
