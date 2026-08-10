@@ -7,7 +7,7 @@
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kspin::SpinNoPreempt;
 
-use crate::BlockDevice;
+use crate::BlockDeviceOperations;
 
 const BLOCK_SIZE: usize = 512;
 
@@ -81,7 +81,7 @@ impl Device for RamDisk {
     }
 }
 
-impl BlockDevice for RamDisk {
+impl BlockDeviceOperations for RamDisk {
     /// Returns the number of blocks the RAM disk can hold.
     #[inline]
     fn num_blocks(&self) -> u64 {

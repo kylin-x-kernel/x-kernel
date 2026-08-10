@@ -6,8 +6,6 @@
 
 use alloc::{string::String, sync::Arc};
 
-use block::BlockDevice;
-use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
 use kext4::{Ext4Error, Ext4Filesystem as KExt4Core, Ext4Inode, Ext4SyncIntent, InodeNumber};
 use ksync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use kvfs::{
@@ -49,10 +47,10 @@ pub struct Ext4Filesystem {
 impl Ext4Filesystem {
     /// Mount a KExt4 filesystem backed by a block device.
     pub fn mount_bdev(
-        dev: ClassDevice<KBlockDevice>,
+        dev: Arc<block::BlockDevice>,
         superblock_flags: SuperBlockFlags,
     ) -> VfsResult<Arc<SuperBlock>> {
-        let device: Arc<dyn BlockDevice> = Arc::new(dev);
+        let device: Arc<dyn block::BlockDeviceOperations> = dev;
         let core = match KExt4Core::mount(device.clone()) {
             Ok(core) => core,
             Err(Ext4Error::NeedsRecovery) => {

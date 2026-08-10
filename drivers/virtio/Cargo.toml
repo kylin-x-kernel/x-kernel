@@ -13,7 +13,7 @@ categories.workspace = true
 
 [features]
 alloc = ["virtio-drivers/alloc"]
-block = ["dep:block"]
+block = ["dep:block", "alloc"]
 gpu = ["alloc", "display"]
 input = ["alloc", "dep:input"]
 net = ["alloc", "dep:net"]

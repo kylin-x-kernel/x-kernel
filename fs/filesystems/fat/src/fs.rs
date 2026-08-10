@@ -10,7 +10,6 @@ use core::{
     ptr::NonNull,
 };
 
-use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
 use ksync::{Mutex, MutexGuard};
 use kvfs::{
     Dentry, NodePermission, NodeType, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations,
@@ -72,7 +71,7 @@ impl DerefMut for FatFilesystemGuard<'_> {
 impl FatFilesystem {
     /// Mount a FAT filesystem backed by a block device.
     pub fn mount_bdev(
-        dev: ClassDevice<KBlockDevice>,
+        dev: Arc<block::BlockDevice>,
         superblock_flags: SuperBlockFlags,
     ) -> Arc<SuperBlock> {
         let mut inner = FatFilesystemInner {

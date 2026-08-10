@@ -22,10 +22,10 @@ use ksync::Mutex;
 use ktime_types::SystemTime;
 use kvfs::{
     AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FileDirOperations,
-    FileOperations, FileSystemType, InodeCache, InodeDirOperations, InodeOperations,
+    FileOperations, FileSystemType, FsContext, InodeCache, InodeDirOperations, InodeOperations,
     InodeSymlinkOperations, Kiocb, LockedDentry, Metadata, MetadataUpdate, Mount, NodeFlags,
     NodePermission, NodeType, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations, Umode,
-    VfsError, VfsFile, VfsInodeInit, VfsResult, WriteBeginRequest, WriteEndRequest,
+    VfsError, VfsFile, VfsInodeInit, VfsResult, WriteBeginRequest, WriteEndRequest, get_tree_nodev,
     inode_init_owner,
     libfs::{simple_getattr, simple_rename, simple_statfs, simple_write_end},
 };
@@ -35,19 +35,27 @@ pub(crate) const RAMFS_MAGIC: u32 = 0x8584_58f6;
 pub(crate) const TMPFS_MAGIC: u32 = 0x0102_1994;
 static SYSFS: Once<(Arc<SuperBlock>, Arc<Mount>)> = Once::new();
 
-fn mount_tmpfs_nodev(superblock_flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
-    Ok(shmem::new_tmpfs(superblock_flags))
+fn tmpfs_get_tree(
+    context: &FsContext<'_>,
+    _lookup_root: &kvfs::Path,
+    _lookup_pwd: &kvfs::Path,
+) -> VfsResult<Arc<SuperBlock>> {
+    get_tree_nodev(context, |flags| Ok(shmem::new_tmpfs(flags)))
 }
 
-fn mount_sysfs_nodev(superblock_flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
-    Ok(new_sysfs(superblock_flags))
+fn sysfs_get_tree(
+    context: &FsContext<'_>,
+    _lookup_root: &kvfs::Path,
+    _lookup_pwd: &kvfs::Path,
+) -> VfsResult<Arc<SuperBlock>> {
+    get_tree_nodev(context, |flags| Ok(new_sysfs(flags)))
 }
 
 /// Registered tmpfs filesystem type.
-pub const TMPFS_TYPE: FileSystemType = FileSystemType::nodev("tmpfs", mount_tmpfs_nodev);
+pub const TMPFS_TYPE: FileSystemType = FileSystemType::nodev("tmpfs", tmpfs_get_tree);
 
 /// Registered sysfs filesystem type.
-pub const SYSFS_TYPE: FileSystemType = FileSystemType::nodev("sysfs", mount_sysfs_nodev);
+pub const SYSFS_TYPE: FileSystemType = FileSystemType::nodev("sysfs", sysfs_get_tree);
 
 /// Returns the shared sysfs superblock.
 ///

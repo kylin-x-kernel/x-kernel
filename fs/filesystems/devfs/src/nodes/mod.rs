@@ -15,6 +15,7 @@ pub(crate) mod random;
 pub(crate) mod rtc;
 pub(crate) mod shm;
 pub(crate) mod tty_nodes;
+pub(crate) mod virtdev;
 
 #[cfg(all(feature = "dice", target_os = "none"))]
 pub(crate) mod dice;

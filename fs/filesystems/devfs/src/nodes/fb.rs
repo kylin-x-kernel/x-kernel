@@ -8,8 +8,8 @@ use core::slice;
 use kerrno::KError;
 use khal::mem::v2p;
 use kvfs::{
-    DeviceFileOps, DeviceId, DirMapping, MmapMapper, NodeFlags, NodeType, SimpleFs, VfsError,
-    VfsFile, VfsResult,
+    DeviceFileOps, DeviceId, DirMapping, MmapMapper, NodeFlags, SimpleFs, VfsError, VfsFile,
+    VfsResult,
 };
 use memaddr::{PhysAddrRange, VirtAddr};
 use osvm::VirtMutPtr;
@@ -266,9 +266,8 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     if !fbdevice::fb_available() {
         return;
     }
-    let fb0 = DeviceFile::new(
+    let fb0 = DeviceFile::new_character(
         fs.clone(),
-        NodeType::CharacterDevice,
         DeviceId::new(29, 0),
         Arc::new(FrameBuffer::new()),
     );

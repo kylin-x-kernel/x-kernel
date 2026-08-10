@@ -11,7 +11,7 @@ use std::{
     sync::Mutex,
 };
 
-use block::{BlockDevice, Device, DeviceKind, DriverError, DriverResult};
+use block::{BlockDeviceOperations, Device, DeviceKind, DriverError, DriverResult};
 
 use crate::{Ext4Error, Ext4Filesystem, UnsupportedKind};
 
@@ -39,7 +39,7 @@ impl Device for WritableImageDevice {
     }
 }
 
-impl BlockDevice for WritableImageDevice {
+impl BlockDeviceOperations for WritableImageDevice {
     fn num_blocks(&self) -> u64 {
         (self.bytes.lock().unwrap().len() / DEVICE_BLOCK_SIZE) as u64
     }

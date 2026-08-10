@@ -4,9 +4,7 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use kvfs::{
-    DeviceFileOps, DeviceId, DirMapping, NodeFlags, NodeType, SimpleFs, VfsFile, VfsResult,
-};
+use kvfs::{DeviceFileOps, DeviceId, DirMapping, NodeFlags, SimpleFs, VfsFile, VfsResult};
 use lazyinit::LazyInit;
 
 use crate::{DeviceFile, add_device_entry};
@@ -63,12 +61,7 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
         add_device_entry(
             root,
             "firmware-dtb",
-            DeviceFile::new(
-                fs.clone(),
-                NodeType::CharacterDevice,
-                DeviceId::new(30, 2),
-                Arc::new(DtbSnapshot),
-            ),
+            DeviceFile::new_character(fs.clone(), DeviceId::new(30, 2), Arc::new(DtbSnapshot)),
         );
     }
 }

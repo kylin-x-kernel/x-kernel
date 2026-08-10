@@ -147,6 +147,8 @@ pub enum DriverError {
     Io,
     /// Not enough space/cannot allocate memory (DMA).
     NoMemory,
+    /// The device is read-only.
+    ReadOnly,
     /// Device or resource is busy.
     ResourceBusy,
     /// This operation is unsupported or unimplemented.
@@ -203,6 +205,7 @@ impl DriverError {
             InvalidInput => "Invalid parameter",
             Io => "Input/output error",
             NoMemory => "Not enough memory",
+            ReadOnly => "Read-only device",
             ResourceBusy => "Resource is busy",
             Unsupported => "Unsupported operation",
         }
@@ -238,7 +241,7 @@ pub type DriverResult<T = ()> = core::result::Result<T, DriverError>;
 /// This trait describes the *identity* of a device instance — its name, its
 /// category, and (optionally) its IRQ. Concrete device-class operations
 /// (block read/write, net send/recv, ...) live in the per-category
-/// sub-traits in their respective crates (`block::BlockDevice`,
+/// sub-traits in their respective crates (`block::BlockDeviceOperations`,
 /// `net::NetDevice`, etc.) and require this trait as a super-trait.
 ///
 /// # Requirements

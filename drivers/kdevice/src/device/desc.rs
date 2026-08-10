@@ -4,6 +4,8 @@
 
 //! Common device metadata types shared by the driver framework.
 
+use core::fmt::Debug;
+
 use driver_base::DeviceKind;
 
 use crate::{BusId, DriverId, ResourceSet};
@@ -35,6 +37,45 @@ impl DeviceId {
     /// Returns the raw numeric value.
     pub const fn raw(self) -> u64 {
         self.0
+    }
+}
+
+/// Linux-style device number (`dev_t`) encoded from major and minor numbers.
+///
+/// This is distinct from [`DeviceId`], which identifies a device-model object.
+#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Copy, Hash)]
+pub struct DeviceNumber(pub u64);
+
+impl DeviceNumber {
+    /// Creates a device number from major and minor components.
+    pub const fn new(major: u32, minor: u32) -> Self {
+        let major = major as u64;
+        let minor = minor as u64;
+        Self(
+            (major & 0xffff_f000) << 32
+                | (major & 0x0000_0fff) << 8
+                | (minor & 0xffff_ff00) << 12
+                | (minor & 0x0000_00ff),
+        )
+    }
+
+    /// Returns the major component.
+    pub const fn major(self) -> u32 {
+        ((self.0 >> 32) & 0xffff_f000 | (self.0 >> 8) & 0x0000_0fff) as u32
+    }
+
+    /// Returns the minor component.
+    pub const fn minor(self) -> u32 {
+        ((self.0 >> 12) & 0xffff_ff00 | self.0 & 0x0000_00ff) as u32
+    }
+}
+
+impl Debug for DeviceNumber {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DeviceNumber")
+            .field("major", &self.major())
+            .field("minor", &self.minor())
+            .finish()
     }
 }
 
@@ -308,4 +349,20 @@ pub struct DeviceRecord {
     pub driver_id: Option<DriverId>,
     pub device_kind: Option<DeviceKind>,
     pub state: DeviceState,
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::def_test;
+
+    use super::DeviceNumber;
+
+    #[def_test]
+    fn device_number_round_trips_linux_components() {
+        for (major, minor) in [(0, 0), (1, 2), (0x1234, 0x5678), (u32::MAX, u32::MAX)] {
+            let device = DeviceNumber::new(major, minor);
+            assert_eq!(device.major(), major);
+            assert_eq!(device.minor(), minor);
+        }
+    }
 }

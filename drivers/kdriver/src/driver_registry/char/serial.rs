@@ -125,7 +125,7 @@ fn publish(device: Arc<DeviceObject>, port: Arc<SerialPort>) -> DriverResult<()>
     let dev = Box::new(SerialCharDev(port));
     match role {
         SerialRole::Stdout => runtime::register_console_runtime(device, dev),
-        SerialRole::Auxiliary => publish_char(device, dev),
+        SerialRole::Auxiliary => publish_char(device, dev).map(drop),
     }
 }
 

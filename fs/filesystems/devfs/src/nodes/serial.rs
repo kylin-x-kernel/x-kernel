@@ -18,8 +18,8 @@ use driver_base::DriverError;
 use kclass::{CharDevice, CharDeviceImpl, ClassDevice, char_devices};
 use kerrno::KError;
 use kvfs::{
-    DeviceFileOps, DeviceId, DirMapping, NodeFlags, NodeType, SimpleDir, SimpleFs, VfsFile,
-    VfsFileBuilder, VfsInode, VfsResult,
+    DeviceFileOps, DeviceId, DirMapping, NodeFlags, SimpleDir, SimpleFs, VfsFile, VfsFileBuilder,
+    VfsInode, VfsResult,
 };
 
 use crate::{DeviceFile, add_device_entry};
@@ -98,9 +98,8 @@ pub fn serial_devices(fs: Arc<SimpleFs>) -> DirMapping {
         if Some(device.id()) == stdout_id {
             continue;
         }
-        let dev = DeviceFile::new(
+        let dev = DeviceFile::new_character(
             fs.clone(),
-            NodeType::CharacterDevice,
             DeviceId::new(SERIAL_MAJOR, idx),
             Arc::new(SerialDev::new(device)),
         );

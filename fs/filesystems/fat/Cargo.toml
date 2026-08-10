@@ -13,10 +13,10 @@ documentation.workspace = true
 default = []
 
 [dependencies]
+block.workspace = true
 chrono = { workspace = true }
 fatfs = { workspace = true, features = ["alloc", "lfn"] }
 fs_block.workspace = true
-kclass = { workspace = true, features = ["block"] }
 kcred.workspace = true
 ktime_types.workspace = true
 ksync.workspace = true

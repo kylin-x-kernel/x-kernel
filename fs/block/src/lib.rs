@@ -2,11 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Block-device adaptation for filesystems.
+//! Filesystem adapters for block devices.
 //!
-//! [`SeekableDisk`] adapts block I/O to byte-oriented filesystem libraries.
-//! [`RootFileSystem`] is the Kconfig-selected block filesystem mount contract;
-//! the selected filesystem crate supplies its implementation at link time.
+//! The block subsystem owns [`block::Gendisk`] and [`block::BlockDevice`],
+//! including their publication and `dev_t` lookup. This crate only contains
+//! filesystem-facing adapters that do not belong to the block core itself.
+
 #![cfg_attr(any(not(test), doc), no_std)]
 
 extern crate alloc;
@@ -14,24 +15,14 @@ extern crate alloc;
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::mem;
 
-use kclass::{BlockDeviceImpl, ClassDevice, prelude::*};
-use kvfs::{SuperBlock, SuperBlockFlags, VfsResult};
+use block::{BlockDevice, BlockDeviceOperations, DriverResult};
+use kvfs::FileSystemType;
 
 /// The block-backed root filesystem provider selected by Kconfig.
 #[kiface::interface]
 pub trait RootFileSystem {
-    /// Returns the registered filesystem type name.
-    fn name() -> &'static str;
-
-    /// Mounts the selected filesystem from a block device.
-    ///
-    /// # Errors
-    ///
-    /// Returns a filesystem-specific error when the device cannot be mounted.
-    fn mount_bdev(
-        device: ClassDevice<BlockDeviceImpl>,
-        flags: SuperBlockFlags,
-    ) -> VfsResult<Arc<SuperBlock>>;
+    /// Returns the selected filesystem's VFS type descriptor.
+    fn file_system_type() -> FileSystemType;
 }
 
 #[doc(hidden)]
@@ -46,31 +37,29 @@ fn take<'a>(buf: &mut &'a [u8], cnt: usize) -> &'a [u8] {
 
 /// Consume `cnt` bytes from the front of a mutable slice.
 fn take_mut<'a>(buf: &mut &'a mut [u8], cnt: usize) -> &'a mut [u8] {
-    // use mem::take to circumvent lifetime issues
+    // `mem::take` lets the returned prefix retain the input slice lifetime.
     let (first, rem) = mem::take(buf).split_at_mut(cnt);
     *buf = rem;
     first
 }
 
-/// A block device with a byte cursor.
+/// A byte cursor over a block device.
 pub struct SeekableDisk {
-    dev: ClassDevice<BlockDeviceImpl>,
-
+    dev: Arc<BlockDevice>,
     block_id: u64,
     offset: usize,
     block_size_log2: u8,
-
     read_buffer: Box<[u8]>,
     write_buffer: Box<[u8]>,
-    /// Whether we have unsaved changes in the write buffer.
+    /// Whether the current write buffer contains uncommitted changes.
     ///
-    /// It's guaranteed that when `offset == 0`, write_buffer_dirty is false.
+    /// When `offset == 0`, this is always false.
     write_buffer_dirty: bool,
 }
 
 impl SeekableDisk {
     /// Creates a byte cursor over a block device.
-    pub fn new(dev: ClassDevice<BlockDeviceImpl>) -> Self {
+    pub fn new(dev: Arc<BlockDevice>) -> Self {
         assert!(dev.block_size().is_power_of_two());
         let block_size_log2 = dev.block_size().trailing_zeros() as u8;
         let read_buffer = vec![0u8; dev.block_size()].into_boxed_slice();
@@ -109,14 +98,13 @@ impl SeekableDisk {
         Ok(())
     }
 
-    /// Writes pending buffered data to the device.
+    /// Writes pending buffered data and flushes the backing device.
     pub fn flush(&mut self) -> DriverResult<()> {
         if self.write_buffer_dirty {
             self.dev.write_block(self.block_id, &self.write_buffer)?;
             self.write_buffer_dirty = false;
         }
-        self.dev.flush()?;
-        Ok(())
+        self.dev.flush()
     }
 
     fn read_partial(&mut self, buf: &mut &mut [u8]) -> DriverResult<usize> {
@@ -132,7 +120,6 @@ impl SeekableDisk {
             self.block_id += 1;
             self.offset = 0;
         }
-
         Ok(length)
     }
 
@@ -148,13 +135,11 @@ impl SeekableDisk {
             self.dev
                 .read_block(self.block_id, take_mut(&mut buf, length))?;
             read += length;
-
             self.block_id += blocks as u64;
         }
         if !buf.is_empty() {
             read += self.read_partial(&mut buf)?;
         }
-
         Ok(read)
     }
 
@@ -174,7 +159,6 @@ impl SeekableDisk {
             self.block_id += 1;
             self.offset = 0;
         }
-
         Ok(length)
     }
 
@@ -190,13 +174,11 @@ impl SeekableDisk {
             self.dev
                 .write_block(self.block_id, take(&mut buf, length))?;
             written += length;
-
             self.block_id += blocks as u64;
         }
         if !buf.is_empty() {
             written += self.write_partial(&mut buf)?;
         }
-
         Ok(written)
     }
 }

@@ -2,9 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, format, sync::Arc};
 
-use driver_base::DeviceKind;
+use driver_base::{Device, DeviceKind};
 use kdevice::{BusTypeId, DeviceDriver, DeviceMatcher, DeviceObject};
 
 use crate::driver_registry::{BoxedDriver, firmware_specs::AHCI};
@@ -69,7 +69,10 @@ impl DeviceDriver for AhciDriver {
             Ok(d) => d,
             Err(e) => return Err(e),
         };
-        kclass::publish_block(device, Box::new(ahci))
+        let (index, first_minor) = super::allocate_scsi_disk()?;
+        let name = format!("{}{}", ahci.name(), index);
+        let disk = block::Gendisk::new(name, 8, first_minor, 16, Box::new(ahci))?;
+        kclass::publish_block(device, Arc::new(disk)).map(drop)
     }
 }
 

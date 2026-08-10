@@ -72,7 +72,7 @@ Ext4Filesystem (mount state，类似 ext4_sb_info)
            ^
            `-- borrow Ext4Inode private state composed in the VFS inode
     v
-block::BlockDevice
+block::BlockDeviceOperations
 ```
 
 核心修改路径通过 `JournalHandle` 进入事务，先经 buffer 层取得元数据创建/写入访问权，
@@ -424,7 +424,7 @@ allocator 的实际并发关系建立锁顺序；不以字段分组预设锁域�
   用户指针与输出容量留在 POSIX/KVFS 边界，bridge 只负责把 mapping 语义转换为 extent。
 - `Ext4Filesystem` 保留类似 Linux `ext4_sb_info` 的 mount 总状态；只有具有独立事务状态机和
   生命周期不变量的 journal 聚合为 `MountedJournal`，不为代码分组机械创建 service。
-- KExt4 只通过通用 `BlockDevice` 表达块读写和 flush；异步 request、完成通知和 VirtIO
+- KExt4 只通过通用 `BlockDeviceOperations` 表达块读写和 flush；异步 request、完成通知和 VirtIO
   中断队列属于 block/driver 层。KExt4 可合并请求并在通用接口可用后接入，但不建立私有驱动
   旁路。
 - errseq、clean unmount/freeze 和完整 fault matrix 依赖最终的后台执行图，集中放在 N3；它们

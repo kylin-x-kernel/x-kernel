@@ -71,7 +71,7 @@ impl DeviceDriver for FxmacDriver {
         })?;
         let mapped_regs = mmio.base;
         match net::fxmac::FXmacNic::init(mapped_regs) {
-            Ok(dev) => kclass::publish_net(device, Box::new(dev)),
+            Ok(dev) => kclass::publish_net(device, Box::new(dev)).map(drop),
             Err(_) => Err(DriverError::Io),
         }
     }

@@ -21,18 +21,25 @@ use alloc::sync::Arc;
 pub use device_file::DeviceFile;
 pub(crate) use device_file::{add_device_entry, device_dentry};
 use klazy::Once;
-use kvfs::{FileSystemType, Mount, SimpleFs, SuperBlock, SuperBlockFlags, VfsResult};
+use kvfs::{
+    FileSystemType, FsContext, Mount, SimpleFs, SuperBlock, SuperBlockFlags, VfsResult,
+    get_tree_nodev,
+};
 pub use nodes::pts::Ptmx;
 
 const DEVFS_MAGIC: u32 = 0x0102_1994;
 static DEVFS: Once<(Arc<SuperBlock>, Arc<Mount>)> = Once::new();
 
-fn mount_nodev(superblock_flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
-    Ok(new_devfs(superblock_flags))
+fn get_tree(
+    context: &FsContext<'_>,
+    _lookup_root: &kvfs::Path,
+    _lookup_pwd: &kvfs::Path,
+) -> VfsResult<Arc<SuperBlock>> {
+    get_tree_nodev(context, |flags| Ok(new_devfs(flags)))
 }
 
 /// Registered devtmpfs filesystem type.
-pub const FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("devtmpfs", mount_nodev);
+pub const FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("devtmpfs", get_tree);
 
 /// Returns the shared devtmpfs superblock for device access.
 ///

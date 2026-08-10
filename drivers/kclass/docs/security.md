@@ -50,7 +50,7 @@
 
 - 事件桥接的回调是否可能在错误的设备状态下被触发；
 - `ClassDevice` 的 `Arc` 生命周期是否可能在设备 remove 后产生悬垂引用；
-- 注册表 publish replace 语义是否可能丢失设备或触发双重回调。
+- 重复 publish 是否被拒绝且 class-specific publish 是否正确回滚。
 
 ## unsafe 代码清单
 
@@ -74,8 +74,8 @@ RAII 管理，生命周期与内核等长）。
    不调用外部 callback。callback 在锁外执行。
 4. **事件分发无重入**：`notify_class_available` 在 callback 调用前已释放注册表锁，
    callback 中对同一注册表的访问不会死锁。
-5. **publish replace 原子性**：同一 `DeviceId` 的 replace 操作在单次锁持有中完成，
-   外部观察者不会看到中间状态（旧设备已移除但新设备未插入）。
+5. **publish identity 唯一性**：同一 `DeviceId` 的第二次 publish 返回 `AlreadyExists`；
+   replacement 必须由 `Removed` 后的新 publish 表达。
 6. **device_kind 校验**：`publish_<class>()` 在构造 `ClassDevice` 前校验 runtime 的
    `device_kind` 与注册表类型匹配，不匹配时返回 `InvalidInput` 而不发布。
 
@@ -94,7 +94,7 @@ RAII 管理，生命周期与内核等长）。
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 |------|----------|----------|----------|----------|
 | T-02 | 事件桥接在 `kdevice` 未初始化时被触发 | 高 | `ensure_event_bridge` 在 `kdevice::init_device_registry` 之前调用 | kdriver 调用 `publish_*` 前已执行 `init_device_registry`；`ACTIVATION_BRIDGE` 惰性初始化在首次 publish 时触发 |
-| T-03 | 注册表 publish 竞态导致设备丢失或重复 | 中 | 同一设备并发 publish | `SpinNoPreempt` 串行化，replace 语义保证同 ID 只有一个条目 |
+| T-03 | 注册表 publish 竞态导致设备丢失或重复 | 中 | 同一设备并发 publish | `SpinNoPreempt` 串行化，同 ID 的第二次 publish 返回 `AlreadyExists` |
 | T-04 | subscriber callback 中 panic 导致后续 subscriber 未被通知 | 中 | 某个 callback panic，其余 callback 在 `for` 循环中未执行 | callback 在 `catch_unwind` 之外执行；当前无 unwind 保护，依赖 subscriber 实现质量 |
 | T-05 | 设备 remove 后 `ClassDevice` 的 `with()` 访问已释放的 runtime | 中 | runtime trait object 的 `Drop` 在 `ClassDeviceInner` drop 之前执行 | `ClassDeviceInner` 的所有字段（包括 runtime）同时 drop；`Arc` 引用计数保证所有引用释放后才 drop |
 | T-06 | publish 时 `device_kind` 校验被绕过 | 中 | 驱动错误使用错误的 publish 函数（如对 net 设备调用 `publish_block`） | 显式 `device_kind != $kind` 校验，不匹配时返回 `InvalidInput` 且不发布 |
@@ -116,7 +116,7 @@ RAII 管理，生命周期与内核等长）。
 | F-03 | 事件桥接未注册 | `ensure_event_bridge` 未被调用（无 class feature 启用） | 无 Activated/Removed 事件分发 | 设备状态变更不影响 class 注册表 | 4 | `ensure_event_bridge` 在每个 `*_registry_fn()` 中调用 |
 | F-04 | subscriber 回调 panic | 回调实现有 bug 导致 unwinding | 后续 subscriber 未被通知 | 部分子系统可能未收到设备可用通知 | 3 | 回调按 Vec 顺序调用；当前未使用 `catch_unwind`；依赖 subscriber 质量 |
 | F-06 | 注册表 `devices()` 返回过大的 Vec | 大量设备同时活跃 | 内存分配可能失败 | 调用者收到空 Vec（当前无 OOM 处理） | 4 | `Vec::collect` 可能失败；上层调用者应处理空结果 |
-| F-07 | publish replace 后旧 `ClassDevice` 仍被外部引用 | 正常行为：外部持有旧克隆 | 旧 `ClassDevice` 可能指向已废弃的 runtime | 取决于外部使用方如何处理旧引用 | 4 | 这是设计行为：replace 从注册表移除旧条目但不失效已有引用 |
+| F-07 | 重复 publish | 驱动绕过正常 remove/add lifecycle | publish 返回 `AlreadyExists` | 新 runtime 不可见 | 4 | 回滚 class-specific publish，保留原 resident object |
 | F-08 | input metadata 缺失 | 非 input class 未实现 `class_metadata` 覆盖 | `physical_location()` / `unique_id()` 返回空字符串 | input 设备身份信息缺失 | 4 | `ClassRuntimeMetadata` 默认实现返回 `empty()`；input class 显式覆盖 |
 
 严重度定义：
@@ -128,8 +128,8 @@ RAII 管理，生命周期与内核等长）。
 
 ## 故障管理
 
-- publish 前置校验失败使用 `DriverError` 返回（`BadState`、`InvalidInput`），不 panic。
-- 注册表操作（publish、devices、find、subscribe、remove）不返回错误——均为 infallible 操作。
+- publish 校验失败使用 `DriverError` 返回（`BadState`、`InvalidInput`、`AlreadyExists`），不 panic。
+- devices、find、subscribe、remove 是 infallible；publish 显式报告重复 identity。
 - subscriber callback 的 panic 当前无 unwind 保护，依赖 subscriber 实现质量。
 - `ClassDevice` 的 `driver_name()` / `driver_id()` 使用 `expect`——前提是 publish 时已校验，
   如果触发 expect 说明存在 bug（publish 路径未正确校验）。
@@ -151,7 +151,6 @@ input class 的 `physical_location` 和 `unique_id` 是设备标识信息，
 - `devices()` 每次调用都分配新的 `Vec`，高频率轮询场景可能有分配压力。
 - 注册表不支持按条件筛选（如"只列出支持某特性的设备"），调用者需自行过滤。
 - 非 input class 无 `ClassDeviceMetadata` 扩展入口；如需添加 class 特定元数据需修改 trait。
-- `publish` 的 replace 语义可能对热插拔场景不友好：旧引用持有者无法感知设备已被替换。
 - `ClassDevice` 不支持降级通知（如设备即将被 remove 的 pre-notification）。
 
 ## 审计清单

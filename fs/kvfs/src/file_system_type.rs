@@ -8,31 +8,51 @@ use alloc::{sync::Arc, vec::Vec};
 
 use klazy::Lazy;
 
-use crate::{Mutex, SuperBlock, SuperBlockFlags, VfsError, VfsResult};
+use crate::{FsContext, Mutex, SuperBlock, VfsError, VfsResult};
 
-type MountNodevFn = fn(SuperBlockFlags) -> VfsResult<Arc<SuperBlock>>;
+bitflags::bitflags! {
+    /// Filesystem type flags, mirroring Linux `struct file_system_type::fs_flags`.
+    ///
+    /// Bit numbering follows `include/linux/fs.h` (`FS_REQUIRES_DEV` = 1,
+    /// `FS_BINARY_MOUNTDATA` = 2, `FS_HAS_SUBTYPE` = 4, `FS_USERNS_MOUNT` = 8,
+    /// ...), so future ports of those flags keep the same numeric layout
+    /// without renumbering existing bits.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct FileSystemTypeFlags: u32 {
+        /// Filesystem requires a backing block device.
+        const REQUIRES_DEV = 1 << 0;
+    }
+}
+
+/// Linux `file_system_type::init_fs_context`/`fs_context_operations::get_tree`
+/// collapsed into the current one-shot mount callback.
+pub type GetTreeFn =
+    for<'a> fn(&FsContext<'a>, &crate::Path, &crate::Path) -> VfsResult<Arc<SuperBlock>>;
 
 /// A filesystem implementation known to the VFS.
 #[derive(Clone, Copy)]
 pub struct FileSystemType {
     name: &'static str,
-    mount_nodev_fn: Option<MountNodevFn>,
+    get_tree: GetTreeFn,
+    fs_flags: FileSystemTypeFlags,
 }
 
 impl FileSystemType {
     /// Describes a filesystem that does not require a backing device.
-    pub const fn nodev(name: &'static str, mount_nodev_fn: MountNodevFn) -> Self {
+    pub const fn nodev(name: &'static str, get_tree: GetTreeFn) -> Self {
         Self {
             name,
-            mount_nodev_fn: Some(mount_nodev_fn),
+            get_tree,
+            fs_flags: FileSystemTypeFlags::empty(),
         }
     }
 
     /// Describes a filesystem that requires a backing device.
-    pub const fn device_backed(name: &'static str) -> Self {
+    pub const fn device_backed(name: &'static str, get_tree: GetTreeFn) -> Self {
         Self {
             name,
-            mount_nodev_fn: None,
+            get_tree,
+            fs_flags: FileSystemTypeFlags::REQUIRES_DEV,
         }
     }
 
@@ -43,19 +63,24 @@ impl FileSystemType {
 
     /// Returns whether this filesystem requires a backing device.
     pub const fn requires_device(self) -> bool {
-        self.mount_nodev_fn.is_none()
+        self.fs_flags.contains(FileSystemTypeFlags::REQUIRES_DEV)
     }
 
-    /// Creates a superblock for a device-less mount.
+    /// Runs the filesystem's `->get_tree` equivalent.
     ///
     /// # Errors
     ///
-    /// Returns [`VfsError::NoSuchDevice`] for device-backed filesystem types,
-    /// or propagates an error from the filesystem factory.
-    pub fn mount_nodev(self, superblock_flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
-        self.mount_nodev_fn
-            .ok_or(VfsError::NoSuchDevice)
-            .and_then(|mount_fn| mount_fn(superblock_flags))
+    /// Propagates an error from the filesystem factory, e.g.
+    /// [`VfsError::InvalidInput`] when a device-backed filesystem is mounted
+    /// without a device name, or [`VfsError::NoSuchDevice`] when the named
+    /// backing device does not exist.
+    pub(crate) fn get_tree(
+        self,
+        context: &FsContext<'_>,
+        lookup_root: &crate::Path,
+        lookup_pwd: &crate::Path,
+    ) -> VfsResult<Arc<SuperBlock>> {
+        (self.get_tree)(context, lookup_root, lookup_pwd)
     }
 }
 

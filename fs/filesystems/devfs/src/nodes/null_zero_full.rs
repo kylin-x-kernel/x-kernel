@@ -8,8 +8,7 @@ use alloc::sync::Arc;
 
 use kerrno::KError;
 use kvfs::{
-    DeviceFileOps, DeviceId, DirMapping, MmapMapper, NodeFlags, NodeType, SimpleFs, VfsFile,
-    VfsResult,
+    DeviceFileOps, DeviceId, DirMapping, MmapMapper, NodeFlags, SimpleFs, VfsFile, VfsResult,
 };
 
 use crate::{DeviceFile, add_device_entry};
@@ -129,32 +128,17 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     add_device_entry(
         root,
         "null",
-        DeviceFile::new(
-            fs.clone(),
-            NodeType::CharacterDevice,
-            DeviceId::new(1, 3),
-            Arc::new(Null),
-        ),
+        DeviceFile::new_character(fs.clone(), DeviceId::new(1, 3), Arc::new(Null)),
     );
     add_device_entry(
         root,
         "zero",
-        DeviceFile::new(
-            fs.clone(),
-            NodeType::CharacterDevice,
-            DeviceId::new(1, 5),
-            Arc::new(Zero),
-        ),
+        DeviceFile::new_character(fs.clone(), DeviceId::new(1, 5), Arc::new(Zero)),
     );
     add_device_entry(
         root,
         "full",
-        DeviceFile::new(
-            fs,
-            NodeType::CharacterDevice,
-            DeviceId::new(1, 7),
-            Arc::new(Full),
-        ),
+        DeviceFile::new_character(fs, DeviceId::new(1, 7), Arc::new(Full)),
     );
 }
 

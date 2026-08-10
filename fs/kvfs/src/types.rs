@@ -3,8 +3,9 @@
 // See LICENSES for license details.
 
 //! Common VFS data types.
-use core::fmt::Debug;
 
+/// Device number stored in special inodes (`dev_t`).
+pub use kdevice::DeviceNumber as DeviceId;
 use ktime_types::SystemTime;
 
 /// Filesystem node type values.
@@ -218,43 +219,6 @@ impl SetattrTime {
     }
 }
 
-/// Device identifier (major/minor encoding).
-#[derive(Default, Clone, PartialEq, Eq, Copy)]
-pub struct DeviceId(pub u64);
-
-impl DeviceId {
-    /// Create a new device ID from major/minor numbers.
-    pub const fn new(major: u32, minor: u32) -> Self {
-        let major = major as u64;
-        let minor = minor as u64;
-        Self(
-            (major & 0xffff_f000) << 32
-                | (major & 0x0000_0fff) << 8
-                | (minor & 0xffff_ff00) << 12
-                | (minor & 0x0000_00ff),
-        )
-    }
-
-    /// Return the major number.
-    pub const fn major(&self) -> u32 {
-        ((self.0 >> 32) & 0xffff_f000 | (self.0 >> 8) & 0x0000_0fff) as u32
-    }
-
-    /// Return the minor number.
-    pub const fn minor(&self) -> u32 {
-        ((self.0 >> 12) & 0xffff_ff00 | self.0 & 0x0000_00ff) as u32
-    }
-}
-
-impl Debug for DeviceId {
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        f.debug_struct("DeviceId")
-            .field("major", &self.major())
-            .field("minor", &self.minor())
-            .finish()
-    }
-}
-
 #[cfg(unittest)]
 mod tests {
     use unittest::{assert, assert_eq, def_test};
@@ -334,25 +298,6 @@ mod tests {
             Umode::from_bits(0o030600).mknod_node_type(),
             NodeType::Unknown
         );
-    }
-
-    #[def_test]
-    fn test_device_id_major_minor() {
-        let dev1 = DeviceId::new(1, 2);
-        assert_eq!(dev1.major(), 1);
-        assert_eq!(dev1.minor(), 2);
-
-        let dev2 = DeviceId::new(0x1234, 0x5678);
-        assert_eq!(dev2.major(), 0x1234);
-        assert_eq!(dev2.minor(), 0x5678);
-
-        let dev3 = DeviceId::new(0, 0);
-        assert_eq!(dev3.major(), 0);
-        assert_eq!(dev3.minor(), 0);
-
-        let dev4 = DeviceId::new(0xFFFFFFFF, 0xFFFFFFFF);
-        assert_eq!(dev4.major(), 0xFFFFFFFF);
-        assert_eq!(dev4.minor(), 0xFFFFFFFF);
     }
 
     #[def_test]

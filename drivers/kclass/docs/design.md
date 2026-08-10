@@ -80,7 +80,6 @@ drivers/kclass/
     │                                         │
     │  Delegation impls:                      │
     │   ClassDevice<NI> : NetDevice           │
-    │   ClassDevice<BI> : BlockDevice         │
     │   ClassDevice<CI> : CharDevice          │
     │   ClassDevice<DI> : DisplayDevice       │
     │   ClassDevice<II> : InputDevice         │
@@ -97,12 +96,12 @@ drivers/kclass/
 |------|------|
 | `ClassDevice<T>` | 类型化的运行时设备句柄；包装 `DeviceObject` + trait object，委托 trait 方法调用 |
 | `ClassDeviceInner<T>` | `ClassDevice` 的内部共享状态：parent、runtime、name、kind、irq、metadata |
-| `ClassRegistry<T>` | 类型化注册表：publish（发布/替换）、devices（枚举活跃设备）、find（按 ID 查找）、subscribe（订阅可用性）、remove（按 ID 移除） |
+| `ClassRegistry<T>` | 类型化注册表：publish（唯一发布）、devices（枚举活跃设备）、find（按 ID 查找）、subscribe（订阅可用性）、remove（按 ID 移除） |
 | `ACTIVATION_BRIDGE` | 全局事件桥接：订阅 `kdevice` 的 `Activated` / `Removed` 事件，驱动 class 级别的 notify/remove |
 | `class_registries!` 宏 | 声明式批量生成 7 个 class 注册表及其所有配套函数 |
 | `ClassDeviceMetadata` | 可选的 class 特定元数据（当前仅 input class 携带 physical_location / unique_id） |
 | `prelude` 模块 | 集中 re-export 所有公开类型，方便 `kdriver` 等发布者统一导入 |
-| Trait delegation impls | 为每个设备类别实现对应的操作 trait（`NetDevice`、`BlockDevice` 等），委托到 inner runtime |
+| Trait delegation impls | 为需要 class handle 调用的类别实现操作 trait（如 `NetDevice`），委托到 inner runtime；block I/O 只经 block core canonical `BlockDevice` |
 
 ## 状态机
 
@@ -136,12 +135,12 @@ drivers/kclass/
 | Published | Available | `kdevice` 分发 `Activated` 事件，`notify_class_available` 调用 subscriber callbacks |
 | Published | Available (immediate) | publish 时 `parent.state()` 已经为 `Active`（desc-adoption 路径） |
 | Available | Removed | `kdevice` 分发 `Removed` 事件，`remove_class_device` 从注册表移除 |
-| Published | Published (replaced) | 同一 `DeviceId` 再次 publish，旧 `ClassDevice` 被替换 |
+| Published | — | 同一 `DeviceId` 再次 publish 返回 `AlreadyExists` |
 
 ### 注册表 publish 语义
 
-`ClassRegistry::publish` 对同一 `DeviceId` 的多次 publish 执行 **replace** 而非追加：
-如果已存在同 ID 的条目，新条目替换旧条目。这支持热插拔设备的重新注册场景。
+`ClassRegistry::publish` 与 Linux device registration 一样拒绝重复 identity。热插拔重注册
+必须先经过 `Removed` lifecycle 删除旧对象，再发布新对象，不能静默替换 resident runtime。
 
 ## 算法流程
 
@@ -155,7 +154,7 @@ drivers/kclass/
 6. 构造 `ClassDevice::try_new_with_class_metadata`：
    - 验证 parent 有 `driver_name()` 和 `driver_id()`（必须已绑定驱动），否则返回 `BadState`。
 7. 注册表 publish（`SpinNoPreempt` 锁内）：
-   - 同一 ID 已存在 → replace
+   - 同一 ID 已存在 → `AlreadyExists`，撤销已经执行的 class-specific publish
    - 否则 → push
 8. 如果设备已处于 `Active` 状态，同步触发 `notify_class_available`，通知所有已注册 subscriber。
 
@@ -185,13 +184,14 @@ drivers/kclass/
 
 ### Device trait 委托
 
-每个 class 的 `ClassDevice<T>` 实现对应的操作 trait，委托到 inner runtime：
+需要由消费者直接持有 class handle 的 `ClassDevice<T>` 实现对应操作 trait，委托到 inner
+runtime。block class 是生命周期发布入口；I/O 消费者从 block core 取得 canonical
+`BlockDevice`，因此不再为 `ClassDevice<BlockDeviceImpl>` 重复实现整套 block operations。
 
 ```rust
-// 以 BlockDevice 为例：
-impl BlockDevice for ClassDevice<BlockDeviceImpl> {
-    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
-        self.with(|device| device.read_block(block_id, buf))
+impl NetDevice for ClassDevice<NetDeviceImpl> {
+    fn can_tx(&self) -> bool {
+        self.with(|device| device.can_tx())
     }
     // ...
 }

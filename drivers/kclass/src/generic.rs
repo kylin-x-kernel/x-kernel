@@ -235,14 +235,17 @@ impl<T> ClassRegistry<T> {
         }
     }
 
-    /// Publish or replace one runtime class device.
-    pub fn publish(&mut self, device: ClassDevice<T>) {
+    /// Publish one runtime class device.
+    ///
+    /// Linux device registration rejects duplicate identities; replacement is
+    /// a remove-then-add lifecycle rather than an implicit registry update.
+    pub fn publish(&mut self, device: ClassDevice<T>) -> DriverResult<()> {
         let id = device.id();
-        if let Some(existing) = self.devices.iter_mut().find(|existing| existing.id() == id) {
-            *existing = device;
-        } else {
-            self.devices.push(device);
+        if self.devices.iter().any(|existing| existing.id() == id) {
+            return Err(DriverError::AlreadyExists);
         }
+        self.devices.push(device);
+        Ok(())
     }
 
     /// Return currently active devices in this class.
@@ -273,10 +276,9 @@ impl<T> ClassRegistry<T> {
     }
 
     /// Remove a class device by parent device ID.
-    pub fn remove(&mut self, id: DeviceId) {
-        if let Some(pos) = self.devices.iter().position(|device| device.id() == id) {
-            self.devices.swap_remove(pos);
-        }
+    pub fn remove(&mut self, id: DeviceId) -> Option<ClassDevice<T>> {
+        let pos = self.devices.iter().position(|device| device.id() == id)?;
+        Some(self.devices.swap_remove(pos))
     }
 }
 

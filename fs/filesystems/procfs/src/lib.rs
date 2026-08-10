@@ -18,14 +18,20 @@ mod trace_nodes;
 
 use alloc::sync::Arc;
 
-use kvfs::{FileSystemType, SimpleFs, SuperBlock, SuperBlockFlags, VfsResult};
+use kvfs::{
+    FileSystemType, FsContext, SimpleFs, SuperBlock, SuperBlockFlags, VfsResult, get_tree_nodev,
+};
 
-fn mount_nodev(superblock_flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
-    Ok(new_procfs(superblock_flags))
+fn get_tree(
+    context: &FsContext<'_>,
+    _lookup_root: &kvfs::Path,
+    _lookup_pwd: &kvfs::Path,
+) -> VfsResult<Arc<SuperBlock>> {
+    get_tree_nodev(context, |flags| Ok(new_procfs(flags)))
 }
 
 /// Registered proc filesystem type.
-pub const FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("proc", mount_nodev);
+pub const FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("proc", get_tree);
 
 /// Creates a procfs superblock for process information.
 pub fn new_procfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {

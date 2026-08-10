@@ -20,30 +20,33 @@ mod util;
 
 use core::{cell::UnsafeCell, ptr::NonNull};
 
+use block::BlockDevice;
 use fatfs::SeekFrom;
 pub use fs::FatFilesystem;
 use fs::FatFilesystemGuard;
 use fs_block::SeekableDisk;
-use kclass::{BlockDeviceImpl, ClassDevice};
+
+fn fat_get_tree(
+    context: &kvfs::FsContext<'_>,
+    lookup_root: &kvfs::Path,
+    lookup_pwd: &kvfs::Path,
+) -> kvfs::VfsResult<alloc::sync::Arc<kvfs::SuperBlock>> {
+    kvfs::get_tree_bdev(context, lookup_root, lookup_pwd, |device, flags| {
+        Ok(FatFilesystem::mount_bdev(device, flags))
+    })
+}
 
 #[fs_block::kiface::provide]
 impl fs_block::RootFileSystem {
-    fn name() -> &'static str {
-        "vfat"
-    }
-
-    fn mount_bdev(
-        device: ClassDevice<BlockDeviceImpl>,
-        flags: kvfs::SuperBlockFlags,
-    ) -> kvfs::VfsResult<alloc::sync::Arc<kvfs::SuperBlock>> {
-        Ok(FatFilesystem::mount_bdev(device, flags))
+    fn file_system_type() -> kvfs::FileSystemType {
+        kvfs::FileSystemType::device_backed("vfat", fat_get_tree)
     }
 }
 
 pub(crate) struct FatDisk(SeekableDisk);
 
 impl FatDisk {
-    pub(crate) fn new(dev: ClassDevice<BlockDeviceImpl>) -> Self {
+    pub(crate) fn new(dev: alloc::sync::Arc<BlockDevice>) -> Self {
         Self(SeekableDisk::new(dev))
     }
 }

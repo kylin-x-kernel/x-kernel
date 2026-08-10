@@ -11,7 +11,7 @@ use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
 use ktty::tty::{PtyDriver, create_pty_pair};
 use kvfs::{
-    Dentry, DeviceFileOps, DeviceId, NodeType, SimpleDirLookup, SimpleDirOps, SimpleFs, VfsFile,
+    Dentry, DeviceFileOps, DeviceId, SimpleDirLookup, SimpleDirOps, SimpleFs, VfsFile,
     VfsFileBuilder, VfsInode, VfsResult,
 };
 
@@ -24,9 +24,8 @@ static PTS_TABLE: SpinNoIrq<FlattenObjects<Arc<DeviceFile>, 16>> =
 fn add_slave(fs: Arc<SimpleFs>, pty: Arc<PtyDriver>) -> KResult<u32> {
     let mut table = PTS_TABLE.lock();
     let pty_number = table
-        .add(DeviceFile::new(
+        .add(DeviceFile::new_character(
             fs,
-            NodeType::CharacterDevice,
             DeviceId::default(),
             pty.clone(),
         ))
@@ -48,12 +47,8 @@ impl Ptmx {
         let (master, slave) = create_pty_pair();
         add_slave(self.0.clone(), slave)?;
         let pty_number = master.pty_number();
-        let device = DeviceFile::new(
-            self.0.clone(),
-            NodeType::CharacterDevice,
-            DeviceId::new(128, pty_number),
-            master,
-        );
+        let device =
+            DeviceFile::new_character(self.0.clone(), DeviceId::new(128, pty_number), master);
         Ok((device, pty_number))
     }
 }

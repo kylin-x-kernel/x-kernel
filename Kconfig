@@ -248,11 +248,11 @@ config KFEAT_ROOTFS_SECONDARY_BLOCK
     bool "Mount the secondary block device as root filesystem"
     depends on KFEAT_FS
     help
-      Select the second discovered block device as the root filesystem
-      backing store instead of the last discovered one.
+      Select the block device with the second-lowest dev_t as the root
+      filesystem backing store instead of the device with the lowest dev_t.
 
 config KFEAT_ROOT_BLOCK
-    string "Preferred root block device name (e.g. \"ramdisk\", \"virtio-blk\")"
+    string "Preferred root block device name (e.g. \"ramdisk\", \"vda\")"
     default ""
     depends on KFEAT_FS
     help
@@ -260,9 +260,9 @@ config KFEAT_ROOT_BLOCK
       matches this value as the root filesystem. This lets multiple block
       devices coexist -- for example a RAM disk as the root filesystem
       alongside a virtio-blk data disk -- without disabling either driver.
-      If empty or no matching device is found, selection falls back to the
-      last-registered device (or the secondary device when
-      KFEAT_ROOTFS_SECONDARY_BLOCK is set).
+      A non-empty value is authoritative and boot fails if no matching disk is
+      registered. If empty, compatibility selection uses the lowest dev_t (or
+      the second-lowest dev_t when KFEAT_ROOTFS_SECONDARY_BLOCK is set).
 
 endmenu
 

@@ -7,9 +7,7 @@
 use alloc::sync::Arc;
 
 use kerrno::KError;
-use kvfs::{
-    DeviceFileOps, DeviceId, DirMapping, NodeFlags, NodeType, SimpleFs, VfsFile, VfsResult,
-};
+use kvfs::{DeviceFileOps, DeviceId, DirMapping, NodeFlags, SimpleFs, VfsFile, VfsResult};
 
 use crate::{DeviceFile, add_device_entry};
 
@@ -52,12 +50,7 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     add_device_entry(
         root,
         "cpu_dma_latency",
-        DeviceFile::new(
-            fs,
-            NodeType::CharacterDevice,
-            DeviceId::new(10, 1024),
-            Arc::new(CpuDmaLatency),
-        ),
+        DeviceFile::new_character(fs, DeviceId::new(10, 1024), Arc::new(CpuDmaLatency)),
     );
 }
 

@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! VirtIO device probing and HAL integration.
-use alloc::boxed::Box;
+use alloc::{boxed::Box, sync::Arc};
 use core::ptr::NonNull;
 
 use cfg_if::cfg_if;
@@ -11,7 +11,7 @@ use device_res::{
     DmaAllocation, DmaDirection, DmaMapping, DmaSpec, MmioRegion, dma_provider, mmio_provider,
     try_dma_provider,
 };
-use driver_base::DriverResult;
+use driver_base::{Device, DriverResult};
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
 
 cfg_if! {
@@ -41,9 +41,17 @@ cfg_if! {
                 transport: T,
                 _irq: Option<usize>,
             ) -> DriverResult<kclass::prelude::BlockDeviceImpl> {
-                Ok(Box::new(virtio::VirtIoBlkDev::<VirtIoHalImpl, T>::try_new(
-                    transport,
-                )?))
+                let device = virtio::VirtIoBlkDev::<VirtIoHalImpl, T>::try_new(transport)?;
+                let name = device.name().into();
+                let first_minor = device.index() << virtio::VIRTIO_BLK_PART_BITS;
+                let disk = block::Gendisk::new(
+                    name,
+                    virtio::VIRTIO_BLK_MAJOR,
+                    first_minor,
+                    1 << virtio::VIRTIO_BLK_PART_BITS,
+                    Box::new(device),
+                )?;
+                Ok(Arc::new(disk))
             }
         }
     }

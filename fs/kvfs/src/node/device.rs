@@ -9,13 +9,16 @@ use alloc::{
     vec::Vec,
 };
 
+use block::{BlockDevice, BlockDeviceOperations, BlockOpenMode, DriverError};
 use hashbrown::HashMap;
-use kerrno::LinuxError;
+use kerrno::{KError, LinuxError};
 use kpoll::{IoEvents, PollContext, PollRegisterError};
+use linux_raw_sys::ioctl::{BLKGETSIZE, BLKGETSIZE64, BLKROGET, BLKROSET};
 use memaddr::PhysAddrRange;
+use osvm::{VirtMutPtr, VirtPtr};
 
 use crate::{
-    DeviceId, FileOperations, Mutex, NodeFlags, VfsError, VfsFile, VfsFileBuilder, VfsInode,
+    DeviceId, FMode, FileOperations, Mutex, NodeFlags, VfsError, VfsFile, VfsFileBuilder, VfsInode,
     VfsResult,
 };
 
@@ -89,58 +92,7 @@ impl ChrdevRegistry {
     }
 }
 
-struct BdevRegistry(Mutex<Option<HashMap<u64, Arc<dyn DeviceFileOps>>>>);
-
-impl BdevRegistry {
-    fn with<R>(&self, f: impl FnOnce(&mut HashMap<u64, Arc<dyn DeviceFileOps>>) -> R) -> R {
-        let mut registry = self.0.lock();
-        f(registry.get_or_insert_with(HashMap::new))
-    }
-
-    fn add(&self, device: DeviceId, ops: Arc<dyn DeviceFileOps>) {
-        self.with(|registry| {
-            registry.insert(device.0, ops);
-        });
-    }
-
-    fn del(&self, device: DeviceId) -> Option<Arc<dyn DeviceFileOps>> {
-        self.with(|registry| registry.remove(&device.0))
-    }
-
-    fn get(&self, device: DeviceId) -> Option<Arc<dyn DeviceFileOps>> {
-        self.with(|registry| registry.get(&device.0).cloned())
-    }
-
-    fn get_file_device(&self, file: &VfsFile) -> VfsResult<Arc<dyn DeviceFileOps>> {
-        self.get(file.inode().rdev())
-            .ok_or_else(|| VfsError::from(LinuxError::ENXIO))
-    }
-
-    fn open(&self, inode: &VfsInode) -> VfsResult<()> {
-        self.get(inode.rdev())
-            .map(|_| ())
-            .ok_or_else(|| VfsError::from(LinuxError::ENXIO))
-    }
-
-    fn read(&self, file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
-        self.get_file_device(file)?.read(file, buf, offset)
-    }
-
-    fn write(&self, file: &VfsFile, buf: &[u8], offset: u64) -> VfsResult<usize> {
-        self.get_file_device(file)?.write(file, buf, offset)
-    }
-
-    fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
-        self.get_file_device(file)?.ioctl(file, cmd, arg)
-    }
-
-    fn mmap(&self, file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
-        self.get_file_device(file)?.mmap(file, mapper)
-    }
-}
-
 static CHRDEV_REGISTRY: ChrdevRegistry = ChrdevRegistry(Mutex::new(None));
-static BDEV_REGISTRY: BdevRegistry = BdevRegistry(Mutex::new(None));
 
 /// Register a character-device operation table for a device number.
 pub fn cdev_add(device: DeviceId, ops: Arc<dyn DeviceFileOps>) {
@@ -150,16 +102,6 @@ pub fn cdev_add(device: DeviceId, ops: Arc<dyn DeviceFileOps>) {
 /// Remove a character-device operation table for a device number.
 pub fn cdev_del(device: DeviceId) -> Option<Arc<dyn DeviceFileOps>> {
     CHRDEV_REGISTRY.del(device)
-}
-
-/// Add a block device to the VFS block-device map.
-pub fn bdev_add(device: DeviceId, ops: Arc<dyn DeviceFileOps>) {
-    BDEV_REGISTRY.add(device, ops);
-}
-
-/// Remove a block device from the VFS block-device map.
-pub fn bdev_del(device: DeviceId) -> Option<Arc<dyn DeviceFileOps>> {
-    BDEV_REGISTRY.del(device)
 }
 
 struct ChrdevFileOperations {
@@ -225,8 +167,14 @@ impl FileOperations for DefaultChrdevFileOperations {
 }
 
 impl FileOperations for DefaultBlkdevFileOperations {
-    fn open(self: Arc<Self>, inode: &VfsInode, _file: &mut VfsFileBuilder) -> VfsResult<()> {
-        BDEV_REGISTRY.open(inode)
+    fn open(self: Arc<Self>, inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
+        let device = block::lookup_block_device(inode.rdev())
+            .ok_or_else(|| VfsError::from(LinuxError::ENXIO))?;
+        BlockDeviceOperations::open(
+            device.as_ref(),
+            device.as_ref(),
+            block_open_mode(file.mode()),
+        )
     }
 
     fn supports_read(&self) -> bool {
@@ -238,19 +186,203 @@ impl FileOperations for DefaultBlkdevFileOperations {
     }
 
     fn read(&self, file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
-        BDEV_REGISTRY.read(file, buf, offset)
+        file_block_device(file)?.read(file, buf, offset)
     }
 
     fn write(&self, file: &VfsFile, buf: &[u8], offset: u64) -> VfsResult<usize> {
-        BDEV_REGISTRY.write(file, buf, offset)
+        file_block_device(file)?.write(file, buf, offset)
     }
 
     fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
-        BDEV_REGISTRY.ioctl(file, cmd, arg)
+        let device = file_block_device(file)?;
+        DeviceFileOps::ioctl(device.as_ref(), file, cmd, arg)
     }
 
     fn mmap(&self, file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
-        BDEV_REGISTRY.mmap(file, mapper)
+        file_block_device(file)?.mmap(file, mapper)
+    }
+
+    fn release(&self, inode: &VfsInode, _file: &VfsFile) -> VfsResult<()> {
+        if let Some(device) = block::lookup_block_device(inode.rdev()) {
+            BlockDeviceOperations::release(device.as_ref(), device.as_ref());
+        }
+        Ok(())
+    }
+
+    fn fsync(&self, file: &VfsFile, _data_only: bool) -> VfsResult<()> {
+        file_block_device(file)?.flush().map_err(map_block_error)
+    }
+}
+
+fn block_open_mode(mode: FMode) -> BlockOpenMode {
+    let mut block_mode = BlockOpenMode::empty();
+    if mode.contains(FMode::READ) {
+        block_mode.insert(BlockOpenMode::READ);
+    }
+    if mode.contains(FMode::WRITE) {
+        block_mode.insert(BlockOpenMode::WRITE);
+    }
+    block_mode
+}
+
+fn file_block_device(file: &VfsFile) -> VfsResult<Arc<BlockDevice>> {
+    block::lookup_block_device(file.inode().rdev()).ok_or_else(|| VfsError::from(LinuxError::ENXIO))
+}
+
+fn map_block_error(error: DriverError) -> VfsError {
+    match error {
+        DriverError::AlreadyExists => KError::AlreadyExists,
+        DriverError::WouldBlock => KError::WouldBlock,
+        DriverError::BadState => KError::BadState,
+        DriverError::InvalidInput => KError::InvalidInput,
+        DriverError::Io => KError::Io,
+        DriverError::NoMemory => KError::NoMemory,
+        DriverError::ReadOnly => KError::OperationNotPermitted,
+        DriverError::ResourceBusy => KError::ResourceBusy,
+        DriverError::Unsupported => KError::OperationNotSupported,
+    }
+}
+
+fn read_block_device(device: &BlockDevice, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    let total_bytes = device.size();
+    if offset >= total_bytes {
+        return Ok(0);
+    }
+
+    let block_size = device.block_size();
+    let length = core::cmp::min(buf.len() as u64, total_bytes - offset) as usize;
+    let output = &mut buf[..length];
+    let first_block = offset / block_size as u64;
+    let first_offset = (offset % block_size as u64) as usize;
+    let extent = first_offset
+        .checked_add(length)
+        .ok_or(KError::InvalidInput)?;
+    let blocks = extent.div_ceil(block_size);
+    let mut copied = 0;
+    let mut scratch = None;
+
+    for index in 0..blocks {
+        let block_offset = if index == 0 { first_offset } else { 0 };
+        let copy_length = core::cmp::min(block_size - block_offset, length - copied);
+        let block_id = first_block + index as u64;
+        if block_offset == 0 && copy_length == block_size {
+            device
+                .read_block(block_id, &mut output[copied..copied + copy_length])
+                .map_err(map_block_error)?;
+        } else {
+            let block = scratch.get_or_insert_with(|| alloc::vec![0u8; block_size]);
+            device
+                .read_block(block_id, block)
+                .map_err(map_block_error)?;
+            output[copied..copied + copy_length]
+                .copy_from_slice(&block[block_offset..block_offset + copy_length]);
+        }
+        copied += copy_length;
+    }
+    Ok(length)
+}
+
+fn write_block_device(device: &BlockDevice, buf: &[u8], offset: u64) -> VfsResult<usize> {
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    if device.is_read_only() {
+        return Err(KError::OperationNotPermitted);
+    }
+    let total_bytes = device.size();
+    if offset >= total_bytes {
+        return Err(VfsError::StorageFull);
+    }
+
+    let block_size = device.block_size();
+    let length = core::cmp::min(buf.len() as u64, total_bytes - offset) as usize;
+    let input = &buf[..length];
+    let first_block = offset / block_size as u64;
+    let first_offset = (offset % block_size as u64) as usize;
+    let extent = first_offset
+        .checked_add(length)
+        .ok_or(KError::InvalidInput)?;
+    let blocks = extent.div_ceil(block_size);
+    let mut copied = 0;
+    let mut scratch = None;
+
+    for index in 0..blocks {
+        let block_offset = if index == 0 { first_offset } else { 0 };
+        let copy_length = core::cmp::min(block_size - block_offset, length - copied);
+        let block_id = first_block + index as u64;
+        let result = if block_offset == 0 && copy_length == block_size {
+            device.write_block(block_id, &input[copied..copied + copy_length])
+        } else {
+            let block = scratch.get_or_insert_with(|| alloc::vec![0u8; block_size]);
+            device.read_block(block_id, block).and_then(|()| {
+                block[block_offset..block_offset + copy_length]
+                    .copy_from_slice(&input[copied..copied + copy_length]);
+                device.write_block(block_id, block)
+            })
+        };
+        if let Err(error) = result {
+            return if copied == 0 {
+                Err(map_block_error(error))
+            } else {
+                Ok(copied)
+            };
+        }
+        copied += copy_length;
+    }
+
+    Ok(length)
+}
+
+impl DeviceFileOps for BlockDevice {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn supports_write(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+        read_block_device(self, buf, offset)
+    }
+
+    fn write(&self, _file: &VfsFile, buf: &[u8], offset: u64) -> VfsResult<usize> {
+        write_block_device(self, buf, offset)
+    }
+
+    fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
+        match cmd {
+            BLKGETSIZE => {
+                let sectors =
+                    usize::try_from(self.size() / 512).map_err(|_| VfsError::FileTooLarge)?;
+                (arg as *mut usize).write_vm(sectors)?;
+                Ok(0)
+            }
+            BLKGETSIZE64 => {
+                (arg as *mut u64).write_vm(self.size())?;
+                Ok(0)
+            }
+            BLKROGET => {
+                (arg as *mut u32).write_vm(self.is_read_only() as u32)?;
+                Ok(0)
+            }
+            BLKROSET => {
+                let read_only = (arg as *const u32).read_vm()?;
+                if read_only > 1 {
+                    return Err(KError::InvalidInput);
+                }
+                self.set_disk_read_only(read_only != 0)?;
+                Ok(0)
+            }
+            _ => BlockDeviceOperations::ioctl(self, self, block_open_mode(file.mode()), cmd, arg),
+        }
+    }
+
+    fn mmap(&self, _file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
+        mapper.map_file_backed()
     }
 }
 
@@ -353,8 +485,9 @@ pub trait DeviceFileOps: Send + Sync {
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::sync::Arc;
+    use alloc::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
 
+    use ksync::Mutex;
     use ktime_types::SystemTime;
     use unittest::def_test;
 
@@ -454,5 +587,96 @@ mod tests {
         let removed = cdev_del(device).expect("registered cdev is removed");
         assert!(Arc::ptr_eq(&removed, &ops));
         assert!(inode.character_device().is_none());
+    }
+
+    struct MemoryBlockDevice {
+        storage: Arc<Mutex<Vec<u8>>>,
+        block_size: usize,
+        flushes: Arc<core::sync::atomic::AtomicUsize>,
+    }
+
+    impl BlockDeviceOperations for MemoryBlockDevice {
+        fn num_blocks(&self) -> u64 {
+            (self.storage.lock().len() / self.block_size) as u64
+        }
+
+        fn block_size(&self) -> usize {
+            self.block_size
+        }
+
+        fn read_block(&self, block_id: u64, buf: &mut [u8]) -> block::DriverResult {
+            let start = block_id as usize * self.block_size;
+            let end = start + buf.len();
+            buf.copy_from_slice(&self.storage.lock()[start..end]);
+            Ok(())
+        }
+
+        fn write_block(&self, block_id: u64, buf: &[u8]) -> block::DriverResult {
+            let start = block_id as usize * self.block_size;
+            let end = start + buf.len();
+            self.storage.lock()[start..end].copy_from_slice(buf);
+            Ok(())
+        }
+
+        fn flush(&self) -> block::DriverResult {
+            self.flushes
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[def_test(serial)]
+    fn block_special_file_io_crosses_blocks_and_obeys_capacity() {
+        const BLOCK_SIZE: usize = 512;
+        const BLOCKS: usize = 4;
+        let initial: Vec<u8> = (0..BLOCK_SIZE * BLOCKS)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let storage = Arc::new(Mutex::new(initial.clone()));
+        let flushes = Arc::new(core::sync::atomic::AtomicUsize::new(0));
+        let disk = Arc::new(
+            block::Gendisk::new(
+                String::from("kvfs-block-test"),
+                243,
+                0,
+                1,
+                Box::new(MemoryBlockDevice {
+                    storage: storage.clone(),
+                    block_size: BLOCK_SIZE,
+                    flushes: flushes.clone(),
+                }),
+            )
+            .expect("valid KVFS test disk"),
+        );
+        let device = block::add_disk(disk.clone()).expect("publish KVFS test disk");
+
+        let mut output = vec![0; 1024];
+        assert_eq!(read_block_device(&device, &mut output, 256).unwrap(), 1024);
+        assert_eq!(&output[..], &initial[256..1280]);
+
+        let input = vec![0x5a; 1024];
+        assert_eq!(write_block_device(&device, &input, 256).unwrap(), 1024);
+        assert_eq!(&storage.lock()[256..1280], &input[..]);
+        assert_eq!(flushes.load(core::sync::atomic::Ordering::Relaxed), 0);
+
+        let mut tail = vec![0; 1024];
+        assert_eq!(
+            read_block_device(&device, &mut tail, (BLOCK_SIZE * BLOCKS - 128) as u64).unwrap(),
+            128
+        );
+        assert_eq!(
+            write_block_device(&device, &[1], (BLOCK_SIZE * BLOCKS) as u64).unwrap_err(),
+            VfsError::StorageFull
+        );
+
+        device
+            .set_disk_read_only(true)
+            .expect("set test disk read-only");
+        assert_eq!(
+            write_block_device(&device, &[1], 0).unwrap_err(),
+            VfsError::from(KError::OperationNotPermitted)
+        );
+
+        block::del_gendisk(disk.device_number()).expect("remove KVFS test disk");
     }
 }

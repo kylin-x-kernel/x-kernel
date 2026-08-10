@@ -14,8 +14,8 @@ use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;
 use ktime_types::SystemTime;
 use kvfs::{
-    DeviceFileOps, DeviceId, DirMapping, NodeFlags, NodeType, SimpleDir, SimpleFs, VfsFile,
-    VfsFileBuilder, VfsInode, VfsResult,
+    DeviceFileOps, DeviceId, DirMapping, NodeFlags, SimpleDir, SimpleFs, VfsFile, VfsFileBuilder,
+    VfsInode, VfsResult,
 };
 use linux_raw_sys::{
     general::{__kernel_old_time_t, __kernel_suseconds_t},
@@ -382,12 +382,7 @@ pub fn input_devices(fs: Arc<SimpleFs>) -> DirMapping {
         let event_dev = Arc::new(EventDev::new(device));
         event_dev.subscribe_removed();
 
-        let dev = DeviceFile::new(
-            fs.clone(),
-            NodeType::CharacterDevice,
-            DeviceId::new(13, (i + 1) as _),
-            event_dev,
-        );
+        let dev = DeviceFile::new_character(fs.clone(), DeviceId::new(13, (i + 1) as _), event_dev);
 
         const BTN_MOUSE: usize = 0x110;
         if keys[BTN_MOUSE / 8] & (1 << (BTN_MOUSE % 8)) != 0 {

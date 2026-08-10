@@ -10,7 +10,7 @@ use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kspin::SpinNoIrq;
 use simple_sdmmc::SdMmc;
 
-use crate::BlockDevice;
+use crate::BlockDeviceOperations;
 
 /// A SD/MMC driver.
 ///
@@ -53,7 +53,7 @@ impl Device for SdMmcDriver {
     }
 }
 
-impl BlockDevice for SdMmcDriver {
+impl BlockDeviceOperations for SdMmcDriver {
     fn num_blocks(&self) -> u64 {
         self.num_blocks
     }

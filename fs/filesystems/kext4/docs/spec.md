@@ -117,7 +117,7 @@ confidence 和 method limits。对比使用固定的 KExt4 历史基线，不保
 | journal 提交仍受同步 block API 限制 | N2.1 已把连续 journal blocks 聚合为不超过 128 KiB 的请求，并复用 journal-superblock image、去除 commit 后的重复 flush | 请求数量已降低，但每个 batch 仍在调用栈中同步完成；没有多请求 in-flight、后台 commit/checkpoint 或驱动 completion |
 | durability 等待仍为同步基线 | runtime inode 尚无 sync/datasync tid，`fsync/fdatasync` 保守提交整个 running transaction 并 flush；`syncfs` 仍推进全文件系统 | 尚无目标 transaction 等待、异步 ordered-data dependency、后台 commit/checkpoint 和 errseq，等待者仍在当前调用栈执行设备 I/O |
 | PageCache writeback 基础有限 | 固定 batch copy、无后台 dirty control、无 transaction dependency | fio 的吞吐和内存压力都不可控 |
-| block/driver 接口只有同步完成路径 | KExt4 只能通过当前 `BlockDevice` 接口逐请求等待，VirtIO 完成通知和多请求 in-flight 不属于 filesystem 层 | KExt4 可以减少和聚合请求，但无法在 filesystem 内消除驱动 busy-poll/同步等待；需由 block/VirtIO owner 提供通用异步接口 |
+| block/driver 接口只有同步完成路径 | KExt4 只能通过当前 `BlockDeviceOperations` 接口逐请求等待，VirtIO 完成通知和多请求 in-flight 不属于 filesystem 层 | KExt4 可以减少和聚合请求，但无法在 filesystem 内消除驱动 busy-poll/同步等待；需由 block/VirtIO owner 提供通用异步接口 |
 | extent/allocator 仍未完整分层 | `ExtentPath` 已承载单路径更新和均衡 split，但跨叶 truncate 回退、重复 lookup 和 scan-backed free-run cache 仍存在 | 长文件常规写不再全树重建，复杂范围操作和多 job 仍受限 |
 
 完整 errseq、unmount 和 fault matrix 很重要，但它们不消除上述结构性瓶颈，也不应继续阻塞
@@ -151,7 +151,7 @@ POSIX / KVFS
                 +-- inode / extent / orphan / xattr operations
                          |
                          v
-                  block::BlockDevice
+                  block::BlockDeviceOperations
 ```
 
 目标映射：
@@ -376,7 +376,7 @@ normal-path buffered fio 可用，而不是先追求所有故障边界。
 
 实现项：
 
-- **N2.1：先降低同步前台 I/O 数量**：在现有同步 `BlockDevice` 能力内合并连续 journal
+- **N2.1：先降低同步前台 I/O 数量**：在现有同步 `BlockDeviceOperations` 能力内合并连续 journal
   blocks，复用已校验的内存 journal superblock，审计并去除一次 commit/checkpoint 内重复的
   read/write/flush；barrier 和最终持久化语义不得削弱；
 - **N2.2：建立后台 journal 执行**：引入 background commit/checkpoint、transaction age
@@ -515,7 +515,7 @@ KExt4 bridge 只消费这些通用接口，不为 KExt4 建立私有 VFS/PageCac
 
 以下能力不属于 ext4/filesystem 实现范围，应建立独立 issue 由 block/driver owner 推进：
 
-1. `BlockDevice` 支持异步 request submission 和 completion notification，而不是要求调用者
+1. `BlockDeviceOperations` 支持异步 request submission 和 completion notification，而不是要求调用者
    对每个请求同步等待或 busy-poll；
 2. 支持多个 read/write request 同时 in-flight，并保留完成顺序、错误和取消语义；
 3. VirtIO-blk 使用中断/完成队列唤醒等待者，并向通用 block 层暴露能力，不建立 KExt4 私有

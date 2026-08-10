@@ -132,9 +132,8 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     add_device_entry(
         root,
         "dice",
-        DeviceFile::new(
+        DeviceFile::new_character(
             fs.clone(),
-            kvfs::NodeType::CharacterDevice,
             kvfs::DeviceId::new(30, 0),
             Arc::new(DiceNodeInfo::new()),
         ),

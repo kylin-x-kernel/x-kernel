@@ -20,7 +20,12 @@ ramdisk-static = []
 # ahci = ["dep:simple-ahci"]
 
 [dependencies]
+bitflags = { workspace = true }
 driver_base = { workspace = true }
+kdevice = { workspace = true }
+kerrno = { workspace = true }
+klazy = { workspace = true }
+ksync = { workspace = true }
 # bcm2835-sdhci = { git = "https://github.com/lhw2002426/bcm2835-sdhci.git", rev = "e974f16", optional = true }
 kspin = { workspace = true }
 log = { workspace = true }

@@ -3,7 +3,10 @@
 // See LICENSES for license details.
 
 //! VirtIO block driver adapter.
-use block::BlockDevice;
+use alloc::string::String;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use block::BlockDeviceOperations;
 use driver_base::{Device, DeviceKind, DriverResult};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
@@ -14,10 +17,40 @@ use virtio_drivers::{
 
 use crate::as_driver_error;
 
+/// Number of minor bits reserved for partitions of one virtio disk.
+pub const PART_BITS: u32 = 4;
+/// Block major used by the current X-Kernel virtio disk namespace.
+pub const VIRTIO_BLK_MAJOR: u32 = 254;
+
+/// Global virtio-blk index allocator.
+///
+/// Assigned in discovery order by [`VirtIoBlkDev::try_new`] and used to derive
+/// the Linux-style `vdX` device name. `Relaxed` ordering suffices because each
+/// device only needs a unique index, not a globally synchronized counter value.
+static VD_INDEX: AtomicU32 = AtomicU32::new(0);
+
+/// Converts a zero-based index into a base26 suffix for Linux-style
+/// virtio-blk device names (0 -> "a", 25 -> "z", 26 -> "aa").
+/// The caller will prepend the "vd" prefix separately.
+fn vd_name(index: u32) -> String {
+    let mut suffix = String::new();
+    let mut n = index;
+    loop {
+        let digit = (n % 26) as u8;
+        suffix.push((b'a' + digit) as char);
+        n /= 26;
+        if n == 0 {
+            break;
+        }
+        n -= 1;
+    }
+    suffix.chars().rev().collect()
+}
+
 /// The VirtIO block device driver.
 ///
 /// Wraps `VirtIOBlk` from `virtio-drivers` and implements the
-/// [`BlockDevice`] trait, providing sector-level read/write access to a
+/// [`BlockDeviceOperations`] trait, providing sector-level read/write access to a
 /// virtual block device.
 ///
 /// # Type Parameters
@@ -37,6 +70,8 @@ pub struct VirtIoBlkDev<H: Hal, T: Transport> {
     device: SpinNoIrq<InnerDev<H, T>>,
     sector_size: usize,
     num_blocks: u64,
+    name: String,
+    index: u32,
 }
 
 // SAFETY: VirtIoBlkDev serializes all access to the inner VirtIOBlk through
@@ -64,11 +99,20 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     pub fn try_new(transport: T) -> DriverResult<Self> {
         let device = Self::init_device(transport)?;
         let num_blocks = device.capacity();
+        let index = VD_INDEX.fetch_add(1, Ordering::Relaxed);
         Ok(Self {
             device: SpinNoIrq::new(device),
             sector_size: SECTOR_SIZE,
             num_blocks,
+            name: alloc::format!("vd{}", vd_name(index)),
+            index,
         })
+    }
+
+    /// Returns the discovery-order disk index retained for driver cleanup and
+    /// `gendisk` minor allocation.
+    pub const fn index(&self) -> u32 {
+        self.index
     }
 
     fn init_device(transport: T) -> DriverResult<InnerDev<H, T>> {
@@ -92,7 +136,7 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
 
 impl<H: Hal, T: Transport> Device for VirtIoBlkDev<H, T> {
     fn name(&self) -> &str {
-        "virtio-blk"
+        &self.name
     }
 
     fn device_kind(&self) -> DeviceKind {
@@ -100,7 +144,7 @@ impl<H: Hal, T: Transport> Device for VirtIoBlkDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> BlockDevice for VirtIoBlkDev<H, T> {
+impl<H: Hal, T: Transport> BlockDeviceOperations for VirtIoBlkDev<H, T> {
     #[inline]
     fn num_blocks(&self) -> u64 {
         self.num_blocks
@@ -137,12 +181,25 @@ mod tests {
         let dev = VirtIoBlkDev::<MockHal, MockTransport>::try_new(transport);
 
         if let Ok(d) = dev {
-            assert_eq!(d.name(), "virtio-blk");
+            assert!(d.name().starts_with("vd"));
+            assert!(d.name().len() >= 3);
             assert_eq!(d.device_kind(), DeviceKind::Block);
             assert_eq!(d.block_size(), 512);
         } else {
             assert!(dev.is_err());
         }
+    }
+
+    #[def_test]
+    fn test_vd_name_base26() {
+        assert_eq!(vd_name(0), "a");
+        assert_eq!(vd_name(1), "b");
+        assert_eq!(vd_name(25), "z");
+        assert_eq!(vd_name(26), "aa");
+        assert_eq!(vd_name(27), "ab");
+        assert_eq!(vd_name(51), "az");
+        assert_eq!(vd_name(52), "ba");
+        assert_eq!(vd_name(701), "zz");
     }
 
     #[def_test]

@@ -6,6 +6,7 @@
 //!
 //! This crate owns the Rust counterpart of Linux `struct fs_struct`: root,
 //! current working directory, file creation mask, and exec transition state.
+//! Process runtime code owns or shares references to this object.
 
 #![cfg_attr(any(not(test), doc), no_std)]
 
@@ -32,23 +33,17 @@ pub fn copy_init_fs_struct() -> Arc<Mutex<FsStruct>> {
     Arc::new(Mutex::new(init_fs().lock().clone_for_process()))
 }
 
-#[derive(Clone, Debug)]
-enum FsLocation {
-    Unmounted,
-    Mounted { root: Path, pwd: Path },
-}
-
-/// Process filesystem context.
+/// The process filesystem view (`fs_struct`).
 ///
-/// This mirrors Linux `struct fs_struct`, but keeps the pre-rootfs state
-/// explicit instead of representing unmounted root and pwd as unrelated
-/// `Option` fields. It stores already resolved root and current-directory
-/// paths; lookup and chroot handling enforce path-escape rules.
+/// This mirrors Linux `struct fs_struct`. Rust `Option` values represent the
+/// zero-initialized `root` and `pwd` paths used by Linux's static `init_fs`
+/// before the initial mount tree is installed.
 #[derive(Debug)]
 pub struct FsStruct {
     umask: u32,
     in_exec: bool,
-    location: FsLocation,
+    root: Option<Path>,
+    pwd: Option<Path>,
 }
 
 impl FsStruct {
@@ -57,7 +52,8 @@ impl FsStruct {
         Self {
             umask: 0o022,
             in_exec: false,
-            location: FsLocation::Unmounted,
+            root: None,
+            pwd: None,
         }
     }
 
@@ -73,7 +69,8 @@ impl FsStruct {
         Ok(Self {
             umask: 0o022,
             in_exec: false,
-            location: FsLocation::Mounted { root, pwd },
+            root: Some(root),
+            pwd: Some(pwd),
         })
     }
 
@@ -89,34 +86,27 @@ impl FsStruct {
         Self {
             umask: self.umask,
             in_exec: self.in_exec,
-            location: self.location.clone(),
+            root: self.root.clone(),
+            pwd: self.pwd.clone(),
         }
     }
 
     /// Attaches the first mounted root to this context.
     pub fn attach_root(&mut self, root: Path) -> VfsResult<()> {
         Self::require_directory(&root)?;
-        self.location = FsLocation::Mounted {
-            root: root.clone(),
-            pwd: root,
-        };
+        self.root = Some(root.clone());
+        self.pwd = Some(root);
         Ok(())
     }
 
     /// Returns this context's root path.
     pub fn root(&self) -> &Path {
-        match &self.location {
-            FsLocation::Mounted { root, .. } => root,
-            FsLocation::Unmounted => panic!("fs root not initialized"),
-        }
+        self.root.as_ref().expect("fs root not initialized")
     }
 
     /// Returns this context's current working directory.
     pub fn pwd(&self) -> &Path {
-        match &self.location {
-            FsLocation::Mounted { pwd, .. } => pwd,
-            FsLocation::Unmounted => panic!("fs pwd not initialized"),
-        }
+        self.pwd.as_ref().expect("fs pwd not initialized")
     }
 
     /// Returns root and pwd as a stable snapshot.
@@ -152,25 +142,20 @@ impl FsStruct {
     /// Changes this context's root.
     pub fn set_root(&mut self, root: Path) -> VfsResult<()> {
         Self::require_directory(&root)?;
-        match &mut self.location {
-            FsLocation::Mounted { root: slot, .. } => *slot = root,
-            FsLocation::Unmounted => {
-                self.location = FsLocation::Mounted {
-                    root: root.clone(),
-                    pwd: root,
-                };
-            }
+        if self.pwd.is_none() {
+            self.pwd = Some(root.clone());
         }
+        self.root = Some(root);
         Ok(())
     }
 
     /// Changes this context's current working directory.
     pub fn set_pwd(&mut self, pwd: Path) -> VfsResult<()> {
         Self::require_directory(&pwd)?;
-        match &mut self.location {
-            FsLocation::Mounted { pwd: slot, .. } => *slot = pwd,
-            FsLocation::Unmounted => return Err(VfsError::InvalidInput),
+        if self.root.is_none() {
+            return Err(VfsError::InvalidInput);
         }
+        self.pwd = Some(pwd);
         Ok(())
     }
 
@@ -178,7 +163,8 @@ impl FsStruct {
     pub fn replace_root_and_pwd(&mut self, root: Path, pwd: Path) -> VfsResult<()> {
         Self::require_directory(&root)?;
         Self::require_directory(&pwd)?;
-        self.location = FsLocation::Mounted { root, pwd };
+        self.root = Some(root);
+        self.pwd = Some(pwd);
         Ok(())
     }
 

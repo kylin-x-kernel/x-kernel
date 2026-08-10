@@ -12,7 +12,63 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use hashbrown::HashMap;
 use klazy::Lazy;
 
-use crate::{Dentry, DentryKey, Mutex, MutexGuard, VfsInode, VfsResult, WritebackControl};
+use crate::{
+    Dentry, DentryKey, Filename, FsContext, LookupFlags, LookupIntent, MountFlags, Mutex,
+    MutexGuard, NodeType, Path, VfsError, VfsInode, VfsResult, WritebackControl,
+};
+
+type FillSuperNodevFn = fn(SuperBlockFlags) -> VfsResult<Arc<SuperBlock>>;
+type FillSuperBdevFn = fn(Arc<block::BlockDevice>, SuperBlockFlags) -> VfsResult<Arc<SuperBlock>>;
+
+/// Constructs a device-less superblock from a filesystem context.
+pub fn get_tree_nodev(
+    context: &FsContext<'_>,
+    fill_super: FillSuperNodevFn,
+) -> VfsResult<Arc<SuperBlock>> {
+    fill_super(context.sb_flags())
+}
+
+/// Constructs a block-backed superblock from a filesystem context.
+///
+/// This is the VFS counterpart of Linux `get_tree_bdev()`: it resolves
+/// `fc->source`, validates the resulting block-special inode and mount policy,
+/// obtains the canonical `BlockDevice` from the block core, and invokes the
+/// filesystem's fill operation.
+pub fn get_tree_bdev(
+    context: &FsContext<'_>,
+    lookup_root: &Path,
+    lookup_pwd: &Path,
+    fill_super: FillSuperBdevFn,
+) -> VfsResult<Arc<SuperBlock>> {
+    let source = context
+        .source()
+        .filter(|source| !source.is_empty())
+        .ok_or(VfsError::InvalidInput)?;
+    let path = Filename::new(source).lookup_at(
+        lookup_root,
+        lookup_pwd,
+        LookupIntent::Open,
+        LookupFlags::follow(),
+        context.cred(),
+    )?;
+    if path.inode().node_type() != NodeType::BlockDevice {
+        return Err(VfsError::from(kerrno::LinuxError::ENOTBLK));
+    }
+    if path.mount().flags().contains(MountFlags::NODEV) {
+        return Err(VfsError::PermissionDenied);
+    }
+
+    let device_number = path.inode().rdev();
+    if device_number == crate::DeviceId::default() {
+        return Err(VfsError::from(kerrno::LinuxError::ENXIO));
+    }
+    let device = block::lookup_block_device(device_number)
+        .ok_or_else(|| VfsError::from(kerrno::LinuxError::ENXIO))?;
+    if device.is_read_only() && !context.sb_flags().contains(SuperBlockFlags::RDONLY) {
+        return Err(VfsError::PermissionDenied);
+    }
+    fill_super(device, context.sb_flags())
+}
 
 static SUPER_BLOCK_REGISTRY: Lazy<SuperBlockRegistry> = Lazy::new(SuperBlockRegistry::new);
 

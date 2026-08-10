@@ -2,92 +2,65 @@
 
 ## 定位
 
-`fs_boot` 负责选择 root backing device、安装初始 root mount，并创建内核启动所需的
-devfs、tmpfs、procfs、sysfs 和可选 bpffs/9P mount。它拥有初始 namespace 的布局策略，
-不拥有具体 block filesystem 的实现选择。它也在用户态启动前注册本镜像内建的
-filesystem type，使通用 mount 路径和 `/proc/filesystems` 读取同一组类型。
-
-## 范围
-
-- `src/lib.rs`：filesystem type 注册、root device 选择、初始 namespace 安装和
-  boot-time mounts。
+`fs_boot` 拥有初始 mount namespace 的布局与 root device 选择策略，不拥有具体 block
+filesystem 的 mount 算法。内建 filesystem type 在用户态启动前注册，普通 mount、boot
+root 和 `/proc/filesystems` 读取同一组 descriptor。
 
 ## 架构
 
 ```text
-kclass block devices
-        |
-        v
-select_root_block -- ClassDevice --> fs_block::RootFileSystem::mount_bdev
-                                      |
-                                      v
-                                root SuperBlock
-                                      |
-                                      v
-                         MntNamespace::init_mount_tree
-                                      |
-              +-----------------------+-----------------------+
-              v                       v                       v
-            /dev                    /proc                   /tmp ...
-
-built-in filesystem descriptors
-        |
-        v
-kvfs::register_filesystem
-        |
-        +--> POSIX mount lookup
-        +--> /proc/filesystems
+block::block_devices -> select root policy -> /dev/<disk_name>
+                                              |
+bootstrap rootfs -> bootstrap devtmpfs         v
+                               FsContext -> FileSystemType::get_tree
+                                              |
+                                              v
+                                      KVFS get_tree_bdev
+                                              |
+                                              v
+                                      real root SuperBlock
+                                              |
+                                              v
+                                   overmount bootstrap rootfs
 ```
 
-root filesystem 的 Kconfig choice 由 `kruntime` 链接成唯一的
-`fs_block::RootFileSystem` provider。`fs_boot` 不依赖 ext4、FAT 或具体 ext4 backend。
-这仍不同于 Linux 在启动时按 `rootfstype=` 或 registered device-backed type 走通用
-mount path；在引入可供 KVFS filesystem type 消费的 pre-root block-source 边界前，
-`RootFileSystem` 只承担该差异，不能作为第二个 filesystem-type registry。
+root filesystem 的 Kconfig choice 链接成唯一 `fs_block::RootFileSystem` provider。provider
+只返回 canonical `FileSystemType`；ext4/FAT 的 `get_tree` 与用户 `mount(2)` 完全相同。
+boot 不再调用 root 专用 `mount_bdev`。
 
-本 crate 直接调用 devfs/tmpfs/procfs 等构造函数，是因为这些 mount path 和启动参数
-属于初始 namespace 布局。类型发现和用户提供名称的分派由 KVFS 注册表负责；boot
-只注册实现描述符，不复制 POSIX mount 的类型匹配。
-devtmpfs 和当前无 namespace 分化的 sysfs 构造器发布共享 superblock，因此后续按类型
-挂载能看到 boot 阶段创建的设备节点、socket 和 `/sys` 链接；构造器同时保留 internal
-root mount，分别对应 Linux 的 private devtmpfs mount，以及当前没有独立 kernfs root 时
-sysfs 树所需的内核 active owner。可见 mount 的卸载不会 teardown 这两棵内核维护的树。
-procfs、bpffs、tmpfs
-仍由各自 factory 创建新实例。
+初始 namespace 先在 KVFS structural nullfs 上挂一个名为 `rootfs` 的 ramfs，并把 init
+`FsStruct` 临时指向它。随后在 `/dev` 挂共享 devtmpfs，使 root source 能按 pathname
+解析。选定 root disk 后构造普通 `FsContext`，经 `get_tree_bdev` 创建真实 superblock，
+再把它 overmount 到 bootstrap root。最后把 init `FsStruct` 的 root/pwd 成对更新到新的
+visible root。bootstrap rootfs 保留在覆盖层下，对应 Linux 初始 rootfs 的生命周期。
 
-## 调用约束 / 执行上下文
-
-所有入口运行在早期启动的普通执行路径，分配器、block class 和 KVFS 已初始化，
-用户进程尚未启动。路径允许分配、加锁和设备 I/O，不可在中断上下文调用。
+用户态启动前，真实 root 上再挂同一个共享 devtmpfs 以及 tmpfs、procfs、sysfs 和可选
+bpffs。devtmpfs/sysfs 的 internal mount 保证可见 mount 卸载后内核维护的树仍然存活。
 
 ## 算法流程
 
-1. 注册所选 block filesystem 和内建 nodev filesystem 描述符。
-2. 枚举 block class 设备；优先匹配 `KFEAT_ROOT_BLOCK`。
-3. 未匹配时按兼容策略选择最后一个设备或 secondary block。
-4. 把设备交给 `fs_block::RootFileSystem::mount_bdev`。
-5. 用返回的 superblock 创建 initial mount tree，并安装 init `FsStruct` root。
-6. 按固定路径挂载启动期虚拟文件系统；`nosuid`、`nodev`、`noexec` 和
-   `relatime` 写入各自 `Mount`，9P host share 也取得默认 `relatime`；只读策略才属于
-   superblock。
+1. 注册 root filesystem type 与内建 nodev filesystem types。
+2. 建立 bootstrap rootfs、initial namespace 和 init `FsStruct`。
+3. 在 bootstrap `/dev` 挂载 devtmpfs。
+4. 从非零容量的 canonical `BlockDevice` 中按 `KFEAT_ROOT_BLOCK` 选择 root；未配置时兼容
+   路径按 `dev_t` 顺序选择。
+5. 以 `/dev/<disk_name>` 为 source 构造 `FsContext`，调用普通 `get_tree`。
+6. 把真实 root overmount 到 bootstrap root，并成对更新 init root/pwd。
+7. 在真实 root 上安装启动期虚拟文件系统。
 
-## 并发模型
+## 所有权与并发
 
-initial namespace 由启动 CPU 串行建立。挂载 backing device id 保存在 mutex 中，设备
-移除通知可在后续执行路径删除 id 并报告 mounted filesystem 已 stale。
-filesystem type 注册也只在该串行阶段执行；运行期 registry 读者不会看到半注册列表。
+initial namespace 由 boot CPU 串行建立。`block::BlockDevice` 的发布与 `dev_t` lookup 由
+block core 拥有；boot 只持有选择和 mount 期间的 `Arc`。root filesystem implementation
+selection 只有链接期 provider，运行时 type identity 只有 KVFS registry。
+
+`nosuid`、`nodev`、`noexec` 和 `relatime` 写入各自 `Mount`；只有 filesystem-wide 只读
+状态进入 `SuperBlockFlags`。bootstrap devfs 与真实 root 上的 devfs 都不能设置 `nodev`。
 
 ## 设计决策
 
-- root backing device selection 属于 boot policy；filesystem implementation selection 不属于。
-- 新增 root filesystem provider 不修改本 crate 的控制流。
-- 虚拟文件系统 mount 保持显式路径布局，避免把 namespace policy 隐藏进 registry。
-- filesystem type registry 只拥有类型发现和创建入口，boot 仍拥有 `/dev`、`/proc`
-  等路径、挂载顺序和初始 per-mount flags。
-- `/dev` 不设置 `nodev`，因为设备节点访问依赖该 mount；安全策略使用
-  `nosuid,noexec`，并保留 Linux mount 路径的默认 `relatime`。
-
-## Drop / 资源释放
-
-initial namespace 和 root path 由 KVFS `Arc` 对象持有。设备移除通知只报告 stale
-backing，不会在回调中隐式卸载正在使用的文件系统。
+- root device selection 是 boot policy；source resolution 和 fill-super 是通用 VFS 机制。
+- 非空 `KFEAT_ROOT_BLOCK` 是权威配置，找不到同名 disk 时停止启动，不猜测其他介质。
+- boot 不引用 ext4/FAT crate，也不维护 filesystem name switch。
+- 空容量 loop disk 不参加 root fallback，但仍是正常 block-core 对象。
+- 固定虚拟文件系统路径属于 initial namespace policy，保持显式。

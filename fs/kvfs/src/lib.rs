@@ -14,6 +14,7 @@ mod fiemap;
 mod file;
 mod file_system_type;
 mod filename;
+mod fs_context;
 mod kiocb;
 pub mod libfs;
 mod lookup;
@@ -42,9 +43,11 @@ pub use anon_inode::{AnonInodeFs, init_anon_inodefs};
 pub use fiemap::{FiemapExtentFlags, FiemapExtentInfo, FiemapExtentWriter, FiemapFlags};
 pub use file::{FMode, FileDirOperations, FileOperations, VfsFile, VfsFileBuilder};
 pub use file_system_type::{
-    FileSystemType, get_filesystem_type, register_filesystem, registered_filesystems,
+    FileSystemType, FileSystemTypeFlags, GetTreeFn, get_filesystem_type, register_filesystem,
+    registered_filesystems,
 };
 pub use filename::Filename;
+pub use fs_context::FsContext;
 pub use kiocb::Kiocb;
 pub use lookup::{LookupFlags, LookupIntent, MagicLinkOps, ResolvedObject};
 pub use mount::{MntNamespace, Mount, MountFlags, MountIdmap, NamespaceClone, Path};
@@ -54,7 +57,7 @@ pub use node::{
     GetattrQueryFlags, GetattrRequestMask, InodeAttributeOperations, InodeCache,
     InodeDirOperations, InodeFiemapOperations, InodeLookupFlags, InodeOperations,
     InodeSymlinkOperations, InodeUpdateTime, LockedDentry, MmapMapper, NodeFlags, RenameFlags,
-    VfsInode, VfsInodeInit, WeakVfsInode, bdev_add, bdev_del, cdev_add, cdev_del, inode_init_owner,
+    VfsInode, VfsInodeInit, WeakVfsInode, cdev_add, cdev_del, inode_init_owner,
 };
 pub(crate) use node::{
     DentryKey, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive,
@@ -71,7 +74,8 @@ pub use simple_file::{RwFile, SimpleFile, SimpleFileOperation, SimpleFileOps};
 pub use simple_fs::{SimpleFs, SimpleFsNode};
 pub use super_block::{
     MAX_LFS_FILESIZE, StatFs, StatFsFlags, SuperBlock, SuperBlockFlags, SuperBlockOperations,
-    SuperBlockRegistry, default_evict_inode, super_block_registry, sync_filesystems,
+    SuperBlockRegistry, default_evict_inode, get_tree_bdev, get_tree_nodev, super_block_registry,
+    sync_filesystems,
 };
 pub(crate) use type_map::TypeMap;
 pub use types::{DeviceId, Metadata, MetadataUpdate, NodePermission, NodeType, SetattrTime, Umode};

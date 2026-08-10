@@ -5,7 +5,7 @@
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::num::NonZeroU32;
 
-use block::BlockDevice;
+use block::BlockDeviceOperations;
 
 use crate::{
     bitmap_allocator::{BlockGroupRange, InodeGroupRange},
@@ -388,7 +388,7 @@ impl Ext4RecoveryCleared {
 
 impl Ext4Filesystem {
     /// Reads and validates the primary ext4 superblock and group descriptor table.
-    pub fn mount(device: Arc<dyn BlockDevice>) -> Ext4Result<Self> {
+    pub fn mount(device: Arc<dyn BlockDeviceOperations>) -> Ext4Result<Self> {
         Self::open(device, false)
     }
 
@@ -406,11 +406,16 @@ impl Ext4Filesystem {
     /// ext4 recovery feature has been cleared on stable storage. On failure,
     /// the method does not intentionally clear the final on-disk recovery
     /// evidence before the corresponding journal or orphan work is durable.
-    pub fn recover(device: Arc<dyn BlockDevice>) -> Ext4Result<Option<Ext4RecoveryReport>> {
+    pub fn recover(
+        device: Arc<dyn BlockDeviceOperations>,
+    ) -> Ext4Result<Option<Ext4RecoveryReport>> {
         Ext4Recovery::open(device)?.replay()
     }
 
-    pub(crate) fn open(device: Arc<dyn BlockDevice>, allow_recovery: bool) -> Ext4Result<Self> {
+    pub(crate) fn open(
+        device: Arc<dyn BlockDeviceOperations>,
+        allow_recovery: bool,
+    ) -> Ext4Result<Self> {
         let mut superblock_bytes = [0; superblock::SUPERBLOCK_SIZE];
         FilesystemDevice::read_bytes(
             device.as_ref(),
@@ -1780,7 +1785,7 @@ mod tests {
         }
     }
 
-    impl BlockDevice for TestDevice {
+    impl BlockDeviceOperations for TestDevice {
         fn num_blocks(&self) -> u64 {
             (self.bytes.lock().unwrap().len() / TEST_BLOCK_SIZE) as u64
         }
@@ -1838,7 +1843,7 @@ mod tests {
         }
     }
 
-    impl BlockDevice for LinuxImageDevice {
+    impl BlockDeviceOperations for LinuxImageDevice {
         fn num_blocks(&self) -> u64 {
             (self.bytes.lock().unwrap().len() / LINUX_IMAGE_DEVICE_BLOCK_SIZE) as u64
         }
@@ -1920,7 +1925,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated journaled allocator image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount generated journaled image");
         let journal = filesystem
@@ -1973,7 +1978,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated journaled allocator image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount generated journaled image");
         let credits = JournalCredits::new(4);
@@ -2060,7 +2065,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated namespace image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount generated namespace image");
         let root = filesystem.root_inode().expect("read root inode");
@@ -2145,7 +2150,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated journaled allocator image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount generated journaled image");
         let journal = filesystem
@@ -2266,7 +2271,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated journaled allocator image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount generated journaled image");
         let journal = filesystem
@@ -2305,7 +2310,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated allocator image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount generated allocator image");
         let journal = JournalTransactions::new(TransactionId::new(701));
@@ -2366,7 +2371,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated truncate image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount generated truncate image");
         let root = filesystem.root_inode().expect("read root inode");
@@ -2420,7 +2425,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated namespace image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount generated namespace image");
         let root = filesystem.root_inode().expect("read root inode");
@@ -2466,7 +2471,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated mkdir image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem = Ext4Filesystem::mount(block_device).expect("mount mkdir image");
         let root = filesystem.root_inode().expect("read root inode");
         let old_root_links = root.links_count();
@@ -2512,7 +2517,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated unlink image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem = Ext4Filesystem::mount(block_device).expect("mount unlink image");
         let root = filesystem.root_inode().expect("read root inode");
         let created = filesystem
@@ -2596,7 +2601,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated orphan recovery image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount orphan recovery image");
         let root = filesystem.root_inode().expect("read root inode");
@@ -2650,12 +2655,12 @@ mod tests {
             assert!(!persisted.features().needs_recovery());
         }
 
-        let mount_device: Arc<dyn BlockDevice> = device.clone();
+        let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
             Ext4Filesystem::mount(mount_device).map(|_| ()),
             Err(Ext4Error::NeedsRecovery)
         );
-        let recovery_device: Arc<dyn BlockDevice> = device.clone();
+        let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(Ext4Filesystem::recover(recovery_device), Ok(None));
 
         {
@@ -2666,7 +2671,7 @@ mod tests {
             assert!(!persisted.features().needs_recovery());
         }
 
-        let recovered_device: Arc<dyn BlockDevice> = device.clone();
+        let recovered_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let recovered =
             Ext4Filesystem::mount(recovered_device).expect("mount orphan-cleaned image");
         assert_eq!(recovered.orphan_head(), None);
@@ -2702,7 +2707,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated orphan recovery image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount orphan recovery image");
         let root = filesystem.root_inode().expect("read root inode");
@@ -2735,7 +2740,7 @@ mod tests {
         drop(filesystem);
 
         device.fail_flush_at(device.flush_count() + 1);
-        let recovery_device: Arc<dyn BlockDevice> = device.clone();
+        let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
             Ext4Filesystem::recover(recovery_device),
             Err(Ext4Error::Device(DriverError::Io))
@@ -2749,16 +2754,16 @@ mod tests {
             assert!(persisted.features().needs_recovery());
         }
 
-        let mount_device: Arc<dyn BlockDevice> = device.clone();
+        let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
             Ext4Filesystem::mount(mount_device).map(|_| ()),
             Err(Ext4Error::NeedsRecovery)
         );
 
-        let retry_device: Arc<dyn BlockDevice> = device.clone();
+        let retry_device: Arc<dyn BlockDeviceOperations> = device.clone();
         Ext4Filesystem::recover(retry_device).expect("retry clean orphan recovery");
 
-        let recovered_device: Arc<dyn BlockDevice> = device.clone();
+        let recovered_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let recovered =
             Ext4Filesystem::mount(recovered_device).expect("mount retried recovery image");
         assert_eq!(recovered.orphan_head(), None);
@@ -2798,7 +2803,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated rmdir image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem = Ext4Filesystem::mount(block_device).expect("mount rmdir image");
         let root = filesystem.root_inode().expect("read root inode");
         let created = filesystem
@@ -2846,7 +2851,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated link image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem = Ext4Filesystem::mount(block_device).expect("mount link image");
         let root = filesystem.root_inode().expect("read root inode");
         let created = filesystem
@@ -2911,7 +2916,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated file rename image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem = Ext4Filesystem::mount(block_device).expect("mount rename image");
         let root = filesystem.root_inode().expect("read root inode");
         let left = filesystem
@@ -2983,7 +2988,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated file overwrite rename image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount overwrite rename image");
         let root = filesystem.root_inode().expect("read root inode");
@@ -3063,7 +3068,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated directory rename image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount directory rename image");
         let root = filesystem.root_inode().expect("read root inode");
@@ -3141,7 +3146,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated directory overwrite rename image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount directory overwrite rename image");
         let root = filesystem.root_inode().expect("read root inode");
@@ -3209,7 +3214,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated symlink image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem = Ext4Filesystem::mount(block_device).expect("mount symlink image");
         let root = filesystem.root_inode().expect("read root inode");
         let created = filesystem
@@ -3250,7 +3255,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated block symlink image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem = Ext4Filesystem::mount(block_device).expect("mount symlink image");
         let root = filesystem.root_inode().expect("read root inode");
         let target = vec![b'a'; 128];
@@ -3296,7 +3301,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated special file image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem = Ext4Filesystem::mount(block_device).expect("mount special file image");
         let root = filesystem.root_inode().expect("read root inode");
         let fifo = filesystem
@@ -3356,7 +3361,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated indexed image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount indexed namespace image");
         let root = filesystem.root_inode().expect("read root inode");
@@ -3452,7 +3457,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated dir_index image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount dir_index namespace image");
         let root = filesystem.root_inode().expect("read root inode");
@@ -3501,7 +3506,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated journaled allocator image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount generated journaled image");
         let journal = filesystem
@@ -3529,18 +3534,18 @@ mod tests {
             .expect("persist allocator metadata to the journal");
         drop(filesystem);
 
-        let dirty_device: Arc<dyn BlockDevice> = device.clone();
+        let dirty_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
             Ext4Filesystem::mount(dirty_device).map(|_| ()),
             Err(Ext4Error::NeedsRecovery)
         );
-        let recovery_device: Arc<dyn BlockDevice> = device.clone();
+        let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let report = Ext4Filesystem::recover(recovery_device)
             .expect("recover persisted allocator journal commit")
             .expect("journal recovery was required");
         assert_eq!(report.update_count(), expected_replay_updates);
 
-        let recovered_device: Arc<dyn BlockDevice> = device.clone();
+        let recovered_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let recovered =
             Ext4Filesystem::mount(recovered_device).expect("mount recovered allocator image");
         assert!(!recovered.superblock().features().needs_recovery());
@@ -6197,7 +6202,7 @@ mod tests {
         persist_test_orphan_head(&mut filesystem, Some(inode.number()), 764);
         drop(filesystem);
 
-        let mount_device: Arc<dyn BlockDevice> = device.clone();
+        let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
             Ext4Filesystem::mount(mount_device).map(|_| ()),
             Err(Ext4Error::NeedsRecovery)
@@ -6211,7 +6216,7 @@ mod tests {
         persist_test_orphan_head(&mut filesystem, Some(inode.number()), 765);
         drop(filesystem);
 
-        let recovery_device: Arc<dyn BlockDevice> = device.clone();
+        let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
             Ext4Filesystem::recover(recovery_device),
             Err(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite))
@@ -6383,7 +6388,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated recovery image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount generated recovery image");
         let free_inodes_before_allocation = filesystem.superblock().free_inodes_count();
@@ -6400,13 +6405,13 @@ mod tests {
             .expect("persist orphan transaction without checkpoint");
         drop(filesystem);
 
-        let recovery_device: Arc<dyn BlockDevice> = device.clone();
+        let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let report = Ext4Filesystem::recover(recovery_device)
             .expect("replay and orphan cleanup")
             .expect("active journal report");
         assert!(report.update_count() > 0);
 
-        let mount_device: Arc<dyn BlockDevice> = device.clone();
+        let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let recovered = Ext4Filesystem::mount(mount_device).expect("mount recovered image");
         assert_eq!(recovered.orphan_head(), None);
         assert_eq!(
@@ -6425,7 +6430,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated recovery image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount generated recovery image");
         let inode = allocate_checkpointed_directory_inode(&mut filesystem);
@@ -6442,7 +6447,7 @@ mod tests {
             .expect("persist orphan head update to journal");
         drop(filesystem);
 
-        let recovery_device: Arc<dyn BlockDevice> = device.clone();
+        let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
             Ext4Filesystem::recover(recovery_device),
             Err(Ext4Error::Unsupported(UnsupportedKind::InodeKind))
@@ -6466,7 +6471,7 @@ mod tests {
         );
         drop(filesystem);
 
-        let recovery_device: Arc<dyn BlockDevice> = device.clone();
+        let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
             Ext4Filesystem::recover(recovery_device),
             Err(Ext4Error::Unsupported(UnsupportedKind::OrphanFile))
@@ -6865,7 +6870,7 @@ mod tests {
         image[TEST_BLOCK_SIZE..TEST_BLOCK_SIZE + descriptor.len()].copy_from_slice(&descriptor);
 
         let block_device = Arc::new(TestDevice::new(image));
-        let device: Arc<dyn BlockDevice> = block_device.clone();
+        let device: Arc<dyn BlockDeviceOperations> = block_device.clone();
         let filesystem_device = Arc::new(
             FilesystemDevice::open(device, TEST_BLOCK_SIZE, TEST_BLOCK_COUNT as u64).unwrap(),
         );
@@ -6930,7 +6935,7 @@ mod tests {
         write_allocator_bitmap(&mut image, 3 * TEST_BLOCK_SIZE, &[0xff, 0x03, 0, 0], true);
 
         let block_device = Arc::new(TestDevice::new(image));
-        let device: Arc<dyn BlockDevice> = block_device.clone();
+        let device: Arc<dyn BlockDeviceOperations> = block_device.clone();
         let filesystem_device = Arc::new(
             FilesystemDevice::open(
                 device,
@@ -7004,7 +7009,7 @@ mod tests {
         }
 
         let block_device = Arc::new(TestDevice::new(image));
-        let device: Arc<dyn BlockDevice> = block_device.clone();
+        let device: Arc<dyn BlockDeviceOperations> = block_device.clone();
         let filesystem_device = Arc::new(
             FilesystemDevice::open(device, TEST_BLOCK_SIZE, u64::from(block_count)).unwrap(),
         );

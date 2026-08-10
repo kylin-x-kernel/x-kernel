@@ -8,7 +8,7 @@ use alloc::{collections::BTreeMap, sync::Arc, vec};
 #[cfg(not(target_os = "none"))]
 use std::sync::{Mutex, MutexGuard};
 
-use block::BlockDevice;
+use block::BlockDeviceOperations;
 #[cfg(target_os = "none")]
 use ksync::{Mutex, MutexGuard};
 
@@ -866,7 +866,7 @@ fn mutation_error_requires_abort(error: Ext4Error) -> bool {
 }
 
 impl Ext4Recovery {
-    pub(super) fn open(device: Arc<dyn BlockDevice>) -> Ext4Result<Self> {
+    pub(super) fn open(device: Arc<dyn BlockDeviceOperations>) -> Ext4Result<Self> {
         Ok(Self {
             filesystem: Ext4Filesystem::open(device, true)?,
         })

@@ -10,7 +10,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use block::{BlockDevice, Device, DeviceKind, DriverError, DriverResult};
+use block::{BlockDeviceOperations, Device, DeviceKind, DriverError, DriverResult};
 use kext4::{
     BlockMapping, DirectoryFileType, Ext4DirEntryRef, Ext4DirPos, Ext4DirSink, Ext4Error,
     Ext4Filesystem, Ext4Inode, Ext4Result, Ext4Timestamp, Ext4XattrNamespace, FilesystemBlock,
@@ -134,7 +134,7 @@ impl Device for WritableImageDevice {
     }
 }
 
-impl BlockDevice for WritableImageDevice {
+impl BlockDeviceOperations for WritableImageDevice {
     fn num_blocks(&self) -> u64 {
         (self.bytes.lock().unwrap().len() / DEVICE_BLOCK_SIZE) as u64
     }
@@ -193,7 +193,7 @@ impl Device for WriteThroughFaultyImageDevice {
     }
 }
 
-impl BlockDevice for WriteThroughFaultyImageDevice {
+impl BlockDeviceOperations for WriteThroughFaultyImageDevice {
     fn num_blocks(&self) -> u64 {
         (self.bytes.lock().unwrap().len() / DEVICE_BLOCK_SIZE) as u64
     }
@@ -252,7 +252,7 @@ impl Device for FaultyBufferedImageDevice {
     }
 }
 
-impl BlockDevice for FaultyBufferedImageDevice {
+impl BlockDeviceOperations for FaultyBufferedImageDevice {
     fn num_blocks(&self) -> u64 {
         (self.committed.lock().unwrap().len() / DEVICE_BLOCK_SIZE) as u64
     }
@@ -387,7 +387,7 @@ fn assert_large_xattr_absent(bytes: &[u8]) {
     );
 }
 
-impl BlockDevice for ImageDevice {
+impl BlockDeviceOperations for ImageDevice {
     fn num_blocks(&self) -> u64 {
         (self.bytes.len() / DEVICE_BLOCK_SIZE) as u64
     }

@@ -40,7 +40,7 @@ impl DeviceDriver for IxgbeDriver {
         match net::ixgbe::IxgbeNic::<super::ixgbe_hal::IxgbeHalImpl, 1024, 1>::init(
             vaddr, mmio_size,
         ) {
-            Ok(nic) => kclass::publish_net(device, Box::new(nic)),
+            Ok(nic) => kclass::publish_net(device, Box::new(nic)).map(drop),
             Err(_) => Err(DriverError::Io),
         }
     }

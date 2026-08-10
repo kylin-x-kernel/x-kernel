@@ -24,7 +24,7 @@ extern crate net as driver_net;
 #[cfg(feature = "block")]
 mod blk;
 #[cfg(feature = "block")]
-pub use self::blk::VirtIoBlkDev;
+pub use self::blk::{PART_BITS as VIRTIO_BLK_PART_BITS, VIRTIO_BLK_MAJOR, VirtIoBlkDev};
 
 #[cfg(feature = "gpu")]
 mod gpu;

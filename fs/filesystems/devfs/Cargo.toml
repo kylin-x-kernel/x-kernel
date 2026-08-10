@@ -17,6 +17,7 @@ dev-log = []
 dice = ["dep:dice_driver", "dep:tee_crypto"]
 
 [dependencies]
+block.workspace = true
 kalloc.workspace = true
 kcred.workspace = true
 kexec.workspace = true

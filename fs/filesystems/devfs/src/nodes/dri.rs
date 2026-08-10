@@ -15,13 +15,15 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     if !drmdevice::available() {
         return;
     }
-    let card0 = DeviceFile::new(
-        fs.clone(),
-        kvfs::NodeType::CharacterDevice,
-        kvfs::DeviceId::new(226, 0),
-        drmdevice::Card0::new(),
-    );
     let mut dri_dir = DirMapping::new();
-    add_device_entry(&mut dri_dir, "card0", card0);
+    add_device_entry(
+        &mut dri_dir,
+        "card0",
+        DeviceFile::new_character(
+            fs.clone(),
+            kvfs::DeviceId::new(226, 0),
+            drmdevice::Card0::new(),
+        ),
+    );
     root.add("dri", SimpleDir::new_maker(fs, Arc::new(dri_dir)));
 }

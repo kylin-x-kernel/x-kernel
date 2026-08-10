@@ -211,37 +211,37 @@ fn dispatch_virtio_try_new<T: virtio::Transport + 'static>(
         #[cfg(feature = "virtio-net")]
         DeviceKind::Net => {
             use glue::VirtIoNet;
-            kclass::publish_net(parent, VirtIoNet::try_new(transport, irq)?)
+            kclass::publish_net(parent, VirtIoNet::try_new(transport, irq)?).map(drop)
         }
         #[cfg(feature = "virtio-blk")]
         DeviceKind::Block => {
             use glue::VirtIoBlk;
-            kclass::publish_block(parent, VirtIoBlk::try_new(transport, irq)?)
+            kclass::publish_block(parent, VirtIoBlk::try_new(transport, irq)?).map(drop)
         }
         #[cfg(feature = "virtio-gpu")]
         DeviceKind::Display => {
             use glue::VirtIoGpu;
-            kclass::publish_display(parent, VirtIoGpu::try_new(transport, irq)?)
+            kclass::publish_display(parent, VirtIoGpu::try_new(transport, irq)?).map(drop)
         }
         #[cfg(feature = "virtio-input")]
         DeviceKind::Input => {
             use glue::VirtIoInput;
-            kclass::publish_input(parent, VirtIoInput::try_new(transport, irq)?)
+            kclass::publish_input(parent, VirtIoInput::try_new(transport, irq)?).map(drop)
         }
         #[cfg(feature = "virtio-socket")]
         DeviceKind::Vsock => {
             use glue::VirtIoSocket;
-            kclass::publish_vsock(parent, VirtIoSocket::try_new(transport, irq)?)
+            kclass::publish_vsock(parent, VirtIoSocket::try_new(transport, irq)?).map(drop)
         }
         #[cfg(feature = "virtio-9p")]
         DeviceKind::Fs9p => {
             use glue::VirtIo9p;
-            kclass::publish_virtio_9p(parent, VirtIo9p::try_new(transport, irq)?)
+            kclass::publish_virtio_9p(parent, VirtIo9p::try_new(transport, irq)?).map(drop)
         }
         #[cfg(feature = "virtio-rng")]
         DeviceKind::Char => {
             use glue::VirtIoRng;
-            kclass::publish_char(parent, VirtIoRng::try_new(transport, irq)?)
+            kclass::publish_char(parent, VirtIoRng::try_new(transport, irq)?).map(drop)
         }
         _ => Err(DriverError::Unsupported),
     }

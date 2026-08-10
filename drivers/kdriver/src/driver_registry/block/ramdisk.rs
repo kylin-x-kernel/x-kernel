@@ -4,7 +4,7 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use driver_base::DeviceKind;
+use driver_base::{Device, DeviceKind};
 use kdevice::{BusTypeId, CompatibleAliasMatcher, DeviceDriver, DeviceMatcher, DeviceObject};
 
 use crate::driver_registry::BoxedDriver;
@@ -41,7 +41,9 @@ impl DeviceDriver for RamdiskDriver {
         #[cfg(not(feature = "ramdisk-static"))]
         let dev = block::ramdisk::RamDisk::new(0x100_0000); // 16 MiB
 
-        kclass::publish_block(device, Box::new(dev))
+        let name = dev.name().into();
+        let disk = block::Gendisk::new(name, 1, 0, 1, Box::new(dev))?;
+        kclass::publish_block(device, Arc::new(disk)).map(drop)
     }
 }
 

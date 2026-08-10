@@ -177,9 +177,8 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     add_device_entry(
         root,
         "memtrack",
-        DeviceFile::new(
+        DeviceFile::new_character(
             fs.clone(),
-            kvfs::NodeType::CharacterDevice,
             kvfs::DeviceId::new(114, 514),
             Arc::new(MemTrack),
         ),

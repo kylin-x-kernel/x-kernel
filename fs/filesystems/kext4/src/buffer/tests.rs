@@ -6,7 +6,7 @@ use alloc::{boxed::Box, sync::Arc, vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::{sync::Barrier, thread, time::Duration};
 
-use block::{BlockDevice, Device, DeviceKind, DriverError, DriverResult};
+use block::{BlockDeviceOperations, Device, DeviceKind, DriverError, DriverResult};
 
 use super::*;
 use crate::{
@@ -57,7 +57,7 @@ impl Device for TestDevice {
     }
 }
 
-impl BlockDevice for TestDevice {
+impl BlockDeviceOperations for TestDevice {
     fn num_blocks(&self) -> u64 {
         (self.bytes.lock().unwrap().len() / TEST_BLOCK_SIZE) as u64
     }
@@ -118,14 +118,14 @@ impl BlockDevice for TestDevice {
 
 fn cache_for(device: Arc<TestDevice>) -> MetadataBlockCache {
     let block_count = device.num_blocks();
-    let device: Arc<dyn BlockDevice> = device;
+    let device: Arc<dyn BlockDeviceOperations> = device;
     let filesystem_device = FilesystemDevice::open(device, TEST_BLOCK_SIZE, block_count).unwrap();
     MetadataBlockCache::new(Arc::new(filesystem_device))
 }
 
 fn metadata_io_for(device: Arc<TestDevice>) -> Ext4MetadataIo {
     let block_count = device.num_blocks();
-    let device: Arc<dyn BlockDevice> = device;
+    let device: Arc<dyn BlockDeviceOperations> = device;
     let filesystem_device = FilesystemDevice::open(device, TEST_BLOCK_SIZE, block_count).unwrap();
     Ext4MetadataIo::new(Arc::new(filesystem_device))
 }

@@ -18,9 +18,10 @@ pub fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     nodes::fb::add_root_entries(&mut root, fs.clone());
     nodes::dri::add_root_entries(&mut root, fs.clone());
     nodes::tty_nodes::add_root_entries(&mut root, fs.clone());
-    nodes::r#loop::add_root_entries(&mut root, fs.clone());
+    nodes::r#loop::init_devices();
     nodes::shm::add_root_entries(&mut root, fs.clone());
     nodes::dtb::add_root_entries(&mut root, fs.clone());
+    nodes::virtdev::add_root_entries(&mut root, fs.clone());
 
     #[cfg(feature = "memtrack")]
     nodes::memtrack::add_root_entries(&mut root, fs.clone());

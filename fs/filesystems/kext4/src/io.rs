@@ -4,7 +4,7 @@
 
 use alloc::{sync::Arc, vec};
 
-use block::BlockDevice;
+use block::BlockDeviceOperations;
 
 use crate::{
     Ext4Error, Ext4Result, FilesystemBlock,
@@ -13,7 +13,7 @@ use crate::{
 
 /// Adapts device blocks to the ext4 filesystem block address space.
 pub(crate) struct FilesystemDevice {
-    device: Arc<dyn BlockDevice>,
+    device: Arc<dyn BlockDeviceOperations>,
     device_block_size: usize,
     filesystem_block_size: usize,
     blocks_per_filesystem_block: u64,
@@ -22,7 +22,7 @@ pub(crate) struct FilesystemDevice {
 
 impl FilesystemDevice {
     pub(crate) fn open(
-        device: Arc<dyn BlockDevice>,
+        device: Arc<dyn BlockDeviceOperations>,
         filesystem_block_size: usize,
         filesystem_blocks: u64,
     ) -> Ext4Result<Self> {
@@ -53,7 +53,7 @@ impl FilesystemDevice {
     }
 
     pub(crate) fn read_bytes(
-        device: &dyn BlockDevice,
+        device: &dyn BlockDeviceOperations,
         byte_offset: u64,
         output: &mut [u8],
     ) -> Ext4Result<()> {
@@ -255,7 +255,7 @@ mod tests {
         }
     }
 
-    impl BlockDevice for MemoryBlockDevice {
+    impl BlockDeviceOperations for MemoryBlockDevice {
         fn num_blocks(&self) -> u64 {
             (self.bytes.lock().unwrap().len() / DEVICE_BLOCK_SIZE) as u64
         }

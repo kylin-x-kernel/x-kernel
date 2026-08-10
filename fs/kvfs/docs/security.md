@@ -129,6 +129,8 @@ umount lock 串行化 hook、发布与最终 shutdown。最后 active 引用先�
 lock，dying/dead 状态拒绝新的 mount activation。默认 hook 接受纯 VFS flags 变更，固定
 只读介质的后端必须拒绝读写转换。显式 filesystem sync 和全局 Weak registry sync snapshot
 也通过同一 umount lock 与 final shutdown 串行化，并跳过 dying/dead superblock。
+`get_tree_bdev` 在调用 filesystem fill-super 前拒绝对 canonical read-only block device 的
+可写 mount，避免把介质只读约束延迟成后续文件系统 I/O 错误。
 mount attach/detach 在 mountpoint inode namespace lock 下修改 topology。每个 child mount
 只用一个 mutex 保护完整 parent `Path`，parent child map 保存 `Weak<Mount>`，namespace
 registry 保存可见 mount 的 `Arc<Mount>`；detach 移除 registry 引用前先清空 parent path。

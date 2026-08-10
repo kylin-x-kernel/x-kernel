@@ -24,16 +24,17 @@ mod util;
 
 pub use fs::Ext4Filesystem;
 
+fn ext4_get_tree(
+    context: &kvfs::FsContext<'_>,
+    lookup_root: &kvfs::Path,
+    lookup_pwd: &kvfs::Path,
+) -> kvfs::VfsResult<alloc::sync::Arc<kvfs::SuperBlock>> {
+    kvfs::get_tree_bdev(context, lookup_root, lookup_pwd, Ext4Filesystem::mount_bdev)
+}
+
 #[fs_block::kiface::provide]
 impl fs_block::RootFileSystem {
-    fn name() -> &'static str {
-        "ext4"
-    }
-
-    fn mount_bdev(
-        device: kclass::ClassDevice<kclass::BlockDeviceImpl>,
-        flags: kvfs::SuperBlockFlags,
-    ) -> kvfs::VfsResult<alloc::sync::Arc<kvfs::SuperBlock>> {
-        Ext4Filesystem::mount_bdev(device, flags)
+    fn file_system_type() -> kvfs::FileSystemType {
+        kvfs::FileSystemType::device_backed("ext4", ext4_get_tree)
     }
 }

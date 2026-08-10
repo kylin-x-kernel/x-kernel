@@ -10,15 +10,16 @@ homepage.workspace = true
 [features]
 default = []
 ebpf = ["dep:bpffs"]
-fs9p = ["dep:v9fs", "kclass/virtio-9p"]
+fs9p = ["dep:v9fs", "dep:kclass", "kclass/virtio-9p"]
 rootfs-secondary-block = []
 
 [dependencies]
+block.workspace = true
 bpffs = { workspace = true, optional = true }
 devfs.workspace = true
 fs_block.workspace = true
 fs_context.workspace = true
-kclass = { workspace = true, features = ["block"] }
+kclass = { workspace = true, optional = true }
 kbuild_config.workspace = true
 kdevice.workspace = true
 kerrno.workspace = true

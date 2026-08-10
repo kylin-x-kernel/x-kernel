@@ -2,9 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, format, sync::Arc};
 
-use driver_base::DeviceKind;
+use driver_base::{Device, DeviceKind};
 use kdevice::{BusTypeId, DeviceDriver, DeviceMatcher, DeviceObject};
 
 use crate::driver_registry::{BoxedDriver, firmware_specs::SDMMC};
@@ -40,7 +40,10 @@ impl DeviceDriver for SdmmcDriver {
         // `SdMmcDriver::new`'s precondition of pointing to a valid,
         // exclusively-accessible MMIO window.
         let dev = unsafe { block::sdmmc::SdMmcDriver::new(vaddr) };
-        kclass::publish_block(device, Box::new(dev))
+        let (index, first_minor) = super::allocate_mmc_disk()?;
+        let name = format!("{}{}", dev.name(), index);
+        let disk = block::Gendisk::new(name, 179, first_minor, 8, Box::new(dev))?;
+        kclass::publish_block(device, Arc::new(disk)).map(drop)
     }
 }
 

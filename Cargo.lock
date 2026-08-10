@@ -345,8 +345,13 @@ dependencies = [
 name = "block"
 version = "0.2.0-dev"
 dependencies = [
+ "bitflags 2.13.1",
  "driver_base",
+ "kdevice",
+ "kerrno",
+ "klazy",
  "kspin 0.2.0-dev",
+ "ksync",
  "log",
  "unittest",
 ]
@@ -1115,6 +1120,7 @@ version = "0.2.0-dev"
 dependencies = [
  "backtrace",
  "bitmaps",
+ "block",
  "chrono",
  "console-driver",
  "dice-driver",
@@ -1435,9 +1441,9 @@ name = "fat"
 version = "0.2.0-dev"
 dependencies = [
  "axfatfs",
+ "block",
  "chrono",
  "fs_block",
- "kclass",
  "kcred",
  "ksync",
  "ktime_types",
@@ -1554,7 +1560,7 @@ dependencies = [
 name = "fs_block"
 version = "0.2.0-dev"
 dependencies = [
- "kclass",
+ "block",
  "kiface",
  "kvfs",
 ]
@@ -1563,6 +1569,7 @@ dependencies = [
 name = "fs_boot"
 version = "0.2.0-dev"
 dependencies = [
+ "block",
  "bpffs",
  "devfs",
  "fs_block",
@@ -2286,7 +2293,6 @@ dependencies = [
  "block",
  "fs_block",
  "iov_iter",
- "kclass",
  "kcred",
  "kerrno",
  "kext4",
@@ -3062,10 +3068,12 @@ name = "kvfs"
 version = "0.2.0-dev"
 dependencies = [
  "bitflags 2.13.1",
+ "block",
  "hashbrown 0.15.5",
  "inherit-methods-macro",
  "iov_iter",
  "kcred",
+ "kdevice",
  "kerrno",
  "klazy",
  "kpoll",

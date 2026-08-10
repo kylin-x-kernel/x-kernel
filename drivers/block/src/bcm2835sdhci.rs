@@ -11,7 +11,7 @@ use bcm2835_sdhci::{
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kspin::SpinNoIrq;
 
-use crate::BlockDevice;
+use crate::BlockDeviceOperations;
 
 /// Raspberry Pi 4 SD card driver based on BCM2835 SDHCI controller.
 ///
@@ -71,7 +71,7 @@ impl Device for SDHCIDriver {
     }
 }
 
-impl BlockDevice for SDHCIDriver {
+impl BlockDeviceOperations for SDHCIDriver {
     fn read_block(&self, block_id: u64, buffer: &mut [u8]) -> DriverResult {
         if buffer.len() < BLOCK_SIZE {
             return Err(DriverError::InvalidInput);

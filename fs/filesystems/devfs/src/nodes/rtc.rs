@@ -75,11 +75,6 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     add_device_entry(
         root,
         "rtc0",
-        DeviceFile::new(
-            fs.clone(),
-            kvfs::NodeType::CharacterDevice,
-            RTC0_DEVICE_ID,
-            Arc::new(Rtc),
-        ),
+        DeviceFile::new_character(fs.clone(), RTC0_DEVICE_ID, Arc::new(Rtc)),
     );
 }

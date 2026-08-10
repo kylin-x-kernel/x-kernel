@@ -22,10 +22,10 @@ use hashbrown::HashMap;
 use kerrno::KResult;
 use ksync::Mutex;
 use kvfs::{
-    AnonInodeFs, Dentry, DirContext, FMode, FileDirOperations, FileOperations, InodeDirOperations,
-    InodeOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType,
-    OpenFlags, SimpleFs, SimpleFsNode, SuperBlock, SuperBlockFlags, VfsError, VfsFile, VfsInode,
-    VfsResult, inode_init_owner,
+    AnonInodeFs, Dentry, DirContext, FMode, FileDirOperations, FileOperations, FsContext,
+    InodeDirOperations, InodeOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags,
+    NodePermission, NodeType, OpenFlags, SimpleFs, SimpleFsNode, SuperBlock, SuperBlockFlags,
+    VfsError, VfsFile, VfsInode, VfsResult, get_tree_nodev, inode_init_owner,
 };
 
 /// Linux `BPF_FS_MAGIC`.
@@ -33,12 +33,16 @@ const BPF_FS_MAGIC: u32 = 0xcafe4a11;
 
 const DIR_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o755);
 
-fn mount_nodev(superblock_flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
-    Ok(new_bpffs(superblock_flags))
+fn get_tree(
+    context: &FsContext<'_>,
+    _lookup_root: &kvfs::Path,
+    _lookup_pwd: &kvfs::Path,
+) -> VfsResult<Arc<SuperBlock>> {
+    get_tree_nodev(context, |flags| Ok(new_bpffs(flags)))
 }
 
 /// Registered BPF filesystem type.
-pub const FILE_SYSTEM_TYPE: kvfs::FileSystemType = kvfs::FileSystemType::nodev("bpf", mount_nodev);
+pub const FILE_SYSTEM_TYPE: kvfs::FileSystemType = kvfs::FileSystemType::nodev("bpf", get_tree);
 const PIN_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o600);
 
 /// Read-only map value snapshot bound to a loaded BPF program.

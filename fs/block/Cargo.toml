@@ -10,6 +10,6 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
-kclass = { workspace = true, features = ["block"] }
+block.workspace = true
 kiface.workspace = true
 kvfs.workspace = true

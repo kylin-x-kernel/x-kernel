@@ -19,7 +19,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
-use driver_base::{DeviceKind, DriverError, DriverResult};
+use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kdevice::{DeviceEvent, DeviceEventKind, DeviceId, DeviceObject};
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
@@ -81,7 +81,10 @@ macro_rules! class_registry {
 
         /// Publish a runtime capability into its typed class registry.
         #[cfg(feature = $feature)]
-        pub fn $publish_fn(parent: Arc<DeviceObject>, runtime: $ty) -> DriverResult<()> {
+        pub fn $publish_fn(
+            parent: Arc<DeviceObject>,
+            runtime: $ty,
+        ) -> DriverResult<ClassDevice<$ty>> {
             let name = runtime.name().into();
             let device_kind = runtime.device_kind();
             let irq = runtime.irq();
@@ -98,19 +101,23 @@ macro_rules! class_registry {
             let device = ClassDevice::try_new_with_class_metadata(
                 parent, runtime, name, $kind, irq, metadata,
             )?;
+            device.with(ClassRuntimeMetadata::publish_class)?;
             let id = device.id();
             let is_active = device.is_available();
+            if let Err(error) = $registry_fn().lock().publish(device.clone()) {
+                device.with(ClassRuntimeMetadata::unpublish_class);
+                return Err(error);
+            }
             log::debug!(
                 "device class '{}': published {:?} (driver={})",
                 $kind.as_str(),
                 id,
                 device.driver_name(),
             );
-            $registry_fn().lock().publish(device);
             if is_active {
                 notify_class_available($kind, id);
             }
-            Ok(())
+            Ok(device)
         }
 
         /// Return every currently available runtime capability for this class.
@@ -148,7 +155,10 @@ macro_rules! class_registry {
 
         #[cfg(feature = $feature)]
         fn $remove_fn(id: DeviceId) {
-            $registry_fn().lock().remove(id);
+            let removed = { $registry_fn().lock().remove(id) };
+            if let Some(device) = removed {
+                device.with(ClassRuntimeMetadata::unpublish_class);
+            }
         }
     };
 }
@@ -210,9 +220,9 @@ macro_rules! class_registries {
 /// through [`publish_net`].
 #[cfg(feature = "net")]
 pub type NetDeviceImpl = Box<dyn NetDevice + Send + Sync>;
-/// Concrete runtime type for block devices.
+/// Concrete runtime type for registered generic disks.
 #[cfg(feature = "block")]
-pub type BlockDeviceImpl = Box<dyn BlockDevice + Send + Sync>;
+pub type BlockDeviceImpl = Arc<block::Gendisk>;
 /// Concrete runtime type for character devices.
 #[cfg(feature = "char")]
 pub type CharDeviceImpl = Box<dyn CharDevice + Send + Sync>;
@@ -229,9 +239,9 @@ pub type VsockDeviceImpl = Box<dyn VsockDevice + Send + Sync>;
 #[cfg(feature = "virtio-9p")]
 pub type Virtio9pDeviceImpl = Box<dyn Virtio9pDevice + Send + Sync>;
 
-/// Re-export block device trait and associated types.
+/// Re-export the generic disk type used by block-class publishers.
 #[cfg(feature = "block")]
-pub use block::BlockDevice;
+pub use block::Gendisk;
 /// Re-export character device trait.
 #[cfg(feature = "char")]
 pub use char_driver::CharDevice;
@@ -255,10 +265,24 @@ trait ClassRuntimeMetadata {
     fn class_metadata(&self) -> ClassDeviceMetadata {
         ClassDeviceMetadata::empty()
     }
+
+    fn publish_class(&self) -> DriverResult<()> {
+        Ok(())
+    }
+
+    fn unpublish_class(&self) {}
 }
 
 #[cfg(feature = "block")]
-impl ClassRuntimeMetadata for BlockDeviceImpl {}
+impl ClassRuntimeMetadata for BlockDeviceImpl {
+    fn publish_class(&self) -> DriverResult<()> {
+        block::add_disk(self.clone()).map(drop)
+    }
+
+    fn unpublish_class(&self) {
+        block::del_gendisk(self.device_number());
+    }
+}
 
 #[cfg(feature = "char")]
 impl ClassRuntimeMetadata for CharDeviceImpl {}
@@ -281,29 +305,6 @@ impl ClassRuntimeMetadata for VsockDeviceImpl {}
 
 #[cfg(feature = "virtio-9p")]
 impl ClassRuntimeMetadata for Virtio9pDeviceImpl {}
-
-#[cfg(feature = "block")]
-impl BlockDevice for ClassDevice<BlockDeviceImpl> {
-    fn num_blocks(&self) -> u64 {
-        self.with(|device| device.num_blocks())
-    }
-
-    fn block_size(&self) -> usize {
-        self.with(|device| device.block_size())
-    }
-
-    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
-        self.with(|device| device.read_block(block_id, buf))
-    }
-
-    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
-        self.with(|device| device.write_block(block_id, buf))
-    }
-
-    fn flush(&self) -> DriverResult {
-        self.with(|device| device.flush())
-    }
-}
 
 #[cfg(feature = "char")]
 impl CharDevice for ClassDevice<CharDeviceImpl> {
@@ -561,10 +562,12 @@ class_registries! {
 
 /// Shared class prelude for runtime publishers and consumers.
 pub mod prelude {
+    #[cfg(feature = "block")]
+    pub use block::BlockDeviceOperations;
     pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 
     #[cfg(feature = "block")]
-    pub use crate::{BlockDevice, BlockDeviceImpl};
+    pub use crate::BlockDeviceImpl;
     #[cfg(feature = "char")]
     pub use crate::{CharDevice, CharDeviceImpl};
     #[cfg(feature = "display")]

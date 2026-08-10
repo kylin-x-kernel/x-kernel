@@ -7,9 +7,7 @@
 use alloc::sync::Arc;
 
 use entropy::{add_entropy, fill_random};
-use kvfs::{
-    DeviceFileOps, DeviceId, DirMapping, NodeFlags, NodeType, SimpleFs, VfsFile, VfsResult,
-};
+use kvfs::{DeviceFileOps, DeviceId, DirMapping, NodeFlags, SimpleFs, VfsFile, VfsResult};
 
 use crate::{DeviceFile, add_device_entry};
 
@@ -61,22 +59,12 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     add_device_entry(
         root,
         "random",
-        DeviceFile::new(
-            fs.clone(),
-            NodeType::CharacterDevice,
-            DeviceId::new(1, 8),
-            Arc::new(Random::new()),
-        ),
+        DeviceFile::new_character(fs.clone(), DeviceId::new(1, 8), Arc::new(Random::new())),
     );
     add_device_entry(
         root,
         "urandom",
-        DeviceFile::new(
-            fs,
-            NodeType::CharacterDevice,
-            DeviceId::new(1, 9),
-            Arc::new(Random::new()),
-        ),
+        DeviceFile::new_character(fs, DeviceId::new(1, 9), Arc::new(Random::new())),
     );
 }
 

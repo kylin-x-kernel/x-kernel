@@ -9,7 +9,7 @@ use kspin::SpinNoIrq;
 use simple_ahci::AhciDriver as CoreAhciDriver;
 pub use simple_ahci::Hal as AhciHal;
 
-use crate::BlockDevice;
+use crate::BlockDeviceOperations;
 
 /// AHCI driver implementation based on `simple_ahci` crate.
 ///
@@ -55,7 +55,7 @@ impl<H: AhciHal> Device for AhciDriver<H> {
     }
 }
 
-impl<H: AhciHal> BlockDevice for AhciDriver<H> {
+impl<H: AhciHal> BlockDeviceOperations for AhciDriver<H> {
     fn block_size(&self) -> usize {
         self.block_size
     }

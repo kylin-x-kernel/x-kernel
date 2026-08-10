@@ -19,19 +19,21 @@ extern crate alloc;
 extern crate log;
 
 #[cfg(feature = "fs9p")]
-use alloc::{boxed::Box, format, string::String};
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{boxed::Box, string::String};
+use alloc::{format, sync::Arc, vec::Vec};
 
-use kclass::{BlockDeviceImpl, ClassDevice, block_devices};
 #[cfg(feature = "fs9p")]
-use kclass::{Virtio9pDevice as _, Virtio9pDeviceImpl, virtio_9p_devices};
+use kclass::{ClassDevice, Virtio9pDevice as _, Virtio9pDeviceImpl, virtio_9p_devices};
+#[cfg(feature = "fs9p")]
 use kdevice::{DeviceId, subscribe_device_removed};
+#[cfg(feature = "fs9p")]
 use ksync::{Mutex, static_lock};
 use kvfs::{
     Filename, LookupFlags, LookupIntent, MntNamespace, MountFlags, NodePermission, Path,
     SuperBlock, SuperBlockFlags, path::PathBuf,
 };
 
+#[cfg(feature = "fs9p")]
 static_lock! {
     static FS_BACKING_DEVICES: Mutex<Vec<DeviceId>> = Mutex::new(Vec::new());
 }
@@ -62,10 +64,8 @@ impl v9fs::Transport for Virtio9pTransport {
 }
 
 fn register_filesystem_types() {
-    kvfs::register_filesystem(kvfs::FileSystemType::device_backed(
-        fs_block::RootFileSystem::name(),
-    ))
-    .expect("root filesystem type must register once");
+    kvfs::register_filesystem(fs_block::RootFileSystem::file_system_type())
+        .expect("root filesystem type must register once");
     kvfs::register_filesystem(devfs::FILE_SYSTEM_TYPE).expect("devtmpfs type must register once");
     kvfs::register_filesystem(procfs::FILE_SYSTEM_TYPE).expect("proc type must register once");
     kvfs::register_filesystem(memfs::SYSFS_TYPE).expect("sysfs type must register once");
@@ -77,8 +77,26 @@ fn register_filesystem_types() {
 /// Prepares the initial mount namespace and init fs_struct.
 pub fn prepare_namespace() {
     register_filesystem_types();
-    let root_fs = mount_root_super_block();
-    BootVfs::install_initial_root(root_fs);
+    let bootstrap =
+        memfs::ramfs::new_ramfs_with_name_and_superblock_flags("rootfs", SuperBlockFlags::empty());
+    BootVfs::install_initial_root(bootstrap);
+
+    let boot = BootVfs::initial();
+    boot.mount_at(
+        "/dev",
+        devfs::new_devfs(SuperBlockFlags::empty()),
+        DEVFS_MOUNT_FLAGS,
+    )
+    .expect("Failed to mount bootstrap devfs");
+    let (root_fs, source) = mount_root_super_block(&boot.root);
+    boot.namespace
+        .attach_with_flags_and_devname(&boot.root, &root_fs, MountFlags::RELATIME, Some(&source))
+        .expect("Failed to graft root filesystem");
+    let root = boot.namespace.visible_root_path();
+    fs_context::init_fs()
+        .lock()
+        .replace_root_and_pwd(root.clone(), root)
+        .expect("real root path must replace bootstrap root");
     kvfs::init_anon_inodefs();
 }
 
@@ -245,22 +263,30 @@ impl BootVfs {
     }
 }
 
-fn mount_root_super_block() -> Arc<kvfs::SuperBlock> {
+fn mount_root_super_block(lookup_root: &Path) -> (Arc<kvfs::SuperBlock>, alloc::string::String) {
     info!("Initialize filesystem subsystem...");
 
-    let mut block_devs = block_devices();
+    let mut block_devs = block::block_devices()
+        .into_iter()
+        .filter(|device| device.num_blocks() != 0)
+        .collect();
     let handle = select_root_block(&mut block_devs);
+    let source = format!("/dev/{}", handle.name());
 
-    let backing_id = handle.id();
-    subscribe_fs_backing_unregister(backing_id, "block");
     info!(
-        "  use block device 0: {:?} (driver={}, {:?})",
+        "  use block device 0: {:?} ({:?})",
         handle.name(),
-        handle.driver_name(),
-        handle.location(),
+        handle.device_number(),
     );
 
-    let fs = match fs_block::RootFileSystem::mount_bdev(handle, SuperBlockFlags::empty()) {
+    let cred = kcred::initial_cred();
+    let context = kvfs::FsContext::new(
+        fs_block::RootFileSystem::file_system_type(),
+        Some(&source),
+        SuperBlockFlags::empty(),
+        &cred,
+    );
+    let fs = match context.get_tree(lookup_root, lookup_root) {
         Ok(fs) => fs,
         Err(e) => {
             error!("Failed to mount root filesystem: {e:?}");
@@ -268,20 +294,23 @@ fn mount_root_super_block() -> Arc<kvfs::SuperBlock> {
         }
     };
     info!("  filesystem type: {:?}", fs.name());
-    fs
+    (fs, source)
 }
 
 /// Chooses the block device used as the root filesystem.
-fn select_root_block(devs: &mut Vec<ClassDevice<BlockDeviceImpl>>) -> ClassDevice<BlockDeviceImpl> {
+fn select_root_block(devs: &mut Vec<Arc<block::BlockDevice>>) -> Arc<block::BlockDevice> {
     let preferred = kbuild_config::KFEAT_ROOT_BLOCK.trim();
     if !preferred.is_empty() {
-        if let Some(index) = devs.iter().position(|device| device.name() == preferred) {
-            return devs.remove(index);
-        }
-        warn!(
-            "preferred root block device '{preferred}' not found among {:?}; falling back",
-            devs.iter().map(|device| device.name()).collect::<Vec<_>>()
-        );
+        let index = devs
+            .iter()
+            .position(|device| device.name() == preferred)
+            .unwrap_or_else(|| {
+                panic!(
+                    "root block device '{preferred}' not found among {:?}",
+                    devs.iter().map(|device| device.name()).collect::<Vec<_>>()
+                )
+            });
+        return devs.remove(index);
     }
 
     #[cfg(feature = "rootfs-secondary-block")]
@@ -291,7 +320,8 @@ fn select_root_block(devs: &mut Vec<ClassDevice<BlockDeviceImpl>>) -> ClassDevic
     }
     #[cfg(not(feature = "rootfs-secondary-block"))]
     {
-        devs.pop().expect("No block device found!")
+        assert!(!devs.is_empty(), "No block device found!");
+        devs.remove(0)
     }
 }
 
@@ -317,6 +347,7 @@ pub fn mount_host_share(mount_path: &str) {
     info!("  mounted at: {:?}", mount_path);
 }
 
+#[cfg(feature = "fs9p")]
 fn subscribe_fs_backing_unregister(id: DeviceId, label: &'static str) {
     FS_BACKING_DEVICES.lock().push(id);
     subscribe_device_removed(Arc::new(move |removed_id| {

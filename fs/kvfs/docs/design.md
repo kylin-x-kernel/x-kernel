@@ -114,13 +114,33 @@ filesystem-context 的 `reconfigure`；该 hook 接收拟议 flags 和 changed m
 flags 变更；固定只读介质的文件系统必须覆盖该 hook 并拒绝读写目标。
 
 `FileSystemType` 对应 Linux `struct file_system_type`，描述文件系统实现的名称、
-是否需要 backing device 及当前可用的 nodev 创建入口。全局注册表对应 Linux
+是否需要 backing device 及统一的 `get_tree` 创建入口。全局注册表对应 Linux
 `file_systems` list，是按类型名挂载和 `/proc/filesystems` 的共同事实源。
-nodev 创建入口接收从 `mount(2)` 提取的 `SuperBlockFlags`，对应 Linux
-`fs_context_for_mount(type, sb_flags)` 在 `get_tree` 前携带 superblock flags；
-`SuperBlockRegistry` 只跟踪已经创建的 superblock 实例，两者不合并，也不互相复制状态。
-具体 type factory 负责决定一次 mount 是创建新 superblock 还是复用已有实例，KVFS
-registry 不增加第二套实例缓存。
+每个类型通过一个 `GetTreeFn` 回调构造 superblock，对应 Linux 的 `->get_tree`：nodev
+类型调用 `get_tree_nodev`；device-backed 类型调用 KVFS `get_tree_bdev`，由 VFS super
+层完成 source pathname、block-special inode、`nodev` 和 `rdev` 校验，再从 block core
+取得 canonical `BlockDevice`。与 Linux `bdev_file_open_by_path` 一样，可写 mount 会拒绝
+canonical read-only device；只读 mount 仍可继续交给 filesystem fill-super。`fs_flags` 字段是类型化
+的 `FileSystemTypeFlags`（bitflags），对应 Linux `struct file_system_type::fs_flags`，
+其中 `REQUIRES_DEV` 声明是否需要 backing device，位编号与 Linux `include/linux/fs.h`
+对齐，供 `/proc/filesystems` 的 nodev 列和 mount 错误路径判断；未来按 Linux 语义
+新增标志（如 binary mountdata、subtype）时保持同一编号体系即可扩展。
+
+block-special inode 统一安装 KVFS 的 `DefaultBlkdevFileOperations`，对应 Linux
+`def_blk_fops`。open 按 inode `rdev` 直接查 block core；read/write/fsync 和通用
+`BLKGETSIZE*` 操作作用于同一个 resident `BlockDevice`，未知 ioctl 再分派到
+`Gendisk` 的 `BlockDeviceOperations`。普通 close 和 write 不隐式 flush，显式 fsync 才把
+durability 请求传给 backend。KVFS 不维护第二张 `dev_t -> DeviceFileOps` 表；
+devfs 只投影名称与 `rdev`，loop 设备也按普通 `Gendisk` 发布。
+
+`FsContext` 对应 Linux `struct fs_context` 的当前 one-shot 子集，保存 `fs_type`、source、
+`sb_flags` 和 mounter credential。它不保存进程 `FsStruct` 的 root/pwd。Linux 在
+`get_tree_bdev -> lookup_bdev -> kern_path` 中从 ambient `current->fs` 取得路径环境；
+KVFS 为避免反向依赖 `kprocess`，由 mount 执行入口取得 `FsStruct` 的 root/pwd 快照，
+在调用 `FsContext::get_tree` 时显式传入。该快照只沿调用栈存在，不成为 mount transaction
+字段。`SuperBlockRegistry` 只跟踪已经创建的 superblock 实例，
+两者不合并，也不互相复制状态。具体 type factory 负责决定一次 mount 是创建新
+superblock 还是复用已有实例，KVFS registry 不增加第二套实例缓存。
 
 `Dentry` 是可移动的 namespace 对象。rename 保留 source dentry 和 inode identity，只
 改变 dentry 的位置和 cache membership。inode 持有文件状态和 address space，因此

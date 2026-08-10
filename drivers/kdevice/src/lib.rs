@@ -65,8 +65,8 @@ pub use bus::{
 };
 pub use device::{
     desc::{
-        DeviceDesc, DeviceDescId, DeviceId, DeviceIdentity, DeviceLocation, DeviceRecord,
-        DeviceState, DiscoveryOrigin, PciIdentity, PlatformIdentity, TransportInfo,
+        DeviceDesc, DeviceDescId, DeviceId, DeviceIdentity, DeviceLocation, DeviceNumber,
+        DeviceRecord, DeviceState, DiscoveryOrigin, PciIdentity, PlatformIdentity, TransportInfo,
     },
     handles::{BusHandle, DeviceCore, DriverCore},
     object::{DeviceObject, DeviceUse},
