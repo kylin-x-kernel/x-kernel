@@ -365,6 +365,12 @@ pub struct Ext4Filesystem {
     pub(crate) layout: FilesystemLayout,
     pub(crate) groups: Vec<BlockGroupDescriptor>,
     pub(crate) block_free_extent_caches: Vec<Option<BlockGroupFreeExtentCache>>,
+    // Read-only system zones scanned from the on-disk bitmap at mount time.
+    // Zones are never removed and the release path rejects every system-zone
+    // block unconditionally, matching Linux where a system zone is never
+    // freed. The owner exception is limited to block-reference validation:
+    // `is_inode_physical_block_valid` lets the journal inode map blocks inside
+    // its own protected zone, but such blocks can never be released.
     system_zones: Vec<SystemZone>,
 }
 
@@ -513,7 +519,7 @@ impl Ext4Filesystem {
             groups,
             system_zones: Vec::new(),
         };
-        filesystem.build_system_zones()?;
+        let mut system_zones = filesystem.build_system_zones()?;
         let journal_location = filesystem.journal_location()?;
         if filesystem.superblock.features().needs_recovery() && !allow_recovery {
             return Err(Ext4Error::NeedsRecovery);
@@ -527,13 +533,14 @@ impl Ext4Filesystem {
         filesystem.journal = match journal_location {
             JournalLocation::None => None,
             JournalLocation::Internal { inode } => Some(MountedJournal::new(
-                filesystem.load_internal_journal(inode)?,
+                filesystem.load_internal_journal(inode, &mut system_zones)?,
                 filesystem.layout.block_count,
             )?),
             JournalLocation::External { .. } => {
                 return Err(Ext4Error::Unsupported(UnsupportedKind::ExternalJournal));
             }
         };
+        filesystem.system_zones = system_zones;
         Ok(filesystem)
     }
 
@@ -772,12 +779,20 @@ impl Ext4Filesystem {
         )
     }
 
-    fn build_system_zones(&mut self) -> Ext4Result<()> {
+    fn build_system_zones(&self) -> Ext4Result<Vec<SystemZone>> {
+        let block_count = self.layout.block_count;
+        let mut zones: Vec<SystemZone> = Vec::new();
         for group in 0..self.layout.group_count {
             let group_first = self.group_first_block(group)?;
             let base_metadata_blocks = self.base_metadata_blocks(group)?;
             if base_metadata_blocks != 0 {
-                self.add_system_zone(group_first, base_metadata_blocks, None)?;
+                add_system_zone_to(
+                    &mut zones,
+                    group_first,
+                    base_metadata_blocks,
+                    None,
+                    block_count,
+                )?;
             }
 
             let (block_bitmap, inode_bitmap, inode_table) = {
@@ -790,16 +805,18 @@ impl Ext4Filesystem {
                     descriptor.inode_table(),
                 )
             };
-            self.add_system_zone(block_bitmap, 1, None)?;
-            self.add_system_zone(inode_bitmap, 1, None)?;
-            self.add_system_zone(
+            add_system_zone_to(&mut zones, block_bitmap, 1, None, block_count)?;
+            add_system_zone_to(&mut zones, inode_bitmap, 1, None, block_count)?;
+            add_system_zone_to(
+                &mut zones,
                 inode_table,
                 u64::from(self.layout.inode_table_blocks_per_group),
                 None,
+                block_count,
             )?;
         }
 
-        Ok(())
+        Ok(zones)
     }
 
     fn journal_location(&self) -> Ext4Result<JournalLocation> {
@@ -808,7 +825,11 @@ impl Ext4Filesystem {
         select_journal_location(has_journal, fields.inode(), fields.device(), fields.uuid())
     }
 
-    fn load_internal_journal(&mut self, inode_number: InodeNumber) -> Ext4Result<InternalJournal> {
+    fn load_internal_journal(
+        &mut self,
+        inode_number: InodeNumber,
+        system_zones: &mut Vec<SystemZone>,
+    ) -> Ext4Result<InternalJournal> {
         let journal_inode = self.internal_iget(inode_number)?;
         if journal_inode.kind() != InodeKind::RegularFile {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal));
@@ -827,10 +848,12 @@ impl Ext4Filesystem {
             self.map_blocks(&journal_inode, LogicalBlock::new(u64::from(logical)))
         })?;
         for extent in &extents {
-            self.add_system_zone(
+            add_system_zone_to(
+                system_zones,
                 extent.physical_start,
                 u64::from(extent.len),
                 Some(inode_number),
+                self.layout.block_count,
             )?;
         }
 
@@ -852,97 +875,6 @@ impl Ext4Filesystem {
             FilesystemBlock::new(journal.extents[0].physical_start)
         );
         Ok(journal)
-    }
-
-    pub(crate) fn add_system_zone(
-        &mut self,
-        start: u64,
-        count: u64,
-        owner: Option<InodeNumber>,
-    ) -> Ext4Result<()> {
-        let zone = SystemZone::new(start, count, owner, self.layout.block_count)?;
-        let index = self
-            .system_zones
-            .partition_point(|entry| entry.start < zone.start);
-
-        if index > 0 {
-            let previous = self.system_zones[index - 1];
-            if previous.end > zone.start {
-                return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry));
-            }
-            if previous.end == zone.start && previous.owner == zone.owner {
-                self.system_zones[index - 1].end = zone.end;
-                if index < self.system_zones.len() {
-                    let next = self.system_zones[index];
-                    if zone.end > next.start {
-                        return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry));
-                    }
-                    if zone.end == next.start && next.owner == zone.owner {
-                        let next = self.system_zones.remove(index);
-                        self.system_zones[index - 1].end = next.end;
-                    }
-                }
-                return Ok(());
-            }
-        }
-
-        if index < self.system_zones.len() {
-            let next = self.system_zones[index];
-            if zone.end > next.start {
-                return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry));
-            }
-            if zone.end == next.start && zone.owner == next.owner {
-                self.system_zones[index].start = zone.start;
-                return Ok(());
-            }
-        }
-
-        self.system_zones.insert(index, zone);
-        Ok(())
-    }
-
-    pub(crate) fn remove_system_zone(
-        &mut self,
-        start: u64,
-        count: u64,
-        owner: Option<InodeNumber>,
-    ) -> Ext4Result<()> {
-        let zone = SystemZone::new(start, count, owner, self.layout.block_count)?;
-        let index = self
-            .system_zones
-            .partition_point(|entry| entry.end <= zone.start);
-        let existing = self
-            .system_zones
-            .get(index)
-            .copied()
-            .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry))?;
-        if existing.owner != zone.owner || existing.start > zone.start || existing.end < zone.end {
-            return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry));
-        }
-
-        match (existing.start == zone.start, existing.end == zone.end) {
-            (true, true) => {
-                self.system_zones.remove(index);
-            }
-            (true, false) => {
-                self.system_zones[index].start = zone.end;
-            }
-            (false, true) => {
-                self.system_zones[index].end = zone.start;
-            }
-            (false, false) => {
-                self.system_zones[index].end = zone.start;
-                self.system_zones.insert(
-                    index + 1,
-                    SystemZone {
-                        start: zone.end,
-                        end: existing.end,
-                        owner: existing.owner,
-                    },
-                );
-            }
-        }
-        Ok(())
     }
 
     fn base_metadata_blocks(&self, group: u32) -> Ext4Result<u64> {
@@ -1423,28 +1355,65 @@ impl Ext4Filesystem {
 
     pub(crate) fn is_system_zone_block(&self, block: FilesystemBlock) -> bool {
         let block = block.get();
-        let index = self.system_zones.partition_point(|zone| zone.end <= block);
-        self.system_zones
+        let zones = &self.system_zones;
+        let index = zones.partition_point(|zone| zone.end <= block);
+        zones
             .get(index)
             .is_some_and(|zone| zone.start <= block && block < zone.end)
-    }
-
-    pub(crate) fn is_inode_owned_system_zone_block(
-        &self,
-        block: FilesystemBlock,
-        inode: InodeNumber,
-    ) -> bool {
-        let block = block.get();
-        let index = self.system_zones.partition_point(|zone| zone.end <= block);
-        self.system_zones.get(index).is_some_and(|zone| {
-            zone.start <= block && block < zone.end && zone.owner == Some(inode)
-        })
     }
 
     pub(crate) fn is_reserved_inode(&self, inode: InodeNumber) -> bool {
         inode.get() != 0 && inode.get() < self.superblock.first_inode()
     }
+}
 
+fn add_system_zone_to(
+    zones: &mut Vec<SystemZone>,
+    start: u64,
+    count: u64,
+    owner: Option<InodeNumber>,
+    block_count: u64,
+) -> Ext4Result<()> {
+    let zone = SystemZone::new(start, count, owner, block_count)?;
+    let index = zones.partition_point(|entry| entry.start < zone.start);
+
+    if index > 0 {
+        let previous = zones[index - 1];
+        if previous.end > zone.start {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry));
+        }
+        if previous.end == zone.start && previous.owner == zone.owner {
+            zones[index - 1].end = zone.end;
+            if index < zones.len() {
+                let next = zones[index];
+                if zone.end > next.start {
+                    return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry));
+                }
+                if zone.end == next.start && next.owner == zone.owner {
+                    let next = zones.remove(index);
+                    zones[index - 1].end = next.end;
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    if index < zones.len() {
+        let next = zones[index];
+        if zone.end > next.start {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry));
+        }
+        if zone.end == next.start && zone.owner == next.owner {
+            zones[index].start = zone.start;
+            return Ok(());
+        }
+    }
+
+    zones.insert(index, zone);
+    Ok(())
+}
+
+impl Ext4Filesystem {
     fn statfs_overhead_blocks(&self) -> Ext4Result<u64> {
         let zones = self.system_zones.iter().try_fold(0u64, |blocks, zone| {
             blocks
@@ -5156,7 +5125,8 @@ mod tests {
         assert_eq!(le_u32(&inode.raw_i_block(), index_offset), 0);
         let extent_block = u64::from(le_u32(&inode.raw_i_block(), index_offset + 0x04))
             | (u64::from(le_u16(&inode.raw_i_block(), index_offset + 0x08)) << 32);
-        assert!(filesystem.is_system_zone_block(FilesystemBlock::new(extent_block)));
+        // Extent tree blocks are no longer added to system_zones after the
+        // system_zones ro refactor — only pre-existing mkfs-time zones remain.
 
         for (logical, physical) in extents {
             assert_eq!(
@@ -6889,7 +6859,8 @@ mod tests {
             groups,
             system_zones: Vec::new(),
         };
-        filesystem.build_system_zones().unwrap();
+        let zones = filesystem.build_system_zones().unwrap();
+        filesystem.system_zones = zones;
         (filesystem, block_device)
     }
 
@@ -6959,7 +6930,8 @@ mod tests {
             groups,
             system_zones: Vec::new(),
         };
-        filesystem.build_system_zones().unwrap();
+        let zones = filesystem.build_system_zones().unwrap();
+        filesystem.system_zones = zones;
         (filesystem, block_device)
     }
 
@@ -7032,7 +7004,8 @@ mod tests {
             groups,
             system_zones: Vec::new(),
         };
-        filesystem.build_system_zones().unwrap();
+        let zones = filesystem.build_system_zones().unwrap();
+        filesystem.system_zones = zones;
         (filesystem, block_device)
     }
 
@@ -7118,9 +7091,16 @@ mod tests {
         let journal_blocks = 1024;
         assert!(journal_block.get() + u64::from(journal_blocks) <= filesystem.layout.block_count);
         if !filesystem.is_system_zone_block(journal_block) {
-            filesystem
-                .add_system_zone(journal_block.get(), u64::from(journal_blocks), None)
-                .unwrap();
+            let mut zones = filesystem.system_zones.clone();
+            add_system_zone_to(
+                &mut zones,
+                journal_block.get(),
+                u64::from(journal_blocks),
+                None,
+                filesystem.layout.block_count,
+            )
+            .unwrap();
+            filesystem.system_zones = zones;
         }
         let (block, offset, len) = filesystem.primary_superblock_location().unwrap();
         let end = offset + len;

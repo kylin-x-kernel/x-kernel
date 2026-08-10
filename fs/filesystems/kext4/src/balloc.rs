@@ -20,7 +20,7 @@ use crate::{
         ext4_bitmap_checksum_matches, ext4_mark_bitmap_end, replace_metadata_access_bytes,
         set_ext4_bitmap_bit, validate_ext4_bitmap_range_set,
     },
-    types::{BlockCount, BlockGroupNumber, FilesystemBlock, InodeNumber, PhysicalBlock},
+    types::{BlockCount, BlockGroupNumber, FilesystemBlock, PhysicalBlock},
 };
 
 const BLOCK_ALLOCATOR_METADATA_CREDITS: u32 = 3;
@@ -216,22 +216,20 @@ impl Ext4Filesystem {
         Ok(allocation)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn release_allocated_block(
         &mut self,
         block: PhysicalBlock,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockAllocation> {
-        self.release_allocated_block_inner(block, handle, false, false, None)
+        self.release_allocated_block_inner(block, handle, false, false)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn release_allocated_metadata_block(
         &mut self,
         block: PhysicalBlock,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockAllocation> {
-        self.release_allocated_block_inner(block, handle, true, true, None)
+        self.release_allocated_block_inner(block, handle, true, true)
     }
 
     pub(crate) fn release_allocated_metadata_block_without_revoke(
@@ -239,26 +237,7 @@ impl Ext4Filesystem {
         block: PhysicalBlock,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockAllocation> {
-        self.release_allocated_block_inner(block, handle, false, true, None)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn release_inode_metadata_block(
-        &mut self,
-        inode: InodeNumber,
-        block: PhysicalBlock,
-        handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<BlockAllocation> {
-        self.release_allocated_block_inner(block, handle, true, true, Some(inode))
-    }
-
-    pub(crate) fn release_inode_metadata_block_without_revoke(
-        &mut self,
-        inode: InodeNumber,
-        block: PhysicalBlock,
-        handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<BlockAllocation> {
-        self.release_allocated_block_inner(block, handle, false, true, Some(inode))
+        self.release_allocated_block_inner(block, handle, false, true)
     }
 
     fn release_allocated_block_inner(
@@ -267,12 +246,16 @@ impl Ext4Filesystem {
         handle: &mut crate::jbd2::JournalHandle<'_>,
         revoke_metadata: bool,
         forget_metadata: bool,
-        metadata_owner: Option<InodeNumber>,
     ) -> Ext4Result<BlockAllocation> {
         let block = FilesystemBlock::new(block.get());
-        let is_owned_metadata_zone =
-            metadata_owner.is_some_and(|owner| self.is_inode_owned_system_zone_block(block, owner));
-        if self.is_system_zone_block(block) && !is_owned_metadata_zone {
+        // Linux ext4_sb_block_valid() lets the owning inode map its own
+        // system-zone blocks, but the owner exception applies only to
+        // block-reference validation and never to the release path: a freed
+        // system-zone block would remain in the read-only zone list and be
+        // handed out again by the allocator as free, corrupting the bitmap.
+        // Releases of any system-zone block are therefore rejected
+        // unconditionally, matching Linux.
+        if self.is_system_zone_block(block) {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap));
         }
         let required_credits = if revoke_metadata {
@@ -371,11 +354,6 @@ impl Ext4Filesystem {
         self.block_free_extent_caches[group_index] = Some(updated_free_cache);
         self.groups[group_index] = updated_descriptor;
         self.superblock = updated_superblock;
-        if is_owned_metadata_zone {
-            let owner =
-                metadata_owner.ok_or(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap))?;
-            self.remove_system_zone(block.get(), 1, Some(owner))?;
-        }
         Ok(released)
     }
 

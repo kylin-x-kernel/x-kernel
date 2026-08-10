@@ -4,8 +4,8 @@
 
 use super::{BlockMapping, BlockMappingFlags, map::ext4_block_bits};
 use crate::{
-    BlockCount, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Result, FilesystemBlock, LogicalBlock,
-    PhysicalBlock, disk::codec, inode::Ext4Inode,
+    BlockCount, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Result, FilesystemBlock, InodeNumber,
+    LogicalBlock, PhysicalBlock, disk::codec, inode::Ext4Inode,
 };
 
 const LEGACY_BLOCK_POINTER_SIZE: usize = 4;
@@ -205,6 +205,8 @@ impl Ext4Filesystem {
         let child_index = logical.checked_div(child_span).ok_or(Ext4Error::Overflow)?;
         let child_logical = logical.checked_rem(child_span).ok_or(Ext4Error::Overflow)?;
         let buffer = self.read_metadata_block(FilesystemBlock::new(u64::from(root)))?;
+        // The per-pointer validation is handled by validate_legacy_pointer_block
+        // when recursing — only the pointer we actually follow is checked.
         let child = legacy_pointer_block_entry(buffer.as_ref(), child_index)?;
         if child == 0 {
             return legacy_hole(logical_span_remaining(child_span, child_logical)?);
@@ -227,6 +229,8 @@ impl Ext4Filesystem {
     ) -> Ext4Result<BlockMapping> {
         let buffer = self.read_metadata_block(FilesystemBlock::new(u64::from(block)))?;
         let bytes = buffer.as_ref();
+        // Legacy mapped block validates the physical pointer via
+        // is_inode_physical_block_valid — only the pointer we actually use.
         let physical = legacy_pointer_block_entry(bytes, logical)?;
         if physical == 0 {
             let mut run_len = 1u32;
@@ -283,6 +287,27 @@ impl Ext4Filesystem {
     fn validate_legacy_pointer_block(&self, inode: &Ext4Inode, block: u32) -> Ext4Result<()> {
         if !self.is_inode_physical_block_valid(inode.number(), u64::from(block), 1) {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
+        }
+        Ok(())
+    }
+
+    /// Linux `ext4_ind_check_inode` equivalent: validates all 12 direct block
+    /// pointers in `i_data[]` against system zones proactively.
+    ///
+    /// Called exactly once per inode at load time by [`Ext4Filesystem::iget_inner`]
+    /// before the inode object is published, so that on-disk corruption is
+    /// detected when the inode is read rather than on the first direct-block
+    /// mapping.
+    pub(crate) fn check_legacy_direct_blocks(
+        &self,
+        inode_number: InodeNumber,
+        block_root: &[u8],
+    ) -> Ext4Result<()> {
+        for i in 0..LEGACY_DIRECT_BLOCKS as usize {
+            let pblk = legacy_inode_block_pointer(block_root, i)?;
+            if pblk != 0 && !self.is_inode_physical_block_valid(inode_number, u64::from(pblk), 1) {
+                return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
+            }
         }
         Ok(())
     }

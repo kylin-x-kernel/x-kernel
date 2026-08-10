@@ -1073,20 +1073,53 @@ impl Ext4Filesystem {
         if !self.is_public_inode_number(number) {
             return Err(Ext4Error::Unsupported(UnsupportedKind::ReservedInode));
         }
-        self.iget_inner(number, false)
+        self.iget_inner(number, false, true)
     }
 
+    /// Loads an inode through the internal path used for inodes this
+    /// filesystem manages itself: freshly initialized inodes whose block root
+    /// is still zeroed, and the internal journal inode which is read before
+    /// the mount-time system zones are installed. Block-root validation is
+    /// skipped on this path, mirroring Linux where the journal inode is
+    /// loaded on a dedicated path before the system zones are set up.
     pub(crate) fn internal_iget(&self, number: InodeNumber) -> Ext4Result<Ext4Inode> {
-        self.iget_inner(number, false)
+        self.iget_inner(number, false, false)
     }
 
     pub(crate) fn orphan_iget(&self, number: InodeNumber) -> Ext4Result<Ext4Inode> {
-        self.iget_inner(number, true)
+        self.iget_inner(number, true, true)
     }
 
-    fn iget_inner(&self, number: InodeNumber, allow_zero_links: bool) -> Ext4Result<Ext4Inode> {
+    fn iget_inner(
+        &self,
+        number: InodeNumber,
+        allow_zero_links: bool,
+        validate_block_root: bool,
+    ) -> Ext4Result<Ext4Inode> {
         let metadata = Ext4InodeMetadata::from_raw(self.raw_inode(number)?, allow_zero_links)?;
-        Ok(Ext4Inode::new(number, metadata))
+        let inode = Ext4Inode::new(number, metadata);
+        if validate_block_root {
+            self.validate_inode_block_root(&inode)?;
+        }
+        Ok(inode)
+    }
+
+    /// Linux `ext4_ind_check_inode` equivalent, run once at inode load time
+    /// before the inode object is published: for legacy (non-extent) inodes
+    /// whose kind uses a block map, all 12 direct block pointers in `i_block[]`
+    /// are validated against the system zones. Extent-format inodes and kinds
+    /// that do not use `i_block[]` as a block map (e.g. fast symlinks) are
+    /// left to the mapping path.
+    fn validate_inode_block_root(&self, inode: &Ext4Inode) -> Ext4Result<()> {
+        if inode.has_extents() {
+            return Ok(());
+        }
+        match inode.kind() {
+            InodeKind::RegularFile | InodeKind::Directory => {
+                self.check_legacy_direct_blocks(inode.number(), &inode.raw_i_block())
+            }
+            _ => Ok(()),
+        }
     }
 
     fn ensure_delalloc_accounting(&self, inode: &Ext4Inode) -> Ext4Result<()> {

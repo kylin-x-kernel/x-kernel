@@ -36,7 +36,7 @@ pub(super) fn validate_extent_entries(
     header: disk_extent::ExtentHeader,
     expected_lblk: Option<u32>,
     upper_lblk: Option<u32>,
-    mut is_valid_physical_block: impl FnMut(u64, u64) -> bool,
+    is_valid_physical_block: impl Fn(u64, u64) -> bool,
 ) -> Ext4Result<()> {
     let entry_count = usize::from(header.entries());
     if entry_count == 0 {

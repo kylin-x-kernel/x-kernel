@@ -120,14 +120,15 @@ impl Ext4Filesystem {
 
         let selected = find_index(bytes, header, logical)?;
         let child_upper_lblk = min_lblk(upper_lblk, selected.next_lblk);
-        let block = self.read_metadata_block(FilesystemBlock::new(selected.index.leaf().get()))?;
+        let child_block = selected.index.leaf();
+        let block = self.read_metadata_block(FilesystemBlock::new(child_block.get()))?;
         let child_depth = header
             .depth()
             .checked_sub(1)
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidExtent))?;
         let bytes = block.as_ref();
         if self.superblock().features().has_metadata_checksum() {
-            verify_extent_block_checksum(self, inode, selected.index.leaf(), bytes)?;
+            verify_extent_block_checksum(self, inode, child_block, bytes)?;
         }
         self.map_extent_node(
             inode,

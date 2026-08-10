@@ -318,10 +318,10 @@ impl Ext4Filesystem {
             && self.external_xattr_block_refcount(inode, old_external_block)? == 1
         {
             let block = FilesystemBlock::new(old_external_block);
-            self.write_external_xattr_block(inode, block, &xattrs, handle)?;
+            self.write_external_xattr_block(block, &xattrs, handle)?;
             Some(block)
         } else {
-            Some(self.create_external_xattr_block(inode, &xattrs, handle)?)
+            Some(self.create_external_xattr_block(&xattrs, handle)?)
         };
         if old_external_block != 0
             && new_external_block.is_none_or(|block| block.get() != old_external_block)
@@ -440,7 +440,6 @@ impl Ext4Filesystem {
 
     fn create_external_xattr_block(
         &mut self,
-        inode: &Ext4Inode,
         xattrs: &[Ext4Xattr],
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<FilesystemBlock> {
@@ -451,14 +450,12 @@ impl Ext4Filesystem {
         }
         let allocation = self.allocate_block(None, handle)?;
         let block = FilesystemBlock::new(allocation.block().get());
-        self.add_system_zone(block.get(), 1, Some(inode.number()))?;
-        self.write_external_xattr_block(inode, block, xattrs, handle)?;
+        self.write_external_xattr_block(block, xattrs, handle)?;
         Ok(block)
     }
 
     fn write_external_xattr_block(
         &mut self,
-        inode: &Ext4Inode,
         block: FilesystemBlock,
         xattrs: &[Ext4Xattr],
         handle: &mut JournalHandle<'_>,
@@ -467,9 +464,6 @@ impl Ext4Filesystem {
             usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
         if external_xattr_encoded_len(xattrs)? > block_size {
             return Err(Ext4Error::Unsupported(UnsupportedKind::ExternalXattrBlock));
-        }
-        if !self.is_inode_owned_system_zone_block(block, inode.number()) {
-            self.add_system_zone(block.get(), 1, Some(inode.number()))?;
         }
         let mut bytes = self.read_metadata_block(block)?.as_ref().to_vec();
         encode_external_xattr_block(
@@ -525,13 +519,7 @@ impl Ext4Filesystem {
         }
 
         let physical = PhysicalBlock::new(block);
-        if self.is_inode_owned_system_zone_block(FilesystemBlock::new(block), inode.number()) {
-            if self.journal_supports_revoke() {
-                self.release_inode_metadata_block(inode.number(), physical, handle)?;
-            } else {
-                self.release_inode_metadata_block_without_revoke(inode.number(), physical, handle)?;
-            }
-        } else if self.journal_supports_revoke() {
+        if self.journal_supports_revoke() {
             self.release_allocated_metadata_block(physical, handle)?;
         } else {
             self.release_allocated_metadata_block_without_revoke(physical, handle)?;

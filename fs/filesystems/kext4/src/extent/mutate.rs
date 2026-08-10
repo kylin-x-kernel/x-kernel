@@ -414,7 +414,7 @@ impl Ext4Filesystem {
                 *new_metadata_blocks = new_metadata_blocks
                     .checked_add(1)
                     .ok_or(Ext4Error::Overflow)?;
-                self.allocate_extent_tree_block(inode, None, handle)?
+                self.allocate_extent_tree_block(None, handle)?
             };
             let access = if reused_block.is_some() {
                 self.metadata_io
@@ -462,7 +462,7 @@ impl Ext4Filesystem {
                     .first()
                     .copied()
                     .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidExtent))?;
-                let block = self.allocate_extent_tree_block(inode, None, handle)?;
+                let block = self.allocate_extent_tree_block(None, handle)?;
                 *new_metadata_blocks = new_metadata_blocks
                     .checked_add(1)
                     .ok_or(Ext4Error::Overflow)?;
@@ -657,9 +657,9 @@ impl Ext4Filesystem {
         }
         for block in &released_blocks {
             if self.journal_supports_revoke() {
-                self.release_inode_metadata_block(inode.number(), *block, handle)?;
+                self.release_allocated_metadata_block(*block, handle)?;
             } else {
-                self.release_inode_metadata_block_without_revoke(inode.number(), *block, handle)?;
+                self.release_allocated_metadata_block_without_revoke(*block, handle)?;
             }
         }
         let released_blocks =
@@ -908,12 +908,12 @@ impl Ext4Filesystem {
         }
         for block in state.metadata_blocks {
             if self.journal_supports_revoke() {
-                self.release_inode_metadata_block(inode.number(), block, handle)?;
+                self.release_allocated_metadata_block(block, handle)?;
             } else {
                 // The transaction engine checkpoints every older transaction
                 // before opening this handle, so recovery has no older image
                 // to suppress for a reused block.
-                self.release_inode_metadata_block_without_revoke(inode.number(), block, handle)?;
+                self.release_allocated_metadata_block_without_revoke(block, handle)?;
             }
         }
         self.update_inode_extent_block_accounting(
@@ -1089,7 +1089,7 @@ impl Ext4Filesystem {
         let mut level = Vec::new();
         let mut metadata_blocks = 0u64;
         for chunk in extents.chunks(leaf_capacity) {
-            let block = self.allocate_extent_tree_block(inode, chunk.first().copied(), handle)?;
+            let block = self.allocate_extent_tree_block(chunk.first().copied(), handle)?;
             metadata_blocks = metadata_blocks.checked_add(1).ok_or(Ext4Error::Overflow)?;
             let access = self
                 .metadata_io
@@ -1120,7 +1120,7 @@ impl Ext4Filesystem {
             }
             let mut next_level = Vec::new();
             for chunk in level.chunks(index_capacity) {
-                let block = self.allocate_extent_tree_block(inode, None, handle)?;
+                let block = self.allocate_extent_tree_block(None, handle)?;
                 metadata_blocks = metadata_blocks.checked_add(1).ok_or(Ext4Error::Overflow)?;
                 let access = self
                     .metadata_io
@@ -1182,13 +1182,11 @@ impl Ext4Filesystem {
 
     fn allocate_extent_tree_block(
         &mut self,
-        inode: &Ext4Inode,
         goal_extent: Option<MutableExtent>,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<PhysicalBlock> {
         let goal = goal_extent.map(|extent| FilesystemBlock::new(extent.physical.get()));
         let block = self.allocate_block(goal, handle)?.block();
-        self.add_system_zone(block.get(), 1, Some(inode.number()))?;
         Ok(block)
     }
 
@@ -1284,7 +1282,7 @@ pub(super) fn insert_inline_extent_bytes(
     physical: PhysicalBlock,
     len: BlockCount,
     state: ExtentMappingState,
-    mut is_valid_physical_block: impl FnMut(u64, u64) -> bool,
+    is_valid_physical_block: impl Fn(u64, u64) -> bool,
 ) -> Ext4Result<()> {
     let mut extents = decode_leaf_extents(bytes, None, None, |block, count| {
         is_valid_physical_block(block, count)
@@ -1405,7 +1403,7 @@ fn decode_leaf_extents(
     bytes: &[u8],
     expected_lblk: Option<u32>,
     upper_lblk: Option<u32>,
-    mut is_valid_physical_block: impl FnMut(u64, u64) -> bool,
+    is_valid_physical_block: impl Fn(u64, u64) -> bool,
 ) -> Ext4Result<Vec<MutableExtent>> {
     let header = decode_header(bytes)?;
     if header.depth() != 0 {
@@ -1428,7 +1426,7 @@ fn rewrite_leaf_extent_entries(
     extents: &[MutableExtent],
     expected_lblk: Option<u32>,
     upper_lblk: Option<u32>,
-    mut is_valid_physical_block: impl FnMut(u64, u64) -> bool,
+    is_valid_physical_block: impl Fn(u64, u64) -> bool,
 ) -> Ext4Result<()> {
     clear_extent_entries(bytes, header)?;
     for (index, extent) in extents.iter().copied().enumerate() {
@@ -1452,7 +1450,7 @@ fn encode_inline_leaf_root(
     bytes: &mut [u8],
     generation: u32,
     extents: &[MutableExtent],
-    mut is_valid_physical_block: impl FnMut(u64, u64) -> bool,
+    is_valid_physical_block: impl Fn(u64, u64) -> bool,
 ) -> Ext4Result<()> {
     bytes.fill(0);
     let max = disk_extent::inline_extent_capacity()?;
@@ -1493,7 +1491,7 @@ fn encode_inline_index_root(
     generation: u32,
     depth: u16,
     children: &[ExtentTreeBlockRef],
-    mut is_valid_physical_block: impl FnMut(u64, u64) -> bool,
+    is_valid_physical_block: impl Fn(u64, u64) -> bool,
 ) -> Ext4Result<()> {
     bytes.fill(0);
     let max = disk_extent::inline_extent_capacity()?;
@@ -1716,7 +1714,7 @@ impl ExtentPath {
                 new_metadata_blocks = new_metadata_blocks
                     .checked_add(1)
                     .ok_or(Ext4Error::Overflow)?;
-                filesystem.allocate_extent_tree_block(inode, Some(first), handle)?
+                filesystem.allocate_extent_tree_block(Some(first), handle)?
             };
             let access = if reused_block.is_some() {
                 filesystem
@@ -1890,7 +1888,7 @@ impl MutableExtent {
         physical: PhysicalBlock,
         len: BlockCount,
         state: ExtentMappingState,
-        mut is_valid_physical_block: impl FnMut(u64, u64) -> bool,
+        is_valid_physical_block: impl Fn(u64, u64) -> bool,
     ) -> Ext4Result<Vec<Self>> {
         let len = len.get();
         if len == 0 {
@@ -1931,7 +1929,7 @@ impl MutableExtent {
         physical: PhysicalBlock,
         len: BlockCount,
         state: ExtentMappingState,
-        mut is_valid_physical_block: impl FnMut(u64, u64) -> bool,
+        is_valid_physical_block: impl Fn(u64, u64) -> bool,
     ) -> Ext4Result<Self> {
         let len = len.get();
         validate_extent_len(len, matches!(state, ExtentMappingState::Unwritten))?;
@@ -2039,7 +2037,7 @@ impl MutableExtent {
 
 fn validate_mutable_extents(
     extents: &[MutableExtent],
-    mut is_valid_physical_block: impl FnMut(u64, u64) -> bool,
+    is_valid_physical_block: impl Fn(u64, u64) -> bool,
 ) -> Ext4Result<()> {
     let mut previous_end = 0u32;
     for extent in extents.iter().copied() {
