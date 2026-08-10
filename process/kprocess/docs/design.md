@@ -226,7 +226,11 @@ path + 旧 argv 的混合状态。
 
 ### 进程退出和回收
 
-1. `exit_thread` 从 `Process` 自有线程成员表移除 TID，并在未 group-exit 时记录退出码。
+1. `exit_thread` 从 `Process` 自有线程成员表移除 TID，按任务身份从全局 TID
+   目录 unpublish，并在未 group-exit 时记录退出码。此后到 `set_exit`/任务销毁
+   之前，外部 `lookup::task(tid)`、`tgkill`、按 TID 的定时器投递都会看到
+   `NoSuchProcess`；这是有意的可见性取舍，避免退出尾段仍被当作可命中目标，
+   并防止 Published(dead Weak) TID 槽位滞留。
 2. 最后一个线程退出后，`posix-process` runtime glue 经 `process_exit` 语义模块触发稳定 `Process` 的 exited-state 转换。
 3. `Process` 内部在 process-domain 临界区内设置 `Zombie` 或 `Dead` 退出状态，
    将所有子进程 reparent 到 init，并同时更新旧 parent children、新 parent
@@ -291,8 +295,16 @@ path + 旧 argv 的混合状态。
   Linux 在 `tasklist_lock` 下维护 PID hash 和全局 task 可见性的部分。当前实现
   采用 staged slot registry：`BTreeMap` 只保存 slot，结构性插入/移除在
   process-domain 锁外完成；slot 有 `Vacant/Reserved/Published/Retired` 生命周期。
-  `cleanup()` 只能清理 `Vacant/Retired` slot，不能删除 reserved-but-empty slot，
-  因此 reserve 与 visible commit 之间即使发生 cleanup 也不会丢失发布位置。
+  热路径按发布身份精确删除：`exit_thread` 携带退出 `KtaskRef` 调用
+  `unpublish_task_if_matches`，wait/autoreap/`reap_detached_process_identity`
+  一律走 `unpublish_process_if_matches`，不再提供仅凭数字 PID 的 unpublish 路径。
+  retire 前用 `Arc::ptr_eq` 校验槽内发布对象仍是本次退出的 task/process；
+  `Reserved` 在途 republish 不会被 retire；只有目录仍指向同一 slot 且 slot 处于
+  `Vacant/Retired` 时才 `BTreeMap::remove`。因此 PID/TID 复用后已 Reserved 或
+  Published 到新身份的槽不会被旧退出路径误退休或误删。`cleanup()` 仍只清理
+  `Vacant/Retired` 与失效 weak entry，作为 group/session 与异常 abort 路径的
+  兜底，不能删除 reserved-but-empty slot，因此 reserve 与 visible commit 之间
+  即使发生 cleanup 也不会丢失发布位置。
   publication table write guard 覆盖 reserve 到 commit/abort 的窗口，避免多个
   事务复用同一个 Reserved group/session slot；进入 process-domain 前已完成所有
   `BTreeMap` 结构性分配，slot 的 published value 在 process-domain 锁内切换，
@@ -304,12 +316,13 @@ path + 旧 argv 的混合状态。
   slot：结构性 `BTreeMap` slot reserve 在事务前完成，对外枚举只返回 published
   slot。task publication 用 `ThreadPublicationBinding` 把全局 TID task slot 和
   进程内 thread member slot 绑定为同一事务对象；process-domain commit 同时发布
-  两个观察面，rollback 同时 retire 两个 slot。PID identity 是否由本次 task
-  publication 插入使用 `ProcessIdentityEffect` 表达，rollback 只撤销本事务插入的
-  process identity。group member 也只在 process-domain 内发布；group/session
-  lookup slot 的本次预留状态由 `PublicationSlotEffect` 记录，失败路径只 retire
-  本事务预留但未发布的 slot。rollback/reap/autoreap retire slot，使未发布 child
-  或已回收 child 不会从 thread 或 process-group 观察面泄漏。
+  两个观察面，rollback 同时 retire 两个 slot 并从目录移除仍可清理的 map 项。
+  PID identity 是否由本次 task publication 插入使用 `ProcessIdentityEffect` 表达，
+  rollback 只撤销本事务插入的 process identity。group member 也只在
+  process-domain 内发布；group/session lookup slot 的本次预留状态由
+  `PublicationSlotEffect` 记录，失败路径只 retire 本事务预留但未发布的 slot。
+  rollback/reap/autoreap retire 并精确删除匹配 slot，使未发布 child 或已回收
+  child 不会在 thread/process 目录中无限滞留。
 - job-control group move 通过 `ProcessPublication::move_process_to_group` 统一提交：
   先在 process-domain 外预留目标 process-group member slot 与 group/session
   publication slot，然后在同一个 process-domain 写事务里更新 `Process::group`、

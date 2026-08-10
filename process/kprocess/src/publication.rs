@@ -117,6 +117,29 @@ impl<T: Clone> PublicationSlot<T> {
     }
 }
 
+impl PublicationSlot<WeakKtaskRef> {
+    /// Retires this TID slot only when it still publishes `task`.
+    ///
+    /// A live `Published` binding to a different task (TID reuse) or an
+    /// in-flight `Reserved` republish is left untouched. `Vacant`/`Retired`
+    /// remain acceptable so a prior identity-matched retire can still finish
+    /// structural directory removal.
+    fn retire_if_publishes(&self, task: &KtaskRef) -> bool {
+        let mut inner = self.inner.lock();
+        match &*inner {
+            PublicationSlotInner::Published(weak) => match weak.upgrade() {
+                Some(published) if Arc::ptr_eq(&published, task) => {
+                    *inner = PublicationSlotInner::Retired;
+                    true
+                }
+                _ => false,
+            },
+            PublicationSlotInner::Vacant | PublicationSlotInner::Retired => true,
+            PublicationSlotInner::Reserved => false,
+        }
+    }
+}
+
 struct PublicationTables {
     task_table: BTreeMap<Tid, Arc<PublicationSlot<WeakKtaskRef>>>,
     process_table: BTreeMap<Pid, Arc<PublicationSlot<Arc<Process>>>>,
@@ -138,17 +161,20 @@ struct JobControlIdentitySlots {
 
 /// Binds the global TID slot and per-process thread member slot for one task.
 struct ThreadPublicationBinding {
+    tid: Tid,
     task_slot: Arc<PublicationSlot<WeakKtaskRef>>,
     member_slot: Arc<crate::process::ThreadMemberSlot>,
 }
 
 impl ThreadPublicationBinding {
     fn reserve(
+        tid: Tid,
         task_slot: Arc<PublicationSlot<WeakKtaskRef>>,
         member_slot: Arc<crate::process::ThreadMemberSlot>,
     ) -> Self {
         task_slot.reserve_vacant_task_slot();
         Self {
+            tid,
             task_slot,
             member_slot,
         }
@@ -321,7 +347,31 @@ impl Drop for PublishedUserTask {
 }
 
 impl ProcessPublication {
+    /// Removes `id` from `table` only when it still names `slot` and `slot` is
+    /// `Vacant`/`Retired`.
+    ///
+    /// This is the PID/TID reuse-safe structural delete: a concurrent republish
+    /// that reused the same slot upgrades it out of the cleanable states, and a
+    /// republish that installed a different slot fails the `Arc::ptr_eq` check.
+    fn remove_slot_if_retired<K: Ord, T>(
+        table: &mut BTreeMap<K, Arc<PublicationSlot<T>>>,
+        id: K,
+        slot: &Arc<PublicationSlot<T>>,
+    ) {
+        if table
+            .get(&id)
+            .is_some_and(|current| Arc::ptr_eq(current, slot))
+            && slot.can_cleanup()
+        {
+            table.remove(&id);
+        }
+    }
+
     /// Cleans up expired task/process-group/session entries.
+    ///
+    /// Hot exit/reap paths remove matching PID/TID slots precisely. This sweep
+    /// remains as a safety net for group/session weak entries and any retired
+    /// slots left behind by unusual abort paths.
     pub(crate) fn cleanup(&self) {
         let mut tables = self.tables.write();
         tables.task_table.retain(|_, slot| {
@@ -482,15 +532,16 @@ impl ProcessPublication {
     pub(crate) fn publish_task(&self, task: &KtaskRef) -> PublicationRollback {
         let thread = task.as_thread();
         let proc = thread.process();
+        let tid = thread.tid();
         let mut tables = self.tables.write();
         let task_slot = tables
             .task_table
-            .entry(thread.tid())
+            .entry(tid)
             .or_insert_with(|| Arc::new(PublicationSlot::new()))
             .clone();
-        let member_slot = proc.reserve_thread_member_slot(thread.tid());
+        let member_slot = proc.reserve_thread_member_slot(tid);
         let (slots, process_effect) = Self::reserve_process_identity_locked(&mut tables, proc);
-        let thread_binding = ThreadPublicationBinding::reserve(task_slot, member_slot);
+        let thread_binding = ThreadPublicationBinding::reserve(tid, task_slot, member_slot);
 
         let domain = process_domain::write_lock();
         thread_binding.publish(&domain, proc, task);
@@ -503,8 +554,18 @@ impl ProcessPublication {
     }
 
     fn rollback_task_publication(&self, rollback: PublicationRollback) {
+        let tid = rollback.thread_binding.tid;
+        let task_slot = rollback.thread_binding.task_slot.clone();
+        let process_slot = rollback.process.published_pid_slot();
         {
             let domain = process_domain::write_lock();
+            // Only clear a process identity this transaction inserted, and only
+            // while the process is still running. If it is already exited, the
+            // PID slot stays Published; `remove_slot_if_retired` then skips it
+            // (`can_cleanup()` is false). That matches the historical rollback
+            // contract: fork-fail-after-exit is an extreme path, and any
+            // leftover Published(dead Weak) PID entry is swept by `cleanup()`
+            // rather than being forced retired here.
             if rollback.process_effect.inserted() && !rollback.process.is_exited_locked(&domain) {
                 rollback.process.clear_published_identity_locked(&domain);
             }
@@ -513,44 +574,102 @@ impl ProcessPublication {
                 rollback.process.discard_unpublished_locked(&domain);
             }
         }
+
+        let mut tables = self.tables.write();
+        Self::remove_slot_if_retired(&mut tables.task_table, tid, &task_slot);
+        if rollback.process_effect.inserted()
+            && let Some(process_slot) = process_slot
+        {
+            Self::remove_slot_if_retired(
+                &mut tables.process_table,
+                rollback.process.pid(),
+                &process_slot,
+            );
+        }
     }
 
-    /// Removes a reaped process identity from the PID directory.
-    pub(crate) fn unpublish_process(&self, pid: Pid) {
-        let slot = self.tables.read().process_table.get(&pid).cloned();
-        if let Some(slot) = slot {
-            let domain = process_domain::write_lock();
-            if let Some(process) = slot.snapshot() {
-                process.clear_published_identity_locked(&domain);
-            } else {
-                slot.retire();
-            }
+    /// Retires a TID directory slot only when it still names `task`, then
+    /// deletes the map entry when still cleanable.
+    ///
+    /// Mirrors [`Self::unpublish_process_if_matches`]: retire is gated by
+    /// `Arc::ptr_eq` against the published task, so a reused TID that already
+    /// publishes a different live task is not flipped to `Retired`. Structural
+    /// removal still requires the directory to point at the same slot object
+    /// in a cleanable state.
+    pub(crate) fn unpublish_task_if_matches(&self, task: &KtaskRef) -> bool {
+        let Some(thread) = task.try_as_thread() else {
+            return false;
+        };
+        let tid = thread.tid();
+        let slot = self.tables.read().task_table.get(&tid).cloned();
+        let Some(slot) = slot else {
+            return false;
+        };
+        if !slot.retire_if_publishes(task) {
+            return false;
+        }
+        let mut tables = self.tables.write();
+        Self::remove_slot_if_retired(&mut tables.task_table, tid, &slot);
+        true
+    }
+
+    /// Retires a TID slot without removing the map entry (unittest reuse probe).
+    #[cfg(unittest)]
+    pub(crate) fn retire_task_slot_keep_entry_for_test(&self, tid: Tid) {
+        if let Some(slot) = self.tables.read().task_table.get(&tid).cloned() {
+            slot.retire();
         }
     }
 
     /// Removes a reaped process identity only when the PID still names `proc`.
+    ///
+    /// Also completes structural directory removal after a prior
+    /// `clear_published_identity_locked` on the wait/autoreap path: the
+    /// process-owned slot weak ref identifies the retired entry even when the
+    /// published value is already gone. `Reserved` in-flight republish slots are
+    /// never retired here; only `Vacant`/`Retired` owned slots are dropped from
+    /// the directory map.
     pub(crate) fn unpublish_process_if_matches(&self, proc: &Arc<Process>) -> bool {
         let pid = proc.pid();
-        let slot = self.tables.read().process_table.get(&pid).cloned();
-        let Some(slot) = slot else {
+        // Common wait/reap callers invoke this after `clear_published_identity`,
+        // so the process-owned weak still upgrades and the directory lookup is
+        // unnecessary. Only fall back to the PID table when this process never
+        // installed its own slot weak (e.g. AlreadyPublished PID reuse).
+        let owned_slot = proc.published_pid_slot();
+        let Some(slot) = owned_slot
+            .clone()
+            .or_else(|| self.tables.read().process_table.get(&pid).cloned())
+        else {
             return false;
         };
-        let removed = {
+
+        let should_remove = {
             let domain = process_domain::write_lock();
-            if slot
-                .snapshot()
-                .is_some_and(|published| Arc::ptr_eq(&published, proc))
-            {
-                proc.clear_published_identity_locked(&domain);
-                true
-            } else {
-                false
+            match slot.snapshot() {
+                Some(published) if Arc::ptr_eq(&published, proc) => {
+                    proc.clear_published_identity_locked(&domain);
+                    true
+                }
+                Some(_) => false,
+                None => {
+                    // Already Vacant/Reserved/Retired. `owned_slot.is_some()` is
+                    // enough here: when Some, `slot` came from that same Arc so
+                    // a further `ptr_eq` would be tautological; when None we
+                    // refuse PID-only deletion. Directory identity is enforced
+                    // by `remove_slot_if_retired`'s `Arc::ptr_eq` against the
+                    // current table entry. Leaving an orphaned Retired entry
+                    // for `cleanup()` when the process weak is gone is an
+                    // intentional conservative fallback.
+                    owned_slot.is_some() && slot.can_cleanup()
+                }
             }
         };
-        if !removed {
+        if !should_remove {
             return false;
         }
 
+        let mut tables = self.tables.write();
+        Self::remove_slot_if_retired(&mut tables.process_table, pid, &slot);
         true
     }
 

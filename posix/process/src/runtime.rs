@@ -322,13 +322,13 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         error!("tee_session_release_state on thread exit: {e:#010X?}");
     }
 
-    let is_last_thread =
-        process_exit::finish_thread_exit(process, kprocess::current_user_tid(), exit_code);
+    let is_last_thread = process_exit::finish_thread_exit(process, &current(), exit_code);
 
-    // `finish_thread_exit()` only removes the current task from the process
-    // membership table; `thr` still holds the current thread object. Close its
-    // CPU-accounting interval before any parent waiter can observe and reap the
-    // zombie.
+    // `finish_thread_exit()` removes the current task from the process membership
+    // table and the global TID directory. External TID lookup/signal delivery
+    // already observes NoSuchProcess for this tid, but `thr` still holds the
+    // current thread object for local teardown. Close its CPU-accounting
+    // interval before any parent waiter can observe and reap the zombie.
     thr.set_cpu_state(kprocess::CpuTimeState::None);
     let (thread_utime, thread_stime) = thr.sample_cpu_time();
     process_exit::record_exited_thread_cpu_time(process, thread_utime, thread_stime);

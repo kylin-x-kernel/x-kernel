@@ -99,16 +99,23 @@ impl Process {
         *self.pid_publication_slot.lock() = Some(Arc::downgrade(slot));
     }
 
+    /// Returns the process-owned PID publication slot, if it is still allocated.
+    ///
+    /// Used by directory reap paths to delete a retired slot after wait/autoreap
+    /// already cleared the published value, without racing a reused PID that
+    /// installed a different slot.
+    pub(crate) fn published_pid_slot(&self) -> Option<Arc<PublishedProcessSlot>> {
+        self.pid_publication_slot
+            .lock()
+            .as_ref()
+            .and_then(Weak::upgrade)
+    }
+
     pub(crate) fn clear_published_identity_locked(
         &self,
         domain: &process_domain::ProcessDomainWriteGuard<'_>,
     ) {
-        if let Some(slot) = self
-            .pid_publication_slot
-            .lock()
-            .as_ref()
-            .and_then(Weak::upgrade)
-        {
+        if let Some(slot) = self.published_pid_slot() {
             slot.retire();
         }
         self.retire_group_membership_locked(domain);

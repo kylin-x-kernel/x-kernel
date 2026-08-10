@@ -397,20 +397,20 @@ fn test_process_lifecycle() {
     assert!(!child.threads().contains(&child_pid));
 
     // Add main thread
-    let _leader_task = publish_test_thread(&child, child_pid);
+    let leader_task = publish_test_thread(&child, child_pid);
     assert!(child.threads().contains(&child_pid));
 
     // Add secondary thread
-    let _sibling_task = publish_test_thread(&child, child_pid + 1);
+    let sibling_task = publish_test_thread(&child, child_pid + 1);
     let threads = child.threads();
     assert!(threads.contains(&(child_pid + 1)));
 
     // Remove secondary thread
-    let is_last = child.exit_thread(child_pid + 1, 0);
+    let is_last = child.exit_thread(&sibling_task, 0);
     assert!(!is_last); // main thread is still there
 
     // Remove main thread
-    let is_last = child.exit_thread(child_pid, 0);
+    let is_last = child.exit_thread(&leader_task, 0);
     assert!(is_last);
 
     // Test Group Exit
@@ -971,10 +971,10 @@ fn test_group_exit_prevents_late_thread_exit_from_overwriting_exit_code() {
     let init = ensure_init();
     let proc = init.fork(500);
 
-    let _leader_task = publish_test_thread(&proc, 500);
-    let _sibling_task = publish_test_thread(&proc, 501);
+    let leader_task = publish_test_thread(&proc, 500);
+    let sibling_task = publish_test_thread(&proc, 501);
 
-    let not_last = proc.exit_thread(500, 11);
+    let not_last = proc.exit_thread(&leader_task, 11);
     assert!(!not_last, "first exiting thread should not be last");
     assert_eq!(
         proc.exit_code(),
@@ -983,7 +983,7 @@ fn test_group_exit_prevents_late_thread_exit_from_overwriting_exit_code() {
     );
 
     proc.group_exit();
-    let is_last = proc.exit_thread(501, 22);
+    let is_last = proc.exit_thread(&sibling_task, 22);
     assert!(is_last, "second exiting thread should be the last thread");
     assert_eq!(
         proc.exit_code(),
@@ -1078,8 +1078,9 @@ fn test_complete_process_exit_wakes_parent_after_child_is_waitable() {
 
 #[def_test(serial)]
 fn test_child_exit_signal_info_carries_linux_child_payload() {
-    let (child, _task) = build_prepared_test_user_task();
-    process_exit::finish_thread_exit(&child, child.pid(), 9 << 8);
+    let (child, prepared) = build_prepared_test_user_task();
+    let task = prepare_user_task(prepared).publish().activate();
+    process_exit::finish_thread_exit(&child, &task, 9 << 8);
 
     let siginfo = process_exit::child_exit_signal_info(&child, ksignal::Signo::SIGCHLD);
     let payload = siginfo
@@ -1313,7 +1314,7 @@ fn test_published_task_lookup_matches_published_user_thread() {
 
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     process.free();
-    publication.unpublish_process(process.pid());
+    let _ = publication.unpublish_process_if_matches(&process);
     drop(task);
     publication.cleanup();
 }
@@ -1408,17 +1409,18 @@ fn test_prepare_thread_clone_defers_tid_visibility_until_publication() {
     let (cloned, task_number) = prepared.into_parts();
     let task = TaskInner::new_user(|| {}, String::from("prepared-thread"), task_number, cloned);
     let published = prepare_user_task(task).publish();
+    let sibling_task = published.task().clone();
 
-    let is_last = process.exit_thread(tid, 0);
+    let is_last = process.exit_thread(&sibling_task, 0);
     assert!(
         !is_last,
         "published sibling thread removal must not tear down the whole process"
     );
     drop(published);
-    process.exit_thread(process.pid(), 0);
+    process.exit_thread(&leader_task, 0);
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     process.free();
-    process_publication().unpublish_process(process.pid());
+    let _ = process_publication().unpublish_process_if_matches(&process);
     drop(leader_task);
     process_publication().cleanup();
 }
@@ -1473,12 +1475,12 @@ fn test_scheduler_resolves_non_leader_tid_not_as_tgid() {
         "tgid lookup must stay inside the process thread group"
     );
 
-    let _ = process.exit_thread(sibling_tid, 0);
+    let _ = process.exit_thread(&sibling_task, 0);
     drop(sibling);
-    process.exit_thread(process.pid(), 0);
+    process.exit_thread(&leader_task, 0);
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     process.free();
-    process_publication().unpublish_process(process.pid());
+    let _ = process_publication().unpublish_process_if_matches(&process);
     drop(leader_task);
     process_publication().cleanup();
 }
@@ -1592,7 +1594,7 @@ fn test_cleanup_preserves_reserved_process_publication_slot() {
 
     child.exit_with_publication(ProcessExitPublication::WaitableZombie);
     child.free();
-    publication.unpublish_process(child.pid());
+    let _ = publication.unpublish_process_if_matches(&child);
     publication.cleanup();
 }
 
@@ -1726,7 +1728,7 @@ fn test_zombie_process_stays_published_until_reaped() {
     );
 
     process.free();
-    publication.unpublish_process(child_pid);
+    let _ = publication.unpublish_process_if_matches(&process);
     assert!(
         publication.published_process(child_pid).is_err(),
         "reaped child must disappear from the published PID registry"
@@ -1752,10 +1754,10 @@ fn test_published_process_count_ignores_retired_slots_before_cleanup() {
 
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     process.free();
-    publication.unpublish_process(pid);
+    let _ = publication.unpublish_process_if_matches(&process);
     assert!(
         publication.published_process(pid).is_err(),
-        "reaped process must disappear before cleanup removes its retired slot"
+        "reaped process must disappear once its publication slot is retired"
     );
     assert_eq!(
         publication.published_process_count(),
@@ -1765,6 +1767,74 @@ fn test_published_process_count_ignores_retired_slots_before_cleanup() {
 
     drop(published);
     publication.cleanup();
+}
+
+#[def_test(user, serial)]
+fn test_exit_and_reap_unpublish_tid_and_pid() {
+    let (process, prepared) = build_prepared_test_user_task();
+    let publication = process_publication();
+    let published = prepare_user_task(prepared).publish().activate();
+    let tid = published.as_thread().tid();
+    let pid = process.pid();
+
+    assert!(
+        process.exit_thread(&published, 0),
+        "single-threaded process exit must report the last thread"
+    );
+    assert!(
+        publication.task(tid).is_err(),
+        "retired tid must stop resolving through the task directory"
+    );
+
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    assert!(
+        wait_reap::reap_zombie_process(&process),
+        "waitable zombie must be consumable once"
+    );
+    assert!(
+        publication.published_process(pid).is_err(),
+        "reaped pid must stop resolving through the process directory"
+    );
+}
+
+#[def_test(user, serial)]
+fn test_unpublish_task_if_matches_preserves_reused_tid_identity() {
+    let process = ensure_init().fork(1_170);
+    let publication = process_publication();
+    let first = publish_test_thread(&process, 1_170);
+
+    // Simulate TID reuse on the same slot object: retire without map removal,
+    // then republish a different task under the same number.
+    publication.retire_task_slot_keep_entry_for_test(1_170);
+    let second = publish_test_thread(&process, 1_170);
+    assert!(
+        publication
+            .task(1_170)
+            .is_ok_and(|task| Arc::ptr_eq(&task, &second)),
+        "republished tid must resolve to the newer task"
+    );
+
+    assert!(
+        !publication.unpublish_task_if_matches(&first),
+        "identity-checked unpublish must reject an older task after TID reuse"
+    );
+    let resolved = publication
+        .task(1_170)
+        .expect("reused tid must keep resolving to the live task");
+    assert!(
+        Arc::ptr_eq(&resolved, &second),
+        "retiring an older task must not disturb a republished live TID slot"
+    );
+
+    assert!(
+        process.exit_thread(&second, 0),
+        "live reused tid owner must still be able to exit cleanly"
+    );
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    process.free();
+    let _ = publication.unpublish_process_if_matches(&process);
+    drop(first);
+    drop(second);
 }
 
 #[def_test(serial)]
@@ -1790,7 +1860,7 @@ fn test_unpublish_process_if_matches_preserves_different_identity() {
 
     published.exit_with_publication(ProcessExitPublication::WaitableZombie);
     published.free();
-    publication.unpublish_process(published.pid());
+    let _ = publication.unpublish_process_if_matches(&published);
 }
 
 #[def_test(serial)]
@@ -1831,7 +1901,7 @@ fn test_procfs_visibility_requires_representative_task() {
     );
 
     process.free();
-    publication.unpublish_process(pid);
+    let _ = publication.unpublish_process_if_matches(&process);
     publication.cleanup();
 }
 
@@ -1855,7 +1925,7 @@ fn test_create_session_publishes_new_job_control_identity() {
 
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     process.free();
-    publication.unpublish_process(process.pid());
+    let _ = publication.unpublish_process_if_matches(&process);
     publication.cleanup();
 }
 
@@ -1887,9 +1957,9 @@ fn test_create_group_publishes_new_process_group_identity() {
 
     sibling.exit_with_publication(ProcessExitPublication::WaitableZombie);
     sibling.free();
-    publication.unpublish_process(sibling.pid());
+    let _ = publication.unpublish_process_if_matches(&sibling);
     leader.exit_with_publication(ProcessExitPublication::WaitableZombie);
     leader.free();
-    publication.unpublish_process(leader.pid());
+    let _ = publication.unpublish_process_if_matches(&leader);
     publication.cleanup();
 }

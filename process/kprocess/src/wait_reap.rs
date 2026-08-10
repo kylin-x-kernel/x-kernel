@@ -7,7 +7,7 @@ use alloc::sync::Arc;
 pub use crate::process::{
     WaitChildKind, WaitChildScan, WaitChildSelector, WaitReapMode, WaitedChild,
 };
-use crate::{Pid, Process, lookup};
+use crate::{Process, lookup};
 
 /// Records a reaped child's CPU time into its parent.
 pub fn record_reaped_child_cpu_time(
@@ -56,8 +56,8 @@ pub fn try_reap_zombie_process(process: &Arc<Process>) -> bool {
 ///
 /// The child relation and zombie consumption decision are resolved inside the
 /// process-domain transaction boundary. If a child is consumed, its PID identity
-/// is removed from the publication directory after the tree relation has been
-/// detached.
+/// is retired under that lock and then structurally deleted from the publication
+/// directory after the tree relation has been detached.
 pub fn scan_waitable_child(
     parent: &Arc<Process>,
     selector: WaitChildSelector,
@@ -70,6 +70,9 @@ pub fn scan_waitable_child(
     {
         let (utime, stime) = waited.total_cpu_time();
         record_reaped_child_cpu_time(parent, utime, stime);
+        // Identity was already retired in-process-domain; this drops the map
+        // entry when the PID has not been reused under a different slot.
+        lookup::unpublish_process_if_matches(waited.process());
     }
     scan
 }
@@ -84,9 +87,4 @@ pub fn reap_exited_process(process: &Arc<Process>) {
 /// Removes a process identity after the process-domain relation was already detached.
 pub fn reap_detached_process_identity(process: &Arc<Process>) {
     lookup::unpublish_process_if_matches(process);
-}
-
-/// Removes a reaped process identity from the global PID directory.
-pub fn reap_process_identity(pid: Pid) {
-    lookup::unpublish_process(pid);
 }

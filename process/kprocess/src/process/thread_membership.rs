@@ -13,7 +13,7 @@ use kspin::SpinNoIrq;
 use ktask::{KtaskRef, WeakKtaskRef};
 
 use super::Process;
-use crate::{Tid, process_domain};
+use crate::{AsThread, Tid, process_domain, publication::process_publication};
 
 /// Published thread membership tracked per process.
 #[derive(Default)]
@@ -125,11 +125,26 @@ impl Process {
         slot.publish(task);
     }
 
-    /// Removes a thread from this [`Process`] and sets the exit code if the
-    /// group has not exited.
+    /// Removes a thread from this [`Process`], retires its global TID directory
+    /// entry, and sets the exit code if the group has not exited.
+    ///
+    /// `task` is the exiting published task identity. Global TID directory
+    /// removal is identity-checked against that object so a reused TID that
+    /// already publishes a different live task is not retired by mistake.
+    ///
+    /// After this returns, `lookup::task(tid)` / `task_by_tid` /
+    /// `send_to_thread` / `interrupt_thread` treat `tid` as gone even though the
+    /// exiting task may still be running local teardown (fd/mm cleanup,
+    /// `complete_process_exit`, `set_exit`). That early unpublish is intentional:
+    /// it prevents fork-heavy workloads from retaining Published(dead Weak) TID
+    /// slots, and matches the view that a thread which has left the process
+    /// membership table is no longer a valid external TID target. Concurrent
+    /// `tgkill`/timer delivery into that teardown window therefore observes
+    /// `NoSuchProcess` and is dropped rather than waking a half-exited thread.
     ///
     /// Returns `true` if this was the last thread in the process.
-    pub(crate) fn exit_thread(self: &Arc<Self>, tid: Tid, exit_code: i32) -> bool {
+    pub(crate) fn exit_thread(self: &Arc<Self>, task: &KtaskRef, exit_code: i32) -> bool {
+        let tid = task.as_thread().tid();
         {
             let mut group_exit = self.group_exit.lock();
             if !group_exit.group_exited {
@@ -137,9 +152,16 @@ impl Process {
             }
         }
 
-        let mut thread_membership = self.thread_membership.lock();
-        thread_membership.retire(tid);
-        thread_membership.is_empty()
+        let is_last = {
+            let mut thread_membership = self.thread_membership.lock();
+            thread_membership.retire(tid);
+            thread_membership.is_empty()
+        };
+        // Drop the global TID directory entry with the member-slot retire so
+        // fork-heavy workloads do not retain Published(dead Weak) slots until a
+        // later full-table cleanup sweep.
+        process_publication().unpublish_task_if_matches(task);
+        is_last
     }
 
     /// Returns a snapshot of published thread IDs in this [`Process`].

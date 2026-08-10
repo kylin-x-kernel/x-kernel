@@ -89,6 +89,7 @@ kprocess / posix/process / ksyscall / ktty
 | T-17 | 下层资源 owner 反向读取 current task 造成层级倒置、身份变化或内核任务 panic | 高 | VFS 路径或匿名文件构造隐式调用 `current_cred()` | current helper 只服务明确的用户 task 入口；syscall 将一个 `Arc<Cred>` 显式传入 `kvfs` 和 fd 对象构造函数 |
 | T-18 | 退出进程的大块用户内存释放依赖普通 GC 任务调度 | 高 | fork/exec 风暴中 GC 任务迟迟不运行，已退出进程的地址空间资源堆积 | runtime 持有 `memspace::process_lifetime::MmUserHandle`；最后一个 handle 释放时同步清理 `MmSpace` 的用户映射，普通 `Arc<MmSpace>` observer 或 `MmPin` 不保留映射 |
 | T-19 | 父进程显式忽略 SIGCHLD 后 zombie 泄漏或被 wait 抢先回收 | 中 | 父进程设置 `SIGCHLD` 为 `SIG_IGN` 或 `SA_NOCLDWAIT`，child exit 与 parent wait / signal handler 并发 | child-exit 通知先准备 autoreap/queue 决策；autoreap child 跳过 waitable zombie 状态，先撤销 children/PID 身份，再提交 typed SIGCHLD payload，并在提交时按当前线程 mask 选择唤醒目标 |
+| T-20 | 失效 PID/TID 目录槽位无限保留 | 高 | wait/exit 只 retire slot 却不从 `BTreeMap` 删除，fork 密集工作负载累积数百 MiB RustHeap | `unpublish_task_if_matches`/`unpublish_process_if_matches` 在 retire 前用 `Arc::ptr_eq` 校验发布身份，再删除仍指向同一 cleanable slot 的目录项；复用后的 Reserved/Published 新身份不会被旧退出路径误退休 |
 
 影响等级定义：
 
@@ -108,6 +109,7 @@ kprocess / posix/process / ksyscall / ktty
 | F-06 | WeakMap 残留过期项 | process group 成员释放后索引未清理 | 遍历结果少于表项数量 | 统计或展示短暂不一致 | 4 | `WeakMap::values` 只返回可升级对象；`kprocess` registry 提供 cleanup |
 | F-07 | 线程集合统计不准 | 调用者漏调 `add_thread` 或 `exit_thread` | `threads()`、CPU time 和 rusage 统计错误 | procfs、wait、timer 逻辑受影响 | 3 | clone 和 exit 路径集中调用对应 API |
 | F-08 | 中断上下文执行进程关系修改 | IRQ 路径误调用 `fork`、`exit`、`create_session` 或 group mutation | 关中断持锁时间变长 | 调度延迟上升，严重时影响系统响应 | 2 | 进程关系修改限定在启动、clone、exit、wait 和 syscall job-control 路径 |
+| F-09 | PID/TID publication 目录泄漏 | exit/wait 路径只逻辑失效 slot | RustHeap 随累计 fork 线性增长，buddy 外部碎片 | spawn 类压力测试 OOM | 2 | 热路径按发布身份精确 retire/删除匹配 PID/TID 槽；`cleanup()` 仅作 group/session 兜底 |
 
 严重度定义：
 
@@ -150,9 +152,9 @@ signal、scheduler 和 job-control 路径读取，调用者需要在上层执行
 - 新增进程关系转换是否保持 parent/children、group/processes、session/process_groups 三组关系一致。
 - 新增锁嵌套是否遵循现有 API 内部加锁方式，避免外部持有成员锁后调用 mutation API。
 - 新增 task publication 或 rollback 是否通过同一事务对象同时处理全局 TID task slot 和进程内 thread member slot。
-- 新增 publication 失败路径是否只 retire 本事务预留的 PID、group、session slot，不撤销既有 published identity。
+- 新增 publication 失败路径是否只 retire 本事务预留的 PID、group、session slot，不撤销既有 published identity，并删除仍可清理的目录 map 项。
 - 新增 fork runtime 构造失败路径是否撤销已经 attach 但尚未 publication 的 child relation。
-- 新增退出路径是否保持最后线程退出、waitable zombie / autoreap、wait/free 顺序。
+- 新增退出路径是否保持最后线程退出、waitable zombie / autoreap、wait/free 顺序，并在 thread exit / process reap 时携带任务/进程身份按 TID/PID 精确删除目录槽，而非仅凭数字 ID retire（尤其禁止对 `Reserved` 槽位 retire）或依赖全表扫描。
 - 新增 child-exit SIGCHLD 行为是否区分默认 ignored、显式 `SIG_IGN` 和 `SA_NOCLDWAIT`，并保持 autoreap 在提交 SIGCHLD pending 和唤醒 parent waiters 前完成。
 - 新增凭据修改是否遵循 prepare/check/commit，且失败时不替换 committed `Arc`。
 - 需要文件权限的调用是否在 syscall 入口取得一次快照，而不是让下层反向查询 current task。

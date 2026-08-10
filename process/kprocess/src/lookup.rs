@@ -37,10 +37,6 @@ pub(crate) fn live_processes() -> Vec<Arc<Process>> {
     process_publication().live_processes()
 }
 
-pub(crate) fn unpublish_process(pid: Pid) {
-    process_publication().unpublish_process(pid);
-}
-
 pub(crate) fn unpublish_process_if_matches(process: &Arc<Process>) -> bool {
     process_publication().unpublish_process_if_matches(process)
 }

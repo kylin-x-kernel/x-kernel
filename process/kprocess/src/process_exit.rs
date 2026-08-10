@@ -5,13 +5,19 @@
 use alloc::sync::Arc;
 
 use ksignal::{ChildExitInfo, ChildExitSignalInfo, SigchldChildExitSignalInfo, Signo};
+use ktask::KtaskRef;
 use ktime_types::TimeSpan;
 
-use crate::{Process, ProcessExitPublication, Tid, process_signals, wait_reap};
+use crate::{Process, ProcessExitPublication, process_signals, wait_reap};
 
 /// Removes an exiting thread from its process and publishes the exit code when needed.
-pub fn finish_thread_exit(process: &Arc<Process>, tid: Tid, exit_code: i32) -> bool {
-    process.exit_thread(tid, exit_code)
+///
+/// `task` must be the exiting published task so TID directory unpublish can
+/// identity-check against the live publication slot before retiring it. See
+/// [`Process::exit_thread`] for the visibility contract: the global TID entry
+/// is removed before later teardown steps such as fd/mm cleanup complete.
+pub fn finish_thread_exit(process: &Arc<Process>, task: &KtaskRef, exit_code: i32) -> bool {
+    process.exit_thread(task, exit_code)
 }
 
 /// Marks the process thread group as group-exited.
