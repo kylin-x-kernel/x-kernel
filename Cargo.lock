@@ -1327,7 +1327,6 @@ version = "0.2.0-dev"
 dependencies = [
  "char_driver",
  "karch",
- "kbuild_config",
  "kclass",
  "khal",
  "klazy",
@@ -2353,6 +2352,7 @@ dependencies = [
  "alloc-engine",
  "backtrace",
  "devfs",
+ "entropy",
  "fbdevice",
  "inputdev",
  "kalloc",
@@ -2619,6 +2619,7 @@ dependencies = [
  "percpu",
  "rtc-driver",
  "timer-driver",
+ "unittest",
 ]
 
 [[package]]

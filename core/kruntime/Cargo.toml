@@ -12,7 +12,7 @@ description = "Runtime library of X-kernel"
 [features]
 default = []
 
-smp = ["khal/smp", "ktask/smp", "memspace/smp", "ipi"]
+smp = ["khal/smp", "ktask/smp", "memspace/smp", "fs_boot?/smp", "ipi"]
 ipi = ["dep:kipi"]
 
 char = ["kdriver/char", "dep:ktty"]

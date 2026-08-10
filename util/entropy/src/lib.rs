@@ -7,10 +7,10 @@
 //! Hardware entropy is mixed into a ChaCha20 pool before output. Registered
 //! sources in [`source`] are all mixed during reseed when available:
 //!
-//! 1. Architecture CPU RNG (AArch64 RNDR / x86 RDSEED·RDRAND when `KFEAT_ENTROPY_ARCH_CPU` is set)
-//! 2. SMCCC firmware TRNG (when `KFEAT_ENTROPY_SMCCC_TRNG` is set)
-//! 3. VirtIO RNG (when `KFEAT_DRIVER_VIRTIO_RNG` and `KFEAT_ENTROPY_TRUST_HOST` are set)
-//! 4. Software jitter (when `KFEAT_ENTROPY_JITTER` is set; timer / interrupt timing noise)
+//! 1. Architecture CPU RNG (AArch64 RNDR / x86 RDSEED·RDRAND when `entropy_arch_cpu` is set)
+//! 2. SMCCC firmware TRNG (when `entropy_smccc_trng` is set)
+//! 3. VirtIO RNG (when `entropy_virtio_rng` and `entropy_trust_host` are set)
+//! 4. Software jitter (when `entropy_jitter` is set; timer / interrupt timing noise)
 //!
 //! VirtIO reads are deferred until the first [`fill_random`] call so boot does
 //! not block in a pre-interrupt virtqueue poll. CPU, SMCCC, and jitter sources
@@ -24,13 +24,17 @@
 
 extern crate alloc;
 
+#[cfg(feature = "entropy_arch_cpu")]
 mod arch_cpu;
+#[cfg(feature = "entropy_jitter")]
 mod jitter;
+#[cfg(all(feature = "entropy_smccc_trng", target_arch = "aarch64"))]
 mod smccc_trng;
 mod source;
+#[cfg(feature = "entropy_virtio_rng")]
 mod virtio;
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use khal::time::now_ticks;
 use klazy::Lazy;
@@ -44,10 +48,12 @@ use rand_chacha::{
 const SEED_SIZE: usize = 32;
 const HW_RESEED_BYTES: usize = 64;
 const HW_RESEED_INTERVAL: u64 = 4096;
+const UNREADY_HW_RETRY_INTERVAL: u32 = 64;
 
 static POOL: Lazy<Mutex<EntropyPool>> = Lazy::new(|| Mutex::new(EntropyPool::bootstrap()));
 static HW_READY: AtomicBool = AtomicBool::new(false);
 static HW_ENABLE_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+static UNREADY_HW_RETRY_DELAY: AtomicU32 = AtomicU32::new(0);
 static INIT_DONE: AtomicBool = AtomicBool::new(false);
 /// Set once quality entropy (hardware or jitter) has been mixed.
 /// Used by `getrandom(2)` for `GRND_NONBLOCK` / readiness checks.
@@ -86,7 +92,7 @@ impl EntropyPool {
 
         self.write_counter = self.write_counter.wrapping_add(1);
 
-        if !kbuild_config::KFEAT_ENTROPY_JITTER {
+        if !cfg!(feature = "entropy_jitter") {
             let ticks = now_ticks()
                 .as_raw()
                 .wrapping_add(self.write_counter.rotate_left(17));
@@ -112,11 +118,14 @@ fn bootstrap_seed() -> [u8; SEED_SIZE] {
     // Mix software jitter as early as the pool is created so the first seed is
     // not only a predictable tick expansion. Jitter does not depend on POOL, so
     // this cannot recurse through `Lazy`.
-    if let Some(jitter_bytes) = jitter::read(SEED_SIZE) {
-        for (index, byte) in jitter_bytes.iter().enumerate() {
-            seed[index % seed.len()] ^= *byte;
+    #[cfg(feature = "entropy_jitter")]
+    {
+        if let Some(jitter_bytes) = jitter::read(SEED_SIZE) {
+            for (index, byte) in jitter_bytes.iter().enumerate() {
+                seed[index % seed.len()] ^= *byte;
+            }
+            mark_ready();
         }
-        mark_ready();
     }
 
     seed
@@ -221,22 +230,57 @@ fn try_eager_hardware_reseed() {
 
 fn try_enable_hardware_once() {
     if HW_ENABLE_ATTEMPTED.swap(true, Ordering::AcqRel) {
+        maybe_allow_unready_hardware_retry();
         return;
     }
 
     let mixed = mix_hardware_entropy(HW_RESEED_BYTES);
     if mixed.is_empty() {
-        if !is_hardware_ready() && source::any_available() {
+        if !is_hardware_ready() && source::any_reseed_source_available() {
             log::warn!("entropy: hardware sources present but initial reseed failed");
         }
+        schedule_unready_hardware_retry();
         return;
     }
 
+    UNREADY_HW_RETRY_DELAY.store(0, Ordering::Release);
     HW_READY.store(true, Ordering::Release);
     log::info!(
         "entropy: hardware RNG enabled ({})",
         format_source_list(&mixed)
     );
+}
+
+fn schedule_unready_hardware_retry() {
+    if !should_retry_unready_hardware() {
+        return;
+    }
+    UNREADY_HW_RETRY_DELAY.store(UNREADY_HW_RETRY_INTERVAL, Ordering::Release);
+}
+
+fn maybe_allow_unready_hardware_retry() {
+    if !should_retry_unready_hardware() {
+        return;
+    }
+
+    let remaining = UNREADY_HW_RETRY_DELAY.load(Ordering::Acquire);
+    if remaining == 0 {
+        HW_ENABLE_ATTEMPTED.store(false, Ordering::Release);
+    } else {
+        let previous = UNREADY_HW_RETRY_DELAY
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .unwrap_or(remaining);
+        if previous <= 1 {
+            HW_ENABLE_ATTEMPTED.store(false, Ordering::Release);
+        }
+    }
+}
+
+fn should_retry_unready_hardware() -> bool {
+    !is_hardware_ready()
+        && (source::any_reseed_source_available() || source::any_pending_reseed_source())
 }
 
 fn maybe_reseed_from_hardware(request_len: usize) {
@@ -429,8 +473,8 @@ mod tests {
     #[def_test]
     fn test_hardware_presence_matches_sources() {
         init();
-        // `any_available` is the discovery side of hardware readiness.
-        let present = source::any_available();
+        // Source eligibility is the discovery side of hardware readiness.
+        let present = source::any_reseed_source_available();
         if is_hardware_ready() {
             assert!(present);
         }

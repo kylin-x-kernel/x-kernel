@@ -23,9 +23,9 @@ pub(crate) fn init() {
     }
 }
 
-/// Jitter is available whenever the Kconfig option is enabled.
+/// Jitter is available whenever the entropy jitter feature is enabled.
 pub(crate) fn is_available() -> bool {
-    kbuild_config::KFEAT_ENTROPY_JITTER
+    true
 }
 
 /// Collect timing jitter into a new buffer up to `len` bytes.
@@ -89,8 +89,8 @@ mod tests {
     use super::*;
 
     #[def_test]
-    fn test_jitter_availability_matches_kconfig() {
-        assert_eq!(is_available(), kbuild_config::KFEAT_ENTROPY_JITTER);
+    fn test_jitter_available_when_feature_compiled() {
+        assert!(is_available());
     }
 
     #[def_test]

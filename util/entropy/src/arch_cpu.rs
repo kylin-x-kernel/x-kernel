@@ -8,26 +8,20 @@ use alloc::vec::Vec;
 
 /// Probe and log CPU RNG availability.
 pub(crate) fn init() {
-    if kbuild_config::KFEAT_ENTROPY_ARCH_CPU {
-        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-        {
-            karch::init_cpu_rng();
-            if karch::cpu_rng_available() {
-                #[cfg(target_arch = "aarch64")]
-                log::info!("entropy: AArch64 CPU RNDR available");
-                #[cfg(target_arch = "x86_64")]
-                log::info!("entropy: x86_64 CPU RDSEED/RDRAND available");
-            }
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    {
+        karch::init_cpu_rng();
+        if karch::cpu_rng_available() {
+            #[cfg(target_arch = "aarch64")]
+            log::info!("entropy: AArch64 CPU RNDR available");
+            #[cfg(target_arch = "x86_64")]
+            log::info!("entropy: x86_64 CPU RDSEED/RDRAND available");
         }
     }
 }
 
 /// Returns whether CPU instruction RNG is enabled and available on this CPU.
 pub(crate) fn is_available() -> bool {
-    if !kbuild_config::KFEAT_ENTROPY_ARCH_CPU {
-        return false;
-    }
-
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     {
         karch::cpu_rng_available()
@@ -74,14 +68,6 @@ mod tests {
     #[def_test]
     fn test_arch_cpu_read_zero_len() {
         assert!(read(0).is_none());
-    }
-
-    #[def_test]
-    fn test_arch_cpu_disabled_without_kconfig() {
-        if !kbuild_config::KFEAT_ENTROPY_ARCH_CPU {
-            assert!(!is_available());
-            assert!(read(16).is_none());
-        }
     }
 
     #[def_test]

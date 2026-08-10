@@ -45,6 +45,7 @@ klazy = { workspace = true }
 rtc_driver = { workspace = true }
 timer_driver = { workspace = true }
 memaddr = { workspace = true }
+unittest = { workspace = true }
 lazyinit = "0.2"
 heapless = "0.9"
 karch = { workspace = true }

@@ -4,7 +4,6 @@
 
 //! PSCI interface helpers for power management and CPU control.
 #![allow(dead_code)]
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use kcpu_id_map::RawCpuId;
 use kerrno::{KError, KErrorKind};
@@ -21,7 +20,6 @@ const PSCI_0_2_FN_SYSTEM_RESET: u32 = PSCI_0_2_FN_BASE + 9;
 const PSCI_0_2_FN64_CPU_SUSPEND: u32 = PSCI_0_2_FN_BASE + PSCI_0_2_64BIT + 1;
 const PSCI_0_2_FN64_CPU_ON: u32 = PSCI_0_2_FN_BASE + PSCI_0_2_64BIT + 3;
 const PSCI_0_2_FN64_MIGRATE: u32 = PSCI_0_2_FN_BASE + PSCI_0_2_64BIT + 5;
-static PSCI_METHOD_HVC: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(i32)]
 pub enum PsciError {
@@ -68,14 +66,7 @@ impl From<PsciError> for KError {
     }
 }
 fn psci_call(func: u32, arg0: usize, arg1: usize, arg2: usize) -> Result<(), PsciError> {
-    // VHE: kernel runs at EL2 so HVC traps to self; must use SMC.
-    let result = if cfg!(feature = "vmm") {
-        smccc::smc_call(func, arg0, arg1, arg2)
-    } else if PSCI_METHOD_HVC.load(Ordering::Acquire) {
-        smccc::hvc_call(func, arg0, arg1, arg2)
-    } else {
-        smccc::smc_call(func, arg0, arg1, arg2)
-    };
+    let result = smccc::invoke(func, arg0, arg1, arg2);
     let ret = result.x0;
     if ret == 0 {
         Ok(())
@@ -85,11 +76,7 @@ fn psci_call(func: u32, arg0: usize, arg1: usize, arg2: usize) -> Result<(), Psc
 }
 /// Initialize the PSCI call method (`"smc"` or `"hvc"`).
 pub fn init(method: &str) {
-    match method {
-        "smc" => PSCI_METHOD_HVC.store(false, Ordering::Release),
-        "hvc" => PSCI_METHOD_HVC.store(true, Ordering::Release),
-        _ => panic!("Unknown PSCI method: {}", method),
-    }
+    smccc::init_conduit(method);
 }
 /// Power off the system via PSCI.
 pub fn shutdown() -> ! {

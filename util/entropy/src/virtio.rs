@@ -27,11 +27,11 @@ pub(crate) fn is_present() -> bool {
     VIRTIO_PRESENT.load(Ordering::Acquire) && !VIRTIO_DISABLED.load(Ordering::Acquire)
 }
 
-pub(crate) fn register_sources() {
-    if !kbuild_config::KFEAT_DRIVER_VIRTIO_RNG {
-        return;
-    }
+pub(crate) fn is_disabled() -> bool {
+    VIRTIO_DISABLED.load(Ordering::Acquire)
+}
 
+pub(crate) fn register_sources() {
     fn note_device(device: &ClassDevice<CharDeviceImpl>) {
         if !is_virtio_rng(device.name(), device.driver_name()) {
             return;
@@ -61,7 +61,7 @@ pub(crate) fn register_sources() {
 }
 
 pub(crate) fn read(len: usize) -> Option<Vec<u8>> {
-    if !kbuild_config::KFEAT_DRIVER_VIRTIO_RNG || !is_present() {
+    if !is_present() {
         return None;
     }
 
@@ -122,17 +122,8 @@ mod tests {
     }
 
     #[def_test]
-    fn test_read_disabled_without_kconfig() {
-        if !kbuild_config::KFEAT_DRIVER_VIRTIO_RNG {
-            assert!(!is_present());
-            assert!(read(16).is_none());
-        }
-    }
-
-    #[def_test]
     fn test_read_when_present() {
-        if kbuild_config::KFEAT_DRIVER_VIRTIO_RNG
-            && is_present()
+        if is_present()
             && let Some(data) = read(32)
         {
             assert_eq!(data.len(), 32);

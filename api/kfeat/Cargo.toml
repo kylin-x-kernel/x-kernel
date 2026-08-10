@@ -10,7 +10,7 @@ documentation.workspace = true
 description = "Top-level feature selection for x-kernel"
 
 [package.metadata.cargo-shear]
-ignored = ["alloc-engine", "fbdevice", "inputdev", "kalloc", "kbpf", "kipi", "knet", "kspin", "ksync", "ktask", "ktracing", "memspace", "procfs", "tee_kernel", "tee_task_iface", "backtrace", "devfs", "kdriver", "kexec", "khal", "kprocess", "kruntime", "ksyscall", "linux_sysno"]
+ignored = ["alloc-engine", "entropy", "fbdevice", "inputdev", "kalloc", "kbpf", "kipi", "knet", "kspin", "ksync", "ktask", "ktracing", "memspace", "procfs", "tee_kernel", "tee_task_iface", "backtrace", "devfs", "kdriver", "kexec", "khal", "kprocess", "kruntime", "ksyscall", "linux_sysno"]
 
 [features]
 default = []
@@ -20,6 +20,7 @@ smp = [
     "ipi",
     "khal/smp",
     "kruntime/smp",
+    "ktracing?/smp",
     "ktask?/smp",
     "kspin/smp",
     "kplat-aarch64?/smp",
@@ -121,11 +122,11 @@ driver_virtio_gpu = ["kdriver/virtio-gpu"]
 driver_virtio_input = ["kdriver/virtio-input"]
 driver_virtio_socket = ["kdriver/virtio-socket"]
 driver_virtio_9p = ["kdriver/virtio-9p"]
-driver_virtio_rng = ["char", "kdriver/virtio-rng"]
-entropy_arch_cpu = []
-entropy_smccc_trng = []
-entropy_trust_host = []
-entropy_jitter = []
+driver_virtio_rng = ["char", "kdriver/virtio-rng", "dep:entropy", "entropy/entropy_virtio_rng"]
+entropy_arch_cpu = ["dep:entropy", "entropy/entropy_arch_cpu"]
+entropy_smccc_trng = ["dep:entropy", "entropy/entropy_smccc_trng"]
+entropy_trust_host = ["dep:entropy", "entropy/entropy_trust_host"]
+entropy_jitter = ["dep:entropy", "entropy/entropy_jitter"]
 driver_ramdisk = ["kdriver/ramdisk"]
 driver_ramdisk_static = ["kdriver/ramdisk-static"]
 driver_ixgbe = ["kdriver/ixgbe"]
@@ -209,6 +210,7 @@ kplat-loongarch64 = { workspace = true, optional = true, features = [
 ] }
 kexec = { workspace = true }
 devfs = { workspace = true }
+entropy = { workspace = true, optional = true }
 khal.workspace = true
 inputdev = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }

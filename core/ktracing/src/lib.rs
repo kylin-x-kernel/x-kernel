@@ -272,6 +272,6 @@ impl KernelTraceOps for Kops {
     }
 }
 
-#[cfg(unittest)]
+#[cfg(all(unittest, feature = "smp"))]
 #[path = "test_ktracing.rs"]
 mod tests;

@@ -12,6 +12,7 @@ default = []
 ebpf = ["dep:bpffs"]
 fs9p = ["dep:v9fs", "dep:kclass", "kclass/virtio-9p"]
 rootfs-secondary-block = []
+smp = ["procfs/smp"]
 
 [dependencies]
 block.workspace = true

@@ -6,57 +6,28 @@
 
 use alloc::vec::Vec;
 
-#[cfg(target_arch = "aarch64")]
-mod imp {
-    use super::Vec;
+use kplat_aarch64::peripherals::trng::TrngReadError;
 
-    pub(crate) fn init() {
-        if !kbuild_config::KFEAT_ENTROPY_SMCCC_TRNG {
-            return;
-        }
+pub(crate) type ReadError = TrngReadError;
 
-        kplat_aarch64::peripherals::trng::init_trng();
-    }
-
-    pub(crate) fn is_available() -> bool {
-        if !kbuild_config::KFEAT_ENTROPY_SMCCC_TRNG {
-            return false;
-        }
-
-        kplat_aarch64::peripherals::trng::trng_available()
-    }
-
-    pub(crate) fn read(len: usize) -> Option<Vec<u8>> {
-        if len == 0 || !is_available() {
-            return None;
-        }
-
-        let mut buf = alloc::vec![0u8; len];
-        let read = kplat_aarch64::peripherals::trng::read_trng_random(&mut buf);
-        if read == 0 {
-            return None;
-        }
-        buf.truncate(read);
-        Some(buf)
-    }
+pub(crate) fn init() {
+    kplat_aarch64::peripherals::trng::init_trng();
 }
 
-#[cfg(not(target_arch = "aarch64"))]
-mod imp {
-    use super::Vec;
-
-    pub(crate) fn init() {}
-
-    pub(crate) fn is_available() -> bool {
-        false
-    }
-
-    pub(crate) fn read(_len: usize) -> Option<Vec<u8>> {
-        None
-    }
+pub(crate) fn is_available() -> bool {
+    kplat_aarch64::peripherals::trng::trng_available()
 }
 
-pub(crate) use imp::{init, is_available, read};
+pub(crate) fn read(len: usize) -> Result<Vec<u8>, TrngReadError> {
+    if len == 0 || !is_available() {
+        return Err(TrngReadError::Unavailable);
+    }
+
+    let mut buf = alloc::vec![0u8; len];
+    let read = kplat_aarch64::peripherals::trng::read_trng_random(&mut buf)?;
+    buf.truncate(read);
+    Ok(buf)
+}
 
 #[cfg(unittest)]
 mod tests {
@@ -66,24 +37,7 @@ mod tests {
 
     #[def_test]
     fn test_smccc_trng_read_zero_len() {
-        assert!(read(0).is_none());
-    }
-
-    // `KFEAT_ENTROPY_SMCCC_TRNG` is only emitted under ARCH_AARCH64.
-    #[cfg(target_arch = "aarch64")]
-    #[def_test]
-    fn test_smccc_trng_disabled_without_kconfig() {
-        if !kbuild_config::KFEAT_ENTROPY_SMCCC_TRNG {
-            assert!(!is_available());
-            assert!(read(16).is_none());
-        }
-    }
-
-    #[cfg(not(target_arch = "aarch64"))]
-    #[def_test]
-    fn test_smccc_trng_unavailable_on_non_aarch64() {
-        assert!(!is_available());
-        assert!(read(16).is_none());
+        assert!(read(0).is_err());
     }
 
     #[def_test]
@@ -94,7 +48,7 @@ mod tests {
             assert_eq!(data.len(), 32);
             assert_ne!(data.as_slice(), &[0u8; 32]);
         } else {
-            assert!(read(32).is_none());
+            assert!(read(32).is_err());
         }
     }
 }
