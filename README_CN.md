@@ -81,8 +81,8 @@ make savedefconfig
 
 ```bash
 make rootfs
+make rootfs ROOTFS_VARIANT=alpine-busybox
 make rootfs ROOTFS_VARIANT=debian-busybox
-make rootfs ROOTFS_VARIANT=debian-systemd
 ```
 
 使用 `make uapps` 将仓库中的 uapps 安装进镜像，或使用

@@ -43,7 +43,8 @@
 #
 # * Root filesystem download (`make rootfs`):
 #     - ROOTFS_URL          Base URL for prebuilt rootfs images
-#     - ROOTFS_VARIANT      Rootfs variant (default alpine-busybox)
+#     - ROOTFS_VARIANT      Rootfs variant (default debian-openrc;
+#                           also supports alpine-busybox, debian-busybox)
 
 .DEFAULT_GOAL := build
 
@@ -58,7 +59,7 @@ XKMAKE := env \
 	CARGO_BUILD_TARGET=$(HOST_TARGET) \
 	RUSTFLAGS= \
 	CARGO_ENCODED_RUSTFLAGS= \
-	cargo run --quiet \
+	cargo run \
 		--target-dir $(XKMAKE_TARGET_DIR) \
 		--manifest-path xtask/Cargo.toml \
 		-p xkmake --
@@ -66,7 +67,7 @@ XCONFIG := env \
 	CARGO_BUILD_TARGET=$(HOST_TARGET) \
 	RUSTFLAGS= \
 	CARGO_ENCODED_RUSTFLAGS= \
-	cargo run --quiet \
+	cargo run \
 		--target-dir $(XCONFIG_TARGET_DIR) \
 		--manifest-path xtask/Cargo.toml \
 		-p xconfig --bin xconf --
@@ -74,7 +75,7 @@ UAPP_TOOL := env \
 	CARGO_BUILD_TARGET=$(HOST_TARGET) \
 	RUSTFLAGS= \
 	CARGO_ENCODED_RUSTFLAGS= \
-	cargo run --quiet \
+	cargo run \
 		--target-dir $(UAPP_TARGET_DIR) \
 		--manifest-path xtask/Cargo.toml \
 		-p uapp --
@@ -87,7 +88,7 @@ RAMDISK_IMG_SIZE ?= 8
 RAMDISK_IMG_FS ?= ext4
 RAMDISK_ROOTFS ?= $(DISK_IMG)
 ROOTFS_URL ?= https://gitee.com/openkylin/x-kernel-image/releases/download/rootfs
-ROOTFS_VARIANT ?= alpine-busybox
+ROOTFS_VARIANT ?= debian-openrc
 
 UNITTEST ?= n
 UNITTEST_CRATE ?=

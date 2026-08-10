@@ -741,7 +741,7 @@ mod tests_test_framework {
         assert_eq!(writer.as_str(), "");
     }
 
-    #[def_test]
+    #[def_test(serial)]
     fn test_testrunner_run_test_updates_stats() {
         let mut runner = TestRunner::new();
         let desc = TestDescriptor::new(
@@ -761,7 +761,7 @@ mod tests_test_framework {
         assert_eq!(stats.failed, 0);
     }
 
-    #[def_test]
+    #[def_test(serial)]
     fn test_grouped_runner_sets_failed_flag() {
         TEST_FAILED_FLAG.store(false, Ordering::Relaxed);
 
@@ -816,7 +816,7 @@ mod tests_test_framework {
         assert_eq!(ignored.run(), TestResult::Ignored);
     }
 
-    #[def_test]
+    #[def_test(serial)]
     fn test_run_tests_descriptors_pass_path_and_tests_failed_false() {
         TEST_FAILED_FLAG.store(false, Ordering::Relaxed);
         let mut runner = TestRunner::new();
@@ -839,7 +839,7 @@ mod tests_test_framework {
         assert!(!tests_failed());
     }
 
-    #[def_test]
+    #[def_test(serial)]
     fn test_run_test_simple_and_default_constructor() {
         let mut runner = TestRunner::default();
         let desc = TestDescriptor::new(
@@ -863,7 +863,7 @@ mod tests_test_framework {
     //     assert_eq!(assert_fail_test(), TestResult::Failed);
     // }
 
-    #[def_test]
+    #[def_test(serial)]
     fn test_run_tests_macro_with_named_suite() {
         TEST_FAILED_FLAG.store(false, Ordering::Relaxed);
         let mut runner = TestRunner::new();
@@ -930,7 +930,7 @@ mod tests_test_framework {
         assert_eq!(ignored.run(), TestResult::Ignored);
     }
 
-    #[def_test]
+    #[def_test(serial)]
     fn test_runner_run_tests_descriptors_failed_sets_global_flag() {
         TEST_FAILED_FLAG.store(false, Ordering::Relaxed);
         let mut runner = TestRunner::new();

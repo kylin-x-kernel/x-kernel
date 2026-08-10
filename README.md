@@ -83,8 +83,8 @@ Download a pre-built root filesystem image:
 
 ```bash
 make rootfs
+make rootfs ROOTFS_VARIANT=alpine-busybox
 make rootfs ROOTFS_VARIANT=debian-busybox
-make rootfs ROOTFS_VARIANT=debian-systemd
 ```
 
 Install repository uapps into the image with `make uapps`, or perform both
