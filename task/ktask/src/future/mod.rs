@@ -62,8 +62,8 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
     let mut fut = pin!(f.into_future());
 
     let curr = current();
-    // It's necessary to keep a strong reference to the current task
-    // to prevent it from being dropped while blocking.
+    // Caller-owned strong ref for `blocked_resched`: into_raw current = 1;
+    // this clone is the required second (also seeds KWaker's weak upgrade).
     let task = curr.clone();
 
     let kwaker = KWaker::new(&task);

@@ -6,7 +6,7 @@ use alloc::sync::Arc;
 
 use linked_list_r4l::{List, def_node};
 
-use crate::BaseScheduler;
+use crate::{BaseScheduler, CurrentDisposition};
 
 def_node! {
     /// A task wrapper for the [`FifoScheduler`].
@@ -62,8 +62,17 @@ impl<T> BaseScheduler for FifoScheduler<T> {
         self.ready_queue.pop_front()
     }
 
-    fn put_prev_task(&mut self, prev: Self::SchedItem, _preempt: bool) {
-        self.ready_queue.push_back(prev);
+    fn enqueue_task(&mut self, task: Self::SchedItem) {
+        self.ready_queue.push_back(task);
+    }
+
+    fn leave_current(&mut self, current: Self::SchedItem, disposition: CurrentDisposition) {
+        match disposition {
+            CurrentDisposition::Yield | CurrentDisposition::Preempt => {
+                self.ready_queue.push_back(current);
+            }
+            CurrentDisposition::Block | CurrentDisposition::Migrate | CurrentDisposition::Exit => {}
+        }
     }
 
     fn task_tick(&mut self, _current: &Self::SchedItem) -> bool {

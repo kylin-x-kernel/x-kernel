@@ -66,7 +66,7 @@ task_tick() → set_preempt_pending   blocked_resched / unblock_task / resched
 |------|------|
 | `TaskInner` / `CurrentTask` | 任务元数据、状态机、上下文、抢占计数 |
 | `RunQueue` | 每 CPU 调度容器；维护算法实例与切换过程 |
-| `Scheduler` (`ksched`) | `add_task/pick_next/task_tick/put_prev/account_sleep` 算法策略（EEVDF 阻塞前 `account_sleep` 记 vlag；放置用的系统虚拟时间 V 含已离队的当前运行任务 curr） |
+| `Scheduler` (`ksched`) | `add_task/pick_next/task_tick/enqueue_task/leave_current` 算法策略（运行任务统一经 `leave_current` 离开；Block/Migrate 记 vlag，唤醒/迁入经 `enqueue_task` PLACE_LAG；EEVDF `curr` 仅为数值快照，计入系统虚拟时间 V） |
 | `future::block_on` | 将 `Future` pending 映射为任务阻塞/唤醒 |
 | `WaitQueue` | 事件型阻塞等待 API |
 | `timers` | tick 回调与定时事件检查 |
@@ -231,9 +231,10 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
   - runnable / running：任务当前归属的 run queue CPU
   - blocked：保留上一次归属 CPU，供 `select_wake_run_queue` 做 wake affinity
 - 所有 ownership 更新收敛到 `RunQueue` 封装入口，调用方不得直接 `Scheduler::add_task` /
-  `put_prev_task` 或散落调用 `set_cpu_id`：
+  `enqueue_task` / `leave_current` 或散落调用 `set_cpu_id`：
   - `publish_task`：新任务首次入队（`spawn` / per-CPU gc）
-  - `enqueue_task`：yield / preempt / unblock / affinity migrate 重新入队
+  - `enqueue_task`：非当前 Ready 任务入队（unblock / affinity migrate-in）
+  - `leave_current`：当前运行任务离开执行槽（Yield / Preempt / Block / Migrate / Exit）
   - `switch_to_local`：不经 ready 队列、直接 `switch_to` 的本地 helper（如 migration task）
   - `set_owner_cpu`：仅用于 run queue 尚未建立时的 boot bring-up（main / idle）
 - `switch_to` 在 SMP 下检查 `next_task.cpu_id() == rq.cpu_id`，防止错队列切换。
@@ -247,7 +248,7 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
   - 唤醒 `PLACE_LAG` 后 vruntime **钳到系统 V**，deadline 用**完整 request**
     （`vd = ve + r/w`），不再造 1-tick 假短 deadline；
   - **非自愿** `preempt_resched` 先 `peer_preempts_curr()`（`curr` 离树比 deadline），
-    仅当同伴更早才 `put_prev`+`pick`；否则清 pending 直接返回（避免无意义
+    仅当同伴更早才 `leave_current(Preempt)`+`pick`；否则清 pending 直接返回（避免无意义
     再入队，也保证 `switch_to` 前 ready 队列持有 prev 的 `Arc`）；
   - `task_tick` 仅在有等待同伴时对到期 deadline 抢占；
   - 唤醒到 busy rq 时按 Linux `NEXT_BUDDY` / `set_preempt_buddy` 提名 wakee
@@ -255,8 +256,19 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
   - futex 等路径用 `with_wake_sync`（Linux `WF_SYNC`）：eligible next buddy 可
     sync-preempt 半截 curr（即使 deadline 更晚），缩短 “等 waker block” 的 p50，
     仍不造 1-tick 假短 deadline / idle-seeking。
-- `exit_current` / `migrate_current` 在离开源 RQ 前调用 `account_sleep`，清除 EEVDF
-  `curr` 并（迁移场景）为目的端 PLACE_LAG 保存 `vlag`；`pick_next` 另有防御性清除。
+- 当前任务离开统一走 `leave_current`：
+  - `yield_current` → `Yield`（重置 request 并再入队；`Running -> Ready` 必须成功）
+  - `preempt_resched` → `Preempt`（保留剩余 slice 并再入队；同上）
+  - `blocked_resched` → `Block`（记 vlag，不入队；into_raw 当前槽位计 1，调用方须另持强引用以满足 `strong_count > 1`；缺则 panic，见 `# Panics` 与 unittest）
+  - `migrate_current` → `Migrate`（源 RQ 记 vlag 供目的端 PLACE_LAG，不入队）
+  - `exit_current` → `Exit`（清除 current 记账，不设置 PLACE_LAG）
+- idle 不进入调度器 `curr`：yield/preempt 只做 `Running -> Ready`，不
+  `leave_current` / 不入队。EEVDF 下 idle 保持 `curr == None`，`peer_preempts`
+  在空 `curr` 时把「ready 非空」视为可抢占即可。
+- 经 `switch_to_local` 上 CPU 的助手在入场时 `sync_running_curr`；`preempt_resched`
+  只探测、不再 sync（避免把 idle 写进 `curr`）。
+- EEVDF `curr` 只保存 identity/vruntime/deadline/weight 快照，不持有任务 `Arc`；
+  `pick_next` 要求此前已 `leave_current`，不再静默擦除陈旧状态。
 - 当前实现无主动负载均衡器；任务跨核迁移主要由 affinity 变化触发。
 - `set_task_affinity`：写 `cpumask` 后 `enforce_affinity_placement`——current 立即
   `migrate_current`；ready 从旧 RQ `remove_task` 再 `migrate_entry`；远端 running

@@ -121,6 +121,8 @@ ksched algorithms / karch context switch / allocator
 | T-06 | snapshot 竞态读取错误 trap frame | 中 | 并发 snapshot session | begin/finish 会话串行 + per-CPU 槽位隔离 |
 | T-07 | affinity 迁移竞态导致任务丢失 | 中 | 迁移中状态被并发修改 | `migrate_current` 受 run queue 临界区保护；`enforce_affinity_placement` 对 ready 持 RQ 锁 `remove_task`，对 running 等远端 preempt 完成 |
 | T-07a | `setaffinity` 静默成功但任务仍在非法 CPU | 高 | 非 current 只写 mask | 成功路径要求 placement 合法，否则 `false`/`EBUSY`；`preempt_resched`/`yield` 强制 affinity migrate |
+| T-07b | 运行任务离开路径漏 deactivate 导致调度器残留状态 | 高 | 新 leave 路径绕过统一 API | 全部经 `leave_current`；EEVDF `curr` 非 owning；`pick_next` 断言 |
+| T-07c | `blocked_resched` 无额外强引用导致切换时任务被释放 | 高 | 调用方未 clone current | rustdoc/`# Panics` 约定；`#[track_caller]` + `strong_count > 1` 硬断言；`block_on` 先 clone；unittest `blocked_resched_survives_with_caller_owned_ref` |
 | T-08 | tick 回调执行耗时过长拖慢调度 | 中 | callback 滥用 | API 文档约束“回调应短小”；系统仍可抢占恢复 |
 | T-09 | 远端唤醒后未及时调度 | 中 | 任务入远端 run queue 但远端 CPU 未到抢占安全点 | `ipi + preempt` 下请求远端 `need_resched`；无 IPI 时仍依赖 tick/安全点 |
 | T-09b | IRQ teardown 等待在错误上下文阻塞当前任务 | 高 | hardirq/softirq/BH-disabled 路径间接调用 `IrqSyncWaitIf` provider | `kirq` 在进入 provider 前执行 context gate；`ktask` 只提供阻塞机制，不放宽 IRQ 同步 API 约束 |
@@ -161,8 +163,10 @@ ksched algorithms / karch context switch / allocator
 1. 当前无全局主动负载均衡线程；跨核主要依赖 affinity 与入队选核。
    `add_task` 对远端/本核 idle 目标会 `request_resched`，避免任务已入队而目标核停在 WFI。
    EEVDF：唤醒 PLACE_LAG + 完整 request deadline；非自愿抢占先 peer_preempts_curr
-   再决定是否 put_prev；busy-rq 唤醒可提名 NEXT_BUDDY；`with_wake_sync`（futex）
-   可对 eligible buddy sync-preempt（仍要求 eligibility，不绕过 EEVDF）。
+   再决定是否 `leave_current(Preempt)`；busy-rq 唤醒可提名 NEXT_BUDDY；
+   `with_wake_sync`（futex）可对 eligible buddy sync-preempt（仍要求 eligibility，
+   不绕过 EEVDF）。运行任务必须经统一 `leave_current` 离开，EEVDF `curr` 不为任务
+   生命周期 owner。
 2. `select_run_queue` 采用简单轮询；`select_wake_run_queue` 始终粘 home（无 idle
    溢出）。
 3. 远端唤醒的抢占请求依赖 `ipi + preempt` feature；未启用时仍依赖 tick 或其它安全点推进。

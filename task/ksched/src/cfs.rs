@@ -8,7 +8,7 @@ use core::{
     sync::atomic::{AtomicIsize, Ordering},
 };
 
-use crate::BaseScheduler;
+use crate::{BaseScheduler, CurrentDisposition};
 
 /// task for CFS
 pub struct CFSTask<T> {
@@ -127,6 +127,15 @@ impl<T> CFScheduler<T> {
     pub fn scheduler_name() -> &'static str {
         "Completely Fair"
     }
+
+    /// Recompute `min_vruntime` from the ready queue's earliest key.
+    fn refresh_min_vruntime(&mut self) {
+        if let Some(((min_vruntime, _), _)) = self.ready_queue.first_key_value() {
+            self.min_vruntime = Some(AtomicIsize::new(*min_vruntime));
+        } else {
+            self.min_vruntime = None;
+        }
+    }
 }
 
 impl<T> BaseScheduler for CFScheduler<T> {
@@ -143,23 +152,15 @@ impl<T> BaseScheduler for CFScheduler<T> {
         task.set_vruntime(vruntime);
         task.set_id(taskid);
         self.ready_queue.insert((vruntime, taskid), task);
-        if let Some(((min_vruntime, _), _)) = self.ready_queue.first_key_value() {
-            self.min_vruntime = Some(AtomicIsize::new(*min_vruntime));
-        } else {
-            self.min_vruntime = None;
-        }
+        self.refresh_min_vruntime();
     }
 
     fn remove_task(&mut self, task: &Self::SchedItem) -> Option<Self::SchedItem> {
         if let Some((_, tmp)) = self
             .ready_queue
-            .remove_entry(&(task.clone().get_vruntime(), task.clone().get_id()))
+            .remove_entry(&(task.get_vruntime(), task.get_id()))
         {
-            if let Some(((min_vruntime, _), _)) = self.ready_queue.first_key_value() {
-                self.min_vruntime = Some(AtomicIsize::new(*min_vruntime));
-            } else {
-                self.min_vruntime = None;
-            }
+            self.refresh_min_vruntime();
             Some(tmp)
         } else {
             None
@@ -167,18 +168,31 @@ impl<T> BaseScheduler for CFScheduler<T> {
     }
 
     fn pick_next_task(&mut self) -> Option<Self::SchedItem> {
-        if let Some((_, v)) = self.ready_queue.pop_first() {
-            Some(v)
-        } else {
-            None
-        }
+        let task = self.ready_queue.pop_first().map(|(_, v)| v)?;
+        // Ready queue no longer holds the running task; keep min_vruntime in sync.
+        self.refresh_min_vruntime();
+        Some(task)
     }
 
-    fn put_prev_task(&mut self, prev: Self::SchedItem, _preempt: bool) {
+    fn enqueue_task(&mut self, task: Self::SchedItem) {
         let taskid = self.id_pool.fetch_add(1, Ordering::Release);
-        prev.set_id(taskid);
-        self.ready_queue
-            .insert((prev.clone().get_vruntime(), taskid), prev);
+        task.set_id(taskid);
+        // Key is evaluated before `task` moves into `insert`; no clone needed.
+        self.ready_queue.insert((task.get_vruntime(), taskid), task);
+        self.refresh_min_vruntime();
+    }
+
+    fn leave_current(&mut self, current: Self::SchedItem, disposition: CurrentDisposition) {
+        match disposition {
+            CurrentDisposition::Yield | CurrentDisposition::Preempt => {
+                self.enqueue_task(current);
+            }
+            CurrentDisposition::Block | CurrentDisposition::Migrate | CurrentDisposition::Exit => {
+                // Running CFS tasks are already off the ready queue; departing
+                // without requeue only needs to keep min_vruntime coherent.
+                self.refresh_min_vruntime();
+            }
+        }
     }
 
     fn task_tick(&mut self, current: &Self::SchedItem) -> bool {

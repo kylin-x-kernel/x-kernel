@@ -23,7 +23,7 @@ use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use khal::percpu::this_cpu_id;
 use klazy::Once;
 use kpoll::{PollRegistrations, PollSet};
-use ksched::BaseScheduler;
+use ksched::{BaseScheduler, CurrentDisposition};
 use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 use lazyinit::LazyInit;
 
@@ -703,10 +703,7 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
         // otherwise, the task is already unblocked by other cores.
         // Note:
         // target task can not be insert into the run queue until it finishes its scheduling process.
-        if self
-            .inner
-            .put_task_with_state(task, TaskState::Blocked, false)
-        {
+        if self.inner.put_task_with_state(task, TaskState::Blocked) {
             // Since now, the task to be unblocked is in the `Ready` state.
             let cpu_id = self.inner.cpu_id;
             debug!(
@@ -767,9 +764,19 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             return;
         }
 
-        self.inner
-            .put_task_with_state(curr.clone(), TaskState::Running, false);
-
+        assert!(
+            curr.transition_state(TaskState::Running, TaskState::Ready),
+            "yield_current requires Running -> Ready before leave_current"
+        );
+        // Idle is never tracked by the algorithm; only flip Ready so `resched`
+        // can re-select it (or another task) without enqueueing into the RQ.
+        // EEVDF `curr` stays unset for idle (see `switch_to_local` sync).
+        if !curr.is_idle() {
+            self.inner
+                .scheduler
+                .lock()
+                .leave_current(curr.clone(), CurrentDisposition::Yield);
+        }
         self.inner.resched();
     }
 
@@ -786,10 +793,13 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         trace!("task migrate: {}", curr.id_name());
         assert!(curr.is_running());
 
-        // Snapshot lag and clear EEVDF `curr` on the source RQ before the task
-        // leaves without a local requeue. Destination `enqueue_task` then applies
-        // PLACE_LAG via `needs_place`.
-        self.inner.scheduler.lock().account_sleep(curr);
+        // Migration helper already owns a strong ref (spawned with curr.clone()).
+        // Deactivate on the source RQ before departure; destination `enqueue_task`
+        // then applies PLACE_LAG via `needs_place`.
+        self.inner
+            .scheduler
+            .lock()
+            .leave_current(curr.clone(), CurrentDisposition::Migrate);
 
         // Mark current task's state as `Ready`,
         // but, do not put current task to the scheduler of this run queue.
@@ -845,30 +855,29 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             }
             #[cfg(feature = "sched_eevdf")]
             {
-                // Linux pick_eevdf probe: compare curr (off-tree) with ready peers
-                // *before* put_prev. Only requeue+pick when a peer actually wins.
-                // Cloning curr also pins an Arc across the switch (CurrentTask is
-                // from_raw and does not contribute to strong_count).
-                let curr_arc = curr.clone();
-                let peer_wins = {
-                    let mut sched = self.inner.scheduler.lock();
-                    sched.sync_running_curr(curr_arc.clone());
-                    sched.peer_preempts_curr()
-                };
-                if !peer_wins {
+                // Linux pick_eevdf probe: compare off-tree `curr` with ready peers
+                // *before* leave. Only leave+pick when a peer actually wins.
+                // Off-tree runners (migration helpers) install `curr` at
+                // `switch_to_local`; idle keeps it unset so any ready peer wins.
+                if !self.inner.scheduler.lock().peer_preempts_curr() {
                     curr.set_preempt_pending(false);
                     return;
                 }
-                self.inner
-                    .put_task_with_state(curr_arc, TaskState::Running, true);
-                self.inner.resched();
             }
-            #[cfg(not(feature = "sched_eevdf"))]
-            {
+            assert!(
+                curr.transition_state(TaskState::Running, TaskState::Ready),
+                "preempt_resched requires Running -> Ready before leave_current"
+            );
+            if !curr.is_idle() {
+                // The into_raw current slot already counts as one strong ref.
+                // leave_current(Preempt) requeues a second Arc so the task stays
+                // alive across switch_to's current-pointer handoff.
                 self.inner
-                    .put_task_with_state(curr.clone(), TaskState::Running, true);
-                self.inner.resched();
+                    .scheduler
+                    .lock()
+                    .leave_current(curr.clone(), CurrentDisposition::Preempt);
             }
+            self.inner.resched();
         } else {
             curr.set_preempt_pending(true);
         }
@@ -892,11 +901,6 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             // Notify the joiner task.
             curr.notify_exit(exit_code);
 
-            // Release the scheduler's cached reference to the exiting task
-            // (EEVDF `curr`), so the GC can drop it even when the ready queue
-            // is empty at the next reschedule.
-            self.inner.scheduler.lock().on_task_exit(curr);
-
             // SAFETY: `exit_current` runs under
             // `current_run_queue::<NoPreemptIrqSave>()`, so IRQs and
             // preemption are disabled while touching current-CPU percpu
@@ -906,9 +910,12 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             // Wake up the GC task to drop the exited tasks.
             current_wait_for_exit().wake();
 
-            // Clear fair-scheduler `curr` before picking the next task. Exit does
-            // not requeue, so without this EEVDF retains a ghost running entity.
-            self.inner.scheduler.lock().account_sleep(curr);
+            // Exited list owns the task; `leave_current(Exit)` clears scheduler
+            // current accounting (e.g. EEVDF `curr`) and must not arm PLACE_LAG.
+            self.inner
+                .scheduler
+                .lock()
+                .leave_current(curr.clone(), CurrentDisposition::Exit);
 
             // Schedule to next task.
             self.inner.resched();
@@ -916,13 +923,33 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         unreachable!("task exited!");
     }
 
-    /// Block the current task, put current task into the wait queue and reschedule.
-    /// Mark the state of current task as `Blocked`, set the `in_wait_queue` flag as true.
-    /// Note:
-    ///     1. The caller must hold the lock of the wait queue.
-    ///     2. The caller must ensure that the current task is in the running state.
-    ///     3. The caller must ensure that the current task is not the idle task.
-    ///     4. The lock of the wait queue will be released explicitly after current task is pushed into it.
+    /// Block the current task and reschedule.
+    ///
+    /// Marks the current task `Blocked` and leaves the scheduler without requeue
+    /// ([`CurrentDisposition::Block`]).
+    ///
+    /// # Caller obligations
+    ///
+    /// 1. The caller must hold the wait-queue / waker lock represented by `woke`.
+    /// 2. The current task must be running and must not be idle.
+    /// 3. The caller must keep an **extra** [`KtaskRef`] to the current task across
+    ///    the context switch. The into_raw current slot contributes one strong
+    ///    ref; the caller's clone (e.g. from [`crate::future::block_on`]) is the
+    ///    second. Together they satisfy `switch_to`'s `strong_count > 1` check.
+    ///    `leave_current(Block)` does not requeue, so that caller-owned clone is
+    ///    what keeps the task alive until the wait queue / waker takes over.
+    ///    Do not drop the clone thinking the current slot "does not count".
+    /// 4. The wait-queue lock is released inside this function before rescheduling.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `Arc::strong_count(current) <= 1` (missing caller-owned ref).
+    /// This is a hard scheduler invariant: there is no recovery path. New
+    /// wait-queue / timer callers must clone current before entry — see the
+    /// `blocked_resched_survives_with_caller_owned_ref` unittest for a
+    /// `block_on`-free template. `#[track_caller]` points the panic at the
+    /// call site.
+    #[track_caller]
     pub fn blocked_resched(&mut self, mut woke: SpinNoIrqGuard<'_, bool>) {
         let curr = &self.current_task;
         assert!(curr.is_running());
@@ -932,10 +959,21 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         // the `woke` SpinNoIrqGuard lock here.
         #[cfg(feature = "preempt")]
         assert!(curr.can_preempt(2));
+        // Current slot (into_raw) = 1; caller's clone (e.g. block_on) = 2nd.
+        let strong = Arc::strong_count(curr);
+        assert!(
+            strong > 1,
+            "blocked_resched: strong_count={strong} (need > 1); into_raw current slot counts as 1 \
+             — caller must hold another KtaskRef across switch (see block_on / blocked_resched \
+             rustdoc)"
+        );
 
-        // Snapshot fair-scheduler lag while still Running / current, before any
-        // concurrent wake can requeue us. EEVDF uses this in put_prev_task.
-        self.inner.scheduler.lock().account_sleep(curr);
+        // Deactivate while still Running / current, before any concurrent wake
+        // can requeue us. Fair schedulers snapshot lag for later enqueue PLACE_LAG.
+        self.inner
+            .scheduler
+            .lock()
+            .leave_current(curr.clone(), CurrentDisposition::Block);
 
         // Mark the task as blocked, this has to be done before adding it to the wait queue
         // while holding the lock of the wait queue.
@@ -1033,39 +1071,39 @@ impl RunQueue {
         self.scheduler.lock().add_task(task);
     }
 
-    /// Enqueue a ready task onto this run queue (yield / preempt / unblock / migrate).
+    /// Enqueue a non-current ready task onto this run queue (unblock / migrate-in).
     ///
-    /// This is the only path that should call `Scheduler::put_prev_task` from ktask.
-    fn enqueue_task(&mut self, task: KtaskRef, preempt: bool) {
+    /// This is the only path that should call `Scheduler::enqueue_task` from ktask.
+    /// Running tasks leave through `leave_current` on the yield/preempt/block/migrate/exit paths.
+    fn enqueue_task(&mut self, task: KtaskRef) {
         #[cfg(feature = "smp")]
         self.attach_owner(&task);
-        self.scheduler.lock().put_prev_task(task, preempt);
+        self.scheduler.lock().enqueue_task(task);
     }
 
     /// Attach a local helper task and switch to it without enqueueing.
     ///
     /// Used for per-CPU helpers such as the affinity migration task that are
-    /// entered via `switch_to` rather than the ready queue.
+    /// entered via `switch_to` rather than the ready queue. Under EEVDF, install
+    /// the helper into `curr` here so later peer-preempt probes see it; idle
+    /// never takes this path.
     #[cfg(feature = "smp")]
     fn switch_to_local(&mut self, prev_task: CurrentTask, next_task: KtaskRef) {
         #[cfg(feature = "smp")]
         self.attach_owner(&next_task);
+        #[cfg(feature = "sched_eevdf")]
+        self.scheduler.lock().sync_running_curr(&next_task);
         self.switch_to(prev_task, next_task);
     }
 
     /// Puts target task into current run queue with `Ready` state
     /// if its state matches `current_state` (except idle task).
     ///
-    /// If `preempt`, keep current task's time slice, otherwise reset it.
+    /// Used for non-current tasks (unblock). Running tasks use `leave_current`.
     ///
     /// Returns `true` if the target task is put into this run queue successfully,
     /// otherwise `false`.
-    fn put_task_with_state(
-        &mut self,
-        task: KtaskRef,
-        current_state: TaskState,
-        preempt: bool,
-    ) -> bool {
+    fn put_task_with_state(&mut self, task: KtaskRef, current_state: TaskState) -> bool {
         // If the task's state matches `current_state`, set its state to `Ready` and
         // put it back to the run queue (except idle task).
         if task.transition_state(current_state, TaskState::Ready) && !task.is_idle() {
@@ -1089,7 +1127,7 @@ impl RunQueue {
                 }
             }
             // TODO: priority
-            self.enqueue_task(task, preempt);
+            self.enqueue_task(task);
             true
         } else {
             false
@@ -1284,7 +1322,7 @@ fn poll_gc(cx: &mut Context<'_>, registrations: &mut PollRegistrations) -> Poll<
 pub(crate) fn migrate_entry(migrated_task: KtaskRef) {
     select_run_queue::<kspin::NoPreemptIrqSave>(&migrated_task)
         .inner
-        .enqueue_task(migrated_task, false);
+        .enqueue_task(migrated_task);
 }
 
 #[cfg(feature = "smp")]
@@ -1370,6 +1408,60 @@ pub(crate) fn enforce_affinity_placement(task: &KtaskRef) -> bool {
 
     cpumask.get(task.cpu_id().as_usize())
         || matches!(task.state(), TaskState::Blocked | TaskState::Exited)
+}
+
+#[cfg(unittest)]
+mod tests_blocked_resched {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use kspin::{NoPreemptIrqSave, SpinNoIrq};
+    use unittest::{assert_eq, def_test};
+
+    use super::{current_run_queue, select_wake_run_queue};
+    use crate::{current, spawn, yield_now};
+
+    /// Direct `blocked_resched` path (not via `block_on`) with an explicit
+    /// caller-owned strong ref — the contract any second caller must follow.
+    #[def_test(serial)]
+    fn blocked_resched_survives_with_caller_owned_ref() {
+        static STARTED: AtomicUsize = AtomicUsize::new(0);
+        static RESUMED: AtomicUsize = AtomicUsize::new(0);
+        // `unittest::assert!` returns `TestResult`; cannot use it inside spawn.
+        static STRONG_OK: AtomicUsize = AtomicUsize::new(0);
+
+        STARTED.store(0, Ordering::Release);
+        RESUMED.store(0, Ordering::Release);
+        STRONG_OK.store(0, Ordering::Release);
+
+        let waiter = spawn(move || {
+            // into_raw current slot = 1; this clone is the required second.
+            let keep_alive = current().clone();
+            if Arc::strong_count(&keep_alive) > 1 {
+                STRONG_OK.store(1, Ordering::Release);
+            }
+
+            let woke = SpinNoIrq::new(false);
+            {
+                let mut rq = current_run_queue::<NoPreemptIrqSave>();
+                STARTED.store(1, Ordering::Release);
+                rq.blocked_resched(woke.lock());
+            }
+            drop(keep_alive);
+            RESUMED.store(1, Ordering::Release);
+        });
+
+        while STARTED.load(Ordering::Acquire) == 0 {
+            yield_now();
+        }
+        // Wake may race the Running→Blocked transition; retry until resume.
+        while RESUMED.load(Ordering::Acquire) == 0 {
+            select_wake_run_queue::<NoPreemptIrqSave>(&waiter).unblock_task(waiter.clone(), true);
+            yield_now();
+        }
+        assert_eq!(STRONG_OK.load(Ordering::Acquire), 1);
+        assert_eq!(RESUMED.load(Ordering::Acquire), 1);
+    }
 }
 
 #[cfg(all(feature = "smp", unittest))]

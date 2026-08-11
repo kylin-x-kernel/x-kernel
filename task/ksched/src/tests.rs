@@ -4,8 +4,8 @@
 
 //! Scheduler algorithm tests ported from StarryOS EEVDF scheduler.
 //!
-//! Covers FIFO, Round-Robin, CFS, and EEVDF schedulers plus the
-//! per-CPU dispatcher and EEVDF fairness simulations.
+//! Covers FIFO, Round-Robin, CFS, and EEVDF schedulers plus EEVDF fairness
+//! simulations.
 
 #![cfg(unittest)]
 
@@ -34,11 +34,12 @@ fn fifo_sched_order() {
         let next = scheduler.pick_next_task().unwrap();
         assert_eq!(*next.inner(), i % NUM_TASKS);
         scheduler.task_tick(&next);
-        scheduler.put_prev_task(next, false);
+        scheduler.leave_current(next, CurrentDisposition::Yield);
     }
     let mut n = 0;
-    while scheduler.pick_next_task().is_some() {
+    while let Some(t) = scheduler.pick_next_task() {
         n += 1;
+        scheduler.leave_current(t, CurrentDisposition::Exit);
     }
     assert_eq!(n, NUM_TASKS);
 }
@@ -74,11 +75,12 @@ fn rr_sched_order() {
         let next = scheduler.pick_next_task().unwrap();
         assert_eq!(*next.inner(), i % NUM_TASKS);
         scheduler.task_tick(&next);
-        scheduler.put_prev_task(next, false);
+        scheduler.leave_current(next, CurrentDisposition::Yield);
     }
     let mut n = 0;
-    while scheduler.pick_next_task().is_some() {
+    while let Some(t) = scheduler.pick_next_task() {
         n += 1;
+        scheduler.leave_current(t, CurrentDisposition::Exit);
     }
     assert_eq!(n, NUM_TASKS);
 }
@@ -125,11 +127,12 @@ fn cfs_sched_order() {
         let next = scheduler.pick_next_task().unwrap();
         assert_eq!(*next.inner(), i % NUM_TASKS);
         scheduler.task_tick(&next);
-        scheduler.put_prev_task(next, false);
+        scheduler.leave_current(next, CurrentDisposition::Yield);
     }
     let mut n = 0;
-    while scheduler.pick_next_task().is_some() {
+    while let Some(t) = scheduler.pick_next_task() {
         n += 1;
+        scheduler.leave_current(t, CurrentDisposition::Exit);
     }
     assert_eq!(n, NUM_TASKS);
 }
@@ -165,11 +168,12 @@ fn eevdf_sched_order() {
         let next = scheduler.pick_next_task().unwrap();
         assert_eq!(*next.inner(), i % NUM_TASKS);
         scheduler.task_tick(&next);
-        scheduler.put_prev_task(next, false);
+        scheduler.leave_current(next, CurrentDisposition::Yield);
     }
     let mut n = 0;
-    while scheduler.pick_next_task().is_some() {
+    while let Some(t) = scheduler.pick_next_task() {
         n += 1;
+        scheduler.leave_current(t, CurrentDisposition::Exit);
     }
     assert_eq!(n, NUM_TASKS);
 }
@@ -199,9 +203,9 @@ fn eevdf_exit_releases_cached_current() {
     assert!(Arc::ptr_eq(&picked, &task));
     drop(picked);
 
-    // The scheduler caches the running task in `curr`; `on_task_exit` must
-    // drop that reference, otherwise an exiting task stays pinned forever.
-    sched.on_task_exit(&task);
+    // `leave_current(Exit)` clears scheduler current accounting so an exiting
+    // task is not kept alive by the RQ after the CPU switches away.
+    sched.leave_current(task.clone(), CurrentDisposition::Exit);
     assert_eq!(Arc::strong_count(&task), 1);
 }
 
@@ -234,7 +238,7 @@ fn eevdf_eligible_preferred_over_earlier_deadline() {
     for _ in 0..4 {
         sched.task_tick(&running);
     }
-    sched.put_prev_task(running, false);
+    sched.leave_current(running, CurrentDisposition::Yield);
 
     let next = sched.pick_next_task().unwrap();
     assert_eq!(*next.inner(), 2);
@@ -259,7 +263,7 @@ fn eevdf_set_priority_on_running_task() {
 
     let running = sched.pick_next_task().unwrap();
     assert!(sched.set_priority(&running, 10));
-    sched.put_prev_task(running, false);
+    sched.leave_current(running, CurrentDisposition::Yield);
     assert!(sched.pick_next_task().is_some());
 }
 
@@ -272,7 +276,7 @@ fn eevdf_preempted_keeps_deadline() {
     let running = sched.pick_next_task().unwrap();
     let dl_before = running.deadline();
     sched.task_tick(&running);
-    sched.put_prev_task(running, true);
+    sched.leave_current(running, CurrentDisposition::Preempt);
 
     let picked = sched.pick_next_task().unwrap();
     assert_eq!(picked.deadline(), dl_before);
@@ -291,7 +295,7 @@ fn eevdf_preempted_expired_deadline_uses_remaining_slice() {
 
     let vr_now = running.vruntime_for_test();
     running.set_deadline_for_test(vr_now - 1);
-    sched.put_prev_task(running, true);
+    sched.leave_current(running, CurrentDisposition::Preempt);
 
     let picked = sched.pick_next_task().unwrap();
     let vr = picked.vruntime_for_test();
@@ -309,7 +313,7 @@ fn eevdf_preempted_valid_deadline_not_overwritten() {
     let dl_before = running.deadline();
     sched.task_tick(&running);
     assert!(running.vruntime_for_test() < dl_before);
-    sched.put_prev_task(running, true);
+    sched.leave_current(running, CurrentDisposition::Preempt);
 
     let picked = sched.pick_next_task().unwrap();
     assert_eq!(picked.deadline(), dl_before);
@@ -392,12 +396,40 @@ fn eevdf_peer_preempt_probe_keeps_curr_when_wakee_later() {
     let wakee = Arc::new(EevdfEntity::new(2usize));
     wakee.set_vlag_for_test(0);
     wakee.set_needs_place_for_test(true);
-    sched.put_prev_task(wakee.clone(), false);
+    sched.enqueue_task(wakee.clone());
     assert_eq!(wakee.slice_for_test(), SLICE as isize);
     assert!(wakee.deadline() > curr.deadline());
-
-    sched.sync_running_curr(curr.clone());
     assert!(!sched.peer_preempts_curr());
+}
+
+#[def_test]
+fn eevdf_peer_preempt_syncs_untracked_runner_at_switch_in() {
+    let mut sched = EevdfScheduler::<usize, SLICE>::new();
+
+    // Production installs curr in switch_to_local; probe itself does not sync.
+    let runner = Arc::new(EevdfEntity::new(1usize));
+    runner.set_vruntime_for_test(0);
+    runner.set_deadline_for_test(0);
+
+    let peer = Arc::new(EevdfEntity::new(2usize));
+    peer.set_vruntime_for_test(0);
+    peer.set_deadline_for_test(100);
+    sched.inject_ready_for_test(peer);
+
+    assert!(
+        sched.curr_is_none(),
+        "untracked runner must start with empty curr snapshot"
+    );
+    assert!(
+        sched.peer_preempts_curr(),
+        "empty curr (idle-like) with a ready peer reports preemptable"
+    );
+
+    sched.sync_running_curr(&runner);
+    assert!(
+        !sched.peer_preempts_curr(),
+        "synced early-deadline runner must not be preempted by a later peer"
+    );
 }
 
 #[def_test]
@@ -414,16 +446,14 @@ fn eevdf_peer_preempt_probe_switches_when_wakee_earlier() {
     let wakee = Arc::new(EevdfEntity::new(2usize));
     wakee.set_vlag_for_test(0);
     wakee.set_needs_place_for_test(true);
-    sched.put_prev_task(wakee.clone(), false);
+    sched.enqueue_task(wakee.clone());
     let vr = wakee.vruntime_for_test();
     let _ = sched.remove_task(&wakee);
     wakee.set_vruntime_for_test(vr);
     wakee.set_deadline_for_test(curr.deadline() - 1);
     sched.inject_ready_for_test(wakee.clone());
-
-    sched.sync_running_curr(curr.clone());
     assert!(sched.peer_preempts_curr());
-    sched.put_prev_task(curr, true);
+    sched.leave_current(curr, CurrentDisposition::Preempt);
     let next = sched.pick_next_task().unwrap();
     assert_eq!(*next.inner(), 2);
 }
@@ -437,20 +467,19 @@ fn eevdf_concurrent_wakes_keep_deadline_order() {
     sched.add_task(runner.clone());
     let curr = sched.pick_next_task().unwrap();
     curr.set_deadline_for_test(curr.vruntime_for_test() + 1_000_000);
+    sched.refresh_curr_snapshot_for_test(&curr);
 
     let first = Arc::new(EevdfEntity::new(2usize));
     first.set_vlag_for_test(0);
     first.set_needs_place_for_test(true);
-    sched.put_prev_task(first.clone(), false);
+    sched.enqueue_task(first.clone());
 
     let second = Arc::new(EevdfEntity::new(3usize));
     second.set_vlag_for_test(0);
     second.set_needs_place_for_test(true);
-    sched.put_prev_task(second, false);
-
-    sched.sync_running_curr(curr.clone());
+    sched.enqueue_task(second);
     assert!(sched.peer_preempts_curr());
-    sched.put_prev_task(curr, true);
+    sched.leave_current(curr, CurrentDisposition::Preempt);
     let next = sched.pick_next_task().unwrap();
     // Deadline-aware NEXT_BUDDY keeps `first`; pick uses that handoff.
     assert_eq!(*next.inner(), 2);
@@ -473,15 +502,14 @@ fn eevdf_wake_buddy_handoff_when_curr_blocks() {
     let wakee = Arc::new(EevdfEntity::new(2usize));
     wakee.set_vlag_for_test(0);
     wakee.set_needs_place_for_test(true);
-    sched.put_prev_task(wakee.clone(), false);
+    sched.enqueue_task(wakee.clone());
     assert!(wakee.deadline() > curr.deadline());
 
     // Full-slice wakee does not preempt mid-slice curr.
-    sched.sync_running_curr(curr.clone());
     assert!(!sched.peer_preempts_curr());
 
     // Waker blocks: next pick should prefer the wake buddy.
-    sched.account_sleep(&curr);
+    sched.leave_current(curr.clone(), CurrentDisposition::Block);
     let next = sched.pick_next_task().unwrap();
     assert_eq!(*next.inner(), 2);
     assert_eq!(sched.stats().wake_handoff, 1);
@@ -504,7 +532,7 @@ fn eevdf_wake_buddy_yields_to_earlier_eligible_peer() {
     let buddy = Arc::new(EevdfEntity::new(3usize));
     buddy.set_vlag_for_test(0);
     buddy.set_needs_place_for_test(true);
-    sched.put_prev_task(buddy.clone(), false);
+    sched.enqueue_task(buddy.clone());
 
     // Inject an earlier-deadline eligible peer without renominating (simulates
     // a ready waiter that was not the latest wake handoff target).
@@ -515,7 +543,7 @@ fn eevdf_wake_buddy_yields_to_earlier_eligible_peer() {
     sched.inject_ready_for_test(earlier.clone());
     assert!(earlier.deadline() < buddy.deadline());
 
-    sched.account_sleep(&curr);
+    sched.leave_current(curr.clone(), CurrentDisposition::Block);
     let next = sched.pick_next_task().unwrap();
     assert_eq!(
         *next.inner(),
@@ -540,15 +568,14 @@ fn eevdf_sync_wake_preempts_eligible_later_deadline_buddy() {
     let wakee = Arc::new(EevdfEntity::new(2usize));
     wakee.set_vlag_for_test(0);
     wakee.set_needs_place_for_test(true);
-    sched.put_prev_task(wakee.clone(), false);
+    sched.enqueue_task(wakee.clone());
     assert!(wakee.deadline() > curr.deadline());
 
     sched.mark_sync_wake_preempt();
-    sched.sync_running_curr(curr.clone());
     assert!(sched.peer_preempts_curr());
     assert_eq!(sched.stats().wake_sync_preempt, 1);
 
-    sched.put_prev_task(curr, true);
+    sched.leave_current(curr, CurrentDisposition::Preempt);
     let next = sched.pick_next_task().unwrap();
     assert_eq!(*next.inner(), 2);
     assert_eq!(sched.stats().wake_handoff, 1);
@@ -565,7 +592,7 @@ fn eevdf_wake_uses_full_request_deadline() {
     let wakee = Arc::new(EevdfEntity::new(2usize));
     wakee.set_vlag_for_test(0);
     wakee.set_needs_place_for_test(true);
-    sched.put_prev_task(wakee.clone(), false);
+    sched.enqueue_task(wakee.clone());
 
     let vr = wakee.vruntime_for_test();
     let expected = vr + SLICE as isize * (1024 * 1024 / 1024);
@@ -582,13 +609,14 @@ fn eevdf_wake_negative_lag_stays_eligible() {
     sched.add_task(runner.clone());
     let curr = sched.pick_next_task().unwrap();
     curr.set_vruntime_for_test(0x2000);
+    sched.refresh_curr_snapshot_for_test(&curr);
 
     // Task that previously ran ahead of V: PLACE_LAG alone would place above V
     // and leave it ineligible while curr (or another eligible peer) runs.
     let wakee = Arc::new(EevdfEntity::new(2usize));
     wakee.set_vlag_for_test(-0x1000);
     wakee.set_needs_place_for_test(true);
-    sched.put_prev_task(wakee.clone(), false);
+    sched.enqueue_task(wakee.clone());
 
     assert!(wakee.vruntime_for_test() <= 0x2000);
     assert_eq!(wakee.slice_for_test(), SLICE as isize);
@@ -608,12 +636,12 @@ fn eevdf_wake_places_positive_lag_task_first() {
     for _ in 0..SLICE {
         let _ = sched.task_tick(&a);
     }
-    sched.put_prev_task(a, false);
+    sched.leave_current(a, CurrentDisposition::Yield);
 
     // t2 is behind → positive lag on sleep.
     let b = sched.pick_next_task().unwrap();
     assert_eq!(*b.inner(), 2);
-    sched.account_sleep(&b);
+    sched.leave_current(b.clone(), CurrentDisposition::Block);
     assert!(b.needs_place_for_test());
     assert!(b.vlag_for_test() > 0);
 
@@ -623,10 +651,10 @@ fn eevdf_wake_places_positive_lag_task_first() {
     for _ in 0..SLICE {
         let _ = sched.task_tick(&a2);
     }
-    sched.put_prev_task(a2, false);
+    sched.leave_current(a2, CurrentDisposition::Yield);
 
     // Wake t2 with PLACE_LAG; it should be selected next.
-    sched.put_prev_task(b, false);
+    sched.enqueue_task(b);
     assert!(!t2.needs_place_for_test());
     let next = sched.pick_next_task().unwrap();
     assert_eq!(*next.inner(), 2);
@@ -642,6 +670,7 @@ fn eevdf_new_task_placement_must_include_current_in_virtual_time() {
     let curr = sched.pick_next_task().unwrap();
     assert!(Arc::ptr_eq(&curr, &t_run));
     curr.set_vruntime_for_test(0x1400);
+    sched.refresh_curr_snapshot_for_test(&curr);
 
     // Ready peer at vruntime 0 (equal weight).
     let t_ready = Arc::new(EevdfEntity::new(2usize));
@@ -663,6 +692,7 @@ fn eevdf_zero_lag_wake_placement_must_include_current() {
     sched.add_task(t_run.clone());
     let curr = sched.pick_next_task().unwrap();
     curr.set_vruntime_for_test(0x1400);
+    sched.refresh_curr_snapshot_for_test(&curr);
 
     let t_ready = Arc::new(EevdfEntity::new(2usize));
     t_ready.set_vruntime_for_test(0);
@@ -672,7 +702,7 @@ fn eevdf_zero_lag_wake_placement_must_include_current() {
     let t_wake = Arc::new(EevdfEntity::new(3usize));
     t_wake.set_vlag_for_test(0);
     t_wake.set_needs_place_for_test(true);
-    sched.put_prev_task(t_wake.clone(), false);
+    sched.enqueue_task(t_wake.clone());
     assert!(!t_wake.needs_place_for_test());
     assert_eq!(t_wake.vruntime_for_test(), 0xa00);
 }
@@ -685,11 +715,12 @@ fn eevdf_zero_lag_wake_with_only_curr_places_at_curr_vruntime() {
     sched.add_task(t_run.clone());
     let curr = sched.pick_next_task().unwrap();
     curr.set_vruntime_for_test(0x1400);
+    sched.refresh_curr_snapshot_for_test(&curr);
 
     let t_wake = Arc::new(EevdfEntity::new(2usize));
     t_wake.set_vlag_for_test(0);
     t_wake.set_needs_place_for_test(true);
-    sched.put_prev_task(t_wake.clone(), false);
+    sched.enqueue_task(t_wake.clone());
     assert_eq!(t_wake.vruntime_for_test(), 0x1400);
 }
 
@@ -701,6 +732,7 @@ fn eevdf_place_waking_clamps_to_min_vruntime() {
     sched.add_task(t_run.clone());
     let curr = sched.pick_next_task().unwrap();
     curr.set_vruntime_for_test(100);
+    sched.refresh_curr_snapshot_for_test(&curr);
 
     // Seed ready with a low and a high vruntime task, then remove the low one
     // so dequeue advances min_vruntime to the remaining high watermark.
@@ -718,7 +750,7 @@ fn eevdf_place_waking_clamps_to_min_vruntime() {
     let t_wake = Arc::new(EevdfEntity::new(4usize));
     t_wake.set_vlag_for_test(0x10000);
     t_wake.set_needs_place_for_test(true);
-    sched.put_prev_task(t_wake.clone(), false);
+    sched.enqueue_task(t_wake.clone());
     assert!(t_wake.vruntime_for_test() >= 0x2000);
 }
 
@@ -730,6 +762,7 @@ fn eevdf_remove_task_lag_includes_curr() {
     sched.add_task(t_run.clone());
     let curr = sched.pick_next_task().unwrap();
     curr.set_vruntime_for_test(0x1400);
+    sched.refresh_curr_snapshot_for_test(&curr);
 
     let t_ready = Arc::new(EevdfEntity::new(2usize));
     t_ready.set_vruntime_for_test(0);
@@ -743,23 +776,86 @@ fn eevdf_remove_task_lag_includes_curr() {
 }
 
 #[def_test]
-fn eevdf_pick_next_clears_stale_curr() {
+fn eevdf_pick_next_requires_leave_current() {
+    // Kernel unittest cannot recover from intentional panics, so assert the
+    // precondition instead of invoking the `pick_next` assert path.
     let mut sched = EevdfScheduler::<usize, SLICE>::new();
 
     let t_run = Arc::new(EevdfEntity::new(1usize));
     sched.add_task(t_run.clone());
     let curr = sched.pick_next_task().unwrap();
-    assert!(Arc::ptr_eq(&curr, &t_run));
+    assert!(!sched.curr_is_none());
 
-    // Simulate exit/migrate forgetting account_sleep: curr stays set while a
-    // new ready task is injected. pick_next must not keep the ghost curr.
     let t_next = Arc::new(EevdfEntity::new(2usize));
     t_next.set_vruntime_for_test(0);
     t_next.set_deadline_for_test(1);
     sched.inject_ready_for_test(t_next.clone());
 
+    sched.leave_current(curr, CurrentDisposition::Exit);
+    assert!(sched.curr_is_none());
     let picked = sched.pick_next_task().unwrap();
-    assert_eq!(*picked.inner(), 2);
+    assert!(Arc::ptr_eq(&picked, &t_next));
+}
+
+#[def_test]
+fn eevdf_leave_dispositions_clear_curr_and_place_rules() {
+    let mut sched = EevdfScheduler::<usize, SLICE>::new();
+    let t = Arc::new(EevdfEntity::new(1usize));
+    sched.add_task(t.clone());
+    let curr = sched.pick_next_task().unwrap();
+    assert!(!sched.curr_is_none());
+
+    // Yield clears curr and requeues.
+    sched.leave_current(curr, CurrentDisposition::Yield);
+    assert!(sched.curr_is_none());
+
+    let curr = sched.pick_next_task().unwrap();
+    let slice_before = curr.slice_for_test();
+    assert!(slice_before > 0);
+    let _ = sched.task_tick(&curr);
+    let remaining = curr.slice_for_test();
+    assert!(remaining < slice_before);
+    sched.leave_current(curr.clone(), CurrentDisposition::Preempt);
+    assert!(sched.curr_is_none());
+    // Preempt keeps remaining slice across requeue id change.
+    assert_eq!(curr.slice_for_test(), remaining);
+
+    let curr = sched.pick_next_task().unwrap();
+    sched.leave_current(curr.clone(), CurrentDisposition::Block);
+    assert!(sched.curr_is_none());
+    assert!(curr.needs_place_for_test());
+
+    // Re-enter via enqueue PLACE_LAG.
+    sched.enqueue_task(curr);
+    assert!(!t.needs_place_for_test());
+
+    let curr = sched.pick_next_task().unwrap();
+    sched.leave_current(curr.clone(), CurrentDisposition::Migrate);
+    assert!(sched.curr_is_none());
+    assert!(curr.needs_place_for_test());
+    // Source RQ weight/V no longer include the migrated task.
+    // (ready empty and curr none => weight 0)
+    // Re-place onto this RQ as migrate-in would.
+    sched.enqueue_task(curr);
+
+    let curr = sched.pick_next_task().unwrap();
+    // Exit must not arm future placement.
+    sched.leave_current(curr.clone(), CurrentDisposition::Exit);
+    assert!(sched.curr_is_none());
+    assert!(!curr.needs_place_for_test());
+}
+
+#[def_test]
+fn eevdf_curr_snapshot_does_not_own_task() {
+    let mut sched = EevdfScheduler::<usize, SLICE>::new();
+    let t = Arc::new(EevdfEntity::new(1usize));
+    sched.add_task(t.clone());
+    let running = sched.pick_next_task().unwrap();
+    // Owners: test handle `t` + local `running`. Snapshot must not add a third.
+    assert_eq!(Arc::strong_count(&running), 2);
+    sched.leave_current(running, CurrentDisposition::Exit);
+    assert!(sched.curr_is_none());
+    assert_eq!(Arc::strong_count(&t), 1);
 }
 
 #[def_test]
@@ -840,7 +936,7 @@ fn eevdf_stats_disabled_does_not_count() {
     sched.add_task(t2.clone());
     let running = sched.pick_next_task().unwrap();
     let _ = sched.task_tick(&running);
-    sched.put_prev_task(running, false);
+    sched.leave_current(running, CurrentDisposition::Yield);
     let _ = sched.pick_next_task().unwrap();
 
     let stats = sched.stats();
@@ -874,126 +970,6 @@ fn eevdf_stats_reset_clears_counters() {
 }
 
 // ============================================================================
-// Per-CPU scheduler tests
-// ============================================================================
-
-struct Task {
-    id: u64,
-}
-
-impl Task {
-    fn new(id: u64) -> Arc<Self> {
-        Arc::new(Self { id })
-    }
-}
-
-impl crate::per_cpu::HasSchedulerId for Task {
-    fn sched_id(&self) -> u64 {
-        self.id
-    }
-}
-
-#[def_test]
-fn percpu_fifo_picks_in_insertion_order() {
-    use crate::per_cpu::{PerCpuScheduler, SchedulerKind};
-
-    let mut s = PerCpuScheduler::<Task>::new(SchedulerKind::Fifo);
-    for id in 0..5u64 {
-        s.add_task(Task::new(id));
-    }
-    for expected in 0..5u64 {
-        let t = s.pick_next_task().unwrap();
-        assert_eq!(t.id, expected);
-        s.put_prev_task(t, false);
-    }
-}
-
-#[def_test]
-fn percpu_fifo_never_preempts() {
-    use crate::per_cpu::{PerCpuScheduler, SchedulerKind};
-
-    let mut s = PerCpuScheduler::<Task>::new(SchedulerKind::Fifo);
-    s.add_task(Task::new(0));
-    let t = s.pick_next_task().unwrap();
-    for _ in 0..100 {
-        assert!(!s.task_tick(&t));
-    }
-    s.put_prev_task(t, false);
-}
-
-#[def_test]
-fn percpu_rr_preempts_after_slice() {
-    use crate::per_cpu::{PerCpuScheduler, SchedulerKind};
-
-    let mut s = PerCpuScheduler::<Task>::new(SchedulerKind::Rr);
-    s.add_task(Task::new(0));
-    let t = s.pick_next_task().unwrap();
-    let mut preempted = false;
-    for _ in 0..10 {
-        if s.task_tick(&t) {
-            preempted = true;
-            break;
-        }
-    }
-    assert!(preempted);
-    s.put_prev_task(t, true);
-}
-
-#[def_test]
-fn percpu_eevdf_fairness_equal_weight() {
-    use crate::per_cpu::{PerCpuScheduler, SchedulerKind};
-
-    let mut s = PerCpuScheduler::<Task>::new(SchedulerKind::Eevdf);
-    let tasks: Vec<_> = (0..3u64).map(Task::new).collect();
-    for t in &tasks {
-        s.add_task(t.clone());
-    }
-
-    let mut counts = [0u64; 3];
-    const TICKS: u64 = 6000;
-    for _ in 0..TICKS {
-        let t = s.pick_next_task().unwrap();
-        let id = t.id as usize;
-        let preempt = s.task_tick(&t);
-        counts[id] += 1;
-        s.put_prev_task(t, preempt);
-    }
-
-    let expected = TICKS / 3;
-    for &got in counts.iter() {
-        let err = (got as f64 - expected as f64).abs() / expected as f64;
-        assert!(err < 0.05);
-    }
-}
-
-#[def_test]
-fn percpu_task_migrates_between_schedulers() {
-    use crate::per_cpu::{PerCpuScheduler, SchedulerKind};
-
-    let mut eevdf = PerCpuScheduler::<Task>::new(SchedulerKind::Eevdf);
-    let mut fifo = PerCpuScheduler::<Task>::new(SchedulerKind::Fifo);
-
-    let t0 = Task::new(0);
-    let t1 = Task::new(1);
-    eevdf.add_task(t0.clone());
-    eevdf.add_task(t1.clone());
-    for _ in 0..20 {
-        let t = eevdf.pick_next_task().unwrap();
-        let preempt = eevdf.task_tick(&t);
-        eevdf.put_prev_task(t, preempt);
-    }
-
-    let migrated = eevdf.remove_task(&t0).unwrap();
-    fifo.add_task(migrated);
-    let picked = fifo.pick_next_task().unwrap();
-    assert_eq!(picked.id, 0);
-    fifo.put_prev_task(picked, false);
-
-    let remaining = eevdf.pick_next_task().unwrap();
-    assert_eq!(remaining.id, 1);
-}
-
-// ============================================================================
 // EEVDF fairness simulation tests
 // ============================================================================
 
@@ -1018,7 +994,14 @@ fn eevdf_simulate(
         let should_switch = sched.task_tick(&current);
         if should_switch || elapsed >= total_ticks {
             let preempt = should_switch && current.slice_for_test() > 0;
-            sched.put_prev_task(current, preempt);
+            sched.leave_current(
+                current,
+                if preempt {
+                    CurrentDisposition::Preempt
+                } else {
+                    CurrentDisposition::Yield
+                },
+            );
             if elapsed >= total_ticks {
                 break;
             }

@@ -10,7 +10,7 @@ use core::{
 
 use linked_list_r4l::{GetLinks, Links, List};
 
-use crate::BaseScheduler;
+use crate::{BaseScheduler, CurrentDisposition};
 
 /// A task wrapper for the [`RRScheduler`].
 ///
@@ -111,12 +111,21 @@ impl<T, const S: usize> BaseScheduler for RRScheduler<T, S> {
         self.ready_queue.pop_front()
     }
 
-    fn put_prev_task(&mut self, prev: Self::SchedItem, preempt: bool) {
-        if prev.time_slice() > 0 && preempt {
-            self.ready_queue.push_front(prev)
-        } else {
-            prev.reset_time_slice();
-            self.ready_queue.push_back(prev)
+    fn enqueue_task(&mut self, task: Self::SchedItem) {
+        task.reset_time_slice();
+        self.ready_queue.push_back(task);
+    }
+
+    fn leave_current(&mut self, current: Self::SchedItem, disposition: CurrentDisposition) {
+        match disposition {
+            CurrentDisposition::Preempt if current.time_slice() > 0 => {
+                self.ready_queue.push_front(current);
+            }
+            CurrentDisposition::Yield | CurrentDisposition::Preempt => {
+                current.reset_time_slice();
+                self.ready_queue.push_back(current);
+            }
+            CurrentDisposition::Block | CurrentDisposition::Migrate | CurrentDisposition::Exit => {}
         }
     }
 

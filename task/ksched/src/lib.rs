@@ -7,7 +7,6 @@
 mod cfs;
 mod eevdf;
 mod fifo;
-mod per_cpu;
 mod round_robin;
 #[cfg(unittest)]
 mod tests;
@@ -17,13 +16,33 @@ extern crate alloc;
 pub use cfs::{CFSTask, CFScheduler};
 pub use eevdf::{EevdfEntity, EevdfScheduler, EevdfStats};
 pub use fifo::{FifoScheduler, FifoTask};
-pub use per_cpu::{HasSchedulerId, PerCpuScheduler, SchedulerKind};
 pub use round_robin::{RRScheduler, RRTask};
+
+/// How a running task leaves its current execution slot on a run queue.
+///
+/// This is the only scheduler-visible reason a current task may depart.
+/// Callers must use [`BaseScheduler::leave_current`] rather than open-coding
+/// sleep accounting or requeue logic per path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurrentDisposition {
+    /// Voluntary yield: reset the request/slice and requeue as Ready.
+    Yield,
+    /// Involuntary preemption: keep any remaining request and requeue as Ready.
+    Preempt,
+    /// Block/sleep: leave without requeue; fair schedulers snapshot lag for PLACE_LAG.
+    Block,
+    /// Migrate away from this RQ: leave without requeue; fair schedulers snapshot
+    /// lag so the destination RQ can PLACE_LAG on enqueue.
+    Migrate,
+    /// Exit: leave without requeue and without arming future placement.
+    Exit,
+}
 
 /// The base scheduler trait that all schedulers should implement.
 ///
-/// All tasks in the scheduler are considered runnable. If a task is go to
-/// sleep, it should be removed from the scheduler.
+/// Ready tasks live in the scheduler. A running task is outside the ready
+/// queue and must leave through [`Self::leave_current`]. Non-current ready
+/// tasks (wake / migrate-in) enter through [`Self::enqueue_task`].
 pub trait BaseScheduler {
     /// Type of scheduled entities. Often a task struct.
     type SchedItem;
@@ -31,11 +50,10 @@ pub trait BaseScheduler {
     /// Initializes the scheduler.
     fn init(&mut self);
 
-    /// Adds a task to the scheduler.
+    /// Adds a newly created runnable task to the scheduler.
     fn add_task(&mut self, task: Self::SchedItem);
 
-    /// Removes a task by its reference from the scheduler. Returns the owned
-    /// removed task with ownership if it exists.
+    /// Removes a ready task by reference. Returns the owned task if present.
     ///
     /// # Safety
     ///
@@ -43,18 +61,29 @@ pub trait BaseScheduler {
     /// the behavior is undefined.
     fn remove_task(&mut self, task: &Self::SchedItem) -> Option<Self::SchedItem>;
 
-    /// Picks the next task to run, it will be removed from the scheduler.
-    /// Returns [`None`] if there is not runnable task.
+    /// Picks the next task to run and removes it from the ready queue.
+    /// Returns [`None`] if there is no runnable task.
+    ///
+    /// Requires that any previous current task has already left via
+    /// [`Self::leave_current`].
     fn pick_next_task(&mut self) -> Option<Self::SchedItem>;
 
-    /// Puts the previous task back to the scheduler. The previous task is
-    /// usually placed at the end of the ready queue, making it less likely
-    /// to be re-scheduled.
+    /// Enqueues a non-current Ready task (wake or migrate-in).
     ///
-    /// `preempt` indicates whether the previous task is preempted by the next
-    /// task. In this case, the previous task may be placed at the front of the
-    /// ready queue.
-    fn put_prev_task(&mut self, prev: Self::SchedItem, preempt: bool);
+    /// Fair schedulers apply saved lag placement (`PLACE_LAG`) when the task
+    /// was previously deactivated with [`CurrentDisposition::Block`] or
+    /// [`CurrentDisposition::Migrate`].
+    fn enqueue_task(&mut self, task: Self::SchedItem);
+
+    /// Transitions the running task out of the current execution slot.
+    ///
+    /// - [`CurrentDisposition::Yield`] / [`CurrentDisposition::Preempt`]:
+    ///   requeue onto this RQ as Ready.
+    /// - [`CurrentDisposition::Block`] / [`CurrentDisposition::Migrate`]:
+    ///   do not requeue; fair schedulers snapshot lag for a later
+    ///   [`Self::enqueue_task`].
+    /// - [`CurrentDisposition::Exit`]: do not requeue and do not arm placement.
+    fn leave_current(&mut self, current: Self::SchedItem, disposition: CurrentDisposition);
 
     /// Advances the scheduler state at each timer tick. Returns `true` if
     /// re-scheduling is required.
@@ -64,21 +93,4 @@ pub trait BaseScheduler {
 
     /// set priority for a task
     fn set_priority(&mut self, task: &Self::SchedItem, prio: isize) -> bool;
-
-    /// Accounts for a running task that is leaving the CPU without being
-    /// requeued (typically sleep / block).
-    ///
-    /// Fair schedulers such as EEVDF use this to snapshot virtual lag so the
-    /// later [`Self::put_prev_task`] wake path can place the task correctly.
-    /// The default implementation is a no-op.
-    fn account_sleep(&mut self, _task: &Self::SchedItem) {}
-
-    /// Releases any scheduler-owned references to a task that is exiting
-    /// without being requeued.
-    ///
-    /// Schedulers that cache the current task (e.g. EEVDF's `curr`) must drop
-    /// that reference here; otherwise an exiting task can be kept alive by the
-    /// scheduler after the CPU switched away, which strands its kernel stack
-    /// and address space. The default implementation is a no-op.
-    fn on_task_exit(&mut self, _task: &Self::SchedItem) {}
 }
