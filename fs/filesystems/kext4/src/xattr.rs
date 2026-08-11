@@ -893,6 +893,7 @@ fn encode_inline_xattrs(xattrs: &[Ext4Xattr], output: &mut [u8]) -> Ext4Result<(
         output,
         disk_xattr::XATTR_IBODY_HEADER_SIZE,
         disk_xattr::XATTR_IBODY_HEADER_SIZE,
+        XattrEntryHashWriter::Inline,
     )
 }
 
@@ -912,8 +913,61 @@ fn encode_external_xattr_block(
     // shared blocks are handled by COW/decrement during mutation.
     put_u32(output, 0x04, 1)?;
     put_u32(output, 0x08, 1)?;
-    encode_xattr_entries(xattrs, output, disk_xattr::XATTR_HEADER_SIZE, 0)?;
+    let mut block_hasher = ExternalXattrBlockHasher::new();
+    encode_xattr_entries(
+        xattrs,
+        output,
+        disk_xattr::XATTR_HEADER_SIZE,
+        0,
+        XattrEntryHashWriter::ExternalBlock(&mut block_hasher),
+    )?;
+    put_u32(output, 0x0c, block_hasher.finish())?;
     update_xattr_block_checksum(block, checksum_seed, has_metadata_checksum, output)
+}
+
+enum XattrEntryHashWriter<'a> {
+    Inline,
+    ExternalBlock(&'a mut ExternalXattrBlockHasher),
+}
+
+impl XattrEntryHashWriter<'_> {
+    fn write_hash(&mut self, xattr: &Ext4Xattr) -> u32 {
+        match self {
+            Self::Inline => 0,
+            Self::ExternalBlock(block_hasher) => {
+                let entry_hash = xattr_entry_hash(&xattr.name, &xattr.value);
+                block_hasher.update(entry_hash);
+                entry_hash
+            }
+        }
+    }
+}
+
+/// Accumulates the ext4 external xattr block hash stored in `h_hash`.
+///
+/// This follows Linux `ext4_xattr_rehash()`. An entry hash of zero marks the
+/// block as unshareable, so Linux sets the complete block hash to zero:
+/// <https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/fs/ext4/xattr.c>
+struct ExternalXattrBlockHasher {
+    hash: Option<u32>,
+}
+
+impl ExternalXattrBlockHasher {
+    const fn new() -> Self {
+        Self { hash: Some(0) }
+    }
+
+    fn update(&mut self, entry_hash: u32) {
+        if entry_hash == 0 {
+            self.hash = None;
+        } else if let Some(block_hash) = &mut self.hash {
+            *block_hash = block_hash.rotate_left(16) ^ entry_hash;
+        }
+    }
+
+    fn finish(self) -> u32 {
+        self.hash.unwrap_or(0)
+    }
 }
 
 fn encode_xattr_entries(
@@ -921,6 +975,7 @@ fn encode_xattr_entries(
     output: &mut [u8],
     entries_offset: usize,
     value_base: usize,
+    mut hash_writer: XattrEntryHashWriter<'_>,
 ) -> Ext4Result<()> {
     let mut sorted = Vec::from(xattrs);
     sorted.sort_by(|left, right| {
@@ -966,10 +1021,36 @@ fn encode_xattr_entries(
         if marker_end > value_cursor {
             return Err(Ext4Error::Unsupported(UnsupportedKind::ExternalXattrBlock));
         }
-        encode_xattr_entry(output, entry_offset, xattr, value_offset, value_size)?;
+        let entry_hash = hash_writer.write_hash(xattr);
+        encode_xattr_entry(
+            output,
+            entry_offset,
+            xattr,
+            value_offset,
+            value_size,
+            entry_hash,
+        )?;
         entry_offset = next_entry;
     }
     Ok(())
+}
+
+/// Computes the ext4 external xattr entry hash stored in `e_hash`.
+///
+/// This follows Linux `ext4_xattr_hash_entry()`. Values are padded to a
+/// four-byte boundary and folded as little-endian words:
+/// <https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/fs/ext4/xattr.c>
+fn xattr_entry_hash(name: &[u8], value: &[u8]) -> u32 {
+    let mut hash = 0u32;
+    for &byte in name {
+        hash = hash.rotate_left(5) ^ u32::from(byte);
+    }
+    for chunk in value.chunks(4) {
+        let mut word = [0u8; 4];
+        word[..chunk.len()].copy_from_slice(chunk);
+        hash = hash.rotate_left(16) ^ u32::from_le_bytes(word);
+    }
+    hash
 }
 
 fn update_xattr_block_checksum(
@@ -1061,6 +1142,7 @@ fn encode_xattr_entry(
     xattr: &Ext4Xattr,
     value_offset: u16,
     value_size: u32,
+    entry_hash: u32,
 ) -> Ext4Result<()> {
     *output
         .get_mut(offset)
@@ -1088,7 +1170,7 @@ fn encode_xattr_entry(
     put_u32(
         output,
         offset.checked_add(0x0c).ok_or(Ext4Error::Overflow)?,
-        0,
+        entry_hash,
     )?;
     let name_start = offset
         .checked_add(disk_xattr::XATTR_ENTRY_HEADER_SIZE)
@@ -1122,11 +1204,12 @@ fn put_u32(output: &mut [u8], offset: usize, value: u32) -> Ext4Result<()> {
 }
 
 fn validate_xattr_block_header(header: disk_xattr::XattrBlockHeader) -> Ext4Result<()> {
+    // Linux treats h_reserved as opaque. When metadata checksums are enabled,
+    // their integrity is covered by the checksum verified after this check.
     if header.magic() != disk_xattr::XATTR_MAGIC
         || header.refcount() == 0
         || header.refcount() > disk_xattr::XATTR_REFCOUNT_MAX
         || header.blocks() != 1
-        || header.reserved() != [0; 3]
     {
         return Err(Ext4Error::Corrupt(CorruptKind::InvalidXattr));
     }
@@ -1319,6 +1402,86 @@ mod tests {
         let name_end = name_start + name.len();
         bytes[name_start..name_end].copy_from_slice(name);
         offset + disk_xattr::entry_len(name.len()).unwrap()
+    }
+
+    #[test]
+    fn external_xattr_encode_matches_linux_hashes_for_multiple_entries() {
+        // Non-repeating values of lengths 301 and 7 exercise both multi-word
+        // folding and zero-padded final words.
+        let user_value: Vec<u8> = (0u8..=250).cycle().take(301).collect();
+        let security_value = vec![0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76];
+        let xattrs = vec![
+            Ext4Xattr {
+                namespace: Ext4XattrNamespace::Security,
+                name: Vec::from(&b"token"[..]),
+                value: security_value,
+            },
+            Ext4Xattr {
+                namespace: Ext4XattrNamespace::User,
+                name: Vec::from(&b"key"[..]),
+                value: user_value,
+            },
+        ];
+        let mut external = vec![0; 4096];
+
+        encode_external_xattr_block(&xattrs, 42, 0, false, &mut external)
+            .expect("encode external xattr block");
+
+        // These values were cross-checked with e2fsprogs
+        // `ext2fs_ext_attr_hash_entry()` and `ext2fs_ext_attr_block_rehash()`.
+        const USER_HASH: u32 = 0xffff_9614;
+        const SECURITY_HASH: u32 = 0x2610_06a8;
+        const BLOCK_HASH: u32 = 0xb004_f957;
+        let user_entry_offset = disk_xattr::XATTR_HEADER_SIZE;
+        let security_entry_offset = user_entry_offset + disk_xattr::entry_len(3).unwrap();
+        assert_eq!(codec::le_u32(&external, 0x0c).unwrap(), BLOCK_HASH);
+        assert_eq!(
+            codec::le_u32(&external, user_entry_offset + 0x0c).unwrap(),
+            USER_HASH
+        );
+        assert_eq!(
+            codec::le_u32(&external, security_entry_offset + 0x0c).unwrap(),
+            SECURITY_HASH
+        );
+
+        let mut inline = vec![0; 512];
+        encode_inline_xattrs(&xattrs, &mut inline).expect("encode inline xattrs");
+        let inline_user_offset = disk_xattr::XATTR_IBODY_HEADER_SIZE;
+        let inline_security_offset = inline_user_offset + disk_xattr::entry_len(3).unwrap();
+        assert_eq!(
+            codec::le_u32(&inline, inline_user_offset + 0x0c).unwrap(),
+            0
+        );
+        assert_eq!(
+            codec::le_u32(&inline, inline_security_offset + 0x0c).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn external_xattr_zero_entry_hash_disables_block_hash() {
+        let mut block_hasher = ExternalXattrBlockHasher::new();
+        block_hasher.update(0x1122_3344);
+        block_hasher.update(0);
+        block_hasher.update(0x5566_7788);
+
+        assert_eq!(block_hasher.finish(), 0);
+    }
+
+    #[test]
+    fn external_xattr_header_allows_nonzero_reserved_words() {
+        let mut bytes = vec![0; disk_xattr::XATTR_HEADER_SIZE];
+        put_u32(&mut bytes, 0x00, disk_xattr::XATTR_MAGIC).unwrap();
+        put_u32(&mut bytes, 0x04, 1).unwrap();
+        put_u32(&mut bytes, 0x08, 1).unwrap();
+        put_u32(&mut bytes, 0x14, 0x1122_3344).unwrap();
+        put_u32(&mut bytes, 0x18, 0x5566_7788).unwrap();
+
+        let header =
+            disk_xattr::XattrBlockHeader::decode(&bytes).expect("decode external xattr header");
+
+        validate_xattr_block_header(header)
+            .expect("reserved words are not an ext4 xattr validity requirement");
     }
 
     #[test]

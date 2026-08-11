@@ -30,6 +30,30 @@ const EXT4_LINK_MAX: u16 = 65_000;
 /// `release_allocated_inode` (8).
 const EVICTION_FINISH_CREDITS: u32 = 11;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirectoryInsertPath {
+    InPlace,
+    LinearAppend,
+    IndexedLeafSplit,
+    LinearToIndexed,
+    LinearToIndexedAndSplit,
+}
+
+impl DirectoryInsertPath {
+    const fn uses_htree(self) -> bool {
+        matches!(
+            self,
+            Self::IndexedLeafSplit | Self::LinearToIndexed | Self::LinearToIndexedAndSplit
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DirectoryInsertPlan {
+    required_blocks: u64,
+    path: DirectoryInsertPath,
+}
+
 struct Ext4Credits;
 
 impl Ext4Credits {
@@ -43,17 +67,27 @@ impl Ext4Credits {
     const INODE_UPDATE: u32 = 1;
     const ORPHAN_LINK_UPDATE: u32 = 2;
 
-    fn create(_filesystem: &Ext4Filesystem, directory: &Ext4Inode) -> JournalCredits {
+    fn create(
+        _filesystem: &Ext4Filesystem,
+        directory: &Ext4Inode,
+        insert: DirectoryInsertPlan,
+    ) -> JournalCredits {
         Self::credits(
-            Self::INODE_ALLOCATOR + Self::dirent_update(directory) + Self::DIRECTORY_BLOCK_GROW,
+            Self::INODE_ALLOCATOR
+                + Self::dirent_insert(directory, insert)
+                + Self::DIRECTORY_BLOCK_GROW,
         )
     }
 
-    fn mkdir(_filesystem: &Ext4Filesystem, directory: &Ext4Inode) -> JournalCredits {
+    fn mkdir(
+        _filesystem: &Ext4Filesystem,
+        directory: &Ext4Inode,
+        insert: DirectoryInsertPlan,
+    ) -> JournalCredits {
         Self::credits(
             Self::INODE_ALLOCATOR
                 + Self::DIRECTORY_BLOCK_UPDATE
-                + Self::dirent_update(directory)
+                + Self::dirent_insert(directory, insert)
                 + Self::DIRECTORY_BLOCK_GROW
                 + Self::FILE_BLOCK_ALLOCATOR
                 + Self::FILE_EXTENT_UPDATE
@@ -61,11 +95,15 @@ impl Ext4Credits {
         )
     }
 
-    fn block_mapped_symlink(_filesystem: &Ext4Filesystem, directory: &Ext4Inode) -> JournalCredits {
+    fn block_mapped_symlink(
+        _filesystem: &Ext4Filesystem,
+        directory: &Ext4Inode,
+        insert: DirectoryInsertPlan,
+    ) -> JournalCredits {
         Self::credits(
             Self::INODE_ALLOCATOR
                 + Self::DIRECTORY_BLOCK_UPDATE
-                + Self::dirent_update(directory)
+                + Self::dirent_insert(directory, insert)
                 + Self::DIRECTORY_BLOCK_GROW
                 + Self::INODE_UPDATE,
         )
@@ -75,8 +113,9 @@ impl Ext4Credits {
         _filesystem: &Ext4Filesystem,
         directory: &Ext4Inode,
         _target: &Ext4Inode,
+        insert: DirectoryInsertPlan,
     ) -> JournalCredits {
-        Self::credits(Self::INODE_UPDATE + Self::dirent_update(directory))
+        Self::credits(Self::INODE_UPDATE + Self::dirent_insert(directory, insert))
     }
 
     fn unlink(
@@ -110,6 +149,7 @@ impl Ext4Credits {
         new_directory: &Ext4Inode,
         moved: &Ext4Inode,
         replaced: Option<&Ext4Inode>,
+        target_insert: Option<DirectoryInsertPlan>,
     ) -> JournalCredits {
         let parent_link_updates = if moved.kind() == InodeKind::Directory {
             Self::INODE_UPDATE * 2
@@ -123,8 +163,12 @@ impl Ext4Credits {
                 Self::INODE_UPDATE
             }
         });
+        let target_dirent = target_insert.map_or_else(
+            || Self::dirent_update(new_directory),
+            |insert| Self::dirent_insert(new_directory, insert),
+        );
         Self::credits(
-            Self::dirent_update(new_directory)
+            target_dirent
                 + Self::dirent_update(old_directory)
                 + Self::INODE_UPDATE
                 + parent_link_updates
@@ -140,6 +184,16 @@ impl Ext4Credits {
         Self::DIRECTORY_BLOCK_UPDATE
             + Self::INODE_UPDATE
             + if directory.has_indexed_directory() {
+                Self::HTREE_INDEX_EXTRA
+            } else {
+                0
+            }
+    }
+
+    fn dirent_insert(directory: &Ext4Inode, insert: DirectoryInsertPlan) -> u32 {
+        Self::DIRECTORY_BLOCK_UPDATE
+            + Self::INODE_UPDATE
+            + if directory.has_indexed_directory() || insert.path.uses_htree() {
                 Self::HTREE_INDEX_EXTRA
             } else {
                 0
@@ -202,9 +256,9 @@ impl Ext4Filesystem {
         }
         timestamp_seconds_u32(timestamp)?;
         self.validate_inode_timestamp_update(parent, timestamp)?;
-        self.ensure_namespace_insert_capacity(parent, name, 0)?;
+        let insert = self.ensure_namespace_insert_capacity(parent, name, 0)?;
 
-        let credits = Ext4Credits::create(self, parent);
+        let credits = Ext4Credits::create(self, parent, insert);
         let journal = self.namei_metadata_journal(credits)?;
         let mut handle = journal.begin(credits)?;
         let result = self.create_regular_file_in_transaction(
@@ -240,9 +294,9 @@ impl Ext4Filesystem {
             .checked_add(1)
             .filter(|links| *links <= EXT4_LINK_MAX)
             .ok_or(Ext4Error::Unsupported(UnsupportedKind::LinkCountLimit))?;
-        self.ensure_namespace_insert_capacity(parent, name, 1)?;
+        let insert = self.ensure_namespace_insert_capacity(parent, name, 1)?;
 
-        let credits = Ext4Credits::mkdir(self, parent);
+        let credits = Ext4Credits::mkdir(self, parent, insert);
         let journal = self.namei_metadata_journal(credits)?;
         let mut handle = journal.begin(credits)?;
         let result = self.create_directory_in_transaction(
@@ -320,9 +374,9 @@ impl Ext4Filesystem {
         }
         timestamp_seconds_u32(timestamp)?;
         self.validate_inode_timestamp_update(parent, timestamp)?;
-        self.ensure_namespace_insert_capacity(parent, name, 1)?;
+        let insert = self.ensure_namespace_insert_capacity(parent, name, 1)?;
 
-        let credits = Ext4Credits::block_mapped_symlink(self, parent);
+        let credits = Ext4Credits::block_mapped_symlink(self, parent, insert);
         let journal = self.namei_metadata_journal(credits)?;
         let mut handle = journal.begin(credits)?;
         let result = self.create_block_mapped_symlink_in_transaction(
@@ -377,9 +431,9 @@ impl Ext4Filesystem {
         self.validate_inode_timestamp_update(parent, timestamp)?;
         self.validate_inode_timestamp_update(target, timestamp)?;
         let file_type = directory_file_type_for_inode_kind(target.kind());
-        self.ensure_namespace_insert_capacity(parent, name, 0)?;
+        let insert = self.ensure_namespace_insert_capacity(parent, name, 0)?;
 
-        let credits = Ext4Credits::link(self, parent, target);
+        let credits = Ext4Credits::link(self, parent, target, insert);
         let journal = self.namei_metadata_journal(credits)?;
         let mut handle = journal.begin(credits)?;
         let result =
@@ -531,9 +585,11 @@ impl Ext4Filesystem {
                 self.ensure_unlinked_inode_eviction_supported(target)?;
             }
         }
-        if replaced.is_none() {
-            self.ensure_namespace_insert_capacity(target_parent, target_name, 0)?;
-        }
+        let target_insert = if replaced.is_none() {
+            Some(self.ensure_namespace_insert_capacity(target_parent, target_name, 0)?)
+        } else {
+            None
+        };
         if moved.kind() == InodeKind::Directory
             && !same_parent
             && replaced.is_none_or(|target| target.kind() != InodeKind::Directory)
@@ -544,7 +600,14 @@ impl Ext4Filesystem {
                 .filter(|links| *links <= EXT4_LINK_MAX)
                 .ok_or(Ext4Error::Unsupported(UnsupportedKind::LinkCountLimit))?;
         }
-        let credits = Ext4Credits::rename(self, source_parent, target_parent, moved, replaced);
+        let credits = Ext4Credits::rename(
+            self,
+            source_parent,
+            target_parent,
+            moved,
+            replaced,
+            target_insert,
+        );
         let journal = self.namei_metadata_journal(credits)?;
         let mut handle = journal.begin(credits)?;
         let result = self.rename_in_transaction(
@@ -641,9 +704,9 @@ impl Ext4Filesystem {
             return Err(Ext4Error::AlreadyExists);
         }
         self.validate_inode_timestamp_update(parent, timestamp)?;
-        self.ensure_namespace_insert_capacity(parent, name, 0)?;
+        let insert = self.ensure_namespace_insert_capacity(parent, name, 0)?;
 
-        let credits = Ext4Credits::create(self, parent);
+        let credits = Ext4Credits::create(self, parent, insert);
         let journal = self.namei_metadata_journal(credits)?;
         let mut handle = journal.begin(credits)?;
         let result = self.create_initialized_child_in_transaction(
@@ -1392,22 +1455,23 @@ impl Ext4Filesystem {
         directory: &Ext4Inode,
         name: &[u8],
         additional_blocks: u64,
-    ) -> Ext4Result<()> {
-        let directory_blocks = self.preflight_directory_entry_insert(directory, name)?;
-        let required = directory_blocks
+    ) -> Ext4Result<DirectoryInsertPlan> {
+        let plan = self.preflight_directory_entry_insert(directory, name)?;
+        let required = plan
+            .required_blocks
             .checked_add(additional_blocks)
             .ok_or(Ext4Error::Overflow)?;
         if required > self.superblock().free_blocks_count() {
             return Err(Ext4Error::NoSpace);
         }
-        Ok(())
+        Ok(plan)
     }
 
     fn preflight_directory_entry_insert(
         &self,
         directory: &Ext4Inode,
         name: &[u8],
-    ) -> Ext4Result<u64> {
+    ) -> Ext4Result<DirectoryInsertPlan> {
         let block_size =
             usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
         let block_size_u64 = u64::try_from(block_size).map_err(|_| Ext4Error::Overflow)?;
@@ -1426,7 +1490,10 @@ impl Ext4Filesystem {
                 return Err(Ext4Error::Corrupt(CorruptKind::Truncated));
             }
             if find_linear_insert_slot(&leaf, block_size, name.len())?.is_some() {
-                return Ok(0);
+                return Ok(DirectoryInsertPlan {
+                    required_blocks: 0,
+                    path: DirectoryInsertPath::InPlace,
+                });
             }
             if usize::from(target.parent.count_limit.count())
                 >= usize::from(target.parent.count_limit.limit())
@@ -1469,7 +1536,10 @@ impl Ext4Filesystem {
                 LogicalBlock::new(logical),
                 BlockCount::new(1),
             )?;
-            return extent_blocks.checked_add(1).ok_or(Ext4Error::Overflow);
+            return Ok(DirectoryInsertPlan {
+                required_blocks: extent_blocks.checked_add(1).ok_or(Ext4Error::Overflow)?,
+                path: DirectoryInsertPath::IndexedLeafSplit,
+            });
         }
 
         let block_count = directory_block_count_exact(directory.size(), block_size_u64)?;
@@ -1486,11 +1556,17 @@ impl Ext4Filesystem {
                 return Err(Ext4Error::Corrupt(CorruptKind::Truncated));
             }
             if find_linear_insert_slot(&block, block_size, name.len())?.is_some() {
-                return Ok(0);
+                return Ok(DirectoryInsertPlan {
+                    required_blocks: 0,
+                    path: DirectoryInsertPath::InPlace,
+                });
             }
         }
 
+        let mut additional_directory_blocks = BlockCount::new(1);
+        let mut insert_path = DirectoryInsertPath::LinearAppend;
         if block_count == 1 && self.superblock().features().has_dir_index() {
+            insert_path = DirectoryInsertPath::LinearToIndexed;
             let conversion = collect_linear_records_for_index_conversion(
                 &block,
                 block_size,
@@ -1503,17 +1579,34 @@ impl Ext4Filesystem {
                 block_size,
                 self.superblock().features().has_metadata_checksum(),
             )?;
+            // Conversion first moves the linear entries into one leaf. If the
+            // pending entry does not fit there, indexed insertion immediately
+            // splits that leaf and therefore needs a second directory block.
             if find_linear_insert_slot(&leaf, block_size, name.len())?.is_none() {
-                return Err(Ext4Error::NoSpace);
+                additional_directory_blocks = BlockCount::new(2);
+                insert_path = DirectoryInsertPath::LinearToIndexedAndSplit;
             }
         }
 
-        let extent_blocks = self.extent_insert_metadata_block_bound(
-            directory,
-            LogicalBlock::new(block_count),
-            BlockCount::new(1),
-        )?;
-        extent_blocks.checked_add(1).ok_or(Ext4Error::Overflow)
+        let extent_blocks = if insert_path == DirectoryInsertPath::LinearToIndexedAndSplit {
+            self.extent_insert_independent_blocks_metadata_bound(
+                directory,
+                LogicalBlock::new(block_count),
+                additional_directory_blocks,
+            )?
+        } else {
+            self.extent_insert_metadata_block_bound(
+                directory,
+                LogicalBlock::new(block_count),
+                additional_directory_blocks,
+            )?
+        };
+        Ok(DirectoryInsertPlan {
+            required_blocks: extent_blocks
+                .checked_add(u64::from(additional_directory_blocks.get()))
+                .ok_or(Ext4Error::Overflow)?,
+            path: insert_path,
+        })
     }
 
     fn replace_directory_entry(

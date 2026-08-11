@@ -129,6 +129,29 @@ impl Ext4Filesystem {
             ExtentMappingState::Unwritten,
             |_, _| true,
         )?;
+        self.extent_insert_metadata_block_bound_for(inode, &new_extents)
+    }
+
+    /// Returns the metadata-block bound for separately allocated one-block
+    /// mappings inserted at consecutive logical blocks.
+    pub(crate) fn extent_insert_independent_blocks_metadata_bound(
+        &self,
+        inode: &Ext4Inode,
+        logical: LogicalBlock,
+        count: BlockCount,
+    ) -> Ext4Result<u64> {
+        self.ensure_extent_mutation_supported(inode)?;
+        let logical = logical_block_u32(logical)?;
+        let new_extents = independent_block_extents(logical, count)?;
+        self.extent_insert_metadata_block_bound_for(inode, &new_extents)
+    }
+
+    fn extent_insert_metadata_block_bound_for(
+        &self,
+        inode: &Ext4Inode,
+        new_extents: &[MutableExtent],
+    ) -> Ext4Result<u64> {
+        validate_mutable_extents(new_extents, |_, _| true)?;
         let first = new_extents
             .first()
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidExtent))?;
@@ -145,7 +168,7 @@ impl Ext4Filesystem {
 
         let header = path.leaf_header()?;
         let mut extents = path.decode_leaf_extents(self, inode)?;
-        insert_extent_run(&mut extents, &new_extents)?;
+        insert_extent_run(&mut extents, new_extents)?;
         if extents.len() <= usize::from(header.max()) {
             return Ok(0);
         }
@@ -1328,6 +1351,37 @@ fn insert_extent_run(
     Ok(Vec::new())
 }
 
+fn independent_block_extents(logical: u32, count: BlockCount) -> Ext4Result<Vec<MutableExtent>> {
+    if count.get() == 0 {
+        return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
+    }
+    let physical_span = u64::from(count.get())
+        .checked_mul(2)
+        .ok_or(Ext4Error::Overflow)?;
+    let physical_base = u64::MAX
+        .checked_sub(physical_span)
+        .ok_or(Ext4Error::Overflow)?;
+    let capacity = usize::try_from(count.get()).map_err(|_| Ext4Error::Overflow)?;
+    let mut extents = Vec::with_capacity(capacity);
+    for offset in 0..count.get() {
+        let logical = logical.checked_add(offset).ok_or(Ext4Error::Overflow)?;
+        let physical_offset = u64::from(offset)
+            .checked_mul(2)
+            .ok_or(Ext4Error::Overflow)?;
+        let physical = physical_base
+            .checked_add(physical_offset)
+            .ok_or(Ext4Error::Overflow)?;
+        extents.push(MutableExtent::new(
+            logical,
+            PhysicalBlock::new(physical),
+            BlockCount::new(1),
+            ExtentMappingState::Initialized,
+            |_, _| true,
+        )?);
+    }
+    Ok(extents)
+}
+
 fn set_extent_range_state(
     extents: &mut Vec<MutableExtent>,
     range: LogicalExtentRange,
@@ -2156,7 +2210,11 @@ fn encode_extent_len(len: u32, is_unwritten: bool) -> Ext4Result<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{balanced_partition_ranges, ordered_writeback_credit_bound};
+    use super::{
+        MutableExtent, balanced_partition_ranges, extent_tree_metadata_block_count,
+        independent_block_extents, insert_extent_run, ordered_writeback_credit_bound,
+    };
+    use crate::{BlockCount, PhysicalBlock, extent::ExtentMappingState};
 
     #[test]
     fn single_block_writeback_covers_maximum_extent_path() {
@@ -2181,6 +2239,62 @@ mod tests {
         assert_eq!(
             balanced_partition_ranges(341, 340),
             Ok(alloc::vec![0..171, 171..341])
+        );
+    }
+
+    #[test]
+    fn independent_block_preflight_preserves_separate_extent_entries() {
+        let existing = alloc::vec![
+            MutableExtent::new(
+                0,
+                PhysicalBlock::new(10),
+                BlockCount::new(1),
+                ExtentMappingState::Initialized,
+                |_, _| true,
+            )
+            .unwrap(),
+            MutableExtent::new(
+                1,
+                PhysicalBlock::new(20),
+                BlockCount::new(1),
+                ExtentMappingState::Initialized,
+                |_, _| true,
+            )
+            .unwrap(),
+            MutableExtent::new(
+                2,
+                PhysicalBlock::new(30),
+                BlockCount::new(1),
+                ExtentMappingState::Initialized,
+                |_, _| true,
+            )
+            .unwrap(),
+        ];
+
+        let mut contiguous = existing.clone();
+        let contiguous_insert = MutableExtent::from_run(
+            3,
+            PhysicalBlock::new(100),
+            BlockCount::new(2),
+            ExtentMappingState::Initialized,
+            |_, _| true,
+        )
+        .unwrap();
+        insert_extent_run(&mut contiguous, &contiguous_insert).unwrap();
+
+        let mut independent = existing;
+        let independent_insert = independent_block_extents(3, BlockCount::new(2)).unwrap();
+        insert_extent_run(&mut independent, &independent_insert).unwrap();
+
+        assert_eq!(contiguous.len(), 4);
+        assert_eq!(independent.len(), 5);
+        assert_eq!(
+            extent_tree_metadata_block_count(contiguous.len(), 4096),
+            Ok(0)
+        );
+        assert_eq!(
+            extent_tree_metadata_block_count(independent.len(), 4096),
+            Ok(1)
         );
     }
 }

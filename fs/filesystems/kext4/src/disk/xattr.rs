@@ -18,7 +18,7 @@ pub(crate) struct XattrBlockHeader {
     refcount: u32,
     blocks: u32,
     checksum: u32,
-    reserved: [u32; 3],
+    _reserved: [u32; 3],
 }
 
 impl XattrBlockHeader {
@@ -29,7 +29,7 @@ impl XattrBlockHeader {
             refcount: codec::le_u32(input, 0x04)?,
             blocks: codec::le_u32(input, 0x08)?,
             checksum: codec::le_u32(input, 0x10)?,
-            reserved: [
+            _reserved: [
                 codec::le_u32(input, 0x14)?,
                 codec::le_u32(input, 0x18)?,
                 codec::le_u32(input, 0x1c)?,
@@ -51,10 +51,6 @@ impl XattrBlockHeader {
 
     pub(crate) const fn checksum(self) -> u32 {
         self.checksum
-    }
-
-    pub(crate) const fn reserved(self) -> [u32; 3] {
-        self.reserved
     }
 }
 

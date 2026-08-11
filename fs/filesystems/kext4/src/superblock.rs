@@ -3468,6 +3468,57 @@ mod tests {
     }
 
     #[test]
+    fn e2fsck_accepts_long_name_htree_conversion_with_leaf_split() {
+        let mke2fs = require_e2fsprogs("mke2fs");
+        let e2fsck = require_e2fsprogs("e2fsck");
+        let image = temporary_image_path("namei-long-name-htree-split-round-trip");
+        create_journaled_indexed_namespace_test_image(&mke2fs, &image);
+
+        let bytes = fs::read(&image).expect("read generated dir_index image");
+        let device = Arc::new(LinuxImageDevice::new(bytes));
+        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let mut filesystem =
+            Ext4Filesystem::mount(block_device).expect("mount dir_index namespace image");
+        let root = filesystem.root_inode().expect("read root inode");
+        let directory = filesystem
+            .create_directory(
+                &root,
+                b"kext4-long-names",
+                0o755,
+                0,
+                0,
+                crate::Ext4Timestamp::new(700, 0),
+            )
+            .expect("create directory before long-name htree conversion");
+        let mut last_name = Vec::new();
+        for index in 0..16 {
+            last_name = format!("{index:03}-").into_bytes();
+            last_name.resize(crate::disk::dir::DIRENT_NAME_MAX, b'a');
+            let _created = filesystem
+                .create_regular_file(
+                    &directory,
+                    &last_name,
+                    0o644,
+                    0,
+                    0,
+                    crate::Ext4Timestamp::new(701 + index, 0),
+                )
+                .expect("create long-name file across htree conversion and leaf split");
+        }
+        assert!(directory.has_indexed_directory());
+        let entry = filesystem
+            .lookup_bytes(&directory, &last_name)
+            .expect("lookup long-name indexed create")
+            .expect("long-name indexed entry is visible");
+        assert_eq!(entry.file_type(), crate::DirectoryFileType::RegularFile);
+        drop(filesystem);
+
+        fs::write(&image, device.bytes()).expect("write long-name htree split image");
+        run_e2fsck_read_only(&e2fsck, &image);
+        fs::remove_file(image).expect("remove namei-long-name-htree-split image");
+    }
+
+    #[test]
     fn recovers_persisted_allocator_journal_commit_before_checkpoint() {
         let mke2fs = require_e2fsprogs("mke2fs");
         let image = temporary_image_path("allocator-journal-recover");

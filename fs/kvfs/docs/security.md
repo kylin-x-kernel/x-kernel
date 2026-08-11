@@ -69,6 +69,9 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   返回的引用才有效；运行时路径不得绕过该初始化顺序。
 - `Nameidata` 不持有 credential；一次操作的调用者必须在整个方法链中传递同一个 `&Cred`。
 - 路径中间目录在 lookup 下一组件前必须通过 `MAY_EXEC`。
+- 尾随 `/` 必须在最终组件 lookup 前强制 `FOLLOW_FINAL | DIRECTORY`；最终
+  `LOOKUP_DIRECTORY` 必须由通用 namei 用 `Dentry::can_lookup()` 消费，不能由 open 层用
+  接受 autodir 的 `d_is_dir()` 代替。
 - 最终 open 必须按 access mode 检查目标 inode，不能只检查路径是否存在。
 - namespace mutation 必须检查相关父目录 `MAY_WRITE | MAY_EXEC`；unlink、rmdir 和 rename
   的 sticky 与 mountpoint policy 必须针对父目录锁内最终 lookup 得到的 victim 执行，不能
@@ -182,7 +185,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-03 | flags 家族误传 | 中 | 内部 API 使用裸整数 | 独立 bitflags 类型形成编译期隔离 |
 | T-04 | dentry 驱逐遗漏导致目录状态或资源生命周期错误 | 中 | namespace 更新只修改弱索引或只修改 dcache | insert/remove/forget 路径成对更新两层缓存，并以行为测试覆盖最后一个外部引用释放后的目录语义 |
 | T-05 | 运行时并发首次访问匿名 inode fs 导致初始化卡住 | 中 | 复杂 VFS 对象放在 lazy 首次访问路径中 | boot 阶段调用 `init_anon_inodefs()`，`global()` 只读取已发布对象 |
-| T-06 | 路径只检查最终 inode，绕过不可搜索目录 | 高 | namei 未对中间目录检查 execute/search | 每次 lookup 下一组件前调用 `Path::permission(MAY_EXEC, cred)` |
+| T-06 | 路径只检查最终 inode，绕过不可搜索目录或错误接受不可 lookup 的最终对象 | 高 | namei 未检查中间目录 execute/search，或把尾随 `/`、`LOOKUP_DIRECTORY` 留给 open 层处理 | 每次 lookup 下一组件前调用 `Path::permission(MAY_EXEC, cred)`；通用 `path_lookupat()` 在最终 walk 前转换尾随 `/`，并用 `Dentry::can_lookup()` 消费目录约束 |
 | T-07 | owner class 缺位后错误退回 group/other | 高 | DAC 把三类权限当作可任选集合 | `generic_permission` 按 owner、group、other 互斥顺序只选择一类 |
 | T-08 | namespace 修改绕过父目录权限 | 高 | 后端 callback 被直接调用或 VFS wrapper 漏检 | `Path` mutation API 在最终对象仍受 namespace lock 保护时执行父目录 `MAY_WRITE | MAY_EXEC` |
 | T-09 | sticky 目录删除其它用户文件 | 高 | 锁外检查的名称在 callback 前被替换 | unlink/rmdir/rename 的 validator 对锁内最终 victim 执行 sticky owner 和 mountpoint policy |
@@ -274,6 +277,8 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
   初始化。
 - 新 pathname 入口是否显式接收并逐层传递同一个 `&Cred`。
 - 中间目录 search、最终 inode 和父目录 mutation 权限是否分别在正确阶段检查。
+- 尾随 `/` 是否强制跟随最终 symlink，所有 `LOOKUP_DIRECTORY` 是否统一要求
+  `Dentry::can_lookup()` 而不是仅判断 directory-like 类型。
 - 新建 inode 是否使用 `inode_init_owner()`，后端是否持久化 UID/GID。
 - fd-based 操作是否使用 open file mode/`f_cred`，而不是重新执行 pathname 授权。
 - FIFO session 是否只归 inode pipe slot，fops 是否保持共享且无状态。

@@ -1152,6 +1152,7 @@ fn journals_inline_xattr_set_and_remove() {
 fn journals_external_xattr_block_and_acl_round_trips() {
     let mke2fs = require_e2fsprogs("mke2fs");
     let debugfs = require_e2fsprogs("debugfs");
+    let e2fsck = require_e2fsprogs("e2fsck");
     let image = temporary_image_path("xattr-external-write");
     let payload = temporary_image_path("xattr-external-write-payload");
     create_image(&mke2fs, &image);
@@ -1165,7 +1166,7 @@ fn journals_external_xattr_block_and_acl_round_trips() {
     let device = Arc::new(WritableImageDevice::new(
         fs::read(&image).expect("read generated external xattr image"),
     ));
-    let large_value = vec![b'x'; 600];
+    let large_value: Vec<u8> = (0u8..=250).cycle().take(603).collect();
     let acl_value = vec![0x02, 0x00, 0x00, 0x00];
     let (inode_number, original_blocks, external_blocks) = {
         let mut filesystem =
@@ -1218,6 +1219,9 @@ fn journals_external_xattr_block_and_acl_round_trips() {
             .expect("persist external xattr updates");
         (inode.number(), original_blocks, external_blocks)
     };
+
+    fs::write(&image, device.committed_bytes()).expect("persist external xattr hash image");
+    run_e2fsck_check(&e2fsck, &image);
 
     {
         let filesystem = Ext4Filesystem::mount(device.clone()).expect("remount external xattr");

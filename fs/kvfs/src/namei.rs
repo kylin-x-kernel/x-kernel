@@ -58,10 +58,6 @@ impl Qstr {
     fn as_str(&self) -> &str {
         &self.name[..self.len]
     }
-
-    fn has_trailing_slashes(&self) -> bool {
-        self.name.len() > self.len
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -198,7 +194,7 @@ impl<'a> Nameidata<'a> {
     }
 
     fn has_trailing_slashes(&self) -> bool {
-        self.last.as_ref().is_some_and(Qstr::has_trailing_slashes)
+        self.name.as_pathname().as_str().ends_with('/')
     }
 
     fn reserve_link_follow(&mut self) -> VfsResult<()> {
@@ -438,7 +434,10 @@ impl<'a> Nameidata<'a> {
     fn path_lookupat(&mut self, base: &Path, cred: &Cred) -> VfsResult<Path> {
         let path = self.link_path_walk(base, cred)?;
         if self.pathname.is_empty() {
-            return Ok(path);
+            return self.complete_path_lookup(path);
+        }
+        if self.last_type == LastType::Norm && self.has_trailing_slashes() {
+            self.flags |= LookupFlags::FOLLOW_FINAL | LookupFlags::DIRECTORY;
         }
         match self.last_type {
             LastType::Root | LastType::Dot | LastType::Dotdot => {
@@ -454,7 +453,14 @@ impl<'a> Nameidata<'a> {
                 self.walk_component(&name, WalkComponent::Final, cred)?;
             }
         }
-        Ok(self.path.clone())
+        self.complete_path_lookup(self.path.clone())
+    }
+
+    fn complete_path_lookup(&self, path: Path) -> VfsResult<Path> {
+        if self.flags.contains(LookupFlags::DIRECTORY) && !path.dentry().can_lookup() {
+            return Err(VfsError::NotADirectory);
+        }
+        Ok(path)
     }
 
     fn parent_lookup(
@@ -1557,6 +1563,14 @@ mod tests {
         let dir_link = file_entry(6, &root, "dirlink", NodeType::Symlink, b"/dir", None);
         root_ops.insert("dirlink", dir_link);
 
+        let autodir_inode = VfsInode::new_dir(
+            Arc::new(TestFile::new(9, NodeType::Directory, &[], None)),
+            inode_init(9, NodeType::Directory, 0),
+        );
+        let autodir =
+            Dentry::new_dir_from_inode(autodir_inode, Some(root.clone()), String::from("autodir"));
+        root_ops.insert("autodir", autodir);
+
         let fs = SuperBlock::new(Arc::new(TestSuperBlock), root.clone());
         let mount = Mount::new_root(&fs);
         let root_location = mount.root_path();
@@ -2267,6 +2281,82 @@ mod tests {
             )
             .unwrap();
         assert!(Arc::ptr_eq(file.cred(), &cred));
+    }
+
+    #[def_test]
+    fn o_path_directory_rejects_non_directory() {
+        let tree = test_tree();
+        let flags = linux_raw_sys::general::O_PATH | linux_raw_sys::general::O_DIRECTORY;
+
+        let regular = Filename::new("/target").open_with_flags_at(
+            &tree.root,
+            &tree.base,
+            flags,
+            NodePermission::empty(),
+            NodePermission::empty(),
+            kcred::initial_cred(),
+        );
+        assert!(matches!(regular, Err(VfsError::NotADirectory)));
+
+        let directory = Filename::new("/dir")
+            .open_with_flags_at(
+                &tree.root,
+                &tree.base,
+                flags,
+                NodePermission::empty(),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            )
+            .unwrap();
+        assert_eq!(directory.node_type(), NodeType::Directory);
+
+        let autodir = Filename::new("/autodir").open_with_flags_at(
+            &tree.root,
+            &tree.base,
+            flags,
+            NodePermission::empty(),
+            NodePermission::empty(),
+            kcred::initial_cred(),
+        );
+        assert!(matches!(autodir, Err(VfsError::NotADirectory)));
+    }
+
+    #[def_test]
+    fn o_path_trailing_slash_follows_symlink_and_requires_directory() {
+        let tree = test_tree();
+
+        let regular = Filename::new("/target/").open_with_flags_at(
+            &tree.root,
+            &tree.base,
+            linux_raw_sys::general::O_PATH,
+            NodePermission::empty(),
+            NodePermission::empty(),
+            kcred::initial_cred(),
+        );
+        assert!(matches!(regular, Err(VfsError::NotADirectory)));
+
+        let flags = linux_raw_sys::general::O_PATH | linux_raw_sys::general::O_NOFOLLOW;
+        let directory = Filename::new("/dirlink/")
+            .open_with_flags_at(
+                &tree.root,
+                &tree.base,
+                flags,
+                NodePermission::empty(),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            )
+            .unwrap();
+        assert_eq!(directory.node_type(), NodeType::Directory);
+
+        let regular_link = Filename::new("/link/").open_with_flags_at(
+            &tree.root,
+            &tree.base,
+            flags,
+            NodePermission::empty(),
+            NodePermission::empty(),
+            kcred::initial_cred(),
+        );
+        assert!(matches!(regular_link, Err(VfsError::NotADirectory)));
     }
 
     #[def_test]

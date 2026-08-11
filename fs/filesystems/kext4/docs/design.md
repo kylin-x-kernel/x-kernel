@@ -278,6 +278,12 @@ Namei 修改先验证 parent/name，查找目标 dirent，检查 inode kind 和�
 一个 journal transaction 中完成 dirent 和 inode 更新。Rename 使用准备、替换、删除、收尾
 的顺序，保证目录父链接计数和 `..` 更新保持一致。
 
+目录插入预检返回一份同时供空间检查和 journal credits 使用的计划，区分原地插入、线性
+append、已有 HTree leaf split、线性目录转 HTree，以及转换后立即 split。最后一种路径实际
+执行两次独立的单块分配，因此 extent 预检在同一份临时叶子状态中加入两个最坏情况下不合并
+的单块 mapping，不能把它们视为一个连续的两块 extent。计划一旦进入 HTree 路径，即使事务
+开始时 inode 尚未设置 `EXT4_INDEX_FL`，credits 也包含 HTree 更新余量。
+
 Create、mkdir、mknod 和 symlink 的 KVFS bridge callback 接收同一次操作的 `&Cred`，先用
 `inode_init_owner()` 根据父 inode、`fsuid/fsgid` 和 setgid 继承规则得到 mode/UID/GID，
 再把显式 `uid`、`gid` 参数传入 KExt4 namei transaction。核心 inode constructor 不读取当前任务，

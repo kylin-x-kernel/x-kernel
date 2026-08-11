@@ -203,7 +203,10 @@ credential 的生命周期由 syscall 持有的 `Arc` 保证；对象字段不�
 
 open 在入口清理 legacy flags，校验已知位，生成 access mode、open intent 和 lookup
 flags。namei 使用这些语义执行查找、创建和最终 open，不再直接组合 `O_CREAT` 与
-`O_EXCL`。
+`O_EXCL`。`O_PATH` 路径同样执行最终对象类型约束；例如 `O_PATH | O_DIRECTORY`
+只接受可执行子项查找的目录，普通文件和 autodir 按 Linux 语义返回 `ENOTDIR`。最终组件
+后的 `/` 在通用 `path_lookupat()` 中转换为 `FOLLOW_FINAL | DIRECTORY`，因此即使同时指定
+`O_NOFOLLOW`，尾随斜杠仍会跟随最终符号链接，并用 `Dentry::can_lookup()` 校验解析结果。
 
 pathname FIFO 不通过 syscall fallback 或第二次 lookup 打开。所有 FIFO inode 共享一张
 无运行时字段的 file-operation table；每个 inode 在 special state 中持有当前活动
