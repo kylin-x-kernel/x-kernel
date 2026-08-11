@@ -26,7 +26,9 @@ driver layer / smoltcp / ringbuf
 ```
 
 - safe API 调用者信任 `knet` 维护 socket 状态、路由状态、buffer 边界和 errno 映射。
-- `knet` 信任 `posix/net` 完成用户指针读取、sockaddr 长度校验、地址族选择和权限策略。
+- `knet` 信任 `posix/net` 完成用户指针读取、sockaddr 长度校验和地址族选择。
+  netlink send 路径还信任 syscall 与 socket file 入口传入本次调用者的 `Cred` 快照，
+  mutation 权限检查由 `knet` 执行。
 - pathname Unix socket 操作信任入口传入的 `Cred` 快照与当前系统调用主体一致；
   kvfs 负责逐级 search、父目录 mutation 和 inode DAC 检查。
 - `knet` 信任 driver 层返回的 `NetBufHandle` 数据切片在 handle 生命周期内有效。
@@ -44,14 +46,16 @@ driver layer / smoltcp / ringbuf
 
 - **网络输入**：Ethernet、ARP、IPv4、TCP、UDP、raw IP 包；
 - **设备输入**：driver 提供的 `NetBufHandle`、IRQ 唤醒、RX/TX 缓冲区生命周期；
-- **控制面输入**：netlink header、attribute、route mutation、neighbor 更新；
+- **控制面输入**：每次发送携带的调用者凭据、批量 netlink message、header、
+  attribute、route mutation、neighbor 更新；
 - **Unix / vsock 输入**：peer socket 数据、连接建立与关闭事件，
   以及 pathname Unix socket 经 kvfs 解析的路径和 inode；
 - **上层 syscall 语义输入**：由 `posix/net` 传入的 socket 地址族、
   socket option、阻塞语义和权限决策结果。
 
 本模块不直接解引用用户指针，
-而是信任 `posix/net` 先完成用户内存访问、长度校验和权限检查。
+而是信任 `posix/net` 先完成用户内存访问和长度校验。netlink 调用者凭据由
+POSIX send 或 socket file write 入口取得，并显式传递给 `NetlinkSocket`。
 本模块也不直接执行 DMA 编程，
 但会消费由 driver 层提供的网络缓冲区，
 因此仍需把 driver buffer 生命周期视为关键边界。
@@ -61,6 +65,7 @@ driver layer / smoltcp / ringbuf
 - 外部网络包是否能触发越界、panic、状态不一致或资源耗尽；
 - 控制面 mutation 是否会让 `ROUTE_STATE`
   与 data-plane 同步失配；
+- netlink mutation 是否复用旧凭据，或在混合批次和 queue 耗尽时产生部分提交；
 - driver buffer、socket handle、ring buffer
   是否可能因生命周期管理错误破坏内存安全；
 - IRQ 路径与普通协议推进路径是否可能发生竞态或延迟放大。
@@ -183,17 +188,19 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 3. `Service` 互斥访问：smoltcp `Interface`、`Router` 和设备 dispatch 必须在 `SERVICE.lock()` 内推进。
 4. ring buffer publish 规则：Unix stream 和 vsock 只能发布已经写入的字节，只能消费当前 occupied 区域内的字节。Unix stream 的 write index 发布、方向关闭和空队列 EOF 判定由同一个方向锁排序。
 5. driver buffer 生命周期：`NetBufHandle::data` 只在 handle 被 recycle 前使用，RX handle 必须在处理后归还。
-6. netlink message 边界：所有 payload 读取必须先经过 header 长度、attribute 长度和 family 校验。
-7. route index 边界：rtnetlink route 的 `oif` 转换成设备索引后必须检查 `dev < devices.len()`。
-8. static init 顺序：创建 socket 前必须完成 `init_network` 初始化 `SERVICE`、`SOCKET_SET` 和 `LISTEN_TABLE`。
-9. pathname credential 一致性：一次 Unix pathname bind 的查找、创建和属主初始化必须使用同一份 `Cred` 快照。
-10. kernel caller 边界：没有当前用户任务的内核调用者不得进入隐式 `current_cred()` 路径；pathname 操作和 socket file 构造都必须显式选择凭据。
-11. `PacketBuf` 所有权：设备、Router、loopback 和 smoltcp adapter 之间按值转移报文；协议偏移只能落在当前有效数据范围内。
-12. IPv4 输入边界：本地交付前必须校验版本、头长、总长和头部校验和，并按 `total_len` 截断尾部数据。
-13. 网络类型边界：`RouteTable` 和 `NetDevice` 不暴露 smoltcp 地址或时间类型；控制面与协议兼容转换由 `Router`、`Service` 和初始化入口完成。
-14. IPv4 重组边界：分片按源地址、目的地址、标识、协议和接口隔离；被已有区间完全覆盖的分片按重复包丢弃，部分重叠或范围矛盾会删除整条队列；重组状态受 64 条队列、4 MiB 高水位、3 MiB 低水位和 30 秒超时限制。
-15. UDP 接收边界：UDP 长度、校验和和 payload range 通过 checked parser 验证，单个 PCB 的接收队列上限为 1024 个数据报。
-16. IPv4 输出边界：输出 MTU 来自匹配路由；DF 包超过 MTU 时返回 `EMSGSIZE`，允许分片的包只按 8 字节对齐切分 payload。
+6. netlink message 边界：所有 payload 读取必须先经过单条 header 长度、批次对齐边界、attribute 长度和 family 校验。
+7. netlink credential 边界：每次 `send` 或 `write` 必须传入当前调用者的独立 `Cred` 快照，netlink socket 不得缓存调用者权限。
+8. netlink batch 执行边界：每个 socket 的发送事务锁串行化容量预检、mutation 执行和 response 入队；混合查询和 mutation 的批次必须在状态更新前拒绝；同类 mutation 执行前必须检查完整批次的 response queue 空间。response 在 rx queue 锁外生成，锁顺序固定为发送事务锁、控制面状态锁、netlink rx queue。
+9. route index 边界：rtnetlink route 的 `oif` 转换成设备索引后必须检查 `dev < devices.len()`。
+10. static init 顺序：创建 socket 前必须完成 `init_network` 初始化 `SERVICE`、`SOCKET_SET` 和 `LISTEN_TABLE`。
+11. pathname credential 一致性：一次 Unix pathname bind 的查找、创建和属主初始化必须使用同一份 `Cred` 快照。
+12. kernel caller 边界：没有当前用户任务的内核调用者不得进入隐式 `current_cred()` 路径；pathname 操作和 socket file 构造都必须显式选择凭据。
+13. `PacketBuf` 所有权：设备、Router、loopback 和 smoltcp adapter 之间按值转移报文；协议偏移只能落在当前有效数据范围内。
+14. IPv4 输入边界：本地交付前必须校验版本、头长、总长和头部校验和，并按 `total_len` 截断尾部数据。
+15. 网络类型边界：`RouteTable` 和 `NetDevice` 不暴露 smoltcp 地址或时间类型；控制面与协议兼容转换由 `Router`、`Service` 和初始化入口完成。
+16. IPv4 重组边界：分片按源地址、目的地址、标识、协议和接口隔离；被已有区间完全覆盖的分片按重复包丢弃，部分重叠或范围矛盾会删除整条队列；重组状态受 64 条队列、4 MiB 高水位、3 MiB 低水位和 30 秒超时限制。
+17. UDP 接收边界：UDP 长度、校验和和 payload range 通过 checked parser 验证，单个 PCB 的接收队列上限为 1024 个数据报。
+18. IPv4 输出边界：输出 MTU 来自匹配路由；DF 包超过 MTU 时返回 `EMSGSIZE`，允许分片的包只按 8 字节对齐切分 payload。
 
 ## 线程安全
 
@@ -203,7 +210,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | `UdpSocket` | 字段满足 Send | `Arc<UdpPcb>` 内的锁、atomic 和分桶 PCB registry 保护共享状态 |
 | `RawSocket` | 字段满足 Send | `RwLock`、atomic 和 immutable handle 保护共享状态 |
 | `StreamTransport` | 字段满足 Send | `Mutex<Option<Channel>>` 串行化本端操作，per-direction `SpinNoPreempt` 排序数据发布、半关闭与 EOF 判定，三组 `PollSet` 隔离读、写和连接状态 waiter |
-| `NetlinkSocket` | 字段满足 Send | `Arc<NetlinkSocketInner>` 内部使用 `RwLock`、`Mutex` 和 `PollSet` |
+| `NetlinkSocket` | 字段满足 Send | `Arc<NetlinkSocketInner>` 内部使用 `RwLock`、发送事务 `Mutex`、rx queue `Mutex` 和 `PollSet`；每次发送显式携带调用者凭据，socket 不保存权限主体 |
 | `Service` | 在 `Mutex<Service>` 内使用 | 通过全局 `Mutex` 提供共享访问 |
 | `Router` | 在 `Service` 内使用 | 通过 `Service` mutex 间接共享 |
 
@@ -233,6 +240,8 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-20 | pathname Unix socket 绕过 inode/目录 DAC 或复用已有 inode | 高 | bind/connect/sendto 直接访问 binding 表，或 bind 接受已有路径 | bind 通过 `parent_at` 和 `Path::mknod` 排他创建；connect/sendto 在 lookup 后检查最终 inode `MAY_WRITE`；abstract 地址才直接访问内存 binding 表 |
 | T-21 | 内核任务隐式读取用户凭据 | 高 | 启动期 pathname bind 调用普通 `SocketOps::bind`，当前线程不存在或主体错误 | 内核调用者使用 `bind_with_cred` 显式传入 `initial_cred()` 等已选择凭据；普通入口只服务当前用户任务 |
 | T-22 | Unix stream 在 EOF 后发布数据 | 中 | send、shutdown 与 peer recv 并发交错，关闭状态和 write index 缺少共同排序 | 每个发送方向使用共享 `tx_order`；send 在锁内复检后发布，recv 在锁内复查 empty 和 closed，Channel 释放前先发布关闭状态 |
+| T-23 | netlink socket 复用旧凭据导致越权 mutation | 高 | socket 跨进程传递或调用者凭据变化后继续使用创建时权限 | POSIX send 与 socket file write 路径仅在 netlink 分支取得当前 `Cred`，`NetlinkSocket::send_with_cred` 逐条检查 mutation；无权限请求生成 `NLMSG_ERROR` 和 `EPERM` |
+| T-24 | 混合 netlink 批次发生部分 mutation | 高 | 同一发送同时包含 query 和 mutation，framing 错误位于已处理消息之后，或 response queue 在批次中途耗尽 | 发送事务锁串行化同一 socket 的 mutation 批次；完整批次先校验 framing 和类别；混合批次返回 syscall `EOPNOTSUPP`；同类 mutation 执行前检查完整 response 空间 |
 
 影响等级定义：
 
@@ -262,6 +271,8 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | F-16 | UDP DF 数据报超过路由 MTU | `IP_MTU_DISCOVER` 要求 DF 且 packet 长度超过路由 MTU | 当前发送失败 | 应用收到 `EMSGSIZE` | 4 | 发送前读取路由 MTU，Router 拒绝对 DF 包执行输出分片 |
 | F-17 | 启动期 Unix pathname bind panic | 内核任务调用隐式 `current_cred()`，但尚无当前用户线程 | `/dev/log` 等内核 socket 无法绑定 | 启动中断 | 2 | 启动期调用 `bind_with_cred` 并显式传入 `initial_cred()`；保留可用的初始 fs context |
 | F-18 | smoltcp 过期 poll 期限变成超长等待 | 有符号微秒差值为负后通过 `as u64` 转换 | soft timer 被设置到远未来 | TCP 数据路径停顿，可能伴随 timer IRQ 异常 | 2 | 在同一 epoch 下直接把 `SmoltcpInstant` 映射为 `MonotonicInstant`，不计算无符号 delay；单测覆盖过期和未来期限 |
+| F-19 | 无权限 netlink mutation | 当前发送凭据不具备配置权限 | mutation 不执行，RX queue 收到 `NLMSG_ERROR` 和 `EPERM` | 调用者配置失败 | 4 | 每次发送重新检查凭据；error 入队后发送入口返回已消费请求长度 |
+| F-20 | 混合或畸形 netlink 批次 | 单次发送混合 query 与 mutation，或后续 message 的长度和对齐非法 | 整批未执行并返回 syscall 错误 | 调用者需修正或拆分批次 | 4 | 批次分类和 framing 校验在状态更新及 response 生成前完成 |
 
 严重度定义：
 
@@ -273,7 +284,8 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 ## 故障管理
 
 - 普通输入错误使用 `KError` 和 `LinuxError` 返回，例如 `EINVAL`、`EAFNOSUPPORT`、`ENETUNREACH`、`EADDRINUSE`、`EWOULDBLOCK`。
-- malformed netlink 请求返回 netlink error response，短到无法读取 header 的请求返回空 response。
+- netlink framing 错误在处理前返回 syscall `EINVAL` 且不生成 response；完成批次拆分后的 payload 或 attribute 错误返回 `NLMSG_ERROR`。
+- 无权限 netlink mutation 在 RX queue 中返回带 `EPERM` 的 `NLMSG_ERROR`；混合查询和 mutation 批次在修改状态前返回 syscall `EOPNOTSUPP`。
 - malformed Ethernet、ARP、IP、UDP、TCP 包在 RX 路径丢弃，并通过 warn 或 trace 记录。
 - UDP PCB 接收队列和 Router TX 队列满时映射为丢包或 `WouldBlock`，poller 负责等待 IO readiness。
 - smoltcp buffer 和 Unix stream ring buffer 满时映射为 `WouldBlock`，poller 负责等待 IO readiness；非阻塞 Unix stream send 已有进度时返回部分字节数。
@@ -304,7 +316,10 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - 每个 `unsafe` 块均有 `SAFETY:` 注释。
 - 新增 smoltcp socket handle 的生命周期受 `SOCKET_SET` 保护。
 - 新增 route 或 device mutation 通过 `update_route_state` 或等效同步路径更新 data-plane。
-- 新增 netlink parser 先校验 header 长度、attribute 长度、family 和 index。
+- 每次 netlink `send` 或 `write` 传入当前调用者的 `Cred` 快照，socket 不缓存权限。
+- 新增 netlink parser 先校验单条 header 长度和批次对齐边界，再校验 attribute、family 和 index。
+- 同一 netlink socket 的发送事务保持串行，锁顺序为发送事务锁、控制面状态锁、rx queue。
+- 仅含查询或仅含 mutation 的批次支持逐条处理，混合批次在状态更新前返回 `EOPNOTSUPP`，mutation 批次执行前检查完整 response 空间。
 - 新增 ring buffer 操作的 advance count 来自同一锁内同一批 slices。
 - Unix stream 的 write index 发布、方向关闭和空队列 EOF 判定保持同一个 per-direction 排序点，方向锁内不执行用户复制或 `PollSet` 唤醒，shutdown 在释放 `channel` mutex 后执行 waiter 唤醒。
 - 新增外部网络输入使用 checked parser。

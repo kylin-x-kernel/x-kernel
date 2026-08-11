@@ -32,7 +32,7 @@ net/knet/
     │   └── wire.rs
     ├── netlink/
     │   ├── mod.rs
-    │   ├── route.rs
+    │   ├── rtnetlink.rs
     │   ├── socket.rs
     │   └── wire.rs
     ├── socket/
@@ -187,7 +187,8 @@ NIC 硬中断 handler 只负责 ack 设备中断并调用 `schedule_rx()`；
   `SERVICE`、`SOCKET_SET` 和 `ROUTE_STATE`
   的共享访问主要依赖全局锁和原子状态，
   但 syscall 语义相关路径仍由 `posix/net`
-  负责提供进程文件描述符与凭据语境。
+  负责提供进程文件描述符与凭据语境。netlink `send` 和 socket file
+  `write` 在操作入口取得当前调用者的凭据快照，socket 不缓存权限。
 - **pathname Unix socket 需要文件系统与凭据语境**：
   用户态 `bind` / `connect` 必须在具有当前线程和 fs context 的任务中调用；
   不具有当前用户任务的内核调用者必须使用 `bind_with_cred`
@@ -306,11 +307,18 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 
 ### rtnetlink 请求
 
-1. `NetlinkSocket::send` 把用户请求交给 `handle_route_request`。
-2. `NlMsgHeader::read` 和各类 `parse_*` helper 校验 netlink header 与 attribute。
-3. dump 请求从 `ROUTE_STATE` 生成 multi-part response。
-4. mutation 请求构造新的 `RtnetlinkState`，失败时返回 netlink error。
-5. 成功更新后同步到 `Service`，带 `NLM_F_ACK` 时返回 ack。
+1. POSIX send 路径和 socket file write 路径先区分协议，仅在 netlink 分支取得当前
+   调用者的 `Cred` 快照，通过 `Socket::send_with_cred` 传给 `NetlinkSocket`。
+2. `NlMsgHeader::read` 校验每条 netlink message 的 header 长度，批次拆分再校验
+   message 对齐边界。framing 错误在处理任何 message 前返回 syscall `EINVAL`。
+3. 仅含查询的批次逐条生成 response；仅含 mutation 的批次在检查完整批次的
+   response queue 空间后逐条执行；混合查询和 mutation 的批次在修改状态前返回
+   syscall `EOPNOTSUPP`。
+4. 每条 mutation 使用本次发送携带的凭据检查权限。无权限请求生成带 `EPERM`
+   的 `NLMSG_ERROR`，response 入队后发送入口返回已消费的请求长度。
+5. dump 请求从 `ROUTE_STATE` 生成 multi-part response。mutation 请求构造新的
+   `RtnetlinkState`，失败时返回 netlink error。
+6. 成功更新后同步到 `Service`，带 `NLM_F_ACK` 时返回 ack。
 
 ## 并发模型
 
@@ -328,7 +336,10 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 - Unix stream 每个 endpoint 的 `tx_order: SpinNoPreempt<()>` 是对应发送方向的共享排序点。本端 write shutdown、对端 read shutdown、write index 发布和对端空队列 EOF 判定都经过该锁。固定锁序为 `channel` mutex 后取得单个 `tx_order`，两个方向的顺序锁不会同时持有。
 - Unix stream 的用户数据复制和 `PollSet` 唤醒在 `tx_order` 外执行。send 先写入未发布的 vacant 区域，再在锁内复检关闭状态并推进 write index；recv 读取为空后在锁内复查 occupied 长度和关闭状态；shutdown 完成状态发布并复制 peer endpoint 引用后释放 `channel` mutex，再执行 waiter 唤醒。
 - Unix stream 每个 endpoint 分别持有 readable、writable 和 connection-state 三组 `PollSet`。写入只唤醒 peer readable waiter，读取跨过发送缓冲低水位时只唤醒 peer writable waiter，半关闭只唤醒受影响方向，完整关闭通过 connection-state waiter 通知双方。
-- netlink `ROUTE_STATE` 使用 `RwLock`，rx queue 和 subscriber 列表使用 `Mutex`。
+- netlink `ROUTE_STATE` 使用 `RwLock`，每个 socket 的发送事务、rx queue 和 subscriber
+  列表使用独立 `Mutex`。发送事务锁串行化同一 socket 的容量预检、mutation 执行和
+  response 入队。response 在 rx queue 锁外生成，只在容量检查和入队时持锁；锁顺序
+  固定为发送事务锁、控制面状态锁、netlink rx queue。
 - RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 使用调用方传入的同一个 `PollContext` 注册聚合 `timeout_poll` 和支持 interrupt-driven RX 的 Ethernet RX poll source；当前该 poll source 由 `NetRx` softirq 在设备 pending 后唤醒，`knet-rx` fallback worker 和普通 socket polling waiter 都可能是消费者。registration 由跨越 `Pending` 的 `PollRegistrations` 统一管理。loopback 和未 attach `NetRxScheduler` 的 Ethernet 设备仍使用 `timeout_poll` 的聚合 waker，多任务广播由 `timeout_poll` 完成；设备层不得保存调用方的裸 waker或绕过 `Service` 注册互不等价的 task waker。
 
 ## 设计决策
@@ -353,6 +364,14 @@ Linux 可从任务上下文隐式读取 `current_cred()`，但 knet 也服务于
 凭据不保存在 Unix socket、pathname lookup 状态或 dentry 中，避免凭据生命周期与路径状态耦合。
 `sock_alloc_file` 也显式接收 `Arc<Cred>`，只把它交给 `VfsFile::f_cred`；socket 对象不保存
 第二份 credential，也不在 knet 内部读取当前 task。
+
+### rtnetlink 每次发送传递凭据
+
+netlink socket 可以跨进程传递，创建 socket 时保存的凭据无法代表后续发送者。
+POSIX send 和 socket file write 在各自入口区分协议，仅在 netlink 分支获取一次
+当前凭据快照，随后通过 `Socket::send_with_cred` 显式传给 rtnetlink 权限检查。
+普通协议继续使用 `SocketOps::send`，调用者凭据不会扩大到不依赖权限的传输实现。
+没有当前用户任务的内核调用者通过 `send_with_cred` 显式选择凭据。
 
 ### 设备 mask 驱动 RX 唤醒
 

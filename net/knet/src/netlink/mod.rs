@@ -24,13 +24,13 @@ use smoltcp::wire::IpAddress;
 
 use crate::{SERVICE, general::GeneralOptions};
 
-mod route;
+mod rtnetlink;
 mod socket;
 #[cfg(unittest)]
 mod tests;
 mod wire;
 
-pub(crate) use route::{build_initial_state, init_route_state, link_state_for_ifindex};
+pub(crate) use rtnetlink::{build_initial_state, init_route_state, link_state_for_ifindex};
 pub use socket::{NetlinkSocket, publish_kobject_uevent};
 pub(crate) const RT_TABLE_MAIN: u8 = wire::route::TABLE_MAIN;
 pub(crate) const RTN_UNICAST: u8 = wire::route::TYPE_UNICAST;
@@ -158,9 +158,7 @@ pub(super) struct NetlinkRxQueue {
 impl NetlinkRxQueue {
     pub(super) fn push_back(&mut self, packet: NetlinkPacket) -> bool {
         let packet_len = packet.data.len();
-        if packet_len > NETLINK_RX_QUEUE_LIMIT
-            || self.bytes.saturating_add(packet_len) > NETLINK_RX_QUEUE_LIMIT
-        {
+        if !self.can_push_bytes(packet_len) {
             return false;
         }
         self.bytes += packet_len;
@@ -181,11 +179,17 @@ impl NetlinkRxQueue {
     pub(super) fn is_empty(&self) -> bool {
         self.packets.is_empty()
     }
+
+    pub(super) fn can_push_bytes(&self, bytes: usize) -> bool {
+        bytes <= NETLINK_RX_QUEUE_LIMIT
+            && self.bytes.saturating_add(bytes) <= NETLINK_RX_QUEUE_LIMIT
+    }
 }
 
 pub(super) struct NetlinkSocketInner {
     pub(super) protocol: i32,
     pub(super) local_addr: RwLock<Option<NetlinkAddr>>,
+    pub(super) send_lock: Mutex<()>,
     pub(super) rx_queue: Mutex<NetlinkRxQueue>,
     pub(super) poll_rx: Arc<kpoll::PollSet>,
     pub(super) general: GeneralOptions,

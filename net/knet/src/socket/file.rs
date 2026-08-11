@@ -66,7 +66,13 @@ impl FileOperations for SocketFileOps {
         if file.is_nonblocking() {
             options.flags |= SendFlags::DONT_WAIT;
         }
-        socket.send(src, options)
+        match socket.as_ref() {
+            Socket::Netlink(_) => {
+                let cred = kprocess::current_cred();
+                socket.send_with_cred(src, options, &cred)
+            }
+            _ => socket.send(src, options),
+        }
     }
 
     fn poll(&self, file: &VfsFile) -> IoEvents {

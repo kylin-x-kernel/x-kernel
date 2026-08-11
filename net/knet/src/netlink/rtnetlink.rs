@@ -2,6 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! rtnetlink request parsing and control-plane state updates.
+
 use alloc::{string::String, vec, vec::Vec};
 
 use kerrno::LinuxError;
@@ -133,6 +135,66 @@ pub(crate) fn init_route_state(state: RtnetlinkState) {
     ROUTE_STATE.init_once(RwLock::new(state));
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RtnetlinkOperation {
+    GetLink,
+    GetAddr,
+    GetRoute,
+    NewLink,
+    NewAddr,
+    DelAddr,
+    NewRoute,
+    DelRoute,
+    NewNeigh,
+    Unsupported,
+}
+
+impl RtnetlinkOperation {
+    fn from_msg_type(msg_type: u16) -> Self {
+        match msg_type {
+            RTM_GETLINK => Self::GetLink,
+            RTM_GETADDR => Self::GetAddr,
+            RTM_GETROUTE => Self::GetRoute,
+            RTM_NEWLINK => Self::NewLink,
+            RTM_NEWADDR => Self::NewAddr,
+            RTM_DELADDR => Self::DelAddr,
+            RTM_NEWROUTE => Self::NewRoute,
+            RTM_DELROUTE => Self::DelRoute,
+            RTM_NEWNEIGH => Self::NewNeigh,
+            _ => Self::Unsupported,
+        }
+    }
+
+    fn is_dump(self) -> bool {
+        match self {
+            Self::GetLink | Self::GetAddr | Self::GetRoute => true,
+            Self::NewLink
+            | Self::NewAddr
+            | Self::DelAddr
+            | Self::NewRoute
+            | Self::DelRoute
+            | Self::NewNeigh
+            | Self::Unsupported => false,
+        }
+    }
+
+    fn requires_privilege(self) -> bool {
+        match self {
+            Self::NewLink
+            | Self::NewAddr
+            | Self::DelAddr
+            | Self::NewRoute
+            | Self::DelRoute
+            | Self::NewNeigh => true,
+            Self::GetLink | Self::GetAddr | Self::GetRoute | Self::Unsupported => false,
+        }
+    }
+}
+
+pub(super) fn rtnetlink_request_requires_privilege(msg_type: u16) -> bool {
+    RtnetlinkOperation::from_msg_type(msg_type).requires_privilege()
+}
+
 pub(super) fn build_error_response(request: &[u8], errno: LinuxError) -> Vec<u8> {
     let Some(header) = NlMsgHeader::read(request) else {
         return Vec::new();
@@ -147,7 +209,7 @@ pub(super) fn build_ack_response(request: &[u8]) -> Vec<u8> {
     build_nlmsg_error_response(&header, 0, request)
 }
 
-pub(super) fn handle_route_request(request: &[u8]) -> Vec<NetlinkPacket> {
+pub(super) fn handle_rtnetlink_request(request: &[u8]) -> Vec<NetlinkPacket> {
     let Some(header) = NlMsgHeader::read(request) else {
         return Vec::new();
     };
@@ -161,23 +223,23 @@ pub(super) fn handle_route_request(request: &[u8]) -> Vec<NetlinkPacket> {
     let payload = request
         .get(NLMSG_HDR_LEN..(header.len as usize).min(request.len()))
         .unwrap_or(&[]);
-    let is_dump = matches!(header.msg_type, RTM_GETLINK | RTM_GETADDR | RTM_GETROUTE);
-    let mut packets = match header.msg_type {
-        RTM_GETLINK => dump_links(&header, payload),
-        RTM_GETADDR => dump_addrs(&header, payload),
-        RTM_GETROUTE => dump_routes(&header, payload),
-        RTM_NEWLINK => apply_newlink(request, &header, payload),
-        RTM_NEWADDR => apply_newaddr(request, &header, payload),
-        RTM_DELADDR => apply_deladdr(request, &header, payload),
-        RTM_NEWROUTE => apply_newroute(request, &header, payload),
-        RTM_DELROUTE => apply_delroute(request, &header, payload),
-        RTM_NEWNEIGH => apply_newneigh(request, &header, payload),
-        _ => vec![NetlinkPacket {
+    let operation = RtnetlinkOperation::from_msg_type(header.msg_type);
+    let mut packets = match operation {
+        RtnetlinkOperation::GetLink => dump_links(&header, payload),
+        RtnetlinkOperation::GetAddr => dump_addrs(&header, payload),
+        RtnetlinkOperation::GetRoute => dump_routes(&header, payload),
+        RtnetlinkOperation::NewLink => apply_newlink(request, &header, payload),
+        RtnetlinkOperation::NewAddr => apply_newaddr(request, &header, payload),
+        RtnetlinkOperation::DelAddr => apply_deladdr(request, &header, payload),
+        RtnetlinkOperation::NewRoute => apply_newroute(request, &header, payload),
+        RtnetlinkOperation::DelRoute => apply_delroute(request, &header, payload),
+        RtnetlinkOperation::NewNeigh => apply_newneigh(request, &header, payload),
+        RtnetlinkOperation::Unsupported => vec![NetlinkPacket {
             from: NetlinkAddr { pid: 0, groups: 0 },
             data: build_error_response(request, LinuxError::EOPNOTSUPP),
         }],
     };
-    if is_dump {
+    if operation.is_dump() {
         packets.push(NetlinkPacket {
             from: NetlinkAddr { pid: 0, groups: 0 },
             data: build_done_response(&header),

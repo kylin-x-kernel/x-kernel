@@ -2,6 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! Linux netlink ABI carrier structures and byte-level codecs.
+
 use alloc::{string::String, vec::Vec};
 
 use kerrno::LinuxError;
@@ -74,13 +76,15 @@ impl NlMsgHeader {
         if buf.len() < NLMSG_HDR_LEN {
             return None;
         }
-        Some(Self {
+        let header = Self {
             len: read_u32_ne(buf, 0)?,
             msg_type: read_u16_ne(buf, 4)?,
             flags: read_u16_ne(buf, 6)?,
             seq: read_u32_ne(buf, 8)?,
             pid: read_u32_ne(buf, 12)?,
-        })
+        };
+        let len = header.len as usize;
+        (NLMSG_HDR_LEN..=buf.len()).contains(&len).then_some(header)
     }
 }
 

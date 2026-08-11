@@ -24,6 +24,7 @@ use bitflags::bitflags;
 use enum_dispatch::enum_dispatch;
 #[cfg(feature = "vsock")]
 use kclass::prelude::VsockAddr;
+use kcred::Cred;
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
 
@@ -311,4 +312,27 @@ pub enum Socket {
     Packet(Box<PacketSocket>),
     #[cfg(feature = "vsock")]
     Vsock(Box<VsockSocket>),
+}
+
+impl Socket {
+    /// Sends data using the credential active at the syscall boundary.
+    ///
+    /// The credential is required by protocols such as rtnetlink whose
+    /// authorization depends on the caller performing each send.
+    ///
+    /// # Errors
+    ///
+    /// Returns the protocol-specific send error, including authorization,
+    /// address, queue-capacity, and nonblocking failures.
+    pub fn send_with_cred(
+        &self,
+        src: impl Read + IoBuf,
+        options: SendOptions,
+        cred: &Cred,
+    ) -> KResult<usize> {
+        match self {
+            Self::Netlink(socket) => socket.send_with_cred(src, options, cred),
+            _ => <Self as SocketOps>::send(self, src, options),
+        }
+    }
 }

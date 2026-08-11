@@ -17,7 +17,7 @@ use kerrno::{KError, KResult, LinuxError};
 use khal::time::monotonic_time;
 use kio::prelude::*;
 use knet::{
-    AncillaryData, KernelAncillaryData, RecvFlags, RecvOptions, SendFlags, SendOptions,
+    AncillaryData, KernelAncillaryData, RecvFlags, RecvOptions, SendFlags, SendOptions, Socket,
     SocketAddrEx, SocketErrorInfo, SocketOps, sock_from_file,
 };
 use ktime_types::TimeSpan;
@@ -165,14 +165,18 @@ fn send_impl(
     if file.is_nonblocking() {
         send_flags |= SendFlags::DONT_WAIT;
     }
-    let sent = socket.send(
-        &mut src,
-        SendOptions {
-            to: addr,
-            flags: send_flags,
-            ancillary,
-        },
-    )?;
+    let options = SendOptions {
+        to: addr,
+        flags: send_flags,
+        ancillary,
+    };
+    let sent = match socket.as_ref() {
+        Socket::Netlink(_) => {
+            let cred = kprocess::current_cred();
+            socket.send_with_cred(&mut src, options, &cred)?
+        }
+        _ => socket.send(&mut src, options)?,
+    };
 
     Ok(sent as isize)
 }
