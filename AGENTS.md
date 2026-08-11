@@ -30,6 +30,10 @@ Current shared skills:
   covering address space, VMA, mmap, faults, anonymous memory, file-backed
   mmap, COW, brk, madvise, msync, and mlock.
 
+The project's own automatic code review rules are located in `docs/ai/review/`.
+
+Before starting the analysis, the review agent must read the rule file corresponding to the current stage from the PR source branch that has been checkouted.
+
 ## Project Overview
 
 X-Kernel is a multi-architecture Rust OS/kernel project.
