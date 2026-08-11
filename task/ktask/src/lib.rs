@@ -31,6 +31,7 @@ mod api;
 mod irq_wait;
 #[cfg(feature = "snapshot")]
 pub mod snapshot;
+mod softirqd;
 mod task;
 #[cfg(feature = "snapshot")]
 mod task_registry;
@@ -42,5 +43,6 @@ pub mod future;
 
 pub use self::{
     api::{sleep, sleep_until, yield_now, *},
+    softirqd::init_current_cpu as init_softirqd_current_cpu,
     tracing_hooks::register_sched_trace_hooks,
 };

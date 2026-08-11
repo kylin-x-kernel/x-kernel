@@ -9,8 +9,15 @@ repository.workspace = true
 documentation.workspace = true
 description = "Generic kernel IRQ core"
 
+[features]
+default = []
+irq_context_debug = []
+irq_stat = []
+
 [dependencies]
 bitflags = { workspace = true }
+karch = { workspace = true }
+kbuild_config = { workspace = true }
 kiface = { workspace = true }
 kpoll = { workspace = true }
 kspin = { workspace = true }

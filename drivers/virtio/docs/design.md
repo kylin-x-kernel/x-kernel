@@ -77,7 +77,7 @@ Feature flags 控制编译哪些设备适配器：
 | `blk.rs` | 将 `VirtIOBlk` 封装为实现 `BlockDevice` 的 `VirtIoBlkDev` |
 | `gpu.rs` | 将 `VirtIOGpu` 封装为实现 `DisplayDevice` 的 `VirtIoGpuDev` |
 | `input.rs` | 将 `VirtIOInput` 封装为实现 `InputDevice` 的 `VirtIoInputDev` |
-| `net.rs` | 将 `VirtIONetRaw` 封装为实现 `NetDevice` 的 `VirtIoNetDev`，管理收发缓冲区和 IRQ |
+| `net.rs` | 将 `VirtIONetRaw` 封装为实现 `NetDevice` 的 `VirtIoNetDev`，管理收发缓冲区、IRQ ack 和网络 RX scheduler 调度 |
 | `socket.rs` | 将 `VsockConnectionManager` 封装为实现 `VsockDevice` 的 `VirtIoSocketDev` |
 | `virtio_9p.rs` | 将 `VirtIO9p` 封装为实现 `Virtio9pDevice` 的 `VirtIo9pDev`，提供 `mount_tag()` 和 `request()` |
 | `mock_virtio.rs` | 提供 `MockHal` 和 `MockTransport`，用于单元测试 |
@@ -101,6 +101,10 @@ Feature flags 控制编译哪些设备适配器：
 - **网络设备的 IRQ 与正常路径并发访问
   依赖 `SpinNoIrq`**：
   调用者不应绕过现有封装直接并发访问 `InnerDev`。
+- **网络 IRQ handler 只做设备级快速处理**：
+  virtio-net IRQ handler 按 resolved IRQ 过滤对应设备 handle，
+  ack 设备中断后只调用上层通过 `driver_net::NetRxScheduler`
+  attach 的 RX 调度能力，不直接运行协议栈或 socket 唤醒逻辑。
 - **设备对象的共享安全依赖 trait 约束和内部封装**：
   非 net 设备主要通过 `&mut self` 独占访问；
   net 设备依赖内部锁和 token-buffer 对应关系维持正确性。

@@ -251,9 +251,9 @@ pub use display::{DisplayDevice, DisplayInfo};
 /// Re-export input device trait, event types, and identity types.
 #[cfg(feature = "input")]
 pub use input::{Event, EventType, InputDevice, InputDeviceId};
-/// Re-export network device trait and buffer handle.
+/// Re-export network device trait, buffer handle, and RX scheduler capability.
 #[cfg(feature = "net")]
-pub use net::{NetBufHandle, NetDevice};
+pub use net::{NetBufHandle, NetDevice, NetRxScheduler};
 /// Re-export VirtIO 9P device trait.
 #[cfg(feature = "virtio-9p")]
 pub use virtio::Virtio9pDevice;
@@ -421,6 +421,10 @@ impl NetDevice for ClassDevice<NetDeviceImpl> {
     fn alloc_tx_buf(&self, size: usize) -> DriverResult<NetBufHandle> {
         self.with(|device| device.alloc_tx_buf(size))
     }
+
+    fn set_rx_scheduler(&self, scheduler: Option<Arc<dyn NetRxScheduler>>) -> DriverResult {
+        self.with(|device| device.set_rx_scheduler(scheduler))
+    }
 }
 
 #[cfg(feature = "vsock")]
@@ -575,7 +579,7 @@ pub mod prelude {
     #[cfg(feature = "input")]
     pub use crate::{Event, EventType, InputDevice, InputDeviceId, InputDeviceImpl};
     #[cfg(feature = "net")]
-    pub use crate::{NetBufHandle, NetDevice, NetDeviceImpl};
+    pub use crate::{NetBufHandle, NetDevice, NetDeviceImpl, NetRxScheduler};
     #[cfg(feature = "virtio-9p")]
     pub use crate::{Virtio9pDevice, Virtio9pDeviceImpl};
     #[cfg(feature = "vsock")]

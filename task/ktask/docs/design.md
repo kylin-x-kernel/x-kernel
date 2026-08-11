@@ -103,6 +103,12 @@ init_scheduler()
   → 创建 per-CPU idle task（绑定本 CPU）
   → 创建 per-CPU run queue（含 gc task）
   → 初始化 current 为 main task
+
+kruntime::init_interrupt()
+  → kirq::softirq::init()
+  → ktask::init_softirqd_current_cpu()
+  → 创建并激活绑定 boot CPU 的 ksoftirqd/0
+  → enable_local_irq()
 ```
 
 从核：
@@ -112,7 +118,22 @@ init_scheduler_secondary()
   → run_queue::init_secondary()
   → 初始化 current 为 idle task
   → 创建本 CPU run queue（含 gc task）
+
+rust_main_secondary()
+  → ktask::init_softirqd_current_cpu()
+  → 创建并激活绑定当前 CPU 的 ksoftirqd/N
+  → enable_local_irq()
 ```
+
+`ksoftirqd/N` 是 `kirq::softirq::SoftirqDaemonIf` 的 `ktask` provider。`kirq`
+只维护 per-CPU softirq pending bit 并在需要退避执行时唤醒当前 CPU daemon；
+daemon 任务由 `ktask` 创建、pin 到对应 CPU，并用 IRQ-safe `PollSet` 阻塞等待
+唤醒。daemon 在普通任务上下文调用 `kirq::softirq::run_pending_softirqs()`，
+用于承接 hardirq-exit/BH-enable 直跑未覆盖或 restart budget 之外的 softirq work。
+daemon 每完成一轮实际 softirq work 后会主动 `yield_now()`，再回到外层 pending
+检查/等待循环；这对应 Linux `run_ksoftirqd()` 在 `__do_softirq()` 后执行
+`cond_resched()` 的调度友好语义。若等待注册因内存压力等原因失败，daemon 也会
+先让出 CPU 再重试，避免无 waiter 的紧循环。
 
 ### 2) 调度与切换
 

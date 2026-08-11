@@ -8,7 +8,9 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use device_res::{Irq, IrqEvent, IrqEventSource, IrqResource, IrqTrigger};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
-use driver_net::{MacAddress, NetBuf, NetBufBox, NetBufHandle, NetBufPool, NetDevice};
+use driver_net::{
+    MacAddress, NetBuf, NetBufBox, NetBufHandle, NetBufPool, NetDevice, NetRxScheduler,
+};
 use kspin::{SpinNoIrq, SpinNoPreempt};
 use virtio_drivers::{Hal, device::net::VirtIONetRaw as InnerDev, transport::Transport};
 
@@ -22,10 +24,12 @@ trait VirtIoNetIrqAck: Send + Sync {
     fn ack_interrupt(&self) -> bool;
     fn handle_id(&self) -> usize;
     fn irq(&self) -> usize;
+    fn schedule_rx(&self);
 }
 
 struct VirtIoNetIrqHandle<H: Hal, T: Transport, const QS: usize> {
     inner: Arc<SpinNoIrq<InnerDev<H, T, QS>>>,
+    rx_scheduler: Arc<SpinNoIrq<Option<Arc<dyn NetRxScheduler>>>>,
     id: usize,
     irq: usize,
 }
@@ -50,6 +54,13 @@ impl<H: Hal, T: Transport, const QS: usize> VirtIoNetIrqAck for VirtIoNetIrqHand
     fn irq(&self) -> usize {
         self.irq
     }
+
+    fn schedule_rx(&self) {
+        let scheduler = self.rx_scheduler.lock().clone();
+        if let Some(scheduler) = scheduler {
+            scheduler.schedule_rx();
+        }
+    }
 }
 
 static NET_IRQ_HANDLES: SpinNoIrq<Vec<Arc<dyn VirtIoNetIrqAck>>> = SpinNoIrq::new(Vec::new());
@@ -64,11 +75,21 @@ static NET_IRQ_GUARDS: SpinNoIrq<Vec<Irq>> = SpinNoIrq::new(Vec::new());
 const RX_SRC: IrqEventSource = 0;
 const TX_SRC: IrqEventSource = 1;
 
-fn handle_virtio_net_irq(_irq: usize) -> IrqEvent {
+fn remove_virtio_net_irq_handle(handle_id: usize) {
+    NET_IRQ_HANDLES
+        .lock()
+        .retain(|handle| handle.handle_id() != handle_id);
+}
+
+fn handle_virtio_net_irq(irq: usize) -> IrqEvent {
     let handles = NET_IRQ_HANDLES.lock();
     let mut sources = 0;
     for irq_handle in handles.iter() {
+        if irq_handle.irq() != irq {
+            continue;
+        }
         if irq_handle.ack_interrupt() {
+            irq_handle.schedule_rx();
             sources |= (1 << RX_SRC) | (1 << TX_SRC);
         }
     }
@@ -82,12 +103,14 @@ fn handle_virtio_net_irq(_irq: usize) -> IrqEvent {
 fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: usize>(
     irq: usize,
     inner: &Arc<SpinNoIrq<InnerDev<H, T, QS>>>,
+    rx_scheduler: &Arc<SpinNoIrq<Option<Arc<dyn NetRxScheduler>>>>,
 ) -> DriverResult<usize> {
     let handle_id = NEXT_IRQ_HANDLE_ID.fetch_add(1, Ordering::Relaxed);
     NET_IRQ_HANDLES
         .lock()
         .push(Arc::new(VirtIoNetIrqHandle::<H, T, QS> {
             inner: inner.clone(),
+            rx_scheduler: rx_scheduler.clone(),
             id: handle_id,
             irq,
         }));
@@ -97,7 +120,7 @@ fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: u
         match Irq::request(resource, Arc::new(handle_virtio_net_irq)) {
             Ok(guard) => NET_IRQ_GUARDS.lock().push(guard),
             Err(_) => {
-                NET_IRQ_HANDLES.lock().pop();
+                remove_virtio_net_irq_handle(handle_id);
                 REGISTERED_NET_IRQS.lock().remove(&irq);
                 return Err(DriverError::ResourceBusy);
             }
@@ -108,9 +131,7 @@ fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: u
 }
 
 fn unregister_virtio_net_irq(irq: usize, handle_id: usize) {
-    NET_IRQ_HANDLES
-        .lock()
-        .retain(|h| h.handle_id() != handle_id);
+    remove_virtio_net_irq_handle(handle_id);
 
     let irq_still_used = NET_IRQ_HANDLES.lock().iter().any(|h| h.irq() == irq);
     if !irq_still_used {
@@ -165,6 +186,7 @@ pub struct VirtIoNetDev<H: Hal, T: Transport, const QS: usize> {
     mac: MacAddress,
     irq: Option<usize>,
     irq_handle_id: Option<usize>,
+    rx_scheduler: Arc<SpinNoIrq<Option<Arc<dyn NetRxScheduler>>>>,
 }
 
 /// Buffer bookkeeping for in-flight and free network buffers.
@@ -256,8 +278,9 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
         }
 
         let mut irq_handle_id = None;
+        let rx_scheduler = Arc::new(SpinNoIrq::new(None));
         if let Some(irq) = irq {
-            irq_handle_id = Some(register_virtio_net_irq(irq, &inner)?);
+            irq_handle_id = Some(register_virtio_net_irq(irq, &inner, &rx_scheduler)?);
         }
 
         // 3. Cache immutable device properties.
@@ -275,6 +298,7 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
             mac,
             irq,
             irq_handle_id,
+            rx_scheduler,
         })
     }
 }
@@ -439,6 +463,14 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
 
         Ok(net_buf.into_handle())
     }
+
+    fn set_rx_scheduler(&self, scheduler: Option<Arc<dyn NetRxScheduler>>) -> DriverResult {
+        if scheduler.is_some() && self.irq.is_none() {
+            return Err(DriverError::Unsupported);
+        }
+        *self.rx_scheduler.lock() = scheduler;
+        Ok(())
+    }
 }
 
 #[cfg(unittest)]
@@ -453,11 +485,23 @@ mod tests {
     struct MockIrqHandle {
         id: usize,
         irq_num: usize,
+        handled: bool,
+        scheduler: Option<Arc<dyn NetRxScheduler>>,
+    }
+
+    struct MockRxScheduler {
+        schedules: AtomicUsize,
+    }
+
+    impl NetRxScheduler for MockRxScheduler {
+        fn schedule_rx(&self) {
+            self.schedules.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     impl VirtIoNetIrqAck for MockIrqHandle {
         fn ack_interrupt(&self) -> bool {
-            false
+            self.handled
         }
 
         fn handle_id(&self) -> usize {
@@ -467,6 +511,12 @@ mod tests {
         fn irq(&self) -> usize {
             self.irq_num
         }
+
+        fn schedule_rx(&self) {
+            if let Some(scheduler) = &self.scheduler {
+                scheduler.schedule_rx();
+            }
+        }
     }
 
     fn reset_irq_state() {
@@ -474,22 +524,35 @@ mod tests {
         REGISTERED_NET_IRQS.lock().clear();
     }
 
+    fn mock_handle(id: usize, irq_num: usize) -> Arc<MockIrqHandle> {
+        Arc::new(MockIrqHandle {
+            id,
+            irq_num,
+            handled: false,
+            scheduler: None,
+        })
+    }
+
+    fn handled_mock_handle(
+        id: usize,
+        irq_num: usize,
+        scheduler: Option<Arc<dyn NetRxScheduler>>,
+    ) -> Arc<MockIrqHandle> {
+        Arc::new(MockIrqHandle {
+            id,
+            irq_num,
+            handled: true,
+            scheduler,
+        })
+    }
+
     #[def_test(serial)]
     fn test_unregister_removes_correct_handle() {
         reset_irq_state();
 
-        NET_IRQ_HANDLES.lock().push(Arc::new(MockIrqHandle {
-            id: 10,
-            irq_num: 32,
-        }));
-        NET_IRQ_HANDLES.lock().push(Arc::new(MockIrqHandle {
-            id: 11,
-            irq_num: 33,
-        }));
-        NET_IRQ_HANDLES.lock().push(Arc::new(MockIrqHandle {
-            id: 12,
-            irq_num: 34,
-        }));
+        NET_IRQ_HANDLES.lock().push(mock_handle(10, 32));
+        NET_IRQ_HANDLES.lock().push(mock_handle(11, 33));
+        NET_IRQ_HANDLES.lock().push(mock_handle(12, 34));
         REGISTERED_NET_IRQS.lock().insert(32);
         REGISTERED_NET_IRQS.lock().insert(33);
         REGISTERED_NET_IRQS.lock().insert(34);
@@ -513,14 +576,8 @@ mod tests {
     fn test_shared_irq_preserved_when_handles_remain() {
         reset_irq_state();
 
-        NET_IRQ_HANDLES.lock().push(Arc::new(MockIrqHandle {
-            id: 20,
-            irq_num: 40,
-        }));
-        NET_IRQ_HANDLES.lock().push(Arc::new(MockIrqHandle {
-            id: 21,
-            irq_num: 40,
-        }));
+        NET_IRQ_HANDLES.lock().push(mock_handle(20, 40));
+        NET_IRQ_HANDLES.lock().push(mock_handle(21, 40));
         REGISTERED_NET_IRQS.lock().insert(40);
 
         unregister_virtio_net_irq(40, 20);
@@ -539,14 +596,8 @@ mod tests {
     fn test_shared_irq_unregistered_when_all_handles_removed() {
         reset_irq_state();
 
-        NET_IRQ_HANDLES.lock().push(Arc::new(MockIrqHandle {
-            id: 30,
-            irq_num: 50,
-        }));
-        NET_IRQ_HANDLES.lock().push(Arc::new(MockIrqHandle {
-            id: 31,
-            irq_num: 50,
-        }));
+        NET_IRQ_HANDLES.lock().push(mock_handle(30, 50));
+        NET_IRQ_HANDLES.lock().push(mock_handle(31, 50));
         REGISTERED_NET_IRQS.lock().insert(50);
 
         unregister_virtio_net_irq(50, 30);
@@ -563,10 +614,7 @@ mod tests {
     fn test_unregister_nonexistent_handle_is_noop() {
         reset_irq_state();
 
-        NET_IRQ_HANDLES.lock().push(Arc::new(MockIrqHandle {
-            id: 40,
-            irq_num: 60,
-        }));
+        NET_IRQ_HANDLES.lock().push(mock_handle(40, 60));
         REGISTERED_NET_IRQS.lock().insert(60);
 
         unregister_virtio_net_irq(60, 9999);
@@ -586,6 +634,91 @@ mod tests {
         let _dev = VirtIoNetDev::<MockHal, MockTransport, 32>::try_new(transport, None);
 
         assert!(NET_IRQ_HANDLES.lock().is_empty());
+
+        reset_irq_state();
+    }
+
+    #[def_test(serial)]
+    fn test_rx_scheduler_requires_registered_irq_but_allows_detach() {
+        reset_irq_state();
+
+        let mut transport = MockTransport::new();
+        transport.device_type = virtio_drivers::transport::DeviceType::Network;
+        let dev = VirtIoNetDev::<MockHal, MockTransport, 32>::try_new(transport, None).unwrap();
+        let scheduler = Arc::new(MockRxScheduler {
+            schedules: AtomicUsize::new(0),
+        });
+
+        assert_eq!(
+            dev.set_rx_scheduler(Some(scheduler)),
+            Err(DriverError::Unsupported)
+        );
+        assert_eq!(dev.set_rx_scheduler(None), Ok(()));
+
+        reset_irq_state();
+    }
+
+    #[def_test(serial)]
+    fn test_irq_handler_filters_irq_and_schedules_rx() {
+        reset_irq_state();
+
+        let scheduler = Arc::new(MockRxScheduler {
+            schedules: AtomicUsize::new(0),
+        });
+        NET_IRQ_HANDLES
+            .lock()
+            .push(handled_mock_handle(50, 70, None));
+        NET_IRQ_HANDLES
+            .lock()
+            .push(handled_mock_handle(51, 71, Some(scheduler.clone())));
+
+        let event = handle_virtio_net_irq(71);
+
+        assert!(event.has_source(RX_SRC));
+        assert!(event.has_source(TX_SRC));
+        assert_eq!(scheduler.schedules.load(Ordering::Relaxed), 1);
+
+        reset_irq_state();
+    }
+
+    #[def_test(serial)]
+    fn test_irq_handler_treats_matched_empty_ack_as_miss() {
+        reset_irq_state();
+
+        let scheduler = Arc::new(MockRxScheduler {
+            schedules: AtomicUsize::new(0),
+        });
+        NET_IRQ_HANDLES.lock().push(Arc::new(MockIrqHandle {
+            id: 52,
+            irq_num: 72,
+            handled: false,
+            scheduler: Some(scheduler.clone()),
+        }));
+
+        let event = handle_virtio_net_irq(72);
+
+        assert!(!event.handled());
+        assert!(!event.has_source(RX_SRC));
+        assert_eq!(scheduler.schedules.load(Ordering::Relaxed), 0);
+
+        reset_irq_state();
+    }
+
+    #[def_test(serial)]
+    fn test_remove_irq_handle_uses_id_not_stack_order() {
+        reset_irq_state();
+
+        NET_IRQ_HANDLES.lock().push(mock_handle(60, 80));
+        NET_IRQ_HANDLES.lock().push(mock_handle(61, 81));
+        NET_IRQ_HANDLES.lock().push(mock_handle(62, 82));
+
+        remove_virtio_net_irq_handle(61);
+
+        let handles = NET_IRQ_HANDLES.lock();
+        assert_eq!(handles.len(), 2);
+        assert_eq!(handles[0].handle_id(), 60);
+        assert_eq!(handles[1].handle_id(), 62);
+        drop(handles);
 
         reset_irq_state();
     }

@@ -14,10 +14,9 @@
 //! IRQ-thread execution will need its own sleepable context model instead of
 //! being represented by [`is_in_interrupt_context`].
 
-use core::{
-    marker::PhantomData,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use core::marker::PhantomData;
+#[cfg(any(unittest, feature = "irq_stat"))]
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kspin::{NoPreempt, NoPreemptIrqSave};
 
@@ -49,9 +48,12 @@ impl IrqContextState {
 #[percpu::def_percpu]
 static IRQ_CONTEXT_STATE: IrqContextState = IrqContextState::empty();
 
+#[cfg(any(unittest, feature = "irq_stat"))]
 static CONTEXT_UNDERFLOW_WARNINGS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(any(unittest, feature = "irq_stat"))]
 static BH_IN_HARDIRQ_WARNINGS: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(any(unittest, feature = "irq_context_debug"))]
 const INITIAL_CONTEXT_WARNING_LOGS: usize = 8;
 
 /// Snapshot of the current CPU's IRQ execution-context counters.
@@ -124,7 +126,7 @@ pub enum InterruptContextLevel {
 }
 
 /// IRQ-context diagnostic counters.
-#[cfg(unittest)]
+#[cfg(any(unittest, feature = "irq_stat"))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct IrqContextDiagnostics {
     /// Number of detected context counter underflow attempts.
@@ -187,7 +189,7 @@ pub fn is_in_interrupt_context() -> bool {
 }
 
 /// Returns current IRQ-context diagnostic counters.
-#[cfg(unittest)]
+#[cfg(any(unittest, feature = "irq_stat"))]
 #[inline]
 pub(crate) fn irq_context_diagnostics() -> IrqContextDiagnostics {
     IrqContextDiagnostics {
@@ -199,7 +201,7 @@ pub(crate) fn irq_context_diagnostics() -> IrqContextDiagnostics {
 /// Clears IRQ-context diagnostic counters.
 ///
 /// This is primarily intended for focused tests and controlled diagnostics.
-#[cfg(unittest)]
+#[cfg(any(unittest, feature = "irq_stat"))]
 #[inline]
 pub(crate) fn clear_irq_context_diagnostics() {
     CONTEXT_UNDERFLOW_WARNINGS.store(0, Ordering::Relaxed);
@@ -289,8 +291,9 @@ impl LocalBhGuard {
     fn new() -> Self {
         let no_preempt = NoPreempt::new();
         with_current_state(|state| {
+            #[cfg(any(unittest, feature = "irq_context_debug"))]
             if state.hardirq_depth != 0 {
-                let warning_count = BH_IN_HARDIRQ_WARNINGS.fetch_add(1, Ordering::Relaxed) + 1;
+                let warning_count = record_bh_in_hardirq_warning();
                 if should_log_context_warning(warning_count) {
                     warn!(
                         "local_bh_disable called from hardirq context ({warning_count} warnings)"
@@ -361,6 +364,7 @@ fn with_current_state_irqoff<T>(f: impl FnOnce(&mut IrqContextState) -> T) -> T 
 
 /// Restores the current CPU IRQ-context snapshot when the caller already masked
 /// local IRQs and pinned the current CPU.
+#[cfg(any(unittest, feature = "irq_context_debug"))]
 pub(crate) fn restore_current_state_snapshot_irqoff(snapshot: IrqContextSnapshot) {
     with_current_state_irqoff(|state| {
         *state = IrqContextState {
@@ -372,12 +376,47 @@ pub(crate) fn restore_current_state_snapshot_irqoff(snapshot: IrqContextSnapshot
 }
 
 fn warn_context_underflow(context: &'static str) {
-    let warning_count = CONTEXT_UNDERFLOW_WARNINGS.fetch_add(1, Ordering::Relaxed) + 1;
-    if should_log_context_warning(warning_count) {
-        warn!("IRQ context {context} depth underflow ({warning_count} warnings)");
+    #[cfg(any(unittest, feature = "irq_context_debug"))]
+    {
+        let warning_count = record_context_underflow_warning();
+        if should_log_context_warning(warning_count) {
+            warn!("IRQ context {context} depth underflow ({warning_count} warnings)");
+        }
+    }
+
+    #[cfg(not(any(unittest, feature = "irq_context_debug")))]
+    let _ = context;
+}
+
+#[cfg(any(unittest, feature = "irq_context_debug"))]
+#[inline]
+fn record_context_underflow_warning() -> usize {
+    #[cfg(any(unittest, feature = "irq_stat"))]
+    {
+        CONTEXT_UNDERFLOW_WARNINGS.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    #[cfg(not(any(unittest, feature = "irq_stat")))]
+    {
+        1
     }
 }
 
+#[cfg(any(unittest, feature = "irq_context_debug"))]
+#[inline]
+fn record_bh_in_hardirq_warning() -> usize {
+    #[cfg(any(unittest, feature = "irq_stat"))]
+    {
+        BH_IN_HARDIRQ_WARNINGS.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    #[cfg(not(any(unittest, feature = "irq_stat")))]
+    {
+        1
+    }
+}
+
+#[cfg(any(unittest, feature = "irq_context_debug"))]
 #[inline]
 fn should_log_context_warning(warning_count: usize) -> bool {
     warning_count <= INITIAL_CONTEXT_WARNING_LOGS || warning_count.is_power_of_two()

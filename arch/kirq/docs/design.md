@@ -476,21 +476,62 @@ open_softirq(vec, action)
 
 raise_softirq(vec)
    -> current CPU SOFTIRQ_PENDING.fetch_or(bit, Release)
+   -> if pending transitioned from empty to non-empty, wake current CPU ksoftirqd
+      when not already in hardirq/serving-softirq/BH-disabled
 
 run_pending_softirqs()
    -> pending.swap(0, Acquire)
-   -> run action snapshot in vector order
-   -> handler context leak check
+   -> enable local IRQs while running action snapshot in vector order
+   -> disable local IRQs before checking new pending bits
+   -> optional handler context leak check when IRQ context debug is enabled
    -> repeat up to restart limit
+   -> wake current CPU ksoftirqd if restart budget is exhausted
 ```
 
 `bottom_half/softirq.rs` 实现 Linux-like fixed-vector foundation，使用 per-CPU pending bit。
-当前不创建 ksoftirqd、workerqueue thread、tasklet 或 threaded IRQ handler。当
-restart limit 命中，或当前 context 不允许 direct run 时，pending work 保留在
-per-CPU pending mask 中，等待后续 handoff。
+`ktask` 通过 `SoftirqDaemonIf` 为每个已上线 CPU 提供 `ksoftirqd/N`，daemon
+固定在对应 CPU 上阻塞等待 `kirq` 的 wake source，并在普通任务上下文 drain
+本 CPU pending softirq。当 restart limit 命中，或 task context raise softirq 使当前
+CPU pending mask 从空变为非空而没有 hardirq-exit/BH-enable 直跑机会时，`kirq`
+会唤醒当前 CPU 的 daemon 作为退避执行者。
+如果在 hardirq、active softirq 或 BH-disabled 临界区中 raise softirq，`kirq` 只保留
+pending bit，不直接唤醒 daemon：hardirq exit 或 outermost `local_bh_enable()` 会在同
+CPU 上尝试 direct drain；若 direct drain 超过 restart budget，才转交 `ksoftirqd/N`。
+如果 task context 的 raise 早于该 CPU `ksoftirqd/N` 创建，pending bit 会被保留；
+daemon 启动后的等待循环会先检查 `local_softirq_pending()`，因此不依赖另一次 wake
+才能 drain 早期 pending work。
+
+softirq runner 的入口和出口保持 local IRQ masked，便于 IRQ-tail、BH-enable 和
+daemon drain 共用同一条 `*_irqoff` 内部路径；action loop 内会临时打开 local IRQ，
+再在检查新 pending bit 和 restart budget 前重新关闭。这个语义对齐 Linux
+`__do_softirq()` 的关键行为，同时仍保持 preemption disabled。M3 仍然不是完整 Linux
+softirq/NAPI 等价实现：当前不创建 workerqueue thread、tasklet 或 threaded IRQ
+handler，也没有 NAPI poll budget/repoll 状态机。
+
+`ksoftirqd/N` 的调度让出由 `ktask` provider 负责：daemon 每次实际运行 softirq 后
+主动回到调度点，避免持续 pending workload 下长时间占用同一 CPU。当前 direct
+drain 仍只使用 restart limit；Linux `__do_softirq()` 的 `need_resched()` 和 2ms
+时间预算会在后续调度接口完善后单独补齐。
 
 `open_softirq()` 只用于 init-time 注册。本阶段没有 unregister API；runner 在
 `SpinNoIrq` 下复制 action table snapshot，但不会持有注册锁执行 action。
+
+### IRQ diagnostics configuration
+
+KIRQ 诊断通过 Kconfig 显式控制，而不是把生产诊断绑定到 `unittest`：
+
+- `KFEAT_IRQ_CONTEXT_DEBUG` 启用执行上下文不变量检查，覆盖
+  `raise_softirq_irqoff()` 的 IRQ-on 误用检测、softirq action 前后 context snapshot
+  比对、以及 hardirq/softirq/BH depth underflow 这类定位手段。该选项在
+  `BUILD_TYPE_DEBUG` 下默认打开，release 默认关闭，避免高频中断路径承担额外 CSR
+  读取和 context snapshot 成本。
+- `KFEAT_IRQ_STAT` 启用 IRQ/softirq 诊断统计，记录 softirq runs、restart limit
+  hits、daemon wake/suppression、context-deferred runs、unhandled vector 和 context
+  debug warning 等计数。高频路径统计必须按 per-CPU counter 采集，需要读取诊断时再
+  聚合，避免全局 atomic cacheline 在多核中断压力下成为新的瓶颈。
+
+`unittest` 仍可启用测试 helper 和诊断读取入口，但它只是验证机制，不是生产诊断
+能力的唯一开关。
 
 ### Deferred executor
 
@@ -608,7 +649,8 @@ descriptor-local `in_flight == 0`，并按 check/register/recheck 协议验证�
 9. 若本次 claim 到 IRQ，`run_hardirq_exit_deferred()` 调用当前注册的 deferred
    executor；`DeferredRunContext::resolved_irq()` 携带上一步解析出的 IRQ identity，
    strict domain miss 时为 `None`，不表达 handler 是否实际运行。
-   默认 owner 是 `softirq`，会在 context 允许时 drain 当前 CPU pending softirq。
+   默认 owner 是 `softirq`，会在 context 允许时 drain 当前 CPU pending softirq；
+   restart budget 未覆盖的 pending work 会交给当前 CPU 的 `ksoftirqd/N`。
 10. lifecycle guard drop，触发 `on_irq_exit`。
 11. 返回 `khal::irq` adapter 后释放 `NoPreempt`。
 
@@ -659,10 +701,21 @@ NMI path 不触发 lifecycle hooks，避免 hardirq 扩展点被用于更严格�
   避免 handler 运行期间重新 raise 的 bit 被清 pending 覆盖。
 - `SOFTIRQ_ACTIONS` 使用 `SpinNoIrq` 保护 init-time 注册和 runner snapshot；action
   在锁外执行。
+- `SoftirqDaemonIf` 是 `kirq -> scheduler` 的单向 capability：`kirq` 只请求唤醒
+  当前 CPU 的 daemon，不创建任务、不阻塞、不依赖 `ktask`。provider 必须可从
+  IRQ-disabled context 调用。`ktask` 在每个 CPU local IRQ 打开前创建并 pin
+  `ksoftirqd/N`，所以 daemon drain 的是同一 CPU 的 per-CPU pending mask。
+- softirq diagnostics 记录 context leak、restart-limit、unhandled vector、action run、
+  daemon wake request、context-suppressed wake、context-deferred run 和
+  `raise_softirq_irqoff()` 的 IRQ-enabled 误用。它们用于发现 “softirq action 过重
+  导致 daemon fallback”“BH/hardirq 内误以为能睡眠”“`*_irqoff` helper 调用方没有
+  建立 IRQ-off 前置条件”等问题。daemon wake/request 类计数按事件口径记录：
+  `raise_softirq*()` 只在 pending mask 从空变非空时请求或抑制一次 daemon wake；
+  direct drain 在 interrupt-like context 中被拒绝时会记录 context-deferred run。
 - `DEFERRED_EXECUTOR_HOOKS` 使用 `SpinNoIrq` 保护注册/清空控制面；runner hot path
   只从 atomic function-pointer slot 读取 hook，不持锁调用 owner。当前不使用全局
   reentry guard，避免 SMP 上一个 CPU 的 hardirq-exit handoff 误抑制另一个 CPU；
-  后续 softirq pending state 落地时应改为 per-CPU pending/reentry 模型。
+  softirq 已使用 per-CPU pending/reentry 模型。
 - `IRQ_WAITERS` 使用 `SpinNoIrq<Vec<IrqPollSets>>` 保护按 `virq` 排序的
   line/source waiter table。fanout-complete hot path 先通过 atomic entry-count
   hint 跳过完全空表，再用二分查找定位 `virq` 并只在锁内 clone 匹配的 `PollSet`，
@@ -708,6 +761,11 @@ fanout-complete wake dispatch 的 owner 是 `kirq`，上层内核子系统直接
 `kdriver` 和 devres 不承载 poll/future IRQ wake bridge。
 后续 Linux-style softirq、IRQ thread 和 workerqueue 应由 `kirq` 提供；poll/waitqueue
 等待者注册则由通用 async/wait notification 层承接。
+
+NetRx direct progress 是 workerqueue 之后的独立里程碑，而不是当前 softirq
+foundation 的一部分。当前 `NetRx` softirq 只能作为网络 fallback worker 的 wake
+source；workerqueue 补齐后，后续里程碑再决定由 softirq 投递 worker，或由一条已审计的
+nonblocking ingress path 直接按 budget 推进 RX。
 
 ### 为什么 NMI 独立于 normal IRQ state
 

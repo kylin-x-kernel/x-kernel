@@ -101,7 +101,7 @@ drivers/kclass/
 | `class_registries!` 宏 | 声明式批量生成 7 个 class 注册表及其所有配套函数 |
 | `ClassDeviceMetadata` | 可选的 class 特定元数据（当前仅 input class 携带 physical_location / unique_id） |
 | `prelude` 模块 | 集中 re-export 所有公开类型，方便 `kdriver` 等发布者统一导入 |
-| Trait delegation impls | 为需要 class handle 调用的类别实现操作 trait（如 `NetDevice`），委托到 inner runtime；block I/O 只经 block core canonical `BlockDevice` |
+| Trait delegation impls | 为需要 class handle 调用的类别实现操作 trait（如 `NetDevice`），委托到 inner runtime；net class 同时转发 `NetRxScheduler` attach/detach，block I/O 只经 block core canonical `BlockDevice` |
 
 ## 状态机
 

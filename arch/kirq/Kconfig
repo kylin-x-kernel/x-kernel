@@ -1,0 +1,19 @@
+menu "IRQ Diagnostics"
+
+config KFEAT_IRQ_STAT
+    bool "IRQ and softirq statistics"
+    help
+      Enable KIRQ diagnostic counters for interrupt-core and softirq paths.
+      Hot-path counters should be implemented as per-CPU counters and only
+      aggregated when diagnostics are read.
+
+config KFEAT_IRQ_CONTEXT_DEBUG
+    bool "IRQ context debug checks"
+    default y if BUILD_TYPE_DEBUG
+    select KFEAT_IRQ_STAT
+    help
+      Enable KIRQ execution-context invariant checks such as IRQ-off API misuse
+      detection and softirq action context leak checks. Release builds normally
+      keep this disabled to avoid extra work on interrupt hot paths.
+
+endmenu

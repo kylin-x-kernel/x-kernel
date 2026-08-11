@@ -214,8 +214,14 @@ handoff；softirq pending state 使用每 CPU pending mask 和 context gating。
 ### Softirq state
 
 `SOFTIRQ_PENDING` 是 per-CPU atomic bit mask。softirq runner 通过 atomic exchange
-获取 batch，action table 在 `SpinNoIrq` 下 snapshot，handler 在锁外执行。当前没有
-ksoftirqd；direct runner 超过 restart 上限时保留 pending 并记录诊断计数。
+获取 batch，action table 在 `SpinNoIrq` 下 snapshot，handler 在锁外执行。runner
+入口/出口保持 local IRQ masked，但 action loop 内临时打开 local IRQ，并在检查新
+pending bit 前重新关闭。`ktask` 提供 per-CPU `ksoftirqd/N`，但 `kirq` 只通过
+`SoftirqDaemonIf` 请求唤醒当前 CPU daemon，不创建任务或阻塞。hardirq、active
+softirq 和 BH-disabled context 中 raise softirq 只保留 pending bit；direct runner
+超过 restart 上限时保留 pending、记录诊断计数，并唤醒 `ksoftirqd/N`。
+`raise_softirq_irqoff()` 期望调用方已经关闭 local IRQ；若 debug/UT 路径发现误用，
+会记录诊断并临时关闭 local IRQ 后再访问 per-CPU pending/context state。
 BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` 并通过类型
 约束避免跨线程 drop，从而防止在不同 CPU 上扣减错误的 per-CPU depth。
 
@@ -277,6 +283,8 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | F-08 | hardirq context guard 未配对退出 | hardirq depth 泄漏 | softirq/BH gating 长期误判 | guard RAII + context diagnostic counter |
 | F-09 | softirq handler 泄漏 context state | handler 修改 hardirq/softirq/BH depth 后返回 | 后续 context 判断错误 | handler 前后 snapshot 比较，warning 并恢复 |
 | F-10 | `local_bh_disable()` 在 hardirq 中误用 | hardirq 中增加 BH depth | direct runner 被延迟，可能暴露调用者上下文错误 | 记录 `bh_in_hardirq_warnings`，outermost drop 在 hardirq 中不 drain |
+| F-10b | BH-disabled raise 被误当作可立即调度 daemon | BH-disabled 临界区中 raise softirq 后抢先唤醒 daemon | 同 CPU direct drain 语义变弱，产生额外 wake 和测试竞态 | `wake_softirqd_if_needed()` 把 BH-disabled 视为 interrupt-like context，只保留 pending；outermost BH enable 或 restart fallback 再处理 |
+| F-10c | `raise_softirq_irqoff()` 被 IRQ-enabled caller 误用 | 调用方未满足 `*_irqoff` 前置条件 | `irq_context_snapshot_irqoff()` 读取 per-CPU context state 的前置条件被破坏 | 记录 `irqoff_misuse_warnings` 并在访问 pending/context state 前临时关闭 local IRQ |
 | F-11 | descriptor mapping 冲突 | `try_*` API 返回错误或兼容 API warning/fail-fast | 阻止错误 metadata 进入 `IRQ_STATE` | `IrqDescError` 携带冲突字段 |
 | F-12 | descriptor 使用未知 domain | `try_*` API 返回 `UnknownDomain` | 设备初始化失败但不会创建不可达 IRQ | domain registry 边界校验先于状态变更 |
 | F-13 | controller completion cookie 错配 | complete 错误 active IRQ 或 no-op | 中断丢失、重复触发或 priority/deactivate 状态泄漏 | `PendingIrq`/`DispatchedIrq` 持有 opaque cookie，generic IRQ core 只把原 cookie 交还 backend |

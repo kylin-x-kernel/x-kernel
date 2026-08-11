@@ -2361,6 +2361,7 @@ dependencies = [
  "kexec",
  "khal",
  "kipi",
+ "kirq",
  "knet",
  "kplat-aarch64",
  "kplat-loongarch64",
@@ -2482,6 +2483,8 @@ name = "kirq"
 version = "0.2.0-dev"
 dependencies = [
  "bitflags 2.13.1",
+ "karch",
+ "kbuild_config",
  "kiface",
  "kpoll",
  "kspin 0.2.0-dev",

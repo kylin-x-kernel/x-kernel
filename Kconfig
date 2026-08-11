@@ -216,13 +216,6 @@ config TIMER_FREQUENCY_HZ
     help
       Specify the frequency of the timer in hertz.
 
-config KFEAT_DWARF
-    bool "Enable DWARF debug sections and symbolication"
-    default y
-    help
-      Keep DWARF sections in the image and enable backtrace symbolication
-      support in the kernel.
-
 config KFEAT_KVM_GUEST_MEM_SHARE
     bool "Enable KVM guest memory share/unshare hooks"
     depends on ARCH_AARCH64
@@ -263,6 +256,22 @@ config KFEAT_ROOT_BLOCK
       A non-empty value is authoritative and boot fails if no matching disk is
       registered. If empty, compatibility selection uses the lowest dev_t (or
       the second-lowest dev_t when KFEAT_ROOTFS_SECONDARY_BLOCK is set).
+
+endmenu
+
+menu "Kernel Diagnostics"
+
+config KFEAT_DWARF
+    bool "Enable DWARF debug sections and symbolication"
+    default y if BUILD_TYPE_DEBUG
+    help
+      Keep DWARF sections in the image and enable backtrace symbolication
+      support in the kernel. Debug builds enable this by default; release
+      builds can still opt in when runtime symbolication is needed for
+      diagnostics.
+
+source "arch/kirq/Kconfig"
+source "task/ktask/Kconfig.diagnostics"
 
 endmenu
 

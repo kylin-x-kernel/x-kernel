@@ -755,8 +755,9 @@ pub mod tests_irq {
         register_irq_lifecycle_hooks, register_irq_source_waker, register_irq_waker,
         runtime::notify,
         softirq::{
-            SoftirqRunResult, SoftirqVec, local_softirq_pending, open_softirq, raise_softirq,
-            reset_softirq_for_tests, run_pending_softirqs, softirq_diagnostics,
+            SoftirqRunResult, SoftirqVec, clear_softirq_diagnostics, local_softirq_pending,
+            raise_softirq, run_pending_softirqs, softirq_diagnostics,
+            test_support::ScopedSoftirqAction,
         },
         state::MAX_IRQ_ACTIONS,
     };
@@ -788,6 +789,7 @@ pub mod tests_irq {
     const IRQ_TAIL_TEST_VIRQ: usize = 0x2f02;
     const IRQ_TAIL_SOFTIRQ_VIRQ: usize = 0x2f03;
     const IRQ_SIMULATED_TEST_VECTOR: usize = 0x5f00;
+
     const IRQ_SIMULATED_TEST_VIRQ: usize = 0x5f01;
     const IRQ_LIFECYCLE_TEST_VECTOR: usize = 0x5f10;
     const IRQ_LIFECYCLE_TEST_VIRQ: usize = 0x5f11;
@@ -1359,7 +1361,9 @@ pub mod tests_irq {
         IRQ_TAIL_SOFTIRQ_SERVING.store(0, Ordering::Relaxed);
 
         crate::deferred::clear_deferred_executor();
-        reset_softirq_for_tests();
+        clear_softirq_diagnostics();
+        let _softirq_action =
+            ScopedSoftirqAction::install(SoftirqVec::High, test_irq_tail_softirq_action);
         {
             let mut state = IRQ_STATE.lock();
             state.descs.insert(
@@ -1373,7 +1377,6 @@ pub mod tests_irq {
             );
         }
 
-        assert!(open_softirq(SoftirqVec::High, test_irq_tail_softirq_action));
         assert!(crate::softirq::init());
 
         let pending = PendingIrq::new(IrqRef::Virq(IRQ_TAIL_SOFTIRQ_VIRQ), IRQ_TAIL_SOFTIRQ_VIRQ);
@@ -1392,7 +1395,6 @@ pub mod tests_irq {
         let drain_again = run_pending_softirqs();
 
         crate::deferred::clear_deferred_executor();
-        reset_softirq_for_tests();
         {
             let mut state = IRQ_STATE.lock();
             state.descs.remove(&IRQ_TAIL_SOFTIRQ_VIRQ);

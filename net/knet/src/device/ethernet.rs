@@ -3,13 +3,22 @@
 // See LICENSES for license details.
 
 //! Ethernet device adapter.
-use alloc::{collections::VecDeque, string::String, vec::Vec};
+use alloc::{
+    collections::VecDeque,
+    string::String,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use hashbrown::HashMap;
 use kclass::{ClassDevice, prelude::*};
 use kerrno::{KError, KResult, LinuxError};
-use kirq::IrqEventSource;
+use kpoll::PollSet;
+use kspin::SpinNoIrq;
 use ktime_types::{MonotonicInstant, TimeSpan};
+#[cfg(not(unittest))]
+use lazyinit::LazyInit;
 
 use crate::{
     buf::{PacketBuf, PacketOwner},
@@ -23,7 +32,209 @@ use crate::{
     },
 };
 
-const NET_RX_IRQ_SOURCE: IrqEventSource = 0;
+const NET_RX_SOFTIRQ_BATCH: usize = 8;
+
+static NEXT_NET_RX_SOURCE_ID: AtomicUsize = AtomicUsize::new(1);
+static NET_RX_SOURCES: SpinNoIrq<NetRxSources> = SpinNoIrq::new(NetRxSources::new());
+#[cfg(not(unittest))]
+static NET_RX_SOFTIRQ_INIT: LazyInit<()> = LazyInit::new();
+static NET_RX_SOFTIRQ_AVAILABLE: AtomicBool = AtomicBool::new(false);
+
+struct NetRxSources {
+    entries: Vec<Arc<NetRxPollSource>>,
+    scan_cursor: usize,
+}
+
+impl NetRxSources {
+    const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            scan_cursor: 0,
+        }
+    }
+
+    fn push(&mut self, source: Arc<NetRxPollSource>) {
+        self.entries.push(source);
+    }
+
+    fn remove(&mut self, id: usize) -> Option<Arc<NetRxPollSource>> {
+        let removed = self
+            .entries
+            .iter()
+            .position(|source| source.id == id)
+            .map(|index| self.entries.swap_remove(index));
+        self.normalize_cursor();
+        removed
+    }
+
+    fn collect_scheduled_fallback_batch(
+        &mut self,
+        wake_batch: &mut [Option<PollSet>; NET_RX_SOFTIRQ_BATCH],
+    ) -> (usize, bool) {
+        let source_count = self.entries.len();
+        if source_count == 0 {
+            self.scan_cursor = 0;
+            return (0, false);
+        }
+
+        self.scan_cursor %= source_count;
+        let start = self.scan_cursor;
+        let mut next_cursor = start;
+        let mut wake_count = 0;
+        let mut has_deferred_pending = false;
+
+        for offset in 0..source_count {
+            if wake_count == NET_RX_SOFTIRQ_BATCH {
+                has_deferred_pending = self.has_pending_from(start, offset);
+                break;
+            }
+
+            let index = (start + offset) % source_count;
+            let source = &self.entries[index];
+            if source.take_pending() {
+                wake_batch[wake_count] = Some(source.waiters_clone());
+                wake_count += 1;
+                next_cursor = (index + 1) % source_count;
+            }
+        }
+
+        self.scan_cursor = next_cursor;
+        (wake_count, has_deferred_pending)
+    }
+
+    fn has_pending_from(&self, start: usize, offset_start: usize) -> bool {
+        (offset_start..self.entries.len()).any(|offset| {
+            let index = (start + offset) % self.entries.len();
+            self.entries[index].has_pending()
+        })
+    }
+
+    fn normalize_cursor(&mut self) {
+        if self.entries.is_empty() {
+            self.scan_cursor = 0;
+        } else if self.scan_cursor >= self.entries.len() {
+            self.scan_cursor %= self.entries.len();
+        }
+    }
+}
+
+struct NetRxPollSource {
+    id: usize,
+    pending: AtomicBool,
+    waiters: PollSet,
+}
+
+impl NetRxPollSource {
+    fn new(id: usize) -> Self {
+        Self {
+            id,
+            pending: AtomicBool::new(false),
+            waiters: PollSet::new(),
+        }
+    }
+
+    fn waiters(&self) -> &PollSet {
+        &self.waiters
+    }
+
+    fn waiters_clone(&self) -> PollSet {
+        self.waiters.clone()
+    }
+
+    fn schedule(&self) {
+        self.pending.store(true, Ordering::Release);
+        kirq::softirq::raise_softirq(kirq::softirq::SoftirqVec::NetRx);
+    }
+
+    fn take_pending(&self) -> bool {
+        self.pending.swap(false, Ordering::AcqRel)
+    }
+
+    fn has_pending(&self) -> bool {
+        self.pending.load(Ordering::Acquire)
+    }
+}
+
+struct KnetRxScheduler {
+    source: Weak<NetRxPollSource>,
+}
+
+impl NetRxScheduler for KnetRxScheduler {
+    fn schedule_rx(&self) {
+        if let Some(source) = self.source.upgrade() {
+            source.schedule();
+        }
+    }
+}
+
+#[cfg(not(unittest))]
+fn ensure_net_rx_softirq_available() -> bool {
+    NET_RX_SOFTIRQ_INIT.call_once(|| {
+        if kirq::softirq::open_softirq(kirq::softirq::SoftirqVec::NetRx, run_net_rx_softirq) {
+            NET_RX_SOFTIRQ_AVAILABLE.store(true, Ordering::Release);
+        } else {
+            warn!("knet: NetRx softirq vector already registered");
+        }
+    });
+    NET_RX_SOFTIRQ_AVAILABLE.load(Ordering::Acquire)
+}
+
+#[cfg(unittest)]
+fn ensure_net_rx_softirq_available() -> bool {
+    let vec = kirq::softirq::SoftirqVec::NetRx;
+    if kirq::softirq::softirq_action_matches_for_tests(vec, run_net_rx_softirq) {
+        NET_RX_SOFTIRQ_AVAILABLE.store(true, Ordering::Release);
+        return true;
+    }
+    if kirq::softirq::is_softirq_open(vec) {
+        NET_RX_SOFTIRQ_AVAILABLE.store(false, Ordering::Release);
+        return false;
+    }
+
+    if kirq::softirq::open_softirq(vec, run_net_rx_softirq) {
+        NET_RX_SOFTIRQ_AVAILABLE.store(true, Ordering::Release);
+        true
+    } else {
+        let available = kirq::softirq::softirq_action_matches_for_tests(vec, run_net_rx_softirq);
+        NET_RX_SOFTIRQ_AVAILABLE.store(available, Ordering::Release);
+        available
+    }
+}
+
+fn register_net_rx_source() -> Option<Arc<NetRxPollSource>> {
+    if !ensure_net_rx_softirq_available() {
+        return None;
+    }
+    let id = NEXT_NET_RX_SOURCE_ID.fetch_add(1, Ordering::Relaxed);
+    let source = Arc::new(NetRxPollSource::new(id));
+    NET_RX_SOURCES.lock().push(source.clone());
+    Some(source)
+}
+
+fn unregister_net_rx_source(id: usize) {
+    let removed = {
+        let mut sources = NET_RX_SOURCES.lock();
+        sources.remove(id)
+    };
+    if let Some(source) = removed {
+        source.waiters.wake();
+    }
+}
+
+fn run_net_rx_softirq() {
+    let mut wake_batch: [Option<PollSet>; NET_RX_SOFTIRQ_BATCH] = core::array::from_fn(|_| None);
+    let (_, has_deferred_pending) = NET_RX_SOURCES
+        .lock()
+        .collect_scheduled_fallback_batch(&mut wake_batch);
+
+    for waiters in wake_batch.into_iter().flatten() {
+        waiters.wake();
+    }
+
+    if has_deferred_pending {
+        kirq::softirq::raise_softirq(kirq::softirq::SoftirqVec::NetRx);
+    }
+}
 
 /// ARP table entry mapping an IP address to a MAC address.
 struct ArpNeighbor {
@@ -47,6 +258,7 @@ pub struct EthernetDevice {
     ip: Ipv4Cidr,
 
     pending_tx: VecDeque<PendingTxPacket>,
+    rx_source: Option<Arc<NetRxPollSource>>,
 }
 
 impl EthernetDevice {
@@ -54,17 +266,43 @@ impl EthernetDevice {
 
     /// Create a new Ethernet device wrapper.
     pub fn new(name: String, inner: ClassDevice<NetDeviceImpl>, ip: Ipv4Cidr) -> Self {
+        let rx_source = if let Some(rx_source) = register_net_rx_source() {
+            let scheduler: Arc<dyn NetRxScheduler> = Arc::new(KnetRxScheduler {
+                source: Arc::downgrade(&rx_source),
+            });
+            match inner.set_rx_scheduler(Some(scheduler)) {
+                Ok(()) => Some(rx_source),
+                Err(DriverError::Unsupported) => {
+                    warn!("Ethernet driver does not support interrupt-driven RX scheduling");
+                    unregister_net_rx_source(rx_source.id);
+                    None
+                }
+                Err(err) => {
+                    warn!("failed to attach Ethernet RX scheduler: {:?}", err);
+                    unregister_net_rx_source(rx_source.id);
+                    None
+                }
+            }
+        } else {
+            warn!("knet: NetRx softirq unavailable; Ethernet RX uses timeout polling fallback");
+            None
+        };
         Self {
             name,
             inner,
             neighbors: HashMap::new(),
             ip,
             pending_tx: VecDeque::with_capacity(ETHERNET_MAX_PENDING_PACKETS),
+            rx_source,
         }
     }
 
+    pub(crate) fn rx_poll_set(&self) -> Option<PollSet> {
+        self.rx_source.as_ref().map(|source| source.waiters_clone())
+    }
+
     /// Spawn the RX poll task for an initialized network stack.
-    pub(crate) fn spawn_rx_task(irq: usize) {
+    pub(crate) fn spawn_rx_task(rx_poll: PollSet) {
         let _ = ktask::spawn_with_name(
             move || {
                 use core::{future::poll_fn, task::Poll};
@@ -76,11 +314,9 @@ impl EthernetDevice {
                     loop {
                         crate::poll_interfaces();
                         let mut context = registrations.context(cx);
-                        if kirq::register_irq_source_waker(irq, NET_RX_IRQ_SOURCE, &mut context)
-                            .is_err()
-                        {
+                        if context.register(&rx_poll).is_err() {
                             drop(context);
-                            // Sleeping without an IRQ registration would stall
+                            // Sleeping without an RX registration would stall
                             // RX forever; yield and retry under memory pressure.
                             ktask::yield_now();
                             continue;
@@ -424,10 +660,8 @@ impl NetDeviceOps for EthernetDevice {
         _source_waker: &core::task::Waker,
         context: &mut kpoll::PollContext<'_>,
     ) -> Result<(), kpoll::PollRegisterError> {
-        // Ethernet registers each waiting task directly on its IRQ source;
-        // the aggregated `source_waker` is only used by single-waker devices.
-        if let Some(irq) = self.inner.irq() {
-            kirq::register_irq_source_waker(irq, NET_RX_IRQ_SOURCE, context)?;
+        if let Some(source) = &self.rx_source {
+            context.register(source.waiters())?;
         }
         Ok(())
     }
@@ -461,6 +695,17 @@ impl NetDeviceOps for EthernetDevice {
     }
 }
 
+impl Drop for EthernetDevice {
+    fn drop(&mut self) {
+        if let Some(source) = &self.rx_source {
+            if let Err(err) = self.inner.set_rx_scheduler(None) {
+                warn!("failed to detach Ethernet RX scheduler: {:?}", err);
+            }
+            unregister_net_rx_source(source.id);
+        }
+    }
+}
+
 fn map_dev_err(err: DriverError) -> KError {
     match err {
         DriverError::AlreadyExists => KError::AlreadyExists,
@@ -469,5 +714,167 @@ fn map_dev_err(err: DriverError) -> KError {
         DriverError::NoMemory => LinuxError::ENOBUFS.into(),
         DriverError::Io => KError::Io,
         _ => KError::BadState,
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use alloc::{boxed::Box, vec::Vec};
+    use core::{
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{RawWaker, RawWakerVTable, Waker},
+    };
+
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    unsafe fn waker_clone(data: *const ()) -> RawWaker {
+        RawWaker::new(data, &WAKER_VTABLE)
+    }
+
+    unsafe fn waker_wake(data: *const ()) {
+        // SAFETY: test wakers install a leaked, aligned `AtomicUsize` pointer.
+        let counter = unsafe { &*(data as *const AtomicUsize) };
+        counter.fetch_add(1, Ordering::SeqCst);
+    }
+
+    unsafe fn waker_wake_by_ref(data: *const ()) {
+        // SAFETY: test wakers install a leaked, aligned `AtomicUsize` pointer.
+        let counter = unsafe { &*(data as *const AtomicUsize) };
+        counter.fetch_add(1, Ordering::SeqCst);
+    }
+
+    unsafe fn waker_drop(_data: *const ()) {}
+
+    static WAKER_VTABLE: RawWakerVTable =
+        RawWakerVTable::new(waker_clone, waker_wake, waker_wake_by_ref, waker_drop);
+
+    fn new_counter() -> &'static AtomicUsize {
+        Box::leak(Box::new(AtomicUsize::new(0)))
+    }
+
+    fn make_waker(counter: &'static AtomicUsize) -> Waker {
+        let raw = RawWaker::new(counter as *const _ as *const (), &WAKER_VTABLE);
+        // SAFETY: the raw waker data pointer is the leaked `AtomicUsize` above
+        // and the vtable only performs atomic increments on that allocation.
+        unsafe { Waker::from_raw(raw) }
+    }
+
+    fn test_source(sources: &mut NetRxSources, id: usize) -> Arc<NetRxPollSource> {
+        let source = Arc::new(NetRxPollSource::new(id));
+        sources.push(source.clone());
+        source
+    }
+
+    fn collect_and_wake_test_sources(sources: &mut NetRxSources) -> (usize, bool) {
+        let mut wake_batch: [Option<PollSet>; NET_RX_SOFTIRQ_BATCH] =
+            core::array::from_fn(|_| None);
+        let result = sources.collect_scheduled_fallback_batch(&mut wake_batch);
+        for waiters in wake_batch.into_iter().flatten() {
+            waiters.wake();
+        }
+        result
+    }
+
+    #[def_test(serial)]
+    fn test_net_rx_softirq_wakes_only_pending_sources() {
+        let mut sources = NetRxSources::new();
+        let pending_id = NEXT_NET_RX_SOURCE_ID.fetch_add(1, Ordering::Relaxed);
+        let idle_id = NEXT_NET_RX_SOURCE_ID.fetch_add(1, Ordering::Relaxed);
+        let pending_source = test_source(&mut sources, pending_id);
+        let idle_source = test_source(&mut sources, idle_id);
+        let pending_counter = new_counter();
+        let idle_counter = new_counter();
+        let pending_registration = pending_source
+            .waiters()
+            .register(&make_waker(pending_counter))
+            .unwrap();
+        let idle_registration = idle_source
+            .waiters()
+            .register(&make_waker(idle_counter))
+            .unwrap();
+
+        pending_source.pending.store(true, Ordering::Release);
+        assert_eq!(collect_and_wake_test_sources(&mut sources), (1, false));
+
+        assert_eq!(pending_counter.load(Ordering::SeqCst), 1);
+        assert_eq!(idle_counter.load(Ordering::SeqCst), 0);
+
+        drop(pending_registration);
+        drop(idle_registration);
+    }
+
+    #[def_test(serial)]
+    fn test_net_rx_softirq_round_robin_cursor_reaches_sources_after_batch() {
+        let mut local_sources = NetRxSources::new();
+        let mut sources = Vec::new();
+        let mut counters = Vec::new();
+        let mut registrations = Vec::new();
+        for _ in 0..(NET_RX_SOFTIRQ_BATCH + 2) {
+            let id = NEXT_NET_RX_SOURCE_ID.fetch_add(1, Ordering::Relaxed);
+            let source = test_source(&mut local_sources, id);
+            let counter = new_counter();
+            registrations.push(source.waiters().register(&make_waker(counter)).unwrap());
+            counters.push(counter);
+            sources.push(source);
+        }
+
+        for source in &sources {
+            source.pending.store(true, Ordering::Release);
+        }
+
+        assert_eq!(
+            collect_and_wake_test_sources(&mut local_sources),
+            (NET_RX_SOFTIRQ_BATCH, true)
+        );
+        assert_eq!(
+            collect_and_wake_test_sources(&mut local_sources),
+            (2, false)
+        );
+
+        for counter in &counters {
+            assert_eq!(counter.load(Ordering::SeqCst), 1);
+        }
+
+        drop(registrations);
+    }
+
+    #[def_test(serial)]
+    fn test_net_rx_softirq_full_batch_without_remaining_pending_does_not_defer() {
+        let mut local_sources = NetRxSources::new();
+        let mut sources = Vec::new();
+        let mut counters = Vec::new();
+        let mut registrations = Vec::new();
+        for _ in 0..(NET_RX_SOFTIRQ_BATCH + 2) {
+            let id = NEXT_NET_RX_SOURCE_ID.fetch_add(1, Ordering::Relaxed);
+            let source = test_source(&mut local_sources, id);
+            let counter = new_counter();
+            registrations.push(source.waiters().register(&make_waker(counter)).unwrap());
+            counters.push(counter);
+            sources.push(source);
+        }
+
+        for source in sources.iter().take(NET_RX_SOFTIRQ_BATCH) {
+            source.pending.store(true, Ordering::Release);
+        }
+
+        assert_eq!(
+            collect_and_wake_test_sources(&mut local_sources),
+            (NET_RX_SOFTIRQ_BATCH, false)
+        );
+        assert_eq!(
+            collect_and_wake_test_sources(&mut local_sources),
+            (0, false)
+        );
+
+        for counter in counters.iter().take(NET_RX_SOFTIRQ_BATCH) {
+            assert_eq!(counter.load(Ordering::SeqCst), 1);
+        }
+        for counter in counters.iter().skip(NET_RX_SOFTIRQ_BATCH) {
+            assert_eq!(counter.load(Ordering::SeqCst), 0);
+        }
+
+        drop(registrations);
     }
 }

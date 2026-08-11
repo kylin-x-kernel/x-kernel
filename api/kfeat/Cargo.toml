@@ -10,7 +10,7 @@ documentation.workspace = true
 description = "Top-level feature selection for x-kernel"
 
 [package.metadata.cargo-shear]
-ignored = ["alloc-engine", "entropy", "fbdevice", "inputdev", "kalloc", "kbpf", "kipi", "knet", "kspin", "ksync", "ktask", "ktracing", "memspace", "procfs", "tee_kernel", "tee_task_iface", "backtrace", "devfs", "kdriver", "kexec", "khal", "kprocess", "kruntime", "ksyscall", "linux_sysno"]
+ignored = ["alloc-engine", "entropy", "fbdevice", "inputdev", "kalloc", "kbpf", "kipi", "kirq", "knet", "kspin", "ksync", "ktask", "ktracing", "memspace", "procfs", "tee_kernel", "tee_task_iface", "backtrace", "devfs", "kdriver", "kexec", "khal", "kprocess", "kruntime", "ksyscall", "linux_sysno"]
 
 [features]
 default = []
@@ -151,6 +151,8 @@ snapshot = ["ktask/snapshot"]
 sysrq = ["dep:procfs", "procfs/sysrq"]
 watchdog = ["kruntime/watchdog", "ksync/watchdog"]
 watchdog_hardlockup = ["kruntime/watchdog_hardlockup", "kplat-aarch64?/nmi"]
+irq_context_debug = ["irq_stat", "dep:kirq", "kirq/irq_context_debug"]
+irq_stat = ["dep:kirq", "kirq/irq_stat"]
 lock_stat = [
     "dep:procfs",
     "procfs/lock_stat",
@@ -191,6 +193,7 @@ kalloc = { workspace = true, optional = true }
 backtrace.workspace = true
 fbdevice = { workspace = true, optional = true }
 kdriver.workspace = true
+kirq = { workspace = true, optional = true }
 kprocess.workspace = true
 kplat-aarch64 = { workspace = true, optional = true, features = [
     "fp-simd",

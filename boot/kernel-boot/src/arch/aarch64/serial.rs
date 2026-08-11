@@ -59,7 +59,7 @@ fn active_uart_idmap() -> Option<Uart> {
     if base == 0 {
         None
     } else {
-        Some(Uart::new(base))
+        Some(Uart::new_idmap(base))
     }
 }
 
@@ -212,13 +212,10 @@ pub struct Uart {
     base_address: usize,
 }
 
-/// Read the ARM generic physical counter.
-///
-/// It always runs, is readable at EL1/EL2 without setup, and touches only a
-/// register, so it is safe to call from early `.idmap.text` to measure time
-/// independently of the core clock.
+// Runtime and idmap console paths intentionally use separate symbols. Debug
+// builds do not reliably inline these helpers, so idmap callers must not branch
+// into `.text` and runtime callers must not branch back into `.idmap.text`.
 #[inline]
-#[unsafe(link_section = ".idmap.text")]
 fn phys_count() -> u64 {
     let v;
     // SAFETY: `mrs` of a read-only counter register; no memory or control
@@ -233,10 +230,39 @@ fn phys_count() -> u64 {
     v
 }
 
-/// Read the frequency (`CNTFRQ_EL0`) of the ARM generic counter.
 #[inline]
 #[unsafe(link_section = ".idmap.text")]
+fn phys_count_idmap() -> u64 {
+    let v;
+    // SAFETY: `mrs` of a read-only counter register; no memory or control
+    // side effects.
+    unsafe {
+        core::arch::asm!(
+            "mrs {0}, CNTPCT_EL0",
+            out(reg) v,
+            options(nostack, preserves_flags)
+        );
+    }
+    v
+}
+
+#[inline]
 fn phys_freq() -> u64 {
+    let v;
+    // SAFETY: `mrs` of a read-only register; no side effects.
+    unsafe {
+        core::arch::asm!(
+            "mrs {0}, CNTFRQ_EL0",
+            out(reg) v,
+            options(nostack, preserves_flags)
+        );
+    }
+    v
+}
+
+#[inline]
+#[unsafe(link_section = ".idmap.text")]
+fn phys_freq_idmap() -> u64 {
     let v;
     // SAFETY: `mrs` of a read-only register; no side effects.
     unsafe {
@@ -259,7 +285,6 @@ fn phys_freq() -> u64 {
 /// core clock. A baud rate of 0 disables pacing: emulated UARTs and PL011s with
 /// deep FIFOs are not overrun and need no delay.
 #[inline]
-#[unsafe(link_section = ".idmap.text")]
 fn pace_one_byte() {
     let baud = kbuild_config::BOOT_CONSOLE_BAUDRATE;
     if baud == 0 {
@@ -277,6 +302,22 @@ fn pace_one_byte() {
 
 #[inline]
 #[unsafe(link_section = ".idmap.text")]
+fn pace_one_byte_idmap() {
+    let baud = kbuild_config::BOOT_CONSOLE_BAUDRATE;
+    if baud == 0 {
+        return;
+    }
+    let baud = baud as u64;
+    // One 8N1 byte is 10 bit times. Wait *at least* that long (ceiling) so the
+    // inject rate never exceeds the line rate and the FIFO cannot overflow.
+    let wait = phys_freq_idmap().saturating_mul(10).div_ceil(baud);
+    let start = phys_count_idmap();
+    while phys_count_idmap().wrapping_sub(start) < wait {
+        core::hint::spin_loop();
+    }
+}
+
+#[inline]
 fn write_data_reg(base_address: usize, c: u8) {
     match kbuild_config::BOOT_CONSOLE_REG_IO_WIDTH {
         4 => {
@@ -304,13 +345,45 @@ fn write_data_reg(base_address: usize, c: u8) {
     }
 }
 
+#[inline]
+#[unsafe(link_section = ".idmap.text")]
+fn write_data_reg_idmap(base_address: usize, c: u8) {
+    match kbuild_config::BOOT_CONSOLE_REG_IO_WIDTH {
+        4 => {
+            let ptr = base_address as *mut u32;
+            // SAFETY: `base_address` is the configured UART data register and
+            // `BOOT_CONSOLE_REG_IO_WIDTH=4` states that firmware/board data
+            // requires naturally-aligned 32-bit MMIO writes.
+            unsafe { ptr.write_volatile(c as u32) };
+        }
+        2 => {
+            let ptr = base_address as *mut u16;
+            // SAFETY: `base_address` is the configured UART data register and
+            // `BOOT_CONSOLE_REG_IO_WIDTH=2` states that firmware/board data
+            // requires naturally-aligned 16-bit MMIO writes.
+            unsafe { ptr.write_volatile(c as u16) };
+        }
+        _ => {
+            let ptr = base_address as *mut u8;
+            // SAFETY: `base_address` is the configured UART data register.
+            // The default early-console access mode is byte MMIO, matching the
+            // historical behavior and Linux 8250's default when `reg-io-width`
+            // is absent.
+            unsafe { ptr.write_volatile(c) };
+        }
+    }
+}
+
 impl Uart {
-    #[unsafe(link_section = ".idmap.text")]
     pub const fn new(base_address: usize) -> Self {
         Self { base_address }
     }
 
     #[unsafe(link_section = ".idmap.text")]
+    pub const fn new_idmap(base_address: usize) -> Self {
+        Self { base_address }
+    }
+
     pub fn put(&self, c: u8) -> Option<u8> {
         write_data_reg(self.base_address, c);
         pace_one_byte();
@@ -319,8 +392,8 @@ impl Uart {
 
     #[unsafe(link_section = ".idmap.text")]
     pub fn put_idmap(&self, c: u8) -> Option<u8> {
-        write_data_reg(self.base_address, c);
-        pace_one_byte();
+        write_data_reg_idmap(self.base_address, c);
+        pace_one_byte_idmap();
         Some(c)
     }
 }

@@ -129,6 +129,31 @@ core/kruntime
 | `unix` | 提供 Unix domain stream 与 datagram transport；pathname 地址通过 kvfs 查找或创建 socket inode |
 | `vsock` | 在 `vsock` feature 下提供 virtio-vsock stream 支持 |
 
+### Ethernet RX 调度边界
+
+驱动向上提供 NIC 能力时仍通过 `kclass` / `driver_net` 发布 `NetDevice`。
+`knet` 在创建 `EthernetDevice` 时为该设备创建独立的 RX `PollSet`，
+并通过 `driver_net::NetRxScheduler` 把一个 IRQ-safe 调度能力 attach 给驱动。
+NIC 硬中断 handler 只负责 ack 设备中断并调用 `schedule_rx()`；
+`schedule_rx()` 标记对应设备有 RX work，并 raise `kirq::softirq::SoftirqVec::NetRx`。
+当前 `NetRx` softirq action 仍是保守 fallback 形态：它只消费已 pending
+的设备 RX source，并唤醒对应设备 RX `PollSet`；实际 `poll_interfaces`、
+协议推进和 socket readiness 仍由 `knet-rx` 任务或普通 socket 轮询路径执行。
+这与 Linux NAPI 的最终形态不同：Linux `NET_RX_SOFTIRQ` 会在
+`net_rx_action()` 中直接按 budget drain NAPI poll list。X-Kernel 后续要
+达到同类形态，需要先补齐非阻塞 RX ingress 或 workerqueue 承接层，因为当前
+`Service` / `SocketSet` 和下游 UDP registry、listen table、packet handler
+仍使用可睡眠锁。
+如果驱动不支持 `NetRxScheduler` attach，`EthernetDevice` 不会注册专用 RX
+`PollSet`，等待路径回退到 `Service` 的 timeout 聚合 waker，避免等待一个
+永远不会被驱动唤醒的 source。如果 `NetRx` softirq vector 无法注册，
+`EthernetDevice` 同样不创建专用 RX source，并保留 timeout polling fallback；
+这属于 fail-closed 行为，而不是创建一个不可达的异步等待源。
+
+这个边界避免把网络 source 语义放进 `kirq`：
+`kirq` 只提供通用 softirq 机制，`driver_net` 表达网络设备能力，
+`knet` 决定 RX work 如何唤醒和推进。
+
 ## 调用约束 / 执行上下文
 
 `knet` 运行在内核上下文中，
@@ -144,8 +169,14 @@ core/kruntime
   netlink mutation 等路径会获取 `Mutex` / `RwLock`
   并推进较重的数据路径，应在普通任务上下文中运行。
 - **IRQ 路径只做通知**：
-  设备中断回调应只负责唤醒等待者或登记事件，
-  不应直接执行完整的协议推进或阻塞式 socket 语义。
+  设备中断回调应只负责 ack 设备中断、登记 RX pending 并调度
+  `NetRx` softirq，不应直接执行完整的协议推进或阻塞式 socket 语义。
+- **当前 NetRx softirq 不直接推进协议栈**：
+  `NetRx` softirq 运行在不可睡眠上下文。现阶段它只消费 pending RX source
+  并唤醒对应设备 RX `PollSet`；`knet-rx` fallback worker 和普通 socket
+  polling waiter 都可能通过该 `PollSet` 被唤醒，协议推进仍由任务/轮询路径执行。
+  在 `knet` 形成全链路 nonblocking receive path 或 workerqueue 之前，不应从
+  softirq 直接调用 `poll_interfaces`。
 - **允许阻塞的路径依赖 poll/waker 语义**：
   阻塞式 socket 操作依赖 `PollSet`、waker
   和 timeout 注册机制。`Pollable::register` 只能通过调用方提供的
@@ -298,7 +329,7 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 - Unix stream 的用户数据复制和 `PollSet` 唤醒在 `tx_order` 外执行。send 先写入未发布的 vacant 区域，再在锁内复检关闭状态并推进 write index；recv 读取为空后在锁内复查 occupied 长度和关闭状态；shutdown 完成状态发布并复制 peer endpoint 引用后释放 `channel` mutex，再执行 waiter 唤醒。
 - Unix stream 每个 endpoint 分别持有 readable、writable 和 connection-state 三组 `PollSet`。写入只唤醒 peer readable waiter，读取跨过发送缓冲低水位时只唤醒 peer writable waiter，半关闭只唤醒受影响方向，完整关闭通过 connection-state waiter 通知双方。
 - netlink `ROUTE_STATE` 使用 `RwLock`，rx queue 和 subscriber 列表使用 `Mutex`。
-- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 使用调用方传入的同一个 `PollContext` 注册聚合 `timeout_poll` 和相关 Ethernet IRQ source，registration 由跨越 `Pending` 的 `PollRegistrations` 统一管理。loopback 仍保存 `timeout_poll` 的聚合 waker（`Mutex<Option<Waker>>`），多任务广播由 `timeout_poll` 完成；设备层不得保存调用方的裸 waker或绕过 `Service` 注册互不等价的 task waker。
+- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 使用调用方传入的同一个 `PollContext` 注册聚合 `timeout_poll` 和支持 interrupt-driven RX 的 Ethernet RX poll source；当前该 poll source 由 `NetRx` softirq 在设备 pending 后唤醒，`knet-rx` fallback worker 和普通 socket polling waiter 都可能是消费者。registration 由跨越 `Pending` 的 `PollRegistrations` 统一管理。loopback 和未 attach `NetRxScheduler` 的 Ethernet 设备仍使用 `timeout_poll` 的聚合 waker，多任务广播由 `timeout_poll` 完成；设备层不得保存调用方的裸 waker或绕过 `Service` 注册互不等价的 task waker。
 
 ## 设计决策
 
@@ -331,6 +362,24 @@ smoltcp `poll_at` 使用传入 timestamp 的同一 epoch 返回期限；兼容�
 `SmoltcpInstant` 与 `MonotonicInstant` 之间直接映射时间点。过期的 smoltcp deadline
 因此仍是过期的单调 deadline，不再计算有符号 delay，也不会经过 `as u64` 窄化。
 这个设计减少无关设备中断唤醒，但依赖路由和地址同步保持 mask 准确。
+
+### 后续 NetRx direct progress 里程碑
+
+`NetRx` softirq 直接推进 RX progress 不属于当前阶段。它应作为 workerqueue
+机制补齐后的独立里程碑实现：
+
+1. hardirq 仍只做设备 ack 和 `NetRxScheduler::schedule_rx()`；
+2. `NetRx` softirq 先按 NAPI-like source state 认领 RX work；
+3. 若需要 sleepable 网络栈路径，softirq 只投递 workerqueue work，不直接调用
+   `poll_interfaces`；
+4. worker 或全链路 nonblocking ingress 负责按 budget 推进 `Router` /
+   `Service` receive path，并在数据入 socket queue 后唤醒 socket waiter；
+5. 该里程碑必须同时定义 RX buffer ownership、budget/repoll、cancel/flush 和
+   device teardown 语义。
+
+在该里程碑开始前，`NetRx` softirq 保持 per-device RX `PollSet` wake source
+角色；`knet-rx` fallback worker 和普通 socket polling waiter 都可能是该 source
+的消费者。
 
 ### TCP listen 表独立于 smoltcp listener socket
 

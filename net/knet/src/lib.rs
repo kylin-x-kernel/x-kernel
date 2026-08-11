@@ -80,21 +80,18 @@ pub fn init_network() {
     ));
 
     let mut eth0_mac = None;
-    let mut eth0_irq = None;
+    let mut eth0_rx_poll = None;
     let eth0_ip = if let Some(handle) = net_devs.pop() {
         let device_id = handle.id();
         info!("  use NIC 0: {:?}", handle.name());
 
         let eth0_address = wire::MacAddress(handle.mac().0);
         eth0_mac = Some(handle.mac().0);
-        eth0_irq = handle.irq();
         let eth0_ip = Ipv4Cidr::new(IP.parse().expect("Invalid IPv4 address"), IP_PREFIX);
 
-        let eth0_dev = router.add_device(Box::new(EthernetDevice::new(
-            "eth0".to_owned(),
-            handle,
-            eth0_ip,
-        )));
+        let eth0 = EthernetDevice::new("eth0".to_owned(), handle, eth0_ip);
+        eth0_rx_poll = eth0.rx_poll_set();
+        let eth0_dev = router.add_device(Box::new(eth0));
 
         router.add_rule(Rule::new(
             Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
@@ -143,8 +140,8 @@ pub fn init_network() {
     LISTEN_TABLE.init_once(ListenTable::new());
     udp::init_udp_registry();
 
-    if let Some(irq) = eth0_irq {
-        EthernetDevice::spawn_rx_task(irq);
+    if let Some(rx_poll) = eth0_rx_poll {
+        EthernetDevice::spawn_rx_task(rx_poll);
     }
 }
 
