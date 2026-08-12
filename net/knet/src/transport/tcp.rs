@@ -29,6 +29,7 @@ use crate::{
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poll_interfaces,
+    poller::{PollReason, network_poller},
     state::*,
 };
 
@@ -92,11 +93,9 @@ impl TcpSocket {
         };
         let bound_endpoint = endpoint_from_ip_endpoint(local_endpoint);
         *result.bound_endpoint.lock() = bound_endpoint;
-        result.general.set_device_mask(
-            SERVICE
-                .lock()
-                .smoltcp_device_mask_for_addr(&remote_endpoint.addr),
-        );
+        result
+            .general
+            .set_device_mask(SERVICE.smoltcp_device_mask_for_addr(&remote_endpoint.addr));
         result
     }
 }
@@ -120,6 +119,60 @@ impl TcpSocket {
 
     fn with_smol_socket<R>(&self, f: impl FnOnce(&mut smol::Socket) -> R) -> R {
         SOCKET_SET.with_socket_mut::<smol::Socket, _, _>(self.dispatch_irq, f)
+    }
+
+    // File close must inspect the receive queue before any protocol packet is
+    // dispatched so unread data can select the TCP reset path.
+    fn shutdown_inner(
+        &self,
+        how: Shutdown,
+        close_protocol: bool,
+        progress_immediately: bool,
+    ) -> KResult {
+        if how.has_read() {
+            self.rx_closed.store(true, Ordering::Release);
+            self.poll_rx_closed.wake();
+        }
+
+        // stream
+        if self.state() == State::Connected {
+            if how.has_write() {
+                self.tx_closed.store(true, Ordering::Release);
+                if close_protocol {
+                    self.with_smol_socket(|socket| {
+                        socket.close();
+                    });
+                }
+                if progress_immediately {
+                    network_poller().notify(PollReason::Tx);
+                }
+            }
+            if how == Shutdown::Both {
+                self.state.set(State::Closed);
+                self.unregister_bound_endpoint();
+                *self.bound_endpoint.lock() = empty_endpoint();
+            }
+            if progress_immediately {
+                poll_interfaces();
+            }
+        }
+
+        // listener
+        if let Ok(guard) = self.state.lock(State::Listening) {
+            guard.transit(State::Closed, || {
+                let bound_endpoint = self.bound_endpoint()?;
+                LISTEN_TABLE.unlisten(bound_endpoint);
+                self.unregister_bound_endpoint();
+                *self.bound_endpoint.lock() = empty_endpoint();
+                if progress_immediately {
+                    poll_interfaces();
+                }
+                Ok(())
+            })?;
+        }
+
+        // ignore for other states
+        Ok(())
     }
 
     fn bound_endpoint(&self) -> KResult<IpListenEndpoint> {
@@ -242,11 +295,13 @@ impl Configurable for TcpSocket {
                 self.with_smol_socket(|socket| {
                     socket.set_nagle_enabled(!no_delay);
                 });
+                network_poller().notify(PollReason::Tx);
             }
             O::KeepAlive(keep_alive) => {
                 self.with_smol_socket(|socket| {
                     socket.set_keep_alive(keep_alive.then(|| Duration::from_secs(75)));
                 });
+                network_poller().notify(PollReason::Timer);
             }
             _ => return Ok(OptionHandled::No),
         }
@@ -282,7 +337,7 @@ impl SocketOps for TcpSocket {
                 self.register_bound_endpoint(endpoint)?;
                 *self.bound_endpoint.lock() = endpoint;
                 self.general
-                    .set_device_mask(SERVICE.lock().smoltcp_device_mask_for(&endpoint));
+                    .set_device_mask(SERVICE.smoltcp_device_mask_for(&endpoint));
                 Ok(())
             })
     }
@@ -305,11 +360,8 @@ impl SocketOps for TcpSocket {
                 let remote_endpoint = IpEndpoint::from(remote_addr);
                 let mut bound_endpoint = *self.bound_endpoint.lock();
                 if bound_endpoint.addr.is_none() {
-                    bound_endpoint.addr = Some(
-                        SERVICE
-                            .lock()
-                            .get_smoltcp_source_address(&remote_endpoint.addr)?,
-                    );
+                    bound_endpoint.addr =
+                        Some(SERVICE.get_smoltcp_source_address(&remote_endpoint.addr)?);
                 }
                 if bound_endpoint.port == 0 {
                     let local_addr = bound_endpoint
@@ -323,19 +375,19 @@ impl SocketOps for TcpSocket {
                 }
 
                 let result = {
-                    let mut service = crate::SERVICE.lock();
-                    let context = service.iface.context();
-                    self.with_smol_socket(|socket| {
-                        socket
-                            .connect(context, remote_endpoint, bound_endpoint)
-                            .map_err(|e| match e {
-                                smol::ConnectError::InvalidState => k_err_type!(AlreadyConnected),
-                                smol::ConnectError::Unaddressable => {
-                                    k_err_type!(ConnectionRefused, "unaddressable")
-                                }
-                            })?;
-                        Ok::<(), KError>(())
-                    })
+                    let mut sockets = SOCKET_SET.inner.lock();
+                    let mut iface = crate::SERVICE.iface.lock();
+                    let context = iface.context();
+                    let socket = sockets.get_mut::<smol::Socket>(self.dispatch_irq);
+                    socket
+                        .connect(context, remote_endpoint, bound_endpoint)
+                        .map_err(|e| match e {
+                            smol::ConnectError::InvalidState => k_err_type!(AlreadyConnected),
+                            smol::ConnectError::Unaddressable => {
+                                k_err_type!(ConnectionRefused, "unaddressable")
+                            }
+                        })?;
+                    Ok::<(), KError>(())
                 };
                 if let Err(err) = result {
                     if should_register {
@@ -348,13 +400,12 @@ impl SocketOps for TcpSocket {
                 if should_register {
                     self.bound_registered.store(true, Ordering::Release);
                 }
-                self.general.set_device_mask(
-                    SERVICE
-                        .lock()
-                        .smoltcp_device_mask_for_addr(&remote_endpoint.addr),
-                );
+                self.general
+                    .set_device_mask(SERVICE.smoltcp_device_mask_for_addr(&remote_endpoint.addr));
                 Ok(())
             })?;
+
+        network_poller().notify(PollReason::Tx);
 
         // Hack: let the server listen
         ktask::yield_now();
@@ -398,7 +449,7 @@ impl SocketOps for TcpSocket {
                     self.bound_registered.store(true, Ordering::Release);
                 }
                 self.general
-                    .set_device_mask(SERVICE.lock().smoltcp_device_mask_for(&bound_endpoint));
+                    .set_device_mask(SERVICE.smoltcp_device_mask_for(&bound_endpoint));
                 Ok(())
             })?;
         } else {
@@ -438,7 +489,6 @@ impl SocketOps for TcpSocket {
             let result = self
                 .general
                 .send_poller_with_nonblocking(self, nonblocking, || {
-                    poll_interfaces();
                     self.with_smol_socket(|socket| {
                         if self.tx_closed.load(Ordering::Acquire) {
                             Err(KError::BrokenPipe)
@@ -462,7 +512,7 @@ impl SocketOps for TcpSocket {
             match result {
                 Ok(0) => break,
                 Ok(len) => {
-                    poll_interfaces();
+                    network_poller().notify(PollReason::Tx);
                     total_sent += len;
                 }
                 Err(_) if total_sent > 0 => return Ok(total_sent),
@@ -477,33 +527,50 @@ impl SocketOps for TcpSocket {
         if self.rx_closed.load(Ordering::Acquire) {
             return Err(KError::NotConnected);
         }
-        self.general
-            .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
-                poll_interfaces();
-                self.with_smol_socket(|socket| {
-                    if socket.can_recv() {
-                        if options.flags.contains(RecvFlags::PEEK) {
-                            dst.write(
-                                socket
-                                    .peek(dst.remaining_mut())
-                                    .map_err(|_| k_err_type!(NotConnected, "not connected?"))?,
-                            )
+        let mut should_poll_rx_window = false;
+        let received =
+            self.general
+                .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
+                    poll_interfaces();
+                    self.with_smol_socket(|socket| {
+                        if socket.can_recv() {
+                            if options.flags.contains(RecvFlags::PEEK) {
+                                dst.write(
+                                    socket
+                                        .peek(dst.remaining_mut())
+                                        .map_err(|_| k_err_type!(NotConnected, "not connected?"))?,
+                                )
+                            } else {
+                                let receive_capacity_bytes = socket.recv_capacity();
+                                let available_before_bytes =
+                                    receive_capacity_bytes.saturating_sub(socket.recv_queue());
+                                let result = socket
+                                    .recv(|buf| {
+                                        let result = dst.write(buf);
+                                        let len = result.unwrap_or(0);
+                                        (len, result)
+                                    })
+                                    .map_err(|_| k_err_type!(NotConnected, "not connected?"))?;
+                                if let Ok(received) = result {
+                                    should_poll_rx_window = should_poll_receive_window(
+                                        receive_capacity_bytes,
+                                        available_before_bytes,
+                                        received,
+                                    );
+                                }
+                                result
+                            }
+                        } else if !socket.may_recv() {
+                            Ok(0)
                         } else {
-                            socket
-                                .recv(|buf| {
-                                    let result = dst.write(buf);
-                                    let len = result.unwrap_or(0);
-                                    (len, result)
-                                })
-                                .map_err(|_| k_err_type!(NotConnected, "not connected?"))?
+                            Err(KError::WouldBlock)
                         }
-                    } else if !socket.may_recv() {
-                        Ok(0)
-                    } else {
-                        Err(KError::WouldBlock)
-                    }
-                })
-            })
+                    })
+                })?;
+        if should_poll_rx_window {
+            network_poller().notify(PollReason::RxWindow);
+        }
+        Ok(received)
     }
 
     fn local_addr(&self) -> KResult<SocketAddrEx> {
@@ -531,42 +598,25 @@ impl SocketOps for TcpSocket {
     }
 
     fn shutdown(&self, how: Shutdown) -> KResult {
-        if how.has_read() {
-            self.rx_closed.store(true, Ordering::Release);
-            self.poll_rx_closed.wake();
-        }
-
-        // stream
-        if self.state() == State::Connected {
-            if how.has_write() {
-                self.tx_closed.store(true, Ordering::Release);
-                self.with_smol_socket(|socket| {
-                    socket.close();
-                });
-            }
-            if how == Shutdown::Both {
-                self.state.set(State::Closed);
-                self.unregister_bound_endpoint();
-                *self.bound_endpoint.lock() = empty_endpoint();
-            }
-            poll_interfaces();
-        }
-
-        // listener
-        if let Ok(guard) = self.state.lock(State::Listening) {
-            guard.transit(State::Closed, || {
-                let bound_endpoint = self.bound_endpoint()?;
-                LISTEN_TABLE.unlisten(bound_endpoint);
-                self.unregister_bound_endpoint();
-                *self.bound_endpoint.lock() = empty_endpoint();
-                poll_interfaces();
-                Ok(())
-            })?;
-        }
-
-        // ignore for other states
-        Ok(())
+        self.shutdown_inner(how, true, true)
     }
+}
+
+fn should_poll_receive_window(
+    receive_capacity_bytes: usize,
+    available_before_bytes: usize,
+    received_bytes: usize,
+) -> bool {
+    // Keep this calculation aligned with smoltcp Socket::new so dependency
+    // upgrades cannot silently narrow the zero-window range covered here.
+    let capacity_bit_len = usize::BITS as usize - receive_capacity_bytes.leading_zeros() as usize;
+    let max_window_scale_shift = capacity_bit_len.saturating_sub(16);
+    let max_window_scale_quantum_bytes = 1usize << max_window_scale_shift;
+
+    // A peer without window scaling needs the first notification after a full
+    // buffer is consumed. A scaled peer can still see a zero window until one
+    // complete scale quantum is free, so each read in that range must poll.
+    received_bytes > 0 && available_before_bytes < max_window_scale_quantum_bytes
 }
 
 impl Pollable for TcpSocket {
@@ -587,7 +637,10 @@ impl Pollable for TcpSocket {
         context: &mut PollContext<'_>,
         events: IoEvents,
     ) -> Result<(), PollRegisterError> {
-        if events.intersects(IoEvents::IN | IoEvents::OUT | IoEvents::RDHUP) {
+        if events.contains(IoEvents::OUT) {
+            let source_waker = self.general.register_tx_waker(context)?;
+            self.with_smol_socket(|socket| socket.register_send_waker(&source_waker));
+        } else if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
             self.general.register_rx_waker(context)?;
         }
         if self.is_listening()
@@ -606,12 +659,32 @@ impl Pollable for TcpSocket {
 
 impl Drop for TcpSocket {
     fn drop(&mut self) {
-        if let Err(err) = self.shutdown(Shutdown::Both) {
+        if let Err(err) = self.shutdown_inner(Shutdown::Both, false, false) {
             warn!("TCP socket {}: shutdown failed: {}", self.dispatch_irq, err);
         }
         self.unregister_bound_endpoint();
-        SOCKET_SET.remove(self.dispatch_irq);
-        // This is crucial for the close messages to be sent.
+
+        let mut sockets = SOCKET_SET.inner.lock();
+        let socket = sockets.get_mut::<smol::Socket>(self.dispatch_irq);
+        let has_unread_data = socket.can_recv();
+        let is_protocol_closed = {
+            // Linux aborts a TCP close with unread receive data. Keep the
+            // handle until smoltcp dispatches the resulting reset packet.
+            if has_unread_data {
+                socket.abort();
+            } else {
+                socket.close();
+            }
+            socket.state() == smol::State::Closed
+        };
+        if is_protocol_closed && !has_unread_data && socket.local_endpoint().is_none() {
+            sockets.remove(self.dispatch_irq);
+            return;
+        }
+
+        sockets.defer_tcp_close(self.dispatch_irq);
+        drop(sockets);
+        network_poller().notify(PollReason::Tx);
         poll_interfaces();
     }
 }
@@ -735,7 +808,7 @@ mod tests {
     use alloc::vec;
     use core::net::Ipv4Addr;
 
-    use smoltcp::wire::Ipv4Address;
+    use smoltcp::{time::Instant, wire::Ipv4Address};
     use unittest::def_test;
 
     use super::*;
@@ -778,6 +851,31 @@ mod tests {
     }
 
     #[def_test]
+    fn recv_window_poll_requires_consumed_data() {
+        assert!(!should_poll_receive_window(64 * 1024, 0, 0));
+        assert!(!should_poll_receive_window(64 * 1024, 1, 0));
+    }
+
+    #[def_test]
+    fn recv_window_poll_covers_the_scaled_zero_window_range() {
+        assert!(should_poll_receive_window(64 * 1024, 0, 1));
+        assert!(should_poll_receive_window(64 * 1024, 1, 1));
+        assert!(should_poll_receive_window(64 * 1024, 1, 4096));
+    }
+
+    #[def_test]
+    fn recv_window_poll_stops_after_the_scale_quantum() {
+        assert!(!should_poll_receive_window(64 * 1024, 2, 4096));
+        assert!(!should_poll_receive_window(64 * 1024, 4096, 4096));
+    }
+
+    #[def_test]
+    fn recv_window_poll_covers_unscaled_receive_buffers() {
+        assert!(should_poll_receive_window(64 * 1024 - 1, 0, 1));
+        assert!(!should_poll_receive_window(64 * 1024 - 1, 1, 1));
+    }
+
+    #[def_test]
     fn test_send_state_error_maps_connection_and_shutdown_states() {
         assert_eq!(
             TcpSocket::send_state_error(smol::State::Listen),
@@ -816,6 +914,32 @@ mod tests {
             TcpSocket::send_state_error(smol::State::TimeWait),
             KError::BrokenPipe
         );
+    }
+
+    #[def_test]
+    fn deferred_close_reaps_protocol_closed_socket() {
+        let current = Instant::from_millis(10);
+        let mut sockets = crate::wrapper::SocketSetState::new();
+        let handle = sockets.add(new_tcp_socket());
+        sockets.defer_tcp_close(handle);
+
+        let next_deadline = sockets.reap_deferred_tcp_closes(current);
+
+        assert_eq!(next_deadline, None);
+        assert_eq!(sockets.iter().count(), 0);
+    }
+
+    #[def_test]
+    fn deferred_close_does_not_impose_deadline_on_live_socket() {
+        let current = Instant::from_millis(10);
+        let mut socket = new_tcp_socket();
+        socket.listen(49152).unwrap();
+        let mut sockets = crate::wrapper::SocketSetState::new();
+        let handle = sockets.add(socket);
+        sockets.defer_tcp_close(handle);
+
+        assert_eq!(sockets.reap_deferred_tcp_closes(current), None);
+        assert_eq!(sockets.iter().count(), 1);
     }
 
     #[def_test]

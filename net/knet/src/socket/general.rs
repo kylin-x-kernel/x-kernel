@@ -86,9 +86,7 @@ impl GeneralOptions {
         &self,
         context: &mut PollContext<'_>,
     ) -> Result<Waker, PollRegisterError> {
-        SERVICE
-            .lock()
-            .register_rx_waker(self.device_mask(), context)
+        SERVICE.register_rx_waker(self.device_mask(), context)
     }
 
     /// Registers for network progress that may free transmit capacity.
@@ -96,7 +94,9 @@ impl GeneralOptions {
         &self,
         context: &mut PollContext<'_>,
     ) -> Result<Waker, PollRegisterError> {
-        SERVICE.lock().register_rx_waker(u32::MAX, context)
+        let source_waker = SERVICE.register_rx_waker(u32::MAX, context)?;
+        crate::poller::network_poller().register_tx_waker(context)?;
+        Ok(source_waker)
     }
 
     /// Poll for send readiness and run the provided operation.

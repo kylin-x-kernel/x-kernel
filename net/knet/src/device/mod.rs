@@ -34,6 +34,10 @@ pub trait NetDevice: Send + Sync {
 
     /// Polls one received packet from the device.
     fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> Option<PacketBuf>;
+
+    /// Returns whether the device has RX work available without waiting.
+    fn has_rx_work(&self) -> bool;
+
     /// Sends an IP packet to the next hop.
     ///
     /// Returns `true` if this operation resulted in the readiness of receive

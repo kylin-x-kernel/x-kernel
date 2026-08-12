@@ -7,7 +7,9 @@ use alloc::{collections::VecDeque, sync::Arc};
 use ::core::{net::SocketAddr, ops::Range};
 use ksync::{Mutex, RwLock};
 
-use super::{IPV4_DEFAULT_TTL, UDP_RX_QUEUE_CAPACITY, state::UdpSocketState};
+use super::{
+    IPV4_DEFAULT_TTL, UDP_RX_QUEUE_CAPACITY, UDP_RX_QUEUE_RETAINED_CAPACITY, state::UdpSocketState,
+};
 use crate::buf::PacketBuf;
 
 #[derive(Clone)]
@@ -67,7 +69,7 @@ impl UdpPcb {
     pub(super) fn new(state: Arc<UdpSocketState>) -> Arc<Self> {
         Arc::new(Self {
             state,
-            rx_queue: Mutex::new(VecDeque::with_capacity(UDP_RX_QUEUE_CAPACITY)),
+            rx_queue: Mutex::new(VecDeque::new()),
             ttl: RwLock::new(IPV4_DEFAULT_TTL),
             mtu_discovery: RwLock::new(1),
         })
@@ -76,6 +78,9 @@ impl UdpPcb {
     pub(super) fn enqueue(&self, datagram: UdpDatagram) -> bool {
         let mut queue = self.rx_queue.lock();
         if queue.len() >= UDP_RX_QUEUE_CAPACITY {
+            return false;
+        }
+        if queue.len() == queue.capacity() && queue.try_reserve(1).is_err() {
             return false;
         }
         queue.push_back(datagram);
@@ -90,10 +95,17 @@ impl UdpPcb {
 
     pub(super) fn recv_datagram(&self, mode: RecvMode) -> Option<UdpDatagram> {
         let mut queue = self.rx_queue.lock();
-        match mode {
+        let datagram = match mode {
             RecvMode::Peek => queue.front().cloned(),
             RecvMode::Consume => queue.pop_front(),
+        };
+        if mode == RecvMode::Consume
+            && queue.is_empty()
+            && queue.capacity() > UDP_RX_QUEUE_RETAINED_CAPACITY
+        {
+            queue.shrink_to(UDP_RX_QUEUE_RETAINED_CAPACITY);
         }
+        datagram
     }
 }
 
@@ -129,5 +141,36 @@ mod tests {
         let second = pcb.recv_datagram(RecvMode::Consume).unwrap();
         assert_eq!(second.remote_addr, SocketAddr::V4(connected_remote));
         assert_eq!(second.payload.as_slice(), &[2]);
+    }
+
+    #[def_test]
+    fn receive_queue_allocates_capacity_on_demand() {
+        let pcb = UdpPcb::new(UdpSocketState::new());
+        assert_eq!(pcb.rx_queue.lock().capacity(), 0);
+
+        let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1000);
+        assert!(pcb.enqueue(datagram(remote, 1)));
+
+        let capacity = pcb.rx_queue.lock().capacity();
+        assert!(capacity > 0);
+        assert!(capacity < UDP_RX_QUEUE_CAPACITY);
+    }
+
+    #[def_test]
+    fn drained_receive_queue_releases_burst_capacity() {
+        let pcb = UdpPcb::new(UdpSocketState::new());
+        let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1000);
+        for payload in 0..128 {
+            assert!(pcb.enqueue(datagram(remote, payload)));
+        }
+        let burst_capacity = pcb.rx_queue.lock().capacity();
+
+        for _ in 0..128 {
+            assert!(pcb.recv_datagram(RecvMode::Consume).is_some());
+        }
+
+        let retained_capacity = pcb.rx_queue.lock().capacity();
+        assert!(retained_capacity <= UDP_RX_QUEUE_RETAINED_CAPACITY);
+        assert!(retained_capacity < burst_capacity);
     }
 }

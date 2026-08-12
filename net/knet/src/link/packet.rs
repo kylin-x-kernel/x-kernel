@@ -251,7 +251,7 @@ impl PacketSocket {
                 if !SERVICE.is_inited() {
                     return Err(KError::NotFound);
                 }
-                SERVICE.lock().send_link_frame(ifindex, frame)
+                SERVICE.send_link_frame(ifindex, frame)
             })
     }
 

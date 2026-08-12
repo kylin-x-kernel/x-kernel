@@ -24,6 +24,7 @@ use crate::{
     ipv4,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poll_interfaces,
+    poller::{PollReason, network_poller},
     udp_err::QueuedUdpError,
 };
 
@@ -75,7 +76,7 @@ impl UdpSocket {
         registry::bind_udp_pcb(self.pcb.clone(), local_endpoint, reuse_address)?;
         let endpoint = registry::listen_endpoint(local_endpoint);
         self.state()
-            .set_device_mask(SERVICE.lock().device_mask_for(&endpoint));
+            .set_device_mask(SERVICE.device_mask_for(&endpoint));
         info!("UDP socket: bound on {}", endpoint);
         Ok(())
     }
@@ -91,11 +92,8 @@ impl UdpSocket {
             Ipv4Address::UNSPECIFIED.into(),
             reuse_address,
         )?;
-        self.state().set_device_mask(
-            SERVICE
-                .lock()
-                .device_mask_for(&registry::listen_endpoint(endpoint)),
-        );
+        self.state()
+            .set_device_mask(SERVICE.device_mask_for(&registry::listen_endpoint(endpoint)));
         info!(
             "UDP socket: bound on {}",
             registry::listen_endpoint(endpoint)
@@ -108,11 +106,8 @@ impl UdpSocket {
         self.state().clear_error_queue();
         if registry::is_udp_pcb_explicitly_bound(&self.pcb) {
             if let Some(local) = self.state().local_endpoint() {
-                self.state().set_device_mask(
-                    SERVICE
-                        .lock()
-                        .device_mask_for(&registry::listen_endpoint(local)),
-                );
+                self.state()
+                    .set_device_mask(SERVICE.device_mask_for(&registry::listen_endpoint(local)));
             }
             return;
         }
@@ -163,26 +158,18 @@ impl UdpSocket {
                     .state()
                     .local_endpoint()
                     .and_then(|local| (!local.addr.is_unspecified()).then_some(local.addr));
-                let mut service = SERVICE.lock();
-                let source_addr = service.prepare_ipv4_packet_send(
+                SERVICE.prepare_and_send_ipv4_packet(
                     bound_source_addr,
                     &remote_endpoint.addr,
-                    packet_len,
+                    &mut packet,
+                    |packet, source_addr, route_mtu| {
+                        let mtu_discovery = *self.pcb.mtu_discovery.read();
+                        let dont_fragment =
+                            should_set_dont_fragment(mtu_discovery, packet_len, route_mtu);
+                        self.write_datagram(packet, remote_endpoint, source_addr, dont_fragment)
+                    },
                 )?;
-                let mtu_discovery = *self.pcb.mtu_discovery.read();
-                let route_mtu = service.ipv4_route_mtu(&remote_endpoint.addr);
-                let dont_fragment = should_set_dont_fragment(mtu_discovery, packet_len, route_mtu);
-                self.write_datagram(
-                    packet.as_mut().ok_or(KError::InvalidInput)?,
-                    remote_endpoint,
-                    source_addr,
-                    dont_fragment,
-                )?;
-                // The service lock keeps the capacity check and enqueue
-                // atomic, so a packet is consumed only after the queue has
-                // enough room for every output fragment.
-                service.send_ipv4_packet(packet.take().ok_or(KError::InvalidInput)?)?;
-                drop(service);
+                network_poller().notify(PollReason::Tx);
                 poll_interfaces();
                 Ok(payload_len)
             })
@@ -194,7 +181,7 @@ impl UdpSocket {
         {
             return Ok(local.addr);
         }
-        SERVICE.lock().get_source_address(&remote_addr)
+        SERVICE.get_source_address(&remote_addr)
     }
 
     fn write_datagram(
@@ -368,11 +355,8 @@ impl SocketOps for UdpSocket {
                 local_addr.ip().into(),
                 reuse_address,
             )?;
-            self.state().set_device_mask(
-                SERVICE
-                    .lock()
-                    .device_mask_for(&registry::listen_endpoint(endpoint)),
-            );
+            self.state()
+                .set_device_mask(SERVICE.device_mask_for(&registry::listen_endpoint(endpoint)));
             info!(
                 "UDP socket: bound on {}",
                 registry::listen_endpoint(endpoint)
@@ -404,7 +388,7 @@ impl SocketOps for UdpSocket {
         self.state()
             .set_peer_endpoint(Some((remote_endpoint, source_addr)));
         self.state()
-            .set_device_mask(SERVICE.lock().device_mask_for_addr(&remote_endpoint.addr));
+            .set_device_mask(SERVICE.device_mask_for_addr(&remote_endpoint.addr));
         debug!("UDP socket: connected to {}", remote_endpoint);
         Ok(())
     }
@@ -553,7 +537,7 @@ impl Pollable for UdpSocket {
         events.set(IoEvents::IN, can_receive);
         events.set(
             IoEvents::OUT,
-            !self.state().is_write_shutdown() && SERVICE.lock().can_send_ip_packet(),
+            !self.state().is_write_shutdown() && SERVICE.can_send_ip_packet(),
         );
         self.state().readiness(events)
     }

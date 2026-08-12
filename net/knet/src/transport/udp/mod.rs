@@ -28,6 +28,7 @@ const IPV4_HEADER_LEN: usize = 20;
 const IPV4_DEFAULT_TTL: u8 = 64;
 const UDP_HEADER_LEN: usize = 8;
 const UDP_RX_QUEUE_CAPACITY: usize = 1024;
+const UDP_RX_QUEUE_RETAINED_CAPACITY: usize = 64;
 const UDP_MAX_PAYLOAD_LEN: usize = u16::MAX as usize - IPV4_HEADER_LEN - UDP_HEADER_LEN;
 
 #[cfg(unittest)]

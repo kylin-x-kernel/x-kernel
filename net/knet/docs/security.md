@@ -185,7 +185,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 
 1. `SocketHandle` 生命周期：任何 smoltcp socket handle 在访问前必须仍存在于 `SOCKET_SET`。
 2. `SocketSet` 互斥访问：所有 `SocketSet` 读写必须经过 `SOCKET_SET.inner` 的 mutex。
-3. `Service` 互斥访问：smoltcp `Interface`、`Router` 和设备 dispatch 必须在 `SERVICE.lock()` 内推进。
+3. `Service` 互斥访问：设备 RX drain、路由状态、ingress queue 和 TX dispatch 必须经过内部 Router mutex，smoltcp Interface 必须经过独立 mutex；IPv4 校验和 snoop 在 Router 锁外执行。
 4. ring buffer publish 规则：Unix stream 和 vsock 只能发布已经写入的字节，只能消费当前 occupied 区域内的字节。Unix stream 的 write index 发布、方向关闭和空队列 EOF 判定由同一个方向锁排序。
 5. driver buffer 生命周期：`NetBufHandle::data` 只在 handle 被 recycle 前使用，RX handle 必须在处理后归还。
 6. netlink message 边界：所有 payload 读取必须先经过单条 header 长度、批次对齐边界、attribute 长度和 family 校验。
@@ -199,8 +199,13 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 14. IPv4 输入边界：本地交付前必须校验版本、头长、总长和头部校验和，并按 `total_len` 截断尾部数据。
 15. 网络类型边界：`RouteTable` 和 `NetDevice` 不暴露 smoltcp 地址或时间类型；控制面与协议兼容转换由 `Router`、`Service` 和初始化入口完成。
 16. IPv4 重组边界：分片按源地址、目的地址、标识、协议和接口隔离；被已有区间完全覆盖的分片按重复包丢弃，部分重叠或范围矛盾会删除整条队列；重组状态受 64 条队列、4 MiB 高水位、3 MiB 低水位和 30 秒超时限制。
-17. UDP 接收边界：UDP 长度、校验和和 payload range 通过 checked parser 验证，单个 PCB 的接收队列上限为 1024 个数据报。
+17. UDP 接收边界：UDP 长度、校验和和 payload range 通过 checked parser 验证，单个 PCB 的接收队列上限为 1024 个数据报。队列按需扩容，扩容失败时丢弃当前数据报，排空后最多保留 64 个槽位。
 18. IPv4 输出边界：输出 MTU 来自匹配路由；DF 包超过 MTU 时返回 `EMSGSIZE`，允许分片的包只按 8 字节对齐切分 payload。
+19. poller 完成条件：唯一执行者通过一次 CAS 从 `RUNNING` 或 `RUNNING_PENDING` 发布 `IDLE` 或 `SCHEDULED`；RX、ingress、TX 和已到期 timer 均无立即工作且执行期间没有通知时才能进入 `IDLE`。每轮 bulk work 受 1 ms 软时间上限约束，Ethernet RX 任务和后台任务执行相同的有界批次，每个批次最多推进四轮，达到上限且仍有立即工作时保留 `SCHEDULED` 并唤醒下一批。
+20. 协议 timer 条件：每轮 `poll_maintenance`、`poll_ingress_single` 和 `poll_egress` 完成后必须用 `poll_at` 刷新下一次 deadline；尚未到期的 timer 不进入 `PollProgress::has_more`，到期后必须通过 `notify(PollReason::Timer)` 发布工作。
+21. TX 与接收窗口交接条件：socket 或 Router 产生 TX 工作后必须通过 `notify(PollReason::Tx)` 发布；TCP 从余量低于最大窗口缩放量子的接收缓冲区消费数据后必须通过 `notify(PollReason::RxWindow)` 发布零窗口恢复工作；Router data TX queue 容量实际增加时必须设置 `tx_capacity_changed`，TX waiter 只依据该字段执行全局容量唤醒。
+22. TCP 关闭生命周期：用户文件对象释放后，含有待发送数据、FIN 或重传状态的 smoltcp handle 必须继续保留在 `SOCKET_SET`；接收队列存在未读数据时必须保留 abort handle 直到 RST 发出；协议进入 `Closed` 后才能删除。只有 orphan `FIN_WAIT_2` 状态受 60 秒回收期限约束。
+23. 网络 timer 条件：协议与 deferred-close deadline 只能通过原子值发布；系统 tick 到期处理不得获取 sleepable mutex、分配 future 或访问 timer wheel。
 
 ## 线程安全
 
@@ -211,8 +216,8 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | `RawSocket` | 字段满足 Send | `RwLock`、atomic 和 immutable handle 保护共享状态 |
 | `StreamTransport` | 字段满足 Send | `Mutex<Option<Channel>>` 串行化本端操作，per-direction `SpinNoPreempt` 排序数据发布、半关闭与 EOF 判定，三组 `PollSet` 隔离读、写和连接状态 waiter |
 | `NetlinkSocket` | 字段满足 Send | `Arc<NetlinkSocketInner>` 内部使用 `RwLock`、发送事务 `Mutex`、rx queue `Mutex` 和 `PollSet`；每次发送显式携带调用者凭据，socket 不保存权限主体 |
-| `Service` | 在 `Mutex<Service>` 内使用 | 通过全局 `Mutex` 提供共享访问 |
-| `Router` | 在 `Service` 内使用 | 通过 `Service` mutex 间接共享 |
+| `Service` | 字段满足 Send | 通过内部 `Mutex` 分别保护 Interface、Router、IngressProcessor、timeout 和可复用 batch；网络 timer 与 deferred-close deadline 使用原子值发布，不在系统 tick 路径获取 sleepable mutex |
+| `Router` | 在 `Service` 内使用 | 通过 `Service` 的 Router mutex 间接共享 |
 
 ## 威胁分析
 
@@ -226,9 +231,9 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-06 | listen backlog 被 SYN 洪泛占满 | 中 | 大量连接请求命中同一 listener | backlog 被 clamp 到 `LISTEN_QUEUE_SIZE`；超限丢弃并记录 warn |
 | T-07 | raw socket 被无权限调用者创建 | 中 | syscall 层没有实施权限门禁 | `knet` 层只封装 raw socket 行为；权限策略应保留在 `posix/net::sys_socket` |
 | T-08 | netlink RX queue 被 uevent 或 response 填满 | 中 | 订阅者不消费，publisher 持续写入 | `NETLINK_RX_QUEUE_LIMIT` 限制单 socket queue 字节数，超限丢弃 |
-| T-09 | 路由状态与 data-plane 不一致 | 中 | rtnetlink mutation 只更新控制面或同步过程中出错 | `update_route_state` 写入 `ROUTE_STATE` 后调用 `SERVICE.lock().sync_netlink`；新增 mutation 需复用该路径 |
+| T-09 | 路由状态与 data-plane 不一致 | 中 | rtnetlink mutation 只更新控制面或同步过程中出错 | `update_route_state` 写入 `ROUTE_STATE` 后调用 `SERVICE.sync_netlink`；同步时持有 Router mutex，并在释放前刷新 ingress 和 Interface 兼容视图 |
 | T-10 | 外部网络包触发 parser panic | 中 | malformed Ethernet、ARP、IP、UDP 或 TCP packet 进入 RX | Ethernet 和 ARP 使用 `zerocopy` checked view，IPv4 与 UDP 使用 crate 内 checked parser，TCP、raw IP 和 IPv6 使用 smoltcp checked parser；错误包直接丢弃 |
-| T-11 | 中断上下文误用导致锁竞争或延迟放大 | 中 | IRQ waker 回调中直接推进 `SERVICE`、`SOCKET_SET` 或执行阻塞 socket 操作 | 中断路径只注册和唤醒 waker，协议推进保留在普通 poll 路径 |
+| T-11 | 中断上下文误用导致锁竞争或延迟放大 | 中 | IRQ waker 回调中直接推进 `SERVICE`、`SOCKET_SET` 或执行阻塞 socket 操作 | VirtIO IRQ handler 只确认中断并唤醒；Ethernet RX 任务在普通任务上下文发布 RX，并执行最多四轮的有界批次 |
 | T-12 | driver buffer 或 DMA 输入破坏 packet 边界 | 高 | 驱动返回长度异常、数据在 recycle 后继续被访问、TX/RX buffer 生命周期使用错误 | RX 数据只在 `NetBufHandle` recycle 前解析和复制；外部帧使用 checked parser；TX buffer 由 driver handle 管理 |
 | T-13 | vsock-TIPC bridge 误把普通 AF_VSOCK 连接路由到 TIPC | 中 | 事件分流没有区分桥接端口或已桥接连接 | bridge 只接管静态 port map 和自己的 connection id，未命中事件继续交给 `VSOCK_CONN_MANAGER` |
 | T-14 | host 通过 bridge 注入超大或非法 TIPC message | 中 | `Received` record 超过 TIPC slot 或 port 0 service name 非法 | bridge 限制 record 长度为 `IPC_CHAN_MAX_BUF_SIZE`，动态 service name 需通过 UTF-8、NUL 和长度校验；非法 name 回 `[1]` 并断开 |
@@ -236,12 +241,20 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-16 | host 误判 port 0 handshake 结果 | 中 | 未读状态字节就发 payload；忽略 `[1]`；无 recv 超时导致永久阻塞 | 协议要求 host 先读单字节状态（`0`=成功，`1`=拒绝）；`libtrusty` 使用 `SO_RCVTIMEO`；CA 测试拒绝非 `[0]` 状态 |
 | T-17 | IPv4 分片耗尽内核内存 | 中 | 外部持续发送无法完成重组的不同分片流 | 重组器限制队列数量与总内存，超过高水位后淘汰最早队列到低水位，队列存活时间固定为 30 秒 |
 | T-18 | 重叠 IPv4 分片混淆上层解析 | 中 | 同一重组 key 提交相互覆盖的 payload range | 被已有区间完全覆盖的分片按重复包丢弃，任何部分重叠或总长度矛盾会删除整条队列 |
-| T-19 | UDP 接收洪泛占满 socket 队列 | 中 | 应用读取速度低于入包速度 | 每个 PCB 最多保留 1024 个数据报，满队列丢弃新数据报并保持内存上限 |
+| T-19 | UDP 接收洪泛占满 socket 队列 | 中 | 应用读取速度低于入包速度 | 每个 PCB 最多保留 1024 个数据报；队列按需扩容，扩容失败或达到上限时丢弃新数据报，排空后回收大于 64 槽的容量 |
 | T-20 | pathname Unix socket 绕过 inode/目录 DAC 或复用已有 inode | 高 | bind/connect/sendto 直接访问 binding 表，或 bind 接受已有路径 | bind 通过 `parent_at` 和 `Path::mknod` 排他创建；connect/sendto 在 lookup 后检查最终 inode `MAY_WRITE`；abstract 地址才直接访问内存 binding 表 |
 | T-21 | 内核任务隐式读取用户凭据 | 高 | 启动期 pathname bind 调用普通 `SocketOps::bind`，当前线程不存在或主体错误 | 内核调用者使用 `bind_with_cred` 显式传入 `initial_cred()` 等已选择凭据；普通入口只服务当前用户任务 |
 | T-22 | Unix stream 在 EOF 后发布数据 | 中 | send、shutdown 与 peer recv 并发交错，关闭状态和 write index 缺少共同排序 | 每个发送方向使用共享 `tx_order`；send 在锁内复检后发布，recv 在锁内复查 empty 和 closed，Channel 释放前先发布关闭状态 |
 | T-23 | netlink socket 复用旧凭据导致越权 mutation | 高 | socket 跨进程传递或调用者凭据变化后继续使用创建时权限 | POSIX send 与 socket file write 路径仅在 netlink 分支取得当前 `Cred`，`NetlinkSocket::send_with_cred` 逐条检查 mutation；无权限请求生成 `NLMSG_ERROR` 和 `EPERM` |
 | T-24 | 混合 netlink 批次发生部分 mutation | 高 | 同一发送同时包含 query 和 mutation，framing 错误位于已处理消息之后，或 response queue 在批次中途耗尽 | 发送事务锁串行化同一 socket 的 mutation 批次；完整批次先校验 framing 和类别；混合批次返回 syscall `EOPNOTSUPP`；同类 mutation 执行前检查完整 response 空间 |
+| T-25 | poller 执行期间丢失新事件 | 中 | RX、TX 或 timer 通知与完成 CAS 并发 | 单个 `AtomicU8` 将执行期通知发布为 `RUNNING_PENDING`；完成 CAS 失败后按观察到的状态重试，并通过一次成功 CAS 同时释放执行权和发布下一轮 |
+| T-26 | smoltcp 协议 timer 缺少推进事件 | 中 | TCP 重传或 keep-alive deadline 到期时没有设备 IRQ 或 socket 调用 | 每次 Interface poll 后通过 `poll_at` 注册 timer；到期后调用 `notify(PollReason::Timer)` 并唤醒 socket waiter；未来 deadline 不触发立即重轮询 |
+| T-27 | socket TX 工作缺少后台推进 | 中 | connect、send、receive window update 或 close 只更新 socket 状态 | 真实 TX 生产路径调用 `notify(PollReason::Tx)`；TCP 与 raw 注册 smoltcp send waker；Router data TX queue 容量增加后唤醒全局 TX waiter |
+| T-28 | TCP 文件关闭丢失已经接受的发送数据 | 中 | `write` 把数据写入 smoltcp buffer 后异步发布 TX，文件 Drop 在 poller 处理前删除 handle | Drop 将未完成协议关闭的 handle 转移到 deferred-close registry；poller 完成 payload、FIN 和重传后回收；60 秒期限只限制 orphan `FIN_WAIT_2` 占用资源 |
+| T-29 | 并发 socket 等待阻塞网络 timer 更新 | 中 | socket 注册等待时在 timeout mutex 内手工 poll 异步 sleep，timer-wheel 锁等待阻塞 poller | deadline 使用原子值发布；系统 tick 到期后直接唤醒 waiter 并通知 poller，不持有 timeout mutex，不创建或 poll timer future |
+| T-30 | TCP close 将未读数据错误转换为 FIN | 中 | 文件对象释放前未检查接收队列，协议 close 直接进入 FIN_WAIT1 | 对端收到 FIN 后继续按有序关闭处理，Linux 预期的 RST 语义丢失 | Drop 检查 smoltcp 接收队列；存在未读数据时调用 abort，并保留 handle 直到 RST dispatch 完成 |
+| T-31 | TCP 零窗口恢复缺少后台推进 | 中 | 应用在接收窗口仍编码为零时读取 TCP 接收缓冲区，却没有发布窗口恢复工作 | 接收缓冲区余量低于最大窗口缩放量子时，读取操作调用 `notify(PollReason::RxWindow)`；达到缩放量子后的窗口增长由 RX 和已登记的协议 timer 推进 |
+| T-32 | poller 执行期间丢失新事件 | 中 | RX、TX 或 timer 通知与完成 CAS 并发 | 普通通知与 RX 任务原地批次复用同一个 `AtomicU8`；执行期工作发布为 `RUNNING_PENDING`，完成 CAS 失败后按观察到的状态重试，并通过一次成功 CAS 同时释放执行权和发布下一轮 |
 
 影响等级定义：
 
@@ -259,11 +272,11 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | F-04 | driver TX buffer 分配失败 | NIC driver 返回 `alloc_tx_buf` 错误 | 当前 frame 未发送 | 网络吞吐下降或连接超时 | 3 | 记录 warn 并返回；上层 poller 可继续重试 |
 | F-05 | UDP ICMP error queue 丢失 | PCB registry 未注册、ICMP 引用头无效或 socket 已关闭 | `SO_ERROR` 或 error queue 缺失 | 应用无法获得异步网络错误 | 4 | socket 创建时初始化 PCB registry，bind 时登记 PCB，Drop 时注销；ICMP 引用报文使用允许截断 payload 的 IPv4 头解析路径 |
 | F-06 | TCP accepted child abort | 握手期间 peer reset 或 smoltcp child 关闭 | `accept` 返回 `ConnectionAborted` | 应用重试 accept | 4 | `ListenTable::accept` 清理 closed child 并继续扫描队列 |
-| F-07 | poll waker 丢失 | device mask 错误、timeout 或 Ethernet RX poll source 未注册、注册所有者未跨 `Pending` 存活或缺少 register 后复查 | socket 阻塞等待延迟 | 应用 IO latency 上升或连接超时 | 3 | bind/connect 后更新 device mask；`Service::register_rx_waker` 使用同一个 `PollContext` 注册 timeout poll 和支持 interrupt-driven RX 的 Ethernet RX poll source；未 attach `NetRxScheduler` 的设备回退 timeout 聚合 waker；调用方持有 `PollRegistrations` 并在注册后复查 readiness |
+| F-07 | poll waker 或协议 timer 丢失 | device mask 错误、timeout 或 Ethernet RX poll source 未注册、注册所有者未跨 `Pending` 存活、缺少 register 后复查或 timer 到期后未通知 poller | socket 阻塞等待延迟，TCP 重传或 keep-alive 延后 | 应用 IO latency 上升或连接超时 | 3 | bind/connect 后更新 device mask；`Service::register_rx_waker` 使用同一个 `PollContext` 注册 timeout poll 和支持 interrupt-driven RX 的 Ethernet RX poll source；未 attach `NetRxScheduler` 的设备回退 timeout 聚合 waker；调用方持有 `PollRegistrations` 并在注册后复查 readiness；每次 Interface poll 后按 `poll_at` deadline 注册 timer，到期后调用 `notify(PollReason::Timer)` |
 | F-08 | malformed netlink request | header 或 attr 长度非法 | 返回 empty response 或 netlink error | 调用者请求失败 | 4 | checked reader 和 error response 处理 |
 | F-09 | ROUTE_STATE 未初始化 | netlink route 请求早于 `init_route_state` | panic 或空状态 | netlink 功能不可用 | 2 | 初始化路径在 `init_network` 中创建初始 state；新增启动路径需保持顺序 |
 | F-10 | Unix stream peer 提前关闭 | channel 被 shutdown 或 drop | send 在无发送进度时返回 `BrokenPipe`，已有进度时返回部分字节数；recv 排空本端缓冲后返回 EOF；peer 关闭时丢弃未读输入则返回一次 `ConnectionReset`；poll 报告 `RDHUP`、`HUP` 或 `ERR` | 应用感知连接关闭 | 4 | endpoint atomic 记录双方半关闭状态与待处理 reset；per-direction `tx_order` 统一关闭与数据顺序；三组 `PollSet` 按受影响事件定向唤醒 |
-| F-11 | 中断上下文执行重型网络推进 | IRQ 或当前 `NetRx` softirq 路径误调用 socket send、recv 或 `poll_interfaces` | 锁竞争、调度延迟或死锁 | 网络 IO 延迟上升，严重时系统卡顿 | 2 | IRQ 路径只做设备 ack、RX pending 标记和 `NetRx` softirq 调度；当前 `NetRx` softirq 只消费 pending RX source 并唤醒对应设备 RX `PollSet`，`knet-rx` fallback worker 和普通 socket polling waiter 都可能通过该 `PollSet` 被唤醒；直接 softirq RX progress 必须等待全链路 nonblocking ingress 或 workerqueue |
+| F-11 | 中断上下文执行重型网络推进 | IRQ 或当前 `NetRx` softirq 路径误调用 socket send、recv 或 `poll_interfaces` | 锁竞争、调度延迟或死锁 | 网络 IO 延迟上升，严重时系统卡顿 | 2 | IRQ 路径只做设备 ack、RX pending 标记和 `NetRx` softirq 调度；当前 `NetRx` softirq 只消费 pending RX source 并唤醒对应设备 RX `PollSet`；`knet-rx` fallback worker 在普通任务上下文执行受四轮上限约束的 poller 批次，普通 socket polling waiter 也可能通过该 `PollSet` 被唤醒；直接 softirq RX progress 必须等待全链路 nonblocking ingress 或 workerqueue |
 | F-12 | RX buffer recycle 顺序错误 | frame payload 在 `recycle_rx` 后仍被引用 | 读取悬垂数据或数据损坏 | packet 解析异常，严重时破坏内存安全 | 1 | `EthernetDevice::poll_rx` 在 recycle 前完成解析和复制；新增设备适配需保持同样生命周期 |
 | F-13 | port 0 handshake 永久等待 | host 早于 TA publish 连接且未设 recv 超时；或 service 永不 publish | host `read` 阻塞；负例测试挂起 | CA/测试进程无响应 | 3 | dynamic connect 保留 `WAIT_FOR_PORT`；host 设 `TRUSTY_VSOCK_TIMEOUT_SEC`；明确拒绝场景回 `[1]` |
 | F-14 | 快速重连 `tipc_connect` 超时 `-11` | `route_event` 在 `has_connection()` 前丢弃同批 `Received`，service-name record 丢失 | host status-byte `EAGAIN`；约半数快速重连失败 | storage client/proxy harness 间歇失败 | 2 | mapped bridge port 仅按 `local_port` 认领；事件入 FIFO，不依赖 `has_connection()` |
@@ -273,6 +286,8 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | F-18 | smoltcp 过期 poll 期限变成超长等待 | 有符号微秒差值为负后通过 `as u64` 转换 | soft timer 被设置到远未来 | TCP 数据路径停顿，可能伴随 timer IRQ 异常 | 2 | 在同一 epoch 下直接把 `SmoltcpInstant` 映射为 `MonotonicInstant`，不计算无符号 delay；单测覆盖过期和未来期限 |
 | F-19 | 无权限 netlink mutation | 当前发送凭据不具备配置权限 | mutation 不执行，RX queue 收到 `NLMSG_ERROR` 和 `EPERM` | 调用者配置失败 | 4 | 每次发送重新检查凭据；error 入队后发送入口返回已消费请求长度 |
 | F-20 | 混合或畸形 netlink 批次 | 单次发送混合 query 与 mutation，或后续 message 的长度和对齐非法 | 整批未执行并返回 syscall 错误 | 调用者需修正或拆分批次 | 4 | 批次分类和 framing 校验在状态更新及 response 生成前完成 |
+| F-21 | RX 或 TX backlog 长期占用推进任务 | 持续高包率超过单轮 budget | 单轮达到预算或 1 ms 软时间上限并留下 backlog | 其他任务调度延迟或网络吞吐下降 | 3 | 设备 RX、stack ingress、stack egress 和 Router TX 最多处理 32 个工作项后检查时间；每批最多连续执行四轮，达到上限后重新唤醒并归还执行权，剩余 backlog 进入下一批 |
+| F-22 | TCP peer 在本地文件关闭后不发送 FIN | peer 已确认本地 FIN，协议 handle 长期停留在 orphan `FIN_WAIT_2` | deferred-close registry 持续持有 socket buffer | 网络内存随失联连接增长 | 3 | 进入 `FIN_WAIT_2` 时设置 60 秒期限，期限进入统一 poll timer，到期后回收 handle |
 
 严重度定义：
 
@@ -304,6 +319,8 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - IPv4 输出使用匹配路由的接口 MTU，ICMP Fragmentation Needed 中的 next-hop MTU 只进入 UDP error queue，尚未形成动态 PMTU cache。
 - IPv4 输出分片只支持无 options 的栈内生成报文，尚未实现 options copy 语义。
 - `ROUTE_STATE` dump 没有覆盖所有 live runtime 状态。
+- smoltcp maintenance 与单次 egress pass 提供有界执行，ingress 通过 `poll_ingress_single` 按 packet 推进；单个 packet 的协议处理和一次 egress pass 仍会形成有限的软上限超出。
+- UDP RX queue 排空后保留 64 个元数据槽位；长期非空队列保持已增长容量，直到队列再次排空。
 - raw socket 创建权限由 syscall 层承担，`knet` 构造器自身没有进程凭据参数。
 - Ethernet 设备只处理 IPv4 ARP，IPv6 NDP、非 Ethernet 链路和多队列 NIC 抽象仍待扩展。
 - crate 内 UDP 数据路径当前只支持 IPv4；IPv6 UDP 继续由 smoltcp DNS 路径使用，普通 UDP socket 不提供 IPv6 收发。
@@ -325,6 +342,9 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - 新增外部网络输入使用 checked parser。
 - IPv4 分片重组改动保持队列数量、内存和超时上限，并拒绝重叠 range。
 - UDP registry 改动保持 bind、connect、普通接收和 ICMP error lookup 使用同一 PCB 所有权来源。
+- 修改 poller 状态机或 `Service::poll_budgeted` 时验证四态转换、单执行者获取、一次 CAS 释放、分阶段 smoltcp 预算和 1 ms 软时间上限；`PollProgress::has_more` 只能包含立即工作，未来协议 deadline 必须等待 timer 到期后发布；TX waiter 只能由 `tx_capacity_changed` 触发全局容量唤醒。
+- 修改 UDP PCB 队列时验证零容量创建、扩容失败丢包、1024 数据报上限、FIFO 顺序和排空后 64 槽容量回收。
+- 修改 TCP Drop 或异步 TX 路径时验证已成功写入的 payload 在文件关闭后仍由协议对象持有，未读数据关闭发送 RST，deferred-close handle 在 `Closed` 后删除，状态期限只作用于 orphan `FIN_WAIT_2`。
 - 新增 socket option 明确 errno、阻塞语义和 poll readiness。
 - 新增 pathname Unix socket 入口使用单次凭据快照，并让全部 VFS 操作显式接收该快照。
 - pathname bind 保持排他创建、`0777 & !umask` mode 和 fs credential owner；connect/sendto

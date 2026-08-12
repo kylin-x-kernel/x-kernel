@@ -312,7 +312,6 @@ impl EthernetDevice {
                 let mut registrations = PollRegistrations::new();
                 ktask::future::block_on(poll_fn(move |cx| {
                     loop {
-                        crate::poll_interfaces();
                         let mut context = registrations.context(cx);
                         if context.register(&rx_poll).is_err() {
                             drop(context);
@@ -322,8 +321,10 @@ impl EthernetDevice {
                             continue;
                         }
                         drop(context);
-                        // Recheck after register to close the IRQ/register race.
-                        crate::poll_interfaces();
+                        // Register before publishing the RX recheck so an IRQ
+                        // arriving across this boundary either wakes this task
+                        // or is covered by the bounded data-plane batch.
+                        crate::poller::network_poller().publish_and_poll_rx();
                         return Poll::<()>::Pending;
                     }
                 }));
@@ -602,6 +603,10 @@ impl NetDeviceOps for EthernetDevice {
                 return packet;
             }
         }
+    }
+
+    fn has_rx_work(&self) -> bool {
+        self.inner.can_rx()
     }
 
     fn send_ip_packet(

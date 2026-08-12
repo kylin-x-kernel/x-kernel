@@ -58,6 +58,10 @@ impl NetDevice for LoopbackDevice {
         self.queue.pop_front()
     }
 
+    fn has_rx_work(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
     fn send_ip_packet(
         &mut self,
         ifindex: i32,
