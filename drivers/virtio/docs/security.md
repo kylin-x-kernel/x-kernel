@@ -252,6 +252,7 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 | F-07 | 9p 请求超时 | 设备无响应 | 文件操作挂起 | 文件系统不可用 | 2 | 当前无超时机制，依赖上层超时处理 |
 | F-08 | `probe_mmio_device` panic | 传入空指针 | 初始化中断 | 系统启动失败 | 1 | 调用者必须验证地址有效性 |
 | F-09 | 网络缓冲区 token 不匹配 | 内部状态不一致 | DMA 到错误地址 | 内存破坏 | 1 | `assert_eq!` 和 `is_some()` 检查；`BadState` 错误返回 |
+| F-10 | 网络 RX 事件丢失 | IRQ handler 和任务上下文都调用 `ack_interrupt()`，任务上下文清除新到事件 | virtio RX 队列停止推进并重复触发未处理 IRQ | TCP 接收窗口降为零，host→guest 传输超时 | 2 | 已注册 IRQ 时仅由 handler 调用 `ack_interrupt()`，`recv()` 仅消费已完成队列项；纯轮询模式由 `recv()` 确认中断 |
 
 ## 故障管理
 

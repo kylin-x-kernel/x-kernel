@@ -151,7 +151,8 @@ fn unregister_virtio_net_irq(irq: usize, handle_id: usize) {
 ///
 /// Wraps `VirtIONetRaw` from `virtio-drivers` and implements the
 /// [`NetDevice`] trait, providing packet-level send/receive with buffer
-/// pool management and interrupt-driven IRQ acknowledgment.
+/// pool management, interrupt-driven IRQ acknowledgment, and a polling
+/// fallback when no IRQ is registered.
 ///
 /// `QS` is the VirtIO queue size.
 ///
@@ -163,9 +164,9 @@ fn unregister_virtio_net_irq(irq: usize, handle_id: usize) {
 ///
 /// # Concurrency
 ///
-/// The inner device is wrapped in `Arc<SpinNoIrq<...>>` because the IRQ
-/// callback runs in interrupt context and must access the device concurrently
-/// with normal send/receive operations.
+/// The inner device is wrapped in `Arc<SpinNoIrq<...>>` because a configured
+/// IRQ callback runs in interrupt context and must access the device
+/// concurrently with normal send/receive operations.
 ///
 /// # Example
 ///
@@ -192,8 +193,8 @@ pub struct VirtIoNetDev<H: Hal, T: Transport, const QS: usize> {
 /// Buffer bookkeeping for in-flight and free network buffers.
 ///
 /// This state is only touched from task context, so it is guarded by a
-/// `SpinNoPreempt` lock. The IRQ handler only acks the device via `inner`
-/// and never touches these buffers, so the two locks never deadlock.
+/// `SpinNoPreempt` lock. A configured IRQ handler only acks the device via
+/// `inner` and never touches these buffers, so the two locks never deadlock.
 struct NetBufState<const QS: usize> {
     rx_buffers: [Option<NetBufBox>; QS],
     tx_buffers: [Option<NetBufBox>; QS],
@@ -224,7 +225,8 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
     ///
     /// - `transport` - The VirtIO transport (MMIO or PCI) for this device.
     /// - `irq` - Optional IRQ number. If provided, an interrupt handler is
-    ///   registered to acknowledge device interrupts.
+    ///   registered to acknowledge device interrupts. If omitted, `recv()`
+    ///   acknowledges pending interrupts while polling the receive queue.
     ///
     /// # Errors
     ///
@@ -420,7 +422,12 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
     }
 
     fn recv(&self) -> DriverResult<NetBufHandle> {
-        self.inner.lock().ack_interrupt();
+        if self.irq.is_none() {
+            // Task context owns ISR acknowledgment when no IRQ handler exists.
+            self.inner.lock().ack_interrupt();
+        }
+        // For IRQ-backed devices, reading the ISR here could clear an event
+        // that arrived after the handler scheduled RX.
         let mut bufs = self.bufs.lock();
         let token = {
             let inner = self.inner.lock();
@@ -655,6 +662,49 @@ mod tests {
         );
         assert_eq!(dev.set_rx_scheduler(None), Ok(()));
 
+        reset_irq_state();
+    }
+
+    #[def_test]
+    fn test_recv_acknowledges_interrupt_in_poll_mode() {
+        let mut transport = MockTransport::new();
+        transport.device_type = virtio_drivers::transport::DeviceType::Network;
+        let interrupt_ack_count = transport.interrupt_ack_count.clone();
+        let dev = VirtIoNetDev::<MockHal, MockTransport, 32>::try_new(transport, None).unwrap();
+
+        assert!(matches!(dev.recv(), Err(DriverError::WouldBlock)));
+        assert_eq!(interrupt_ack_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[def_test(serial)]
+    fn test_recv_leaves_interrupt_ack_to_registered_handler() {
+        reset_irq_state();
+
+        let mut transport = MockTransport::new();
+        transport.device_type = virtio_drivers::transport::DeviceType::Network;
+        let interrupt_ack_count = transport.interrupt_ack_count.clone();
+        let mut dev = VirtIoNetDev::<MockHal, MockTransport, 32>::try_new(transport, None).unwrap();
+        let irq = 73;
+        let handle_id = 53;
+        NET_IRQ_HANDLES
+            .lock()
+            .push(Arc::new(VirtIoNetIrqHandle::<MockHal, MockTransport, 32> {
+                inner: dev.inner.clone(),
+                rx_scheduler: dev.rx_scheduler.clone(),
+                id: handle_id,
+                irq,
+            }));
+        REGISTERED_NET_IRQS.lock().insert(irq);
+        dev.irq = Some(irq);
+        dev.irq_handle_id = Some(handle_id);
+
+        assert!(matches!(dev.recv(), Err(DriverError::WouldBlock)));
+        assert_eq!(interrupt_ack_count.load(Ordering::Relaxed), 0);
+
+        let _ = handle_virtio_net_irq(irq);
+        assert_eq!(interrupt_ack_count.load(Ordering::Relaxed), 1);
+
+        drop(dev);
         reset_irq_state();
     }
 

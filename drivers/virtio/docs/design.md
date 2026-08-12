@@ -364,7 +364,7 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 
 **接收流程**：
 
-1. 中断到来时调用 `recv()`：先 `ack_interrupt()`，再 `poll_receive()` 获取令牌
+1. IRQ 模式由 handler 调用 `ack_interrupt()` 确认设备事件并调度 RX，任务上下文调用 `recv()` 后直接通过 `poll_receive()` 获取令牌；纯轮询模式没有 IRQ handler，由 `recv()` 调用 `ack_interrupt()` 后查询接收队列
 2. 从 `rx_buffers[token]` 取出缓冲区，调用 `receive_complete()` 读取帧头和包长度
 3. 设置 `hdr_len` 和 `payload_len`，返回 `NetBufHandle`
 4. 上层处理完毕后调用 `recycle_rx()`：`receive_begin()` 重新提交缓冲区，存回 `rx_buffers[new_token]`
@@ -373,7 +373,8 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 
 1. `register_virtio_net_irq(irq, inner)`：将 `VirtIoNetIrqHandle` 存入全局 `NET_IRQ_HANDLES`
 2. 若该 IRQ 首次注册（`REGISTERED_NET_IRQS` 去重），调用 `Irq::request(resource, Arc::new(handle_virtio_net_irq))` 注册中断，guard 存入 `NET_IRQ_GUARDS`
-3. 中断到来时 `handle_virtio_net_irq()` 遍历所有句柄，调用 `ack_interrupt()` 确认中断，返回 `IrqReturn::Handled`
+3. 中断到来时 `handle_virtio_net_irq()` 遍历所有句柄，调用 `ack_interrupt()` 确认中断，返回包含来源位图的 `IrqEvent`，没有句柄确认中断时返回 `IrqEvent::NOT_HANDLED`
+4. 已注册 IRQ 时，`ack_interrupt()` 仅由 IRQ handler 调用，避免 RX 任务清除运行期间新到达但尚未调度的设备事件；未注册 IRQ 时，由 `recv()` 在纯轮询路径中确认中断
 
 ### Vsock 连接管理
 
@@ -451,9 +452,9 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 
 ### 为什么 net 的 IRQ 处理使用全局静态变量
 
-中断处理函数 `handle_virtio_net_irq` 通过 `Arc<dyn Fn() -> IrqReturn>` 注册，
-但仍需访问所有网络设备实例。使用全局 `NET_IRQ_HANDLES` 存储所有网络设备的
-IRQ 回调句柄，中断到来时遍历所有句柄执行 `ack_interrupt()`。
+中断处理函数 `handle_virtio_net_irq` 作为返回 `IrqEvent` 的回调注册，但仍需访问
+所有网络设备实例。使用全局 `NET_IRQ_HANDLES` 存储所有网络设备的 IRQ 回调句柄，
+中断到来时遍历所有句柄执行 `ack_interrupt()`。
 `NET_IRQ_GUARDS` 持有 `Irq` guard，确保设备 Drop 时自动注销中断。
 
 ## Drop / 资源释放

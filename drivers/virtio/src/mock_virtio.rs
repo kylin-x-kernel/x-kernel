@@ -2,7 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use core::{cell::RefCell, ptr::NonNull};
+use core::{
+    cell::RefCell,
+    ptr::NonNull,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use virtio_drivers::{
     BufferDirection, Error, Hal, PhysAddr, Result,
@@ -11,7 +15,10 @@ use virtio_drivers::{
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 extern crate alloc;
-use alloc::alloc::{Layout, alloc, dealloc};
+use alloc::{
+    alloc::{Layout, alloc, dealloc},
+    sync::Arc,
+};
 
 pub struct MockHal;
 
@@ -80,6 +87,7 @@ pub struct MockTransport {
     pub status: RefCell<DeviceStatus>,
     pub features: u64,
     pub config_space: RefCell<[u8; 256]>,
+    pub interrupt_ack_count: Arc<AtomicUsize>,
 }
 
 impl MockTransport {
@@ -93,6 +101,7 @@ impl MockTransport {
             status: RefCell::new(DeviceStatus::empty()),
             features: 0,
             config_space: RefCell::new([0; 256]),
+            interrupt_ack_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -151,6 +160,7 @@ impl Transport for MockTransport {
     }
 
     fn ack_interrupt(&mut self) -> InterruptStatus {
+        self.interrupt_ack_count.fetch_add(1, Ordering::Relaxed);
         InterruptStatus::empty()
     }
 
