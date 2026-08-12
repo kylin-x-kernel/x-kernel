@@ -1,0 +1,28 @@
+{
+    "project": "x_kernel",
+    "product": "code",
+    "language": "rust",
+    "build": {
+        "helper": "cargo-fuzz",
+        "config": {
+            "module_root": "."
+        },
+        "match": []
+    },
+    "fuzz": {
+        "entrypoints": [
+            {
+                "name": "fdt_parse",
+                "binary": "fdt_parse",
+                "isDefault": true,
+                "arguments": [
+                    {
+                        "typeid": "&[u8]",
+                        "generator": "<bytes>",
+                        "arguments": []
+                    }
+                ]
+            }
+        ]
+    }
+}

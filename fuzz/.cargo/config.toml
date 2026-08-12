@@ -1,0 +1,14 @@
+# Kylin crates mirror for cargo-fuzz builds inside v11-2603 container.
+[source.crates-io]
+replace-with = "kylin"
+
+[source.kylin]
+registry = "sparse+https://alimirror.kylinos.cn/crates.io-index/"
+
+[http]
+timeout = 600
+check-revoke = false
+
+[net]
+retry = 4
+git-fetch-with-cli = true

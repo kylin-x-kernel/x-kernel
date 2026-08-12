@@ -29,6 +29,13 @@
 /xtask/*/Cargo.lock
 /tee_apps/**/Cargo.lock
 /uapps/**/Cargo.lock
+/fuzz/Cargo.lock
+
+# WFUZZ fuzz harness artifacts
+/fuzz/entrypoints.json
+/fuzz/entrypoints_list.txt
+/fuzz/wfuzz-fuzz-targets/
+/fuzz/wfuzz-test-*/
 
 # Python
 __pycache__
