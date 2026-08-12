@@ -98,7 +98,7 @@ BootInfo*
     → klogger + backtrace (链接符号 _stext/_etext)
     → final_init
     → init_scheduler
-    → init_interrupt (softirq runner、定时器 tick、IPI、PMU 基础 handler)
+    → init_interrupt (softirq runner、kworker/system_wq、定时器 tick、IPI、PMU 基础 handler)
     → create late-init bootstrap thread (Internal, PID-less)
     → activate late-init thread
     → boot task (PID 0) block forever

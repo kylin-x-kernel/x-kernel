@@ -53,7 +53,8 @@ arch/kirq/src/
     ├── context.rs      # IRQ execution-context tracking and diagnostics
     ├── deferred.rs     # IRQ-tail deferred-execution handoff
     ├── lifecycle.rs    # hardirq entry/exit extension hooks
-    └── softirq.rs      # fixed-vector softirq pending bits and bounded runner
+    ├── softirq.rs      # fixed-vector softirq pending bits and bounded runner
+    └── workerqueue.rs  # fixed system workerqueue state and queue ordering
 ```
 
 `kirq` deliberately does not depend on `khal`, `kcpu`, `kplat`,
@@ -516,6 +517,86 @@ drain 仍只使用 restart limit；Linux `__do_softirq()` 的 `need_resched()` �
 `open_softirq()` 只用于 init-time 注册。本阶段没有 unregister API；runner 在
 `SpinNoIrq` 下复制 action table snapshot，但不会持有注册锁执行 action。
 
+### Workerqueue foundation
+
+```text
+schedule_work(work_item)
+   -> queue_work(system_wq, work_item)
+   -> clone WorkItem handle into fixed-capacity pending entry without allocation
+   -> wake kworker/system_wq through WorkerqueueHostIf if the queue became non-empty
+
+kworker/system_wq
+   -> wait until system_wq has runnable work
+   -> run_one_work(system_wq)
+   -> callback runs in sleepable task context with KIRQ locks released
+   -> publish completion or preserve a queued follow-up run
+
+flush_work(work) / cancel_work_sync(work)
+   -> reject hardirq/serving-softirq/BH-disabled context
+   -> reject self-wait from the worker currently running the same work
+   -> reject flush of another work still pending on the current single-consumer queue
+   -> wait through WorkqueueSyncWaitIf and recheck KIRQ-owned work state
+```
+
+`bottom_half/workerqueue.rs` implements the first sleepable bottom-half layer.
+`kirq` owns `WorkItem`, `WorkQueue`, internal work state, fixed-capacity ring
+pending storage, duplicate suppression, running requeue state, and completion
+publication.
+`WorkItem` is a refcounted owner handle: queue entries and running callbacks
+keep their own handle clone, so a work item remains alive while it is queued or
+executing. This lets device-owned work be allocated during probe/init and
+dropped after teardown instead of forcing `Box::leak()` or global static work
+objects. `WorkItem` state records the queue that owns the current pending entry,
+so `cancel_work()` and `cancel_work_sync()` remove pending work by looking at the
+work itself rather than trusting a caller-supplied queue pointer. `ktask` owns
+the task that drains the queue and is reached only through `WorkerqueueHostIf`;
+`kirq` never creates tasks or blocks in the enqueue path.
+
+This milestone deliberately starts with one provider-backed `system_wq` and one
+`kworker/system_wq` consumer. That keeps the queue state machine simple while
+giving hardirq/softirq code a real sleepable handoff target. Additional
+workqueues may be explicitly drained by their owner through `run_one_work()`,
+but they are not automatically hosted by the ktask provider yet. Per-CPU pools,
+unbound pools, delayed work, work attributes, and multi-consumer draining are
+later workerqueue milestones.
+`run_one_work()` is also non-reentrant in M4: a work callback must not drain any
+workerqueue again on the same task. Nested drain attempts return `false`
+without consuming pending work. If later code needs nested drains, the
+task-local current-work context must become an explicit worker stack first.
+
+`queue_work()` and `schedule_work()` may be called from hardirq, active
+softirq, BH-disabled, or task context. The successful enqueue path only clones
+the `WorkItem` handle, uses preallocated queue slots, and does not allocate or
+execute callbacks. Worker callbacks receive `&WorkItem`, run in ordinary ktask
+context, and may sleep, but they must not rely on being associated with the task
+that queued the work. Device callbacks that need device state should capture an
+owner-safe reference such as a `Weak<Device>` and tolerate teardown racing with
+callback execution.
+
+`flush_work()` waits until the work reaches idle. This is deliberately the
+teardown-friendly conservative form: callers that require a bounded wait for one
+observed instance must prevent unrelated requeue while flushing.
+In the M4 single-consumer model, a worker callback must also not flush another
+work item that is still pending on the same queue: that pending item cannot run
+until the current callback returns. KIRQ records the queue identity for pending
+entries and returns `SelfWait` for this case instead of blocking forever. The
+same diagnostic is also returned if a worker callback tries to flush a running
+work item, because that work can be requeued onto the current single-consumer
+queue before it reaches idle.
+`cancel_work_sync()` derives the pending owner queue from the `WorkItem`, removes
+that pending entry, or marks a running work as canceling. The canceling state
+rejects new queue attempts with `QueueWorkResult::Disabled` until the callback
+exits, and then the caller waits for idle. These waiting APIs use
+`WorkqueueSyncWaitIf`, so the completion is only a wake source; KIRQ always
+rechecks `WorkStatus` and worker-context deadlock predicates after wake. Waiting
+APIs may sleep and therefore return
+`InvalidContext` from hardirq, active softirq, or BH-disabled context. Calling
+them from the worker task currently executing the same `WorkItem` returns
+`SelfWait`; KIRQ stores the current work identity as an opaque scheduler
+task-local key derived from the `WorkItem` allocation through
+`WorkerqueueTaskContextIf`, together with the current queue identity, so this
+diagnostic does not depend on CPU affinity.
+
 ### IRQ diagnostics configuration
 
 KIRQ 诊断通过 Kconfig 显式控制，而不是把生产诊断绑定到 `unittest`：
@@ -550,8 +631,9 @@ owner，`kruntime::init_interrupt()` 在开本地 IRQ 前调用它。没有 clai
 spurious vector 不触发 deferred executor。pseudo-NMI path 也不触发 deferred
 executor。executor 在注册/清空控制面通过 `SpinNoIrq` 保持单 owner；IRQ-tail hot
 path 从 atomic function-pointer slot 读取当前 hook，未安装 executor 时直接返回，不
-获取全局锁。workerqueue、tasklet 和 threaded IRQ 后续应挂在 softirq 或显式 future
-API 之上，而不是增加额外 implicit deferred owner。
+获取全局锁。workerqueue 通过显式 `queue_work()` handoff 进入
+`kworker/system_wq`；tasklet 和 threaded IRQ 后续应挂在 softirq 或显式 future API
+之上，而不是增加额外 implicit deferred owner。
 
 ## 算法流程
 
@@ -705,6 +787,21 @@ NMI path 不触发 lifecycle hooks，避免 hardirq 扩展点被用于更严格�
   当前 CPU 的 daemon，不创建任务、不阻塞、不依赖 `ktask`。provider 必须可从
   IRQ-disabled context 调用。`ktask` 在每个 CPU local IRQ 打开前创建并 pin
   `ksoftirqd/N`，所以 daemon drain 的是同一 CPU 的 per-CPU pending mask。
+- `WorkerqueueHostIf` 是 `kirq -> scheduler` 的单向 capability：`kirq` 只请求唤醒
+  provider-backed `system_wq` worker，不创建任务、不阻塞、不依赖 `ktask`。当前
+  ktask provider 只创建一个 `kworker/system_wq`，因此 `system_wq` 保持
+  single-consumer queue invariant。
+- `WorkerqueueTaskContextIf` 是 `kirq -> scheduler` 的 task-local execution
+  context capability：worker callback 是 sleepable 的，可能让出 CPU，因此 KIRQ 不用
+  per-CPU slot 记录当前 work，而是让 scheduler provider 在当前任务上保存 opaque
+  work key 和 queue key，用于 `flush_work(self)` / `cancel_work_sync(self)` 的
+  self-wait 诊断，以及 callback 中 `flush_work()` 同一 single-consumer queue 上其它
+  pending work 的自锁诊断。当前只保存单层 context，因此 M4 禁止 nested
+  `run_one_work()`；后续如要支持嵌套 drain，需要把该 task-local context 扩展成
+  worker stack。
+- `WorkqueueSyncWaitIf` 是 `kirq -> scheduler` 的 sleepable wait capability：
+  `kirq` 拥有 work lifecycle predicate，ktask provider 只负责阻塞在 completion
+  wake source 上；等待返回后必须重查 `WorkStatus`。
 - softirq diagnostics 记录 context leak、restart-limit、unhandled vector、action run、
   daemon wake request、context-suppressed wake、context-deferred run 和
   `raise_softirq_irqoff()` 的 IRQ-enabled 误用。它们用于发现 “softirq action 过重
@@ -762,10 +859,10 @@ fanout-complete wake dispatch 的 owner 是 `kirq`，上层内核子系统直接
 后续 Linux-style softirq、IRQ thread 和 workerqueue 应由 `kirq` 提供；poll/waitqueue
 等待者注册则由通用 async/wait notification 层承接。
 
-NetRx direct progress 是 workerqueue 之后的独立里程碑，而不是当前 softirq
-foundation 的一部分。当前 `NetRx` softirq 只能作为网络 fallback worker 的 wake
-source；workerqueue 补齐后，后续里程碑再决定由 softirq 投递 worker，或由一条已审计的
-nonblocking ingress path 直接按 budget 推进 RX。
+NetRx direct progress 是 workerqueue foundation 之后的独立里程碑。当前 `NetRx`
+softirq 只能作为网络 fallback worker 的 wake source；后续里程碑再决定由 softirq
+投递 `system_wq` work，或由一条已审计的 nonblocking ingress path 直接按 budget 推进
+RX。
 
 ### 为什么 NMI 独立于 normal IRQ state
 

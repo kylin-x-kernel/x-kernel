@@ -8,3 +8,4 @@ pub mod context;
 pub mod deferred;
 pub mod lifecycle;
 pub mod softirq;
+pub mod workerqueue;

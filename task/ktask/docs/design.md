@@ -108,6 +108,8 @@ kruntime::init_interrupt()
   → kirq::softirq::init()
   → ktask::init_softirqd_current_cpu()
   → 创建并激活绑定 boot CPU 的 ksoftirqd/0
+  → ktask::init_system_workqueue_worker()
+  → 创建并激活绑定 boot CPU 的 kworker/system_wq
   → enable_local_irq()
 ```
 
@@ -134,6 +136,23 @@ daemon 每完成一轮实际 softirq work 后会主动 `yield_now()`，再回到
 检查/等待循环；这对应 Linux `run_ksoftirqd()` 在 `__do_softirq()` 后执行
 `cond_resched()` 的调度友好语义。若等待注册因内存压力等原因失败，daemon 也会
 先让出 CPU 再重试，避免无 waiter 的紧循环。
+
+`kworker/system_wq` 是 `kirq::workerqueue::WorkerqueueHostIf` 的 `ktask`
+provider。`kirq` 拥有 `system_wq` 的队列状态、work 状态和 enqueue/requeue
+语义；`ktask` 只提供一个 sleepable task context 来 drain 队列。当前 workerqueue
+foundation 只有一个 system worker，因此保持 single-consumer queue invariant。
+provider 使用 `PollSet` 等待 `kirq::workerqueue::system_wq_has_runnable_work()`，
+唤醒路径可从 hardirq/softirq/BH-disabled context 调用；worker callback 在普通
+任务上下文执行，可以睡眠，但不继承排队方的进程上下文。
+`WorkerqueueTaskContextIf` 在当前 `TaskInner` 上保存 opaque work key 和 queue key，
+供 KIRQ 识别 worker callback 中的 `flush_work(self)` / `cancel_work_sync(self)`
+self-wait，以及 `flush_work()` 同一 single-consumer queue 上其它 pending work 的
+self-deadlock；这个状态跟随任务迁移，不依赖 per-CPU slot。work key 表示 KIRQ
+`WorkItem` 的底层 allocation identity；`ktask` 不拥有 work 生命周期，也不保存 work
+handle。当前 provider 只保存单层 context，因此 M4 的 `run_one_work()` 不支持
+callback 内嵌套 drain。
+`WorkqueueSyncWaitIf` 复用 ktask 的 completion wait helper；`kirq` 在进入 provider
+前完成 context/self-wait gate，provider 只负责 `try_wait/register/recheck` 阻塞协议。
 
 ### 2) 调度与切换
 

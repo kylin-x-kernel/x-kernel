@@ -241,6 +241,13 @@ pub struct TaskInner {
     interrupted: AtomicBool,
     interrupt_waker: PollSet,
 
+    /// Opaque KIRQ workerqueue callback context currently executed by this task, if any.
+    ///
+    /// Worker callbacks are sleepable and can migrate, so workerqueue
+    /// self-wait detection must be task-local rather than per-CPU.
+    workerqueue_current_work_key: AtomicUsize,
+    workerqueue_current_queue_key: AtomicUsize,
+
     exit_code: AtomicI32,
     wait_for_exit: Completion,
 
@@ -520,6 +527,48 @@ impl TaskInner {
         self.interrupt_waker.wake();
     }
 
+    pub(crate) fn set_workerqueue_current_work_context(
+        &self,
+        work_key: usize,
+        queue_key: usize,
+    ) -> Option<(usize, usize)> {
+        let previous_queue = self
+            .workerqueue_current_queue_key
+            .swap(queue_key, Ordering::AcqRel);
+        let previous_work = self
+            .workerqueue_current_work_key
+            .swap(work_key, Ordering::AcqRel);
+        (previous_work != 0).then_some((previous_work, previous_queue))
+    }
+
+    pub(crate) fn clear_workerqueue_current_work_context(
+        &self,
+        work_key: usize,
+        queue_key: usize,
+    ) -> bool {
+        if self.workerqueue_current_queue_key.load(Ordering::Acquire) != queue_key {
+            return false;
+        }
+        let cleared = self
+            .workerqueue_current_work_key
+            .compare_exchange(work_key, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        if cleared {
+            self.workerqueue_current_queue_key
+                .store(0, Ordering::Release);
+        }
+        cleared
+    }
+
+    pub(crate) fn workerqueue_current_work_context(&self) -> Option<(usize, usize)> {
+        let work_key = self.workerqueue_current_work_key.load(Ordering::Acquire);
+        if work_key == 0 {
+            return None;
+        }
+        let queue_key = self.workerqueue_current_queue_key.load(Ordering::Acquire);
+        Some((work_key, queue_key))
+    }
+
     #[cfg(feature = "snapshot")]
     #[inline(always)]
     pub fn set_waiting_lock(&self, lock: usize, now: khal::time::TimerTicks) {
@@ -634,6 +683,8 @@ impl TaskInner {
             wake_sync_depth: AtomicUsize::new(0),
             interrupted: AtomicBool::new(false),
             interrupt_waker: PollSet::new(),
+            workerqueue_current_work_key: AtomicUsize::new(0),
+            workerqueue_current_queue_key: AtomicUsize::new(0),
             exit_code: AtomicI32::new(0),
             wait_for_exit: Completion::new(),
             kstack: None,

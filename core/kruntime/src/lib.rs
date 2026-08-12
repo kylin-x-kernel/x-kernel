@@ -570,6 +570,7 @@ fn init_interrupt() {
     );
 
     ktask::init_softirqd_current_cpu();
+    ktask::init_system_workqueue_worker();
 
     // Enable IRQs before starting app
     karch::enable_local_irq();
