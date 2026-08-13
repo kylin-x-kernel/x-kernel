@@ -4,12 +4,13 @@
 
 extern crate alloc;
 
-use alloc::{format, string::String, vec, vec::Vec};
-use core::sync::atomic::Ordering;
+use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
+use core::{sync::atomic::Ordering, task::Waker};
 
 use kcred::Cred;
 use kerrno::LinuxError;
 use kio::Cursor;
+use ktime_types::MonotonicInstant;
 use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address};
 use unittest::def_test;
 
@@ -17,13 +18,130 @@ use super::{
     rtnetlink::*,
     socket::publish_kobject_uevent,
     wire::{
-        NlMsgHeader, addr as wire_addr, build_nlmsg, link as wire_link, neigh as wire_neigh,
-        push_attr, push_i32_ne, push_u8, push_u16_ne, push_u32_ne, read_i32_ne, read_u16_ne,
-        route as wire_route,
+        IfInfoMsg, NlMsgHeader, addr as wire_addr, build_nlmsg, link as wire_link,
+        neigh as wire_neigh, parse_attrs, push_attr, push_i32_ne, push_u8, push_u16_ne,
+        push_u32_ne, read_i32_ne, read_u16_ne, route as wire_route,
     },
     *,
 };
-use crate::{RecvOptions, SendOptions, SocketAddrEx, socket::SocketOps};
+use crate::{
+    RecvOptions, SERVICE, SendOptions, SocketAddrEx,
+    buf::PacketBuf,
+    device::{
+        IF_OPER_DOWN, IF_OPER_UNKNOWN, IF_OPER_UP, LINK_FLAG_BROADCAST, LINK_FLAG_LOOPBACK,
+        LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST, LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind,
+        LinkSendSnapshot, LinkSnapshot, NetDevice,
+    },
+    router::Router,
+    service::Service,
+    socket::SocketOps,
+};
+
+struct TestDevice {
+    link: LinkSnapshot,
+    device_id: Option<kdevice::DeviceId>,
+}
+
+impl TestDevice {
+    fn new(link: LinkSnapshot) -> Self {
+        Self {
+            link,
+            device_id: None,
+        }
+    }
+
+    fn with_device_id(mut self, device_id: kdevice::DeviceId) -> Self {
+        self.device_id = Some(device_id);
+        self
+    }
+}
+
+impl NetDevice for TestDevice {
+    fn name(&self) -> &str {
+        &self.link.name
+    }
+
+    fn link_kind(&self) -> LinkKind {
+        self.link.kind
+    }
+
+    fn mtu(&self) -> usize {
+        self.link.mtu
+    }
+
+    fn is_link_up(&self) -> bool {
+        self.link.flags & LINK_FLAG_UP != 0
+    }
+
+    fn link_snapshot(&self, ifindex: i32) -> LinkSnapshot {
+        LinkSnapshot {
+            ifindex,
+            ..self.link.clone()
+        }
+    }
+
+    fn link_send_snapshot(&self) -> LinkSendSnapshot {
+        LinkSendSnapshot {
+            is_up: self.is_link_up(),
+            mtu: self.link.mtu,
+            hardware_addr: self.link.hardware_addr,
+        }
+    }
+
+    fn device_id(&self) -> Option<kdevice::DeviceId> {
+        self.device_id
+    }
+
+    fn poll_rx(&mut self, _ifindex: i32, _timestamp: MonotonicInstant) -> Option<PacketBuf> {
+        None
+    }
+
+    fn has_rx_work(&self) -> bool {
+        false
+    }
+
+    fn send_ip_packet(
+        &mut self,
+        _ifindex: i32,
+        _next_hop: crate::ip::IpAddress,
+        _packet: PacketBuf,
+        _timestamp: MonotonicInstant,
+    ) -> bool {
+        false
+    }
+
+    fn register_rx_waker(
+        &self,
+        _source_waker: &Waker,
+        _context: &mut kpoll::PollContext<'_>,
+    ) -> Result<(), kpoll::PollRegisterError> {
+        Ok(())
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.link.name = name;
+    }
+
+    fn set_mtu(&mut self, mtu: usize) -> Result<(), LinuxError> {
+        self.link.kind.validate_mtu(mtu)?;
+        self.link.mtu = mtu;
+        Ok(())
+    }
+
+    fn set_link_up(&mut self, is_up: bool) {
+        if is_up {
+            self.link.flags |= LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP;
+            self.link.operstate = if self.link.kind == LinkKind::Ethernet {
+                IF_OPER_UP
+            } else {
+                IF_OPER_UNKNOWN
+            };
+        } else {
+            self.link.flags &= !(LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP);
+            self.link.operstate = IF_OPER_DOWN;
+        }
+    }
+}
 
 fn init_test_state() {
     let state = build_initial_state(
@@ -35,15 +153,48 @@ fn init_test_state() {
             Ipv4Address::new(192, 168, 1, 2),
             24,
         ))),
-        Some([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]),
         Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 1))),
-        1500,
     );
     if ROUTE_STATE.is_inited() {
-        *ROUTE_STATE.write() = state;
+        *ROUTE_STATE.write() = state.clone();
     } else {
-        init_route_state(state);
+        init_route_state(state.clone());
     }
+
+    let mut router = Router::new();
+    router.add_device(Box::new(TestDevice::new(LinkSnapshot {
+        ifindex: 1,
+        name: String::from("lo"),
+        flags: LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOOPBACK | LINK_FLAG_LOWER_UP,
+        mtu: 65_536,
+        operstate: IF_OPER_UNKNOWN,
+        kind: LinkKind::Loopback,
+        hardware_addr: [0; 6],
+        broadcast_addr: [0; 6],
+    })));
+    router.add_device(Box::new(
+        TestDevice::new(LinkSnapshot {
+            ifindex: 2,
+            name: String::from("eth0"),
+            flags: LINK_FLAG_UP
+                | LINK_FLAG_RUNNING
+                | LINK_FLAG_BROADCAST
+                | LINK_FLAG_MULTICAST
+                | LINK_FLAG_LOWER_UP,
+            mtu: 1500,
+            operstate: IF_OPER_UP,
+            kind: LinkKind::Ethernet,
+            hardware_addr: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
+            broadcast_addr: [0xff; 6],
+        })
+        .with_device_id(kdevice::DeviceId::new(2)),
+    ));
+    if SERVICE.is_inited() {
+        SERVICE.replace_router_for_tests(router);
+    } else {
+        SERVICE.init_once(Service::new(router));
+    }
+    SERVICE.sync_netlink(&state);
 }
 
 fn nl_header(msg_type: u16, flags: u16, seq: u32) -> NlMsgHeader {
@@ -108,7 +259,7 @@ fn test_malformed_unsupported_protocol_request_does_not_queue_empty_response() {
 }
 
 #[def_test(serial)]
-fn test_build_initial_state_contains_links_and_routes() {
+fn test_build_initial_state_contains_addresses_and_routes() {
     let state = build_initial_state(
         IpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
             Ipv4Address::new(127, 0, 0, 1),
@@ -118,15 +269,10 @@ fn test_build_initial_state_contains_links_and_routes() {
             Ipv4Address::new(10, 0, 2, 15),
             24,
         ))),
-        Some([1, 2, 3, 4, 5, 6]),
         Some(IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, 2))),
-        1500,
     );
 
-    assert_eq!(state.links.len(), 2);
     assert_eq!(state.addrs.len(), 2);
-    assert_eq!(state.links[0].name, "lo");
-    assert_eq!(state.links[1].name, "eth0");
     assert!(state.routes.iter().any(|route| {
         route.dst == Some(IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)))
             && route.dst_len == 8
@@ -154,8 +300,8 @@ fn test_parse_link_update_name_and_mtu() {
     push_u8(&mut payload, 0);
     push_u16_ne(&mut payload, ARPHRD_ETHER);
     push_i32_ne(&mut payload, 2);
-    push_u32_ne(&mut payload, IFF_UP);
-    push_u32_ne(&mut payload, IFF_UP);
+    push_u32_ne(&mut payload, LINK_FLAG_UP);
+    push_u32_ne(&mut payload, LINK_FLAG_UP);
     payload.extend(attr(wire_link::attr::IFNAME, b"eth1\0"));
     payload.extend(attr(wire_link::attr::MTU, &1400u32.to_ne_bytes()));
 
@@ -165,23 +311,262 @@ fn test_parse_link_update_name_and_mtu() {
     assert_eq!(request.mtu, Some(1400));
 }
 
+#[def_test]
+fn test_parse_link_update_rejects_unsupported_attributes() {
+    let mut payload = Vec::new();
+    push_u8(&mut payload, 17);
+    push_u8(&mut payload, 0);
+    push_u16_ne(&mut payload, ARPHRD_ETHER);
+    push_i32_ne(&mut payload, 2);
+    push_u32_ne(&mut payload, 0);
+    push_u32_ne(&mut payload, 0);
+    payload.extend(attr(wire_link::attr::ADDRESS, &[1, 2, 3, 4, 5, 6]));
+
+    assert!(matches!(
+        parse_link_update(&payload),
+        Err(LinuxError::EOPNOTSUPP)
+    ));
+}
+
 #[def_test(serial)]
 fn test_update_link_state_rename_and_down() {
     init_test_state();
     let request = LinkUpdateRequest {
         index: 2,
         flags: 0,
-        change: IFF_UP,
+        change: LINK_FLAG_UP,
         name: Some(String::from("ens3")),
         mtu: Some(1400),
     };
     update_link_state(request).unwrap();
 
-    let state = route_state();
-    let link = state.links.iter().find(|link| link.index == 2).unwrap();
+    let link = SERVICE
+        .link_snapshot_for_ifindex(2)
+        .expect("eth0 link snapshot");
     assert_eq!(link.name, "ens3");
     assert_eq!(link.mtu, 1400);
-    assert_eq!(link.flags & IFF_UP, 0);
+    assert_eq!(link.flags & LINK_FLAG_UP, 0);
+}
+
+#[def_test(serial)]
+fn test_device_mtu_is_route_mtu_source() {
+    init_test_state();
+    let destination = crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(8, 8, 8, 8));
+    assert_eq!(SERVICE.ipv4_route_mtu(&destination), Some(1500));
+
+    update_link_state(LinkUpdateRequest {
+        index: 2,
+        flags: 0,
+        change: 0,
+        name: None,
+        mtu: Some(1400),
+    })
+    .unwrap();
+
+    assert_eq!(SERVICE.ipv4_route_mtu(&destination), Some(1400));
+    assert_eq!(route_state().routes.len(), 3);
+}
+
+#[def_test(serial)]
+fn test_unchanged_mtu_does_not_rebuild_interface() {
+    init_test_state();
+    let rebuild_count = SERVICE.rebuild_count_for_tests();
+
+    update_link_state(LinkUpdateRequest {
+        index: 2,
+        flags: 0,
+        change: 0,
+        name: None,
+        mtu: Some(1500),
+    })
+    .unwrap();
+
+    assert_eq!(SERVICE.rebuild_count_for_tests(), rebuild_count);
+}
+
+#[def_test(serial)]
+fn test_down_device_keeps_route_mtu_for_output_checks() {
+    init_test_state();
+    let destination = crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(8, 8, 8, 8));
+
+    update_link_state(LinkUpdateRequest {
+        index: 2,
+        flags: 0,
+        change: LINK_FLAG_UP,
+        name: None,
+        mtu: None,
+    })
+    .unwrap();
+
+    assert_eq!(SERVICE.ipv4_route_mtu(&destination), Some(1500));
+    assert_eq!(
+        SERVICE.get_source_address(&destination),
+        Err(LinuxError::ENETUNREACH.into())
+    );
+}
+
+#[def_test(serial)]
+fn test_non_effective_mtu_change_does_not_rebuild_interface() {
+    init_test_state();
+    let rebuild_count = SERVICE.rebuild_count_for_tests();
+
+    update_link_state(LinkUpdateRequest {
+        index: 1,
+        flags: 0,
+        change: 0,
+        name: None,
+        mtu: Some(60_000),
+    })
+    .unwrap();
+
+    assert_eq!(SERVICE.rebuild_count_for_tests(), rebuild_count);
+    assert_eq!(
+        SERVICE.ipv4_route_mtu(&crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
+            127, 0, 0, 1
+        ))),
+        Some(60_000)
+    );
+}
+
+#[def_test(serial)]
+fn test_link_change_mask_ignores_volatile_flags() {
+    init_test_state();
+
+    update_link_state(LinkUpdateRequest {
+        index: 2,
+        flags: 0,
+        change: LINK_FLAG_RUNNING,
+        name: None,
+        mtu: None,
+    })
+    .unwrap();
+    let current_flags = SERVICE
+        .link_snapshot_for_ifindex(2)
+        .expect("eth0 link snapshot")
+        .flags;
+    assert_ne!(current_flags & LINK_FLAG_RUNNING, 0);
+
+    update_link_state(LinkUpdateRequest {
+        index: 2,
+        flags: current_flags & !LINK_FLAG_UP,
+        change: u32::MAX,
+        name: None,
+        mtu: None,
+    })
+    .unwrap();
+    let down_flags = SERVICE
+        .link_snapshot_for_ifindex(2)
+        .expect("eth0 link snapshot")
+        .flags;
+    assert_eq!(down_flags & LINK_FLAG_UP, 0);
+    assert_ne!(down_flags & LINK_FLAG_MULTICAST, 0);
+
+    assert_eq!(
+        update_link_state(LinkUpdateRequest {
+            index: 2,
+            flags: down_flags & !LINK_FLAG_MULTICAST,
+            change: LINK_FLAG_MULTICAST,
+            name: None,
+            mtu: None,
+        }),
+        Err(LinuxError::EOPNOTSUPP)
+    );
+}
+
+#[def_test(serial)]
+fn test_device_removal_rebuilds_interface_after_effective_mtu_change() {
+    init_test_state();
+    let service = &SERVICE;
+    let rebuild_count = service.rebuild_count_for_tests();
+
+    assert!(service.remove_device_by_model_id(kdevice::DeviceId::new(2)));
+    assert_eq!(service.rebuild_count_for_tests(), rebuild_count + 1);
+    assert_eq!(service.link_snapshots().len(), 1);
+}
+
+#[def_test(serial)]
+fn test_reject_invalid_link_name_and_mtu_without_partial_update() {
+    init_test_state();
+
+    for name in [
+        "",
+        ".",
+        "..",
+        "eth/1",
+        "eth:1",
+        "eth 1",
+        "eth\x0b1",
+        "1234567890123456",
+    ] {
+        assert_eq!(
+            update_link_state(LinkUpdateRequest {
+                index: 2,
+                flags: 0,
+                change: 0,
+                name: Some(String::from(name)),
+                mtu: None,
+            }),
+            Err(LinuxError::EINVAL)
+        );
+    }
+    assert_eq!(
+        update_link_state(LinkUpdateRequest {
+            index: 2,
+            flags: 0,
+            change: 0,
+            name: Some(String::from("ens3")),
+            mtu: Some(1501),
+        }),
+        Err(LinuxError::EINVAL)
+    );
+
+    let link = SERVICE
+        .link_snapshot_for_ifindex(2)
+        .expect("eth0 remains present");
+    assert_eq!(link.name, "eth0");
+    assert_eq!(link.mtu, 1500);
+    assert_ne!(link.flags & LINK_FLAG_UP, 0);
+
+    assert_eq!(
+        update_link_state(LinkUpdateRequest {
+            index: 2,
+            flags: 0,
+            change: 0,
+            name: Some(String::from("lo")),
+            mtu: None,
+        }),
+        Err(LinuxError::EEXIST)
+    );
+}
+
+#[def_test(serial)]
+fn test_link_dump_reads_device_snapshots() {
+    init_test_state();
+    let packets =
+        handle_rtnetlink_request(&build_nlmsg(RTM_GETLINK, 17, NLM_F_REQUEST, Vec::new()));
+
+    assert_eq!(packets.len(), 3);
+    let links: Vec<_> = packets
+        .iter()
+        .filter_map(|packet| {
+            let header = NlMsgHeader::read(&packet.data)?;
+            (header.msg_type == RTM_NEWLINK).then(|| {
+                let payload = &packet.data[NLMSG_HDR_LEN..];
+                let info = IfInfoMsg::read(payload).expect("valid RTM_NEWLINK payload");
+                let change = info.change;
+                assert_eq!(info.family, 0);
+                assert_eq!(change, 0);
+                assert!(
+                    parse_attrs(&payload[IfInfoMsg::SIZE..])
+                        .expect("valid link attributes")
+                        .iter()
+                        .all(|attr| attr.kind != wire_link::attr::LINK)
+                );
+                info.index
+            })
+        })
+        .collect();
+    assert_eq!(links, vec![1, 2]);
 }
 
 #[def_test(serial)]

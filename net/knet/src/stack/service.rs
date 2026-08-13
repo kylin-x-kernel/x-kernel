@@ -5,6 +5,8 @@
 //! Network service with budgeted data-plane progression.
 
 use alloc::{sync::Arc, vec::Vec};
+#[cfg(unittest)]
+use core::sync::atomic::AtomicUsize;
 use core::{
     sync::atomic::{AtomicU64, Ordering},
     task::Waker,
@@ -27,6 +29,7 @@ use smoltcp::{
 use crate::{
     LISTEN_TABLE, SOCKET_SET,
     buf::PacketBuf,
+    device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot},
     ip::{IpAddress, IpListenEndpoint},
     netlink::RtnetlinkState,
     poller::{PollBudget, PollProgress},
@@ -71,6 +74,8 @@ pub struct Service {
     control_batch: Mutex<Vec<Vec<u8>>>,
     timeout_deadline_micros: AtomicU64,
     timeout_poll: Arc<PollSet>,
+    #[cfg(unittest)]
+    rebuild_count: AtomicUsize,
 }
 
 impl Service {
@@ -87,6 +92,8 @@ impl Service {
             control_batch: Mutex::new(Vec::new()),
             timeout_deadline_micros: AtomicU64::new(0),
             timeout_poll: Arc::new(PollSet::new()),
+            #[cfg(unittest)]
+            rebuild_count: AtomicUsize::new(0),
         }
     }
 
@@ -251,10 +258,8 @@ impl Service {
         let dst_addr = super::from_smoltcp_ip_address(*dst_addr);
         self.router
             .lock()
-            .table
-            .lookup(&dst_addr)
-            .map(|rule| super::to_smoltcp_ip_address(rule.src))
-            .ok_or(KError::from(LinuxError::ENETUNREACH))
+            .output_route_source(&dst_addr)
+            .map(super::to_smoltcp_ip_address)
     }
 
     pub fn smoltcp_device_mask_for(&self, endpoint: &SmoltcpIpListenEndpoint) -> u32 {
@@ -274,12 +279,12 @@ impl Service {
     }
 
     pub fn get_source_address(&self, dst_addr: &IpAddress) -> KResult<IpAddress> {
-        self.router
-            .lock()
-            .table
-            .lookup(dst_addr)
-            .map(|rule| rule.src)
-            .ok_or(KError::from(LinuxError::ENETUNREACH))
+        self.router.lock().output_route_source(dst_addr)
+    }
+
+    #[cfg(unittest)]
+    pub fn ipv4_route_mtu(&self, dst_addr: &IpAddress) -> Option<usize> {
+        self.router.lock().route_mtu(dst_addr)
     }
 
     pub fn can_send_ip_packet(&self) -> bool {
@@ -299,14 +304,8 @@ impl Service {
             return Err(KError::WouldBlock);
         }
 
-        let source_addr = match bound_src {
-            Some(addr) => addr,
-            None => router
-                .table
-                .lookup(dst_addr)
-                .map(|rule| rule.src)
-                .ok_or(KError::from(LinuxError::ENETUNREACH))?,
-        };
+        let route_source = router.output_route_source(dst_addr)?;
+        let source_addr = bound_src.unwrap_or(route_source);
         let packet_count = output_ipv4_packet_count(&router, dst_addr, packet_len)?;
         if !router.can_enqueue_tx_packets(packet_count) {
             return Err(KError::WouldBlock);
@@ -430,8 +429,78 @@ impl Service {
         });
     }
 
+    fn rebuild_interface(&self, router: &mut Router, iface: &mut Interface) {
+        let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
+        let mut new_iface = Interface::new(config, router, to_smoltcp_instant(monotonic_time()));
+        let current_addrs = iface.ip_addrs().to_vec();
+        new_iface.update_ip_addrs(|ip_addrs| {
+            for addr in current_addrs {
+                ip_addrs
+                    .push(addr)
+                    .expect("rebuilt interface must preserve the original address capacity");
+            }
+        });
+        *iface = new_iface;
+        self.timeout_deadline_micros.store(0, Ordering::Release);
+        self.timeout_poll.wake();
+        #[cfg(unittest)]
+        self.rebuild_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn link_snapshots(&self) -> Vec<LinkSnapshot> {
+        self.router.lock().link_snapshots()
+    }
+
+    pub fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
+        self.router.lock().link_snapshot_for_ifindex(ifindex)
+    }
+
+    pub fn has_device(&self, ifindex: i32) -> bool {
+        self.router.lock().has_device(ifindex)
+    }
+
+    pub fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
+        self.router.lock().link_send_snapshot_for_ifindex(ifindex)
+    }
+
+    pub fn update_device_link(
+        &self,
+        ifindex: i32,
+        update: LinkConfigUpdate,
+    ) -> Result<(), LinuxError> {
+        let mut router = self.router.lock();
+        let is_effective_mtu_changed = router.update_device_link(ifindex, update)?;
+        if is_effective_mtu_changed {
+            let mut iface = self.iface.lock();
+            self.rebuild_interface(&mut router, &mut iface);
+        }
+        Ok(())
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn replace_router_for_tests(&self, mut router: Router) {
+        let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
+        let iface = Interface::new(config, &mut router, to_smoltcp_instant(monotonic_time()));
+        *self.router.lock() = router;
+        *self.iface.lock() = iface;
+        self.timeout_deadline_micros.store(0, Ordering::Release);
+        self.timeout_poll.wake();
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn rebuild_count_for_tests(&self) -> usize {
+        self.rebuild_count.load(Ordering::Relaxed)
+    }
+
     pub fn remove_device_by_model_id(&self, id: kdevice::DeviceId) -> bool {
-        self.router.lock().remove_device_by_model_id(id)
+        let mut router = self.router.lock();
+        let effective_mtu = router.effective_mtu();
+        let is_removed = router.remove_device_by_model_id(id);
+        if is_removed && router.effective_mtu() != effective_mtu {
+            let mut iface = self.iface.lock();
+            self.rebuild_interface(&mut router, &mut iface);
+        }
+        is_removed
     }
 
     pub fn send_link_frame(&self, ifindex: i32, frame: &[u8]) -> KResult<usize> {

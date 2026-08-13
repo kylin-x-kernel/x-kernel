@@ -19,6 +19,7 @@ use super::{
     },
     *,
 };
+use crate::device::{LINK_FLAG_UP, LINK_FLAG_VOLATILE, LinkConfigUpdate, LinkKind, LinkSnapshot};
 
 #[derive(Clone, Debug)]
 pub(super) struct LinkUpdateRequest {
@@ -249,12 +250,15 @@ pub(super) fn handle_rtnetlink_request(request: &[u8]) -> Vec<NetlinkPacket> {
 }
 
 fn dump_links(request: &NlMsgHeader, _payload: &[u8]) -> Vec<NetlinkPacket> {
-    route_state()
-        .links
+    if !SERVICE.is_inited() {
+        return Vec::new();
+    }
+    SERVICE
+        .link_snapshots()
         .into_iter()
         .map(|link| NetlinkPacket {
             from: NetlinkAddr { pid: 0, groups: 0 },
-            data: build_link_message(request, &link),
+            data: build_link_message(request, link),
         })
         .collect()
 }
@@ -265,14 +269,20 @@ fn dump_addrs(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
         .copied()
         .filter(|family| *family != 0)
         .unwrap_or(wire_route::FAMILY_IPV4);
-    let RtnetlinkState { links, addrs, .. } = route_state();
-    addrs
+    let state = route_state();
+    let links = if SERVICE.is_inited() {
+        SERVICE.link_snapshots()
+    } else {
+        Vec::new()
+    };
+    state
+        .addrs
         .into_iter()
         .filter(|addr| addr.family == family)
         .map(|addr| {
             let label = links
                 .iter()
-                .find(|link| link.index as u32 == addr.index)
+                .find(|link| link.ifindex as u32 == addr.index)
                 .map(|link| link.name.as_str())
                 .unwrap_or("");
             NetlinkPacket {
@@ -343,45 +353,41 @@ fn apply_newneigh(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<N
 }
 
 pub(super) fn update_link_state(request: LinkUpdateRequest) -> Result<(), LinuxError> {
-    mutate_route_state(|state| {
-        if let Some(name) = request.name.as_ref()
-            && state
-                .links
-                .iter()
-                .any(|other| other.index != request.index && other.name == *name)
-        {
-            return Err(LinuxError::EEXIST);
-        }
-        let link = state
-            .links
-            .iter_mut()
-            .find(|link| link.index == request.index)
-            .ok_or(LinuxError::ENODEV)?;
+    if request.index <= 0 {
+        return Err(LinuxError::ENODEV);
+    }
+    if !SERVICE.is_inited() {
+        return Err(LinuxError::ENODEV);
+    }
 
-        if let Some(name) = request.name {
-            link.name = name;
-        }
-        if let Some(mtu) = request.mtu {
-            link.mtu = mtu;
-        }
-        if request.change & IFF_UP != 0 {
-            if request.flags & IFF_UP != 0 {
-                link.flags |= IFF_UP | IFF_RUNNING | IFF_LOWER_UP;
-                if link.link_type == ARPHRD_ETHER {
-                    link.operstate = 6;
-                }
-            } else {
-                link.flags &= !(IFF_UP | IFF_RUNNING | IFF_LOWER_UP);
-                link.operstate = 2;
-            }
-        }
-        Ok(())
-    })
+    let current_flags = SERVICE
+        .link_snapshot_for_ifindex(request.index)
+        .ok_or(LinuxError::ENODEV)?
+        .flags;
+    // Linux treats a zero change mask with nonzero flags as an all-bits mask
+    // for backward compatibility. Device-owned volatile flags are preserved.
+    let change = if request.change == 0 && request.flags != 0 {
+        u32::MAX
+    } else {
+        request.change
+    };
+    let changed_flags = change & (request.flags ^ current_flags);
+    if changed_flags & !(LINK_FLAG_UP | LINK_FLAG_VOLATILE) != 0 {
+        return Err(LinuxError::EOPNOTSUPP);
+    }
+    SERVICE.update_device_link(
+        request.index,
+        LinkConfigUpdate {
+            name: request.name,
+            mtu: request.mtu.map(|mtu| mtu as usize),
+            is_up: (change & LINK_FLAG_UP != 0).then_some(request.flags & LINK_FLAG_UP != 0),
+        },
+    )
 }
 
 pub(super) fn add_addr_state(request: AddrRequest, flags: u16) -> Result<(), LinuxError> {
+    ensure_link_exists(request.index)?;
     mutate_route_state(|state| {
-        ensure_link_exists(state, request.index)?;
         let existing = state
             .addrs
             .iter()
@@ -413,10 +419,10 @@ pub(super) fn del_addr_state(request: AddrRequest) -> Result<(), LinuxError> {
 }
 
 pub(super) fn add_route_state(request: RouteRequest, flags: u16) -> Result<(), LinuxError> {
+    if request.oif != 0 {
+        ensure_link_exists(request.oif)?;
+    }
     mutate_route_state(|state| {
-        if request.oif != 0 {
-            ensure_link_exists(state, request.oif)?;
-        }
         let existing = state
             .routes
             .iter()
@@ -445,8 +451,8 @@ pub(super) fn del_route_state(request: RouteRequest) -> Result<(), LinuxError> {
 }
 
 pub(super) fn add_neigh_state(request: NeighRequest, flags: u16) -> Result<(), LinuxError> {
+    ensure_link_exists(request.ifindex)?;
     mutate_route_state(|state| {
-        ensure_link_exists(state, request.ifindex)?;
         let existing = state
             .neighs
             .iter()
@@ -463,13 +469,14 @@ pub(super) fn add_neigh_state(request: NeighRequest, flags: u16) -> Result<(), L
     })
 }
 
-fn ensure_link_exists(state: &RtnetlinkState, ifindex: u32) -> Result<(), LinuxError> {
-    state
-        .links
-        .iter()
-        .any(|link| link.index as u32 == ifindex)
-        .then_some(())
-        .ok_or(LinuxError::ENODEV)
+fn ensure_link_exists(ifindex: u32) -> Result<(), LinuxError> {
+    let ifindex = i32::try_from(ifindex).map_err(|_| LinuxError::ENODEV)?;
+    let exists = if SERVICE.is_inited() {
+        SERVICE.link_snapshot_for_ifindex(ifindex).is_some()
+    } else {
+        false
+    };
+    exists.then_some(()).ok_or(LinuxError::ENODEV)
 }
 
 fn same_addr(addr: &AddrState, request: &AddrRequest) -> bool {
@@ -556,8 +563,8 @@ fn parse_link_attrs(attrs: Vec<NlAttr<'_>>) -> Result<LinkAttrs, LinuxError> {
             | wire_link::attr::ADDRESS
             | wire_link::attr::BROADCAST
             | wire_link::attr::LINK
-            | wire_link::attr::OPERSTATE => {}
-            _ => {}
+            | wire_link::attr::OPERSTATE => return Err(LinuxError::EOPNOTSUPP),
+            _ => return Err(LinuxError::EOPNOTSUPP),
         }
     }
     Ok(parsed)
@@ -613,29 +620,33 @@ fn parse_neigh_attrs(family: u8, attrs: Vec<NlAttr<'_>>) -> Result<NeighAttrs, L
     Ok(parsed)
 }
 
-fn build_link_message(request: &NlMsgHeader, link: &LinkState) -> Vec<u8> {
+fn build_link_message(request: &NlMsgHeader, link: LinkSnapshot) -> Vec<u8> {
     let mut payload = Vec::new();
     IfInfoMsg {
-        family: 17,
+        family: 0,
         pad: 0,
-        link_type: link.link_type,
-        index: link.index,
+        link_type: match link.kind {
+            LinkKind::Loopback => ARPHRD_LOOPBACK,
+            LinkKind::Ethernet => ARPHRD_ETHER,
+        },
+        index: link.ifindex,
         flags: link.flags,
-        change: u32::MAX,
+        change: 0,
     }
     .write(&mut payload);
 
-    push_attr(&mut payload, wire_link::attr::ADDRESS, &link.mac);
-    push_attr(&mut payload, wire_link::attr::BROADCAST, &link.broadcast);
+    push_attr(&mut payload, wire_link::attr::ADDRESS, &link.hardware_addr);
+    push_attr(
+        &mut payload,
+        wire_link::attr::BROADCAST,
+        &link.broadcast_addr,
+    );
     push_attr_str(&mut payload, wire_link::attr::IFNAME, &link.name);
-    push_attr(&mut payload, wire_link::attr::MTU, &link.mtu.to_ne_bytes());
-    if link.index > 1 {
-        push_attr(
-            &mut payload,
-            wire_link::attr::LINK,
-            &(link.index as u32 - 1).to_ne_bytes(),
-        );
-    }
+    push_attr(
+        &mut payload,
+        wire_link::attr::MTU,
+        &(link.mtu as u32).to_ne_bytes(),
+    );
     push_attr(&mut payload, wire_link::attr::OPERSTATE, &[link.operstate]);
 
     build_nlmsg(RTM_NEWLINK, request.seq, NLM_F_MULTI, payload)
@@ -726,19 +737,6 @@ pub(crate) fn route_state() -> RtnetlinkState {
     }
 }
 
-pub(crate) fn link_state_for_ifindex(ifindex: i32) -> Option<LinkState> {
-    if ROUTE_STATE.is_inited() {
-        ROUTE_STATE
-            .read()
-            .links
-            .iter()
-            .find(|link| link.index == ifindex)
-            .cloned()
-    } else {
-        None
-    }
-}
-
 fn mutate_route_state<F>(f: F) -> Result<(), LinuxError>
 where
     F: FnOnce(&mut RtnetlinkState) -> Result<(), LinuxError>,
@@ -757,21 +755,9 @@ where
 pub(crate) fn build_initial_state(
     lo_ip: IpCidr,
     eth0_ip: Option<IpCidr>,
-    eth0_mac: Option<[u8; 6]>,
     gateway: Option<IpAddress>,
-    standard_mtu: u32,
 ) -> RtnetlinkState {
     let mut state = RtnetlinkState::default();
-    state.links.push(LinkState {
-        index: 1,
-        name: String::from("lo"),
-        flags: IFF_UP | IFF_RUNNING | IFF_LOOPBACK | IFF_LOWER_UP,
-        mtu: 65_536,
-        operstate: 0,
-        link_type: ARPHRD_LOOPBACK,
-        mac: [0; 6],
-        broadcast: [0; 6],
-    });
     state.addrs.push(AddrState {
         index: 1,
         family: match lo_ip.address() {
@@ -796,16 +782,6 @@ pub(crate) fn build_initial_state(
     });
 
     if let Some(eth0_ip) = eth0_ip {
-        state.links.push(LinkState {
-            index: 2,
-            name: String::from("eth0"),
-            flags: IFF_UP | IFF_RUNNING | IFF_BROADCAST | IFF_MULTICAST | IFF_LOWER_UP,
-            mtu: standard_mtu,
-            operstate: 6,
-            link_type: ARPHRD_ETHER,
-            mac: eth0_mac.unwrap_or([0; 6]),
-            broadcast: [0xff; 6],
-        });
         state.addrs.push(AddrState {
             index: 2,
             family: match eth0_ip.address() {

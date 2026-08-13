@@ -199,7 +199,12 @@ impl SocketOps for RawSocket {
         }
 
         let remote = self.remote_address(&options)?;
-        let local = self.local_address_for(remote)?;
+        let local = if let Some(local) = *self.local_addr.read() {
+            SERVICE.get_smoltcp_source_address(&remote)?;
+            local
+        } else {
+            self.local_address_for(remote)?
+        };
         let payload_len = src.remaining();
 
         self.general

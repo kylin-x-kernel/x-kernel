@@ -17,7 +17,7 @@ use super::ipv4::{self, Ipv4Error, Ipv4Header};
 use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
-    device::NetDevice,
+    device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NetDevice},
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
     netlink::{RT_TABLE_MAIN, RTN_UNICAST, RtnetlinkState},
 };
@@ -31,7 +31,6 @@ pub struct Rule {
     pub via: Option<IpAddress>,
     pub dev: usize,
     pub src: IpAddress,
-    pub mtu: usize,
 }
 
 impl Rule {
@@ -41,7 +40,6 @@ impl Rule {
             via,
             dev,
             src,
-            mtu: STANDARD_MTU,
         }
     }
 }
@@ -92,6 +90,7 @@ pub struct Router {
     next_ipv4_identification: u16,
     pub(crate) devices: Vec<Box<dyn NetDevice>>,
     pub(crate) table: RouteTable,
+    effective_mtu: usize,
 }
 
 pub(crate) struct RxDrain {
@@ -109,11 +108,36 @@ impl Router {
             next_ipv4_identification: 1,
             devices: Vec::new(),
             table: RouteTable::new(),
+            effective_mtu: STANDARD_MTU,
         }
     }
 
     pub fn route_mtu(&self, dst: &IpAddress) -> Option<usize> {
-        self.table.lookup(dst).map(|rule| rule.mtu)
+        let rule = self.table.lookup(dst)?;
+        self.devices
+            .get(rule.dev)
+            .map(|device| device.mtu().min(u16::MAX as usize))
+    }
+
+    /// Returns the source address for an output route with an active device.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ENETUNREACH` when the route or its device is absent, or when
+    /// the selected device is administratively down.
+    pub fn output_route_source(&self, dst: &IpAddress) -> KResult<IpAddress> {
+        let rule = self
+            .table
+            .lookup(dst)
+            .ok_or(KError::from(LinuxError::ENETUNREACH))?;
+        let device = self
+            .devices
+            .get(rule.dev)
+            .ok_or(KError::from(LinuxError::ENETUNREACH))?;
+        if !device.is_link_up() {
+            return Err(LinuxError::ENETUNREACH.into());
+        }
+        Ok(rule.src)
     }
 
     pub fn can_enqueue_tx_packet(&self) -> bool {
@@ -151,6 +175,7 @@ impl Router {
 
     pub fn add_device(&mut self, device: Box<dyn NetDevice>) -> usize {
         self.devices.push(device);
+        self.recompute_effective_mtu();
         self.devices.len() - 1
     }
 
@@ -165,6 +190,7 @@ impl Router {
         self.devices.remove(pos);
         self.table.remove_device(pos);
         self.adjust_rx_device_cursor_after_remove(pos);
+        self.recompute_effective_mtu();
         true
     }
 
@@ -172,10 +198,90 @@ impl Router {
         &self.local_ipv4_addrs
     }
 
+    /// Returns the MTU advertised through the smoltcp device capabilities.
+    pub fn effective_mtu(&self) -> usize {
+        self.effective_mtu
+    }
+
+    pub fn link_snapshots(&self) -> Vec<LinkSnapshot> {
+        self.devices
+            .iter()
+            .enumerate()
+            .map(|(dev, device)| device.link_snapshot(dev as i32 + 1))
+            .collect()
+    }
+
+    pub fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
+        let dev_index = Self::device_index(ifindex)?;
+        self.devices
+            .get(dev_index)
+            .map(|device| device.link_snapshot(ifindex))
+    }
+
+    pub fn has_device(&self, ifindex: i32) -> bool {
+        Self::device_index(ifindex).is_some_and(|dev_index| self.devices.get(dev_index).is_some())
+    }
+
+    pub fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
+        let dev_index = Self::device_index(ifindex)?;
+        self.devices
+            .get(dev_index)
+            .map(|device| device.link_send_snapshot())
+    }
+
+    /// Applies a validated link update.
+    ///
+    /// Returns `Ok(true)` when the effective device MTU changed and the
+    /// smoltcp interface must be rebuilt to refresh its cached capabilities.
+    pub fn update_device_link(
+        &mut self,
+        ifindex: i32,
+        update: LinkConfigUpdate,
+    ) -> Result<bool, LinuxError> {
+        let dev = Self::device_index(ifindex).ok_or(LinuxError::ENODEV)?;
+        let device = self.devices.get(dev).ok_or(LinuxError::ENODEV)?;
+        if let Some(name) = update.name.as_deref() {
+            crate::device::validate_interface_name(name)?;
+            if self
+                .devices
+                .iter()
+                .enumerate()
+                .any(|(other_dev, device)| other_dev != dev && device.name() == name)
+            {
+                return Err(LinuxError::EEXIST);
+            }
+        }
+        if let Some(mtu) = update.mtu {
+            device.link_kind().validate_mtu(mtu)?;
+        }
+
+        let is_mtu_changed = update.mtu.is_some_and(|mtu| mtu != device.mtu());
+        let effective_mtu = self.effective_mtu;
+
+        let LinkConfigUpdate { name, mtu, is_up } = update;
+        let device = &mut self.devices[dev];
+        if let Some(mtu) = mtu {
+            device.set_mtu(mtu)?;
+        }
+        if let Some(name) = name {
+            device.set_name(name);
+        }
+        if let Some(is_up) = is_up {
+            device.set_link_up(is_up);
+        }
+        if is_mtu_changed {
+            self.recompute_effective_mtu();
+        }
+        Ok(self.effective_mtu != effective_mtu)
+    }
+
+    fn device_index(ifindex: i32) -> Option<usize> {
+        (ifindex > 0).then_some((ifindex - 1) as usize)
+    }
+
     pub fn sync_netlink(&mut self, state: &RtnetlinkState) {
         for (dev_index, device) in self.devices.iter_mut().enumerate() {
             let ifindex = dev_index as i32 + 1;
-            let link = state.links.iter().find(|link| link.index == ifindex);
             let ipv4_addr = state
                 .addrs
                 .iter()
@@ -195,7 +301,7 @@ impl Router {
                     Some((super::from_smoltcp_ip_address(neigh.dst), hardware_addr))
                 })
                 .collect();
-            device.sync_netlink(link.map(|link| link.name.as_str()), ipv4_addr, &neighbors);
+            device.sync_netlink(ipv4_addr, &neighbors);
         }
 
         self.table.clear();
@@ -229,19 +335,23 @@ impl Router {
                 })
                 .map(super::from_smoltcp_ip_address)
                 .unwrap_or(filter.address());
-            let mut rule = Rule::new(
+            let rule = Rule::new(
                 filter,
                 route.gateway.map(super::from_smoltcp_ip_address),
                 dev,
                 src,
             );
-            rule.mtu = state
-                .links
-                .iter()
-                .find(|link| link.index == route.oif as i32)
-                .map_or(STANDARD_MTU, |link| link.mtu as usize);
             self.table.add_rule(rule);
         }
+    }
+
+    fn recompute_effective_mtu(&mut self) {
+        self.effective_mtu = self
+            .devices
+            .iter()
+            .map(|device| device.mtu().min(u16::MAX as usize))
+            .min()
+            .unwrap_or(STANDARD_MTU);
     }
 
     pub fn drain_rx_budgeted_into(
@@ -309,10 +419,7 @@ impl Router {
     }
 
     pub fn send_link_frame(&mut self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
-        if ifindex <= 0 {
-            return Err(KError::InvalidInput);
-        }
-        let dev_index = (ifindex - 1) as usize;
+        let dev_index = Self::device_index(ifindex).ok_or(KError::InvalidInput)?;
         let dev = self
             .devices
             .get_mut(dev_index)
@@ -632,7 +739,7 @@ impl smoltcp::phy::Device for Router {
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
         caps.medium = Medium::Ip;
-        caps.max_transmission_unit = STANDARD_MTU;
+        caps.max_transmission_unit = self.effective_mtu;
         caps.max_burst_size = Some(SOCKET_BUFFER_SIZE);
         caps
     }

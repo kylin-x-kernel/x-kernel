@@ -12,7 +12,6 @@
 
 use alloc::{
     collections::VecDeque,
-    string::String,
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -30,7 +29,7 @@ mod socket;
 mod tests;
 mod wire;
 
-pub(crate) use rtnetlink::{build_initial_state, init_route_state, link_state_for_ifindex};
+pub(crate) use rtnetlink::{build_initial_state, init_route_state};
 pub use socket::{NetlinkSocket, publish_kobject_uevent};
 pub(crate) const RT_TABLE_MAIN: u8 = wire::route::TABLE_MAIN;
 pub(crate) const RTN_UNICAST: u8 = wire::route::TYPE_UNICAST;
@@ -65,27 +64,8 @@ pub(super) const RTM_NEWNEIGH: u16 = 28;
 // pub(super) const RT_SCOPE_NOWHERE: u8 = 255;
 // pub(super) const RTM_NEWNEIGH_FAMILY: u8 = 0;
 
-pub(crate) const IFF_UP: u32 = 1 << 0;
-pub(super) const IFF_BROADCAST: u32 = 1 << 1;
-pub(super) const IFF_LOOPBACK: u32 = 1 << 3;
-pub(super) const IFF_RUNNING: u32 = 1 << 6;
-pub(super) const IFF_MULTICAST: u32 = 1 << 12;
-pub(super) const IFF_LOWER_UP: u32 = 1 << 16;
-
 pub(super) const ARPHRD_LOOPBACK: u16 = 772;
 pub(super) const ARPHRD_ETHER: u16 = 1;
-
-#[derive(Clone, Debug)]
-pub(crate) struct LinkState {
-    pub(crate) index: i32,
-    pub(crate) name: String,
-    pub(crate) flags: u32,
-    pub(crate) mtu: u32,
-    pub(crate) operstate: u8,
-    pub(crate) link_type: u16,
-    pub(crate) mac: [u8; 6],
-    pub(crate) broadcast: [u8; 6],
-}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AddrState {
@@ -123,7 +103,6 @@ pub(crate) struct NeighState {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RtnetlinkState {
-    pub(crate) links: Vec<LinkState>,
     pub(crate) addrs: Vec<AddrState>,
     pub(crate) routes: Vec<RouteState>,
     pub(crate) neighs: Vec<NeighState>,

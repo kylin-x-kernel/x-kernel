@@ -48,7 +48,7 @@ pub(crate) use transport::udp_err;
 pub use transport::{raw, tcp, udp};
 
 use crate::{
-    consts::{GATEWAY, IP, IP_PREFIX, STANDARD_MTU},
+    consts::{GATEWAY, IP, IP_PREFIX},
     device::{EthernetDevice, LoopbackDevice},
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     listen_table::ListenTable,
@@ -79,14 +79,12 @@ pub fn init_network() {
         lo_ip.address().into(),
     ));
 
-    let mut eth0_mac = None;
     let mut eth0_rx_poll = None;
     let eth0_ip = if let Some(handle) = net_devs.pop() {
         let device_id = handle.id();
         info!("  use NIC 0: {:?}", handle.name());
 
         let eth0_address = wire::MacAddress(handle.mac().0);
-        eth0_mac = Some(handle.mac().0);
         let eth0_ip = Ipv4Cidr::new(IP.parse().expect("Invalid IPv4 address"), IP_PREFIX);
 
         let eth0 = EthernetDevice::new("eth0".to_owned(), handle, eth0_ip);
@@ -120,9 +118,7 @@ pub fn init_network() {
     let netlink_state = netlink::build_initial_state(
         to_smoltcp_ipv4_cidr(lo_ip),
         eth0_ip.map(to_smoltcp_ipv4_cidr),
-        eth0_mac,
         GATEWAY.parse().ok(),
-        STANDARD_MTU as u32,
     );
     let service = Service::new(router);
     service.sync_netlink(&netlink_state);

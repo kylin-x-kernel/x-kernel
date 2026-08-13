@@ -23,7 +23,11 @@ use lazyinit::LazyInit;
 use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::ETHERNET_MAX_PENDING_PACKETS,
-    device::NetDevice as NetDeviceOps,
+    device::{
+        IF_OPER_DOWN, IF_OPER_UP, LINK_FLAG_BROADCAST, LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST,
+        LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind, LinkSendSnapshot, LinkSnapshot,
+        NetDevice as NetDeviceOps,
+    },
     ip::{IpAddress, Ipv4Cidr},
     packet,
     wire::{
@@ -251,8 +255,10 @@ struct PendingTxPacket {
 
 /// Ethernet device backed by a driver-provided NIC.
 pub struct EthernetDevice {
-    #[allow(dead_code)]
     name: String,
+    flags: u32,
+    mtu: usize,
+    operstate: u8,
     inner: ClassDevice<NetDeviceImpl>,
     neighbors: HashMap<IpAddress, Option<ArpNeighbor>>,
     ip: Ipv4Cidr,
@@ -289,6 +295,13 @@ impl EthernetDevice {
         };
         Self {
             name,
+            flags: LINK_FLAG_UP
+                | LINK_FLAG_RUNNING
+                | LINK_FLAG_BROADCAST
+                | LINK_FLAG_MULTICAST
+                | LINK_FLAG_LOWER_UP,
+            mtu: crate::consts::STANDARD_MTU,
+            operstate: IF_OPER_UP,
             inner,
             neighbors: HashMap::new(),
             ip,
@@ -387,9 +400,20 @@ impl EthernetDevice {
     }
 
     fn send_ipv4_packet_to(&mut self, ifindex: i32, dst: MacAddress, packet: &PacketBuf) {
+        if !self.is_link_up() {
+            return;
+        }
         let Some(ip_packet) = packet.network_packet() else {
             return;
         };
+        if ip_packet.len() > self.mtu {
+            warn!(
+                "Dropping IPv4 packet of {} bytes exceeding device MTU {}",
+                ip_packet.len(),
+                self.mtu
+            );
+            return;
+        }
         self.send_to(
             ifindex,
             dst,
@@ -580,11 +604,47 @@ impl NetDeviceOps for EthernetDevice {
         &self.name
     }
 
+    fn link_kind(&self) -> LinkKind {
+        LinkKind::Ethernet
+    }
+
+    fn mtu(&self) -> usize {
+        self.mtu
+    }
+
+    fn is_link_up(&self) -> bool {
+        self.flags & LINK_FLAG_UP != 0
+    }
+
+    fn link_snapshot(&self, ifindex: i32) -> LinkSnapshot {
+        LinkSnapshot {
+            ifindex,
+            name: self.name.clone(),
+            flags: self.flags,
+            mtu: self.mtu,
+            operstate: self.operstate,
+            kind: LinkKind::Ethernet,
+            hardware_addr: self.mac_addr().0,
+            broadcast_addr: [0xff; 6],
+        }
+    }
+
+    fn link_send_snapshot(&self) -> LinkSendSnapshot {
+        LinkSendSnapshot {
+            is_up: self.is_link_up(),
+            mtu: self.mtu,
+            hardware_addr: self.mac_addr().0,
+        }
+    }
+
     fn device_id(&self) -> Option<kdevice::DeviceId> {
         Some(self.inner.id())
     }
 
     fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> Option<PacketBuf> {
+        if !self.is_link_up() {
+            return None;
+        }
         loop {
             let rx_buf: NetBufHandle = match self.inner.recv() {
                 Ok(buf) => buf,
@@ -616,12 +676,22 @@ impl NetDeviceOps for EthernetDevice {
         mut packet: PacketBuf,
         timestamp: MonotonicInstant,
     ) -> bool {
+        if !self.is_link_up() {
+            return false;
+        }
         if !matches!(next_hop, IpAddress::Ipv4(_)) {
             warn!("Dropping IPv6 packet on IPv4-only Ethernet device");
             return false;
         }
 
         packet.set_ifindex(ifindex);
+        if packet
+            .network_packet()
+            .is_none_or(|network_packet| network_packet.len() > self.mtu)
+        {
+            warn!("Dropping packet exceeding Ethernet MTU {}", self.mtu);
+            return false;
+        }
         if next_hop.is_broadcast() || self.ip.broadcast().map(IpAddress::Ipv4) == Some(next_hop) {
             self.send_ipv4_packet_to(ifindex, MacAddress::BROADCAST, &packet);
             return false;
@@ -651,6 +721,9 @@ impl NetDeviceOps for EthernetDevice {
     }
 
     fn send_link_frame(&mut self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
+        if !self.is_link_up() {
+            return Err(LinuxError::ENETDOWN.into());
+        }
         let local_addr = self.mac_addr().0;
         self.inner.recycle_tx().map_err(map_dev_err)?;
         let mut tx_buf = self.inner.alloc_tx_buf(frame.len()).map_err(map_dev_err)?;
@@ -671,16 +744,27 @@ impl NetDeviceOps for EthernetDevice {
         Ok(())
     }
 
-    fn sync_netlink(
-        &mut self,
-        name: Option<&str>,
-        ipv4_addr: Option<Ipv4Cidr>,
-        neighbors: &[(IpAddress, [u8; 6])],
-    ) {
-        if let Some(name) = name {
-            self.name = name.into();
-        }
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
 
+    fn set_mtu(&mut self, mtu: usize) -> Result<(), LinuxError> {
+        LinkKind::Ethernet.validate_mtu(mtu)?;
+        self.mtu = mtu;
+        Ok(())
+    }
+
+    fn set_link_up(&mut self, is_up: bool) {
+        if is_up {
+            self.flags |= LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP;
+            self.operstate = IF_OPER_UP;
+        } else {
+            self.flags &= !(LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP);
+            self.operstate = IF_OPER_DOWN;
+        }
+    }
+
+    fn sync_netlink(&mut self, ipv4_addr: Option<Ipv4Cidr>, neighbors: &[(IpAddress, [u8; 6])]) {
         if let Some(ipv4_addr) = ipv4_addr {
             self.ip = ipv4_addr;
         }
