@@ -8,9 +8,6 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
-[package.metadata.cargo-shear]
-ignored = ["kcpu"]
-
 [features]
 fp-simd = ["kcpu/fp-simd"]
 rtc = ["rtc_driver/goldfish"]
@@ -30,6 +27,7 @@ kcpu_id_map = { workspace = true }
 karch = { workspace = true }
 kerrno = { workspace = true }
 kplat = { workspace = true }
+of = { workspace = true }
 rtc_driver = { workspace = true }
 timer_driver = { workspace = true }
 

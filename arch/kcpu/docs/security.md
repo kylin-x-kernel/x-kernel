@@ -359,6 +359,11 @@ $f0–$f31 的寄存器编号。
 5. **x86_64 不支持 XSAVE**：使用 FXSAVE/FXRSTOR，不支持 AVX 等
    扩展状态。依赖扩展状态的任务会丢失 YMM/ZMM 寄存器。
 
+6. **riscv64 hwprobe snapshot 依赖固件描述**：RISC-V capability snapshot
+   只报告 device tree 或内核地址布局中可确定的信息。未描述的 vendor id
+   和扩展按 Linux hwprobe ABI 返回 `0` / unknown，避免在 S-mode syscall
+   路径读取可能 fault 的 M-mode CSR。
+
 ## 审计清单
 
 修改 `kcpu` 时需验证：
@@ -373,6 +378,8 @@ $f0–$f31 的寄存器编号。
 - [ ] LoongArch64 新增指令模拟时验证操作码掩码和寄存器编号范围。
 - [ ] 修改 `copy_user.S` / `atomic_user.S` 后确认每条访存指令均有对应的 `_asm_extable` 条目。
 - [ ] 新增 per-CPU 变量时验证初始化顺序（percpu init → `init_trap`）。
+- [ ] 新增 RISC-V hwprobe key 时确认数据来源是否来自启动期 snapshot，
+      并同步 `ksyscall` 聚合/过滤语义。
 - [ ] 修改页表切换逻辑后验证 TLB 刷新语义是否正确。
 - [ ] 修改 `fp-simd` / `tls` feature 门控代码后验证所有架构的一致性。
 - [ ] 修改 x86_64 `orig_rax` 或 syscall 重启逻辑后验证 `excp.S` 中的 push/pop 序列与 `ExceptionContext` 布局一致。

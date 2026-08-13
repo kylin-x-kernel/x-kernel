@@ -9,6 +9,7 @@ mod macros;
 
 mod ctx;
 mod excp;
+mod hwprobe;
 
 pub mod instrs;
 pub use instrs as asm;
@@ -17,6 +18,10 @@ pub(crate) mod boot;
 pub mod userspace;
 
 pub use boot::init_trap;
+pub use hwprobe::{
+    RISCV_HWPROBE_UNKNOWN_KEY, hwprobe_aggregate_value, hwprobe_cpu_matches, hwprobe_key_is_known,
+    init_hwprobe_from_fdt,
+};
 
 pub use self::ctx::{
     ExceptionContext as TrapFrame, ExceptionContext, FpState, GeneralRegisters, TaskContext,

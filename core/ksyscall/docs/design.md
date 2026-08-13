@@ -46,6 +46,9 @@ core/ksyscall/
 │   │   ├── membarrier.rs
 │   │   └── mod.rs
 │   ├── sys.rs
+│   ├── arch/
+│   │   ├── mod.rs
+│   │   └── riscv_hwprobe.rs
 │   ├── task/
 │   │   ├── clone.rs
 │   │   ├── clone3.rs
@@ -119,6 +122,22 @@ ksyscall::dispatch_irq_syscall
 - `sys.rs`
   - `sethostname` 路由到当前 UTS namespace
   - `reboot` 校验 Linux magic/command 后路由到平台 power 接口
+- `arch/`
+  - 架构专属 system-info/control syscall adapter（`arch/mod.rs` 按架构
+    `cfg` 组织子模块，`lib.rs` 声明顶层 `mod arch;`，`sys.rs` 仅
+    `pub use crate::arch::*` 转发），避免为单个架构在顶层散落特例文件
+  - riscv64 `riscv_hwprobe` 解析 Linux `struct riscv_hwprobe`、用户
+    cpuset 和 `RISCV_HWPROBE_WHICH_CPUS`，再向 `kcpu` 查询每个 present
+    logical CPU 的 RISC-V capability snapshot；`ksyscall` 只做 ABI
+    copyin/copyout 和 cpuset 边界处理，hwprobe key 的取值、聚合与匹配
+    语义由 `kcpu` 的 hwprobe helper 提供
+  - riscv64 `riscv_flush_icache` 读取第 3 个参数 `flags`（Linux ABI 为 64
+    位：内核 syscall 定义 `uintptr_t`、libc 原型 `unsigned long`，故按
+    `usize` 处理并保留位检查覆盖全部 64 位——注意与 `riscv_hwprobe` 的 32 位
+    `unsigned int flags` 区分）：`SYS_RISCV_FLUSH_ICACHE_LOCAL` 只刷新本 hart
+    （`karch::flush_icache_all_local()`，等价单条 `fence.i`），其余保留位
+    返回 `EINVAL`；未置位 LOCAL 时调用 `karch::flush_icache_all()` 经 IPI
+    广播到所有 hart，保证自修改代码在任务迁移后仍可见
 - `time/timerfd.rs`
   - `timerfd_*`
   - owner 在 `kfd_objects::TimerFd`

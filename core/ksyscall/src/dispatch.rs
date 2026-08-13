@@ -18,6 +18,8 @@
 //! - `task`: Process, thread, signal, and pidfd management
 //! - `time`: Time and process-timer operations
 
+#[cfg(target_arch = "riscv64")]
+use kerrno::KResult;
 use kerrno::LinuxError;
 use khal::uspace::UserContext;
 use kprocess::UserThreadRuntimeAction;
@@ -27,6 +29,31 @@ use posix_mm::*;
 use posix_net::*;
 
 use crate::{io_mpx::*, ipc::*, sync::*, sys::*, task::*, time::*, vfs::*};
+
+/// `riscv_flush_icache(start, end, flags)` — synchronize the instruction cache.
+///
+/// The address range is ignored, matching Linux. `flags` selects the scope:
+/// [`SYS_RISCV_FLUSH_ICACHE_LOCAL`] flushes only the current hart (a single
+/// `fence.i`); otherwise the flush is broadcast to every hart via IPI so that
+/// self-modifying code stays visible after the task migrates. Reserved flag
+/// bits are rejected with [`EINVAL`], matching Linux
+/// `flags & ~SYS_RISCV_FLUSH_ICACHE_ALL` (the ABI declares `flags` as
+/// `uintptr_t`, so high bits participate in the check).
+///
+/// [`EINVAL`]: LinuxError::EINVAL
+#[cfg(target_arch = "riscv64")]
+fn sys_riscv_flush_icache(flags: usize) -> KResult<isize> {
+    const SYS_RISCV_FLUSH_ICACHE_LOCAL: usize = 1;
+    if flags & !SYS_RISCV_FLUSH_ICACHE_LOCAL != 0 {
+        return Err(LinuxError::EINVAL.into());
+    }
+    if flags & SYS_RISCV_FLUSH_ICACHE_LOCAL != 0 {
+        karch::flush_icache_all_local();
+    } else {
+        karch::flush_icache_all();
+    }
+    Ok(0)
+}
 
 /// Dispatches a syscall from the given user context.
 pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
@@ -599,7 +626,15 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         Sysno::getrandom => sys_getrandom(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
         Sysno::seccomp => sys_seccomp(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
         #[cfg(target_arch = "riscv64")]
-        Sysno::riscv_flush_icache => sys_riscv_flush_icache(),
+        Sysno::riscv_flush_icache => sys_riscv_flush_icache(uctx.arg2()),
+        #[cfg(target_arch = "riscv64")]
+        Sysno::riscv_hwprobe => sys_riscv_hwprobe(
+            uctx.arg0().into(),
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3().into(),
+            uctx.arg4() as _,
+        ),
 
         // sync
         Sysno::membarrier => sys_membarrier(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),

@@ -58,6 +58,8 @@ resource owners
 | T-08 | 非特权进程改变电源状态 | 高 | `reboot` 直接进入平台 power 接口 | 检查 privileged credential、Linux magic 和受支持命令集合 |
 | T-09 | 非特权进程修改墙钟 | 高 | wall-clock setter 直接更新 realtime 时钟关联 | `settimeofday` 与 `clock_settime` 在共享 setter 中检查 privileged credential，并拒绝把墙钟移到 CLOCK_MONOTONIC 之前 |
 | T-10 | `PR_SET_KEEPCAPS` 传入非法值或绕过锁定位 | 中 | `ctl.rs` 拒绝大于 1 的设置值，`kcred::Cred::keep_caps_enable()` / `keep_caps_disable()` 校验锁定位并通过 prepared credential 一次提交 |
+| T-11 | `riscv_hwprobe` 使用未校验用户 cpuset/pairs | 中 | 坏指针、超大 mask/pair_count 触发巨量内核分配（DoS）或破坏 ABI 结果 | 逐条 stream pairs（`read_vm`/`write_vm`，不做 bulk `Vec` 分配，超大 `pair_count` 只会走入未映射页返回 `EFAULT`）；`cpusetsize` 在 load 与 write 两端均封顶到 `cpumask_size()`；`flags` 非 `0`/`WHICH_CPUS` 返回 `EINVAL`，value 模式下用户 cpuset 与 online 求交后为空返回 `EINVAL`，`cpus == NULL && cpusetsize != 0` 返回 `EFAULT`；WHICH_CPUS 模式空 cpuset 视作全部 online，未知 key 写回 `key=-1,value=0` 并清空输出 cpuset；key 取值、聚合与匹配由 `kcpu` hwprobe helper 提供 |
+| T-12 | syscall 热路径临时读取不可靠 RISC-V 硬件状态 | 中 | S-mode 读取 M-mode CSR fault 或跨 CPU 能力不一致 | RISC-V 能力事实来源保存在 `kcpu` 的 FDT 初始化 snapshot；`ksyscall` 只按 selected CPU mask 聚合 |
 
 ## 审计清单
 
@@ -66,4 +68,5 @@ resource owners
 - [ ] 用户指针访问是否都通过现有封装类型？
 - [ ] 合并相近 syscall 路径时，是否分别遵守各自的参数个数和 flags ABI？
 - [ ] current process/thread helper 的调用上下文是否明确？
+- [ ] 架构专属 syscall 是否把硬件事实来源留在架构 owner，而不是在 adapter 中临时探测？
 - [ ] 如果修改了 owner 路由关系，是否同步更新本 crate 和 owner crate 文档？

@@ -45,6 +45,7 @@ arch/kcpu/
 │   │   ├── instrs.rs / copy_user.S   # user_copy
 │   │   ├── userspace.rs              # UserContext、enter_user
 │   │   ├── boot.rs                   # init_trap()
+│   │   ├── hwprobe.rs                # riscv_hwprobe 能力快照、聚合与 WHICH_CPUS 匹配 helper
 │   │   └── macros.rs                 # 汇编宏（LDR/STR、FP、异常表）
 │   └── loongarch64/
 │       ├── mod.rs                    # 导出、UnalignedError
@@ -154,6 +155,13 @@ TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换
   保持本 hart 的 `gp`。原因：handler 若在 trap 途中阻塞（如 page-fault
   后端），任务会在 PUSH 与 POP 之间迁移到另一 hart，此时从 trapframe 恢复
   旧 hart 的基址会污染 `current()`/`this_cpu_id()`。
+- **riscv64 hwprobe snapshot**：`init_hwprobe_from_fdt()` 在平台早期初始化
+  从 enabled CPU device-tree node 采集 `riscv,isa` /
+  `riscv,isa-extensions`、vendor/arch/impl id、`timebase-frequency`、
+  Zicboz block size 和当前用户虚拟地址上限。
+  `RiscvHwprobe` private provider 持有 per-CPU capability snapshot；
+  对外 helper 接收 Linux raw key，在 `kcpu` 内部完成取值、聚合和
+  `WHICH_CPUS` 匹配语义。syscall 路径不读取 M-mode CSR，也不重新解析设备树。
 - **`TaskContext::switch_to()`**：必须在中断关闭上下文调用。
   涉及页表切换、TLS 更新和 FP 状态保存/恢复。
 - **`UserContext::run()`**：禁用本地 IRQ 后进入用户态，返回后重新启用。

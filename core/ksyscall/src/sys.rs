@@ -29,6 +29,13 @@ use linux_raw_sys::{
 use osvm::{VirtPtr, write_vm_mem};
 use posix_types::{UserConstPtr, UserPtr};
 
+// Re-export the architecture-specific syscalls (e.g. `sys_riscv_hwprobe` on
+// riscv64) so dispatch can reach them via `crate::sys::*`. Gated to riscv64
+// because the module is empty on other architectures, where a glob import
+// would otherwise trip `-D unused-imports`.
+#[cfg(target_arch = "riscv64")]
+pub use crate::arch::*;
+
 /// Maximum hostname length in bytes accepted by `sethostname(2)`.
 ///
 /// Matches `UTS_LEN - 1` enforced by the UTS namespace owner
@@ -274,12 +281,5 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> KResult<isize> {
 /// Secure computing syscall for sandboxing (not fully implemented)
 pub fn sys_seccomp(_op: u32, _flags: u32, _args: *const ()) -> KResult<isize> {
     warn!("dummy sys_seccomp");
-    Ok(0)
-}
-
-/// Flush instruction cache (RISC-V architecture only)
-#[cfg(target_arch = "riscv64")]
-pub fn sys_riscv_flush_icache() -> KResult<isize> {
-    riscv::asm::fence_i();
     Ok(0)
 }

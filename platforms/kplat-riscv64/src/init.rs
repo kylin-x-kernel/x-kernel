@@ -22,6 +22,9 @@ impl BootHandler {
         irq_driver::riscv::init_current_cpu_context();
         console_driver::init_stdout_from_device_tree()
             .expect("failed to parse console from device tree");
+        if let Some(fdt) = of::fdt() {
+            kcpu::init_hwprobe_from_fdt(fdt);
+        }
         console_driver::register_input_irq_handler();
         #[cfg(feature = "rtc")]
         {

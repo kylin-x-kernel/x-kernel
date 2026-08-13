@@ -38,6 +38,11 @@ aarch64-cpu = "10.0"
 tock-registers = "0.9"
 
 [target.'cfg(any(target_arch = "riscv32", target_arch = "riscv64"))'.dependencies]
+kaddr_layout = { workspace = true }
+kbuild_config = { workspace = true }
+kcpu_id_map = { workspace = true }
+klazy = { workspace = true }
+of = { workspace = true }
 riscv = "0.14"
 
 [target.'cfg(target_arch = "loongarch64")'.dependencies]

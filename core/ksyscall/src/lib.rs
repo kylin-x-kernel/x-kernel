@@ -15,6 +15,7 @@ extern crate klogger;
 
 extern crate alloc;
 
+mod arch;
 mod dispatch;
 mod io_mpx;
 mod ipc;
