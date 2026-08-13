@@ -89,8 +89,10 @@ KExt4 核心 API 可能执行块设备 I/O、内存分配、JBD2 事务、checkp
 分配器和 journal 状态尚未可用的早期启动阶段调用。
 
 当前运行态 bridge 使用挂载级 `RwLock<kext4::Ext4Filesystem>`：只读调用可共享进入，
-mutation 仍由 write guard 串行化。VFS inode 组合持有的 ext4 private state 以 sleepable mutex
-保护磁盘 metadata working state 和 delayed-allocation extents；resident lifecycle 完全归 KVFS。
+mutation 仍由 write guard 串行化。VFS inode 组合持有的 ext4 private state 以 per-inode
+`RwLock<Ext4InodeState>` 保护磁盘 metadata working state 和 delayed-allocation extents：
+只读路径（`size`/`stat`/`metadata_snapshot`/delalloc 查询）通过 `with_state` 以 read guard
+共享进入，mutation 通过 `update_state` 以 write guard 独占；resident lifecycle 完全归 KVFS。
 调用者不能假设 allocator 或 journal
 已有 per-group 级别的并行修改。可写文件打开计数由
 KVFS `VfsInode` 拥有，bridge 只在 release callback 中读取它。

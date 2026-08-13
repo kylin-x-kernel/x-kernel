@@ -259,7 +259,7 @@ impl InodeAttributeOperations for Inode {
     }
 
     fn owner(&self) -> (u32, u32) {
-        (self.core_inode.uid(), self.core_inode.gid())
+        self.core_inode.owner()
     }
 
     fn link_count(&self) -> u64 {
@@ -1062,8 +1062,9 @@ impl AddressSpaceOperations for Inode {
         if len > self.max_file_size() {
             return Err(VfsError::FileTooLarge);
         }
-        let is_visible_shrink = len < self.core_inode.size();
-        let is_disk_shrink = len < self.core_inode.disk_size();
+        let (visible_size, disk_size) = self.core_inode.sizes();
+        let is_visible_shrink = len < visible_size;
+        let is_disk_shrink = len < disk_size;
         {
             let mut fs = self.fs.lock();
             fs.prepare_regular_inode_truncate(&self.core_inode, len, current_ext4_timestamp())

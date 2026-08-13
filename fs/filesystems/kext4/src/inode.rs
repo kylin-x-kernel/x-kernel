@@ -12,7 +12,7 @@ use crate::{
     file::RegularWriteMetadata,
     jbd2::{JournalCredits, JournalHandle},
     superblock::replace_metadata_access_bytes,
-    sync::{self, Mutex},
+    sync::{self, RwLock},
 };
 
 const EXT4_ENCODED_DEV_MAJOR_MAX: u32 = 0x0fff;
@@ -483,6 +483,57 @@ struct Ext4InodeState {
     reserved_data_blocks: u64,
 }
 
+impl Ext4InodeState {
+    /// Returns the inode owner's user ID.
+    ///
+    /// No locking here: only valid while the caller already holds the inode-state
+    /// lock, e.g. inside [`Ext4Inode::with_state`] or [`Ext4Inode::update_state`].
+    pub fn uid(&self) -> u32 {
+        self.metadata.uid
+    }
+
+    /// Returns the inode owner's group ID.
+    ///
+    /// No locking here: only valid while the caller already holds the inode-state
+    /// lock, e.g. inside [`Ext4Inode::with_state`] or [`Ext4Inode::update_state`].
+    pub fn gid(&self) -> u32 {
+        self.metadata.gid
+    }
+
+    /// Returns the VFS-visible inode size in bytes.
+    ///
+    /// No locking here: only valid while the caller already holds the inode-state
+    /// lock, e.g. inside [`Ext4Inode::with_state`] or [`Ext4Inode::update_state`].
+    pub fn size(&self) -> u64 {
+        self.visible_size
+    }
+
+    /// Returns the ext4 on-disk inode size in bytes.
+    ///
+    /// This is the kext4 equivalent of Linux ext4's `i_disksize`. No locking
+    /// here: only valid while the caller already holds the inode-state lock, e.g.
+    /// inside [`Ext4Inode::with_state`] or [`Ext4Inode::update_state`].
+    pub fn disk_size(&self) -> u64 {
+        self.metadata.disk_size
+    }
+
+    /// Returns whether the inode carries the ext4 immutable flag.
+    ///
+    /// No locking here: only valid while the caller already holds the inode-state
+    /// lock, e.g. inside [`Ext4Inode::with_state`] or [`Ext4Inode::update_state`].
+    pub fn is_immutable(&self) -> bool {
+        self.metadata.flags & disk_inode::EXT4_IMMUTABLE_FL != 0
+    }
+
+    /// Returns whether the inode carries the ext4 append-only flag.
+    ///
+    /// No locking here: only valid while the caller already holds the inode-state
+    /// lock, e.g. inside [`Ext4Inode::with_state`] or [`Ext4Inode::update_state`].
+    pub fn is_append_only(&self) -> bool {
+        self.metadata.flags & disk_inode::EXT4_APPEND_FL != 0
+    }
+}
+
 /// A transient, lightweight inode attribute snapshot.
 ///
 /// This is the kext4-side equivalent of Linux `struct kstat`: it is produced
@@ -521,7 +572,7 @@ pub struct Ext4InodeStat {
 /// count.
 pub struct Ext4Inode {
     number: InodeNumber,
-    state: Mutex<Ext4InodeState>,
+    state: RwLock<Ext4InodeState>,
 }
 
 impl Ext4Inode {
@@ -529,7 +580,7 @@ impl Ext4Inode {
         let visible_size = metadata.disk_size;
         Self {
             number,
-            state: Mutex::new(Ext4InodeState {
+            state: RwLock::new(Ext4InodeState {
                 metadata,
                 visible_size,
                 delayed_extents: BTreeMap::new(),
@@ -538,16 +589,75 @@ impl Ext4Inode {
         }
     }
 
+    /// Holds the inode-state read lock while running `f`, with zero cloning.
+    ///
+    /// This is the kext4 equivalent of Linux `down_read(i_data_sem)`: the
+    /// caller observes a consistent inode state without copying it.
+    ///
+    /// # Locking
+    ///
+    /// The underlying `RwLock` is **not** reentrant. The closure `f` must not
+    /// call any method on the same [`Ext4Inode`] that acquires the inode-state
+    /// lock (e.g. [`with_state`](Self::with_state),
+    /// [`update_state`](Self::update_state), [`size`](Self::size),
+    /// [`disk_size`](Self::disk_size), [`set_size`](Self::set_size), etc.),
+    /// otherwise the current thread will self-deadlock.
+    ///
+    /// # Writer fairness
+    ///
+    /// Unlike Linux `i_data_sem` (which is backed by `rwsem` and throttles new
+    /// readers while a writer is pending, so truncate/writeback writers cannot
+    /// be starved), the underlying [`ksync::RwLock`] is **reader-preference**:
+    /// a new reader is admitted as long as no writer currently *holds* the
+    /// lock, regardless of how many writers are *waiting*. A waiting writer is
+    /// only woken by the last reader's release or by another writer's release.
+    ///
+    /// Practical consequence: under sustained concurrent read load (e.g. many
+    /// page-fault readers), a writer such as truncate ([`update_state`]) may be
+    /// deferred indefinitely, whereas Linux would let it through. Code paths
+    /// that rely on writer progress for forward advancement must therefore not
+    /// assume Linux-grade fairness on this lock.
+    fn with_state<R>(&self, f: impl FnOnce(&Ext4InodeState) -> R) -> R {
+        let state = sync::read_lock(&self.state);
+        f(&state)
+    }
+
+    /// Holds the inode-state write lock while running `f`.
+    ///
+    /// This is the kext4 equivalent of Linux `down_write(i_data_sem)`: the
+    /// caller may mutate the inode state under exclusive access. The closure
+    /// return value is passed through to the caller.
+    ///
+    /// # Locking
+    ///
+    /// The underlying `RwLock` is **not** reentrant. The closure `f` must not
+    /// call any method on the same [`Ext4Inode`] that acquires the inode-state
+    /// lock (e.g. [`with_state`](Self::with_state),
+    /// [`update_state`](Self::update_state), [`size`](Self::size),
+    /// [`disk_size`](Self::disk_size), [`set_size`](Self::set_size), etc.),
+    /// otherwise the current thread will self-deadlock.
+    ///
+    /// # Writer fairness
+    ///
+    /// See [`with_state`](Self::with_state#writer-fairness): unlike Linux
+    /// `i_data_sem`, the underlying lock is reader-preference, so this writer
+    /// can be deferred indefinitely under sustained read load and must not be
+    /// used on a path that assumes Linux-grade writer fairness.
+    fn update_state<R>(&self, f: impl FnOnce(&mut Ext4InodeState) -> R) -> R {
+        let mut state = sync::write_lock(&self.state);
+        f(&mut state)
+    }
+
     fn metadata_snapshot(&self) -> Ext4InodeMetadata {
-        sync::lock(&self.state).metadata.clone()
+        self.with_state(|state| state.metadata.clone())
     }
 
     fn with_metadata<T>(&self, read: impl FnOnce(&Ext4InodeMetadata) -> T) -> T {
-        read(&sync::lock(&self.state).metadata)
+        self.with_state(|state| read(&state.metadata))
     }
 
     fn publish_metadata(&self, metadata: Ext4InodeMetadata) -> Ext4Result<()> {
-        sync::lock(&self.state).metadata = metadata;
+        self.update_state(|state| state.metadata = metadata);
         Ok(())
     }
 
@@ -568,12 +678,17 @@ impl Ext4Inode {
 
     /// Returns the inode owner's user ID.
     pub fn uid(&self) -> u32 {
-        self.with_metadata(|metadata| metadata.uid)
+        self.with_state(|state| state.uid())
     }
 
     /// Returns the inode owner's group ID.
     pub fn gid(&self) -> u32 {
-        self.with_metadata(|metadata| metadata.gid)
+        self.with_state(|state| state.gid())
+    }
+
+    /// Returns the inode owner's `(uid, gid)` pair under one state lock.
+    pub fn owner(&self) -> (u32, u32) {
+        self.with_state(|state| (state.uid(), state.gid()))
     }
 
     /// Returns the ext4 on-disk inode size in bytes.
@@ -582,103 +697,115 @@ impl Ext4Inode {
     /// may expose a newer visible `i_size` while buffered data is still waiting
     /// for ordered writeback.
     pub fn disk_size(&self) -> u64 {
-        self.with_metadata(|metadata| metadata.disk_size)
+        self.with_state(|state| state.disk_size())
     }
 
     /// Returns the VFS-visible inode size in bytes.
     pub fn size(&self) -> u64 {
-        sync::lock(&self.state).visible_size
+        self.with_state(|state| state.size())
+    }
+
+    /// Returns the `(visible_size, disk_size)` pair under one state lock.
+    pub fn sizes(&self) -> (u64, u64) {
+        self.with_state(|state| (state.size(), state.disk_size()))
     }
 
     /// Updates the VFS-visible inode size without changing `i_disksize`.
     pub fn set_size(&self, size: u64) {
-        sync::lock(&self.state).visible_size = size;
+        self.update_state(|state| state.visible_size = size);
     }
 
     /// Captures the generic inode attributes under one state lock.
     pub fn stat(&self) -> Ext4InodeStat {
-        let state = sync::lock(&self.state);
-        let metadata = &state.metadata;
-        Ext4InodeStat {
-            mode: metadata.mode,
-            uid: metadata.uid,
-            gid: metadata.gid,
-            size: state.visible_size,
-            blocks: metadata.blocks,
-            rdev: device_id_from_metadata(metadata),
-            links_count: metadata.links_count,
-            atime: metadata.atime,
-            ctime: metadata.ctime,
-            mtime: metadata.mtime,
-        }
+        self.with_state(|state| {
+            let metadata = &state.metadata;
+            Ext4InodeStat {
+                mode: metadata.mode,
+                uid: metadata.uid,
+                gid: metadata.gid,
+                size: state.visible_size,
+                blocks: metadata.blocks,
+                rdev: device_id_from_metadata(metadata),
+                links_count: metadata.links_count,
+                atime: metadata.atime,
+                ctime: metadata.ctime,
+                mtime: metadata.mtime,
+            }
+        })
     }
 
     /// Updates permission bits in the single resident inode state.
     pub fn set_permission(&self, permission: u16) {
-        let mut state = sync::lock(&self.state);
-        state.metadata.mode =
-            (state.metadata.mode & disk_inode::S_IFMT) | (permission & !disk_inode::S_IFMT);
+        self.update_state(|state| {
+            state.metadata.mode =
+                (state.metadata.mode & disk_inode::S_IFMT) | (permission & !disk_inode::S_IFMT);
+        });
     }
 
     /// Updates the owner in the single resident inode state.
     pub fn set_owner(&self, uid: u32, gid: u32) {
-        let mut state = sync::lock(&self.state);
-        state.metadata.uid = uid;
-        state.metadata.gid = gid;
+        self.update_state(|state| {
+            state.metadata.uid = uid;
+            state.metadata.gid = gid;
+        });
     }
 
     /// Updates the link count in the single resident inode state.
     pub fn set_links_count(&self, link_count: u64) {
         let link_count = u16::try_from(link_count).unwrap_or(u16::MAX);
-        sync::lock(&self.state).metadata.links_count = link_count;
+        self.update_state(|state| state.metadata.links_count = link_count);
     }
 
     /// Increments the resident link count.
     pub fn increment_links_count(&self) {
-        let mut state = sync::lock(&self.state);
-        state.metadata.links_count = state.metadata.links_count.saturating_add(1);
+        self.update_state(|state| {
+            state.metadata.links_count = state.metadata.links_count.saturating_add(1);
+        });
     }
 
     /// Decrements the resident link count.
     pub fn decrement_links_count(&self) {
-        let mut state = sync::lock(&self.state);
-        debug_assert_ne!(state.metadata.links_count, 0);
-        state.metadata.links_count = state.metadata.links_count.saturating_sub(1);
+        self.update_state(|state| {
+            debug_assert_ne!(state.metadata.links_count, 0);
+            state.metadata.links_count = state.metadata.links_count.saturating_sub(1);
+        });
     }
 
     /// Updates the access time in the single resident inode state.
     pub fn set_atime(&self, atime: Ext4Timestamp) {
-        sync::lock(&self.state).metadata.atime = atime;
+        self.update_state(|state| state.metadata.atime = atime);
     }
 
     /// Updates the modification time in the single resident inode state.
     pub fn set_mtime(&self, mtime: Ext4Timestamp) {
-        sync::lock(&self.state).metadata.mtime = mtime;
+        self.update_state(|state| state.metadata.mtime = mtime);
     }
 
     /// Updates the status-change time in the single resident inode state.
     pub fn set_ctime(&self, ctime: Ext4Timestamp) {
-        sync::lock(&self.state).metadata.ctime = ctime;
+        self.update_state(|state| state.metadata.ctime = ctime);
     }
 
     /// Updates generic allocated-block accounting in the resident inode.
     pub fn set_allocated_bytes(&self, bytes: u64) {
         debug_assert_eq!(bytes % 512, 0);
-        sync::lock(&self.state).metadata.blocks = bytes / 512;
+        self.update_state(|state| state.metadata.blocks = bytes / 512);
     }
 
     /// Adds allocated bytes to the resident block count.
     pub fn add_allocated_bytes(&self, bytes: u64) {
         debug_assert_eq!(bytes % 512, 0);
-        let mut state = sync::lock(&self.state);
-        state.metadata.blocks = state.metadata.blocks.saturating_add(bytes / 512);
+        self.update_state(|state| {
+            state.metadata.blocks = state.metadata.blocks.saturating_add(bytes / 512);
+        });
     }
 
     /// Subtracts allocated bytes from the resident block count.
     pub fn subtract_allocated_bytes(&self, bytes: u64) {
         debug_assert_eq!(bytes % 512, 0);
-        let mut state = sync::lock(&self.state);
-        state.metadata.blocks = state.metadata.blocks.saturating_sub(bytes / 512);
+        self.update_state(|state| {
+            state.metadata.blocks = state.metadata.blocks.saturating_sub(bytes / 512);
+        });
     }
 
     /// Returns the raw ext4 block accounting value.
@@ -693,12 +820,18 @@ impl Ext4Inode {
 
     /// Returns whether the inode carries the ext4 immutable flag.
     pub fn is_immutable(&self) -> bool {
-        self.flags() & disk_inode::EXT4_IMMUTABLE_FL != 0
+        self.with_state(|state| state.is_immutable())
     }
 
     /// Returns whether the inode carries the ext4 append-only flag.
     pub fn is_append_only(&self) -> bool {
-        self.flags() & disk_inode::EXT4_APPEND_FL != 0
+        self.with_state(|state| state.is_append_only())
+    }
+
+    /// Returns the ext4 inode attribute flags `(is_immutable, is_append_only)`
+    /// under one state lock.
+    pub fn inode_attr_flags(&self) -> (bool, bool) {
+        self.with_state(|state| (state.is_immutable(), state.is_append_only()))
     }
 
     pub(crate) fn block_mapping_root(&self) -> (u32, [u8; disk_inode::INODE_BLOCK_BYTES]) {
@@ -824,124 +957,127 @@ impl Ext4Inode {
     }
 
     fn unreserved_delalloc_extents(&self, start: u64, end: u64) -> Vec<(u64, u64)> {
-        let state = sync::lock(&self.state);
-        let mut extents = Vec::new();
-        let mut cursor = start;
-        for (&extent_start, &extent_end) in state.delayed_extents.range(..end) {
-            if extent_end <= cursor {
-                continue;
+        self.with_state(|state| {
+            let mut extents = Vec::new();
+            let mut cursor = start;
+            for (&extent_start, &extent_end) in state.delayed_extents.range(..end) {
+                if extent_end <= cursor {
+                    continue;
+                }
+                if extent_start > cursor {
+                    extents.push((cursor, extent_start.min(end)));
+                }
+                cursor = cursor.max(extent_end);
+                if cursor >= end {
+                    break;
+                }
             }
-            if extent_start > cursor {
-                extents.push((cursor, extent_start.min(end)));
+            if cursor < end {
+                extents.push((cursor, end));
             }
-            cursor = cursor.max(extent_end);
-            if cursor >= end {
-                break;
-            }
-        }
-        if cursor < end {
-            extents.push((cursor, end));
-        }
-        extents
+            extents
+        })
     }
 
     fn insert_unreserved_delalloc_extents(&self, extents: &[(u64, u64)]) -> Ext4Result<u64> {
-        let mut state = sync::lock(&self.state);
-        let mut previous_end = None;
-        let newly_reserved = extents.iter().try_fold(
-            0u64,
-            |total, &(extent_start, extent_end)| -> Ext4Result<u64> {
-                if extent_start >= extent_end
-                    || previous_end.is_some_and(|previous_end| previous_end > extent_start)
-                {
-                    return Err(Ext4Error::InvalidDelayedAllocationState);
-                }
-                let overlaps_left = state
-                    .delayed_extents
-                    .range(..extent_end)
-                    .next_back()
-                    .is_some_and(|(_, reserved_end)| *reserved_end > extent_start);
-                if overlaps_left {
-                    return Err(Ext4Error::InvalidDelayedAllocationState);
-                }
-                previous_end = Some(extent_end);
-                total
-                    .checked_add(
-                        extent_end
-                            .checked_sub(extent_start)
-                            .ok_or(Ext4Error::Overflow)?,
-                    )
-                    .ok_or(Ext4Error::Overflow)
-            },
-        )?;
-        let new_reserved_data_blocks = state
-            .reserved_data_blocks
-            .checked_add(newly_reserved)
-            .ok_or(Ext4Error::Overflow)?;
+        self.update_state(|state| -> Ext4Result<u64> {
+            let mut previous_end = None;
+            let newly_reserved = extents.iter().try_fold(
+                0u64,
+                |total, &(extent_start, extent_end)| -> Ext4Result<u64> {
+                    if extent_start >= extent_end
+                        || previous_end.is_some_and(|previous_end| previous_end > extent_start)
+                    {
+                        return Err(Ext4Error::InvalidDelayedAllocationState);
+                    }
+                    let overlaps_left = state
+                        .delayed_extents
+                        .range(..extent_end)
+                        .next_back()
+                        .is_some_and(|(_, reserved_end)| *reserved_end > extent_start);
+                    if overlaps_left {
+                        return Err(Ext4Error::InvalidDelayedAllocationState);
+                    }
+                    previous_end = Some(extent_end);
+                    total
+                        .checked_add(
+                            extent_end
+                                .checked_sub(extent_start)
+                                .ok_or(Ext4Error::Overflow)?,
+                        )
+                        .ok_or(Ext4Error::Overflow)
+                },
+            )?;
+            let new_reserved_data_blocks = state
+                .reserved_data_blocks
+                .checked_add(newly_reserved)
+                .ok_or(Ext4Error::Overflow)?;
 
-        for &(extent_start, extent_end) in extents {
-            let left = state
-                .delayed_extents
-                .range(..extent_start)
-                .next_back()
-                .filter(|(_, reserved_end)| **reserved_end == extent_start)
-                .map(|(&reserved_start, _)| reserved_start);
-            let right = state.delayed_extents.remove(&extent_end);
-            let merged_start = left.unwrap_or(extent_start);
-            if let Some(left) = left {
-                state.delayed_extents.remove(&left);
+            for &(extent_start, extent_end) in extents {
+                let left = state
+                    .delayed_extents
+                    .range(..extent_start)
+                    .next_back()
+                    .filter(|(_, reserved_end)| **reserved_end == extent_start)
+                    .map(|(&reserved_start, _)| reserved_start);
+                let right = state.delayed_extents.remove(&extent_end);
+                let merged_start = left.unwrap_or(extent_start);
+                if let Some(left) = left {
+                    state.delayed_extents.remove(&left);
+                }
+                state
+                    .delayed_extents
+                    .insert(merged_start, right.unwrap_or(extent_end));
             }
-            state
-                .delayed_extents
-                .insert(merged_start, right.unwrap_or(extent_end));
-        }
-        state.reserved_data_blocks = new_reserved_data_blocks;
-        Ok(newly_reserved)
+            state.reserved_data_blocks = new_reserved_data_blocks;
+            Ok(newly_reserved)
+        })
     }
 
     fn remove_delalloc_extent(&self, start: u64, end: u64) -> Ext4Result<u64> {
         if start >= end {
             return Ok(0);
         }
-        let mut state = sync::lock(&self.state);
-        let overlapping = state
-            .delayed_extents
-            .range(..end)
-            .filter(|(extent_start, extent_end)| **extent_end > start && **extent_start < end)
-            .map(|(&extent_start, &extent_end)| (extent_start, extent_end))
-            .collect::<Vec<_>>();
-        let released = overlapping.iter().try_fold(
-            0u64,
-            |total, &(extent_start, extent_end)| -> Ext4Result<u64> {
+        self.update_state(|state| -> Ext4Result<u64> {
+            let overlapping = state
+                .delayed_extents
+                .range(..end)
+                .filter(|(extent_start, extent_end)| **extent_end > start && **extent_start < end)
+                .map(|(&extent_start, &extent_end)| (extent_start, extent_end))
+                .collect::<Vec<_>>();
+            let released = overlapping.iter().try_fold(
+                0u64,
+                |total, &(extent_start, extent_end)| -> Ext4Result<u64> {
+                    let released_start = extent_start.max(start);
+                    let released_end = extent_end.min(end);
+                    total
+                        .checked_add(
+                            released_end
+                                .checked_sub(released_start)
+                                .ok_or(Ext4Error::Overflow)?,
+                        )
+                        .ok_or(Ext4Error::Overflow)
+                },
+            )?;
+            let new_reserved_data_blocks = state
+                .reserved_data_blocks
+                .checked_sub(released)
+                .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
+
+            for (extent_start, extent_end) in overlapping {
+                state.delayed_extents.remove(&extent_start);
                 let released_start = extent_start.max(start);
                 let released_end = extent_end.min(end);
-                total
-                    .checked_add(
-                        released_end
-                            .checked_sub(released_start)
-                            .ok_or(Ext4Error::Overflow)?,
-                    )
-                    .ok_or(Ext4Error::Overflow)
-            },
-        )?;
-        let new_reserved_data_blocks = state
-            .reserved_data_blocks
-            .checked_sub(released)
-            .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
-
-        for (extent_start, extent_end) in overlapping {
-            state.delayed_extents.remove(&extent_start);
-            let released_start = extent_start.max(start);
-            let released_end = extent_end.min(end);
-            if extent_start < released_start {
-                state.delayed_extents.insert(extent_start, released_start);
+                if extent_start < released_start {
+                    state.delayed_extents.insert(extent_start, released_start);
+                }
+                if released_end < extent_end {
+                    state.delayed_extents.insert(released_end, extent_end);
+                }
             }
-            if released_end < extent_end {
-                state.delayed_extents.insert(released_end, extent_end);
-            }
-        }
-        state.reserved_data_blocks = new_reserved_data_blocks;
-        Ok(released)
+            state.reserved_data_blocks = new_reserved_data_blocks;
+            Ok(released)
+        })
     }
 
     fn remove_delalloc_from(&self, first_block: u64) -> Ext4Result<u64> {
@@ -949,36 +1085,38 @@ impl Ext4Inode {
     }
 
     fn clear_delalloc_reservations(&self) -> u64 {
-        let mut state = sync::lock(&self.state);
-        let reserved = state.reserved_data_blocks;
-        state.delayed_extents.clear();
-        state.reserved_data_blocks = 0;
-        reserved
+        self.update_state(|state| {
+            let reserved = state.reserved_data_blocks;
+            state.delayed_extents.clear();
+            state.reserved_data_blocks = 0;
+            reserved
+        })
     }
 
     fn reserved_data_blocks(&self) -> u64 {
-        sync::lock(&self.state).reserved_data_blocks
+        self.with_state(|state| state.reserved_data_blocks)
     }
 
     pub(crate) fn has_delalloc_reservations(&self) -> bool {
-        sync::lock(&self.state).reserved_data_blocks != 0
+        self.with_state(|state| state.reserved_data_blocks != 0)
     }
 
     pub(crate) fn next_delalloc_extent(&self, start: u64) -> Option<(u64, u64)> {
-        let state = sync::lock(&self.state);
-        if let Some((_, extent_end)) = state
-            .delayed_extents
-            .range(..=start)
-            .next_back()
-            .filter(|(_, extent_end)| **extent_end > start)
-        {
-            return Some((start, *extent_end));
-        }
-        state
-            .delayed_extents
-            .range(start..)
-            .next()
-            .map(|(extent_start, extent_end)| (*extent_start, *extent_end))
+        self.with_state(|state| {
+            if let Some((_, extent_end)) = state
+                .delayed_extents
+                .range(..=start)
+                .next_back()
+                .filter(|(_, extent_end)| **extent_end > start)
+            {
+                return Some((start, *extent_end));
+            }
+            state
+                .delayed_extents
+                .range(start..)
+                .next()
+                .map(|(extent_start, extent_end)| (*extent_start, *extent_end))
+        })
     }
 }
 
@@ -2514,5 +2652,291 @@ mod tests {
 
     fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
         bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// QEMU unittest variants of the inode-state lock tests.
+///
+/// These run under `make UNITTEST=y UNITTEST_CRATE=kext4 run` (kernel build,
+/// `target_os = "none"`), so they use the `unittest` assertion macros and,
+/// for the concurrency cases, the kernel scheduler (`ktask`) and
+/// synchronization primitives (`ksync`) instead of `std::thread`.
+#[cfg(unittest)]
+mod unittests {
+    use alloc::vec::Vec;
+
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+
+    fn test_inode(metadata: Ext4InodeMetadata) -> Ext4Inode {
+        Ext4Inode::new(InodeNumber::new(12), metadata)
+    }
+
+    fn regular_inode_metadata() -> Ext4InodeMetadata {
+        Ext4InodeMetadata {
+            kind: InodeKind::RegularFile,
+            mode: disk_inode::S_IFREG | 0o644,
+            uid: 0,
+            gid: 0,
+            disk_size: 0,
+            blocks: 0,
+            flags: disk_inode::EXT4_EXTENTS_FL,
+            block: [0; disk_inode::INODE_BLOCK_BYTES],
+            file_acl: 0,
+            inline_xattr: alloc::vec::Vec::new(),
+            generation: 1,
+            links_count: 1,
+            atime: timestamp(0, 0),
+            ctime: timestamp(0, 0),
+            mtime: timestamp(0, 0),
+        }
+    }
+
+    const fn timestamp(seconds: i64, nanos: u32) -> Ext4Timestamp {
+        Ext4Timestamp::new(seconds, nanos)
+    }
+
+    #[def_test]
+    fn with_state_exposes_consistent_size_pair_and_passes_result_through() {
+        let inode = test_inode(regular_inode_metadata());
+        inode.update_state(|state| {
+            state.visible_size = 4096;
+            state.metadata.disk_size = 2048;
+        });
+
+        let (size, disk_size) = inode.with_state(|state| (state.size(), state.disk_size()));
+
+        assert_eq!(size, 4096);
+        assert_eq!(disk_size, 2048);
+    }
+
+    #[def_test]
+    fn inode_state_accessors_reflect_metadata_fields() {
+        let mut metadata = regular_inode_metadata();
+        metadata.uid = 7;
+        metadata.gid = 9;
+        metadata.flags = disk_inode::EXT4_IMMUTABLE_FL | disk_inode::EXT4_APPEND_FL;
+        let inode = test_inode(metadata);
+
+        inode.update_state(|state| {
+            state.visible_size = 100;
+            state.metadata.disk_size = 200;
+        });
+
+        let (uid, gid, size, disk_size, immutable, append_only) = inode.with_state(|state| {
+            (
+                state.uid(),
+                state.gid(),
+                state.size(),
+                state.disk_size(),
+                state.is_immutable(),
+                state.is_append_only(),
+            )
+        });
+        assert_eq!(uid, 7);
+        assert_eq!(gid, 9);
+        assert_eq!(size, 100);
+        assert_eq!(disk_size, 200);
+        assert!(immutable);
+        assert!(append_only);
+    }
+
+    #[def_test]
+    fn update_state_publishes_mutation_to_later_readers() {
+        let inode = test_inode(regular_inode_metadata());
+
+        inode.update_state(|state| {
+            state.visible_size = 1234;
+            state.metadata.disk_size = 5678;
+        });
+        inode.update_state(|state| state.metadata.uid = 42);
+
+        let (size, disk_size, uid) =
+            inode.with_state(|state| (state.size(), state.disk_size(), state.uid()));
+        assert_eq!(size, 1234);
+        assert_eq!(disk_size, 5678);
+        assert_eq!(uid, 42);
+    }
+
+    /// The three tests below exercise real `RwLock` behavior and therefore
+    /// need the kernel scheduler (`ktask`) and kernel sync primitives
+    /// (`ksync`), which only exist when building for the kernel
+    /// (`target_os = "none"`). `make UNITTEST=y` builds exactly that target.
+    #[cfg(target_os = "none")]
+    mod concurrent {
+        use alloc::sync::Arc;
+        use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
+        use ksync::Semaphore;
+        use ktask::spawn;
+        use unittest::{assert, assert_eq, def_test};
+
+        use super::*;
+
+        #[def_test]
+        fn with_state_allows_concurrent_readers() {
+            const READER_COUNT: usize = 4;
+
+            let inode = Arc::new(test_inode(regular_inode_metadata()));
+            let gate = Arc::new(Semaphore::new(0));
+            let entered = Arc::new(AtomicUsize::new(0));
+            let max_active_readers = Arc::new(AtomicUsize::new(0));
+            let release_all = Arc::new(AtomicBool::new(false));
+
+            let mut readers = Vec::new();
+            for _ in 0..READER_COUNT {
+                let inode = Arc::clone(&inode);
+                let gate = Arc::clone(&gate);
+                let entered = Arc::clone(&entered);
+                let max_active_readers = Arc::clone(&max_active_readers);
+                let release_all = Arc::clone(&release_all);
+                readers.push(spawn(move || {
+                    gate.acquire();
+                    inode.with_state(|_state| {
+                        let active = entered.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_active_readers.fetch_max(active, Ordering::SeqCst);
+                        // Stay inside the read lock, spinning with a yield,
+                        // until the main thread has observed that several
+                        // readers hold the shared lock at the same time. This
+                        // deterministically proves concurrent readers. Never
+                        // block (deschedule) while holding the lock: a reader
+                        // parked in a semaphore `block_on` races the
+                        // Running -> Blocked transition against a cross-CPU
+                        // wake, which can strand it in Blocked forever and
+                        // hang the test (observed on SMP builds).
+                        while !release_all.load(Ordering::Acquire) {
+                            core::hint::spin_loop();
+                            ktask::yield_now();
+                        }
+                    });
+                }));
+            }
+            for _ in 0..READER_COUNT {
+                gate.release();
+            }
+            // Wait until every reader is inside `with_state` and at least two
+            // of them hold the read lock at once, then let all of them leave.
+            while entered.load(Ordering::Acquire) < READER_COUNT
+                || max_active_readers.load(Ordering::Acquire) < 2
+            {
+                ktask::yield_now();
+            }
+            release_all.store(true, Ordering::Release);
+            for reader in readers {
+                reader.join();
+            }
+
+            assert_eq!(entered.load(Ordering::SeqCst), READER_COUNT);
+            assert!(
+                max_active_readers.load(Ordering::SeqCst) > 1,
+                "with_state must admit concurrent readers"
+            );
+        }
+
+        #[def_test]
+        fn update_state_serializes_concurrent_writers() {
+            const WRITER_COUNT: usize = 4;
+
+            let inode = Arc::new(test_inode(regular_inode_metadata()));
+            let gate = Arc::new(Semaphore::new(0));
+            let active_writers = Arc::new(AtomicUsize::new(0));
+            let max_active_writers = Arc::new(AtomicUsize::new(0));
+
+            let mut writers = Vec::new();
+            for _ in 0..WRITER_COUNT {
+                let inode = Arc::clone(&inode);
+                let gate = Arc::clone(&gate);
+                let active_writers = Arc::clone(&active_writers);
+                let max_active_writers = Arc::clone(&max_active_writers);
+                writers.push(spawn(move || {
+                    gate.acquire();
+                    inode.update_state(|state| {
+                        state.visible_size += 1;
+                        let active = active_writers.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_active_writers.fetch_max(active, Ordering::SeqCst);
+                        ktask::yield_now();
+                        active_writers.fetch_sub(1, Ordering::SeqCst);
+                    });
+                }));
+            }
+            for _ in 0..WRITER_COUNT {
+                gate.release();
+            }
+            for writer in writers {
+                writer.join();
+            }
+
+            assert_eq!(
+                max_active_writers.load(Ordering::SeqCst),
+                1,
+                "update_state must be write-exclusive"
+            );
+            assert_eq!(
+                inode.size(),
+                WRITER_COUNT as u64,
+                "serialized writers must not lose updates"
+            );
+        }
+
+        #[def_test]
+        fn with_state_never_tears_paired_size_update() {
+            const WRITER_COUNT: usize = 1;
+            const READER_COUNT: usize = 3;
+            const ITERATIONS: u64 = 10_000;
+
+            let inode = Arc::new(test_inode(regular_inode_metadata()));
+            let gate = Arc::new(Semaphore::new(0));
+            let generation = Arc::new(AtomicU64::new(0));
+            let torn = Arc::new(AtomicBool::new(false));
+
+            let mut workers = Vec::new();
+            for _ in 0..WRITER_COUNT {
+                let inode = Arc::clone(&inode);
+                let gate = Arc::clone(&gate);
+                let generation = Arc::clone(&generation);
+                workers.push(spawn(move || {
+                    gate.acquire();
+                    for _ in 0..ITERATIONS {
+                        let generation = generation.fetch_add(1, Ordering::SeqCst) + 1;
+                        // Truncate/writeback publish visible_size and disk_size
+                        // as one paired update; a reader inside with_state must
+                        // never observe a torn (size, disk_size) combination.
+                        inode.update_state(|state| {
+                            state.visible_size = generation;
+                            state.metadata.disk_size = generation;
+                        });
+                    }
+                }));
+            }
+            for _ in 0..READER_COUNT {
+                let inode = Arc::clone(&inode);
+                let gate = Arc::clone(&gate);
+                let torn = Arc::clone(&torn);
+                workers.push(spawn(move || {
+                    gate.acquire();
+                    for _ in 0..ITERATIONS {
+                        inode.with_state(|state| {
+                            if state.size() != state.disk_size() {
+                                torn.store(true, Ordering::SeqCst);
+                            }
+                        });
+                    }
+                }));
+            }
+
+            for _ in 0..(WRITER_COUNT + READER_COUNT) {
+                gate.release();
+            }
+            for worker in workers {
+                worker.join();
+            }
+
+            assert!(
+                !torn.load(Ordering::SeqCst),
+                "with_state must never expose a torn (size, disk_size) pair"
+            );
+            assert_eq!(generation.load(Ordering::SeqCst), ITERATIONS);
+        }
     }
 }

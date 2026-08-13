@@ -534,7 +534,7 @@ impl Ext4Filesystem {
             JournalLocation::None => None,
             JournalLocation::Internal { inode } => Some(MountedJournal::new(
                 filesystem.load_internal_journal(inode, &mut system_zones)?,
-                filesystem.layout.block_count,
+                filesystem.layout().block_count,
             )?),
             JournalLocation::External { .. } => {
                 return Err(Ext4Error::Unsupported(UnsupportedKind::ExternalJournal));
@@ -3476,7 +3476,7 @@ mod tests {
 
         let bytes = fs::read(&image).expect("read generated dir_index image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
-        let block_device: Arc<dyn BlockDevice> = device.clone();
+        let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4Filesystem::mount(block_device).expect("mount dir_index namespace image");
         let root = filesystem.root_inode().expect("read root inode");
@@ -7140,7 +7140,7 @@ mod tests {
     fn install_test_internal_journal(filesystem: &mut Ext4Filesystem, sequence: u32) {
         let journal_block = FilesystemBlock::new(16);
         let journal_blocks = 1024;
-        assert!(journal_block.get() + u64::from(journal_blocks) <= filesystem.layout.block_count);
+        assert!(journal_block.get() + u64::from(journal_blocks) <= filesystem.layout().block_count);
         if !filesystem.is_system_zone_block(journal_block) {
             let mut zones = filesystem.system_zones.clone();
             add_system_zone_to(
@@ -7148,7 +7148,7 @@ mod tests {
                 journal_block.get(),
                 u64::from(journal_blocks),
                 None,
-                filesystem.layout.block_count,
+                filesystem.layout().block_count,
             )
             .unwrap();
             filesystem.system_zones = zones;
@@ -7183,7 +7183,7 @@ mod tests {
                     }],
                     block_count: journal_blocks,
                 },
-                filesystem.layout.block_count,
+                filesystem.layout().block_count,
             )
             .unwrap(),
         );

@@ -16,6 +16,7 @@ default = []
 bitflags.workspace = true
 block = { workspace = true }
 ktime_types = { workspace = true }
+unittest = { workspace = true }
 
 [target.'cfg(target_os = "none")'.dependencies]
 ksync = { workspace = true }

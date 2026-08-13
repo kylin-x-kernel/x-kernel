@@ -29,15 +29,20 @@ const EXT4_ROOT_INO: u32 = 2;
 const EVICTION_BATCH_BLOCKS: u32 = 256;
 
 fn node_flags_from_core_inode(inode: &Ext4Inode) -> NodeFlags {
+    let (immutable, append_only) = inode.inode_attr_flags();
     let mut flags = NodeFlags::empty();
-    flags.set(NodeFlags::IMMUTABLE, inode.is_immutable());
-    flags.set(NodeFlags::APPEND_ONLY, inode.is_append_only());
+    flags.set(NodeFlags::IMMUTABLE, immutable);
+    flags.set(NodeFlags::APPEND_ONLY, append_only);
     flags
 }
 
 /// Ext4 filesystem implementation backed by the checked KExt4 core.
 pub struct Ext4Filesystem {
     inner: RwLock<KExt4Core>,
+    /// Mount-invariant block size, cached at mount time.
+    ///
+    /// This mirrors Linux `s_blocksize`: it is fixed once and never changes,
+    /// so it is cached without taking the filesystem lock on every access.
     block_size: u32,
     extent_max_file_size: u64,
     legacy_max_file_size: u64,

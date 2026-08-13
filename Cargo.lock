@@ -2283,6 +2283,7 @@ dependencies = [
  "ksync",
  "ktask",
  "ktime_types",
+ "unittest",
 ]
 
 [[package]]
