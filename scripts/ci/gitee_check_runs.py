@@ -702,6 +702,49 @@ def resolve_failed_stage_log(stage_name, ci_result, failed_stage_logs, root_ws):
     return strip_ansi_escapes(detail)
 
 
+def _runtime_arch_from_stage(stage_name):
+    """Parse arch from 'Runtime Test: kplat-<arch>' (arch is the suffix)."""
+    prefix = "Runtime Test: kplat-"
+    name = (stage_name or "").strip()
+    if not name.startswith(prefix):
+        return None
+    arch = name[len(prefix):].strip()
+    return arch or None
+
+
+def _runtime_failed_cases_markdown(stage_name, details_url, root_ws, stage_log_url=""):
+    """Best-effort failed-case links from harness last_run.json.
+
+    ``root_ws`` follows the Jenkins manifest contract (``ciRootDir()``, i.e.
+    ``<workspace>/.ci``). ``runtime_failed_cases`` also accepts a workspace
+    root; both layouts are tried when locating last_run.json.
+    """
+    if not root_ws:
+        return ""
+    try:
+        from runtime_failed_cases import collect_runtime_failed_case_markdown
+    except ImportError:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        if script_dir not in sys.path:
+            sys.path.insert(0, script_dir)
+        try:
+            from runtime_failed_cases import collect_runtime_failed_case_markdown
+        except ImportError:
+            return ""
+    try:
+        return collect_runtime_failed_case_markdown(
+            stage_name,
+            root_ws=root_ws,
+            build_url=details_url or "",
+            stage_log_url=stage_log_url or "",
+            arch=_runtime_arch_from_stage(stage_name),
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort enrichment only
+        print(f"WARN: runtime failed-case links skipped: {exc}", file=sys.stderr)
+        return ""
+
+
+
 def build_stage_check_run_output(stage_name, ci_result, failed_stage_logs, details_url,
                                  root_ws=None):
     """生成 finish 时传给 Gitee 的 output 字段。"""
@@ -719,13 +762,25 @@ def build_stage_check_run_output(stage_name, ci_result, failed_stage_logs, detai
         if base else ""
     )
 
+    case_links = ""
+    if status == "failed":
+        case_links = _runtime_failed_cases_markdown(
+            stage_name, details_url, root_ws, stage_log_url=log_url,
+        )
+
     if status == "passed":
         summary = f"## ✅ {stage_name} 通过\n\n[查看 Jenkins Stages]({stages_url})"
     elif status == "failed":
-        summary = (
-            f"## ❌ {stage_name} 失败\n\n{detail}\n\n"
-            f"[阶段日志]({log_url}) | [Jenkins Stages]({stages_url})"
-        )
+        if case_links:
+            summary = (
+                f"## ❌ {stage_name} 失败\n\n{case_links}\n\n"
+                f"[Jenkins Stages]({stages_url})"
+            )
+        else:
+            summary = (
+                f"## ❌ {stage_name} 失败\n\n{detail}\n\n"
+                f"[阶段日志]({log_url}) | [Jenkins Stages]({stages_url})"
+            )
     elif status == "skipped":
         summary = f"## ⏭ {stage_name} 已跳过\n\n{detail}\n\n[查看 Jenkins Stages]({stages_url})"
     else:

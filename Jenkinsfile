@@ -1032,10 +1032,10 @@ def resolveHeadSha() {
     return null
 }
 
-def resolveGiteeCheckRunsScript() {
+def resolveCiScript(String scriptName) {
     def candidates = [
-        "${ciSourceDir()}/scripts/ci/gitee_check_runs.py",
-        'scripts/ci/gitee_check_runs.py',
+        "${ciSourceDir()}/scripts/ci/${scriptName}",
+        "scripts/ci/${scriptName}",
     ]
     for (path in candidates) {
         if (fileExists(path)) {
@@ -1043,6 +1043,92 @@ def resolveGiteeCheckRunsScript() {
         }
     }
     return null
+}
+
+def resolveGiteeCheckRunsScript() {
+    return resolveCiScript('gitee_check_runs.py')
+}
+
+def resolveRuntimeFailedCasesScript() {
+    return resolveCiScript('runtime_failed_cases.py')
+}
+
+/** 从 Runtime Test stage 名解析 arch；必须属于 runtimeTestArchitectures()。 */
+def runtimeArchFromStageName(String stageName) {
+    def prefix = 'Runtime Test: kplat-'
+    if (!stageName?.startsWith(prefix)) {
+        return null
+    }
+    def arch = stageName.substring(prefix.length())
+    return runtimeTestArchitectures().contains(arch) ? arch : null
+}
+
+/** Runtime Test 失败时，从 harness last_run.json 生成失败 case 的 artifact 链接。 */
+def formatRuntimeFailedCasesMarkdown(String stageName) {
+    def scriptPath = resolveRuntimeFailedCasesScript()
+    if (!scriptPath) {
+        echo "formatRuntimeFailedCasesMarkdown: runtime_failed_cases.py not found"
+        return ''
+    }
+    def arch = runtimeArchFromStageName(stageName)
+    if (!arch) {
+        return ''
+    }
+    // Prefer workspace root; script also accepts ciRootDir() (.ci) for Check Run.
+    def rootWs = rootWorkspace()
+    if (!rootWs?.trim()) {
+        return ''
+    }
+    def stageLogUrl = env.BUILD_URL
+        ? "${env.BUILD_URL}artifact/.ci/stage-logs/${sanitizeStageFileName(stageName)}.log"
+        : ''
+    def outFile = "${ciGiteeRoot()}/failed-cases-${sanitizeStageFileName(stageName)}.md"
+    try {
+        // Write to a file: python exits 1 when there is no summary/failed case, and
+        // combining returnStdout+returnStatus is awkward in Pipeline.
+        def status = withEnv([
+            "_CI_FAILED_CASES_SCRIPT=${scriptPath}",
+            "_CI_ROOT_WS=${rootWs}",
+            "_CI_ARCH=${arch}",
+            "_CI_STAGE_NAME=${stageName}",
+            "_CI_BUILD_URL=${env.BUILD_URL ?: ''}",
+            "_CI_STAGE_LOG_URL=${stageLogUrl}",
+            "_CI_OUT_FILE=${outFile}",
+            "_CI_GITEE_ROOT=${ciGiteeRoot()}",
+        ]) {
+            sh(
+                label: "Format failed cases: ${stageName}",
+                script: '''#!/bin/bash
+set +e
+install -d -m 0700 "${_CI_GITEE_ROOT}"
+python3 "${_CI_FAILED_CASES_SCRIPT}" \
+  --root-ws "${_CI_ROOT_WS}" \
+  --arch "${_CI_ARCH}" \
+  --stage-name "${_CI_STAGE_NAME}" \
+  --build-url "${_CI_BUILD_URL}" \
+  --stage-log-url "${_CI_STAGE_LOG_URL}" \
+  --suite ci-test \
+  --format markdown \
+  >"${_CI_OUT_FILE}" 2>"${_CI_OUT_FILE}.err"
+status=$?
+if [ -s "${_CI_OUT_FILE}.err" ]; then
+  echo "runtime_failed_cases stderr:" >&2
+  cat "${_CI_OUT_FILE}.err" >&2
+fi
+exit "${status}"
+''',
+                returnStatus: true
+            )
+        }
+        if (status == 0 && fileExists(outFile)) {
+            return readFile(outFile).trim()
+        }
+        echo "formatRuntimeFailedCasesMarkdown: script exit ${status} for ${stageName}"
+        return ''
+    } catch (e) {
+        echo "formatRuntimeFailedCasesMarkdown skipped for ${stageName}: ${e.message}"
+        return ''
+    }
 }
 
 def giteeCheckIdsFile() {
@@ -1475,12 +1561,24 @@ ${rows}
     }
 
     def errorBlocks = stageOrder.findAll { name ->
-        normalizedResults[name].status == 'failed' &&
-            (failedStageLogs[name]?.trim() || normalizedResults[name].detail?.trim())
+        normalizedResults[name].status == 'failed'
     }.collect { name ->
-        def detail = (failedStageLogs[name]?.trim() ?: normalizedResults[name].detail).take(4000)
-        "\n### ❌ ${name}\n\n<details>\n<summary>查看错误详情</summary>\n\n" +
-            '```' + "\n${detail}\n" + '```' + "\n</details>"
+        def caseLinks = formatRuntimeFailedCasesMarkdown(name)
+        def detail = (failedStageLogs[name]?.trim() ?: normalizedResults[name].detail ?: '').take(4000)
+        def body
+        if (caseLinks) {
+            body = caseLinks
+            if (detail) {
+                body += "\n\n<details>\n<summary>查看阶段日志片段</summary>\n\n" +
+                    '```' + "\n${detail}\n" + '```' + "\n</details>"
+            }
+        } else if (detail) {
+            body = "<details>\n<summary>查看错误详情</summary>\n\n" +
+                '```' + "\n${detail}\n" + '```' + "\n</details>"
+        } else {
+            body = normalizedResults[name].detail ?: '请查看 Jenkins Stages 详情。'
+        }
+        "\n### ❌ ${name}\n\n${body}"
     }.join('\n')
 
     def details = coverageBlock + docBlock + (errorBlocks ? "${errorBlocks}\n" : '')
