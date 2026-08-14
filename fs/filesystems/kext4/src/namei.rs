@@ -66,6 +66,7 @@ impl Ext4Credits {
     const INODE_FREE: u32 = 8;
     const INODE_UPDATE: u32 = 1;
     const ORPHAN_LINK_UPDATE: u32 = 2;
+    const SYMLINK_DATA_BLOCK: u32 = 1;
 
     fn create(
         _filesystem: &Ext4Filesystem,
@@ -105,7 +106,8 @@ impl Ext4Credits {
                 + Self::DIRECTORY_BLOCK_UPDATE
                 + Self::dirent_insert(directory, insert)
                 + Self::DIRECTORY_BLOCK_GROW
-                + Self::INODE_UPDATE,
+                + Self::INODE_UPDATE
+                + Self::SYMLINK_DATA_BLOCK,
         )
     }
 
@@ -1098,7 +1100,7 @@ impl Ext4Filesystem {
 
         // Get conservative credits for this truncation scope, reusing the tree
         // already collected above to avoid a second full tree walk.
-        let credits = self.extent_truncate_metadata_credits_from(&collected, new_blocks)?;
+        let credits = self.extent_truncate_metadata_credits_from(inode, &collected, new_blocks)?;
         // Fast check above confirmed there are data blocks, so a zero-credit
         // result means the extent tree is inconsistent with the inode block
         // count — refuse to proceed.
@@ -1218,7 +1220,13 @@ impl Ext4Filesystem {
             .get_mut(..target.len())
             .ok_or(Ext4Error::Corrupt(CorruptKind::Truncated))?
             .copy_from_slice(target);
-        self.write_contiguous_blocks(block, 1, &bytes)?;
+        // Write the symlink target as a journaled metadata buffer, aligned
+        // with Linux ext4_init_symlink_block() which uses ext4_bread +
+        // journaled buffer_head. The buffer is checkpointed to the home
+        // block during transaction commit, making the content recoverable
+        // on journal replay.
+        let access = self.metadata_io.create_access(block, handle)?;
+        replace_metadata_access_bytes(&access, bytes)?;
 
         self.insert_extent_mapping(
             symlink,

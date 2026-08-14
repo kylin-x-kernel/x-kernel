@@ -40,7 +40,7 @@ impl Ext4Filesystem {
     ) -> Ext4Result<u32> {
         self.ensure_extent_mutation_supported(inode)?;
         let collected = self.collect_extent_tree(inode)?;
-        self.extent_truncate_metadata_credits_from(&collected, new_blocks)
+        self.extent_truncate_metadata_credits_from(inode, &collected, new_blocks)
     }
 
     /// Credit bound variant that reuses an already-collected extent tree,
@@ -49,6 +49,7 @@ impl Ext4Filesystem {
     /// and the truncation itself.
     pub(crate) fn extent_truncate_metadata_credits_from(
         &self,
+        inode: &Ext4Inode,
         collected: &CollectedExtentTree,
         new_blocks: LogicalBlock,
     ) -> Ext4Result<u32> {
@@ -68,7 +69,11 @@ impl Ext4Filesystem {
         }
 
         let mut released_groups = BTreeSet::new();
+        let mut released_data_blocks: u32 = 0;
         for extent in &released_extents {
+            released_data_blocks = released_data_blocks
+                .checked_add(extent.len)
+                .ok_or(Ext4Error::Overflow)?;
             self.collect_extent_block_groups(*extent, &mut released_groups)?;
         }
         for block in &collected.metadata_blocks {
@@ -85,11 +90,25 @@ impl Ext4Filesystem {
         let released_group_count =
             u32::try_from(released_groups.len()).map_err(|_| Ext4Error::Overflow)?;
 
+        // Directory and block-mapped symlink data blocks are journaled
+        // metadata buffers, so releasing them emits one revoke per released
+        // block (see `release_extent_data_blocks`), mirroring Linux
+        // get_default_free_blocks_flags() (S_ISDIR/S_ISLNK =>
+        // METADATA|FORGET). Regular-file data blocks carry no revoke cost.
+        let released_data_revoke_credits = if self.extent_data_blocks_need_metadata_release(inode)
+            && self.journal_supports_revoke()
+        {
+            released_data_blocks
+        } else {
+            0
+        };
+
         // New tree blocks may each need a create record plus allocator bitmap,
         // descriptor, and superblock access. Released data blocks only add one
-        // bitmap and descriptor target per physical group; old tree blocks also
-        // need one revoke credit each. Extra headroom satisfies allocator entry
-        // checks even after all distinct target credits have been consumed.
+        // bitmap and descriptor target per physical group; old tree blocks and
+        // journaled directory/symlink data blocks also need one revoke credit
+        // each. Extra headroom satisfies allocator entry checks even after all
+        // distinct target credits have been consumed.
         INODE_ROOT_CREDITS
             .checked_add(
                 new_tree_blocks
@@ -97,6 +116,7 @@ impl Ext4Filesystem {
                     .ok_or(Ext4Error::Overflow)?,
             )
             .and_then(|credits| credits.checked_add(old_tree_blocks))
+            .and_then(|credits| credits.checked_add(released_data_revoke_credits))
             .and_then(|credits| {
                 released_group_count
                     .checked_mul(ALLOCATOR_BLOCKS_PER_GROUP)
@@ -577,7 +597,7 @@ impl Ext4Filesystem {
         };
 
         for extent in released {
-            self.release_extent_data_blocks(extent, handle)?;
+            self.release_extent_data_blocks(inode, extent, handle)?;
         }
         let delta = metadata_delta
             .checked_sub(i128::from(released_data_blocks))
@@ -927,7 +947,7 @@ impl Ext4Filesystem {
             return Ok(());
         };
         for extent in state.released_data {
-            self.release_extent_data_blocks(extent, handle)?;
+            self.release_extent_data_blocks(inode, extent, handle)?;
         }
         for block in state.metadata_blocks {
             if self.journal_supports_revoke() {
@@ -1213,15 +1233,52 @@ impl Ext4Filesystem {
         Ok(block)
     }
 
+    /// Whether this inode's extent-mapped data blocks are journaled metadata
+    /// buffers, so freeing them must go through the metadata forget/revoke
+    /// path instead of the plain data-block release.
+    ///
+    /// This is the single source of truth for that policy, mirroring Linux's
+    /// get_default_free_blocks_flags() (S_ISDIR/S_ISLNK/EA_INODE => METADATA |
+    /// FORGET). Both the journal-credit estimate
+    /// (extent_truncate_metadata_credits_from) and the actual release
+    /// (release_extent_data_blocks) consult it, so extending the kind set or
+    /// adding a journal-data mount mode cannot desynchronize the two.
+    fn extent_data_blocks_need_metadata_release(&self, inode: &Ext4Inode) -> bool {
+        matches!(
+            inode.kind(),
+            crate::inode::InodeKind::Directory | crate::inode::InodeKind::Symlink
+        )
+    }
+
     fn release_extent_data_blocks(
         &mut self,
+        inode: &Ext4Inode,
         extent: MutableExtent,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<()> {
         let start = extent.physical.get();
         let end = extent.physical_end()?;
         for block in start..end {
-            self.release_allocated_block(PhysicalBlock::new(block), handle)?;
+            // Directory blocks and block-mapped symlink targets are journaled
+            // metadata buffers even though they are mapped as data extents.
+            // Linux's get_default_free_blocks_flags() treats S_ISLNK the same
+            // as S_ISDIR; fold both kinds in so any pending metadata checkpoint
+            // is revoked or forgotten before the blocks can be reallocated.
+            // Otherwise a quick create/delete/recreate cycle can reallocate a
+            // block whose old metadata checkpoint is still pending and abort
+            // the journal.
+            if self.extent_data_blocks_need_metadata_release(inode) {
+                if self.journal_supports_revoke() {
+                    self.release_allocated_metadata_block(PhysicalBlock::new(block), handle)?;
+                } else {
+                    self.release_allocated_metadata_block_without_revoke(
+                        PhysicalBlock::new(block),
+                        handle,
+                    )?;
+                }
+            } else {
+                self.release_allocated_block(PhysicalBlock::new(block), handle)?;
+            }
         }
         Ok(())
     }

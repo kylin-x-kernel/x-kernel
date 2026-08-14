@@ -48,6 +48,9 @@ mod tracking;
 #[cfg(feature = "tracking")]
 pub use tracking::*;
 
+// Exactly one allocator feature must be selected. Kernel builds get it
+// through kfeat; host test builds pass it explicitly (e.g.
+// `cargo test -p kext4 --features kalloc/slab`).
 #[cfg(not(any(feature = "slab", feature = "buddy", feature = "tlsf")))]
 compile_error!("kalloc requires one of the allocator features: slab, buddy, or tlsf");
 

@@ -9,9 +9,9 @@ homepage.workspace = true
 tee = []
 dice = []
 default = []
-tlsf = []
-slab = []
-buddy = []
+tlsf = ["alloc-engine/tlsf"]
+slab = ["alloc-engine/slab"]
+buddy = ["alloc-engine/buddy"]
 tracking = ["dep:backtrace"]
 
 [dependencies]

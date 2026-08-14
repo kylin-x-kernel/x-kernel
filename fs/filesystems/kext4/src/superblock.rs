@@ -1653,7 +1653,9 @@ mod tests {
     use std::{
         format, fs,
         path::{Path, PathBuf},
+        println,
         process::{Command, Stdio},
+        string::{String, ToString},
         sync::Mutex,
     };
 
@@ -1661,7 +1663,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        BlockCount, BlockMappingFlags, Ext4Inode, Ext4SyncIntent, LogicalBlock, PhysicalBlock,
+        BlockCount, BlockMappingFlags, DirectoryFileType, Ext4Inode, Ext4SyncIntent, LogicalBlock,
+        PhysicalBlock,
         extent::ExtentMappingState,
         file::RegularWriteMetadata,
         inode::InodeInitialization,
@@ -3254,11 +3257,305 @@ mod tests {
             .expect("read block-mapped symlink");
         assert_eq!(read, target.len());
         assert_eq!(read_target, target);
+        // An oversized buffer (e.g. a full page passed by `read_folio`) must
+        // be truncated to `i_size`, never exposing block padding after the
+        // target.
+        let mut oversized_target = vec![0xFFu8; 4096];
+        let oversized_read = filesystem
+            .read_link_at(&created, 0, &mut oversized_target)
+            .expect("read block-mapped symlink with oversized buffer");
+        assert_eq!(oversized_read, target.len());
+        assert_eq!(&oversized_target[..oversized_read], &target[..]);
         drop(filesystem);
 
         fs::write(&image, device.bytes()).expect("write block symlink image");
         run_e2fsck_read_only(&e2fsck, &image);
         fs::remove_file(image).expect("remove namei-block-symlink-round-trip image");
+    }
+
+    #[test]
+    fn symlink_delete_releases_data_block_through_metadata_forget() {
+        // Deleting a block-mapped symlink must free its target block through
+        // the journaled metadata release path (forget + revoke), not the plain
+        // data path. The freed block must become immediately reusable, the
+        // orphan list must drain, and e2fsck must accept the final image.
+        let mke2fs = require_e2fsprogs("mke2fs");
+        let e2fsck = require_e2fsprogs("e2fsck");
+        let image = temporary_image_path("symlink-delete-metadata-forget");
+        create_journaled_linear_namespace_test_image(&mke2fs, &image);
+
+        let bytes = fs::read(&image).expect("read journaled namespace image");
+        let device = Arc::new(LinuxImageDevice::new(bytes));
+        let mut filesystem =
+            Ext4Filesystem::mount(device.clone()).expect("mount journaled namespace image");
+        let root = filesystem.root_inode().expect("read root inode");
+        let timestamp = crate::Ext4Timestamp::new(144, 0);
+        filesystem
+            .metadata_journal()
+            .expect("journaled test image has an internal journal");
+        assert!(filesystem.journal_supports_revoke());
+        let free_blocks_before = filesystem.superblock().free_blocks_count();
+        let free_inodes_before = filesystem.superblock().free_inodes_count();
+
+        let target = b"/opt/package/lib/libremoved.so.1.0.0-symlink-delete-forget-target-block";
+        let symlink = filesystem
+            .create_symlink(&root, b"removed-link", target, 0, 0, timestamp)
+            .expect("create block-mapped symlink");
+        assert_eq!(symlink.kind(), InodeKind::Symlink);
+        assert_eq!(
+            filesystem.superblock().free_blocks_count(),
+            free_blocks_before - 1
+        );
+
+        filesystem
+            .unlink(&root, b"removed-link", &symlink, timestamp)
+            .expect("unlink block-mapped symlink");
+        filesystem
+            .evict_unlinked_inode(&symlink, timestamp)
+            .expect("evict unlinked symlink");
+
+        assert_eq!(
+            filesystem
+                .lookup(&root, "removed-link")
+                .expect("lookup removed symlink"),
+            None
+        );
+        assert_eq!(filesystem.orphan_head(), None);
+        assert_eq!(
+            filesystem.superblock().free_blocks_count(),
+            free_blocks_before
+        );
+        assert_eq!(
+            filesystem.superblock().free_inodes_count(),
+            free_inodes_before
+        );
+        assert!(
+            !filesystem
+                .metadata_journal()
+                .expect("journal present")
+                .is_aborted(),
+            "metadata forget release aborted the journal"
+        );
+
+        // The forgotten block must be cleanly reusable right away.
+        let replacement = filesystem
+            .create_symlink(&root, b"replacement-link", target, 0, 0, timestamp)
+            .expect("recreate symlink on forgotten block");
+        assert_eq!(
+            filesystem.superblock().free_blocks_count(),
+            free_blocks_before - 1
+        );
+        let mut buffer = vec![0u8; target.len()];
+        let read = filesystem
+            .read_link_at(&replacement, 0, &mut buffer)
+            .expect("read recreated symlink target");
+        assert_eq!(read, target.len());
+        assert_eq!(&buffer[..read], target);
+
+        filesystem
+            .sync_filesystem()
+            .expect("sync journaled namespace image");
+        drop(filesystem);
+        fs::write(&image, device.bytes()).expect("write journaled namespace image");
+        run_e2fsck_read_only(&e2fsck, &image);
+        fs::remove_file(image).expect("remove journaled namespace image");
+    }
+
+    #[test]
+    fn symlink_data_block_recovers_after_journal_replay() {
+        // A crash after the block-mapped symlink commit but before the journal
+        // checkpoint must leave the image recoverable: replay restores the
+        // directory entry, inode, and target data block with the exact target.
+        let mke2fs = require_e2fsprogs("mke2fs");
+        let e2fsck = require_e2fsprogs("e2fsck");
+        let image = temporary_image_path("symlink-journal-replay");
+        create_journaled_linear_namespace_test_image(&mke2fs, &image);
+
+        let bytes = fs::read(&image).expect("read journaled namespace image");
+        let device = Arc::new(LinuxImageDevice::new(bytes));
+        let timestamp = crate::Ext4Timestamp::new(144, 0);
+        let target = b"/opt/package/lib/libreplay.so.1.0.0-symlink-journal-replay-target-block";
+        {
+            let mut filesystem =
+                Ext4Filesystem::mount(device.clone()).expect("mount journaled namespace image");
+            let root = filesystem.root_inode().expect("read root inode");
+            let symlink = filesystem
+                .create_symlink(&root, b"replay-link", target, 0, 0, timestamp)
+                .expect("create block-mapped symlink");
+            let mut buffer = vec![0u8; target.len()];
+            let read = filesystem
+                .read_link_at(&symlink, 0, &mut buffer)
+                .expect("read symlink target before crash");
+            assert_eq!(read, target.len());
+            assert_eq!(&buffer[..read], target);
+            // create_symlink leaves its small transaction running; commit it
+            // so the metadata is persisted to the journal but not checkpointed.
+            let committed = filesystem
+                .commit_running_metadata_transaction()
+                .expect("commit running symlink transaction");
+            assert!(committed);
+            assert!(filesystem.pending_checkpoint_count() > 0);
+            // Drop without sync_filesystem: the committed metadata lives only
+            // in the journal, like a crash before checkpoint.
+        }
+
+        assert_eq!(
+            Ext4Filesystem::mount(device.clone()).map(|_| ()),
+            Err(Ext4Error::NeedsRecovery)
+        );
+        let report = Ext4Filesystem::recover(device.clone())
+            .expect("recover journaled symlink commit")
+            .expect("expected replayed journal records");
+        assert!(report.update_count() > 0);
+
+        let mut filesystem =
+            Ext4Filesystem::mount(device.clone()).expect("mount after journal replay");
+        let root = filesystem.root_inode().expect("read root inode");
+        let entry = filesystem
+            .lookup(&root, "replay-link")
+            .expect("lookup replayed symlink")
+            .expect("symlink should survive journal replay");
+        assert_eq!(entry.file_type(), DirectoryFileType::Symlink);
+        let symlink = filesystem
+            .load_inode_private(entry.inode())
+            .expect("read replayed symlink inode");
+        assert_eq!(symlink.kind(), InodeKind::Symlink);
+        let mapping = filesystem
+            .map_blocks(&symlink, LogicalBlock::new(0))
+            .expect("map replayed symlink block");
+        assert!(
+            matches!(mapping, BlockMapping::Mapped { .. }),
+            "expected mapped symlink target block"
+        );
+        let mut buffer = vec![0u8; target.len()];
+        let read = filesystem
+            .read_link_at(&symlink, 0, &mut buffer)
+            .expect("read replayed symlink target");
+        assert_eq!(read, target.len());
+        assert_eq!(&buffer[..read], target);
+
+        filesystem.sync_filesystem().expect("sync replayed image");
+        drop(filesystem);
+        fs::write(&image, device.bytes()).expect("write replayed image");
+        run_e2fsck_read_only(&e2fsck, &image);
+        fs::remove_file(image).expect("remove replayed image");
+    }
+
+    #[test]
+    fn symlink_create_delete_recreate_cycle_reads_current_target() {
+        // Original bug regression: rapid create/delete/recreate of block-mapped
+        // symlinks reuses the freed target block before the old journal
+        // checkpoint completes. Without forget/revoke on the release path the
+        // metadata cache could serve stale or zeroed target content. Every
+        // iteration must read back exactly the target it created; the
+        // allocator deterministically hands back the just-freed block (the
+        // shortest free run is preferred for a one-block request), so that
+        // read is the stale / zeroed-content check. The reuse premise itself
+        // is asserted at the bottom of the test.
+        let mke2fs = require_e2fsprogs("mke2fs");
+        let e2fsck = require_e2fsprogs("e2fsck");
+        let image = temporary_image_path("symlink-create-delete-recreate");
+        create_journaled_linear_namespace_test_image(&mke2fs, &image);
+
+        let bytes = fs::read(&image).expect("read journaled namespace image");
+        let device = Arc::new(LinuxImageDevice::new(bytes));
+        let mut filesystem =
+            Ext4Filesystem::mount(device.clone()).expect("mount journaled namespace image");
+        let timestamp = crate::Ext4Timestamp::new(144, 0);
+        filesystem
+            .metadata_journal()
+            .expect("journaled test image has an internal journal");
+        assert!(filesystem.journal_supports_revoke());
+        let free_blocks_before = filesystem.superblock().free_blocks_count();
+
+        let mut previous_physical: Option<u64> = None;
+        let mut reuse_iterations = 0u32;
+        for iteration in 0..8u64 {
+            let root = filesystem.root_inode().expect("read root inode");
+            let target = format!(
+                "/opt/package/lib/libcycle.so.{iteration}.0-symlink-recreate-target-block-padding"
+            );
+            let symlink = filesystem
+                .create_symlink(&root, b"link", target.as_bytes(), 0, 0, timestamp)
+                .expect("create block-mapped symlink");
+            assert_eq!(symlink.kind(), InodeKind::Symlink);
+
+            let mapping = filesystem
+                .map_blocks(&symlink, LogicalBlock::new(0))
+                .expect("map symlink target block");
+            let BlockMapping::Mapped { physical, .. } = mapping else {
+                panic!("expected mapped symlink target block");
+            };
+            if previous_physical.is_some_and(|previous| physical.get() == previous) {
+                // The allocator reused the just-freed target block: the
+                // original bug trigger. The read below must still serve the
+                // freshly written target, which the per-iteration assertion
+                // enforces.
+                reuse_iterations += 1;
+            }
+            previous_physical = Some(physical.get());
+
+            let mut buffer = vec![0u8; target.len()];
+            let read = filesystem
+                .read_link_at(&symlink, 0, &mut buffer)
+                .expect("read symlink target");
+            assert_eq!(read, target.len());
+            assert_eq!(
+                &buffer[..read],
+                target.as_bytes(),
+                "iteration {iteration} read a stale or zeroed target block"
+            );
+
+            filesystem
+                .unlink(&root, b"link", &symlink, timestamp)
+                .expect("unlink block-mapped symlink");
+            filesystem
+                .evict_unlinked_inode(&symlink, timestamp)
+                .expect("evict unlinked symlink");
+            assert_eq!(
+                filesystem
+                    .lookup(&root, "link")
+                    .expect("lookup removed link"),
+                None
+            );
+            assert_eq!(filesystem.orphan_head(), None);
+            assert_eq!(
+                filesystem.superblock().free_blocks_count(),
+                free_blocks_before,
+                "iteration {iteration} leaked the symlink target block"
+            );
+            assert!(
+                !filesystem
+                    .metadata_journal()
+                    .expect("journal present")
+                    .is_aborted(),
+                "iteration {iteration} aborted the journal"
+            );
+        }
+        // The stale/zeroed-content regression scenario only exists when the
+        // allocator hands back the just-freed target block. Under the fixed
+        // image parameters above that reuse is not a coincidence: the
+        // per-group free-extent cache ranks runs by |len - 1| for a one-block
+        // request, so the freed single block is always the preferred run in
+        // its block group. The assertion turns that implicit premise into a
+        // hard requirement: if a future mke2fs layout change or allocator
+        // policy change stops reusing the freed block, this test would
+        // silently stop exercising the regression path and still pass, so it
+        // must fail loudly instead of reporting false coverage.
+        assert!(
+            reuse_iterations > 0,
+            "allocator never reused the just-freed symlink target block; the stale/zeroed \
+             metadata regression scenario was not exercised"
+        );
+        println!("symlink target block reused by the allocator in {reuse_iterations} iteration(s)");
+
+        filesystem
+            .sync_filesystem()
+            .expect("sync journaled namespace image");
+        drop(filesystem);
+        fs::write(&image, device.bytes()).expect("write journaled namespace image");
+        run_e2fsck_read_only(&e2fsck, &image);
+        fs::remove_file(image).expect("remove journaled namespace image");
     }
 
     #[test]
@@ -7471,17 +7768,83 @@ mod tests {
     }
 
     fn create_allocator_image_with_features(mke2fs: &Path, image: &Path, features: &str) {
+        let supported_features = features
+            .split(',')
+            .map(str::trim)
+            .filter(|feature| {
+                if feature.starts_with('^') {
+                    // A disabled-feature name unknown to this mke2fs release
+                    // is a no-op: that release never had the feature to
+                    // disable, so dropping it keeps the requested image
+                    // semantics unchanged.
+                    mke2fs_supports_feature(mke2fs, feature)
+                } else {
+                    // Enabled features must be understood. Silently dropping
+                    // one would change the image feature set and layout the
+                    // test relies on (e.g. metadata_csum gates journal
+                    // semantics and checksum verification), so fail loudly
+                    // instead of running a test against a different image.
+                    assert!(
+                        mke2fs_supports_feature(mke2fs, feature),
+                        "mke2fs at {mke2fs:?} does not support required feature {feature:?}"
+                    );
+                    true
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         let file = fs::File::create(image).expect("create allocator ext4 image");
         file.set_len(256 * 1024 * 1024)
             .expect("size allocator ext4 image");
         let status = Command::new(mke2fs)
             .args(["-q", "-t", "ext4", "-F", "-b", "4096", "-I", "256"])
             .arg("-O")
-            .arg(features)
+            .arg(supported_features)
             .arg(image)
             .status()
             .expect("run mke2fs for allocator image");
         assert!(status.success(), "mke2fs allocator image failed");
+    }
+
+    /// Probe whether the local mke2fs accepts a `-O` feature flag.
+    ///
+    /// Older mke2fs releases reject feature names they do not know, even when
+    /// the feature is disabled with `^` (e.g. `^orphan_file` before e2fsprogs
+    /// 1.46). Callers distinguish the two cases:
+    /// - a disabled (`^`) unknown feature is dropped as a no-op, because that
+    ///   release never had the feature to disable;
+    /// - an enabled unknown feature must fail the test loudly instead of
+    ///   being dropped, because dropping it would silently change the image
+    ///   feature set that the test relies on.
+    fn mke2fs_supports_feature(mke2fs: &Path, feature: &str) -> bool {
+        static FEATURE_SUPPORT: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
+        let mut support = FEATURE_SUPPORT
+            .lock()
+            .expect("mke2fs feature support cache poisoned");
+        if let Some((_, cached)) = support.iter().find(|(name, _)| name == feature) {
+            return *cached;
+        }
+        static PROBE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let scratch = std::env::temp_dir().join(format!(
+            "kext4-mke2fs-feature-probe-{}-{}.img",
+            std::process::id(),
+            PROBE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let created = fs::File::create(&scratch)
+            .and_then(|file| file.set_len(64 * 1024 * 1024))
+            .is_ok();
+        let supported = created
+            && Command::new(mke2fs)
+                .args(["-q", "-F", "-t", "ext4", "-O"])
+                .arg(feature)
+                .arg(&scratch)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
+        let _ = fs::remove_file(&scratch);
+        support.push((feature.to_string(), supported));
+        supported
     }
 
     fn run_e2fsck_read_only(e2fsck: &Path, image: &Path) {

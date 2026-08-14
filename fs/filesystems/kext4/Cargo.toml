@@ -21,3 +21,11 @@ unittest = { workspace = true }
 [target.'cfg(target_os = "none")'.dependencies]
 ksync = { workspace = true }
 ktask = { workspace = true }
+
+[dev-dependencies]
+kalloc = { workspace = true }
+
+
+[package.metadata.cargo-shear]
+# kalloc is indirectly used in tests, so ignore the unused dependency warning
+ignored = ["kalloc"]

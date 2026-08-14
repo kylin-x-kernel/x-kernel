@@ -338,8 +338,12 @@ Truncate 和 unwritten preallocation discard 的 journal credits 按实际 exten
 root、重建后的 extent-tree blocks、需要 revoke 的旧 tree blocks，以及释放范围覆盖的不同 block
 group 中各一个 bitmap/descriptor target。数据块数量本身不会一对一增加 journal metadata block，
 因此不能用 `i_blocks` 或被释放 data block 数直接放大 reservation；否则大文件只回收一个很小的
-preallocation tail 也会被误判为超过空 journal 容量。计算结果仍为 allocator entry check 保留
-固定 headroom，并在任何 metadata mutation 前完成。
+preallocation tail 也会被误判为超过空 journal 容量。唯一例外是目录与 block-mapped symlink
+的数据块：它们本身是 journaled metadata buffer，释放路径对每个被释放块各产生一个 revoke，
+因此 credits 按本次实际释放的数据块数逐一追加 revoke credit（与 Linux
+get_default_free_blocks_flags() 对 S_ISDIR/S_ISLNK 的 METADATA|FORGET 语义一致）；regular
+file 数据块不带该开销。计算结果仍为 allocator entry check 保留固定 headroom，并在任何
+metadata mutation 前完成。
 
 Ordered writeback 的 insert 与 unwritten conversion 只使用 `ExtentPath`，因此 transaction 内不再
 切换到复杂度取决于整棵树大小的重建算法。它的 credits 在打开 transaction 前按本次 logical

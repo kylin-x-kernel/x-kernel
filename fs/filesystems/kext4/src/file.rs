@@ -16,12 +16,6 @@ use crate::{
 #[cfg(test)]
 mod raw_overwrite_tests;
 
-#[derive(Clone, Copy)]
-enum MissingBlockRead {
-    ZeroFill,
-    Corrupt,
-}
-
 struct AllocatedWriteRun {
     first_block: FilesystemBlock,
     block_count: u32,
@@ -149,12 +143,7 @@ impl Ext4Filesystem {
     ) -> Ext4Result<usize> {
         match self.fast_symlink_target(inode)? {
             Some(target) => self.read_fast_symlink_target(&target, offset, output),
-            None => self.read_inode_bytes_with_missing_block_policy(
-                inode,
-                offset,
-                output,
-                MissingBlockRead::Corrupt,
-            ),
+            None => self.read_block_symlink_target(inode, offset, output),
         }
     }
 
@@ -186,21 +175,6 @@ impl Ext4Filesystem {
         offset: u64,
         output: &mut [u8],
     ) -> Ext4Result<usize> {
-        self.read_inode_bytes_with_missing_block_policy(
-            inode,
-            offset,
-            output,
-            MissingBlockRead::ZeroFill,
-        )
-    }
-
-    fn read_inode_bytes_with_missing_block_policy(
-        &self,
-        inode: &Ext4Inode,
-        offset: u64,
-        output: &mut [u8],
-        missing_block: MissingBlockRead,
-    ) -> Ext4Result<usize> {
         if output.is_empty() || offset >= inode.size() {
             return Ok(0);
         }
@@ -231,15 +205,11 @@ impl Ext4Filesystem {
             let wanted = (total - copied).min(block_remaining);
 
             match self.map_blocks(inode, LogicalBlock::new(logical))? {
-                BlockMapping::Hole { .. } | BlockMapping::Unwritten { .. } => match missing_block {
-                    MissingBlockRead::ZeroFill => {
-                        output[copied..copied + wanted].fill(0);
-                        copied += wanted;
-                    }
-                    MissingBlockRead::Corrupt => {
-                        return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
-                    }
-                },
+                BlockMapping::Hole { .. } | BlockMapping::Unwritten { .. } => {
+                    // Sparse regular-file holes read as zeroes.
+                    output[copied..copied + wanted].fill(0);
+                    copied += wanted;
+                }
                 BlockMapping::Mapped { physical, len, .. } => {
                     if physical.get() == 0 || len.get() == 0 {
                         return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
@@ -259,14 +229,14 @@ impl Ext4Filesystem {
                     let block_count = rounded_bytes
                         .checked_div(block_size_usize)
                         .ok_or(Ext4Error::Overflow)?;
-                    let block_count_u32 =
-                        u32::try_from(block_count).map_err(|_| Ext4Error::Overflow)?;
                     let mut block_bytes = vec![
                         0;
                         block_count
                             .checked_mul(block_size_usize)
                             .ok_or(Ext4Error::Overflow)?
                     ];
+                    let block_count_u32 =
+                        u32::try_from(block_count).map_err(|_| Ext4Error::Overflow)?;
                     self.read_blocks(first_block, block_count_u32, &mut block_bytes)?;
                     let source_end = in_block.checked_add(read_len).ok_or(Ext4Error::Overflow)?;
                     output[copied..copied + read_len].copy_from_slice(
@@ -280,6 +250,68 @@ impl Ext4Filesystem {
         }
 
         Ok(copied)
+    }
+
+    /// Reads a block-mapped symlink target.
+    ///
+    /// The target is stored in logical block 0, a journaled metadata buffer
+    /// written via `metadata_io.create_access`. It is read from the metadata
+    /// cache so uncheckpointed content is visible, matching Linux
+    /// `ext4_get_link()` which maps logical block 0 with `ext4_bread` and
+    /// reads it through the buffer cache.
+    fn read_block_symlink_target(
+        &self,
+        inode: &Ext4Inode,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Ext4Result<usize> {
+        if output.is_empty() || offset >= inode.size() {
+            return Ok(0);
+        }
+        let start = usize::try_from(offset).map_err(|_| Ext4Error::Overflow)?;
+        match self.map_blocks(inode, LogicalBlock::new(0))? {
+            BlockMapping::Hole { .. } | BlockMapping::Unwritten { .. } => {
+                Err(Ext4Error::Corrupt(CorruptKind::InvalidInode))
+            }
+            BlockMapping::Mapped { physical, len, .. } => {
+                if physical.get() == 0 || len.get() == 0 {
+                    return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
+                }
+                let buffer = self
+                    .metadata_io
+                    .read_block(FilesystemBlock::new(physical.get()))?;
+                // Truncate to the remaining target length so callers passing
+                // oversized buffers (e.g. a full page via `read_folio`) never
+                // observe block padding after the target, matching the fast
+                // symlink and regular-file read paths. `read_link_at` already
+                // guarantees `offset < inode.size()`; checked arithmetic keeps
+                // this robust against corrupt inode sizes anyway.
+                let remaining_target = usize::try_from(
+                    inode
+                        .size()
+                        .checked_sub(offset)
+                        .ok_or(Ext4Error::Overflow)?,
+                )
+                .map_err(|_| Ext4Error::Overflow)?;
+                // A block symlink target fits in one block, so the offset is
+                // inside it; defend against corrupt inode sizes anyway.
+                let available = buffer
+                    .as_ref()
+                    .len()
+                    .checked_sub(start)
+                    .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidInode))?
+                    .min(remaining_target);
+                let copied = output.len().min(available);
+                let end = start.checked_add(copied).ok_or(Ext4Error::Overflow)?;
+                output[..copied].copy_from_slice(
+                    buffer
+                        .as_ref()
+                        .get(start..end)
+                        .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidInode))?,
+                );
+                Ok(copied)
+            }
+        }
     }
 
     /// Raw overwrite of bytes inside already allocated regular-file blocks.
