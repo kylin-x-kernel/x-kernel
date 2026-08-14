@@ -87,7 +87,9 @@ impl Semaphore {
     /// initialized with. Callers are responsible for ensuring balanced acquire/release.
     pub fn release(&self) {
         self.count.fetch_add(1, Ordering::Release);
-        self.event.notify(1);
+        // Each release makes one additional permit available, so wake one
+        // previously unnotified waiter even if another notification is pending.
+        self.event.notify_additional(1);
     }
 
     /// Returns the current number of available permits.

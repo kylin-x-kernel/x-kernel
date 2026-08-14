@@ -9,6 +9,8 @@
 extern crate alloc;
 
 use alloc::{sync::Arc, vec, vec::Vec};
+#[cfg(target_os = "none")]
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use unittest::{assert, assert_eq, def_test};
 
@@ -347,6 +349,44 @@ fn test_semaphore_zero_permits() {
 
     // Now try_acquire should succeed
     assert!(sem.try_acquire());
+    assert_eq!(sem.available_permits(), 0);
+}
+
+#[cfg(target_os = "none")]
+#[def_test]
+fn test_semaphore_release_wakes_all_zero_count_waiters() {
+    const WAITER_COUNT: usize = 8;
+
+    let sem = Arc::new(Semaphore::new(0));
+    let acquired = Arc::new(AtomicUsize::new(0));
+    let ready = Arc::new(AtomicUsize::new(0));
+    let mut waiters = Vec::new();
+
+    for _ in 0..WAITER_COUNT {
+        let sem = Arc::clone(&sem);
+        let acquired = Arc::clone(&acquired);
+        let ready = Arc::clone(&ready);
+        waiters.push(ktask::spawn(move || {
+            ready.fetch_add(1, Ordering::Release);
+            sem.acquire();
+            acquired.fetch_add(1, Ordering::SeqCst);
+        }));
+    }
+
+    while ready.load(Ordering::Acquire) != WAITER_COUNT {
+        ktask::yield_now();
+    }
+    // Let the last waiter register its event listener and block.
+    ktask::yield_now();
+
+    for _ in 0..WAITER_COUNT {
+        sem.release();
+    }
+    for waiter in waiters {
+        waiter.join();
+    }
+
+    assert_eq!(acquired.load(Ordering::SeqCst), WAITER_COUNT);
     assert_eq!(sem.available_permits(), 0);
 }
 
