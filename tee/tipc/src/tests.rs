@@ -7,8 +7,10 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use core::task::Poll;
 
 use kerrno::KError;
+use kpoll::PollContext;
 use linux_sysno::Sysno;
 use unittest::def_test;
 
@@ -633,4 +635,40 @@ fn memref_validate_mmap_checks_bounds_and_requested_permissions() {
         ),
         Ok(())
     );
+}
+
+#[def_test(user, serial)]
+fn wait_for_event_returns_interrupted_on_fatal_signal() {
+    // Regression test: wait_for_event must be interruptible by fatal signals.
+    // Without the interruptible wrapper, a TA blocked in tipc_wait/tipc_wait_any
+    // would be unkillable.
+    ktask::current().interrupt();
+    let err = crate::syscall::wait_for_event(u32::MAX, |_cx: &mut PollContext<'_>| Poll::Pending)
+        .expect_err("wait_for_event must return error when interrupted");
+    ktask::current().clear_interrupt();
+    assert_eq!(err, KError::Interrupted);
+}
+
+#[def_test(user, serial)]
+fn wait_connected_returns_interrupted_on_fatal_signal() {
+    // Regression test: synchronous tipc_connect must be interruptible by fatal
+    // signals. Create an async connect to a non-existent port so the channel
+    // stays in Connecting state, then interrupt the wait.
+    let uuid = IpcUuid::from_bytes([0xfe; 16]);
+    let path = "com.xkernel.test.tipc.interrupt-connect";
+    let channel = ipc_port_connect_async(
+        uuid,
+        path,
+        IpcConnectFlags::WAIT_FOR_PORT | IpcConnectFlags::ASYNC,
+    )
+    .expect("async connect must succeed");
+    assert_eq!(channel.state(), crate::IpcChanState::Connecting);
+
+    ktask::current().interrupt();
+    let err = channel
+        .wait_connected()
+        .expect_err("wait_connected must return error when interrupted");
+    ktask::current().clear_interrupt();
+    assert_eq!(err, KError::Interrupted);
+    channel.close();
 }

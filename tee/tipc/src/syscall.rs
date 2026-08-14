@@ -38,7 +38,7 @@ pub(crate) struct IpcMsgInfo {
     num_handles: u32,
 }
 
-#[derive(Clone, Copy, posix_types::UserRead, posix_types::UserWrite)]
+#[derive(Debug, Clone, Copy, posix_types::UserRead, posix_types::UserWrite)]
 #[repr(C)]
 pub(crate) struct UserEvent {
     handle: i32,
@@ -146,19 +146,25 @@ fn timeout_duration(timeout_ms: u32) -> Option<ktime_types::TimeSpan> {
     (timeout_ms != u32::MAX).then(|| ktime_types::TimeSpan::from_millis(timeout_ms as u64))
 }
 
-fn wait_for_event(
+/// Blocks on a poll future with timeout and fatal-signal interruptibility.
+///
+/// Returns the `UserEvent` when the wait function produces `Poll::Ready(Ok(event))`.
+/// Returns `KError::TimedOut` if `timeout_ms` elapses before the event is ready.
+/// Returns `KError::Interrupted` if the current task receives a fatal signal
+/// (e.g. SIGKILL) while waiting.
+pub(crate) fn wait_for_event(
     timeout_ms: u32,
     mut wait: impl FnMut(&mut PollContext<'_>) -> Poll<KResult<UserEvent>>,
 ) -> KResult<UserEvent> {
     let mut registrations = PollRegistrations::new();
-    ktask::future::block_on(ktask::future::timeout(
-        timeout_duration(timeout_ms),
-        poll_fn(move |cx| {
-            let mut context = registrations.context(cx);
-            wait(&mut context)
-        }),
-    ))
-    .map_err(KError::from)?
+    let poll_result = poll_fn(move |cx| {
+        let mut context = registrations.context(cx);
+        wait(&mut context)
+    });
+    let timed = ktask::future::timeout(timeout_duration(timeout_ms), poll_result);
+    let result =
+        ktask::future::block_on(ktask::future::interruptible(timed)).map_err(KError::from)?;
+    result?
 }
 
 fn map_register_error(error: PollRegisterError) -> KError {

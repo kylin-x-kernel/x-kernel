@@ -8,12 +8,14 @@ use alloc::{
 };
 use core::{
     any::Any,
+    future::poll_fn,
     sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
 };
 
 use kerrno::{KError, KResult};
 use kpoll::{PollContext, PollRegisterError, PollRegistrations};
 use kspin::SpinNoIrq;
+use ktask::future::{block_on, interruptible};
 use log::warn;
 use tipc_handle::HandleWaitState;
 
@@ -337,6 +339,15 @@ impl IpcChan {
     }
 
     /// Waits synchronously until an asynchronous connect is accepted or closed.
+    ///
+    /// Returns `Ok(())` once the peer accepts the connection, or
+    /// `Err(KError::NotConnected)` if the peer disconnects before accepting.
+    ///
+    /// # Interruptibility
+    ///
+    /// If the current task receives a fatal signal (e.g. SIGKILL) while waiting,
+    /// this method returns `Err(KError::Interrupted)`. The caller should propagate
+    /// this error so the task can proceed with normal exit.
     pub fn wait_connected(&self) -> KResult {
         let mut registrations = PollRegistrations::new();
         loop {
@@ -346,7 +357,7 @@ impl IpcChan {
                 _ => {
                     // Register through a short-lived poll future to avoid a
                     // separate wait primitive in the core object.
-                    ktask::future::block_on(core::future::poll_fn(|cx| {
+                    let result: Result<(), KError> = block_on(interruptible(poll_fn(|cx| {
                         let mut context = registrations.context(cx);
                         if self
                             .register(&mut context, HandleEventMask::READY | HandleEventMask::HUP)
@@ -362,7 +373,9 @@ impl IpcChan {
                         } else {
                             core::task::Poll::Pending
                         }
-                    }))?;
+                    })))
+                    .map_err(KError::from)?;
+                    result?;
                 }
             }
         }
