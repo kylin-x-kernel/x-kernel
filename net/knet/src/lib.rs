@@ -52,7 +52,7 @@ use crate::{
     device::{EthernetDevice, LoopbackDevice},
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     listen_table::ListenTable,
-    router::{Router, Rule},
+    router::{Ipv4AddrEntry, ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE, Router, Rule},
     service::Service,
     wrapper::SocketSetWrapper,
 };
@@ -72,12 +72,13 @@ pub fn init_network() {
     let lo_dev = router.add_device(Box::new(LoopbackDevice::new()));
 
     let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8);
-    router.add_rule(Rule::new(
-        lo_ip.into(),
-        None,
-        lo_dev,
-        lo_ip.address().into(),
-    ));
+    router
+        .add_ipv4_addr(Ipv4AddrEntry {
+            dev: lo_dev,
+            addr: lo_ip,
+            scope: ROUTE_SCOPE_HOST,
+        })
+        .expect("loopback IPv4 address must fit the interface");
 
     let mut eth0_rx_poll = None;
     let eth0_ip = if let Some(handle) = net_devs.pop() {
@@ -87,10 +88,17 @@ pub fn init_network() {
         let eth0_address = wire::MacAddress(handle.mac().0);
         let eth0_ip = Ipv4Cidr::new(IP.parse().expect("Invalid IPv4 address"), IP_PREFIX);
 
-        let eth0 = EthernetDevice::new("eth0".to_owned(), handle, eth0_ip);
+        let eth0 = EthernetDevice::new("eth0".to_owned(), handle);
         eth0_rx_poll = eth0.rx_poll_set();
         let eth0_dev = router.add_device(Box::new(eth0));
 
+        router
+            .add_ipv4_addr(Ipv4AddrEntry {
+                dev: eth0_dev,
+                addr: eth0_ip,
+                scope: ROUTE_SCOPE_UNIVERSE,
+            })
+            .expect("Ethernet IPv4 address must fit the interface");
         router.add_rule(Rule::new(
             Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
             Some(IpAddress::Ipv4(
@@ -115,11 +123,8 @@ pub fn init_network() {
         info!("Device: {}", dev.name());
     }
 
-    let netlink_state = netlink::build_initial_state(
-        to_smoltcp_ipv4_cidr(lo_ip),
-        eth0_ip.map(to_smoltcp_ipv4_cidr),
-        GATEWAY.parse().ok(),
-    );
+    let netlink_state =
+        netlink::build_initial_state(eth0_ip.map(to_smoltcp_ipv4_cidr), GATEWAY.parse().ok());
     let service = Service::new(router);
     service.sync_netlink(&netlink_state);
     SERVICE.init_once(service);
@@ -148,7 +153,7 @@ fn subscribe_network_unregister(id: kdevice::DeviceId) {
         if removed_id != id || !SERVICE.is_inited() {
             return;
         }
-        if SERVICE.remove_device_by_model_id(id) {
+        if netlink::remove_device_state(id) {
             warn!("network: detached removed device {:?}", id);
         }
     }));

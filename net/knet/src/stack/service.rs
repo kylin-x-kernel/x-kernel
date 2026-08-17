@@ -33,7 +33,7 @@ use crate::{
     ip::{IpAddress, IpListenEndpoint},
     netlink::RtnetlinkState,
     poller::{PollBudget, PollProgress},
-    router::Router,
+    router::{DeviceRemoval, Router},
     stack::ingress::IngressProcessor,
 };
 
@@ -47,6 +47,12 @@ struct SmoltcpIngressProgress {
     packets: usize,
     has_socket_state_change: bool,
     has_reached_time_limit: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExistingIpv4AddrAction {
+    Keep,
+    Reject,
 }
 
 fn to_smoltcp_instant(instant: MonotonicInstant) -> SmoltcpInstant {
@@ -83,7 +89,7 @@ impl Service {
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
         let iface = Interface::new(config, &mut router, to_smoltcp_instant(monotonic_time()));
 
-        Self {
+        let service = Self {
             iface: Mutex::new(iface),
             router: Mutex::new(router),
             ingress: Mutex::new(IngressProcessor::new()),
@@ -94,7 +100,9 @@ impl Service {
             timeout_poll: Arc::new(PollSet::new()),
             #[cfg(unittest)]
             rebuild_count: AtomicUsize::new(0),
-        }
+        };
+        service.sync_local_ipv4_views();
+        service
     }
 
     /// Advances the network data plane within one bounded poll round.
@@ -412,19 +420,25 @@ impl Service {
         let mut router = self.router.lock();
         router.sync_netlink(state);
         let local_ipv4_addrs = router.local_ipv4_addrs();
+        self.replace_local_ipv4_views(&local_ipv4_addrs);
+    }
 
-        self.ingress
-            .lock()
-            .update_local_ipv4_addrs(local_ipv4_addrs);
+    fn sync_local_ipv4_views(&self) {
+        let local_ipv4_addrs = self.router.lock().local_ipv4_addrs();
+        self.replace_local_ipv4_views(&local_ipv4_addrs);
+    }
+
+    fn replace_local_ipv4_views(&self, addrs: &[crate::ip::Ipv4Cidr]) {
+        self.ingress.lock().update_local_ipv4_addrs(addrs);
         self.iface.lock().update_ip_addrs(|ip_addrs| {
             ip_addrs.clear();
-            for addr in &state.addrs {
-                if let SmoltcpIpAddress::Ipv4(ipv4) = addr.address {
-                    let _ = ip_addrs.push(SmoltcpIpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
-                        ipv4,
-                        addr.prefix_len,
-                    )));
-                }
+            for addr in addrs {
+                ip_addrs
+                    .push(SmoltcpIpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
+                        addr.address().into(),
+                        addr.prefix_len(),
+                    )))
+                    .expect("Router validates the smoltcp address capacity");
             }
         });
     }
@@ -463,6 +477,51 @@ impl Service {
         self.router.lock().link_send_snapshot_for_ifindex(ifindex)
     }
 
+    pub(crate) fn ipv4_addr_snapshots(&self) -> Vec<crate::router::Ipv4AddrSnapshot> {
+        self.router.lock().ipv4_addr_snapshots()
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn ipv4_addr_entries(&self) -> Vec<crate::router::Ipv4AddrEntry> {
+        self.router.lock().ipv4_addr_entries().to_vec()
+    }
+
+    pub(crate) fn add_ipv4_addr(
+        &self,
+        entry: crate::router::Ipv4AddrEntry,
+        existing_action: ExistingIpv4AddrAction,
+    ) -> Result<(), LinuxError> {
+        let mut router = self.router.lock();
+        let is_existing = router
+            .ipv4_addr_entries()
+            .iter()
+            .any(|existing| existing.dev == entry.dev && existing.addr == entry.addr);
+        if is_existing {
+            return match existing_action {
+                ExistingIpv4AddrAction::Keep => Ok(()),
+                ExistingIpv4AddrAction::Reject => Err(LinuxError::EEXIST),
+            };
+        }
+        router.add_ipv4_addr(entry)?;
+        let local_ipv4_addrs = router.local_ipv4_addrs();
+        self.replace_local_ipv4_views(&local_ipv4_addrs);
+        Ok(())
+    }
+
+    pub(crate) fn remove_ipv4_addr(
+        &self,
+        entry: crate::router::Ipv4AddrEntry,
+    ) -> Result<bool, LinuxError> {
+        let mut router = self.router.lock();
+        if !router.remove_ipv4_addr(entry) {
+            return Err(LinuxError::EADDRNOTAVAIL);
+        }
+        let is_last_owner = !router.has_ipv4_address(entry.addr.address());
+        let local_ipv4_addrs = router.local_ipv4_addrs();
+        self.replace_local_ipv4_views(&local_ipv4_addrs);
+        Ok(is_last_owner)
+    }
+
     pub fn update_device_link(
         &self,
         ifindex: i32,
@@ -483,6 +542,7 @@ impl Service {
         let iface = Interface::new(config, &mut router, to_smoltcp_instant(monotonic_time()));
         *self.router.lock() = router;
         *self.iface.lock() = iface;
+        self.sync_local_ipv4_views();
         self.timeout_deadline_micros.store(0, Ordering::Release);
         self.timeout_poll.wake();
     }
@@ -492,15 +552,20 @@ impl Service {
         self.rebuild_count.load(Ordering::Relaxed)
     }
 
-    pub fn remove_device_by_model_id(&self, id: kdevice::DeviceId) -> bool {
+    /// Removes a device and refreshes every address-derived data-plane view.
+    ///
+    /// Returns the removed interface and orphaned IPv4 sources when found.
+    pub(crate) fn remove_device_by_model_id(&self, id: kdevice::DeviceId) -> Option<DeviceRemoval> {
         let mut router = self.router.lock();
         let effective_mtu = router.effective_mtu();
-        let is_removed = router.remove_device_by_model_id(id);
-        if is_removed && router.effective_mtu() != effective_mtu {
+        let removal = router.remove_device_by_model_id(id)?;
+        if router.effective_mtu() != effective_mtu {
             let mut iface = self.iface.lock();
             self.rebuild_interface(&mut router, &mut iface);
         }
-        is_removed
+        let local_ipv4_addrs = router.local_ipv4_addrs();
+        self.replace_local_ipv4_views(&local_ipv4_addrs);
+        Some(removal)
     }
 
     pub fn send_link_frame(&self, ifindex: i32, frame: &[u8]) -> KResult<usize> {

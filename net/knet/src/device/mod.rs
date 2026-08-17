@@ -138,8 +138,9 @@ pub trait NetDevice: Send + Sync {
     /// Returns whether the device has RX work available without waiting.
     fn has_rx_work(&self) -> bool;
 
-    /// Sends an IP packet to the next hop.
+    /// Sends a validated IP packet to the next hop.
     ///
+    /// `source_addr` is the source parsed by the Router before dispatch.
     /// Returns `true` if this operation resulted in the readiness of receive
     /// operation. This is true for loopback devices and can be used to speed
     /// up packet processing.
@@ -147,6 +148,7 @@ pub trait NetDevice: Send + Sync {
         &mut self,
         ifindex: i32,
         next_hop: IpAddress,
+        source_addr: IpAddress,
         packet: PacketBuf,
         timestamp: MonotonicInstant,
     ) -> bool;
@@ -189,8 +191,18 @@ pub trait NetDevice: Send + Sync {
     /// Backends stop receiving and transmitting packets while the link is down.
     fn set_link_up(&mut self, _is_up: bool) {}
 
-    /// Synchronizes address and neighbor state prepared by the control-plane adapter.
-    fn sync_netlink(&mut self, _ipv4_addr: Option<Ipv4Cidr>, _neighbors: &[(IpAddress, [u8; 6])]) {}
+    /// Replaces the IPv4 address projections prepared by the Router owner.
+    ///
+    /// `assigned_addrs` belongs to this device and drives egress broadcast
+    /// handling. `local_addrs` contains every local address and drives weak-host
+    /// ARP receive behavior.
+    fn set_ipv4_addrs(&mut self, _assigned_addrs: &[Ipv4Cidr], _local_addrs: &[Ipv4Cidr]) {}
+
+    /// Removes queued packets whose IPv4 source address is no longer local.
+    fn remove_pending_ipv4_source(&mut self, _addr: crate::ip::Ipv4Address) {}
+
+    /// Synchronizes neighbor entries prepared by the control-plane adapter.
+    fn sync_neighbors(&mut self, _neighbors: &[(IpAddress, [u8; 6])]) {}
 }
 
 #[cfg(unittest)]

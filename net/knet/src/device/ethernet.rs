@@ -38,6 +38,14 @@ use crate::{
 
 const NET_RX_SOFTIRQ_BATCH: usize = 8;
 
+fn is_ipv4_source_usable_for_egress(
+    next_hop: IpAddress,
+    source_addr: crate::ip::Ipv4Address,
+    assigned_ipv4_addrs: &[Ipv4Cidr],
+) -> bool {
+    next_hop.is_broadcast() || (!source_addr.is_unspecified() && !assigned_ipv4_addrs.is_empty())
+}
+
 static NEXT_NET_RX_SOURCE_ID: AtomicUsize = AtomicUsize::new(1);
 static NET_RX_SOURCES: SpinNoIrq<NetRxSources> = SpinNoIrq::new(NetRxSources::new());
 #[cfg(not(unittest))]
@@ -250,6 +258,7 @@ struct ArpNeighbor {
 /// Queued IP packet awaiting ARP resolution.
 struct PendingTxPacket {
     next_hop: IpAddress,
+    source_addr: crate::ip::Ipv4Address,
     packet: PacketBuf,
 }
 
@@ -261,7 +270,8 @@ pub struct EthernetDevice {
     operstate: u8,
     inner: ClassDevice<NetDeviceImpl>,
     neighbors: HashMap<IpAddress, Option<ArpNeighbor>>,
-    ip: Ipv4Cidr,
+    assigned_ipv4_addrs: Vec<Ipv4Cidr>,
+    local_ipv4_addrs: Vec<Ipv4Cidr>,
 
     pending_tx: VecDeque<PendingTxPacket>,
     rx_source: Option<Arc<NetRxPollSource>>,
@@ -271,7 +281,7 @@ impl EthernetDevice {
     const NEIGHBOR_TTL: TimeSpan = TimeSpan::from_secs(300);
 
     /// Create a new Ethernet device wrapper.
-    pub fn new(name: String, inner: ClassDevice<NetDeviceImpl>, ip: Ipv4Cidr) -> Self {
+    pub fn new(name: String, inner: ClassDevice<NetDeviceImpl>) -> Self {
         let rx_source = if let Some(rx_source) = register_net_rx_source() {
             let scheduler: Arc<dyn NetRxScheduler> = Arc::new(KnetRxScheduler {
                 source: Arc::downgrade(&rx_source),
@@ -304,7 +314,8 @@ impl EthernetDevice {
             operstate: IF_OPER_UP,
             inner,
             neighbors: HashMap::new(),
-            ip,
+            assigned_ipv4_addrs: Vec::new(),
+            local_ipv4_addrs: Vec::new(),
             pending_tx: VecDeque::with_capacity(ETHERNET_MAX_PENDING_PACKETS),
             rx_source,
         }
@@ -463,17 +474,26 @@ impl EthernetDevice {
         None
     }
 
-    fn send_arp_request(&mut self, ifindex: i32, target_ip: IpAddress) {
+    fn send_arp_request(
+        &mut self,
+        ifindex: i32,
+        target_ip: IpAddress,
+        source_addr: crate::ip::Ipv4Address,
+    ) {
         let IpAddress::Ipv4(target_ipv4) = target_ip else {
             warn!("IPv6 address ARP is not supported: {}", target_ip);
             return;
         };
+        if source_addr.is_unspecified() {
+            warn!("Cannot resolve ARP from an unspecified IPv4 source");
+            return;
+        }
         debug!("Requesting ARP for {}", target_ipv4);
 
         let arp_packet = ArpIpv4Packet {
             operation: ArpOperation::Request,
             source_hardware_addr: self.mac_addr(),
-            source_protocol_addr: self.ip.address(),
+            source_protocol_addr: source_addr,
             target_hardware_addr: MacAddress::BROADCAST,
             target_protocol_addr: target_ipv4,
         };
@@ -522,7 +542,11 @@ impl EthernetDevice {
         {
             return;
         }
-        if self.ip.address() != target_protocol_addr {
+        if !self
+            .local_ipv4_addrs
+            .iter()
+            .any(|addr| addr.address() == target_protocol_addr)
+        {
             return;
         }
 
@@ -539,7 +563,7 @@ impl EthernetDevice {
             let response = ArpIpv4Packet {
                 operation: ArpOperation::Reply,
                 source_hardware_addr: self.mac_addr(),
-                source_protocol_addr: self.ip.address(),
+                source_protocol_addr: target_protocol_addr,
                 target_hardware_addr: source_hardware_addr,
                 target_protocol_addr: source_protocol_addr,
             };
@@ -583,7 +607,7 @@ impl EthernetDevice {
                 PendingAction::Keep => kept_packets.push(pending),
                 PendingAction::Refresh => {
                     self.neighbors.remove(&pending.next_hop);
-                    self.send_arp_request(ifindex, pending.next_hop);
+                    self.send_arp_request(ifindex, pending.next_hop, pending.source_addr);
                     kept_packets.push(pending);
                 }
             }
@@ -673,6 +697,7 @@ impl NetDeviceOps for EthernetDevice {
         &mut self,
         ifindex: i32,
         next_hop: IpAddress,
+        source_addr: IpAddress,
         mut packet: PacketBuf,
         timestamp: MonotonicInstant,
     ) -> bool {
@@ -683,16 +708,30 @@ impl NetDeviceOps for EthernetDevice {
             warn!("Dropping IPv6 packet on IPv4-only Ethernet device");
             return false;
         }
+        let IpAddress::Ipv4(source_addr) = source_addr else {
+            warn!("Dropping packet with a non-IPv4 source on IPv4-only Ethernet device");
+            return false;
+        };
 
         packet.set_ifindex(ifindex);
-        if packet
-            .network_packet()
-            .is_none_or(|network_packet| network_packet.len() > self.mtu)
-        {
+        let Some(ip_packet) = packet.network_packet() else {
+            warn!("Dropping malformed IPv4 output packet");
+            return false;
+        };
+        let is_limited_broadcast = next_hop.is_broadcast();
+        if !is_ipv4_source_usable_for_egress(next_hop, source_addr, &self.assigned_ipv4_addrs) {
+            warn!("Dropping IPv4 packet without a local IPv4 source");
+            return false;
+        }
+        if ip_packet.len() > self.mtu {
             warn!("Dropping packet exceeding Ethernet MTU {}", self.mtu);
             return false;
         }
-        if next_hop.is_broadcast() || self.ip.broadcast().map(IpAddress::Ipv4) == Some(next_hop) {
+        let is_directed_broadcast = matches!(next_hop, IpAddress::Ipv4(next_hop) if self
+            .assigned_ipv4_addrs
+            .iter()
+            .any(|addr| addr.is_directed_broadcast(next_hop)));
+        if is_limited_broadcast || is_directed_broadcast {
             self.send_ipv4_packet_to(ifindex, MacAddress::BROADCAST, &packet);
             return false;
         }
@@ -709,14 +748,17 @@ impl NetDeviceOps for EthernetDevice {
         };
         // Only send ARP request if we haven't already requested it
         if need_request {
-            self.send_arp_request(ifindex, next_hop);
+            self.send_arp_request(ifindex, next_hop, source_addr);
         }
         if self.pending_tx.len() >= ETHERNET_MAX_PENDING_PACKETS {
             warn!("Pending packets buffer is full, dropping packet");
             return false;
         }
-        self.pending_tx
-            .push_back(PendingTxPacket { next_hop, packet });
+        self.pending_tx.push_back(PendingTxPacket {
+            next_hop,
+            source_addr,
+            packet,
+        });
         false
     }
 
@@ -764,11 +806,18 @@ impl NetDeviceOps for EthernetDevice {
         }
     }
 
-    fn sync_netlink(&mut self, ipv4_addr: Option<Ipv4Cidr>, neighbors: &[(IpAddress, [u8; 6])]) {
-        if let Some(ipv4_addr) = ipv4_addr {
-            self.ip = ipv4_addr;
-        }
+    fn set_ipv4_addrs(&mut self, assigned_addrs: &[Ipv4Cidr], local_addrs: &[Ipv4Cidr]) {
+        self.assigned_ipv4_addrs.clear();
+        self.assigned_ipv4_addrs.extend_from_slice(assigned_addrs);
+        self.local_ipv4_addrs.clear();
+        self.local_ipv4_addrs.extend_from_slice(local_addrs);
+    }
 
+    fn remove_pending_ipv4_source(&mut self, addr: crate::ip::Ipv4Address) {
+        Self::remove_pending_packets_with_source(&mut self.pending_tx, addr);
+    }
+
+    fn sync_neighbors(&mut self, neighbors: &[(IpAddress, [u8; 6])]) {
         self.neighbors.clear();
         for (dst_addr, hardware_addr) in neighbors {
             self.neighbors.insert(
@@ -781,6 +830,15 @@ impl NetDeviceOps for EthernetDevice {
                 }),
             );
         }
+    }
+}
+
+impl EthernetDevice {
+    fn remove_pending_packets_with_source(
+        pending_tx: &mut VecDeque<PendingTxPacket>,
+        addr: crate::ip::Ipv4Address,
+    ) {
+        pending_tx.retain(|pending| pending.source_addr != addr);
     }
 }
 
@@ -808,7 +866,7 @@ fn map_dev_err(err: DriverError) -> KError {
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::{boxed::Box, vec::Vec};
+    use alloc::{boxed::Box, vec, vec::Vec};
     use core::{
         sync::atomic::{AtomicUsize, Ordering},
         task::{RawWaker, RawWakerVTable, Waker},
@@ -848,6 +906,53 @@ mod tests {
         // SAFETY: the raw waker data pointer is the leaked `AtomicUsize` above
         // and the vtable only performs atomic increments on that allocation.
         unsafe { Waker::from_raw(raw) }
+    }
+
+    fn pending_packet(source: crate::ip::Ipv4Address) -> PacketBuf {
+        let mut bytes = vec![0; 20];
+        bytes[0] = 0x45;
+        let packet_len = bytes.len() as u16;
+        bytes[2..4].copy_from_slice(&packet_len.to_be_bytes());
+        bytes[12..16].copy_from_slice(&source.octets());
+        bytes[16..20].copy_from_slice(&[198, 51, 100, 1]);
+        PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceTx)
+    }
+
+    #[def_test]
+    fn remove_pending_packets_with_deleted_source() {
+        let deleted = crate::ip::Ipv4Address::new(192, 0, 2, 7);
+        let retained = crate::ip::Ipv4Address::new(192, 0, 2, 8);
+        let mut pending = VecDeque::from([
+            PendingTxPacket {
+                next_hop: IpAddress::Ipv4(crate::ip::Ipv4Address::new(198, 51, 100, 1)),
+                source_addr: deleted,
+                packet: pending_packet(deleted),
+            },
+            PendingTxPacket {
+                next_hop: IpAddress::Ipv4(crate::ip::Ipv4Address::new(198, 51, 100, 2)),
+                source_addr: retained,
+                packet: pending_packet(retained),
+            },
+        ]);
+
+        EthernetDevice::remove_pending_packets_with_source(&mut pending, deleted);
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending.front().unwrap().source_addr, retained);
+    }
+
+    #[def_test]
+    fn limited_broadcast_accepts_unspecified_ipv4_source() {
+        assert!(is_ipv4_source_usable_for_egress(
+            IpAddress::Ipv4(crate::ip::Ipv4Address::BROADCAST),
+            crate::ip::Ipv4Address::UNSPECIFIED,
+            &[],
+        ));
+        assert!(!is_ipv4_source_usable_for_egress(
+            IpAddress::Ipv4(crate::ip::Ipv4Address::new(192, 0, 2, 1)),
+            crate::ip::Ipv4Address::UNSPECIFIED,
+            &[],
+        ));
     }
 
     fn test_source(sources: &mut NetRxSources, id: usize) -> Arc<NetRxPollSource> {

@@ -19,7 +19,11 @@ use super::{
     },
     *,
 };
-use crate::device::{LINK_FLAG_UP, LINK_FLAG_VOLATILE, LinkConfigUpdate, LinkKind, LinkSnapshot};
+use crate::{
+    device::{LINK_FLAG_UP, LINK_FLAG_VOLATILE, LinkConfigUpdate, LinkKind, LinkSnapshot},
+    router::Ipv4AddrEntry,
+    service::ExistingIpv4AddrAction,
+};
 
 #[derive(Clone, Debug)]
 pub(super) struct LinkUpdateRequest {
@@ -88,18 +92,6 @@ struct RouteAttrs {
 struct NeighAttrs {
     dst: Option<IpAddress>,
     lladdr: Option<[u8; 6]>,
-}
-
-impl From<AddrRequest> for AddrState {
-    fn from(value: AddrRequest) -> Self {
-        Self {
-            index: value.index,
-            family: value.family,
-            prefix_len: value.prefix_len,
-            scope: value.scope,
-            address: value.address,
-        }
-    }
 }
 
 impl From<RouteRequest> for RouteState {
@@ -269,26 +261,15 @@ fn dump_addrs(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
         .copied()
         .filter(|family| *family != 0)
         .unwrap_or(wire_route::FAMILY_IPV4);
-    let state = route_state();
-    let links = if SERVICE.is_inited() {
-        SERVICE.link_snapshots()
-    } else {
-        Vec::new()
-    };
-    state
-        .addrs
+    if family != wire_route::FAMILY_IPV4 || !SERVICE.is_inited() {
+        return Vec::new();
+    }
+    SERVICE
+        .ipv4_addr_snapshots()
         .into_iter()
-        .filter(|addr| addr.family == family)
-        .map(|addr| {
-            let label = links
-                .iter()
-                .find(|link| link.ifindex as u32 == addr.index)
-                .map(|link| link.name.as_str())
-                .unwrap_or("");
-            NetlinkPacket {
-                from: NetlinkAddr { pid: 0, groups: 0 },
-                data: build_addr_message(request, addr, label),
-            }
+        .map(|snapshot| NetlinkPacket {
+            from: NetlinkAddr { pid: 0, groups: 0 },
+            data: build_addr_message(request, snapshot.entry, &snapshot.label),
         })
         .collect()
 }
@@ -359,6 +340,7 @@ pub(super) fn update_link_state(request: LinkUpdateRequest) -> Result<(), LinuxE
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
+    let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
 
     let current_flags = SERVICE
         .link_snapshot_for_ifindex(request.index)
@@ -386,39 +368,81 @@ pub(super) fn update_link_state(request: LinkUpdateRequest) -> Result<(), LinuxE
 }
 
 pub(super) fn add_addr_state(request: AddrRequest, flags: u16) -> Result<(), LinuxError> {
-    ensure_link_exists(request.index)?;
-    mutate_route_state(|state| {
-        let existing = state
-            .addrs
-            .iter()
-            .position(|addr| same_addr(addr, &request));
-        if let Some(pos) = existing {
-            if flags & NLM_F_REPLACE != 0 {
-                state.addrs[pos] = request.into();
-                return Ok(());
-            }
-            return Err(LinuxError::EEXIST);
-        }
-        if flags & NLM_F_CREATE == 0 && flags & NLM_F_EXCL != 0 {
-            return Err(LinuxError::ENOENT);
-        }
-        state.addrs.push(request.into());
-        Ok(())
-    })
+    let entry = ipv4_addr_entry_from_request(request)?;
+    if !SERVICE.is_inited() {
+        return Err(LinuxError::ENODEV);
+    }
+    let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
+    let existing_action = if flags & NLM_F_REPLACE != 0 && flags & NLM_F_EXCL == 0 {
+        ExistingIpv4AddrAction::Keep
+    } else {
+        ExistingIpv4AddrAction::Reject
+    };
+    SERVICE.add_ipv4_addr(entry, existing_action)
 }
 
 pub(super) fn del_addr_state(request: AddrRequest) -> Result<(), LinuxError> {
-    mutate_route_state(|state| {
-        let before = state.addrs.len();
-        state.addrs.retain(|addr| !same_addr(addr, &request));
-        if state.addrs.len() == before {
-            return Err(LinuxError::EADDRNOTAVAIL);
+    let entry = ipv4_addr_entry_from_request(request)?;
+    if !SERVICE.is_inited() {
+        return Err(LinuxError::ENODEV);
+    }
+    let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
+    let new_state = {
+        let mut state = ROUTE_STATE.write();
+        if !SERVICE.remove_ipv4_addr(entry)? {
+            return Ok(());
         }
-        Ok(())
-    })
+        state
+            .routes
+            .retain(|route| route.prefsrc != Some(request.address));
+        state.clone()
+    };
+    SERVICE.sync_netlink(&new_state);
+    Ok(())
+}
+
+pub(crate) fn remove_device_state(id: kdevice::DeviceId) -> bool {
+    if !SERVICE.is_inited() {
+        return false;
+    }
+    let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
+    if !ROUTE_STATE.is_inited() {
+        return SERVICE.remove_device_by_model_id(id).is_some();
+    }
+
+    let new_state = {
+        let mut state = ROUTE_STATE.write();
+        let Some(removal) = SERVICE.remove_device_by_model_id(id) else {
+            return false;
+        };
+        state.routes.retain(|route| {
+            route.oif != removal.ifindex
+                && !removal
+                    .orphaned_ipv4_sources
+                    .iter()
+                    .any(|source| route.prefsrc == Some(IpAddress::Ipv4((*source).into())))
+        });
+        for route in &mut state.routes {
+            if route.oif > removal.ifindex {
+                route.oif -= 1;
+            }
+        }
+        state
+            .neighs
+            .retain(|neigh| neigh.ifindex != removal.ifindex);
+        for neigh in &mut state.neighs {
+            if neigh.ifindex > removal.ifindex {
+                neigh.ifindex -= 1;
+            }
+        }
+        state.clone()
+    };
+    SERVICE.sync_netlink(&new_state);
+    true
 }
 
 pub(super) fn add_route_state(request: RouteRequest, flags: u16) -> Result<(), LinuxError> {
+    let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
     if request.oif != 0 {
         ensure_link_exists(request.oif)?;
     }
@@ -440,6 +464,7 @@ pub(super) fn add_route_state(request: RouteRequest, flags: u16) -> Result<(), L
 }
 
 pub(super) fn del_route_state(request: RouteRequest) -> Result<(), LinuxError> {
+    let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
     mutate_route_state(|state| {
         let before = state.routes.len();
         state.routes.retain(|route| !same_route(route, &request));
@@ -451,6 +476,7 @@ pub(super) fn del_route_state(request: RouteRequest) -> Result<(), LinuxError> {
 }
 
 pub(super) fn add_neigh_state(request: NeighRequest, flags: u16) -> Result<(), LinuxError> {
+    let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
     ensure_link_exists(request.ifindex)?;
     mutate_route_state(|state| {
         let existing = state
@@ -479,11 +505,22 @@ fn ensure_link_exists(ifindex: u32) -> Result<(), LinuxError> {
     exists.then_some(()).ok_or(LinuxError::ENODEV)
 }
 
-fn same_addr(addr: &AddrState, request: &AddrRequest) -> bool {
-    addr.index == request.index
-        && addr.family == request.family
-        && addr.prefix_len == request.prefix_len
-        && addr.address == request.address
+fn ipv4_addr_entry_from_request(request: AddrRequest) -> Result<Ipv4AddrEntry, LinuxError> {
+    let IpAddress::Ipv4(address) = request.address else {
+        return Err(LinuxError::EAFNOSUPPORT);
+    };
+    if request.family != wire_route::FAMILY_IPV4 {
+        return Err(LinuxError::EAFNOSUPPORT);
+    }
+    if request.prefix_len > 32 {
+        return Err(LinuxError::EINVAL);
+    }
+    let dev = request.index.checked_sub(1).ok_or(LinuxError::ENODEV)? as usize;
+    Ok(Ipv4AddrEntry {
+        dev,
+        addr: crate::ip::Ipv4Cidr::new(address.into(), request.prefix_len),
+        scope: request.scope,
+    })
 }
 
 fn same_route(route: &RouteState, request: &RouteRequest) -> bool {
@@ -513,7 +550,15 @@ pub(super) fn parse_link_update(payload: &[u8]) -> Result<LinkUpdateRequest, Lin
 
 fn parse_addr_request(payload: &[u8]) -> Result<AddrRequest, LinuxError> {
     let info = IfAddrMsg::read(payload)?;
+    // Linux derives the legacy IPv4 `ifa_flags` bits from address ordering
+    // and lifetimes, so this permanent-address subset accepts the field
+    // without treating it as independently mutable state.
     let attrs = parse_addr_attrs(info.family, parse_attrs(&payload[IfAddrMsg::SIZE..])?)?;
+    if let (Some(address), Some(local)) = (attrs.address, attrs.local)
+        && address != local
+    {
+        return Err(LinuxError::EOPNOTSUPP);
+    }
     Ok(AddrRequest {
         index: info.index,
         family: info.family,
@@ -652,18 +697,18 @@ fn build_link_message(request: &NlMsgHeader, link: LinkSnapshot) -> Vec<u8> {
     build_nlmsg(RTM_NEWLINK, request.seq, NLM_F_MULTI, payload)
 }
 
-fn build_addr_message(request: &NlMsgHeader, addr: AddrState, label: &str) -> Vec<u8> {
+fn build_addr_message(request: &NlMsgHeader, addr: Ipv4AddrEntry, label: &str) -> Vec<u8> {
     let mut payload = Vec::new();
     IfAddrMsg {
-        family: addr.family,
-        prefix_len: addr.prefix_len,
+        family: wire_route::FAMILY_IPV4,
+        prefix_len: addr.addr.prefix_len(),
         flags: 0,
         scope: addr.scope,
-        index: addr.index,
+        index: addr.dev as u32 + 1,
     }
     .write(&mut payload);
 
-    let ip_bytes = ip_addr_bytes(addr.address);
+    let ip_bytes = ip_addr_bytes(IpAddress::Ipv4(addr.addr.address().into()));
     push_attr(&mut payload, wire_addr::attr::ADDRESS, &ip_bytes);
     push_attr(&mut payload, wire_addr::attr::LOCAL, &ip_bytes);
     push_attr_str(&mut payload, wire_addr::attr::LABEL, label);
@@ -753,57 +798,11 @@ where
 }
 
 pub(crate) fn build_initial_state(
-    lo_ip: IpCidr,
     eth0_ip: Option<IpCidr>,
     gateway: Option<IpAddress>,
 ) -> RtnetlinkState {
     let mut state = RtnetlinkState::default();
-    state.addrs.push(AddrState {
-        index: 1,
-        family: match lo_ip.address() {
-            IpAddress::Ipv4(_) => wire_route::FAMILY_IPV4,
-            IpAddress::Ipv6(_) => wire_route::FAMILY_IPV6,
-        },
-        prefix_len: lo_ip.prefix_len(),
-        scope: wire_route::SCOPE_HOST,
-        address: lo_ip.address(),
-    });
-    state.routes.push(RouteState {
-        family: wire_route::FAMILY_IPV4,
-        dst_len: lo_ip.prefix_len(),
-        table: wire_route::TABLE_MAIN,
-        protocol: wire_route::PROTOCOL_BOOT,
-        scope: wire_route::SCOPE_HOST,
-        route_type: wire_route::TYPE_UNICAST,
-        oif: 1,
-        dst: Some(lo_ip.address()),
-        gateway: None,
-        prefsrc: Some(lo_ip.address()),
-    });
-
     if let Some(eth0_ip) = eth0_ip {
-        state.addrs.push(AddrState {
-            index: 2,
-            family: match eth0_ip.address() {
-                IpAddress::Ipv4(_) => wire_route::FAMILY_IPV4,
-                IpAddress::Ipv6(_) => wire_route::FAMILY_IPV6,
-            },
-            prefix_len: eth0_ip.prefix_len(),
-            scope: wire_route::SCOPE_UNIVERSE,
-            address: eth0_ip.address(),
-        });
-        state.routes.push(RouteState {
-            family: wire_route::FAMILY_IPV4,
-            dst_len: 32,
-            table: wire_route::TABLE_MAIN,
-            protocol: wire_route::PROTOCOL_BOOT,
-            scope: wire_route::SCOPE_HOST,
-            route_type: wire_route::TYPE_UNICAST,
-            oif: 1,
-            dst: Some(eth0_ip.address()),
-            gateway: None,
-            prefsrc: Some(eth0_ip.address()),
-        });
         state.routes.push(RouteState {
             family: wire_route::FAMILY_IPV4,
             dst_len: 0,

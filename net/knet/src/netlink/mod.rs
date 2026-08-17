@@ -29,10 +29,13 @@ mod socket;
 mod tests;
 mod wire;
 
-pub(crate) use rtnetlink::{build_initial_state, init_route_state};
+pub(crate) use rtnetlink::{build_initial_state, init_route_state, remove_device_state};
 pub use socket::{NetlinkSocket, publish_kobject_uevent};
-pub(crate) const RT_TABLE_MAIN: u8 = wire::route::TABLE_MAIN;
-pub(crate) const RTN_UNICAST: u8 = wire::route::TYPE_UNICAST;
+pub(crate) use wire::route::{
+    PROTOCOL_BOOT as RTPROT_BOOT, PROTOCOL_KERNEL as RTPROT_KERNEL, SCOPE_HOST as RT_SCOPE_HOST,
+    SCOPE_LINK as RT_SCOPE_LINK, SCOPE_UNIVERSE as RT_SCOPE_UNIVERSE, TABLE_MAIN as RT_TABLE_MAIN,
+    TYPE_UNICAST as RTN_UNICAST,
+};
 
 pub const NETLINK_ROUTE: i32 = 0;
 pub(super) const NETLINK_KOBJECT_UEVENT: i32 = 15;
@@ -40,6 +43,7 @@ pub(super) const NLM_F_REQUEST: u16 = 0x0001;
 pub(super) const NLM_F_ACK: u16 = 0x0004;
 pub(super) const NLM_F_REPLACE: u16 = 0x0100;
 pub(super) const NLM_F_EXCL: u16 = 0x0200;
+#[cfg(unittest)]
 pub(super) const NLM_F_CREATE: u16 = 0x0400;
 pub(super) const NLM_F_MULTI: u16 = 0x0002;
 pub(super) const NLMSG_ERROR: u16 = 0x0002;
@@ -59,22 +63,11 @@ pub(super) const RTM_DELROUTE: u16 = 25;
 pub(super) const RTM_GETROUTE: u16 = 26;
 pub(super) const RTM_NEWNEIGH: u16 = 28;
 
-// Reserved for future kernel-originated route protocol handling.
-// pub(super) const RTPROT_KERNEL: u8 = 2;
 // pub(super) const RT_SCOPE_NOWHERE: u8 = 255;
 // pub(super) const RTM_NEWNEIGH_FAMILY: u8 = 0;
 
 pub(super) const ARPHRD_LOOPBACK: u16 = 772;
 pub(super) const ARPHRD_ETHER: u16 = 1;
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct AddrState {
-    pub(crate) index: u32,
-    pub(crate) family: u8,
-    pub(crate) prefix_len: u8,
-    pub(crate) scope: u8,
-    pub(crate) address: IpAddress,
-}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RouteState {
@@ -103,12 +96,14 @@ pub(crate) struct NeighState {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RtnetlinkState {
-    pub(crate) addrs: Vec<AddrState>,
     pub(crate) routes: Vec<RouteState>,
     pub(crate) neighs: Vec<NeighState>,
 }
 
 pub(super) static ROUTE_STATE: LazyInit<RwLock<RtnetlinkState>> = LazyInit::new();
+static_lock! {
+    pub(super) static RTNETLINK_MUTATION_LOCK: Mutex<()> = Mutex::new(());
+}
 static_lock! {
     pub(super) static UEVENT_SUBSCRIBERS: Mutex<Vec<Weak<NetlinkSocketInner>>> = Mutex::new(Vec::new());
 }

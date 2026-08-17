@@ -53,6 +53,7 @@ features = [
   "async",
   "medium-ethernet",
   "medium-ip",
+  "iface-max-addr-count-8",
   "proto-ipv4",
   "proto-ipv6",
   "auto-icmp-echo-reply",

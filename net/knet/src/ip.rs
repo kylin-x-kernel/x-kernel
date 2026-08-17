@@ -40,6 +40,10 @@ impl Ipv4Address {
     pub(crate) fn is_multicast(self) -> bool {
         (224..=239).contains(&self.0[0])
     }
+
+    pub(crate) fn is_unicast(self) -> bool {
+        !(self.is_unspecified() || self.is_broadcast() || self.is_multicast())
+    }
 }
 
 impl From<Ipv4Addr> for Ipv4Address {
@@ -193,6 +197,15 @@ impl Ipv4Cidr {
         self.prefix_len
     }
 
+    pub(crate) fn network(self) -> Self {
+        let mask = prefix_mask(self.prefix_len);
+        let addr = u32::from_be_bytes(self.address.octets()) & mask;
+        Self::new(
+            Ipv4Address::from_octets(addr.to_be_bytes()),
+            self.prefix_len,
+        )
+    }
+
     pub(crate) fn broadcast(self) -> Option<Ipv4Address> {
         if self.prefix_len > 32 {
             return None;
@@ -200,6 +213,10 @@ impl Ipv4Cidr {
         let mask = prefix_mask(self.prefix_len);
         let addr = u32::from_be_bytes(self.address.octets());
         Some(Ipv4Address::from_octets((addr | !mask).to_be_bytes()))
+    }
+
+    pub(crate) fn is_directed_broadcast(self, addr: Ipv4Address) -> bool {
+        self.prefix_len < 31 && self.broadcast() == Some(addr)
     }
 
     pub(crate) fn contains_addr(self, addr: &IpAddress) -> bool {

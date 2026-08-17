@@ -24,6 +24,9 @@ pub(crate) mod link {
 }
 
 pub(crate) mod addr {
+    #[cfg(unittest)]
+    pub(crate) const FLAG_PERMANENT: u8 = 0x80;
+
     pub(crate) mod attr {
         pub(crate) const ADDRESS: u16 = 1;
         pub(crate) const LOCAL: u16 = 2;
@@ -35,8 +38,10 @@ pub(crate) mod route {
     pub(crate) const FAMILY_IPV4: u8 = 2;
     pub(crate) const FAMILY_IPV6: u8 = 10;
     pub(crate) const TABLE_MAIN: u8 = 254;
+    pub(crate) const PROTOCOL_KERNEL: u8 = 2;
     pub(crate) const PROTOCOL_BOOT: u8 = 3;
     pub(crate) const SCOPE_UNIVERSE: u8 = 0;
+    pub(crate) const SCOPE_LINK: u8 = 253;
     // Reserved for future route deletion / nowhere-scope handling.
     // pub(crate) const SCOPE_NOWHERE: u8 = 255;
     pub(crate) const SCOPE_HOST: u8 = 254;

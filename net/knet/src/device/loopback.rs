@@ -114,6 +114,7 @@ impl NetDevice for LoopbackDevice {
         &mut self,
         ifindex: i32,
         next_hop: IpAddress,
+        _source_addr: IpAddress,
         mut packet: PacketBuf,
         _timestamp: MonotonicInstant,
     ) -> bool {
@@ -213,6 +214,7 @@ mod tests {
 
         assert!(!device.send_ip_packet(
             1,
+            IpAddress::Ipv4(crate::ip::Ipv4Address::new(127, 0, 0, 1)),
             IpAddress::Ipv4(crate::ip::Ipv4Address::new(127, 0, 0, 1)),
             packet,
             MonotonicInstant::ORIGIN,
