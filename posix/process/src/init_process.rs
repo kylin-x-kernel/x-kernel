@@ -126,6 +126,7 @@ pub fn spawn_init_process(
                 .resources()
                 .expect("init process must have live resources")
                 .fd_table()
+                .expect("init process must have a live fd table")
                 .write(),
             &fs_context,
         )

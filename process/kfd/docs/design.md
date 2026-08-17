@@ -45,7 +45,7 @@ posix/fs, posix/net, posix/mm, io-mpx
         v
 ┌─────────────────────────────────────────────┐
 │ kresources                                  │
-│  Arc<RwLock<FdTable>>                       │
+│  Option<Arc<RwLock<FdTable>>>               │
 └──────────────────┬──────────────────────────┘
                    │ read/write lock
                    v
@@ -90,7 +90,7 @@ Open(updated cloexec)
   │ duplicate_to
   ├──────────────► Open at new fd (Arc cloned)
   │
-  │ file_close_fd_locked / remove_range / remove_cloexec_files / remove_all_if_unshared
+  │ file_close_fd_locked / remove_range / remove_cloexec_files / final table drop
   v
 Free
 ```
@@ -121,23 +121,23 @@ Open
 再逐个删除。
 这样可以避免边遍历 `FlattenObjects` 边修改同一结构。
 
-### fd table 共享和关闭
+### fd table 共享和退出关闭
 
 ```text
-Arc strong_count > 1
-   │ remove_all_if_unshared
+Process A files ─┐
+                 ├──> Arc<RwLock<FdTable>>
+Process B files ─┘
+   │ first exit_files(): take this process owner
    v
-unchanged
-
-Arc strong_count == 1
-   │ remove_all_if_unshared
+table remains live for Process B
+   │ final exit_files()
    v
-all descriptors removed, lock dropped before descriptor close
+FdTable::drop(): remove and close all descriptors
 ```
 
-该路径用于进程资源释放。
-当 fd table 仍被其他进程或线程共享时，
-不会关闭所有 fd。
+进程退出只释放自己的 files owner，不根据瞬时 `Arc::strong_count` 猜测是否应该
+关闭共享表。最后一个 owner 消失时，`FdTable::drop()` 关闭剩余 descriptor；已经
+取得的临时 table capability 也按同一所有权规则延迟 final close。
 
 ## 算法流程
 
@@ -210,9 +210,10 @@ snapshot 创建后，原 fd 可以被关闭或复用，
 - 查找 fd、读取 `cloexec`：调用方持读锁即可。
 - 创建 `FdSnapshot`：调用方持读锁，克隆 `Arc<dyn FileLike>` 后释放锁。
 - 添加、删除、dup、设置 `cloexec`、close range：调用方必须持写锁。
-- `remove_all_if_unshared` 在持写锁时移除 descriptor，
-  把移除结果暂存在 `Vec` 中，
-  然后由 `ProcessResources` 在表锁外关闭 `FileDescriptor`。
+- 普通 close/exec/range 路径在持写锁时只移除 descriptor，再由
+  `ProcessResources` 在表锁外关闭。
+- final `FdTable::drop()` 只会在外层 `RwLock` 的所有 `Arc` 都已释放后运行；
+  此时表已经不可访问，可以直接 drain 并关闭剩余 descriptor。
 
 这样可以避免 `FileLike::drop` 或底层对象释放路径在持有 fd table 写锁时重入 fd 表。
 

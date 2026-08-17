@@ -188,7 +188,7 @@ kfd resources / kvfs / device and pipe implementations
 | F-08 | `syncfs` 目标不是文件或目录 | fd 指向 pipe/socket/设备 | 返回 `InvalidInput` | 当前同步请求失败 | 4 | downcast 后只 flush 文件系统对象 |
 | F-09 | `copy_file_range` 语义不完整 | 重叠和普通文件检查 TODO | 可能出现与 Linux 不一致的数据结果 | 相关应用复制行为异常 | 2 | 非零 flags 显式拒绝；其余限制实现前需要补充测试 |
 | F-10 | `fcntl` unsupported cmd 返回成功 | 兼容占位 | 应用误判某些控制操作已生效 | 可能产生行为差异 | 2 | warning 记录；有安全影响的命令应显式实现或拒绝 |
-| F-11 | `close_range(UNSHARE)` 资源复制失败 | 下层 unshare 实现异常 | 当前 API 没有错误承载 | fd 表隔离语义不完整 | 2 | `unshare_fd_table` 当前按不可失败路径使用 |
+| F-11 | `close_range(UNSHARE)` 无法取得 files owner | 进程退出已脱离 fd table owner | `unshare_fd_table` 返回 `NoSuchProcess` | 当前 syscall 失败，已脱离的 fd table 不会被重新安装 | 3 | `sys_close_range` 通过 `?` 将资源层错误传播为用户态 syscall 错误 |
 | F-12 | FIEMAP 输出容量不足或中途遇到坏用户页 | 调用者提供较小数组或不可写地址 | 返回已统计数量或 `BadAddress` | 当前查询失败，文件系统状态不变 | 3 | `FiemapExtentInfo` 达到容量后正常停止；writer 每项通过 `UserPtr` 写入并传播 copy fault |
 
 严重度定义：

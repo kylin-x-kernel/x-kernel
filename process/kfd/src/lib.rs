@@ -20,9 +20,12 @@ pub use self::{
 
 #[cfg(unittest)]
 mod tests {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
     use kpoll::IoEvents;
     use ktime_types::SystemTime;
-    use kvfs::{AnonInodeFs, DeviceId, FMode, FileOperations, OpenFlags, VfsFile};
+    use kvfs::{AnonInodeFs, DeviceId, FMode, FileOperations, OpenFlags, VfsFile, VfsResult};
     use linux_raw_sys::general::stat;
     use unittest::def_test;
 
@@ -33,6 +36,18 @@ mod tests {
     impl FileOperations for SnapshotTestFops {
         fn poll(&self, _file: &VfsFile) -> IoEvents {
             IoEvents::IN
+        }
+    }
+
+    struct FlushCountFops {
+        flushes: Arc<AtomicUsize>,
+        result: VfsResult<()>,
+    }
+
+    impl FileOperations for FlushCountFops {
+        fn flush(&self, _file: &VfsFile) -> VfsResult<()> {
+            self.flushes.fetch_add(1, Ordering::Relaxed);
+            self.result
         }
     }
 
@@ -47,6 +62,19 @@ mod tests {
                 kcred::initial_cred(),
             )
             .expect("snapshot test anon inode file opens")
+    }
+
+    fn flush_count_test_file(flushes: Arc<AtomicUsize>, result: VfsResult<()>) -> Arc<VfsFile> {
+        AnonInodeFs::global()
+            .get_file(
+                "[fd-table-drop-test]",
+                Arc::new(FlushCountFops { flushes, result }),
+                Arc::new(()),
+                FMode::READ,
+                OpenFlags::empty(),
+                kcred::initial_cred(),
+            )
+            .expect("fd table drop test file opens")
     }
 
     #[def_test]
@@ -122,5 +150,44 @@ mod tests {
             table.snapshot(fd),
             Err(kerrno::KError::BadFileDescriptor)
         ));
+    }
+
+    #[def_test]
+    fn test_fd_table_drop_closes_remaining_descriptors() {
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let mut table = FdTable::default();
+        table
+            .add_file(16, flush_count_test_file(flushes.clone(), Ok(())), false)
+            .unwrap();
+
+        drop(table);
+
+        assert_eq!(flushes.load(Ordering::Relaxed), 1);
+    }
+
+    #[def_test]
+    fn test_fd_table_drop_continues_after_flush_error() {
+        let failed_flushes = Arc::new(AtomicUsize::new(0));
+        let successful_flushes = Arc::new(AtomicUsize::new(0));
+        let mut table = FdTable::default();
+        table
+            .add_file(
+                16,
+                flush_count_test_file(failed_flushes.clone(), Err(kerrno::KError::Io)),
+                false,
+            )
+            .unwrap();
+        table
+            .add_file(
+                16,
+                flush_count_test_file(successful_flushes.clone(), Ok(())),
+                false,
+            )
+            .unwrap();
+
+        drop(table);
+
+        assert_eq!(failed_flushes.load(Ordering::Relaxed), 1);
+        assert_eq!(successful_flushes.load(Ordering::Relaxed), 1);
     }
 }

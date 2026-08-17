@@ -48,13 +48,13 @@ pub fn sys_close_range(first: i32, last: i32, flags: u32) -> KResult<isize> {
 
     let resources = kprocess::current_user_process().resources()?;
     if flags.contains(CloseRangeFlags::UNSHARE) {
-        resources.unshare_fd_table();
+        resources.unshare_fd_table()?;
     }
 
     if flags.contains(CloseRangeFlags::CLOEXEC) {
-        resources.set_cloexec_range(first, last);
+        resources.set_cloexec_range(first, last)?;
     } else {
-        resources.close_range(first, last);
+        resources.close_range(first, last)?;
     }
 
     Ok(0)

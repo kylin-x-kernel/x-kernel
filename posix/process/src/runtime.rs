@@ -334,8 +334,8 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
     process_exit::record_exited_thread_cpu_time(process, thread_utime, thread_stime);
 
     if is_last_thread {
-        if let Err(err) = process.close_all_fds() {
-            error!("close_all_fds on process exit failed: {err:?}");
+        if let Err(err) = process.exit_mm() {
+            error!("exit_mm on process exit failed: {err:?}");
         }
 
         // Detach shared memory before waking the parent, so that
@@ -347,8 +347,14 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
             error!("clear_tee_runtime_private on process exit failed: {err:?}");
         }
 
-        if let Err(err) = process.clear_exclusive_address_space() {
-            error!("clear address space on process exit failed: {err:?}");
+        if let Err(err) = process.exit_files() {
+            error!("exit_files on process exit failed: {err:?}");
+        }
+        if let Err(err) = process.exit_fs() {
+            error!("exit_fs on process exit failed: {err:?}");
+        }
+        if let Err(err) = process.exit_namespaces() {
+            error!("exit_namespaces on process exit failed: {err:?}");
         }
 
         process_exit::complete_process_exit(process);

@@ -16,7 +16,7 @@ syscall layer
    │
    v
 kresources
-   │ owns Arc<RwLock<FdTable>>
+   │ owns Option<Arc<RwLock<FdTable>>>
    │
    v
 ┌─────────────────────────────────────────────┐
@@ -114,9 +114,9 @@ let mut statx: statx = unsafe { core::mem::zeroed() };
    snapshot 不是 fd table 的实时视图。
 4. **fd table 修改独占**：
    所有插入、删除和 flag 修改都要求调用方持有 `RwLock<FdTable>` 写锁。
-5. **drop 不在表锁内执行**：
-   `remove_all_if_unshared` 先从表中取出 descriptor，
-   释放写锁后再关闭，降低释放路径重入风险。
+5. **关闭不持有仍可访问的表锁**：
+   普通 close 路径先从表中取出 descriptor，释放写锁后再关闭；final table drop
+   只在外层 `RwLock` 的所有 `Arc` 已消失后处理剩余 descriptor。
 6. **ABI 结构不泄露未初始化数据**：
    `stat` / `statx` 转换先全零初始化，
    再填充字段。
@@ -147,7 +147,7 @@ let mut statx: statx = unsafe { core::mem::zeroed() };
 | T-08 | `stat` / `statx` 未初始化字段泄露内核内存 | 高 | 直接构造 ABI 结构但未清零 reserved 字段 | 转换先 `zeroed()`，保留字段保持 0 |
 | T-09 | 低层槽位 API 被外部绕过资源策略或 descriptor flag 规则 | 中 | `add`、`add_at`、`remove`、`get_mut` 作为跨 crate API 暴露 | 已将这些 helper 收窄为 `pub(crate)`；外部路径使用高层 API |
 | T-10 | `FileLike` 默认方法返回值掩盖不支持操作 | 低 | 具体实现未覆盖 read/write/ioctl/mmap | 默认返回 `InvalidInput`、`NotATty` 或 `NoSuchDevice`；调用者按 errno 处理 |
-| T-11 | `Arc::strong_count` 判断期间出现新的共享者 | 中 | `remove_all_if_unshared` 与 fd table 引用复制并发 | 调用方的进程资源替换路径应串行化 fd table Arc 的发布；函数只在 strong count 为 1 时关闭 |
+| T-11 | 共享 fd table 永远不执行 final close | 中 | 退出进程保留自己的 table owner，仅在瞬时非共享时尝试清空 | `exit_files()` 无条件取走当前进程 owner；最后一个 `Arc` 释放时由 `FdTable::drop()` 关闭剩余 descriptor |
 | T-12 | procfs 或 exec 路径把 `FdSnapshot` 当成 live fd 权限 | 中 | snapshot 创建后原 fd 被关闭、复用或 flag 改变 | snapshot 只表示创建时的 open object；需要 live fd 状态的 syscall 必须重新查 fd table |
 
 影响等级定义：
@@ -208,9 +208,9 @@ let mut statx: statx = unsafe { core::mem::zeroed() };
 3. **`FileLike` errno 语义由实现者补充**：
    trait 默认方法只描述通用不支持操作，
    具体对象仍需在自身 crate 中说明 read/write/ioctl/mmap 的 errno 细节。
-4. **`remove_all_if_unshared` 依赖发布侧串行化**：
-   `Arc::strong_count` 只能表达当前引用数，
-   不能替代进程资源层对 fd table 替换的同步。
+4. **外部 table capability 可延迟 final close**：
+   procfs、select 等路径在退出前取得的 `Arc<RwLock<FdTable>>` 会保持表存活，
+   但退出后的新查询会返回 `NoSuchProcess`，且 capability 释放后仍会执行 final close。
 
 ## 其它说明（模板章节）
 
@@ -234,4 +234,4 @@ let mut statx: statx = unsafe { core::mem::zeroed() };
 - [ ] 新增 `FileLike` 默认方法不会把不支持操作伪装成成功。
 - [ ] `stat` / `statx` ABI 结构新增字段时保留字段仍清零。
 - [ ] exec 路径继续调用 `close_cloexec_files`。
-- [ ] 资源层替换 fd table 时保持 `Arc<RwLock<FdTable>>` 发布同步。
+- [ ] 资源层替换或释放 fd table 时保持 owner slot 原子切换，且不能在退出后重新安装。

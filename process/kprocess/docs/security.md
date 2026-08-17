@@ -43,6 +43,8 @@ kprocess / posix/process / ksyscall / ktty
    completion 归属于 `Process`，不依赖 `ProcessRuntime` 是否仍可升级。
 7. **弱 runtime 引用非拥有**：`Process` 只保存 `Weak<ProcessRuntime>`，
    不延长 runtime 生命周期；upgrade 失败时由上层折叠为 `NoSuchProcess` 等语义错误。
+   runtime 内的 files、`FsStruct` 和 `NsProxy` owner 可在 runtime 对象仍存活时独立置空，
+   capability accessor 必须同时检查对应 owner 是否存在。
 8. **live 语义独立于弱 runtime 引用**：外部 `live process` 以 exited state 为准，
    不允许把“runtime 还没释放”误判成“进程仍然活着”。
 9. **publication 原子可见性**：task/process/group/session 目录在同一 publication 锁下更新，
@@ -90,6 +92,7 @@ kprocess / posix/process / ksyscall / ktty
 | T-18 | 退出进程的大块用户内存释放依赖普通 GC 任务调度 | 高 | fork/exec 风暴中 GC 任务迟迟不运行，已退出进程的地址空间资源堆积 | runtime 持有 `memspace::process_lifetime::MmUserHandle`；最后一个 handle 释放时同步清理 `MmSpace` 的用户映射，普通 `Arc<MmSpace>` observer 或 `MmPin` 不保留映射 |
 | T-19 | 父进程显式忽略 SIGCHLD 后 zombie 泄漏或被 wait 抢先回收 | 中 | 父进程设置 `SIGCHLD` 为 `SIG_IGN` 或 `SA_NOCLDWAIT`，child exit 与 parent wait / signal handler 并发 | child-exit 通知先准备 autoreap/queue 决策；autoreap child 跳过 waitable zombie 状态，先撤销 children/PID 身份，再提交 typed SIGCHLD payload，并在提交时按当前线程 mask 选择唤醒目标 |
 | T-20 | 失效 PID/TID 目录槽位无限保留 | 高 | wait/exit 只 retire slot 却不从 `BTreeMap` 删除，fork 密集工作负载累积数百 MiB RustHeap | `unpublish_task_if_matches`/`unpublish_process_if_matches` 在 retire 前用 `Arc::ptr_eq` 校验发布身份，再删除仍指向同一 cleanable slot 的目录项；复用后的 Reserved/Published 新身份不会被旧退出路径误退休 |
+| T-21 | zombie 或 reaper identity 继续固定 VFS mount | 高 | exited-state 已发布，但 runtime 的 fd table、`FsStruct` 或 `NsProxy` owner 仍存在 | 最后线程先取走 mm/files/fs/ns owner，再发布 exited state；空 owner 的 accessor 返回 `NoSuchProcess` |
 
 影响等级定义：
 
@@ -159,6 +162,8 @@ signal、scheduler 和 job-control 路径读取，调用者需要在上层执行
 - 新增凭据修改是否遵循 prepare/check/commit，且失败时不替换 committed `Arc`。
 - 需要文件权限的调用是否在 syscall 入口取得一次快照，而不是让下层反向查询 current task。
 - 新增 current-thread 尾段路径是否仍可通过稳定 `Process` 访问所需 runtime capability，且不会把已退出进程重新暴露为 live。
+- 新增退出 capability 是否在 exited-state 发布前取走；files、fs、namespace accessor
+  是否在 owner 已空时拒绝访问，且 owner drop 是否发生在对应 slot 锁外。
 - 新增地址空间退出清理是否只在最后一个 runtime `MmUserHandle` 释放时发生，且不得被普通 `Arc<MmSpace>` observer 或 `MmPin` 阻塞或破坏 `CLONE_VM` 共享方。
 - 新增用户映射访问路径是否走 live address-space 入口；退出后仅需观察 mm 对象的路径是否显式使用 teardown-observation pinned 入口，避免把 `MmPin` 当成 live user capability。
 - 新增 controlling terminal 行为是否保持 set-once 和 pointer-match unset 语义。

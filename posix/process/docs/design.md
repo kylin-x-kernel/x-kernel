@@ -60,14 +60,18 @@ entry / ksyscall
 1. 清理 `clear_child_tid` 并唤醒 futex。
 2. 遍历 robust futex list，标记 owner-dead。
 3. 从进程线程集合中摘除当前线程。
-4. 若为最后线程，关闭 fd、通知父进程、清理共享内存和可选 TEE 私有状态。
-5. 若触发 group exit，向线程组广播 `SIGKILL`。
+4. 若为最后线程，释放 mm owner，再清理共享内存和可选 TEE 私有状态。
+5. 依次释放 files、filesystem context 和 namespace owner。
+6. owner 全部释放后发布 process exit 并通知父进程。
+7. 若触发 group exit，向线程组广播 `SIGKILL`。
 
 ## 并发模型
 
 - 线程/进程基础状态由 `kprocess` 和其内部锁保护。
 - 本 crate 负责组织退出与信号路径的调用顺序，不重复持有额外全局状态。
 - robust futex owner-dead 标志通过原子位和等待队列协作。
+- owner slot 的 `take()` 与 capability 查询由各自 runtime 锁串行化；取出的对象在
+  slot 锁外 drop，避免资源析构重入 owner 锁。
 
 ## 设计决策
 

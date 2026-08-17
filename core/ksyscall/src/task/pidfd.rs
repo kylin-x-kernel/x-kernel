@@ -37,7 +37,7 @@ pub fn sys_pidfd_getfd(pidfd: i32, target_fd: i32, flags: u32) -> KResult<isize>
     pidfd
         .live_process()?
         .resources()?
-        .fd_table()
+        .fd_table()?
         .read()
         .get(target_fd as usize)
         .ok_or(KError::BadFileDescriptor)

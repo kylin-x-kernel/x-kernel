@@ -20,13 +20,13 @@ use linux_raw_sys::general::{RLIM_NLIMITS, RLIMIT_NOFILE};
 
 /// Process-owned resource state.
 ///
-/// This is the first owner boundary for process resources. More resource handles
-/// can move here later; for now it owns the rlimit set explicitly.
+/// The resource set owns limits and the detachable file descriptor table used
+/// by one process runtime.
 pub struct ProcessResources {
     /// Per-process resource limits.
     pub rlimits: RwLock<Rlimits>,
     /// The process-owned file descriptor table handle.
-    fd_table: RwLock<Arc<RwLock<FdTable>>>,
+    fd_table: RwLock<Option<Arc<RwLock<FdTable>>>>,
 }
 
 impl ProcessResources {
@@ -34,7 +34,7 @@ impl ProcessResources {
     pub fn new(user_stack_size: usize) -> Arc<Self> {
         Arc::new(Self {
             rlimits: RwLock::new(Rlimits::new(user_stack_size)),
-            fd_table: RwLock::new(FdTable::new_shared()),
+            fd_table: RwLock::new(Some(FdTable::new_shared())),
         })
     }
 
@@ -83,14 +83,23 @@ impl ProcessResources {
         self.set_rlimit(resource, Rlimit::new(current, max))
     }
 
-    /// Returns the current file descriptor table handle.
-    pub fn fd_table(&self) -> Arc<RwLock<FdTable>> {
-        self.fd_table.read().clone()
+    /// Returns the attached file descriptor table.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] after the process has released its
+    /// files owner.
+    pub fn fd_table(&self) -> KResult<Arc<RwLock<FdTable>>> {
+        self.fd_table.read().clone().ok_or(KError::NoSuchProcess)
     }
 
-    fn with_fd_table<R>(&self, access_fn: impl FnOnce(&RwLock<FdTable>) -> R) -> R {
-        let fd_table = self.fd_table.read();
-        access_fn((*fd_table).as_ref())
+    fn with_fd_table<R>(
+        &self,
+        access_fn: impl FnOnce(&RwLock<FdTable>) -> KResult<R>,
+    ) -> KResult<R> {
+        let owner = self.fd_table.read();
+        let fd_table = owner.as_ref().ok_or(KError::NoSuchProcess)?;
+        access_fn(fd_table)
     }
 
     fn close_descriptors(descriptors: impl IntoIterator<Item = FileDescriptor>) {
@@ -161,54 +170,82 @@ impl ProcessResources {
     }
 
     /// Closes all descriptors in the given inclusive range.
-    pub fn close_range(&self, first_fd: c_int, last_fd: c_int) {
+    pub fn close_range(&self, first_fd: c_int, last_fd: c_int) -> KResult<()> {
         let descriptors =
-            self.with_fd_table(|fd_table| fd_table.write().remove_range(first_fd, last_fd));
+            self.with_fd_table(|fd_table| Ok(fd_table.write().remove_range(first_fd, last_fd)))?;
         Self::close_descriptors(descriptors);
+        Ok(())
     }
 
     /// Marks all descriptors in the given inclusive range close-on-exec.
-    pub fn set_cloexec_range(&self, first_fd: c_int, last_fd: c_int) {
-        self.with_fd_table(|fd_table| fd_table.write().set_cloexec_range(first_fd, last_fd));
+    pub fn set_cloexec_range(&self, first_fd: c_int, last_fd: c_int) -> KResult<()> {
+        self.with_fd_table(|fd_table| {
+            fd_table.write().set_cloexec_range(first_fd, last_fd);
+            Ok(())
+        })
     }
 
     /// Closes all descriptors marked close-on-exec.
-    pub fn close_cloexec_files(&self) {
-        let descriptors = self.with_fd_table(|fd_table| fd_table.write().remove_cloexec_files());
+    pub fn close_cloexec_files(&self) -> KResult<()> {
+        let descriptors =
+            self.with_fd_table(|fd_table| Ok(fd_table.write().remove_cloexec_files()))?;
         Self::close_descriptors(descriptors);
+        Ok(())
     }
 
-    /// Closes all file descriptors when the table is not shared.
-    pub fn close_all_fds(&self) {
-        // Must NOT call self.fd_table() — that clones the inner Arc and
-        // bumps strong_count, tricking remove_all_if_unshared into returning
-        // early without closing any descriptors.
-        let descriptors = {
-            let guard = self.fd_table.read();
-            FdTable::remove_all_if_unshared(&guard)
+    /// Releases this process's file descriptor table owner.
+    ///
+    /// A table shared by multiple processes closes its descriptors when its
+    /// final owner is released.
+    pub fn exit_files(&self) {
+        let fd_table = self.fd_table.write().take();
+        drop(fd_table);
+    }
+
+    /// Replaces a shared fd table with a private clone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] after the files owner is released.
+    pub fn unshare_fd_table(&self) -> KResult<()> {
+        let old_table = {
+            let mut owner = self.fd_table.write();
+            let table = owner.as_ref().ok_or(KError::NoSuchProcess)?;
+            if Arc::strong_count(table) == 1 {
+                return Ok(());
+            }
+
+            let new_table = FdTable::clone_shared_from(table);
+            owner
+                .replace(new_table)
+                .expect("fd table owner was checked")
         };
-        Self::close_descriptors(descriptors);
+        drop(old_table);
+        Ok(())
     }
 
-    /// Replaces the current fd table with an unshared clone.
-    pub fn unshare_fd_table(&self) {
-        let old_table = self.fd_table();
-        let new_table = FdTable::clone_shared_from(&old_table);
-        self.replace_fd_table(new_table);
-    }
-
-    /// Replaces the file descriptor table handle.
-    pub fn replace_fd_table(&self, table: Arc<RwLock<FdTable>>) -> Arc<RwLock<FdTable>> {
-        core::mem::replace(&mut *self.fd_table.write(), table)
+    /// Replaces the attached file descriptor table.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] after the files owner is released;
+    /// an exited process cannot acquire a new table.
+    pub fn replace_fd_table(&self, table: Arc<RwLock<FdTable>>) -> KResult<Arc<RwLock<FdTable>>> {
+        let mut owner = self.fd_table.write();
+        let old_table = owner.take().ok_or(KError::NoSuchProcess)?;
+        *owner = Some(table);
+        Ok(old_table)
     }
 }
 
 #[cfg(unittest)]
 mod tests {
+    use alloc::sync::Arc;
+
     use krlimit::Rlimit;
     use unittest::def_test;
 
-    use super::ProcessResources;
+    use super::{FdTable, ProcessResources};
 
     #[def_test]
     fn test_process_resources_default_limits() {
@@ -218,7 +255,7 @@ mod tests {
             resources.rlimits.read()[linux_raw_sys::general::RLIMIT_STACK].current,
             0x80000
         );
-        assert_eq!(resources.fd_table().read().count(), 0);
+        assert_eq!(resources.fd_table().unwrap().read().count(), 0);
     }
 
     #[def_test]
@@ -282,5 +319,37 @@ mod tests {
                 .unwrap_err(),
             kerrno::KError::OperationNotPermitted
         );
+    }
+
+    #[def_test]
+    fn test_exit_files_detaches_fd_table() {
+        let resources = ProcessResources::new(0x80000);
+
+        resources.exit_files();
+
+        assert_eq!(
+            resources.fd_table().err(),
+            Some(kerrno::KError::NoSuchProcess)
+        );
+        assert_eq!(
+            resources.replace_fd_table(FdTable::new_shared()).err(),
+            Some(kerrno::KError::NoSuchProcess)
+        );
+        resources.exit_files();
+    }
+
+    #[def_test]
+    fn test_shared_fd_table_lives_until_last_files_owner_exits() {
+        let first = ProcessResources::new(0x80000);
+        let second = ProcessResources::new(0x80000);
+        let shared = first.fd_table().unwrap();
+        let weak = Arc::downgrade(&shared);
+        drop(second.replace_fd_table(shared).unwrap());
+
+        first.exit_files();
+        assert!(weak.upgrade().is_some());
+
+        second.exit_files();
+        assert!(weak.upgrade().is_none());
     }
 }

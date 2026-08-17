@@ -121,10 +121,10 @@ pub enum ForkFdTable {
 pub(crate) struct ProcessRuntime {
     process: Arc<Process>,
     resources: Arc<ProcessResources>,
-    fs_context: Arc<Mutex<FsStruct>>,
+    fs_context: RwLock<Option<Arc<Mutex<FsStruct>>>>,
     posix_state: ProcessPosixState,
     runtime_state: ProcessRuntimeState,
-    nsproxy: RwLock<Arc<NsProxy>>,
+    nsproxy: RwLock<Option<Arc<NsProxy>>>,
     signal_manager: Arc<ProcessSignalManager>,
     #[cfg(feature = "tee")]
     tee_ta_ctx: RwLock<TeeTaCtx>,
@@ -158,9 +158,17 @@ impl AttachedForkProcess {
         }
     }
 
-    fn into_process(mut self) -> Arc<Process> {
+    fn commit(mut self) {
+        drop(
+            self.process
+                .take()
+                .expect("attached fork process must be present"),
+        );
+    }
+
+    fn process(&self) -> &Arc<Process> {
         self.process
-            .take()
+            .as_ref()
             .expect("attached fork process must be present")
     }
 }
@@ -249,10 +257,10 @@ impl ProcessRuntime {
             #[cfg(feature = "tipc")]
             tipc_handles: RwLock::new(TipcHandleTable::new()),
             resources: ProcessResources::new(config.user_stack_size),
-            fs_context,
+            fs_context: RwLock::new(Some(fs_context)),
             posix_state,
             runtime_state,
-            nsproxy: RwLock::new(nsproxy),
+            nsproxy: RwLock::new(Some(nsproxy)),
             signal_manager: Arc::new(ProcessSignalManager::new(
                 signal_actions,
                 config.signal_trampoline,
@@ -347,23 +355,33 @@ impl ProcessRuntime {
         self.runtime_state.mm_id()
     }
 
-    pub(crate) fn clear_exclusive_address_space(&self) -> bool {
-        self.runtime_state.clear_exclusive_address_space()
+    pub(crate) fn exit_mm(&self) -> bool {
+        self.runtime_state.exit_mm()
     }
 
-    /// Returns the process-owned filesystem context.
-    pub fn fs_context(&self) -> Arc<Mutex<FsStruct>> {
-        self.fs_context.clone()
+    /// Returns the process-owned filesystem context while it remains attached.
+    pub fn fs_context(&self) -> Option<Arc<Mutex<FsStruct>>> {
+        self.fs_context.read().clone()
     }
 
-    /// Returns the namespace proxy.
-    pub fn nsproxy(&self) -> Arc<NsProxy> {
+    /// Returns the namespace proxy while it remains attached.
+    pub fn nsproxy(&self) -> Option<Arc<NsProxy>> {
         self.nsproxy.read().clone()
     }
 
-    /// Returns the UTS namespace.
-    pub fn uts_ns(&self) -> Arc<kns::UtsNamespace> {
-        self.nsproxy.read().uts_ns().clone()
+    /// Returns the UTS namespace while the namespace proxy remains attached.
+    pub fn uts_ns(&self) -> Option<Arc<kns::UtsNamespace>> {
+        self.nsproxy().map(|nsproxy| nsproxy.uts_ns().clone())
+    }
+
+    pub(crate) fn exit_fs(&self) {
+        let fs_context = self.fs_context.write().take();
+        drop(fs_context);
+    }
+
+    pub(crate) fn exit_namespaces(&self) {
+        let nsproxy = self.nsproxy.write().take();
+        drop(nsproxy);
     }
 
     /// Returns the top address of the user heap.
@@ -441,15 +459,15 @@ pub(crate) fn fork_process_runtime(
 
     let address_space = prepare_fork_address_space(parent, config.address_space)?;
     let signal_actions = prepare_fork_signal_actions(parent, config.signal_actions);
-    let process = attached_process.into_process();
     let process_runtime = finish_fork_runtime(
         parent,
-        process,
+        attached_process.process().clone(),
         fs_namespaces,
         address_space,
         signal_actions,
         config,
-    );
+    )?;
+    attached_process.commit();
 
     Ok((process_runtime, leader_task_number))
 }
@@ -458,7 +476,7 @@ fn prepare_fork_fs_and_namespaces(
     parent: &Arc<ProcessRuntime>,
     config: &ProcessForkConfig,
 ) -> KResult<ForkFsNamespaces> {
-    let parent_fs_context = parent.fs_context();
+    let parent_fs_context = parent.fs_context().ok_or(KError::NoSuchProcess)?;
     let fs_context = if matches!(config.fs, ForkFs::Shared) {
         if parent_fs_context.lock().in_exec() {
             return Err(KError::WouldBlock);
@@ -468,15 +486,12 @@ fn prepare_fork_fs_and_namespaces(
         Arc::new(Mutex::new(parent_fs_context.lock().clone_for_process()))
     };
 
+    let parent_nsproxy = parent.nsproxy().ok_or(KError::NoSuchProcess)?;
     let nsproxy_result = if matches!(config.fs, ForkFs::Shared) {
-        parent
-            .nsproxy()
-            .clone_for_child(config.namespace_flags, NamespaceFsContext::Shared)
+        parent_nsproxy.clone_for_child(config.namespace_flags, NamespaceFsContext::Shared)
     } else {
         let mut fs = fs_context.lock();
-        parent
-            .nsproxy()
-            .clone_for_child(config.namespace_flags, NamespaceFsContext::Private(&mut fs))
+        parent_nsproxy.clone_for_child(config.namespace_flags, NamespaceFsContext::Private(&mut fs))
     };
     let nsproxy = nsproxy_result.map_err(|err| match err {
         kns::CloneNsError::InvalidFlagCombination => KError::InvalidInput,
@@ -529,7 +544,7 @@ fn finish_fork_runtime(
     address_space: ForkAddressSpaceState,
     signal_actions: Arc<SpinNoIrq<SignalActions>>,
     config: ProcessForkConfig,
-) -> Arc<ProcessRuntime> {
+) -> KResult<Arc<ProcessRuntime>> {
     let exec_metadata = parent.exec_metadata();
     let process_runtime = ProcessRuntime::new_with_nsproxy_and_mm_user(
         process,
@@ -547,11 +562,11 @@ fn finish_fork_runtime(
     if matches!(config.fd_table, ForkFdTable::Shared) {
         process_runtime
             .resources()
-            .replace_fd_table(parent.resources().fd_table());
+            .replace_fd_table(parent.resources().fd_table()?)?;
     } else {
-        let fd_table = kfd::FdTable::clone_shared_from(&parent.resources().fd_table());
-        process_runtime.resources().replace_fd_table(fd_table);
+        let fd_table = kfd::FdTable::clone_shared_from(&parent.resources().fd_table()?);
+        process_runtime.resources().replace_fd_table(fd_table)?;
     }
 
-    process_runtime
+    Ok(process_runtime)
 }

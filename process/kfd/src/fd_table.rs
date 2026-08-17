@@ -217,21 +217,19 @@ impl FdTable {
         }
         removed
     }
+}
 
-    /// Removes all descriptors when the table is not shared.
-    pub fn remove_all_if_unshared(fd_table: &Arc<RwLock<Self>>) -> Vec<FileDescriptor> {
-        if Arc::strong_count(fd_table) > 1 {
-            return Vec::new();
+impl Drop for FdTable {
+    fn drop(&mut self) {
+        // Final owner teardown cannot return close errors. Keep closing so one
+        // failed flush does not retain the remaining descriptors.
+        loop {
+            let next_fd = self.ids().next();
+            let Some(fd) = next_fd else {
+                break;
+            };
+            let descriptor = self.remove(fd).expect("descriptor id must remain present");
+            let _ = descriptor.close();
         }
-
-        let mut table = fd_table.write();
-        let ids: Vec<usize> = table.ids().collect();
-        let mut removed = Vec::with_capacity(ids.len());
-        for id in ids {
-            if let Some(descriptor) = table.remove(id) {
-                removed.push(descriptor);
-            }
-        }
-        removed
     }
 }

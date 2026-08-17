@@ -71,7 +71,7 @@ fn do_select(
     );
 
     let resources = kprocess::current_resources();
-    let fd_table = resources.fd_table();
+    let fd_table = resources.fd_table()?;
     let fd_table = fd_table.read();
     let mut fds = Vec::with_capacity(nfds);
     let mut fd_indices = Vec::with_capacity(nfds);

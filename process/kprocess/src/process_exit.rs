@@ -45,6 +45,9 @@ pub fn finalize_process_exit_with_publication(
 
 /// Completes process exit after the last thread has finished runtime cleanup.
 ///
+/// The caller must release process-owned mm, files, filesystem context, and
+/// namespace capabilities before calling this function.
+///
 /// The parent wait event is the tail publication step: a parent woken by
 /// `wait*()` should only observe a fully resolved child-exit state, either a
 /// waitable zombie or an already-detached autoreaped child.

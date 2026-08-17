@@ -450,8 +450,10 @@ impl SimpleDirOps for ThreadFdDir {
         let Ok(resources) = task.as_thread().process().resources() else {
             return Box::new(iter::empty());
         };
-        let ids = resources
-            .fd_table()
+        let Ok(fd_table) = resources.fd_table() else {
+            return Box::new(iter::empty());
+        };
+        let ids = fd_table
             .read()
             .ids()
             .map(|id| Cow::Owned(id.to_string()))

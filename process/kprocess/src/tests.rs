@@ -757,8 +757,7 @@ fn test_exit_cleanup_clears_exclusive_address_space() {
     let (proc, _task) = process_with_address_space(8_130, mapped_test_address_space());
 
     assert!(
-        proc.clear_exclusive_address_space()
-            .expect("runtime must be attached"),
+        proc.exit_mm().expect("runtime must be attached"),
         "exclusive address space should be cleared during process exit"
     );
     assert!(
@@ -779,13 +778,58 @@ fn test_exit_cleanup_clears_exclusive_address_space() {
 }
 
 #[def_test(serial)]
+fn test_exit_owners_detach_before_process_exit_publication() {
+    let (proc, _task) = process_with_address_space(8_137, mapped_test_address_space());
+    let resources = proc.resources().expect("runtime must expose resources");
+
+    assert!(proc.address_space().is_ok());
+    assert!(resources.fd_table().is_ok());
+    assert!(proc.fs_context().is_ok());
+    assert!(proc.mnt_ns().is_ok());
+    assert!(proc.uts_ns().is_ok());
+
+    proc.exit_mm().expect("runtime must be attached");
+    proc.exit_files().expect("runtime must be attached");
+    proc.exit_fs().expect("runtime must be attached");
+    proc.exit_namespaces().expect("runtime must be attached");
+
+    assert!(!proc.is_exited());
+    assert_eq!(
+        proc.address_space().err(),
+        Some(kerrno::KError::NoSuchProcess)
+    );
+    assert_eq!(
+        resources.fd_table().err(),
+        Some(kerrno::KError::NoSuchProcess)
+    );
+    assert_eq!(proc.fs_context().err(), Some(kerrno::KError::NoSuchProcess));
+    assert_eq!(proc.mnt_ns().err(), Some(kerrno::KError::NoSuchProcess));
+    assert_eq!(proc.uts_ns().err(), Some(kerrno::KError::NoSuchProcess));
+
+    assert!(!proc.exit_mm().expect("owner release must be idempotent"));
+    proc.exit_files().expect("owner release must be idempotent");
+    proc.exit_fs().expect("owner release must be idempotent");
+    proc.exit_namespaces()
+        .expect("owner release must be idempotent");
+
+    process_exit::finalize_process_exit(&proc);
+    assert!(proc.is_exited());
+    assert_eq!(
+        resources.fd_table().err(),
+        Some(kerrno::KError::NoSuchProcess)
+    );
+    assert_eq!(proc.fs_context().err(), Some(kerrno::KError::NoSuchProcess));
+    assert_eq!(proc.mnt_ns().err(), Some(kerrno::KError::NoSuchProcess));
+    wait_reap::assert_reap_zombie_process(&proc);
+}
+
+#[def_test(serial)]
 fn test_exit_cleanup_ignores_non_runtime_address_space_refs() {
     let observed_address_space = mapped_test_address_space();
     let (proc, _task) = process_with_address_space(8_131, observed_address_space.clone());
 
     assert!(
-        proc.clear_exclusive_address_space()
-            .expect("runtime must be attached"),
+        proc.exit_mm().expect("runtime must be attached"),
         "temporary address-space references must not suppress final mm cleanup"
     );
     assert_eq!(
@@ -817,9 +861,7 @@ fn test_exit_cleanup_preserves_clone_vm_address_space_until_last_runtime_user() 
     let child_process = child.process().clone();
 
     assert!(
-        !parent
-            .clear_exclusive_address_space()
-            .expect("runtime must be attached"),
+        !parent.exit_mm().expect("runtime must be attached"),
         "shared VM mappings must remain while another process runtime still uses the mm"
     );
     assert_eq!(
@@ -830,7 +872,7 @@ fn test_exit_cleanup_preserves_clone_vm_address_space_until_last_runtime_user() 
 
     assert!(
         child_process
-            .clear_exclusive_address_space()
+            .exit_mm()
             .expect("child runtime must be attached"),
         "last shared VM runtime user should clear mappings"
     );
@@ -895,9 +937,7 @@ fn test_failed_shared_vm_fork_rolls_back_tree_relation() {
     let child_count_before = parent.children().len();
 
     assert!(
-        parent
-            .clear_exclusive_address_space()
-            .expect("runtime must be attached"),
+        parent.exit_mm().expect("runtime must be attached"),
         "test setup must release the last active address-space user"
     );
 
@@ -934,9 +974,7 @@ fn test_failed_private_vm_fork_after_parent_mm_teardown_rolls_back_tree_relation
     let child_count_before = parent.children().len();
 
     assert!(
-        parent
-            .clear_exclusive_address_space()
-            .expect("runtime must be attached"),
+        parent.exit_mm().expect("runtime must be attached"),
         "test setup must release the last active address-space user"
     );
 
@@ -962,6 +1000,41 @@ fn test_failed_private_vm_fork_after_parent_mm_teardown_rolls_back_tree_relation
         "failed fork must roll back the unpublished child relation"
     );
 
+    process_exit::finalize_process_exit(&parent);
+    wait_reap::assert_reap_zombie_process(&parent);
+}
+
+#[def_test(serial)]
+fn test_failed_fork_after_parent_files_exit_rolls_back_tree_relation() {
+    let (parent, parent_task) = process_with_address_space(8_138, mapped_test_address_space());
+    let child_count_before = parent.children().len();
+    parent.exit_files().expect("runtime must be attached");
+
+    let err = match parent_task
+        .as_thread()
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Private,
+            fs: ForkFs::Private,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::empty(),
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+        }) {
+        Ok(_) => panic!("fork must fail once the parent files owner is released"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err, kerrno::KError::NoSuchProcess);
+    assert_eq!(
+        parent.children().len(),
+        child_count_before,
+        "failed fork must roll back the unpublished child relation"
+    );
+
+    parent.exit_mm().expect("runtime must be attached");
+    parent.exit_fs().expect("runtime must be attached");
+    parent.exit_namespaces().expect("runtime must be attached");
     process_exit::finalize_process_exit(&parent);
     wait_reap::assert_reap_zombie_process(&parent);
 }

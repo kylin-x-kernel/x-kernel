@@ -91,7 +91,7 @@ impl ProcessRuntimeState {
     }
 
     /// Releases this runtime's address-space user and clears mappings for the last user.
-    pub(super) fn clear_exclusive_address_space(&self) -> bool {
+    pub(super) fn exit_mm(&self) -> bool {
         let mm_user = self.mm_user.lock().take();
         mm_user.is_some_and(MmUserHandle::release_and_clear_if_last)
     }
@@ -131,6 +131,6 @@ impl ProcessRuntimeState {
 
 impl Drop for ProcessRuntimeState {
     fn drop(&mut self) {
-        self.clear_exclusive_address_space();
+        self.exit_mm();
     }
 }

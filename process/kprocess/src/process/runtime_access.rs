@@ -145,20 +145,37 @@ impl Process {
         self.runtime().map(|runtime| runtime.resources().clone())
     }
 
-    /// Returns the filesystem context while runtime remains attached.
+    /// Returns the attached filesystem context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] when the runtime or filesystem owner
+    /// has been released.
     pub fn fs_context(&self) -> KResult<Arc<Mutex<FsStruct>>> {
-        self.runtime().map(|runtime| runtime.fs_context())
+        self.runtime()?.fs_context().ok_or(KError::NoSuchProcess)
     }
 
-    /// Returns the process UTS namespace while runtime remains attached.
+    /// Returns the process UTS namespace while its namespace owner is attached.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
+    /// has been released.
     pub fn uts_ns(&self) -> KResult<Arc<kns::UtsNamespace>> {
-        self.runtime().map(|runtime| runtime.uts_ns())
+        self.runtime()?.uts_ns().ok_or(KError::NoSuchProcess)
     }
 
-    /// Returns the process mount namespace while runtime remains attached.
+    /// Returns the process mount namespace while its namespace owner is attached.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
+    /// has been released.
     pub fn mnt_ns(&self) -> KResult<Arc<kns::MntNamespace>> {
-        self.runtime()
-            .map(|runtime| runtime.nsproxy().mnt_ns().clone())
+        self.runtime()?
+            .nsproxy()
+            .map(|nsproxy| nsproxy.mnt_ns().clone())
+            .ok_or(KError::NoSuchProcess)
     }
 
     /// Returns a live address-space capability while runtime remains attached.
@@ -184,13 +201,17 @@ impl Process {
         self.runtime().map(|runtime| runtime.mm_id())
     }
 
-    /// Releases this process runtime's address-space user.
+    /// Releases this process runtime's address-space owner.
     ///
     /// Returns `true` when this was the last runtime user and user mappings
     /// were cleared.
-    pub fn clear_exclusive_address_space(&self) -> KResult<bool> {
-        self.runtime()
-            .map(|runtime| runtime.clear_exclusive_address_space())
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] when the process runtime is no longer
+    /// reachable.
+    pub fn exit_mm(&self) -> KResult<bool> {
+        self.runtime().map(|runtime| runtime.exit_mm())
     }
 
     /// Returns the signal manager while runtime remains attached.
@@ -393,7 +414,7 @@ impl Process {
         runtime.set_heap_top(update.heap_top);
         runtime.reset_signal_actions();
         runtime.clear_posix_timers();
-        runtime.resources().close_cloexec_files();
+        runtime.resources().close_cloexec_files()?;
         #[cfg(feature = "tipc")]
         runtime.with_tipc_handles(|handles| handles.write().uctx_handle_close_all());
         #[cfg(feature = "tee")]
@@ -412,16 +433,42 @@ impl Process {
         self.runtime().map(|runtime| runtime.clear_posix_timers())
     }
 
-    /// Closes all process file descriptors.
-    pub fn close_all_fds(&self) -> KResult<()> {
-        self.runtime()
-            .map(|runtime| runtime.resources().close_all_fds())
+    /// Releases this process's file descriptor table owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] when the process runtime is no longer
+    /// reachable.
+    pub fn exit_files(&self) -> KResult<()> {
+        self.runtime()?.resources().exit_files();
+        Ok(())
+    }
+
+    /// Releases this process's filesystem context owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] when the process runtime is no longer
+    /// reachable.
+    pub fn exit_fs(&self) -> KResult<()> {
+        self.runtime()?.exit_fs();
+        Ok(())
+    }
+
+    /// Releases this process's namespace owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] when the process runtime is no longer
+    /// reachable.
+    pub fn exit_namespaces(&self) -> KResult<()> {
+        self.runtime()?.exit_namespaces();
+        Ok(())
     }
 
     /// Closes all process file descriptors marked `FD_CLOEXEC`.
     pub fn close_cloexec_files(&self) -> KResult<()> {
-        self.runtime()
-            .map(|runtime| runtime.resources().close_cloexec_files())
+        self.runtime()?.resources().close_cloexec_files()
     }
 
     /// Closes every TIPC handle before this process starts its new executable.

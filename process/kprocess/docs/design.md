@@ -92,11 +92,20 @@ Process
   ├─ pid_publication_slot
   └─ runtime_ref: Option<Weak<ProcessRuntime>>
               │
-              ├─ Thread
-              │    ├─ real_cred: RwLock<Arc<Cred>>
-              │    └─ cred: RwLock<Arc<Cred>>
-              │
               v
+        ProcessRuntime
+          ├─ mm_user: Option<MmUserHandle>
+          ├─ resources.fd_table: Option<Arc<RwLock<FdTable>>>
+          ├─ fs_context: Option<Arc<Mutex<FsStruct>>>
+          └─ nsproxy: Option<Arc<NsProxy>>
+              ^
+              │
+        Thread
+          ├─ process: Arc<Process>
+          ├─ runtime: Arc<ProcessRuntime>
+          ├─ real_cred: RwLock<Arc<Cred>>
+          └─ cred: RwLock<Arc<Cred>>
+
         ProcessGroup
           ├─ processes: BTreeMap<Pid, Arc<ProcessGroupMemberSlot>>
           └─ session: Arc<Session>
@@ -141,10 +150,12 @@ Created ──publish_task──> Running ──exit_thread(last)──> Exiting
 |----|----|----------|
 | `Created` | `Running` | publication 阶段把已准备好的 task 发布到 `Process` 自有线程成员表 |
 | `Running` | `Running` | 非最后一个线程调用 `exit_thread` |
-| `Running` | `Zombie` | 最后一个线程退出后调用 `Process::exit`，且 child-exit 策略要求父进程 wait |
-| `Running` | `Dead/Reaped` | 最后一个线程退出后 child-exit 策略要求 autoreap |
+| `Running` | `Exiting` | 最后一个线程离开线程成员表，开始释放进程 owner |
+| `Exiting` | `Zombie` | owner 已释放，且 child-exit 策略要求父进程 wait |
+| `Exiting` | `Dead/Reaped` | owner 已释放，且 child-exit 策略要求 autoreap |
 | `Zombie` | `Dead/Reaped` | 父进程 wait 路径调用 `free` 或 `wait_reap` 获得单赢家 |
 
+`Exiting` 是最后一个线程移除后、退出状态发布前的控制流阶段，不增加独立的状态字段。
 `Process::exit` 对 init 进程直接返回。
 普通进程退出时设置退出状态，并把子进程 reparent 到 init 进程。
 `free` 只允许已退出进程调用，并从父进程 children 表移除当前进程。
@@ -231,15 +242,22 @@ path + 旧 argv 的混合状态。
    之前，外部 `lookup::task(tid)`、`tgkill`、按 TID 的定时器投递都会看到
    `NoSuchProcess`；这是有意的可见性取舍，避免退出尾段仍被当作可命中目标，
    并防止 Published(dead Weak) TID 槽位滞留。
-2. 最后一个线程退出后，`posix-process` runtime glue 经 `process_exit` 语义模块触发稳定 `Process` 的 exited-state 转换。
-3. `Process` 内部在 process-domain 临界区内设置 `Zombie` 或 `Dead` 退出状态，
+2. 最后一个线程先释放 `MmUserHandle`，完成共享内存和进程私有状态清理，再依次
+   从 runtime 取走 fd table、`FsStruct` 和 `NsProxy` owner。每个 owner slot 都可
+   独立置空，重复释放安全返回；后续 capability 查询返回 `NoSuchProcess`。
+3. owner 释放完成后，`posix-process` 才通过 `process_exit` 发布稳定 `Process` 的
+   exited state。`Process` 内部在 process-domain 临界区内设置 `Zombie` 或 `Dead`，
    将所有子进程 reparent 到 init，并同时更新旧 parent children、新 parent
    children、child parent link 和 orphan 的退出通知 signal。reparent 会把
    orphan 的退出通知 signal 重置为 `SIGCHLD`，避免 init 继承非 `SIGCHLD`
    clone-child 通知语义。
 4. 默认 SIGCHLD 语义下，waitable zombie 之后该 `Process` 仍保持 published 身份，继续承担 wait/pidfd/reap 语义；与此同时，外部 `live` 查询必须开始把它视为不可操作对象。
-5. 弱 runtime 引用不在 zombie 转换时主动清除，而是允许当前退出线程在尾段继续通过稳定 `Process` 访问其已持有的运行态资源；其生命周期最终由 `Thread -> Arc<ProcessRuntime>` 强引用自然结束。
-6. 最后一个线程在发布 zombie 前释放当前 runtime 持有的 `memspace::process_lifetime::MmUserHandle`；当这是最后一个 active mm user 时同步释放 VMA 和用户页资源。共享 VM 场景通过从父 runtime 的 handle 派生新 user 继续持有，普通 `Arc<MmSpace>` observer 或 `MmPin` 不参与该判定。
+5. 弱 runtime 引用不在 zombie 转换时主动清除，但 runtime 中的 mm/files/fs/ns
+   owner 已经置空。当前退出线程可继续持有 runtime 壳完成尾段，zombie/reaper identity
+   不会因此继续固定 VFS path 或 mount。
+6. 当退出线程释放的是最后一个 active mm user 时，同步释放 VMA 和用户页资源。
+   共享 VM 场景通过从父 runtime 的 handle 派生新 user 继续持有，普通
+   `Arc<MmSpace>` observer 或 `MmPin` 不参与该判定。
 7. 退出路径在父进程可观察前，先把当前线程最终 CPU time 累计到 `ProcessLifecycleState`，并通过本进程 `exit_event` 通知 pidfd/poll 观察者。
 8. child-exit 通知对齐 Linux `do_notify_parent()`：默认忽略的 SIGCHLD 仍会排队；显式 `SIG_IGN` 或 `SA_NOCLDWAIT` 请求 autoreap。`SA_NOCLDWAIT` 保持 Linux 行为，除非同时显式 `SIG_IGN`，否则仍发送 SIGCHLD。发送给父进程的 signal 使用 child-exit `siginfo_t` layout，而不是普通 `SI_KERNEL`：`si_code` 从 wait status 映射为 `CLD_EXITED`、`CLD_KILLED` 或 `CLD_DUMPED`，`si_status` 携带退出码或终止信号，并填充 child PID、real UID、用户态/内核态 CPU clock ticks。非 SIGCHLD 的 clone exit signal 也沿用同一 child-exit payload，只替换 `si_signo`。
 9. 对 SIGCHLD 退出，运行时先在 process-domain read side 采样
@@ -421,6 +439,8 @@ subreaper 尚未实现，代码保留 TODO。
 - `Process` 没有自定义 `Drop`，生命周期由 `Arc` 引用计数控制。
 - 父进程 children 表持有子进程强引用，`free` 或 autoreap 从父表移除已退出子进程后释放这条所有权边。
 - 用户进程的大块地址空间资源不依赖 `ktask` GC；最后一个 runtime `MmUserHandle` 释放时会同步清理 `MmSpace` 的用户映射。
+- fd table、`FsStruct` 和 `NsProxy` 不等待整个 `ProcessRuntime` drop；最后线程在
+  exited-state 发布前取走对应 owner。共享对象由最后一个 `Arc` owner 自然释放。
 - 需要访问 live 用户映射的路径通过 `Process::address_space()` 进入，该入口要求
   runtime 仍能派生 active `MmUserHandle`；退出清理后需要观察稳定 mm identity 或
   空 VMA 状态的内部路径必须显式使用 teardown-observation pinned address-space 入口。
