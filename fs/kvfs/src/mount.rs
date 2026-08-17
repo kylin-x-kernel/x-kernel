@@ -58,6 +58,10 @@ bitflags::bitflags! {
 }
 
 /// `struct vfsmount`.
+///
+/// Releasing the final object may synchronously run final superblock shutdown
+/// and sleep. It must therefore happen in sleepable task context, without
+/// holding a non-sleepable lock or a lock required by filesystem shutdown.
 #[derive(Debug)]
 pub struct VfsMount {
     mnt_root: Dentry,
@@ -1582,8 +1586,8 @@ mod tests {
         }
         SuperBlock::new_with_flags(
             Arc::new(MockFilesystem { mount_flags }),
-            root,
             superblock_flags,
+            |_| root,
         )
     }
 

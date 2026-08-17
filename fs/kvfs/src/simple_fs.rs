@@ -47,7 +47,7 @@ impl SimpleFs {
         });
         let root = root(fs.clone());
         let root = Dentry::new_dir_from_inode(root(), None, String::new());
-        SuperBlock::new_with_flags(fs, root, superblock_flags)
+        SuperBlock::new_with_flags(fs, superblock_flags, |_| root)
     }
 
     fn alloc_inode(&self) -> u64 {

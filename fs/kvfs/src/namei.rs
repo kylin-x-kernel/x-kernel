@@ -1571,7 +1571,7 @@ mod tests {
             Dentry::new_dir_from_inode(autodir_inode, Some(root.clone()), String::from("autodir"));
         root_ops.insert("autodir", autodir);
 
-        let fs = SuperBlock::new(Arc::new(TestSuperBlock), root.clone());
+        let fs = SuperBlock::new(Arc::new(TestSuperBlock), |_| root.clone());
         let mount = Mount::new_root(&fs);
         let root_location = mount.root_path();
         let target_location = Path::new(mount.clone(), target);

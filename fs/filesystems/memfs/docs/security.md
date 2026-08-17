@@ -25,6 +25,9 @@
 - 同一 regular-file inode 最多拥有一个 `VfsInode::i_mapping`
   `AddressSpace`。
 - 同一 inode `AddressSpace` 最多拥有一个私有 `PageCache` 实现组件。
+- 同一 memfs backing inode number 必须以所属 `SuperBlock` 为联合键进入 VFS-wide identity
+  table 并取得唯一
+  `VfsInode`；`MemoryFs` 不得保存第二张 VFS inode cache。
 - 所有指向同一 inode 的 open-file / mmap 路径都必须复用同一个 owner。
 - 符号链接不能进入 regular-file page-cache 路径。
 - 匿名文件不能挂入进程可见 mount namespace。
@@ -39,6 +42,8 @@
 ## 线程安全
 
 - inode metadata、目录项和 mapping state 都通过对应 owner 的锁保护。
+- root 与后续 lookup/create/link 使用同一 VFS-wide identity table 和 superblock key；新 identity 在可见前
+  已绑定该 superblock。
 - regular-file content ownership 位于 `VfsInode::i_mapping` 下，不引入第二套
   file-backed content ownership。
 - `kvfs::AddressSpace` 只通过 `Arc` 传播，不暴露共享裸指针或内部

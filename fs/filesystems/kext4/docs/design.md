@@ -108,7 +108,7 @@ N2 根据真实执行者建立 journal、per-inode、metadata-buffer 和 per-gro
 ### VFS resident inode 与 ext4 private state
 
 ```text
-KVFS InodeCache::iget(ino)
+KVFS SuperBlock::get_or_try_init_inode(ino)
   -> absent: reserve New, decode one Ext4Inode private state, publish Live VfsInode
   -> New: wait for initialization
   -> Live: return the existing VfsInode
@@ -118,7 +118,8 @@ absent -> New -> Live -> Freeing -> absent
 ```
 
 `VfsInode`/`AddressSpace` 是唯一 resident identity，状态层次对应 Linux `struct inode` 的
-`I_NEW`、普通可用状态和 `I_FREEING`。KVFS cache 先占据 `New` slot，再让唯一 initializer
+`I_NEW`、普通可用状态和 `I_FREEING`。KVFS-wide `(SuperBlock, ino)` table 先占据 `New`
+slot，再让唯一 initializer
 解码 `RawInode` 并构造 bridge private state；初始化失败会撤销 slot 并唤醒等待者。最后一个
 VFS 引用进入 drop 时，KVFS 在调用 filesystem eviction hook 前发布 `Freeing`；同号 lookup
 等待 cleanup 完成并重新查找，不把竞争暴露为 `EINVAL` 或 `ESTALE`。
@@ -360,7 +361,7 @@ state；完整 `stat/getattr` 通过 Linux `struct kstat` 对等的瞬时 `Ext4I
 临界区读取 nlink、size、blocks、mode/owner、rdev 和 timestamps。该值不驻留、不参与 identity，
 也不是 attribute cache。unlink/rmdir/rename 从已锁定 dentry 取得 victim/moved/replaced VFS
 inode 并把其 private state 显式传给 core，禁止 core 在 mutation 中按 inode number 重新加载。
-VFS `InodeCache` 因而独自保证一个 live inode number 只对应一个 `VfsInode`、一个
+VFS-wide identity table 因而以 `(SuperBlock, inode number)` 保证一个 live identity 只对应一个 `VfsInode`、一个
 `AddressSpace` 和一份 ext4 private state。
 
 Bridge 在 mount 时缓存 filesystem block size 以及 extent/legacy 两个文件系统级上限；

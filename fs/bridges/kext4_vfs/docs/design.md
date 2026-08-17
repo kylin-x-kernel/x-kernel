@@ -16,7 +16,7 @@ KVFS 已保留 `I_NEW`-equivalent slot 后加载 ext4 状态，再把该状态�
 
 ```text
 src/lib.rs    filesystem-type registration
-src/fs.rs     mount state, KVFS inode cache, sync and eviction hooks
+src/fs.rs     mount state, superblock construction, sync and eviction hooks
 src/inode.rs  inode/file/address-space callbacks
 src/util.rs   KExt4/KVFS type and error conversion
 ```
@@ -24,7 +24,8 @@ src/util.rs   KExt4/KVFS type and error conversion
 ## 架构
 
 ```text
-KVFS InodeCache: ino -> New | Live(Weak<VfsInode>) | Freeing
+KVFS-wide identity table
+  -> (SuperBlock, ino) -> New | Live(Weak<VfsInode>) | Freeing
                                       |
                                       v
           VfsInode / AddressSpace / generic inode semantics
@@ -36,7 +37,9 @@ KVFS InodeCache: ino -> New | Live(Weak<VfsInode>) | Freeing
                     writeback_lock }
 ```
 
-KVFS cache 是唯一 resident identity table。每个 bridge `Inode` 直接组合持有一个
+KVFS-wide table 按 `(SuperBlock, ino)` 联合索引，是唯一 resident identity table。这对应
+Linux `inode_hashtable`，不会给 `SuperBlock` 或 bridge filesystem 增加 cache 字段。每个 bridge
+`Inode` 直接组合持有一个
 `Ext4Inode`；KVFS 通过 `InodeAttributeOperations` 直接访问该组件中的 mode、owner、nlink、
 timestamps、`i_size` 和 block accounting，因此没有第二份 cached attributes，也没有 mutation
 后的 bridge 回灌。组件同时保存 `i_disksize`、extent root、xattr、delalloc 等 ext4-private
@@ -68,9 +71,12 @@ KVFS cache reserves New -> core decodes private state -> publish Live VfsInode
 
 ## 算法流程
 
-Mount 和普通 lookup 都先进入 KVFS `InodeCache::get_or_try_insert_with()`。命中 `Live` 直接返回
-现有 `VfsInode`；命中 `New/Freeing` 等待；只有获得空 slot 的 owner 才调用 core inode decode，
-构造 bridge private state 并发布 `Live`。初始化失败会删除 `New` slot、唤醒等待者并允许重试。
+Mount 先分配 nascent `SuperBlock`，再由 root initializer 使用
+`SuperBlock::get_or_try_init_inode()` 读取 ext4 root；普通 lookup 从当前目录 inode 取得同一个
+superblock 并进入同一 API。命中 `Live` 直接返回现有 `VfsInode`；命中 `New/Freeing` 等待；
+只有获得空 slot 的 owner 才调用 core inode decode，构造 bridge private state，在绑定
+superblock 后发布 `Live`。root 初始化失败时 superblock 不进入全局 registry，`New` slot 被删除、
+等待者被唤醒并允许重试。
 
 Buffered writeback 由每个 bridge inode 的 `writeback_lock` 串行化一个 PageCache writeback pass。
 delayed-allocation 区间树、`i_reserved_data_blocks` 等价计数和 mount-wide aggregate 全部归
@@ -92,8 +98,8 @@ Bridge filesystem 使用挂载级 `RwLock<kext4::Ext4Filesystem>`。读目录、
 
 ## 设计决策
 
-- VFS `InodeCache` 是唯一 resident cache，负责 `I_NEW`/`I_FREEING` 等价等待、`VfsInode` 和
-  `AddressSpace` identity。
+- VFS-wide `(SuperBlock, ino)` table 是唯一 resident cache，负责 `I_NEW`/`I_FREEING`
+  等价等待、`VfsInode` 和 `AddressSpace` identity。
 - KVFS generic attribute API 与 KExt4 共用同一组件；`i_size` 与 `i_disksize` 是两个不同的
   Linux 字段，不是两份同义 cache。
 - Bridge `Inode` 不保存 inode number 字段；number 由其组合持有的 core private component 给出。

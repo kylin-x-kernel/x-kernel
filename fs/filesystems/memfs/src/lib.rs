@@ -22,11 +22,11 @@ use ksync::Mutex;
 use ktime_types::SystemTime;
 use kvfs::{
     AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FileDirOperations,
-    FileOperations, FileSystemType, FsContext, InodeCache, InodeDirOperations, InodeOperations,
+    FileOperations, FileSystemType, FsContext, InodeDirOperations, InodeOperations,
     InodeSymlinkOperations, Kiocb, LockedDentry, Metadata, MetadataUpdate, Mount, NodeFlags,
     NodePermission, NodeType, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations, Umode,
-    VfsError, VfsFile, VfsInodeInit, VfsResult, WriteBeginRequest, WriteEndRequest, get_tree_nodev,
-    inode_init_owner,
+    VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest, WriteEndRequest,
+    get_tree_nodev, inode_init_owner,
     libfs::{simple_getattr, simple_rename, simple_statfs, simple_write_end},
 };
 use slab::Slab;
@@ -114,7 +114,6 @@ pub struct MemoryFs {
     name: &'static str,
     fs_type: u32,
     inodes: Mutex<Slab<Arc<Inode>>>,
-    inode_cache: InodeCache,
 }
 
 impl MemoryFs {
@@ -154,20 +153,20 @@ impl MemoryFs {
             name,
             fs_type,
             inodes: Mutex::new(Slab::new()),
-            inode_cache: InodeCache::new(),
         });
-        let root_ino = Inode::new(
-            &fs,
-            None,
-            NodeType::Directory,
-            root_mode,
-            0,
-            0,
-            DeviceId::default(),
-        );
-        let root_inode = MemoryNode::vfs_inode_from_inode(&fs, root_ino);
-        let root = Dentry::new_dir_from_inode(root_inode, None, String::new());
-        SuperBlock::new_with_flags(fs, root, superblock_flags)
+        SuperBlock::new_with_flags(fs.clone(), superblock_flags, |super_block| {
+            let root_ino = Inode::new(
+                &fs,
+                None,
+                NodeType::Directory,
+                root_mode,
+                0,
+                0,
+                DeviceId::default(),
+            );
+            let root_inode = MemoryNode::vfs_inode_from_inode(super_block, &fs, root_ino);
+            Dentry::new_dir_from_inode(root_inode, None, String::new())
+        })
     }
 
     fn get(&self, ino: u64) -> Arc<Inode> {
@@ -344,35 +343,35 @@ impl MemoryNode {
         Arc::new(Self { fs, inode })
     }
 
-    fn vfs_inode_from_inode(fs: &Arc<MemoryFs>, inode: Arc<Inode>) -> Arc<kvfs::VfsInode> {
+    fn vfs_inode_from_inode(
+        super_block: &Arc<SuperBlock>,
+        fs: &Arc<MemoryFs>,
+        inode: Arc<Inode>,
+    ) -> Arc<kvfs::VfsInode> {
         let metadata = inode.metadata.lock();
         let node_type = metadata.mode.node_type();
         let init = VfsInodeInit::from_metadata(&metadata);
         drop(metadata);
-        match node_type {
-            NodeType::Directory => fs.inode_cache.get_or_insert_openable_dir_with_init(
+        super_block.get_or_init_inode(init.inode_number(), || match node_type {
+            NodeType::Directory => VfsInode::new_openable_dir_with_flags(
+                MemoryNode::new(fs.clone(), inode),
                 NodeFlags::empty(),
                 init,
-                || MemoryNode::new(fs.clone(), inode),
             ),
-            NodeType::RegularFile => {
-                fs.inode_cache
-                    .get_or_insert_file_with_init(NodeFlags::ALWAYS_CACHE, init, || {
-                        MemoryNode::new(fs.clone(), inode)
-                    })
+            NodeType::RegularFile => VfsInode::new_file_with_address_space_and_flags(
+                MemoryNode::new(fs.clone(), inode),
+                NodeFlags::ALWAYS_CACHE,
+                init,
+            ),
+            NodeType::Symlink => VfsInode::new_symlink_with_address_space_and_flags(
+                MemoryNode::new(fs.clone(), inode),
+                NodeFlags::empty(),
+                init,
+            ),
+            _ => {
+                VfsInode::new_special(MemoryNode::new(fs.clone(), inode), NodeFlags::empty(), init)
             }
-            NodeType::Symlink => {
-                fs.inode_cache
-                    .get_or_insert_symlink_with_init(NodeFlags::empty(), init, || {
-                        MemoryNode::new(fs.clone(), inode)
-                    })
-            }
-            _ => fs
-                .inode_cache
-                .get_or_insert_special_with_init(NodeFlags::empty(), init, || {
-                    MemoryNode::new(fs.clone(), inode)
-                }),
-        }
+        })
     }
 
     fn ramfs_get_inode(
@@ -403,6 +402,7 @@ impl MemoryNode {
         device: DeviceId,
         cred: &Cred,
     ) -> VfsResult<()> {
+        let super_block = dir_inode.super_block()?;
         let name = dentry.name();
         let content = self.inode.as_dir()?;
         let mut entries = content.entries.lock();
@@ -413,7 +413,7 @@ impl MemoryNode {
         let inode = self.ramfs_get_inode(Some(self.inode.ino), dir_inode, mode, device, cred);
         entries.insert(name.into(), InodeRef::new(self.fs.clone(), inode.ino));
         drop(entries);
-        let inode = Self::vfs_inode_from_inode(&self.fs, inode);
+        let inode = Self::vfs_inode_from_inode(&super_block, &self.fs, inode);
         dentry.instantiate(inode)
     }
 
@@ -516,10 +516,11 @@ impl InodeSymlinkOperations for MemoryNode {
 impl InodeDirOperations for MemoryNode {
     fn lookup(
         &self,
-        _dir: &kvfs::VfsInode,
+        dir: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
         _flags: kvfs::InodeLookupFlags,
     ) -> VfsResult<Option<Dentry>> {
+        let super_block = dir.super_block()?;
         let name = dentry.name();
         let content = self.inode.as_dir()?;
         let entries = content.entries.lock();
@@ -529,7 +530,7 @@ impl InodeDirOperations for MemoryNode {
         };
         let inode = entry.get();
         drop(entries);
-        let inode = Self::vfs_inode_from_inode(&self.fs, inode);
+        let inode = Self::vfs_inode_from_inode(&super_block, &self.fs, inode);
         dentry.instantiate_or_alias(inode)
     }
 
@@ -580,6 +581,7 @@ impl InodeDirOperations for MemoryNode {
         target: &str,
         cred: &Cred,
     ) -> VfsResult<()> {
+        let super_block = dir_inode.super_block()?;
         let name = dentry.name();
         let content = self.inode.as_dir()?;
         let mut entries = content.entries.lock();
@@ -606,16 +608,17 @@ impl InodeDirOperations for MemoryNode {
         inode.metadata.lock().size = target.len() as u64;
         entries.insert(name.into(), InodeRef::new(self.fs.clone(), inode.ino));
         drop(entries);
-        let inode = Self::vfs_inode_from_inode(&self.fs, inode);
+        let inode = Self::vfs_inode_from_inode(&super_block, &self.fs, inode);
         dentry.instantiate(inode)
     }
 
     fn link(
         &self,
         target_dentry: &Dentry,
-        _dir: &kvfs::VfsInode,
+        dir: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
     ) -> VfsResult<()> {
+        let super_block = dir.super_block()?;
         let name = dentry.name();
         let content = self.inode.as_dir()?;
         let mut entries = content.entries.lock();
@@ -629,7 +632,7 @@ impl InodeDirOperations for MemoryNode {
         entries.insert(name.into(), InodeRef::new(self.fs.clone(), inode.ino));
         target_dentry.increment_link_count();
         drop(entries);
-        let inode = Self::vfs_inode_from_inode(&self.fs, inode);
+        let inode = Self::vfs_inode_from_inode(&super_block, &self.fs, inode);
         dentry.instantiate(inode)
     }
 

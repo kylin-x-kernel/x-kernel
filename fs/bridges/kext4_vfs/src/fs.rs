@@ -9,9 +9,8 @@ use alloc::{string::String, sync::Arc};
 use kext4::{Ext4Error, Ext4Filesystem as KExt4Core, Ext4Inode, Ext4SyncIntent, InodeNumber};
 use ksync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use kvfs::{
-    Dentry, DeviceId, InodeCache, Metadata, NodeFlags, NodeType, StatFs, SuperBlock,
-    SuperBlockFlags, SuperBlockOperations, Umode, VfsInode, VfsInodeInit, VfsResult,
-    default_evict_inode,
+    Dentry, DeviceId, Metadata, NodeFlags, NodeType, StatFs, SuperBlock, SuperBlockFlags,
+    SuperBlockOperations, Umode, VfsInode, VfsInodeInit, VfsResult, default_evict_inode,
 };
 
 use super::{
@@ -46,7 +45,6 @@ pub struct Ext4Filesystem {
     block_size: u32,
     extent_max_file_size: u64,
     legacy_max_file_size: u64,
-    inode_cache: InodeCache,
 }
 
 impl Ext4Filesystem {
@@ -85,12 +83,12 @@ impl Ext4Filesystem {
             block_size,
             extent_max_file_size,
             legacy_max_file_size,
-            inode_cache: InodeCache::new(),
         });
-        let root_inode = Self::iget(&fs, InodeNumber::new(EXT4_ROOT_INO))
-            .inspect_err(|err| error!("KExt4 root inode VFS initialization failed: {err:?}"))?;
-        let root = Dentry::new_dir_from_inode(root_inode, None, String::new());
-        Ok(SuperBlock::new_with_flags(fs, root, superblock_flags))
+        SuperBlock::try_new_with_flags(fs.clone(), superblock_flags, |super_block| {
+            let root_inode = Self::iget(super_block, &fs, InodeNumber::new(EXT4_ROOT_INO))
+                .inspect_err(|err| error!("KExt4 root inode VFS initialization failed: {err:?}"))?;
+            Ok(Dentry::new_dir_from_inode(root_inode, None, String::new()))
+        })
     }
 
     pub(crate) fn lock(&self) -> RwLockWriteGuard<'_, KExt4Core> {
@@ -137,24 +135,28 @@ impl Ext4Filesystem {
         }
     }
 
-    pub(crate) fn iget(fs: &Arc<Self>, number: InodeNumber) -> VfsResult<Arc<VfsInode>> {
-        fs.inode_cache
-            .get_or_try_insert_with(u64::from(number.get()), || {
-                let inode = fs
-                    .read_lock()
-                    .load_inode_private(number)
-                    .map_err(into_vfs_err)?;
-                Self::new_vfs_inode(fs, inode)
-            })
+    pub(crate) fn iget(
+        super_block: &Arc<SuperBlock>,
+        fs: &Arc<Self>,
+        number: InodeNumber,
+    ) -> VfsResult<Arc<VfsInode>> {
+        super_block.get_or_try_init_inode(u64::from(number.get()), || {
+            let inode = fs
+                .read_lock()
+                .load_inode_private(number)
+                .map_err(into_vfs_err)?;
+            Self::new_vfs_inode(fs, inode)
+        })
     }
 
     pub(crate) fn iget_from_core_inode(
+        super_block: &Arc<SuperBlock>,
         fs: &Arc<Self>,
         inode: Ext4Inode,
     ) -> VfsResult<Arc<VfsInode>> {
         let number = inode.number();
-        fs.inode_cache
-            .get_or_try_insert_with(u64::from(number.get()), || Self::new_vfs_inode(fs, inode))
+        super_block
+            .get_or_try_init_inode(u64::from(number.get()), || Self::new_vfs_inode(fs, inode))
     }
 
     fn new_vfs_inode(fs: &Arc<Self>, inode: Ext4Inode) -> VfsResult<Arc<VfsInode>> {

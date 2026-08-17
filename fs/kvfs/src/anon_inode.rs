@@ -36,7 +36,8 @@ pub struct AnonInodeFs {
 impl AnonInodeFs {
     fn new() -> Self {
         let singleton_inode = AnonInode::new_shared_inode();
-        let super_block = SuperBlock::new(Arc::new(AnonInodeSuperBlock), anon_inode_root_dentry());
+        let super_block =
+            SuperBlock::new(Arc::new(AnonInodeSuperBlock), |_| anon_inode_root_dentry());
         Self {
             mount: Mount::new_root(&super_block),
             singleton_inode,

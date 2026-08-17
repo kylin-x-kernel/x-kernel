@@ -104,7 +104,8 @@ KVFS bridge 信任 KVFS 已经提供内核拥有的 path name、dentry、inode `
   UID/GID；KExt4 core 不得把新 inode owner 默认为 root。
 - FIEMAP 的 logical/physical/length 乘法和加法必须 checked；遍历必须同时受请求末端与
   inode 创建时缓存的格式上限约束，损坏 mapping 不得越界输出。
-- Resident identity 只属于 KVFS `VfsInode`/`InodeCache`；KExt4 不得建立 inode-number cache、
+- Resident identity 只属于 KVFS `VfsInode` 和 VFS-wide `(SuperBlock, ino)` table；KExt4
+  不得建立 inode-number cache、
   `Live/Evicting/Evicted` 状态或基于 core handle 引用数的 last-reference 规则。`RawInode` 只能
   作为磁盘解码值，不能承载 runtime identity 或 ext4-private transient state。
 - bridge `Inode` 必须组合持有一份 ext4 private state，不能只保存 inode number 并按操作重新
@@ -150,7 +151,7 @@ exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，
 | T-10 | journal head 追上 tail 并覆盖尚未 checkpoint 的 commit | 高 | 多个 committed transaction 占满环形日志，追加仍继续写入 | 依据 oldest tail/current head 计算 live 空间，始终保留一个空 block；空间不足时先 checkpoint 最老 transaction 再重试，不发出覆盖写；真实 ext4 镜像测试覆盖双 transaction tail 推进 |
 | T-11 | 损坏 extent 或超大 FIEMAP 范围造成算术溢出、错误物理地址或无界遍历 | 高 | disk mapping 长度越过格式容量，或字节/块换算未检查 | core 暴露 Linux 对等的 inode 格式相关最大字节数；bridge 对每次加法、乘法和输出字段做 checked 校验，并把 mapping 截断到请求与格式边界 |
 | T-12 | 磁盘 inode 的 immutable/append-only 状态在 bridge 中丢失，导致 xattr 被修改 | 中 | iget 构造 KVFS inode 时总是使用空 `NodeFlags` | core 以语义方法暴露 `EXT4_IMMUTABLE_FL/EXT4_APPEND_FL`；bridge 在发布 VFS inode identity 时映射为 KVFS flags，由通用 xattr 权限层在 mutation 前返回 `EPERM` |
-| T-13 | 同一 inode 出现 snapshot 分叉，或 inode number reuse 继承旧 transient state | 中 | KVFS 初始化/释放期间并发 `iget`，core namei 按编号重载 live child，或 orphan removal 为 resident 前驱解码临时对象 | KVFS `New/Live/Freeing` cache 是唯一 identity table；`New/Freeing` 等待并重试；bridge 向 unlink/rmdir/rename 传入既有 private state；legacy orphan next 只读写 journaled inode-table bytes；KExt4 无 resident cache；reuse 只能在 `Freeing` 完成并删除旧 slot 后发生 |
+| T-13 | 同一 inode 出现 snapshot 分叉，或 inode number reuse 继承旧 transient state | 中 | KVFS 初始化/释放期间并发 `iget`，core namei 按编号重载 live child，或 orphan removal 为 resident 前驱解码临时对象 | KVFS-wide `(SuperBlock, ino)` table 的 `New/Live/Freeing` 是唯一 identity 状态；`New/Freeing` 等待并重试；bridge 向 unlink/rmdir/rename 传入既有 private state；legacy orphan next 只读写 journaled inode-table bytes；KExt4 无 resident cache；reuse 只能在 `Freeing` 完成并删除旧 slot 后发生 |
 | T-14 | shrink 后重新增长暴露旧 PageCache 数据 | 高 | ext4 backing prepare 提前把 VFS `i_size` 改成目标值，导致 `truncate_setsize()` 误判长度未变并跳过 folio 丢弃或 EOF 清零 | regular-file metadata publish 只更新 `i_disksize`；唯一 `i_size` 由 VFS 在 PageCache 顺序点发布；core prepare 与 KVFS shrink/regrow、partial-grow 回归测试共同约束该职责边界 |
 
 ## 故障模式与影响分析（FMEA）

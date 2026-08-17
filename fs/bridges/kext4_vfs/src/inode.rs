@@ -159,13 +159,14 @@ impl Inode {
         }
     }
 
-    fn lookup_child(&self, name: &str) -> VfsResult<Arc<VfsInode>> {
+    fn lookup_child(&self, dir: &VfsInode, name: &str) -> VfsResult<Arc<VfsInode>> {
+        let super_block = dir.super_block()?;
         let entry = {
             let fs = self.fs.read_lock();
             fs.lookup(&self.core_inode, name).map_err(into_vfs_err)?
         }
         .ok_or(VfsError::NotFound)?;
-        Ext4Filesystem::iget(&self.fs, entry.inode())
+        Ext4Filesystem::iget(&super_block, &self.fs, entry.inode())
     }
 
     fn block_size(&self) -> u64 {
@@ -741,12 +742,12 @@ impl InodeSymlinkOperations for Inode {
 impl InodeDirOperations for Inode {
     fn lookup(
         &self,
-        _dir: &VfsInode,
+        dir: &VfsInode,
         dentry: &LockedDentry<'_>,
         _flags: kvfs::InodeLookupFlags,
     ) -> VfsResult<Option<Dentry>> {
         let name = dentry.name();
-        let inode = match self.lookup_child(name) {
+        let inode = match self.lookup_child(dir, name) {
             Ok(inode) => inode,
             Err(err) if err.canonicalize() == VfsError::NotFound => return Ok(None),
             Err(err) => return Err(err),
@@ -763,6 +764,7 @@ impl InodeDirOperations for Inode {
         _exclusive: bool,
         cred: &kcred::Cred,
     ) -> VfsResult<()> {
+        let super_block = dir.super_block()?;
         let name = dentry.name();
         if mode.node_type() != NodeType::RegularFile {
             return Err(VfsError::InvalidInput);
@@ -780,7 +782,7 @@ impl InodeDirOperations for Inode {
             )
             .map_err(into_vfs_err)?
         };
-        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, child)?;
+        let inode = Ext4Filesystem::iget_from_core_inode(&super_block, &self.fs, child)?;
         dentry.instantiate(inode)
     }
 
@@ -792,6 +794,7 @@ impl InodeDirOperations for Inode {
         mode: kvfs::Umode,
         cred: &kcred::Cred,
     ) -> VfsResult<()> {
+        let super_block = dir.super_block()?;
         let name = dentry.name();
         let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
         let child = {
@@ -806,7 +809,7 @@ impl InodeDirOperations for Inode {
             )
             .map_err(into_vfs_err)?
         };
-        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, child)?;
+        let inode = Ext4Filesystem::iget_from_core_inode(&super_block, &self.fs, child)?;
         dentry.instantiate(inode)
     }
 
@@ -819,6 +822,7 @@ impl InodeDirOperations for Inode {
         device: DeviceId,
         cred: &kcred::Cred,
     ) -> VfsResult<()> {
+        let super_block = dir.super_block()?;
         let name = dentry.name();
         let kind = vfs_type_to_inode_kind(mode.node_type()).ok_or(VfsError::InvalidInput)?;
         let device = match mode.node_type() {
@@ -840,7 +844,7 @@ impl InodeDirOperations for Inode {
             )
             .map_err(into_vfs_err)?
         };
-        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, child)?;
+        let inode = Ext4Filesystem::iget_from_core_inode(&super_block, &self.fs, child)?;
         dentry.instantiate(inode)
     }
 
@@ -852,6 +856,7 @@ impl InodeDirOperations for Inode {
         target: &str,
         cred: &kcred::Cred,
     ) -> VfsResult<()> {
+        let super_block = dir.super_block()?;
         let name = dentry.name();
         let (_, uid, gid) = inode_init_owner(
             dir,
@@ -873,16 +878,17 @@ impl InodeDirOperations for Inode {
             )
             .map_err(into_vfs_err)?
         };
-        let inode = Ext4Filesystem::iget_from_core_inode(&self.fs, child)?;
+        let inode = Ext4Filesystem::iget_from_core_inode(&super_block, &self.fs, child)?;
         dentry.instantiate(inode)
     }
 
     fn link(
         &self,
         old_dentry: &Dentry,
-        _dir: &VfsInode,
+        dir: &VfsInode,
         dentry: &LockedDentry<'_>,
     ) -> VfsResult<()> {
+        let super_block = dir.super_block()?;
         let name = dentry.name();
         let target: Arc<Self> = old_dentry.downcast()?;
         self.ensure_same_filesystem(&target)?;
@@ -896,7 +902,7 @@ impl InodeDirOperations for Inode {
             )
             .map_err(into_vfs_err)?
         }
-        let inode = Ext4Filesystem::iget(&self.fs, target.core_inode.number())?;
+        let inode = Ext4Filesystem::iget(&super_block, &self.fs, target.core_inode.number())?;
         dentry.instantiate(inode)
     }
 

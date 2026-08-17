@@ -10,11 +10,11 @@ use alloc::{
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use hashbrown::HashMap;
-use klazy::Lazy;
+use klazy::{Lazy, Once};
 
 use crate::{
     Dentry, DentryKey, Filename, FsContext, LookupFlags, LookupIntent, MountFlags, Mutex,
-    MutexGuard, NodeType, Path, VfsError, VfsInode, VfsResult, WritebackControl,
+    MutexGuard, NodeType, Path, VfsError, VfsInode, VfsResult, WritebackControl, node,
 };
 
 type FillSuperNodevFn = fn(SuperBlockFlags) -> VfsResult<Arc<SuperBlock>>;
@@ -187,6 +187,14 @@ pub trait SuperBlockOperations: Send + Sync + 'static {
 
     /// Releases filesystem-owned inode state during final inode teardown.
     ///
+    /// KVFS calls this after the hashed inode identity enters its freeing state
+    /// and before removing that identity from the inode cache, corresponding to
+    /// Linux `I_FREEING` around `super_operations::evict_inode`. Implementations
+    /// must not reacquire the same `(superblock, inode number)` identity because
+    /// lookup waits for this callback to finish. They may load unrelated inode
+    /// identities provided that doing so cannot form a cyclic eviction dependency.
+    /// This callback may sleep and perform I/O.
+    ///
     /// The default drops the inode page cache without treating final teardown
     /// as ordinary writeback.
     fn evict_inode(&self, inode: &VfsInode) -> VfsResult<()> {
@@ -352,7 +360,7 @@ impl SuperBlockLifecycle {
 /// take that mutex.
 pub struct SuperBlock {
     ops: Arc<dyn SuperBlockOperations>,
-    root: Dentry,
+    root: Once<Dentry>,
     /// VFS-wide state corresponding to Linux `super_block::s_flags`.
     flags: AtomicSuperBlockFlags,
     /// Active mount references and shutdown state, corresponding to Linux
@@ -375,7 +383,10 @@ impl SuperBlock {
 
     /// Returns the root dentry for this superblock.
     pub fn root_dir(self: &Arc<Self>) -> Dentry {
-        self.root.clone()
+        self.root
+            .get()
+            .expect("a published superblock must have a root dentry")
+            .clone()
     }
 
     /// Returns filesystem statistics for this superblock.
@@ -393,21 +404,57 @@ impl SuperBlock {
         self.flags.load()
     }
 
-    /// Creates a superblock and transfers ownership of its root dentry to it.
-    pub fn new(ops: Arc<dyn SuperBlockOperations>, root: Dentry) -> Arc<Self> {
-        Self::new_with_flags(ops, root, SuperBlockFlags::empty())
+    /// Creates a superblock and initializes its root after allocation.
+    ///
+    /// The initializer receives the nascent superblock so the root inode can be
+    /// obtained through [`Self::get_or_init_inode`]. The superblock is published
+    /// to the global registry only after the initializer returns its root.
+    pub fn new(
+        ops: Arc<dyn SuperBlockOperations>,
+        init_root_fn: impl FnOnce(&Arc<Self>) -> Dentry,
+    ) -> Arc<Self> {
+        Self::new_with_flags(ops, SuperBlockFlags::empty(), init_root_fn)
     }
 
-    /// Creates a superblock with initial VFS-wide flags.
+    /// Creates a superblock with initial VFS-wide flags and then initializes its root.
     pub fn new_with_flags(
         ops: Arc<dyn SuperBlockOperations>,
-        root: Dentry,
         flags: SuperBlockFlags,
+        init_root_fn: impl FnOnce(&Arc<Self>) -> Dentry,
     ) -> Arc<Self> {
+        match Self::try_new_with_flags(ops, flags, |super_block| {
+            Ok::<_, core::convert::Infallible>(init_root_fn(super_block))
+        }) {
+            Ok(super_block) => super_block,
+            Err(error) => match error {},
+        }
+    }
+
+    /// Creates a superblock whose root initialization can fail.
+    ///
+    /// A failed initializer leaves neither a root dentry nor a global
+    /// superblock-registry entry behind.
+    ///
+    /// # Errors
+    ///
+    /// Returns the root initializer's error without publishing the nascent
+    /// superblock.
+    pub fn try_new_with_flags<E>(
+        ops: Arc<dyn SuperBlockOperations>,
+        flags: SuperBlockFlags,
+        init_root_fn: impl FnOnce(&Arc<Self>) -> Result<Dentry, E>,
+    ) -> Result<Arc<Self>, E> {
+        let super_block = Self::allocate(ops, flags);
+        let root = init_root_fn(&super_block)?;
+        Self::publish_root(&super_block, root);
+        Ok(super_block)
+    }
+
+    fn allocate(ops: Arc<dyn SuperBlockOperations>, flags: SuperBlockFlags) -> Arc<Self> {
         let max_file_size = ops.max_file_size().min(MAX_LFS_FILESIZE);
-        let super_block = Arc::new(Self {
+        Arc::new(Self {
             ops,
-            root,
+            root: Once::new(),
             flags: AtomicSuperBlockFlags::new(flags),
             lifecycle: Mutex::new(SuperBlockLifecycle::Available { active_mounts: 0 }),
             umount_lock: Mutex::default(),
@@ -415,10 +462,65 @@ impl SuperBlock {
             max_file_size,
             rename_mutex: Mutex::default(),
             inodes: Mutex::default(),
-        });
-        super_block.root.bind_super_block(&super_block);
-        super_block_registry().register(&super_block);
-        super_block
+        })
+    }
+
+    fn publish_root(super_block: &Arc<Self>, root: Dentry) {
+        let root = super_block.root.call_once(|| root);
+        root.bind_super_block(super_block);
+        super_block_registry().register(super_block);
+    }
+
+    /// Looks up a live inode identity without invoking a filesystem loader.
+    ///
+    /// This is the superblock-owned counterpart of Linux `ilookup()`. It only
+    /// finds hashed identities; pseudo or otherwise unhashed inodes are not
+    /// returned.
+    pub fn lookup_inode(self: &Arc<Self>, inode_number: u64) -> Option<Arc<VfsInode>> {
+        node::lookup_inode(self, inode_number)
+    }
+
+    /// Returns the live inode identity or initializes it exactly once.
+    ///
+    /// The new inode is attached to this superblock before concurrent lookups
+    /// can observe it. This entry is for hashed identities; Linux-style pseudo
+    /// inodes constructed outside the hash must remain unhashed.
+    pub fn get_or_init_inode(
+        self: &Arc<Self>,
+        inode_number: u64,
+        init_inode_fn: impl FnOnce() -> Arc<VfsInode>,
+    ) -> Arc<VfsInode> {
+        match self.get_or_try_init_inode(inode_number, || {
+            Ok::<_, core::convert::Infallible>(init_inode_fn())
+        }) {
+            Ok(inode) => inode,
+            Err(error) => match error {},
+        }
+    }
+
+    /// Returns the live inode identity or fallibly initializes it exactly once.
+    ///
+    /// This provides the identity and initialization semantics of Linux
+    /// `iget_locked()` followed by `unlock_new_inode()`. Failed initialization
+    /// removes the reservation so a later lookup can retry.
+    /// Filesystems must use this entry consistently for every lookup of a
+    /// hashed identity; Linux-style pseudo inodes constructed outside the hash
+    /// must remain unhashed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the inode initializer's error without publishing a new identity.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the initializer returns a different inode number or an inode
+    /// identity already owned by another superblock.
+    pub fn get_or_try_init_inode<E>(
+        self: &Arc<Self>,
+        inode_number: u64,
+        init_inode_fn: impl FnOnce() -> Result<Arc<VfsInode>, E>,
+    ) -> Result<Arc<VfsInode>, E> {
+        node::get_or_try_init_inode(self, inode_number, init_inode_fn)
     }
 
     /// Acquires the active superblock reference owned by one `VfsMount`.
@@ -462,7 +564,9 @@ impl SuperBlock {
         // so write back before dropping dcache ownership. Eviction can publish
         // additional filesystem metadata, which requires the second sync.
         let writeback_result = self.sync_fs_locked();
-        if let Ok(root) = self.root.as_dir() {
+        if let Some(root) = self.root.get()
+            && let Ok(root) = root.as_dir()
+        {
             root.forget();
         }
         let flush_result = self.sync_fs_locked();

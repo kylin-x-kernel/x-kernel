@@ -86,29 +86,32 @@ impl FatFilesystem {
             inner: Mutex::new(inner),
         });
 
-        let root_node = {
-            let fs = result.lock();
-            let root = fs.inner.root_dir();
-            FatDirInode::new(result.clone(), result.as_ref(), root, root_inode_number)
-        };
-        let root_inode = VfsInode::new_openable_dir(
-            root_node,
-            VfsInodeInit::new(
-                root_inode_number,
-                root_block_size,
-                kvfs::Umode::new(NodeType::Directory, NodePermission::default()),
-            )
-            .with_owner_links_and_rdev(0, 0, 1, Default::default())
-            .with_stat_data(
-                root_block_size,
-                1,
-                Default::default(),
-                Default::default(),
-                Default::default(),
-            ),
-        );
-        let root_dir = Dentry::new_dir_from_inode(root_inode, None, String::new());
-        SuperBlock::new_with_flags(result, root_dir, superblock_flags)
+        SuperBlock::new_with_flags(result.clone(), superblock_flags, move |super_block| {
+            let root_node = {
+                let fs = result.lock();
+                let root = fs.inner.root_dir();
+                FatDirInode::new(result.clone(), result.as_ref(), root, root_inode_number)
+            };
+            let root_inode = super_block.get_or_init_inode(root_inode_number, || {
+                VfsInode::new_openable_dir(
+                    root_node,
+                    VfsInodeInit::new(
+                        root_inode_number,
+                        root_block_size,
+                        kvfs::Umode::new(NodeType::Directory, NodePermission::default()),
+                    )
+                    .with_owner_links_and_rdev(0, 0, 1, Default::default())
+                    .with_stat_data(
+                        root_block_size,
+                        1,
+                        Default::default(),
+                        Default::default(),
+                        Default::default(),
+                    ),
+                )
+            });
+            Dentry::new_dir_from_inode(root_inode, None, String::new())
+        })
     }
 }
 

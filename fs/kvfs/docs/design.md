@@ -17,7 +17,7 @@ credential snapshot，`kvfs` 接收显式 `&Cred` 并完成路径遍历和通用
 - `src/open_flags.rs`：原始 `O_*` 参数的规范化与 open intent。
 - `src/namei.rs`：路径遍历和 open 流程。
 - `src/permission.rs`：owner/group/other DAC 与 open access 映射。
-- `src/node/`：dentry、inode、live inode identity cache 及文件系统 operation traits。
+- `src/node/`：dentry、inode、inode identity 状态机及文件系统 operation traits。
 - `src/address_space.rs`：inode-owned `AddressSpace`、其私有 `PageCache` 实现，以及
   writeback 与 truncate/invalidation 边界。
 - `src/fiemap.rs`：与用户 ABI 解耦的 inode FIEMAP 请求状态、标志和安全输出接口。
@@ -98,9 +98,12 @@ FIEMAP 的原始 C 布局和用户指针留在 POSIX 层。KVFS 以可选
 `OpenFlags` 是其中的 `O_*` 位集合，同时表示 `VfsFile::f_flags`；原子存储仍使用
 `AtomicU32`，加载后立即恢复为类型。
 
-`SuperBlock` 在创建时接管调用者提供的 root dentry。文件系统 operation 对象只保存
-文件系统私有状态，不重复保存 root；这对应 Linux 中 `super_block.s_root` 的所有权
-边界，也避免私有状态和 root inode 之间形成引用环。`SuperBlockFlags` 对应
+`SuperBlock` 先分配对象，再由 root initializer 构造并交回 root dentry，最后才绑定 root
+并进入全局 registry。initializer 可通过 nascent `SuperBlock` 的 inode 方法进入 VFS inode
+identity table 并构造 root inode；失败的 initializer 不发布半初始化 superblock。这对应 Linux 先分配
+`struct super_block`、再执行 `fill_super()`、最后令 `s_root` 可见的层次。文件系统 operation
+对象只保存文件系统私有状态，不重复保存 root；这对应 Linux 中 `super_block.s_root` 的
+所有权边界，也避免私有状态和 root inode 之间形成引用环。`SuperBlockFlags` 对应
 `super_block.s_flags`，当前承载 `SB_RDONLY`、`SB_NOATIME` 和 `SB_NODIRATIME`；
 `MountFlags` 对应 `vfsmount.mnt_flags`，承载 `MNT_RELATIME` 等 per-mount 策略。
 `SuperBlockOperations::statfs()` 只返回文件系统统计数据，POSIX 导出时才由 VFS 将
@@ -144,10 +147,14 @@ superblock 还是复用已有实例，KVFS registry 不增加第二套实例缓�
 
 `Dentry` 是可移动的 namespace 对象。rename 保留 source dentry 和 inode identity，只
 改变 dentry 的位置和 cache membership。inode 持有文件状态和 address space，因此
-rename 不会 flush 文件数据，也不会替换 inode `AddressSpace` identity。
+rename 不会 flush 文件数据，也不会替换 inode `AddressSpace` identity。与 Linux `d_sb`/`i_sb`
+一致，dentry 和 inode 首次附着 superblock 后都不可重绑；二者保存 `Weak<SuperBlock>` 以避免
+root/dcache 强引用环，但旧 superblock 销毁也不会把同一 VFS identity 转交给新 superblock。
 
-每个 live backing inode number 通过 filesystem `InodeCache` 复用同一个 `VfsInode`；hard
-link、rename 和重复 lookup 因此共享同一个 `AddressSpace`。非目录 inode 可以有多个
+每个由文件系统通过 VFS-wide identity table 发布的 hashed
+`(SuperBlock, backing inode number)` 复用同一个 `VfsInode`；hard link、rename 和重复 lookup
+因此共享同一个 `AddressSpace`。Linux 风格的 pseudo/unhashed inode 不进入该表，也不能对同一
+identity 混用直接构造与 `get_or_try_init_inode()`。非目录 inode 可以有多个
 dentry alias；目录 inode 至多有一个 live alias，重复 lookup 复用该 dentry，对应 Linux
 `d_splice_alias()` 所依赖的目录单 alias 不变量。文件系统可以让 operation object 实现
 `InodeAttributeOperations`，使 KVFS generic attribute API 与文件系统组件共用一份状态；这对应
@@ -158,18 +165,27 @@ Linux filesystem-private inode 结构内嵌 `struct inode`。未使用共享后�
 `Arc<VfsInode>`。更新入口校验 positive state、inode number、node type、block size 和
 `rdev`，防止把一个 core inode 的结果写入另一 identity。
 
-`InodeCache` 同时承担 Linux inode cache 的初始化与释放门禁：缺失 slot 先转为 `New`，只有
+identity table 对应 Linux `fs/inode.c` 的全局 `inode_hashtable`，按 superblock identity 与 inode
+number 联合索引；它不成为 `SuperBlock` 或 filesystem/bridge 的字段。
+`SuperBlock::lookup_inode()` 是该全局算法的面向对象入口，对应 Linux `ilookup()`；
+`get_or_try_init_inode()` 对应
+`iget_locked()` 加 filesystem fill，再由 VFS 发布。cache 同时承担 Linux inode cache 的
+初始化与释放门禁：缺失 slot 先转为 `New`，只有
 owner 运行 fallible filesystem initializer，其他 lookup 睡眠；成功后发布 `Live`，失败或
 initializer panic unwind 都由局部 reservation guard 删除 `New` slot 并唤醒重试。该 guard 只表达
 Linux `unlock_new_inode()`/`iget_failed()` 的成对约束，不进入 resident inode，也不增加 cache
 状态。每个 slot 的等待队列对应 Linux 对该 inode `I_NEW/I_FREEING` state bit 的等待；等待者
 保存 slot generation 并在 cache mutex 外睡眠，只有该 inode 的 publish/remove 才唤醒它，避免
-全 cache 广播和跨 inode 惊群。Cache-only `lookup()` 对应 Linux `ilookup()`：等待过渡对象后若 slot 已 unhashed，返回
-`None`；必须从磁盘加载的路径使用对应 `iget_locked()` 的 `get_or_try_insert_with()`。最后一个
+全 cache 广播和跨 inode 惊群。Cache-only lookup 等待过渡对象后若 slot 已 unhashed，返回
+`None`；必须从磁盘加载的 hashed 路径使用 `get_or_try_init_inode()`。新 hashed identity 在发布 `Live` 前
+先绑定所属 superblock，因此 filesystem callback 观察不到缺失 `i_sb` 的 resident inode。最后一个
 `VfsInode` 引用进入 drop 时，cache 在 filesystem eviction hook 前
 把精确匹配的 `Live` entry 转为 `Freeing`；同号 lookup 等待 hook 完成、旧 entry 删除后重新
 查找。`New`/`Freeing` 不会作为普通 inode 返回，也不会转换为 pathname 的 `EINVAL`/`ESTALE`。
 Filesystem private state 由 `VfsInode` 组合持有，不得在后端另建 resident inode-number cache。
+普通 pathname callback 的 `Path -> Mount` 强引用在调用期间保活 superblock；如果一个未绑定或
+teardown 后的 raw inode 被绕过 Path 直接用于 filesystem callback，`VfsInode::super_block()` 返回
+Linux `ESTALE`，不把对象生命周期错误误报为介质 `EIO`。
 共享 attribute operations 的构造入口会在发布前校验 inode number 与 node type；构造后 KVFS
 不再分配另一份 owner/link/time/size/block state。高频 generic field 读取直接调用共享组件的
 单字段 getter；只有完整 `stat/getattr` snapshot 才调用 `fill_metadata()`。完整 snapshot 的 inode
@@ -185,6 +201,11 @@ credential 的生命周期由 syscall 持有的 `Arc` 保证；对象字段不�
 不适用于中断上下文，也不能在持有 spinlock 时调用。这些 API 依赖调度器、分配器和
 正常内核运行环境。POSIX 路径通常需要当前进程的 mount、root 和 cwd；纯 VFS 对象
 方法只依赖显式传入的对象。
+
+最后一个 `VfsInode` 引用的释放可能同步执行 filesystem eviction；最后一个
+`VfsMount` 的释放可能同步执行 superblock shutdown。两者同样只能发生在可睡眠的 task
+context，且调用者不能持有 non-sleepable lock 或 teardown 所需的锁。这对应 Linux
+`iput()` 本身可以睡眠的调用约束，不额外引入 inode 专用 deferred worker。
 
 一次完整 pathname 操作必须复用同一个 credential snapshot。调用者不能在每个路径
 组件重新查询 current task，否则并发 credential commit 可能让同一次解析混用身份。
@@ -573,11 +594,18 @@ parent children 弱索引与 superblock dentry cache 中移除 dentry；仍有 P
 superblock active 引用；最后一个 active mount 释放时执行 writeback、dcache eviction 和
 最终 filesystem/device sync。superblock 对象的 `Arc` 最终释放只负责丢弃已经 shutdown 的
 root 和私有状态。dentry cache 与 open file 都持有 `VfsInode` 引用；最后一个引用消失后，
-`InodeCache` 先发布 `Freeing`，再让 `SuperBlockOperations::evict_inode()` 获得 final teardown
+hashed VFS inode identity table 先发布 `Freeing`，再让 `SuperBlockOperations::evict_inode()` 获得 final teardown
 机会。默认实现只丢弃 inode `AddressSpace` 中的 cached folios，磁盘文件系统可在 nlink=0
 时追加 journaled inode 回收。hook 返回后 cache 删除精确匹配的旧 entry 并唤醒同号 lookup；
 失败只能记录，但仍不能把正在释放的 identity 重新交给普通操作。唤醒使用被删除 slot 自己的
-等待队列，不广播到其它 inode。per-open
+等待队列，不广播到其它 inode。identity table 的一把 mutex 对应 Linux `inode_hash_lock`；
+锁内只做 `(SuperBlock, inode number)` 哈希查找和状态转换，initializer、等待和 eviction hook
+都在锁外。key 保存 `Weak<SuperBlock>` 并按其分配地址比较：它不延长 superblock 值的生命，
+但会保留 `Arc` 分配直到 slot 删除，因此地址不能在旧 identity 仍 hashed 时复用，也不需要新增
+superblock serial。`VfsInode` 同样只弱持有 superblock，避免与 root/dcache 形成强引用环；
+filesystem callback 按需执行可失败的 upgrade，不在 bridge 中缓存第二份 superblock owner。
+unhashed pseudo inode 不发布 `Freeing` slot，最后一个引用直接执行同一 eviction hook。
+per-open
 `FileOperations::release()` 先于 final inode eviction，不能代替后者。flags
 类型不拥有资源；inode 与文件系统私有资源仍由现有对象生命周期及文件系统回调负责。
 FIFO 最后一个 open file 关闭时清空 inode pipe slot，`Arc<PipeObject>` 随最后一个引用

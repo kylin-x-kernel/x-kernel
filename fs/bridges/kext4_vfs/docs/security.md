@@ -25,8 +25,8 @@ Bridge 不直接访问 user pointer、MMIO/PIO、DMA、firmware、FFI 或 inline
   number 必须与 private state number 相同。
 - KVFS generic attribute operations 必须直接落到同一个 inode component；bridge 不得保存或
   mutation 后回灌第二份 mode/owner/nlink/time/size/block snapshot。
-- KVFS cache 是唯一 resident identity table；KExt4 不得再按 inode number 缓存、合并或驱逐
-  private state。
+- KVFS-wide `(SuperBlock, ino)` table 是唯一 resident identity table；`SuperBlock`、bridge filesystem 和
+  KExt4 不得再按 inode number 缓存、合并或驱逐 private state。
 - zero-link inode 的 PageCache、data/xattr blocks 和 inode bitmap 只能在最后 `VfsInode` 引用
   drop 的 superblock hook 中释放。
 - delalloc interval、per-inode reserved count 和 mount aggregate 必须由一个 core range API 在
@@ -39,7 +39,7 @@ Bridge 不直接访问 user pointer、MMIO/PIO、DMA、firmware、FFI 或 inline
 ## 线程安全
 
 挂载级 `RwLock` 保护 core mutation 入口，per-inode `writeback_lock` 串行化 writeback pass，KVFS
-Weak cache 独自合并 VFS identity。只读 guard 可并发；mutation 仍串行。KVFS cache mutex 不跨
+VFS-wide Weak cache 按 superblock 与 inode number 合并 identity。只读 guard 可并发；mutation 仍串行。KVFS cache mutex 不跨
 等待或 filesystem callback 持有；KExt4 没有第二把 inode-cache mutex。
 
 ## 威胁分析

@@ -16,8 +16,9 @@ pub(crate) use dentry::{
 pub use device::{DeviceFileOps, MmapMapper, cdev_add, cdev_del};
 pub use dir::{DirContext, DirEntrySink};
 pub use inode::{
-    FiemapCapability, GetattrQueryFlags, GetattrRequestMask, InodeAttributeOperations, InodeCache,
+    FiemapCapability, GetattrQueryFlags, GetattrRequestMask, InodeAttributeOperations,
     InodeDirOperations, InodeFiemapOperations, InodeLookupFlags, InodeOperations,
     InodeSymlinkOperations, InodeUpdateTime, NodeFlags, RenameFlags, VfsInode, VfsInodeInit,
     WeakVfsInode, inode_init_owner,
 };
+pub(crate) use inode::{get_or_try_init_inode, lookup_inode};

@@ -91,13 +91,22 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
 - split truncate 必须在 inode data lock 与 address-space invalidate exclusive lock 下恰好
   调用一次 `truncate_setsize()`；该入口先发布 `i_size`，并在 cache truncate 前后各执行
   一次 mmap invalidation。文件系统负责维护 backing prepare 后失败的磁盘恢复协议。
-- `InodeCache` 是每个 filesystem 唯一的 resident inode identity table。缺失 entry 必须先发布
+- VFS-wide identity table 按 `(SuperBlock, inode number)` 联合索引，是唯一的 hashed resident inode
+  identity table；`SuperBlock`、filesystem 和 bridge 不得再保存第二个 hashed cache 字段。Linux 风格的
+  pseudo/unhashed inode 可以不进入表，但同一 filesystem identity 不得混用直接构造和 hashed initializer。
+  缺失 entry 必须先发布
   `New` 再运行 fallible initializer；局部 reservation guard 必须在错误或 panic unwind 时删除
-  未发布的 `New` 并唤醒等待者；`New` 和 `Freeing` 只能等待，不能返回普通 inode。
+  未发布的 `New` 并唤醒等待者；新 inode 必须在发布 `Live` 前绑定所属 superblock；`New` 和
+  `Freeing` 只能等待，不能返回普通 inode。key 自身持有 `Weak<SuperBlock>` 分配身份并按指针
+  比较；这不保活 superblock 值，却保证 hashed slot 删除前地址不能复用。禁止用可复用裸整数地址
+  或额外的 superblock serial 建立平行身份。
 - 使用 `InodeAttributeOperations` 的 filesystem 必须让 operations 描述待构造的同号、同类型
   inode；KVFS 只保留该共享后端，不能同时分配另一份 generic attribute storage。
 - `VfsInode` final drop 必须在 filesystem eviction hook 前把精确匹配的 cache entry 从 `Live`
   转为 `Freeing`，hook 返回后只删除该对象的 entry 并唤醒等待者；后端不得另建 resident cache。
+- dentry 和 inode 的 superblock identity 首次绑定后不可改变；即使旧 `Weak<SuperBlock>` 已无法
+  upgrade，也不得把同一对象绑定到另一个 superblock。合法 pathname callback 由 `Path/Mount`
+  保活 superblock；绕过该 owner 调用返回 `ESTALE`。
 - `VfsInode` 只拥有一个 `AddressSpace`，MM/filemap 只经 `VfsFile::mapping()` 获取它；
   不得向 MM 暴露或额外强持有内部 `PageCache`。
 - pathname FIFO 的活动 `PipeObject` 必须由 `VfsInode` 的 typed slot 持有；共享
@@ -116,7 +125,7 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
 ## 线程安全
 
 共享 dentry、inode、mount 和 file 状态由 mutex、atomic、`Arc` 和 `Weak` 保护。
-Inode cache mutex 只保护 `New/Live/Freeing` entry；initializer、eviction hook 和 wait 均不持有
+VFS inode-cache mutex 只保护 `New/Live/Freeing` entry；initializer、eviction hook 和 wait 均不持有
 该 mutex。每个 slot 有独立等待队列；未发布 reservation 的 drop 和正常状态迁移都在释放 mutex
 后只唤醒该 slot，等待者同时校验 slot generation，避免错过唤醒、跨 inode 惊群，或把已进入
 final drop、Weak upgrade 失败的 `Live` 当成 cache miss 并行重建。
@@ -297,8 +306,8 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 - file-backed MM runtime 是否只保存 `VfsFile`，并经 `VfsFile::mapping()` 访问唯一的
   inode `AddressSpace`。
 - `release()` 与 final `evict_inode()` 是否保持为两个不同生命周期阶段。
-- filesystem 是否通过同一个 `InodeCache` 的 fallible initializer 构造 private state，且没有
-  后端 inode-number resident cache？
+- filesystem 是否通过所属 `SuperBlock` 的 fallible inode initializer 构造 private state，且
+  没有后端 inode-number resident cache？
 - `New/Freeing` 是否在 KVFS 内等待重试，eviction finish 是否只删除精确匹配的旧 entry？
 - 每个 `VfsMount` 是否恰好取得和释放一次 superblock active 引用，非最后 mount 是否避免
   teardown，最后一个引用是否只执行一次 shutdown。

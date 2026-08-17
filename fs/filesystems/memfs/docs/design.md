@@ -32,7 +32,10 @@ owner，而不是由每个 dentry 或 open file 单独拥有内容对象。
 
 ```text
 MemoryFs
-  -> Inode / VfsInode
+  -> Inode
+
+VFS-wide identity table: (SuperBlock, ino)
+  -> VfsInode
        -> i_mapping: kvfs::AddressSpace
             -> page_cache: pagecache::PageCache (private implementation)
 
@@ -44,6 +47,11 @@ VfsFile::mapping()
 `VfsFile::mapping()` 进入文件缓存路径后，只取得 inode address-space；private
 page-cache storage、mapped views 与 MM shared object identity 的统一宿主是
 `VfsInode::i_mapping` 下的 `AddressSpace`。
+
+`MemoryFs` 也不保存 inode-number 到 `VfsInode` 的第二张表。构造时先分配
+`SuperBlock`，再由 root initializer 通过 `SuperBlock::get_or_init_inode()` 进入 VFS-wide table
+建立 root；普通 lookup/create/link 由当前目录 inode 的 superblock 进入同一个 table。`MemoryFs`
+自己的 slab 只拥有 memfs backing inode 数据，不承担 VFS resident identity 生命周期。
 
 `TMPFS_TYPE` 和 `SYSFS_TYPE` 只描述 canonical name 与 nodev superblock factory；
 类型注册和 mount policy 由 boot/KVFS 拥有，不写入 `MemoryFs` inode 状态。
@@ -96,6 +104,8 @@ root 长生命周期的对应职责，不增加第二套目录树或 lifecycle �
 
 - inode metadata 由 `Mutex<Metadata>` 保护。
 - 目录项表由 `Mutex<HashMap<...>>` 保护。
+- 同一 filesystem instance 的 VFS inode identity 由 VFS-wide table 按 `(SuperBlock, ino)` 串行
+  初始化；`MemoryFs` 不增加 cache lock 或 cache 字段。
 - inode address-space 的 private page-cache storage、mapped views 与 MM object identity
   由 `kvfs::AddressSpace` 内部同步保护。
 - sysfs superblock 与 internal root mount 由同一个 `Once` 原子发布；对外只克隆

@@ -40,7 +40,10 @@ impl Fs9pFilesystem {
             String::new(),
         );
 
-        Ok(SuperBlock::new(fs, root))
+        // The legacy adapter exposes inode number zero for every qid. Keep
+        // those identities unhashed until qid-based `iget5` semantics exist;
+        // hashing by zero would merge unrelated remote objects.
+        Ok(SuperBlock::new(fs, |_| root))
     }
 
     /// Lock the inner 9P session for sending requests.

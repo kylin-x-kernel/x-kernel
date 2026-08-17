@@ -24,7 +24,7 @@ const NULLFS_BLOCK_SIZE: u64 = 4096;
 
 /// Creates the single-purpose filesystem used as the initial namespace root.
 pub(crate) fn new_superblock() -> Arc<SuperBlock> {
-    SuperBlock::new(Arc::new(NullFs), nullfs_root_dentry())
+    SuperBlock::new(Arc::new(NullFs), |_| nullfs_root_dentry())
 }
 
 struct NullFs;
