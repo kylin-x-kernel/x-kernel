@@ -63,6 +63,40 @@ impl UdpSocket {
         &self.pcb.state
     }
 
+    pub(crate) fn send_datagram_now(
+        &self,
+        remote_addr: SocketAddr,
+        payload: &[u8],
+    ) -> KResult<usize> {
+        SocketOps::send(
+            self,
+            payload,
+            SendOptions {
+                to: Some(SocketAddrEx::Ip(remote_addr)),
+                flags: SendFlags::DONT_WAIT,
+                ancillary: Vec::new(),
+            },
+        )
+    }
+
+    pub(crate) fn recv_datagram_now(&self, buf: &mut [u8]) -> KResult<Option<(usize, SocketAddr)>> {
+        let mut from = SocketAddrEx::Unspecified;
+        match SocketOps::recv(
+            self,
+            &mut buf[..],
+            RecvOptions {
+                from: Some(&mut from),
+                flags: RecvFlags::DONT_WAIT,
+                ancillary: None,
+                out_flags: None,
+            },
+        ) {
+            Ok(len) => Ok(Some((len, from.into_ip()?))),
+            Err(KError::WouldBlock) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     fn remote_endpoint(&self) -> KResult<(IpEndpoint, IpAddress)> {
         self.state().peer_endpoint().ok_or(KError::NotConnected)
     }

@@ -8,7 +8,8 @@ license.workspace = true
 homepage.workspace = true
 
 [features]
-default = []
+default = ["dev-log"]
+dev-log = ["devfs/dev-log"]
 ebpf = ["dep:bpffs"]
 fs9p = ["dep:v9fs", "dep:kclass", "kclass/virtio-9p"]
 rootfs-secondary-block = []

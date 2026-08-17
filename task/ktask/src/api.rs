@@ -138,8 +138,13 @@ pub(crate) fn rearm_local_timer(earliest_soft_deadline: Option<ktime_types::Mono
     // SAFETY: the caller guarantees IRQs are masked on this CPU (the wheel lock
     // is held or we run in IRQ context), so the timer IRQ cannot re-enter and
     // observe a half-updated slot. Only this CPU's own slot is touched.
-    let next_tick =
-        unsafe { next_tick_deadline() }.unwrap_or(ktime_types::MonotonicInstant::ORIGIN);
+    let next_tick = unsafe { next_tick_deadline() }.unwrap_or_else(|| {
+        khal::time::monotonic_time()
+            .checked_add(PERIODIC_INTERVAL)
+            .unwrap_or_else(|| {
+                ktime_types::MonotonicInstant::from_span_since_origin(ktime_types::TimeSpan::MAX)
+            })
+    });
     let deadline = earliest_soft_deadline
         .map(|soft| soft.min(next_tick))
         .unwrap_or(next_tick);
@@ -236,6 +241,27 @@ pub fn prepare_task(task: TaskInner) -> KtaskRef {
 /// after it is enqueued.
 pub fn activate_task(task: &KtaskRef) {
     select_run_queue::<NoPreemptIrqSave>(task).add_task(task.clone());
+}
+
+/// Wakes a blocked task and optionally requests rescheduling on its run queue.
+///
+/// If the task is already running, ready, or exited, this is a no-op. This is
+/// intended for subsystems that keep a task reference but do not own the wait
+/// queue the task may currently be blocked on (e.g. the VMM waking a vCPU
+/// thread that is parked in an interruptible sleep).
+pub fn wake_task(task: &KtaskRef, resched: bool) {
+    select_wake_run_queue::<NoPreemptIrqSave>(task).unblock_task(task.clone(), resched);
+}
+
+/// Interrupts a task and wakes it if it is blocked.
+///
+/// Sets the task's interrupt flag so that an in-progress
+/// [`interruptible`](crate::future::interruptible) wait returns early, then
+/// unblocks it. Used to deliver asynchronous events (such as a pending virtual
+/// IRQ) to a thread parked in [`interruptible_sleep_until`].
+pub fn interrupt_task(task: &KtaskRef, resched: bool) {
+    task.interrupt();
+    wake_task(task, resched);
 }
 
 /// Spawns a PID-less kernel worker thread with the given parameters.
@@ -360,6 +386,26 @@ pub fn sleep(dur: ktime_types::TimeSpan) {
 /// Current task is going to sleep, it will be woken up at the given deadline.
 pub fn sleep_until(deadline: ktime_types::MonotonicInstant) {
     crate::future::block_on(crate::future::sleep_until(deadline));
+}
+
+/// Current task sleeps until `deadline`, or until another subsystem interrupts
+/// it via [`interrupt_task`].
+///
+/// Unlike [`sleep_until`], the wait is wrapped in
+/// [`interruptible`](crate::future::interruptible), so a concurrent
+/// [`interrupt_task`] causes an early return. Used by the VMM WFI path so a
+/// vCPU parked waiting for its next timer deadline can be woken immediately
+/// when a virtual IRQ is injected.
+pub fn interruptible_sleep_until(deadline: ktime_types::MonotonicInstant) {
+    if let Err(error) = crate::future::block_on(crate::future::interruptible(
+        crate::future::sleep_until(deadline),
+    )) && !error.is_signal()
+    {
+        log::error!(
+            "interruptible_sleep_until failed to register interrupt wait: {}",
+            error
+        );
+    }
 }
 
 /// Exits the current task.

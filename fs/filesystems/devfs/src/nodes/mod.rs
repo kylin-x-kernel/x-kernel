@@ -21,6 +21,8 @@ pub(crate) mod virtdev;
 pub(crate) mod dice;
 #[cfg(feature = "input")]
 pub(crate) mod event;
+#[cfg(feature = "vmm")]
+pub(crate) mod kvmm;
 #[cfg(feature = "dev-log")]
 pub(crate) mod log;
 #[cfg(feature = "memtrack")]

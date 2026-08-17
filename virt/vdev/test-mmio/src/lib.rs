@@ -4,7 +4,9 @@
 
 //! Test MMIO device for selftest data-abort verification.
 
-use crate::mm::mmio::MmioDevice;
+#![no_std]
+
+use vdev_core::MmioDevice;
 
 pub const TEST_MMIO_GPA: u64 = 0x1000_0000;
 pub const TEST_MMIO_SIZE: u64 = 0x1000;
@@ -12,6 +14,10 @@ pub const TEST_MMIO_SIZE: u64 = 0x1000;
 pub struct TestMmioDevice;
 
 impl MmioDevice for TestMmioDevice {
+    fn name(&self) -> &str {
+        "test-mmio"
+    }
+
     fn mmio_range(&self) -> (u64, u64) {
         (TEST_MMIO_GPA, TEST_MMIO_SIZE)
     }

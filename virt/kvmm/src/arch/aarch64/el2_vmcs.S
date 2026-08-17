@@ -21,6 +21,12 @@
 //   376 : host_vbar   8 B
 //   384 : host_tpidr  8 B
 //   392 : sysregs[128] 128 B
+//   520 : exit_type   8 B
+//   528 : esr         8 B  (captured by guest vector)
+//   536 : far         8 B  (captured on exit below)
+//   544 : hpfar       8 B  (captured on exit below)
+//   552 : cntv_ctl    8 B  (guest vtimer, saved/disabled on exit)
+//   560 : cntv_cval   8 B  (guest vtimer, saved on exit)
 
 .arch armv8.2-a
 
@@ -65,13 +71,15 @@ el2_enter_guest:
     mrs  x2, vbar_el1
     str  x2, [x0, #376]         // vcpu->host_vbar
 
-    // 5. Switch HCR_EL2 to guest mode: clear TGE, set TWI+IMO+FMO.
+    // 5. Switch HCR_EL2 to guest mode: clear TGE, set TSC+TWI+TWE+IMO+FMO.
     //    IMO/FMO route physical IRQ/FIQ to EL2 so the host timer can
     //    preempt a guest running a tight loop (no voluntary exit).
     //    VM bit (Stage-2 enable) is set by Stage2::activate() if configured.
     mrs  x2, hcr_el2
     bic  x2, x2, #(1 << 27)    // clear TGE
+    orr  x2, x2, #(1 << 19)    // set TSC (trap SMC to EL2)
     orr  x2, x2, #(1 << 13)    // set TWI
+    orr  x2, x2, #(1 << 14)    // set TWE
     orr  x2, x2, #(1 << 4)     // set IMO (route IRQ to EL2)
     orr  x2, x2, #(1 << 3)     // set FMO (route FIQ to EL2)
     msr  hcr_el2, x2
@@ -89,6 +97,20 @@ el2_enter_guest:
     // sysregs[64] = vcpu offset 392+64 = 456.
     ldr  x2, [x0, #456]
     msr  tpidr_el1, x2
+
+    // Restore guest SP_EL0 while TGE=0. Linux arm64 stores `current` here when
+    // running in EL1h, so this must be per-vCPU or current-task state crosses
+    // CPUs under SMP.
+    ldr  x2, [x0, #480]
+    msr  sp_el0, x2
+
+    // 6c. Restore the guest virtual timer (saved + disabled on the previous
+    //     exit). Restore CVAL before CTL so a stale compare cannot fire.
+    ldr  x2, [x0, #560]         // vcpu->cntv_cval
+    msr  S3_5_C14_C3_2, x2      // CNTV_CVAL_EL02
+    ldr  x2, [x0, #552]         // vcpu->cntv_ctl
+    msr  S3_5_C14_C3_1, x2      // CNTV_CTL_EL02
+    isb
 
     // 7. Load guest GPRs x1-x30 (x0 last, it holds the vcpu pointer).
     ldr  x1,       [x0, #8]
@@ -157,17 +179,54 @@ el2_trap_exit_common:
     mrs  x1, tpidr_el1
     str  x1, [x0, #456]
 
-    // Restore HCR_EL2 to host mode: set TGE, clear TWI+VM+IMO+FMO.
+    // Save guest SP_EL0 while TGE=0, before returning to host context. On
+    // Linux/arm64 this is the per-CPU current task pointer in kernel mode.
+    mrs  x1, sp_el0
+    str  x1, [x0, #480]
+
+    // Capture fault address registers before returning to host code. ESR_EL2
+    // is captured by the guest vector; FAR_EL2/HPFAR_EL2 are captured here.
+    // These EL2 exception registers are not vCPU-private and can be overwritten
+    // by a later host exception once the host unmasks IRQs in Rust.
+    mrs  x1, far_el2
+    mrs  x2, hpfar_el2
+    str  x1, [x0, #536]         // vcpu->far
+    str  x2, [x0, #544]         // vcpu->hpfar
+
+    // Save the guest virtual timer and DISABLE it, so its PPI 27 cannot assert
+    // while the host runs (no "Unhandled IRQ 27" leak, no ticks counted during
+    // host time). The Rust exit path re-injects the tick in software and the
+    // next entry restores CTL/CVAL. Runs while IRQs are still masked.
+    mrs  x1, S3_5_C14_C3_1      // CNTV_CTL_EL02
+    mrs  x2, S3_5_C14_C3_2      // CNTV_CVAL_EL02
+    str  x1, [x0, #552]         // vcpu->cntv_ctl
+    str  x2, [x0, #560]         // vcpu->cntv_cval
+    // msr  S3_5_C14_C3_1, xzr     // disable timer → PPI 27 deasserts
+    isb
+
+    // Restore host VBAR_EL2 before switching HCR back to host mode. While the
+    // guest vector is still installed, any host-side EL2 exception would reuse
+    // the guest exit path and stale tpidr_el2 — especially visible when
+    // multiple vCPUs share one physical CPU.
+    ldr  x1, [x0, #376]         // vcpu->host_vbar
+    msr  vbar_el2, x1
+    isb
+
+    // Restore HCR_EL2 to host mode: set TGE, clear TSC+TWI+TWE+VM+IMO+FMO.
     mrs  x1, hcr_el2
     orr  x1, x1, #(1 << 27)    // set TGE
+    bic  x1, x1, #(1 << 19)    // clear TSC
     bic  x1, x1, #(1 << 13)    // clear TWI
+    bic  x1, x1, #(1 << 14)    // clear TWE
     bic  x1, x1, #(1 << 4)     // clear IMO
     bic  x1, x1, #(1 << 3)     // clear FMO
     bic  x1, x1, #1            // clear VM (disable Stage-2)
     msr  hcr_el2, x1
     isb
 
-    // Restore host VBAR_EL2 (via vbar_el1 alias, since TGE=1 now).
+    // With VHE and TGE=1 host exceptions use the VBAR_EL1 alias. Restore it
+    // after the HCR switch as well; the earlier VBAR_EL2 write only closes the
+    // transient window while TGE was still clear.
     ldr  x1, [x0, #376]         // vcpu->host_vbar
     msr  vbar_el1, x1
     isb
@@ -187,6 +246,11 @@ el2_trap_exit_common:
     ldp  x29, x30, [x1, #80]
     ldr  x2,       [x1, #96]
     mov  sp, x2
+
+    // Restore host uaccess state before returning to Rust. A guest exit can
+    // leave privileged access to EL0 mappings disabled via PSTATE.PAN, while
+    // the host copy_user path expects PAN to be clear.
+    msr  pan, #0
 
     ret
 .size el2_trap_exit_common, . - el2_trap_exit_common

@@ -77,18 +77,6 @@ fn kernel_main() {
 
     runtime::init_runtime();
 
-    if kbuild_config::KFEAT_VMM && !kvmm::selftest::vmm_selftest_smp() {
-        error!("VMM selftest failed");
-    }
-
-    if kbuild_config::KFEAT_VMM && !kvmm::selftest::vmm_selftest_guest_mem() {
-        error!("VMM guest-memory selftest failed");
-    }
-
-    if kbuild_config::KFEAT_VMM && !kvmm::selftest::vmm_selftest_multi_vm() {
-        error!("VMM multi-VM selftest failed");
-    }
-
     let args = CMDLINE
         .iter()
         .copied()

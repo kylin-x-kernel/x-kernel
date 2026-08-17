@@ -5,15 +5,23 @@
 //! VMM self-test: creates a minimal VM and runs a finite guest to verify
 //! the context-switch path end-to-end.
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
+
+use vdev_test_mmio::{TEST_MMIO_GPA, TEST_MMIO_SIZE, TestMmioDevice};
 
 use crate::{
     arch::VmmArch,
     mm::GuestMem,
     vcpu::{Vcpu, spawn_vcpu_thread, vmm_run_vcpu},
-    vdev::test_mmio::{TEST_MMIO_GPA, TEST_MMIO_SIZE, TestMmioDevice},
     vm::{Vm, VmConfig},
 };
+
+struct BackgroundVm {
+    _vm: Vm<CurrentArch>,
+    _task: ktask::KtaskRef,
+}
+
+static BACKGROUND_VMS: ksync::Mutex<Vec<BackgroundVm>> = ksync::Mutex::new(Vec::new());
 
 /// Pages owned by the guest loader, freed when dropped.
 struct GuestPages {
@@ -98,6 +106,7 @@ fn selftest_impl<A: VmmArch + 'static>() -> bool {
 
     let task = spawn_vcpu_thread::<A>(vcpu);
     let exit_code = task.join();
+    vm.shutdown();
 
     if exit_code == 0 {
         log::info!("[vmm] selftest: PASSED");
@@ -191,6 +200,7 @@ fn selftest_smp_impl<A: VmmArch + 'static>() -> bool {
 
     let passed = tasks.iter().all(|t| t.join() == 0);
     drop(code_page);
+    vm.shutdown();
     if passed {
         log::info!("[vmm] smp selftest: PASSED ({} vCPUs)", total);
     } else {
@@ -259,6 +269,7 @@ fn selftest_guest_mem_impl<A: VmmArch + 'static>() -> bool {
 
     let task = spawn_vcpu_thread::<A>(vcpu);
     let exit_code = task.join();
+    vm.shutdown();
 
     if exit_code == 0 {
         log::info!("[vmm] guest-mem selftest: PASSED");
@@ -279,19 +290,19 @@ const GUEST_MODE_INFINITE: u64 = 1;
 /// with background VMs.
 pub fn vmm_selftest_multi_vm() -> bool {
     log::warn!("[vmm] === Multi-VM Self-Test ===");
-    selftest_multi_vm_impl::<CurrentArch>()
+    selftest_multi_vm_impl()
 }
 
-fn selftest_multi_vm_impl<A: VmmArch + 'static>() -> bool {
+fn selftest_multi_vm_impl() -> bool {
     const NUM_VMS: usize = 2;
 
-    if !A::percpu_hw_init() {
+    if !CurrentArch::percpu_hw_init() {
         log::error!("[vmm] multi-vm selftest: per-CPU init failed");
         return false;
     }
 
     for vm_idx in 0..NUM_VMS {
-        let mut vm: Vm<A> = match Vm::new(VmConfig::new(0, 0x1_0000_0000, 1)) {
+        let mut vm: Vm<CurrentArch> = match Vm::new(VmConfig::new(0, 0x1_0000_0000, 1)) {
             Some(vm) => vm,
             None => {
                 log::error!("[vmm] multi-vm selftest: vm_create failed for VM{}", vm_idx);
@@ -309,20 +320,24 @@ fn selftest_multi_vm_impl<A: VmmArch + 'static>() -> bool {
 
         let mut vcpu = vm.create_vcpu(0);
 
-        let (entry, sp, pages) = load_guest::<A>();
-        if !A::init_vcpu(&mut vcpu, entry, sp) {
+        let (entry, sp, pages) = load_guest::<CurrentArch>();
+        if !CurrentArch::init_vcpu(&mut vcpu, entry, sp) {
             log::error!("[vmm] multi-vm selftest: init_vcpu failed VM{}", vm_idx);
             return false;
         }
         pages.bind_to_vcpu(&mut vcpu);
 
         // Set guest mode register to infinite loop.
-        set_guest_mode::<A>(&mut vcpu, GUEST_MODE_INFINITE);
+        set_guest_mode::<CurrentArch>(&mut vcpu, GUEST_MODE_INFINITE);
 
         log::info!("[vmm] multi-vm: VM{} launched (infinite mode)", vm_idx);
 
-        // Spawn and detach — VM runs in background indefinitely.
-        spawn_vcpu_thread::<A>(vcpu);
+        vm.register();
+        let task = spawn_vcpu_thread::<CurrentArch>(vcpu);
+        BACKGROUND_VMS.lock().push(BackgroundVm {
+            _vm: vm,
+            _task: task,
+        });
     }
 
     log::info!(

@@ -30,6 +30,11 @@ pub fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         "sched_stat",
         SimpleFile::new_regular(fs.clone(), || Ok(ktask::sched_stats_text())),
     );
+    #[cfg(feature = "vmm")]
+    root.add(
+        "kvmm",
+        SimpleFile::new_regular(fs.clone(), || Ok(kvmm::dump_vm_info())),
+    );
     #[cfg(feature = "sysrq")]
     crate::sysrq_nodes::root::add_root_entries(&mut root, fs.clone());
 

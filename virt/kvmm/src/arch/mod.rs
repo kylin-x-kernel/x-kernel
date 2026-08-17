@@ -13,6 +13,14 @@ pub mod x86_64;
 #[cfg(target_arch = "riscv64")]
 pub mod riscv64;
 
+/// The VMM backend for the target architecture.
+#[cfg(target_arch = "aarch64")]
+pub type CurrentArch = aarch64::Aarch64Vhe;
+#[cfg(target_arch = "x86_64")]
+pub type CurrentArch = x86_64::X86Vmx;
+#[cfg(target_arch = "riscv64")]
+pub type CurrentArch = riscv64::RiscvHext;
+
 use crate::{
     mm::GuestMem,
     vcpu::{ExitAction, Vcpu},
@@ -38,6 +46,14 @@ pub trait VmmArch {
     fn init_vcpu(vcpu: &mut Vcpu<Self>, entry: u64, sp: u64) -> bool
     where
         Self: Sized;
+
+    /// Initialize a secondary vCPU brought up via PSCI `CPU_ON`.
+    fn init_secondary_vcpu(_vcpu: &mut Vcpu<Self>, _entry_pa: u64, _context_id: u64) -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
 
     /// Restore guest context before entering the guest.
     fn restore_guest_ctx(vcpu: &mut Vcpu<Self>)

@@ -11,6 +11,8 @@ use lazyinit::LazyInit;
 
 static GIC: LazyInit<SpinNoIrq<Gic>> = LazyInit::new();
 static TRAP_OP: LazyInit<TrapOp> = LazyInit::new();
+const GUEST_VTIMER_IRQ: usize = 27;
+
 pub fn init(gicd_base: memaddr::VirtAddr, gicc_base: memaddr::VirtAddr) {
     if GIC.get().is_some() {
         return;
@@ -114,8 +116,28 @@ pub fn dispatch_irq_from_irqsoff() -> Option<(usize, usize)> {
     Some((irq, cookie))
 }
 
+fn skip_dir_for_vmm_guest_irq(ack: Ack) -> bool {
+    if !kbuild_config::KFEAT_VMM {
+        return false;
+    }
+    let hwirq = match ack {
+        Ack::Other(intid) => intid,
+        Ack::SGI { intid, cpu_id: _ } => intid,
+    }
+    .to_u32() as usize;
+
+    // KVM-style GICv2 HW LR injection for the guest virtual timer keeps the
+    // physical PPI active until the guest EOI/deactivate path consumes the HW
+    // LR. Host-side DIR here would drop the physical backing interrupt before
+    // the guest observes it.
+    hwirq == GUEST_VTIMER_IRQ
+}
+
 pub fn complete_irq(completion_cookie: usize) {
     let ack = Ack::from(completion_cookie as u32);
+    if skip_dir_for_vmm_guest_irq(ack) {
+        return;
+    }
     TRAP_OP.dir(ack);
 }
 

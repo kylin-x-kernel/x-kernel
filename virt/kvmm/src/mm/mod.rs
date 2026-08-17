@@ -7,10 +7,48 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 static NEXT_VMID: AtomicU32 = AtomicU32::new(1);
+const PAGE_SIZE_4K: usize = 4096;
 
 /// Allocate a unique VMID for a new VM.
 pub fn alloc_vmid() -> u32 {
     NEXT_VMID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Reserve an identity-mapped guest RAM range in the host allocator.
+///
+/// Current second-stage implementations map guest RAM as GPA == HPA. Reserving
+/// the backing physical pages prevents later host allocations from reusing guest
+/// RAM and also validates that the alias is backed by host RAM before the loader
+/// writes through it.
+pub fn reserve_guest_ram(mem_base: u64, mem_size: u64) -> bool {
+    let npages = (mem_size as usize) / PAGE_SIZE_4K;
+    let va = kaddr_layout::p2v(mem_base as usize);
+
+    match kalloc::global_allocator().alloc_pages_at(
+        va,
+        npages,
+        PAGE_SIZE_4K,
+        kalloc::UsageKind::VirtMem,
+    ) {
+        Ok(_) => {
+            log::info!(
+                "[kvmm] reserved guest RAM GPA {:#x}+{:#x} ({} pages)",
+                mem_base,
+                mem_size,
+                npages,
+            );
+            true
+        }
+        Err(err) => {
+            log::error!(
+                "[kvmm] reserve guest RAM {:#x}+{:#x} failed: {:?}",
+                mem_base,
+                mem_size,
+                err,
+            );
+            false
+        }
+    }
 }
 
 #[cfg(target_arch = "aarch64")]

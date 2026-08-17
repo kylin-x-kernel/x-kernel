@@ -12,6 +12,7 @@ repository.workspace = true
 default = []
 fp-simd = []
 tls = []
+vmm = []
 arm-el2 = ["karch/arm-el2"]
 pmr = ["karch/pmr"]
 

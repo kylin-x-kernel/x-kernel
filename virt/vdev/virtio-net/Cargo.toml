@@ -1,0 +1,14 @@
+[package]
+name = "vdev-virtio-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Virtual virtio-mmio network device"
+
+[dependencies]
+log.workspace = true
+knet.workspace = true
+vdev-core.workspace = true

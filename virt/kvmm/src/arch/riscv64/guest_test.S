@@ -10,11 +10,11 @@
 //   non-zero → infinite WFI loop (VM stays alive)
 //
 // ecall protocol (a7 = hypercall number):
-//   a7=1 (PRINT): a0 = iteration count
-//   a7=0 (DONE):  guest finished
+//   a7=0x584b0001 (PRINT): a0 = iteration count
+//   a7=0x584b0000 (DONE):  guest finished
 
-.equ GUEST_ECALL_DONE,   0
-.equ GUEST_ECALL_PRINT,  1
+.equ GUEST_ECALL_DONE,   0x584b0000
+.equ GUEST_ECALL_PRINT,  0x584b0001
 
 .section .text
 .balign 4

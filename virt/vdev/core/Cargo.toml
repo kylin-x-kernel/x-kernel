@@ -1,0 +1,12 @@
+[package]
+name = "vdev-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Virtual device interfaces for x-kernel VMMs"
+
+[dependencies]
+ksync.workspace = true

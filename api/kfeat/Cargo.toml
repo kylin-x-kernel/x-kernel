@@ -34,6 +34,7 @@ fp-simd = ["khal/fp-simd"]
 
 # Virtualization (VMM)
 vmm = [
+    "devfs/vmm",
     "khal/vmm",
     "kplat-aarch64?/vmm",
     "kplat-x86_64?/vmm",

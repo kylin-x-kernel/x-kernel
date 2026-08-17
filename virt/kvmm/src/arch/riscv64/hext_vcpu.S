@@ -5,55 +5,62 @@
 //
 // hext_enter_guest(vcpu: *mut RiscvVcpu) -> i32
 //   Saves host callee-saved regs, restores VS-CSRs, installs
-//   hext_trap_vector, sets hstatus.SPV+SPVP, loads guest GPRs, sret.
+//   hext_trap_vector, sets hstatus.SPV and restores guest SPVP, loads guest
+//   GPRs, sret.
 //   Returns 1 via hext_trap_vector when guest traps to HS-mode.
 //
 // hext_trap_vector
-//   Saves guest GPRs + VS-CSRs + scause/stval/htval, clears
+//   Saves guest GPRs + VS-CSRs + scause/stval/htval/hstatus, clears
 //   hstatus.SPV+SPVP, restores host state, returns 1.
 //
 // RiscvVcpu layout (offsets match Rust #[repr(C)] struct):
 //    0   : gprs[32]       32×8 = 256 B
-//  256   : vsepc          8 B
-//  264   : vsstatus       8 B
-//  272   : vstvec         8 B
-//  280   : vsscratch      8 B
-//  288   : vsatp          8 B
-//  296   : vsie           8 B
-//  304   : scause_save    8 B
-//  312   : stval_save     8 B
-//  320   : htval_save     8 B
-//  328   : host_ctx[16]   16×8 = 128 B
+//  256   : pc             8 B
+//  264   : vsepc          8 B
+//  272   : vsstatus       8 B
+//  280   : vstvec         8 B
+//  288   : vsscratch      8 B
+//  296   : vsatp          8 B
+//  304   : vsie           8 B
+//  312   : scause_save    8 B
+//  320   : stval_save     8 B
+//  328   : htval_save     8 B
+//  336   : htinst_save    8 B
+//  344   : hstatus        8 B
+//  352   : host_ctx[16]   16×8 = 128 B
 
 // vcpu_t field offsets
 .equ VCPU_R0,         0
-.equ VCPU_VSEPC,      256
-.equ VCPU_VSSTATUS,   264
-.equ VCPU_VSTVEC,     272
-.equ VCPU_VSSCRATCH,  280
-.equ VCPU_VSATP,      288
-.equ VCPU_VSIE,       296
-.equ VCPU_SCAUSE,     304
-.equ VCPU_STVAL,      312
-.equ VCPU_HTVAL,      320
+.equ VCPU_PC,         256
+.equ VCPU_VSEPC,      264
+.equ VCPU_VSSTATUS,   272
+.equ VCPU_VSTVEC,     280
+.equ VCPU_VSSCRATCH,  288
+.equ VCPU_VSATP,      296
+.equ VCPU_VSIE,       304
+.equ VCPU_SCAUSE,     312
+.equ VCPU_STVAL,      320
+.equ VCPU_HTVAL,      328
+.equ VCPU_HTINST,     336
+.equ VCPU_HSTATUS,    344
 
-// host_ctx offsets (VCPU_HOSTCTX = 328)
-.equ HCTX_RA,         328
-.equ HCTX_S0,         336
-.equ HCTX_S1,         344
-.equ HCTX_S2,         352
-.equ HCTX_S3,         360
-.equ HCTX_S4,         368
-.equ HCTX_S5,         376
-.equ HCTX_S6,         384
-.equ HCTX_S7,         392
-.equ HCTX_S8,         400
-.equ HCTX_S9,         408
-.equ HCTX_S10,        416
-.equ HCTX_S11,        424
-.equ HCTX_SP,         432
-.equ HCTX_STVEC,      440
-.equ HCTX_GP,         448
+// host_ctx offsets (VCPU_HOSTCTX = 352)
+.equ HCTX_RA,         352
+.equ HCTX_S0,         360
+.equ HCTX_S1,         368
+.equ HCTX_S2,         376
+.equ HCTX_S3,         384
+.equ HCTX_S4,         392
+.equ HCTX_S5,         400
+.equ HCTX_S6,         408
+.equ HCTX_S7,         416
+.equ HCTX_S8,         424
+.equ HCTX_S9,         432
+.equ HCTX_S10,        440
+.equ HCTX_S11,        448
+.equ HCTX_SP,         456
+.equ HCTX_STVEC,      464
+.equ HCTX_GP,         472
 
 // H-extension CSR numbers (assembler may not recognize symbolic names)
 .equ CSR_HSTATUS,     0x600
@@ -64,6 +71,7 @@
 .equ CSR_VSEPC,       0x241
 .equ CSR_VSATP,       0x280
 .equ CSR_HTVAL,       0x643
+.equ CSR_HTINST,      0x64a
 
 .section .text
 .balign 4
@@ -119,20 +127,30 @@ hext_enter_guest:
     // 5. Store vcpu* in sscratch (trap handler retrieves it).
     csrw    sscratch, a0
 
-    // 6. Set sepc = vcpu->vsepc (sret target).
-    ld      t0, VCPU_VSEPC(a0)
+    // 6. Set sepc = vcpu->pc (sret target).
+    ld      t0, VCPU_PC(a0)
     csrw    sepc, t0
 
-    // 7. Set sstatus.SPP=1 (sret returns to S-mode = VS-mode), clear SPIE.
+    // 7. Set sstatus.SPP from saved guest SPVP and clear SPIE. HS `sret`
+    // uses SPP for the target privilege even when hstatus.SPV re-enters
+    // virtual mode, so SPP must be 0 for VU-mode resumes.
     csrr    t0, sstatus
-    ori     t0, t0, 0x100       // SPP = bit8 = 1
-    li      t1, ~0x20
-    and     t0, t0, t1          // SPIE = bit5 = 0
+    li      t1, ~0x120
+    and     t0, t0, t1          // clear SPP(bit8)+SPIE(bit5)
+    ld      t1, VCPU_HSTATUS(a0)
+    andi    t1, t1, 0x100       // SPVP bit matches SPP bit position
+    or      t0, t0, t1
     csrw    sstatus, t0
 
-    // 8. Set hstatus.SPV=1 + SPVP=1 (sret enters VS-mode).
+    // 8. Set hstatus.SPV=1 and restore SPVP from the guest snapshot. SPVP
+    // controls whether the virtualized sret target is VS-mode or VU-mode.
     csrr    t0, CSR_HSTATUS
-    ori     t0, t0, 0x180       // SPV=bit7=1, SPVP=bit8=1
+    li      t1, ~0x180
+    and     t0, t0, t1          // clear SPV+SPVP
+    ori     t0, t0, 0x80        // SPV=bit7=1
+    ld      t1, VCPU_HSTATUS(a0)
+    andi    t1, t1, 0x100       // restore SPVP=bit8
+    or      t0, t0, t1
     csrw    CSR_HSTATUS, t0
 
     // 9. Load guest GPRs (a0 = x10 last).
@@ -246,7 +264,7 @@ kvmm_hext_trap_vector:
 
     // 3. Save HS trap info (sepc = guest PC on trap).
     csrr    t0, sepc
-    sd      t0, VCPU_VSEPC(a0)    // overwrite vsepc with actual trap PC
+    sd      t0, VCPU_PC(a0)
 
     csrr    t0, scause
     sd      t0, VCPU_SCAUSE(a0)
@@ -257,10 +275,17 @@ kvmm_hext_trap_vector:
     csrr    t0, CSR_HTVAL
     sd      t0, VCPU_HTVAL(a0)
 
-    // 3b. Clear hstatus.SPV(bit7)+SPVP(bit8).
+    csrr    t0, CSR_HTINST
+    sd      t0, VCPU_HTINST(a0)
+
+    // 3b. Save hstatus before clearing SPV/SPVP. On a trap from guest, SPVP
+    // records the virtual privilege mode interrupted by the trap.
+    csrr    t0, CSR_HSTATUS
+    sd      t0, VCPU_HSTATUS(a0)
+
+    // 3c. Clear hstatus.SPV(bit7)+SPVP(bit8).
     // Without this, any subsequent sret in host context would
     // incorrectly enter VS/VU-mode.
-    csrr    t0, CSR_HSTATUS
     li      t1, ~0x180
     and     t0, t0, t1
     csrw    CSR_HSTATUS, t0

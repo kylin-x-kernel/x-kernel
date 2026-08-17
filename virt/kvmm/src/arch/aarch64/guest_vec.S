@@ -4,9 +4,12 @@
 // AArch64 guest trap vector table.
 //
 // Installed into VBAR_EL2 before entering guest.
-// Each entry saves guest x0/x1 to the host stack, writes exit_type
-// into vcpu->exit_type (offset 520 via tpidr_el2), then branches
-// to el2_trap_exit_common.
+// Each entry saves guest x0/x1 to the host stack, captures ESR_EL2 into
+// vcpu->esr (offset 528), writes exit_type into vcpu->exit_type (offset 520
+// via tpidr_el2), then branches to el2_trap_exit_common.
+//
+// ESR_EL2 is captured here — before the host unmasks IRQs in Rust — so a
+// later host exception cannot clobber the syndrome for a synchronous exit.
 //
 // Exit types: 0=synchronous, 1=IRQ, 2=FIQ, 3=SError
 //
@@ -22,8 +25,10 @@
     .balign 128
     stp  x0, x1, [sp, #-16]!
     mrs  x0, tpidr_el2
+    mrs  x1, esr_el2
+    str  x1, [x0, #528]         // vcpu->esr
     mov  x1, #\type
-    str  x1, [x0, #520]
+    str  x1, [x0, #520]         // vcpu->exit_type
     b    el2_trap_exit_common
 .endm
 

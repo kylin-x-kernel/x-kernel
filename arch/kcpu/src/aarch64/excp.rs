@@ -33,7 +33,11 @@ core::arch::global_asm!(
     trapframe_size = const core::mem::size_of::<ExceptionContext>(),
     // GICv3-only: mrs/msr ICC_PMR_EL1. GICv2 has no sysreg interface —
     // enabling pmr on GICv2 will cause undefined-instruction exceptions.
-    PMR_SYSREG = const if cfg!(feature = "pmr") { 1u64 } else { 0u64 },
+    PMR_SYSREG = const if cfg!(all(feature = "pmr", not(feature = "vmm"))) {
+        1u64
+    } else {
+        0u64
+    },
     TRAP_KIND_SYNC = const ArchTrap::Synchronous as u8,
     TRAP_KIND_IRQ = const ArchTrap::Irq as u8,
     TRAP_KIND_FIQ = const ArchTrap::Fiq as u8,
@@ -90,7 +94,7 @@ fn dispatch_exception(tf: &mut ExceptionContext, kind: ArchTrap, source: ArchTra
             panic!("Unhandled exception {:?}:\n{:#x?}", kind, tf);
         }
         ArchTrap::Irq => {
-            #[cfg(feature = "pmr")]
+            #[cfg(all(feature = "pmr", not(feature = "vmm")))]
             if tf.spsr & (1 << 7) != 0
                 || (karch::pmr::is_ready() && tf.pmr as u8 <= karch::pmr::NMI_ONLY)
             {

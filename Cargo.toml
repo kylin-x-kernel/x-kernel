@@ -171,6 +171,10 @@ xdice = { path = "tee/xdice", default-features = false, features = ["nostd"] }
 
 # Internal: virtualization
 kvmm = { path = "virt/kvmm" }
+vdev-core = { path = "virt/vdev/core" }
+vdev-test-mmio = { path = "virt/vdev/test-mmio" }
+vdev-virtio-net = { path = "virt/vdev/virtio-net" }
+vdev-vpl011 = { path = "virt/vdev/vpl011" }
 
 # Internal: Trusty IPC
 tipc = { path = "tee/tipc" }

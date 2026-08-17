@@ -45,10 +45,10 @@
 #![no_std]
 
 #[cfg(feature = "platform_kplat_aarch64")]
-extern crate kplat_aarch64;
+extern crate kplat_aarch64 as _;
 #[cfg(feature = "platform_kplat_loongarch64")]
-extern crate kplat_loongarch64;
+extern crate kplat_loongarch64 as _;
 #[cfg(feature = "platform_kplat_riscv64")]
-extern crate kplat_riscv64;
+extern crate kplat_riscv64 as _;
 #[cfg(feature = "platform_kplat_x86_64")]
-extern crate kplat_x86_64;
+extern crate kplat_x86_64 as _;

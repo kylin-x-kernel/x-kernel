@@ -1,0 +1,13 @@
+[package]
+name = "vdev-test-mmio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Virtual test MMIO device"
+
+[dependencies]
+log.workspace = true
+vdev-core.workspace = true

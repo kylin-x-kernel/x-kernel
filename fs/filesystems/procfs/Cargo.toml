@@ -15,6 +15,7 @@ tee = ["kprocess/tee", "dep:tee_task_iface"]
 lock_stat = ["dep:klockstat", "klockstat/stats"]
 sched_stat = ["ktask/sched_stat"]
 smp = ["ktracing/smp"]
+vmm = ["dep:kvmm"]
 
 [dependencies]
 kbuild_config.workspace = true
@@ -32,6 +33,7 @@ memaddr.workspace = true
 memspace.workspace = true
 unittest.workspace = true
 tee_task_iface = { workspace = true, optional = true }
+kvmm = { workspace = true, optional = true }
 
 [target.'cfg(any(target_arch = "riscv32", target_arch = "riscv64"))'.dependencies]
 riscv = "0.14"

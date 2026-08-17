@@ -51,8 +51,10 @@ kvmm_save_sysregs_el12:
     mrs  x2, tpidr_el0
     stp  x1, x2, [x0], #16
 
+    // Preserve guest SP_EL0. Linux arm64 uses SP_EL0 as `current` while in
+    // kernel mode; it is saved/restored in el2_vmcs.S while TGE=0.
     mrs  x1, tpidrro_el0
-    mrs  x2, sp_el0
+    ldr  x2, [x0, #8]
     stp  x1, x2, [x0], #16
 
     mrs  x1, elr_el12
@@ -93,7 +95,8 @@ kvmm_restore_sysregs_el12:
 
     ldp  x1, x2, [x0], #16
     msr  tpidrro_el0, x1
-    msr  sp_el0, x2
+    // Skip SP_EL0 here: restore it in el2_vmcs.S after clearing TGE, so the
+    // value is the guest's per-vCPU `current`, not host context state.
 
     ldp  x1, x2, [x0], #16
     msr  elr_el12, x1

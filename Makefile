@@ -14,8 +14,10 @@
 # * QEMU / runtime — `make run`, `make justrun`, `make debug`:
 #     - DISK_IMG            virtio-blk backing disk image (see RAMDISK_IMG below)
 #     - NET / BLK / VSOCK   Enable virtio-net / virtio-blk / vhost-vsock (y/n)
-#     - ACCEL               Enable KVM (linux) / HVF (macOS) acceleration (y/n;
-#                           default: n on macOS, y elsewhere)
+#     - ACCEL               Enable KVM (linux) / HVF (macOS) acceleration for
+#                           non-VMM kernels (y/n; default: n on macOS, y
+#                           elsewhere). KFEAT_VMM=y forces QEMU TCG because CI
+#                           hosts normally do not support nested virtualization.
 #     - GRAPHIC             Enable graphical output + virtio-gpu (y/n)
 #     - UEFI                Boot x86_64 via OVMF `.uefi.img` instead of LinuxBoot (y/n)
 #     - MEM                 Guest memory size (default 1g)

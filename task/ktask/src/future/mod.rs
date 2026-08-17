@@ -117,6 +117,13 @@ impl fmt::Display for Interrupted {
     }
 }
 
+impl Interrupted {
+    /// Returns true when the wait was interrupted by [`crate::interrupt_task`].
+    pub fn is_signal(&self) -> bool {
+        matches!(self.0, InterruptCause::Signal)
+    }
+}
+
 impl core::error::Error for Interrupted {}
 
 impl From<Interrupted> for KError {

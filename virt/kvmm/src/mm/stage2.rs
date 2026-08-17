@@ -18,6 +18,7 @@ use super::{GuestMem, GuestPerm, free_pt_page};
 
 const L1_ENTRIES: usize = 4;
 const L2_ENTRIES: usize = 512;
+const L3_ENTRIES: usize = 512;
 
 // LPAE descriptor bits (Stage-2 format)
 const LPAE_VALID: u64 = 1 << 0;
@@ -63,14 +64,87 @@ impl Stage2 {
     fn destroy(&mut self) {
         let l1_va = self.l1_page.as_ptr() as *const u64;
         for i in 0..L1_ENTRIES {
-            // SAFETY: l1_va is valid; i < 512 (well within page).
+            // SAFETY: l1_va is valid; i < L1_ENTRIES.
             let entry = unsafe { l1_va.add(i).read() };
             if entry & LPAE_VALID != 0 && entry & LPAE_TABLE != 0 {
                 let l2_pa = entry & LPAE_ADDR_MASK;
+                let l2_va = kaddr_layout::p2v(l2_pa as usize) as *const u64;
+
+                // Free any L3 tables split out of this L2 (e.g. GICC→GICV).
+                for j in 0..L2_ENTRIES {
+                    // SAFETY: l2_va is valid; j < L2_ENTRIES.
+                    let l2_entry = unsafe { l2_va.add(j).read() };
+                    if l2_entry & LPAE_VALID != 0 && l2_entry & LPAE_TABLE != 0 {
+                        let l3_pa = l2_entry & LPAE_ADDR_MASK;
+                        // SAFETY: l3_pa was allocated by ensure_l3_table.
+                        unsafe { free_pt_page(l3_pa) };
+                    }
+                }
+
                 // SAFETY: l2_pa was allocated by us in new().
                 unsafe { free_pt_page(l2_pa) };
             }
         }
+    }
+
+    /// Ensure the L2 slot `(l1_idx, l2_idx)` is an L3 table, returning its VA.
+    ///
+    /// If the slot is already a table, reuses it. If it is a 2 MiB block,
+    /// splits it into 512 identity 4 KiB pages. If it is invalid, allocates a
+    /// zeroed (all-invalid) L3 table. Returns null on allocation failure.
+    fn ensure_l3_table(&mut self, l1_idx: usize, l2_idx: usize) -> *mut u64 {
+        let l1_va = self.l1_page.as_ptr() as *const u64;
+        // SAFETY: l1_va valid, l1_idx < L1_ENTRIES (checked by caller).
+        let l1_entry = unsafe { l1_va.add(l1_idx).read() };
+        if l1_entry & LPAE_VALID == 0 {
+            return core::ptr::null_mut();
+        }
+
+        let l2_pa = l1_entry & LPAE_ADDR_MASK;
+        let l2_va = kaddr_layout::p2v(l2_pa as usize) as *mut u64;
+        // SAFETY: l2_va valid, l2_idx < L2_ENTRIES.
+        let l2_entry = unsafe { l2_va.add(l2_idx).read() };
+
+        if l2_entry & LPAE_VALID != 0 && l2_entry & LPAE_TABLE != 0 {
+            let l3_pa = l2_entry & LPAE_ADDR_MASK;
+            return kaddr_layout::p2v(l3_pa as usize) as *mut u64;
+        }
+
+        let mut l3_page = match kalloc::GlobalPage::alloc_zero() {
+            Ok(p) => p,
+            Err(_) => return core::ptr::null_mut(),
+        };
+        let l3_va = l3_page.as_mut_ptr() as *mut u64;
+        let l3_pa = kaddr_layout::v2p(l3_va as usize) as u64;
+        core::mem::forget(l3_page);
+
+        if l2_entry & LPAE_VALID != 0 {
+            // 2 MiB block → populate the L3 with 512 identity 4 KiB pages so
+            // the existing mapping is preserved before we overwrite one page.
+            let block_pa = l2_entry & LPAE_ADDR_MASK;
+            let block_attr = l2_entry & !LPAE_ADDR_MASK & !0x3u64;
+            for i in 0..L3_ENTRIES {
+                let page_pa = block_pa + (i as u64) * 4096;
+                // SAFETY: l3_va is a freshly-allocated zeroed page.
+                unsafe {
+                    l3_va
+                        .add(i)
+                        .write(page_pa | block_attr | LPAE_VALID | LPAE_TABLE);
+                }
+            }
+        }
+        // else: invalid L2 → leave the L3 all-invalid (region keeps trapping).
+
+        flush_pt_page(l3_va as *const u8);
+
+        // SAFETY: install the L3 table into the L2 slot after it is flushed.
+        unsafe {
+            l2_va.add(l2_idx).write(l3_pa | LPAE_VALID | LPAE_TABLE);
+            core::arch::asm!("dc civac, {}", in(reg) l2_va.add(l2_idx));
+            core::arch::asm!("dsb ish");
+        }
+        flush_stage2_tlb();
+        l3_va
     }
 }
 
@@ -106,20 +180,24 @@ impl GuestMem for Stage2 {
             }
         }
 
-        // Fill L2 block entries: identity map with appropriate attributes
+        // Fill L2 block entries. Only guest RAM is mapped (Normal, RW).
+        // Everything else — device MMIO (GIC, UART, ...) and unbacked IPA — is
+        // left INVALID so the guest faults to EL2 and the VMM emulates it. The
+        // guest must never reach real host devices; the only exception is added
+        // later via `map_region` (GICC → hardware GICV).
         for (i1, &l2_pa) in l2_pas.iter().enumerate() {
             let l2_va = kaddr_layout::p2v(l2_pa as usize) as *mut u64;
             for i2 in 0..L2_ENTRIES {
                 let ipa = ((i1 as u64) << 30) | ((i2 as u64) << 21);
                 let is_ram = ipa >= mem_base && ipa < mem_end;
-                let attr = if is_ram {
-                    LPAE_AF | LPAE_SH_IS | LPAE_MATTR_NORM | LPAE_S2AP_RW
+                let entry = if is_ram {
+                    ipa | LPAE_AF | LPAE_SH_IS | LPAE_MATTR_NORM | LPAE_S2AP_RW | LPAE_VALID
                 } else {
-                    LPAE_AF | LPAE_MATTR_DEV | LPAE_S2AP_RW | LPAE_XN
+                    0 // invalid → Stage-2 fault → trap to VMM MMIO emulation
                 };
                 // SAFETY: l2_va is a valid 4KB-aligned page; i2 < 512.
                 unsafe {
-                    l2_va.add(i2).write(ipa | attr | LPAE_VALID);
+                    l2_va.add(i2).write(entry);
                 }
             }
         }
@@ -149,9 +227,55 @@ impl GuestMem for Stage2 {
         Some(Self { l1_page, vmid })
     }
 
-    fn map_region(&mut self, _gpa: u64, _hpa: u64, _size: u64, _perm: GuestPerm) -> bool {
-        // TODO: fine-grained mapping for non-identity regions
-        false
+    fn map_region(&mut self, gpa: u64, hpa: u64, size: u64, perm: GuestPerm) -> bool {
+        let start = gpa & !0xFFF;
+        let hpa_base = hpa & !0xFFF;
+        let end = (gpa + size + 0xFFF) & !0xFFF;
+
+        let attr = match perm {
+            GuestPerm::RamRW => LPAE_AF | LPAE_SH_IS | LPAE_MATTR_NORM | LPAE_S2AP_RW,
+            GuestPerm::DeviceRW => LPAE_AF | LPAE_MATTR_DEV | LPAE_S2AP_RW | LPAE_XN,
+        };
+
+        let mut offset: u64 = 0;
+        while start + offset < end {
+            let cur_gpa = start + offset;
+            let cur_hpa = hpa_base + offset;
+
+            let l1_idx = (cur_gpa >> 30) as usize;
+            let l2_idx = ((cur_gpa >> 21) & 0x1FF) as usize;
+            let l3_idx = ((cur_gpa >> 12) & 0x1FF) as usize;
+
+            if l1_idx >= L1_ENTRIES {
+                return false;
+            }
+
+            let l3_va = self.ensure_l3_table(l1_idx, l2_idx);
+            if l3_va.is_null() {
+                return false;
+            }
+
+            // SAFETY: l3_va points to a valid L3 page; l3_idx < 512.
+            unsafe {
+                let entry_ptr = l3_va.add(l3_idx);
+                entry_ptr.write(cur_hpa | attr | LPAE_VALID | LPAE_TABLE);
+                core::arch::asm!("dc civac, {}", in(reg) entry_ptr);
+            }
+
+            offset += 4096;
+        }
+
+        // SAFETY: barrier + TLB invalidation.
+        unsafe { core::arch::asm!("dsb ish") };
+        flush_stage2_tlb();
+
+        log::info!(
+            "[stage2] map_region gpa={:#x} → hpa={:#x} size={:#x}",
+            gpa,
+            hpa,
+            size,
+        );
+        true
     }
 
     fn gpa_to_hpa(&self, gpa: u64) -> Option<u64> {

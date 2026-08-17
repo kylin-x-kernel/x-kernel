@@ -40,9 +40,11 @@ pub(crate) fn run(bundle: &Bundle, args: &RunArgs) -> Result<()> {
                 .to_string(),
         );
 
-    let accel = (!args.no_accel)
-        .then(|| hardware_accel(context.config.arch()))
-        .flatten();
+    let accel = selected_accel(
+        context.config.arch(),
+        args.no_accel,
+        context.config.is_enabled("KFEAT_VMM"),
+    );
     add_platform_args(&mut command, bundle, args, qemu_program, accel)?;
     add_devices(&mut command, bundle, args, qemu_program)?;
     if !args.graphic {
@@ -73,12 +75,23 @@ fn qemu_program(arch: KernelArch) -> &'static str {
     }
 }
 
+/// Select the QEMU accelerator backend.
+///
+/// VMM-enabled kernels need architectural virtualization support inside the
+/// guest. Most CI hosts expose KVM to the outer QEMU but do not support nested
+/// virtualization, so run those kernels under TCG unless acceleration is
+/// explicitly disabled already.
+fn selected_accel(guest: KernelArch, no_accel: bool, vmm: bool) -> Option<&'static str> {
+    if no_accel || vmm {
+        None
+    } else {
+        hardware_accel(guest)
+    }
+}
+
 /// Hardware acceleration backend (KVM on Linux, HVF on macOS) available when
 /// the host can run the guest arch natively. Returns the QEMU accelerator
 /// backend name, or `None` when only software emulation (TCG) is usable.
-///
-/// Independent of `KFEAT_VMM`, which only controls nested-virt / VMX exposure
-/// — mirroring the semantics of the former `scripts/make/qemu.mk`.
 fn hardware_accel(guest: KernelArch) -> Option<&'static str> {
     let arch_matches = matches!(
         (env::consts::ARCH, guest),
@@ -455,7 +468,9 @@ fn virtio_device_suffix(bus: Option<VirtioBus>) -> Result<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::output_contains_device;
+    use xconfig::build_config::KernelArch;
+
+    use super::{output_contains_device, selected_accel};
 
     #[test]
     fn device_probe_matches_qemu_device_listing() {
@@ -465,5 +480,16 @@ name \"vhost-vsock-pci\", bus PCI
 
         assert!(output_contains_device(output, "vhost-vsock-pci"));
         assert!(!output_contains_device(output, "vhost-vsock-device"));
+    }
+
+    #[test]
+    fn vmm_forces_tcg_even_when_accel_is_available() {
+        let guest = match std::env::consts::ARCH {
+            "aarch64" => KernelArch::Aarch64,
+            "riscv64" => KernelArch::Riscv64,
+            _ => KernelArch::X86_64,
+        };
+
+        assert_eq!(selected_accel(guest, false, true), None);
     }
 }

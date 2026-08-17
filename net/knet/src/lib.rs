@@ -30,6 +30,7 @@ pub mod unix;
 pub mod vsock;
 
 use alloc::{borrow::ToOwned, boxed::Box, sync::Arc};
+use core::net::SocketAddr;
 
 #[cfg(feature = "vsock")]
 use kclass::{ClassDevice, VsockDeviceImpl, subscribe_vsock_available, vsock_devices};
@@ -209,4 +210,58 @@ fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
 /// The call does not publish new work or wait for another executor.
 pub fn poll_interfaces() {
     poller::network_poller().assist_once();
+}
+
+/// Send a complete link-layer frame through the interface identified by `ifindex`.
+pub fn send_link_frame(ifindex: i32, frame: &[u8]) -> kerrno::KResult<usize> {
+    if !SERVICE.is_inited() {
+        return Err(kerrno::KError::OperationNotSupported);
+    }
+    SERVICE.send_link_frame(ifindex, frame)
+}
+
+/// Send a UDP datagram through the kernel network stack.
+pub fn send_udp_payload(dst: SocketAddr, payload: &[u8]) -> kerrno::KResult<usize> {
+    if !SERVICE.is_inited() {
+        return Err(kerrno::KError::OperationNotSupported);
+    }
+
+    let socket = udp::UdpSocket::new();
+    socket.send_datagram_now(dst, payload)
+}
+
+/// Persistent UDP relay socket for request/reply datagram flows.
+pub struct UdpDatagramRelay {
+    socket: udp::UdpSocket,
+}
+
+impl UdpDatagramRelay {
+    /// Create a UDP relay socket with an ephemeral local port.
+    pub fn new() -> kerrno::KResult<Self> {
+        Self::new_with_port(0)
+    }
+
+    /// Create a UDP relay socket bound to `local_port`.
+    pub fn new_with_port(local_port: u16) -> kerrno::KResult<Self> {
+        if !SERVICE.is_inited() {
+            return Err(kerrno::KError::OperationNotSupported);
+        }
+
+        let socket = udp::UdpSocket::new();
+        socket.bind(SocketAddrEx::Ip(SocketAddr::new(
+            core::net::IpAddr::V4(core::net::Ipv4Addr::UNSPECIFIED),
+            local_port,
+        )))?;
+        Ok(Self { socket })
+    }
+
+    /// Send a UDP datagram through this relay socket.
+    pub fn send_to(&self, dst: SocketAddr, payload: &[u8]) -> kerrno::KResult<usize> {
+        self.socket.send_datagram_now(dst, payload)
+    }
+
+    /// Try to receive a UDP datagram without blocking.
+    pub fn try_recv(&self, buf: &mut [u8]) -> kerrno::KResult<Option<(usize, SocketAddr)>> {
+        self.socket.recv_datagram_now(buf)
+    }
 }

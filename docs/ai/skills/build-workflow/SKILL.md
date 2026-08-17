@@ -199,6 +199,9 @@ Important defaults:
 - virtio block and network: enabled when compiled into the kernel;
 - vsock: automatically attached when the kernel driver and selected QEMU
   device model both support it; otherwise XKMake warns and continues;
+- acceleration: `KFEAT_VMM=y` forces QEMU TCG even when `ACCEL=y`, because
+  CI hosts usually expose KVM only to the outer QEMU and do not support nested
+  virtualization;
 - display: serial/nographic unless `--graphic` is supplied;
 - guest IP: `10.0.2.15`;
 - gateway: `10.0.2.2`.

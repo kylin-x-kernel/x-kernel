@@ -1,0 +1,15 @@
+[package]
+name = "vdev"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Virtual device crate collection"
+
+[dependencies]
+vdev-core.workspace = true
+vdev-test-mmio.workspace = true
+vdev-virtio-net.workspace = true
+vdev-vpl011.workspace = true

@@ -8,9 +8,10 @@ use core::{
 };
 
 use aarch64_cpu::registers::{
-    CNTFRQ_EL0, CNTP_CTL_EL0, CNTP_TVAL_EL0, CNTPCT_EL0, CNTV_CTL_EL0, CNTV_TVAL_EL0, CNTVCT_EL0,
-    Readable, Writeable,
+    CNTFRQ_EL0, CNTPCT_EL0, CNTV_CTL_EL0, CNTV_TVAL_EL0, CNTVCT_EL0, Readable, Writeable,
 };
+#[cfg(not(feature = "vmm"))]
+use aarch64_cpu::registers::{CNTP_CTL_EL0, CNTP_TVAL_EL0};
 use int_ratio::Ratio;
 use klazy::Once;
 #[cfg(feature = "arm-timer-resume-fixup")]
@@ -183,8 +184,8 @@ fn rearm_local_timer_irq() {
     let irq = interrupt_id();
     match mode() {
         TimerMode::Physical => {
-            CNTP_CTL_EL0.write(CNTP_CTL_EL0::ENABLE::SET);
-            CNTP_TVAL_EL0.set(0);
+            write_physical_timer_ctl(1);
+            write_physical_timer_tval(0);
         }
         TimerMode::Virtual => {
             CNTV_CTL_EL0.write(CNTV_CTL_EL0::ENABLE::SET);
@@ -305,15 +306,47 @@ pub fn arm_timer(deadline: ktime_types::MonotonicInstant) {
     if current_ticks < deadline_ticks {
         let interval = (deadline_ticks - current_ticks).min(MAX_TIMER_INTERVAL_TICKS);
         match mode() {
-            TimerMode::Physical => CNTP_TVAL_EL0.set(interval),
+            TimerMode::Physical => write_physical_timer_tval(interval),
             TimerMode::Virtual => CNTV_TVAL_EL0.set(interval),
         }
     } else {
         match mode() {
-            TimerMode::Physical => CNTP_TVAL_EL0.set(0),
+            TimerMode::Physical => write_physical_timer_tval(0),
             TimerMode::Virtual => CNTV_TVAL_EL0.set(0),
         }
     }
+}
+
+#[cfg(feature = "vmm")]
+#[inline]
+fn write_physical_timer_ctl(value: u64) {
+    // SAFETY: under the aarch64 VMM configuration the host runs at EL2 with
+    // VHE enabled, and IRQ 26 is the EL2 physical timer interrupt.
+    unsafe { core::arch::asm!("msr CNTHP_CTL_EL2, {}", in(reg) value) };
+}
+
+#[cfg(not(feature = "vmm"))]
+#[inline]
+fn write_physical_timer_ctl(value: u64) {
+    if value & 1 != 0 {
+        CNTP_CTL_EL0.write(CNTP_CTL_EL0::ENABLE::SET);
+    } else {
+        CNTP_CTL_EL0.write(CNTP_CTL_EL0::ENABLE::CLEAR);
+    }
+}
+
+#[cfg(feature = "vmm")]
+#[inline]
+fn write_physical_timer_tval(value: u64) {
+    // SAFETY: see `write_physical_timer_ctl`; TVAL is a 32-bit signed timer
+    // value architecturally, and callers clamp positive intervals to u32.
+    unsafe { core::arch::asm!("msr CNTHP_TVAL_EL2, {}", in(reg) value) };
+}
+
+#[cfg(not(feature = "vmm"))]
+#[inline]
+fn write_physical_timer_tval(value: u64) {
+    CNTP_TVAL_EL0.set(value);
 }
 
 pub fn config_from_device_tree() -> Option<TimerConfig> {

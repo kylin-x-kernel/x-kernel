@@ -116,6 +116,169 @@ Key design decisions:
   allocated per vCPU inside `init_vcpu`. Idempotency via `VMXON_DONE` percpu flag.
 - **RISC-V**: All state is CSR-based and naturally per-hart. `hext_init()` is idempotent.
 
+### vCPU Run-State Machine (`VcpuRunState`)
+
+`VmShared` publishes a coarse per-vCPU execution state, maintained by the run
+loop (`vmm_run_vcpu`) and the WFI handler:
+
+| State | Meaning |
+|-------|---------|
+| `Offline` | not started, or exited |
+| `RunningGuest` | executing guest code at EL1 |
+| `HostHandlingExit` | trapped out; host is handling the exit |
+| `WfiSleeping` | parked in the VMM WFI path in an *interruptible* sleep |
+
+The WFI path (`handle_wfi`) now parks the vCPU with
+`ktask::interruptible_sleep_until` instead of a plain sleep, so an injected
+virtual IRQ can wake it early. `VmShared::set_vcpu_task` records the owning
+`KtaskRef` so `inject_irq` can reach the thread.
+
+### Preemption-safe world switch
+
+The per-vCPU state that lives in *per-physical-CPU* hardware — the Stage-2/EPT
+root (VTTBR/EPTP/hgatp), the guest EL1 register bank, and (once added) the GICH
+list registers — is loaded, entered, and read back inside a single IRQ-masked
+window in `vmm_run_vcpu` (`ksync::spin::IrqSave`). Without it the scheduler
+could preempt the vCPU thread between the Rust-side load and the `eret` and
+migrate it to another pCPU, so the guest would resume on a CPU holding another
+vCPU's hardware state (corrupt Stage-2, lost registers, or a dropped
+just-injected IRQ). The guard is released before `exit_handler`, which may
+block or yield. This extends the narrow `tpidr_el2` masking already done inside
+`el2_enter_guest` to cover the whole setup/read-back.
+
+**`inject_irq` is a skeleton in this stage.** It only wakes a vCPU that is
+`WfiSleeping`. The actual injection substrate (recording a pending bit and
+programming it into a list register) and the cross-pCPU IPI kick for a vCPU
+running guest code on another physical CPU are the subject of the next stage
+(see *Future Work → Interrupt Injection*). Until then, guests receive no
+virtual interrupts.
+
+### AArch64 world-switch / thread fixes
+
+The EL2 exception registers are not vCPU-private and can be clobbered by a
+host exception once the exit handler unmasks IRQs. They are therefore captured
+in assembly *before* returning to Rust:
+
+- **ESR_EL2** → `Aarch64Vcpu.esr` (offset 528), captured in the guest vector
+  (`guest_vec.S`).
+- **FAR_EL2 / HPFAR_EL2** → `Aarch64Vcpu.far` / `.hpfar` (offsets 536 / 544),
+  captured in `el2_trap_exit_common` (`el2_vmcs.S`).
+
+`el2_trap_exit_common` also:
+
+- restores host `VBAR_EL2` *before* the `HCR_EL2` switch back to host mode,
+  closing the window where a host EL2 exception would reuse the guest exit path
+  and stale `tpidr_el2` (visible when several vCPUs share one physical CPU); and
+- clears `PSTATE.PAN` (`msr pan, #0`) before returning, since a guest exit may
+  leave PAN set while the host `copy_user` path expects it clear.
+
+### Introspection (`/proc/kvmm`) and guest loader
+
+Every `Vm` registers a `Weak<dyn VmInfo>` in a global registry on creation and
+clears its `active` flag via `shutdown()` when torn down. `kvmm::dump_vm_info()`
+walks the registry and formats a live snapshot — per-vCPU pCPU/run-state, cycle
+accounting (guest vs host time, utilisation), an exit-reason breakdown
+(halt/hcall/mmio/irq/other), and emulated MMIO devices. It is surfaced read-only
+at `/proc/kvmm` through the procfs `vmm` feature (`procfs = { features =
+["vmm"] }`). Per-vCPU counters live in `VcpuStats` (one cache-line slot per
+vCPU, `Relaxed` atomics); the run loop stamps guest/host ticks around each entry
+and the arch exit handler tags `vcpu.exit_category`.
+
+`loader.rs` reads guest images from the kernel VFS (`kfs`) into guest physical
+memory via `GuestMem::gpa_to_hpa`, and patches the guest DTB (initrd range,
+memory node, disabling unemulated nodes). It is self-contained (no device/vgic
+dependencies) and is the building block the `/dev/kvmm` ioctl path will use to
+boot real guests.
+
+### `/dev/kvmm` device model and interrupt path (AArch64)
+
+`/dev/kvmm` (devfs `vmm` feature → `KvmmDevice`) is a write-command control
+plane: `echo "boot <bin> [@0xBASE]" > /dev/kvmm` loads a raw binary (FreeRTOS
+style — no DTB/initrd) at `base + KERNEL_OFF`, wires the emulated devices, and
+starts a small SMP VM. `attach`/`input`/`irq`/`dump` help drive and inspect it.
+
+The shared device registry and cross-architecture device traits live under
+`src/vdev/`. AArch64 guest-platform devices live under `src/vdev/aarch64/` and
+are the sandbox used to bring up and debug the whole interrupt path with the
+simplest possible guest:
+
+- **`stage2` maps only guest RAM** (Normal). Every device region is left
+  *invalid* so guest MMIO faults to EL2 — the guest can never touch the real
+  host GIC/UART. The one hardware exception is added with a fine-grained L3
+  mapping (`ensure_l3_table` splits a 2 MiB block into 4 KiB pages).
+- **`vpl011`** emulates the PL011 UART; TX is line-buffered to the host log
+  (`[guest N] …`), RX flows through an SPSC `RxChannel`.
+- **`aarch64::vgicd`** emulates the GIC distributor (GICD, `0x0800_0000`). A byte-addressable
+  backing store gives correct read-back for the registers the guest probes
+  (IPRIORITYR/ITARGETSR/ICFGR/CTLR — without this the priority-bit probe reads 0
+  and the guest hangs). Distributor writes update vGIC state: SGI/PPI enable bits
+  are banked per vCPU, shared SPI enable bits are VM-wide, and ISPENDR/SGIR latch
+  pending interrupts for the selected target vCPUs.
+- **GICC → GICV**: the guest CPU interface (`0x0801_0000`) is redirected to the
+  hardware virtual interface GICV (`0x0804_0000`) via `map_region`, so ack/EOI
+  are hardware-assisted.
+- **`aarch64::vgic`** owns virtual CPU-interface/GICH state. Pending interrupts are
+  latched independently from enable state; `VgicHook::on_entry` drains only
+  `pending & enabled` into free LRs inside the IRQ-masked world-switch window.
+  Disabled pending lines stay latched until the guest enables them. LRs are read
+  back in `on_exit`, then the physical GICH LR/VMCR/APR state is cleared so
+  another VM that later runs on the same pCPU cannot observe stale virtual
+  interrupt state.
+- **Virtual timer**: guest `CNTV_CTL_EL02`/`CNTV_CVAL_EL02` are saved on exit and
+  restored on entry; the timer is not disabled on exit because the host IRQ 27
+  path must keep observing guest virtual timer expiry. The host IRQ route only
+  wakes the per-pCPU owner task; before each guest entry, the VMM recomputes
+  whether the current vCPU's saved virtual timer deadline is overdue and latches
+  virtual PPI 27 pending when needed. Delivery still requires the guest's banked
+  PPI 27 enable bit for that vCPU, matching GIC PPI semantics.
+- **MMIO data path**: `handle_data_abort` decodes the ESR ISS (ISV/SAS/SRT/WnR)
+  and moves the actual bytes between the faulting GPR and the device — a read
+  writes the result back into the destination register, a write forwards the
+  source register value.
+
+End-to-end this boots FreeRTOS, delivers its timer tick, and runs the Rhealstone
+benchmark.
+
+### `/dev/kvmm` RISC-V validation devices
+
+RISC-V guest-platform validation devices live under `src/vdev/riscv64/`. They
+are intentionally smaller than a production virtual platform: the goal is to
+exercise the same `VmDevices`/`IrqSender`/`VcpuHookFactory` abstraction used by
+AArch64 while keeping the PLIC and timer model small enough for bring-up.
+
+- **`riscv64::irq`** implements a simplified vPLIC at the QEMU virt PLIC window
+  (`0x0c00_0000`, 4 MiB). It supports the PLIC priority, pending, enable,
+  threshold, and claim/complete register layout for the first 64 sources, and
+  maps PLIC context N directly to vCPU N. Claim moves a source from pending to
+  active; completion clears active. The vCPU hook summarizes each context's
+  deliverable source as VS external interrupt pending (`hvip.VSEIP`) and clears
+  that per-pCPU CSR bit on exit so another VM cannot inherit stale virtual
+  interrupt state.
+- **`riscv64::timer`** raises VS timer interrupt pending (`hvip.VSTIP`)
+  periodically while a vCPU is entered. This validates timer delivery through
+  the hook path; a real implementation should replace it with SBI/Sstc deadline
+  state programmed by the guest.
+- **`arch::riscv64` CSR glue** delegates and enables VS external/timer interrupt
+  injection (`hideleg`/`hie`) during per-CPU H-extension init, and exposes narrow
+  helpers for the RISC-V vdev hooks to set or clear the current pCPU's `hvip`
+  pending bits.
+
+**IRQ exit scheduling.** Kernel preemption is disabled here (cooperative
+scheduling), so the vCPU thread must give up its pCPU voluntarily — but *how
+often* matters a lot. Yielding on every IRQ exit throttled the guest badly
+(host-timer preemptions via `HCR.IMO` fire ~100 Hz, and each yield let the run
+loop ping-pong so the guest only ran ~49 % of the time); never yielding starved
+host tasks that share the vCPU's pCPU (busybox stalled). The fix: the IRQ exit
+handler just re-enters the guest (the host IRQ was already serviced at unmask),
+and the run loop does a **bounded periodic yield** — at most once per ~1 ms of
+wall time. When the vCPU is the only runnable task that yield is a cheap
+self-repick (~µs, measured); when a host task is ready on the pCPU it hands the
+CPU over. Result on the Rhealstone task-switch test: jitter 10.3 ms → 263 µs,
+vCPU utilisation 49 % → 98 %, host shell responsive, vtimer inject latency
+~130 µs. The remaining knob (a later step) is letting the vCPU actually sleep
+during guest WFI instead of busy-yielding, and ultimately enabling kernel
+preemption so no explicit yield is needed.
+
 ---
 
 ## Implementation History
