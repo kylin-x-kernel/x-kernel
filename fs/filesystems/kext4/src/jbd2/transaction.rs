@@ -91,7 +91,6 @@ impl RunningTransactionState {
         Ok(())
     }
 
-    #[cfg(test)]
     fn reserve(&mut self, credits: JournalCredits) -> Ext4Result<()> {
         self.reserved_credits = self
             .reserved_credits
@@ -358,6 +357,7 @@ pub(crate) struct JournalTransactions {
     checkpoint_waiters: WaitQueue,
     #[cfg(not(target_os = "none"))]
     checkpoint_condition: Condvar,
+    max_reserved_credits: u32,
     inner: Mutex<JournalInner>,
 }
 
@@ -371,13 +371,23 @@ impl fmt::Debug for JournalTransactions {
 }
 
 impl JournalTransactions {
-    /// Creates the transaction engine for one mounted journal.
+    /// Creates an unbounded transaction engine for isolated tests.
+    #[cfg(test)]
     pub const fn new(first_transaction: TransactionId) -> Self {
+        Self::new_with_credit_limit(first_transaction, u32::MAX)
+    }
+
+    /// Creates the transaction engine for one mounted journal.
+    pub(crate) const fn new_with_credit_limit(
+        first_transaction: TransactionId,
+        max_reserved_credits: u32,
+    ) -> Self {
         Self {
             #[cfg(target_os = "none")]
             checkpoint_waiters: WaitQueue::new(),
             #[cfg(not(target_os = "none"))]
             checkpoint_condition: Condvar::new(),
+            max_reserved_credits,
             inner: Mutex::new(JournalInner {
                 aborted: None,
                 next_transaction: first_transaction,
@@ -415,6 +425,9 @@ impl JournalTransactions {
 
     /// Starts or joins the running transaction.
     pub fn begin(&self, credits: JournalCredits) -> Ext4Result<JournalHandle<'_>> {
+        if credits.get() > self.max_reserved_credits {
+            return Err(Ext4Error::InsufficientJournalCredits);
+        }
         let mut inner = lock(&self.inner);
         check_not_aborted(&inner)?;
 
@@ -452,9 +465,8 @@ impl JournalTransactions {
     pub(crate) fn transaction_to_commit_before_reservation(
         &self,
         incoming_credits: JournalCredits,
-        max_reserved_credits: u32,
     ) -> Ext4Result<Option<TransactionId>> {
-        if incoming_credits.get() > max_reserved_credits {
+        if incoming_credits.get() > self.max_reserved_credits {
             return Err(Ext4Error::InsufficientJournalCredits);
         }
         let inner = lock(&self.inner);
@@ -466,7 +478,7 @@ impl JournalTransactions {
         let projected_credits = reserved_credits
             .checked_add(incoming_credits.get())
             .ok_or(Ext4Error::Overflow)?;
-        if projected_credits < max_reserved_credits {
+        if projected_credits < self.max_reserved_credits {
             return Ok(None);
         }
         if active_handles != 0 {
@@ -480,7 +492,6 @@ impl JournalTransactions {
     pub(crate) fn transaction_to_commit_after_handle(
         &self,
         transaction: TransactionId,
-        max_reserved_credits: u32,
     ) -> Ext4Result<Option<TransactionId>> {
         let inner = lock(&self.inner);
         check_not_aborted(&inner)?;
@@ -491,7 +502,7 @@ impl JournalTransactions {
             return Err(Ext4Error::InvalidJournalTransaction);
         }
         let (active_handles, reserved_credits) = running.running_state()?;
-        if active_handles != 0 || reserved_credits < max_reserved_credits {
+        if active_handles != 0 || reserved_credits < self.max_reserved_credits {
             return Ok(None);
         }
         Ok(Some(running.id()))
@@ -918,10 +929,22 @@ impl<'a> JournalHandle<'a> {
         self.remaining_credits
     }
 
-    /// Reserves additional credits for this handle and transaction.
-    #[cfg(test)]
-    pub fn reserve_more(&mut self, credits: JournalCredits) -> Ext4Result<()> {
+    /// Reserves additional credits without exceeding the running transaction's
+    /// journal-space limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Ext4Error::InsufficientJournalCredits`] when the extended
+    /// reservation would exceed the mounted journal's transaction limit.
+    pub(crate) fn reserve_more(&mut self, credits: JournalCredits) -> Ext4Result<()> {
         self.journal.with_running(self.id, |running| {
+            let projected_credits = running
+                .reserved_credits
+                .checked_add(credits.get())
+                .ok_or(Ext4Error::Overflow)?;
+            if projected_credits > self.journal.max_reserved_credits {
+                return Err(Ext4Error::InsufficientJournalCredits);
+            }
             running.reserve(credits)?;
             self.remaining_credits = self
                 .remaining_credits
@@ -1056,7 +1079,7 @@ mod tests {
 
     #[test]
     fn reserve_more_extends_handle_credit_budget() {
-        let journal = JournalTransactions::new(TransactionId::new(8));
+        let journal = JournalTransactions::new_with_credit_limit(TransactionId::new(8), 3);
         let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
 
         handle
@@ -1067,6 +1090,18 @@ mod tests {
         handle
             .consume_metadata_credit(FilesystemBlock::new(2))
             .unwrap();
+    }
+
+    #[test]
+    fn reserve_more_rejects_transaction_limit_overflow() {
+        let journal = JournalTransactions::new_with_credit_limit(TransactionId::new(8), 3);
+        let mut handle = journal.begin(JournalCredits::new(2)).unwrap();
+
+        assert_eq!(
+            handle.reserve_more(JournalCredits::new(2)),
+            Err(Ext4Error::InsufficientJournalCredits)
+        );
+        assert_eq!(handle.remaining_credits(), 2);
     }
 
     #[test]
@@ -1419,7 +1454,7 @@ mod tests {
 
     #[test]
     fn running_transaction_trigger_accounts_for_outstanding_credits() {
-        let journal = JournalTransactions::new(TransactionId::new(32));
+        let journal = JournalTransactions::new_with_credit_limit(TransactionId::new(32), 4);
         let mut first = journal.begin(JournalCredits::new(2)).unwrap();
         let transaction = first.id();
         first
@@ -1433,13 +1468,13 @@ mod tests {
         assert_eq!(journal.running_transaction().unwrap(), Some(transaction));
         assert_eq!(
             journal
-                .transaction_to_commit_before_reservation(JournalCredits::new(1), 4)
+                .transaction_to_commit_before_reservation(JournalCredits::new(1))
                 .unwrap(),
             None
         );
         assert_eq!(
             journal
-                .transaction_to_commit_before_reservation(JournalCredits::new(2), 4)
+                .transaction_to_commit_before_reservation(JournalCredits::new(2))
                 .unwrap(),
             Some(transaction)
         );
@@ -1447,16 +1482,20 @@ mod tests {
 
     #[test]
     fn admission_rejects_one_handle_that_exceeds_limit() {
-        let journal = JournalTransactions::new(TransactionId::new(33));
+        let journal = JournalTransactions::new_with_credit_limit(TransactionId::new(33), 4);
 
         assert_eq!(
             journal
-                .transaction_to_commit_before_reservation(JournalCredits::new(4), 4)
+                .transaction_to_commit_before_reservation(JournalCredits::new(4))
                 .unwrap(),
             None
         );
         assert_eq!(
-            journal.transaction_to_commit_before_reservation(JournalCredits::new(5), 4),
+            journal.transaction_to_commit_before_reservation(JournalCredits::new(5)),
+            Err(Ext4Error::InsufficientJournalCredits)
+        );
+        assert_eq!(
+            journal.begin(JournalCredits::new(5)).map(|_| ()),
             Err(Ext4Error::InsufficientJournalCredits)
         );
         assert_eq!(journal.running_transaction().unwrap(), None);
@@ -1464,7 +1503,7 @@ mod tests {
 
     #[test]
     fn admission_allows_active_handles_below_limit_and_waits_at_limit() {
-        let journal = JournalTransactions::new(TransactionId::new(34));
+        let journal = JournalTransactions::new_with_credit_limit(TransactionId::new(34), 4);
         let mut handle = journal.begin(JournalCredits::new(2)).unwrap();
         let transaction = handle.id();
         handle
@@ -1476,19 +1515,19 @@ mod tests {
 
         assert_eq!(
             journal
-                .transaction_to_commit_before_reservation(JournalCredits::new(1), 4)
+                .transaction_to_commit_before_reservation(JournalCredits::new(1))
                 .unwrap(),
             None
         );
         assert_eq!(
-            journal.transaction_to_commit_before_reservation(JournalCredits::new(2), 4),
+            journal.transaction_to_commit_before_reservation(JournalCredits::new(2)),
             Err(Ext4Error::JournalBusy)
         );
 
         drop(handle);
         assert_eq!(
             journal
-                .transaction_to_commit_before_reservation(JournalCredits::new(2), 4)
+                .transaction_to_commit_before_reservation(JournalCredits::new(2))
                 .unwrap(),
             Some(transaction)
         );
@@ -1496,7 +1535,7 @@ mod tests {
 
     #[test]
     fn completion_requests_commit_only_after_the_last_handle_closes() {
-        let journal = JournalTransactions::new(TransactionId::new(35));
+        let journal = JournalTransactions::new_with_credit_limit(TransactionId::new(35), 2);
         let mut first = journal.begin(JournalCredits::new(2)).unwrap();
         let transaction = first.id();
         first
@@ -1510,14 +1549,14 @@ mod tests {
         drop(first);
         assert_eq!(
             journal
-                .transaction_to_commit_after_handle(transaction, 2)
+                .transaction_to_commit_after_handle(transaction)
                 .unwrap(),
             None
         );
         drop(second);
         assert_eq!(
             journal
-                .transaction_to_commit_after_handle(transaction, 2)
+                .transaction_to_commit_after_handle(transaction)
                 .unwrap(),
             Some(transaction)
         );

@@ -190,6 +190,69 @@ enum XattrMutation {
     Unchanged,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct XattrStoragePlan {
+    inline: Vec<Ext4Xattr>,
+    external: Vec<Ext4Xattr>,
+}
+
+impl XattrStoragePlan {
+    fn layout(&self) -> XattrStorageLayout {
+        if !self.external.is_empty() {
+            XattrStorageLayout::External { shared: false }
+        } else {
+            xattr_inline_layout(&self.inline)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExternalXattrBlockAction {
+    None,
+    Reuse,
+    Rewrite,
+    Allocate,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InodeXattrStoragePlan {
+    extra_isize: u16,
+    storage: XattrStoragePlan,
+    external_block_action: ExternalXattrBlockAction,
+}
+
+enum XattrMutationPlan {
+    Unchanged,
+    Changed {
+        credits: JournalCredits,
+        storage: InodeXattrStoragePlan,
+    },
+}
+
+enum XattrMutationRequest<'a> {
+    Set {
+        namespace: Ext4XattrNamespace,
+        name: &'a [u8],
+        value: &'a [u8],
+        mode: Ext4XattrSetMode,
+    },
+    Remove {
+        namespace: Ext4XattrNamespace,
+        name: &'a [u8],
+    },
+}
+
+enum PlannedXattrMutation {
+    Unchanged,
+    Changed(InodeXattrStoragePlan),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExtraIsizeLayoutCandidate {
+    extra_isize: u16,
+    inline_capacity: usize,
+}
+
 impl Ext4Filesystem {
     /// Reads all supported extended attributes stored on an inode.
     pub fn read_xattrs(&self, inode: &Ext4Inode) -> Ext4Result<Vec<Ext4Xattr>> {
@@ -230,9 +293,9 @@ impl Ext4Filesystem {
     /// Sets or replaces an extended attribute.
     ///
     /// This R9 baseline supports the common `user`, `trusted`, and `security`
-    /// namespaces, plus opaque POSIX ACL xattr storage. The updated xattr set is
-    /// kept in the inode body when it fits, otherwise a single external xattr
-    /// block is created or replaced with refcount/checksum maintenance.
+    /// namespaces, plus opaque POSIX ACL xattr storage. The updated xattr set
+    /// may be split between the inode body and one external xattr block, with
+    /// refcount and checksum maintenance for the external part.
     pub fn set_xattr(
         &mut self,
         inode: &Ext4Inode,
@@ -263,18 +326,25 @@ impl Ext4Filesystem {
     ) -> Ext4Result<()> {
         validate_settable_xattr(namespace, name)?;
         self.validate_inode_timestamp_update(inode, timestamp)?;
-        let (credits, xattrs, mutation) = self.xattr_mutation_plan(inode, timestamp, |xattrs| {
-            set_xattr_value_with_mode(xattrs, namespace, name, value, mode)
-        })?;
-        if mutation == XattrMutation::Unchanged {
+        let XattrMutationPlan::Changed { credits, storage } = self.xattr_mutation_plan(
+            inode,
+            timestamp,
+            XattrMutationRequest::Set {
+                namespace,
+                name,
+                value,
+                mode,
+            },
+        )?
+        else {
             return Ok(());
-        }
+        };
         let journal = self.metadata_journal_for_mutation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
         )?;
         let mut handle = journal.begin(credits)?;
-        let result = self.update_xattr_in_transaction(inode, timestamp, &mut handle, xattrs);
+        let result = self.update_xattr_in_transaction(inode, timestamp, &mut handle, storage);
         self.complete_metadata_mutation(handle, result)
     }
 
@@ -288,16 +358,23 @@ impl Ext4Filesystem {
     ) -> Ext4Result<()> {
         validate_settable_xattr(namespace, name)?;
         self.validate_inode_timestamp_update(inode, timestamp)?;
-        let (credits, xattrs, _) = self.xattr_mutation_plan(inode, timestamp, |xattrs| {
-            remove_xattr_value(xattrs, namespace, name).map(|_| XattrMutation::Changed)
-        })?;
+        let XattrMutationPlan::Changed { credits, storage } = self.xattr_mutation_plan(
+            inode,
+            timestamp,
+            XattrMutationRequest::Remove { namespace, name },
+        )?
+        else {
+            return Ok(());
+        };
         let journal = self.metadata_journal_for_mutation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
         )?;
         let mut handle = journal.begin(credits)?;
-        let result = self.update_xattr_in_transaction(inode, timestamp, &mut handle, xattrs);
-        self.complete_metadata_mutation(handle, result)
+        let result = self.update_xattr_in_transaction(inode, timestamp, &mut handle, storage);
+        self.complete_metadata_mutation(handle, result)?;
+        inode.enable_extra_isize_expansion();
+        Ok(())
     }
 
     fn update_xattr_in_transaction(
@@ -305,23 +382,59 @@ impl Ext4Filesystem {
         inode: &Ext4Inode,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
-        xattrs: Vec<Ext4Xattr>,
+        plan: InodeXattrStoragePlan,
+    ) -> Ext4Result<()> {
+        self.apply_xattr_storage_plan(inode, plan, None, Some(timestamp), handle)
+    }
+
+    fn apply_xattr_storage_plan(
+        &mut self,
+        inode: &Ext4Inode,
+        plan: InodeXattrStoragePlan,
+        preallocated_external_block: Option<FilesystemBlock>,
+        timestamp: Option<Ext4Timestamp>,
+        handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
         let old_external_block = inode.file_acl_block();
-
-        let inline_capacity = inode.inline_xattr_bytes().len();
-        let needs_external_block =
-            !xattrs.is_empty() && inline_xattr_encoded_len(&xattrs)? > inline_capacity;
-        let new_external_block = if !needs_external_block {
-            None
-        } else if old_external_block != 0
-            && self.external_xattr_block_refcount(inode, old_external_block)? == 1
-        {
-            let block = FilesystemBlock::new(old_external_block);
-            self.write_external_xattr_block(block, &xattrs, handle)?;
-            Some(block)
-        } else {
-            Some(self.create_external_xattr_block(&xattrs, handle)?)
+        let new_external_block = match plan.external_block_action {
+            ExternalXattrBlockAction::None => {
+                if !plan.storage.external.is_empty() || preallocated_external_block.is_some() {
+                    return Err(Ext4Error::InvalidJournalTransaction);
+                }
+                None
+            }
+            ExternalXattrBlockAction::Reuse => {
+                if plan.storage.external.is_empty()
+                    || old_external_block == 0
+                    || preallocated_external_block.is_some()
+                {
+                    return Err(Ext4Error::InvalidJournalTransaction);
+                }
+                Some(FilesystemBlock::new(old_external_block))
+            }
+            ExternalXattrBlockAction::Rewrite => {
+                if plan.storage.external.is_empty()
+                    || old_external_block == 0
+                    || preallocated_external_block.is_some()
+                {
+                    return Err(Ext4Error::InvalidJournalTransaction);
+                }
+                let block = FilesystemBlock::new(old_external_block);
+                self.write_external_xattr_block(block, &plan.storage.external, handle)?;
+                Some(block)
+            }
+            ExternalXattrBlockAction::Allocate => {
+                if plan.storage.external.is_empty() {
+                    return Err(Ext4Error::InvalidJournalTransaction);
+                }
+                let block = if let Some(block) = preallocated_external_block {
+                    self.write_external_xattr_block(block, &plan.storage.external, handle)?;
+                    block
+                } else {
+                    self.create_external_xattr_block(&plan.storage.external, handle)?
+                };
+                Some(block)
+            }
         };
         if old_external_block != 0
             && new_external_block.is_none_or(|block| block.get() != old_external_block)
@@ -330,7 +443,7 @@ impl Ext4Filesystem {
         }
 
         let (inode_table_block, inode_table_bytes, updated_inode) =
-            self.prepare_xattr_inode_update(inode, &xattrs, new_external_block, timestamp)?;
+            self.prepare_xattr_inode_update(inode, &plan, new_external_block, timestamp)?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
         self.publish_inode_metadata(inode, updated_inode)
@@ -340,52 +453,207 @@ impl Ext4Filesystem {
         &self,
         inode: &Ext4Inode,
         timestamp: Ext4Timestamp,
-        update: impl FnOnce(&mut Vec<Ext4Xattr>) -> Ext4Result<XattrMutation>,
-    ) -> Ext4Result<(JournalCredits, Vec<Ext4Xattr>, XattrMutation)> {
+        request: XattrMutationRequest<'_>,
+    ) -> Ext4Result<XattrMutationPlan> {
         let old_external_block = inode.file_acl_block();
-        let mut xattrs = self.read_xattrs(inode)?;
-        let old_inline_layout = (old_external_block == 0).then(|| xattr_inline_layout(&xattrs));
-        let mutation = update(&mut xattrs)?;
-        if mutation == XattrMutation::Unchanged {
-            return Ok((JournalCredits::new(0), xattrs, mutation));
-        }
-        let old_layout = if let Some(layout) = old_inline_layout {
-            layout
-        } else {
-            let refcount = self.external_xattr_block_refcount(inode, old_external_block)?;
+        let mut inline_xattrs = Vec::new();
+        self.read_inline_xattrs(inode, &mut inline_xattrs)?;
+        sort_xattrs(&mut inline_xattrs);
+        let old_inline_layout = xattr_inline_layout(&inline_xattrs);
+        let mut old_external_xattrs = Vec::new();
+        let old_external_refcount =
+            self.read_external_xattrs_with_refcount(inode, &mut old_external_xattrs)?;
+        sort_xattrs(&mut old_external_xattrs);
+        let old_layout = old_external_refcount.map_or(old_inline_layout, |refcount| {
             XattrStorageLayout::External {
                 shared: refcount > 1,
             }
+        });
+        let inode_size = usize::from(self.superblock().inode_size());
+        let block_size =
+            usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
+        let current_extra_isize = inode.extra_isize();
+        let inline_capacity =
+            extra_isize_layout_candidate(inode_size, current_extra_isize)?.inline_capacity;
+        let free_blocks_count = self.superblock().free_blocks_count();
+        let plan = match request {
+            XattrMutationRequest::Set {
+                namespace,
+                name,
+                value,
+                mode,
+            } => match plan_xattr_set_storage(
+                &inline_xattrs,
+                &old_external_xattrs,
+                namespace,
+                name,
+                value,
+                mode,
+                current_extra_isize,
+                inline_capacity,
+                block_size,
+                old_layout,
+                free_blocks_count,
+            )? {
+                PlannedXattrMutation::Unchanged => return Ok(XattrMutationPlan::Unchanged),
+                PlannedXattrMutation::Changed(plan) => plan,
+            },
+            XattrMutationRequest::Remove { namespace, name } => plan_xattr_remove_storage(
+                &inline_xattrs,
+                &old_external_xattrs,
+                namespace,
+                name,
+                current_extra_isize,
+                inline_capacity,
+                block_size,
+                old_layout,
+                free_blocks_count,
+            )?,
         };
-        let new_layout = xattr_layout_after_update(&xattrs, inode.inline_xattr_bytes().len())?;
-        if matches!(new_layout, XattrStorageLayout::External { .. }) {
-            let block_size =
-                usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
-            if external_xattr_encoded_len(&xattrs)? > block_size {
-                return Err(Ext4Error::Unsupported(UnsupportedKind::ExternalXattrBlock));
+        let new_layout = plan.storage.layout();
+        let planned_external_block = (!plan.storage.external.is_empty())
+            .then_some(FilesystemBlock::new(old_external_block.max(1)));
+        self.prepare_xattr_inode_update(inode, &plan, planned_external_block, Some(timestamp))?;
+        Ok(XattrMutationPlan::Changed {
+            credits: JournalCredits::new(xattr_mutation_credit_count(
+                old_layout,
+                new_layout,
+                plan.external_block_action,
+            )),
+            storage: plan,
+        })
+    }
+
+    /// Best-effort expansion of an existing inode's extra fields.
+    ///
+    /// Linux performs this step when an inode is dirtied. KExt4 follows the
+    /// same fallback rule: try `want_extra_isize`, then `min_extra_isize`, and
+    /// keep the current size if neither layout can preserve every xattr.
+    /// Layout and allocation-space failures leave ordinary inode metadata
+    /// updates available; device, checksum, and corruption errors still
+    /// propagate because they invalidate the transaction's integrity.
+    pub(crate) fn try_expand_inode_extra_isize(
+        &mut self,
+        inode: &Ext4Inode,
+        handle: &mut JournalHandle<'_>,
+    ) -> Ext4Result<()> {
+        if inode.is_extra_isize_expansion_disabled() {
+            return Ok(());
+        }
+        let current_extra_isize = inode.extra_isize();
+        let desired_extra_isize = self.superblock().want_extra_isize();
+        if current_extra_isize >= desired_extra_isize {
+            return Ok(());
+        }
+
+        let mut inline_xattrs = Vec::new();
+        self.read_inline_xattrs(inode, &mut inline_xattrs)?;
+        let mut external_xattrs = Vec::new();
+        let external_refcount =
+            self.read_external_xattrs_with_refcount(inode, &mut external_xattrs)?;
+        let old_layout = external_refcount.map_or_else(
+            || xattr_inline_layout(&inline_xattrs),
+            |refcount| XattrStorageLayout::External {
+                shared: refcount > 1,
+            },
+        );
+        let plan = match self.plan_inode_xattr_expansion(
+            inode,
+            &inline_xattrs,
+            &external_xattrs,
+            old_layout,
+        ) {
+            Ok(plan) => plan,
+            Err(Ext4Error::NoSpace) => {
+                inode.disable_extra_isize_expansion();
+                return Ok(());
             }
-            let reuses_existing =
-                matches!(old_layout, XattrStorageLayout::External { shared: false });
-            if !reuses_existing && self.superblock().free_blocks_count() == 0 {
-                return Err(Ext4Error::NoSpace);
+            Err(error) => return Err(error),
+        };
+        if plan.extra_isize == current_extra_isize {
+            inode.disable_extra_isize_expansion();
+            return Ok(());
+        }
+
+        let total_credits = xattr_mutation_credit_count(
+            old_layout,
+            plan.storage.layout(),
+            plan.external_block_action,
+        );
+        let additional_credits = total_credits.saturating_sub(XATTR_INODE_UPDATE_CREDITS);
+        if additional_credits != 0 {
+            match handle.reserve_more(JournalCredits::new(additional_credits)) {
+                Ok(()) => {}
+                Err(Ext4Error::InsufficientJournalCredits | Ext4Error::JournalBusy) => {
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
             }
         }
-        let planned_external_block = matches!(new_layout, XattrStorageLayout::External { .. })
-            .then_some(FilesystemBlock::new(old_external_block.max(1)));
-        self.prepare_xattr_inode_update(inode, &xattrs, planned_external_block, timestamp)?;
-        Ok((
-            JournalCredits::new(xattr_mutation_credit_count(old_layout, new_layout)),
-            xattrs,
-            mutation,
-        ))
+        let preallocated_external_block =
+            if plan.external_block_action == ExternalXattrBlockAction::Allocate {
+                match self.allocate_block(None, handle) {
+                    Ok(allocation) => Some(FilesystemBlock::new(allocation.block().get())),
+                    Err(Ext4Error::NoSpace) => {
+                        inode.disable_extra_isize_expansion();
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                None
+            };
+        self.apply_xattr_storage_plan(inode, plan, preallocated_external_block, None, handle)
+    }
+
+    fn plan_inode_xattr_expansion(
+        &self,
+        inode: &Ext4Inode,
+        inline_xattrs: &[Ext4Xattr],
+        external_xattrs: &[Ext4Xattr],
+        old_layout: XattrStorageLayout,
+    ) -> Ext4Result<InodeXattrStoragePlan> {
+        let inode_size = usize::from(self.superblock().inode_size());
+        let block_size =
+            usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
+        let current_extra_isize = inode.extra_isize();
+        let candidates = extra_isize_layout_candidates(
+            inode_size,
+            current_extra_isize,
+            self.superblock().want_extra_isize(),
+            self.superblock().min_extra_isize(),
+        )?;
+
+        let mut current_external = Vec::from(external_xattrs);
+        sort_xattrs(&mut current_external);
+        select_extra_isize_storage_plan(candidates, |inline_capacity| {
+            let Some(storage) = plan_xattr_expansion_storage(
+                inline_xattrs,
+                external_xattrs,
+                inline_capacity,
+                block_size,
+            )?
+            else {
+                return Ok(None);
+            };
+            let rewrite_external = storage.external != current_external;
+            let external_block_action =
+                external_xattr_block_action(old_layout, &storage, rewrite_external);
+            if external_block_action == ExternalXattrBlockAction::Allocate
+                && self.superblock().free_blocks_count() == 0
+            {
+                return Ok(None);
+            }
+            Ok(Some((storage, external_block_action)))
+        })
     }
 
     fn prepare_xattr_inode_update(
         &self,
         inode: &Ext4Inode,
-        xattrs: &[Ext4Xattr],
+        plan: &InodeXattrStoragePlan,
         new_external_block: Option<FilesystemBlock>,
-        timestamp: Ext4Timestamp,
+        timestamp: Option<Ext4Timestamp>,
     ) -> Ext4Result<(FilesystemBlock, Vec<u8>, Ext4InodeMetadata)> {
         let old_external_block = inode.file_acl_block();
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
@@ -398,41 +666,43 @@ impl Ext4Filesystem {
             inode,
             |inode_bytes| {
                 let raw = disk_inode::RawInode::decode(inode_bytes)?;
-                let inline_xattr_offset =
+                validate_nonshrinking_extra_isize(raw.extra_isize(), plan.extra_isize)?;
+                let old_inline_xattr_offset =
                     inline_xattr_offset(inode_bytes.len(), raw.extra_isize())?;
+                inode_bytes
+                    .get_mut(old_inline_xattr_offset..)
+                    .ok_or(Ext4Error::Corrupt(CorruptKind::Truncated))?
+                    .fill(0);
+                if inode_bytes.len() >= disk_inode::EXTRA_ISIZE_OFFSET + 2 {
+                    put_u16(
+                        inode_bytes,
+                        disk_inode::EXTRA_ISIZE_OFFSET,
+                        plan.extra_isize,
+                    )?;
+                } else if plan.extra_isize != 0 {
+                    return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
+                }
+                let inline_xattr_offset = inline_xattr_offset(inode_bytes.len(), plan.extra_isize)?;
                 let inline_xattr_bytes = inode_bytes
                     .get_mut(inline_xattr_offset..)
                     .ok_or(Ext4Error::Corrupt(CorruptKind::Truncated))?;
-                if let Some(block) = new_external_block {
-                    inline_xattr_bytes.fill(0);
-                    update_inode_xattr_block_bytes(
-                        inode_bytes,
-                        &raw,
-                        InodeXattrBlockUpdate {
-                            file_acl: block.get(),
-                            current_blocks: inode.blocks(),
-                            had_external_block: old_external_block != 0,
-                            has_external_block: true,
-                            block_size: self.layout().block_size(),
-                            has_64bit: self.superblock().features().has_64bit(),
-                        },
-                    )?;
-                } else {
-                    encode_inline_xattrs(xattrs, inline_xattr_bytes)?;
-                    update_inode_xattr_block_bytes(
-                        inode_bytes,
-                        &raw,
-                        InodeXattrBlockUpdate {
-                            file_acl: 0,
-                            current_blocks: inode.blocks(),
-                            had_external_block: old_external_block != 0,
-                            has_external_block: false,
-                            block_size: self.layout().block_size(),
-                            has_64bit: self.superblock().features().has_64bit(),
-                        },
-                    )?;
+                encode_inline_xattrs(&plan.storage.inline, inline_xattr_bytes)?;
+                update_inode_xattr_block_bytes(
+                    inode_bytes,
+                    &raw,
+                    InodeXattrBlockUpdate {
+                        file_acl: new_external_block.map_or(0, FilesystemBlock::get),
+                        current_blocks: inode.blocks(),
+                        had_external_block: old_external_block != 0,
+                        has_external_block: new_external_block.is_some(),
+                        block_size: self.layout().block_size(),
+                        has_64bit: self.superblock().features().has_64bit(),
+                    },
+                )?;
+                if let Some(timestamp) = timestamp {
+                    update_inode_ctime_bytes(inode_bytes, timestamp)?;
                 }
-                update_inode_ctime_bytes(inode_bytes, timestamp)
+                Ok(())
             },
         )?;
         Ok((inode_table_block, inode_table_bytes, updated_inode))
@@ -476,17 +746,6 @@ impl Ext4Filesystem {
         let access = self.metadata_io.write_access(block, handle)?;
         replace_metadata_access_bytes(&access, bytes)?;
         Ok(())
-    }
-
-    fn external_xattr_block_refcount(&self, inode: &Ext4Inode, block: u64) -> Ext4Result<u32> {
-        if !self.is_inode_physical_block_valid(inode.number(), block, 1) {
-            return Err(Ext4Error::Corrupt(CorruptKind::InvalidXattr));
-        }
-        let buffer = self.read_metadata_block(FilesystemBlock::new(block))?;
-        let header = disk_xattr::XattrBlockHeader::decode(buffer.as_ref())?;
-        validate_xattr_block_header(header)?;
-        self.verify_xattr_block_checksum(inode, block, buffer.as_ref(), header)?;
-        Ok(header.refcount())
     }
 
     fn drop_external_xattr_block(
@@ -577,9 +836,18 @@ impl Ext4Filesystem {
         inode: &Ext4Inode,
         output: &mut Vec<Ext4Xattr>,
     ) -> Ext4Result<()> {
+        self.read_external_xattrs_with_refcount(inode, output)
+            .map(|_| ())
+    }
+
+    fn read_external_xattrs_with_refcount(
+        &self,
+        inode: &Ext4Inode,
+        output: &mut Vec<Ext4Xattr>,
+    ) -> Ext4Result<Option<u32>> {
         let block = inode.file_acl_block();
         if block == 0 {
-            return Ok(());
+            return Ok(None);
         }
         if !self.is_inode_physical_block_valid(inode.number(), block, 1) {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidXattr));
@@ -595,7 +863,8 @@ impl Ext4Filesystem {
             0,
             XattrEntryOrder::RequireSorted,
             output,
-        )
+        )?;
+        Ok(Some(header.refcount()))
     }
 
     fn list_external_xattr_names(
@@ -789,6 +1058,7 @@ fn set_xattr_value_with_mode(
     Ok(XattrMutation::Changed)
 }
 
+#[cfg(test)]
 fn remove_xattr_value(
     xattrs: &mut Vec<Ext4Xattr>,
     namespace: Ext4XattrNamespace,
@@ -810,21 +1080,341 @@ fn xattr_inline_layout(xattrs: &[Ext4Xattr]) -> XattrStorageLayout {
     }
 }
 
-fn xattr_layout_after_update(
-    xattrs: &[Ext4Xattr],
-    inline_capacity: usize,
-) -> Ext4Result<XattrStorageLayout> {
-    if xattrs.is_empty() {
-        return Ok(XattrStorageLayout::Empty);
+fn validate_nonshrinking_extra_isize(current: u16, planned: u16) -> Ext4Result<()> {
+    if planned < current {
+        return Err(Ext4Error::InvalidInodeState);
     }
-    if inline_xattr_encoded_len(xattrs)? <= inline_capacity {
-        Ok(XattrStorageLayout::Inline)
+    debug_assert!(planned >= current);
+    Ok(())
+}
+
+fn extra_isize_layout_candidates(
+    inode_size: usize,
+    current_extra_isize: u16,
+    wanted_extra_isize: u16,
+    minimum_extra_isize: u16,
+) -> Ext4Result<[Option<ExtraIsizeLayoutCandidate>; 3]> {
+    let desired_extra_isize = current_extra_isize.max(wanted_extra_isize.max(minimum_extra_isize));
+    let minimum_extra_isize = current_extra_isize.max(minimum_extra_isize);
+    let extra_isizes = [
+        desired_extra_isize,
+        minimum_extra_isize,
+        current_extra_isize,
+    ];
+    let mut candidates = [None; 3];
+
+    for (index, extra_isize) in extra_isizes.into_iter().enumerate() {
+        if extra_isizes[..index].contains(&extra_isize) {
+            continue;
+        }
+        candidates[index] = Some(extra_isize_layout_candidate(inode_size, extra_isize)?);
+    }
+
+    Ok(candidates)
+}
+
+fn extra_isize_layout_candidate(
+    inode_size: usize,
+    extra_isize: u16,
+) -> Ext4Result<ExtraIsizeLayoutCandidate> {
+    let inline_capacity = inode_size
+        .checked_sub(disk_inode::GOOD_OLD_INODE_SIZE)
+        .and_then(|available| available.checked_sub(usize::from(extra_isize)))
+        .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidInode))?;
+    Ok(ExtraIsizeLayoutCandidate {
+        extra_isize,
+        inline_capacity,
+    })
+}
+
+fn select_extra_isize_storage_plan(
+    candidates: [Option<ExtraIsizeLayoutCandidate>; 3],
+    mut plan_storage: impl FnMut(
+        usize,
+    )
+        -> Ext4Result<Option<(XattrStoragePlan, ExternalXattrBlockAction)>>,
+) -> Ext4Result<InodeXattrStoragePlan> {
+    for candidate in candidates.into_iter().flatten() {
+        let Some((storage, external_block_action)) = plan_storage(candidate.inline_capacity)?
+        else {
+            continue;
+        };
+        return Ok(InodeXattrStoragePlan {
+            extra_isize: candidate.extra_isize,
+            storage,
+            external_block_action,
+        });
+    }
+
+    Err(Ext4Error::NoSpace)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_xattr_set_storage(
+    inline_xattrs: &[Ext4Xattr],
+    old_external_xattrs: &[Ext4Xattr],
+    namespace: Ext4XattrNamespace,
+    name: &[u8],
+    value: &[u8],
+    mode: Ext4XattrSetMode,
+    extra_isize: u16,
+    inline_capacity: usize,
+    external_capacity: usize,
+    old_layout: XattrStorageLayout,
+    free_blocks_count: u64,
+) -> Ext4Result<PlannedXattrMutation> {
+    let occurrences = inline_xattrs
+        .iter()
+        .chain(old_external_xattrs)
+        .filter(|xattr| xattr_matches(xattr, namespace, name))
+        .count();
+    if occurrences > 1 {
+        return Err(Ext4Error::Corrupt(CorruptKind::InvalidXattr));
+    }
+
+    let mut updated_xattrs = Vec::from(inline_xattrs);
+    updated_xattrs.extend(old_external_xattrs.iter().cloned());
+    if set_xattr_value_with_mode(&mut updated_xattrs, namespace, name, value, mode)?
+        == XattrMutation::Unchanged
+    {
+        return Ok(PlannedXattrMutation::Unchanged);
+    }
+    let updated_xattr = updated_xattrs
+        .into_iter()
+        .find(|xattr| xattr_matches(xattr, namespace, name))
+        .ok_or(Ext4Error::InvalidInodeState)?;
+
+    // Linux first tries the changed entry in the inode body while leaving all
+    // unrelated entries in their current regions. Only that entry falls back
+    // to the external block when the inode body cannot hold it.
+    let mut inline = Vec::from(inline_xattrs);
+    inline.retain(|xattr| !xattr_matches(xattr, namespace, name));
+    inline.push(updated_xattr.clone());
+    let mut external = Vec::from(old_external_xattrs);
+    external.retain(|xattr| !xattr_matches(xattr, namespace, name));
+    if let Some(plan) = finalize_xattr_storage_plan(
+        extra_isize,
+        inline,
+        external,
+        old_external_xattrs,
+        inline_capacity,
+        external_capacity,
+        old_layout,
+        free_blocks_count,
+    )? {
+        return Ok(PlannedXattrMutation::Changed(plan));
+    }
+
+    let mut inline = Vec::from(inline_xattrs);
+    inline.retain(|xattr| !xattr_matches(xattr, namespace, name));
+    let mut external = Vec::from(old_external_xattrs);
+    external.retain(|xattr| !xattr_matches(xattr, namespace, name));
+    external.push(updated_xattr);
+    finalize_xattr_storage_plan(
+        extra_isize,
+        inline,
+        external,
+        old_external_xattrs,
+        inline_capacity,
+        external_capacity,
+        old_layout,
+        free_blocks_count,
+    )?
+    .map(PlannedXattrMutation::Changed)
+    .ok_or(Ext4Error::NoSpace)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_xattr_remove_storage(
+    inline_xattrs: &[Ext4Xattr],
+    old_external_xattrs: &[Ext4Xattr],
+    namespace: Ext4XattrNamespace,
+    name: &[u8],
+    extra_isize: u16,
+    inline_capacity: usize,
+    external_capacity: usize,
+    old_layout: XattrStorageLayout,
+    free_blocks_count: u64,
+) -> Ext4Result<InodeXattrStoragePlan> {
+    let occurrences = inline_xattrs
+        .iter()
+        .chain(old_external_xattrs)
+        .filter(|xattr| xattr_matches(xattr, namespace, name))
+        .count();
+    match occurrences {
+        0 => return Err(Ext4Error::NotFound),
+        1 => {}
+        _ => return Err(Ext4Error::Corrupt(CorruptKind::InvalidXattr)),
+    }
+
+    let mut inline = Vec::from(inline_xattrs);
+    inline.retain(|xattr| !xattr_matches(xattr, namespace, name));
+    let mut external = Vec::from(old_external_xattrs);
+    external.retain(|xattr| !xattr_matches(xattr, namespace, name));
+    finalize_xattr_storage_plan(
+        extra_isize,
+        inline,
+        external,
+        old_external_xattrs,
+        inline_capacity,
+        external_capacity,
+        old_layout,
+        free_blocks_count,
+    )?
+    .ok_or(Ext4Error::NoSpace)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_xattr_storage_plan(
+    extra_isize: u16,
+    mut inline: Vec<Ext4Xattr>,
+    mut external: Vec<Ext4Xattr>,
+    old_external_xattrs: &[Ext4Xattr],
+    inline_capacity: usize,
+    external_capacity: usize,
+    old_layout: XattrStorageLayout,
+    free_blocks_count: u64,
+) -> Ext4Result<Option<InodeXattrStoragePlan>> {
+    sort_xattrs(&mut inline);
+    sort_xattrs(&mut external);
+    if inline_xattr_encoded_len(&inline)? > inline_capacity
+        || (!external.is_empty() && external_xattr_encoded_len(&external)? > external_capacity)
+    {
+        return Ok(None);
+    }
+    let storage = XattrStoragePlan { inline, external };
+    let rewrite_external = storage.external != old_external_xattrs;
+    let external_block_action = external_xattr_block_action(old_layout, &storage, rewrite_external);
+    if external_block_action == ExternalXattrBlockAction::Allocate && free_blocks_count == 0 {
+        return Ok(None);
+    }
+    Ok(Some(InodeXattrStoragePlan {
+        extra_isize,
+        storage,
+        external_block_action,
+    }))
+}
+
+fn xattr_matches(xattr: &Ext4Xattr, namespace: Ext4XattrNamespace, name: &[u8]) -> bool {
+    xattr.namespace == namespace && xattr.name == name
+}
+
+fn external_xattr_block_action(
+    old_layout: XattrStorageLayout,
+    storage: &XattrStoragePlan,
+    rewrite_external: bool,
+) -> ExternalXattrBlockAction {
+    if storage.external.is_empty() {
+        ExternalXattrBlockAction::None
+    } else if !rewrite_external {
+        ExternalXattrBlockAction::Reuse
+    } else if old_layout == (XattrStorageLayout::External { shared: false }) {
+        ExternalXattrBlockAction::Rewrite
     } else {
-        Ok(XattrStorageLayout::External { shared: false })
+        ExternalXattrBlockAction::Allocate
     }
 }
 
-fn xattr_mutation_credit_count(old: XattrStorageLayout, new: XattrStorageLayout) -> u32 {
+fn plan_xattr_expansion_storage(
+    inline_xattrs: &[Ext4Xattr],
+    external_xattrs: &[Ext4Xattr],
+    inline_capacity: usize,
+    external_capacity: usize,
+) -> Ext4Result<Option<XattrStoragePlan>> {
+    let mut inline_xattrs = Vec::from(inline_xattrs);
+    let mut external_xattrs = Vec::from(external_xattrs);
+    sort_xattrs(&mut inline_xattrs);
+    sort_xattrs(&mut external_xattrs);
+    if inline_xattr_encoded_len(&inline_xattrs)? <= inline_capacity {
+        return Ok(Some(XattrStoragePlan {
+            inline: inline_xattrs,
+            external: external_xattrs,
+        }));
+    }
+
+    while inline_xattr_encoded_len(&inline_xattrs)? > inline_capacity {
+        let inline_used = inline_xattr_encoded_len(&inline_xattrs)?;
+        let external_used = external_xattr_encoded_len(&external_xattrs)?;
+        let Some(external_free) = external_capacity.checked_sub(external_used) else {
+            return Ok(None);
+        };
+        let mut covering_entry = None;
+        let mut fallback_entry = None;
+        for (index, xattr) in inline_xattrs.iter().enumerate() {
+            if !xattr_can_move_to_external(xattr) {
+                continue;
+            }
+            let entry_size = xattr_encoded_entry_len(xattr)?;
+            if entry_size > external_free {
+                continue;
+            }
+            let remaining_inline = if inline_xattrs.len() == 1 {
+                0
+            } else {
+                inline_used
+                    .checked_sub(entry_size)
+                    .ok_or(Ext4Error::InvalidInodeState)?
+            };
+            if remaining_inline <= inline_capacity {
+                if covering_entry.is_none_or(|(_, best_size)| entry_size < best_size) {
+                    covering_entry = Some((index, entry_size));
+                }
+            } else {
+                // Match ext4_xattr_make_inode_space(): if no one entry can
+                // finish the expansion, keep the last movable entry seen and
+                // rescan after moving it.
+                fallback_entry = Some((index, entry_size));
+            }
+        }
+        let Some((entry_index, _)) = covering_entry.or(fallback_entry) else {
+            return Ok(None);
+        };
+        external_xattrs.push(inline_xattrs.remove(entry_index));
+    }
+    sort_xattrs(&mut external_xattrs);
+    debug_assert!(inline_xattr_encoded_len(&inline_xattrs)? <= inline_capacity);
+    debug_assert!(external_xattr_encoded_len(&external_xattrs)? <= external_capacity);
+    Ok(Some(XattrStoragePlan {
+        inline: inline_xattrs,
+        external: external_xattrs,
+    }))
+}
+
+fn xattr_can_move_to_external(xattr: &Ext4Xattr) -> bool {
+    xattr.namespace != Ext4XattrNamespace::System || xattr.name != b"data"
+}
+
+fn xattr_encoded_entry_len(xattr: &Ext4Xattr) -> Ext4Result<usize> {
+    disk_xattr::entry_len(xattr.name.len())?
+        .checked_add(disk_xattr::padded_len(xattr.value.len())?)
+        .ok_or(Ext4Error::Overflow)
+}
+
+fn compare_xattr_names(left: &Ext4Xattr, right: &Ext4Xattr) -> core::cmp::Ordering {
+    (
+        left.namespace.index(),
+        left.name.len(),
+        left.name.as_slice(),
+    )
+        .cmp(&(
+            right.namespace.index(),
+            right.name.len(),
+            right.name.as_slice(),
+        ))
+}
+
+fn sort_xattrs(xattrs: &mut [Ext4Xattr]) {
+    xattrs.sort_by(compare_xattr_names);
+}
+
+fn xattr_mutation_credit_count(
+    old: XattrStorageLayout,
+    new: XattrStorageLayout,
+    external_block_action: ExternalXattrBlockAction,
+) -> u32 {
+    if external_block_action == ExternalXattrBlockAction::Reuse {
+        return XATTR_INODE_UPDATE_CREDITS;
+    }
     let mut credits = XATTR_INODE_UPDATE_CREDITS;
     match (old, new) {
         (XattrStorageLayout::External { shared: false }, XattrStorageLayout::External { .. }) => {
@@ -856,10 +1446,7 @@ fn inline_xattr_encoded_len(xattrs: &[Ext4Xattr]) -> Ext4Result<usize> {
     let mut len = disk_xattr::XATTR_IBODY_HEADER_SIZE;
     for xattr in xattrs {
         len = len
-            .checked_add(disk_xattr::entry_len(xattr.name.len())?)
-            .ok_or(Ext4Error::Overflow)?;
-        len = len
-            .checked_add(disk_xattr::padded_len(xattr.value.len())?)
+            .checked_add(xattr_encoded_entry_len(xattr)?)
             .ok_or(Ext4Error::Overflow)?;
     }
     len.checked_add(4).ok_or(Ext4Error::Overflow)
@@ -869,10 +1456,7 @@ fn external_xattr_encoded_len(xattrs: &[Ext4Xattr]) -> Ext4Result<usize> {
     let mut len = disk_xattr::XATTR_HEADER_SIZE;
     for xattr in xattrs {
         len = len
-            .checked_add(disk_xattr::entry_len(xattr.name.len())?)
-            .ok_or(Ext4Error::Overflow)?;
-        len = len
-            .checked_add(disk_xattr::padded_len(xattr.value.len())?)
+            .checked_add(xattr_encoded_entry_len(xattr)?)
             .ok_or(Ext4Error::Overflow)?;
     }
     len.checked_add(4).ok_or(Ext4Error::Overflow)
@@ -978,18 +1562,7 @@ fn encode_xattr_entries(
     mut hash_writer: XattrEntryHashWriter<'_>,
 ) -> Ext4Result<()> {
     let mut sorted = Vec::from(xattrs);
-    sorted.sort_by(|left, right| {
-        (
-            left.namespace.index(),
-            left.name.len(),
-            left.name.as_slice(),
-        )
-            .cmp(&(
-                right.namespace.index(),
-                right.name.len(),
-                right.name.as_slice(),
-            ))
-    });
+    sort_xattrs(&mut sorted);
 
     let mut entry_offset = entries_offset;
     let mut value_cursor = output.len();
@@ -1369,7 +1942,7 @@ fn validate_non_overlapping_value_ranges(ranges: &mut [(usize, usize)]) -> Ext4R
 
 #[cfg(test)]
 mod tests {
-    use alloc::{vec, vec::Vec};
+    use alloc::{format, vec, vec::Vec};
 
     use super::*;
 
@@ -1737,16 +2310,285 @@ mod tests {
         );
     }
 
+    fn numbered_xattrs(count: usize) -> Vec<Ext4Xattr> {
+        (0..count)
+            .map(|index| Ext4Xattr {
+                namespace: Ext4XattrNamespace::User,
+                name: format!("{index}").into_bytes(),
+                value: Vec::from(&b"aa"[..]),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn xattr_set_uses_inode_and_external_block_without_rebalancing() {
+        let inline = numbered_xattrs(10);
+        let inline_capacity = inline_xattr_encoded_len(&inline).unwrap();
+
+        let PlannedXattrMutation::Changed(plan) = plan_xattr_set_storage(
+            &inline,
+            &[],
+            Ext4XattrNamespace::Security,
+            b"new",
+            b"value",
+            Ext4XattrSetMode::Create,
+            0,
+            inline_capacity,
+            4096,
+            XattrStorageLayout::Inline,
+            1,
+        )
+        .expect("plan mixed xattr storage") else {
+            panic!("new xattr must change storage");
+        };
+
+        assert_eq!(plan.extra_isize, 0);
+        assert_eq!(plan.storage.inline, inline);
+        assert_eq!(plan.storage.external.len(), 1);
+        assert_eq!(
+            plan.external_block_action,
+            ExternalXattrBlockAction::Allocate
+        );
+    }
+
+    #[test]
+    fn xattr_set_keeps_current_extra_isize_when_value_moves_external() {
+        let inline = vec![Ext4Xattr {
+            namespace: Ext4XattrNamespace::User,
+            name: Vec::from(&b"key"[..]),
+            value: Vec::from(&b"small"[..]),
+        }];
+        let PlannedXattrMutation::Changed(plan) = plan_xattr_set_storage(
+            &inline,
+            &[],
+            Ext4XattrNamespace::User,
+            b"key",
+            &[0x5a; 88],
+            Ext4XattrSetMode::Replace,
+            16,
+            inline_xattr_encoded_len(&inline).unwrap(),
+            4096,
+            XattrStorageLayout::Inline,
+            1,
+        )
+        .expect("replacement can move to an external block") else {
+            panic!("different value must change storage");
+        };
+
+        assert_eq!(plan.extra_isize, 16);
+        assert!(plan.storage.inline.is_empty());
+        assert_eq!(plan.storage.external.len(), 1);
+        assert_eq!(
+            plan.external_block_action,
+            ExternalXattrBlockAction::Allocate
+        );
+    }
+
+    #[test]
+    fn xattr_mutation_reuses_unchanged_shared_external_block_when_disk_is_full() {
+        let old_external = vec![Ext4Xattr {
+            namespace: Ext4XattrNamespace::Security,
+            name: Vec::from(&b"external"[..]),
+            value: vec![0x45; 200],
+        }];
+        let updated_inline = Ext4Xattr {
+            namespace: Ext4XattrNamespace::User,
+            name: Vec::from(&b"inline"[..]),
+            value: Vec::from(&b"updated"[..]),
+        };
+        let inline = vec![Ext4Xattr {
+            namespace: Ext4XattrNamespace::User,
+            name: Vec::from(&b"inline"[..]),
+            value: Vec::from(&b"old"[..]),
+        }];
+        let PlannedXattrMutation::Changed(plan) = plan_xattr_set_storage(
+            &inline,
+            &old_external,
+            Ext4XattrNamespace::User,
+            b"inline",
+            b"updated",
+            Ext4XattrSetMode::Replace,
+            0,
+            256,
+            4096,
+            XattrStorageLayout::External { shared: true },
+            0,
+        )
+        .expect("unchanged shared external block does not need allocation") else {
+            panic!("different value must change storage");
+        };
+
+        assert_eq!(plan.storage.inline, vec![updated_inline]);
+        assert_eq!(plan.storage.external, old_external);
+        assert_eq!(plan.external_block_action, ExternalXattrBlockAction::Reuse);
+    }
+
+    #[test]
+    fn xattr_remove_preserves_unrelated_storage_regions() {
+        let removed = Ext4Xattr {
+            namespace: Ext4XattrNamespace::User,
+            name: Vec::from(&b"removed"[..]),
+            value: Vec::from(&b"value"[..]),
+        };
+        let retained_inline = Ext4Xattr {
+            namespace: Ext4XattrNamespace::User,
+            name: Vec::from(&b"inline"[..]),
+            value: Vec::from(&b"value"[..]),
+        };
+        let retained_external = Ext4Xattr {
+            namespace: Ext4XattrNamespace::Security,
+            name: Vec::from(&b"external"[..]),
+            value: vec![0x45; 200],
+        };
+
+        let plan = plan_xattr_remove_storage(
+            &[removed, retained_inline.clone()],
+            core::slice::from_ref(&retained_external),
+            Ext4XattrNamespace::User,
+            b"removed",
+            16,
+            256,
+            4096,
+            XattrStorageLayout::External { shared: true },
+            0,
+        )
+        .expect("removing an inline entry leaves the shared block unchanged");
+
+        assert_eq!(plan.extra_isize, 16);
+        assert_eq!(plan.storage.inline, vec![retained_inline]);
+        assert_eq!(plan.storage.external, vec![retained_external]);
+        assert_eq!(plan.external_block_action, ExternalXattrBlockAction::Reuse);
+    }
+
+    #[test]
+    fn extra_isize_layout_falls_back_to_minimum_then_current_size() {
+        let candidates = extra_isize_layout_candidates(256, 0, 80, 16).unwrap();
+        assert_eq!(candidates[0].unwrap().extra_isize, 80);
+        assert_eq!(candidates[0].unwrap().inline_capacity, 48);
+        assert_eq!(candidates[1].unwrap().extra_isize, 16);
+        assert_eq!(candidates[1].unwrap().inline_capacity, 112);
+        assert_eq!(candidates[2].unwrap().extra_isize, 0);
+        assert_eq!(candidates[2].unwrap().inline_capacity, 128);
+    }
+
+    #[test]
+    fn extra_isize_expansion_does_not_rebalance_existing_external_xattrs() {
+        let inline = numbered_xattrs(4);
+        let external = vec![Ext4Xattr {
+            namespace: Ext4XattrNamespace::User,
+            name: Vec::from(&b"external"[..]),
+            value: Vec::from(&b"value"[..]),
+        }];
+
+        let plan = plan_xattr_expansion_storage(&inline, &external, 176, 4096)
+            .unwrap()
+            .expect("inline entries already fit expanded inode");
+
+        assert_eq!(plan.inline, inline);
+        assert_eq!(plan.external, external);
+    }
+
+    #[test]
+    fn extra_isize_expansion_moves_the_smallest_entry_that_frees_enough_space() {
+        let small = Ext4Xattr {
+            namespace: Ext4XattrNamespace::User,
+            name: Vec::from(&b"small"[..]),
+            value: vec![0x11; 4],
+        };
+        let sufficient = Ext4Xattr {
+            namespace: Ext4XattrNamespace::User,
+            name: Vec::from(&b"sufficient"[..]),
+            value: vec![0x22; 24],
+        };
+        let large = Ext4Xattr {
+            namespace: Ext4XattrNamespace::User,
+            name: Vec::from(&b"large"[..]),
+            value: vec![0x33; 80],
+        };
+        let inline = vec![small.clone(), sufficient.clone(), large.clone()];
+        let capacity = inline_xattr_encoded_len(&inline).unwrap()
+            - xattr_encoded_entry_len(&sufficient).unwrap();
+
+        let plan = plan_xattr_expansion_storage(&inline, &[], capacity, 4096)
+            .unwrap()
+            .expect("one inode-body entry can move externally");
+
+        assert_eq!(plan.external, vec![sufficient]);
+        assert!(plan.inline.contains(&small));
+        assert!(plan.inline.contains(&large));
+    }
+
+    #[test]
+    fn extra_isize_expansion_uses_linux_last_entry_fallback() {
+        let entries = [b"aaa", b"bbb", b"ccc"].map(|name| Ext4Xattr {
+            namespace: Ext4XattrNamespace::User,
+            name: Vec::from(&name[..]),
+            value: vec![0x66; 8],
+        });
+        let entry_size = xattr_encoded_entry_len(&entries[0]).unwrap();
+        let capacity = inline_xattr_encoded_len(&entries).unwrap() - 2 * entry_size;
+
+        let plan = plan_xattr_expansion_storage(&entries, &[], capacity, 4096)
+            .unwrap()
+            .expect("moving two entries makes enough inode-body space");
+
+        assert_eq!(
+            plan.external
+                .iter()
+                .map(|xattr| xattr.name.as_slice())
+                .collect::<Vec<_>>(),
+            vec![&b"aaa"[..], &b"ccc"[..]]
+        );
+    }
+
+    #[test]
+    fn extra_isize_expansion_keeps_system_data_in_the_inode_body() {
+        let system_data = Ext4Xattr {
+            namespace: Ext4XattrNamespace::System,
+            name: Vec::from(&b"data"[..]),
+            value: vec![0x44; 24],
+        };
+        let user = Ext4Xattr {
+            namespace: Ext4XattrNamespace::User,
+            name: Vec::from(&b"movable"[..]),
+            value: vec![0x55; 24],
+        };
+        let capacity = inline_xattr_encoded_len(core::slice::from_ref(&system_data)).unwrap();
+
+        let plan =
+            plan_xattr_expansion_storage(&[system_data.clone(), user.clone()], &[], capacity, 4096)
+                .unwrap()
+                .expect("the movable entry can leave system.data inline");
+
+        assert_eq!(plan.inline, vec![system_data]);
+        assert_eq!(plan.external, vec![user]);
+    }
+
+    #[test]
+    fn storage_plan_rejects_internal_extra_isize_shrink() {
+        assert_eq!(
+            validate_nonshrinking_extra_isize(32, 16),
+            Err(Ext4Error::InvalidInodeState)
+        );
+        validate_nonshrinking_extra_isize(32, 32).unwrap();
+        validate_nonshrinking_extra_isize(32, 64).unwrap();
+    }
+
     #[test]
     fn xattr_mutation_credits_follow_storage_transition() {
         assert_eq!(
-            xattr_mutation_credit_count(XattrStorageLayout::Empty, XattrStorageLayout::Inline),
+            xattr_mutation_credit_count(
+                XattrStorageLayout::Empty,
+                XattrStorageLayout::Inline,
+                ExternalXattrBlockAction::None,
+            ),
             XATTR_INODE_UPDATE_CREDITS
         );
         assert_eq!(
             xattr_mutation_credit_count(
                 XattrStorageLayout::Inline,
                 XattrStorageLayout::External { shared: false },
+                ExternalXattrBlockAction::Allocate,
             ),
             XATTR_INODE_UPDATE_CREDITS + XATTR_EXTERNAL_ALLOC_CREDITS
         );
@@ -1754,6 +2596,7 @@ mod tests {
             xattr_mutation_credit_count(
                 XattrStorageLayout::External { shared: false },
                 XattrStorageLayout::External { shared: false },
+                ExternalXattrBlockAction::Rewrite,
             ),
             XATTR_INODE_UPDATE_CREDITS + XATTR_EXTERNAL_REWRITE_CREDITS
         );
@@ -1761,6 +2604,7 @@ mod tests {
             xattr_mutation_credit_count(
                 XattrStorageLayout::External { shared: false },
                 XattrStorageLayout::Inline,
+                ExternalXattrBlockAction::None,
             ),
             XATTR_INODE_UPDATE_CREDITS + XATTR_EXTERNAL_RELEASE_CREDITS
         );
@@ -1768,10 +2612,19 @@ mod tests {
             xattr_mutation_credit_count(
                 XattrStorageLayout::External { shared: true },
                 XattrStorageLayout::External { shared: false },
+                ExternalXattrBlockAction::Allocate,
             ),
             XATTR_INODE_UPDATE_CREDITS
                 + XATTR_EXTERNAL_ALLOC_CREDITS
                 + XATTR_EXTERNAL_SHARED_REFCOUNT_CREDITS
+        );
+        assert_eq!(
+            xattr_mutation_credit_count(
+                XattrStorageLayout::External { shared: true },
+                XattrStorageLayout::External { shared: false },
+                ExternalXattrBlockAction::Reuse,
+            ),
+            XATTR_INODE_UPDATE_CREDITS
         );
     }
 
@@ -1788,5 +2641,88 @@ mod tests {
             Err(Ext4Error::InvalidName)
         );
         validate_settable_xattr(Ext4XattrNamespace::Trusted, b"name").unwrap();
+    }
+}
+
+/// QEMU unittest coverage for xattr layout decisions used by metadata writes.
+#[cfg(unittest)]
+mod unittests {
+    use alloc::{vec, vec::Vec};
+
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn mutation_reuses_unchanged_shared_external_block_when_disk_is_full() {
+        let old_external = vec![Ext4Xattr {
+            namespace: Ext4XattrNamespace::Security,
+            name: Vec::from(&b"external"[..]),
+            value: vec![0x45; 200],
+        }];
+        let updated_inline = Ext4Xattr {
+            namespace: Ext4XattrNamespace::User,
+            name: Vec::from(&b"inline"[..]),
+            value: Vec::from(&b"updated"[..]),
+        };
+        let inline = vec![Ext4Xattr {
+            namespace: Ext4XattrNamespace::User,
+            name: Vec::from(&b"inline"[..]),
+            value: Vec::from(&b"old"[..]),
+        }];
+        let PlannedXattrMutation::Changed(plan) = plan_xattr_set_storage(
+            &inline,
+            &old_external,
+            Ext4XattrNamespace::User,
+            b"inline",
+            b"updated",
+            Ext4XattrSetMode::Replace,
+            0,
+            256,
+            4096,
+            XattrStorageLayout::External { shared: true },
+            0,
+        )
+        .unwrap() else {
+            panic!("different value must change storage");
+        };
+
+        assert_eq!(plan.storage.inline, vec![updated_inline]);
+        assert_eq!(plan.storage.external, old_external);
+        assert_eq!(plan.external_block_action, ExternalXattrBlockAction::Reuse);
+        assert_eq!(
+            xattr_mutation_credit_count(
+                XattrStorageLayout::External { shared: true },
+                plan.storage.layout(),
+                plan.external_block_action,
+            ),
+            XATTR_INODE_UPDATE_CREDITS
+        );
+    }
+
+    #[def_test]
+    fn mutation_marks_new_external_block_for_preallocation() {
+        let PlannedXattrMutation::Changed(plan) = plan_xattr_set_storage(
+            &[],
+            &[],
+            Ext4XattrNamespace::User,
+            b"key",
+            &[0x5a; 88],
+            Ext4XattrSetMode::Create,
+            16,
+            0,
+            4096,
+            XattrStorageLayout::Inline,
+            1,
+        )
+        .unwrap() else {
+            panic!("new value must change storage");
+        };
+
+        assert_eq!(plan.extra_isize, 16);
+        assert_eq!(
+            plan.external_block_action,
+            ExternalXattrBlockAction::Allocate
+        );
     }
 }

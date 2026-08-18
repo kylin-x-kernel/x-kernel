@@ -423,6 +423,7 @@ pub(crate) struct Ext4InodeMetadata {
     flags: u32,
     block: [u8; disk_inode::INODE_BLOCK_BYTES],
     file_acl: u64,
+    extra_isize: u16,
     inline_xattr: Vec<u8>,
     generation: u32,
     links_count: u16,
@@ -457,6 +458,7 @@ impl Ext4InodeMetadata {
             flags: raw.flags(),
             block: *raw.block(),
             file_acl: raw.file_acl(),
+            extra_isize: raw.extra_isize(),
             inline_xattr: Vec::from(raw.inline_xattr()),
             generation: raw.generation(),
             links_count: raw.links_count(),
@@ -481,6 +483,7 @@ struct Ext4InodeState {
     visible_size: u64,
     delayed_extents: BTreeMap<u64, u64>,
     reserved_data_blocks: u64,
+    is_extra_isize_expansion_disabled: bool,
 }
 
 impl Ext4InodeState {
@@ -585,6 +588,7 @@ impl Ext4Inode {
                 visible_size,
                 delayed_extents: BTreeMap::new(),
                 reserved_data_blocks: 0,
+                is_extra_isize_expansion_disabled: false,
             }),
         }
     }
@@ -840,6 +844,22 @@ impl Ext4Inode {
 
     pub(crate) fn file_acl_block(&self) -> u64 {
         self.with_metadata(|metadata| metadata.file_acl)
+    }
+
+    pub(crate) fn extra_isize(&self) -> u16 {
+        self.with_metadata(|metadata| metadata.extra_isize)
+    }
+
+    pub(crate) fn is_extra_isize_expansion_disabled(&self) -> bool {
+        self.with_state(|state| state.is_extra_isize_expansion_disabled)
+    }
+
+    pub(crate) fn disable_extra_isize_expansion(&self) {
+        self.update_state(|state| state.is_extra_isize_expansion_disabled = true);
+    }
+
+    pub(crate) fn enable_extra_isize_expansion(&self) {
+        self.update_state(|state| state.is_extra_isize_expansion_disabled = false);
     }
 
     pub(crate) fn inline_xattr_bytes(&self) -> Vec<u8> {
@@ -1454,15 +1474,6 @@ impl Ext4Filesystem {
         )
     }
 
-    pub(crate) fn update_inode_table_entry(
-        &self,
-        block_bytes: &mut [u8],
-        number: InodeNumber,
-        update: impl FnOnce(&mut [u8]) -> Ext4Result<()>,
-    ) -> Ext4Result<Ext4InodeMetadata> {
-        self.update_inode_table_entry_inner(block_bytes, number, false, update)
-    }
-
     pub(crate) fn update_inode_table_entry_allow_zero_links(
         &self,
         block_bytes: &mut [u8],
@@ -1510,8 +1521,38 @@ impl Ext4Filesystem {
         Ext4InodeMetadata::from_raw(raw, allow_zero_links)
     }
 
+    /// Persists one ordinary inode metadata change after best-effort expansion
+    /// of the inode's extra fields.
+    ///
+    /// Xattr mutation and zero-link eviction intentionally use the lower-level
+    /// table-entry helpers so their inode writes cannot recurse into xattr
+    /// migration. All other referenced-inode dirty paths should use this
+    /// entry point, matching Linux `__ext4_mark_inode_dirty()`.
+    pub(crate) fn update_dirty_inode_metadata(
+        &mut self,
+        inode: &Ext4Inode,
+        handle: &mut JournalHandle<'_>,
+        update: impl FnOnce(&Self, &mut [u8]) -> Ext4Result<()>,
+    ) -> Ext4Result<()> {
+        self.try_expand_inode_extra_isize(inode, handle)?;
+
+        let inode_table_block = self.inode_table_entry_block(inode.number())?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
+        let updated_inode = self.update_referenced_inode_table_entry(
+            &mut inode_table_bytes,
+            inode,
+            |inode_bytes| update(self, inode_bytes),
+        )?;
+        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
+        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
+        self.publish_inode_metadata(inode, updated_inode)
+    }
+
     pub(crate) fn update_regular_inode_write_metadata(
-        &self,
+        &mut self,
         inode: &Ext4Inode,
         new_disk_size: u64,
         metadata: RegularWriteMetadata,
@@ -1542,7 +1583,7 @@ impl Ext4Filesystem {
     }
 
     pub(crate) fn update_regular_inode_size_metadata(
-        &self,
+        &mut self,
         inode: &Ext4Inode,
         new_disk_size: u64,
         metadata: RegularWriteMetadata,
@@ -1550,110 +1591,66 @@ impl Ext4Filesystem {
     ) -> Ext4Result<()> {
         self.ensure_regular_file_mutation_supported(inode)?;
 
-        let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let mut inode_table_bytes = self
-            .read_metadata_block(inode_table_block)?
-            .as_ref()
-            .to_vec();
-        let updated_inode = self.update_referenced_inode_table_entry(
-            &mut inode_table_bytes,
-            inode,
-            |inode_bytes| {
-                update_inode_size_bytes(inode_bytes, new_disk_size)?;
-                match metadata {
-                    RegularWriteMetadata::SizeOnly => Ok(()),
-                    RegularWriteMetadata::Full { timestamp } => {
-                        let raw = disk_inode::RawInode::decode(inode_bytes)?;
-                        update_inode_timestamp_bytes(
-                            inode_bytes,
-                            0x0c,
-                            disk_inode::CTIME_EXTRA_OFFSET,
-                            raw.ctime_extra().is_some(),
-                            timestamp,
-                        )?;
-                        update_inode_timestamp_bytes(
-                            inode_bytes,
-                            0x10,
-                            disk_inode::MTIME_EXTRA_OFFSET,
-                            raw.mtime_extra().is_some(),
-                            timestamp,
-                        )
-                    }
+        self.update_dirty_inode_metadata(inode, handle, |_filesystem, inode_bytes| {
+            update_inode_size_bytes(inode_bytes, new_disk_size)?;
+            match metadata {
+                RegularWriteMetadata::SizeOnly => Ok(()),
+                RegularWriteMetadata::Full { timestamp } => {
+                    let raw = disk_inode::RawInode::decode(inode_bytes)?;
+                    update_inode_timestamp_bytes(
+                        inode_bytes,
+                        0x0c,
+                        disk_inode::CTIME_EXTRA_OFFSET,
+                        raw.ctime_extra().is_some(),
+                        timestamp,
+                    )?;
+                    update_inode_timestamp_bytes(
+                        inode_bytes,
+                        0x10,
+                        disk_inode::MTIME_EXTRA_OFFSET,
+                        raw.mtime_extra().is_some(),
+                        timestamp,
+                    )
                 }
-            },
-        )?;
-        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        self.publish_inode_metadata(inode, updated_inode)
+            }
+        })
     }
 
     pub(crate) fn update_inode_size_metadata(
-        &self,
+        &mut self,
         inode: &Ext4Inode,
         size: u64,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
-        let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let mut inode_table_bytes = self
-            .read_metadata_block(inode_table_block)?
-            .as_ref()
-            .to_vec();
-        let updated_inode = self.update_referenced_inode_table_entry(
-            &mut inode_table_bytes,
-            inode,
-            |inode_bytes| {
-                update_inode_size_bytes(inode_bytes, size)?;
-                update_inode_ctime_mtime_bytes(inode_bytes, timestamp)
-            },
-        )?;
-        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        self.publish_inode_metadata(inode, updated_inode)?;
+        self.update_dirty_inode_metadata(inode, handle, |_filesystem, inode_bytes| {
+            update_inode_size_bytes(inode_bytes, size)?;
+            update_inode_ctime_mtime_bytes(inode_bytes, timestamp)
+        })?;
         inode.set_size(size);
         Ok(())
     }
 
     pub(crate) fn update_inode_timestamps_metadata(
-        &self,
+        &mut self,
         inode: &Ext4Inode,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
-        let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let mut inode_table_bytes = self
-            .read_metadata_block(inode_table_block)?
-            .as_ref()
-            .to_vec();
-        let updated_inode = self.update_referenced_inode_table_entry(
-            &mut inode_table_bytes,
-            inode,
-            |inode_bytes| update_inode_ctime_mtime_bytes(inode_bytes, timestamp),
-        )?;
-        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        self.publish_inode_metadata(inode, updated_inode)
+        self.update_dirty_inode_metadata(inode, handle, |_filesystem, inode_bytes| {
+            update_inode_ctime_mtime_bytes(inode_bytes, timestamp)
+        })
     }
 
     pub(crate) fn update_inode_ctime_metadata(
-        &self,
+        &mut self,
         inode: &Ext4Inode,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
-        let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let mut inode_table_bytes = self
-            .read_metadata_block(inode_table_block)?
-            .as_ref()
-            .to_vec();
-        let updated_inode = self.update_referenced_inode_table_entry(
-            &mut inode_table_bytes,
-            inode,
-            |inode_bytes| update_inode_ctime_bytes(inode_bytes, timestamp),
-        )?;
-        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        self.publish_inode_metadata(inode, updated_inode)
+        self.update_dirty_inode_metadata(inode, handle, |_filesystem, inode_bytes| {
+            update_inode_ctime_bytes(inode_bytes, timestamp)
+        })
     }
 
     /// Applies a journaled inode metadata update.
@@ -1677,129 +1674,87 @@ impl Ext4Filesystem {
     }
 
     fn update_inode_metadata_in_transaction(
-        &self,
+        &mut self,
         inode: &Ext4Inode,
         update: Ext4InodeMetadataUpdate,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
-        let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let mut inode_table_bytes = self
-            .read_metadata_block(inode_table_block)?
-            .as_ref()
-            .to_vec();
-        let updated_inode = self.update_referenced_inode_table_entry(
-            &mut inode_table_bytes,
-            inode,
-            |inode_bytes| {
-                let raw = disk_inode::RawInode::decode(inode_bytes)?;
-                if let Some(mode) = update.mode {
-                    put_u16(inode_bytes, 0x00, (raw.mode() & disk_inode::S_IFMT) | mode)?;
-                }
-                if let Some((uid, gid)) = update.owner {
-                    put_u16(inode_bytes, 0x02, uid as u16)?;
-                    put_u16(inode_bytes, 0x18, gid as u16)?;
-                    put_u16(inode_bytes, 0x78, (uid >> 16) as u16)?;
-                    put_u16(inode_bytes, 0x7a, (gid >> 16) as u16)?;
-                }
-                if let Some(atime) = update.atime {
-                    update_inode_timestamp_bytes(
-                        inode_bytes,
-                        0x08,
-                        disk_inode::ATIME_EXTRA_OFFSET,
-                        raw.atime_extra().is_some(),
-                        atime,
-                    )?;
-                }
-                if let Some(mtime) = update.mtime {
-                    update_inode_timestamp_bytes(
-                        inode_bytes,
-                        0x10,
-                        disk_inode::MTIME_EXTRA_OFFSET,
-                        raw.mtime_extra().is_some(),
-                        mtime,
-                    )?;
-                }
+        self.update_dirty_inode_metadata(inode, handle, |_filesystem, inode_bytes| {
+            let raw = disk_inode::RawInode::decode(inode_bytes)?;
+            if let Some(mode) = update.mode {
+                put_u16(inode_bytes, 0x00, (raw.mode() & disk_inode::S_IFMT) | mode)?;
+            }
+            if let Some((uid, gid)) = update.owner {
+                put_u16(inode_bytes, 0x02, uid as u16)?;
+                put_u16(inode_bytes, 0x18, gid as u16)?;
+                put_u16(inode_bytes, 0x78, (uid >> 16) as u16)?;
+                put_u16(inode_bytes, 0x7a, (gid >> 16) as u16)?;
+            }
+            if let Some(atime) = update.atime {
                 update_inode_timestamp_bytes(
                     inode_bytes,
-                    0x0c,
-                    disk_inode::CTIME_EXTRA_OFFSET,
-                    raw.ctime_extra().is_some(),
-                    update.ctime,
-                )
-            },
-        )?;
-        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        self.publish_inode_metadata(inode, updated_inode)
+                    0x08,
+                    disk_inode::ATIME_EXTRA_OFFSET,
+                    raw.atime_extra().is_some(),
+                    atime,
+                )?;
+            }
+            if let Some(mtime) = update.mtime {
+                update_inode_timestamp_bytes(
+                    inode_bytes,
+                    0x10,
+                    disk_inode::MTIME_EXTRA_OFFSET,
+                    raw.mtime_extra().is_some(),
+                    mtime,
+                )?;
+            }
+            update_inode_timestamp_bytes(
+                inode_bytes,
+                0x0c,
+                disk_inode::CTIME_EXTRA_OFFSET,
+                raw.ctime_extra().is_some(),
+                update.ctime,
+            )
+        })
     }
 
     pub(crate) fn update_inode_flags_timestamps_metadata(
-        &self,
+        &mut self,
         inode: &Ext4Inode,
         flags: u32,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
-        let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let mut inode_table_bytes = self
-            .read_metadata_block(inode_table_block)?
-            .as_ref()
-            .to_vec();
-        let updated_inode = self.update_referenced_inode_table_entry(
-            &mut inode_table_bytes,
-            inode,
-            |inode_bytes| {
-                put_u32(inode_bytes, 0x20, flags)?;
-                update_inode_ctime_mtime_bytes(inode_bytes, timestamp)
-            },
-        )?;
-        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        self.publish_inode_metadata(inode, updated_inode)
+        self.update_dirty_inode_metadata(inode, handle, |_filesystem, inode_bytes| {
+            put_u32(inode_bytes, 0x20, flags)?;
+            update_inode_ctime_mtime_bytes(inode_bytes, timestamp)
+        })
     }
 
     pub(crate) fn update_inode_links_count_metadata(
-        &self,
+        &mut self,
         inode: &Ext4Inode,
         links_count: u16,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
-        let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let mut inode_table_bytes = self
-            .read_metadata_block(inode_table_block)?
-            .as_ref()
-            .to_vec();
-        let updated_inode =
-            self.update_inode_table_entry(&mut inode_table_bytes, inode.number(), |inode_bytes| {
-                put_u16(inode_bytes, 0x1a, links_count)?;
-                update_inode_ctime_mtime_bytes(inode_bytes, timestamp)
-            })?;
-        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        self.publish_inode_metadata(inode, updated_inode)
+        self.update_dirty_inode_metadata(inode, handle, |_filesystem, inode_bytes| {
+            put_u16(inode_bytes, 0x1a, links_count)?;
+            update_inode_ctime_mtime_bytes(inode_bytes, timestamp)
+        })
     }
 
     pub(crate) fn update_inode_links_count_ctime_metadata(
-        &self,
+        &mut self,
         inode: &Ext4Inode,
         links_count: u16,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
-        let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let mut inode_table_bytes = self
-            .read_metadata_block(inode_table_block)?
-            .as_ref()
-            .to_vec();
-        let updated_inode =
-            self.update_inode_table_entry(&mut inode_table_bytes, inode.number(), |inode_bytes| {
-                put_u16(inode_bytes, 0x1a, links_count)?;
-                update_inode_ctime_bytes(inode_bytes, timestamp)
-            })?;
-        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        self.publish_inode_metadata(inode, updated_inode)
+        self.update_dirty_inode_metadata(inode, handle, |_filesystem, inode_bytes| {
+            put_u16(inode_bytes, 0x1a, links_count)?;
+            update_inode_ctime_bytes(inode_bytes, timestamp)
+        })
     }
 
     pub(crate) fn update_unlinked_inode_metadata(
@@ -1831,24 +1786,14 @@ impl Ext4Filesystem {
     }
 
     pub(crate) fn update_inode_blocks_metadata(
-        &self,
+        &mut self,
         inode: &Ext4Inode,
         blocks: u64,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
-        let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let mut inode_table_bytes = self
-            .read_metadata_block(inode_table_block)?
-            .as_ref()
-            .to_vec();
-        let updated_inode = self.update_referenced_inode_table_entry(
-            &mut inode_table_bytes,
-            inode,
-            |inode_bytes| update_inode_blocks_bytes(inode_bytes, blocks),
-        )?;
-        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        self.publish_inode_metadata(inode, updated_inode)
+        self.update_dirty_inode_metadata(inode, handle, |_filesystem, inode_bytes| {
+            update_inode_blocks_bytes(inode_bytes, blocks)
+        })
     }
 
     pub(crate) fn update_inode_orphan_next(
@@ -1920,22 +1865,8 @@ impl Ext4Filesystem {
         let available = inode_size
             .checked_sub(disk_inode::GOOD_OLD_INODE_SIZE)
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidInodeSize))?;
-        let requested = self
-            .superblock()
-            .want_extra_isize()
-            .max(self.superblock().min_extra_isize());
-        let requested = usize::from(requested);
-        if requested != 0 {
-            return u16::try_from(requested.min(available)).map_err(|_| Ext4Error::Overflow);
-        }
-        if self.superblock().features().has_metadata_checksum()
-            && disk_inode::CHECKSUM_HI_OFFSET + 2 <= inode_size
-        {
-            let checksum_extra =
-                disk_inode::CHECKSUM_HI_OFFSET + 2 - disk_inode::GOOD_OLD_INODE_SIZE;
-            return u16::try_from(checksum_extra).map_err(|_| Ext4Error::Overflow);
-        }
-        Ok(0)
+        let effective_want_extra_isize = usize::from(self.superblock().want_extra_isize());
+        u16::try_from(effective_want_extra_isize.min(available)).map_err(|_| Ext4Error::Overflow)
     }
 }
 
@@ -2546,6 +2477,7 @@ mod tests {
             flags,
             block,
             file_acl,
+            extra_isize: 0,
             inline_xattr: alloc::vec::Vec::new(),
             generation: 0,
             links_count: 1,
@@ -2570,6 +2502,7 @@ mod tests {
             flags: 0,
             block,
             file_acl: 0,
+            extra_isize: 0,
             inline_xattr: alloc::vec::Vec::new(),
             generation: 0,
             links_count: 1,
@@ -2594,6 +2527,7 @@ mod tests {
             flags: disk_inode::EXT4_EXTENTS_FL,
             block: [0; disk_inode::INODE_BLOCK_BYTES],
             file_acl: 0,
+            extra_isize: 0,
             inline_xattr: alloc::vec::Vec::new(),
             generation: 1,
             links_count: 1,
@@ -2601,6 +2535,21 @@ mod tests {
             ctime: timestamp(0, 0),
             mtime: timestamp(0, 0),
         }
+    }
+
+    #[test]
+    fn extra_isize_expansion_failure_state_is_resident_and_resettable() {
+        let inode = test_inode(regular_inode_metadata());
+        assert!(!inode.is_extra_isize_expansion_disabled());
+
+        inode.disable_extra_isize_expansion();
+        let mut updated = regular_inode_metadata();
+        updated.extra_isize = 16;
+        inode.publish_metadata(updated).unwrap();
+        assert!(inode.is_extra_isize_expansion_disabled());
+
+        inode.enable_extra_isize_expansion();
+        assert!(!inode.is_extra_isize_expansion_disabled());
     }
 
     #[test]
@@ -2684,6 +2633,7 @@ mod unittests {
             flags: disk_inode::EXT4_EXTENTS_FL,
             block: [0; disk_inode::INODE_BLOCK_BYTES],
             file_acl: 0,
+            extra_isize: 0,
             inline_xattr: alloc::vec::Vec::new(),
             generation: 1,
             links_count: 1,

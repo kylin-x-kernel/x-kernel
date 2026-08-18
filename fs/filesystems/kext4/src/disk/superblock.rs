@@ -25,6 +25,9 @@ const FREE_INODES_COUNT_OFFSET: usize = 0x10;
 const LAST_ORPHAN_OFFSET: usize = 0xe8;
 const MIN_EXTRA_ISIZE_OFFSET: usize = 0x15c;
 const WANT_EXTRA_ISIZE_OFFSET: usize = 0x15e;
+// Linux initializes `s_want_extra_isize` to the fields currently known by
+// `struct ext4_inode` before considering the on-disk min/want values.
+const LINUX_DEFAULT_EXTRA_ISIZE: u16 = 32;
 const MIN_64BIT_DESCRIPTOR_SIZE: u16 = 64;
 const MAX_DESCRIPTOR_SIZE: u16 = 1024;
 const GOOD_OLD_FIRST_INODE: u32 = 11;
@@ -80,7 +83,7 @@ pub struct Superblock {
     reserved_gdt_blocks: u16,
     log_groups_per_flex: u8,
     min_extra_isize: u16,
-    want_extra_isize: u16,
+    effective_want_extra_isize: u16,
     features: FeatureSet,
     uuid: [u8; 16],
     checksum_seed: u32,
@@ -205,13 +208,17 @@ impl Superblock {
         if inode_size < 128 || !inode_size.is_power_of_two() || u32::from(inode_size) > block_size {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeSize));
         }
-        let min_extra_isize = codec::le_u16(input, MIN_EXTRA_ISIZE_OFFSET)?;
-        let want_extra_isize = codec::le_u16(input, WANT_EXTRA_ISIZE_OFFSET)?;
-        validate_extra_isize(inode_size, min_extra_isize)?;
-        validate_extra_isize(inode_size, want_extra_isize)?;
-        if want_extra_isize != 0 && want_extra_isize < min_extra_isize {
-            return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeGeometry));
-        }
+        let (min_extra_isize, disk_want_extra_isize) = if features.has_extra_isize() {
+            let min_extra_isize = codec::le_u16(input, MIN_EXTRA_ISIZE_OFFSET)?;
+            let disk_want_extra_isize = codec::le_u16(input, WANT_EXTRA_ISIZE_OFFSET)?;
+            validate_extra_isize(inode_size, min_extra_isize)?;
+            validate_extra_isize(inode_size, disk_want_extra_isize)?;
+            (min_extra_isize, disk_want_extra_isize)
+        } else {
+            (0, 0)
+        };
+        let effective_want_extra_isize =
+            effective_want_extra_isize(inode_size, min_extra_isize, disk_want_extra_isize);
         let inodes_per_block = block_size / u32::from(inode_size);
         if inodes_per_group < inodes_per_block || inodes_per_group > bitmap_capacity {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeGeometry));
@@ -283,7 +290,7 @@ impl Superblock {
             reserved_gdt_blocks: codec::le_u16(input, 0xce)?,
             log_groups_per_flex,
             min_extra_isize,
-            want_extra_isize,
+            effective_want_extra_isize,
             features,
             uuid,
             checksum_seed,
@@ -384,9 +391,13 @@ impl Superblock {
         self.min_extra_isize
     }
 
-    /// Returns the preferred extra inode bytes for newly initialized inodes.
+    /// Returns Linux's effective preferred extra inode bytes.
+    ///
+    /// The runtime value includes the 32 bytes reserved for fields known to
+    /// Linux and, when `RO_COMPAT_EXTRA_ISIZE` is set, the filesystem's
+    /// on-disk min/want requirements.
     pub const fn want_extra_isize(&self) -> u16 {
-        self.want_extra_isize
+        self.effective_want_extra_isize
     }
 
     /// Returns the negotiated feature bitmaps.
@@ -553,16 +564,65 @@ fn validate_extra_isize(inode_size: u16, extra_isize: u16) -> Ext4Result<()> {
     Ok(())
 }
 
+fn effective_want_extra_isize(
+    inode_size: u16,
+    min_extra_isize: u16,
+    disk_want_extra_isize: u16,
+) -> u16 {
+    let available = inode_size.saturating_sub(crate::disk::inode::GOOD_OLD_INODE_SIZE as u16);
+    LINUX_DEFAULT_EXTRA_ISIZE
+        .min(available)
+        .max(min_extra_isize)
+        .max(disk_want_extra_isize)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CHECKSUM_OFFSET, CRC32C_CHECKSUM_TYPE, SUPERBLOCK_SIZE, Superblock};
+    use super::{
+        CHECKSUM_OFFSET, CRC32C_CHECKSUM_TYPE, LINUX_DEFAULT_EXTRA_ISIZE, MIN_EXTRA_ISIZE_OFFSET,
+        SUPERBLOCK_SIZE, Superblock, WANT_EXTRA_ISIZE_OFFSET,
+    };
     use crate::{CorruptKind, Ext4Error, disk::checksum};
 
     const INCOMPAT_EXTENTS: u32 = 0x0040;
     const INCOMPAT_RECOVER: u32 = 0x0004;
     const INCOMPAT_64BIT: u32 = 0x0080;
+    const RO_COMPAT_EXTRA_ISIZE: u32 = 0x0040;
     const RO_COMPAT_BIGALLOC: u32 = 0x0200;
     const RO_COMPAT_METADATA_CSUM: u32 = 0x0400;
+
+    #[test]
+    fn derives_linux_default_effective_want_extra_isize() {
+        let decoded = Superblock::decode(&valid_superblock()).unwrap();
+
+        assert_eq!(decoded.min_extra_isize(), 0);
+        assert_eq!(decoded.want_extra_isize(), LINUX_DEFAULT_EXTRA_ISIZE);
+    }
+
+    #[test]
+    fn effective_want_extra_isize_includes_disk_requirements() {
+        let mut bytes = valid_superblock();
+        put_u32(&mut bytes, 0x64, RO_COMPAT_EXTRA_ISIZE);
+        put_u16(&mut bytes, MIN_EXTRA_ISIZE_OFFSET, 48);
+        put_u16(&mut bytes, WANT_EXTRA_ISIZE_OFFSET, 64);
+
+        let decoded = Superblock::decode(&bytes).unwrap();
+
+        assert_eq!(decoded.min_extra_isize(), 48);
+        assert_eq!(decoded.want_extra_isize(), 64);
+    }
+
+    #[test]
+    fn effective_want_extra_isize_ignores_disk_fields_without_feature() {
+        let mut bytes = valid_superblock();
+        put_u16(&mut bytes, MIN_EXTRA_ISIZE_OFFSET, 48);
+        put_u16(&mut bytes, WANT_EXTRA_ISIZE_OFFSET, 64);
+
+        let decoded = Superblock::decode(&bytes).unwrap();
+
+        assert_eq!(decoded.min_extra_isize(), 0);
+        assert_eq!(decoded.want_extra_isize(), LINUX_DEFAULT_EXTRA_ISIZE);
+    }
 
     #[test]
     fn accepts_linux_64bit_descriptor_geometry() {

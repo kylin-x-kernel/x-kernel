@@ -164,6 +164,8 @@ pub enum Ext4Error {
     InvalidName,
     /// Inode and mount delayed-allocation accounting no longer agree.
     InvalidDelayedAllocationState,
+    /// Resident and transaction-local inode metadata no longer agree.
+    InvalidInodeState,
     /// A journal operation must wait for active handles or checkpoint space.
     JournalBusy,
     /// A journal operation referenced a transaction that is not known here.
@@ -226,6 +228,7 @@ impl fmt::Display for Ext4Error {
             Self::InvalidDelayedAllocationState => {
                 formatter.write_str("invalid ext4 delayed-allocation accounting")
             }
+            Self::InvalidInodeState => formatter.write_str("invalid ext4 resident inode state"),
             Self::JournalBusy => {
                 formatter.write_str("ext4 journal must wait for transaction or checkpoint progress")
             }

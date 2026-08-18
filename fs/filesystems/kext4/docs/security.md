@@ -94,12 +94,28 @@ KVFS bridge 信任 KVFS 已经提供内核拥有的 path name、dentry、inode `
   扣除 ext4 reserved blocks 和 core 持有的 delayed-allocation mount aggregate。
 - 从磁盘解码的 external xattr name 必须拒绝内嵌 NUL，保持与 Linux/e2fsck 的 corruption
   handling 一致。
+- 新写 external xattr block 必须按 Linux ext4 算法生成每项 `e_hash` 和聚合 `h_hash`，并在其后
+  计算 metadata checksum；不能用只保证 KExt4 自身可读、但会被 e2fsck 判坏的零 hash 编码。
 - Xattr name-only 遍历仍必须验证 entry 末端、value range、external block header 和 checksum；
   sink 只能在单次回调期间借用 name bytes，不能保存该引用。
 - External xattr block 的 `h_reserved` 按 Linux 语义作为 opaque 字段处理，不能仅因其非零拒绝
   e2fsck 修复后的合法块；启用 metadata checksum 时仍由完整 block checksum 检测意外修改。
 - 相同 xattr value 的允许替换必须在 journal credit 准备和 metadata access 前短路，不能更新
   inode ctime，也不能产生无意义的 journal 写入。
+- 普通 xattr set/remove 必须固定使用当前 `i_extra_isize`，只改变目标 entry 的存储区域；可选的
+  extra-isize 扩展只由统一 ordinary inode-dirty 入口触发，xattr apply 和 zero-link cleanup 必须
+  绕过该入口以防递归。
+- 扩大 `i_extra_isize` 前必须先证明全部 xattr 可在缩小后的 inode body 与一个 external block
+  中完整分区；迁移、`i_file_acl`/`i_blocks` 和 inode checksum 更新必须属于同一 transaction。
+  运行时 effective `want_extra_isize` 必须按 Linux 规则包含默认 32 字节，并仅在
+  `RO_COMPAT_EXTRA_ISIZE` 存在时合并磁盘 min/want；新 inode 必须在分配事务中直接写入该值。
+  effective want 无法满足时只能退到磁盘 `min_extra_isize` 或保留当前值，不能丢弃属性或阻断
+  本来合法的普通 inode metadata 更新。迁移选择必须是有界的 entry-by-entry 扫描，并禁止把
+  `system.data` 移到 external block。内容未变的已有 external block 必须直接复用；需要新
+  external block 的候选必须在规划阶段检查 allocator 可用性，并在 apply 前完成分配。规划与分配
+  之间的空闲空间竞争返回 `NoSpace` 时记录 resident `no_expand` 并继续普通更新，不能扩大为假
+  `ENOSPC`；删除 xattr 清除该状态，journal 的暂时性 credit/忙碌失败不应永久禁止重试。设备 I/O、
+  checksum 和 corruption 错误仍必须传播并触发既有 journal 失败策略，不能以 best-effort 为由吞掉。
 - 运行态 inode allocation 必须使用 bridge 已通过 `inode_init_owner()` 导出的显式
   UID/GID；KExt4 core 不得把新 inode owner 默认为 root。
 - FIEMAP 的 logical/physical/length 乘法和加法必须 checked；遍历必须同时受请求末端与
@@ -153,6 +169,7 @@ exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，
 | T-12 | 磁盘 inode 的 immutable/append-only 状态在 bridge 中丢失，导致 xattr 被修改 | 中 | iget 构造 KVFS inode 时总是使用空 `NodeFlags` | core 以语义方法暴露 `EXT4_IMMUTABLE_FL/EXT4_APPEND_FL`；bridge 在发布 VFS inode identity 时映射为 KVFS flags，由通用 xattr 权限层在 mutation 前返回 `EPERM` |
 | T-13 | 同一 inode 出现 snapshot 分叉，或 inode number reuse 继承旧 transient state | 中 | KVFS 初始化/释放期间并发 `iget`，core namei 按编号重载 live child，或 orphan removal 为 resident 前驱解码临时对象 | KVFS-wide `(SuperBlock, ino)` table 的 `New/Live/Freeing` 是唯一 identity 状态；`New/Freeing` 等待并重试；bridge 向 unlink/rmdir/rename 传入既有 private state；legacy orphan next 只读写 journaled inode-table bytes；KExt4 无 resident cache；reuse 只能在 `Freeing` 完成并删除旧 slot 后发生 |
 | T-14 | shrink 后重新增长暴露旧 PageCache 数据 | 高 | ext4 backing prepare 提前把 VFS `i_size` 改成目标值，导致 `truncate_setsize()` 误判长度未变并跳过 folio 丢弃或 EOF 清零 | regular-file metadata publish 只更新 `i_disksize`；唯一 `i_size` 由 VFS 在 PageCache 顺序点发布；core prepare 与 KVFS shrink/regrow、partial-grow 回归测试共同约束该职责边界 |
+| T-15 | 扩大 `i_extra_isize` 时覆盖、丢失 xattr，生成 e2fsck 不接受的 external EA block，或在磁盘满时拒绝本可完成的更新 | 高 | xattr syscall 错误地同时改变 extra-isize、普通 inode dirty 路径漏掉扩展，新 extra fields 与旧 inline 区间重叠，external entry/block hash 留零，错误地 COW 内容未变的共享 block，或布局阶段的空闲块在 apply 前被占用 | 普通 set/remove 固定使用当前 extra-isize，统一 ordinary inode-dirty 入口再按 want/min/current 扩展；迁移采用 Linux 风格 entry-by-entry 选择且固定 `system.data`；内容未变的 external block 直接复用，需要新 block 的布局在 apply 前预分配并把 `NoSpace` 降级为 `no_expand`；同一 journal transaction 重写 external block、生成 Linux-compatible `e_hash`/`h_hash`、清理旧 inline 区并更新 inode checksum；单元测试覆盖 deferred expansion、目录 inode dirty、磁盘满共享 external 复用、迁移选择与独立固定 hash 向量 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -167,6 +184,7 @@ exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，
 | F-07 | committed journal 占满可追加空间 | checkpoint 落后于 commit，head 接近 oldest tail | 新 transaction 暂时不能持久化 | mutation 等待 checkpoint progress | 3 | append 前按环形 live range 校验空间并保留一个空 block；提交路径捕获 `JournalBusy`，同步推进最老 pending checkpoint 后重试 |
 | F-08 | FIEMAP 查询遇到损坏 mapping | extent tree/legacy pointer 返回非法长度或物理范围 | 当前 ioctl 返回数据错误 | 文件内容不被修改，调用方不能取得布局 | 3 | 复用 core mapping 校验；bridge 拒绝零进度和算术溢出，不输出未经检查的 extent |
 | F-09 | eviction 与并发 `iget` 交错 | final teardown 已开始时另一路按相同 inode number 加载 | 调用方可能观察正在释放的 metadata，或建立并行 identity | stale I/O、重复释放或 transient state 串线 | 2 | KVFS cache mutex 下完成 `Live -> Freeing`；lookup/insert 在内部等待，finish 精确移除旧 Weak entry 并唤醒后重试，不向路径操作返回 `EINVAL`/`ESTALE` |
+| F-10 | 存量 inode 的 extra-isize 扩展在每次脏写重复失败 | xattr 布局或 external block 资源持续不满足，但失败结论没有驻留状态 | 每次 ordinary inode dirty 重复 metadata I/O、checksum、解码、排序和布局规划 | 元数据更新吞吐下降，磁盘满场景可能被放大 | 4 | 确定布局不可行时在唯一 resident `Ext4Inode` 状态中设置 `no_expand`；成功删除 xattr 后清除，journal busy/credits 不足保持可重试 |
 
 ## 故障管理
 
@@ -220,7 +238,10 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
 - metadata parser 是否拒绝 truncated、out-of-bounds、unsorted 或 checksum-invalid input？
 - xattr list 是否只借用名称，同时继续校验 value range 和 external block checksum？相同值
   set 是否在 journal/ctime 更新前返回？磁盘 immutable/append-only flags 是否在 iget 时
-  映射到 KVFS，并在任何 xattr mutation 前返回 `EPERM`？
+  映射到 KVFS，并在任何 xattr mutation 前返回 `EPERM`？inline/external 混合布局是否保存
+  全部属性，普通 set/remove 是否保持当前 extra-isize，统一 ordinary inode-dirty 入口是否覆盖
+  目录和非写入元数据更新，extra-isize 扩展失败是否安全回退且只缓存已经完成布局/资源判定的
+  失败，而不把 journal 暂时繁忙记成永久状态？
 - 每个 mutation 是否为所有可能 dirty 或 revoke 的 metadata block 预留了足够 journal credits？
 - 线性目录转 HTree 后立即 split 时，extent 预检是否把两次独立 block allocation 视为两个
   最坏情况下不合并的 mapping，并在 `EXT4_INDEX_FL` 发布前预留 HTree credits？

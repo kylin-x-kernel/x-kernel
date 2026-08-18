@@ -46,6 +46,8 @@ bitflags::bitflags! {
         const HUGE_FILE = 0x0008;
         /// Group descriptors carry legacy CRC16 checksums.
         const GDT_CSUM = 0x0010;
+        /// The superblock records minimum and preferred inode extra sizes.
+        const EXTRA_ISIZE = 0x0040;
         /// Allocation uses clusters larger than filesystem blocks.
         const BIGALLOC = 0x0200;
         /// Metadata structures carry CRC32C checksums.
@@ -119,6 +121,11 @@ impl FeatureSet {
     pub(crate) const fn has_huge_file(self) -> bool {
         self.read_only_compat
             .contains(ReadOnlyCompatFeatures::HUGE_FILE)
+    }
+
+    pub(crate) const fn has_extra_isize(self) -> bool {
+        self.read_only_compat
+            .contains(ReadOnlyCompatFeatures::EXTRA_ISIZE)
     }
 
     pub(crate) const fn has_sparse_super(self) -> bool {

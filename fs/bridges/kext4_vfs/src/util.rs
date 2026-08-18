@@ -28,6 +28,7 @@ pub(crate) fn into_vfs_err(err: Ext4Error) -> VfsError {
         | Ext4Error::Unsupported(_) => LinuxError::EOPNOTSUPP,
         Ext4Error::Device(_)
         | Ext4Error::InvalidDelayedAllocationState
+        | Ext4Error::InvalidInodeState
         | Ext4Error::JournalAborted
         | Ext4Error::InsufficientJournalCredits
         | Ext4Error::InvalidJournalTransaction

@@ -257,32 +257,18 @@ impl Ext4Filesystem {
     ) -> Ext4Result<()> {
         self.ensure_extent_mutation_supported(inode)?;
 
-        let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
-        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access)?;
         let logical = logical_block_u32(logical)?;
-        let updated_inode = self.update_referenced_inode_table_entry(
-            &mut inode_table_bytes,
-            inode,
-            |inode_bytes| {
-                let i_block = inode_bytes
-                    .get_mut(
-                        disk_inode::I_BLOCK_OFFSET
-                            ..disk_inode::I_BLOCK_OFFSET + disk_inode::INODE_BLOCK_BYTES,
-                    )
-                    .ok_or(Ext4Error::Corrupt(CorruptKind::Truncated))?;
-                insert_inline_extent_bytes(
-                    i_block,
-                    logical,
-                    physical,
-                    len,
-                    state,
-                    |block, count| self.is_inode_physical_block_valid(inode.number(), block, count),
+        self.update_dirty_inode_metadata(inode, handle, |filesystem, inode_bytes| {
+            let i_block = inode_bytes
+                .get_mut(
+                    disk_inode::I_BLOCK_OFFSET
+                        ..disk_inode::I_BLOCK_OFFSET + disk_inode::INODE_BLOCK_BYTES,
                 )
-            },
-        )?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        self.publish_inode_metadata(inode, updated_inode)
+                .ok_or(Ext4Error::Corrupt(CorruptKind::Truncated))?;
+            insert_inline_extent_bytes(i_block, logical, physical, len, state, |block, count| {
+                filesystem.is_inode_physical_block_valid(inode.number(), block, count)
+            })
+        })
     }
 
     pub(crate) fn convert_unwritten_extent_range(
@@ -1096,24 +1082,15 @@ impl Ext4Filesystem {
         handle: &mut crate::jbd2::JournalHandle<'_>,
         encode: impl FnOnce(&mut [u8]) -> Ext4Result<()>,
     ) -> Ext4Result<()> {
-        let inode_table_block = self.inode_table_entry_block(inode.number())?;
-        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
-        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access)?;
-        let updated_inode = self.update_referenced_inode_table_entry(
-            &mut inode_table_bytes,
-            inode,
-            |inode_bytes| {
-                let i_block = inode_bytes
-                    .get_mut(
-                        disk_inode::I_BLOCK_OFFSET
-                            ..disk_inode::I_BLOCK_OFFSET + disk_inode::INODE_BLOCK_BYTES,
-                    )
-                    .ok_or(Ext4Error::Corrupt(CorruptKind::Truncated))?;
-                encode(i_block)
-            },
-        )?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
-        self.publish_inode_metadata(inode, updated_inode)
+        self.update_dirty_inode_metadata(inode, handle, |_filesystem, inode_bytes| {
+            let i_block = inode_bytes
+                .get_mut(
+                    disk_inode::I_BLOCK_OFFSET
+                        ..disk_inode::I_BLOCK_OFFSET + disk_inode::INODE_BLOCK_BYTES,
+                )
+                .ok_or(Ext4Error::Corrupt(CorruptKind::Truncated))?;
+            encode(i_block)
+        })
     }
 
     fn create_extent_tree_blocks(
@@ -1196,7 +1173,7 @@ impl Ext4Filesystem {
     }
 
     fn update_inode_extent_block_accounting(
-        &self,
+        &mut self,
         inode: &Ext4Inode,
         old_allocated_blocks: u64,
         extents: &[MutableExtent],
@@ -1211,7 +1188,7 @@ impl Ext4Filesystem {
     }
 
     fn update_inode_extent_block_delta(
-        &self,
+        &mut self,
         inode: &Ext4Inode,
         delta: i128,
         handle: &mut crate::jbd2::JournalHandle<'_>,

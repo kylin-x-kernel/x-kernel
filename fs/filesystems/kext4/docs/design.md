@@ -156,7 +156,9 @@ i_disksize` 就顺带修改 `i_size`；后者只由 VFS `write_end_set_size()` �
 
 含义：
 
-1. Handle 加入 mount-wide running transaction，并根据 mutation 类型预留 journal credits。
+1. Handle 加入 mount-wide running transaction，并根据 mutation 类型预留 journal credits；
+   transaction engine 持有挂载时确定的 credit limit，`begin()` 和运行中扩展都以同一上限校验，
+   调用者不能传入另一个上限绕过约束。
 2. 每个被修改的元数据 block 通过 buffer 层记录撤销/写入访问权。
 3. 元数据字节和内存计数器在同一事务内更新。
 4. ordered data 在使其可达的 metadata commit 前完成。
@@ -293,13 +295,44 @@ Create、mkdir、mknod 和 symlink 的 KVFS bridge callback 接收同一次操�
 也不提供固定 root owner 的运行态默认值；测试镜像构造必须显式传入其 fixture owner。
 
 Xattr 修改会把 inline xattr 和 external xattr 解码一次，在同一份 mutation plan 中完成
-存在性检查、值更新、存储布局选择与 journal credits 计算，再选择 inode-body 或 single
-external-block 存储，维护 `i_file_acl`、`i_blocks`、block checksum 和 refcount。
+存在性检查、值更新、存储布局选择与 journal credits 计算。普通 set/remove 固定使用 inode
+当前的 `i_extra_isize`，不会借 xattr syscall 机会扩大 extra fields：set 先尝试把发生变化的
+entry 放入 inode body，放不下时只把该 entry 放入 single external block；无关 entry 保持原区域，
+remove 也只删除目标 entry。提交时同时维护 `i_file_acl`、`i_blocks`、Linux-compatible external
+entry hash、block hash、block checksum 和 refcount。Inline entry 的
+`e_hash` 按 ext4 格式保持为零，external entry 则对 name 与四字节补齐后的 value 计算旋转异或
+hash，block header 再按 entry 顺序聚合 `h_hash`。
 `Ext4XattrSetMode` 表达无标志、create、replace 和 create+replace 四种组合；组合标志在属性
 存在时返回 `EEXIST`，缺失时返回 `ENODATA`，不会通过 bridge 的锁外预查实现。允许替换时，
-若现有值逐字节相同，core 在 journal handle、metadata write 和 ctime 更新前返回原 inode。
+若现有值逐字节相同，core 在布局规划、journal handle、metadata write 和 ctime 更新前返回。
+effective want 沿用 Linux 的 superblock 初始化策略：inode 大于 128 字节时先为 Linux 已知的扩展
+inode 字段保留 32 字节；仅当文件系统声明 `RO_COMPAT_EXTRA_ISIZE` 时，再与磁盘 min/want
+取最大值。新 inode 在分配事务中直接把该 effective want 写入 `i_extra_isize`，因此第一次
+普通写回不会为了补齐新 inode 再读取和规划 xattr。已有 external 属性集合逐字节不变时直接
+复用原 block，即使它是共享 block 且 allocator 已满也不触发 COW；只有 external 内容发生变化
+时，才要求已有私有 block 可原地重写或 allocator 尚有空闲 block；因此磁盘已满但目标 entry
+仍可在当前布局内完成的更新不会被误报为 `ENOSPC`。
 `Ext4Inode` 从磁盘 `i_flags` 暴露 immutable 和 append-only 状态；bridge 在 iget 时把它们映射
 为 KVFS `NodeFlags`，使通用 xattr 权限层在进入 namespace 或 KExt4 mutation 前返回 `EPERM`。
+
+除 xattr 自身更新和 zero-link eviction 外，所有普通 inode dirty 入口都会先尝试把现有 inode
+的 `i_extra_isize` 扩到 superblock 的运行时 effective `want_extra_isize`；这覆盖 regular-file
+写入/截断、extent 更新、chmod/chown/utimes 以及目录 namei 元数据，而不是只覆盖文件写入。
+Xattr apply 走底层 inode-table helper，避免扩展过程递归进入 xattr mutation。目标布局容纳不下
+全部 xattr 时退到磁盘
+`min_extra_isize`，仍不成立则保留当前大小而继续普通 metadata 更新。需要缩小 inline 区域时，
+规划器按 Linux 的 entry-by-entry 策略重复扫描：优先迁移足以一次腾出所需空间的最小 entry，
+否则迁移本轮扫描中最后一个 external block 可容纳的 entry 后继续；`system.data` 不允许外迁。
+迁移、inode-body 重编码和 `i_extra_isize` 更新属于同一 journal transaction；handle 只为新增的
+external metadata targets 扩展 credits，transaction engine 使用挂载时固化的 journal limit
+拒绝越界扩展。
+需要新 external block 时，在进入布局 apply 前先完成块分配；规划后的空闲空间竞争若返回
+`NoSpace`，则记录 `no_expand` 并继续普通 inode metadata 更新。设备 I/O、checksum 或元数据损坏
+仍按 journal 完整性错误传播，不能作为机会性扩展失败静默忽略。
+确认没有可行扩展布局后，`Ext4Inode` 在 resident 私有状态中记录 Linux
+`EXT4_STATE_NO_EXPAND` 对等标志，后续写入不再重复读取、校验和规划相同的 xattr；成功删除
+xattr 会清除此标志，因为 inode-body/external 空间已经改变。`JournalBusy` 或 journal credits
+暂时不足发生在实际布局迁移之前，不记录为永久失败，后续 transaction 仍可重试。
 
 `list_xattrs()` 使用 `Ext4XattrNameSink` 逐项借用已校验的磁盘名称，只验证 value range 而不
 复制 value。KVFS bridge 在 sink 中添加 `user.*`、`trusted.*`、`security.*` 前缀并继续流式

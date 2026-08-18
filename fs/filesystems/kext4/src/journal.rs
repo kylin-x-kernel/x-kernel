@@ -31,6 +31,17 @@ use crate::{
 
 const JBD2_FEATURE_INCOMPAT_REVOKE: u32 = 0x0000_0001;
 
+fn transaction_credit_limit(superblock: &JournalSuperblock) -> Ext4Result<u32> {
+    let log_blocks = superblock
+        .max_blocks()
+        .checked_sub(superblock.first_log_block().get())
+        .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?;
+    // Linux bounds a normal transaction below roughly one third of the
+    // journal so descriptor, revoke, and commit overhead still fit while a
+    // checkpoint can make progress.
+    Ok((log_blocks / 3).max(1))
+}
+
 #[cfg(target_os = "none")]
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock()
@@ -70,7 +81,10 @@ impl MountedJournal {
         filesystem_block_count: u64,
     ) -> Ext4Result<Arc<Self>> {
         storage.validate_physical_bounds(filesystem_block_count)?;
-        let transactions = JournalTransactions::new(storage.superblock.sequence());
+        let transactions = JournalTransactions::new_with_credit_limit(
+            storage.superblock.sequence(),
+            transaction_credit_limit(&storage.superblock)?,
+        );
         Ok(Arc::new(Self {
             transactions,
             state: Mutex::new(MountedJournalState {
@@ -86,19 +100,6 @@ impl MountedJournal {
 
     fn supports_revoke(&self) -> bool {
         lock(&self.state).storage.superblock.feature_incompat() & JBD2_FEATURE_INCOMPAT_REVOKE != 0
-    }
-
-    fn transaction_credit_limit(&self) -> Ext4Result<u32> {
-        let state = lock(&self.state);
-        let superblock = &state.storage.superblock;
-        let log_blocks = superblock
-            .max_blocks()
-            .checked_sub(superblock.first_log_block().get())
-            .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?;
-        // Linux bounds a normal transaction below roughly one third of the
-        // journal so descriptor, revoke, and commit overhead still fit while a
-        // checkpoint can make progress.
-        Ok((log_blocks / 3).max(1))
     }
 
     fn replace_superblock(&self, superblock: JournalSuperblock) {
@@ -248,21 +249,13 @@ impl Ext4Filesystem {
             return Ok(journal);
         }
 
-        let credit_limit = self.running_transaction_credit_limit()?;
         if let Some(transaction) = journal
             .transactions
-            .transaction_to_commit_before_reservation(credits, credit_limit)?
+            .transaction_to_commit_before_reservation(credits)?
         {
             self.commit_metadata_transaction(transaction)?;
         }
         Ok(journal)
-    }
-
-    fn running_transaction_credit_limit(&self) -> Ext4Result<u32> {
-        self.journal
-            .as_ref()
-            .ok_or(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite))?
-            .transaction_credit_limit()
     }
 
     fn enable_journal_revoke_feature(&mut self) -> Ext4Result<()> {
@@ -333,13 +326,12 @@ impl Ext4Filesystem {
             .ok_or(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite))?;
         let requires_immediate_commit = !self.journal_supports_revoke()
             || recovery_flag_policy == RecoveryFlagPolicy::PreserveDuringRecovery;
-        let credit_limit = self.running_transaction_credit_limit()?;
         let transaction_to_commit = if requires_immediate_commit {
             journal.transactions.idle_running_transaction(transaction)?
         } else {
             journal
                 .transactions
-                .transaction_to_commit_after_handle(transaction, credit_limit)?
+                .transaction_to_commit_after_handle(transaction)?
         };
         if let Some(transaction) = transaction_to_commit {
             self.commit_metadata_transaction_with_policy(transaction, recovery_flag_policy)?;

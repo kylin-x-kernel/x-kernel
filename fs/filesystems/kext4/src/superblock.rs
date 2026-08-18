@@ -1663,8 +1663,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        BlockCount, BlockMappingFlags, DirectoryFileType, Ext4Inode, Ext4SyncIntent, LogicalBlock,
-        PhysicalBlock,
+        BlockCount, BlockMappingFlags, DirectoryFileType, Ext4Inode, Ext4InodeMetadataUpdate,
+        Ext4SyncIntent, Ext4XattrNamespace, LogicalBlock, PhysicalBlock,
         extent::ExtentMappingState,
         file::RegularWriteMetadata,
         inode::InodeInitialization,
@@ -7413,6 +7413,21 @@ mod tests {
     }
 
     #[test]
+    fn newly_allocated_inode_starts_at_effective_want_extra_isize() {
+        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let effective_want_extra_isize = filesystem.superblock().want_extra_isize();
+        assert_eq!(effective_want_extra_isize, 32);
+
+        let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+
+        assert_eq!(inode.extra_isize(), effective_want_extra_isize);
+        assert_eq!(
+            filesystem.raw_inode(inode.number()).unwrap().extra_isize(),
+            effective_want_extra_isize
+        );
+    }
+
+    #[test]
     fn inode_metadata_mutation_updates_the_inode_component_in_place() {
         let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
@@ -7432,6 +7447,51 @@ mod tests {
             .checkpoint_committed(&commit)
             .unwrap();
         journal.finish_checkpoint_for_test(&commit).unwrap();
+    }
+
+    #[test]
+    fn xattr_mutation_defers_extra_isize_expansion_to_inode_dirty() {
+        let (mut filesystem, _device) = journal_allocator_test_filesystem(512, 0b0011_1111);
+        let inode = allocate_checkpointed_directory_inode(&mut filesystem);
+        let journal = JournalTransactions::new(TransactionId::new(692));
+        let mut handle = journal.begin(JournalCredits::new(2)).unwrap();
+        let transaction = handle.id();
+        update_test_inode_extra_isize(&mut filesystem, &inode, 0, &mut handle);
+        drop(handle);
+        let commit = journal.force_commit(transaction).unwrap();
+        filesystem
+            .metadata_io
+            .checkpoint_committed(&commit)
+            .unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
+
+        install_test_internal_journal(&mut filesystem, 692);
+        filesystem
+            .set_xattr(
+                &inode,
+                Ext4XattrNamespace::User,
+                b"key",
+                b"value",
+                crate::Ext4Timestamp::new(692, 0),
+            )
+            .unwrap();
+        assert_eq!(inode.extra_isize(), 0);
+
+        filesystem
+            .update_inode_metadata(
+                &inode,
+                Ext4InodeMetadataUpdate::new(crate::Ext4Timestamp::new(693, 0)).with_mode(0o700),
+            )
+            .unwrap();
+
+        assert_eq!(
+            inode.extra_isize(),
+            filesystem.superblock().want_extra_isize()
+        );
+        assert_eq!(
+            filesystem.raw_inode(inode.number()).unwrap().extra_isize(),
+            filesystem.superblock().want_extra_isize()
+        );
     }
 
     fn install_test_internal_journal(filesystem: &mut Ext4Filesystem, sequence: u32) {
@@ -7525,6 +7585,32 @@ mod tests {
                     Ok(())
                 },
             )
+            .unwrap();
+        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes).unwrap();
+        filesystem.publish_inode_metadata(inode, updated).unwrap();
+    }
+
+    fn update_test_inode_extra_isize(
+        filesystem: &mut Ext4Filesystem,
+        inode: &Ext4Inode,
+        extra_isize: u16,
+        handle: &mut crate::jbd2::JournalHandle<'_>,
+    ) {
+        let inode_table_block = filesystem.inode_table_entry_block(inode.number()).unwrap();
+        let inode_table_access = filesystem
+            .metadata_io
+            .write_access(inode_table_block, handle)
+            .unwrap();
+        let mut inode_table_bytes = metadata_access_bytes(&inode_table_access).unwrap();
+        let updated = filesystem
+            .update_referenced_inode_table_entry(&mut inode_table_bytes, inode, |inode_bytes| {
+                put_u16(
+                    inode_bytes,
+                    crate::disk::inode::EXTRA_ISIZE_OFFSET,
+                    extra_isize,
+                );
+                Ok(())
+            })
             .unwrap();
         replace_metadata_access_bytes(&inode_table_access, inode_table_bytes).unwrap();
         filesystem.publish_inode_metadata(inode, updated).unwrap();
