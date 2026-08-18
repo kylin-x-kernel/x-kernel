@@ -54,7 +54,7 @@ kruntime::init_scheduler()/init_scheduler_secondary()
         │                         │
         │ on_timer_fire()         │ block/wake/exit/yield
         ▼                         ▼
-task_tick() → set_preempt_pending   blocked_resched / unblock_task / resched
+update_current() → pending      blocked_resched / unblock_task / resched
         │                         │
         └─────── 延迟到抢占安全点（enable_preempt）───────┘
                                   │
@@ -66,10 +66,10 @@ task_tick() → set_preempt_pending   blocked_resched / unblock_task / resched
 |------|------|
 | `TaskInner` / `CurrentTask` | 任务元数据、状态机、上下文、抢占计数 |
 | `RunQueue` | 每 CPU 调度容器；维护算法实例与切换过程 |
-| `Scheduler` (`ksched`) | `add_task/pick_next/task_tick/enqueue_task/leave_current` 算法策略（运行任务统一经 `leave_current` 离开；Block/Migrate 记 vlag，唤醒/迁入经 `enqueue_task` PLACE_LAG；EEVDF `curr` 仅为数值快照，计入系统虚拟时间 V） |
+| `Scheduler` (`ksched`) | `add_task/pick_next/update_current/next_preemption_ns/enqueue_task/leave_current` 算法策略（运行任务统一经 `leave_current` 离开；Block/Migrate 记 vlag，唤醒/迁入经 `enqueue_task` PLACE_LAG；EEVDF `curr` 仅为数值快照；slice/request 以 ns 计） |
 | `future::block_on` | 将 `Future` pending 映射为任务阻塞/唤醒 |
 | `WaitQueue` | 事件型阻塞等待 API |
-| `timers` | tick 回调与定时事件检查 |
+| `timers` | 显式周期回调（与调度 timer 解耦） |
 | `snapshot/task_registry` | 可选诊断：snapshot/watchdog/NMI 共享的任务遍历视图 |
 
 ## 创建与发布模型
@@ -164,31 +164,73 @@ callback 内嵌套 drain。
 
 `resched()` 在当前 CPU 的调度器上 `pick_next_task()`；无就绪任务时回退到本 CPU `IDLE_TASK`。
 
-### 3) 硬件定时器驱动与时钟 tick
+### 3) 硬件定时器驱动与动态 schedule timer
 
 `ktask` 拥有全部硬件定时器驱动逻辑：`kruntime` 只注册时钟中断向量，中断处理直接调用
-`ktask::on_timer_fire()`。`on_timer_fire()` 采用 tick 限定的 NOHZ 风格：
+`ktask::on_timer_fire()`。调度与 soft timer 共用每 CPU oneshot 硬件，按绝对 ns deadline
+仲裁，**不再**依赖固定 `TICKS_PER_SECOND` 调度节拍：
 
-1. 每次硬件触发都执行 `timers::check_events()`：分发 tick 回调、排空定时 future 的
-   timer wheel（两者都是 ns 驱动，与触发频率无关）。
-2. **仅**当周期 tick 截止时间已到（或首次触发的懒初始化）时，才调用
-   `scheduler_timer_tick()` → 算法 `task_tick(current)`，并把下一个 tick 截止时间推进
-   `now + PERIODIC_INTERVAL`。调度器按 tick 计数（slice/vruntime 以 tick 为单位），
-   因此子 tick 的 soft-timer 触发不会调用 `task_tick`，保证调度记账仍以固定 `TICKS_PER_SECOND`
-   速率推进。
-3. 重新装填硬件定时器到 `min(下一个周期 tick, wheel 最早 soft deadline)`。
+1. IRQ 入口先调用 `register_timer_irq_note` 钩子（watchdog 硬锁心跳按任意
+   timer IRQ 计，不只 4s sample），再按 `now - last_accounted_ns` 对当前任务
+   `update_current(elapsed_ns)`（idle 跳过；只在 request 用完时要求 resched）。
+   **仅到期的 schedule slot** 再跑 Linux `entity_tick` / `check_preempt_tick`：
+   pick 会变（eligible NEXT_BUDDY，或更早 deadline）才置 `need_resched`。
+   soft/periodic IRQ 只记账，避免 WF_SYNC 刚换上 later-deadline wakee 就被抢回。
+   ineligible buddy 由 `next_preemption_ns` 武装 until-eligible，不对其它
+   waiter 做 10µs 轮询。IRQ 尾探测抢不过仍立即返回。
+2. 运行到期的显式周期回调（`register_timer_callback(period, ...)`）；唤醒批次内推迟
+   硬件 rearm，排空 soft-timer wheel 并 wake，再重读 soft earliest。
+3. 用 `next_preemption_ns(current)` 重算可选的 `NEXT_SCHED_DEADLINE`，再
+   `rearm_local_timer` 到
 
-该路径从 timer wheel 到 `MonotonicTimerIf::arm_timer` 始终传递 `MonotonicInstant`。
-具体 timer backend 仅在写 SBI、APIC 或体系结构 timer 寄存器前把 typed deadline
-钳制并转换为硬件 ticks。周期 deadline 的 per-CPU 槽直接保存
-`Option<MonotonicInstant>`，不使用整数编码或特殊数值作为未初始化哨兵。
+```text
+min(next_sched_deadline?, earliest_soft?, earliest_periodic?)
+```
 
-子 tick 精度的关键：`register_timer`/`sleep_until` 在入队后（仍持有 wheel 的 `SpinNoIrq`
-锁、IRQ 关闭）立即调 `rearm_local_timer()` 把硬件截止时间拉到新的最早 deadline；
-`cancel_timer`/`TimerFuture::drop` 在本地 CPU 移除最早项时同样重装。远程 CPU 上取消最早项
-不发 IPI，由对方 CPU 下次（已过期的）触发自纠正（至多一次多余中断）。
+   三者皆空时 `disarm_timer()`。过期/陈旧 IRQ 只补账并重装，不做 catch-up tick 循环。
+   在 `sched_stat` 下按是否命中 schedule / soft / periodic deadline 分类计数
+   （`timer_irq_sched` / `timer_irq_soft` / `timer_irq_periodic` / `timer_irq_stale`），
+   便于核对取消固定 10ms tick 后的 IRQ 构成；分类在 drain/run 之后从 schedule slot、
+   非空 soft wakers、`run_due_and_earliest` 的 due 标志推导，默认 release 不额外查询
+   timer wheel。
 
-`ktask` 采用延迟抢占：tick 里通常只打 pending 标记，真正 `preempt_resched()` 在抢占重新允许的安全点触发。
+schedule deadline 经 `program_sched_deadline` 写入：对齐 Linux `hrtick_start`，
+正的相对延迟下限 10μs；`next_preemption_ns == 0` 或 slot 已到期时先打
+`need_resched` 并消费该 one-shot schedule slot，绝不武装硬件 interval=0，也不把
+已到期 slot 每 10μs 循环后推（避免 timer IRQ 活锁）。该下限只作用于 schedule 源，
+不影响 soft/periodic 精度；pending 抢占在临界区退出后的安全点消费。
+
+该路径 soft deadline 以 `MonotonicInstant` 贯穿 timer wheel 到
+`rearm_local_timer`；装入硬件前再转换为绝对 ns / ticks。上下文切换、
+block/exit/migrate、优先级变更与本地 `request_resched` 也会补账并刷新
+schedule deadline。远端 wake 的 IPI 只置 `need_resched`（与改周期 tick 之前相同）；
+IRQ 尾 `peer_preempts_curr` 决定是否切换，探测失败才在 `preempt_resched` 里武装
+剩余 request 的 backup hrtick。不要在 IPI 里 `account`/`refresh` 目标 RQ：那会与
+waker 持有的远端 `&mut RunQueue` 别名，并把 schedule slot 重编程或 disarm，导致
+busy home 上空等一整段 request。
+由于 oneshot/NOHZ CPU 可能已彻底停表，`smp` 不带 `ipi` 无法可靠推进远端 runnable
+任务，`ktask` 在编译期拒绝该配置，不提供虚假的本地 fallback。
+
+`register_timer`/`sleep_until` 在关抢占下读取 `this_cpu_id`、入队，并（仍持有 wheel 的
+`SpinNoIrq` 锁、IRQ 关闭）立即调 `rearm_local_timer()`；`cancel_timer`/`TimerFuture::drop`
+在本地移除最早项时同样重装。远程取消最早项不发 IPI，由对方 CPU 至多一次陈旧 IRQ 自纠正。
+
+`on_timer_fire` 在唤醒批次内推迟硬件 rearm（`DEFER_LOCAL_TIMER_REARM`），避免每次 wake
+用过期 soft earliest 覆盖刚刷新的 schedule slot；批次结束后重读 soft earliest 再仲裁。
+`switch_to` 经 `program_sched_deadline_for(incoming, …)` 写入：立即请求的 pending 落在
+入场任务上（此时 `current()` 仍是出场任务）。NOHZ 下 lone runner 墙钟时间在 add/wake/
+priority 变更前经 RQ `flush_running_runtime` 注入 EEVDF `curr`，避免 PLACE_LAG 用陈旧 V。
+`last_accounted_ns` 只在持有该 RQ 的 scheduler `SpinRaw` 时更新，这样远端 wake flush
+与本地 timer `account_current_runtime` 不会对同一段墙钟重复或漏记。
+
+显式周期回调在 hard IRQ/本地 IRQ 关闭上下文执行，必须短小且不阻塞。回调调用前释放
+callback vector 的 Rust 借用并以 `Arc` 固定闭包生命周期，因此回调内追加注册安全；
+每次 deadline 从**回调完成时刻 + period** 重算，超期只执行一次，不 catch-up、不立即
+重入。注册新周期源时重装仍携带当前 soft deadline，不能把已有 sleep/timeout 推迟；
+超出 `u64` ns 的 `Duration` 饱和到最远期限而不是截断成短周期。
+
+`ktask` 仍采用延迟抢占：timer 路径通常只打 pending，真正 `preempt_resched()` 在抢占
+重新允许的安全点触发。
 
 ### 4) 抢占与 kspin 的接口耦合
 
@@ -206,7 +248,8 @@ guard 尚未释放时，抢占只保留 `need_resched` pending，不实际切换
 IRQ 分发完成并向中断控制器回写完成状态后，`khal` 在释放 IRQ handler 的 `NoPreempt`
 guard 前暂时挂起 active-exception 标记。这样 `enable_preempt` 可在 IRQ 尾部、IRQ 仍关闭
 的安全窗口消费 pending；被中断任务恢复后再还原标记并返回异常。若不做该尾部补查，
-IPI wake 在 EL1 exception 内只会留下 pending，可能一直等到下一个周期 tick。
+IPI wake 在 EL1 exception 内只会留下 pending，可能一直等到下一次 schedule timer
+或安全点。
 
 异常路径可能进入会阻塞的后端（例如用户缺页处理），任务也可能在 trap handler
 返回前被调度到其它 CPU。为避免原 CPU 上的 active-exception slot 变成 stale 状态，
@@ -260,27 +303,42 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
 - `select_run_queue` 依据任务 `cpumask` 在允许 CPU 集内做轮询选队。
 - `select_wake_run_queue` **始终粘 home**（cpumask 不含 home 时才 fallback 轮询）。
   任何 “home 忙 → idle” 溢出都会把 schbench RPS 从 ~450 打到 ~325。
-- `add_task` 首次入队后：若目标是远端 CPU，或本 CPU 当前为 idle，则 `request_resched`
-  （远端 IPI / 本地 pending）；本核忙碌时不额外 kick，交给 tick/yield。避免 RR 到远端
-  idle 后卡在 WFI，进而把 sticky wake 锁进坏布局。
+- `add_task` 首次入队后总是 `request_resched`（远端 IPI / 本地 pending 并刷新
+  schedule deadline）。动态 timer 在 lone task 时已 disarm，busy 本核也不能依赖不存在的
+  周期 tick 日后发现新 peer。
 - EEVDF（`ksched`）对齐 Linux `pick_eevdf` / `place_entity`：
-  - 唤醒 `PLACE_LAG` 后 vruntime **钳到系统 V**，deadline 用**完整 request**
-    （`vd = ve + r/w`），不再造 1-tick 假短 deadline；
+  - 唤醒 `PLACE_LAG`：`vruntime = V - lag`（lag 先按 `(W+w)/W` 膨胀），deadline 用**完整 request**
+    （`vd = ve + r/w`，request 以 ns 计，默认 `DEFAULT_SLICE_NS` = 2ms），不造假短 deadline，
+    也不把 wakee 额外钳到 V / `min_vruntime`（负 lag 允许暂时 ineligible）；
+    `min_vruntime` 按 Linux `update_min_vruntime` 计入离树 `curr`；
   - **非自愿** `preempt_resched` 先 `peer_preempts_curr()`（`curr` 离树比 deadline），
-    仅当同伴更早才 `leave_current(Preempt)`+`pick`；否则清 pending 直接返回（避免无意义
-    再入队，也保证 `switch_to` 前 ready 队列持有 prev 的 `Arc`）；
-  - `task_tick` 仅在有等待同伴时对到期 deadline 抢占；
-  - 唤醒到 busy rq 时按 Linux `NEXT_BUDDY` / `set_preempt_buddy` 提名 wakee
-    （保留更早 deadline 的既有 buddy）；waker block 后 `pick` 优先 eligible buddy；
+    同伴更早或 WF_SYNC 的 eligible buddy 才 `leave_current(Preempt)`+`pick`；否则清 pending
+    直接返回（避免无意义再入队，也保证 `switch_to` 前 ready 队列持有 prev 的 `Arc`）。
+    探测失败路径在同一次 scheduler 锁内完成 account + probe + `next_preemption_ns`，
+    出锁后再 `program_sched_deadline` / rearm，避免三次加锁拉长关中断窗口；
+  - `update_current` 对齐 Linux `update_deadline`：request 完成后赋新 `vd = ve + r/w`，
+    仅在有等待同伴时 resched；lone task 不装 schedule timer；
+  - 唤醒按 Linux `NEXT_BUDDY` / `set_next_buddy` 提名 wakee（保留更早
+    deadline 的既有 buddy），**不要求** `curr` 已安装：远端 futex 常在
+    目标 `leave` 之后、`pick` 之前入队；`curr` 为空时跳过提名，随后 pick
+    会把刚放回的 runner 再跑完一段 request（schbench p99.9 ≈ 2ms）。
+    `pick` 优先 eligible buddy；WF_SYNC 再设 `prefer_sync_buddy`；
   - futex 等路径用 `with_wake_sync`（Linux `WF_SYNC`）：eligible next buddy 可
-    sync-preempt 半截 curr（即使 deadline 更晚），缩短 “等 waker block” 的 p50，
-    仍不造 1-tick 假短 deadline / idle-seeking。
+    sync-preempt 半截 curr（即使 deadline 更晚）。`mark_sync_wake_preempt` 当时
+    就设 `prefer_sync_buddy`，且失败的 `peer_preempts_curr` 不得清掉 sync 标记，
+    否则远端 slice-expire pick / 随后 IPI 探测看不到 buddy。account + PLACE +
+    提名必须在同一把 scheduler 锁里完成。
+  - `TaskInner::interrupt()` 对 `interrupt_waker` 走 `with_wake_sync`（信号发送方
+    随后往往会 block）。
 - 当前任务离开统一走 `leave_current`：
   - `yield_current` → `Yield`（重置 request 并再入队；`Running -> Ready` 必须成功）
   - `preempt_resched` → `Preempt`（保留剩余 slice 并再入队；同上）
   - `blocked_resched` → `Block`（记 vlag，不入队；into_raw 当前槽位计 1，调用方须另持强引用以满足 `strong_count > 1`；缺则 panic，见 `# Panics` 与 unittest）
   - `migrate_current` → `Migrate`（源 RQ 记 vlag 供目的端 PLACE_LAG，不入队）
   - `exit_current` → `Exit`（清除 current 记账，不设置 PLACE_LAG）
+- 所有离开路径（含 `yield_current`）均在 `leave_current` / requeue **之前**按当前时间
+  `update_current`；`switch_to` 不再对已经入树的 prev 补账，避免修改有序队列 key 后破坏
+  调度器索引与权重聚合。
 - idle 不进入调度器 `curr`：yield/preempt 只做 `Running -> Ready`，不
   `leave_current` / 不入队。EEVDF 下 idle 保持 `curr == None`，`peer_preempts`
   在空 `curr` 时把「ready 非空」视为可抢占即可。
@@ -290,11 +348,17 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
   `pick_next` 要求此前已 `leave_current`，不再静默擦除陈旧状态。
 - 当前实现无主动负载均衡器；任务跨核迁移主要由 affinity 变化触发。
 - `set_task_affinity`：写 `cpumask` 后 `enforce_affinity_placement`——current 立即
-  `migrate_current`；ready 从旧 RQ `remove_task` 再 `migrate_entry`；远端 running
+  `migrate_current`；ready 从旧 RQ `remove_task` 再 `migrate_entry`（目的 RQ 入队后
+  `request_resched_on`，与 `add_task` 相同）；远端 running
   在 `preempt`+`ipi` 下 `request_resched`，由 `preempt_resched`/`yield_current`
   发现 mask 不含本 CPU 后强制迁移，调用方自旋等到离开非法 CPU；迁不走返回
   `false`（syscall 侧 `EBUSY`）。
-- 对 `Blocked` 任务重新入队时，SMP 下会等待 `task.on_cpu()` 清零，避免与远端 CPU 的切换过程并发冲突。
+- 对 `Blocked` 任务重新入队时，SMP 唤醒方先发布目标 RQ 与 wake flags；若
+  `task.on_cpu()` 仍为真，则由原 CPU 在 switch-out 清零 `on_cpu` 后原子认领并完成入队。
+  该 handoff 防止重复入队，也避免唤醒方持 `NoPreemptIrqSave` 关中断自旋等待远端 CPU。
+  `arm_wake_enqueue` / `on_cpu` / `set_on_cpu(false)` / `take_wake_enqueue` 四处
+  均为 SeqCst：这是两变量 Dekker 协议，Release/Acquire 会允许双方都看不到对方
+  的 store，任务停在 `Ready` 却不在任何 run queue。
 - 远端 run queue 唤醒/首次入队都不会直接切换远端 CPU；在支持 IPI 和抢占时，通过远端 pending-resched 请求把切换推迟到远端安全点。
 - `TaskInner::on_cpu_mask()` 现在只表示 `ktask` 自己的调度驻留快照；用户地址空间
   的 TLB shootdown 目标集合由 `memspace::MmCpuResidency` 持有。当前实现只在
@@ -308,27 +372,28 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
 | `yield_now()` | 是（主动 `resched`） |
 | `blocked_resched()` | 是 |
 | `exit_current()` | 是 |
-| tick 触发 `task_tick` | 否（通常先设置 pending） |
+| schedule timer 触发 `update_current` | 否（通常先设置 pending） |
 | 本 CPU waker 唤醒任务 | 否（设置 pending，安全点抢占） |
-| 远端 waker 唤醒任务 | 否（可通过 IPI 请求远端 pending） |
-| `add_task` 到远端 / 本核 idle | 否（`request_resched`；远端 IPI） |
+| 远端 waker 唤醒任务 | 否（可通过 IPI 请求远端 pending 并刷新 schedule deadline） |
+| `add_task` / `migrate_entry`（本地 busy/idle 或远端） | 否（`request_resched`；远端 IPI） |
 | `enable_preempt` 且 `need_resched` | 可能（触发 `preempt_resched`） |
 
-因此 `ktask` 不是“每个时钟中断必切换”模型，而是“tick 驱动 + 安全点执行”的工程化抢占模型。
+因此 `ktask` 不是“固定节拍必切换”模型，而是“动态 schedule timer + 安全点执行”的抢占模型。
 
 ## Cargo Features
 
 | Feature | 作用 |
 |---------|------|
 | `preempt` | 启用抢占逻辑与 `kspin` preempt 接口 |
-| `smp` | 启用多核 run queue 与迁移相关语义 |
+| `smp` | 启用多核 run queue 与迁移相关语义；必须同时启用 `ipi` |
 | `sched_fifo` | FIFO 协作式调度 |
 | `sched_rr` | RR 抢占式调度（隐含 `preempt`） |
 | `sched_cfs` | CFS 抢占式调度（隐含 `preempt`） |
 | `sched_eevdf` | EEVDF 抢占式调度（隐含 `preempt`） |
 | `snapshot` | 任务快照与回溯基础能力 |
 | `watchdog` | watchdog 诊断（依赖 `snapshot`） |
-| `ipi` / `tls` | 可选扩展能力 |
+| `ipi` | SMP 远端唤醒/重调度的必需能力 |
+| `tls` | 可选扩展能力 |
 
 `UserTaskRuntime` 是 `ktask` 的用户运行时接口。其 scheduler hook 可在关闭抢占的切换上下文
 调用，因此实现不得阻塞、递归调度或依赖普通的 current-process 上下文。`TaskIdentity::User`
@@ -339,6 +404,19 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
 该 task 退出，不再向 non-user task 临时注入 runtime。
 
 调度算法默认由 Kconfig 选择（默认 EEVDF）。
+
+## 亚 tick / 竞争唤醒测试约定
+
+`future/time.rs` 中的 unittest 拆成两类：
+
+- **Idle**：无同 CPU 自旋负载，断言 median `< 6ms`，验证 soft-timer 不会被取整到旧的
+  10ms tick。
+- **Contended（EEVDF）**：同 CPU `spin_loop` spinner，上限为
+  `request + DEFAULT_SLICE_NS + 2ms`。这测的是调度唤醒延迟预算，不是 timer 取整。
+
+默认 request 长度见 `ksched::DEFAULT_SLICE_NS`（2ms）。
+RR 不共用这个 EEVDF request：其历史 quantum 由
+`ksched::DEFAULT_RR_SLICE_NS` 保持为 50ms，避免把 RR 上下文切换率放大 25 倍。
 
 ## 设计决策
 
@@ -366,8 +444,8 @@ wait/future 唤醒通常发生在释放资源或发送事件的线程上下文�
 ## 与 `kruntime` 的边界
 
 - `kruntime` 负责注册时钟（及 IPI/PMU）中断向量；定时器中断处理只调用 `ktask::on_timer_fire()`。
-- `ktask` 负责全部硬件定时器驱动：周期 tick 簿记、timer wheel 排空、硬件重装，并将 tick
-  转换为调度记账、抢占请求、定时事件唤醒（含子 tick 精度）。
+- `ktask` 负责全部硬件定时器驱动：动态 schedule deadline、soft timer wheel、显式周期回调、
+  硬件重装，并将到期事件转换为调度记账、抢占请求、定时事件唤醒。
 - `kruntime` 不感知具体调度算法；`ktask` 不负责硬件 IRQ 路由。
 
 ## 调度统计

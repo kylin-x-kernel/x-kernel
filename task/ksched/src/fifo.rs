@@ -21,7 +21,8 @@ def_node! {
 /// queue. When picking the next task to run, the head of the ready queue is
 /// taken.
 ///
-/// As it's a cooperative scheduler, it does nothing when the timer tick occurs.
+/// As it's a cooperative scheduler, it never requests a schedule timer and
+/// never forces preemption from runtime accounting.
 ///
 /// It internally uses a linked list as the ready queue.
 pub struct FifoScheduler<T> {
@@ -75,8 +76,12 @@ impl<T> BaseScheduler for FifoScheduler<T> {
         }
     }
 
-    fn task_tick(&mut self, _current: &Self::SchedItem) -> bool {
-        false // no reschedule
+    fn update_current(&mut self, _current: &Self::SchedItem, _elapsed_ns: u64) -> bool {
+        false
+    }
+
+    fn next_preemption_ns(&self, _current: &Self::SchedItem) -> Option<u64> {
+        None
     }
 
     fn set_priority(&mut self, _task: &Self::SchedItem, _prio: isize) -> bool {

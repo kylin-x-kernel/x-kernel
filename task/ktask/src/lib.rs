@@ -17,6 +17,11 @@
 
 #![cfg_attr(not(test), no_std)]
 
+#[cfg(all(feature = "smp", not(feature = "ipi")))]
+compile_error!(
+    "ktask's SMP run queues require the `ipi` feature so remote runnable tasks can wake a NOHZ CPU"
+);
+
 #[cfg(test)]
 mod tests;
 

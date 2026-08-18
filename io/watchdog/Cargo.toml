@@ -20,3 +20,4 @@ log.workspace = true
 percpu.workspace = true
 kbuild_config = { workspace = true }
 kcpu_id_map = { workspace = true }
+unittest.workspace = true

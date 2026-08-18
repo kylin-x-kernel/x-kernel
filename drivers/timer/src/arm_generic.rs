@@ -132,6 +132,10 @@ impl khal::time::MonotonicTimerIf {
         arm_timer(deadline)
     }
 
+    fn disarm_timer() {
+        disarm_timer()
+    }
+
     #[cfg(feature = "arm-timer-resume-fixup")]
     fn handle_idle_return(previous_ticks: khal::time::TimerTicks) -> bool {
         handle_idle_return(previous_ticks.as_raw())
@@ -303,17 +307,33 @@ pub fn arm_timer(deadline: ktime_types::MonotonicInstant) {
     let current_ticks = now_ticks_raw();
     let deadline_ns = deadline.as_nanos_u64_saturating();
     let deadline_ticks = nanos_to_ticks(deadline_ns);
-    if current_ticks < deadline_ticks {
-        let interval = (deadline_ticks - current_ticks).min(MAX_TIMER_INTERVAL_TICKS);
-        match mode() {
-            TimerMode::Physical => write_physical_timer_tval(interval),
-            TimerMode::Virtual => CNTV_TVAL_EL0.set(interval),
-        }
+    let interval = if current_ticks < deadline_ticks {
+        // CNT*_TVAL_EL0 is effectively a signed 32-bit countdown; clamp and
+        // rely on software re-arbitration for farther deadlines.
+        (deadline_ticks - current_ticks).min(MAX_TIMER_INTERVAL_TICKS)
     } else {
-        match mode() {
-            TimerMode::Physical => write_physical_timer_tval(0),
-            TimerMode::Virtual => CNTV_TVAL_EL0.set(0),
+        0
+    };
+    match mode() {
+        TimerMode::Physical => {
+            // TVAL then ENABLE: after `disarm_timer` the leftover TVAL may be 0.
+            // Enabling first would assert ISTATUS immediately. Linux
+            // `arch_timer` `set_next_event` writes TVAL, then CTRL.ENABLE.
+            // Physical writes go through the VMM-aware helpers (EL2 CNTHP_*).
+            write_physical_timer_tval(interval);
+            write_physical_timer_ctl(1);
         }
+        TimerMode::Virtual => {
+            CNTV_TVAL_EL0.set(interval);
+            CNTV_CTL_EL0.write(CNTV_CTL_EL0::ENABLE::SET);
+        }
+    }
+}
+
+pub fn disarm_timer() {
+    match mode() {
+        TimerMode::Physical => write_physical_timer_ctl(0),
+        TimerMode::Virtual => CNTV_CTL_EL0.write(CNTV_CTL_EL0::ENABLE::CLEAR),
     }
 }
 

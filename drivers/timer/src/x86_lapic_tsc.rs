@@ -47,6 +47,10 @@ impl khal::time::MonotonicTimerIf {
         arm_timer(deadline)
     }
 
+    fn disarm_timer() {
+        disarm_timer()
+    }
+
     fn handle_idle_return(_previous_ticks: khal::time::TimerTicks) -> bool {
         false
     }
@@ -185,12 +189,25 @@ pub fn arm_timer(deadline: ktime_types::MonotonicInstant) {
                 let apic_ticks = NANOS_TO_LAPIC_TICKS_RATIO
                     .get()
                     .expect("x86 LAPIC deadline ratio is not initialized")
+                    // Initial-count is 32-bit; clamp and re-arbitrate on the early IRQ.
                     .mul_trunc(deadline_ns - now_ns)
                     .clamp(1, u32::MAX as u64);
                 lapic.set_timer_initial(apic_ticks as u32);
             } else {
                 lapic.set_timer_initial(1);
             }
+        });
+    }
+}
+
+pub fn disarm_timer() {
+    // SAFETY: LAPIC bring-up completes before any deadline programming, the
+    // same precondition as `arm_timer`. `with_local_apic` holds the local APIC
+    // lock, so this CPU exclusively updates the timer registers. Writing 0 to
+    // the initial-count register stops the current countdown (Intel SDM).
+    unsafe {
+        x86_apic::with_local_apic(|lapic| {
+            lapic.set_timer_initial(0);
         });
     }
 }

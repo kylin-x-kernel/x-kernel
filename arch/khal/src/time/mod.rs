@@ -42,6 +42,8 @@ pub trait MonotonicTimerIf {
     fn interrupt_id() -> usize;
     /// Arms the monotonic timer to trigger at the given deadline.
     fn arm_timer(deadline: MonotonicInstant);
+    /// Disarms the local monotonic timer so it will not interrupt until re-armed.
+    fn disarm_timer();
     /// Allows the timer backend to handle counter/timer repair after idle returns.
     fn handle_idle_return(previous_ticks: TimerTicks) -> bool;
 }
@@ -77,6 +79,11 @@ pub fn arm_timer(deadline: MonotonicInstant) {
 }
 
 #[inline]
+pub fn disarm_timer() {
+    MonotonicTimerIf::disarm_timer()
+}
+
+#[inline]
 pub fn handle_idle_return(previous_ticks: TimerTicks) -> bool {
     MonotonicTimerIf::handle_idle_return(previous_ticks)
 }
@@ -84,6 +91,12 @@ pub fn handle_idle_return(previous_ticks: TimerTicks) -> bool {
 #[inline]
 pub fn monotonic_time() -> MonotonicInstant {
     MonotonicInstant::from_span_since_origin(ticks_to_span(now_ticks()))
+}
+
+/// Nanoseconds since the monotonic origin, for hardware / scheduler arithmetic.
+#[inline]
+pub fn monotonic_time_nanos() -> u64 {
+    monotonic_time().as_nanos_u64_saturating()
 }
 
 #[inline]

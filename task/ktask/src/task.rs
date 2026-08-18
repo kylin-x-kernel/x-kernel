@@ -222,6 +222,13 @@ pub struct TaskInner {
     /// Used to indicate whether the task is running on a CPU.
     #[cfg(feature = "smp")]
     on_cpu: AtomicBool,
+    /// Wakeup metadata handed from the waker to the CPU completing switch-out.
+    ///
+    /// Bit 0 means the task still needs to be enqueued, bit 1 carries
+    /// `WF_SYNC`, and bit 2 carries the reschedule request.
+    /// SeqCst with [`Self::on_cpu`]: see [`Self::arm_wake_enqueue`].
+    #[cfg(feature = "smp")]
+    wake_enqueue_flags: AtomicU8,
 
     /// Bitmask of CPUs this task has been scheduled on since the last TLB
     /// shootdown. Used to limit the scope of cross-CPU TLB invalidation.
@@ -521,10 +528,19 @@ impl TaskInner {
     }
 
     /// Interrupts the task.
+    ///
+    /// The wake uses [`crate::with_wake_sync`] when a current task exists:
+    /// signal senders typically block soon after, matching Linux `WF_SYNC`.
     #[inline]
     pub fn interrupt(&self) {
         self.interrupted.store(true, Ordering::Release);
-        self.interrupt_waker.wake();
+        if crate::current_may_uninit().is_some() {
+            crate::with_wake_sync(|| {
+                self.interrupt_waker.wake();
+            });
+        } else {
+            self.interrupt_waker.wake();
+        }
     }
 
     pub(crate) fn set_workerqueue_current_work_context(
@@ -674,6 +690,8 @@ impl TaskInner {
             cpu_id: AtomicU32::new(0),
             #[cfg(feature = "smp")]
             on_cpu: AtomicBool::new(false),
+            #[cfg(feature = "smp")]
+            wake_enqueue_flags: AtomicU8::new(0),
             #[cfg(feature = "smp")]
             on_cpu_mask: SpinNoIrq::new(KCpuMask::new()),
             #[cfg(feature = "preempt")]
@@ -874,19 +892,65 @@ impl TaskInner {
     ///
     /// It is used to protect the task from being moved to a different run queue
     /// while it has not finished its scheduling process.
-    /// The `on_cpu field is set to `true` when the task is preparing to run on a CPU,
+    /// The `on_cpu` field is set to `true` when the task is preparing to run on a CPU,
     /// and it is set to `false` when the task has finished its scheduling process in `clear_prev_task_on_cpu()`.
+    ///
+    /// SeqCst: this load and [`Self::set_on_cpu`] form one side of the wake
+    /// handoff Dekker protocol with [`Self::arm_wake_enqueue`] /
+    /// [`Self::take_wake_enqueue`]. Release/Acquire on two distinct atomics
+    /// allows store buffering: both sides can miss each other's stores and
+    /// leave a `Ready` task on no run queue.
     #[cfg(feature = "smp")]
     #[inline]
     pub(crate) fn on_cpu(&self) -> bool {
-        self.on_cpu.load(Ordering::Acquire)
+        self.on_cpu.load(Ordering::SeqCst)
     }
 
     /// Sets whether the task is running on a CPU.
+    ///
+    /// SeqCst: clearing this bit is the switch-out store in the wake handoff
+    /// Dekker protocol; see [`Self::on_cpu`].
     #[cfg(feature = "smp")]
     #[inline]
     pub(crate) fn set_on_cpu(&self, on_cpu: bool) {
-        self.on_cpu.store(on_cpu, Ordering::Release)
+        self.on_cpu.store(on_cpu, Ordering::SeqCst)
+    }
+
+    /// Publishes an enqueue operation that may be completed by either the
+    /// waker or the CPU finishing this task's switch-out.
+    ///
+    /// SeqCst so a later [`Self::on_cpu`] load is totally ordered with the
+    /// switch-out `on_cpu=false` store and [`Self::take_wake_enqueue`] swap.
+    /// At least one side then observes the other and enqueues.
+    #[cfg(feature = "smp")]
+    #[inline]
+    pub(crate) fn arm_wake_enqueue(&self, is_wake_sync: bool, resched: bool) {
+        const PENDING: u8 = 1;
+        const WAKE_SYNC: u8 = 1 << 1;
+        const RESCHED: u8 = 1 << 2;
+
+        let mut flags = PENDING;
+        if is_wake_sync {
+            flags |= WAKE_SYNC;
+        }
+        if resched {
+            flags |= RESCHED;
+        }
+        self.wake_enqueue_flags.store(flags, Ordering::SeqCst);
+    }
+
+    /// Claims a pending wake enqueue exactly once.
+    ///
+    /// SeqCst swap: see [`Self::arm_wake_enqueue`].
+    #[cfg(feature = "smp")]
+    #[inline]
+    pub(crate) fn take_wake_enqueue(&self) -> Option<(bool, bool)> {
+        const PENDING: u8 = 1;
+        const WAKE_SYNC: u8 = 1 << 1;
+        const RESCHED: u8 = 1 << 2;
+
+        let flags = self.wake_enqueue_flags.swap(0, Ordering::SeqCst);
+        (flags & PENDING != 0).then_some((flags & WAKE_SYNC != 0, flags & RESCHED != 0))
     }
 
     /// Returns the task-local scheduler residency snapshot for this task.
@@ -1050,7 +1114,10 @@ extern "C" fn task_entry() -> ! {
     // must be cleared for this CPU.
     unsafe {
         // Clear the prev task on CPU before running the task entry function.
-        crate::run_queue::clear_prev_task_on_cpu();
+        // SAFETY: a first-run task reaches this point with IRQs disabled and
+        // owns its current CPU's run queue after the context switch.
+        let run_queue = crate::run_queue::current_run_queue_mut();
+        crate::run_queue::clear_prev_task_on_cpu(run_queue);
     }
     // Enable irq (if feature "irq" is enabled) before running the task entry function.
     karch::enable_local_irq();

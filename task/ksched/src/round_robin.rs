@@ -5,7 +5,7 @@
 use alloc::sync::Arc;
 use core::{
     ops::Deref,
-    sync::atomic::{AtomicIsize, Ordering},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use linked_list_r4l::{GetLinks, Links, List};
@@ -14,10 +14,10 @@ use crate::{BaseScheduler, CurrentDisposition};
 
 /// A task wrapper for the [`RRScheduler`].
 ///
-/// It add a time slice counter to use in round-robin scheduling.
-pub struct RRTask<T, const MAX_TIME_SLICE: usize> {
+/// It adds a remaining runtime counter (nanoseconds) for round-robin scheduling.
+pub struct RRTask<T, const MAX_SLICE_NS: usize> {
     inner: T,
-    time_slice: AtomicIsize,
+    remaining_ns: AtomicU64,
     links: Links<Self>,
 }
 
@@ -26,17 +26,17 @@ impl<T, const S: usize> RRTask<T, S> {
     pub const fn new(inner: T) -> Self {
         Self {
             inner,
-            time_slice: AtomicIsize::new(S as isize),
+            remaining_ns: AtomicU64::new(S as u64),
             links: Links::new(),
         }
     }
 
-    fn time_slice(&self) -> isize {
-        self.time_slice.load(Ordering::Acquire)
+    fn remaining_ns(&self) -> u64 {
+        self.remaining_ns.load(Ordering::Acquire)
     }
 
-    fn reset_time_slice(&self) {
-        self.time_slice.store(S as isize, Ordering::Release);
+    fn reset_slice(&self) {
+        self.remaining_ns.store(S as u64, Ordering::Release);
     }
 
     /// Returns a reference to the inner task struct.
@@ -45,7 +45,7 @@ impl<T, const S: usize> RRTask<T, S> {
     }
 }
 
-impl<T, const MAX_TIME_SLICE: usize> GetLinks for RRTask<T, MAX_TIME_SLICE> {
+impl<T, const MAX_SLICE_NS: usize> GetLinks for RRTask<T, MAX_SLICE_NS> {
     type EntryType = Self;
 
     fn get_links(data: &Self::EntryType) -> &Links<Self::EntryType> {
@@ -64,17 +64,15 @@ impl<T, const S: usize> Deref for RRTask<T, S> {
 
 /// A simple [Round-Robin] (RR) preemptive scheduler.
 ///
-/// It's very similar to the [`FifoScheduler`], but every task has a time slice
-/// counter that is decremented each time a timer tick occurs. When the current
-/// task's time slice counter reaches zero, the task is preempted and needs to
-/// be rescheduled.
+/// Every task has a remaining runtime budget in nanoseconds. When the budget
+/// reaches zero, the task is preempted and needs to be rescheduled.
 ///
 /// It internally uses a linked list as the ready queue.
 ///
 /// [Round-Robin]: https://en.wikipedia.org/wiki/Round-robin_scheduling
 /// [`FifoScheduler`]: crate::FifoScheduler
-pub struct RRScheduler<T, const MAX_TIME_SLICE: usize> {
-    ready_queue: List<Arc<RRTask<T, MAX_TIME_SLICE>>>,
+pub struct RRScheduler<T, const MAX_SLICE_NS: usize> {
+    ready_queue: List<Arc<RRTask<T, MAX_SLICE_NS>>>,
 }
 
 impl<T, const S: usize> RRScheduler<T, S> {
@@ -112,26 +110,37 @@ impl<T, const S: usize> BaseScheduler for RRScheduler<T, S> {
     }
 
     fn enqueue_task(&mut self, task: Self::SchedItem) {
-        task.reset_time_slice();
+        task.reset_slice();
         self.ready_queue.push_back(task);
     }
 
     fn leave_current(&mut self, current: Self::SchedItem, disposition: CurrentDisposition) {
         match disposition {
-            CurrentDisposition::Preempt if current.time_slice() > 0 => {
+            CurrentDisposition::Preempt if current.remaining_ns() > 0 => {
                 self.ready_queue.push_front(current);
             }
             CurrentDisposition::Yield | CurrentDisposition::Preempt => {
-                current.reset_time_slice();
+                current.reset_slice();
                 self.ready_queue.push_back(current);
             }
             CurrentDisposition::Block | CurrentDisposition::Migrate | CurrentDisposition::Exit => {}
         }
     }
 
-    fn task_tick(&mut self, current: &Self::SchedItem) -> bool {
-        let old_slice = current.time_slice.fetch_sub(1, Ordering::Release);
-        old_slice <= 1
+    fn update_current(&mut self, current: &Self::SchedItem, elapsed_ns: u64) -> bool {
+        let old = current.remaining_ns.load(Ordering::Acquire);
+        let consumed = elapsed_ns.min(old);
+        current
+            .remaining_ns
+            .store(old.saturating_sub(consumed), Ordering::Release);
+        old <= elapsed_ns
+    }
+
+    fn next_preemption_ns(&self, current: &Self::SchedItem) -> Option<u64> {
+        if self.ready_queue.is_empty() {
+            return None;
+        }
+        Some(current.remaining_ns())
     }
 
     fn set_priority(&mut self, _task: &Self::SchedItem, _prio: isize) -> bool {

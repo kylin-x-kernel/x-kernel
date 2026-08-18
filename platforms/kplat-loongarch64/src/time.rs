@@ -119,6 +119,10 @@ impl MonotonicTimerIf {
         tcfg::set_en(true);
     }
 
+    fn disarm_timer() {
+        tcfg::set_en(false);
+    }
+
     fn handle_idle_return(_previous_ticks: TimerTicks) -> bool {
         false
     }

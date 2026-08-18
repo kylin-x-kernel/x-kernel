@@ -5,11 +5,7 @@
 //! Dummy implementation of platform-related interfaces defined in [`kplat`].
 
 use kcpu_id_map::LogicalCpuId;
-use kplat::{
-    boot::BootHandler,
-    impl_dev_interface,
-    sys::SysCtrl,
-};
+use kplat::{boot::BootHandler, impl_dev_interface, sys::SysCtrl};
 
 #[impl_dev_interface]
 impl BootHandler {
@@ -67,6 +63,8 @@ impl crate::time::MonotonicTimerIf {
     }
 
     fn arm_timer(_deadline: crate::time::MonotonicInstant) {}
+
+    fn disarm_timer() {}
 
     fn handle_idle_return(_previous_ticks: crate::time::TimerTicks) -> bool {
         false

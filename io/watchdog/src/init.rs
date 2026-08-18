@@ -19,6 +19,11 @@ static LAST_SOFTLOCKUP_REPORT: Option<ktime_types::MonotonicInstant> = None;
 /// It sets up:
 /// - soft lockup detection (timer + watchdog task)
 fn init_common() {
+    // Hardlockup is "this CPU stopped taking timer IRQs", not "the 4s sample
+    // callback did not run between two PMU NMIs". Count every local timer IRQ.
+    ktask::register_timer_irq_note(|| {
+        crate::timer_tick(khal::time::monotonic_time());
+    });
     init_softlockup_detection();
 
     // Register mutex deadlock check
@@ -108,35 +113,41 @@ fn init_nmi_watchdog() {
 /// and timer callbacks check whether the timestamp is stale.
 /// Initialize soft lockup detection on the current CPU.
 pub fn init_softlockup_detection() {
-    // Timer callback used to detect soft lockup conditions.
-    ktask::register_timer_callback(|_| {
-        let now = khal::time::monotonic_time();
-        crate::timer_tick();
+    // Explicit sample period — Linux softlockup_thresh/5 (4s), independent of
+    // the dynamic schedule timer.
+    ktask::register_timer_callback(
+        core::time::Duration::from_nanos(
+            crate::lockup_detection::DEFAULT_WATCHDOG_SAMPLE_PERIOD.as_nanos_u64_saturating(),
+        ),
+        |_| {
+            let now = khal::time::monotonic_time();
+            crate::timer_tick(now);
 
-        if crate::check_softlockup(now) {
-            // SAFETY: timer callbacks run with interrupts disabled on the
-            // current CPU, so per-CPU raw access is safe from migration.
-            // SAFETY: timer callbacks run with interrupts disabled and cannot
-            // migrate while accessing the current CPU's report timestamp.
-            let last = unsafe { *LAST_SOFTLOCKUP_REPORT.current_ref_raw() };
-            if last.is_none_or(|last| {
-                now.saturating_duration_since(last)
-                    > crate::lockup_detection::DEFAULT_SOFTLOCKUP_THRESHOLD
-            }) {
-                log::error!(
-                    "[watchdog] softlockup detected on cpu {}",
-                    this_cpu_id().as_usize()
-                );
-                ktask::dump_sched_stats();
-                // SAFETY: timer callback, IRQs disabled, same CPU as the
-                // `read_current_raw` above — cannot race with migration.
-                // SAFETY: the same non-migrating timer callback exclusively
-                // updates this CPU's report timestamp.
-                unsafe { *LAST_SOFTLOCKUP_REPORT.current_ref_mut_raw() = Some(now) };
-                ktask::snapshot::dump_cpu_tasks(this_cpu_id());
+            if crate::check_softlockup(now) {
+                // SAFETY: timer callbacks run with interrupts disabled on the
+                // current CPU, so per-CPU raw access is safe from migration.
+                // SAFETY: timer callbacks run with interrupts disabled and cannot
+                // migrate while accessing the current CPU's report timestamp.
+                let last = unsafe { *LAST_SOFTLOCKUP_REPORT.current_ref_raw() };
+                if last.is_none_or(|last| {
+                    now.saturating_duration_since(last)
+                        > crate::lockup_detection::DEFAULT_SOFTLOCKUP_THRESHOLD
+                }) {
+                    log::error!(
+                        "[watchdog] softlockup detected on cpu {}",
+                        this_cpu_id().as_usize()
+                    );
+                    ktask::dump_sched_stats();
+                    // SAFETY: timer callback, IRQs disabled, same CPU as the
+                    // `read_current_raw` above — cannot race with migration.
+                    // SAFETY: the same non-migrating timer callback exclusively
+                    // updates this CPU's report timestamp.
+                    unsafe { *LAST_SOFTLOCKUP_REPORT.current_ref_mut_raw() = Some(now) };
+                    ktask::snapshot::dump_cpu_tasks(this_cpu_id());
+                }
             }
-        }
-    });
+        },
+    );
 
     // Sleep 4s between touches instead of yielding — the softlockup threshold
     // is 20s, so this gives 5 wakeup chances (20s / 4s) before a false positive while

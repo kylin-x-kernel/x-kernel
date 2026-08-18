@@ -38,6 +38,19 @@ pub enum CurrentDisposition {
     Exit,
 }
 
+/// Default EEVDF request length in nanoseconds (2 ms).
+///
+/// Aligned with Linux `sched_base_slice_ns` on small SMP (roughly 0.7–2 ms).
+/// The historical value was 50 ms (`MAX_TIME_SLICE = 5` at 100 Hz); that made
+/// same-CPU wake latency under load sit near one full request (~50 ms).
+pub const DEFAULT_SLICE_NS: u64 = 2_000_000;
+
+/// Default round-robin quantum in nanoseconds (50 ms).
+///
+/// RR keeps its historical quantum: EEVDF's latency-oriented request size
+/// must not multiply RR's context-switch rate.
+pub const DEFAULT_RR_SLICE_NS: u64 = 50_000_000;
+
 /// The base scheduler trait that all schedulers should implement.
 ///
 /// Ready tasks live in the scheduler. A running task is outside the ready
@@ -85,11 +98,16 @@ pub trait BaseScheduler {
     /// - [`CurrentDisposition::Exit`]: do not requeue and do not arm placement.
     fn leave_current(&mut self, current: Self::SchedItem, disposition: CurrentDisposition);
 
-    /// Advances the scheduler state at each timer tick. Returns `true` if
-    /// re-scheduling is required.
+    /// Accounts `elapsed_ns` of wall-clock runtime for `current`.
     ///
-    /// `current` is the current running task.
-    fn task_tick(&mut self, current: &Self::SchedItem) -> bool;
+    /// Returns `true` if re-scheduling is required (slice expired or an
+    /// eligible peer should preempt).
+    fn update_current(&mut self, current: &Self::SchedItem, elapsed_ns: u64) -> bool;
+
+    /// Returns how many nanoseconds from now the scheduler must re-evaluate
+    /// preemption for `current`, or [`None`] if no schedule timer is needed
+    /// (for example a lone runnable task or a cooperative scheduler).
+    fn next_preemption_ns(&self, current: &Self::SchedItem) -> Option<u64>;
 
     /// set priority for a task
     fn set_priority(&mut self, task: &Self::SchedItem, prio: isize) -> bool;

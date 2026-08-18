@@ -8,7 +8,8 @@ EEVDF 语义见 [eevdf-wake.md](eevdf-wake.md)；IRQ / affinity / `block_on` 见
 
 参考环境（量级，不是硬 SLA）：
 
-- aarch64 QEMU，**4 CPUs**，定时器约 **100 Hz**，EEVDF；
+- aarch64 QEMU，**4 CPUs**，EEVDF，`DEFAULT_SLICE_NS` = 2ms + 每 CPU oneshot hrtick
+  （不再是固定 100Hz 调度节拍）；
 - `./schbench`（1.0 默认：workers ≈ `get_nprocs()`，无 `-M/-W`）；
 - 对比 **wakeup p50 / p99 / p99.9**、**request latency**、**average RPS**。
 
@@ -56,6 +57,8 @@ Wakeup latency chase:
 |------|------|
 | `wakeup_last_cpu` 高、fallback 低 | sticky home 在工作 |
 | `wake_sync_preempt` 随 p50 变好而升 | WF_SYNC 在干活 |
+| `[eevdf_wake] mark` vs `wake_sync_preempt` | 入队标上了但探测没赢 → 看同块 `probe_*` |
+| `probe_false_buddy` / `probe_ineligible` / `probe_no_buddy` | 远端 WF_SYNC 失败的三种互斥原因；见 [eevdf-wake.md](eevdf-wake.md) |
 | `wake_handoff` 高 | block 路径在 pick |
 | `preempt_skip_exception` 非零（历史） | IRQ/exception 推迟抢占类问题 |
 | `remote_resched_fail=0` 但仍慢 | 不是 IPI 丢；看本地 handoff / pile-up |

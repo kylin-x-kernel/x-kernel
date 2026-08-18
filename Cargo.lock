@@ -5445,6 +5445,7 @@ dependencies = [
  "ktime_types",
  "log",
  "percpu",
+ "unittest",
 ]
 
 [[package]]

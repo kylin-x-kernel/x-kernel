@@ -49,7 +49,7 @@ pub(crate) use transport::udp_err;
 pub use transport::{raw, tcp, udp};
 
 use crate::{
-    consts::{GATEWAY, IP, IP_PREFIX},
+    consts::{GATEWAY, IP, IP_PREFIX, TIMER_SAMPLE_PERIOD},
     device::{EthernetDevice, LoopbackDevice},
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     listen_table::ListenTable,
@@ -135,7 +135,7 @@ pub fn init_network() {
     LISTEN_TABLE.init_once(ListenTable::new());
     udp::init_udp_registry();
     poller::network_poller().start();
-    ktask::register_timer_callback(|_| SERVICE.handle_timer_tick());
+    ktask::register_timer_callback(TIMER_SAMPLE_PERIOD, |_| SERVICE.handle_timer_tick());
 
     if let Some(rx_poll) = eth0_rx_poll {
         EthernetDevice::spawn_rx_task(rx_poll);

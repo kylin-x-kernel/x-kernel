@@ -58,7 +58,8 @@ ksched algorithms / karch context switch / allocator
 
 1. 切换时本地 IRQ 已关闭；
 2. `prev`/`next` 上下文指针有效，且栈未被回收；
-3. `clear_prev_task_on_cpu()` 与 blocked-task 重新入队等待逻辑成对。
+3. `clear_prev_task_on_cpu()` 与 blocked-task 唤醒 handoff 成对：SeqCst
+   store/load 保证至少一方完成入队，禁止 IRQ-off 自旋等待远端 `on_cpu`。
 
 ### 3) `task.rs`：`TaskContext` 内部可变与当前任务 TLS/CPU-local 指针
 
@@ -94,16 +95,27 @@ ksched algorithms / karch context switch / allocator
 
 1. `task_registry` 槽位只存 0 或有效 `Box<WeakKtaskRef>` 指针；
 2. CAS 成功的一方负责释放；
-3. snapshot 读写遵守 session 串行化约束（`begin`/`finish`）。
+3. snapshot 读写遵守 session 串行化约束（`begin`/`finish`）；
+4. 周期 callback 调用期间不保留 callback vector 的引用：先以 `Arc` 固定闭包并把当前
+   entry 临时置为 inactive，回调完成后再按稳定 index 写入新 deadline；注册只允许 append，
+   不提供删除，因此回调内注册造成的 vector reallocate 不会悬空引用；
+5. 周期 deadline 从回调完成时间向后推进一个 period；超长 `Duration` 向 `u64::MAX`
+   饱和，禁止窄化截断和 overrun catch-up IRQ 循环。仲裁时跳过 `u64::MAX` 哨兵，
+   避免把 in-flight 项当成最远期 deadline 装进 32-bit TVAL。
+6. `register_timer_irq_note` 只写入 `'static fn()`；timer IRQ 路径 Acquire 后
+   transmute 调用，钩子必须短小且不阻塞。
 
 ## 内存与并发不变量
 
 1. **任务状态机单向约束**：`Running/Ready/Blocked/Exited` 转换由 run queue 统一入口执行；`transition_state` 防止重复唤醒重入。
-2. **延迟抢占模型**：tick 仅设置 `need_resched`，真实切换在 `enable_preempt` 安全点触发，避免临界区中途切换；若当前 CPU 仍处于 active exception context，则继续延迟抢占直到异常/IRQ trapframe guard 释放。
-3. **SMP blocked 唤醒保护**：Blocked 任务重新入队前（`smp`）等待 `task.on_cpu()==false`，防止与远端 CPU `switch_to` 并发。
-4. **唤醒抢占请求分离**：waker 只把任务转为 `Ready` 并设置本地或远端 `need_resched` 请求，真实切换仍发生在抢占安全点。
+2. **延迟抢占模型**：schedule timer / wake 仅设置 `need_resched`，真实切换在 `enable_preempt` 安全点触发，避免临界区中途切换；若当前 CPU 仍处于 active exception context，则继续延迟抢占直到异常/IRQ trapframe guard 释放。
+3. **SMP blocked 唤醒保护**：Blocked 任务若仍在远端 `switch_to`，唤醒方发布
+   target RQ/wake flags 后立即返回；原 CPU 清除 `on_cpu` 时通过 atomic swap
+   唯一认领并完成入队。四处握手操作使用 SeqCst，避免 Release/Acquire 下
+   store-buffering 让双方都跳过入队；也不在 IRQ-off 区等待远端进展。
+4. **唤醒抢占请求分离**：waker 只把任务转为 `Ready` 并设置本地或远端 `need_resched` 请求，真实切换仍发生在抢占安全点；远端 IPI 只置 pending，不 account/refresh 目标 RQ。立即 schedule 请求消费 one-shot slot 而不循环重装 10μs timer；`smp` 缺少 `ipi` 在编译期拒绝。
 5. **退出回收隔离**：退出任务先进入 `EXITED_TASKS`，由每 CPU `gc_task` 延迟回收，避免切换路径直接 drop。
-6. **idle 任务特判**：idle 不入普通调度实体路径，不参与 `task_tick`，避免算法元数据污染。
+6. **idle 任务特判**：idle 不入普通调度实体路径，不参与 `update_current`，避免算法元数据污染。
 7. **发布先于 runnable**：需要额外注册对象图的调用方必须先 `prepare_task()`，
    完成外部 publish 后再 `activate_task()`，避免 task 先运行、后补注册。PID 1 同样
    遵守此约束：它由 `new_user()` 一次性构造完整 runtime，再经 `publish_user_task()`
@@ -114,7 +126,7 @@ ksched algorithms / karch context switch / allocator
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 |------|----------|----------|----------|----------|
 | T-01 | per-CPU `&'static mut` 别名导致 UB | 高 | 同 CPU 并发可变借用 | guard + IRQ/preempt 约束；调用点集中封装 |
-| T-02 | 任务切换与唤醒并发，导致同任务重复入队 | 高 | 远端 CPU 尚在切换，当前 CPU 立即 unblock | `task.on_cpu()` 自旋等待 + `clear_prev_task_on_cpu` 配对 |
+| T-02 | 任务切换与唤醒并发，导致同任务重复入队、丢失唤醒或 IRQ-off 死锁 | 高 | 远端 CPU 尚在切换，当前 CPU 立即 unblock | SeqCst Dekker handoff（flags store/swap × `on_cpu` store/load）+ `clear_prev_task_on_cpu` 唯一认领；禁止等待远端 `on_cpu` |
 | T-03 | 退出任务过早释放导致 UAF | 高 | 仍有 joiner/切换路径持有引用 | per-task exit `Completion` 唤醒 joiner；`EXITED_TASKS` + `gc_task` + `Arc::try_unwrap` 延迟回收 |
 | T-04 | `need_resched` 在错误时机触发重入调度 | 中 | 临界区内或异常/IRQ trapframe guard 未释放时直接抢占切换 | 仅设置 pending，`enable_preempt` 安全点检查，并在 active exception context 内延迟实际切换 |
 | T-05 | `task_registry` 指针槽位损坏 | 高 | 非法写入或重复释放 | CAS 协议 + 0/ptr 双态约束 + 弱引用升级校验 |
@@ -123,10 +135,11 @@ ksched algorithms / karch context switch / allocator
 | T-07a | `setaffinity` 静默成功但任务仍在非法 CPU | 高 | 非 current 只写 mask | 成功路径要求 placement 合法，否则 `false`/`EBUSY`；`preempt_resched`/`yield` 强制 affinity migrate |
 | T-07b | 运行任务离开路径漏 deactivate 导致调度器残留状态 | 高 | 新 leave 路径绕过统一 API | 全部经 `leave_current`；EEVDF `curr` 非 owning；`pick_next` 断言 |
 | T-07c | `blocked_resched` 无额外强引用导致切换时任务被释放 | 高 | 调用方未 clone current | rustdoc/`# Panics` 约定；`#[track_caller]` + `strong_count > 1` 硬断言；`block_on` 先 clone；unittest `blocked_resched_survives_with_caller_owned_ref` |
-| T-08 | tick 回调执行耗时过长拖慢调度 | 中 | callback 滥用 | API 文档约束“回调应短小”；系统仍可抢占恢复 |
-| T-09 | 远端唤醒后未及时调度 | 中 | 任务入远端 run queue 但远端 CPU 未到抢占安全点 | `ipi + preempt` 下请求远端 `need_resched`；无 IPI 时仍依赖 tick/安全点 |
+| T-08 | 周期回调执行耗时过长拖慢调度或形成 IRQ 重入循环 | 高 | callback 滥用或执行时间超过 period | API 约束 hardirq 回调短小且不阻塞；一次 IRQ 最多调用每个到期 callback 一次，下一期限从完成时间计算 |
+| T-09 | 远端唤醒后未及时调度 | 中 | 任务入远端 run queue 但远端 CPU 未到抢占安全点 | SMP 强制依赖 IPI；远端 IPI 只置 `need_resched`；探测失败才在目标 CPU `preempt_resched` 武装 backup hrtick |
 | T-09b | IRQ teardown 等待在错误上下文阻塞当前任务 | 高 | hardirq/softirq/BH-disabled 路径间接调用 `IrqSyncWaitIf` provider | `kirq` 在进入 provider 前执行 context gate；`ktask` 只提供阻塞机制，不放宽 IRQ 同步 API 约束 |
-| T-10 | 绝对 timer deadline 在整数转换时截断 | 高 | `TimeSpan::as_nanos()` 的 `u128` 结果直接窄化为 `u64` | HAL 接口保持 `MonotonicInstant`；仅 timer backend 在寄存器边界执行钳制转换 |
+| T-10 | 绝对 timer deadline / 周期在整数转换时截断 | 高 | `as_nanos()` 的 `u128` 结果直接窄化为 `u64` | HAL 接口保持 `MonotonicInstant`；backend 在寄存器边界钳制；周期 `Duration` 转换向 `u64::MAX` 饱和 |
+| T-11 | 已到期 schedule slot 在不可抢占区反复重装 | 高 | immediate request 被改写为周期性 10μs hrtick | 到期 slot 只设置 pending 并立即清零；soft/periodic deadline 独立保留 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -137,9 +150,10 @@ ksched algorithms / karch context switch / allocator
 | F-02a | 远端 running affinity 迁不走 | 无 preempt/IPI 或安全点过晚 | 调用方见失败 | 调用方可重试；mask 可能已更新 | 3 | `enforce_affinity_placement` 返回 false → syscall `EBUSY` |
 | F-03 | 长时间持有 NoPreempt 临界区 | 代码路径过重 | 抢占延迟增大 | 延迟抖动/实时性下降 | 3 | 缩短临界区，避免重计算 |
 | F-04 | gc task 回收滞后 | 外部长期持有 `Arc` | `EXITED_TASKS` 堆积 | 内存增长 | 2 | `Arc::try_unwrap` 重试，join 语义释放 |
-| F-05 | 远端 resched 请求丢失/延迟消费 | IPI 不可用或 EL1 IRQ 退出前没有安全点 | 被唤醒任务调度延迟 | 吞吐/延迟波动 | 3 | `ipi + preempt` 下发送 pending，并在 IRQ 完成后挂起 exception 标记以执行尾部补查；无 IPI 配置依赖 tick |
-| F-06 | 算法 `task_tick` 行为异常 | 调度器实现 bug | 抢占策略失真 | 饥饿/抖动 | 2 | `ksched` 单测覆盖 + trace hook 诊断 |
+| F-05 | 远端 resched 请求丢失/延迟消费 | IPI 发送失败或 EL1 IRQ 退出前没有安全点 | 被唤醒任务调度延迟 | 吞吐/延迟波动 | 3 | SMP 配置强制启用 IPI；发送 pending（不在 IPI 里 account/refresh 目标 RQ）；探测失败才武装 backup hrtick；记录发送失败；IRQ 完成后挂起 exception 标记以执行尾部补查 |
+| F-06 | 算法 `update_current` / `next_preemption_ns` 行为异常 | 调度器实现 bug | 抢占策略失真 | 饥饿/抖动 | 2 | `ksched` 单测覆盖 + trace hook 诊断 |
 | F-07 | soft timer deadline 截断为已过期硬件时间 | deadline 超过硬件纳秒表示范围时发生截断 | timer 被立即重复触发 | IRQ 风暴、任务和网络路径停顿 | 1 | typed deadline 贯穿 HAL；backend 使用 checked conversion，超范围钳制到最远可表示期限 |
+| F-08 | 周期 callback overrun 后立即再次到期 | deadline 按旧周期逐次追赶或按 IRQ 入口时间重算 | hardirq 连续回调 | CPU 活锁、调度/soft timer 饥饿 | 1 | callback 前临时置 inactive；完成后以 fresh monotonic time + period 一次性重装 |
 
 ## 故障管理
 
@@ -161,16 +175,24 @@ ksched algorithms / karch context switch / allocator
 ## 已知限制
 
 1. 当前无全局主动负载均衡线程；跨核主要依赖 affinity 与入队选核。
-   `add_task` 对远端/本核 idle 目标会 `request_resched`，避免任务已入队而目标核停在 WFI。
+   `add_task` 总会 `request_resched`（含 busy 本核），避免动态 timer 已 disarm
+   时新 peer 永不被发现。
    EEVDF：唤醒 PLACE_LAG + 完整 request deadline；非自愿抢占先 peer_preempts_curr
-   再决定是否 `leave_current(Preempt)`；busy-rq 唤醒可提名 NEXT_BUDDY；
-   `with_wake_sync`（futex）可对 eligible buddy sync-preempt（仍要求 eligibility，
-   不绕过 EEVDF）。运行任务必须经统一 `leave_current` 离开，EEVDF `curr` 不为任务
-   生命周期 owner。
+   再决定是否 `leave_current(Preempt)`；唤醒提名 NEXT_BUDDY（`curr` 为空也提名，
+   覆盖远端 leave→pick 窗口）；
+   `with_wake_sync`（futex 与 `Task::interrupt`）可对 eligible buddy sync-preempt
+   （仍要求 eligibility，不绕过 EEVDF）；NEXT_BUDDY 与 sync 标记在同一次
+   scheduler 锁内武装，避免远端 CPU 在两次加锁之间抽走 buddy。
+   运行任务必须经统一 `leave_current` 离开，EEVDF `curr` 不为任务生命周期 owner。
 2. `select_run_queue` 采用简单轮询；`select_wake_run_queue` 始终粘 home（无 idle
    溢出）。
-3. 远端唤醒的抢占请求依赖 `ipi + preempt` feature；未启用时仍依赖 tick 或其它安全点推进。
-4. `unsafe` 边界仍较多，需持续收敛到更小封装点并补齐 `SAFETY` 说明。
+3. SMP 必须同时启用 `ipi`：远端唤醒的抢占请求通过 IPI 置 `need_resched`；
+   `smp && !ipi` 在编译期拒绝。IPI 回调不得 account/refresh 目标 RQ。
+4. `on_timer_fire` 在唤醒批次内推迟硬件 rearm，结束后重读 soft earliest；仅
+   schedule slot 到期时 `account_sched_tick`（`check_preempt_tick`），否则只
+   account。`switch_to` 的立即抢占 pending 落在入场任务上。NOHZ 下 add/wake
+   前会 flush 运行实体墙钟时间。
+5. `unsafe` 边界仍较多，需持续收敛到更小封装点并补齐 `SAFETY` 说明。
 
 ## 审计清单
 

@@ -18,6 +18,8 @@ use khal::time::monotonic_time;
 use kspin::SpinNoIrq;
 use ktime_types::{MonotonicInstant, TimeSpan};
 
+use crate::api::rearm_local_timer;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct TimerKey {
     deadline: MonotonicInstant,
@@ -133,16 +135,23 @@ pub(crate) fn drain_expired_and_get_earliest(
     (wakers, earliest)
 }
 
+/// Returns the earliest pending soft-timer deadline on `cpu_id`.
+pub(crate) fn earliest_deadline(cpu_id: kcpu_id_map::LogicalCpuId) -> Option<MonotonicInstant> {
+    timer_runtime(cpu_id).lock().earliest_deadline()
+}
+
 /// Registers a timer that fires `waker` when `deadline` is reached.
 /// Returns `None` if `deadline` has already passed.
 pub fn register_timer(deadline: MonotonicInstant, waker: Waker) -> Option<TimerHandle> {
+    // Pin to this CPU across id selection, wheel insert, and local rearm so an
+    // affinity migrate cannot insert on one RQ and reprogram another.
+    let _pin = kspin::NoPreempt::new();
     let cpu_id = khal::percpu::this_cpu_id();
     let mut guard = timer_runtime(cpu_id).lock();
     let key = guard.add_with_waker(deadline, waker)?;
     // While still under the wheel lock (IRQs masked), pull the hardware
-    // deadline forward to the new earliest soft timer. This is what makes
-    // sub-tick timeouts wake on time instead of waiting for the next tick.
-    crate::api::rearm_local_timer(guard.earliest_deadline());
+    // deadline forward to the new earliest soft timer so timeouts wake on time.
+    rearm_local_timer(guard.earliest_deadline(), None);
     drop(guard);
     Some(TimerHandle { key, cpu_id })
 }
@@ -162,7 +171,7 @@ pub fn cancel_timer(handle: &TimerHandle) {
     let was_earliest = guard.earliest_deadline() == Some(handle.key.deadline);
     guard.cancel(&handle.key);
     if local && was_earliest {
-        crate::api::rearm_local_timer(guard.earliest_deadline());
+        rearm_local_timer(guard.earliest_deadline(), None);
     }
 }
 
@@ -188,7 +197,7 @@ impl Drop for TimerFuture {
         let was_earliest = guard.earliest_deadline() == Some(self.key.deadline);
         guard.cancel(&self.key);
         if local && was_earliest {
-            crate::api::rearm_local_timer(guard.earliest_deadline());
+            rearm_local_timer(guard.earliest_deadline(), None);
         }
     }
 }
@@ -200,17 +209,22 @@ pub async fn sleep(duration: TimeSpan) {
 
 /// Waits until `deadline` is reached.
 pub async fn sleep_until(deadline: MonotonicInstant) {
-    let cpu_id = khal::percpu::this_cpu_id();
-    // Register the timer and re-arm the hardware while still under the wheel
-    // lock, then drop the guard before awaiting: a `SpinNoIrq` guard must not
-    // be held across the `.await` (it would block the timer IRQ that wakes us).
-    let key = {
-        let mut guard = timer_runtime(cpu_id).lock();
-        let key = guard.add(deadline);
-        if key.is_some() {
-            crate::api::rearm_local_timer(guard.earliest_deadline());
-        }
-        key
+    // Pin across CPU id + wheel insert + rearm (see `register_timer`).
+    let (key, cpu_id) = {
+        let _pin = kspin::NoPreempt::new();
+        let cpu_id = khal::percpu::this_cpu_id();
+        // Register the timer and re-arm the hardware while still under the wheel
+        // lock, then drop the guard before awaiting: a `SpinNoIrq` guard must not
+        // be held across the `.await` (it would block the timer IRQ that wakes us).
+        let key = {
+            let mut guard = timer_runtime(cpu_id).lock();
+            let key = guard.add(deadline);
+            if key.is_some() {
+                rearm_local_timer(guard.earliest_deadline(), None);
+            }
+            key
+        };
+        (key, cpu_id)
     };
     if let Some(key) = key {
         TimerFuture { key, cpu_id }.await;
@@ -265,8 +279,13 @@ pub async fn timeout_at<F: IntoFuture>(
 #[cfg(unittest)]
 #[allow(missing_docs)]
 mod tests_subtick_precision {
-    use core::future::pending;
+    use alloc::{string::String, sync::Arc};
+    use core::{
+        future::pending,
+        sync::atomic::{AtomicBool, Ordering},
+    };
 
+    use kcpu_id_map::KCpuMaskExt;
     use khal::time::monotonic_time;
     use ktime_types::TimeSpan;
     use unittest::{assert, def_test};
@@ -275,20 +294,24 @@ mod tests_subtick_precision {
     use crate::future::block_on;
 
     /// Samples per case: enough to stabilise the median against scheduling
-    /// jitter, while keeping the worst-case (current, tick-bound) runtime at a
-    /// few hundred milliseconds.
+    /// jitter, while keeping the worst-case runtime modest.
     const SAMPLES: usize = 10;
 
-    /// Upper bound for a sub-tick timed wait.
+    /// Idle-CPU bound for a short timed wait (timer wheel + modest wake latency).
     ///
-    /// The default `Kconfig` `TICKS_PER_SECOND = 100` yields a 10 ms tick. With
-    /// a working one-shot timer a 1-2 ms wait completes around the requested
-    /// deadline plus modest scheduling latency (a couple of ms). The current
-    /// kernel drains the timer wheel only from the periodic tick, so every
-    /// sub-tick wait is rounded up to the next 10 ms boundary and the median
-    /// lands near a full tick (~10 ms) — the LTP `futex_wait05` "slept too long"
-    /// failure. This bound sits between the two regimes.
-    const SUBTICK_LIMIT: TimeSpan = TimeSpan::from_millis(6);
+    /// This is **not** a guarantee under same-CPU CPU-bound competition; use the
+    /// contended tests for that.
+    const IDLE_SUBTICK_LIMIT: TimeSpan = TimeSpan::from_millis(6);
+
+    /// Contended wake budget: request + one default request slice + 2 ms slack.
+    fn contended_limit(request: TimeSpan) -> TimeSpan {
+        TimeSpan::from_nanos(
+            request
+                .as_nanos_u64_saturating()
+                .saturating_add(ksched::DEFAULT_SLICE_NS)
+                .saturating_add(2_000_000),
+        )
+    }
 
     struct TimingStats {
         min: TimeSpan,
@@ -307,15 +330,49 @@ mod tests_subtick_precision {
         }
     }
 
-    /// `sleep` shares the timer wheel with every timed wait, so it is the most
-    /// direct probe of sub-tick precision.
+    #[cfg(feature = "sched_eevdf")]
+    struct SameCpuSpinner {
+        task: crate::KtaskRef,
+        stop: Arc<AtomicBool>,
+    }
+
+    #[cfg(feature = "sched_eevdf")]
+    impl Drop for SameCpuSpinner {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            // Do not let a failed timing assertion leak a permanently runnable
+            // worker into the remaining serial unittest suite.
+            let _ = self.task.join();
+        }
+    }
+
+    /// Pins a `spin_loop` worker to this CPU so timer wakes compete for the RQ.
+    #[cfg(feature = "sched_eevdf")]
+    fn spawn_same_cpu_spinner() -> SameCpuSpinner {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_flag = stop.clone();
+        let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
+            move || {
+                while !stop_flag.load(Ordering::Acquire) {
+                    core::hint::spin_loop();
+                }
+            },
+            String::from("subtick-spinner"),
+            kbuild_config::TASK_STACK_SIZE,
+        ));
+        let cpu = khal::percpu::this_cpu_id();
+        task.set_cpumask(crate::KCpuMask::one_shot_logical(cpu));
+        crate::activate_task(&task);
+        // Let the spinner land on this RQ before measuring.
+        crate::yield_now();
+        SameCpuSpinner { task, stop }
+    }
+
+    /// Idle: `sleep` probes soft-timer expiry without same-CPU competition.
     #[def_test(serial)]
-    fn test_subtick_sleep_is_not_rounded_to_tick() {
+    fn test_idle_subtick_sleep_is_not_rounded_to_tick() {
         const REQUEST: TimeSpan = TimeSpan::from_millis(1);
 
-        // Warm up so the loop reaches its steady-state phase alignment before
-        // recording: a task woken on a tick re-issues the wait immediately, so
-        // under the tick-only wheel every sample lands on the next 10 ms tick.
         block_on(sleep(REQUEST));
 
         let mut samples = [TimeSpan::ZERO; SAMPLES];
@@ -326,51 +383,101 @@ mod tests_subtick_precision {
         }
         let stats = stats_of(&mut samples);
         log::info!(
-            "sleep({:?}): min={:?} median={:?} max={:?} (subtick limit={:?})",
+            "idle sleep({:?}): min={:?} median={:?} max={:?} (limit={:?})",
             REQUEST,
             stats.min,
             stats.median,
             stats.max,
-            SUBTICK_LIMIT,
+            IDLE_SUBTICK_LIMIT,
         );
-        // Sanity: the wait must block for at least the requested time. A timer
-        // firing spuriously early would otherwise mask a real regression.
         assert!(stats.min >= REQUEST);
-        // Regression gate: the median must finish well inside one tick. Under
-        // the current tick-only wheel this is ~10 ms and the assertion fires.
-        assert!(stats.median < SUBTICK_LIMIT);
+        assert!(stats.median < IDLE_SUBTICK_LIMIT);
     }
 
-    /// Mirrors `FUTEX_WAIT` with a timeout: a future that never resolves, raced
-    /// against a deadline via [`timeout`]. Completion can only come from the
-    /// deadline firing — the exact `futex_wait05` scenario (a futex that is
-    /// never woken, relying on the timeout).
+    /// Idle: `timeout` mirrors futex-wait-with-timeout on an idle CPU.
     #[def_test(serial)]
-    fn test_subtick_timeout_is_not_rounded_to_tick() {
+    fn test_idle_subtick_timeout_is_not_rounded_to_tick() {
         const REQUEST: TimeSpan = TimeSpan::from_millis(2);
 
-        // Warm up: expected to time out (`Err(Elapsed)`) since `pending()` never
-        // resolves; the exact result is intentionally discarded.
         let _ = block_on(timeout(Some(REQUEST), pending::<()>()));
         let mut samples = [TimeSpan::ZERO; SAMPLES];
         for slot in &mut samples {
             let start = monotonic_time();
             let result = block_on(timeout(Some(REQUEST), pending::<()>()));
-            // The inner future never resolves, so the only honest outcome is a
-            // timeout; any other result makes the measurement meaningless.
             assert!(result.is_err());
             *slot = monotonic_time() - start;
         }
         let stats = stats_of(&mut samples);
         log::info!(
-            "timeout({:?}): min={:?} median={:?} max={:?} (subtick limit={:?})",
+            "idle timeout({:?}): min={:?} median={:?} max={:?} (limit={:?})",
             REQUEST,
             stats.min,
             stats.median,
             stats.max,
-            SUBTICK_LIMIT,
+            IDLE_SUBTICK_LIMIT,
         );
         assert!(stats.min >= REQUEST);
-        assert!(stats.median < SUBTICK_LIMIT);
+        assert!(stats.median < IDLE_SUBTICK_LIMIT);
+    }
+
+    /// Contended: same-CPU spinner; latency may include one default request slice.
+    #[cfg(feature = "sched_eevdf")]
+    #[def_test(serial)]
+    fn test_contended_subtick_sleep_within_slice_budget() {
+        const REQUEST: TimeSpan = TimeSpan::from_millis(1);
+        let limit = contended_limit(REQUEST);
+        let spinner = spawn_same_cpu_spinner();
+
+        block_on(sleep(REQUEST));
+        let mut samples = [TimeSpan::ZERO; SAMPLES];
+        for slot in &mut samples {
+            let start = monotonic_time();
+            block_on(sleep(REQUEST));
+            *slot = monotonic_time() - start;
+        }
+        drop(spinner);
+
+        let stats = stats_of(&mut samples);
+        log::info!(
+            "contended sleep({:?}): min={:?} median={:?} max={:?} (limit={:?})",
+            REQUEST,
+            stats.min,
+            stats.median,
+            stats.max,
+            limit,
+        );
+        assert!(stats.min >= REQUEST);
+        assert!(stats.median < limit);
+    }
+
+    /// Contended: same-CPU spinner against `timeout`.
+    #[cfg(feature = "sched_eevdf")]
+    #[def_test(serial)]
+    fn test_contended_subtick_timeout_within_slice_budget() {
+        const REQUEST: TimeSpan = TimeSpan::from_millis(2);
+        let limit = contended_limit(REQUEST);
+        let spinner = spawn_same_cpu_spinner();
+
+        let _ = block_on(timeout(Some(REQUEST), pending::<()>()));
+        let mut samples = [TimeSpan::ZERO; SAMPLES];
+        for slot in &mut samples {
+            let start = monotonic_time();
+            let result = block_on(timeout(Some(REQUEST), pending::<()>()));
+            assert!(result.is_err());
+            *slot = monotonic_time() - start;
+        }
+        drop(spinner);
+
+        let stats = stats_of(&mut samples);
+        log::info!(
+            "contended timeout({:?}): min={:?} median={:?} max={:?} (limit={:?})",
+            REQUEST,
+            stats.min,
+            stats.median,
+            stats.max,
+            limit,
+        );
+        assert!(stats.min >= REQUEST);
+        assert!(stats.median < limit);
     }
 }

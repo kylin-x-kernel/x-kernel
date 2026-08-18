@@ -86,8 +86,10 @@ impl<T> CFSTask<T> {
         self.id.store(id, Ordering::Release);
     }
 
-    fn task_tick(&self) {
-        self.delta.fetch_add(1, Ordering::Release);
+    fn account_runtime(&self, elapsed_ns: u64) {
+        if elapsed_ns > 0 {
+            self.delta.fetch_add(elapsed_ns as isize, Ordering::Release);
+        }
     }
 
     /// Returns a reference to the inner task struct.
@@ -195,13 +197,23 @@ impl<T> BaseScheduler for CFScheduler<T> {
         }
     }
 
-    fn task_tick(&mut self, current: &Self::SchedItem) -> bool {
-        current.task_tick();
+    fn update_current(&mut self, current: &Self::SchedItem, elapsed_ns: u64) -> bool {
+        current.account_runtime(elapsed_ns);
         if self.ready_queue.is_empty() {
             return false;
         }
         self.min_vruntime.is_none()
             || current.get_vruntime() > self.min_vruntime.as_mut().unwrap().load(Ordering::Acquire)
+    }
+
+    fn next_preemption_ns(&self, _current: &Self::SchedItem) -> Option<u64> {
+        // Explicit minimum granularity: do not depend on a periodic scheduler tick.
+        const CFS_MIN_GRANULARITY_NS: u64 = 1_000_000;
+        if self.ready_queue.is_empty() {
+            None
+        } else {
+            Some(CFS_MIN_GRANULARITY_NS)
+        }
     }
 
     fn set_priority(&mut self, task: &Self::SchedItem, prio: isize) -> bool {

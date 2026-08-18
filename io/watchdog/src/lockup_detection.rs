@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! Soft/hard lockup detection state and helpers.
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ktime_types::{MonotonicInstant, TimeSpan};
 
@@ -15,6 +15,12 @@ pub const DEFAULT_SOFTLOCKUP_THRESHOLD: TimeSpan = TimeSpan::from_secs(20);
 /// Default hard-lockup detection threshold.
 pub const DEFAULT_HARDLOCKUP_THRESHOLD: TimeSpan = TimeSpan::from_secs(10);
 
+/// Independent watchdog sample period (Linux `sample_period`).
+///
+/// Softlockup threshold / 5 so the oneshot hrtimer has several heartbeats
+/// before a hardlockup NMI window. With a 20s soft threshold this is 4s.
+pub const DEFAULT_WATCHDOG_SAMPLE_PERIOD: TimeSpan = TimeSpan::from_secs(4);
+
 /// Per-CPU lockup detection state.
 #[repr(C, align(64))]
 pub struct LockupDetection {
@@ -25,10 +31,13 @@ pub struct LockupDetection {
     soft_timestamp_initialized: AtomicBool,
 
     // === Hardlockup Detection ===
-    /// Timer interrupt counter (incremented in timer interrupt).
-    hrtimer_interrupts: AtomicU32,
-    /// Saved hrtimer_interrupts value from last NMI check.
-    hrtimer_interrupts_saved: AtomicU32,
+    /// Timestamp of the last hardlockup heartbeat (nanoseconds).
+    ///
+    /// Written on every local timer IRQ and by the 4s watchdog periodic
+    /// callback; read from NMI. Compared against wall time so the check
+    /// does not depend on the PMU NMI interval.
+    hard_timestamp: AtomicU64,
+    hard_timestamp_initialized: AtomicBool,
 }
 
 impl Default for LockupDetection {
@@ -43,8 +52,8 @@ impl LockupDetection {
         Self {
             soft_timestamp: AtomicU64::new(0),
             soft_timestamp_initialized: AtomicBool::new(false),
-            hrtimer_interrupts: AtomicU32::new(0),
-            hrtimer_interrupts_saved: AtomicU32::new(0),
+            hard_timestamp: AtomicU64::new(0),
+            hard_timestamp_initialized: AtomicBool::new(false),
         }
     }
 
@@ -90,31 +99,30 @@ impl LockupDetection {
     // Hardlockup detection
     // =========================================================================
 
-    /// Increment hrtimer interrupt counter (called from timer interrupt).
+    /// Record a watchdog sample (timer IRQ or the 4s periodic callback).
     #[inline]
-    pub fn timer_tick(&self) {
-        self.hrtimer_interrupts.fetch_add(1, Ordering::Release);
-    }
-
-    /// Get current hrtimer interrupt count.
-    #[inline]
-    pub fn hrtimer_interrupts(&self) -> u32 {
-        self.hrtimer_interrupts.load(Ordering::Acquire)
+    pub fn timer_tick(&self, now: MonotonicInstant) {
+        self.hard_timestamp
+            .store(now.as_nanos_u64_saturating(), Ordering::Relaxed);
+        self.hard_timestamp_initialized
+            .store(true, Ordering::Release);
     }
 
     /// Check for hardlockup condition (called from NMI).
     ///
-    /// Returns true if hardlockup is detected (timer interrupts stopped).
+    /// Returns true when no watchdog sample has landed for longer than
+    /// `threshold`. Wall time is required because the NMI source is a PMU
+    /// cycle budget at an assumed CPU frequency: two NMIs can fall between
+    /// 4s samples on a live CPU.
     #[inline]
-    pub fn check_hardlockup(&self) -> bool {
-        let current = self.hrtimer_interrupts.load(Ordering::Acquire);
-        let saved = self.hrtimer_interrupts_saved.load(Ordering::Acquire);
-
-        // Update saved value for next check
-        self.hrtimer_interrupts_saved
-            .store(current, Ordering::Release);
-        // If counts are equal, no timer interrupts occurred
-        current == saved && current != 0
+    pub fn check_hardlockup(&self, now: MonotonicInstant, threshold: TimeSpan) -> bool {
+        if !self.hard_timestamp_initialized.load(Ordering::Acquire) {
+            return false;
+        }
+        let last = MonotonicInstant::from_span_since_origin(TimeSpan::from_nanos(
+            self.hard_timestamp.load(Ordering::Relaxed),
+        ));
+        now.saturating_duration_since(last) > threshold
     }
 }
 
@@ -134,14 +142,19 @@ pub fn touch_softlockup(timestamp: MonotonicInstant) {
     }
 }
 
-/// Timer tick (called from timer interrupt).
+/// Refresh the hardlockup heartbeat.
+///
+/// Called from every local timer IRQ and from the 4s watchdog periodic
+/// callback. The IRQ path is the source of truth: a live CPU that still
+/// takes timer interrupts will keep this timestamp fresh even if the 4s
+/// sample is delayed.
 #[inline]
-pub fn timer_tick() {
+pub fn timer_tick(now: MonotonicInstant) {
     // SAFETY: `current_ref_mut_raw` accesses the per‑CPU instance for the
     // current CPU.  Timer callbacks run with interrupts disabled on the
     // local CPU, so the pointer is stable.
     unsafe {
-        LOCKUP_DETECTION.current_ref_mut_raw().timer_tick();
+        LOCKUP_DETECTION.current_ref_mut_raw().timer_tick(now);
     }
 }
 
@@ -173,6 +186,29 @@ impl WatchdogTask for LockupDetection {
     }
 
     fn check(&self) -> bool {
-        !self.check_hardlockup()
+        !self.check_hardlockup(khal::time::monotonic_time(), DEFAULT_HARDLOCKUP_THRESHOLD)
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::{assert, def_test};
+
+    use super::*;
+
+    fn instant_secs(secs: u64) -> MonotonicInstant {
+        MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(secs))
+    }
+
+    #[def_test]
+    fn hardlockup_uses_wall_time_not_nmi_spacing() {
+        let det = LockupDetection::new();
+        let t0 = instant_secs(1);
+        assert!(!det.check_hardlockup(t0, DEFAULT_HARDLOCKUP_THRESHOLD));
+
+        det.timer_tick(t0);
+        assert!(!det.check_hardlockup(instant_secs(5), DEFAULT_HARDLOCKUP_THRESHOLD));
+        assert!(!det.check_hardlockup(instant_secs(11), DEFAULT_HARDLOCKUP_THRESHOLD));
+        assert!(det.check_hardlockup(instant_secs(12), DEFAULT_HARDLOCKUP_THRESHOLD));
     }
 }

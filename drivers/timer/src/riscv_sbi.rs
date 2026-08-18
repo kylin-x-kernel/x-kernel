@@ -38,6 +38,10 @@ impl khal::time::MonotonicTimerIf {
         arm_timer(deadline)
     }
 
+    fn disarm_timer() {
+        disarm_timer()
+    }
+
     fn handle_idle_return(_previous_ticks: khal::time::TimerTicks) -> bool {
         false
     }
@@ -113,4 +117,9 @@ pub fn interrupt_id() -> usize {
 pub fn arm_timer(deadline: ktime_types::MonotonicInstant) {
     let deadline_ns = deadline.as_nanos_u64_saturating();
     sbi_rt::set_timer(nanos_to_ticks(deadline_ns));
+}
+
+pub fn disarm_timer() {
+    // A compare value far in the future disables practical timer IRQs until re-armed.
+    sbi_rt::set_timer(u64::MAX);
 }
