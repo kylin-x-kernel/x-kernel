@@ -471,7 +471,7 @@ impl Process {
         self.runtime()?.resources().close_cloexec_files()
     }
 
-    /// Closes every TIPC handle before this process starts its new executable.
+    /// Closes every TIPC handle owned by this process.
     ///
     /// TIPC handles are process-local capabilities, separate from the POSIX
     /// file descriptor table, and therefore are not covered by `FD_CLOEXEC`.

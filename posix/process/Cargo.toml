@@ -11,6 +11,7 @@ documentation.workspace = true
 
 [features]
 tee = ["kprocess/tee", "dep:tee_kernel"]
+tipc = ["kprocess/tipc"]
 
 [dependencies]
 bytemuck = { workspace = true, features = ["derive"] }

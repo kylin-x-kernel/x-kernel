@@ -356,6 +356,10 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         if let Err(err) = process.exit_namespaces() {
             error!("exit_namespaces on process exit failed: {err:?}");
         }
+        #[cfg(feature = "tipc")]
+        if let Err(err) = process.close_all_tipc_handles() {
+            error!("close_all_tipc_handles on process exit failed: {err:?}");
+        }
 
         process_exit::complete_process_exit(process);
     }

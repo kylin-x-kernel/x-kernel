@@ -62,8 +62,9 @@ entry / ksyscall
 3. 从进程线程集合中摘除当前线程。
 4. 若为最后线程，释放 mm owner，再清理共享内存和可选 TEE 私有状态。
 5. 依次释放 files、filesystem context 和 namespace owner。
-6. owner 全部释放后发布 process exit 并通知父进程。
-7. 若触发 group exit，向线程组广播 `SIGKILL`。
+6. 关闭进程本地 TIPC handle table（`close_all_tipc_handles`），解除 port 发布并通知 channel 对端。
+7. owner 全部释放后发布 process exit 并通知父进程。
+8. 若触发 group exit，向线程组广播 `SIGKILL`。
 
 ## 并发模型
 

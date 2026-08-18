@@ -2036,3 +2036,113 @@ fn test_create_group_publishes_new_process_group_identity() {
     let _ = publication.unpublish_process_if_matches(&leader);
     publication.cleanup();
 }
+
+/// TIPC handle double that records `close()`, used to observe whether the
+/// process exit path closes process-local TIPC handles.
+#[cfg(feature = "tipc")]
+struct ExitObservingHandle {
+    wait_state: tipc_handle::HandleWaitState,
+    closed: AtomicBool,
+}
+
+#[cfg(feature = "tipc")]
+impl ExitObservingHandle {
+    fn new() -> Self {
+        Self {
+            wait_state: tipc_handle::HandleWaitState::new(),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(feature = "tipc")]
+impl tipc_handle::Handle for ExitObservingHandle {
+    fn kind(&self) -> tipc_handle::HandleKind {
+        tipc_handle::HandleKind::Port
+    }
+
+    fn poll(&self, _finalize: bool) -> tipc_handle::HandleEventMask {
+        tipc_handle::HandleEventMask::NONE
+    }
+
+    fn register(
+        &self,
+        context: &mut kpoll::PollContext<'_>,
+        _event_mask: tipc_handle::HandleEventMask,
+    ) -> Result<(), kpoll::PollRegisterError> {
+        self.wait_state.register(context)
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    fn set_cookie(&self, cookie: usize) {
+        self.wait_state.set_cookie(cookie);
+    }
+
+    fn cookie(&self) -> usize {
+        self.wait_state.cookie()
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+/// Installs `handle` into the TIPC handle table of a fresh single-thread
+/// process and returns the process, its task, and the process-local handle ID.
+#[cfg(feature = "tipc")]
+fn process_with_tipc_handle(
+    pid: crate::Pid,
+    handle: Arc<ExitObservingHandle>,
+) -> (Arc<Process>, TaskInner, i32) {
+    let (process, task) = process_with_address_space(pid, mapped_test_address_space());
+    let handle_id = process
+        .with_tipc_handles(|table| {
+            table
+                .write()
+                .uctx_handle_install(handle as Arc<dyn tipc_handle::Handle>)
+        })
+        .expect("runtime must be attached")
+        .expect("handle install must succeed");
+    (process, task, handle_id)
+}
+
+#[cfg(feature = "tipc")]
+#[def_test(serial)]
+fn test_tipc_handles_close_before_process_exit_publication() {
+    let handle = Arc::new(ExitObservingHandle::new());
+    let (process, _task, handle_id) = process_with_tipc_handle(8_140, handle.clone());
+
+    // Mirror the last-thread release sequence of `do_exit()`
+    // (posix/process/src/runtime.rs): mm, files, fs, and namespaces are
+    // released, then the TIPC handle table is closed, and only then is the
+    // process exit published.
+    process.exit_mm().expect("runtime must be attached");
+    process.exit_files().expect("runtime must be attached");
+    process.exit_fs().expect("runtime must be attached");
+    process.exit_namespaces().expect("runtime must be attached");
+    process
+        .close_all_tipc_handles()
+        .expect("runtime must be attached");
+
+    // The handle must be closed and detached before any parent waiter can
+    // observe the exit, so a device shutdown after publication never sees a
+    // live channel/port owner.
+    assert!(handle.is_closed());
+    let lookup = process
+        .with_tipc_handles(|table| table.read().uctx_handle_get(handle_id).map(|_| ()))
+        .expect("runtime must be attached");
+    assert_eq!(lookup, Err(kerrno::KError::BadFileDescriptor));
+
+    process_exit::finalize_process_exit(&process);
+    assert!(process.is_exited());
+    assert!(handle.is_closed());
+
+    wait_reap::assert_reap_zombie_process(&process);
+}

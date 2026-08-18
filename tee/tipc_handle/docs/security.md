@@ -76,6 +76,7 @@ kpoll / kspin / alloc
 | T-04 | handle id 空间耗尽 | 中 | 进程持续打开 handle | 完整环形扫描后返回 `TooManyOpenFiles` |
 | T-05 | 错误的 `Arc<dyn Handle>` 与 id 不属于同一 table | 中 | 调用方构造不一致 registration | syscall adapter 应从同一 `HandleTable` 取 handle 后注册 |
 | T-06 | exec 后新映像继承旧 TIPC capability | 高 | exec 仅清理普通 `FD_CLOEXEC`，未关闭 process-local TIPC table | `Process::apply_exec_update` 调用 `uctx_handle_close_all`，显式关闭全部 TIPC handle |
+| T-07 | 进程退出后残留存活 port/channel owner | 中 | 退出路径不关闭 TIPC table，仅靠 GC 异步 drop runtime | `do_exit` 在发布 process exit 前经 `Process::close_all_tipc_handles` 调用 `uctx_handle_close_all` |
 
 影响等级定义：
 
@@ -93,6 +94,7 @@ kpoll / kspin / alloc
 | F-04 | handle set poll 返回 `NotFound` | handle set 为空 | wait 失败 | 调用方需先注册 handle | 4 | 明确空集合错误 |
 | F-05 | delete/modify 返回 `NotFound` | 目标 registration 不存在或 cookie 不匹配 | 操作失败 | 调用方状态需同步 | 3 | 存在性和 cookie 检查 |
 | F-06 | exec 后残留 port 或 channel | exec 未清理独立 TIPC table | 新程序可使用旧 capability | 可能跨 credential transition 保留 IPC 权限 | 2 | exec 时关闭全部 TIPC handle |
+| F-07 | 进程退出后残留 port 或 channel | exit 未清理独立 TIPC table | 对端观察到已退出进程的存活连接 | 设备 shutdown 观察到存活 owner | 3 | 发布 process exit 前关闭全部 TIPC handle |
 
 严重度定义：
 
@@ -126,6 +128,6 @@ cookie 是调用方 opaque 数据，可能携带用户协议含义。
 - [ ] 新增 handle 类型是否正确实现 `poll`、`register`、`close`、`cookie` 和 `is_sendable`？
 - [ ] 新增 handle table 操作是否保持 process-local id 语义？
 - [ ] 修改 close/remove 路径时是否仍先 detach handle set registration？
-- [ ] exec 路径是否调用 `uctx_handle_close_all`，而不是仅清空 table map？
+- [ ] exec 和进程退出路径是否都调用 `uctx_handle_close_all`（后者经 `Process::close_all_tipc_handles`），而不是仅清空 table map 或依赖对象 Drop？
 - [ ] 修改 handle set 嵌套策略时是否补充循环检测和测试？
 - [ ] 新增 unsafe 时是否更新 unsafe 清单和 `SAFETY:` 注释？

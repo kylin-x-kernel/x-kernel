@@ -100,7 +100,7 @@ process-local integer id
   └─ uctx_handle_remove()
        ├─ uctx_handle_uninstall(id)
        └─ handle.close()
-  └─ uctx_handle_close_all() during exec
+  └─ uctx_handle_close_all() during exec / last-thread exit
        ├─ remove all table ownership
        ├─ clear handle-set registrations
        └─ close every handle
@@ -159,11 +159,13 @@ uctx_handle_remove(id)
 用于 syscall 回滚等已经临时安装 handle 但还不能关闭底层对象的路径。
 普通 close 路径必须使用 `uctx_handle_remove`。
 
-`uctx_handle_close_all` 用于 exec 边界。TIPC handle 不属于 POSIX file
-descriptor table，也没有 inheritable 或 close-on-exec 标志，因此新可执行文件
-不得继承旧映像的 port、channel、handle set 或 memref。该方法先使整张表及其
-wait-any snapshot 失效，再显式关闭每个对象；这保证 port 被取消发布，channel
-peer 被通知断开。
+`uctx_handle_close_all` 用于 exec 和进程退出两个边界。TIPC handle 不属于
+POSIX file descriptor table，也没有 inheritable 或 close-on-exec 标志，因此
+新可执行文件不得继承旧映像的 port、channel、handle set 或 memref。该方法先使
+整张表及其 wait-any snapshot 失效，再显式关闭每个对象；这保证 port 被取消
+发布，channel peer 被通知断开。进程最后一个线程退出时，`do_exit` 在发布
+process exit 之前经 `Process::close_all_tipc_handles` 调用同一方法，避免
+父进程 `wait` 返回或设备 shutdown 时仍观察到已退出进程的存活 handle owner。
 
 ## 并发模型
 

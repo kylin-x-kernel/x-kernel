@@ -193,13 +193,19 @@ process-local integer id
   ├─ uctx_handle_get()
   ├─ wait_any_snapshot()
   ├─ register_wait_any_table_change()
-  └─ uctx_handle_remove()
-       ├─ detach_from_handle_sets(id)
-       └─ handle.close()
+  ├─ uctx_handle_remove()
+  │    ├─ detach_from_handle_sets(id)
+  │    └─ handle.close()
+  └─ uctx_handle_close_all() during exec / last-thread exit
+       └─ close every handle
 ```
 
 handle id 是进程本地能力，不是全局 id。
 关闭一个 handle 时，`HandleTable` 会从同一 table 中所有 `HandleSet` 移除该 id，避免 stale registration 持有已关闭对象。
+exec 边界和进程最后一个线程退出时（发布 process exit 之前）都会经
+`Process::close_all_tipc_handles` 调用 `uctx_handle_close_all`，
+因此父进程 `wait` 返回或设备 shutdown 时不会观察到已退出进程仍持有存活的
+port/channel owner。
 `sys_tipc_wait_any` 使用 `HandleTable` 缓存的 wait-any snapshot；
 缓存只在 handle table 增删后重建，避免每轮 poll 都分配 `Vec` 并 clone
 所有 `Arc<dyn Handle>`。等待路径同时注册 handle 事件和 handle-table

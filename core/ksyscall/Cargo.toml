@@ -10,7 +10,7 @@ repository.workspace = true
 
 [features]
 vsock = ["posix-net/vsock"]
-tipc = ["dep:tipc"]
+tipc = ["dep:tipc", "posix-process/tipc"]
 tee = [
     "dep:tee_kernel",
     "dep:tee_task_iface",
