@@ -357,8 +357,29 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
   `task.on_cpu()` 仍为真，则由原 CPU 在 switch-out 清零 `on_cpu` 后原子认领并完成入队。
   该 handoff 防止重复入队，也避免唤醒方持 `NoPreemptIrqSave` 关中断自旋等待远端 CPU。
   `arm_wake_enqueue` / `on_cpu` / `set_on_cpu(false)` / `take_wake_enqueue` 四处
-  均为 SeqCst：这是两变量 Dekker 协议，Release/Acquire 会允许双方都看不到对方
-  的 store，任务停在 `Ready` 却不在任何 run queue。
+  均为 SeqCst，并且在 store 与对侧 load 之间加 `SeqCst` fence（x86 `MFENCE`，
+  AArch64 `DMB ISH`）。这是两变量 Dekker 的内存模型要求，不是模拟器兜底：
+  SeqCst store 再 SeqCst load **另一个**地址并不构成 store→load 屏障
+  （C++20 P0668，Rust 跟随）。Release/Acquire 在真机上就会双边漏看；去掉
+  fence 后 LLVM 可把 SeqCst 降为普通 store/load，x86 TSO 同样允许漏看。
+  不可把 fence 降为 acquire/release（x86 上只有 SeqCst fence 会发出 `MFENCE`）。
+  QEMU TCG（IK9KW6）只是最先观测到失效的环境；任务会停在 `Ready` 却不在任何
+  run queue。
+  现有 unittest `wake_of_switching_task_defers_enqueue_without_spinning` 只覆盖
+  单线程 Deferred 路径，打不出跨 CPU store-buffering。guest 内再写 block/wake
+  对打也不能在无 fence 时被预期为超时：IK9KW6 单 VM 连跑 20 次全过，要靠宿主机
+  上多 VM 并发拉长 TCG 交错窗口。确定性回归因此记手工复现，不塞一条假绿压力单测。
+
+  **IK9KW6 手工复现（aarch64 QEMU TCG，`NR_CPUS=4`）**
+
+  1. 并行启动 3 个隔离 TCG VM，各跑 harness `process-ipc-smoke,getrusage-reentry`
+     （不要串行、不要单 VM 连刷）。
+  2. 无 `SeqCst` fence 时，首轮即可有 VM 卡在
+     `shm_deadlock::shm_deadlock_shmget_vs_shmat`：现场
+     `state=Ready`、`on_cpu=0`、`wake_enqueue_flags=0x05`（`PENDING|RESCHED`），
+     原 CPU 跑 idle，后续 wake 不再走 `Blocked→Ready`。
+  3. 对照：同一二进制 KVM、或仅在 store 与对侧 load 之间保留 `SeqCst` fence，
+     24/24 通过。完整撤掉 wake handoff 同样 24/24，但会回到 IRQ-off 自旋。
 - 远端 run queue 唤醒/首次入队都不会直接切换远端 CPU；在支持 IPI 和抢占时，通过远端 pending-resched 请求把切换推迟到远端安全点。
 - `TaskInner::on_cpu_mask()` 现在只表示 `ktask` 自己的调度驻留快照；用户地址空间
   的 TLB shootdown 目标集合由 `memspace::MmCpuResidency` 持有。当前实现只在

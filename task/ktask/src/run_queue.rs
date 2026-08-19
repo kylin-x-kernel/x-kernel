@@ -12,7 +12,9 @@ use alloc::{collections::VecDeque, sync::Arc};
 #[cfg(feature = "sched_stat")]
 use core::fmt::Write;
 #[cfg(feature = "sched_stat")]
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::AtomicU64;
+#[cfg(any(feature = "smp", feature = "sched_stat"))]
+use core::sync::atomic::Ordering;
 use core::{
     future::poll_fn,
     ptr::NonNull,
@@ -1399,9 +1401,9 @@ impl RunQueue {
             {
                 // Dekker handoff with `clear_prev_task_on_cpu`: store pending
                 // flags, then load `on_cpu`. The matching side stores
-                // `on_cpu=false` then swaps the flags. SeqCst on both pairs
-                // guarantees at least one side sees the other's store; RA
-                // would allow both to miss (task Ready, on no queue).
+                // `on_cpu=false` then swaps the flags. SeqCst atomics plus the
+                // store→load fence in `arm_wake_enqueue` / below; SeqCst
+                // store then SeqCst load of another location is not enough.
                 self.attach_owner(&task);
                 task.arm_wake_enqueue(is_wake_sync, resched);
                 if task.on_cpu() {
@@ -1741,6 +1743,8 @@ pub(crate) unsafe fn clear_prev_task_on_cpu(current_rq: &mut RunQueue) {
             .expect("Invalid prev_task pointer or prev_task has been dropped")
     };
     prev_task.set_on_cpu(false);
+    // Matching Dekker store-load fence; see `TaskInner::arm_wake_enqueue`.
+    core::sync::atomic::fence(Ordering::SeqCst);
 
     // Matching Dekker load: SeqCst swap after the SeqCst `on_cpu=false`
     // store. If the waker deferred because it still saw `on_cpu`, this swap

@@ -59,7 +59,9 @@ ksched algorithms / karch context switch / allocator
 1. 切换时本地 IRQ 已关闭；
 2. `prev`/`next` 上下文指针有效，且栈未被回收；
 3. `clear_prev_task_on_cpu()` 与 blocked-task 唤醒 handoff 成对：SeqCst
-   store/load 保证至少一方完成入队，禁止 IRQ-off 自旋等待远端 `on_cpu`。
+   store/load 加上 store 与对侧 load 之间的 `SeqCst` fence（Dekker 的内存模型
+   要求，不可当作 TCG 兜底删除），保证至少一方完成入队；禁止 IRQ-off 自旋
+   等待远端 `on_cpu`。
 
 ### 3) `task.rs`：`TaskContext` 内部可变与当前任务 TLS/CPU-local 指针
 
@@ -111,8 +113,9 @@ ksched algorithms / karch context switch / allocator
 2. **延迟抢占模型**：schedule timer / wake 仅设置 `need_resched`，真实切换在 `enable_preempt` 安全点触发，避免临界区中途切换；若当前 CPU 仍处于 active exception context，则继续延迟抢占直到异常/IRQ trapframe guard 释放。
 3. **SMP blocked 唤醒保护**：Blocked 任务若仍在远端 `switch_to`，唤醒方发布
    target RQ/wake flags 后立即返回；原 CPU 清除 `on_cpu` 时通过 atomic swap
-   唯一认领并完成入队。四处握手操作使用 SeqCst，避免 Release/Acquire 下
-   store-buffering 让双方都跳过入队；也不在 IRQ-off 区等待远端进展。
+   唯一认领并完成入队。四处握手操作使用 SeqCst，并在 store 与对侧 load 之间加
+   `SeqCst` fence（Dekker 内存模型要求；不可降为 acquire/release）。没有这道
+   fence，真机 x86 与 QEMU TCG 都允许双方跳过入队；也不在 IRQ-off 区等待远端进展。
 4. **唤醒抢占请求分离**：waker 只把任务转为 `Ready` 并设置本地或远端 `need_resched` 请求，真实切换仍发生在抢占安全点；远端 IPI 只置 pending，不 account/refresh 目标 RQ。立即 schedule 请求消费 one-shot slot 而不循环重装 10μs timer；`smp` 缺少 `ipi` 在编译期拒绝。
 5. **退出回收隔离**：退出任务先进入 `EXITED_TASKS`，由每 CPU `gc_task` 延迟回收，避免切换路径直接 drop。
 6. **idle 任务特判**：idle 不入普通调度实体路径，不参与 `update_current`，避免算法元数据污染。
@@ -126,7 +129,7 @@ ksched algorithms / karch context switch / allocator
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 |------|----------|----------|----------|----------|
 | T-01 | per-CPU `&'static mut` 别名导致 UB | 高 | 同 CPU 并发可变借用 | guard + IRQ/preempt 约束；调用点集中封装 |
-| T-02 | 任务切换与唤醒并发，导致同任务重复入队、丢失唤醒或 IRQ-off 死锁 | 高 | 远端 CPU 尚在切换，当前 CPU 立即 unblock | SeqCst Dekker handoff（flags store/swap × `on_cpu` store/load）+ `clear_prev_task_on_cpu` 唯一认领；禁止等待远端 `on_cpu` |
+| T-02 | 任务切换与唤醒并发，导致同任务重复入队、丢失唤醒或 IRQ-off 死锁 | 高 | 远端 CPU 尚在切换，当前 CPU 立即 unblock | SeqCst Dekker handoff（flags store/swap × `on_cpu` store/load + store/load 之间不可降级的 `SeqCst` fence）+ `clear_prev_task_on_cpu` 唯一认领；禁止等待远端 `on_cpu` |
 | T-03 | 退出任务过早释放导致 UAF | 高 | 仍有 joiner/切换路径持有引用 | per-task exit `Completion` 唤醒 joiner；`EXITED_TASKS` + `gc_task` + `Arc::try_unwrap` 延迟回收 |
 | T-04 | `need_resched` 在错误时机触发重入调度 | 中 | 临界区内或异常/IRQ trapframe guard 未释放时直接抢占切换 | 仅设置 pending，`enable_preempt` 安全点检查，并在 active exception context 内延迟实际切换 |
 | T-05 | `task_registry` 指针槽位损坏 | 高 | 非法写入或重复释放 | CAS 协议 + 0/ptr 双态约束 + 弱引用升级校验 |
@@ -205,3 +208,5 @@ ksched algorithms / karch context switch / allocator
 - [ ] 退出与回收路径是否避免早释放与引用泄漏。
 - [ ] `preempt` 开关下行为是否一致（有无 feature 分支遗漏）。
 - [ ] 若改动 tick/抢占逻辑，验证不会在临界区中途切换任务。
+- [ ] 改 wake handoff / 内存序时按 `docs/design.md` 的 IK9KW6 步骤做 3 路 TCG
+      复现，不要用单 VM 连跑或 guest 压力单测代替。

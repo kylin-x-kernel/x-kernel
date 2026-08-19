@@ -897,9 +897,9 @@ impl TaskInner {
     ///
     /// SeqCst: this load and [`Self::set_on_cpu`] form one side of the wake
     /// handoff Dekker protocol with [`Self::arm_wake_enqueue`] /
-    /// [`Self::take_wake_enqueue`]. Release/Acquire on two distinct atomics
-    /// allows store buffering: both sides can miss each other's stores and
-    /// leave a `Ready` task on no run queue.
+    /// [`Self::take_wake_enqueue`]. A SeqCst store then a SeqCst load of a
+    /// different location is not a store→load barrier; the fence lives in
+    /// [`Self::arm_wake_enqueue`] / `clear_prev_task_on_cpu`.
     #[cfg(feature = "smp")]
     #[inline]
     pub(crate) fn on_cpu(&self) -> bool {
@@ -919,9 +919,19 @@ impl TaskInner {
     /// Publishes an enqueue operation that may be completed by either the
     /// waker or the CPU finishing this task's switch-out.
     ///
-    /// SeqCst so a later [`Self::on_cpu`] load is totally ordered with the
-    /// switch-out `on_cpu=false` store and [`Self::take_wake_enqueue`] swap.
-    /// At least one side then observes the other and enqueues.
+    /// SeqCst so a later [`Self::on_cpu`] load participates in the same total
+    /// order as the switch-out `on_cpu=false` store and
+    /// [`Self::take_wake_enqueue`] swap.
+    ///
+    /// The trailing `SeqCst` fence is a memory-model requirement for this
+    /// two-variable Dekker, not an emulator workaround. A SeqCst store
+    /// followed by a SeqCst load of a *different* location does not order
+    /// store→load (C++20 P0668, which Rust follows). LLVM may lower those
+    /// ops to plain stores/loads (x86 `MOV`); TSO store buffering then
+    /// lets both sides miss, leaving a `Ready` task on no queue. Only a
+    /// `SeqCst` fence is a real barrier here (`MFENCE` on x86, `DMB ISH`
+    /// on AArch64); do not weaken it to acquire/release. QEMU TCG (IK9KW6)
+    /// was the first place this showed up.
     #[cfg(feature = "smp")]
     #[inline]
     pub(crate) fn arm_wake_enqueue(&self, is_wake_sync: bool, resched: bool) {
@@ -937,6 +947,7 @@ impl TaskInner {
             flags |= RESCHED;
         }
         self.wake_enqueue_flags.store(flags, Ordering::SeqCst);
+        core::sync::atomic::fence(Ordering::SeqCst);
     }
 
     /// Claims a pending wake enqueue exactly once.
