@@ -3,9 +3,6 @@
 // See LICENSES for license details.
 
 //! FAT filesystem implementation.
-//!
-//! When selected as the root filesystem, this crate provides
-//! [`fs_block::RootFileSystem`].
 #![cfg_attr(any(not(test), doc), no_std)]
 #![feature(likely_unlikely)]
 #![allow(clippy::new_ret_no_self)]
@@ -31,16 +28,16 @@ fn fat_get_tree(
     lookup_root: &kvfs::Path,
     lookup_pwd: &kvfs::Path,
 ) -> kvfs::VfsResult<alloc::sync::Arc<kvfs::SuperBlock>> {
-    kvfs::get_tree_bdev(context, lookup_root, lookup_pwd, |device, flags| {
-        Ok(FatFilesystem::mount_bdev(device, flags))
-    })
+    kvfs::get_tree_bdev(context, lookup_root, lookup_pwd, FatFilesystem::fill_super)
 }
 
-#[fs_block::kiface::provide]
-impl fs_block::RootFileSystem {
-    fn file_system_type() -> kvfs::FileSystemType {
-        kvfs::FileSystemType::device_backed("vfat", fat_get_tree)
-    }
+/// The canonical FAT filesystem type registered with KVFS.
+static FILE_SYSTEM_TYPE: kvfs::FileSystemType =
+    kvfs::FileSystemType::device_backed("vfat", fat_get_tree);
+
+#[macros::register_init]
+fn init_fat_fs() {
+    kvfs::register_filesystem(&FILE_SYSTEM_TYPE).expect("FAT filesystem type must register once");
 }
 
 pub(crate) struct FatDisk(SeekableDisk);

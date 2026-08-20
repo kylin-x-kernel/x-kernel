@@ -11,43 +11,41 @@ use ktime_types::SystemTime;
 use slab::Slab;
 
 use crate::{
-    Dentry, DeviceId, InodeOperations, Metadata, MetadataUpdate, NodePermission, NodeType, StatFs,
-    SuperBlock, SuperBlockFlags, SuperBlockOperations, VfsInodeInit, VfsResult,
+    Dentry, DeviceId, FileSystemType, InodeOperations, Metadata, MetadataUpdate, NodePermission,
+    NodeType, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations, VfsInodeInit, VfsResult,
     libfs::simple_statfs, simple_dir::DirMaker,
 };
 
 /// A simple filesystem implementation that uses a slab allocator for inodes.
 pub struct SimpleFs {
-    name: String,
-    fs_type: u32,
+    magic: u32,
     inodes: Mutex<Slab<()>>,
 }
 
 impl SimpleFs {
     /// Creates a superblock backed by a simple filesystem.
     pub fn new_with(
-        name: String,
-        fs_type: u32,
+        file_system_type: &'static FileSystemType,
+        magic: u32,
         root: impl FnOnce(Arc<Self>) -> DirMaker,
     ) -> Arc<SuperBlock> {
-        Self::new_with_superblock_flags(name, fs_type, SuperBlockFlags::empty(), root)
+        Self::new_with_superblock_flags(file_system_type, magic, SuperBlockFlags::empty(), root)
     }
 
     /// Creates a superblock backed by a simple filesystem with explicit flags.
     pub fn new_with_superblock_flags(
-        name: String,
-        fs_type: u32,
+        file_system_type: &'static FileSystemType,
+        magic: u32,
         superblock_flags: SuperBlockFlags,
         root: impl FnOnce(Arc<Self>) -> DirMaker,
     ) -> Arc<SuperBlock> {
         let fs = Arc::new(Self {
-            name,
-            fs_type,
+            magic,
             inodes: Mutex::new(Slab::new()),
         });
         let root = root(fs.clone());
         let root = Dentry::new_dir_from_inode(root(), None, String::new());
-        SuperBlock::new_with_flags(fs, superblock_flags, |_| root)
+        SuperBlock::new_with_flags(file_system_type, fs, superblock_flags, |_| root)
     }
 
     fn alloc_inode(&self) -> u64 {
@@ -60,12 +58,8 @@ impl SimpleFs {
 }
 
 impl SuperBlockOperations for SimpleFs {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
     fn statfs(&self) -> VfsResult<StatFs> {
-        Ok(simple_statfs(self.fs_type))
+        Ok(simple_statfs(self.magic))
     }
 }
 

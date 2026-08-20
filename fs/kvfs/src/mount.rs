@@ -25,10 +25,11 @@ use ktime_types::TimeSpan;
 pub struct MountIdmap;
 
 use crate::{
-    Dentry, DentryKey, DeviceId, FMode, FileOperations, GetattrQueryFlags, GetattrRequestMask,
-    InodeUpdateTime, Metadata, MetadataUpdate, Mutex, NodeFlags, NodePermission, NodeType,
-    OpenFlags, Permission, RenameFlags, SetattrTime, StatFs, SuperBlock, SuperBlockFlags, Umode,
-    VfsError, VfsFile, VfsFileBuilder, VfsInode, VfsResult, nullfs, path::PathBuf,
+    Dentry, DentryKey, DeviceId, FMode, FileOperations, FsContext, GetattrQueryFlags,
+    GetattrRequestMask, InodeUpdateTime, Metadata, MetadataUpdate, Mutex, NodeFlags,
+    NodePermission, NodeType, OpenFlags, Permission, RenameFlags, SetattrTime, StatFs, SuperBlock,
+    SuperBlockFlags, Umode, VfsError, VfsFile, VfsFileBuilder, VfsInode, VfsResult, nullfs,
+    path::PathBuf,
 };
 
 bitflags::bitflags! {
@@ -70,13 +71,18 @@ pub struct VfsMount {
 }
 
 impl VfsMount {
-    fn new(fs: &Arc<SuperBlock>, flags: MountFlags) -> Self {
-        fs.activate_mount();
-        Self {
-            mnt_root: fs.root_dir(),
-            mnt_sb: fs.clone(),
-            mnt_flags: AtomicU32::new(flags.bits()),
-        }
+    fn try_new(
+        fs: &Arc<SuperBlock>,
+        flags: MountFlags,
+        requested_superblock_flags: Option<SuperBlockFlags>,
+    ) -> VfsResult<Option<Self>> {
+        Ok(fs
+            .try_activate_mount(requested_superblock_flags)?
+            .then(|| Self {
+                mnt_root: fs.root_dir(),
+                mnt_sb: fs.clone(),
+                mnt_flags: AtomicU32::new(flags.bits()),
+            }))
     }
 
     fn clone_from_path(source: &Path) -> Self {
@@ -234,11 +240,61 @@ impl MntNamespace {
         flags: MountFlags,
         devname: Option<&str>,
     ) -> VfsResult<Arc<Mount>> {
+        self.attach_with_requested_superblock_flags(mountpoint, fs, flags, devname, None)
+    }
+
+    fn attach_with_requested_superblock_flags(
+        &self,
+        mountpoint: &Path,
+        fs: &Arc<SuperBlock>,
+        flags: MountFlags,
+        devname: Option<&str>,
+        requested_superblock_flags: Option<SuperBlockFlags>,
+    ) -> VfsResult<Arc<Mount>> {
         let mut mounts = self.mounts.lock();
         Self::require_mount(&mounts, mountpoint.mount())?;
-        let mount = mountpoint.mount_filesystem_with_flags_and_devname(fs, flags, devname)?;
+        let mount = mountpoint.mount_filesystem_with_requested_superblock_flags(
+            fs,
+            flags,
+            devname,
+            requested_superblock_flags,
+        )?;
         mounts.insert(mount.mount_id(), mount.clone());
         Ok(mount)
+    }
+
+    /// Creates and attaches a filesystem selected by a filesystem context.
+    ///
+    /// This is the common new-mount operation used after filesystem-type
+    /// lookup. Filesystem construction completes before the namespace lock is
+    /// acquired, so `get_tree` may perform blocking device I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error from filesystem construction, mountpoint validation,
+    /// or namespace attachment.
+    pub fn mount_new(
+        &self,
+        mountpoint: &Path,
+        mount_flags: MountFlags,
+        context: &FsContext<'_>,
+        lookup_root: &Path,
+        lookup_pwd: &Path,
+    ) -> VfsResult<Arc<Mount>> {
+        loop {
+            let super_block = context.get_tree(lookup_root, lookup_pwd)?;
+            let result = self.attach_with_requested_superblock_flags(
+                mountpoint,
+                &super_block,
+                mount_flags,
+                context.source(),
+                Some(context.sb_flags()),
+            );
+            if matches!(&result, Err(VfsError::ResourceBusy)) && !super_block.is_available() {
+                continue;
+            }
+            return result;
+        }
     }
 
     /// Creates a non-recursive bind mount of `source` at `mountpoint`.
@@ -367,14 +423,28 @@ impl Mount {
     }
 
     fn new_detached(fs: &Arc<SuperBlock>, flags: MountFlags, devname: Option<&str>) -> Self {
-        Self {
-            mnt: VfsMount::new(fs, flags),
+        Self::try_new_detached(fs, flags, devname, None)
+            .expect("unchecked mount activation cannot reject flags")
+            .expect("a dying or dead superblock cannot be mounted")
+    }
+
+    fn try_new_detached(
+        fs: &Arc<SuperBlock>,
+        flags: MountFlags,
+        devname: Option<&str>,
+        requested_superblock_flags: Option<SuperBlockFlags>,
+    ) -> VfsResult<Option<Self>> {
+        let Some(mnt) = VfsMount::try_new(fs, flags, requested_superblock_flags)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            mnt,
             mnt_location: Mutex::default(),
             mnt_mounts: Mutex::default(),
             mnt_id: MOUNT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             covers: Mutex::default(),
             mnt_devname: devname.map(|s| s.to_string()),
-        }
+        }))
     }
 
     fn clone_mnt(source: &Path) -> Self {
@@ -1161,14 +1231,16 @@ impl Path {
         })
     }
 
-    /// Mount a filesystem at this path.
-    fn mount_filesystem_with_flags_and_devname(
+    fn mount_filesystem_with_requested_superblock_flags(
         &self,
         fs: &Arc<SuperBlock>,
         flags: MountFlags,
         devname: Option<&str>,
+        requested_superblock_flags: Option<SuperBlockFlags>,
     ) -> VfsResult<Arc<Mount>> {
-        self.graft_tree(Mount::new_detached(fs, flags, devname))
+        let mount = Mount::try_new_detached(fs, flags, devname, requested_superblock_flags)?
+            .ok_or(VfsError::ResourceBusy)?;
+        self.graft_tree(mount)
     }
 
     fn mount_bind(&self, source: &Path) -> VfsResult<Arc<Mount>> {
@@ -1381,7 +1453,7 @@ mod tests {
     }
 
     fn mount_filesystem(path: &Path, fs: &Arc<SuperBlock>) -> VfsResult<Arc<Mount>> {
-        path.mount_filesystem_with_flags_and_devname(fs, MountFlags::empty(), None)
+        path.mount_filesystem_with_requested_superblock_flags(fs, MountFlags::empty(), None, None)
     }
 
     struct MockFilesystem {
@@ -1389,10 +1461,6 @@ mod tests {
     }
 
     impl SuperBlockOperations for MockFilesystem {
-        fn name(&self) -> &str {
-            "mockfs"
-        }
-
         fn statfs(&self) -> VfsResult<StatFs> {
             statfs()
         }
@@ -1585,6 +1653,7 @@ mod tests {
             superblock_flags.insert(SuperBlockFlags::RDONLY);
         }
         SuperBlock::new_with_flags(
+            &crate::super_block::TEST_FILE_SYSTEM_TYPE,
             Arc::new(MockFilesystem { mount_flags }),
             superblock_flags,
             |_| root,
@@ -1647,7 +1716,12 @@ mod tests {
         let root_mount = Mount::new_root_with_flags(&root_fs, MountFlags::RDONLY);
         let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
         let child_mount = mount_dir
-            .mount_filesystem_with_flags_and_devname(&child_fs, MountFlags::empty(), None)
+            .mount_filesystem_with_requested_superblock_flags(
+                &child_fs,
+                MountFlags::empty(),
+                None,
+                None,
+            )
             .unwrap();
         let child_root = child_mount.root_path();
 
@@ -1720,7 +1794,7 @@ mod tests {
         assert!(Arc::ptr_eq(loc_a.mount(), &mount_a));
 
         let mount_b = mnt_loc
-            .mount_filesystem_with_flags_and_devname(&fs_b, MountFlags::RDONLY, None)
+            .mount_filesystem_with_requested_superblock_flags(&fs_b, MountFlags::RDONLY, None, None)
             .unwrap();
         let loc_b = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
         assert!(Arc::ptr_eq(loc_b.mount(), &mount_b));

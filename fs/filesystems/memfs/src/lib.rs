@@ -40,7 +40,9 @@ fn tmpfs_get_tree(
     _lookup_root: &kvfs::Path,
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
-    get_tree_nodev(context, |flags| Ok(shmem::new_tmpfs(flags)))
+    get_tree_nodev(context, |file_system_type, flags| {
+        Ok(shmem::new_tmpfs_with_type(file_system_type, flags))
+    })
 }
 
 fn sysfs_get_tree(
@@ -48,14 +50,24 @@ fn sysfs_get_tree(
     _lookup_root: &kvfs::Path,
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
-    get_tree_nodev(context, |flags| Ok(new_sysfs(flags)))
+    get_tree_nodev(context, |file_system_type, flags| {
+        Ok(new_sysfs_with_type(file_system_type, flags))
+    })
 }
 
 /// Registered tmpfs filesystem type.
-pub const TMPFS_TYPE: FileSystemType = FileSystemType::nodev("tmpfs", tmpfs_get_tree);
+pub static TMPFS_TYPE: FileSystemType = FileSystemType::nodev("tmpfs", tmpfs_get_tree);
 
 /// Registered sysfs filesystem type.
-pub const SYSFS_TYPE: FileSystemType = FileSystemType::nodev("sysfs", sysfs_get_tree);
+pub static SYSFS_TYPE: FileSystemType = FileSystemType::nodev("sysfs", sysfs_get_tree);
+
+#[macros::register_init]
+fn init_memory_filesystems() {
+    kvfs::register_filesystem(&ramfs::RAMFS_TYPE)
+        .expect("ramfs filesystem type must register once");
+    kvfs::register_filesystem(&TMPFS_TYPE).expect("tmpfs filesystem type must register once");
+    kvfs::register_filesystem(&SYSFS_TYPE).expect("sysfs filesystem type must register once");
+}
 
 /// Returns the shared sysfs superblock.
 ///
@@ -63,9 +75,20 @@ pub const SYSFS_TYPE: FileSystemType = FileSystemType::nodev("sysfs", sysfs_get_
 /// owned by this superblock rather than by a separate kernfs root. Visible
 /// mounts therefore cannot tear down the shared kernel-populated tree.
 pub fn new_sysfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
+    new_sysfs_with_type(&SYSFS_TYPE, superblock_flags)
+}
+
+fn new_sysfs_with_type(
+    file_system_type: &'static FileSystemType,
+    superblock_flags: SuperBlockFlags,
+) -> Arc<SuperBlock> {
     let (super_block, _internal_mount) = SYSFS.call_once(|| {
-        let super_block =
-            ramfs::new_ramfs_with_name_and_superblock_flags("sysfs", superblock_flags);
+        let super_block = MemoryFs::new_with_file_system_type_superblock_flags_and_root_mode(
+            file_system_type,
+            RAMFS_MAGIC,
+            superblock_flags,
+            NodePermission::from_bits_truncate(0o755),
+        );
         let internal_mount = Mount::new_root(&super_block);
         (super_block, internal_mount)
     });
@@ -111,62 +134,75 @@ impl Borrow<str> for FileName {
 
 /// A simple in-memory filesystem that supports basic file operations.
 pub struct MemoryFs {
-    name: &'static str,
-    fs_type: u32,
+    magic: u32,
     inodes: Mutex<Slab<Arc<Inode>>>,
 }
+
+fn memfs_get_tree(
+    context: &FsContext<'_>,
+    _lookup_root: &kvfs::Path,
+    _lookup_pwd: &kvfs::Path,
+) -> VfsResult<Arc<SuperBlock>> {
+    get_tree_nodev(context, |file_system_type, flags| {
+        Ok(
+            MemoryFs::new_with_file_system_type_superblock_flags_and_root_mode(
+                file_system_type,
+                RAMFS_MAGIC,
+                flags,
+                NodePermission::from_bits_truncate(0o755),
+            ),
+        )
+    })
+}
+
+static MEMFS_TYPE: FileSystemType = FileSystemType::nodev("memfs", memfs_get_tree);
 
 impl MemoryFs {
     /// Creates an in-memory superblock.
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> Arc<SuperBlock> {
-        Self::new_with_name_and_superblock_flags("memfs", SuperBlockFlags::empty())
+        Self::new_with_superblock_flags(SuperBlockFlags::empty())
     }
 
     /// Creates an in-memory superblock with explicit VFS-wide flags.
     #[allow(clippy::new_ret_no_self)]
     pub fn new_with_superblock_flags(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
-        Self::new_with_name_and_superblock_flags("memfs", superblock_flags)
-    }
-
-    /// Creates an in-memory superblock with a custom name and VFS-wide flags.
-    #[allow(clippy::new_ret_no_self)]
-    pub fn new_with_name_and_superblock_flags(
-        name: &'static str,
-        superblock_flags: SuperBlockFlags,
-    ) -> Arc<SuperBlock> {
-        Self::new_with_name_superblock_flags_and_root_mode(
-            name,
+        Self::new_with_file_system_type_superblock_flags_and_root_mode(
+            &MEMFS_TYPE,
             RAMFS_MAGIC,
             superblock_flags,
             NodePermission::from_bits_truncate(0o755),
         )
     }
 
-    pub(crate) fn new_with_name_superblock_flags_and_root_mode(
-        name: &'static str,
-        fs_type: u32,
+    pub(crate) fn new_with_file_system_type_superblock_flags_and_root_mode(
+        file_system_type: &'static FileSystemType,
+        magic: u32,
         superblock_flags: SuperBlockFlags,
         root_mode: NodePermission,
     ) -> Arc<SuperBlock> {
         let fs = Arc::new(Self {
-            name,
-            fs_type,
+            magic,
             inodes: Mutex::new(Slab::new()),
         });
-        SuperBlock::new_with_flags(fs.clone(), superblock_flags, |super_block| {
-            let root_ino = Inode::new(
-                &fs,
-                None,
-                NodeType::Directory,
-                root_mode,
-                0,
-                0,
-                DeviceId::default(),
-            );
-            let root_inode = MemoryNode::vfs_inode_from_inode(super_block, &fs, root_ino);
-            Dentry::new_dir_from_inode(root_inode, None, String::new())
-        })
+        SuperBlock::new_with_flags(
+            file_system_type,
+            fs.clone(),
+            superblock_flags,
+            |super_block| {
+                let root_ino = Inode::new(
+                    &fs,
+                    None,
+                    NodeType::Directory,
+                    root_mode,
+                    0,
+                    0,
+                    DeviceId::default(),
+                );
+                let root_inode = MemoryNode::vfs_inode_from_inode(super_block, &fs, root_ino);
+                Dentry::new_dir_from_inode(root_inode, None, String::new())
+            },
+        )
     }
 
     fn get(&self, ino: u64) -> Arc<Inode> {
@@ -175,12 +211,8 @@ impl MemoryFs {
 }
 
 impl SuperBlockOperations for MemoryFs {
-    fn name(&self) -> &str {
-        self.name
-    }
-
     fn statfs(&self) -> VfsResult<StatFs> {
-        Ok(simple_statfs(self.fs_type))
+        Ok(simple_statfs(self.magic))
     }
 }
 

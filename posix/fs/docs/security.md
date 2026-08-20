@@ -184,7 +184,7 @@ kfd resources / kvfs / device and pipe implementations
 | F-04 | 设备 open 失败 | 设备 file operations 拒绝 open 或初始化失败 | open 返回错误 | 终端相关程序无法打开目标设备 | 3 | 错误传播；设备语义由对应设备实现维护 |
 | F-05 | `fallocate` 后端写零返回 0 | 底层文件系统无法前进写入 | 返回 `WriteZero` | 操作失败但文件不应继续无限循环 | 2 | `write_zeros_range` 检测 0 字节写 |
 | F-06 | `sendfile`/`splice` 遇到 `WouldBlock` | 非阻塞源暂时无数据 | 已写入部分则返回部分进度，否则返回错误 | 调用方可轮询后重试 | 4 | `do_send` 保留部分写入语义 |
-| F-07 | `mount` 请求未知或当前不能由 legacy 路径创建的文件系统类型 | 名称未注册，或类型需要尚未解析的 backing device | 返回 `NoSuchDevice` | 用户态 mount 失败 | 3 | 按 KVFS registry 精确查找；nodev 类型调用描述符 factory，device-backed 类型显式失败 |
+| F-07 | `mount` 请求未知文件系统类型或无效 backing source | 名称未注册，或 source 不是可用 block-special path | 返回 `NoSuchDevice`、`ENOTBLK`、`ENXIO` 等对应错误 | 用户态 mount 失败 | 3 | 按 KVFS registry 精确查找；nodev/device-backed 类型统一经 `FsContext`，设备 source 由 `get_tree_bdev` 校验 |
 | F-08 | `syncfs` 目标不是文件或目录 | fd 指向 pipe/socket/设备 | 返回 `InvalidInput` | 当前同步请求失败 | 4 | downcast 后只 flush 文件系统对象 |
 | F-09 | `copy_file_range` 语义不完整 | 重叠和普通文件检查 TODO | 可能出现与 Linux 不一致的数据结果 | 相关应用复制行为异常 | 2 | 非零 flags 显式拒绝；其余限制实现前需要补充测试 |
 | F-10 | `fcntl` unsupported cmd 返回成功 | 兼容占位 | 应用误判某些控制操作已生效 | 可能产生行为差异 | 2 | warning 记录；有安全影响的命令应显式实现或拒绝 |
@@ -229,8 +229,8 @@ kfd resources / kvfs / device and pipe implementations
 2. FAT 等不能表达 Unix owner 的后端无法完整保存创建者 UID/GID。
 3. `fcntl` 文件锁和 `flock` 未实现真实锁。
 4. `copy_file_range` 对普通文件类型、同文件重叠和跨文件系统限制仍为 TODO。
-5. `mount` 支持已注册 nodev filesystem、非递归 bind、普通只读 remount 和 bind remount；
-   不支持 device-backed 新挂载、move、recursive bind、propagation、文件系统专用
+5. `mount` 支持已注册 nodev/device-backed filesystem、非递归 bind、普通只读 remount 和
+   bind remount；不支持 move、recursive bind、propagation、文件系统专用
    reconfigure 和 lazy/force unmount。
 6. `preadv2` / `pwritev2` 当前只支持 `flags == 0`，
    非零 flags 返回 `Unsupported`。

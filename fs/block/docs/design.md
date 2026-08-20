@@ -6,11 +6,9 @@
 operations。那些职责分别属于 `drivers/block` 与 KVFS，和 Linux 的 block core / VFS
 层次一致。
 
-本 crate 只保留两个文件系统侧适配：
-
-- `SeekableDisk`：把 canonical `block::BlockDevice` 适配为带字节游标的介质；
-- `RootFileSystem`：由 Kconfig 在链接期选择唯一 root `FileSystemType`，不提供另一条
-  mount 算法。
+本 crate 只保留 `SeekableDisk`：把 canonical `block::BlockDevice` 适配为带字节游标的
+介质。root filesystem 类型选择不属于 block I/O adapter；所选实现直接向 KVFS 暴露
+canonical `FileSystemType` 静态对象。
 
 ## 架构
 
@@ -20,15 +18,7 @@ driver operations -> block::Gendisk -> block::BlockDevice
                                            +--> KVFS def_blk_fops
                                            +--> KVFS get_tree_bdev
                                            `--> fs_block::SeekableDisk
-
-Kconfig root choice -> RootFileSystem::file_system_type
-                              |
-                              `--> FsContext -> the same get_tree callback as mount(2)
 ```
-
-`RootFileSystem` 只返回 filesystem type descriptor。early boot 先建立 bootstrap rootfs 和
-devtmpfs，因此 root device 也能按 `/dev/<name>` 解析，并走普通
-`FsContext -> get_tree_bdev -> fill_super`。不存在 root 专用 `mount_bdev` callback。
 
 ## SeekableDisk 算法
 
@@ -44,4 +34,5 @@ devtmpfs，因此 root device 也能按 `/dev/<name>` 解析，并走普通
 - device-backed mount source 的 pathname、`nodev` 和 `rdev` 校验属于 KVFS
   `get_tree_bdev`。
 - `Gendisk`、`BlockDevice`、容量和设备移除生命周期属于 block core。
-- root filesystem 的实现选择只有链接期 provider 和 KVFS `FileSystemType` 这一份事实。
+- 本 crate 不定义 filesystem type、root provider 或 mount callback；root 与用户挂载都由
+  KVFS canonical registry 分派。

@@ -260,10 +260,23 @@ impl SeqIterator for ProcMountIter {
 mod tests {
     use alloc::{string::ToString, sync::Arc};
 
-    use kvfs::{DirMapping, Mount, MountFlags, SimpleDir, SimpleFs};
+    use kvfs::{
+        DirMapping, FileSystemType, FsContext, Mount, MountFlags, Path, SimpleDir, SimpleFs,
+        SuperBlock, VfsResult,
+    };
     use unittest::{assert_eq, def_test};
 
     use super::ProcMountEntry;
+
+    fn test_get_tree(
+        _context: &FsContext<'_>,
+        _lookup_root: &Path,
+        _lookup_pwd: &Path,
+    ) -> VfsResult<Arc<SuperBlock>> {
+        unreachable!("the procfs test type does not provide a mount entry")
+    }
+
+    static TEST_FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("test", test_get_tree);
 
     #[def_test]
     fn test_format_mount_options_defaults_to_rw() {
@@ -356,7 +369,7 @@ mod tests {
     #[def_test]
     fn test_mount_source_uses_devname_when_set() {
         // Create a simple filesystem for testing.
-        let fs = SimpleFs::new_with("test".into(), 0, |fs| {
+        let fs = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
             SimpleDir::<DirMapping>::new_maker(fs, Arc::new(DirMapping::new()))
         });
 
@@ -370,7 +383,7 @@ mod tests {
     #[def_test]
     fn test_mount_source_falls_back_to_none_when_no_devname() {
         // Create a simple filesystem for testing.
-        let fs = SimpleFs::new_with("test".into(), 0, |fs| {
+        let fs = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
             SimpleDir::<DirMapping>::new_maker(fs, Arc::new(DirMapping::new()))
         });
 

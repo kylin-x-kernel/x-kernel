@@ -3,7 +3,7 @@
 ## 信任模型
 
 root block device 名称来自内核构建配置；设备枚举和磁盘内容来自驱动及外部介质。
-具体磁盘格式验证由所选 `RootFileSystem` provider 负责。
+具体磁盘格式验证由 registry 中候选 `FileSystemType` 的 `get_tree/fill_super` 负责。
 内建 filesystem type 描述符和 boot mount policy 是受信任的内核构建产物。
 
 ## 外部边界 / 攻击面
@@ -24,9 +24,17 @@ root block device 名称来自内核构建配置；设备枚举和磁盘内容�
 - root device handle 在 `FsContext::get_tree` 和真实 root graft 完成前保持有效。
 - init `FsStruct` 的 root/pwd 在 bootstrap 和真实 root 两次切换中都成对更新。
 - 所有内建 filesystem type 必须在安装用户态可见的 procfs 和开放 mount syscall 前
-  完成唯一注册。
+  通过统一 init 段完成唯一注册。
+- registry 必须保存各实现的唯一静态 descriptor 引用；boot 直接使用这些 canonical 对象，
+  POSIX 和 procfs 通过 registry 查找/遍历同一对象，不复制类型或另建 provider。
 - `nosuid`、`nodev`、`noexec`、`relatime` 属于具体 `Mount`；不得写入共享
   superblock 状态。`/dev` 不得设置 `nodev`。
+- root 候选必须先按 RW 完整探测，再以 `SB_RDONLY` 和只读 mount flag 完整重试；不得因
+  read-only block device 的首轮 `EACCES` 直接停止启动。
+- 只读真实 root 必须预先包含 boot policy 所需的 mountpoint 目录；Linux 同样不会在
+  只读介质上合成缺失的目录。目录缺失属于无效 root 镜像并停止启动。
+- mount helper 只接受已存在目录；boot policy 声明创建的嵌套路径必须先逐级建立，不能只
+  创建最终分量或删除同名非目录对象。
 - boot 挂载的 devtmpfs/sysfs 必须与对应 type factory 使用同一共享 superblock，
   否则后续 mount 会暴露缺失 boot 节点的分离目录树。
 - devtmpfs/sysfs 构造器必须保留 internal root mount 的 active 引用；可见 mount 卸载不得
@@ -34,18 +42,20 @@ root block device 名称来自内核构建配置；设备枚举和磁盘内容�
 
 ## 线程安全
 
-初始 mount 建立由 boot CPU 串行执行。后续设备移除回调只在短 mutex 临界区更新 id
-集合，不在持锁期间执行文件系统 I/O。
+初始 mount 建立由 boot CPU 串行执行。已挂载文件系统直接持有 backing device handle；
+boot 不另建移除订阅或设备生命周期状态。
 
 ## 威胁分析
 
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 |------|----------|----------|----------|----------|
-| T-01 | 错误 filesystem provider 被挂为 root | 高 | boot 自己按 feature/name 分支且与 Kconfig 漂移 | boot 只调用 exactly-one `fs_block::RootFileSystem` |
-| T-02 | 损坏磁盘触发不安全解析 | 高 | provider 未校验外部介质 | mount 错误必须传播；磁盘校验由具体 provider 实现 |
-| T-03 | 已挂载 backing device 被移除 | 中 | 热移除 root 或 9P 设备 | mount 持有 resident object；后续 I/O 传播设备错误，9P 移除另行告警 |
-| T-04 | filesystem type 列表与用户 mount 分派漂移 | 中 | boot、procfs 和 syscall 各自维护类型名 | boot 只向 KVFS 注册描述符；procfs 和 POSIX mount 都读取该注册表 |
+| T-01 | root 类型选择与可挂载类型表漂移 | 高 | Kconfig、runtime 或 boot 维护第二套 provider/name/能力来源 | Kconfig 只链接实现；每个实现通过统一 init 段注册自己的 canonical descriptor；boot 只遍历同一 registry 的 `REQUIRES_DEV` 类型 |
+| T-02 | 损坏磁盘触发不安全解析 | 高 | filesystem 未校验外部介质 | mount 错误必须传播；磁盘校验由具体 `fill_super` 实现 |
+| T-03 | 已挂载 backing device 被移除 | 中 | 热移除 root 或 9P 设备 | mount/session 持有 resident object；后续 I/O 传播设备错误；boot 不复制设备生命周期状态 |
+| T-04 | filesystem type 列表与用户 mount 分派漂移 | 中 | boot、procfs 和 syscall 各自维护类型名或构造入口 | boot 直接使用已注册 canonical descriptor，procfs/POSIX 从同一 registry 取得它，并统一经 `MntNamespace::mount_new` 创建和 attach |
 | T-05 | 启动 mount flags 错误作用到共享 superblock 或禁用 `/dev` | 高 | 把 per-mount flags 填入 statfs 后端状态，或给 `/dev` 设置 `nodev` | boot 通过 namespace attach 设置 `MountFlags`；superblock 构造器只接收 filesystem-wide flags |
+| T-06 | 只读 root device 无法启动 | 高 | root 探测只使用 RW flags，首轮 `EACCES` 后直接 panic | 按 Linux `mount_root_generic()` 对完整 filesystem 候选集执行 RW、RO 两轮探测；RO 轮同时设置 superblock 与 mount 只读位；root 镜像须预置必要 mountpoint |
+| T-07 | 9P 嵌套挂载点缺少父目录 | 中 | mount helper 只对最终 `/mnt/hostshare` 执行 `mkdir` | `mount_host_share()` 在挂载前通过 `ensure_directory_path()` 逐级创建 policy-owned 路径；通用 helper 要求目标已存在 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -59,7 +69,7 @@ root block device 名称来自内核构建配置；设备枚举和磁盘内容�
 ## 故障管理
 
 root/关键虚拟文件系统失败会停止启动，避免在不完整 namespace 上运行用户态。
-可选 9P 和设备移除路径记录带设备身份的错误上下文。
+可选 9P mount 错误保留 transport 上下文并停止启动。
 
 ## 已知限制
 
@@ -69,9 +79,9 @@ root/关键虚拟文件系统失败会停止启动，避免在不完整 namespac
 
 ## 审计清单
 
-- boot 是否仍然不引用具体 root filesystem crate 或 `KFEAT_FS_*` 分支？
+- `fs_boot` 是否仍然不引用具体 block filesystem crate 或 `KFEAT_FS_*` 分支？
 - 新 mount path 是 namespace policy，还是应进入通用 mount/type 层？
 - 新 filesystem 是否注册 canonical type，且没有在 procfs 或 POSIX 层增加名称表？
 - 新启动 mount 的 flags 是否写入 `Mount`；`/dev` 是否保持可访问设备节点？
 - 真实 root mount 失败是否在启动用户态前终止，并保留明确错误？
-- 设备移除回调是否避免持锁执行 I/O？
+- backing device 生命周期是否由 mount/session handle 持有，而不是在 boot 复制状态？

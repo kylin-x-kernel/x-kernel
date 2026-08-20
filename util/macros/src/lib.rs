@@ -12,7 +12,7 @@ use syn::{
     punctuated::Punctuated,
 };
 
-/// Register a constructor function to be called before `main`.
+/// Registers a function in the kernel runtime init array.
 ///
 /// The function should have no input arguments and return nothing.
 #[proc_macro_attribute]
@@ -20,7 +20,7 @@ pub fn register_init(attr: TokenStream, function: TokenStream) -> TokenStream {
     if !attr.is_empty() {
         return Error::new(
             Span::call_site(),
-            "expect an empty attribute: `#[register_ctor]`",
+            "expect an empty attribute: `#[register_init]`",
         )
         .to_compile_error()
         .into();
@@ -28,30 +28,32 @@ pub fn register_init(attr: TokenStream, function: TokenStream) -> TokenStream {
 
     let item: Item = parse_macro_input!(function as Item);
     if let Item::Fn(func) = item {
+        let attributes = &func.attrs;
         let name = &func.sig.ident;
         let name_str = name.to_string();
         let name_ident = format_ident!("_INIT_{}", name_str);
         let output = &func.sig.output;
-        // Constructor functions should not have any return value.
+        // Init functions should not have any return value.
         if let syn::ReturnType::Type(..) = output {
             return Error::new(
                 Span::call_site(),
-                "expect no return value for the constructor function",
+                "expect no return value for the init function",
             )
             .to_compile_error()
             .into();
         }
         let inputs = &func.sig.inputs;
-        // Constructor functions should not have any input arguments.
+        // Init functions should not have any input arguments.
         if !inputs.is_empty() {
             return Error::new(
                 Span::call_site(),
-                "expect no input arguments for the constructor function",
+                "expect no input arguments for the init function",
             )
             .to_compile_error()
             .into();
         }
         let block = &func.block;
+        let visibility = &func.vis;
 
         quote! {
             #[unsafe(link_section = ".init_array")]
@@ -59,9 +61,8 @@ pub fn register_init(attr: TokenStream, function: TokenStream) -> TokenStream {
             #[allow(non_upper_case_globals)]
             static #name_ident: extern "C" fn() = #name;
 
-            #[unsafe(no_mangle)]
-            #[allow(non_upper_case_globals)]
-            pub extern "C" fn #name() {
+            #(#attributes)*
+            #visibility extern "C" fn #name() {
                 #block
             }
         }

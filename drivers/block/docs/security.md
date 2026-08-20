@@ -10,6 +10,7 @@ driver 报告的 disk identity、容量、block size 和 I/O completion 跨越 b
 - major 必须非零，minor range 非空且不能溢出或与已发布 disk 重叠；
 - block size 必须非零，`num_blocks * block_size` 在 `u64` 中可表示；
 - 一个 `dev_t` 在 resident registry 中只对应一个 `BlockDevice`；
+- 一个 canonical `BlockDevice` 同时至多有一个 exclusive holder，claim token 负责释放；
 - 每个 I/O buffer 长度是 block size 的整数倍，完整 extent 位于当前 capacity 内；
 - block offset 的加法必须 checked；
 - operations object、`Gendisk` 和 `BlockDevice` 都是 `Send + Sync`；
@@ -26,6 +27,7 @@ driver 报告的 disk identity、容量、block size 和 I/O completion 跨越 b
 | 故障 | 结果 |
 |---|---|
 | identity/range 冲突 | `AlreadyExists`，不发布半成品 |
+| 已有 exclusive holder | `ResourceBusy`，不建立第二个 holder |
 | 无效或越界 I/O | `InvalidInput`，不调用 backend |
 | backend I/O/flush 失败 | 原样传播 `DriverError` |
 | read-only disk 写入 | `ReadOnly`；KVFS 映射为 Linux `EPERM` |

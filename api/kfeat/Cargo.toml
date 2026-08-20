@@ -84,12 +84,12 @@ sched_stat = ["ktask/sched_stat", "dep:procfs", "procfs/sched_stat"]
 
 # File system
 #
-# `KFEAT_FS` is a Kconfig-only dependency gate. Cargo features expose concrete
-# filesystem capabilities and let kruntime pull in its internal fs core.
-fs_ext4 = ["kruntime/fs_ext4"]
-fs_fat = ["kruntime/fs_fat"]
+# `KFEAT_FS` is a Kconfig-only dependency gate. Cargo features link concrete
+# filesystem implementations while kruntime only owns the generic fs stage.
+fs_ext4 = ["dep:kext4_vfs", "kruntime/fs"]
+fs_fat = ["dep:fat", "kruntime/fs"]
 fs_9p = ["kruntime/fs9p"]
-fs_times = ["kruntime/fs_times"]
+fs_times = ["fs_ext4", "kext4_vfs/times"]
 
 # Networking
 #
@@ -193,6 +193,7 @@ memspace = { workspace = true, optional = true }
 kalloc = { workspace = true, optional = true }
 backtrace.workspace = true
 fbdevice = { workspace = true, optional = true }
+fat = { workspace = true, optional = true }
 kdriver.workspace = true
 kirq = { workspace = true, optional = true }
 kprocess.workspace = true
@@ -220,6 +221,7 @@ inputdev = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }
 knet = { workspace = true, optional = true }
 kruntime.workspace = true
+kext4_vfs = { workspace = true, optional = true }
 ksync = { workspace = true, optional = true }
 ktask = { workspace = true, optional = true }
 ksyscall = { workspace = true }

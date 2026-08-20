@@ -12,8 +12,8 @@ use core::{
 
 use ksync::{Mutex, MutexGuard};
 use kvfs::{
-    Dentry, NodePermission, NodeType, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations,
-    VfsInode, VfsInodeInit, VfsResult, path::MAX_NAME_LEN,
+    Dentry, NodePermission, NodeType, StatFs, SuperBlock, SuperBlockOperations, VfsInode,
+    VfsInodeInit, VfsResult, path::MAX_NAME_LEN,
 };
 use slab::Slab;
 
@@ -69,14 +69,20 @@ impl DerefMut for FatFilesystemGuard<'_> {
 }
 
 impl FatFilesystem {
-    /// Mount a FAT filesystem backed by a block device.
-    pub fn mount_bdev(
-        dev: Arc<block::BlockDevice>,
-        superblock_flags: SuperBlockFlags,
-    ) -> Arc<SuperBlock> {
+    /// Fills a newly reserved FAT superblock from a validated block device.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the FAT boot sector or filesystem metadata cannot
+    /// initialize a filesystem instance.
+    pub(crate) fn fill_super(super_block: &Arc<SuperBlock>) -> VfsResult<()> {
+        let dev = super_block
+            .block_device()
+            .expect("get_tree_bdev must set s_bdev before fill_super")
+            .clone();
         let mut inner = FatFilesystemInner {
             inner: ff::FileSystem::new(FatDisk::new(dev), fatfs::FsOptions::new())
-                .expect("failed to initialize FAT filesystem"),
+                .map_err(into_vfs_err)?,
             inode_allocator: Slab::new(),
             _pinned: PhantomPinned,
         };
@@ -86,7 +92,7 @@ impl FatFilesystem {
             inner: Mutex::new(inner),
         });
 
-        SuperBlock::new_with_flags(result.clone(), superblock_flags, move |super_block| {
+        match super_block.initialize(result.clone(), move |super_block| {
             let root_node = {
                 let fs = result.lock();
                 let root = fs.inner.root_dir();
@@ -110,8 +116,15 @@ impl FatFilesystem {
                     ),
                 )
             });
-            Dentry::new_dir_from_inode(root_inode, None, String::new())
-        })
+            Ok::<_, core::convert::Infallible>(Dentry::new_dir_from_inode(
+                root_inode,
+                None,
+                String::new(),
+            ))
+        }) {
+            Ok(()) => Ok(()),
+            Err(error) => match error {},
+        }
     }
 }
 
@@ -125,10 +138,6 @@ impl FatFilesystem {
 }
 
 impl SuperBlockOperations for FatFilesystem {
-    fn name(&self) -> &str {
-        "vfat"
-    }
-
     fn statfs(&self) -> VfsResult<StatFs> {
         let fs = self.inner.lock();
         let stats = fs.inner.stats().map_err(into_vfs_err)?;

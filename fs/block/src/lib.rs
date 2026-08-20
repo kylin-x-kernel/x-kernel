@@ -16,18 +16,6 @@ use alloc::{boxed::Box, sync::Arc, vec};
 use core::mem;
 
 use block::{BlockDevice, BlockDeviceOperations, DriverResult};
-use kvfs::FileSystemType;
-
-/// The block-backed root filesystem provider selected by Kconfig.
-#[kiface::interface]
-pub trait RootFileSystem {
-    /// Returns the selected filesystem's VFS type descriptor.
-    fn file_system_type() -> FileSystemType;
-}
-
-#[doc(hidden)]
-pub use kiface;
-
 /// Consume `cnt` bytes from the front of a slice.
 fn take<'a>(buf: &mut &'a [u8], cnt: usize) -> &'a [u8] {
     let (first, rem) = buf.split_at(cnt);

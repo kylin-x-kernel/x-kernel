@@ -35,20 +35,35 @@ fn get_tree(
     _lookup_root: &kvfs::Path,
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
-    get_tree_nodev(context, |flags| Ok(new_devfs(flags)))
+    get_tree_nodev(context, |file_system_type, flags| {
+        Ok(new_devfs_with_type(file_system_type, flags))
+    })
 }
 
 /// Registered devtmpfs filesystem type.
-pub const FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("devtmpfs", get_tree);
+pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("devtmpfs", get_tree);
+
+#[macros::register_init]
+fn init_devfs_fs() {
+    kvfs::register_filesystem(&FILE_SYSTEM_TYPE)
+        .expect("devtmpfs filesystem type must register once");
+}
 
 /// Returns the shared devtmpfs superblock for device access.
 ///
 /// The singleton retains the internal root mount used for kernel device-node
 /// updates, corresponding to Linux's private devtmpfs mount.
 pub fn new_devfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
+    new_devfs_with_type(&FILE_SYSTEM_TYPE, superblock_flags)
+}
+
+fn new_devfs_with_type(
+    file_system_type: &'static FileSystemType,
+    superblock_flags: SuperBlockFlags,
+) -> Arc<SuperBlock> {
     let (super_block, _internal_mount) = DEVFS.call_once(|| {
         let super_block = SimpleFs::new_with_superblock_flags(
-            "devtmpfs".into(),
+            file_system_type,
             DEVFS_MAGIC,
             superblock_flags,
             root::builder,

@@ -103,7 +103,11 @@ FIEMAP 的原始 C 布局和用户指针留在 POSIX 层。KVFS 以可选
 identity table 并构造 root inode；失败的 initializer 不发布半初始化 superblock。这对应 Linux 先分配
 `struct super_block`、再执行 `fill_super()`、最后令 `s_root` 可见的层次。文件系统 operation
 对象只保存文件系统私有状态，不重复保存 root；这对应 Linux 中 `super_block.s_root` 的
-所有权边界，也避免私有状态和 root inode 之间形成引用环。`SuperBlockFlags` 对应
+所有权边界，也避免私有状态和 root inode 之间形成引用环。每个 `SuperBlock` 在分配时保存
+创建它的 canonical `FileSystemType`，对应 Linux `super_block.s_type`；文件系统名称统一由
+`s_type.name` 导出，`SuperBlockOperations` 不再维护第二份名称。block-backed superblock
+同时保存 canonical `BlockDevice` 的 exclusive claim，对应 Linux `super_block.s_bdev` 与
+block holder；设备身份和所有权不下沉为后端私有 cache key。`SuperBlockFlags` 对应
 `super_block.s_flags`，当前承载 `SB_RDONLY`、`SB_NOATIME` 和 `SB_NODIRATIME`；
 `MountFlags` 对应 `vfsmount.mnt_flags`，承载 `MNT_RELATIME` 等 per-mount 策略。
 `SuperBlockOperations::statfs()` 只返回文件系统统计数据，POSIX 导出时才由 VFS 将
@@ -113,16 +117,33 @@ per-mount 位导出，即使同名 superblock 位仍参与 inode atime 决策。
 `SuperBlockFlags` 前调用 filesystem 的 `reconfigure` hook，对应 Linux
 filesystem-context 的 `reconfigure`；该 hook 接收拟议 flags 和 changed mask，对应
 `sb_flags`/`sb_flags_mask`，并与 flags 发布、最终 shutdown 由 superblock 内的 umount lock
-串行化，对应 `s_umount` 的职责。和 Linux 未提供 callback 时的行为一样，默认 hook 接受纯 VFS
-flags 变更；固定只读介质的文件系统必须覆盖该 hook 并拒绝读写目标。
+串行化，对应 `s_umount` 的职责。和 Linux `reconfigure_super()` 一样，VFS 在调用 hook 前
+统一拒绝把 read-only block device 切换为读写；默认 hook 接受其余纯 VFS flags 变更，
+device-less 或文件系统本身固定只读时由后端拒绝读写目标。
 
 `FileSystemType` 对应 Linux `struct file_system_type`，描述文件系统实现的名称、
 是否需要 backing device 及统一的 `get_tree` 创建入口。全局注册表对应 Linux
-`file_systems` list，是按类型名挂载和 `/proc/filesystems` 的共同事实源。
+`file_systems` list，是按类型名挂载和 `/proc/filesystems` 的共同事实源。与 Linux 注册
+静态 `struct file_system_type *` 一样，registry 保存 `&'static FileSystemType`；
+`FsContext` 和其创建的 `SuperBlock` 继续借用同一对象，不复制 descriptor identity。
 每个类型通过一个 `GetTreeFn` 回调构造 superblock，对应 Linux 的 `->get_tree`：nodev
 类型调用 `get_tree_nodev`；device-backed 类型调用 KVFS `get_tree_bdev`，由 VFS super
 层完成 source pathname、block-special inode、`nodev` 和 `rdev` 校验，再从 block core
-取得 canonical `BlockDevice`。与 Linux `bdev_file_open_by_path` 一样，可写 mount 会拒绝
+取得 canonical `BlockDevice`。`get_tree_bdev` 随后按
+`(FileSystemType, BlockDevice object)` 在同一个 superblock registry 中执行 Linux
+`sget_dev()` 等价查找：已有 live 实例直接复用；初始化中
+或正在 shutdown 的实例等待其 lifecycle transition；只有取得 reservation 的调用者才执行
+filesystem fill-super。新的 block-backed superblock 在 block core 取得 exclusive claim，
+所以同一 canonical device 不能由不同 filesystem type 或 instance 并行拥有；同一 `dev_t`
+撤销后重新发布的 `BlockDevice` 对象则是新的介质代际，不会命中旧 root 和 cache。这与
+Linux `setup_bdev_super()` 以新 superblock 作为 exclusive `bdev_open()` holder 一致：不同
+filesystem type 创建不同 holder，因此不能同时取得同一设备。VFS
+先分配并注册已经带有 `s_type/s_bdev/s_flags` 的 nascent `SuperBlock`，fill callback 只接收
+该对象并安装 filesystem operations 与 root，不再接收或
+复制 type、device、flags；fill 成功后 VFS 才把 lifecycle 切换为 available。
+已有 block-backed superblock 与新请求的 `SB_RDONLY` 不一致时返回 `EBUSY`，对应 Linux
+`get_tree_bdev_flags()` 的已有 `s_root` 分支，而不是将 block mount 降格为 per-mount 策略。
+与 Linux `bdev_file_open_by_path` 一样，可写 mount 会拒绝
 canonical read-only device；只读 mount 仍可继续交给 filesystem fill-super。`fs_flags` 字段是类型化
 的 `FileSystemTypeFlags`（bitflags），对应 Linux `struct file_system_type::fs_flags`，
 其中 `REQUIRES_DEV` 声明是否需要 backing device，位编号与 Linux `include/linux/fs.h`
@@ -141,9 +162,16 @@ devfs 只投影名称与 `rdev`，loop 设备也按普通 `Gendisk` 发布。
 `get_tree_bdev -> lookup_bdev -> kern_path` 中从 ambient `current->fs` 取得路径环境；
 KVFS 为避免反向依赖 `kprocess`，由 mount 执行入口取得 `FsStruct` 的 root/pwd 快照，
 在调用 `FsContext::get_tree` 时显式传入。该快照只沿调用栈存在，不成为 mount transaction
-字段。`SuperBlockRegistry` 只跟踪已经创建的 superblock 实例，
-两者不合并，也不互相复制状态。具体 type factory 负责决定一次 mount 是创建新
-superblock 还是复用已有实例，KVFS registry 不增加第二套实例缓存。
+字段。`SuperBlockRegistry` 继续只保存 superblock weak entry；block-backed identity 的
+`Nascent -> Available -> Dying -> Dead` 状态和等待队列属于 `SuperBlock` 生命周期本身。
+registry 既是全局遍历来源，也是 `sget_dev` 查找所有者，不在后端或 boot 层增加第二套实例
+缓存。初始化失败先删除 nascent identity，再把对象切到 dead、释放 block claim，并唤醒
+已经取得它的等待者。
+
+`MntNamespace::mount_new()` 对应 Linux `do_new_mount_fc()` 的对象化入口：调用者完成
+filesystem-type lookup 和 flags 拆分后传入 `FsContext`；该方法先执行 `get_tree`，再以
+context source 和 per-mount flags attach。filesystem I/O 在 namespace registry mutex
+之外完成。POSIX、boot 虚拟挂载和 root block 挂载都复用该入口。
 
 `Dentry` 是可移动的 namespace 对象。rename 保留 source dentry 和 inode identity，只
 改变 dentry 的位置和 cache membership。inode 持有文件状态和 address space，因此
@@ -400,13 +428,18 @@ superblock flags 和 per-mount flags，更新 `SuperBlock` 上所有共享 mount
 `MntNamespace::reconfigure_mount()` 只替换目标的 per-mount flags，不要求目标本身由
 bind 创建。superblock flags 由 `AtomicSuperBlockFlags` 保存；普通 remount 在发布新 flags
 前调用 filesystem `reconfigure` hook，并由 per-superblock umount lock 串行化 hook
-和发布。文件系统后端固定报告只读时，切换到读写会返回 `ReadOnlyFilesystem`。
+和发布。block device 固定只读时，VFS 在 hook 和 flags 发布前返回 `PermissionDenied` 并
+保持原状态；device-less 或文件系统固有的只读策略仍由后端 hook 校验。
 mount 不保存“是否由 bind 创建”的来源状态；所有 mount 卸载都只移除 topology 节点，
 `VfsMount` 创建和复制时取得一个 superblock active 引用，最后释放时归还，对应 Linux
 `cleanup_mnt()` 中的 `dput(mnt_root)` 和 `deactivate_super(mnt_sb)`。非最后一个 mount
 释放不重复 teardown；active 计数归零时，在 umount lock 下先写回 inode/page cache 和
 filesystem 状态，再驱逐 dcache 所有权，最后再次同步 eviction 产生的 metadata、journal
 checkpoint 和设备状态，对应 `generic_shutdown_super()` 与 block-device final flush 的职责。
+设备 identity entry 在 shutdown 完成前保持可见但不可重新激活；同设备新 mount 等待 entry
+移除后才可重新执行 fill-super，且 exclusive block claim 在 lifecycle 进入 dead 后才释放，
+避免旧实例 teardown 与新实例 I/O 交错。只有初始化 owner
+或 final-shutdown owner 删除 entry；等待者观察到不可用实例后只重试，不能替 owner 提前注销。
 `Path::unmount()` 不在 topology 层调用 `sync_fs()`，所以打开文件或其它 `Path` 持有 detached
 mount 时会像 Linux 一样推迟 final shutdown。shutdown 的 sync 错误被记录但不回滚已提交的
 topology；清理和最终 flush 仍继续执行。
@@ -526,7 +559,10 @@ detach transaction 在丢弃其收集的 `Arc<Mount>` 前先释放 namespace reg
 superblock active lifecycle 对应 Linux `s_active`、`SB_DYING` 和 `SB_DEAD`：非最后引用直接
 递减；最后引用候选保留计数为一并释放 lifecycle lock，取得 umount lock 后重新校验，再
 切换到 dying。shutdown callback 运行期间不持有 lifecycle lock，避免 inode eviction
-反向进入 mount release；dying/dead superblock 不能取得新的 active 引用。显式 filesystem
+反向进入 mount release；mount activation 与 final shutdown 同受 umount lock 串行化，若
+`get_tree` 返回后实例已经进入 dying，namespace mount 会重新执行 `get_tree`。dying/dead
+superblock 不能取得新的 active 引用，device registry waiter 只在实例发布或完成 shutdown
+移除后继续。显式 filesystem
 sync 和 Weak registry 的全局 sync snapshot 也获取 umount lock，不能与 final dcache
 eviction 交错，并在取得锁后跳过已经 dying/dead 的 superblock。shutdown 不反向获取
 mount-namespace registry mutex。
@@ -566,8 +602,9 @@ child cache 仍使用 mutex。RCU、seqcount lookup 和 lock-free dcache travers
   替换原 opened-file identity。
 - 匿名 inode pseudo fs 采用显式预初始化，而不是 `Lazy` 首次访问初始化。该设计对齐
   复杂 VFS 全局对象的生命周期：启动时构造，运行时只复用。
-- `FileSystemType` 保留 Linux 的“类型描述符 + 全局注册表”层次；POSIX mount 不依赖
-  具体文件系统 crate，`/proc/filesystems` 也不维护平行的名称表。
+- `FileSystemType` 保留 Linux 的“静态类型描述符 + 全局注册表”层次；POSIX mount、boot
+  root/虚拟挂载和 `/proc/filesystems` 不维护平行的对象、provider 或名称表；后端通过
+  统一 `register_init` 段注册自己的 descriptor，运行时编排层不列举文件系统实现。
 - 不为 immutable simple symlink 增加文件系统私有 target 字段；cached-link 是唯一目标
   owner，operation table 只标识并读取该 inode 状态。
 - `AddressSpaceOperations::set_len()` 必须进入 `truncate_setsize()`；文件系统不能自行组合
@@ -592,7 +629,8 @@ VFS 对象通过 `Arc`/`Weak` 管理生命周期。unlink、rename replacement �
 parent children 弱索引与 superblock dentry cache 中移除 dentry；仍有 Path/File 引用
 时对象继续存活，否则释放时沿 strong parent 链逐级归还引用。每个 `VfsMount` 持有一个
 superblock active 引用；最后一个 active mount 释放时执行 writeback、dcache eviction 和
-最终 filesystem/device sync。superblock 对象的 `Arc` 最终释放只负责丢弃已经 shutdown 的
+最终 filesystem/device sync，进入 dead 后释放 block-device claim。superblock 对象的
+`Arc` 最终释放只负责丢弃已经 shutdown 的
 root 和私有状态。dentry cache 与 open file 都持有 `VfsInode` 引用；最后一个引用消失后，
 hashed VFS inode identity table 先发布 `Freeing`，再让 `SuperBlockOperations::evict_inode()` 获得 final teardown
 机会。默认实现只丢弃 inode `AddressSpace` 中的 cached folios，磁盘文件系统可在 nlink=0
@@ -622,5 +660,9 @@ FIFO 最后一个 open file 关闭时清空 inode pipe slot，`Arc<PipeObject>` 
   hashed candidate owner/waiter 模型合并同名并发 lookup。
 - layered filesystem 的跨文件系统 lock rank 尚未建模。
 - mount topology 同步与 superblock rename mutex 仍是不同机制。
+- sysfs、devtmpfs 等共享 nodev singleton 的后续 mount 当前要求请求的 `SB_RDONLY` 与首次
+  创建的 superblock 一致，不一致返回 `EBUSY`；Linux `get_tree_single()` 忽略后续
+  superblock flags，并仅由 `MNT_READONLY` 表达该 mount 的只读请求。该 singleton 差异尚待
+  在不削弱 block-backed `get_tree_bdev_flags()` 语义的前提下分离。
 - 文件系统类型当前都是静态内建实现，尚无 Linux module autoload、引用计数和
   `unregister_filesystem()` 生命周期。

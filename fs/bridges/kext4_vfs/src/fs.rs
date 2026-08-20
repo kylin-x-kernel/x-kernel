@@ -9,8 +9,8 @@ use alloc::{string::String, sync::Arc};
 use kext4::{Ext4Error, Ext4Filesystem as KExt4Core, Ext4Inode, Ext4SyncIntent, InodeNumber};
 use ksync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use kvfs::{
-    Dentry, DeviceId, Metadata, NodeFlags, NodeType, StatFs, SuperBlock, SuperBlockFlags,
-    SuperBlockOperations, Umode, VfsInode, VfsInodeInit, VfsResult, default_evict_inode,
+    Dentry, DeviceId, Metadata, NodeFlags, NodeType, StatFs, SuperBlock, SuperBlockOperations,
+    Umode, VfsInode, VfsInodeInit, VfsResult, default_evict_inode,
 };
 
 use super::{
@@ -48,11 +48,17 @@ pub struct Ext4Filesystem {
 }
 
 impl Ext4Filesystem {
-    /// Mount a KExt4 filesystem backed by a block device.
-    pub fn mount_bdev(
-        dev: Arc<block::BlockDevice>,
-        superblock_flags: SuperBlockFlags,
-    ) -> VfsResult<Arc<SuperBlock>> {
+    /// Fills a newly reserved KExt4 superblock from a validated block device.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when ext4 validation, recovery, geometry discovery,
+    /// or root inode initialization fails.
+    pub(crate) fn fill_super(super_block: &Arc<SuperBlock>) -> VfsResult<()> {
+        let dev = super_block
+            .block_device()
+            .expect("get_tree_bdev must set s_bdev before fill_super")
+            .clone();
         let device: Arc<dyn block::BlockDeviceOperations> = dev;
         let core = match KExt4Core::mount(device.clone()) {
             Ok(core) => core,
@@ -84,7 +90,7 @@ impl Ext4Filesystem {
             extent_max_file_size,
             legacy_max_file_size,
         });
-        SuperBlock::try_new_with_flags(fs.clone(), superblock_flags, |super_block| {
+        super_block.initialize(fs.clone(), |super_block| {
             let root_inode = Self::iget(super_block, &fs, InodeNumber::new(EXT4_ROOT_INO))
                 .inspect_err(|err| error!("KExt4 root inode VFS initialization failed: {err:?}"))?;
             Ok(Dentry::new_dir_from_inode(root_inode, None, String::new()))
@@ -209,10 +215,6 @@ impl Ext4Filesystem {
 }
 
 impl SuperBlockOperations for Ext4Filesystem {
-    fn name(&self) -> &str {
-        "ext4"
-    }
-
     fn statfs(&self) -> VfsResult<StatFs> {
         let fs = self.read_lock();
         let stat = fs.statfs().map_err(into_vfs_err)?;

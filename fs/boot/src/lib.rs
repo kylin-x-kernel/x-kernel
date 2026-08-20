@@ -5,11 +5,12 @@
 //! Filesystem namespace preparation during kernel boot.
 //!
 //! This crate selects the root block device and builds the initial mount
-//! namespace. The concrete root filesystem is supplied through
-//! [`fs_block::RootFileSystem`], so boot code does not branch on filesystem or
-//! backend names. Boot registers built-in filesystem type descriptors before
-//! constructing tmpfs, procfs, devtmpfs, and bpffs at fixed initial-namespace
-//! paths; those direct constructors express layout policy, not type dispatch.
+//! namespace. Configured filesystems register their canonical KVFS type
+//! descriptors through the kernel initcall section before this crate scans the
+//! registry. Each built-in nodev implementation owns the same registration
+//! callback used before boot mounts tmpfs, procfs, devtmpfs, and bpffs at fixed
+//! initial-namespace paths through the filesystem-context path used by
+//! `mount(2)`.
 
 #![cfg_attr(any(not(test), doc), no_std)]
 
@@ -25,17 +26,45 @@ use alloc::{format, sync::Arc, vec::Vec};
 #[cfg(feature = "fs9p")]
 use kclass::{ClassDevice, Virtio9pDevice as _, Virtio9pDeviceImpl, virtio_9p_devices};
 #[cfg(feature = "fs9p")]
-use kdevice::{DeviceId, subscribe_device_removed};
-#[cfg(feature = "fs9p")]
-use ksync::{Mutex, static_lock};
+use ksync::Mutex;
 use kvfs::{
-    Filename, LookupFlags, LookupIntent, MntNamespace, MountFlags, NodePermission, Path,
-    SuperBlock, SuperBlockFlags, path::PathBuf,
+    FileSystemType, Filename, LookupFlags, LookupIntent, MntNamespace, MountFlags, NodePermission,
+    Path, SuperBlock, SuperBlockFlags, path::PathBuf,
 };
 
 #[cfg(feature = "fs9p")]
-static_lock! {
-    static FS_BACKING_DEVICES: Mutex<Vec<DeviceId>> = Mutex::new(Vec::new());
+fn host_9p_get_tree(
+    context: &kvfs::FsContext<'_>,
+    _lookup_root: &Path,
+    _lookup_pwd: &Path,
+) -> kvfs::VfsResult<Arc<SuperBlock>> {
+    let mut devices = virtio_9p_devices();
+    let handle = match context.source().filter(|mount_tag| !mount_tag.is_empty()) {
+        Some(mount_tag) => devices
+            .into_iter()
+            .find(|device| device.mount_tag() == mount_tag),
+        None => devices.pop(),
+    }
+    .ok_or(kvfs::VfsError::NoSuchDevice)?;
+    let mount_tag = handle.mount_tag();
+
+    info!("Mount 9P filesystem...");
+    info!("  use virtio-9p device: {:?}", handle.name());
+    info!("  mount tag: {:?}", mount_tag);
+
+    let transport = Box::new(Virtio9pTransport(Mutex::new(handle)));
+    kvfs::get_tree_nodev(context, move |file_system_type, superblock_flags| {
+        v9fs::Fs9pFilesystem::mount(file_system_type, superblock_flags, transport, mount_tag)
+    })
+}
+
+#[cfg(feature = "fs9p")]
+static HOST_9P_TYPE: FileSystemType = FileSystemType::nodev("9p", host_9p_get_tree);
+
+#[cfg(feature = "fs9p")]
+#[macros::register_init]
+fn init_host_9p_fs() {
+    kvfs::register_filesystem(&HOST_9P_TYPE).expect("9P filesystem type must register once");
 }
 
 const PSEUDO_FS_MOUNT_FLAGS: MountFlags = MountFlags::NOSUID
@@ -63,35 +92,29 @@ impl v9fs::Transport for Virtio9pTransport {
     }
 }
 
-fn register_filesystem_types() {
-    kvfs::register_filesystem(fs_block::RootFileSystem::file_system_type())
-        .expect("root filesystem type must register once");
-    kvfs::register_filesystem(devfs::FILE_SYSTEM_TYPE).expect("devtmpfs type must register once");
-    kvfs::register_filesystem(procfs::FILE_SYSTEM_TYPE).expect("proc type must register once");
-    kvfs::register_filesystem(memfs::SYSFS_TYPE).expect("sysfs type must register once");
-    kvfs::register_filesystem(memfs::TMPFS_TYPE).expect("tmpfs type must register once");
-    #[cfg(feature = "ebpf")]
-    kvfs::register_filesystem(bpffs::FILE_SYSTEM_TYPE).expect("bpf type must register once");
-}
-
-/// Prepares the initial mount namespace and init fs_struct.
+/// Prepares the initial mount namespace from registered filesystem types.
+///
+/// # Panics
+///
+/// Panics if filesystem initcalls have not registered the required canonical
+/// types, or if bootstrap mounts, root device selection, root filesystem
+/// construction, or init `fs_struct` setup fails.
 pub fn prepare_namespace() {
-    register_filesystem_types();
-    let bootstrap =
-        memfs::ramfs::new_ramfs_with_name_and_superblock_flags("rootfs", SuperBlockFlags::empty());
+    let bootstrap = memfs::ramfs::new_rootfs(SuperBlockFlags::empty());
     BootVfs::install_initial_root(bootstrap);
 
     let boot = BootVfs::initial();
+    boot.ensure_directory_path("/dev")
+        .expect("Failed to create bootstrap /dev mountpoint");
     boot.mount_at(
         "/dev",
-        devfs::new_devfs(SuperBlockFlags::empty()),
+        &devfs::FILE_SYSTEM_TYPE,
+        None,
+        SuperBlockFlags::empty(),
         DEVFS_MOUNT_FLAGS,
     )
     .expect("Failed to mount bootstrap devfs");
-    let (root_fs, source) = mount_root_super_block(&boot.root);
-    boot.namespace
-        .attach_with_flags_and_devname(&boot.root, &root_fs, MountFlags::RELATIME, Some(&source))
-        .expect("Failed to graft root filesystem");
+    mount_root_file_system(&boot);
     let root = boot.namespace.visible_root_path();
     fs_context::init_fs()
         .lock()
@@ -129,46 +152,66 @@ impl BootVfs {
     }
 
     fn mount_virtual_filesystems(&self) {
+        self.ensure_directory_path("/dev")
+            .expect("Failed to create /dev mountpoint");
         self.mount_at(
             "/dev",
-            devfs::new_devfs(SuperBlockFlags::empty()),
+            &devfs::FILE_SYSTEM_TYPE,
+            None,
+            SuperBlockFlags::empty(),
             DEVFS_MOUNT_FLAGS,
         )
         .expect("Failed to mount devfs");
+        self.ensure_directory_path("/dev/shm")
+            .expect("Failed to create /dev/shm mountpoint");
         self.mount_at(
             "/dev/shm",
-            memfs::shmem::new_tmpfs(SuperBlockFlags::empty()),
+            &memfs::TMPFS_TYPE,
+            None,
+            SuperBlockFlags::empty(),
             TMPFS_MOUNT_FLAGS,
         )
         .expect("Failed to mount /dev/shm");
+        self.ensure_directory_path("/tmp")
+            .expect("Failed to create /tmp mountpoint");
         self.mount_at(
             "/tmp",
-            memfs::shmem::new_tmpfs(SuperBlockFlags::empty()),
+            &memfs::TMPFS_TYPE,
+            None,
+            SuperBlockFlags::empty(),
             TMPFS_MOUNT_FLAGS,
         )
         .expect("Failed to mount /tmp");
+        self.ensure_directory_path("/proc")
+            .expect("Failed to create /proc mountpoint");
         self.mount_at(
             "/proc",
-            procfs::new_procfs(SuperBlockFlags::empty()),
+            &procfs::FILE_SYSTEM_TYPE,
+            None,
+            SuperBlockFlags::empty(),
             PSEUDO_FS_MOUNT_FLAGS,
         )
         .expect("Failed to mount procfs");
+        self.ensure_directory_path("/sys")
+            .expect("Failed to create /sys mountpoint");
         self.mount_at(
             "/sys",
-            memfs::new_sysfs(SuperBlockFlags::empty()),
+            &memfs::SYSFS_TYPE,
+            None,
+            SuperBlockFlags::empty(),
             PSEUDO_FS_MOUNT_FLAGS,
         )
         .expect("Failed to mount sysfs");
 
         #[cfg(feature = "ebpf")]
         {
-            if self.lookup("/sys/fs").is_err() {
-                self.mkdir_path("/sys/fs")
-                    .expect("Failed to create /sys/fs");
-            }
+            self.ensure_directory_path("/sys/fs/bpf")
+                .expect("Failed to create /sys/fs/bpf mountpoint");
             self.mount_at(
                 "/sys/fs/bpf",
-                bpffs::new_bpffs(SuperBlockFlags::empty()),
+                &bpffs::FILE_SYSTEM_TYPE,
+                None,
+                SuperBlockFlags::empty(),
                 PSEUDO_FS_MOUNT_FLAGS,
             )
             .expect("Failed to mount bpffs");
@@ -219,21 +262,22 @@ impl BootVfs {
         })
     }
 
-    fn mount_at(&self, path: &str, fs: Arc<SuperBlock>, flags: MountFlags) -> kvfs::VfsResult<()> {
-        let mountpoint = match self.lookup(path) {
-            Ok(loc) if loc.is_dir() => loc,
-            Ok(_) => {
-                Filename::new(path).unlink_at(&self.root, &self.root, &kcred::initial_cred())?;
-                self.mkdir_path(path)?;
-                self.lookup(path)?
-            }
-            Err(_) => {
-                self.mkdir_path(path)?;
-                self.lookup(path)?
-            }
-        };
+    fn mount_at(
+        &self,
+        path: &str,
+        file_system_type: &'static FileSystemType,
+        source: Option<&str>,
+        superblock_flags: SuperBlockFlags,
+        mount_flags: MountFlags,
+    ) -> kvfs::VfsResult<()> {
+        let mountpoint = self.lookup(path)?;
+        if !mountpoint.is_dir() {
+            return Err(kvfs::VfsError::NotADirectory);
+        }
+        let cred = kcred::initial_cred();
+        let context = kvfs::FsContext::new(file_system_type, source, superblock_flags, &cred);
         self.namespace
-            .attach_with_flags_and_devname(&mountpoint, &fs, flags, None)?;
+            .mount_new(&mountpoint, mount_flags, &context, &self.root, &self.root)?;
         Ok(())
     }
 
@@ -249,21 +293,9 @@ impl BootVfs {
         }
         Ok(())
     }
-
-    #[cfg(feature = "fs9p")]
-    fn mount_host_share(&self, mount_path: &str, fs: Arc<SuperBlock>) -> kvfs::VfsResult<()> {
-        self.ensure_directory_path(mount_path)?;
-        self.namespace.attach_with_flags_and_devname(
-            &self.lookup(mount_path)?,
-            &fs,
-            MountFlags::RELATIME,
-            None,
-        )?;
-        Ok(())
-    }
 }
 
-fn mount_root_super_block(lookup_root: &Path) -> (Arc<kvfs::SuperBlock>, alloc::string::String) {
+fn mount_root_file_system(boot: &BootVfs) {
     info!("Initialize filesystem subsystem...");
 
     let mut block_devs = block::block_devices()
@@ -279,22 +311,53 @@ fn mount_root_super_block(lookup_root: &Path) -> (Arc<kvfs::SuperBlock>, alloc::
         handle.device_number(),
     );
 
+    let file_system_types: Vec<_> = kvfs::registered_filesystems()
+        .into_iter()
+        .filter(|file_system_type| file_system_type.requires_device())
+        .collect();
     let cred = kcred::initial_cred();
-    let context = kvfs::FsContext::new(
-        fs_block::RootFileSystem::file_system_type(),
-        Some(&source),
-        SuperBlockFlags::empty(),
-        &cred,
-    );
-    let fs = match context.get_tree(lookup_root, lookup_root) {
-        Ok(fs) => fs,
-        Err(e) => {
-            error!("Failed to mount root filesystem: {e:?}");
-            panic!("VFS: Unable to mount root fs");
+    for superblock_flags in [SuperBlockFlags::empty(), SuperBlockFlags::RDONLY] {
+        let mut mount_flags = MountFlags::RELATIME;
+        if superblock_flags.contains(SuperBlockFlags::RDONLY) {
+            mount_flags.insert(MountFlags::RDONLY);
         }
-    };
-    info!("  filesystem type: {:?}", fs.name());
-    (fs, source)
+
+        for file_system_type in &file_system_types {
+            let context =
+                kvfs::FsContext::new(file_system_type, Some(&source), superblock_flags, &cred);
+            match boot.namespace.mount_new(
+                &boot.root,
+                mount_flags,
+                &context,
+                &boot.root,
+                &boot.root,
+            ) {
+                Ok(mount) => {
+                    info!("  filesystem type: {:?}", mount.filesystem_name());
+                    return;
+                }
+                Err(err) => {
+                    if matches!(
+                        kerrno::LinuxError::from(err),
+                        kerrno::LinuxError::EACCES | kerrno::LinuxError::EINVAL
+                    ) {
+                        debug!(
+                            "root filesystem probe as {} failed: {err:?}",
+                            file_system_type.name()
+                        );
+                        continue;
+                    }
+                    error!(
+                        "Failed to mount root filesystem as {}: {err:?}",
+                        file_system_type.name()
+                    );
+                    panic!("VFS: Unable to mount root fs");
+                }
+            }
+        }
+    }
+    error!("Failed to mount {source} using any registered block filesystem type");
+    panic!("VFS: Unable to mount root fs");
 }
 
 /// Chooses the block device used as the root filesystem.
@@ -328,42 +391,18 @@ fn select_root_block(devs: &mut Vec<Arc<block::BlockDevice>>) -> Arc<block::Bloc
 /// Mounts the host-share 9P filesystem into the initial namespace.
 #[cfg(feature = "fs9p")]
 pub fn mount_host_share(mount_path: &str) {
-    let mut virtio_9p_devs = virtio_9p_devices();
-    let handle = virtio_9p_devs.pop().expect("No virtio-9p device found!");
-    let backing_id = handle.id();
-    subscribe_fs_backing_unregister(backing_id, "virtio-9p");
-    let mount_tag = handle.mount_tag();
-    info!("Mount 9P filesystem...");
-    info!("  use virtio-9p device: {:?}", handle.name());
-    info!("  mount tag: {:?}", mount_tag);
-
-    let transport = Box::new(Virtio9pTransport(Mutex::new(handle)));
-    let fs =
-        v9fs::Fs9pFilesystem::mount(transport, mount_tag).expect("Failed to initialize filesystem");
-    info!("  filesystem type: {:?}", fs.name());
-    BootVfs::initial()
-        .mount_host_share(mount_path, fs)
-        .expect("Failed to mount 9P filesystem");
+    let boot = BootVfs::initial();
+    boot.ensure_directory_path(mount_path)
+        .expect("Failed to create 9P mountpoint path");
+    boot.mount_at(
+        mount_path,
+        &HOST_9P_TYPE,
+        None,
+        SuperBlockFlags::empty(),
+        MountFlags::RELATIME,
+    )
+    .expect("Failed to mount 9P filesystem");
     info!("  mounted at: {:?}", mount_path);
-}
-
-#[cfg(feature = "fs9p")]
-fn subscribe_fs_backing_unregister(id: DeviceId, label: &'static str) {
-    FS_BACKING_DEVICES.lock().push(id);
-    subscribe_device_removed(Arc::new(move |removed_id| {
-        if removed_id != id {
-            return;
-        }
-        let mut devices = FS_BACKING_DEVICES.lock();
-        if let Some(pos) = devices.iter().position(|device_id| *device_id == id) {
-            devices.swap_remove(pos);
-            warn!(
-                "filesystem: mounted {} backing device {:?} was removed; mounted filesystem is \
-                 now stale",
-                label, id
-            );
-        }
-    }));
 }
 
 fn for_each_lexical_component<E>(

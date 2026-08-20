@@ -52,7 +52,7 @@ kernel-boot (汇编 / MMU / BootInfo)
         ▼
 ┌───────────────────────────────────────────────────────────────┐
 │  late_init (Internal, PID-less bootstrap thread)              │
-│    drivers / fs / net / SMP / IPI / init_cb                  │
+│    drivers / init_cb / fs / net / SMP / IPI                  │
 │    等待 INITED_CPUS == nr_cpus                                │
 │    SystemInitEntry::enter() ─────────────► entry crate        │
 │    entry spawns and activates fresh PID 1 init task           │
@@ -106,13 +106,15 @@ BootInfo*
 late-init thread (Internal, PID-less):
     → [smp] start_secondary_cpus
     → init_drivers
-    → [char/display/input] console handoff / fb / input
+    → [char] console handoff
+    → entropy
+    → init_setup::init_cb
+    → [display/input] fb / input
     → [fs] fs_boot (root namespace, virtual filesystems)
     → [fs9p] fs_boot host-share mount
     → [net/vsock] knet
     → [ipi] kipi::init, mark_all_cpus_started
     → [watchdog] init_primary
-    → init_setup::init_cb
     → finish_allocator_init, log_memory_regions
     → INITED_CPUS += 1
     → spin until is_init_ok()
@@ -177,7 +179,7 @@ SecondaryKernelEntry::enter(logical_cpu_id)
 `init_setup.rs` 维护链接器段 `.init_array`：
 
 - `_SECTION_PLACE_HOLDER`：保证空镜像也有 `__init_array_start` / `__init_array_end`。
-- `init_cb()`：在 `init_interrupt` 之后、`finish_allocator_init` 之前，按指针步进调用段内每个 `extern "C" fn()`。
+- `init_cb()`：在 driver/entropy 初始化之后、filesystem namespace 建立之前，按指针步进调用段内每个 `extern "C" fn()`。
 
 各子系统可通过 `util/macros` 的 `#[register_init]` 向该段注册早期 init，无需修改 `kruntime` 源码列表。
 
@@ -189,7 +191,6 @@ SecondaryKernelEntry::enter(logical_cpu_id)
 | `klogger::LoggerAdapter` | `lib.rs` | 日志输出到 `khal::console`，附带 CPU/任务 ID |
 | `kernel_boot::PrimaryKernelEntry` | `lib.rs` | 主核从 boot 层进入 `rust_main` |
 | `kernel_boot::SecondaryKernelEntry` | `mp.rs` | 从核从 boot 层进入 `rust_main_secondary` |
-| `fs_block::RootFileSystem` | Kconfig 所选 `kext4_vfs` / `fat` crate | 提供 root block filesystem mount，避免 boot 按实现分支 |
 | `kruntime::SystemInitEntry` | `entry/src/main.rs` | runtime 就绪后进入系统级 init 策略层 |
 均为链接期 exactly-one 单实现，非运行时注册。
 
@@ -199,7 +200,7 @@ SecondaryKernelEntry::enter(logical_cpu_id)
 |---------|------|
 | `smp` | 从核启动、`rust_main_secondary`、`memspace`/`ktask`/`khal` SMP |
 | `ipi` | 依赖 `kipi`；IPI 中断处理 |
-| `fs` / `fs9p` / `net` / `vsock` / `display` / `input` | 驱动与子系统初始化（经 `kdriver`）；具体 root filesystem feature 只链接对应 `RootFileSystem` provider |
+| `fs` / `fs9p` / `net` / `vsock` / `display` / `input` | 驱动与子系统初始化（经 `kdriver`）；具体文件系统由 `kfeat` 链接并通过 `register_init` 自注册，`kruntime` 不依赖后端 crate，`fs_boot` 从 registry 探测 root |
 | `rtc` | 启动时打印墙钟时间 |
 | `watchdog` / `watchdog_hardlockup` | 看门狗主/从核初始化 |
 | `pmu` | PMU 溢出中断 |
@@ -216,7 +217,9 @@ SecondaryKernelEntry::enter(logical_cpu_id)
 
 ### 为何主核才跑 `init_cb`
 
-`.init_array` 回调假定中断子系统已注册、且尚未进入多任务应用阶段；放在 `init_interrupt` 之后、调用 `SystemInitEntry::enter()` 之前，与 C 运行时 constructor 时机相近，但由内核显式控制调用点。
+`.init_array` 回调假定中断、驱动和 entropy 已初始化，且 filesystem namespace 尚未建立；
+这保证文件系统 descriptor 在 root 探测前可见，同时仍处于用户态和普通并发工作负载启动前。
+其时机与 Linux initcall 相近，但由内核显式控制调用点。
 
 ### 为何 DMA 接线放在独立模块
 

@@ -36,6 +36,7 @@ ktask.workspace = true
 kprocess.workspace = true
 ktty.workspace = true
 kvfs.workspace = true
+macros.workspace = true
 
 linux-raw-sys = { workspace = true, features = ["ioctl"] }
 memaddr.workspace = true

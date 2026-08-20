@@ -15,7 +15,7 @@ use crate::{FileSystemType, Path, SuperBlock, SuperBlockFlags, VfsResult};
 /// the calling process's `fs_struct`; KVFS passes pathname state explicitly to
 /// [`FsContext::get_tree`] because it has no ambient `current` dependency.
 pub struct FsContext<'a> {
-    fs_type: FileSystemType,
+    fs_type: &'static FileSystemType,
     source: Option<&'a str>,
     sb_flags: SuperBlockFlags,
     cred: &'a kcred::Cred,
@@ -24,7 +24,7 @@ pub struct FsContext<'a> {
 impl<'a> FsContext<'a> {
     /// Creates a filesystem context from a validated mount request.
     pub const fn new(
-        fs_type: FileSystemType,
+        fs_type: &'static FileSystemType,
         source: Option<&'a str>,
         sb_flags: SuperBlockFlags,
         cred: &'a kcred::Cred,
@@ -48,7 +48,7 @@ impl<'a> FsContext<'a> {
     }
 
     /// Returns the filesystem type selected for this request.
-    pub const fn fs_type(&self) -> FileSystemType {
+    pub const fn fs_type(&self) -> &'static FileSystemType {
         self.fs_type
     }
 

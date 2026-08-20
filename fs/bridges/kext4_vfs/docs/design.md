@@ -75,8 +75,16 @@ Mount 先分配 nascent `SuperBlock`，再由 root initializer 使用
 `SuperBlock::get_or_try_init_inode()` 读取 ext4 root；普通 lookup 从当前目录 inode 取得同一个
 superblock 并进入同一 API。命中 `Live` 直接返回现有 `VfsInode`；命中 `New/Freeing` 等待；
 只有获得空 slot 的 owner 才调用 core inode decode，构造 bridge private state，在绑定
-superblock 后发布 `Live`。root 初始化失败时 superblock 不进入全局 registry，`New` slot 被删除、
-等待者被唤醒并允许重试。
+superblock 后发布 `Live`。root 初始化失败时 VFS 删除已注册的 nascent superblock identity，
+`New` inode slot 随对象一起销毁，等待同一设备的 mount 调用者被唤醒并允许重试。
+
+本 crate 拥有唯一静态 `FILE_SYSTEM_TYPE`，并由自己的 `register_init` 回调将它注册进 KVFS。
+`kruntime` 不依赖或列举 ext4 后端。其 `get_tree`
+先进入 KVFS `get_tree_bdev()` 完成 source/device policy 和 `(s_type, dev_t)` identity
+reservation；已有实例直接复用，只有新生 reservation 调用 `Ext4Filesystem::fill_super()`。
+KVFS 在调用前已经给 nascent `SuperBlock` 建立 canonical `s_type/s_bdev/s_flags`；fill-super
+只从该对象取得 `s_bdev`，安装 ext4 operations 与 root，不接收或复制 type、device、flags。
+root boot 和用户 `mount(2)` 不存在另一条 ext4 mount callback 或实例缓存。
 
 Buffered writeback 由每个 bridge inode 的 `writeback_lock` 串行化一个 PageCache writeback pass。
 delayed-allocation 区间树、`i_reserved_data_blocks` 等价计数和 mount-wide aggregate 全部归

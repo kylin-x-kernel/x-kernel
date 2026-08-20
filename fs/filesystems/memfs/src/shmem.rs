@@ -9,7 +9,8 @@ use alloc::{string::String, sync::Arc};
 use kcred::Cred;
 use ksync::{Mutex, static_lock};
 use kvfs::{
-    Mount, NodePermission, Path, SuperBlock, SuperBlockFlags, VfsFile, VfsResult, dentry_open,
+    FileSystemType, Mount, NodePermission, Path, SuperBlock, SuperBlockFlags, VfsFile, VfsResult,
+    dentry_open,
 };
 use linux_raw_sys::general::{
     F_SEAL_FUTURE_WRITE, F_SEAL_GROW, F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_WRITE, O_CREAT, O_EXCL,
@@ -37,8 +38,15 @@ bitflags::bitflags! {
 
 /// Creates a tmpfs superblock.
 pub fn new_tmpfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
-    MemoryFs::new_with_name_superblock_flags_and_root_mode(
-        "tmpfs",
+    new_tmpfs_with_type(&crate::TMPFS_TYPE, superblock_flags)
+}
+
+pub(crate) fn new_tmpfs_with_type(
+    file_system_type: &'static FileSystemType,
+    superblock_flags: SuperBlockFlags,
+) -> Arc<SuperBlock> {
+    MemoryFs::new_with_file_system_type_superblock_flags_and_root_mode(
+        file_system_type,
         TMPFS_MAGIC,
         superblock_flags,
         NodePermission::from_bits_truncate(0o1777),

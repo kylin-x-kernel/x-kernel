@@ -20,6 +20,7 @@ vmm = ["dep:kvmm"]
 [dependencies]
 kbuild_config.workspace = true
 kvfs.workspace = true
+macros.workspace = true
 kaddr_layout.workspace = true
 kalloc.workspace = true
 kcpu_id_map.workspace = true

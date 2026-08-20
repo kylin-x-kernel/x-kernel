@@ -12,6 +12,7 @@
 | `struct block_device_operations` | `BlockDeviceOperations` | driver/backend algorithm、open mode callback |
 | `struct gendisk` | `Gendisk` | disk name、major/minor range、state、operations |
 | `struct block_device` | `BlockDevice` | `dev_t`、disk view、capacity |
+| `bd_holder` / exclusive `bdev_open` | `BlockDeviceClaim` | exclusive holder lifetime |
 | `add_disk` / `del_gendisk` | 同名函数 | 显式 publish/unpublish |
 | `blkdev_get_no_open` | `lookup_block_device` | canonical `dev_t` lookup |
 | `set_capacity` | `BlockDevice::set_capacity` | 可变介质容量发布 |
@@ -34,7 +35,13 @@ registry。devfs、KVFS block-special open、filesystem mount 和 boot root sele
 该 registry，不各自维护映射。
 
 `del_gendisk` 按 part0 `dev_t` 取得 owning disk，并删除所有指向它的 device views。已有
-`Arc<BlockDevice>` 维持对象内存生命周期；新 lookup 不再取得已撤销对象。
+`Arc<BlockDevice>` 维持对象内存生命周期；新 lookup 不再取得已撤销对象。相同 `dev_t`
+随后重新发布会产生新的 canonical `BlockDevice` 对象，使用者以对象 identity 区分介质代际。
+
+`BlockDevice::claim_exclusive()` 返回 RAII `BlockDeviceClaim`，对应 Linux block holder
+所有权。一个 canonical device 同时只允许一个 holder；filesystem superblock 直接持有该
+token，并在初始化失败或 final shutdown 进入 dead 后释放。因此不同 filesystem instance
+不能同时拥有同一介质，且 block core 不需要了解 VFS 或文件系统类型。
 
 ## I/O 边界
 

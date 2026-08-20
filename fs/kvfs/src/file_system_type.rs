@@ -30,7 +30,11 @@ pub type GetTreeFn =
     for<'a> fn(&FsContext<'a>, &crate::Path, &crate::Path) -> VfsResult<Arc<SuperBlock>>;
 
 /// A filesystem implementation known to the VFS.
-#[derive(Clone, Copy)]
+///
+/// Registered implementations expose one static descriptor, matching the
+/// identity and lifetime of Linux `struct file_system_type` objects. A
+/// superblock created through this descriptor retains the same reference as
+/// its Linux-equivalent `s_type` identity.
 pub struct FileSystemType {
     name: &'static str,
     get_tree: GetTreeFn,
@@ -57,12 +61,12 @@ impl FileSystemType {
     }
 
     /// Returns the registered filesystem name.
-    pub const fn name(self) -> &'static str {
+    pub const fn name(&self) -> &'static str {
         self.name
     }
 
     /// Returns whether this filesystem requires a backing device.
-    pub const fn requires_device(self) -> bool {
+    pub const fn requires_device(&self) -> bool {
         self.fs_flags.contains(FileSystemTypeFlags::REQUIRES_DEV)
     }
 
@@ -75,7 +79,7 @@ impl FileSystemType {
     /// without a device name, or [`VfsError::NoSuchDevice`] when the named
     /// backing device does not exist.
     pub(crate) fn get_tree(
-        self,
+        &self,
         context: &FsContext<'_>,
         lookup_root: &crate::Path,
         lookup_pwd: &crate::Path,
@@ -84,14 +88,15 @@ impl FileSystemType {
     }
 }
 
-static FILE_SYSTEMS: Lazy<Mutex<Vec<FileSystemType>>> = Lazy::new(|| Mutex::new(Vec::new()));
+static FILE_SYSTEMS: Lazy<Mutex<Vec<&'static FileSystemType>>> =
+    Lazy::new(|| Mutex::new(Vec::new()));
 
-/// Registers one filesystem type.
+/// Registers one canonical static filesystem type.
 ///
 /// # Errors
 ///
 /// Returns [`VfsError::ResourceBusy`] when the name is already registered.
-pub fn register_filesystem(file_system_type: FileSystemType) -> VfsResult<()> {
+pub fn register_filesystem(file_system_type: &'static FileSystemType) -> VfsResult<()> {
     let mut file_systems = FILE_SYSTEMS.lock();
     if file_systems
         .iter()
@@ -103,8 +108,8 @@ pub fn register_filesystem(file_system_type: FileSystemType) -> VfsResult<()> {
     Ok(())
 }
 
-/// Finds a registered filesystem type by its exact name.
-pub fn get_filesystem_type(name: &str) -> Option<FileSystemType> {
+/// Finds the registered static filesystem type with the exact name.
+pub fn get_filesystem_type(name: &str) -> Option<&'static FileSystemType> {
     FILE_SYSTEMS
         .lock()
         .iter()
@@ -112,7 +117,7 @@ pub fn get_filesystem_type(name: &str) -> Option<FileSystemType> {
         .find(|file_system_type| file_system_type.name == name)
 }
 
-/// Returns a snapshot of all registered filesystem types.
-pub fn registered_filesystems() -> Vec<FileSystemType> {
+/// Returns a snapshot of references to all registered filesystem types.
+pub fn registered_filesystems() -> Vec<&'static FileSystemType> {
     FILE_SYSTEMS.lock().clone()
 }

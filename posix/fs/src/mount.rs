@@ -117,7 +117,8 @@ fn path_mount(
     let file_system_type = kvfs::get_filesystem_type(fs_type).ok_or(KError::NoSuchDevice)?;
     let (root, pwd) = process.fs_context()?.lock().root_and_pwd();
     let context = kvfs::FsContext::new(file_system_type, dev_name, superblock_flags, cred);
-    do_new_mount(&namespace, target, mount_flags, &context, &root, &pwd)
+    namespace.mount_new(target, mount_flags, &context, &root, &pwd)?;
+    Ok(())
 }
 
 fn lookup_mount_path(process: &Process, name: &str, cred: &kcred::Cred) -> KResult<Path> {
@@ -144,24 +145,6 @@ fn do_loopback(
         .ok_or(KError::InvalidInput)?;
     let old_path = lookup_mount_path(process, old_name, cred)?;
     namespace.attach_bind(&old_path, mountpoint)?;
-    Ok(())
-}
-
-fn do_new_mount(
-    namespace: &MntNamespace,
-    mountpoint: &Path,
-    mount_flags: MountFlags,
-    context: &kvfs::FsContext<'_>,
-    lookup_root: &Path,
-    lookup_pwd: &Path,
-) -> KResult<()> {
-    let mount_fs = context.get_tree(lookup_root, lookup_pwd)?;
-    namespace.attach_with_flags_and_devname(
-        mountpoint,
-        &mount_fs,
-        mount_flags,
-        context.source(),
-    )?;
     Ok(())
 }
 

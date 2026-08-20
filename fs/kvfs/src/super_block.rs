@@ -11,21 +11,53 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use hashbrown::HashMap;
 use klazy::{Lazy, Once};
+use ktask::WaitQueue;
 
 use crate::{
-    Dentry, DentryKey, Filename, FsContext, LookupFlags, LookupIntent, MountFlags, Mutex,
-    MutexGuard, NodeType, Path, VfsError, VfsInode, VfsResult, WritebackControl, node,
+    Dentry, DentryKey, FileSystemType, Filename, FsContext, LookupFlags, LookupIntent, MountFlags,
+    Mutex, MutexGuard, NodeType, Path, VfsError, VfsInode, VfsResult, WritebackControl, node,
 };
 
-type FillSuperNodevFn = fn(SuperBlockFlags) -> VfsResult<Arc<SuperBlock>>;
-type FillSuperBdevFn = fn(Arc<block::BlockDevice>, SuperBlockFlags) -> VfsResult<Arc<SuperBlock>>;
+type FillSuperBdevFn = fn(&Arc<SuperBlock>) -> VfsResult<()>;
+
+fn has_readonly_mismatch(current: SuperBlockFlags, requested: SuperBlockFlags) -> bool {
+    (current ^ requested).contains(SuperBlockFlags::RDONLY)
+}
+
+fn validate_block_device_flags(
+    block_device: &block::BlockDevice,
+    flags: SuperBlockFlags,
+) -> VfsResult<()> {
+    if block_device.is_read_only() && !flags.contains(SuperBlockFlags::RDONLY) {
+        return Err(VfsError::PermissionDenied);
+    }
+    Ok(())
+}
+
+#[cfg(unittest)]
+fn test_get_tree(
+    _context: &FsContext<'_>,
+    _lookup_root: &Path,
+    _lookup_pwd: &Path,
+) -> VfsResult<Arc<SuperBlock>> {
+    unreachable!("the test filesystem type does not provide a mount entry")
+}
+
+#[cfg(unittest)]
+pub(crate) static TEST_FILE_SYSTEM_TYPE: FileSystemType =
+    FileSystemType::nodev("mockfs", test_get_tree);
 
 /// Constructs a device-less superblock from a filesystem context.
+///
+/// The fill operation receives the context's canonical filesystem type and
+/// superblock flags so the new instance can establish its VFS identity during
+/// allocation. It is one-shot so the filesystem can transfer per-mount
+/// resources, such as a transport session, into the new instance.
 pub fn get_tree_nodev(
     context: &FsContext<'_>,
-    fill_super: FillSuperNodevFn,
+    fill_super: impl FnOnce(&'static FileSystemType, SuperBlockFlags) -> VfsResult<Arc<SuperBlock>>,
 ) -> VfsResult<Arc<SuperBlock>> {
-    fill_super(context.sb_flags())
+    fill_super(context.fs_type(), context.sb_flags())
 }
 
 /// Constructs a block-backed superblock from a filesystem context.
@@ -33,7 +65,9 @@ pub fn get_tree_nodev(
 /// This is the VFS counterpart of Linux `get_tree_bdev()`: it resolves
 /// `fc->source`, validates the resulting block-special inode and mount policy,
 /// obtains the canonical `BlockDevice` from the block core, and invokes the
-/// filesystem's fill operation.
+/// filesystem's fill operation only for a newly reserved identity. Existing
+/// instances are reused by canonical filesystem type and block device,
+/// corresponding to Linux `sget_dev()`.
 pub fn get_tree_bdev(
     context: &FsContext<'_>,
     lookup_root: &Path,
@@ -64,10 +98,13 @@ pub fn get_tree_bdev(
     }
     let device = block::lookup_block_device(device_number)
         .ok_or_else(|| VfsError::from(kerrno::LinuxError::ENXIO))?;
-    if device.is_read_only() && !context.sb_flags().contains(SuperBlockFlags::RDONLY) {
-        return Err(VfsError::PermissionDenied);
-    }
-    fill_super(device, context.sb_flags())
+    validate_block_device_flags(&device, context.sb_flags())?;
+    super_block_registry().get_or_try_init_bdev(
+        context.fs_type(),
+        device,
+        context.sb_flags(),
+        fill_super,
+    )
 }
 
 static SUPER_BLOCK_REGISTRY: Lazy<SuperBlockRegistry> = Lazy::new(SuperBlockRegistry::new);
@@ -84,21 +121,52 @@ pub fn sync_filesystems() -> VfsResult<()> {
 
 #[derive(Debug, Default)]
 struct SuperBlockSet {
-    super_blocks: HashMap<usize, Weak<SuperBlock>>,
+    super_blocks: Vec<Weak<SuperBlock>>,
 }
 
 impl SuperBlockSet {
     fn register(&mut self, super_block: &Arc<SuperBlock>) {
-        self.super_blocks.insert(
-            Arc::as_ptr(super_block) as usize,
-            Arc::downgrade(super_block),
-        );
+        self.super_blocks.push(Arc::downgrade(super_block));
+    }
+
+    fn lookup_bdev(
+        &mut self,
+        file_system_type: &'static FileSystemType,
+        block_device: &Arc<block::BlockDevice>,
+    ) -> Option<Arc<SuperBlock>> {
+        let mut matching = None;
+        self.super_blocks
+            .retain(|registered| match registered.upgrade() {
+                Some(super_block) => {
+                    if matching.is_none()
+                        && core::ptr::eq(super_block.file_system_type(), file_system_type)
+                        && super_block.block_device().is_some_and(|registered_device| {
+                            Arc::ptr_eq(registered_device, block_device)
+                        })
+                    {
+                        matching = Some(super_block);
+                    }
+                    true
+                }
+                None => false,
+            });
+        matching
+    }
+
+    fn unregister(&mut self, super_block: &SuperBlock) {
+        if let Some(index) = self
+            .super_blocks
+            .iter()
+            .position(|registered| core::ptr::eq(registered.as_ptr(), super_block))
+        {
+            self.super_blocks.swap_remove(index);
+        }
     }
 
     fn live_super_blocks(&mut self) -> Vec<Arc<SuperBlock>> {
         let mut live = Vec::new();
         self.super_blocks
-            .retain(|_, super_block| match super_block.upgrade() {
+            .retain(|super_block| match super_block.upgrade() {
                 Some(super_block) => {
                     live.push(super_block);
                     true
@@ -124,6 +192,54 @@ impl SuperBlockRegistry {
         self.super_blocks.lock().register(super_block);
     }
 
+    fn get_or_try_init_bdev(
+        &self,
+        file_system_type: &'static FileSystemType,
+        block_device: Arc<block::BlockDevice>,
+        flags: SuperBlockFlags,
+        fill_super: FillSuperBdevFn,
+    ) -> VfsResult<Arc<SuperBlock>> {
+        loop {
+            let (super_block, is_new) = {
+                let mut super_blocks = self.super_blocks.lock();
+                match super_blocks.lookup_bdev(file_system_type, &block_device) {
+                    Some(super_block) => (super_block, false),
+                    None => {
+                        let claim = block_device.claim_exclusive()?;
+                        let candidate = SuperBlock::allocate(file_system_type, Some(claim), flags);
+                        super_blocks.register(&candidate);
+                        (candidate, true)
+                    }
+                }
+            };
+            if is_new {
+                match fill_super(&super_block) {
+                    Ok(()) => super_block.finish_initialization(),
+                    Err(error) => {
+                        // Keep identity removal and holder release atomic with
+                        // respect to a new sget attempt.
+                        {
+                            let mut super_blocks = self.super_blocks.lock();
+                            super_block.fail_initialization();
+                            super_blocks.unregister(&super_block);
+                        }
+                        super_block.lifecycle_waiters.notify_all(false);
+                        return Err(error);
+                    }
+                }
+                return Ok(super_block);
+            }
+
+            if !super_block.wait_until_available_or_dead() {
+                continue;
+            }
+            if has_readonly_mismatch(super_block.flags(), flags) {
+                return Err(VfsError::ResourceBusy);
+            }
+            return Ok(super_block);
+        }
+    }
+
     /// Returns a snapshot of live superblocks and prunes dropped ones.
     pub fn live_super_blocks(&self) -> Vec<Arc<SuperBlock>> {
         self.super_blocks.lock().live_super_blocks()
@@ -144,9 +260,6 @@ impl SuperBlockRegistry {
 /// all inodes in that instance. This boundary must not contain per-open-file
 /// state.
 pub trait SuperBlockOperations: Send + Sync + 'static {
-    /// Returns the filesystem type name.
-    fn name(&self) -> &str;
-
     /// Returns filesystem statistics.
     fn statfs(&self) -> VfsResult<StatFs>;
 
@@ -157,8 +270,9 @@ pub trait SuperBlockOperations: Send + Sync + 'static {
     /// that cannot transition from read-only to read-write can reject the
     /// change without exposing an intermediate state. `changed` corresponds to
     /// Linux `fs_context::sb_flags_mask`. Like Linux's absent callback, the
-    /// default accepts VFS-only flag changes; a filesystem backed by permanently
-    /// read-only media must override this method and reject a read-write target.
+    /// default accepts VFS-only flag changes. The VFS rejects a read-write
+    /// target for a read-only block device before invoking this hook; a
+    /// device-less or intrinsically read-only filesystem must reject it here.
     fn reconfigure(&self, _flags: SuperBlockFlags, _changed: SuperBlockFlags) -> VfsResult<()> {
         Ok(())
     }
@@ -306,19 +420,21 @@ pub struct StatFs {
 
 #[derive(Debug)]
 enum SuperBlockLifecycle {
+    Nascent,
     Available { active_mounts: usize },
     Dying,
     Dead,
 }
 
 impl SuperBlockLifecycle {
-    fn acquire_mount(&mut self) {
+    fn try_acquire_mount(&mut self) -> bool {
         let Self::Available { active_mounts } = self else {
-            panic!("a dying or dead superblock must not acquire an active mount");
+            return false;
         };
         *active_mounts = active_mounts
             .checked_add(1)
             .expect("active mount count must not overflow");
+        true
     }
 
     fn release_unless_last(&mut self) -> bool {
@@ -346,6 +462,10 @@ impl SuperBlockLifecycle {
     fn is_available(&self) -> bool {
         matches!(self, Self::Available { .. })
     }
+
+    fn is_initializing_or_dying(&self) -> bool {
+        matches!(self, Self::Nascent | Self::Dying)
+    }
 }
 
 /// VFS superblock object.
@@ -359,26 +479,45 @@ impl SuperBlockLifecycle {
 /// corresponding to Linux `s_vfs_rename_mutex`; same-directory rename does not
 /// take that mutex.
 pub struct SuperBlock {
-    ops: Arc<dyn SuperBlockOperations>,
+    /// Canonical filesystem type corresponding to Linux `super_block::s_type`.
+    file_system_type: &'static FileSystemType,
+    /// Exclusive claim on the canonical device corresponding to Linux
+    /// `super_block::s_bdev` and its block-device holder.
+    block_device: Option<block::BlockDeviceClaim>,
+    ops: Once<Arc<dyn SuperBlockOperations>>,
     root: Once<Dentry>,
     /// VFS-wide state corresponding to Linux `super_block::s_flags`.
     flags: AtomicSuperBlockFlags,
-    /// Active mount references and shutdown state, corresponding to Linux
-    /// `super_block::s_active` together with `SB_DYING` and `SB_DEAD`.
+    /// Initialization, active mounts, and shutdown state, corresponding to
+    /// Linux `SB_BORN`, `s_active`, `SB_DYING`, and `SB_DEAD`.
     lifecycle: Mutex<SuperBlockLifecycle>,
     /// Serializes reconfiguration and final shutdown, corresponding to Linux
     /// `super_block::s_umount`.
     umount_lock: Mutex<()>,
+    /// Wakes `sget_dev` callers after nascent initialization or final shutdown.
+    lifecycle_waiters: WaitQueue,
     dentry_cache: Mutex<HashMap<DentryKey, Dentry>>,
-    max_file_size: u64,
+    max_file_size: Once<u64>,
     rename_mutex: Mutex<()>,
     inodes: Mutex<Vec<Weak<VfsInode>>>,
 }
 
 impl SuperBlock {
     /// Returns the filesystem type name.
-    pub fn name(&self) -> &str {
-        self.ops.name()
+    pub const fn name(&self) -> &'static str {
+        self.file_system_type.name()
+    }
+
+    /// Returns the canonical filesystem type that created this superblock.
+    pub const fn file_system_type(&self) -> &'static FileSystemType {
+        self.file_system_type
+    }
+
+    /// Returns the canonical block device backing this superblock, if any.
+    pub fn block_device(&self) -> Option<&Arc<block::BlockDevice>> {
+        self.block_device
+            .as_ref()
+            .map(block::BlockDeviceClaim::device)
     }
 
     /// Returns the root dentry for this superblock.
@@ -391,7 +530,7 @@ impl SuperBlock {
 
     /// Returns filesystem statistics for this superblock.
     pub fn stat(&self) -> VfsResult<StatFs> {
-        self.ops.statfs()
+        self.ops().statfs()
     }
 
     /// Returns whether this superblock is read-only without issuing `statfs`.
@@ -404,25 +543,42 @@ impl SuperBlock {
         self.flags.load()
     }
 
+    pub(crate) fn is_available(&self) -> bool {
+        self.lifecycle.lock().is_available()
+    }
+
     /// Creates a superblock and initializes its root after allocation.
+    ///
+    /// `file_system_type` becomes the immutable equivalent of Linux
+    /// `super_block::s_type`.
     ///
     /// The initializer receives the nascent superblock so the root inode can be
     /// obtained through [`Self::get_or_init_inode`]. The superblock is published
     /// to the global registry only after the initializer returns its root.
     pub fn new(
+        file_system_type: &'static FileSystemType,
         ops: Arc<dyn SuperBlockOperations>,
         init_root_fn: impl FnOnce(&Arc<Self>) -> Dentry,
     ) -> Arc<Self> {
-        Self::new_with_flags(ops, SuperBlockFlags::empty(), init_root_fn)
+        Self::new_with_flags(
+            file_system_type,
+            ops,
+            SuperBlockFlags::empty(),
+            init_root_fn,
+        )
     }
 
     /// Creates a superblock with initial VFS-wide flags and then initializes its root.
+    ///
+    /// `file_system_type` becomes the immutable equivalent of Linux
+    /// `super_block::s_type`.
     pub fn new_with_flags(
+        file_system_type: &'static FileSystemType,
         ops: Arc<dyn SuperBlockOperations>,
         flags: SuperBlockFlags,
         init_root_fn: impl FnOnce(&Arc<Self>) -> Dentry,
     ) -> Arc<Self> {
-        match Self::try_new_with_flags(ops, flags, |super_block| {
+        match Self::try_new_with_flags(file_system_type, ops, flags, |super_block| {
             Ok::<_, core::convert::Infallible>(init_root_fn(super_block))
         }) {
             Ok(super_block) => super_block,
@@ -432,6 +588,9 @@ impl SuperBlock {
 
     /// Creates a superblock whose root initialization can fail.
     ///
+    /// `file_system_type` becomes the immutable equivalent of Linux
+    /// `super_block::s_type`.
+    ///
     /// A failed initializer leaves neither a root dentry nor a global
     /// superblock-registry entry behind.
     ///
@@ -440,35 +599,131 @@ impl SuperBlock {
     /// Returns the root initializer's error without publishing the nascent
     /// superblock.
     pub fn try_new_with_flags<E>(
+        file_system_type: &'static FileSystemType,
         ops: Arc<dyn SuperBlockOperations>,
         flags: SuperBlockFlags,
         init_root_fn: impl FnOnce(&Arc<Self>) -> Result<Dentry, E>,
     ) -> Result<Arc<Self>, E> {
-        let super_block = Self::allocate(ops, flags);
-        let root = init_root_fn(&super_block)?;
-        Self::publish_root(&super_block, root);
+        let super_block = Self::allocate(file_system_type, None, flags);
+        super_block.initialize(ops, init_root_fn)?;
+        super_block.finish_initialization();
+        super_block_registry().register(&super_block);
         Ok(super_block)
     }
 
-    fn allocate(ops: Arc<dyn SuperBlockOperations>, flags: SuperBlockFlags) -> Arc<Self> {
+    /// Installs filesystem operations and a root on a nascent superblock.
+    ///
+    /// This is the object-oriented fill-super operation. For a block-backed
+    /// filesystem, [`get_tree_bdev`] allocates and publishes the nascent object
+    /// before invoking the backend, corresponding to Linux `sget_dev()` passing
+    /// a new `struct super_block` to `fill_super()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the root initializer's error. The VFS discards a failed nascent
+    /// block-backed superblock without making it available for reuse.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the superblock is no longer nascent or initialization was
+    /// already attempted.
+    pub fn initialize<E>(
+        self: &Arc<Self>,
+        ops: Arc<dyn SuperBlockOperations>,
+        init_root_fn: impl FnOnce(&Arc<Self>) -> Result<Dentry, E>,
+    ) -> Result<(), E> {
+        assert!(
+            matches!(*self.lifecycle.lock(), SuperBlockLifecycle::Nascent),
+            "only a nascent superblock can be initialized"
+        );
+        assert!(
+            self.ops.get().is_none() && self.root.get().is_none(),
+            "a superblock can only be initialized once"
+        );
         let max_file_size = ops.max_file_size().min(MAX_LFS_FILESIZE);
+        self.ops.call_once(|| ops);
+        self.max_file_size.call_once(|| max_file_size);
+        let root = init_root_fn(self)?;
+        Self::publish_root(self, root);
+        Ok(())
+    }
+
+    fn allocate(
+        file_system_type: &'static FileSystemType,
+        block_device: Option<block::BlockDeviceClaim>,
+        flags: SuperBlockFlags,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            ops,
+            file_system_type,
+            block_device,
+            ops: Once::new(),
             root: Once::new(),
             flags: AtomicSuperBlockFlags::new(flags),
-            lifecycle: Mutex::new(SuperBlockLifecycle::Available { active_mounts: 0 }),
+            lifecycle: Mutex::new(SuperBlockLifecycle::Nascent),
             umount_lock: Mutex::default(),
+            lifecycle_waiters: WaitQueue::new(),
             dentry_cache: Mutex::default(),
-            max_file_size,
+            max_file_size: Once::new(),
             rename_mutex: Mutex::default(),
             inodes: Mutex::default(),
         })
     }
 
+    fn ops(&self) -> &Arc<dyn SuperBlockOperations> {
+        self.ops
+            .get()
+            .expect("a published superblock must have filesystem operations")
+    }
+
     fn publish_root(super_block: &Arc<Self>, root: Dentry) {
         let root = super_block.root.call_once(|| root);
         root.bind_super_block(super_block);
-        super_block_registry().register(super_block);
+    }
+
+    fn finish_initialization(&self) {
+        assert!(
+            self.ops.get().is_some() && self.root.get().is_some(),
+            "fill_super must install operations and a root"
+        );
+        let mut lifecycle = self.lifecycle.lock();
+        assert!(
+            matches!(*lifecycle, SuperBlockLifecycle::Nascent),
+            "only a nascent superblock can finish initialization"
+        );
+        *lifecycle = SuperBlockLifecycle::Available { active_mounts: 0 };
+        drop(lifecycle);
+        self.lifecycle_waiters.notify_all(false);
+    }
+
+    fn fail_initialization(&self) {
+        let mut lifecycle = self.lifecycle.lock();
+        assert!(
+            matches!(*lifecycle, SuperBlockLifecycle::Nascent),
+            "only a nascent superblock can fail initialization"
+        );
+        *lifecycle = SuperBlockLifecycle::Dead;
+        drop(lifecycle);
+        self.release_block_device();
+    }
+
+    fn release_block_device(&self) {
+        if let Some(block_device) = &self.block_device {
+            block_device.release();
+        }
+    }
+
+    /// Waits until the existing instance can be reused or its owner has
+    /// completed teardown. A waiter never owns removal from the registry.
+    fn wait_until_available_or_dead(&self) -> bool {
+        loop {
+            self.lifecycle_waiters
+                .wait_until(|| !self.lifecycle.lock().is_initializing_or_dying());
+            match &*self.lifecycle.lock() {
+                SuperBlockLifecycle::Available { .. } => return true,
+                SuperBlockLifecycle::Dead => return false,
+                SuperBlockLifecycle::Nascent | SuperBlockLifecycle::Dying => {}
+            }
+        }
     }
 
     /// Looks up a live inode identity without invoking a filesystem loader.
@@ -525,7 +780,33 @@ impl SuperBlock {
 
     /// Acquires the active superblock reference owned by one `VfsMount`.
     pub(crate) fn activate_mount(&self) {
-        self.lifecycle.lock().acquire_mount();
+        assert!(
+            self.try_activate_mount(None)
+                .expect("unchecked mount activation cannot reject flags"),
+            "a dying or dead superblock must not acquire an active mount"
+        );
+    }
+
+    /// Attempts to acquire one active mount reference.
+    ///
+    /// Activation is serialized with final shutdown so a mount either becomes
+    /// active before the last old mount is released or observes the instance
+    /// as unavailable and can repeat `get_tree`.
+    pub(crate) fn try_activate_mount(
+        &self,
+        requested_flags: Option<SuperBlockFlags>,
+    ) -> VfsResult<bool> {
+        let _umount_guard = self.umount_lock.lock();
+        let mut lifecycle = self.lifecycle.lock();
+        if !lifecycle.is_available() {
+            return Ok(false);
+        }
+        if requested_flags
+            .is_some_and(|requested_flags| has_readonly_mismatch(self.flags(), requested_flags))
+        {
+            return Err(VfsError::ResourceBusy);
+        }
+        Ok(lifecycle.try_acquire_mount())
     }
 
     /// Releases one active mount reference and shuts down the last active mount.
@@ -549,7 +830,14 @@ impl SuperBlock {
         }
 
         let shutdown_result = self.shutdown();
-        *self.lifecycle.lock() = SuperBlockLifecycle::Dead;
+        // A new sget must observe either the old identity and holder or neither.
+        {
+            let mut super_blocks = super_block_registry().super_blocks.lock();
+            *self.lifecycle.lock() = SuperBlockLifecycle::Dead;
+            self.release_block_device();
+            super_blocks.unregister(self);
+        }
+        self.lifecycle_waiters.notify_all(false);
         if let Err(err) = shutdown_result {
             log::warn!(
                 "failed to shut down {} after its last active mount: {err:?}",
@@ -574,6 +862,12 @@ impl SuperBlock {
     }
 
     /// Changes the VFS-wide read-only policy shared by every mount of this superblock.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PermissionDenied` when a read-write target conflicts with a
+    /// read-only block device. Filesystem reconfiguration errors are propagated
+    /// without publishing the proposed flags.
     pub fn reconfigure_readonly(&self, is_readonly: bool) -> VfsResult<()> {
         let _umount_guard = self.umount_lock.lock();
         let mut flags = self.flags();
@@ -582,8 +876,11 @@ impl SuperBlock {
         } else {
             flags.remove(SuperBlockFlags::RDONLY);
         }
+        if let Some(block_device) = self.block_device() {
+            validate_block_device_flags(block_device, flags)?;
+        }
 
-        self.ops.reconfigure(flags, SuperBlockFlags::RDONLY)?;
+        self.ops().reconfigure(flags, SuperBlockFlags::RDONLY)?;
         self.flags.store(flags);
         Ok(())
     }
@@ -645,7 +942,10 @@ impl SuperBlock {
 
     /// Returns this superblock's maximum regular-file size.
     pub fn max_file_size(&self) -> u64 {
-        self.max_file_size
+        *self
+            .max_file_size
+            .get()
+            .expect("a published superblock must have a maximum file size")
     }
 
     /// Serializes directory-tree topology changes across different parents.
@@ -687,7 +987,7 @@ impl SuperBlock {
     fn writeback_inode_metadata(&self, inodes: &[Arc<VfsInode>], data_only: bool) -> VfsResult<()> {
         let mut control = WritebackControl::all(data_only);
         for inode in inodes {
-            self.ops.write_inode(inode.as_ref(), &mut control)?;
+            self.ops().write_inode(inode.as_ref(), &mut control)?;
         }
         Ok(())
     }
@@ -708,12 +1008,12 @@ impl SuperBlock {
         let inodes = self.live_inodes();
         Self::writeback_inodes(&inodes, false)?;
         self.writeback_inode_metadata(&inodes, false)?;
-        self.ops.sync_fs()
+        self.ops().sync_fs()
     }
 
     /// Releases filesystem-owned inode state during final inode teardown.
     pub(crate) fn evict_inode(&self, inode: &VfsInode) -> VfsResult<()> {
-        self.ops.evict_inode(inode)
+        self.ops().evict_inode(inode)
     }
 }
 
@@ -722,5 +1022,383 @@ impl core::fmt::Debug for SuperBlock {
         f.debug_struct("SuperBlock")
             .field("name", &self.name())
             .finish()
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use alloc::{boxed::Box, string::String, sync::Arc};
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+    use crate::{NodeFlags, NodePermission, Umode, VfsInodeInit};
+
+    static FILL_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static TRANSITION_STAGE: AtomicUsize = AtomicUsize::new(0);
+    static TRANSITION_WAITER_STARTED: AtomicUsize = AtomicUsize::new(0);
+    static TRANSITION_WAITER_DONE: AtomicUsize = AtomicUsize::new(0);
+    static TRANSITION_WAITERS: WaitQueue = WaitQueue::new();
+
+    fn bdev_test_get_tree(
+        _context: &FsContext<'_>,
+        _lookup_root: &Path,
+        _lookup_pwd: &Path,
+    ) -> VfsResult<Arc<SuperBlock>> {
+        unreachable!("the registry test invokes its fill operation directly")
+    }
+
+    static BDEV_TEST_FILE_SYSTEM_TYPE: FileSystemType =
+        FileSystemType::device_backed("bdev-test", bdev_test_get_tree);
+    static BDEV_ALT_FILE_SYSTEM_TYPE: FileSystemType =
+        FileSystemType::device_backed("bdev-alt-test", bdev_test_get_tree);
+
+    struct TestSuperBlockOperations;
+
+    fn test_statfs() -> StatFs {
+        StatFs {
+            fs_type: 0,
+            block_size: 512,
+            blocks: 1,
+            blocks_free: 1,
+            blocks_available: 1,
+            file_count: 1,
+            free_file_count: 0,
+            name_length: 255,
+            fragment_size: 512,
+        }
+    }
+
+    impl SuperBlockOperations for TestSuperBlockOperations {
+        fn statfs(&self) -> VfsResult<StatFs> {
+            Ok(test_statfs())
+        }
+    }
+
+    struct BlockingShutdownOperations;
+
+    impl SuperBlockOperations for BlockingShutdownOperations {
+        fn statfs(&self) -> VfsResult<StatFs> {
+            Ok(test_statfs())
+        }
+
+        fn sync_fs(&self) -> VfsResult<()> {
+            if TRANSITION_STAGE
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                TRANSITION_WAITERS.notify_all(false);
+                TRANSITION_WAITERS.wait_until(|| TRANSITION_STAGE.load(Ordering::Acquire) >= 2);
+            }
+            Ok(())
+        }
+    }
+
+    struct TestBlockDevice;
+
+    impl block::BlockDeviceOperations for TestBlockDevice {
+        fn num_blocks(&self) -> u64 {
+            1
+        }
+
+        fn block_size(&self) -> usize {
+            512
+        }
+
+        fn read_block(&self, _block_id: u64, _buf: &mut [u8]) -> block::DriverResult {
+            Ok(())
+        }
+
+        fn write_block(&self, _block_id: u64, _buf: &[u8]) -> block::DriverResult {
+            Ok(())
+        }
+
+        fn flush(&self) -> block::DriverResult {
+            Ok(())
+        }
+    }
+
+    fn initialize_test_bdev(
+        super_block: &Arc<SuperBlock>,
+        operations: Arc<dyn SuperBlockOperations>,
+    ) -> VfsResult<()> {
+        super_block.initialize(operations, |super_block| {
+            let inode = super_block.get_or_init_inode(1, || {
+                VfsInode::new_dir_with_defaults(
+                    NodeFlags::empty(),
+                    VfsInodeInit::new(
+                        1,
+                        0,
+                        Umode::new(NodeType::Directory, NodePermission::default()),
+                    ),
+                )
+            });
+            Ok(Dentry::new_dir_from_inode(inode, None, String::new()))
+        })
+    }
+
+    fn fill_test_bdev(super_block: &Arc<SuperBlock>) -> VfsResult<()> {
+        FILL_COUNT.fetch_add(1, Ordering::Relaxed);
+        initialize_test_bdev(super_block, Arc::new(TestSuperBlockOperations))
+    }
+
+    fn fail_test_bdev(_super_block: &Arc<SuperBlock>) -> VfsResult<()> {
+        FILL_COUNT.fetch_add(1, Ordering::Relaxed);
+        TRANSITION_STAGE.store(1, Ordering::Release);
+        TRANSITION_WAITERS.notify_all(false);
+        TRANSITION_WAITERS.wait_until(|| TRANSITION_STAGE.load(Ordering::Acquire) >= 2);
+        Err(VfsError::InvalidInput)
+    }
+
+    fn fill_blocking_shutdown_bdev(super_block: &Arc<SuperBlock>) -> VfsResult<()> {
+        FILL_COUNT.fetch_add(1, Ordering::Relaxed);
+        initialize_test_bdev(super_block, Arc::new(BlockingShutdownOperations))
+    }
+
+    fn reset_transition_test_state() {
+        FILL_COUNT.store(0, Ordering::Relaxed);
+        TRANSITION_STAGE.store(0, Ordering::Release);
+        TRANSITION_WAITER_STARTED.store(0, Ordering::Release);
+        TRANSITION_WAITER_DONE.store(0, Ordering::Release);
+    }
+
+    fn spawn_successful_waiting_mount(block_device: Arc<block::BlockDevice>) -> ktask::KtaskRef {
+        ktask::spawn(move || {
+            TRANSITION_WAITER_STARTED.store(1, Ordering::Release);
+            TRANSITION_WAITERS.notify_all(false);
+            let super_block = super_block_registry()
+                .get_or_try_init_bdev(
+                    &BDEV_TEST_FILE_SYSTEM_TYPE,
+                    block_device,
+                    SuperBlockFlags::empty(),
+                    fill_test_bdev,
+                )
+                .expect("mount retries after the old superblock transition");
+            super_block.activate_mount();
+            super_block.deactivate_mount();
+            TRANSITION_WAITER_DONE.store(1, Ordering::Release);
+            TRANSITION_WAITERS.notify_all(false);
+        })
+    }
+
+    fn add_test_disk(name: &str, major: u32) -> (Arc<block::Gendisk>, Arc<block::BlockDevice>) {
+        let disk = Arc::new(
+            block::Gendisk::new(String::from(name), major, 0, 1, Box::new(TestBlockDevice))
+                .expect("valid superblock test disk"),
+        );
+        let block_device = block::add_disk(disk.clone()).expect("publish superblock test disk");
+        (disk, block_device)
+    }
+
+    #[def_test(serial)]
+    fn sget_dev_reuses_identity_and_rejects_readonly_mismatch() {
+        FILL_COUNT.store(0, Ordering::Relaxed);
+        let (disk, block_device) = add_test_disk("kvfs-sget-test", 246);
+        let registry = super_block_registry();
+
+        let first = registry
+            .get_or_try_init_bdev(
+                &BDEV_TEST_FILE_SYSTEM_TYPE,
+                block_device.clone(),
+                SuperBlockFlags::empty(),
+                fill_test_bdev,
+            )
+            .expect("first mount initializes the device superblock");
+        let second = registry
+            .get_or_try_init_bdev(
+                &BDEV_TEST_FILE_SYSTEM_TYPE,
+                block_device.clone(),
+                SuperBlockFlags::empty(),
+                fill_test_bdev,
+            )
+            .expect("second mount reuses the device superblock");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(FILL_COUNT.load(Ordering::Relaxed), 1);
+        first.activate_mount();
+        assert!(matches!(
+            registry.get_or_try_init_bdev(
+                &BDEV_TEST_FILE_SYSTEM_TYPE,
+                block_device,
+                SuperBlockFlags::RDONLY,
+                fill_test_bdev,
+            ),
+            Err(VfsError::ResourceBusy)
+        ));
+        assert_eq!(FILL_COUNT.load(Ordering::Relaxed), 1);
+
+        first.deactivate_mount();
+        drop(second);
+        block::del_gendisk(disk.device_number()).expect("remove sget test disk");
+    }
+
+    #[def_test(serial)]
+    fn block_device_claim_rejects_a_different_filesystem_until_shutdown() {
+        FILL_COUNT.store(0, Ordering::Relaxed);
+        let (disk, block_device) = add_test_disk("kvfs-holder-test", 247);
+        let registry = super_block_registry();
+        let first = registry
+            .get_or_try_init_bdev(
+                &BDEV_TEST_FILE_SYSTEM_TYPE,
+                block_device.clone(),
+                SuperBlockFlags::empty(),
+                fill_test_bdev,
+            )
+            .expect("first filesystem claims the device");
+        first.activate_mount();
+
+        assert!(matches!(
+            registry.get_or_try_init_bdev(
+                &BDEV_ALT_FILE_SYSTEM_TYPE,
+                block_device.clone(),
+                SuperBlockFlags::empty(),
+                fill_test_bdev,
+            ),
+            Err(VfsError::ResourceBusy)
+        ));
+        assert_eq!(FILL_COUNT.load(Ordering::Relaxed), 1);
+
+        first.deactivate_mount();
+        let replacement = registry
+            .get_or_try_init_bdev(
+                &BDEV_ALT_FILE_SYSTEM_TYPE,
+                block_device,
+                SuperBlockFlags::empty(),
+                fill_test_bdev,
+            )
+            .expect("dead superblock releases its block-device claim");
+        replacement.activate_mount();
+        assert_eq!(FILL_COUNT.load(Ordering::Relaxed), 2);
+        replacement.deactivate_mount();
+        block::del_gendisk(disk.device_number()).expect("remove holder test disk");
+    }
+
+    #[def_test(serial)]
+    fn sget_dev_uses_canonical_device_object_identity() {
+        FILL_COUNT.store(0, Ordering::Relaxed);
+        let (old_disk, old_device) = add_test_disk("kvfs-old-device", 248);
+        let registry = super_block_registry();
+        let old_super_block = registry
+            .get_or_try_init_bdev(
+                &BDEV_TEST_FILE_SYSTEM_TYPE,
+                old_device,
+                SuperBlockFlags::empty(),
+                fill_test_bdev,
+            )
+            .expect("mount old device generation");
+        old_super_block.activate_mount();
+        block::del_gendisk(old_disk.device_number()).expect("unpublish old disk");
+
+        let (new_disk, new_device) = add_test_disk("kvfs-new-device", 248);
+        let new_super_block = registry
+            .get_or_try_init_bdev(
+                &BDEV_TEST_FILE_SYSTEM_TYPE,
+                new_device,
+                SuperBlockFlags::empty(),
+                fill_test_bdev,
+            )
+            .expect("mount replacement device generation");
+        new_super_block.activate_mount();
+
+        assert!(!Arc::ptr_eq(&old_super_block, &new_super_block));
+        assert_eq!(FILL_COUNT.load(Ordering::Relaxed), 2);
+
+        old_super_block.deactivate_mount();
+        new_super_block.deactivate_mount();
+        block::del_gendisk(new_disk.device_number()).expect("remove replacement disk");
+    }
+
+    #[def_test(serial)]
+    fn read_only_block_device_cannot_be_reconfigured_read_write() {
+        FILL_COUNT.store(0, Ordering::Relaxed);
+        let (disk, block_device) = add_test_disk("kvfs-read-only-remount", 249);
+        block_device
+            .set_disk_read_only(true)
+            .expect("make backing device read-only");
+        let super_block = super_block_registry()
+            .get_or_try_init_bdev(
+                &BDEV_TEST_FILE_SYSTEM_TYPE,
+                block_device,
+                SuperBlockFlags::RDONLY,
+                fill_test_bdev,
+            )
+            .expect("mount read-only device read-only");
+        super_block.activate_mount();
+
+        assert_eq!(
+            super_block.reconfigure_readonly(false),
+            Err(VfsError::PermissionDenied)
+        );
+        assert!(super_block.flags().contains(SuperBlockFlags::RDONLY));
+
+        super_block.deactivate_mount();
+        block::del_gendisk(disk.device_number()).expect("remove read-only remount disk");
+    }
+
+    #[def_test(serial)]
+    fn failed_fill_wakes_waiter_and_allows_retry() {
+        reset_transition_test_state();
+        let (disk, block_device) = add_test_disk("kvfs-failed-fill", 250);
+        let owner_device = block_device.clone();
+        let owner = ktask::spawn(move || {
+            match super_block_registry().get_or_try_init_bdev(
+                &BDEV_TEST_FILE_SYSTEM_TYPE,
+                owner_device,
+                SuperBlockFlags::empty(),
+                fail_test_bdev,
+            ) {
+                Err(VfsError::InvalidInput) => {}
+                result => panic!("failed fill returned an unexpected result: {result:?}"),
+            }
+        });
+        TRANSITION_WAITERS.wait_until(|| TRANSITION_STAGE.load(Ordering::Acquire) == 1);
+
+        let waiter = spawn_successful_waiting_mount(block_device);
+        TRANSITION_WAITERS.wait_until(|| TRANSITION_WAITER_STARTED.load(Ordering::Acquire) == 1);
+        ktask::yield_now();
+        assert_eq!(TRANSITION_WAITER_DONE.load(Ordering::Acquire), 0);
+
+        TRANSITION_STAGE.store(2, Ordering::Release);
+        TRANSITION_WAITERS.notify_all(true);
+        owner.join();
+        waiter.join();
+
+        assert_eq!(TRANSITION_WAITER_DONE.load(Ordering::Acquire), 1);
+        assert_eq!(FILL_COUNT.load(Ordering::Relaxed), 2);
+        block::del_gendisk(disk.device_number()).expect("remove failed-fill test disk");
+    }
+
+    #[def_test(serial)]
+    fn dying_superblock_wakes_waiter_after_shutdown() {
+        reset_transition_test_state();
+        let (disk, block_device) = add_test_disk("kvfs-dying-wait", 251);
+        let super_block = super_block_registry()
+            .get_or_try_init_bdev(
+                &BDEV_TEST_FILE_SYSTEM_TYPE,
+                block_device.clone(),
+                SuperBlockFlags::empty(),
+                fill_blocking_shutdown_bdev,
+            )
+            .expect("mount device before blocking shutdown");
+        super_block.activate_mount();
+
+        let shutting_down = super_block.clone();
+        let shutdown = ktask::spawn(move || shutting_down.deactivate_mount());
+        TRANSITION_WAITERS.wait_until(|| TRANSITION_STAGE.load(Ordering::Acquire) == 1);
+
+        let waiter = spawn_successful_waiting_mount(block_device);
+        TRANSITION_WAITERS.wait_until(|| TRANSITION_WAITER_STARTED.load(Ordering::Acquire) == 1);
+        ktask::yield_now();
+        assert_eq!(TRANSITION_WAITER_DONE.load(Ordering::Acquire), 0);
+
+        TRANSITION_STAGE.store(2, Ordering::Release);
+        TRANSITION_WAITERS.notify_all(true);
+        shutdown.join();
+        waiter.join();
+
+        assert_eq!(TRANSITION_WAITER_DONE.load(Ordering::Acquire), 1);
+        assert_eq!(FILL_COUNT.load(Ordering::Relaxed), 2);
+        block::del_gendisk(disk.device_number()).expect("remove dying-wait test disk");
     }
 }

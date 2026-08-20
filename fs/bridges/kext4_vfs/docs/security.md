@@ -11,6 +11,7 @@ Bridge 信任 KVFS 提供有效的 kernel-owned `VfsInode`、dentry、PageCache 
 - KVFS create/link/unlink/rename/truncate/read/write/fsync/syncfs callback；
 - PageCache writeback、invalidate、reclaim 和 final eviction 顺序；
 - 块设备 I/O 与 journal/recovery 错误，由 core 以 `Ext4Error` 返回；
+- canonical `FileSystemType -> get_tree_bdev -> fill_super` 挂载入口；
 - UID/GID/mode 和 device id 的 VFS/core 转换。
 
 Bridge 不直接访问 user pointer、MMIO/PIO、DMA、firmware、FFI 或 inline assembly。
@@ -27,6 +28,12 @@ Bridge 不直接访问 user pointer、MMIO/PIO、DMA、firmware、FFI 或 inline
   mutation 后回灌第二份 mode/owner/nlink/time/size/block snapshot。
 - KVFS-wide `(SuperBlock, ino)` table 是唯一 resident identity table；`SuperBlock`、bridge filesystem 和
   KExt4 不得再按 inode number 缓存、合并或驱逐 private state。
+- ext4 只能由自己的 `register_init` 回调注册一个静态 `FileSystemType`；创建出的
+  `SuperBlock.s_type` 必须引用同一对象，root 和普通 mount 不得另建 provider、名称字段或
+  第二个 device-mount 入口。
+- 同一 ext4 type 与 `dev_t` 的实例身份由 KVFS `sget_dev` 等价 registry 拥有；bridge
+  `fill_super` 只能给 VFS 已分配的新生 `SuperBlock` 安装私有 operations 与 root，不得另建
+  mount cache、复制 identity 字段或重复打开同一设备状态。
 - zero-link inode 的 PageCache、data/xattr blocks 和 inode bitmap 只能在最后 `VfsInode` 引用
   drop 的 superblock hook 中释放。
 - delalloc interval、per-inode reserved count 和 mount aggregate 必须由一个 core range API 在

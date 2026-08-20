@@ -6,29 +6,24 @@ config KFEAT_FS
     help
       Enable the kernel filesystem stack and related runtime support.
 
-choice
-    prompt "Root filesystem"
-    depends on KFEAT_FS
-    default KFEAT_FS_EXT4
-
 config KFEAT_FS_EXT4
-    bool "ext4"
+    bool "ext4 filesystem support"
+    depends on KFEAT_FS
+    default y
     help
-      Use ext4 as the root filesystem.
+      Enable support for mounting ext4 filesystems.
 
 config KFEAT_FS_FAT
-    bool "FAT"
+    bool "FAT filesystem support"
+    depends on KFEAT_FS
     help
-      Use FAT as the root filesystem.
-
-endchoice
+      Enable support for mounting FAT filesystems.
 
 config KFEAT_FS_TIMES
     bool "Enable filesystem timestamps"
-    depends on KFEAT_FS
+    depends on KFEAT_FS_EXT4
     help
-      Enable timestamp-related filesystem behavior in the shared VFS and
-      filesystem backends.
+      Enable timestamp-related behavior in the ext4 VFS adapter.
 
 config KFEAT_FS_9P
     bool "Enable 9P filesystem support"

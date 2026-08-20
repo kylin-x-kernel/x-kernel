@@ -309,14 +309,14 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
 4. 已验证的请求按 `MS_REMOUNT|MS_BIND`、普通 `MS_REMOUNT`、`MS_BIND`、普通新挂载分派；
    对应操作分别调用 namespace 的
    `reconfigure_mount()`、`remount()`、`attach_bind()` 或
-   `attach_with_flags_and_devname()` 对象方法。
+   `mount_new()` 对象方法。
 5. 非递归 bind 要求非空 source，解析 source 后克隆源 mount；副本继承源 mount
    flags，初次 `MS_BIND` 的普通 mount flags 不应用到副本。
 6. 普通挂载像 Linux `do_new_mount()` 一样按 canonical type name 查询 KVFS
-   `FileSystemType` 注册表，再调用类型描述符的 nodev 创建入口。注册表和
-   `/proc/filesystems` 都只使用 canonical name，例如 `devtmpfs`。
-7. nodev 创建入口接收已经提取的 `SuperBlockFlags`，在构造 superblock 时应用 VFS-wide
-   策略；随后把带 per-mount flags 的 detached mount graft 到 target。
+   `FileSystemType` 注册表，构造 `FsContext`，再调用 `MntNamespace::mount_new()`。
+7. `mount_new()` 经类型对象的 `get_tree` 进入 nodev 或 `get_tree_bdev -> fill_super`，随后
+   把带 per-mount flags 的 detached mount graft 到 target；registry 和
+   `/proc/filesystems` 使用同一静态 descriptor identity。
 
 ## 并发模型
 
@@ -377,7 +377,7 @@ atime 选项的 remount 只保留目标当前 atime mask，其它 user-settable 
 `mount(2)` 语义，用户态 `mount(8)` 是否补齐旧选项属于其自身策略。
 初次 bind 继承源 mount flags，不应用同次调用的普通 mount flags；修改 bind mount flags
 需要第二次 `MS_REMOUNT|MS_BIND` 调用。
-普通新挂载不再依赖 devfs、procfs、bpffs 等具体 crate；`do_new_mount` 只解析 canonical
+普通新挂载不再依赖 devfs、procfs、bpffs 等具体 crate；`path_mount` 只解析 canonical
 type 并使用 KVFS registry，对应 Linux `get_fs_type()` 后进入 filesystem type 的创建入口。
 这使 mount 支持集合与 `/proc/filesystems` 保持同一事实源。
 move、recursive bind 和 propagation flags 在任何 operation dispatch 前返回 `InvalidInput`；
@@ -457,9 +457,7 @@ pathname DAC。这对应 Linux `vfs_truncate()` 与 `do_ftruncate()` 的语义�
 3. `fcntl` 文件锁和 `flock` 目前是兼容占位，不提供真实互斥。
 4. `copy_file_range` 尚未检查普通文件类型、同文件重叠和跨文件系统条件。
 5. `mount` 尚不支持 move、recursive bind、propagation，以及只读策略之外的文件系统专用
-   reconfigure。registry 中需要 block device 的 root filesystem 会列在
-   `/proc/filesystems`，但 legacy `mount(2)` 尚未实现 source block-device 解析，因此
-   当前返回 `NoSuchDevice`。
+   reconfigure；nodev 与 device-backed 类型均经 registry/FsContext 创建。
 6. `sendfile` 对非空 offset 保留 32 位范围限制，反映旧接口兼容约束。
 7. `F_ADD_SEALS` / `F_GET_SEALS` 已接入 shmem object state；shared
    writable mmap 和 `mprotect(PROT_WRITE)` seal enforcement 由 `mm/filemap`

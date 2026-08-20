@@ -298,6 +298,45 @@ pub struct BlockDevice {
     device_number: DeviceNumber,
     start_block: u64,
     num_blocks: AtomicU64,
+    exclusive_holder: Mutex<bool>,
+}
+
+/// An exclusive holder claim on one canonical block-device object.
+///
+/// This is the ownership part of Linux's exclusive `bdev_open()`: while the
+/// token is alive, another subsystem cannot establish a distinct holder for
+/// the same [`BlockDevice`]. Dropping the token releases the claim.
+pub struct BlockDeviceClaim {
+    device: Arc<BlockDevice>,
+    is_active: Mutex<bool>,
+}
+
+impl BlockDeviceClaim {
+    /// Returns the canonical block-device object owned by this claim.
+    pub fn device(&self) -> &Arc<BlockDevice> {
+        &self.device
+    }
+
+    /// Releases the claim before the token itself is dropped.
+    ///
+    /// This is idempotent so an owning object's lifecycle can release block
+    /// ownership at its logical death rather than waiting for its final `Arc`.
+    pub fn release(&self) {
+        let mut is_active = self.is_active.lock();
+        if !*is_active {
+            return;
+        }
+        let mut holder = self.device.exclusive_holder.lock();
+        assert!(*holder, "an active block-device claim must own the holder");
+        *holder = false;
+        *is_active = false;
+    }
+}
+
+impl Drop for BlockDeviceClaim {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 impl BlockDevice {
@@ -309,7 +348,29 @@ impl BlockDevice {
             device_number,
             start_block: 0,
             num_blocks: AtomicU64::new(num_blocks),
+            exclusive_holder: Mutex::new(false),
         }
+    }
+
+    /// Claims this canonical block-device object for one exclusive holder.
+    ///
+    /// Filesystem superblocks retain the returned token for their complete
+    /// lifetime, preventing a different filesystem instance from acquiring
+    /// the same media concurrently.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::ResourceBusy`] while another holder owns the device.
+    pub fn claim_exclusive(self: &Arc<Self>) -> KResult<BlockDeviceClaim> {
+        let mut holder = self.exclusive_holder.lock();
+        if *holder {
+            return Err(KError::ResourceBusy);
+        }
+        *holder = true;
+        Ok(BlockDeviceClaim {
+            device: self.clone(),
+            is_active: Mutex::new(true),
+        })
     }
 
     /// Returns this view's device number (`bd_dev`).
@@ -733,5 +794,28 @@ mod tests {
         device.set_disk_read_only(false).expect("set disk writable");
         assert!(device.write_block(0, &[0; BLOCK_SIZE]).is_ok());
         del_gendisk(disk.device_number()).expect("remove read-only disk");
+    }
+
+    #[def_test(serial)]
+    fn exclusive_claim_follows_token_lifetime() {
+        let disk = disk("test-exclusive-claim", 243, 0, 1);
+        let device = add_disk(disk.clone()).expect("publish claim test disk");
+
+        let first = device.claim_exclusive().expect("claim unowned device");
+        assert!(matches!(
+            device.claim_exclusive(),
+            Err(KError::ResourceBusy)
+        ));
+
+        first.release();
+        let second = device
+            .claim_exclusive()
+            .expect("explicit release makes device claimable");
+        drop(second);
+        device
+            .claim_exclusive()
+            .expect("drop makes device claimable");
+
+        del_gendisk(disk.device_number()).expect("remove claim test disk");
     }
 }

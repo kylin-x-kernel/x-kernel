@@ -15,12 +15,12 @@ times = ["dep:ktime"]
 
 [dependencies]
 block.workspace = true
-fs_block.workspace = true
 iov_iter.workspace = true
 kcred.workspace = true
 kerrno.workspace = true
 kext4.workspace = true
 klogger.workspace = true
+macros.workspace = true
 ksync.workspace = true
 kvfs.workspace = true
 ktime_types.workspace = true

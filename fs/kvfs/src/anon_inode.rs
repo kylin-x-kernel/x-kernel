@@ -12,9 +12,10 @@ use klazy::Once;
 use ktime_types::SystemTime;
 
 use crate::{
-    Dentry, DentryOperations, FMode, FileOperations, InodeOperations, Metadata, Mount, MountIdmap,
-    NodeFlags, NodePermission, NodeType, OpenFlags, Path, StatFs, SuperBlock, SuperBlockOperations,
-    Umode, VfsFile, VfsInode, VfsInodeInit, VfsResult,
+    Dentry, DentryOperations, FMode, FileOperations, FileSystemType, FsContext, InodeOperations,
+    Metadata, Mount, MountIdmap, NodeFlags, NodePermission, NodeType, OpenFlags, Path, StatFs,
+    SuperBlock, SuperBlockOperations, Umode, VfsFile, VfsInode, VfsInodeInit, VfsResult,
+    get_tree_nodev,
 };
 
 static ANON_INODE_FS: Once<AnonInodeFs> = Once::new();
@@ -26,6 +27,19 @@ const ANON_INODE_BLOCK_SIZE: u64 = 4096;
 const ANON_INODE_BLOCK_SIZE_U32: u32 = 4096;
 const ANON_INODE_NAME_LEN: u32 = 255;
 
+fn anon_inodefs_get_tree(
+    context: &FsContext<'_>,
+    _lookup_root: &Path,
+    _lookup_pwd: &Path,
+) -> VfsResult<Arc<SuperBlock>> {
+    get_tree_nodev(context, |file_system_type, _flags| {
+        Ok(new_anon_inode_superblock(file_system_type))
+    })
+}
+
+static ANON_INODE_FS_TYPE: FileSystemType =
+    FileSystemType::nodev("anon_inodefs", anon_inodefs_get_tree);
+
 /// Anonymous-inode pseudo filesystem used by kernel-created file objects.
 pub struct AnonInodeFs {
     mount: Arc<Mount>,
@@ -36,8 +50,7 @@ pub struct AnonInodeFs {
 impl AnonInodeFs {
     fn new() -> Self {
         let singleton_inode = AnonInode::new_shared_inode();
-        let super_block =
-            SuperBlock::new(Arc::new(AnonInodeSuperBlock), |_| anon_inode_root_dentry());
+        let super_block = new_anon_inode_superblock(&ANON_INODE_FS_TYPE);
         Self {
             mount: Mount::new_root(&super_block),
             singleton_inode,
@@ -112,6 +125,12 @@ impl AnonInodeFs {
             .set_operations(self.dentry_operations.clone());
         Ok(file)
     }
+}
+
+fn new_anon_inode_superblock(file_system_type: &'static FileSystemType) -> Arc<SuperBlock> {
+    SuperBlock::new(file_system_type, Arc::new(AnonInodeSuperBlock), |_| {
+        anon_inode_root_dentry()
+    })
 }
 
 /// Initializes the VFS-wide anonymous-inode pseudo filesystem.
@@ -220,10 +239,6 @@ fn anon_inode_root_init() -> VfsInodeInit {
 struct AnonInodeSuperBlock;
 
 impl SuperBlockOperations for AnonInodeSuperBlock {
-    fn name(&self) -> &str {
-        "anon_inodefs"
-    }
-
     fn statfs(&self) -> VfsResult<StatFs> {
         Ok(StatFs {
             fs_type: ANON_INODE_FS_MAGIC,

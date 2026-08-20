@@ -38,11 +38,18 @@ fn get_tree(
     _lookup_root: &kvfs::Path,
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
-    get_tree_nodev(context, |flags| Ok(new_bpffs(flags)))
+    get_tree_nodev(context, |file_system_type, flags| {
+        Ok(new_bpffs_with_type(file_system_type, flags))
+    })
 }
 
 /// Registered BPF filesystem type.
-pub const FILE_SYSTEM_TYPE: kvfs::FileSystemType = kvfs::FileSystemType::nodev("bpf", get_tree);
+pub static FILE_SYSTEM_TYPE: kvfs::FileSystemType = kvfs::FileSystemType::nodev("bpf", get_tree);
+
+#[macros::register_init]
+fn init_bpf_fs() {
+    kvfs::register_filesystem(&FILE_SYSTEM_TYPE).expect("BPF filesystem type must register once");
+}
 const PIN_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o600);
 
 /// Read-only map value snapshot bound to a loaded BPF program.
@@ -603,7 +610,14 @@ impl FileDirOperations for BpfFileOperations {
 
 /// Creates a bpffs superblock.
 pub fn new_bpffs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
-    SimpleFs::new_with_superblock_flags("bpf".into(), BPF_FS_MAGIC, superblock_flags, |fs| {
+    new_bpffs_with_type(&FILE_SYSTEM_TYPE, superblock_flags)
+}
+
+fn new_bpffs_with_type(
+    file_system_type: &'static kvfs::FileSystemType,
+    superblock_flags: SuperBlockFlags,
+) -> Arc<SuperBlock> {
+    SimpleFs::new_with_superblock_flags(file_system_type, BPF_FS_MAGIC, superblock_flags, |fs| {
         let root = Inode::new_dir(fs.clone(), DIR_PERMISSION, 0, 0);
         Arc::new(move || {
             let node = BpfNode::new(fs.clone(), root.clone());

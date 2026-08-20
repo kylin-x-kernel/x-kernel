@@ -135,14 +135,23 @@ remount/reconfigure 在替换 flags 前校验目标是当前 mount namespace 中
 的根路径。普通 remount 独立接收 superblock flags 和 per-mount flags，并同步更新共享
 superblock 的只读策略；`MS_REMOUNT|MS_BIND` 仅更新目标 mount 的 per-mount flags。
 superblock flags 由 `AtomicSuperBlockFlags` 封装为强类型 `SuperBlockFlags`；普通 remount
-在发布拟议 flags 前调用 filesystem `reconfigure` hook，并由每个 superblock 的
+在发布拟议 flags 前先拒绝 read-only block device 的读写目标，再调用 filesystem
+`reconfigure` hook，并由每个 superblock 的
 umount lock 串行化 hook、发布与最终 shutdown。最后 active 引用先在 lifecycle lock 下
 判定，在取得 umount lock 后重新校验并切换到 dying；shutdown callback 不持有 lifecycle
-lock，dying/dead 状态拒绝新的 mount activation。默认 hook 接受纯 VFS flags 变更，固定
-只读介质的后端必须拒绝读写转换。显式 filesystem sync 和全局 Weak registry sync snapshot
+lock，dying/dead 状态拒绝新的 mount activation。默认 hook 接受其余纯 VFS flags 变更，
+device-less 或文件系统固有的只读策略由后端拒绝。显式 filesystem sync 和全局 Weak
+registry sync snapshot
 也通过同一 umount lock 与 final shutdown 串行化，并跳过 dying/dead superblock。
 `get_tree_bdev` 在调用 filesystem fill-super 前拒绝对 canonical read-only block device 的
-可写 mount，避免把介质只读约束延迟成后续文件系统 I/O 错误。
+可写 mount，避免把介质只读约束延迟成后续文件系统 I/O 错误。它还在 VFS-wide
+superblock registry 中按 canonical type 与 `BlockDevice` 对象 identity 串行化初始化；VFS
+先发布带 `s_type/s_bdev/s_flags` 的 nascent superblock，后端只安装 operations 与 root。同 identity
+只允许一个 available superblock，已有实例的 RO/RW 状态不匹配时返回 `ResourceBusy`。
+block-core exclusive claim 同时阻止不同 filesystem type 拥有同一 canonical device；相同
+`dev_t` 重新注册所得的新对象不会复用旧 superblock。最后一个 active mount 完成 shutdown、
+进入 dead 并释放 claim 后才删除 identity entry 并唤醒等待者；等待者观察到
+nascent 失败或 dying/dead 状态时只重试，不拥有 entry 的提前删除权限。
 mount attach/detach 在 mountpoint inode namespace lock 下修改 topology。每个 child mount
 只用一个 mutex 保护完整 parent `Path`，parent child map 保存 `Weak<Mount>`，namespace
 registry 保存可见 mount 的 `Arc<Mount>`；detach 移除 registry 引用前先清空 parent path。
@@ -223,7 +232,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-23 | filesystem callback 替换 VFS 已检查的创建对象 | 高 | callback 返回另一个 parent/name 下的 dentry | create-like callback 只能实例化事务 negative dentry；lookup alternate result 校验 positive state、parent 和 name |
 | T-24 | 并发 slow lookup 建立重复 dentry | 高 | cache miss 检查与 candidate 发布分离，或等待者提前观察未完成对象 | candidate 在 callback 前原子加入 dcache；owner 保持 parallel-lookup 状态和 lookup mutex，等待者只在 lookup done 后读取结果 |
 | T-29 | detached mount 仍可沿旧 parent 返回原 namespace | 高 | 卸载只删除 parent child map，却保留 mount 中的 parent/mountpoint 状态 | parent 和 mountpoint 合并为一个受 mutex 保护的 `Option<Path>`；detach 在 mountpoint namespace lock 下移除 topology 并清空该 location |
-| T-30 | mount 支持集合与 `/proc/filesystems` 漂移 | 中 | syscall 和 procfs 各自维护文件系统名称或构造分支 | 两者都读取同一个 `FileSystemType` 注册表；重复名称注册失败 |
+| T-30 | mount 支持集合、已挂载 superblock 名称与 `/proc/filesystems` 漂移 | 中 | syscall、boot、superblock operations 和 procfs 各自维护文件系统名称、对象或构造分支 | registry 只保存 canonical 静态 `FileSystemType` 引用；`FsContext` 将同一引用写入 `SuperBlock.s_type`；POSIX/boot 通过同一 lookup 和 `mount_new` 创建，mount/procfs 都从 canonical type 读取名称；重复名称注册失败 |
 | T-31 | immutable symlink target 出现两份可分离状态 | 中 | simple-file closure 和 inode cache 分别保存目标 | 创建时直接构造 cached-link inode；目标只存于 inode，node 只保存长度等元数据 |
 | T-34 | 最后一个 mount 释放时丢失 dirty page、inode metadata 或 journal checkpoint | 高 | topology detach 后 superblock 没有 active 生命周期，Weak registry 也无法保活 | `VfsMount` 获取/释放 superblock active 引用；最后一个引用在 umount lock 下执行 writeback、dcache eviction 和最终 filesystem/device sync；错误记录后仍完成 teardown |
 | T-35 | 递归卸载 overmount 子树留下 registry 中不可达 mount | 高 | 只遍历 visible children，或边遍历边修改 topology | 收集每个 child mountpoint 的完整 covers 链，先验证全部 registry membership，再执行无失败分支的 topology commit |
@@ -232,6 +241,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-38 | `listxattr` 为不可见名称或属性值建立中间副本，造成不必要的内存放大 | 中 | 后端先返回拥有 value 的属性向量，KVFS 再过滤 `trusted.*` | `InodeOperations::list_xattrs` 通过 borrowed name sink 输出；`Path` 在流中先过滤 `trusted.*`，调用者只接收可见名称 |
 | T-39 | immutable 或 append-only inode 的 xattr 仍可被修改 | 中 | namespace 特例在通用 inode 状态检查前直接授权，或文件系统未把磁盘 inode flags 映射到 KVFS | `check_xattr_permission()` 在所有 namespace 分支前检查 `NodeFlags::IMMUTABLE/APPEND_ONLY`，set/remove 统一返回 `EPERM`；具体 bridge 必须在建立 VFS inode identity 时映射后端 flags |
 | T-40 | inode 初始化或驱逐竞争产生第二个 resident identity，或全 cache 唤醒形成惊群 | 高 | cache miss 在构造后才占 slot、Weak upgrade 失败立即重建，或所有 inode 共用一个等待队列 | cache 先发布 `New`；并发 initializer 在该 slot 等待；最后引用 drop 发布 `Freeing` 后再调用 hook；同号 lookup 等待 entry 删除并重试；每 slot 队列只唤醒同号等待者，后端不接收 `EINVAL` 风格的竞争错误 |
+| T-41 | 同一 filesystem type 和 block device 建立两个 live superblock | 高 | 每次 `get_tree_bdev` 都调用后端 fill，或旧实例 shutdown 前删除 identity | VFS registry 在 fill 前按 `(s_type, BlockDevice object)` 发布 nascent superblock；并发 mount 等待并复用同一 available instance；RO/RW 不一致按 Linux `get_tree_bdev_flags()` 返回 `EBUSY`；block holder 阻止不同 filesystem instance 同时取得同一 canonical device；shutdown 完成后才移除 entry |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -313,8 +323,8 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
   teardown，最后一个引用是否只执行一次 shutdown。
 - 递归 detach 是否包含 child overmount stack，并在修改 topology 前完成完整 registry 校验。
 - 每个 namespace mutation 是否获取父目录 exclusive lock。
-- 新文件系统是否只注册一个 canonical name，且 mount lookup 与
-  `/proc/filesystems` 没有新增平行分支。
+- 新文件系统是否只注册一个 canonical 静态 descriptor，且 boot、mount lookup 与
+  `/proc/filesystems` 没有新增平行 provider、对象或名称分支。
 - immutable symlink target 是否只存于 inode cached-link 状态，metadata size 是否同步。
 - unlink/rmdir 和 rename replacement 是否锁住 victim inode。
 - cross-directory rename 是否先获取 topology mutex，再获取 inode lock。

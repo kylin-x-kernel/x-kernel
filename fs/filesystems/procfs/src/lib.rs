@@ -27,15 +27,29 @@ fn get_tree(
     _lookup_root: &kvfs::Path,
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
-    get_tree_nodev(context, |flags| Ok(new_procfs(flags)))
+    get_tree_nodev(context, |file_system_type, flags| {
+        Ok(new_procfs_with_type(file_system_type, flags))
+    })
 }
 
 /// Registered proc filesystem type.
-pub const FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("proc", get_tree);
+pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("proc", get_tree);
+
+#[macros::register_init]
+fn init_proc_fs() {
+    kvfs::register_filesystem(&FILE_SYSTEM_TYPE).expect("proc filesystem type must register once");
+}
 
 /// Creates a procfs superblock for process information.
 pub fn new_procfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
-    SimpleFs::new_with_superblock_flags("proc".into(), 0x9fa0, superblock_flags, root::builder)
+    new_procfs_with_type(&FILE_SYSTEM_TYPE, superblock_flags)
+}
+
+fn new_procfs_with_type(
+    file_system_type: &'static FileSystemType,
+    superblock_flags: SuperBlockFlags,
+) -> Arc<SuperBlock> {
+    SimpleFs::new_with_superblock_flags(file_system_type, 0x9fa0, superblock_flags, root::builder)
 }
 
 #[cfg(unittest)]

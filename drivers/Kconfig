@@ -189,9 +189,9 @@ config KFEAT_DRIVER_RAMDISK_STATIC
       as a real (read-write) root filesystem. The image path is set by the
       RAMDISK_IMG Makefile variable (default: an empty ext4 image produced by
       'make ramdisk_img'); any ext4 image may be substituted. Select the
-      matching filesystem backend (KFEAT_FS_EXT4 by default; KFEAT_FS_FAT if a
-      FAT image is used). The image is embedded in .data, so the kernel binary
-      grows by roughly the image size.
+      matching filesystem support (KFEAT_FS_EXT4 by default; also enable
+      KFEAT_FS_FAT if a FAT image is used). The image is embedded in .data, so
+      the kernel binary grows by roughly the image size.
 
 comment "Network drivers"
 

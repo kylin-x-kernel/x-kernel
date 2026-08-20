@@ -13,6 +13,7 @@ iov_iter.workspace = true
 kcred.workspace = true
 klazy.workspace = true
 kvfs.workspace = true
+macros.workspace = true
 ktime_types.workspace = true
 
 ksync.workspace = true

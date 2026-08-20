@@ -9,10 +9,11 @@ use alloc::sync::Arc;
 use ktime_types::SystemTime;
 
 use crate::{
-    Dentry, DirContext, FileDirOperations, FileOperations, GetattrQueryFlags, GetattrRequestMask,
-    InodeDirOperations, InodeLookupFlags, InodeOperations, LockedDentry, Metadata, MetadataUpdate,
-    MountIdmap, NodeFlags, NodePermission, NodeType, StatFs, SuperBlock, SuperBlockOperations,
-    Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
+    Dentry, DirContext, FileDirOperations, FileOperations, FileSystemType, FsContext,
+    GetattrQueryFlags, GetattrRequestMask, InodeDirOperations, InodeLookupFlags, InodeOperations,
+    LockedDentry, Metadata, MetadataUpdate, MountIdmap, NodeFlags, NodePermission, NodeType,
+    StatFs, SuperBlock, SuperBlockOperations, Umode, VfsError, VfsFile, VfsInode, VfsInodeInit,
+    VfsResult, get_tree_nodev,
     libfs::{generic_read_dir, noop_fsync, simple_statfs},
     path::{DOT, DOTDOT},
 };
@@ -22,18 +23,30 @@ const NULLFS_MAGIC: u32 = 0x4E55_4C4C;
 const NULLFS_ROOT_INO: u64 = 1;
 const NULLFS_BLOCK_SIZE: u64 = 4096;
 
+fn nullfs_get_tree(
+    context: &FsContext<'_>,
+    _lookup_root: &crate::Path,
+    _lookup_pwd: &crate::Path,
+) -> VfsResult<Arc<SuperBlock>> {
+    get_tree_nodev(context, |file_system_type, _flags| {
+        Ok(new_superblock_with_type(file_system_type))
+    })
+}
+
+static NULLFS_TYPE: FileSystemType = FileSystemType::nodev(NULLFS_NAME, nullfs_get_tree);
+
 /// Creates the single-purpose filesystem used as the initial namespace root.
 pub(crate) fn new_superblock() -> Arc<SuperBlock> {
-    SuperBlock::new(Arc::new(NullFs), |_| nullfs_root_dentry())
+    new_superblock_with_type(&NULLFS_TYPE)
+}
+
+fn new_superblock_with_type(file_system_type: &'static FileSystemType) -> Arc<SuperBlock> {
+    SuperBlock::new(file_system_type, Arc::new(NullFs), |_| nullfs_root_dentry())
 }
 
 struct NullFs;
 
 impl SuperBlockOperations for NullFs {
-    fn name(&self) -> &str {
-        NULLFS_NAME
-    }
-
     fn statfs(&self) -> VfsResult<StatFs> {
         Ok(simple_statfs(NULLFS_MAGIC))
     }

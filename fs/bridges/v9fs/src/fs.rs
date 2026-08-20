@@ -8,7 +8,10 @@ use alloc::{boxed::Box, string::String, sync::Arc};
 
 use fs9p::{Session, Transport};
 use ksync::{Mutex, MutexGuard};
-use kvfs::{NodeFlags, StatFs, SuperBlock, SuperBlockOperations, VfsResult, path::MAX_NAME_LEN};
+use kvfs::{
+    FileSystemType, NodeFlags, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations,
+    VfsResult, path::MAX_NAME_LEN,
+};
 
 use super::inode::{Inode, inode_init_from_attr};
 
@@ -18,8 +21,14 @@ pub struct Fs9pFilesystem {
 }
 
 impl Fs9pFilesystem {
-    /// Mount a 9P filesystem over an established 9P transport.
-    pub fn mount(transport: Box<dyn Transport>, mount_tag: String) -> VfsResult<Arc<SuperBlock>> {
+    /// Mounts a 9P filesystem over an established transport with the selected
+    /// canonical filesystem type and VFS-wide superblock flags.
+    pub fn mount(
+        file_system_type: &'static FileSystemType,
+        superblock_flags: SuperBlockFlags,
+        transport: Box<dyn Transport>,
+        mount_tag: String,
+    ) -> VfsResult<Arc<SuperBlock>> {
         let mut session = Session::new(transport, mount_tag);
         session
             .negotiate()
@@ -43,7 +52,12 @@ impl Fs9pFilesystem {
         // The legacy adapter exposes inode number zero for every qid. Keep
         // those identities unhashed until qid-based `iget5` semantics exist;
         // hashing by zero would merge unrelated remote objects.
-        Ok(SuperBlock::new(fs, |_| root))
+        Ok(SuperBlock::new_with_flags(
+            file_system_type,
+            fs,
+            superblock_flags,
+            |_| root,
+        ))
     }
 
     /// Lock the inner 9P session for sending requests.
@@ -53,10 +67,6 @@ impl Fs9pFilesystem {
 }
 
 impl SuperBlockOperations for Fs9pFilesystem {
-    fn name(&self) -> &str {
-        "9p"
-    }
-
     fn statfs(&self) -> VfsResult<StatFs> {
         // 9P does not expose filesystem-wide statistics in a standard way.
         // Return a minimal StatFs with zeroed fields.

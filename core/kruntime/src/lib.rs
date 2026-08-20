@@ -13,7 +13,8 @@
 //!
 //! - `smp`: SMP bring-up (`rust_main_secondary`, `mp`)
 //! - `ipi`: Inter-processor interrupts (`kipi`)
-//! - `fs` / `fs9p` / `net` / `vsock` / `display` / `input`: driver and subsystem init
+//! - `fs`: filesystem boot orchestration
+//! - `fs9p` / `net` / `vsock` / `display` / `input`: driver and subsystem init
 //! - `rtc`: Wall-clock banner at boot
 //! - `watchdog` / `watchdog_hardlockup`: Watchdog on primary/secondary CPUs
 //! - `pmu`: PMU overflow IRQ handler
@@ -25,12 +26,6 @@
 #![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
-
-// The root filesystem choice selects exactly one `fs_block::RootFileSystem` provider.
-#[cfg(feature = "fs_fat")]
-extern crate fat as _;
-#[cfg(feature = "fs_ext4")]
-extern crate kext4_vfs as _;
 
 #[macro_use]
 extern crate klogger;
@@ -188,6 +183,10 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     // Must run before TEE register_init paths that call fill_random().
     entropy::init();
 
+    // Filesystem implementations and other built-in subsystems own their
+    // registration callbacks, matching Linux initcall ownership.
+    init_setup::init_cb();
+
     #[cfg(feature = "display")]
     fbdevice::fb_init();
     #[cfg(feature = "input")]
@@ -216,7 +215,6 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     #[cfg(feature = "watchdog")]
     watchdog::init_primary();
 
-    init_setup::init_cb();
     finish_allocator_init();
     log_memory_regions();
 

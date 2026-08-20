@@ -11,5 +11,3 @@ documentation.workspace = true
 
 [dependencies]
 block.workspace = true
-kiface.workspace = true
-kvfs.workspace = true

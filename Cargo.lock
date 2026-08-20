@@ -394,6 +394,7 @@ dependencies = [
  "kerrno",
  "ksync",
  "kvfs",
+ "macros",
 ]
 
 [[package]]
@@ -1148,6 +1149,7 @@ dependencies = [
  "kvmm",
  "lazyinit",
  "linux-raw-sys",
+ "macros",
  "memaddr",
  "osvm",
  "posix-types",
@@ -1441,6 +1443,7 @@ dependencies = [
  "ksync",
  "ktime_types",
  "kvfs",
+ "macros",
  "slab",
 ]
 
@@ -1554,8 +1557,6 @@ name = "fs_block"
 version = "0.2.0-dev"
 dependencies = [
  "block",
- "kiface",
- "kvfs",
 ]
 
 [[package]]
@@ -1565,16 +1566,15 @@ dependencies = [
  "block",
  "bpffs",
  "devfs",
- "fs_block",
  "fs_context",
  "kbuild_config",
  "kclass",
  "kcred",
- "kdevice",
  "kerrno",
  "ksync",
  "kvfs",
  "log",
+ "macros",
  "memfs",
  "procfs",
  "v9fs",
@@ -2292,7 +2292,6 @@ name = "kext4_vfs"
 version = "0.2.0-dev"
 dependencies = [
  "block",
- "fs_block",
  "iov_iter",
  "kcred",
  "kerrno",
@@ -2302,6 +2301,7 @@ dependencies = [
  "ktime",
  "ktime_types",
  "kvfs",
+ "macros",
  "unittest",
 ]
 
@@ -2355,12 +2355,14 @@ dependencies = [
  "backtrace",
  "devfs",
  "entropy",
+ "fat",
  "fbdevice",
  "inputdev",
  "kalloc",
  "kbpf",
  "kdriver",
  "kexec",
+ "kext4_vfs",
  "khal",
  "kipi",
  "kirq",
@@ -2787,7 +2789,6 @@ dependencies = [
  "boot-info",
  "chrono",
  "entropy",
- "fat",
  "fbdevice",
  "fs_boot",
  "heapless",
@@ -2802,7 +2803,6 @@ dependencies = [
  "kdriver",
  "kernel-boot",
  "kerrno",
- "kext4_vfs",
  "khal",
  "kiface",
  "kipi",
@@ -3293,6 +3293,7 @@ dependencies = [
  "ktime_types",
  "kvfs",
  "linux-raw-sys",
+ "macros",
  "slab",
  "unittest",
 ]
@@ -4001,6 +4002,7 @@ dependencies = [
  "ktracing",
  "kvfs",
  "kvmm",
+ "macros",
  "memaddr",
  "memspace",
  "riscv",
