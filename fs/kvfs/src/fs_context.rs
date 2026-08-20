@@ -17,6 +17,7 @@ use crate::{FileSystemType, Path, SuperBlock, SuperBlockFlags, VfsResult};
 pub struct FsContext<'a> {
     fs_type: &'static FileSystemType,
     source: Option<&'a str>,
+    data: Option<&'a [u8]>,
     sb_flags: SuperBlockFlags,
     cred: &'a kcred::Cred,
 }
@@ -26,12 +27,14 @@ impl<'a> FsContext<'a> {
     pub const fn new(
         fs_type: &'static FileSystemType,
         source: Option<&'a str>,
+        data: Option<&'a [u8]>,
         sb_flags: SuperBlockFlags,
         cred: &'a kcred::Cred,
     ) -> Self {
         Self {
             fs_type,
             source,
+            data,
             sb_flags,
             cred,
         }
@@ -55,6 +58,15 @@ impl<'a> FsContext<'a> {
     /// Returns the source name supplied to `mount(2)`.
     pub const fn source(&self) -> Option<&'a str> {
         self.source
+    }
+
+    /// Returns bounded, kernel-owned filesystem-specific mount data.
+    ///
+    /// The opaque byte slice is borrowed for the synchronous `get_tree`
+    /// operation. A filesystem must parse the representation it supports and
+    /// copy any state that remains live after mounting.
+    pub const fn data(&self) -> Option<&'a [u8]> {
+        self.data
     }
 
     /// Returns the proposed VFS superblock flags.

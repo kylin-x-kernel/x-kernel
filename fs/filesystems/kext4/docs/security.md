@@ -92,6 +92,8 @@ KVFS bridge 信任 KVFS 已经提供内核拥有的 path name、dentry、inode `
 - block allocation/release 必须在同一 metadata mutation 中同步 primary superblock 与 group
   descriptor 的 free-block counter；delayed-allocation admission 依赖 primary counter，并另行
   扣除 ext4 reserved blocks 和 core 持有的 delayed-allocation mount aggregate。
+- `Ext4StatFsMode` 只能改变对外总块数的口径；free、available、reserved-block 和
+  delayed-allocation aggregate 必须保持同一唯一事实源，不能按 `minixdf` 重算或放宽空间准入。
 - 从磁盘解码的 external xattr name 必须拒绝内嵌 NUL，保持与 Linux/e2fsck 的 corruption
   handling 一致。
 - 新写 external xattr block 必须按 Linux ext4 算法生成每项 `e_hash` 和聚合 `h_hash`，并在其后
@@ -170,6 +172,8 @@ exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，
 | T-13 | 同一 inode 出现 snapshot 分叉，或 inode number reuse 继承旧 transient state | 中 | KVFS 初始化/释放期间并发 `iget`，core namei 按编号重载 live child，或 orphan removal 为 resident 前驱解码临时对象 | KVFS-wide `(SuperBlock, ino)` table 的 `New/Live/Freeing` 是唯一 identity 状态；`New/Freeing` 等待并重试；bridge 向 unlink/rmdir/rename 传入既有 private state；legacy orphan next 只读写 journaled inode-table bytes；KExt4 无 resident cache；reuse 只能在 `Freeing` 完成并删除旧 slot 后发生 |
 | T-14 | shrink 后重新增长暴露旧 PageCache 数据 | 高 | ext4 backing prepare 提前把 VFS `i_size` 改成目标值，导致 `truncate_setsize()` 误判长度未变并跳过 folio 丢弃或 EOF 清零 | regular-file metadata publish 只更新 `i_disksize`；唯一 `i_size` 由 VFS 在 PageCache 顺序点发布；core prepare 与 KVFS shrink/regrow、partial-grow 回归测试共同约束该职责边界 |
 | T-15 | 扩大 `i_extra_isize` 时覆盖、丢失 xattr，生成 e2fsck 不接受的 external EA block，或在磁盘满时拒绝本可完成的更新 | 高 | xattr syscall 错误地同时改变 extra-isize、普通 inode dirty 路径漏掉扩展，新 extra fields 与旧 inline 区间重叠，external entry/block hash 留零，错误地 COW 内容未变的共享 block，或布局阶段的空闲块在 apply 前被占用 | 普通 set/remove 固定使用当前 extra-isize，统一 ordinary inode-dirty 入口再按 want/min/current 扩展；迁移采用 Linux 风格 entry-by-entry 选择且固定 `system.data`；内容未变的 external block 直接复用，需要新 block 的布局在 apply 前预分配并把 `NoSpace` 降级为 `no_expand`；同一 journal transaction 重写 external block、生成 Linux-compatible `e_hash`/`h_hash`、清理旧 inline 区并更新 inode checksum；单元测试覆盖 deferred expansion、目录 inode dirty、磁盘满共享 external 复用、迁移选择与独立固定 hash 向量 |
+| T-16 | 损坏 legacy orphan head 让挂载恢复失败、循环，或访问未分配/reserved inode | 中 | `s_last_orphan` 越界或指向 allocation bit 为零的 inode，已加载 inode 带不可截断的链接类型，或 `i_dtime` 指向非法 next | 普通 orphan API 继续严格拒绝非法编号；显式 recovery 在 inode-table decode 前验证编号和带 checksum 的 bitmap，加载后验证可截断类型与 next，并以 `PreserveDuringRecovery` journal transaction 持久化清零后终止 bad chain；bitmap I/O/checksum、inode decode 和合法但未支持的 cleanup 继续失败而不被降级 |
+| T-17 | `minixdf`/`bsddf` 改变 free-space 事实源或错误扣除 metadata overhead | 中 | 两种模式分别实现整套 statfs 公式，或 bridge 直接修改 free counters | core 的 typed mode 只选择 `blocks_count - overhead` 或原始 `blocks_count`；free/available/inode 统计走共享代码，Linux-image 回归测试验证两者除总块数外一致 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -177,7 +181,7 @@ exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，
 |------|----------|----------|----------|----------|--------|----------|
 | F-01 | 对 Linux ext4 有效 feature 返回 unsupported | EA inode、bigalloc、orphan-file、inline-data write 等 feature 尚未实现 | 当前操作失败 | filesystem 仍保持可审计状态，但该能力不可用 | 3 | feature negotiation 和显式 `UnsupportedKind` |
 | F-02 | journal commit 或 checkpoint 失败 | 设备写入/flush 错误 | committing 或 pending checkpoint 状态保留并 abort journal | 当前 mount 后续 sync/mutation 拒绝继续，重新挂载时依赖 recovery | 2 | 失败返回前永久 abort；保留 recovery evidence 和 pending state，禁止后续 sync 假成功 |
-| F-03 | recovery-time zero-link cleanup 失败 | crash 发生在 namespace commit 之后、final cleanup 之前，且 metadata 损坏、设备失败或 inode 使用尚未支持的格式 | recovery 保留 orphan/recovery evidence 并返回错误 | filesystem 不会被当作可写 root 暴露 | 2 | legacy orphan cleanup 使用独立 journal transaction；checkpoint 后在保留 recovery flag 的同时重载 mutable metadata state，成功后再继续下一个 orphan；clean-journal flush-failure 回归测试验证失败可观察、证据保留和重试成功，N3 在最终执行图上补齐其余 fault/powercut 矩阵 |
+| F-03 | recovery-time orphan cleanup 失败 | crash 发生在 namespace commit 之后、final cleanup 之前，bad-orphan 链需要切断，或 bitmap/inode metadata、设备失败、inode 使用尚未支持的格式 | 明确的 bad-orphan 在 durable clear 后终止；不能安全降级的错误保留 orphan head 或 recovery evidence 并返回 | filesystem 不会在未持久化 cleanup 时被当作可写 root 暴露，也不会把 checksum/I/O 错误当成 stale orphan 丢弃 | 2 | legacy orphan cleanup 使用独立 journal transaction；bad-orphan clear 与普通 inode cleanup 都采用 `PreserveDuringRecovery`，checkpoint 后重载 mutable metadata state，成功后再继续；真实镜像测试覆盖 reserved/out-of-range、未分配 head、非法 next，flush-failure 测试覆盖证据保留和重试，N3 在最终执行图上补齐其余 fault/powercut 矩阵 |
 | F-04 | 粗粒度 write lock 串行化慢 mutation I/O | live bridge 在 blocking filesystem mutation 周围持有 mount-level core write guard | 吞吐下降 | 其他 KExt4 mutation 等待；只读路径仍可共享 read guard | 4 | inode private state 已有独立 state lock；N2 根据实际 worker 和共享状态继续建立 per-group/journal/metadata-buffer 锁域；锁拆分前不宣称 mutation 并发性能 |
 | F-05 | journal reservation 空间不足 | operation 的实际 metadata targets 超过空 journal 容量，或 reservation 混入另一个 lifecycle 阶段的工作 | transaction 在修改 metadata 前失败 | 正常 writeback、fsync、rename-overwrite、truncate 或 orphan cleanup 返回错误；已有磁盘状态保持不变 | 3 | namespace 与 final eviction 分开预算；目录插入计划在事务前识别 HTree 转换/split，并把独立块 mapping 和 HTree credits 纳入同一预检；ordered writeback 只走 path-local update，并按最大路径深度计算不截断预算；跨叶 truncate 在首个 metadata 写入前选择按 tree blocks/groups 估算的全树路径；由 rename-overwrite、fragmented-writeback、balanced-split 和 preallocation-tail credit 回归测试约束 |
 | F-06 | PageCache 与 filesystem core 锁序反转 | writeback 持有 core mutex 等待 mapping mutex，同时 cache miss 持有 mapping mutex 进入 backing read | 并发 buffered I/O 和 `sync()` 停止推进 | watchdog 报告 mutex deadlock，filesystem workload 无法继续 | 2 | bridge 不在 PageCache traversal 外层持有 core mutex；同 inode writeback 独立串行化，batch callback 在 mapping/folio mutex 释放后才进入核心；VFS/MM 后续仍需消除 tree lock 下的 backing I/O |
@@ -185,6 +189,7 @@ exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，
 | F-08 | FIEMAP 查询遇到损坏 mapping | extent tree/legacy pointer 返回非法长度或物理范围 | 当前 ioctl 返回数据错误 | 文件内容不被修改，调用方不能取得布局 | 3 | 复用 core mapping 校验；bridge 拒绝零进度和算术溢出，不输出未经检查的 extent |
 | F-09 | eviction 与并发 `iget` 交错 | final teardown 已开始时另一路按相同 inode number 加载 | 调用方可能观察正在释放的 metadata，或建立并行 identity | stale I/O、重复释放或 transient state 串线 | 2 | KVFS cache mutex 下完成 `Live -> Freeing`；lookup/insert 在内部等待，finish 精确移除旧 Weak entry 并唤醒后重试，不向路径操作返回 `EINVAL`/`ESTALE` |
 | F-10 | 存量 inode 的 extra-isize 扩展在每次脏写重复失败 | xattr 布局或 external block 资源持续不满足，但失败结论没有驻留状态 | 每次 ordinary inode dirty 重复 metadata I/O、checksum、解码、排序和布局规划 | 元数据更新吞吐下降，磁盘满场景可能被放大 | 4 | 确定布局不可行时在唯一 resident `Ext4Inode` 状态中设置 `no_expand`；成功删除 xattr 后清除，journal busy/credits 不足保持可重试 |
+| F-11 | statfs 总容量模式选择错误 | bridge 丢失 mount state，或 core 把默认模式当成 minixdf | `f_blocks` 与 Linux ext4 ABI 口径不一致 | 容量监控与应用空间判断错误 | 3 | core 默认 `Bsd`，bridge 显式传 typed mode；分别验证 minixdf 精确总块数和 bsddf overhead 结果 |
 
 ## 故障管理
 
@@ -259,3 +264,4 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
 - 新增 ext4-private transient 字段是否放在 VFS inode 组合持有的 private state，而不是 bridge
   snapshot、mount-wide inode-number map 或通用状态容器？
 - 文档是否区分了 core support、live KVFS syscall exposure 和路线图能力？
+- statfs 模式是否只改变 `blocks`，并保持 free/available/reserved/delalloc accounting 共享？

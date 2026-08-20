@@ -22,13 +22,17 @@ mod inode;
 mod util;
 
 pub use fs::Ext4Filesystem;
+use fs::Ext4MountOptions;
 
 fn ext4_get_tree(
     context: &kvfs::FsContext<'_>,
     lookup_root: &kvfs::Path,
     lookup_pwd: &kvfs::Path,
 ) -> kvfs::VfsResult<alloc::sync::Arc<kvfs::SuperBlock>> {
-    kvfs::get_tree_bdev(context, lookup_root, lookup_pwd, Ext4Filesystem::fill_super)
+    let mount_options = Ext4MountOptions::parse(context.data())?;
+    kvfs::get_tree_bdev(context, lookup_root, lookup_pwd, move |super_block| {
+        Ext4Filesystem::fill_super(super_block, mount_options)
+    })
 }
 
 /// The canonical ext4 filesystem type registered with KVFS.

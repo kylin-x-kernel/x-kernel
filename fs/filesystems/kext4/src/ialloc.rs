@@ -19,8 +19,8 @@ use crate::{
     inode::{InodeInitialization, InodeKind},
     superblock::{
         Ext4Filesystem, bitmap_bit_capacity, count_clear_ext4_bitmap_bits, ensure_metadata_credits,
-        ext4_bitmap_checksum_matches, ext4_mark_bitmap_end, replace_metadata_access_bytes,
-        validate_ext4_bitmap_range_set,
+        ext4_bitmap_checksum_matches, ext4_mark_bitmap_end, is_ext4_bitmap_bit_set,
+        replace_metadata_access_bytes, validate_ext4_bitmap_range_set,
     },
     types::{BlockGroupNumber, FilesystemBlock, InodeNumber},
 };
@@ -28,6 +28,31 @@ use crate::{
 const INODE_ALLOCATOR_METADATA_CREDITS: u32 = 4;
 
 impl Ext4Filesystem {
+    pub(crate) fn is_inode_allocated(&self, inode: InodeNumber) -> Ext4Result<bool> {
+        let group = self.block_group_for_inode(inode)?;
+        let group_index = usize::try_from(group.get()).map_err(|_| Ext4Error::Overflow)?;
+        let descriptor = self.groups.get(group_index).ok_or(Ext4Error::OutOfBounds)?;
+
+        // An uninitialized inode bitmap represents an entirely free
+        // non-reserved range, so no legacy orphan may point into it.
+        if descriptor.has_uninit_inode_bitmap() {
+            return Ok(false);
+        }
+
+        let range = self.inode_group_range(group)?;
+        let bitmap = self.read_metadata_block(FilesystemBlock::new(descriptor.inode_bitmap()))?;
+        self.verify_inode_bitmap_checksum_for_group(descriptor, bitmap.as_ref())?;
+        self.validate_inode_bitmap_for_group(range, bitmap.as_ref())?;
+
+        let bit_index = inode
+            .get()
+            .checked_sub(1)
+            .ok_or(Ext4Error::OutOfBounds)?
+            .checked_rem(self.superblock().inodes_per_group())
+            .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidInodeGeometry))?;
+        is_ext4_bitmap_bit_set(bitmap.as_ref(), bit_index)
+    }
+
     #[allow(dead_code)]
     pub(crate) fn allocate_inode(
         &mut self,

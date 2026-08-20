@@ -3789,6 +3789,7 @@ dependencies = [
  "kvfs",
  "linux-raw-sys",
  "linux_sysno",
+ "memaddr",
  "memfs",
  "osvm",
  "posix-types",

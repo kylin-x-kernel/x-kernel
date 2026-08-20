@@ -4,7 +4,7 @@
 
 //! Mount and umount syscall entry points.
 
-use alloc::string::String;
+use alloc::{string::String, vec, vec::Vec};
 use core::ffi::{c_char, c_void};
 
 use kerrno::{KError, KResult};
@@ -13,21 +13,22 @@ use kvfs::{
     Filename, LookupFlags, LookupIntent, MntNamespace, MountFlags, Path, SuperBlockFlags,
     path::PATH_MAX,
 };
+use osvm::VirtPtr;
 use posix_types::UserConstPtr;
 
+const LEGACY_MOUNT_DATA_SIZE: usize = memaddr::PAGE_SIZE_4K;
+
 /// Mount a filesystem at the specified target path.
-///
-/// Filesystem-specific options in `data` are not yet forwarded to filesystem
-/// backends.
 pub fn sys_mount(
     source: UserConstPtr<c_char>,
     target: UserConstPtr<c_char>,
     fs_type: UserConstPtr<c_char>,
     flags: u32,
-    _data: UserConstPtr<c_void>,
+    data: UserConstPtr<c_void>,
 ) -> KResult<isize> {
     let fs_type = copy_mount_string(fs_type)?;
     let source = copy_mount_string(source)?;
+    let data = copy_mount_data(data)?;
     let target = target.load_string_with_max_len(PATH_MAX)?;
     debug!("sys_mount <= source: {source:?}, target: {target:?}, flags: {flags:#x}");
 
@@ -40,6 +41,7 @@ pub fn sys_mount(
         target.as_str(),
         fs_type.as_deref(),
         flags,
+        data.as_deref(),
     )?;
     Ok(0)
 }
@@ -52,6 +54,37 @@ fn copy_mount_string(pointer: UserConstPtr<c_char>) -> KResult<Option<String>> {
     }
 }
 
+fn copy_mount_data(pointer: UserConstPtr<c_void>) -> KResult<Option<Vec<u8>>> {
+    if pointer.is_null() {
+        return Ok(None);
+    }
+
+    let bytes = pointer.cast::<u8>();
+    let mut data = match bytes.load_vm_vec(LEGACY_MOUNT_DATA_SIZE) {
+        Ok(data) => data,
+        Err(_) => copy_mount_data_page(|offset| {
+            UserConstPtr::from(bytes.as_ptr().wrapping_add(offset)).read_vm()
+        })?,
+    };
+    data[LEGACY_MOUNT_DATA_SIZE - 1] = 0;
+    Ok(Some(data))
+}
+
+fn copy_mount_data_page<E>(
+    mut read_byte: impl FnMut(usize) -> Result<u8, E>,
+) -> Result<Vec<u8>, E> {
+    let mut data = vec![0; LEGACY_MOUNT_DATA_SIZE];
+    for (offset, byte) in data.iter_mut().enumerate() {
+        match read_byte(offset) {
+            Ok(value) => *byte = value,
+            Err(error) if offset == 0 => return Err(error),
+            Err(_) => break,
+        }
+    }
+    data[LEGACY_MOUNT_DATA_SIZE - 1] = 0;
+    Ok(data)
+}
+
 fn do_mount(
     process: &Process,
     cred: &kcred::Cred,
@@ -59,9 +92,10 @@ fn do_mount(
     dir_name: &str,
     fs_type: Option<&str>,
     flags: u32,
+    data: Option<&[u8]>,
 ) -> KResult<()> {
     let target = lookup_mount_path(process, dir_name, cred)?;
-    path_mount(process, cred, dev_name, &target, fs_type, flags)
+    path_mount(process, cred, dev_name, &target, fs_type, flags, data)
 }
 
 fn path_mount(
@@ -71,6 +105,7 @@ fn path_mount(
     target: &Path,
     fs_type: Option<&str>,
     mut flags: u32,
+    data: Option<&[u8]>,
 ) -> KResult<()> {
     if flags & linux_raw_sys::general::MS_MGC_MSK == linux_raw_sys::general::MS_MGC_VAL {
         flags &= !linux_raw_sys::general::MS_MGC_MSK;
@@ -116,7 +151,7 @@ fn path_mount(
     let fs_type = fs_type.ok_or(KError::InvalidInput)?;
     let file_system_type = kvfs::get_filesystem_type(fs_type).ok_or(KError::NoSuchDevice)?;
     let (root, pwd) = process.fs_context()?.lock().root_and_pwd();
-    let context = kvfs::FsContext::new(file_system_type, dev_name, superblock_flags, cred);
+    let context = kvfs::FsContext::new(file_system_type, dev_name, data, superblock_flags, cred);
     namespace.mount_new(target, mount_flags, &context, &root, &pwd)?;
     Ok(())
 }
@@ -233,6 +268,32 @@ pub fn sys_umount2(target: UserConstPtr<c_char>, flags: i32) -> KResult<isize> {
 mod tests {
     use kvfs::{MountFlags, SuperBlockFlags};
     use unittest::{assert, assert_eq, def_test};
+
+    use super::LEGACY_MOUNT_DATA_SIZE;
+
+    #[def_test]
+    fn mount_data_page_preserves_opaque_bytes_and_zero_fills_after_fault() {
+        let input = [0xff, 0, 0x80, b','];
+        let copied =
+            super::copy_mount_data_page(|offset| input.get(offset).copied().ok_or(())).unwrap();
+
+        assert_eq!(&copied[..input.len()], &input);
+        assert!(copied[input.len()..].iter().all(|byte| *byte == 0));
+    }
+
+    #[def_test]
+    fn mount_data_page_reserves_last_byte_for_text_termination() {
+        let copied = super::copy_mount_data_page::<()>(|_| Ok(0xff)).unwrap();
+
+        assert_eq!(copied.len(), LEGACY_MOUNT_DATA_SIZE);
+        assert_eq!(copied[0], 0xff);
+        assert_eq!(copied[LEGACY_MOUNT_DATA_SIZE - 1], 0);
+    }
+
+    #[def_test]
+    fn mount_data_page_rejects_an_unreadable_first_byte() {
+        assert!(super::copy_mount_data_page::<()>(|_| Err(())).is_err());
+    }
 
     #[def_test]
     fn test_superblock_flags_from_mount_only_options_are_filtered() {

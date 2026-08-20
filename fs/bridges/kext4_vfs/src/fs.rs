@@ -6,7 +6,9 @@
 
 use alloc::{string::String, sync::Arc};
 
-use kext4::{Ext4Error, Ext4Filesystem as KExt4Core, Ext4Inode, Ext4SyncIntent, InodeNumber};
+use kext4::{
+    Ext4Error, Ext4Filesystem as KExt4Core, Ext4Inode, Ext4StatFsMode, Ext4SyncIntent, InodeNumber,
+};
 use ksync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use kvfs::{
     Dentry, DeviceId, Metadata, NodeFlags, NodeType, StatFs, SuperBlock, SuperBlockOperations,
@@ -27,6 +29,31 @@ const EXT4_ROOT_INO: u32 = 2;
 /// 256 blocks × 4 KiB = 1 MiB of block allocation work per transaction.
 const EVICTION_BATCH_BLOCKS: u32 = 256;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Ext4MountOptions {
+    statfs_mode: Ext4StatFsMode,
+}
+
+impl Ext4MountOptions {
+    pub(crate) fn parse(data: Option<&[u8]>) -> kvfs::VfsResult<Self> {
+        let mut options = Self::default();
+        let data = data.unwrap_or_default();
+        let text = &data[..data
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(data.len())];
+        for option in text.split(|byte| *byte == b',') {
+            match option {
+                b"" => {}
+                b"minixdf" => options.statfs_mode = Ext4StatFsMode::Minix,
+                b"bsddf" => options.statfs_mode = Ext4StatFsMode::Bsd,
+                _ => return Err(kvfs::VfsError::InvalidInput),
+            }
+        }
+        Ok(options)
+    }
+}
+
 fn node_flags_from_core_inode(inode: &Ext4Inode) -> NodeFlags {
     let (immutable, append_only) = inode.inode_attr_flags();
     let mut flags = NodeFlags::empty();
@@ -38,6 +65,7 @@ fn node_flags_from_core_inode(inode: &Ext4Inode) -> NodeFlags {
 /// Ext4 filesystem implementation backed by the checked KExt4 core.
 pub struct Ext4Filesystem {
     inner: RwLock<KExt4Core>,
+    statfs_mode: Ext4StatFsMode,
     /// Mount-invariant block size, cached at mount time.
     ///
     /// This mirrors Linux `s_blocksize`: it is fixed once and never changes,
@@ -54,7 +82,10 @@ impl Ext4Filesystem {
     ///
     /// Returns an error when ext4 validation, recovery, geometry discovery,
     /// or root inode initialization fails.
-    pub(crate) fn fill_super(super_block: &Arc<SuperBlock>) -> VfsResult<()> {
+    pub(crate) fn fill_super(
+        super_block: &Arc<SuperBlock>,
+        mount_options: Ext4MountOptions,
+    ) -> VfsResult<()> {
         let dev = super_block
             .block_device()
             .expect("get_tree_bdev must set s_bdev before fill_super")
@@ -86,6 +117,7 @@ impl Ext4Filesystem {
         let legacy_max_file_size = core.legacy_max_file_size().map_err(into_vfs_err)?;
         let fs = Arc::new(Self {
             inner: RwLock::new(core),
+            statfs_mode: mount_options.statfs_mode,
             block_size,
             extent_max_file_size,
             legacy_max_file_size,
@@ -217,7 +249,9 @@ impl Ext4Filesystem {
 impl SuperBlockOperations for Ext4Filesystem {
     fn statfs(&self) -> VfsResult<StatFs> {
         let fs = self.read_lock();
-        let stat = fs.statfs().map_err(into_vfs_err)?;
+        let stat = fs
+            .statfs_with_mode(self.statfs_mode)
+            .map_err(into_vfs_err)?;
         Ok(StatFs {
             fs_type: 0xef53,
             block_size: stat.block_size,
@@ -275,5 +309,67 @@ impl SuperBlockOperations for Ext4Filesystem {
         self.lock()
             .eviction_finish(ext4_inode.core_inode(), timestamp)
             .map_err(into_vfs_err)
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use kext4::Ext4StatFsMode;
+    use unittest::{assert_eq, def_test};
+
+    use super::Ext4MountOptions;
+
+    #[def_test]
+    fn statfs_mount_options_default_to_bsddf() {
+        assert_eq!(
+            Ext4MountOptions::parse(None).unwrap().statfs_mode,
+            Ext4StatFsMode::Bsd
+        );
+        assert_eq!(
+            Ext4MountOptions::parse(Some(b"\0")).unwrap().statfs_mode,
+            Ext4StatFsMode::Bsd
+        );
+    }
+
+    #[def_test]
+    fn last_statfs_mount_option_wins() {
+        assert_eq!(
+            Ext4MountOptions::parse(Some(b"bsddf,minixdf\0"))
+                .unwrap()
+                .statfs_mode,
+            Ext4StatFsMode::Minix
+        );
+        assert_eq!(
+            Ext4MountOptions::parse(Some(b"minixdf,,bsddf\0"))
+                .unwrap()
+                .statfs_mode,
+            Ext4StatFsMode::Bsd
+        );
+    }
+
+    #[def_test]
+    fn unsupported_mount_options_are_rejected() {
+        assert_eq!(
+            Ext4MountOptions::parse(Some(b"garbage\0")).unwrap_err(),
+            kvfs::VfsError::InvalidInput
+        );
+        assert_eq!(
+            Ext4MountOptions::parse(Some(b"discard\0")).unwrap_err(),
+            kvfs::VfsError::InvalidInput
+        );
+        assert_eq!(
+            Ext4MountOptions::parse(Some(b"nodelalloc\0")).unwrap_err(),
+            kvfs::VfsError::InvalidInput
+        );
+    }
+
+    #[def_test]
+    fn bytes_after_mount_data_terminator_are_ignored() {
+        assert_eq!(
+            Ext4MountOptions::parse(Some(b"minixdf\0\xff"))
+                .unwrap()
+                .statfs_mode,
+            Ext4StatFsMode::Minix
+        );
     }
 }

@@ -13,8 +13,8 @@ use std::{
 use block::{BlockDeviceOperations, Device, DeviceKind, DriverError, DriverResult};
 use kext4::{
     BlockMapping, DirectoryFileType, Ext4DirEntryRef, Ext4DirPos, Ext4DirSink, Ext4Error,
-    Ext4Filesystem, Ext4Inode, Ext4Result, Ext4Timestamp, Ext4XattrNamespace, FilesystemBlock,
-    InodeKind, InodeNumber, LogicalBlock, UnsupportedKind,
+    Ext4Filesystem, Ext4Inode, Ext4Result, Ext4StatFsMode, Ext4Timestamp, Ext4XattrNamespace,
+    FilesystemBlock, InodeKind, InodeNumber, LogicalBlock, UnsupportedKind,
 };
 
 const DEVICE_BLOCK_SIZE: usize = 512;
@@ -1660,6 +1660,9 @@ fn statfs_matches_dumpe2fs_for_one_kib_and_four_kib_images() {
         let filesystem = Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes)))
             .expect("mount generated Linux ext4 image");
         let stat = filesystem.statfs().expect("read kext4 statfs");
+        let minix_stat = filesystem
+            .statfs_with_mode(Ext4StatFsMode::Minix)
+            .expect("read kext4 minixdf statfs");
 
         assert_eq!(stat.block_size, expected.block_size as u32);
         assert_eq!(stat.fragment_size, expected.fragment_size as u32);
@@ -1680,6 +1683,11 @@ fn statfs_matches_dumpe2fs_for_one_kib_and_four_kib_images() {
         assert_eq!(stat.files, expected.inode_count);
         assert_eq!(stat.files_free, expected.free_inodes);
         assert_eq!(stat.max_name_len, 255);
+        assert_eq!(minix_stat.blocks, expected.block_count);
+        assert_eq!(minix_stat.blocks_free, stat.blocks_free);
+        assert_eq!(minix_stat.blocks_available, stat.blocks_available);
+        assert_eq!(minix_stat.files, stat.files);
+        assert_eq!(minix_stat.files_free, stat.files_free);
 
         fs::remove_file(image).expect("remove generated image");
     }

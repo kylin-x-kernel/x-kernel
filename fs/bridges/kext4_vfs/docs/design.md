@@ -15,8 +15,8 @@ KVFS 已保留 `I_NEW`-equivalent slot 后加载 ext4 状态，再把该状态�
 ## 范围
 
 ```text
-src/lib.rs    filesystem-type registration
-src/fs.rs     mount state, superblock construction, sync and eviction hooks
+src/lib.rs    filesystem-type registration and FsContext mount-data handoff
+src/fs.rs     mount-option parsing, mount state, statfs, sync and eviction hooks
 src/inode.rs  inode/file/address-space callbacks
 src/util.rs   KExt4/KVFS type and error conversion
 ```
@@ -86,6 +86,16 @@ KVFS 在调用前已经给 nascent `SuperBlock` 建立 canonical `s_type/s_bdev/
 只从该对象取得 `s_bdev`，安装 ext4 operations 与 root，不接收或复制 type、device、flags。
 root boot 和用户 `mount(2)` 不存在另一条 ext4 mount callback 或实例缓存。
 
+挂载入口把 `FsContext::data()` 的 opaque bytes 按首个 NUL 截断，再精确解析 ASCII
+`bsddf`/`minixdf` token。未指定时默认 `bsddf`，同一 option string 中最后一个模式生效，与
+Linux legacy mount-option 顺序一致；未知 token 和尚未实现的 ext4 option 在设备打开和
+superblock publication 前返回 `EINVAL`，不能通过成功 mount 暗示选项已生效。Bridge 把结果复制为
+`Ext4StatFsMode` 并与 superblock wrapper 同生命周期保存。`statfs()` 将该枚举传给 core：
+`bsddf` 的 `f_blocks` 扣除 metadata overhead，`minixdf` 报告磁盘 superblock 的完整块数；
+`f_bfree`、`f_bavail` 和 inode 统计不随模式改变。保留给内核直接调用者的公开
+`Ext4Filesystem::mount_bdev()` 继续默认 BSD 口径；只有 filesystem-type `get_tree()` 使用
+crate 内部的带选项入口。
+
 Buffered writeback 由每个 bridge inode 的 `writeback_lock` 串行化一个 PageCache writeback pass。
 delayed-allocation 区间树、`i_reserved_data_blocks` 等价计数和 mount-wide aggregate 全部归
 KExt4；bridge 只按逻辑区间调用 reserve/release/truncate。PageCache traversal 不持有 core
@@ -113,6 +123,8 @@ Bridge filesystem 使用挂载级 `RwLock<kext4::Ext4Filesystem>`。读目录、
 - Bridge `Inode` 不保存 inode number 字段；number 由其组合持有的 core private component 给出。
 - `writeback_lock` 保留在 bridge，因为它保护 PageCache callback 编排，不是 ext4 inode metadata。
 - KExt4 不建立 inode-number map；其 `Ext4Inode` 只作为 bridge inode 组合持有的 inode component。
+- 文本 mount option 由 bridge 从 opaque bytes 解析并严格拒绝未知 token，core 只接收 typed
+  `Ext4StatFsMode`；generic VFS 和存储 core 都不依赖 `bsddf`/`minixdf` 字符串语法。
 
 ## Drop / 资源释放
 

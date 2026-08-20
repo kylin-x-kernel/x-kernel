@@ -5,11 +5,15 @@
 //! Legacy ext4 regular-file orphan-list helpers.
 
 use crate::{
-    CorruptKind, Ext4Error, Ext4Filesystem, Ext4Inode, Ext4Result, InodeNumber, UnsupportedKind,
+    CorruptKind, Ext4Error, Ext4Filesystem, Ext4Inode, Ext4Result, InodeKind, InodeNumber,
+    UnsupportedKind,
     disk::superblock,
+    jbd2::JournalCredits,
     journal::RecoveryFlagPolicy,
     superblock::{metadata_access_bytes, replace_metadata_access_bytes},
 };
+
+const ORPHAN_HEAD_UPDATE_CREDITS: JournalCredits = JournalCredits::new(1);
 
 impl Ext4Filesystem {
     pub(crate) fn orphan_head(&self) -> Option<InodeNumber> {
@@ -83,8 +87,14 @@ impl Ext4Filesystem {
         let mut steps = 0u32;
         while let Some(head) = self.orphan_head() {
             self.advance_orphan_walk(&mut steps)?;
-            self.validate_orphan_number(head)?;
-            let inode = self.orphan_iget(head)?;
+            let inode = match self.recovery_orphan_head(head)? {
+                Some(inode) => inode,
+                None => {
+                    self.discard_invalid_orphan_chain(recovery_flag_policy)?;
+                    cleaned = cleaned.checked_add(1).ok_or(Ext4Error::Overflow)?;
+                    continue;
+                }
+            };
             if inode.links_count() == 0 {
                 self.cleanup_unlinked_orphan_from_head(&inode, recovery_flag_policy)?;
             } else {
@@ -93,6 +103,38 @@ impl Ext4Filesystem {
             cleaned = cleaned.checked_add(1).ok_or(Ext4Error::Overflow)?;
         }
         Ok(cleaned)
+    }
+
+    fn recovery_orphan_head(&self, head: InodeNumber) -> Ext4Result<Option<Ext4Inode>> {
+        if !self.is_valid_orphan_number(head) || !self.is_inode_allocated(head)? {
+            return Ok(None);
+        }
+
+        let (inode, next) = self.orphan_iget_with_next(head)?;
+        if inode.links_count() != 0
+            && !matches!(
+                inode.kind(),
+                InodeKind::RegularFile | InodeKind::Directory | InodeKind::Symlink
+            )
+        {
+            return Ok(None);
+        }
+        if next.is_some_and(|next| !self.is_valid_orphan_number(next)) {
+            return Ok(None);
+        }
+
+        Ok(Some(inode))
+    }
+
+    fn discard_invalid_orphan_chain(
+        &mut self,
+        recovery_flag_policy: RecoveryFlagPolicy,
+    ) -> Ext4Result<()> {
+        let journal =
+            self.metadata_journal_for_mutation(ORPHAN_HEAD_UPDATE_CREDITS, recovery_flag_policy)?;
+        let mut handle = journal.begin(ORPHAN_HEAD_UPDATE_CREDITS)?;
+        let result = self.set_orphan_head(None, &mut handle);
+        self.complete_metadata_mutation_with_policy(handle, result, recovery_flag_policy)
     }
 
     fn remove_orphan_inner(
@@ -179,13 +221,16 @@ impl Ext4Filesystem {
     }
 
     pub(crate) fn validate_orphan_number(&self, inode: InodeNumber) -> Ext4Result<()> {
-        if inode.get() == 0
-            || inode.get() > self.superblock().inodes_count()
-            || self.is_reserved_inode(inode)
-        {
+        if !self.is_valid_orphan_number(inode) {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeNumber));
         }
         Ok(())
+    }
+
+    fn is_valid_orphan_number(&self, inode: InodeNumber) -> bool {
+        inode.get() != 0
+            && inode.get() <= self.superblock().inodes_count()
+            && !self.is_reserved_inode(inode)
     }
 
     pub(crate) fn valid_orphan_next(

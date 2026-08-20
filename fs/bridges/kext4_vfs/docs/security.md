@@ -3,8 +3,8 @@
 ## 信任模型
 
 Bridge 信任 KVFS 提供有效的 kernel-owned `VfsInode`、dentry、PageCache 和生命周期 callback，
-信任 `kext4` core 已校验 ext4 磁盘元数据。来自 syscall 的 name、offset、length、metadata update
-和 credential 仍是边界输入，必须在 KVFS/core 对应边界校验。
+信任 `kext4` core 已校验 ext4 磁盘元数据。来自 syscall 的 name、offset、length、metadata update、
+mount option 和 credential 仍是边界输入，必须在 KVFS/core 对应边界校验。
 
 ## 外部边界 / 攻击面
 
@@ -13,6 +13,9 @@ Bridge 信任 KVFS 提供有效的 kernel-owned `VfsInode`、dentry、PageCache 
 - 块设备 I/O 与 journal/recovery 错误，由 core 以 `Ext4Error` 返回；
 - canonical `FileSystemType -> get_tree_bdev -> fill_super` 挂载入口；
 - UID/GID/mode 和 device id 的 VFS/core 转换。
+- KVFS 已有界复制的 opaque `FsContext::data()`；bridge 只识别首个 NUL 前精确的
+  `bsddf`/`minixdf` ASCII token，拒绝未知或尚未实现的 option，并把成功结果复制成
+  mount-lifetime enum。
 
 Bridge 不直接访问 user pointer、MMIO/PIO、DMA、firmware、FFI 或 inline assembly。
 
@@ -42,6 +45,8 @@ Bridge 不直接访问 user pointer、MMIO/PIO、DMA、firmware、FFI 或 inline
 - Cross-filesystem private state 是内部契约失败并映射为 `EIO`；当前运行态没有可逃逸的 core
   inode handle。`Freeing` 由 KVFS 在内部等待重试，不进入普通 core API；未来若引入带
   generation 的外部 handle，其真实失效才应映射 `ESTALE`。
+- statfs mode 在 mount 时确定并随 bridge filesystem 保持不变；切换模式只能改变总块数
+  `f_blocks` 的口径，不能改变 free/available/reserved/delalloc 记账。
 
 ## 线程安全
 
@@ -59,6 +64,7 @@ VFS-wide Weak cache 按 superblock 与 inode number 合并 identity。只读 gua
 | T-04 | delalloc accounting 漂移导致过量预留或 statfs 错误 | 中 | per-inode interval/count 与 mount aggregate 分开更新，或只按 `i_disksize` 判断 truncate | reserve/release/truncate/writeback/eviction 复用 core range API，一次更新 interval、per-inode count 和 mount aggregate；EOF tail 释放按旧 `i_size` 判断，磁盘 mapping shrink 单独按旧 `i_disksize` 判断；bridge 无 reservation counter |
 | T-05 | PageCache/core 锁反转造成永久等待 | 中 | writeback 持 core lock 遍历 folio，同时 read fault 持 mapping lock 进入 core | traversal 外不持 core lock；batch callback 在 mapping/folio lock 释放后进入 core；per-inode writeback lock 单独串行化 pass |
 | T-06 | shrink 后重新增长暴露旧缓存数据 | 高 | backing prepare 提前发布新 `i_size`，使通用 PageCache 看不到旧 EOF | core prepare 只提交 `i_disksize`；bridge 恰好调用一次 `truncate_setsize()` 发布 `i_size` 并完成 folio/mmap 处理；回归测试覆盖 shrink、shrink-regrow 与 partial-page grow |
+| T-07 | mount option 丢失、顺序处理错误或被静默忽略，导致 `statfs().f_blocks` 使用错误口径或用户误判功能已启用 | 中 | syscall/VFS 未转交 data、bridge 使用默认值覆盖后续 token，或未知/未实现 option 返回成功 | 精确解析 `bsddf`/`minixdf`，最后一个 token 生效；其它 token 在 publication 前返回 `EINVAL`；保存 typed mount state；core Linux-image 测试验证两种口径 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -67,6 +73,7 @@ VFS-wide Weak cache 按 superblock 与 inode number 合并 identity。只读 gua
 | F-01 | core mutation/eviction 返回错误 | I/O、journal abort、corruption 或 internal cross-filesystem contract | 当前 VFS operation 失败 | mount 可能保持 recovery evidence 或拒绝后续 mutation | 2 | 跨文件系统 private component 是 `EIO` 级内部合同失败；`Freeing` 不离开 KVFS cache；final eviction 记录 warning，磁盘一致性依赖 core journal/recovery 证据 |
 | F-02 | 粗粒度 core write guard 阻塞 | 慢 I/O 或 checkpoint | 同 mount mutation 排队 | 吞吐下降 | 4 | read path 共享 guard；writeback 不跨 PageCache traversal 持 guard；后续只按实测锁域继续拆分 |
 | F-03 | VFS/private metadata 合同不一致 | attribute operations 返回的 inode number/type 与待构造 identity 不符 | 构造触发内部合同失败 | 阻止把 foreign/corrupt state 发布到其他 identity | 2 | 发布前校验 immutable fields；后续 KVFS 与 core 直接访问同一组件，不执行可失败的 snapshot 回灌 |
+| F-04 | 未识别或尚未实现的 ext4 mount option | KExt4 bridge 没有对应 typed state 或后端语义 | mount 返回 `InvalidInput` | 不创建 superblock，不发布部分 mount topology | 3 | 本次只接受 `bsddf`/`minixdf`；包括 `discard`、`nodelalloc` 在内的未实现 token 明确拒绝 |
 
 ## 故障管理
 
@@ -87,6 +94,9 @@ number、操作阶段和错误，不应输出文件内容或 xattr value。
   transaction。
 - KVFS xattr operation trait 尚未接入，core xattr 能力未暴露为 live syscall surface。
 - Final Drop 错误只能记录，不能同步返回给已经消失的最后引用持有者。
+- 当前只消费普通新挂载中的 `bsddf`/`minixdf` 文本 representation；其它 ext4 option 和
+  filesystem-specific remount reconfigure 不属于本次实现并返回 `EINVAL`。KVFS 可以传递
+  binary mountdata，但 ext4 bridge 不接受 binary representation。
 
 ## 审计清单
 
@@ -96,3 +106,6 @@ number、操作阶段和错误，不应输出文件内容或 xattr value。
 - unlink 是否延迟 data/xattr/inode slot 释放到 final VFS eviction？
 - PageCache 与 core lock 的获取顺序是否保持无反转？
 - delalloc interval/count 和 mount aggregate 是否只经 core range API 联合更新？
+- mount option 是否只解析精确 token、复制为 typed mount state，并在 publication 前拒绝未知或
+  尚未实现的 option？
+- statfs mode 是否只改变 `f_blocks`，没有绕过 free/reserved/delalloc accounting？

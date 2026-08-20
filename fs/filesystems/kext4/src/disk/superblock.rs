@@ -180,9 +180,6 @@ impl Superblock {
         if free_inodes_count > inodes_count {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeGeometry));
         }
-        if last_orphan > inodes_count {
-            return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeNumber));
-        }
         if u64::from(first_data_block) >= blocks_count
             || (block_size == 1024 && first_data_block == 0)
         {
@@ -740,14 +737,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_orphan_head_outside_inode_table() {
+    fn decodes_out_of_range_orphan_head_for_recovery() {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, super::LAST_ORPHAN_OFFSET, 8193);
 
+        let decoded = Superblock::decode(&bytes).unwrap();
+        assert_eq!(decoded.last_orphan(), 8193);
         assert_eq!(
-            Superblock::decode(&bytes),
+            super::set_last_orphan(&mut bytes, 8193),
             Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeNumber))
         );
+        let cleared = super::set_last_orphan(&mut bytes, 0).unwrap();
+        assert_eq!(cleared.last_orphan(), 0);
     }
 
     #[test]

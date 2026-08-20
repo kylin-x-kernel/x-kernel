@@ -129,8 +129,8 @@ pub use inode::{
     Ext4DeviceId, Ext4Inode, Ext4InodeMetadataUpdate, Ext4InodeStat, Ext4Timestamp, InodeKind,
 };
 pub use superblock::{
-    Ext4Filesystem, Ext4RecoveryReport, Ext4StatFs, FilesystemLayout, JournalLocation,
-    JournalStatus,
+    Ext4Filesystem, Ext4RecoveryReport, Ext4StatFs, Ext4StatFsMode, FilesystemLayout,
+    JournalLocation, JournalStatus,
 };
 pub use types::{
     BlockCount, BlockGroupNumber, FilesystemBlock, InodeNumber, LogicalBlock, PhysicalBlock,

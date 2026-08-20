@@ -2,8 +2,9 @@
 
 ## 信任模型
 
-用户提供的路径、open flags、rename flags 和 mount flags 不可信。POSIX syscall 层
-负责复制用户内存并完成 ABI 初步校验；`kvfs` 接收内核所有的字符串和类型化 flags。
+用户提供的路径、open flags、rename flags、mount flags 和 mount data 不可信。POSIX syscall 层
+负责复制用户内存并完成 ABI 初步校验；`kvfs` 只接收内核拥有的路径字符串、opaque mount-data
+byte slice 和类型化 flags。
 具体文件系统返回的目录项、extent 与元数据也必须视为可能失败的外部输入。`kvfs` 在提交
 namespace 状态前校验 name、mount relationship、类型、topology 和 operation flags。
 
@@ -30,6 +31,9 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   初始化好的 singleton；不从用户输入直接触发全局 VFS 初始化。
 - 文件系统类型注册表只接受内核构造的静态描述符；用户提供的类型名只能执行精确查找，
   不能安装或替换注册项。
+- `FsContext::data()` 只暴露 syscall 层已经有界复制的 opaque mount-data slice；filesystem
+  type 必须在同步 `get_tree()` 中解释自身文本或二进制 representation，并复制需要长期保存的
+  typed state，不能保留用户指针或借用 slice。
 - 文件系统 mutation result 会进入 VFS cached inode attributes；错误 identity 或 immutable
   geometry 不可信。
 - Xattr 名称和值来自 syscall 边界；KVFS 只接受内核拥有的 `XattrName` 和 value slice，
@@ -242,6 +246,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-39 | immutable 或 append-only inode 的 xattr 仍可被修改 | 中 | namespace 特例在通用 inode 状态检查前直接授权，或文件系统未把磁盘 inode flags 映射到 KVFS | `check_xattr_permission()` 在所有 namespace 分支前检查 `NodeFlags::IMMUTABLE/APPEND_ONLY`，set/remove 统一返回 `EPERM`；具体 bridge 必须在建立 VFS inode identity 时映射后端 flags |
 | T-40 | inode 初始化或驱逐竞争产生第二个 resident identity，或全 cache 唤醒形成惊群 | 高 | cache miss 在构造后才占 slot、Weak upgrade 失败立即重建，或所有 inode 共用一个等待队列 | cache 先发布 `New`；并发 initializer 在该 slot 等待；最后引用 drop 发布 `Freeing` 后再调用 hook；同号 lookup 等待 entry 删除并重试；每 slot 队列只唤醒同号等待者，后端不接收 `EINVAL` 风格的竞争错误 |
 | T-41 | 同一 filesystem type 和 block device 建立两个 live superblock | 高 | 每次 `get_tree_bdev` 都调用后端 fill，或旧实例 shutdown 前删除 identity | VFS registry 在 fill 前按 `(s_type, BlockDevice object)` 发布 nascent superblock；并发 mount 等待并复用同一 available instance；RO/RW 不一致按 Linux `get_tree_bdev_flags()` 返回 `EBUSY`；block holder 阻止不同 filesystem instance 同时取得同一 canonical device；shutdown 完成后才移除 entry |
+| T-42 | filesystem 在 mount 完成后继续使用失效的 mount data borrow | 高 | `get_tree()` 把 `FsContext::data()` byte-slice 引用直接存入 superblock state | mount data 只作为同步 `get_tree()` 输入；filesystem 必须解析并保存 owned/typed state，generic fill closure 为 `FnOnce` |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -257,6 +262,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | F-08 | split truncate 在 backing prepare 后 cache invalidation 失败 | 分配或 mapping invalidation 错误 | 当前 truncate 返回失败 | backing inode 可能保持 orphan/recovery state | 2 | 由具体文件系统的持久化 recovery protocol 收敛，禁止静默执行 finish |
 | F-09 | 文件系统类型重复注册 | 启动接线重复或名称冲突 | 注册返回 `ResourceBusy` | boot 在用户态启动前停止 | 2 | boot 对每个内建类型恰好注册一次并把失败视为初始化错误 |
 | F-10 | FIEMAP writer 容量耗尽 | 用户输出容量小于映射数量 | 返回已装入的 extent，遍历停止 | 调用方可增加容量重试 | 4 | `fill_next_extent()` 用布尔返回值表达容量，不把正常截断当成后端错误 |
+| F-11 | filesystem 拒绝 mount data 或 option | binary/text representation 不匹配、语法错误，或该类型尚未实现对应语义 | mount 在 superblock/topology publication 前失败 | 用户得到明确错误，不会误认为选项生效 | 3 | generic VFS 只负责安全转交；filesystem 对未知和未实现选项返回错误，只有明确建模的 compatibility no-op 才可接受 |
 
 校验失败会在 filesystem callback 前返回 typed VFS error。后端失败时 dentry cache
 location 保持不变，因为 cache commit 只在 callback 成功后执行；rename 所需 key 和 cache
@@ -280,6 +286,8 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 - mount topology synchronization 与 superblock rename mutex 是不同机制，但均遵循已记录的
   inode-then-topology 嵌套顺序。
 - 文件系统类型当前不支持运行时卸载；注册项及其函数入口必须具有整个内核生命周期。
+- `FsContext` 能承载 binary mountdata bytes，但不负责具体 representation 的解析或
+  filesystem-specific remount parsing。
 
 ## 审计清单
 
@@ -325,6 +333,8 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 - 每个 namespace mutation 是否获取父目录 exclusive lock。
 - 新文件系统是否只注册一个 canonical 静态 descriptor，且 boot、mount lookup 与
   `/proc/filesystems` 没有新增平行 provider、对象或名称分支。
+- filesystem mount data 是否在 `get_tree()` 内按该类型的 representation 解析，未知或未实现
+  选项是否明确失败，且 mount state 不保留 `FsContext::data()` 的借用？
 - immutable symlink target 是否只存于 inode cached-link 状态，metadata size 是否同步。
 - unlink/rmdir 和 rename replacement 是否锁住 victim inode。
 - cross-directory rename 是否先获取 topology mutex，再获取 inode lock。

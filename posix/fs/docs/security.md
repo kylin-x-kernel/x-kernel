@@ -46,6 +46,7 @@ kfd resources / kvfs / device and pipe implementations
 | 边界 | 入口示例 | 风险来源 |
 |------|----------|----------|
 | 用户路径字符串 | `openat`、`linkat`、`statx`、`mount` | 空指针、非 NUL 结尾、过长字符串、路径穿越、符号链接循环 |
+| mount data 字节页 | `mount(..., data)` | 坏指针、跨不可读页、二进制内容，以及由具体 filesystem 解释的恶意或未知 option |
 | 用户读写缓冲区 | `read`、`write`、`readlinkat`、`getdents64`、`statfs` | 坏地址、短缓冲区、跨页访问失败、内核信息写回格式错误 |
 | xattr 名称和值 | `set/get/list/remove*xattr` | 非 NUL 结尾、超长 name/value/list、非 UTF-8 suffix、短输出缓冲区、namespace 越权 |
 | 用户 iovec | `readv`、`writev`、`preadv2`、`pwritev2` | iovec 数量过大、范围溢出、读写方向错误 |
@@ -98,6 +99,10 @@ kfd resources / kvfs / device and pipe implementations
 7. **FIEMAP 可变长输出必须使用 checked arithmetic**：
    `fm_extent_count` 先受 Linux UAPI 总字节上限约束，header 地址、数组字节数和每项
    offset 均用 `checked_add`/`checked_mul`；每个输出 extent 的 reserved 字段显式清零。
+8. **mount data 只能以有界内核字节页向下传递**：
+   syscall 入口复制一个 4 KiB base-page 大小的 opaque buffer 并强制清零末字节，不施加 UTF-8
+   或提前 NUL 约束；`FsContext` 不保存用户指针，filesystem 若要在 `get_tree()` 返回后保留
+   选项，必须只复制已解析状态。
 
 ## 权限与语义不变量
 
@@ -167,6 +172,7 @@ kfd resources / kvfs / device and pipe implementations
 | T-25 | FIFO open 根据第一次错误重新解析 pathname | pathname/open | 高 | 两次 lookup 之间目标被 rename 或 symlink replacement | syscall open 只调用一次 `Filename::open_with_flags_at`；FIFO dispatch 在 KVFS 已授权的 resolved inode 上完成 |
 | T-26 | FIEMAP 数量或地址计算溢出导致越界写或内核数据泄漏 | ioctl / 用户输出 | 高 | 信任 `fm_extent_count`、用未检查指针运算或复制未初始化 reserved 字段 | 限制最大数量，所有地址运算使用 checked arithmetic，输出结构显式初始化全部字段；用户地址只通过 `UserPtr` 写入 |
 | T-27 | `listxattr` 的名称聚合溢出或 size query 产生无界中间分配 | xattr / 用户输出 | 中 | 先收集属性和值，再构造多个完整名称副本，或累计长度未检查 | KVFS borrowed-name sink 直接写入单个 `XattrListWriter`；逐项 checked_add 并限制 `XATTR_LIST_MAX`，`size == 0` 只计数 |
+| T-28 | mount data 导致无界用户内存读取、错误拒绝 binary data 或把瞬时用户指针带入文件系统 | mount data / filesystem type | 高 | 通用层把 `void *` 当路径字符串解析，或直接向后端保留用户指针 | syscall 边界复制一个零填充的 4 KiB opaque byte page，并强制清零末字节；`FsContext` 只借用内核 slice，后端只保存解析后的 mount state |
 
 影响等级定义：
 
@@ -190,6 +196,7 @@ kfd resources / kvfs / device and pipe implementations
 | F-10 | `fcntl` unsupported cmd 返回成功 | 兼容占位 | 应用误判某些控制操作已生效 | 可能产生行为差异 | 2 | warning 记录；有安全影响的命令应显式实现或拒绝 |
 | F-11 | `close_range(UNSHARE)` 无法取得 files owner | 进程退出已脱离 fd table owner | `unshare_fd_table` 返回 `NoSuchProcess` | 当前 syscall 失败，已脱离的 fd table 不会被重新安装 | 3 | `sys_close_range` 通过 `?` 将资源层错误传播为用户态 syscall 错误 |
 | F-12 | FIEMAP 输出容量不足或中途遇到坏用户页 | 调用者提供较小数组或不可写地址 | 返回已统计数量或 `BadAddress` | 当前查询失败，文件系统状态不变 | 3 | `FiemapExtentInfo` 达到容量后正常停止；writer 每项通过 `UserPtr` 写入并传播 copy fault |
+| F-13 | mount data 复制失败 | 首字节不可读，或整页读取失败后逐字节恢复也无法读取首字节 | `mount(2)` 在创建 superblock 前返回 `BadAddress` | 当前挂载不发生，不留下部分 topology | 3 | 先尝试整页复制，失败后恢复可读前缀并零填充尾部；只有零字节可读时传播错误 |
 
 严重度定义：
 
@@ -229,9 +236,10 @@ kfd resources / kvfs / device and pipe implementations
 2. FAT 等不能表达 Unix owner 的后端无法完整保存创建者 UID/GID。
 3. `fcntl` 文件锁和 `flock` 未实现真实锁。
 4. `copy_file_range` 对普通文件类型、同文件重叠和跨文件系统限制仍为 TODO。
-5. `mount` 支持已注册 nodev/device-backed filesystem、非递归 bind、普通只读 remount 和
-   bind remount；不支持 move、recursive bind、propagation、文件系统专用
-   reconfigure 和 lazy/force unmount。
+5. `mount` 支持已注册 nodev filesystem、已接入 `get_tree_bdev()` 的 block-backed type、
+   非递归 bind、普通只读 remount、bind remount，以及普通新挂载的一页 opaque mount data
+   转交；不支持 move、recursive bind、propagation、文件系统专用 reconfigure 和 lazy/force
+   unmount。通用层支持 binary data 转交不等于具体 filesystem 已实现相应格式或选项。
 6. `preadv2` / `pwritev2` 当前只支持 `flags == 0`，
    非零 flags 返回 `Unsupported`。
 7. memfd `F_ADD_SEALS` / `F_GET_SEALS` 已接入；shared writable mmap 和
@@ -257,6 +265,7 @@ kfd resources / kvfs / device and pipe implementations
 - [ ] 每个多步 pathname 操作只取得一次 credential snapshot，并传递给完整解析过程。
 - [ ] pathname 与 descriptor 操作没有混淆调用时 DAC 和 open-file authority。
 - [ ] mount/umount 新 flags 要么完整实现，要么显式拒绝。
+- [ ] mount data 是否在 syscall 边界按一页 opaque bytes 有界复制，且 filesystem 只保存解析后的状态？
 - [ ] 新 filesystem type 通过 KVFS registry 接入，不在 syscall 层增加具体 crate 依赖或
   与 `/proc/filesystems` 分离的名称表。
 - [ ] 新增日志不输出文件内容或敏感用户缓冲区。

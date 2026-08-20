@@ -297,8 +297,11 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
 
 ### `mount`
 
-1. `sys_mount()` 只复制 nullable source/fs type 和 target，捕获一次 process/credential
-   上下文后进入 `do_mount()`。
+1. `sys_mount()` 复制 nullable source/fs type、target，并把 nullable filesystem-specific
+   mount data 作为一个 4 KiB base-page 大小的 opaque byte buffer 复制到内核；它不要求输入
+   NUL 终止或满足 UTF-8，只保留末字节作为文本 parser 的强制 NUL。整页复制失败时按 Linux
+   legacy mount 语义逐字节恢复可读前缀，首字节不可读才返回 `EFAULT`，其余尾部保持零填充。
+   用户指针只在 syscall 边界访问，随后捕获一次 process/credential 上下文并进入 `do_mount()`。
 2. `do_mount()` 按当前 `FsStruct` 解析 target，再把 resolved `Path` 交给
    `path_mount()`；对应 Linux 的 syscall、`do_mount()` 和 `path_mount()` 分层。
 3. `path_mount()` 丢弃旧 mount magic，拒绝 `MS_NOUSER`，并在操作分派前统一拒绝当前未实现
@@ -313,10 +316,12 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
 5. 非递归 bind 要求非空 source，解析 source 后克隆源 mount；副本继承源 mount
    flags，初次 `MS_BIND` 的普通 mount flags 不应用到副本。
 6. 普通挂载像 Linux `do_new_mount()` 一样按 canonical type name 查询 KVFS
-   `FileSystemType` 注册表，构造 `FsContext`，再调用 `MntNamespace::mount_new()`。
-7. `mount_new()` 经类型对象的 `get_tree` 进入 nodev 或 `get_tree_bdev -> fill_super`，随后
-   把带 per-mount flags 的 detached mount graft 到 target；registry 和
-   `/proc/filesystems` 使用同一静态 descriptor identity。
+   `FileSystemType` 注册表，再构造包含 source、mount data、superblock flags 和 credential
+   的 `FsContext`，再调用 `MntNamespace::mount_new()`。registry 和 `/proc/filesystems`
+   使用同一静态 descriptor identity。
+7. `mount_new()` 经类型对象的同步 `get_tree()` 进入 nodev 或
+   `get_tree_bdev -> fill_super`；filesystem 解析 mount data，并把挂载后仍需保留的状态
+   复制到自身 mount state，随后 VFS 把 detached mount graft 到 target。
 
 ## 并发模型
 
@@ -380,6 +385,10 @@ atime 选项的 remount 只保留目标当前 atime mask，其它 user-settable 
 普通新挂载不再依赖 devfs、procfs、bpffs 等具体 crate；`path_mount` 只解析 canonical
 type 并使用 KVFS registry，对应 Linux `get_fs_type()` 后进入 filesystem type 的创建入口。
 这使 mount 支持集合与 `/proc/filesystems` 保持同一事实源。
+普通新挂载把一页有界、内核拥有的 opaque mount data 通过 `FsContext` 转交 filesystem
+type；通用 syscall/VFS 不解释 UTF-8、逗号或 filesystem option。具体文件系统决定该页是文本
+还是 binary representation，解析未知或未实现的选项时必须按自身兼容策略明确失败或记录为
+真正的 compatibility no-op。filesystem-specific remount reconfigure 仍未建模。
 move、recursive bind 和 propagation flags 在任何 operation dispatch 前返回 `InvalidInput`；
 因此 `MS_BIND|MS_MOVE`、`MS_REMOUNT|MS_SHARED` 和普通新挂载携带 `MS_REC` 都不会执行部分请求，
 `sys_umount2` 对 force、detach、expire、nofollow 返回 `InvalidInput`。
@@ -457,7 +466,8 @@ pathname DAC。这对应 Linux `vfs_truncate()` 与 `do_ftruncate()` 的语义�
 3. `fcntl` 文件锁和 `flock` 目前是兼容占位，不提供真实互斥。
 4. `copy_file_range` 尚未检查普通文件类型、同文件重叠和跨文件系统条件。
 5. `mount` 尚不支持 move、recursive bind、propagation，以及只读策略之外的文件系统专用
-   reconfigure；nodev 与 device-backed 类型均经 registry/FsContext 创建。
+   reconfigure。普通新挂载已转交一页 opaque mount data，但具体文本或二进制格式及选项仍由
+   各 filesystem type 选择性实现；nodev 与 device-backed 类型均经 registry/FsContext 创建。
 6. `sendfile` 对非空 offset 保留 32 位范围限制，反映旧接口兼容约束。
 7. `F_ADD_SEALS` / `F_GET_SEALS` 已接入 shmem object state；shared
    writable mmap 和 `mprotect(PROT_WRITE)` seal enforcement 由 `mm/filemap`

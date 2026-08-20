@@ -275,7 +275,7 @@ impl BootVfs {
             return Err(kvfs::VfsError::NotADirectory);
         }
         let cred = kcred::initial_cred();
-        let context = kvfs::FsContext::new(file_system_type, source, superblock_flags, &cred);
+        let context = kvfs::FsContext::new(file_system_type, source, None, superblock_flags, &cred);
         self.namespace
             .mount_new(&mountpoint, mount_flags, &context, &self.root, &self.root)?;
         Ok(())
@@ -323,8 +323,13 @@ fn mount_root_file_system(boot: &BootVfs) {
         }
 
         for file_system_type in &file_system_types {
-            let context =
-                kvfs::FsContext::new(file_system_type, Some(&source), superblock_flags, &cred);
+            let context = kvfs::FsContext::new(
+                file_system_type,
+                Some(&source),
+                None,
+                superblock_flags,
+                &cred,
+            );
             match boot.namespace.mount_new(
                 &boot.root,
                 mount_flags,

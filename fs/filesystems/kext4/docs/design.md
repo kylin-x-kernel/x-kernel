@@ -366,7 +366,18 @@ cleanup transaction 都采用 `PreserveDuringRecovery`，逐个同步完成 comm
 已落盘的 superblock/group descriptors 重新建立内存状态，避免旧 orphan head 或 allocator
 counter 被 checkpoint 前的快照重新带回循环。全部 orphan 清理完成后，recovery 再确认 JBD2
 `s_start` 为零，最后清除并 flush ext4 recovery feature；任一步失败都会返回错误，而不会先
-清除最终的磁盘恢复证据。
+清除最终的磁盘恢复证据。Superblock decode 会保留越过 inode table 的原始
+`s_last_orphan`，使显式 recovery 有机会处理该损坏，而普通 mount 仍因非零 orphan head 返回
+`NeedsRecovery`。Recovery 在 `iget` 前同时校验 inode table 上界、reserved inode 范围和经过
+checksum 验证的 inode bitmap 分配位；编号合法但 allocation bit 为零的 head 不读取 inode
+table。成功加载 inode 后还会在执行 truncate/eviction 前验证：带链接的 inode kind 必须属于
+Linux ext4 可截断的 regular/directory/symlink，以及原始 `i_dtime` 必须为零或合法的下一
+orphan 编号。命中这些 bad-orphan 条件时按 Linux `ext4_orphan_cleanup()` 的终止规则，用独立的
+一-credit transaction 把 head 清零。该 transaction 同样采用 `PreserveDuringRecovery` 并计为
+cleanup work，避免 replay 分支把已经推进的 journal sequence 回写成旧状态；只有 clear 的
+commit/checkpoint 完成后才允许清理最终 recovery feature。Bitmap 读取/checksum、inode decode、
+合法但 KExt4 尚不支持的格式或 cleanup 错误仍向上返回，不借此路径静默吞掉一般 metadata
+corruption 或把未完成的有效 cleanup 伪装成成功。
 
 Truncate 和 unwritten preallocation discard 的 journal credits 按实际 extent 结构计算：inode
 root、重建后的 extent-tree blocks、需要 revoke 的旧 tree blocks，以及释放范围覆盖的不同 block
@@ -414,6 +425,13 @@ blocks 和 core mount aggregate。reserve/release/truncate/writeback/eviction �
 mount aggregate；bridge 不读取或调整任一计数。该 counter 与 group descriptor 由同一
 allocation/release mutation 更新，因此 admission 是常数时间；显式 `statfs()` 仍遍历 group
 descriptor，提供独立的实时统计与一致性观察面。
+
+Core 通过 `Ext4StatFsMode` 暴露两种 Linux ext4 总容量口径，但不解析 mount-option 字符串：
+`Bsd` 从 superblock 总块数中扣除 first-data-block 与 metadata system zones，`Minix` 直接使用
+on-disk `blocks_count`。两种模式共享同一次 group free-inode/free-block 聚合，并同样扣除
+reserved blocks 与 delayed-allocation mount aggregate，因此只允许 `Ext4StatFs::blocks`
+不同，`blocks_free`、`blocks_available` 和 inode 统计必须一致。模式的选择与生命周期由 VFS
+bridge 的 mount state 拥有。
 
 Buffered write 在 `FileOperations::write_iter()` 中、generic write 的 inode data critical
 section 内应用 inode-format 上限，再由 `write_begin()` 查询 core mapping。shared-file write

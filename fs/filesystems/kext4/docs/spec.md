@@ -98,7 +98,8 @@ confidence 和 method limits。对比使用固定的 KExt4 历史基线，不保
 
 ### 已完成的运行态基线
 
-- S0：适配 `LockedDentry`、typed flags、最新 inode constructors、statfs 和 max-file-size；
+- S0：适配 `LockedDentry`、typed flags、最新 inode constructors、statfs（含
+  `bsddf`/`minixdf` 的 `f_blocks` 口径）和 max-file-size；
 - S1：一个 ext4 inode number 对应一个 live `VfsInode`/AddressSpace；
 - S1：core namespace removal 与 final inode eviction 分离；
 - S1：truncate 使用 core prepare → `AddressSpace` i_size/unmap/cache/unmap transaction → core finish；
@@ -286,7 +287,10 @@ N5 advanced I/O / common features -> N6 replacement
   恢复状态；recovery-time orphan cleanup 也保持同步 commit/checkpoint，不加入普通 batch。
   即使 JBD2 已 clean，只要 legacy orphan head 非零，首个 cleanup transaction 也会采用
   `PreserveDuringRecovery` 建立 recovery evidence；全部 cleanup 完成后确认 journal start 为零，
-  再清除并 flush ext4 recovery feature；
+  再清除并 flush ext4 recovery feature。Reserved、越过 inode table 或 allocation bit 为零的
+  head 在 inode-table decode 前被识别；成功加载后还会拒绝不可截断的 linked kind 和非法
+  `i_dtime` next。这些 bad-orphan 通过同策略的独立 journal transaction 持久化清零后终止该链，
+  bitmap I/O/checksum、inode decode 和合法但未支持的 cleanup 不会被降级；
 - journal 不再保存 inode-number keyed sync/datasync cursor；bridge `fsync/fdatasync` 先完成
   目标 inode PageCache writeback，再保守提交整个 running transaction 并 flush。精准 target
   transaction 等待需由 runtime inode 保存 tid，并在 mutation 完成后发布；

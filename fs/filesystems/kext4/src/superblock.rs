@@ -58,6 +58,16 @@ pub struct Ext4StatFs {
     pub max_name_len: u32,
 }
 
+/// Selects the ext4 accounting convention for `statfs().f_blocks`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Ext4StatFsMode {
+    /// Subtract filesystem metadata overhead from the reported total.
+    #[default]
+    Bsd,
+    /// Report the complete on-disk filesystem block count.
+    Minix,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct InodeAllocationTotals {
     free_inodes: u64,
@@ -412,6 +422,11 @@ impl Ext4Filesystem {
     /// ext4 recovery feature has been cleared on stable storage. On failure,
     /// the method does not intentionally clear the final on-disk recovery
     /// evidence before the corresponding journal or orphan work is durable.
+    /// A reserved, out-of-range, or unallocated legacy orphan head, a linked
+    /// inode kind that ext4 cannot truncate, and an invalid next pointer all
+    /// terminate the damaged chain through a journaled zero-head update.
+    /// Bitmap I/O/checksum failures, inode decode failures, and unsupported but
+    /// structurally valid cleanup work remain caller-visible errors.
     pub fn recover(
         device: Arc<dyn BlockDeviceOperations>,
     ) -> Ext4Result<Option<Ext4RecoveryReport>> {
@@ -605,8 +620,26 @@ impl Ext4Filesystem {
         self.metadata_io.reclaim_unused(limit)
     }
 
-    /// Returns ext4 filesystem statistics without depending on VFS types.
+    /// Returns ext4 filesystem statistics using the default BSD accounting mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validated filesystem geometry cannot be represented
+    /// consistently in the reported block counts.
     pub fn statfs(&self) -> Ext4Result<Ext4StatFs> {
+        self.statfs_with_mode(Ext4StatFsMode::Bsd)
+    }
+
+    /// Returns ext4 filesystem statistics using the requested total-block convention.
+    ///
+    /// The selected mode changes only the `blocks` total. Free and available
+    /// counts retain ext4 reserved-block and delayed-allocation accounting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validated filesystem geometry cannot be represented
+    /// consistently in the reported block counts.
+    pub fn statfs_with_mode(&self, mode: Ext4StatFsMode) -> Ext4Result<Ext4StatFs> {
         let (free_blocks, free_inodes) =
             self.groups
                 .iter()
@@ -616,7 +649,10 @@ impl Ext4Filesystem {
                         inodes + u64::from(group.free_inodes_count()),
                     )
                 });
-        let overhead = self.statfs_overhead_blocks()?;
+        let overhead = match mode {
+            Ext4StatFsMode::Bsd => self.statfs_overhead_blocks()?,
+            Ext4StatFsMode::Minix => 0,
+        };
         let blocks = self
             .superblock
             .blocks_count()
@@ -6528,6 +6564,199 @@ mod tests {
     }
 
     #[test]
+    fn recovery_discards_reserved_and_out_of_range_legacy_orphan_heads() {
+        let mke2fs = require_e2fsprogs("mke2fs");
+        let debugfs = require_e2fsprogs("debugfs");
+        let image = temporary_image_path("invalid-legacy-orphan-heads");
+        create_journaled_orphan_test_image(&mke2fs, &image);
+
+        let pristine = fs::read(&image).expect("read generated orphan recovery image");
+        let superblock = Superblock::decode(&pristine[1024..1024 + superblock::SUPERBLOCK_SIZE])
+            .expect("decode generated orphan recovery superblock");
+        let out_of_range = superblock
+            .inodes_count()
+            .checked_add(1)
+            .expect("test inode count leaves an out-of-range value");
+        let heads = (1..superblock.first_inode()).chain(core::iter::once(out_of_range));
+
+        for head in heads {
+            fs::write(&image, &pristine).expect("restore pristine orphan recovery image");
+            run_debugfs(&debugfs, &image, &format!("ssv last_orphan {head}"));
+            let damaged = fs::read(&image).expect("read damaged orphan recovery image");
+            let persisted = Superblock::decode(&damaged[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                .expect("decode damaged orphan recovery superblock");
+            assert_eq!(persisted.last_orphan(), head);
+
+            let device = Arc::new(LinuxImageDevice::new(damaged));
+            let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
+            assert_eq!(
+                Ext4Filesystem::recover(recovery_device),
+                Ok(None),
+                "recover damaged orphan head {head}"
+            );
+
+            let bytes = device.bytes();
+            let recovered = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                .expect("decode recovered orphan superblock");
+            assert_eq!(recovered.last_orphan(), 0, "orphan head {head}");
+            assert!(!recovered.features().needs_recovery(), "orphan head {head}");
+
+            let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
+            let mounted = Ext4Filesystem::mount(mount_device).unwrap_or_else(|error| {
+                panic!("mount after repairing orphan head {head}: {error:?}")
+            });
+            assert_eq!(mounted.orphan_head(), None);
+        }
+
+        fs::remove_file(image).expect("remove invalid orphan recovery image");
+    }
+
+    #[test]
+    fn recovery_discards_an_unallocated_in_range_legacy_orphan_head() {
+        let mke2fs = require_e2fsprogs("mke2fs");
+        let debugfs = require_e2fsprogs("debugfs");
+        let image = temporary_image_path("unallocated-legacy-orphan-head");
+        create_journaled_orphan_test_image(&mke2fs, &image);
+
+        let pristine = fs::read(&image).expect("read generated orphan recovery image");
+        let inspect_device: Arc<dyn BlockDeviceOperations> =
+            Arc::new(LinuxImageDevice::new(pristine.clone()));
+        let filesystem = Ext4Filesystem::mount(inspect_device)
+            .expect("mount pristine image to find an unallocated inode");
+        let head = (filesystem.superblock().first_inode()..=filesystem.superblock().inodes_count())
+            .map(InodeNumber::new)
+            .find(|inode| {
+                !filesystem
+                    .is_inode_allocated(*inode)
+                    .expect("read inode allocation bitmap")
+            })
+            .expect("generated image has an unallocated inode");
+        drop(filesystem);
+
+        run_debugfs(&debugfs, &image, &format!("ssv last_orphan {}", head.get()));
+        let damaged = fs::read(&image).expect("read image with unallocated orphan head");
+        let device = Arc::new(LinuxImageDevice::new(damaged));
+        let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
+        assert_eq!(Ext4Filesystem::recover(recovery_device), Ok(None));
+
+        let bytes = device.bytes();
+        let recovered = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+            .expect("decode recovered orphan superblock");
+        assert_eq!(recovered.last_orphan(), 0);
+        assert!(!recovered.features().needs_recovery());
+
+        let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
+        Ext4Filesystem::mount(mount_device)
+            .expect("mount after discarding unallocated orphan head");
+        fs::remove_file(image).expect("remove unallocated orphan recovery image");
+    }
+
+    #[test]
+    fn recovery_discards_a_legacy_orphan_head_with_an_invalid_next_pointer() {
+        let mke2fs = require_e2fsprogs("mke2fs");
+        let debugfs = require_e2fsprogs("debugfs");
+        let image = temporary_image_path("invalid-legacy-orphan-next");
+        create_journaled_orphan_test_image(&mke2fs, &image);
+        run_debugfs(&debugfs, &image, "write /dev/null /orphan-next");
+
+        let clean = fs::read(&image).expect("read image containing orphan-next file");
+        let inspect_device: Arc<dyn BlockDeviceOperations> = Arc::new(LinuxImageDevice::new(clean));
+        let filesystem =
+            Ext4Filesystem::mount(inspect_device).expect("mount image to locate orphan-next file");
+        let root = filesystem.root_inode().expect("load root inode");
+        let head = filesystem
+            .lookup(&root, "orphan-next")
+            .expect("lookup orphan-next file")
+            .expect("orphan-next file exists")
+            .inode();
+        let invalid_next = filesystem
+            .superblock()
+            .inodes_count()
+            .checked_add(1)
+            .expect("test inode count leaves an out-of-range value");
+        assert!(
+            filesystem
+                .is_inode_allocated(head)
+                .expect("read allocated orphan inode bit")
+        );
+        drop(filesystem);
+
+        run_debugfs(
+            &debugfs,
+            &image,
+            &format!("sif /orphan-next dtime {invalid_next}"),
+        );
+        run_debugfs(&debugfs, &image, &format!("ssv last_orphan {}", head.get()));
+
+        let damaged = fs::read(&image).expect("read image with invalid orphan next pointer");
+        let device = Arc::new(LinuxImageDevice::new(damaged));
+        let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
+        assert_eq!(Ext4Filesystem::recover(recovery_device), Ok(None));
+
+        let bytes = device.bytes();
+        let recovered = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+            .expect("decode recovered orphan superblock");
+        assert_eq!(recovered.last_orphan(), 0);
+        assert!(!recovered.features().needs_recovery());
+
+        let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
+        Ext4Filesystem::mount(mount_device)
+            .expect("mount after discarding orphan chain with invalid next pointer");
+        fs::remove_file(image).expect("remove invalid orphan-next recovery image");
+    }
+
+    #[test]
+    fn invalid_orphan_head_recovery_failure_preserves_evidence_and_retries() {
+        let mke2fs = require_e2fsprogs("mke2fs");
+        let debugfs = require_e2fsprogs("debugfs");
+        let image = temporary_image_path("invalid-orphan-head-recovery-failure");
+        create_journaled_orphan_test_image(&mke2fs, &image);
+        run_debugfs(&debugfs, &image, "ssv last_orphan 5");
+
+        let bytes = fs::read(&image).expect("read damaged orphan recovery image");
+        let device = Arc::new(LinuxImageDevice::new(bytes));
+        let prepare_device: Arc<dyn BlockDeviceOperations> = device.clone();
+        let mut prepared = Ext4Recovery::open(prepare_device)
+            .expect("open invalid orphan image for journal feature preparation");
+        prepared
+            .filesystem
+            .metadata_journal()
+            .expect("prepare journal revoke feature before failure injection");
+        drop(prepared);
+
+        device.fail_flush_at(device.flush_count() + 1);
+        let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
+        assert_eq!(
+            Ext4Filesystem::recover(recovery_device),
+            Err(Ext4Error::Device(DriverError::Io))
+        );
+
+        {
+            let bytes = device.bytes();
+            let persisted = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                .expect("decode failed invalid-orphan recovery superblock");
+            assert_eq!(persisted.last_orphan(), 5);
+            assert!(persisted.features().needs_recovery());
+        }
+
+        let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
+        assert_eq!(
+            Ext4Filesystem::mount(mount_device).map(|_| ()),
+            Err(Ext4Error::NeedsRecovery)
+        );
+
+        let retry_device: Arc<dyn BlockDeviceOperations> = device.clone();
+        Ext4Filesystem::recover(retry_device).expect("retry invalid orphan head recovery");
+        let recovered_device: Arc<dyn BlockDeviceOperations> = device.clone();
+        let recovered =
+            Ext4Filesystem::mount(recovered_device).expect("mount retried orphan recovery image");
+        assert_eq!(recovered.orphan_head(), None);
+        assert!(!recovered.superblock().features().needs_recovery());
+
+        fs::remove_file(image).expect("remove invalid orphan recovery failure image");
+    }
+
+    #[test]
     fn recover_rejects_clean_legacy_orphan_without_a_journal() {
         let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
@@ -6683,7 +6912,7 @@ mod tests {
             .unwrap();
         journal.finish_checkpoint_for_test(&commit).unwrap();
 
-        let recovery_inode = filesystem.orphan_iget(inode.number()).unwrap();
+        let recovery_inode = filesystem.orphan_iget_with_next(inode.number()).unwrap().0;
         filesystem
             .cleanup_unlinked_orphan_from_head(
                 &recovery_inode,
@@ -7823,6 +8052,17 @@ mod tests {
         )
     }
 
+    fn create_journaled_orphan_test_image(mke2fs: &Path, image: &Path) {
+        create_allocator_image_with_features_and_size(
+            mke2fs,
+            image,
+            "extent,filetype,64bit,flex_bg,metadata_csum,dir_index,has_journal,\
+             ^metadata_csum_seed,^orphan_file,^fast_commit,^bigalloc,^inline_data,^encrypt,\
+             ^verity,^casefold,^mmp,^huge_file",
+            16 * 1024 * 1024,
+        )
+    }
+
     fn create_journaled_linear_namespace_test_image(mke2fs: &Path, image: &Path) {
         create_allocator_image_with_features(
             mke2fs,
@@ -7854,6 +8094,15 @@ mod tests {
     }
 
     fn create_allocator_image_with_features(mke2fs: &Path, image: &Path, features: &str) {
+        create_allocator_image_with_features_and_size(mke2fs, image, features, 256 * 1024 * 1024)
+    }
+
+    fn create_allocator_image_with_features_and_size(
+        mke2fs: &Path,
+        image: &Path,
+        features: &str,
+        image_size: u64,
+    ) {
         let supported_features = features
             .split(',')
             .map(str::trim)
@@ -7880,8 +8129,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         let file = fs::File::create(image).expect("create allocator ext4 image");
-        file.set_len(256 * 1024 * 1024)
-            .expect("size allocator ext4 image");
+        file.set_len(image_size).expect("size allocator ext4 image");
         let status = Command::new(mke2fs)
             .args(["-q", "-t", "ext4", "-F", "-b", "4096", "-I", "256"])
             .arg("-O")

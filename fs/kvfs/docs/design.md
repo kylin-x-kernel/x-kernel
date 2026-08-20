@@ -139,8 +139,9 @@ filesystem fill-super。新的 block-backed superblock 在 block core 取得 exc
 Linux `setup_bdev_super()` 以新 superblock 作为 exclusive `bdev_open()` holder 一致：不同
 filesystem type 创建不同 holder，因此不能同时取得同一设备。VFS
 先分配并注册已经带有 `s_type/s_bdev/s_flags` 的 nascent `SuperBlock`，fill callback 只接收
-该对象并安装 filesystem operations 与 root，不再接收或
-复制 type、device、flags；fill 成功后 VFS 才把 lifecycle 切换为 available。
+该对象并安装 filesystem operations 与 root，不再接收或复制 type、device、flags；一次性
+fill closure 可以捕获同一 `FsContext` 中已经解析的 mount state，而不把 option parser 放进
+generic VFS。fill 成功后 VFS 才把 lifecycle 切换为 available。
 已有 block-backed superblock 与新请求的 `SB_RDONLY` 不一致时返回 `EBUSY`，对应 Linux
 `get_tree_bdev_flags()` 的已有 `s_root` 分支，而不是将 block mount 降格为 per-mount 策略。
 与 Linux `bdev_file_open_by_path` 一样，可写 mount 会拒绝
@@ -158,7 +159,10 @@ durability 请求传给 backend。KVFS 不维护第二张 `dev_t -> DeviceFileOp
 devfs 只投影名称与 `rdev`，loop 设备也按普通 `Gendisk` 发布。
 
 `FsContext` 对应 Linux `struct fs_context` 的当前 one-shot 子集，保存 `fs_type`、source、
-`sb_flags` 和 mounter credential。它不保存进程 `FsStruct` 的 root/pwd。Linux 在
+一页有界的 kernel-owned opaque mount data、`sb_flags` 和 mounter credential。mount data
+只借用于同步 `get_tree()`；KVFS 不施加文本编码或 option grammar，具体文件系统负责解析自身
+支持的文本或二进制 representation，并把需要在挂载后存活的状态复制到自己的 superblock
+wrapper。它不保存用户指针，也不保存进程 `FsStruct` 的 root/pwd。Linux 在
 `get_tree_bdev -> lookup_bdev -> kern_path` 中从 ambient `current->fs` 取得路径环境；
 KVFS 为避免反向依赖 `kprocess`，由 mount 执行入口取得 `FsStruct` 的 root/pwd 快照，
 在调用 `FsContext::get_tree` 时显式传入。该快照只沿调用栈存在，不成为 mount transaction
@@ -666,3 +670,5 @@ FIFO 最后一个 open file 关闭时清空 inode pipe slot，`Arc<PipeObject>` 
   在不削弱 block-backed `get_tree_bdev_flags()` 语义的前提下分离。
 - 文件系统类型当前都是静态内建实现，尚无 Linux module autoload、引用计数和
   `unregister_filesystem()` 生命周期。
+- `FsContext` 当前承载普通新挂载的一页 opaque mount data，但不负责 filesystem-specific
+  parser selection 或 reconfigure；具体 binary/text format 支持属于各 filesystem type。

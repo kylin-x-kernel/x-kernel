@@ -1244,8 +1244,17 @@ impl Ext4Filesystem {
         self.iget_inner(number, false, false)
     }
 
-    pub(crate) fn orphan_iget(&self, number: InodeNumber) -> Ext4Result<Ext4Inode> {
-        self.iget_inner(number, true, true)
+    pub(crate) fn orphan_iget_with_next(
+        &self,
+        number: InodeNumber,
+    ) -> Ext4Result<(Ext4Inode, Option<InodeNumber>)> {
+        let raw = self.raw_inode(number)?;
+        let next = match raw.dtime() {
+            0 => None,
+            next => Some(InodeNumber::new(next)),
+        };
+        let inode = self.iget_from_raw(number, raw, true, true)?;
+        Ok((inode, next))
     }
 
     fn iget_inner(
@@ -1254,7 +1263,18 @@ impl Ext4Filesystem {
         allow_zero_links: bool,
         validate_block_root: bool,
     ) -> Ext4Result<Ext4Inode> {
-        let metadata = Ext4InodeMetadata::from_raw(self.raw_inode(number)?, allow_zero_links)?;
+        let raw = self.raw_inode(number)?;
+        self.iget_from_raw(number, raw, allow_zero_links, validate_block_root)
+    }
+
+    fn iget_from_raw(
+        &self,
+        number: InodeNumber,
+        raw: disk_inode::RawInode,
+        allow_zero_links: bool,
+        validate_block_root: bool,
+    ) -> Ext4Result<Ext4Inode> {
+        let metadata = Ext4InodeMetadata::from_raw(raw, allow_zero_links)?;
         let inode = Ext4Inode::new(number, metadata);
         if validate_block_root {
             self.validate_inode_block_root(&inode)?;

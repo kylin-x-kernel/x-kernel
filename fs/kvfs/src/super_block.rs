@@ -18,8 +18,6 @@ use crate::{
     Mutex, MutexGuard, NodeType, Path, VfsError, VfsInode, VfsResult, WritebackControl, node,
 };
 
-type FillSuperBdevFn = fn(&Arc<SuperBlock>) -> VfsResult<()>;
-
 fn has_readonly_mismatch(current: SuperBlockFlags, requested: SuperBlockFlags) -> bool {
     (current ^ requested).contains(SuperBlockFlags::RDONLY)
 }
@@ -67,13 +65,18 @@ pub fn get_tree_nodev(
 /// obtains the canonical `BlockDevice` from the block core, and invokes the
 /// filesystem's fill operation only for a newly reserved identity. Existing
 /// instances are reused by canonical filesystem type and block device,
-/// corresponding to Linux `sget_dev()`.
-pub fn get_tree_bdev(
+/// corresponding to Linux `sget_dev()`. The one-shot fill closure may capture
+/// mount state parsed from the same context without exposing that state to the
+/// generic VFS layer.
+pub fn get_tree_bdev<F>(
     context: &FsContext<'_>,
     lookup_root: &Path,
     lookup_pwd: &Path,
-    fill_super: FillSuperBdevFn,
-) -> VfsResult<Arc<SuperBlock>> {
+    fill_super: F,
+) -> VfsResult<Arc<SuperBlock>>
+where
+    F: FnOnce(&Arc<SuperBlock>) -> VfsResult<()>,
+{
     let source = context
         .source()
         .filter(|source| !source.is_empty())
@@ -192,13 +195,17 @@ impl SuperBlockRegistry {
         self.super_blocks.lock().register(super_block);
     }
 
-    fn get_or_try_init_bdev(
+    fn get_or_try_init_bdev<F>(
         &self,
         file_system_type: &'static FileSystemType,
         block_device: Arc<block::BlockDevice>,
         flags: SuperBlockFlags,
-        fill_super: FillSuperBdevFn,
-    ) -> VfsResult<Arc<SuperBlock>> {
+        fill_super: F,
+    ) -> VfsResult<Arc<SuperBlock>>
+    where
+        F: FnOnce(&Arc<SuperBlock>) -> VfsResult<()>,
+    {
+        let mut fill_super = Some(fill_super);
         loop {
             let (super_block, is_new) = {
                 let mut super_blocks = self.super_blocks.lock();
@@ -213,6 +220,9 @@ impl SuperBlockRegistry {
                 }
             };
             if is_new {
+                let fill_super = fill_super
+                    .take()
+                    .expect("a fill callback is consumed only by a new superblock");
                 match fill_super(&super_block) {
                     Ok(()) => super_block.finish_initialization(),
                     Err(error) => {
