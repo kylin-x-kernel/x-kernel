@@ -132,7 +132,7 @@ inactive
    -> publish(request_seq, vaddr/flush_all)
    -> bump 目标 CPU pending epoch
    -> send IPI
-   -> wait for per-target ack
+   -> wait for per-target ack（等待中轮询 `handle_shootdown`，IRQ 关闭时也能 ack 对方）
    -> deactivate()
 ```
 
@@ -172,6 +172,8 @@ inactive
 5. 为每个目标 CPU bump `pending epoch`。
 6. 发送 IPI。
 7. 等待每个目标 CPU 将 `acked_seq_by_cpu[target]` 推进到该 `request_seq`。
+   等待循环里轮询 `handle_shootdown()`：页表路径常在 IRQ 关闭下走到
+   `flush_remote`，若只等 IPI handler，两核互等会谁也 ack 不了。
 8. 释放 active slot；若期间检测到同 CPU 嵌套请求，则补发 full retry flush。
 
 ### `tlb::handle_shootdown`

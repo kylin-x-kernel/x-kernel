@@ -32,7 +32,7 @@ EEVDF 语义见 [eevdf-wake.md](eevdf-wake.md)；IRQ / affinity / `block_on` 见
 |------|----------|
 | p50/p90/p99 一起抬（~30 → ~60–100 µs），p99.9 仍低 | 常见路径在等 waker block / handoff；不是 LB |
 | p50 好、p99.9 多 ms | leapfrog、wakee 不 eligible、pile-up、或抢占被推迟 |
-| “优化选核”后 RPS 暴跌（~450 → ~325） | idle-seeking / home→idle 溢出 |
+| “优化选核”后 RPS 暴跌（~450 → ~325） | 粘 home 时做了 idle overflow；SIS 下应变回抢椅子 |
 
 **顺序：** 先用 Linux place/pick 语义压多 ms 长尾，再用 NEXT_BUDDY + WF_SYNC
 改善常见 handoff。禁止用全局假短 wake deadline 买 p50。
@@ -55,7 +55,10 @@ Wakeup latency chase:
 
 | 信号 | 读法 |
 |------|------|
-| `wakeup_last_cpu` 高、fallback 低 | sticky home 在工作 |
+| `wakeup_last_cpu` | prev 空闲，或无 idle 时留 prev |
+| `wakeup_idle_sibling` | home 忙，去了另一颗 idle CPU（SIS） |
+| `wakeup_fallback` | home 不在 cpumask 且无 idle |
+| `idle_pull` | 即将 idle 时从忙核偷到一颗 Ready `!on_cpu` waiter |
 | `wake_sync_preempt` 随 p50 变好而升 | WF_SYNC 在干活 |
 | `[eevdf_wake] mark` vs `wake_sync_preempt` | 入队标上了但探测没赢 → 看同块 `probe_*` |
 | `probe_false_buddy` / `probe_ineligible` / `probe_no_buddy` | 远端 WF_SYNC 失败的三种互斥原因；见 [eevdf-wake.md](eevdf-wake.md) |
@@ -72,6 +75,7 @@ Wakeup latency chase:
 
 ## 本目录暂不覆盖
 
-- 主动负载均衡 / `select_idle_sibling`（主要影响 pile-up 尾，非上述 p50/p99.9 主因）
+- 周期 `load_balance` / 调度域
+- PELT 衰减（`nr_home` 仍不衰减）
 - CFS / RR 细节
 - 远端 running 任务的完整 Linux affinity migrate

@@ -66,7 +66,7 @@ update_current() → pending      blocked_resched / unblock_task / resched
 |------|------|
 | `TaskInner` / `CurrentTask` | 任务元数据、状态机、上下文、抢占计数 |
 | `RunQueue` | 每 CPU 调度容器；维护算法实例与切换过程 |
-| `Scheduler` (`ksched`) | `add_task/pick_next/update_current/next_preemption_ns/enqueue_task/leave_current` 算法策略（运行任务统一经 `leave_current` 离开；Block/Migrate 记 vlag，唤醒/迁入经 `enqueue_task` PLACE_LAG；EEVDF `curr` 仅为数值快照；slice/request 以 ns 计） |
+| `Scheduler` (`ksched`) | `add_task/pick_next/update_current/next_preemption_ns/enqueue_task/leave_current/steal_ready_task` 算法策略（运行任务统一经 `leave_current` 离开；Block/Migrate 记 vlag，唤醒/迁入经 `enqueue_task` PLACE_LAG；idle-pull 经 `steal_ready_task` 再 PLACE_LAG；EEVDF `curr` 仅为数值快照；slice/request 以 ns 计） |
 | `future::block_on` | 将 `Future` pending 映射为任务阻塞/唤醒 |
 | `WaitQueue` | 事件型阻塞等待 API |
 | `timers` | 显式周期回调（与调度 timer 解耦） |
@@ -162,7 +162,8 @@ callback 内嵌套 drain。
 - `exit()` → `exit_current()` → `resched()`
 - `blocked_resched()`（阻塞）→ `resched()`
 
-`resched()` 在当前 CPU 的调度器上 `pick_next_task()`；无就绪任务时回退到本 CPU `IDLE_TASK`。
+`resched()` 在当前 CPU 的调度器上 `pick_next_task()`；无就绪任务时先做 idle-pull
+（从 `nr_running >= 2` 的核偷 Ready 且 `!on_cpu` 的 waiter），再回退到本 CPU `IDLE_TASK`。
 
 ### 3) 硬件定时器驱动与动态 schedule timer
 
@@ -263,7 +264,7 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
 - `future::block_on` 在 `Poll::Pending` 下走 `blocked_resched()`，把当前任务置为 `Blocked`。
 - 若 waker 在 `Poll::Pending` 与提交阻塞之间触发，`block_on` 清除 wake 标志后立即重新 poll；不能先 yield，否则满载 CPU 会把已完成的 wake-before-block 竞态转换为无关 runnable task 的排队延迟。
 - waker 触发时通过 `select_wake_run_queue(...).unblock_task(..., true)` 将任务恢复为 `Ready`。
-- SMP 下唤醒优先入任务阻塞时保留的 owner CPU（`task.cpu_id()`）；若 cpumask 已不含该 CPU，则回退到普通 `select_run_queue` 轮询选队。
+- SMP 下唤醒按 Linux `select_idle_sibling`：`prev_cpu`（`task.cpu_id()`）空闲则回家；否则在 cpumask 里找 `nr_running == 0` 的核；都忙则留在 prev；home 不在 cpumask 且无 idle 时才走 `find_idlest_cpu`。
 - `unblock_task(..., true)` 对本 CPU 设置 `need_resched`；对远端 CPU 在 `ipi + preempt` 可用时请求远端设置 `need_resched`。
 - `WaitQueue` 基于 `event_listener` 封装等待与通知，支持超时与条件等待。
 - `TaskInner::join()` 使用 `kpoll::Completion` 作为 per-task exit wait source。任务退出时先发布
@@ -295,14 +296,29 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
 - 所有 ownership 更新收敛到 `RunQueue` 封装入口，调用方不得直接 `Scheduler::add_task` /
   `enqueue_task` / `leave_current` 或散落调用 `set_cpu_id`：
   - `publish_task`：新任务首次入队（`spawn` / per-CPU gc）
-  - `enqueue_task`：非当前 Ready 任务入队（unblock / affinity migrate-in）
+  - `enqueue_task`：非当前 Ready 任务入队（unblock / affinity migrate-in / idle-pull）
   - `leave_current`：当前运行任务离开执行槽（Yield / Preempt / Block / Migrate / Exit）
   - `switch_to_local`：不经 ready 队列、直接 `switch_to` 的本地 helper（如 migration task）
   - `set_owner_cpu`：仅用于 run queue 尚未建立时的 boot bring-up（main / idle）
 - `switch_to` 在 SMP 下检查 `next_task.cpu_id() == rq.cpu_id`，防止错队列切换。
-- `select_run_queue` 依据任务 `cpumask` 在允许 CPU 集内做轮询选队。
-- `select_wake_run_queue` **始终粘 home**（cpumask 不含 home 时才 fallback 轮询）。
-  任何 “home 忙 → idle” 溢出都会把 schbench RPS 从 ~450 打到 ~325。
+- `select_run_queue` 对齐 Linux fork 的 `find_idlest_cpu`：**idle-first**
+  （`nr_running == 0`，睡觉的核也算 idle），再比 `nr_home`。SIS 已验证后，
+  clone 落到 sleeper 核上安全——被挤走的 worker 下次还能找 idle。空闲核之间仍
+  优先 `nr_home` 更低的（空核优于有人睡觉的核）。并列 `prefer_local`，再 RR。
+- `select_wake_run_queue` 对齐 Linux `select_idle_sibling`：prev 空闲则回家，
+  否则找一颗 `nr_running == 0` 的核。曾经「始终粘 home」时，home 忙 → idle
+  溢出会把 schbench 锁成 ~3 路（RPS ~450→~325）；SIS 下被挤走的 worker 下次
+  仍可再找 idle（抢椅子，平均仍约 4 路）。无 idle 时留在 prev。
+- 当前无周期 balancer。跨核除 affinity 与上述 wake SIS 外，即将 idle 时
+  做 Linux 风格 idle-pull：只从 `nr_running >= 2` 的核偷 **Ready && `!on_cpu`**
+  的 waiter，经源 RQ `steal_ready_task`（内部 `remove_task`，记 PLACE_LAG）再
+  本核 `enqueue_task`。只锁 src，再锁 dest 入队，避免 dest-then-src 与远端 wake
+  死锁。入队后复查 cpumask：steal 到 enqueue 之间 affinity 可能已排除 dest，
+  不含本核则立刻 `migrate_entry`，不在非法 CPU 上 pick。曾经把仍 `on_cpu` 的
+  任务偷到另一核（yield/preempt 入树到 `switch_to` 完成之间），两核同跑一份栈；
+  现必须拒绝 `on_cpu`。steal 会改 `cpu_id`，SIS 下这是预期的抢椅子：下次唤醒
+  prev 空闲则回家，否则再找 idle。
+  spawn / `activate_task` / affinity migrate-in 仍走 `find_idlest_cpu`。
 - `add_task` 首次入队后总是 `request_resched`（远端 IPI / 本地 pending 并刷新
   schedule deadline）。动态 timer 在 lone task 时已 disarm，busy 本核也不能依赖不存在的
   周期 tick 日后发现新 peer。
@@ -346,13 +362,16 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
   只探测、不再 sync（避免把 idle 写进 `curr`）。
 - EEVDF `curr` 只保存 identity/vruntime/deadline/weight 快照，不持有任务 `Arc`；
   `pick_next` 要求此前已 `leave_current`，不再静默擦除陈旧状态。
-- 当前实现无主动负载均衡器；任务跨核迁移主要由 affinity 变化触发。
 - `set_task_affinity`：写 `cpumask` 后 `enforce_affinity_placement`——current 立即
   `migrate_current`；ready 从旧 RQ `remove_task` 再 `migrate_entry`（目的 RQ 入队后
-  `request_resched_on`，与 `add_task` 相同）；远端 running
+  `request_resched_on`，与 `add_task` 相同）；idle-pull 在 steal 与 dest 入队之间
+  会出现 Ready、不在任何队列、`cpu_id` 仍为源 RQ 的窗口，此时 `remove_task` 会 miss，
+  `enforce_affinity_placement` 短暂自旋等到 dest 入队或任务变成 Running，再按 ready /
+  running 路径迁移（失败仍仅限远端 running 迁不走）。远端 running
   在 `preempt`+`ipi` 下 `request_resched`，由 `preempt_resched`/`yield_current`
   发现 mask 不含本 CPU 后强制迁移，调用方自旋等到离开非法 CPU；迁不走返回
-  `false`（syscall 侧 `EBUSY`）。
+  `false`（syscall 侧 `EBUSY`）。idle-pull dest 入队后复查 cpumask，不含本核则
+  立刻 `migrate_entry`，不在非法 CPU 上 pick。
 - 对 `Blocked` 任务重新入队时，SMP 唤醒方先发布目标 RQ 与 wake flags；若
   `task.on_cpu()` 仍为真，则由原 CPU 在 switch-out 清零 `on_cpu` 后原子认领并完成入队。
   该 handoff 防止重复入队，也避免唤醒方持 `NoPreemptIrqSave` 关中断自旋等待远端 CPU。
@@ -479,4 +498,6 @@ watchdog 触发时调用 `dump_sched_stats()` 做不分配内存的基础输出�
 ## 冗余与过载
 
 - **冗余设计**：每 CPU 独立 idle/gc 与 run queue，避免单点队列。
-- **过载控制**：由算法层（`ksched`）与任务阻塞模型共同承担；`ktask` 不实现全局负载均衡守护线程。
+- **过载控制**：由算法层（`ksched`）与任务阻塞模型共同承担；`ktask` 在
+  spawn / affinity migrate-in 上做 `find_idlest_cpu` 选队，即将 idle 时
+  idle-pull 一颗 Ready `!on_cpu` waiter。没有周期 load-balance 守护线程。

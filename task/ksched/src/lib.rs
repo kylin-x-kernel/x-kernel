@@ -74,6 +74,16 @@ pub trait BaseScheduler {
     /// the behavior is undefined.
     fn remove_task(&mut self, task: &Self::SchedItem) -> Option<Self::SchedItem>;
 
+    /// Removes one ready waiter matching `want`, without selecting it to run.
+    ///
+    /// Unlike [`Self::pick_next_task`], this does not install a current entity.
+    /// Fair schedulers snapshot lag as in [`Self::remove_task`] so a later
+    /// [`Self::enqueue_task`] can PLACE_LAG on the destination run queue.
+    /// The caller (ktask idle-pull) must reject still-`on_cpu` tasks.
+    fn steal_ready_task<F>(&mut self, want: F) -> Option<Self::SchedItem>
+    where
+        F: FnMut(&Self::SchedItem) -> bool;
+
     /// Picks the next task to run and removes it from the ready queue.
     /// Returns [`None`] if there is no runnable task.
     ///

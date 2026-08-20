@@ -29,6 +29,37 @@ pub struct FifoScheduler<T> {
     ready_queue: List<Arc<FifoTask<T>>>,
 }
 
+/// Unlink the first ready waiter matching `want`.
+///
+/// Idle-pull holds the source scheduler lock on the busiest CPU. Draining the
+/// whole list would be O(n) even when the head matches; stop at the hit so the
+/// tail stays linked and the cost is O(k) for the match index.
+fn steal_first_matching<T>(
+    queue: &mut List<Arc<FifoTask<T>>>,
+    mut want: impl FnMut(&Arc<FifoTask<T>>) -> bool,
+) -> Option<Arc<FifoTask<T>>> {
+    let mut skipped = List::new();
+    while let Some(task) = queue.pop_front() {
+        if want(&task) {
+            prepend_in_order(queue, skipped);
+            return Some(task);
+        }
+        skipped.push_back(task);
+    }
+    *queue = skipped;
+    None
+}
+
+fn prepend_in_order<T>(dest: &mut List<Arc<FifoTask<T>>>, mut front: List<Arc<FifoTask<T>>>) {
+    let mut rev: List<Arc<FifoTask<T>>> = List::new();
+    while let Some(task) = front.pop_front() {
+        rev.push_front(task);
+    }
+    while let Some(task) = rev.pop_front() {
+        dest.push_front(task);
+    }
+}
+
 impl<T> FifoScheduler<T> {
     /// Creates a new empty [`FifoScheduler`].
     pub const fn new() -> Self {
@@ -57,6 +88,13 @@ impl<T> BaseScheduler for FifoScheduler<T> {
         // this scheduler, so removing a known task preserves the intrusive-list
         // membership invariant.
         unsafe { self.ready_queue.remove(task) }
+    }
+
+    fn steal_ready_task<F>(&mut self, want: F) -> Option<Self::SchedItem>
+    where
+        F: FnMut(&Self::SchedItem) -> bool,
+    {
+        steal_first_matching(&mut self.ready_queue, want)
     }
 
     fn pick_next_task(&mut self) -> Option<Self::SchedItem> {

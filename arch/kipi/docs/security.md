@@ -156,6 +156,7 @@
 |------|------|----------|------|------|
 | T-01 | 目标 CPU 在观察到 request 状态前先处理 IPI | 平台 `notify_cpu()` 缺少发布屏障 | TLB shootdown 丢失，发起 CPU 自旋等待 | 在 IRQ backend 中定义并实现 publish-before-notify 契约 |
 | T-02 | 同一 CPU 上两个任务重入复用同一个 request slot | `flush_remote()` 生命周期内允许抢占 | request 状态被覆盖，可能死锁或漏 flush | `ActiveShootdownSlot` 绑定 no-preempt 与 active slot |
+| T-02a | 两核 `flush_remote` 互等 ack | 等待时 IRQ 关闭，不处理对方 shootdown | libc-test 等并行 unmap 整机卡住 | 等待循环轮询 `handle_shootdown()`，不依赖本核已进 IPI handler |
 | T-03 | 普通 IPI 共用同一向量导致无意义全表扫描 | 每次 IPI 都无条件扫描 TLB slots | 高频无关 IPI 造成 O(CPU_NUM) 热路径开销 | per-target `pending_epoch` fast path |
 | T-04 | 调用者把不适合中断上下文的逻辑作为回调广播到其它 CPU | 回调内部睡眠、拿大锁或跑长路径 | IPI handler 延迟、锁顺序问题、可用性下降 | `kipi` 文档约束回调必须适合该执行上下文；模块不兜底 |
 | T-05 | 队列未初始化前被远程入队 | AP 尚未执行 `init()`，但已经成为 IPI 目标 | 通过原始 per-CPU 引用访问未就绪槽位 | API 显式检查 `IPI_QUEUE_READY`，失败返回 `TargetCpuNotReady` |
@@ -166,7 +167,7 @@
 |------|----------|----------|----------|-----------|
 | F-01 | 目标 CPU IPI 队列未初始化 | `run_on_cpu` / 广播失败 | 相关跨核操作无法执行 | 返回 `KipiError::TargetCpuNotReady` |
 | F-02 | IPI 队列塞满 | 当前回调无法投递 | 局部控制流失败，上层需自行恢复 | 返回 `QueueFull` |
-| F-03 | 目标 CPU 长时间不 ack TLB request | 发起 CPU 自旋等待 | 页表修改路径停顿，可能表现为系统卡住 | 超时后记录 warning，保留现场用于诊断 |
+| F-03 | 目标 CPU 长时间不 ack TLB request | 发起 CPU 自旋等待 | 页表修改路径停顿，可能表现为系统卡住 | 超时后记录 warning；等待中轮询 `handle_shootdown` 避免 IRQ-off 互等 |
 | F-04 | pending epoch 未同步更新 | 目标 CPU fast path 直接返回，不扫描 slots | 单测或协议调用错误时出现假阴性 / 卡住 | 正式路径由 `flush_remote()` 封装；单测通过 helper 同步更新 |
 | F-05 | callback panic | 当前回调失败 | 其它已排队回调仍继续处理 | `ipi_handler()` 继续消费队列，不让单个回调中断整个队列 |
 
@@ -202,6 +203,7 @@
 
 - 检查所有新增 `notify_cpu()` 调用点是否依赖 publish-before-notify 语义。
 - 检查是否有任何路径在 `ActiveShootdownSlot` 生命周期内进入可能睡眠的代码。
+- 检查 `flush_remote` 等待 ack 时是否轮询 `handle_shootdown`（IRQ 关闭下两核互等）。
 - 检查任何新测试若手工构造 request slot 状态，是否同步更新 `pending_epoch`。
 - 检查新的广播回调是否真的能在 IPI handler 上下文执行，而不会睡眠或长时间占用 CPU。
 - 检查新平台 IRQ backend 是否兑现 `IntrManagerIf::notify_cpu` 的顺序契约。

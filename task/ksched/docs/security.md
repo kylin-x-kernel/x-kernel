@@ -51,6 +51,7 @@ IRQ/preempt 约束提供。
 | T-03 | Exit 误设 PLACE_LAG | 中 | Exit 与 Block 共用 sleep 记账 | `CurrentDisposition::Exit` 单独分支 |
 | T-04 | 迁移后源 RQ 仍计入任务权重 | 中 | Migrate 未清 current 记账 | Migrate 走 `leave_current` 清快照 |
 | T-05 | `curr` 快照过期导致错误抢占/放置 | 中 | 改运行实体字段后未刷新 | `update_current`/`set_priority` 刷新；测试辅助显式同步 |
+| T-06 | idle-pull 偷走仍 `on_cpu` 的实体 | 高 | yield/preempt 入树后远端 `steal_ready_task` | 调度器只摘 ready waiter；ktask 谓词拒绝 `on_cpu`，不 `pick_next` |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -59,6 +60,7 @@ IRQ/preempt 约束提供。
 | F-01 | pick 时 curr 非空 | 调用顺序错误 | 断言失败 | 调度停止（暴露 bug） | 2 | 强制 leave 契约 |
 | F-02 | 唤醒未 PLACE_LAG | Block/Migrate 未记 lag | 放置偏差 | 延迟/公平性劣化 | 3 | disposition 区分 + 单测 |
 | F-03 | Block 后无额外强引用 | 调用方未 pin 任务 | `switch_to` 断言失败 | 调度停止 | 2 | `blocked_resched` 要求 `strong_count > 1` |
+| F-04 | idle-pull 迁入未 PLACE_LAG | 摘任务不走 `remove_task` | 目的 RQ 放置偏差 | 迁入任务公平性漂移 | 3 | `steal_ready_task` 走 `remove_task`；dest `enqueue_task` PLACE_LAG |
 
 ## 故障管理
 
@@ -81,3 +83,4 @@ IRQ/preempt 约束提供。
 - [ ] 迁移后源 RQ 的 V/weight 是否不再包含迁出任务。
 - [ ] Block 路径调用方是否另持强引用。
 - [ ] 单测是否覆盖五种 disposition 与 pick-without-leave。
+- [ ] `steal_ready_task` 是否走 `remove_task` 且不安装 `curr`。

@@ -169,6 +169,14 @@ impl<T> BaseScheduler for CFScheduler<T> {
         }
     }
 
+    fn steal_ready_task<F>(&mut self, mut want: F) -> Option<Self::SchedItem>
+    where
+        F: FnMut(&Self::SchedItem) -> bool,
+    {
+        let task = self.ready_queue.values().find(|task| want(task)).cloned()?;
+        self.remove_task(&task)
+    }
+
     fn pick_next_task(&mut self) -> Option<Self::SchedItem> {
         let task = self.ready_queue.pop_first().map(|(_, v)| v)?;
         // Ready queue no longer holds the running task; keep min_vruntime in sync.

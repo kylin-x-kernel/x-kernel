@@ -29,6 +29,7 @@ task/ksched/
 
 ```
 Ready --pick_next_task--> Running
+Ready --steal_ready_task--> Migrating (off source RQ; PLACE_LAG armed)
 Running --leave_current(Yield|Preempt)--> Ready
 Running --leave_current(Block)--> Blocked (off RQ)
 Running --leave_current(Migrate)--> Migrating (off source RQ)
@@ -41,12 +42,14 @@ Blocked|Migrating --enqueue_task--> Ready
 | `CurrentDisposition` | 当前任务离开原因的封闭枚举 |
 | `BaseScheduler::leave_current` | 运行任务离开执行槽的唯一转换 |
 | `BaseScheduler::enqueue_task` | 非当前 Ready 任务入队（唤醒 / 迁入） |
+| `BaseScheduler::steal_ready_task` | 摘一颗匹配谓词的 ready waiter（idle-pull）；不 `pick_next`、不安装 `curr` |
 | `EevdfScheduler::curr` | 非 owning 的运行实体数值快照 |
 
 ## 调用约束 / 执行上下文
 
-- 所有 `BaseScheduler` 方法由 `ktask` 在持有当前 CPU run queue 锁、IRQ/preempt
-  已按路径禁用的上下文中调用。
+- 所有 `BaseScheduler` 方法由 `ktask` 在持有**目标** run queue 的 scheduler 锁、
+  IRQ/preempt 已按路径禁用的上下文中调用。idle-pull 的 `steal_ready_task` 持的是
+  **源** RQ 锁，且不得同时持有 dest 调度锁。
 - `leave_current` 必须在 `pick_next_task` 之前完成；EEVDF 对残留 `curr` 直接断言失败。
 - 调度器不得成为任务生命周期 owner：EEVDF `curr` 只缓存调度数值。
 - 修改运行实体的 `vruntime` / `deadline` / `weight` 后，必须同步刷新 `curr` 快照
@@ -59,29 +62,33 @@ Blocked|Migrating --enqueue_task--> Ready
 
 1. `add_task`：新任务按算法初始放置进入 ready 队列。
 2. `pick_next_task`：选出下一个运行任务；EEVDF 同时写入 `curr` 快照。
-3. `update_current(elapsed_ns)`：推进运行任务记账；EEVDF 同步刷新快照。
-4. `next_preemption_ns`：返回距下次必须重评估抢占的相对纳秒，lone task 为 `None`。
-5. 抢占探测分两步，对齐 Linux `check_preempt_tick` 与 `__schedule`：
+3. `steal_ready_task`：按谓词摘一颗 ready waiter，走与 `remove_task` 相同的
+   lag 快照，不安装 `curr`。FIFO/RR 在首个匹配处停止，剩余侵入式链表原地保留
+   （O(匹配下标)）；CFS/EEVDF 为 find 后 `remove_task`。ktask idle-pull 用它
+   拒绝仍 `on_cpu` 的任务。
+4. `update_current(elapsed_ns)`：推进运行任务记账；EEVDF 同步刷新快照。
+5. `next_preemption_ns`：返回距下次必须重评估抢占的相对纳秒，lone task 为 `None`。
+6. 抢占探测分两步，对齐 Linux `check_preempt_tick` 与 `__schedule`：
    仅 schedule tick（`account_sched_tick`）调用不消费标记的 `check_preempt_tick`；
    IRQ 尾 `peer_preempts_curr` 才消费 WF_SYNC 并决定是否 `leave_current(Preempt)`
    + pick。`update_current` 只在本 request 用完时要求 resched，不因同伴更早
    deadline 打标（否则 WF_SYNC 换上 later-deadline wakee 会被立刻抢回）。
    off-tree 助手在 `switch_to_local` 入场时 `sync_running_curr`；idle 保持
    `curr` 为空。
-6. `leave_current`：
+7. `leave_current`：
    - Yield：重置 request/slice 并再入队；
    - Preempt：保留剩余 request 并再入队；
    - Block/Migrate：公平调度器保存 lag 并标记 PLACE_LAG，不入队；
    - Exit：清除 current 记账，不设置 PLACE_LAG。
-7. `enqueue_task`：消费 PLACE_LAG（若有）后入队；EEVDF 提名 NEXT_BUDDY
+8. `enqueue_task`：消费 PLACE_LAG（若有）后入队；EEVDF 提名 NEXT_BUDDY
    （Linux `set_next_buddy`）。`curr` 为空时也要提名：远端 WF_SYNC 常落在
    leave→pick 窗口，否则随后 pick 会留下更早 deadline 的 runner。
-8. EEVDF `min_vruntime` 按 Linux `update_min_vruntime` 更新：离树但仍
+9. EEVDF `min_vruntime` 按 Linux `update_min_vruntime` 更新：离树但仍
    runnable 的 `curr` 参与水位（与 ready 最小 vruntime 取 min 后再单调抬升）。
    `leave_current` 必须在清 `curr` **之前**更新（Linux `put_prev` /
    `update_curr`）；清掉后再入队时不要按 ready-only 树更新水位。
    `place_entity` 是 `vruntime = V - lag`，不把 wakee 额外钳到 V 或 `min_vruntime`。
-9. `update_current` 对齐 Linux `update_deadline`：request 完成后赋新
+10. `update_current` 对齐 Linux `update_deadline`：request 完成后赋新
    `vd = ve + r/w`，仅在 ready 队列非空时要求 resched。
 
 ## 设计决策

@@ -919,6 +919,14 @@ impl<T, const S: usize> BaseScheduler for EevdfScheduler<T, S> {
         Some(removed)
     }
 
+    fn steal_ready_task<F>(&mut self, mut want: F) -> Option<Self::SchedItem>
+    where
+        F: FnMut(&Self::SchedItem) -> bool,
+    {
+        let task = self.ready_queue.values().find(|task| want(task)).cloned()?;
+        self.remove_task(&task)
+    }
+
     fn pick_next_task(&mut self) -> Option<Self::SchedItem> {
         // Involuntary preemption must `leave_current(Preempt)` in ktask *after*
         // a [`Self::peer_preempts_curr`] probe, so `curr` is clear here.

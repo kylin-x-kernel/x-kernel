@@ -672,7 +672,9 @@ mod tests_api {
         {
             assert!(text.contains("[sched_stat] begin"));
             assert!(text.contains("wakeup_last_cpu="));
+            assert!(text.contains("wakeup_idle_sibling="));
             assert!(text.contains("wakeup_fallback="));
+            assert!(text.contains("idle_pull="));
             assert!(text.contains("timer_irq_sched="));
             assert!(text.contains("timer_irq_stale="));
             assert!(text.contains("[sched_stat] end"));

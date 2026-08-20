@@ -64,6 +64,52 @@ fn fifo_remove() {
     }
 }
 
+#[def_test]
+fn fifo_steal_ready_skips_rejected() {
+    let mut scheduler = FifoScheduler::<usize>::new();
+    let t0 = Arc::new(FifoTask::new(0usize));
+    let t1 = Arc::new(FifoTask::new(1usize));
+    let t2 = Arc::new(FifoTask::new(2usize));
+    scheduler.add_task(t0);
+    scheduler.add_task(t1);
+    scheduler.add_task(t2);
+    let stolen = scheduler.steal_ready_task(|t| *t.inner() == 1).unwrap();
+    assert_eq!(*stolen.inner(), 1);
+    let first = scheduler.pick_next_task().unwrap();
+    let second = scheduler.pick_next_task().unwrap();
+    assert_eq!(*first.inner(), 0);
+    assert_eq!(*second.inner(), 2);
+    assert!(scheduler.pick_next_task().is_none());
+}
+
+#[def_test]
+fn fifo_steal_ready_head_keeps_tail_order() {
+    let mut scheduler = FifoScheduler::<usize>::new();
+    for i in 0..5 {
+        scheduler.add_task(Arc::new(FifoTask::new(i)));
+    }
+    let stolen = scheduler.steal_ready_task(|_| true).unwrap();
+    assert_eq!(*stolen.inner(), 0);
+    for i in 1..5 {
+        let next = scheduler.pick_next_task().unwrap();
+        assert_eq!(*next.inner(), i);
+    }
+}
+
+#[def_test]
+fn fifo_steal_ready_tail_keeps_prefix_order() {
+    let mut scheduler = FifoScheduler::<usize>::new();
+    for i in 0..5 {
+        scheduler.add_task(Arc::new(FifoTask::new(i)));
+    }
+    let stolen = scheduler.steal_ready_task(|t| *t.inner() == 4).unwrap();
+    assert_eq!(*stolen.inner(), 4);
+    for i in 0..4 {
+        let next = scheduler.pick_next_task().unwrap();
+        assert_eq!(*next.inner(), i);
+    }
+}
+
 // ============================================================================
 // Round-Robin scheduler tests
 // ============================================================================
@@ -116,6 +162,49 @@ fn rr_remove() {
     }
 }
 
+#[def_test]
+fn rr_steal_ready_skips_rejected() {
+    let mut scheduler = RRScheduler::<usize, SLICE>::new();
+    scheduler.add_task(Arc::new(RRTask::new(0usize)));
+    scheduler.add_task(Arc::new(RRTask::new(1usize)));
+    scheduler.add_task(Arc::new(RRTask::new(2usize)));
+    let stolen = scheduler.steal_ready_task(|t| *t.inner() == 1).unwrap();
+    assert_eq!(*stolen.inner(), 1);
+    let first = scheduler.pick_next_task().unwrap();
+    let second = scheduler.pick_next_task().unwrap();
+    assert_eq!(*first.inner(), 0);
+    assert_eq!(*second.inner(), 2);
+    assert!(scheduler.pick_next_task().is_none());
+}
+
+#[def_test]
+fn rr_steal_ready_head_keeps_tail_order() {
+    let mut scheduler = RRScheduler::<usize, SLICE>::new();
+    for i in 0..5 {
+        scheduler.add_task(Arc::new(RRTask::new(i)));
+    }
+    let stolen = scheduler.steal_ready_task(|_| true).unwrap();
+    assert_eq!(*stolen.inner(), 0);
+    for i in 1..5 {
+        let next = scheduler.pick_next_task().unwrap();
+        assert_eq!(*next.inner(), i);
+    }
+}
+
+#[def_test]
+fn rr_steal_ready_tail_keeps_prefix_order() {
+    let mut scheduler = RRScheduler::<usize, SLICE>::new();
+    for i in 0..5 {
+        scheduler.add_task(Arc::new(RRTask::new(i)));
+    }
+    let stolen = scheduler.steal_ready_task(|t| *t.inner() == 4).unwrap();
+    assert_eq!(*stolen.inner(), 4);
+    for i in 0..4 {
+        let next = scheduler.pick_next_task().unwrap();
+        assert_eq!(*next.inner(), i);
+    }
+}
+
 // ============================================================================
 // CFS scheduler tests
 // ============================================================================
@@ -157,6 +246,22 @@ fn cfs_remove() {
     }
 }
 
+#[def_test]
+fn cfs_steal_ready_skips_rejected() {
+    let mut scheduler = CFScheduler::<usize>::new();
+    scheduler.add_task(Arc::new(CFSTask::new(0usize)));
+    scheduler.add_task(Arc::new(CFSTask::new(1usize)));
+    scheduler.add_task(Arc::new(CFSTask::new(2usize)));
+    let stolen = scheduler.steal_ready_task(|t| *t.inner() == 1).unwrap();
+    assert_eq!(*stolen.inner(), 1);
+    assert!(scheduler.steal_ready_task(|_| false).is_none());
+    let mut remaining = 0;
+    while scheduler.pick_next_task().is_some() {
+        remaining += 1;
+    }
+    assert_eq!(remaining, 2);
+}
+
 // ============================================================================
 // EEVDF scheduler tests
 // ============================================================================
@@ -196,6 +301,23 @@ fn eevdf_remove() {
         let t = scheduler.remove_task(&tasks[i]).unwrap();
         assert_eq!(*t.inner(), i);
     }
+}
+
+#[def_test]
+fn eevdf_steal_ready_leaves_curr() {
+    let mut sched = EevdfScheduler::<usize, SLICE>::new();
+    let runner = Arc::new(EevdfEntity::new(1usize));
+    let waiter = Arc::new(EevdfEntity::new(2usize));
+    sched.add_task(runner.clone());
+    sched.add_task(waiter.clone());
+    let curr = sched.pick_next_task().unwrap();
+    assert!(!sched.curr_is_none());
+
+    let stolen = sched.steal_ready_task(|_| true).unwrap();
+    assert!(!Arc::ptr_eq(&stolen, &curr));
+    assert!(!sched.curr_is_none());
+    assert!(stolen.needs_place_for_test());
+    assert!(sched.steal_ready_task(|_| false).is_none());
 }
 
 #[def_test]

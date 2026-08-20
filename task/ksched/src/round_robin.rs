@@ -75,6 +75,39 @@ pub struct RRScheduler<T, const MAX_SLICE_NS: usize> {
     ready_queue: List<Arc<RRTask<T, MAX_SLICE_NS>>>,
 }
 
+/// Unlink the first ready waiter matching `want`.
+///
+/// Same idle-pull lock concern as [`crate::FifoScheduler`]: do not drain the
+/// whole ready list after the first hit.
+fn steal_first_matching<T, const S: usize>(
+    queue: &mut List<Arc<RRTask<T, S>>>,
+    mut want: impl FnMut(&Arc<RRTask<T, S>>) -> bool,
+) -> Option<Arc<RRTask<T, S>>> {
+    let mut skipped = List::new();
+    while let Some(task) = queue.pop_front() {
+        if want(&task) {
+            prepend_in_order(queue, skipped);
+            return Some(task);
+        }
+        skipped.push_back(task);
+    }
+    *queue = skipped;
+    None
+}
+
+fn prepend_in_order<T, const S: usize>(
+    dest: &mut List<Arc<RRTask<T, S>>>,
+    mut front: List<Arc<RRTask<T, S>>>,
+) {
+    let mut rev: List<Arc<RRTask<T, S>>> = List::new();
+    while let Some(task) = front.pop_front() {
+        rev.push_front(task);
+    }
+    while let Some(task) = rev.pop_front() {
+        dest.push_front(task);
+    }
+}
+
 impl<T, const S: usize> RRScheduler<T, S> {
     /// Creates a new empty [`RRScheduler`].
     pub const fn new() -> Self {
@@ -103,6 +136,13 @@ impl<T, const S: usize> BaseScheduler for RRScheduler<T, S> {
         // this scheduler, so removing a known task preserves the intrusive-list
         // membership invariant.
         unsafe { self.ready_queue.remove(task) }
+    }
+
+    fn steal_ready_task<F>(&mut self, want: F) -> Option<Self::SchedItem>
+    where
+        F: FnMut(&Self::SchedItem) -> bool,
+    {
+        steal_first_matching(&mut self.ready_queue, want)
     }
 
     fn pick_next_task(&mut self) -> Option<Self::SchedItem> {

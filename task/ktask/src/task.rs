@@ -222,6 +222,19 @@ pub struct TaskInner {
     /// Used to indicate whether the task is running on a CPU.
     #[cfg(feature = "smp")]
     on_cpu: AtomicBool,
+    /// Whether this task currently contributes to its owner RQ `nr_running`.
+    ///
+    /// Set on `publish_task` / `enqueue_task`, cleared on block / migrate /
+    /// exit / idle-pull steal. `switch_to_local` helpers never charge, so their
+    /// `leave_current(Exit)` must not underflow the snapshot.
+    #[cfg(feature = "smp")]
+    rq_load_charged: AtomicBool,
+    /// Whether this task currently contributes to its owner RQ `nr_home`.
+    ///
+    /// Counts sticky-home occupancy (running, ready, or blocked on this CPU).
+    /// Cleared on exit or when ownership moves to another RQ; **not** on block.
+    #[cfg(feature = "smp")]
+    home_charged: AtomicBool,
     /// Wakeup metadata handed from the waker to the CPU completing switch-out.
     ///
     /// Bit 0 means the task still needs to be enqueued, bit 1 carries
@@ -691,6 +704,10 @@ impl TaskInner {
             #[cfg(feature = "smp")]
             on_cpu: AtomicBool::new(false),
             #[cfg(feature = "smp")]
+            rq_load_charged: AtomicBool::new(false),
+            #[cfg(feature = "smp")]
+            home_charged: AtomicBool::new(false),
+            #[cfg(feature = "smp")]
             wake_enqueue_flags: AtomicU8::new(0),
             #[cfg(feature = "smp")]
             on_cpu_mask: SpinNoIrq::new(KCpuMask::new()),
@@ -904,6 +921,38 @@ impl TaskInner {
     #[inline]
     pub(crate) fn on_cpu(&self) -> bool {
         self.on_cpu.load(Ordering::SeqCst)
+    }
+
+    /// Marks this task as counted in its owner RQ load snapshot.
+    ///
+    /// Returns `true` if this call made the charged→true transition.
+    #[cfg(feature = "smp")]
+    pub(crate) fn mark_rq_load_charged(&self) -> bool {
+        !self.rq_load_charged.swap(true, Ordering::Relaxed)
+    }
+
+    /// Clears the RQ load-snapshot charge.
+    ///
+    /// Returns `true` if this call made the charged→false transition.
+    #[cfg(feature = "smp")]
+    pub(crate) fn clear_rq_load_charged(&self) -> bool {
+        self.rq_load_charged.swap(false, Ordering::Relaxed)
+    }
+
+    /// Marks this task as counted in its owner RQ home-occupancy snapshot.
+    ///
+    /// Returns `true` if this call made the charged→true transition.
+    #[cfg(feature = "smp")]
+    pub(crate) fn mark_home_charged(&self) -> bool {
+        !self.home_charged.swap(true, Ordering::Relaxed)
+    }
+
+    /// Clears the RQ home-occupancy charge.
+    ///
+    /// Returns `true` if this call made the charged→false transition.
+    #[cfg(feature = "smp")]
+    pub(crate) fn clear_home_charged(&self) -> bool {
+        self.home_charged.swap(false, Ordering::Relaxed)
     }
 
     /// Sets whether the task is running on a CPU.

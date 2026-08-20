@@ -126,17 +126,24 @@ Linux 对齐、且不抬回 ms 尾的修法：
 仅 buddy、ready 里又只有 wakee 时，几乎省不下时间；**sync preempt** 才缩短
 “等 waker block”。
 
-## Sticky home
+## Wake placement（`select_idle_sibling`）
 
-`select_wake_run_queue` **粘 home**（cpumask 不含 home 才 fallback）。
-home 忙 → idle 溢出会把 schbench RPS 从 ~450 打到 ~325；不要为“均衡”加回来。
+`select_wake_run_queue` 对齐 Linux：`prev_cpu` 空闲（`nr_running == 0`）则回家，
+否则找另一颗 idle CPU。不要回到「始终粘 home」——那会让一次 overflow 锁死拓扑。
+曾经 sticky + home 忙 → idle 把 RPS 从 ~450 打到 ~325；SIS 下被挤走的任务下次
+还能再找 idle。`wakeup_last_cpu` / `wakeup_idle_sibling` / `wakeup_fallback`
+区分三种结局。
+
+Spawn 对齐 Linux idle-first，再比 `nr_home`。即将 idle 时 idle-pull：只从
+`nr_running >= 2` 的核偷 Ready && `!on_cpu` 的 waiter，只锁 src，经
+`steal_ready_task` / `enqueue_task` PLACE_LAG。不要偷仍 `on_cpu` 的任务。
 
 Sticky pile-up / 缺 LB 解释不了 **整段 p50 抬升**；那是 handoff 模型问题。
 
 ## 禁区（不要再引入）
 
 1. 全局假 1-tick（或其它合成短）wake deadline 买延迟。
-2. home 忙 → idle 唤醒溢出。
+2. 在 SIS 之前单独做「粘 home 的 home 忙 → idle」溢出。
 3. 非自愿抢占决策前把 `curr` 先放回 ready 树。
 4. 把缺 LB 当成系统性 p50 变差的主因。
 5. 一轮堆很多投机性调度改动——归因会废。
@@ -144,5 +151,5 @@ Sticky pile-up / 缺 LB 解释不了 **整段 p50 抬升**；那是 handoff 模�
 ## 关键代码
 
 - `task/ksched/src/eevdf.rs` — place、`peer_preempts_curr`、buddy、sync preempt
-- `task/ktask/src/run_queue.rs` — sticky wake、`preempt_resched`、`mark_sync_wake_preempt`
+- `task/ktask/src/run_queue.rs` — `select_idle_cpu` / wake SIS、idle-pull、`preempt_resched`、`mark_sync_wake_preempt`
 - `process/kfutex/src/table.rs` — `with_wake_sync`

@@ -13,6 +13,8 @@ use alloc::{collections::VecDeque, sync::Arc};
 use core::fmt::Write;
 #[cfg(feature = "sched_stat")]
 use core::sync::atomic::AtomicU64;
+#[cfg(feature = "smp")]
+use core::sync::atomic::AtomicUsize;
 #[cfg(any(feature = "smp", feature = "sched_stat"))]
 use core::sync::atomic::Ordering;
 use core::{
@@ -47,6 +49,7 @@ struct SchedCpuStats {
     select_task: AtomicU64,
     select_wakeup: AtomicU64,
     wakeup_last_cpu: AtomicU64,
+    wakeup_idle_sibling: AtomicU64,
     wakeup_fallback: AtomicU64,
     add_task: AtomicU64,
     unblock_task: AtomicU64,
@@ -70,6 +73,8 @@ struct SchedCpuStats {
     preempt_denied: AtomicU64,
     resched: AtomicU64,
     pick_idle: AtomicU64,
+    /// Successful idle-pull of a Ready `!on_cpu` waiter from a busier CPU.
+    idle_pull: AtomicU64,
     switch: AtomicU64,
     switch_same: AtomicU64,
 }
@@ -81,6 +86,7 @@ impl SchedCpuStats {
             select_task: AtomicU64::new(0),
             select_wakeup: AtomicU64::new(0),
             wakeup_last_cpu: AtomicU64::new(0),
+            wakeup_idle_sibling: AtomicU64::new(0),
             wakeup_fallback: AtomicU64::new(0),
             add_task: AtomicU64::new(0),
             unblock_task: AtomicU64::new(0),
@@ -100,6 +106,7 @@ impl SchedCpuStats {
             preempt_denied: AtomicU64::new(0),
             resched: AtomicU64::new(0),
             pick_idle: AtomicU64::new(0),
+            idle_pull: AtomicU64::new(0),
             switch: AtomicU64::new(0),
             switch_same: AtomicU64::new(0),
         }
@@ -129,15 +136,17 @@ pub(crate) fn dump_sched_stats() {
     for (cpu, stats) in SCHED_CPU_STATS.iter().enumerate() {
         khal::kprint_atomic!(
             "[sched_stat] cpu={} select_task={} select_wakeup={} wakeup_last_cpu={} \
-             wakeup_fallback={} add_task={} unblock={} local_resched={} remote_resched={} \
-             remote_resched_fail={} tick_preempt={} timer_irq_sched={} timer_irq_soft={} \
-             timer_irq_periodic={} timer_irq_stale={} preempt_check={} preempt_need={} \
-             preempt_skip_disabled={} preempt_skip_exception={} preempt_resched={} \
-             preempt_denied={} resched={} pick_idle={} switch={} switch_same={}\n",
+             wakeup_idle_sibling={} wakeup_fallback={} add_task={} unblock={} local_resched={} \
+             remote_resched={} remote_resched_fail={} tick_preempt={} timer_irq_sched={} \
+             timer_irq_soft={} timer_irq_periodic={} timer_irq_stale={} preempt_check={} \
+             preempt_need={} preempt_skip_disabled={} preempt_skip_exception={} \
+             preempt_resched={} preempt_denied={} resched={} pick_idle={} idle_pull={} switch={} \
+             switch_same={}\n",
             cpu,
             stats.select_task.load(Ordering::Relaxed),
             stats.select_wakeup.load(Ordering::Relaxed),
             stats.wakeup_last_cpu.load(Ordering::Relaxed),
+            stats.wakeup_idle_sibling.load(Ordering::Relaxed),
             stats.wakeup_fallback.load(Ordering::Relaxed),
             stats.add_task.load(Ordering::Relaxed),
             stats.unblock_task.load(Ordering::Relaxed),
@@ -157,6 +166,7 @@ pub(crate) fn dump_sched_stats() {
             stats.preempt_denied.load(Ordering::Relaxed),
             stats.resched.load(Ordering::Relaxed),
             stats.pick_idle.load(Ordering::Relaxed),
+            stats.idle_pull.load(Ordering::Relaxed),
             stats.switch.load(Ordering::Relaxed),
             stats.switch_same.load(Ordering::Relaxed),
         );
@@ -191,15 +201,17 @@ pub(crate) fn sched_stats_text() -> String {
         let _ = writeln!(
             out,
             "[sched_stat] cpu={} select_task={} select_wakeup={} wakeup_last_cpu={} \
-             wakeup_fallback={} add_task={} unblock={} local_resched={} remote_resched={} \
-             remote_resched_fail={} tick_preempt={} timer_irq_sched={} timer_irq_soft={} \
-             timer_irq_periodic={} timer_irq_stale={} preempt_check={} preempt_need={} \
-             preempt_skip_disabled={} preempt_skip_exception={} preempt_resched={} \
-             preempt_denied={} resched={} pick_idle={} switch={} switch_same={}",
+             wakeup_idle_sibling={} wakeup_fallback={} add_task={} unblock={} local_resched={} \
+             remote_resched={} remote_resched_fail={} tick_preempt={} timer_irq_sched={} \
+             timer_irq_soft={} timer_irq_periodic={} timer_irq_stale={} preempt_check={} \
+             preempt_need={} preempt_skip_disabled={} preempt_skip_exception={} \
+             preempt_resched={} preempt_denied={} resched={} pick_idle={} idle_pull={} switch={} \
+             switch_same={}",
             cpu,
             stats.select_task.load(Ordering::Relaxed),
             stats.select_wakeup.load(Ordering::Relaxed),
             stats.wakeup_last_cpu.load(Ordering::Relaxed),
+            stats.wakeup_idle_sibling.load(Ordering::Relaxed),
             stats.wakeup_fallback.load(Ordering::Relaxed),
             stats.add_task.load(Ordering::Relaxed),
             stats.unblock_task.load(Ordering::Relaxed),
@@ -219,6 +231,7 @@ pub(crate) fn sched_stats_text() -> String {
             stats.preempt_denied.load(Ordering::Relaxed),
             stats.resched.load(Ordering::Relaxed),
             stats.pick_idle.load(Ordering::Relaxed),
+            stats.idle_pull.load(Ordering::Relaxed),
             stats.switch.load(Ordering::Relaxed),
             stats.switch_same.load(Ordering::Relaxed),
         );
@@ -460,43 +473,128 @@ pub(crate) fn current_run_queue<G: BaseGuard>() -> CurrentRunQueueRef<'static, G
     }
 }
 
-/// Selects the run queue index based on a CPU set bitmap and load balancing.
+/// Fork / migrate-in CPU pick, analogue of Linux `find_idlest_cpu`.
 ///
-/// This function filters the available run queues based on the provided `cpumask` and
-/// selects the run queue index for the next task. The selection is based on a round-robin algorithm.
+/// Linux fork is idle-first (`idle_cpu()`, true even with sleepers) then PELT
+/// `load_avg`. Wake is already `select_idle_sibling`, so landing a clone on a
+/// sleeper CPU is safe: the displaced worker can seek idle on the next wake.
+/// Occupancy among idle (and among busy) CPUs is still [`RunQueue::nr_home`].
+/// Ties: `prefer_local`, then RR.
 ///
-/// ## Arguments
-///
-/// * `cpumask` - A bitmap representing the CPUs that are eligible for task execution.
-///
-/// ## Returns
-///
-/// The index (cpu_id) of the selected run queue.
+/// Wake idle-seek uses [`select_idle_cpu`], not this ranking. Home-forbidden
+/// and no-idle wake fallback calls this with `prefer_local == false`.
 ///
 /// ## Panics
 ///
-/// This function will panic if `cpu_mask` is empty, indicating that there are no available CPUs for task execution.
+/// Empty `cpumask`, or none of the allowed CPUs have finished scheduler
+/// bring-up.
 #[cfg(feature = "smp")]
 #[inline]
-fn select_run_queue_index(cpumask: &KCpuMask) -> usize {
-    use core::sync::atomic::{AtomicUsize, Ordering};
+fn select_run_queue_index(cpumask: &KCpuMask, prefer_local: bool) -> usize {
     static RUN_QUEUE_INDEX: AtomicUsize = AtomicUsize::new(0);
 
+    let rr_token = RUN_QUEUE_INDEX.fetch_add(1, Ordering::Relaxed);
+    let prefer = prefer_local.then(|| this_cpu_id().as_usize());
+    let index = find_idlest_cpu(cpumask, rr_token, prefer, |idx| {
+        RUN_QUEUES.try_get(idx).as_deref().map(spawn_idlest_key)
+    });
+    #[cfg(feature = "sched_stat")]
+    sched_stat_inc(&sched_stat_cpu(LogicalCpuId::new(index)).select_task);
+    index
+}
+
+/// Spawn key: lower is better. `(is_busy, nr_home)`.
+///
+/// Idle (`nr_running == 0`) ranks ahead of any busy CPU, matching Linux
+/// `idle_cpu()` first. Among idle (or among busy), lower [`RunQueue::nr_home`]
+/// wins so a vacant CPU beats a sleeper's CPU.
+#[cfg(feature = "smp")]
+fn spawn_idlest_key(rq: &RunQueue) -> (bool, usize) {
+    let nr_home = rq.nr_home.load(Ordering::Relaxed);
+    let nr_running = rq.nr_running.load(Ordering::Relaxed);
+    let is_busy = nr_running > 0;
+    (is_busy, nr_home)
+}
+
+/// Lowest `key_of` in `cpumask`; `prefer` wins remaining ties, else `rr_token`.
+///
+/// `key_of` returns [`None`] for a CPU that is not yet schedulable (skipped).
+#[cfg(feature = "smp")]
+fn find_idlest_cpu<K: Copy + Ord>(
+    cpumask: &KCpuMask,
+    rr_token: usize,
+    prefer: Option<usize>,
+    key_of: impl Fn(usize) -> Option<K>,
+) -> usize {
     assert!(!cpumask.is_empty(), "No available CPU for task execution");
 
-    // Collect eligible CPU indices into a small stack buffer and round-robin
-    // over them directly. This avoids scanning NR_CPUS-sized ranges when only
-    // a subset of CPUs are present and eligible.
-    let mut eligible = [0usize; kbuild_config::NR_CPUS];
-    let mut count = 0usize;
+    let mut tied = [0usize; kbuild_config::NR_CPUS];
+    let mut n_tied = 0usize;
+    let mut best_key: Option<K> = None;
+    let mut is_prefer_tied = false;
     for cpu_id in cpumask.iter_logical() {
-        eligible[count] = cpu_id.as_usize();
-        count += 1;
+        let idx = cpu_id.as_usize();
+        let Some(key) = key_of(idx) else {
+            continue;
+        };
+        let is_better = best_key.is_none_or(|best| key < best);
+        if is_better {
+            best_key = Some(key);
+            tied[0] = idx;
+            n_tied = 1;
+            is_prefer_tied = prefer == Some(idx);
+        } else if best_key == Some(key) {
+            tied[n_tied] = idx;
+            n_tied += 1;
+            if prefer == Some(idx) {
+                is_prefer_tied = true;
+            }
+        }
     }
-    let nth = RUN_QUEUE_INDEX.fetch_add(1, Ordering::Relaxed) % count;
-    #[cfg(feature = "sched_stat")]
-    sched_stat_inc(&sched_stat_cpu(LogicalCpuId::new(eligible[nth])).select_task);
-    eligible[nth]
+    assert!(n_tied > 0, "No available CPU for task execution");
+    if n_tied == 1 {
+        tied[0]
+    } else if let Some(pref) = prefer.filter(|_| is_prefer_tied) {
+        pref
+    } else {
+        tied[rr_token % n_tied]
+    }
+}
+
+/// Busiest CPU with `nr_running >= 2`, excluding `dest` and `tried`.
+///
+/// Linux `idle_balance` pulls onto a CPU that is about to idle. We only steal
+/// from a CPU that still has a waiter after keeping its runner
+/// (`nr_running >= 2`). Ties keep the lowest CPU id.
+#[cfg(feature = "smp")]
+fn find_idle_pull_src(
+    dest: usize,
+    tried: &KCpuMask,
+    nr_cpus: usize,
+    nr_running_of: impl Fn(usize) -> usize,
+) -> Option<usize> {
+    let mut best_cpu = None;
+    let mut best_nr = 1usize;
+    for cpu in 0..nr_cpus {
+        if cpu == dest || tried.get(cpu) {
+            continue;
+        }
+        let nr_running = nr_running_of(cpu);
+        if nr_running > best_nr {
+            best_nr = nr_running;
+            best_cpu = Some(cpu);
+        }
+    }
+    best_cpu
+}
+
+/// Idle-pull may take this ready waiter onto `dest_cpu`.
+///
+/// Rejects still-`on_cpu` tasks: yield/preempt requeue before `switch_to`
+/// finishes, and stealing that stack races the outgoing CPU.
+#[cfg(feature = "smp")]
+fn can_idle_pull_task(task: &KtaskRef, dest_cpu: usize) -> bool {
+    task.is_ready() && !task.on_cpu() && !task.is_idle() && task.cpumask().get(dest_cpu)
 }
 
 /// Retrieves a `'static` reference to the run queue corresponding to the given index.
@@ -524,7 +622,9 @@ fn get_run_queue(index: usize) -> &'static mut RunQueue {
 /// Selects the appropriate run queue for the provided task.
 ///
 /// * In a single-core system, this function always returns a reference to the global run queue.
-/// * In a multi-core system, this function selects the run queue based on the task's CPU affinity and load balance.
+/// * In a multi-core system, this function selects the run queue based on the
+///   task's CPU affinity and spawn idlest ranking (idle-first, then `nr_home`,
+///   then the creating CPU).
 ///
 /// ## Arguments
 ///
@@ -533,11 +633,6 @@ fn get_run_queue(index: usize) -> &'static mut RunQueue {
 /// ## Returns
 ///
 /// * [`KRunQueueRef`] - a static reference to the selected [`RunQueue`] (current or remote).
-///
-/// ## TODO
-///
-/// 1. Implement better load balancing across CPUs for more efficient task distribution.
-/// 2. Use a more generic load balancing algorithm that can be customized or replaced.
 #[inline]
 pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'static, G> {
     let irq_state = G::acquire();
@@ -553,8 +648,8 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'s
     }
     #[cfg(feature = "smp")]
     {
-        // When SMP is enabled, select the run queue based on the task's CPU affinity and load balance.
-        let index = select_run_queue_index(&task.cpumask());
+        // Spawn / migrate-in: find_idlest (not wake select_idle_sibling).
+        let index = select_run_queue_index(&task.cpumask(), true);
         KRunQueueRef {
             inner: get_run_queue(index),
             state: irq_state,
@@ -563,28 +658,89 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'s
     }
 }
 
-/// Sticky-home wake placement: `(run_queue_index, used_home)`.
+/// How [`wake_affinity_select`] placed a wakeup.
+#[cfg(feature = "smp")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WakePlacement {
+    /// `prev_cpu` was idle, or no idle CPU existed so Linux keeps prev.
+    PrevCpu,
+    /// Home was busy; picked another `nr_running == 0` CPU.
+    IdleSibling,
+    /// Home not in `cpumask` and no idle CPU; spawn `find_idlest_cpu`.
+    Fallback,
+}
+
+/// Linux `select_idle_sibling`: `prev` if idle, else the first idle CPU in `cpumask`.
 ///
-/// Keeps the task's owner CPU when still allowed by `cpumask`; otherwise falls
-/// back to ordinary affinity RR. Exposed to unittest so the branch is covered
-/// without depending on `/proc/sched_stat` counter side effects alone.
+/// `is_idle` is true when that CPU is schedulable and has `nr_running == 0`.
+/// [`None`] means no idle CPU; the caller keeps `prev` when it is still allowed.
+#[cfg(feature = "smp")]
+fn select_idle_cpu(
+    cpumask: &KCpuMask,
+    prev: Option<usize>,
+    is_idle: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    if let Some(prev) = prev
+        && cpumask.get(prev)
+        && is_idle(prev)
+    {
+        return Some(prev);
+    }
+    for cpu_id in cpumask.iter_logical() {
+        let idx = cpu_id.as_usize();
+        if is_idle(idx) {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+#[cfg(feature = "smp")]
+fn is_runqueue_idle(idx: usize) -> bool {
+    RUN_QUEUES
+        .try_get(idx)
+        .is_some_and(|rq| rq.nr_running.load(Ordering::Relaxed) == 0)
+}
+
+/// Wake placement analogue of Linux `select_idle_sibling`.
+///
+/// Sticky-home plus "home busy → idle" overflow collapsed schbench to ~3-way
+/// parallelism (RPS ~450 → ~325) because the overflowed task never left.
+/// Linux keeps prev when it is idle, otherwise seeks an idle CPU; the next
+/// wake of the displaced worker can seek again (musical chairs, still ~4-way).
+///
+/// No idle CPU: stay on prev if allowed. Home forbidden: spawn `find_idlest`.
+/// Exposed to unittest so the branch is covered without `/proc/sched_stat`.
 #[cfg(feature = "smp")]
 #[inline]
-pub(crate) fn wake_affinity_select(task: &KtaskRef) -> (usize, bool) {
+pub(crate) fn wake_affinity_select(task: &KtaskRef) -> (usize, WakePlacement) {
     let cpumask = task.cpumask();
-    let home = task.cpu_id();
-    if cpumask.get(home.as_usize()) {
-        (home.as_usize(), true)
+    let home = task.cpu_id().as_usize();
+    let is_home_allowed = cpumask.get(home);
+    let prev = is_home_allowed.then_some(home);
+
+    if let Some(cpu) = select_idle_cpu(&cpumask, prev, is_runqueue_idle) {
+        let place = if prev == Some(cpu) {
+            WakePlacement::PrevCpu
+        } else {
+            WakePlacement::IdleSibling
+        };
+        return (cpu, place);
+    }
+    if is_home_allowed {
+        (home, WakePlacement::PrevCpu)
     } else {
-        (select_run_queue_index(&cpumask), false)
+        (
+            select_run_queue_index(&cpumask, false),
+            WakePlacement::Fallback,
+        )
     }
 }
 
 /// Selects a run queue for a task that is becoming runnable from a wakeup.
 ///
-/// Sticky home wake affinity (schbench ping-pong). Any "home busy → idle"
-/// overflow has repeatedly collapsed RPS (~450 → ~325); keep home unless the
-/// task's cpumask no longer contains it.
+/// Linux `select_idle_sibling`: prev if idle, else an idle CPU in `cpumask`.
+/// See [`wake_affinity_select`].
 #[inline]
 pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'static, G> {
     let irq_state = G::acquire();
@@ -599,18 +755,19 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueR
     }
     #[cfg(feature = "smp")]
     {
-        let (index, sticky_home) = wake_affinity_select(task);
+        let (index, place) = wake_affinity_select(task);
         #[cfg(feature = "sched_stat")]
         {
             let stats = sched_stat_cpu(LogicalCpuId::new(index));
             sched_stat_inc(&stats.select_wakeup);
-            if sticky_home {
-                sched_stat_inc(&stats.wakeup_last_cpu);
-            } else {
-                sched_stat_inc(&stats.wakeup_fallback);
+            match place {
+                WakePlacement::PrevCpu => sched_stat_inc(&stats.wakeup_last_cpu),
+                WakePlacement::IdleSibling => sched_stat_inc(&stats.wakeup_idle_sibling),
+                WakePlacement::Fallback => sched_stat_inc(&stats.wakeup_fallback),
             }
         }
-        let _ = sticky_home;
+        #[cfg(not(feature = "sched_stat"))]
+        let _ = place;
         KRunQueueRef {
             inner: get_run_queue(index),
             state: irq_state,
@@ -699,6 +856,19 @@ pub(crate) struct RunQueue {
     /// local timer IRQ both take that lock, so they cannot double-count or drop
     /// a NOHZ gap before PLACE_LAG.
     last_accounted_ns: u64,
+    /// Runnable-task snapshot (block discharges). Spawn idle-first looks at
+    /// this: `nr_running == 0` outranks any busy CPU, including vs a sleeper's
+    /// [`Self::nr_home`].
+    ///
+    /// Relaxed: heuristic only. Updated under [`Self::scheduler`] via
+    /// [`TaskInner::mark_rq_load_charged`] / [`TaskInner::clear_rq_load_charged`].
+    #[cfg(feature = "smp")]
+    nr_running: AtomicUsize,
+    /// Sticky-home occupancy: running, ready, **and** blocked tasks whose
+    /// `cpu_id` still names this RQ. Second spawn key after idle-first, so
+    /// two idle CPUs prefer the one with fewer sticky residents.
+    #[cfg(feature = "smp")]
+    nr_home: AtomicUsize,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -951,6 +1121,8 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             .scheduler
             .lock()
             .leave_current(curr.clone(), CurrentDisposition::Migrate);
+        #[cfg(feature = "smp")]
+        self.inner.discharge_rq_load(curr);
 
         // Mark current task's state as `Ready`,
         // but, do not put current task to the scheduler of this run queue.
@@ -1095,6 +1267,10 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
                 .scheduler
                 .lock()
                 .leave_current(curr.clone(), CurrentDisposition::Exit);
+            #[cfg(feature = "smp")]
+            self.inner.discharge_rq_load(curr);
+            #[cfg(feature = "smp")]
+            self.inner.discharge_home(curr);
 
             // Schedule to next task.
             self.inner.resched();
@@ -1155,6 +1331,8 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             .scheduler
             .lock()
             .leave_current(curr.clone(), CurrentDisposition::Block);
+        #[cfg(feature = "smp")]
+        self.inner.discharge_rq_load(curr);
 
         // Mark the task as blocked, this has to be done before adding it to the wait queue
         // while holding the lock of the wait queue.
@@ -1232,6 +1410,10 @@ impl RunQueue {
             cpu_id,
             scheduler: SpinRaw::new(scheduler),
             last_accounted_ns: 0,
+            #[cfg(feature = "smp")]
+            nr_running: AtomicUsize::new(0),
+            #[cfg(feature = "smp")]
+            nr_home: AtomicUsize::new(0),
         };
         // Publish through the ownership-aware entry so secondary-CPU gc tasks
         // do not keep the default `cpu_id == 0`.
@@ -1314,10 +1496,55 @@ impl RunQueue {
     }
 
     /// Attach this run queue as the task's owner before publish / enqueue / local switch.
+    ///
+    /// If the task already counted toward another RQ's [`Self::nr_home`], that
+    /// occupancy moves here (wake-fallback / migrate-in / idle-pull). Block does not call
+    /// this, so a sleeping worker keeps its home.
     #[cfg(feature = "smp")]
     #[inline]
     fn attach_owner(&self, task: &KtaskRef) {
+        let old = task.cpu_id();
+        if old != self.cpu_id
+            && task.clear_home_charged()
+            && let Some(old_rq) = RUN_QUEUES.try_get(old.as_usize())
+        {
+            old_rq.nr_home.fetch_sub(1, Ordering::Relaxed);
+        }
         Self::set_owner_cpu(task, self.cpu_id);
+    }
+
+    /// Includes `task` in this RQ's `nr_running` snapshot if not already charged.
+    #[cfg(feature = "smp")]
+    fn charge_rq_load(&self, task: &KtaskRef) {
+        if task.mark_rq_load_charged() {
+            self.nr_running.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Drops `task` from this RQ's `nr_running` snapshot if it was charged.
+    ///
+    /// No-op for `switch_to_local` helpers that were never published.
+    #[cfg(feature = "smp")]
+    fn discharge_rq_load(&self, task: &KtaskRef) {
+        if task.clear_rq_load_charged() {
+            self.nr_running.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Includes `task` in this RQ's sticky-home occupancy if not already charged.
+    #[cfg(feature = "smp")]
+    fn charge_home(&self, task: &KtaskRef) {
+        if task.mark_home_charged() {
+            self.nr_home.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Drops `task` from this RQ's sticky-home occupancy if it was charged.
+    #[cfg(feature = "smp")]
+    fn discharge_home(&self, task: &KtaskRef) {
+        if task.clear_home_charged() {
+            self.nr_home.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 
     /// Publish a newly runnable task onto this run queue's scheduler.
@@ -1326,6 +1553,10 @@ impl RunQueue {
     fn publish_task(&mut self, task: KtaskRef) {
         #[cfg(feature = "smp")]
         self.attach_owner(&task);
+        #[cfg(feature = "smp")]
+        self.charge_rq_load(&task);
+        #[cfg(feature = "smp")]
+        self.charge_home(&task);
         self.scheduler.lock().add_task(task);
     }
 
@@ -1342,6 +1573,10 @@ impl RunQueue {
     fn enqueue_ready_task(&mut self, task: KtaskRef, is_wake_sync: bool) {
         #[cfg(feature = "smp")]
         self.attach_owner(&task);
+        #[cfg(feature = "smp")]
+        self.charge_rq_load(&task);
+        #[cfg(feature = "smp")]
+        self.charge_home(&task);
         let now_ns = khal::time::monotonic_time_nanos();
         let mut sched = self.scheduler.lock();
         let elapsed = Self::advance_account_epoch(&mut self.last_accounted_ns, now_ns);
@@ -1431,6 +1666,12 @@ impl RunQueue {
             .lock()
             .pick_next_task()
             .unwrap_or_else(|| current_idle_task().clone());
+        #[cfg(feature = "smp")]
+        let next = if next.is_idle() && self.idle_pull() {
+            self.scheduler.lock().pick_next_task().unwrap_or(next)
+        } else {
+            next
+        };
         #[cfg(feature = "sched_stat")]
         if next.is_idle() {
             sched_stat_inc(&sched_stat_cpu(self.cpu_id).pick_idle);
@@ -1442,6 +1683,81 @@ impl RunQueue {
             next.state()
         );
         self.switch_to(current(), next);
+    }
+
+    /// Steal one Ready `!on_cpu` waiter from a busier CPU onto this idle RQ.
+    ///
+    /// Locks only the source scheduler (then this RQ's enqueue lock). Never
+    /// dest-then-src: that deadlocks against remote wake. Never steals
+    /// `on_cpu` tasks (yield/preempt are already in the ready tree). After
+    /// enqueue, drop the waiter if its cpumask no longer contains this CPU.
+    #[cfg(feature = "smp")]
+    fn idle_pull(&mut self) -> bool {
+        let dest = self.cpu_id.as_usize();
+        let nr_cpus = kcpu_id_map::nr_cpus();
+        let mut tried = KCpuMask::new();
+        loop {
+            let Some(src_idx) = find_idle_pull_src(dest, &tried, nr_cpus, |cpu| {
+                RUN_QUEUES
+                    .try_get(cpu)
+                    .map(|rq| rq.nr_running.load(Ordering::Relaxed))
+                    .unwrap_or(0)
+            }) else {
+                return false;
+            };
+            tried.set(src_idx, true);
+            debug_assert_ne!(src_idx, dest);
+            let Some(stolen) = get_run_queue(src_idx).steal_ready_for_idle_pull(self.cpu_id) else {
+                continue;
+            };
+            if self.commit_idle_pull(stolen) {
+                #[cfg(feature = "sched_stat")]
+                sched_stat_inc(&sched_stat_cpu(self.cpu_id).idle_pull);
+                return true;
+            }
+        }
+    }
+
+    /// Enqueue a stolen waiter, then drop it if affinity no longer allows dest.
+    ///
+    /// Steal to enqueue is not atomic: the task is Ready, on no RQ, with
+    /// `cpu_id` still at src. `set_task_affinity` can exclude dest in that
+    /// window. Recheck after `enqueue_task` so this CPU does not pick a task
+    /// the new mask forbids.
+    #[cfg(feature = "smp")]
+    fn commit_idle_pull(&mut self, stolen: KtaskRef) -> bool {
+        let dest = self.cpu_id.as_usize();
+        self.enqueue_task(stolen.clone());
+        if stolen.cpumask().get(dest) {
+            return true;
+        }
+        let Some(removed) = self.scheduler.lock().remove_task(&stolen) else {
+            return false;
+        };
+        self.discharge_rq_load(&removed);
+        migrate_entry(removed);
+        false
+    }
+
+    /// Dequeue a stealable waiter from this (source) RQ. Caller must not hold
+    /// the destination scheduler lock.
+    #[cfg(feature = "smp")]
+    fn steal_ready_for_idle_pull(&mut self, dest_cpu: LogicalCpuId) -> Option<KtaskRef> {
+        let dest_idx = dest_cpu.as_usize();
+        let now_ns = khal::time::monotonic_time_nanos();
+        let stolen = {
+            let mut sched = self.scheduler.lock();
+            let elapsed = Self::advance_account_epoch(&mut self.last_accounted_ns, now_ns);
+            #[cfg(feature = "sched_eevdf")]
+            sched.account_curr_elapsed(elapsed);
+            #[cfg(not(feature = "sched_eevdf"))]
+            {
+                let _ = elapsed;
+            }
+            sched.steal_ready_task(|task| can_idle_pull_task(task, dest_idx))?
+        };
+        self.discharge_rq_load(&stolen);
+        Some(stolen)
     }
 
     fn switch_to(&mut self, prev_task: CurrentTask, next_task: KtaskRef) {
@@ -1659,7 +1975,9 @@ fn try_remove_ready_task(task: &KtaskRef) -> Option<KtaskRef> {
     if !task.is_ready() {
         return None;
     }
-    rq.inner.scheduler.lock().remove_task(task)
+    let removed = rq.inner.scheduler.lock().remove_task(task)?;
+    rq.inner.discharge_rq_load(&removed);
+    Some(removed)
 }
 
 /// After [`KtaskRef::set_cpumask`], move the task off any CPU the new mask
@@ -1667,6 +1985,8 @@ fn try_remove_ready_task(task: &KtaskRef) -> Option<KtaskRef> {
 ///
 /// - current: migrate immediately (same as historical `set_current_affinity`);
 /// - ready on a forbidden RQ: dequeue and `migrate_entry`;
+/// - ready but not queued (idle-pull in flight): wait until dest enqueue or
+///   the task starts running, then migrate as above;
 /// - running remotely: request resched and wait for the affinity migrate in
 ///   [`CurrentRunQueueRef::preempt_resched`];
 /// - blocked/exited: mask-only (wake / teardown pick a legal CPU later).
@@ -1694,8 +2014,15 @@ pub(crate) fn enforce_affinity_placement(task: &KtaskRef) -> bool {
         return true;
     }
 
-    if let Some(removed) = try_remove_ready_task(task) {
-        migrate_entry(removed);
+    // idle-pull leaves a Ready task off every RQ until dest `enqueue_task`.
+    // `try_remove_ready_task` misses that window and must not fall through to
+    // `false` (the documented failure is only a remote *running* migrate).
+    while task.is_ready() && !cpumask.get(task.cpu_id().as_usize()) {
+        if let Some(removed) = try_remove_ready_task(task) {
+            migrate_entry(removed);
+            break;
+        }
+        core::hint::spin_loop();
     }
 
     if task.is_running() && !cpumask.get(task.cpu_id().as_usize()) {
@@ -1804,12 +2131,16 @@ pub(crate) fn init() {
     crate::task_registry::record_tracked_task(&main_task);
     // SAFETY: scheduler bring-up installs the first current task for this CPU
     // before any concurrent task access can occur.
-    unsafe { CurrentTask::init_current(main_task) }
+    unsafe { CurrentTask::init_current(main_task.clone()) }
 
     RUN_QUEUE.with_current(|rq| {
         rq.init_once(RunQueue::new(cpu_id));
     });
     RUN_QUEUES.register_current(cpu_id, current_run_queue_ptr());
+    #[cfg(feature = "smp")]
+    current_run_queue_mut().charge_rq_load(&main_task);
+    #[cfg(feature = "smp")]
+    current_run_queue_mut().charge_home(&main_task);
 }
 
 pub(crate) fn init_secondary() {
@@ -1900,7 +2231,10 @@ mod tests_wake_affinity {
 
     #[cfg(feature = "sched_stat")]
     use super::sched_stat_cpu;
-    use super::{WakeEnqueue, select_wake_run_queue, wake_affinity_select};
+    use super::{
+        WakeEnqueue, WakePlacement, can_idle_pull_task, find_idle_pull_src, find_idlest_cpu,
+        select_idle_cpu, select_wake_run_queue, wake_affinity_select,
+    };
     use crate::{KCpuMask, KtaskRef, TaskInner, TaskState};
 
     fn test_task_on(home: usize) -> KtaskRef {
@@ -1910,7 +2244,39 @@ mod tests_wake_affinity {
     }
 
     #[def_test]
-    fn wake_affinity_sticks_to_home_when_allowed() {
+    fn select_idle_cpu_keeps_prev_when_idle() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let mut mask = KCpuMask::new();
+            mask.set(0, true);
+            mask.set(1, true);
+            let idx = select_idle_cpu(&mask, Some(1), |cpu| cpu == 1);
+            assert_eq!(idx, Some(1));
+        }
+    }
+
+    #[def_test]
+    fn select_idle_cpu_seeks_sibling_when_prev_busy() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let mut mask = KCpuMask::new();
+            mask.set(0, true);
+            mask.set(1, true);
+            let idx = select_idle_cpu(&mask, Some(1), |cpu| cpu == 0);
+            assert_eq!(idx, Some(0));
+        }
+    }
+
+    #[def_test]
+    fn select_idle_cpu_none_when_all_busy() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let mut mask = KCpuMask::new();
+            mask.set(0, true);
+            mask.set(1, true);
+            assert_eq!(select_idle_cpu(&mask, Some(1), |_| false), None);
+        }
+    }
+
+    #[def_test]
+    fn wake_affinity_stays_home_when_prev_idle() {
         if kcpu_id_map::nr_cpus() >= 2 {
             let task = test_task_on(1);
             let mut mask = KCpuMask::new();
@@ -1918,9 +2284,14 @@ mod tests_wake_affinity {
             mask.set(1, true);
             task.set_cpumask(mask);
 
-            let (idx, sticky) = wake_affinity_select(&task);
-            assert!(sticky);
-            assert_eq!(idx, 1);
+            // CPU1 is typically idle in this unittest; if the test itself runs
+            // there, SIS may pick another idle CPU — still a legal wake.
+            let (idx, place) = wake_affinity_select(&task);
+            match place {
+                WakePlacement::PrevCpu => assert_eq!(idx, 1),
+                WakePlacement::IdleSibling => assert!(idx != 1 && task.cpumask().get(idx)),
+                WakePlacement::Fallback => panic!("home is still in cpumask"),
+            }
         }
     }
 
@@ -1932,9 +2303,12 @@ mod tests_wake_affinity {
             mask.set(0, true);
             task.set_cpumask(mask);
 
-            let (idx, sticky) = wake_affinity_select(&task);
-            assert!(!sticky);
+            let (idx, place) = wake_affinity_select(&task);
             assert_eq!(idx, 0);
+            assert!(matches!(
+                place,
+                WakePlacement::IdleSibling | WakePlacement::Fallback
+            ));
         }
     }
 
@@ -1954,8 +2328,18 @@ mod tests_wake_affinity {
     }
 
     #[cfg(feature = "sched_stat")]
+    fn placement_counter(cpu: usize, place: WakePlacement) -> u64 {
+        let stats = sched_stat_cpu(LogicalCpuId::new(cpu));
+        match place {
+            WakePlacement::PrevCpu => stats.wakeup_last_cpu.load(Ordering::Relaxed),
+            WakePlacement::IdleSibling => stats.wakeup_idle_sibling.load(Ordering::Relaxed),
+            WakePlacement::Fallback => stats.wakeup_fallback.load(Ordering::Relaxed),
+        }
+    }
+
+    #[cfg(feature = "sched_stat")]
     #[def_test]
-    fn select_wake_run_queue_counts_sticky_and_fallback() {
+    fn select_wake_run_queue_counts_placement() {
         if kcpu_id_map::nr_cpus() >= 2 {
             let task = test_task_on(1);
             let mut all = KCpuMask::new();
@@ -1963,30 +2347,164 @@ mod tests_wake_affinity {
             all.set(1, true);
             task.set_cpumask(all);
 
-            let before_last = sched_stat_cpu(LogicalCpuId::new(1))
-                .wakeup_last_cpu
-                .load(Ordering::Relaxed);
+            let (idx, place) = wake_affinity_select(&task);
+            let before = placement_counter(idx, place);
             {
                 let _rq = select_wake_run_queue::<NoPreemptIrqSave>(&task);
             }
-            let after_last = sched_stat_cpu(LogicalCpuId::new(1))
-                .wakeup_last_cpu
-                .load(Ordering::Relaxed);
-            assert_eq!(after_last, before_last + 1);
+            assert_eq!(placement_counter(idx, place), before + 1);
 
             let mut only0 = KCpuMask::new();
             only0.set(0, true);
             task.set_cpumask(only0);
-            let before_fb = sched_stat_cpu(LogicalCpuId::new(0))
-                .wakeup_fallback
-                .load(Ordering::Relaxed);
+            let (idx0, place0) = wake_affinity_select(&task);
+            assert_eq!(idx0, 0);
+            let before0 = placement_counter(idx0, place0);
             {
                 let _rq = select_wake_run_queue::<NoPreemptIrqSave>(&task);
             }
-            let after_fb = sched_stat_cpu(LogicalCpuId::new(0))
-                .wakeup_fallback
-                .load(Ordering::Relaxed);
-            assert_eq!(after_fb, before_fb + 1);
+            assert_eq!(placement_counter(idx0, place0), before0 + 1);
         }
+    }
+
+    #[def_test]
+    fn find_idlest_prefers_lighter_cpu() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let mut mask = KCpuMask::new();
+            mask.set(0, true);
+            mask.set(1, true);
+            let idx = find_idlest_cpu(&mask, 0, None, |cpu| match cpu {
+                0 => Some(3),
+                1 => Some(1),
+                _ => None,
+            });
+            assert_eq!(idx, 1);
+        }
+    }
+
+    #[def_test]
+    fn find_idlest_round_robins_ties() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let mut mask = KCpuMask::new();
+            mask.set(0, true);
+            mask.set(1, true);
+            let first = find_idlest_cpu(&mask, 0, None, |_| Some(0));
+            let second = find_idlest_cpu(&mask, 1, None, |_| Some(0));
+            assert_eq!(first, 0);
+            assert_eq!(second, 1);
+        }
+    }
+
+    #[def_test]
+    fn find_idlest_prefers_local_on_tie() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let mut mask = KCpuMask::new();
+            mask.set(0, true);
+            mask.set(1, true);
+            let idx = find_idlest_cpu(&mask, 0, Some(1), |_| Some(1));
+            assert_eq!(idx, 1);
+        }
+    }
+
+    #[def_test]
+    fn find_idlest_ignores_heavier_prefer() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let mut mask = KCpuMask::new();
+            mask.set(0, true);
+            mask.set(1, true);
+            let idx = find_idlest_cpu(&mask, 0, Some(0), |cpu| match cpu {
+                0 => Some(2),
+                1 => Some(1),
+                _ => None,
+            });
+            assert_eq!(idx, 1);
+        }
+    }
+
+    /// Idle-first: a sleeper's CPU (`is_busy == false`) ranks ahead of a
+    /// running CPU. Key is `(is_busy, nr_home)` as in [`super::spawn_idlest_key`].
+    #[def_test]
+    fn find_idlest_idle_beats_busy() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let mut mask = KCpuMask::new();
+            mask.set(0, true);
+            mask.set(1, true);
+            let idx = find_idlest_cpu(&mask, 0, Some(0), |cpu| match cpu {
+                0 => Some((true, 1usize)),
+                1 => Some((false, 1usize)),
+                _ => None,
+            });
+            assert_eq!(idx, 1);
+        }
+    }
+
+    /// Among idle CPUs, a vacant CPU ranks ahead of a sleeper's CPU.
+    #[def_test]
+    fn find_idlest_vacant_idle_beats_sleeper() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let mut mask = KCpuMask::new();
+            mask.set(0, true);
+            mask.set(1, true);
+            let idx = find_idlest_cpu(&mask, 0, Some(0), |cpu| match cpu {
+                0 => Some((false, 1usize)),
+                1 => Some((false, 0usize)),
+                _ => None,
+            });
+            assert_eq!(idx, 1);
+        }
+    }
+
+    #[def_test]
+    fn find_idle_pull_src_picks_busiest() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let tried = KCpuMask::new();
+            let src = find_idle_pull_src(0, &tried, 2, |cpu| match cpu {
+                0 => 4,
+                1 => 3,
+                _ => 0,
+            });
+            assert_eq!(src, Some(1));
+        }
+    }
+
+    #[def_test]
+    fn find_idle_pull_src_ignores_lone_and_tried() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let tried = KCpuMask::new();
+            assert_eq!(
+                find_idle_pull_src(0, &tried, 2, |cpu| match cpu {
+                    1 => 1,
+                    _ => 0,
+                }),
+                None
+            );
+
+            let mut tried = KCpuMask::new();
+            tried.set(1, true);
+            assert_eq!(
+                find_idle_pull_src(0, &tried, 2, |cpu| match cpu {
+                    1 => 5,
+                    _ => 0,
+                }),
+                None
+            );
+        }
+    }
+
+    #[def_test]
+    fn can_idle_pull_task_rejects_on_cpu() {
+        let task = test_task_on(1);
+        let mut mask = KCpuMask::new();
+        mask.set(0, true);
+        mask.set(1, true);
+        task.set_cpumask(mask);
+        assert!(can_idle_pull_task(&task, 0));
+        task.set_on_cpu(true);
+        assert!(!can_idle_pull_task(&task, 0));
+        task.set_on_cpu(false);
+        let mut only_home = KCpuMask::new();
+        only_home.set(1, true);
+        task.set_cpumask(only_home);
+        assert!(!can_idle_pull_task(&task, 0));
     }
 }

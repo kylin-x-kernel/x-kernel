@@ -418,6 +418,13 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
             let mut warned = false;
             for target in targets.iter().flatten() {
                 while !active_slot.is_acked_by(target.as_usize(), request_seq) {
+                    // Incoming shootdowns must be drained here. `flush_remote`
+                    // is often reached with IRQs already off (page-table
+                    // `SpinNoIrq`, syscall/fault paths). Waiting only for the
+                    // IPI handler deadlocks when two CPUs wait on each other:
+                    // neither can ack. `handle_shootdown` reads published
+                    // slots directly, so a missed IPI still completes.
+                    handle_shootdown();
                     let elapsed = khal::time::monotonic_time().saturating_duration_since(start);
                     if !warned && elapsed >= SHOOTDOWN_WARN {
                         warned = true;
@@ -448,7 +455,9 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
 
 /// Handle any pending TLB shootdown requests targeting the current CPU.
 ///
-/// Called from the shared IPI interrupt handler.
+/// Called from the shared IPI interrupt handler, and also polled from
+/// [`flush_remote`] while waiting for remote acks so an IRQ-off waiter can
+/// still acknowledge inbound requests.
 ///
 /// The fast path checks this CPU's pending epoch first and returns immediately
 /// when no TLB request has targeted the CPU since the last scan, so generic
