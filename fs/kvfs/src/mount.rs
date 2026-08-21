@@ -265,19 +265,15 @@ impl MntNamespace {
 
     /// Creates and attaches a filesystem selected by a filesystem context.
     ///
-    /// This is the common new-mount operation used after filesystem-type
-    /// lookup. Filesystem construction completes before the namespace lock is
-    /// acquired, so `get_tree` may perform blocking device I/O.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error from filesystem construction, mountpoint validation,
-    /// or namespace attachment.
+    /// Filesystem construction completes before the namespace lock is
+    /// acquired, so `get_tree` may perform blocking device I/O. If the
+    /// selected superblock enters final shutdown before activation, lookup is
+    /// repeated just as Linux retries after losing the `sget` race.
     pub fn mount_new(
         &self,
         mountpoint: &Path,
         mount_flags: MountFlags,
-        context: &FsContext<'_>,
+        context: &mut FsContext<'_>,
         lookup_root: &Path,
         lookup_pwd: &Path,
     ) -> VfsResult<Arc<Mount>> {
@@ -317,14 +313,12 @@ impl MntNamespace {
     pub fn remount(
         &self,
         target: &Path,
-        superblock_flags: SuperBlockFlags,
+        context: &mut FsContext<'_>,
         mount_flags: MountFlags,
     ) -> VfsResult<()> {
         let mounts = self.mounts.lock();
         let mount = Self::registered_mount_at(&mounts, target)?;
-        mount
-            .super_block()
-            .reconfigure_readonly(superblock_flags.contains(SuperBlockFlags::RDONLY))?;
+        mount.super_block().reconfigure(context)?;
         mount.set_flags(mount_flags);
         Ok(())
     }
@@ -478,7 +472,8 @@ impl Mount {
         Path::new(self.clone(), self.mnt.mnt_root.clone())
     }
 
-    pub(crate) fn super_block(&self) -> &Arc<SuperBlock> {
+    /// Returns the superblock mounted at this mount object.
+    pub fn super_block(&self) -> &Arc<SuperBlock> {
         &self.mnt.mnt_sb
     }
 
@@ -1231,6 +1226,7 @@ impl Path {
         })
     }
 
+    /// Mount a filesystem at this path.
     fn mount_filesystem_with_requested_superblock_flags(
         &self,
         fs: &Arc<SuperBlock>,
@@ -1429,10 +1425,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        Dentry, DirContext, FileDirOperations, FileOperations, InodeDirOperations, InodeOperations,
-        LockedDentry, Metadata, MetadataUpdate, NodePermission, NodeType, StatFs, StatFsFlags,
-        SuperBlockFlags, SuperBlockOperations, VfsError, VfsFile, VfsInode, VfsInodeInit,
-        VfsResult,
+        Dentry, DirContext, FileDirOperations, FileOperations, FsContextPurpose,
+        InodeDirOperations, InodeOperations, LockedDentry, Metadata, MetadataUpdate,
+        NodePermission, NodeType, StatFs, StatFsFlags, SuperBlockFlags, SuperBlockOperations,
+        VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
     };
 
     fn lookup_child_in_mount(path: &Path, name: &str) -> VfsResult<Path> {
@@ -1456,24 +1452,58 @@ mod tests {
         path.mount_filesystem_with_requested_superblock_flags(fs, MountFlags::empty(), None, None)
     }
 
-    struct MockFilesystem {
+    struct MockFilesystem;
+
+    static MOCK_SUPER_OPERATIONS: MockFilesystem = MockFilesystem;
+
+    struct MockSuperPrivate {
         mount_flags: StatFsFlags,
     }
 
     impl SuperBlockOperations for MockFilesystem {
-        fn statfs(&self) -> VfsResult<StatFs> {
+        fn statfs(&self, _super_block: &SuperBlock) -> VfsResult<StatFs> {
             statfs()
         }
-
-        fn reconfigure(&self, flags: SuperBlockFlags, _changed: SuperBlockFlags) -> VfsResult<()> {
-            if self.mount_flags.contains(StatFsFlags::RDONLY)
-                && !flags.contains(SuperBlockFlags::RDONLY)
-            {
-                return Err(VfsError::ReadOnlyFilesystem);
-            }
-            Ok(())
-        }
     }
+
+    fn mock_get_tree(
+        _context: &mut FsContext<'_>,
+        _lookup_root: &Path,
+        _lookup_pwd: &Path,
+    ) -> VfsResult<Arc<SuperBlock>> {
+        Err(VfsError::NoSuchDevice)
+    }
+
+    fn mock_reconfigure(context: &mut FsContext<'_>) -> VfsResult<()> {
+        let super_block = context.super_block()?;
+        if context.private::<FsContextPurpose>()? != &FsContextPurpose::Reconfigure
+            || context.super_private::<SuperBlockFlags>()? != &context.sb_flags()
+        {
+            return Err(VfsError::InvalidInput);
+        }
+        if super_block
+            .private::<MockSuperPrivate>()?
+            .mount_flags
+            .contains(StatFsFlags::RDONLY)
+            && !context.sb_flags().contains(SuperBlockFlags::RDONLY)
+        {
+            return Err(VfsError::ReadOnlyFilesystem);
+        }
+        Ok(())
+    }
+
+    static MOCK_CONTEXT_OPERATIONS: crate::FsContextOperations =
+        crate::FsContextOperations::with_reconfigure(mock_get_tree, mock_reconfigure);
+
+    fn init_mock_context(context: &mut FsContext<'_>) -> VfsResult<()> {
+        context.set_operations(&MOCK_CONTEXT_OPERATIONS);
+        context.set_private(context.purpose());
+        context.set_super_private(context.sb_flags());
+        Ok(())
+    }
+
+    static MOCK_FILE_SYSTEM_TYPE: crate::FileSystemType =
+        crate::FileSystemType::nodev("mockfs", init_mock_context);
 
     struct MockDirOps {
         mount_flags: StatFsFlags,
@@ -1652,10 +1682,13 @@ mod tests {
         if mount_flags.contains(StatFsFlags::RDONLY) {
             superblock_flags.insert(SuperBlockFlags::RDONLY);
         }
-        SuperBlock::new_with_flags(
-            &crate::super_block::TEST_FILE_SYSTEM_TYPE,
-            Arc::new(MockFilesystem { mount_flags }),
+        SuperBlock::new_with_flags_and_private(
+            &MOCK_FILE_SYSTEM_TYPE,
+            &MOCK_SUPER_OPERATIONS,
+            MockSuperPrivate { mount_flags },
             superblock_flags,
+            1,
+            crate::MAX_LFS_FILESIZE,
             |_| root,
         )
     }
@@ -1903,14 +1936,39 @@ mod tests {
         let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
         let root = namespace.root_path();
         let mountpoint = lookup_child_in_mount(&root, "mnt").unwrap();
+        let cred = kcred::initial_cred();
+        let mut readonly_context = FsContext::new_reconfigure(
+            child_fs.as_ref(),
+            None,
+            None,
+            SuperBlockFlags::RDONLY,
+            SuperBlockFlags::RDONLY,
+            &cred,
+        )
+        .unwrap();
 
         assert_eq!(
-            namespace.remount(&mountpoint, SuperBlockFlags::RDONLY, MountFlags::RDONLY),
+            namespace.remount(&mountpoint, &mut readonly_context, MountFlags::RDONLY),
             Err(VfsError::InvalidInput)
         );
 
         let child = namespace.attach(&mountpoint, &child_fs).unwrap();
         let child_root = child.root_path();
+        let mut mount_context = FsContext::new(
+            &MOCK_FILE_SYSTEM_TYPE,
+            None,
+            None,
+            SuperBlockFlags::RDONLY,
+            &cred,
+        )
+        .unwrap();
+        assert_eq!(
+            namespace.remount(&child_root, &mut mount_context, MountFlags::RDONLY),
+            Err(VfsError::InvalidInput)
+        );
+        assert_eq!(child.flags(), MountFlags::empty());
+        assert_eq!(child.super_block_flags(), SuperBlockFlags::empty());
+
         let bind_mountpoint = lookup_child_in_mount(&child_root, "mnt").unwrap();
         let bind = namespace
             .attach_bind(&child_root, &bind_mountpoint)
@@ -1920,7 +1978,7 @@ mod tests {
         namespace
             .remount(
                 &child_root,
-                SuperBlockFlags::RDONLY,
+                &mut readonly_context,
                 MountFlags::RDONLY | MountFlags::NOEXEC,
             )
             .unwrap();
@@ -1936,8 +1994,17 @@ mod tests {
             Err(VfsError::ReadOnlyFilesystem)
         );
 
+        let mut writable_context = FsContext::new_reconfigure(
+            child_fs.as_ref(),
+            None,
+            None,
+            SuperBlockFlags::empty(),
+            SuperBlockFlags::RDONLY,
+            &cred,
+        )
+        .unwrap();
         namespace
-            .remount(&child_root, SuperBlockFlags::empty(), MountFlags::NOEXEC)
+            .remount(&child_root, &mut writable_context, MountFlags::NOEXEC)
             .unwrap();
         assert!(child_root.check_writable_mount().is_ok());
         assert!(bind_root.check_writable_mount().is_ok());
@@ -1960,11 +2027,21 @@ mod tests {
         let root = namespace.root_path();
         let mountpoint = lookup_child_in_mount(&root, "mnt").unwrap();
         let child = namespace.attach(&mountpoint, &child_fs).unwrap();
+        let cred = kcred::initial_cred();
+        let mut writable_context = FsContext::new_reconfigure(
+            child_fs.as_ref(),
+            None,
+            None,
+            SuperBlockFlags::empty(),
+            SuperBlockFlags::RDONLY,
+            &cred,
+        )
+        .unwrap();
 
         assert_eq!(
             namespace.remount(
                 &child.root_path(),
-                SuperBlockFlags::empty(),
+                &mut writable_context,
                 MountFlags::empty()
             ),
             Err(VfsError::ReadOnlyFilesystem)

@@ -1088,8 +1088,12 @@ mod tests {
 
     struct TestSuperBlock;
 
+    static TEST_SUPER_BLOCK_OPERATIONS: TestSuperBlock = TestSuperBlock;
+    static TEST_FILE_SYSTEM_TYPE: crate::FileSystemType =
+        crate::FileSystemType::internal("namei-test");
+
     impl SuperBlockOperations for TestSuperBlock {
-        fn statfs(&self) -> VfsResult<StatFs> {
+        fn statfs(&self, _super_block: &SuperBlock) -> VfsResult<StatFs> {
             Ok(StatFs {
                 fs_type: 0,
                 block_size: 4096,
@@ -1567,11 +1571,9 @@ mod tests {
             Dentry::new_dir_from_inode(autodir_inode, Some(root.clone()), String::from("autodir"));
         root_ops.insert("autodir", autodir);
 
-        let fs = SuperBlock::new(
-            &crate::super_block::TEST_FILE_SYSTEM_TYPE,
-            Arc::new(TestSuperBlock),
-            |_| root.clone(),
-        );
+        let fs = SuperBlock::new(&TEST_FILE_SYSTEM_TYPE, &TEST_SUPER_BLOCK_OPERATIONS, |_| {
+            root.clone()
+        });
         let mount = Mount::new_root(&fs);
         let root_location = mount.root_path();
         let target_location = Path::new(mount.clone(), target);

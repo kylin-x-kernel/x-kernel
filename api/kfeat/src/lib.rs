@@ -47,7 +47,7 @@
 #[cfg(feature = "fs_fat")]
 extern crate fat as _;
 #[cfg(feature = "fs_ext4")]
-extern crate kext4_vfs as _;
+extern crate kext4 as _;
 #[cfg(feature = "platform_kplat_aarch64")]
 extern crate kplat_aarch64 as _;
 #[cfg(feature = "platform_kplat_loongarch64")]

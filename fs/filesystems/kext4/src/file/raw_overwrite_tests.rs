@@ -13,7 +13,7 @@ use std::{
 
 use block::{BlockDeviceOperations, Device, DeviceKind, DriverError, DriverResult};
 
-use crate::{Ext4Error, Ext4Filesystem, UnsupportedKind};
+use crate::{Ext4Error, Ext4SbInfo, UnsupportedKind};
 
 const DEVICE_BLOCK_SIZE: usize = 512;
 
@@ -99,7 +99,7 @@ fn overwrites_existing_linux_file_extent() {
 
     let bytes = fs::read(&image).expect("read generated ext4 image");
     let device = Arc::new(WritableImageDevice::new(bytes));
-    let filesystem = Ext4Filesystem::mount(device.clone()).expect("mount writable test image");
+    let filesystem = Ext4SbInfo::mount(device.clone()).expect("mount writable test image");
     let root = filesystem.root_inode().expect("read root inode");
     let hello_entry = filesystem
         .lookup(&root, "hello.txt")
@@ -118,7 +118,7 @@ fn overwrites_existing_linux_file_extent() {
         5
     );
 
-    let filesystem = Ext4Filesystem::mount(device).expect("remount overwritten image");
+    let filesystem = Ext4SbInfo::mount(device).expect("remount overwritten image");
     let root = filesystem
         .root_inode()
         .expect("read root inode after overwrite");
@@ -160,7 +160,7 @@ fn overwrite_past_eof_is_noop_and_does_not_update_timestamps() {
 
     let bytes = fs::read(&image).expect("read generated ext4 image");
     let device = Arc::new(WritableImageDevice::new(bytes));
-    let filesystem = Ext4Filesystem::mount(device.clone()).expect("mount writable test image");
+    let filesystem = Ext4SbInfo::mount(device.clone()).expect("mount writable test image");
     let root = filesystem.root_inode().expect("read root inode");
     let hello_entry = filesystem
         .lookup(&root, "hello.txt")
@@ -179,7 +179,7 @@ fn overwrite_past_eof_is_noop_and_does_not_update_timestamps() {
         0
     );
 
-    let filesystem = Ext4Filesystem::mount(device).expect("remount after EOF no-op");
+    let filesystem = Ext4SbInfo::mount(device).expect("remount after EOF no-op");
     let root = filesystem
         .root_inode()
         .expect("read root inode after EOF no-op");
@@ -220,7 +220,7 @@ fn overwrite_hole_returns_unallocated_write() {
 
     let bytes = fs::read(&image).expect("read generated ext4 image");
     let filesystem =
-        Ext4Filesystem::mount(Arc::new(WritableImageDevice::new(bytes))).expect("mount image");
+        Ext4SbInfo::mount(Arc::new(WritableImageDevice::new(bytes))).expect("mount image");
     let root = filesystem.root_inode().expect("read root inode");
     let sparse_entry = filesystem
         .lookup(&root, "sparse.bin")
@@ -257,7 +257,7 @@ fn raw_overwrite_cross_hole_rejects_range_without_prefix_write() {
 
     let bytes = fs::read(&image).expect("read generated ext4 image");
     let device = Arc::new(WritableImageDevice::new(bytes));
-    let filesystem = Ext4Filesystem::mount(device.clone()).expect("mount image");
+    let filesystem = Ext4SbInfo::mount(device.clone()).expect("mount image");
     let root = filesystem.root_inode().expect("read root inode");
     let sparse_entry = filesystem
         .lookup(&root, "sparse.bin")
@@ -277,7 +277,7 @@ fn raw_overwrite_cross_hole_rejects_range_without_prefix_write() {
         Err(Ext4Error::Unsupported(UnsupportedKind::UnallocatedWrite))
     );
 
-    let filesystem = Ext4Filesystem::mount(device).expect("remount after failed raw overwrite");
+    let filesystem = Ext4SbInfo::mount(device).expect("remount after failed raw overwrite");
     let sparse_inode = filesystem
         .load_inode_private(sparse_entry.inode())
         .expect("read sparse inode after failed raw overwrite");

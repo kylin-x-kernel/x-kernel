@@ -152,6 +152,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "anon_inodefs"
+version = "0.2.0-dev"
+dependencies = [
+ "kcred",
+ "klazy",
+ "ktime",
+ "kvfs",
+ "memaddr",
+ "unittest",
+]
+
+[[package]]
 name = "anstyle"
 version = "1.0.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -390,6 +402,7 @@ dependencies = [
 name = "bpffs"
 version = "0.2.0-dev"
 dependencies = [
+ "anon_inodefs",
  "hashbrown 0.16.1",
  "kcred",
  "kerrno",
@@ -1564,6 +1577,7 @@ dependencies = [
 name = "fs_boot"
 version = "0.2.0-dev"
 dependencies = [
+ "anon_inodefs",
  "block",
  "bpffs",
  "devfs",
@@ -1577,6 +1591,7 @@ dependencies = [
  "log",
  "macros",
  "memfs",
+ "pipefs",
  "procfs",
  "v9fs",
 ]
@@ -2283,24 +2298,13 @@ version = "0.2.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "block",
- "kalloc",
- "ksync",
- "ktask",
- "ktime_types",
- "unittest",
-]
-
-[[package]]
-name = "kext4_vfs"
-version = "0.2.0-dev"
-dependencies = [
- "block",
  "iov_iter",
+ "kalloc",
  "kcred",
  "kerrno",
- "kext4",
  "klogger",
  "ksync",
+ "ktask",
  "ktime",
  "ktime_types",
  "kvfs",
@@ -2312,6 +2316,7 @@ dependencies = [
 name = "kfd"
 version = "0.2.0-dev"
 dependencies = [
+ "anon_inodefs",
  "flatten_objects",
  "kcred",
  "kerrno",
@@ -2328,6 +2333,7 @@ dependencies = [
 name = "kfd_objects"
 version = "0.2.0-dev"
 dependencies = [
+ "anon_inodefs",
  "bitflags 2.13.1",
  "hashbrown 0.16.1",
  "kcred",
@@ -2365,7 +2371,7 @@ dependencies = [
  "kbpf",
  "kdriver",
  "kexec",
- "kext4_vfs",
+ "kext4",
  "khal",
  "kipi",
  "kirq",
@@ -2543,6 +2549,7 @@ dependencies = [
 name = "knet"
 version = "0.2.0-dev"
 dependencies = [
+ "anon_inodefs",
  "async-channel",
  "async-trait",
  "bitflags 2.13.1",
@@ -2733,6 +2740,7 @@ dependencies = [
 name = "kprocess"
 version = "0.2.0-dev"
 dependencies = [
+ "anon_inodefs",
  "fs_context",
  "kaddr_layout",
  "karch",
@@ -2928,6 +2936,7 @@ dependencies = [
  "linux_sysno",
  "num_enum",
  "osvm",
+ "pipefs",
  "posix-bpf",
  "posix-fs",
  "posix-ipc",
@@ -3301,6 +3310,7 @@ dependencies = [
  "kvfs",
  "linux-raw-sys",
  "macros",
+ "memaddr",
  "slab",
  "unittest",
 ]
@@ -3664,6 +3674,20 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "pipefs"
+version = "0.2.0-dev"
+dependencies = [
+ "kcred",
+ "kerrno",
+ "klazy",
+ "kpoll",
+ "ktime",
+ "kvfs",
+ "memaddr",
+ "unittest",
+]
 
 [[package]]
 name = "pkcs1"

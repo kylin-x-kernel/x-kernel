@@ -23,7 +23,7 @@ use crate::{
         mark_superblock_empty, persist_journal_commit,
     },
     superblock::{
-        Ext4Filesystem, Ext4Recovery, Ext4RecoveryCleared, Ext4RecoveryReport, InternalJournal,
+        Ext4Recovery, Ext4RecoveryCleared, Ext4RecoveryReport, Ext4SbInfo, InternalJournal,
         JournalMarkedEmpty,
     },
     types::FilesystemBlock,
@@ -201,7 +201,7 @@ impl MountedJournal {
     }
 }
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     /// Returns whether the mounted journal can persist revoke records.
     pub(crate) fn journal_supports_revoke(&self) -> bool {
         self.journal
@@ -860,7 +860,7 @@ fn mutation_error_requires_abort(error: Ext4Error) -> bool {
 impl Ext4Recovery {
     pub(super) fn open(device: Arc<dyn BlockDeviceOperations>) -> Ext4Result<Self> {
         Ok(Self {
-            filesystem: Ext4Filesystem::open(device, true)?,
+            filesystem: Ext4SbInfo::open(device, true)?,
         })
     }
 
@@ -907,7 +907,7 @@ impl Ext4Recovery {
     }
 }
 
-impl JournalBlockMapper for Ext4Filesystem {
+impl JournalBlockMapper for Ext4SbInfo {
     fn map_journal_block(&self, block: JournalBlock) -> Ext4Result<FilesystemBlock> {
         self.journal
             .as_ref()
@@ -916,7 +916,7 @@ impl JournalBlockMapper for Ext4Filesystem {
     }
 }
 
-impl JournalBlockReader for Ext4Filesystem {
+impl JournalBlockReader for Ext4SbInfo {
     fn read_journal_block(&self, block: JournalBlock, output: &mut [u8]) -> Ext4Result<()> {
         let expected =
             usize::try_from(self.layout.block_size()).map_err(|_| Ext4Error::Overflow)?;
@@ -931,7 +931,7 @@ impl JournalBlockReader for Ext4Filesystem {
     }
 }
 
-impl JournalBlockWriter for Ext4Filesystem {
+impl JournalBlockWriter for Ext4SbInfo {
     fn write_journal_block(&self, block: JournalBlock, input: &[u8]) -> Ext4Result<()> {
         let expected =
             usize::try_from(self.layout.block_size()).map_err(|_| Ext4Error::Overflow)?;
@@ -1004,7 +1004,7 @@ impl JournalBlockWriter for Ext4Filesystem {
     }
 }
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     fn write_journal_physical_run(
         &self,
         physical: FilesystemBlock,

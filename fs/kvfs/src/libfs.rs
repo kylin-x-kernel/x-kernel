@@ -4,29 +4,81 @@
 
 //! Generic VFS helpers corresponding to `fs/libfs.c`.
 
+use alloc::{string::String, sync::Arc};
 use core::ptr;
 
 use memaddr::PAGE_SIZE_4K;
 
 use crate::{
-    AddressSpace, Dentry, GetattrQueryFlags, GetattrRequestMask, LockedDentry, Metadata,
-    MountIdmap, Path, RenameFlags, StatFs, VfsError, VfsFile, VfsInode, VfsResult, WriteEndRequest,
-    d_really_is_positive, path::MAX_NAME_LEN,
+    AddressSpace, Dentry, DentryOperations, FileSystemType, GetattrQueryFlags, GetattrRequestMask,
+    LockedDentry, MAX_LFS_FILESIZE, Metadata, MountIdmap, NodeFlags, NodePermission, NodeType,
+    Path, RenameFlags, StatFs, SuperBlock, SuperBlockOperations, Umode, VfsError, VfsFile,
+    VfsInode, VfsInodeInit, VfsResult, WriteEndRequest, d_really_is_positive, path::MAX_NAME_LEN,
 };
+
+const PSEUDO_FS_ROOT_INO: u64 = 1;
 
 /// `simple_statfs` for simple in-kernel filesystems.
 pub fn simple_statfs(fs_type: u32) -> StatFs {
     StatFs {
         fs_type,
         block_size: PAGE_SIZE_4K as u32,
-        blocks: 100,
-        blocks_free: 100,
-        blocks_available: 100,
+        blocks: 0,
+        blocks_free: 0,
+        blocks_available: 0,
         file_count: 0,
         free_file_count: 0,
         name_length: MAX_NAME_LEN as u32,
         fragment_size: 0,
     }
+}
+
+struct PseudoSuperOperations;
+
+static PSEUDO_SUPER_OPERATIONS: PseudoSuperOperations = PseudoSuperOperations;
+
+impl SuperBlockOperations for PseudoSuperOperations {
+    fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs> {
+        Ok(simple_statfs(super_block.magic()))
+    }
+}
+
+/// Creates an internal pseudo-filesystem superblock.
+///
+/// This is the object-model counterpart of Linux `init_pseudo()` followed by
+/// `pseudo_fs_fill_super()`: it installs one shared simple `s_op`, the supplied
+/// static default `s_d_op`, page-sized geometry, filesystem magic, and the
+/// standard private root inode.
+pub fn new_pseudo_super_block(
+    file_system_type: &'static FileSystemType,
+    magic: u32,
+    dentry_operations: &'static dyn DentryOperations,
+) -> Arc<SuperBlock> {
+    SuperBlock::new_with_dentry_operations(
+        file_system_type,
+        &PSEUDO_SUPER_OPERATIONS,
+        dentry_operations,
+        magic,
+        PAGE_SIZE_4K as u64,
+        MAX_LFS_FILESIZE,
+        |_| pseudo_fs_root_dentry(),
+    )
+}
+
+fn pseudo_fs_root_dentry() -> Dentry {
+    let timestamp = ktime::realtime();
+    let init = VfsInodeInit::new(
+        PSEUDO_FS_ROOT_INO,
+        0,
+        Umode::new(
+            NodeType::Directory,
+            NodePermission::OWNER_READ | NodePermission::OWNER_WRITE,
+        ),
+    )
+    .with_owner_links_and_rdev(0, 0, 1, Default::default())
+    .with_stat_data(PAGE_SIZE_4K as u64, 0, timestamp, timestamp, timestamp);
+    let inode = VfsInode::new_dir_with_defaults(NodeFlags::PRIVATE, init);
+    Dentry::new_dir_from_inode(inode, None, String::new())
 }
 
 /// `simple_empty`: report whether a directory has positive children.

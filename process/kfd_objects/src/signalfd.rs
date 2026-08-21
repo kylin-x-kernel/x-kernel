@@ -7,6 +7,7 @@
 use alloc::sync::Arc;
 use core::mem;
 
+use anon_inodefs::AnonInodeFs;
 use bitflags::bitflags;
 use kcred::Cred;
 use kerrno::{KError, KResult};
@@ -18,7 +19,7 @@ use ktask::{
     current,
     future::{block_on, poll_io},
 };
-use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
+use kvfs::{FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
 use zerocopy::{Immutable, IntoBytes};
 

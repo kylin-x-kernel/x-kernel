@@ -5,8 +5,8 @@
 use alloc::vec::Vec;
 
 use crate::{
-    ChecksumTarget, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Result, FilesystemBlock,
-    PhysicalBlock, UnsupportedKind,
+    ChecksumTarget, CorruptKind, Ext4Error, Ext4Result, Ext4SbInfo, FilesystemBlock, PhysicalBlock,
+    UnsupportedKind,
     disk::{checksum, codec, inode as disk_inode, xattr as disk_xattr},
     inode::{Ext4Inode, Ext4InodeMetadata, Ext4Timestamp, update_inode_ctime_bytes},
     jbd2::{JournalCredits, JournalHandle},
@@ -153,7 +153,7 @@ impl<'a> Ext4XattrNameRef<'a> {
 /// Receives borrowed xattr names while KExt4 walks inode metadata.
 ///
 /// Implementations must consume each borrowed name before `emit` returns.
-/// Disk-format and I/O failures are reported by [`Ext4Filesystem::list_xattrs`].
+/// Disk-format and I/O failures are reported by [`Ext4SbInfo::list_xattrs`].
 pub trait Ext4XattrNameSink {
     /// Consumes one xattr name without taking ownership of its bytes.
     ///
@@ -253,7 +253,7 @@ struct ExtraIsizeLayoutCandidate {
     inline_capacity: usize,
 }
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     /// Reads all supported extended attributes stored on an inode.
     pub fn read_xattrs(&self, inode: &Ext4Inode) -> Ext4Result<Vec<Ext4Xattr>> {
         let mut xattrs = Vec::new();
@@ -296,6 +296,7 @@ impl Ext4Filesystem {
     /// namespaces, plus opaque POSIX ACL xattr storage. The updated xattr set
     /// may be split between the inode body and one external xattr block, with
     /// refcount and checksum maintenance for the external part.
+    #[cfg(test)]
     pub fn set_xattr(
         &mut self,
         inode: &Ext4Inode,

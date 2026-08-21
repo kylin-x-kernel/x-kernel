@@ -10,11 +10,12 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use anon_inodefs::AnonInodeFs;
 use kcred::Cred;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ktask::future::{block_on, poll_io};
-use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile};
+use kvfs::{FMode, FileOperations, OpenFlags, VfsFile};
 
 /// Kernel object implementing eventfd semantics.
 pub struct EventFd {

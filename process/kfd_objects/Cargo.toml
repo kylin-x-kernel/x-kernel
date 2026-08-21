@@ -10,6 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
+anon_inodefs.workspace = true
 bitflags.workspace = true
 hashbrown.workspace = true
 kerrno.workspace = true

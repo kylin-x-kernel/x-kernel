@@ -13,7 +13,7 @@ use core::{
     any::Any,
     fmt,
     hash::{Hash, Hasher},
-    sync::atomic::{AtomicU16, AtomicUsize, Ordering},
+    sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering},
 };
 
 use bitflags::bitflags;
@@ -42,6 +42,23 @@ use crate::{
 const IOP_CACHED_LINK: u16 = 0x0040;
 const INODE_BYTES_PER_BLOCK: u64 = 512;
 static INODE_CACHE: Lazy<InodeCache> = Lazy::new(InodeCache::new);
+static LAST_INODE_NUMBER: AtomicU64 = AtomicU64::new(1);
+
+/// Allocates a non-zero inode number for pseudo filesystems.
+///
+/// This is the VFS counterpart of Linux `get_next_ino()`. Inode numbers only
+/// need to remain unique among simultaneously live pseudo inodes; wraparound
+/// therefore skips the reserved zero value.
+pub fn get_next_ino() -> u64 {
+    loop {
+        let inode = LAST_INODE_NUMBER
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        if inode != 0 {
+            return inode;
+        }
+    }
+}
 
 /// Timestamp operation requested by an automatic VFS time update.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -416,6 +433,9 @@ struct EmptyInodeOperations;
 
 impl InodeOperations for EmptyInodeOperations {}
 
+static EMPTY_INODE_OPERATIONS: Lazy<Arc<EmptyInodeOperations>> =
+    Lazy::new(|| Arc::new(EmptyInodeOperations));
+
 #[derive(Clone, Copy, Debug)]
 struct InodeTimestamp {
     sec: i64,
@@ -579,7 +599,7 @@ impl InodeIdentity {
 /// Linux `struct inode` in a filesystem-private inode structure.
 pub trait InodeAttributeOperations: Send + Sync {
     /// Builds a snapshot using the inode number owned by the VFS identity.
-    fn fill_metadata(&self, inode_number: u64) -> Metadata;
+    fn fill_metadata(&self, inode_number: u64, block_size: u64) -> Metadata;
 
     /// Returns the inode mode without requiring a full metadata snapshot.
     fn mode(&self) -> Umode;
@@ -598,9 +618,6 @@ pub trait InodeAttributeOperations: Send + Sync {
 
     /// Returns the visible inode size without requiring a full metadata snapshot.
     fn size(&self) -> u64;
-
-    /// Returns the preferred I/O block size.
-    fn block_size(&self) -> u64;
 
     /// Returns the allocated 512-byte block count.
     fn blocks(&self) -> u64;
@@ -651,7 +668,6 @@ struct OwnedInodeAttributes {
     size: Mutex<u64>,
     times: Mutex<InodeTimes>,
     block_accounting: Mutex<InodeBlockAccounting>,
-    block_bits: u8,
 }
 
 impl OwnedInodeAttributes {
@@ -669,7 +685,6 @@ impl OwnedInodeAttributes {
                 init.changed_at,
             )),
             block_accounting: Mutex::new(InodeBlockAccounting::new(init.blocks, init.block_bytes)),
-            block_bits: init.block_bits,
         }
     }
 
@@ -740,10 +755,6 @@ impl OwnedInodeAttributes {
         times.changed_at = InodeTimestamp::from_system_time(value);
     }
 
-    fn block_bits(&self) -> u8 {
-        self.block_bits
-    }
-
     fn blocks(&self) -> u64 {
         self.block_accounting.lock().blocks
     }
@@ -772,7 +783,7 @@ impl OwnedInodeAttributes {
         accounting.set_allocated_bytes(allocated);
     }
 
-    fn fill_metadata(&self, inode_number: u64) -> Metadata {
+    fn fill_metadata(&self, inode_number: u64, block_size: u64) -> Metadata {
         let (uid, gid) = self.owner();
         let times = *self.times.lock();
         Metadata {
@@ -783,7 +794,7 @@ impl OwnedInodeAttributes {
             uid,
             gid,
             size: self.size(),
-            block_size: 1_u64 << self.block_bits(),
+            block_size,
             blocks: self.blocks(),
             rdev: self.rdev(),
             atime: times.accessed_at.as_system_time(),
@@ -794,8 +805,8 @@ impl OwnedInodeAttributes {
 }
 
 impl InodeAttributeOperations for OwnedInodeAttributes {
-    fn fill_metadata(&self, inode_number: u64) -> Metadata {
-        OwnedInodeAttributes::fill_metadata(self, inode_number)
+    fn fill_metadata(&self, inode_number: u64, block_size: u64) -> Metadata {
+        OwnedInodeAttributes::fill_metadata(self, inode_number, block_size)
     }
 
     fn mode(&self) -> Umode {
@@ -820,10 +831,6 @@ impl InodeAttributeOperations for OwnedInodeAttributes {
 
     fn size(&self) -> u64 {
         OwnedInodeAttributes::size(self)
-    }
-
-    fn block_size(&self) -> u64 {
-        1_u64 << OwnedInodeAttributes::block_bits(self)
     }
 
     fn blocks(&self) -> u64 {
@@ -883,23 +890,34 @@ struct InodeAttributes {
     operations: Arc<dyn InodeAttributeOperations>,
     operation_flags: AtomicU16,
     flags: NodeFlags,
+    block_bits: u8,
 }
 
 impl InodeAttributes {
     fn new(init: VfsInodeInit, flags: NodeFlags) -> Self {
-        Self::from_operations(Arc::new(OwnedInodeAttributes::new(init)), flags)
+        Self::from_operations(
+            Arc::new(OwnedInodeAttributes::new(init)),
+            flags,
+            init.block_bits,
+        )
     }
 
-    fn from_operations(operations: Arc<dyn InodeAttributeOperations>, flags: NodeFlags) -> Self {
+    fn from_operations(
+        operations: Arc<dyn InodeAttributeOperations>,
+        flags: NodeFlags,
+        block_bits: u8,
+    ) -> Self {
         Self {
             operations,
             operation_flags: AtomicU16::new(0),
             flags,
+            block_bits,
         }
     }
 
     fn metadata(&self, inode_number: u64) -> Metadata {
-        self.operations.fill_metadata(inode_number)
+        self.operations
+            .fill_metadata(inode_number, 1_u64 << self.block_bits)
     }
 
     fn mode(&self) -> Umode {
@@ -983,7 +1001,7 @@ impl InodeAttributes {
     }
 
     fn block_bits(&self) -> u8 {
-        inode_blkbits(self.operations.block_size())
+        self.block_bits
     }
 
     fn allocated_bytes(&self) -> u64 {
@@ -1085,8 +1103,9 @@ fn no_open_file_operations() -> Arc<dyn FileOperations> {
     Arc::new(NoOpenFileOperations)
 }
 
-fn empty_inode_operations() -> Arc<dyn InodeOperations> {
-    Arc::new(EmptyInodeOperations)
+/// Returns the shared no-op inode operation table.
+pub fn empty_inode_operations() -> Arc<dyn InodeOperations> {
+    EMPTY_INODE_OPERATIONS.clone()
 }
 
 fn init_special_inode(
@@ -1215,7 +1234,7 @@ struct InodeParts {
     inode_operations: Arc<dyn InodeOperations>,
     file_operations: Option<Arc<dyn FileOperations>>,
     flags: NodeFlags,
-    address_space_operations: Arc<dyn AddressSpaceOperations>,
+    address_space_operations: &'static dyn AddressSpaceOperations,
     init: VfsInodeInit,
 }
 
@@ -1228,16 +1247,11 @@ impl VfsInode {
     pub fn new_with_inode_attribute_operations<T>(
         node: Arc<T>,
         flags: NodeFlags,
+        address_space_operations: &'static dyn AddressSpaceOperations,
         mut init: VfsInodeInit,
     ) -> Arc<Self>
     where
-        T: Any
-            + Send
-            + Sync
-            + InodeOperations
-            + FileOperations
-            + AddressSpaceOperations
-            + InodeAttributeOperations,
+        T: Any + Send + Sync + InodeOperations + FileOperations + InodeAttributeOperations,
     {
         let node_type = init.node_type();
         let private_data: Arc<dyn Any + Send + Sync> = node.clone();
@@ -1250,13 +1264,9 @@ impl VfsInode {
             }
             NodeType::RegularFile | NodeType::Unknown => {
                 let file_operations: Arc<dyn FileOperations> = node.clone();
-                let address_space_operations: Arc<dyn AddressSpaceOperations> = node.clone();
                 (Some(file_operations), address_space_operations)
             }
-            NodeType::Symlink => {
-                let address_space_operations: Arc<dyn AddressSpaceOperations> = node.clone();
-                (None, address_space_operations)
-            }
+            NodeType::Symlink => (None, address_space_operations),
             NodeType::CharacterDevice
             | NodeType::BlockDevice
             | NodeType::Fifo
@@ -1308,14 +1318,17 @@ impl VfsInode {
     }
 
     /// Construct a file inode whose address space is implemented by `node`.
-    pub fn new_file_with_address_space<T>(node: Arc<T>, init: VfsInodeInit) -> Arc<Self>
+    pub fn new_file_with_address_space<T>(
+        node: Arc<T>,
+        address_space_operations: &'static dyn AddressSpaceOperations,
+        init: VfsInodeInit,
+    ) -> Arc<Self>
     where
-        T: Any + Send + Sync + InodeOperations + FileOperations + AddressSpaceOperations,
+        T: Any + Send + Sync + InodeOperations + FileOperations,
     {
         let private_data: Arc<dyn Any + Send + Sync> = node.clone();
         let inode_operations: Arc<dyn InodeOperations> = node.clone();
         let file_operations: Arc<dyn FileOperations> = node.clone();
-        let address_space_operations: Arc<dyn AddressSpaceOperations> = node;
         Self::new_file_with_address_space_operations(
             private_data,
             inode_operations,
@@ -1330,15 +1343,15 @@ impl VfsInode {
     pub fn new_file_with_address_space_and_flags<T>(
         node: Arc<T>,
         flags: NodeFlags,
+        address_space_operations: &'static dyn AddressSpaceOperations,
         init: VfsInodeInit,
     ) -> Arc<Self>
     where
-        T: Any + Send + Sync + InodeOperations + FileOperations + AddressSpaceOperations,
+        T: Any + Send + Sync + InodeOperations + FileOperations,
     {
         let private_data: Arc<dyn Any + Send + Sync> = node.clone();
         let inode_operations: Arc<dyn InodeOperations> = node.clone();
         let file_operations: Arc<dyn FileOperations> = node.clone();
-        let address_space_operations: Arc<dyn AddressSpaceOperations> = node;
         Self::new_file_with_address_space_operations(
             private_data,
             inode_operations,
@@ -1353,15 +1366,15 @@ impl VfsInode {
     pub fn new_symlink_with_address_space_and_flags<T>(
         node: Arc<T>,
         flags: NodeFlags,
+        address_space_operations: &'static dyn AddressSpaceOperations,
         init: VfsInodeInit,
     ) -> Arc<Self>
     where
-        T: Any + Send + Sync + InodeOperations + AddressSpaceOperations,
+        T: Any + Send + Sync + InodeOperations,
     {
         debug_assert_eq!(init.mode.node_type(), NodeType::Symlink);
         let private_data: Arc<dyn Any + Send + Sync> = node.clone();
         let inode_operations: Arc<dyn InodeOperations> = node.clone();
-        let address_space_operations: Arc<dyn AddressSpaceOperations> = node;
         Self::new_file_with_address_space_operations(
             private_data,
             inode_operations,
@@ -1434,7 +1447,7 @@ impl VfsInode {
     }
 
     /// Construct a non-directory inode with no-open file operations.
-    pub(crate) fn new_file_with_inode_operations(
+    pub fn new_file_with_inode_operations(
         private_data: Arc<dyn Any + Send + Sync>,
         inode_operations: Arc<dyn InodeOperations>,
         flags: NodeFlags,
@@ -1487,7 +1500,7 @@ impl VfsInode {
         inode_operations: Arc<dyn InodeOperations>,
         file_operations: Option<Arc<dyn FileOperations>>,
         flags: NodeFlags,
-        ops: Arc<dyn crate::AddressSpaceOperations>,
+        ops: &'static dyn crate::AddressSpaceOperations,
         init: VfsInodeInit,
     ) -> Arc<Self> {
         let node_type = init.mode.node_type();
@@ -1512,7 +1525,7 @@ impl VfsInode {
         parts: InodeParts,
         operations: Arc<dyn InodeAttributeOperations>,
     ) -> Arc<Self> {
-        let metadata = operations.fill_metadata(parts.init.number);
+        let metadata = operations.fill_metadata(parts.init.number, 1_u64 << parts.init.block_bits);
         assert_eq!(
             metadata.inode, parts.init.number,
             "inode attribute operations must describe the constructed inode"
@@ -1522,7 +1535,8 @@ impl VfsInode {
             parts.init.node_type(),
             "inode attribute operations must preserve the constructed inode type"
         );
-        let attributes = InodeAttributes::from_operations(operations, parts.flags);
+        let attributes =
+            InodeAttributes::from_operations(operations, parts.flags, parts.init.block_bits);
         Self::from_parts_with_attributes(parts, attributes)
     }
 
@@ -2103,6 +2117,23 @@ impl VfsInode {
             .map_err(|_| VfsError::InvalidInput)
     }
 
+    /// Borrows the filesystem-private inode component.
+    ///
+    /// The returned reference is tied to this VFS inode, matching Linux's
+    /// container-based lookup from `address_space::host` to the owning
+    /// filesystem inode object without creating another owning reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidInput`] if the filesystem-private inode
+    /// component is not of type `T`.
+    pub fn private<T: Any + Send + Sync>(&self) -> VfsResult<&T> {
+        self.private_data
+            .as_ref()
+            .downcast_ref::<T>()
+            .ok_or(VfsError::InvalidInput)
+    }
+
     /// Returns the live superblock that owns this inode identity.
     ///
     /// # Errors
@@ -2602,9 +2633,10 @@ mod tests {
     impl AddressSpaceOperations for TestChrdevInode {}
 
     impl InodeAttributeOperations for TestChrdevInode {
-        fn fill_metadata(&self, inode_number: u64) -> Metadata {
+        fn fill_metadata(&self, inode_number: u64, block_size: u64) -> Metadata {
             let mut metadata = self.metadata.lock().clone();
             metadata.inode = inode_number;
+            metadata.block_size = block_size;
             metadata
         }
 
@@ -2631,10 +2663,6 @@ mod tests {
 
         fn size(&self) -> u64 {
             self.metadata.lock().size
-        }
-
-        fn block_size(&self) -> u64 {
-            self.metadata.lock().block_size
         }
 
         fn blocks(&self) -> u64 {
@@ -2733,6 +2761,7 @@ mod tests {
         let inode = VfsInode::new_with_inode_attribute_operations(
             node.clone(),
             NodeFlags::NON_CACHEABLE,
+            empty_address_space_operations(),
             init,
         );
 

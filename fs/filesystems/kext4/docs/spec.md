@@ -63,11 +63,11 @@ confidence 和 method limits。对比使用固定的 KExt4 历史基线，不保
 ## 不可破坏的 ownership 边界
 
 - `fs/filesystems/kext4` 拥有 ext4 磁盘格式、校验、JBD2、metadata buffer、extent、allocator、
-  orphan、xattr 和持久化不变量；core 不依赖 KVFS 对象。
+  orphan、xattr、持久化不变量和直接 KVFS operation 实现；磁盘算法不保存 KVFS 对象回指。
 - KVFS 拥有 dentry、inode identity、open file、AddressSpace（含私有 `PageCache` folio
   storage）、mmap view 和 mount tree 生命周期。
-- `fs/bridges/kext4_vfs` 只做语义适配、对象绑定、缓存属性同步和错误转换；bridge 不建立
-  第二套 dentry cache、普通文件数据 cache 或 journal coordinator。
+- `kext4::vfs` 只做语义转换、对象绑定和错误映射，不建立第二套 dentry cache、普通文件数据
+  cache、resident inode wrapper 或 journal coordinator。
 - 普通文件数据只通过 inode-owned AddressSpace/PageCache；ext4 元数据只通过 KExt4
   metadata buffer 和 JBD2 transaction 修改。
 - KExt4 是 ext4 行为和接口的唯一实现，不保留旧后端兼容路径。
@@ -112,7 +112,7 @@ confidence 和 method limits。对比使用固定的 KExt4 历史基线，不保
 
 | 瓶颈 | 当前实现 | 为什么必须先改 |
 | --- | --- | --- |
-| mount-wide 串行化 | bridge 用一个 `Mutex<kext4::Ext4Filesystem>` 包住所有 core 调用 | journal、allocator、不同 inode 和只读路径无法并行 |
+| mount-wide metadata 串行化 | 唯一 `Ext4SbInfo` 作为 `s_fs_info` 置于 `RwLock` 中；delalloc aggregate 已有独立 reservation mutex | journal、allocator 和不同 inode 的 metadata mutation 仍无法完全并行；只读与 reservation 路径可共享进入 |
 | commit batching 仍为同步驱动 | 普通 mutation 可共享 mount-wide running transaction；真实 outstanding credits、日志空间和显式 sync 可触发 commit | 尚无基于时间的 age trigger 和后台 commit worker，低负载 transaction 仍依赖后续操作或显式 sync 推进 |
 | checkpoint 仍由调用者驱动 | mutation 返回后可保留 pending checkpoint，`syncfs`/unmount 或 journal-space pressure 同步推进 | 没有后台 writeback/checkpoint，home-block 脏状态和尾部回收仍会阻塞触发者 |
 | journal 提交仍受同步 block API 限制 | N2.1 已把连续 journal blocks 聚合为不超过 128 KiB 的请求，并复用 journal-superblock image、去除 commit 后的重复 flush | 请求数量已降低，但每个 batch 仍在调用栈中同步完成；没有多请求 in-flight、后台 commit/checkpoint 或驱动 completion |
@@ -133,14 +133,19 @@ POSIX / KVFS
     +-- inode-owned AddressSpace / private PageCache folio storage / mmap views
                          |
                          v
-                  kext4_vfs::Inode
+                  kext4::Ext4Inode
                   - inode number
                   - sync/datasync transaction ids
                   - delalloc / unwritten / written range state
                   - VFS attribute synchronization
                          |
                          v
-                Ext4Filesystem (mount state)
+                Ext4AddressSpaceOperations (static a_ops)
+                         |
+                         v
+                Ext4SuperOperations (static s_op)
+                         |
+                RwLock<Ext4SbInfo> (sole s_fs_info)
                 +-- validated geometry/features and device
                 +-- metadata buffer cache
                 +-- group descriptors / allocator state
@@ -159,9 +164,9 @@ POSIX / KVFS
 
 | Linux 对象/机制 | KExt4 目标所有者 |
 | --- | --- |
-| `super_block` / `ext4_sb_info` | KVFS `SuperBlock` + KExt4 `Ext4Filesystem` mount state；不为字段分组机械拆 service |
-| `ext4_inode_info` | bridge/core per-inode state；`i_size/i_disksize`、sync tids、delalloc/PA/extent-status |
-| `address_space` | KVFS `AddressSpace` 唯一拥有 identity/views；`PageCache` 是其私有 folio storage，KExt4 提供 address-space operations |
+| `super_block` / `ext4_sb_info` | KVFS `SuperBlock` + KExt4 `Ext4SbInfo` mount-private owner；通用 block size/maxbytes 留在 KVFS |
+| `ext4_inode_info` | 唯一 `Ext4Inode` private component；`i_size/i_disksize`、sync tids、delalloc/PA/extent-status |
+| `address_space` | KVFS `AddressSpace` 唯一拥有 identity/views/host；`PageCache` 是其私有 folio storage，KExt4 提供所有 inode 共享的静态 aops，并只从 host 借用 `Ext4Inode` |
 | `jbd2_journal` | mount-wide `MountedJournal`；聚合磁盘 journal、transaction engine 和 checkpoint queue |
 | running/committing/checkpoint transaction | `MountedJournal`、checkpoint queue 和 metadata buffer 共同维护明确 ownership |
 | extent status tree | per-inode logical-range cache，不替代磁盘 extent tree |
@@ -227,7 +232,7 @@ N5 advanced I/O / common features -> N6 replacement
 
 实现项：
 
-- `Ext4Filesystem` 作为类似 Linux `ext4_sb_info` 的 mount 总状态，持有 geometry/device、
+- `Ext4SbInfo` 作为类似 Linux `ext4_sb_info` 的 mount 总状态，持有 geometry/device、
   metadata cache、group/allocator state 和各类 ext4 operation；不按字段类别机械拆 service；
 - `MountedJournal` 作为类似 JBD2 `journal_t` 的 mount-lifetime journal 边界，同时持有磁盘
   journal 映射/superblock、唯一 transaction engine 和 pending checkpoint queue；
@@ -249,7 +254,7 @@ N5 advanced I/O / common features -> N6 replacement
   `MountedJournal`；commit/checkpoint API 只能通过该 mount-owned identity 进入，pending queue
   只保存同一个 runtime transaction；持久化证据属于其 Checkpoint phase，不再复制 transaction
   payload、创建持有 `Arc` 的 checkpoint wrapper 或保存反向 journal 引用；
-  allocator、metadata 和 device 继续由 `Ext4Filesystem` mount state 持有；
+  allocator、metadata 和 device 继续由 `Ext4SbInfo` mount state 持有；
 - allocator、extent、truncate/orphan、namei、xattr、inode metadata 和 ordered writeback
   已把预期失败前移到首次 metadata access 之前：先完成格式/存在性/容量/credits/extent path
   校验与资源预算，再进入 transaction 内的 byte publication；
@@ -291,7 +296,7 @@ N5 advanced I/O / common features -> N6 replacement
   head 在 inode-table decode 前被识别；成功加载后还会拒绝不可截断的 linked kind 和非法
   `i_dtime` next。这些 bad-orphan 通过同策略的独立 journal transaction 持久化清零后终止该链，
   bitmap I/O/checksum、inode decode 和合法但未支持的 cleanup 不会被降级；
-- journal 不再保存 inode-number keyed sync/datasync cursor；bridge `fsync/fdatasync` 先完成
+- journal 不再保存 inode-number keyed sync/datasync cursor；kext4 `fsync/fdatasync` 先完成
   目标 inode PageCache writeback，再保守提交整个 running transaction 并 flush。精准 target
   transaction 等待需由 runtime inode 保存 tid，并在 mutation 完成后发布；
 - unit test 和真实 Linux ext4 镜像测试覆盖修改前预期错误、修改后 invariant abort、credit
@@ -317,7 +322,7 @@ N5 advanced I/O / common features -> N6 replacement
 - 显式 filesystem sync 能同步驱动所有 pending state 到稳定存储；
 - 最小 sentinel 覆盖未提交 transaction 不 replay、已提交 transaction 可 replay、ordered
   data 先于相关 metadata commit；
-- 代码和文档明确：`Ext4Filesystem` 拥有 device、geometry、metadata buffer 和 allocator；
+- 代码和文档明确：`Ext4SbInfo` 拥有 device、geometry、metadata buffer 和 allocator；
   `MountedJournal` 拥有 journal sequence、transaction engine 和 checkpoint queue。
 
 ### N1.5：收口 metadata mutation 失败语义
@@ -394,7 +399,7 @@ normal-path buffered fio 可用，而不是先追求所有故障边界。
 - **N2.3：建立 ordered writeback 与 range ownership**：per-inode logical-range state 表达
   hole/delayed/unwritten/written、dirty 和 writeback；reservation/allocator accounting 使用
   range ownership，writeback batch 关联 ordered-data dependency 和目标 transaction；
-- **N2.4：按执行者拆锁**：去除 bridge 的 mount-wide core mutex，建立 per-inode、journal、
+- **N2.4：按执行者拆锁**：去除 mount-wide ext4 state lock，建立 per-inode、journal、
   metadata-buffer 和 per-group allocator 锁域；不为尚未存在的 worker 预拆字段 service；
 - 在已有 path-local find/insert/split 基础上补齐跨叶 remove/truncate，消除重复 lookup 与剩余
   全树回退；allocator 建立稳定的 group/buddy/preallocation ownership；
@@ -505,14 +510,14 @@ G3 退出条件：
 2. **Buffered prepare cancellation**：`write_begin()` 成功后所有退出路径与一次
    `write_end()` 配对；PageCache grow/copy 失败使用 `copied == 0`。
 3. **Runtime inode journal cursor**：KVFS runtime inode 提供 `sync_tid`/`datasync_tid`
-   存储、更新和 eviction/reuse 清理接口；KExt4 bridge 只在 core mutation 成功后发布 tid，
+   存储、更新和 eviction/reuse 清理接口；KExt4 只在 ext4 mutation 成功后发布 tid，
    不以 inode number 为 key 在 mount journal 中复制 cursor 所有权。
 4. **Writeback errseq**：mapping error 向 filesystem-wide error 聚合；open file 分别采样
    file/superblock cursor；`fsync/syncfs` 按 Linux 语义检查并推进。
 5. **Filesystem lifecycle**：unmount/freeze 能 gate 新引用/写入，drain VFS-owned data 和
    filesystem hook，只有成功后才 detach/标记 frozen，失败可以恢复 active state。
 
-KExt4 bridge 只消费这些通用接口，不为 KExt4 建立私有 VFS/PageCache 旁路，也不保留
+KExt4 只消费这些通用接口，不建立私有 VFS/PageCache 旁路，也不保留
 旧后端兼容路径。
 
 ## 交给 block/VirtIO 负责人的外部依赖

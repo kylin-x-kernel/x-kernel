@@ -260,23 +260,12 @@ impl SeqIterator for ProcMountIter {
 mod tests {
     use alloc::{string::ToString, sync::Arc};
 
-    use kvfs::{
-        DirMapping, FileSystemType, FsContext, Mount, MountFlags, Path, SimpleDir, SimpleFs,
-        SuperBlock, VfsResult,
-    };
+    use kvfs::{DirMapping, Mount, MountFlags, SimpleDir, SimpleFs};
     use unittest::{assert_eq, def_test};
 
     use super::ProcMountEntry;
 
-    fn test_get_tree(
-        _context: &FsContext<'_>,
-        _lookup_root: &Path,
-        _lookup_pwd: &Path,
-    ) -> VfsResult<Arc<SuperBlock>> {
-        unreachable!("the procfs test type does not provide a mount entry")
-    }
-
-    static TEST_FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("test", test_get_tree);
+    static TEST_FILE_SYSTEM_TYPE: kvfs::FileSystemType = kvfs::FileSystemType::internal("test");
 
     #[def_test]
     fn test_format_mount_options_defaults_to_rw() {

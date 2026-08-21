@@ -39,8 +39,9 @@ block subsystem 已就绪的可阻塞任务上下文运行，不能从 IRQ conte
 1. `FileSystemType::get_tree` 调用 KVFS `get_tree_bdev` 取得 canonical `BlockDevice`，并由
    VFS registry 按 `(s_type, dev_t)` 查找或 reservation；已有实例不再调用 FAT。
 2. VFS 分配带有 `s_type/s_bdev/s_flags` 的 nascent `SuperBlock` 后才调用 `fill_super`；FAT
-   从该对象取得设备并由 `SeekableDisk` 解析格式，只安装私有 operations 与 root，不接收或
-   复制 identity 参数；格式或 I/O 错误作为 `VfsResult` 返回，不 panic。
+   从该对象取得设备并由 `SeekableDisk` 解析格式，安装所有 FAT 挂载共享的静态 `s_op`、
+   唯一 mount-private state 与 root，不接收或复制 identity 参数；格式或 I/O 错误作为
+   `VfsResult` 返回，不 panic。
 3. mount state 固定地址并由 mutex 串行化 FAT handle 操作。
 4. 建立 KVFS `SuperBlock`、root inode 和 root dentry 后才向调用方返回可挂载对象。
 

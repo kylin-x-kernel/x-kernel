@@ -182,23 +182,12 @@ mod tests_nsproxy {
 
     use fs_context::FsStruct;
     use kcred::initial_user_namespace;
-    use kvfs::{
-        DirMapping, FileSystemType, FsContext, MntNamespace, Path, SimpleDir, SimpleFs, SuperBlock,
-        VfsResult,
-    };
+    use kvfs::{DirMapping, MntNamespace, SimpleDir, SimpleFs};
     use unittest::def_test;
 
     use super::*;
 
-    fn test_get_tree(
-        _context: &FsContext<'_>,
-        _lookup_root: &Path,
-        _lookup_pwd: &Path,
-    ) -> VfsResult<Arc<SuperBlock>> {
-        unreachable!("the namespace test type does not provide a mount entry")
-    }
-
-    static TEST_FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("kns-test", test_get_tree);
+    static TEST_FILE_SYSTEM_TYPE: kvfs::FileSystemType = kvfs::FileSystemType::internal("kns-test");
 
     fn make_mnt_namespace() -> Arc<MntNamespace> {
         let root_fs = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {

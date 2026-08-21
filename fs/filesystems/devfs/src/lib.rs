@@ -22,8 +22,8 @@ pub use device_file::DeviceFile;
 pub(crate) use device_file::{add_device_entry, device_dentry};
 use klazy::Once;
 use kvfs::{
-    FileSystemType, FsContext, Mount, SimpleFs, SuperBlock, SuperBlockFlags, VfsResult,
-    get_tree_nodev,
+    FileSystemType, FsContext, FsContextOperations, Mount, SimpleFs, SuperBlock, SuperBlockFlags,
+    VfsResult, get_tree_nodev,
 };
 pub use nodes::pts::Ptmx;
 
@@ -31,7 +31,7 @@ const DEVFS_MAGIC: u32 = 0x0102_1994;
 static DEVFS: Once<(Arc<SuperBlock>, Arc<Mount>)> = Once::new();
 
 fn get_tree(
-    context: &FsContext<'_>,
+    context: &mut FsContext<'_>,
     _lookup_root: &kvfs::Path,
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
@@ -40,8 +40,15 @@ fn get_tree(
     })
 }
 
+static FS_CONTEXT_OPERATIONS: FsContextOperations = FsContextOperations::new(get_tree);
+
+fn init_fs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
+    context.set_operations(&FS_CONTEXT_OPERATIONS);
+    Ok(())
+}
+
 /// Registered devtmpfs filesystem type.
-pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("devtmpfs", get_tree);
+pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("devtmpfs", init_fs_context);
 
 #[macros::register_init]
 fn init_devfs_fs() {

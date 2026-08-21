@@ -69,12 +69,7 @@ impl DerefMut for FatFilesystemGuard<'_> {
 }
 
 impl FatFilesystem {
-    /// Fills a newly reserved FAT superblock from a validated block device.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the FAT boot sector or filesystem metadata cannot
-    /// initialize a filesystem instance.
+    /// Fills a newly reserved FAT superblock from its canonical block device.
     pub(crate) fn fill_super(super_block: &Arc<SuperBlock>) -> VfsResult<()> {
         let dev = super_block
             .block_device()
@@ -92,39 +87,44 @@ impl FatFilesystem {
             inner: Mutex::new(inner),
         });
 
-        match super_block.initialize(result.clone(), move |super_block| {
-            let root_node = {
-                let fs = result.lock();
-                let root = fs.inner.root_dir();
-                FatDirInode::new(result.clone(), result.as_ref(), root, root_inode_number)
-            };
-            let root_inode = super_block.get_or_init_inode(root_inode_number, || {
-                VfsInode::new_openable_dir(
-                    root_node,
-                    VfsInodeInit::new(
-                        root_inode_number,
-                        root_block_size,
-                        kvfs::Umode::new(NodeType::Directory, NodePermission::default()),
-                    )
-                    .with_owner_links_and_rdev(0, 0, 1, Default::default())
-                    .with_stat_data(
-                        root_block_size,
-                        1,
-                        Default::default(),
-                        Default::default(),
-                        Default::default(),
-                    ),
-                )
-            });
-            Ok::<_, core::convert::Infallible>(Dentry::new_dir_from_inode(
-                root_inode,
-                None,
-                String::new(),
-            ))
-        }) {
-            Ok(()) => Ok(()),
-            Err(error) => match error {},
-        }
+        super_block
+            .initialize_with_private(
+                &FAT_SUPER_OPERATIONS,
+                result.clone(),
+                root_block_size,
+                kvfs::MAX_LFS_FILESIZE,
+                move |super_block| {
+                    let root_node = {
+                        let fs = result.lock();
+                        let root = fs.inner.root_dir();
+                        FatDirInode::new(result.clone(), result.as_ref(), root, root_inode_number)
+                    };
+                    let root_inode = super_block.get_or_init_inode(root_inode_number, || {
+                        VfsInode::new_openable_dir(
+                            root_node,
+                            VfsInodeInit::new(
+                                root_inode_number,
+                                root_block_size,
+                                kvfs::Umode::new(NodeType::Directory, NodePermission::default()),
+                            )
+                            .with_owner_links_and_rdev(0, 0, 1, Default::default())
+                            .with_stat_data(
+                                root_block_size,
+                                1,
+                                Default::default(),
+                                Default::default(),
+                                Default::default(),
+                            ),
+                        )
+                    });
+                    Ok::<_, core::convert::Infallible>(Dentry::new_dir_from_inode(
+                        root_inode,
+                        None,
+                        String::new(),
+                    ))
+                },
+            )
+            .map_err(|error| match error {})
     }
 }
 
@@ -137,9 +137,13 @@ impl FatFilesystem {
     }
 }
 
-impl SuperBlockOperations for FatFilesystem {
-    fn statfs(&self) -> VfsResult<StatFs> {
-        let fs = self.inner.lock();
+struct FatSuperOperations;
+
+static FAT_SUPER_OPERATIONS: FatSuperOperations = FatSuperOperations;
+
+impl SuperBlockOperations for FatSuperOperations {
+    fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs> {
+        let fs = super_block.private::<Arc<FatFilesystem>>()?.inner.lock();
         let stats = fs.inner.stats().map_err(into_vfs_err)?;
         Ok(StatFs {
             fs_type: 0x65735546, // fuse

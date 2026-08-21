@@ -9,12 +9,13 @@ use super::{
     validate::{decode_header, find_index, map_leaf, min_lblk, validate_extent_entries},
 };
 use crate::{
-    BlockCount, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Result, FilesystemBlock, LogicalBlock,
+    BlockCount, CorruptKind, Ext4Error, Ext4Result, Ext4SbInfo, FilesystemBlock, LogicalBlock,
     inode::Ext4Inode,
 };
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     /// Returns the Linux-compatible maximum byte size for this inode format.
+    #[cfg(test)]
     pub fn max_file_size(&self, inode: &Ext4Inode) -> Ext4Result<u64> {
         if inode.has_extents() {
             return self.extent_max_file_size();

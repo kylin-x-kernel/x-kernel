@@ -17,6 +17,7 @@ use core::{
     task::{Context, Waker},
 };
 
+use anon_inodefs::AnonInodeFs;
 use bitflags::bitflags;
 use hashbrown::{HashMap, HashSet};
 use kcred::Cred;
@@ -24,7 +25,7 @@ use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollRegistrations, PollSet, Pollable};
 use kspin::SpinNoPreempt;
 use ksync::Mutex;
-use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
+use kvfs::{FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
 use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT, epoll_event};
 
 /// A ready event returned by an [`Epoll`] instance.
@@ -911,9 +912,10 @@ mod epoll_tests {
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
+    use anon_inodefs::AnonInodeFs;
     use kerrno::KError;
     use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
-    use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile};
+    use kvfs::{FMode, FileOperations, OpenFlags, VfsFile};
     use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT, epoll_event};
     use unittest::def_test;
 

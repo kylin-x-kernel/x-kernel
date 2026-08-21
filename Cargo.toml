@@ -98,6 +98,7 @@ posix-bpf = { path = "posix/bpf" }
 # Internal: memory and filesystem
 alloc-engine = { path = "mm/alloc-engine" }
 kvfs = { path = "fs/kvfs" }
+anon_inodefs = { path = "fs/filesystems/anon_inodefs" }
 bpffs = { path = "fs/filesystems/bpffs" }
 memfs = { path = "fs/filesystems/memfs" }
 kaddr_layout = { path = "mm/kaddr_layout" }
@@ -106,9 +107,9 @@ fat = { path = "fs/filesystems/fat" }
 fs_block = { path = "fs/block" }
 fs_boot = { path = "fs/boot" }
 procfs = { path = "fs/filesystems/procfs" }
+pipefs = { path = "fs/filesystems/pipefs" }
 devfs = { path = "fs/filesystems/devfs" }
 fs9p = { path = "fs/filesystems/fs9p", default-features = false }
-kext4_vfs = { path = "fs/bridges/kext4_vfs" }
 v9fs = { path = "fs/bridges/v9fs" }
 memaddr = { path = "mm/memaddr" }
 anon = { path = "mm/anon" }

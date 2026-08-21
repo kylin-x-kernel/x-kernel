@@ -11,15 +11,23 @@ categories = ["filesystem", "no-std"]
 
 [features]
 default = []
+times = ["dep:ktime"]
 
 [dependencies]
 bitflags.workspace = true
 block = { workspace = true }
+iov_iter.workspace = true
+kcred.workspace = true
+kerrno.workspace = true
+klogger.workspace = true
+macros.workspace = true
+ksync.workspace = true
+kvfs.workspace = true
+ktime = { workspace = true, optional = true }
 ktime_types = { workspace = true }
 unittest = { workspace = true }
 
 [target.'cfg(target_os = "none")'.dependencies]
-ksync = { workspace = true }
 ktask = { workspace = true }
 
 [dev-dependencies]

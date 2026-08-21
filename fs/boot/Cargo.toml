@@ -16,6 +16,7 @@ rootfs-secondary-block = []
 smp = ["procfs/smp"]
 
 [dependencies]
+anon_inodefs.workspace = true
 block.workspace = true
 bpffs = { workspace = true, optional = true }
 devfs.workspace = true
@@ -30,4 +31,5 @@ log.workspace = true
 macros = { workspace = true, optional = true }
 memfs.workspace = true
 procfs.workspace = true
+pipefs.workspace = true
 v9fs = { workspace = true, optional = true }

@@ -19,6 +19,6 @@ pub use inode::{
     FiemapCapability, GetattrQueryFlags, GetattrRequestMask, InodeAttributeOperations,
     InodeDirOperations, InodeFiemapOperations, InodeLookupFlags, InodeOperations,
     InodeSymlinkOperations, InodeUpdateTime, NodeFlags, RenameFlags, VfsInode, VfsInodeInit,
-    WeakVfsInode, inode_init_owner,
+    WeakVfsInode, empty_inode_operations, get_next_ino, inode_init_owner,
 };
 pub(crate) use inode::{get_or_try_init_inode, lookup_inode};

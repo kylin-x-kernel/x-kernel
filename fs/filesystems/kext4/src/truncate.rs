@@ -7,7 +7,7 @@
 use alloc::vec;
 
 use crate::{
-    BlockMapping, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Inode, Ext4Result, FilesystemBlock,
+    BlockMapping, CorruptKind, Ext4Error, Ext4Inode, Ext4Result, Ext4SbInfo, FilesystemBlock,
     LogicalBlock, UnsupportedKind, file::RegularWriteMetadata, jbd2::JournalCredits,
 };
 
@@ -19,10 +19,7 @@ impl JournalCredits {
         Self::new(INODE_UPDATE_CREDITS.saturating_add(ORPHAN_HEAD_UPDATE_CREDITS))
     }
 
-    fn for_preallocation_discard(
-        filesystem: &Ext4Filesystem,
-        inode: &Ext4Inode,
-    ) -> Ext4Result<Self> {
+    fn for_preallocation_discard(filesystem: &Ext4SbInfo, inode: &Ext4Inode) -> Ext4Result<Self> {
         let new_blocks = file_block_count(inode.disk_size(), filesystem.layout().block_size())?;
         Ok(Self::new(filesystem.extent_truncate_metadata_credits(
             inode,
@@ -31,7 +28,7 @@ impl JournalCredits {
     }
 
     fn for_regular_truncate(
-        filesystem: &Ext4Filesystem,
+        filesystem: &Ext4SbInfo,
         inode: &Ext4Inode,
         new_size: u64,
     ) -> Ext4Result<Self> {
@@ -46,7 +43,7 @@ impl JournalCredits {
     }
 }
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     /// Prepares a regular-file disk-size change using Linux-style ordering.
     ///
     /// Grow zeroes any mapped old EOF tail before committing a larger
@@ -89,6 +86,7 @@ impl Ext4Filesystem {
     }
 
     /// Changes a regular file's visible length using Linux-style orphan protection.
+    #[cfg(test)]
     pub fn truncate_regular_inode(
         &mut self,
         inode: &Ext4Inode,

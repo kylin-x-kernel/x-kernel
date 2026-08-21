@@ -6,13 +6,13 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use core::fmt;
 
 use crate::{
-    BlockMapping, ChecksumTarget, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Result,
-    FilesystemBlock, InodeNumber, LogicalBlock, UnsupportedKind,
+    BlockMapping, ChecksumTarget, CorruptKind, Ext4Error, Ext4Result, Ext4SbInfo, FilesystemBlock,
+    InodeNumber, LogicalBlock, UnsupportedKind,
     disk::{checksum, extent as disk_extent, inode as disk_inode},
     file::RegularWriteMetadata,
     jbd2::{JournalCredits, JournalHandle},
     superblock::replace_metadata_access_bytes,
-    sync::{self, RwLock},
+    sync::{self, Mutex, RwLock},
 };
 
 const EXT4_ENCODED_DEV_MAJOR_MAX: u32 = 0x0fff;
@@ -570,12 +570,13 @@ pub struct Ext4InodeStat {
 ///
 /// This is the object-oriented equivalent of Linux `ext4_inode_info` with its
 /// embedded `vfs_inode`: KVFS generic attribute operations and ext4 algorithms
-/// access this same object. It is composed directly into the bridge inode and
-/// has neither an independent resident identity nor an independent reference
-/// count.
+/// access this same object. It is the private component of the sole resident
+/// KVFS inode and has neither an independent resident identity nor an
+/// independent reference count.
 pub struct Ext4Inode {
     number: InodeNumber,
     state: RwLock<Ext4InodeState>,
+    writeback_lock: Mutex<()>,
 }
 
 impl Ext4Inode {
@@ -590,7 +591,12 @@ impl Ext4Inode {
                 reserved_data_blocks: 0,
                 is_extra_isize_expansion_disabled: false,
             }),
+            writeback_lock: Mutex::new(()),
         }
+    }
+
+    pub(crate) fn lock_writeback(&self) -> sync::MutexGuard<'_, ()> {
+        sync::mutex_lock(&self.writeback_lock)
     }
 
     /// Holds the inode-state read lock while running `f`, with zero cloning.
@@ -1198,7 +1204,7 @@ fn ensure_ext4_device_id_representable(device: Ext4DeviceId) -> Ext4Result<()> {
     Ok(())
 }
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     /// Returns an inline fast-symlink target, or `None` for a block-mapped target.
     pub fn fast_symlink_target(&self, inode: &Ext4Inode) -> Ext4Result<Option<Vec<u8>>> {
         inode.fast_symlink_target(
@@ -1208,6 +1214,7 @@ impl Ext4Filesystem {
     }
 
     /// Loads filesystem-private state for the root inode.
+    #[cfg(test)]
     pub fn root_inode(&self) -> Ext4Result<Ext4Inode> {
         self.load_inode_private(InodeNumber::new(disk_inode::EXT4_ROOT_INO))
     }
@@ -1300,8 +1307,12 @@ impl Ext4Filesystem {
         }
     }
 
-    fn ensure_delalloc_accounting(&self, inode: &Ext4Inode) -> Ext4Result<()> {
-        if inode.reserved_data_blocks() <= self.delalloc_reserved_blocks {
+    fn ensure_delalloc_accounting(
+        &self,
+        inode: &Ext4Inode,
+        delalloc_reserved_blocks: u64,
+    ) -> Ext4Result<()> {
+        if inode.reserved_data_blocks() <= delalloc_reserved_blocks {
             Ok(())
         } else {
             Err(Ext4Error::InvalidDelayedAllocationState)
@@ -1319,12 +1330,13 @@ impl Ext4Filesystem {
     /// Returns an extent-validation, overflow, accounting, or no-space error
     /// without publishing a partial mount reservation.
     pub fn reserve_delalloc_range(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         start: LogicalBlock,
         block_count: u64,
     ) -> Ext4Result<()> {
-        self.ensure_delalloc_accounting(inode)?;
+        let mut delalloc_reserved_blocks = sync::mutex_lock(&self.delalloc_reserved_blocks);
+        self.ensure_delalloc_accounting(inode, *delalloc_reserved_blocks)?;
         if block_count == 0 {
             return Ok(());
         }
@@ -1364,11 +1376,15 @@ impl Ext4Filesystem {
                 .checked_add(end.checked_sub(*start).ok_or(Ext4Error::Overflow)?)
                 .ok_or(Ext4Error::Overflow)
         })?;
-        if reserved > self.blocks_available_for_reservation() {
+        let blocks_available = self
+            .superblock()
+            .free_blocks_count()
+            .saturating_sub(*delalloc_reserved_blocks)
+            .saturating_sub(self.superblock().reserved_blocks_count());
+        if reserved > blocks_available {
             return Err(Ext4Error::NoSpace);
         }
-        let new_total = self
-            .delalloc_reserved_blocks
+        let new_total = delalloc_reserved_blocks
             .checked_add(reserved)
             .ok_or(Ext4Error::Overflow)?;
         let inserted_blocks = inode.insert_unreserved_delalloc_extents(&holes)?;
@@ -1376,7 +1392,7 @@ impl Ext4Filesystem {
             inserted_blocks, reserved,
             "validated delayed-allocation holes must preserve their block count"
         );
-        self.delalloc_reserved_blocks = new_total;
+        *delalloc_reserved_blocks = new_total;
         Ok(())
     }
 
@@ -1386,19 +1402,19 @@ impl Ext4Filesystem {
     ///
     /// Returns an overflow or accounting-invariant error.
     pub fn release_delalloc_range(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         start: LogicalBlock,
         block_count: u64,
     ) -> Ext4Result<()> {
-        self.ensure_delalloc_accounting(inode)?;
+        let mut delalloc_reserved_blocks = sync::mutex_lock(&self.delalloc_reserved_blocks);
+        self.ensure_delalloc_accounting(inode, *delalloc_reserved_blocks)?;
         let end = start
             .get()
             .checked_add(block_count)
             .ok_or(Ext4Error::Overflow)?;
         let released = inode.remove_delalloc_extent(start.get(), end)?;
-        self.delalloc_reserved_blocks = self
-            .delalloc_reserved_blocks
+        *delalloc_reserved_blocks = delalloc_reserved_blocks
             .checked_sub(released)
             .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
         Ok(())
@@ -1410,14 +1426,14 @@ impl Ext4Filesystem {
     ///
     /// Returns an accounting-invariant error.
     pub fn truncate_delalloc_range(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         first_block: LogicalBlock,
     ) -> Ext4Result<()> {
-        self.ensure_delalloc_accounting(inode)?;
+        let mut delalloc_reserved_blocks = sync::mutex_lock(&self.delalloc_reserved_blocks);
+        self.ensure_delalloc_accounting(inode, *delalloc_reserved_blocks)?;
         let released = inode.remove_delalloc_from(first_block.get())?;
-        self.delalloc_reserved_blocks = self
-            .delalloc_reserved_blocks
+        *delalloc_reserved_blocks = delalloc_reserved_blocks
             .checked_sub(released)
             .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
         Ok(())
@@ -1428,11 +1444,11 @@ impl Ext4Filesystem {
     /// # Errors
     ///
     /// Returns an accounting-invariant error.
-    pub fn release_all_delalloc(&mut self, inode: &Ext4Inode) -> Ext4Result<()> {
-        self.ensure_delalloc_accounting(inode)?;
+    pub fn release_all_delalloc(&self, inode: &Ext4Inode) -> Ext4Result<()> {
+        let mut delalloc_reserved_blocks = sync::mutex_lock(&self.delalloc_reserved_blocks);
+        self.ensure_delalloc_accounting(inode, *delalloc_reserved_blocks)?;
         let released = inode.clear_delalloc_reservations();
-        self.delalloc_reserved_blocks = self
-            .delalloc_reserved_blocks
+        *delalloc_reserved_blocks = delalloc_reserved_blocks
             .checked_sub(released)
             .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
         Ok(())
@@ -1897,7 +1913,7 @@ struct InodeLocation {
     inode_size: usize,
 }
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     fn inode_location(&self, number: InodeNumber) -> Ext4Result<InodeLocation> {
         let inode_number = number.get();
         if inode_number == 0 || inode_number > self.superblock().inodes_count() {

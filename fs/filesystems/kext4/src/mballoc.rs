@@ -15,7 +15,7 @@ use crate::{
     bitmap_allocator::{BlockAllocation, BlockRunAllocation},
     error::{CorruptKind, Ext4Error, Ext4Result},
     jbd2::JournalHandle,
-    superblock::{Ext4Filesystem, is_ext4_bitmap_bit_set},
+    superblock::{Ext4SbInfo, is_ext4_bitmap_bit_set},
     types::{BlockCount, BlockGroupNumber, FilesystemBlock, LogicalBlock, PhysicalBlock},
 };
 
@@ -442,7 +442,7 @@ fn order_bucket_floor(blocks: u32) -> Ext4Result<usize> {
     usize::try_from(u32::BITS - 1 - blocks.leading_zeros()).map_err(|_| Ext4Error::Overflow)
 }
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     pub(crate) fn reset_block_allocation_caches(&mut self) {
         self.block_free_extent_caches = vec![None; self.groups.len()];
     }

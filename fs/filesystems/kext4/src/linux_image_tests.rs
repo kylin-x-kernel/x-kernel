@@ -3,18 +3,23 @@
 // See LICENSES for license details.
 
 use std::{
-    fs,
+    boxed::Box,
+    format, fs,
     io::{BufWriter, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    string::{String, ToString},
     sync::{Arc, Mutex},
+    vec,
+    vec::Vec,
 };
 
 use block::{BlockDeviceOperations, Device, DeviceKind, DriverError, DriverResult};
-use kext4::{
+
+use crate::{
     BlockMapping, DirectoryFileType, Ext4DirEntryRef, Ext4DirPos, Ext4DirSink, Ext4Error,
-    Ext4Filesystem, Ext4Inode, Ext4Result, Ext4StatFsMode, Ext4Timestamp, Ext4XattrNamespace,
-    FilesystemBlock, InodeKind, InodeNumber, LogicalBlock, UnsupportedKind,
+    Ext4Inode, Ext4Result, Ext4SbInfo, Ext4Timestamp, Ext4XattrNamespace, FilesystemBlock,
+    InodeKind, InodeNumber, LogicalBlock, UnsupportedKind, superblock::Ext4StatFsMode,
 };
 
 const DEVICE_BLOCK_SIZE: usize = 512;
@@ -350,12 +355,12 @@ fn block_start(block_id: u64) -> Result<usize, DriverError> {
 }
 
 fn set_large_xattr_on_file(
-    filesystem: &mut Ext4Filesystem,
+    filesystem: &mut Ext4SbInfo,
     large_value: &[u8],
 ) -> Ext4Result<Ext4Inode> {
     let root = filesystem.root_inode()?;
     let entry = filesystem.lookup(&root, "file")?.ok_or(Ext4Error::Corrupt(
-        kext4::CorruptKind::InvalidDirectoryEntry,
+        crate::CorruptKind::InvalidDirectoryEntry,
     ))?;
     let inode = filesystem.load_inode_private(entry.inode())?;
     filesystem.set_xattr(
@@ -369,7 +374,7 @@ fn set_large_xattr_on_file(
 }
 
 fn assert_large_xattr_absent(bytes: &[u8]) {
-    let filesystem = Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes.to_vec())))
+    let filesystem = Ext4SbInfo::mount(Arc::new(ImageDevice::new(bytes.to_vec())))
         .expect("mount committed xattr image");
     let root = filesystem.root_inode().expect("read committed root");
     let entry = filesystem
@@ -428,7 +433,7 @@ fn mounts_linux_metadata_csum_image() {
     create_image(&mke2fs, &image);
 
     let bytes = fs::read(&image).expect("read generated ext4 image");
-    let filesystem = Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes.clone())))
+    let filesystem = Ext4SbInfo::mount(Arc::new(ImageDevice::new(bytes.clone())))
         .expect("mount generated Linux ext4 image");
     assert_eq!(filesystem.layout().block_size(), 4096);
     assert_eq!(
@@ -455,7 +460,7 @@ fn mounts_linux_image_without_a_journal() {
     create_image_with_journal(&mke2fs, &image, false);
 
     let bytes = fs::read(&image).expect("read generated ext4 image");
-    let filesystem = Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes)))
+    let filesystem = Ext4SbInfo::mount(Arc::new(ImageDevice::new(bytes)))
         .expect("mount generated Linux ext4 image without journal");
     assert!(filesystem.journal_status().is_none());
     fs::remove_file(image).expect("remove generated image");
@@ -470,7 +475,7 @@ fn rejects_linux_image_marked_as_needing_recovery() {
     let mut bytes = fs::read(&image).expect("read generated ext4 image");
     mark_image_needs_recovery(&mut bytes);
 
-    let error = match Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes))) {
+    let error = match Ext4SbInfo::mount(Arc::new(ImageDevice::new(bytes))) {
         Ok(_) => panic!("filesystem requiring recovery unexpectedly mounted"),
         Err(error) => error,
     };
@@ -488,12 +493,12 @@ fn recovers_linux_image_marked_as_needing_recovery() {
     mark_image_needs_recovery(&mut bytes);
     let device = Arc::new(WritableImageDevice::new(bytes));
 
-    let report = Ext4Filesystem::recover(device.clone())
+    let report = Ext4SbInfo::recover(device.clone())
         .expect("recover generated Linux ext4 image")
         .expect("recovery was required");
     assert_eq!(report.update_count(), 0);
 
-    let filesystem = Ext4Filesystem::mount(device).expect("mount recovered Linux ext4 image");
+    let filesystem = Ext4SbInfo::mount(device).expect("mount recovered Linux ext4 image");
     assert!(!filesystem.superblock().features().needs_recovery());
     let journal = filesystem.journal_status().expect("internal journal");
     assert_eq!(journal.start_block(), None);
@@ -508,15 +513,14 @@ fn recovers_e2fsprogs_written_journal_transaction() {
     let debugfs = require_e2fsprogs("debugfs");
     let fixture = journaled_update_image_bytes(&mke2fs, &debugfs, "recover-real-journal", 3, true);
     let device = Arc::new(WritableImageDevice::new(fixture.bytes.clone()));
-    let report = Ext4Filesystem::recover(device.clone())
+    let report = Ext4SbInfo::recover(device.clone())
         .expect("recover e2fsprogs journal transaction")
         .expect("recovery was required");
 
     assert_eq!(report.update_count(), fixture.targets.len());
     assert_eq!(report.revoke_hit_count(), 0);
 
-    let filesystem =
-        Ext4Filesystem::mount(device).expect("mount recovered e2fsprogs journal image");
+    let filesystem = Ext4SbInfo::mount(device).expect("mount recovered e2fsprogs journal image");
     let journal = filesystem.journal_status().expect("internal journal");
     assert_eq!(journal.start_block(), None);
     assert_eq!(journal.sequence(), report.next_sequence());
@@ -534,7 +538,7 @@ fn recovers_e2fsprogs_descriptor_layout_matrix() {
         let fixture =
             journaled_update_image_bytes(&mke2fs, &debugfs, &label, journal_version, has_64bit);
         let device = Arc::new(WritableImageDevice::new(fixture.bytes.clone()));
-        let report = Ext4Filesystem::recover(device.clone())
+        let report = Ext4SbInfo::recover(device.clone())
             .unwrap_or_else(|error| {
                 panic!("recover e2fsprogs journal v{journal_version} 64bit={has_64bit}: {error:?}")
             })
@@ -542,7 +546,7 @@ fn recovers_e2fsprogs_descriptor_layout_matrix() {
 
         assert_eq!(report.update_count(), fixture.targets.len());
         let filesystem =
-            Ext4Filesystem::mount(device).expect("mount recovered descriptor-layout image");
+            Ext4SbInfo::mount(device).expect("mount recovered descriptor-layout image");
         assert_filesystem_blocks(&filesystem, &fixture.targets, &fixture.replacements);
     }
 }
@@ -559,7 +563,7 @@ fn recovery_partial_replay_write_failure_keeps_ext4_recovery_feature() {
         fail_write,
     ));
 
-    let error = Ext4Filesystem::recover(device.clone()).expect_err("partial replay write fails");
+    let error = Ext4SbInfo::recover(device.clone()).expect_err("partial replay write fails");
 
     assert!(matches!(error, Ext4Error::Device(DriverError::Io)));
     let committed = device.committed_bytes();
@@ -589,7 +593,7 @@ fn recovery_replay_flush_failure_keeps_ext4_recovery_feature() {
         1,
     ));
 
-    let error = Ext4Filesystem::recover(device.clone()).expect_err("recovery flush fails");
+    let error = Ext4SbInfo::recover(device.clone()).expect_err("recovery flush fails");
 
     assert!(matches!(error, Ext4Error::Device(DriverError::Io)));
     let committed = device.committed_bytes();
@@ -614,7 +618,7 @@ fn recovery_journal_empty_write_failure_keeps_ext4_recovery_feature() {
         replay_writes + 1,
     ));
 
-    let error = Ext4Filesystem::recover(device.clone()).expect_err("journal write fails");
+    let error = Ext4SbInfo::recover(device.clone()).expect_err("journal write fails");
 
     assert!(matches!(error, Ext4Error::Device(DriverError::Io)));
     let committed = device.committed_bytes();
@@ -640,7 +644,7 @@ fn recovery_ext4_clear_write_failure_keeps_ext4_recovery_feature() {
         replay_writes + journal_empty_writes + 1,
     ));
 
-    let error = Ext4Filesystem::recover(device.clone()).expect_err("ext4 recovery clear fails");
+    let error = Ext4SbInfo::recover(device.clone()).expect_err("ext4 recovery clear fails");
 
     assert!(matches!(error, Ext4Error::Device(DriverError::Io)));
     let committed = device.committed_bytes();
@@ -664,7 +668,7 @@ fn recovery_ext4_clear_flush_failure_keeps_ext4_recovery_feature() {
         3,
     ));
 
-    let error = Ext4Filesystem::recover(device.clone()).expect_err("ext4 recovery flush fails");
+    let error = Ext4SbInfo::recover(device.clone()).expect_err("ext4 recovery flush fails");
 
     assert!(matches!(error, Ext4Error::Device(DriverError::Io)));
     let committed = device.committed_bytes();
@@ -691,7 +695,7 @@ fn nonzero_journal_start_without_ext4_recovery_flag_still_mounts() {
     create_image(&mke2fs, &image);
 
     let mut bytes = fs::read(&image).expect("read generated ext4 image");
-    let filesystem = Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes.clone())))
+    let filesystem = Ext4SbInfo::mount(Arc::new(ImageDevice::new(bytes.clone())))
         .expect("mount generated Linux ext4 image");
     let journal_block = filesystem
         .journal_superblock_block()
@@ -721,7 +725,7 @@ fn nonzero_journal_start_without_ext4_recovery_flag_still_mounts() {
         journal[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4].copy_from_slice(&checksum.to_be_bytes());
     }
 
-    let filesystem = Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes)))
+    let filesystem = Ext4SbInfo::mount(Arc::new(ImageDevice::new(bytes)))
         .expect("s_start alone must not select ext4 recovery");
     assert_eq!(
         filesystem
@@ -776,7 +780,7 @@ fn reads_linux_directory_and_regular_files() {
     );
 
     let bytes = fs::read(&image).expect("read generated ext4 image");
-    let filesystem = Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes.clone())))
+    let filesystem = Ext4SbInfo::mount(Arc::new(ImageDevice::new(bytes.clone())))
         .expect("mount generated Linux ext4 image");
     let root = filesystem.root_inode().expect("read root inode");
     assert_eq!(root.kind(), InodeKind::Directory);
@@ -893,7 +897,7 @@ fn read_dir_from_resumes_with_ext4_directory_offsets() {
     }
 
     let bytes = fs::read(&image).expect("read generated ext4 image");
-    let filesystem = Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes)))
+    let filesystem = Ext4SbInfo::mount(Arc::new(ImageDevice::new(bytes)))
         .expect("mount generated Linux ext4 image");
     let root = filesystem.root_inode().expect("read root inode");
     let expected: Vec<Vec<u8>> = filesystem
@@ -962,7 +966,7 @@ fn reads_linux_inode_and_external_xattrs() {
         .position(|window| window == large_value.as_bytes())
         .expect("large xattr value is stored in the image");
     corrupt_bytes[large_offset] ^= 1;
-    let corrupt = Ext4Filesystem::mount(Arc::new(ImageDevice::new(corrupt_bytes)))
+    let corrupt = Ext4SbInfo::mount(Arc::new(ImageDevice::new(corrupt_bytes)))
         .expect("mount xattr image with corrupted external xattr block");
     let corrupt_root = corrupt.root_inode().expect("read corrupt xattr root inode");
     let corrupt_entry = corrupt
@@ -975,12 +979,12 @@ fn reads_linux_inode_and_external_xattrs() {
     assert!(matches!(
         corrupt.read_xattrs(&corrupt_inode),
         Err(Ext4Error::ChecksumMismatch {
-            target: kext4::ChecksumTarget::XattrBlock { .. },
+            target: crate::ChecksumTarget::XattrBlock { .. },
             ..
         })
     ));
 
-    let filesystem = Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes)))
+    let filesystem = Ext4SbInfo::mount(Arc::new(ImageDevice::new(bytes)))
         .expect("mount generated xattr ext4 image");
     let root = filesystem.root_inode().expect("read root inode");
     let entry = filesystem
@@ -1043,8 +1047,7 @@ fn journals_inline_xattr_set_and_remove() {
     ));
     let timestamp = Ext4Timestamp::new(1_720_000_000, 0);
     let inode_number = {
-        let mut filesystem =
-            Ext4Filesystem::mount(device.clone()).expect("mount xattr write image");
+        let mut filesystem = Ext4SbInfo::mount(device.clone()).expect("mount xattr write image");
         let root = filesystem.root_inode().expect("read root inode");
         let entry = filesystem
             .lookup(&root, "file")
@@ -1089,7 +1092,7 @@ fn journals_inline_xattr_set_and_remove() {
     };
 
     {
-        let filesystem = Ext4Filesystem::mount(device.clone()).expect("remount after xattr set");
+        let filesystem = Ext4SbInfo::mount(device.clone()).expect("remount after xattr set");
         let persisted = filesystem
             .load_inode_private(inode_number)
             .expect("read persisted xattr inode");
@@ -1103,7 +1106,7 @@ fn journals_inline_xattr_set_and_remove() {
     }
 
     {
-        let mut filesystem = Ext4Filesystem::mount(device.clone()).expect("mount for xattr remove");
+        let mut filesystem = Ext4SbInfo::mount(device.clone()).expect("mount for xattr remove");
         let persisted = filesystem
             .load_inode_private(inode_number)
             .expect("read xattr inode before remove");
@@ -1126,7 +1129,7 @@ fn journals_inline_xattr_set_and_remove() {
             .expect("persist inline xattr removal");
     }
 
-    let filesystem = Ext4Filesystem::mount(device).expect("remount after xattr remove");
+    let filesystem = Ext4SbInfo::mount(device).expect("remount after xattr remove");
     let root = filesystem
         .root_inode()
         .expect("read root inode after remove");
@@ -1170,7 +1173,7 @@ fn journals_external_xattr_block_and_acl_round_trips() {
     let acl_value = vec![0x02, 0x00, 0x00, 0x00];
     let (inode_number, original_blocks, external_blocks) = {
         let mut filesystem =
-            Ext4Filesystem::mount(device.clone()).expect("mount external xattr write image");
+            Ext4SbInfo::mount(device.clone()).expect("mount external xattr write image");
         let root = filesystem.root_inode().expect("read root inode");
         let entry = filesystem
             .lookup(&root, "file")
@@ -1224,7 +1227,7 @@ fn journals_external_xattr_block_and_acl_round_trips() {
     run_e2fsck_check(&e2fsck, &image);
 
     {
-        let filesystem = Ext4Filesystem::mount(device.clone()).expect("remount external xattr");
+        let filesystem = Ext4SbInfo::mount(device.clone()).expect("remount external xattr");
         let persisted = filesystem
             .load_inode_private(inode_number)
             .expect("read persisted external xattr inode");
@@ -1247,7 +1250,7 @@ fn journals_external_xattr_block_and_acl_round_trips() {
 
     {
         let mut filesystem =
-            Ext4Filesystem::mount(device.clone()).expect("mount for external xattr remove");
+            Ext4SbInfo::mount(device.clone()).expect("mount for external xattr remove");
         let persisted = filesystem
             .load_inode_private(inode_number)
             .expect("read external xattr inode before remove");
@@ -1287,7 +1290,7 @@ fn journals_external_xattr_block_and_acl_round_trips() {
             .expect("persist external xattr removals");
     }
 
-    let filesystem = Ext4Filesystem::mount(device).expect("remount after external xattr remove");
+    let filesystem = Ext4SbInfo::mount(device).expect("remount after external xattr remove");
     let inode = filesystem
         .load_inode_private(inode_number)
         .expect("read inode after external xattr remove");
@@ -1328,7 +1331,7 @@ fn unlinks_and_rename_overwrites_external_xattr_inodes() {
     let large_value = vec![b'n'; 600];
     {
         let mut filesystem =
-            Ext4Filesystem::mount(device.clone()).expect("mount external xattr namei image");
+            Ext4SbInfo::mount(device.clone()).expect("mount external xattr namei image");
         let root = filesystem.root_inode().expect("read root inode");
         let unlink_entry = filesystem
             .lookup(&root, "unlink-me")
@@ -1443,7 +1446,7 @@ fn unlinks_and_rename_overwrites_external_xattr_inodes() {
 
     fs::write(&image, device.committed_bytes()).expect("persist mutated external xattr image");
     run_e2fsck_check(&e2fsck, &image);
-    let filesystem = Ext4Filesystem::mount(Arc::new(ImageDevice::new(
+    let filesystem = Ext4SbInfo::mount(Arc::new(ImageDevice::new(
         fs::read(&image).expect("read remounted external xattr namei image"),
     )))
     .expect("remount external xattr namei image");
@@ -1503,7 +1506,7 @@ fn failed_external_xattr_mutation_does_not_publish_half_update_and_retries() {
     ] {
         let error = {
             let mut filesystem =
-                Ext4Filesystem::mount(fault.device()).expect("mount faulty xattr image");
+                Ext4SbInfo::mount(fault.device()).expect("mount faulty xattr image");
             set_large_xattr_on_file(&mut filesystem, &large_value)
                 .expect_err("faulted xattr mutation must fail")
         };
@@ -1516,7 +1519,7 @@ fn failed_external_xattr_mutation_does_not_publish_half_update_and_retries() {
         assert_large_xattr_absent(&committed);
         let retry_device = Arc::new(WritableImageDevice::new(committed));
         let mut filesystem =
-            Ext4Filesystem::mount(retry_device).expect("remount retryable xattr image");
+            Ext4SbInfo::mount(retry_device).expect("remount retryable xattr image");
         let updated = set_large_xattr_on_file(&mut filesystem, &large_value)
             .expect("retry external xattr mutation");
         assert_eq!(
@@ -1579,7 +1582,7 @@ fn reads_linux_legacy_indirect_file_blocks() {
     );
 
     let bytes = fs::read(&image).expect("read generated legacy indirect image");
-    let filesystem = Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes.clone())))
+    let filesystem = Ext4SbInfo::mount(Arc::new(ImageDevice::new(bytes.clone())))
         .expect("mount generated legacy indirect ext4 image");
     let root = filesystem.root_inode().expect("read root inode");
     let entry = filesystem
@@ -1617,7 +1620,7 @@ fn reads_linux_legacy_indirect_file_blocks() {
         legacy_indirect_inode_from_image(system_zone_pointer, "legacy.bin");
     assert_eq!(
         corrupt.map_blocks(&corrupt_inode, LogicalBlock::new(SINGLE_FIRST)),
-        Err(Ext4Error::Corrupt(kext4::CorruptKind::InvalidExtent))
+        Err(Ext4Error::Corrupt(crate::CorruptKind::InvalidExtent))
     );
 
     let mut out_of_bounds_pointer = bytes;
@@ -1632,7 +1635,7 @@ fn reads_linux_legacy_indirect_file_blocks() {
         legacy_indirect_inode_from_image(out_of_bounds_pointer, "legacy.bin");
     assert_eq!(
         corrupt.map_blocks(&corrupt_inode, LogicalBlock::new(SINGLE_FIRST)),
-        Err(Ext4Error::Corrupt(kext4::CorruptKind::InvalidExtent))
+        Err(Ext4Error::Corrupt(crate::CorruptKind::InvalidExtent))
     );
 
     fs::remove_file(payload).expect("remove legacy indirect payload");
@@ -1657,7 +1660,7 @@ fn statfs_matches_dumpe2fs_for_one_kib_and_four_kib_images() {
 
         let expected = read_dumpe2fs_stats(&dumpe2fs, &image);
         let bytes = fs::read(&image).expect("read generated ext4 image");
-        let filesystem = Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes)))
+        let filesystem = Ext4SbInfo::mount(Arc::new(ImageDevice::new(bytes)))
             .expect("mount generated Linux ext4 image");
         let stat = filesystem.statfs().expect("read kext4 statfs");
         let minix_stat = filesystem
@@ -1700,7 +1703,7 @@ fn rejects_public_access_to_reserved_journal_inode() {
     create_image(&mke2fs, &image);
 
     let bytes = fs::read(&image).expect("read generated ext4 image");
-    let filesystem = Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes)))
+    let filesystem = Ext4SbInfo::mount(Arc::new(ImageDevice::new(bytes)))
         .expect("mount generated Linux ext4 image");
     assert!(matches!(
         filesystem.load_inode_private(InodeNumber::new(8)),
@@ -1729,7 +1732,7 @@ fn reads_linux_htree_directory() {
     run_e2fsck_optimize_directories(&e2fsck, &image);
 
     let bytes = fs::read(&image).expect("read generated ext4 image");
-    let filesystem = Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes.clone())))
+    let filesystem = Ext4SbInfo::mount(Arc::new(ImageDevice::new(bytes.clone())))
         .expect("mount generated Linux ext4 image");
     let root = filesystem.root_inode().expect("read root inode");
     let big_entry = filesystem
@@ -1784,7 +1787,7 @@ fn reads_linux_htree_directory() {
         .expect("htree root checksum offset");
     let mut corrupt = bytes.clone();
     corrupt[checksum_offset] ^= 1;
-    let corrupt = Ext4Filesystem::mount(Arc::new(ImageDevice::new(corrupt)))
+    let corrupt = Ext4SbInfo::mount(Arc::new(ImageDevice::new(corrupt)))
         .expect("mount htree root checksum image");
     let corrupt_root = corrupt.root_inode().expect("read corrupt htree root inode");
     let corrupt_big_entry = corrupt
@@ -1797,7 +1800,7 @@ fn reads_linux_htree_directory() {
     assert!(matches!(
         corrupt.read_dir(&corrupt_big),
         Err(Ext4Error::ChecksumMismatch {
-            target: kext4::ChecksumTarget::DirectoryBlock {
+            target: crate::ChecksumTarget::DirectoryBlock {
                 inode,
                 block: 0
             },
@@ -1834,7 +1837,7 @@ fn rejects_corrupt_superblock_checksum() {
 
     let mut bytes = fs::read(&image).expect("read generated ext4 image");
     bytes[1024 + 0x10] ^= 1;
-    let error = match Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes))) {
+    let error = match Ext4SbInfo::mount(Arc::new(ImageDevice::new(bytes))) {
         Ok(_) => panic!("corrupt superblock unexpectedly mounted"),
         Err(error) => error,
     };
@@ -1850,7 +1853,7 @@ fn rejects_corrupt_group_descriptor_checksum() {
 
     let mut bytes = fs::read(&image).expect("read generated ext4 image");
     bytes[4096 + 12] ^= 1;
-    let error = match Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes))) {
+    let error = match Ext4SbInfo::mount(Arc::new(ImageDevice::new(bytes))) {
         Ok(_) => panic!("corrupt group descriptor unexpectedly mounted"),
         Err(error) => error,
     };
@@ -1866,7 +1869,7 @@ fn rejects_device_shorter_than_superblock_geometry() {
 
     let mut bytes = fs::read(&image).expect("read generated ext4 image");
     bytes.truncate(bytes.len() / 2);
-    let error = match Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes))) {
+    let error = match Ext4SbInfo::mount(Arc::new(ImageDevice::new(bytes))) {
         Ok(_) => panic!("truncated block device unexpectedly mounted"),
         Err(error) => error,
     };
@@ -1997,7 +2000,7 @@ fn journaled_update_image_bytes(
     );
 
     let before = fs::read(&image).expect("read pre-journal image");
-    let filesystem = Ext4Filesystem::mount(Arc::new(ImageDevice::new(before.clone())))
+    let filesystem = Ext4SbInfo::mount(Arc::new(ImageDevice::new(before.clone())))
         .expect("mount pre-journal image");
     let root = filesystem.root_inode().expect("read root inode");
     let entry = filesystem
@@ -2201,7 +2204,7 @@ fn image_block(bytes: &[u8], block: u64, block_size: usize) -> Vec<u8> {
 }
 
 fn assert_legacy_logical_block(
-    filesystem: &Ext4Filesystem,
+    filesystem: &Ext4SbInfo,
     inode: &Ext4Inode,
     logical: u64,
     block_size: usize,
@@ -2257,9 +2260,9 @@ fn put_le_u32(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
-fn legacy_indirect_inode_from_image(bytes: Vec<u8>, name: &str) -> (Ext4Filesystem, Ext4Inode) {
-    let filesystem = Ext4Filesystem::mount(Arc::new(ImageDevice::new(bytes)))
-        .expect("mount legacy indirect image");
+fn legacy_indirect_inode_from_image(bytes: Vec<u8>, name: &str) -> (Ext4SbInfo, Ext4Inode) {
+    let filesystem =
+        Ext4SbInfo::mount(Arc::new(ImageDevice::new(bytes))).expect("mount legacy indirect image");
     let root = filesystem.root_inode().expect("read root inode");
     let entry = filesystem
         .lookup(&root, name)
@@ -2281,7 +2284,7 @@ fn assert_image_block(bytes: &[u8], target: u64, block_size: usize, expected: &[
     assert_eq!(image_block(bytes, target, block_size).as_slice(), expected);
 }
 
-fn assert_filesystem_blocks(filesystem: &Ext4Filesystem, targets: &[u64], expected: &[Vec<u8>]) {
+fn assert_filesystem_blocks(filesystem: &Ext4SbInfo, targets: &[u64], expected: &[Vec<u8>]) {
     let block_size = filesystem.layout().block_size() as usize;
     let mut block = vec![0; block_size];
     for (target, expected) in targets.iter().zip(expected) {

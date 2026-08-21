@@ -8,8 +8,9 @@ use core::ffi::c_int;
 
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
-use kvfs::pipe::create_pipe_files;
-use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK, O_RDONLY, O_WRONLY};
+use kvfs::OpenFlags;
+use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
+use pipefs::create_pipe_files;
 use posix_types::UserPtr;
 
 bitflags! {
@@ -29,15 +30,11 @@ pub fn sys_pipe2(fds: UserPtr<[c_int; 2]>, flags: u32) -> KResult<isize> {
 
     let cloexec = flags.contains(PipeFlags::CLOEXEC);
     let status_flags = if flags.contains(PipeFlags::NONBLOCK) {
-        O_NONBLOCK
+        OpenFlags::NONBLOCK
     } else {
-        0
+        OpenFlags::empty()
     };
-    let (read_file, write_file) = create_pipe_files(
-        O_RDONLY | status_flags,
-        O_WRONLY | status_flags,
-        kprocess::current_cred(),
-    )?;
+    let (read_file, write_file) = create_pipe_files(status_flags, kprocess::current_cred())?;
     let resources = kprocess::current_resources();
     let read_fd = resources.add_file(read_file, cloexec)?;
     let write_fd = resources.add_file(write_file, cloexec).inspect_err(|_| {

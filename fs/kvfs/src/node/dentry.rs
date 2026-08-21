@@ -150,7 +150,7 @@ struct DentryInner {
     lookup_mutex: Mutex<()>,
     inode: Mutex<Option<Arc<VfsInode>>>,
     location: RwLock<DentryLocation>,
-    operations: Mutex<Option<Arc<dyn DentryOperations>>>,
+    operations: Once<&'static dyn DentryOperations>,
     super_block: Once<Weak<SuperBlock>>,
     // A live child pins its parent, while the parent only indexes children.
     // The superblock dentry cache owns hashed children until explicit eviction.
@@ -165,7 +165,11 @@ impl DentryInner {
         name: String,
     ) -> Self {
         let super_block = Once::new();
+        let operations = Once::new();
         if let Some(parent_super_block) = parent.as_ref().and_then(Dentry::super_block) {
+            if let Some(default_operations) = parent_super_block.default_dentry_operations() {
+                operations.call_once(|| default_operations);
+            }
             super_block.call_once(|| Arc::downgrade(&parent_super_block));
         }
         Self {
@@ -173,7 +177,7 @@ impl DentryInner {
             lookup_mutex: Mutex::default(),
             inode: Mutex::new(inode),
             location: RwLock::new(DentryLocation { parent, name }),
-            operations: Mutex::default(),
+            operations,
             super_block,
             children: Mutex::default(),
         }
@@ -496,8 +500,8 @@ impl Dentry {
         *self.0.flags.lock()
     }
 
-    fn operations(&self) -> Option<Arc<dyn DentryOperations>> {
-        self.0.operations.lock().clone()
+    fn operations(&self) -> Option<&'static dyn DentryOperations> {
+        self.0.operations.get().copied()
     }
 
     /// Returns this dentry's dynamic display name, if its operation table provides one.
@@ -563,13 +567,8 @@ impl Dentry {
         self.dentry_flags().is_symlink_type()
     }
 
-    /// Installs dentry operations.
-    pub(crate) fn set_operations(&self, operations: Arc<dyn DentryOperations>) {
-        *self.0.operations.lock() = Some(operations);
-    }
-
     /// Returns this dentry's superblock, if it is already attached.
-    pub(crate) fn super_block(&self) -> Option<Arc<SuperBlock>> {
+    pub fn super_block(&self) -> Option<Arc<SuperBlock>> {
         self.0.super_block.poll().and_then(Weak::upgrade)
     }
 
@@ -586,6 +585,13 @@ impl Dentry {
             Weak::ptr_eq(bound, &requested),
             "one VFS dentry identity must not belong to multiple superblocks"
         );
+        if let Some(default_operations) = super_block.default_dentry_operations() {
+            let installed = self.0.operations.call_once(|| default_operations);
+            assert!(
+                core::ptr::eq(*installed, default_operations),
+                "one VFS dentry identity must not change operation tables"
+            );
+        }
 
         // Only publish children into the dcache when they are cacheable,
         // mirroring `insert_cache`. `bind_super_block` must not defeat
@@ -1559,16 +1565,19 @@ mod tests_dentry {
 
     use super::{Dentry, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive};
     use crate::{
-        AddressSpaceOperations, DirContext, FileDirOperations, FileOperations, InodeDirOperations,
-        InodeOperations, InodeSymlinkOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags,
-        NodePermission, NodeType, RenameFlags, StatFs, SuperBlock, SuperBlockOperations, Umode,
-        VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
+        AddressSpace, AddressSpaceOperations, DirContext, FileDirOperations, FileOperations,
+        InodeDirOperations, InodeOperations, InodeSymlinkOperations, LockedDentry, Metadata,
+        MetadataUpdate, NodeFlags, NodePermission, NodeType, RenameFlags, StatFs, SuperBlock,
+        SuperBlockOperations, Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
     };
 
     struct MockFilesystem;
 
+    static MOCK_SUPER_OPERATIONS: MockFilesystem = MockFilesystem;
+    static MOCK_FILE_SYSTEM_TYPE: crate::FileSystemType = crate::FileSystemType::internal("mockfs");
+
     impl SuperBlockOperations for MockFilesystem {
-        fn statfs(&self) -> VfsResult<StatFs> {
+        fn statfs(&self, _super_block: &SuperBlock) -> VfsResult<StatFs> {
             Ok(StatFs {
                 fs_type: 0,
                 block_size: 0,
@@ -1694,9 +1703,14 @@ mod tests_dentry {
         }
     }
 
-    impl AddressSpaceOperations for MockFileOps {
-        fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
-            let data = self.data.lock();
+    struct MockAddressSpaceOperations;
+
+    static MOCK_ADDRESS_SPACE_OPERATIONS: MockAddressSpaceOperations = MockAddressSpaceOperations;
+
+    impl AddressSpaceOperations for MockAddressSpaceOperations {
+        fn read_at(&self, mapping: &AddressSpace, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+            let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
+            let data = inode.private::<MockFileOps>()?.data.lock();
             let start = offset as usize;
             if start >= data.len() {
                 return Ok(0);
@@ -1706,8 +1720,9 @@ mod tests_dentry {
             Ok(count)
         }
 
-        fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
-            let mut data = self.data.lock();
+        fn write_at(&self, mapping: &AddressSpace, buf: &[u8], offset: u64) -> VfsResult<usize> {
+            let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
+            let mut data = inode.private::<MockFileOps>()?.data.lock();
             let start = offset as usize;
             if start + buf.len() > data.len() {
                 data.resize(start + buf.len(), 0);
@@ -2064,7 +2079,7 @@ mod tests_dentry {
     fn test_create_instantiates_cached_lookup_miss() {
         let fs = Arc::new(MockFilesystem);
         let root = make_dir_entry(fs.clone(), 24, "");
-        let _super_block = SuperBlock::new(&crate::super_block::TEST_FILE_SYSTEM_TYPE, fs, |_| {
+        let _super_block = SuperBlock::new(&MOCK_FILE_SYSTEM_TYPE, &MOCK_SUPER_OPERATIONS, |_| {
             root.clone()
         });
 
@@ -2271,11 +2286,9 @@ mod tests_dentry {
         let child = make_renamable_dir_entry(48, Some(source.clone()), "child");
         root.insert_cache(String::from("source"), source.clone());
         source.insert_cache(String::from("child"), child.clone());
-        let _super_block = SuperBlock::new(
-            &crate::super_block::TEST_FILE_SYSTEM_TYPE,
-            Arc::new(MockFilesystem),
-            |_| root.clone(),
-        );
+        let _super_block = SuperBlock::new(&MOCK_FILE_SYSTEM_TYPE, &MOCK_SUPER_OPERATIONS, |_| {
+            root.clone()
+        });
 
         assert_eq!(
             root.rename("source", &child, "moved", RenameFlags::empty()),
@@ -2298,11 +2311,9 @@ mod tests_dentry {
         root.insert_cache(String::from("ancestor"), ancestor.clone());
         ancestor.insert_cache(String::from("old"), old_parent.clone());
         old_parent.insert_cache(String::from("source"), source.clone());
-        let _super_block = SuperBlock::new(
-            &crate::super_block::TEST_FILE_SYSTEM_TYPE,
-            Arc::new(MockFilesystem),
-            |_| root.clone(),
-        );
+        let _super_block = SuperBlock::new(&MOCK_FILE_SYSTEM_TYPE, &MOCK_SUPER_OPERATIONS, |_| {
+            root.clone()
+        });
 
         assert_eq!(
             old_parent.rename("source", &root, "ancestor", RenameFlags::empty()),
@@ -2326,11 +2337,9 @@ mod tests_dentry {
         root.insert_cache(String::from("old"), old_parent.clone());
         root.insert_cache(String::from("new"), new_parent.clone());
         old_parent.insert_cache(String::from("source"), source.clone());
-        let _super_block = SuperBlock::new(
-            &crate::super_block::TEST_FILE_SYSTEM_TYPE,
-            Arc::new(MockFilesystem),
-            |_| root.clone(),
-        );
+        let _super_block = SuperBlock::new(&MOCK_FILE_SYSTEM_TYPE, &MOCK_SUPER_OPERATIONS, |_| {
+            root.clone()
+        });
 
         old_parent
             .rename("source", &new_parent, "target", RenameFlags::empty())
@@ -2400,8 +2409,8 @@ mod tests_dentry {
     fn test_superblock_inode_cache_reuses_live_identity() {
         let fs = Arc::new(MockFilesystem);
         let super_block = SuperBlock::new(
-            &crate::super_block::TEST_FILE_SYSTEM_TYPE,
-            fs.clone(),
+            &MOCK_FILE_SYSTEM_TYPE,
+            &MOCK_SUPER_OPERATIONS,
             |super_block| {
                 let root_inode = super_block.get_or_init_inode(1, || {
                     VfsInode::new_dir_with_defaults(
@@ -2418,6 +2427,7 @@ mod tests_dentry {
             VfsInode::new_file_with_address_space_and_flags(
                 Arc::new(MockFileOps::new(fs.clone(), 50, b"first")),
                 NodeFlags::empty(),
+                &MOCK_ADDRESS_SPACE_OPERATIONS,
                 inode_init(50, NodeType::RegularFile, b"first".len() as u64),
             )
         });
@@ -2439,6 +2449,7 @@ mod tests_dentry {
             VfsInode::new_file_with_address_space_and_flags(
                 Arc::new(MockFileOps::new(fs, 50, b"replacement")),
                 NodeFlags::empty(),
+                &MOCK_ADDRESS_SPACE_OPERATIONS,
                 inode_init(50, NodeType::RegularFile, b"replacement".len() as u64),
             )
         });
@@ -2452,8 +2463,8 @@ mod tests_dentry {
     fn test_superblock_inode_cache_isolates_equal_inode_numbers() {
         let fs = Arc::new(MockFilesystem);
         let first_super_block = SuperBlock::new(
-            &crate::super_block::TEST_FILE_SYSTEM_TYPE,
-            fs.clone(),
+            &MOCK_FILE_SYSTEM_TYPE,
+            &MOCK_SUPER_OPERATIONS,
             |super_block| {
                 let root_inode = super_block.get_or_init_inode(1, || {
                     VfsInode::new_dir_with_defaults(
@@ -2465,8 +2476,8 @@ mod tests_dentry {
             },
         );
         let second_super_block = SuperBlock::new(
-            &crate::super_block::TEST_FILE_SYSTEM_TYPE,
-            fs.clone(),
+            &MOCK_FILE_SYSTEM_TYPE,
+            &MOCK_SUPER_OPERATIONS,
             |super_block| {
                 let root_inode = super_block.get_or_init_inode(1, || {
                     VfsInode::new_dir_with_defaults(
@@ -2482,6 +2493,7 @@ mod tests_dentry {
             VfsInode::new_file_with_address_space_and_flags(
                 Arc::new(MockFileOps::new(fs.clone(), 50, b"first")),
                 NodeFlags::empty(),
+                &MOCK_ADDRESS_SPACE_OPERATIONS,
                 inode_init(50, NodeType::RegularFile, b"first".len() as u64),
             )
         });
@@ -2489,6 +2501,7 @@ mod tests_dentry {
             VfsInode::new_file_with_address_space_and_flags(
                 Arc::new(MockFileOps::new(fs, 50, b"second")),
                 NodeFlags::empty(),
+                &MOCK_ADDRESS_SPACE_OPERATIONS,
                 inode_init(50, NodeType::RegularFile, b"second".len() as u64),
             )
         });
@@ -2508,8 +2521,8 @@ mod tests_dentry {
     fn test_failed_root_initialization_drops_nascent_superblock() {
         let mut nascent_super_block = None;
         let result = SuperBlock::try_new_with_flags(
-            &crate::super_block::TEST_FILE_SYSTEM_TYPE,
-            Arc::new(MockFilesystem),
+            &MOCK_FILE_SYSTEM_TYPE,
+            &MOCK_SUPER_OPERATIONS,
             crate::SuperBlockFlags::empty(),
             |super_block| {
                 nascent_super_block = Some(Arc::downgrade(super_block));
@@ -2540,11 +2553,9 @@ mod tests_dentry {
     fn test_dentry_cache_retains_hashed_children_and_preserves_parent_lifetime() {
         let fs = Arc::new(MockFilesystem);
         let root = make_dir_entry(fs.clone(), 13, "");
-        let _super_block = SuperBlock::new(
-            &crate::super_block::TEST_FILE_SYSTEM_TYPE,
-            fs.clone(),
-            |_| root.clone(),
-        );
+        let _super_block = SuperBlock::new(&MOCK_FILE_SYSTEM_TYPE, &MOCK_SUPER_OPERATIONS, |_| {
+            root.clone()
+        });
         let cached = make_dir_entry_with_parent(fs.clone(), 14, Some(root.clone()), "cached");
         let cached_weak = Arc::downgrade(&cached.0);
         root.insert_cache(String::from("cached"), cached.clone());
@@ -2572,11 +2583,9 @@ mod tests_dentry {
     fn test_hashed_child_without_external_reference_keeps_directory_nonempty() {
         let fs = Arc::new(MockFilesystem);
         let root = make_dir_entry(fs.clone(), 17, "");
-        let _super_block = SuperBlock::new(
-            &crate::super_block::TEST_FILE_SYSTEM_TYPE,
-            fs.clone(),
-            |_| root.clone(),
-        );
+        let _super_block = SuperBlock::new(&MOCK_FILE_SYSTEM_TYPE, &MOCK_SUPER_OPERATIONS, |_| {
+            root.clone()
+        });
         let directory = make_dir_entry_with_parent(fs.clone(), 18, Some(root.clone()), "directory");
         root.insert_cache(String::from("directory"), directory.clone());
         let (child, _) = make_file_entry(fs, 19, Some(directory.clone()), "child");
@@ -2657,11 +2666,9 @@ mod tests_dentry {
     fn test_lookup_non_cacheable_positive_retracts() {
         let fs = Arc::new(MockFilesystem);
         let (dir, ops) = make_non_cacheable_dir(fs.clone(), 2, None, "dir");
-        let sb = SuperBlock::new(
-            &crate::super_block::TEST_FILE_SYSTEM_TYPE,
-            fs.clone(),
-            |_| dir.clone(),
-        );
+        let sb = SuperBlock::new(&MOCK_FILE_SYSTEM_TYPE, &MOCK_SUPER_OPERATIONS, |_| {
+            dir.clone()
+        });
 
         let (child, _) = make_file_entry(fs, 3, Some(dir.clone()), "x");
         *ops.lookup_result.lock() = Some(child.clone());
@@ -2679,7 +2686,7 @@ mod tests_dentry {
     fn test_lookup_non_cacheable_negative_retracts() {
         let fs = Arc::new(MockFilesystem);
         let (dir, _) = make_non_cacheable_dir(fs.clone(), 2, None, "dir");
-        let sb = SuperBlock::new(&crate::super_block::TEST_FILE_SYSTEM_TYPE, fs, |_| {
+        let sb = SuperBlock::new(&MOCK_FILE_SYSTEM_TYPE, &MOCK_SUPER_OPERATIONS, |_| {
             dir.clone()
         });
 
@@ -2699,11 +2706,9 @@ mod tests_dentry {
     fn test_bind_super_block_skips_non_cacheable_children() {
         let fs = Arc::new(MockFilesystem);
         let (dir, _) = make_non_cacheable_dir(fs.clone(), 2, None, "dir");
-        let sb = SuperBlock::new(
-            &crate::super_block::TEST_FILE_SYSTEM_TYPE,
-            fs.clone(),
-            |_| dir.clone(),
-        );
+        let sb = SuperBlock::new(&MOCK_FILE_SYSTEM_TYPE, &MOCK_SUPER_OPERATIONS, |_| {
+            dir.clone()
+        });
         let (child, _) = make_file_entry(fs.clone(), 3, Some(dir.clone()), "child");
         dir.0
             .children
@@ -2715,11 +2720,9 @@ mod tests_dentry {
 
         // Control: a cacheable directory does publish its children.
         let cacheable = make_dir_entry(fs.clone(), 4, "cacheable");
-        let sb2 = SuperBlock::new(
-            &crate::super_block::TEST_FILE_SYSTEM_TYPE,
-            fs.clone(),
-            |_| cacheable.clone(),
-        );
+        let sb2 = SuperBlock::new(&MOCK_FILE_SYSTEM_TYPE, &MOCK_SUPER_OPERATIONS, |_| {
+            cacheable.clone()
+        });
         let (child2, _) = make_file_entry(fs, 5, Some(cacheable.clone()), "child");
         cacheable
             .0
@@ -2735,11 +2738,9 @@ mod tests_dentry {
     fn test_replace_lookup_candidate_preserves_replacer() {
         let fs = Arc::new(MockFilesystem);
         let dir = make_dir_entry(fs.clone(), 2, "dir");
-        let sb = SuperBlock::new(
-            &crate::super_block::TEST_FILE_SYSTEM_TYPE,
-            fs.clone(),
-            |_| dir.clone(),
-        );
+        let sb = SuperBlock::new(&MOCK_FILE_SYSTEM_TYPE, &MOCK_SUPER_OPERATIONS, |_| {
+            dir.clone()
+        });
 
         // Simulate the concurrent-replacement window: the children slot
         // already holds another thread's candidate, so a stale replace must

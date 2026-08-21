@@ -9,7 +9,6 @@
 extern crate alloc;
 
 mod address_space;
-mod anon_inode;
 mod fiemap;
 mod file;
 mod file_system_type;
@@ -39,15 +38,14 @@ pub use address_space::{
     AddressSpace, AddressSpaceOperations, AddressSpaceViewGuard, PageMkwriteRequest,
     ReadaheadControl, WriteBeginRequest, WriteEndRequest, WritebackControl, WritebackSyncMode,
 };
-pub use anon_inode::{AnonInodeFs, init_anon_inodefs};
 pub use fiemap::{FiemapExtentFlags, FiemapExtentInfo, FiemapExtentWriter, FiemapFlags};
 pub use file::{FMode, FileDirOperations, FileOperations, VfsFile, VfsFileBuilder};
 pub use file_system_type::{
-    FileSystemType, FileSystemTypeFlags, GetTreeFn, get_filesystem_type, register_filesystem,
-    registered_filesystems,
+    FileSystemType, FileSystemTypeFlags, FsContextOperations, GetTreeFn, InitFsContextFn,
+    ReconfigureFn, get_filesystem_type, register_filesystem, registered_filesystems,
 };
 pub use filename::Filename;
-pub use fs_context::FsContext;
+pub use fs_context::{FsContext, FsContextPurpose};
 pub use kiocb::Kiocb;
 pub use lookup::{LookupFlags, LookupIntent, MagicLinkOps, ResolvedObject};
 pub use mount::{MntNamespace, Mount, MountFlags, MountIdmap, NamespaceClone, Path};
@@ -57,7 +55,7 @@ pub use node::{
     GetattrQueryFlags, GetattrRequestMask, InodeAttributeOperations, InodeDirOperations,
     InodeFiemapOperations, InodeLookupFlags, InodeOperations, InodeSymlinkOperations,
     InodeUpdateTime, LockedDentry, MmapMapper, NodeFlags, RenameFlags, VfsInode, VfsInodeInit,
-    WeakVfsInode, cdev_add, cdev_del, inode_init_owner,
+    WeakVfsInode, cdev_add, cdev_del, empty_inode_operations, get_next_ino, inode_init_owner,
 };
 pub(crate) use node::{
     DentryKey, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive,

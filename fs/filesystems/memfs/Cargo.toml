@@ -14,6 +14,7 @@ kcred.workspace = true
 klazy.workspace = true
 kvfs.workspace = true
 macros.workspace = true
+memaddr.workspace = true
 ktime_types.workspace = true
 
 ksync.workspace = true

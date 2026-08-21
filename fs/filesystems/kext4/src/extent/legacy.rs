@@ -4,7 +4,7 @@
 
 use super::{BlockMapping, BlockMappingFlags, map::ext4_block_bits};
 use crate::{
-    BlockCount, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Result, FilesystemBlock, InodeNumber,
+    BlockCount, CorruptKind, Ext4Error, Ext4Result, Ext4SbInfo, FilesystemBlock, InodeNumber,
     LogicalBlock, PhysicalBlock, disk::codec, inode::Ext4Inode,
 };
 
@@ -87,7 +87,7 @@ pub(super) fn legacy_max_file_size(block_size: u32, has_huge_file: bool) -> Ext4
         .ok_or(Ext4Error::Overflow)
 }
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     pub(super) fn map_legacy_blocks(
         &self,
         inode: &Ext4Inode,
@@ -294,7 +294,7 @@ impl Ext4Filesystem {
     /// Linux `ext4_ind_check_inode` equivalent: validates all 12 direct block
     /// pointers in `i_data[]` against system zones proactively.
     ///
-    /// Called exactly once per inode at load time by [`Ext4Filesystem::iget_inner`]
+    /// Called exactly once per inode at load time by [`Ext4SbInfo::iget_inner`]
     /// before the inode object is published, so that on-disk corruption is
     /// detected when the inode is read rather than on the first direct-block
     /// mapping.

@@ -17,7 +17,7 @@ use linux_raw_sys::general::{
     O_RDWR,
 };
 
-use crate::{MemoryFs, MemoryNode, TMPFS_MAGIC};
+use crate::{MemoryFs, MemoryNode, TMPFS_MAGIC, TMPFS_TYPE};
 
 bitflags::bitflags! {
     /// Memfd seal bits stored on a shmem inode.
@@ -38,14 +38,14 @@ bitflags::bitflags! {
 
 /// Creates a tmpfs superblock.
 pub fn new_tmpfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
-    new_tmpfs_with_type(&crate::TMPFS_TYPE, superblock_flags)
+    new_tmpfs_with_type(&TMPFS_TYPE, superblock_flags)
 }
 
 pub(crate) fn new_tmpfs_with_type(
     file_system_type: &'static FileSystemType,
     superblock_flags: SuperBlockFlags,
 ) -> Arc<SuperBlock> {
-    MemoryFs::new_with_file_system_type_superblock_flags_and_root_mode(
+    MemoryFs::new_with_name_superblock_flags_and_root_mode(
         file_system_type,
         TMPFS_MAGIC,
         superblock_flags,

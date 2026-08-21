@@ -27,8 +27,8 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   当前操作的授权主体。
 - `VfsFile::cred()` 暴露 open 时捕获的不可变 credential，供需要 Linux `f_cred` 语义
   的文件操作读取。
-- `AnonInodeFs::global()` 是运行时匿名文件创建入口，但它只接受已经由 boot 阶段
-  初始化好的 singleton；不从用户输入直接触发全局 VFS 初始化。
+- superblock 默认 dentry operations 只接受内核构造的静态 table；dentry 绑定后不能
+  从用户输入安装或替换 operation identity。
 - 文件系统类型注册表只接受内核构造的静态描述符；用户提供的类型名只能执行精确查找，
   不能安装或替换注册项。
 - `FsContext::data()` 只暴露 syscall 层已经有界复制的 opaque mount-data slice；filesystem
@@ -69,8 +69,10 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   mapping lock 和 delayed-state lock 发布 reservation，不依赖 inode data lock。
 - live child dentry 强持有 parent，parent 只保存 child 的弱索引；superblock dcache
   强持有 hashed dentry，驱逐时必须同时移除弱索引和 dcache 所有权。
-- `AnonInodeFs` singleton 必须先完成 `init_anon_inodefs()` 发布，后续 `global()`
-  返回的引用才有效；运行时路径不得绕过该初始化顺序。
+- dentry 继承的 operation table 必须与其唯一 superblock 的默认 `s_d_op` 对应物一致；
+  绑定后不得更换 table 或重绑 superblock。
+- pseudo filesystem 的 magic、block size、最大文件大小和 root inode 由通用 helper 一次
+  安装；具体实现不得在 private state 复制另一组 geometry/identity。
 - `Nameidata` 不持有 credential；一次操作的调用者必须在整个方法链中传递同一个 `&Cred`。
 - 路径中间目录在 lookup 下一组件前必须通过 `MAY_EXEC`。
 - 尾随 `/` 必须在最终组件 lookup 前强制 `FOLLOW_FINAL | DIRECTORY`；最终
@@ -112,7 +114,14 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   upgrade，也不得把同一对象绑定到另一个 superblock。合法 pathname callback 由 `Path/Mount`
   保活 superblock；绕过该 owner 调用返回 `ESTALE`。
 - `VfsInode` 只拥有一个 `AddressSpace`，MM/filemap 只经 `VfsFile::mapping()` 获取它；
+  address-space operation table 必须是所有 inode 共享的静态表，callback 只使用传入 mapping
+  的唯一 host inode/superblock，不得把 filesystem inode 同时作为 aops object，也不得保存平行
+  owner 回指。通用 block size 和 max file size 只由 `SuperBlock` 保存。
   不得向 MM 暴露或额外强持有内部 `PageCache`。
+- `SuperBlock` 的 operation table 与 filesystem-private state 分离，对应 Linux `s_op` 与
+  `s_fs_info`。构造 API 只接受静态共享 operation table；filesystem callback 必须通过绑定到
+  `&SuperBlock` 的 typed borrow 恢复 private state，不得取得可逃逸的 private owner、在
+  operation object 中保存 mount owner，或建立第二个 filesystem identity。
 - pathname FIFO 的活动 `PipeObject` 必须由 `VfsInode` 的 typed slot 持有；共享
   `FifoFileOperations` 不得保存 session 状态。
 - pipe 访问方向只能来自 `VfsFile::mode`，HUP generation snapshot 只能来自
@@ -139,23 +148,22 @@ remount/reconfigure 在替换 flags 前校验目标是当前 mount namespace 中
 的根路径。普通 remount 独立接收 superblock flags 和 per-mount flags，并同步更新共享
 superblock 的只读策略；`MS_REMOUNT|MS_BIND` 仅更新目标 mount 的 per-mount flags。
 superblock flags 由 `AtomicSuperBlockFlags` 封装为强类型 `SuperBlockFlags`；普通 remount
-在发布拟议 flags 前先拒绝 read-only block device 的读写目标，再调用 filesystem
-`reconfigure` hook，并由每个 superblock 的
+构造 purpose 为 reconfigure 的 `FsContext`，在发布拟议 flags 前调用静态
+`FsContextOperations::reconfigure`，并由每个 superblock 的
 umount lock 串行化 hook、发布与最终 shutdown。最后 active 引用先在 lifecycle lock 下
 判定，在取得 umount lock 后重新校验并切换到 dying；shutdown callback 不持有 lifecycle
-lock，dying/dead 状态拒绝新的 mount activation。默认 hook 接受其余纯 VFS flags 变更，
-device-less 或文件系统固有的只读策略由后端拒绝。显式 filesystem sync 和全局 Weak
-registry sync snapshot
+lock，dying/dead 状态拒绝新的 mount activation。context 绑定唯一目标 superblock，callback
+只从 context 恢复 owner；VFS 在调用前验证 identity。context 分别独占 parsed `fs_private`
+和拟议 `s_fs_info`，并携带 `sb_flags_mask`，因此失败 transaction 不污染既有 `s_fs_info`。
+默认 hook 接受纯 VFS flags 变更；block-backed superblock 由 VFS 在 hook 前统一验证
+canonical device 的只读状态。显式 filesystem
+sync 和全局 Weak registry sync snapshot
 也通过同一 umount lock 与 final shutdown 串行化，并跳过 dying/dead superblock。
 `get_tree_bdev` 在调用 filesystem fill-super 前拒绝对 canonical read-only block device 的
-可写 mount，避免把介质只读约束延迟成后续文件系统 I/O 错误。它还在 VFS-wide
-superblock registry 中按 canonical type 与 `BlockDevice` 对象 identity 串行化初始化；VFS
-先发布带 `s_type/s_bdev/s_flags` 的 nascent superblock，后端只安装 operations 与 root。同 identity
-只允许一个 available superblock，已有实例的 RO/RW 状态不匹配时返回 `ResourceBusy`。
-block-core exclusive claim 同时阻止不同 filesystem type 拥有同一 canonical device；相同
-`dev_t` 重新注册所得的新对象不会复用旧 superblock。最后一个 active mount 完成 shutdown、
-进入 dead 并释放 claim 后才删除 identity entry 并唤醒等待者；等待者观察到
-nascent 失败或 dying/dead 状态时只重试，不拥有 entry 的提前删除权限。
+可写 mount，避免把介质只读约束延迟成后续文件系统 I/O 错误。它在 fill 前按 canonical
+filesystem-type 指针和 canonical block-device 对象建立 nascent reservation 并持有独占
+claim；并发相同 identity 等待同一 fill，失败或 final shutdown 都在删除 registry identity、
+释放 claim 后唤醒重试。不同 filesystem type 不能同时拥有同一 device。
 mount attach/detach 在 mountpoint inode namespace lock 下修改 topology。每个 child mount
 只用一个 mutex 保护完整 parent `Path`，parent child map 保存 `Weak<Mount>`，namespace
 registry 保存可见 mount 的 `Arc<Mount>`；detach 移除 registry 引用前先清空 parent path。
@@ -180,8 +188,8 @@ identity 决定，父目录锁按 ancestor-first 顺序；互不为祖先时先�
 inode 依赖单 alias 不变量，非目录 alias 对应的 inode lock 按 identity 去重并按指针值排序。
 mount topology lock 始终在相关 inode namespace lock 之后获取。
 
-匿名 inode pseudo fs 的 singleton 由 `Once` 发布，但不允许普通运行时路径触发初始化；
-并发创建匿名文件只共享已经发布的 mount/inode，不竞争初始化闭包。
+默认 dentry operation table 在 nascent superblock 初始化时发布。root/child dentry 只继承
+静态引用；并发路径不分配或替换 operation object。
 
 FIFO session 生命周期使用 inode pipe-slot lock 串行化 get/create/`files` transition 与
 release/clear，slot lock 获取后才可获取 pipe state lock。reader/writer close 先释放
@@ -206,7 +214,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-02 | rename 模式冲突 | 中 | `EXCHANGE` 与 `NOREPLACE/WHITEOUT` 组合 | syscall 与 VFS 入口双重校验 |
 | T-03 | flags 家族误传 | 中 | 内部 API 使用裸整数 | 独立 bitflags 类型形成编译期隔离 |
 | T-04 | dentry 驱逐遗漏导致目录状态或资源生命周期错误 | 中 | namespace 更新只修改弱索引或只修改 dcache | insert/remove/forget 路径成对更新两层缓存，并以行为测试覆盖最后一个外部引用释放后的目录语义 |
-| T-05 | 运行时并发首次访问匿名 inode fs 导致初始化卡住 | 中 | 复杂 VFS 对象放在 lazy 首次访问路径中 | boot 阶段调用 `init_anon_inodefs()`，`global()` 只读取已发布对象 |
+| T-05 | dentry operation 与所属 superblock 不一致 | 高 | 具体文件系统在 dentry 创建后逐个补装或替换 operation object | nascent superblock 安装静态默认 `s_d_op` 对应物，root/child 在绑定时继承且不可替换 |
 | T-06 | 路径只检查最终 inode，绕过不可搜索目录或错误接受不可 lookup 的最终对象 | 高 | namei 未检查中间目录 execute/search，或把尾随 `/`、`LOOKUP_DIRECTORY` 留给 open 层处理 | 每次 lookup 下一组件前调用 `Path::permission(MAY_EXEC, cred)`；通用 `path_lookupat()` 在最终 walk 前转换尾随 `/`，并用 `Dentry::can_lookup()` 消费目录约束 |
 | T-07 | owner class 缺位后错误退回 group/other | 高 | DAC 把三类权限当作可任选集合 | `generic_permission` 按 owner、group、other 互斥顺序只选择一类 |
 | T-08 | namespace 修改绕过父目录权限 | 高 | 后端 callback 被直接调用或 VFS wrapper 漏检 | `Path` mutation API 在最终对象仍受 namespace lock 保护时执行父目录 `MAY_WRITE | MAY_EXEC` |
@@ -236,7 +244,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-23 | filesystem callback 替换 VFS 已检查的创建对象 | 高 | callback 返回另一个 parent/name 下的 dentry | create-like callback 只能实例化事务 negative dentry；lookup alternate result 校验 positive state、parent 和 name |
 | T-24 | 并发 slow lookup 建立重复 dentry | 高 | cache miss 检查与 candidate 发布分离，或等待者提前观察未完成对象 | candidate 在 callback 前原子加入 dcache；owner 保持 parallel-lookup 状态和 lookup mutex，等待者只在 lookup done 后读取结果 |
 | T-29 | detached mount 仍可沿旧 parent 返回原 namespace | 高 | 卸载只删除 parent child map，却保留 mount 中的 parent/mountpoint 状态 | parent 和 mountpoint 合并为一个受 mutex 保护的 `Option<Path>`；detach 在 mountpoint namespace lock 下移除 topology 并清空该 location |
-| T-30 | mount 支持集合、已挂载 superblock 名称与 `/proc/filesystems` 漂移 | 中 | syscall、boot、superblock operations 和 procfs 各自维护文件系统名称、对象或构造分支 | registry 只保存 canonical 静态 `FileSystemType` 引用；`FsContext` 将同一引用写入 `SuperBlock.s_type`；POSIX/boot 通过同一 lookup 和 `mount_new` 创建，mount/procfs 都从 canonical type 读取名称；重复名称注册失败 |
+| T-30 | mount 支持集合与 `/proc/filesystems` 漂移 | 中 | syscall 和 procfs 各自维护文件系统名称或构造分支 | 两者都读取同一个 `FileSystemType` 注册表；重复名称注册失败 |
 | T-31 | immutable symlink target 出现两份可分离状态 | 中 | simple-file closure 和 inode cache 分别保存目标 | 创建时直接构造 cached-link inode；目标只存于 inode，node 只保存长度等元数据 |
 | T-34 | 最后一个 mount 释放时丢失 dirty page、inode metadata 或 journal checkpoint | 高 | topology detach 后 superblock 没有 active 生命周期，Weak registry 也无法保活 | `VfsMount` 获取/释放 superblock active 引用；最后一个引用在 umount lock 下执行 writeback、dcache eviction 和最终 filesystem/device sync；错误记录后仍完成 teardown |
 | T-35 | 递归卸载 overmount 子树留下 registry 中不可达 mount | 高 | 只遍历 visible children，或边遍历边修改 topology | 收集每个 child mountpoint 的完整 covers 链，先验证全部 registry membership，再执行无失败分支的 topology commit |
@@ -245,8 +253,8 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-38 | `listxattr` 为不可见名称或属性值建立中间副本，造成不必要的内存放大 | 中 | 后端先返回拥有 value 的属性向量，KVFS 再过滤 `trusted.*` | `InodeOperations::list_xattrs` 通过 borrowed name sink 输出；`Path` 在流中先过滤 `trusted.*`，调用者只接收可见名称 |
 | T-39 | immutable 或 append-only inode 的 xattr 仍可被修改 | 中 | namespace 特例在通用 inode 状态检查前直接授权，或文件系统未把磁盘 inode flags 映射到 KVFS | `check_xattr_permission()` 在所有 namespace 分支前检查 `NodeFlags::IMMUTABLE/APPEND_ONLY`，set/remove 统一返回 `EPERM`；具体 bridge 必须在建立 VFS inode identity 时映射后端 flags |
 | T-40 | inode 初始化或驱逐竞争产生第二个 resident identity，或全 cache 唤醒形成惊群 | 高 | cache miss 在构造后才占 slot、Weak upgrade 失败立即重建，或所有 inode 共用一个等待队列 | cache 先发布 `New`；并发 initializer 在该 slot 等待；最后引用 drop 发布 `Freeing` 后再调用 hook；同号 lookup 等待 entry 删除并重试；每 slot 队列只唤醒同号等待者，后端不接收 `EINVAL` 风格的竞争错误 |
-| T-41 | 同一 filesystem type 和 block device 建立两个 live superblock | 高 | 每次 `get_tree_bdev` 都调用后端 fill，或旧实例 shutdown 前删除 identity | VFS registry 在 fill 前按 `(s_type, BlockDevice object)` 发布 nascent superblock；并发 mount 等待并复用同一 available instance；RO/RW 不一致按 Linux `get_tree_bdev_flags()` 返回 `EBUSY`；block holder 阻止不同 filesystem instance 同时取得同一 canonical device；shutdown 完成后才移除 entry |
-| T-42 | filesystem 在 mount 完成后继续使用失效的 mount data borrow | 高 | `get_tree()` 把 `FsContext::data()` byte-slice 引用直接存入 superblock state | mount data 只作为同步 `get_tree()` 输入；filesystem 必须解析并保存 owned/typed state，generic fill closure 为 `FnOnce` |
+| T-41 | 同一 block device 出现两个 mutable superblock，或 mount 到正在 teardown 的实例 | 高 | filesystem 每次 mount 自行分配 state，或 `get_tree` 与 active acquisition 间无状态校验 | KVFS 按 canonical `(s_type, BlockDevice)` 建立 nascent reservation 和独占 claim；同 identity 等待/复用，RO/RW 不一致或跨类型冲突返回 `EBUSY`；`mount_new` 在 dying/dead activation race 后重试 |
+| T-42 | filesystem 在 transaction 完成后继续使用失效的 mount data borrow | 高 | filesystem 把 `FsContext::data()` byte-slice 引用直接存入 superblock state | opaque data 只作为同步 context 输入；filesystem 必须解析并保存 owned/typed state，generic fill closure 为 `FnOnce` |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -256,7 +264,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | F-02 | rename 参数非法 | 模式冲突或 helper 不支持 | rename 失败 | namespace 保持不变 | 2 | 操作前校验 |
 | F-03 | 文件系统回调失败 | 后端 I/O 或元数据错误 | 当前操作失败 | 可能降级为 I/O 错误 | 2 | 通过 `VfsResult` 传播 |
 | F-04 | hashed dentry 未被及时回收 | 当前阶段没有 Linux shrinker/LRU | dcache 占用增长 | 长期运行可能增加内存压力 | 3 | unlink、rename、forget 显式驱逐；后续接入全局回收策略 |
-| F-05 | 匿名 inode fs 未初始化即使用 | boot 初始化顺序缺失 | 当前调用 panic | 暴露启动顺序回归 | 3 | `fs_boot::prepare_namespace()` 显式初始化，测试覆盖启动路径 |
+| F-05 | dentry 未继承默认 operations | superblock 构造或绑定路径漏传 | dynamic name/lookup policy 缺失 | 具体 pseudo filesystem 行为错误 | 3 | superblock bind 统一继承，具体文件系统测试 root/per-file dentry 行为 |
 | F-06 | 权限检查失败 | mode、owner 或组不允许请求 | 当前 VFS 操作返回 `PermissionDenied` | namespace 和 inode 状态保持不变 | 3 | 在后端 mutation 前完成通用检查并传播错误 |
 | F-07 | 后端不能保存 Unix owner | 磁盘格式没有 UID/GID | getattr 无法完整反映创建身份 | DAC 语义受文件系统能力限制 | 3 | 文档明确后端限制；支持 owner 的后端必须持久化 helper 结果 |
 | F-08 | split truncate 在 backing prepare 后 cache invalidation 失败 | 分配或 mapping invalidation 错误 | 当前 truncate 返回失败 | backing inode 可能保持 orphan/recovery state | 2 | 由具体文件系统的持久化 recovery protocol 收敛，禁止静默执行 finish |
@@ -300,8 +308,7 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 - mount attach/detach 是否校验当前 namespace membership、持有 mountpoint inode
   namespace lock，并在 detach 后清空 parent location。
 - 没有外部 `Dentry` 引用时，hashed child 是否仍能参与目录非空判断。
-- 新增匿名 inode 使用点是否只调用 `AnonInodeFs::global()`，且不重新引入 lazy 首次访问
-  初始化。
+- 新 filesystem 默认 dentry operations 是否安装在 superblock，而不是 per-dentry 分配和补装？
 - 新 pathname 入口是否显式接收并逐层传递同一个 `&Cred`。
 - 中间目录 search、最终 inode 和父目录 mutation 权限是否分别在正确阶段检查。
 - 尾随 `/` 是否强制跟随最终 symlink，所有 `LOOKUP_DIRECTORY` 是否统一要求
@@ -329,11 +336,13 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 - `New/Freeing` 是否在 KVFS 内等待重试，eviction finish 是否只删除精确匹配的旧 entry？
 - 每个 `VfsMount` 是否恰好取得和释放一次 superblock active 引用，非最后 mount 是否避免
   teardown，最后一个引用是否只执行一次 shutdown。
+- block-backed fill 是否只初始化 KVFS 已 reservation 的 nascent superblock；失败与 final
+  shutdown 是否都释放 claim、删除 identity 并唤醒等待者；RO/RW 不一致是否返回 `EBUSY`。
 - 递归 detach 是否包含 child overmount stack，并在修改 topology 前完成完整 registry 校验。
 - 每个 namespace mutation 是否获取父目录 exclusive lock。
 - 新文件系统是否只注册一个 canonical 静态 descriptor，且 boot、mount lookup 与
   `/proc/filesystems` 没有新增平行 provider、对象或名称分支。
-- filesystem mount data 是否在 `get_tree()` 内按该类型的 representation 解析，未知或未实现
+- filesystem mount data 是否在 context 初始化阶段按该类型的 representation 解析，未知或未实现
   选项是否明确失败，且 mount state 不保留 `FsContext::data()` 的借用？
 - immutable symlink target 是否只存于 inode cached-link 状态，metadata size 是否同步。
 - unlink/rmdir 和 rename replacement 是否锁住 victim inode。

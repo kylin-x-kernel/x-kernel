@@ -293,22 +293,27 @@ impl WriteEndRequest {
 /// one open file instance.
 pub trait AddressSpaceOperations: Send + Sync + 'static {
     /// Reads backing bytes at `offset`.
-    fn read_at(&self, _buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+    fn read_at(&self, _mapping: &AddressSpace, _buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
         Err(VfsError::NoSuchDevice)
     }
 
     /// Writes backing bytes at `offset`.
-    fn write_at(&self, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
+    fn write_at(&self, _mapping: &AddressSpace, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
         Err(VfsError::NoSuchDevice)
     }
 
     /// Reads backing storage into a newly materialized folio.
-    fn read_folio(&self, folio: &mut Folio, index: PageIndex) -> VfsResult<usize> {
+    fn read_folio(
+        &self,
+        mapping: &AddressSpace,
+        folio: &mut Folio,
+        index: PageIndex,
+    ) -> VfsResult<usize> {
         let page = folio.data();
         let offset = index
             .checked_mul(page.len() as u64)
             .ok_or(VfsError::InvalidInput)?;
-        self.read_at(page, offset)
+        self.read_at(mapping, page, offset)
     }
 
     /// Writes all dirty pages known to this address space.
@@ -322,7 +327,8 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
                 .ok_or(VfsError::InvalidInput)?;
             let mut written = 0usize;
             while written < valid_len {
-                let n = self.write_at(&data[written..valid_len], offset + written as u64)?;
+                let n =
+                    self.write_at(mapping, &data[written..valid_len], offset + written as u64)?;
                 if n == 0 {
                     return Err(VfsError::WriteZero);
                 }
@@ -404,7 +410,8 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
 /// VFS address space for one inode.
 pub struct AddressSpace {
     inode: WeakVfsInode,
-    ops: Arc<dyn AddressSpaceOperations>,
+    /// Shared operation table corresponding to Linux `address_space::a_ops`.
+    ops: &'static dyn AddressSpaceOperations,
     object_id: VmObjectId,
     invalidate_lock: RwLock<()>,
     views: Mutex<BTreeMap<MappingViewId, RegisteredView>>,
@@ -415,7 +422,7 @@ impl AddressSpace {
     /// Creates an address space for `inode`.
     pub fn new(
         inode: WeakVfsInode,
-        ops: Arc<dyn AddressSpaceOperations>,
+        ops: &'static dyn AddressSpaceOperations,
         kind: PageCacheKind,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -433,7 +440,7 @@ impl AddressSpace {
     /// Creates the default address space for an inode with the given flags.
     pub fn new_default(
         inode: WeakVfsInode,
-        ops: Arc<dyn AddressSpaceOperations>,
+        ops: &'static dyn AddressSpaceOperations,
         inode_flags: NodeFlags,
     ) -> Arc<Self> {
         Self::new(inode, ops, address_space_mapping_kind(inode_flags))
@@ -544,7 +551,7 @@ impl AddressSpace {
     }
 
     fn read_folio(&self, folio: &mut Folio, index: PageIndex) -> VfsResult<usize> {
-        self.ops.read_folio(folio, index)
+        self.ops.read_folio(self, folio, index)
     }
 
     fn dirty_folio(&self, folio: &mut Folio) -> VfsResult<bool> {
@@ -965,7 +972,7 @@ pub(crate) fn address_space_mapping_kind(inode_flags: NodeFlags) -> PageCacheKin
 pub(crate) fn default_address_space_operations(
     inode_flags: NodeFlags,
     node_type: NodeType,
-) -> Arc<dyn AddressSpaceOperations> {
+) -> &'static dyn AddressSpaceOperations {
     if node_type == NodeType::RegularFile && inode_flags.contains(NodeFlags::ALWAYS_CACHE) {
         in_memory_address_space_operations()
     } else {
@@ -973,18 +980,26 @@ pub(crate) fn default_address_space_operations(
     }
 }
 
-pub(crate) fn in_memory_address_space_operations() -> Arc<dyn AddressSpaceOperations> {
-    Arc::new(InMemoryAddressSpaceOperations)
+pub(crate) fn in_memory_address_space_operations() -> &'static dyn AddressSpaceOperations {
+    &IN_MEMORY_ADDRESS_SPACE_OPERATIONS
 }
 
-pub(crate) fn empty_address_space_operations() -> Arc<dyn AddressSpaceOperations> {
-    Arc::new(EmptyAddressSpaceOperations)
+pub(crate) fn empty_address_space_operations() -> &'static dyn AddressSpaceOperations {
+    &EMPTY_ADDRESS_SPACE_OPERATIONS
 }
 
 struct InMemoryAddressSpaceOperations;
 
+static IN_MEMORY_ADDRESS_SPACE_OPERATIONS: InMemoryAddressSpaceOperations =
+    InMemoryAddressSpaceOperations;
+
 impl AddressSpaceOperations for InMemoryAddressSpaceOperations {
-    fn read_folio(&self, folio: &mut Folio, page_index: PageIndex) -> VfsResult<usize> {
+    fn read_folio(
+        &self,
+        _mapping: &AddressSpace,
+        folio: &mut Folio,
+        page_index: PageIndex,
+    ) -> VfsResult<usize> {
         let _ = page_index;
         let page = folio.data();
         page.fill(0);
@@ -1012,8 +1027,15 @@ impl AddressSpaceOperations for InMemoryAddressSpaceOperations {
 
 struct EmptyAddressSpaceOperations;
 
+static EMPTY_ADDRESS_SPACE_OPERATIONS: EmptyAddressSpaceOperations = EmptyAddressSpaceOperations;
+
 impl AddressSpaceOperations for EmptyAddressSpaceOperations {
-    fn read_folio(&self, _folio: &mut Folio, _index: PageIndex) -> VfsResult<usize> {
+    fn read_folio(
+        &self,
+        _mapping: &AddressSpace,
+        _folio: &mut Folio,
+        _index: PageIndex,
+    ) -> VfsResult<usize> {
         Err(VfsError::InvalidInput)
     }
 
@@ -1042,14 +1064,9 @@ mod tests {
     use super::*;
     use crate::{FileOperations, InodeOperations, NodePermission, Umode, VfsInode, VfsInodeInit};
 
-    /// An `AddressSpaceOperations` that records whether `writepages` was
-    /// called, and how many dirty folios were written back.
-    struct TestOps {
-        writepages_called: Mutex<bool>,
-        writeback_count: Mutex<usize>,
-    }
-
     struct TruncateOps;
+
+    static TRUNCATE_OPERATIONS: TruncateOps = TruncateOps;
 
     impl InodeOperations for TruncateOps {}
     impl FileOperations for TruncateOps {}
@@ -1059,7 +1076,12 @@ mod tests {
             mapping.truncate_setsize(len)
         }
 
-        fn read_folio(&self, folio: &mut Folio, _index: PageIndex) -> VfsResult<usize> {
+        fn read_folio(
+            &self,
+            _mapping: &AddressSpace,
+            folio: &mut Folio,
+            _index: PageIndex,
+        ) -> VfsResult<usize> {
             folio.data().fill(0);
             Ok(folio.data().len())
         }
@@ -1082,46 +1104,40 @@ mod tests {
         }
     }
 
-    impl TestOps {
-        fn new_arc() -> Arc<Self> {
-            Arc::new(Self {
-                writepages_called: Mutex::new(false),
-                writeback_count: Mutex::new(0),
-            })
-        }
-    }
+    struct PanicWritebackOps;
 
-    impl AddressSpaceOperations for TestOps {
-        fn read_folio(&self, folio: &mut Folio, _index: PageIndex) -> VfsResult<usize> {
+    static PANIC_WRITEBACK_OPERATIONS: PanicWritebackOps = PanicWritebackOps;
+
+    impl AddressSpaceOperations for PanicWritebackOps {
+        fn read_folio(
+            &self,
+            _mapping: &AddressSpace,
+            folio: &mut Folio,
+            _index: PageIndex,
+        ) -> VfsResult<usize> {
             folio.data().fill(0);
             Ok(folio.data().len())
         }
 
         fn writepages(
             &self,
-            mapping: &AddressSpace,
-            control: &mut WritebackControl,
+            _mapping: &AddressSpace,
+            _control: &mut WritebackControl,
         ) -> VfsResult<()> {
-            *self.writepages_called.lock() = true;
-            // Simulate writing dirty folios: count and clear them.
-            mapping.writeback_cached_folios(control, |_index, _data, _valid_len| {
-                *self.writeback_count.lock() += 1;
-                Ok(())
-            })
+            panic!("final eviction must not call ordinary writeback")
         }
     }
 
     #[def_test]
     fn address_space_identity_is_owned_by_address_space() {
-        let ops = TestOps::new_arc();
         let first = AddressSpace::new(
             Weak::new(),
-            ops.clone() as Arc<dyn AddressSpaceOperations>,
+            empty_address_space_operations(),
             PageCacheKind::InMemory,
         );
         let second = AddressSpace::new(
             Weak::new(),
-            ops as Arc<dyn AddressSpaceOperations>,
+            empty_address_space_operations(),
             PageCacheKind::InMemory,
         );
 
@@ -1132,10 +1148,9 @@ mod tests {
     /// without forcing ordinary writeback.
     #[def_test]
     fn evict_discards_dirty_folios_without_writeback() {
-        let ops = TestOps::new_arc();
         let address_space = AddressSpace::new(
             Weak::new(),
-            ops.clone() as Arc<dyn AddressSpaceOperations>,
+            &PANIC_WRITEBACK_OPERATIONS,
             PageCacheKind::InMemory,
         );
         address_space
@@ -1145,15 +1160,6 @@ mod tests {
         // Evict — this is the code path that was broken.
         address_space.evict().expect("evict should succeed");
 
-        assert!(
-            !*ops.writepages_called.lock(),
-            "final eviction must not require ordinary writeback"
-        );
-        assert_eq!(
-            *ops.writeback_count.lock(),
-            0,
-            "final eviction must not write back dirty folios"
-        );
         assert_eq!(address_space.nrpages(), 0);
     }
 
@@ -1161,25 +1167,14 @@ mod tests {
     /// does not spuriously write back clean folios.
     #[def_test]
     fn evict_on_clean_address_space_writes_back_zero_folios() {
-        let ops = TestOps::new_arc();
         let address_space = AddressSpace::new(
             Weak::new(),
-            ops.clone() as Arc<dyn AddressSpaceOperations>,
+            &PANIC_WRITEBACK_OPERATIONS,
             PageCacheKind::InMemory,
         );
 
         // Evict on a clean cache should succeed.
         address_space.evict().expect("evict should succeed");
-
-        assert!(
-            !*ops.writepages_called.lock(),
-            "final eviction must not call ordinary writeback"
-        );
-        assert_eq!(
-            *ops.writeback_count.lock(),
-            0,
-            "evict on clean cache should not write back anything",
-        );
     }
 
     #[def_test]
@@ -1187,6 +1182,7 @@ mod tests {
         let inode = VfsInode::new_file_with_address_space_and_flags(
             Arc::new(TruncateOps),
             NodeFlags::ALWAYS_CACHE,
+            &TRUNCATE_OPERATIONS,
             VfsInodeInit::new(
                 1,
                 (PAGE_SIZE_4K * 2) as u64,
@@ -1225,6 +1221,7 @@ mod tests {
         let inode = VfsInode::new_file_with_address_space_and_flags(
             Arc::new(TruncateOps),
             NodeFlags::ALWAYS_CACHE,
+            &TRUNCATE_OPERATIONS,
             VfsInodeInit::new(
                 2,
                 old_len,
@@ -1264,6 +1261,7 @@ mod tests {
         let inode = VfsInode::new_file_with_address_space_and_flags(
             Arc::new(TruncateOps),
             NodeFlags::ALWAYS_CACHE,
+            &TRUNCATE_OPERATIONS,
             VfsInodeInit::new(
                 3,
                 old_len,

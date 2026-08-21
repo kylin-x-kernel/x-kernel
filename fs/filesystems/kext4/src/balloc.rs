@@ -16,7 +16,7 @@ use crate::{
     error::{CorruptKind, Ext4Error, Ext4Result},
     mballoc::{Ext4AllocationFlags, Ext4AllocationRequest},
     superblock::{
-        Ext4Filesystem, bitmap_bit_capacity, count_clear_ext4_bitmap_bits, ensure_metadata_credits,
+        Ext4SbInfo, bitmap_bit_capacity, count_clear_ext4_bitmap_bits, ensure_metadata_credits,
         ext4_bitmap_checksum_matches, ext4_mark_bitmap_end, replace_metadata_access_bytes,
         set_ext4_bitmap_bit, validate_ext4_bitmap_range_set,
     },
@@ -26,7 +26,7 @@ use crate::{
 const BLOCK_ALLOCATOR_METADATA_CREDITS: u32 = 3;
 const METADATA_BLOCK_RELEASE_CREDITS: u32 = BLOCK_ALLOCATOR_METADATA_CREDITS + 1;
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     #[allow(dead_code)]
     pub(crate) fn allocate_block(
         &mut self,

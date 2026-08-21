@@ -912,7 +912,8 @@ impl VfsFile {
             });
     }
 
-    pub(crate) fn set_private_data<T>(&self, value: Arc<T>)
+    /// Attaches typed filesystem or kernel-object state to this open file.
+    pub fn set_private_data<T>(&self, value: Arc<T>)
     where
         T: Any + Send + Sync + 'static,
     {

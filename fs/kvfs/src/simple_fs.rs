@@ -18,7 +18,7 @@ use crate::{
 
 /// A simple filesystem implementation that uses a slab allocator for inodes.
 pub struct SimpleFs {
-    magic: u32,
+    fs_type: u32,
     inodes: Mutex<Slab<()>>,
 }
 
@@ -26,26 +26,34 @@ impl SimpleFs {
     /// Creates a superblock backed by a simple filesystem.
     pub fn new_with(
         file_system_type: &'static FileSystemType,
-        magic: u32,
+        fs_type: u32,
         root: impl FnOnce(Arc<Self>) -> DirMaker,
     ) -> Arc<SuperBlock> {
-        Self::new_with_superblock_flags(file_system_type, magic, SuperBlockFlags::empty(), root)
+        Self::new_with_superblock_flags(file_system_type, fs_type, SuperBlockFlags::empty(), root)
     }
 
     /// Creates a superblock backed by a simple filesystem with explicit flags.
     pub fn new_with_superblock_flags(
         file_system_type: &'static FileSystemType,
-        magic: u32,
+        fs_type: u32,
         superblock_flags: SuperBlockFlags,
         root: impl FnOnce(Arc<Self>) -> DirMaker,
     ) -> Arc<SuperBlock> {
         let fs = Arc::new(Self {
-            magic,
+            fs_type,
             inodes: Mutex::new(Slab::new()),
         });
         let root = root(fs.clone());
         let root = Dentry::new_dir_from_inode(root(), None, String::new());
-        SuperBlock::new_with_flags(file_system_type, fs, superblock_flags, |_| root)
+        SuperBlock::new_with_flags_and_private(
+            file_system_type,
+            &SIMPLE_SUPER_OPERATIONS,
+            fs.clone(),
+            superblock_flags,
+            1,
+            crate::MAX_LFS_FILESIZE,
+            |_| root,
+        )
     }
 
     fn alloc_inode(&self) -> u64 {
@@ -57,9 +65,15 @@ impl SimpleFs {
     }
 }
 
-impl SuperBlockOperations for SimpleFs {
-    fn statfs(&self) -> VfsResult<StatFs> {
-        Ok(simple_statfs(self.magic))
+struct SimpleSuperOperations;
+
+static SIMPLE_SUPER_OPERATIONS: SimpleSuperOperations = SimpleSuperOperations;
+
+impl SuperBlockOperations for SimpleSuperOperations {
+    fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs> {
+        Ok(simple_statfs(
+            super_block.private::<Arc<SimpleFs>>()?.fs_type,
+        ))
     }
 }
 

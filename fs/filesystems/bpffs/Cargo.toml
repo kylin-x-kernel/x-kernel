@@ -9,6 +9,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+anon_inodefs.workspace = true
 hashbrown.workspace = true
 kerrno.workspace = true
 kcred.workspace = true

@@ -3,6 +3,9 @@
 // See LICENSES for license details.
 
 //! FAT filesystem implementation.
+//!
+//! The crate registers its canonical KVFS filesystem type through an initcall;
+//! root probing and ordinary mounts therefore use the same descriptor.
 #![cfg_attr(any(not(test), doc), no_std)]
 #![feature(likely_unlikely)]
 #![allow(clippy::new_ret_no_self)]
@@ -24,16 +27,23 @@ use fs::FatFilesystemGuard;
 use fs_block::SeekableDisk;
 
 fn fat_get_tree(
-    context: &kvfs::FsContext<'_>,
+    context: &mut kvfs::FsContext<'_>,
     lookup_root: &kvfs::Path,
     lookup_pwd: &kvfs::Path,
 ) -> kvfs::VfsResult<alloc::sync::Arc<kvfs::SuperBlock>> {
     kvfs::get_tree_bdev(context, lookup_root, lookup_pwd, FatFilesystem::fill_super)
 }
 
-/// The canonical FAT filesystem type registered with KVFS.
+static FS_CONTEXT_OPERATIONS: kvfs::FsContextOperations =
+    kvfs::FsContextOperations::new(fat_get_tree);
+
+fn init_fs_context(context: &mut kvfs::FsContext<'_>) -> kvfs::VfsResult<()> {
+    context.set_operations(&FS_CONTEXT_OPERATIONS);
+    Ok(())
+}
+
 static FILE_SYSTEM_TYPE: kvfs::FileSystemType =
-    kvfs::FileSystemType::device_backed("vfat", fat_get_tree);
+    kvfs::FileSystemType::device_backed("vfat", init_fs_context);
 
 #[macros::register_init]
 fn init_fat_fs() {

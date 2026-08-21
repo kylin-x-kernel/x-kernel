@@ -22,11 +22,11 @@ use ksync::Mutex;
 use ktime_types::SystemTime;
 use kvfs::{
     AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FileDirOperations,
-    FileOperations, FileSystemType, FsContext, InodeDirOperations, InodeOperations,
-    InodeSymlinkOperations, Kiocb, LockedDentry, Metadata, MetadataUpdate, Mount, NodeFlags,
-    NodePermission, NodeType, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations, Umode,
-    VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest, WriteEndRequest,
-    get_tree_nodev, inode_init_owner,
+    FileOperations, FileSystemType, FsContext, FsContextOperations, InodeDirOperations,
+    InodeOperations, InodeSymlinkOperations, Kiocb, LockedDentry, Metadata, MetadataUpdate, Mount,
+    NodeFlags, NodePermission, NodeType, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations,
+    Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest,
+    WriteEndRequest, get_tree_nodev, inode_init_owner,
     libfs::{simple_getattr, simple_rename, simple_statfs, simple_write_end},
 };
 use slab::Slab;
@@ -36,7 +36,7 @@ pub(crate) const TMPFS_MAGIC: u32 = 0x0102_1994;
 static SYSFS: Once<(Arc<SuperBlock>, Arc<Mount>)> = Once::new();
 
 fn tmpfs_get_tree(
-    context: &FsContext<'_>,
+    context: &mut FsContext<'_>,
     _lookup_root: &kvfs::Path,
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
@@ -46,7 +46,7 @@ fn tmpfs_get_tree(
 }
 
 fn sysfs_get_tree(
-    context: &FsContext<'_>,
+    context: &mut FsContext<'_>,
     _lookup_root: &kvfs::Path,
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
@@ -55,11 +55,24 @@ fn sysfs_get_tree(
     })
 }
 
+static TMPFS_CONTEXT_OPERATIONS: FsContextOperations = FsContextOperations::new(tmpfs_get_tree);
+static SYSFS_CONTEXT_OPERATIONS: FsContextOperations = FsContextOperations::new(sysfs_get_tree);
+
+fn init_tmpfs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
+    context.set_operations(&TMPFS_CONTEXT_OPERATIONS);
+    Ok(())
+}
+
+fn init_sysfs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
+    context.set_operations(&SYSFS_CONTEXT_OPERATIONS);
+    Ok(())
+}
+
 /// Registered tmpfs filesystem type.
-pub static TMPFS_TYPE: FileSystemType = FileSystemType::nodev("tmpfs", tmpfs_get_tree);
+pub static TMPFS_TYPE: FileSystemType = FileSystemType::nodev("tmpfs", init_tmpfs_context);
 
 /// Registered sysfs filesystem type.
-pub static SYSFS_TYPE: FileSystemType = FileSystemType::nodev("sysfs", sysfs_get_tree);
+pub static SYSFS_TYPE: FileSystemType = FileSystemType::nodev("sysfs", init_sysfs_context);
 
 #[macros::register_init]
 fn init_memory_filesystems() {
@@ -83,12 +96,8 @@ fn new_sysfs_with_type(
     superblock_flags: SuperBlockFlags,
 ) -> Arc<SuperBlock> {
     let (super_block, _internal_mount) = SYSFS.call_once(|| {
-        let super_block = MemoryFs::new_with_file_system_type_superblock_flags_and_root_mode(
-            file_system_type,
-            RAMFS_MAGIC,
-            superblock_flags,
-            NodePermission::from_bits_truncate(0o755),
-        );
+        let super_block =
+            ramfs::new_ramfs_with_file_system_type_and_flags(file_system_type, superblock_flags);
         let internal_mount = Mount::new_root(&super_block);
         (super_block, internal_mount)
     });
@@ -134,28 +143,11 @@ impl Borrow<str> for FileName {
 
 /// A simple in-memory filesystem that supports basic file operations.
 pub struct MemoryFs {
-    magic: u32,
+    fs_type: u32,
     inodes: Mutex<Slab<Arc<Inode>>>,
 }
 
-fn memfs_get_tree(
-    context: &FsContext<'_>,
-    _lookup_root: &kvfs::Path,
-    _lookup_pwd: &kvfs::Path,
-) -> VfsResult<Arc<SuperBlock>> {
-    get_tree_nodev(context, |file_system_type, flags| {
-        Ok(
-            MemoryFs::new_with_file_system_type_superblock_flags_and_root_mode(
-                file_system_type,
-                RAMFS_MAGIC,
-                flags,
-                NodePermission::from_bits_truncate(0o755),
-            ),
-        )
-    })
-}
-
-static MEMFS_TYPE: FileSystemType = FileSystemType::nodev("memfs", memfs_get_tree);
+static MEMFS_TYPE: FileSystemType = FileSystemType::internal("memfs");
 
 impl MemoryFs {
     /// Creates an in-memory superblock.
@@ -167,7 +159,7 @@ impl MemoryFs {
     /// Creates an in-memory superblock with explicit VFS-wide flags.
     #[allow(clippy::new_ret_no_self)]
     pub fn new_with_superblock_flags(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
-        Self::new_with_file_system_type_superblock_flags_and_root_mode(
+        Self::new_with_name_superblock_flags_and_root_mode(
             &MEMFS_TYPE,
             RAMFS_MAGIC,
             superblock_flags,
@@ -175,20 +167,23 @@ impl MemoryFs {
         )
     }
 
-    pub(crate) fn new_with_file_system_type_superblock_flags_and_root_mode(
+    pub(crate) fn new_with_name_superblock_flags_and_root_mode(
         file_system_type: &'static FileSystemType,
-        magic: u32,
+        fs_type: u32,
         superblock_flags: SuperBlockFlags,
         root_mode: NodePermission,
     ) -> Arc<SuperBlock> {
         let fs = Arc::new(Self {
-            magic,
+            fs_type,
             inodes: Mutex::new(Slab::new()),
         });
-        SuperBlock::new_with_flags(
+        SuperBlock::new_with_flags_and_private(
             file_system_type,
+            &MEMORY_SUPER_OPERATIONS,
             fs.clone(),
             superblock_flags,
+            memaddr::PAGE_SIZE_4K as u64,
+            kvfs::MAX_LFS_FILESIZE,
             |super_block| {
                 let root_ino = Inode::new(
                     &fs,
@@ -210,9 +205,17 @@ impl MemoryFs {
     }
 }
 
-impl SuperBlockOperations for MemoryFs {
-    fn statfs(&self) -> VfsResult<StatFs> {
-        Ok(simple_statfs(self.magic))
+struct MemorySuperOperations;
+
+static MEMORY_SUPER_OPERATIONS: MemorySuperOperations = MemorySuperOperations;
+
+impl SuperBlockOperations for MemorySuperOperations {
+    fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs> {
+        let fs = super_block.private::<Arc<MemoryFs>>()?;
+        let mut stat = simple_statfs(fs.fs_type);
+        stat.block_size =
+            u32::try_from(super_block.block_size()).map_err(|_| VfsError::InvalidInput)?;
+        Ok(stat)
     }
 }
 
@@ -393,11 +396,13 @@ impl MemoryNode {
             NodeType::RegularFile => VfsInode::new_file_with_address_space_and_flags(
                 MemoryNode::new(fs.clone(), inode),
                 NodeFlags::ALWAYS_CACHE,
+                &MEMORY_ADDRESS_SPACE_OPERATIONS,
                 init,
             ),
             NodeType::Symlink => VfsInode::new_symlink_with_address_space_and_flags(
                 MemoryNode::new(fs.clone(), inode),
                 NodeFlags::empty(),
+                &MEMORY_ADDRESS_SPACE_OPERATIONS,
                 init,
             ),
             _ => {
@@ -835,8 +840,12 @@ impl FileDirOperations for MemoryNode {
     }
 }
 
-impl AddressSpaceOperations for MemoryNode {
-    fn read_at(&self, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+struct MemoryAddressSpaceOperations;
+
+static MEMORY_ADDRESS_SPACE_OPERATIONS: MemoryAddressSpaceOperations = MemoryAddressSpaceOperations;
+
+impl AddressSpaceOperations for MemoryAddressSpaceOperations {
+    fn read_at(&self, _mapping: &AddressSpace, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
         buf.fill(0);
         Ok(buf.len())
     }
@@ -850,13 +859,16 @@ impl AddressSpaceOperations for MemoryNode {
     }
 
     fn set_len(&self, mapping: &AddressSpace, len: u64) -> VfsResult<()> {
-        self.inode.as_file()?;
-        self.inode.metadata.lock().size = len;
+        let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
+        let node = vfs_inode.private::<MemoryNode>()?;
+        node.inode.as_file()?;
+        node.inode.metadata.lock().size = len;
         mapping.truncate_setsize(len)
     }
 
-    fn write_begin(&self, _mapping: &AddressSpace, _request: WriteBeginRequest) -> VfsResult<()> {
-        self.inode.as_file()?;
+    fn write_begin(&self, mapping: &AddressSpace, _request: WriteBeginRequest) -> VfsResult<()> {
+        let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
+        vfs_inode.private::<MemoryNode>()?.inode.as_file()?;
         Ok(())
     }
 
@@ -864,7 +876,7 @@ impl AddressSpaceOperations for MemoryNode {
         let copied = simple_write_end(mapping, request)?;
         if copied != 0 {
             let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
-            self.inode.metadata.lock().size = inode.size();
+            inode.private::<MemoryNode>()?.inode.metadata.lock().size = inode.size();
         }
         Ok(copied)
     }
@@ -878,13 +890,40 @@ mod tests {
     use super::*;
 
     #[def_test]
+    fn memory_filesystems_report_page_sized_blocks() {
+        let fs = MemoryFs::new();
+
+        assert_eq!(fs.block_size(), memaddr::PAGE_SIZE_4K as u64);
+        assert_eq!(fs.stat().unwrap().block_size, memaddr::PAGE_SIZE_4K as u32);
+    }
+
+    #[def_test]
     fn tmpfs_readonly_policy_can_be_reconfigured() {
         let fs = shmem::new_tmpfs(SuperBlockFlags::RDONLY);
+        let cred = kcred::initial_cred();
 
         assert!(fs.flags().contains(SuperBlockFlags::RDONLY));
-        fs.reconfigure_readonly(false).unwrap();
+        let mut writable = FsContext::new_reconfigure(
+            fs.as_ref(),
+            None,
+            None,
+            SuperBlockFlags::empty(),
+            SuperBlockFlags::RDONLY,
+            &cred,
+        )
+        .unwrap();
+        fs.reconfigure(&mut writable).unwrap();
         assert!(!fs.flags().contains(SuperBlockFlags::RDONLY));
-        fs.reconfigure_readonly(true).unwrap();
+        let mut readonly = FsContext::new_reconfigure(
+            fs.as_ref(),
+            None,
+            None,
+            SuperBlockFlags::RDONLY,
+            SuperBlockFlags::RDONLY,
+            &cred,
+        )
+        .unwrap();
+        fs.reconfigure(&mut readonly).unwrap();
         assert!(fs.flags().contains(SuperBlockFlags::RDONLY));
     }
 

@@ -23,9 +23,10 @@ mod tests {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
+    use anon_inodefs::AnonInodeFs;
     use kpoll::IoEvents;
     use ktime_types::SystemTime;
-    use kvfs::{AnonInodeFs, DeviceId, FMode, FileOperations, OpenFlags, VfsFile, VfsResult};
+    use kvfs::{DeviceId, FMode, FileOperations, OpenFlags, VfsFile, VfsResult};
     use linux_raw_sys::general::stat;
     use unittest::def_test;
 

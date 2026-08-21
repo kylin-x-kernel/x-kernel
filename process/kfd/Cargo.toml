@@ -10,6 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
+anon_inodefs.workspace = true
 flatten_objects.workspace = true
 kvfs.workspace = true
 ktime_types.workspace = true

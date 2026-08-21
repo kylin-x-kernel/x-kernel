@@ -13,14 +13,14 @@ use super::{
     },
 };
 use crate::{
-    BlockCount, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Result, FilesystemBlock, LogicalBlock,
+    BlockCount, CorruptKind, Ext4Error, Ext4Result, Ext4SbInfo, FilesystemBlock, LogicalBlock,
     PhysicalBlock, UnsupportedKind,
     disk::{extent as disk_extent, inode as disk_inode},
     inode::Ext4Inode,
     superblock::{metadata_access_bytes, replace_metadata_access_bytes},
 };
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     /// Returns a conservative credit bound for an ordered-data writeback.
     pub(crate) fn extent_writeback_metadata_credits(
         &self,
@@ -1554,7 +1554,7 @@ fn encode_inline_leaf_root(
 }
 
 fn encode_extent_leaf_block(
-    filesystem: &Ext4Filesystem,
+    filesystem: &Ext4SbInfo,
     inode: &Ext4Inode,
     bytes: &mut [u8],
     generation: u32,
@@ -1596,7 +1596,7 @@ fn encode_inline_index_root(
 }
 
 fn encode_extent_index_block(
-    filesystem: &Ext4Filesystem,
+    filesystem: &Ext4SbInfo,
     inode: &Ext4Inode,
     bytes: &mut [u8],
     generation: u32,
@@ -1704,7 +1704,7 @@ impl ExtentPath {
 
     fn decode_leaf_extents(
         &self,
-        filesystem: &Ext4Filesystem,
+        filesystem: &Ext4SbInfo,
         inode: &Ext4Inode,
     ) -> Ext4Result<Vec<MutableExtent>> {
         decode_leaf_extents(
@@ -1715,7 +1715,7 @@ impl ExtentPath {
         )
     }
 
-    fn leaf_capacity(&self, filesystem: &Ext4Filesystem) -> Ext4Result<usize> {
+    fn leaf_capacity(&self, filesystem: &Ext4SbInfo) -> Ext4Result<usize> {
         let capacity = if self.block.is_some() {
             usize::from(self.leaf_header()?.max())
         } else {
@@ -1731,7 +1731,7 @@ impl ExtentPath {
 
     fn is_split_supported(
         &self,
-        filesystem: &Ext4Filesystem,
+        filesystem: &Ext4SbInfo,
         extents: &[MutableExtent],
     ) -> Ext4Result<bool> {
         if extents.is_empty() {
@@ -1773,7 +1773,7 @@ impl ExtentPath {
 
     fn split_leaf(
         &self,
-        filesystem: &mut Ext4Filesystem,
+        filesystem: &mut Ext4SbInfo,
         inode: &Ext4Inode,
         extents: &[MutableExtent],
         handle: &mut crate::jbd2::JournalHandle<'_>,
@@ -1885,7 +1885,7 @@ impl ExtentPath {
 
     fn rewrite_leaf(
         &self,
-        filesystem: &mut Ext4Filesystem,
+        filesystem: &mut Ext4SbInfo,
         inode: &Ext4Inode,
         extents: &[MutableExtent],
         handle: &mut crate::jbd2::JournalHandle<'_>,
@@ -1895,7 +1895,7 @@ impl ExtentPath {
 
     fn prune_empty_leaf(
         &self,
-        filesystem: &mut Ext4Filesystem,
+        filesystem: &mut Ext4SbInfo,
         inode: &Ext4Inode,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<u64> {

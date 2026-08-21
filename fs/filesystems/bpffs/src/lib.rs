@@ -18,11 +18,12 @@ use alloc::{
     vec::Vec,
 };
 
+use anon_inodefs::AnonInodeFs;
 use hashbrown::HashMap;
 use kerrno::KResult;
 use ksync::Mutex;
 use kvfs::{
-    AnonInodeFs, Dentry, DirContext, FMode, FileDirOperations, FileOperations, FsContext,
+    Dentry, DirContext, FMode, FileDirOperations, FileOperations, FsContext, FsContextOperations,
     InodeDirOperations, InodeOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags,
     NodePermission, NodeType, OpenFlags, SimpleFs, SimpleFsNode, SuperBlock, SuperBlockFlags,
     VfsError, VfsFile, VfsInode, VfsResult, get_tree_nodev, inode_init_owner,
@@ -34,7 +35,7 @@ const BPF_FS_MAGIC: u32 = 0xcafe4a11;
 const DIR_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o755);
 
 fn get_tree(
-    context: &FsContext<'_>,
+    context: &mut FsContext<'_>,
     _lookup_root: &kvfs::Path,
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
@@ -43,8 +44,16 @@ fn get_tree(
     })
 }
 
+static FS_CONTEXT_OPERATIONS: FsContextOperations = FsContextOperations::new(get_tree);
+
+fn init_fs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
+    context.set_operations(&FS_CONTEXT_OPERATIONS);
+    Ok(())
+}
+
 /// Registered BPF filesystem type.
-pub static FILE_SYSTEM_TYPE: kvfs::FileSystemType = kvfs::FileSystemType::nodev("bpf", get_tree);
+pub static FILE_SYSTEM_TYPE: kvfs::FileSystemType =
+    kvfs::FileSystemType::nodev("bpf", init_fs_context);
 
 #[macros::register_init]
 fn init_bpf_fs() {

@@ -22,6 +22,7 @@ use crate::{
     },
     journal::MountedJournal,
     mballoc::BlockGroupFreeExtentCache,
+    sync::{self, Mutex},
     types::{BlockGroupNumber, FilesystemBlock, InodeNumber, LogicalBlock},
 };
 
@@ -60,7 +61,7 @@ pub struct Ext4StatFs {
 
 /// Selects the ext4 accounting convention for `statfs().f_blocks`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum Ext4StatFsMode {
+pub(crate) enum Ext4StatFsMode {
     /// Subtract filesystem metadata overhead from the reported total.
     #[default]
     Bsd,
@@ -366,8 +367,11 @@ impl InternalJournal {
 ///
 /// KVFS owns resident inode identity. This object owns ext4 superblock state,
 /// including the mount-wide delayed-allocation reservation aggregate.
-pub struct Ext4Filesystem {
-    pub(crate) delalloc_reserved_blocks: u64,
+pub(crate) struct Ext4SbInfo {
+    pub(crate) delalloc_reserved_blocks: Mutex<u64>,
+    statfs_mode: Ext4StatFsMode,
+    /// Maximum byte size supported by legacy indirect-block inodes.
+    pub(crate) bitmap_maxbytes: u64,
     pub(crate) device: Arc<FilesystemDevice>,
     pub(crate) metadata_io: Ext4MetadataIo,
     pub(crate) journal: Option<Arc<MountedJournal>>,
@@ -385,7 +389,7 @@ pub struct Ext4Filesystem {
 }
 
 pub(crate) struct Ext4Recovery {
-    pub(crate) filesystem: Ext4Filesystem,
+    pub(crate) filesystem: Ext4SbInfo,
 }
 
 pub(crate) struct JournalMarkedEmpty {
@@ -402,10 +406,24 @@ impl Ext4RecoveryCleared {
     }
 }
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     /// Reads and validates the primary ext4 superblock and group descriptor table.
+    #[cfg(test)]
     pub fn mount(device: Arc<dyn BlockDeviceOperations>) -> Ext4Result<Self> {
-        Self::open(device, false)
+        Self::mount_with_statfs_mode(device, Ext4StatFsMode::Bsd)
+    }
+
+    pub(crate) fn mount_with_statfs_mode(
+        device: Arc<dyn BlockDeviceOperations>,
+        statfs_mode: Ext4StatFsMode,
+    ) -> Ext4Result<Self> {
+        let mut filesystem = Self::open(device, false)?;
+        filesystem.statfs_mode = statfs_mode;
+        Ok(filesystem)
+    }
+
+    pub(crate) fn set_statfs_mode(&mut self, statfs_mode: Ext4StatFsMode) {
+        self.statfs_mode = statfs_mode;
     }
 
     /// Recovers a filesystem journal and cleans the legacy orphan list.
@@ -524,7 +542,9 @@ impl Ext4Filesystem {
         }
 
         let mut filesystem = Self {
-            delalloc_reserved_blocks: 0,
+            delalloc_reserved_blocks: Mutex::new(0),
+            statfs_mode: Ext4StatFsMode::Bsd,
+            bitmap_maxbytes: 0,
             device: filesystem_device,
             metadata_io,
             journal: None,
@@ -555,8 +575,14 @@ impl Ext4Filesystem {
                 return Err(Ext4Error::Unsupported(UnsupportedKind::ExternalJournal));
             }
         };
+        filesystem.bitmap_maxbytes = filesystem.legacy_max_file_size()?;
         filesystem.system_zones = system_zones;
         Ok(filesystem)
+    }
+
+    /// Returns the ext4-private legacy indirect-block file-size limit.
+    pub const fn bitmap_max_file_size(&self) -> u64 {
+        self.bitmap_maxbytes
     }
 
     /// Returns the decoded primary superblock.
@@ -575,11 +601,13 @@ impl Ext4Filesystem {
     }
 
     /// Returns all validated block group descriptors.
+    #[cfg(test)]
     pub fn groups(&self) -> &[BlockGroupDescriptor] {
         &self.groups
     }
 
     /// Returns public status for the internal JBD2 journal, when present.
+    #[cfg(test)]
     pub fn journal_status(&self) -> Option<JournalStatus> {
         self.journal
             .as_ref()
@@ -590,6 +618,7 @@ impl Ext4Filesystem {
     ///
     /// This is a diagnostic/mount test helper that avoids exposing JBD2 block
     /// address types as public KExt4 API.
+    #[cfg(test)]
     pub fn journal_superblock_block(&self) -> Ext4Result<Option<FilesystemBlock>> {
         match self.journal.as_ref() {
             Some(_) => JournalBlockMapper::map_journal_block(self, JournalBlock::new(0)).map(Some),
@@ -615,11 +644,6 @@ impl Ext4Filesystem {
         replay_scanned_journal(self, self.device.as_ref(), &scan, self.device.block_size())
     }
 
-    /// Reclaims up to `limit` metadata blocks with no active readers.
-    pub fn reclaim_metadata_blocks(&self, limit: usize) -> usize {
-        self.metadata_io.reclaim_unused(limit)
-    }
-
     /// Returns ext4 filesystem statistics using the default BSD accounting mode.
     ///
     /// # Errors
@@ -627,7 +651,7 @@ impl Ext4Filesystem {
     /// Returns an error when validated filesystem geometry cannot be represented
     /// consistently in the reported block counts.
     pub fn statfs(&self) -> Ext4Result<Ext4StatFs> {
-        self.statfs_with_mode(Ext4StatFsMode::Bsd)
+        self.statfs_with_mode(self.statfs_mode)
     }
 
     /// Returns ext4 filesystem statistics using the requested total-block convention.
@@ -658,7 +682,8 @@ impl Ext4Filesystem {
             .blocks_count()
             .checked_sub(overhead)
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry))?;
-        let free_blocks = free_blocks.saturating_sub(self.delalloc_reserved_blocks);
+        let delalloc_reserved_blocks = *sync::mutex_lock(&self.delalloc_reserved_blocks);
+        let free_blocks = free_blocks.saturating_sub(delalloc_reserved_blocks);
         let blocks_available = free_blocks.saturating_sub(self.superblock.reserved_blocks_count());
 
         Ok(Ext4StatFs {
@@ -679,11 +704,18 @@ impl Ext4Filesystem {
     /// the same metadata operation as their group descriptor. Delayed
     /// allocation admission can therefore use this constant-time aggregate
     /// instead of folding every block-group descriptor as `statfs()` does.
+    #[cfg(test)]
     pub fn blocks_available_for_reservation(&self) -> u64 {
+        let delalloc_reserved_blocks = *sync::mutex_lock(&self.delalloc_reserved_blocks);
         self.superblock
             .free_blocks_count()
-            .saturating_sub(self.delalloc_reserved_blocks)
+            .saturating_sub(delalloc_reserved_blocks)
             .saturating_sub(self.superblock.reserved_blocks_count())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delalloc_reserved_block_count(&self) -> u64 {
+        *sync::mutex_lock(&self.delalloc_reserved_blocks)
     }
 
     /// Reads complete filesystem blocks without exposing metadata mutation.
@@ -1449,7 +1481,7 @@ fn add_system_zone_to(
     Ok(())
 }
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     fn statfs_overhead_blocks(&self) -> Ext4Result<u64> {
         let zones = self.system_zones.iter().try_fold(0u64, |blocks, zone| {
             blocks
@@ -1935,7 +1967,7 @@ mod tests {
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount generated journaled image");
+            Ext4SbInfo::mount(block_device).expect("mount generated journaled image");
         let journal = filesystem
             .metadata_journal()
             .expect("open metadata journal");
@@ -1988,7 +2020,7 @@ mod tests {
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount generated journaled image");
+            Ext4SbInfo::mount(block_device).expect("mount generated journaled image");
         let credits = JournalCredits::new(4);
         let block_goal =
             FilesystemBlock::new(u64::from(filesystem.superblock().blocks_per_group()) + 10);
@@ -2075,7 +2107,7 @@ mod tests {
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount generated namespace image");
+            Ext4SbInfo::mount(block_device).expect("mount generated namespace image");
         let root = filesystem.root_inode().expect("read root inode");
         let first = filesystem
             .create_regular_file(
@@ -2160,7 +2192,7 @@ mod tests {
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount generated journaled image");
+            Ext4SbInfo::mount(block_device).expect("mount generated journaled image");
         let journal = filesystem
             .metadata_journal()
             .expect("open metadata journal");
@@ -2281,7 +2313,7 @@ mod tests {
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount generated journaled image");
+            Ext4SbInfo::mount(block_device).expect("mount generated journaled image");
         let journal = filesystem
             .metadata_journal()
             .expect("open metadata journal");
@@ -2320,7 +2352,7 @@ mod tests {
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount generated allocator image");
+            Ext4SbInfo::mount(block_device).expect("mount generated allocator image");
         let journal = JournalTransactions::new(TransactionId::new(701));
         let mut handle = journal.begin(JournalCredits::new(14)).unwrap();
         let transaction = handle.id();
@@ -2381,7 +2413,7 @@ mod tests {
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount generated truncate image");
+            Ext4SbInfo::mount(block_device).expect("mount generated truncate image");
         let root = filesystem.root_inode().expect("read root inode");
         let entry = filesystem
             .lookup(&root, "truncate.bin")
@@ -2435,7 +2467,7 @@ mod tests {
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount generated namespace image");
+            Ext4SbInfo::mount(block_device).expect("mount generated namespace image");
         let root = filesystem.root_inode().expect("read root inode");
         assert_eq!(filesystem.lookup(&root, "kext4-created.txt").unwrap(), None);
 
@@ -2480,7 +2512,7 @@ mod tests {
         let bytes = fs::read(&image).expect("read generated mkdir image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        let mut filesystem = Ext4Filesystem::mount(block_device).expect("mount mkdir image");
+        let mut filesystem = Ext4SbInfo::mount(block_device).expect("mount mkdir image");
         let root = filesystem.root_inode().expect("read root inode");
         let old_root_links = root.links_count();
 
@@ -2526,7 +2558,7 @@ mod tests {
         let bytes = fs::read(&image).expect("read generated unlink image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        let mut filesystem = Ext4Filesystem::mount(block_device).expect("mount unlink image");
+        let mut filesystem = Ext4SbInfo::mount(block_device).expect("mount unlink image");
         let root = filesystem.root_inode().expect("read root inode");
         let created = filesystem
             .create_regular_file(
@@ -2610,8 +2642,7 @@ mod tests {
         let bytes = fs::read(&image).expect("read generated orphan recovery image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount orphan recovery image");
+        let mut filesystem = Ext4SbInfo::mount(block_device).expect("mount orphan recovery image");
         let root = filesystem.root_inode().expect("read root inode");
         let free_inodes_before_create = filesystem.superblock().free_inodes_count();
         let created = filesystem
@@ -2665,11 +2696,11 @@ mod tests {
 
         let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
-            Ext4Filesystem::mount(mount_device).map(|_| ()),
+            Ext4SbInfo::mount(mount_device).map(|_| ()),
             Err(Ext4Error::NeedsRecovery)
         );
         let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        assert_eq!(Ext4Filesystem::recover(recovery_device), Ok(None));
+        assert_eq!(Ext4SbInfo::recover(recovery_device), Ok(None));
 
         {
             let bytes = device.bytes();
@@ -2680,8 +2711,7 @@ mod tests {
         }
 
         let recovered_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        let recovered =
-            Ext4Filesystem::mount(recovered_device).expect("mount orphan-cleaned image");
+        let recovered = Ext4SbInfo::mount(recovered_device).expect("mount orphan-cleaned image");
         assert_eq!(recovered.orphan_head(), None);
         assert!(
             !recovered
@@ -2716,8 +2746,7 @@ mod tests {
         let bytes = fs::read(&image).expect("read generated orphan recovery image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount orphan recovery image");
+        let mut filesystem = Ext4SbInfo::mount(block_device).expect("mount orphan recovery image");
         let root = filesystem.root_inode().expect("read root inode");
         let free_inodes_before_create = filesystem.superblock().free_inodes_count();
         let created = filesystem
@@ -2750,7 +2779,7 @@ mod tests {
         device.fail_flush_at(device.flush_count() + 1);
         let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
-            Ext4Filesystem::recover(recovery_device),
+            Ext4SbInfo::recover(recovery_device),
             Err(Ext4Error::Device(DriverError::Io))
         );
 
@@ -2764,16 +2793,15 @@ mod tests {
 
         let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
-            Ext4Filesystem::mount(mount_device).map(|_| ()),
+            Ext4SbInfo::mount(mount_device).map(|_| ()),
             Err(Ext4Error::NeedsRecovery)
         );
 
         let retry_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        Ext4Filesystem::recover(retry_device).expect("retry clean orphan recovery");
+        Ext4SbInfo::recover(retry_device).expect("retry clean orphan recovery");
 
         let recovered_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        let recovered =
-            Ext4Filesystem::mount(recovered_device).expect("mount retried recovery image");
+        let recovered = Ext4SbInfo::mount(recovered_device).expect("mount retried recovery image");
         assert_eq!(recovered.orphan_head(), None);
         assert!(!recovered.superblock().features().needs_recovery());
         assert!(
@@ -2812,7 +2840,7 @@ mod tests {
         let bytes = fs::read(&image).expect("read generated rmdir image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        let mut filesystem = Ext4Filesystem::mount(block_device).expect("mount rmdir image");
+        let mut filesystem = Ext4SbInfo::mount(block_device).expect("mount rmdir image");
         let root = filesystem.root_inode().expect("read root inode");
         let created = filesystem
             .create_directory(
@@ -2860,7 +2888,7 @@ mod tests {
         let bytes = fs::read(&image).expect("read generated link image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        let mut filesystem = Ext4Filesystem::mount(block_device).expect("mount link image");
+        let mut filesystem = Ext4SbInfo::mount(block_device).expect("mount link image");
         let root = filesystem.root_inode().expect("read root inode");
         let created = filesystem
             .create_regular_file(
@@ -2925,7 +2953,7 @@ mod tests {
         let bytes = fs::read(&image).expect("read generated file rename image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        let mut filesystem = Ext4Filesystem::mount(block_device).expect("mount rename image");
+        let mut filesystem = Ext4SbInfo::mount(block_device).expect("mount rename image");
         let root = filesystem.root_inode().expect("read root inode");
         let left = filesystem
             .create_directory(
@@ -2997,8 +3025,7 @@ mod tests {
         let bytes = fs::read(&image).expect("read generated file overwrite rename image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount overwrite rename image");
+        let mut filesystem = Ext4SbInfo::mount(block_device).expect("mount overwrite rename image");
         let root = filesystem.root_inode().expect("read root inode");
         let source = filesystem
             .create_regular_file(
@@ -3077,8 +3104,7 @@ mod tests {
         let bytes = fs::read(&image).expect("read generated directory rename image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount directory rename image");
+        let mut filesystem = Ext4SbInfo::mount(block_device).expect("mount directory rename image");
         let root = filesystem.root_inode().expect("read root inode");
         let old_root_links = root.links_count();
         let left = filesystem
@@ -3156,7 +3182,7 @@ mod tests {
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount directory overwrite rename image");
+            Ext4SbInfo::mount(block_device).expect("mount directory overwrite rename image");
         let root = filesystem.root_inode().expect("read root inode");
         let source = filesystem
             .create_directory(
@@ -3223,7 +3249,7 @@ mod tests {
         let bytes = fs::read(&image).expect("read generated symlink image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        let mut filesystem = Ext4Filesystem::mount(block_device).expect("mount symlink image");
+        let mut filesystem = Ext4SbInfo::mount(block_device).expect("mount symlink image");
         let root = filesystem.root_inode().expect("read root inode");
         let created = filesystem
             .create_fast_symlink(
@@ -3264,7 +3290,7 @@ mod tests {
         let bytes = fs::read(&image).expect("read generated block symlink image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        let mut filesystem = Ext4Filesystem::mount(block_device).expect("mount symlink image");
+        let mut filesystem = Ext4SbInfo::mount(block_device).expect("mount symlink image");
         let root = filesystem.root_inode().expect("read root inode");
         let target = vec![b'a'; 128];
         let created = filesystem
@@ -3323,7 +3349,7 @@ mod tests {
         let bytes = fs::read(&image).expect("read journaled namespace image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let mut filesystem =
-            Ext4Filesystem::mount(device.clone()).expect("mount journaled namespace image");
+            Ext4SbInfo::mount(device.clone()).expect("mount journaled namespace image");
         let root = filesystem.root_inode().expect("read root inode");
         let timestamp = crate::Ext4Timestamp::new(144, 0);
         filesystem
@@ -3413,7 +3439,7 @@ mod tests {
         let target = b"/opt/package/lib/libreplay.so.1.0.0-symlink-journal-replay-target-block";
         {
             let mut filesystem =
-                Ext4Filesystem::mount(device.clone()).expect("mount journaled namespace image");
+                Ext4SbInfo::mount(device.clone()).expect("mount journaled namespace image");
             let root = filesystem.root_inode().expect("read root inode");
             let symlink = filesystem
                 .create_symlink(&root, b"replay-link", target, 0, 0, timestamp)
@@ -3436,16 +3462,15 @@ mod tests {
         }
 
         assert_eq!(
-            Ext4Filesystem::mount(device.clone()).map(|_| ()),
+            Ext4SbInfo::mount(device.clone()).map(|_| ()),
             Err(Ext4Error::NeedsRecovery)
         );
-        let report = Ext4Filesystem::recover(device.clone())
+        let report = Ext4SbInfo::recover(device.clone())
             .expect("recover journaled symlink commit")
             .expect("expected replayed journal records");
         assert!(report.update_count() > 0);
 
-        let mut filesystem =
-            Ext4Filesystem::mount(device.clone()).expect("mount after journal replay");
+        let mut filesystem = Ext4SbInfo::mount(device.clone()).expect("mount after journal replay");
         let root = filesystem.root_inode().expect("read root inode");
         let entry = filesystem
             .lookup(&root, "replay-link")
@@ -3496,7 +3521,7 @@ mod tests {
         let bytes = fs::read(&image).expect("read journaled namespace image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let mut filesystem =
-            Ext4Filesystem::mount(device.clone()).expect("mount journaled namespace image");
+            Ext4SbInfo::mount(device.clone()).expect("mount journaled namespace image");
         let timestamp = crate::Ext4Timestamp::new(144, 0);
         filesystem
             .metadata_journal()
@@ -3604,7 +3629,7 @@ mod tests {
         let bytes = fs::read(&image).expect("read generated special file image");
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        let mut filesystem = Ext4Filesystem::mount(block_device).expect("mount special file image");
+        let mut filesystem = Ext4SbInfo::mount(block_device).expect("mount special file image");
         let root = filesystem.root_inode().expect("read root inode");
         let fifo = filesystem
             .create_special_file(
@@ -3665,7 +3690,7 @@ mod tests {
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount indexed namespace image");
+            Ext4SbInfo::mount(block_device).expect("mount indexed namespace image");
         let root = filesystem.root_inode().expect("read root inode");
         let big_entry = filesystem
             .lookup(&root, "big")
@@ -3761,7 +3786,7 @@ mod tests {
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount dir_index namespace image");
+            Ext4SbInfo::mount(block_device).expect("mount dir_index namespace image");
         let root = filesystem.root_inode().expect("read root inode");
         let directory = filesystem
             .create_directory(
@@ -3811,7 +3836,7 @@ mod tests {
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount dir_index namespace image");
+            Ext4SbInfo::mount(block_device).expect("mount dir_index namespace image");
         let root = filesystem.root_inode().expect("read root inode");
         let directory = filesystem
             .create_directory(
@@ -3861,7 +3886,7 @@ mod tests {
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount generated journaled image");
+            Ext4SbInfo::mount(block_device).expect("mount generated journaled image");
         let journal = filesystem
             .metadata_journal()
             .expect("journaled test image has an internal journal");
@@ -3889,18 +3914,18 @@ mod tests {
 
         let dirty_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
-            Ext4Filesystem::mount(dirty_device).map(|_| ()),
+            Ext4SbInfo::mount(dirty_device).map(|_| ()),
             Err(Ext4Error::NeedsRecovery)
         );
         let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        let report = Ext4Filesystem::recover(recovery_device)
+        let report = Ext4SbInfo::recover(recovery_device)
             .expect("recover persisted allocator journal commit")
             .expect("journal recovery was required");
         assert_eq!(report.update_count(), expected_replay_updates);
 
         let recovered_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let recovered =
-            Ext4Filesystem::mount(recovered_device).expect("mount recovered allocator image");
+            Ext4SbInfo::mount(recovered_device).expect("mount recovered allocator image");
         assert!(!recovered.superblock().features().needs_recovery());
         assert_eq!(
             recovered.superblock().free_blocks_count(),
@@ -4264,7 +4289,7 @@ mod tests {
         filesystem
             .reserve_delalloc_range(&inode, LogicalBlock::new(2), 4)
             .unwrap();
-        assert_eq!(filesystem.delalloc_reserved_blocks, 6);
+        assert_eq!(filesystem.delalloc_reserved_block_count(), 6);
         assert_eq!(filesystem.statfs().unwrap().blocks_free, free_before - 6);
         assert_eq!(
             filesystem
@@ -4279,7 +4304,7 @@ mod tests {
         filesystem
             .release_delalloc_range(&inode, LogicalBlock::new(1), 4)
             .unwrap();
-        assert_eq!(filesystem.delalloc_reserved_blocks, 2);
+        assert_eq!(filesystem.delalloc_reserved_block_count(), 2);
         assert_eq!(
             filesystem
                 .report_mapping(&inode, LogicalBlock::new(1))
@@ -4292,9 +4317,9 @@ mod tests {
         filesystem
             .truncate_delalloc_range(&inode, LogicalBlock::new(5))
             .unwrap();
-        assert_eq!(filesystem.delalloc_reserved_blocks, 1);
+        assert_eq!(filesystem.delalloc_reserved_block_count(), 1);
         filesystem.release_all_delalloc(&inode).unwrap();
-        assert_eq!(filesystem.delalloc_reserved_blocks, 0);
+        assert_eq!(filesystem.delalloc_reserved_block_count(), 0);
         assert!(!inode.has_delalloc_reservations());
     }
 
@@ -4318,7 +4343,7 @@ mod tests {
 
         assert_eq!(inode.disk_size(), truncated_size);
         assert_eq!(inode.size(), truncated_size);
-        assert_eq!(filesystem.delalloc_reserved_blocks, 3);
+        assert_eq!(filesystem.delalloc_reserved_block_count(), 3);
         assert!(matches!(
             filesystem.report_mapping(&inode, LogicalBlock::new(0)),
             Ok(BlockMapping::Hole {
@@ -4341,7 +4366,7 @@ mod tests {
 
         assert_eq!(inode.disk_size(), truncated_size);
         assert_eq!(inode.size(), truncated_size);
-        assert_eq!(filesystem.delalloc_reserved_blocks, 3);
+        assert_eq!(filesystem.delalloc_reserved_block_count(), 3);
         assert!(matches!(
             filesystem.report_mapping(&inode, LogicalBlock::new(3)),
             Ok(BlockMapping::Hole { flags, .. }) if flags.is_empty()
@@ -6558,7 +6583,7 @@ mod tests {
 
         let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
-            Ext4Filesystem::mount(mount_device).map(|_| ()),
+            Ext4SbInfo::mount(mount_device).map(|_| ()),
             Err(Ext4Error::NeedsRecovery)
         );
     }
@@ -6765,7 +6790,7 @@ mod tests {
 
         let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
-            Ext4Filesystem::recover(recovery_device),
+            Ext4SbInfo::recover(recovery_device),
             Err(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite))
         );
         let bytes = device.bytes();
@@ -6937,7 +6962,7 @@ mod tests {
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount generated recovery image");
+            Ext4SbInfo::mount(block_device).expect("mount generated recovery image");
         let free_inodes_before_allocation = filesystem.superblock().free_inodes_count();
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         let journal = filesystem.metadata_journal().expect("open mounted journal");
@@ -6953,13 +6978,13 @@ mod tests {
         drop(filesystem);
 
         let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        let report = Ext4Filesystem::recover(recovery_device)
+        let report = Ext4SbInfo::recover(recovery_device)
             .expect("replay and orphan cleanup")
             .expect("active journal report");
         assert!(report.update_count() > 0);
 
         let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        let recovered = Ext4Filesystem::mount(mount_device).expect("mount recovered image");
+        let recovered = Ext4SbInfo::mount(mount_device).expect("mount recovered image");
         assert_eq!(recovered.orphan_head(), None);
         assert_eq!(
             recovered.superblock().free_inodes_count(),
@@ -6979,7 +7004,7 @@ mod tests {
         let device = Arc::new(LinuxImageDevice::new(bytes));
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
-            Ext4Filesystem::mount(block_device).expect("mount generated recovery image");
+            Ext4SbInfo::mount(block_device).expect("mount generated recovery image");
         let inode = allocate_checkpointed_directory_inode(&mut filesystem);
         let journal = filesystem.metadata_journal().expect("open mounted journal");
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
@@ -6996,7 +7021,7 @@ mod tests {
 
         let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
-            Ext4Filesystem::recover(recovery_device),
+            Ext4SbInfo::recover(recovery_device),
             Err(Ext4Error::Unsupported(UnsupportedKind::InodeKind))
         );
 
@@ -7020,7 +7045,7 @@ mod tests {
 
         let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
-            Ext4Filesystem::recover(recovery_device),
+            Ext4SbInfo::recover(recovery_device),
             Err(Ext4Error::Unsupported(UnsupportedKind::OrphanFile))
         );
     }
@@ -7321,7 +7346,7 @@ mod tests {
     fn allocator_test_filesystem(
         free_blocks: u32,
         bitmap_first_byte: u8,
-    ) -> (Ext4Filesystem, Arc<TestDevice>) {
+    ) -> (Ext4SbInfo, Arc<TestDevice>) {
         allocator_test_filesystem_with_inodes(
             free_blocks,
             bitmap_first_byte,
@@ -7337,7 +7362,7 @@ mod tests {
         free_inodes: u32,
         inode_bitmap_second_byte: u8,
         used_directories: u32,
-    ) -> (Ext4Filesystem, Arc<TestDevice>) {
+    ) -> (Ext4SbInfo, Arc<TestDevice>) {
         allocator_test_filesystem_with_flags(
             free_blocks,
             block_bitmap_first_byte,
@@ -7355,7 +7380,7 @@ mod tests {
         inode_bitmap_second_byte: u8,
         used_directories: u32,
         flags: u16,
-    ) -> (Ext4Filesystem, Arc<TestDevice>) {
+    ) -> (Ext4SbInfo, Arc<TestDevice>) {
         allocator_test_filesystem_with_options(
             free_blocks,
             block_bitmap_first_byte,
@@ -7379,7 +7404,7 @@ mod tests {
         metadata_checksum: bool,
         corrupt_block_bitmap_checksum: bool,
         corrupt_inode_bitmap_checksum: bool,
-    ) -> (Ext4Filesystem, Arc<TestDevice>) {
+    ) -> (Ext4SbInfo, Arc<TestDevice>) {
         let mut image = vec![0; TEST_BLOCK_SIZE * TEST_BLOCK_COUNT];
         let mut superblock_bytes = allocator_superblock(free_blocks, free_inodes);
         if metadata_checksum {
@@ -7425,8 +7450,10 @@ mod tests {
         let layout = FilesystemLayout::derive(&superblock).unwrap();
         let groups = vec![BlockGroupDescriptor::decode(&descriptor, true).unwrap()];
 
-        let mut filesystem = Ext4Filesystem {
-            delalloc_reserved_blocks: 0,
+        let mut filesystem = Ext4SbInfo {
+            delalloc_reserved_blocks: Mutex::new(0),
+            statfs_mode: Ext4StatFsMode::Bsd,
+            bitmap_maxbytes: 0,
             device: filesystem_device,
             metadata_io,
             journal: None,
@@ -7436,6 +7463,7 @@ mod tests {
             groups,
             system_zones: Vec::new(),
         };
+        filesystem.bitmap_maxbytes = filesystem.legacy_max_file_size().unwrap();
         let zones = filesystem.build_system_zones().unwrap();
         filesystem.system_zones = zones;
         (filesystem, block_device)
@@ -7444,7 +7472,7 @@ mod tests {
     fn journal_allocator_test_filesystem(
         free_blocks: u32,
         block_bitmap_first_byte: u8,
-    ) -> (Ext4Filesystem, Arc<TestDevice>) {
+    ) -> (Ext4SbInfo, Arc<TestDevice>) {
         let mut image = vec![0; TEST_BLOCK_SIZE * TEST_JOURNAL_FILESYSTEM_BLOCK_COUNT];
         let mut superblock_bytes = allocator_superblock_with_geometry(
             TEST_JOURNAL_FILESYSTEM_BLOCK_COUNT as u32,
@@ -7496,8 +7524,10 @@ mod tests {
         let superblock = Superblock::decode(&superblock_bytes).unwrap();
         let layout = FilesystemLayout::derive(&superblock).unwrap();
         let groups = vec![BlockGroupDescriptor::decode(&descriptor, true).unwrap()];
-        let mut filesystem = Ext4Filesystem {
-            delalloc_reserved_blocks: 0,
+        let mut filesystem = Ext4SbInfo {
+            delalloc_reserved_blocks: Mutex::new(0),
+            statfs_mode: Ext4StatFsMode::Bsd,
+            bitmap_maxbytes: 0,
             device: filesystem_device,
             metadata_io,
             journal: None,
@@ -7507,6 +7537,7 @@ mod tests {
             groups,
             system_zones: Vec::new(),
         };
+        filesystem.bitmap_maxbytes = filesystem.legacy_max_file_size().unwrap();
         let zones = filesystem.build_system_zones().unwrap();
         filesystem.system_zones = zones;
         (filesystem, block_device)
@@ -7514,7 +7545,7 @@ mod tests {
 
     fn allocator_multigroup_test_filesystem(
         groups: &[AllocatorGroupSpec],
-    ) -> (Ext4Filesystem, Arc<TestDevice>) {
+    ) -> (Ext4SbInfo, Arc<TestDevice>) {
         let group_count = u32::try_from(groups.len()).unwrap();
         let block_count = group_count * TEST_BLOCK_COUNT as u32;
         let inodes_count = group_count * 32;
@@ -7570,8 +7601,10 @@ mod tests {
             .map(|descriptor| BlockGroupDescriptor::decode(descriptor, true).unwrap())
             .collect();
 
-        let mut filesystem = Ext4Filesystem {
-            delalloc_reserved_blocks: 0,
+        let mut filesystem = Ext4SbInfo {
+            delalloc_reserved_blocks: Mutex::new(0),
+            statfs_mode: Ext4StatFsMode::Bsd,
+            bitmap_maxbytes: 0,
             device: filesystem_device,
             metadata_io,
             journal: None,
@@ -7581,13 +7614,14 @@ mod tests {
             groups,
             system_zones: Vec::new(),
         };
+        filesystem.bitmap_maxbytes = filesystem.legacy_max_file_size().unwrap();
         let zones = filesystem.build_system_zones().unwrap();
         filesystem.system_zones = zones;
         (filesystem, block_device)
     }
 
     fn allocate_contiguous_blocks(
-        filesystem: &mut Ext4Filesystem,
+        filesystem: &mut Ext4SbInfo,
         count: u32,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> PhysicalBlock {
@@ -7613,16 +7647,16 @@ mod tests {
         allocator_superblock_with_geometry(TEST_BLOCK_COUNT as u32, 32, free_blocks, free_inodes)
     }
 
-    fn allocate_checkpointed_regular_inode(filesystem: &mut Ext4Filesystem) -> crate::Ext4Inode {
+    fn allocate_checkpointed_regular_inode(filesystem: &mut Ext4SbInfo) -> crate::Ext4Inode {
         allocate_checkpointed_inode(filesystem, InodeInitialization::regular_file(0o644, 0, 0))
     }
 
-    fn allocate_checkpointed_directory_inode(filesystem: &mut Ext4Filesystem) -> crate::Ext4Inode {
+    fn allocate_checkpointed_directory_inode(filesystem: &mut Ext4SbInfo) -> crate::Ext4Inode {
         allocate_checkpointed_inode(filesystem, InodeInitialization::directory(0o755, 0, 0))
     }
 
     fn allocate_checkpointed_inode(
-        filesystem: &mut Ext4Filesystem,
+        filesystem: &mut Ext4SbInfo,
         initialization: InodeInitialization,
     ) -> crate::Ext4Inode {
         let journal = JournalTransactions::new(TransactionId::new(690));
@@ -7723,7 +7757,7 @@ mod tests {
         );
     }
 
-    fn install_test_internal_journal(filesystem: &mut Ext4Filesystem, sequence: u32) {
+    fn install_test_internal_journal(filesystem: &mut Ext4SbInfo, sequence: u32) {
         let journal_block = FilesystemBlock::new(16);
         let journal_blocks = 1024;
         assert!(journal_block.get() + u64::from(journal_blocks) <= filesystem.layout().block_count);
@@ -7776,7 +7810,7 @@ mod tests {
     }
 
     fn persist_test_orphan_head(
-        filesystem: &mut Ext4Filesystem,
+        filesystem: &mut Ext4SbInfo,
         head: Option<InodeNumber>,
         sequence: u32,
     ) {
@@ -7794,7 +7828,7 @@ mod tests {
     }
 
     fn update_test_inode_links_count(
-        filesystem: &mut Ext4Filesystem,
+        filesystem: &mut Ext4SbInfo,
         inode: &Ext4Inode,
         links_count: u16,
         handle: &mut crate::jbd2::JournalHandle<'_>,
@@ -7820,7 +7854,7 @@ mod tests {
     }
 
     fn update_test_inode_extra_isize(
-        filesystem: &mut Ext4Filesystem,
+        filesystem: &mut Ext4SbInfo,
         inode: &Ext4Inode,
         extra_isize: u16,
         handle: &mut crate::jbd2::JournalHandle<'_>,
@@ -7846,7 +7880,7 @@ mod tests {
     }
 
     fn set_allocator_feature_bits(
-        filesystem: &mut Ext4Filesystem,
+        filesystem: &mut Ext4SbInfo,
         compat_features: features::CompatFeatures,
         read_only_compat_features: features::ReadOnlyCompatFeatures,
     ) {
@@ -7866,7 +7900,7 @@ mod tests {
             .unwrap();
     }
 
-    fn enable_allocator_flex_bg(filesystem: &mut Ext4Filesystem, log_groups_per_flex: u8) {
+    fn enable_allocator_flex_bg(filesystem: &mut Ext4SbInfo, log_groups_per_flex: u8) {
         let (block, offset, len) = filesystem.primary_superblock_location().unwrap();
         let end = offset + len;
         let mut bytes = vec![0; filesystem.device.block_size()];
@@ -8262,7 +8296,7 @@ mod tests {
     /// three-phase eviction protocol.  Each extent is allocated contiguously.
     fn eviction_test_unlinked_inode(
         extents: &[(u64, u32)],
-    ) -> (Ext4Filesystem, Ext4Inode, crate::Ext4Timestamp) {
+    ) -> (Ext4SbInfo, Ext4Inode, crate::Ext4Timestamp) {
         let (mut filesystem, _device) = journal_allocator_test_filesystem(512, 0b0011_1111);
         install_test_internal_journal(&mut filesystem, 2000);
         let journal = JournalTransactions::new(TransactionId::new(2000));

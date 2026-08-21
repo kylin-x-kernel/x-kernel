@@ -18,7 +18,7 @@ use crate::{
     error::{CorruptKind, Ext4Error, Ext4Result},
     inode::{InodeInitialization, InodeKind},
     superblock::{
-        Ext4Filesystem, bitmap_bit_capacity, count_clear_ext4_bitmap_bits, ensure_metadata_credits,
+        Ext4SbInfo, bitmap_bit_capacity, count_clear_ext4_bitmap_bits, ensure_metadata_credits,
         ext4_bitmap_checksum_matches, ext4_mark_bitmap_end, is_ext4_bitmap_bit_set,
         replace_metadata_access_bytes, validate_ext4_bitmap_range_set,
     },
@@ -27,7 +27,7 @@ use crate::{
 
 const INODE_ALLOCATOR_METADATA_CREDITS: u32 = 4;
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     pub(crate) fn is_inode_allocated(&self, inode: InodeNumber) -> Ext4Result<bool> {
         let group = self.block_group_for_inode(inode)?;
         let group_index = usize::try_from(group.get()).map_err(|_| Ext4Error::Overflow)?;

@@ -4,11 +4,12 @@
 
 use alloc::sync::Arc;
 
+use anon_inodefs::AnonInodeFs;
 use kcred::Cred;
 use kerrno::{KError, KResult};
 use kpoll::{Completion, IoEvents, PollContext, PollRegisterError, Pollable};
 use ktask::KtaskRef;
-use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
+use kvfs::{FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
 
 use crate::{Pid, Process, Tid, lookup};
 

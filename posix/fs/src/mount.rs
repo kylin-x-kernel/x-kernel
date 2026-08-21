@@ -138,7 +138,17 @@ fn path_mount(
         return Ok(());
     }
     if flags & linux_raw_sys::general::MS_REMOUNT != 0 {
-        namespace.remount(target, superblock_flags, mount_flags)?;
+        let super_block = target.mount().super_block();
+        let source = dev_name.or_else(|| target.mount().devname());
+        let mut context = kvfs::FsContext::new_reconfigure(
+            super_block.as_ref(),
+            source,
+            data,
+            superblock_flags,
+            SuperBlockFlags::RDONLY,
+            cred,
+        )?;
+        namespace.remount(target, &mut context, mount_flags)?;
         return Ok(());
     }
     if flags & linux_raw_sys::general::MS_BIND != 0 {
@@ -151,9 +161,9 @@ fn path_mount(
     let fs_type = fs_type.ok_or(KError::InvalidInput)?;
     let file_system_type = kvfs::get_filesystem_type(fs_type).ok_or(KError::NoSuchDevice)?;
     let (root, pwd) = process.fs_context()?.lock().root_and_pwd();
-    let context = kvfs::FsContext::new(file_system_type, dev_name, data, superblock_flags, cred);
-    namespace.mount_new(target, mount_flags, &context, &root, &pwd)?;
-    Ok(())
+    let mut context =
+        kvfs::FsContext::new(file_system_type, dev_name, data, superblock_flags, cred)?;
+    do_new_mount(&namespace, target, mount_flags, &mut context, &root, &pwd)
 }
 
 fn lookup_mount_path(process: &Process, name: &str, cred: &kcred::Cred) -> KResult<Path> {
@@ -180,6 +190,18 @@ fn do_loopback(
         .ok_or(KError::InvalidInput)?;
     let old_path = lookup_mount_path(process, old_name, cred)?;
     namespace.attach_bind(&old_path, mountpoint)?;
+    Ok(())
+}
+
+fn do_new_mount(
+    namespace: &MntNamespace,
+    mountpoint: &Path,
+    mount_flags: MountFlags,
+    context: &mut kvfs::FsContext<'_>,
+    lookup_root: &Path,
+    lookup_pwd: &Path,
+) -> KResult<()> {
+    namespace.mount_new(mountpoint, mount_flags, context, lookup_root, lookup_pwd)?;
     Ok(())
 }
 

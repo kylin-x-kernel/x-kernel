@@ -5,7 +5,7 @@
 //! Legacy ext4 regular-file orphan-list helpers.
 
 use crate::{
-    CorruptKind, Ext4Error, Ext4Filesystem, Ext4Inode, Ext4Result, InodeKind, InodeNumber,
+    CorruptKind, Ext4Error, Ext4Inode, Ext4Result, Ext4SbInfo, InodeKind, InodeNumber,
     UnsupportedKind,
     disk::superblock,
     jbd2::JournalCredits,
@@ -15,7 +15,7 @@ use crate::{
 
 const ORPHAN_HEAD_UPDATE_CREDITS: JournalCredits = JournalCredits::new(1);
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     pub(crate) fn orphan_head(&self) -> Option<InodeNumber> {
         match self.superblock().last_orphan() {
             0 => None,

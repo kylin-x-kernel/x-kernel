@@ -1,0 +1,18 @@
+[package]
+name = "anon_inodefs"
+description = "Anonymous-inode pseudo filesystem for X-Kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+kcred.workspace = true
+klazy.workspace = true
+ktime.workspace = true
+kvfs.workspace = true
+memaddr.workspace = true
+unittest.workspace = true

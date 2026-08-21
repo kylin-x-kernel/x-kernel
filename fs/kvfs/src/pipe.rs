@@ -7,7 +7,6 @@
 use alloc::{collections::VecDeque, sync::Arc};
 
 use iov_iter::{IovIterDest, IovIterSource};
-use kcred::Cred;
 use kerrno::{KError, KResult, LinuxError};
 use klazy::Lazy;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
@@ -17,10 +16,7 @@ use linux_raw_sys::ioctl::FIONREAD;
 use memaddr::PAGE_SIZE_4K;
 use osvm::VirtMutPtr;
 
-use crate::{
-    AnonInodeFs, FMode, FileOperations, Kiocb, OpenFlags, VfsFile, VfsFileBuilder, VfsInode,
-    VfsResult,
-};
+use crate::{FMode, FileOperations, Kiocb, VfsFile, VfsFileBuilder, VfsInode, VfsResult};
 
 /// Initial pipe buffer capacity in bytes.
 pub(crate) const RING_BUFFER_INIT_SIZE: usize = 65536;
@@ -163,7 +159,8 @@ impl PipeObject {
         })
     }
 
-    fn new_anonymous() -> Arc<Self> {
+    /// Allocates the state owned by one anonymous pipe inode.
+    pub fn new_anonymous() -> Arc<Self> {
         let pipe = Self::alloc();
         {
             let mut state = pipe.state.lock();
@@ -655,7 +652,7 @@ impl FileOperations for PipeFileOperations {
     fn release(&self, _inode: &VfsInode, file: &VfsFile) -> VfsResult<()> {
         let pipe = PipeObject::from_file(file)?;
         pipe.close(file.mode())?;
-        // Anonymous pipes have no inode slot to clear when the final file drops.
+        // Anonymous pipes do not use the pathname-FIFO slot on `VfsInode`.
         let _ = pipe.release_file();
         Ok(())
     }
@@ -754,37 +751,9 @@ pub(crate) fn fifo_file_operations() -> Arc<dyn FileOperations> {
     FIFO_FILE_OPERATIONS.clone()
 }
 
-fn pipe_file_operations() -> Arc<dyn FileOperations> {
+/// Returns the shared anonymous-pipe file operation table.
+pub fn pipe_file_operations() -> Arc<dyn FileOperations> {
     PIPE_FILE_OPERATIONS.clone()
-}
-
-/// Creates the read and write open files for an anonymous pipe.
-///
-/// Both file views capture the same `cred` as their open credential.
-pub fn create_pipe_files(
-    read_flags: u32,
-    write_flags: u32,
-    cred: Arc<Cred>,
-) -> KResult<(Arc<VfsFile>, Arc<VfsFile>)> {
-    let read_flags = OpenFlags::from_bits(read_flags).ok_or(KError::InvalidInput)?;
-    let write_flags = OpenFlags::from_bits(write_flags).ok_or(KError::InvalidInput)?;
-    let pipe = PipeObject::new_anonymous();
-    let operations = pipe_file_operations();
-    let write_file = AnonInodeFs::global().get_file(
-        "[pipe]",
-        operations.clone(),
-        pipe.clone(),
-        FMode::WRITE | FMode::STREAM,
-        write_flags,
-        cred,
-    )?;
-    let read_file = write_file.alloc_clone_with_private_data(
-        FMode::READ | FMode::STREAM,
-        read_flags,
-        operations,
-        pipe,
-    )?;
-    Ok((read_file, write_file))
 }
 
 #[cfg(unittest)]
@@ -792,87 +761,6 @@ mod tests {
     use unittest::def_test;
 
     use super::*;
-
-    fn pipe_files() -> (Arc<VfsFile>, Arc<VfsFile>, Arc<PipeObject>) {
-        let (read_file, write_file) =
-            create_pipe_files(0, 0, kcred::initial_cred()).expect("anonymous pipe files open");
-        let pipe = PipeObject::from_file(&read_file).expect("pipe state is installed");
-        (read_file, write_file, pipe)
-    }
-
-    #[def_test]
-    fn anonymous_pipe_files_share_state() {
-        let (read_file, write_file, pipe) = pipe_files();
-        let write_pipe = PipeObject::from_file(&write_file).expect("pipe state is installed");
-
-        assert!(read_file.mode().contains(FMode::READ));
-        assert!(write_file.mode().contains(FMode::WRITE));
-        assert!(Arc::ptr_eq(&pipe, &write_pipe));
-        assert_eq!(pipe.capacity(), RING_BUFFER_INIT_SIZE);
-    }
-
-    #[def_test]
-    fn anonymous_pipe_poll_after_writer_drop() {
-        let (read_file, write_file, _) = pipe_files();
-        drop(write_file);
-
-        let events = read_file.poll();
-        assert!(!events.contains(IoEvents::IN));
-        assert!(events.contains(IoEvents::HUP));
-    }
-
-    #[def_test]
-    fn anonymous_pipe_buffered_data_survives_writer_drop() {
-        let (read_file, write_file, _) = pipe_files();
-        let data = b"hello";
-        assert_eq!(write_file.write(data).unwrap(), data.len());
-        drop(write_file);
-
-        let events = read_file.poll();
-        assert!(events.contains(IoEvents::IN));
-        assert!(events.contains(IoEvents::HUP));
-
-        let mut buf = [0u8; 5];
-        assert_eq!(read_file.read(&mut buf).unwrap(), data.len());
-        assert_eq!(&buf, data);
-    }
-
-    #[def_test]
-    fn anonymous_pipe_resize_rounds_to_power_of_two_pages() {
-        let (_, _, pipe) = pipe_files();
-
-        pipe.resize(5000).unwrap();
-        assert_eq!(pipe.capacity(), 8192);
-        pipe.resize(12 * 1024).unwrap();
-        assert_eq!(pipe.capacity(), 16 * 1024);
-    }
-
-    #[def_test]
-    fn anonymous_pipe_resize_rejects_invalid_sizes() {
-        let (_, _, pipe) = pipe_files();
-
-        assert_eq!(
-            pipe.resize(PIPE_MAX_SIZE + 1),
-            Err(KError::OperationNotPermitted)
-        );
-        assert_eq!(pipe.capacity(), RING_BUFFER_INIT_SIZE);
-        assert_eq!(pipe.resize(usize::MAX), Err(KError::InvalidInput));
-        assert_eq!(pipe.capacity(), RING_BUFFER_INIT_SIZE);
-    }
-
-    #[def_test]
-    fn anonymous_pipe_nonblocking_pipe_buf_write_is_atomic() {
-        let (_read_file, write_file, pipe) = pipe_files();
-        pipe.resize(PAGE_SIZE_4K).unwrap();
-        write_file.set_nonblocking(true);
-
-        let fill = [0u8; PAGE_SIZE_4K - 64];
-        assert_eq!(write_file.write(&fill).unwrap(), fill.len());
-
-        let payload = [1u8; 128];
-        assert_eq!(write_file.write(&payload), Err(KError::WouldBlock));
-        assert_eq!(pipe.readable_len(), fill.len());
-    }
 
     #[def_test]
     fn fifo_partner_counter_records_completed_rendezvous() {

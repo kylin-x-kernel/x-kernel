@@ -6,8 +6,8 @@ use alloc::{vec, vec::Vec};
 use core::str;
 
 use crate::{
-    BlockMapping, ChecksumTarget, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Result,
-    FilesystemBlock, InodeNumber, LogicalBlock, UnsupportedKind,
+    BlockMapping, ChecksumTarget, CorruptKind, Ext4Error, Ext4Result, Ext4SbInfo, FilesystemBlock,
+    InodeNumber, LogicalBlock, UnsupportedKind,
     disk::{DirectoryFileType, checksum, codec, dir as disk_dir},
     inode::{Ext4Inode, InodeKind, inode_checksum_seed},
 };
@@ -133,7 +133,7 @@ struct ScannedDirectoryEntry<'a> {
     next_offset: u64,
 }
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     /// Reads all supported directory entries from a directory inode.
     pub fn read_dir(&self, inode: &Ext4Inode) -> Ext4Result<Vec<DirectoryEntry>> {
         let mut entries = Vec::new();

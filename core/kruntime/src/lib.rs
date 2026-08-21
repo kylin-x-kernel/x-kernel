@@ -13,8 +13,7 @@
 //!
 //! - `smp`: SMP bring-up (`rust_main_secondary`, `mp`)
 //! - `ipi`: Inter-processor interrupts (`kipi`)
-//! - `fs`: filesystem boot orchestration
-//! - `fs9p` / `net` / `vsock` / `display` / `input`: driver and subsystem init
+//! - `fs` / `fs9p` / `net` / `vsock` / `display` / `input`: driver and subsystem init
 //! - `rtc`: Wall-clock banner at boot
 //! - `watchdog` / `watchdog_hardlockup`: Watchdog on primary/secondary CPUs
 //! - `pmu`: PMU overflow IRQ handler

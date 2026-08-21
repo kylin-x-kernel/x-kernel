@@ -4,18 +4,23 @@
 
 //! Superblock state and filesystem statistics.
 use alloc::{
+    boxed::Box,
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::{
+    any::Any,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use hashbrown::HashMap;
 use klazy::{Lazy, Once};
 use ktask::WaitQueue;
 
 use crate::{
-    Dentry, DentryKey, FileSystemType, Filename, FsContext, LookupFlags, LookupIntent, MountFlags,
-    Mutex, MutexGuard, NodeType, Path, VfsError, VfsInode, VfsResult, WritebackControl, node,
+    Dentry, DentryKey, DentryOperations, FileSystemType, Filename, FsContext, FsContextPurpose,
+    LookupFlags, LookupIntent, MountFlags, Mutex, MutexGuard, NodeType, Path, VfsError, VfsInode,
+    VfsResult, WritebackControl, node,
 };
 
 fn has_readonly_mismatch(current: SuperBlockFlags, requested: SuperBlockFlags) -> bool {
@@ -32,25 +37,7 @@ fn validate_block_device_flags(
     Ok(())
 }
 
-#[cfg(unittest)]
-fn test_get_tree(
-    _context: &FsContext<'_>,
-    _lookup_root: &Path,
-    _lookup_pwd: &Path,
-) -> VfsResult<Arc<SuperBlock>> {
-    unreachable!("the test filesystem type does not provide a mount entry")
-}
-
-#[cfg(unittest)]
-pub(crate) static TEST_FILE_SYSTEM_TYPE: FileSystemType =
-    FileSystemType::nodev("mockfs", test_get_tree);
-
 /// Constructs a device-less superblock from a filesystem context.
-///
-/// The fill operation receives the context's canonical filesystem type and
-/// superblock flags so the new instance can establish its VFS identity during
-/// allocation. It is one-shot so the filesystem can transfer per-mount
-/// resources, such as a transport session, into the new instance.
 pub fn get_tree_nodev(
     context: &FsContext<'_>,
     fill_super: impl FnOnce(&'static FileSystemType, SuperBlockFlags) -> VfsResult<Arc<SuperBlock>>,
@@ -65,9 +52,8 @@ pub fn get_tree_nodev(
 /// obtains the canonical `BlockDevice` from the block core, and invokes the
 /// filesystem's fill operation only for a newly reserved identity. Existing
 /// instances are reused by canonical filesystem type and block device,
-/// corresponding to Linux `sget_dev()`. The one-shot fill closure may capture
-/// mount state parsed from the same context without exposing that state to the
-/// generic VFS layer.
+/// corresponding to Linux `sget_dev()`. The one-shot closure may capture parsed
+/// mount state without exposing filesystem-specific options to the generic VFS.
 pub fn get_tree_bdev<F>(
     context: &FsContext<'_>,
     lookup_root: &Path,
@@ -226,8 +212,6 @@ impl SuperBlockRegistry {
                 match fill_super(&super_block) {
                     Ok(()) => super_block.finish_initialization(),
                     Err(error) => {
-                        // Keep identity removal and holder release atomic with
-                        // respect to a new sget attempt.
                         {
                             let mut super_blocks = self.super_blocks.lock();
                             super_block.fail_initialization();
@@ -271,21 +255,7 @@ impl SuperBlockRegistry {
 /// state.
 pub trait SuperBlockOperations: Send + Sync + 'static {
     /// Returns filesystem statistics.
-    fn statfs(&self) -> VfsResult<StatFs>;
-
-    /// Validates and applies a proposed superblock reconfiguration.
-    ///
-    /// This corresponds to Linux's filesystem-context `reconfigure` operation.
-    /// The VFS invokes it before publishing the proposed flags, so a filesystem
-    /// that cannot transition from read-only to read-write can reject the
-    /// change without exposing an intermediate state. `changed` corresponds to
-    /// Linux `fs_context::sb_flags_mask`. Like Linux's absent callback, the
-    /// default accepts VFS-only flag changes. The VFS rejects a read-write
-    /// target for a read-only block device before invoking this hook; a
-    /// device-less or intrinsically read-only filesystem must reject it here.
-    fn reconfigure(&self, _flags: SuperBlockFlags, _changed: SuperBlockFlags) -> VfsResult<()> {
-        Ok(())
-    }
+    fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs>;
 
     /// Writes back superblock-owned dirty state.
     ///
@@ -295,18 +265,13 @@ pub trait SuperBlockOperations: Send + Sync + 'static {
     /// Filesystems should use this hook for superblock-wide metadata, journal
     /// checkpoint, and device flush work rather than for discovering ordinary
     /// dirty file data.
-    fn sync_fs(&self) -> VfsResult<()> {
+    fn sync_fs(&self, _super_block: &SuperBlock) -> VfsResult<()> {
         Ok(())
     }
 
     /// Writes back filesystem-owned metadata for one inode.
     fn write_inode(&self, _inode: &VfsInode, _control: &mut WritebackControl) -> VfsResult<()> {
         Ok(())
-    }
-
-    /// Returns the maximum regular-file byte offset supported by this superblock.
-    fn max_file_size(&self) -> u64 {
-        crate::MAX_LFS_FILESIZE
     }
 
     /// Releases filesystem-owned inode state during final inode teardown.
@@ -489,17 +454,24 @@ impl SuperBlockLifecycle {
 /// corresponding to Linux `s_vfs_rename_mutex`; same-directory rename does not
 /// take that mutex.
 pub struct SuperBlock {
-    /// Canonical filesystem type corresponding to Linux `super_block::s_type`.
+    /// Canonical filesystem type corresponding to Linux `s_type`.
     file_system_type: &'static FileSystemType,
     /// Exclusive claim on the canonical device corresponding to Linux
     /// `super_block::s_bdev` and its block-device holder.
     block_device: Option<block::BlockDeviceClaim>,
-    ops: Once<Arc<dyn SuperBlockOperations>>,
+    /// Shared filesystem operation table corresponding to Linux `s_op`.
+    ops: Once<&'static dyn SuperBlockOperations>,
+    /// Default dentry operation table corresponding to Linux `s_d_op`.
+    default_dentry_operations: Once<&'static dyn DentryOperations>,
+    /// Filesystem magic corresponding to Linux `s_magic`.
+    magic: Once<u32>,
+    /// Filesystem-private mount state corresponding to Linux `s_fs_info`.
+    private: Once<Box<dyn Any + Send + Sync>>,
     root: Once<Dentry>,
     /// VFS-wide state corresponding to Linux `super_block::s_flags`.
     flags: AtomicSuperBlockFlags,
-    /// Initialization, active mounts, and shutdown state, corresponding to
-    /// Linux `SB_BORN`, `s_active`, `SB_DYING`, and `SB_DEAD`.
+    /// Active mount references and shutdown state, corresponding to Linux
+    /// `super_block::s_active` together with `SB_DYING` and `SB_DEAD`.
     lifecycle: Mutex<SuperBlockLifecycle>,
     /// Serializes reconfiguration and final shutdown, corresponding to Linux
     /// `super_block::s_umount`.
@@ -507,6 +479,7 @@ pub struct SuperBlock {
     /// Wakes `sget_dev` callers after nascent initialization or final shutdown.
     lifecycle_waiters: WaitQueue,
     dentry_cache: Mutex<HashMap<DentryKey, Dentry>>,
+    block_size: Once<u64>,
     max_file_size: Once<u64>,
     rename_mutex: Mutex<()>,
     inodes: Mutex<Vec<Weak<VfsInode>>>,
@@ -518,7 +491,7 @@ impl SuperBlock {
         self.file_system_type.name()
     }
 
-    /// Returns the canonical filesystem type that created this superblock.
+    /// Returns the canonical filesystem type that constructed this superblock.
     pub const fn file_system_type(&self) -> &'static FileSystemType {
         self.file_system_type
     }
@@ -540,7 +513,7 @@ impl SuperBlock {
 
     /// Returns filesystem statistics for this superblock.
     pub fn stat(&self) -> VfsResult<StatFs> {
-        self.ops().statfs()
+        self.ops().statfs(self)
     }
 
     /// Returns whether this superblock is read-only without issuing `statfs`.
@@ -559,15 +532,12 @@ impl SuperBlock {
 
     /// Creates a superblock and initializes its root after allocation.
     ///
-    /// `file_system_type` becomes the immutable equivalent of Linux
-    /// `super_block::s_type`.
-    ///
     /// The initializer receives the nascent superblock so the root inode can be
     /// obtained through [`Self::get_or_init_inode`]. The superblock is published
     /// to the global registry only after the initializer returns its root.
     pub fn new(
         file_system_type: &'static FileSystemType,
-        ops: Arc<dyn SuperBlockOperations>,
+        ops: &'static dyn SuperBlockOperations,
         init_root_fn: impl FnOnce(&Arc<Self>) -> Dentry,
     ) -> Arc<Self> {
         Self::new_with_flags(
@@ -579,12 +549,9 @@ impl SuperBlock {
     }
 
     /// Creates a superblock with initial VFS-wide flags and then initializes its root.
-    ///
-    /// `file_system_type` becomes the immutable equivalent of Linux
-    /// `super_block::s_type`.
     pub fn new_with_flags(
         file_system_type: &'static FileSystemType,
-        ops: Arc<dyn SuperBlockOperations>,
+        ops: &'static dyn SuperBlockOperations,
         flags: SuperBlockFlags,
         init_root_fn: impl FnOnce(&Arc<Self>) -> Dentry,
     ) -> Arc<Self> {
@@ -596,10 +563,39 @@ impl SuperBlock {
         }
     }
 
-    /// Creates a superblock whose root initialization can fail.
+    /// Creates a superblock with a shared default dentry operation table.
     ///
-    /// `file_system_type` becomes the immutable equivalent of Linux
-    /// `super_block::s_type`.
+    /// Dentries allocated on this superblock inherit `dentry_operations`,
+    /// corresponding to Linux `set_default_d_op()` assigning `s_d_op` during
+    /// `fill_super()`.
+    pub fn new_with_dentry_operations(
+        file_system_type: &'static FileSystemType,
+        ops: &'static dyn SuperBlockOperations,
+        dentry_operations: &'static dyn DentryOperations,
+        magic: u32,
+        block_size: u64,
+        max_file_size: u64,
+        init_root_fn: impl FnOnce(&Arc<Self>) -> Dentry,
+    ) -> Arc<Self> {
+        let super_block = Self::allocate(file_system_type, None, SuperBlockFlags::empty());
+        super_block.magic.call_once(|| magic);
+        match super_block.initialize_inner(
+            ops,
+            Some(dentry_operations),
+            None,
+            block_size,
+            max_file_size,
+            |super_block| Ok::<_, core::convert::Infallible>(init_root_fn(super_block)),
+        ) {
+            Ok(()) => {}
+            Err(error) => match error {},
+        }
+        super_block.finish_initialization();
+        super_block_registry().register(&super_block);
+        super_block
+    }
+
+    /// Creates a superblock whose root initialization can fail.
     ///
     /// A failed initializer leaves neither a root dentry nor a global
     /// superblock-registry entry behind.
@@ -610,36 +606,124 @@ impl SuperBlock {
     /// superblock.
     pub fn try_new_with_flags<E>(
         file_system_type: &'static FileSystemType,
-        ops: Arc<dyn SuperBlockOperations>,
+        ops: &'static dyn SuperBlockOperations,
         flags: SuperBlockFlags,
         init_root_fn: impl FnOnce(&Arc<Self>) -> Result<Dentry, E>,
     ) -> Result<Arc<Self>, E> {
         let super_block = Self::allocate(file_system_type, None, flags);
-        super_block.initialize(ops, init_root_fn)?;
+        super_block.initialize(ops, 1, MAX_LFS_FILESIZE, init_root_fn)?;
         super_block.finish_initialization();
         super_block_registry().register(&super_block);
         Ok(super_block)
     }
 
-    /// Installs filesystem operations and a root on a nascent superblock.
+    /// Creates a superblock with distinct shared operations and mount-private state.
+    pub fn new_with_flags_and_private<T>(
+        file_system_type: &'static FileSystemType,
+        ops: &'static dyn SuperBlockOperations,
+        private: T,
+        flags: SuperBlockFlags,
+        block_size: u64,
+        max_file_size: u64,
+        init_root_fn: impl FnOnce(&Arc<Self>) -> Dentry,
+    ) -> Arc<Self>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        match Self::try_new_with_flags_and_private(
+            file_system_type,
+            ops,
+            private,
+            flags,
+            block_size,
+            max_file_size,
+            |super_block| Ok::<_, core::convert::Infallible>(init_root_fn(super_block)),
+        ) {
+            Ok(super_block) => super_block,
+            Err(error) => match error {},
+        }
+    }
+
+    /// Creates a superblock with distinct filesystem operations and private state.
     ///
-    /// This is the object-oriented fill-super operation. For a block-backed
-    /// filesystem, [`get_tree_bdev`] allocates and publishes the nascent object
-    /// before invoking the backend, corresponding to Linux `sget_dev()` passing
-    /// a new `struct super_block` to `fill_super()`.
+    /// This is the object-model counterpart of Linux `fill_super()` installing
+    /// static `s_op`, filesystem-owned `s_fs_info`, and generic `s_blocksize`
+    /// and `s_maxbytes` fields on the same nascent superblock.
     ///
     /// # Errors
     ///
-    /// Returns the root initializer's error. The VFS discards a failed nascent
-    /// block-backed superblock without making it available for reuse.
+    /// Returns the root initializer's error without publishing the nascent
+    /// superblock.
+    pub fn try_new_with_flags_and_private<T, E>(
+        file_system_type: &'static FileSystemType,
+        ops: &'static dyn SuperBlockOperations,
+        private: T,
+        flags: SuperBlockFlags,
+        block_size: u64,
+        max_file_size: u64,
+        init_root_fn: impl FnOnce(&Arc<Self>) -> Result<Dentry, E>,
+    ) -> Result<Arc<Self>, E>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        let super_block = Self::allocate(file_system_type, None, flags);
+        super_block.initialize_with_private(
+            ops,
+            private,
+            block_size,
+            max_file_size,
+            init_root_fn,
+        )?;
+        super_block.finish_initialization();
+        super_block_registry().register(&super_block);
+        Ok(super_block)
+    }
+
+    /// Installs static operations and a root on a nascent superblock.
     ///
-    /// # Panics
-    ///
-    /// Panics if the superblock is no longer nascent or initialization was
-    /// already attempted.
+    /// This is the object-oriented `fill_super()` operation. Block-backed
+    /// filesystems receive the identity reserved by [`get_tree_bdev`] and fill
+    /// that object instead of allocating a second superblock.
     pub fn initialize<E>(
         self: &Arc<Self>,
-        ops: Arc<dyn SuperBlockOperations>,
+        ops: &'static dyn SuperBlockOperations,
+        block_size: u64,
+        max_file_size: u64,
+        init_root_fn: impl FnOnce(&Arc<Self>) -> Result<Dentry, E>,
+    ) -> Result<(), E> {
+        self.initialize_inner(ops, None, None, block_size, max_file_size, init_root_fn)
+    }
+
+    /// Installs static operations, mount-private state, and a root on a
+    /// nascent superblock.
+    pub fn initialize_with_private<T, E>(
+        self: &Arc<Self>,
+        ops: &'static dyn SuperBlockOperations,
+        private: T,
+        block_size: u64,
+        max_file_size: u64,
+        init_root_fn: impl FnOnce(&Arc<Self>) -> Result<Dentry, E>,
+    ) -> Result<(), E>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        self.initialize_inner(
+            ops,
+            None,
+            Some(Box::new(private)),
+            block_size,
+            max_file_size,
+            init_root_fn,
+        )
+    }
+
+    fn initialize_inner<E>(
+        self: &Arc<Self>,
+        ops: &'static dyn SuperBlockOperations,
+        default_dentry_operations: Option<&'static dyn DentryOperations>,
+        private: Option<Box<dyn Any + Send + Sync>>,
+        block_size: u64,
+        max_file_size: u64,
         init_root_fn: impl FnOnce(&Arc<Self>) -> Result<Dentry, E>,
     ) -> Result<(), E> {
         assert!(
@@ -647,12 +731,29 @@ impl SuperBlock {
             "only a nascent superblock can be initialized"
         );
         assert!(
-            self.ops.get().is_none() && self.root.get().is_none(),
+            self.ops.get().is_none()
+                && self.default_dentry_operations.get().is_none()
+                && self.private.get().is_none()
+                && self.root.get().is_none()
+                && self.block_size.get().is_none()
+                && self.max_file_size.get().is_none(),
             "a superblock can only be initialized once"
         );
-        let max_file_size = ops.max_file_size().min(MAX_LFS_FILESIZE);
+        assert!(
+            block_size.is_power_of_two(),
+            "a superblock block size must be a non-zero power of two"
+        );
         self.ops.call_once(|| ops);
-        self.max_file_size.call_once(|| max_file_size);
+        if let Some(default_dentry_operations) = default_dentry_operations {
+            self.default_dentry_operations
+                .call_once(|| default_dentry_operations);
+        }
+        if let Some(private) = private {
+            self.private.call_once(|| private);
+        }
+        self.block_size.call_once(|| block_size);
+        self.max_file_size
+            .call_once(|| max_file_size.min(MAX_LFS_FILESIZE));
         let root = init_root_fn(self)?;
         Self::publish_root(self, root);
         Ok(())
@@ -667,22 +768,66 @@ impl SuperBlock {
             file_system_type,
             block_device,
             ops: Once::new(),
+            default_dentry_operations: Once::new(),
+            magic: Once::new(),
+            private: Once::new(),
             root: Once::new(),
             flags: AtomicSuperBlockFlags::new(flags),
             lifecycle: Mutex::new(SuperBlockLifecycle::Nascent),
             umount_lock: Mutex::default(),
             lifecycle_waiters: WaitQueue::new(),
             dentry_cache: Mutex::default(),
+            block_size: Once::new(),
             max_file_size: Once::new(),
             rename_mutex: Mutex::default(),
             inodes: Mutex::default(),
         })
     }
 
-    fn ops(&self) -> &Arc<dyn SuperBlockOperations> {
-        self.ops
+    fn ops(&self) -> &'static dyn SuperBlockOperations {
+        *self
+            .ops
             .get()
             .expect("a published superblock must have filesystem operations")
+    }
+
+    pub(crate) fn default_dentry_operations(&self) -> Option<&'static dyn DentryOperations> {
+        self.default_dentry_operations.get().copied()
+    }
+
+    /// Returns the filesystem magic installed during superblock initialization.
+    pub fn magic(&self) -> u32 {
+        self.magic.get().copied().unwrap_or_default()
+    }
+
+    /// Returns the filesystem block size in bytes.
+    pub fn block_size(&self) -> u64 {
+        *self
+            .block_size
+            .get()
+            .expect("a published superblock must have a block size")
+    }
+
+    /// Returns this filesystem's mount-private state.
+    ///
+    /// This is the object-oriented counterpart of Linux helpers such as
+    /// `EXT4_SB()`, which recover `s_fs_info` independently of the static
+    /// superblock operation table.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidInput`] when `T` is not the private object
+    /// installed by the filesystem's fill operation.
+    pub fn private<T>(&self) -> VfsResult<&T>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        self.private
+            .get()
+            .map(Box::as_ref)
+            .ok_or(VfsError::InvalidInput)?
+            .downcast_ref::<T>()
+            .ok_or(VfsError::InvalidInput)
     }
 
     fn publish_root(super_block: &Arc<Self>, root: Dentry) {
@@ -692,8 +837,11 @@ impl SuperBlock {
 
     fn finish_initialization(&self) {
         assert!(
-            self.ops.get().is_some() && self.root.get().is_some(),
-            "fill_super must install operations and a root"
+            self.ops.get().is_some()
+                && self.root.get().is_some()
+                && self.block_size.get().is_some()
+                && self.max_file_size.get().is_some(),
+            "fill_super must install operations, sizes, and a root"
         );
         let mut lifecycle = self.lifecycle.lock();
         assert!(
@@ -722,8 +870,6 @@ impl SuperBlock {
         }
     }
 
-    /// Waits until the existing instance can be reused or its owner has
-    /// completed teardown. A waiter never owns removal from the registry.
     fn wait_until_available_or_dead(&self) -> bool {
         loop {
             self.lifecycle_waiters
@@ -840,7 +986,8 @@ impl SuperBlock {
         }
 
         let shutdown_result = self.shutdown();
-        // A new sget must observe either the old identity and holder or neither.
+        // A new `sget` must observe either the old identity and holder or
+        // neither of them.
         {
             let mut super_blocks = super_block_registry().super_blocks.lock();
             *self.lifecycle.lock() = SuperBlockLifecycle::Dead;
@@ -871,26 +1018,26 @@ impl SuperBlock {
         writeback_result.and(flush_result)
     }
 
-    /// Changes the VFS-wide read-only policy shared by every mount of this superblock.
+    /// Applies a parsed filesystem-context transaction to this superblock.
     ///
     /// # Errors
     ///
-    /// Returns `PermissionDenied` when a read-write target conflicts with a
-    /// read-only block device. Filesystem reconfiguration errors are propagated
-    /// without publishing the proposed flags.
-    pub fn reconfigure_readonly(&self, is_readonly: bool) -> VfsResult<()> {
+    /// Returns [`VfsError::InvalidInput`] if the context is not a reconfigure
+    /// transaction or targets another superblock. Filesystem-specific
+    /// validation errors are returned without changing the superblock flags.
+    pub fn reconfigure(&self, context: &mut FsContext<'_>) -> VfsResult<()> {
         let _umount_guard = self.umount_lock.lock();
-        let mut flags = self.flags();
-        if is_readonly {
-            flags.insert(SuperBlockFlags::RDONLY);
-        } else {
-            flags.remove(SuperBlockFlags::RDONLY);
+        if context.purpose() != FsContextPurpose::Reconfigure
+            || !core::ptr::eq(self, context.super_block()?)
+        {
+            return Err(VfsError::InvalidInput);
         }
+        let mask = context.sb_flags_mask();
+        let flags = (self.flags() & !mask) | (context.sb_flags() & mask);
         if let Some(block_device) = self.block_device() {
             validate_block_device_flags(block_device, flags)?;
         }
-
-        self.ops().reconfigure(flags, SuperBlockFlags::RDONLY)?;
+        context.reconfigure()?;
         self.flags.store(flags);
         Ok(())
     }
@@ -1018,7 +1165,7 @@ impl SuperBlock {
         let inodes = self.live_inodes();
         Self::writeback_inodes(&inodes, false)?;
         self.writeback_inode_metadata(&inodes, false)?;
-        self.ops().sync_fs()
+        self.ops().sync_fs(self)
     }
 
     /// Releases filesystem-owned inode state during final inode teardown.
@@ -1042,29 +1189,101 @@ mod tests {
 
     use unittest::{assert, assert_eq, def_test};
 
-    use super::*;
-    use crate::{NodeFlags, NodePermission, Umode, VfsInodeInit};
+    use super::{
+        MAX_LFS_FILESIZE, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations,
+        super_block_registry,
+    };
+    use crate::{
+        Dentry, FileSystemType, FsContext, FsContextOperations, NodeFlags, NodePermission,
+        NodeType, Path, Umode, VfsError, VfsInode, VfsInodeInit, VfsResult,
+    };
+
+    struct TestSuperOperations;
+
+    static TEST_SUPER_OPERATIONS: TestSuperOperations = TestSuperOperations;
+    static TEST_FILE_SYSTEM_TYPE: crate::FileSystemType =
+        crate::FileSystemType::internal("private-test");
+
+    struct TestPrivate(u64);
+
+    impl SuperBlockOperations for TestSuperOperations {
+        fn statfs(&self, super_block: &SuperBlock) -> crate::VfsResult<StatFs> {
+            if super_block.private::<TestPrivate>()?.0 != 0x5f5f_494e_464f {
+                return Err(crate::VfsError::InvalidInput);
+            }
+            Ok(StatFs {
+                fs_type: 0,
+                block_size: 4096,
+                blocks: 0,
+                blocks_free: 0,
+                blocks_available: 0,
+                file_count: 0,
+                free_file_count: 0,
+                name_length: 255,
+                fragment_size: 4096,
+            })
+        }
+    }
+
+    #[def_test]
+    fn superblock_separates_operations_from_private_state() {
+        let super_block = SuperBlock::try_new_with_flags_and_private(
+            &TEST_FILE_SYSTEM_TYPE,
+            &TEST_SUPER_OPERATIONS,
+            TestPrivate(0x5f5f_494e_464f),
+            SuperBlockFlags::empty(),
+            4096,
+            1 << 30,
+            |_| {
+                let inode = VfsInode::new_dir_with_defaults(
+                    NodeFlags::empty(),
+                    VfsInodeInit::new(
+                        2,
+                        0,
+                        Umode::new(NodeType::Directory, NodePermission::default()),
+                    ),
+                );
+                Ok::<_, crate::VfsError>(Dentry::new_dir_from_inode(inode, None, String::new()))
+            },
+        )
+        .expect("construct superblock with private state");
+
+        assert_eq!(super_block.block_size(), 4096);
+        assert_eq!(super_block.max_file_size(), 1 << 30);
+        assert!(super_block.private::<TestSuperOperations>().is_err());
+        assert!(super_block.stat().is_ok());
+    }
 
     static FILL_COUNT: AtomicUsize = AtomicUsize::new(0);
     static TRANSITION_STAGE: AtomicUsize = AtomicUsize::new(0);
     static TRANSITION_WAITER_STARTED: AtomicUsize = AtomicUsize::new(0);
     static TRANSITION_WAITER_DONE: AtomicUsize = AtomicUsize::new(0);
-    static TRANSITION_WAITERS: WaitQueue = WaitQueue::new();
+    static TRANSITION_WAITERS: ktask::WaitQueue = ktask::WaitQueue::new();
 
     fn bdev_test_get_tree(
-        _context: &FsContext<'_>,
+        _context: &mut FsContext<'_>,
         _lookup_root: &Path,
         _lookup_pwd: &Path,
     ) -> VfsResult<Arc<SuperBlock>> {
         unreachable!("the registry test invokes its fill operation directly")
     }
 
-    static BDEV_TEST_FILE_SYSTEM_TYPE: FileSystemType =
-        FileSystemType::device_backed("bdev-test", bdev_test_get_tree);
-    static BDEV_ALT_FILE_SYSTEM_TYPE: FileSystemType =
-        FileSystemType::device_backed("bdev-alt-test", bdev_test_get_tree);
+    static BDEV_TEST_CONTEXT_OPERATIONS: FsContextOperations =
+        FsContextOperations::new(bdev_test_get_tree);
 
-    struct TestSuperBlockOperations;
+    fn init_bdev_test_context(context: &mut FsContext<'_>) -> VfsResult<()> {
+        context.set_operations(&BDEV_TEST_CONTEXT_OPERATIONS);
+        Ok(())
+    }
+
+    static BDEV_TEST_FILE_SYSTEM_TYPE: FileSystemType =
+        FileSystemType::device_backed("bdev-test", init_bdev_test_context);
+    static BDEV_ALT_FILE_SYSTEM_TYPE: FileSystemType =
+        FileSystemType::device_backed("bdev-alt-test", init_bdev_test_context);
+
+    struct BdevTestSuperOperations;
+
+    static BDEV_TEST_SUPER_OPERATIONS: BdevTestSuperOperations = BdevTestSuperOperations;
 
     fn test_statfs() -> StatFs {
         StatFs {
@@ -1080,20 +1299,22 @@ mod tests {
         }
     }
 
-    impl SuperBlockOperations for TestSuperBlockOperations {
-        fn statfs(&self) -> VfsResult<StatFs> {
+    impl SuperBlockOperations for BdevTestSuperOperations {
+        fn statfs(&self, _super_block: &SuperBlock) -> VfsResult<StatFs> {
             Ok(test_statfs())
         }
     }
 
     struct BlockingShutdownOperations;
 
+    static BLOCKING_SHUTDOWN_OPERATIONS: BlockingShutdownOperations = BlockingShutdownOperations;
+
     impl SuperBlockOperations for BlockingShutdownOperations {
-        fn statfs(&self) -> VfsResult<StatFs> {
+        fn statfs(&self, _super_block: &SuperBlock) -> VfsResult<StatFs> {
             Ok(test_statfs())
         }
 
-        fn sync_fs(&self) -> VfsResult<()> {
+        fn sync_fs(&self, _super_block: &SuperBlock) -> VfsResult<()> {
             if TRANSITION_STAGE
                 .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
@@ -1131,9 +1352,9 @@ mod tests {
 
     fn initialize_test_bdev(
         super_block: &Arc<SuperBlock>,
-        operations: Arc<dyn SuperBlockOperations>,
+        operations: &'static dyn SuperBlockOperations,
     ) -> VfsResult<()> {
-        super_block.initialize(operations, |super_block| {
+        super_block.initialize(operations, 512, MAX_LFS_FILESIZE, |super_block| {
             let inode = super_block.get_or_init_inode(1, || {
                 VfsInode::new_dir_with_defaults(
                     NodeFlags::empty(),
@@ -1150,7 +1371,7 @@ mod tests {
 
     fn fill_test_bdev(super_block: &Arc<SuperBlock>) -> VfsResult<()> {
         FILL_COUNT.fetch_add(1, Ordering::Relaxed);
-        initialize_test_bdev(super_block, Arc::new(TestSuperBlockOperations))
+        initialize_test_bdev(super_block, &BDEV_TEST_SUPER_OPERATIONS)
     }
 
     fn fail_test_bdev(_super_block: &Arc<SuperBlock>) -> VfsResult<()> {
@@ -1163,7 +1384,7 @@ mod tests {
 
     fn fill_blocking_shutdown_bdev(super_block: &Arc<SuperBlock>) -> VfsResult<()> {
         FILL_COUNT.fetch_add(1, Ordering::Relaxed);
-        initialize_test_bdev(super_block, Arc::new(BlockingShutdownOperations))
+        initialize_test_bdev(super_block, &BLOCKING_SHUTDOWN_OPERATIONS)
     }
 
     fn reset_transition_test_state() {
@@ -1335,9 +1556,19 @@ mod tests {
             )
             .expect("mount read-only device read-only");
         super_block.activate_mount();
+        let cred = kcred::initial_cred();
+        let mut context = FsContext::new_reconfigure(
+            super_block.as_ref(),
+            None,
+            None,
+            SuperBlockFlags::empty(),
+            SuperBlockFlags::RDONLY,
+            &cred,
+        )
+        .expect("construct writable reconfigure context");
 
         assert_eq!(
-            super_block.reconfigure_readonly(false),
+            super_block.reconfigure(&mut context),
             Err(VfsError::PermissionDenied)
         );
         assert!(super_block.flags().contains(SuperBlockFlags::RDONLY));

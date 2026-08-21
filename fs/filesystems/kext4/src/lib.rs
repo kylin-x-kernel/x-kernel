@@ -2,9 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Checked ext4 storage primitives.
+//! Checked ext4 filesystem objects and storage algorithms.
 //!
-//! The current implementation provides disk decoding, filesystem block I/O,
+//! The crate owns ext4-private algorithms and their direct KVFS operation
+//! objects. The current implementation provides disk decoding, filesystem block I/O,
 //! feature negotiation, explicit journal recovery, metadata-buffer/JBD2
 //! mutation, extent tree updates, bitmap allocation, a PageCache-facing
 //! ordered-data regular-file writeback baseline, and a regular-file
@@ -43,7 +44,7 @@
 //! extents, and the inode bitmap after the last reference is gone. Core mutation
 //! results update the inode component composed into the sole resident KVFS
 //! inode; KVFS generic attribute operations read and update that same state,
-//! so the bridge has no second cached snapshot to refresh. KVFS owns
+//! so there is no second cached inode snapshot to refresh. KVFS owns
 //! `I_NEW`/`I_FREEING`-equivalent lookup and eviction; KExt4 owns no resident
 //! inode cache or lifecycle. Namespace mutation receives the already resident
 //! child/moved/replaced private state instead of reloading it by number.
@@ -58,7 +59,7 @@
 //! release and dirty throttling remain KVFS/PageCache accounting extensions.
 //! The R9 xattr baseline adds journaled inode-body and single external
 //! block set/remove for `user.*`, `trusted.*`, `security.*`, and opaque POSIX
-//! ACL xattrs. The live bridge under `fs/bridges/kext4_vfs` exposes
+//! ACL xattrs. The direct KVFS operation implementation exposes
 //! `user.*`, `trusted.*`, and `security.*` through KVFS xattr operations,
 //! including atomic create/replace policy and ctime synchronization. Opaque ACL
 //! bytes remain a core-only foundation until KVFS has ACL permission and
@@ -79,7 +80,7 @@
 //! while queue progress remains synchronously driven until N2 introduces
 //! background execution. Precise per-inode sync tids still require KVFS
 //! runtime-inode storage, so the current sync path conservatively commits the
-//! running transaction. The current KVFS bridge wires filesystem drain through
+//! running transaction. The KVFS integration wires filesystem drain through
 //! `SuperBlockOperations::sync_fs`.
 //! Crate-internal tests keep a raw allocated-data overwrite helper for
 //! validating storage plumbing; it is not exported as an ext4 API.
@@ -88,6 +89,9 @@
 #![forbid(unsafe_code)]
 
 extern crate alloc;
+
+#[macro_use]
+extern crate klogger;
 
 #[cfg(not(target_os = "none"))]
 extern crate std;
@@ -106,6 +110,8 @@ mod inode;
 mod io;
 mod jbd2;
 mod journal;
+#[cfg(test)]
+mod linux_image_tests;
 mod mballoc;
 mod namei;
 mod orphan;
@@ -113,6 +119,7 @@ mod superblock;
 mod sync;
 mod truncate;
 mod types;
+mod vfs;
 mod xattr;
 
 pub use dir::{DirectoryEntry, Ext4DirEntryRef, Ext4DirPos, Ext4DirSink};
@@ -128,13 +135,52 @@ pub use file::Ext4SyncIntent;
 pub use inode::{
     Ext4DeviceId, Ext4Inode, Ext4InodeMetadataUpdate, Ext4InodeStat, Ext4Timestamp, InodeKind,
 };
+pub(crate) use superblock::Ext4SbInfo;
 pub use superblock::{
-    Ext4Filesystem, Ext4RecoveryReport, Ext4StatFs, Ext4StatFsMode, FilesystemLayout,
-    JournalLocation, JournalStatus,
+    Ext4RecoveryReport, Ext4StatFs, FilesystemLayout, JournalLocation, JournalStatus,
 };
 pub use types::{
     BlockCount, BlockGroupNumber, FilesystemBlock, InodeNumber, LogicalBlock, PhysicalBlock,
 };
+use vfs::{Ext4MountOptions, Ext4SuperOperations};
 pub use xattr::{
     Ext4Xattr, Ext4XattrNameRef, Ext4XattrNameSink, Ext4XattrNamespace, Ext4XattrSetMode,
 };
+
+fn ext4_get_tree(
+    context: &mut kvfs::FsContext<'_>,
+    lookup_root: &kvfs::Path,
+    lookup_pwd: &kvfs::Path,
+) -> kvfs::VfsResult<alloc::sync::Arc<kvfs::SuperBlock>> {
+    let options = *context.private::<Ext4MountOptions>()?;
+    kvfs::get_tree_bdev(context, lookup_root, lookup_pwd, move |super_block| {
+        Ext4SuperOperations::fill_super(super_block, options)
+    })
+}
+
+fn ext4_reconfigure(context: &mut kvfs::FsContext<'_>) -> kvfs::VfsResult<()> {
+    let options = *context.private::<Ext4MountOptions>()?;
+    let super_block = context.super_block()?;
+    if let Some(statfs_mode) = options.statfs_mode {
+        sync::write_lock(super_block.private::<sync::RwLock<Ext4SbInfo>>()?)
+            .set_statfs_mode(statfs_mode);
+    }
+    Ok(())
+}
+
+static FS_CONTEXT_OPERATIONS: kvfs::FsContextOperations =
+    kvfs::FsContextOperations::with_reconfigure(ext4_get_tree, ext4_reconfigure);
+
+fn init_fs_context(context: &mut kvfs::FsContext<'_>) -> kvfs::VfsResult<()> {
+    context.set_operations(&FS_CONTEXT_OPERATIONS);
+    context.set_private(Ext4MountOptions::parse(context.data())?);
+    Ok(())
+}
+
+static FILE_SYSTEM_TYPE: kvfs::FileSystemType =
+    kvfs::FileSystemType::device_backed("ext4", init_fs_context);
+
+#[macros::register_init]
+fn init_ext4_fs() {
+    kvfs::register_filesystem(&FILE_SYSTEM_TYPE).expect("ext4 filesystem type must register once");
+}

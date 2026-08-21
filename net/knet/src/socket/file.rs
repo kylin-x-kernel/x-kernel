@@ -6,10 +6,11 @@
 
 use alloc::{format, sync::Arc};
 
+use anon_inodefs::AnonInodeFs;
 use kcred::Cred;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
-use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile, VfsResult};
+use kvfs::{FMode, FileOperations, OpenFlags, VfsFile, VfsResult};
 
 use crate::{RecvFlags, RecvOptions, SendFlags, SendOptions, Socket, SocketOps};
 

@@ -39,6 +39,8 @@ root block device 名称来自内核构建配置；设备枚举和磁盘内容�
   否则后续 mount 会暴露缺失 boot 节点的分离目录树。
 - devtmpfs/sysfs 构造器必须保留 internal root mount 的 active 引用；可见 mount 卸载不得
   teardown 内核仍在更新的共享树。
+- `anon_inodefs` 与 `pipefs` 必须在普通 task 可创建匿名 fd/pipe 前完成 hidden mount 发布；
+  runtime 路径不得隐式执行首次初始化。
 
 ## 线程安全
 
@@ -56,6 +58,7 @@ boot 不另建移除订阅或设备生命周期状态。
 | T-05 | 启动 mount flags 错误作用到共享 superblock 或禁用 `/dev` | 高 | 把 per-mount flags 填入 statfs 后端状态，或给 `/dev` 设置 `nodev` | boot 通过 namespace attach 设置 `MountFlags`；superblock 构造器只接收 filesystem-wide flags |
 | T-06 | 只读 root device 无法启动 | 高 | root 探测只使用 RW flags，首轮 `EACCES` 后直接 panic | 按 Linux `mount_root_generic()` 对完整 filesystem 候选集执行 RW、RO 两轮探测；RO 轮同时设置 superblock 与 mount 只读位；root 镜像须预置必要 mountpoint |
 | T-07 | 9P 嵌套挂载点缺少父目录 | 中 | mount helper 只对最终 `/mnt/hostshare` 执行 `mkdir` | `mount_host_share()` 在挂载前通过 `ensure_directory_path()` 逐级创建 policy-owned 路径；通用 helper 要求目标已存在 |
+| T-08 | 匿名 fd/pipe 在 hidden pseudo fs 初始化前运行 | 高 | boot 漏掉初始化或把初始化推迟到 runtime first-use | `prepare_namespace()` 在发布真实 root 后显式初始化两个 filesystem，未初始化访问立即暴露契约错误 |
 
 ## 故障模式与影响分析（FMEA）
 

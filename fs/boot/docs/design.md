@@ -37,6 +37,10 @@ provider trait 或第二套名称/能力来源。root 候选从同一 registry �
 再把它 overmount 到 bootstrap root。最后把 init `FsStruct` 的 root/pwd 成对更新到新的
 visible root。bootstrap rootfs 保留在覆盖层下，对应 Linux 初始 rootfs 的生命周期。
 
+真实 root 发布后，boot 显式初始化 `anon_inodefs` 与 `pipefs` 的 hidden mount。两者是
+不可由用户 mount 的内核伪文件系统，不进入用户可见 filesystem registry；初始化发生在
+普通 task/eventfd/socket/pipe 路径运行前，runtime caller 只读取已发布对象。
+
 用户态启动前，真实 root 上再挂同一个共享 devtmpfs 以及 tmpfs、procfs、sysfs 和可选
 bpffs。每个固定路径直接使用已经由 init 段注册的 canonical descriptor 构造 `FsContext`，
 再调用 `MntNamespace::mount_new()`；boot 不按名称二次查表，也不直接调用具体 superblock
@@ -59,7 +63,8 @@ constructor。devtmpfs/sysfs 的 internal mount 保证可见 mount 卸载后内�
    `FsContext` 并调用 `MntNamespace::mount_new()`；与 Linux `mount_root_generic()` 一样，
    只有 `EACCES`/`EINVAL` 会继续尝试下一种格式，其它错误立即停止启动。
 6. 成对更新 init root/pwd 到 overmount 后的真实 root。
-7. 通过同一个 `mount_new()` 对象入口在真实 root 上安装启动期虚拟文件系统。
+7. 初始化 `anon_inodefs` 与 `pipefs` 的 hidden mount。
+8. 通过同一个 `mount_new()` 对象入口在真实 root 上安装启动期虚拟文件系统。
 
 ## 所有权与并发
 

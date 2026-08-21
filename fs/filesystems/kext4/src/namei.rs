@@ -7,7 +7,7 @@
 use alloc::{sync::Arc, vec, vec::Vec};
 
 use crate::{
-    BlockCount, BlockMapping, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Result, FilesystemBlock,
+    BlockCount, BlockMapping, CorruptKind, Ext4Error, Ext4Result, Ext4SbInfo, FilesystemBlock,
     InodeNumber, LogicalBlock, PhysicalBlock, UnsupportedKind,
     dirhash::{DirectoryHash, directory_hash},
     disk::{DirectoryFileType, checksum, dir as disk_dir, inode as disk_inode},
@@ -69,7 +69,7 @@ impl Ext4Credits {
     const SYMLINK_DATA_BLOCK: u32 = 1;
 
     fn create(
-        _filesystem: &Ext4Filesystem,
+        _filesystem: &Ext4SbInfo,
         directory: &Ext4Inode,
         insert: DirectoryInsertPlan,
     ) -> JournalCredits {
@@ -81,7 +81,7 @@ impl Ext4Credits {
     }
 
     fn mkdir(
-        _filesystem: &Ext4Filesystem,
+        _filesystem: &Ext4SbInfo,
         directory: &Ext4Inode,
         insert: DirectoryInsertPlan,
     ) -> JournalCredits {
@@ -97,7 +97,7 @@ impl Ext4Credits {
     }
 
     fn block_mapped_symlink(
-        _filesystem: &Ext4Filesystem,
+        _filesystem: &Ext4SbInfo,
         directory: &Ext4Inode,
         insert: DirectoryInsertPlan,
     ) -> JournalCredits {
@@ -112,7 +112,7 @@ impl Ext4Credits {
     }
 
     fn link(
-        _filesystem: &Ext4Filesystem,
+        _filesystem: &Ext4SbInfo,
         directory: &Ext4Inode,
         _target: &Ext4Inode,
         insert: DirectoryInsertPlan,
@@ -121,7 +121,7 @@ impl Ext4Credits {
     }
 
     fn unlink(
-        _filesystem: &Ext4Filesystem,
+        _filesystem: &Ext4SbInfo,
         directory: &Ext4Inode,
         victim: &Ext4Inode,
     ) -> JournalCredits {
@@ -134,7 +134,7 @@ impl Ext4Credits {
     }
 
     fn rmdir(
-        _filesystem: &Ext4Filesystem,
+        _filesystem: &Ext4SbInfo,
         directory: &Ext4Inode,
         _victim: &Ext4Inode,
     ) -> JournalCredits {
@@ -146,7 +146,7 @@ impl Ext4Credits {
     }
 
     fn rename(
-        _filesystem: &Ext4Filesystem,
+        _filesystem: &Ext4SbInfo,
         old_directory: &Ext4Inode,
         new_directory: &Ext4Inode,
         moved: &Ext4Inode,
@@ -215,10 +215,7 @@ impl Ext4Credits {
             .ok_or(Ext4Error::Overflow)
     }
 
-    fn final_eviction(
-        filesystem: &Ext4Filesystem,
-        inode: &Ext4Inode,
-    ) -> Ext4Result<JournalCredits> {
+    fn final_eviction(filesystem: &Ext4SbInfo, inode: &Ext4Inode) -> Ext4Result<JournalCredits> {
         let extent_delete = if filesystem.unlinked_inode_data_blocks(inode)? == 0 {
             0
         } else {
@@ -234,7 +231,7 @@ impl Ext4Credits {
     }
 }
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     /// Creates a regular file in a linear ext4 directory.
     ///
     /// This is the first R7 namei write path. It keeps ext4-specific work in
@@ -953,6 +950,7 @@ impl Ext4Filesystem {
     /// # Errors
     ///
     /// Format, journal, and device errors are propagated.
+    #[cfg(test)]
     pub fn evict_unlinked_inode(
         &mut self,
         inode: &Ext4Inode,

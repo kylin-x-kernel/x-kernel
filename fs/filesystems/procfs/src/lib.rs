@@ -19,11 +19,12 @@ mod trace_nodes;
 use alloc::sync::Arc;
 
 use kvfs::{
-    FileSystemType, FsContext, SimpleFs, SuperBlock, SuperBlockFlags, VfsResult, get_tree_nodev,
+    FileSystemType, FsContext, FsContextOperations, SimpleFs, SuperBlock, SuperBlockFlags,
+    VfsResult, get_tree_nodev,
 };
 
 fn get_tree(
-    context: &FsContext<'_>,
+    context: &mut FsContext<'_>,
     _lookup_root: &kvfs::Path,
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
@@ -32,8 +33,15 @@ fn get_tree(
     })
 }
 
+static FS_CONTEXT_OPERATIONS: FsContextOperations = FsContextOperations::new(get_tree);
+
+fn init_fs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
+    context.set_operations(&FS_CONTEXT_OPERATIONS);
+    Ok(())
+}
+
 /// Registered proc filesystem type.
-pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("proc", get_tree);
+pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("proc", init_fs_context);
 
 #[macros::register_init]
 fn init_proc_fs() {

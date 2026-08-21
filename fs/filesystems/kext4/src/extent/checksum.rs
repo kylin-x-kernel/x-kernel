@@ -4,13 +4,13 @@
 
 use super::validate::decode_header;
 use crate::{
-    ChecksumTarget, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Result, PhysicalBlock,
+    ChecksumTarget, CorruptKind, Ext4Error, Ext4Result, Ext4SbInfo, PhysicalBlock,
     disk::{checksum, extent as disk_extent},
     inode::{Ext4Inode, inode_checksum_seed},
 };
 
 pub(super) fn verify_extent_block_checksum(
-    filesystem: &Ext4Filesystem,
+    filesystem: &Ext4SbInfo,
     inode: &Ext4Inode,
     block: PhysicalBlock,
     bytes: &[u8],
@@ -41,7 +41,7 @@ pub(super) fn verify_extent_block_checksum(
 }
 
 pub(super) fn update_extent_block_checksum(
-    filesystem: &Ext4Filesystem,
+    filesystem: &Ext4SbInfo,
     inode: &Ext4Inode,
     bytes: &mut [u8],
 ) -> Ext4Result<()> {

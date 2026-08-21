@@ -8,10 +8,7 @@ use alloc::{boxed::Box, string::String, sync::Arc};
 
 use fs9p::{Session, Transport};
 use ksync::{Mutex, MutexGuard};
-use kvfs::{
-    FileSystemType, NodeFlags, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations,
-    VfsResult, path::MAX_NAME_LEN,
-};
+use kvfs::{NodeFlags, StatFs, SuperBlock, SuperBlockOperations, VfsResult, path::MAX_NAME_LEN};
 
 use super::inode::{Inode, inode_init_from_attr};
 
@@ -21,11 +18,10 @@ pub struct Fs9pFilesystem {
 }
 
 impl Fs9pFilesystem {
-    /// Mounts a 9P filesystem over an established transport with the selected
-    /// canonical filesystem type and VFS-wide superblock flags.
+    /// Mount a 9P filesystem over an established 9P transport.
     pub fn mount(
-        file_system_type: &'static FileSystemType,
-        superblock_flags: SuperBlockFlags,
+        file_system_type: &'static kvfs::FileSystemType,
+        superblock_flags: kvfs::SuperBlockFlags,
         transport: Box<dyn Transport>,
         mount_tag: String,
     ) -> VfsResult<Arc<SuperBlock>> {
@@ -52,10 +48,13 @@ impl Fs9pFilesystem {
         // The legacy adapter exposes inode number zero for every qid. Keep
         // those identities unhashed until qid-based `iget5` semantics exist;
         // hashing by zero would merge unrelated remote objects.
-        Ok(SuperBlock::new_with_flags(
+        Ok(SuperBlock::new_with_flags_and_private(
             file_system_type,
+            &V9FS_SUPER_OPERATIONS,
             fs,
             superblock_flags,
+            1,
+            kvfs::MAX_LFS_FILESIZE,
             |_| root,
         ))
     }
@@ -66,8 +65,12 @@ impl Fs9pFilesystem {
     }
 }
 
-impl SuperBlockOperations for Fs9pFilesystem {
-    fn statfs(&self) -> VfsResult<StatFs> {
+struct V9fsSuperOperations;
+
+static V9FS_SUPER_OPERATIONS: V9fsSuperOperations = V9fsSuperOperations;
+
+impl SuperBlockOperations for V9fsSuperOperations {
+    fn statfs(&self, _super_block: &SuperBlock) -> VfsResult<StatFs> {
         // 9P does not expose filesystem-wide statistics in a standard way.
         // Return a minimal StatFs with zeroed fields.
         Ok(StatFs {
@@ -83,7 +86,7 @@ impl SuperBlockOperations for Fs9pFilesystem {
         })
     }
 
-    fn sync_fs(&self) -> VfsResult<()> {
+    fn sync_fs(&self, _super_block: &SuperBlock) -> VfsResult<()> {
         // 9P writes are synchronous through virtio — no explicit flush needed.
         Ok(())
     }

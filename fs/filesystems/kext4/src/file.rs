@@ -5,7 +5,7 @@
 use alloc::{vec, vec::Vec};
 
 use crate::{
-    BlockCount, CorruptKind, Ext4Error, Ext4Filesystem, Ext4Result, FilesystemBlock, LogicalBlock,
+    BlockCount, CorruptKind, Ext4Error, Ext4Result, Ext4SbInfo, FilesystemBlock, LogicalBlock,
     UnsupportedKind,
     extent::{BlockMapping, ExtentMappingState},
     inode::{Ext4Inode, Ext4Timestamp, InodeKind},
@@ -90,7 +90,7 @@ pub(crate) enum RegularWriteMetadata {
     },
 }
 
-impl Ext4Filesystem {
+impl Ext4SbInfo {
     pub(crate) fn ensure_regular_file_mutation_supported(
         &self,
         inode: &Ext4Inode,

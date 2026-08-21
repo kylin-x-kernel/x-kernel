@@ -7,6 +7,7 @@
 use alloc::{sync::Arc, task::Wake};
 use core::{mem::size_of, task::Waker};
 
+use anon_inodefs::AnonInodeFs;
 use kcred::Cred;
 use kerrno::{KError, KResult};
 use khal::time::monotonic_time;
@@ -14,7 +15,7 @@ use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use kspin::SpinNoIrq;
 use ktask::future::{TimerHandle, block_on, cancel_timer, poll_io, register_timer};
 use ktime_types::{MonotonicInstant, SystemTime, TimeSpan};
-use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
+use kvfs::{FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
 use linux_raw_sys::general::{CLOCK_BOOTTIME, CLOCK_MONOTONIC};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
