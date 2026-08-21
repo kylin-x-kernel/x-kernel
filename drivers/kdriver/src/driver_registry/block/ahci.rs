@@ -21,17 +21,10 @@ impl block::ahci::AhciHal for AhciHalImpl {
     }
 
     fn flush_dcache() {
-        #[cfg(target_arch = "loongarch64")]
-        // SAFETY: `dbar 0` is a LoongArch64 data barrier instruction that
-        // ensures preceding data cache operations complete before subsequent
-        // memory accesses. This is required for AHCI DMA coherency on
-        // LoongArch64 where the DMA controller may observe stale cache
-        // lines. The instruction is privileged but safe to execute in
-        // kernel context and has no memory safety implications — it only
-        // affects ordering, not addressability.
-        unsafe {
-            core::arch::asm!("dbar 0");
-        }
+        // Orders the command-list/command-table stores before the DMA engine
+        // reads them; executes `dbar 0` on LoongArch64 and is a no-op on
+        // cache-coherent architectures.
+        karch::dma_read_barrier();
     }
 }
 

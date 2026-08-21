@@ -38,4 +38,5 @@ vdev-vpl011.workspace = true
 percpu.workspace = true
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
+aarch64-cpu.workspace = true
 percpu.workspace = true

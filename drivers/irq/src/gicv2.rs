@@ -88,8 +88,8 @@ pub fn dispatch_irq_from_irqson() -> Option<(usize, usize, bool)> {
     // GIC non-secure mode requires an early EOI to lower the running priority,
     // while the actual deactivation is deferred to `complete_irq`.
     TRAP_OP.eoi(ack);
-    // SAFETY: `isb` only orders the acknowledged interrupt before the handler.
-    unsafe { core::arch::asm!("isb", options(nomem, nostack)) };
+    // Order the acknowledged interrupt before the handler.
+    aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
     Some((irq, u32::from(ack) as usize, false))
 }
 
@@ -101,8 +101,8 @@ pub fn dispatch_irq_from_irqsoff() -> Option<(usize, usize)> {
     #[cfg(feature = "nmi-pmu")]
     {
         karch::pmr::write(karch::pmr::NMI_ONLY);
-        // SAFETY: isb ensures PMR write is visible before IAR read.
-        unsafe { core::arch::asm!("isb", options(nomem, nostack)) };
+        // Ensure the PMR write is visible before the IAR read.
+        aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
     }
 
     let result = dispatch_irq_from_irqson();
@@ -142,10 +142,10 @@ pub fn complete_irq(completion_cookie: usize) {
 }
 
 pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
-    // SAFETY: `dmb ishst` orders the caller's prior Normal-memory stores
-    // before the SGI MMIO write, which is required for cross-CPU publish
-    // before notify semantics.
-    unsafe { core::arch::asm!("dmb ishst", options(nomem, nostack)) };
+    // `dmb ishst` orders the caller's prior Normal-memory stores before the
+    // SGI MMIO write, which is required for cross-CPU publish-before-notify
+    // semantics.
+    aarch64_cpu::asm::barrier::dmb(aarch64_cpu::asm::barrier::ISHST);
     match target {
         TargetCpu::Self_ => {
             GIC.lock()

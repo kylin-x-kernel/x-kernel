@@ -90,9 +90,7 @@ macro_rules! msr {
 #[macro_export]
 macro_rules! isb {
     () => {
-        // SAFETY: `isb` is a barrier instruction that does not access
-        // memory or general-purpose registers.
-        unsafe { core::arch::asm!("isb", options(nomem, nostack)) }
+        $crate::regs::isb()
     };
 }
 

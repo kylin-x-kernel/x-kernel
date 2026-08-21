@@ -196,6 +196,7 @@ klockstat = { path = "util/klockstat" }
 klockstat-macros = { path = "util/klockstat-macros" }
 
 # External crates
+aarch64-cpu = "10.0"
 bitflags = "2.10"
 bytemuck = { version = "1.23", features = ["unsound_ptr_pod_impl"] }
 cfg-if = "1.0"

@@ -26,3 +26,12 @@ pub fn flush_icache_all() {}
 /// Flushes the instruction cache for the given virtual address range (no-op on x86_64).
 #[inline]
 pub fn flush_icache_range(_start: VirtAddr, _size: usize) {}
+
+/// Orders prior CPU stores before a device reads the same memory via DMA.
+///
+/// x86_64 is cache-coherent for device DMA and maintains strong store
+/// ordering, so no barrier is required. The explicit no-op keeps driver call
+/// sites portable across architectures — the LoongArch64 implementation
+/// executes `dbar 0`.
+#[inline]
+pub fn dma_read_barrier() {}

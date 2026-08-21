@@ -141,8 +141,8 @@ impl Stage2 {
         unsafe {
             l2_va.add(l2_idx).write(l3_pa | LPAE_VALID | LPAE_TABLE);
             core::arch::asm!("dc civac, {}", in(reg) l2_va.add(l2_idx));
-            core::arch::asm!("dsb ish");
         }
+        aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ISH);
         flush_stage2_tlb();
         l3_va
     }
@@ -265,8 +265,8 @@ impl GuestMem for Stage2 {
             offset += 4096;
         }
 
-        // SAFETY: barrier + TLB invalidation.
-        unsafe { core::arch::asm!("dsb ish") };
+        // Ensure all descriptor writes are visible before TLB invalidation.
+        aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ISH);
         flush_stage2_tlb();
 
         log::info!(
@@ -343,8 +343,8 @@ impl GuestMem for Stage2 {
                 entry_ptr.write(0);
                 // Flush the cache line so the table walker sees the invalidation.
                 core::arch::asm!("dc civac, {}", in(reg) entry_ptr);
-                core::arch::asm!("dsb ish");
             }
+            aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ISH);
 
             addr += block_size;
         }
@@ -365,10 +365,9 @@ fn flush_pt_page(va: *const u8) {
         }
         p += 64;
     }
-    // SAFETY: barrier instructions.
-    unsafe {
-        core::arch::asm!("dsb sy");
-    }
+    // Wait for all cleans to reach the Point of Coherency before TLB
+    // invalidation.
+    aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::SY);
     flush_stage2_tlb();
 }
 

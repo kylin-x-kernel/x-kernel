@@ -24,6 +24,7 @@ dependencies = [
 name = "aarch64-pmuv3"
 version = "0.1.0"
 dependencies = [
+ "aarch64-cpu 10.0.0",
  "tock-registers 0.10.1",
 ]
 
@@ -1932,6 +1933,7 @@ dependencies = [
 name = "irq-driver"
 version = "0.2.0-dev"
 dependencies = [
+ "aarch64-cpu 10.0.0",
  "arm-gic-driver",
  "karch",
  "kbuild_config",
@@ -2162,6 +2164,7 @@ dependencies = [
  "driver_base",
  "input",
  "kalloc",
+ "karch",
  "kbuild_config",
  "kclass",
  "kdevice",
@@ -3123,6 +3126,7 @@ dependencies = [
 name = "kvmm"
 version = "0.2.0-dev"
 dependencies = [
+ "aarch64-cpu 10.0.0",
  "fs_context",
  "kaddr_layout",
  "kalloc",

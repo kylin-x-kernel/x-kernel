@@ -8,6 +8,12 @@
 //! this CPU ready, IRQ masking uses the GIC priority mask instead of
 //! `DAIF.I` — keeping pseudo‑NMIs deliverable.
 //!
+//! All helpers in this module modify **only** the `DAIF.I` bit (via the
+//! `aarch64-cpu` `DAIF.modify` read-modify-write); the D/A/F mask bits
+//! (SError, debug, FIQ) are preserved, so masking state established by
+//! [`save_irq_and_disable`] or by explicit SError/debug masking is never
+//! lifted as a side effect.
+//!
 //! # PMR‑mode DAIF.I invariant
 //!
 //! Once `pmr::is_ready()` returns `true` on a CPU, **`DAIF.I` must always
@@ -25,7 +31,7 @@
 
 use core::arch::asm;
 
-use aarch64_cpu::registers::{DAIF, Readable, Writeable};
+use aarch64_cpu::registers::{DAIF, ReadWriteable, Readable, Writeable};
 
 #[cfg(feature = "pmr")]
 use super::pmr;
@@ -42,7 +48,8 @@ pub fn enable_local_irq() {
     if pmr::is_ready() {
         pmr::write(pmr::ALL);
     }
-    DAIF.write(DAIF::I::Unmasked);
+    // `modify` clears only the DAIF.I bit, preserving the D/A/F masks.
+    DAIF.modify(DAIF::I::Unmasked);
 }
 
 /// Disable normal IRQs on the current CPU.
@@ -60,10 +67,12 @@ pub fn disable_local_irq() {
     #[cfg(feature = "pmr")]
     if pmr::is_ready() {
         pmr::write(pmr::NMI_ONLY);
-        DAIF.write(DAIF::I::Unmasked);
+        // `modify` clears only the DAIF.I bit, preserving the D/A/F masks.
+        DAIF.modify(DAIF::I::Unmasked);
         return;
     }
-    DAIF.write(DAIF::I::Masked);
+    // `modify` sets only the DAIF.I bit, preserving the D/A/F masks.
+    DAIF.modify(DAIF::I::Masked);
 }
 
 /// Prepare to return from EL1 to EL0 with normal IRQs available in userspace.
@@ -80,7 +89,8 @@ pub fn disable_local_irq() {
 pub fn prepare_enter_user_irq() {
     #[cfg(feature = "pmr")]
     if pmr::is_ready() {
-        DAIF.write(DAIF::I::Masked);
+        // `modify` sets only the DAIF.I bit, preserving the D/A/F masks.
+        DAIF.modify(DAIF::I::Masked);
         pmr::write(pmr::ALL);
     }
 }

@@ -4,6 +4,8 @@
 
 //! Host-backed guest virtual timer delivery.
 
+use aarch64_cpu::registers::{CNTPCT_EL0, CNTVOFF_EL2, Readable};
+
 use super::irq_route::HOST_VTIMER_IRQ;
 use crate::{
     arch::aarch64::Aarch64Vhe,
@@ -52,13 +54,8 @@ fn check_vtimer(vcpu: &mut Vcpu<Aarch64Vhe>) -> bool {
     if ctl & CTL_ENABLE == 0 || ctl & CTL_IMASK != 0 {
         return false;
     }
-    let now: u64;
-    let cntvoff: u64;
-    // SAFETY: reading CNTPCT_EL0 / CNTVOFF_EL2 from EL2 is always safe.
-    unsafe {
-        core::arch::asm!("mrs {}, cntpct_el0", out(reg) now);
-        core::arch::asm!("mrs {}, cntvoff_el2", out(reg) cntvoff);
-    }
+    let now = CNTPCT_EL0.get();
+    let cntvoff = CNTVOFF_EL2.get();
     if now >= vcpu.arch.cntv_cval.wrapping_add(cntvoff) {
         vcpu.vm.inject_irq(vcpu.vcpu_id, HOST_VTIMER_IRQ);
         true

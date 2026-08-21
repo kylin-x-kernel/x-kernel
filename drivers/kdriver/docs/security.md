@@ -253,13 +253,13 @@ unsafe { virtio::probe_mmio_device(regs.as_ptr(), size) }.ok_or(DriverError::Bad
 
 ### 6. AHCI 驱动 probe
 
-位置：`src/driver_registry/block/ahci.rs:25,63`
+位置：`src/driver_registry/block/ahci.rs:27,61`
 
 ```rust
-// line 25: LoongArch64 data cache barrier
-unsafe { core::arch::asm!("dbar 0"); }
+// line 27: DMA ordering barrier (dbar 0 on LoongArch64, no-op elsewhere)
+karch::dma_read_barrier();
 
-// line 63: construct AHCI driver from raw MMIO vaddr
+// line 61: construct AHCI driver from raw MMIO vaddr
 let ahci = match unsafe { block::ahci::AhciDriver::<AhciHalImpl>::new(vaddr) } { ... };
 ```
 
@@ -267,7 +267,8 @@ let ahci = match unsafe { block::ahci::AhciDriver::<AhciHalImpl>::new(vaddr) } {
 
 - `vaddr` 来自 `iomap_first_mmio(device, "ahci")`，通过 devres 管理生命周期。
 - `iomap_first_mmio` 返回的指针在 `device` 存活期间有效。
-- `dbar 0` 仅在 `target_arch = "loongarch64"` 时执行，用于 AHCI DMA coherency。
+- `karch::dma_read_barrier()` 为安全封装：在 LoongArch64 上执行 `dbar 0`
+  用于 AHCI DMA coherency，在 cache-coherent 架构上为 no-op。
 
 安全依据：
 

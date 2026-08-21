@@ -14,7 +14,8 @@ mod tlb;
 mod tls;
 
 pub use cache::{
-    flush_icache_all, flush_icache_all_local, flush_icache_range, flush_icache_remote,
+    dma_read_barrier, flush_icache_all, flush_icache_all_local, flush_icache_range,
+    flush_icache_remote,
 };
 pub use cpu::{await_interrupts, stop_cpu};
 pub use hypercall::hypercall;

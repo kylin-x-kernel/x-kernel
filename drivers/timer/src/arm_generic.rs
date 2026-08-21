@@ -7,6 +7,8 @@ use core::{
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
+#[cfg(feature = "vmm")]
+use aarch64_cpu::registers::CNTHP_CTL_EL2;
 use aarch64_cpu::registers::{
     CNTFRQ_EL0, CNTPCT_EL0, CNTV_CTL_EL0, CNTV_TVAL_EL0, CNTVCT_EL0, Readable, Writeable,
 };
@@ -340,9 +342,9 @@ pub fn disarm_timer() {
 #[cfg(feature = "vmm")]
 #[inline]
 fn write_physical_timer_ctl(value: u64) {
-    // SAFETY: under the aarch64 VMM configuration the host runs at EL2 with
-    // VHE enabled, and IRQ 26 is the EL2 physical timer interrupt.
-    unsafe { core::arch::asm!("msr CNTHP_CTL_EL2, {}", in(reg) value) };
+    // Under the aarch64 VMM configuration the host runs at EL2 with VHE
+    // enabled, and IRQ 26 is the EL2 physical timer interrupt.
+    CNTHP_CTL_EL2.set(value);
 }
 
 #[cfg(not(feature = "vmm"))]

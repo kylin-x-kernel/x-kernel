@@ -7,6 +7,9 @@ This crate provides a uniform API across all supported architectures (AArch64, x
 - **TLB flush**: `flush_tlb(vaddr: Option<VirtAddr>)`
 - **Cache maintenance** (AArch64): `flush_icache_all()`,
   `clean_dcache_line_to_poc(vaddr)`, `clean_dcache_range_to_poc(start, size)`
+- **DMA ordering**: `dma_read_barrier()` — orders prior CPU stores before a
+  device reads the same memory via DMA (`dbar 0` on LoongArch64, no-op on
+  cache-coherent architectures)
 - **CPU control**: `stop_cpu() -> !` (terminal halt; never returns),
   `await_interrupts()`
 - **Local interrupt management**:

@@ -103,3 +103,12 @@ pub fn clean_dcache_range_to_poc(start: VirtAddr, size: usize) {
     // SAFETY: `dsb sy` waits until all preceding clean operations reach PoC.
     unsafe { asm!("dsb sy") };
 }
+
+/// Orders prior CPU stores before a device reads the same memory via DMA.
+///
+/// The AArch64 platforms in this configuration are cache-coherent for device
+/// DMA, so no barrier is required. The explicit no-op keeps driver call sites
+/// portable across architectures — the LoongArch64 implementation executes
+/// `dbar 0`.
+#[inline]
+pub fn dma_read_barrier() {}

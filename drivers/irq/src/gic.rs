@@ -9,6 +9,8 @@ mod gicv2;
 #[path = "gicv3.rs"]
 mod gicv3;
 
+#[cfg(feature = "nmi-pmu")]
+use aarch64_cpu::registers::{DAIF, ReadWriteable};
 use kirq::TargetCpu;
 use lazyinit::LazyInit;
 use memaddr::{PhysAddr, VirtAddr};
@@ -217,9 +219,10 @@ pub fn enable(irq: usize, enabled: bool) {
 fn open_nmi_window() {
     assert!(karch::pmr::is_ready());
     karch::pmr::write(karch::pmr::NMI_ONLY);
-    // SAFETY: exception entry set DAIF.I; clear it so pseudo‑NMI can nest
-    // while normal IRQs remain gated by PMR.
-    unsafe { core::arch::asm!("msr daifclr, #2") };
+    // Exception entry set DAIF.I; clear it so pseudo‑NMI can nest while
+    // normal IRQs remain gated by PMR. `modify` touches only the DAIF.I
+    // bit, so the D/A/F mask bits are preserved.
+    DAIF.modify(DAIF::I::Unmasked);
 }
 
 /// IRQ path: ack → RPR check → early EOI, version dispatch.

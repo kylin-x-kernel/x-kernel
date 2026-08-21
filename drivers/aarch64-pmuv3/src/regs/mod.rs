@@ -17,6 +17,16 @@ mod pmccfiltr_el0;
 mod register_types;
 pub use register_types::*;
 
+/// Instruction Synchronization Barrier — flushes the pipeline.
+///
+/// Thin wrapper over `aarch64_cpu::asm::barrier::isb` so the exported
+/// [`isb!`](crate::isb) macro stays path-hygienic at external expansion
+/// sites.
+#[inline]
+pub fn isb() {
+    aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
+}
+
 #[macro_export]
 macro_rules! define_pmu_register {
     ($mod_name:ident, $reg_name:ident, $reg_literal:tt) => {

@@ -88,8 +88,8 @@ pub fn dispatch_irq_from_irqson() -> Option<(usize, usize, bool)> {
     let is_nmi = false;
 
     TRAP_OP.eoi1(ack);
-    // SAFETY: `isb` only orders the acknowledged interrupt before the handler.
-    unsafe { core::arch::asm!("isb", options(nomem, nostack)) };
+    // Order the acknowledged interrupt before the handler.
+    aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
     Some((irq, irq, is_nmi))
 }
 
@@ -101,8 +101,8 @@ pub fn dispatch_irq_from_irqsoff() -> Option<(usize, usize)> {
     #[cfg(feature = "nmi-pmu")]
     {
         karch::pmr::write(karch::pmr::NMI_ONLY);
-        // SAFETY: isb ensures PMR write is visible before IAR read.
-        unsafe { core::arch::asm!("isb", options(nomem, nostack)) };
+        // Ensure the PMR write is visible before the IAR read.
+        aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
     }
 
     let ack = TRAP_OP.ack1();
@@ -114,8 +114,8 @@ pub fn dispatch_irq_from_irqsoff() -> Option<(usize, usize)> {
         // pseudo-NMI.
         let irq = ack.to_u32() as usize;
         TRAP_OP.eoi1(ack);
-        // SAFETY: `isb` only orders the acknowledged interrupt before the handler.
-        unsafe { core::arch::asm!("isb", options(nomem, nostack)) };
+        // Order the acknowledged interrupt before the handler.
+        aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
         Some((irq, irq))
     };
 
@@ -134,11 +134,11 @@ pub fn complete_irq(completion_cookie: usize) {
 }
 
 pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
-    // SAFETY: `ICC_SGI1R_EL1` is written via a system-register `msr`, so we
-    // need `dsb st` here rather than a mere ordering barrier. This guarantees
-    // the shootdown request state stored in Normal memory has completed before
-    // the target CPU can observe the SGI delivery.
-    unsafe { core::arch::asm!("dsb st", options(nomem, nostack)) };
+    // `ICC_SGI1R_EL1` is written via a system-register `msr`, so we need
+    // `dsb st` here rather than a mere ordering barrier. This guarantees the
+    // shootdown request state stored in Normal memory has completed before the
+    // target CPU can observe the SGI delivery.
+    aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ST);
     match target {
         TargetCpu::Self_ => {
             GIC.lock()
@@ -162,8 +162,8 @@ pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
                 .send_sgi(IntId::sgi(interrupt_id as u32), SGITarget::All);
         }
     }
-    // SAFETY: `isb` forces the SGI system-register write to be observed as
-    // issued before subsequent instructions continue, matching Linux's
-    // GICv3 SGI-send ordering.
-    unsafe { core::arch::asm!("isb", options(nomem, nostack)) };
+    // `isb` forces the SGI system-register write to be observed as issued
+    // before subsequent instructions continue, matching Linux's GICv3
+    // SGI-send ordering.
+    aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
 }

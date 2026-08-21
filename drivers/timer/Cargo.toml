@@ -27,7 +27,7 @@ percpu.workspace = true
 unittest.workspace = true
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
-aarch64-cpu = "10.0"
+aarch64-cpu.workspace = true
 of = { workspace = true }
 int_ratio = { workspace = true }
 

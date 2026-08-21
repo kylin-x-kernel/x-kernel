@@ -50,3 +50,17 @@ pub fn flush_icache_all() {
 pub fn flush_icache_range(_start: VirtAddr, _size: usize) {
     flush_icache_all();
 }
+
+/// Orders prior CPU stores before a device reads the same memory via DMA.
+///
+/// LoongArch64 does not guarantee that a DMA engine observes prior CPU
+/// stores in program order, so drivers must execute the full barrier
+/// `dbar 0` after writing a descriptor or buffer and before triggering the
+/// transfer. `dbar 0` also waits for those stores to complete, so the device
+/// cannot read stale data.
+#[inline]
+pub fn dma_read_barrier() {
+    // SAFETY: `dbar 0` only constrains ordering and completion of prior
+    // memory accesses; it has no addressing or privilege side-effects.
+    unsafe { asm!("dbar 0") };
+}

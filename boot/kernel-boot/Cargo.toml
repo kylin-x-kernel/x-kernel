@@ -23,7 +23,7 @@ kiface = { workspace = true }
 
 # Architecture-specific dependencies
 [target.'cfg(target_arch = "aarch64")'.dependencies]
-aarch64-cpu = "10.0"
+aarch64-cpu.workspace = true
 karch = { workspace = true }
 page_table = { workspace = true }
 memaddr = { workspace = true }

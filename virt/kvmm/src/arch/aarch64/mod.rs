@@ -7,6 +7,8 @@
 //! The kernel runs at EL2 with `HCR_EL2.E2H=1`. Guest vCPUs execute
 //! at EL1 via `eret`, trapping back to EL2 on WFI/HVC/Data Abort.
 
+use aarch64_cpu::registers::{DAIF, ReadWriteable};
+
 use super::VmmArch;
 use crate::{
     vcpu::{ExitAction, Vcpu},
@@ -281,9 +283,9 @@ impl VmmArch for Aarch64Vhe {
 
     fn exit_handler(vcpu: &mut Vcpu<Self>) -> ExitAction {
         // Unmask IRQ — EL2 entry masks PSTATE.I; host needs interrupts.
-
-        // SAFETY: re-enabling IRQ in host context is safe.
-        unsafe { core::arch::asm!("msr daifclr, #2") };
+        // `modify` touches only the DAIF.I bit, so the D/A/F mask bits
+        // are preserved.
+        DAIF.modify(DAIF::I::Unmasked);
 
         // Timer delivery is recomputed from this vCPU's saved CNTV state on
         // each entry, avoiding per-CPU host-IRQ attribution between VMs.
