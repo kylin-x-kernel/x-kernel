@@ -79,24 +79,136 @@ cargo --version
 rustc --version
 rustup show active-toolchain
 
-# The builder image ships these tools as binaries under /usr/local/cargo/bin
-# (on PATH) while CARGO_HOME points at a separate cache volume, so
-# `cargo install --list` cannot see them and would recompile from source on
-# every run. Detect via the binary version instead of the install registry.
-if [ "$(cargo-shear --version 2>/dev/null | awk '{print $NF}')" != "${CARGO_SHEAR_VERSION}" ]; then
-    echo "==> Installing cargo-shear ${CARGO_SHEAR_VERSION}"
-    retry 3 cargo install cargo-shear \
-        --version "${CARGO_SHEAR_VERSION}" --locked --force
-fi
+# Builder image ships tools under /usr/local/cargo/bin while CARGO_HOME is a
+# separate cache volume. cargo-shear 1.13.2 may report `Version: dev`.
+# Do not rely on `cargo install --list` alone: it needs a usable rustup
+# toolchain and can fail even when /usr/local/cargo/.crates.toml is present.
+# Prefer, in order: exact --version, .crates.toml / install-list metadata,
+# then the image binary embedding `{package}-{version}`.
+IMAGE_CARGO_BIN="/usr/local/cargo/bin"
+
+tool_version_token() {
+    local program="$1"
+    "$program" --version 2>/dev/null | awk '{print $NF}'
+}
+
+cargo_install_root_for() {
+    local program="$1"
+    local executable install_root
+    executable="$(command -v "${program}" 2>/dev/null || true)"
+    if [ -z "${executable}" ]; then
+        return 1
+    fi
+    install_root="$(dirname "$(dirname "${executable}")")"
+    if [ "$(basename "$(dirname "${executable}")")" != "bin" ]; then
+        return 1
+    fi
+    printf '%s\n' "${install_root}"
+}
+
+# .crates.toml lines look like:
+#   "cargo-shear 1.13.2 (registry+https://github.com/rust-lang/crates.io-index)" = ["cargo-shear"]
+cargo_crates_toml_has() {
+    local package="$1"
+    local version="$2"
+    local root="$3"
+    local crates_toml="${root}/.crates.toml"
+    if [ ! -f "${crates_toml}" ]; then
+        return 1
+    fi
+    grep -E "^\"${package} ${version} " "${crates_toml}" >/dev/null 2>&1
+}
+
+cargo_install_list_has() {
+    local package="$1"
+    local version="$2"
+    local root="$3"
+    cargo install --list --root "${root}" 2>/dev/null \
+        | awk -v expect="${package} v${version}:" '
+            { gsub(/\r/, ""); if ($0 == expect) found=1 }
+            END { exit found ? 0 : 1 }
+        '
+}
+
+cargo_root_has_package() {
+    local package="$1"
+    local version="$2"
+    local root="$3"
+    cargo_crates_toml_has "${package}" "${version}" "${root}" \
+        || cargo_install_list_has "${package}" "${version}" "${root}"
+}
+
+# cargo install embeds registry paths like .../cargo-shear-1.13.2/... in the bin.
+image_bin_embeds_version() {
+    local bin="$1"
+    local package="$2"
+    local version="$3"
+    grep -a -F "${package}-${version}" "${bin}" >/dev/null 2>&1
+}
+
+cargo_tool_ready() {
+    local program="$1"
+    local package="$2"
+    local version="$3"
+    local reported root
+    local image_bin="${IMAGE_CARGO_BIN}/${program}"
+
+    reported="$(tool_version_token "${program}" || true)"
+    if [ "${reported}" = "${version}" ]; then
+        return 0
+    fi
+
+    # Image/build quirk: clap reports "dev" while install metadata is correct.
+    if [ "${reported}" = "dev" ]; then
+        root="$(cargo_install_root_for "${program}" || true)"
+        if [ -n "${root}" ] && cargo_root_has_package "${package}" "${version}" "${root}"; then
+            return 0
+        fi
+        if cargo_root_has_package "${package}" "${version}" /usr/local/cargo; then
+            return 0
+        fi
+        if [ -x "${image_bin}" ] && image_bin_embeds_version "${image_bin}" "${package}" "${version}"; then
+            return 0
+        fi
+    fi
+
+    # PATH may miss /usr/local/cargo/bin; still accept a pinned image binary.
+    if [ -x "${image_bin}" ]; then
+        reported="$("${image_bin}" --version 2>/dev/null | awk '{print $NF}' || true)"
+        if [ "${reported}" = "${version}" ]; then
+            return 0
+        fi
+        if [ "${reported}" = "dev" ] && {
+            cargo_root_has_package "${package}" "${version}" /usr/local/cargo \
+                || image_bin_embeds_version "${image_bin}" "${package}" "${version}"
+        }; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+ensure_cargo_tool() {
+    local program="$1"
+    local package="$2"
+    local version="$3"
+
+    if cargo_tool_ready "${program}" "${package}" "${version}"; then
+        return 0
+    fi
+
+    echo "==> Installing ${package} ${version}"
+    retry 3 cargo install "${package}" \
+        --version "${version}" --locked --force
+}
+
+ensure_cargo_tool cargo-shear cargo-shear "${CARGO_SHEAR_VERSION}"
 
 echo "==> Dependency analyzer"
 cargo-shear --version
 
-if [ "$(licensure --version 2>/dev/null | awk '{print $NF}')" != "${LICENSURE_VERSION}" ]; then
-    echo "==> Installing licensure ${LICENSURE_VERSION}"
-    retry 3 cargo install licensure \
-        --version "${LICENSURE_VERSION}" --locked --force
-fi
+ensure_cargo_tool licensure licensure "${LICENSURE_VERSION}"
 
 echo "==> License header analyzer"
 licensure --version
