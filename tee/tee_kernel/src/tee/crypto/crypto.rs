@@ -1054,48 +1054,64 @@ pub(crate) fn crypto_authenc_update_payload(
     crypto_cipher_update(cs, input, output)
 }
 
+/// AEAD encrypt-final. On `SHORT_BUFFER`, writes required sizes to
+/// `required_dst` / `required_tag` and leaves the operation intact.
 pub(crate) fn crypto_authenc_enc_final(
     cs: Arc<Mutex<TeeCrypState>>,
     input: Option<&[u8]>,
     output: &mut [u8],
     tag: &mut [u8],
+    required_dst: &mut usize,
+    required_tag: &mut usize,
 ) -> TeeResult<usize> {
     let mut cs_guard = cs.lock();
-    let ctx = core::mem::replace(&mut cs_guard.ctx, CrypCtx::Finalized);
-    if let CrypCtx::CipherCtx(ctx) = ctx {
-        let (ct, tag_val) = ctx
-            .encrypt_final_with_input(input)
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-        let ct_len = ct.len().min(output.len());
-        output[..ct_len].copy_from_slice(&ct[..ct_len]);
-        let tag_len = tag_val.len().min(tag.len());
-        tag[..tag_len].copy_from_slice(&tag_val[..tag_len]);
-        Ok(ct_len)
-    } else {
-        cs_guard.ctx = ctx; // put back
-        Err(TEE_ERROR_BAD_PARAMETERS)
+    let CrypCtx::CipherCtx(ctx) = &cs_guard.ctx else {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    };
+
+    // Probe on a clone so SHORT_BUFFER does not consume the live operation.
+    let (ct, tag_val) = ctx
+        .clone()
+        .encrypt_final_with_input(input)
+        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    *required_dst = ct.len();
+    *required_tag = tag_val.len();
+    if output.len() < ct.len() || tag.len() < tag_val.len() {
+        return Err(TEE_ERROR_SHORT_BUFFER);
     }
+
+    let _ = core::mem::replace(&mut cs_guard.ctx, CrypCtx::Finalized);
+    output[..ct.len()].copy_from_slice(&ct);
+    tag[..tag_val.len()].copy_from_slice(&tag_val);
+    Ok(ct.len())
 }
 
+/// AEAD decrypt-final. On `SHORT_BUFFER`, writes required dst size to
+/// `required_dst` and leaves the operation intact.
 pub(crate) fn crypto_authenc_dec_final(
     cs: Arc<Mutex<TeeCrypState>>,
     input: Option<&[u8]>,
     output: &mut [u8],
     tag: &[u8],
+    required_dst: &mut usize,
 ) -> TeeResult<usize> {
     let mut cs_guard = cs.lock();
-    let ctx = core::mem::replace(&mut cs_guard.ctx, CrypCtx::Finalized);
-    if let CrypCtx::CipherCtx(ctx) = ctx {
-        let pt = ctx
-            .decrypt_final_with_input(input, tag)
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-        let pt_len = pt.len().min(output.len());
-        output[..pt_len].copy_from_slice(&pt[..pt_len]);
-        Ok(pt_len)
-    } else {
-        cs_guard.ctx = ctx; // put back
-        Err(TEE_ERROR_BAD_PARAMETERS)
+    let CrypCtx::CipherCtx(ctx) = &cs_guard.ctx else {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    };
+
+    let pt = ctx
+        .clone()
+        .decrypt_final_with_input(input, tag)
+        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    *required_dst = pt.len();
+    if output.len() < pt.len() {
+        return Err(TEE_ERROR_SHORT_BUFFER);
     }
+
+    let _ = core::mem::replace(&mut cs_guard.ctx, CrypCtx::Finalized);
+    output[..pt.len()].copy_from_slice(&pt);
+    Ok(pt.len())
 }
 
 pub(crate) fn crypto_rsa_init(cs: Arc<Mutex<TeeCrypState>>, mode: TEE_OperationMode) -> TeeResult {

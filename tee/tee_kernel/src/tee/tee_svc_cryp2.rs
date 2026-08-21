@@ -578,99 +578,116 @@ pub fn tee_cryp_state_alloc(
     let algo = translate_compat_algo(algo);
     let mut cs = TeeCrypState::default();
 
-    // 判断密钥对象是否存在，并取出密钥对象
-    let mut o1_ok = false;
-    let mut o2_ok = false;
-    if let Some(key1) = key1
-        && let Ok(obj1_arc) = tee_obj_get(key1 as TeeObjIdType)
-    {
-        o1_ok = true;
-        let mut o1 = obj1_arc.lock();
-        if o1.busy {
-            return Err(TEE_ERROR_BUSY);
-        }
-        o1.busy = true;
-        cs.key1 = Some(o1.info.objectId);
-        tee_svc_cryp_check_key_type(&o1, algo, mode)?;
-    }
+    // Track keys we marked busy so error paths can roll them back.
+    let mut busy_key1: Option<u32> = None;
+    let mut busy_key2: Option<u32> = None;
 
-    if let Some(key2) = key2
-        && let Ok(obj2_arc) = tee_obj_get(key2 as TeeObjIdType)
-    {
-        o2_ok = true;
-        let mut o2 = obj2_arc.lock();
-        if o2.busy {
-            return Err(TEE_ERROR_BUSY);
+    let res = (|| -> TeeResult {
+        // 判断密钥对象是否存在，并取出密钥对象
+        let mut o1_ok = false;
+        let mut o2_ok = false;
+        if let Some(key1) = key1
+            && let Ok(obj1_arc) = tee_obj_get(key1 as TeeObjIdType)
+        {
+            o1_ok = true;
+            let mut o1 = obj1_arc.lock();
+            if o1.busy {
+                return Err(TEE_ERROR_BUSY);
+            }
+            o1.busy = true;
+            busy_key1 = Some(key1);
+            cs.key1 = Some(o1.info.objectId);
+            tee_svc_cryp_check_key_type(&o1, algo, mode)?;
         }
-        o2.busy = true;
-        cs.key2 = Some(o2.info.objectId);
-        tee_svc_cryp_check_key_type(&o2, algo, mode)?;
-    }
 
-    // 判断密钥是否符合算法要求
-    match tee_alg_get_class(algo) {
-        TEE_OPERATION_CIPHER => {
-            if (tee_alg_get_chain_mode(algo) == TEE_CHAIN_MODE_XTS && (!o1_ok || !o2_ok))
-                || (tee_alg_get_chain_mode(algo) != TEE_CHAIN_MODE_XTS && (!o1_ok || o2_ok))
-            {
-                return Err(TEE_ERROR_BAD_PARAMETERS);
+        if let Some(key2) = key2
+            && let Ok(obj2_arc) = tee_obj_get(key2 as TeeObjIdType)
+        {
+            o2_ok = true;
+            let mut o2 = obj2_arc.lock();
+            if o2.busy {
+                return Err(TEE_ERROR_BUSY);
             }
+            o2.busy = true;
+            busy_key2 = Some(key2);
+            cs.key2 = Some(o2.info.objectId);
+            tee_svc_cryp_check_key_type(&o2, algo, mode)?;
         }
-        TEE_OPERATION_AE => {
-            if !o1_ok || o2_ok {
-                return Err(TEE_ERROR_BAD_PARAMETERS);
-            }
-        }
-        TEE_OPERATION_MAC => {
-            if !o1_ok || o2_ok {
-                return Err(TEE_ERROR_BAD_PARAMETERS);
-            }
-        }
-        TEE_OPERATION_DIGEST => {
-            if o1_ok || o2_ok {
-                return Err(TEE_ERROR_BAD_PARAMETERS);
-            }
-        }
-        TEE_OPERATION_ASYMMETRIC_CIPHER | TEE_OPERATION_ASYMMETRIC_SIGNATURE => {
-            if !o1_ok || o2_ok {
-                return Err(TEE_ERROR_BAD_PARAMETERS);
-            }
-        }
-        TEE_OPERATION_KEY_DERIVATION => {
-            if algo == TEE_ALG_SM2_KEP {
-                if !o1_ok || !o2_ok {
+
+        // 判断密钥是否符合算法要求
+        match tee_alg_get_class(algo) {
+            TEE_OPERATION_CIPHER => {
+                if (tee_alg_get_chain_mode(algo) == TEE_CHAIN_MODE_XTS && (!o1_ok || !o2_ok))
+                    || (tee_alg_get_chain_mode(algo) != TEE_CHAIN_MODE_XTS && (!o1_ok || o2_ok))
+                {
                     return Err(TEE_ERROR_BAD_PARAMETERS);
                 }
-            } else if !o1_ok || o2_ok {
-                return Err(TEE_ERROR_BAD_PARAMETERS);
+            }
+            TEE_OPERATION_AE => {
+                if !o1_ok || o2_ok {
+                    return Err(TEE_ERROR_BAD_PARAMETERS);
+                }
+            }
+            TEE_OPERATION_MAC => {
+                if !o1_ok || o2_ok {
+                    return Err(TEE_ERROR_BAD_PARAMETERS);
+                }
+            }
+            TEE_OPERATION_DIGEST => {
+                if o1_ok || o2_ok {
+                    return Err(TEE_ERROR_BAD_PARAMETERS);
+                }
+            }
+            TEE_OPERATION_ASYMMETRIC_CIPHER | TEE_OPERATION_ASYMMETRIC_SIGNATURE => {
+                if !o1_ok || o2_ok {
+                    return Err(TEE_ERROR_BAD_PARAMETERS);
+                }
+            }
+            TEE_OPERATION_KEY_DERIVATION => {
+                if algo == TEE_ALG_SM2_KEP {
+                    if !o1_ok || !o2_ok {
+                        return Err(TEE_ERROR_BAD_PARAMETERS);
+                    }
+                } else if !o1_ok || o2_ok {
+                    return Err(TEE_ERROR_BAD_PARAMETERS);
+                }
+            }
+            _ => {
+                return Err(TEE_ERROR_NOT_SUPPORTED);
             }
         }
-        _ => {
-            return Err(TEE_ERROR_NOT_SUPPORTED);
+
+        // GP: crypto_mac_alloc_ctx / crypto_hash_alloc_ctx at state alloc time.
+        cs.ctx = match tee_alg_get_class(algo) {
+            TEE_OPERATION_MAC => crypto_mac_alloc_ctx(algo)?,
+            TEE_OPERATION_DIGEST => crypto_hash_alloc_ctx(algo)?,
+            _ => CrypCtx::Others,
+        };
+
+        with_tee_session_ctx_mut(|ctx| {
+            let vacant = ctx.cryp_state.vacant_entry();
+            let id = vacant.key();
+            let cs_id = id as u32;
+            cs.id = cs_id;
+            cs.algo = algo;
+            cs.mode = mode;
+            *state = cs_id;
+
+            // 插入TeeCrypState
+            let arc_cs = Arc::new(Mutex::new(cs));
+            let _ = vacant.insert(arc_cs);
+            Ok(())
+        })
+    })();
+
+    if res.is_err() {
+        for id in [busy_key1, busy_key2].into_iter().flatten() {
+            if let Ok(obj) = tee_obj_get(id as TeeObjIdType) {
+                obj.lock().busy = false;
+            }
         }
     }
-
-    // GP: crypto_mac_alloc_ctx / crypto_hash_alloc_ctx at state alloc time.
-    cs.ctx = match tee_alg_get_class(algo) {
-        TEE_OPERATION_MAC => crypto_mac_alloc_ctx(algo)?,
-        TEE_OPERATION_DIGEST => crypto_hash_alloc_ctx(algo)?,
-        _ => CrypCtx::Others,
-    };
-
-    with_tee_session_ctx_mut(|ctx| {
-        let vacant = ctx.cryp_state.vacant_entry();
-        let id = vacant.key();
-        let cs_id = id as u32;
-        cs.id = cs_id;
-        cs.algo = algo;
-        cs.mode = mode;
-        *state = cs_id;
-
-        // 插入TeeCrypState
-        let arc_cs = Arc::new(Mutex::new(cs));
-        let _ = vacant.insert(arc_cs);
-        Ok(())
-    })
+    res
 }
 
 pub fn syscall_cryp_state_alloc(
@@ -737,7 +754,8 @@ pub fn syscall_cryp_state_copy(arg0: usize, arg1: usize) -> TeeResult {
     tee_cryp_state_copy(arg0 as _, arg1 as _)
 }
 
-// 删除一个TeeCrypState：先丢弃运算上下文（内含轮密钥等副本），再移除状态节点，最后清零并关闭密钥对象
+// 删除一个TeeCrypState：先丢弃运算上下文（内含轮密钥等副本），再移除状态节点，最后清零并关闭密钥对象。
+// GP FreeOperation is void / must succeed: clean up best-effort and surface the first error.
 pub fn tee_cryp_state_free(id: u32) -> TeeResult {
     let cs = tee_cryp_state_get(id)?;
     let (key1, key2) = {
@@ -749,27 +767,43 @@ pub fn tee_cryp_state_free(id: u32) -> TeeResult {
         (key1, key2)
     };
 
-    cryp_state_free(id)?;
+    let mut first_err: Option<u32> = None;
 
-    if let Some(key1) = key1 {
-        let o = tee_obj_get(key1 as _)?;
-        let mut o_guard = o.lock();
-        o_guard.busy = false;
-        tee_obj_attr_clear(&mut o_guard)?;
-        drop(o_guard);
-        tee_obj_close(key1)?;
+    if let Err(e) = cryp_state_free(id) {
+        first_err = Some(e);
     }
 
-    if let Some(key2) = key2 {
-        let o = tee_obj_get(key2 as _)?;
-        let mut o_guard = o.lock();
-        o_guard.busy = false;
-        tee_obj_attr_clear(&mut o_guard)?;
-        drop(o_guard);
-        tee_obj_close(key2)?;
+    for key in [key1, key2].into_iter().flatten() {
+        match tee_obj_get(key as _) {
+            Ok(o) => {
+                let clear_res = {
+                    let mut o_guard = o.lock();
+                    o_guard.busy = false;
+                    tee_obj_attr_clear(&mut o_guard)
+                };
+                if first_err.is_none()
+                    && let Err(e) = clear_res
+                {
+                    first_err = Some(e);
+                }
+                if let Err(e) = tee_obj_close(key)
+                    && first_err.is_none()
+                {
+                    first_err = Some(e);
+                }
+            }
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
     }
 
-    Ok(())
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 pub fn syscall_cryp_state_free(arg0: usize) -> TeeResult {
@@ -1207,11 +1241,32 @@ pub fn syscall_authenc_update_payload(
     )
 }
 
+#[cfg(unittest)]
 pub fn tee_cryp_authenc_enc_final(
     id: u32,
     input: Option<&[u8]>,
     output: &mut [u8],
     tag: &mut [u8],
+) -> TeeResult<usize> {
+    let mut required_dst = 0usize;
+    let mut required_tag = 0usize;
+    tee_cryp_authenc_enc_final_with_required(
+        id,
+        input,
+        output,
+        tag,
+        &mut required_dst,
+        &mut required_tag,
+    )
+}
+
+fn tee_cryp_authenc_enc_final_with_required(
+    id: u32,
+    input: Option<&[u8]>,
+    output: &mut [u8],
+    tag: &mut [u8],
+    required_dst: &mut usize,
+    required_tag: &mut usize,
 ) -> TeeResult<usize> {
     memtag_strip_tag_const()?;
     memtag_strip_tag()?;
@@ -1225,7 +1280,7 @@ pub fn tee_cryp_authenc_enc_final(
     }
 
     drop(cs_guard);
-    crypto_authenc_enc_final(cs.clone(), input, output, tag)
+    crypto_authenc_enc_final(cs, input, output, tag, required_dst, required_tag)
 }
 
 pub fn syscall_authenc_enc_final(
@@ -1244,29 +1299,66 @@ pub fn syscall_authenc_enc_final(
         .transpose()?;
     let mut dst_len = read_user_len(arg4)?;
     let mut dst = read_user_output(arg3, dst_len)?;
-    let tag_len = read_user_len(arg6)?;
+    let mut tag_len = read_user_len(arg6)?;
     let mut tag = read_user_output(arg5, tag_len)?;
 
-    match src {
-        Some(src) => {
-            dst_len = tee_cryp_authenc_enc_final(arg0 as _, Some(&src), &mut dst, &mut tag)?;
-        }
-        None => {
-            dst_len = tee_cryp_authenc_enc_final(arg0 as _, None, &mut dst, &mut tag)?;
-        }
+    let mut required_dst = 0usize;
+    let mut required_tag = 0usize;
+    let res = match src {
+        Some(src) => tee_cryp_authenc_enc_final_with_required(
+            arg0 as _,
+            Some(&src),
+            &mut dst,
+            &mut tag,
+            &mut required_dst,
+            &mut required_tag,
+        ),
+        None => tee_cryp_authenc_enc_final_with_required(
+            arg0 as _,
+            None,
+            &mut dst,
+            &mut tag,
+            &mut required_dst,
+            &mut required_tag,
+        ),
     };
 
-    write_user_len(arg4, dst_len)?;
-    write_user_bytes(arg3, &dst[..dst_len])?;
-    write_user_bytes(arg5, &tag[..tag_len])?;
-    Ok(())
+    match res {
+        Ok(n) => {
+            dst_len = n;
+            tag_len = required_tag;
+            write_user_len(arg4, dst_len)?;
+            write_user_bytes(arg3, &dst[..dst_len])?;
+            write_user_len(arg6, tag_len)?;
+            write_user_bytes(arg5, &tag[..tag_len])?;
+            Ok(())
+        }
+        Err(TEE_ERROR_SHORT_BUFFER) => {
+            write_user_len(arg4, required_dst)?;
+            write_user_len(arg6, required_tag)?;
+            Err(TEE_ERROR_SHORT_BUFFER)
+        }
+        Err(e) => Err(e),
+    }
 }
 
+#[cfg(unittest)]
 pub fn tee_cryp_authenc_dec_final(
     id: u32,
     input: Option<&[u8]>,
     output: &mut [u8],
     tag: &[u8],
+) -> TeeResult<usize> {
+    let mut required_dst = 0usize;
+    tee_cryp_authenc_dec_final_with_required(id, input, output, tag, &mut required_dst)
+}
+
+fn tee_cryp_authenc_dec_final_with_required(
+    id: u32,
+    input: Option<&[u8]>,
+    output: &mut [u8],
+    tag: &[u8],
+    required_dst: &mut usize,
 ) -> TeeResult<usize> {
     memtag_strip_tag_const()?;
     memtag_strip_tag()?;
@@ -1280,7 +1372,7 @@ pub fn tee_cryp_authenc_dec_final(
     }
 
     drop(cs_guard);
-    crypto_authenc_dec_final(cs.clone(), input, output, tag)
+    crypto_authenc_dec_final(cs, input, output, tag, required_dst)
 }
 
 pub fn syscall_authenc_dec_final(
@@ -1301,18 +1393,37 @@ pub fn syscall_authenc_dec_final(
     let mut dst = read_user_output(arg3, dst_len)?;
     let tag = read_required_user_bytes(arg5, arg6)?;
 
-    match src {
-        Some(src) => {
-            dst_len = tee_cryp_authenc_dec_final(arg0 as _, Some(&src), &mut dst, &tag)?;
-        }
-        None => {
-            dst_len = tee_cryp_authenc_dec_final(arg0 as _, None, &mut dst, &tag)?;
-        }
+    let mut required_dst = 0usize;
+    let res = match src {
+        Some(src) => tee_cryp_authenc_dec_final_with_required(
+            arg0 as _,
+            Some(&src),
+            &mut dst,
+            &tag,
+            &mut required_dst,
+        ),
+        None => tee_cryp_authenc_dec_final_with_required(
+            arg0 as _,
+            None,
+            &mut dst,
+            &tag,
+            &mut required_dst,
+        ),
     };
 
-    write_user_len(arg4, dst_len)?;
-    write_user_bytes(arg3, &dst[..dst_len])?;
-    Ok(())
+    match res {
+        Ok(n) => {
+            dst_len = n;
+            write_user_len(arg4, dst_len)?;
+            write_user_bytes(arg3, &dst[..dst_len])?;
+            Ok(())
+        }
+        Err(TEE_ERROR_SHORT_BUFFER) => {
+            write_user_len(arg4, required_dst)?;
+            Err(TEE_ERROR_SHORT_BUFFER)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(unittest)]
@@ -1831,6 +1942,38 @@ pub mod tests_cryp {
             &mut state2,
         );
         assert_eq!(result.err(), Some(TEE_ERROR_BUSY));
+    }
+
+    /// Failed `state_alloc` (algo/key mismatch) must roll back `busy` so the key
+    /// can still be freed / reused.
+    #[unittest::def_test(user)]
+    fn test_cryp_state_alloc_rolls_back_busy_on_error() {
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj_id.as_user_ref()).unwrap();
+        let obj_id = obj_id.read();
+        syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0).unwrap();
+
+        let mut state: u32 = 0;
+        // AES key with HMAC algorithm → BAD_PARAMETERS after busy was set.
+        let result = tee_cryp_state_alloc(
+            TEE_ALG_HMAC_SHA256,
+            TEE_OperationMode::TEE_MODE_MAC,
+            Some(obj_id),
+            None,
+            &mut state,
+        );
+        assert_eq!(result.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+
+        // Key must not remain busy — a second alloc with a matching algo must work.
+        let result = tee_cryp_state_alloc(
+            TEE_ALG_AES_ECB_NOPAD,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj_id),
+            None,
+            &mut state,
+        );
+        assert!(result.is_ok());
+        assert!(tee_cryp_state_free(state).is_ok());
     }
 
     #[unittest::def_test(user)]
@@ -3089,6 +3232,46 @@ pub mod tests_cryp {
         tee_cryp_authenc_update_payload(state, &data, &mut out).unwrap();
         let res = tee_cryp_authenc_update_aad(state, b"late");
         assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+    }
+
+    /// AEAD encrypt final must reject undersized dst/tag with SHORT_BUFFER and
+    /// leave the operation usable for a retry with a large enough buffer.
+    #[unittest::def_test(user)]
+    fn test_cryp_authenc_enc_final_short_buffer() {
+        let mut state: u32 = 0;
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref()).unwrap();
+        let obj_id = obj_id.read();
+        syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0).unwrap();
+
+        tee_cryp_state_alloc(
+            TEE_ALG_SM4_GCM,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj_id as _),
+            None,
+            &mut state,
+        )
+        .unwrap();
+
+        let nonce = [0u8; 12];
+        let data = [0u8; 16];
+        tee_cryp_authenc_init(state, &nonce, None, None, None).unwrap();
+
+        let mut short_out = [0u8; 8];
+        let mut tag = [0u8; 16];
+        let res = tee_cryp_authenc_enc_final(state, Some(&data), &mut short_out, &mut tag);
+        assert_eq!(res.err(), Some(TEE_ERROR_SHORT_BUFFER));
+
+        let mut out = [0u8; 32];
+        let mut short_tag = [0u8; 8];
+        let res = tee_cryp_authenc_enc_final(state, Some(&data), &mut out, &mut short_tag);
+        assert_eq!(res.err(), Some(TEE_ERROR_SHORT_BUFFER));
+
+        // Operation must still be Initialized — retry with full buffers succeeds.
+        let mut tag = [0u8; 16];
+        let res = tee_cryp_authenc_enc_final(state, Some(&data), &mut out, &mut tag);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), 16);
     }
 
     /// After AEAD `enc_final` seals the tag, the operation is finalized —
