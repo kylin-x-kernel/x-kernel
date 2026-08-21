@@ -48,17 +48,19 @@ use crate::tee::{
     },
 };
 
-/// Get the digest (hash) output size for the specified algorithm
-///
-/// This enum indicates whether a cryptographic operation has been initialized or not.
+/// Lifecycle of a TEE crypto operation handle.
 ///
 /// # Variants
-/// * `Initialized` - The cryptographic operation has been properly initialized and is ready for use
-/// * `Uninitialized` - The cryptographic operation has not been initialized yet
+/// * `Initialized` — ready for update / final
+/// * `Uninitialized` — allocated but not yet initialized
+/// * `Finalized` — digest/MAC `final` has completed; further `update` is
+///   `TEE_ERROR_BAD_STATE` (GP DoFinal). The live ctx is kept (clone-finalize)
+///   so DigestExtract → CopyOperation still works.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum CrypState {
     Initialized = 0,
     Uninitialized,
+    Finalized,
 }
 
 /// Rust equivalent of the tee_cryp_state struct
@@ -73,7 +75,7 @@ pub(crate) enum CrypState {
 /// * `key1` - Virtual address of the first key used in the operation (Vaddr is typically usize in Rust)
 /// * `key2` - Virtual address of the second key used in the operation (for algorithms requiring multiple keys)
 /// * `ctx` - A trait object containing the specific context data for the algorithm
-/// * `state` - Current state of the operation (initialized or uninitialized)
+/// * `state` - Current lifecycle state (`Initialized` / `Uninitialized` / `Finalized`)
 /// * `id` - Unique identifier for this cryptographic state instance
 #[repr(C)]
 pub(crate) struct TeeCrypState {
@@ -874,9 +876,14 @@ pub fn tee_cryp_hash_final(id: u32, chunk: &[u8], hash: &mut [u8]) -> TeeResult<
     let cs = tee_cryp_state_get(id)?;
     let cs_guard = cs.lock();
     let algo = cs_guard.algo;
+    let state = cs_guard.state;
 
-    if cs_guard.state != CrypState::Initialized {
-        return Err(TEE_ERROR_BAD_STATE);
+    // Allow re-final after DigestExtract-style final (clone-finalize). Reject
+    // feeding more data once already finalized — that would mutate the live ctx.
+    match state {
+        CrypState::Initialized => {}
+        CrypState::Finalized if chunk.is_empty() => {}
+        _ => return Err(TEE_ERROR_BAD_STATE),
     }
     drop(cs_guard);
 
@@ -2049,6 +2056,36 @@ pub mod tests_cryp {
         let dst_len = tee_cryp_hash_final(dst_state, &[], &mut dst_digest).unwrap();
         assert_eq!(dst_len, 16);
         assert_eq!(dst_digest, HASH_DATA_MD5_OUT1);
+    }
+
+    /// After digest `final`, further `update` must return `TEE_ERROR_BAD_STATE`
+    /// (GP DigestDoFinal). DigestExtract still shares this path via clone-finalize.
+    #[unittest::def_test(user)]
+    fn test_cryp_hash_update_rejected_after_final() {
+        let mut state: u32 = 0;
+        assert!(
+            tee_cryp_state_alloc(
+                TEE_ALG_MD5,
+                TEE_OperationMode::TEE_MODE_DIGEST,
+                None,
+                None,
+                &mut state,
+            )
+            .is_ok()
+        );
+        assert!(tee_cryp_hash_init(state).is_ok());
+        assert!(tee_cryp_hash_update(state, b"a").is_ok());
+
+        let mut digest = [0u8; 16];
+        assert!(tee_cryp_hash_final(state, &[], &mut digest).is_ok());
+
+        let res = tee_cryp_hash_update(state, b"b");
+        assert_eq!(res.err(), Some(TEE_ERROR_BAD_STATE));
+
+        // Re-final (DigestExtract-style) with empty chunk still succeeds.
+        let mut digest2 = [0u8; 16];
+        assert!(tee_cryp_hash_final(state, &[], &mut digest2).is_ok());
+        assert_eq!(digest, digest2);
     }
 
     /// GP `regression_4001` MAC analogue: `TEE_DigestExtract` calls

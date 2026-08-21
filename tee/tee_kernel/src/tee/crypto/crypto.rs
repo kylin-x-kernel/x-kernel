@@ -533,63 +533,66 @@ pub(crate) fn crypto_hash_update(cs: Arc<Mutex<TeeCrypState>>, data: &[u8]) -> T
 }
 
 pub(crate) fn crypto_hash_final(cs: Arc<Mutex<TeeCrypState>>, hash: &mut [u8]) -> TeeResult<usize> {
-    let cs_guard = cs.lock();
+    let mut cs_guard = cs.lock();
 
     // Clone the live hash state and finalize the clone so callers that need
     // digest-extract semantics (GP `TEE_DigestExtract` → `TEE_CopyOperation`)
-    // can still copy/continue the operation after `final`.
-    match &cs_guard.ctx {
+    // can still copy the operation after `final`. Mark Finalized so a later
+    // `update` returns BAD_STATE (GP DigestDoFinal).
+    let len = match &cs_guard.ctx {
         CrypCtx::HashCtx(HashContext::Md5(h)) => {
             let digest = h.clone().finalize();
             let digest = digest.as_bytes();
             let len = digest.len().min(hash.len());
             hash[..len].copy_from_slice(&digest[..len]);
-            Ok(len)
+            len
         }
         CrypCtx::HashCtx(HashContext::Sha1(h)) => {
             let digest = h.clone().finalize();
             let digest = digest.as_bytes();
             let len = digest.len().min(hash.len());
             hash[..len].copy_from_slice(&digest[..len]);
-            Ok(len)
+            len
         }
         CrypCtx::HashCtx(HashContext::Sha224(h)) => {
             let digest = h.clone().finalize();
             let digest = digest.as_bytes();
             let len = digest.len().min(hash.len());
             hash[..len].copy_from_slice(&digest[..len]);
-            Ok(len)
+            len
         }
         CrypCtx::HashCtx(HashContext::Sha256(h)) => {
             let digest = h.clone().finalize();
             let digest = digest.as_bytes();
             let len = digest.len().min(hash.len());
             hash[..len].copy_from_slice(&digest[..len]);
-            Ok(len)
+            len
         }
         CrypCtx::HashCtx(HashContext::Sha384(h)) => {
             let digest = h.clone().finalize();
             let digest = digest.as_bytes();
             let len = digest.len().min(hash.len());
             hash[..len].copy_from_slice(&digest[..len]);
-            Ok(len)
+            len
         }
         CrypCtx::HashCtx(HashContext::Sha512(h)) => {
             let digest = h.clone().finalize();
             let digest = digest.as_bytes();
             let len = digest.len().min(hash.len());
             hash[..len].copy_from_slice(&digest[..len]);
-            Ok(len)
+            len
         }
         CrypCtx::HashCtx(HashContext::Sm3(h)) => {
             let digest = h.clone().finalize();
             let digest = digest.as_bytes();
             let len = digest.len().min(hash.len());
             hash[..len].copy_from_slice(&digest[..len]);
-            Ok(len)
+            len
         }
-        _ => Err(TEE_ERROR_BAD_PARAMETERS),
-    }
+        _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+    };
+    cs_guard.state = CrypState::Finalized;
+    Ok(len)
 }
 
 // defining mac operations for cryptographic hashing
@@ -744,86 +747,89 @@ pub(crate) fn crypto_mac_update(cs: Arc<Mutex<TeeCrypState>>, data: &[u8]) -> Te
 
 // Crypto MAC finalization
 pub(crate) fn crypto_mac_final(cs: Arc<Mutex<TeeCrypState>>, hash: &mut [u8]) -> TeeResult<usize> {
-    let cs_guard = cs.lock();
+    let mut cs_guard = cs.lock();
 
     // Clone the live MAC state and finalize the clone so callers that need
     // digest-extract semantics (GP `TEE_DigestExtract` → `TEE_CopyOperation`)
-    // can still copy/continue the operation after `final`.
-    match &cs_guard.ctx {
+    // can still copy the operation after `final`. Mark Finalized so a later
+    // `update` returns BAD_STATE (GP MACCompareFinal / MACComputeFinal).
+    let len = match &cs_guard.ctx {
         CrypCtx::HmacCtx(HmacContext::HmacMd5(h)) => {
             let tag = h.clone().finalize();
             let len = tag.len().min(hash.len());
             hash[..len].copy_from_slice(&tag[..len]);
-            Ok(len)
+            len
         }
         CrypCtx::HmacCtx(HmacContext::HmacSha1(h)) => {
             let tag = h.clone().finalize();
             let len = tag.len().min(hash.len());
             hash[..len].copy_from_slice(&tag[..len]);
-            Ok(len)
+            len
         }
         CrypCtx::HmacCtx(HmacContext::HmacSha224(h)) => {
             let tag = h.clone().finalize();
             let len = tag.len().min(hash.len());
             hash[..len].copy_from_slice(&tag[..len]);
-            Ok(len)
+            len
         }
         CrypCtx::HmacCtx(HmacContext::HmacSha256(h)) => {
             let tag = h.clone().finalize();
             let len = tag.len().min(hash.len());
             hash[..len].copy_from_slice(&tag[..len]);
-            Ok(len)
+            len
         }
         CrypCtx::HmacCtx(HmacContext::HmacSha384(h)) => {
             let tag = h.clone().finalize();
             let len = tag.len().min(hash.len());
             hash[..len].copy_from_slice(&tag[..len]);
-            Ok(len)
+            len
         }
         CrypCtx::HmacCtx(HmacContext::HmacSha512(h)) => {
             let tag = h.clone().finalize();
             let len = tag.len().min(hash.len());
             hash[..len].copy_from_slice(&tag[..len]);
-            Ok(len)
+            len
         }
         CrypCtx::HmacCtx(HmacContext::HmacSm3(h)) => {
             let tag = h.clone().finalize();
             let len = tag.len().min(hash.len());
             hash[..len].copy_from_slice(&tag[..len]);
-            Ok(len)
+            len
         }
         CrypCtx::CmacCtx(CmacContext::Aes128(c)) => {
             let tag = c.clone().finalize();
             let len = tag.len().min(hash.len());
             hash[..len].copy_from_slice(&tag[..len]);
-            Ok(len)
+            len
         }
         CrypCtx::CmacCtx(CmacContext::Aes192(c)) => {
             let tag = c.clone().finalize();
             let len = tag.len().min(hash.len());
             hash[..len].copy_from_slice(&tag[..len]);
-            Ok(len)
+            len
         }
         CrypCtx::CmacCtx(CmacContext::Aes256(c)) => {
             let tag = c.clone().finalize();
             let len = tag.len().min(hash.len());
             hash[..len].copy_from_slice(&tag[..len]);
-            Ok(len)
+            len
         }
         CrypCtx::CmacCtx(CmacContext::Sm4(c)) => {
             let tag = c.clone().finalize();
             let len = tag.len().min(hash.len());
             hash[..len].copy_from_slice(&tag[..len]);
-            Ok(len)
+            len
         }
         CrypCtx::CmacCtx(CmacContext::Des3(c)) => {
             let tag = c.clone().finalize();
             let len = tag.len().min(hash.len());
             hash[..len].copy_from_slice(&tag[..len]);
-            Ok(len)
+            len
         }
-        _ => Err(TEE_ERROR_BAD_PARAMETERS),
-    }
+        _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+    };
+    cs_guard.state = CrypState::Finalized;
+    Ok(len)
 }
 
 pub(crate) fn crypto_cipher_init(
