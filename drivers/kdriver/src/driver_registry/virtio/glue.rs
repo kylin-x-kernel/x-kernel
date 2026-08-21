@@ -265,6 +265,10 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         direction: BufferDirection,
         _access_platform: bool,
     ) {
+        if paddr == 0 {
+            return;
+        }
+
         let dir = hal_direction(direction);
         let Some(p) = try_dma_provider() else {
             return;
@@ -279,5 +283,27 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
             len: slice.len(),
             direction: dir,
         });
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use core::ptr::NonNull;
+
+    use unittest::def_test;
+    use virtio::{BufferDirection, VirtIoHal};
+
+    use super::VirtIoHalImpl;
+
+    #[def_test(serial)]
+    fn unshare_ignores_zero_streaming_dma_mapping() {
+        let mut byte = 0u8;
+        let buffer = NonNull::slice_from_raw_parts(NonNull::from(&mut byte), 1);
+
+        // SAFETY: this mirrors the virtio-drivers cleanup path after a prior
+        // share failure returned the legacy zero sentinel.
+        unsafe {
+            VirtIoHalImpl::unshare(0, buffer, BufferDirection::DeviceToDriver, false);
+        }
     }
 }

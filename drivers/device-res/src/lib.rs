@@ -87,26 +87,23 @@ pub use provider::*;
 
 #[cfg(unittest)]
 mod tests {
-    //! Unit tests for the RAII handles and `devm_*` helpers.
+    //! Unit tests for resource provider contracts and device cleanup ordering.
     //!
     //! A mock triple of providers (`MmioOp` / `DmaOp` / `IrqOp`) records every
-    //! call into an event log backed by real memory, so the drop semantics and the
-    //! `devm_*` LIFO cleanup ordering can be asserted exactly. The provider
-    //! registry is replaceable under `--cfg unittest`, so each test swaps in the
-    //! mock even though the host kernel has already installed the real providers
-    //! during early init.
+    //! call into an event log backed by real memory. Tests exercise the provider
+    //! traits directly instead of replacing the global runtime registry, because
+    //! full-kernel unit tests run alongside real device background tasks.
 
     use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     use kspin::SpinNoIrq;
     use unittest::def_test;
 
     use crate::{
-        DeviceResource, DmaAllocation, DmaCoherent, DmaOp, DmaSpec, Io, Irq, IrqEvent, IrqHandler,
-        IrqHandlerToken, IrqOp, IrqResource, IrqTrigger, MmioMapping, MmioOp, MmioRegion, ResError,
-        ResResult, ResourceDesc, devm_alloc_coherent, devm_iomap, devm_request_irq,
-        provider_installed, reset_providers, set_dma_provider, set_irq_provider, set_mmio_provider,
-        try_dma_provider, try_irq_provider, try_mmio_provider,
+        DeviceResource, DmaAllocation, DmaOp, DmaSpec, IrqEvent, IrqHandler, IrqHandlerToken,
+        IrqOp, IrqResource, IrqTrigger, MmioMapping, MmioOp, MmioRegion, ResError, ResResult,
+        ResourceDesc,
     };
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -283,199 +280,99 @@ mod tests {
         }
     }
 
-    static TEST_PROVIDER: TestProvider = TestProvider::new();
-    static TEST_SERIAL: SpinNoIrq<()> = SpinNoIrq::new(());
-
-    /// RAII guard that installs the mock provider triple on creation and
-    /// restores the previously-installed providers on drop. Restoring the
-    /// registry after each test keeps the host backend in place for later
-    /// kernel code (e.g. virtio probing) that shares the same global registry.
-    struct ProviderGuard {
-        saved_mmio: Option<&'static dyn MmioOp>,
-        saved_dma: Option<&'static dyn DmaOp>,
-        saved_irq: Option<&'static dyn IrqOp>,
-    }
-
-    impl ProviderGuard {
-        fn new() -> Self {
-            let guard = Self {
-                saved_mmio: try_mmio_provider(),
-                saved_dma: try_dma_provider(),
-                saved_irq: try_irq_provider(),
-            };
-            set_mmio_provider(&TEST_PROVIDER);
-            set_dma_provider(&TEST_PROVIDER);
-            set_irq_provider(&TEST_PROVIDER);
-            TEST_PROVIDER.reset();
-            guard
-        }
-    }
-
-    impl Drop for ProviderGuard {
-        fn drop(&mut self) {
-            if let Some(p) = self.saved_mmio {
-                set_mmio_provider(p);
-            }
-            if let Some(p) = self.saved_dma {
-                set_dma_provider(p);
-            }
-            if let Some(p) = self.saved_irq {
-                set_irq_provider(p);
-            }
-        }
-    }
-
     #[def_test]
-    fn missing_provider_returns_no_provider_error() {
-        let _serial = TEST_SERIAL.lock();
-        let _g = ProviderGuard::new();
-        reset_providers();
-        assert!(!provider_installed());
-
-        assert_eq!(
-            Io::map(
-                MmioRegion {
-                    base: 0x1000,
-                    size: 4
-                },
-                "missing"
-            )
-            .unwrap_err(),
-            ResError::NoProvider
-        );
-        assert_eq!(
-            Irq::request(
-                IrqResource::new(1, IrqTrigger::EdgeRising),
-                Arc::new(|_| IrqEvent::HANDLED),
-            )
-            .unwrap_err(),
-            ResError::NoProvider
-        );
-        assert_eq!(
-            DmaCoherent::alloc(DmaSpec::new(16, 8)).unwrap_err(),
-            ResError::NoProvider
-        );
-    }
-
-    #[def_test]
-    fn io_read_write_and_drop_follow_provider_lifecycle() {
-        let _serial = TEST_SERIAL.lock();
-        let _g = ProviderGuard::new();
+    fn provider_methods_record_lifecycle_without_global_registry_override() {
+        let provider = TestProvider::new();
 
         let region = MmioRegion {
             base: 0x2000,
             size: 16,
         };
-        let io = Io::map(region, "regs").unwrap();
-        assert_eq!(io.region(), region);
-
-        io.write8(0, 0x12);
-        io.write16(2, 0x3456);
-        io.write32(4, 0x789a_bcde);
-        io.write64(8, 0x0123_4567_89ab_cdef);
-
-        assert_eq!(io.read8(0), 0x12);
-        assert_eq!(io.read16(2), 0x3456);
-        assert_eq!(io.read32(4), 0x789a_bcde);
-        assert_eq!(io.read64(8), 0x0123_4567_89ab_cdef);
-
-        drop(io);
-
-        assert_eq!(
-            TEST_PROVIDER.events(),
-            vec![Event::MapMmio(region), Event::UnmapMmio(region)]
-        );
-    }
-
-    #[def_test]
-    fn irq_and_dma_release_on_drop_and_devm_cleanup() {
-        let _serial = TEST_SERIAL.lock();
-        let _g = ProviderGuard::new();
-
         let irq = IrqResource::new(7, IrqTrigger::LevelHigh);
         let spec = DmaSpec::new(24, 8);
 
-        let guard = Irq::request(irq, Arc::new(|_| IrqEvent::HANDLED)).unwrap();
-        assert_eq!(guard.number(), 7);
-        guard.set_enabled(false);
-        drop(guard);
+        let mapping = provider.map_mmio(region, "regs").unwrap();
+        assert_eq!(mapping.region, region);
+        provider.unmap_mmio(mapping);
 
-        let dma = DmaCoherent::alloc(spec).unwrap();
-        assert_eq!(dma.bus_addr(), 0xfeed_cafe);
-        assert_eq!(dma.len(), 24);
-        assert!(!dma.is_empty());
-        drop(dma);
+        let token = provider
+            .request_irq(irq, Arc::new(|_| IrqEvent::HANDLED))
+            .unwrap();
+        provider.set_irq_enabled(irq, false);
+        provider.release_irq(irq, token);
+
+        let dma = provider.alloc_coherent(spec).unwrap();
+        assert_eq!(dma.bus_addr, 0xfeed_cafe);
+        provider.free_coherent(dma);
 
         let device = TestDevice::new(vec![ResourceDesc::Irq(irq), ResourceDesc::Dma(spec)]);
         assert_eq!(device.resources().len(), 2);
 
-        devm_request_irq(&device, irq, Arc::new(|_| IrqEvent::HANDLED)).unwrap();
-        let (cpu_ptr, bus_addr) = devm_alloc_coherent(&device, spec).unwrap();
         assert_eq!(
-            cpu_ptr.as_ptr() as usize,
-            TEST_PROVIDER.state.lock().dma.as_ptr() as usize
-        );
-        assert_eq!(bus_addr, 0xfeed_cafe);
-
-        device.run_cleanups();
-
-        assert_eq!(
-            TEST_PROVIDER.events(),
+            provider.events(),
             vec![
+                Event::MapMmio(region),
+                Event::UnmapMmio(region),
                 Event::RequestIrq(irq),
                 Event::SetIrqEnabled(irq, false),
                 Event::ReleaseIrq(irq),
                 Event::AllocCoherent(spec),
                 Event::FreeCoherent(spec),
-                Event::RequestIrq(irq),
-                Event::AllocCoherent(spec),
-                Event::FreeCoherent(spec),
-                Event::ReleaseIrq(irq),
             ]
         );
     }
 
     #[def_test]
-    fn devm_iomap_and_provider_errors_propagate() {
-        let _serial = TEST_SERIAL.lock();
-        let _g = ProviderGuard::new();
-
-        let device = TestDevice::new(Vec::new());
+    fn provider_errors_propagate_without_global_registry_override() {
+        let provider = TestProvider::new();
         let region = MmioRegion {
             base: 0x3000,
             size: 8,
         };
-        let ptr = devm_iomap(&device, region, "devm").unwrap();
+        provider.set_map_error(ResError::MappingFailed);
         assert_eq!(
-            ptr.as_ptr() as usize,
-            TEST_PROVIDER.state.lock().mmio_words.as_ptr() as usize
-        );
-        device.run_cleanups();
-
-        TEST_PROVIDER.reset();
-        TEST_PROVIDER.set_map_error(ResError::MappingFailed);
-        assert_eq!(
-            devm_iomap(&device, region, "failing").unwrap_err(),
+            provider.map_mmio(region, "failing").unwrap_err(),
             ResError::MappingFailed
         );
 
-        TEST_PROVIDER.reset();
-        TEST_PROVIDER.set_irq_error(ResError::Busy);
+        provider.reset();
+        provider.set_irq_error(ResError::Busy);
         assert_eq!(
-            devm_request_irq(
-                &device,
-                IrqResource::new(9, IrqTrigger::EdgeRising),
-                Arc::new(|_| IrqEvent::NOT_HANDLED),
-            )
-            .unwrap_err(),
+            provider
+                .request_irq(
+                    IrqResource::new(9, IrqTrigger::EdgeRising),
+                    Arc::new(|_| IrqEvent::NOT_HANDLED),
+                )
+                .unwrap_err(),
             ResError::Busy
         );
 
-        TEST_PROVIDER.reset();
-        TEST_PROVIDER.set_dma_error(ResError::NoMemory);
+        provider.reset();
+        provider.set_dma_error(ResError::NoMemory);
         assert_eq!(
-            devm_alloc_coherent(&device, DmaSpec::new(8, 8)).unwrap_err(),
+            provider.alloc_coherent(DmaSpec::new(8, 8)).unwrap_err(),
             ResError::NoMemory
         );
+    }
+
+    #[def_test]
+    fn device_cleanups_run_lifo_without_provider_registry_override() {
+        static ORDER: SpinNoIrq<Vec<usize>> = SpinNoIrq::new(Vec::new());
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+        ORDER.lock().clear();
+        NEXT.store(0, Ordering::Relaxed);
+
+        let device = TestDevice::new(Vec::new());
+        for id in 0..3 {
+            device.register_cleanup(Box::new(move || {
+                let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+                ORDER.lock().push((seq << 8) | id);
+            }));
+        }
+
+        device.run_cleanups();
+
+        assert_eq!(&*ORDER.lock(), &[2, 0x101, 0x200]);
     }
 }

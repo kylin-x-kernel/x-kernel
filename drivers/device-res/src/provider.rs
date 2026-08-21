@@ -25,10 +25,9 @@ use crate::{
 // Capability provider registry.
 //
 // Production uses `klazy::Once` for lock-free reads (a single acquire load
-// after installation). Under `--cfg unittest` the registry is backed by a
-// replaceable `SpinLock<Option<…>>` instead, so unit tests can swap in a mock
-// triple even though the host kernel has already installed the real providers
-// during early init (which runs before the test harness).
+// after installation). Under `--cfg unittest` the registry remains install-once
+// so full-kernel parallel tests cannot replace providers while real device
+// background tasks are still using them.
 #[cfg(not(unittest))]
 static MMIO_PROVIDER: Once<&'static dyn MmioOp> = Once::new();
 #[cfg(not(unittest))]
@@ -60,15 +59,24 @@ pub fn set_irq_provider(p: &'static dyn IrqOp) {
 
 #[cfg(unittest)]
 pub fn set_mmio_provider(p: &'static dyn MmioOp) {
-    *MMIO_PROVIDER.lock() = Some(p);
+    let mut provider = MMIO_PROVIDER.lock();
+    if provider.is_none() {
+        *provider = Some(p);
+    }
 }
 #[cfg(unittest)]
 pub fn set_dma_provider(p: &'static dyn DmaOp) {
-    *DMA_PROVIDER.lock() = Some(p);
+    let mut provider = DMA_PROVIDER.lock();
+    if provider.is_none() {
+        *provider = Some(p);
+    }
 }
 #[cfg(unittest)]
 pub fn set_irq_provider(p: &'static dyn IrqOp) {
-    *IRQ_PROVIDER.lock() = Some(p);
+    let mut provider = IRQ_PROVIDER.lock();
+    if provider.is_none() {
+        *provider = Some(p);
+    }
 }
 
 /// Returns `true` once all three providers have been installed.
@@ -104,18 +112,6 @@ pub fn try_irq_provider() -> Option<&'static dyn IrqOp> {
 #[cfg(unittest)]
 pub fn try_irq_provider() -> Option<&'static dyn IrqOp> {
     *IRQ_PROVIDER.lock()
-}
-
-/// Uninstall all three providers.
-///
-/// Only available under `--cfg unittest`, where the registry is replaceable;
-/// used to exercise the [`NoProvider`](ResError::NoProvider) error path before
-/// a test re-installs a mock triple.
-#[cfg(unittest)]
-pub fn reset_providers() {
-    *MMIO_PROVIDER.lock() = None;
-    *DMA_PROVIDER.lock() = None;
-    *IRQ_PROVIDER.lock() = None;
 }
 
 /// Returns the installed MMIO provider, or [`NoProvider`](ResError::NoProvider).

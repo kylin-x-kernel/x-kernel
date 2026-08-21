@@ -101,6 +101,10 @@ impl DmaOp for HostResourceProvider {
     }
 
     fn unmap_streaming(&self, mapping: DmaMapping) {
+        if mapping.bus_addr == 0 {
+            return;
+        }
+
         let cpu_addr = NonNull::new(mapping.cpu_addr as *mut u8)
             .expect("streaming DMA mapping stored a null CPU address");
         let buffer = NonNull::slice_from_raw_parts(cpu_addr, mapping.len);
