@@ -26,6 +26,8 @@ pub(crate) enum Command {
     Run(RunArgs),
     /// Print one resolved configuration or artifact value.
     Config(ConfigArgs),
+    /// Symbolicate raw backtrace addresses in a log against the debug ELF.
+    Symbolize(SymbolizeArgs),
     /// Run repository hygiene checks.
     Hygiene(HygieneArgs),
 }
@@ -134,6 +136,28 @@ pub(crate) struct BuildArgs {
     pub(crate) unittest_crate: Option<String>,
 }
 
+#[derive(Clone, Debug, Args)]
+pub(crate) struct SymbolizeArgs {
+    #[command(flatten)]
+    pub(crate) workspace: WorkspaceArgs,
+
+    /// Kernel log containing raw backtrace frames (default: stdin).
+    #[arg(long)]
+    pub(crate) log: Option<PathBuf>,
+
+    /// ELF to resolve against (default: bundle kernel.debug.elf).
+    #[arg(long)]
+    pub(crate) elf: Option<PathBuf>,
+
+    /// Add this offset (decimal or 0x-prefixed) to every logged address.
+    #[arg(long)]
+    pub(crate) offset: Option<String>,
+
+    /// addr2line binary to use (default: llvm-addr2line, then addr2line).
+    #[arg(long)]
+    pub(crate) tool: Option<PathBuf>,
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct DocArgs {
     #[command(flatten)]
@@ -224,4 +248,8 @@ pub(crate) struct RunArgs {
     /// Additional QEMU arguments.
     #[arg(last = true)]
     pub(crate) qemu_args: Vec<String>,
+
+    /// Do not symbolicate backtrace frames from the QEMU log after the run.
+    #[arg(long)]
+    pub(crate) no_symbolize: bool,
 }

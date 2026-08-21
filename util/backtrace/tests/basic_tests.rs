@@ -4,13 +4,50 @@
 
 //! Basic integration tests for backtrace functionality.
 //!
-//! Note: DWARF symbolication is not tested here because it requires
-//! kernel-specific linker symbols. These tests verify the core
-//! unwinding logic and API surface.
+//! Stack unwinding is always available; DWARF/symtab symbolication is not
+//! exercised here because it requires kernel-specific linker sections.
 
-// Include stub symbols when testing with dwarf feature
+// Stub linker symbols for the embedded DWARF sections: the `dwarf`
+// feature compiles `dwarf::init` against the `__start_debug_*` /
+// `__stop_debug_*` symbols that the kernel linker script provides, and
+// host-side integration tests link the library without `cfg(test)`.
 #[cfg(feature = "dwarf")]
-mod test_stubs;
+mod test_stubs {
+    #![allow(dead_code)]
+    #![allow(non_upper_case_globals)]
+    #![allow(clippy::used_underscore_binding)]
+
+    macro_rules! stub {
+        ($name:ident) => {
+            // `no_mangle`: `dwarf.rs` references these through an `extern`
+            // block, which resolves the unmangled C symbol name.
+            #[used]
+            #[unsafe(no_mangle)]
+            pub static $name: [u8; 1] = [0];
+        };
+    }
+
+    stub!(__start_debug_abbrev);
+    stub!(__stop_debug_abbrev);
+    stub!(__start_debug_addr);
+    stub!(__stop_debug_addr);
+    stub!(__start_debug_aranges);
+    stub!(__stop_debug_aranges);
+    stub!(__start_debug_info);
+    stub!(__stop_debug_info);
+    stub!(__start_debug_line);
+    stub!(__stop_debug_line);
+    stub!(__start_debug_line_str);
+    stub!(__stop_debug_line_str);
+    stub!(__start_debug_ranges);
+    stub!(__stop_debug_ranges);
+    stub!(__start_debug_rnglists);
+    stub!(__stop_debug_rnglists);
+    stub!(__start_debug_str);
+    stub!(__stop_debug_str);
+    stub!(__start_debug_str_offsets);
+    stub!(__stop_debug_str_offsets);
+}
 
 use backtrace::{Backtrace, Frame, init, max_depth, set_max_depth};
 
@@ -22,8 +59,8 @@ fn test_initialization() {
     // Should not panic
     let bt = Backtrace::capture();
 
-    // Verify we got a backtrace object (frame count may be 0)
-    let _count = bt.frame_count();
+    // Unwinding must produce at least the current frame
+    assert!(bt.frame_count() > 0);
 }
 
 #[test]
@@ -89,10 +126,9 @@ fn test_recursive_capture() {
 
     let bt = recursive(5);
 
-    // Should have captured some frames
-    // Exact count depends on optimization level
-    let _count = bt.frame_count();
-    // Note: count may be 0 in optimized builds without dwarf feature
+    // Raw unwinding always captures frames, independent of any
+    // symbolication feature.
+    assert!(bt.frame_count() > 0);
 }
 
 #[test]
@@ -102,48 +138,40 @@ fn test_backtrace_display() {
     let bt = Backtrace::capture();
     let display = format!("{}", bt);
 
-    // Should produce some output
-    assert!(!display.is_empty());
+    // Raw output starts with a stable header followed by indexed addresses.
+    assert!(display.starts_with("Backtrace:"));
+    assert!(display.contains("0: 0x"));
 }
 
 #[test]
 fn test_capture_trap() {
     init(0..usize::MAX, 0..usize::MAX);
 
-    // Note: With dwarf feature enabled, capture_trap will try to unwind
-    // from the provided frame pointer. Since we can't provide valid
-    // stack addresses in a test, we skip this test when dwarf is enabled.
-    #[cfg(not(feature = "dwarf"))]
-    {
-        let fp = 0x7fff_1000;
-        let ip = 0x8000_5000;
-        let ra = 0x8000_6000;
+    // An invalid frame pointer aborts unwinding immediately, leaving only
+    // the synthetic trap frame.
+    let fp = 0usize;
+    let ip = 0x8000_5000usize;
+    let ra = 0x8000_6000usize;
 
-        let bt = Backtrace::capture_trap(fp, ip, ra);
-        assert_eq!(bt.frame_count(), 0);
-    }
-
-    // With dwarf enabled, we can't test with fake addresses
-    #[cfg(feature = "dwarf")]
-    {
-        // Just verify the API exists and is callable
-        // In a real kernel, this would work with actual trap frame addresses
-    }
+    let bt = Backtrace::capture_trap(fp, ip, ra);
+    assert_eq!(bt.frame_count(), 1);
+    let first = bt.raw_frames().expect("captured frames").first().unwrap();
+    assert_eq!(first.fp, fp);
+    assert_eq!(first.ip, ip.wrapping_add(1));
 }
 
 #[test]
-#[cfg(feature = "alloc")]
 fn test_raw_frames_access() {
     init(0..usize::MAX, 0..usize::MAX);
 
     let bt = Backtrace::capture();
 
-    // Should be able to access raw frames
-    if let Some(frames) = bt.raw_frames() {
-        for frame in frames {
-            // Each frame should be displayable
-            let _ = format!("{}", frame);
-        }
+    // Raw frames are always available.
+    let frames = bt.raw_frames().expect("raw frames must be available");
+    assert!(!frames.is_empty());
+    for frame in frames {
+        // Each frame should be displayable
+        let _ = format!("{}", frame);
     }
 }
 
@@ -152,8 +180,9 @@ fn test_frame_count() {
     init(0..usize::MAX, 0..usize::MAX);
 
     let bt = Backtrace::capture();
-    let _count = bt.frame_count();
+    let count = bt.frame_count();
 
-    // Count is always non-negative by definition (usize)
-    // This test mainly checks the API works correctly
+    // Unwinding is always available, so at least the current frame is
+    // captured.
+    assert!(count > 0);
 }

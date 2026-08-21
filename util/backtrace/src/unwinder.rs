@@ -3,14 +3,12 @@
 // See LICENSES for license details.
 
 //! Stack unwinding implementation.
+//!
+//! Unwinding fills a caller-provided frame buffer and never allocates: it
+//! runs on panic/NMI/lockup paths where the allocator lock may be held by
+//! the interrupted code, so requesting heap memory there could self-deadlock.
 
-use alloc::vec::Vec;
-
-use crate::{
-    config::BacktraceConfig,
-    error::{BacktraceError, Result},
-    frame::Frame,
-};
+use crate::{config::BacktraceConfig, error::Result, frame::Frame};
 
 /// Stack unwinder.
 pub struct Unwinder<'a> {
@@ -23,21 +21,22 @@ impl<'a> Unwinder<'a> {
         Self { config }
     }
 
-    /// Unwind the stack from the given frame pointer.
-    pub fn unwind(&self, mut fp: usize) -> Result<Vec<Frame>> {
+    /// Unwind the stack from the given frame pointer into `out`.
+    ///
+    /// Returns the number of frames written. The unwind stops at the first
+    /// invalid frame, on a detected cycle, or when `out` is full; the
+    /// configured max depth also caps the walk.
+    pub fn unwind(&self, mut fp: usize, out: &mut [Frame]) -> usize {
         // Validate initial frame pointer
         if !self.config.validate_fp(fp) {
-            return Err(BacktraceError::OutOfRange {
-                fp,
-                range: (self.config.fp_range.start, self.config.fp_range.end),
-            });
+            return 0;
         }
 
-        let mut frames = Vec::with_capacity(self.config.max_depth);
-        let mut depth = 0;
+        let max_depth = out.len().min(self.config.max_depth);
+        let mut written = 0;
         let mut prev_fp = 0;
 
-        while depth < self.config.max_depth {
+        while written < max_depth {
             // Validate frame pointer bounds
             if !self.config.validate_fp(fp) {
                 break;
@@ -45,12 +44,13 @@ impl<'a> Unwinder<'a> {
 
             // Read frame
             let frame = match Frame::read(fp) {
-                Ok(f) => f,
+                Ok(frame) => frame,
                 Err(_) => break, // Stop on first invalid frame
             };
 
             // Always record the current frame before deciding whether to continue.
-            frames.push(frame);
+            out[written] = frame;
+            written += 1;
 
             // Check for cycles
             if frame.fp == prev_fp {
@@ -79,11 +79,23 @@ impl<'a> Unwinder<'a> {
             // Move to next frame
             prev_fp = fp;
             fp = frame.fp;
-            depth += 1;
         }
 
-        Ok(frames)
+        written
     }
+}
+
+/// Backward-compatible allocation-based unwinding entry point.
+///
+/// Only for callers that can tolerate allocation (e.g. `unwind_stack`
+/// public API); the `Backtrace` capture paths use the allocation-free
+/// [`Unwinder::unwind`] buffer API.
+pub(crate) fn unwind_alloc(config: &BacktraceConfig, fp: usize) -> Result<alloc::vec::Vec<Frame>> {
+    let mut frames = alloc::vec::Vec::new();
+    let mut buffer = [Frame::new(0, 0); 64];
+    let written = Unwinder::new(config).unwind(fp, &mut buffer);
+    frames.extend_from_slice(&buffer[..written]);
+    Ok(frames)
 }
 
 #[cfg(test)]
@@ -95,7 +107,16 @@ mod tests {
         let unwinder = Unwinder::new(&config);
 
         // Out of range frame pointer
-        let result = unwinder.unwind(0x2000);
-        assert!(matches!(result, Err(BacktraceError::OutOfRange { .. })));
+        let mut buffer = [Frame::new(0, 0); 8];
+        assert_eq!(unwinder.unwind(0x2000, &mut buffer), 0);
+    }
+
+    #[test]
+    fn test_unwinder_stops_at_buffer_capacity() {
+        let config = BacktraceConfig::new(0..usize::MAX, 0..usize::MAX);
+        let unwinder = Unwinder::new(&config);
+        let mut buffer = [Frame::new(0, 0); 2];
+        // An invalid frame pointer aborts immediately.
+        assert_eq!(unwinder.unwind(0, &mut buffer), 0);
     }
 }

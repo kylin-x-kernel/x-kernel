@@ -143,7 +143,10 @@ driver_serial_ns16550_mmio = ["kdriver/serial-ns16550-mmio"]
 driver_serial_ns16550_ioport = ["kdriver/serial-ns16550-ioport"]
 
 # Backtrace
+# In-kernel DWARF symbolication (legacy mode; KFEAT_DWARF)
 dwarf = ["backtrace/dwarf"]
+# Compact kernel symbol table (kallsyms-style; KFEAT_SYMTAB)
+symtab = ["backtrace/symtab"]
 
 
 # Diagnostics

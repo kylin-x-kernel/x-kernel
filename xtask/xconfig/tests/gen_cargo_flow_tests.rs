@@ -69,7 +69,7 @@ config KFEAT_DRIVER_CONSOLE_PL011
     fs::write(&config_path, "ARCH_AARCH64=y\nPLATFORM_KPLAT_AARCH64=y\n").unwrap();
 
     env::set_current_dir(temp_dir.path()).unwrap();
-    let result = gen_cargo_command(config_path, false, None, false);
+    let result = gen_cargo_command(config_path, false, None);
     env::set_current_dir(old_cwd).unwrap();
     result.unwrap();
 
@@ -133,7 +133,7 @@ config KFEAT_ROOT
     .unwrap();
 
     env::set_current_dir(temp_dir.path()).unwrap();
-    let result = gen_cargo_command(config_path, false, None, false);
+    let result = gen_cargo_command(config_path, false, None);
     env::set_current_dir(old_cwd).unwrap();
     result.unwrap();
 

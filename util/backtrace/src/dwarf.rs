@@ -89,6 +89,14 @@ macro_rules! generate_sections {
     };
 }
 
+/// Returns whether the in-kernel DWARF context is initialized and ready.
+///
+/// The [`Backtrace`](crate::Backtrace) display impl falls back to raw
+/// address output when this is false.
+pub(crate) fn is_ready() -> bool {
+    CONTEXT.get().is_some()
+}
+
 #[cfg_attr(any(test, unittest), allow(dead_code))]
 pub fn init() {
     INIT_ONCE.call_once(|| {

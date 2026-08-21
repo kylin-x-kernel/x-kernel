@@ -16,6 +16,8 @@ mod image_metadata;
 mod linker;
 mod process;
 mod qemu;
+mod symbolize;
+mod symtab;
 mod x86;
 
 use clap::Parser;
@@ -79,10 +81,19 @@ fn run() -> Result<()> {
             } else {
                 build::build(&args.build)?
             };
-            qemu::run(&bundle, &args)?;
+            let qemu_result = qemu::run(&bundle, &args);
+            if !args.no_symbolize {
+                // Symbolicate any panic backtrace from the QEMU log; failures
+                // degrade to warnings and never mask the QEMU result.
+                if let Err(error) = symbolize::auto(&bundle, &qemu::log_path(&bundle)) {
+                    eprintln!("[xkmake] auto symbolication failed: {error}");
+                }
+            }
+            qemu_result?;
             coverage::generate(&bundle, &args)
         }
         Command::Config(args) => context::print_config(&args),
+        Command::Symbolize(args) => symbolize::run(&args),
         Command::Hygiene(args) => match args.command {
             HygieneCommand::InstallTools => hygiene::install_tools(),
             HygieneCommand::Deps(args) => hygiene::check_dependencies(&args),

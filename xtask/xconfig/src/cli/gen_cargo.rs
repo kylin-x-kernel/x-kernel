@@ -4,16 +4,14 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    path::Path,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    config::ConfigEngine,
-    config::ConfigReader,
+    config::{ConfigEngine, ConfigReader},
     error::{KconfigError, Result},
 };
 
@@ -21,7 +19,6 @@ use crate::{
 pub struct BuildOpts {
     pub unittest: bool,
     pub ld_script: Option<String>,
-    pub dwarf: bool,
 }
 
 impl BuildOpts {
@@ -29,7 +26,6 @@ impl BuildOpts {
         Self {
             unittest: std::env::var("XKERNEL_UNITTEST").as_deref() == Ok("y"),
             ld_script: std::env::var("XKERNEL_LD_SCRIPT").ok(),
-            dwarf: std::env::var("XKERNEL_DWARF").as_deref() == Ok("y"),
         }
     }
 }
@@ -39,17 +35,11 @@ impl BuildOpts {
 /// Unlike `gen-const`, this should run before every build because it depends
 /// on runtime options (unittest, dwarf, ld-script) that may change between
 /// invocations even when `.config` is unchanged.
-pub fn gen_cargo_command(
-    config: PathBuf,
-    unittest: bool,
-    ld_script: Option<String>,
-    dwarf: bool,
-) -> Result<()> {
+pub fn gen_cargo_command(config: PathBuf, unittest: bool, ld_script: Option<String>) -> Result<()> {
     let config_map = load_effective_build_config(&config)?;
     let opts = BuildOpts {
         unittest,
         ld_script,
-        dwarf,
     };
     generate_rust_analyzer_and_cargo_config(&config_map, &opts)?;
     Ok(())
@@ -79,9 +69,10 @@ fn load_effective_build_config(config: &Path) -> Result<HashMap<String, String>>
 /// Write `content` to `path` only if it differs from the current file content.
 fn write_if_changed(path: &std::path::Path, content: &str) -> std::io::Result<bool> {
     if let Ok(existing) = std::fs::read_to_string(path)
-        && existing == content {
-            return Ok(false);
-        }
+        && existing == content
+    {
+        return Ok(false);
+    }
     std::fs::write(path, content)?;
     Ok(true)
 }
@@ -237,9 +228,10 @@ fn generate_cargo_config(config: &HashMap<String, String>, opts: &BuildOpts) -> 
                     .map(|c| c.contains("k_plat_name"))
                     .unwrap_or(false);
             if (has_defconfig || has_plat_cfg)
-                && let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    all_plat_names.push(name.to_string());
-                }
+                && let Some(name) = path.file_name().and_then(|n| n.to_str())
+            {
+                all_plat_names.push(name.to_string());
+            }
         }
     }
     all_plat_names.sort();
@@ -273,14 +265,15 @@ fn generate_cargo_config(config: &HashMap<String, String>, opts: &BuildOpts) -> 
         target_rustflags.push("link-arg=-znostart-stop-gc".into());
     }
 
-    if opts.dwarf {
-        target_rustflags.push("-C".into());
-        target_rustflags.push("force-frame-pointers".into());
-        target_rustflags.push("-C".into());
-        target_rustflags.push("debuginfo=2".into());
-        target_rustflags.push("-C".into());
-        target_rustflags.push("strip=none".into());
-    }
+    // Unconditional build flags: the unstripped debug ELF (with DWARF) is a
+    // first-class artifact used for host-side symbolication, and frame
+    // pointers are required for backtrace unwinding.
+    target_rustflags.push("-C".into());
+    target_rustflags.push("force-frame-pointers".into());
+    target_rustflags.push("-C".into());
+    target_rustflags.push("debuginfo=2".into());
+    target_rustflags.push("-C".into());
+    target_rustflags.push("strip=none".into());
 
     if opts.unittest {
         target_rustflags.push("-C".into());
@@ -338,10 +331,8 @@ fn generate_cargo_config(config: &HashMap<String, String>, opts: &BuildOpts) -> 
     let generated_toml =
         toml::to_string_pretty(&config_obj).map_err(|e| KconfigError::Config(e.to_string()))?;
     let cargo_config_toml = format!(
-        "# Automatically generated file; DO NOT EDIT.\n\
-         # Derived from .config by xtask xconfig gen-cargo.\n\
-         \n\
-         {}\n",
+        "# Automatically generated file; DO NOT EDIT.\n# Derived from .config by xtask xconfig \
+         gen-cargo.\n\n{}\n",
         generated_toml
     );
     let xconfig_path = dot_cargo_dir.join(".xconfig.toml");

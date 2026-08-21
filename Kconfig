@@ -262,13 +262,29 @@ endmenu
 menu "Kernel Diagnostics"
 
 config KFEAT_DWARF
-    bool "Enable DWARF debug sections and symbolication"
+    bool "Enable in-kernel DWARF symbolication"
     default y if BUILD_TYPE_DEBUG
     help
-      Keep DWARF sections in the image and enable backtrace symbolication
-      support in the kernel. Debug builds enable this by default; release
-      builds can still opt in when runtime symbolication is needed for
-      diagnostics.
+      Embed DWARF debug sections into the kernel image and symbolicate
+      backtraces inside the kernel (legacy mode). Debug builds enable this
+      by default; release builds can still opt in when runtime
+      symbolication is needed.
+
+      Disabled by default: the kernel then prints raw addresses which are
+      resolved on the host against the unstripped kernel.debug.elf with
+      `make symbolize LOG=<log>`. Raw frame-pointer unwinding is always
+      available regardless of this option.
+
+config KFEAT_SYMTAB
+    bool "Enable compact kernel symbol table"
+    default n
+    help
+      Embed a compact kallsyms-style symbol table into the kernel image so
+      raw backtrace addresses are annotated with func+0xoff/0xsize at the
+      fault site, without full DWARF data.
+
+      Independent of KFEAT_DWARF. Full file/line resolution still happens
+      on the host against kernel.debug.elf.
 
 source "arch/kirq/Kconfig"
 source "task/ktask/Kconfig.diagnostics"

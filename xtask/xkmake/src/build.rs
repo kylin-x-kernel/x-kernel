@@ -40,24 +40,31 @@ pub(crate) enum BootArtifacts {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RootArtifactKind {
     Elf,
+    DebugElf,
     Bin,
     Linuxboot,
     Uefi,
 }
 
-const DIRECT_ROOT_ARTIFACTS: &[RootArtifactKind] = &[RootArtifactKind::Elf, RootArtifactKind::Bin];
+const DIRECT_ROOT_ARTIFACTS: &[RootArtifactKind] = &[
+    RootArtifactKind::Elf,
+    RootArtifactKind::DebugElf,
+    RootArtifactKind::Bin,
+];
 const X86_ROOT_ARTIFACTS: &[RootArtifactKind] = &[
     RootArtifactKind::Elf,
+    RootArtifactKind::DebugElf,
     RootArtifactKind::Bin,
     RootArtifactKind::Linuxboot,
     RootArtifactKind::Uefi,
 ];
-const BUNDLE_FORMAT_VERSION: u32 = 5;
+const BUNDLE_FORMAT_VERSION: u32 = 6;
 
 impl RootArtifactKind {
     fn source(self, context: &BuildContext) -> &std::path::Path {
         match self {
             Self::Elf => &context.bundle_elf,
+            Self::DebugElf => &context.bundle_debug_elf,
             Self::Bin => &context.bundle_bin,
             Self::Linuxboot => &context.bundle_linuxboot,
             Self::Uefi => &context.bundle_uefi,
@@ -67,6 +74,7 @@ impl RootArtifactKind {
     const fn extension(self) -> &'static str {
         match self {
             Self::Elf => "elf",
+            Self::DebugElf => "debug.elf",
             Self::Bin => "bin",
             Self::Linuxboot => "bzimg",
             Self::Uefi => "uefi.img",
@@ -86,6 +94,7 @@ struct BundleManifest {
     build_info: BuildInfo,
     build_id: String,
     kernel_elf: BundleArtifact,
+    kernel_debug_elf: BundleArtifact,
     kernel_image: BundleArtifact,
     linuxboot_image: Option<BundleArtifact>,
     uefi_image: Option<BundleArtifact>,
@@ -100,6 +109,7 @@ struct BundleArtifact {
 
 struct PendingBundle {
     kernel_elf: PathBuf,
+    kernel_debug_elf: PathBuf,
     kernel_bin: PathBuf,
     linuxboot_image: Option<PathBuf>,
     uefi_image: Option<PathBuf>,
@@ -138,6 +148,9 @@ impl PendingBundle {
         let suffix = std::process::id();
         Self {
             kernel_elf: context.bundle_dir.join(format!("kernel.elf.tmp.{suffix}")),
+            kernel_debug_elf: context
+                .bundle_dir
+                .join(format!("kernel.debug.elf.tmp.{suffix}")),
             kernel_bin: context.bundle_dir.join(format!("kernel.bin.tmp.{suffix}")),
             linuxboot_image: (context.config.arch() == KernelArch::X86_64).then(|| {
                 context
@@ -157,8 +170,11 @@ impl PendingBundle {
         let manifest_path = context.bundle_dir.join("bundle.toml");
         remove_if_present(&manifest_path)?;
         remove_if_present(&context.bundle_elf)?;
+        remove_if_present(&context.bundle_debug_elf)?;
         remove_if_present(&context.bundle_bin)?;
         fs::rename(&self.kernel_elf, &context.bundle_elf).with_path(&context.bundle_elf)?;
+        fs::rename(&self.kernel_debug_elf, &context.bundle_debug_elf)
+            .with_path(&context.bundle_debug_elf)?;
         fs::rename(&self.kernel_bin, &context.bundle_bin).with_path(&context.bundle_bin)?;
         if let Some(linuxboot_image) = &self.linuxboot_image {
             remove_if_present(&context.bundle_linuxboot)?;
@@ -176,6 +192,7 @@ impl PendingBundle {
 impl Drop for PendingBundle {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.kernel_elf);
+        let _ = fs::remove_file(&self.kernel_debug_elf);
         let _ = fs::remove_file(&self.kernel_bin);
         if let Some(path) = &self.linuxboot_image {
             let _ = fs::remove_file(path);
@@ -197,7 +214,23 @@ pub(crate) fn build(args: &BuildArgs) -> Result<Bundle> {
         None
     };
     let build_info = BuildInfoRequest::collect(&context, config_hash(&context))?;
-    create_bundle(&context, x86_inputs.as_ref(), &build_info)?;
+
+    // The symbol table is generated from the first link and embedded into
+    // the kernel on the second link (see `symtab::generate`). The layout is
+    // stable across relinks because the blob lives in `.rodata` and the
+    // table only covers `.text` symbols, which precede `.rodata` in the
+    // linker script — so this converges after at most two iterations.
+    for _ in 0..2 {
+        let symtab_changed = create_bundle(&context, x86_inputs.as_ref(), &build_info)?;
+        if !symtab_changed {
+            break;
+        }
+        if context.verbosity > 0 {
+            println!("Symbol table updated; relinking kernel");
+        }
+        run_cargo(&context, CargoAction::Build)?;
+    }
+
     publish_root_artifacts(&context)?;
 
     Ok(bundle_from_context(context))
@@ -347,21 +380,37 @@ fn create_bundle(
     context: &BuildContext,
     x86_inputs: Option<&X86BootInputs>,
     build_info: &BuildInfoRequest,
-) -> Result<()> {
+) -> Result<bool> {
     if context.dry_run {
-        return Ok(());
+        return Ok(false);
     }
 
+    // Reuse check first: `can_reuse_bundle` compares the Cargo ELF against
+    // the committed bundle, and an unchanged `cargo_elf` implies an unchanged
+    // symbol blob — so a cache hit must not pay for reading and parsing the
+    // (hundreds of MB) debug ELF just to regenerate the table.
     if can_reuse_bundle(context, x86_inputs, build_info)? {
         if context.verbosity > 0 {
             println!("Reusing {}", context.bundle_dir.display());
         }
-        return Ok(());
+        return Ok(false);
     }
+
+    // Regenerate the symbol table from the current ELF; `true` means the
+    // blob changed and the kernel must be relinked to embed it.
+    let symtab_changed = if context.config.is_enabled("KFEAT_SYMTAB") {
+        crate::symtab::generate(context)?
+    } else {
+        false
+    };
 
     fs::create_dir_all(&context.bundle_dir).with_path(&context.bundle_dir)?;
     let pending = PendingBundle::create(context);
+    // `kernel.debug.elf` is the pristine unstripped Cargo artifact and the
+    // symbolication input for `xkmake symbolize`; `kernel.elf` is the boot
+    // ELF, which may receive DWARF injection and build metadata.
     fs::copy(&context.cargo_elf, &pending.kernel_elf).with_path(&context.cargo_elf)?;
+    fs::copy(&context.cargo_elf, &pending.kernel_debug_elf).with_path(&context.cargo_elf)?;
 
     if context.config.is_enabled("KFEAT_DWARF") {
         embed_dwarf(context, &pending.kernel_elf)?;
@@ -380,7 +429,8 @@ fn create_bundle(
         inputs.create_uefi_image(context, &pending.kernel_elf, uefi_image)?;
     }
     write_manifest(context, &build_info, build_id, &pending)?;
-    pending.commit(context)
+    pending.commit(context)?;
+    Ok(symtab_changed)
 }
 
 fn publish_root_artifacts(context: &BuildContext) -> Result<()> {
@@ -395,11 +445,10 @@ fn publish_root_artifacts(context: &BuildContext) -> Result<()> {
     );
     for artifact in root_artifact_kinds(context.config.arch()) {
         let source = artifact.source(context);
-        let destination = context.workspace_root.join(format!(
-            "xkernel_{}.{}",
-            stem,
-            artifact.extension()
-        ));
+        let destination =
+            context
+                .workspace_root
+                .join(format!("xkernel_{}.{}", stem, artifact.extension()));
         if copy_is_current(source, &destination)? {
             continue;
         }
@@ -485,6 +534,7 @@ fn bundle_manifest(
         build_info: build_info.clone(),
         build_id,
         kernel_elf: BundleArtifact::collect("kernel.elf", &pending.kernel_elf)?,
+        kernel_debug_elf: BundleArtifact::collect("kernel.debug.elf", &pending.kernel_debug_elf)?,
         kernel_image: BundleArtifact::collect("kernel.bin", &pending.kernel_bin)?,
         linuxboot_image: pending
             .linuxboot_image
@@ -519,6 +569,7 @@ fn can_reuse_bundle(
         && manifest.unittest_crate == context.unittest_crate
         && build_info.matches(&manifest.build_info)
         && manifest.kernel_elf.path == "kernel.elf"
+        && manifest.kernel_debug_elf.path == "kernel.debug.elf"
         && manifest.kernel_image.path == "kernel.bin"
         && manifest
             .linuxboot_image
@@ -555,6 +606,9 @@ fn can_reuse_bundle(
         || !manifest
             .kernel_elf
             .matches(&context.bundle_elf, bundle_modified)?
+        || !manifest
+            .kernel_debug_elf
+            .matches(&context.bundle_debug_elf, bundle_modified)?
         || !manifest
             .kernel_image
             .matches(&context.bundle_bin, bundle_modified)?
@@ -661,10 +715,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn direct_platforms_publish_elf_and_bin() {
+    fn direct_platforms_publish_elf_debug_elf_and_bin() {
         assert_eq!(
             root_artifact_kinds(KernelArch::Riscv64),
-            [RootArtifactKind::Elf, RootArtifactKind::Bin]
+            [
+                RootArtifactKind::Elf,
+                RootArtifactKind::DebugElf,
+                RootArtifactKind::Bin,
+            ]
         );
     }
 
@@ -674,6 +732,7 @@ mod tests {
             root_artifact_kinds(KernelArch::X86_64),
             [
                 RootArtifactKind::Elf,
+                RootArtifactKind::DebugElf,
                 RootArtifactKind::Bin,
                 RootArtifactKind::Linuxboot,
                 RootArtifactKind::Uefi,

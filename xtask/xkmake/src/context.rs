@@ -24,6 +24,7 @@ pub(crate) struct BuildContext {
     pub(crate) cargo_elf: PathBuf,
     pub(crate) bundle_dir: PathBuf,
     pub(crate) bundle_elf: PathBuf,
+    pub(crate) bundle_debug_elf: PathBuf,
     pub(crate) bundle_bin: PathBuf,
     pub(crate) bundle_linuxboot: PathBuf,
     pub(crate) bundle_uefi: PathBuf,
@@ -64,6 +65,7 @@ impl BuildContext {
         let cargo_elf = target_dir.join(target).join(profile).join(&package_name);
         let bundle_dir = target_dir.join("xkmake").join(platform).join(profile);
         let bundle_elf = bundle_dir.join("kernel.elf");
+        let bundle_debug_elf = bundle_dir.join("kernel.debug.elf");
         let bundle_bin = bundle_dir.join("kernel.bin");
         let bundle_linuxboot = bundle_dir.join("kernel.bzimg");
         let bundle_uefi = bundle_dir.join("kernel.uefi.img");
@@ -78,6 +80,7 @@ impl BuildContext {
             cargo_elf,
             bundle_dir,
             bundle_elf,
+            bundle_debug_elf,
             bundle_bin,
             bundle_linuxboot,
             bundle_uefi,
@@ -96,7 +99,6 @@ impl BuildContext {
             rust_const_dir: self.kbuild_dir.clone(),
             linker_script: self.linker_script.clone(),
             unittest: self.unittest,
-            dwarf: self.config.is_enabled("KFEAT_DWARF"),
         }
     }
 }

@@ -11,8 +11,7 @@ use xconfig::build_config::{
 use crate::{cli::DocArgs, context, error::Result, process::Process};
 
 const PLATFORM_CHECK_CFG: &str = "cfg(k_plat_name, values(\"kplat-aarch64\", \
-                                  \"kplat-loongarch64\", \"kplat-riscv64\", \
-                                  \"kplat-x86_64\"))";
+                                  \"kplat-loongarch64\", \"kplat-riscv64\", \"kplat-x86_64\"))";
 
 pub(crate) fn generate(args: &DocArgs) -> Result<()> {
     let workspace_root = context::workspace_root()?;
@@ -35,7 +34,6 @@ pub(crate) fn generate(args: &DocArgs) -> Result<()> {
             .join(profile)
             .join(format!("linker_{platform}.lds")),
         unittest: false,
-        dwarf: config.is_enabled("KFEAT_DWARF"),
     };
     if !args.workspace.dry_run {
         generate_kernel_build_files(&config, &build_files)?;

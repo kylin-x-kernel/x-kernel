@@ -8,30 +8,32 @@
 
 //! # Backtrace - Stack Unwinding for x-kernel
 //!
-//! This crate provides stack unwinding and symbolication support for bare-metal
-//! and kernel environments.
+//! This crate provides frame-pointer based stack unwinding for bare-metal and
+//! kernel environments.
+//!
+//! ## Design
+//!
+//! Stack unwinding and symbolication are decoupled:
+//!
+//! - **Unwinding** is always available: [`Backtrace::capture`] walks the
+//!   frame-pointer chain and returns raw instruction addresses. This works
+//!   without any debug data in the kernel image.
+//! - **Symbolication** happens outside the kernel:
+//!   - With the `dwarf` feature enabled, raw addresses are symbolicated in
+//!     kernel with the embedded DWARF sections (legacy mode).
+//!   - Otherwise the kernel prints raw addresses and the host side resolves
+//!     them against the unstripped `kernel.debug.elf` (see the `xkmake
+//!     symbolize` tool).
+//!   - With the `symtab` feature enabled, a compact kernel symbol table adds
+//!     `func+0xoff/0xsize` annotations to the raw addresses.
 //!
 //! ## Features
 //!
-//! - **Multi-architecture**: Supports x86_64, aarch64, riscv32/64, loongarch64
-//! - **DWARF symbolication**: Convert addresses to function names and source locations
-//! - **Configurable**: Control unwinding depth and validation
-//! - **Safe**: Comprehensive error handling and validation
-//!
-//! ## Quick Start
-//!
-//! ```no_run
-//! use backtrace::{Backtrace, init};
-//!
-//! // Initialize with valid memory ranges
-//! let code_range = 0x8000_0000..0x9000_0000;
-//! let stack_range = 0x7000_0000..0x8000_0000;
-//! init(code_range, stack_range);
-//!
-//! // Capture current backtrace
-//! let bt = Backtrace::capture();
-//! println!("{}", bt);
-//! ```
+//! - **Multi-architecture**: x86_64, aarch64, riscv32/64, loongarch64
+//! - **Always-on frame-pointer unwinding**: raw addresses without debug data
+//! - **Optional in-kernel DWARF symbolication** (`dwarf` feature)
+//! - **Optional compact symbol table** (`symtab` feature)
+//! - **Configurable**: unwinding depth and validation
 
 extern crate alloc;
 
@@ -46,6 +48,7 @@ pub mod config;
 pub mod error;
 pub mod frame;
 
+mod format;
 mod unwinder;
 pub use config::{max_depth, set_max_depth};
 pub use error::{BacktraceError, Result};
@@ -54,29 +57,34 @@ use unwinder::Unwinder;
 
 #[cfg(feature = "dwarf")]
 mod dwarf;
-
-use config::BacktraceConfig;
 #[cfg(feature = "dwarf")]
 pub use dwarf::{DwarfReader, FrameIter};
+
+#[cfg(feature = "symtab")]
+mod symtab;
+
+use config::BacktraceConfig;
 
 /// Global backtrace configuration.
 static CONFIG: Once<BacktraceConfig> = Once::new();
 
 /// Initializes the backtrace library.
+///
+/// # Arguments
+///
+/// * `ip_range` - Valid instruction pointer range.
+/// * `fp_range` - Valid frame pointer range.
 pub fn init(ip_range: Range<usize>, fp_range: Range<usize>) {
     CONFIG.call_once(|| BacktraceConfig::new(ip_range, fp_range));
     #[cfg(all(feature = "dwarf", not(test)))]
     dwarf::init();
+    #[cfg(feature = "symtab")]
+    symtab::init();
 }
 
 /// Returns whether the backtrace library is initialized.
 pub fn is_initialized() -> bool {
     CONFIG.get().is_some()
-}
-
-/// Returns whether the backtrace feature is enabled.
-pub const fn is_enabled() -> bool {
-    cfg!(feature = "dwarf")
 }
 
 // Unwind the stack from the given frame pointer.
@@ -95,8 +103,7 @@ pub fn unwind_stack(fp: usize) -> Vec<Frame> {
         return Vec::new();
     };
 
-    let unwinder = Unwinder::new(config);
-    match unwinder.unwind(fp) {
+    match unwinder::unwind_alloc(config, fp) {
         Ok(frames) => frames,
         Err(e) => {
             log::error!("Stack unwinding failed: {}", e);
@@ -105,17 +112,38 @@ pub fn unwind_stack(fp: usize) -> Vec<Frame> {
     }
 }
 
+/// Maximum number of frames a backtrace can hold.
+///
+/// The capture path is allocation-free (it runs on panic/NMI paths where
+/// the allocator lock may be held), so frames live in a fixed buffer.
+/// `set_max_depth` still caps the walk, but never beyond this bound.
+const MAX_FRAMES: usize = 64;
+
+/// Unwind into `out` without allocating; returns the number of frames
+/// written. Used by [`Backtrace::capture`]/[`Backtrace::capture_trap`] so
+/// panic/NMI paths never touch the heap (the allocator lock may be held by
+/// the interrupted code).
+fn capture_into(fp: usize, out: &mut [Frame]) -> usize {
+    let Some(config) = CONFIG.get() else {
+        log::error!("Backtrace not initialized. Call backtrace::init() first.");
+        return 0;
+    };
+    Unwinder::new(config).unwind(fp, out)
+}
+
 /// State of a captured backtrace.
+// `Unsupported` is only constructed on architectures without unwinding
+// support, so it is dead on supported targets.
 #[allow(dead_code)]
+// The fixed capture buffer dwarfs the empty variant; that is the point of
+// the allocation-free design.
+#[allow(clippy::large_enum_variant)]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
 enum Inner {
     /// Architecture does not support unwinding.
     Unsupported,
-    /// Backtrace capturing is disabled.
-    Disabled,
-    /// Successfully captured backtrace.
-    #[cfg(feature = "dwarf")]
-    Captured(Vec<Frame>),
+    /// Successfully captured backtrace (fixed buffer + frame count).
+    Captured([Frame; MAX_FRAMES], usize),
 }
 
 /// A captured stack backtrace.
@@ -139,38 +167,29 @@ impl Backtrace {
     /// println!("Backtrace:\n{}", bt);
     /// ```
     pub fn capture() -> Self {
-        #[cfg(not(feature = "dwarf"))]
+        // Check if architecture is supported
+        #[cfg(not(any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            target_arch = "riscv32",
+            target_arch = "riscv64",
+            target_arch = "loongarch64"
+        )))]
         {
-            Self {
-                inner: Inner::Disabled,
-            }
+            return Self {
+                inner: Inner::Unsupported,
+            };
         }
 
-        #[cfg(feature = "dwarf")]
-        {
-            // Check if architecture is supported
-            #[cfg(not(any(
-                target_arch = "x86_64",
-                target_arch = "aarch64",
-                target_arch = "riscv32",
-                target_arch = "riscv64",
-                target_arch = "loongarch64"
-            )))]
-            {
-                return Self {
-                    inner: Inner::Unsupported,
-                };
-            }
+        use arch::{ArchBacktrace, CurrentArch};
+        let fp = CurrentArch::current_fp();
+        let mut frames = [Frame::new(0, 0); MAX_FRAMES];
+        let count = capture_into(fp, &mut frames);
+        // prevent this frame from being tail-call optimised away
+        core::hint::black_box(());
 
-            use arch::{ArchBacktrace, CurrentArch};
-            let fp = CurrentArch::current_fp();
-            let frames = unwind_stack(fp);
-            // prevent this frame from being tail-call optimised away
-            core::hint::black_box(());
-
-            Self {
-                inner: Inner::Captured(frames),
-            }
+        Self {
+            inner: Inner::Captured(frames, count),
         }
     }
 
@@ -194,40 +213,38 @@ impl Backtrace {
     ///     trap_frame.ra,
     /// );
     /// ```
-    #[allow(unused_variables)]
     pub fn capture_trap(fp: usize, ip: usize, ra: usize) -> Self {
-        #[cfg(not(feature = "dwarf"))]
+        let mut frames = [Frame::new(0, 0); MAX_FRAMES];
+        // Reserve slot 0 for the synthetic trap frame; the unwound frames
+        // follow it. The trap ip is stored as `ip + 1` so that the display
+        // side's `adjust_ip()` (which subtracts 1) reproduces the exact
+        // faulting address.
+        frames[0] = Frame::new(fp, ip.wrapping_add(1));
+        let mut count = capture_into(fp, &mut frames[1..]);
+        // Fix up the first unwound frame if needed
+        if count > 0
+            && let Some(config) = CONFIG.get()
+            && !config.validate_ip(frames[1].ip)
         {
-            Self {
-                inner: Inner::Disabled,
-            }
+            frames[1].ip = ra;
         }
-        #[cfg(feature = "dwarf")]
-        {
-            let mut frames = unwind_stack(fp);
-            // Fix up the first frame if needed
-            if let Some(first) = frames.first_mut()
-                && let Some(config) = CONFIG.get()
-                && !config.validate_ip(first.ip)
-            {
-                first.ip = ra;
-            }
+        count += 1;
 
-            frames.insert(0, Frame::new(fp, ip.wrapping_add(1)));
-
-            Self {
-                inner: Inner::Captured(frames),
-            }
+        Self {
+            inner: Inner::Captured(frames, count),
         }
     }
 
     /// Visit each stack frame in the captured backtrace.
     ///
     /// Returns `None` if backtrace is not captured or DWARF is not available.
+    /// Visit each stack frame in the captured backtrace.
+    ///
+    /// Returns `None` if backtrace is not captured or DWARF is not available.
     #[cfg(feature = "dwarf")]
     pub fn frames(&self) -> Option<FrameIter<'_>> {
         match &self.inner {
-            Inner::Captured(frames) => Some(FrameIter::new(frames)),
+            Inner::Captured(..) => Some(FrameIter::new(self.frame_slice())),
             _ => None,
         }
     }
@@ -235,8 +252,7 @@ impl Backtrace {
     /// Get the raw frames without symbolication.
     pub fn raw_frames(&self) -> Option<&[Frame]> {
         match &self.inner {
-            #[cfg(feature = "dwarf")]
-            Inner::Captured(frames) => Some(frames),
+            Inner::Captured(frames, count) => Some(&frames[..*count]),
             _ => None,
         }
     }
@@ -244,9 +260,17 @@ impl Backtrace {
     /// Returns the number of frames in this backtrace.
     pub fn frame_count(&self) -> usize {
         match &self.inner {
-            #[cfg(feature = "dwarf")]
-            Inner::Captured(frames) => frames.len(),
+            Inner::Captured(_, count) => *count,
             _ => 0,
+        }
+    }
+}
+
+impl Backtrace {
+    fn frame_slice(&self) -> &[Frame] {
+        match &self.inner {
+            Inner::Captured(frames, count) => &frames[..*count],
+            Inner::Unsupported => &[],
         }
     }
 }
@@ -257,16 +281,16 @@ impl fmt::Display for Backtrace {
             Inner::Unsupported => {
                 writeln!(f, "<unwinding unsupported on this architecture>")
             }
-            Inner::Disabled => {
-                writeln!(
-                    f,
-                    "<backtrace disabled: enable the \"dwarf\" feature to capture backtraces>"
-                )
-            }
-            #[cfg(feature = "dwarf")]
-            Inner::Captured(frames) => {
-                writeln!(f, "Backtrace:")?;
-                dwarf::fmt_frames(f, frames)
+            Inner::Captured(..) => {
+                let frames = self.frame_slice();
+                #[cfg(feature = "dwarf")]
+                {
+                    if dwarf::is_ready() {
+                        writeln!(f, "Backtrace:")?;
+                        return dwarf::fmt_frames(f, frames);
+                    }
+                }
+                format::fmt_frames(f, frames)
             }
         }
     }

@@ -64,7 +64,18 @@ pub(crate) fn run(bundle: &Bundle, args: &RunArgs) -> Result<()> {
     if context.verbosity == 0 && !context.dry_run {
         println!("{}", command.command_lines());
     }
-    command.run()
+
+    if context.dry_run {
+        return command.run();
+    }
+    // Mirror QEMU output to the terminal and keep a copy so a panic
+    // backtrace can be symbolicated after the run (`symbolize::auto`).
+    command.run_tee(log_path(bundle))
+}
+
+/// Where the QEMU output log is mirrored for post-run symbolication.
+pub(crate) fn log_path(bundle: &Bundle) -> PathBuf {
+    bundle.directory.join("qemu.log")
 }
 
 fn qemu_program(arch: KernelArch) -> &'static str {

@@ -173,10 +173,6 @@ pub enum Commands {
         /// Path to linker script
         #[arg(long)]
         ld_script: Option<String>,
-
-        /// Enable DWARF debug info
-        #[arg(long)]
-        dwarf: bool,
     },
 }
 
@@ -277,9 +273,6 @@ pub fn run_cli() -> Result<()> {
             config,
             unittest,
             ld_script,
-            dwarf,
-        } => {
-            crate::cli::gen_cargo::gen_cargo_command(config, unittest, ld_script, dwarf)
-        }
+        } => crate::cli::gen_cargo::gen_cargo_command(config, unittest, ld_script),
     }
 }

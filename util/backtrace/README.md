@@ -1,13 +1,39 @@
 # Backtrace - Stack Unwinding for x-kernel
 
-Stack unwinding and symbolication library for bare-metal and kernel environments.
+Frame-pointer based stack unwinding for bare-metal and kernel environments.
+
+## Design
+
+Stack unwinding and symbolication are **decoupled**:
+
+| Layer | Where | Always on? |
+|-------|-------|-----------|
+| Unwinding (raw addresses) | Kernel (`Backtrace::capture`) | **Yes** — no debug data needed |
+| In-kernel DWARF symbolication | Kernel (`dwarf` feature / KFEAT_DWARF) | Optional, off by default |
+| Compact symbol table (`func+0xoff/0xsize`) | Kernel (`symtab` feature / KFEAT_SYMTAB) | Optional, off by default |
+| Full file/line symbolication | Host (`xkmake symbolize` / `make symbolize`) | Offline tool |
+
+The kernel prints a stable raw format that the host resolves against the
+unstripped `kernel.debug.elf`:
+
+```text
+Backtrace:
+0: 0xffff8000004a1234
+1: 0xffff8000003f2abc
+```
+
+```bash
+# host-side resolution
+make symbolize LOG=panic.log
+```
 
 ## Features
 
 - 🏗️ **Multi-architecture** - x86_64, aarch64, riscv32/64, loongarch64
-- 🔍 **DWARF symbolication** - Function names, file paths, line numbers
-- ⚙️ **Configurable** - Depth limits, memory ranges, filtering
-- 🛡️ **Safe** - Comprehensive validation and error handling
+- ⚡ **Always-on frame-pointer unwinding** - raw addresses without DWARF
+- 🔍 **Optional DWARF symbolication** - in-kernel gimli/addr2line (`dwarf`)
+- 🏷️ **Optional compact symbol table** - kallsyms-style annotations (`symtab`)
+- ⚙️ **Configurable** - depth limits, memory ranges, validation
 
 ## Quick Start
 
@@ -23,7 +49,7 @@ init(
 // 2. Capture backtrace
 let bt = Backtrace::capture();
 
-// 3. Display
+// 3. Display (raw addresses, optionally annotated)
 println!("{}", bt);
 ```
 
@@ -36,6 +62,30 @@ println!("{}", bt);
 | riscv32      | ✅     | 1            | 8 bytes   | Tested |
 | riscv64      | ✅     | 1            | 8 bytes   | Fully tested |
 | loongarch64  | ⚠️     | 1            | 8 bytes   | Limited testing |
+
+## Output Formats
+
+Default (no symbolication features):
+
+```text
+Backtrace:
+0: 0xffff8000004a1234
+1: 0xffff8000003f2abc
+```
+
+With `symtab` (KFEAT_SYMTAB):
+
+```text
+Backtrace:
+0: 0xffff8000004a1234  panic+0x2f9/0x330
+1: 0xffff8000003f2abc  ksyscall_entry+0x1a/0x2b
+```
+
+With `dwarf` (KFEAT_DWARF): full function names, files and line numbers,
+resolved in kernel (legacy mode).
+
+The raw address is always the first token of each frame line, so the host
+parser works with every format.
 
 ## Examples
 
@@ -63,100 +113,71 @@ use backtrace::set_max_depth;
 set_max_depth(20);
 ```
 
-### Iterate Frames with Symbolication
-
-```rust,ignore
-if let Some(frames) = bt.frames() {
-    for (i, (raw, frame)) in frames.enumerate() {
-        println!("{:>4}: {:?} at {}:{}",
-            i,
-            frame.function,
-            frame.file.unwrap_or("??"),
-            frame.line.unwrap_or(0),
-        );
-    }
-}
-```
-
 ## Safety Considerations
 
 ⚠️ **Important**: Always call `init()` before capturing backtraces!
 
 - Ensure IP and FP ranges cover valid memory
-- Be aware of performance impact in hot paths
-- Stack unwinding can be expensive (allocates Vec)
+- Stack unwinding allocates a `Vec` bounded by the configured max depth
+- Raw unwinding is designed for panic/NMI/lockup paths: no DWARF parsing,
+  no demangling, no allocation beyond the frame vector
 
 ## Testing
 
 ### Running Tests
 
 ```bash
-cd util/backtrace
-cargo test --all-features
+cargo test --all-features --manifest-path util/backtrace/Cargo.toml
 ```
 
-### Test Environment Limitations
-
-**Important**: DWARF symbolication is automatically disabled during tests because:
-
-1. Debug symbols (`__start_debug_*`, `__stop_debug_*`) are defined by the kernel linker script
-2. These symbols are not available in user-space test environments
-3. Attempting to reference them causes linker errors
+Note: `util/backtrace` is not a workspace member; run tests through the
+kernel build (`make build`) or the unittest image (`make UNITTEST=y run`)
+for kernel-context coverage.
 
 ### What Is Tested
 
 ✅ **Tested in `cargo test`:**
-- Stack frame capture
+- Stack frame capture (always-on unwinding)
 - Frame pointer validation
 - Configuration management (max depth, ranges)
-- API surface and error handling
-- Display formatting (raw frames)
+- Display formatting (raw addresses)
 
 ❌ **Not tested in `cargo test`:**
-- DWARF symbolication (function names, file paths, line numbers)
-- Architecture-specific symbol resolution in kernel context
+- DWARF symbolication (requires kernel linker sections; covered by the
+  kernel unittest image with KFEAT_DWARF)
+- Symbol table blob parsing (`symtab` feature; covered by kernel
+  `#[cfg(unittest)]` tests, run via `make UNITTEST=y run`)
+- Kernel symbol table embedding (requires the `xkmake` bootstrap)
 
-### Testing DWARF Symbolication
+## Host-side Symbolication Workflow
 
-To test full symbolication support, run in the actual kernel:
+1. Build the kernel (KFEAT_DWARF=n by default):
 
-```bash
-# Build x-kernel with backtrace support
-cd /path/to/x-kernel
-make A=apps/exception ARCH=aarch64 qemu
+   ```bash
+   make defconfig && make build
+   ```
 
-# Trigger an exception to see backtrace with symbols
-```
+2. Run and capture a panic/exception log:
 
-### Test Output Example
+   ```bash
+   make run > panic.log
+   ```
 
-When running `cargo test --all-features`, you'll see:
+3. Resolve addresses against `kernel.debug.elf`:
 
-```text
-running 11 tests
-test test_backtrace_display ... ok
-test test_capture_trap ... ok
-test test_frame_adjusted_ip ... ok
-test test_frame_count ... ok
-test test_frame_creation ... ok
-test test_frame_display ... ok
-test test_initialization ... ok
-test test_invalid_frame ... ok
-test test_max_depth_configuration ... ok
-test test_raw_frames_access ... ok
-test test_recursive_capture ... ok
+   ```bash
+   make symbolize LOG=panic.log
+   # or: xkmake symbolize --elf kernel.debug.elf --log panic.log
+   ```
 
-test result: ok. 11 passed; 0 failed; 0 ignored
-```
+`kernel.debug.elf` is always produced by the build (unstripped, with DWARF)
+and is the symbolication input; the boot image never contains DWARF in the
+default configuration.
 
-Backtrace display in tests will show:
-```text
-Symbolication not available in test mode.
-Raw frames:
-   0: fp=0x00007ffd12340000, ip=0x0000555555555000
-   1: fp=0x00007ffd12341000, ip=0x0000555555556000
-   ...
-```
+`make run` / `make justrun` also symbolicate automatically after QEMU
+exits: the guest output is mirrored to `bundle/qemu.log` (while staying
+live on the terminal), and any backtrace frames in it are resolved against
+`kernel.debug.elf` right away. Disable with `--no-symbolize`.
 
 ## License
 

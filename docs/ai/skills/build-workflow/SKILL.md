@@ -191,6 +191,52 @@ make run QEMU_ARGS='-no-reboot'
 (they are appended after `--`), covering ad-hoc devices or debug flags that
 don't have a dedicated Make variable.
 
+## Symbolize
+
+Raw backtrace addresses in a panic/exception log are resolved against the
+unstripped `kernel.debug.elf` (always produced by the build) on the host:
+
+```bash
+make run > panic.log          # capture a failing run
+make symbolize LOG=panic.log  # resolve addresses to function/file/line
+```
+
+The tool accepts the stable kernel frame format (`0: 0xffff8000...`) and
+`func+0xoff/0xsize` annotated lines, and uses `llvm-addr2line` (falling back
+to `addr2line`). Use `XKMAKE_ARGS='--elf <path>'`, `--offset <delta>`, or
+`--tool <binary>` for custom setups; without `LOG=` it reads stdin.
+
+`make run` / `make justrun` also symbolicate automatically: QEMU output is
+mirrored to `bundle/qemu.log` (alongside the live terminal output), and when
+the run ends with backtrace frames the addresses are resolved right away.
+Disable with `XKMAKE_ARGS='--no-symbolize'`.
+
+### Symbolizing logs from real hardware
+
+Board logs work the same way. The kernel runs at its link-time virtual
+address (`kimage_vaddr` is fixed per architecture; only the physical load
+address varies), so raw backtrace addresses captured from a serial console
+match the build's `kernel.debug.elf` directly:
+
+```bash
+minicom -C board.log    # capture U-Boot + kernel serial output
+# resolve with the matching build artifact (use --elf when it is not the
+# current bundle's kernel.debug.elf):
+make symbolize LOG=board.log XKMAKE_ARGS='--elf xkernel_aarch64-rk3588.debug.elf'
+```
+
+Keep the build's `xkernel_<arch>-<machine>.debug.elf` (published next to
+the boot image) together with the flashed image. `--offset` is only needed
+if the kernel gains relocation/KASLR, or when mixing logs with a different
+build; a fully-unresolved pass prints a diagnostic pointing at both causes.
+
+Address detection is two-tier: strict kernel frame lines
+(`<index>: 0x<addr>`) first, then — only when the log carries panic markers
+(`Backtrace:` / `panicked` / `kernel panic`) — a loose scan for high-half
+kernel addresses anywhere in a line. The loose tier tolerates serial tools
+that inject timestamp/ANSI prefixes or logs captured with truncated
+headers; user-space addresses (`0x7f...`) are excluded.
+
 Important defaults:
 
 - memory: `1g`;

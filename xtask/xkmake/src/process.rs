@@ -5,8 +5,10 @@
 use std::{
     ffi::OsString,
     fs::{self, File},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{Arc, Mutex},
 };
 
 use crate::error::{Error, IoResultExt, Result};
@@ -104,6 +106,72 @@ impl Process {
             parts.push(format!("> {}", shell_quote(&path.display().to_string())));
         }
         parts
+    }
+
+    /// Run the command while mirroring stdout to the terminal and to `path`.
+    ///
+    /// The child's stdout is piped and forwarded by a reader thread to both
+    /// the parent's stdout and the file, so the run stays live on the
+    /// terminal while the full output is preserved for post-processing
+    /// (e.g. automatic panic backtrace symbolication). stderr and stdin stay
+    /// inherited so interactive QEMU sessions keep working.
+    pub(crate) fn run_tee(&mut self, path: impl Into<PathBuf>) -> Result<()> {
+        let output_path = path.into();
+        if self.verbosity > 0 || self.dry_run {
+            println!("+ {:#?}", self.command);
+            println!("  stdout tee -> {}", output_path.display());
+        }
+        if self.dry_run {
+            return Ok(());
+        }
+
+        let file = File::create(&output_path).with_path(&output_path)?;
+        self.command.stdout(Stdio::piped());
+        let program = self.command.get_program().to_string_lossy().into_owned();
+        let mut child = self.command.spawn().map_err(|source| Error::Spawn {
+            program: program.clone(),
+            source,
+        })?;
+        let mut pipe = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::Message(format!("failed to capture {program} stdout")))?;
+        let tee_file = Arc::new(Mutex::new(file));
+        let tee_file = Arc::clone(&tee_file);
+        let tee_handle = std::thread::spawn(move || {
+            let mut stdout = io::stdout().lock();
+            let mut buffer = [0u8; 8192];
+            loop {
+                match pipe.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(length) => {
+                        let _ = stdout.write_all(&buffer[..length]);
+                        let _ = stdout.flush();
+                        if let Ok(mut file) = tee_file.lock() {
+                            let _ = file.write_all(&buffer[..length]);
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let status = match child.wait() {
+            Ok(status) => status,
+            Err(source) => {
+                let _ = tee_handle.join();
+                return Err(Error::Spawn {
+                    program: program.clone(),
+                    source,
+                });
+            }
+        };
+        let _ = tee_handle.join();
+        if !status.success() {
+            return Err(Error::CommandFailed { program, status });
+        }
+        Ok(())
     }
 
     pub(crate) fn run(&mut self) -> Result<()> {

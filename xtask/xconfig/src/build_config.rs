@@ -115,8 +115,6 @@ pub struct KernelBuildFiles {
     pub linker_script: PathBuf,
     /// Whether generated Cargo flags enable kernel unit-test mode.
     pub unittest: bool,
-    /// Whether generated Cargo flags preserve DWARF information.
-    pub dwarf: bool,
 }
 
 impl ResolvedKernelConfig {
@@ -246,7 +244,6 @@ pub fn generate_kernel_build_files(
     let build_options = BuildOpts {
         unittest: files.unittest,
         ld_script: Some(files.linker_script.to_string_lossy().into_owned()),
-        dwarf: files.dwarf,
     };
     generate_rust_analyzer_and_cargo_config(&values, &build_options)
 }

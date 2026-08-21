@@ -18,7 +18,14 @@
 
 DWARF 段嵌入（原 `dwarf_embed` 工具）现已在 xkmake 进程内完成，
 不再作为外部子进程调用；其 ELF 改写逻辑全程以 `Result` 传播并带边界
-校验，但若该逻辑出错会直接影响 `xkmake build` 进程而非被隔离。
+校验，但若该逻辑出错会直接影响 `xkmake build` 进程而非被隔离。该路径
+只在 KFEAT_DWARF=y 时启用；默认构建的启动镜像不携带任何 DWARF 数据。
+
+紧凑符号表（KFEAT_SYMTAB）由 xkmake 从内核 ELF 提取函数符号生成：只
+收录 `SHF_EXECINSTR` 段中的函数、排序去重后写入 `$TARGET_DIR/kbuild/
+ksymtab.bin`，由 `util/backtrace` 经 build.rs 复制并以 `include_bytes!`
+嵌入 `.rodata`。生成逻辑全程在进程内完成并带长度/类型校验；符号名
+来自 ELF strtab，视为构建产物而非外部输入。
 
 镜像元数据 finalize 同样在进程内完成。写入前必须验证 note header、owner、
 descriptor 大小、文件范围及 section 同时落在 `PT_LOAD` 的文件和虚拟地址
@@ -52,6 +59,22 @@ Header 检查通过 Git 取得已跟踪及未忽略的 Rust 文件，只把仍�
 覆盖率流程只在 unittest QEMU 正常退出后读取用户指定的磁盘镜像。
 `debugfs` 请求中的 guest 与 host 路径会按其命令词法转义；报告命令均以
 结构化参数执行，LCOV 到 Cobertura 的转换在 XKMake 进程内完成。
+
+`symbolize` 只调用 `llvm-addr2line`/`addr2line`（`--tool` 可显式指定），
+以结构化参数传递 ELF 与地址；日志内容仅被读取用于提取地址，工具不执行
+日志中的任何内容。`kernel.debug.elf` 未构建时工具明确报错，不会回退到
+猜测产物。
+
+## 安全模型：backtrace 与调试数据
+
+- 默认构建（KFEAT_DWARF=n）的 `kernel.bin`/启动镜像不含 `.debug_*`
+  数据；DWARF 只存在于 `kernel.debug.elf`（Host 产物，可单独分发）；
+- KFEAT_DWARF=y 时镜像携带完整 DWARF，运行时符号化依赖 gimli/addr2line
+  与动态内存分配，仅供无 Host 工具链的环境使用；
+- KFEAT_SYMTAB 在镜像中保留函数名与地址（约 MB 级），默认关闭；
+  开启时泄露面是函数符号名，不含行号与源码路径；
+- 无论何种模式，内核始终能输出原始地址 backtrace，Host 侧还原不依赖
+  运行时任何调试数据。
 
 ## unsafe 代码清单
 

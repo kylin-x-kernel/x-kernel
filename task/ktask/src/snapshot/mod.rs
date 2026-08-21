@@ -153,7 +153,7 @@ fn wait_mask(timeout: ktime_types::TimeSpan) -> usize {
     }
 }
 
-fn dump_all(mask: usize, symbolize: bool) {
+fn dump_all(mask: usize) {
     let expect = present_mask();
 
     for_each_present_logical_cpu(|_, cpu_id, _| {
@@ -166,16 +166,15 @@ fn dump_all(mask: usize, symbolize: bool) {
         }
 
         match TRAP_FRAMES.read(cpu_id) {
-            Some(tf) => dump::dump_cur_task_backtrace(cpu_id, &tf, true, symbolize),
+            Some(tf) => dump::dump_cur_task_backtrace(cpu_id, &tf, true),
             None => khal::kprint_atomic!("[snapshot] cpu={cpu} no active trap frame\n"),
         }
-        dump::dump_cpu_task_backtrace(cpu_id, true, symbolize);
+        dump::dump_cpu_task_backtrace(cpu_id, true);
     });
 }
 
 fn trigger_impl(reason: &str, collect_mask: impl FnOnce(usize) -> Option<usize>) {
     let seq = SNAPSHOT_SEQ.fetch_add(1, Ordering::Relaxed);
-    let symbolize = backtrace::is_enabled();
     khal::kprint_atomic!("\n[snapshot {seq}] trigger={reason}\n");
 
     let Some(_guard) = begin_guard() else {
@@ -184,7 +183,7 @@ fn trigger_impl(reason: &str, collect_mask: impl FnOnce(usize) -> Option<usize>)
     };
 
     if let Some(mask) = collect_mask(seq) {
-        dump_all(mask, symbolize);
+        dump_all(mask);
     }
 }
 
@@ -229,9 +228,9 @@ pub fn trigger(reason: &str) {
 /// then dumps all non-running tasks.
 pub fn dump_cpu_tasks(cpu_id: LogicalCpuId) {
     if let Some(tf) = khal::context::active_exception_context() {
-        dump::dump_cur_task_backtrace(cpu_id, &tf, false, true);
+        dump::dump_cur_task_backtrace(cpu_id, &tf, false);
     }
-    dump::dump_cpu_task_backtrace(cpu_id, false, true);
+    dump::dump_cpu_task_backtrace(cpu_id, false);
 }
 
 /// Begin an NMI-driven snapshot session.
@@ -251,8 +250,8 @@ pub fn nmi_collect_local() {
 /// Dump all CPU task backtraces from NMI context.
 ///
 /// `mask` is the bitmap of CPUs that have collected their trap frames.
-pub fn nmi_dump_all(mask: usize, symbolize: bool) {
-    dump_all(mask, symbolize);
+pub fn nmi_dump_all(mask: usize) {
+    dump_all(mask);
 }
 
 /// Finish an NMI-driven snapshot session.

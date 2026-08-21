@@ -21,7 +21,9 @@ src/
 ├── qemu.rs       平台启动策略
 ├── x86.rs        LinuxBoot/UEFI 启动介质
 ├── process.rs    外部进程边界
-├── dwarf_embed.rs 进程内 DWARF 段嵌入
+├── dwarf_embed.rs 进程内 DWARF 段嵌入（KFEAT_DWARF 时启用）
+├── symtab.rs     紧凑内核符号表生成（KFEAT_SYMTAB）
+├── symbolize.rs  日志地址的 Host 侧符号化
 └── error.rs      工具层错误模型
 ```
 
@@ -34,13 +36,19 @@ Makefile
 xkmake ------> xconfig ------> .config / config.rs / Cargo config
    |
    +---------> Cargo --------> kernel ELF
+   |                            |
+   |                            +--> kernel.debug.elf（未剥离，符号化输入）
    |
-   +-- 进程内嵌入 DWARF 段 + rust-objcopy(外部)
+   +-- 按需嵌入 DWARF（KFEAT_DWARF）/ 自举符号表（KFEAT_SYMTAB）
+   |      + rust-objcopy(外部)
    |                         |
    |                         v
    +--------------------> versioned bundle
                                |  \
                                |   +--> workspace-root xkernel_* copies
+                               |
+                               +--> make symbolize（Host 侧还原函数/行号）
+                               |
                                v
                               QEMU
 ```
@@ -69,9 +77,9 @@ LCOV 到 Cobertura XML 的转换是 unittest 覆盖率流程的内部阶段，�
 7. 若现有 bundle 的稳定构建来源、配置 hash、输入时间、产物名称、大小和
    mtime 顺序仍匹配，则作为可信本地缓存直接复用，并保留原有构建时间；
    普通 build 不重新扫描完整 ELF。
-8. 否则在临时路径复制 ELF、按需嵌入 DWARF，再原地填充 linker 预留的
-   `.note.xkernel.build-info` 与 `.note.gnu.build-id`；自动构建时间在此时取
-   当前 UTC 时间，而不是参与前置缓存判断。
+8. 否则在临时路径复制 ELF、按需嵌入 DWARF（KFEAT_DWARF），再原地填充
+   linker 预留的 `.note.xkernel.build-info` 与 `.note.gnu.build-id`；自动
+   构建时间在此时取当前 UTC 时间，而不是参与前置缓存判断。
 9. Build ID 对 build-info 已写入、Build ID descriptor 清零后的全部
    `PT_LOAD` 内容计算 SHA-256。
 10. 从 finalized ELF 生成 raw BIN。
@@ -81,6 +89,42 @@ LCOV 到 Cobertura XML 的转换是 unittest 覆盖率流程的内部阶段，�
     Jenkins 制品传递和仍使用旧命名的工具消费。复制先写入不存在的同目录
     临时路径，使 APFS/Linux CoW 文件系统可走 clone/reflink 快速路径，再
     以 rename 替换最终文件；文件系统不支持时由标准库回退普通复制。
+
+### 产物
+
+每个 bundle 包含两类 ELF：
+
+- `kernel.elf`：启动/调试 ELF。KFEAT_DWARF 时嵌入 DWARF 可加载段，否则
+  与 Cargo 产物一致；
+- `kernel.debug.elf`：**始终**是未加工的 Cargo 产物（非 alloc `.debug_*`
+  完整保留），是 `xkmake symbolize` 的符号化输入。
+
+### 符号表自举（KFEAT_SYMTAB）
+
+紧凑符号表（kallsyms 风格）来自内核自身符号，因此存在"表需要链接产物、
+产物需要表"的循环。构建按两轮收敛：
+
+1. 首轮以空表链接；`create_bundle` 从 Cargo ELF 提取函数符号并写入
+   `$TARGET_DIR/kbuild/ksymtab.bin`；
+2. 内容变化时再次调用 Cargo 重链（`util/backtrace` 通过 build.rs 复制
+   该 blob 并以 `include_bytes!` 嵌入），随后重建 bundle。
+
+收敛性由布局保证：blob 位于 `.rodata`（普通 static），符号表只收录
+`.text` 系段的函数，而 `.text` 在 `.rodata` 之前——blob 大小的变化
+不会改变表内记录的地址。第二轮的 blob 与第一轮相同，构建停止。
+
+### Symbolize
+
+`make symbolize LOG=<log>` 从日志提取 `Backtrace:` 块的原始地址（兼容
+`func+0xoff/0xsize` 注解），调用 `llvm-addr2line`/`addr2line` 对照
+`kernel.debug.elf` 输出函数名与文件/行号。`--offset` 支持内核加载地址
+偏移（如 KASLR）。
+
+`make run`/`make justrun` 自动符号化：QEMU 输出实时 tee 到终端并镜像到
+`bundle/qemu.log`，运行结束后扫描 backtrace 帧，发现则自动对照
+`kernel.debug.elf` 解析并打印（`--no-symbolize` 关闭）。tee 由
+`Process::run_tee` 实现：stdout 走管道由读取线程转发到终端与日志文件，
+stdin/stderr 保持继承，交互会话不受影响。
 
 ### Run
 
@@ -160,6 +204,7 @@ target、平台和 bundle 路径查询，避免 Makefile 重新解析 `.config`�
   完整 loadable-image SHA-256 校验。
 - 每次 build 仍调用 Cargo 检查源码新鲜度；源码和配置未变化时 Cargo
   增量流程不重新编译，XKMake 也不重新生成 ELF metadata、BIN 或启动镜像。
+  KFEAT_SYMTAB 的符号表自举在 blob 内容不变时不触发第二次链接。
 - 构建来源元数据不进入 Cargo 编译环境；linker 预留固定 note，XKMake 在
   bundle 阶段原地写入，因此机器名和时间变化不会让 kernel crate 重编译。
 - 自动构建时间表示 bundle 本次真正生成的 UTC 时间，不是缓存检查输入；

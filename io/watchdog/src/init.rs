@@ -89,7 +89,7 @@ fn init_nmi_watchdog() {
                 );
 
                 // Cause CPU dumps all tasks for all CPUs.
-                ktask::snapshot::nmi_dump_all(rv::all_arrived_mask(), true);
+                ktask::snapshot::nmi_dump_all(rv::all_arrived_mask());
 
                 // Notify others that dump is done.
                 rv::mark_dump_done();

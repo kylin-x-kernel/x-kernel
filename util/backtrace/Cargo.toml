@@ -12,6 +12,7 @@ description = "Backtrace Catching for X-kernel"
 
 [features]
 dwarf = ["dep:addr2line", "dep:gimli", "dep:paste"]
+symtab = []
 
 [dependencies]
 log = { workspace = true }
