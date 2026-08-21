@@ -58,6 +58,7 @@ pub(crate) mod route {
 }
 
 pub(crate) mod neigh {
+    pub(crate) const STATE_INCOMPLETE: u16 = 0x01;
     pub(crate) const STATE_PERMANENT: u16 = 0x80;
 
     pub(crate) mod attr {

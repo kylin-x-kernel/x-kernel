@@ -82,7 +82,7 @@ pub fn init_network() {
         .expect("loopback IPv4 address must fit the interface");
 
     let mut eth0_rx_poll = None;
-    let eth0_ip = if let Some(handle) = net_devs.pop() {
+    if let Some(handle) = net_devs.pop() {
         let device_id = handle.id();
         info!("  use NIC 0: {:?}", handle.name());
 
@@ -113,23 +113,16 @@ pub fn init_network() {
         info!("  mac:  {}", eth0_address);
         info!("  ip:   {}", eth0_ip);
         subscribe_network_unregister(device_id);
-
-        Some(eth0_ip)
     } else {
         warn!("  No network device found!");
-        None
-    };
+    }
 
     for dev in &router.devices {
         info!("Device: {}", dev.name());
     }
 
-    let netlink_state =
-        netlink::build_initial_state(eth0_ip.map(to_smoltcp_ipv4_cidr), GATEWAY.parse().ok());
     let service = Service::new(router);
-    service.sync_netlink(&netlink_state);
     SERVICE.init_once(service);
-    netlink::init_route_state(netlink_state.clone());
 
     SOCKET_SET.init_once(SocketSetWrapper::new());
     LISTEN_TABLE.init_once(ListenTable::new());
@@ -142,22 +135,27 @@ pub fn init_network() {
     }
 }
 
-fn to_smoltcp_ipv4_cidr(cidr: Ipv4Cidr) -> smoltcp::wire::IpCidr {
-    smoltcp::wire::IpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
-        cidr.address().into(),
-        cidr.prefix_len(),
-    ))
-}
-
 fn subscribe_network_unregister(id: kdevice::DeviceId) {
     subscribe_device_removed(Arc::new(move |removed_id| {
-        if removed_id != id || !SERVICE.is_inited() {
+        if removed_id != id {
             return;
         }
-        if netlink::remove_device_state(id) {
+        if unregister_netdev(id) {
             warn!("network: detached removed device {:?}", id);
         }
     }));
+}
+
+/// Removes a NIC from the network stack.
+///
+/// Takes [`netlink::rtnl_lock`] so teardown is serialized with rtnetlink
+/// mutations, matching Linux `unregister_netdev()` in `net/core/dev.c`.
+pub(crate) fn unregister_netdev(id: kdevice::DeviceId) -> bool {
+    if !SERVICE.is_inited() {
+        return false;
+    }
+    let _rtnl = netlink::rtnl_lock();
+    SERVICE.remove_device_by_model_id(id).is_some()
 }
 
 /// Init vsock subsystem by vsock devices.

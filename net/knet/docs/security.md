@@ -63,7 +63,7 @@ POSIX send 或 socket file write 入口取得，并显式传递给 `NetlinkSocke
 因此威胁分析重点应覆盖：
 
 - 外部网络包是否能触发越界、panic、状态不一致或资源耗尽；
-- link mutation 是否绕过设备 owner，地址 mutation 是否绕过 Router owner，路由和邻居 mutation 是否会让 `ROUTE_STATE` 与 data-plane 同步失配；
+- link 与 neighbor mutation 是否绕过设备 owner，address 与 route mutation 是否绕过 Router owner，设备注销是否与 rtnetlink mutation 使用同一把配置锁；
 - netlink mutation 是否复用旧凭据，或在混合批次和 queue 耗尽时产生部分提交；
 - driver buffer、socket handle、ring buffer
   是否可能因生命周期管理错误破坏内存安全；
@@ -189,7 +189,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 5. driver buffer 生命周期：`NetBufHandle::data` 只在 handle 被 recycle 前使用，RX handle 必须在处理后归还。
 6. netlink message 边界：所有 payload 读取必须先经过单条 header 长度、批次对齐边界、attribute 长度和 family 校验。
 7. netlink credential 边界：每次 `send` 或 `write` 必须传入当前调用者的独立 `Cred` 快照，netlink socket 不得缓存调用者权限。
-8. netlink batch 执行边界：每个 socket 的发送事务锁串行化容量预检、mutation 执行和 response 入队；全局 `RTNETLINK_MUTATION_LOCK` 串行化跨 socket mutation 与设备移除；混合查询和 mutation 的批次必须在状态更新前拒绝；同类 mutation 执行前必须检查完整批次的 response queue 空间。response 在 rx queue 锁外生成，锁顺序固定为发送事务锁、全局 mutation 锁、`ROUTE_STATE`、Router、ingress、Interface、netlink rx queue，未涉及的锁按序跳过。
+8. netlink batch 执行边界：每个 socket 的发送事务锁串行化容量预检、mutation 执行和 response 入队；`rtnl_lock` 串行化跨 socket mutation 与 `unregister_netdev`；混合查询和 mutation 的批次必须在状态更新前拒绝；同类 mutation 执行前必须检查完整批次的 response queue 空间。response 在 rx queue 锁外生成，锁顺序固定为发送事务锁、`rtnl_lock`、Router、ingress、Interface、netlink rx queue，未涉及的锁按序跳过。
 9. route index 边界：rtnetlink route 的 `oif` 转换成设备索引后必须检查 `dev < devices.len()`。
 10. static init 顺序：创建 socket 前必须完成 `init_network` 初始化 `SERVICE`、`SOCKET_SET` 和 `LISTEN_TABLE`。
 11. pathname credential 一致性：一次 Unix pathname bind 的查找、创建和属主初始化必须使用同一份 `Cred` 快照。
@@ -206,7 +206,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 22. TCP 关闭生命周期：用户文件对象释放后，含有待发送数据、FIN 或重传状态的 smoltcp handle 必须继续保留在 `SOCKET_SET`；接收队列存在未读数据时必须保留 abort handle 直到 RST 发出；协议进入 `Closed` 后才能删除。只有 orphan `FIN_WAIT_2` 状态受 60 秒回收期限约束。
 23. 网络 timer 条件：协议与 deferred-close deadline 只能通过原子值发布；周期采样回调到期处理不得获取 sleepable mutex、分配 future 或访问 timer wheel。
 24. link 配置所有权：接口名、MTU、管理 up 状态和 link snapshot 只由 `NetDevice` 持有；`RTM_NEWLINK` 必须先完成名称唯一性、名称格式、设备 MTU 范围和受支持 flags 的整组校验，再修改设备。`ifi_change` 中的派生状态位按 Linux `IFF_VOLATILE` 语义保留，实际改变的未支持可写位返回 `EOPNOTSUPP`。
-25. IPv4 地址生命周期：地址或所属设备移除后，Router 地址条目、自动路由、IngressProcessor、smoltcp Interface 和设备投影必须在同一 Router 锁作用域内刷新；最后一个同值地址消失时，`ROUTE_STATE` 中依赖该 `prefsrc` 的配置路由必须同步删除；设备消失时还必须删除其路由与邻居并重编号后续接口索引。
+25. IPv4 地址生命周期：地址或所属设备移除后，Router 地址条目、自动路由、IngressProcessor、smoltcp Interface 和设备投影必须在同一 Router 锁作用域内刷新；最后一个同值地址消失时，Router 中依赖该 `prefsrc` 的配置路由必须同步删除；设备消失时还必须删除其路由与邻居并重编号后续接口索引。
 
 ## 线程安全
 
@@ -232,7 +232,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-06 | listen backlog 被 SYN 洪泛占满 | 中 | 大量连接请求命中同一 listener | backlog 被 clamp 到 `LISTEN_QUEUE_SIZE`；超限丢弃并记录 warn |
 | T-07 | raw socket 被无权限调用者创建 | 中 | syscall 层没有实施权限门禁 | `knet` 层只封装 raw socket 行为；权限策略应保留在 `posix/net::sys_socket` |
 | T-08 | netlink RX queue 被 uevent 或 response 填满 | 中 | 订阅者不消费，publisher 持续写入 | `NETLINK_RX_QUEUE_LIMIT` 限制单 socket queue 字节数，超限丢弃 |
-| T-09 | 控制面与 data-plane 不一致 | 中 | link mutation 更新设备 owner 失败，跨 socket 地址 mutation 交错，设备移除后保留旧地址投影或控制面路由，删除地址后配置路由继续引用失效 `prefsrc`，或路由和邻居 mutation 只更新控制面 | 全局 mutation 锁串行化跨 socket 更新与设备移除；link query 与 mutation 直接访问 `NetDevice` owner；地址 query 与 mutation 直接访问 Router；地址与设备删除刷新自动路由、ingress、Interface 和设备投影；地址最后持有者和设备删除路径同步清理 `ROUTE_STATE` 并更新接口索引；路由和邻居 mutation 在释放 `ROUTE_STATE` 写锁后调用 `SERVICE.sync_netlink` |
+| T-09 | 控制面与 data-plane 不一致 | 中 | link mutation 更新设备 owner 失败，跨 socket 地址 mutation 交错，设备移除后保留旧地址投影或控制面路由，删除地址后配置路由继续引用失效 `prefsrc`，或 route 与 neighbor mutation 绕过各自 owner | `rtnl_lock` 串行化跨 socket 更新与 `unregister_netdev`；link query 与 mutation 直接访问 `NetDevice` owner；address 与 route query 和 mutation 直接访问 Router；`RTM_NEWNEIGH` 直接访问目标设备；地址与设备删除刷新自动路由、ingress、Interface 和设备投影；地址最后持有者和设备删除路径同步清理 Router 路由并更新接口索引 |
 | T-10 | 外部网络包触发 parser panic | 中 | malformed Ethernet、ARP、IP、UDP 或 TCP packet 进入 RX | Ethernet 和 ARP 使用 `zerocopy` checked view，IPv4 与 UDP 使用 crate 内 checked parser，TCP、raw IP 和 IPv6 使用 smoltcp checked parser；错误包直接丢弃 |
 | T-11 | 中断上下文误用导致锁竞争或延迟放大 | 中 | IRQ waker 回调中直接推进 `SERVICE`、`SOCKET_SET` 或执行阻塞 socket 操作 | VirtIO IRQ handler 只确认中断并唤醒；Ethernet RX 任务在普通任务上下文发布 RX，并执行最多四轮的有界批次 |
 | T-12 | driver buffer 或 DMA 输入破坏 packet 边界 | 高 | 驱动返回长度异常、数据在 recycle 后继续被访问、TX/RX buffer 生命周期使用错误 | RX 数据只在 `NetBufHandle` recycle 前解析和复制；外部帧使用 checked parser；TX buffer 由 driver handle 管理 |
@@ -276,7 +276,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | F-06 | TCP accepted child abort | 握手期间 peer reset 或 smoltcp child 关闭 | `accept` 返回 `ConnectionAborted` | 应用重试 accept | 4 | `ListenTable::accept` 清理 closed child 并继续扫描队列 |
 | F-07 | poll waker 或协议 timer 丢失 | device mask 错误、timeout 或 Ethernet RX poll source 未注册、注册所有者未跨 `Pending` 存活、缺少 register 后复查或 timer 到期后未通知 poller | socket 阻塞等待延迟，TCP 重传或 keep-alive 延后 | 应用 IO latency 上升或连接超时 | 3 | bind/connect 后更新 device mask；`Service::register_rx_waker` 使用同一个 `PollContext` 注册 timeout poll 和支持 interrupt-driven RX 的 Ethernet RX poll source；未 attach `NetRxScheduler` 的设备回退 timeout 聚合 waker；调用方持有 `PollRegistrations` 并在注册后复查 readiness；每次 Interface poll 后按 `poll_at` deadline 注册 timer，到期后调用 `notify(PollReason::Timer)` |
 | F-08 | malformed netlink request | header 或 attr 长度非法 | 返回 empty response 或 netlink error | 调用者请求失败 | 4 | checked reader 和 error response 处理 |
-| F-09 | 网络服务或控制面未初始化 | AF_PACKET 或 netlink route 请求早于 `SERVICE` 或 `init_route_state` | AF_PACKET 设备绑定与发送返回 `ENODEV`；link dump 为空，mutation 返回错误，地址或路由 dump 为空 | 对应网络功能暂不可用 | 2 | 所有 `SERVICE` 查询先检查初始化状态；初始化路径先创建 `SERVICE`，再创建地址、路由和邻居初始 state；新增启动路径需保持顺序 |
+| F-09 | 网络服务或控制面未初始化 | AF_PACKET 或 netlink route 请求早于 `SERVICE` 或 Router 初始化 | AF_PACKET 设备绑定与发送返回 `ENODEV`；link dump 为空，mutation 返回错误，地址或路由 dump 为空 | 对应网络功能暂不可用 | 2 | 所有 `SERVICE` 查询先检查初始化状态；初始化路径在公开网络接口可用前完成 Router 与 `SERVICE` 初始化；新增启动路径需保持顺序 |
 | F-10 | Unix stream peer 提前关闭 | channel 被 shutdown 或 drop | send 在无发送进度时返回 `BrokenPipe`，已有进度时返回部分字节数；recv 排空本端缓冲后返回 EOF；peer 关闭时丢弃未读输入则返回一次 `ConnectionReset`；poll 报告 `RDHUP`、`HUP` 或 `ERR` | 应用感知连接关闭 | 4 | endpoint atomic 记录双方半关闭状态与待处理 reset；per-direction `tx_order` 统一关闭与数据顺序；三组 `PollSet` 按受影响事件定向唤醒 |
 | F-11 | 中断上下文执行重型网络推进 | IRQ 或当前 `NetRx` softirq 路径误调用 socket send、recv 或 `poll_interfaces` | 锁竞争、调度延迟或死锁 | 网络 IO 延迟上升，严重时系统卡顿 | 2 | IRQ 路径只做设备 ack、RX pending 标记和 `NetRx` softirq 调度；当前 `NetRx` softirq 只消费 pending RX source 并唤醒对应设备 RX `PollSet`；`knet-rx` fallback worker 在普通任务上下文执行受四轮上限约束的 poller 批次，普通 socket polling waiter 也可能通过该 `PollSet` 被唤醒；直接 softirq RX progress 必须等待全链路 nonblocking ingress 或 workerqueue |
 | F-12 | RX buffer recycle 顺序错误 | frame payload 在 `recycle_rx` 后仍被引用 | 读取悬垂数据或数据损坏 | packet 解析异常，严重时破坏内存安全 | 1 | `EthernetDevice::poll_rx` 在 recycle 前完成解析和复制；新增设备适配需保持同样生命周期 |
@@ -318,13 +318,13 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 
 ## 已知限制
 
-- `RTM_GETNEIGH` dump 尚未实现，neighbor 只通过 `RTM_NEWNEIGH` mutation 进入控制面。
+- `RTM_GETNEIGH` dump 列入后续范围，neighbor 通过 `RTM_NEWNEIGH` mutation 进入设备 owner。
 - IPv4 输出使用匹配路由指向设备的 MTU，ICMP Fragmentation Needed 中的 next-hop MTU 只进入 UDP error queue，尚未形成动态 PMTU cache。
 - IPv4 输出分片只支持无 options 的栈内生成报文，尚未实现 options copy 语义。
-- `ROUTE_STATE` dump 没有覆盖所有 live runtime 状态；地址 dump 直接读取 Router，路由 dump 仍只覆盖配置路由。
+- route dump 读取 Router 中的配置路由和地址派生路由。
 - smoltcp maintenance 与单次 egress pass 提供有界执行，ingress 通过 `poll_ingress_single` 按 packet 推进；单个 packet 的协议处理和一次 egress pass 仍会形成有限的软上限超出。
 - UDP RX queue 排空后保留 64 个元数据槽位；长期非空队列保持已增长容量，直到队列再次排空。
-- 地址 dump 直接读取 Router 地址条目；路由和邻居 dump 仍来自 `ROUTE_STATE` 投影；link dump 已直接读取设备实时快照。
+- address 与 route dump 直接读取 Router，link dump 直接读取设备实时快照。
 - raw socket 创建权限由 syscall 层承担，`knet` 构造器自身没有进程凭据参数。
 - Ethernet 设备只处理 IPv4 ARP，IPv6 NDP、非 Ethernet 链路和多队列 NIC 抽象仍待扩展。
 - crate 内 UDP 数据路径当前只支持 IPv4；IPv6 UDP 继续由 smoltcp DNS 路径使用，普通 UDP socket 不提供 IPv6 收发。
@@ -336,10 +336,10 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 
 - 每个 `unsafe` 块均有 `SAFETY:` 注释。
 - 新增 smoltcp socket handle 的生命周期受 `SOCKET_SET` 保护。
-- 新增 link mutation 直接更新设备 owner；地址 mutation 和设备移除在全局 mutation 锁内更新 Router 并刷新派生投影；最后一个同值地址删除时同步清理 `ROUTE_STATE` 中依赖该 `prefsrc` 的配置路由；设备移除同步删除并重编号路由与邻居；路由或邻居 mutation 通过 `mutate_route_state` 或等效同步路径更新 data-plane。
+- 新增 link 与 neighbor mutation 直接更新目标设备 owner；address 与 route mutation 在 `rtnl_lock` 内更新 Router 并刷新派生投影；最后一个同值地址删除时同步清理 Router 中依赖该 `prefsrc` 的配置路由；设备移除走 `unregister_netdev`，在同一把锁下删除并重编号路由与设备邻居。
 - 每次 netlink `send` 或 `write` 传入当前调用者的 `Cred` 快照，socket 不缓存权限。
 - 新增 netlink parser 先校验单条 header 长度和批次对齐边界，再校验 attribute、family 和 index。
-- 同一 netlink socket 的发送事务保持串行，跨 socket mutation 由全局 mutation 锁串行化；锁顺序为发送事务锁、全局 mutation 锁、控制面 owner 锁、rx queue。
+- 同一 netlink socket 的发送事务保持串行，跨 socket mutation 由 `rtnl_lock` 串行化；设备移除走 `unregister_netdev`；锁顺序为发送事务锁、`rtnl_lock`、控制面 owner 锁、rx queue。
 - 仅含查询或仅含 mutation 的批次支持逐条处理，混合批次在状态更新前返回 `EOPNOTSUPP`，mutation 批次执行前检查完整 response 空间。
 - 新增 ring buffer 操作的 advance count 来自同一锁内同一批 slices。
 - Unix stream 的 write index 发布、方向关闭和空队列 EOF 判定保持同一个 per-direction 排序点，方向锁内不执行用户复制或 `PollSet` 唤醒，shutdown 在释放 `channel` mutex 后执行 waiter 唤醒。

@@ -108,6 +108,21 @@ pub(crate) struct LinkSendSnapshot {
     pub(crate) hardware_addr: [u8; 6],
 }
 
+/// Neighbor states accepted from the control plane.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NeighborState {
+    Incomplete,
+    Permanent { hardware_addr: [u8; 6] },
+}
+
+/// A control-plane neighbor update targeted at one network device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NeighborUpdate {
+    pub(crate) dev: usize,
+    pub(crate) dst: IpAddress,
+    pub(crate) state: NeighborState,
+}
+
 /// Trait implemented by network device backends.
 pub trait NetDevice: Send + Sync {
     fn name(&self) -> &str;
@@ -201,8 +216,15 @@ pub trait NetDevice: Send + Sync {
     /// Removes queued packets whose IPv4 source address is no longer local.
     fn remove_pending_ipv4_source(&mut self, _addr: crate::ip::Ipv4Address) {}
 
-    /// Synchronizes neighbor entries prepared by the control-plane adapter.
-    fn sync_neighbors(&mut self, _neighbors: &[(IpAddress, [u8; 6])]) {}
+    /// Applies one neighbor-table update to this device.
+    fn apply_neighbor_update(&mut self, _update: NeighborUpdate) -> Result<(), LinuxError> {
+        Err(LinuxError::EOPNOTSUPP)
+    }
+
+    /// Returns whether this device owns a neighbor entry for `dst`.
+    fn has_neighbor(&self, _dst: IpAddress) -> bool {
+        false
+    }
 }
 
 #[cfg(unittest)]

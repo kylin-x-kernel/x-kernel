@@ -29,11 +29,10 @@ use smoltcp::{
 use crate::{
     LISTEN_TABLE, SOCKET_SET,
     buf::PacketBuf,
-    device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot},
+    device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborUpdate},
     ip::{IpAddress, IpListenEndpoint},
-    netlink::RtnetlinkState,
     poller::{PollBudget, PollProgress},
-    router::{DeviceRemoval, Router},
+    router::{NeighborUpdatePolicy, Router, Rule},
     stack::ingress::IngressProcessor,
 };
 
@@ -414,15 +413,6 @@ impl Service {
         crate::poller::network_poller().notify(crate::poller::PollReason::Timer);
     }
 
-    pub fn sync_netlink(&self, state: &RtnetlinkState) {
-        // Keep the Router locked until all derived views are refreshed so a
-        // new RX batch cannot observe a partially synchronized configuration.
-        let mut router = self.router.lock();
-        router.sync_netlink(state);
-        let local_ipv4_addrs = router.local_ipv4_addrs();
-        self.replace_local_ipv4_views(&local_ipv4_addrs);
-    }
-
     fn sync_local_ipv4_views(&self) {
         let local_ipv4_addrs = self.router.lock().local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
@@ -522,6 +512,26 @@ impl Service {
         Ok(is_last_owner)
     }
 
+    pub(crate) fn route_snapshot(&self) -> Vec<Rule> {
+        self.router.lock().route_snapshot()
+    }
+
+    pub(crate) fn add_route_rule(&self, rule: Rule) -> Result<(), LinuxError> {
+        self.router.lock().add_route_rule(rule)
+    }
+
+    pub(crate) fn replace_route_rule(
+        &self,
+        existing: Rule,
+        replacement: Rule,
+    ) -> Result<(), LinuxError> {
+        self.router.lock().replace_route_rule(existing, replacement)
+    }
+
+    pub(crate) fn remove_route_rule(&self, route: Rule) {
+        self.router.lock().remove_exact_route_rule(route);
+    }
+
     pub fn update_device_link(
         &self,
         ifindex: i32,
@@ -554,18 +564,34 @@ impl Service {
 
     /// Removes a device and refreshes every address-derived data-plane view.
     ///
-    /// Returns the removed interface and orphaned IPv4 sources when found.
-    pub(crate) fn remove_device_by_model_id(&self, id: kdevice::DeviceId) -> Option<DeviceRemoval> {
+    /// Callers must hold [`crate::netlink::rtnl_lock`], matching Linux
+    /// `unregister_netdevice()` which requires `ASSERT_RTNL()`.
+    pub(crate) fn remove_device_by_model_id(&self, id: kdevice::DeviceId) -> Option<()> {
         let mut router = self.router.lock();
         let effective_mtu = router.effective_mtu();
-        let removal = router.remove_device_by_model_id(id)?;
+        router.remove_device_by_model_id(id)?;
         if router.effective_mtu() != effective_mtu {
             let mut iface = self.iface.lock();
             self.rebuild_interface(&mut router, &mut iface);
         }
         let local_ipv4_addrs = router.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
-        Some(removal)
+        Some(())
+    }
+
+    pub(crate) fn apply_neighbor_update(
+        &self,
+        update: NeighborUpdate,
+        policy: NeighborUpdatePolicy,
+    ) -> Result<(), LinuxError> {
+        self.router.lock().apply_neighbor_update(update, policy)?;
+        self.timeout_poll.wake();
+        Ok(())
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn has_neighbor(&self, dev: usize, dst: IpAddress) -> bool {
+        self.router.lock().has_neighbor(dev, dst)
     }
 
     pub fn send_link_frame(&self, ifindex: i32, frame: &[u8]) -> KResult<usize> {

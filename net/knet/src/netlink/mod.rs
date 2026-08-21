@@ -2,13 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Minimal netlink socket support for in-kernel consumers.
+//! AF_NETLINK sockets, kobject uevent delivery, and a limited rtnetlink
+//! protocol front end.
 //!
-//! This provides a small AF_NETLINK socket that is sufficient to grow a
-//! rtnetlink implementation for Kata. The current dispatcher intentionally keeps
-//! the protocol surface small and returns netlink errors for unsupported
-//! requests, so later work can extend request handling without changing the
-//! socket plumbing.
+//! Link, address, route, and neighbor objects are owned by devices and the
+//! Router. This module parses requests, serializes mutations with
+//! [`rtnl_lock`], and dumps live snapshots.
 
 use alloc::{
     collections::VecDeque,
@@ -17,11 +16,9 @@ use alloc::{
 };
 use core::sync::atomic::AtomicU64;
 
-use ksync::{Mutex, RwLock, static_lock};
-use lazyinit::LazyInit;
-use smoltcp::wire::IpAddress;
+use ksync::{Mutex, MutexGuard, RwLock, static_lock};
 
-use crate::{SERVICE, general::GeneralOptions};
+use crate::general::GeneralOptions;
 
 mod rtnetlink;
 mod socket;
@@ -29,7 +26,6 @@ mod socket;
 mod tests;
 mod wire;
 
-pub(crate) use rtnetlink::{build_initial_state, init_route_state, remove_device_state};
 pub use socket::{NetlinkSocket, publish_kobject_uevent};
 pub(crate) use wire::route::{
     PROTOCOL_BOOT as RTPROT_BOOT, PROTOCOL_KERNEL as RTPROT_KERNEL, SCOPE_HOST as RT_SCOPE_HOST,
@@ -43,7 +39,6 @@ pub(super) const NLM_F_REQUEST: u16 = 0x0001;
 pub(super) const NLM_F_ACK: u16 = 0x0004;
 pub(super) const NLM_F_REPLACE: u16 = 0x0100;
 pub(super) const NLM_F_EXCL: u16 = 0x0200;
-#[cfg(unittest)]
 pub(super) const NLM_F_CREATE: u16 = 0x0400;
 pub(super) const NLM_F_MULTI: u16 = 0x0002;
 pub(super) const NLMSG_ERROR: u16 = 0x0002;
@@ -69,41 +64,19 @@ pub(super) const RTM_NEWNEIGH: u16 = 28;
 pub(super) const ARPHRD_LOOPBACK: u16 = 772;
 pub(super) const ARPHRD_ETHER: u16 = 1;
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct RouteState {
-    pub(crate) family: u8,
-    pub(crate) dst_len: u8,
-    pub(crate) table: u8,
-    pub(crate) protocol: u8,
-    pub(crate) scope: u8,
-    pub(crate) route_type: u8,
-    pub(crate) oif: u32,
-    pub(crate) dst: Option<IpAddress>,
-    pub(crate) gateway: Option<IpAddress>,
-    pub(crate) prefsrc: Option<IpAddress>,
-}
-
-#[derive(Clone, Copy, Debug)]
-#[expect(dead_code)]
-pub(crate) struct NeighState {
-    pub(crate) family: u8,
-    pub(crate) ifindex: u32,
-    pub(crate) state: u16,
-    pub(crate) flags: u8,
-    pub(crate) dst: IpAddress,
-    pub(crate) lladdr: Option<[u8; 6]>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct RtnetlinkState {
-    pub(crate) routes: Vec<RouteState>,
-    pub(crate) neighs: Vec<NeighState>,
-}
-
-pub(super) static ROUTE_STATE: LazyInit<RwLock<RtnetlinkState>> = LazyInit::new();
 static_lock! {
     pub(super) static RTNETLINK_MUTATION_LOCK: Mutex<()> = Mutex::new(());
 }
+
+/// Serializes rtnetlink mutations with device unregister.
+///
+/// Linux keeps this semaphore in `net/core/rtnetlink.c` as `rtnl_mutex` and
+/// exports `rtnl_lock()`. Device teardown in `net/core/dev.c` takes the same
+/// lock through `unregister_netdev()`.
+pub(crate) fn rtnl_lock() -> MutexGuard<'static, ()> {
+    RTNETLINK_MUTATION_LOCK.lock()
+}
+
 static_lock! {
     pub(super) static UEVENT_SUBSCRIBERS: Mutex<Vec<Weak<NetlinkSocketInner>>> = Mutex::new(Vec::new());
 }

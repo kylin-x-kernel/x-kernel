@@ -25,8 +25,8 @@ use crate::{
     consts::ETHERNET_MAX_PENDING_PACKETS,
     device::{
         IF_OPER_DOWN, IF_OPER_UP, LINK_FLAG_BROADCAST, LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST,
-        LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind, LinkSendSnapshot, LinkSnapshot,
-        NetDevice as NetDeviceOps,
+        LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborState,
+        NeighborUpdate, NetDevice as NetDeviceOps,
     },
     ip::{IpAddress, Ipv4Cidr},
     packet,
@@ -817,19 +817,25 @@ impl NetDeviceOps for EthernetDevice {
         Self::remove_pending_packets_with_source(&mut self.pending_tx, addr);
     }
 
-    fn sync_neighbors(&mut self, neighbors: &[(IpAddress, [u8; 6])]) {
-        self.neighbors.clear();
-        for (dst_addr, hardware_addr) in neighbors {
-            self.neighbors.insert(
-                *dst_addr,
-                Some(ArpNeighbor {
-                    hardware_address: MacAddress(*hardware_addr),
-                    expires_at: MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(
-                        u64::MAX / 2,
-                    )),
-                }),
-            );
+    fn apply_neighbor_update(&mut self, update: NeighborUpdate) -> Result<(), LinuxError> {
+        if !matches!(update.dst, IpAddress::Ipv4(_)) {
+            return Err(LinuxError::EAFNOSUPPORT);
         }
+        let neighbor = match update.state {
+            NeighborState::Incomplete => None,
+            NeighborState::Permanent { hardware_addr } => Some(ArpNeighbor {
+                hardware_address: MacAddress(hardware_addr),
+                expires_at: MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(
+                    u64::MAX / 2,
+                )),
+            }),
+        };
+        self.neighbors.insert(update.dst, neighbor);
+        Ok(())
+    }
+
+    fn has_neighbor(&self, dst: IpAddress) -> bool {
+        self.neighbors.contains_key(&dst)
     }
 }
 
