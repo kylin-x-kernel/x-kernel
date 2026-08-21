@@ -5785,10 +5785,9 @@ dependencies = [
 
 [[package]]
 name = "xdice"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "tee_crypto 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "unittest",
  "zeroize",
 ]
 

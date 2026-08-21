@@ -1,5 +1,6 @@
 [package]
 name = "xdice"
+version = "0.1.0"
 edition = "2024"
 authors.workspace = true
 license.workspace = true
@@ -19,4 +20,3 @@ name = "xdice"
 [dependencies]
 tee_crypto.workspace = true
 zeroize.workspace = true
-unittest.workspace = true

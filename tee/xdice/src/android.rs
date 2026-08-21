@@ -386,14 +386,14 @@ pub fn dice_android_handover_parse(
     Ok((cdi_attest_array, cdi_seal_array, dice_chain))
 }
 
-#[cfg(unittest)]
+#[cfg(test)]
 mod tests {
     use core::panic;
 
     use super::*;
     use crate::test_data::test_constants::{CODEHASH, HANDOVER};
 
-    #[unittest::def_test]
+    #[test]
     fn test_dice_android_handover_parse() {
         match dice_android_handover_parse(HANDOVER) {
             Ok((cdi_attest_array, cdi_seal_array, dice_chain)) => {
@@ -421,7 +421,7 @@ mod tests {
         }
     }
 
-    #[unittest::def_test]
+    #[test]
     fn test_dice_android_handover_parse_find_err() {
         use crate::dice_main_flow_chain_codehash;
         let mut input = [0u8; 4096];
@@ -542,7 +542,7 @@ mod tests {
         // panic!("All fields parsed successfully!");
     }
 
-    #[unittest::def_test]
+    #[test]
     fn test_dice_android_handover_main_flow() {
         let mut input_value = DiceInputValues::new_zero();
         input_value.code_hash = [
@@ -586,7 +586,7 @@ mod tests {
         }
     }
 
-    #[unittest::def_test]
+    #[test]
     fn test_dice_android_main_flow() {
         let current_cdi_attest = [
             0x83, 0x6a, 0x04, 0xc7, 0x80, 0x4b, 0xe1, 0xf5, 0xe6, 0x5a, 0x1d, 0x95, 0xc2, 0x52,
@@ -750,7 +750,7 @@ mod tests {
         }
     }
 
-    #[unittest::def_test]
+    #[test]
     fn test_dice_android_format_config_descriptor() {
         // Test 1: Empty config (no flags set)
         let config_values = DiceAndroidConfigValues {

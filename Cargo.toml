@@ -6,6 +6,7 @@ members = [
     # boot and loader
     "boot/*",
     "tee/tee_crypto",
+    "tee/xdice",
 ]
 exclude = [
     # platform-specific boot code that is not intended to be built as part of the main workspace

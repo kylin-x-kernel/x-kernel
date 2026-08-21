@@ -12,7 +12,8 @@ pub mod cbor_reader;
 pub mod dice;
 pub mod mbedtls_sm2dsa;
 pub mod tee_dice;
-pub mod test_data;
+#[cfg(test)]
+mod test_data;
 
 pub use android::dice_android_handover_parse;
 pub use cbor_cert_op::{DiceConfigType, DiceInputValues, DiceMode, DiceResult};
@@ -48,8 +49,8 @@ pub fn dice_main_flow_chain_codehash<'a>(
     Ok(&buffer[..actual_size])
 }
 
-#[cfg(unittest)]
-#[unittest::def_test]
+#[cfg(test)]
+#[test]
 fn test_dice_generate_certificate_platform_error() {
     use crate::cbor_cert_op::{
         DiceConfigType, DiceInputValues, DiceMode, dice_generate_certificate,
@@ -89,12 +90,12 @@ fn test_dice_generate_certificate_platform_error() {
     }
 }
 
-#[cfg(unittest)]
+#[cfg(test)]
 mod lib_tests {
     use super::*;
     use crate::test_data::test_constants::HANDOVER;
 
-    #[unittest::def_test]
+    #[test]
     fn test_dice_main_flow_chain_codehash() {
         let codehash = &[
             0x14, 0xde, 0xb7, 0x0d, 0x3e, 0xe1, 0x9d, 0x5a, 0x8b, 0x54, 0xac, 0x1a, 0xe4, 0xa0,
@@ -114,7 +115,7 @@ mod lib_tests {
         }
     }
 
-    #[unittest::def_test]
+    #[test]
     fn test_dice_main_flow_chain() {
         let mut buffer = [0x0u8; 4096];
 
@@ -132,7 +133,7 @@ mod lib_tests {
         }
     }
 
-    #[unittest::def_test]
+    #[test]
     fn test_dice_parse_handover() {
         let buffer = crate::test_data::test_constants::HANDOVER;
 

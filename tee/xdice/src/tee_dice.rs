@@ -115,7 +115,7 @@ pub fn dice_init() {
     let _ = dice_tee_handover_main_flow_chain_origin(&mut buf);
 }
 
-#[cfg(unittest)]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_data::test_constants::HANDOVER;
@@ -126,7 +126,7 @@ mod tests {
         0x09, 0xdc,
     ];
 
-    #[unittest::def_test]
+    #[test]
     fn test_dice_tee_handover_main_flow_chain_code_hash() {
         let mut buffer = [0x0u8; 4096];
 

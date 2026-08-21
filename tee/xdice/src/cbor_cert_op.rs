@@ -849,11 +849,11 @@ pub fn dice_cose_encode_public_key(
     }
 }
 
-#[cfg(unittest)]
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    #[unittest::def_test]
+    #[test]
     fn test_empty_buffer_size_calculation() {
         let protected_attributes = b"test";
         let aad = b"aad";
@@ -874,7 +874,7 @@ mod tests {
         }
     }
 
-    #[unittest::def_test]
+    #[test]
     fn test_cbor_out_empty_buffer() {
         let mut out = CborOut::new(&mut []);
         out.write_array(4);
@@ -886,7 +886,7 @@ mod tests {
         assert!(out.size() > 0, "cursor should be greater than zero");
     }
 
-    #[unittest::def_test]
+    #[test]
     fn test_encode_cwt_empty_buffer() {
         let input_values = DiceInputValues {
             code_hash: [0u8; DICE_HASH_SIZE],
@@ -925,7 +925,7 @@ mod tests {
         }
     }
 
-    #[unittest::def_test]
+    #[test]
     fn test_dice_generate_certificate_empty_buffer() {
         let subject_seed = [0u8; DICE_PRIVATE_KEY_SEED_SIZE];
         let authority_seed = [0u8; DICE_PRIVATE_KEY_SEED_SIZE];

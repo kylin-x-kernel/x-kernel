@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#[cfg(unittest)]
+#[cfg(test)]
 pub mod test_constants {
     pub const HANDOVER: &[u8] = &[
         0xa3, 0x01, 0x58, 0x20, 0x83, 0x6a, 0x04, 0xc7, 0x80, 0x4b, 0xe1, 0xf5, 0xe6, 0x5a, 0x1d,

@@ -177,12 +177,12 @@ pub fn dice_main_flow(
     Ok(certificate_size)
 }
 
-#[cfg(unittest)]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::cbor_cert_op::{DiceConfigType, DiceMode, DiceResult};
 
-    #[unittest::def_test]
+    #[test]
     fn dice_main_flow_descriptor_does_not_crash() {
         let mut context = 0u8;
         let current_cdi_attest = [0u8; DICE_CDI_SIZE];
@@ -217,7 +217,7 @@ mod tests {
         assert_ne!(next_cdi_seal, [0u8; DICE_CDI_SIZE]);
     }
 
-    #[unittest::def_test]
+    #[test]
     fn test_dice_main_flow_empty_buffer_size_calculation() {
         let mut context = 0u8;
         let current_cdi_attest = [0u8; DICE_CDI_SIZE];

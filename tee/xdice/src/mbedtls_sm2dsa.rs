@@ -239,11 +239,11 @@ pub fn dice_kdf(
     Ok(())
 }
 
-#[cfg(unittest)]
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    #[unittest::def_test]
+    #[test]
     fn test_sm2_sign_verify_roundtrip() {
         let seed = [0x42u8; 32];
         let mut public_key = [0u8; 64];
@@ -259,7 +259,7 @@ mod tests {
         sm2_verify(message, &signature, &public_key).expect("verify failed");
     }
 
-    #[unittest::def_test]
+    #[test]
     fn test_dice_hash() {
         let input = b"test hash data";
         let mut output = [0u8; 32];
@@ -267,7 +267,7 @@ mod tests {
         assert!(output.iter().any(|&b| b != 0));
     }
 
-    #[unittest::def_test]
+    #[test]
     fn test_dice_kdf() {
         let ikm = [0x01u8; 32];
         let salt = [0x02u8; 16];
