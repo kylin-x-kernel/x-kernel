@@ -133,6 +133,20 @@ vsock 采用能力探测：内核启用 virtio-socket 且用户未传 `--no-vsoc
 时，XKMake 查询当前 QEMU 的设备列表。仅在对应 `vhost-vsock-*` 型号
 存在时添加设备；不支持时输出 warning 并继续启动。
 
+网络转发端口与 vsock CID 采用顺序探测。`--hostfwd-port`（默认 61005）
+是转发到 guest TCP/UDP 5555 的首选主机端口，被占用时按 10 为步长
+（61005、61015、...、62005）在 `61005..=62005` 内查找首个 TCP 与 UDP
+均空闲的端口；探测区间耗尽时报错退出。端口探测只把 `AddrInUse` 视为
+占用，其他 bind 错误（如非 root 绑定 <1024 端口）直接报错，不会静默
+换端口。`--vsock-cid`（默认 103）是首选 guest CID，被占用时在
+`103..=203` 内逐个顺序查找空闲 CID。CID 探测通过临时打开
+`/dev/vhost-vsock` 并执行 `VHOST_VSOCK_SET_GUEST_CID` 完成，内核以
+`EADDRINUSE` 表示 CID 已被占用，探测 fd 随即关闭释放 CID；设备缺失或
+无权限探测时退回首选值，避免探测失败阻止虚拟机启动，而内核 `EINVAL`
+（保留 CID）直接报错；`--vsock-cid` 在参数解析时校验不小于 3（内核
+保留 0/1/2）。`--dry-run` 不执行任何探测，直接使用首选端口与 CID 构造
+命令行。
+
 `--no-build` 会只接受 manifest、构建信息、内嵌 Build ID、产物和 Cargo ELF
 时间均匹配的现有 bundle。复用校验会重新计算 ELF 的 loadable-image hash，
 避免消费被修改或不完整的 bundle。`config` 子命令为 Makefile 工具目标提供只读的架构、

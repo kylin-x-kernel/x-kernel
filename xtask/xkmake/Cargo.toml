@@ -14,6 +14,7 @@ goblin = "0.10"
 kaddr_layout = { path = "../../mm/kaddr_layout" }
 kernel-image-metadata = { path = "../../boot/kernel-image-metadata" }
 lcov2cobertura = "1.0.9"
+libc = "0.2"
 log = "0.4"
 scroll = "0.13"
 serde = { version = "1.0", features = ["derive"] }

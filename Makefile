@@ -22,8 +22,10 @@
 #     - UEFI                Boot x86_64 via OVMF `.uefi.img` instead of LinuxBoot (y/n)
 #     - MEM                 Guest memory size (default 1g)
 #     - SMP                 Number of vCPUs (default: configured NR_CPUS)
-#     - HOSTFWD_PORT        Host port forwarded to guest :5555 (default 5555)
-#     - VSOCK_CID           Guest CID for the vhost-vsock device (default 103)
+#     - HOSTFWD_PORT        Preferred host port forwarded to guest :5555 (default 61005;
+#                           when busy, candidates 10 ports apart up to 62005 are tried)
+#     - VSOCK_CID           Preferred guest CID for vhost-vsock (default 103; must be >= 3;
+#                           when busy, the next free CID up to 203 is picked)
 #     - QEMU_ARGS           Extra QEMU args, appended verbatim after `--`
 #     - XKMAKE_ARGS         Extra flags forwarded to every xkmake invocation
 #

@@ -36,17 +36,14 @@ impl ConfigWriter {
                         use crate::kconfig::ast::SymbolType;
                         match symbol.symbol_type {
                             SymbolType::Hex => {
-                                // Hex: NO quotes, normalize to 0x format
-                                let normalized_hex =
-                                    if value.starts_with("0x") || value.starts_with("0X") {
-                                        format!("0x{}", value[2..].to_lowercase())
-                                    } else if let Ok(num) = value.parse::<u64>() {
-                                        format!("0x{:x}", num)
-                                    } else {
-                                        // If parsing fails, use the value as-is
-                                        value.to_string()
-                                    };
-                                writeln!(content, "{}={}", clean_name, normalized_hex).unwrap();
+                                // Hex: NO quotes. Route through the shared
+                                // canonical form so .config stays byte-identical
+                                // with every other generated artifact.
+                                let canonical_hex = crate::kconfig::canonical_symbol_value(
+                                    &symbol.symbol_type,
+                                    value.clone(),
+                                );
+                                writeln!(content, "{}={}", clean_name, canonical_hex).unwrap();
                             }
                             ref ty if ty.is_integer_type() => {
                                 // Integer: NO quotes, decimal format

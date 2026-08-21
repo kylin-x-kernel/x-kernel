@@ -171,8 +171,12 @@ impl ConfigGenerator {
             }
 
             SymbolType::Hex => {
-                // Hex type -- emit as usize
-                content.push_str(&format!("pub const {}: usize = {};\n\n", key, value));
+                // Hex type -- emit as usize. Re-canonicalize here because
+                // callers such as `gen-const` feed raw `.config` maps that
+                // never passed through the normalizing SymbolTable.
+                let canonical_hex =
+                    crate::kconfig::canonical_symbol_value(symbol_type, value.to_string());
+                content.push_str(&format!("pub const {}: usize = {};\n\n", key, canonical_hex));
                 Ok(true)
             }
 
@@ -351,8 +355,8 @@ impl ConfigGenerator {
         // Hex value
         if value.starts_with("0x") || value.starts_with("0X") {
             match usize::from_str_radix(&value[2..], 16) {
-                Ok(_) => {
-                    content.push_str(&format!("pub const {}: usize = {};\n\n", key, value));
+                Ok(number) => {
+                    content.push_str(&format!("pub const {}: usize = 0x{:x};\n\n", key, number));
                 }
                 Err(_) => {
                     eprintln!("⚠️  Warning: Invalid hex value for {}: {}", key, value);
@@ -410,7 +414,7 @@ impl ConfigGenerator {
                 let trimmed = s.trim();
                 if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
                     match usize::from_str_radix(&trimmed[2..], 16) {
-                        Ok(_) => valid_items.push(trimmed.to_string()),
+                        Ok(number) => valid_items.push(format!("0x{number:x}")),
                         Err(_) => {
                             eprintln!(
                                 "⚠️  Warning: Invalid hex value '{}' in array {}",

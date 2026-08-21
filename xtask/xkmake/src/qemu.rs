@@ -3,8 +3,9 @@
 // See LICENSES for license details.
 
 use std::{
-    env, fs,
-    os::unix::fs::FileTypeExt,
+    env, fs, io,
+    net::{TcpListener, UdpSocket},
+    os::{fd::AsRawFd, unix::fs::FileTypeExt},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -344,6 +345,122 @@ fn qemu_data_directory(qemu_program: &str) -> Option<PathBuf> {
     Some(program.parent()?.parent()?.join("share/qemu"))
 }
 
+/// Scan width for host forwarding ports: with the preferred port at 61005,
+/// the candidates run through 62005 (1000 ports).
+const HOSTFWD_PORT_PROBE_SPAN: u16 = 1000;
+
+/// Step between host forwarding port candidates (61005, 61015, ...).
+const HOSTFWD_PORT_PROBE_STEP: usize = 10;
+
+/// Scan width for vsock guest CIDs: with the preferred CID at 103, the
+/// candidates run through 203 (100 CIDs).
+const VSOCK_CID_PROBE_SPAN: u32 = 100;
+
+/// `VHOST_VSOCK_SET_GUEST_CID` ioctl request code (`_IOW(VHOST_VIRTIO, 0x60,
+/// u64)`), used to probe whether a guest CID is already claimed on the host.
+/// The Linux `libc` bindings do not export this constant, so it is written
+/// out with its derivation.
+const VHOST_VSOCK_SET_GUEST_CID: libc::c_ulong = 0x4008_af60;
+
+/// Pick the host port forwarded to guest TCP/UDP port 5555.
+///
+/// Starts at the preferred `--hostfwd-port` and, when it is busy, scans
+/// sequentially upward (step `HOSTFWD_PORT_PROBE_STEP`) for the first port
+/// free on both TCP and UDP. Probing binds to `0.0.0.0`, mirroring the
+/// wildcard bind QEMU's `user` netdev performs for `hostfwd=tcp::PORT-:5555`.
+fn resolve_hostfwd_port(args: &RunArgs) -> Result<u16> {
+    let preferred = args.hostfwd_port;
+    let last = preferred.saturating_add(HOSTFWD_PORT_PROBE_SPAN);
+    for port in (preferred..=last).step_by(HOSTFWD_PORT_PROBE_STEP) {
+        if is_host_port_free(port)? {
+            return Ok(port);
+        }
+    }
+    Err(Error::Message(format!(
+        "no free host port in {preferred}..={last} for guest TCP/UDP port 5555"
+    )))
+}
+
+/// Whether nothing listens on `port` on any address, for either TCP or UDP.
+///
+/// Only a busy port (`AddrInUse`) counts as unavailable. Any other bind
+/// error (for example `EACCES` when a non-root user picks a port below
+/// 1024) is a real problem QEMU would hit too, so it is reported instead of
+/// being misdiagnosed as a busy port and silently skipped.
+fn is_host_port_free(port: u16) -> Result<bool> {
+    match TcpListener::bind(("0.0.0.0", port)) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::AddrInUse => return Ok(false),
+        Err(error) => {
+            return Err(Error::Message(format!(
+                "cannot bind TCP port {port} to check forwarding: {error}"
+            )));
+        }
+    }
+    match UdpSocket::bind(("0.0.0.0", port)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::AddrInUse => Ok(false),
+        Err(error) => Err(Error::Message(format!(
+            "cannot bind UDP port {port} to check forwarding: {error}"
+        ))),
+    }
+}
+
+/// Pick a free guest CID for the vhost-vsock device.
+///
+/// Starts at the preferred `--vsock-cid` and, when it is already claimed by
+/// another guest on the host, scans sequentially upward for the first free
+/// one. Availability is probed with `VHOST_VSOCK_SET_GUEST_CID` on a
+/// temporary `/dev/vhost-vsock` fd: the kernel answers `EADDRINUSE` when the
+/// CID is taken. The fd is dropped right after the probe, releasing any CID
+/// it claimed. When the device is missing or cannot be probed (for example
+/// without permission), the preferred CID is used unchanged; a kernel
+/// `EINVAL` (a reserved CID) is reported as an error instead of falling
+/// back to the same illegal value.
+fn resolve_vsock_cid(args: &RunArgs) -> Result<u32> {
+    let preferred = args.vsock_cid;
+    let fd = match fs::File::open("/dev/vhost-vsock") {
+        Ok(fd) => fd,
+        Err(error) => {
+            log::warn!(
+                "cannot open /dev/vhost-vsock to probe CID availability ({error}); \
+                 using the preferred CID {preferred}"
+            );
+            return Ok(preferred);
+        }
+    };
+    let last = preferred.saturating_add(VSOCK_CID_PROBE_SPAN);
+    for candidate in preferred..=last {
+        // The kernel reads a u64 guest CID for this request.
+        let cid = u64::from(candidate);
+        // SAFETY: `fd` is a valid open file descriptor, and the kernel only
+        // reads the CID value from the provided pointer for this request.
+        let rc = unsafe { libc::ioctl(fd.as_raw_fd(), VHOST_VSOCK_SET_GUEST_CID, &cid) };
+        if rc == 0 {
+            return Ok(candidate);
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EADDRINUSE) => {}
+            Some(libc::EINVAL) => {
+                return Err(Error::Message(format!(
+                    "the kernel rejected vsock guest CID {candidate}: {error}"
+                )));
+            }
+            _ => {
+                log::warn!(
+                    "cannot probe vsock CID availability ({error}); using the preferred CID {preferred}"
+                );
+                return Ok(preferred);
+            }
+        }
+    }
+    Err(Error::Message(format!(
+        "no free vsock guest CID in {preferred}..={last}; \
+         release one of them or pick another with --vsock-cid"
+    )))
+}
+
 fn add_devices(
     command: &mut Process,
     bundle: &Bundle,
@@ -382,13 +499,26 @@ fn add_devices(
     }
 
     if needs_net {
+        // Probing binds sockets, so in dry-run mode (which only prints the
+        // command without side effects) the preferred port is used as-is.
+        let hostfwd_port = if bundle.context.dry_run {
+            args.hostfwd_port
+        } else {
+            resolve_hostfwd_port(args)?
+        };
+        if hostfwd_port != args.hostfwd_port {
+            log::info!(
+                "host port {} is busy; forwarding guest TCP/UDP port 5555 on host port {}",
+                args.hostfwd_port,
+                hostfwd_port
+            );
+        }
         command
             .arg("-device")
             .arg(format!("virtio-net-{suffix},netdev=net0"))
             .arg("-netdev")
             .arg(format!(
-                "user,id=net0,hostfwd=tcp::{}-:5555,hostfwd=udp::{}-:5555",
-                args.hostfwd_port, args.hostfwd_port
+                "user,id=net0,hostfwd=tcp::{hostfwd_port}-:5555,hostfwd=udp::{hostfwd_port}-:5555"
             ));
     }
 
@@ -402,9 +532,22 @@ fn add_devices(
     if wants_vsock {
         let device = format!("vhost-vsock-{suffix}");
         if qemu_supports_device(qemu_program, &device) {
-            command.arg("-device").arg(format!(
-                "{device},id=virtiosocket0,guest-cid={}",
+            // Probing claims CIDs on /dev/vhost-vsock, so it is skipped in
+            // dry-run mode and the preferred CID is used as-is.
+            let vsock_cid = if bundle.context.dry_run {
                 args.vsock_cid
+            } else {
+                resolve_vsock_cid(args)?
+            };
+            if vsock_cid != args.vsock_cid {
+                log::info!(
+                    "vsock CID {} is busy; using guest CID {}",
+                    args.vsock_cid,
+                    vsock_cid
+                );
+            }
+            command.arg("-device").arg(format!(
+                "{device},id=virtiosocket0,guest-cid={vsock_cid}"
             ));
         }
     }
@@ -468,9 +611,11 @@ fn virtio_device_suffix(bus: Option<VirtioBus>) -> Result<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{TcpListener, UdpSocket};
+
     use xconfig::build_config::KernelArch;
 
-    use super::{output_contains_device, selected_accel};
+    use super::{is_host_port_free, output_contains_device, selected_accel};
 
     #[test]
     fn device_probe_matches_qemu_device_listing() {
@@ -491,5 +636,25 @@ name \"vhost-vsock-pci\", bus PCI
         };
 
         assert_eq!(selected_accel(guest, false, true), None);
+    }
+
+    #[test]
+    fn is_host_port_free_accepts_an_unused_port() {
+        // Port 0 asks the kernel for an ephemeral port, which is always free.
+        assert!(is_host_port_free(0).unwrap());
+    }
+
+    #[test]
+    fn is_host_port_free_detects_occupied_tcp_port() {
+        let listener = TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(!is_host_port_free(port).unwrap());
+    }
+
+    #[test]
+    fn is_host_port_free_detects_occupied_udp_port() {
+        let socket = UdpSocket::bind(("0.0.0.0", 0)).unwrap();
+        let port = socket.local_addr().unwrap().port();
+        assert!(!is_host_port_free(port).unwrap());
     }
 }

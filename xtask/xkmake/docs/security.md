@@ -26,7 +26,11 @@ descriptor 大小、文件范围及 section 同时落在 `PT_LOAD` 的文件和�
 
 所有外部命令通过 `std::process::Command` 构造，不拼接 shell 命令。
 QEMU vsock 能力通过只读的 `-device help` 子进程探测；探测失败只会禁用
-vsock 并产生 warning，不会阻止无 vsock 的虚拟机启动。
+vsock 并产生 warning，不会阻止无 vsock 的虚拟机启动。端口与 CID 的
+可用性探测只在本进程内绑定临时 socket，或对 `/dev/vhost-vsock` 执行
+`VHOST_VSOCK_SET_GUEST_CID` 请求，不访问外部服务。CID 探测会临时占用
+候选 CID，探测 fd 随即关闭即释放该 CID，不长期持有内核资源；
+`--dry-run` 不执行任何探测。
 
 LinuxBoot header 与镜像拼装在进程内完成，ELF 符号、长度、偏移和整数
 转换均在写文件前校验。UEFI 镜像只写入临时 bundle 路径。OVMF 固件视为

@@ -1483,6 +1483,7 @@ dependencies = [
  "kaddr_layout",
  "kernel-image-metadata",
  "lcov2cobertura",
+ "libc",
  "log",
  "scroll",
  "serde",

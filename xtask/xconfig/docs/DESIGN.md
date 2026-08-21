@@ -105,6 +105,7 @@ Manages configuration symbols and their values.
 **Features:**
 - Symbol registration
 - Value storage (bool, tristate, string, int, hex)
+- Canonical value normalization on write (`canonical_symbol_value`)
 - Enabled state checking
 - Value retrieval
 
@@ -119,12 +120,16 @@ CONFIG_STRING="value"
 ```
 
 ##### Writer (config/writer.rs)
-Writes .config files with proper formatting.
+Writes .config files with proper formatting. Hex values go through the
+shared canonical form (see Design Decision 6).
 
 ##### Generator (config/generator.rs)
 Generates:
 - `auto.conf`: Makefile-compatible configuration
 - `autoconf.h`: C header with preprocessor macros
+- `config.rs`: typed Rust constants; hex emission re-canonicalizes because
+  standalone paths (`gen-const`) feed raw `.config` maps that never passed
+  through the normalizing symbol table
 
 ## Design Decisions
 
@@ -189,6 +194,36 @@ Each included file gets its own lexer and token state. The stack grows with incl
 
 **Parsed Files Set:**
 Uses a HashSet to track parsed files - O(1) lookup, minimal memory overhead.
+
+### 6. Canonical Value Normalization
+
+All symbol values are normalized once, at the moment they enter the symbol
+table (`SymbolTable::set_value` / `set_value_tracked`), via
+`canonical_symbol_value`. For hex symbols this means a lowercase
+`0x`-prefixed form with no leading zeros; unprefixed digit strings are
+interpreted as hex digits (Kconfig semantics). Non-hex types and unparseable
+values pass through unchanged.
+
+**Why:** every generated artifact (`.config`, `auto.conf`, `autoconf.h`,
+`config.rs`) is derived from the same symbol values, and Cargo fingerprints
+those artifacts to decide whether `kbuild_config` and its ~80 dependent
+crates are stale. If two generators disagree about formatting (historically:
+`.config` lowercased hex while `config.rs` kept the raw `0x1C200` spelling
+from a defconfig), each build rewrites `config.rs` differently from the
+previous one, invalidating build-script fingerprints and cascading into a
+workspace-wide rebuild.
+
+**Rules:**
+- Normalization happens at the symbol-table boundary, not in emitters.
+- Emitters that consume raw maps bypassing the symbol table (the standalone
+  `gen-const` path) must re-canonicalize through the same helper.
+- No generator may invent its own hex/number formatting.
+- Required invariant (currently unguarded by a dedicated test): two
+  consecutive generations from the same logical input must be
+  byte-identical, including re-generation from a previously generated
+  `.config`. Any new emitter or formatting change must preserve this
+  property; a stability test covering an uppercase-hex fixture and every
+  checked-in platform defconfig is the intended long-term guard.
 
 ## Performance Considerations
 

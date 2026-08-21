@@ -117,9 +117,10 @@ fn test_config_writer_hex_no_quotes() {
     symbols.add_symbol("MEMORY_BASE".to_string(), SymbolType::Hex);
     symbols.set_value("MEMORY_BASE", "0x80000000".to_string());
 
-    // Test hex value as decimal number (should be converted to hex)
+    // Test unprefixed hex digits (Kconfig semantics: digits of a hex symbol
+    // are base 16, not decimal)
     symbols.add_symbol("MEMORY_SIZE".to_string(), SymbolType::Hex);
-    symbols.set_value("MEMORY_SIZE", "2147483648".to_string());
+    symbols.set_value("MEMORY_SIZE", "80000000".to_string());
 
     ConfigWriter::write(&config_path, &symbols).unwrap();
 
@@ -130,12 +131,12 @@ fn test_config_writer_hex_no_quotes() {
     );
     assert!(
         content.contains("MEMORY_SIZE=0x80000000"),
-        "Decimal should be converted to hex format"
+        "Unprefixed hex digits should gain the 0x prefix"
     );
     assert!(!content.contains("\"0x"), "Hex should not have quotes");
     assert!(
-        !content.contains("\"2147483648\""),
-        "Decimal input should be converted to hex"
+        !content.contains("\"80000000\""),
+        "Hex input should not be quoted or left unprefixed"
     );
 }
 
@@ -182,7 +183,7 @@ fn test_config_writer_all_types() {
 
     // Hex type
     symbols.add_symbol("MEMORY_BASE".to_string(), SymbolType::Hex);
-    symbols.set_value("MEMORY_BASE", "2147483648".to_string());
+    symbols.set_value("MEMORY_BASE", "0x80000000".to_string());
 
     // String type
     symbols.add_symbol("KERNEL_VERSION".to_string(), SymbolType::String);

@@ -31,8 +31,8 @@ fn test_menuconfig_preserves_new_hex_defaults() {
     );
     assert_eq!(
         symbol_table.get_value("KERNEL_ASPACE_SIZE"),
-        Some("0x0000FFFFFFFF0000".to_string()),
-        "Default value should be set before loading .config"
+        Some("0xffffffff0000".to_string()),
+        "Default value should be set (in canonical hex form) before loading .config"
     );
 
     // Simulate loading .config (this is what menuconfig does)
@@ -70,7 +70,7 @@ fn test_menuconfig_preserves_new_hex_defaults() {
     // Verify the hex default is preserved
     assert_eq!(
         symbol_table.get_value("KERNEL_ASPACE_SIZE"),
-        Some("0x0000FFFFFFFF0000".to_string()),
+        Some("0xffffffff0000".to_string()),
         "Hex default should be preserved even when .config has '# XXX is not set'"
     );
 

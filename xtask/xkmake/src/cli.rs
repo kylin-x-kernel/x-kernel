@@ -205,12 +205,20 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     pub(crate) graphic: bool,
 
-    /// Host port forwarded to guest TCP and UDP port 5555.
-    #[arg(long, default_value_t = 5555)]
+    /// Preferred host port forwarded to guest TCP and UDP port 5555. When
+    /// the port is busy, candidates 10 ports apart are probed up to 1000
+    /// above the preferred port (e.g. 61005, 61015, ..., 62005).
+    #[arg(long, default_value_t = 61005)]
     pub(crate) hostfwd_port: u16,
 
-    /// Guest CID for the vsock device.
-    #[arg(long, default_value_t = 103)]
+    /// Preferred guest CID for the vsock device. When the CID is busy, the
+    /// next free CID up to 100 above it is picked. CIDs below 3 are reserved
+    /// by the kernel and rejected.
+    #[arg(
+        long,
+        default_value_t = 103,
+        value_parser = clap::value_parser!(u32).range(3..)
+    )]
     pub(crate) vsock_cid: u32,
 
     /// Additional QEMU arguments.

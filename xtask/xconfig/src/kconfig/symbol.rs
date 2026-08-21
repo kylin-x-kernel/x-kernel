@@ -40,9 +40,13 @@ impl SymbolTable {
         });
     }
 
+    /// Set a symbol's value, canonicalizing it for its type.
+    ///
+    /// Values pass through [`canonical_symbol_value`] so every reader of the
+    /// table observes one canonical spelling (notably for hex values).
     pub fn set_value(&mut self, name: &str, value: String) {
         if let Some(symbol) = self.symbols.get_mut(name) {
-            symbol.value = Some(value);
+            symbol.value = Some(canonical_symbol_value(&symbol.symbol_type, value));
         }
     }
 
@@ -97,13 +101,19 @@ impl SymbolTable {
     }
 
     /// Set value and track the change
+    ///
+    /// The value is canonicalized before comparison, so format-only edits
+    /// (e.g. hex case changes) are not tracked as semantic changes.
     pub fn set_value_tracked(&mut self, name: &str, value: String) {
         if let Some(symbol) = self.symbols.get_mut(name) {
+            // Normalize before comparing so case-only or format-only edits of
+            // a hex value are not reported as semantic changes.
+            let canonical_value = canonical_symbol_value(&symbol.symbol_type, value);
             let old_value = symbol.value.clone();
-            symbol.value = Some(value.clone());
+            symbol.value = Some(canonical_value.clone());
 
             // Track if value actually changed
-            if old_value != Some(value)
+            if old_value != Some(canonical_value)
                 && !self.changed_symbols.contains(&name.to_string()) {
                     self.changed_symbols.push(name.to_string());
                 }
@@ -119,5 +129,36 @@ impl SymbolTable {
 impl Default for SymbolTable {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Return the canonical textual form of a symbol value for its type.
+///
+/// Hex values are normalized to a lowercase `0x`-prefixed form with no
+/// leading zeros (an unprefixed digit string is interpreted as hex, matching
+/// Kconfig semantics). Every consumer of the symbol table — `.config`,
+/// `auto.conf`, `autoconf.h`, and the generated `config.rs` — must emit
+/// byte-identical output for semantically equal inputs. Without this
+/// normalization, a defconfig carrying `0x1C200` is rewritten as `0x1c200`
+/// in `.config` while generators that emit the raw value keep the uppercase
+/// form; the next build then regenerates `config.rs` with the lowercase form,
+/// invalidating Cargo build-script fingerprints and cascading into a
+/// workspace-wide rebuild.
+///
+/// Non-hex types and unparseable hex values are returned unchanged; emitters
+/// keep their own diagnostics for malformed values.
+pub fn canonical_symbol_value(symbol_type: &SymbolType, value: String) -> String {
+    if !matches!(symbol_type, SymbolType::Hex) {
+        return value;
+    }
+
+    let digits = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value.as_str());
+
+    match u128::from_str_radix(digits, 16) {
+        Ok(number) => format!("0x{number:x}"),
+        Err(_) => value,
     }
 }
