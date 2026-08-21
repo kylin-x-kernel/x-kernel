@@ -14,7 +14,9 @@ default = []
 [dependencies]
 kiface.workspace = true
 karch = { workspace = true, features = ["smp"] }
-khal = { workspace = true }
+# `smp` here compiles khal's SmpStopIf no-op fallback out, so linking this
+# crate leaves exactly one provider (this crate's) in the final image.
+khal = { workspace = true, features = ["smp"] }
 kirq = { workspace = true }
 ktime_types.workspace = true
 kcpu_id_map.workspace = true

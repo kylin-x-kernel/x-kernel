@@ -78,7 +78,15 @@ impl SysCtrl {
         Ok(())
     }
 
-    fn shutdown() -> ! {
+    fn halt() -> ! {
+        unimplemented!()
+    }
+
+    fn power_off() -> ! {
+        unimplemented!()
+    }
+
+    fn suspend_to_ram() -> kerrno::KResult {
         unimplemented!()
     }
 }

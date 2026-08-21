@@ -7,7 +7,8 @@ This crate provides a uniform API across all supported architectures (AArch64, x
 - **TLB flush**: `flush_tlb(vaddr: Option<VirtAddr>)`
 - **Cache maintenance** (AArch64): `flush_icache_all()`,
   `clean_dcache_line_to_poc(vaddr)`, `clean_dcache_range_to_poc(start, size)`
-- **CPU control**: `stop_cpu()`, `await_interrupts()`
+- **CPU control**: `stop_cpu() -> !` (terminal halt; never returns),
+  `await_interrupts()`
 - **Local interrupt management**:
   - `enable_local_irq()`, `disable_local_irq()`, `local_irq_enabled()`
   - `save_irq_and_disable() -> usize` — atomically save interrupt state and disable local interrupts

@@ -99,7 +99,7 @@ SMP TLB shootdown 单测使用 volatile 读写验证远端 CPU 是否看到页�
 
 ### panic handler（`src/lang_items.rs`）
 
-panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕获 backtrace 可能再次失败。当前策略是打印 panic 信息和 backtrace，然后调用 `khal::power::shutdown()` 终止系统。
+panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕获 backtrace 可能再次失败。当前策略是打印 panic 信息和 backtrace，然后调用 `khal::power::platform_power_off()` 终止系统。panic 路径刻意绕过 `khal::power::power_off()` 的 SMP stop 钩子：钩子通过 IPI 停机，而 panic CPU 可能正持有其他 CPU 自旋等待的锁，走钩子会死锁。
 
 ## 内存安全不变量
 
@@ -150,7 +150,7 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 ## 故障管理
 
 - **启动期错误快速失败**：关键路径使用 `assert!`、`expect` 或 `panic!`，避免在未完整初始化的内核中降级运行。
-- **panic 后关机**：panic handler 打印 panic 信息和 backtrace 后调用 `khal::power::shutdown()`；本 crate 不尝试恢复。
+- **panic 后关机**：panic handler 打印 panic 信息和 backtrace 后调用裸平台终点 `khal::power::platform_power_off()`（不走 SMP stop 钩子，避免 panic 持锁导致 IPI 停机死锁）；本 crate 不尝试恢复。
 - **SMP hang 无本地超时**：`ENTERED_CPUS` / `INITED_CPUS` 等待使用自旋，若 AP 或主核 late init 卡死，需要 watchdog feature、平台日志或外部复位介入。
 - **feature 关闭是配置选择**：如 `fs`、`net`、`watchdog`、`pmu` 未启用时跳过对应初始化，不作为运行时故障处理。
 

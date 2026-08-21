@@ -9,5 +9,9 @@ use core::panic::PanicInfo;
 fn panic(info: &PanicInfo) -> ! {
     kprintln!("{}", info);
     kprintln!("{}", backtrace::Backtrace::capture());
-    khal::power::shutdown()
+    // Use the bare platform terminal: the SMP stop hook exchanges IPIs and
+    // can deadlock here when this CPU holds a lock that the other CPUs spin
+    // on with interrupts disabled. Power-off behaviour matches the
+    // pre-halt/power-off split shutdown() path.
+    khal::power::platform_power_off()
 }

@@ -6,11 +6,18 @@
 
 use super::irq::disable_local_irq;
 
-/// Halt the current CPU.
+/// Halt the current CPU terminally.
+///
+/// Disables local interrupts and remains in `wfi` until the hart is
+/// reset. `wfi` may resume on events that are disabled, so the
+/// instruction is re-entered rather than executed once. This is a
+/// terminal operation and never returns.
 #[inline]
-pub fn stop_cpu() {
+pub fn stop_cpu() -> ! {
     disable_local_irq();
-    riscv::asm::wfi(); // should never return
+    loop {
+        riscv::asm::wfi();
+    }
 }
 
 /// Relaxes the current CPU and waits for interrupts.

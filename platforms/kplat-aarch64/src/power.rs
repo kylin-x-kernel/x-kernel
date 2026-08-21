@@ -5,7 +5,7 @@
 //! Power control implementation for aarch64.
 
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
-use kerrno::KResult;
+use kerrno::{KError, KResult};
 use kplat::sys::SysCtrl;
 
 #[impl_dev_interface]
@@ -25,7 +25,20 @@ impl SysCtrl {
         crate::peripherals::psci::cpu_on(raw_cpu_id, entry_paddr.as_usize(), 0).map_err(Into::into)
     }
 
-    fn shutdown() -> ! {
-        crate::peripherals::psci::shutdown()
+    fn power_off() -> ! {
+        crate::peripherals::psci::system_power_off()
+    }
+
+    fn halt() -> ! {
+        info!("Halting system...");
+        // Halt is not a firmware power state on this platform: mask local
+        // interrupts and park the calling CPU, leaving the system powered.
+        karch::stop_cpu()
+    }
+
+    fn suspend_to_ram() -> KResult {
+        // PSCI `SYSTEM_SUSPEND` (0.2+) exists on this platform but is not
+        // wired up; the sleep machinery currently lives behind x86-64 ACPI.
+        Err(KError::OperationNotSupported)
     }
 }

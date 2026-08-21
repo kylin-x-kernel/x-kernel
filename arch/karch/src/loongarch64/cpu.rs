@@ -6,13 +6,20 @@
 
 use super::irq::disable_local_irq;
 
-/// Halt the current CPU.
+/// Halt the current CPU terminally.
+///
+/// Disables local interrupts and remains in the LoongArch idle
+/// instruction until the CPU is reset. The instruction may resume on
+/// disabled events, so it is re-entered rather than executed once. This
+/// is a terminal operation and never returns.
 #[inline]
-pub fn stop_cpu() {
+pub fn stop_cpu() -> ! {
     disable_local_irq();
-    // SAFETY: with local IRQs disabled, putting the current CPU into the
-    // LoongArch idle instruction is the intended terminal halt path.
-    unsafe { loongArch64::asm::idle() }
+    loop {
+        // SAFETY: with local IRQs disabled, putting the current CPU into the
+        // LoongArch idle instruction is the intended terminal halt path.
+        unsafe { loongArch64::asm::idle() }
+    }
 }
 
 /// Relaxes the current CPU and waits for interrupts.

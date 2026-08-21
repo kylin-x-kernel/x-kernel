@@ -121,7 +121,12 @@ ksyscall::dispatch_irq_syscall
   - owner 在 `kfd_objects::EventFd`
 - `sys.rs`
   - `sethostname` 路由到当前 UTS namespace
-  - `reboot` 校验 Linux magic/command 后路由到平台 power 接口
+  - `reboot` 校验 Linux magic/command 后路由到 `khal::power` 终点：
+    `HALT` 走 `halt()`（停止所有 CPU、保持供电），`POWER_OFF` 走
+    `power_off()`（平台断电）；两者进入终点前均通过 SMP stop 钩子先停
+    止其他 CPU，fs sync/设备清理等上层收尾由后续 orderly-shutdown
+    supervisor 负责；`SW_SUSPEND` 走 `suspend_to_ram()`（非终点：平台
+    睡眠代理进入 S3，无代理/被拒时向调用方返回平台错误）
 - `arch/`
   - 架构专属 system-info/control syscall adapter（`arch/mod.rs` 按架构
     `cfg` 组织子模块，`lib.rs` 声明顶层 `mod arch;`，`sys.rs` 仅

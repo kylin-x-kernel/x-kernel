@@ -52,19 +52,9 @@ pub mod tls;
 
 pub mod irq;
 pub mod paging;
+pub mod power;
+pub mod trap;
 pub use firmware::cmdline;
-
-/// CPU power management.
-pub mod power {
-    #[cfg(feature = "smp")]
-    pub use kplat::sys::boot_ap;
-    pub use kplat::sys::shutdown;
-}
-
-/// Trap handling.
-pub mod trap {
-    pub use kcpu::excp::{IRQ, PAGE_FAULT, PageFaultFlags, register_trap_handler};
-}
 
 /// CPU register states for context switching.
 ///
@@ -114,6 +104,18 @@ pub mod pmu {
     pub use kplat::perf::{
         PerfCb, on_overflow as dispatch_irq_overflows, reg_cb as register_overflow_handler,
     };
+}
+
+/// Quiesces the local NMI (or pseudo-NMI) source on the current CPU.
+///
+/// This is a no-op when the platform NMI facility is disabled. It is called
+/// before parking a CPU on the final stop path so that an NMI-driven
+/// hard-lockup watchdog can neither keep waking the parked CPU nor mistake
+/// the intentional stop for a lockup and panic into a platform power-off.
+#[inline]
+pub fn quiesce_nmi() {
+    #[cfg(feature = "nmi")]
+    kplat::nm_irq::disable();
 }
 #[inline]
 pub fn boot_info(arg: usize) -> &'static boot_info::BootInfo {

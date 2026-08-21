@@ -8,11 +8,18 @@ use core::arch::asm;
 
 use super::irq::disable_local_irq;
 
-/// Halt the current CPU.
+/// Halt the current CPU terminally.
+///
+/// Disables maskable interrupts and remains in `hlt` (the host-test build
+/// spins) until the CPU is reset. `hlt` can still be exited by an NMI or
+/// SMI, so the instruction is re-entered rather than executed once. This
+/// is a terminal operation and never returns.
 #[inline]
-pub fn stop_cpu() {
+pub fn stop_cpu() -> ! {
     disable_local_irq();
-    await_interrupts(); // should never return
+    loop {
+        await_interrupts();
+    }
 }
 
 /// Relaxes the current CPU and waits for interrupts.

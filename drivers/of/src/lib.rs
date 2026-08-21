@@ -9,6 +9,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use lazyinit::LazyInit;
+use memaddr::PhysAddr;
 pub use rs_fdtree::{
     Chosen, Dice, FdtError, FdtNode, InterruptController, LinuxFdt, MemoryRegion, NodeProperty,
     RegIter,
@@ -102,7 +103,12 @@ pub fn cpu_node_reg(node: FdtNode<'_, '_>) -> Option<u64> {
     if !is_cpu_node(node) {
         return None;
     }
+    node_reg(node)
+}
 
+/// The first `reg` address of a node, honoring the parent's
+/// `#address-cells` width.
+fn node_reg(node: FdtNode<'_, '_>) -> Option<u64> {
     let address_cells = node.parent_property_u32("#address-cells").unwrap_or(1) as usize;
     match address_cells {
         1 => property_u32_cells::<1>(node, "reg").and_then(|cells| parse_cells_u64(&cells)),
@@ -287,6 +293,36 @@ pub fn chosen() -> Option<Chosen<'static, 'static>> {
 
 pub fn resolve_node(path_or_alias: &str) -> Option<FdtNode<'static, 'static>> {
     fdt()?.resolve_node(path_or_alias)
+}
+
+/// A control register declared in the DT `syscon-poweroff` style: the
+/// physical address of the register and the vendor-encoded value to write
+/// to it.
+pub struct SysconControl {
+    /// Physical address of the register — the `regmap` target's `reg` base
+    /// plus the node's `offset` property.
+    pub paddr: PhysAddr,
+    /// The node's `value` property.
+    pub value: u32,
+}
+
+/// The device tree's `syscon-poweroff` declaration, if present.
+///
+/// This is how a machine names its power-off register without ACPI tables:
+/// the node points at a `syscon` register block through a `regmap` phandle
+/// and declares the `offset` and `value` of the byte that removes power.
+/// QEMU's loongarch virt machine describes its ACPI GED sleep-control
+/// register this way — address and the whole S5 byte included — so direct
+/// kernel boot (which hands over no ACPI table) still has a firmware
+/// declaration to read instead of a guest-side constant.
+pub fn syscon_poweroff() -> Option<SysconControl> {
+    let node = find_compatible("syscon-poweroff")?;
+    let regmap = find_node_by_phandle(property_u32(node, "regmap")?)?;
+    let offset = u64::from(property_u32(node, "offset")?);
+    Some(SysconControl {
+        paddr: PhysAddr::from_usize((node_reg(regmap)? + offset) as usize),
+        value: property_u32(node, "value")?,
+    })
 }
 
 /// Returns the first interrupt specifier for a device node.

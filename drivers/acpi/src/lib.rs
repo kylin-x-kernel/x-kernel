@@ -91,6 +91,16 @@ pub struct PciHostMemWindow {
     pub is_64bit: bool,
 }
 
+/// The ACPI PM1a control block from the FADT (ACPI 5.0 §4.8.3.2), reached
+/// through port IO: the register sleep-state requests are written to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pm1aControlBlock {
+    /// IO-port number of the control block.
+    pub port: u16,
+    /// `PM1_CNT_LEN` in bytes: the register width the firmware declares.
+    pub length: u8,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct LocalApicEntry {
     pub processor_uid: u8,
@@ -247,6 +257,57 @@ pub fn find_pci_host_mem_window_from_init() -> Option<PciHostMemWindow> {
     let body = sdt_bytes(dsdt_addr, header.length);
     let body = body.get(mem::size_of::<AcpiSdtHeader>()..)?;
     scan_dsdt_for_pci_mem_window(body)
+}
+
+/// Finds the FADT PM1a control block from the boot-initialized RSDP.
+///
+/// The block is an IO-port register on this platform: an ACPI 2.0+
+/// `X_PM1a_CNT_BLK` generic address in system-IO space is preferred, with
+/// the legacy 32-bit `PM1a_CNT_BLK` field as fallback. `None` when ACPI is
+/// uninitialized, the FADT is absent, or neither field names a usable port
+/// — callers decide what power-off means without one.
+///
+/// Unlike [`find_table_from_rsdp`], a missing FADT is `None` rather than a
+/// panic: power terminals reach this after the rest of the system is torn
+/// down and must stay panic-free.
+pub fn find_pm1a_control_block_from_init() -> Option<Pm1aControlBlock> {
+    let rsdp = validate_rsdp(rsdp_addr()?)?;
+    let fadt_addr = if rsdp.revision >= 2 && rsdp.xsdt_addr != 0 {
+        find_table_xsdt(rsdp.xsdt_addr as usize, *b"FACP")
+    } else if rsdp.rsdt_addr != 0 {
+        find_table_rsdt(rsdp.rsdt_addr as usize, *b"FACP")
+    } else {
+        None
+    }?;
+    let header = read_sdt_header(fadt_addr);
+    let body = sdt_bytes(fadt_addr, header.length);
+
+    // FADT layout: PM1a_CNT_BLK @ offset 64 (u32), PM1_CNT_LEN @ offset 89
+    // (u8), X_PM1a_CNT_BLK GAS @ offset 172 (address space u8, address u64
+    // at +8) — ACPI 2.0+ only, hence the length and revision guards.
+    let port = if header.length >= 188 && header.revision >= 2 {
+        let address_space = *body.get(172)?;
+        let address = u64::from_le_bytes(body.get(180..188)?.try_into().ok()?);
+        if address_space == 1 && address != 0 && address <= u16::MAX as u64 {
+            address as u16
+        } else {
+            legacy_pm1a_port(body)?
+        }
+    } else {
+        legacy_pm1a_port(body)?
+    };
+    let length = if header.length >= 90 {
+        *body.get(89)?
+    } else {
+        0
+    };
+    Some(Pm1aControlBlock { port, length })
+}
+
+/// The legacy 32-bit `PM1a_CNT_BLK` field, which names an IO port directly.
+fn legacy_pm1a_port(body: &[u8]) -> Option<u16> {
+    let port = u32::from_le_bytes(body.get(64..68)?.try_into().ok()?);
+    (port != 0 && port <= u16::MAX as u32).then_some(port as u16)
 }
 
 fn find_dsdt_address(rsdp: usize) -> Option<usize> {

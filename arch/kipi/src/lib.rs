@@ -6,8 +6,10 @@
 //!
 //! This module provides a lightweight abstraction for CPU-to-CPU communication
 //! using Inter-Processor Interrupts (IPI). It maintains per-CPU callback queues,
-//! dispatches generic callbacks from the shared IPI handler, and hosts the TLB
-//! shootdown protocol used by page-table updates.
+//! dispatches generic callbacks from the shared IPI handler, hosts the TLB
+//! shootdown protocol used by page-table updates, and the system-wide CPU
+//! stop protocol used before entering a platform power terminal
+//! ([`stop_other_cpus`]).
 //!
 //! ## Safety
 //!
@@ -31,6 +33,7 @@ use lazyinit::LazyInit;
 mod event;
 mod icache;
 mod queue;
+mod stop;
 pub mod tlb;
 
 pub use event::{Callback, MulticastCallback};
@@ -264,9 +267,12 @@ fn enqueue_broadcast_to_others(current_cpu_id: LogicalCpuId, callback: &Multicas
 /// This function is called in interrupt context. If a callback panics or fails,
 /// the error is logged but other pending callbacks will still be processed.
 ///
-/// TLB shootdowns are processed before generic queued callbacks so that page
-/// table coherency work is not delayed behind ordinary cross-CPU events.
+/// A system-wide stop request is processed before anything else: once a stop
+/// is in progress, every non-orchestrator CPU acknowledges and parks here and
+/// never reaches the TLB shootdown or callback queues.
 pub fn ipi_handler() {
+    stop::handle_stop_request();
+
     // Process TLB shootdown requests before handling generic callbacks.
     tlb::handle_shootdown();
 

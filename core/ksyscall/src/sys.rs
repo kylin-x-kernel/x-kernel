@@ -21,8 +21,8 @@ use linux_raw_sys::{
     general::{
         GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM, LINUX_REBOOT_CMD_CAD_OFF,
         LINUX_REBOOT_CMD_CAD_ON, LINUX_REBOOT_CMD_HALT, LINUX_REBOOT_CMD_POWER_OFF,
-        LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_MAGIC2A, LINUX_REBOOT_MAGIC2B,
-        LINUX_REBOOT_MAGIC2C,
+        LINUX_REBOOT_CMD_SW_SUSPEND, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
+        LINUX_REBOOT_MAGIC2A, LINUX_REBOOT_MAGIC2B, LINUX_REBOOT_MAGIC2C,
     },
     system::{new_utsname, sysinfo},
 };
@@ -166,10 +166,14 @@ pub fn sys_sethostname(name: UserConstPtr<u8>, len: usize) -> KResult<isize> {
 ///
 /// Requires a privileged credential and a valid reboot magic pair
 /// (`LINUX_REBOOT_MAGIC1` plus one of the `MAGIC2*` values), matching the
-/// `reboot(2)` ABI. Only `HALT`, `POWER_OFF` and the `CAD_ON`/`CAD_OFF`
-/// toggles are handled here; other commands (`RESTART`, `RESTART2`, `KEXEC`,
-/// `SW_SUSPEND`) are rejected with `EINVAL`, since `reboot(2)` returns
-/// `EINVAL` — not `ENOSYS` — for an unsupported command.
+/// `reboot(2)` ABI. `HALT`, `POWER_OFF`, the `CAD_ON`/`CAD_OFF` toggles,
+/// and `SW_SUSPEND` are handled here; `HALT` stops all CPUs and keeps the
+/// system powered, `POWER_OFF` cuts power through the platform power-off
+/// agent, and `SW_SUSPEND` requests suspend-to-RAM through the platform
+/// sleep agent, failing with the platform's error where no agent exists.
+/// Other commands (`RESTART`, `RESTART2`, `KEXEC`) are rejected with
+/// `EINVAL`, since `reboot(2)` returns `EINVAL` — not `ENOSYS` — for an
+/// unsupported command.
 pub fn sys_reboot(
     magic1: u32,
     magic2: u32,
@@ -195,11 +199,28 @@ pub fn sys_reboot(
         // CAD_ON/CAD_OFF toggle the Ctrl-Alt-Del behaviour. There is no kernel
         // CAD-state variable yet, so these are accepted as an intentional stub.
         LINUX_REBOOT_CMD_CAD_ON | LINUX_REBOOT_CMD_CAD_OFF => Ok(0),
-        LINUX_REBOOT_CMD_HALT | LINUX_REBOOT_CMD_POWER_OFF => {
-            // TODO: flush/sync filesystems (e.g. sys_sync) before pulling the
-            // plug; `shutdown()` never returns, so cleanup must happen first.
-            warn!("reboot: initiating platform shutdown (command {command:#x})");
-            khal::power::shutdown()
+        LINUX_REBOOT_CMD_HALT => {
+            // TODO: flush/sync filesystems before the terminal; the final
+            // orderly-shutdown supervisor owns that cleanup, and
+            // `khal::power::halt()` never returns.
+            warn!("reboot: halting system (command {command:#x})");
+            khal::power::halt()
+        }
+        LINUX_REBOOT_CMD_POWER_OFF => {
+            // TODO: flush/sync filesystems before the terminal; the final
+            // orderly-shutdown supervisor owns that cleanup, and
+            // `khal::power::power_off()` never returns.
+            warn!("reboot: powering off system (command {command:#x})");
+            khal::power::power_off()
+        }
+        LINUX_REBOOT_CMD_SW_SUSPEND => {
+            // TODO: flush/sync filesystems and quiesce devices before
+            // suspending; the orderly-shutdown supervisor owns that
+            // cleanup. A successful return means the platform slept and
+            // was resumed.
+            warn!("reboot: suspending to RAM (command {command:#x})");
+            khal::power::suspend_to_ram()?;
+            Ok(0)
         }
         _ => Err(KError::InvalidInput),
     }

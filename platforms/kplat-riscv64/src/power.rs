@@ -35,12 +35,23 @@ impl SysCtrl {
         Ok(())
     }
 
-    fn shutdown() -> ! {
+    fn power_off() -> ! {
         info!("Shutting down...");
         sbi_rt::system_reset(sbi_rt::Shutdown, sbi_rt::NoReason);
-        warn!("It should shutdown!");
-        loop {
-            karch::stop_cpu();
-        }
+        warn!("SBI system reset returned; halting the current CPU");
+        karch::stop_cpu()
+    }
+
+    fn halt() -> ! {
+        info!("Halting system...");
+        // SBI has no platform-wide halt agent: mask local interrupts and
+        // park the calling hart in WFI, leaving the system powered.
+        karch::stop_cpu()
+    }
+
+    fn suspend_to_ram() -> KResult {
+        // The SBI suspend extension is not probed or wired up; the sleep
+        // machinery currently lives behind x86-64 ACPI.
+        Err(KError::OperationNotSupported)
     }
 }

@@ -160,6 +160,10 @@
 | T-03 | 普通 IPI 共用同一向量导致无意义全表扫描 | 每次 IPI 都无条件扫描 TLB slots | 高频无关 IPI 造成 O(CPU_NUM) 热路径开销 | per-target `pending_epoch` fast path |
 | T-04 | 调用者把不适合中断上下文的逻辑作为回调广播到其它 CPU | 回调内部睡眠、拿大锁或跑长路径 | IPI handler 延迟、锁顺序问题、可用性下降 | `kipi` 文档约束回调必须适合该执行上下文；模块不兜底 |
 | T-05 | 队列未初始化前被远程入队 | AP 尚未执行 `init()`，但已经成为 IPI 目标 | 通过原始 per-CPU 引用访问未就绪槽位 | API 显式检查 `IPI_QUEUE_READY`，失败返回 `TargetCpuNotReady` |
+| T-06 | 停机 IPI 无法到达关中断自旋的 CPU | 目标 CPU 长期屏蔽本地中断，永远不进入 `ipi_handler` | 该 CPU 未停靠，终点前仍在变更共享状态 | 1s 有界超时后告警并继续（对齐 Linux `smp_send_stop`），不阻塞终点 |
+| T-07 | NMI 看门狗唤醒停靠 CPU 或误判故意停机为 lockup | 平台带 NMI/pseudo-NMI hard-lockup 看门狗，park 后 NMI 源仍开启 | 停靠 CPU 被反复唤醒；看门狗 panic 后走平台断电，`halt` 变成 `power_off` | park 前调用 `khal::quiesce_nmi()` 停靠本地 NMI 源（无 NMI 平台为 no-op） |
+| T-08 | 停机编排者任务在协议中途被迁移 | 从可抢占的 syscall 上下文进入终点，认领 id 与广播/等待基于过期的 CPU id | 被离开的 CPU 被当作 orchestrator 永不 park，协议必然吃满超时并留下运行中的 CPU | `stop_other_cpus` 全程持有 `NoPreempt` 守卫，把编排者钉在认领的 CPU 上 |
+| T-09 | 等待集包含 IPI 队列未初始化的 present CPU | AP 尚未执行 `kipi::init()` 即触发停机 | 该 CPU 永远无法 ack，每次停机固定白等 1s 超时并误报告警 | 发布时一次性快照等待集，只含队列已就绪的 CPU；广播仍覆盖全部其它 CPU |
 
 ## 故障模式与影响分析（FMEA）
 

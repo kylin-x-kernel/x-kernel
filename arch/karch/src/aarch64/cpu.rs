@@ -4,16 +4,23 @@
 
 //! CPU control operations for AArch64.
 
-use super::irq::disable_local_irq;
-
-/// Halt the current CPU.
+/// Halt the current CPU terminally.
 ///
-/// Disables interrupts then executes WFI. Since interrupts are disabled,
-/// this should stop execution until reset.
+/// Masks every DAIF exception class — debug exceptions, SError, IRQs
+/// (including PMR-mode pseudo-NMIs), and FIQs — then remains in the
+/// architected wait state until the CPU is reset. This is a terminal
+/// operation and never returns.
 #[inline]
-pub fn stop_cpu() {
-    disable_local_irq();
-    aarch64_cpu::asm::wfi();
+pub fn stop_cpu() -> ! {
+    // Masking all four DAIF classes deliberately breaks the PMR-mode rule
+    // that keeps `DAIF.I` clear (see `irq.rs`), because this one-way park
+    // path must also block the pseudo-NMIs, SError, and debug exceptions
+    // that could otherwise resume the CPU and panic it into a power-off.
+    // Nothing runs on this CPU afterwards, so no restore path is needed.
+    super::irq::disable_local_exceptions();
+    loop {
+        aarch64_cpu::asm::wfi();
+    }
 }
 
 /// Relaxes the current CPU and waits for interrupts.

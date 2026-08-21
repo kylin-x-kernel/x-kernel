@@ -81,7 +81,7 @@ kernel-boot (汇编 / MMU / BootInfo)
 | `mp::start_secondary_cpus` | 为 AP 准备栈、调用 `boot_ap`、等待 AP 进入 runtime |
 | `init_setup` | 执行链接段 `.init_array` 中的 `register_init` 回调 |
 | `dma_integration` | 将 DMA 页表属性更新委托给 `memspace::kernel_layout` |
-| `lang_items` | Panic 时打印 backtrace 并 `shutdown` |
+| `lang_items` | Panic 时打印 backtrace 并调用裸平台终点 `khal::power::platform_power_off`（绕过 SMP stop 钩子，避免 panic 持锁时 IPI 停机死锁） |
 
 ## 启动流程（主核）
 
@@ -114,6 +114,7 @@ late-init thread (Internal, PID-less):
     → [fs9p] fs_boot host-share mount
     → [net/vsock] knet
     → [ipi] kipi::init, mark_all_cpus_started
+        (khal::power 的 SMP stop 由 kipi 在链接期提供 SmpStopIf provider)
     → [watchdog] init_primary
     → finish_allocator_init, log_memory_regions
     → INITED_CPUS += 1
@@ -182,6 +183,19 @@ SecondaryKernelEntry::enter(logical_cpu_id)
 - `init_cb()`：在 driver/entropy 初始化之后、filesystem namespace 建立之前，按指针步进调用段内每个 `extern "C" fn()`。
 
 各子系统可通过 `util/macros` 的 `#[register_init]` 向该段注册早期 init，无需修改 `kruntime` 源码列表。
+
+## 已知限制：loongarch64 QEMU 直启没有 ACPI 表
+
+`make justrun`（loongarch64）用 `-kernel` 直启，QEMU 的
+`loongarch_direct_kernel_boot` 伪造的 EFI system table 只含
+memmap/initrd/DTB 三个 configuration table 条目；ACPI 表
+（`virt_acpi_setup`）只通过 fw_cfg 文件（`etc/acpi/tables`、
+`etc/acpi/rsdp`）暴露，**从不写入 guest RAM**——它们只有在 UEFI 固件
+启动（固件读 fw_cfg 并把表拷进 RAM、在 EFI config table 挂 RSDP 条目）
+时才可达。因此直启下 `rsdp=0`、表解析休眠属预期行为而非缺陷（Linux
+在同样启动方式下也拿不到 ACPI）。断电由 DTB 的 `syscon-poweroff`
+声明兜底（直启虽无 ACPI 表，但 QEMU 的 DTB 声明了 GED
+sleep-control 寄存器地址与 S5 写值）。x86-64（SeaBIOS）不受影响。
 
 ## `kiface` 接线
 

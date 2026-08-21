@@ -15,7 +15,6 @@ ignored = ["kcpu", "kspin"]
 fp-simd = ["kcpu/fp-simd", "kernel_boot/fp-simd"]
 rtc = ["rtc_driver/cmos"]
 smp = ["kplat/smp", "kspin/smp"]
-reboot-on-system-off = []
 vmm = []
 
 [dependencies]
@@ -38,6 +37,7 @@ x86_apic = { workspace = true }
 rtc_driver = { workspace = true }
 timer_driver = { workspace = true }
 boot_info = { workspace = true }
+acpi = { workspace = true }
 klazy = { workspace = true }
 multiboot2 = { version = "0.24.1", default-features = false }
 

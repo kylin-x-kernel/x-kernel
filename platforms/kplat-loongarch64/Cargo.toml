@@ -26,6 +26,7 @@ log = "0.4"
 kcpu = { workspace = true }
 karch = { workspace = true }
 kaddr_layout = { workspace = true }
+of = { workspace = true }
 khal = { workspace = true }
 ktime_types = { workspace = true }
 ktime = { workspace = true }

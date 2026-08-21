@@ -17,6 +17,11 @@
 //! `DAIF.I` directly via `asm!` or raw register access in PMR mode —
 //! [`disable_local_irq`] and [`enable_local_irq`] will silently overwrite
 //! the bit without restoring a caller‑set value.
+//!
+//! The one deliberate exception is [`disable_local_exceptions`], the
+//! terminal-path helper behind the park in [`super::cpu::stop_cpu`]: it
+//! masks all four DAIF exception classes and is never followed by a
+//! restore, so no restore path exists.
 
 use core::arch::asm;
 
@@ -153,18 +158,18 @@ pub fn restore_irq(state: usize) {
     }
 }
 
-#[deprecated(note = "Use `enable_local_irq`")]
+/// Mask every DAIF exception class on the current CPU: debug exceptions,
+/// SError, IRQs (including PMR-mode pseudo-NMIs), and FIQs.
+///
+/// This deliberately breaks the PMR-mode rule that keeps `DAIF.I` clear
+/// (see the [module-level DAIF.I invariant](self#pmrmode-daifi-invariant)):
+/// setting all four mask bits is the only architectural way to also block
+/// the pseudo-NMIs, SError, and debug exceptions that could otherwise
+/// resume a parked CPU. It is therefore reserved for one-way terminal
+/// paths that never restore interrupts — currently only
+/// [`super::cpu::stop_cpu`]. PMR is not touched: once every DAIF class is
+/// masked, the CPU takes no interrupt at any priority.
 #[inline]
-pub fn enable_irq() {
-    enable_local_irq()
-}
-#[deprecated(note = "Use `disable_local_irq`")]
-#[inline]
-pub fn disable_irq() {
-    disable_local_irq()
-}
-#[deprecated(note = "Use `local_irq_enabled`")]
-#[inline]
-pub fn irq_enabled() -> bool {
-    local_irq_enabled()
+pub fn disable_local_exceptions() {
+    DAIF.write(DAIF::D::Masked + DAIF::A::Masked + DAIF::I::Masked + DAIF::F::Masked);
 }

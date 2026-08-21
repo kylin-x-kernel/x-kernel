@@ -27,8 +27,8 @@ pub use cpu::{await_interrupts, stop_cpu};
 pub use fp::enable_fp;
 #[allow(deprecated)]
 pub use irq::{
-    disable_irq, disable_local_irq, enable_irq, enable_local_irq, irq_enabled, local_irq_enabled,
-    prepare_enter_user_irq, restore_irq, save_irq_and_disable,
+    disable_local_irq, enable_local_irq, local_irq_enabled, prepare_enter_user_irq, restore_irq,
+    save_irq_and_disable,
 };
 pub use mmu::{
     HwPageTableRoot, read_kernel_page_table, read_user_page_table, write_kernel_page_table,

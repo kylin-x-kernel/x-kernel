@@ -78,14 +78,12 @@ fn psci_call(func: u32, arg0: usize, arg1: usize, arg2: usize) -> Result<(), Psc
 pub fn init(method: &str) {
     smccc::init_conduit(method);
 }
-/// Power off the system via PSCI.
-pub fn shutdown() -> ! {
+/// Powers off the whole system via PSCI `SYSTEM_OFF`.
+pub fn system_power_off() -> ! {
     info!("Shutting down...");
     psci_call(PSCI_0_2_FN_SYSTEM_OFF, 0, 0, 0).ok();
-    warn!("It should shutdown!");
-    loop {
-        karch::stop_cpu();
-    }
+    warn!("PSCI SYSTEM_OFF returned; halting the current CPU");
+    karch::stop_cpu()
 }
 /// Power on a target CPU identified by its raw MPIDR affinity value.
 pub fn cpu_on(

@@ -2415,6 +2415,7 @@ dependencies = [
  "kalloc",
  "kcpu",
  "kernel-boot",
+ "kerrno",
  "kiface",
  "kirq",
  "kplat",
@@ -2652,6 +2653,7 @@ dependencies = [
  "log",
  "loongArch64",
  "memspace",
+ "of",
 ]
 
 [[package]]
@@ -2688,6 +2690,7 @@ dependencies = [
 name = "kplat-x86_64"
 version = "0.2.0-dev"
 dependencies = [
+ "acpi",
  "boot-info",
  "console-driver",
  "irq-driver",
@@ -3435,6 +3438,7 @@ name = "of"
 version = "0.2.0-dev"
 dependencies = [
  "lazyinit",
+ "memaddr",
  "rs_fdtree",
  "unittest",
 ]

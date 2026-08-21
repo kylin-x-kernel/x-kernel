@@ -100,7 +100,7 @@ fn kernel_main() {
             }
         }
         info!("Init process finished, powering off...");
-        khal::power::shutdown();
+        khal::power::power_off();
     });
 }
 
@@ -357,5 +357,5 @@ fn kernel_main() {
     }
 
     info!("Unit tests completed, shutting down...");
-    khal::power::shutdown();
+    khal::power::power_off();
 }

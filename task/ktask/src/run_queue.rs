@@ -1247,7 +1247,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             // preemption are disabled while touching the current CPU's percpu
             // exited-task list.
             current_exited_tasks_mut().clear();
-            khal::power::shutdown();
+            khal::power::power_off();
         } else {
             // Notify the joiner task.
             curr.notify_exit(exit_code);
