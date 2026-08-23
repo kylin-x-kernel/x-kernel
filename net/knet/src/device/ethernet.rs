@@ -235,12 +235,16 @@ fn unregister_net_rx_source(id: usize) {
 
 fn run_net_rx_softirq() {
     let mut wake_batch: [Option<PollSet>; NET_RX_SOFTIRQ_BATCH] = core::array::from_fn(|_| None);
-    let (_, has_deferred_pending) = NET_RX_SOURCES
+    let (wake_count, has_deferred_pending) = NET_RX_SOURCES
         .lock()
         .collect_scheduled_fallback_batch(&mut wake_batch);
 
     for waiters in wake_batch.into_iter().flatten() {
         waiters.wake();
+    }
+
+    if wake_count > 0 {
+        crate::poller::network_poller().notify(crate::poller::PollReason::Rx);
     }
 
     if has_deferred_pending {
@@ -319,42 +323,6 @@ impl EthernetDevice {
             pending_tx: VecDeque::with_capacity(ETHERNET_MAX_PENDING_PACKETS),
             rx_source,
         }
-    }
-
-    pub(crate) fn rx_poll_set(&self) -> Option<PollSet> {
-        self.rx_source.as_ref().map(|source| source.waiters_clone())
-    }
-
-    /// Spawn the RX poll task for an initialized network stack.
-    pub(crate) fn spawn_rx_task(rx_poll: PollSet) {
-        let _ = ktask::spawn_with_name(
-            move || {
-                use core::{future::poll_fn, task::Poll};
-
-                use kpoll::PollRegistrations;
-
-                let mut registrations = PollRegistrations::new();
-                ktask::future::block_on(poll_fn(move |cx| {
-                    loop {
-                        let mut context = registrations.context(cx);
-                        if context.register(&rx_poll).is_err() {
-                            drop(context);
-                            // Sleeping without an RX registration would stall
-                            // RX forever; yield and retry under memory pressure.
-                            ktask::yield_now();
-                            continue;
-                        }
-                        drop(context);
-                        // Register before publishing the RX recheck so an IRQ
-                        // arriving across this boundary either wakes this task
-                        // or is covered by the bounded data-plane batch.
-                        crate::poller::network_poller().publish_and_poll_rx();
-                        return Poll::<()>::Pending;
-                    }
-                }));
-            },
-            "knet-rx".into(),
-        );
     }
 
     #[inline]

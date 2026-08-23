@@ -81,7 +81,6 @@ pub fn init_network() {
         })
         .expect("loopback IPv4 address must fit the interface");
 
-    let mut eth0_rx_poll = None;
     if let Some(handle) = net_devs.pop() {
         let device_id = handle.id();
         info!("  use NIC 0: {:?}", handle.name());
@@ -90,7 +89,6 @@ pub fn init_network() {
         let eth0_ip = Ipv4Cidr::new(IP.parse().expect("Invalid IPv4 address"), IP_PREFIX);
 
         let eth0 = EthernetDevice::new("eth0".to_owned(), handle);
-        eth0_rx_poll = eth0.rx_poll_set();
         let eth0_dev = router.add_device(Box::new(eth0));
 
         router
@@ -129,10 +127,6 @@ pub fn init_network() {
     udp::init_udp_registry();
     poller::network_poller().start();
     ktask::register_timer_callback(TIMER_SAMPLE_PERIOD, |_| SERVICE.handle_timer_tick());
-
-    if let Some(rx_poll) = eth0_rx_poll {
-        EthernetDevice::spawn_rx_task(rx_poll);
-    }
 }
 
 fn subscribe_network_unregister(id: kdevice::DeviceId) {

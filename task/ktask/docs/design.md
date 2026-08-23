@@ -42,6 +42,10 @@ task/ktask/
     └── design.md
 ```
 
+`ktask` 也是 `kwork` 的 provider owner：它提供 system/custom kwork task host、
+task-local worker context、completion wait，以及 delayed work 使用的 monotonic timer
+waker 注册。`kwork` 仍只消费 provider trait，不直接依赖 `ktask`。
+
 ## 架构
 
 ```text
@@ -109,7 +113,8 @@ kruntime::init_interrupt()
   → ktask::init_softirqd_current_cpu()
   → 创建并激活绑定 boot CPU 的 ksoftirqd/0
   → ktask::init_system_workqueue_worker()
-  → 创建并激活绑定 boot CPU 的 kworker/system_wq
+  → 创建并激活绑定 boot CPU 的 kwork/system_wq/0:manager
+  → 创建并激活 boot CPU 的初始 kwork/system_wq/0:M worker
   → enable_local_irq()
 ```
 
@@ -124,6 +129,9 @@ init_scheduler_secondary()
 rust_main_secondary()
   → ktask::init_softirqd_current_cpu()
   → 创建并激活绑定当前 CPU 的 ksoftirqd/N
+  → ktask::init_system_workqueue_worker()
+  → 创建并激活绑定当前 CPU 的 kwork/system_wq/N:manager
+  → 创建并激活当前 CPU 的初始 kwork/system_wq/N:M worker
   → enable_local_irq()
 ```
 
@@ -137,21 +145,41 @@ daemon 每完成一轮实际 softirq work 后会主动 `yield_now()`，再回到
 `cond_resched()` 的调度友好语义。若等待注册因内存压力等原因失败，daemon 也会
 先让出 CPU 再重试，避免无 waiter 的紧循环。
 
-`kworker/system_wq` 是 `kirq::workerqueue::WorkerqueueHostIf` 的 `ktask`
-provider。`kirq` 拥有 `system_wq` 的队列状态、work 状态和 enqueue/requeue
-语义；`ktask` 只提供一个 sleepable task context 来 drain 队列。当前 workerqueue
-foundation 只有一个 system worker，因此保持 single-consumer queue invariant。
-provider 使用 `PollSet` 等待 `kirq::workerqueue::system_wq_has_runnable_work()`，
-唤醒路径可从 hardirq/softirq/BH-disabled context 调用；worker callback 在普通
-任务上下文执行，可以睡眠，但不继承排队方的进程上下文。
-`WorkerqueueTaskContextIf` 在当前 `TaskInner` 上保存 opaque work key 和 queue key，
-供 KIRQ 识别 worker callback 中的 `flush_work(self)` / `cancel_work_sync(self)`
-self-wait，以及 `flush_work()` 同一 single-consumer queue 上其它 pending work 的
-self-deadlock；这个状态跟随任务迁移，不依赖 per-CPU slot。work key 表示 KIRQ
-`WorkItem` 的底层 allocation identity；`ktask` 不拥有 work 生命周期，也不保存 work
-handle。当前 provider 只保存单层 context，因此 M4 的 `run_one_work()` 不支持
-callback 内嵌套 drain。
-`WorkqueueSyncWaitIf` 复用 ktask 的 completion wait helper；`kirq` 在进入 provider
+`kwork/system_wq/<cpu>:<worker_id>` 是 `kwork::WorkqueueHostIf` 的
+`ktask` pool provider。`kwork` 拥有 per-CPU Default pool、挂接到 pool 的
+逻辑 queue、work 状态和 enqueue 语义；`ktask` 只提供 sleepable task context 来
+drain 对应 CPU 的 default task pool。`system_long_wq`、custom/dynamic queue 与
+system queue 共享 Default pool，不创建自己的 task。每个 CPU 启动一个 pinned manager task
+和少量初始 worker；当 `kwork`
+发现 runnable work 仍存在但没有 running/idle/preparing worker 时，只唤醒 manager，
+由 manager 在 task context 创建新的 bounded worker。一个 callback sleep 只阻塞当前
+worker task，已有或新建 worker 可以继续执行同 CPU 同 kind pool 上其它 runnable work。
+provider 使用 `PollSet` 等待 `SystemPoolBinding::has_runnable_work()`，唤醒路径可从
+hardirq/softirq/BH-disabled context 调用；worker callback 在普通任务上下文执行，
+可以睡眠，但不继承排队方的进程上下文。`ktask` 同时向 `kwork` 暴露 per-CPU
+worker pool ready 状态，使显式 CPU/kind 目标投递不会进入尚未安装 worker 的 system
+pool。与此相对，BH workqueue callback 在 `kirq` softirq context 执行，不是
+`ktask` worker task；`ktask::sleep()`、`sleep_until()` 和
+`interruptible_sleep_until()` 在 hardirq/softirq/BH-disabled context fail-fast，
+防止 BH callback 或其它 interrupt-like path 进入阻塞调度路径。`yield_now()` 仍按
+D1 决策只表达主动让出 CPU，不作为 sleep/blocking API。
+pool。创建 worker task 的动作只发生在 manager task context，不在 IRQ-safe enqueue
+path 或 `kwork` pool lock 内执行。
+
+`WorkQueueHandle::alloc()` 只创建逻辑 queue 并配置 per-CPU pwq 的 `max_active`。
+`WorkQueue::start()` 对 static custom queue 执行同样的策略配置。两者都不进入 ktask
+registry，也不创建 queue-owned worker。`destroy()` 设置 queue enqueue gate 并等待
+shared pools 中属于该 queue 的 pending/running instance 清零；pool worker 生命周期
+不受 queue destroy 影响。
+
+`WorkqueueTaskContextIf` 在当前 `TaskInner` 上保存 opaque work/queue/pool/worker key，
+供 `kwork` 识别 worker callback 中的 `flush_work(self)` / `cancel_work_sync(self)`
+self-wait，以及 `flush_work()` 同一 execution pool 上其它 pending/running work 的
+self-deadlock；这个状态跟随任务迁移，不依赖 per-CPU slot。work key 表示 `kwork`
+`ScheduledWork` 的底层 allocation identity；`ktask` 不拥有 work 生命周期，也不保存 work
+handle。pool drain 入口只有 `SystemPoolBinding::run_one_work(worker_id)`，不存在供
+callback 调用的 queue-level drain API。
+`WorkqueueSyncWaitIf` 复用 ktask 的 completion wait helper；`kwork` 在进入 provider
 前完成 context/self-wait gate，provider 只负责 `try_wait/register/recheck` 阻塞协议。
 
 ### 2) 调度与切换
@@ -263,6 +291,9 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
 
 - `future::block_on` 在 `Poll::Pending` 下走 `blocked_resched()`，把当前任务置为 `Blocked`。
 - 若 waker 在 `Poll::Pending` 与提交阻塞之间触发，`block_on` 清除 wake 标志后立即重新 poll；不能先 yield，否则满载 CPU 会把已完成的 wake-before-block 竞态转换为无关 runnable task 的排队延迟。
+- 若当前任务正在执行 kwork callback，`block_on` 会在函数级边界通知 `kwork`
+  worker-pool accounting；任务真正进入 `Blocked` 的收敛点由 scheduler hook 对齐
+  Linux `wq_worker_sleeping()`，切回 `Running` 时再配对 resume accounting。
 - waker 触发时通过 `select_wake_run_queue(...).unblock_task(..., true)` 将任务恢复为 `Ready`。
 - SMP 下唤醒按 Linux `select_idle_sibling`：`prev_cpu`（`task.cpu_id()`）空闲则回家；否则在 cpumask 里找 `nr_running == 0` 的核；都忙则留在 prev；home 不在 cpumask 且无 idle 时才走 `find_idlest_cpu`。
 - `unblock_task(..., true)` 对本 CPU 设置 `need_resched`；对远端 CPU 在 `ipi + preempt` 可用时请求远端设置 `need_resched`。

@@ -8,4 +8,6 @@ pub mod context;
 pub mod deferred;
 pub mod lifecycle;
 pub mod softirq;
-pub mod workerqueue;
+mod workerqueue;
+
+pub use workerqueue::init as init_workerqueue;

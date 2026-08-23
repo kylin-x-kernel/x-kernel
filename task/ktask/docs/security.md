@@ -141,6 +141,9 @@ ksched algorithms / karch context switch / allocator
 | T-08 | 周期回调执行耗时过长拖慢调度或形成 IRQ 重入循环 | 高 | callback 滥用或执行时间超过 period | API 约束 hardirq 回调短小且不阻塞；一次 IRQ 最多调用每个到期 callback 一次，下一期限从完成时间计算 |
 | T-09 | 远端唤醒后未及时调度 | 中 | 任务入远端 run queue 但远端 CPU 未到抢占安全点 | SMP 强制依赖 IPI；远端 IPI 只置 `need_resched`；探测失败才在目标 CPU `preempt_resched` 武装 backup hrtick |
 | T-09b | IRQ teardown 等待在错误上下文阻塞当前任务 | 高 | hardirq/softirq/BH-disabled 路径间接调用 `IrqSyncWaitIf` provider | `kirq` 在进入 provider 前执行 context gate；`ktask` 只提供阻塞机制，不放宽 IRQ 同步 API 约束 |
+| T-09c | workerqueue 等待绕过 kwork 生命周期谓词 | 高 | `ktask` provider 直接阻塞而不让 `kwork` 重查 work 状态 | `ktask` 只实现 `kwork::WorkqueueSyncWaitIf` 的 completion wait；work 状态、cancel/flush 谓词和 deadlock gate 仍由 `kwork` 持有 |
+| T-09d | custom/dynamic workqueue 错误创建专属 task | 中 | provider API 重新引入 queue-level host/stop/wake 或保存 `WorkQueueHandle` | `WorkqueueHostIf` 只暴露 per-CPU pool ready/worker/manager wake；所有逻辑 queue 共享 pool task，destroy 不进入 ktask |
+| T-09e | interrupt-like context 直接调用 `ktask::sleep*()` | 高 | BH workqueue callback、softirq action、hardirq 或 BH-disabled path 绕过上层 context gate | `sleep()`、`sleep_until()`、`interruptible_sleep_until()` 统一检查 `kirq::context::is_in_interrupt_context()` 并 fail-fast；`yield_now()` 不作为 sleep/blocking API |
 | T-10 | 绝对 timer deadline / 周期在整数转换时截断 | 高 | `as_nanos()` 的 `u128` 结果直接窄化为 `u64` | HAL 接口保持 `MonotonicInstant`；backend 在寄存器边界钳制；周期 `Duration` 转换向 `u64::MAX` 饱和 |
 | T-11 | 已到期 schedule slot 在不可抢占区反复重装 | 高 | immediate request 被改写为周期性 10μs hrtick | 到期 slot 只设置 pending 并立即清零；soft/periodic deadline 独立保留 |
 | T-12 | idle-pull 偷走仍 `on_cpu` 的任务 | 高 | yield/preempt 入树后、`switch_to` 完成前远端 steal | 只偷 Ready && `!on_cpu`；`can_idle_pull_task` 拒绝 `on_cpu` |

@@ -16,6 +16,7 @@ nmi = ["khal/nmi"]
 khal.workspace = true
 ktime_types.workspace = true
 ktask = { workspace = true, features = ["watchdog"] }
+kwork.workspace = true
 log.workspace = true
 percpu.workspace = true
 kbuild_config = { workspace = true }

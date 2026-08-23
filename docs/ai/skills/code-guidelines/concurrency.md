@@ -54,6 +54,44 @@ atomics, interrupts, wait/wake paths, or shared mutable state.
   whether it may sleep,
   and which lock families callers may hold.
 
+## Workerqueue Usage
+
+- use `kwork` when hardirq, softirq, timer, or other non-sleepable paths need
+  to defer sleepable work into task context;
+- use `kwork::schedule_work()` / `kwork::schedule_work_on()` for small shared jobs that do not
+  need subsystem ordering or teardown isolation;
+- use `WorkQueueHandle::alloc()` when a driver or subsystem needs its own ordered
+  work stream, bounded worker pool, or explicit `WorkQueueHandle::destroy()`
+  lifecycle;
+- use delayed work for timer-triggered task-context work, not as a replacement
+  for ordinary softirq polling or immediate IRQ bottom halves;
+- queueing APIs may be used from IRQ-like context, but `ScheduledWork::flush()`,
+  `ScheduledWork::cancel_sync()`, `DelayedScheduledWork::flush()`,
+  `DelayedScheduledWork::cancel_sync()`, `WorkQueue::flush()`,
+  `WorkQueueHandle::flush()`, and `WorkQueueHandle::destroy()` must run from
+  sleepable task context;
+- before freeing state captured by a work callback, stop new producers first,
+  then cancel or flush the work, and finally destroy any dynamic workqueue.
+
+Example:
+
+```text
+let queue = kwork::WorkQueueHandle::alloc("net-reset", kwork::WorkQueueAttrs::new())?;
+let reset_work = kwork::ScheduledWork::new(|work| {
+    // Runs in kwork task context; sleeping operations are allowed here.
+});
+
+irq_handler_or_softirq_path() {
+    let _ = queue.queue_work(&reset_work);
+}
+
+device_teardown() {
+    stop_irq_or_other_producers();
+    reset_work.cancel_sync()?;
+    queue.destroy()?;
+}
+```
+
 ## Design Guidance
 
 - keep lock scope narrow but not so fragmented

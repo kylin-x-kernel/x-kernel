@@ -20,7 +20,8 @@ This skill covers:
 - concurrency, lock ordering, and atomics;
 - error handling;
 - logging;
-- resource management and performance-sensitive code review.
+- resource management, data structure selection,
+  and performance-sensitive code review.
 
 This skill does not replace:
 
@@ -119,6 +120,10 @@ Before considering a code change aligned with this skill, verify:
 - modules, visibility, imports, and attributes stay narrowly scoped;
 - error paths use `Result` and `?` rather than hidden panics;
 - logging uses crate-standard prefixes and appropriate severity;
+- container choices match their access pattern; queues needing middle
+  removal, stable element addresses, or IRQ-safe enqueue are not built
+  on growable `Vec` bookkeeping, and linked-list needs use the
+  project-standard intrusive `linked_list_r4l`;
 - the patch does not introduce obvious hot-path regressions.
 
 ## Canonical Human References

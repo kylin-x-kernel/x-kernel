@@ -512,17 +512,29 @@ where
 /// Current task gives up the CPU time voluntarily, and switches to another
 /// ready task.
 pub fn yield_now() {
-    current_run_queue::<NoPreemptIrqSave>().yield_current()
+    current_run_queue::<NoPreemptIrqSave>().yield_current();
 }
 
 /// Current task is going to sleep for the given duration.
+///
+/// # Panics
+///
+/// Panics in hardirq, softirq, or BH-disabled context. Interrupt-like contexts
+/// have no sleepable task state and must not enter the blocking scheduler path.
 pub fn sleep(dur: ktime_types::TimeSpan) {
-    sleep_until(khal::time::monotonic_time() + dur);
+    assert_sleepable_context("sleep");
+    sleep_until_unchecked(khal::time::monotonic_time() + dur);
 }
 
 /// Current task is going to sleep, it will be woken up at the given deadline.
+///
+/// # Panics
+///
+/// Panics in hardirq, softirq, or BH-disabled context. Interrupt-like contexts
+/// have no sleepable task state and must not enter the blocking scheduler path.
 pub fn sleep_until(deadline: ktime_types::MonotonicInstant) {
-    crate::future::block_on(crate::future::sleep_until(deadline));
+    assert_sleepable_context("sleep_until");
+    sleep_until_unchecked(deadline);
 }
 
 /// Current task sleeps until `deadline`, or until another subsystem interrupts
@@ -533,7 +545,13 @@ pub fn sleep_until(deadline: ktime_types::MonotonicInstant) {
 /// [`interrupt_task`] causes an early return. Used by the VMM WFI path so a
 /// vCPU parked waiting for its next timer deadline can be woken immediately
 /// when a virtual IRQ is injected.
+///
+/// # Panics
+///
+/// Panics in hardirq, softirq, or BH-disabled context. Interrupt-like contexts
+/// have no sleepable task state and must not enter the blocking scheduler path.
 pub fn interruptible_sleep_until(deadline: ktime_types::MonotonicInstant) {
+    assert_sleepable_context("interruptible_sleep_until");
     if let Err(error) = crate::future::block_on(crate::future::interruptible(
         crate::future::sleep_until(deadline),
     )) && !error.is_signal()
@@ -543,6 +561,26 @@ pub fn interruptible_sleep_until(deadline: ktime_types::MonotonicInstant) {
             error
         );
     }
+}
+
+fn assert_sleepable_context(operation: &'static str) {
+    assert!(
+        can_sleep_current_context(),
+        "{operation} called from non-sleepable interrupt-like context"
+    );
+}
+
+fn sleep_until_unchecked(deadline: ktime_types::MonotonicInstant) {
+    crate::future::block_on(crate::future::sleep_until(deadline));
+}
+
+fn can_sleep_current_context() -> bool {
+    !kirq::context::is_in_interrupt_context()
+}
+
+#[cfg(unittest)]
+pub fn can_sleep_current_context_for_tests() -> bool {
+    can_sleep_current_context()
 }
 
 /// Exits the current task.
@@ -592,12 +630,24 @@ pub fn sched_stats_text() -> alloc::string::String {
 
 #[cfg(unittest)]
 mod tests_api {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use kirq::{
+        context::local_bh_disable,
+        softirq::{SoftirqVec, raise_softirq, test_support::ScopedSoftirqAction},
+    };
     use unittest::{assert, assert_eq, def_test};
 
     use super::{
-        MIN_SCHED_TIMER_NS, current, sched_stats_text, schedule_deadline_request,
-        select_local_timer_deadline, with_wake_sync,
+        MIN_SCHED_TIMER_NS, can_sleep_current_context_for_tests, current, sched_stats_text,
+        schedule_deadline_request, select_local_timer_deadline, with_wake_sync,
     };
+
+    static SOFTIRQ_SLEEPABLE_OBSERVED: AtomicBool = AtomicBool::new(true);
+
+    fn record_sleep_gate_from_softirq() {
+        SOFTIRQ_SLEEPABLE_OBSERVED.store(can_sleep_current_context_for_tests(), Ordering::Release);
+    }
 
     #[def_test]
     fn timer_arbiter_picks_earliest_deadline() {
@@ -687,6 +737,24 @@ mod tests_api {
         {
             assert!(text.contains("disabled"));
         }
+    }
+
+    #[def_test(serial)]
+    fn sleep_context_gate_rejects_softirq_context() {
+        SOFTIRQ_SLEEPABLE_OBSERVED.store(true, Ordering::Release);
+        let _softirq_action =
+            ScopedSoftirqAction::install(SoftirqVec::Block, record_sleep_gate_from_softirq);
+
+        raise_softirq(SoftirqVec::Block);
+        let _ = kirq::softirq::run_pending_softirqs();
+
+        assert!(!SOFTIRQ_SLEEPABLE_OBSERVED.load(Ordering::Acquire));
+    }
+
+    #[def_test(serial)]
+    fn sleep_context_gate_rejects_bh_disabled_context() {
+        let _bh = local_bh_disable();
+        assert!(!can_sleep_current_context_for_tests());
     }
 }
 

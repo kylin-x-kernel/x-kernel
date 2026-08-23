@@ -33,9 +33,8 @@ pub struct LockupDetection {
     // === Hardlockup Detection ===
     /// Timestamp of the last hardlockup heartbeat (nanoseconds).
     ///
-    /// Written on every local timer IRQ and by the 4s watchdog periodic
-    /// callback; read from NMI. Compared against wall time so the check
-    /// does not depend on the PMU NMI interval.
+    /// Written on every local timer IRQ and read from NMI. Compared against
+    /// wall time so the check does not depend on the PMU NMI interval.
     hard_timestamp: AtomicU64,
     hard_timestamp_initialized: AtomicBool,
 }
@@ -99,7 +98,7 @@ impl LockupDetection {
     // Hardlockup detection
     // =========================================================================
 
-    /// Record a watchdog sample (timer IRQ or the 4s periodic callback).
+    /// Record a watchdog sample from the local timer IRQ.
     #[inline]
     pub fn timer_tick(&self, now: MonotonicInstant) {
         self.hard_timestamp
@@ -129,12 +128,12 @@ impl LockupDetection {
 #[percpu::def_percpu]
 pub static LOCKUP_DETECTION: LockupDetection = LockupDetection::new();
 
-/// Touch softlockup timestamp (called from watchdog thread).
+/// Touch softlockup timestamp from the per-CPU watchdog task.
 #[inline]
 pub fn touch_softlockup(timestamp: MonotonicInstant) {
     // SAFETY: `current_ref_mut_raw` accesses the per‑CPU instance for the
-    // current CPU.  The watchdog thread is pinned to its CPU and runs with
-    // preemption disabled, so the pointer cannot race with migration.
+    // current CPU. The per-CPU watchdog task is pinned before it is activated,
+    // so this short access cannot resume on a different CPU.
     unsafe {
         LOCKUP_DETECTION
             .current_ref_mut_raw()
@@ -144,10 +143,9 @@ pub fn touch_softlockup(timestamp: MonotonicInstant) {
 
 /// Refresh the hardlockup heartbeat.
 ///
-/// Called from every local timer IRQ and from the 4s watchdog periodic
-/// callback. The IRQ path is the source of truth: a live CPU that still
-/// takes timer interrupts will keep this timestamp fresh even if the 4s
-/// sample is delayed.
+/// Called from every local timer IRQ. A live CPU that still takes timer
+/// interrupts will keep this timestamp fresh even if the watchdog task is
+/// delayed.
 #[inline]
 pub fn timer_tick(now: MonotonicInstant) {
     // SAFETY: `current_ref_mut_raw` accesses the per‑CPU instance for the

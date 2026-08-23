@@ -1032,13 +1032,20 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     }
 
     fn apply_runtime_account_side_effects(
-        &self,
+        &mut self,
         elapsed: u64,
         is_idle: bool,
         should_preempt: bool,
     ) {
         if is_idle {
             return;
+        }
+        if elapsed > 0
+            && let Some(worker_context) = kwork::raw::WorkqueueTaskContextIf::current_work_context()
+        {
+            let wake_plan = worker_context.worker_tick_in_scheduler();
+            self.inner
+                .execute_system_worker_wake_plan(worker_context, wake_plan);
         }
         #[cfg(feature = "sched_stat")]
         if should_preempt && elapsed > 0 {
@@ -1283,6 +1290,12 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// Marks the current task `Blocked` and leaves the scheduler without requeue
     /// ([`CurrentDisposition::Block`]).
     ///
+    /// Workerqueue callbacks are accounted here, not in higher-level wait
+    /// wrappers: this is the scheduler's Running→Blocked convergence point and
+    /// therefore the X-Kernel counterpart of Linux `wq_worker_sleeping()`.
+    /// Callers must not add a second workerqueue sleep/resume wrapper around
+    /// this function.
+    ///
     /// # Caller obligations
     ///
     /// 1. The caller must hold the wait-queue / waker lock represented by `woke`.
@@ -1324,6 +1337,8 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
              — caller must hold another KtaskRef across switch (see block_on / blocked_resched \
              rustdoc)"
         );
+
+        self.inner.account_current_worker_sleeping(curr);
 
         // Deactivate while still Running / current, before any concurrent wake
         // can requeue us. Fair schedulers snapshot lag for later enqueue PLACE_LAG.
@@ -1564,6 +1579,7 @@ impl RunQueue {
     ///
     /// This is the only path that should call `Scheduler::enqueue_task` from ktask.
     /// Running tasks leave through `leave_current` on the yield/preempt/block/migrate/exit paths.
+    #[cfg(feature = "smp")]
     fn enqueue_task(&mut self, task: KtaskRef) {
         self.enqueue_ready_task(task, false);
     }
@@ -1786,6 +1802,7 @@ impl RunQueue {
         #[cfg(feature = "preempt")]
         next_task.set_preempt_pending(false);
         next_task.set_state(TaskState::Running);
+        self.account_next_worker_running(&next_task);
 
         let program_next_deadline = |rq: &mut Self, next: &KtaskRef, now: u64| {
             let next_rel = {
@@ -1882,6 +1899,83 @@ impl RunQueue {
             // to indicate that it has finished its scheduling process and no longer running on this CPU.
             #[cfg(feature = "smp")]
             clear_prev_task_on_cpu(self);
+        }
+    }
+
+    fn account_current_worker_sleeping(&mut self, curr: &CurrentTask) {
+        let Some(context) = kwork::raw::WorkqueueTaskContextIf::current_work_context() else {
+            return;
+        };
+        let (did_sleep, wake_plan) = context.worker_will_block_in_scheduler();
+        if !did_sleep {
+            return;
+        }
+        curr.mark_workerqueue_sleep_accounted();
+        self.execute_system_worker_wake_plan(context, wake_plan);
+    }
+
+    fn account_next_worker_running(&mut self, next_task: &KtaskRef) {
+        if !next_task.take_workerqueue_sleep_accounted() {
+            return;
+        }
+        let Some((work_key, queue_key, pool_key, worker_id, worker_token)) =
+            next_task.workerqueue_current_work_context()
+        else {
+            return;
+        };
+        kwork::raw::WorkqueueTaskContext::new(
+            work_key,
+            queue_key,
+            pool_key,
+            kwork::raw::WorkerId::new(worker_id),
+            kwork::raw::WorkerExecutionToken::from_usize(worker_token),
+        )
+        .worker_did_resume();
+    }
+
+    fn execute_system_worker_wake_plan(
+        &mut self,
+        context: kwork::raw::WorkqueueTaskContext,
+        plan: kwork::raw::WorkerWakePlan,
+    ) {
+        let Some(binding) = context.system_pool_binding() else {
+            return;
+        };
+        debug_assert_eq!(
+            binding.cpu_id(),
+            self.cpu_id,
+            "workerqueue scheduler wake plan should target the current run queue"
+        );
+        if let Some(worker_id) = plan.worker_to_wake
+            && let Some(task) = crate::workqueue::system_worker_task_for_wake(
+                binding.kind(),
+                binding.cpu_id(),
+                worker_id,
+            )
+        {
+            self.unblock_workerqueue_task_from_scheduler(task);
+        }
+        if plan.should_wake_manager
+            && let Some(task) =
+                crate::workqueue::system_manager_task_for_wake(binding.kind(), binding.cpu_id())
+        {
+            self.unblock_workerqueue_task_from_scheduler(task);
+        }
+    }
+
+    fn unblock_workerqueue_task_from_scheduler(&mut self, task: KtaskRef) {
+        let task_id = task.trace_id();
+        let is_wake_sync = current_may_uninit().is_some_and(|current| current.is_wake_sync());
+        let wake_enqueue = self.put_task_with_state(task, TaskState::Blocked, is_wake_sync, true);
+        if wake_enqueue == WakeEnqueue::Rejected {
+            return;
+        }
+        #[cfg(feature = "sched_stat")]
+        sched_stat_inc(&sched_stat_cpu(self.cpu_id).unblock_task);
+        fire_task_wakeup(task_id);
+        #[cfg(feature = "preempt")]
+        if wake_enqueue == WakeEnqueue::Enqueued {
+            request_resched_on(self);
         }
     }
 }

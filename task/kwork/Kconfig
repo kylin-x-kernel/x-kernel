@@ -1,0 +1,27 @@
+menu "Kernel Workqueue"
+
+config WORKQUEUE_PENDING_CAP
+    usize "Per-pool pending work ring capacity"
+    range 8 1024
+    default 128
+    help
+      Maximum number of pending work entries one worker pool can hold.
+      All logical workqueues attached to a per-CPU pool share this
+      bounded ring, so capacity pressure grows with the number of
+      attached queues. Enqueue into a full ring fails instead of
+      blocking or allocating, keeping the enqueue path IRQ-safe.
+      Raising the cap increases static memory usage by one entry slot
+      per added slot per pool.
+
+config WORKQUEUE_WORKERS_PER_POOL
+    usize "Maximum worker tasks per system worker pool"
+    range 1 16
+    default 4
+    help
+      Maximum number of worker tasks one per-CPU system worker pool may
+      run. IRQ-safe enqueue paths never create tasks; a provider-owned
+      manager task creates workers on demand up to this cap. Raising the
+      cap increases per-pool static worker records and the provider-side
+      wake-source table.
+
+endmenu

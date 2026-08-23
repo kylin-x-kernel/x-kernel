@@ -1,21 +1,32 @@
 # watchdog
 
-A Non-Maskable Interrupt (NMI) based hard lockup detection watchdog for system monitoring.
+Soft and hard lockup detection for system monitoring.
 
 ## Overview
 
-watchdog is a hard lockup detection implementation that uses NMI mechanisms to periodically trigger interrupts and monitor system state. When a hard lockup occurs, the watchdog can trigger appropriate handling mechanisms.
+watchdog combines timer-driven soft-lockup checks with optional NMI-based
+hard-lockup detection. The soft-lockup heartbeat is a per-CPU watchdog task:
+it is pinned to the owning CPU, runs with elevated scheduler priority, and
+periodically updates the local CPU timestamp. Timer interrupt callbacks check
+whether that timestamp is stale.
+
+The NMI watchdog path also runs registered health checks, including the kwork
+system workqueue backlog check. That check is implemented by kwork and only
+registered through watchdog, so watchdog's own forward progress does not depend
+on system workqueue execution.
 
 ## Usage
 
 ### Initialization
 
 ```rust
-use watchdog::nmi::{HARD_LOCKUP_THRESHOLD, init_primary, init_secondary};
+use watchdog::{init_primary, init_secondary};
+
 // Initialize on primary core
-init_primary(HARD_LOCKUP_THRESHOLD)?;
+init_primary();
+
 // Initialize on secondary cores (call when each secondary core boots)
-init_secondary(HARD_LOCKUP_THRESHOLD)?;
+init_secondary();
 ```
 
 ## Hardware Requirements

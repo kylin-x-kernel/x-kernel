@@ -60,6 +60,42 @@ cargo update -p <crate-name>
 - clean up resources after each test;
 - name tests after the behavior or specification concept being verified.
 
+### Unit Test Determinism And Isolation
+
+Unit tests should verify local semantic contracts, not performance,
+scheduler timing, or real-device timing. A unit test may check that an
+operation becomes observable only when progress is driven by an explicit,
+deterministic action such as `run_one_work()`, `run_pending_softirqs()`,
+`dispatch_actions()`, `complete()`, `wake()`, or a test-owned provider hook.
+
+Avoid these patterns in ordinary unit tests:
+
+- wall-clock thresholds such as "must finish within N ms";
+- median/min/max timing assertions;
+- fixed retry loops that assume "N yields is enough";
+- reliance on real device IRQs, SMP timing, QEMU speed, or host load;
+- reliance on test execution order or global state initialized by earlier tests;
+- leaving global hooks, waiters, queues, IRQ mappings, pending bits, worker
+  hosts, or other runtime registries installed after the test.
+
+Preferred patterns:
+
+- test pure state machines directly where possible;
+- use scoped RAII fixtures to install and restore global state;
+- use unique test IDs or allocate conflict-free resources instead of hard-coded
+  live IRQ, MSI, or device mappings;
+- use explicit synchronization flags, completions, or test hooks to confirm a
+  spawned task reached the intended state before asserting;
+- use deterministic drivers such as `run_one_work()`, `run_pending_softirqs()`,
+  `dispatch_actions()`, or provider test hooks instead of sleeping;
+- move timing, throughput, fairness, latency, and stress checks to integration,
+  performance, or CI stress harnesses.
+
+For IRQ, softirq, workerqueue, timer, and scheduler tests, any test touching
+global runtime state must either use a scoped guard that restores the previous
+state on drop, or document why the initialized state is intentionally permanent
+for the whole unit-test run.
+
 ## When Reviewing
 
 Check specifically for:
@@ -67,4 +103,5 @@ Check specifically for:
 - fixes that changed behavior without adding regression coverage;
 - tests over-coupled to internal implementation names;
 - resource leaks across test cases;
+- unit tests that rely on timing, fixed yield counts, or unscoped global state;
 - feature work mixed with unrelated cleanup in the same commit series.

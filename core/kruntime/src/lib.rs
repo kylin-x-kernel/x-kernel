@@ -529,6 +529,9 @@ fn init_interrupt() {
     if !kirq::softirq::init() {
         warn!("softirq hardirq-exit runner was already installed");
     }
+    if !kirq::init_workerqueue() {
+        warn!("bottom-half workerqueue softirq actions were already installed");
+    }
 
     // Timer interrupt handler. All hardware-timer driving — periodic-tick
     // bookkeeping, soft-timer wheel drain, and hardware re-arm — lives in

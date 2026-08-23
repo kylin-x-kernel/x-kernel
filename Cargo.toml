@@ -69,6 +69,7 @@ kuaccess = { path = "core/kuaccess" }
 kpoll = { path = "task/kpoll" }
 kspin = { path = "task/kspin" }
 ksync = { path = "task/ksync" }
+kwork = { path = "task/kwork" }
 ktask = { path = "task/ktask" }
 ksched = { path = "task/ksched" }
 linked_list_r4l = "0.3"
@@ -209,7 +210,7 @@ chrono = { version = "0.4", default-features = false }
 crate_interface = { version = "0.3", features = ["weak_default"] }
 enum_dispatch = "0.3"
 etherparse = { version = "0.20.2", default-features = false }
-event-listener = { version = "5.4.0", default-features = false }
+event-listener = { version = "=5.4.1", default-features = false }
 extern-trait = "0.2"
 fatfs = { version = "0.1.0-pre.0", default-features = false, package = "axfatfs" }
 hashbrown = "0.16"

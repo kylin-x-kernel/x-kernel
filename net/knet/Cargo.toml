@@ -24,6 +24,7 @@ ktime_types = { workspace = true }
 ksync = { workspace = true }
 kspin = { workspace = true }
 ktask = { workspace = true }
+kwork = { workspace = true }
 kprocess = { workspace = true }
 kcred = { workspace = true }
 kerrno = { workspace = true }
@@ -42,7 +43,7 @@ log = { workspace = true }
 ringbuf = { version = "0.4.8", default-features = false, features = ["alloc"] }
 zerocopy = { workspace = true }
 async-channel = { version = "2.5.0", default-features = false }
-event-listener = { version = "5.4.0", default-features = false }
+event-listener = { workspace = true }
 async-trait = "0.1.88"
 
 [dependencies.smoltcp]

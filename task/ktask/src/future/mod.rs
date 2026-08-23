@@ -73,25 +73,26 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
     loop {
         match fut.as_mut().poll(&mut cx) {
             Poll::Pending => {
+                {
+                    let mut woke = kwaker.woke.lock();
+                    if *woke {
+                        *woke = false;
+                        continue;
+                    }
+                }
+
                 let mut rq = current_run_queue::<NoPreemptIrqSave>();
                 let mut woke = kwaker.woke.lock();
-                if !*woke {
-                    // blocked_resched() will set *woke = false and drop
-                    // the guard internally before rescheduling. When this
-                    // task is woken, woke will be set to true by the waker
-                    // and we'll re-enter the loop to poll again.
-                    rq.blocked_resched(woke);
-                } else {
-                    // The waker fired after `poll()` returned Pending but before
-                    // this task committed to blocking. Re-poll immediately:
-                    // yielding here can hand a saturated CPU to an unrelated
-                    // runnable task even though this future is already ready,
-                    // turning a resolved wake-before-block race into scheduler
-                    // latency. If the wake was spurious, the next Pending poll
-                    // will take the normal blocking path.
+                if *woke {
                     *woke = false;
-                    drop(woke);
+                    continue;
                 }
+
+                // blocked_resched() will set *woke = false and drop
+                // the guard internally before rescheduling. When this
+                // task is woken, woke will be set to true by the waker
+                // and we'll re-enter the loop to poll again.
+                rq.blocked_resched(woke);
             }
             Poll::Ready(output) => break output,
         }

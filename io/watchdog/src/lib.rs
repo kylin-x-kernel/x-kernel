@@ -4,6 +4,8 @@
 
 //! Watchdog subsystem for soft/hard lockup detection.
 #![no_std]
+extern crate alloc;
+
 pub mod init;
 pub mod lockup_detection;
 pub mod rendezvous;

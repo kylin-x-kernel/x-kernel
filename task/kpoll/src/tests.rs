@@ -14,7 +14,7 @@ use core::{
 
 use unittest::{assert, assert_eq, def_test};
 
-use super::{Completion, PollRegistrations, PollSet};
+use super::{Completion, PollEvent, PollRegistrations, PollSet};
 
 fn new_counter() -> &'static AtomicUsize {
     Box::leak(Box::new(AtomicUsize::new(0)))
@@ -187,6 +187,37 @@ fn test_completion_complete_releases_one_token() {
     assert!(completion.try_wait());
     assert!(!completion.is_completed());
     assert!(!completion.try_wait());
+}
+
+#[def_test]
+fn test_poll_event_broadcasts_generation_change_to_all_waiters() {
+    let event = PollEvent::new();
+    let observed_generation = event.generation();
+    let first_counter = new_counter();
+    let second_counter = new_counter();
+    let first_waker = make_waker(first_counter);
+    let second_waker = make_waker(second_counter);
+    let mut first_registrations = PollRegistrations::new();
+    let mut second_registrations = PollRegistrations::new();
+
+    event
+        .register(&mut first_registrations.context(&Context::from_waker(&first_waker)))
+        .expect("event waiter registration should succeed");
+    event
+        .register(&mut second_registrations.context(&Context::from_waker(&second_waker)))
+        .expect("event waiter registration should succeed");
+
+    let wake_set = event.notify_defer_wake();
+    assert!(event.has_changed_since(observed_generation));
+    assert_eq!(first_counter.load(Ordering::SeqCst), 0);
+    assert_eq!(second_counter.load(Ordering::SeqCst), 0);
+
+    assert_eq!(wake_set.wake(), 2);
+    assert_eq!(first_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(second_counter.load(Ordering::SeqCst), 1);
+
+    drop(first_registrations);
+    drop(second_registrations);
 }
 
 #[def_test]

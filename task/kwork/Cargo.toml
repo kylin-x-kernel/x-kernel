@@ -1,0 +1,25 @@
+[package]
+name = "kwork"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+description = "Generic kernel workerqueue core"
+
+[features]
+default = []
+
+[dependencies]
+bitflags = { workspace = true }
+kbuild_config = { workspace = true }
+kcpu_id_map = { workspace = true }
+kiface = { workspace = true }
+klazy = { workspace = true }
+kpoll = { workspace = true }
+kspin = { workspace = true }
+ktime_types = { workspace = true }
+log = { workspace = true }
+unittest = { workspace = true }

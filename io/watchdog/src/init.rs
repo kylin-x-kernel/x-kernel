@@ -4,9 +4,12 @@
 
 //! Watchdog initialization and optional NMI handler setup.
 
+use alloc::format;
+
+use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use khal::percpu::this_cpu_id;
-use ktask::{KCpuMask, TaskInner};
-use log::debug;
+use ktime_types::TimeSpan;
+use log::{debug, warn};
 
 /// Per-CPU timestamp of the last softlockup report.
 /// Rate-limits reports to one per threshold period so a genuine lockup
@@ -14,10 +17,13 @@ use log::debug;
 #[percpu::def_percpu]
 static LAST_SOFTLOCKUP_REPORT: Option<ktime_types::MonotonicInstant> = None;
 
+const SOFTLOCKUP_TOUCH_INTERVAL: TimeSpan = TimeSpan::from_secs(4);
+const WATCHDOG_TASK_PRIO: isize = -20;
+
 /// Common watchdog initialization for both primary and secondary CPUs.
 ///
 /// It sets up:
-/// - soft lockup detection (timer + watchdog task)
+/// - soft lockup detection (timer check + per-CPU watchdog task)
 fn init_common() {
     // Hardlockup is "this CPU stopped taking timer IRQs", not "the 4s sample
     // callback did not run between two PMU NMIs". Count every local timer IRQ.
@@ -28,6 +34,7 @@ fn init_common() {
 
     // Register mutex deadlock check
     crate::register_watchdog_task(&crate::watchdog_task::MUTEX_DEADLOCK_CHECK);
+    crate::register_watchdog_task(&SYSTEM_WORKQUEUE_CHECK);
 
     #[cfg(feature = "nmi")]
     init_nmi_watchdog();
@@ -109,9 +116,8 @@ fn init_nmi_watchdog() {
 
 /// Initialize soft lockup detection.
 ///
-/// A per-CPU watchdog task periodically updates a timestamp,
-/// and timer callbacks check whether the timestamp is stale.
-/// Initialize soft lockup detection on the current CPU.
+/// A per-CPU watchdog task periodically updates a timestamp, and timer
+/// callbacks check whether the timestamp is stale.
 pub fn init_softlockup_detection() {
     // Explicit sample period — Linux softlockup_thresh/5 (4s), independent of
     // the dynamic schedule timer.
@@ -124,8 +130,6 @@ pub fn init_softlockup_detection() {
             crate::timer_tick(now);
 
             if crate::check_softlockup(now) {
-                // SAFETY: timer callbacks run with interrupts disabled on the
-                // current CPU, so per-CPU raw access is safe from migration.
                 // SAFETY: timer callbacks run with interrupts disabled and cannot
                 // migrate while accessing the current CPU's report timestamp.
                 let last = unsafe { *LAST_SOFTLOCKUP_REPORT.current_ref_raw() };
@@ -138,8 +142,6 @@ pub fn init_softlockup_detection() {
                         this_cpu_id().as_usize()
                     );
                     ktask::dump_sched_stats();
-                    // SAFETY: timer callback, IRQs disabled, same CPU as the
-                    // `read_current_raw` above — cannot race with migration.
                     // SAFETY: the same non-migrating timer callback exclusively
                     // updates this CPU's report timestamp.
                     unsafe { *LAST_SOFTLOCKUP_REPORT.current_ref_mut_raw() = Some(now) };
@@ -149,21 +151,55 @@ pub fn init_softlockup_detection() {
         },
     );
 
-    // Sleep 4s between touches instead of yielding — the softlockup threshold
-    // is 20s, so this gives 5 wakeup chances (20s / 4s) before a false positive while
-    // keeping the CPU truly idle when there is no other work.
-    let watchdog_task = TaskInner::new_pidless_kthread(
-        move || loop {
-            crate::touch_softlockup(khal::time::monotonic_time());
-            ktask::sleep(ktime_types::TimeSpan::from_secs(4));
-        },
-        "watchdog".into(),
-        kbuild_config::TASK_STACK_SIZE,
-    );
+    let cpu_id = this_cpu_id();
+    crate::touch_softlockup(khal::time::monotonic_time());
+    start_softlockup_watchdog_task(cpu_id);
+}
 
-    // Bind watchdog task to the local CPU.
-    watchdog_task.set_cpumask(KCpuMask::one_shot(this_cpu_id().as_usize()));
-    ktask::spawn_task(watchdog_task);
+fn start_softlockup_watchdog_task(cpu_id: LogicalCpuId) {
+    let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
+        softlockup_watchdog_task,
+        format!("watchdog/{}", cpu_id.as_usize()),
+        kbuild_config::TASK_STACK_SIZE,
+    ));
+    if !ktask::set_task_affinity(&task, ktask::KCpuMask::one_shot_logical(cpu_id)) {
+        warn!(
+            "watchdog: failed to pin softlockup watchdog task to cpu {}",
+            cpu_id.as_usize()
+        );
+        return;
+    }
+    if !ktask::set_task_prio(&task, WATCHDOG_TASK_PRIO) {
+        warn!(
+            "watchdog: failed to raise softlockup watchdog task priority on cpu {}",
+            cpu_id.as_usize()
+        );
+    }
+    ktask::activate_task(&task);
+}
+
+fn softlockup_watchdog_task() {
+    loop {
+        crate::touch_softlockup(khal::time::monotonic_time());
+        ktask::sleep(SOFTLOCKUP_TOUCH_INTERVAL);
+    }
+}
+
+struct SystemWorkqueueCheck;
+
+static SYSTEM_WORKQUEUE_CHECK: SystemWorkqueueCheck = SystemWorkqueueCheck;
+
+impl crate::watchdog_task::WatchdogTask for SystemWorkqueueCheck {
+    fn name(&self) -> &str {
+        "SystemWorkqueue"
+    }
+
+    fn check(&self) -> bool {
+        kwork::system_workqueue_watchdog_check(
+            khal::time::monotonic_time(),
+            crate::lockup_detection::DEFAULT_SOFTLOCKUP_THRESHOLD,
+        )
+    }
 }
 
 /// Initialize watchdogs on the primary CPU.

@@ -14,6 +14,8 @@
 //! same poll registration model. It is intentionally scheduler-agnostic so
 //! low-level kernel subsystems can own completion state without depending on
 //! task blocking APIs.
+//! [`PollEvent`] adds generation-based broadcast wakeups for state changes that
+//! require all waiters to recheck their own predicates.
 
 #![no_std]
 #![deny(missing_docs)]
@@ -21,12 +23,14 @@
 extern crate alloc;
 
 mod completion;
+mod event;
 mod events;
 mod registration;
 mod source;
 mod tests;
 
 pub use completion::Completion;
+pub use event::PollEvent;
 pub use events::IoEvents;
 pub use registration::{PollContext, PollRegisterError, PollRegistration, PollRegistrations};
 pub use source::PollSet;

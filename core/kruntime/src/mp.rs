@@ -116,6 +116,7 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     kirq::enable(of::pmu_irq_or(kbuild_config::PMU_IRQ), true);
 
     ktask::init_softirqd_current_cpu();
+    ktask::init_system_workqueue_worker();
 
     karch::enable_local_irq();
 

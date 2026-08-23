@@ -243,6 +243,25 @@ impl Drop for HardIrqContextGuard {
     }
 }
 
+#[cfg(unittest)]
+pub mod test_support {
+    use super::HardIrqContextGuard;
+
+    /// Test-only guard that enters hardirq context until dropped.
+    pub struct ScopedHardIrqContext {
+        _guard: HardIrqContextGuard,
+    }
+
+    impl ScopedHardIrqContext {
+        /// Enters a synthetic hardirq context for cross-crate unit tests.
+        pub fn enter() -> Self {
+            Self {
+                _guard: HardIrqContextGuard::enter(),
+            }
+        }
+    }
+}
+
 pub(crate) struct SoftIrqContextGuard {
     irqoff: bool,
 }
