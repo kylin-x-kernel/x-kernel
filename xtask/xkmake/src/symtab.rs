@@ -57,6 +57,24 @@ pub(crate) fn generate(context: &BuildContext) -> Result<bool> {
     write_if_changed(&output, &blob)
 }
 
+/// Ensure the blob input always exists when `KFEAT_SYMTAB` is disabled.
+///
+/// `util/backtrace/build.rs` declares `cargo:rerun-if-changed` on
+/// `$TARGET_DIR/kbuild/ksymtab.bin` so the embedded table catches up when the
+/// blob appears or changes. Cargo treats a *missing* `rerun-if-changed` input
+/// as permanently dirty, which would rebuild `backtrace` and every transitive
+/// dependent on each `xkmake build`. Writing the empty blob here keeps the
+/// input present and content-stable across builds, so the build script only
+/// reruns when the symbol table actually changes.
+pub(crate) fn ensure_empty(context: &BuildContext) -> Result<()> {
+    let output = context.target_dir.join("kbuild").join("ksymtab.bin");
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent).with_path(parent)?;
+    }
+    write_if_changed(&output, &empty_blob())?;
+    Ok(())
+}
+
 fn build_blob(elf_path: &Path) -> Result<Vec<u8>> {
     let bytes = fs::read(elf_path).with_path(elf_path)?;
     let elf = Elf::parse(&bytes).map_err(|err| {

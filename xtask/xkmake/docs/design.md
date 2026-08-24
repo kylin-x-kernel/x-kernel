@@ -113,6 +113,12 @@ LCOV 到 Cobertura XML 的转换是 unittest 覆盖率流程的内部阶段，�
 `.text` 系段的函数，而 `.text` 在 `.rodata` 之前——blob 大小的变化
 不会改变表内记录的地址。第二轮的 blob 与第一轮相同，构建停止。
 
+KFEAT_SYMTAB=n 时同样会落盘一个空的 16 字节 blob。`util/backtrace`
+的 build.rs 以 `cargo:rerun-if-changed` 跟踪 `$TARGET_DIR/kbuild/
+ksymtab.bin`，而 Cargo 对不存在的 `rerun-if-changed` 输入一律视为
+dirty，会导致 backtrace 及其全部传递依赖在每次构建时被全量重编译。
+保持该输入始终存在且内容稳定，才能让后续构建完整命中 Cargo 增量缓存。
+
 ### Symbolize
 
 `make symbolize LOG=<log>` 从日志提取 `Backtrace:` 块的原始地址（兼容

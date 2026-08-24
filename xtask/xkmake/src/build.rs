@@ -397,10 +397,15 @@ fn create_bundle(
     }
 
     // Regenerate the symbol table from the current ELF; `true` means the
-    // blob changed and the kernel must be relinked to embed it.
+    // blob changed and the kernel must be relinked to embed it. When
+    // `KFEAT_SYMTAB` is off, still materialize the blob (empty) so
+    // `util/backtrace`'s `rerun-if-changed` input never goes missing — a
+    // missing input would keep that build script permanently dirty and force
+    // a full dependent rebuild on every invocation.
     let symtab_changed = if context.config.is_enabled("KFEAT_SYMTAB") {
         crate::symtab::generate(context)?
     } else {
+        crate::symtab::ensure_empty(context)?;
         false
     };
 
