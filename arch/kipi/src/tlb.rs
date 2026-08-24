@@ -64,6 +64,22 @@ static LAST_HANDLED_PENDING_EPOCH: u64 = 0;
 
 const SHOOTDOWN_WARN: TimeSpan = TimeSpan::from_secs(1);
 
+/// Bounded-wait policy for a target that has not acknowledged the request.
+///
+/// A pending fixed IPI is latched and delivered on real x86 hardware even to
+/// an idle target with interrupts enabled, so an unbounded wait would only
+/// ever be correct there. Under emulated delivery (TCG wakeup races) a single
+/// IPI can be silently lost, so:
+/// - `SHOOTDOWN_RESEND_INTERVAL`: re-deliver the IPI periodically; this both
+///   feeds the IRQ-off inbound poll (`handle_shootdown`) and recovers from a
+///   transient delivery loss.
+/// - `SHOOTDOWN_ESCALATE_TIMEOUT`: after sustained non-ack, report loudly.
+/// - `SHOOTDOWN_GIVE_UP_TIMEOUT`: stop waiting, flush the local TLB and
+///   return so the system makes progress instead of hanging forever.
+const SHOOTDOWN_RESEND_INTERVAL: TimeSpan = TimeSpan::from_secs(1);
+const SHOOTDOWN_ESCALATE_TIMEOUT: TimeSpan = TimeSpan::from_secs(10);
+const SHOOTDOWN_GIVE_UP_TIMEOUT: TimeSpan = TimeSpan::from_secs(30);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RequestSeq(u64);
 
@@ -416,8 +432,34 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
 
             let start = khal::time::monotonic_time();
             let mut warned = false;
+            let mut escalated = false;
             for target in targets.iter().flatten() {
+                let mut last_resend = start;
                 while !active_slot.is_acked_by(target.as_usize(), request_seq) {
+                    let now = khal::time::monotonic_time();
+                    let elapsed = now.saturating_duration_since(start);
+                    // Bounded fallback: the target never acknowledged despite
+                    // periodic re-delivery. On real hardware this is only
+                    // reachable when the target is truly wedged; under TCG it
+                    // also covers an emulator delivery/wakeup loss. Do not spin
+                    // forever: flush the local TLB, report loudly, and return
+                    // so the rest of the system can keep making progress.
+                    if elapsed >= SHOOTDOWN_GIVE_UP_TIMEOUT {
+                        error!(
+                            "tlb shootdown GAVE UP: initiator_cpu={} target_cpu={} elapsed_ms={} \
+                             flush_all={} vaddr={:?} request_seq={} targeted={:?} acked={:?}",
+                            active_slot.initiator(),
+                            target.as_usize(),
+                            elapsed.into_core().as_millis() as u64,
+                            vaddr.is_none(),
+                            vaddr,
+                            request_seq.get(),
+                            active_slot.targeted_snapshot(),
+                            active_slot.acked_snapshot()
+                        );
+                        karch::flush_tlb(vaddr);
+                        return;
+                    }
                     // Incoming shootdowns must be drained here. `flush_remote`
                     // is often reached with IRQs already off (page-table
                     // `SpinNoIrq`, syscall/fault paths). Waiting only for the
@@ -425,7 +467,14 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
                     // neither can ack. `handle_shootdown` reads published
                     // slots directly, so a missed IPI still completes.
                     handle_shootdown();
-                    let elapsed = khal::time::monotonic_time().saturating_duration_since(start);
+                    // Re-deliver the IPI periodically. This feeds the IRQ-off
+                    // inbound poll above and, critically, recovers from a
+                    // transient delivery loss (e.g. TCG wakeup races) instead
+                    // of waiting on a single IPI that never arrived.
+                    if now.saturating_duration_since(last_resend) >= SHOOTDOWN_RESEND_INTERVAL {
+                        last_resend = now;
+                        kirq::notify_cpu(IPI_IRQ, TargetCpu::Specific(target.as_usize()));
+                    }
                     if !warned && elapsed >= SHOOTDOWN_WARN {
                         warned = true;
                         warn!(
@@ -438,6 +487,18 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
                             request_seq.get(),
                             active_slot.targeted_snapshot(),
                             active_slot.acked_snapshot()
+                        );
+                    }
+                    if !escalated && elapsed >= SHOOTDOWN_ESCALATE_TIMEOUT {
+                        escalated = true;
+                        error!(
+                            "tlb shootdown STALL sustained: initiator_cpu={} target_cpu={} \
+                             elapsed_ms={} request_seq={}; re-delivering but target still not \
+                             acknowledging",
+                            active_slot.initiator(),
+                            target.as_usize(),
+                            elapsed.into_core().as_millis() as u64,
+                            request_seq.get()
                         );
                     }
                     core::hint::spin_loop();
