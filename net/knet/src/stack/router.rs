@@ -23,7 +23,9 @@ pub(crate) use crate::netlink::{
 use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
-    device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice},
+    device::{
+        LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice,
+    },
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
 };
 
@@ -353,6 +355,39 @@ impl Router {
                 .into_iter()
                 .map(|packet| PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack)),
         );
+        Ok(())
+    }
+
+    /// Returns whether `dst` is routed through a loopback device.
+    pub(crate) fn is_loopback_destination(&self, dst: &IpAddress) -> bool {
+        self.table.lookup(dst).is_some_and(|rule| {
+            self.devices
+                .get(rule.dev)
+                .is_some_and(|device| device.link_kind() == LinkKind::Loopback)
+        })
+    }
+
+    /// Transmits an IPv4 packet through the current route without waiting for
+    /// the poller TX queue.
+    ///
+    /// Loopback xmit raises `NetRx` and drains it on `local_bh_enable`, matching
+    /// Linux `dev_queue_xmit` → `loopback_xmit` → `__netif_rx`.
+    /// A full shared `NetRx` queue drops the packet and still returns `Ok`,
+    /// matching `loopback_xmit` returning `NETDEV_TX_OK` after `__netif_rx`
+    /// reports `NET_RX_DROP`.
+    pub(crate) fn transmit_ipv4_now(
+        &mut self,
+        packet: Vec<u8>,
+        timestamp: MonotonicInstant,
+    ) -> KResult {
+        let packets = self.fragment_ipv4_packet_for_output(packet)?;
+        for packet in packets {
+            let buf = PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack);
+            // RX-ready hint for the poller, not send success. This path is
+            // not the poller; a dropped loopback packet is still a successful
+            // xmit, as documented above.
+            let _poll_next = self.dispatch_ipv4_packet(buf, timestamp);
+        }
         Ok(())
     }
 
@@ -878,6 +913,11 @@ impl Router {
         (work_done, poll_next || self.has_queued_tx_packets())
     }
 
+    /// Dispatches one IPv4 packet onto the selected device.
+    ///
+    /// Returns whether the send made RX ready, which [`Self::dispatch_budgeted`]
+    /// uses as its `poll_next` hint. Ethernet TX and dropped packets return
+    /// `false`.
     fn dispatch_ipv4_packet(&mut self, mut packet: PacketBuf, timestamp: MonotonicInstant) -> bool {
         let header = match Ipv4Header::prepare_output_packet(&mut packet) {
             Ok(header) => header,
@@ -1041,7 +1081,7 @@ mod tests {
         router
     }
 
-    #[def_test]
+    #[def_test(serial)]
     fn exact_rx_budget_does_not_report_empty_device() {
         let mut router = router_with_ready_loopback_packet();
         let mut packets = Vec::new();
@@ -1052,7 +1092,7 @@ mod tests {
         assert!(!drain.has_more);
     }
 
-    #[def_test]
+    #[def_test(serial)]
     fn zero_rx_budget_reports_ready_device() {
         let mut router = router_with_ready_loopback_packet();
         let mut packets = Vec::new();

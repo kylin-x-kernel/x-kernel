@@ -41,15 +41,17 @@ impl IngressProcessor {
         self.local_ipv4_addrs.extend_from_slice(addrs);
     }
 
+    /// Consumes `packets` and appends work for the shared stack and control TX.
+    ///
+    /// The output batches may contain work retained from an earlier poll round
+    /// whose shared destination lock was contended.
     pub fn handle_rx_packets(
         &mut self,
         timestamp: MonotonicInstant,
         packets: &mut Vec<PacketBuf>,
         accepted_packets: &mut Vec<PacketBuf>,
         control_packets: &mut Vec<Vec<u8>>,
-        sockets: &mut SocketSet<'_>,
     ) {
-        accepted_packets.clear();
         for expired in self.ipv4_reassembler.remove_expired(timestamp) {
             queue_icmpv4_error(
                 control_packets,
@@ -60,13 +62,7 @@ impl IngressProcessor {
             );
         }
         for packet in packets.drain(..) {
-            self.handle_rx_packet(
-                timestamp,
-                packet,
-                accepted_packets,
-                control_packets,
-                sockets,
-            );
+            self.handle_rx_packet(timestamp, packet, accepted_packets, control_packets);
         }
     }
 
@@ -76,22 +72,13 @@ impl IngressProcessor {
         packet: PacketBuf,
         accepted_packets: &mut Vec<PacketBuf>,
         control_packets: &mut Vec<Vec<u8>>,
-        sockets: &mut SocketSet<'_>,
     ) {
         let Some(ip_packet) = packet.network_packet() else {
             return;
         };
         match ipv4::ip_version(ip_packet) {
-            Some(4) => self.handle_ipv4_input(
-                timestamp,
-                packet,
-                accepted_packets,
-                control_packets,
-                sockets,
-            ),
+            Some(4) => self.handle_ipv4_input(timestamp, packet, accepted_packets, control_packets),
             Some(6) => {
-                // UDP error delivery currently supports only ICMPv4.
-                snoop_ipv6_tcp_packet(ip_packet, sockets);
                 accepted_packets.push(packet);
             }
             _ => debug!("Dropping packet with invalid IP version"),
@@ -104,7 +91,6 @@ impl IngressProcessor {
         mut packet: PacketBuf,
         accepted_packets: &mut Vec<PacketBuf>,
         control_packets: &mut Vec<Vec<u8>>,
-        sockets: &mut SocketSet<'_>,
     ) {
         let header = match Ipv4Header::validate_input_packet(&mut packet) {
             Ok(header) => header,
@@ -117,13 +103,9 @@ impl IngressProcessor {
 
         if header.is_fragmented() {
             match self.ipv4_reassembler.reassemble(packet, header, timestamp) {
-                Ipv4ReassemblyResult::Complete(packet) => self.handle_ipv4_input(
-                    timestamp,
-                    packet,
-                    accepted_packets,
-                    control_packets,
-                    sockets,
-                ),
+                Ipv4ReassemblyResult::Complete(packet) => {
+                    self.handle_ipv4_input(timestamp, packet, accepted_packets, control_packets)
+                }
                 Ipv4ReassemblyResult::Pending | Ipv4ReassemblyResult::Dropped => {}
             }
             return;
@@ -131,14 +113,18 @@ impl IngressProcessor {
 
         if header.protocol() == ipv4::PROTOCOL_UDP {
             let packet_type = packet.packet_type();
-            let (disposition, returned_packet) = udp::handle_ipv4_packet(header, packet);
+            let packet = match udp::prepare_ipv4_packet(header, packet) {
+                Ok(packet) => packet,
+                Err(_) => return,
+            };
+            let (disposition, returned_packet) = udp::deliver_ipv4_packet(packet);
             match disposition {
-                udp::InputDisposition::Accepted | udp::InputDisposition::Malformed => return,
+                udp::InputDisposition::Accepted => return,
                 udp::InputDisposition::NoSocket if !header.is_broadcast_or_multicast() => {
                     let Some(packet) = returned_packet else {
                         return;
                     };
-                    let Some(ip_packet) = packet.network_packet() else {
+                    let Some(ip_packet) = packet.packet().network_packet() else {
                         return;
                     };
                     queue_icmpv4_error(
@@ -169,15 +155,6 @@ impl IngressProcessor {
 
         if let Some(ip_packet) = packet.network_packet() {
             udp_err::inspect_icmpv4_error(ip_packet);
-            if let Some(payload) = ipv4::payload(ip_packet, &header) {
-                snoop_tcp_segment(
-                    header.protocol(),
-                    SmoltcpIpAddress::Ipv4(header.src_addr().into()),
-                    SmoltcpIpAddress::Ipv4(header.dst_addr().into()),
-                    payload,
-                    sockets,
-                );
-            }
         }
         accepted_packets.push(packet);
     }
@@ -189,6 +166,39 @@ impl IngressProcessor {
                 .local_ipv4_addrs
                 .iter()
                 .any(|addr| addr.address() == dst_addr || addr.broadcast() == Some(dst_addr))
+    }
+}
+
+/// Updates TCP listener state before accepted packets enter smoltcp.
+///
+/// UDP delivery has already completed before this function takes the shared
+/// smoltcp socket-set lock. This keeps custom UDP ingress independent from
+/// unrelated TCP socket operations while preserving listener setup before a
+/// TCP SYN reaches smoltcp.
+pub(crate) fn prepare_smoltcp_ingress(packets: &[PacketBuf], sockets: &mut SocketSet<'_>) {
+    for packet in packets {
+        let Some(ip_packet) = packet.network_packet() else {
+            continue;
+        };
+        match ipv4::ip_version(ip_packet) {
+            Some(4) => {
+                let Ok(header) = Ipv4Header::parse_input(ip_packet) else {
+                    continue;
+                };
+                let Some(payload) = ipv4::payload(ip_packet, &header) else {
+                    continue;
+                };
+                snoop_tcp_segment(
+                    header.protocol(),
+                    SmoltcpIpAddress::Ipv4(header.src_addr().into()),
+                    SmoltcpIpAddress::Ipv4(header.dst_addr().into()),
+                    payload,
+                    sockets,
+                );
+            }
+            Some(6) => snoop_ipv6_tcp_packet(ip_packet, sockets),
+            _ => {}
+        }
     }
 }
 

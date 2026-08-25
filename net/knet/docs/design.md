@@ -25,6 +25,7 @@ net/knet/
     │   ├── mod.rs
     │   ├── ethernet.rs
     │   ├── loopback.rs
+    │   ├── net_rx.rs
     │   └── vsock.rs
     ├── link/
     │   ├── buf.rs
@@ -121,7 +122,7 @@ core/kruntime
 | `Router` | 管理设备列表、IPv4 地址、配置路由、地址派生路由、RX 设备游标、smoltcp ingress queue、control/data TX queue、IPv4 输出分片、next-hop 选择和 budget dispatch |
 | `IngressProcessor` | 在 Router 锁外校验和重组 IPv4 输入，执行 crate 内 UDP 分流、UDP error 与 TCP listen snoop，并生成 ICMPv4 control packet |
 | `NetDevice` | 抽象 loopback 和 Ethernet 设备后端，持有接口名、MTU、管理 up 状态、link snapshot 和设备邻居状态，通过 `PacketBuf` 转移报文所有权，并使用 crate 内地址类型和 `MonotonicInstant` 表达设备边界 |
-| `PacketBuf` | 保存报文数据、协议偏移、接口索引、包类型、校验状态和当前所有者 |
+| `PacketBuf` | 指针大小的引用计数报文句柄，保存报文数据、协议偏移、接口索引、包类型、校验状态、已校验传输层元数据和当前所有者；共享后的写操作通过写时复制保持各句柄状态独立 |
 | `link::wire` | 使用 `zerocopy` 校验和构造 Ethernet 与 Ethernet/IPv4 ARP 头部 |
 | `stack::ipv4` | 使用 `etherparse` 校验和构造 IPv4 与 ICMPv4 头部，并执行输出分片 |
 | `stack::fragment` | 按源地址、目的地址、标识、协议和接口重组本地 IPv4 分片，并限制队列数量、内存和存活时间 |
@@ -141,15 +142,18 @@ core/kruntime
 并通过 `driver_net::NetRxScheduler` 把一个 IRQ-safe 调度能力 attach 给驱动。
 NIC 硬中断 handler 只负责 ack 设备中断并调用 `schedule_rx()`；
 `schedule_rx()` 标记对应设备有 RX work，并 raise `kirq::softirq::SoftirqVec::NetRx`。
-当前 `NetRx` softirq action 仍是保守 fallback 形态：它只消费已 pending
-的设备 RX source，唤醒对应设备 RX `PollSet`，并调度 `knet-poller`
-dynamic kwork 执行 sleepable 协议推进；普通 socket 轮询路径也可以在被唤醒后
-执行一次 assist。
-这与 Linux NAPI 的最终形态不同：Linux `NET_RX_SOFTIRQ` 会在
+当前 `NetRx` softirq action 对 Ethernet 仍是保守 fallback 形态：它只消费已 pending
+的设备 RX source，唤醒对应设备 RX `PollSet`，并调度 `knet-poller` dynamic kwork
+执行 sleepable 协议推进；普通 socket 轮询路径也可以在被唤醒后执行一次 assist。
+Loopback 走单独的 Linux 对齐路径：xmit 在关闭 BH 前给完整 IPv4 UDP 盖上接收元数据，
+把同一 `PacketBuf` 放入共享 `NET_RX_QUEUE` 的 `pending_udp` 并 raise `NetRx`，
+`local_bh_enable` 在发送路径上跑 `NetRx`，已盖戳的 UDP 直接进入 PCB。
+`NetRx` 只 drain `pending_udp`，不查找 `LoopbackDevice`。
+TCP、ICMP、IPv6、分片和未命中 socket 的 UDP 留在 `deferred`，由任务 poller `poll_rx` 取出。
+这与 Linux NAPI 的最终形态仍不同：Linux `NET_RX_SOFTIRQ` 会在
 `net_rx_action()` 中直接按 budget drain NAPI poll list。X-Kernel 后续要
-达到同类形态，需要先补齐非阻塞 RX ingress 或 workerqueue 承接层，因为当前
-`Service` / `SocketSet` 和下游 UDP registry、listen table、packet handler
-仍使用可睡眠锁。
+达到同类形态，需要先补齐 Ethernet 非阻塞 RX ingress 或 workerqueue 承接层，因为当前
+`Service` / `SocketSet` 和 TCP listen table 仍使用可睡眠锁。
 如果驱动不支持 `NetRxScheduler` attach，`EthernetDevice` 不会注册专用 RX
 `PollSet`，等待路径回退到 `Service` 的 timeout 聚合 waker，避免等待一个
 永远不会被驱动唤醒的 source。如果 `NetRx` softirq vector 无法注册，
@@ -177,14 +181,18 @@ dynamic kwork 执行 sleepable 协议推进；普通 socket 轮询路径也可�
 - **IRQ 路径只做通知**：
   设备中断回调应只负责 ack 设备中断、登记 RX pending 并调度
   `NetRx` softirq，不应直接执行完整的协议推进或阻塞式 socket 语义。
-- **当前 NetRx softirq 不直接推进协议栈**：
-  `NetRx` softirq 运行在不可睡眠上下文。现阶段它只消费 pending RX source、
-  唤醒对应设备 RX `PollSet`，并调度 `knet-poller` work。该 work 在 kwork
-  任务上下文发布 RX 工作，并尝试执行一个受批次轮数上限约束的数据面批次。普通
-  socket polling waiter 也可能通过该 `PollSet` 被唤醒并 assist 一次；协议推进仍由
-  任务/轮询路径执行。
-  在 `knet` 形成全链路 nonblocking receive path 之前，不应从
-  softirq 直接调用 `poll_interfaces`。
+- **NetRx softirq 可交付 loopback UDP，但不得调用 `poll_interfaces`**：
+  `NetRx` 运行在不可睡眠上下文。Ethernet 路径只消费 pending RX source
+  并唤醒对应设备 RX `PollSet`，随后调度 `knet-poller` work 在 kwork 任务
+  上下文执行受批次轮数上限约束的数据面推进。
+  Loopback 发送侧在关闭 BH 前完成 UDP 校验，并把地址与 payload range
+  写入现有 `PacketBuf` 的控制元数据；
+  同一 action 只从 `pending_udp` 取出这些已盖戳句柄，经 `SpinNoIrq` PCB registry 移入已预留容量的
+  接收队列并唤醒 socket waiter，因此 action 的 UDP 投递热路径不执行堆分配。
+  TCP、ICMP、IPv6、分片和未命中 socket 的 UDP 留在 `deferred`，由任务 poller
+  通过 `poll_rx` 取出。
+  不得从 softirq 调用 `poll_interfaces` 或获取 `Service` / `SocketSet`
+  的可睡眠锁。
 - **允许阻塞的路径依赖 poll/waker 语义**：
   阻塞式 socket 操作依赖 `PollSet`、waker
   和 timeout 注册机制。`Pollable::register` 只能通过调用方提供的
@@ -292,6 +300,7 @@ IDLE ──notify──────────────> SCHEDULED
 `RUNNING_PENDING` 记录执行期间到达的新通知。完成路径通过一次 CAS 同时归还执行权
 并发布 `IDLE` 或 `SCHEDULED`，通知与完成并发时由同一原子修改序列保留事件。
 `SCHEDULED` 状态由 `knet-poller` dynamic kwork 或 socket assist 竞争批次执行权。
+Loopback UDP 独立于 poller 执行权，发送路径在 BH 窗口内完成 xmit 与 `NetRx` 交付。
 `Interface::poll_at` 返回的下一次协议 deadline 由 `Service` 注册为 timer，
 到期后调度 poller 并唤醒正在等待 socket readiness 的任务。
 
@@ -312,19 +321,20 @@ IDLE ──notify──────────────> SCHEDULED
 
 1. `NetRx` softirq 在设备 RX pending 后调用 `NetworkPoller::notify(PollReason::Rx)`，调度 `knet-poller` work；socket recv 和 readiness 路径通过 `poll_interfaces` 尝试执行一次已有工作；TCP、UDP 和 raw TX 生产路径通过 `notify(PollReason::Tx)` 发布工作。TCP 从可编码为零窗口的低余量接收缓冲区消费数据时通过 `notify(PollReason::RxWindow)` 主动重开对端窗口。
 2. 普通 `notify` 在 `IDLE` 上发布 `SCHEDULED` 并 queue `knet-poller` work。执行期间的新工作进入 `RUNNING_PENDING`；kwork callback 和 assist 只有一个能够通过 `SCHEDULED` 到 `RUNNING` 的 CAS。
-3. `Router::drain_rx_budgeted_into` 按 RX budget 从设备轮转拉取 `PacketBuf`，`next_rx_device` 在设备间保持公平并随设备删除修正。
-4. `IngressProcessor` 在 Router 锁外校验 IPv4 头、长度、校验和与本地目的地址，并完成 IPv4 分片重组。
-5. 完整 UDP 数据报进入 crate 内 UDP PCB 分流，未命中 socket 的单播 UDP 触发 ICMPv4 Port Unreachable。UDP PCB 按 FIFO 保留已入队数据报，`connect` 只影响后续入包的 peer 匹配。
-6. TCP、raw IP、ICMP 和 IPv6 packet 进入有界 smoltcp ingress queue。`Service` 先执行 `poll_maintenance`，再按 RX budget 逐个调用 `poll_ingress_single`，并按 TX budget 调用有界的 `poll_egress`。达到预算或时间边界后，剩余 ingress 保持 FIFO 顺序并进入后续轮次。
-7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
-8. `Router::dispatch_budgeted` 先处理 control TX queue，再处理 data TX queue，单轮发送数量受 TX budget 限制。
-9. `Interface::poll_at` 与 orphan `FIN_WAIT_2` deadline 共同决定下一次网络 deadline，`Service` 将其写入原子 deadline；`register_timer_callback(TIMER_SAMPLE_PERIOD)` 周期采样该值，到期后通过 `notify(PollReason::Timer)` 发布工作。尚未到期的 deadline 不进入 `PollProgress::has_more`。
-10. `PollProgress::has_more` 只汇报当前可立即处理的 RX、ingress、TX 或已到期 timer 工作。每轮 `Service::poll_budgeted` 使用 1 ms 软时间上限，并在设备 RX、stack ingress、stack egress 和 Router TX 每完成 32 个工作项后检查时间。协议 maintenance 和一次 smoltcp egress pass 始终执行，以维持 timer 与协议输出进度。kwork callback 或 assist 获得批次执行权后最多连续推进四轮，达到轮数上限或清空立即工作后归还执行权，剩余 backlog 通过 `SCHEDULED` 状态进入下一批。
+3. `Service` 先按 TX budget dispatch 已排队的 control 和 data packet，使 loopback TCP/ICMP TX 在同一轮进入 `NET_RX_QUEUE`；本轮后续 TX dispatch 复用剩余预算。Loopback UDP 不依赖这一轮：`prepare_and_send_ipv4_packet` 对 loopback 目的地址直接 xmit，`send_ip_packet` 在关闭 BH 前盖戳并入 `NET_RX_QUEUE`，raise `NetRx` 后 BH 恢复时把完整 UDP 数据报送入 PCB。
+4. `Router::drain_rx_budgeted_into` 按 RX budget 从设备轮转拉取 `PacketBuf`，`next_rx_device` 在设备间保持公平并随设备删除修正。
+5. `IngressProcessor` 在 Router 和 smoltcp socket-set 锁外校验 IPv4 头、长度、校验和与本地目的地址，并完成 IPv4 分片重组。完整 UDP 数据报直接进入 crate 内 UDP PCB 分流，未命中 socket 的单播 UDP 触发 ICMPv4 Port Unreachable。
+6. TCP、raw IP、ICMP 和 IPv6 packet 保存在可复用 accepted batch 中。按 smoltcp socket-set、Router 的顺序取得两把锁后，`prepare_smoltcp_ingress` 更新 TCP listener 状态并将 batch 转入有界 smoltcp ingress queue；只有 control batch 时跳过 socket-set。锁竞争期间保留 raw、accepted 和 control batch，当前轮返回 `has_more`，后续轮次继续交接。
+7. `Service` 执行 `poll_maintenance`，按 RX budget 逐个调用 `poll_ingress_single`，并调用有界的 `poll_egress`。达到预算或时间边界后，剩余 ingress 保持 FIFO 顺序并进入后续轮次；`ListenTable::wake_touched_acceptors` 随后唤醒 accept 等待者。
+8. `Router::dispatch_budgeted` 使用本轮剩余 TX budget 发送协议阶段新增的 packet，随后使用剩余 RX budget 再拉取一次设备队列。该尾部 RX 阶段让 loopback TCP/ICMP 完成 TX 与 smoltcp 交接，同时维持 assist 的单轮边界。
+9. Router、IngressProcessor、smoltcp socket-set 或 Interface 的共享 mutex 发生竞争时，poller 通过 `try_lock` 直接退让。`Service` 返回带 `has_more` 的进度，唯一执行者按原状态机归还执行权并安排后续轮次。
+10. `Interface::poll_at` 与 orphan `FIN_WAIT_2` deadline 共同决定下一次网络 deadline，`Service` 将其写入原子 deadline；`register_timer_callback(TIMER_SAMPLE_PERIOD)` 周期采样该值，到期后通过 `notify(PollReason::Timer)` 发布工作。尚未到期的 deadline 不进入 `PollProgress::has_more`。
+11. `PollProgress::has_more` 只汇报当前可立即处理的 RX、ingress、TX、锁竞争重试或已到期 timer 工作。每轮 `Service::poll_budgeted` 使用 1 ms 软时间上限，并在设备 RX、stack ingress、stack egress 和 Router TX 每完成 32 个工作项后检查时间。协议 maintenance 和一次 smoltcp egress pass 始终执行，以维持 timer 与协议输出进度。kwork callback 或 assist 获得批次执行权后最多连续推进四轮，达到轮数上限或清空立即工作后归还执行权，剩余 backlog 通过 `SCHEDULED` 状态进入下一批。
 
 ### TX 路由
 
-1. TCP connect、send 和 close，raw send 以及 UDP data queue 提交完成后发布真实 TX 通知；TCP recv 只在消费前的 smoltcp 接收缓冲区余量低于最大窗口缩放量子时发布 `RxWindow` 通知，覆盖未缩放零窗口和缩放后仍编码为零的窗口。达到缩放量子后的窗口增长随 RX 或已登记的协议 timer poll 推进，避免每次应用读取都创建后台工作。调用方可随后通过 `assist_once` 协助执行已调度的一轮。TCP 文件关闭不会立即删除仍处于协议关闭过程中的 handle。
-2. crate 内 UDP 在 Router mutex 内选择处于管理 up 状态的输出设备、源地址和路由 MTU；路由缺失或输出设备管理 down 时返回 `ENETUNREACH`。写入 UDP 与 IPv4 头后提交到 data TX queue。smoltcp 生成的 IP 包进入同一 data TX queue，`IngressProcessor` 生成的 ICMPv4 错误进入 control TX queue。
+1. TCP connect、send 和 close，raw send 以及 UDP data queue 提交完成后发布真实 TX 通知；调用方可随后通过 `assist_once` 协助执行已调度的一轮。TCP recv 只在消费前的 smoltcp 接收缓冲区余量低于最大窗口缩放量子时发布 `RxWindow` 通知，覆盖未缩放零窗口和缩放后仍编码为零的窗口。达到缩放量子后的窗口增长随 RX 或已登记的协议 timer poll 推进，避免每次应用读取都创建后台工作。TCP 文件关闭不会立即删除仍处于协议关闭过程中的 handle。
+2. crate 内 UDP 在 Router mutex 内选择处于管理 up 状态的输出设备、源地址和路由 MTU；路由缺失或输出设备管理 down 时返回 `ENETUNREACH`。写入 UDP 与 IPv4 头后，loopback 目的地址立即 `transmit_ipv4_now`；其余目的地址提交到 data TX queue。`transmit_ipv4_now` 忽略 `dispatch_ipv4_packet` 的 RX-ready 返回值：该 `bool` 是 poller 的 `poll_next` 提示，不是发送成败；共享 `NetRx` 队列满时丢包仍返回成功，对齐 Linux `loopback_xmit` 在 `NET_RX_DROP` 时返回 `NETDEV_TX_OK`。smoltcp 生成的 IP 包进入同一 data TX queue，`IngressProcessor` 生成的 ICMPv4 错误进入 control TX queue。
 3. `IP_MTU_DISCOVER` 决定 UDP IPv4 头部的 DF 标志。超出路由 MTU 且允许分片的包由 `fragment_output_packet` 拆分，DF 包返回 `EMSGSIZE`。
 4. `Router::dispatch_budgeted` 优先接管 control packet，再按 IP 版本解析源地址和目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和，并将已校验的源地址随报文传给 `NetDevice`。
 5. 广播或组播包复制到所有设备；`0.0.0.0` 到 `255.255.255.255` 的受限广播允许在设备尚未分配 IPv4 地址时直接发送，用于 DHCP 初始化流量。
@@ -333,7 +343,7 @@ IDLE ──notify──────────────> SCHEDULED
 8. 未命中时发送 ARP request，并把 IP 包放入 `pending_tx` 等待 neighbor 解析。
 
 当前实现保留 smoltcp TCP、raw socket 和 IPv6 推进。UDP、IPv4 分片重组、输出分片和 ICMPv4 UDP 差错报告使用 crate 内实现。
-`PacketBuf`、`link::wire` 和 `stack::ipv4` 提供设备与 crate 内 IPv4/UDP 数据路径共用的报文表示和 parser/emitter。
+`PacketBuf`、`link::wire` 和 `stack::ipv4` 提供设备与 crate 内 IPv4/UDP 数据路径共用的报文表示和 parser/emitter。`PacketBuf` 对应 Linux `sk_buff` 的报文生命周期角色：报文进入网络栈时创建引用计数句柄，后续队列只移动或克隆该句柄；需要修改共享报文时执行写时复制。
 路由表和设备接口使用 `crate::ip` 地址类型，设备时间使用 `ktime::MonotonicInstant`。
 `Router`、`Service` 和初始化入口在 smoltcp 兼容边界完成地址与时间转换。
 
@@ -378,11 +388,11 @@ IDLE ──notify──────────────> SCHEDULED
 
 ## 并发模型
 
-- 全局 `SERVICE` 是 `LazyInit<Service>`。`Service` 内部分别使用 mutex 保护 smoltcp `Interface`、`Router`、`IngressProcessor` 和可复用 batch。网络 timer deadline 使用 `AtomicU64` 保存，周期采样回调只执行原子检查、waiter 唤醒和 poller 通知。
+- 全局 `SERVICE` 是 `LazyInit<Service>`。`Service` 内部分别使用 mutex 保护 smoltcp `Interface`、`Router`、`IngressProcessor` 和可复用 batch。poller 对前三类共享状态使用 `try_lock`，竞争时保留 batch 并返回立即工作；可复用 batch 只由取得全局推进权的执行者访问。网络 timer deadline 使用 `AtomicU64` 保存，周期采样回调只执行原子检查、waiter 唤醒和 poller 通知。
 - `NetworkPoller` 通过 `kwork::BudgetedPoller` 保存 `IDLE`、`SCHEDULED`、`RUNNING` 和 `RUNNING_PENDING` 四态执行权。kwork 后台批次预算为 512 个 RX packet、256 个 TX packet 和 32 个 timer event，socket assist 预算为 16、16 和 8。每轮受 1 ms 软时间上限约束，每个批次最多连续执行四轮，每次 assist 最多执行一轮；达到批次上限后 queue 下一批并归还执行权。
-- RX 设备拉取和 TX dispatch 位于 Router 锁内，IPv4 校验、过滤和 snoop 位于 Router 锁外。smoltcp ingress queue 有固定容量，`poll_ingress_single` 每次消费一个 packet，预算或时间边界留下的 packet 在后续轮次继续推进。
+- RX 设备拉取和 TX dispatch 位于 Router 锁内，IPv4 校验、过滤和 UDP 分流位于 Router 与 smoltcp socket-set 锁外。TCP snoop 在 accepted batch 已同时取得 Router 与 socket-set 后执行，避免 listener side effect 与 batch 交接分离。smoltcp ingress queue 有固定容量，`poll_ingress_single` 每次消费一个 packet，预算、时间边界或共享锁竞争留下的 packet 在后续轮次继续推进。
 - 全局 `SOCKET_SET` 内部使用 `Mutex<SocketSetState>`，其中的 smoltcp socket set 与 TCP deferred-close 元数据共享同一所有权锁。关闭、登记、协议推进和回收不会跨两个 mutex 交接 handle。
-- `UDP_PCB_REGISTRY` 按端口分为 256 个 bucket，每个 bucket 独立加锁；每个 UDP PCB 的接收队列、endpoint、错误队列和 option 状态分别受锁或 atomic 保护。接收队列从零容量开始按需增长，上限为 1024 个数据报，队列排空后最多保留 64 个槽位。
+- `UDP_PCB_REGISTRY` 按端口分为 256 个 bucket，每个 bucket 使用 `SpinNoIrq`，因为 `NetRx` 会在 softirq 中 lookup；每个 UDP PCB 的接收队列和 connected peer 同样是 `SpinNoIrq`，bind/connect 的 sleepable 状态更新放在 bucket 锁外。接收队列保存指针大小的 `PreparedUdpPacket`，其内部仍是报文进入网络栈时创建的 `PacketBuf` 句柄。数据报校验、地址与 payload range 解析发生在 loopback 发送侧进入 BH 前或普通 task ingress 中，结果写入同一报文的控制元数据；PCB 创建时按 1024 槽预留 `VecDeque` 容量，对齐 Linux `__udp_enqueue_schedule_skb` 在 `sk_receive_queue.lock` 下只 `__skb_queue_tail` 已有 `skb`。`enqueue` 在 softirq 与 `SpinNoIrq` 内只做占用检查和已有句柄拼接，满队列分支先释放队列锁，再回收当前报文；`MSG_PEEK` 只在锁内增加 `PacketBuf` 引用计数，payload 复制在 `SpinNoIrq` 外完成。共享 `NET_RX_QUEUE` 也使用 `SpinNoIrq`，由 loopback xmit、`NetRx` 和 task `poll_rx` 共用；`pending_udp` 与 `deferred` 都只保存指针大小的 `PacketBuf`，前者供 `NetRx` 按 budget 顺序取出盖戳 UDP，后者供任务 poller 取出其他报文。占用按两条队列长度与 in-flight 合计，避免在 PCB 交付期间被生产者填满腾出的槽。未命中 PCB 的 UDP 必须仍由该路径唯一持有句柄，清除元数据后放入 `deferred`。
 - `Ipv4Reassembler` 位于 `Router` 内，并由 `SERVICE` mutex 串行访问。
 - `LISTEN_TABLE` 用 `Mutex<HashMap<...>>` 管理 listener；每个 entry 的 `accept_poll`
   放在 entry 级 `Mutex` 之外，backlog 队列仍由该 `Mutex` 保护。`register_accept_waker`
@@ -410,7 +420,9 @@ TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推�
 
 NetRx softirq、socket TX 生产路径、协议 timer 和 socket assist 共享同一个 `NetworkPoller`。`notify` 使用状态低位发布 pending 工作，`SCHEDULED` 到 `RUNNING` 的 CAS 提供单执行者约束，完成 CAS 同时归还执行权并发布下一状态。执行期间到达的通知把状态变为 `RUNNING_PENDING`，完成路径据此发布 `SCHEDULED` 并 queue `knet-poller` work。assist 在 `IDLE`、`RUNNING` 和 `RUNNING_PENDING` 上直接返回，不创建事件，也不等待执行权。
 
-RX、TX 与 timer 使用独立预算。`Service` 使用 smoltcp 分阶段 API 约束 stack ingress 和 egress，并使用 1 ms 软时间上限控制单轮占用。control TX 优先于 data TX，避免 ICMP 错误和协议控制流量长期滞后。TCP send 可写快路径向 smoltcp socket buffer 写入数据并发布 TX 通知，连续发送由 poller owner 在有界批次内完成协议推进和 TX dispatch。TCP recv 在消费前接收缓冲区余量低于最大窗口缩放量子时发布 `RxWindow` 通知，释放 socket-set mutex 后由 poller 推进窗口更新；达到缩放量子后的接收窗口增长复用 RX 和已登记的 timer 推进。TCP 和 raw socket 直接向 smoltcp 注册聚合 send waker；Router data TX queue 的可用 packet slot 实际增加时，`PollProgress::tx_capacity_changed` 触发 poller TX waiter 唤醒。协议与 deferred-close deadline 写入原子值，周期采样回调到期后唤醒 socket waiter，并以 `PollReason::Timer` 通知 poller。
+Loopback UDP 不经过 poller 所有权交接：发送路径对齐 Linux `dev_queue_xmit`（BH off）→ `loopback_xmit` → `__netif_rx` → `local_bh_enable` 跑 `NET_RX_SOFTIRQ`。完整 IPv4 UDP 在 BH 窗口内进入 PCB；TCP/ICMP/IPv6 仍由 poller 的 TX-then-RX 轮次交接。
+
+RX、TX 与 timer 使用独立预算。`Service` 使用 smoltcp 分阶段 API 约束 stack ingress 和 egress，并使用 1 ms 软时间上限控制单轮占用。TX budget 在协议推进前后共享，RX budget 在主 RX 和尾部 RX 之间共享；该顺序让 loopback TCP/ICMP 在一次 assist 内完成设备往返。Router、IngressProcessor、Interface 和 socket-set 竞争会结束当前轮并设置 `has_more`，执行者继续沿四态状态机释放推进权。control TX 优先于 data TX，避免 ICMP 错误和协议控制流量长期滞后。TCP send 可写快路径向 smoltcp socket buffer 写入数据并发布 TX 通知，连续发送由 poller owner 在有界批次内完成协议推进和 TX dispatch。TCP recv 在消费前接收缓冲区余量低于最大窗口缩放量子时发布 `RxWindow` 通知，释放 socket-set mutex 后由 poller 推进窗口更新；达到缩放量子后的接收窗口增长复用 RX 和已登记的 timer 推进。TCP 和 raw socket 直接向 smoltcp 注册聚合 send waker；Router data TX queue 的可用 packet slot 实际增加时，`PollProgress::tx_capacity_changed` 触发 poller TX waiter 唤醒。协议与 deferred-close deadline 写入原子值，周期采样回调到期后唤醒 socket waiter，并以 `PollReason::Timer` 通知 poller。
 
 ### 控制面状态所有权
 
@@ -444,13 +456,13 @@ smoltcp `poll_at` 使用传入 timestamp 的同一 epoch 返回期限；兼容�
 因此仍是过期的单调 deadline，不再计算有符号 delay，也不会经过 `as u64` 窄化。
 这个设计减少无关设备中断唤醒，但依赖路由和地址同步保持 mask 准确。
 
-### 后续 NetRx direct progress 里程碑
+### 后续 Ethernet NetRx direct progress 里程碑
 
-`NetRx` softirq 直接推进 RX progress 不属于当前阶段。它应作为 workerqueue
-机制补齐后的独立里程碑实现：
+Loopback IPv4 UDP 已经由 `NetRx` 直接交付 PCB。Ethernet 以及需要 smoltcp 的
+协议仍不在 softirq 中推进。那部分应作为独立里程碑实现：
 
 1. hardirq 仍只做设备 ack 和 `NetRxScheduler::schedule_rx()`；
-2. `NetRx` softirq 先按 NAPI-like source state 认领 RX work；
+2. `NetRx` softirq 先按 NAPI-like source state 认领 Ethernet RX work；
 3. 若需要 sleepable 网络栈路径，softirq 只投递 workerqueue work，不直接调用
    `poll_interfaces`；
 4. worker 或全链路 nonblocking ingress 负责按 budget 推进 `Router` /
@@ -458,7 +470,7 @@ smoltcp `poll_at` 使用传入 timestamp 的同一 epoch 返回期限；兼容�
 5. 该里程碑必须同时定义 RX buffer ownership、budget/repoll、cancel/flush 和
    device teardown 语义。
 
-在该里程碑开始前，`NetRx` softirq 保持 per-device RX `PollSet` wake source
+在该里程碑开始前，Ethernet `NetRx` 保持 per-device RX `PollSet` wake source
 角色，同时通过 `knet-poller` work 承接 sleepable fallback progress；普通 socket
 polling waiter 也可能是该 source 的消费者。
 

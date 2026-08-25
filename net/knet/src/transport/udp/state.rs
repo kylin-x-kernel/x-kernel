@@ -12,6 +12,7 @@ use ::core::{
 };
 use kerrno::{KError, KResult, LinuxError};
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
+use kspin::SpinNoIrq;
 use ksync::{Mutex, RwLock};
 
 use super::wait::UdpSocketWaiters;
@@ -46,7 +47,8 @@ pub(crate) struct UdpSocketQueuedError {
 pub(crate) struct UdpSocketState {
     lifecycle: RwLock<UdpSocketLifecycle>,
     local_endpoint: RwLock<Option<InetEndpoint>>,
-    peer_endpoint: RwLock<Option<(InetEndpoint, IpAddress)>>,
+    /// Read from `NetRx` UDP lookup; task connect/disconnect writes it.
+    peer_endpoint: SpinNoIrq<Option<(InetEndpoint, IpAddress)>>,
     read_shutdown: AtomicBool,
     write_shutdown: AtomicBool,
     recv_err: AtomicBool,
@@ -61,7 +63,7 @@ impl UdpSocketState {
         Arc::new(Self {
             lifecycle: RwLock::new(UdpSocketLifecycle::Init),
             local_endpoint: RwLock::new(None),
-            peer_endpoint: RwLock::new(None),
+            peer_endpoint: SpinNoIrq::new(None),
             read_shutdown: AtomicBool::new(false),
             write_shutdown: AtomicBool::new(false),
             recv_err: AtomicBool::new(false),
@@ -94,11 +96,11 @@ impl UdpSocketState {
     }
 
     pub(crate) fn peer_endpoint(&self) -> Option<(InetEndpoint, IpAddress)> {
-        *self.peer_endpoint.read()
+        *self.peer_endpoint.lock()
     }
 
     pub(crate) fn set_peer_endpoint(&self, endpoint: Option<(InetEndpoint, IpAddress)>) {
-        *self.peer_endpoint.write() = endpoint;
+        *self.peer_endpoint.lock() = endpoint;
         self.set_lifecycle(
             match (endpoint.is_some(), self.local_endpoint().is_some()) {
                 (true, _) => UdpSocketLifecycle::Connected,

@@ -8,7 +8,7 @@ use etherparse::UdpHeaderSlice;
 use super::{
     UDP_HEADER_LEN,
     output::{has_valid_udp_checksum, ipv4_to_core},
-    pcb::{UdpDatagram, UdpPayload},
+    pcb::PreparedUdpPacket,
     registry,
 };
 use crate::{buf::PacketBuf, ipv4};
@@ -18,34 +18,45 @@ use crate::{buf::PacketBuf, ipv4};
 pub(crate) enum InputDisposition {
     Accepted,
     NoSocket,
-    Malformed,
 }
 
-/// Deliver an IPv4 UDP packet while preserving the original packet storage.
-pub(crate) fn handle_ipv4_packet(
+/// Validates an IPv4 UDP packet and records its receive metadata.
+///
+/// This function must run in task context. Loopback stamps packets before
+/// disabling BH; ordinary ingress is already processed by a task. The existing
+/// reference-counted `PacketBuf` is retained without another allocation.
+pub(crate) fn prepare_ipv4_packet(
     header: ipv4::Ipv4Header,
     packet: PacketBuf,
-) -> (InputDisposition, Option<PacketBuf>) {
-    let Some((local, remote, payload_offset, payload_len)) = packet
+) -> Result<PreparedUdpPacket, PacketBuf> {
+    debug_assert!(
+        !kirq::context::is_in_interrupt_context(),
+        "prepare_ipv4_packet requires task context"
+    );
+    let Some((local_addr, remote_addr, payload_offset, payload_len)) = packet
         .network_packet()
         .and_then(|ip_packet| parse_udp_datagram(header, ip_packet))
     else {
-        return (InputDisposition::Malformed, Some(packet));
+        return Err(packet);
     };
+    let packet =
+        PreparedUdpPacket::new(packet, payload_offset, payload_len, local_addr, remote_addr)?;
+    Ok(packet)
+}
 
-    let Some(pcb) = registry::lookup_udp_pcb(local, remote) else {
+/// Delivers a prepared packet through the non-sleeping PCB lookup path.
+///
+/// `PacketBuf` owns the shared packet allocation before `NetRx` starts, and the
+/// PCB receive queue is reserved to its occupancy bound, so this function is
+/// allocation-free.
+pub(crate) fn deliver_ipv4_packet(
+    packet: PreparedUdpPacket,
+) -> (InputDisposition, Option<PreparedUdpPacket>) {
+    let Some(pcb) = registry::lookup_udp_pcb(packet.local_addr(), packet.remote_addr()) else {
         return (InputDisposition::NoSocket, Some(packet));
     };
 
-    let payload = match UdpPayload::new(packet, payload_offset, payload_len) {
-        Ok(payload) => payload,
-        Err(packet) => return (InputDisposition::Malformed, Some(packet)),
-    };
-    let datagram = UdpDatagram {
-        payload,
-        remote_addr: remote,
-    };
-    pcb.enqueue(datagram);
+    pcb.enqueue(packet);
     (InputDisposition::Accepted, None)
 }
 

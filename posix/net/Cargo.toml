@@ -16,6 +16,7 @@ vsock = ["knet/vsock"]
 
 [dependencies]
 bytemuck = { workspace = true, features = ["derive"] }
+kbuild_config.workspace = true
 kerrno.workspace = true
 khal.workspace = true
 ktime_types.workspace = true

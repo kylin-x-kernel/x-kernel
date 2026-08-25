@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! Loopback network device implementation.
-use alloc::{collections::VecDeque, string::String};
+use alloc::string::String;
 
 use ::core::task::Waker;
 use kerrno::LinuxError;
@@ -13,15 +13,15 @@ use ktime_types::MonotonicInstant;
 
 use crate::{
     buf::{PacketBuf, PacketOwner},
-    consts::SOCKET_BUFFER_SIZE,
     device::{
         IF_OPER_DOWN, IF_OPER_UNKNOWN, LINK_FLAG_LOOPBACK, LINK_FLAG_LOWER_UP, LINK_FLAG_RUNNING,
         LINK_FLAG_UP, LOOPBACK_MAX_MTU, LinkKind, LinkSendSnapshot, LinkSnapshot, NetDevice,
+        net_rx,
     },
     ip::IpAddress,
 };
 
-/// Loopback device backed by an in-memory queue.
+/// Loopback device backed by the shared NetRx packet queue.
 ///
 /// RX wakeups use a single stored [`Waker`], not a multi-waiter [`kpoll::PollSet`].
 /// That is intentional and not a multi-task regression:
@@ -37,26 +37,43 @@ use crate::{
 /// Restoring a device-level `PollSet` would be wrong for this call pattern:
 /// Service re-registers the same source waker on every wait, and the new
 /// `PollSet` does not dedupe, so waiters would accumulate until the next RX.
+///
+/// Complete IPv4 UDP datagrams are delivered from `NetRx` (Linux
+/// `loopback_xmit` → `__netif_rx` → `NET_RX_SOFTIRQ`). TCP, ICMP, IPv6,
+/// fragments, and unmatched UDP stay on the deferred queue for the task poller.
 pub struct LoopbackDevice {
     name: String,
     flags: u32,
     mtu: usize,
     operstate: u8,
-    queue: VecDeque<PacketBuf>,
+    /// Interface index used by this device's last successful xmit or `poll_rx`.
+    /// `has_rx_work` and `Drop` use it to find this device's packets in the
+    /// shared `NetRx` queue without registering the device with `NetRx`.
+    rx_ifindex: Option<i32>,
     /// Aggregated Service RX/timeout waker. Must not be replaced by a
     /// task-local waker from a bypass of `Service::register_rx_waker`.
     rx_waker: Mutex<Option<Waker>>,
 }
+
 impl LoopbackDevice {
     /// Create a new loopback device.
     pub fn new() -> Self {
+        let _ = super::ethernet::ensure_net_rx_softirq_available();
         Self {
             name: String::from("lo"),
             flags: LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOOPBACK | LINK_FLAG_LOWER_UP,
             mtu: LOOPBACK_MAX_MTU,
             operstate: IF_OPER_UNKNOWN,
-            queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
+            rx_ifindex: None,
             rx_waker: Mutex::new(None),
+        }
+    }
+}
+
+impl Drop for LoopbackDevice {
+    fn drop(&mut self) {
+        if let Some(ifindex) = self.rx_ifindex {
+            net_rx::discard_ifindex(ifindex);
         }
     }
 }
@@ -99,15 +116,23 @@ impl NetDevice for LoopbackDevice {
         }
     }
 
-    fn poll_rx(&mut self, _ifindex: i32, _timestamp: MonotonicInstant) -> Option<PacketBuf> {
+    fn poll_rx(&mut self, ifindex: i32, _timestamp: MonotonicInstant) -> Option<PacketBuf> {
+        self.rx_ifindex = Some(ifindex);
         if !self.is_link_up() {
             return None;
         }
-        self.queue.pop_front()
+        // Task-context fallback when NetRx did not run (unit tests, or the
+        // vector is owned by another action). Stamped UDP is consumed first.
+        // A true result is a bounded-progress hint, not a missing packet:
+        // `has_rx_work` is checked again by Router after this poll, and the
+        // next round continues draining remaining work. Retrying here would make
+        // device polling unbounded while producers keep enqueueing packets.
+        net_rx::drain_pending();
+        net_rx::pop_deferred(ifindex)
     }
 
     fn has_rx_work(&self) -> bool {
-        !self.queue.is_empty()
+        self.rx_ifindex.is_some_and(net_rx::has_work_for)
     }
 
     fn send_ip_packet(
@@ -128,20 +153,45 @@ impl NetDevice for LoopbackDevice {
             warn!("Dropping packet exceeding loopback MTU {}", self.mtu);
             return false;
         }
-        if self.queue.len() >= SOCKET_BUFFER_SIZE {
+        packet.set_ifindex(ifindex);
+        packet.set_owner(PacketOwner::Loopback);
+        let Some(packet) = net_rx::prepare_for_enqueue(packet) else {
+            // Malformed IPv4 UDP is dropped in task context. Linux
+            // `loopback_xmit` still returns `NETDEV_TX_OK` after `NET_RX_DROP`.
+            return true;
+        };
+
+        // Linux `netif_rx`: if the caller is not already in BH/IRQ context,
+        // disable BH around enqueue + raise so `local_bh_enable` runs
+        // `NET_RX_SOFTIRQ` before this function returns.
+        let enqueue_result = {
+            let _bh = kirq::context::local_bh_disable();
+            let result = net_rx::enqueue(packet);
+            if result.is_ok() {
+                kirq::softirq::raise_softirq(kirq::softirq::SoftirqVec::NetRx);
+            }
+            result
+        };
+        if let Err(dropped) = enqueue_result {
             warn!(
                 "Loopback device buffer is full, dropping packet to {}",
                 next_hop
             );
+            drop(dropped);
             return false;
         }
+        self.rx_ifindex = Some(ifindex);
+        // Softirq not registered (or budget exhausted): finish stamped UDP
+        // in task context so sendto still completes before recvfrom waits.
+        net_rx::drain_pending();
 
-        packet.set_ifindex(ifindex);
-        packet.set_owner(PacketOwner::Loopback);
-        self.queue.push_back(packet);
-        let waker = self.rx_waker.lock().clone();
-        if let Some(waker) = waker {
-            waker.wake();
+        // A PCB hit wakes its socket waiter during UDP enqueue. The device
+        // source only needs a kick when work remains for the task poller.
+        if net_rx::has_work_for(ifindex) {
+            let waker = self.rx_waker.lock().clone();
+            if let Some(waker) = waker {
+                waker.wake();
+            }
         }
         true
     }
@@ -205,12 +255,14 @@ mod tests {
     use super::*;
     use crate::device::IPV4_MIN_MTU;
 
-    #[def_test]
+    // Serial: reads the shared NetRx queue length around the send.
+    #[def_test(serial)]
     fn loopback_rechecks_current_mtu_before_enqueue() {
         let mut device = LoopbackDevice::new();
         device.set_mtu(IPV4_MIN_MTU).unwrap();
         let packet =
             PacketBuf::from_ip_packet_vec(0, vec![0; IPV4_MIN_MTU + 1], PacketOwner::Ipv4Stack);
+        let queued_before = net_rx::queued_len();
 
         assert!(!device.send_ip_packet(
             1,
@@ -219,7 +271,8 @@ mod tests {
             packet,
             MonotonicInstant::ORIGIN,
         ));
-        assert!(device.queue.is_empty());
+        assert_eq!(net_rx::queued_len(), queued_before);
+        assert!(!device.has_rx_work());
     }
 
     #[def_test]

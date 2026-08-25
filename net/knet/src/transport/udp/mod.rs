@@ -14,7 +14,8 @@ mod wait;
 
 pub use self::socket::UdpSocket;
 pub(crate) use self::{
-    input::{InputDisposition, handle_ipv4_packet},
+    input::{InputDisposition, deliver_ipv4_packet, prepare_ipv4_packet},
+    pcb::PreparedUdpPacket,
     registry::{init_udp_registry, lookup_udp_error_state},
     state::UdpSocketQueuedError,
 };
@@ -28,7 +29,6 @@ const IPV4_HEADER_LEN: usize = 20;
 const IPV4_DEFAULT_TTL: u8 = 64;
 const UDP_HEADER_LEN: usize = 8;
 const UDP_RX_QUEUE_CAPACITY: usize = 1024;
-const UDP_RX_QUEUE_RETAINED_CAPACITY: usize = 64;
 const UDP_MAX_PAYLOAD_LEN: usize = u16::MAX as usize - IPV4_HEADER_LEN - UDP_HEADER_LEN;
 
 #[cfg(unittest)]
@@ -39,7 +39,8 @@ mod tests {
     use unittest::def_test;
 
     use super::{
-        output::{has_valid_udp_checksum, ipv4_to_core, read_u16_be},
+        output::{has_valid_udp_checksum, ipv4_to_core, read_u16_be, write_udp_header},
+        pcb::RecvMode,
         registry::{
             bind_udp_auto_pcb_for_test, bind_udp_pcb, listen_endpoint, lookup_udp_pcb,
             udp_port_available,
@@ -48,7 +49,9 @@ mod tests {
     };
     use crate::{
         RecvOptions, Shutdown, SocketAddrEx, SocketOps,
-        ip::{IpEndpoint, Ipv4Address},
+        buf::{PacketBuf, PacketOwner},
+        device::{LoopbackDevice, NetDevice},
+        ip::{IpAddress, IpEndpoint, Ipv4Address},
         ipv4,
     };
 
@@ -144,6 +147,79 @@ mod tests {
         .expect("disconnected UDP PCB should keep receiving on its local port");
         assert!(Arc::ptr_eq(&selected, &socket.pcb));
         assert!(!udp_port_available(listen_endpoint(local)));
+        clear_registry();
+    }
+
+    #[def_test(serial)]
+    fn loopback_net_rx_delivers_udp_without_poller() {
+        clear_registry();
+
+        let socket = UdpSocket::new();
+        let local_ip = Ipv4Address::new(127, 0, 0, 1);
+        let local = endpoint(local_ip, 5000);
+        bind_udp_pcb(socket.pcb.clone(), local, false).unwrap();
+
+        let mut udp = alloc::vec![0u8; UDP_HEADER_LEN + 1];
+        udp[UDP_HEADER_LEN] = b'x';
+        write_udp_header(&mut udp, local_ip, local_ip, 4000, 5000)
+            .expect("UDP header length is valid");
+        let packet = ipv4::build_ipv4_packet(local_ip, local_ip, ipv4::PROTOCOL_UDP, 64, &udp)
+            .expect("IPv4 packet length is valid");
+        let mut packet = PacketBuf::from_ip_packet_vec(1, packet, PacketOwner::Ipv4Stack);
+        ipv4::Ipv4Header::prepare_output_packet(&mut packet).expect("IPv4 header is valid");
+
+        let mut device = LoopbackDevice::new();
+        assert!(device.send_ip_packet(
+            1,
+            IpAddress::Ipv4(local_ip),
+            IpAddress::Ipv4(local_ip),
+            packet,
+            ktime_types::MonotonicInstant::ORIGIN,
+        ));
+
+        assert!(socket.pcb.has_recv_data());
+        let datagram = socket
+            .pcb
+            .recv_datagram(RecvMode::Consume)
+            .expect("NetRx should deliver the loopback datagram");
+        assert_eq!(datagram.payload.as_slice(), b"x");
+        assert!(
+            device
+                .poll_rx(1, ktime_types::MonotonicInstant::ORIGIN)
+                .is_none()
+        );
+
+        clear_registry();
+    }
+
+    #[def_test(serial)]
+    fn unmatched_loopback_udp_stays_queued_for_the_poller() {
+        clear_registry();
+
+        let local_ip = Ipv4Address::new(127, 0, 0, 1);
+        let mut udp = alloc::vec![0u8; UDP_HEADER_LEN + 1];
+        udp[UDP_HEADER_LEN] = b'x';
+        write_udp_header(&mut udp, local_ip, local_ip, 4000, 5000)
+            .expect("UDP header length is valid");
+        let packet = ipv4::build_ipv4_packet(local_ip, local_ip, ipv4::PROTOCOL_UDP, 64, &udp)
+            .expect("IPv4 packet length is valid");
+        let mut packet = PacketBuf::from_ip_packet_vec(1, packet, PacketOwner::Ipv4Stack);
+        ipv4::Ipv4Header::prepare_output_packet(&mut packet).expect("IPv4 header is valid");
+
+        let mut device = LoopbackDevice::new();
+        assert!(device.send_ip_packet(
+            1,
+            IpAddress::Ipv4(local_ip),
+            IpAddress::Ipv4(local_ip),
+            packet,
+            ktime_types::MonotonicInstant::ORIGIN,
+        ));
+
+        let leftover = device
+            .poll_rx(1, ktime_types::MonotonicInstant::ORIGIN)
+            .expect("unmatched UDP should remain for the task poller");
+        assert!(leftover.udp_metadata().is_none());
+
         clear_registry();
     }
 }

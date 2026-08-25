@@ -33,7 +33,7 @@ use crate::{
     ip::{IpAddress, IpListenEndpoint},
     poller::{PollBudget, PollProgress},
     router::{NeighborUpdatePolicy, Router, Rule},
-    stack::ingress::IngressProcessor,
+    stack::ingress::{IngressProcessor, prepare_smoltcp_ingress},
 };
 
 const IPV4_HEADER_LEN: usize = 20;
@@ -46,6 +46,13 @@ struct SmoltcpIngressProgress {
     packets: usize,
     has_socket_state_change: bool,
     has_reached_time_limit: bool,
+}
+
+#[derive(Default)]
+struct DeviceRxProgress {
+    packets: usize,
+    has_reached_time_limit: bool,
+    has_lock_contention: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,71 +114,62 @@ impl Service {
     /// Advances the network data plane within one bounded poll round.
     ///
     /// The caller must run in task context without holding spinlocks because
-    /// this path acquires sleepable network and socket-set mutexes.
+    /// transport and device handlers may acquire sleepable mutexes. Shared
+    /// progression locks are acquired with `try_lock`; contention leaves the
+    /// pending batches intact and reports immediate work for a later round.
     pub fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
         let round_started_at = monotonic_time();
         let device_timestamp = round_started_at;
-        let mut has_reached_time_limit = false;
-        let mut rx_packets = 0;
-        let mut rx_remaining = budget.rx_packets;
-        let mut rx_packets_since_time_check = 0;
-        let mut sockets = SOCKET_SET.inner.lock();
         let mut control_packets = self.control_batch.lock();
         let mut rx_batch = self.rx_batch.lock();
         let mut accepted_packets = self.accepted_batch.lock();
-        control_packets.clear();
 
-        while rx_remaining > 0 {
-            if rx_packets_since_time_check >= POLL_TIME_CHECK_INTERVAL_WORK_ITEMS {
-                rx_packets_since_time_check = 0;
-                if has_reached_poll_round_time_limit(round_started_at, monotonic_time()) {
-                    has_reached_time_limit = true;
-                    break;
-                }
-            }
-
-            let mut router = self.router.lock();
-            let batch_budget = rx_remaining
-                .min(RX_INGRESS_BATCH_PACKETS)
-                .min(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS)
-                .min(router.ingress_capacity());
-            if batch_budget == 0 {
-                break;
-            }
-            let drain =
-                router.drain_rx_budgeted_into(device_timestamp, batch_budget, &mut rx_batch);
-            drop(router);
-            rx_packets += drain.work_done;
-            rx_remaining = rx_remaining.saturating_sub(drain.work_done);
-            rx_packets_since_time_check =
-                rx_packets_since_time_check.saturating_add(drain.work_done);
-
-            self.ingress.lock().handle_rx_packets(
-                device_timestamp,
-                &mut rx_batch,
-                &mut accepted_packets,
-                &mut control_packets,
-                &mut sockets,
-            );
-            let mut router = self.router.lock();
-            router.enqueue_ingress_packets(&mut accepted_packets);
-            for packet in control_packets.drain(..) {
-                if let Err(err) = router.queue_control_ipv4_packet(packet) {
-                    warn!("Dropping network control packet: {}", err);
-                }
-            }
-            if !drain.has_more || drain.work_done == 0 {
-                break;
-            }
+        if !self.try_flush_ingress_batches(&mut accepted_packets, &mut control_packets) {
+            return deferred_poll_progress(0, 0, 0, false);
         }
 
-        if rx_packets > 0 && has_reached_poll_round_time_limit(round_started_at, monotonic_time()) {
-            has_reached_time_limit = true;
+        let Some(mut router) = self.router.try_lock() else {
+            return deferred_poll_progress(0, 0, 0, false);
+        };
+        let tx_capacity_before = router.available_tx_packet_slots();
+        let (mut tx_packets, mut has_reached_time_limit) = dispatch_tx_budgeted(
+            &mut router,
+            device_timestamp,
+            budget.tx_packets,
+            round_started_at,
+        );
+        let mut tx_capacity_changed = router.available_tx_packet_slots() > tx_capacity_before;
+        drop(router);
+        let mut tx_remaining = budget.tx_packets.saturating_sub(tx_packets);
+
+        let rx_progress = self.poll_device_rx_budgeted(
+            device_timestamp,
+            round_started_at,
+            if has_reached_time_limit {
+                0
+            } else {
+                budget.rx_packets
+            },
+            &mut rx_batch,
+            &mut accepted_packets,
+            &mut control_packets,
+        );
+        let mut rx_packets = rx_progress.packets;
+        has_reached_time_limit |= rx_progress.has_reached_time_limit;
+        if rx_progress.has_lock_contention {
+            return deferred_poll_progress(rx_packets, tx_packets, 0, tx_capacity_changed);
         }
 
-        let mut router = self.router.lock();
+        let Some(mut sockets) = SOCKET_SET.inner.try_lock() else {
+            return deferred_poll_progress(rx_packets, tx_packets, 0, tx_capacity_changed);
+        };
+        let Some(mut router) = self.router.try_lock() else {
+            return deferred_poll_progress(rx_packets, tx_packets, 0, tx_capacity_changed);
+        };
         let current = now();
-        let mut iface = self.iface.lock();
+        let Some(mut iface) = self.iface.try_lock() else {
+            return deferred_poll_progress(rx_packets, tx_packets, 0, tx_capacity_changed);
+        };
         // Maintenance and one egress pass remain bounded and preserve protocol
         // progress after bulk RX or TX reaches the round time limit.
         iface.poll_maintenance(current);
@@ -226,36 +224,190 @@ impl Service {
         LISTEN_TABLE.wake_touched_acceptors(&mut sockets);
         drop(sockets);
 
-        let ingress_has_more = router.has_pending_ingress();
-        let rx_has_more = router.has_immediate_rx_work();
+        if has_reached_time_limit {
+            tx_remaining = 0;
+        }
         let tx_capacity_before = router.available_tx_packet_slots();
-        let (_, mut tx_has_more) = router.dispatch_budgeted(device_timestamp, 0);
-        let mut tx_packets = 0;
-        let mut tx_remaining = if has_reached_time_limit {
-            0
-        } else {
-            budget.tx_packets
-        };
-        while tx_remaining > 0 {
-            let chunk = tx_remaining.min(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS);
-            let (work_done, has_more) = router.dispatch_budgeted(device_timestamp, chunk);
-            tx_packets += work_done;
-            tx_remaining = tx_remaining.saturating_sub(work_done);
-            tx_has_more = has_more;
-            if work_done < chunk {
-                break;
-            }
-            if has_reached_poll_round_time_limit(round_started_at, monotonic_time()) {
-                break;
+        let (dispatched, tx_time_limit) = dispatch_tx_budgeted(
+            &mut router,
+            device_timestamp,
+            tx_remaining,
+            round_started_at,
+        );
+        tx_packets += dispatched;
+        tx_capacity_changed |= router.available_tx_packet_slots() > tx_capacity_before;
+        has_reached_time_limit |= tx_time_limit;
+        drop(router);
+
+        let rx_remaining = budget.rx_packets.saturating_sub(rx_packets);
+        if !has_reached_time_limit && rx_remaining > 0 {
+            let tail_progress = self.poll_device_rx_budgeted(
+                device_timestamp,
+                round_started_at,
+                rx_remaining,
+                &mut rx_batch,
+                &mut accepted_packets,
+                &mut control_packets,
+            );
+            rx_packets += tail_progress.packets;
+            if tail_progress.has_lock_contention {
+                return deferred_poll_progress(
+                    rx_packets,
+                    tx_packets,
+                    usize::from(budget.timer_events > 0 && has_socket_state_change),
+                    tx_capacity_changed,
+                );
             }
         }
+
+        let Some(mut router) = self.router.try_lock() else {
+            return deferred_poll_progress(
+                rx_packets,
+                tx_packets,
+                usize::from(budget.timer_events > 0 && has_socket_state_change),
+                tx_capacity_changed,
+            );
+        };
+        let ingress_has_more = router.has_pending_ingress();
+        let rx_has_more = router.has_immediate_rx_work();
+        let (_, tx_has_more) = router.dispatch_budgeted(device_timestamp, 0);
         PollProgress {
             rx_packets,
             tx_packets,
             timer_events: usize::from(budget.timer_events > 0 && has_socket_state_change),
-            tx_capacity_changed: router.available_tx_packet_slots() > tx_capacity_before,
+            tx_capacity_changed,
             has_more: rx_has_more || ingress_has_more || tx_has_more || timer_has_more,
         }
+    }
+
+    fn poll_device_rx_budgeted(
+        &self,
+        device_timestamp: MonotonicInstant,
+        round_started_at: MonotonicInstant,
+        budget: usize,
+        rx_batch: &mut Vec<PacketBuf>,
+        accepted_packets: &mut Vec<PacketBuf>,
+        control_packets: &mut Vec<Vec<u8>>,
+    ) -> DeviceRxProgress {
+        let mut progress = DeviceRxProgress::default();
+        let mut packets_since_time_check = 0;
+
+        if !self.try_process_rx_batch(
+            device_timestamp,
+            rx_batch,
+            accepted_packets,
+            control_packets,
+        ) || !self.try_flush_ingress_batches(accepted_packets, control_packets)
+        {
+            progress.has_lock_contention = true;
+            return progress;
+        }
+
+        while progress.packets < budget {
+            if packets_since_time_check >= POLL_TIME_CHECK_INTERVAL_WORK_ITEMS {
+                packets_since_time_check = 0;
+                if has_reached_poll_round_time_limit(round_started_at, monotonic_time()) {
+                    progress.has_reached_time_limit = true;
+                    break;
+                }
+            }
+
+            let Some(mut router) = self.router.try_lock() else {
+                progress.has_lock_contention = true;
+                break;
+            };
+            let batch_budget = budget
+                .saturating_sub(progress.packets)
+                .min(RX_INGRESS_BATCH_PACKETS)
+                .min(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS)
+                .min(router.ingress_capacity());
+            if batch_budget == 0 {
+                break;
+            }
+            let drain = router.drain_rx_budgeted_into(device_timestamp, batch_budget, rx_batch);
+            drop(router);
+            progress.packets += drain.work_done;
+            packets_since_time_check = packets_since_time_check.saturating_add(drain.work_done);
+
+            if !self.try_process_rx_batch(
+                device_timestamp,
+                rx_batch,
+                accepted_packets,
+                control_packets,
+            ) || !self.try_flush_ingress_batches(accepted_packets, control_packets)
+            {
+                progress.has_lock_contention = true;
+                break;
+            }
+            if !drain.has_more || drain.work_done == 0 {
+                break;
+            }
+        }
+
+        if progress.packets > 0
+            && has_reached_poll_round_time_limit(round_started_at, monotonic_time())
+        {
+            progress.has_reached_time_limit = true;
+        }
+        progress
+    }
+
+    fn try_process_rx_batch(
+        &self,
+        device_timestamp: MonotonicInstant,
+        rx_batch: &mut Vec<PacketBuf>,
+        accepted_packets: &mut Vec<PacketBuf>,
+        control_packets: &mut Vec<Vec<u8>>,
+    ) -> bool {
+        if rx_batch.is_empty() {
+            return true;
+        }
+
+        let Some(mut ingress) = self.ingress.try_lock() else {
+            return false;
+        };
+        ingress.handle_rx_packets(
+            device_timestamp,
+            rx_batch,
+            accepted_packets,
+            control_packets,
+        );
+        true
+    }
+
+    fn try_flush_ingress_batches(
+        &self,
+        accepted_packets: &mut Vec<PacketBuf>,
+        control_packets: &mut Vec<Vec<u8>>,
+    ) -> bool {
+        if accepted_packets.is_empty() && control_packets.is_empty() {
+            return true;
+        }
+
+        let mut sockets = if accepted_packets.is_empty() {
+            None
+        } else {
+            let Some(sockets) = SOCKET_SET.inner.try_lock() else {
+                return false;
+            };
+            Some(sockets)
+        };
+        let Some(mut router) = self.router.try_lock() else {
+            return false;
+        };
+        if let Some(sockets) = &mut sockets {
+            // Acquire both destinations before listener preparation mutates the
+            // socket set. A failed nonblocking acquisition leaves the complete
+            // batch available for an identical retry in a later poll round.
+            prepare_smoltcp_ingress(accepted_packets, sockets);
+            router.enqueue_ingress_packets(accepted_packets);
+        }
+        for packet in control_packets.drain(..) {
+            if let Err(err) = router.queue_control_ipv4_packet(packet) {
+                warn!("Dropping network control packet: {}", err);
+            }
+        }
+        true
     }
 
     pub fn get_smoltcp_source_address(
@@ -307,15 +459,19 @@ impl Service {
     ) -> KResult {
         let mut router = self.router.lock();
         let packet_len = packet.as_ref().ok_or(KError::InvalidInput)?.len();
-        if !router.can_enqueue_tx_packet() {
-            return Err(KError::WouldBlock);
-        }
-
         let route_source = router.output_route_source(dst_addr)?;
         let source_addr = bound_src.unwrap_or(route_source);
-        let packet_count = output_ipv4_packet_count(&router, dst_addr, packet_len)?;
-        if !router.can_enqueue_tx_packets(packet_count) {
-            return Err(KError::WouldBlock);
+        let is_loopback = router.is_loopback_destination(dst_addr);
+
+        if !is_loopback {
+            if !router.can_enqueue_tx_packet() {
+                return Err(KError::WouldBlock);
+            }
+
+            let packet_count = output_ipv4_packet_count(&router, dst_addr, packet_len)?;
+            if !router.can_enqueue_tx_packets(packet_count) {
+                return Err(KError::WouldBlock);
+            }
         }
 
         let route_mtu = router.route_mtu(dst_addr);
@@ -324,7 +480,12 @@ impl Service {
             source_addr,
             route_mtu,
         )?;
-        router.queue_ipv4_packet(packet.take().ok_or(KError::InvalidInput)?)
+        let packet = packet.take().ok_or(KError::InvalidInput)?;
+        if is_loopback {
+            router.transmit_ipv4_now(packet, monotonic_time())
+        } else {
+            router.queue_ipv4_packet(packet)
+        }
     }
 
     pub fn device_mask_for(&self, endpoint: &IpListenEndpoint) -> u32 {
@@ -643,6 +804,48 @@ fn has_reached_poll_round_time_limit(
     current.saturating_duration_since(round_started_at) >= POLL_ROUND_TIME_LIMIT
 }
 
+fn deferred_poll_progress(
+    rx_packets: usize,
+    tx_packets: usize,
+    timer_events: usize,
+    tx_capacity_changed: bool,
+) -> PollProgress {
+    PollProgress {
+        rx_packets,
+        tx_packets,
+        timer_events,
+        tx_capacity_changed,
+        has_more: true,
+    }
+}
+
+fn dispatch_tx_budgeted(
+    router: &mut Router,
+    timestamp: MonotonicInstant,
+    budget: usize,
+    round_started_at: MonotonicInstant,
+) -> (usize, bool) {
+    let mut work_done = 0;
+    let mut remaining = budget;
+    let mut has_reached_time_limit = false;
+
+    while remaining > 0 {
+        let chunk = remaining.min(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS);
+        let (dispatched, _) = router.dispatch_budgeted(timestamp, chunk);
+        work_done += dispatched;
+        remaining = remaining.saturating_sub(dispatched);
+        if dispatched < chunk {
+            break;
+        }
+        if has_reached_poll_round_time_limit(round_started_at, monotonic_time()) {
+            has_reached_time_limit = true;
+            break;
+        }
+    }
+
+    (work_done, has_reached_time_limit)
+}
+
 fn has_immediate_timer_work(current: SmoltcpInstant, next_poll: Option<SmoltcpInstant>) -> bool {
     next_poll.is_some_and(|deadline| deadline <= current)
 }
@@ -689,13 +892,25 @@ fn output_ipv4_packet_count(
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::{vec, vec::Vec};
+    use alloc::{boxed::Box, vec, vec::Vec};
 
     use smoltcp::iface::SocketSet;
     use unittest::{assert, def_test};
 
     use super::*;
-    use crate::buf::PacketOwner;
+    use crate::{
+        buf::PacketOwner,
+        device::LoopbackDevice,
+        ip::{Ipv4Address, Ipv4Cidr},
+        router::{Ipv4AddrEntry, ROUTE_SCOPE_HOST},
+        stack::ipv4,
+    };
+
+    const TEST_POLL_BUDGET: PollBudget = PollBudget {
+        rx_packets: 1,
+        tx_packets: 1,
+        timer_events: 1,
+    };
 
     #[def_test]
     fn test_smoltcp_deadline_clamps_expired_delay() {
@@ -773,5 +988,53 @@ mod tests {
 
         assert_eq!(progress.packets, 1);
         assert!(router.has_pending_ingress());
+    }
+
+    /// Regression test for <https://gitee.com/openkylin/x-kernel/issues/IK97G7>.
+    #[def_test]
+    fn poll_round_defers_router_lock_contention() {
+        let service = Service::new(Router::new());
+        let _router = service.router.lock();
+
+        let progress = service.poll_budgeted(TEST_POLL_BUDGET);
+
+        assert_eq!(progress.rx_packets, 0);
+        assert_eq!(progress.tx_packets, 0);
+        assert!(progress.has_more);
+    }
+
+    #[def_test(serial)]
+    fn tx_dispatch_exposes_loopback_rx_in_the_same_round() {
+        let loopback_addr = Ipv4Address::new(127, 0, 0, 1);
+        let mut router = Router::new();
+        let loopback = router.add_device(Box::new(LoopbackDevice::new()));
+        router
+            .add_ipv4_addr(Ipv4AddrEntry {
+                dev: loopback,
+                addr: Ipv4Cidr::new(loopback_addr, 8),
+                scope: ROUTE_SCOPE_HOST,
+            })
+            .unwrap();
+        let packet =
+            ipv4::build_ipv4_packet(loopback_addr, loopback_addr, ipv4::PROTOCOL_ICMP, 64, &[])
+                .unwrap();
+        router.queue_ipv4_packet(packet).unwrap();
+        let round_started_at = monotonic_time();
+
+        let (tx_packets, _) = dispatch_tx_budgeted(
+            &mut router,
+            round_started_at,
+            TEST_POLL_BUDGET.tx_packets,
+            round_started_at,
+        );
+        let mut packets = Vec::new();
+        let rx_progress = router.drain_rx_budgeted_into(
+            round_started_at,
+            TEST_POLL_BUDGET.rx_packets,
+            &mut packets,
+        );
+
+        assert_eq!(tx_packets, 1);
+        assert_eq!(rx_progress.work_done, 1);
     }
 }

@@ -4,8 +4,8 @@
 
 //! Packet buffer owned by the in-kernel network stack.
 
-use alloc::vec::Vec;
-use core::ops::Range;
+use alloc::{sync::Arc, vec::Vec};
+use core::{net::SocketAddr, ops::Range};
 
 use super::wire::{ETHERNET_HEADER_LEN, EtherType, MacAddress};
 
@@ -42,9 +42,51 @@ pub(crate) struct LinkMetadata {
     pub(crate) protocol: EtherType,
 }
 
-/// A packet buffer with protocol offsets and ownership metadata.
+/// Validated UDP metadata carried by a [`PacketBuf`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct UdpPacketMetadata {
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    payload_start: usize,
+    payload_end: usize,
+}
+
+impl UdpPacketMetadata {
+    pub(crate) fn new(
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        payload_start: usize,
+        payload_end: usize,
+    ) -> Self {
+        Self {
+            local_addr,
+            remote_addr,
+            payload_start,
+            payload_end,
+        }
+    }
+
+    pub(crate) fn local_addr(self) -> SocketAddr {
+        self.local_addr
+    }
+
+    pub(crate) fn remote_addr(self) -> SocketAddr {
+        self.remote_addr
+    }
+
+    pub(crate) fn payload_range(self) -> Range<usize> {
+        self.payload_start..self.payload_end
+    }
+}
+
+/// A reference-counted packet buffer with protocol and ownership metadata.
 #[derive(Clone, Debug)]
 pub(crate) struct PacketBuf {
+    inner: Arc<PacketBufInner>,
+}
+
+#[derive(Clone, Debug)]
+struct PacketBufInner {
     data: Vec<u8>,
     head: usize,
     tail: usize,
@@ -55,22 +97,26 @@ pub(crate) struct PacketBuf {
     link_metadata: Option<LinkMetadata>,
     network_offset: Option<usize>,
     transport_offset: Option<usize>,
+    udp_metadata: Option<UdpPacketMetadata>,
 }
 
 impl PacketBuf {
     pub(crate) fn from_ip_packet_vec(ifindex: i32, data: Vec<u8>, owner: PacketOwner) -> Self {
         let tail = data.len();
         Self {
-            data,
-            head: 0,
-            tail,
-            ifindex,
-            packet_type: PacketType::Host,
-            checksum_state: ChecksumState::Unverified,
-            owner,
-            link_metadata: None,
-            network_offset: Some(0),
-            transport_offset: None,
+            inner: Arc::new(PacketBufInner {
+                data,
+                head: 0,
+                tail,
+                ifindex,
+                packet_type: PacketType::Host,
+                checksum_state: ChecksumState::Unverified,
+                owner,
+                link_metadata: None,
+                network_offset: Some(0),
+                transport_offset: None,
+                udp_metadata: None,
+            }),
         }
     }
 
@@ -81,7 +127,7 @@ impl PacketBuf {
         packet_type: PacketType,
     ) -> Self {
         let mut packet = Self::from_ip_packet_vec(ifindex, data, owner);
-        packet.packet_type = packet_type;
+        Arc::make_mut(&mut packet.inner).packet_type = packet_type;
         packet
     }
 
@@ -101,92 +147,128 @@ impl PacketBuf {
         };
 
         Self {
-            data: frame.to_vec(),
-            head: 0,
-            tail: frame.len(),
-            ifindex,
-            packet_type: packet_type(dst_addr, local_addr),
-            checksum_state: ChecksumState::Unverified,
-            owner,
-            link_metadata: Some(LinkMetadata {
-                dst_addr,
-                src_addr,
-                protocol,
+            inner: Arc::new(PacketBufInner {
+                data: frame.to_vec(),
+                head: 0,
+                tail: frame.len(),
+                ifindex,
+                packet_type: packet_type(dst_addr, local_addr),
+                checksum_state: ChecksumState::Unverified,
+                owner,
+                link_metadata: Some(LinkMetadata {
+                    dst_addr,
+                    src_addr,
+                    protocol,
+                }),
+                network_offset,
+                transport_offset: None,
+                udp_metadata: None,
             }),
-            network_offset,
-            transport_offset: None,
         }
     }
 
     pub(crate) fn ifindex(&self) -> i32 {
-        self.ifindex
+        self.inner.ifindex
     }
 
     pub(crate) fn set_ifindex(&mut self, ifindex: i32) {
-        self.ifindex = ifindex;
+        Arc::make_mut(&mut self.inner).ifindex = ifindex;
     }
 
     pub(crate) fn packet_type(&self) -> PacketType {
-        self.packet_type
+        self.inner.packet_type
     }
 
     #[cfg(unittest)]
     pub(crate) fn checksum_state(&self) -> ChecksumState {
-        self.checksum_state
+        self.inner.checksum_state
     }
 
     pub(crate) fn set_checksum_state(&mut self, checksum_state: ChecksumState) {
-        self.checksum_state = checksum_state;
+        Arc::make_mut(&mut self.inner).checksum_state = checksum_state;
     }
 
     #[cfg(unittest)]
     pub(crate) fn owner(&self) -> PacketOwner {
-        self.owner
+        self.inner.owner
     }
 
     pub(crate) fn set_owner(&mut self, owner: PacketOwner) {
-        self.owner = owner;
+        Arc::make_mut(&mut self.inner).owner = owner;
     }
 
     pub(crate) fn data(&self) -> &[u8] {
-        &self.data[self.data_range()]
+        &self.inner.data[self.data_range()]
     }
 
     pub(crate) fn link_metadata(&self) -> Option<LinkMetadata> {
-        self.link_metadata
+        self.inner.link_metadata
     }
 
     pub(crate) fn network_packet(&self) -> Option<&[u8]> {
-        let offset = self.network_offset?;
-        self.data.get(offset..self.tail)
+        let offset = self.inner.network_offset?;
+        self.inner.data.get(offset..self.inner.tail)
     }
 
     pub(crate) fn network_offset(&self) -> Option<usize> {
-        self.network_offset
+        self.inner.network_offset
     }
 
     pub(crate) fn network_packet_mut(&mut self) -> Option<&mut [u8]> {
-        let offset = self.network_offset?;
-        self.data.get_mut(offset..self.tail)
+        let offset = self.inner.network_offset?;
+        let inner = Arc::make_mut(&mut self.inner);
+        inner.udp_metadata = None;
+        inner.data.get_mut(offset..inner.tail)
     }
 
     pub(crate) fn truncate_network_packet(&mut self, len: usize) -> Option<()> {
-        let offset = self.network_offset?;
+        let offset = self.inner.network_offset?;
         let tail = offset.checked_add(len)?;
-        if tail > self.data.len() {
+        if tail > self.inner.data.len() {
             return None;
         }
-        self.tail = tail;
+        let inner = Arc::make_mut(&mut self.inner);
+        inner.tail = tail;
+        inner.udp_metadata = None;
         Some(())
     }
 
     #[cfg(unittest)]
     pub(crate) fn transport_offset(&self) -> Option<usize> {
-        self.transport_offset
+        self.inner.transport_offset
     }
 
     pub(crate) fn set_transport_offset(&mut self, offset: usize) {
-        self.transport_offset = Some(offset);
+        let inner = Arc::make_mut(&mut self.inner);
+        inner.transport_offset = Some(offset);
+        inner.udp_metadata = None;
+    }
+
+    pub(crate) fn set_udp_metadata(&mut self, metadata: UdpPacketMetadata) {
+        debug_assert!(
+            self.network_packet()
+                .and_then(|packet| packet.get(metadata.payload_range()))
+                .is_some()
+        );
+        Arc::make_mut(&mut self.inner).udp_metadata = Some(metadata);
+    }
+
+    pub(crate) fn udp_metadata(&self) -> Option<UdpPacketMetadata> {
+        self.inner.udp_metadata
+    }
+
+    /// Drops stamped UDP metadata from a uniquely owned handle.
+    ///
+    /// Used after `NetRx` fails to match a socket, so the same packet can stay
+    /// on the shared queue for the task poller without being picked up again.
+    /// The handle is unique on that path, so `make_mut` does not allocate.
+    pub(crate) fn clear_udp_metadata(&mut self) {
+        debug_assert_eq!(
+            Arc::strong_count(&self.inner),
+            1,
+            "NetRx unmatched UDP must uniquely own the packet handle"
+        );
+        Arc::make_mut(&mut self.inner).udp_metadata = None;
     }
 
     #[cfg(unittest)]
@@ -201,8 +283,13 @@ impl PacketBuf {
         self.clone()
     }
 
+    #[cfg(unittest)]
+    pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     fn data_range(&self) -> Range<usize> {
-        self.head..self.tail
+        self.inner.head..self.inner.tail
     }
 }
 
@@ -296,6 +383,24 @@ mod tests {
         assert_eq!(copy.owner(), PacketOwner::DeviceTx);
         assert_eq!(copy.transport_offset(), Some(40));
         assert_eq!(copy.data(), packet.data());
+    }
+
+    #[def_test]
+    fn test_packet_handle_is_pointer_sized_and_uses_copy_on_write() {
+        let packet = PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx);
+        let mut copy = packet.clone();
+
+        assert_eq!(
+            core::mem::size_of::<PacketBuf>(),
+            core::mem::size_of::<usize>()
+        );
+        assert!(packet.shares_storage_with(&copy));
+
+        copy.network_packet_mut().unwrap()[0] = 0x60;
+
+        assert!(!packet.shares_storage_with(&copy));
+        assert_eq!(packet.network_packet().unwrap()[0], 0x45);
+        assert_eq!(copy.network_packet().unwrap()[0], 0x60);
     }
 
     #[def_test]

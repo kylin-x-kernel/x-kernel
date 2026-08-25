@@ -8,6 +8,7 @@ use ::core::net::{IpAddr, SocketAddr};
 use hashbrown::HashMap;
 use kerrno::{KResult, k_bail};
 use khal::time::monotonic_time;
+use kspin::SpinNoIrq;
 use ksync::Mutex;
 use lazyinit::LazyInit;
 
@@ -22,7 +23,7 @@ const UDP_EPHEMERAL_PORT_RANGE: u16 = UDP_EPHEMERAL_PORT_END - UDP_EPHEMERAL_POR
 static UDP_PCB_REGISTRY: LazyInit<UdpPcbRegistry> = LazyInit::new();
 
 struct UdpPcbRegistry {
-    buckets: Vec<Mutex<UdpPcbBucket>>,
+    buckets: Vec<SpinNoIrq<UdpPcbBucket>>,
     port_rand: Mutex<UdpPortRand>,
 }
 
@@ -57,7 +58,7 @@ impl UdpPcbRegistry {
     fn new() -> Self {
         let mut buckets = Vec::with_capacity(UDP_REGISTRY_BUCKETS);
         for _ in 0..UDP_REGISTRY_BUCKETS {
-            buckets.push(Mutex::new(UdpPcbBucket::new()));
+            buckets.push(SpinNoIrq::new(UdpPcbBucket::new()));
         }
         Self {
             buckets,
@@ -116,7 +117,11 @@ impl UdpPcbRegistry {
     ) -> KResult {
         self.bucket(endpoint.port)
             .lock()
-            .bind(pcb, endpoint, kind, reuse_address)
+            .bind(pcb.clone(), endpoint, kind, reuse_address)?;
+        // `set_local_endpoint` takes a sleepable lock; keep it outside the
+        // IRQ-safe bucket used by `NetRx` lookup.
+        pcb.state.set_local_endpoint(Some(endpoint));
+        Ok(())
     }
 
     fn bind_ephemeral(
@@ -133,7 +138,9 @@ impl UdpPcbRegistry {
             };
             let mut bucket = self.bucket(endpoint.port).lock();
             if !bucket.contains_bind_conflict(listen_endpoint(endpoint), reuse_address) {
-                bucket.bind(pcb, endpoint, kind, reuse_address)?;
+                bucket.bind(pcb.clone(), endpoint, kind, reuse_address)?;
+                drop(bucket);
+                pcb.state.set_local_endpoint(Some(endpoint));
                 return Ok(endpoint);
             }
         }
@@ -164,7 +171,7 @@ impl UdpPcbRegistry {
             .is_explicitly_bound(pcb, local_endpoint.port)
     }
 
-    fn bucket(&self, port: u16) -> &Mutex<UdpPcbBucket> {
+    fn bucket(&self, port: u16) -> &SpinNoIrq<UdpPcbBucket> {
         &self.buckets[bucket_index_for_port(port)]
     }
 
@@ -218,7 +225,6 @@ impl UdpPcbBucket {
             return Err(kerrno::KError::AddrInUse);
         }
 
-        pcb.state.set_local_endpoint(Some(endpoint));
         self.insert(pcb, endpoint, kind, reuse_address);
         Ok(())
     }

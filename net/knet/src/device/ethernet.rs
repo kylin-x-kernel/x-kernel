@@ -180,8 +180,9 @@ impl NetRxScheduler for KnetRxScheduler {
 }
 
 #[cfg(not(unittest))]
-fn ensure_net_rx_softirq_available() -> bool {
+pub(crate) fn ensure_net_rx_softirq_available() -> bool {
     NET_RX_SOFTIRQ_INIT.call_once(|| {
+        super::net_rx::ensure_net_rx_queue();
         if kirq::softirq::open_softirq(kirq::softirq::SoftirqVec::NetRx, run_net_rx_softirq) {
             NET_RX_SOFTIRQ_AVAILABLE.store(true, Ordering::Release);
         } else {
@@ -192,7 +193,8 @@ fn ensure_net_rx_softirq_available() -> bool {
 }
 
 #[cfg(unittest)]
-fn ensure_net_rx_softirq_available() -> bool {
+pub(crate) fn ensure_net_rx_softirq_available() -> bool {
+    super::net_rx::ensure_net_rx_queue();
     let vec = kirq::softirq::SoftirqVec::NetRx;
     if kirq::softirq::softirq_action_matches_for_tests(vec, run_net_rx_softirq) {
         NET_RX_SOFTIRQ_AVAILABLE.store(true, Ordering::Release);
@@ -234,6 +236,8 @@ fn unregister_net_rx_source(id: usize) {
 }
 
 fn run_net_rx_softirq() {
+    let has_more_packets = super::net_rx::process_pending(super::net_rx::NET_RX_BUDGET);
+
     let mut wake_batch: [Option<PollSet>; NET_RX_SOFTIRQ_BATCH] = core::array::from_fn(|_| None);
     let (wake_count, has_deferred_pending) = NET_RX_SOURCES
         .lock()
@@ -247,7 +251,7 @@ fn run_net_rx_softirq() {
         crate::poller::network_poller().notify(crate::poller::PollReason::Rx);
     }
 
-    if has_deferred_pending {
+    if has_deferred_pending || has_more_packets {
         kirq::softirq::raise_softirq(kirq::softirq::SoftirqVec::NetRx);
     }
 }

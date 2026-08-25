@@ -12,6 +12,7 @@ use ktime_types::MonotonicInstant;
 
 mod ethernet;
 mod loopback;
+mod net_rx;
 #[cfg(feature = "vsock")]
 mod vsock;
 
@@ -155,10 +156,14 @@ pub trait NetDevice: Send + Sync {
 
     /// Sends a validated IP packet to the next hop.
     ///
+    /// The Router calls this in task context. Implementations may allocate and
+    /// callers must not invoke it from hardirq, softirq, or BH-disabled context.
+    ///
     /// `source_addr` is the source parsed by the Router before dispatch.
-    /// Returns `true` if this operation resulted in the readiness of receive
-    /// operation. This is true for loopback devices and can be used to speed
-    /// up packet processing.
+    /// Returns `true` when the send made RX ready, typically after a
+    /// successful loopback enqueue. Returns `false` when it did not:
+    /// Ethernet TX, or a drop such as link down, over-MTU, or a full
+    /// `NetRx` queue. This is a poller hint, not a send-success flag.
     fn send_ip_packet(
         &mut self,
         ifindex: i32,

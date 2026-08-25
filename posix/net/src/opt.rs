@@ -8,6 +8,9 @@
 //! - Get socket options (getsockopt, etc.)
 //! - Set socket options (setsockopt, etc.)
 //! - Socket-level, IP-level, TCP-level, and other protocol options
+//!
+//! Linux stores nonzero send and receive timeouts in jiffies. Socket timeout
+//! conversion therefore rounds a userspace `timeval` up to one kernel tick.
 
 use kerrno::{KError, KResult, LinuxError};
 use knet::{
@@ -29,6 +32,7 @@ const PACKET_STATISTICS: u32 = 6;
 mod conv {
     use kerrno::{KError, KResult};
     use knet::options::{PacketMembership, PacketStatistics, UnixCredentials};
+    use ktime_types::{NANOS_PER_SEC, TimeSpan};
     use linux_raw_sys::{general::timeval, net::ucred};
     use posix_types::{TimeSpanLike, UserRead};
 
@@ -56,14 +60,26 @@ mod conv {
         }
     }
 
-    pub struct Duration;
+    pub struct SocketTimeout;
 
-    impl Duration {
-        pub fn sys_to_rust(val: timeval) -> KResult<ktime_types::TimeSpan> {
-            val.try_into_time_span()
+    impl SocketTimeout {
+        pub fn sys_to_rust(val: timeval) -> KResult<TimeSpan> {
+            let timeout = val.try_into_time_span()?;
+            if timeout.is_zero() {
+                return Ok(timeout);
+            }
+
+            let nanos_per_tick = NANOS_PER_SEC as u128 / kbuild_config::TICKS_PER_SECOND as u128;
+            let ticks = timeout.as_nanos().div_ceil(nanos_per_tick);
+            // Tick rounding must not turn a valid userspace timeout into a
+            // conversion error when it crosses the internal duration range.
+            Ok(
+                TimeSpan::try_from_nanos(ticks.saturating_mul(nanos_per_tick))
+                    .unwrap_or(TimeSpan::MAX),
+            )
         }
 
-        pub fn rust_to_sys(val: ktime_types::TimeSpan) -> KResult<timeval> {
+        pub fn rust_to_sys(val: TimeSpan) -> KResult<timeval> {
             Ok(timeval::from_time_span(val))
         }
     }
@@ -166,8 +182,8 @@ macro_rules! call_dispatch {
             (SOL_SOCKET, SO_SNDBUF) => SendBuffer as Int<usize>,
             (SOL_SOCKET, SO_RCVBUF) => ReceiveBuffer as Int<usize>,
             (SOL_SOCKET, SO_KEEPALIVE) => KeepAlive as IntBool,
-            (SOL_SOCKET, SO_RCVTIMEO) => ReceiveTimeout as Duration,
-            (SOL_SOCKET, SO_SNDTIMEO) => SendTimeout as Duration,
+            (SOL_SOCKET, SO_RCVTIMEO) => ReceiveTimeout as SocketTimeout,
+            (SOL_SOCKET, SO_SNDTIMEO) => SendTimeout as SocketTimeout,
             (SOL_SOCKET, SO_PASSCRED) => PassCredentials as IntBool,
             (SOL_SOCKET, SO_PEERCRED) => PeerCredentials as Ucred,
 
@@ -280,4 +296,49 @@ pub fn sys_setsockopt(
     call_dispatch!(dispatch, (level, optname));
 
     Ok(0)
+}
+
+#[cfg(unittest)]
+mod tests {
+    use ktime_types::{NANOS_PER_SEC, TimeSpan};
+    use linux_raw_sys::general::timeval;
+    use unittest::{assert_eq, def_test};
+
+    use super::conv::SocketTimeout;
+
+    const NANOS_PER_TICK: u64 = NANOS_PER_SEC / kbuild_config::TICKS_PER_SECOND as u64;
+
+    #[def_test]
+    fn zero_socket_timeout_remains_infinite() {
+        let timeout = SocketTimeout::sys_to_rust(timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        })
+        .unwrap();
+
+        assert_eq!(timeout, TimeSpan::ZERO);
+    }
+
+    /// Regression test for <https://gitee.com/openkylin/x-kernel/issues/IK97G7>.
+    #[def_test]
+    fn one_microsecond_socket_timeout_rounds_up_to_one_tick() {
+        let timeout = SocketTimeout::sys_to_rust(timeval {
+            tv_sec: 0,
+            tv_usec: 1,
+        })
+        .unwrap();
+
+        assert_eq!(timeout, TimeSpan::from_nanos(NANOS_PER_TICK));
+    }
+
+    #[def_test]
+    fn exact_tick_socket_timeout_is_unchanged() {
+        let timeout = SocketTimeout::sys_to_rust(timeval {
+            tv_sec: 0,
+            tv_usec: (NANOS_PER_TICK / 1_000) as _,
+        })
+        .unwrap();
+
+        assert_eq!(timeout, TimeSpan::from_nanos(NANOS_PER_TICK));
+    }
 }

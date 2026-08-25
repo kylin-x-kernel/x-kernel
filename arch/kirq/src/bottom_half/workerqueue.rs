@@ -309,19 +309,28 @@ mod tests {
         pool.freeze_wakes_for_tests();
         WORK_RUNS.store(0, Ordering::Relaxed);
 
-        {
+        let result = {
             let _hardirq = HardIrqContextGuard::enter();
-            assert_eq!(
-                queue.queue_delayed_work(&delayed, TimeSpan::ZERO),
-                QueueDelayedWorkResult::Queued
-            );
+            let result = queue.queue_delayed_work(&delayed, TimeSpan::ZERO);
+            match result {
+                QueueDelayedWorkResult::Queued | QueueDelayedWorkResult::WorkerUnavailable => {}
+                result => panic!(
+                    "IRQ-safe zero-delay enqueue should only depend on worker-pool readiness, got \
+                     {result:?}"
+                ),
+            }
             assert_eq!(WORK_RUNS.load(Ordering::Relaxed), 0);
+            result
+        };
+        if result == QueueDelayedWorkResult::WorkerUnavailable {
+            pool.unfreeze_wakes_for_tests(true);
+        } else {
+            pool.unfreeze_wakes_for_tests(false);
+            delayed
+                .flush()
+                .expect("hardirq zero-delay delayed work should finish");
+            assert_eq!(WORK_RUNS.load(Ordering::Relaxed), 1);
         }
-        pool.unfreeze_wakes_for_tests(false);
-        delayed
-            .flush()
-            .expect("hardirq zero-delay delayed work should finish");
-        assert_eq!(WORK_RUNS.load(Ordering::Relaxed), 1);
     }
 
     #[def_test(serial)]

@@ -3895,6 +3895,7 @@ name = "posix-net"
 version = "0.2.0-dev"
 dependencies = [
  "bytemuck",
+ "kbuild_config",
  "kerrno",
  "khal",
  "kio",
