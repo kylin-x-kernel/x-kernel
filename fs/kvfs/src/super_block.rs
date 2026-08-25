@@ -16,6 +16,7 @@ use core::{
 use hashbrown::HashMap;
 use klazy::{Lazy, Once};
 use ktask::WaitQueue;
+use ktime_types::{SystemTime, TimestampLimits};
 
 use crate::{
     Dentry, DentryKey, DentryOperations, FileSystemType, Filename, FsContext, FsContextPurpose,
@@ -257,6 +258,15 @@ pub trait SuperBlockOperations: Send + Sync + 'static {
     /// Returns filesystem statistics.
     fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs>;
 
+    /// Returns the timestamp representation supported by this filesystem.
+    ///
+    /// The default matches Linux `alloc_super()`: full signed 64-bit seconds
+    /// at whole-second precision. Filesystems with a different on-disk or
+    /// protocol representation should override this during `fill_super()`.
+    fn timestamp_limits(&self, _super_block: &SuperBlock) -> TimestampLimits {
+        TimestampLimits::default()
+    }
+
     /// Writes back superblock-owned dirty state.
     ///
     /// [`SuperBlock::sync_fs`] calls this hook only after writing back dirty
@@ -481,6 +491,7 @@ pub struct SuperBlock {
     dentry_cache: Mutex<HashMap<DentryKey, Dentry>>,
     block_size: Once<u64>,
     max_file_size: Once<u64>,
+    timestamp_limits: Once<TimestampLimits>,
     rename_mutex: Mutex<()>,
     inodes: Mutex<Vec<Weak<VfsInode>>>,
 }
@@ -736,7 +747,8 @@ impl SuperBlock {
                 && self.private.get().is_none()
                 && self.root.get().is_none()
                 && self.block_size.get().is_none()
-                && self.max_file_size.get().is_none(),
+                && self.max_file_size.get().is_none()
+                && self.timestamp_limits.get().is_none(),
             "a superblock can only be initialized once"
         );
         assert!(
@@ -754,6 +766,8 @@ impl SuperBlock {
         self.block_size.call_once(|| block_size);
         self.max_file_size
             .call_once(|| max_file_size.min(MAX_LFS_FILESIZE));
+        self.timestamp_limits
+            .call_once(|| ops.timestamp_limits(self));
         let root = init_root_fn(self)?;
         Self::publish_root(self, root);
         Ok(())
@@ -779,6 +793,7 @@ impl SuperBlock {
             dentry_cache: Mutex::default(),
             block_size: Once::new(),
             max_file_size: Once::new(),
+            timestamp_limits: Once::new(),
             rename_mutex: Mutex::default(),
             inodes: Mutex::default(),
         })
@@ -840,8 +855,9 @@ impl SuperBlock {
             self.ops.get().is_some()
                 && self.root.get().is_some()
                 && self.block_size.get().is_some()
-                && self.max_file_size.get().is_some(),
-            "fill_super must install operations, sizes, and a root"
+                && self.max_file_size.get().is_some()
+                && self.timestamp_limits.get().is_some(),
+            "fill_super must install operations, capabilities, and a root"
         );
         let mut lifecycle = self.lifecycle.lock();
         assert!(
@@ -1103,6 +1119,13 @@ impl SuperBlock {
             .max_file_size
             .get()
             .expect("a published superblock must have a maximum file size")
+    }
+
+    pub(crate) fn truncate_timestamp(&self, timestamp: SystemTime) -> SystemTime {
+        self.timestamp_limits
+            .get()
+            .expect("an initialized superblock must publish timestamp limits")
+            .truncate(timestamp)
     }
 
     /// Serializes directory-tree topology changes across different parents.

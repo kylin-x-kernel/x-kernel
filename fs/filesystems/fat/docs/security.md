@@ -49,6 +49,7 @@ wrapper 生命周期，并通过 `UnsafeCell` 提供 guard-bound borrow。`from_
 | T-02 | handle 在错误 owner/lock 下访问 | 高 | wrapper 与 mount state 混用 | `FsRef` 保存 owner pointer，每次 borrow 校验 matching mutex guard |
 | T-03 | root 与普通 mount 行为漂移 | 中 | 另建 root provider 或 callback | 自有 `register_init` 回调注册唯一静态 `FILE_SYSTEM_TYPE`，随后经 KVFS registry、`get_tree_bdev` 和 `fill_super` 分派 |
 | T-04 | 同一 FAT 设备建立两套 mutable mount state | 高 | 每次 mount 都直接调用 `fill_super` | KVFS 在调用 FAT 前按 `(s_type, dev_t)` reservation；已有 live superblock 直接复用，RO/RW 不一致返回 `EBUSY` |
+| T-05 | resident inode 时间与 FAT 目录项不一致 | 中 | VFS 发布原请求，绕过日期级 atime、2 秒 mtime/ctime 联动或 1980～2107 范围 | superblock 只声明公共范围和 1ns 粒度；FAT callback 规范化各字段、写盘并返回实际 `MetadataUpdate`；ctime 单独请求不作为已应用字段返回 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -57,6 +58,7 @@ wrapper 生命周期，并通过 `UnsafeCell` 提供 guard-bound borrow。`from_
 | F-01 | FAT 初始化失败 | 损坏格式或 I/O 错误 | `fill_super` 返回错误 | 当前 mount 失败；root 无候选时停止 boot | 2 | 传播 typed VFS error，不发布半初始化 superblock |
 | F-02 | block flush 失败 | 后端设备错误 | 同步请求失败 | 持久化不保证 | 2 | 显式 sync/flush 路径传播错误 |
 | F-03 | owner 校验失败 | 内部 handle 跨 mount 混用 | 内核 assertion 终止当前执行 | kernel panic | 1 | wrapper 构造绑定 owner；review 禁止绕过 `FsRef` borrow API |
+| F-04 | timestamp 超出 FAT 范围或精度 | 用户请求无法编码的时间 | 请求在 FAT callback 中被钳制或舍入 | syscall 成功且 resident 值与介质表示一致 | 3 | 统一使用 `FAT_TIMESTAMP_LIMITS`、日期级 atime 和 2 秒 mtime helper，并把实际值返回 KVFS |
 
 ## 故障管理
 
@@ -69,7 +71,8 @@ assertion 阻止产生错误引用。
 
 ## 已知限制
 
-mount-wide mutex 串行化 FAT 操作；FAT 无法完整表达 Unix owner/permission 语义。
+mount-wide mutex 串行化 FAT 操作；FAT 无法完整表达 Unix owner/permission 语义。当前内核没有
+FAT `time_offset` mount option 或全局 kernel timezone，FAT local time 暂按 UTC（offset 0）解释。
 
 ## 审计清单
 
@@ -77,3 +80,4 @@ mount-wide mutex 串行化 FAT 操作；FAT 无法完整表达 Unix owner/permis
 - 新 FAT handle 是否只通过 matching owner guard 借用？
 - 新 unsafe lifetime extension 是否列出 owner、pinning、锁和 aliasing 不变量？
 - 格式或 I/O 错误是否返回而非 panic？
+- metadata callback 是否只返回真正写入 FAT 的时间字段和值？

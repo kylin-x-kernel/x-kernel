@@ -120,6 +120,16 @@ impl P9Session {
         &self.mount_tag
     }
 
+    /// Returns the largest non-negative timestamp second representable by the
+    /// negotiated dialect.
+    pub fn timestamp_max_seconds(&self) -> i64 {
+        if self.p9_version.is_dotl() {
+            i64::MAX
+        } else {
+            i64::from(u32::MAX)
+        }
+    }
+
     /// List directory entries at the provided path.
     pub fn list_dir(&mut self, path: &str) -> Result<Vec<String>, String> {
         let (fid, is_dir) = self.walk_path(path)?;

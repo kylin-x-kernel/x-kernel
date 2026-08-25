@@ -17,7 +17,6 @@ use core::{
 use hashbrown::HashMap;
 use kcred::{Cred, NamespaceId, UserNamespace, initial_user_namespace};
 use klazy::Once;
-use ktime::realtime;
 use ktime_types::TimeSpan;
 
 /// Mount idmapping context passed into inode namespace operations.
@@ -836,7 +835,7 @@ impl Path {
         }
 
         let metadata = self.metadata();
-        let now = realtime();
+        let now = self.inode().current_time();
         if mount_flags.contains(MountFlags::RELATIME)
             && metadata.mtime < metadata.atime
             && metadata.ctime < metadata.atime
@@ -862,7 +861,7 @@ impl Path {
         }
 
         let metadata = self.metadata();
-        let now = realtime();
+        let now = self.inode().current_time();
         if metadata.mtime == now && metadata.ctime == now {
             return Ok(());
         }
@@ -1464,6 +1463,10 @@ mod tests {
         fn statfs(&self, _super_block: &SuperBlock) -> VfsResult<StatFs> {
             statfs()
         }
+
+        fn timestamp_limits(&self, _super_block: &SuperBlock) -> crate::TimestampLimits {
+            crate::TimestampLimits::NANOSECOND
+        }
     }
 
     fn mock_get_tree(
@@ -1549,9 +1552,9 @@ mod tests {
             &self,
             _idmap: &crate::MountIdmap,
             _dentry: &Dentry,
-            _update: MetadataUpdate,
-        ) -> VfsResult<()> {
-            Ok(())
+            update: MetadataUpdate,
+        ) -> VfsResult<MetadataUpdate> {
+            Ok(update)
         }
     }
 

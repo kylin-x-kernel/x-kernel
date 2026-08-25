@@ -90,6 +90,11 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   只执行已授权的 mutation，不能作为 syscall 层的公开绕过入口。
 - timestamp 授权必须区分 touch 与显式 times 数组；单个 `UTIME_NOW` 与
   `UTIME_OMIT` 的组合仍属于显式请求。
+- `TimestampLimits` 构造时必须拒绝零值、超过一秒的粒度和反向范围；通用 superblock
+  构造路径使用整秒保守默认，文件系统必须显式提升能力。已授权的显式时间由
+  `VfsInode::truncate_timestamp()` 准备，自动 I/O 与 namespace 时间由 `current_time()` 在比较
+  前准备；filesystem callback 必须通过返回的 `MetadataUpdate` 报告实际生效值并省略未应用字段，
+  resident inode 只发布该返回值，raw setter 不再重复应用 policy 或恢复原始精度。
 - descriptor truncate 必须验证 `FMode::WRITE`；pathname truncate 必须使用调用时凭据
   检查 inode write permission。
 - dentry backing metadata refresh 必须先确认 positive state，再匹配 inode number、node
@@ -255,6 +260,7 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-40 | inode 初始化或驱逐竞争产生第二个 resident identity，或全 cache 唤醒形成惊群 | 高 | cache miss 在构造后才占 slot、Weak upgrade 失败立即重建，或所有 inode 共用一个等待队列 | cache 先发布 `New`；并发 initializer 在该 slot 等待；最后引用 drop 发布 `Freeing` 后再调用 hook；同号 lookup 等待 entry 删除并重试；每 slot 队列只唤醒同号等待者，后端不接收 `EINVAL` 风格的竞争错误 |
 | T-41 | 同一 block device 出现两个 mutable superblock，或 mount 到正在 teardown 的实例 | 高 | filesystem 每次 mount 自行分配 state，或 `get_tree` 与 active acquisition 间无状态校验 | KVFS 按 canonical `(s_type, BlockDevice)` 建立 nascent reservation 和独占 claim；同 identity 等待/复用，RO/RW 不一致或跨类型冲突返回 `EBUSY`；`mount_new` 在 dying/dead activation race 后重试 |
 | T-42 | filesystem 在 transaction 完成后继续使用失效的 mount data borrow | 高 | filesystem 把 `FsContext::data()` byte-slice 引用直接存入 superblock state | opaque data 只作为同步 context 输入；filesystem 必须解析并保存 owned/typed state，generic fill closure 为 `FnOnce` |
+| T-43 | resident inode 暴露磁盘格式无法保存的时间精度，或字段联动关系与磁盘不一致 | 中 | VFS 在 filesystem callback 后重新发布原请求，掩盖后端的范围钳制、字段专有粒度或忽略行为 | `TimestampLimits` 只处理 superblock 级公共能力；callback 复用 `MetadataUpdate` 返回实际生效字段，KVFS 只发布返回值；FAT 日期级 atime、2 秒 mtime/ctime 联动及 KVFS callback 回传测试约束该合同 |
 
 ## 故障模式与影响分析（FMEA）
 

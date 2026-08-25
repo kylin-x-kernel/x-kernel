@@ -5,6 +5,8 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::fmt;
 
+use ktime_types::TimestampLimits;
+
 use crate::{
     BlockMapping, ChecksumTarget, CorruptKind, Ext4Error, Ext4Result, Ext4SbInfo, FilesystemBlock,
     InodeNumber, LogicalBlock, UnsupportedKind,
@@ -79,7 +81,7 @@ pub(crate) struct InodeInitialization {
     block: [u8; disk_inode::INODE_BLOCK_BYTES],
     uses_extent_tree: bool,
     links_count: u16,
-    timestamp_seconds: u32,
+    timestamp: Ext4Timestamp,
     generation: u32,
 }
 
@@ -95,7 +97,7 @@ impl InodeInitialization {
             block: [0; disk_inode::INODE_BLOCK_BYTES],
             uses_extent_tree: false,
             links_count: 1,
-            timestamp_seconds: 0,
+            timestamp: Ext4Timestamp::new(0, 0),
             generation: 0,
         }
     }
@@ -110,7 +112,7 @@ impl InodeInitialization {
             block: [0; disk_inode::INODE_BLOCK_BYTES],
             uses_extent_tree: false,
             links_count: 2,
-            timestamp_seconds: 0,
+            timestamp: Ext4Timestamp::new(0, 0),
             generation: 0,
         }
     }
@@ -134,7 +136,7 @@ impl InodeInitialization {
             block,
             uses_extent_tree: false,
             links_count: 1,
-            timestamp_seconds: 0,
+            timestamp: Ext4Timestamp::new(0, 0),
             generation: 0,
         })
     }
@@ -152,7 +154,7 @@ impl InodeInitialization {
             block: [0; disk_inode::INODE_BLOCK_BYTES],
             uses_extent_tree: true,
             links_count: 1,
-            timestamp_seconds: 0,
+            timestamp: Ext4Timestamp::new(0, 0),
             generation: 0,
         })
     }
@@ -183,7 +185,7 @@ impl InodeInitialization {
             block,
             uses_extent_tree: false,
             links_count: 1,
-            timestamp_seconds: 0,
+            timestamp: Ext4Timestamp::new(0, 0),
             generation: 0,
         })
     }
@@ -194,8 +196,8 @@ impl InodeInitialization {
         self
     }
 
-    pub(crate) const fn with_timestamp_seconds(mut self, timestamp_seconds: u32) -> Self {
-        self.timestamp_seconds = timestamp_seconds;
+    pub(crate) const fn with_timestamp(mut self, timestamp: Ext4Timestamp) -> Self {
+        self.timestamp = timestamp;
         self
     }
 
@@ -355,6 +357,26 @@ impl Ext4Timestamp {
             extra: None,
         })
     }
+}
+
+pub(crate) const fn timestamp_limits_for_inode_size(inode_size: u16) -> TimestampLimits {
+    const EXT4_EXTRA_TIMESTAMP_MAX_SECONDS: i64 = (1_i64 << 34) - 1 + i32::MIN as i64;
+    const EXTRA_TIMESTAMP_END: usize = disk_inode::ATIME_EXTRA_OFFSET + 4;
+
+    let has_extra_timestamps = inode_size as usize >= EXTRA_TIMESTAMP_END;
+    TimestampLimits::new(
+        if has_extra_timestamps {
+            1
+        } else {
+            ktime_types::NANOS_PER_SEC as u32
+        },
+        i32::MIN as i64,
+        if has_extra_timestamps {
+            EXT4_EXTRA_TIMESTAMP_MAX_SECONDS
+        } else {
+            i32::MAX as i64
+        },
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1982,9 +2004,27 @@ fn encode_initialized_inode(
     put_u16(output, 0x00, initialization.mode())?;
     put_u16(output, 0x02, initialization.uid as u16)?;
     update_inode_size_bytes(output, initialization.size)?;
-    put_u32(output, 0x08, initialization.timestamp_seconds)?;
-    put_u32(output, 0x0c, initialization.timestamp_seconds)?;
-    put_u32(output, 0x10, initialization.timestamp_seconds)?;
+    update_inode_timestamp_bytes(
+        output,
+        0x08,
+        disk_inode::ATIME_EXTRA_OFFSET,
+        initialized_inode_extra_field_fits(extra_isize, disk_inode::ATIME_EXTRA_OFFSET),
+        initialization.timestamp,
+    )?;
+    update_inode_timestamp_bytes(
+        output,
+        0x0c,
+        disk_inode::CTIME_EXTRA_OFFSET,
+        initialized_inode_extra_field_fits(extra_isize, disk_inode::CTIME_EXTRA_OFFSET),
+        initialization.timestamp,
+    )?;
+    update_inode_timestamp_bytes(
+        output,
+        0x10,
+        disk_inode::MTIME_EXTRA_OFFSET,
+        initialized_inode_extra_field_fits(extra_isize, disk_inode::MTIME_EXTRA_OFFSET),
+        initialization.timestamp,
+    )?;
     put_u16(output, 0x18, initialization.gid as u16)?;
     put_u16(output, 0x1a, initialization.links_count)?;
     let flags = initialized_inode_flags(&initialization, has_extents_feature)?;
@@ -2013,6 +2053,10 @@ fn encode_initialized_inode(
         put_u16(output, disk_inode::EXTRA_ISIZE_OFFSET, extra_isize)?;
     }
     update_inode_checksum(output, number, has_metadata_checksum, checksum_seed)
+}
+
+fn initialized_inode_extra_field_fits(extra_isize: u16, offset: usize) -> bool {
+    disk_inode::GOOD_OLD_INODE_SIZE + usize::from(extra_isize) >= offset + 4
 }
 
 fn initialized_inode_flags(
@@ -2239,7 +2283,8 @@ fn inode_checksum(
 mod tests {
     use super::{
         EncodedTimestamp, Ext4DeviceId, Ext4Inode, Ext4InodeMetadata, Ext4Timestamp,
-        InodeInitialization, InodeKind, RawTimestampFields, disk_inode,
+        InodeInitialization, InodeKind, RawTimestampFields, disk_inode, encode_initialized_inode,
+        timestamp_limits_for_inode_size,
     };
     use crate::{CorruptKind, Ext4Error, InodeNumber, UnsupportedKind};
 
@@ -2496,6 +2541,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn timestamp_limits_track_inode_extra_field_capacity() {
+        let legacy = timestamp_limits_for_inode_size(128);
+        assert_eq!(legacy.granularity_ns(), ktime_types::NANOS_PER_SEC as u32);
+        assert_eq!(legacy.minimum_seconds(), i32::MIN as i64);
+        assert_eq!(legacy.maximum_seconds(), i32::MAX as i64);
+
+        let extended = timestamp_limits_for_inode_size(256);
+        assert_eq!(extended.granularity_ns(), 1);
+        assert_eq!(extended.minimum_seconds(), i32::MIN as i64);
+        assert_eq!(extended.maximum_seconds(), 15_032_385_535);
+    }
+
+    #[test]
+    fn initialized_extended_inode_preserves_epoch_and_nanoseconds() {
+        let timestamp = Ext4Timestamp::new(2_147_483_648, 123_456_789);
+        let mut bytes = [0; 256];
+        encode_initialized_inode(
+            &mut bytes,
+            InodeNumber::new(11),
+            InodeInitialization::regular_file(0o644, 1000, 1001).with_timestamp(timestamp),
+            32,
+            false,
+            false,
+            0,
+        )
+        .unwrap();
+
+        let metadata =
+            Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false)
+                .unwrap();
+        assert_eq!(metadata.atime, timestamp);
+        assert_eq!(metadata.ctime, timestamp);
+        assert_eq!(metadata.mtime, timestamp);
+    }
+
+    #[test]
+    fn initialized_legacy_inode_clamps_post_2038_timestamp() {
+        let mut bytes = [0; disk_inode::GOOD_OLD_INODE_SIZE];
+        encode_initialized_inode(
+            &mut bytes,
+            InodeNumber::new(11),
+            InodeInitialization::regular_file(0o644, 1000, 1001)
+                .with_timestamp(Ext4Timestamp::new(2_147_483_648, 123_456_789)),
+            0,
+            false,
+            false,
+            0,
+        )
+        .unwrap();
+
+        let metadata =
+            Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false)
+                .unwrap();
+        let maximum = Ext4Timestamp::new(i32::MAX as i64, 0);
+        assert_eq!(metadata.atime, maximum);
+        assert_eq!(metadata.ctime, maximum);
+        assert_eq!(metadata.mtime, maximum);
+    }
+
     fn symlink_inode(
         size: u64,
         blocks: u64,
@@ -2681,6 +2786,66 @@ mod unittests {
 
     const fn timestamp(seconds: i64, nanos: u32) -> Ext4Timestamp {
         Ext4Timestamp::new(seconds, nanos)
+    }
+
+    #[def_test]
+    fn timestamp_limits_track_inode_extra_field_capacity() {
+        let legacy = timestamp_limits_for_inode_size(128);
+        assert_eq!(legacy.granularity_ns(), ktime_types::NANOS_PER_SEC as u32);
+        assert_eq!(legacy.minimum_seconds(), i32::MIN as i64);
+        assert_eq!(legacy.maximum_seconds(), i32::MAX as i64);
+
+        let extended = timestamp_limits_for_inode_size(256);
+        assert_eq!(extended.granularity_ns(), 1);
+        assert_eq!(extended.minimum_seconds(), i32::MIN as i64);
+        assert_eq!(extended.maximum_seconds(), 15_032_385_535);
+    }
+
+    #[def_test]
+    fn initialized_extended_inode_preserves_epoch_and_nanoseconds() {
+        let timestamp = Ext4Timestamp::new(2_147_483_648, 123_456_789);
+        let mut bytes = [0; 256];
+        encode_initialized_inode(
+            &mut bytes,
+            InodeNumber::new(11),
+            InodeInitialization::regular_file(0o644, 1000, 1001).with_timestamp(timestamp),
+            32,
+            false,
+            false,
+            0,
+        )
+        .unwrap();
+
+        let metadata =
+            Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false)
+                .unwrap();
+        assert_eq!(metadata.atime, timestamp);
+        assert_eq!(metadata.ctime, timestamp);
+        assert_eq!(metadata.mtime, timestamp);
+    }
+
+    #[def_test]
+    fn initialized_legacy_inode_clamps_post_2038_timestamp() {
+        let mut bytes = [0; disk_inode::GOOD_OLD_INODE_SIZE];
+        encode_initialized_inode(
+            &mut bytes,
+            InodeNumber::new(11),
+            InodeInitialization::regular_file(0o644, 1000, 1001)
+                .with_timestamp(Ext4Timestamp::new(2_147_483_648, 123_456_789)),
+            0,
+            false,
+            false,
+            0,
+        )
+        .unwrap();
+
+        let metadata =
+            Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false)
+                .unwrap();
+        let maximum = Ext4Timestamp::new(i32::MAX as i64, 0);
+        assert_eq!(metadata.atime, maximum);
+        assert_eq!(metadata.ctime, maximum);
+        assert_eq!(metadata.mtime, maximum);
     }
 
     #[def_test]

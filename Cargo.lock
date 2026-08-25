@@ -1459,6 +1459,7 @@ dependencies = [
  "kvfs",
  "macros",
  "slab",
+ "unittest",
 ]
 
 [[package]]
@@ -2305,7 +2306,6 @@ dependencies = [
  "klogger",
  "ksync",
  "ktask",
- "ktime",
  "ktime_types",
  "kvfs",
  "macros",

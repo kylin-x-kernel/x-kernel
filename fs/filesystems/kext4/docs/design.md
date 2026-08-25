@@ -421,6 +421,17 @@ inode 并把其 private state 显式传给 core，禁止 core 在 mutation 中�
 VFS-wide identity table 因而以 `(SuperBlock, inode number)` 保证一个 live identity 只对应一个 `VfsInode`、一个
 `AddressSpace` 和一份 ext4 private state。
 
+`Ext4SbInfo::timestamp_limits()` 从 filesystem inode size 推导共享的
+`ktime_types::TimestampLimits`：不能容纳 `i_atime_extra` 的 128-byte inode 只支持整秒及
+有符号 32-bit 秒范围；具备完整 extra timestamp 空间的 inode 支持纳秒和扩展 epoch。ext4
+superblock operations 在 fill 期间从已经安装的 `Ext4SbInfo` 返回该能力，由唯一的 KVFS
+`SuperBlock` 持有；bridge 不再重复保存或转换平行的范围结构。VFS 生成当前时间时先按该能力截断，再用于比较、filesystem callback 和
+resident publication；raw inode setter 只保存已经准备好的值。新建 inode 的初始化结构保存
+完整 `Ext4Timestamp`，并通过与存量 inode 相同的 base/extra encoder 写入 atime、ctime 和
+mtime，因而 256-byte inode 保留纳秒与 epoch 位，128-byte inode 在磁盘边界截断到可表示的
+整秒范围。既有 timestamp encode/decode 仍按每个实际 extra field 是否存在进行截断或校验，
+作为磁盘格式边界的第二层保护。
+
 挂载时由 ext4 fill operation 把 filesystem block size 与 extent-format `s_maxbytes` 写入 KVFS
 `SuperBlock`，legacy bitmap maxbytes 只保存在 `Ext4SbInfo`；Ext4Inode 通过其组合持有的 ext4
 private state 查询 extent-format 状态。write、truncate、FIEMAP

@@ -96,7 +96,7 @@ impl InodeOperations for DeviceFile {
         _idmap: &kvfs::MountIdmap,
         _dentry: &kvfs::Dentry,
         update: MetadataUpdate,
-    ) -> VfsResult<()>;
+    ) -> VfsResult<MetadataUpdate>;
 }
 
 impl kvfs::FileOperations for DeviceFile {

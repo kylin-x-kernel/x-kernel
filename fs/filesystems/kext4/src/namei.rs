@@ -253,7 +253,6 @@ impl Ext4SbInfo {
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
         }
-        timestamp_seconds_u32(timestamp)?;
         self.validate_inode_timestamp_update(parent, timestamp)?;
         let insert = self.ensure_namespace_insert_capacity(parent, name, 0)?;
 
@@ -286,7 +285,6 @@ impl Ext4SbInfo {
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
         }
-        timestamp_seconds_u32(timestamp)?;
         self.validate_inode_timestamp_update(parent, timestamp)?;
         parent
             .links_count()
@@ -337,8 +335,8 @@ impl Ext4SbInfo {
         gid: u32,
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<Ext4Inode> {
-        let initialization = InodeInitialization::fast_symlink(target, uid, gid)?
-            .with_timestamp_seconds(timestamp_seconds_u32(timestamp)?);
+        let initialization =
+            InodeInitialization::fast_symlink(target, uid, gid)?.with_timestamp(timestamp);
         self.create_initialized_child(
             parent,
             name,
@@ -371,7 +369,6 @@ impl Ext4SbInfo {
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
         }
-        timestamp_seconds_u32(timestamp)?;
         self.validate_inode_timestamp_update(parent, timestamp)?;
         let insert = self.ensure_namespace_insert_capacity(parent, name, 1)?;
 
@@ -404,7 +401,7 @@ impl Ext4SbInfo {
     ) -> Ext4Result<Ext4Inode> {
         let (kind, device) = special;
         let initialization = InodeInitialization::special(kind, permissions, device, uid, gid)?
-            .with_timestamp_seconds(timestamp_seconds_u32(timestamp)?);
+            .with_timestamp(timestamp);
         let file_type = directory_file_type_for_inode_kind(kind);
         self.create_initialized_child(parent, name, initialization, file_type, timestamp)
     }
@@ -633,12 +630,10 @@ impl Ext4SbInfo {
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<Ext4Inode> {
-        let timestamp_seconds = timestamp_seconds_u32(timestamp)?;
         let allocation = self.allocate_named_inode(
             Some(parent.number()),
             name,
-            InodeInitialization::regular_file(permissions, uid, gid)
-                .with_timestamp_seconds(timestamp_seconds),
+            InodeInitialization::regular_file(permissions, uid, gid).with_timestamp(timestamp),
             handle,
         )?;
         let child = self.internal_iget(allocation.inode())?;
@@ -664,12 +659,10 @@ impl Ext4SbInfo {
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<Ext4Inode> {
-        let timestamp_seconds = timestamp_seconds_u32(timestamp)?;
         let allocation = self.allocate_named_inode(
             Some(parent.number()),
             name,
-            InodeInitialization::directory(permissions, uid, gid)
-                .with_timestamp_seconds(timestamp_seconds),
+            InodeInitialization::directory(permissions, uid, gid).with_timestamp(timestamp),
             handle,
         )?;
         let child = self.internal_iget(allocation.inode())?;
@@ -746,12 +739,11 @@ impl Ext4SbInfo {
         timestamp: Ext4Timestamp,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<Ext4Inode> {
-        let timestamp_seconds = timestamp_seconds_u32(timestamp)?;
         let allocation = self.allocate_named_inode(
             Some(parent.number()),
             name,
             InodeInitialization::block_mapped_symlink(target.len(), uid, gid)?
-                .with_timestamp_seconds(timestamp_seconds),
+                .with_timestamp(timestamp),
             handle,
         )?;
         let child = self.internal_iget(allocation.inode())?;
@@ -3490,11 +3482,6 @@ fn validate_symlink_target(target: &[u8]) -> Ext4Result<()> {
         return Err(Ext4Error::InvalidName);
     }
     Ok(())
-}
-
-fn timestamp_seconds_u32(timestamp: Ext4Timestamp) -> Ext4Result<u32> {
-    u32::try_from(timestamp.seconds())
-        .map_err(|_| Ext4Error::Unsupported(UnsupportedKind::TimestampRange))
 }
 
 const fn directory_file_type_for_inode_kind(kind: InodeKind) -> DirectoryFileType {

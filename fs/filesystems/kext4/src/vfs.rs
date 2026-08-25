@@ -22,9 +22,9 @@ use kvfs::{
 
 use crate::{
     BlockMapping, BlockMappingFlags, DirectoryFileType, Ext4DeviceId, Ext4DirEntryRef, Ext4DirPos,
-    Ext4DirSink, Ext4Error, Ext4Inode, Ext4InodeMetadataUpdate, Ext4Result, Ext4SyncIntent,
-    Ext4Timestamp, Ext4XattrNameRef, Ext4XattrNameSink, Ext4XattrNamespace, Ext4XattrSetMode,
-    InodeKind, InodeNumber, LogicalBlock,
+    Ext4DirSink, Ext4Error, Ext4Inode, Ext4InodeMetadataUpdate, Ext4InodeStat, Ext4Result,
+    Ext4SyncIntent, Ext4Timestamp, Ext4XattrNameRef, Ext4XattrNameSink, Ext4XattrNamespace,
+    Ext4XattrSetMode, InodeKind, InodeNumber, LogicalBlock,
     disk::inode::EXT4_ROOT_INO,
     superblock::{Ext4SbInfo, Ext4StatFsMode},
     sync::{self, RwLock},
@@ -244,12 +244,12 @@ fn ext4_timestamp_to_system_time(timestamp: Ext4Timestamp) -> SystemTime {
 }
 
 #[cfg(feature = "times")]
-fn current_ext4_timestamp() -> Ext4Timestamp {
-    system_time_to_ext4(ktime::realtime())
+fn current_ext4_timestamp(inode: &VfsInode) -> Ext4Timestamp {
+    system_time_to_ext4(inode.current_time())
 }
 
 #[cfg(not(feature = "times"))]
-fn current_ext4_timestamp() -> Ext4Timestamp {
+fn current_ext4_timestamp(_inode: &VfsInode) -> Ext4Timestamp {
     Ext4Timestamp::new(0, 0)
 }
 
@@ -277,6 +277,25 @@ fn metadata_from_inode(inode: &Ext4Inode, block_size: u64) -> Metadata {
         atime: ext4_timestamp_to_system_time(stat.atime),
         mtime: ext4_timestamp_to_system_time(stat.mtime),
         ctime: ext4_timestamp_to_system_time(stat.ctime),
+    }
+}
+
+fn applied_metadata_update(requested: MetadataUpdate, applied: Ext4InodeStat) -> MetadataUpdate {
+    MetadataUpdate {
+        size: None,
+        mode: requested
+            .mode
+            .map(|_| NodePermission::from_bits_truncate(applied.mode)),
+        owner: requested.owner.map(|_| (applied.uid, applied.gid)),
+        atime: requested
+            .atime
+            .map(|_| ext4_timestamp_to_system_time(applied.atime)),
+        mtime: requested
+            .mtime
+            .map(|_| ext4_timestamp_to_system_time(applied.mtime)),
+        ctime: requested
+            .ctime
+            .map(|_| ext4_timestamp_to_system_time(applied.ctime)),
     }
 }
 
@@ -416,6 +435,12 @@ impl Ext4SuperOperations {
 }
 
 impl SuperBlockOperations for Ext4SuperOperations {
+    fn timestamp_limits(&self, super_block: &SuperBlock) -> kvfs::TimestampLimits {
+        let ext4 = ext4_private(super_block)
+            .expect("ext4 fill_super must install private state before timestamp capabilities");
+        sync::read_lock(ext4).timestamp_limits()
+    }
+
     fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs> {
         let ext4 = ext4_private(super_block)?;
         let stat = sync::read_lock(ext4).statfs().map_err(into_vfs_err)?;
@@ -449,7 +474,7 @@ impl SuperBlockOperations for Ext4SuperOperations {
         if inode.link_count() != 0 {
             return Ok(());
         }
-        let timestamp = current_ext4_timestamp();
+        let timestamp = current_ext4_timestamp(inode);
         sync::write_lock(ext4)
             .eviction_prepare(private)
             .map_err(into_vfs_err)?;
@@ -905,7 +930,7 @@ impl InodeOperations for Ext4Inode {
         _idmap: &kvfs::MountIdmap,
         dentry: &Dentry,
         update: MetadataUpdate,
-    ) -> VfsResult<()> {
+    ) -> VfsResult<MetadataUpdate> {
         if update.size.is_some() {
             return Err(VfsError::OperationNotSupported);
         }
@@ -933,7 +958,7 @@ impl InodeOperations for Ext4Inode {
         state
             .update_inode_metadata(self, metadata)
             .map_err(into_vfs_err)?;
-        Ok(())
+        Ok(applied_metadata_update(update, self.stat()))
     }
 
     fn get_xattr(
@@ -988,7 +1013,7 @@ impl InodeOperations for Ext4Inode {
                 suffix,
                 value,
                 mode,
-                current_ext4_timestamp(),
+                current_ext4_timestamp(inode),
             )
             .map_err(into_xattr_vfs_err)
     }
@@ -998,7 +1023,7 @@ impl InodeOperations for Ext4Inode {
         let super_block = ext4_super_block(inode)?;
         let ext4 = ext4_private(&super_block)?;
         sync::write_lock(ext4)
-            .remove_xattr(self, namespace, suffix, current_ext4_timestamp())
+            .remove_xattr(self, namespace, suffix, current_ext4_timestamp(inode))
             .map_err(into_xattr_vfs_err)
     }
 }
@@ -1107,7 +1132,7 @@ impl InodeDirOperations for Ext4Inode {
                     mode.permission().bits(),
                     uid,
                     gid,
-                    current_ext4_timestamp(),
+                    current_ext4_timestamp(dir),
                 )
                 .map_err(into_vfs_err)?
         };
@@ -1136,7 +1161,7 @@ impl InodeDirOperations for Ext4Inode {
                     mode.permission().bits(),
                     uid,
                     gid,
-                    current_ext4_timestamp(),
+                    current_ext4_timestamp(dir),
                 )
                 .map_err(into_vfs_err)?
         };
@@ -1173,7 +1198,7 @@ impl InodeDirOperations for Ext4Inode {
                     mode.permission().bits(),
                     uid,
                     gid,
-                    current_ext4_timestamp(),
+                    current_ext4_timestamp(dir),
                 )
                 .map_err(into_vfs_err)?
         };
@@ -1209,7 +1234,7 @@ impl InodeDirOperations for Ext4Inode {
                     target.as_bytes(),
                     uid,
                     gid,
-                    current_ext4_timestamp(),
+                    current_ext4_timestamp(dir),
                 )
                 .map_err(into_vfs_err)?
         };
@@ -1232,7 +1257,7 @@ impl InodeDirOperations for Ext4Inode {
         {
             let mut state = sync::write_lock(ext4);
             state
-                .link(self, name.as_bytes(), &target, current_ext4_timestamp())
+                .link(self, name.as_bytes(), &target, current_ext4_timestamp(dir))
                 .map_err(into_vfs_err)?
         }
         let inode = Ext4SuperOperations::iget(&super_block, target.number())?;
@@ -1250,11 +1275,11 @@ impl InodeDirOperations for Ext4Inode {
             let mut state = sync::write_lock(ext4);
             if dentry.is_dir() {
                 state
-                    .remove_directory(self, name.as_bytes(), &child, current_ext4_timestamp())
+                    .remove_directory(self, name.as_bytes(), &child, current_ext4_timestamp(dir))
                     .map_err(into_vfs_err)?
             } else {
                 state
-                    .unlink(self, name.as_bytes(), &child, current_ext4_timestamp())
+                    .unlink(self, name.as_bytes(), &child, current_ext4_timestamp(dir))
                     .map_err(into_vfs_err)?
             }
         }
@@ -1294,7 +1319,7 @@ impl InodeDirOperations for Ext4Inode {
                     &new_parent,
                     new_dentry.name().as_bytes(),
                     replaced.as_deref(),
-                    current_ext4_timestamp(),
+                    current_ext4_timestamp(old_dir),
                 )
                 .map_err(into_vfs_err)?
         }
@@ -1379,7 +1404,7 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
         let super_block = vfs_inode.super_block()?;
         let ext4 = ext4_private(&super_block)?;
         let intent = Ext4SyncIntent::from_data_only(control.is_data_only());
-        let timestamp = current_ext4_timestamp();
+        let timestamp = current_ext4_timestamp(&vfs_inode);
 
         // A cache miss may enter `read_at()` while the PageCache mapping lock is
         // held. Keep the core mutex out of PageCache traversal so writeback
@@ -1424,7 +1449,7 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
         {
             let mut state = sync::write_lock(ext4);
             state
-                .prepare_regular_inode_truncate(inode, len, current_ext4_timestamp())
+                .prepare_regular_inode_truncate(inode, len, current_ext4_timestamp(&vfs_inode))
                 .map_err(into_vfs_err)?
         }
         mapping.truncate_setsize(len)?;
@@ -1583,20 +1608,57 @@ mod tests {
     use alloc::vec::Vec;
 
     use kerrno::LinuxError;
+    use ktime_types::SystemTime;
     use kvfs::{
-        FiemapExtentFlags, FiemapExtentInfo, FiemapExtentWriter, FiemapFlags, RenameFlags,
-        VfsError, VfsResult, XattrName, XattrSetFlags,
+        FiemapExtentFlags, FiemapExtentInfo, FiemapExtentWriter, FiemapFlags, MetadataUpdate,
+        NodePermission, RenameFlags, VfsError, VfsResult, XattrName, XattrSetFlags,
     };
     use unittest::def_test;
 
     use super::{
-        Ext4MountOptions, ExtentWalkQuery, parse_xattr_name, supports_rename_flags,
-        walk_file_extents, xattr_set_mode,
+        Ext4MountOptions, ExtentWalkQuery, applied_metadata_update, parse_xattr_name,
+        supports_rename_flags, walk_file_extents, xattr_set_mode,
     };
     use crate::{
-        BlockCount, BlockMapping, BlockMappingFlags, Ext4XattrNamespace, Ext4XattrSetMode,
-        PhysicalBlock, superblock::Ext4StatFsMode,
+        BlockCount, BlockMapping, BlockMappingFlags, Ext4InodeStat, Ext4Timestamp,
+        Ext4XattrNamespace, Ext4XattrSetMode, PhysicalBlock, superblock::Ext4StatFsMode,
     };
+
+    #[def_test]
+    fn setattr_result_uses_post_encoding_inode_values() {
+        let requested_timestamp = SystemTime::from_unix_parts(2_147_483_648, 123_456_789).unwrap();
+        let applied_timestamp = Ext4Timestamp::new(i32::MAX as i64, 0);
+        let requested = MetadataUpdate {
+            mode: Some(NodePermission::from_bits_truncate(0o777)),
+            owner: Some((1000, 1001)),
+            atime: Some(requested_timestamp),
+            mtime: Some(requested_timestamp),
+            ctime: Some(requested_timestamp),
+            ..Default::default()
+        };
+        let applied = applied_metadata_update(
+            requested,
+            Ext4InodeStat {
+                mode: 0o100640,
+                uid: 2000,
+                gid: 2001,
+                size: 0,
+                blocks: 0,
+                rdev: None,
+                links_count: 1,
+                atime: applied_timestamp,
+                ctime: applied_timestamp,
+                mtime: applied_timestamp,
+            },
+        );
+        let applied_system_time = SystemTime::from_unix_seconds(i32::MAX as i64);
+
+        assert_eq!(applied.mode.map(|mode| mode.bits()), Some(0o640));
+        assert_eq!(applied.owner, Some((2000, 2001)));
+        assert_eq!(applied.atime, Some(applied_system_time));
+        assert_eq!(applied.mtime, Some(applied_system_time));
+        assert_eq!(applied.ctime, Some(applied_system_time));
+    }
 
     #[def_test]
     fn statfs_mount_options_default_to_bsddf() {

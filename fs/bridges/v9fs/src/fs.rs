@@ -70,6 +70,13 @@ struct V9fsSuperOperations;
 static V9FS_SUPER_OPERATIONS: V9fsSuperOperations = V9fsSuperOperations;
 
 impl SuperBlockOperations for V9fsSuperOperations {
+    fn timestamp_limits(&self, super_block: &SuperBlock) -> kvfs::TimestampLimits {
+        let fs = super_block
+            .private::<Arc<Fs9pFilesystem>>()
+            .expect("9P superblock initialization must install its session before capabilities");
+        kvfs::TimestampLimits::new(1, 0, fs.lock().timestamp_max_seconds())
+    }
+
     fn statfs(&self, _super_block: &SuperBlock) -> VfsResult<StatFs> {
         // 9P does not expose filesystem-wide statistics in a standard way.
         // Return a minimal StatFs with zeroed fields.

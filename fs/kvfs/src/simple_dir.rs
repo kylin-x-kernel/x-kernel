@@ -419,7 +419,7 @@ impl<O: SimpleDirOps> InodeOperations for SimpleDirInodeOperations<O> {
         idmap: &crate::MountIdmap,
         dentry: &Dentry,
         update: MetadataUpdate,
-    ) -> VfsResult<()> {
+    ) -> VfsResult<MetadataUpdate> {
         self.dir.node.setattr(idmap, dentry, update)
     }
 }

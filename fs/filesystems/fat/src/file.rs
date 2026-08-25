@@ -102,7 +102,7 @@ impl InodeOperations for FatFileInode {
         _idmap: &kvfs::MountIdmap,
         _dentry: &Dentry,
         update: MetadataUpdate,
-    ) -> VfsResult<()> {
+    ) -> VfsResult<MetadataUpdate> {
         // FatFS has no ownership & permission
 
         let mut fs = self.fs.lock();
@@ -111,8 +111,7 @@ impl InodeOperations for FatFileInode {
         if let Some(size) = update.size {
             set_file_len(block_size, file, size)?;
         }
-        update_file_metadata(file, update);
-        Ok(())
+        Ok(update_file_metadata(file, update))
     }
 }
 

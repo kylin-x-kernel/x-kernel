@@ -38,6 +38,10 @@ struct PseudoSuperOperations;
 static PSEUDO_SUPER_OPERATIONS: PseudoSuperOperations = PseudoSuperOperations;
 
 impl SuperBlockOperations for PseudoSuperOperations {
+    fn timestamp_limits(&self, _super_block: &SuperBlock) -> crate::TimestampLimits {
+        crate::TimestampLimits::NANOSECOND
+    }
+
     fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs> {
         Ok(simple_statfs(super_block.magic()))
     }

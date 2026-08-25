@@ -1181,9 +1181,9 @@ mod tests {
             &self,
             _idmap: &crate::MountIdmap,
             _dentry: &Dentry,
-            _update: MetadataUpdate,
-        ) -> VfsResult<()> {
-            Ok(())
+            update: MetadataUpdate,
+        ) -> VfsResult<MetadataUpdate> {
+            Ok(update)
         }
     }
 
@@ -1366,9 +1366,9 @@ mod tests {
             &self,
             _idmap: &crate::MountIdmap,
             _dentry: &Dentry,
-            _update: MetadataUpdate,
-        ) -> VfsResult<()> {
-            Ok(())
+            update: MetadataUpdate,
+        ) -> VfsResult<MetadataUpdate> {
+            Ok(update)
         }
     }
 

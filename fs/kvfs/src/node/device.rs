@@ -553,9 +553,9 @@ mod tests {
             &self,
             _idmap: &MountIdmap,
             _dentry: &crate::Dentry,
-            _update: MetadataUpdate,
-        ) -> VfsResult<()> {
-            Ok(())
+            update: MetadataUpdate,
+        ) -> VfsResult<MetadataUpdate> {
+            Ok(update)
         }
     }
 

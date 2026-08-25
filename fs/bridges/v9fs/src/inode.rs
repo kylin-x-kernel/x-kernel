@@ -15,9 +15,9 @@ use kcred::Cred;
 use ktime_types::SystemTime;
 use kvfs::{
     Dentry, DeviceId, DirContext, FileDirOperations, FileOperations, InodeDirOperations,
-    InodeOperations, InodeSymlinkOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags,
-    NodePermission, NodeType, Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
-    inode_init_owner,
+    InodeOperations, InodeSymlinkOperations, InodeUpdateTime, LockedDentry, Metadata,
+    MetadataUpdate, NodeFlags, NodePermission, NodeType, Umode, VfsError, VfsFile, VfsInode,
+    VfsInodeInit, VfsResult, inode_init_owner,
 };
 
 use super::{
@@ -304,7 +304,10 @@ impl InodeOperations for Inode {
         _idmap: &kvfs::MountIdmap,
         _dentry: &Dentry,
         update: MetadataUpdate,
-    ) -> VfsResult<()> {
+    ) -> VfsResult<MetadataUpdate> {
+        if update.owner.is_some() || update.atime.is_some() || update.mtime.is_some() {
+            return Err(VfsError::OperationNotSupported);
+        }
         let path = self.node_path()?;
         if let Some(mode) = update.mode {
             let mut session = self.fs.lock();
@@ -315,10 +318,24 @@ impl InodeOperations for Inode {
         if let Some(size) = update.size {
             self.set_regular_len(size)?;
         }
-        // 9P2000.L TSETATTR supports uid/gid/atime/mtime changes,
-        // but our fs9p::Session currently only exposes setattr_mode.
-        // Additional setattr helpers can be added as the Session API grows.
-        Ok(())
+        Ok(MetadataUpdate {
+            size: update.size,
+            mode: update.mode,
+            ..Default::default()
+        })
+    }
+
+    fn update_time(
+        &self,
+        _idmap: &kvfs::MountIdmap,
+        _dentry: &Dentry,
+        _timestamp: SystemTime,
+        _update: InodeUpdateTime,
+    ) -> VfsResult<MetadataUpdate> {
+        // Automatic updates remain best-effort until the session exposes the
+        // 9P2000.L timestamp form of TSETATTR. Returning no applied fields
+        // prevents KVFS from publishing a value that was never sent.
+        Ok(MetadataUpdate::default())
     }
 }
 

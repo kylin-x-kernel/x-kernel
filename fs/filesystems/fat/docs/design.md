@@ -44,6 +44,11 @@ block subsystem 已就绪的可阻塞任务上下文运行，不能从 IRQ conte
    `VfsResult` 返回，不 panic。
 3. mount state 固定地址并由 mutex 串行化 FAT handle 操作。
 4. 建立 KVFS `SuperBlock`、root inode 和 root dentry 后才向调用方返回可挂载对象。
+5. superblock timestamp capability 只声明所有 FAT 字段共有的 1980～2107 范围，并采用
+   Linux FAT 的 1ns 公共粒度以避免 VFS 预先做错误的统一舍入。文件 metadata callback 在写盘前
+   把 atime 截断到本地日期边界（当前内核没有 FAT `time_offset` 或全局时区，故本地偏移为
+   0，即 UTC），把 mtime 截断到 2 秒并令 ctime 与之相同；callback 通过
+   `MetadataUpdate` 返回这些实际生效值，KVFS resident inode 不再发布原请求。
 
 ## 并发模型
 
@@ -57,6 +62,8 @@ block subsystem 已就绪的可阻塞任务上下文运行，不能从 IRQ conte
   第二套设备实例 cache。
 - block source policy 属于 KVFS，字节游标属于 `fs_block`，FAT 格式状态属于本 crate。
 - 初始化失败返回错误，使 root candidate 和普通 mount 使用同一失败语义。
+- `TimestampLimits` 不尝试表达 FAT 的分字段时间规则；日期级 atime 和共享 mtime/ctime
+  属于 FAT inode callback，避免在通用 VFS 中建立 FAT 专有状态。
 
 ## Drop / 资源释放
 

@@ -6,6 +6,7 @@ use alloc::{sync::Arc, vec, vec::Vec};
 use core::num::NonZeroU32;
 
 use block::BlockDeviceOperations;
+use ktime_types::TimestampLimits;
 
 use crate::{
     bitmap_allocator::{BlockGroupRange, InodeGroupRange},
@@ -14,7 +15,7 @@ use crate::{
     disk::{BlockGroupDescriptor, Superblock, checksum, features, superblock},
     error::{ChecksumTarget, CorruptKind, Ext4Error, Ext4Result, UnsupportedKind},
     extent::BlockMapping,
-    inode::InodeKind,
+    inode::{InodeKind, timestamp_limits_for_inode_size},
     io::FilesystemDevice,
     jbd2::{
         JournalBlock, JournalBlockMapper, JournalLogScan, JournalReplayApplied,
@@ -593,6 +594,11 @@ impl Ext4SbInfo {
     /// Returns the immutable derived layout.
     pub const fn layout(&self) -> FilesystemLayout {
         self.layout
+    }
+
+    /// Returns the timestamp limits implied by this filesystem's inode size.
+    pub const fn timestamp_limits(&self) -> TimestampLimits {
+        timestamp_limits_for_inode_size(self.superblock.inode_size())
     }
 
     /// Returns a validated block group descriptor.
@@ -5401,7 +5407,7 @@ mod tests {
                 BlockGroupNumber::new(0),
                 InodeInitialization::regular_file(0o644, 0, 0)
                     .with_owner(1000, 1001)
-                    .with_timestamp_seconds(123)
+                    .with_timestamp(crate::Ext4Timestamp::new(123, 0))
                     .with_generation(77),
                 &mut handle,
             )
@@ -7688,6 +7694,21 @@ mod tests {
             filesystem.raw_inode(inode.number()).unwrap().extra_isize(),
             effective_want_extra_isize
         );
+    }
+
+    #[test]
+    fn newly_allocated_inode_preserves_extended_timestamp() {
+        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let timestamp = crate::Ext4Timestamp::new(2_147_483_648, 123_456_789);
+
+        let inode = allocate_checkpointed_inode(
+            &mut filesystem,
+            InodeInitialization::regular_file(0o644, 0, 0).with_timestamp(timestamp),
+        );
+
+        assert_eq!(inode.atime(), timestamp);
+        assert_eq!(inode.ctime(), timestamp);
+        assert_eq!(inode.mtime(), timestamp);
     }
 
     #[test]

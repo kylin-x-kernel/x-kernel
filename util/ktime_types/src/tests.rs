@@ -78,3 +78,44 @@ fn system_time_checked_arithmetic_detects_bounds() {
         Some(SystemTime::from_unix_seconds(i64::MAX))
     );
 }
+
+#[def_test]
+fn timestamp_limits_round_down_and_clamp() {
+    let limits = TimestampLimits::new(NANOS_PER_SEC as u32, -10, 10);
+
+    assert_eq!(
+        limits.truncate(SystemTime::from_unix_parts(2, 123_456_789).unwrap()),
+        SystemTime::from_unix_seconds(2)
+    );
+    assert_eq!(
+        limits.truncate(SystemTime::from_unix_parts(-11, 999_999_999).unwrap()),
+        SystemTime::from_unix_seconds(-10)
+    );
+    assert_eq!(
+        limits.truncate(SystemTime::from_unix_parts(10, 123_456_789).unwrap()),
+        SystemTime::from_unix_seconds(10)
+    );
+    assert_eq!(
+        TimestampLimits::NANOSECOND.truncate(SystemTime::from_unix_parts(2, 123_456_789).unwrap()),
+        SystemTime::from_unix_parts(2, 123_456_789).unwrap()
+    );
+    assert_eq!(TimestampLimits::default(), TimestampLimits::SECOND);
+}
+
+#[def_test]
+fn timestamp_limits_clear_nanoseconds_at_linux_range_endpoints() {
+    let limits = TimestampLimits::new(1, -10, 10);
+
+    assert_eq!(
+        limits.truncate(SystemTime::from_unix_parts(-10, 123_456_789).unwrap()),
+        SystemTime::from_unix_seconds(-10)
+    );
+    assert_eq!(
+        limits.truncate(SystemTime::from_unix_parts(10, 987_654_321).unwrap()),
+        SystemTime::from_unix_seconds(10)
+    );
+    assert_eq!(
+        limits.truncate(SystemTime::from_unix_parts(9, 987_654_321).unwrap()),
+        SystemTime::from_unix_parts(9, 987_654_321).unwrap()
+    );
+}

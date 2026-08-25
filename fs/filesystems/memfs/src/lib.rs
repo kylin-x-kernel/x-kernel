@@ -210,6 +210,10 @@ struct MemorySuperOperations;
 static MEMORY_SUPER_OPERATIONS: MemorySuperOperations = MemorySuperOperations;
 
 impl SuperBlockOperations for MemorySuperOperations {
+    fn timestamp_limits(&self, _super_block: &SuperBlock) -> kvfs::TimestampLimits {
+        kvfs::TimestampLimits::NANOSECOND
+    }
+
     fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs> {
         let fs = super_block.private::<Arc<MemoryFs>>()?;
         let mut stat = simple_statfs(fs.fs_type);
@@ -512,7 +516,7 @@ impl InodeOperations for MemoryNode {
         _idmap: &kvfs::MountIdmap,
         _dentry: &Dentry,
         update: MetadataUpdate,
-    ) -> VfsResult<()> {
+    ) -> VfsResult<MetadataUpdate> {
         let mut metadata = self.inode.metadata.lock();
         if let Some(size) = update.size {
             self.inode.as_file()?;
@@ -534,7 +538,7 @@ impl InodeOperations for MemoryNode {
         if let Some(ctime) = update.ctime {
             metadata.ctime = ctime;
         }
-        Ok(())
+        Ok(update)
     }
 }
 

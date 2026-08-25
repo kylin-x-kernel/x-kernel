@@ -11,7 +11,7 @@ categories = ["filesystem", "no-std"]
 
 [features]
 default = []
-times = ["dep:ktime"]
+times = []
 
 [dependencies]
 bitflags.workspace = true
@@ -23,7 +23,6 @@ klogger.workspace = true
 macros.workspace = true
 ksync.workspace = true
 kvfs.workspace = true
-ktime = { workspace = true, optional = true }
 ktime_types = { workspace = true }
 unittest = { workspace = true }
 

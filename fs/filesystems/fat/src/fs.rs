@@ -17,7 +17,12 @@ use kvfs::{
 };
 use slab::Slab;
 
-use super::{FatDisk, dir::FatDirInode, ff, util::into_vfs_err};
+use super::{
+    FatDisk,
+    dir::FatDirInode,
+    ff,
+    util::{FAT_TIMESTAMP_LIMITS, into_vfs_err},
+};
 
 /// Inner FAT filesystem state.
 pub(crate) struct FatFilesystemInner {
@@ -142,6 +147,10 @@ struct FatSuperOperations;
 static FAT_SUPER_OPERATIONS: FatSuperOperations = FatSuperOperations;
 
 impl SuperBlockOperations for FatSuperOperations {
+    fn timestamp_limits(&self, _super_block: &SuperBlock) -> kvfs::TimestampLimits {
+        FAT_TIMESTAMP_LIMITS
+    }
+
     fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs> {
         let fs = super_block.private::<Arc<FatFilesystem>>()?.inner.lock();
         let stats = fs.inner.stats().map_err(into_vfs_err)?;

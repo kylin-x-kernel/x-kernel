@@ -340,24 +340,40 @@ pub trait InodeOperations: Send + Sync + 'static {
         None
     }
 
-    /// Updates inode metadata.
+    /// Updates inode metadata and returns the values actually applied.
+    ///
+    /// Filesystems must omit fields they ignored and return any value they
+    /// normalized to match their storage or protocol representation. KVFS
+    /// publishes only the returned values to the resident inode.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::OperationNotSupported`] by default. Filesystem
+    /// implementations may return other errors when validation or persistence
+    /// fails; on error KVFS does not publish any returned metadata.
     fn setattr(
         &self,
         _idmap: &MountIdmap,
         _dentry: &Dentry,
         _attr: MetadataUpdate,
-    ) -> VfsResult<()> {
+    ) -> VfsResult<MetadataUpdate> {
         Err(VfsError::OperationNotSupported)
     }
 
-    /// Applies an automatic VFS timestamp update.
+    /// Applies an automatic VFS timestamp update and returns the values
+    /// actually applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error reported while applying the timestamp update. KVFS
+    /// does not update the resident inode when this method fails.
     fn update_time(
         &self,
         idmap: &MountIdmap,
         dentry: &Dentry,
         timestamp: SystemTime,
         update: InodeUpdateTime,
-    ) -> VfsResult<()> {
+    ) -> VfsResult<MetadataUpdate> {
         let (atime, mtime, ctime) = match update {
             InodeUpdateTime::Access => (Some(timestamp), None, None),
             InodeUpdateTime::ChangeAndModification => (None, Some(timestamp), Some(timestamp)),
@@ -1696,39 +1712,37 @@ impl VfsInode {
 
     /// Updates the metadata of the node.
     pub fn update_metadata(&self, dentry: &Dentry, mut update: MetadataUpdate) -> VfsResult<()> {
-        let size = update.size;
-        let mode = update.mode;
-        let owner = update.owner;
-        let atime = update.atime;
-        let mtime = update.mtime;
-        let changed = size.is_some()
-            || mode.is_some()
-            || owner.is_some()
-            || atime.is_some()
-            || mtime.is_some();
+        let changed = update.size.is_some()
+            || update.mode.is_some()
+            || update.owner.is_some()
+            || update.atime.is_some()
+            || update.mtime.is_some();
+        update.atime = update.atime.map(|time| self.truncate_timestamp(time));
+        update.mtime = update.mtime.map(|time| self.truncate_timestamp(time));
+        update.ctime = update.ctime.map(|time| self.truncate_timestamp(time));
         if changed && update.ctime.is_none() {
-            update.ctime = Some(ktime::realtime());
+            update.ctime = Some(self.current_time());
         }
-        let ctime = update.ctime;
-        self.inode_operations
+        let applied = self
+            .inode_operations
             .as_ref()
             .setattr(&MountIdmap, dentry, update)?;
-        if let Some(size) = size {
+        if let Some(size) = applied.size {
             self.set_size(size);
         }
-        if let Some(atime) = atime {
+        if let Some(atime) = applied.atime {
             self.set_accessed_at(atime);
         }
-        if let Some(mtime) = mtime {
+        if let Some(mtime) = applied.mtime {
             self.set_modified_at(mtime);
         }
-        if let Some(ctime) = ctime {
+        if let Some(ctime) = applied.ctime {
             self.set_changed_at(ctime);
         }
-        if let Some(mode) = mode {
+        if let Some(mode) = applied.mode {
             self.attributes.set_permission(mode);
         }
-        if let Some((uid, gid)) = owner {
+        if let Some((uid, gid)) = applied.owner {
             self.attributes.set_owner(uid, gid);
         }
         Ok(())
@@ -1740,16 +1754,17 @@ impl VfsInode {
         timestamp: SystemTime,
         update: InodeUpdateTime,
     ) -> VfsResult<()> {
-        self.inode_operations
+        let applied = self
+            .inode_operations
             .update_time(&MountIdmap, dentry, timestamp, update)?;
-        match update {
-            InodeUpdateTime::Access => {
-                self.set_accessed_at(timestamp);
-            }
-            InodeUpdateTime::ChangeAndModification => {
-                self.set_modified_at(timestamp);
-                self.set_changed_at(timestamp);
-            }
+        if let Some(atime) = applied.atime {
+            self.set_accessed_at(atime);
+        }
+        if let Some(mtime) = applied.mtime {
+            self.set_modified_at(mtime);
+        }
+        if let Some(ctime) = applied.ctime {
+            self.set_changed_at(ctime);
         }
         Ok(())
     }
@@ -2189,24 +2204,38 @@ impl VfsInode {
         }
     }
 
-    /// Sets the access timestamp.
+    /// Stores a prepared access timestamp without applying filesystem policy.
     pub fn set_accessed_at(&self, timestamp: SystemTime) -> SystemTime {
         self.attributes.set_accessed_at(timestamp)
     }
 
-    /// Sets the modification timestamp.
+    /// Stores a prepared modification timestamp without applying filesystem policy.
     pub fn set_modified_at(&self, timestamp: SystemTime) -> SystemTime {
         self.attributes.set_modified_at(timestamp)
     }
 
-    /// Sets the change timestamp.
+    /// Stores a prepared change timestamp without applying filesystem policy.
     pub fn set_changed_at(&self, timestamp: SystemTime) -> SystemTime {
         self.attributes.set_changed_at(timestamp)
     }
 
-    /// Sets the change timestamp to the current wall-clock time.
+    /// Sets the change timestamp to the current filesystem time.
     pub fn set_changed_at_to_now(&self) -> SystemTime {
-        self.set_changed_at(ktime::realtime())
+        self.set_changed_at(self.current_time())
+    }
+
+    /// Returns the current wall-clock time truncated to this inode's filesystem capability.
+    pub fn current_time(&self) -> SystemTime {
+        self.truncate_timestamp(ktime::realtime())
+    }
+
+    /// Truncates a timestamp to this inode's filesystem capability.
+    pub fn truncate_timestamp(&self, timestamp: SystemTime) -> SystemTime {
+        self.identity
+            .super_block()
+            .map_or(timestamp, |super_block| {
+                super_block.truncate_timestamp(timestamp)
+            })
     }
 
     /// Sets the link count.
@@ -2570,16 +2599,21 @@ pub(crate) fn get_or_try_init_inode<E>(
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::sync::Arc;
+    use alloc::{string::String, sync::Arc};
 
-    use ktime_types::SystemTime;
+    use ktime_types::{NANOS_PER_SEC, SystemTime};
     use unittest::{assert_eq, def_test};
 
     use super::*;
-    use crate::{GetattrQueryFlags, GetattrRequestMask, NodePermission};
+    use crate::{
+        GetattrQueryFlags, GetattrRequestMask, NodePermission, StatFs, SuperBlockFlags,
+        SuperBlockOperations, TimestampLimits,
+    };
 
     struct TestChrdevInode {
         metadata: Mutex<Metadata>,
+        last_update: Mutex<Option<MetadataUpdate>>,
+        next_applied_update: Mutex<Option<MetadataUpdate>>,
     }
 
     impl TestChrdevInode {
@@ -2603,6 +2637,8 @@ mod tests {
                     mtime: Default::default(),
                     ctime: Default::default(),
                 }),
+                last_update: Mutex::new(None),
+                next_applied_update: Mutex::new(None),
             }
         }
     }
@@ -2622,9 +2658,10 @@ mod tests {
             &self,
             _idmap: &MountIdmap,
             _dentry: &Dentry,
-            _update: MetadataUpdate,
-        ) -> VfsResult<()> {
-            Ok(())
+            update: MetadataUpdate,
+        ) -> VfsResult<MetadataUpdate> {
+            *self.last_update.lock() = Some(update.clone());
+            Ok(self.next_applied_update.lock().take().unwrap_or(update))
         }
     }
 
@@ -2729,6 +2766,58 @@ mod tests {
         }
     }
 
+    struct SecondResolutionSuperBlockOperations;
+
+    static SECOND_RESOLUTION_SUPER_BLOCK_OPERATIONS: SecondResolutionSuperBlockOperations =
+        SecondResolutionSuperBlockOperations;
+    static SECOND_RESOLUTION_FILE_SYSTEM_TYPE: crate::FileSystemType =
+        crate::FileSystemType::internal("timestamp-limits-test");
+
+    impl SuperBlockOperations for SecondResolutionSuperBlockOperations {
+        fn statfs(&self, _super_block: &SuperBlock) -> VfsResult<StatFs> {
+            Ok(StatFs {
+                fs_type: 0,
+                block_size: 512,
+                blocks: 1,
+                blocks_free: 1,
+                blocks_available: 1,
+                file_count: 1,
+                free_file_count: 0,
+                name_length: 255,
+                fragment_size: 512,
+            })
+        }
+
+        fn timestamp_limits(&self, _super_block: &SuperBlock) -> TimestampLimits {
+            TimestampLimits::new(NANOS_PER_SEC as u32, i32::MIN as i64, i32::MAX as i64)
+        }
+    }
+
+    fn second_resolution_super_block() -> Arc<SuperBlock> {
+        SuperBlock::new_with_flags_and_private(
+            &SECOND_RESOLUTION_FILE_SYSTEM_TYPE,
+            &SECOND_RESOLUTION_SUPER_BLOCK_OPERATIONS,
+            (),
+            SuperBlockFlags::empty(),
+            1,
+            crate::MAX_LFS_FILESIZE,
+            |_| {
+                Dentry::new_dir_from_inode(
+                    VfsInode::new_dir_with_defaults(
+                        NodeFlags::empty(),
+                        VfsInodeInit::new(
+                            1,
+                            0,
+                            Umode::new(NodeType::Directory, NodePermission::default()),
+                        ),
+                    ),
+                    None,
+                    String::new(),
+                )
+            },
+        )
+    }
+
     #[def_test]
     fn special_inodes_preserve_rdev() {
         let node = Arc::new(TestChrdevInode::new(DeviceId::default()));
@@ -2775,6 +2864,143 @@ mod tests {
         assert_eq!(inode.metadata().uid, 1000);
         assert_eq!(inode.size(), 41);
         assert_eq!(inode.generation(), 17);
+    }
+
+    #[def_test]
+    fn inode_time_updates_use_superblock_timestamp_limits() {
+        let super_block = second_resolution_super_block();
+        let node = Arc::new(TestChrdevInode::new(DeviceId::new(1, 3)));
+        let inode = super_block.get_or_init_inode(42, || {
+            VfsInode::new_with_inode_attribute_operations(
+                node.clone(),
+                NodeFlags::NON_CACHEABLE,
+                empty_address_space_operations(),
+                VfsInodeInit::new(
+                    42,
+                    0,
+                    Umode::new(
+                        NodeType::CharacterDevice,
+                        NodePermission::from_bits_truncate(0o666),
+                    ),
+                )
+                .with_owner_links_and_rdev(0, 0, 1, DeviceId::new(1, 3)),
+            )
+        });
+        let dentry = Dentry::new_file_from_inode(inode.clone(), None, String::from("timestamp"));
+
+        dentry
+            .update_metadata(MetadataUpdate {
+                atime: Some(SystemTime::from_unix_parts(11, 111).unwrap()),
+                mtime: Some(SystemTime::from_unix_parts(12, 222).unwrap()),
+                ctime: Some(SystemTime::from_unix_parts(13, 333).unwrap()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let callback_update = node.last_update.lock().clone().unwrap();
+        assert_eq!(
+            callback_update.atime,
+            Some(SystemTime::from_unix_seconds(11))
+        );
+        assert_eq!(
+            callback_update.mtime,
+            Some(SystemTime::from_unix_seconds(12))
+        );
+        assert_eq!(
+            callback_update.ctime,
+            Some(SystemTime::from_unix_seconds(13))
+        );
+        assert_eq!(inode.metadata().atime, SystemTime::from_unix_seconds(11));
+        assert_eq!(inode.metadata().mtime, SystemTime::from_unix_seconds(12));
+        assert_eq!(inode.metadata().ctime, SystemTime::from_unix_seconds(13));
+
+        inode
+            .update_time(
+                &dentry,
+                inode.truncate_timestamp(SystemTime::from_unix_parts(14, 444).unwrap()),
+                InodeUpdateTime::ChangeAndModification,
+            )
+            .unwrap();
+        let callback_update = node.last_update.lock().clone().unwrap();
+        assert_eq!(
+            callback_update.mtime,
+            Some(SystemTime::from_unix_seconds(14))
+        );
+        assert_eq!(
+            callback_update.ctime,
+            Some(SystemTime::from_unix_seconds(14))
+        );
+        assert_eq!(inode.metadata().mtime, SystemTime::from_unix_seconds(14));
+        assert_eq!(inode.metadata().ctime, SystemTime::from_unix_seconds(14));
+
+        assert_eq!(
+            inode.truncate_timestamp(SystemTime::from_unix_parts(15, 555).unwrap()),
+            SystemTime::from_unix_seconds(15)
+        );
+        assert_eq!(inode.current_time().subsec_nanos(), 0);
+        assert_eq!(
+            inode.set_accessed_at(SystemTime::from_unix_parts(15, 555).unwrap()),
+            SystemTime::from_unix_parts(15, 555).unwrap()
+        );
+        assert_eq!(
+            inode.metadata().atime,
+            SystemTime::from_unix_parts(15, 555).unwrap()
+        );
+    }
+
+    #[def_test]
+    fn resident_timestamps_follow_values_returned_by_filesystem() {
+        let super_block = second_resolution_super_block();
+        let node = Arc::new(TestChrdevInode::new(DeviceId::new(1, 3)));
+        let inode = super_block.get_or_init_inode(43, || {
+            VfsInode::new_with_inode_attribute_operations(
+                node.clone(),
+                NodeFlags::NON_CACHEABLE,
+                empty_address_space_operations(),
+                VfsInodeInit::new(
+                    43,
+                    0,
+                    Umode::new(
+                        NodeType::CharacterDevice,
+                        NodePermission::from_bits_truncate(0o666),
+                    ),
+                ),
+            )
+        });
+        let dentry = Dentry::new_file_from_inode(inode.clone(), None, String::from("applied"));
+        let applied_atime = SystemTime::from_unix_seconds(20);
+        *node.next_applied_update.lock() = Some(MetadataUpdate {
+            atime: Some(applied_atime),
+            ..Default::default()
+        });
+
+        dentry
+            .update_metadata(MetadataUpdate {
+                atime: Some(SystemTime::from_unix_seconds(21)),
+                mtime: Some(SystemTime::from_unix_seconds(22)),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(inode.metadata().atime, applied_atime);
+        assert_eq!(inode.metadata().mtime, SystemTime::UNIX_EPOCH);
+
+        let applied_cmtime = SystemTime::from_unix_seconds(24);
+        *node.next_applied_update.lock() = Some(MetadataUpdate {
+            mtime: Some(applied_cmtime),
+            ctime: Some(applied_cmtime),
+            ..Default::default()
+        });
+        inode
+            .update_time(
+                &dentry,
+                SystemTime::from_unix_seconds(25),
+                InodeUpdateTime::ChangeAndModification,
+            )
+            .unwrap();
+
+        assert_eq!(inode.metadata().mtime, applied_cmtime);
+        assert_eq!(inode.metadata().ctime, applied_cmtime);
     }
 
     #[def_test]

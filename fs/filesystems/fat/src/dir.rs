@@ -159,9 +159,9 @@ impl InodeOperations for FatDirInode {
         _idmap: &kvfs::MountIdmap,
         _dentry: &Dentry,
         _update: MetadataUpdate,
-    ) -> VfsResult<()> {
+    ) -> VfsResult<MetadataUpdate> {
         // TODO: update metadata on directory
-        Ok(())
+        Ok(MetadataUpdate::default())
     }
 }
 

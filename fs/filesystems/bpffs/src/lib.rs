@@ -455,7 +455,7 @@ impl InodeOperations for BpfInodeOperations {
         idmap: &kvfs::MountIdmap,
         dentry: &Dentry,
         update: MetadataUpdate,
-    ) -> VfsResult<()> {
+    ) -> VfsResult<MetadataUpdate> {
         self.node.inode.node.setattr(idmap, dentry, update)
     }
 }

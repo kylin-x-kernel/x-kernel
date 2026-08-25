@@ -128,6 +128,21 @@ credential、解析态 `fs_private` 和拟议 superblock-private `s_fs_info`。r
 flags 变更；block-backed superblock 在 callback 前由 VFS 统一拒绝与 canonical read-only
 device 冲突的读写目标。
 
+`ktime_types::TimestampLimits` 对应 Linux `super_block` 的 `s_time_gran`、`s_time_min` 和
+`s_time_max`。`SuperBlockOperations::timestamp_limits()` 采用 Linux `alloc_super()` 的整秒、
+完整 `i64` 范围作为保守默认；filesystem fill operation 安装 operation table 和 private state
+后查询一次该 capability，再由唯一的 `SuperBlock` 持久保存。文件系统可以像 Linux
+`fill_super()` 设置 `s_time_*` 一样，根据磁盘格式或协议状态显式覆盖；KVFS 不另建并行的
+format object，也不在 bridge 中复制该状态。
+`VfsInode::current_time()` 生成已经向下取整并截断范围的当前
+时间，`truncate_timestamp()` 对显式值执行同一转换。显式 `setattr`、自动 I/O 时间更新和
+namespace helper 在比较及 filesystem callback 前应用 superblock 级公共能力；filesystem
+callback 再处理 FAT 分字段粒度等格式专有语义，并通过同一个 `MetadataUpdate` 返回实际生效值。
+resident inode 只发布 callback 返回的字段，忽略的字段不再被 VFS 恢复为原请求；raw timestamp
+setter 只负责存储，不再重复查询 superblock policy。这与
+Linux `current_time()`/`timestamp_truncate()` 负责准备、`inode_set_*_to_ts()` 负责存储的层次
+一致，也允许 FAT 像 Linux `fat_truncate_time()` 一样维护 atime 与 mtime/ctime 的不同不变量。
+
 `FileSystemType` 对应 Linux `struct file_system_type`，描述文件系统实现的名称、
 是否需要 backing device、`init_fs_context` 及类型 flags。`init_fs_context` 为每个
 transaction 安装静态共享的 `FsContextOperations` 并初始化 context-private state，对应
@@ -376,7 +391,11 @@ inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `seta
 `SetattrTime` 只承载单次调用中“当前值/显式值”的授权信息，落盘的 `MetadataUpdate`
 只包含解析后的 atime/mtime/ctime 值，不在 inode 或 namei 状态中保存调用上下文。
 自动 I/O 时间更新使用 Linux `FS_UPD_ATIME` / `FS_UPD_CMTIME` 对应的
-`InodeUpdateTime`，并经 filesystem `update_time` callback 落盘。
+`InodeUpdateTime`，并经 filesystem `update_time` callback 落盘。授权完成后的显式时间值由
+`VfsInode::truncate_timestamp()` 准备；自动更新时间通过 `current_time()` 取得可表示值，并在
+atime/mtime/ctime 比较之前使用。callback 返回实际生效的 `MetadataUpdate`；resident attribute
+setter 只发布返回字段及其最终值，因而后端可以降低字段精度、联动多个时间字段或明确忽略
+无法持久化的字段，setter 本身不再重复执行 capability policy。
 
 Xattr 也由 `Path` 统一承载 mount、namespace 和 DAC 策略，再进入
 `InodeOperations::{get,list,set,remove}_xattr`。get/set/remove 输入名称以受检的内核

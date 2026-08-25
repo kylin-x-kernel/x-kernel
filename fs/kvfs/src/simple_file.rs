@@ -128,7 +128,7 @@ impl InodeOperations for SimpleFile {
         _idmap: &crate::MountIdmap,
         _dentry: &crate::Dentry,
         update: MetadataUpdate,
-    ) -> VfsResult<()>;
+    ) -> VfsResult<MetadataUpdate>;
 }
 
 impl crate::InodeSymlinkOperations for SimpleFile {

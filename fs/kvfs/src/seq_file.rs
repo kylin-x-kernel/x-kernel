@@ -212,7 +212,7 @@ impl<I: SeqIterator> InodeOperations for SeqFileInode<I> {
         idmap: &crate::MountIdmap,
         dentry: &crate::Dentry,
         update: MetadataUpdate,
-    ) -> VfsResult<()> {
+    ) -> VfsResult<MetadataUpdate> {
         self.node.setattr(idmap, dentry, update)
     }
 }

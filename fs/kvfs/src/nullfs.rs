@@ -34,6 +34,10 @@ struct NullFs;
 static NULLFS_OPERATIONS: NullFs = NullFs;
 
 impl SuperBlockOperations for NullFs {
+    fn timestamp_limits(&self, _super_block: &SuperBlock) -> crate::TimestampLimits {
+        crate::TimestampLimits::NANOSECOND
+    }
+
     fn statfs(&self, _super_block: &SuperBlock) -> VfsResult<StatFs> {
         Ok(simple_statfs(NULLFS_MAGIC))
     }
@@ -103,7 +107,7 @@ impl InodeOperations for NullFsRoot {
         _idmap: &MountIdmap,
         _dentry: &Dentry,
         _update: MetadataUpdate,
-    ) -> VfsResult<()> {
+    ) -> VfsResult<MetadataUpdate> {
         Err(VfsError::OperationNotPermitted)
     }
 }

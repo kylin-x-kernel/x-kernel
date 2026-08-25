@@ -47,6 +47,7 @@ pub use file_system_type::{
 pub use filename::Filename;
 pub use fs_context::{FsContext, FsContextPurpose};
 pub use kiocb::Kiocb;
+pub use ktime_types::TimestampLimits;
 pub use lookup::{LookupFlags, LookupIntent, MagicLinkOps, ResolvedObject};
 pub use mount::{MntNamespace, Mount, MountFlags, MountIdmap, NamespaceClone, Path};
 pub use namei::{DelayedCall, LastType, ParentLookup, dentry_open, may_mknod};

@@ -70,6 +70,10 @@ struct SimpleSuperOperations;
 static SIMPLE_SUPER_OPERATIONS: SimpleSuperOperations = SimpleSuperOperations;
 
 impl SuperBlockOperations for SimpleSuperOperations {
+    fn timestamp_limits(&self, _super_block: &SuperBlock) -> crate::TimestampLimits {
+        crate::TimestampLimits::NANOSECOND
+    }
+
     fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs> {
         Ok(simple_statfs(
             super_block.private::<Arc<SimpleFs>>()?.fs_type,
@@ -182,7 +186,7 @@ impl InodeOperations for SimpleFsNode {
         _idmap: &crate::MountIdmap,
         _dentry: &Dentry,
         update: MetadataUpdate,
-    ) -> VfsResult<()> {
+    ) -> VfsResult<MetadataUpdate> {
         let mut metadata = self.metadata.lock();
         if let Some(size) = update.size {
             metadata.size = size;
@@ -203,7 +207,7 @@ impl InodeOperations for SimpleFsNode {
         if let Some(ctime) = update.ctime {
             metadata.ctime = ctime;
         }
-        Ok(())
+        Ok(update)
     }
 }
 

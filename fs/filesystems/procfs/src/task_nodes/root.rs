@@ -362,7 +362,7 @@ impl InodeOperations for ProcFdLink {
         idmap: &kvfs::MountIdmap,
         dentry: &Dentry,
         update: MetadataUpdate,
-    ) -> VfsResult<()> {
+    ) -> VfsResult<MetadataUpdate> {
         self.node.setattr(idmap, dentry, update)
     }
 }

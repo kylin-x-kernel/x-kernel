@@ -1654,10 +1654,10 @@ mod tests_dentry {
             _idmap: &crate::MountIdmap,
             _dentry: &Dentry,
             update: MetadataUpdate,
-        ) -> VfsResult<()> {
+        ) -> VfsResult<MetadataUpdate> {
             *self.owner.lock() = update.owner;
             self.update_count.fetch_add(1, Ordering::Relaxed);
-            Ok(())
+            Ok(update)
         }
     }
 
@@ -1809,9 +1809,9 @@ mod tests_dentry {
             &self,
             _idmap: &crate::MountIdmap,
             _dentry: &Dentry,
-            _update: MetadataUpdate,
-        ) -> VfsResult<()> {
-            Ok(())
+            update: MetadataUpdate,
+        ) -> VfsResult<MetadataUpdate> {
+            Ok(update)
         }
     }
 
