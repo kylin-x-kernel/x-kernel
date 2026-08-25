@@ -17,7 +17,20 @@ use khal::mem::{VirtAddr, v2p};
 #[unsafe(link_section = ".bss.stack")]
 static SECONDARY_BOOT_STACKS: SecondaryBootStacks = SecondaryBootStacks::new();
 
-static ENTERED_CPUS: AtomicUsize = AtomicUsize::new(1);
+/// Number of present CPUs whose per-CPU run queue has been registered via
+/// `ktask::init_scheduler_secondary()` (secondary cores) / `ktask::init_scheduler()`
+/// (boot core, counted by the initial `1`).
+///
+/// The boot core enters `late_init_main` only after its own scheduler is up,
+/// so it is sched-ready from the start. Each secondary core increments this
+/// counter once its run queue is published, before any later bring-up step
+/// (kipi / IRQ enable / softirqd / workqueue).
+///
+/// `start_secondary_cpus` waits on this counter so that the primary does not
+/// enter driver initialization — which may spawn kernel threads whose default
+/// cpumask spans every present CPU — until every secondary run queue is
+/// registered and cross-CPU placement cannot land on an unregistered CPU.
+static SCHED_READY_CPUS: AtomicUsize = AtomicUsize::new(1);
 
 struct SecondaryBootStacks {
     stacks: UnsafeCell<[[u8; TASK_STACK_SIZE]; NR_CPUS - 1]>,
@@ -51,7 +64,16 @@ impl SecondaryBootStacks {
 // bring-up. No shared references to the inner arrays are exposed.
 unsafe impl Sync for SecondaryBootStacks {}
 
-/// Start all secondary CPUs and wait until they enter the runtime.
+/// Start all secondary CPUs and wait until each has both entered the
+/// runtime and registered its per-CPU run queue.
+///
+/// Waiting on run-queue registration (rather than on the AP merely having
+/// entered the runtime, which happens before scheduler bring-up) guarantees
+/// that cross-CPU task placement is safe before the caller proceeds to driver
+/// initialization. Driver init spawns kernel threads whose default cpumask
+/// spans every present CPU; without this barrier a round-robin selection
+/// could land on a secondary that has entered but not yet registered its
+/// run queue, panicking in `RUN_QUEUES.get().expect()`.
 #[allow(clippy::absurd_extreme_comparisons)]
 pub fn start_secondary_cpus(primary_cpu_id: LogicalCpuId) -> KResult {
     let mut secondary_logical_cpu_id = 0;
@@ -76,7 +98,12 @@ pub fn start_secondary_cpus(primary_cpu_id: LogicalCpuId) -> KResult {
         }
         secondary_logical_cpu_id += 1;
 
-        while ENTERED_CPUS.load(Ordering::Acquire) <= secondary_logical_cpu_id {
+        // The AP has entered the runtime, but its run queue is not registered
+        // until `ktask::init_scheduler_secondary()` runs later in
+        // `rust_main_secondary`. Wait for that step before booting the next
+        // AP so the caller can safely assume every present CPU is schedulable
+        // once this function returns.
+        while SCHED_READY_CPUS.load(Ordering::Acquire) <= secondary_logical_cpu_id {
             core::hint::spin_loop();
         }
     });
@@ -90,7 +117,6 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     khal::percpu::init_secondary(logical_cpu_id);
     kcpu::init_trap();
 
-    ENTERED_CPUS.fetch_add(1, Ordering::Release);
     info!("Secondary CPU {} started.", logical_cpu_id.as_usize());
 
     memspace::init_memory_management_secondary();
@@ -98,6 +124,11 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     khal::final_init_secondary(logical_cpu_id);
 
     ktask::init_scheduler_secondary();
+
+    // Publish that this CPU's run queue is registered so the primary's
+    // `start_secondary_cpus` can stop waiting and enter driver initialization
+    // knowing cross-CPU placement onto this CPU is safe.
+    SCHED_READY_CPUS.fetch_add(1, Ordering::Release);
 
     #[cfg(feature = "ipi")]
     kipi::init();

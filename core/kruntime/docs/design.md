@@ -78,7 +78,7 @@ kernel-boot (汇编 / MMU / BootInfo)
 |------|------|
 | `rust_main` | 主核唯一完整初始化路径；由 `PrimaryKernelEntry` provider 进入 |
 | `rust_main_secondary` | 从核初始化；由 `SecondaryKernelEntry` provider 进入；最终 `run_idle` |
-| `mp::start_secondary_cpus` | 为 AP 准备栈、调用 `boot_ap`、等待 AP 进入 runtime |
+| `mp::start_secondary_cpus` | 为 AP 准备栈、调用 `boot_ap`、等待 AP 注册其 run queue（跨核 spawn 安全前提） |
 | `init_setup` | 执行链接段 `.init_array` 中的 `register_init` 回调 |
 | `dma_integration` | 将 DMA 页表属性更新委托给 `memspace::kernel_layout` |
 | `lang_items` | Panic 时打印 backtrace 并调用裸平台终点 `khal::power::platform_power_off`（绕过 SMP stop 钩子，避免 panic 持锁时 IPI 停机死锁） |
@@ -104,8 +104,8 @@ BootInfo*
     → boot task (PID 0) block forever
 
 late-init thread (Internal, PID-less):
-    → [smp] start_secondary_cpus
-    → init_drivers
+    → [smp] start_secondary_cpus  (返回前已确保每个 AP 的 run queue 注册)
+    → init_drivers  (可能跨核 spawn 内核线程; 此时跨核选择不会命中未注册 RQ)
     → [char] console handoff
     → entropy::init
     → init_setup::init_cb (filesystem/subsystem self-registration)
@@ -162,9 +162,9 @@ INITED_CPUS.load(Acquire) == kcpu_id_map::nr_cpus()
 ```
 SecondaryKernelEntry::enter(logical_cpu_id)
     → percpu::init_secondary, init_trap
-    → ENTERED_CPUS += 1  (供 start_secondary_cpus 等待)
     → memspace::init_memory_management_secondary
     → final_init_secondary, init_scheduler_secondary
+    → SCHED_READY_CPUS += 1  (供 start_secondary_cpus 等待; RQ 已注册, 跨核 spawn 安全)
     → [ipi] kipi::init
     → INITED_CPUS += 1
     → spin until is_init_ok()
@@ -173,7 +173,7 @@ SecondaryKernelEntry::enter(logical_cpu_id)
     → run_idle()  (永不返回)
 ```
 
-`start_secondary_cpus` 与从核通过 `ENTERED_CPUS` 握手：主核每启动一个 AP，等待其 `ENTERED_CPUS` 递增后再启动下一个，避免栈或未映射内存被并发使用。
+`start_secondary_cpus` 与从核通过 `SCHED_READY_CPUS` 握手：主核每启动一个 AP，等待其在 `ktask::init_scheduler_secondary()` 之后递增 `SCHED_READY_CPUS` 再启动下一个。旧握手只在“AP 进入 runtime”时放行，但此时 run queue 尚未注册；新握手把放行点后移到 run queue 注册后，因而返回后调用方可安全假设每个 present CPU 均可被跨核 spawn 命中，主核随即进入 `init_drivers` 等可能跨核 spawn 内核线程的初始化阶段。
 
 ## `.init_array` 与 `register_init`
 

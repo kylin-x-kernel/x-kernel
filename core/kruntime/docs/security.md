@@ -35,7 +35,7 @@ kernel-boot / 平台固件
 |------|------|------|----------|
 | `BootInfo` | CPU ID、内存表、boot console PA/VA/size | 错误内存映射、错误 CPU 初始化、MMIO 区域越界 | `khal::firmware::init`、`khal::mem::init` 和 `memspace` 负责校验；boot console VA/PA 页内偏移由 `assert_eq!` 检查 |
 | 链接符号 | `_stext`、`_etext`、`.init_array` 边界 | backtrace 范围错误、构造函数表越界、任意跳转 | 只取 ZST 符号地址；`.init_array` 通过链接脚本和 `#[register_init]` 约束 |
-| SMP bring-up | DT/ACPI 发现的 present CPU、AP 栈、`boot_ap` | 从核使用错误栈、AP 未启动导致主核自旋 | 每个 AP 使用独立 boot stack；`ENTERED_CPUS` 串行握手；全局完成由 `INITED_CPUS == nr_cpus()` 判断 |
+| SMP bring-up | DT/ACPI 发现的 present CPU、AP 栈、`boot_ap` | 从核使用错误栈、AP 未启动导致主核自旋 | 每个 AP 使用独立 boot stack；`SCHED_READY_CPUS` 串行握手（等 AP 注册 run queue）；全局完成由 `INITED_CPUS == nr_cpus()` 判断 |
 | 中断和 timer | softirq runner、timer/IPI/PMU IRQ 号与 handler | 未安装 runner 或未注册 handler 时中断 bottom-half、timer deadline 错乱 | `init_interrupt` 先安装 softirq runner 和注册 handler 再 `enable_local_irq()`；从核在完成本地 runtime 初始化和全局屏障后才开 IRQ |
 | DMA 页表属性 | `kdma` 传入的内核 VA、size、flags | 错误修改内核页表属性 | `DmaPageTableIf::protect` 委托 `memspace::kernel_layout().protect()` 进行范围和页表处理 |
 
@@ -75,7 +75,7 @@ kernel-boot / 平台固件
 - `start_secondary_cpus()` 串行分配 `secondary_cpu_index`，并在 `secondary_cpu_index < NR_CPUS - 1` 时才取栈。
 - backing array 位于 `.bss.stack`，生命周期覆盖整个内核运行期。
 - 每个从核只获得一个独立槽位的 one-past-end 栈顶地址，模块不暴露内部数组引用。
-- `ENTERED_CPUS` 握手确保主核在启动下一个 AP 前，当前 AP 已进入 runtime。
+- `SCHED_READY_CPUS` 握手确保主核在启动下一个 AP 前，当前 AP 已进入 runtime 并注册其 run queue，因而主核进入 `init_drivers` 时跨核 spawn 不会命中未注册 RQ。
 
 ### per-CPU timer deadline（`src/lib.rs`）
 
@@ -113,7 +113,7 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 ## 线程安全
 
 - `INITED_CPUS` 使用 `Release`/`Acquire` 作为全局 runtime-ready 屏障。主核 late-init 线程和每个从核完成本地 runtime 初始化后递增；`SystemInitEntry::enter()` 和依赖跨 CPU 调度的 late-start worker 只在屏障满足后运行。
-- `ENTERED_CPUS` 只表达 AP 已进入 `rust_main_secondary`，不代表 AP 初始化完成；它与 `INITED_CPUS` 分离，避免把“可启动下一个 AP”和“全局 runtime ready”混在一起。
+- `SCHED_READY_CPUS` 只表达 AP 已注册 run queue（进入 runtime 后进一步完成内存管理与调度器初始化），不代表 AP 初始化完成；它与 `INITED_CPUS` 分离，避免把“可跨核调度”/“可启动下一个 AP”和“全局 runtime ready”混在一起。
 - `LoggerAdapter::cpu_id()` 和 `task_id()` 在 `is_init_ok()` 前避免读取可能未就绪的 current task / CPU-local 运行时状态；非 SMP 构建下 CPU ID 固定为 0。
 - 从核在 `INITED_CPUS` 屏障后才启用 IPI/PMU IRQ、本地 IRQ 和 watchdog，并最终进入 `ktask::run_idle()`。
 - `DmaPageTableIf::protect()` 通过 `memspace::kernel_layout().lock()` 串行化内核页表属性更新。
@@ -124,8 +124,8 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 |------|----------|----------|----------|----------|
 | T-01 | `.init_array` 槽位不是有效函数指针，`init_cb` 跳转到非法地址 | 高 | 链接脚本错误、恶意/损坏对象文件、内存破坏 | 仅信任注册宏生成条目；链接脚本保留并界定 `.init_array`；启动期集中调用 |
 | T-02 | `BootInfo` 内存表或 CPU 拓扑错误 | 高 | boot 层 bug、固件表异常、虚拟化环境错误 | 由 `khal::firmware` / `khal::mem` / `kcpu_id_map` 建立运行时视图；后续初始化只消费该视图 |
-| T-03 | AP 未完成初始化时进入系统 init 或跨 CPU worker | 中 | `INITED_CPUS` 计数错误、CPU 数来源错误 | 等待 `INITED_CPUS == kcpu_id_map::nr_cpus()`；计数使用 Release/Acquire |
-| T-04 | 从核使用错误或重叠 boot stack | 高 | AP 启动循环越界、并发启动复用槽位 | `secondary_cpu_index < NR_CPUS - 1`；串行 `boot_ap` + `ENTERED_CPUS` 握手；每 AP 独立槽 |
+| T-03 | AP 未完成初始化时进入系统 init 或跨 CPU worker | 中 | `INITED_CPUS` 计数错误、CPU 数来源错误 | 跨核 spawn 由 `SCHED_READY_CPUS` 提前守护；系统 init 入口等待 `INITED_CPUS == kcpu_id_map::nr_cpus()`；计数均使用 Release/Acquire |
+| T-04 | 从核使用错误或重叠 boot stack | 高 | AP 启动循环越界、并发启动复用槽位 | `secondary_cpu_index < NR_CPUS - 1`；串行 `boot_ap` + `SCHED_READY_CPUS` 握手；每 AP 独立槽 |
 | T-05 | PID 1 被提前消耗 | 中 | late-init 线程或后台 worker 获得 Linux-visible identity；`SystemInitEntry` 未先创建 init | boot、idle、late-init 和普通内核 worker 使用 PID-less identity；init 创建路径断言 root PID 为 1 |
 | T-06 | IRQ 在 handler 注册前启用 | 高 | `init_interrupt` 顺序被改坏、平台提前开 IRQ | 主核先安装 softirq hardirq-exit runner，再注册 timer/IPI/PMU handler，最后开本地 IRQ；从核初始化完成后再开 IRQ |
 | T-07 | per-CPU timer deadline raw access 在可迁移上下文运行 | 中 | handler 被改为普通线程调用或抢占语义变化 | unsafe 注释要求 IRQ/preemption 禁止迁移；审计 raw percpu 调用点 |
@@ -139,7 +139,7 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 |------|----------|----------|----------|----------|--------|----------|
 | F-01 | 全局 allocator 没有可用 FREE 区域 | 固件内存表错误或 boot 层漏报 | allocator 初始化不完整 | 早期分配失败或 panic，系统无法启动 | 1 | 启动期快速失败；依赖 boot/mem 子系统校验 |
 | F-02 | boot console MMIO VA/PA 页内偏移不一致 | `BootInfo` 填写错误 | `assert_eq!` 失败 | 启动中止 | 2 | 显式偏移检查后才注册 fixed device region |
-| F-03 | 某从核未递增 `ENTERED_CPUS` | `boot_ap` 失败、固件未唤醒 AP、AP trap | 主核卡在 AP bring-up | late init 无法继续 | 2 | `start_secondary_cpus()` 返回 `boot_ap` 错误；进入 runtime 失败时依赖平台日志/调试 |
+| F-03 | 某从核未递增 `SCHED_READY_CPUS` | `boot_ap` 失败、固件未唤醒 AP、AP 在 memspace/scheduler 初始化期 trap | 主核卡在 AP bring-up | late init 无法继续 | 2 | `start_secondary_cpus()` 返回 `boot_ap` 错误；启动期 hang 依赖平台日志/调试 |
 | F-04 | 某 CPU 未递增 `INITED_CPUS` | 从核 init hang、主核 late init panic | 全局 ready 屏障不满足 | 系统 init 不启动或从核不进 idle | 2 | 启动日志；watchdog feature 或外部复位 |
 | F-05 | `register_init` 回调 panic | 子系统 init bug | `.init_array` 遍历中断 | 后续 init 不执行，panic 后关机 | 2 | 回调保持短小、无阻塞；新增回调需审计 panic 路径 |
 | F-06 | `SystemInitEntry` provider 缺失或重复 | `entry` 未提供实现或多个实现冲突 | 链接失败 | 无法生成镜像 | 2 | `kiface` exactly-one provider 构建期发现 |
@@ -151,7 +151,7 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 
 - **启动期错误快速失败**：关键路径使用 `assert!`、`expect` 或 `panic!`，避免在未完整初始化的内核中降级运行。
 - **panic 后关机**：panic handler 打印 panic 信息和 backtrace 后调用裸平台终点 `khal::power::platform_power_off()`（不走 SMP stop 钩子，避免 panic 持锁导致 IPI 停机死锁）；本 crate 不尝试恢复。
-- **SMP hang 无本地超时**：`ENTERED_CPUS` / `INITED_CPUS` 等待使用自旋，若 AP 或主核 late init 卡死，需要 watchdog feature、平台日志或外部复位介入。
+- **SMP hang 无本地超时**：`SCHED_READY_CPUS` / `INITED_CPUS` 等待使用自旋，若 AP 或主核 late init 卡死，需要 watchdog feature、平台日志或外部复位介入。
 - **feature 关闭是配置选择**：如 `fs`、`net`、`watchdog`、`pmu` 未启用时跳过对应初始化，不作为运行时故障处理。
 
 ## 隐私分析
@@ -181,7 +181,7 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 - [ ] 新增或移动 `unsafe` 块时，同步说明真实不变量、调用上下文和失败影响。
 - [ ] 调整 `rust_main` 顺序时，重新检查 allocator、memspace、driver resource provider、logger、scheduler、IRQ 的依赖。
 - [ ] 调整 `late_init_main` 顺序时，重新检查 `.init_array`、SMP ready 屏障、vsock/TIPC bridge 和 `SystemInitEntry` 的顺序。
-- [ ] 修改 `INITED_CPUS` / `ENTERED_CPUS` 时，区分“AP 已进入 runtime”和“所有 CPU runtime ready”，并检查 Release/Acquire 配对。
+- [ ] 修改 `INITED_CPUS` / `SCHED_READY_CPUS` 时，区分“AP 已可跨核调度（run queue 注册）”和“所有 CPU runtime ready”，并检查 Release/Acquire 配对。
 - [ ] 新增 early/late kernel thread 时，确认它是否应为 PID-less `Internal`，不能抢先消耗 PID 1。
 - [ ] 修改 `SystemInitEntry` provider 时，确认它 spawn 并激活 PID 1 后返回。
 - [ ] 新增 `register_init` 回调时，确认它不依赖用户态 init、避免长时间阻塞，并接受 panic 会中止启动。

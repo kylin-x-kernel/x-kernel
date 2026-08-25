@@ -166,6 +166,9 @@ fn is_init_ok() -> bool {
 fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     #[cfg(feature = "smp")]
     {
+        // Returns only after every present secondary CPU has registered its
+        // run queue, so cross-CPU spawn during the driver/subsystem init
+        // below cannot land on an unregistered CPU.
         self::mp::start_secondary_cpus(cpu_id).unwrap_or_else(|err| {
             panic!(
                 "failed to start secondary CPUs after boot CPU {} init: {err:?}",
