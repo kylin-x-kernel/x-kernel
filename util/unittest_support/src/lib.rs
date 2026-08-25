@@ -10,7 +10,6 @@ use alloc::{format, sync::Arc, vec, vec::Vec};
 use core::{
     marker::PhantomData,
     mem::{MaybeUninit, size_of},
-    ops::{Deref, DerefMut},
     sync::atomic::{AtomicU32, AtomicUsize, Ordering},
 };
 
@@ -210,20 +209,6 @@ impl TestUserBuffer {
         assert!(size_of::<T>() <= self.len);
         self.user_addr as *mut T
     }
-
-    pub fn as_user_slice(&mut self, len: usize) -> &mut [u8] {
-        assert!(len <= self.len);
-        // SAFETY: `user_addr..user_addr + len` lies within the mapped test buffer
-        // and `&mut self` guarantees exclusive access.
-        unsafe { core::slice::from_raw_parts_mut(self.user_addr as *mut u8, len) }
-    }
-
-    pub fn as_user_ref<T>(&mut self) -> &mut T {
-        assert!(size_of::<T>() <= self.len);
-        // SAFETY: the mapped test buffer is at least `size_of::<T>()` bytes and
-        // `&mut self` guarantees exclusive access to that region.
-        unsafe { &mut *(self.user_addr as *mut T) }
-    }
 }
 
 pub struct TestUserValue<T> {
@@ -248,10 +233,6 @@ impl<T> TestUserValue<T> {
         Ok(user_value)
     }
 
-    pub fn as_user_ref(&mut self) -> &mut T {
-        self.buffer.as_user_ref::<T>()
-    }
-
     pub fn as_user_ptr(&self) -> *mut T {
         self.buffer.as_user_ptr::<T>()
     }
@@ -260,16 +241,22 @@ impl<T> TestUserValue<T> {
     where
         T: Copy,
     {
-        *self.as_user_ref() = value;
+        write_vm_mem(self.as_user_ptr(), core::slice::from_ref(&value))
+            .expect("write test user value");
     }
 
     pub fn read(&self) -> T
     where
         T: Copy,
     {
-        // SAFETY: the mapped test buffer contains a previously initialized `T`
-        // value written through the same typed view.
-        unsafe { self.as_user_ptr().read() }
+        let mut out = MaybeUninit::<T>::uninit();
+        read_vm_mem(
+            self.as_user_ptr().cast_const(),
+            core::slice::from_mut(&mut out),
+        )
+        .expect("read test user value");
+        // SAFETY: `read_vm_mem` initialized the single `T` slot.
+        unsafe { out.assume_init() }
     }
 }
 
@@ -303,18 +290,6 @@ impl<T, const N: usize> TestUserArray<T, N> {
         N == 0
     }
 
-    pub fn as_user_slice(&mut self) -> &mut [T] {
-        // SAFETY: the mapped buffer is sized for `[T; N]` and `&mut self`
-        // guarantees exclusive access to that region.
-        unsafe { core::slice::from_raw_parts_mut(self.as_user_ptr(), N) }
-    }
-
-    pub fn as_user_ref(&mut self) -> &mut [T; N] {
-        // SAFETY: the mapped buffer is sized for `[T; N]` and `&mut self`
-        // guarantees exclusive access to that region.
-        unsafe { &mut *(self.as_user_ptr() as *mut [T; N]) }
-    }
-
     pub fn as_user_ptr(&self) -> *mut T {
         self.buffer.as_user_ptr::<T>()
     }
@@ -323,32 +298,22 @@ impl<T, const N: usize> TestUserArray<T, N> {
     where
         T: Copy,
     {
-        self.as_user_slice().copy_from_slice(&value);
+        let ptr = self.as_user_ptr().cast::<[T; N]>();
+        write_vm_mem(ptr, core::slice::from_ref(&value)).expect("write test user array");
     }
 
     pub fn read(&self) -> [T; N]
     where
         T: Copy,
     {
-        // SAFETY: the mapped buffer contains a previously initialized `[T; N]`
-        // value written through the same typed view.
-        unsafe { (self.as_user_ptr() as *const [T; N]).read() }
-    }
-}
-
-impl<T, const N: usize> Deref for TestUserArray<T, N> {
-    type Target = [T];
-
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: the mapped buffer is sized for `N` elements and remains valid
-        // for shared access for the lifetime of `self`.
-        unsafe { core::slice::from_raw_parts(self.as_user_ptr(), N) }
-    }
-}
-
-impl<T, const N: usize> DerefMut for TestUserArray<T, N> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.as_user_slice()
+        let mut out = MaybeUninit::<[T; N]>::uninit();
+        read_vm_mem(
+            self.as_user_ptr().cast_const().cast::<[T; N]>(),
+            core::slice::from_mut(&mut out),
+        )
+        .expect("read test user array");
+        // SAFETY: `read_vm_mem` initialized the single `[T; N]` slot.
+        unsafe { out.assume_init() }
     }
 }
 

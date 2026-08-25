@@ -13,27 +13,18 @@
 mod bh;
 mod system;
 
-use bh::bh_wq_cpu;
-pub use bh::{
-    BottomHalfPoolBinding, BottomHalfWorkQueueKind, system_bh_highpri_wq,
-    system_bh_highpri_wq_for_cpu, system_bh_wq, system_bh_wq_for_cpu,
-};
-pub(crate) use bh::{BottomHalfWake, bh_wq_kind_cpu};
-use kcpu_id_map::LogicalCpuId;
-use system::system_wq_cpu;
+pub use bh::{BottomHalfPoolBinding, BottomHalfWorkQueueKind, system_bh_highpri_wq, system_bh_wq};
+pub(crate) use bh::{BottomHalfWake, bh_queue_cpu_is_valid, bh_wq_kind};
 pub use system::{
-    INITIAL_SYSTEM_WORKERS_PER_CPU, MAX_SYSTEM_WORKERS_PER_CPU, SystemPoolBinding,
+    INITIAL_SYSTEM_WORKERS_PER_CPU, MAX_SYSTEM_WORKERS_PER_CPU, SystemPoolBinding, SystemPoolKind,
     SystemWorkQueueKind, schedule_long_work, schedule_long_work_on, schedule_work,
-    schedule_work_on, system_long_wq, system_long_wq_for_cpu, system_percpu_wq,
-    system_percpu_wq_for_cpu, system_wq, system_wq_for_cpu,
+    schedule_work_on, system_long_wq, system_percpu_wq, system_wq,
 };
-pub(crate) use system::{TaskPoolBinding, TaskPoolWake, system_pool_for_cpu};
+pub(crate) use system::{
+    TaskPoolBinding, TaskPoolWake, system_pool_for_cpu, system_queue_cpu_is_valid, system_wq_kind,
+};
 
 use crate::WorkQueue;
-
-pub(crate) fn static_array_index<T>(array: &'static [T], item: &'static T) -> Option<usize> {
-    static_array_index_by_key(array, core::ptr::from_ref(item).addr())
-}
 
 pub(crate) fn static_array_index_by_key<T>(array: &'static [T], key: usize) -> Option<usize> {
     let elem_size = core::mem::size_of::<T>();
@@ -56,11 +47,7 @@ pub(crate) fn static_array_index_by_key<T>(array: &'static [T], key: usize) -> O
     (index < array.len()).then_some(index)
 }
 
-/// Returns the CPU of a built-in static runtime queue.
-///
-/// Core queue code uses this only to reject reconfiguration of built-in
-/// runtime instances. The concrete `system_*` / BH family remains owned by the
-/// runtime module.
-pub(crate) fn builtin_queue_cpu(queue: &'static WorkQueue) -> Option<LogicalCpuId> {
-    system_wq_cpu(queue).or_else(|| bh_wq_cpu(queue))
+/// Returns whether `queue` is owned by the built-in runtime.
+pub(crate) fn is_builtin_queue(queue: &'static WorkQueue) -> bool {
+    system_wq_kind(queue).is_some() || bh_wq_kind(queue).is_some()
 }

@@ -16,14 +16,14 @@ use crate::{
     BottomHalfWorkQueueKind, DeferredWake, PendingCancel, QueueWorkResult, SystemWorkQueueKind,
     WorkQueue, WorkQueueHandle, WorkQueuePoolBinding, WorkQueueRuntime, WorkerExecutionToken,
     WorkerId, WorkqueueSyncWaitIf, WorkqueueTaskContextIf, attach_flush_barrier,
-    cancel_pending_from_binding, finish_workqueue_pool_enqueue, reject_invalid_wait_context,
-    reject_self_wait, schedule_long_work, schedule_long_work_on, schedule_work, schedule_work_on,
-    system_bh_highpri_wq, system_bh_highpri_wq_for_cpu, system_bh_wq, system_bh_wq_for_cpu,
+    bh_queue_cpu_is_valid, cancel_pending_from_binding, finish_workqueue_pool_enqueue,
+    reject_invalid_wait_context, reject_self_wait, schedule_long_work, schedule_long_work_on,
+    schedule_work, schedule_work_on, system_bh_highpri_wq, system_bh_wq,
 };
 
 /// Built-in queue target selected for one schedule operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ScheduleTarget {
+pub(crate) enum ScheduleTarget {
     /// Task-context system workerqueue.
     System(SystemWorkQueueKind),
     /// Bottom-half workerqueue.
@@ -396,19 +396,25 @@ impl ScheduledWork {
             ScheduleQueue::Builtin(ScheduleTarget::BottomHalf(
                 BottomHalfWorkQueueKind::Default,
             )) => match cpu_id {
-                Some(cpu_id) => match system_bh_wq_for_cpu(cpu_id) {
-                    Some(queue) => queue.queue_work(self),
-                    None => QueueWorkResult::InvalidCpu,
-                },
+                Some(cpu_id) if bh_queue_cpu_is_valid(cpu_id) => {
+                    match system_bh_wq().select_pool_binding(Some(cpu_id)) {
+                        Ok(binding) => finish_workqueue_pool_enqueue(binding.queue_work(self)),
+                        Err(result) => result,
+                    }
+                }
+                Some(_) => QueueWorkResult::InvalidCpu,
                 None => system_bh_wq().queue_work(self),
             },
             ScheduleQueue::Builtin(ScheduleTarget::BottomHalf(
                 BottomHalfWorkQueueKind::HighPri,
             )) => match cpu_id {
-                Some(cpu_id) => match system_bh_highpri_wq_for_cpu(cpu_id) {
-                    Some(queue) => queue.queue_work(self),
-                    None => QueueWorkResult::InvalidCpu,
-                },
+                Some(cpu_id) if bh_queue_cpu_is_valid(cpu_id) => {
+                    match system_bh_highpri_wq().select_pool_binding(Some(cpu_id)) {
+                        Ok(binding) => finish_workqueue_pool_enqueue(binding.queue_work(self)),
+                        Err(result) => result,
+                    }
+                }
+                Some(_) => QueueWorkResult::InvalidCpu,
                 None => system_bh_highpri_wq().queue_work(self),
             },
             ScheduleQueue::Static(queue) => match cpu_id {

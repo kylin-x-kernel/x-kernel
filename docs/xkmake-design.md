@@ -66,6 +66,14 @@ platform, profile, virtio transport, and Cargo features. `.config`,
 configuration all consume that snapshot. Generation does not reopen `.config`
 or parse Kconfig again.
 
+The rust-analyzer settings also pin the Rust sysroot used for IDE analysis.
+By default, xconfig records the sysroot reported by the repository toolchain's
+`rustc --print sysroot` and, when present, its `lib/rustlib/src/rust/library`
+source tree. Vendor SDKs can override this with `XKERNEL_RUST_SYSROOT` and
+`XKERNEL_RUST_SYSROOT_SRC`, so IDE `core`/`alloc` resolution follows the same
+library tree as the intended build environment instead of whatever the editor
+extension discovers on its own.
+
 Generated files use write-if-content-changed semantics. This is required for
 Cargo incremental compilation: merely evaluating Kconfig must not make every
 kernel crate appear stale.

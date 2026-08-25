@@ -2584,14 +2584,14 @@ fn long2byte(value: u64, ch: &mut [u8]) -> u32 {
 pub(crate) fn tee_init_ref_attribute(
     attr: &mut utee_attribute,
     attribute_id: u32,
-    buffer: &[u8],
+    buffer: *const u8,
     length: u32,
 ) {
     if (attribute_id & TEE_ATTR_FLAG_VALUE) != 0 {
         panic!("attributeID is value attribute");
     }
     attr.attribute_id = attribute_id;
-    attr.a = buffer.as_ptr() as u64;
+    attr.a = buffer as u64;
     attr.b = length as u64;
 }
 
@@ -2964,9 +2964,9 @@ pub mod tests_tee_svc_cryp {
 
     #[unittest::def_test(user)]
     fn test_syscall_cryp_obj_alloc() {
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result =
-            syscall_cryp_obj_alloc(TEE_TYPE_ECDSA_PUBLIC_KEY as _, 256, obj_id.as_user_ref());
+            syscall_cryp_obj_alloc(TEE_TYPE_ECDSA_PUBLIC_KEY as _, 256, obj_id.as_user_ptr());
         assert!(result.is_ok());
         let obj_id = obj_id.read();
         let obj_arc = tee_obj_get(obj_id as TeeObjIdType).unwrap();
@@ -2983,9 +2983,9 @@ pub mod tests_tee_svc_cryp {
 
     #[unittest::def_test(user)]
     fn test_syscall_cryp_obj_get_attr() {
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result =
-            syscall_cryp_obj_alloc(TEE_TYPE_ECDSA_PUBLIC_KEY as _, 256, obj_id.as_user_ref());
+            syscall_cryp_obj_alloc(TEE_TYPE_ECDSA_PUBLIC_KEY as _, 256, obj_id.as_user_ptr());
         assert!(result.is_ok());
         let _obj_id = obj_id.read();
         let _buffer: [u8; 8] = [1; 8];
@@ -3001,9 +3001,9 @@ pub mod tests_tee_svc_cryp {
     #[unittest::def_test(user)]
     fn test_syscall_cryp_generate_key_ecc_keypair() {
         // alloc sm2 key pair
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result =
-            syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_KEYPAIR as _, 256, obj_id.as_user_ref());
+            syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_KEYPAIR as _, 256, obj_id.as_user_ptr());
         assert!(result.is_ok());
         let obj_id = obj_id.read();
         // sm2 no need usr_params
@@ -3042,25 +3042,29 @@ pub mod tests_tee_svc_cryp {
 
         let (usr_params, param_count) = {
             if e == 0 {
-                (core::ptr::null(), 0)
+                (core::ptr::null_mut(), 0)
             } else {
                 let e_len = long2byte(e, &mut e_bytes);
-                usr_exp[..e_len as usize].copy_from_slice(&e_bytes[..e_len as usize]);
+                let mut usr_exp_data = [0u8; 8];
+                usr_exp_data[..e_len as usize].copy_from_slice(&e_bytes[..e_len as usize]);
+                usr_exp.write(usr_exp_data);
+                let mut usr_params_data = [utee_attribute::default(); 1];
                 tee_init_ref_attribute(
-                    &mut usr_params[0],
+                    &mut usr_params_data[0],
                     TEE_ATTR_RSA_PUBLIC_EXPONENT,
-                    &usr_exp[..e_len as usize],
+                    usr_exp.as_user_ptr(),
                     e_len,
                 );
-                (usr_params.as_ptr(), 1)
+                usr_params.write(usr_params_data);
+                (usr_params.as_user_ptr(), 1)
             }
         };
 
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result = syscall_cryp_obj_alloc(
             TEE_TYPE_RSA_KEYPAIR as _,
             key_size as _,
-            obj_id.as_user_ref(),
+            obj_id.as_user_ptr(),
         );
         assert!(result.is_ok());
         let obj_id = obj_id.read();
@@ -3120,8 +3124,8 @@ pub mod tests_tee_svc_cryp {
             key_size
         );
         // alloc sm4 key
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let result = syscall_cryp_obj_alloc(key_type as _, key_size as _, obj_id.as_user_ref());
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(key_type as _, key_size as _, obj_id.as_user_ptr());
         assert!(result.is_ok());
         let obj_id = obj_id.read();
         // assert!(obj_id != 0);
@@ -3168,7 +3172,7 @@ pub mod tests_tee_svc_cryp {
 
     #[unittest::def_test(user)]
     fn test_copy_in_attrs() {
-        let mut usr_attrs = crate::user_vec![utee_attribute::default(); 2];
+        let mut usr_attrs = [utee_attribute::default(); 2];
         // index 0 is value attribute
         usr_attrs[0].attribute_id = TEE_ATTR_FLAG_VALUE;
         usr_attrs[0].a = 0x11223344_u64;

@@ -15,9 +15,9 @@
 //!
 //! Use task-context system work for callbacks that may sleep, allocate, or call
 //! ordinary kernel APIs that require process context. The default
-//! [`ScheduleAttrs::system`] target runs on the per-CPU system workerqueue; use
-//! [`ScheduleAttrs::long_system`] for long-running callbacks that should not occupy
-//! default system workers.
+//! [`ScheduleAttrs::system`] targets the global system workqueue and resolves a
+//! per-CPU pool binding at enqueue time; use [`ScheduleAttrs::long_system`] for
+//! long-running callbacks that should not occupy default system workers.
 //!
 //! [`ScheduledWork::new`] creates an idle work instance. Creation may allocate
 //! and must be done before IRQ-like producers use the instance; enqueueing the
@@ -198,14 +198,13 @@ pub use provider::{
 };
 pub use runtime::{
     BottomHalfPoolBinding, BottomHalfWorkQueueKind, INITIAL_SYSTEM_WORKERS_PER_CPU,
-    MAX_SYSTEM_WORKERS_PER_CPU, SystemPoolBinding, SystemWorkQueueKind, schedule_long_work,
-    schedule_long_work_on, schedule_work, schedule_work_on, system_bh_highpri_wq,
-    system_bh_highpri_wq_for_cpu, system_bh_wq, system_bh_wq_for_cpu, system_long_wq,
-    system_long_wq_for_cpu, system_percpu_wq, system_percpu_wq_for_cpu, system_wq,
-    system_wq_for_cpu,
+    MAX_SYSTEM_WORKERS_PER_CPU, SystemPoolBinding, SystemPoolKind, SystemWorkQueueKind,
+    schedule_long_work, schedule_long_work_on, schedule_work, schedule_work_on,
+    system_bh_highpri_wq, system_bh_wq, system_long_wq, system_percpu_wq, system_wq,
 };
 pub(crate) use runtime::{
-    BottomHalfWake, TaskPoolBinding, TaskPoolWake, bh_wq_kind_cpu, builtin_queue_cpu,
+    BottomHalfWake, TaskPoolBinding, TaskPoolWake, bh_queue_cpu_is_valid, bh_wq_kind,
+    is_builtin_queue, system_queue_cpu_is_valid,
 };
 #[cfg(unittest)]
 pub(crate) use work::{DelayedFireOutcome, DelayedWorkStatus, clear_delayed_reservation};
@@ -235,8 +234,8 @@ pub use crate::{
         WorkQueueHandle, WorkQueueMaxActive, WorkQueueStartError,
     },
     work::{
-        CancelWorkResult, DelayedScheduledWork, ScheduleAttrs, ScheduleQueueRef, ScheduleTarget,
-        ScheduledWork, WorkqueueError,
+        CancelWorkResult, DelayedScheduledWork, ScheduleAttrs, ScheduleQueueRef, ScheduledWork,
+        WorkqueueError,
     },
 };
 #[cfg(unittest)]
@@ -270,15 +269,13 @@ pub mod raw {
         },
         runtime::{
             BottomHalfPoolBinding, BottomHalfWorkQueueKind, INITIAL_SYSTEM_WORKERS_PER_CPU,
-            MAX_SYSTEM_WORKERS_PER_CPU, SystemPoolBinding, SystemWorkQueueKind, schedule_long_work,
-            schedule_long_work_on, schedule_work, schedule_work_on, system_bh_highpri_wq,
-            system_bh_highpri_wq_for_cpu, system_bh_wq, system_bh_wq_for_cpu, system_long_wq,
-            system_long_wq_for_cpu, system_percpu_wq, system_percpu_wq_for_cpu, system_wq,
-            system_wq_for_cpu,
+            MAX_SYSTEM_WORKERS_PER_CPU, SystemPoolBinding, SystemPoolKind, SystemWorkQueueKind,
+            schedule_long_work, schedule_long_work_on, schedule_work, schedule_work_on,
+            system_bh_highpri_wq, system_bh_wq, system_long_wq, system_percpu_wq, system_wq,
         },
         work::{
-            CancelWorkResult, DelayedScheduledWork, ScheduleAttrs, ScheduleQueueRef,
-            ScheduleTarget, ScheduledWork, WorkqueueError,
+            CancelWorkResult, DelayedScheduledWork, ScheduleAttrs, ScheduleQueueRef, ScheduledWork,
+            WorkqueueError,
         },
     };
 }

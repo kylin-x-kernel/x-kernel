@@ -1836,7 +1836,7 @@ pub mod tests_tee_svc_storage {
 
         let object_id_user = user_buffer_from_bytes(object_id.as_bytes());
         let data_create_user = user_buffer_from_bytes(data_create);
-        let mut obj = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let obj = TestUserValue::<c_uint>::from_value(0).unwrap();
 
         let result = syscall_storage_obj_create(
             storage_id,
@@ -1846,19 +1846,19 @@ pub mod tests_tee_svc_storage {
             attr as c_ulong,
             data_create_user.as_user_ptr(),
             data_create.len(),
-            obj.as_user_ref(),
+            obj.as_user_ptr(),
         );
         assert!(result.is_ok());
 
         let obj_id = obj.read() as c_ulong;
 
         let data_read = TestUserBuffer::new(data_create.len()).unwrap();
-        let mut count = TestUserValue::<u64>::from_value(0).unwrap();
+        let count = TestUserValue::<u64>::from_value(0).unwrap();
         let result = syscall_storage_obj_read(
             obj_id,
             data_read.as_user_ptr(),
             data_create.len(),
-            count.as_user_ref(),
+            count.as_user_ptr(),
         );
         assert!(result.is_ok());
         let data_read_back = data_read.read_bytes(data_create.len()).unwrap();
@@ -1879,12 +1879,12 @@ pub mod tests_tee_svc_storage {
         assert!(result.is_ok());
 
         let data_read = TestUserBuffer::new(data_write.len()).unwrap();
-        let mut count = TestUserValue::<u64>::from_value(0).unwrap();
+        let count = TestUserValue::<u64>::from_value(0).unwrap();
         let result = syscall_storage_obj_read(
             obj_id,
             data_read.as_user_ptr(),
             data_write.len(),
-            count.as_user_ref(),
+            count.as_user_ptr(),
         );
         assert!(result.is_ok());
         let data_read_back = data_read.read_bytes(data_write.len()).unwrap();
@@ -1897,12 +1897,12 @@ pub mod tests_tee_svc_storage {
         assert!(result.is_ok());
 
         let data_read = TestUserBuffer::new(data_create.len()).unwrap();
-        let mut count = TestUserValue::<u64>::from_value(0).unwrap();
+        let count = TestUserValue::<u64>::from_value(0).unwrap();
         let result = syscall_storage_obj_read(
             obj_id,
             data_read.as_user_ptr(),
             data_create.len(),
-            count.as_user_ref(),
+            count.as_user_ptr(),
         );
         assert!(result.is_ok());
         let data_read_back = data_read.read_bytes(data_create.len()).unwrap();
@@ -1910,9 +1910,9 @@ pub mod tests_tee_svc_storage {
         assert_eq!(count.read(), data_create.len() as u64);
 
         let data_read = TestUserBuffer::new(1).unwrap();
-        let mut count = TestUserValue::<u64>::from_value(0).unwrap();
+        let count = TestUserValue::<u64>::from_value(0).unwrap();
         let _result =
-            syscall_storage_obj_read(obj_id, data_read.as_user_ptr(), 1, count.as_user_ref());
+            syscall_storage_obj_read(obj_id, data_read.as_user_ptr(), 1, count.as_user_ptr());
         assert_eq!(count.read(), 0);
 
         let result = syscall_storage_obj_seek(
@@ -1922,9 +1922,9 @@ pub mod tests_tee_svc_storage {
         );
         assert!(result.is_ok());
 
-        let mut info =
+        let info =
             TestUserValue::<utee_object_info>::from_value(utee_object_info::default()).unwrap();
-        let result = syscall_cryp_obj_get_info(obj_id, info.as_user_ref());
+        let result = syscall_cryp_obj_get_info(obj_id, info.as_user_ptr());
         assert!(result.is_ok());
         let info = info.read();
         assert_eq!(info.data_size, data_create.len() as u32);
@@ -1960,7 +1960,7 @@ pub mod tests_tee_svc_storage {
     #[unittest::def_test(user)]
     fn test_syscall_storage_obj_create_rejects_invalid_parameters() {
         let object_id = user_buffer_from_bytes(b"invalid_create");
-        let mut obj = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let obj = TestUserValue::<c_uint>::from_value(0).unwrap();
 
         let result = syscall_storage_obj_create(
             TEE_STORAGE_PRIVATE as c_ulong,
@@ -1970,7 +1970,7 @@ pub mod tests_tee_svc_storage {
             TEE_HANDLE_NULL as c_ulong,
             core::ptr::null_mut(),
             0,
-            obj.as_user_ref(),
+            obj.as_user_ptr(),
         );
         assert_eq!(result.err(), Some(TEE_ERROR_BAD_PARAMETERS));
 
@@ -1982,7 +1982,7 @@ pub mod tests_tee_svc_storage {
             TEE_HANDLE_NULL as c_ulong,
             core::ptr::null_mut(),
             4,
-            obj.as_user_ref(),
+            obj.as_user_ptr(),
         );
         assert_eq!(result.err(), Some(TEE_ERROR_BAD_PARAMETERS));
     }
@@ -2003,7 +2003,7 @@ pub mod tests_tee_svc_storage {
 
         let object_id_create_user = user_buffer_from_bytes(object_id.as_bytes());
         let data_create_user = user_buffer_from_bytes(data_create);
-        let mut created_obj = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let created_obj = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result = syscall_storage_obj_create(
             storage_id,
             object_id_create_user.as_user_ptr(),
@@ -2012,7 +2012,7 @@ pub mod tests_tee_svc_storage {
             TEE_HANDLE_NULL as c_ulong,
             data_create_user.as_user_ptr(),
             data_create.len(),
-            created_obj.as_user_ref(),
+            created_obj.as_user_ptr(),
         );
         assert!(result.is_ok());
 
@@ -2021,13 +2021,13 @@ pub mod tests_tee_svc_storage {
         assert!(result.is_ok());
 
         let object_id_user = user_buffer_from_bytes(object_id.as_bytes());
-        let mut obj = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let obj = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result = syscall_storage_obj_open(
             storage_id,
             object_id_user.as_user_ptr(),
             object_id.len(),
             open_flags as c_ulong,
-            obj.as_user_ref(),
+            obj.as_user_ptr(),
         );
         assert!(result.is_ok());
 
@@ -2039,14 +2039,14 @@ pub mod tests_tee_svc_storage {
     #[unittest::def_test(user)]
     fn test_syscall_storage_obj_open_rejects_invalid_parameters() {
         let object_id = user_buffer_from_bytes(b"missing_object");
-        let mut obj = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let obj = TestUserValue::<c_uint>::from_value(0).unwrap();
 
         let result = syscall_storage_obj_open(
             TEE_STORAGE_PRIVATE as c_ulong,
             object_id.as_user_ptr(),
             "missing_object".len(),
             1u64 << 62,
-            obj.as_user_ref(),
+            obj.as_user_ptr(),
         );
         assert_eq!(result.err(), Some(TEE_ERROR_BAD_PARAMETERS));
 
@@ -2055,7 +2055,7 @@ pub mod tests_tee_svc_storage {
             object_id.as_user_ptr(),
             "missing_object".len(),
             TEE_DATA_FLAG_ACCESS_READ as c_ulong,
-            obj.as_user_ref(),
+            obj.as_user_ptr(),
         );
         assert!(result.is_err());
         assert_ne!(result.unwrap_err(), TEE_ERROR_BAD_PARAMETERS);
@@ -2069,7 +2069,7 @@ pub mod tests_tee_svc_storage {
         let data_create = b"seek_data";
         let object_id_user = user_buffer_from_bytes(object_id.as_bytes());
         let data_create_user = user_buffer_from_bytes(data_create);
-        let mut obj = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let obj = TestUserValue::<c_uint>::from_value(0).unwrap();
 
         let result = syscall_storage_obj_create(
             storage_id,
@@ -2082,7 +2082,7 @@ pub mod tests_tee_svc_storage {
             TEE_HANDLE_NULL as c_ulong,
             data_create_user.as_user_ptr(),
             data_create.len(),
-            obj.as_user_ref(),
+            obj.as_user_ptr(),
         );
         assert!(result.is_ok());
 

@@ -5,6 +5,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use serde::Serialize;
@@ -141,6 +142,8 @@ fn generate_rust_analyzer_config(config: &HashMap<String, String>) -> Result<()>
 
     let managed_keys = [
         "rust-analyzer.cargo.target",
+        "rust-analyzer.cargo.sysroot",
+        "rust-analyzer.cargo.sysrootSrc",
         "rust-analyzer.cargo.noDefaultFeatures",
         "rust-analyzer.cargo.cfgs",
         "rust-analyzer.cargo.features",
@@ -170,6 +173,15 @@ fn generate_rust_analyzer_config(config: &HashMap<String, String>) -> Result<()>
         "rust-analyzer.cargo.target".into(),
         Value::String(target.into()),
     );
+    if let Some(sysroot) = resolve_rust_analyzer_sysroot()? {
+        settings.insert(
+            "rust-analyzer.cargo.sysroot".into(),
+            Value::String(sysroot.sysroot),
+        );
+        if let Some(src) = sysroot.source {
+            settings.insert("rust-analyzer.cargo.sysrootSrc".into(), Value::String(src));
+        }
+    }
     settings.insert(
         "rust-analyzer.cargo.features".into(),
         Value::Array(
@@ -201,6 +213,142 @@ fn generate_rust_analyzer_config(config: &HashMap<String, String>) -> Result<()>
     }
 
     Ok(())
+}
+
+struct RustAnalyzerSysroot {
+    sysroot: String,
+    source: Option<String>,
+}
+
+fn resolve_rust_analyzer_sysroot() -> Result<Option<RustAnalyzerSysroot>> {
+    resolve_rust_analyzer_sysroot_from(
+        std::env::var("XKERNEL_RUST_SYSROOT").ok(),
+        std::env::var("XKERNEL_RUST_SYSROOT_SRC").ok(),
+        discover_rustc_sysroot(),
+    )
+}
+
+fn resolve_rust_analyzer_sysroot_from(
+    explicit_sysroot: Option<String>,
+    explicit_source: Option<String>,
+    discovered_sysroot: Option<String>,
+) -> Result<Option<RustAnalyzerSysroot>> {
+    let sysroot = if let Some(sysroot) = explicit_sysroot {
+        canonical_existing_path("XKERNEL_RUST_SYSROOT", Path::new(&sysroot))?
+    } else if let Some(sysroot) = discovered_sysroot {
+        sysroot
+    } else {
+        return Ok(None);
+    };
+
+    let source = if let Some(source) = explicit_source {
+        Some(canonical_existing_path(
+            "XKERNEL_RUST_SYSROOT_SRC",
+            Path::new(&source),
+        )?)
+    } else {
+        let default_source = Path::new(&sysroot)
+            .join("lib")
+            .join("rustlib")
+            .join("src")
+            .join("rust")
+            .join("library");
+        default_source
+            .exists()
+            .then(|| default_source.to_string_lossy().into_owned())
+    };
+
+    Ok(Some(RustAnalyzerSysroot { sysroot, source }))
+}
+
+fn discover_rustc_sysroot() -> Option<String> {
+    let output = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sysroot = String::from_utf8(output.stdout).ok()?;
+    let sysroot = sysroot.trim();
+    (!sysroot.is_empty()).then(|| sysroot.to_string())
+}
+
+fn canonical_existing_path(env_name: &str, path: &Path) -> Result<String> {
+    if !path.exists() {
+        return Err(KconfigError::Config(format!(
+            "{} points to missing path: {}",
+            env_name,
+            path.display()
+        )));
+    }
+    let path = path.canonicalize().map_err(KconfigError::Io)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::resolve_rust_analyzer_sysroot_from;
+
+    #[test]
+    fn rust_analyzer_sysroot_prefers_explicit_vendor_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let sysroot = temp_dir.path().join("vendor-rust");
+        let source = temp_dir.path().join("vendor-src").join("library");
+        fs::create_dir_all(&sysroot).unwrap();
+        fs::create_dir_all(&source).unwrap();
+
+        let resolved = resolve_rust_analyzer_sysroot_from(
+            Some(sysroot.to_string_lossy().into_owned()),
+            Some(source.to_string_lossy().into_owned()),
+            Some("/wrong/discovered/sysroot".into()),
+        )
+        .unwrap()
+        .unwrap();
+
+        let expected_sysroot = sysroot
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let expected_source = source
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(resolved.sysroot, expected_sysroot);
+        assert_eq!(resolved.source.as_deref(), Some(expected_source.as_str()));
+    }
+
+    #[test]
+    fn rust_analyzer_sysroot_uses_discovered_default_source() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir
+            .path()
+            .join("lib")
+            .join("rustlib")
+            .join("src")
+            .join("rust")
+            .join("library");
+        fs::create_dir_all(&source).unwrap();
+
+        let resolved = resolve_rust_analyzer_sysroot_from(
+            None,
+            None,
+            Some(temp_dir.path().to_string_lossy().into_owned()),
+        )
+        .unwrap()
+        .unwrap();
+
+        let expected_sysroot = temp_dir.path().to_string_lossy().into_owned();
+        let expected_source = source.to_string_lossy().into_owned();
+        assert_eq!(resolved.sysroot, expected_sysroot);
+        assert_eq!(resolved.source.as_deref(), Some(expected_source.as_str()));
+    }
 }
 
 fn generate_cargo_config(config: &HashMap<String, String>, opts: &BuildOpts) -> Result<()> {

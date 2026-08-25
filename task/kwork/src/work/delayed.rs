@@ -18,10 +18,10 @@ use crate::{
     BottomHalfWorkQueueKind, DeferredWake, FlushTarget, QueueDelayedWorkResult, QueueWorkResult,
     SystemWorkQueueKind, WorkQueue, WorkQueueHandle, WorkQueueRuntime, WorkqueueContextIf,
     WorkqueueHostIf, WorkqueueSyncWaitIf, WorkqueueTaskContextIf, WorkqueueTimerHandle,
-    WorkqueueTimerIf, finish_workqueue_pool_enqueue, reject_delayed_target_wait_deadlock,
-    reject_invalid_wait_context, reject_self_wait, reject_worker_wait_deadlock,
-    system_bh_highpri_wq_for_cpu, system_bh_wq_for_cpu, system_long_wq_for_cpu,
-    system_percpu_wq_for_cpu,
+    WorkqueueTimerIf, bh_queue_cpu_is_valid, finish_workqueue_pool_enqueue,
+    reject_delayed_target_wait_deadlock, reject_invalid_wait_context, reject_self_wait,
+    reject_worker_wait_deadlock, system_bh_highpri_wq, system_bh_wq, system_long_wq,
+    system_percpu_wq, system_queue_cpu_is_valid,
 };
 
 #[derive(Clone)]
@@ -371,27 +371,35 @@ impl DelayedScheduledWork {
             .unwrap_or_else(WorkqueueHostIf::current_cpu_id);
         match attrs.target() {
             ScheduleQueue::Builtin(ScheduleTarget::System(SystemWorkQueueKind::Default)) => {
-                let queue =
-                    system_percpu_wq_for_cpu(cpu_id).ok_or(QueueDelayedWorkResult::InvalidCpu)?;
+                if !system_queue_cpu_is_valid(cpu_id) {
+                    return Err(QueueDelayedWorkResult::InvalidCpu);
+                }
+                let queue = system_percpu_wq();
                 Ok(DelayedWorkTarget::StaticOn { queue, cpu_id })
             }
             ScheduleQueue::Builtin(ScheduleTarget::System(SystemWorkQueueKind::Long)) => {
-                let queue =
-                    system_long_wq_for_cpu(cpu_id).ok_or(QueueDelayedWorkResult::InvalidCpu)?;
+                if !system_queue_cpu_is_valid(cpu_id) {
+                    return Err(QueueDelayedWorkResult::InvalidCpu);
+                }
+                let queue = system_long_wq();
                 Ok(DelayedWorkTarget::StaticOn { queue, cpu_id })
             }
             ScheduleQueue::Builtin(ScheduleTarget::BottomHalf(
                 BottomHalfWorkQueueKind::Default,
             )) => {
-                let queue =
-                    system_bh_wq_for_cpu(cpu_id).ok_or(QueueDelayedWorkResult::InvalidCpu)?;
+                if !bh_queue_cpu_is_valid(cpu_id) {
+                    return Err(QueueDelayedWorkResult::InvalidCpu);
+                }
+                let queue = system_bh_wq();
                 Ok(DelayedWorkTarget::StaticOn { queue, cpu_id })
             }
             ScheduleQueue::Builtin(ScheduleTarget::BottomHalf(
                 BottomHalfWorkQueueKind::HighPri,
             )) => {
-                let queue = system_bh_highpri_wq_for_cpu(cpu_id)
-                    .ok_or(QueueDelayedWorkResult::InvalidCpu)?;
+                if !bh_queue_cpu_is_valid(cpu_id) {
+                    return Err(QueueDelayedWorkResult::InvalidCpu);
+                }
+                let queue = system_bh_highpri_wq();
                 Ok(DelayedWorkTarget::StaticOn { queue, cpu_id })
             }
             ScheduleQueue::Static(queue) => Ok(DelayedWorkTarget::StaticOn { queue, cpu_id }),

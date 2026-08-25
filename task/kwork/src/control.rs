@@ -168,9 +168,7 @@ pub(crate) fn process_one_pool_work(binding: SystemPoolBinding, worker_id: Worke
     let queue_name = outcome
         .binding
         .as_ref()
-        .map_or(binding.kind().queue_name(), |binding| {
-            binding.owner().name()
-        });
+        .map_or(binding.queue().name(), |binding| binding.owner().name());
     let Some((work, work_binding, worker_token)) = finish_workqueue_pool_take(queue_name, outcome)
     else {
         return false;
@@ -569,6 +567,7 @@ impl CurrentWorkGuard {
         if previous_context.is_some() {
             warn!("nested workerqueue callback entered");
         }
+        WorkqueueTaskContextIf::refresh_current_worker_tick();
         Self {
             context,
             previous_context,
@@ -587,6 +586,7 @@ impl Drop for CurrentWorkGuard {
             } else if !WorkqueueTaskContextIf::clear_current_work_context(self.context) {
                 warn!("workerqueue current-work state changed during callback");
             }
+            WorkqueueTaskContextIf::refresh_current_worker_tick();
         } else {
             warn!("workerqueue current-work state changed during callback");
         }

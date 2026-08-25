@@ -6,7 +6,7 @@ use kcpu_id_map::LogicalCpuId;
 
 use crate::{
     WorkQueue, WorkerPool, WorkerPoolAttrs, WorkerPoolCpuAffinity, WorkerPoolExecution,
-    WorkerPoolSchedulingPolicy, WorkerWakePlan, WorkqueueBottomHalfIf, WorkqueueHostIf,
+    WorkerPoolSchedulingPolicy, WorkerWakePlan, WorkqueueBottomHalfIf,
 };
 
 const BH_DRAIN_SLOT_ID: usize = 0;
@@ -54,9 +54,9 @@ impl BottomHalfWorkQueueKind {
     }
 }
 
-static BH_WORKQUEUES: [[WorkQueue; kbuild_config::NR_CPUS]; BottomHalfWorkQueueKind::COUNT] = [
-    [const { WorkQueue::new("system_bh_wq") }; kbuild_config::NR_CPUS],
-    [const { WorkQueue::new("system_bh_highpri_wq") }; kbuild_config::NR_CPUS],
+static BH_WORKQUEUES: [WorkQueue; BottomHalfWorkQueueKind::COUNT] = [
+    WorkQueue::new("system_bh_wq"),
+    WorkQueue::new("system_bh_highpri_wq"),
 ];
 
 static BH_POOLS: [[WorkerPool; kbuild_config::NR_CPUS]; BottomHalfWorkQueueKind::COUNT] = [
@@ -105,7 +105,7 @@ impl BottomHalfPoolBinding {
         let binding = Self::new(
             kind,
             cpu_id,
-            bh_wq_for_kind_cpu(kind, cpu_id)?,
+            bh_queue_cpu_is_valid(cpu_id).then(|| bh_wq_for_kind(kind))?,
             bh_pool_for_kind_cpu(kind, cpu_id)?,
         );
         binding.ensure_pseudo_worker();
@@ -170,66 +170,30 @@ impl BottomHalfWake {
     }
 }
 
-/// Returns the current CPU's default bottom-half system workerqueue.
+/// Returns the default global bottom-half system workqueue.
 ///
 /// This is the X-Kernel runtime counterpart of Linux `system_bh_wq`.
-///
-/// # Panics
-///
-/// Panics if the provider returns a logical CPU id outside `NR_CPUS`.
 pub fn system_bh_wq() -> &'static WorkQueue {
-    system_bh_wq_for_cpu(WorkqueueHostIf::current_cpu_id())
-        .expect("current logical CPU must have a bottom-half workerqueue lane")
+    bh_wq_for_kind(BottomHalfWorkQueueKind::Default)
 }
 
-/// Returns the current CPU's high-priority bottom-half system workerqueue.
-///
-/// # Panics
-///
-/// Panics if the provider returns a logical CPU id outside `NR_CPUS`.
+/// Returns the global high-priority bottom-half system workqueue.
 pub fn system_bh_highpri_wq() -> &'static WorkQueue {
-    system_bh_highpri_wq_for_cpu(WorkqueueHostIf::current_cpu_id())
-        .expect("current logical CPU must have a high-priority bottom-half workerqueue lane")
+    bh_wq_for_kind(BottomHalfWorkQueueKind::HighPri)
 }
 
-/// Returns the default bottom-half workerqueue for `cpu_id`.
-///
-/// Returns `None` if the logical CPU id is outside `NR_CPUS`.
-pub fn system_bh_wq_for_cpu(cpu_id: LogicalCpuId) -> Option<&'static WorkQueue> {
-    bh_wq_for_kind_cpu(BottomHalfWorkQueueKind::Default, cpu_id)
+pub(crate) fn bh_wq_kind(queue: &'static WorkQueue) -> Option<BottomHalfWorkQueueKind> {
+    BottomHalfWorkQueueKind::ALL
+        .into_iter()
+        .find(|&kind| core::ptr::eq(&BH_WORKQUEUES[kind.as_usize()], queue))
 }
 
-/// Returns the high-priority bottom-half workerqueue for `cpu_id`.
-///
-/// Returns `None` if the logical CPU id is outside `NR_CPUS`.
-pub fn system_bh_highpri_wq_for_cpu(cpu_id: LogicalCpuId) -> Option<&'static WorkQueue> {
-    bh_wq_for_kind_cpu(BottomHalfWorkQueueKind::HighPri, cpu_id)
+pub(crate) fn bh_wq_for_kind(kind: BottomHalfWorkQueueKind) -> &'static WorkQueue {
+    &BH_WORKQUEUES[kind.as_usize()]
 }
 
-pub(crate) fn bh_wq_kind_cpu(
-    queue: &'static WorkQueue,
-) -> Option<(BottomHalfWorkQueueKind, LogicalCpuId)> {
-    for kind in BottomHalfWorkQueueKind::ALL {
-        if let Some(cpu_id) =
-            super::static_array_index(&BH_WORKQUEUES[kind.as_usize()], queue).map(LogicalCpuId::new)
-        {
-            return Some((kind, cpu_id));
-        }
-    }
-    None
-}
-
-pub(crate) fn bh_wq_cpu(queue: &'static WorkQueue) -> Option<LogicalCpuId> {
-    bh_wq_kind_cpu(queue).map(|(_, cpu_id)| cpu_id)
-}
-
-fn bh_wq_for_kind_cpu(
-    kind: BottomHalfWorkQueueKind,
-    cpu_id: LogicalCpuId,
-) -> Option<&'static WorkQueue> {
-    BH_WORKQUEUES
-        .get(kind.as_usize())
-        .and_then(|queues| queues.get(cpu_id.as_usize()))
+pub(crate) fn bh_queue_cpu_is_valid(cpu_id: LogicalCpuId) -> bool {
+    cpu_id.as_usize() < kbuild_config::NR_CPUS
 }
 
 fn bh_pool_for_kind_cpu(

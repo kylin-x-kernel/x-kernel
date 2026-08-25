@@ -18,10 +18,10 @@ use super::{
 };
 use crate::{
     DelayedScheduledWork, DelayedWorkTarget, ScheduledWork, TaskPoolBinding, WorkColor,
-    WorkQueuePoolState, WorkQueueRuntime, WorkqueueContextIf, WorkqueueError, builtin_queue_cpu,
-    finish_workqueue_pool_enqueue, mod_delayed_work_for_target, queue_delayed_work_for_target,
-    queue_result_to_wait_error, reject_invalid_wait_context, reject_worker_pool_wait_deadlock,
-    wait_for_workqueue_idle,
+    WorkQueuePoolState, WorkQueueRuntime, WorkqueueContextIf, WorkqueueError,
+    finish_workqueue_pool_enqueue, is_builtin_queue, mod_delayed_work_for_target,
+    queue_delayed_work_for_target, queue_result_to_wait_error, reject_invalid_wait_context,
+    reject_worker_pool_wait_deadlock, wait_for_workqueue_idle,
 };
 pub struct WorkQueue {
     name: &'static str,
@@ -193,7 +193,7 @@ impl WorkQueue {
         if WorkqueueContextIf::is_invalid_wait_context() {
             return Err(WorkQueueStartError::InvalidContext);
         }
-        if builtin_queue_cpu(self).is_some() {
+        if is_builtin_queue(self) {
             return Err(WorkQueueStartError::SystemQueue);
         }
         let config = validate_workqueue_attrs(attrs)?;

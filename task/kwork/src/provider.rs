@@ -9,8 +9,8 @@ use kcpu_id_map::LogicalCpuId;
 use ktime_types::MonotonicInstant;
 
 use super::{
-    BottomHalfWorkQueueKind, SystemPoolBinding, SystemWorkQueueKind, WorkerExecutionToken,
-    WorkerId, WorkerWakePlan,
+    BottomHalfWorkQueueKind, SystemPoolBinding, SystemPoolKind, WorkerExecutionToken, WorkerId,
+    WorkerWakePlan,
 };
 
 /// Scheduler-facing wake bridge for the system workerqueue.
@@ -30,19 +30,19 @@ pub trait WorkqueueHostIf {
     ///
     /// Implementations must be callable from hardirq, serving-softirq, and
     /// BH-disabled context.
-    fn is_system_pool_ready(kind: SystemWorkQueueKind, cpu_id: LogicalCpuId) -> bool;
+    fn is_system_pool_ready(pool_kind: SystemPoolKind, cpu_id: LogicalCpuId) -> bool;
 
     /// Wakes one idle worker waiting on one bound system workqueue CPU pool.
     ///
     /// Implementations must be callable from hardirq, serving-softirq, and
     /// BH-disabled context.
-    fn wake_system_worker(kind: SystemWorkQueueKind, cpu_id: LogicalCpuId, worker_id: WorkerId);
+    fn wake_system_worker(pool_kind: SystemPoolKind, cpu_id: LogicalCpuId, worker_id: WorkerId);
 
     /// Wakes the task-context manager for one bound system worker pool.
     ///
     /// The manager may create worker tasks and therefore runs outside IRQ-safe
     /// enqueue paths.
-    fn wake_system_manager(kind: SystemWorkQueueKind, cpu_id: LogicalCpuId);
+    fn wake_system_manager(pool_kind: SystemPoolKind, cpu_id: LogicalCpuId);
 }
 
 /// IRQ-core bridge for bottom-half workerqueue execution.
@@ -80,6 +80,12 @@ pub trait WorkqueueTaskContextIf {
     /// Returns the current task's workerqueue callback context, if one is
     /// executing.
     fn current_work_context() -> Option<WorkqueueTaskContext>;
+
+    /// Refreshes the scheduler-owned tick deadline for the current worker.
+    ///
+    /// Called when a task enters or leaves a workerqueue callback so NOHZ does
+    /// not stop the local timer past the CPU-intensive threshold.
+    fn refresh_current_worker_tick();
 }
 
 /// Opaque workerqueue callback identity stored in scheduler task-local state.
@@ -220,6 +226,13 @@ impl WorkqueueTaskContext {
             Some(pool) => pool.account_worker_tick(self.worker_id, self.worker_token),
             None => WorkerWakePlan::default(),
         }
+    }
+
+    /// Returns the monotonic deadline at which this worker should receive a
+    /// scheduler tick for CPU-intensive accounting.
+    pub fn worker_tick_deadline(self) -> Option<MonotonicInstant> {
+        SystemPoolBinding::for_pool_key(self.pool_key)
+            .and_then(|pool| pool.worker_tick_deadline(self.worker_id, self.worker_token))
     }
 }
 

@@ -28,6 +28,6 @@ pub(crate) use delayed::{
     DelayedWorkTarget, mod_delayed_work_for_target, queue_delayed_work_for_target,
 };
 pub use error::{CancelWorkResult, WorkqueueError};
-pub(crate) use scheduled_work::ScheduleQueue;
-pub use scheduled_work::{ScheduleAttrs, ScheduleQueueRef, ScheduleTarget, ScheduledWork};
+pub use scheduled_work::{ScheduleAttrs, ScheduleQueueRef, ScheduledWork};
+pub(crate) use scheduled_work::{ScheduleQueue, ScheduleTarget};
 pub(crate) use state::{RunQueueEntryClaim, WorkColor, WorkInstanceId, WorkState, WorkStatus};

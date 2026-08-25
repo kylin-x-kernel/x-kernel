@@ -6,16 +6,14 @@ use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kcpu_id_map::LogicalCpuId;
-use kspin::SpinNoIrq;
+use kspin::{NoPreempt, SpinNoIrq};
 use ktime_types::TimeSpan;
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;
 use crate::{
     attach_flush_barrier, clear_delayed_reservation,
-    raw::{
-        process_one_bottom_half_pool_work, schedule_work_on, system_percpu_wq, system_wq_for_cpu,
-    },
+    raw::{process_one_bottom_half_pool_work, schedule_work_on, system_percpu_wq},
 };
 
 static WORK_RUNS: AtomicUsize = AtomicUsize::new(0);
@@ -392,7 +390,6 @@ fn test_budgeted_poller_background_batch_honors_max_rounds() {
 
 #[def_test(serial)]
 fn test_budgeted_poller_worker_drains_notified_work() {
-    let _frozen_pool = FrozenTestPool::freeze_current();
     let polls = Arc::new(AtomicUsize::new(0));
     let poll_count = polls.clone();
     let poller = BudgetedPoller::new("budgeted-worker-test", 1usize, 1usize, 4, move |_| {
@@ -401,8 +398,12 @@ fn test_budgeted_poller_worker_drains_notified_work() {
     });
 
     poller.start().expect("budgeted poller should start");
-    assert!(poller.notify_irq_safe());
-    assert!(drain_one_test_work(WorkerId::new(0)));
+    {
+        let _pin = NoPreempt::new();
+        let _frozen_pool = FrozenTestPool::freeze_current();
+        assert!(poller.notify_irq_safe());
+        assert!(drain_one_test_work(WorkerId::new(0)));
+    }
 
     assert_eq!(polls.load(Ordering::Acquire), 1);
     assert!(poller.is_idle_for_tests());
@@ -411,7 +412,6 @@ fn test_budgeted_poller_worker_drains_notified_work() {
 
 #[def_test(serial)]
 fn test_budgeted_poller_notify_recovers_after_queue_full() {
-    let _frozen_pool = FrozenTestPool::freeze_current();
     let filler_queue = Box::leak(Box::new(WorkQueue::new("budgeted-full-filler")));
     let mut filler = Vec::new();
     let polls = Arc::new(AtomicUsize::new(0));
@@ -422,18 +422,22 @@ fn test_budgeted_poller_notify_recovers_after_queue_full() {
     });
 
     poller.start().expect("budgeted poller should start");
-    for _ in 0..MAX_WORKQUEUE_PENDING {
-        let work = test_work(count_work);
-        assert_eq!(filler_queue.queue_work(&work), QueueWorkResult::Queued);
-        filler.push(work);
+    {
+        let _pin = NoPreempt::new();
+        let _frozen_pool = FrozenTestPool::freeze_current();
+        for _ in 0..MAX_WORKQUEUE_PENDING {
+            let work = test_work(count_work);
+            assert_eq!(filler_queue.queue_work(&work), QueueWorkResult::Queued);
+            filler.push(work);
+        }
+
+        assert!(!poller.notify_irq_safe());
+        assert!(poller.is_idle_for_tests());
+
+        assert!(drain_one_test_work(WorkerId::new(0)));
+        assert!(poller.notify_irq_safe());
+        while drain_one_test_work(WorkerId::new(0)) {}
     }
-
-    assert!(!poller.notify_irq_safe());
-    assert!(poller.is_idle_for_tests());
-
-    assert!(drain_one_test_work(WorkerId::new(0)));
-    assert!(poller.notify_irq_safe());
-    while drain_one_test_work(WorkerId::new(0)) {}
 
     assert_eq!(polls.load(Ordering::Acquire), 1);
     assert!(poller.is_idle_for_tests());
@@ -442,7 +446,6 @@ fn test_budgeted_poller_notify_recovers_after_queue_full() {
 
 #[def_test(serial)]
 fn test_budgeted_poller_scheduled_notify_retries_queueing() {
-    let _frozen_pool = FrozenTestPool::freeze_current();
     let filler_queue = Box::leak(Box::new(WorkQueue::new("budgeted-retry-filler")));
     let mut filler = Vec::new();
     let polls = Arc::new(AtomicUsize::new(0));
@@ -459,19 +462,23 @@ fn test_budgeted_poller_scheduled_notify_retries_queueing() {
     );
 
     poller.start().expect("budgeted poller should start");
-    poller.force_scheduled_for_tests();
-    for _ in 0..MAX_WORKQUEUE_PENDING {
-        let work = test_work(count_work);
-        assert_eq!(filler_queue.queue_work(&work), QueueWorkResult::Queued);
-        filler.push(work);
+    {
+        let _pin = NoPreempt::new();
+        let _frozen_pool = FrozenTestPool::freeze_current();
+        poller.force_scheduled_for_tests();
+        for _ in 0..MAX_WORKQUEUE_PENDING {
+            let work = test_work(count_work);
+            assert_eq!(filler_queue.queue_work(&work), QueueWorkResult::Queued);
+            filler.push(work);
+        }
+
+        assert!(!poller.notify_irq_safe());
+        assert!(poller.is_scheduled_for_tests());
+
+        assert!(drain_one_test_work(WorkerId::new(0)));
+        assert!(poller.notify_irq_safe());
+        while drain_one_test_work(WorkerId::new(0)) {}
     }
-
-    assert!(!poller.notify_irq_safe());
-    assert!(poller.is_scheduled_for_tests());
-
-    assert!(drain_one_test_work(WorkerId::new(0)));
-    assert!(poller.notify_irq_safe());
-    while drain_one_test_work(WorkerId::new(0)) {}
 
     assert_eq!(polls.load(Ordering::Acquire), 1);
     assert!(poller.is_idle_for_tests());
@@ -480,7 +487,6 @@ fn test_budgeted_poller_scheduled_notify_retries_queueing() {
 
 #[def_test(serial)]
 fn test_budgeted_poller_followup_queue_failure_reopens_notify() {
-    let _frozen_pool = FrozenTestPool::freeze_current();
     let filler_queue: &'static WorkQueue =
         Box::leak(Box::new(WorkQueue::new("budgeted-followup-filler")));
     let polls = Arc::new(AtomicUsize::new(0));
@@ -505,19 +511,23 @@ fn test_budgeted_poller_followup_queue_failure_reopens_notify() {
     );
 
     poller.start().expect("budgeted poller should start");
-    assert!(poller.notify_irq_safe());
-    for _ in 1..MAX_WORKQUEUE_PENDING {
-        let work = test_work(count_work);
-        assert_eq!(filler_queue.queue_work(&work), QueueWorkResult::Queued);
+    {
+        let _pin = NoPreempt::new();
+        let _frozen_pool = FrozenTestPool::freeze_current();
+        assert!(poller.notify_irq_safe());
+        for _ in 1..MAX_WORKQUEUE_PENDING {
+            let work = test_work(count_work);
+            assert_eq!(filler_queue.queue_work(&work), QueueWorkResult::Queued);
+        }
+
+        assert!(drain_one_test_work(WorkerId::new(0)));
+        assert_eq!(polls.load(Ordering::Acquire), 1);
+        assert!(poller.is_idle_for_tests());
+
+        assert!(drain_one_test_work(WorkerId::new(0)));
+        assert!(poller.notify_irq_safe());
+        while drain_one_test_work(WorkerId::new(0)) {}
     }
-
-    assert!(drain_one_test_work(WorkerId::new(0)));
-    assert_eq!(polls.load(Ordering::Acquire), 1);
-    assert!(poller.is_idle_for_tests());
-
-    assert!(drain_one_test_work(WorkerId::new(0)));
-    assert!(poller.notify_irq_safe());
-    while drain_one_test_work(WorkerId::new(0)) {}
 
     assert_eq!(polls.load(Ordering::Acquire), 2);
     assert!(poller.is_idle_for_tests());
@@ -762,8 +772,7 @@ fn test_delayed_timer_reservation_has_no_pool_queue_owner() {
 
 #[def_test(serial)]
 fn test_static_system_delayed_target_uses_shared_pool() {
-    let cpu_id = LogicalCpuId::new(0);
-    let queue = system_wq_for_cpu(cpu_id).expect("CPU 0 system queue should exist");
+    let queue = system_wq();
     let work = DelayedScheduledWork::new(count_work);
     let seq = arm_delayed_for_tests(&work, DelayedWorkTarget::Static(queue));
     let result = DelayedWorkTarget::Static(queue).queue_reserved_work(work.scheduled(), seq);
@@ -1361,9 +1370,10 @@ fn test_static_queue_color_flush_completion_is_generation_event() {
 #[def_test(serial)]
 fn test_system_queue_color_flush_completion_is_generation_event() {
     let cpu_id = LogicalCpuId::new(0);
-    let queue = system_wq_for_cpu(cpu_id).expect("CPU 0 system queue should exist");
-    let work_binding =
-        WorkQueuePoolBinding::for_static(queue).expect("CPU 0 system queue should resolve");
+    let queue = system_wq();
+    let work_binding = queue
+        .select_pool_binding(Some(cpu_id))
+        .expect("CPU 0 system queue should resolve");
     let system_binding = SystemPoolBinding::for_kind_cpu(SystemWorkQueueKind::Default, cpu_id)
         .expect("system queue should carry pool binding");
     let pool = system_binding.pool();
@@ -1647,7 +1657,7 @@ fn test_non_waiting_cancel_removes_pending_work() {
 #[def_test(serial)]
 fn test_start_workqueue_rejects_invalid_static_inputs() {
     let queue = Box::leak(Box::new(WorkQueue::new("test")));
-    let system_queue = system_wq_for_cpu(LogicalCpuId::new(0)).expect("system queue exists");
+    let system_queue = system_wq();
 
     assert_eq!(
         system_queue.start(WorkQueueAttrs::new()),
@@ -2618,13 +2628,29 @@ fn test_schedule_work_on_rejects_out_of_range_cpu() {
 
 #[def_test(serial)]
 fn test_system_percpu_wq_aliases_default_system_instance() {
-    let cpu_id = WorkqueueHostIf::current_cpu_id();
-    let percpu_queue =
-        system_percpu_wq_for_cpu(cpu_id).expect("current CPU percpu system queue should exist");
-    let compat_queue = system_wq_for_cpu(cpu_id).expect("current CPU system queue should exist");
+    let percpu_queue = system_percpu_wq();
+    let compat_queue = system_wq();
 
     assert!(core::ptr::eq(system_percpu_wq(), percpu_queue));
     assert!(core::ptr::eq(percpu_queue, compat_queue));
+}
+
+#[def_test(serial)]
+fn test_system_bh_wq_is_global_with_per_cpu_pools() {
+    let cpu_id = WorkqueueHostIf::current_cpu_id();
+    let queue = system_bh_wq();
+
+    assert!(core::ptr::eq(system_bh_wq(), queue));
+    if kbuild_config::NR_CPUS > 1 {
+        let other_cpu = LogicalCpuId::new((cpu_id.as_usize() + 1) % kbuild_config::NR_CPUS);
+        let binding = BottomHalfPoolBinding::for_kind_cpu(BottomHalfWorkQueueKind::Default, cpu_id)
+            .expect("current CPU BH pool should exist");
+        let other_binding =
+            BottomHalfPoolBinding::for_kind_cpu(BottomHalfWorkQueueKind::Default, other_cpu)
+                .expect("other CPU BH pool should exist");
+
+        assert!(binding.pool().key() != other_binding.pool().key());
+    }
 }
 
 #[def_test(serial)]
@@ -2667,6 +2693,30 @@ fn test_pool_cpu_intensive_tick_releases_concurrency() {
     assert_eq!(plan.worker_to_wake, Some(WorkerId::new(1)));
     assert!(!plan.should_wake_manager);
     assert_eq!(pool_state.workers[1].state, WorkerState::Preparing);
+}
+
+#[def_test(serial)]
+fn test_pool_worker_tick_deadline_tracks_current_execution() {
+    let pool = WorkerPool::new();
+
+    let mut pool_state = pool.state.lock();
+    assert!(pool_state.install_worker(0));
+    pool_state.set_cpu_intensive_threshold_for_tests(TimeSpan::from_millis(10));
+
+    let stale_token =
+        pool_state.start_running_work(0, 0xA8, WorkInstanceId::for_tests(0xA8), Vec::new());
+    let stale_deadline = pool_state.worker_tick_deadline(0, stale_token);
+    assert!(stale_deadline.is_some());
+
+    let current_token =
+        pool_state.start_running_work(0, 0xA9, WorkInstanceId::for_tests(0xA9), Vec::new());
+    let current_deadline = pool_state.worker_tick_deadline(0, current_token);
+    assert!(current_deadline.is_some());
+    assert_eq!(pool_state.worker_tick_deadline(0, stale_token), None);
+
+    pool_state.set_cpu_intensive_threshold_for_tests(TimeSpan::ZERO);
+    let _ = pool_state.tick_running_worker(0, current_token);
+    assert_eq!(pool_state.worker_tick_deadline(0, current_token), None);
 }
 
 #[def_test(serial)]
@@ -2817,12 +2867,10 @@ fn test_pool_cpu_intensive_marking_allows_manager_creation() {
 
 #[def_test(serial)]
 fn test_default_and_long_system_queues_share_default_pool() {
-    let cpu_id = LogicalCpuId::new(0);
-    let default_queue = system_wq_for_cpu(cpu_id).expect("CPU 0 default queue should exist");
-    let long_queue = system_long_wq_for_cpu(cpu_id).expect("CPU 0 long queue should exist");
-    let bh_queue = system_bh_wq_for_cpu(cpu_id).expect("CPU 0 BH queue should exist");
-    let highpri_bh_queue =
-        system_bh_highpri_wq_for_cpu(cpu_id).expect("CPU 0 high-priority BH queue should exist");
+    let default_queue = system_wq();
+    let long_queue = system_long_wq();
+    let bh_queue = system_bh_wq();
+    let highpri_bh_queue = system_bh_highpri_wq();
     let default_pwq = WorkQueuePoolBinding::for_static(default_queue)
         .expect("default system queue should resolve");
     let long_pwq =
@@ -2848,7 +2896,7 @@ fn test_default_and_long_system_queues_share_default_pool() {
 fn test_bottom_half_worker_does_not_drain_task_work() {
     let _frozen_pool = FrozenTestPool::freeze_current();
     let cpu_id = WorkqueueHostIf::current_cpu_id();
-    let queue = system_wq_for_cpu(cpu_id).expect("current CPU default queue should exist");
+    let queue = system_wq();
     let work = test_work(count_work);
 
     WORK_RUNS.store(0, Ordering::Relaxed);

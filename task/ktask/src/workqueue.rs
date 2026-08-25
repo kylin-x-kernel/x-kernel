@@ -18,10 +18,14 @@ use kspin::{NoPreempt, SpinNoIrq};
 use ktime_types::MonotonicInstant;
 
 use crate::{
-    KCpuMask, KtaskRef, TaskInner, activate_task, future::block_on, prepare_task, sleep, yield_now,
+    KCpuMask, KtaskRef, TaskInner, activate_task, api::current_run_queue, future::block_on,
+    prepare_task, sleep, yield_now,
 };
 
 static SYSTEM_POOL_WAKE_SOURCES: SystemPoolWakeSources = SystemPoolWakeSources::new();
+/// Absolute monotonic ns of the current workerqueue CPU-intensive tick, or `0`.
+#[percpu::def_percpu]
+static NEXT_WORKER_TICK_DEADLINE_NS: u64 = 0;
 #[cfg(unittest)]
 static WORKQUEUE_WAIT_PROBE: AtomicUsize = AtomicUsize::new(0);
 
@@ -47,6 +51,108 @@ fn record_workqueue_wait_probe_for_tests() {
     }
 }
 
+pub(crate) fn set_worker_tick_deadline_for_context(
+    context: Option<kwork::raw::WorkqueueTaskContext>,
+) {
+    let _guard = kspin::NoPreemptIrqSave::new();
+    // SAFETY: `NoPreemptIrqSave` pins execution to this CPU and masks local
+    // IRQs while updating the per-CPU worker tick slot.
+    unsafe {
+        NEXT_WORKER_TICK_DEADLINE_NS.write_current_raw(
+            context
+                .and_then(|context| context.worker_tick_deadline())
+                .map(|deadline| deadline.as_nanos_u64_saturating())
+                .unwrap_or(0),
+        );
+    }
+}
+
+pub(crate) fn refresh_current_worker_tick_deadline_slot() {
+    set_worker_tick_deadline_for_context(kwork::raw::WorkqueueTaskContextIf::current_work_context());
+}
+
+fn account_due_worker_tick_and_refresh_slot() {
+    use kspin::NoOp;
+
+    current_run_queue::<NoOp>().account_current_worker_tick();
+    refresh_current_worker_tick_deadline_slot();
+}
+
+pub(crate) fn account_due_current_worker_tick_and_refresh_slot(now_ns: u64) {
+    // SAFETY: caller holds `NoPreemptIrqSave` or is in timer IRQ, so this CPU's
+    // worker slot is stable against local timer reprogramming.
+    let worker_ns = unsafe { NEXT_WORKER_TICK_DEADLINE_NS.read_current_raw() };
+    if worker_ns != 0 && worker_ns <= now_ns {
+        account_due_worker_tick_and_refresh_slot();
+    }
+}
+
+pub(crate) fn refresh_current_worker_tick_after_timer_callbacks(now_ns: u64) {
+    refresh_current_worker_tick_deadline_slot();
+    account_due_current_worker_tick_and_refresh_slot(now_ns);
+}
+
+pub(crate) fn current_worker_tick_is_due(now_ns: u64) -> bool {
+    // SAFETY: caller holds IRQ/preempt exclusion for the current CPU.
+    let worker_ns = unsafe { NEXT_WORKER_TICK_DEADLINE_NS.read_current_raw() };
+    worker_ns != 0 && now_ns >= worker_ns
+}
+
+pub(crate) fn account_timer_worker_tick(worker_tick_due: bool, sched_due: bool) {
+    use kspin::NoOp;
+
+    #[cfg(feature = "sched_eevdf")]
+    if worker_tick_due && !sched_due {
+        current_run_queue::<NoOp>().account_current_worker_tick();
+    }
+    #[cfg(not(feature = "sched_eevdf"))]
+    if worker_tick_due {
+        current_run_queue::<NoOp>().account_current_worker_tick();
+    }
+    #[cfg(not(feature = "sched_eevdf"))]
+    let _ = sched_due;
+}
+
+pub(crate) fn worker_tick_deadline_for_rearm(now_ns: u64) -> Option<u64> {
+    // SAFETY: caller holds `NoPreemptIrqSave`, so this CPU's slot is stable
+    // against local timer IRQ while it is inspected.
+    let worker_ns = unsafe { NEXT_WORKER_TICK_DEADLINE_NS.read_current_raw() };
+    (worker_ns != 0 && worker_ns > now_ns).then_some(worker_ns)
+}
+
+/// Refreshes the local workerqueue CPU-intensive tick and pulls in hardware
+/// only when the worker deadline is earlier than every non-worker source.
+pub(crate) fn refresh_current_worker_tick_deadline() {
+    let _guard = kspin::NoPreemptIrqSave::new();
+    refresh_current_worker_tick_deadline_slot();
+
+    let now_ns = khal::time::monotonic_time_nanos();
+    account_due_current_worker_tick_and_refresh_slot(now_ns);
+    let Some(worker_ns) = worker_tick_deadline_for_rearm(now_ns) else {
+        return;
+    };
+
+    // Worker-context refresh may run before a due scheduler slot has been
+    // accounted. Only pull the hardware timer earlier; leave scheduler slot
+    // consumption to timer IRQ / switch paths that run `task_tick()` semantics.
+    if crate::api::sched_deadline_for_worker_timer_pull_in()
+        .is_some_and(|deadline| deadline <= worker_ns)
+    {
+        return;
+    }
+    let soft = crate::future::earliest_deadline(khal::percpu::this_cpu_id())
+        .map(|deadline| deadline.as_nanos_u64_saturating());
+    if soft.is_some_and(|deadline| deadline <= worker_ns) {
+        return;
+    }
+    if crate::timers::earliest_deadline().is_some_and(|deadline| deadline <= worker_ns) {
+        return;
+    }
+    khal::time::arm_timer(ktime_types::MonotonicInstant::from_span_since_origin(
+        ktime_types::TimeSpan::from_nanos(worker_ns),
+    ));
+}
+
 struct SystemPoolWakeSourcesEntry {
     wake_sources: [PollSet; kwork::raw::MAX_SYSTEM_WORKERS_PER_CPU],
     worker_tasks: [Option<KtaskRef>; kwork::raw::MAX_SYSTEM_WORKERS_PER_CPU],
@@ -56,31 +162,31 @@ struct SystemPoolWakeSourcesEntry {
 
 struct SystemPoolWakeSources(
     [[SpinNoIrq<Option<SystemPoolWakeSourcesEntry>>; kbuild_config::NR_CPUS];
-        kwork::raw::SystemWorkQueueKind::COUNT],
+        kwork::raw::SystemPoolKind::COUNT],
 );
 
 impl SystemPoolWakeSources {
     const fn new() -> Self {
         Self(
             [const { [const { SpinNoIrq::new(None) }; kbuild_config::NR_CPUS] };
-                kwork::raw::SystemWorkQueueKind::COUNT],
+                kwork::raw::SystemPoolKind::COUNT],
         )
     }
 
     fn install(
         &self,
-        kind: kwork::raw::SystemWorkQueueKind,
+        pool_kind: kwork::raw::SystemPoolKind,
         cpu_id: LogicalCpuId,
         wake_sources: [PollSet; kwork::raw::MAX_SYSTEM_WORKERS_PER_CPU],
         manager_wake_source: PollSet,
     ) -> bool {
-        let Some(kind_slots) = self.0.get(kind.as_usize()) else {
+        let Some(kind_slots) = self.0.get(pool_kind.as_usize()) else {
             return false;
         };
         let Some(cpu_slot) = kind_slots.get(cpu_id.as_usize()) else {
             warn!(
                 "cannot install {:?} system workerqueue wake source for out-of-range CPU {}",
-                kind,
+                pool_kind,
                 cpu_id.as_usize()
             );
             return false;
@@ -101,12 +207,12 @@ impl SystemPoolWakeSources {
 
     fn get(
         &self,
-        kind: kwork::raw::SystemWorkQueueKind,
+        pool_kind: kwork::raw::SystemPoolKind,
         cpu_id: LogicalCpuId,
         worker_id: kwork::raw::WorkerId,
     ) -> Option<PollSet> {
         self.0
-            .get(kind.as_usize())?
+            .get(pool_kind.as_usize())?
             .get(cpu_id.as_usize())
             .and_then(|slot| {
                 slot.lock()
@@ -115,20 +221,20 @@ impl SystemPoolWakeSources {
             })
     }
 
-    fn is_installed(&self, kind: kwork::raw::SystemWorkQueueKind, cpu_id: LogicalCpuId) -> bool {
+    fn is_installed(&self, pool_kind: kwork::raw::SystemPoolKind, cpu_id: LogicalCpuId) -> bool {
         self.0
-            .get(kind.as_usize())
+            .get(pool_kind.as_usize())
             .and_then(|slots| slots.get(cpu_id.as_usize()))
             .is_some_and(|slot| slot.lock().is_some())
     }
 
     fn manager(
         &self,
-        kind: kwork::raw::SystemWorkQueueKind,
+        pool_kind: kwork::raw::SystemPoolKind,
         cpu_id: LogicalCpuId,
     ) -> Option<PollSet> {
         self.0
-            .get(kind.as_usize())?
+            .get(pool_kind.as_usize())?
             .get(cpu_id.as_usize())
             .and_then(|slot| {
                 slot.lock()
@@ -139,13 +245,13 @@ impl SystemPoolWakeSources {
 
     fn register_worker_task(
         &self,
-        kind: kwork::raw::SystemWorkQueueKind,
+        pool_kind: kwork::raw::SystemPoolKind,
         cpu_id: LogicalCpuId,
         worker_id: kwork::raw::WorkerId,
         task: KtaskRef,
     ) -> bool {
         self.0
-            .get(kind.as_usize())
+            .get(pool_kind.as_usize())
             .and_then(|slots| slots.get(cpu_id.as_usize()))
             .is_some_and(|slot| {
                 let mut slot = slot.lock();
@@ -165,12 +271,12 @@ impl SystemPoolWakeSources {
 
     fn worker_task(
         &self,
-        kind: kwork::raw::SystemWorkQueueKind,
+        pool_kind: kwork::raw::SystemPoolKind,
         cpu_id: LogicalCpuId,
         worker_id: kwork::raw::WorkerId,
     ) -> Option<KtaskRef> {
         self.0
-            .get(kind.as_usize())?
+            .get(pool_kind.as_usize())?
             .get(cpu_id.as_usize())
             .and_then(|slot| {
                 slot.lock()
@@ -182,12 +288,12 @@ impl SystemPoolWakeSources {
 
     fn unregister_worker_task(
         &self,
-        kind: kwork::raw::SystemWorkQueueKind,
+        pool_kind: kwork::raw::SystemPoolKind,
         cpu_id: LogicalCpuId,
         worker_id: kwork::raw::WorkerId,
     ) -> Option<KtaskRef> {
         self.0
-            .get(kind.as_usize())?
+            .get(pool_kind.as_usize())?
             .get(cpu_id.as_usize())
             .and_then(|slot| {
                 slot.lock()
@@ -199,12 +305,12 @@ impl SystemPoolWakeSources {
 
     fn register_manager_task(
         &self,
-        kind: kwork::raw::SystemWorkQueueKind,
+        pool_kind: kwork::raw::SystemPoolKind,
         cpu_id: LogicalCpuId,
         task: KtaskRef,
     ) -> bool {
         self.0
-            .get(kind.as_usize())
+            .get(pool_kind.as_usize())
             .and_then(|slots| slots.get(cpu_id.as_usize()))
             .is_some_and(|slot| {
                 let mut slot = slot.lock();
@@ -221,11 +327,11 @@ impl SystemPoolWakeSources {
 
     fn manager_task(
         &self,
-        kind: kwork::raw::SystemWorkQueueKind,
+        pool_kind: kwork::raw::SystemPoolKind,
         cpu_id: LogicalCpuId,
     ) -> Option<KtaskRef> {
         self.0
-            .get(kind.as_usize())?
+            .get(pool_kind.as_usize())?
             .get(cpu_id.as_usize())
             .and_then(|slot| {
                 slot.lock()
@@ -243,15 +349,15 @@ impl SystemPoolWakeSources {
 /// callback only blocks that worker task, while other pre-created workers can
 /// continue draining runnable work.
 pub fn init_system_workqueue_worker() {
-    init_system_workqueue_kind_worker(kwork::raw::SystemWorkQueueKind::Default);
+    init_system_workqueue_pool_worker(kwork::raw::SystemPoolKind::Normal);
 }
 
-fn init_system_workqueue_kind_worker(kind: kwork::raw::SystemWorkQueueKind) {
+fn init_system_workqueue_pool_worker(pool_kind: kwork::raw::SystemPoolKind) {
     let wake_sources = core::array::from_fn(|_| PollSet::new());
     let manager_wake_source = PollSet::new();
     let cpu_id = khal::percpu::this_cpu_id();
     if !SYSTEM_POOL_WAKE_SOURCES.install(
-        kind,
+        pool_kind,
         cpu_id,
         wake_sources.clone(),
         manager_wake_source.clone(),
@@ -262,35 +368,35 @@ fn init_system_workqueue_kind_worker(kind: kwork::raw::SystemWorkQueueKind) {
     for worker_id in 0..kwork::raw::INITIAL_SYSTEM_WORKERS_PER_CPU {
         let worker_id = kwork::raw::WorkerId::new(worker_id);
         let worker_wake_source = wake_sources[worker_id.as_usize()].clone();
-        if !start_system_worker_task(kind, cpu_id, worker_id, worker_wake_source) {
+        if !start_system_worker_task(pool_kind, cpu_id, worker_id, worker_wake_source) {
             warn!(
                 "failed to start initial {:?} system workerqueue worker {} for CPU {}",
-                kind,
+                pool_kind,
                 worker_id.as_usize(),
                 cpu_id.as_usize()
             );
         }
     }
 
-    let Some(pool) = kwork::raw::SystemPoolBinding::for_kind_cpu(kind, cpu_id) else {
+    let Some(pool) = kwork::raw::SystemPoolBinding::for_pool_kind_cpu(pool_kind, cpu_id) else {
         warn!(
             "cannot start {:?} system workerqueue manager for out-of-range CPU {}",
-            kind,
+            pool_kind,
             cpu_id.as_usize()
         );
         return;
     };
     let manager_task = TaskInner::new_pidless_kthread(
-        move || system_worker_manager_main(kind, cpu_id, manager_wake_source),
-        system_worker_manager_name(kind, cpu_id),
+        move || system_worker_manager_main(pool_kind, cpu_id, manager_wake_source),
+        system_worker_manager_name(pool_kind, cpu_id),
         kbuild_config::TASK_STACK_SIZE,
     );
     let manager_task = prepare_task(manager_task);
     manager_task.set_cpumask(system_pool_cpumask(pool));
-    if !SYSTEM_POOL_WAKE_SOURCES.register_manager_task(kind, cpu_id, manager_task.clone()) {
+    if !SYSTEM_POOL_WAKE_SOURCES.register_manager_task(pool_kind, cpu_id, manager_task.clone()) {
         warn!(
             "failed to register {:?} system workerqueue manager task for CPU {}",
-            kind,
+            pool_kind,
             cpu_id.as_usize()
         );
     }
@@ -303,24 +409,24 @@ impl kwork::raw::WorkqueueHostIf {
         khal::percpu::this_cpu_id()
     }
 
-    fn is_system_pool_ready(kind: kwork::raw::SystemWorkQueueKind, cpu_id: LogicalCpuId) -> bool {
-        SYSTEM_POOL_WAKE_SOURCES.is_installed(kind, cpu_id)
+    fn is_system_pool_ready(pool_kind: kwork::raw::SystemPoolKind, cpu_id: LogicalCpuId) -> bool {
+        SYSTEM_POOL_WAKE_SOURCES.is_installed(pool_kind, cpu_id)
     }
 
     fn wake_system_worker(
-        kind: kwork::raw::SystemWorkQueueKind,
+        pool_kind: kwork::raw::SystemPoolKind,
         cpu_id: LogicalCpuId,
         worker_id: kwork::raw::WorkerId,
     ) {
         let _guard = NoPreempt::new();
-        if let Some(source) = SYSTEM_POOL_WAKE_SOURCES.get(kind, cpu_id, worker_id) {
+        if let Some(source) = SYSTEM_POOL_WAKE_SOURCES.get(pool_kind, cpu_id, worker_id) {
             let _ = source.wake();
         }
     }
 
-    fn wake_system_manager(kind: kwork::raw::SystemWorkQueueKind, cpu_id: LogicalCpuId) {
+    fn wake_system_manager(pool_kind: kwork::raw::SystemPoolKind, cpu_id: LogicalCpuId) {
         let _guard = NoPreempt::new();
-        if let Some(source) = SYSTEM_POOL_WAKE_SOURCES.manager(kind, cpu_id) {
+        if let Some(source) = SYSTEM_POOL_WAKE_SOURCES.manager(pool_kind, cpu_id) {
             let _ = source.wake();
         }
     }
@@ -378,6 +484,10 @@ impl kwork::raw::WorkqueueTaskContextIf {
                 },
             )
         })
+    }
+
+    fn refresh_current_worker_tick() {
+        refresh_current_worker_tick_deadline();
     }
 }
 
@@ -467,17 +577,17 @@ impl kwork::raw::WorkqueueTimerHandle for KtaskWorkqueueTimerHandle {
 }
 
 fn system_worker_main(
-    kind: kwork::raw::SystemWorkQueueKind,
+    pool_kind: kwork::raw::SystemPoolKind,
     cpu_id: LogicalCpuId,
     worker_id: kwork::raw::WorkerId,
     wake_source: PollSet,
 ) {
-    debug!("started {}", worker_name(kind, cpu_id, worker_id));
-    let Some(pool) = kwork::raw::SystemPoolBinding::for_kind_cpu(kind, cpu_id) else {
+    debug!("started {}", worker_name(pool_kind, cpu_id, worker_id));
+    let Some(pool) = kwork::raw::SystemPoolBinding::for_pool_kind_cpu(pool_kind, cpu_id) else {
         warn!(
             "system workerqueue worker {} found no {:?} pool for CPU {}",
             worker_id.as_usize(),
-            kind,
+            pool_kind,
             cpu_id.as_usize()
         );
         return;
@@ -489,15 +599,15 @@ fn system_worker_main(
 }
 
 fn system_worker_manager_main(
-    kind: kwork::raw::SystemWorkQueueKind,
+    pool_kind: kwork::raw::SystemPoolKind,
     cpu_id: LogicalCpuId,
     wake_source: PollSet,
 ) {
-    debug!("started {}", system_worker_manager_name(kind, cpu_id));
-    let Some(pool) = kwork::raw::SystemPoolBinding::for_kind_cpu(kind, cpu_id) else {
+    debug!("started {}", system_worker_manager_name(pool_kind, cpu_id));
+    let Some(pool) = kwork::raw::SystemPoolBinding::for_pool_kind_cpu(pool_kind, cpu_id) else {
         warn!(
             "system workerqueue manager found no {:?} pool for CPU {}",
-            kind,
+            pool_kind,
             cpu_id.as_usize()
         );
         return;
@@ -505,14 +615,16 @@ fn system_worker_manager_main(
     loop {
         wait_for_system_manager_work(pool, &wake_source);
         while let Some(worker_id) = pool.reserve_worker_creation() {
-            let worker_wake_source = match SYSTEM_POOL_WAKE_SOURCES.get(kind, cpu_id, worker_id) {
-                Some(source) => source,
-                None => {
-                    pool.finish_worker_creation(worker_id, false);
-                    break;
-                }
-            };
-            let started = start_system_worker_task(kind, cpu_id, worker_id, worker_wake_source);
+            let worker_wake_source =
+                match SYSTEM_POOL_WAKE_SOURCES.get(pool_kind, cpu_id, worker_id) {
+                    Some(source) => source,
+                    None => {
+                        pool.finish_worker_creation(worker_id, false);
+                        break;
+                    }
+                };
+            let started =
+                start_system_worker_task(pool_kind, cpu_id, worker_id, worker_wake_source);
             pool.finish_worker_creation(worker_id, started);
             if !started {
                 sleep(kwork::raw::WORKER_CREATE_RETRY_DELAY);
@@ -523,35 +635,35 @@ fn system_worker_manager_main(
 }
 
 fn start_system_worker_task(
-    kind: kwork::raw::SystemWorkQueueKind,
+    pool_kind: kwork::raw::SystemPoolKind,
     cpu_id: LogicalCpuId,
     worker_id: kwork::raw::WorkerId,
     wake_source: PollSet,
 ) -> bool {
-    let Some(pool) = kwork::raw::SystemPoolBinding::for_kind_cpu(kind, cpu_id) else {
+    let Some(pool) = kwork::raw::SystemPoolBinding::for_pool_kind_cpu(pool_kind, cpu_id) else {
         return false;
     };
     let task = TaskInner::new_pidless_kthread(
-        move || system_worker_main(kind, cpu_id, worker_id, wake_source),
-        worker_name(kind, cpu_id, worker_id),
+        move || system_worker_main(pool_kind, cpu_id, worker_id, wake_source),
+        worker_name(pool_kind, cpu_id, worker_id),
         kbuild_config::TASK_STACK_SIZE,
     );
     let task = prepare_task(task);
     task.set_cpumask(system_pool_cpumask(pool));
-    if !SYSTEM_POOL_WAKE_SOURCES.register_worker_task(kind, cpu_id, worker_id, task.clone()) {
+    if !SYSTEM_POOL_WAKE_SOURCES.register_worker_task(pool_kind, cpu_id, worker_id, task.clone()) {
         warn!(
             "failed to register {:?} system workerqueue worker task {} for CPU {}",
-            kind,
+            pool_kind,
             worker_id.as_usize(),
             cpu_id.as_usize()
         );
         return false;
     }
     if !pool.install_worker(worker_id) {
-        let _ = SYSTEM_POOL_WAKE_SOURCES.unregister_worker_task(kind, cpu_id, worker_id);
+        let _ = SYSTEM_POOL_WAKE_SOURCES.unregister_worker_task(pool_kind, cpu_id, worker_id);
         warn!(
             "failed to install {:?} system workerqueue worker {} for CPU {}",
-            kind,
+            pool_kind,
             worker_id.as_usize(),
             cpu_id.as_usize()
         );
@@ -568,18 +680,18 @@ fn system_pool_cpumask(pool: kwork::raw::SystemPoolBinding) -> KCpuMask {
 }
 
 pub(crate) fn system_worker_task_for_wake(
-    kind: kwork::raw::SystemWorkQueueKind,
+    pool_kind: kwork::raw::SystemPoolKind,
     cpu_id: LogicalCpuId,
     worker_id: kwork::raw::WorkerId,
 ) -> Option<KtaskRef> {
-    SYSTEM_POOL_WAKE_SOURCES.worker_task(kind, cpu_id, worker_id)
+    SYSTEM_POOL_WAKE_SOURCES.worker_task(pool_kind, cpu_id, worker_id)
 }
 
 pub(crate) fn system_manager_task_for_wake(
-    kind: kwork::raw::SystemWorkQueueKind,
+    pool_kind: kwork::raw::SystemPoolKind,
     cpu_id: LogicalCpuId,
 ) -> Option<KtaskRef> {
-    SYSTEM_POOL_WAKE_SOURCES.manager_task(kind, cpu_id)
+    SYSTEM_POOL_WAKE_SOURCES.manager_task(pool_kind, cpu_id)
 }
 
 fn drain_system_workqueue(pool: kwork::raw::SystemPoolBinding, worker_id: kwork::raw::WorkerId) {
@@ -666,23 +778,27 @@ fn wait_for_workqueue_event(
 }
 
 fn worker_name(
-    kind: kwork::raw::SystemWorkQueueKind,
+    pool_kind: kwork::raw::SystemPoolKind,
     cpu_id: LogicalCpuId,
     worker_id: kwork::raw::WorkerId,
 ) -> String {
     format!(
         "kwork/{}/{}:{}",
-        kind.queue_name(),
+        pool_kind.pool_name(),
         cpu_id.as_usize(),
         worker_id.as_usize()
     )
 }
 
 fn system_worker_manager_name(
-    kind: kwork::raw::SystemWorkQueueKind,
+    pool_kind: kwork::raw::SystemPoolKind,
     cpu_id: LogicalCpuId,
 ) -> String {
-    format!("kwork/{}/{}/manager", kind.queue_name(), cpu_id.as_usize())
+    format!(
+        "kwork/{}/{}/manager",
+        pool_kind.pool_name(),
+        cpu_id.as_usize()
+    )
 }
 
 #[cfg(unittest)]
@@ -709,20 +825,20 @@ mod tests {
     static SELF_WAIT_RESULT: AtomicUsize = AtomicUsize::new(0);
 
     struct ScopedRemovedSystemPool {
-        kind: kwork::raw::SystemWorkQueueKind,
+        pool_kind: kwork::raw::SystemPoolKind,
         cpu_id: LogicalCpuId,
         previous: Option<SystemPoolWakeSourcesEntry>,
     }
 
     impl ScopedRemovedSystemPool {
-        fn remove(kind: kwork::raw::SystemWorkQueueKind, cpu_id: LogicalCpuId) -> Option<Self> {
+        fn remove(pool_kind: kwork::raw::SystemPoolKind, cpu_id: LogicalCpuId) -> Option<Self> {
             let slot = SYSTEM_POOL_WAKE_SOURCES
                 .0
-                .get(kind.as_usize())?
+                .get(pool_kind.as_usize())?
                 .get(cpu_id.as_usize())?;
             let previous = slot.lock().take();
             Some(Self {
-                kind,
+                pool_kind,
                 cpu_id,
                 previous,
             })
@@ -733,7 +849,7 @@ mod tests {
         fn drop(&mut self) {
             if let Some(slot) = SYSTEM_POOL_WAKE_SOURCES
                 .0
-                .get(self.kind.as_usize())
+                .get(self.pool_kind.as_usize())
                 .and_then(|slots| slots.get(self.cpu_id.as_usize()))
             {
                 *slot.lock() = self.previous.take();
@@ -841,17 +957,14 @@ mod tests {
     fn test_worker_name_includes_cpu_id() {
         assert_eq!(
             worker_name(
-                kwork::raw::SystemWorkQueueKind::Default,
+                kwork::raw::SystemPoolKind::Normal,
                 LogicalCpuId::new(3),
                 kwork::raw::WorkerId::new(1)
             ),
             String::from("kwork/system_wq/3:1")
         );
         assert_eq!(
-            system_worker_manager_name(
-                kwork::raw::SystemWorkQueueKind::Default,
-                LogicalCpuId::new(3)
-            ),
+            system_worker_manager_name(kwork::raw::SystemPoolKind::Normal, LogicalCpuId::new(3)),
             String::from("kwork/system_wq/3/manager")
         );
     }
@@ -860,11 +973,9 @@ mod tests {
     fn test_system_wq_enqueue_rejects_unavailable_worker_pool() {
         init_system_workqueue_worker();
         let cpu_id = khal::percpu::this_cpu_id();
-        let queue =
-            kwork::raw::system_percpu_wq_for_cpu(cpu_id).expect("current CPU queue should exist");
-        let _removed =
-            ScopedRemovedSystemPool::remove(kwork::raw::SystemWorkQueueKind::Default, cpu_id)
-                .expect("current CPU worker pool slot should be in range");
+        let queue = kwork::raw::system_percpu_wq();
+        let _removed = ScopedRemovedSystemPool::remove(kwork::raw::SystemPoolKind::Normal, cpu_id)
+            .expect("current CPU worker pool slot should be in range");
         let work = kwork::raw::ScheduledWork::new(count_system_work);
         let direct_work = kwork::raw::ScheduledWork::new(count_system_work);
 
@@ -882,11 +993,9 @@ mod tests {
     fn test_long_system_wq_enqueue_rejects_unavailable_worker_pool() {
         init_system_workqueue_worker();
         let cpu_id = khal::percpu::this_cpu_id();
-        let queue = kwork::raw::system_long_wq_for_cpu(cpu_id)
-            .expect("current CPU long queue should exist");
-        let _removed =
-            ScopedRemovedSystemPool::remove(kwork::raw::SystemWorkQueueKind::Default, cpu_id)
-                .expect("current CPU default worker pool slot should be in range");
+        let queue = kwork::raw::system_long_wq();
+        let _removed = ScopedRemovedSystemPool::remove(kwork::raw::SystemPoolKind::Normal, cpu_id)
+            .expect("current CPU default worker pool slot should be in range");
         let work = kwork::raw::ScheduledWork::new(count_system_work);
         let direct_work = kwork::raw::ScheduledWork::new(count_system_work);
 
@@ -936,9 +1045,7 @@ mod tests {
     fn test_system_worker_drains_flushed_delayed_work() {
         init_system_workqueue_worker();
 
-        let cpu_id = khal::percpu::this_cpu_id();
-        let queue =
-            kwork::raw::system_percpu_wq_for_cpu(cpu_id).expect("current CPU queue should exist");
+        let queue = kwork::raw::system_percpu_wq();
         let before = SYSTEM_WORKER_RUNS.load(Ordering::Acquire);
         let work = kwork::raw::DelayedScheduledWork::new(count_system_work);
 

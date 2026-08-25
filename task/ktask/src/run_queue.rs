@@ -42,6 +42,7 @@ use crate::{
     future::{block_on, earliest_deadline},
     task::{CurrentTask, TaskState},
     tracing_hooks::{fire_context_switch, fire_task_wakeup},
+    workqueue::set_worker_tick_deadline_for_context,
 };
 
 #[cfg(feature = "sched_stat")]
@@ -1005,6 +1006,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     #[cfg(feature = "sched_eevdf")]
     pub fn account_sched_tick(&mut self, now_ns: u64) {
         self.account_runtime(now_ns, true);
+        self.account_current_worker_tick();
     }
 
     fn account_runtime(&mut self, now_ns: u64, is_sched_tick: bool) {
@@ -1040,13 +1042,6 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         if is_idle {
             return;
         }
-        if elapsed > 0
-            && let Some(worker_context) = kwork::raw::WorkqueueTaskContextIf::current_work_context()
-        {
-            let wake_plan = worker_context.worker_tick_in_scheduler();
-            self.inner
-                .execute_system_worker_wake_plan(worker_context, wake_plan);
-        }
         #[cfg(feature = "sched_stat")]
         if should_preempt && elapsed > 0 {
             sched_stat_inc(&sched_stat_cpu(self.inner.cpu_id).tick_preempt);
@@ -1057,6 +1052,24 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             #[cfg(feature = "preempt")]
             self.current_task.set_preempt_pending(true);
         }
+    }
+
+    /// Accounts a true scheduler tick for the current workerqueue callback.
+    ///
+    /// This mirrors Linux `sched_tick()` calling `wq_worker_tick()` for
+    /// `PF_WQ_WORKER` tasks. It is intentionally independent of RQ runtime
+    /// `elapsed`: NOHZ wake/runtime flushes may have already consumed the
+    /// scheduler accounting epoch, while kwork uses its own callback start
+    /// timestamp to decide whether the worker crossed the CPU-intensive
+    /// threshold.
+    pub fn account_current_worker_tick(&mut self) {
+        let Some(worker_context) = kwork::raw::WorkqueueTaskContextIf::current_work_context()
+        else {
+            return;
+        };
+        let wake_plan = worker_context.worker_tick_in_scheduler();
+        self.inner
+            .execute_system_worker_wake_plan(worker_context, wake_plan);
     }
 
     /// Recomputes the per-CPU schedule deadline for the running task.
@@ -1803,6 +1816,9 @@ impl RunQueue {
         next_task.set_preempt_pending(false);
         next_task.set_state(TaskState::Running);
         self.account_next_worker_running(&next_task);
+        let next_worker_context = worker_context_from_task(&next_task);
+        self.account_due_worker_tick_for_context(next_worker_context, now_ns);
+        set_worker_tick_deadline_for_context(next_worker_context);
 
         let program_next_deadline = |rq: &mut Self, next: &KtaskRef, now: u64| {
             let next_rel = {
@@ -1918,19 +1934,28 @@ impl RunQueue {
         if !next_task.take_workerqueue_sleep_accounted() {
             return;
         }
-        let Some((work_key, queue_key, pool_key, worker_id, worker_token)) =
-            next_task.workerqueue_current_work_context()
-        else {
+        let Some(context) = worker_context_from_task(next_task) else {
             return;
         };
-        kwork::raw::WorkqueueTaskContext::new(
-            work_key,
-            queue_key,
-            pool_key,
-            kwork::raw::WorkerId::new(worker_id),
-            kwork::raw::WorkerExecutionToken::from_usize(worker_token),
-        )
-        .worker_did_resume();
+        context.worker_did_resume();
+    }
+
+    fn account_due_worker_tick_for_context(
+        &mut self,
+        context: Option<kwork::raw::WorkqueueTaskContext>,
+        now_ns: u64,
+    ) {
+        let Some(context) = context else {
+            return;
+        };
+        let Some(deadline) = context.worker_tick_deadline() else {
+            return;
+        };
+        if deadline.as_nanos_u64_saturating() > now_ns {
+            return;
+        }
+        let wake_plan = context.worker_tick_in_scheduler();
+        self.execute_system_worker_wake_plan(context, wake_plan);
     }
 
     fn execute_system_worker_wake_plan(
@@ -1948,7 +1973,7 @@ impl RunQueue {
         );
         if let Some(worker_id) = plan.worker_to_wake
             && let Some(task) = crate::workqueue::system_worker_task_for_wake(
-                binding.kind(),
+                binding.pool_kind(),
                 binding.cpu_id(),
                 worker_id,
             )
@@ -1956,8 +1981,10 @@ impl RunQueue {
             self.unblock_workerqueue_task_from_scheduler(task);
         }
         if plan.should_wake_manager
-            && let Some(task) =
-                crate::workqueue::system_manager_task_for_wake(binding.kind(), binding.cpu_id())
+            && let Some(task) = crate::workqueue::system_manager_task_for_wake(
+                binding.pool_kind(),
+                binding.cpu_id(),
+            )
         {
             self.unblock_workerqueue_task_from_scheduler(task);
         }
@@ -1978,6 +2005,20 @@ impl RunQueue {
             request_resched_on(self);
         }
     }
+}
+
+fn worker_context_from_task(task: &KtaskRef) -> Option<kwork::raw::WorkqueueTaskContext> {
+    task.workerqueue_current_work_context().map(
+        |(work_key, queue_key, pool_key, worker_id, worker_token)| {
+            kwork::raw::WorkqueueTaskContext::new(
+                work_key,
+                queue_key,
+                pool_key,
+                kwork::raw::WorkerId::new(worker_id),
+                kwork::raw::WorkerExecutionToken::from_usize(worker_token),
+            )
+        },
+    )
 }
 
 fn poll_gc(cx: &mut Context<'_>, registrations: &mut PollRegistrations) -> Poll<()> {

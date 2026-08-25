@@ -211,7 +211,7 @@ Budgeted poller：
 - `ScheduleAttrs` 保存一次调度的投递目标：default system、long system、BH、
   BH high-priority 或 custom queue，以及可选 CPU 绑定；custom queue 可以来自
   `'static WorkQueue` 或 `WorkQueueHandle`，差异只表示 owner 生命周期；
-  无 CPU 绑定表示按 enqueue 当时的 current CPU 选择 per-CPU queue；
+  无 CPU 绑定表示按 enqueue 当时的 current CPU 选择 per-CPU pool binding；
 - 同一个 `ScheduledWork` 实例不能同时 running 和 pending；running
   callback 重新 queue 自身返回 `AlreadyQueued`。
 

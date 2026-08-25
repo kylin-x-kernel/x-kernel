@@ -12,7 +12,7 @@ use super::{
 use crate::WorkerPool;
 use crate::{
     BottomHalfPoolBinding, QueueOwner, QueueWorkResult, TaskPoolBinding, WorkQueue,
-    WorkQueueHandle, WorkqueueHostIf, bh_wq_kind_cpu, builtin_queue_cpu,
+    WorkQueueHandle, WorkqueueHostIf, bh_wq_kind,
 };
 
 /// Runtime policy that resolves one logical workqueue onto execution pools.
@@ -124,12 +124,6 @@ fn default_pool_cpu_error(cpu_id: LogicalCpuId) -> QueueWorkResult {
 fn static_queue_cpu_error(queue: &'static WorkQueue, cpu_id: LogicalCpuId) -> QueueWorkResult {
     if queue.pool_state_for_cpu(cpu_id).is_none() {
         QueueWorkResult::InvalidCpu
-    } else if let Some(queue_cpu) = builtin_queue_cpu(queue) {
-        if queue_cpu == cpu_id {
-            QueueWorkResult::WorkerUnavailable
-        } else {
-            QueueWorkResult::InvalidCpu
-        }
     } else {
         QueueWorkResult::WorkerUnavailable
     }
@@ -141,10 +135,8 @@ impl WorkQueueRuntime for &'static WorkQueue {
         cpu_id: Option<LogicalCpuId>,
     ) -> Result<WorkQueuePoolBinding, QueueWorkResult> {
         let owner = QueueOwner::Static(self);
-        let target_cpu = cpu_id
-            .or_else(|| builtin_queue_cpu(self))
-            .unwrap_or_else(WorkqueueHostIf::current_cpu_id);
-        if let Some((kind, _queue_cpu)) = bh_wq_kind_cpu(self) {
+        let target_cpu = cpu_id.unwrap_or_else(WorkqueueHostIf::current_cpu_id);
+        if let Some(kind) = bh_wq_kind(self) {
             let Some(binding) = BottomHalfPoolBinding::for_kind_cpu(kind, target_cpu)
                 .filter(|binding| core::ptr::eq(binding.queue(), self))
             else {
@@ -165,10 +157,21 @@ impl WorkQueueRuntime for &'static WorkQueue {
     }
 
     fn all_pool_bindings(self) -> Result<alloc::vec::Vec<WorkQueuePoolBinding>, QueueWorkResult> {
-        if let Some(cpu_id) = builtin_queue_cpu(self) {
-            return self
-                .select_pool_binding(Some(cpu_id))
-                .map(|binding| alloc::vec![binding]);
+        if let Some(kind) = bh_wq_kind(self) {
+            let mut bindings = alloc::vec::Vec::with_capacity(kbuild_config::NR_CPUS);
+            for cpu_index in 0..kbuild_config::NR_CPUS {
+                let cpu_id = LogicalCpuId::new(cpu_index);
+                let Some(binding) = BottomHalfPoolBinding::for_kind_cpu(kind, cpu_id)
+                    .filter(|binding| core::ptr::eq(binding.queue(), self))
+                else {
+                    return Err(static_queue_cpu_error(self, cpu_id));
+                };
+                bindings.push(WorkQueuePoolBinding {
+                    owner: QueueOwner::Static(self),
+                    binding: PoolRuntimeBinding::new(ExecutionPoolBinding::BottomHalf(binding)),
+                });
+            }
+            return Ok(bindings);
         }
 
         let mut bindings = alloc::vec::Vec::with_capacity(kbuild_config::NR_CPUS);

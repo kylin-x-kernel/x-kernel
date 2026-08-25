@@ -777,6 +777,22 @@ impl WorkerPoolState {
         self.select_worker_to_kick()
     }
 
+    pub(crate) fn worker_tick_deadline(
+        &self,
+        worker_id: usize,
+        worker_token: WorkerExecutionToken,
+    ) -> Option<MonotonicInstant> {
+        let slot = self.workers.get(worker_id)?;
+        if slot.state != WorkerState::Running
+            || slot.generation != worker_token
+            || slot.cpu_intensive
+        {
+            return None;
+        }
+        slot.current_run_started?
+            .checked_add(self.cpu_intensive_threshold)
+    }
+
     fn clear_worker_current_work(&mut self, worker_id: usize) {
         if let Some(worker) = self.workers.get_mut(worker_id) {
             worker.state = WorkerState::Idle;

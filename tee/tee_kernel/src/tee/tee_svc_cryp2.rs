@@ -1878,16 +1878,18 @@ pub mod tests_cryp {
     fn test_syscall_cryp_generate_key_ecc_p256_keypair() {
         // ECDSA P-256：必须在 generate_key 时通过 TEE_ATTR_ECC_CURVE 指定曲线
         let mut usr_params = crate::user_vec![utee_attribute::default(); 1];
-        usr_params[0].attribute_id = TEE_ATTR_ECC_CURVE;
-        usr_params[0].a = TEE_ECC_CURVE_NIST_P256 as u64;
-        usr_params[0].b = 0;
+        let mut usr_params_data = [utee_attribute::default(); 1];
+        usr_params_data[0].attribute_id = TEE_ATTR_ECC_CURVE;
+        usr_params_data[0].a = TEE_ECC_CURVE_NIST_P256 as u64;
+        usr_params_data[0].b = 0;
+        usr_params.write(usr_params_data);
 
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let result = syscall_cryp_obj_alloc(TEE_TYPE_ECDSA_KEYPAIR as _, 256, obj_id.as_user_ref());
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_ECDSA_KEYPAIR as _, 256, obj_id.as_user_ptr());
         assert!(result.is_ok());
         let obj_id = obj_id.read();
 
-        let result = syscall_obj_generate_key(obj_id as c_ulong, 256, usr_params.as_ptr(), 1);
+        let result = syscall_obj_generate_key(obj_id as c_ulong, 256, usr_params.as_user_ptr(), 1);
         assert!(result.is_ok());
 
         let obj_arc = tee_obj_get(obj_id as TeeObjIdType);
@@ -1915,8 +1917,8 @@ pub mod tests_cryp {
 
     #[unittest::def_test(user)]
     fn test_cryp_state_alloc_rejects_busy_key() {
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ptr());
         assert!(result.is_ok());
         let obj_id = obj_id.read();
 
@@ -1948,8 +1950,8 @@ pub mod tests_cryp {
     /// can still be freed / reused.
     #[unittest::def_test(user)]
     fn test_cryp_state_alloc_rolls_back_busy_on_error() {
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj_id.as_user_ref()).unwrap();
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj_id.as_user_ptr()).unwrap();
         let obj_id = obj_id.read();
         syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0).unwrap();
 
@@ -2038,8 +2040,8 @@ pub mod tests_cryp {
     #[unittest::def_test(user)]
     fn test_cryp_hmac_sm3() {
         let mut state: u32 = 0;
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let result = syscall_cryp_obj_alloc(TEE_TYPE_HMAC_SM3 as _, 128, obj_id.as_user_ref());
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_HMAC_SM3 as _, 128, obj_id.as_user_ptr());
         assert!(result.is_ok());
         let obj_id = obj_id.read();
 
@@ -2236,15 +2238,15 @@ pub mod tests_cryp {
     /// still succeed. HMAC-SM3 self-consistency: dst tag must equal src tag.
     #[unittest::def_test(user)]
     fn test_cryp_mac_copy_after_digest_extract_style_final_hmac_sm3() {
-        let mut src_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let mut dst_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let src_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let dst_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let mut src_state: u32 = 0;
         let mut dst_state: u32 = 0;
         const KEY: &[u8; 16] = b"abcdefghabcdefgh";
 
-        syscall_cryp_obj_alloc(TEE_TYPE_HMAC_SM3 as _, 128, src_obj_id.as_user_ref()).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_HMAC_SM3 as _, 128, src_obj_id.as_user_ptr()).unwrap();
         let src_obj_id = src_obj_id.read();
-        syscall_cryp_obj_alloc(TEE_TYPE_HMAC_SM3 as _, 128, dst_obj_id.as_user_ref()).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_HMAC_SM3 as _, 128, dst_obj_id.as_user_ptr()).unwrap();
         let dst_obj_id = dst_obj_id.read();
 
         for obj_id in [src_obj_id, dst_obj_id] {
@@ -2305,11 +2307,11 @@ pub mod tests_cryp {
             0x40, 0x10,
         ];
 
-        let mut src_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let mut dst_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, src_obj_id.as_user_ref()).unwrap();
+        let src_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let dst_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, src_obj_id.as_user_ptr()).unwrap();
         let src_obj_id = src_obj_id.read();
-        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, dst_obj_id.as_user_ref()).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, dst_obj_id.as_user_ptr()).unwrap();
         let dst_obj_id = dst_obj_id.read();
 
         for obj_id in [src_obj_id, dst_obj_id] {
@@ -2357,17 +2359,17 @@ pub mod tests_cryp {
 
     #[unittest::def_test(user)]
     fn test_cryp_state_copy_hmac_sm3() {
-        let mut src_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let mut dst_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let src_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let dst_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let mut src_state: u32 = 0;
         let mut dst_state: u32 = 0;
         let key = b"abcdefghabcdefgh";
 
-        let res = syscall_cryp_obj_alloc(TEE_TYPE_HMAC_SM3 as _, 128, src_obj_id.as_user_ref());
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_HMAC_SM3 as _, 128, src_obj_id.as_user_ptr());
         assert!(res.is_ok());
         let src_obj_id = src_obj_id.read();
 
-        let res = syscall_cryp_obj_alloc(TEE_TYPE_HMAC_SM3 as _, 128, dst_obj_id.as_user_ref());
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_HMAC_SM3 as _, 128, dst_obj_id.as_user_ptr());
         assert!(res.is_ok());
         let dst_obj_id = dst_obj_id.read();
 
@@ -2433,8 +2435,8 @@ pub mod tests_cryp {
 
     #[unittest::def_test(user)]
     fn test_cryp_state_copy_sm4_cbc_ctx() {
-        let mut src_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let mut dst_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let src_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let dst_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let mut src_state: u32 = 0;
         let mut dst_state: u32 = 0;
         let key = b"abcdefghabcdefgh";
@@ -2442,10 +2444,10 @@ pub mod tests_cryp {
         let data1 = b"abcdefghabcdefgh";
         let data2 = b"1234567890987654";
 
-        let res = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, src_obj_id.as_user_ref());
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, src_obj_id.as_user_ptr());
         assert!(res.is_ok());
         let src_obj_id = src_obj_id.read();
-        let res = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, dst_obj_id.as_user_ref());
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, dst_obj_id.as_user_ptr());
         assert!(res.is_ok());
         let dst_obj_id = dst_obj_id.read();
 
@@ -2518,8 +2520,8 @@ pub mod tests_cryp {
     #[unittest::def_test(user)]
     fn test_cryp_cmac_aes() {
         let mut state: u32 = 0;
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let result = syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj_id.as_user_ref());
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj_id.as_user_ptr());
         assert!(result.is_ok());
         let obj_id = obj_id.read();
 
@@ -2578,8 +2580,8 @@ pub mod tests_cryp {
 
     /// Populate a transient AES object and allocate `TEE_ALG_AES_CMAC` state (GP crypt TA).
     fn alloc_aes_cmac_mac_state(key: &[u8], state: &mut u32) -> TestResult {
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        assert!(syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj_id.as_user_ref()).is_ok());
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        assert!(syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj_id.as_user_ptr()).is_ok());
         let obj_id = obj_id.read();
 
         let obj_arc = tee_obj_get(obj_id as TeeObjIdType).unwrap();
@@ -2723,8 +2725,8 @@ pub mod tests_cryp {
     #[unittest::def_test(user)]
     fn test_cryp_sm4_ecb_encrypt() {
         let mut state: u32 = 0;
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ptr());
         assert!(result.is_ok());
         let obj_id = obj_id.read();
 
@@ -2797,8 +2799,8 @@ pub mod tests_cryp {
 
     #[unittest::def_test(user)]
     fn test_cryp_cipher_update_rejects_uninitialized_state_and_short_buffer() {
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ptr());
         assert!(result.is_ok());
         let obj_id = obj_id.read();
 
@@ -2830,8 +2832,8 @@ pub mod tests_cryp {
     #[unittest::def_test(user)]
     fn test_cryp_sm4_ecb_decrypt() {
         let mut state: u32 = 0;
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ptr());
         assert!(result.is_ok());
         let obj_id = obj_id.read();
 
@@ -2903,8 +2905,8 @@ pub mod tests_cryp {
     #[unittest::def_test(user)]
     fn test_cryp_sm4_cbc_encrypt() {
         let mut state: u32 = 0;
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ptr());
         assert!(result.is_ok());
         let obj_id = obj_id.read();
 
@@ -2974,8 +2976,8 @@ pub mod tests_cryp {
     #[unittest::def_test(user)]
     fn test_cryp_sm4_cbc_decrypt() {
         let mut state: u32 = 0;
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ptr());
         assert!(result.is_ok());
         let obj_id = obj_id.read();
 
@@ -3043,8 +3045,8 @@ pub mod tests_cryp {
     #[unittest::def_test(user)]
     fn test_cryp_sm4_gcm_encrypt() {
         let mut state: u32 = 0;
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ptr());
         assert!(result.is_ok());
         let obj_id = obj_id.read();
 
@@ -3139,8 +3141,8 @@ pub mod tests_cryp {
     #[unittest::def_test(user)]
     fn test_cryp_sm4_gcm_split_aad_matches_one_shot() {
         let mut state: u32 = 0;
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref()).unwrap();
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ptr()).unwrap();
         let obj_id = obj_id.read();
         syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0).unwrap();
 
@@ -3211,8 +3213,8 @@ pub mod tests_cryp {
     #[unittest::def_test(user)]
     fn test_cryp_authenc_aad_rejected_after_payload() {
         let mut state: u32 = 0;
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref()).unwrap();
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ptr()).unwrap();
         let obj_id = obj_id.read();
         syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0).unwrap();
 
@@ -3239,8 +3241,8 @@ pub mod tests_cryp {
     #[unittest::def_test(user)]
     fn test_cryp_authenc_enc_final_short_buffer() {
         let mut state: u32 = 0;
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref()).unwrap();
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ptr()).unwrap();
         let obj_id = obj_id.read();
         syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0).unwrap();
 
@@ -3281,11 +3283,11 @@ pub mod tests_cryp {
     fn test_cryp_state_copy_rejected_after_authenc_final() {
         let mut enc_state: u32 = 0;
         let mut dst_state: u32 = 0;
-        let mut enc_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let mut dst_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, enc_obj_id.as_user_ref()).unwrap();
+        let enc_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let dst_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, enc_obj_id.as_user_ptr()).unwrap();
         let enc_obj_id = enc_obj_id.read();
-        syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, dst_obj_id.as_user_ref()).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, dst_obj_id.as_user_ptr()).unwrap();
         let dst_obj_id = dst_obj_id.read();
         syscall_obj_generate_key(enc_obj_id as c_ulong, 128, core::ptr::null(), 0).unwrap();
         syscall_obj_generate_key(dst_obj_id as c_ulong, 128, core::ptr::null(), 0).unwrap();
@@ -3321,8 +3323,8 @@ pub mod tests_cryp {
 
     #[unittest::def_test(user)]
     fn test_cryp_authenc_requires_ae_state() {
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ptr());
         assert!(result.is_ok());
         let obj_id = obj_id.read();
 
@@ -3347,8 +3349,8 @@ pub mod tests_cryp {
     }
 
     fn des3_ecb_encrypt_test_setup(key: &[u8]) -> TeeResult<u32> {
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        syscall_cryp_obj_alloc(TEE_TYPE_DES3 as _, 192, obj_id.as_user_ref())?;
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_DES3 as _, 192, obj_id.as_user_ptr())?;
         let obj_id = obj_id.read();
 
         let obj_arc = tee_obj_get(obj_id as TeeObjIdType)?;
@@ -3408,10 +3410,10 @@ pub mod tests_cryp {
     }
 
     fn aes_xts_test_setup_keys(key1: &[u8], key2: &[u8]) -> (TeeObjIdType, TeeObjIdType) {
-        let mut obj1_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let mut obj2_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj1_id.as_user_ref()).unwrap();
-        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj2_id.as_user_ref()).unwrap();
+        let obj1_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let obj2_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj1_id.as_user_ptr()).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj2_id.as_user_ptr()).unwrap();
         let obj1_id = obj1_id.read() as TeeObjIdType;
         let obj2_id = obj2_id.read() as TeeObjIdType;
 
@@ -3802,14 +3804,14 @@ pub mod tests_cryp {
     fn test_cryp_aes_ccm_encrypt_decrypt() {
         let mut enc_state: u32 = 0;
         let mut dec_state: u32 = 0;
-        let mut enc_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let mut dec_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let enc_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let dec_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
 
-        let result = syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, enc_obj_id.as_user_ref());
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, enc_obj_id.as_user_ptr());
         assert!(result.is_ok());
         let enc_obj_id = enc_obj_id.read();
 
-        let result = syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, dec_obj_id.as_user_ref());
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, dec_obj_id.as_user_ptr());
         assert!(result.is_ok());
         let dec_obj_id = dec_obj_id.read();
 
@@ -3924,8 +3926,8 @@ pub mod tests_cryp {
     #[unittest::def_test(user)]
     fn test_cryp_sm4_gcm_decrypt() {
         let mut state: u32 = 0;
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ptr());
         assert!(result.is_ok());
         let obj_id = obj_id.read();
 
@@ -4015,8 +4017,8 @@ pub mod tests_cryp {
     #[unittest::def_test(user)]
     fn test_cryp_sm2_sign_verify() {
         // alloc sm2 key pair
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let res = syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_KEYPAIR as _, 256, obj_id.as_user_ref());
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_KEYPAIR as _, 256, obj_id.as_user_ptr());
         assert!(res.is_ok());
         let obj_id = obj_id.read();
         // sm2 no need usr_params
@@ -4034,11 +4036,11 @@ pub mod tests_cryp {
         assert!(matches!(obj.attr[0], TeeCryptObj::EccKeypair(_)));
         drop(obj);
 
-        let mut obj_id_pub = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let obj_id_pub = TestUserValue::<c_uint>::from_value(0).unwrap();
         let res = syscall_cryp_obj_alloc(
             TEE_TYPE_SM2_DSA_PUBLIC_KEY as _,
             256,
-            obj_id_pub.as_user_ref(),
+            obj_id_pub.as_user_ptr(),
         );
         assert!(res.is_ok());
         let obj_id_pub = obj_id_pub.read();
@@ -4080,9 +4082,9 @@ pub mod tests_cryp {
     #[unittest::def_test(user)]
     fn test_cryp_sm2_verify_with_pub_key() {
         // alloc sm2 key pair
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let res =
-            syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_PUBLIC_KEY as _, 256, obj_id.as_user_ref());
+            syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_PUBLIC_KEY as _, 256, obj_id.as_user_ptr());
         assert!(res.is_ok());
         let obj_id = obj_id.read();
 
@@ -4151,9 +4153,9 @@ pub mod tests_cryp {
     /// `syscall_cryp_obj_populate` 写入（对齐 TA：`TEE_InitRefAttribute` + `TEE_PopulateTransientObject`）。
     #[unittest::def_test(user)]
     fn test_cryp_sm2_verify_with_pub_key_via_init_ref_attr() {
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let res =
-            syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_PUBLIC_KEY as _, 256, obj_id.as_user_ref());
+            syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_PUBLIC_KEY as _, 256, obj_id.as_user_ptr());
         assert!(res.is_ok());
         let obj_id = obj_id.read();
 
@@ -4174,26 +4176,32 @@ pub mod tests_cryp {
 
         let mut usr_x = crate::user_vec![0u8; 32];
         let mut usr_y = crate::user_vec![0u8; 32];
-        usr_x.copy_from_slice(&pubkey[..32]);
-        usr_y.copy_from_slice(&pubkey[32..]);
+        let mut usr_x_data = [0u8; 32];
+        let mut usr_y_data = [0u8; 32];
+        usr_x_data.copy_from_slice(&pubkey[..32]);
+        usr_y_data.copy_from_slice(&pubkey[32..]);
+        usr_x.write(usr_x_data);
+        usr_y.write(usr_y_data);
 
         let mut usr_attrs = crate::user_vec![utee_attribute::default(); 2];
+        let mut usr_attrs_data = [utee_attribute::default(); 2];
         tee_init_ref_attribute(
-            &mut usr_attrs[0],
+            &mut usr_attrs_data[0],
             TEE_ATTR_ECC_PUBLIC_VALUE_X,
-            &usr_x[..],
+            usr_x.as_user_ptr(),
             32,
         );
         tee_init_ref_attribute(
-            &mut usr_attrs[1],
+            &mut usr_attrs_data[1],
             TEE_ATTR_ECC_PUBLIC_VALUE_Y,
-            &usr_y[..],
+            usr_y.as_user_ptr(),
             32,
         );
+        usr_attrs.write(usr_attrs_data);
 
         let res = syscall_cryp_obj_populate(
             obj_id as c_ulong,
-            usr_attrs.as_mut_ptr(),
+            usr_attrs.as_user_ptr(),
             usr_attrs.len() as c_ulong,
         );
         assert!(res.is_ok(), "populate: {:x?}", res);
@@ -4221,8 +4229,8 @@ pub mod tests_cryp {
     #[unittest::def_test(user)]
     fn test_cryp_sm2_enc_dec() {
         // alloc sm2 key pair
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let res = syscall_cryp_obj_alloc(TEE_TYPE_SM2_PKE_KEYPAIR as _, 256, obj_id.as_user_ref());
+        let obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_SM2_PKE_KEYPAIR as _, 256, obj_id.as_user_ptr());
         assert!(res.is_ok());
         let obj_id = obj_id.read();
         // sm2 no need usr_params
@@ -4240,11 +4248,11 @@ pub mod tests_cryp {
         assert!(matches!(obj.attr[0], TeeCryptObj::EccKeypair(_)));
         drop(obj);
 
-        let mut obj_id_pub = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let obj_id_pub = TestUserValue::<c_uint>::from_value(0).unwrap();
         let res = syscall_cryp_obj_alloc(
             TEE_TYPE_SM2_PKE_PUBLIC_KEY as _,
             256,
-            obj_id_pub.as_user_ref(),
+            obj_id_pub.as_user_ptr(),
         );
         assert!(res.is_ok());
         let obj_id_pub = obj_id_pub.read();
@@ -4406,8 +4414,8 @@ pub mod tests_cryp {
     fn install_rsa_test_der_key_objects() -> (u32, u32) {
         let res = TestUserValue::<c_uint>::from_value(0);
         ::core::assert!(res.is_ok());
-        let mut kp_obj = res.unwrap();
-        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_KEYPAIR as _, 2048, kp_obj.as_user_ref());
+        let kp_obj = res.unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_KEYPAIR as _, 2048, kp_obj.as_user_ptr());
         ::core::assert!(res.is_ok());
         let kp_id = kp_obj.read();
 
@@ -4424,8 +4432,8 @@ pub mod tests_cryp {
 
         let res = TestUserValue::<c_uint>::from_value(0);
         ::core::assert!(res.is_ok());
-        let mut pub_obj = res.unwrap();
-        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_PUBLIC_KEY as _, 2048, pub_obj.as_user_ref());
+        let pub_obj = res.unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_PUBLIC_KEY as _, 2048, pub_obj.as_user_ptr());
         ::core::assert!(res.is_ok());
         let pub_id = pub_obj.read();
         let res = syscall_cryp_obj_copy(pub_id as _, kp_id as _);
@@ -4480,8 +4488,8 @@ pub mod tests_cryp {
     fn test_cryp_rsa_pkcs1_v15_encrypt_decrypt_random_key() {
         let kp_obj = TestUserValue::<c_uint>::from_value(0);
         assert!(kp_obj.is_ok());
-        let mut kp_obj = kp_obj.unwrap();
-        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_KEYPAIR as _, 2048, kp_obj.as_user_ref());
+        let kp_obj = kp_obj.unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_KEYPAIR as _, 2048, kp_obj.as_user_ptr());
         assert!(res.is_ok());
         let kp_id = kp_obj.read();
 
@@ -4499,8 +4507,8 @@ pub mod tests_cryp {
 
         let pub_obj = TestUserValue::<c_uint>::from_value(0);
         assert!(pub_obj.is_ok());
-        let mut pub_obj = pub_obj.unwrap();
-        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_PUBLIC_KEY as _, 2048, pub_obj.as_user_ref());
+        let pub_obj = pub_obj.unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_PUBLIC_KEY as _, 2048, pub_obj.as_user_ptr());
         assert!(res.is_ok());
         let pub_id = pub_obj.read();
 
@@ -4546,8 +4554,8 @@ pub mod tests_cryp {
     fn test_cryp_rsa_oaep_sha256_encrypt_decrypt_random_key_with_label() {
         let kp_obj = TestUserValue::<c_uint>::from_value(0);
         assert!(kp_obj.is_ok());
-        let mut kp_obj = kp_obj.unwrap();
-        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_KEYPAIR as _, 2048, kp_obj.as_user_ref());
+        let kp_obj = kp_obj.unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_KEYPAIR as _, 2048, kp_obj.as_user_ptr());
         assert!(res.is_ok());
         let kp_id = kp_obj.read();
 
@@ -4565,8 +4573,8 @@ pub mod tests_cryp {
 
         let pub_obj = TestUserValue::<c_uint>::from_value(0);
         assert!(pub_obj.is_ok());
-        let mut pub_obj = pub_obj.unwrap();
-        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_PUBLIC_KEY as _, 2048, pub_obj.as_user_ref());
+        let pub_obj = pub_obj.unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_PUBLIC_KEY as _, 2048, pub_obj.as_user_ptr());
         assert!(res.is_ok());
         let pub_id = pub_obj.read();
 
@@ -4621,8 +4629,8 @@ pub mod tests_cryp {
     fn test_cryp_rsa_pss_sha256_sign_verify_random_key() {
         let kp_obj = TestUserValue::<c_uint>::from_value(0);
         assert!(kp_obj.is_ok());
-        let mut kp_obj = kp_obj.unwrap();
-        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_KEYPAIR as _, 2048, kp_obj.as_user_ref());
+        let kp_obj = kp_obj.unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_KEYPAIR as _, 2048, kp_obj.as_user_ptr());
         assert!(res.is_ok());
         let kp_id = kp_obj.read();
 
@@ -4639,8 +4647,8 @@ pub mod tests_cryp {
 
         let pub_obj = TestUserValue::<c_uint>::from_value(0);
         assert!(pub_obj.is_ok());
-        let mut pub_obj = pub_obj.unwrap();
-        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_PUBLIC_KEY as _, 2048, pub_obj.as_user_ref());
+        let pub_obj = pub_obj.unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_PUBLIC_KEY as _, 2048, pub_obj.as_user_ptr());
         assert!(res.is_ok());
         let pub_id = pub_obj.read();
 
@@ -4760,9 +4768,9 @@ pub mod tests_cryp {
 
         let pub_obj = TestUserValue::<c_uint>::from_value(0);
         assert!(pub_obj.is_ok());
-        let mut pub_obj = pub_obj.unwrap();
+        let pub_obj = pub_obj.unwrap();
         let res =
-            syscall_cryp_obj_alloc(TEE_TYPE_ED25519_PUBLIC_KEY as _, 256, pub_obj.as_user_ref());
+            syscall_cryp_obj_alloc(TEE_TYPE_ED25519_PUBLIC_KEY as _, 256, pub_obj.as_user_ptr());
         assert!(res.is_ok());
         let pub_id = pub_obj.read();
 
