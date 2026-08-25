@@ -10,14 +10,14 @@ use crate::{
     disk::superblock,
     jbd2::JournalCredits,
     journal::RecoveryFlagPolicy,
-    superblock::{metadata_access_bytes, replace_metadata_access_bytes},
+    superblock::{lock, metadata_access_bytes, replace_metadata_access_bytes},
 };
 
 const ORPHAN_HEAD_UPDATE_CREDITS: JournalCredits = JournalCredits::new(1);
 
 impl Ext4SbInfo {
     pub(crate) fn orphan_head(&self) -> Option<InodeNumber> {
-        match self.superblock().last_orphan() {
+        match lock(&self.allocator).last_orphan {
             0 => None,
             head => Some(InodeNumber::new(head)),
         }
@@ -203,7 +203,7 @@ impl Ext4SbInfo {
             .ok_or(Ext4Error::OutOfBounds)?;
         let updated = superblock::set_last_orphan(superblock_bytes, head)?;
         replace_metadata_access_bytes(&access, block_bytes)?;
-        self.superblock = updated;
+        lock(&self.allocator).last_orphan = updated.last_orphan();
         Ok(())
     }
 

@@ -1459,7 +1459,7 @@ impl Ext4SbInfo {
             .required_blocks
             .checked_add(additional_blocks)
             .ok_or(Ext4Error::Overflow)?;
-        if required > self.superblock().free_blocks_count() {
+        if required > self.free_blocks_count() {
             return Err(Ext4Error::NoSpace);
         }
         Ok(plan)

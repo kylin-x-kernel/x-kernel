@@ -15,7 +15,7 @@ use crate::{
     bitmap_allocator::{BlockAllocation, BlockRunAllocation},
     error::{CorruptKind, Ext4Error, Ext4Result},
     jbd2::JournalHandle,
-    superblock::{Ext4SbInfo, is_ext4_bitmap_bit_set},
+    superblock::{AllocatorState, Ext4SbInfo, is_ext4_bitmap_bit_set, lock},
     types::{BlockCount, BlockGroupNumber, FilesystemBlock, LogicalBlock, PhysicalBlock},
 };
 
@@ -443,49 +443,75 @@ fn order_bucket_floor(blocks: u32) -> Ext4Result<usize> {
 }
 
 impl Ext4SbInfo {
-    pub(crate) fn reset_block_allocation_caches(&mut self) {
-        self.block_free_extent_caches = vec![None; self.groups.len()];
+    pub(crate) fn reset_block_allocation_caches(&self) {
+        reset_block_allocation_caches_inner(&mut lock(&self.allocator));
     }
+}
 
-    pub(crate) fn ensure_block_group_free_cache(
-        &mut self,
-        group: BlockGroupNumber,
-        range: crate::bitmap_allocator::BlockGroupRange,
-        bitmap: &[u8],
-    ) -> Ext4Result<&mut BlockGroupFreeExtentCache> {
-        let group_index = usize::try_from(group.get()).map_err(|_| Ext4Error::Overflow)?;
-        if self
-            .block_free_extent_caches
+pub(crate) fn reset_block_allocation_caches_inner(alloc: &mut AllocatorState) {
+    alloc.block_free_extent_caches = vec![None; alloc.groups.len()];
+}
+
+/// Allocation-goal input for [`ensure_block_group_free_cache_inner`].
+pub(crate) struct FreeCacheGoalRequest {
+    pub(crate) goal: Option<FilesystemBlock>,
+    pub(crate) min_len: BlockCount,
+    pub(crate) expected_len: BlockCount,
+}
+
+/// Ensures the per-group free-extent cache exists, building it from `bitmap`
+/// on first use. When `goal_request` is present, returns the allocation goal
+/// the cache suggests for that request.
+///
+/// Callers must hold the allocator lock and must not invoke other
+/// `Ext4SbInfo` methods that re-lock it while this runs.
+pub(crate) fn ensure_block_group_free_cache_inner(
+    alloc: &mut AllocatorState,
+    group: BlockGroupNumber,
+    range: crate::bitmap_allocator::BlockGroupRange,
+    bitmap: &[u8],
+    goal_request: Option<FreeCacheGoalRequest>,
+    is_system_zone_block: impl Fn(FilesystemBlock) -> bool,
+) -> Ext4Result<Option<FilesystemBlock>> {
+    let group_index = usize::try_from(group.get()).map_err(|_| Ext4Error::Overflow)?;
+    if alloc
+        .block_free_extent_caches
+        .get(group_index)
+        .ok_or(Ext4Error::OutOfBounds)?
+        .is_none()
+    {
+        let cache = BlockGroupFreeExtentCache::from_bitmap(range, bitmap, is_system_zone_block)?;
+        let descriptor = alloc
+            .groups
             .get(group_index)
-            .ok_or(Ext4Error::OutOfBounds)?
-            .is_none()
+            .ok_or(Ext4Error::OutOfBounds)?;
+        if !descriptor.has_uninit_block_bitmap()
+            && cache.free_blocks() != descriptor.free_blocks_count()
         {
-            let cache = BlockGroupFreeExtentCache::from_bitmap(range, bitmap, |block| {
-                self.is_system_zone_block(block)
-            })?;
-            let descriptor = self.groups.get(group_index).ok_or(Ext4Error::OutOfBounds)?;
-            if !descriptor.has_uninit_block_bitmap()
-                && cache.free_blocks() != descriptor.free_blocks_count()
-            {
-                return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap));
-            }
-            *self
-                .block_free_extent_caches
-                .get_mut(group_index)
-                .ok_or(Ext4Error::OutOfBounds)? = Some(cache);
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap));
         }
-        self.block_free_extent_caches
-            .get_mut(group_index)
-            .and_then(Option::as_mut)
-            .ok_or(Ext4Error::OutOfBounds)
+        alloc.block_free_extent_caches[group_index] = Some(cache);
     }
+    let cache = alloc
+        .block_free_extent_caches
+        .get_mut(group_index)
+        .and_then(Option::as_mut)
+        .ok_or(Ext4Error::OutOfBounds)?;
+    match goal_request {
+        Some(request) => {
+            cache.suggest_goal(range, request.goal, request.min_len, request.expected_len)
+        }
+        None => Ok(None),
+    }
+}
 
+impl Ext4SbInfo {
     pub(crate) fn allocate_blocks_for_write(
-        &mut self,
+        &self,
         request: Ext4AllocationRequest,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<Ext4AllocatedRun> {
-        if self.superblock.free_blocks_count() == 0 {
+        if self.free_blocks_count() == 0 {
             return Err(Ext4Error::NoSpace);
         }
         let start = match request.goal {
@@ -498,16 +524,33 @@ impl Ext4SbInfo {
         } else {
             request.expected_len
         };
+        // The mount-wide free total does not vary per group; cache it once
+        // instead of taking the allocator lock again for every scanned
+        // group. It only caps the requested `expected_len`, and the actual
+        // allocation re-validates free space inside its own critical
+        // section, so a stale snapshot is harmless.
+        let mount_free_blocks = self.free_blocks_count().min(u64::from(u32::MAX)) as u32;
 
         for group in self.group_scan_order(start)? {
             let group_index = usize::try_from(group.get()).map_err(|_| Ext4Error::Overflow)?;
-            let descriptor = self.groups.get(group_index).ok_or(Ext4Error::OutOfBounds)?;
-            if descriptor.free_blocks_count() == 0 && !descriptor.has_uninit_block_bitmap() {
+            // Peek this group's cheap hint under a short lock, then attempt
+            // the allocation in its own critical section: the allocator lock
+            // is not reentrant, so the scan cannot hold it across the entry.
+            let (free_blocks, uninit_block_bitmap) = {
+                let alloc = lock(&self.allocator);
+                let descriptor = alloc
+                    .groups
+                    .get(group_index)
+                    .ok_or(Ext4Error::OutOfBounds)?;
+                (
+                    descriptor.free_blocks_count(),
+                    descriptor.has_uninit_block_bitmap(),
+                )
+            };
+            if free_blocks == 0 && !uninit_block_bitmap {
                 continue;
             }
-            if !descriptor.has_uninit_block_bitmap()
-                && descriptor.free_blocks_count() < min_len.get()
-            {
+            if !uninit_block_bitmap && free_blocks < min_len.get() {
                 continue;
             }
             let range = self.block_group_range(group)?;
@@ -518,7 +561,7 @@ impl Ext4SbInfo {
                 .expected_len
                 .get()
                 .min(range.block_count())
-                .min(self.superblock.free_blocks_count().min(u64::from(u32::MAX)) as u32);
+                .min(mount_free_blocks);
             if expected_len < min_len.get() {
                 continue;
             }

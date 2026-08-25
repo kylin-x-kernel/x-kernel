@@ -550,7 +550,7 @@ impl Ext4SbInfo {
             logical = logical.checked_add(covered).ok_or(Ext4Error::Overflow)?;
         }
 
-        let free_blocks = self.superblock().free_blocks_count();
+        let free_blocks = self.free_blocks_count();
         let required = required_data_blocks
             .checked_add(required_metadata_blocks)
             .ok_or(Ext4Error::Overflow)?;

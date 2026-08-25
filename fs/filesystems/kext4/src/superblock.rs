@@ -4,8 +4,12 @@
 
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::num::NonZeroU32;
+#[cfg(not(target_os = "none"))]
+use std::sync::{Mutex, MutexGuard};
 
 use block::BlockDeviceOperations;
+#[cfg(target_os = "none")]
+use ksync::{Mutex, MutexGuard};
 use ktime_types::TimestampLimits;
 
 use crate::{
@@ -13,7 +17,7 @@ use crate::{
     buffer::{Ext4MetadataIo, MetadataBuffer, MetadataWriteAccess},
     dirhash::DX_HASH_UNSIGNED_OFFSET,
     disk::{
-        BlockGroupDescriptor, Superblock, checksum,
+        BlockGroupDescriptor, GroupGeometry, GroupMutableState, Superblock, checksum,
         dir::DX_HASH_SIPHASH,
         features, superblock,
         superblock::{EXT2_FLAGS_SIGNED_HASH, EXT2_FLAGS_UNSIGNED_HASH},
@@ -28,7 +32,6 @@ use crate::{
     },
     journal::MountedJournal,
     mballoc::BlockGroupFreeExtentCache,
-    sync::{self, Mutex},
     types::{BlockGroupNumber, FilesystemBlock, InodeNumber, LogicalBlock},
 };
 
@@ -369,12 +372,113 @@ impl InternalJournal {
     }
 }
 
+#[cfg(target_os = "none")]
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock()
+}
+
+#[cfg(not(target_os = "none"))]
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Mutable block/inode accounting state guarded by the allocator lock.
+///
+/// Linux keeps this state in `ext4_sb_info` under per-group spinlocks and
+/// percpu counters; KExt4 currently concentrates it in one sleepable mutex.
+/// Balloc/ialloc entries hold the lock across their whole read-modify-write
+/// (snapshot, bitmap edits, journal slots, in-memory publish) so concurrent
+/// callers cannot double-allocate or lose counter updates. The multi-group
+/// scan entries (`allocate_blocks_for_write`, `allocate_inode_with_name`)
+/// are not single critical sections: the scan peeks each group's hint under
+/// a short lock, then re-acquires the lock inside each `*_in_group` attempt.
+/// The mount-wide delayed-allocation total is deliberately kept out of this
+/// lock: it lives behind the separate
+/// [`Ext4SbInfo::delalloc_reserved_blocks`] mutex, so reserve/release only
+/// serialize against other delalloc mutations, not against block-group
+/// allocation (Linux `s_dirtyclusters_counter` analog, updated by atomic
+/// percpu counters there; a dedicated mutex is KExt4's smaller-footprint
+/// equivalent). Admission checks additionally read this lock's free-block
+/// aggregate; the read order is fixed to this lock first, then the delalloc
+/// mutex, and no path takes them the other way around.
+/// Holders may call into `metadata_io` and the journal while holding the
+/// lock, but must never re-enter anything that takes it again: public
+/// allocator entries as well as the lock-taking accessors (`groups()`,
+/// `free_blocks_count()`, `free_inodes_count()`, `needs_recovery()`) — use
+/// the in-guard fields, the frozen `group_geometry` table, or the
+/// `*_in_group` lock-free variants instead (the lock is not recursive).
+/// Entries pre-warm the metadata cache
+/// ([`Ext4SbInfo::prefetch_metadata_blocks`])
+/// before taking this lock so cold-cache device reads run outside the
+/// critical section; only the inode-table block whose address depends on
+/// the allocation decision is still read in-lock.
+/// Live counters and flags travel here. Feature bits and primary-superblock
+/// geometry stay in the frozen [`Ext4SbInfo::superblock`] mirror, and
+/// per-group addresses (block/inode bitmap, inode-table start) in the frozen
+/// [`Ext4SbInfo::group_geometry`] table, so lock-free readers never see
+/// allocator churn and never lock just to read static geometry (matching
+/// Linux `ext4_get_group_desc(..., NULL)`). The `groups` Vec keeps only the
+/// mutable per-group descriptor fields ([`GroupMutableState`]) for the
+/// allocator read-modify-write; address fields are deliberately absent, so
+/// the frozen geometry table is the single read source for addresses and
+/// [`Ext4SbInfo::reload_mutable_metadata_state`] rejects replayed
+/// descriptors whose addresses changed instead of splitting the two states.
+pub(crate) struct AllocatorState {
+    pub(crate) free_blocks_count: u64,
+    pub(crate) free_inodes_count: u32,
+    /// Mount-wide directory-inode total (Linux `s_dirs_counter` analog).
+    ///
+    /// Initialized at mount from a one-time fold over the decoded group
+    /// descriptors and then updated at the same sites as the per-group
+    /// `bg_used_dirs_count`, so it stays exact under the single allocator
+    /// mutex (where Linux's percpu counter is an approximation).
+    /// `inode_allocation_totals` reads it in constant time instead of
+    /// folding every group under this lock.
+    pub(crate) used_directories_count: u32,
+    pub(crate) last_orphan: u32,
+    pub(crate) needs_recovery: bool,
+    pub(crate) groups: Vec<GroupMutableState>,
+    pub(crate) block_free_extent_caches: Vec<Option<BlockGroupFreeExtentCache>>,
+}
+
 /// A validated ext4 filesystem mount core.
 ///
 /// KVFS owns resident inode identity. This object owns ext4 superblock state,
 /// including the mount-wide delayed-allocation reservation aggregate.
 pub(crate) struct Ext4SbInfo {
+    pub(crate) allocator: Mutex<AllocatorState>,
+    /// Mount-wide delayed-allocation reservation total.
+    ///
+    /// A dedicated lock keeps the reserve/release/truncate/eviction paths
+    /// from serializing against block-group allocation on the allocator
+    /// mutex, mirroring Linux where `s_dirtyclusters_counter` is an atomic
+    /// per-CPU counter updated outside the group locks. Admission checks
+    /// additionally read the allocator's free-block aggregate; the read
+    /// order is fixed to allocator lock first, then this lock.
     pub(crate) delalloc_reserved_blocks: Mutex<u64>,
+    /// Mount-time mirror of the decoded primary superblock.
+    ///
+    /// Geometry and feature bits never change after mount; live free-block
+    /// and free-inode counters, the orphan-list head, and the recovery flag
+    /// live in [`AllocatorState`] and are read through dedicated accessors.
+    pub(crate) superblock: Superblock,
+    /// Per-group geometry (block/inode bitmap and inode-table addresses)
+    /// frozen at mount.
+    ///
+    /// This table is the mount's single read source for these addresses;
+    /// [`AllocatorState`] carries no address fields. The inode-table hot
+    /// path reads the table without the allocator lock, mirroring Linux
+    /// where `ext4_get_group_desc(..., NULL)` reads the same fields from
+    /// the page-cached descriptor table lock-free. Journal replay may
+    /// rewrite descriptor blocks, so
+    /// [`Self::reload_mutable_metadata_state`] re-validates the replayed
+    /// descriptors and fails closed on any address change instead of
+    /// letting the reloaded mutable state diverge from this table. Live
+    /// counters and flags stay in [`AllocatorState`] under the allocator
+    /// lock.
+    group_geometry: Vec<GroupGeometry>,
     statfs_mode: Ext4StatFsMode,
     /// Maximum byte size supported by legacy indirect-block inodes.
     pub(crate) bitmap_maxbytes: u64,
@@ -384,10 +488,7 @@ pub(crate) struct Ext4SbInfo {
     pub(crate) device: Arc<FilesystemDevice>,
     pub(crate) metadata_io: Ext4MetadataIo,
     pub(crate) journal: Option<Arc<MountedJournal>>,
-    pub(crate) superblock: Superblock,
     pub(crate) layout: FilesystemLayout,
-    pub(crate) groups: Vec<BlockGroupDescriptor>,
-    pub(crate) block_free_extent_caches: Vec<Option<BlockGroupFreeExtentCache>>,
     // Read-only system zones scanned from the on-disk bitmap at mount time.
     // Zones are never removed and the release path rejects every system-zone
     // block unconditionally, matching Linux where a system zone is never
@@ -555,29 +656,48 @@ impl Ext4SbInfo {
             groups.push(descriptor);
         }
 
+        let group_geometry = groups.iter().map(GroupGeometry::from_descriptor).collect();
+        let group_states: Vec<GroupMutableState> = groups
+            .iter()
+            .map(GroupMutableState::from_descriptor)
+            .collect();
+        // Mount-time-only fold seeding the constant-time aggregate, like
+        // Linux `ext4_count_dirs`; the live paths never walk the groups.
+        let used_directories_count = group_states.iter().fold(0u32, |total, state| {
+            total.saturating_add(state.used_directories_count())
+        });
+        let block_free_extent_caches = vec![None; group_states.len()];
         let mut filesystem = Self {
+            allocator: Mutex::new(AllocatorState {
+                free_blocks_count: superblock.on_disk_free_blocks_count(),
+                free_inodes_count: superblock.on_disk_free_inodes_count(),
+                used_directories_count,
+                last_orphan: superblock.last_orphan(),
+                needs_recovery: superblock.features().needs_recovery(),
+                groups: group_states,
+                block_free_extent_caches,
+            }),
             delalloc_reserved_blocks: Mutex::new(0),
+            superblock,
+            group_geometry,
             statfs_mode: Ext4StatFsMode::Bsd,
             bitmap_maxbytes: 0,
             hash_unsigned: 0,
             device: filesystem_device,
             metadata_io,
             journal: None,
-            superblock,
             layout,
-            block_free_extent_caches: vec![None; groups.len()],
-            groups,
             system_zones: Vec::new(),
         };
         filesystem.initialize_directory_hash_policy()?;
         let mut system_zones = filesystem.build_system_zones()?;
         let journal_location = filesystem.journal_location()?;
-        if filesystem.superblock.features().needs_recovery() && !allow_recovery {
+        if filesystem.needs_recovery() && !allow_recovery {
             return Err(Ext4Error::NeedsRecovery);
         }
         if !allow_recovery
             && (filesystem.orphan_head().is_some()
-                || filesystem.superblock.features().has_orphan_present())
+                || filesystem.superblock().features().has_orphan_present())
         {
             return Err(Ext4Error::NeedsRecovery);
         }
@@ -658,8 +778,29 @@ impl Ext4SbInfo {
     }
 
     /// Returns the decoded primary superblock.
+    ///
+    /// The mirror is frozen at mount time: geometry and feature bits never
+    /// change while mounted. Live free-block/free-inode counters, the
+    /// orphan-list head, and the recovery flag move with the allocator;
+    /// use [`Self::free_blocks_count`], [`Self::free_inodes_count`], and
+    /// [`Self::needs_recovery`] instead of the same-named fields here.
     pub const fn superblock(&self) -> &Superblock {
         &self.superblock
+    }
+
+    /// Returns the live free-block aggregate maintained by the allocator.
+    pub fn free_blocks_count(&self) -> u64 {
+        lock(&self.allocator).free_blocks_count
+    }
+
+    /// Returns the live free-inode aggregate maintained by the allocator.
+    pub fn free_inodes_count(&self) -> u32 {
+        lock(&self.allocator).free_inodes_count
+    }
+
+    /// Returns whether the filesystem currently carries the recovery flag.
+    pub fn needs_recovery(&self) -> bool {
+        lock(&self.allocator).needs_recovery
     }
 
     /// Returns the immutable derived layout.
@@ -672,15 +813,33 @@ impl Ext4SbInfo {
         timestamp_limits_for_inode_size(self.superblock.inode_size())
     }
 
-    /// Returns a validated block group descriptor.
-    pub fn group(&self, group: BlockGroupNumber) -> Option<&BlockGroupDescriptor> {
-        self.groups.get(group.get() as usize)
+    /// Returns the frozen geometry of one block group without taking the
+    /// allocator lock.
+    ///
+    /// The block/inode bitmap and inode-table addresses never change after
+    /// mount; Linux reads the same fields from the page-cached group
+    /// descriptor table without any lock (`ext4_get_group_desc(..., NULL)`,
+    /// e.g. `ext4_get_inode_loc`). Use this on the inode-table hot path
+    /// instead of locking the allocator and cloning a whole descriptor just
+    /// to expose one static address.
+    pub(crate) fn group_geometry(&self, group: BlockGroupNumber) -> Option<&GroupGeometry> {
+        self.group_geometry.get(usize::try_from(group.get()).ok()?)
     }
 
-    /// Returns all validated block group descriptors.
+    /// Returns a snapshot of the mutable per-group allocator state.
+    ///
+    /// Takes the allocator lock and clones every group entry, so it is only
+    /// used from tests and is not compiled into the production kernel
+    /// build; production code reads live counters in-guard and frozen
+    /// addresses through [`Self::group_geometry`].
     #[cfg(test)]
-    pub fn groups(&self) -> &[BlockGroupDescriptor] {
-        &self.groups
+    pub(crate) fn groups(&self) -> Vec<GroupMutableState> {
+        lock(&self.allocator).groups.clone()
+    }
+
+    /// Returns the mount-wide delayed-allocation reservation total.
+    pub(crate) fn delalloc_reserved_blocks(&self) -> u64 {
+        *lock(&self.delalloc_reserved_blocks)
     }
 
     /// Returns public status for the internal JBD2 journal, when present.
@@ -734,22 +893,22 @@ impl Ext4SbInfo {
     /// Returns ext4 filesystem statistics using the requested total-block convention.
     ///
     /// The selected mode changes only the `blocks` total. Free and available
-    /// counts retain ext4 reserved-block and delayed-allocation accounting.
+    /// counts retain ext4 reserved-block and delayed-allocation accounting,
+    /// read from the same allocator aggregates that admission and allocation
+    /// mutation maintain rather than folding every block-group descriptor.
     ///
     /// # Errors
     ///
     /// Returns an error when validated filesystem geometry cannot be represented
     /// consistently in the reported block counts.
     pub fn statfs_with_mode(&self, mode: Ext4StatFsMode) -> Ext4Result<Ext4StatFs> {
-        let (free_blocks, free_inodes) =
-            self.groups
-                .iter()
-                .fold((0u64, 0u64), |(blocks, inodes), group| {
-                    (
-                        blocks + u64::from(group.free_blocks_count()),
-                        inodes + u64::from(group.free_inodes_count()),
-                    )
-                });
+        // Read order is fixed to allocator lock first, then the delalloc
+        // mutex; no path takes them in the opposite order.
+        let alloc = lock(&self.allocator);
+        let free_blocks_count = alloc.free_blocks_count;
+        let free_inodes_count = alloc.free_inodes_count;
+        drop(alloc);
+        let delalloc_reserved_blocks = *lock(&self.delalloc_reserved_blocks);
         let overhead = match mode {
             Ext4StatFsMode::Bsd => self.statfs_overhead_blocks()?,
             Ext4StatFsMode::Minix => 0,
@@ -759,40 +918,24 @@ impl Ext4SbInfo {
             .blocks_count()
             .checked_sub(overhead)
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry))?;
-        let delalloc_reserved_blocks = *sync::mutex_lock(&self.delalloc_reserved_blocks);
-        let free_blocks = free_blocks.saturating_sub(delalloc_reserved_blocks);
+        let free_blocks = free_blocks_count.saturating_sub(delalloc_reserved_blocks);
         let blocks_available = free_blocks.saturating_sub(self.superblock.reserved_blocks_count());
 
         Ok(Ext4StatFs {
-            block_size: self.superblock.block_size(),
-            fragment_size: self.superblock.block_size(),
+            block_size: self.superblock().block_size(),
+            fragment_size: self.superblock().block_size(),
             blocks,
             blocks_free: free_blocks,
             blocks_available,
-            files: u64::from(self.superblock.inodes_count()),
-            files_free: free_inodes,
+            files: u64::from(self.superblock().inodes_count()),
+            files_free: u64::from(free_inodes_count),
             max_name_len: crate::disk::dir::DIRENT_NAME_MAX as u32,
         })
     }
 
-    /// Returns the free-block budget available after ext4 and delayed-allocation reservations.
-    ///
-    /// Allocation and release paths update the primary superblock counter in
-    /// the same metadata operation as their group descriptor. Delayed
-    /// allocation admission can therefore use this constant-time aggregate
-    /// instead of folding every block-group descriptor as `statfs()` does.
-    #[cfg(test)]
-    pub fn blocks_available_for_reservation(&self) -> u64 {
-        let delalloc_reserved_blocks = *sync::mutex_lock(&self.delalloc_reserved_blocks);
-        self.superblock
-            .free_blocks_count()
-            .saturating_sub(delalloc_reserved_blocks)
-            .saturating_sub(self.superblock.reserved_blocks_count())
-    }
-
     #[cfg(test)]
     pub(crate) fn delalloc_reserved_block_count(&self) -> u64 {
-        *sync::mutex_lock(&self.delalloc_reserved_blocks)
+        *lock(&self.delalloc_reserved_blocks)
     }
 
     /// Reads complete filesystem blocks without exposing metadata mutation.
@@ -823,6 +966,24 @@ impl Ext4SbInfo {
         self.metadata_io.read_block(block)
     }
 
+    /// Warms the metadata cache for `blocks` before the caller takes the
+    /// allocator lock, so a cold-cache device read runs while other
+    /// allocators can still proceed instead of serializing every one of
+    /// them behind the mutex (Linux reads the bitmap buffer before
+    /// `ext4_lock_group` for the same reason). Cache slots stay resident,
+    /// so the authoritative in-lock re-reads hit memory; an error here
+    /// fails the caller before it ever takes the lock. The prefetched
+    /// bytes are a latency pre-warm only — never an authoritative
+    /// snapshot; safety relies on the `MetadataBlockCache` publish-then-
+    /// read contract (every publish replaces the slot bytes) that makes
+    /// the in-lock re-read observe the latest committed content.
+    pub(crate) fn prefetch_metadata_blocks(&self, blocks: &[FilesystemBlock]) -> Ext4Result<()> {
+        for block in blocks {
+            let _ = self.read_metadata_block(*block)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn reload_mutable_metadata_state(&mut self) -> Ext4Result<()> {
         let (superblock_block, superblock_offset, superblock_len) =
             self.primary_superblock_location()?;
@@ -837,10 +998,38 @@ impl Ext4SbInfo {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry));
         }
         let groups = self.decode_group_descriptors(&superblock, layout)?;
-        self.superblock = superblock;
         self.initialize_directory_hash_policy()?;
-        self.groups = groups;
-        self.reset_block_allocation_caches();
+
+        // The frozen geometry table is the mount's single address source.
+        // No KExt4-supported operation journals address changes, so a
+        // replayed descriptor table with different bitmap or inode-table
+        // addresses is either corruption or an unsupported on-disk feature;
+        // reject it instead of splitting geometry from the reloaded state.
+        //
+        // The layout check above pins group_count, so the decoded table and
+        // the frozen table are the same length; index them directly rather
+        // than zip, which would silently truncate on a mismatch.
+        debug_assert_eq!(groups.len(), self.group_geometry.len());
+        for (group, descriptor) in groups.iter().enumerate() {
+            if GroupGeometry::from_descriptor(descriptor) != self.group_geometry[group] {
+                return Err(Ext4Error::Corrupt(
+                    CorruptKind::GroupDescriptorAddressChanged,
+                ));
+            }
+        }
+        let mut alloc = lock(&self.allocator);
+        alloc.free_blocks_count = superblock.on_disk_free_blocks_count();
+        alloc.free_inodes_count = superblock.on_disk_free_inodes_count();
+        alloc.used_directories_count = groups.iter().fold(0u32, |total, descriptor| {
+            total.saturating_add(descriptor.used_directories_count())
+        });
+        alloc.last_orphan = superblock.last_orphan();
+        alloc.needs_recovery = superblock.features().needs_recovery();
+        alloc.groups = groups
+            .iter()
+            .map(GroupMutableState::from_descriptor)
+            .collect();
+        crate::mballoc::reset_block_allocation_caches_inner(&mut alloc);
         Ok(())
     }
 
@@ -916,8 +1105,8 @@ impl Ext4SbInfo {
         count: u64,
     ) -> bool {
         is_inode_physical_block_valid(
-            self.superblock.first_data_block(),
-            self.superblock.blocks_count(),
+            self.superblock().first_data_block(),
+            self.superblock().blocks_count(),
             &self.system_zones,
             inode,
             block,
@@ -942,13 +1131,13 @@ impl Ext4SbInfo {
             }
 
             let (block_bitmap, inode_bitmap, inode_table) = {
-                let descriptor = self
-                    .group(BlockGroupNumber::new(group))
+                let geometry = self
+                    .group_geometry(BlockGroupNumber::new(group))
                     .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry))?;
                 (
-                    descriptor.block_bitmap(),
-                    descriptor.inode_bitmap(),
-                    descriptor.inode_table(),
+                    geometry.block_bitmap(),
+                    geometry.inode_bitmap(),
+                    geometry.inode_table(),
                 )
             };
             add_system_zone_to(&mut zones, block_bitmap, 1, None, block_count)?;
@@ -966,8 +1155,8 @@ impl Ext4SbInfo {
     }
 
     fn journal_location(&self) -> Ext4Result<JournalLocation> {
-        let has_journal = self.superblock.features().has_journal();
-        let fields = self.superblock.journal();
+        let has_journal = self.superblock().features().has_journal();
+        let fields = self.superblock().journal();
         select_journal_location(has_journal, fields.inode(), fields.device(), fields.uuid())
     }
 
@@ -1008,7 +1197,7 @@ impl Ext4SbInfo {
                 .as_ref(),
             self.layout.block_size,
             journal_blocks,
-            self.superblock.uuid(),
+            self.superblock().uuid(),
         )?;
         let block_count = superblock.max_blocks();
         let journal = InternalJournal {
@@ -1029,7 +1218,9 @@ impl Ext4SbInfo {
         }
         u64::from(1u32)
             .checked_add(u64::from(self.layout.descriptor_table_blocks))
-            .and_then(|blocks| blocks.checked_add(u64::from(self.superblock.reserved_gdt_blocks())))
+            .and_then(|blocks| {
+                blocks.checked_add(u64::from(self.superblock().reserved_gdt_blocks()))
+            })
             .ok_or(Ext4Error::Overflow)
     }
 
@@ -1037,9 +1228,9 @@ impl Ext4SbInfo {
         if group == 0 {
             return Ok(true);
         }
-        let features = self.superblock.features();
+        let features = self.superblock().features();
         if features.has_sparse_super2() {
-            return Ok(self.superblock.backup_groups().contains(&group));
+            return Ok(self.superblock().backup_groups().contains(&group));
         }
         if group <= 1 || !features.has_sparse_super() {
             return Ok(true);
@@ -1052,8 +1243,8 @@ impl Ext4SbInfo {
 
     fn group_first_block(&self, group: u32) -> Ext4Result<u64> {
         u64::from(group)
-            .checked_mul(u64::from(self.superblock.blocks_per_group()))
-            .and_then(|offset| offset.checked_add(u64::from(self.superblock.first_data_block())))
+            .checked_mul(u64::from(self.superblock().blocks_per_group()))
+            .and_then(|offset| offset.checked_add(u64::from(self.superblock().first_data_block())))
             .ok_or(Ext4Error::Overflow)
     }
 
@@ -1063,9 +1254,9 @@ impl Ext4SbInfo {
         }
         let first = self.group_first_block(group.get())?;
         let end = first
-            .checked_add(u64::from(self.superblock.blocks_per_group()))
+            .checked_add(u64::from(self.superblock().blocks_per_group()))
             .ok_or(Ext4Error::Overflow)?
-            .min(self.superblock.blocks_count());
+            .min(self.superblock().blocks_count());
         let block_count = u32::try_from(end.checked_sub(first).ok_or(Ext4Error::Overflow)?)
             .map_err(|_| Ext4Error::Overflow)?;
         BlockGroupRange::new(group, FilesystemBlock::new(first), block_count)
@@ -1073,14 +1264,14 @@ impl Ext4SbInfo {
 
     pub(crate) fn block_bitmap_checksum_bytes(&self) -> Ext4Result<usize> {
         bitmap_checksum_bytes(
-            self.superblock.clusters_per_group(),
+            self.superblock().clusters_per_group(),
             CorruptKind::InvalidBlockGroupGeometry,
         )
     }
 
     pub(crate) fn inode_bitmap_checksum_bytes(&self) -> Ext4Result<usize> {
         bitmap_checksum_bytes(
-            self.superblock.inodes_per_group(),
+            self.superblock().inodes_per_group(),
             CorruptKind::InvalidInodeGeometry,
         )
     }
@@ -1089,11 +1280,11 @@ impl Ext4SbInfo {
         &self,
         block: FilesystemBlock,
     ) -> Ext4Result<BlockGroupNumber> {
-        let first_data = u64::from(self.superblock.first_data_block());
-        if block.get() < first_data || block.get() >= self.superblock.blocks_count() {
+        let first_data = u64::from(self.superblock().first_data_block());
+        if block.get() < first_data || block.get() >= self.superblock().blocks_count() {
             return Err(Ext4Error::OutOfBounds);
         }
-        let group = (block.get() - first_data) / u64::from(self.superblock.blocks_per_group());
+        let group = (block.get() - first_data) / u64::from(self.superblock().blocks_per_group());
         let group = u32::try_from(group).map_err(|_| Ext4Error::Overflow)?;
         if group >= self.layout.group_count {
             return Err(Ext4Error::OutOfBounds);
@@ -1107,8 +1298,8 @@ impl Ext4SbInfo {
     ) -> Ext4Result<BlockGroupNumber> {
         match goal {
             Some(goal)
-                if goal.get() >= u64::from(self.superblock.first_data_block())
-                    && goal.get() < self.superblock.blocks_count() =>
+                if goal.get() >= u64::from(self.superblock().first_data_block())
+                    && goal.get() < self.superblock().blocks_count() =>
             {
                 self.block_group_for_block(goal)
             }
@@ -1122,23 +1313,23 @@ impl Ext4SbInfo {
         }
         let first_inode = group
             .get()
-            .checked_mul(self.superblock.inodes_per_group())
+            .checked_mul(self.superblock().inodes_per_group())
             .and_then(|offset| offset.checked_add(1))
             .ok_or(Ext4Error::Overflow)?;
         let remaining = self
-            .superblock
+            .superblock()
             .inodes_count()
             .checked_sub(first_inode - 1)
             .ok_or(Ext4Error::OutOfBounds)?;
-        let inode_count = self.superblock.inodes_per_group().min(remaining);
+        let inode_count = self.superblock().inodes_per_group().min(remaining);
         InodeGroupRange::new(group, InodeNumber::new(first_inode), inode_count)
     }
 
     pub(crate) fn block_group_for_inode(&self, inode: InodeNumber) -> Ext4Result<BlockGroupNumber> {
-        if inode.get() == 0 || inode.get() > self.superblock.inodes_count() {
+        if inode.get() == 0 || inode.get() > self.superblock().inodes_count() {
             return Err(Ext4Error::OutOfBounds);
         }
-        let group = (inode.get() - 1) / self.superblock.inodes_per_group();
+        let group = (inode.get() - 1) / self.superblock().inodes_per_group();
         if group >= self.layout.group_count {
             return Err(Ext4Error::OutOfBounds);
         }
@@ -1202,7 +1393,7 @@ impl Ext4SbInfo {
             None => BlockGroupNumber::new(0),
         };
 
-        if self.superblock.features().has_flex_bg() {
+        if self.superblock().features().has_flex_bg() {
             if let Some(group) =
                 self.first_data_inode_group_in_flex(self.flex_group_index(start))?
             {
@@ -1228,24 +1419,15 @@ impl Ext4SbInfo {
     }
 
     fn inode_allocation_totals(&self) -> InodeAllocationTotals {
-        self.groups.iter().fold(
-            InodeAllocationTotals {
-                free_inodes: 0,
-                free_blocks: 0,
-                used_directories: 0,
-            },
-            |totals, descriptor| InodeAllocationTotals {
-                free_inodes: totals
-                    .free_inodes
-                    .saturating_add(u64::from(descriptor.free_inodes_count())),
-                free_blocks: totals
-                    .free_blocks
-                    .saturating_add(u64::from(descriptor.free_blocks_count())),
-                used_directories: totals
-                    .used_directories
-                    .saturating_add(u64::from(descriptor.used_directories_count())),
-            },
-        )
+        // Constant-time aggregate reads, like Linux `find_group_orlov`
+        // reading the `s_freeinodes_counter`/`s_freeclusters_counter`/
+        // `s_dirs_counter` percpu counters instead of folding groups.
+        let alloc = lock(&self.allocator);
+        InodeAllocationTotals {
+            free_inodes: u64::from(alloc.free_inodes_count),
+            free_blocks: alloc.free_blocks_count,
+            used_directories: u64::from(alloc.used_directories_count),
+        }
     }
 
     fn is_top_level_directory_parent(&self, parent: Option<InodeNumber>) -> bool {
@@ -1262,7 +1444,7 @@ impl Ext4SbInfo {
 
     fn orlov_child_name_hash(&self, child_name: Option<&[u8]>) -> u32 {
         let Some(name) = child_name.filter(|name| !name.is_empty()) else {
-            return self.superblock.checksum_seed();
+            return self.superblock().checksum_seed();
         };
         self.orlov_hash(name).major()
     }
@@ -1300,11 +1482,11 @@ impl Ext4SbInfo {
         let flex_size = u64::from(self.flex_group_size());
         let flex_count = u64::from(self.flex_group_count());
         let max_dirs = (totals.used_directories / flex_count)
-            .saturating_add(u64::from(self.superblock.inodes_per_group()) * flex_size / 16);
+            .saturating_add(u64::from(self.superblock().inodes_per_group()) * flex_size / 16);
         let min_inodes = avg_free_inodes
-            .saturating_sub(u64::from(self.superblock.inodes_per_group()) * flex_size / 4);
+            .saturating_sub(u64::from(self.superblock().inodes_per_group()) * flex_size / 4);
         let min_blocks = avg_free_blocks
-            .saturating_sub(u64::from(self.superblock.blocks_per_group()) * flex_size / 4);
+            .saturating_sub(u64::from(self.superblock().blocks_per_group()) * flex_size / 4);
 
         for flex in self.flex_scan_order(start_flex) {
             let stats = self.flex_group_stats(flex)?;
@@ -1327,8 +1509,8 @@ impl Ext4SbInfo {
         min_free_inodes: u64,
     ) -> Option<BlockGroupNumber> {
         self.group_scan_order(start).ok()?.find(|group| {
-            self.group_descriptor(*group)
-                .map(|descriptor| u64::from(descriptor.free_inodes_count()) >= min_free_inodes)
+            self.group_mutable_state(*group)
+                .map(|state| u64::from(state.free_inodes_count()) >= min_free_inodes)
                 .unwrap_or(false)
         })
     }
@@ -1345,30 +1527,30 @@ impl Ext4SbInfo {
     fn best_directory_group_in_flex(&self, flex: u32) -> Ext4Result<Option<BlockGroupNumber>> {
         let mut best = None;
         for group in self.flex_group_range(flex) {
-            let descriptor = self.group_descriptor(group)?;
-            if descriptor.free_inodes_count() == 0 || descriptor.free_blocks_count() == 0 {
+            let state = self.group_mutable_state(group)?;
+            if state.free_inodes_count() == 0 || state.free_blocks_count() == 0 {
                 continue;
             }
             best = match best {
-                Some((_, best_used_dirs))
-                    if best_used_dirs <= descriptor.used_directories_count() =>
-                {
+                Some((_, best_used_dirs)) if best_used_dirs <= state.used_directories_count() => {
                     best
                 }
-                _ => Some((group, descriptor.used_directories_count())),
+                _ => Some((group, state.used_directories_count())),
             };
         }
         Ok(best.map(|(group, _)| group))
     }
 
     fn group_has_free_inode_and_block(&self, group: BlockGroupNumber) -> Ext4Result<bool> {
-        let descriptor = self.group_descriptor(group)?;
-        Ok(descriptor.free_inodes_count() > 0 && descriptor.free_blocks_count() > 0)
+        let state = self.group_mutable_state(group)?;
+        Ok(state.free_inodes_count() > 0 && state.free_blocks_count() > 0)
     }
 
-    fn group_descriptor(&self, group: BlockGroupNumber) -> Ext4Result<&BlockGroupDescriptor> {
-        self.groups
+    fn group_mutable_state(&self, group: BlockGroupNumber) -> Ext4Result<GroupMutableState> {
+        lock(&self.allocator)
+            .groups
             .get(usize::try_from(group.get()).map_err(|_| Ext4Error::Overflow)?)
+            .copied()
             .ok_or(Ext4Error::OutOfBounds)
     }
 
@@ -1377,10 +1559,10 @@ impl Ext4SbInfo {
     }
 
     fn flex_group_size(&self) -> u32 {
-        if !self.superblock.features().has_flex_bg() {
+        if !self.superblock().features().has_flex_bg() {
             return 1;
         }
-        let size = 1u32.checked_shl(u32::from(self.superblock.log_groups_per_flex()));
+        let size = 1u32.checked_shl(u32::from(self.superblock().log_groups_per_flex()));
         debug_assert!(
             size.is_some(),
             "validated flex_bg log_groups_per_flex must fit u32 shift"
@@ -1419,16 +1601,16 @@ impl Ext4SbInfo {
             used_directories: 0,
         };
         for group in self.flex_group_range(flex) {
-            let descriptor = self.group_descriptor(group)?;
+            let state = self.group_mutable_state(group)?;
             stats.free_inodes = stats
                 .free_inodes
-                .saturating_add(u64::from(descriptor.free_inodes_count()));
+                .saturating_add(u64::from(state.free_inodes_count()));
             stats.free_blocks = stats
                 .free_blocks
-                .saturating_add(u64::from(descriptor.free_blocks_count()));
+                .saturating_add(u64::from(state.free_blocks_count()));
             stats.used_directories = stats
                 .used_directories
-                .saturating_add(u64::from(descriptor.used_directories_count()));
+                .saturating_add(u64::from(state.used_directories_count()));
         }
         Ok(stats)
     }
@@ -1496,7 +1678,7 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn is_reserved_inode(&self, inode: InodeNumber) -> bool {
-        inode.get() != 0 && inode.get() < self.superblock.first_inode()
+        inode.get() != 0 && inode.get() < self.superblock().first_inode()
     }
 }
 
@@ -1557,7 +1739,7 @@ impl Ext4SbInfo {
                 )
                 .ok_or(Ext4Error::Overflow)
         })?;
-        u64::from(self.superblock.first_data_block())
+        u64::from(self.superblock().first_data_block())
             .checked_add(zones)
             .ok_or(Ext4Error::Overflow)
     }
@@ -2297,9 +2479,11 @@ mod tests {
         filesystem
             .sync_inode(&first, Ext4SyncIntent::FullMetadata)
             .expect("conservatively sync current transaction");
-        // The next metadata mutation refreshes recovery evidence before its
-        // commit. The commit barrier again replaces a trailing inode flush.
-        assert_eq!(device.flush_count(), flushes_before_second_sync + 2);
+        // Allocator accounting no longer replaces the decoded superblock, so
+        // the recovery bit persisted by the first commit is still set and the
+        // second commit skips the redundant evidence write; only the commit
+        // barrier flush remains.
+        assert_eq!(device.flush_count(), flushes_before_second_sync + 1);
 
         assert_eq!(journal.running_transaction().unwrap(), None);
         assert_eq!(filesystem.pending_checkpoint_count(), 2);
@@ -2328,7 +2512,7 @@ mod tests {
         let journal = filesystem
             .metadata_journal()
             .expect("open metadata journal");
-        let free_blocks_before = filesystem.superblock().free_blocks_count();
+        let free_blocks_before = filesystem.free_blocks_count();
         let block_goal =
             FilesystemBlock::new(u64::from(filesystem.superblock().blocks_per_group()) + 10);
 
@@ -2360,11 +2544,8 @@ mod tests {
 
         assert_ne!(first_allocation.block(), second_allocation.block());
         assert_eq!(filesystem.pending_checkpoint_count(), 2);
-        assert_eq!(
-            filesystem.superblock().free_blocks_count(),
-            free_blocks_before - 2
-        );
-        assert!(filesystem.superblock().features().needs_recovery());
+        assert_eq!(filesystem.free_blocks_count(), free_blocks_before - 2);
+        assert!(filesystem.needs_recovery());
         let status = filesystem.journal_status().expect("journal status");
         assert_eq!(status.sequence(), first_transaction.get());
         assert!(status.has_nonzero_log_start());
@@ -2377,7 +2558,7 @@ mod tests {
             .run_checkpoint_worker_for_test()
             .expect("checkpoint first transaction");
         assert_eq!(filesystem.pending_checkpoint_count(), 1);
-        assert!(filesystem.superblock().features().needs_recovery());
+        assert!(filesystem.needs_recovery());
         let on_disk_bytes = device.bytes();
         let on_disk_superblock =
             Superblock::decode(&on_disk_bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
@@ -2396,17 +2577,14 @@ mod tests {
             .sync_filesystem()
             .expect("checkpoint remaining transaction");
         assert_eq!(filesystem.pending_checkpoint_count(), 0);
-        assert!(!filesystem.superblock().features().needs_recovery());
+        assert!(!filesystem.needs_recovery());
         assert!(
             !filesystem
                 .journal_status()
                 .expect("clean journal status")
                 .has_nonzero_log_start()
         );
-        assert_eq!(
-            filesystem.superblock().free_blocks_count(),
-            free_blocks_before - 2
-        );
+        assert_eq!(filesystem.free_blocks_count(), free_blocks_before - 2);
 
         let mut cleanup_handle = journal.begin(JournalCredits::new(8)).unwrap();
         let cleanup_transaction = cleanup_handle.id();
@@ -2424,10 +2602,7 @@ mod tests {
         filesystem
             .sync_filesystem()
             .expect("checkpoint cleanup transaction");
-        assert_eq!(
-            filesystem.superblock().free_blocks_count(),
-            free_blocks_before
-        );
+        assert_eq!(filesystem.free_blocks_count(), free_blocks_before);
         drop(filesystem);
 
         fs::write(&image, device.bytes()).expect("write two-commit journal image");
@@ -2471,6 +2646,77 @@ mod tests {
         assert!(journal.is_aborted());
         assert_eq!(filesystem.sync_filesystem(), Err(Ext4Error::JournalAborted));
         fs::remove_file(image).expect("remove syncfs-pending-checkpoint-failure image");
+    }
+
+    #[test]
+    fn concurrent_allocator_round_trip_keeps_accounting_invariant() {
+        const THREADS: usize = 2;
+        const ROUNDS: usize = 6;
+
+        let (filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let filesystem = Arc::new(filesystem);
+        let allocated = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+
+        let mut threads = Vec::new();
+        for thread_id in 0..THREADS {
+            let filesystem = filesystem.clone();
+            let allocated = allocated.clone();
+            threads.push(std::thread::spawn(move || {
+                // Each thread owns its journal so the concurrent writers get
+                // distinct transaction ids; the buffer cache admits a single
+                // transaction per block slot, so a loser of an interleave
+                // gets ConcurrentMetadataTransaction and retries next round
+                // once the winner checkpoints the slot back to Clean.
+                let journal = JournalTransactions::new(TransactionId::new(
+                    u32::try_from(thread_id).unwrap() + 1,
+                ));
+                for _ in 0..ROUNDS {
+                    let mut handle = journal.begin(JournalCredits::new(16)).unwrap();
+                    let transaction = handle.id();
+                    let result = filesystem
+                        .allocate_inode(
+                            None,
+                            InodeInitialization::regular_file(0o644, 0, 0),
+                            &mut handle,
+                        )
+                        .and_then(|allocation| {
+                            let inode = allocation.inode();
+                            filesystem.release_allocated_inode(
+                                inode,
+                                InodeKind::RegularFile,
+                                &mut handle,
+                            )?;
+                            Ok(inode.get())
+                        });
+                    drop(handle);
+                    match result {
+                        Ok(inode) => allocated.lock().unwrap().push(inode),
+                        Err(Ext4Error::Unsupported(
+                            UnsupportedKind::ConcurrentMetadataTransaction,
+                        )) => {}
+                        Err(error) => panic!("unexpected allocator error: {error:?}"),
+                    }
+                    let commit = journal.force_commit(transaction).unwrap();
+                    filesystem
+                        .metadata_io
+                        .checkpoint_committed(&commit)
+                        .unwrap();
+                    journal.finish_checkpoint_for_test(&commit).unwrap();
+                }
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        // No over-allocation: successfully allocated inodes are unique.
+        let mut inodes = allocated.lock().unwrap().clone();
+        inodes.sort_unstable();
+        inodes.dedup();
+        assert_eq!(inodes.len(), allocated.lock().unwrap().len());
+        // Every allocation was paired with a release, so the free-inode
+        // total returns to its initial value (no lost counter updates).
+        assert_eq!(filesystem.free_inodes_count(), TEST_FREE_INODES);
     }
 
     #[test]
@@ -2554,7 +2800,7 @@ mod tests {
         let inode = filesystem
             .load_inode_private(entry.inode())
             .expect("read truncate inode");
-        let free_before_truncate = filesystem.superblock().free_blocks_count();
+        let free_before_truncate = filesystem.free_blocks_count();
         let new_size = u64::try_from(TEST_BLOCK_SIZE + 23).unwrap();
 
         filesystem
@@ -2564,10 +2810,7 @@ mod tests {
         assert_eq!(inode.size(), new_size);
         assert_eq!(inode.blocks(), 16);
         assert_eq!(filesystem.orphan_head(), None);
-        assert_eq!(
-            filesystem.superblock().free_blocks_count(),
-            free_before_truncate + 1
-        );
+        assert_eq!(filesystem.free_blocks_count(), free_before_truncate + 1);
         let crate::BlockMapping::Mapped { physical, .. } = filesystem
             .map_blocks(&inode, LogicalBlock::new(1))
             .expect("map partial EOF block")
@@ -2776,7 +3019,7 @@ mod tests {
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem = Ext4SbInfo::mount(block_device).expect("mount orphan recovery image");
         let root = filesystem.root_inode().expect("read root inode");
-        let free_inodes_before_create = filesystem.superblock().free_inodes_count();
+        let free_inodes_before_create = filesystem.free_inodes_count();
         let created = filesystem
             .create_regular_file(
                 &root,
@@ -2809,13 +3052,13 @@ mod tests {
         assert_eq!(created.links_count(), 0);
         assert_eq!(filesystem.orphan_head(), Some(created.number()));
         assert!(filesystem.journal_supports_revoke());
-        assert!(!filesystem.superblock().features().needs_recovery());
+        assert!(!filesystem.needs_recovery());
         filesystem
             .sync_filesystem()
             .expect("persist clean journal and legacy orphan");
         assert_eq!(filesystem.pending_checkpoint_count(), 0);
         assert_eq!(filesystem.orphan_head(), Some(created.number()));
-        assert!(!filesystem.superblock().features().needs_recovery());
+        assert!(!filesystem.needs_recovery());
         drop(filesystem);
 
         {
@@ -2851,10 +3094,7 @@ mod tests {
                 .expect("recovered image has an internal journal")
                 .has_nonzero_log_start()
         );
-        assert_eq!(
-            recovered.superblock().free_inodes_count(),
-            free_inodes_before_create
-        );
+        assert_eq!(recovered.free_inodes_count(), free_inodes_before_create);
         assert_eq!(
             recovered
                 .lookup(&recovered.root_inode().unwrap(), "kext4-recovery-orphan")
@@ -2880,7 +3120,7 @@ mod tests {
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem = Ext4SbInfo::mount(block_device).expect("mount orphan recovery image");
         let root = filesystem.root_inode().expect("read root inode");
-        let free_inodes_before_create = filesystem.superblock().free_inodes_count();
+        let free_inodes_before_create = filesystem.free_inodes_count();
         let created = filesystem
             .create_regular_file(
                 &root,
@@ -2905,7 +3145,7 @@ mod tests {
         filesystem
             .sync_filesystem()
             .expect("persist clean journal and legacy orphan");
-        assert!(!filesystem.superblock().features().needs_recovery());
+        assert!(!filesystem.needs_recovery());
         drop(filesystem);
 
         device.fail_flush_at(device.flush_count() + 1);
@@ -2935,17 +3175,14 @@ mod tests {
         let recovered_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let recovered = Ext4SbInfo::mount(recovered_device).expect("mount retried recovery image");
         assert_eq!(recovered.orphan_head(), None);
-        assert!(!recovered.superblock().features().needs_recovery());
+        assert!(!recovered.needs_recovery());
         assert!(
             !recovered
                 .journal_status()
                 .expect("recovered image has an internal journal")
                 .has_nonzero_log_start()
         );
-        assert_eq!(
-            recovered.superblock().free_inodes_count(),
-            free_inodes_before_create
-        );
+        assert_eq!(recovered.free_inodes_count(), free_inodes_before_create);
         assert_eq!(
             recovered
                 .lookup(
@@ -3488,18 +3725,15 @@ mod tests {
             .metadata_journal()
             .expect("journaled test image has an internal journal");
         assert!(filesystem.journal_supports_revoke());
-        let free_blocks_before = filesystem.superblock().free_blocks_count();
-        let free_inodes_before = filesystem.superblock().free_inodes_count();
+        let free_blocks_before = filesystem.free_blocks_count();
+        let free_inodes_before = filesystem.free_inodes_count();
 
         let target = b"/opt/package/lib/libremoved.so.1.0.0-symlink-delete-forget-target-block";
         let symlink = filesystem
             .create_symlink(&root, b"removed-link", target, 0, 0, timestamp)
             .expect("create block-mapped symlink");
         assert_eq!(symlink.kind(), InodeKind::Symlink);
-        assert_eq!(
-            filesystem.superblock().free_blocks_count(),
-            free_blocks_before - 1
-        );
+        assert_eq!(filesystem.free_blocks_count(), free_blocks_before - 1);
 
         filesystem
             .unlink(&root, b"removed-link", &symlink, timestamp)
@@ -3515,14 +3749,8 @@ mod tests {
             None
         );
         assert_eq!(filesystem.orphan_head(), None);
-        assert_eq!(
-            filesystem.superblock().free_blocks_count(),
-            free_blocks_before
-        );
-        assert_eq!(
-            filesystem.superblock().free_inodes_count(),
-            free_inodes_before
-        );
+        assert_eq!(filesystem.free_blocks_count(), free_blocks_before);
+        assert_eq!(filesystem.free_inodes_count(), free_inodes_before);
         assert!(
             !filesystem
                 .metadata_journal()
@@ -3535,10 +3763,7 @@ mod tests {
         let replacement = filesystem
             .create_symlink(&root, b"replacement-link", target, 0, 0, timestamp)
             .expect("recreate symlink on forgotten block");
-        assert_eq!(
-            filesystem.superblock().free_blocks_count(),
-            free_blocks_before - 1
-        );
+        assert_eq!(filesystem.free_blocks_count(), free_blocks_before - 1);
         let mut buffer = vec![0u8; target.len()];
         let read = filesystem
             .read_link_at(&replacement, 0, &mut buffer)
@@ -3659,7 +3884,7 @@ mod tests {
             .metadata_journal()
             .expect("journaled test image has an internal journal");
         assert!(filesystem.journal_supports_revoke());
-        let free_blocks_before = filesystem.superblock().free_blocks_count();
+        let free_blocks_before = filesystem.free_blocks_count();
 
         let mut previous_physical: Option<u64> = None;
         let mut reuse_iterations = 0u32;
@@ -3713,7 +3938,7 @@ mod tests {
             );
             assert_eq!(filesystem.orphan_head(), None);
             assert_eq!(
-                filesystem.superblock().free_blocks_count(),
+                filesystem.free_blocks_count(),
                 free_blocks_before,
                 "iteration {iteration} leaked the symlink target block"
             );
@@ -4031,9 +4256,14 @@ mod tests {
             .allocate_block(Some(block_goal), &mut handle)
             .expect("allocate a block from journaled Linux image");
         let group_index = usize::try_from(allocation.group().get()).unwrap();
-        let expected_super_free = filesystem.superblock().free_blocks_count();
+        let expected_super_free = filesystem.free_blocks_count();
         let expected_group_free = filesystem.groups()[group_index].free_blocks_count();
-        let bitmap_block = FilesystemBlock::new(filesystem.groups()[group_index].block_bitmap());
+        let bitmap_block = FilesystemBlock::new(
+            filesystem
+                .group_geometry(allocation.group())
+                .expect("allocated group has frozen geometry")
+                .block_bitmap(),
+        );
         let bitmap_bit = allocation.bitmap_bit();
         drop(handle);
 
@@ -4058,11 +4288,8 @@ mod tests {
         let recovered_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let recovered =
             Ext4SbInfo::mount(recovered_device).expect("mount recovered allocator image");
-        assert!(!recovered.superblock().features().needs_recovery());
-        assert_eq!(
-            recovered.superblock().free_blocks_count(),
-            expected_super_free
-        );
+        assert!(!recovered.needs_recovery());
+        assert_eq!(recovered.free_blocks_count(), expected_super_free);
         assert_eq!(
             recovered.groups()[group_index].free_blocks_count(),
             expected_group_free
@@ -4448,7 +4675,6 @@ mod tests {
     #[test]
     fn block_allocator_journals_bitmap_group_and_superblock_updates() {
         let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let available_before = filesystem.blocks_available_for_reservation();
         let journal = JournalTransactions::new(TransactionId::new(101));
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
         let transaction = handle.id();
@@ -4460,11 +4686,9 @@ mod tests {
         assert_eq!(allocation.block(), PhysicalBlock::new(6));
         assert_eq!(allocation.bitmap_bit(), 6);
         assert_eq!(filesystem.groups()[0].free_blocks_count(), 25);
-        assert_eq!(filesystem.superblock().free_blocks_count(), 25);
-        assert_eq!(
-            filesystem.blocks_available_for_reservation(),
-            available_before - 1
-        );
+        assert_eq!(filesystem.free_blocks_count(), 25);
+        // Block allocation does not touch the delayed-allocation reserve.
+        assert_eq!(filesystem.delalloc_reserved_block_count(), 0);
         drop(handle);
 
         let commit = journal.force_commit(transaction).unwrap();
@@ -4681,7 +4905,7 @@ mod tests {
         assert_eq!(allocation.requested_len(), BlockCount::new(4));
         assert!(!allocation.is_partial());
         assert_eq!(filesystem.groups()[0].free_blocks_count(), 22);
-        assert_eq!(filesystem.superblock().free_blocks_count(), 22);
+        assert_eq!(filesystem.free_blocks_count(), 22);
         drop(handle);
 
         let commit = journal.force_commit(transaction).unwrap();
@@ -4730,7 +4954,7 @@ mod tests {
         assert_eq!(allocation.requested_len(), BlockCount::new(4));
         assert!(allocation.is_partial());
         assert_eq!(filesystem.groups()[0].free_blocks_count(), 0);
-        assert_eq!(filesystem.superblock().free_blocks_count(), 0);
+        assert_eq!(filesystem.free_blocks_count(), 0);
     }
 
     #[test]
@@ -4805,7 +5029,7 @@ mod tests {
         assert_eq!(released.block(), PhysicalBlock::new(6));
         assert_eq!(released.bitmap_bit(), 6);
         assert_eq!(filesystem.groups()[0].free_blocks_count(), 26);
-        assert_eq!(filesystem.superblock().free_blocks_count(), 26);
+        assert_eq!(filesystem.free_blocks_count(), 26);
         drop(handle);
 
         let commit = journal.force_commit(transaction).unwrap();
@@ -4968,7 +5192,7 @@ mod tests {
             TEST_FREE_BLOCKS - 1
         );
         assert_eq!(
-            filesystem.superblock().free_blocks_count(),
+            filesystem.free_blocks_count(),
             u64::from(TEST_FREE_BLOCKS - 1)
         );
         assert!(matches!(
@@ -5077,10 +5301,7 @@ mod tests {
         );
         assert_eq!(handle.remaining_credits(), 2);
         assert_eq!(filesystem.groups()[0].free_blocks_count(), TEST_FREE_BLOCKS);
-        assert_eq!(
-            filesystem.superblock().free_blocks_count(),
-            u64::from(TEST_FREE_BLOCKS)
-        );
+        assert_eq!(filesystem.free_blocks_count(), u64::from(TEST_FREE_BLOCKS));
     }
 
     #[test]
@@ -5099,10 +5320,7 @@ mod tests {
         );
         assert_eq!(handle.remaining_credits(), 3);
         assert_eq!(filesystem.groups()[0].free_inodes_count(), TEST_FREE_INODES);
-        assert_eq!(
-            filesystem.superblock().free_inodes_count(),
-            TEST_FREE_INODES
-        );
+        assert_eq!(filesystem.free_inodes_count(), TEST_FREE_INODES);
     }
 
     #[test]
@@ -5186,7 +5404,7 @@ mod tests {
         assert_eq!(allocation.block(), PhysicalBlock::new(38));
         assert_eq!(filesystem.groups()[1].free_blocks_count(), 25);
         assert_eq!(filesystem.groups()[1].flags(), 0);
-        assert_eq!(filesystem.superblock().free_blocks_count(), 25);
+        assert_eq!(filesystem.free_blocks_count(), 25);
         drop(handle);
 
         let commit = journal.force_commit(transaction).unwrap();
@@ -5250,7 +5468,7 @@ mod tests {
         assert_eq!(allocation.block_count(), BlockCount::new(4));
         assert_eq!(filesystem.groups()[1].free_blocks_count(), 22);
         assert_eq!(filesystem.groups()[1].flags(), 0);
-        assert_eq!(filesystem.superblock().free_blocks_count(), 22);
+        assert_eq!(filesystem.free_blocks_count(), 22);
         drop(handle);
 
         let commit = journal.force_commit(transaction).unwrap();
@@ -5274,6 +5492,35 @@ mod tests {
             0b0000_0011
         );
         assert_eq!(le_u32(&bytes, 1024 + 0x0c), 22);
+    }
+
+    #[test]
+    fn reload_rejects_replayed_descriptor_address_changes() {
+        let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+
+        // Unchanged descriptors reload into the same mutable state.
+        filesystem.metadata_io.invalidate_all();
+        filesystem
+            .reload_mutable_metadata_state()
+            .expect("reload accepts an unchanged descriptor table");
+
+        // A replayed descriptor table that moved a bitmap address must not
+        // split the frozen geometry table from the reloaded allocator state.
+        //
+        // The test image has metadata_csum off and first_data_block 0, so
+        // rewriting the block-bitmap lo-u32's low byte from 2 to 5 keeps the
+        // descriptor valid: decode skips its checksum, block 5 stays inside
+        // group 0 for `validate_group`, and only the frozen-geometry
+        // comparison rejects it.
+        device.bytes.lock().unwrap()[TEST_BLOCK_SIZE] = 5;
+        filesystem.metadata_io.invalidate_all();
+        assert_eq!(
+            filesystem.reload_mutable_metadata_state(),
+            Err(Ext4Error::Corrupt(
+                CorruptKind::GroupDescriptorAddressChanged
+            ))
+        );
+        assert_eq!(filesystem.groups()[0].free_blocks_count(), TEST_FREE_BLOCKS);
     }
 
     #[test]
@@ -5513,8 +5760,8 @@ mod tests {
         assert_eq!(filesystem.groups()[1].free_blocks_count(), TEST_FREE_BLOCKS);
         assert_eq!(filesystem.groups()[1].free_inodes_count(), 31);
         assert_eq!(filesystem.groups()[1].flags(), 0);
-        assert_eq!(filesystem.superblock().free_blocks_count(), 26);
-        assert_eq!(filesystem.superblock().free_inodes_count(), 31);
+        assert_eq!(filesystem.free_blocks_count(), 26);
+        assert_eq!(filesystem.free_inodes_count(), 31);
         drop(handle);
 
         let commit = journal.force_commit(transaction).unwrap();
@@ -5624,7 +5871,7 @@ mod tests {
         assert_eq!(allocation.inode(), InodeNumber::new(11));
         assert_eq!(allocation.bitmap_bit(), 10);
         assert_eq!(filesystem.groups()[0].free_inodes_count(), 21);
-        assert_eq!(filesystem.superblock().free_inodes_count(), 21);
+        assert_eq!(filesystem.free_inodes_count(), 21);
         let inode = filesystem.internal_iget(allocation.inode()).unwrap();
         assert_eq!(inode.kind(), InodeKind::RegularFile);
         assert_eq!(inode.mode(), 0o100644);
@@ -6032,7 +6279,7 @@ mod tests {
             )
             .unwrap();
         let inode = filesystem.internal_iget(inode_allocation.inode()).unwrap();
-        let free_after_allocation = filesystem.superblock().free_blocks_count();
+        let free_after_allocation = filesystem.free_blocks_count();
 
         filesystem
             .insert_extent_mapping(
@@ -6076,10 +6323,7 @@ mod tests {
                 flags: crate::BlockMappingFlags::empty(),
             })
         );
-        assert_eq!(
-            filesystem.superblock().free_blocks_count(),
-            free_after_allocation + 2
-        );
+        assert_eq!(filesystem.free_blocks_count(), free_after_allocation + 2);
     }
 
     #[test]
@@ -6161,7 +6405,7 @@ mod tests {
             )
             .unwrap();
         let inode = filesystem.internal_iget(inode_allocation.inode()).unwrap();
-        let free_after_allocation = filesystem.superblock().free_blocks_count();
+        let free_after_allocation = filesystem.free_blocks_count();
 
         filesystem
             .insert_extent_mapping(
@@ -6192,10 +6436,7 @@ mod tests {
                 flags: crate::BlockMappingFlags::empty(),
             })
         );
-        assert_eq!(
-            filesystem.superblock().free_blocks_count(),
-            free_after_allocation + 3
-        );
+        assert_eq!(filesystem.free_blocks_count(), free_after_allocation + 3);
     }
 
     #[test]
@@ -6352,7 +6593,7 @@ mod tests {
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 712);
         let input = vec![0x42; TEST_BLOCK_SIZE * 4];
-        let free_before_write = filesystem.superblock().free_blocks_count();
+        let free_before_write = filesystem.free_blocks_count();
 
         inode.set_size(input.len() as u64);
         filesystem
@@ -6384,10 +6625,7 @@ mod tests {
                 flags: crate::BlockMappingFlags::empty(),
             })
         );
-        assert_eq!(
-            filesystem.superblock().free_blocks_count(),
-            free_before_write - 8
-        );
+        assert_eq!(filesystem.free_blocks_count(), free_before_write - 8);
         assert!(
             filesystem
                 .extent_truncate_metadata_credits(&inode, LogicalBlock::new(4))
@@ -6409,10 +6647,7 @@ mod tests {
                 flags: crate::BlockMappingFlags::empty(),
             })
         );
-        assert_eq!(
-            filesystem.superblock().free_blocks_count(),
-            free_before_write - 4
-        );
+        assert_eq!(filesystem.free_blocks_count(), free_before_write - 4);
     }
 
     #[test]
@@ -6422,7 +6657,7 @@ mod tests {
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 713);
         let input = vec![0x34; TEST_BLOCK_SIZE * 4];
-        let free_before_write = filesystem.superblock().free_blocks_count();
+        let free_before_write = filesystem.free_blocks_count();
 
         inode.set_size(input.len() as u64);
         filesystem
@@ -6453,10 +6688,7 @@ mod tests {
                 flags: crate::BlockMappingFlags::empty(),
             })
         );
-        assert_eq!(
-            filesystem.superblock().free_blocks_count(),
-            free_before_write - 4
-        );
+        assert_eq!(filesystem.free_blocks_count(), free_before_write - 4);
     }
 
     #[test]
@@ -6467,7 +6699,7 @@ mod tests {
         install_test_internal_journal(&mut filesystem, 714);
         let first = vec![0x41; TEST_BLOCK_SIZE * 4];
         let second = vec![0x62; TEST_BLOCK_SIZE * 4];
-        let free_before_write = filesystem.superblock().free_blocks_count();
+        let free_before_write = filesystem.free_blocks_count();
 
         inode.set_size(first.len() as u64);
         filesystem
@@ -6493,10 +6725,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            filesystem.superblock().free_blocks_count(),
-            free_before_write - 8
-        );
+        assert_eq!(filesystem.free_blocks_count(), free_before_write - 8);
         assert_eq!(
             filesystem.map_blocks(&inode, LogicalBlock::new(0)),
             Ok(crate::BlockMapping::Mapped {
@@ -6684,7 +6913,7 @@ mod tests {
             .unwrap();
         assert_eq!(inode.blocks(), (TEST_BLOCK_SIZE / 512 * 3) as u64);
         install_test_internal_journal(&mut filesystem, 742);
-        let free_before_truncate = filesystem.superblock().free_blocks_count();
+        let free_before_truncate = filesystem.free_blocks_count();
         let new_size = u64::try_from(TEST_BLOCK_SIZE + 17).unwrap();
 
         filesystem
@@ -6701,10 +6930,7 @@ mod tests {
                 flags: crate::BlockMappingFlags::empty(),
             })
         );
-        assert_eq!(
-            filesystem.superblock().free_blocks_count(),
-            free_before_truncate + 1
-        );
+        assert_eq!(filesystem.free_blocks_count(), free_before_truncate + 1);
 
         let crate::BlockMapping::Mapped { physical, .. } =
             filesystem.map_blocks(&inode, LogicalBlock::new(1)).unwrap()
@@ -6739,7 +6965,7 @@ mod tests {
             .unwrap();
         assert_eq!(inode.blocks(), (TEST_BLOCK_SIZE / 512 * 3) as u64);
         install_test_internal_journal(&mut filesystem, 752);
-        let free_before_orphan_cleanup = filesystem.superblock().free_blocks_count();
+        let free_before_orphan_cleanup = filesystem.free_blocks_count();
         let new_size = u64::try_from(TEST_BLOCK_SIZE + 9).unwrap();
 
         let journal = JournalTransactions::new(TransactionId::new(753));
@@ -6782,7 +7008,7 @@ mod tests {
             })
         );
         assert_eq!(
-            filesystem.superblock().free_blocks_count(),
+            filesystem.free_blocks_count(),
             free_before_orphan_cleanup + 1
         );
     }
@@ -7135,7 +7361,7 @@ mod tests {
             journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         install_test_internal_journal(&mut filesystem, 769);
-        let free_inodes_before_cleanup = filesystem.superblock().free_inodes_count();
+        let free_inodes_before_cleanup = filesystem.free_inodes_count();
         let journal = JournalTransactions::new(TransactionId::new(770));
         let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
         let transaction = handle.id();
@@ -7157,9 +7383,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(filesystem.orphan_head(), None);
-        assert!(filesystem.superblock().features().needs_recovery());
+        assert!(filesystem.needs_recovery());
         assert_eq!(
-            filesystem.superblock().free_inodes_count(),
+            filesystem.free_inodes_count(),
             free_inodes_before_cleanup + 1
         );
     }
@@ -7175,7 +7401,7 @@ mod tests {
         let block_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let mut filesystem =
             Ext4SbInfo::mount(block_device).expect("mount generated recovery image");
-        let free_inodes_before_allocation = filesystem.superblock().free_inodes_count();
+        let free_inodes_before_allocation = filesystem.free_inodes_count();
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         let journal = filesystem.metadata_journal().expect("open mounted journal");
         let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
@@ -7198,11 +7424,8 @@ mod tests {
         let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let recovered = Ext4SbInfo::mount(mount_device).expect("mount recovered image");
         assert_eq!(recovered.orphan_head(), None);
-        assert_eq!(
-            recovered.superblock().free_inodes_count(),
-            free_inodes_before_allocation
-        );
-        assert!(!recovered.superblock().features().needs_recovery());
+        assert_eq!(recovered.free_inodes_count(), free_inodes_before_allocation);
+        assert!(!recovered.needs_recovery());
         fs::remove_file(image).expect("remove recovery image");
     }
 
@@ -7299,10 +7522,7 @@ mod tests {
         assert_eq!(released.inode(), InodeNumber::new(11));
         assert_eq!(filesystem.groups()[0].free_inodes_count(), TEST_FREE_INODES);
         assert_eq!(filesystem.groups()[0].used_directories_count(), 0);
-        assert_eq!(
-            filesystem.superblock().free_inodes_count(),
-            TEST_FREE_INODES
-        );
+        assert_eq!(filesystem.free_inodes_count(), TEST_FREE_INODES);
         drop(handle);
 
         let commit = journal.force_commit(release_transaction).unwrap();
@@ -7660,20 +7880,39 @@ mod tests {
         );
         let metadata_io = Ext4MetadataIo::new(filesystem_device.clone());
         let layout = FilesystemLayout::derive(&superblock).unwrap();
-        let groups = vec![BlockGroupDescriptor::decode(&descriptor, true).unwrap()];
+        let descriptors = vec![BlockGroupDescriptor::decode(&descriptor, true).unwrap()];
+        let group_geometry = descriptors
+            .iter()
+            .map(GroupGeometry::from_descriptor)
+            .collect();
+        let groups: Vec<GroupMutableState> = descriptors
+            .iter()
+            .map(GroupMutableState::from_descriptor)
+            .collect();
+        let used_directories_count = groups.iter().fold(0u32, |total, state| {
+            total.saturating_add(state.used_directories_count())
+        });
 
         let mut filesystem = Ext4SbInfo {
+            allocator: Mutex::new(AllocatorState {
+                free_blocks_count: superblock.on_disk_free_blocks_count(),
+                free_inodes_count: superblock.on_disk_free_inodes_count(),
+                used_directories_count,
+                last_orphan: superblock.last_orphan(),
+                needs_recovery: superblock.features().needs_recovery(),
+                block_free_extent_caches: vec![None; groups.len()],
+                groups,
+            }),
             delalloc_reserved_blocks: Mutex::new(0),
+            superblock,
+            group_geometry,
             statfs_mode: Ext4StatFsMode::Bsd,
             bitmap_maxbytes: 0,
             hash_unsigned: 0,
             device: filesystem_device,
             metadata_io,
             journal: None,
-            superblock,
             layout,
-            block_free_extent_caches: vec![None; groups.len()],
-            groups,
             system_zones: Vec::new(),
         };
         filesystem.bitmap_maxbytes = filesystem.legacy_max_file_size().unwrap();
@@ -7736,19 +7975,39 @@ mod tests {
         let metadata_io = Ext4MetadataIo::new(filesystem_device.clone());
         let superblock = Superblock::decode(&superblock_bytes).unwrap();
         let layout = FilesystemLayout::derive(&superblock).unwrap();
-        let groups = vec![BlockGroupDescriptor::decode(&descriptor, true).unwrap()];
+        let descriptors = vec![BlockGroupDescriptor::decode(&descriptor, true).unwrap()];
+        let group_geometry = descriptors
+            .iter()
+            .map(GroupGeometry::from_descriptor)
+            .collect();
+        let groups: Vec<GroupMutableState> = descriptors
+            .iter()
+            .map(GroupMutableState::from_descriptor)
+            .collect();
+        let used_directories_count = groups.iter().fold(0u32, |total, state| {
+            total.saturating_add(state.used_directories_count())
+        });
+
         let mut filesystem = Ext4SbInfo {
+            allocator: Mutex::new(AllocatorState {
+                free_blocks_count: superblock.on_disk_free_blocks_count(),
+                free_inodes_count: superblock.on_disk_free_inodes_count(),
+                used_directories_count,
+                last_orphan: superblock.last_orphan(),
+                needs_recovery: superblock.features().needs_recovery(),
+                block_free_extent_caches: vec![None; groups.len()],
+                groups,
+            }),
             delalloc_reserved_blocks: Mutex::new(0),
+            superblock,
+            group_geometry,
             statfs_mode: Ext4StatFsMode::Bsd,
             bitmap_maxbytes: 0,
             hash_unsigned: 0,
             device: filesystem_device,
             metadata_io,
             journal: None,
-            superblock,
             layout,
-            block_free_extent_caches: vec![None; groups.len()],
-            groups,
             system_zones: Vec::new(),
         };
         filesystem.bitmap_maxbytes = filesystem.legacy_max_file_size().unwrap();
@@ -7810,23 +8069,42 @@ mod tests {
         let metadata_io = Ext4MetadataIo::new(filesystem_device.clone());
         let superblock = Superblock::decode(&superblock_bytes).unwrap();
         let layout = FilesystemLayout::derive(&superblock).unwrap();
-        let groups: Vec<BlockGroupDescriptor> = descriptors
+        let descriptors: Vec<BlockGroupDescriptor> = descriptors
             .iter()
             .map(|descriptor| BlockGroupDescriptor::decode(descriptor, true).unwrap())
             .collect();
+        let group_geometry = descriptors
+            .iter()
+            .map(GroupGeometry::from_descriptor)
+            .collect();
+        let groups: Vec<GroupMutableState> = descriptors
+            .iter()
+            .map(GroupMutableState::from_descriptor)
+            .collect();
+        let used_directories_count = groups.iter().fold(0u32, |total, state| {
+            total.saturating_add(state.used_directories_count())
+        });
 
         let mut filesystem = Ext4SbInfo {
+            allocator: Mutex::new(AllocatorState {
+                free_blocks_count: superblock.on_disk_free_blocks_count(),
+                free_inodes_count: superblock.on_disk_free_inodes_count(),
+                used_directories_count,
+                last_orphan: superblock.last_orphan(),
+                needs_recovery: superblock.features().needs_recovery(),
+                block_free_extent_caches: vec![None; groups.len()],
+                groups,
+            }),
             delalloc_reserved_blocks: Mutex::new(0),
+            superblock,
+            group_geometry,
             statfs_mode: Ext4StatFsMode::Bsd,
             bitmap_maxbytes: 0,
             hash_unsigned: 0,
             device: filesystem_device,
             metadata_io,
             journal: None,
-            superblock,
             layout,
-            block_free_extent_caches: vec![None; groups.len()],
-            groups,
             system_zones: Vec::new(),
         };
         filesystem.bitmap_maxbytes = filesystem.legacy_max_file_size().unwrap();
@@ -8153,8 +8431,9 @@ mod tests {
         let incompat = le_u32(superblock_bytes, 0x60) | features::IncompatFeatures::FLEX_BG.bits();
         put_u32(superblock_bytes, 0x60, incompat);
         superblock_bytes[0x174] = log_groups_per_flex;
-        filesystem.superblock = Superblock::decode(superblock_bytes).unwrap();
-        filesystem.layout = FilesystemLayout::derive(&filesystem.superblock).unwrap();
+        let updated = Superblock::decode(superblock_bytes).unwrap();
+        filesystem.layout = FilesystemLayout::derive(&updated).unwrap();
+        filesystem.superblock = updated;
         filesystem
             .device
             .write_contiguous_blocks(block, 1, &bytes)

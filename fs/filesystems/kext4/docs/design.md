@@ -111,11 +111,60 @@ KVFS `VfsInode` 拥有，kext4 只在 release callback 中读取它。
 从 `mapping->host` 取得唯一 `VfsInode`，再借用其中的 `Ext4Inode` private component；
 `Ext4Inode` 不再同时充当 aops object，因此不存在两个必须保持一致的 inode identity。
 
-剩余挂载级 metadata 写锁是过渡实现而不是长期调用契约。N1 已把磁盘 journal、transaction engine 和
+allocator 可变状态（逐组可变 descriptor 字段、per-group free-extent cache、
+free-blocks/free-inodes/directory-inode 全局计数、orphan 头与 recovery 位）由 `Ext4SbInfo` 内的
+`Mutex<AllocatorState>` 保护；mount-wide delayed-allocation 总量刻意放在该锁之外，
+由独立的 `delalloc_reserved_blocks: Mutex<u64>` 保护，对应 Linux
+`s_dirtyclusters_counter`（per-CPU 原子计数）的独立更新域——reserve/release 只与
+其他 delalloc 修改互相串行，不阻塞全局组分配。静态几何不受本锁变动：
+primary superblock 解出的 geometry/feature 留在挂载时冻结的 `superblock` mirror，
+逐组地址（block/inode bitmap、inode table）只保存在挂载时冻结的 `group_geometry`
+一维表中——`AllocatorState` 的逐组条目（`GroupMutableState`）只镜像计数、flags 与
+bitmap checksum 等可变字段，刻意不含地址字段，地址因此只有一个读取源，对应 Linux
+`ext4_get_group_desc(..., NULL)` 对静态地址字段的无锁读，inode 表定位等热路径据此
+无锁读。journal replay 可能重写 descriptor block，`reload_mutable_metadata_state`
+重解码并校验 replay 后的 descriptor 表：计数等可变字段照常重建，地址字段与冻结表
+不一致时 fail-closed 拒绝（KExt4 支持的操作不会 journal 地址变更，变化即损坏或不
+支持特性），避免冻结几何与重载状态分裂后操作错误的 bitmap/inode table。取锁前，
+balloc/ialloc 入口先完成冻结几何解析与元数据缓存预热（`prefetch_metadata_blocks`），
+冷缓存设备读在锁外完成、失败也在锁外返回，不串行化全体分配器（对应 Linux 先读
+bitmap buffer 再 `ext4_lock_group`）；权威快照在锁内重读，预热结果绝不作为权威
+数据。balloc/ialloc 的
+单组分配/释放入口（`*_in_group`）整体为单一临界区：从读组描述符、位图 buffer 读改、
+journal write-access 到内存状态发布全程持锁，入口之间不会基于同一位图快照重复选取
+同一块/同一 inode，也不会丢失计数更新——对应 Linux 组锁"锁窗覆盖分配决策与
+bitmap 更新"的语义。多组扫描入口（`allocate_blocks_for_write()` /
+`allocate_inode_with_name()`）不是单一临界区：扫描循环逐组以短锁窥探 hint、随即
+释放，再逐个在 `*_in_group` 中重新取锁尝试；由于该锁不可重入，不能在扫描循环内持锁
+调用 `*_in_group`，goal 选择与分配也不构成原子操作，组间竞态由 `*_in_group` 锁内
+重校验兜底。delalloc 总量更新位于独立小锁的单临界区，读改写不会丢计数；预算准入
+检查与累计位于同一临界区（allocator 锁读 free-blocks + delalloc 锁读并累加，
+锁序固定 allocator → delalloc），check-then-act 基于同一快照原子完成，不存在
+并发超预留窗口，也不依赖 bridge 挂载级写锁的外部串行化；临界区有界（仅读计数
+并做一次加法），与 Linux 直接原子累加 percpu 计数的近似记账相比保持精确语义。
+
+锁序固定为 bridge 挂载级锁 → allocator 锁 → delalloc 锁 → metadata-buffer /
+journal 内部锁，禁止反向等待。持 allocator 锁期间不得调用任何会重新取该锁的路径：
+不仅公开入口，取锁访问器（`groups()`/`free_blocks_count()`/`free_inodes_count()`/
+`needs_recovery()`）同样在禁止之列——守卫内直接访问锁内字段；inode 定位等几何
+计算读冻结的 `group_geometry` 表（无锁），持锁的分配路径使用 `*_in_group` 无锁
+变体（该锁不可重入，ksync 对同任务重入直接 panic）。delalloc 锁是独立的
+`Mutex<u64>`，delalloc 路径只对它加锁，读 free-blocks 时按上述锁序先取 allocator
+短锁。对齐目标仍是 Linux 的 per-group spinlock + percpu 计数：当前单锁是过渡形态，
+临界区有界（单组位图扫描 + 已缓存元数据的内存读改写 + journal 发布；阻塞设备读
+已经预热移出锁外，仅剩地址依赖分配结果的 inode-table 块仍在锁内读），后续按组细化，使不同
+组的分配恢复并行（Linux `ext4_lock_group` 锁窗 = 单组扫描，不跨组持锁）。
+
+该挂载级读写锁是过渡实现而不是长期调用契约。N1 已把磁盘 journal、transaction engine 和
 checkpoint queue 收进同一个 `MountedJournal` 生命周期边界；metadata、allocator、device 和
 geometry 继续由 `Ext4SbInfo` mount state 持有，对应 Linux `ext4_sb_info` 的聚合角色。
 N2 根据真实执行者建立 journal、per-inode、metadata-buffer 和 per-group 锁，替代 mount-wide
-全局串行化。所有这些路径仍属于可阻塞的任务上下文，不能从中断上下文调用。
+全局串行化。N2 per-group 锁验收标准：锁窗内不得含阻塞 I/O——位图/描述符锁外预取
+（对齐 Linux 先读 bitmap buffer 再 `ext4_lock_group`），脏元数据发布移到锁外完成
+（对齐 Linux `ext4_unlock_group` 之后才 `ext4_handle_dirty_metadata`），锁窗只保留
+纯内存位操作与计数更新；发布外移必须配套锁内重校验与失败重试，防止并发观察到过期
+位图。在 N2 完成前，禁止向分配器锁临界区新增阻塞 I/O 或新的取锁调用。
+所有这些路径仍属于可阻塞的任务上下文，不能从中断上下文调用。
 
 ## 状态机
 
@@ -399,7 +448,9 @@ open-unlink 的 inode 可以按任意顺序完成 final eviction，而不会从�
 clean-journal cleanup 的首个 transaction 会先建立 ext4 recovery evidence；所有 recovery
 cleanup transaction 都采用 `PreserveDuringRecovery`，逐个同步完成 commit/checkpoint，并从
 已落盘的 superblock/group descriptors 重新建立内存状态，避免旧 orphan head 或 allocator
-counter 被 checkpoint 前的快照重新带回循环。全部 orphan 清理完成后，recovery 再确认 JBD2
+counter 被 checkpoint 前的快照重新带回循环。重建时冻结的 `group_geometry` 地址表保持
+挂载时的值：replay 后的 descriptor 地址若与冻结表不一致，reload 直接报 corruption
+返回，不会带着分裂的地址状态继续清理。全部 orphan 清理完成后，recovery 再确认 JBD2
 `s_start` 为零，最后清除并 flush ext4 recovery feature；任一步失败都会返回错误，而不会先
 清除最终的磁盘恢复证据。Superblock decode 会保留越过 inode table 的原始
 `s_last_orphan`，使显式 recovery 有机会处理该损坏，而普通 mount 仍因非零 orphan head 返回
@@ -468,10 +519,15 @@ extent 和 legacy mapper 随后借用该局部 root 完成一次 run 查询，�
 `s_dirtyclusters_counter`，用于 admission 与 `statfs()`，不是第二份 extent identity。
 Delayed-allocation admission 使用 primary superblock 的 free-block counter 减去 ext4 reserved
 blocks 和 core mount aggregate。reserve/release/truncate/writeback/eviction 只能调用 core 的
-区间 API；该 API 在独立 reservation mutex 下联合更新 inode 区间、per-inode count 和 mount
-aggregate，kext4 KVFS 层不读取或调整任一计数。该 counter 与 group descriptor 由同一
-allocation/release mutation 更新，因此 admission 是常数时间；显式 `statfs()` 仍遍历 group
-descriptor，提供独立的实时统计与一致性观察面。
+区间 API，由 core 在各自临界区内原子更新 inode 区间、per-inode count 和 mount
+aggregate（inode 侧在 per-inode 状态锁内，mount 总量在独立 delalloc 锁内）；
+bridge 不读取或调整任一计数。该 counter 与 group descriptor 由同一
+allocation/release mutation 更新，因此 admission 与显式 `statfs()` 都直接读该常
+数时间 aggregate，不遍历 group descriptor（避免持锁 O(组数) 折叠阻塞全局分配）。
+目录分配的 Orlov goal 选择同样只读常数时间 aggregate：allocator 锁内一次取得
+free-inodes/free-blocks 与 mount 级 directory-inode 总量（对应 Linux
+`s_dirs_counter`，挂载时一次 O(组数) fold 播种，此后与逐组 `bg_used_dirs_count`
+同点更新），不在持锁期间逐组折叠。
 
 Core 通过 `Ext4StatFsMode` 暴露两种 Linux ext4 总容量口径，但不解析 mount-option 字符串：
 `Bsd` 从 superblock 总块数中扣除 first-data-block 与 metadata system zones，`Minix` 直接使用

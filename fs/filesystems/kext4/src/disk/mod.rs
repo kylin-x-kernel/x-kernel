@@ -16,10 +16,11 @@ pub use dir::DirectoryFileType;
 pub use features::{CompatFeatures, FeatureSet, IncompatFeatures, ReadOnlyCompatFeatures};
 pub use group::BlockGroupDescriptor;
 pub(crate) use group::{
-    decrement_group_free_blocks_count, decrement_group_free_inodes_count,
-    decrement_group_used_directories_count, increment_group_free_blocks_count,
-    increment_group_free_inodes_count, increment_group_used_directories_count,
-    set_group_free_blocks_count, update_group_block_bitmap_metadata,
-    update_group_inode_allocation_metadata, update_group_inode_bitmap_metadata,
+    GroupGeometry, GroupMutableState, decrement_group_free_blocks_count,
+    decrement_group_free_inodes_count, decrement_group_used_directories_count,
+    increment_group_free_blocks_count, increment_group_free_inodes_count,
+    increment_group_used_directories_count, set_group_free_blocks_count,
+    update_group_block_bitmap_metadata, update_group_inode_allocation_metadata,
+    update_group_inode_bitmap_metadata,
 };
 pub use superblock::{JournalFields, Superblock};

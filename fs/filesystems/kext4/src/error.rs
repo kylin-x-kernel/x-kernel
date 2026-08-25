@@ -119,6 +119,9 @@ pub enum CorruptKind {
     InvalidClusterGeometry,
     /// Block group geometry is inconsistent with the filesystem size.
     InvalidBlockGroupGeometry,
+    /// A replayed group descriptor moved a bitmap or inode-table address
+    /// relative to the mount-time frozen geometry table.
+    GroupDescriptorAddressChanged,
     /// The flex block group geometry cannot be represented.
     InvalidFlexGeometry,
     /// A metadata block lies outside its permitted block group.

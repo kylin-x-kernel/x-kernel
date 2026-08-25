@@ -324,13 +324,21 @@ impl Superblock {
         self.reserved_blocks_count
     }
 
-    /// Returns the free block count stored in the primary superblock.
-    pub const fn free_blocks_count(&self) -> u64 {
+    /// Returns the free block count decoded from the on-disk superblock.
+    ///
+    /// Mount-time snapshot: the live free-block aggregate lives in
+    /// `Ext4SbInfo::free_blocks_count()` under the allocator lock. Use
+    /// that accessor for anything that runs after mount.
+    pub const fn on_disk_free_blocks_count(&self) -> u64 {
         self.free_blocks_count
     }
 
-    /// Returns the free inode count stored in the primary superblock.
-    pub const fn free_inodes_count(&self) -> u32 {
+    /// Returns the free inode count decoded from the on-disk superblock.
+    ///
+    /// Mount-time snapshot: the live free-inode aggregate lives in
+    /// `Ext4SbInfo::free_inodes_count()` under the allocator lock. Use
+    /// that accessor for anything that runs after mount.
+    pub const fn on_disk_free_inodes_count(&self) -> u32 {
         self.free_inodes_count
     }
 
@@ -408,15 +416,6 @@ impl Superblock {
         self.features
     }
 
-    /// Marks only the decoded runtime feature state as needing recovery.
-    pub(crate) fn mark_needs_recovery(&mut self) {
-        self.features = FeatureSet::new(
-            self.features.compat().bits(),
-            self.features.incompat().bits() | features::IncompatFeatures::RECOVER.bits(),
-            self.features.read_only_compat().bits(),
-        );
-    }
-
     /// Returns the filesystem UUID.
     pub const fn uuid(&self) -> [u8; 16] {
         self.uuid
@@ -476,7 +475,7 @@ pub(crate) fn set_ext4_needs_recovery_feature(input: &mut [u8]) -> Ext4Result<()
 pub(crate) fn decrement_free_blocks_count(input: &mut [u8], blocks: u32) -> Ext4Result<Superblock> {
     let superblock = Superblock::decode(input)?;
     let free_blocks_count = superblock
-        .free_blocks_count()
+        .on_disk_free_blocks_count()
         .checked_sub(u64::from(blocks))
         .ok_or(Ext4Error::NoSpace)?;
     set_free_blocks_count(input, free_blocks_count)
@@ -485,7 +484,7 @@ pub(crate) fn decrement_free_blocks_count(input: &mut [u8], blocks: u32) -> Ext4
 pub(crate) fn increment_free_blocks_count(input: &mut [u8], blocks: u32) -> Ext4Result<Superblock> {
     let superblock = Superblock::decode(input)?;
     let free_blocks_count = superblock
-        .free_blocks_count()
+        .on_disk_free_blocks_count()
         .checked_add(u64::from(blocks))
         .ok_or(Ext4Error::Overflow)?;
     set_free_blocks_count(input, free_blocks_count)
@@ -494,7 +493,7 @@ pub(crate) fn increment_free_blocks_count(input: &mut [u8], blocks: u32) -> Ext4
 pub(crate) fn decrement_free_inodes_count(input: &mut [u8], inodes: u32) -> Ext4Result<Superblock> {
     let superblock = Superblock::decode(input)?;
     let free_inodes_count = superblock
-        .free_inodes_count()
+        .on_disk_free_inodes_count()
         .checked_sub(inodes)
         .ok_or(Ext4Error::NoSpace)?;
     set_free_inodes_count(input, free_inodes_count)
@@ -503,7 +502,7 @@ pub(crate) fn decrement_free_inodes_count(input: &mut [u8], inodes: u32) -> Ext4
 pub(crate) fn increment_free_inodes_count(input: &mut [u8], inodes: u32) -> Ext4Result<Superblock> {
     let superblock = Superblock::decode(input)?;
     let free_inodes_count = superblock
-        .free_inodes_count()
+        .on_disk_free_inodes_count()
         .checked_add(inodes)
         .ok_or(Ext4Error::Overflow)?;
     set_free_inodes_count(input, free_inodes_count)

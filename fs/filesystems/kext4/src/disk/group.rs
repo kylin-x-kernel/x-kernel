@@ -25,7 +25,13 @@ const INODE_BITMAP_CHECKSUM_HI_OFFSET: usize = 58;
 const EXT4_BG_INODE_UNINIT: u16 = 0x0001;
 const EXT4_BG_BLOCK_UNINIT: u16 = 0x0002;
 
-/// Decoded block group metadata addresses and counters.
+/// Decoded on-disk block group descriptor, mirroring the raw 64-byte layout.
+///
+/// This is the ext4 `struct ext4_group_desc` analogue: it only decodes and
+/// exposes the disk fields and is not held in mount state. The resident
+/// management representations are derived from it — [`GroupGeometry`] for the
+/// frozen addresses and [`GroupMutableState`] for the allocator-mutable
+/// counters and flags.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockGroupDescriptor {
     block_bitmap: u64,
@@ -115,16 +121,6 @@ impl BlockGroupDescriptor {
         self.flags
     }
 
-    /// Returns whether the block bitmap still needs ext4 lazy initialization.
-    pub(crate) const fn has_uninit_block_bitmap(&self) -> bool {
-        self.flags & EXT4_BG_BLOCK_UNINIT != 0
-    }
-
-    /// Returns whether the inode bitmap still needs ext4 lazy initialization.
-    pub(crate) const fn has_uninit_inode_bitmap(&self) -> bool {
-        self.flags & EXT4_BG_INODE_UNINIT != 0
-    }
-
     /// Returns the stored block bitmap checksum.
     pub const fn block_bitmap_checksum(&self) -> u32 {
         self.block_bitmap_checksum
@@ -135,7 +131,8 @@ impl BlockGroupDescriptor {
         self.inode_bitmap_checksum
     }
 
-    /// Returns how many inode table entries at the end of this group are unused.
+    /// Returns how many inode table entries at the end of this group are
+    /// unused.
     pub const fn itable_unused_count(&self) -> u32 {
         self.itable_unused_count
     }
@@ -143,6 +140,138 @@ impl BlockGroupDescriptor {
     /// Returns the stored descriptor checksum.
     pub const fn checksum(&self) -> u16 {
         self.checksum
+    }
+
+    /// Partitions the descriptor into its frozen-address part and its
+    /// allocator-mutable part.
+    ///
+    /// This is the single place that assigns every descriptor field to one
+    /// resident home, so the ownership split between [`GroupGeometry`] and
+    /// [`GroupMutableState`] is enumerated exactly once and cannot drift.
+    pub(crate) fn split(&self) -> (GroupGeometry, GroupMutableState) {
+        (
+            GroupGeometry {
+                block_bitmap: self.block_bitmap,
+                inode_bitmap: self.inode_bitmap,
+                inode_table: self.inode_table,
+            },
+            GroupMutableState {
+                free_blocks_count: self.free_blocks_count,
+                free_inodes_count: self.free_inodes_count,
+                used_directories_count: self.used_directories_count,
+                flags: self.flags,
+                block_bitmap_checksum: self.block_bitmap_checksum,
+                inode_bitmap_checksum: self.inode_bitmap_checksum,
+            },
+        )
+    }
+}
+
+/// Per-group block addresses frozen at mount time.
+///
+/// This table is the mount's single read source for the block/inode bitmap
+/// and inode-table addresses. Linux keeps these address fields in
+/// `sbi->s_group_desc`'s page-cached descriptors and reads them without any
+/// lock (`ext4_get_inode_loc` → `ext4_get_group_desc(..., NULL)` →
+/// `ext4_inode_table`); KExt4 has no descriptor page cache, so it stores the
+/// addresses once in an immutable table and lets the inode-table hot path
+/// read them without taking the allocator lock. The allocator's mutable
+/// state ([`GroupMutableState`]) deliberately carries no address fields, so
+/// the two states cannot diverge field by field. Journal replay may rewrite
+/// descriptor blocks, so [`crate::superblock::Ext4SbInfo::reload_mutable_metadata_state`]
+/// re-validates replayed descriptors and rejects any address change instead
+/// of silently splitting the frozen table from the reloaded descriptors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GroupGeometry {
+    block_bitmap: u64,
+    inode_bitmap: u64,
+    inode_table: u64,
+}
+
+impl GroupGeometry {
+    pub(crate) fn from_descriptor(descriptor: &BlockGroupDescriptor) -> Self {
+        descriptor.split().0
+    }
+
+    /// Returns the block containing this group's block bitmap.
+    pub(crate) const fn block_bitmap(&self) -> u64 {
+        self.block_bitmap
+    }
+
+    /// Returns the block containing this group's inode bitmap.
+    pub(crate) const fn inode_bitmap(&self) -> u64 {
+        self.inode_bitmap
+    }
+
+    /// Returns the first block of this group's inode table.
+    pub(crate) const fn inode_table(&self) -> u64 {
+        self.inode_table
+    }
+}
+
+/// Per-group mutable descriptor state held under the allocator lock.
+///
+/// Mirrors only the group-descriptor fields that allocation and release
+/// transactions update: counters, flags, and bitmap checksums. The
+/// block/inode bitmap and inode-table addresses are deliberately absent so
+/// the frozen [`GroupGeometry`] table stays the mount's single read source
+/// for addresses; fields written only through raw descriptor bytes and
+/// re-validated on every decode (descriptor checksum, `itable_unused`) stay
+/// on the disk path and are not mirrored.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GroupMutableState {
+    free_blocks_count: u32,
+    free_inodes_count: u32,
+    used_directories_count: u32,
+    flags: u16,
+    block_bitmap_checksum: u32,
+    inode_bitmap_checksum: u32,
+}
+
+impl GroupMutableState {
+    pub(crate) fn from_descriptor(descriptor: &BlockGroupDescriptor) -> Self {
+        descriptor.split().1
+    }
+
+    /// Returns the group's free block count.
+    pub(crate) const fn free_blocks_count(&self) -> u32 {
+        self.free_blocks_count
+    }
+
+    /// Returns the group's free inode count.
+    pub(crate) const fn free_inodes_count(&self) -> u32 {
+        self.free_inodes_count
+    }
+
+    /// Returns the group's used directory count.
+    pub(crate) const fn used_directories_count(&self) -> u32 {
+        self.used_directories_count
+    }
+
+    /// Returns the block group flags.
+    #[cfg(test)]
+    pub(crate) const fn flags(&self) -> u16 {
+        self.flags
+    }
+
+    /// Returns the stored block bitmap checksum.
+    pub(crate) const fn block_bitmap_checksum(&self) -> u32 {
+        self.block_bitmap_checksum
+    }
+
+    /// Returns the stored inode bitmap checksum.
+    pub(crate) const fn inode_bitmap_checksum(&self) -> u32 {
+        self.inode_bitmap_checksum
+    }
+
+    /// Returns whether the block bitmap still needs ext4 lazy initialization.
+    pub(crate) const fn has_uninit_block_bitmap(&self) -> bool {
+        self.flags & EXT4_BG_BLOCK_UNINIT != 0
+    }
+
+    /// Returns whether the inode bitmap still needs ext4 lazy initialization.
+    pub(crate) const fn has_uninit_inode_bitmap(&self) -> bool {
+        self.flags & EXT4_BG_INODE_UNINIT != 0
     }
 }
 

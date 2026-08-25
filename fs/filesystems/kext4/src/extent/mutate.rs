@@ -82,7 +82,7 @@ impl Ext4SbInfo {
 
         let new_tree_blocks =
             extent_tree_metadata_block_count(remaining_extents.len(), self.device.block_size())?;
-        if u64::from(new_tree_blocks) > self.superblock().free_blocks_count() {
+        if u64::from(new_tree_blocks) > self.free_blocks_count() {
             return Err(Ext4Error::NoSpace);
         }
         let old_tree_blocks =

@@ -9,15 +9,15 @@ use alloc::vec;
 use crate::{
     bitmap_allocator::{self, BlockAllocation, BlockGroupRange, BlockRunAllocation},
     disk::{
-        BlockGroupDescriptor, checksum, decrement_group_free_blocks_count,
+        GroupMutableState, checksum, decrement_group_free_blocks_count,
         increment_group_free_blocks_count, set_group_free_blocks_count, superblock,
         update_group_block_bitmap_metadata,
     },
     error::{CorruptKind, Ext4Error, Ext4Result},
-    mballoc::{Ext4AllocationFlags, Ext4AllocationRequest},
+    mballoc::{Ext4AllocationFlags, Ext4AllocationRequest, ensure_block_group_free_cache_inner},
     superblock::{
         Ext4SbInfo, bitmap_bit_capacity, count_clear_ext4_bitmap_bits, ensure_metadata_credits,
-        ext4_bitmap_checksum_matches, ext4_mark_bitmap_end, replace_metadata_access_bytes,
+        ext4_bitmap_checksum_matches, ext4_mark_bitmap_end, lock, replace_metadata_access_bytes,
         set_ext4_bitmap_bit, validate_ext4_bitmap_range_set,
     },
     types::{BlockCount, BlockGroupNumber, FilesystemBlock, PhysicalBlock},
@@ -29,7 +29,7 @@ const METADATA_BLOCK_RELEASE_CREDITS: u32 = BLOCK_ALLOCATOR_METADATA_CREDITS + 1
 impl Ext4SbInfo {
     #[allow(dead_code)]
     pub(crate) fn allocate_block(
-        &mut self,
+        &self,
         goal: Option<FilesystemBlock>,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockAllocation> {
@@ -45,7 +45,7 @@ impl Ext4SbInfo {
 
     #[allow(dead_code)]
     pub(crate) fn allocate_block_in_group(
-        &mut self,
+        &self,
         group: BlockGroupNumber,
         goal: Option<FilesystemBlock>,
         handle: &mut crate::jbd2::JournalHandle<'_>,
@@ -61,7 +61,7 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn allocate_block_run_in_group(
-        &mut self,
+        &self,
         group: BlockGroupNumber,
         goal: Option<FilesystemBlock>,
         min_len: BlockCount,
@@ -72,7 +72,32 @@ impl Ext4SbInfo {
             return Err(Ext4Error::OutOfBounds);
         }
         let group_index = usize::try_from(group.get()).map_err(|_| Ext4Error::Overflow)?;
-        let descriptor = self
+        // Geometry and block locations come from frozen mount tables and
+        // need no lock; resolve them before the allocator lock so the
+        // critical section starts with every address already known.
+        let range = self.block_group_range(group)?;
+        let block_bitmap_checksum_bytes = self.block_bitmap_checksum_bytes()?;
+        let bitmap_block = FilesystemBlock::new(
+            self.group_geometry(group)
+                .ok_or(Ext4Error::OutOfBounds)?
+                .block_bitmap(),
+        );
+        let (descriptor_block, descriptor_offset, descriptor_len) =
+            self.group_descriptor_location(group)?;
+        let (superblock_block, superblock_offset, superblock_len) =
+            self.primary_superblock_location()?;
+        // Warm the metadata cache outside the allocator lock so a
+        // cold-cache device read does not serialize every allocator behind
+        // the mutex; the authoritative snapshots are re-read inside the
+        // lock below. Prefetching the block bitmap of an uninit group
+        // costs one harmless cached read.
+        self.prefetch_metadata_blocks(&[bitmap_block, descriptor_block, superblock_block])?;
+
+        // The allocator lock still spans the in-lock read-modify-write so
+        // concurrent callers cannot select the same block from the same
+        // bitmap snapshot.
+        let mut alloc = lock(&self.allocator);
+        let descriptor = alloc
             .groups
             .get(group_index)
             .cloned()
@@ -83,25 +108,20 @@ impl Ext4SbInfo {
         if group.get() == 0 && descriptor.has_uninit_block_bitmap() {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap));
         }
-        if self.superblock.free_blocks_count() == 0 {
+        if alloc.free_blocks_count == 0 {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry));
         }
         ensure_metadata_credits(handle, BLOCK_ALLOCATOR_METADATA_CREDITS)?;
-
-        let range = self.block_group_range(group)?;
-        let block_bitmap_checksum_bytes = self.block_bitmap_checksum_bytes()?;
-        let bitmap_block = FilesystemBlock::new(descriptor.block_bitmap());
-        let (descriptor_block, descriptor_offset, descriptor_len) =
-            self.group_descriptor_location(group)?;
-        let (superblock_block, superblock_offset, superblock_len) =
-            self.primary_superblock_location()?;
 
         let had_uninit_block_bitmap = descriptor.has_uninit_block_bitmap();
         let mut bitmap_bytes = if had_uninit_block_bitmap {
             vec![0; usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?]
         } else {
             let bitmap = self.read_metadata_block(bitmap_block)?;
-            self.verify_block_bitmap_checksum_for_group(&descriptor, bitmap.as_ref())?;
+            self.verify_block_bitmap_checksum_for_group(
+                descriptor.block_bitmap_checksum(),
+                bitmap.as_ref(),
+            )?;
             self.validate_block_bitmap_for_group(range, bitmap.as_ref())?;
             bitmap.as_ref().to_vec()
         };
@@ -116,9 +136,18 @@ impl Ext4SbInfo {
         } else {
             None
         };
-        let suggested_goal = self
-            .ensure_block_group_free_cache(group, range, &bitmap_bytes)?
-            .suggest_goal(range, goal, min_len, expected_len)?;
+        let suggested_goal = ensure_block_group_free_cache_inner(
+            &mut alloc,
+            group,
+            range,
+            &bitmap_bytes,
+            Some(crate::mballoc::FreeCacheGoalRequest {
+                goal,
+                min_len,
+                expected_len,
+            }),
+            |block| self.is_system_zone_block(block),
+        )?;
         let allocation = match bitmap_allocator::allocate_block_run_from_bitmap(
             &mut bitmap_bytes,
             range,
@@ -146,26 +175,26 @@ impl Ext4SbInfo {
             let _ = set_group_free_blocks_count(
                 descriptor_slice,
                 group.get(),
-                self.superblock.checksum_seed(),
-                self.superblock.features().has_64bit(),
-                self.superblock.features().has_metadata_checksum(),
+                self.superblock().checksum_seed(),
+                self.superblock().features().has_64bit(),
+                self.superblock().features().has_metadata_checksum(),
                 free_blocks,
             )?;
         }
         let _ = decrement_group_free_blocks_count(
             descriptor_slice,
             group.get(),
-            self.superblock.checksum_seed(),
-            self.superblock.features().has_64bit(),
-            self.superblock.features().has_metadata_checksum(),
+            self.superblock().checksum_seed(),
+            self.superblock().features().has_64bit(),
+            self.superblock().features().has_metadata_checksum(),
             allocation.block_count().get(),
         )?;
         let updated_descriptor = update_group_block_bitmap_metadata(
             descriptor_slice,
             group.get(),
-            self.superblock.checksum_seed(),
-            self.superblock.features().has_64bit(),
-            self.superblock.features().has_metadata_checksum(),
+            self.superblock().checksum_seed(),
+            self.superblock().features().has_64bit(),
+            self.superblock().features().has_metadata_checksum(),
             block_bitmap_checksum_bytes,
             &bitmap_bytes,
         )?;
@@ -195,7 +224,7 @@ impl Ext4SbInfo {
             superblock_slice,
             allocation.block_count().get(),
         )?;
-        let mut updated_free_cache = self
+        let mut updated_free_cache = alloc
             .block_free_extent_caches
             .get(group_index)
             .and_then(Option::as_ref)
@@ -204,20 +233,24 @@ impl Ext4SbInfo {
         updated_free_cache
             .mark_allocated(allocation.first_bitmap_bit(), allocation.block_count())?;
 
+        // Publication stays inside the allocator lock: the bitmap bytes are
+        // the bit-level source of truth, so releasing the lock before the
+        // replacements land would let a concurrent allocator observe the
+        // updated counters against a stale bitmap and double-allocate.
         let bitmap_access = self.metadata_io.write_access(bitmap_block, handle)?;
         let descriptor_access = self.metadata_io.write_access(descriptor_block, handle)?;
         let superblock_access = self.metadata_io.write_access(superblock_block, handle)?;
         replace_metadata_access_bytes(&bitmap_access, bitmap_bytes)?;
         replace_metadata_access_bytes(&descriptor_access, descriptor_bytes)?;
         replace_metadata_access_bytes(&superblock_access, superblock_bytes)?;
-        self.block_free_extent_caches[group_index] = Some(updated_free_cache);
-        self.groups[group_index] = updated_descriptor;
-        self.superblock = updated_superblock;
+        alloc.block_free_extent_caches[group_index] = Some(updated_free_cache);
+        alloc.groups[group_index] = GroupMutableState::from_descriptor(&updated_descriptor);
+        alloc.free_blocks_count = updated_superblock.on_disk_free_blocks_count();
         Ok(allocation)
     }
 
     pub(crate) fn release_allocated_block(
-        &mut self,
+        &self,
         block: PhysicalBlock,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockAllocation> {
@@ -225,7 +258,7 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn release_allocated_metadata_block(
-        &mut self,
+        &self,
         block: PhysicalBlock,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockAllocation> {
@@ -233,7 +266,7 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn release_allocated_metadata_block_without_revoke(
-        &mut self,
+        &self,
         block: PhysicalBlock,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockAllocation> {
@@ -241,7 +274,7 @@ impl Ext4SbInfo {
     }
 
     fn release_allocated_block_inner(
-        &mut self,
+        &self,
         block: PhysicalBlock,
         handle: &mut crate::jbd2::JournalHandle<'_>,
         revoke_metadata: bool,
@@ -266,7 +299,31 @@ impl Ext4SbInfo {
         ensure_metadata_credits(handle, required_credits)?;
         let group = self.block_group_for_block(block)?;
         let group_index = usize::try_from(group.get()).map_err(|_| Ext4Error::Overflow)?;
-        let descriptor = self
+        // Geometry and block locations come from frozen mount tables and
+        // need no lock; the freed block is known up front, so every block
+        // this path touches is addressable before the allocator lock.
+        let range = self.block_group_range(group)?;
+        let block_bitmap_checksum_bytes = self.block_bitmap_checksum_bytes()?;
+        let bitmap_block = FilesystemBlock::new(
+            self.group_geometry(group)
+                .ok_or(Ext4Error::OutOfBounds)?
+                .block_bitmap(),
+        );
+        let (descriptor_block, descriptor_offset, descriptor_len) =
+            self.group_descriptor_location(group)?;
+        let (superblock_block, superblock_offset, superblock_len) =
+            self.primary_superblock_location()?;
+        // Warm the metadata cache outside the allocator lock so a
+        // cold-cache device read does not serialize every allocator behind
+        // the mutex; the authoritative snapshots are re-read inside the
+        // lock below.
+        self.prefetch_metadata_blocks(&[bitmap_block, descriptor_block, superblock_block])?;
+
+        // The allocator lock still spans the in-lock read-modify-write so
+        // concurrent releases keep the bitmap and counters consistent with
+        // one another.
+        let mut alloc = lock(&self.allocator);
+        let descriptor = alloc
             .groups
             .get(group_index)
             .cloned()
@@ -274,20 +331,23 @@ impl Ext4SbInfo {
         if descriptor.has_uninit_block_bitmap() {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap));
         }
-        let range = self.block_group_range(group)?;
-        let block_bitmap_checksum_bytes = self.block_bitmap_checksum_bytes()?;
-        let bitmap_block = FilesystemBlock::new(descriptor.block_bitmap());
-        let (descriptor_block, descriptor_offset, descriptor_len) =
-            self.group_descriptor_location(group)?;
-        let (superblock_block, superblock_offset, superblock_len) =
-            self.primary_superblock_location()?;
 
         let bitmap = self.read_metadata_block(bitmap_block)?;
-        self.verify_block_bitmap_checksum_for_group(&descriptor, bitmap.as_ref())?;
+        self.verify_block_bitmap_checksum_for_group(
+            descriptor.block_bitmap_checksum(),
+            bitmap.as_ref(),
+        )?;
         self.validate_block_bitmap_for_group(range, bitmap.as_ref())?;
 
         let mut bitmap_bytes = bitmap.as_ref().to_vec();
-        self.ensure_block_group_free_cache(group, range, &bitmap_bytes)?;
+        ensure_block_group_free_cache_inner(
+            &mut alloc,
+            group,
+            range,
+            &bitmap_bytes,
+            None,
+            |candidate| self.is_system_zone_block(candidate),
+        )?;
         let released = bitmap_allocator::release_block_to_bitmap(
             &mut bitmap_bytes,
             range,
@@ -305,17 +365,17 @@ impl Ext4SbInfo {
         let _ = increment_group_free_blocks_count(
             descriptor_slice,
             group.get(),
-            self.superblock.checksum_seed(),
-            self.superblock.features().has_64bit(),
-            self.superblock.features().has_metadata_checksum(),
+            self.superblock().checksum_seed(),
+            self.superblock().features().has_64bit(),
+            self.superblock().features().has_metadata_checksum(),
             1,
         )?;
         let updated_descriptor = update_group_block_bitmap_metadata(
             descriptor_slice,
             group.get(),
-            self.superblock.checksum_seed(),
-            self.superblock.features().has_64bit(),
-            self.superblock.features().has_metadata_checksum(),
+            self.superblock().checksum_seed(),
+            self.superblock().features().has_64bit(),
+            self.superblock().features().has_metadata_checksum(),
             block_bitmap_checksum_bytes,
             &bitmap_bytes,
         )?;
@@ -331,7 +391,7 @@ impl Ext4SbInfo {
             .get_mut(superblock_offset..superblock_offset + superblock_len)
             .ok_or(Ext4Error::OutOfBounds)?;
         let updated_superblock = superblock::increment_free_blocks_count(superblock_slice, 1)?;
-        let mut updated_free_cache = self
+        let mut updated_free_cache = alloc
             .block_free_extent_caches
             .get(group_index)
             .and_then(Option::as_ref)
@@ -339,6 +399,10 @@ impl Ext4SbInfo {
             .ok_or(Ext4Error::OutOfBounds)?;
         updated_free_cache.mark_free(released.bitmap_bit())?;
 
+        // Publication stays inside the allocator lock: the bitmap bytes are
+        // the bit-level source of truth, so releasing the lock before the
+        // replacements land would let a concurrent allocator observe the
+        // updated counters against a stale bitmap and double-free.
         let bitmap_access = self.metadata_io.write_access(bitmap_block, handle)?;
         let descriptor_access = self.metadata_io.write_access(descriptor_block, handle)?;
         let superblock_access = self.metadata_io.write_access(superblock_block, handle)?;
@@ -351,9 +415,9 @@ impl Ext4SbInfo {
         replace_metadata_access_bytes(&bitmap_access, bitmap_bytes)?;
         replace_metadata_access_bytes(&descriptor_access, descriptor_bytes)?;
         replace_metadata_access_bytes(&superblock_access, superblock_bytes)?;
-        self.block_free_extent_caches[group_index] = Some(updated_free_cache);
-        self.groups[group_index] = updated_descriptor;
-        self.superblock = updated_superblock;
+        alloc.block_free_extent_caches[group_index] = Some(updated_free_cache);
+        alloc.groups[group_index] = GroupMutableState::from_descriptor(&updated_descriptor);
+        alloc.free_blocks_count = updated_superblock.on_disk_free_blocks_count();
         Ok(released)
     }
 
@@ -389,10 +453,10 @@ impl Ext4SbInfo {
 
     fn verify_block_bitmap_checksum_for_group(
         &self,
-        descriptor: &BlockGroupDescriptor,
+        expected_checksum: u32,
         bitmap: &[u8],
     ) -> Ext4Result<()> {
-        if !self.superblock.features().has_metadata_checksum() {
+        if !self.superblock().features().has_metadata_checksum() {
             return Ok(());
         }
 
@@ -400,11 +464,11 @@ impl Ext4SbInfo {
         let input = bitmap
             .get(..checksum_bytes)
             .ok_or(Ext4Error::Corrupt(CorruptKind::Truncated))?;
-        let calculated = checksum::bitmap_checksum(input, self.superblock.checksum_seed());
+        let calculated = checksum::bitmap_checksum(input, self.superblock().checksum_seed());
         if !ext4_bitmap_checksum_matches(
             calculated,
-            descriptor.block_bitmap_checksum(),
-            self.superblock.features().has_64bit(),
+            expected_checksum,
+            self.superblock().features().has_64bit(),
         ) {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap));
         }

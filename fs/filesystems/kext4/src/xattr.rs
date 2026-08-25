@@ -476,7 +476,7 @@ impl Ext4SbInfo {
         let current_extra_isize = inode.extra_isize();
         let inline_capacity =
             extra_isize_layout_candidate(inode_size, current_extra_isize)?.inline_capacity;
-        let free_blocks_count = self.superblock().free_blocks_count();
+        let free_blocks_count = self.free_blocks_count();
         let plan = match request {
             XattrMutationRequest::Set {
                 namespace,
@@ -641,7 +641,7 @@ impl Ext4SbInfo {
             let external_block_action =
                 external_xattr_block_action(old_layout, &storage, rewrite_external);
             if external_block_action == ExternalXattrBlockAction::Allocate
-                && self.superblock().free_blocks_count() == 0
+                && self.free_blocks_count() == 0
             {
                 return Ok(None);
             }

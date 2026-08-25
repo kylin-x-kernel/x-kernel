@@ -27,6 +27,15 @@ struct MetadataBlockCacheInner {
 /// The index deliberately owns ready slots. This is an explicit retain and
 /// reclaim cache: handles pin the immutable byte storage, while
 /// `reclaim_unused` removes entries whose bytes have no external readers.
+///
+/// Ordering contract (required by the allocator's prefetch pattern):
+/// every successful publish through a write access replaces the bytes held
+/// by the slot, and every read returns slot contents, loading the device
+/// first only when the slot is missing or unloaded. There is no
+/// write-through mode that bypasses the slot update. The allocator warms
+/// the cache before taking its lock (prefetch) and re-reads inside the
+/// critical section; that pattern is only race-free while this contract
+/// holds, so a future write-through downgrade must be rejected.
 #[derive(Clone)]
 pub(super) struct MetadataBlockCache {
     inner: Arc<MetadataBlockCacheInner>,

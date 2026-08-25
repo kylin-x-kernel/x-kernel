@@ -6,11 +6,11 @@
 
 use alloc::{collections::BTreeMap, sync::Arc, vec};
 #[cfg(not(target_os = "none"))]
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
 
 use block::BlockDeviceOperations;
 #[cfg(target_os = "none")]
-use ksync::{Mutex, MutexGuard};
+use ksync::Mutex;
 
 use crate::{
     disk::{Superblock, superblock},
@@ -24,7 +24,7 @@ use crate::{
     },
     superblock::{
         Ext4Recovery, Ext4RecoveryCleared, Ext4RecoveryReport, Ext4SbInfo, InternalJournal,
-        JournalMarkedEmpty,
+        JournalMarkedEmpty, lock,
     },
     types::FilesystemBlock,
 };
@@ -40,18 +40,6 @@ fn transaction_credit_limit(superblock: &JournalSuperblock) -> Ext4Result<u32> {
     // journal so descriptor, revoke, and commit overhead still fit while a
     // checkpoint can make progress.
     Ok((log_blocks / 3).max(1))
-}
-
-#[cfg(target_os = "none")]
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock()
-}
-
-#[cfg(not(target_os = "none"))]
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -685,6 +673,9 @@ impl Ext4SbInfo {
                 // Setting the recovery bit reads the pre-checkpoint superblock
                 // from disk. Rebase after the home blocks land so the next
                 // orphan sees the checkpointed head and allocator counters.
+                // The reload takes the allocator lock internally; no caller
+                // on this path may already hold it — ksync mutexes are not
+                // reentrant and reentry panics.
                 self.metadata_io.invalidate_all();
                 self.reload_mutable_metadata_state()
             }
@@ -780,7 +771,7 @@ impl Ext4SbInfo {
             &bytes,
             self.layout.block_size(),
             block_count,
-            self.superblock.uuid(),
+            self.superblock().uuid(),
         )?;
         Ok((physical, bytes, superblock))
     }
@@ -808,20 +799,19 @@ impl Ext4SbInfo {
     }
 
     fn set_ext4_needs_recovery_feature(&mut self) -> Ext4Result<()> {
-        if self.superblock.features().needs_recovery() {
+        if self.needs_recovery() {
             return Ok(());
         }
         self.write_ext4_superblock_recovery_feature(superblock::set_ext4_needs_recovery_feature)?;
         // The disk copy still contains pre-checkpoint counters. Preserve the
         // newer in-memory metadata state while recording only the recovery bit.
-        self.superblock.mark_needs_recovery();
+        lock(&self.allocator).needs_recovery = true;
         Ok(())
     }
 
     fn clear_ext4_needs_recovery_feature_on_disk(&mut self) -> Ext4Result<()> {
-        self.superblock = self.write_ext4_superblock_recovery_feature(
-            superblock::clear_ext4_needs_recovery_feature,
-        )?;
+        self.write_ext4_superblock_recovery_feature(superblock::clear_ext4_needs_recovery_feature)?;
+        lock(&self.allocator).needs_recovery = false;
         Ok(())
     }
 
@@ -872,7 +862,7 @@ impl Ext4Recovery {
     }
 
     pub(super) fn replay(mut self) -> Ext4Result<Option<Ext4RecoveryReport>> {
-        let features = self.filesystem.superblock.features();
+        let features = self.filesystem.superblock().features();
         if features.has_orphan_file() || features.has_orphan_present() {
             return Err(Ext4Error::Unsupported(UnsupportedKind::OrphanFile));
         }
@@ -884,6 +874,9 @@ impl Ext4Recovery {
         }
         let applied = self.filesystem.replay_internal_journal_updates()?;
         self.filesystem.metadata_io.invalidate_all();
+        // The reload takes the allocator lock internally; replay paths must
+        // never be entered while holding it — ksync mutexes are not
+        // reentrant and reentry panics.
         self.filesystem.reload_mutable_metadata_state()?;
         self.filesystem
             .stage_replayed_journal_clean_state(applied)?;

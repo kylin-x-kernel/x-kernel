@@ -1329,12 +1329,8 @@ impl Ext4SbInfo {
         }
     }
 
-    fn ensure_delalloc_accounting(
-        &self,
-        inode: &Ext4Inode,
-        delalloc_reserved_blocks: u64,
-    ) -> Ext4Result<()> {
-        if inode.reserved_data_blocks() <= delalloc_reserved_blocks {
+    fn ensure_delalloc_accounting(&self, inode: &Ext4Inode) -> Ext4Result<()> {
+        if inode.reserved_data_blocks() <= self.delalloc_reserved_blocks() {
             Ok(())
         } else {
             Err(Ext4Error::InvalidDelayedAllocationState)
@@ -1357,8 +1353,7 @@ impl Ext4SbInfo {
         start: LogicalBlock,
         block_count: u64,
     ) -> Ext4Result<()> {
-        let mut delalloc_reserved_blocks = sync::mutex_lock(&self.delalloc_reserved_blocks);
-        self.ensure_delalloc_accounting(inode, *delalloc_reserved_blocks)?;
+        self.ensure_delalloc_accounting(inode)?;
         if block_count == 0 {
             return Ok(());
         }
@@ -1398,23 +1393,31 @@ impl Ext4SbInfo {
                 .checked_add(end.checked_sub(*start).ok_or(Ext4Error::Overflow)?)
                 .ok_or(Ext4Error::Overflow)
         })?;
-        let blocks_available = self
-            .superblock()
-            .free_blocks_count()
-            .saturating_sub(*delalloc_reserved_blocks)
-            .saturating_sub(self.superblock().reserved_blocks_count());
-        if reserved > blocks_available {
-            return Err(Ext4Error::NoSpace);
+        // Check-then-act admission stays inside one critical section so the
+        // capacity check sees the same snapshot that the accumulation
+        // updates; otherwise two concurrent reserves could both pass on a
+        // stale free/reserved view and over-reserve the mount-wide total,
+        // starving later writes and underreporting statfs. Lock order stays
+        // allocator then delalloc, matching statfs.
+        {
+            let allocator = sync::mutex_lock(&self.allocator);
+            let mut delalloc_reserved_blocks = sync::mutex_lock(&self.delalloc_reserved_blocks);
+            let blocks_available = allocator
+                .free_blocks_count
+                .saturating_sub(*delalloc_reserved_blocks)
+                .saturating_sub(self.superblock().reserved_blocks_count());
+            if reserved > blocks_available {
+                return Err(Ext4Error::NoSpace);
+            }
+            *delalloc_reserved_blocks = delalloc_reserved_blocks
+                .checked_add(reserved)
+                .ok_or(Ext4Error::Overflow)?;
         }
-        let new_total = delalloc_reserved_blocks
-            .checked_add(reserved)
-            .ok_or(Ext4Error::Overflow)?;
         let inserted_blocks = inode.insert_unreserved_delalloc_extents(&holes)?;
         assert_eq!(
             inserted_blocks, reserved,
             "validated delayed-allocation holes must preserve their block count"
         );
-        *delalloc_reserved_blocks = new_total;
         Ok(())
     }
 
@@ -1429,13 +1432,13 @@ impl Ext4SbInfo {
         start: LogicalBlock,
         block_count: u64,
     ) -> Ext4Result<()> {
-        let mut delalloc_reserved_blocks = sync::mutex_lock(&self.delalloc_reserved_blocks);
-        self.ensure_delalloc_accounting(inode, *delalloc_reserved_blocks)?;
+        self.ensure_delalloc_accounting(inode)?;
         let end = start
             .get()
             .checked_add(block_count)
             .ok_or(Ext4Error::Overflow)?;
         let released = inode.remove_delalloc_extent(start.get(), end)?;
+        let mut delalloc_reserved_blocks = sync::mutex_lock(&self.delalloc_reserved_blocks);
         *delalloc_reserved_blocks = delalloc_reserved_blocks
             .checked_sub(released)
             .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
@@ -1452,9 +1455,9 @@ impl Ext4SbInfo {
         inode: &Ext4Inode,
         first_block: LogicalBlock,
     ) -> Ext4Result<()> {
-        let mut delalloc_reserved_blocks = sync::mutex_lock(&self.delalloc_reserved_blocks);
-        self.ensure_delalloc_accounting(inode, *delalloc_reserved_blocks)?;
+        self.ensure_delalloc_accounting(inode)?;
         let released = inode.remove_delalloc_from(first_block.get())?;
+        let mut delalloc_reserved_blocks = sync::mutex_lock(&self.delalloc_reserved_blocks);
         *delalloc_reserved_blocks = delalloc_reserved_blocks
             .checked_sub(released)
             .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
@@ -1467,9 +1470,9 @@ impl Ext4SbInfo {
     ///
     /// Returns an accounting-invariant error.
     pub fn release_all_delalloc(&self, inode: &Ext4Inode) -> Ext4Result<()> {
-        let mut delalloc_reserved_blocks = sync::mutex_lock(&self.delalloc_reserved_blocks);
-        self.ensure_delalloc_accounting(inode, *delalloc_reserved_blocks)?;
+        self.ensure_delalloc_accounting(inode)?;
         let released = inode.clear_delalloc_reservations();
+        let mut delalloc_reserved_blocks = sync::mutex_lock(&self.delalloc_reserved_blocks);
         *delalloc_reserved_blocks = delalloc_reserved_blocks
             .checked_sub(released)
             .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
@@ -1512,13 +1515,36 @@ impl Ext4SbInfo {
         Ok(self.inode_location(number)?.block)
     }
 
-    pub(crate) fn initialize_inode_table_entry(
+    pub(crate) fn inode_table_entry_block_in_group(
+        &self,
+        number: InodeNumber,
+        group_index: usize,
+        inode_table_start: u64,
+    ) -> Ext4Result<FilesystemBlock> {
+        Ok(self
+            .inode_location_in_group(number, group_index, inode_table_start)?
+            .block)
+    }
+
+    pub(crate) fn initialize_inode_table_entry_in_group(
         &self,
         block_bytes: &mut [u8],
         number: InodeNumber,
+        group_index: usize,
+        inode_table_start: u64,
         initialization: InodeInitialization,
     ) -> Ext4Result<()> {
-        let location = self.inode_location(number)?;
+        let location = self.inode_location_in_group(number, group_index, inode_table_start)?;
+        self.initialize_inode_table_entry_at(block_bytes, number, location, initialization)
+    }
+
+    fn initialize_inode_table_entry_at(
+        &self,
+        block_bytes: &mut [u8],
+        number: InodeNumber,
+        location: InodeLocation,
+        initialization: InodeInitialization,
+    ) -> Ext4Result<()> {
         let inode_bytes = inode_entry_mut(block_bytes, location)?;
         let extra_isize = self.new_inode_extra_isize(location.inode_size)?;
         encode_initialized_inode(
@@ -1876,12 +1902,14 @@ impl Ext4SbInfo {
         Ok(())
     }
 
-    pub(crate) fn clear_inode_table_entry(
+    pub(crate) fn clear_inode_table_entry_in_group(
         &self,
         block_bytes: &mut [u8],
         number: InodeNumber,
+        group_index: usize,
+        inode_table_start: u64,
     ) -> Ext4Result<()> {
-        let location = self.inode_location(number)?;
+        let location = self.inode_location_in_group(number, group_index, inode_table_start)?;
         inode_entry_mut(block_bytes, location)?.fill(0);
         Ok(())
     }
@@ -1944,10 +1972,39 @@ impl Ext4SbInfo {
 
         let zero_based = inode_number.checked_sub(1).ok_or(Ext4Error::Overflow)?;
         let group = zero_based / self.superblock().inodes_per_group();
-        let index = zero_based % self.superblock().inodes_per_group();
-        let descriptor = self
-            .group(crate::BlockGroupNumber::new(group))
+        let geometry = self
+            .group_geometry(crate::BlockGroupNumber::new(group))
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidInodeNumber))?;
+        self.inode_location_in_group(
+            number,
+            usize::try_from(group).map_err(|_| Ext4Error::Overflow)?,
+            geometry.inode_table(),
+        )
+    }
+
+    /// Location for an inode whose block-group inode-table start is known.
+    ///
+    /// The inode-table start block is a frozen geometry address read from the
+    /// lock-free [`Self::group_geometry`] table; allocator critical sections
+    /// pass it from the same table because calling [`Self::inode_location`]
+    /// there would re-enter the allocator lock.
+    fn inode_location_in_group(
+        &self,
+        number: InodeNumber,
+        group_index: usize,
+        inode_table_start: u64,
+    ) -> Ext4Result<InodeLocation> {
+        let inode_number = number.get();
+        if inode_number == 0 || inode_number > self.superblock().inodes_count() {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeNumber));
+        }
+
+        let zero_based = inode_number.checked_sub(1).ok_or(Ext4Error::Overflow)?;
+        let group = zero_based / self.superblock().inodes_per_group();
+        if u64::from(group) != u64::try_from(group_index).map_err(|_| Ext4Error::Overflow)? {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeNumber));
+        }
+        let index = zero_based % self.superblock().inodes_per_group();
 
         let inode_size = u64::from(self.superblock().inode_size());
         let block_size = u64::from(self.layout().block_size());
@@ -1958,8 +2015,7 @@ impl Ext4SbInfo {
         let byte_offset =
             usize::try_from(table_offset % block_size).map_err(|_| Ext4Error::Overflow)?;
         let inode_size = usize::try_from(inode_size).map_err(|_| Ext4Error::Overflow)?;
-        let inode_table_block = descriptor
-            .inode_table()
+        let inode_table_block = inode_table_start
             .checked_add(block_offset)
             .ok_or(Ext4Error::Overflow)?;
 
