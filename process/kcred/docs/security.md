@@ -48,6 +48,9 @@ kvfs: explicit &Cred -> generic DAC / filesystem callbacks
    prepared credential 不会发布。
 9. **exec 清除 keep-capabilities**：`apply_exec()` 在提交 exec 凭据前清除
    `SECBIT_KEEP_CAPS`。
+10. **real-credential 匹配非对称**：跨任务 real-credential 检查只使用调用者的 real
+    UID/GID，并要求它们分别匹配目标的 real、effective 和 saved UID/GID；不能逐字段
+    比较两份完整凭据。
 
 ## 线程安全
 
@@ -74,6 +77,7 @@ kvfs: explicit &Cred -> generic DAC / filesystem callbacks
 | T-07 | exec 忘记固定 saved IDs | 特权恢复语义错误 | exec credential 副本调用 `apply_exec()` 后再提交 |
 | T-08 | 初始 root credential 被原地修改 | 全局权限破坏 | `initial_cred()` 只发布 `Arc<Cred>`，变更必须 prepare 新对象 |
 | T-09 | 锁定的 keep-capabilities 状态被修改 | 后续 exec 或 UID 转换的权限边界失效 | `keep_caps_enable()` / `keep_caps_disable()` 先检查 `SECBIT_KEEP_CAPS_LOCKED`，失败路径不提交凭据 |
+| T-10 | real-credential 检查逐字段比较 caller/target | 错误放行 set-ID 目标或拒绝合法调用者 | `matches_real_credential_ids()` 固定使用 caller real UID/GID 与 target real/effective/saved IDs 比较，非对称测试覆盖两类反例 |
 
 ## 故障模式与处理
 
@@ -100,6 +104,7 @@ kvfs: explicit &Cred -> generic DAC / filesystem callbacks
 
 - 新转换是否只修改 prepared `Cred`，并在成功后一次提交。
 - UID/GID 检查是否使用正确的 real/effective/saved 集合。
+- real-credential 匹配是否保持 caller-real 对 target 三类 ID 的非对称语义。
 - keep-capabilities 锁定位是否阻止后续修改，exec 是否清除 `KEEP_CAPS`。
 - `fsuid/fsgid` 与补充组是否保持 DAC 所需不变量。
 - 多步检查是否复用同一个 `Arc<Cred>`。

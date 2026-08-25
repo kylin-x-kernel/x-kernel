@@ -207,7 +207,10 @@ pub fn sys_get_robust_list(
     size: UserPtr<usize>,
 ) -> KResult<isize> {
     let task = kprocess::pidfd::robust_list_task(tid)?;
-    head.write_vm(task.as_thread().robust_list_head() as _)?;
+    let current = kprocess::current_user_thread();
+    let target = task.as_thread();
+    kprocess::ptrace::check_read_real_creds_access(&current, target)?;
+    head.write_vm(target.robust_list_head() as _)?;
     size.write_vm(size_of::<robust_list_head>())?;
     Ok(0)
 }

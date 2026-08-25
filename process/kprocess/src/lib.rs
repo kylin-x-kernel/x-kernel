@@ -31,6 +31,8 @@ mod process_runtime;
 pub mod process_signals;
 /// `/proc` visibility and task lookup helpers.
 pub mod procfs;
+/// Ptrace-style cross-task access checks.
+pub mod ptrace;
 mod publication;
 /// Resource-limit target resolution.
 pub mod resource_limits;

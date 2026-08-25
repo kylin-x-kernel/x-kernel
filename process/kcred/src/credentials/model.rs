@@ -162,6 +162,24 @@ impl Cred {
         self.euid == 0
     }
 
+    /// Returns whether this credential's real, effective, and saved IDs all
+    /// match the real user and group IDs of `caller`.
+    ///
+    /// This is the credential-only identity predicate used by Linux
+    /// `PTRACE_MODE_REALCREDS` checks. Filesystem IDs and supplementary groups
+    /// do not participate in this comparison.
+    pub fn matches_real_credential_ids(&self, caller: &Self) -> bool {
+        let caller_uid = caller.ruid;
+        let caller_gid = caller.rgid;
+
+        self.ruid == caller_uid
+            && self.euid == caller_uid
+            && self.suid == caller_uid
+            && self.rgid == caller_gid
+            && self.egid == caller_gid
+            && self.sgid == caller_gid
+    }
+
     /// Implements Linux/POSIX `setuid`.
     ///
     /// A privileged process sets real, effective, saved, and filesystem UIDs.

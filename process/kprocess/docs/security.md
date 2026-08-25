@@ -21,7 +21,8 @@ kprocess / posix/process / ksyscall / ktty
 └──────────────────────────────┘
 ```
 
-- 调用者负责分配唯一 PID、PGID 和 SID，并在 syscall 层执行 POSIX 权限检查。
+- 调用者负责分配唯一 PID、PGID 和 SID。一般 POSIX 权限检查仍由 syscall 层执行；
+  需要统一 task identity 语义的 ptrace-style 跨任务读取由 `kprocess::ptrace` 集中检查。
 - `kprocess` 负责在 safe API 内维护父子关系、进程组关系、session 关系和退出状态不变量。
 - `kprocess` 负责 current-task credential 的定位和 committed `Arc<Cred>` 发布；凭据转换
   规则由 `kcred` 负责。
@@ -56,6 +57,8 @@ kprocess / posix/process / ksyscall / ktty
    `Cred` 副本上完成后，按 `real_cred`、`cred` 的固定锁顺序同时替换。
 12. **objective/subjective 关系明确**：当前未支持 override credential，普通提交要求两个
    旧指针相同，避免静默覆盖未来的临时 subjective identity。
+13. **跨任务读取检查集中**：同线程组豁免、objective credential 快照、real-ID 匹配和
+    特权绕过由 `ptrace::check_read_real_creds_access()` 一次组合，syscall 不重复拼接字段规则。
 
 ## 线程安全
 
@@ -93,6 +96,7 @@ kprocess / posix/process / ksyscall / ktty
 | T-19 | 父进程显式忽略 SIGCHLD 后 zombie 泄漏或被 wait 抢先回收 | 中 | 父进程设置 `SIGCHLD` 为 `SIG_IGN` 或 `SA_NOCLDWAIT`，child exit 与 parent wait / signal handler 并发 | child-exit 通知先准备 autoreap/queue 决策；autoreap child 跳过 waitable zombie 状态，先撤销 children/PID 身份，再提交 typed SIGCHLD payload，并在提交时按当前线程 mask 选择唤醒目标 |
 | T-20 | 失效 PID/TID 目录槽位无限保留 | 高 | wait/exit 只 retire slot 却不从 `BTreeMap` 删除，fork 密集工作负载累积数百 MiB RustHeap | `unpublish_task_if_matches`/`unpublish_process_if_matches` 在 retire 前用 `Arc::ptr_eq` 校验发布身份，再删除仍指向同一 cleanable slot 的目录项；复用后的 Reserved/Published 新身份不会被旧退出路径误退休 |
 | T-21 | zombie 或 reaper identity 继续固定 VFS mount | 高 | exited-state 已发布，但 runtime 的 fd table、`FsStruct` 或 `NsProxy` owner 仍存在 | 最后线程先取走 mm/files/fs/ns owner，再发布 exited state；空 owner 的 accessor 返回 `NoSuchProcess` |
+| T-22 | ptrace-style syscall 各自实现不一致的凭据比较 | 高 | syscall 逐字段比较 caller/target，错误处理 set-ID 凭据 | `kprocess::ptrace` 集中线程组、real-credential 和特权策略；字段匹配复用 `kcred` 的非对称谓词 |
 
 影响等级定义：
 
@@ -160,6 +164,7 @@ signal、scheduler 和 job-control 路径读取，调用者需要在上层执行
 - 新增退出路径是否保持最后线程退出、waitable zombie / autoreap、wait/free 顺序，并在 thread exit / process reap 时携带任务/进程身份按 TID/PID 精确删除目录槽，而非仅凭数字 ID retire（尤其禁止对 `Reserved` 槽位 retire）或依赖全表扫描。
 - 新增 child-exit SIGCHLD 行为是否区分默认 ignored、显式 `SIG_IGN` 和 `SA_NOCLDWAIT`，并保持 autoreap 在提交 SIGCHLD pending 和唤醒 parent waiters 前完成。
 - 新增凭据修改是否遵循 prepare/check/commit，且失败时不替换 committed `Arc`。
+- 新增 ptrace-style 跨任务读取是否复用 `kprocess::ptrace`，而不是在 syscall 层重写凭据比较。
 - 需要文件权限的调用是否在 syscall 入口取得一次快照，而不是让下层反向查询 current task。
 - 新增 current-thread 尾段路径是否仍可通过稳定 `Process` 访问所需 runtime capability，且不会把已退出进程重新暴露为 live。
 - 新增退出 capability 是否在 exited-state 发布前取走；files、fs、namespace accessor

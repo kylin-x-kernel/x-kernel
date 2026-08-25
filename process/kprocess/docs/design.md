@@ -39,6 +39,7 @@ process/kprocess/
     ├── lib.rs
     ├── capability.rs
     ├── credentials.rs
+    ├── ptrace.rs                 # ptrace-style 跨任务访问策略
     ├── job_control.rs
     ├── lookup.rs
     ├── pidfd.rs
@@ -400,6 +401,14 @@ VFS 处于 `kprocess` 下层，不能调用这些 current helpers。syscall 入�
 显式传入 `kvfs`。匿名 fd 的资源 owner 同样接收显式 `Arc<Cred>`，pidfd 构造也由
 syscall adapter 提供快照；credential 最终只保存在 `VfsFile::f_cred`，不复制进资源对象。
 这样既保持单向依赖和一次操作的身份一致性，也允许内核任务明确选择其凭据。
+
+### 跨任务读取权限
+
+`ptrace::check_read_real_creds_access()` 集中组合 Linux
+`PTRACE_MODE_READ_REALCREDS` 风格的 task-level 策略：同一 `Process` 的线程直接放行；
+跨进程时分别取得 caller/target 的 objective credential 快照，复用 `kcred` 的非对称
+real-ID 匹配谓词，并以当前 `euid == 0` 特权模型近似 `CAP_SYS_PTRACE`。syscall adapter
+只负责解析目标并调用该策略，避免各 syscall 重复实现字段比较和线程组判断。
 
 ### 查询策略层与领域接口层分离
 

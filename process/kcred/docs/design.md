@@ -83,6 +83,13 @@ filesystem IDs，不创建一份 effective-ID credential。
 打开文件时，`VfsFile` 保存该 `Arc<Cred>`，对应 Linux `file::f_cred`。descriptor-based
 操作首先依赖 open file 的访问模式；pathname-based 操作继续显式接收调用时凭据。
 
+## 跨任务身份匹配
+
+`Cred::matches_real_credential_ids()` 提供不依赖 task/current context 的纯凭据谓词：
+调用者的 real UID/GID 必须分别匹配目标凭据的 real、effective 和 saved UID/GID。
+该谓词不比较 filesystem IDs 或补充组，也不决定线程组豁免、capability 或其他
+跨任务访问策略；这些策略由持有 `Thread` 身份的 `kprocess` 组合。
+
 ## 状态转换
 
 ### UID/GID
@@ -125,6 +132,7 @@ filesystem IDs，不创建一份 effective-ID credential。
 ## 设计决策
 
 - 凭据数据和转换策略属于 `kcred`，当前任务定位属于 `kprocess`。
+- real-credential 字段匹配属于 `kcred`；线程组和特权绕过等跨任务策略属于 `kprocess`。
 - VFS 显式接收 `&Cred`，不引入全局 current hook 或向上依赖。
 - access 身份选择复用 `Cred`，不增加只为搬运相同字段的结构体。
 - `Nameidata` 只保存路径解析状态；调用上下文由方法参数表达。

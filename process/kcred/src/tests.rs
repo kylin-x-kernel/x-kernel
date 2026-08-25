@@ -258,6 +258,25 @@ fn test_access_credential_uses_real_ids_without_changing_source() {
 }
 
 #[def_test]
+fn test_real_credential_match_uses_only_caller_real_ids() {
+    let mut caller = Cred::new(1000, 100);
+    caller.set_resuid_unchecked(None, Some(2000), Some(3000));
+    caller.set_resgid_unchecked(None, Some(200), Some(300));
+
+    let target = Cred::new(1000, 100);
+    assert!(target.matches_real_credential_ids(&caller));
+}
+
+#[def_test]
+fn test_real_credential_match_rejects_equal_nonuniform_credentials() {
+    let mut caller = Cred::new(1000, 100);
+    caller.set_resuid_unchecked(None, Some(2000), Some(2000));
+    caller.set_resgid_unchecked(None, Some(200), Some(200));
+
+    assert!(!caller.matches_real_credential_ids(&caller));
+}
+
+#[def_test]
 fn test_initial_credential_is_shared() {
     assert!(Arc::ptr_eq(&initial_cred(), &initial_cred()));
 }
