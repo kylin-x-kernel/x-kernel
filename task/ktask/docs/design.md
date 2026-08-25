@@ -393,16 +393,18 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
   只探测、不再 sync（避免把 idle 写进 `curr`）。
 - EEVDF `curr` 只保存 identity/vruntime/deadline/weight 快照，不持有任务 `Arc`；
   `pick_next` 要求此前已 `leave_current`，不再静默擦除陈旧状态。
-- `set_task_affinity`：写 `cpumask` 后 `enforce_affinity_placement`——current 立即
-  `migrate_current`；ready 从旧 RQ `remove_task` 再 `migrate_entry`（目的 RQ 入队后
-  `request_resched_on`，与 `add_task` 相同）；idle-pull 在 steal 与 dest 入队之间
-  会出现 Ready、不在任何队列、`cpu_id` 仍为源 RQ 的窗口，此时 `remove_task` 会 miss，
-  `enforce_affinity_placement` 短暂自旋等到 dest 入队或任务变成 Running，再按 ready /
-  running 路径迁移（失败仍仅限远端 running 迁不走）。远端 running
-  在 `preempt`+`ipi` 下 `request_resched`，由 `preempt_resched`/`yield_current`
-  发现 mask 不含本 CPU 后强制迁移，调用方自旋等到离开非法 CPU；迁不走返回
-  `false`（syscall 侧 `EBUSY`）。idle-pull dest 入队后复查 cpumask，不含本核则
-  立刻 `migrate_entry`，不在非法 CPU 上 pick。
+- `set_task_affinity`：写 `cpumask` 后 `enforce_affinity_placement`。只在任务
+  **正在占用**某颗 CPU 时迁移：current 立即 `migrate_current`；ready 已在禁止
+  RQ 上则 `remove_task` 再 `migrate_entry`（目的 RQ 入队后 `request_resched_on`，
+  与 `add_task` 相同）；远端 running 在 `preempt`+`ipi` 下 `request_resched`，
+  由 `preempt_resched`/`yield_current` 发现 mask 不含本 CPU 后强制迁移，调用方
+  自旋等到离开非法 CPU；迁不走返回 `false`（syscall 侧 `EBUSY`）。
+  未 `activate` 的 prepared 任务、Blocked/Exited、以及 idle-pull steal 到 dest
+  入队之间（Ready、不在任何队列）都不占用 CPU，只改 mask；下一次入队
+  （`activate_task` / wake / dest `commit_idle_pull`）按新 mask 选核。
+  dest 入队后仍复查 cpumask，不含本核则立刻 `migrate_entry`，不在非法 CPU 上 pick。
+  首次绑核用 `set_cpumask` 再 `activate_task`（ksoftirqd / watchdog），不要把
+  未入队任务送进迁移路径。
 - 对 `Blocked` 任务重新入队时，SMP 唤醒方先发布目标 RQ 与 wake flags；若
   `task.on_cpu()` 仍为真，则由原 CPU 在 switch-out 清零 `on_cpu` 后原子认领并完成入队。
   该 handoff 防止重复入队，也避免唤醒方持 `NoPreemptIrqSave` 关中断自旋等待远端 CPU。

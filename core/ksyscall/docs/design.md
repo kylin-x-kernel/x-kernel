@@ -207,7 +207,7 @@ ksyscall::dispatch_irq_syscall
     `CAP_SYS_NICE`，非特权调用者不能降低 nice 值来提高优先级
   - `sched_setaffinity` 同样要求 caller euid 匹配目标 ruid/euid，或 caller 为 root
     （近似 `CAP_SYS_NICE`）；错误序为 ESRCH → EPERM → EINVAL(empty mask)；
-    随后 `ktask::set_task_affinity` 迁移离队，迁不走返回 EBUSY
+    随后 `ktask::set_task_affinity`：已入队则迁移离队，未占用 CPU 只改 mask，迁不走返回 EBUSY
 - `sync/futex.rs`
   - `futex` / `get_robust_list` / `set_robust_list`
   - compound op（`REQUEUE` / `CMP_REQUEUE` / `WAKE_OP`）在单次

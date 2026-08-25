@@ -467,10 +467,16 @@ pub fn set_task_prio(task: &KtaskRef, prio: isize) -> bool {
 
 /// Set the CPU affinity mask for `task`.
 ///
+/// Writes `cpumask` first. If `task` currently occupies a CPU the new mask
+/// forbids (it is running there, or queued on that runqueue), it is migrated
+/// off. Prepared tasks that have not been passed to [`activate_task`],
+/// blocked/exited waiters, and the idle-pull steal-to-enqueue gap are not
+/// occupying a CPU: only the mask changes, and the next enqueue selects a
+/// legal CPU.
+///
 /// Returns `false` if `cpumask` is empty, or (on SMP) if a remote running task
 /// could not be migrated off a newly forbidden CPU. On success the task is not
-/// left running/queued on a CPU outside `cpumask` (blocked tasks only update
-/// the mask and pick a legal CPU on the next wake).
+/// left running or queued on a CPU outside `cpumask`.
 pub fn set_task_affinity(task: &KtaskRef, cpumask: KCpuMask) -> bool {
     if cpumask.is_empty() {
         return false;

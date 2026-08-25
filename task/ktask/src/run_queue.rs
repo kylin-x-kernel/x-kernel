@@ -1737,9 +1737,9 @@ impl RunQueue {
     /// Enqueue a stolen waiter, then drop it if affinity no longer allows dest.
     ///
     /// Steal to enqueue is not atomic: the task is Ready, on no RQ, with
-    /// `cpu_id` still at src. `set_task_affinity` can exclude dest in that
-    /// window. Recheck after `enqueue_task` so this CPU does not pick a task
-    /// the new mask forbids.
+    /// `cpu_id` still at src. `set_task_affinity` in that window is mask-only;
+    /// recheck after `enqueue_task` so this CPU does not pick a task the new
+    /// mask forbids.
     #[cfg(feature = "smp")]
     fn commit_idle_pull(&mut self, stolen: KtaskRef) -> bool {
         let dest = self.cpu_id.as_usize();
@@ -2074,19 +2074,24 @@ fn try_remove_ready_task(task: &KtaskRef) -> Option<KtaskRef> {
     Some(removed)
 }
 
-/// After [`KtaskRef::set_cpumask`], move the task off any CPU the new mask
-/// forbids.
+/// After [`KtaskRef::set_cpumask`], move the task off any CPU it currently
+/// occupies that the new mask forbids.
+///
+/// Enforcement applies only while the task *occupies* a CPU: it is current,
+/// running remotely, or queued on that CPU's runqueue. Prepared-but-not-
+/// activated tasks, blocked/exited waiters, and the idle-pull steal-to-enqueue
+/// gap are not occupying a CPU, so this is mask-only. The next enqueue
+/// (`activate_task`, wake, or dest idle-pull enqueue) selects a CPU from the
+/// new mask. Dest idle-pull still rechecks membership after enqueue.
 ///
 /// - current: migrate immediately (same as historical `set_current_affinity`);
 /// - ready on a forbidden RQ: dequeue and `migrate_entry`;
-/// - ready but not queued (idle-pull in flight): wait until dest enqueue or
-///   the task starts running, then migrate as above;
+/// - not queued: mask-only;
 /// - running remotely: request resched and wait for the affinity migrate in
-///   [`CurrentRunQueueRef::preempt_resched`];
-/// - blocked/exited: mask-only (wake / teardown pick a legal CPU later).
+///   [`CurrentRunQueueRef::preempt_resched`].
 ///
-/// Returns `false` when a remote running task cannot be migrated synchronously
-/// (no preempt/IPI path, or still on a forbidden CPU after the wait).
+/// Returns `false` only when a remote running task cannot be migrated off a
+/// newly forbidden CPU (no preempt/IPI path, or still there after the wait).
 #[cfg(feature = "smp")]
 pub(crate) fn enforce_affinity_placement(task: &KtaskRef) -> bool {
     let cpumask = task.cpumask();
@@ -2108,18 +2113,12 @@ pub(crate) fn enforce_affinity_placement(task: &KtaskRef) -> bool {
         return true;
     }
 
-    // idle-pull leaves a Ready task off every RQ until dest `enqueue_task`.
-    // `try_remove_ready_task` misses that window and must not fall through to
-    // `false` (the documented failure is only a remote *running* migrate).
-    while task.is_ready() && !cpumask.get(task.cpu_id().as_usize()) {
-        if let Some(removed) = try_remove_ready_task(task) {
-            migrate_entry(removed);
-            break;
-        }
-        core::hint::spin_loop();
+    if let Some(removed) = try_remove_ready_task(task) {
+        migrate_entry(removed);
+        return !task.is_running() || cpumask.get(task.cpu_id().as_usize());
     }
 
-    if task.is_running() && !cpumask.get(task.cpu_id().as_usize()) {
+    if task.is_running() {
         #[cfg(all(feature = "preempt", feature = "ipi"))]
         {
             let cpu_id = task.cpu_id();
@@ -2138,17 +2137,16 @@ pub(crate) fn enforce_affinity_placement(task: &KtaskRef) -> bool {
         }
     }
 
-    // A Running→Ready race may leave the task queued on the old RQ; requeue.
+    // Running→Ready on the old RQ can race the IPI wait; take one more dequeue.
     if !task.is_running()
-        && !matches!(task.state(), TaskState::Blocked | TaskState::Exited)
         && !cpumask.get(task.cpu_id().as_usize())
         && let Some(removed) = try_remove_ready_task(task)
     {
         migrate_entry(removed);
     }
 
-    cpumask.get(task.cpu_id().as_usize())
-        || matches!(task.state(), TaskState::Blocked | TaskState::Exited)
+    // Occupying a forbidden CPU is failure. Anything off-queue is mask-only.
+    !task.is_running() || cpumask.get(task.cpu_id().as_usize())
 }
 
 /// Clear the `on_cpu` field of previous task running on this CPU.
@@ -2335,6 +2333,24 @@ mod tests_wake_affinity {
         let task = TaskInner::new_internal(|| {}, "wake-aff".into(), 4096).into_arc();
         task.set_cpu_id(LogicalCpuId::new(home));
         task
+    }
+
+    /// `prepare_task` leaves `Ready` + `cpu_id == 0` and no RQ occupancy.
+    /// Affinity must be mask-only there; spinning until enqueue never arrives.
+    #[def_test]
+    fn set_task_affinity_on_unpublished_task_is_mask_only() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let task = TaskInner::new_internal(|| {}, "aff-prep".into(), 4096).into_arc();
+            assert_eq!(task.cpu_id().as_usize(), 0);
+            assert!(task.is_ready());
+
+            let mut only1 = KCpuMask::new();
+            only1.set(1, true);
+            assert!(crate::set_task_affinity(&task, only1));
+            assert!(task.cpumask().get(1));
+            assert!(!task.cpumask().get(0));
+            assert_eq!(task.state(), TaskState::Ready);
+        }
     }
 
     #[def_test]

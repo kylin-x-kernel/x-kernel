@@ -162,20 +162,17 @@ fn start_softlockup_watchdog_task(cpu_id: LogicalCpuId) {
         format!("watchdog/{}", cpu_id.as_usize()),
         kbuild_config::TASK_STACK_SIZE,
     ));
-    if !ktask::set_task_affinity(&task, ktask::KCpuMask::one_shot_logical(cpu_id)) {
-        warn!(
-            "watchdog: failed to pin softlockup watchdog task to cpu {}",
-            cpu_id.as_usize()
-        );
-        return;
-    }
+    // Spawn pin: write the mask, then activate onto a CPU in that mask
+    // (same as ksoftirqd). `set_task_affinity` migrates a task that already
+    // occupies a runqueue.
+    task.set_cpumask(ktask::KCpuMask::one_shot_logical(cpu_id));
+    ktask::activate_task(&task);
     if !ktask::set_task_prio(&task, WATCHDOG_TASK_PRIO) {
         warn!(
             "watchdog: failed to raise softlockup watchdog task priority on cpu {}",
             cpu_id.as_usize()
         );
     }
-    ktask::activate_task(&task);
 }
 
 fn softlockup_watchdog_task() {

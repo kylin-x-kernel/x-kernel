@@ -22,8 +22,9 @@ EEVDF 算法见 [eevdf-wake.md](eevdf-wake.md)。
   - `clone` 仍继承 creator mask（schbench 依赖此语义 pin worker）。
 
 `sched_get/setaffinity` 应按 tid 解析；`setaffinity` 须先做 same-owner /
-`CAP_SYS_NICE`（当前用 root）校验，再 `set_task_affinity`：ready 换队、
-running 经 IPI/`preempt_resched` 迁出；迁不走则 `EBUSY`，禁止静默成功。
+`CAP_SYS_NICE`（当前用 root）校验，再 `set_task_affinity`：已入队 ready 换队、
+running 经 IPI/`preempt_resched` 迁出；未入队只改 mask；迁不走则 `EBUSY`，
+禁止占用非法 CPU 时静默成功。首次绑核用 `set_cpumask` 再 `activate_task`。
 
 ## `block_on`：wake-before-block 不要 yield
 

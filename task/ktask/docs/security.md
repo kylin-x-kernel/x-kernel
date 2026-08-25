@@ -134,8 +134,8 @@ ksched algorithms / karch context switch / allocator
 | T-04 | `need_resched` 在错误时机触发重入调度 | 中 | 临界区内或异常/IRQ trapframe guard 未释放时直接抢占切换 | 仅设置 pending，`enable_preempt` 安全点检查，并在 active exception context 内延迟实际切换 |
 | T-05 | `task_registry` 指针槽位损坏 | 高 | 非法写入或重复释放 | CAS 协议 + 0/ptr 双态约束 + 弱引用升级校验 |
 | T-06 | snapshot 竞态读取错误 trap frame | 中 | 并发 snapshot session | begin/finish 会话串行 + per-CPU 槽位隔离 |
-| T-07 | affinity 迁移竞态导致任务丢失 | 中 | 迁移中状态被并发修改 | `migrate_current` 受 run queue 临界区保护；`enforce_affinity_placement` 对 ready 持 RQ 锁 `remove_task`，idle-pull 中间态自旋等到再入队，对 running 等远端 preempt 完成 |
-| T-07a | `setaffinity` 静默成功但任务仍在非法 CPU | 高 | 非 current 只写 mask | 成功路径要求 placement 合法，否则 `false`/`EBUSY`；`preempt_resched`/`yield` 强制 affinity migrate |
+| T-07 | affinity 迁移竞态导致任务丢失 | 中 | 迁移中状态被并发修改 | `migrate_current` 受 run queue 临界区保护；`enforce_affinity_placement` 对已入队 ready 持 RQ 锁 `remove_task`，未占用 CPU 时只改 mask，对 running 等远端 preempt 完成 |
+| T-07a | `setaffinity` 静默成功但任务仍在非法 CPU | 高 | 非 current 只写 mask | 成功路径要求当前未占用禁止 CPU（running/queued 必须迁走，未入队只改 mask），否则 `false`/`EBUSY`；`preempt_resched`/`yield` 强制 affinity migrate |
 | T-07b | 运行任务离开路径漏 deactivate 导致调度器残留状态 | 高 | 新 leave 路径绕过统一 API | 全部经 `leave_current`；EEVDF `curr` 非 owning；`pick_next` 断言 |
 | T-07c | `blocked_resched` 无额外强引用导致切换时任务被释放 | 高 | 调用方未 clone current | rustdoc/`# Panics` 约定；`#[track_caller]` + `strong_count > 1` 硬断言；`block_on` 先 clone；unittest `blocked_resched_survives_with_caller_owned_ref` |
 | T-08 | 周期回调执行耗时过长拖慢调度或形成 IRQ 重入循环 | 高 | callback 滥用或执行时间超过 period | API 约束 hardirq 回调短小且不阻塞；一次 IRQ 最多调用每个到期 callback 一次，下一期限从完成时间计算 |
@@ -148,7 +148,7 @@ ksched algorithms / karch context switch / allocator
 | T-11 | 已到期 schedule slot 在不可抢占区反复重装 | 高 | immediate request 被改写为周期性 10μs hrtick | 到期 slot 只设置 pending 并立即清零；soft/periodic deadline 独立保留 |
 | T-12 | idle-pull 偷走仍 `on_cpu` 的任务 | 高 | yield/preempt 入树后、`switch_to` 完成前远端 steal | 只偷 Ready && `!on_cpu`；`can_idle_pull_task` 拒绝 `on_cpu` |
 | T-12a | steal 改 `cpu_id` 把 prev 搬走 | 中 | idle-pull 迁入后唤醒跟到新核 | 唤醒走 `select_idle_sibling`（prev 空闲则回家，否则再找 idle）；与 Linux 抢椅子一致 |
-| T-12b | idle-pull 中间态被 `setaffinity` 漏迁 | 高 | steal 后、dest 入队前 Ready 不在任何 RQ | dest 入队后复查 cpumask，不含 dest 则 `migrate_entry`；`enforce_affinity_placement` 对该窗口自旋等到再入队/Running |
+| T-12b | idle-pull 中间态被 `setaffinity` 漏迁 | 高 | steal 后、dest 入队前 Ready 不在任何 RQ | 该窗口与 unpublished 一样只改 mask；dest 入队后复查 cpumask，不含 dest 则 `migrate_entry` |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -164,7 +164,7 @@ ksched algorithms / karch context switch / allocator
 | F-07 | soft timer deadline 截断为已过期硬件时间 | deadline 超过硬件纳秒表示范围时发生截断 | timer 被立即重复触发 | IRQ 风暴、任务和网络路径停顿 | 1 | typed deadline 贯穿 HAL；backend 使用 checked conversion，超范围钳制到最远可表示期限 |
 | F-08 | 周期 callback overrun 后立即再次到期 | deadline 按旧周期逐次追赶或按 IRQ 入口时间重算 | hardirq 连续回调 | CPU 活锁、调度/soft timer 饥饿 | 1 | callback 前临时置 inactive；完成后以 fresh monotonic time + period 一次性重装 |
 | F-09 | idle-pull 与远端 wake 双锁顺序颠倒 | dest 持锁再锁 src | 死锁 | 调度停住 | 1 | 只锁 src 再 dest 入队；`resched` 已放下 dest 调度锁 |
-| F-10 | idle-pull 窗口 affinity 漏迁 | steal 后 dest 入队前 `setaffinity` | 任务在新掩码外运行 | 隔离违约 | 2 | dest 入队后复查 cpumask；enforce 对 Ready 不在队中间态自旋 |
+| F-10 | idle-pull 窗口 affinity 漏迁 | steal 后 dest 入队前 `setaffinity` | 任务在新掩码外运行 | 隔离违约 | 2 | dest 入队后复查 cpumask；enforce 对未占用 CPU 只改 mask |
 
 ## 故障管理
 
@@ -226,7 +226,7 @@ ksched algorithms / karch context switch / allocator
 - [ ] 不要在 `on_cpu` 仍为真时把 ready 任务迁到别的 RQ（idle-pull 必须拒绝）。
 - [ ] idle-pull 是否只锁 src、经 `steal_ready_task`/`enqueue_task` PLACE_LAG。
 - [ ] idle-pull dest 入队后是否复查 cpumask；不含 dest 是否 `migrate_entry`。
-- [ ] `setaffinity` 遇到 Ready 但不在任何 RQ 时是否等待再入队，而不是直接 `false`。
+- [ ] `setaffinity` 遇到未占用 CPU 的 Ready（unpublished / idle-pull 间隙）是否只改 mask 并成功，而不是自旋或 `false`。
 - [ ] `nr_running` 是否只在 publish/enqueue 记账、block/migrate/exit 销账。
 - [ ] `nr_home` 是否在 block 时保持，仅 exit / 换核时销账。
 - [ ] spawn 是否 idle-first（`nr_running == 0`），再比 `nr_home`。
