@@ -99,8 +99,6 @@ pub struct RiscvVcpu {
     pub host_ctx: [u64; 16],
     /// Guest-programmed SBI timer deadline in guest time units.
     pub timer_deadline: u64,
-    console_buf: [u8; 256],
-    console_len: usize,
 }
 
 impl Default for RiscvVcpu {
@@ -121,8 +119,6 @@ impl Default for RiscvVcpu {
             hstatus: HSTATUS_SPVP,
             host_ctx: [0; 16],
             timer_deadline: 0,
-            console_buf: [0; 256],
-            console_len: 0,
         }
     }
 }
@@ -196,19 +192,42 @@ pub fn hext_init() {
     }
     // log::info!("[HEXT] hstatus.VTW set");
 }
-fn handle_wfi(vcpu: &mut RiscvVcpu) -> ExitAction {
-    vcpu.pc += 4;
-    ktask::sleep(ktime_types::TimeSpan::from_millis(1));
+fn handle_wfi(vcpu: &mut Vcpu<RiscvHext>) -> ExitAction {
+    let arch = &mut vcpu.arch;
+    arch.pc += 4;
+
+    let now = read_time();
+    if arch.timer_deadline != 0 && now >= arch.timer_deadline {
+        return ExitAction::Resume;
+    }
+
+    let deadline = if arch.timer_deadline == 0 {
+        ktime_types::MonotonicInstant::from_span_since_origin(ktime_types::TimeSpan::MAX)
+    } else {
+        let ticks = khal::time::TimerTicks::from_raw(arch.timer_deadline.wrapping_sub(now));
+        let span = khal::time::ticks_to_span(ticks);
+        khal::time::monotonic_time()
+            .checked_add(span)
+            .unwrap_or_else(|| {
+                ktime_types::MonotonicInstant::from_span_since_origin(ktime_types::TimeSpan::MAX)
+            })
+    };
+
+    vcpu.vm
+        .set_vcpu_run_state(vcpu.vcpu_id, crate::vm::VcpuRunState::WfiSleeping);
+    ktask::interruptible_sleep_until(deadline);
+    vcpu.vm
+        .set_vcpu_run_state(vcpu.vcpu_id, crate::vm::VcpuRunState::HostHandlingExit);
     ExitAction::Resume
 }
 
-fn handle_vs_ecall(vcpu: &mut RiscvVcpu) -> ExitAction {
-    let ext = vcpu.gprs[17]; // a7
-    let func = vcpu.gprs[16]; // a6
-    let arg0 = vcpu.gprs[10]; // a0
+fn handle_vs_ecall(vcpu: &mut Vcpu<RiscvHext>) -> ExitAction {
+    let ext = vcpu.arch.gprs[17]; // a7
+    let func = vcpu.arch.gprs[16]; // a6
+    let arg0 = vcpu.arch.gprs[10]; // a0
 
     // Step past ecall instruction.
-    vcpu.pc += 4;
+    vcpu.arch.pc += 4;
 
     match ext {
         GUEST_ECALL_PRINT => {
@@ -222,15 +241,15 @@ fn handle_vs_ecall(vcpu: &mut RiscvVcpu) -> ExitAction {
             ExitAction::VmExit
         }
         SBI_LEGACY_SET_TIMER => {
-            vcpu.timer_deadline = arg0;
+            vcpu.arch.timer_deadline = arg0;
             ExitAction::Resume
         }
         SBI_LEGACY_CONSOLE_PUTCHAR => {
-            sbi_console_putchar(vcpu, arg0 as u8);
+            sbi_console_putchar(arg0 as u8);
             ExitAction::Resume
         }
         SBI_LEGACY_CONSOLE_GETCHAR => {
-            vcpu.gprs[10] = u64::MAX;
+            vcpu.arch.gprs[10] = u64::MAX;
             ExitAction::Resume
         }
         SBI_EXT_BASE => {
@@ -247,26 +266,26 @@ fn handle_vs_ecall(vcpu: &mut RiscvVcpu) -> ExitAction {
                     _ => 0,
                 },
                 _ => {
-                    vcpu.gprs[10] = SBI_ERR_NOT_SUPPORTED;
-                    vcpu.gprs[11] = 0;
+                    vcpu.arch.gprs[10] = SBI_ERR_NOT_SUPPORTED;
+                    vcpu.arch.gprs[11] = 0;
                     return ExitAction::Resume;
                 }
             };
-            vcpu.gprs[10] = SBI_SUCCESS;
-            vcpu.gprs[11] = value;
+            vcpu.arch.gprs[10] = SBI_SUCCESS;
+            vcpu.arch.gprs[11] = value;
             ExitAction::Resume
         }
         SBI_EXT_TIME if func == SBI_TIME_SET_TIMER => {
-            vcpu.timer_deadline = arg0;
-            vcpu.gprs[10] = SBI_SUCCESS;
-            vcpu.gprs[11] = 0;
+            vcpu.arch.timer_deadline = arg0;
+            vcpu.arch.gprs[10] = SBI_SUCCESS;
+            vcpu.arch.gprs[11] = 0;
             ExitAction::Resume
         }
         SBI_EXT_RFENCE => {
             // Single-vCPU VMs have no remote harts to synchronize. Linux still
             // probes and may call RFENCE, so report success for the no-op case.
-            vcpu.gprs[10] = SBI_SUCCESS;
-            vcpu.gprs[11] = 0;
+            vcpu.arch.gprs[10] = SBI_SUCCESS;
+            vcpu.arch.gprs[11] = 0;
             ExitAction::Resume
         }
         _ => {
@@ -275,37 +294,15 @@ fn handle_vs_ecall(vcpu: &mut RiscvVcpu) -> ExitAction {
                 ext,
                 func
             );
-            vcpu.gprs[10] = SBI_ERR_NOT_SUPPORTED;
-            vcpu.gprs[11] = 0;
+            vcpu.arch.gprs[10] = SBI_ERR_NOT_SUPPORTED;
+            vcpu.arch.gprs[11] = 0;
             ExitAction::Resume
         }
     }
 }
 
-fn sbi_console_putchar(vcpu: &mut RiscvVcpu, byte: u8) {
-    if byte == b'\r' {
-        return;
-    }
-    if byte == b'\n' {
-        flush_sbi_console(vcpu);
-        return;
-    }
-    if vcpu.console_len >= vcpu.console_buf.len() {
-        flush_sbi_console(vcpu);
-    }
-    let pos = vcpu.console_len;
-    vcpu.console_buf[pos] = byte;
-    vcpu.console_len = pos + 1;
-}
-
-fn flush_sbi_console(vcpu: &mut RiscvVcpu) {
-    if vcpu.console_len == 0 {
-        return;
-    }
-    let line =
-        core::str::from_utf8(&vcpu.console_buf[..vcpu.console_len]).unwrap_or("<invalid utf8>");
-    log::info!("[guest rv64] {}", line);
-    vcpu.console_len = 0;
+fn sbi_console_putchar(byte: u8) {
+    klogger::kprint!("{}", byte as char);
 }
 
 #[derive(Clone, Copy)]
@@ -541,11 +538,11 @@ impl VmmArch for RiscvHext {
                 CAUSE_VIRTUAL_INSTRUCTION => {
                     // WFI trapped by hstatus.VTW=1.
                     vcpu.exit_category = crate::vm::EXIT_CAT_HALT;
-                    handle_wfi(&mut vcpu.arch)
+                    handle_wfi(vcpu)
                 }
                 CAUSE_VS_ECALL => {
                     vcpu.exit_category = crate::vm::EXIT_CAT_HYPERCALL;
-                    handle_vs_ecall(&mut vcpu.arch)
+                    handle_vs_ecall(vcpu)
                 }
                 12 | 13 | 15 => {
                     // Page fault (shouldn't happen without vsatp).

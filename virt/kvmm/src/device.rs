@@ -166,9 +166,11 @@ impl KvmmDevice {
         unmap_mmio_ranges(&mut vm)?;
         #[cfg(target_arch = "riscv64")]
         {
-            let (uart, rx) = riscv64::uart::Uart16550::new(vm_id);
+            let (uart, rx) = vdev_uart16550::Uart16550::new(vm_id);
             vm.shared().devices().set_console_rx(rx);
-            vm.shared().devices().register_mmio(Box::new(uart));
+            vm.shared()
+                .devices()
+                .register_mmio(Box::new(vdev_uart16550::Uart16550Mmio::new(uart)));
         }
 
         // AArch64: emulate the GIC distributor, pass GICC→GICV, create the vGIC.
@@ -336,9 +338,11 @@ impl KvmmDevice {
         unmap_mmio_ranges(&mut vm)?;
         #[cfg(target_arch = "riscv64")]
         {
-            let (uart, rx) = riscv64::uart::Uart16550::new(vm_id);
+            let (uart, rx) = vdev_uart16550::Uart16550::new(vm_id);
             vm.shared().devices().set_console_rx(rx);
-            vm.shared().devices().register_mmio(Box::new(uart));
+            vm.shared()
+                .devices()
+                .register_mmio(Box::new(vdev_uart16550::Uart16550Mmio::new(uart)));
         }
         #[cfg(target_arch = "riscv64")]
         unmap_riscv64_mmio_ranges(&mut vm)?;
@@ -452,8 +456,8 @@ fn unmap_riscv64_mmio_ranges(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
     let ranges = [
         (
             "riscv-uart",
-            riscv64::uart::UART_BASE,
-            riscv64::uart::UART_SIZE,
+            vdev_uart16550::UART_BASE,
+            vdev_uart16550::UART_SIZE,
         ),
         (
             "riscv-vplic",

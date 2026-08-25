@@ -9,6 +9,12 @@
 extern crate alloc;
 
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+
+const CONSOLE_RX_CAP: usize = 64;
 
 /// A single MMIO device that handles reads and writes at a fixed guest-physical range.
 pub trait MmioDevice: Send {
@@ -118,6 +124,84 @@ pub trait IrqController: Send + Sync {
 /// VM-owned wakeup hook used by interrupt controllers after queueing IRQs.
 pub trait VcpuWaker: Send + Sync {
     fn wake_vcpu(&self, vcpu_id: u32);
+}
+
+/// Single-producer/single-consumer RX FIFO for one VM's guest console.
+///
+/// The host control-device write path is the sole producer (`push`); the guest
+/// UART MMIO read path is the sole consumer (`pop`). `head` is advanced only by
+/// the consumer and `tail` only by the producer.
+pub struct RxChannel {
+    data: UnsafeCell<[u8; CONSOLE_RX_CAP]>,
+    head: AtomicUsize,
+    tail: AtomicUsize,
+    irq_enabled: AtomicBool,
+}
+
+// SAFETY: SPSC ring buffer. The producer writes `data[tail]` then advances
+// `tail` with Release; the consumer reads `data[head]` then advances `head`
+// with Release, observing occupancy via Acquire loads of the opposite index.
+// A slot is only accessed when `tail != head`, and each index is mutated by
+// exactly one side, so producer and consumer never touch the same slot at once.
+unsafe impl Sync for RxChannel {}
+
+impl RxChannel {
+    pub fn new() -> Self {
+        Self {
+            data: UnsafeCell::new([0u8; CONSOLE_RX_CAP]),
+            head: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
+            irq_enabled: AtomicBool::new(false),
+        }
+    }
+
+    /// Push a byte into the guest UART RX FIFO. Returns false if full.
+    pub fn push(&self, byte: u8) -> bool {
+        let tail = self.tail.load(Ordering::Relaxed);
+        let next = (tail + 1) % CONSOLE_RX_CAP;
+        if next == self.head.load(Ordering::Acquire) {
+            return false;
+        }
+        // SAFETY: single producer; consumer cannot read slot `tail` until it
+        // observes the Release store of `tail` below.
+        unsafe {
+            (*self.data.get())[tail] = byte;
+        }
+        self.tail.store(next, Ordering::Release);
+        true
+    }
+
+    pub fn pop(&self) -> Option<u8> {
+        let head = self.head.load(Ordering::Relaxed);
+        if head == self.tail.load(Ordering::Acquire) {
+            return None;
+        }
+        // SAFETY: single consumer; `tail != head` means slot `head` is not the
+        // producer's current target.
+        let byte = unsafe { (*self.data.get())[head] };
+        self.head
+            .store((head + 1) % CONSOLE_RX_CAP, Ordering::Release);
+        Some(byte)
+    }
+
+    pub fn has_data(&self) -> bool {
+        self.head.load(Ordering::Relaxed) != self.tail.load(Ordering::Acquire)
+    }
+
+    /// True if RX has pending data and the guest enabled the RX interrupt.
+    pub fn irq_pending(&self) -> bool {
+        self.has_data() && self.irq_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_irq_enabled(&self, enabled: bool) {
+        self.irq_enabled.store(enabled, Ordering::Release);
+    }
+}
+
+impl Default for RxChannel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Guest physical memory access for virtual device backends.

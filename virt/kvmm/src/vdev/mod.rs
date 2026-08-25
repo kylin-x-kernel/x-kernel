@@ -17,7 +17,9 @@ pub mod dma;
 #[cfg(target_arch = "riscv64")]
 pub mod riscv64;
 
-pub use vdev_core::{GuestDma, IrqController, IrqSender, MmioBus, MmioDevice, VcpuWaker};
+pub use vdev_core::{
+    GuestDma, IrqController, IrqSender, MmioBus, MmioDevice, RxChannel, VcpuWaker,
+};
 
 use crate::{arch::VmmArch, vcpu::Vcpu};
 
@@ -37,7 +39,7 @@ pub trait VcpuHookFactory<A: VmmArch>: Send + Sync {
 
 /// KVMM-owned virtual device registry.
 pub struct VmDevices<A: VmmArch> {
-    common: vdev_core::VmDevices<vdev_vpl011::RxChannel>,
+    common: vdev_core::VmDevices<RxChannel>,
     hook_factories: ksync::Mutex<Vec<Arc<dyn VcpuHookFactory<A>>>>,
 }
 
@@ -89,7 +91,7 @@ impl<A: VmmArch> VmDevices<A> {
         }
     }
 
-    pub fn set_console_rx(&self, rx: Arc<vdev_vpl011::RxChannel>) {
+    pub fn set_console_rx(&self, rx: Arc<RxChannel>) {
         self.common.set_console_rx(rx);
     }
 

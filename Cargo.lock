@@ -3148,6 +3148,7 @@ dependencies = [
  "kcred",
  "khal",
  "kirq",
+ "klogger",
  "kspin 0.2.0-dev",
  "ksync",
  "ktask",
@@ -3160,6 +3161,7 @@ dependencies = [
  "percpu",
  "vdev-core",
  "vdev-test-mmio",
+ "vdev-uart16550",
  "vdev-virtio-net",
  "vdev-vpl011",
 ]
@@ -5358,6 +5360,15 @@ name = "vdev-test-mmio"
 version = "0.2.0-dev"
 dependencies = [
  "log",
+ "vdev-core",
+]
+
+[[package]]
+name = "vdev-uart16550"
+version = "0.2.0-dev"
+dependencies = [
+ "klogger",
+ "ksync",
  "vdev-core",
 ]
 

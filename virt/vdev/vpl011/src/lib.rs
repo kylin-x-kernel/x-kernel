@@ -4,22 +4,18 @@
 
 //! Virtual PL011 UART — guest console TX/RX.
 //!
-//! TX is line-buffered and emitted to the host log (`[guest N] ...`). RX flows
-//! through a shared [`RxChannel`]: the host `/dev/kvmm` writer pushes bytes and
-//! the guest MMIO read path pops them. When RX IRQ is enabled the vGIC can
-//! inject the UART interrupt so the guest wakes to drain the FIFO.
+//! RX flows through a shared [`vdev_core::RxChannel`]: the host `/dev/kvmm`
+//! writer pushes bytes and the guest MMIO read path pops them. When RX IRQ is
+//! enabled the vGIC can inject the UART interrupt so the guest wakes to drain
+//! the FIFO.
 
 #![no_std]
 
 extern crate alloc;
 
 use alloc::sync::Arc;
-use core::{
-    cell::UnsafeCell,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-};
 
-use vdev_core::MmioDevice;
+use vdev_core::{MmioDevice, RxChannel};
 
 pub const PL011_BASE: u64 = 0x0900_0000;
 pub const PL011_SIZE: u64 = 0x1000;
@@ -51,85 +47,6 @@ const FR_RXFE: u32 = 1 << 4; // RX FIFO empty
 const INT_RX: u32 = 1 << 4; // RX interrupt (RIS/MIS/IMSC bit 4)
 
 const LINE_BUF_SIZE: usize = 256;
-const RX_CAP: usize = 64;
-
-/// Single-producer/single-consumer RX FIFO for one VM's console.
-///
-/// The host `/dev/kvmm` write path is the sole producer (`push`); the guest
-/// vCPU MMIO read path is the sole consumer (`pop`). `head` is advanced only by
-/// the consumer, `tail` only by the producer, so the two sides never touch the
-/// same slot concurrently.
-pub struct RxChannel {
-    data: UnsafeCell<[u8; RX_CAP]>,
-    head: AtomicUsize,
-    tail: AtomicUsize,
-    irq_enabled: AtomicBool,
-}
-
-// SAFETY: SPSC ring buffer. The producer writes `data[tail]` then advances
-// `tail` with Release; the consumer reads `data[head]` then advances `head`
-// with Release, observing occupancy via Acquire loads of the opposite index.
-// A slot is only accessed when `tail != head`, and each index is mutated by
-// exactly one side, so producer and consumer never touch the same slot at once.
-unsafe impl Sync for RxChannel {}
-
-impl RxChannel {
-    pub fn new() -> Self {
-        Self {
-            data: UnsafeCell::new([0u8; RX_CAP]),
-            head: AtomicUsize::new(0),
-            tail: AtomicUsize::new(0),
-            irq_enabled: AtomicBool::new(false),
-        }
-    }
-
-    /// Push a byte into the guest UART RX FIFO. Returns false if full.
-    pub fn push(&self, byte: u8) -> bool {
-        let tail = self.tail.load(Ordering::Relaxed);
-        let next = (tail + 1) % RX_CAP;
-        if next == self.head.load(Ordering::Acquire) {
-            return false;
-        }
-        // SAFETY: single producer; consumer cannot read slot `tail` until it
-        // observes the Release store of `tail` below.
-        unsafe {
-            (*self.data.get())[tail] = byte;
-        }
-        self.tail.store(next, Ordering::Release);
-        true
-    }
-
-    pub fn pop(&self) -> Option<u8> {
-        let head = self.head.load(Ordering::Relaxed);
-        if head == self.tail.load(Ordering::Acquire) {
-            return None;
-        }
-        // SAFETY: single consumer; `tail != head` means slot `head` is not the
-        // producer's current target.
-        let byte = unsafe { (*self.data.get())[head] };
-        self.head.store((head + 1) % RX_CAP, Ordering::Release);
-        Some(byte)
-    }
-
-    pub fn has_data(&self) -> bool {
-        self.head.load(Ordering::Relaxed) != self.tail.load(Ordering::Acquire)
-    }
-
-    /// True if RX has pending data AND the guest enabled the RX interrupt.
-    pub fn irq_pending(&self) -> bool {
-        self.has_data() && self.irq_enabled.load(Ordering::Relaxed)
-    }
-
-    pub fn set_irq_enabled(&self, enabled: bool) {
-        self.irq_enabled.store(enabled, Ordering::Release);
-    }
-}
-
-impl Default for RxChannel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// Emulated PL011 UART for one VM.
 pub struct Vpl011 {

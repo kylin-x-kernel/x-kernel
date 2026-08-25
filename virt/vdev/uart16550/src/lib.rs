@@ -4,9 +4,13 @@
 
 //! Minimal 16550A-compatible UART for RISC-V virt guests.
 
+#![no_std]
+
+extern crate alloc;
+
 use alloc::sync::Arc;
 
-use crate::vdev::MmioDevice;
+use vdev_core::{MmioDevice, RxChannel};
 
 pub const UART_BASE: u64 = 0x1000_0000;
 pub const UART_SIZE: u64 = 0x100;
@@ -27,8 +31,7 @@ const LSR_TEMT: u8 = 1 << 6;
 const IIR_NO_INTERRUPT: u8 = 1 << 0;
 const LINE_BUF_SIZE: usize = 256;
 
-/// Line-buffered RISC-V UART console.
-pub struct Uart16550 {
+struct Uart16550Inner {
     vm_id: u32,
     ier: u8,
     lcr: u8,
@@ -36,29 +39,51 @@ pub struct Uart16550 {
     scr: u8,
     dll: u8,
     dlm: u8,
-    rx: Arc<vdev_vpl011::RxChannel>,
+    rx: Arc<RxChannel>,
     line_buf: [u8; LINE_BUF_SIZE],
     line_len: usize,
 }
 
-impl Uart16550 {
-    pub fn new(vm_id: u32) -> (Self, Arc<vdev_vpl011::RxChannel>) {
-        let rx = Arc::new(vdev_vpl011::RxChannel::new());
-        let dev = Self {
-            vm_id,
-            ier: 0,
-            lcr: 0,
-            mcr: 0,
-            scr: 0,
-            dll: 0,
-            dlm: 0,
-            rx: rx.clone(),
-            line_buf: [0; LINE_BUF_SIZE],
-            line_len: 0,
-        };
-        (dev, rx)
-    }
+/// Line-buffered 16550A UART console.
+pub struct Uart16550 {
+    inner: ksync::Mutex<Uart16550Inner>,
+}
 
+/// MMIO front-end for a shared [`Uart16550`] instance.
+pub struct Uart16550Mmio {
+    uart: Arc<Uart16550>,
+}
+
+impl Uart16550Mmio {
+    /// Create an MMIO front-end for `uart`.
+    pub fn new(uart: Arc<Uart16550>) -> Self {
+        Self { uart }
+    }
+}
+
+impl Uart16550 {
+    /// Create a per-VM 16550A instance plus its shared RX channel.
+    pub fn new(vm_id: u32) -> (Arc<Self>, Arc<RxChannel>) {
+        let rx = Arc::new(RxChannel::new());
+        let dev = Self {
+            inner: ksync::Mutex::new(Uart16550Inner {
+                vm_id,
+                ier: 0,
+                lcr: 0,
+                mcr: 0,
+                scr: 0,
+                dll: 0,
+                dlm: 0,
+                rx: rx.clone(),
+                line_buf: [0; LINE_BUF_SIZE],
+                line_len: 0,
+            }),
+        };
+        (Arc::new(dev), rx)
+    }
+}
+
+impl Uart16550Inner {
     fn divisor_latch_enabled(&self) -> bool {
         self.lcr & 0x80 != 0
     }
@@ -69,7 +94,7 @@ impl Uart16550 {
         }
         let line =
             core::str::from_utf8(&self.line_buf[..self.line_len]).unwrap_or("<invalid utf8>");
-        khal::kprintln!("[guest {}] {}", self.vm_id, line);
+        klogger::kprintln!("[guest {}] {}", self.vm_id, line);
         self.line_len = 0;
     }
 
@@ -102,9 +127,9 @@ impl Uart16550 {
     }
 }
 
-impl MmioDevice for Uart16550 {
+impl MmioDevice for Uart16550Mmio {
     fn name(&self) -> &str {
-        "riscv-uart16550"
+        "uart16550"
     }
 
     fn mmio_range(&self) -> (u64, u64) {
@@ -112,49 +137,53 @@ impl MmioDevice for Uart16550 {
     }
 
     fn read(&self, offset: u64, size: u8) -> u64 {
+        let inner = self.uart.inner.lock();
         if size != 1 && size != 4 {
             return 0;
         }
 
         match offset {
-            UART_RBR_THR_DLL if self.divisor_latch_enabled() => self.dll as u64,
-            UART_RBR_THR_DLL => self.rx.pop().unwrap_or(0) as u64,
-            UART_IER_DLM if self.divisor_latch_enabled() => self.dlm as u64,
-            UART_IER_DLM => self.ier as u64,
+            UART_RBR_THR_DLL if inner.divisor_latch_enabled() => inner.dll as u64,
+            UART_RBR_THR_DLL => inner.rx.pop().unwrap_or(0) as u64,
+            UART_IER_DLM if inner.divisor_latch_enabled() => inner.dlm as u64,
+            UART_IER_DLM => inner.ier as u64,
             UART_IIR_FCR => IIR_NO_INTERRUPT as u64,
-            UART_LCR => self.lcr as u64,
-            UART_MCR => self.mcr as u64,
+            UART_LCR => inner.lcr as u64,
+            UART_MCR => inner.mcr as u64,
             UART_LSR => {
                 let mut lsr = LSR_THRE | LSR_TEMT;
-                if self.rx.has_data() {
+                if inner.rx.has_data() {
                     lsr |= LSR_DATA_READY;
                 }
                 lsr as u64
             }
             UART_MSR => 0,
-            UART_SCR => self.scr as u64,
+            UART_SCR => inner.scr as u64,
             _ => 0,
         }
     }
 
     fn write(&mut self, offset: u64, size: u8, value: u64) {
+        let mut inner = self.uart.inner.lock();
         if size != 1 && size != 4 {
             return;
         }
 
         let value = value as u8;
         match offset {
-            UART_RBR_THR_DLL if self.divisor_latch_enabled() => self.dll = value,
-            UART_RBR_THR_DLL => self.put_char(value),
-            UART_IER_DLM if self.divisor_latch_enabled() => self.dlm = value,
+            UART_RBR_THR_DLL if inner.divisor_latch_enabled() => inner.dll = value,
+            UART_RBR_THR_DLL => inner.put_char(value),
+            UART_IER_DLM if inner.divisor_latch_enabled() => inner.dlm = value,
             UART_IER_DLM => {
-                self.ier = value;
-                self.rx.set_irq_enabled((self.ier & IER_RX_AVAILABLE) != 0);
+                inner.ier = value;
+                inner
+                    .rx
+                    .set_irq_enabled((inner.ier & IER_RX_AVAILABLE) != 0);
             }
             UART_IIR_FCR => {}
-            UART_LCR => self.lcr = value,
-            UART_MCR => self.mcr = value,
-            UART_SCR => self.scr = value,
+            UART_LCR => inner.lcr = value,
+            UART_MCR => inner.mcr = value,
+            UART_SCR => inner.scr = value,
             _ => {}
         }
     }

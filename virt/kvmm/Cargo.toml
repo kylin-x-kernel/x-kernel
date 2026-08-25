@@ -13,6 +13,7 @@ default = []
 
 [dependencies]
 log.workspace = true
+klogger.workspace = true
 kaddr_layout.workspace = true
 ktask.workspace = true
 kalloc.workspace = true
@@ -31,6 +32,7 @@ memspace.workspace = true
 memaddr.workspace = true
 vdev-core.workspace = true
 vdev-test-mmio.workspace = true
+vdev-uart16550.workspace = true
 vdev-virtio-net.workspace = true
 vdev-vpl011.workspace = true
 

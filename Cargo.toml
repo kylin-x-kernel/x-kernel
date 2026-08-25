@@ -176,6 +176,7 @@ xdice = { path = "tee/xdice", default-features = false, features = ["nostd"] }
 kvmm = { path = "virt/kvmm" }
 vdev-core = { path = "virt/vdev/core" }
 vdev-test-mmio = { path = "virt/vdev/test-mmio" }
+vdev-uart16550 = { path = "virt/vdev/uart16550" }
 vdev-virtio-net = { path = "virt/vdev/virtio-net" }
 vdev-vpl011 = { path = "virt/vdev/vpl011" }
 

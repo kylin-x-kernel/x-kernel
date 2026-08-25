@@ -1,16 +1,14 @@
 [package]
-name = "vdev"
+name = "vdev-uart16550"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Virtual device crate collection"
+description = "Virtual 16550A UART device"
 
 [dependencies]
+klogger.workspace = true
+ksync.workspace = true
 vdev-core.workspace = true
-vdev-test-mmio.workspace = true
-vdev-uart16550.workspace = true
-vdev-virtio-net.workspace = true
-vdev-vpl011.workspace = true
