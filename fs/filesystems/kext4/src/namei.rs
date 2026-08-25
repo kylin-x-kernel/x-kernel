@@ -9,7 +9,7 @@ use alloc::{sync::Arc, vec, vec::Vec};
 use crate::{
     BlockCount, BlockMapping, CorruptKind, Ext4Error, Ext4Result, Ext4SbInfo, FilesystemBlock,
     InodeNumber, LogicalBlock, PhysicalBlock, UnsupportedKind,
-    dirhash::{DirectoryHash, directory_hash},
+    dirhash::DirectoryHash,
     disk::{DirectoryFileType, checksum, dir as disk_dir, inode as disk_inode},
     extent::ExtentMappingState,
     inode::{
@@ -1375,7 +1375,7 @@ impl Ext4SbInfo {
         let buffer = self.read_metadata_block(FilesystemBlock::new(physical.get()))?;
         block[..block_size].copy_from_slice(&buffer.as_ref()[..block_size]);
         if directory.has_indexed_directory() {
-            let count_limit = self.decode_htree_root_for_write(directory, &block, block_size)?;
+            let (_, count_limit) = self.decode_htree_root(&block, block_size)?;
             self.verify_htree_block_checksum(
                 directory,
                 0,
@@ -1397,7 +1397,7 @@ impl Ext4SbInfo {
             .write_access(FilesystemBlock::new(physical.get()), handle)?;
         let mut bytes = metadata_access_bytes(&access)?;
         let root_count_limit = if directory.has_indexed_directory() {
-            let count_limit = self.decode_htree_root_for_write(directory, &bytes, block_size)?;
+            let (_, count_limit) = self.decode_htree_root(&bytes, block_size)?;
             self.verify_htree_block_checksum(
                 directory,
                 0,
@@ -1499,13 +1499,8 @@ impl Ext4SbInfo {
                 return Err(Ext4Error::Unsupported(UnsupportedKind::LargeDir));
             }
 
-            let mut records = collect_leaf_records_for_split(
-                &leaf,
-                block_size,
-                target.hash_version,
-                self.superblock().hash_seed(),
-                self.superblock().inodes_count(),
-            )?;
+            let mut records =
+                self.collect_leaf_records_for_split(&leaf, block_size, target.hash_version)?;
             records.sort_by_key(|record| record.hash);
             let split = htree_leaf_split_index(&records, block_size)?;
             let hash2 = records
@@ -2228,8 +2223,10 @@ impl Ext4SbInfo {
         let mut root = vec![0; block_size];
         let root_buffer = self.read_metadata_block(FilesystemBlock::new(root_physical.get()))?;
         root[..block_size].copy_from_slice(&root_buffer.as_ref()[..block_size]);
-        let root_info = disk_dir::HTreeRootInfo::decode(&root)?;
-        let root_count_limit = self.decode_htree_root_for_write(directory, &root, block_size)?;
+        let (root_info, root_count_limit) = self.decode_htree_root(&root, block_size)?;
+        if root_info.indirect_levels() > 1 {
+            return Err(Ext4Error::Unsupported(UnsupportedKind::LargeDir));
+        }
         self.verify_htree_block_checksum(
             directory,
             0,
@@ -2237,11 +2234,7 @@ impl Ext4SbInfo {
             disk_dir::DX_ROOT_COUNT_LIMIT_OFFSET,
             root_count_limit,
         )?;
-        let hash = directory_hash(
-            name,
-            root_info.hash_version(),
-            self.superblock().hash_seed(),
-        )?;
+        let hash = self.htree_hash(name, root_info.hash_version())?;
         let root_index = htree_select_entry(
             &root,
             disk_dir::DX_ROOT_COUNT_LIMIT_OFFSET,
@@ -2389,13 +2382,8 @@ impl Ext4SbInfo {
         if read_len != block_size {
             return Err(Ext4Error::Corrupt(CorruptKind::Truncated));
         }
-        let mut records = collect_leaf_records_for_split(
-            &old_bytes,
-            block_size,
-            target.hash_version,
-            self.superblock().hash_seed(),
-            self.superblock().inodes_count(),
-        )?;
+        let mut records =
+            self.collect_leaf_records_for_split(&old_bytes, block_size, target.hash_version)?;
         records.sort_by_key(|record| record.hash);
         let split = htree_leaf_split_index(&records, block_size)?;
         let hash2 = records
@@ -2494,26 +2482,6 @@ impl Ext4SbInfo {
         self.update_inode_timestamps_metadata(directory, timestamp, handle)
     }
 
-    fn decode_htree_root_for_write(
-        &self,
-        _directory: &Ext4Inode,
-        bytes: &[u8],
-        block_size: usize,
-    ) -> Ext4Result<disk_dir::HTreeCountLimit> {
-        let root_info = disk_dir::HTreeRootInfo::decode(bytes)?;
-        if root_info.reserved_zero() != 0
-            || root_info.info_length() != 8
-            || root_info.flags() != 0
-            || root_info.hash_version() > crate::dirhash::DX_HASH_TEA_UNSIGNED
-        {
-            return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
-        }
-        if root_info.indirect_levels() > 1 {
-            return Err(Ext4Error::Unsupported(UnsupportedKind::LargeDir));
-        }
-        self.decode_htree_count_limit(bytes, disk_dir::DX_ROOT_COUNT_LIMIT_OFFSET, block_size)
-    }
-
     fn decode_htree_node_for_write(
         &self,
         directory: &Ext4Inode,
@@ -2522,7 +2490,7 @@ impl Ext4SbInfo {
         block_size: usize,
     ) -> Ext4Result<disk_dir::HTreeCountLimit> {
         let fake = disk_dir::RawDirectoryEntry::decode(bytes, 0)?;
-        let fake_len = crate::dir::rec_len_from_disk(fake.rec_len(), block_size)?;
+        let fake_len = fake.record_len(block_size)?;
         if fake.inode() != 0 || fake.name_len() != 0 || fake_len != block_size {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
         }
@@ -2847,7 +2815,7 @@ impl LinearInsertSlot {
                 put_u16(
                     bytes,
                     existing_offset + 4,
-                    rec_len_to_disk(existing_rec_len, block_size)?,
+                    disk_dir::RawDirectoryEntry::encode_record_len(existing_rec_len, block_size)?,
                 )?;
                 write_dirent(
                     bytes,
@@ -2882,7 +2850,7 @@ impl LinearRemoveSlot {
                 put_u16(
                     bytes,
                     previous_offset + 4,
-                    rec_len_to_disk(merged_len, block_size)?,
+                    disk_dir::RawDirectoryEntry::encode_record_len(merged_len, block_size)?,
                 )?;
                 let target_end = self
                     .target_offset
@@ -2913,7 +2881,7 @@ fn find_linear_insert_slot(
     let mut offset = 0usize;
     while offset < bytes.len() {
         let entry = disk_dir::RawDirectoryEntry::decode(bytes, offset)?;
-        let rec_len = crate::dir::rec_len_from_disk(entry.rec_len(), block_size)?;
+        let rec_len = entry.record_len(block_size)?;
         if rec_len == 0 || !rec_len.is_multiple_of(4) || rec_len < disk_dir::DIRENT_HEADER_SIZE {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
         }
@@ -2970,7 +2938,7 @@ fn find_linear_remove_slot(
     let mut previous = None;
     while offset < bytes.len() {
         let entry = disk_dir::RawDirectoryEntry::decode(bytes, offset)?;
-        let rec_len = crate::dir::rec_len_from_disk(entry.rec_len(), block_size)?;
+        let rec_len = entry.record_len(block_size)?;
         if rec_len == 0 || !rec_len.is_multiple_of(4) || rec_len < disk_dir::DIRENT_HEADER_SIZE {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
         }
@@ -3035,7 +3003,7 @@ fn find_linear_entry_slot(
     let mut offset = 0usize;
     while offset < bytes.len() {
         let entry = disk_dir::RawDirectoryEntry::decode(bytes, offset)?;
-        let rec_len = crate::dir::rec_len_from_disk(entry.rec_len(), block_size)?;
+        let rec_len = entry.record_len(block_size)?;
         if rec_len == 0 || !rec_len.is_multiple_of(4) || rec_len < disk_dir::DIRENT_HEADER_SIZE {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
         }
@@ -3168,64 +3136,66 @@ fn insert_htree_index_entry(
     disk_dir::HTreeCountLimit::decode(bytes, count_offset)
 }
 
-fn collect_leaf_records_for_split(
-    bytes: &[u8],
-    block_size: usize,
-    hash_version: u8,
-    hash_seed: [u32; 4],
-    inodes_count: u32,
-) -> Ext4Result<Vec<DirectoryLeafRecord>> {
-    let mut records = Vec::new();
-    let mut offset = 0usize;
-    while offset < bytes.len() {
-        let entry = disk_dir::RawDirectoryEntry::decode(bytes, offset)?;
-        let rec_len = crate::dir::rec_len_from_disk(entry.rec_len(), block_size)?;
-        if rec_len == 0 || !rec_len.is_multiple_of(4) || rec_len < disk_dir::DIRENT_HEADER_SIZE {
-            return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
-        }
-        let next = offset.checked_add(rec_len).ok_or(Ext4Error::Overflow)?;
-        if next > bytes.len() {
-            return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
-        }
-        if entry.is_checksum_tail() {
-            if next != bytes.len() {
+impl Ext4SbInfo {
+    fn collect_leaf_records_for_split(
+        &self,
+        bytes: &[u8],
+        block_size: usize,
+        hash_version: u8,
+    ) -> Ext4Result<Vec<DirectoryLeafRecord>> {
+        let mut records = Vec::new();
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let entry = disk_dir::RawDirectoryEntry::decode(bytes, offset)?;
+            let rec_len = entry.record_len(block_size)?;
+            if rec_len == 0 || !rec_len.is_multiple_of(4) || rec_len < disk_dir::DIRENT_HEADER_SIZE
+            {
                 return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
             }
-            break;
-        }
-        let name_len = usize::from(entry.name_len());
-        if name_len > disk_dir::DIRENT_NAME_MAX
-            || disk_dir::DIRENT_HEADER_SIZE
-                .checked_add(name_len)
-                .ok_or(Ext4Error::Overflow)?
-                > rec_len
-        {
-            return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
-        }
-        if entry.inode() != 0 {
-            if entry.inode() > inodes_count {
+            let next = offset.checked_add(rec_len).ok_or(Ext4Error::Overflow)?;
+            if next > bytes.len() {
                 return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
             }
-            let name_start = offset
-                .checked_add(disk_dir::DIRENT_HEADER_SIZE)
-                .ok_or(Ext4Error::Overflow)?;
-            let name_end = name_start
-                .checked_add(name_len)
-                .ok_or(Ext4Error::Overflow)?;
-            let name = bytes
-                .get(name_start..name_end)
-                .ok_or(Ext4Error::Corrupt(CorruptKind::Truncated))?;
-            records.push(DirectoryLeafRecord {
-                hash: directory_hash(name, hash_version, hash_seed)?.major(),
-                inode: InodeNumber::new(entry.inode()),
-                file_type: entry.file_type(),
-                name: Vec::from(name),
-                rec_len,
-            });
+            if entry.is_checksum_tail() {
+                if next != bytes.len() {
+                    return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
+                }
+                break;
+            }
+            let name_len = usize::from(entry.name_len());
+            if name_len > disk_dir::DIRENT_NAME_MAX
+                || disk_dir::DIRENT_HEADER_SIZE
+                    .checked_add(name_len)
+                    .ok_or(Ext4Error::Overflow)?
+                    > rec_len
+            {
+                return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
+            }
+            if entry.inode() != 0 {
+                if entry.inode() > self.superblock().inodes_count() {
+                    return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
+                }
+                let name_start = offset
+                    .checked_add(disk_dir::DIRENT_HEADER_SIZE)
+                    .ok_or(Ext4Error::Overflow)?;
+                let name_end = name_start
+                    .checked_add(name_len)
+                    .ok_or(Ext4Error::Overflow)?;
+                let name = bytes
+                    .get(name_start..name_end)
+                    .ok_or(Ext4Error::Corrupt(CorruptKind::Truncated))?;
+                records.push(DirectoryLeafRecord {
+                    hash: self.htree_hash(name, hash_version)?.major(),
+                    inode: InodeNumber::new(entry.inode()),
+                    file_type: entry.file_type(),
+                    name: Vec::from(name),
+                    rec_len,
+                });
+            }
+            offset = next;
         }
-        offset = next;
+        Ok(records)
     }
-    Ok(records)
 }
 
 fn collect_linear_records_for_index_conversion(
@@ -3238,7 +3208,7 @@ fn collect_linear_records_for_index_conversion(
     let mut offset = 0usize;
     while offset < bytes.len() {
         let entry = disk_dir::RawDirectoryEntry::decode(bytes, offset)?;
-        let rec_len = crate::dir::rec_len_from_disk(entry.rec_len(), block_size)?;
+        let rec_len = entry.record_len(block_size)?;
         if rec_len == 0 || !rec_len.is_multiple_of(4) || rec_len < disk_dir::DIRENT_HEADER_SIZE {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
         }
@@ -3504,20 +3474,6 @@ fn dirent_record_len(name_len: usize) -> Ext4Result<usize> {
         .ok_or(Ext4Error::Overflow)
 }
 
-fn rec_len_to_disk(len: usize, block_size: usize) -> Ext4Result<u16> {
-    if len == 0 || !len.is_multiple_of(4) || len > block_size {
-        return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
-    }
-    if len == block_size && block_size > u16::MAX as usize {
-        return Ok(u16::MAX);
-    }
-    if block_size > u16::MAX as usize {
-        let encoded = (len & 0xfffc) | ((len >> 16) & 0x3);
-        return u16::try_from(encoded).map_err(|_| Ext4Error::Overflow);
-    }
-    u16::try_from(len).map_err(|_| Ext4Error::Overflow)
-}
-
 fn write_dirent(
     bytes: &mut [u8],
     offset: usize,
@@ -3537,7 +3493,11 @@ fn write_dirent(
         .ok_or(Ext4Error::Corrupt(CorruptKind::Truncated))?;
     record.fill(0);
     put_u32(record, 0, inode.get())?;
-    put_u16(record, 4, rec_len_to_disk(rec_len, block_size)?)?;
+    put_u16(
+        record,
+        4,
+        disk_dir::RawDirectoryEntry::encode_record_len(rec_len, block_size)?,
+    )?;
     record[6] = u8::try_from(name.len()).map_err(|_| Ext4Error::InvalidName)?;
     record[7] = file_type.to_raw();
     let name_end = disk_dir::DIRENT_HEADER_SIZE
@@ -3564,7 +3524,11 @@ fn write_free_dirent(
         .get_mut(offset..end)
         .ok_or(Ext4Error::Corrupt(CorruptKind::Truncated))?;
     record.fill(0);
-    put_u16(record, 4, rec_len_to_disk(rec_len, block_size)?)
+    put_u16(
+        record,
+        4,
+        disk_dir::RawDirectoryEntry::encode_record_len(rec_len, block_size)?,
+    )
 }
 
 fn write_checksum_tail(bytes: &mut [u8], offset: usize) -> Ext4Result<()> {

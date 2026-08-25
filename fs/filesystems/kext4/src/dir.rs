@@ -346,12 +346,12 @@ impl Ext4SbInfo {
         let block_size =
             usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
         let dot = disk_dir::RawDirectoryEntry::decode(bytes, 0)?;
-        let dot_rec_len = rec_len_from_disk(dot.rec_len(), block_size)?;
+        let dot_rec_len = dot.record_len(block_size)?;
         if dot_rec_len != 12 {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
         }
         let dotdot = disk_dir::RawDirectoryEntry::decode(bytes, dot_rec_len)?;
-        let dotdot_rec_len = rec_len_from_disk(dotdot.rec_len(), block_size)?;
+        let dotdot_rec_len = dotdot.record_len(block_size)?;
         if dotdot_rec_len
             != block_size
                 .checked_sub(dot_rec_len)
@@ -360,25 +360,7 @@ impl Ext4SbInfo {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
         }
 
-        let root_info = disk_dir::HTreeRootInfo::decode(bytes)?;
-        if root_info.reserved_zero() != 0
-            || root_info.info_length() != 8
-            || root_info.flags() != 0
-            || root_info.hash_version() > 6
-        {
-            return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
-        }
-        if root_info.indirect_levels() > disk_dir::DX_MAX_TREE_DEPTH_WITHOUT_LARGEDIR {
-            if self.superblock().features().has_large_dir()
-                && root_info.indirect_levels() <= disk_dir::DX_MAX_TREE_DEPTH_WITH_LARGEDIR
-            {
-                return Err(Ext4Error::Unsupported(UnsupportedKind::LargeDir));
-            }
-            return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
-        }
-
-        let count_limit =
-            self.decode_htree_count_limit(bytes, disk_dir::DX_ROOT_COUNT_LIMIT_OFFSET, block_size)?;
+        let (root_info, count_limit) = self.decode_htree_root(bytes, block_size)?;
         self.verify_htree_block_checksum(
             inode,
             0,
@@ -402,6 +384,31 @@ impl Ext4SbInfo {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
         }
         Ok(leaf_blocks)
+    }
+
+    pub(crate) fn decode_htree_root(
+        &self,
+        bytes: &[u8],
+        block_size: usize,
+    ) -> Ext4Result<(disk_dir::HTreeRootInfo, disk_dir::HTreeCountLimit)> {
+        let root_info = disk_dir::HTreeRootInfo::decode(bytes)?;
+        root_info.validate()?;
+        let max_levels = if self.superblock().features().has_large_dir() {
+            disk_dir::DX_HTREE_LEVEL
+        } else {
+            disk_dir::DX_HTREE_LEVEL_COMPAT
+        };
+        if root_info.indirect_levels() >= max_levels {
+            if !self.superblock().features().has_large_dir()
+                && root_info.indirect_levels() < disk_dir::DX_HTREE_LEVEL
+            {
+                return Err(Ext4Error::Unsupported(UnsupportedKind::LargeDir));
+            }
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
+        }
+        let count_limit =
+            self.decode_htree_count_limit(bytes, disk_dir::DX_ROOT_COUNT_LIMIT_OFFSET, block_size)?;
+        Ok((root_info, count_limit))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -461,7 +468,7 @@ impl Ext4SbInfo {
             .get(..read_len)
             .ok_or(Ext4Error::Corrupt(CorruptKind::Truncated))?;
         let fake_dirent = disk_dir::RawDirectoryEntry::decode(bytes, 0)?;
-        let fake_rec_len = rec_len_from_disk(fake_dirent.rec_len(), block_size)?;
+        let fake_rec_len = fake_dirent.record_len(block_size)?;
         if fake_dirent.inode() != 0 || fake_dirent.name_len() != 0 || fake_rec_len != block_size {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
         }
@@ -513,7 +520,7 @@ impl Ext4SbInfo {
         } else {
             block_size
         };
-        if entries_end > max_entries_end {
+        if entries_end != max_entries_end {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
         }
         Ok(count_limit)
@@ -687,7 +694,7 @@ fn scan_directory_block(
     let mut offset = 0usize;
     while offset < bytes.len() {
         let entry = disk_dir::RawDirectoryEntry::decode(bytes, offset)?;
-        let rec_len = rec_len_from_disk(entry.rec_len(), block_size)?;
+        let rec_len = entry.record_len(block_size)?;
         if rec_len == 0 || rec_len % 4 != 0 || rec_len < disk_dir::DIRENT_HEADER_SIZE {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
         }
@@ -750,15 +757,6 @@ fn scan_directory_block(
         offset = next;
     }
     Ok(true)
-}
-
-pub(crate) fn rec_len_from_disk(raw: u16, block_size: usize) -> Ext4Result<usize> {
-    let len = usize::from(raw);
-    if len == u16::MAX as usize || len == 0 {
-        return Ok(block_size);
-    }
-    let high_bits = len.checked_shl(16).ok_or(Ext4Error::Overflow)? & 0x30000;
-    Ok((len & 0xfffc) | high_bits)
 }
 
 #[cfg(test)]

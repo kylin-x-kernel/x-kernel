@@ -135,6 +135,8 @@ pub enum CorruptKind {
     InvalidExtent,
     /// A directory entry is structurally invalid.
     InvalidDirectoryEntry,
+    /// The superblock selects an invalid default directory hash.
+    InvalidDirectoryHash,
     /// An extended-attribute entry or block is structurally invalid.
     InvalidXattr,
     /// The Ext4 journal location or JBD2 geometry is invalid.

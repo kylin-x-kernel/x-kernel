@@ -19,7 +19,10 @@ use block::{BlockDeviceOperations, Device, DeviceKind, DriverError, DriverResult
 use crate::{
     BlockMapping, DirectoryFileType, Ext4DirEntryRef, Ext4DirPos, Ext4DirSink, Ext4Error,
     Ext4Inode, Ext4Result, Ext4SbInfo, Ext4Timestamp, Ext4XattrNamespace, FilesystemBlock,
-    InodeKind, InodeNumber, LogicalBlock, UnsupportedKind, superblock::Ext4StatFsMode,
+    InodeKind, InodeNumber, LogicalBlock, Superblock, UnsupportedKind,
+    dirhash::DX_HASH_UNSIGNED_OFFSET,
+    disk::superblock::{EXT2_FLAGS_SIGNED_HASH, EXT2_FLAGS_UNSIGNED_HASH},
+    superblock::Ext4StatFsMode,
 };
 
 const DEVICE_BLOCK_SIZE: usize = 512;
@@ -1830,6 +1833,135 @@ fn reads_linux_htree_directory() {
 }
 
 #[test]
+fn unsigned_linux_htree_split_remains_lookup_compatible() {
+    const LINUX_ENTRY_COUNT: usize = 192;
+    const MAX_INSERTIONS_BEFORE_SPLIT: usize = 64;
+
+    let mke2fs = require_e2fsprogs("mke2fs");
+    let debugfs = require_e2fsprogs("debugfs");
+    let e2fsck = require_e2fsprogs("e2fsck");
+    let image = temporary_image_path("unsigned-htree-split");
+    let payload = temporary_image_path("unsigned-htree-split-payload");
+    let script = temporary_image_path("unsigned-htree-split-debugfs");
+    create_image(&mke2fs, &image);
+    fs::write(&payload, b"x").expect("write unsigned htree payload");
+
+    let linux_names: Vec<String> = (0..LINUX_ENTRY_COUNT)
+        .map(|index| long_high_byte_name("linux", index))
+        .collect();
+    let mut commands = String::from("mkdir /big\n");
+    for name in &linux_names {
+        commands.push_str(&format!("write {} /big/{name}\n", payload.display()));
+    }
+    fs::write(&script, commands).expect("write unsigned htree debugfs command file");
+    run_debugfs_script(&debugfs, &image, &script);
+    run_debugfs(
+        &debugfs,
+        &image,
+        &format!("set_super_value flags {EXT2_FLAGS_UNSIGNED_HASH}"),
+    );
+    run_e2fsck_optimize_directories(&e2fsck, &image);
+
+    let bytes = fs::read(&image).expect("read generated unsigned htree image");
+    let superblock = Superblock::decode(&bytes[1024..2048]).expect("decode unsigned superblock");
+    assert_ne!(superblock.flags() & EXT2_FLAGS_UNSIGNED_HASH, 0);
+    assert_eq!(superblock.flags() & EXT2_FLAGS_SIGNED_HASH, 0);
+
+    let device = Arc::new(WritableImageDevice::new(bytes));
+    let (inserted_names, split_name) = {
+        let mut filesystem =
+            Ext4SbInfo::mount(device.clone()).expect("mount Linux unsigned htree image");
+        assert_eq!(filesystem.hash_unsigned, DX_HASH_UNSIGNED_OFFSET);
+        let root = filesystem.root_inode().expect("read unsigned htree root");
+        let big_entry = filesystem
+            .lookup(&root, "big")
+            .expect("lookup unsigned htree directory")
+            .expect("unsigned htree directory exists");
+        let big = filesystem
+            .load_inode_private(big_entry.inode())
+            .expect("read unsigned htree directory inode");
+        assert_ne!(big.flags() & 0x0000_1000, 0);
+        for name in &linux_names {
+            assert!(
+                filesystem
+                    .lookup(&big, name)
+                    .expect("lookup Linux unsigned htree entry")
+                    .is_some(),
+                "Linux unsigned htree entry is missing: {name}"
+            );
+        }
+
+        let size_before_split = big.size();
+        let mut inserted_names = Vec::new();
+        let mut split_name = None;
+        for index in 0..MAX_INSERTIONS_BEFORE_SPLIT {
+            let name = long_high_byte_name("kext4", index);
+            filesystem
+                .create_regular_file(
+                    &big,
+                    name.as_bytes(),
+                    0o644,
+                    0,
+                    0,
+                    Ext4Timestamp::new(1_730_000_000, 0),
+                )
+                .expect("insert entry into unsigned htree");
+            inserted_names.push(name.clone());
+            if big.size() > size_before_split {
+                split_name = Some(name);
+                break;
+            }
+        }
+        let split_name = split_name.expect("unsigned htree insertion must split a leaf");
+        for name in linux_names.iter().chain(&inserted_names) {
+            assert!(
+                filesystem
+                    .lookup(&big, name)
+                    .expect("lookup entry after unsigned htree split")
+                    .is_some(),
+                "entry is missing after unsigned htree split: {name}"
+            );
+        }
+        filesystem
+            .sync_filesystem()
+            .expect("persist unsigned htree split");
+        (inserted_names, split_name)
+    };
+
+    fs::write(&image, device.committed_bytes()).expect("persist unsigned htree split image");
+    run_e2fsck_check(&e2fsck, &image);
+    assert_debugfs_path_exists(&debugfs, &image, &format!("/big/{split_name}"));
+
+    let filesystem = Ext4SbInfo::mount(Arc::new(ImageDevice::new(
+        fs::read(&image).expect("read checked unsigned htree split image"),
+    )))
+    .expect("remount checked unsigned htree split image");
+    let root = filesystem
+        .root_inode()
+        .expect("read remounted unsigned root");
+    let big_entry = filesystem
+        .lookup(&root, "big")
+        .expect("lookup remounted unsigned htree directory")
+        .expect("remounted unsigned htree directory exists");
+    let big = filesystem
+        .load_inode_private(big_entry.inode())
+        .expect("read remounted unsigned htree inode");
+    for name in linux_names.iter().chain(&inserted_names) {
+        assert!(
+            filesystem
+                .lookup(&big, name)
+                .expect("lookup remounted unsigned htree entry")
+                .is_some(),
+            "remounted unsigned htree entry is missing: {name}"
+        );
+    }
+
+    fs::remove_file(payload).expect("remove unsigned htree payload");
+    fs::remove_file(script).expect("remove unsigned htree debugfs command file");
+    fs::remove_file(image).expect("remove generated unsigned htree image");
+}
+
+#[test]
 fn rejects_corrupt_superblock_checksum() {
     let mke2fs = require_e2fsprogs("mke2fs");
     let image = temporary_image_path("bad-super");
@@ -2317,6 +2449,20 @@ fn run_debugfs(debugfs: &Path, image: &Path, command: &str) {
     assert!(status.success(), "debugfs command failed: {command}");
 }
 
+fn assert_debugfs_path_exists(debugfs: &Path, image: &Path, path: &str) {
+    let output = Command::new(debugfs)
+        .args(["-R", &format!("stat {path}")])
+        .arg(image)
+        .output()
+        .expect("run debugfs stat");
+    assert!(output.status.success(), "debugfs stat failed for {path}");
+    let stdout = String::from_utf8(output.stdout).expect("debugfs stat output is UTF-8");
+    assert!(
+        stdout.contains("Inode:"),
+        "debugfs did not find unsigned htree path {path}"
+    );
+}
+
 fn run_debugfs_script(debugfs: &Path, image: &Path, script: &Path) {
     let status = Command::new(debugfs)
         .arg("-w")
@@ -2373,4 +2519,13 @@ fn find_e2fsprogs(name: &str) -> Option<PathBuf> {
 
 fn temporary_image_path(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("kext4-{label}-{}.img", std::process::id()))
+}
+
+fn long_high_byte_name(prefix: &str, index: usize) -> String {
+    let mut name = format!("{prefix}-{index:04}-");
+    while name.len() < 180 {
+        name.push('x');
+    }
+    name.push('\u{00e9}');
+    name
 }

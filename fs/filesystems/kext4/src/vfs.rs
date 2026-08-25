@@ -14,10 +14,10 @@ use kvfs::{
     FiemapExtentInfo, FiemapFlags, FileDirOperations, FileOperations, InodeAttributeOperations,
     InodeDirOperations, InodeFiemapOperations, InodeOperations, InodeSymlinkOperations, Kiocb,
     LockedDentry, Metadata, MetadataUpdate, NodePermission, NodeType, PageMkwriteRequest,
-    ReadaheadControl, RenameFlags, StatFs, SuperBlock, SuperBlockOperations, Umode, VfsError,
-    VfsFile, VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest, WriteEndRequest,
-    WritebackControl, XattrName, XattrNameRef, XattrNameSink, XattrSetFlags, default_evict_inode,
-    inode_init_owner,
+    ReadaheadControl, RenameFlags, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations,
+    Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest,
+    WriteEndRequest, WritebackControl, XattrName, XattrNameRef, XattrNameSink, XattrSetFlags,
+    default_evict_inode, inode_init_owner,
 };
 
 use crate::{
@@ -57,6 +57,9 @@ impl Ext4MountOptions {
                 b"" => {}
                 b"minixdf" => options.statfs_mode = Some(Ext4StatFsMode::Minix),
                 b"bsddf" => options.statfs_mode = Some(Ext4StatFsMode::Bsd),
+                // Linux accepts these explicit positive defaults. KExt4 has no
+                // per-mount state to change for either compatibility spelling.
+                b"acl" | b"user_xattr" => {}
                 _ => return Err(VfsError::InvalidInput),
             }
         }
@@ -325,14 +328,16 @@ impl Ext4SuperOperations {
             .clone();
         let device: Arc<dyn block::BlockDeviceOperations> = device;
         let statfs_mode = options.mount_statfs_mode();
-        let state = match Ext4SbInfo::mount_with_statfs_mode(device.clone(), statfs_mode) {
+        let is_read_only = super_block.flags().contains(SuperBlockFlags::RDONLY);
+        let mount_fn = |device| Ext4SbInfo::prepare_mount_with_statfs_mode(device, statfs_mode);
+        let state = match mount_fn(device.clone()) {
             Ok(state) => state,
             Err(Ext4Error::NeedsRecovery) => {
                 if let Err(error) = Ext4SbInfo::recover(device.clone()) {
                     error!("KExt4 recovery failed: {error:?}");
                     return Err(into_vfs_err(error));
                 }
-                match Ext4SbInfo::mount_with_statfs_mode(device, statfs_mode) {
+                match mount_fn(device) {
                     Ok(state) => state,
                     Err(error) => {
                         error!("KExt4 mount after filesystem recovery failed: {error:?}");
@@ -354,10 +359,17 @@ impl Ext4SuperOperations {
             block_size,
             max_file_size,
             |super_block| {
-                let root = Self::iget(super_block, InodeNumber::new(EXT4_ROOT_INO)).inspect_err(
-                    |error| error!("KExt4 root inode VFS initialization failed: {error:?}"),
-                )?;
-                Ok(Dentry::new_dir_from_inode(root, None, String::new()))
+                let root_inode = Self::iget(super_block, InodeNumber::new(EXT4_ROOT_INO))
+                    .inspect_err(|error| {
+                        error!("KExt4 root inode VFS initialization failed: {error:?}")
+                    })?;
+                let root = Dentry::new_dir_from_inode(root_inode, None, String::new());
+                if !is_read_only {
+                    sync::write_lock(ext4_private(super_block)?)
+                        .persist_directory_hash_policy()
+                        .map_err(into_vfs_err)?;
+                }
+                Ok(root)
             },
         )
     }
@@ -1688,6 +1700,26 @@ mod tests {
                 .unwrap()
                 .mount_statfs_mode(),
             Ext4StatFsMode::Bsd
+        );
+    }
+
+    #[def_test]
+    fn linux_default_acl_and_user_xattr_options_are_accepted() {
+        for option in [
+            &b"acl\0"[..],
+            &b"user_xattr\0"[..],
+            &b"acl,user_xattr\0"[..],
+        ] {
+            assert_eq!(
+                Ext4MountOptions::parse(Some(option)).unwrap(),
+                Ext4MountOptions::default()
+            );
+        }
+        assert_eq!(
+            Ext4MountOptions::parse(Some(b"acl,minixdf,user_xattr\0"))
+                .unwrap()
+                .mount_statfs_mode(),
+            Ext4StatFsMode::Minix
         );
     }
 

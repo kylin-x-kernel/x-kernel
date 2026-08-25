@@ -2,15 +2,16 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use crate::{Ext4Error, Ext4Result, UnsupportedKind};
+use crate::{
+    CorruptKind, Ext4Error, Ext4Result, UnsupportedKind,
+    disk::dir::{DX_HASH_HALF_MD4, DX_HASH_LEGACY, DX_HASH_SIPHASH, DX_HASH_TEA},
+    superblock::Ext4SbInfo,
+};
 
-pub(crate) const DX_HASH_LEGACY: u8 = 0;
-pub(crate) const DX_HASH_HALF_MD4: u8 = 1;
-pub(crate) const DX_HASH_TEA: u8 = 2;
-pub(crate) const DX_HASH_LEGACY_UNSIGNED: u8 = 3;
-pub(crate) const DX_HASH_HALF_MD4_UNSIGNED: u8 = 4;
-pub(crate) const DX_HASH_TEA_UNSIGNED: u8 = 5;
-
+pub(crate) const DX_HASH_UNSIGNED_OFFSET: u8 = 3;
+const DX_HASH_LEGACY_UNSIGNED: u8 = DX_HASH_LEGACY + DX_HASH_UNSIGNED_OFFSET;
+const DX_HASH_HALF_MD4_UNSIGNED: u8 = DX_HASH_HALF_MD4 + DX_HASH_UNSIGNED_OFFSET;
+const DX_HASH_TEA_UNSIGNED: u8 = DX_HASH_TEA + DX_HASH_UNSIGNED_OFFSET;
 const DEFAULT_SEED: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
 const TEA_DELTA: u32 = 0x9e37_79b9;
 const HTREE_EOF_32BIT: u32 = (1u32 << 31) - 1;
@@ -25,32 +26,68 @@ impl DirectoryHash {
     pub(crate) const fn major(self) -> u32 {
         self.major
     }
+
+    fn from_effective_version(name: &[u8], hash_version: u8, seed: [u32; 4]) -> Ext4Result<Self> {
+        let mut state = hash_state(seed);
+        let (major, minor) = match hash_version {
+            DX_HASH_LEGACY => (legacy_hash(name, false), 0),
+            DX_HASH_LEGACY_UNSIGNED => (legacy_hash(name, true), 0),
+            DX_HASH_HALF_MD4 => half_md4_hash(name, false, &mut state),
+            DX_HASH_HALF_MD4_UNSIGNED => half_md4_hash(name, true, &mut state),
+            DX_HASH_TEA => tea_hash(name, false, &mut state),
+            DX_HASH_TEA_UNSIGNED => tea_hash(name, true, &mut state),
+            DX_HASH_SIPHASH => {
+                return Err(Ext4Error::Unsupported(UnsupportedKind::EncryptedName));
+            }
+            _ => return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry)),
+        };
+        Ok(Self::normalized(major, minor))
+    }
+
+    fn orlov(name: &[u8], seed: [u32; 4]) -> Self {
+        let mut state = hash_state(seed);
+        let (major, minor) = half_md4_hash(name, false, &mut state);
+        Self::normalized(major, minor)
+    }
+
+    fn normalized(mut major: u32, minor: u32) -> Self {
+        major &= !1;
+        if major == (HTREE_EOF_32BIT << 1) {
+            major = (HTREE_EOF_32BIT - 1) << 1;
+        }
+        Self { major, minor }
+    }
 }
 
-pub(crate) fn directory_hash(
-    name: &[u8],
-    hash_version: u8,
-    seed: [u32; 4],
-) -> Ext4Result<DirectoryHash> {
-    let mut state = if seed.iter().any(|word| *word != 0) {
+impl Ext4SbInfo {
+    /// Applies the mount-wide signedness policy to an on-disk HTree version.
+    pub(crate) fn htree_hash(
+        &self,
+        name: &[u8],
+        root_hash_version: u8,
+    ) -> Ext4Result<DirectoryHash> {
+        let hash_version = if root_hash_version <= DX_HASH_TEA {
+            root_hash_version
+                .checked_add(self.hash_unsigned)
+                .ok_or(Ext4Error::Overflow)?
+        } else {
+            root_hash_version
+        };
+        DirectoryHash::from_effective_version(name, hash_version, self.superblock.hash_seed())
+    }
+
+    /// Computes the fixed signed HALF_MD4 hash used only for Orlov placement.
+    pub(crate) fn orlov_hash(&self, name: &[u8]) -> DirectoryHash {
+        DirectoryHash::orlov(name, self.superblock.hash_seed())
+    }
+}
+
+fn hash_state(seed: [u32; 4]) -> [u32; 4] {
+    if seed.iter().any(|word| *word != 0) {
         seed
     } else {
         DEFAULT_SEED
-    };
-    let (mut major, minor) = match hash_version {
-        DX_HASH_LEGACY => (legacy_hash(name, false), 0),
-        DX_HASH_LEGACY_UNSIGNED => (legacy_hash(name, true), 0),
-        DX_HASH_HALF_MD4 => half_md4_hash(name, false, &mut state),
-        DX_HASH_HALF_MD4_UNSIGNED => half_md4_hash(name, true, &mut state),
-        DX_HASH_TEA => tea_hash(name, false, &mut state),
-        DX_HASH_TEA_UNSIGNED => tea_hash(name, true, &mut state),
-        _ => return Err(Ext4Error::Unsupported(UnsupportedKind::IndexedDirectory)),
-    };
-    major &= !1;
-    if major == (HTREE_EOF_32BIT << 1) {
-        major = (HTREE_EOF_32BIT - 1) << 1;
     }
-    Ok(DirectoryHash { major, minor })
 }
 
 fn legacy_hash(name: &[u8], unsigned: bool) -> u32 {
@@ -225,4 +262,50 @@ fn round3(target: &mut u32, b: u32, c: u32, d: u32, word: u32, shift: u32) {
         .wrapping_add(word)
         .wrapping_add(0x6ed9_eba1)
         .rotate_left(shift);
+}
+
+#[cfg(unittest)]
+mod unittests {
+    use unittest::{assert_eq, assert_ne, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn siphash_is_unsupported_instead_of_corrupt() {
+        assert_eq!(
+            DirectoryHash::from_effective_version(b"name", DX_HASH_SIPHASH, [0; 4]),
+            Err(Ext4Error::Unsupported(UnsupportedKind::EncryptedName))
+        );
+    }
+
+    #[def_test]
+    fn effective_version_selects_signedness() {
+        let signed = DirectoryHash::from_effective_version(&[0x80], DX_HASH_LEGACY, [0; 4])
+            .expect("signed legacy hash");
+        let unsigned =
+            DirectoryHash::from_effective_version(&[0x80], DX_HASH_LEGACY_UNSIGNED, [0; 4])
+                .expect("unsigned legacy hash");
+
+        assert_ne!(signed, unsigned);
+    }
+
+    #[def_test]
+    fn orlov_ignores_htree_default_version_and_unsigned_variant() {
+        let seed = [1, 2, 3, 4];
+        let orlov = DirectoryHash::orlov(&[0x80], seed);
+        let signed = DirectoryHash::from_effective_version(&[0x80], DX_HASH_HALF_MD4, seed)
+            .expect("signed half-MD4 hash");
+        let unsigned =
+            DirectoryHash::from_effective_version(&[0x80], DX_HASH_HALF_MD4_UNSIGNED, seed)
+                .expect("unsigned half-MD4 hash");
+
+        assert_eq!(orlov, signed);
+        assert_ne!(orlov, unsigned);
+        for htree_default_version in [DX_HASH_LEGACY, DX_HASH_TEA] {
+            let htree_default =
+                DirectoryHash::from_effective_version(&[0x80], htree_default_version, seed)
+                    .expect("HTree default hash");
+            assert_ne!(orlov, htree_default);
+        }
+    }
 }

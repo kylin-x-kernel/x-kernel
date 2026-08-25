@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use crate::{Ext4Result, disk::codec};
+use crate::{CorruptKind, Ext4Error, Ext4Result, disk::codec};
 
 pub(crate) const DIRENT_HEADER_SIZE: usize = 8;
 pub(crate) const DIRENT_NAME_MAX: usize = 255;
@@ -15,8 +15,12 @@ pub(crate) const DX_COUNT_LIMIT_SIZE: usize = 4;
 pub(crate) const DX_ENTRY_SIZE: usize = 8;
 pub(crate) const DX_TAIL_SIZE: usize = 8;
 pub(crate) const DX_BLOCK_MASK: u32 = 0x0fff_ffff;
-pub(crate) const DX_MAX_TREE_DEPTH_WITHOUT_LARGEDIR: u8 = 2;
-pub(crate) const DX_MAX_TREE_DEPTH_WITH_LARGEDIR: u8 = 3;
+pub(crate) const DX_HTREE_LEVEL_COMPAT: u8 = 2;
+pub(crate) const DX_HTREE_LEVEL: u8 = 3;
+pub(crate) const DX_HASH_LEGACY: u8 = 0;
+pub(crate) const DX_HASH_HALF_MD4: u8 = 1;
+pub(crate) const DX_HASH_TEA: u8 = 2;
+pub(crate) const DX_HASH_SIPHASH: u8 = 6;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DirectoryFileType {
@@ -85,8 +89,28 @@ impl RawDirectoryEntry {
         self.inode
     }
 
-    pub(crate) const fn rec_len(self) -> u16 {
-        self.rec_len
+    pub(crate) fn record_len(self, block_size: usize) -> Ext4Result<usize> {
+        let raw = usize::from(self.rec_len);
+        // Linux ext4 treats both special disk values as an entire directory block.
+        if raw == u16::MAX as usize || raw == 0 {
+            return Ok(block_size);
+        }
+        let high_bits = raw.checked_shl(16).ok_or(Ext4Error::Overflow)? & 0x30000;
+        Ok((raw & 0xfffc) | high_bits)
+    }
+
+    pub(crate) fn encode_record_len(len: usize, block_size: usize) -> Ext4Result<u16> {
+        if len == 0 || !len.is_multiple_of(4) || len > block_size {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
+        }
+        if len == block_size && block_size > u16::MAX as usize {
+            return Ok(u16::MAX);
+        }
+        if block_size > u16::MAX as usize {
+            let encoded = (len & 0xfffc) | ((len >> 16) & 0x3);
+            return u16::try_from(encoded).map_err(|_| Ext4Error::Overflow);
+        }
+        u16::try_from(len).map_err(|_| Ext4Error::Overflow)
     }
 
     pub(crate) const fn name_len(self) -> u8 {
@@ -141,14 +165,6 @@ impl HTreeRootInfo {
         })
     }
 
-    pub(crate) const fn reserved_zero(self) -> u32 {
-        self.reserved_zero
-    }
-
-    pub(crate) const fn info_length(self) -> u8 {
-        self.info_length
-    }
-
     pub(crate) const fn indirect_levels(self) -> u8 {
         self.indirect_levels
     }
@@ -157,8 +173,18 @@ impl HTreeRootInfo {
         self.hash_version
     }
 
-    pub(crate) const fn flags(self) -> u8 {
-        self.flags
+    pub(crate) fn validate(self) -> Ext4Result<()> {
+        if self.reserved_zero != 0
+            || self.info_length != 8
+            || self.flags & 1 != 0
+            || !matches!(
+                self.hash_version,
+                DX_HASH_LEGACY | DX_HASH_HALF_MD4 | DX_HASH_TEA | DX_HASH_SIPHASH
+            )
+        {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
+        }
+        Ok(())
     }
 }
 
@@ -226,5 +252,51 @@ impl HTreeEntry {
 
     pub(crate) const fn block(self) -> u32 {
         self.block & DX_BLOCK_MASK
+    }
+}
+
+#[cfg(unittest)]
+mod unittests {
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn special_record_lengths_follow_linux_encoding() {
+        let zero = raw_directory_entry(0);
+        let maximum = raw_directory_entry(u16::MAX);
+
+        assert_eq!(zero.record_len(4_096), Ok(4_096));
+        assert_eq!(maximum.record_len(4_096), Ok(4_096));
+        assert_eq!(
+            RawDirectoryEntry::encode_record_len(4_096, 4_096),
+            Ok(4_096)
+        );
+        assert_eq!(
+            RawDirectoryEntry::encode_record_len(65_536, 65_536),
+            Ok(u16::MAX)
+        );
+    }
+
+    #[def_test]
+    fn htree_root_distinguishes_disk_and_derived_hash_versions() {
+        let mut bytes = [0; DX_ROOT_INFO_OFFSET + 8];
+        bytes[DX_ROOT_INFO_OFFSET + 4] = DX_HASH_SIPHASH;
+        bytes[DX_ROOT_INFO_OFFSET + 5] = 8;
+        let root_info = HTreeRootInfo::decode(&bytes).expect("decode htree root info");
+        assert_eq!(root_info.validate(), Ok(()));
+
+        bytes[DX_ROOT_INFO_OFFSET + 4] = 5;
+        let root_info = HTreeRootInfo::decode(&bytes).expect("decode htree root info");
+        assert_eq!(
+            root_info.validate(),
+            Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry))
+        );
+    }
+
+    fn raw_directory_entry(rec_len: u16) -> RawDirectoryEntry {
+        let mut bytes = [0; DIRENT_HEADER_SIZE];
+        bytes[4..6].copy_from_slice(&rec_len.to_le_bytes());
+        RawDirectoryEntry::decode(&bytes, 0).expect("decode directory entry")
     }
 }

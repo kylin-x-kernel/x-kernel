@@ -56,6 +56,7 @@ fs/filesystems/kext4
     |-- Ext4AddressSpaceOperations (static KVFS a_ops, no inode identity)
     |-- RwLock<Ext4SbInfo> (the sole ext4 s_fs_info object)
     |-- layout / feature negotiation / device
+    |-- HTree hash_unsigned mount policy
     |-- metadata buffer / checksum validation
     |-- group descriptors / allocator state
     |-- MountedJournal (类似 journal_t)
@@ -302,6 +303,27 @@ append、已有 HTree leaf split、线性目录转 HTree，以及转换后立即
 的单块 mapping，不能把它们视为一个连续的两块 extent。计划一旦进入 HTree 路径，即使事务
 开始时 inode 尚未设置 `EXT4_INDEX_FL`，credits 也包含 HTree 更新余量。
 
+目录磁盘语义由既有对象分层承担：`RawDirectoryEntry` 统一完成 `rec_len` 编解码，并与 Linux
+`ext4_rec_len_from_disk()` 一致地把原始 `0` 和 `0xffff` 解释为整个目录块；64 KiB 整块写回使用
+`0xffff`。`HTreeRootInfo` 统一校验 root 固定字段与磁盘 hash version，`Ext4SbInfo::decode_htree_root()`
+再结合 `large_dir` 校验树深并解码 count/limit，读写路径不再各自维护一套 root 规则。磁盘 root
+只接受 Linux 的 `0/1/2/6`。磁盘 `Superblock` 只保存 `s_def_hash_version`、`s_hash_seed` 和
+`s_flags` 事实；`Ext4SbInfo` 在 mount 阶段按 `ext4_hash_info_init()` 校验默认版本，并且只在
+启用 `DIR_INDEX` 时解释 signedness flags。显式 unsigned 优先，显式 signed 保持 signed；两者都
+未设置时按当前 Linux 的全局 unsigned-char 语义生成运行态 `hash_unsigned=3`。该初始化阶段只
+建立 mount state；可写 VFS mount 在 root inode 建立后、superblock 发布前的 finalize 边界把
+`EXT2_FLAGS_UNSIGNED_HASH` 写回，read-only mount 不修改磁盘。这对应 Linux 先由
+`ext4_hash_info_init()` 解析策略、再由 `ext4_setup_super()` 提交 superblock 的生命周期。
+HTree 入口把 root 磁盘版本与该
+运行态 offset 组合后执行算法，调用者不能用裸参数重新拼装策略。SIPHASH 因此是合法 root 格式，
+但在 KExt4 尚无 fscrypt name key 时于首次 hash 计算前返回 `Unsupported`，不会被误报为目录损坏；
+依赖该 hash 的 namespace transaction 因而不能选择或写入对应 HTree leaf，并以失败结束而不提交
+metadata 变更。Orlov 顶层目录放置另走独立入口：Linux `find_group_orlov()` 为这一入口重新构造
+`dx_hash_info`，固定指定 signed `DX_HASH_HALF_MD4` 和 `s_hash_seed`，不读取
+`s_def_hash_version` 或 `s_hash_unsigned`。KExt4 保持同一边界，因此 LEGACY、TEA、HALF_MD4
+默认版本的镜像都得到相同的 Orlov 起始 flex；这可能改变旧 KExt4 的目录放置位置，但属于恢复
+Linux allocator 语义，不改变磁盘 HTree 格式。
+
 Create、mkdir、mknod 和 symlink 的 kext4 KVFS 层 callback 接收同一次操作的 `&Cred`，先用
 `inode_init_owner()` 根据父 inode、`fsuid/fsgid` 和 setgid 继承规则得到 mode/UID/GID，
 再把显式 `uid`、`gid` 参数传入 KExt4 namei transaction。核心 inode constructor 不读取当前任务，
@@ -459,6 +481,8 @@ reserved blocks 与 delayed-allocation mount aggregate，因此只允许 `Ext4St
 context 从 opaque mount data 解析后写入唯一 `Ext4SbInfo`，对应 Linux
 `ext4_sb_info::s_mount_opt`，不放入静态 operation table，也不增加 wrapper。新挂载未指定时默认
 `bsddf`；reconfigure 未指定该选项时保留现值，显式 `bsddf`/`minixdf` 才更新 mount-private state。
+Linux 默认启用的正向选项 `user_xattr` 和 `acl` 作为 mount-data 兼容拼写被接受，但不创建未被
+消费的 per-mount 字段；其中 `acl` 的语法兼容不扩大当前 KVFS POSIX ACL 权限语义。
 
 Buffered write 在 `FileOperations::write_iter()` 中、generic write 的 inode data critical
 section 内应用 inode-format 上限，再由 `write_begin()` 查询 core mapping。shared-file write

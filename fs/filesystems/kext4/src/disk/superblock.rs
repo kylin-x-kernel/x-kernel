@@ -16,6 +16,8 @@ pub(crate) const SUPERBLOCK_SIZE: usize = 1024;
 pub(crate) const SUPERBLOCK_OFFSET: u64 = 1024;
 
 const EXT4_MAGIC: u16 = 0xef53;
+pub(crate) const EXT2_FLAGS_SIGNED_HASH: u32 = 0x0001;
+pub(crate) const EXT2_FLAGS_UNSIGNED_HASH: u32 = 0x0002;
 const CHECKSUM_OFFSET: usize = 0x3fc;
 const CRC32C_CHECKSUM_TYPE: u8 = 1;
 const FEATURE_INCOMPAT_OFFSET: usize = 0x60;
@@ -25,6 +27,7 @@ const FREE_INODES_COUNT_OFFSET: usize = 0x10;
 const LAST_ORPHAN_OFFSET: usize = 0xe8;
 const MIN_EXTRA_ISIZE_OFFSET: usize = 0x15c;
 const WANT_EXTRA_ISIZE_OFFSET: usize = 0x15e;
+const FLAGS_OFFSET: usize = 0x160;
 // Linux initializes `s_want_extra_isize` to the fields currently known by
 // `struct ext4_inode` before considering the on-disk min/want values.
 const LINUX_DEFAULT_EXTRA_ISIZE: u16 = 32;
@@ -89,6 +92,7 @@ pub struct Superblock {
     checksum_seed: u32,
     hash_seed: [u32; 4],
     default_hash_version: u8,
+    flags: u32,
     journal: JournalFields,
     backup_groups: [u32; 2],
 }
@@ -264,6 +268,7 @@ impl Superblock {
         let default_hash_version = *input
             .get(0xfc)
             .ok_or(Ext4Error::Corrupt(CorruptKind::Truncated))?;
+        let flags = codec::le_u32(input, FLAGS_OFFSET)?;
         let log_groups_per_flex = input[0x174];
         if features.has_flex_bg() && 1u32.checked_shl(u32::from(log_groups_per_flex)).is_none() {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidFlexGeometry));
@@ -293,6 +298,7 @@ impl Superblock {
             checksum_seed,
             hash_seed,
             default_hash_version,
+            flags,
             journal: JournalFields {
                 inode: NonZeroU32::new(codec::le_u32(input, 0xe0)?),
                 device: NonZeroU32::new(codec::le_u32(input, 0xe4)?),
@@ -428,6 +434,10 @@ impl Superblock {
         self.default_hash_version
     }
 
+    pub(crate) const fn flags(&self) -> u32 {
+        self.flags
+    }
+
     /// Returns the fields that locate the filesystem journal.
     pub const fn journal(&self) -> JournalFields {
         self.journal
@@ -510,6 +520,14 @@ pub(crate) fn set_last_orphan(input: &mut [u8], last_orphan: u32) -> Ext4Result<
     Superblock::decode(input)
 }
 
+pub(crate) fn set_unsigned_hash_flag(input: &mut [u8]) -> Ext4Result<Superblock> {
+    let superblock = Superblock::decode(input)?;
+    let flags = superblock.flags() | EXT2_FLAGS_UNSIGNED_HASH;
+    input[FLAGS_OFFSET..FLAGS_OFFSET + 4].copy_from_slice(&flags.to_le_bytes());
+    update_feature_checksum(input, &superblock)?;
+    Superblock::decode(input)
+}
+
 fn set_free_blocks_count(input: &mut [u8], free_blocks_count: u64) -> Ext4Result<Superblock> {
     let superblock = Superblock::decode(input)?;
     if free_blocks_count > superblock.blocks_count() {
@@ -576,8 +594,8 @@ fn effective_want_extra_isize(
 #[cfg(test)]
 mod tests {
     use super::{
-        CHECKSUM_OFFSET, CRC32C_CHECKSUM_TYPE, LINUX_DEFAULT_EXTRA_ISIZE, MIN_EXTRA_ISIZE_OFFSET,
-        SUPERBLOCK_SIZE, Superblock, WANT_EXTRA_ISIZE_OFFSET,
+        CHECKSUM_OFFSET, CRC32C_CHECKSUM_TYPE, EXT2_FLAGS_UNSIGNED_HASH, LINUX_DEFAULT_EXTRA_ISIZE,
+        MIN_EXTRA_ISIZE_OFFSET, SUPERBLOCK_SIZE, Superblock, WANT_EXTRA_ISIZE_OFFSET,
     };
     use crate::{CorruptKind, Ext4Error, disk::checksum};
 
@@ -734,6 +752,35 @@ mod tests {
         let updated = super::set_last_orphan(&mut bytes, 13).unwrap();
         assert_eq!(updated.last_orphan(), 13);
         assert_eq!(Superblock::decode(&bytes).unwrap().last_orphan(), 13);
+    }
+
+    #[test]
+    fn preserves_directory_hash_flags_as_disk_facts() {
+        let mut bytes = valid_superblock();
+        put_u32(&mut bytes, 0x160, EXT2_FLAGS_UNSIGNED_HASH);
+
+        assert_eq!(
+            Superblock::decode(&bytes)
+                .expect("decode unsigned-hash superblock")
+                .flags(),
+            EXT2_FLAGS_UNSIGNED_HASH
+        );
+    }
+
+    #[test]
+    fn setting_unsigned_hash_flag_updates_metadata_checksum() {
+        let mut bytes = valid_superblock();
+        put_u32(&mut bytes, 0x64, RO_COMPAT_METADATA_CSUM);
+        bytes[0x175] = CRC32C_CHECKSUM_TYPE;
+        update_superblock_checksum(&mut bytes);
+
+        let updated = super::set_unsigned_hash_flag(&mut bytes).unwrap();
+
+        assert_eq!(
+            updated.flags() & EXT2_FLAGS_UNSIGNED_HASH,
+            EXT2_FLAGS_UNSIGNED_HASH
+        );
+        assert_eq!(Superblock::decode(&bytes).unwrap(), updated);
     }
 
     #[test]

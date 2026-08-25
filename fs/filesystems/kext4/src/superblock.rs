@@ -11,8 +11,13 @@ use ktime_types::TimestampLimits;
 use crate::{
     bitmap_allocator::{BlockGroupRange, InodeGroupRange},
     buffer::{Ext4MetadataIo, MetadataBuffer, MetadataWriteAccess},
-    dirhash::directory_hash,
-    disk::{BlockGroupDescriptor, Superblock, checksum, features, superblock},
+    dirhash::DX_HASH_UNSIGNED_OFFSET,
+    disk::{
+        BlockGroupDescriptor, Superblock, checksum,
+        dir::DX_HASH_SIPHASH,
+        features, superblock,
+        superblock::{EXT2_FLAGS_SIGNED_HASH, EXT2_FLAGS_UNSIGNED_HASH},
+    },
     error::{ChecksumTarget, CorruptKind, Ext4Error, Ext4Result, UnsupportedKind},
     extent::BlockMapping,
     inode::{InodeKind, timestamp_limits_for_inode_size},
@@ -373,6 +378,9 @@ pub(crate) struct Ext4SbInfo {
     statfs_mode: Ext4StatFsMode,
     /// Maximum byte size supported by legacy indirect-block inodes.
     pub(crate) bitmap_maxbytes: u64,
+    // Linux `ext4_sb_info::s_hash_unsigned`: zero for signed algorithms and
+    // three for the corresponding unsigned HTree algorithms.
+    pub(crate) hash_unsigned: u8,
     pub(crate) device: Arc<FilesystemDevice>,
     pub(crate) metadata_io: Ext4MetadataIo,
     pub(crate) journal: Option<Arc<MountedJournal>>,
@@ -408,13 +416,16 @@ impl Ext4RecoveryCleared {
 }
 
 impl Ext4SbInfo {
-    /// Reads and validates the primary ext4 superblock and group descriptor table.
+    /// Builds test mount state and commits writable mount-finalization metadata.
     #[cfg(test)]
     pub fn mount(device: Arc<dyn BlockDeviceOperations>) -> Ext4Result<Self> {
-        Self::mount_with_statfs_mode(device, Ext4StatFsMode::Bsd)
+        let mut filesystem = Self::prepare_mount_with_statfs_mode(device, Ext4StatFsMode::Bsd)?;
+        filesystem.persist_directory_hash_policy()?;
+        Ok(filesystem)
     }
 
-    pub(crate) fn mount_with_statfs_mode(
+    /// Prepares ext4 mount state without committing mount-success metadata.
+    pub(crate) fn prepare_mount_with_statfs_mode(
         device: Arc<dyn BlockDeviceOperations>,
         statfs_mode: Ext4StatFsMode,
     ) -> Ext4Result<Self> {
@@ -429,12 +440,14 @@ impl Ext4SbInfo {
 
     /// Recovers a filesystem journal and cleans the legacy orphan list.
     ///
-    /// This entry point performs metadata writes. It is intentionally separate
-    /// from [`mount`](Self::mount), which keeps the read-only mount path from
-    /// modifying storage implicitly. A filesystem can have a clean journal but
-    /// still contain legacy orphan entries left by a committed unlink or
-    /// truncate. In that case this method performs journaled orphan cleanup and
-    /// returns `Ok(None)` because no journal replay report was produced.
+    /// This entry point performs journal replay and orphan-list metadata writes.
+    /// It is intentionally separate from [`mount`](Self::mount); the writable
+    /// mount path may persist Linux's default directory-hash signedness, but it
+    /// does not implicitly perform recovery. A filesystem can have a clean
+    /// journal but still contain legacy orphan entries left by a committed
+    /// unlink or truncate. In that case this method performs journaled orphan
+    /// cleanup and returns `Ok(None)` because no journal replay report was
+    /// produced.
     ///
     /// A successful return means that orphan cleanup has completed its journal
     /// commit and home-block checkpoint, the journal is marked empty, and the
@@ -546,6 +559,7 @@ impl Ext4SbInfo {
             delalloc_reserved_blocks: Mutex::new(0),
             statfs_mode: Ext4StatFsMode::Bsd,
             bitmap_maxbytes: 0,
+            hash_unsigned: 0,
             device: filesystem_device,
             metadata_io,
             journal: None,
@@ -555,6 +569,7 @@ impl Ext4SbInfo {
             groups,
             system_zones: Vec::new(),
         };
+        filesystem.initialize_directory_hash_policy()?;
         let mut system_zones = filesystem.build_system_zones()?;
         let journal_location = filesystem.journal_location()?;
         if filesystem.superblock.features().needs_recovery() && !allow_recovery {
@@ -584,6 +599,62 @@ impl Ext4SbInfo {
     /// Returns the ext4-private legacy indirect-block file-size limit.
     pub const fn bitmap_max_file_size(&self) -> u64 {
         self.bitmap_maxbytes
+    }
+
+    fn initialize_directory_hash_policy(&mut self) -> Ext4Result<()> {
+        let has_dir_index = self.superblock.features().has_dir_index();
+        let flags = self.superblock.flags();
+        self.hash_unsigned = Self::resolve_directory_hash_unsigned(
+            self.superblock.default_hash_version(),
+            has_dir_index,
+            flags,
+        )?;
+        Ok(())
+    }
+
+    /// Persists Linux's implicit unsigned hash choice at writable mount finalization.
+    pub(crate) fn persist_directory_hash_policy(&mut self) -> Ext4Result<()> {
+        let has_dir_index = self.superblock.features().has_dir_index();
+        let flags = self.superblock.flags();
+        if has_dir_index && flags & (EXT2_FLAGS_SIGNED_HASH | EXT2_FLAGS_UNSIGNED_HASH) == 0 {
+            self.persist_unsigned_hash_flag()?;
+        }
+        Ok(())
+    }
+
+    fn resolve_directory_hash_unsigned(
+        default_hash_version: u8,
+        has_dir_index: bool,
+        flags: u32,
+    ) -> Ext4Result<u8> {
+        if default_hash_version >= DX_HASH_SIPHASH {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryHash));
+        }
+        if !has_dir_index {
+            return Ok(0);
+        }
+        if flags & EXT2_FLAGS_UNSIGNED_HASH != 0 {
+            return Ok(DX_HASH_UNSIGNED_OFFSET);
+        } else if flags & EXT2_FLAGS_SIGNED_HASH == 0 {
+            // Current Linux ext4 is built with `-funsigned-char`; select the
+            // same default. Writable mount finalization persists this choice.
+            return Ok(DX_HASH_UNSIGNED_OFFSET);
+        }
+        Ok(0)
+    }
+
+    fn persist_unsigned_hash_flag(&mut self) -> Ext4Result<()> {
+        let (block, offset, len) = self.primary_superblock_location()?;
+        let end = offset.checked_add(len).ok_or(Ext4Error::Overflow)?;
+        let mut bytes = vec![0; self.device.block_size()];
+        self.device.read_blocks(block, 1, &mut bytes)?;
+        let superblock_bytes = bytes.get_mut(offset..end).ok_or(Ext4Error::OutOfBounds)?;
+        let updated = superblock::set_unsigned_hash_flag(superblock_bytes)?;
+        self.device.write_contiguous_blocks(block, 1, &bytes)?;
+        self.device.flush()?;
+        self.metadata_io.invalidate_all();
+        self.superblock = updated;
+        Ok(())
     }
 
     /// Returns the decoded primary superblock.
@@ -767,6 +838,7 @@ impl Ext4SbInfo {
         }
         let groups = self.decode_group_descriptors(&superblock, layout)?;
         self.superblock = superblock;
+        self.initialize_directory_hash_policy()?;
         self.groups = groups;
         self.reset_block_allocation_caches();
         Ok(())
@@ -1192,20 +1264,7 @@ impl Ext4SbInfo {
         let Some(name) = child_name.filter(|name| !name.is_empty()) else {
             return self.superblock.checksum_seed();
         };
-        if let Ok(hash) = directory_hash(
-            name,
-            self.superblock.default_hash_version(),
-            self.superblock.hash_seed(),
-        ) {
-            return hash.major();
-        }
-
-        let mut hash = 0x811c_9dc5_u32 ^ self.superblock.checksum_seed();
-        for byte in name {
-            hash ^= u32::from(*byte);
-            hash = hash.wrapping_mul(0x0100_0193).rotate_left(5);
-        }
-        hash
+        self.orlov_hash(name).major()
     }
 
     fn find_top_level_directory_group(
@@ -1720,6 +1779,73 @@ fn is_inode_physical_block_valid(
         index += 1;
     }
     true
+}
+
+#[cfg(unittest)]
+mod unittests {
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn mount_hash_policy_matches_linux_signedness_order() {
+        assert_eq!(
+            Ext4SbInfo::resolve_directory_hash_unsigned(0, false, 0),
+            Ok(0)
+        );
+        assert_eq!(
+            Ext4SbInfo::resolve_directory_hash_unsigned(0, false, EXT2_FLAGS_SIGNED_HASH),
+            Ok(0)
+        );
+        assert_eq!(
+            Ext4SbInfo::resolve_directory_hash_unsigned(0, false, EXT2_FLAGS_UNSIGNED_HASH),
+            Ok(0)
+        );
+        assert_eq!(
+            Ext4SbInfo::resolve_directory_hash_unsigned(
+                0,
+                false,
+                EXT2_FLAGS_SIGNED_HASH | EXT2_FLAGS_UNSIGNED_HASH,
+            ),
+            Ok(0)
+        );
+        assert_eq!(
+            Ext4SbInfo::resolve_directory_hash_unsigned(0, true, 0),
+            Ok(DX_HASH_UNSIGNED_OFFSET)
+        );
+        assert_eq!(
+            Ext4SbInfo::resolve_directory_hash_unsigned(0, true, EXT2_FLAGS_SIGNED_HASH),
+            Ok(0)
+        );
+        assert_eq!(
+            Ext4SbInfo::resolve_directory_hash_unsigned(0, true, EXT2_FLAGS_UNSIGNED_HASH),
+            Ok(DX_HASH_UNSIGNED_OFFSET)
+        );
+        assert_eq!(
+            Ext4SbInfo::resolve_directory_hash_unsigned(
+                0,
+                true,
+                EXT2_FLAGS_SIGNED_HASH | EXT2_FLAGS_UNSIGNED_HASH,
+            ),
+            Ok(DX_HASH_UNSIGNED_OFFSET)
+        );
+    }
+
+    #[def_test]
+    fn mount_hash_policy_rejects_invalid_default_hash() {
+        assert_eq!(
+            Ext4SbInfo::resolve_directory_hash_unsigned(5, false, 0),
+            Ok(0)
+        );
+        assert_eq!(
+            Ext4SbInfo::resolve_directory_hash_unsigned(DX_HASH_SIPHASH, false, 0),
+            Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryHash))
+        );
+        assert_eq!(
+            Ext4SbInfo::resolve_directory_hash_unsigned(u8::MAX, true, 0),
+            Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryHash))
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4125,6 +4251,87 @@ mod tests {
             .unwrap();
 
         assert_eq!(allocation.group(), BlockGroupNumber::new(expected_flex));
+    }
+
+    #[test]
+    fn orlov_hash_ignores_htree_default_version_and_unsigned_policy() {
+        let name = [0x80];
+        for default_hash_version in [
+            crate::disk::dir::DX_HASH_LEGACY,
+            crate::disk::dir::DX_HASH_HALF_MD4,
+            crate::disk::dir::DX_HASH_TEA,
+        ] {
+            let (mut filesystem, _device) =
+                allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+            set_allocator_default_hash_version(&mut filesystem, default_hash_version);
+            assert_eq!(
+                filesystem.superblock().default_hash_version(),
+                default_hash_version
+            );
+            filesystem.hash_unsigned = 0;
+            let signed_half_md4 = filesystem
+                .htree_hash(&name, crate::disk::dir::DX_HASH_HALF_MD4)
+                .unwrap();
+            let selected_default = filesystem.htree_hash(&name, default_hash_version).unwrap();
+            if default_hash_version != crate::disk::dir::DX_HASH_HALF_MD4 {
+                assert_ne!(selected_default, signed_half_md4);
+            }
+
+            filesystem.hash_unsigned = DX_HASH_UNSIGNED_OFFSET;
+            let unsigned_half_md4 = filesystem
+                .htree_hash(&name, crate::disk::dir::DX_HASH_HALF_MD4)
+                .unwrap();
+
+            assert_ne!(unsigned_half_md4, signed_half_md4);
+            assert_eq!(
+                filesystem.orlov_child_name_hash(Some(&name)),
+                signed_half_md4.major()
+            );
+        }
+    }
+
+    #[test]
+    fn indexed_hash_policy_initialization_does_not_persist() {
+        let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        set_allocator_feature_bits(
+            &mut filesystem,
+            features::CompatFeatures::DIR_INDEX,
+            features::ReadOnlyCompatFeatures::empty(),
+        );
+
+        filesystem.initialize_directory_hash_policy().unwrap();
+
+        assert_eq!(filesystem.hash_unsigned, DX_HASH_UNSIGNED_OFFSET);
+        assert_eq!(filesystem.superblock().flags(), 0);
+        assert_eq!(device.flush_count(), 0);
+    }
+
+    #[test]
+    fn writable_mount_finalization_persists_unsigned_default() {
+        let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        set_allocator_feature_bits(
+            &mut filesystem,
+            features::CompatFeatures::DIR_INDEX,
+            features::ReadOnlyCompatFeatures::empty(),
+        );
+
+        filesystem.initialize_directory_hash_policy().unwrap();
+
+        assert_eq!(filesystem.superblock().flags(), 0);
+        assert_eq!(device.flush_count(), 0);
+
+        filesystem.persist_directory_hash_policy().unwrap();
+
+        assert_eq!(filesystem.hash_unsigned, DX_HASH_UNSIGNED_OFFSET);
+        assert_ne!(
+            filesystem.superblock().flags() & EXT2_FLAGS_UNSIGNED_HASH,
+            0
+        );
+        assert_ne!(
+            le_u32(&device.bytes(), 1024 + 0x160) & EXT2_FLAGS_UNSIGNED_HASH,
+            0
+        );
+        assert_eq!(device.flush_count(), 1);
     }
 
     #[test]
@@ -6621,7 +6828,7 @@ mod tests {
             let device = Arc::new(LinuxImageDevice::new(damaged));
             let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
             assert_eq!(
-                Ext4Filesystem::recover(recovery_device),
+                Ext4SbInfo::recover(recovery_device),
                 Ok(None),
                 "recover damaged orphan head {head}"
             );
@@ -6633,7 +6840,7 @@ mod tests {
             assert!(!recovered.features().needs_recovery(), "orphan head {head}");
 
             let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
-            let mounted = Ext4Filesystem::mount(mount_device).unwrap_or_else(|error| {
+            let mounted = Ext4SbInfo::mount(mount_device).unwrap_or_else(|error| {
                 panic!("mount after repairing orphan head {head}: {error:?}")
             });
             assert_eq!(mounted.orphan_head(), None);
@@ -6652,7 +6859,7 @@ mod tests {
         let pristine = fs::read(&image).expect("read generated orphan recovery image");
         let inspect_device: Arc<dyn BlockDeviceOperations> =
             Arc::new(LinuxImageDevice::new(pristine.clone()));
-        let filesystem = Ext4Filesystem::mount(inspect_device)
+        let filesystem = Ext4SbInfo::mount(inspect_device)
             .expect("mount pristine image to find an unallocated inode");
         let head = (filesystem.superblock().first_inode()..=filesystem.superblock().inodes_count())
             .map(InodeNumber::new)
@@ -6668,7 +6875,7 @@ mod tests {
         let damaged = fs::read(&image).expect("read image with unallocated orphan head");
         let device = Arc::new(LinuxImageDevice::new(damaged));
         let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        assert_eq!(Ext4Filesystem::recover(recovery_device), Ok(None));
+        assert_eq!(Ext4SbInfo::recover(recovery_device), Ok(None));
 
         let bytes = device.bytes();
         let recovered = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
@@ -6677,8 +6884,7 @@ mod tests {
         assert!(!recovered.features().needs_recovery());
 
         let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        Ext4Filesystem::mount(mount_device)
-            .expect("mount after discarding unallocated orphan head");
+        Ext4SbInfo::mount(mount_device).expect("mount after discarding unallocated orphan head");
         fs::remove_file(image).expect("remove unallocated orphan recovery image");
     }
 
@@ -6693,7 +6899,7 @@ mod tests {
         let clean = fs::read(&image).expect("read image containing orphan-next file");
         let inspect_device: Arc<dyn BlockDeviceOperations> = Arc::new(LinuxImageDevice::new(clean));
         let filesystem =
-            Ext4Filesystem::mount(inspect_device).expect("mount image to locate orphan-next file");
+            Ext4SbInfo::mount(inspect_device).expect("mount image to locate orphan-next file");
         let root = filesystem.root_inode().expect("load root inode");
         let head = filesystem
             .lookup(&root, "orphan-next")
@@ -6722,7 +6928,7 @@ mod tests {
         let damaged = fs::read(&image).expect("read image with invalid orphan next pointer");
         let device = Arc::new(LinuxImageDevice::new(damaged));
         let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        assert_eq!(Ext4Filesystem::recover(recovery_device), Ok(None));
+        assert_eq!(Ext4SbInfo::recover(recovery_device), Ok(None));
 
         let bytes = device.bytes();
         let recovered = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
@@ -6731,7 +6937,7 @@ mod tests {
         assert!(!recovered.features().needs_recovery());
 
         let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        Ext4Filesystem::mount(mount_device)
+        Ext4SbInfo::mount(mount_device)
             .expect("mount after discarding orphan chain with invalid next pointer");
         fs::remove_file(image).expect("remove invalid orphan-next recovery image");
     }
@@ -6758,7 +6964,7 @@ mod tests {
         device.fail_flush_at(device.flush_count() + 1);
         let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
-            Ext4Filesystem::recover(recovery_device),
+            Ext4SbInfo::recover(recovery_device),
             Err(Ext4Error::Device(DriverError::Io))
         );
 
@@ -6772,15 +6978,15 @@ mod tests {
 
         let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
         assert_eq!(
-            Ext4Filesystem::mount(mount_device).map(|_| ()),
+            Ext4SbInfo::mount(mount_device).map(|_| ()),
             Err(Ext4Error::NeedsRecovery)
         );
 
         let retry_device: Arc<dyn BlockDeviceOperations> = device.clone();
-        Ext4Filesystem::recover(retry_device).expect("retry invalid orphan head recovery");
+        Ext4SbInfo::recover(retry_device).expect("retry invalid orphan head recovery");
         let recovered_device: Arc<dyn BlockDeviceOperations> = device.clone();
         let recovered =
-            Ext4Filesystem::mount(recovered_device).expect("mount retried orphan recovery image");
+            Ext4SbInfo::mount(recovered_device).expect("mount retried orphan recovery image");
         assert_eq!(recovered.orphan_head(), None);
         assert!(!recovered.superblock().features().needs_recovery());
 
@@ -7460,6 +7666,7 @@ mod tests {
             delalloc_reserved_blocks: Mutex::new(0),
             statfs_mode: Ext4StatFsMode::Bsd,
             bitmap_maxbytes: 0,
+            hash_unsigned: 0,
             device: filesystem_device,
             metadata_io,
             journal: None,
@@ -7534,6 +7741,7 @@ mod tests {
             delalloc_reserved_blocks: Mutex::new(0),
             statfs_mode: Ext4StatFsMode::Bsd,
             bitmap_maxbytes: 0,
+            hash_unsigned: 0,
             device: filesystem_device,
             metadata_io,
             journal: None,
@@ -7611,6 +7819,7 @@ mod tests {
             delalloc_reserved_blocks: Mutex::new(0),
             statfs_mode: Ext4StatFsMode::Bsd,
             bitmap_maxbytes: 0,
+            hash_unsigned: 0,
             device: filesystem_device,
             metadata_io,
             journal: None,
@@ -7914,6 +8123,20 @@ mod tests {
         let ro_compat = le_u32(superblock_bytes, 0x64) | read_only_compat_features.bits();
         put_u32(superblock_bytes, 0x5c, compat);
         put_u32(superblock_bytes, 0x64, ro_compat);
+        filesystem.superblock = Superblock::decode(superblock_bytes).unwrap();
+        filesystem
+            .device
+            .write_contiguous_blocks(block, 1, &bytes)
+            .unwrap();
+    }
+
+    fn set_allocator_default_hash_version(filesystem: &mut Ext4SbInfo, hash_version: u8) {
+        let (block, offset, len) = filesystem.primary_superblock_location().unwrap();
+        let end = offset + len;
+        let mut bytes = vec![0; filesystem.device.block_size()];
+        filesystem.device.read_blocks(block, 1, &mut bytes).unwrap();
+        let superblock_bytes = bytes.get_mut(offset..end).unwrap();
+        superblock_bytes[0xfc] = hash_version;
         filesystem.superblock = Superblock::decode(superblock_bytes).unwrap();
         filesystem
             .device

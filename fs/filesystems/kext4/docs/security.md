@@ -99,6 +99,15 @@ KExt4 的 KVFS operation 实现信任 KVFS 已经提供内核拥有的 path name
   delayed-allocation aggregate 必须保持同一唯一事实源，不能按 `minixdf` 重算或放宽空间准入。
 - 从磁盘解码的 external xattr name 必须拒绝内嵌 NUL，保持与 Linux/e2fsck 的 corruption
   handling 一致。
+- 目录记录长度必须由 `RawDirectoryEntry` 的唯一编解码入口按 Linux 磁盘语义解释。HTree root
+  的固定字段、磁盘 hash version 和树深必须经共享 root decoder 校验；磁盘版本 `3/4/5` 是
+  非法元数据，版本 `6` 是合法 SIPHASH 格式，但缺少 fscrypt name key 的 mutation 必须在依据
+  该 hash 选择或写入 HTree leaf 前返回 `Unsupported`。
+- HTree signedness 必须由 mount state 统一拥有：默认 hash 在 mount 时校验，`DIR_INDEX` 未启用
+  时不得解释 signedness，显式 unsigned 优先于 signed，两者都未指定时遵循当前 Linux 的
+  unsigned-char 选择；策略解析不得写盘，可写 mount 只能在 root inode 初始化成功后、superblock
+  发布前持久化该默认，read-only mount 不得写盘。Orlov placement 必须固定使用 signed HALF_MD4
+  和 superblock seed，不能复用 HTree default/signedness policy。
 - 新写 external xattr block 必须按 Linux ext4 算法生成每项 `e_hash` 和聚合 `h_hash`，并在其后
   计算 metadata checksum；不能用只保证 KExt4 自身可读、但会被 e2fsck 判坏的零 hash 编码。
 - Xattr name-only 遍历仍必须验证 entry 末端、value range、external block header 和 checksum；
@@ -187,6 +196,8 @@ exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，
 | T-16 | 损坏 legacy orphan head 让挂载恢复失败、循环，或访问未分配/reserved inode | 中 | `s_last_orphan` 越界或指向 allocation bit 为零的 inode，已加载 inode 带不可截断的链接类型，或 `i_dtime` 指向非法 next | 普通 orphan API 继续严格拒绝非法编号；显式 recovery 在 inode-table decode 前验证编号和带 checksum 的 bitmap，加载后验证可截断类型与 next，并以 `PreserveDuringRecovery` journal transaction 持久化清零后终止 bad chain；bitmap I/O/checksum、inode decode 和合法但未支持的 cleanup 继续失败而不被降级 |
 | T-17 | `minixdf`/`bsddf` 改变 free-space 事实源或错误扣除 metadata overhead | 中 | 两种模式分别实现整套 statfs 公式，或 VFS integration 直接修改 free counters | typed mode 只选择 `blocks_count - overhead` 或原始 `blocks_count`；free/available/inode 统计走共享代码，Linux-image 回归测试验证两者除总块数外一致 |
 | T-18 | 128-byte inode 对外暴露不存在的纳秒精度，或新建 inode 丢失纳秒/扩展 epoch 并在 2038 年后回绕 | 中 | 只在 inode-table encode 时截断、VFS 比较原始高精度时间，或初始化结构只保存 base `u32` 秒 | KExt4 按 inode size 返回共享的 `TimestampLimits`，由唯一 KVFS `SuperBlock` 持有；`VfsInode::current_time()` 在比较、callback 和 publication 前只截断一次；新建 inode 保存完整 `Ext4Timestamp` 并通过 base/extra encoder 写盘，128-byte 格式在边界钳制，256-byte 格式保留纳秒和 epoch；回归测试覆盖两种 inode size 的能力选择、初始化编码和 resident publication |
+| T-19 | 合法 SIPHASH HTree 被误报损坏 | 中 | root `hash_version=6` 进入目录写路径 | 共享 HTree root decoder 只接受磁盘版本 `0/1/2/6`，HTree signedness 来自 mount state；SIPHASH 在需要密钥的 hash 边界返回 `Unsupported`，相关事务不能提交 metadata mutation |
+| T-20 | 未标 signedness 的旧 HTree 镜像跨 Linux 挂载后名称不可见，或 Orlov 目录放置漂移 | 高 | 磁盘两种 signedness flag 都为空时按 signed 计算，或 Orlov 复用 HTree default/unsigned policy | mount state 按 Linux unsigned-char 语义生成 `hash_unsigned`，RW 持久化 unsigned flag、RO 保持磁盘不变；HTree 只经 mount policy hash，Orlov 独立固定 signed HALF_MD4 + seed；高位字节名称回归测试区分 signed/unsigned |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -238,9 +249,12 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
   中检查。磁盘 immutable/append-only flags 在 iget 时映射到 KVFS 并阻止 xattr mutation；
   当前尚未实现 `FS_IOC_SETFLAGS`，因此不存在需要运行时刷新这些 flags 的修改入口。
 - POSIX ACL 当前只是 core 内的 opaque xattr bytes，不实现 ACL permission enforcement、
-  mode 同步或 inheritance，因此 kext4 KVFS 层不把 `system.posix_acl_*` 作为普通 xattr 暴露。
+  mode 同步或 inheritance，因此 kext4 KVFS 层不把 `system.posix_acl_*` 作为普通 xattr 暴露；
+  mount parser 接受 `acl` 只用于兼容 Linux 默认开启选项的正向拼写，不得改变上述权限边界。
 - EA inode、oversized xattr、bigalloc、orphan-file、inline-data write、huge-file write
   block-unit accounting、encryption/casefold、direct I/O 和 mmap coherence 仍是后续工作。
+- HTree SIPHASH root 可以完成格式分类，但 encryption/casefold name-key 语义尚未实现；需要名称
+  哈希的 create/unlink/rename 等操作返回 `EOPNOTSUPP`。
 - KVFS unmount 已在 topology detach 前后同步 VFS 与 journal 状态，但阻止新引用/写入、
   lazy unmount、freeze 和后台 worker drain 仍需最终 lifecycle gate。
 - 精准 per-inode `fsync/fdatasync` 等待需要 KVFS runtime inode 承载 sync/datasync tid；当前
@@ -254,6 +268,10 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
 ## 审计清单
 
 - metadata parser 是否拒绝 truncated、out-of-bounds、unsorted 或 checksum-invalid input？
+- 目录 parser 是否由 `RawDirectoryEntry` 统一执行 Linux `rec_len` 解码？HTree 读写是否复用
+  同一个 root decoder，且把非法磁盘 hash version、mount-time unsigned 算法和合法但未实现的
+  SIPHASH 分开分类？未指定 signedness 的 RW/RO mount 是否分别持久化/保留磁盘 flags？Orlov 是否
+  始终绕过 HTree default/signedness policy 而使用 signed HALF_MD4？
 - xattr list 是否只借用名称，同时继续校验 value range 和 external block checksum？相同值
   set 是否在 journal/ctime 更新前返回？磁盘 immutable/append-only flags 是否在 iget 时
   映射到 KVFS，并在任何 xattr mutation 前返回 `EPERM`？inline/external 混合布局是否保存
