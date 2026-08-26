@@ -4,26 +4,27 @@
 
 //! Trusty-compatible vsock-TIPC bridge.
 //!
-//! The bridge is intentionally wired into the vsock device event router rather
-//! than exposed as an AF_VSOCK endpoint. That lets it preserve virtio-vsock
-//! record boundaries: one `Received(conn_id, len)` event becomes exactly one
-//! TIPC message.
+//! The bridge is a consumer of the vsock connection manager. It registers the
+//! well-known bridge ports (0-4) with the manager, receives per-connection events
+//! through the manager's bridge event queue, and reads/writes record data through
+//! the manager's connection API. The raw device is never touched directly.
 
 use alloc::{
-    collections::{BTreeSet, VecDeque},
+    collections::VecDeque,
     string::{String, ToString},
     sync::Arc,
     vec,
     vec::Vec,
 };
 use core::{
+    cell::Cell,
     future::poll_fn,
     str,
-    sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     task::Poll,
 };
 
-use kclass::{ClassDevice, prelude::*};
+use kclass::prelude::DriverError;
 use kerrno::{KError, KResult};
 use klazy::Lazy;
 use kpoll::{PollRegisterError, PollRegistrations, PollSet};
@@ -37,10 +38,13 @@ use tipc::{
 };
 
 use super::{
-    VsockAddr, VsockConnId,
+    VsockConnId,
     bridge_connection::{BridgeConnection, BridgeConnectionState},
     bridge_port_map::{BRIDGE_PORT_MAP, TIPC_TO_VSOCK_MAP, TipcToVsockMapping, bridge_mapping},
-    connection_manager::{ConnectionState, VSOCK_CONN_MANAGER},
+    connection_manager::{
+        VSOCK_CONN_MANAGER, VsockBridgeEvent, abort_bridge, create_bridge_connection,
+        disconnect_bridge, recv_bridge, send_bridge,
+    },
 };
 
 const BRIDGE_RECV_BUFS: usize = 4;
@@ -60,25 +64,15 @@ const PORT_EVENTS: HandleEventMask = HandleEventMask::READY
 
 static VSOCK_BRIDGE: Lazy<VsockBridge> = Lazy::new(VsockBridge::new);
 static NEXT_TOKEN: AtomicUsize = AtomicUsize::new(1);
-static NEXT_REVERSE_PORT: AtomicU32 = AtomicU32::new(0x8000);
-
-#[derive(Debug)]
-enum VsockBridgeEvent {
-    ConnectionRequest(VsockConnId),
-    Connected(VsockConnId),
-    Received(VsockConnId, usize),
-    Disconnected(VsockConnId),
-    CreditUpdate(VsockConnId),
-}
 
 struct PublishedPort {
     port: Arc<IpcPort>,
     mapping_index: usize,
 }
 
-/// Initializes the bridge against the registered vsock device.
-pub fn init(dev: ClassDevice<VsockDeviceImpl>) -> KResult {
-    VSOCK_BRIDGE.init(dev)
+/// Initializes the bridge against the registered vsock connection manager.
+pub fn init() -> KResult {
+    VSOCK_BRIDGE.init()
 }
 
 /// Starts bridge worker tasks once the scheduler can spawn on every CPU.
@@ -86,19 +80,8 @@ pub fn start() {
     VSOCK_BRIDGE.start()
 }
 
-/// Routes a raw vsock device event to the bridge when it belongs to a bridged
-/// port or to an existing bridged connection.
-pub fn route_event(event: VsockDriverEventType) -> bool {
-    VSOCK_BRIDGE.route_event(event)
-}
-
 struct VsockBridge {
-    dev: Mutex<Option<ClassDevice<VsockDeviceImpl>>>,
     connections: Mutex<Vec<BridgeConnection>>,
-    /// Inbound host ConnectionRequest seen by route_event but not yet processed
-    /// by rx_task (BridgeConnection not created). Used so a same-batch Received
-    /// (port 0 service name) routes here without claiming all mapped-port traffic.
-    pending_inbound: Mutex<BTreeSet<VsockConnId>>,
     rx_queue: Mutex<VecDeque<VsockBridgeEvent>>,
     rx_waiters: PollSet,
     handle_set: Arc<HandleSet>,
@@ -110,9 +93,7 @@ struct VsockBridge {
 impl VsockBridge {
     fn new() -> Self {
         Self {
-            dev: Mutex::new(None),
             connections: Mutex::new(Vec::new()),
-            pending_inbound: Mutex::new(BTreeSet::new()),
             rx_queue: Mutex::new(VecDeque::new()),
             rx_waiters: PollSet::new(),
             handle_set: HandleSet::handle_set_create(),
@@ -122,17 +103,12 @@ impl VsockBridge {
         }
     }
 
-    fn init(&self, dev: ClassDevice<VsockDeviceImpl>) -> KResult {
+    fn init(&self) -> KResult {
         {
-            let mut guard = self.dev.lock();
-            if guard.is_some() {
-                return Ok(());
+            let mut manager = VSOCK_CONN_MANAGER.lock();
+            for mapping in BRIDGE_PORT_MAP {
+                manager.listen_bridge_port(mapping.port);
             }
-            *guard = Some(dev.clone());
-        }
-
-        for mapping in BRIDGE_PORT_MAP {
-            dev.listen(mapping.port);
         }
 
         self.publish_reverse_ports()?;
@@ -181,76 +157,12 @@ impl VsockBridge {
     }
 
     fn start_runtime_once(&self) {
-        if self.dev.lock().is_none() {
-            return;
-        }
         if self.runtime_started.swap(true, Ordering::SeqCst) {
             return;
         }
         ktask::spawn_with_name(rx_task, "vsock-tipc-rx".to_string());
         ktask::spawn_with_name(tx_task, "vsock-tipc-tx".to_string());
-        crate::device::start_vsock_polling();
-    }
-
-    fn route_event(&self, event: VsockDriverEventType) -> bool {
-        // vsock-poll may deliver ConnectionRequest and Received back-to-back while
-        // rx_task has not yet created BridgeConnection. Track inbound CR in
-        // pending_inbound so Received routes here without claiming every event on
-        // BRIDGE_PORT_MAP local_port (which would break AF_VSOCK bind(1..4)+connect).
-        let bridge_event = match event {
-            VsockDriverEventType::ConnectionRequest(conn_id) => {
-                if bridge_mapping(conn_id.local_port).is_none() {
-                    return false;
-                }
-                self.mark_pending_inbound(conn_id);
-                VsockBridgeEvent::ConnectionRequest(conn_id)
-            }
-            VsockDriverEventType::Received(conn_id, len) => {
-                if !self.should_route_received(conn_id) {
-                    return false;
-                }
-                VsockBridgeEvent::Received(conn_id, len)
-            }
-            VsockDriverEventType::Connected(conn_id) => {
-                if !self.should_route_existing(conn_id) {
-                    return false;
-                }
-                VsockBridgeEvent::Connected(conn_id)
-            }
-            VsockDriverEventType::Disconnected(conn_id) => {
-                if !self.should_route_existing(conn_id) {
-                    return false;
-                }
-                VsockBridgeEvent::Disconnected(conn_id)
-            }
-            VsockDriverEventType::CreditUpdate(conn_id) => {
-                if !self.should_route_existing(conn_id) {
-                    return false;
-                }
-                VsockBridgeEvent::CreditUpdate(conn_id)
-            }
-            VsockDriverEventType::Unknown => return false,
-        };
-        self.push_rx_event(bridge_event);
-        true
-    }
-
-    fn mark_pending_inbound(&self, conn_id: VsockConnId) {
-        self.pending_inbound.lock().insert(conn_id);
-    }
-
-    fn clear_pending_inbound(&self, conn_id: VsockConnId) {
-        self.pending_inbound.lock().remove(&conn_id);
-    }
-
-    /// Same-batch port 0 service-name record: CR marked pending, Received follows.
-    fn should_route_received(&self, conn_id: VsockConnId) -> bool {
-        self.has_connection(conn_id) || self.pending_inbound.lock().contains(&conn_id)
-    }
-
-    /// Lifecycle events for an established or pending-inbound bridge connection.
-    fn should_route_existing(&self, conn_id: VsockConnId) -> bool {
-        self.has_connection(conn_id) || self.pending_inbound.lock().contains(&conn_id)
+        crate::vsock::connection_manager::start_vsock_polling();
     }
 
     fn has_connection(&self, conn_id: VsockConnId) -> bool {
@@ -272,14 +184,18 @@ impl VsockBridge {
                 return Poll::Ready(Ok(event));
             }
 
-            if let Err(err) = registrations.context(cx).register(&self.rx_waiters) {
+            let mut context = registrations.context(cx);
+            if let Err(err) = context.register(&self.rx_waiters) {
                 return Poll::Ready(Err(err));
             }
-            if let Some(event) = self.rx_queue.lock().pop_front() {
-                Poll::Ready(Ok(event))
-            } else {
-                Poll::Pending
+            if let Ok(Some(event)) = VSOCK_CONN_MANAGER.lock().pop_bridge_event(&mut context) {
+                return Poll::Ready(Ok(event));
             }
+            if let Some(event) = self.rx_queue.lock().pop_front() {
+                return Poll::Ready(Ok(event));
+            }
+
+            Poll::Pending
         }))
     }
 
@@ -317,16 +233,12 @@ impl VsockBridge {
         }
     }
 
-    fn dev(&self) -> KResult<ClassDevice<VsockDeviceImpl>> {
-        self.dev.lock().as_ref().cloned().ok_or(KError::NotFound)
-    }
-
     fn handle_rx_event(&self, event: VsockBridgeEvent) {
         match event {
             VsockBridgeEvent::ConnectionRequest(conn_id) => self.on_connection_request(conn_id),
             VsockBridgeEvent::Received(conn_id, len) => self.on_received(conn_id, len),
             VsockBridgeEvent::Connected(conn_id) => self.on_connected(conn_id),
-            VsockBridgeEvent::Disconnected(conn_id) => self.close_connection(conn_id, true),
+            VsockBridgeEvent::Disconnected(conn_id) => self.close_connection(conn_id),
             VsockBridgeEvent::CreditUpdate(conn_id) => {
                 if self.has_connection(conn_id) {
                     trace!("vsock bridge credit update for {conn_id:?}");
@@ -354,12 +266,10 @@ impl VsockBridge {
                 "vsock bridge failed to connect fixed port {} to {}: {err:?}",
                 mapping.port, mapping.tipc_service
             );
-            self.clear_pending_inbound(conn_id);
-            self.abort_vsock(conn.conn_id());
+            let _ = abort_bridge(conn_id);
             return;
         }
         self.connections.lock().push(conn);
-        self.clear_pending_inbound(conn_id);
     }
 
     fn on_received(&self, conn_id: VsockConnId, len: usize) {
@@ -375,15 +285,16 @@ impl VsockBridge {
             Some(
                 BridgeConnectionState::TipcConnecting | BridgeConnectionState::TipcSendBlocked,
             ) => {
+                // TIPC is not ready to consume the packet yet. Re-queue the event
+                // locally and retry after a short backoff.
                 self.push_rx_event(VsockBridgeEvent::Received(conn_id, len));
                 ktask::sleep(TimeSpan::from_millis(10));
             }
             Some(_) => {
                 warn!("vsock bridge received data in invalid state for {conn_id:?}");
-                self.close_connection(conn_id, true);
+                self.close_connection(conn_id);
             }
             None => {
-                self.clear_pending_inbound(conn_id);
                 warn!("vsock bridge drop Received(len={len}) with no connection: {conn_id:?}");
             }
         }
@@ -429,18 +340,20 @@ impl VsockBridge {
                     return;
                 };
                 if conn.has_pending_rx() {
+                    // A previous record is still blocked on TIPC. Re-queue and
+                    // wait for the channel to unblock.
                     self.push_rx_event(VsockBridgeEvent::Received(conn_id, len));
                     return;
                 }
                 if let Err(err) = conn.stage_rx(&data).and_then(|_| conn.tipc_try_send()) {
                     warn!("vsock bridge failed to send vsock data to TIPC: {err:?}");
                     drop(conns);
-                    self.close_connection(conn_id, true);
+                    self.close_connection(conn_id);
                 }
             }
             Err(err) => {
                 warn!("vsock bridge failed to read vsock data: {err:?}");
-                self.close_connection(conn_id, true);
+                self.close_connection(conn_id);
             }
         }
     }
@@ -489,9 +402,13 @@ impl VsockBridge {
             return Err(KError::OutOfRange);
         }
         let mut data = vec![0; len];
-        let read_len = self.dev()?.recv(conn_id, &mut data).map_err(map_dev_err)?;
-        if read_len != len {
-            return Err(KError::Io);
+        let mut offset = 0;
+        while offset < len {
+            let read = recv_bridge(conn_id, &mut data[offset..]).map_err(map_dev_err)?;
+            if read == 0 {
+                return Err(KError::Io);
+            }
+            offset += read;
         }
         Ok(data)
     }
@@ -519,7 +436,7 @@ impl VsockBridge {
                 && let Err(err) = self.add_channel_handle(token, channel)
             {
                 warn!("vsock bridge failed to add reverse channel to handle set: {err:?}");
-                self.close_connection(conn_id, true);
+                self.close_connection(conn_id);
             }
         }
     }
@@ -530,19 +447,13 @@ impl VsockBridge {
             .lock()
             .iter()
             .any(|conn| conn.conn_id() == conn_id && conn.local_port() == 0);
-        if should_reject
-            && let Err(err) = self.dev().and_then(|dev| {
-                dev.send(conn_id, &[DYNAMIC_CONNECT_STATUS_REJECT])
-                    .map_err(map_dev_err)
-            })
-        {
-            warn!("vsock bridge failed to send dynamic reject byte: {err:?}");
+        if should_reject {
+            let _ = send_bridge(conn_id, &[DYNAMIC_CONNECT_STATUS_REJECT]);
         }
-        self.close_connection(conn_id, true);
+        let _ = abort_bridge(conn_id);
     }
 
-    fn close_connection(&self, conn_id: VsockConnId, disconnect_vsock: bool) {
-        self.clear_pending_inbound(conn_id);
+    fn close_connection(&self, conn_id: VsockConnId) {
         let removed = {
             let mut conns = self.connections.lock();
             let Some(index) = conns.iter().position(|conn| conn.conn_id() == conn_id) else {
@@ -554,19 +465,7 @@ impl VsockBridge {
             self.remove_channel_handle(removed.token(), channel.clone());
             channel.close();
         }
-        VSOCK_CONN_MANAGER.lock().remove_connection(conn_id);
-        if disconnect_vsock {
-            let _ = self
-                .dev()
-                .and_then(|dev| dev.disconnect(conn_id).map_err(map_dev_err));
-        }
-    }
-
-    fn abort_vsock(&self, conn_id: VsockConnId) {
-        self.clear_pending_inbound(conn_id);
-        let _ = self
-            .dev()
-            .and_then(|dev| dev.abort(conn_id).map_err(map_dev_err));
+        let _ = disconnect_bridge(conn_id);
     }
 
     fn handle_tipc_event(&self, event: UEvent) {
@@ -625,17 +524,34 @@ impl VsockBridge {
         }
 
         let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
-        let (local_port, conn_id) = reserve_reverse_connection(mapping.target_addr)?;
-        let conn = BridgeConnection::new_tipc_only(
-            token,
-            mapping.target_addr,
-            local_port,
-            mapping.tipc_service,
-            channel.clone(),
-        );
-        self.connections.lock().push(conn);
-        if let Err(err) = self.dev()?.connect(conn_id).map_err(map_dev_err) {
-            self.close_connection(conn_id, false);
+
+        // Create the connection in the manager and insert the BridgeConnection
+        // before sending the connect request, so event handlers can find it
+        // before the peer responds.
+        let pre_connect_conn_id = Cell::new(None);
+        let conn_id = create_bridge_connection(mapping.target_addr, |conn_id| {
+            pre_connect_conn_id.set(Some(conn_id));
+            let conn = BridgeConnection::new_tipc_only(
+                token,
+                mapping.target_addr,
+                conn_id.local_port,
+                mapping.tipc_service,
+                channel.clone(),
+            );
+            self.connections.lock().push(conn);
+        })
+        .inspect_err(|_err| {
+            // The pre_connect hook already inserted a BridgeConnection;
+            // remove it to avoid leaking the entry (ephemeral port reuse
+            // would otherwise create duplicate entries for the same conn_id).
+            if let Some(cid) = pre_connect_conn_id.get() {
+                let mut conns = self.connections.lock();
+                conns.retain(|c| c.conn_id() != cid);
+            }
+            channel.close();
+        })?;
+        if let Err(err) = self.add_channel_handle(token, channel) {
+            self.close_connection(conn_id);
             return Err(err);
         }
         Ok(())
@@ -696,7 +612,7 @@ impl VsockBridge {
         if dynamic_connecting {
             self.reject_dynamic_connect(conn_id);
         } else {
-            self.close_connection(conn_id, true);
+            self.close_connection(conn_id);
         }
     }
 
@@ -712,14 +628,12 @@ impl VsockBridge {
             conn.set_state(BridgeConnectionState::Active);
             conn.local_port() == 0
         };
-        if send_dynamic_success
-            && let Err(err) = self.dev().and_then(|dev| {
-                dev.send(conn_id, &[DYNAMIC_CONNECT_STATUS_OK])
-                    .map_err(map_dev_err)
-            })
-        {
-            warn!("vsock bridge failed to send dynamic success byte: {err:?}");
-            self.close_connection(conn_id, true);
+        if send_dynamic_success {
+            let result = send_bridge(conn_id, &[DYNAMIC_CONNECT_STATUS_OK]);
+            if result.is_err() {
+                warn!("vsock bridge failed to send dynamic success byte: {result:?}");
+                self.close_connection(conn_id);
+            }
         }
     }
 
@@ -731,7 +645,7 @@ impl VsockBridge {
         if let Err(err) = conn.tipc_try_send() {
             warn!("vsock bridge failed to retry TIPC send: {err:?}");
             drop(conns);
-            self.close_connection(conn_id, true);
+            self.close_connection(conn_id);
         }
     }
 
@@ -753,23 +667,14 @@ impl VsockBridge {
                 Err(KError::WouldBlock) => return,
                 Err(err) => {
                     warn!("vsock bridge failed to get TIPC message: {err:?}");
-                    self.close_connection(conn_id, true);
+                    self.close_connection(conn_id);
                     return;
                 }
             };
 
             let result = self.read_tipc_msg(&channel, msg).and_then(|data| {
                 channel.ipc_put_msg(msg.id)?;
-                self.dev()?
-                    .send(conn_id, &data)
-                    .map_err(map_dev_err)
-                    .and_then(|sent| {
-                        if sent == data.len() {
-                            Ok(sent)
-                        } else {
-                            Err(KError::Io)
-                        }
-                    })
+                send_bridge(conn_id, &data).map_err(map_dev_err)
             });
 
             match result {
@@ -785,7 +690,7 @@ impl VsockBridge {
                 }
                 Err(err) => {
                     warn!("vsock bridge failed to forward TIPC message to vsock: {err:?}");
-                    self.close_connection(conn_id, true);
+                    self.close_connection(conn_id);
                     return;
                 }
             }
@@ -838,31 +743,6 @@ fn parse_service_name(data: &[u8]) -> KResult<String> {
 
 fn uuid_allowed(uuid: IpcUuid, allowed_uuids: &[IpcUuid]) -> bool {
     allowed_uuids.is_empty() || allowed_uuids.contains(&uuid)
-}
-
-fn reserve_reverse_connection(peer_addr: VsockAddr) -> KResult<(u32, VsockConnId)> {
-    let local_cid = crate::device::vsock_guest_cid()?;
-    let mut manager = VSOCK_CONN_MANAGER.lock();
-    loop {
-        let port = NEXT_REVERSE_PORT.fetch_add(1, Ordering::Relaxed);
-        if bridge_mapping(port).is_some() || manager.is_local_port_in_use(port) {
-            continue;
-        }
-        let conn_id = VsockConnId {
-            peer_addr,
-            local_port: port,
-        };
-        manager.create_connection(
-            conn_id,
-            VsockAddr {
-                cid: local_cid,
-                port,
-            },
-            Some(peer_addr),
-            ConnectionState::Connecting,
-        )?;
-        return Ok((port, conn_id));
-    }
 }
 
 fn channel_handle_id(token: usize) -> i32 {

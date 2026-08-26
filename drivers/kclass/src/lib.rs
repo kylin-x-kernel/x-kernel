@@ -259,7 +259,10 @@ pub use net::{NetBufHandle, NetDevice, NetRxScheduler};
 pub use virtio::Virtio9pDevice;
 /// Re-export VSOCK device trait and address/connection types.
 #[cfg(feature = "vsock")]
-pub use vsock::{VsockAddr, VsockConnId, VsockDevice, VsockDriverEventType};
+pub use vsock::{
+    VsockAddr, VsockConnId, VsockConnectionInfo, VsockDevice, VsockTransportEvent,
+    VsockTransportEventKind,
+};
 
 trait ClassRuntimeMetadata {
     fn class_metadata(&self) -> ClassDeviceMetadata {
@@ -433,36 +436,43 @@ impl VsockDevice for ClassDevice<VsockDeviceImpl> {
         self.with(|device| device.guest_cid())
     }
 
-    fn listen(&self, src_port: u32) {
-        self.with(|device| device.listen(src_port));
+    fn listen(&self, port: u32) {
+        self.with(|device| device.listen(port));
     }
 
-    fn connect(&self, cid: VsockConnId) -> DriverResult<()> {
-        self.with(|device| device.connect(cid))
+    fn unlisten(&self, port: u32) {
+        self.with(|device| device.unlisten(port));
     }
 
-    fn send(&self, cid: VsockConnId, buf: &[u8]) -> DriverResult<usize> {
-        self.with(|device| device.send(cid, buf))
+    fn connect(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+        self.with(|device| device.connect(info))
     }
 
-    fn recv(&self, cid: VsockConnId, buf: &mut [u8]) -> DriverResult<usize> {
-        self.with(|device| device.recv(cid, buf))
+    fn accept(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+        self.with(|device| device.accept(info))
     }
 
-    fn recv_avail(&self, cid: VsockConnId) -> DriverResult<usize> {
-        self.with(|device| device.recv_avail(cid))
+    fn force_close(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+        self.with(|device| device.force_close(info))
     }
 
-    fn disconnect(&self, cid: VsockConnId) -> DriverResult<()> {
-        self.with(|device| device.disconnect(cid))
+    fn send(&self, info: &VsockConnectionInfo, buf: &[u8]) -> DriverResult<usize> {
+        self.with(|device| device.send(info, buf))
     }
 
-    fn abort(&self, cid: VsockConnId) -> DriverResult<()> {
-        self.with(|device| device.abort(cid))
+    fn shutdown(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+        self.with(|device| device.shutdown(info))
     }
 
-    fn poll_event(&self) -> DriverResult<Option<VsockDriverEventType>> {
-        self.with(|device| device.poll_event())
+    fn credit_update(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+        self.with(|device| device.credit_update(info))
+    }
+
+    fn poll_event(
+        &self,
+        handler: &mut dyn FnMut(VsockTransportEvent, &[u8]) -> DriverResult<()>,
+    ) -> DriverResult<bool> {
+        self.with(|device| device.poll_event(handler))
     }
 }
 
@@ -583,5 +593,8 @@ pub mod prelude {
     #[cfg(feature = "virtio-9p")]
     pub use crate::{Virtio9pDevice, Virtio9pDeviceImpl};
     #[cfg(feature = "vsock")]
-    pub use crate::{VsockAddr, VsockConnId, VsockDevice, VsockDeviceImpl, VsockDriverEventType};
+    pub use crate::{
+        VsockAddr, VsockConnId, VsockConnectionInfo, VsockDevice, VsockDeviceImpl,
+        VsockTransportEvent, VsockTransportEventKind,
+    };
 }

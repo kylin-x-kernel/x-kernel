@@ -36,6 +36,7 @@ use core::net::SocketAddr;
 use kclass::{ClassDevice, VsockDeviceImpl, subscribe_vsock_available, vsock_devices};
 use kclass::{NetDevice, net_devices};
 use kdevice::subscribe_device_removed;
+use kerrno::KError;
 use lazyinit::LazyInit;
 pub use link::packet;
 pub(crate) use link::{buf, wire};
@@ -173,7 +174,7 @@ pub fn start_vsock_bridge() {
 
 #[cfg(feature = "vsock")]
 fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
-    use crate::device::{register_vsock_dev, unregister_vsock_dev};
+    use crate::vsock::connection_manager::{register_vsock_dev, unregister_vsock_dev};
 
     let id = handle.id();
     info!(
@@ -182,19 +183,21 @@ fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
         handle.driver_name(),
         handle.location(),
     );
-    if let Err(e) = register_vsock_dev(handle.clone()) {
-        warn!("Failed to initialize vsock device: {:?}", e);
-    } else {
-        #[cfg(feature = "vsock_tipc_bridge")]
-        if let Err(e) = crate::vsock::bridge::init(handle.clone()) {
-            warn!("Failed to initialize vsock-TIPC bridge: {:?}", e);
+    if let Err(e) = register_vsock_dev(handle) {
+        if e != KError::AlreadyExists {
+            warn!("Failed to initialize vsock device: {:?}", e);
         }
-        subscribe_device_removed(Arc::new(move |removed_id| {
-            if removed_id == id && unregister_vsock_dev(id) {
-                warn!("vsock: detached removed device {:?}", id);
-            }
-        }));
+        return;
     }
+    #[cfg(feature = "vsock_tipc_bridge")]
+    if let Err(e) = crate::vsock::bridge::init() {
+        warn!("Failed to initialize vsock-TIPC bridge: {:?}", e);
+    }
+    subscribe_device_removed(Arc::new(move |removed_id| {
+        if removed_id == id && unregister_vsock_dev(id) {
+            warn!("vsock: detached removed device {:?}", id);
+        }
+    }));
 }
 
 /// Assists one already scheduled network polling round from task context.

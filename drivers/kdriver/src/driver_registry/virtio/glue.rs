@@ -100,9 +100,10 @@ cfg_if! {
                 transport: T,
                 irq: Option<usize>,
             ) -> DriverResult<kclass::prelude::VsockDeviceImpl> {
-                Ok(Box::new(virtio::VirtIoSocketDev::<VirtIoHalImpl, T>::try_new(
-                    transport, irq,
-                )?))
+                Ok(Box::new(virtio::VirtIoVsockDev::<
+                    VirtIoHalImpl,
+                    T,
+                >::try_new(transport, irq)?))
             }
         }
     }

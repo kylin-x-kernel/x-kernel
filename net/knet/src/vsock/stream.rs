@@ -22,6 +22,12 @@ use crate::{
 pub struct VsockStreamTransport {
     conn_id: Mutex<Option<VsockConnId>>,
     connection: Mutex<Option<Arc<Mutex<Connection>>>>,
+    /// Serializes concurrent sends on the same socket, mirroring Linux's
+    /// `lock_sock(sk)` in `vsock_connectible_sendmsg`. This prevents TOCTOU
+    /// credit races where two threads snapshot the same `tx_cnt` and both
+    /// believe there is enough peer credit. The connection manager never takes
+    /// this lock, so no deadlock is possible.
+    tx_lock: Mutex<()>,
     state: StateLock,
     general: GeneralOptions,
 }
@@ -31,6 +37,7 @@ impl VsockStreamTransport {
         Self {
             conn_id: Mutex::new(None),
             connection: Mutex::new(None),
+            tx_lock: Mutex::new(()),
             state: StateLock::new(State::Idle),
             general: GeneralOptions::new(),
         }
@@ -73,8 +80,13 @@ impl VsockTransportOps for VsockStreamTransport {
                     }
                 }
                 let conn_id = VsockConnId::listening(local_addr.port);
-                let conn =
-                    manager.create_connection(conn_id, local_addr, None, ConnectionState::Idle)?;
+                let conn = manager.create_connection(
+                    conn_id,
+                    local_addr,
+                    None,
+                    ConnectionState::Idle,
+                    false,
+                )?;
 
                 *self.conn_id.lock() = Some(conn_id);
                 *self.connection.lock() = Some(conn);
@@ -96,7 +108,6 @@ impl VsockTransportOps for VsockStreamTransport {
 
             // register in the global listen table
             VSOCK_CONN_MANAGER.lock().listen(local_addr)?;
-            crate::device::vsock_listen(local_addr)?;
             // set state
             conn.lock().set_state(ConnectionState::Listening);
             trace!("Vsock listening on {:?}", local_addr);
@@ -128,6 +139,7 @@ impl VsockTransportOps for VsockStreamTransport {
                 let new_transport = VsockStreamTransport {
                     conn_id: Mutex::new(Some(conn_id)),
                     connection: Mutex::new(Some(conn)),
+                    tx_lock: Mutex::new(()),
                     state: StateLock::new(State::Connected),
                     general: GeneralOptions::default(),
                 };
@@ -167,8 +179,12 @@ impl VsockTransportOps for VsockStreamTransport {
             };
             drop(existing_conn);
 
+            let guest_cid = manager.guest_cid();
+            if guest_cid == 0 {
+                k_bail!(NotFound, "vsock transport not registered");
+            }
             let local_addr = VsockAddr {
-                cid: crate::device::vsock_guest_cid()?,
+                cid: guest_cid,
                 port: local_port,
             };
 
@@ -182,6 +198,7 @@ impl VsockTransportOps for VsockStreamTransport {
                 local_addr,
                 Some(peer_addr),
                 ConnectionState::Connecting,
+                false,
             )?;
 
             *self.conn_id.lock() = Some(conn_id);
@@ -190,7 +207,11 @@ impl VsockTransportOps for VsockStreamTransport {
             drop(manager);
 
             // driver connect
-            crate::device::vsock_connect(conn_id)?;
+            if let Err(e) = vsock_connect(conn_id) {
+                *self.conn_id.lock() = None;
+                *self.connection.lock() = None;
+                return Err(e);
+            }
             debug!("Vsock connecting from {} to {:?}", local_port, peer_addr);
             Ok(())
         })?;
@@ -207,7 +228,12 @@ impl VsockTransportOps for VsockStreamTransport {
         })
     }
 
-    fn send(&self, mut src: impl Read + IoBuf, _options: SendOptions) -> KResult<usize> {
+    fn send(&self, mut src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
+        // Serialize concurrent sends on the same socket to prevent TOCTOU
+        // credit races. Mirrors Linux's lock_sock(sk) in
+        // vsock_connectible_sendmsg. The manager never takes this lock.
+        let _tx_guard = self.tx_lock.lock();
+
         let conn = self.get_connection()?;
         let conn_guard = conn.lock();
 
@@ -220,12 +246,12 @@ impl VsockTransportOps for VsockStreamTransport {
         }
 
         let conn_id = self.conn_id.lock().ok_or(KError::NotConnected)?;
+        let nonblocking = self.general.nonblocking() || options.flags.nonblocking();
         let tx_wait_queue = conn_guard.tx_wait_queue();
         drop(conn_guard);
 
-        // now virtio-driver only support non-blocking send
         let result = src.write_to(&mut kio::write_fn(|buf| {
-            crate::device::vsock_send(conn_id, buf, &tx_wait_queue)
+            vsock_send(conn_id, buf, nonblocking, &tx_wait_queue)
         }));
         conn.lock().add_tx_bytes(result.unwrap_or(0));
         result
@@ -233,49 +259,60 @@ impl VsockTransportOps for VsockStreamTransport {
 
     fn recv(&self, mut dst: impl Write, options: RecvOptions) -> KResult<usize> {
         let conn = self.get_connection()?;
+        let conn_id = *self.conn_id.lock();
 
-        self.general
-            .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
-                let mut conn_guard = conn.lock();
+        let count =
+            self.general
+                .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
+                    let mut conn_guard = conn.lock();
 
-                if conn_guard.rx_closed() && conn_guard.rx_buffer_used() == 0 {
-                    return Ok(0); // EOF
-                }
+                    if conn_guard.rx_closed() && conn_guard.rx_buffer_used() == 0 {
+                        return Ok(0); // EOF
+                    }
 
-                // should allow read when connection is closed, to read remaining data
-                if !matches!(
-                    conn_guard.state(),
-                    ConnectionState::Connected | ConnectionState::Closed
-                ) {
-                    return Err(KError::NotConnected);
-                }
+                    // should allow read when connection is closed, to read remaining data
+                    if !matches!(
+                        conn_guard.state(),
+                        ConnectionState::Connected | ConnectionState::Closed
+                    ) {
+                        return Err(KError::NotConnected);
+                    }
 
-                if conn_guard.rx_buffer_used() == 0 {
-                    return Err(KError::WouldBlock);
-                }
+                    if conn_guard.rx_buffer_used() == 0 {
+                        return Err(KError::WouldBlock);
+                    }
 
-                let (left, right) = conn_guard.rx_slices();
-                let mut count = dst.write(left)?;
+                    let (left, right) = conn_guard.rx_slices();
+                    let mut count = dst.write(left)?;
 
-                if count >= left.len() && !right.is_empty() {
-                    count += dst.write(right)?;
-                }
-                if !options.flags.contains(RecvFlags::PEEK) {
-                    conn_guard.advance_rx_read(count);
-                }
+                    if count >= left.len() && !right.is_empty() {
+                        count += dst.write(right)?;
+                    }
+                    if !options.flags.contains(RecvFlags::PEEK) {
+                        conn_guard.advance_rx_read(count);
+                    }
 
-                if count > 0 {
-                    trace!(
-                        "Recv {} bytes from connection (buffer_remaining={}/{})",
-                        count,
-                        conn_guard.rx_buffer_used(),
-                        VSOCK_RX_BUFFER_SIZE
-                    );
-                    Ok(count)
-                } else {
-                    Err(KError::WouldBlock)
-                }
-            })
+                    if count > 0 {
+                        trace!(
+                            "Recv {} bytes from connection (buffer_remaining={}/{})",
+                            count,
+                            conn_guard.rx_buffer_used(),
+                            VSOCK_RX_BUFFER_SIZE
+                        );
+                        Ok(count)
+                    } else {
+                        Err(KError::WouldBlock)
+                    }
+                })?;
+
+        if !options.flags.contains(RecvFlags::PEEK)
+            && let Some(conn_id) = conn_id
+        {
+            let _ = advance_rx_credit(conn_id, count)
+                .map_err(|e| warn!("vsock recv failed to update credit: {e:?}"));
+        }
+
+        Ok(count)
     }
 
     fn shutdown(&self, how: Shutdown) -> KResult<()> {
@@ -308,7 +345,7 @@ impl VsockTransportOps for VsockStreamTransport {
 
         if let Some(conn_id) = *self.conn_id.lock() {
             if state == ConnectionState::Connected {
-                crate::device::vsock_disconnect(conn_id)?;
+                vsock_disconnect(conn_id)?;
             } else if state == ConnectionState::Listening {
                 VSOCK_CONN_MANAGER.lock().unlisten(conn_id.local_port);
             }

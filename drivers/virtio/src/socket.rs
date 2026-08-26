@@ -2,129 +2,132 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! VirtIO vsock driver adapter.
+//! Raw VirtIO vsock transport adapter.
+//!
+//! This adapter wraps [`VirtIOSocket`] from the `virtio-drivers` crate and
+//! exposes only packet-level virtio-vsock operations: connect, accept, send,
+//! receive-event poll, and credit control. It does not keep connection tables,
+//! listen sets, accept queues, or per-connection receive buffers. Those are
+//! owned by the connection manager in `net/knet`.
+
+use alloc::vec::Vec;
+
 use driver_base::{Device, DeviceKind, DriverResult};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal,
     device::socket::{
-        VirtIOSocket, VsockAddr, VsockConnectionManager as InnerDev, VsockEvent, VsockEventType,
+        ConnectionInfo, VirtIOSocket, VsockAddr as VirtioVsockAddr, VsockEvent, VsockEventType,
     },
     transport::Transport,
 };
-use vsock::{VsockConnId, VsockDevice, VsockDriverEventType};
+use vsock::{VsockConnectionInfo, VsockDevice, VsockTransportEvent, VsockTransportEventKind};
 
 use crate::as_driver_error;
 
 /// Per-vsock RX virtqueue buffer size.
 const RX_BUFFER_SIZE: usize = 4096;
 
-/// Per-connection receive buffer capacity used by the connection manager.
-const PER_CONNECTION_BUFFER_CAPACITY: u32 = 32 * 1024;
-
-struct ConnectionArgs {
-    peer_addr: VsockAddr,
-    host_port: u32,
+/// Low-level VirtIO vsock device.
+///
+/// Implements [`VsockDevice`] for the underlying [`VirtIOSocket`]. This is a
+/// packet-oriented transport: it does not keep connection tables, listen sets,
+/// accept queues, or per-connection receive buffers. Those are owned by the
+/// connection manager in `net/knet`.
+pub struct VirtIoVsockDev<H: Hal, T: Transport, const RX_BUF_SIZE: usize = RX_BUFFER_SIZE> {
+    inner: SpinNoIrq<VirtIOSocket<H, T, RX_BUF_SIZE>>,
+    guest_cid: u64,
+    irq: Option<usize>,
 }
 
-impl ConnectionArgs {
-    fn from_conn_id(conn_id: VsockConnId) -> Self {
-        Self {
-            peer_addr: VsockAddr {
-                cid: conn_id.peer_addr.cid as _,
-                port: conn_id.peer_addr.port as _,
-            },
-            host_port: conn_id.local_port,
-        }
+// SAFETY: VirtIoVsockDev serializes all access to the inner VirtIOSocket
+// through its own SpinNoIrq lock. The inner type is not auto Send/Sync due to
+// PhantomData, but it is safe to transfer across threads and share behind that
+// lock.
+unsafe impl<H: Hal, T: Transport, const RX_BUF_SIZE: usize> Send
+    for VirtIoVsockDev<H, T, RX_BUF_SIZE>
+{
+}
+// SAFETY: same as the Send impl above: the inner VirtIOSocket is only accessed
+// through the SpinNoIrq lock, so it can be shared across threads.
+unsafe impl<H: Hal, T: Transport, const RX_BUF_SIZE: usize> Sync
+    for VirtIoVsockDev<H, T, RX_BUF_SIZE>
+{
+}
+
+impl<H: Hal, T: Transport, const RX_BUF_SIZE: usize> Drop for VirtIoVsockDev<H, T, RX_BUF_SIZE> {
+    fn drop(&mut self) {
+        // The inner VirtIOSocket already clears virtqueue pointers on drop.
     }
 }
 
-/// The VirtIO socket device driver.
-///
-/// Wraps `VsockConnectionManager` from `virtio-drivers` and implements the
-/// [`VsockDevice`] trait, providing connection-oriented socket communication
-/// between the guest and host via the VirtIO vsock transport.
-///
-/// # Type Parameters
-///
-/// - `H` - VirtIO HAL implementation for DMA allocation.
-/// - `T` - Transport layer (MMIO or PCI).
-///
-/// # Example
-///
-/// ```ignore
-/// let (kind, transport) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
-/// let mut vsock = VirtIoSocketDev::<HalImpl, _>::try_new(transport)?;
-/// vsock.listen(1234);
-/// let event = vsock.poll_event()?;
-/// ```
-pub struct VirtIoSocketDev<H: Hal, T: Transport> {
-    inner: SpinNoIrq<InnerDev<H, T, RX_BUFFER_SIZE>>,
-    guest_cid: u64,
-}
-
-// SAFETY: VirtIoSocketDev serializes all access to the inner
-// VsockConnectionManager through its own `SpinNoIrq` lock. The inner type
-// is not auto Send/Sync due to PhantomData, but it is safe to transfer across
-// threads and share behind that lock.
-unsafe impl<H: Hal, T: Transport> Send for VirtIoSocketDev<H, T> {}
-// SAFETY: VirtIoSocketDev serializes all shared access to the inner
-// VsockConnectionManager through its own `SpinNoIrq` lock.
-unsafe impl<H: Hal, T: Transport> Sync for VirtIoSocketDev<H, T> {}
-
-impl<H: Hal, T: Transport> VirtIoSocketDev<H, T> {
-    /// Creates a new driver instance and initializes the device, or returns
-    /// an error if any step fails.
+impl<H: Hal, T: Transport, const RX_BUF_SIZE: usize> VirtIoVsockDev<H, T, RX_BUF_SIZE> {
+    /// Create a new raw VirtIO vsock transport and initialize the device.
     ///
-    /// # Errors
-    ///
-    /// Returns `DriverError` if the VirtIO socket device fails to initialize
-    /// (e.g. feature negotiation failure, queue allocation failure).
-    pub fn try_new(transport: T, _irq: Option<usize>) -> DriverResult<Self> {
-        // The current vsock backend does not expose interrupt acknowledgment
-        // or virtqueue notification control, so knet advances it by polling.
-        let virtio_socket = Self::open_socket(transport)?;
-        let inner = InnerDev::new_with_capacity(virtio_socket, PER_CONNECTION_BUFFER_CAPACITY);
+    /// Returns an error if the device fails to initialize (feature
+    /// negotiation, queue allocation, etc.).
+    pub fn try_new(transport: T, irq: Option<usize>) -> DriverResult<Self> {
+        let inner = VirtIOSocket::<H, T, RX_BUF_SIZE>::new(transport).map_err(as_driver_error)?;
         let guest_cid = inner.guest_cid();
         Ok(Self {
             inner: SpinNoIrq::new(inner),
             guest_cid,
+            irq,
         })
     }
 
-    fn open_socket(transport: T) -> DriverResult<VirtIOSocket<H, T, RX_BUFFER_SIZE>> {
-        VirtIOSocket::<H, T, RX_BUFFER_SIZE>::new(transport).map_err(as_driver_error)
-    }
-
-    fn translate_event(event: VsockEvent) -> VsockDriverEventType {
-        let connection = VsockConnId {
-            peer_addr: vsock::VsockAddr {
-                cid: event.source.cid as _,
-                port: event.source.port as _,
+    /// Convert [`VsockConnectionInfo`] to the underlying [`ConnectionInfo`].
+    ///
+    /// This is a trivial field-by-field copy. The `has_pending_credit_request`
+    /// field is always `false` because the manager handles credit-request
+    /// logic at a higher level.
+    fn to_connection_info(info: &VsockConnectionInfo) -> ConnectionInfo {
+        let mut ci = ConnectionInfo::new(
+            VirtioVsockAddr {
+                cid: info.conn_id.peer_addr.cid,
+                port: info.conn_id.peer_addr.port,
             },
-            local_port: event.destination.port,
-        };
-
-        match event.event_type {
-            VsockEventType::ConnectionRequest => {
-                VsockDriverEventType::ConnectionRequest(connection)
-            }
-            VsockEventType::Connected => VsockDriverEventType::Connected(connection),
-            VsockEventType::Received { length } => {
-                VsockDriverEventType::Received(connection, length)
-            }
-            VsockEventType::Disconnected { .. } => VsockDriverEventType::Disconnected(connection),
-            VsockEventType::CreditUpdate => VsockDriverEventType::CreditUpdate(connection),
-            _ => VsockDriverEventType::Unknown,
-        }
+            info.conn_id.local_port,
+        );
+        ci.buf_alloc = info.buf_alloc;
+        ci.set_fwd_cnt(info.fwd_cnt);
+        ci.set_peer_buf_alloc(info.peer_buf_alloc);
+        ci.set_peer_fwd_cnt(info.peer_fwd_cnt);
+        ci.set_tx_cnt(info.tx_cnt);
+        ci
     }
 
-    fn refresh_credit(inner: &mut InnerDev<H, T, RX_BUFFER_SIZE>, connection: &ConnectionArgs) {
-        let _ = inner.update_credit(connection.peer_addr, connection.host_port);
+    fn translate_event(event: &VsockEvent) -> VsockTransportEvent {
+        let source = vsock::VsockAddr {
+            cid: event.source.cid,
+            port: event.source.port,
+        };
+        let destination = vsock::VsockAddr {
+            cid: event.destination.cid,
+            port: event.destination.port,
+        };
+        let kind = match event.event_type {
+            VsockEventType::ConnectionRequest => VsockTransportEventKind::ConnectionRequest,
+            VsockEventType::Connected => VsockTransportEventKind::Connected,
+            VsockEventType::Received { length } => VsockTransportEventKind::Received { length },
+            VsockEventType::Disconnected { .. } => VsockTransportEventKind::Disconnected,
+            VsockEventType::CreditUpdate => VsockTransportEventKind::CreditUpdate {
+                buffer_allocation: event.buffer_status.buffer_allocation,
+                forward_count: event.buffer_status.forward_count,
+            },
+            VsockEventType::CreditRequest => VsockTransportEventKind::CreditRequest,
+        };
+        VsockTransportEvent {
+            source,
+            destination,
+            peer_buf_alloc: event.buffer_status.buffer_allocation,
+            peer_fwd_cnt: event.buffer_status.forward_count,
+            kind,
+        }
     }
 }
 
-impl<H: Hal, T: Transport> Device for VirtIoSocketDev<H, T> {
+impl<H: Hal, T: Transport, const RX_BUF_SIZE: usize> Device for VirtIoVsockDev<H, T, RX_BUF_SIZE> {
     fn name(&self) -> &str {
         "virtio-socket"
     }
@@ -132,75 +135,103 @@ impl<H: Hal, T: Transport> Device for VirtIoSocketDev<H, T> {
     fn device_kind(&self) -> DeviceKind {
         DeviceKind::Vsock
     }
+
+    fn irq(&self) -> Option<usize> {
+        self.irq
+    }
 }
 
-impl<H: Hal, T: Transport> VsockDevice for VirtIoSocketDev<H, T> {
+impl<H: Hal, T: Transport, const RX_BUF_SIZE: usize> VsockDevice
+    for VirtIoVsockDev<H, T, RX_BUF_SIZE>
+{
     fn guest_cid(&self) -> u64 {
         self.guest_cid
     }
 
-    fn listen(&self, src_port: u32) {
-        self.inner.lock().listen(src_port)
+    fn listen(&self, _port: u32) {
+        // Raw transport does not track listen ports; the connection manager
+        // owns the listen table and decides whether to accept or reject.
     }
 
-    fn connect(&self, cid: VsockConnId) -> DriverResult<()> {
-        let connection = ConnectionArgs::from_conn_id(cid);
+    fn unlisten(&self, _port: u32) {
+        // Raw transport does not track listen ports.
+    }
+
+    fn connect(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+        let ci = Self::to_connection_info(info);
+        self.inner.lock().connect(&ci).map_err(as_driver_error)
+    }
+
+    fn accept(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+        let ci = Self::to_connection_info(info);
+        self.inner.lock().accept(&ci).map_err(as_driver_error)
+    }
+
+    fn force_close(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+        let ci = Self::to_connection_info(info);
+        self.inner.lock().force_close(&ci).map_err(as_driver_error)
+    }
+
+    fn send(&self, info: &VsockConnectionInfo, buf: &[u8]) -> DriverResult<usize> {
+        let mut ci = Self::to_connection_info(info);
         self.inner
             .lock()
-            .connect(connection.peer_addr, connection.host_port)
+            .send(buf, &mut ci)
+            .map_err(as_driver_error)?;
+        Ok(buf.len())
+    }
+
+    fn shutdown(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+        let ci = Self::to_connection_info(info);
+        self.inner.lock().shutdown(&ci).map_err(as_driver_error)
+    }
+
+    fn credit_update(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+        let ci = Self::to_connection_info(info);
+        self.inner
+            .lock()
+            .credit_update(&ci)
             .map_err(as_driver_error)
     }
 
-    fn send(&self, cid: VsockConnId, buf: &[u8]) -> DriverResult<usize> {
-        let connection = ConnectionArgs::from_conn_id(cid);
-        match self
-            .inner
-            .lock()
-            .send(connection.peer_addr, connection.host_port, buf)
+    fn poll_event(
+        &self,
+        handler: &mut dyn FnMut(VsockTransportEvent, &[u8]) -> DriverResult<()>,
+    ) -> DriverResult<bool> {
+        let mut got_event = false;
+        // Remove scratch SpinNoIrq field from VirtIoVsockDev that caused
+        // can_preempt(2) panic; revert poll_event to local Vec
+        let mut body = Vec::new();
+        let mut transport_event = None;
+
+        // Poll the inner VirtIOSocket once. The callback is called while the
+        // inner lock is held, so we copy the event and payload out.
         {
-            Ok(()) => Ok(buf.len()),
-            Err(e) => Err(as_driver_error(e)),
+            let mut inner = self.inner.lock();
+            let result = inner.poll(|event, raw_body| {
+                got_event = true;
+                body.clear();
+                body.extend_from_slice(raw_body);
+                transport_event = Some(event);
+                Ok(None)
+            });
+            if let Err(e) = result {
+                return Err(as_driver_error(e));
+            }
         }
-    }
 
-    fn recv(&self, cid: VsockConnId, buf: &mut [u8]) -> DriverResult<usize> {
-        let connection = ConnectionArgs::from_conn_id(cid);
-        let mut inner = self.inner.lock();
-        let res = inner
-            .recv(connection.peer_addr, connection.host_port, buf)
-            .map_err(as_driver_error);
-        Self::refresh_credit(&mut inner, &connection);
-        res
-    }
+        if !got_event {
+            return Ok(false);
+        }
 
-    fn recv_avail(&self, cid: VsockConnId) -> DriverResult<usize> {
-        let connection = ConnectionArgs::from_conn_id(cid);
-        self.inner
-            .lock()
-            .recv_buffer_available_bytes(connection.peer_addr, connection.host_port)
-            .map_err(as_driver_error)
-    }
+        let event = transport_event.expect("event was set when got_event is true");
+        let transport_event = Self::translate_event(&event);
 
-    fn disconnect(&self, cid: VsockConnId) -> DriverResult<()> {
-        let connection = ConnectionArgs::from_conn_id(cid);
-        self.inner
-            .lock()
-            .shutdown(connection.peer_addr, connection.host_port)
-            .map_err(as_driver_error)
-    }
+        // Release the inner lock before invoking the manager callback so the
+        // manager can call back into the transport to send control packets
+        // (accept, force_close, credit_update) without deadlocking.
+        handler(transport_event, &body)?;
 
-    fn abort(&self, cid: VsockConnId) -> DriverResult<()> {
-        let connection = ConnectionArgs::from_conn_id(cid);
-        self.inner
-            .lock()
-            .force_close(connection.peer_addr, connection.host_port)
-            .map_err(as_driver_error)
-    }
-
-    fn poll_event(&self) -> DriverResult<Option<VsockDriverEventType>> {
-        let Some(event) = self.inner.lock().poll().map_err(as_driver_error)? else {
-            return Ok(None);
-        };
-        Ok(Some(Self::translate_event(event)))
+        Ok(true)
     }
 }

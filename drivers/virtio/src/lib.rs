@@ -66,7 +66,7 @@ pub use virtio_drivers::{
 };
 
 #[cfg(feature = "socket")]
-pub use self::socket::VirtIoSocketDev;
+pub use self::socket::VirtIoVsockDev;
 
 /// Try to probe a VirtIO MMIO device from the given memory region.
 ///

@@ -13,13 +13,9 @@ use ktime_types::MonotonicInstant;
 mod ethernet;
 mod loopback;
 mod net_rx;
-#[cfg(feature = "vsock")]
-mod vsock;
 
 pub use ethernet::*;
 pub use loopback::*;
-#[cfg(feature = "vsock")]
-pub use vsock::*;
 
 use crate::{
     buf::PacketBuf,

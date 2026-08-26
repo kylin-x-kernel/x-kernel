@@ -70,8 +70,11 @@ net/knet/
     │   ├── dgram.rs
     │   └── stream.rs
     └── vsock/
-        ├── connection_manager.rs
-        └── stream.rs
+        ├── bridge.rs              # vsock-TIPC bridge（vsock_tipc_bridge feature）
+        ├── bridge_connection.rs   # bridge 单连接状态
+        ├── bridge_port_map.rs     # host↔TIPC 固定端口映射
+        ├── connection_manager.rs  # 统一连接管理器与原始传输 owner
+        └── stream.rs              # AF_VSOCK stream socket 实现
 ```
 
 测试辅助代码位于 `socket/test_options.rs`、`socket/test_state.rs`、`netlink/tests.rs`，
@@ -133,7 +136,7 @@ core/kruntime
 | `SocketOps` | 上层 socket syscall 使用的统一操作接口 |
 | `netlink` | 提供 AF_NETLINK socket、kobject uevent 和有限 rtnetlink 协议适配，查询各 owner 的实时快照并把 mutation 交给对应 owner |
 | `unix` | 提供 Unix domain stream 与 datagram transport；pathname 地址通过 kvfs 查找或创建 socket inode |
-| `vsock` | 在 `vsock` feature 下提供 virtio-vsock stream 支持 |
+| `vsock` | 在 `vsock` feature 下提供 virtio-vsock stream 支持；`connection_manager.rs` 负责从 kclass 注册 raw transport、驱动轮询、维护连接表/监听表/credit/bridge 事件队列，`stream.rs` 实现 AF_VSOCK，`bridge.rs` 在 `vsock_tipc_bridge` 下作为 `VSOCK_CONN_MANAGER` 消费者复用同一连接管理器 |
 
 ### Ethernet RX 调度边界
 
@@ -494,13 +497,23 @@ Ethernet 设备为未解析 next-hop 保留 `pending_tx`。
 
 ### vsock-TIPC bridge
 
-`vsock_tipc_bridge` feature 打开时，bridge 在 vsock device 注册后初始化端口资源：
-保存 vsock device、监听桥接端口并发布反向 TIPC port。
-bridge worker 不在 device 注册回调里启动；
-它们由 `kruntime` 在 SMP secondary run queue 注册完成后 late-start，
-以避免 early boot 阶段把 task 调度到尚未注册的远端 CPU run queue。
-它不创建普通 AF_VSOCK stream endpoint，而是在 `device/vsock.rs` 的 driver event router 处优先识别桥接端口和已桥接连接。
-未命中的事件继续交给原有 `VSOCK_CONN_MANAGER`，保持普通 AF_VSOCK stream 行为。
+`vsock_tipc_bridge` feature 打开时，`bridge` 是 `VSOCK_CONN_MANAGER` 的消费者，与 AF_VSOCK 共用同一个连接管理器，但不再直接操作 `VsockDevice`：
+
+- `net/knet` 的 `init_vsock()` 从 kclass 拿到原始 virtio-vsock 设备后，
+  通过 `connection_manager::register_vsock_dev()` 把它安装到 `VSOCK_CONN_MANAGER`；
+- `VSOCK_CONN_MANAGER` 同时负责：
+  - 维护连接表、监听表、credit、bridge 事件队列；
+  - 驱动原始 RX virtqueue 轮询（`poll_event()`）；
+  - 对非桥接端口执行 accept/force_close、把数据写入连接接收缓冲、更新 credit；
+  - 对桥接端口/桥接连接把高层事件（`ConnectionRequest`/`Connected`/`Received`/`Disconnected`/`CreditUpdate`）
+    推入 bridge event queue，由 `bridge::rx_task` 通过 `pop_bridge_event()` 消费；
+- AF_VSOCK 通过 `connection_manager` 的 socket-facing helper 调用 manager，
+  不再经过任何 device facade；
+- `bridge::init()` 向 `VSOCK_CONN_MANAGER` 注册 `BRIDGE_PORT_MAP` 端口（0-4），
+  由 manager 监听并把桥接事件排队；
+- bridge 通过 `VSOCK_CONN_MANAGER` 的 bridge API 发送/接收/关闭连接：
+  `listen_bridge_port`、`send_bridge`、`recv_bridge`、`create_bridge_connection`、
+  `disconnect_bridge`、`abort_bridge`。
 
 host-to-TA 方向使用固定端口映射：
 
@@ -528,22 +541,21 @@ Trusty-compatible dynamic bridge 在 host 连上 vsock port 0 后按 record 语�
 固定端口（1–4）在 vsock 连接建立时即 `WAIT_FOR_PORT | ASYNC` 连到预置 TIPC service，不使用上述单字节 handshake。
 
 TA-to-host 方向发布 `com.android.trusty.vsock.forwarder` TIPC port，并把 accepted channel 连接到 host CID 2 port 0。
-bridge worker 直接使用 `VsockDevice` 的 `listen/connect/recv/send/disconnect/abort`，并直接复用 TIPC core 的 `IpcChan`、`IpcPort` 和 `HandleSet`。
+反向连接由 `VSOCK_CONN_MANAGER::create_bridge_connection()` 申请一个临时端口并发送 vsock connect，
+bridge 在收到 `Connected` 事件后把 channel 加入 handle set。
 
 vsock `Received(conn_id, len)` 事件由 bridge 以 record 语义处理：
-bridge 分配 `len` 大小的临时 buffer 并调用一次 `recv(conn_id, &mut buf[..len])`，然后把该 record 作为一个 TIPC message。
+bridge 分配 `len` 大小的临时 buffer 并调用 `recv_bridge(conn_id, &mut buf[..len])` 读完整 record，然后把该 record 作为一个 TIPC message。
 如果 TIPC send 返回 `WouldBlock`，bridge 只保留一条 pending record 并等待 `SEND_UNBLOCKED` 后重试。
-TIPC 到 vsock 方向按 `get_msg -> read_msg -> put_msg -> send` 转发；
-v1 不排队等待 vsock credit，send 失败会关闭连接。
+TIPC 到 vsock 方向按 `get_msg -> read_msg -> put_msg -> send_bridge` 转发；
+`send_bridge` 在 vsock credit 耗尽时阻塞等待 `CreditUpdate`（通过 `tx_wait_queue`），
+连接关闭时返回错误由调用方处理。
 bridge v1 只转发 bytes，不转发 TIPC handles 或 memrefs。
-
-**事件路由约束**：`route_event` 对 `ConnectionRequest`（mapped port）立即记入 `pending_inbound`，使同批 `Received`（port 0 service name）在 `BridgeConnection` 创建前也能入 bridge FIFO。**不得**仅凭 `bridge_mapping(local_port)` 认领所有 `Connected`/`Received`，否则 guest 普通 AF_VSOCK 若显式 `bind(1..4)` 再 `connect()`，事件会被 bridge 误消费。
-
-`vsock-poll` 可能在同一批 `poll_event` 中连续弹出 `ConnectionRequest` 与 `Received`；若丢弃 `Received`，动态 handshake 的 service-name record 永久丢失，host `tipc_connect` 会在 status byte 上超时（`EAGAIN` / `-11`）。
 
 `bind()` 在 `vsock_tipc_bridge` 开启时拒绝显式绑定 `BRIDGE_PORT_MAP` 端口（ephemeral 分配本就跳过这些端口）。
 
-反向（TIPC→vsock）连接使用 `allocate_reverse_port()`，不在 `BRIDGE_PORT_MAP` 中；`accept_reverse_tipc()` 在 `dev.connect()` 之前插入 `BridgeConnection`，`has_connection()` 为真时生命周期事件仍走 bridge。
+反向（TIPC→vsock）连接由 manager 的 `allocate_port()` 分配临时端口，不在 `BRIDGE_PORT_MAP` 中；
+`accept_reverse_tipc()` 在 `create_bridge_connection()` 之后插入 `BridgeConnection`，生命周期事件仍由 manager 推入 bridge 队列。
 
 ## Drop / 资源释放
 

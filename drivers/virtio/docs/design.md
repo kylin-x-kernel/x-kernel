@@ -78,7 +78,7 @@ Feature flags 控制编译哪些设备适配器：
 | `gpu.rs` | 将 `VirtIOGpu` 封装为实现 `DisplayDevice` 的 `VirtIoGpuDev` |
 | `input.rs` | 将 `VirtIOInput` 封装为实现 `InputDevice` 的 `VirtIoInputDev` |
 | `net.rs` | 将 `VirtIONetRaw` 封装为实现 `NetDevice` 的 `VirtIoNetDev`，管理收发缓冲区、IRQ ack 和网络 RX scheduler 调度 |
-| `socket.rs` | 将 `VsockConnectionManager` 封装为实现 `VsockDevice` 的 `VirtIoSocketDev` |
+| `socket.rs` | 将 `VirtIOSocket` 封装为实现 `VsockDevice` 的原始包收发适配器 `VirtIoVsockDev`；连接状态由 `net/knet` 的 `VSOCK_CONN_MANAGER` 持有 |
 | `virtio_9p.rs` | 将 `VirtIO9p` 封装为实现 `Virtio9pDevice` 的 `VirtIo9pDev`，提供 `mount_tag()` 和 `request()` |
 | `mock_virtio.rs` | 提供 `MockHal` 和 `MockTransport`，用于单元测试 |
 
@@ -376,37 +376,43 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 3. 中断到来时 `handle_virtio_net_irq()` 遍历所有句柄，调用 `ack_interrupt()` 确认中断，返回包含来源位图的 `IrqEvent`，没有句柄确认中断时返回 `IrqEvent::NOT_HANDLED`
 4. 已注册 IRQ 时，`ack_interrupt()` 仅由 IRQ handler 调用，避免 RX 任务清除运行期间新到达但尚未调度的设备事件；未注册 IRQ 时，由 `recv()` 在纯轮询路径中确认中断
 
-### Vsock 连接管理
+### Vsock 原始传输适配器
+
+`socket.rs` 不再维护连接表、监听集合、接收缓冲区等状态；
+它只把 `VirtIOSocket` 包装成 `VirtIoVsockDev`，实现 xkernel 的 `VsockDevice` trait，
+提供 virtio-vsock 包级别的能力：
+
+- `connect` / `accept`：发送连接请求或响应控制包；
+- `send` / `shutdown` / `force_close`：发送数据包、优雅关闭或强制 RST；
+- `credit_update`：发送 credit 更新；
+- `poll_event`：从 RX virtqueue 取出一个原始事件，把事件类型和 payload 交给调用者处理；
+- `guest_cid`：返回设备配置的 guest CID。
+
+`VsockDevice` 是低层 packet transport trait；`kdriver` 通过现有的 `VsockDevice` class
+注册表发布 `VirtIoVsockDev`。`net/knet` 的 `VSOCK_CONN_MANAGER` 直接消费该 trait，
+负责连接、监听、缓冲、credit 等所有连接语义。
 
 **初始化流程**：
 
-1. `try_new(transport)` → `VirtIOSocket::new(transport)`：协商 feature、分配 VirtIO 队列
-2. `InnerDev::new_with_capacity(socket, 32KB)`：创建连接管理器，指定内部缓冲区大小
+1. `try_new(transport)` → `VirtIOSocket::new(transport)`：协商 feature、分配 VirtIO 队列；
+2. 返回 `VirtIoVsockDev`，内部用 `SpinNoIrq` 串行化对 `VirtIOSocket` 的访问。
 
-**连接建立流程**：
+**包收发流程**：
 
-1. 服务端：`listen(src_port)` 开始监听 → `poll_event()` 收到 `ConnectionRequest` → `connect()` 接受连接
-2. 客户端：`connect(cid)` 主动发起 → `poll_event()` 收到 `Connected` 事件 → 连接建立
+1. 发送：`send(info, buf)` → 用 `VsockConnectionInfo` 构造底层 `ConnectionInfo` → `inner.send(buf, &mut ci)`；
+2. 接收：`poll_event(handler)` → `inner.poll()` 获取 `VsockEvent` → 翻译为 `VsockTransportEvent` + payload → 调用 `handler` 处理事件；
+3. 控制动作：`handler` 在回调内直接调用 `VsockDevice` 方法（如 `accept`、`force_close`、`credit_update`）发送响应包，回调在 virtqueue 锁外执行。
 
-**数据传输流程**：
+**连接状态归属**：
 
-1. 发送：`send(cid, buf)` → 翻译 `VsockConnId` 为 `VsockAddr` → `inner.send(peer_addr, host_port, buf)`
-2. 接收：`recv(cid, buf)` → `inner.recv(peer_addr, host_port, buf)` → 自动调用 `update_credit()` 通知对端可用缓冲区
-
-**事件轮询流程**：
-
-1. 调用 `poll_event()` → `inner.poll()` 获取 `VsockEvent`
-2. `translate_event()` 将 `VsockEvent` 翻译为上层 `VsockDriverEventType`：
-   - `ConnectionRequest` → `VsockDriverEventType::ConnectionRequest`
-   - `Connected` → `VsockDriverEventType::Connected`
-   - `Received { length }` → `VsockDriverEventType::Received`
-   - `Disconnected` → `VsockDriverEventType::Disconnected`
-   - `CreditUpdate` → `VsockDriverEventType::CreditUpdate`
+- 本模块不维护连接表；
+- 连接状态由 `net/knet` 的 `VSOCK_CONN_MANAGER` 统一持有；
+- 本模块只负责把 virtio 包推进/取出队列。连接信息（含 `tx_cnt`）由 `VsockConnectionInfo` 携带，从 manager 传入。
 
 **连接关闭流程**：
 
-1. 优雅关闭：`disconnect(cid)` → `inner.shutdown()` 等待对端确认
-2. 强制关闭：`abort(cid)` → `inner.force_close()` 不等待对端确认
+1. 优雅关闭：`shutdown(cid)` → 发送 `VIRTIO_VSOCK_OP_SHUTDOWN`；
+2. 强制关闭/拒绝：`force_close(cid)` → 发送 `VIRTIO_VSOCK_OP_RST`。
 
 ### 9p 设备请求
 

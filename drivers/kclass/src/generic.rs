@@ -162,7 +162,7 @@ impl<T> ClassDevice<T> {
     ///
     /// The runtime object is shared immutably; any mutation is the driver's
     /// responsibility via interior locking.
-    pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+    pub fn with<'a, R>(&'a self, f: impl FnOnce(&'a T) -> R) -> R {
         f(&self.inner.runtime)
     }
 
