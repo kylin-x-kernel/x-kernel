@@ -42,6 +42,9 @@
 - 恶意 robust list 构造循环：通过 `ROBUST_LIST_LIMIT` 限界。
 - 无效用户地址：`read_vm()` 失败即停止遍历。
 - `rt_sigreturn` 后重复进入信号处理：`SkipSignalCheckOnce` 显式规避。
+- 向正在用户态运行的任务投递信号：`TaskInner::interrupt()` kick 目标 CPU；
+  返回用户态前若 `is_interrupted()` 则再跑一次 `check_signals`，避免 NOHZ
+  lone runner 永远不 trap。
 - init 可执行文件解析失败：当前实现直接 panic，保留“系统无法启动即失败停止”的语义。
 - file-backed 映射越过 EOF 的 page fault：`MmSpace::handle_page_fault()`
   返回结构化 `PageFaultOutcome::BusError`，runtime 将其转换为 `SIGBUS`，

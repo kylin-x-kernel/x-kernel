@@ -165,6 +165,7 @@ ksched algorithms / karch context switch / allocator
 | F-08 | 周期 callback overrun 后立即再次到期 | deadline 按旧周期逐次追赶或按 IRQ 入口时间重算 | hardirq 连续回调 | CPU 活锁、调度/soft timer 饥饿 | 1 | callback 前临时置 inactive；完成后以 fresh monotonic time + period 一次性重装 |
 | F-09 | idle-pull 与远端 wake 双锁顺序颠倒 | dest 持锁再锁 src | 死锁 | 调度停住 | 1 | 只锁 src 再 dest 入队；`resched` 已放下 dest 调度锁 |
 | F-10 | idle-pull 窗口 affinity 漏迁 | steal 后 dest 入队前 `setaffinity` | 任务在新掩码外运行 | 隔离违约 | 2 | dest 入队后复查 cpumask；enforce 对未占用 CPU 只改 mask |
+| F-11 | 运行中用户任务收不到 pending 信号 | `interrupt()` 只 wake waiter、不 kick CPU；NOHZ 已停表 | 目标停在用户态忙循环 | 定时信号（如 SIGALRM）永久延迟，workload 卡死 | 2 | `interrupt()` 对 `on_cpu` 任务置本 CPU `need_resched` 或发 reschedule IPI；用户返回路径在 preempt 后再查一次 `is_interrupted` |
 
 ## 故障管理
 
@@ -203,7 +204,9 @@ ksched algorithms / karch context switch / allocator
    留 prev；home 不在 cpumask 且无 idle 才 `find_idlest`）。不要在 SIS 之前单独加
    「粘 home 的 idle 溢出」。
 3. SMP 必须同时启用 `ipi`：远端唤醒的抢占请求通过 IPI 置 `need_resched`；
-   `smp && !ipi` 在编译期拒绝。IPI 回调不得 account/refresh 目标 RQ。
+   向正在运行的任务 `interrupt()`（信号投递）同样走该 IPI，否则 NOHZ lone
+   runner 不会离开用户态。`smp && !ipi` 在编译期拒绝。IPI 回调不得
+   account/refresh 目标 RQ。
 4. `on_timer_fire` 在唤醒批次内推迟硬件 rearm，结束后重读 soft earliest；仅
    schedule slot 到期时 `account_sched_tick`（`check_preempt_tick`），否则只
    account。`switch_to` 的立即抢占 pending 落在入场任务上。NOHZ 下 add/wake
@@ -230,4 +233,6 @@ ksched algorithms / karch context switch / allocator
 - [ ] `nr_running` 是否只在 publish/enqueue 记账、block/migrate/exit 销账。
 - [ ] `nr_home` 是否在 block 时保持，仅 exit / 换核时销账。
 - [ ] spawn 是否 idle-first（`nr_running == 0`），再比 `nr_home`。
+- [ ] 向运行中任务 `interrupt()` / 投递未屏蔽信号时，是否 kick 目标 CPU
+      （本 CPU `need_resched`，远端 IPI），而不是只依赖 waiter wake 或周期 tick。
 - [ ] wake 是否 prev 空闲回家、否则 `select_idle_sibling`、无 idle 留 prev。

@@ -337,7 +337,7 @@ pub fn on_timer_fire() {
 /// refresh here raced the waker's `&mut RunQueue` and could reprogram (or
 /// disarm) the target's schedule slot before the IRQ-tail `peer_preempts_curr`
 /// probe. A failed probe arms the backup hrtick in `preempt_resched`.
-#[cfg(all(feature = "preempt", feature = "smp", feature = "ipi"))]
+#[cfg(all(feature = "preempt", feature = "smp"))]
 pub(crate) fn on_remote_resched_ipi() {
     current().set_preempt_pending(true);
 }
@@ -399,8 +399,10 @@ pub fn wake_task(task: &KtaskRef, resched: bool) {
 ///
 /// Sets the task's interrupt flag so that an in-progress
 /// [`interruptible`](crate::future::interruptible) wait returns early, then
-/// unblocks it. Used to deliver asynchronous events (such as a pending virtual
-/// IRQ) to a thread parked in [`interruptible_sleep_until`].
+/// unblocks it. If the task is already running, [`TaskInner::interrupt`] kicks
+/// its CPU so a user-mode runner returns to the kernel. Used to deliver
+/// asynchronous events (such as a pending virtual IRQ) to a thread parked in
+/// [`interruptible_sleep_until`].
 pub fn interrupt_task(task: &KtaskRef, resched: bool) {
     task.interrupt();
     wake_task(task, resched);

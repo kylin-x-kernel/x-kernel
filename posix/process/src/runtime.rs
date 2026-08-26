@@ -147,9 +147,19 @@ pub(crate) fn run_user_thread_loop(
         }
 
         thr.set_cpu_state(CpuTimeState::User);
-        poll_cpu_timers();
+        // Drop the trap-time interrupt flag before polling timers or preempting,
+        // so `is_interrupted` below means a *new* `interrupt()` from this window.
         curr.clear_interrupt();
+        poll_cpu_timers();
         ktask::check_preempt_pending();
+        // `interrupt()` may have queued a signal in `poll_cpu_timers` (CPU-time
+        // timer) or while this task was preempted (for example `alarm_task`).
+        // Re-handle before `uctx.run()`; a NOHZ lone runner may never trap again.
+        // `rt_sigreturn` still skips the trap check above. This path only runs
+        // when a *new* interrupt arrived after `clear_interrupt`.
+        if curr.is_interrupted() {
+            while check_signals(&thr, &mut uctx, None) {}
+        }
     }
 }
 

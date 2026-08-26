@@ -544,7 +544,20 @@ impl TaskInner {
         self.interrupted.store(false, Ordering::Release);
     }
 
+    /// Returns whether [`Self::interrupt`] has been called since the last clear.
+    #[inline]
+    pub fn is_interrupted(&self) -> bool {
+        self.interrupted.load(Ordering::Acquire)
+    }
+
     /// Interrupts the task.
+    ///
+    /// Sets the interrupt flag and wakes any [`Self::poll_interrupt`] waiter.
+    /// If the task is currently running, this also kicks its CPU so a user-mode
+    /// busy loop can return to the kernel and observe pending work: a local
+    /// target gets `need_resched`, a remote target gets a reschedule IPI.
+    /// Without that kick, oneshot/NOHZ may have disarmed the schedule timer, so
+    /// a lone user runner would never trap again.
     ///
     /// The wake uses [`crate::with_wake_sync`] when a current task exists:
     /// signal senders typically block soon after, matching Linux `WF_SYNC`.
@@ -558,6 +571,7 @@ impl TaskInner {
         } else {
             self.interrupt_waker.wake();
         }
+        crate::run_queue::kick_running_task(self);
     }
 
     pub(crate) fn set_workerqueue_current_work_context(
@@ -881,6 +895,12 @@ impl TaskInner {
     #[cfg(feature = "preempt")]
     pub(crate) fn set_preempt_pending(&self, pending: bool) {
         self.need_resched.store(pending, Ordering::Release)
+    }
+
+    #[inline]
+    #[cfg(feature = "preempt")]
+    pub(crate) fn is_preempt_pending(&self) -> bool {
+        self.need_resched.load(Ordering::Acquire)
     }
 
     /// Enter a nested Linux-style `WF_SYNC` wake scope.

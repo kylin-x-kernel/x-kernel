@@ -17,7 +17,7 @@ ipi = ["dep:kipi"]
 watchdog = ["snapshot"]
 tls = ["khal/tls"]
 preempt = ["percpu/preempt", "kspin/preempt"]
-smp = ["kspin/smp"]
+smp = ["kspin/smp", "ipi"]
 
 sched_fifo = []
 sched_rr = ["preempt"]

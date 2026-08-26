@@ -31,7 +31,7 @@ use ksched::{BaseScheduler, CurrentDisposition};
 use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 use lazyinit::LazyInit;
 
-#[cfg(all(feature = "preempt", feature = "smp", feature = "ipi"))]
+#[cfg(all(feature = "preempt", feature = "smp"))]
 use crate::api::on_remote_resched_ipi;
 use crate::{
     KCpuMask, KtaskRef, Scheduler, TaskInner,
@@ -840,6 +840,53 @@ fn request_remote_resched(cpu_id: LogicalCpuId) -> kipi::Result<()> {
         Err(err)
     } else {
         Ok(())
+    }
+}
+
+/// Kicks a running task off user mode or into a preempt check.
+///
+/// Blocked waiters are handled by [`TaskInner::interrupt`]'s `PollSet` wake.
+/// A task that is `on_cpu` has no waiter, so NOHZ can leave it in user mode
+/// until the next syscall or timer IRQ. Signal delivery therefore needs a CPU
+/// kick: local `need_resched`, or a reschedule IPI.
+///
+/// Matches Linux `kick_process`: sample `on_cpu` / `cpu_id` once. A userspace
+/// runner cannot change CPUs without a kernel entry that already observes
+/// `interrupted`; a stale IPI is a spurious resched. The IPI itself pulls
+/// `UserContext::run` back; `preempt` only adds `need_resched` in the callback.
+pub(crate) fn kick_running_task(task: &TaskInner) {
+    #[cfg(not(any(feature = "smp", feature = "preempt")))]
+    let _ = task;
+    #[cfg(feature = "smp")]
+    {
+        if !task.on_cpu() {
+            return;
+        }
+        let cpu_id = task.cpu_id();
+        if cpu_id == this_cpu_id() {
+            #[cfg(feature = "preempt")]
+            task.set_preempt_pending(true);
+            return;
+        }
+        let kick_result = kipi::run_on_cpu(cpu_id, || {
+            #[cfg(feature = "preempt")]
+            on_remote_resched_ipi();
+        });
+        if let Err(err) = &kick_result {
+            warn!(
+                "failed to kick CPU {} for running task: {}",
+                cpu_id.as_usize(),
+                err
+            );
+        }
+        #[cfg(feature = "preempt")]
+        record_remote_resched(cpu_id, kick_result.is_err());
+    }
+    #[cfg(all(not(feature = "smp"), feature = "preempt"))]
+    {
+        if task.is_running() {
+            task.set_preempt_pending(true);
+        }
     }
 }
 
@@ -2657,5 +2704,112 @@ mod tests_wake_affinity {
         only_home.set(1, true);
         task.set_cpumask(only_home);
         assert!(!can_idle_pull_task(&task, 0));
+    }
+}
+
+#[cfg(all(feature = "preempt", unittest))]
+mod tests_interrupt_kick {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use unittest::{assert, assert_eq, def_test};
+
+    use crate::{current, yield_now};
+
+    #[def_test(serial)]
+    fn interrupt_current_sets_preempt_pending() {
+        let curr = current();
+        curr.disable_preempt();
+        curr.set_preempt_pending(false);
+        curr.clear_interrupt();
+        curr.interrupt();
+        assert!(curr.is_interrupted());
+        assert!(curr.is_preempt_pending());
+        curr.clear_interrupt();
+        curr.enable_preempt(false);
+    }
+
+    #[cfg(feature = "smp")]
+    #[def_test(serial)]
+    fn interrupt_running_remote_task_sets_preempt_pending() {
+        use kcpu_id_map::LogicalCpuId;
+        use khal::percpu::this_cpu_id;
+
+        use crate::{KCpuMask, set_task_affinity, spawn};
+
+        const TIMEOUT_NS: u64 = 2_000_000_000;
+
+        static READY: AtomicUsize = AtomicUsize::new(0);
+        static DONE: AtomicUsize = AtomicUsize::new(0);
+        static FAILED: AtomicUsize = AtomicUsize::new(0);
+        static STOP: AtomicUsize = AtomicUsize::new(0);
+
+        if kcpu_id_map::nr_cpus() >= 2 {
+            READY.store(0, Ordering::Release);
+            DONE.store(0, Ordering::Release);
+            FAILED.store(0, Ordering::Release);
+            STOP.store(0, Ordering::Release);
+
+            let local = this_cpu_id().as_usize();
+            let remote = (0..kcpu_id_map::nr_cpus())
+                .find(|&cpu| cpu != local)
+                .expect("smp unittest must expose a second CPU");
+
+            let task = spawn(move || {
+                let mut mask = KCpuMask::new();
+                mask.set(remote, true);
+                if !set_task_affinity(&current().clone(), mask) {
+                    FAILED.store(1, Ordering::Release);
+                    DONE.store(1, Ordering::Release);
+                    return;
+                }
+
+                while current().cpu_id().as_usize() != remote && STOP.load(Ordering::Acquire) == 0 {
+                    yield_now();
+                }
+
+                let curr = current();
+                curr.disable_preempt();
+                curr.set_preempt_pending(false);
+                curr.clear_interrupt();
+                READY.store(1, Ordering::Release);
+
+                let start = khal::time::monotonic_time_nanos();
+                while STOP.load(Ordering::Acquire) == 0 {
+                    if curr.is_interrupted() && curr.is_preempt_pending() {
+                        break;
+                    }
+                    if khal::time::monotonic_time_nanos().saturating_sub(start) > TIMEOUT_NS {
+                        FAILED.store(1, Ordering::Release);
+                        break;
+                    }
+                    core::hint::spin_loop();
+                }
+                curr.enable_preempt(false);
+                DONE.store(1, Ordering::Release);
+            });
+
+            let start = khal::time::monotonic_time_nanos();
+            while READY.load(Ordering::Acquire) == 0 {
+                if khal::time::monotonic_time_nanos().saturating_sub(start) > TIMEOUT_NS {
+                    break;
+                }
+                yield_now();
+            }
+            assert_eq!(READY.load(Ordering::Acquire), 1);
+            assert!(task.on_cpu());
+            assert_eq!(task.cpu_id(), LogicalCpuId::new(remote));
+
+            task.interrupt();
+
+            while DONE.load(Ordering::Acquire) == 0 {
+                if khal::time::monotonic_time_nanos().saturating_sub(start) > TIMEOUT_NS {
+                    break;
+                }
+                yield_now();
+            }
+            STOP.store(1, Ordering::Release);
+            assert_eq!(DONE.load(Ordering::Acquire), 1);
+            assert_eq!(FAILED.load(Ordering::Acquire), 0);
+        }
     }
 }

@@ -297,6 +297,10 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
 - waker 触发时通过 `select_wake_run_queue(...).unblock_task(..., true)` 将任务恢复为 `Ready`。
 - SMP 下唤醒按 Linux `select_idle_sibling`：`prev_cpu`（`task.cpu_id()`）空闲则回家；否则在 cpumask 里找 `nr_running == 0` 的核；都忙则留在 prev；home 不在 cpumask 且无 idle 时才走 `find_idlest_cpu`。
 - `unblock_task(..., true)` 对本 CPU 设置 `need_resched`；对远端 CPU 在 `ipi + preempt` 可用时请求远端设置 `need_resched`。
+- `TaskInner::interrupt()` 在 wake `interrupt_waker` 之后对仍 `on_cpu` 的任务
+  `kick_running_task()`：本 CPU 在 `preempt` 下置 `need_resched`，远端一律发
+  IPI（`smp` 已带 `ipi`）。信号投递给正在用户态运行的任务必须走这条路径；
+  NOHZ lone runner 没有周期 tick 兜底。
 - `WaitQueue` 基于 `event_listener` 封装等待与通知，支持超时与条件等待。
 - `TaskInner::join()` 使用 `kpoll::Completion` 作为 per-task exit wait source。任务退出时先发布
   `exit_code`，再把 state 切到 `Exited` 并 `complete_all()`；joiner 的真实完成条件仍是
@@ -376,7 +380,10 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
     否则远端 slice-expire pick / 随后 IPI 探测看不到 buddy。account + PLACE +
     提名必须在同一把 scheduler 锁里完成。
   - `TaskInner::interrupt()` 对 `interrupt_waker` 走 `with_wake_sync`（信号发送方
-    随后往往会 block）。
+    随后往往会 block）。若目标正在 CPU 上运行，再 kick 该 CPU：本 CPU 在
+    `preempt` 下置 `need_resched`，远端发 IPI（`smp` 已带 `ipi`）。IPI 把
+    `UserContext::run` 拉回内核；`preempt` 只在回调里多置 `need_resched`。
+    这是 Linux `kick_process` 在 NOHZ 下的对应物。只采样一次 `on_cpu`/`cpu_id`。
 - 当前任务离开统一走 `leave_current`：
   - `yield_current` → `Yield`（重置 request 并再入队；`Running -> Ready` 必须成功）
   - `preempt_resched` → `Preempt`（保留剩余 slice 并再入队；同上）
@@ -458,14 +465,14 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
 | Feature | 作用 |
 |---------|------|
 | `preempt` | 启用抢占逻辑与 `kspin` preempt 接口 |
-| `smp` | 启用多核 run queue 与迁移相关语义；必须同时启用 `ipi` |
+| `smp` | 多核 run queue 与迁移；同时启用 `ipi` |
 | `sched_fifo` | FIFO 协作式调度 |
 | `sched_rr` | RR 抢占式调度（隐含 `preempt`） |
 | `sched_cfs` | CFS 抢占式调度（隐含 `preempt`） |
 | `sched_eevdf` | EEVDF 抢占式调度（隐含 `preempt`） |
 | `snapshot` | 任务快照与回溯基础能力 |
 | `watchdog` | watchdog 诊断（依赖 `snapshot`） |
-| `ipi` | SMP 远端唤醒/重调度的必需能力 |
+| `ipi` | 由 `smp` 带上；远端 IPI 唤醒/重调度 |
 | `tls` | 可选扩展能力 |
 
 `UserTaskRuntime` 是 `ktask` 的用户运行时接口。其 scheduler hook 可在关闭抢占的切换上下文

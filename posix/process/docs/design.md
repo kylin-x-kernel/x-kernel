@@ -53,7 +53,12 @@ entry / ksyscall
 3. 因 syscall / page fault / exception / interrupt 返回内核。
 4. 处理返回原因并更新 CPU 计时状态。
 5. 执行信号检查和默认动作。
-6. 轮询 CPU timer 后返回用户态。
+6. 先清掉本次 trap 的 interrupt 标志，再轮询 CPU timer、检查抢占；若这段
+   窗口里又发生 `interrupt()`（CPU timer 投递或 `alarm_task` 抢占），再次
+   检查信号，然后返回用户态。NOHZ 下 lone runner 可能已停调度 tick，因此
+   运行中任务的 `TaskInner::interrupt()` 还会 kick 目标 CPU（本 CPU
+   `need_resched` / 远端 IPI），不能依赖下一次 syscall 或周期 tick 才进入
+   `check_signals`。
 
 ### 线程退出
 
