@@ -110,6 +110,26 @@ impl UserContext {
         self.tpidr = tls as _;
     }
 
+    /// Resets the general-purpose registers before entering a freshly
+    /// loaded executable.
+    ///
+    /// A successful `execve` must not leak the old program's registers into
+    /// the new image. Linux's AArch64 `start_thread` zeroes the whole
+    /// register file before the new ELF entry point runs; only `pc`, `sp`
+    /// and the `SPSR` are re-established afterwards, so all 31 X registers
+    /// are cleared here. The syscall-restart snapshot and `from_syscall`
+    /// marker are reset as well: the new image does not enter via a syscall,
+    /// and a coincidental `x0` value must not be interpreted as a restart
+    /// code.
+    ///
+    /// Control fields (`elr`, `spsr`, `pmr`, `sp`, `tpidr`) are left for the
+    /// caller to re-establish via `set_ip`/`set_sp`/`set_tls`.
+    pub fn reset_for_exec(&mut self) {
+        self.tf.x = [0; 31];
+        self.saved_syscall_arg0 = 0;
+        self.from_syscall = false;
+    }
+
     /// Enters user space.
     ///
     /// It restores the user registers and jumps to the user entry point

@@ -107,6 +107,12 @@ ksyscall::dispatch_irq_syscall
 4. 资源对象的状态机、不变量和生命周期必须留在 owner crate。
 5. 不因 syscall 名字相似就把不同资源 owner 混进同一目录。
 6. 每个 syscall number 按自己的 ABI 参数个数解码；旧 ABI 未定义的参数寄存器不得被当作扩展 flags 使用。
+7. 进程控制类 syscall 替换用户执行上下文时必须建立面向目标架构 ELF entry ABI
+   的全新寄存器状态，不继承旧 syscall 的参数寄存器。`execve` 成功装载新镜像后
+   在重建 IP/SP/TLS 之前调用 `UserContext::reset_for_exec()` 清零所有通用寄存器
+   和 syscall restart 状态；否则 x86_64 静态 glibc 程序入口 `rdx` 会残留
+   `envp` 参数（被当作 `rtld_fini` 回调 → 退出时跳旧堆地址 SIGSEGV），
+   aarch64 `x2`、riscv/loongarch64 `a2` 也会残留旧 `envp`。
 
 ## 当前 owner 对齐
 

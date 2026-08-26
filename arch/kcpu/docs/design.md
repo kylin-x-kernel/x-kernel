@@ -314,6 +314,25 @@ LoongArch64 架构对非对齐访问触发异常而非由硬件处理。内核�
 以保证正确性。`emulate_unaligned()` 解码故障指令的操作码，确定操作类型
 （加载/存储、大小、有符号/无符号、通用/浮点寄存器），执行相应操作后推进 PC。
 
+### 为什么 exec 成功后要重置用户通用寄存器
+
+`execve` 成功装载新镜像后，入口用户寄存器必须符合目标架构 ELF entry ABI，
+不能继承旧程序 syscall trap 时的寄存器值。各架构 `UserContext::reset_for_exec()`
+负责清零所有不应继承的通用寄存器以及 syscall restart 相关状态（`orig_rax`、
+`saved_syscall_arg0`、`from_syscall`），由调用方随后重建新的 IP/SP/TLS。
+
+- x86_64 的 `execve(path, argv, envp)` 第三个参数 `envp` 位于 `rdx`；静态
+  glibc 的 `_start` 把入口 `rdx` 当作 `rtld_fini` 回调传给
+  `__libc_start_main`。若不清零，glibc 会把旧堆里的 `envp` 地址注册为退出回调，
+  在 `__run_exit_handlers` 中 `call *%rax` 跳入旧地址导致 SIGSEGV（与 shell
+  `echo $?` 观测到的 139 一致）。
+- 其余架构（aarch64/riscv/loongarch64）同样清零全部 GPR `x`/`regs`，避免旧程序
+  参数（如 exec 的 `envp` 落在 aarch64 `x2`、riscv/loongarch64 `a2`）泄漏到新
+  镜像，并清除 syscall restart 状态使新程序不被当作 syscall 入口。
+
+复位只覆盖通用寄存器；`cs/ss/rflags`、`spsr`、`sepc/era/elr`、`sp`、TLS 等框架
+字段由 `set_ip`/`set_sp`/`set_tls` 调用方重建。
+
 ### 为什么 RISC-V FP 状态使用 lazy save/restore
 
 RISC-V 的 `sstatus.FS` 字段跟踪 FP 状态（Off/Initial/Clean/Dirty）。

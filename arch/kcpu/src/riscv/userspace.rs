@@ -116,6 +116,23 @@ impl UserContext {
         karch::enable_local_irq();
         ret
     }
+
+    /// Resets the general-purpose registers before entering a freshly
+    /// loaded executable.
+    ///
+    /// A successful `execve` must not leak the old program's registers into
+    /// the new image. Linux zeroes the RISC-V register file on exec and only
+    /// re-establishes `pc`, `sp`, and the saved `sstatus`, so all GPRs are
+    /// cleared here (the caller re-applies `sp` via `set_sp` and TLS via
+    /// `set_tls` afterwards). The syscall-restart snapshot and the
+    /// `from_syscall` marker are reset as well: the new image does not enter
+    /// via a syscall, and a coincidental `a0` value must not be interpreted
+    /// as a restart code.
+    pub fn reset_for_exec(&mut self) {
+        self.0.regs = GeneralRegisters::default();
+        self.0.saved_syscall_arg0 = 0;
+        self.set_from_syscall(false);
+    }
 }
 
 impl_user_context_deref!(ExceptionContext, 0);

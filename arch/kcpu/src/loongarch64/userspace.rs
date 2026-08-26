@@ -16,7 +16,7 @@ use loongArch64::register::{
 use memaddr::VirtAddr;
 
 pub use crate::userspace_common::{ExceptionKind, ReturnReason};
-use crate::{ExceptionContext, excp::PageFaultFlags};
+use crate::{ExceptionContext, GeneralRegisters, excp::PageFaultFlags};
 
 /// Context to enter user space.
 #[derive(Debug, Clone, Copy)]
@@ -104,6 +104,21 @@ impl UserContext {
 
         karch::enable_local_irq();
         ret
+    }
+
+    /// Resets the general-purpose registers before entering a freshly
+    /// loaded executable.
+    ///
+    /// A successful `execve` must not leak the old program's registers into
+    /// the new image, so all GPRs are cleared here (the caller re-applies
+    /// `sp` via `set_sp` and TLS via `set_tls` afterwards). The syscall
+    /// argument `envp` would otherwise survive in `a2`, and the syscall
+    /// restart snapshot plus `from_syscall` are reset because the new image
+    /// does not enter via a syscall.
+    pub fn reset_for_exec(&mut self) {
+        self.0.regs = GeneralRegisters::default();
+        self.0.saved_syscall_arg0 = 0;
+        self.set_from_syscall(false);
     }
 }
 

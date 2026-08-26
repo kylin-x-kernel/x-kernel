@@ -111,6 +111,41 @@ impl UserContext {
         self.fs_base = tls_area as _;
     }
 
+    /// Resets the general-purpose registers before entering a freshly
+    /// loaded executable.
+    ///
+    /// A successful `execve` must not leak the old program's registers into
+    /// the new image. On x86-64 the third `execve` argument `envp` sits in
+    /// `rdx`; glibc's static `_start` passes `rdx` to `__libc_start_main` as
+    /// the `rtld_fini` callback, which must be zero for a statically linked
+    /// binary. A stale value would be registered as an exit handler and then
+    /// called from `__run_exit_handlers`, faulting into the old heap.
+    ///
+    /// The x86-64 ELF entry ABI only defines `rsp`, `rip`, and (for dynamic
+    /// entry) `rdx`, so every other general-purpose register is cleared along
+    /// with the user GS base and the "not from syscall" marker. Control fields
+    /// (`cs`/`ss`/`rflags`, `rip`, `rsp`, `fs_base`) are left for the caller
+    /// to re-establish via `set_ip`/`set_sp`/`set_tls`.
+    pub fn reset_for_exec(&mut self) {
+        self.rax = 0;
+        self.rcx = 0;
+        self.rdx = 0;
+        self.rbx = 0;
+        self.rbp = 0;
+        self.rsi = 0;
+        self.rdi = 0;
+        self.r8 = 0;
+        self.r9 = 0;
+        self.r10 = 0;
+        self.r11 = 0;
+        self.r12 = 0;
+        self.r13 = 0;
+        self.r14 = 0;
+        self.r15 = 0;
+        self.orig_rax = u64::MAX;
+        self.gs_base = 0;
+    }
+
     /// Enters user space.
     ///
     /// It restores the user registers and jumps to the user entry point

@@ -124,6 +124,13 @@ pub fn sys_execve(
     // the same segments later.
     posix_ipc::SHM_MANAGER.lock().clear_proc_shm(process.pid());
 
+    // execve replaces the whole user register context.  Do not inherit any
+    // general-purpose register of the old program: the x86_64 `execve`
+    // argument `envp` sits in `rdx`, which static glibc entry reads as the
+    // `rtld_fini` callback and later calls during exit handling, crashing on
+    // the stale address.  Re-establish only the fields required by the target
+    // architecture's ELF entry ABI.
+    uctx.reset_for_exec();
     uctx.set_ip(entry_point.as_usize());
     uctx.set_sp(user_stack_base.as_usize());
     uctx.set_tls(0);
