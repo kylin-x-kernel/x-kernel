@@ -1353,6 +1353,7 @@ impl Ext4SbInfo {
         start: LogicalBlock,
         block_count: u64,
     ) -> Ext4Result<()> {
+        self.ensure_regular_file_mutation_supported(inode)?;
         self.ensure_delalloc_accounting(inode)?;
         if block_count == 0 {
             return Ok(());

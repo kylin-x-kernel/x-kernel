@@ -16,8 +16,8 @@ use kvfs::{
     LockedDentry, Metadata, MetadataUpdate, NodePermission, NodeType, PageMkwriteRequest,
     ReadaheadControl, RenameFlags, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations,
     Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest,
-    WriteEndRequest, WritebackControl, XattrName, XattrNameRef, XattrNameSink, XattrSetFlags,
-    default_evict_inode, inode_init_owner,
+    WriteEndRequest, WritebackControl, WritebackRangeOutcome, XattrName, XattrNameRef,
+    XattrNameSink, XattrSetFlags, default_evict_inode, inode_init_owner,
 };
 
 use crate::{
@@ -1427,22 +1427,35 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
             let visible_size = vfs_inode.size();
             let disk_size = inode.disk_size();
             let write_end = offset.saturating_add(data.len() as u64);
-            {
+            let outcome = {
                 let mut state = sync::write_lock(ext4);
-                state
-                    .writeback_ordered_at(inode, offset, data, visible_size, timestamp, intent)
-                    .inspect_err(|error| {
+                match state.writeback_ordered_at(
+                    inode,
+                    offset,
+                    data,
+                    visible_size,
+                    timestamp,
+                    intent,
+                ) {
+                    Ok(completed_bytes) => WritebackRangeOutcome::complete(completed_bytes),
+                    Err(failure) => {
                         error!(
                             "KExt4 inode {} writeback at offset {offset} for {} bytes failed: \
-                             visible size {visible_size}, disk size {disk_size}, write end \
-                             {write_end}: {error:?}",
+                             completed {} bytes, visible size {visible_size}, disk size \
+                             {disk_size}, write end {write_end}: {:?}",
                             inode.number().get(),
-                            data.len()
+                            data.len(),
+                            failure.completed_bytes(),
+                            failure.error()
                         );
-                    })
-                    .map_err(into_vfs_err)?;
-            }
-            Ok(())
+                        WritebackRangeOutcome::failed(
+                            failure.completed_bytes(),
+                            into_vfs_err(failure.error()),
+                        )
+                    }
+                }
+            };
+            Ok(outcome)
         })?;
         Ok(())
     }

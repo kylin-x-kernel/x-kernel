@@ -86,7 +86,8 @@ confidence 和 method limits。对比使用固定的 KExt4 历史基线，不保
 - metadata buffer create/write/forget/revoke、frozen checkpoint snapshot、失败保留和
   reclaim 基线；
 - extent lookup、unwritten mapping、insert/merge/remove/truncate、indexed-tree rebuild 和
-  extent checksum；
+  extent checksum；legacy direct/indirect block map 只提供受检读取，整盘 `^extents` 格式
+  在 mount negotiation 阶段拒绝；
 - journaled block/inode bitmap、连续 run allocation、order-bucket free-run cache、partial
   allocation 和 simplified Orlov inode-group selection；
 - sparse read、ordered-data writeback、writeback-time allocation、unwritten conversion、有限
@@ -117,7 +118,7 @@ confidence 和 method limits。对比使用固定的 KExt4 历史基线，不保
 | checkpoint 仍由调用者驱动 | mutation 返回后可保留 pending checkpoint，`syncfs`/unmount 或 journal-space pressure 同步推进 | 没有后台 writeback/checkpoint，home-block 脏状态和尾部回收仍会阻塞触发者 |
 | journal 提交仍受同步 block API 限制 | N2.1 已把连续 journal blocks 聚合为不超过 128 KiB 的请求，并复用 journal-superblock image、去除 commit 后的重复 flush | 请求数量已降低，但每个 batch 仍在调用栈中同步完成；没有多请求 in-flight、后台 commit/checkpoint 或驱动 completion |
 | durability 等待仍为同步基线 | runtime inode 尚无 sync/datasync tid，`fsync/fdatasync` 保守提交整个 running transaction 并 flush；`syncfs` 仍推进全文件系统 | 尚无目标 transaction 等待、异步 ordered-data dependency、后台 commit/checkpoint 和 errseq，等待者仍在当前调用栈执行设备 I/O |
-| PageCache writeback 基础有限 | 固定 batch copy、无后台 dirty control、无 transaction dependency | fio 的吞吐和内存压力都不可控 |
+| PageCache writeback 基础有限 | PageCache 仍固定上限聚合 folio；core 已由 live cursor 按实际 mapping/allocation run 续订 credits，并在 journal transaction 容量不足时提交前缀后续写；失败会把已完成字节前缀反馈给 PageCache，仅保留边界 folio 与后缀为 dirty，但仍无后台 dirty control 和异步 transaction dependency | 静态全范围 credit/space plan 与“错误等于零进展”的歧义已消除；fio 吞吐、内存压力和异步完成仍不可控 |
 | block/driver 接口只有同步完成路径 | KExt4 只能通过当前 `BlockDeviceOperations` 接口逐请求等待，VirtIO 完成通知和多请求 in-flight 不属于 filesystem 层 | KExt4 可以减少和聚合请求，但无法在 filesystem 内消除驱动 busy-poll/同步等待；需由 block/VirtIO owner 提供通用异步接口 |
 | extent/allocator 仍未完整分层 | `ExtentPath` 已承载单路径更新和均衡 split，但跨叶 truncate 回退、重复 lookup 和 scan-backed free-run cache 仍存在 | 长文件常规写不再全树重建，复杂范围操作和多 job 仍受限 |
 
@@ -343,9 +344,11 @@ mutation 通过“修改前校验与资源预留 + path-local 显式 unwind”�
 - 把权限、格式、目标存在性、journal credits、block/inode 空间和 extent path 可表达性校验
   前移；跨叶或全树 fallback 必须在首次 metadata write/create/revoke 前选定；
 - allocator 先在私有 bytes 和 free-extent cache 副本上完成 bitmap/counter 计算，再一次性取得
-  journal access 并发布；extent、namei、truncate/orphan、xattr 和 ordered writeback 在 handle
-  创建前完成容量、目标状态和 path 可表达性检查。当前同步、挂载级串行 mutation 没有跨外部
-  执行者的资源取得阶段，因而不另建一套通用 unwind 栈；
+  journal access 并发布；extent、namei、truncate/orphan 和 xattr 在 handle 创建前完成容量、
+  目标状态和 path 可表达性检查。ordered writeback 的必需数据空间由 write-time reservation
+  纳入 accounting，执行时逐 run 读取 live mapping 并由 handle 续订 credits，不生成会过期的
+  全范围静态 plan。当前同步、挂载级串行 mutation 没有跨外部执行者的资源取得阶段，因而不另建
+  一套通用 unwind 栈；
 - 允许多个 handle 独立 stop，不再依赖“失败 operation 必须是全 transaction 最新 savepoint”
   这一全局约束；后台 commit 不得观察到“handle 已关闭但 operation 尚未决定成功/失败”的中间态；
 - 所有生产 mutation 完成显式 unwind 改造后，删除 `JournalOperationState`、operation token、
@@ -398,7 +401,12 @@ normal-path buffered fio 可用，而不是先追求所有故障边界。
   error 继续交给 N3 errseq/forced-readonly 观察面；
 - **N2.3：建立 ordered writeback 与 range ownership**：per-inode logical-range state 表达
   hole/delayed/unwritten/written、dirty 和 writeback；reservation/allocator accounting 使用
-  range ownership，writeback batch 关联 ordered-data dependency 和目标 transaction；
+  range ownership，writeback batch 关联 ordered-data dependency 和目标 transaction。容量子项
+  已完成：core 以 live mapping cursor 按实际 hole allocation/unwritten conversion run 续订
+  credits，达到 journal transaction 上限时提交 durable prefix、精确释放对应 delalloc，并携带
+  剩余 preallocation budget 继续；失败结果携带已完成字节前缀，PageCache 清理完整前缀 folio、
+  保留边界与后缀 dirty 并可重试收敛。异步 range completion 和目标 transaction ownership 仍待
+  通用异步接口；
 - **N2.4：按执行者拆锁**：去除 mount-wide ext4 state lock，建立 per-inode、journal、
   metadata-buffer 和 per-group allocator 锁域；不为尚未存在的 worker 预拆字段 service；
 - 在已有 path-local find/insert/split 基础上补齐跨叶 remove/truncate，消除重复 lookup 与剩余

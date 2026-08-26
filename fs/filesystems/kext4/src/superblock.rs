@@ -518,6 +518,13 @@ impl Ext4RecoveryCleared {
 
 impl Ext4SbInfo {
     /// Builds test mount state and commits writable mount-finalization metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Ext4Error::Unsupported`] when the filesystem does not enable
+    /// extent-based block mapping. The mounted core exposes mutation APIs, so
+    /// it does not publish a filesystem whose legacy indirect block maps can
+    /// only be read but not safely allocated, truncated, or freed.
     #[cfg(test)]
     pub fn mount(device: Arc<dyn BlockDeviceOperations>) -> Ext4Result<Self> {
         let mut filesystem = Self::prepare_mount_with_statfs_mode(device, Ext4StatFsMode::Bsd)?;
@@ -560,6 +567,12 @@ impl Ext4SbInfo {
     /// terminate the damaged chain through a journaled zero-head update.
     /// Bitmap I/O/checksum failures, inode decode failures, and unsupported but
     /// structurally valid cleanup work remain caller-visible errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Ext4Error::Unsupported`] before replay when the filesystem
+    /// lacks extent-based block mapping, because recovery may need the same
+    /// mutation and block-release support as a normal writable mount.
     pub fn recover(
         device: Arc<dyn BlockDeviceOperations>,
     ) -> Ext4Result<Option<Ext4RecoveryReport>> {
@@ -577,6 +590,7 @@ impl Ext4SbInfo {
             &mut superblock_bytes,
         )?;
         let superblock = Superblock::decode(&superblock_bytes)?;
+        superblock.features().validate_mount()?;
         let layout = FilesystemLayout::derive(&superblock)?;
         let filesystem_device = Arc::new(FilesystemDevice::open(
             device,
@@ -842,6 +856,21 @@ impl Ext4SbInfo {
         *lock(&self.delalloc_reserved_blocks)
     }
 
+    /// Returns physical blocks not promised to delayed allocation or the
+    /// filesystem reserved-block pool.
+    ///
+    /// The allocator and delayed-allocation counters are sampled under their
+    /// shared lock order so optional preallocation cannot consume a stale
+    /// reservation snapshot.
+    pub(crate) fn unreserved_blocks_count(&self) -> u64 {
+        let allocator = lock(&self.allocator);
+        let delalloc_reserved_blocks = lock(&self.delalloc_reserved_blocks);
+        allocator
+            .free_blocks_count
+            .saturating_sub(*delalloc_reserved_blocks)
+            .saturating_sub(self.superblock.reserved_blocks_count())
+    }
+
     /// Returns public status for the internal JBD2 journal, when present.
     #[cfg(test)]
     pub fn journal_status(&self) -> Option<JournalStatus> {
@@ -993,6 +1022,7 @@ impl Ext4SbInfo {
             .get(superblock_offset..superblock_offset + superblock_len)
             .ok_or(Ext4Error::OutOfBounds)?;
         let superblock = Superblock::decode(superblock_bytes)?;
+        superblock.features().validate_mount()?;
         let layout = FilesystemLayout::derive(&superblock)?;
         if layout != self.layout {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry));
@@ -2243,6 +2273,44 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn mount_rejects_non_extent_after_superblock_decode() {
+        let mut image = vec![0; TEST_BLOCK_SIZE * TEST_BLOCK_COUNT];
+        let mut superblock_bytes = allocator_superblock(TEST_FREE_BLOCKS, TEST_FREE_INODES);
+        put_u32(
+            &mut superblock_bytes,
+            0x60,
+            features::IncompatFeatures::BIT_64.bits(),
+        );
+        image[1024..1024 + superblock::SUPERBLOCK_SIZE].copy_from_slice(&superblock_bytes);
+        let device: Arc<dyn BlockDeviceOperations> = Arc::new(TestDevice::new(image));
+
+        assert!(matches!(
+            Ext4SbInfo::mount(device),
+            Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentFilesystem))
+        ));
+    }
+
+    #[test]
+    fn mutable_state_reload_revalidates_mount_features() {
+        let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        {
+            let mut bytes = device.bytes.lock().unwrap();
+            let superblock_bytes = &mut bytes[1024..1024 + superblock::SUPERBLOCK_SIZE];
+            put_u32(
+                superblock_bytes,
+                0x60,
+                features::IncompatFeatures::BIT_64.bits(),
+            );
+        }
+        filesystem.metadata_io.invalidate_all();
+
+        assert_eq!(
+            filesystem.reload_mutable_metadata_state(),
+            Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentFilesystem))
+        );
     }
 
     #[test]
@@ -4761,6 +4829,38 @@ mod tests {
     }
 
     #[test]
+    fn delayed_allocation_rejects_legacy_inode_before_reserving_space() {
+        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+        let journal = JournalTransactions::new(TransactionId::new(390));
+        let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
+        let transaction = handle.id();
+        filesystem
+            .update_inode_flags_timestamps_metadata(
+                &inode,
+                inode.flags() & !crate::disk::inode::EXT4_EXTENTS_FL,
+                crate::Ext4Timestamp::new(9, 0),
+                &mut handle,
+            )
+            .expect("prepare an extents-enabled filesystem containing one legacy inode");
+        drop(handle);
+        let commit = journal.force_commit(transaction).unwrap();
+        filesystem
+            .metadata_io
+            .checkpoint_committed(&commit)
+            .unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
+        assert!(!inode.has_extents());
+
+        assert_eq!(
+            filesystem.reserve_delalloc_range(&inode, LogicalBlock::new(0), 1),
+            Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode))
+        );
+        assert!(!inode.has_delalloc_reservations());
+        assert_eq!(filesystem.delalloc_reserved_block_count(), 0);
+    }
+
+    #[test]
     fn truncate_releases_delalloc_beyond_visible_eof_even_without_disk_shrink() {
         let (mut filesystem, _device) =
             journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
@@ -6691,6 +6791,436 @@ mod tests {
         assert_eq!(filesystem.free_blocks_count(), free_before_write - 4);
     }
 
+    fn fragment_ordered_writeback_free_space(filesystem: &mut Ext4SbInfo) {
+        let journal = JournalTransactions::new(TransactionId::new(713));
+        let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
+        let transaction = handle.id();
+        for physical in [
+            7u64, 9, 11, 13, 15, 1041, 1043, 1045, 1047, 1049, 1051, 1053, 1054, 1055,
+        ] {
+            let request = Ext4AllocationRequest::for_metadata(
+                Some(FilesystemBlock::new(physical)),
+                BlockCount::new(1),
+                BlockCount::new(1),
+                Ext4AllocationFlags::EXACT,
+            )
+            .unwrap();
+            let allocation = filesystem
+                .allocate_blocks_for_write(request, &mut handle)
+                .unwrap();
+            assert_eq!(allocation.physical_start(), PhysicalBlock::new(physical));
+        }
+        drop(handle);
+        let commit = journal.force_commit(transaction).unwrap();
+        filesystem
+            .metadata_io
+            .checkpoint_committed(&commit)
+            .unwrap();
+        journal.finish_checkpoint_for_test(&commit).unwrap();
+        assert_eq!(filesystem.free_blocks_count(), 12);
+    }
+
+    #[test]
+    fn ordered_writeback_restarts_transaction_for_actual_allocation_runs() {
+        let (mut filesystem, device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+        fragment_ordered_writeback_free_space(&mut filesystem);
+        install_test_internal_journal_with_blocks(&mut filesystem, 714, 238);
+        drop(filesystem.metadata_journal().unwrap());
+        let input = vec![0x7a; TEST_BLOCK_SIZE * 6];
+        let flushes_before = device.flush_count();
+
+        inode.set_size(input.len() as u64);
+        filesystem
+            .reserve_delalloc_range(&inode, LogicalBlock::new(0), 6)
+            .unwrap();
+        filesystem
+            .writeback_ordered_at_with_prealloc_budget(
+                &inode,
+                0,
+                &input,
+                input.len() as u64,
+                crate::Ext4Timestamp::new(5684, 0),
+                Ext4SyncIntent::DataOnly,
+                0,
+            )
+            .expect("restart after the actual allocation runs exhaust one transaction");
+
+        // The test leaves only single-block free runs and limits a transaction
+        // to 79 credits. The fifth insertion grows the inline extent root;
+        // extending for the sixth run then commits that prefix and restarts.
+        assert_eq!(filesystem.pending_checkpoint_count(), 1);
+        assert_eq!(device.flush_count(), flushes_before + 4);
+        assert_eq!(inode.disk_size(), input.len() as u64);
+        assert!(!inode.has_delalloc_reservations());
+        assert_eq!(filesystem.delalloc_reserved_blocks(), 0);
+        for logical in 0..6u64 {
+            assert!(matches!(
+                filesystem.map_blocks(&inode, LogicalBlock::new(logical)),
+                Ok(crate::BlockMapping::Mapped { .. })
+            ));
+        }
+        let mut output = vec![0; input.len()];
+        assert_eq!(filesystem.read_at(&inode, 0, &mut output), Ok(input.len()));
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn ordered_writeback_preserves_prealloc_budget_across_five_restarts() {
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let setup_journal = JournalTransactions::new(TransactionId::new(714));
+        let mut handle = setup_journal.begin(JournalCredits::new(1024)).unwrap();
+        let transaction = handle.id();
+        let allocation = filesystem
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
+            .unwrap();
+        let inode = filesystem.internal_iget(allocation.inode()).unwrap();
+        let physical = allocate_contiguous_blocks(&mut filesystem, 5, &mut handle);
+        for (index, logical) in [1u64, 3, 5, 7, 9].into_iter().enumerate() {
+            filesystem
+                .insert_extent_mapping(
+                    &inode,
+                    LogicalBlock::new(logical),
+                    PhysicalBlock::new(physical.get() + u64::try_from(index).unwrap()),
+                    BlockCount::new(1),
+                    ExtentMappingState::Initialized,
+                    &mut handle,
+                )
+                .unwrap();
+        }
+        drop(handle);
+        let commit = setup_journal.force_commit(transaction).unwrap();
+        filesystem
+            .metadata_io
+            .checkpoint_committed(&commit)
+            .unwrap();
+        setup_journal.finish_checkpoint_for_test(&commit).unwrap();
+
+        // (226 - first_log_block) / 3 = 75 credits: one hole mutation fits,
+        // but extending the handle for the next hole must restart. The five
+        // one-block holes are separated by mapped runs; the final four-block
+        // tail consumes the optional four-block preallocation budget once.
+        install_test_internal_journal_with_blocks(&mut filesystem, 715, 226);
+        let input = vec![0x6b; TEST_BLOCK_SIZE * 14];
+        let free_before_write = filesystem.free_blocks_count();
+        inode.set_size(input.len() as u64);
+        filesystem
+            .reserve_delalloc_range(&inode, LogicalBlock::new(0), 14)
+            .unwrap();
+
+        filesystem
+            .writeback_ordered_at_with_prealloc_budget(
+                &inode,
+                0,
+                &input,
+                input.len() as u64,
+                crate::Ext4Timestamp::new(5687, 0),
+                Ext4SyncIntent::DataOnly,
+                4,
+            )
+            .expect("five transaction restarts preserve the one-shot preallocation budget");
+
+        assert_eq!(filesystem.pending_checkpoint_count(), 5);
+        assert_eq!(inode.disk_size(), input.len() as u64);
+        assert!(!inode.has_delalloc_reservations());
+        assert_eq!(filesystem.delalloc_reserved_blocks(), 0);
+        assert_eq!(
+            inode.blocks(),
+            u64::try_from((14 + 4) * (TEST_BLOCK_SIZE / 512)).unwrap()
+        );
+        assert_eq!(filesystem.free_blocks_count(), free_before_write - 13);
+        let Ok(crate::BlockMapping::Mapped {
+            physical: dirty_tail,
+            len: dirty_tail_len,
+            ..
+        }) = filesystem.map_blocks(&inode, LogicalBlock::new(10))
+        else {
+            panic!("dirty tail must be mapped after writeback");
+        };
+        assert_eq!(dirty_tail_len, BlockCount::new(4));
+        assert_eq!(
+            filesystem.map_blocks(&inode, LogicalBlock::new(14)),
+            Ok(crate::BlockMapping::Unwritten {
+                physical: PhysicalBlock::new(dirty_tail.get() + 4),
+                len: BlockCount::new(4),
+                flags: crate::BlockMappingFlags::empty(),
+            })
+        );
+        let mut output = vec![0; input.len()];
+        assert_eq!(filesystem.read_at(&inode, 0, &mut output), Ok(input.len()));
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn ordered_writeback_restarts_across_hole_mapped_and_unwritten_runs() {
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let setup_journal = JournalTransactions::new(TransactionId::new(716));
+        let mut handle = setup_journal.begin(JournalCredits::new(256)).unwrap();
+        let transaction = handle.id();
+        let allocation = filesystem
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
+            .unwrap();
+        let inode = filesystem.internal_iget(allocation.inode()).unwrap();
+        let physical = allocate_contiguous_blocks(&mut filesystem, 2, &mut handle);
+        filesystem
+            .insert_extent_mapping(
+                &inode,
+                LogicalBlock::new(1),
+                physical,
+                BlockCount::new(1),
+                ExtentMappingState::Initialized,
+                &mut handle,
+            )
+            .unwrap();
+        filesystem
+            .insert_extent_mapping(
+                &inode,
+                LogicalBlock::new(2),
+                PhysicalBlock::new(physical.get() + 1),
+                BlockCount::new(1),
+                ExtentMappingState::Unwritten,
+                &mut handle,
+            )
+            .unwrap();
+        drop(handle);
+        let commit = setup_journal.force_commit(transaction).unwrap();
+        filesystem
+            .metadata_io
+            .checkpoint_committed(&commit)
+            .unwrap();
+        setup_journal.finish_checkpoint_for_test(&commit).unwrap();
+
+        install_test_internal_journal_with_blocks(&mut filesystem, 717, 226);
+        let input = vec![0x4e; TEST_BLOCK_SIZE * 4];
+        let timestamp = crate::Ext4Timestamp::new(5688, 0);
+        inode.set_size(input.len() as u64);
+        filesystem
+            .reserve_delalloc_range(&inode, LogicalBlock::new(0), 4)
+            .unwrap();
+
+        filesystem
+            .writeback_ordered_at_with_prealloc_budget(
+                &inode,
+                0,
+                &input,
+                input.len() as u64,
+                timestamp,
+                Ext4SyncIntent::FullMetadata,
+                0,
+            )
+            .expect("stream hole, mapped, unwritten, and trailing-hole mappings");
+
+        assert!(filesystem.pending_checkpoint_count() >= 1);
+        assert_eq!(inode.disk_size(), input.len() as u64);
+        assert_eq!(inode.ctime(), timestamp);
+        assert_eq!(inode.mtime(), timestamp);
+        assert!(!inode.has_delalloc_reservations());
+        assert_eq!(filesystem.delalloc_reserved_blocks(), 0);
+        for logical in 0..4u64 {
+            assert!(matches!(
+                filesystem.map_blocks(&inode, LogicalBlock::new(logical)),
+                Ok(crate::BlockMapping::Mapped { .. })
+            ));
+        }
+        let mut output = vec![0; input.len()];
+        assert_eq!(filesystem.read_at(&inode, 0, &mut output), Ok(input.len()));
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn mapped_full_metadata_writeback_fits_the_eight_credit_boundary() {
+        let (mut filesystem, _device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let setup_journal = JournalTransactions::new(TransactionId::new(718));
+        let mut handle = setup_journal.begin(JournalCredits::new(16)).unwrap();
+        let transaction = handle.id();
+        let allocation = filesystem
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
+            .unwrap();
+        let inode = filesystem.internal_iget(allocation.inode()).unwrap();
+        let physical = allocate_contiguous_blocks(&mut filesystem, 1, &mut handle);
+        filesystem
+            .insert_extent_mapping(
+                &inode,
+                LogicalBlock::new(0),
+                physical,
+                BlockCount::new(1),
+                ExtentMappingState::Initialized,
+                &mut handle,
+            )
+            .unwrap();
+        drop(handle);
+        let commit = setup_journal.force_commit(transaction).unwrap();
+        filesystem
+            .metadata_io
+            .checkpoint_committed(&commit)
+            .unwrap();
+        setup_journal.finish_checkpoint_for_test(&commit).unwrap();
+
+        // (25 - first_log_block) / 3 = 8 credits, exactly the mapped-only
+        // FullMetadata bound. Mapped runs add no operation credits and must
+        // therefore complete without entering the Restart branch.
+        install_test_internal_journal_with_blocks(&mut filesystem, 719, 25);
+        let input = vec![0x2a; TEST_BLOCK_SIZE];
+        let timestamp = crate::Ext4Timestamp::new(5689, 0);
+        inode.set_size(input.len() as u64);
+
+        filesystem
+            .writeback_ordered_at(
+                &inode,
+                0,
+                &input,
+                input.len() as u64,
+                timestamp,
+                Ext4SyncIntent::FullMetadata,
+            )
+            .expect("mapped FullMetadata writeback fits the minimum journal bound");
+
+        assert_eq!(filesystem.pending_checkpoint_count(), 0);
+        assert_eq!(inode.disk_size(), input.len() as u64);
+        assert_eq!(inode.ctime(), timestamp);
+        assert_eq!(inode.mtime(), timestamp);
+        let mut output = vec![0; input.len()];
+        assert_eq!(filesystem.read_at(&inode, 0, &mut output), Ok(input.len()));
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn failed_split_writeback_publishes_only_the_durable_prefix() {
+        let (mut filesystem, device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+        fragment_ordered_writeback_free_space(&mut filesystem);
+        install_test_internal_journal_with_blocks(&mut filesystem, 715, 238);
+        drop(filesystem.metadata_journal().unwrap());
+        let input = vec![0x3d; TEST_BLOCK_SIZE * 6];
+        let visible_size = input.len() as u64;
+        let timestamp = crate::Ext4Timestamp::new(5685, 0);
+
+        inode.set_size(visible_size);
+        filesystem
+            .reserve_delalloc_range(&inode, LogicalBlock::new(0), 6)
+            .unwrap();
+        device.fail_flush_at(device.flush_count() + 4);
+        let failure = filesystem
+            .writeback_ordered_at_with_prealloc_budget(
+                &inode,
+                0,
+                &input,
+                visible_size,
+                timestamp,
+                Ext4SyncIntent::FullMetadata,
+                0,
+            )
+            .expect_err("the second transaction data barrier must fail");
+        assert_eq!(failure.error(), Ext4Error::Device(DriverError::Io));
+        assert_eq!(failure.completed_bytes(), TEST_BLOCK_SIZE * 5);
+
+        // The first five-block transaction and its journal commit are durable.
+        // The second transaction's data barrier fails, so only that prefix may
+        // advance i_disksize and FullMetadata must remain unpublished.
+        assert_eq!(inode.disk_size(), (TEST_BLOCK_SIZE * 5) as u64);
+        assert!(inode.has_delalloc_reservations());
+        assert_eq!(filesystem.delalloc_reserved_blocks(), 1);
+        assert_ne!(inode.ctime(), timestamp);
+        assert_ne!(inode.mtime(), timestamp);
+        assert!(
+            filesystem
+                .journal
+                .as_ref()
+                .expect("installed journal")
+                .is_aborted()
+        );
+    }
+
+    #[test]
+    fn ordered_writeback_credits_follow_fragmented_unwritten_runs() {
+        let (mut filesystem, device) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let setup_journal = JournalTransactions::new(TransactionId::new(716));
+        let mut handle = setup_journal.begin(JournalCredits::new(1024)).unwrap();
+        let transaction = handle.id();
+        let allocation = filesystem
+            .allocate_inode(
+                None,
+                InodeInitialization::regular_file(0o644, 0, 0),
+                &mut handle,
+            )
+            .unwrap();
+        let inode = filesystem.internal_iget(allocation.inode()).unwrap();
+        let physical = allocate_contiguous_blocks(&mut filesystem, 8, &mut handle);
+        for logical in 0..8u64 {
+            let state = if logical % 2 == 0 {
+                ExtentMappingState::Initialized
+            } else {
+                ExtentMappingState::Unwritten
+            };
+            filesystem
+                .insert_extent_mapping(
+                    &inode,
+                    LogicalBlock::new(logical),
+                    PhysicalBlock::new(physical.get() + logical),
+                    BlockCount::new(1),
+                    state,
+                    &mut handle,
+                )
+                .unwrap();
+        }
+        drop(handle);
+        let commit = setup_journal.force_commit(transaction).unwrap();
+        filesystem
+            .metadata_io
+            .checkpoint_committed(&commit)
+            .unwrap();
+        setup_journal.finish_checkpoint_for_test(&commit).unwrap();
+
+        install_test_internal_journal(&mut filesystem, 717);
+        let input = vec![0x5c; TEST_BLOCK_SIZE * 8];
+        let flushes_before = device.flush_count();
+        inode.set_size(input.len() as u64);
+        filesystem
+            .writeback_ordered_at_with_prealloc_budget(
+                &inode,
+                0,
+                &input,
+                input.len() as u64,
+                crate::Ext4Timestamp::new(5686, 0),
+                Ext4SyncIntent::DataOnly,
+                0,
+            )
+            .expect("charge the four unwritten mappings instead of eight data blocks");
+
+        // Four unwritten conversions fit in one transaction. Charging every
+        // logical block as a hole would exceed this journal and split/error.
+        assert_eq!(device.flush_count(), flushes_before + 1);
+        assert_eq!(
+            filesystem.map_blocks(&inode, LogicalBlock::new(0)),
+            Ok(crate::BlockMapping::Mapped {
+                physical,
+                len: BlockCount::new(8),
+                flags: crate::BlockMappingFlags::empty(),
+            })
+        );
+        let mut output = vec![0; input.len()];
+        assert_eq!(filesystem.read_at(&inode, 0, &mut output), Ok(input.len()));
+        assert_eq!(output, input);
+    }
+
     #[test]
     fn ordered_writeback_reuses_preallocated_unwritten_tail() {
         let (mut filesystem, _device) =
@@ -7342,16 +7872,20 @@ mod tests {
             .unwrap();
         journal.finish_checkpoint_for_test(&commit).unwrap();
 
-        assert_eq!(
-            filesystem.writeback_ordered_at(
+        let failure = filesystem
+            .writeback_ordered_at(
                 &inode,
                 0,
                 b"x",
                 1,
                 crate::Ext4Timestamp::new(38, 0),
                 Ext4SyncIntent::FullMetadata,
-            ),
-            Err(Ext4Error::Unsupported(UnsupportedKind::HugeFile))
+            )
+            .expect_err("huge-file block accounting remains unsupported");
+        assert_eq!(failure.completed_bytes(), 0);
+        assert_eq!(
+            failure.error(),
+            Ext4Error::Unsupported(UnsupportedKind::HugeFile)
         );
     }
 
@@ -8266,8 +8800,15 @@ mod tests {
     }
 
     fn install_test_internal_journal(filesystem: &mut Ext4SbInfo, sequence: u32) {
+        install_test_internal_journal_with_blocks(filesystem, sequence, 1024);
+    }
+
+    fn install_test_internal_journal_with_blocks(
+        filesystem: &mut Ext4SbInfo,
+        sequence: u32,
+        journal_blocks: u32,
+    ) {
         let journal_block = FilesystemBlock::new(16);
-        let journal_blocks = 1024;
         assert!(journal_block.get() + u64::from(journal_blocks) <= filesystem.layout().block_count);
         if !filesystem.is_system_zone_block(journal_block) {
             let mut zones = filesystem.system_zones.clone();
@@ -8293,7 +8834,8 @@ mod tests {
             .device
             .write_contiguous_blocks(block, 1, &bytes)
             .unwrap();
-        let journal_superblock_bytes = test_journal_superblock_bytes(sequence);
+        let journal_superblock_bytes =
+            test_journal_superblock_bytes_with_blocks(sequence, journal_blocks);
         let mut journal_block_bytes = vec![0; TEST_BLOCK_SIZE];
         journal_block_bytes[..journal_superblock_bytes.len()]
             .copy_from_slice(&journal_superblock_bytes);
@@ -8303,7 +8845,7 @@ mod tests {
         filesystem.journal = Some(
             MountedJournal::new(
                 InternalJournal {
-                    superblock: test_journal_superblock(sequence),
+                    superblock: test_journal_superblock_with_blocks(sequence, journal_blocks),
                     extents: vec![JournalExtent {
                         logical_start: 0,
                         physical_start: journal_block.get(),
@@ -8441,16 +8983,27 @@ mod tests {
     }
 
     fn test_journal_superblock(sequence: u32) -> JournalSuperblock {
-        let bytes = test_journal_superblock_bytes(sequence);
-        JournalSuperblock::decode(&bytes, TEST_BLOCK_SIZE as u32, 1024, [0; 16]).unwrap()
+        test_journal_superblock_with_blocks(sequence, 1024)
+    }
+
+    fn test_journal_superblock_with_blocks(
+        sequence: u32,
+        journal_blocks: u32,
+    ) -> JournalSuperblock {
+        let bytes = test_journal_superblock_bytes_with_blocks(sequence, journal_blocks);
+        JournalSuperblock::decode(&bytes, TEST_BLOCK_SIZE as u32, journal_blocks, [0; 16]).unwrap()
     }
 
     fn test_journal_superblock_bytes(sequence: u32) -> [u8; 1024] {
+        test_journal_superblock_bytes_with_blocks(sequence, 1024)
+    }
+
+    fn test_journal_superblock_bytes_with_blocks(sequence: u32, journal_blocks: u32) -> [u8; 1024] {
         let mut bytes = [0; 1024];
         put_be_u32(&mut bytes, 0x00, 0xc03b_3998);
         put_be_u32(&mut bytes, 0x04, 3);
         put_be_u32(&mut bytes, 0x0c, TEST_BLOCK_SIZE as u32);
-        put_be_u32(&mut bytes, 0x10, 1024);
+        put_be_u32(&mut bytes, 0x10, journal_blocks);
         put_be_u32(&mut bytes, 0x14, 1);
         put_be_u32(&mut bytes, 0x18, sequence);
         put_be_u32(&mut bytes, 0x1c, 0);

@@ -42,7 +42,9 @@ pub enum ChecksumTarget {
 /// Classifies unsupported ext4 semantics beyond feature-bit negotiation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnsupportedKind {
-    /// The inode's block map uses a shape outside the supported read path.
+    /// The filesystem does not enable extent-based block mapping.
+    NonExtentFilesystem,
+    /// The inode uses legacy block mapping on an extent-enabled filesystem.
     NonExtentInode,
     /// The inode stores data inline in metadata.
     InlineData,

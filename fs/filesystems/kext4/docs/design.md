@@ -11,6 +11,14 @@
 `bitflags` 类型表示。解码使用 `from_bits_retain` 保留未知磁盘位，避免把不同 feature
 类别中数值相同的位混为一类，并保证挂载协商仍能报告原始 unsupported bits。
 
+当前 `Ext4SbInfo` mount state 同时发布读取和 mutation API，类型系统尚未区分只读
+legacy block-map mount。因此挂载协商要求 superblock 启用 `EXT4_FEATURE_INCOMPAT_EXTENTS`：
+整盘 `^extents` 格式在读取 group descriptor、replay journal 或发布 VFS root 前返回
+`Unsupported(NonExtentFilesystem)`。带 extents feature 的镜像仍可只读解析个别 legacy inode，
+但其 buffered-write reservation、`page_mkwrite` 和后续 mutation 会在复制或标脏用户数据前返回
+`Unsupported(NonExtentInode)`。完整放开整盘 legacy 格式必须同时实现
+direct/single/double/triple indirect 的分配、释放、truncate 与 resize，不能只移除挂载检查。
+
 ## 背景
 
 KExt4 是 X-Kernel 唯一的 ext4 后端，保持 Rust 受检代码、明确的 feature negotiation、
@@ -166,6 +174,13 @@ N2 根据真实执行者建立 journal、per-inode、metadata-buffer 和 per-gro
 位图。在 N2 完成前，禁止向分配器锁临界区新增阻塞 I/O 或新的取锁调用。
 所有这些路径仍属于可阻塞的任务上下文，不能从中断上下文调用。
 
+Mount 首先把 primary superblock 解码为经过结构和 metadata checksum 验证的磁盘状态，再由
+`Ext4SbInfo::open()` 执行 feature negotiation；non-extent 等运行能力拒绝发生在 layout、
+journal recovery 和 VFS root 发布之前，但不得抢在 checksum failure 之前改变错误语义。
+Recovery replay 后重新加载 mutable superblock 时会再次执行同一 mount capability 校验。
+只更新 superblock 计数、recovery bit 或 orphan head 的磁盘 helper 复用格式 decoder，不承载
+mount policy。
+
 ## 状态机
 
 ### VFS resident inode 与 ext4 private state
@@ -273,7 +288,18 @@ VFS runtime inode identity 上，对应 Linux inode 内的 sync/datasync tid。�
 后，再实现目标 transaction 等待；不能重新引入按 inode number 索引的 mount-wide cursor map。
 `syncfs` 和 KVFS unmount writeback 仍提交 running transaction 并 drain 全部 checkpoint。
 当前 ordered-data dependency 是同步基线：数据块写入发生在使其可达的 metadata transaction
-完成之前；异步 dependency 对象和后台 writeback 属于后续阶段。
+完成之前。PageCache 仍以固定上限聚合 folio；dirty range 的必需数据块已由 `write_begin` 或
+`page_mkwrite` 纳入 delayed-allocation accounting，writeback 不再扫描完整范围生成静态空间/
+credit plan。实际写回由 byte cursor 推进，每处理一个 mapped、unwritten 或 hole allocation run
+都重新调用 `map_blocks()`；unwritten conversion 和 hole allocation/insert/conversion 按实际
+发生的 run 增长 credit usage，并优先通过 `JournalHandle::reserve_more()` 扩展当前 transaction。
+transaction credit limit 只由 journal engine 持有并在 `begin()`/`reserve_more()` 内执行约束，
+file 层不读取或重复解释该上限。若 handle 无法继续扩展，core 先 flush 当前数据、只推进该前缀
+的 `i_disksize`，同步提交 transaction 并精确释放该前缀的 delalloc reservation，再从同一
+cursor 开启下一 transaction。optional preallocation 只使用扣除 reserved blocks 和全部
+delalloc reservation 后的可用块，并保存在 cursor 中按 allocator 实际多分配的 block 扣减；
+最后一个 transaction 才发布完整 timestamp/size。异步 dependency 对象和后台 writeback 属于
+后续阶段。
 
 operation savepoint、operation token 和 operation-local metadata byte copy 已删除。ext4
 mutation 在首次 metadata access 前完成格式、目标状态、空间、credits 和 extent path
@@ -477,10 +503,21 @@ file 数据块不带该开销。计算结果仍为 allocator entry check 保留�
 metadata mutation 前完成。
 
 Ordered writeback 的 insert 与 unwritten conversion 只使用 `ExtentPath`，因此 transaction 内不再
-切换到复杂度取决于整棵树大小的重建算法。它的 credits 在打开 transaction 前按本次 logical
-block 数、extent 最大深度和每层 split 可能涉及的现有/new metadata targets 计算，不扫描已有
-extent，也不再用 512 截断所需预算。跨叶 range removal 的全树回退仍使用 truncate planner 按
-实际 tree blocks、revoke targets 和 affected groups 单独估算。
+切换到复杂度取决于整棵树大小的重建算法。writeback execution cursor 每步读取 live mapping；
+credits 对每个实际 unwritten conversion 计一次 extent mutation，对 allocator 实际返回的每个
+hole run 计一次 allocation、insert 和 conversion。Mapped overwrite 只保留最终 inode metadata
+余量，不再随 data blocks 线性放大。计算仍覆盖 extent 最大深度和每层 split 可能涉及的
+existing/new metadata targets，且不使用固定数值截断。每次 mutation 开始前，handle 必须保留
+该操作增量以及最终 inode publish 的固定余量；容量不足时只能在前一个 run 完整结束后重启
+transaction，不能在 path-local mutation 中途拆分。跨叶 range removal 的全树回退仍使用
+truncate planner 按实际 tree blocks、revoke targets 和 affected groups 单独估算。
+
+分段 writeback 的返回值采用“可能部分完成”的契约：后续 transaction 失败不会撤销已经提交的
+durable prefix，也不会把其 delalloc reservation 重新计入。core 把已完成字节前缀经 KVFS 返回
+给 PageCache；完全落在该前缀内的 folio 结束 writeback，跨越前缀边界的 folio 和剩余后缀保持
+dirty。再次提交时只重试 dirty suffix，并从 live mapping 重新判断当前状态。普通可重试错误
+允许在当前 mount 重试；device 或 JBD2 错误则永久 abort 当前 mount journal，恢复路径是
+recovery/remount 后重新提交，不能声称同一 mount 上必然收敛。
 
 `huge_file` superblock feature 表示 inode 可以使用扩展的 block accounting 格式；未设置
 `EXT4_HUGE_FILE_FL` 的普通 inode 仍以 512-byte sector 记录 `i_blocks`，KExt4 可以安全修改。
@@ -598,7 +635,9 @@ allocator 的实际并发关系建立锁顺序；不以字段分组预设锁域�
   生命周期不变量的 journal 聚合为 `MountedJournal`，不为代码分组机械创建 service。
 - KExt4 只通过通用 `BlockDeviceOperations` 表达块读写和 flush；异步 request、完成通知和 VirtIO
   中断队列属于 block/driver 层。KExt4 可合并请求并在通用接口可用后接入，但不建立私有驱动
-  旁路。
+  旁路。当前 transaction restart 仍需同步 `flush` 建立 ordered-data durability 边界；只有通用
+  block 层提供 request completion/FUA 或等价 dependency 后，才能把多个 transaction 的数据与
+  commit 安全流水化，不能在 filesystem 层直接删除该 barrier。
 - errseq、clean unmount/freeze 和完整 fault matrix 依赖最终的后台执行图，集中放在 N3；它们
   不阻塞 N2 主路径，但仍是替换旧后端前的强制门槛。
 

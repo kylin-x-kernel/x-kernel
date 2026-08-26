@@ -10,6 +10,13 @@ superblock feature bitmap 在进入文件系统逻辑时被包装为按 compat �
 flags。未知位不会在解码时丢弃，incompat 未支持位仍会导致挂载失败，从而避免因类型
 封装而放宽对不可信磁盘 feature 的校验。
 
+KExt4 当前只对 extent-backed block map 提供完整 mutation 合同，因此缺少
+`EXT4_FEATURE_INCOMPAT_EXTENTS` 的镜像会在挂载状态发布前失败。这个检查防止合法但超出
+实现能力的 legacy indirect 格式先进入可写运行态，再由延迟 writeback 把用户态已经成功的
+写入转化为异步 `EOPNOTSUPP`、journal shutdown 错误或部分持久化。即使 superblock 启用了
+extents feature，个别 legacy inode 的 `write_begin`/`page_mkwrite` 也会在 delayed-allocation
+reservation 和用户数据标脏前同步拒绝。
+
 KExt4 的 KVFS operation 实现信任 KVFS 已经提供内核拥有的 path name、dentry、inode `AddressSpace`
 （含私有 `PageCache` storage）和文件生命周期回调。KExt4 核心不直接解引用用户态指针。
 它也信任 `fill_super` 只接收 KVFS 已按 canonical `(s_type, BlockDevice)` reservation 并持有
@@ -41,6 +48,8 @@ KExt4 的 KVFS operation 实现信任 KVFS 已经提供内核拥有的 path name
 
 - 对 metadata bytes 切片前必须校验磁盘 offset 和 size。
 - 信任 checksum-protected block 前必须完成 metadata checksum validation。
+- Primary superblock 的 metadata checksum failure 必须先于 mount feature negotiation 返回；
+  capability 拒绝只能发生在 checksum 通过后，并在首次 open 及 recovery reload 发布运行态前执行。
 - block number 和 inode number 必须通过 layout、group、bitmap 和 system-zone 规则校验。
 - JBD2 handle 在 dirty 或 revoke metadata buffer 前必须拥有足够 credits。
 - mount 生命周期内的 `MountedJournal` 是生产路径唯一 journal identity，同时拥有磁盘 mapping、
@@ -85,6 +94,16 @@ KExt4 的 KVFS operation 实现信任 KVFS 已经提供内核拥有的 path name
 - extent 局部更新必须同时刷新被修改叶子、祖先索引、inode root 和 metadata checksum；
   ordered writeback 不得在同一 handle 内从路径更新切换到全树重写，credits 上界按本次写入
   规模与最大路径深度覆盖逐层分裂，且不得截断计算结果。
+- ordered writeback 不得把全范围静态 mapping/space plan 当作执行真相。dirty range 的必需块
+  已纳入 delayed-allocation reservation accounting；执行 cursor 在每个实际 mapping/allocation
+  run 前重新查询 extent，并由 journal handle 自己约束 mounted credit limit。handle 扩展失败
+  只能在完整 run 边界 flush 并提交 durable prefix。只有该 transaction 成功后才能释放对应
+  delalloc range；因 metadata/fragmentation 发生的后续 ENOSPC 也必须按部分进度返回。未完成
+  后缀及其 reservation 必须保留，optional preallocation budget 不能因 transaction restart 被
+  重新授予，也不能占用 ext4 reserved blocks 或其他 inode 的 delalloc reservation。
+  整体 writeback 在后续 transaction 失败时必须返回已完成字节前缀；PageCache 只结束其中完整
+  folio 的 writeback，边界 folio 和后缀保持 dirty。普通可重试错误可以再次提交该 suffix；
+  device/JBD2 错误会 abort 当前 mount journal，必须先 recovery/remount。
 - range mutation 只有在完整操作可由单条 `ExtentPath` 表达时才能开始局部 metadata 写入；
   跨叶回退必须发生在首个 metadata write/create/revoke 之前。
 - 不带 revoke feature 的 journal 只能在“旧 transaction 已全部 checkpoint”时无 revoke
@@ -181,7 +200,7 @@ exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，
 | T-01 | 损坏镜像中的 xattr entry name 或 value range 被 name-only list 路径当成合法属性 | 中 | 恶意或损坏镜像编码 NUL、越界/重叠 value 或无效 external block | `decode_xattr_entries()` 拒绝 NUL 和畸形 entry；name-only 遍历仍校验 value range、block header 与 checksum，并有回归测试 |
 | T-02 | external xattr block 在 unlink 或 rename overwrite 后泄漏，或 inode 继续引用已释放 block | 中 | zero-link victim 的 `i_file_acl != 0` | zero-link eviction 先释放或递减 EA block refcount，清 `i_file_acl`，更新 `i_blocks`，再释放 inode |
 | T-03 | 运行态 unlink 过早释放仍被打开 fd 引用的 inode | 中 | KExt4 运行态后端上 unlink 一个仍打开的 inode | namespace transaction 只持久化 nlink/orphan；open-file 持有唯一 VFS inode 及其 ext4 private state，最后 VFS 引用销毁才进入 superblock final eviction |
-| T-04 | journal credits 估算不足或按 data blocks 过度估算，导致 metadata update 在事务中途失败或被错误拒绝 | 中 | namespace remove、HTree 转换/split、writeback、truncate、preallocation discard 或 final eviction 修改 orphan、xattr、extent 和 inode metadata | namespace 插入预检显式记录 HTree 路径，转换后立即 split 按两个独立单块 extent 预估并在 inode flag 发布前加入 HTree credits；namespace removal 只覆盖 dirent、nlink 和 orphan metadata，不包含后续 final eviction；ordered writeback 固定为 path-local 算法并按 logical blocks 与最大路径深度估算，禁止固定上限截断；legacy final eviction 和 extent truncate 按实际 tree blocks、需要 revoke 的旧 tree blocks 与 affected groups 计算，目录/block-mapped symlink 数据块释放按释放块数逐一计入 revoke credits；victim 带 external xattr 时 final eviction 预算包含 EA 清理 |
+| T-04 | journal credits 估算不足或按 data blocks 过度估算，导致 metadata update 在事务中途失败或被错误拒绝 | 中 | namespace remove、HTree 转换/split、writeback、truncate、preallocation discard 或 final eviction 修改 orphan、xattr、extent 和 inode metadata | namespace 插入预检显式记录 HTree 路径，转换后立即 split 按两个独立单块 extent 预估并在 inode flag 发布前加入 HTree credits；namespace removal 只覆盖 dirent、nlink 和 orphan metadata，不包含后续 final eviction；ordered writeback 固定为 path-local 算法，由 live cursor 按实际 unwritten conversion 和 hole allocation run 续订 handle，达到 transaction 上限时提交完整前缀并重启；legacy final eviction 和 extent truncate 按实际 tree blocks、需要 revoke 的旧 tree blocks 与 affected groups 计算，目录/block-mapped symlink 数据块释放按释放块数逐一计入 revoke credits；victim 带 external xattr 时 final eviction 预算包含 EA 清理 |
 | T-05 | 恶意 extent 或 bitmap metadata 导致释放不属于该 inode 的 block | 高 | 损坏镜像把 extent/xattr block 指向 system zone 或非法 group | release 或 mutation 前执行 block ownership、system-zone、bitmap 和 checksum 校验 |
 | T-06 | 设备写入/flush 失败让部分 metadata 可见 | 中 | commit、replay、checkpoint、显式 sync 或 xattr update 期间设备失败 | journal abort 保留 recovery state 或 pending checkpoint；后续 sync/mutation 返回 aborted，不跨 syscall 回滚内存修改；测试覆盖 explicit-sync commit、checkpoint、xattr 和 replay failure |
 | T-07 | clean journal 上残留 legacy orphan，mount 永久返回 `NeedsRecovery` | 中 | namespace transaction 已 checkpoint，但 final inode eviction 尚未发生 | 显式 recovery 无论 journal 是否需要 replay 都遍历 legacy orphan；clean 分支以 `PreserveDuringRecovery` 建立 recovery evidence，逐个同步 commit/checkpoint，确认 journal start 清零后才清除 recovery feature；zero-link entry 复用 journaled final-eviction 路径 |
@@ -207,7 +226,7 @@ exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，
 | F-02 | journal commit 或 checkpoint 失败 | 设备写入/flush 错误 | committing 或 pending checkpoint 状态保留并 abort journal | 当前 mount 后续 sync/mutation 拒绝继续，重新挂载时依赖 recovery | 2 | 失败返回前永久 abort；保留 recovery evidence 和 pending state，禁止后续 sync 假成功 |
 | F-03 | recovery-time orphan cleanup 失败 | crash 发生在 namespace commit 之后、final cleanup 之前，bad-orphan 链需要切断，或 bitmap/inode metadata、设备失败、inode 使用尚未支持的格式 | 明确的 bad-orphan 在 durable clear 后终止；不能安全降级的错误保留 orphan head 或 recovery evidence 并返回 | filesystem 不会在未持久化 cleanup 时被当作可写 root 暴露，也不会把 checksum/I/O 错误当成 stale orphan 丢弃 | 2 | legacy orphan cleanup 使用独立 journal transaction；bad-orphan clear 与普通 inode cleanup 都采用 `PreserveDuringRecovery`，checkpoint 后重载 mutable metadata state，成功后再继续；真实镜像测试覆盖 reserved/out-of-range、未分配 head、非法 next，flush-failure 测试覆盖证据保留和重试，N3 在最终执行图上补齐其余 fault/powercut 矩阵 |
 | F-04 | 粗粒度 write lock 串行化慢 mutation I/O | live kext4 KVFS 层在 blocking filesystem mutation 周围持有 mount-level core write guard | 吞吐下降 | 其他 KExt4 mutation 等待；只读路径仍可共享 read guard | 4 | inode private state 已有独立 state lock；N2 根据实际 worker 和共享状态继续建立 per-group/journal/metadata-buffer 锁域；锁拆分前不宣称 mutation 并发性能 |
-| F-05 | journal reservation 空间不足 | operation 的实际 metadata targets 超过空 journal 容量，或 reservation 混入另一个 lifecycle 阶段的工作 | transaction 在修改 metadata 前失败 | 正常 writeback、fsync、rename-overwrite、truncate 或 orphan cleanup 返回错误；已有磁盘状态保持不变 | 3 | namespace 与 final eviction 分开预算；目录插入计划在事务前识别 HTree 转换/split，并把独立块 mapping 和 HTree credits 纳入同一预检；ordered writeback 只走 path-local update，并按最大路径深度计算不截断预算；跨叶 truncate 在首个 metadata 写入前选择按 tree blocks/groups 估算的全树路径；由 rename-overwrite、fragmented-writeback、balanced-split 和 preallocation-tail credit 回归测试约束 |
+| F-05 | journal reservation 空间不足 | operation 的实际 metadata targets 超过空 journal 容量，或 reservation 混入另一个 lifecycle 阶段的工作 | 单次 mutation 无法容纳时在修改 metadata 前失败；writeback transaction 扩展失败时只提交完整前缀 | admission 失败保持磁盘不变；分段 writeback 的后续 transaction 若再失败，调用方可收到错误而 durable prefix 保留 | 3 | namespace 与 final eviction 分开预算；目录插入计划在事务前识别 HTree 转换/split，并把独立块 mapping 和 HTree credits 纳入同一预检；ordered writeback 在每个 live mapping run 前保证该操作及 inode publish 余量，先尝试 `reserve_more()`，容量不足则提交已 flush 的前缀、精确结算其 delalloc 后重开 transaction，只有连单次 mutation 都无法容纳时才在 admission 阶段拒绝；跨叶 truncate 在首个 metadata 写入前选择按 tree blocks/groups 估算的全树路径；由 small-journal actual-run restart、fragmented unwritten、failure/retry、rename-overwrite、balanced-split 和 preallocation-tail credit 回归测试约束 |
 | F-06 | PageCache 与 filesystem core 锁序反转 | writeback 持有 core mutex 等待 mapping mutex，同时 cache miss 持有 mapping mutex 进入 backing read | 并发 buffered I/O 和 `sync()` 停止推进 | watchdog 报告 mutex deadlock，filesystem workload 无法继续 | 2 | kext4 KVFS 层不在 PageCache traversal 外层持有 core mutex；同 inode writeback 独立串行化，batch callback 在 mapping/folio mutex 释放后才进入核心；VFS/MM 后续仍需消除 tree lock 下的 backing I/O |
 | F-07 | committed journal 占满可追加空间 | checkpoint 落后于 commit，head 接近 oldest tail | 新 transaction 暂时不能持久化 | mutation 等待 checkpoint progress | 3 | append 前按环形 live range 校验空间并保留一个空 block；提交路径捕获 `JournalBusy`，同步推进最老 pending checkpoint 后重试 |
 | F-08 | FIEMAP 查询遇到损坏 mapping | extent tree/legacy pointer 返回非法长度或物理范围 | 当前 ioctl 返回数据错误 | 文件内容不被修改，调用方不能取得布局 | 3 | 复用 ext4 mapping 校验；KVFS operation 拒绝零进度和算术溢出，不输出未经检查的 extent |
@@ -243,6 +262,10 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
 
 ## 已知限制
 
+- 整盘 legacy direct/indirect block-map 格式当前不能挂载；只读 legacy mount 需要先把
+  core mount state 拆成不可取得 mutation API 的能力类型。带 extents feature 的镜像中，
+  个别 legacy inode 仍只支持受检读取；buffered write/page fault 在 reservation 前同步拒绝，
+  其他 mutation 最迟在首次 metadata access 前拒绝。
 - 运行态已通过 KVFS 暴露 `user.*`、`trusted.*` 和 `security.*` xattr；namespace/DAC 在
   KVFS 检查，缺少完整 LSM/capability 时 `security.*` set/remove 要求 privileged
   credential，create/replace 的四种标志组合由 KExt4 core 在同一写锁的 mutation plan

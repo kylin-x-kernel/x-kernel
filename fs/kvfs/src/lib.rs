@@ -63,6 +63,7 @@ pub(crate) use node::{
 };
 pub use open_flags::OpenFlags;
 pub(crate) use open_flags::{AccMode, OpenHow, OpenParams};
+pub use pagecache::WritebackRangeOutcome;
 pub use permission::{Permission, generic_permission, open_access_to_permission};
 pub use seq_file::{SeqFile, SeqFileInode, SeqIterator, seq_open};
 pub use simple_dir::{

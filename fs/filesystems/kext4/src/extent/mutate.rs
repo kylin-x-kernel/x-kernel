@@ -25,10 +25,11 @@ impl Ext4SbInfo {
     pub(crate) fn extent_writeback_metadata_credits(
         &self,
         inode: &Ext4Inode,
-        logical_blocks: u32,
+        allocation_runs: u32,
+        extent_mutations: u32,
     ) -> Ext4Result<u32> {
         self.ensure_extent_mutation_supported(inode)?;
-        ordered_writeback_credit_bound(logical_blocks)
+        ordered_writeback_credit_bound(allocation_runs, extent_mutations)
     }
 
     /// Returns a conservative credit bound for rewriting an extent tree and
@@ -1306,15 +1307,17 @@ fn balanced_partition_ranges(
     Ok(ranges)
 }
 
-fn ordered_writeback_credit_bound(logical_blocks: u32) -> Ext4Result<u32> {
+pub(crate) fn ordered_writeback_credit_bound(
+    allocation_runs: u32,
+    extent_mutations: u32,
+) -> Ext4Result<u32> {
     const BASE_METADATA_CREDITS: u32 = 8;
-    const MUTATIONS_PER_LOGICAL_BLOCK: u32 = 2;
     // One existing path block may be dirtied, while a split can allocate one
     // replacement block with bitmap, group-descriptor, superblock, and create
     // targets. Counting both at every possible level also covers root growth.
     const TARGETS_PER_PATH_LEVEL: u32 = 5;
     const INODE_TARGETS_PER_MUTATION: u32 = 2;
-    const DATA_ALLOCATOR_TARGETS_PER_LOGICAL_BLOCK: u32 = 3;
+    const DATA_ALLOCATOR_TARGETS_PER_RUN: u32 = 3;
 
     let path_levels = u32::from(disk_extent::EXTENT_MAX_DEPTH)
         .checked_add(1)
@@ -1323,12 +1326,13 @@ fn ordered_writeback_credit_bound(logical_blocks: u32) -> Ext4Result<u32> {
         .checked_mul(TARGETS_PER_PATH_LEVEL)
         .and_then(|credits| credits.checked_add(INODE_TARGETS_PER_MUTATION))
         .ok_or(Ext4Error::Overflow)?;
-    let targets_per_logical_block = targets_per_mutation
-        .checked_mul(MUTATIONS_PER_LOGICAL_BLOCK)
-        .and_then(|credits| credits.checked_add(DATA_ALLOCATOR_TARGETS_PER_LOGICAL_BLOCK))
-        .ok_or(Ext4Error::Overflow)?;
-    logical_blocks
-        .checked_mul(targets_per_logical_block)
+    extent_mutations
+        .checked_mul(targets_per_mutation)
+        .and_then(|credits| {
+            allocation_runs
+                .checked_mul(DATA_ALLOCATOR_TARGETS_PER_RUN)
+                .and_then(|allocator| credits.checked_add(allocator))
+        })
         .and_then(|credits| credits.checked_add(BASE_METADATA_CREDITS))
         .ok_or(Ext4Error::Overflow)
 }
@@ -2252,20 +2256,26 @@ mod tests {
 
     #[test]
     fn single_block_writeback_covers_maximum_extent_path() {
-        assert_eq!(ordered_writeback_credit_bound(1), Ok(75));
+        assert_eq!(ordered_writeback_credit_bound(1, 2), Ok(75));
     }
 
     #[test]
     fn multi_block_writeback_scales_credit_budget() {
-        let single = ordered_writeback_credit_bound(1).unwrap();
-        let multiple = ordered_writeback_credit_bound(8).unwrap();
+        let single = ordered_writeback_credit_bound(1, 2).unwrap();
+        let multiple = ordered_writeback_credit_bound(8, 16).unwrap();
 
         assert!(multiple > single);
     }
 
     #[test]
     fn writeback_credit_budget_is_not_truncated() {
-        assert!(ordered_writeback_credit_bound(8).unwrap() > 512);
+        assert!(ordered_writeback_credit_bound(8, 16).unwrap() > 512);
+    }
+
+    #[test]
+    fn writeback_credit_budget_follows_mapping_work() {
+        assert_eq!(ordered_writeback_credit_bound(0, 0), Ok(8));
+        assert_eq!(ordered_writeback_credit_bound(0, 1), Ok(40));
     }
 
     #[test]

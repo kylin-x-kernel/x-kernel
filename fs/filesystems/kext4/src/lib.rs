@@ -9,10 +9,18 @@
 //! feature negotiation, explicit journal recovery, metadata-buffer/JBD2
 //! mutation, extent tree updates, bitmap allocation, a PageCache-facing
 //! ordered-data regular-file writeback baseline, and a regular-file
-//! truncate/orphan recovery baseline. Buffered writeback can
+//! truncate/orphan recovery baseline. Mount negotiation requires the ext4
+//! extents feature because legacy direct/indirect block maps currently have a
+//! checked read path but no complete mutation contract. Buffered writeback can
 //! overwrite initialized extents, allocate blocks for holes, convert unwritten
 //! extents after data flush, and grow the on-disk size through journaled inode
-//! metadata. `Ext4Inode::disk_size()` is the core equivalent of Linux ext4
+//! metadata. A live writeback cursor reads the current extent before each
+//! mapping or allocation run, charges journal credits for the actual work, and
+//! restarts the transaction at a durable filesystem-block boundary when the
+//! current handle cannot be extended. If a later transaction fails, the core
+//! reports its completed byte prefix through KVFS so PageCache can clean only
+//! complete prefix folios and retain the boundary and suffix for retry.
+//! `Ext4Inode::disk_size()` is the core equivalent of Linux ext4
 //! `i_disksize`; KVFS keeps the VFS-visible size separately while writeback or
 //! prepared truncate work is pending. Truncate uses a prepare/finish token so
 //! VFS can run generic PageCache resize between Linux-style `i_disksize`
@@ -131,7 +139,7 @@ pub use error::{
     ChecksumTarget, CorruptKind, Ext4Error, Ext4Result, FeatureClass, UnsupportedKind,
 };
 pub use extent::{BlockMapping, BlockMappingFlags};
-pub use file::Ext4SyncIntent;
+pub use file::{Ext4SyncIntent, Ext4WritebackError, Ext4WritebackResult};
 pub use inode::{
     Ext4DeviceId, Ext4Inode, Ext4InodeMetadataUpdate, Ext4InodeStat, Ext4Timestamp, InodeKind,
 };

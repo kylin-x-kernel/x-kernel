@@ -8,6 +8,8 @@ mod map;
 mod mutate;
 mod validate;
 
+pub(crate) use mutate::ordered_writeback_credit_bound;
+
 #[cfg(test)]
 mod tests;
 

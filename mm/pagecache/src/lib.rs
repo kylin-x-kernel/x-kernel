@@ -29,6 +29,12 @@ pub type PageIndex = u64;
 
 type IndexedFolio = (PageIndex, Arc<Mutex<Folio>>);
 
+struct BatchedFolio {
+    index: PageIndex,
+    folio: Arc<Mutex<Folio>>,
+    byte_len: usize,
+}
+
 /// Result counters for one writeback pass.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WritebackStats {
@@ -36,6 +42,75 @@ pub struct WritebackStats {
     pub pages_written: usize,
     /// Dirty folios left for a later writeback pass.
     pub pages_skipped: usize,
+}
+
+/// Filesystem result for one contiguous page-cache writeback range.
+///
+/// `completed_bytes` is always a prefix of the submitted range. An error may
+/// therefore report progress made by an earlier filesystem transaction while
+/// leaving only the uncompleted suffix dirty for retry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WritebackRangeOutcome {
+    completed_bytes: usize,
+    error: Option<KError>,
+}
+
+impl WritebackRangeOutcome {
+    /// Reports complete success for a submitted byte range.
+    pub const fn complete(completed_bytes: usize) -> Self {
+        Self {
+            completed_bytes,
+            error: None,
+        }
+    }
+
+    /// Reports a completed prefix followed by an error.
+    pub const fn failed(completed_bytes: usize, error: KError) -> Self {
+        Self {
+            completed_bytes,
+            error: Some(error),
+        }
+    }
+
+    /// Returns the completed prefix length.
+    pub const fn completed_bytes(self) -> usize {
+        self.completed_bytes
+    }
+
+    /// Returns the error following the completed prefix, if any.
+    pub const fn error(self) -> Option<KError> {
+        self.error
+    }
+}
+
+/// Page-cache result for one batched writeback pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WritebackPassOutcome {
+    stats: WritebackStats,
+    error: Option<KError>,
+}
+
+impl WritebackPassOutcome {
+    const fn complete(stats: WritebackStats) -> Self {
+        Self { stats, error: None }
+    }
+
+    const fn failed(stats: WritebackStats, error: KError) -> Self {
+        Self {
+            stats,
+            error: Some(error),
+        }
+    }
+
+    /// Returns counters accumulated before the pass stopped.
+    pub const fn stats(self) -> WritebackStats {
+        self.stats
+    }
+
+    /// Returns the callback error that stopped the pass, if any.
+    pub const fn error(self) -> Option<KError> {
+        self.error
+    }
 }
 
 impl WritebackStats {
@@ -113,9 +188,9 @@ impl PageCache {
         }
     }
 
-    fn reconcile_dirty_folios(&self, folios: &[IndexedFolio]) {
+    fn reconcile_batched_folios(&self, folios: &[BatchedFolio]) {
         let mut inner = self.inner.lock();
-        for (index, folio) in folios {
+        for BatchedFolio { index, folio, .. } in folios {
             let is_current = inner
                 .pages
                 .get(index)
@@ -376,11 +451,11 @@ impl PageCache {
         end: u64,
         max_pages: usize,
         max_bytes: usize,
-        write_range_fn: &mut impl FnMut(u64, &[u8]) -> KResult<()>,
-    ) -> KResult<WritebackStats> {
+        write_range_fn: &mut impl FnMut(u64, &[u8]) -> KResult<WritebackRangeOutcome>,
+    ) -> KResult<WritebackPassOutcome> {
         let mut stats = WritebackStats::default();
         if max_pages == 0 {
-            return Ok(stats);
+            return Ok(WritebackPassOutcome::complete(stats));
         }
         let folios = self.collect_dirty_folios_in_range(start, end);
 
@@ -390,32 +465,48 @@ impl PageCache {
         let mut batch_data = Vec::new();
         let mut batch_folios = Vec::new();
 
-        let flush_batch = |batch_start: u64,
-                           batch_data: &mut Vec<u8>,
-                           batch_folios: &mut Vec<IndexedFolio>,
-                           write_range_fn: &mut dyn FnMut(u64, &[u8]) -> KResult<()>,
-                           stats: &mut WritebackStats|
-         -> KResult<()> {
-            if batch_data.is_empty() {
-                return Ok(());
-            }
-            let result = write_range_fn(batch_start, batch_data);
-            if result.is_ok() {
-                stats.wrote(batch_folios.len());
-            }
-            for (_, folio) in batch_folios.iter() {
-                let mut folio = folio.lock();
-                if result.is_err() {
-                    folio.mark_dirty();
+        let flush_batch =
+            |batch_start: u64,
+             batch_data: &mut Vec<u8>,
+             batch_folios: &mut Vec<BatchedFolio>,
+             write_range_fn: &mut dyn FnMut(u64, &[u8]) -> KResult<WritebackRangeOutcome>,
+             stats: &mut WritebackStats|
+             -> Option<KError> {
+                if batch_data.is_empty() {
+                    return None;
                 }
-                folio.end_writeback();
-            }
-            self.reconcile_dirty_folios(batch_folios);
-            batch_folios.clear();
-            batch_data.clear();
-            result?;
-            Ok(())
-        };
+                let outcome = write_range_fn(batch_start, batch_data)
+                    .unwrap_or_else(|error| WritebackRangeOutcome::failed(0, error));
+                let (completed_bytes, error) = if outcome.completed_bytes() > batch_data.len() {
+                    (0, Some(KError::InvalidInput))
+                } else if outcome.error().is_none() && outcome.completed_bytes() != batch_data.len()
+                {
+                    (outcome.completed_bytes(), Some(KError::InvalidInput))
+                } else {
+                    (outcome.completed_bytes(), outcome.error())
+                };
+
+                let mut batch_offset = 0usize;
+                for BatchedFolio {
+                    folio, byte_len, ..
+                } in batch_folios.iter()
+                {
+                    let folio_end = batch_offset.saturating_add(*byte_len);
+                    let is_complete = folio_end <= completed_bytes;
+                    let mut locked = folio.lock();
+                    if !is_complete {
+                        locked.mark_dirty();
+                    } else {
+                        stats.wrote(1);
+                    }
+                    locked.end_writeback();
+                    batch_offset = folio_end;
+                }
+                self.reconcile_batched_folios(batch_folios);
+                batch_folios.clear();
+                batch_data.clear();
+                error
+            };
 
         for (index, folio) in folios {
             if stats.pages_written >= max_pages {
@@ -436,13 +527,15 @@ impl PageCache {
             let would_exceed_pages =
                 stats.pages_written.saturating_add(batch_folios.len()) >= max_pages;
             if !batch_data.is_empty() && (!contiguous || would_overflow || would_exceed_pages) {
-                flush_batch(
+                if let Some(error) = flush_batch(
                     batch_start,
                     &mut batch_data,
                     &mut batch_folios,
                     write_range_fn,
                     &mut stats,
-                )?;
+                ) {
+                    return Ok(WritebackPassOutcome::failed(stats, error));
+                }
                 if stats.pages_written >= max_pages {
                     break;
                 }
@@ -450,13 +543,15 @@ impl PageCache {
 
             let Some(mut locked) = self.start_writeback_for_candidate(index, &folio, &mut stats)
             else {
-                flush_batch(
+                if let Some(error) = flush_batch(
                     batch_start,
                     &mut batch_data,
                     &mut batch_folios,
                     write_range_fn,
                     &mut stats,
-                )?;
+                ) {
+                    return Ok(WritebackPassOutcome::failed(stats, error));
+                }
                 if stats.pages_written >= max_pages {
                     break;
                 }
@@ -469,18 +564,24 @@ impl PageCache {
             }
             batch_data.extend_from_slice(&locked.data()[..valid_len]);
             drop(locked);
-            batch_folios.push((index, folio));
+            batch_folios.push(BatchedFolio {
+                index,
+                folio,
+                byte_len: valid_len,
+            });
             next_index = Some(index + 1);
         }
 
-        flush_batch(
+        if let Some(error) = flush_batch(
             batch_start,
             &mut batch_data,
             &mut batch_folios,
             write_range_fn,
             &mut stats,
-        )?;
-        Ok(stats)
+        ) {
+            return Ok(WritebackPassOutcome::failed(stats, error));
+        }
+        Ok(WritebackPassOutcome::complete(stats))
     }
 
     /// Drops all cached folios during final mapping teardown.
@@ -617,7 +718,7 @@ mod tests {
     use ksync::Mutex;
     use unittest::{assert_eq, def_test};
 
-    use super::{Folio, PAGE_SIZE_4K, PageCache, PageCacheKind, PageIndex};
+    use super::{Folio, PAGE_SIZE_4K, PageCache, PageCacheKind, PageIndex, WritebackRangeOutcome};
 
     fn new_cache(kind: PageCacheKind) -> Arc<PageCache> {
         PageCache::new(kind)
@@ -843,7 +944,7 @@ mod tests {
                 u64::MAX,
                 usize::MAX,
                 PAGE_SIZE_4K,
-                &mut |offset, _| {
+                &mut |offset, data| {
                     write_offsets.push(offset);
                     if offset == 0 {
                         let replacement = Arc::new(Mutex::new(Folio::new_zeroed()?));
@@ -855,7 +956,7 @@ mod tests {
                             .expect("collected folio");
                         old.lock().clear_dirty();
                     }
-                    Ok(())
+                    Ok(WritebackRangeOutcome::complete(data.len()))
                 },
             )
             .unwrap();
@@ -875,18 +976,19 @@ mod tests {
         write_cached(&cache, 0, &vec![1; PAGE_SIZE_4K]).unwrap();
         write_cached(&cache, PAGE_SIZE_4K as u64, &vec![2; PAGE_SIZE_4K]).unwrap();
 
-        let error = cache
+        let outcome = cache
             .write_cache_pages(
                 (PAGE_SIZE_4K * 2) as u64,
                 0,
                 u64::MAX,
                 usize::MAX,
                 PAGE_SIZE_4K * 2,
-                &mut |_, _| Err(KError::InvalidInput),
+                &mut |_, _| Ok(WritebackRangeOutcome::failed(0, KError::InvalidInput)),
             )
-            .unwrap_err();
+            .unwrap();
 
-        assert_eq!(error, KError::InvalidInput);
+        assert_eq!(outcome.error(), Some(KError::InvalidInput));
+        assert_eq!(outcome.stats().pages_written, 0);
         assert_eq!(dirty_indices(&cache), vec![0, 1]);
         for index in 0..2 {
             cache.with_folio(index, |folio| {
@@ -895,6 +997,45 @@ mod tests {
                 assert!(!folio.is_under_writeback());
                 folio.clear_dirty();
             });
+        }
+        assert!(dirty_indices(&cache).is_empty());
+    }
+
+    #[def_test]
+    fn batched_writeback_failure_cleans_only_complete_prefix_folios() {
+        let cache = new_cache(PageCacheKind::FileBacked);
+        write_cached(&cache, 0, &vec![1; PAGE_SIZE_4K]).unwrap();
+        write_cached(&cache, PAGE_SIZE_4K as u64, &vec![2; PAGE_SIZE_4K]).unwrap();
+        write_cached(&cache, (PAGE_SIZE_4K * 2) as u64, &vec![3; PAGE_SIZE_4K]).unwrap();
+
+        let completed_bytes = PAGE_SIZE_4K + PAGE_SIZE_4K / 2;
+        let outcome = cache
+            .write_cache_pages(
+                (PAGE_SIZE_4K * 3) as u64,
+                0,
+                u64::MAX,
+                usize::MAX,
+                PAGE_SIZE_4K * 3,
+                &mut |_, _| {
+                    Ok(WritebackRangeOutcome::failed(
+                        completed_bytes,
+                        KError::InvalidInput,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(outcome.error(), Some(KError::InvalidInput));
+        assert_eq!(outcome.stats().pages_written, 1);
+        assert_eq!(dirty_indices(&cache), vec![1, 2]);
+        for (index, expected_dirty) in [(0, false), (1, true), (2, true)] {
+            let state = cache.with_folio(index, |folio| {
+                let folio = folio.expect("batched folio remains cached");
+                let state = (folio.is_dirty(), folio.is_under_writeback());
+                folio.clear_dirty();
+                state
+            });
+            assert_eq!(state, (expected_dirty, false));
         }
         assert!(dirty_indices(&cache).is_empty());
     }
@@ -919,7 +1060,7 @@ mod tests {
                 first_snapshot.extend_from_slice(&data[..3]);
                 write_cached(&cache_during_io, 0, b"new")?;
                 dirty_indices_after_redirty = dirty_indices(&cache_during_io);
-                Ok(())
+                Ok(WritebackRangeOutcome::complete(data.len()))
             })
             .unwrap();
 
@@ -941,7 +1082,9 @@ mod tests {
         assert!(!observed.2);
 
         cache
-            .write_cache_pages(3, 0, u64::MAX, usize::MAX, PAGE_SIZE_4K, &mut |_, _| Ok(()))
+            .write_cache_pages(3, 0, u64::MAX, usize::MAX, PAGE_SIZE_4K, &mut |_, data| {
+                Ok(WritebackRangeOutcome::complete(data.len()))
+            })
             .unwrap();
         assert!(dirty_indices(&cache).is_empty());
         let final_state = cache.with_folio(0, |folio| {

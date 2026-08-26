@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use crate::{Ext4Error, Ext4Result, FeatureClass};
+use crate::{Ext4Error, Ext4Result, FeatureClass, UnsupportedKind};
 
 bitflags::bitflags! {
     /// Compatible ext4 superblock feature flags.
@@ -193,12 +193,39 @@ impl FeatureSet {
 
         Ok(())
     }
+
+    pub(crate) fn validate_mount(self) -> Ext4Result<()> {
+        self.validate_read_only()?;
+        if !self.has_extents() {
+            return Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentFilesystem));
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(unittest)]
+mod unittests {
+    use unittest::{assert_eq, def_test};
+
+    use super::{FeatureSet, IncompatFeatures};
+    use crate::{Ext4Error, UnsupportedKind};
+
+    #[def_test]
+    fn mount_negotiation_rejects_filesystem_without_extents() {
+        let features = FeatureSet::new(0, IncompatFeatures::FILETYPE.bits(), 0);
+
+        assert_eq!(
+            features.validate_mount(),
+            Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentFilesystem))
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{CompatFeatures, FeatureSet, IncompatFeatures};
-    use crate::{Ext4Error, FeatureClass};
+    use crate::{Ext4Error, FeatureClass, UnsupportedKind};
 
     #[test]
     fn overlapping_feature_bits_remain_in_their_own_classes() {
@@ -226,6 +253,16 @@ mod tests {
                 class: FeatureClass::Incompatible,
                 bits: UNKNOWN,
             })
+        );
+    }
+
+    #[test]
+    fn mount_negotiation_rejects_filesystem_without_extents() {
+        let features = FeatureSet::new(0, IncompatFeatures::FILETYPE.bits(), 0);
+
+        assert_eq!(
+            features.validate_mount(),
+            Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentFilesystem))
         );
     }
 }

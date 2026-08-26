@@ -130,7 +130,6 @@ impl Superblock {
             codec::le_u32(input, 0x60)?,
             codec::le_u32(input, 0x64)?,
         );
-        features.validate_read_only()?;
 
         if features.has_metadata_checksum() {
             if input[0x175] != CRC32C_CHECKSUM_TYPE {
@@ -149,6 +148,7 @@ impl Superblock {
                 });
             }
         }
+        features.validate_read_only()?;
 
         let blocks_count = u64::from(codec::le_u32(input, 0x04)?)
             | if features.has_64bit() {
@@ -596,7 +596,7 @@ mod tests {
         CHECKSUM_OFFSET, CRC32C_CHECKSUM_TYPE, EXT2_FLAGS_UNSIGNED_HASH, LINUX_DEFAULT_EXTRA_ISIZE,
         MIN_EXTRA_ISIZE_OFFSET, SUPERBLOCK_SIZE, Superblock, WANT_EXTRA_ISIZE_OFFSET,
     };
-    use crate::{CorruptKind, Ext4Error, disk::checksum};
+    use crate::{ChecksumTarget, CorruptKind, Ext4Error, disk::checksum};
 
     const INCOMPAT_EXTENTS: u32 = 0x0040;
     const INCOMPAT_RECOVER: u32 = 0x0004;
@@ -712,6 +712,34 @@ mod tests {
                 bits: RO_COMPAT_BIGALLOC,
             })
         );
+    }
+
+    #[test]
+    fn decodes_non_extent_superblock_before_mount_negotiation() {
+        let mut bytes = valid_superblock();
+        put_u32(&mut bytes, 0x60, 0);
+
+        assert!(Superblock::decode(&bytes).is_ok());
+    }
+
+    #[test]
+    fn checksum_failure_precedes_mount_feature_negotiation() {
+        let mut bytes = valid_superblock();
+        put_u32(&mut bytes, 0x64, RO_COMPAT_METADATA_CSUM);
+        bytes[0x175] = CRC32C_CHECKSUM_TYPE;
+        update_superblock_checksum(&mut bytes);
+
+        // Corrupt the checksummed feature word so the filesystem also appears
+        // to lack extents. Integrity failure must win over mount capability.
+        put_u32(&mut bytes, 0x60, INCOMPAT_64BIT);
+
+        assert!(matches!(
+            Superblock::decode(&bytes),
+            Err(Ext4Error::ChecksumMismatch {
+                target: ChecksumTarget::Superblock,
+                ..
+            })
+        ));
     }
 
     #[test]
