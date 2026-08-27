@@ -2128,6 +2128,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kcpu_slot"
+version = "0.2.0-dev"
+dependencies = [
+ "kcpu_id_map",
+]
+
+[[package]]
 name = "kcred"
 version = "0.2.0-dev"
 dependencies = [

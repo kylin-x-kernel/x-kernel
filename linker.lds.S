@@ -127,6 +127,21 @@ SECTIONS
     }
     . = _percpu_end;
 
+    /* Independent typed per-CPU slot template and reserved areas. */
+    . = ALIGN(4K);
+    _cpu_slot_template_lma_start = .;
+    .cpu_slot.template 0 : AT(_cpu_slot_template_lma_start) {
+        _cpu_slot_template_vma_start = .;
+        KEEP(*(.cpu_slot.template .cpu_slot.template.*))
+        _cpu_slot_template_vma_end = .;
+    }
+    _cpu_slot_template_size = _cpu_slot_template_vma_end - _cpu_slot_template_vma_start;
+    _cpu_slot_template_lma_end = _cpu_slot_template_lma_start + _cpu_slot_template_size;
+    _cpu_slot_area_stride = ALIGN(_cpu_slot_template_size, 64);
+    _cpu_slot_area_start = ALIGN(_cpu_slot_template_lma_end, 64);
+    _cpu_slot_area_end = _cpu_slot_area_start + _cpu_slot_area_stride * %NR_CPUS%;
+    . = _cpu_slot_area_end;
+
     . = ALIGN(4K);
     _edata = .;
 

@@ -1,0 +1,18 @@
+[package]
+name = "kcpu_slot"
+description = "Typed, architecture-backed per-CPU slots for X-Kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+kcpu_id_map.workspace = true
+
+[lints.clippy]
+new_without_default = "allow"

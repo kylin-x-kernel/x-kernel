@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "arch/kcpu_slot",
     # kernel entry
     "entry",
     # boot and loader
