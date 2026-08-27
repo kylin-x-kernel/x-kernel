@@ -4,10 +4,14 @@
 
 //! Virtual PL011 UART — guest console TX/RX.
 //!
-//! RX flows through a shared [`vdev_core::RxChannel`]: the host `/dev/kvmm`
+//! RX flows through a shared [`vdev_core::RxChannel`]: the host control-device
 //! writer pushes bytes and the guest MMIO read path pops them. When RX IRQ is
 //! enabled the vGIC can inject the UART interrupt so the guest wakes to drain
 //! the FIFO.
+//!
+//! TX has two modes, selected per-VM by the owning control device via
+//! [`vdev_core::TxChannel::set_enabled`]. When enabled, guest output bytes are
+//! forwarded verbatim into the channel instead of the host kernel log.
 
 #![no_std]
 
@@ -15,7 +19,7 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
-use vdev_core::{MmioDevice, RxChannel};
+use vdev_core::{MmioDevice, RxChannel, TxChannel};
 
 pub const PL011_BASE: u64 = 0x0900_0000;
 pub const PL011_SIZE: u64 = 0x1000;
@@ -50,47 +54,68 @@ const LINE_BUF_SIZE: usize = 256;
 
 /// Emulated PL011 UART for one VM.
 pub struct Vpl011 {
-    vm_id: u32,
     cr: u32,
     imsc: u32,
     rx: Arc<RxChannel>,
+    tx: Arc<TxChannel>,
     line_buf: [u8; LINE_BUF_SIZE],
     line_len: usize,
 }
 
 impl Vpl011 {
-    /// Create a per-VM PL011 instance plus the shared RX channel handle (so the
-    /// host can route console input without going through the MMIO bus).
-    pub fn new(vm_id: u32) -> (Self, Arc<RxChannel>) {
+    /// Create a per-VM PL011 instance plus the shared RX and TX channel handles
+    /// (so the host can route console input and drain console output without
+    /// going through the MMIO bus).
+    ///
+    /// `vm_id` is accepted for call-site symmetry with other console devices
+    /// but is not retained; guest output is emitted without a per-VM prefix.
+    ///
+    /// The returned [`TxChannel`] starts disabled: until a control device
+    /// enables it, guest output stays on the host kernel log.
+    pub fn new(_vm_id: u32) -> (Self, Arc<RxChannel>, Arc<TxChannel>) {
         let rx = Arc::new(RxChannel::new());
+        let tx = Arc::new(TxChannel::new());
         let dev = Self {
-            vm_id,
             cr: 0x301, // UARTEN | TXE | RXE
             imsc: 0,
             rx: rx.clone(),
+            tx: tx.clone(),
             line_buf: [0; LINE_BUF_SIZE],
             line_len: 0,
         };
-        (dev, rx)
+        (dev, rx, tx)
     }
 
-    fn flush_line(&mut self) {
+    fn flush_line(&mut self, newline: bool) {
         if self.line_len == 0 {
             return;
         }
         let s = core::str::from_utf8(&self.line_buf[..self.line_len]).unwrap_or("<invalid utf8>");
-        klogger::kprintln!("[guest {}] {}", self.vm_id, s);
+        // Leave the cursor on the prompt line (no newline) so a typed command
+        // echoes back on the same line; only real end-of-line output advances.
+        if newline {
+            klogger::kprintln!("{}", s);
+        } else {
+            klogger::kprint!("{}", s);
+        }
         self.line_len = 0;
     }
 
     fn put_char(&mut self, c: u8) {
+        // Channel mode: forward the byte verbatim (including CR/LF) to the host
+        // consumer and skip the host-log line buffer entirely.
+        if self.tx.is_enabled() {
+            self.tx.push(c);
+            return;
+        }
+
         if c == b'\n' || c == b'\r' {
-            self.flush_line();
+            self.flush_line(true);
             return;
         }
 
         if self.line_len >= LINE_BUF_SIZE {
-            self.flush_line();
+            self.flush_line(true);
         }
 
         self.line_buf[self.line_len] = c;
@@ -102,7 +127,7 @@ impl Vpl011 {
             || self.line_ends_with(b"# ")
             || self.line_ends_with(b"$ ")
         {
-            self.flush_line();
+            self.flush_line(false);
         }
     }
 

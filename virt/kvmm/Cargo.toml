@@ -24,17 +24,8 @@ ksync.workspace = true
 khal.workspace = true
 kirq.workspace = true
 ktime_types.workspace = true
-fs_context.workspace = true
-kcred.workspace = true
-kvfs.workspace = true
-linux-raw-sys.workspace = true
-memspace.workspace = true
-memaddr.workspace = true
 vdev-core.workspace = true
 vdev-test-mmio.workspace = true
-vdev-uart16550.workspace = true
-vdev-virtio-net.workspace = true
-vdev-vpl011.workspace = true
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 percpu.workspace = true

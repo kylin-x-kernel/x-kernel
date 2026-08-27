@@ -15,6 +15,9 @@ use core::{
 };
 
 const CONSOLE_RX_CAP: usize = 64;
+/// Guest->host TX FIFO capacity. Large enough to absorb a boot-time console
+/// burst before the host control device starts draining.
+const CONSOLE_TX_CAP: usize = 8192;
 
 /// A single MMIO device that handles reads and writes at a fixed guest-physical range.
 pub trait MmioDevice: Send {
@@ -204,6 +207,99 @@ impl Default for RxChannel {
     }
 }
 
+/// Single-producer/single-consumer TX FIFO for one VM's guest console.
+///
+/// The guest UART MMIO write path is the sole producer (`push`) and the host
+/// control-device read path is the sole consumer (`pop`/`drain`). The channel
+/// starts disabled so legacy users keep host-log console output until a control
+/// device explicitly enables raw console streaming.
+pub struct TxChannel {
+    data: UnsafeCell<[u8; CONSOLE_TX_CAP]>,
+    head: AtomicUsize,
+    tail: AtomicUsize,
+    enabled: AtomicBool,
+}
+
+// SAFETY: SPSC ring buffer. The producer writes `data[tail]` then advances
+// `tail` with Release; the consumer reads `data[head]` then advances `head`
+// with Release, observing occupancy via Acquire loads of the opposite index.
+// A slot is only accessed when `tail != head`, and each index is mutated by
+// exactly one side, so producer and consumer never touch the same slot at once.
+unsafe impl Sync for TxChannel {}
+
+impl TxChannel {
+    pub fn new() -> Self {
+        Self {
+            data: UnsafeCell::new([0u8; CONSOLE_TX_CAP]),
+            head: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
+            enabled: AtomicBool::new(false),
+        }
+    }
+
+    /// Push one guest output byte. Returns false if the FIFO is full.
+    pub fn push(&self, byte: u8) -> bool {
+        let tail = self.tail.load(Ordering::Relaxed);
+        let next = (tail + 1) % CONSOLE_TX_CAP;
+        if next == self.head.load(Ordering::Acquire) {
+            return false;
+        }
+        // SAFETY: single producer; consumer cannot read slot `tail` until it
+        // observes the Release store of `tail` below.
+        unsafe {
+            (*self.data.get())[tail] = byte;
+        }
+        self.tail.store(next, Ordering::Release);
+        true
+    }
+
+    pub fn pop(&self) -> Option<u8> {
+        let head = self.head.load(Ordering::Relaxed);
+        if head == self.tail.load(Ordering::Acquire) {
+            return None;
+        }
+        // SAFETY: single consumer; `tail != head` means slot `head` is not the
+        // producer's current target.
+        let byte = unsafe { (*self.data.get())[head] };
+        self.head
+            .store((head + 1) % CONSOLE_TX_CAP, Ordering::Release);
+        Some(byte)
+    }
+
+    /// Pop as many bytes as fit into `buf`, returning the count copied.
+    pub fn drain(&self, buf: &mut [u8]) -> usize {
+        let mut n = 0;
+        while n < buf.len() {
+            match self.pop() {
+                Some(byte) => {
+                    buf[n] = byte;
+                    n += 1;
+                }
+                None => break,
+            }
+        }
+        n
+    }
+
+    pub fn has_data(&self) -> bool {
+        self.head.load(Ordering::Relaxed) != self.tail.load(Ordering::Acquire)
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Release);
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+}
+
+impl Default for TxChannel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Guest physical memory access for virtual device backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmaError {
@@ -244,20 +340,22 @@ pub trait GuestDma: Send + Sync {
 }
 
 /// VM-owned virtual device capabilities.
-pub struct VmDevices<Rx> {
+pub struct VmDevices<Rx, Tx> {
     mmio_bus: ksync::Mutex<MmioBus>,
     irq_controller: ksync::Mutex<Option<Arc<dyn IrqController>>>,
     irq_sender: ksync::Mutex<Option<Arc<dyn IrqSender>>>,
     console_rx: ksync::Mutex<Option<Arc<Rx>>>,
+    console_tx: ksync::Mutex<Option<Arc<Tx>>>,
 }
 
-impl<Rx> VmDevices<Rx> {
+impl<Rx, Tx> VmDevices<Rx, Tx> {
     pub fn new() -> Self {
         Self {
             mmio_bus: ksync::Mutex::new(MmioBus::new()),
             irq_controller: ksync::Mutex::new(None),
             irq_sender: ksync::Mutex::new(None),
             console_rx: ksync::Mutex::new(None),
+            console_tx: ksync::Mutex::new(None),
         }
     }
 
@@ -299,12 +397,20 @@ impl<Rx> VmDevices<Rx> {
         self.console_rx.lock().clone()
     }
 
+    pub fn set_console_tx(&self, tx: Arc<Tx>) {
+        *self.console_tx.lock() = Some(tx);
+    }
+
+    pub fn console_tx(&self) -> Option<Arc<Tx>> {
+        self.console_tx.lock().clone()
+    }
+
     pub fn device_names(&self) -> Vec<(String, u64)> {
         self.mmio_bus.lock().device_list()
     }
 }
 
-impl<Rx> Default for VmDevices<Rx> {
+impl<Rx, Tx> Default for VmDevices<Rx, Tx> {
     fn default() -> Self {
         Self::new()
     }

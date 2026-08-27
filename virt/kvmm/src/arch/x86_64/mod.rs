@@ -231,28 +231,28 @@ impl VmmArch for X86Vmx {
 
         match reason {
             VMX_REASON_EXT_INT => {
-                vcpu.exit_category = crate::vm::EXIT_CAT_INTERRUPT;
+                vcpu.exit_category = crate::vcpu_state::EXIT_CAT_INTERRUPT;
                 ktask::yield_now();
                 ExitAction::Resume
             }
             VMX_REASON_HLT => {
-                vcpu.exit_category = crate::vm::EXIT_CAT_HALT;
+                vcpu.exit_category = crate::vcpu_state::EXIT_CAT_HALT;
                 handle_hlt(vcpu)
             }
             VMX_REASON_VMCALL => {
-                vcpu.exit_category = crate::vm::EXIT_CAT_HYPERCALL;
+                vcpu.exit_category = crate::vcpu_state::EXIT_CAT_HYPERCALL;
                 handle_vmcall(&mut vcpu.arch)
             }
             VMX_REASON_CPUID => {
-                vcpu.exit_category = crate::vm::EXIT_CAT_HYPERCALL;
+                vcpu.exit_category = crate::vcpu_state::EXIT_CAT_HYPERCALL;
                 handle_cpuid(&mut vcpu.arch)
             }
             VMX_REASON_EPT_VIOLATION => {
-                vcpu.exit_category = crate::vm::EXIT_CAT_MMIO;
+                vcpu.exit_category = crate::vcpu_state::EXIT_CAT_MMIO;
                 handle_ept_violation(vcpu)
             }
             VMX_REASON_EXC_NMI => {
-                vcpu.exit_category = crate::vm::EXIT_CAT_OTHER;
+                vcpu.exit_category = crate::vcpu_state::EXIT_CAT_OTHER;
                 let intr_info = vmcs_read(VmcsField::ExiIntrInfo);
                 log::error!(
                     "[VMX] Exception/NMI: intr_info={:#x} rip={:#x}",
@@ -262,7 +262,7 @@ impl VmmArch for X86Vmx {
                 ExitAction::Exit
             }
             _ => {
-                vcpu.exit_category = crate::vm::EXIT_CAT_OTHER;
+                vcpu.exit_category = crate::vcpu_state::EXIT_CAT_OTHER;
                 log::error!(
                     "[VMX] Unhandled exit: reason={} rip={:#x} qual={:#x}",
                     reason,

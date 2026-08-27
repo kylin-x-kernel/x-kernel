@@ -1,0 +1,23 @@
+[package]
+name = "kvmm-run"
+description = "Launch and own a kvmm guest VM via /dev/kvmm-vm (fd-bound lifecycle)"
+enabled = true
+order = 20
+
+# Compile the C launcher with the configured cross toolchain. CROSS_COMPILE is
+# exported by the uapp installer; for riscv64 it resolves to
+# "riscv64-linux-musl-", so ${CROSS_COMPILE}gcc == riscv64-linux-musl-gcc.
+# The command is run through `sh -c` so the variable is expanded and `&&`
+# sequences (the installer executes argv directly, not via a shell otherwise).
+[prepare]
+commands = [
+  "sh -c 'mkdir -p out && ${CROSS_COMPILE}gcc -static -Os -Wall -Wextra -o out/kvmm-run kvmm-run.c'",
+]
+
+[[install]]
+src = "out/kvmm-run"
+dest = "/usr/local/bin/kvmm-run"
+mode = "0755"
+
+# No [[autostart]]: kvmm-run blocks holding the VM open, so it must be launched
+# interactively (e.g. `/usr/local/bin/kvmm-run`), not from the boot hook.

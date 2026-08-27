@@ -22,7 +22,7 @@ pub(crate) mod dice;
 #[cfg(feature = "input")]
 pub(crate) mod event;
 #[cfg(feature = "vmm")]
-pub(crate) mod kvmm;
+pub(crate) mod kvmm_vm;
 #[cfg(feature = "dev-log")]
 pub(crate) mod log;
 #[cfg(feature = "memtrack")]

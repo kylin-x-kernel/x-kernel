@@ -9,15 +9,13 @@ use alloc::{sync::Arc, vec};
 
 use kcred::Cred;
 use kvfs::{Filename, NodePermission, VfsFile};
-
-use crate::mm::GuestMem;
+use kvmm::mm::GuestMem;
 
 #[derive(Debug)]
 pub enum LoadError {
     FileNotFound,
     ReadFailed,
     AddressTranslation,
-    NoGuestMem,
     DtbPatchFailed,
 }
 

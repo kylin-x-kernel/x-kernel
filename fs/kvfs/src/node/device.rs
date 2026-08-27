@@ -143,6 +143,10 @@ impl FileOperations for ChrdevFileOperations {
         self.ops.mmap(file, mapper)
     }
 
+    fn release(&self, inode: &VfsInode, file: &VfsFile) -> VfsResult<()> {
+        self.ops.release(inode, file)
+    }
+
     fn poll(&self, file: &VfsFile) -> IoEvents {
         self.ops.poll(file)
     }
@@ -454,6 +458,15 @@ pub trait DeviceFileOps: Send + Sync {
     /// Manipulates the underlying device parameters of special files.
     fn ioctl(&self, _file: &VfsFile, _cmd: u32, _arg: usize) -> VfsResult<usize> {
         Err(VfsError::NotATty)
+    }
+
+    /// Called when an open reference to the device file is released (the last
+    /// fd referring to this open file description is closed).
+    ///
+    /// Devices that bind resources to an open file — via per-fd private data
+    /// installed in [`open`](Self::open) — use this hook to tear them down.
+    fn release(&self, _inode: &VfsInode, _file: &VfsFile) -> VfsResult<()> {
+        Ok(())
     }
 
     /// Handle mmap for this device via the provided mapper.

@@ -214,10 +214,12 @@ fn handle_wfi(vcpu: &mut Vcpu<RiscvHext>) -> ExitAction {
     };
 
     vcpu.vm
-        .set_vcpu_run_state(vcpu.vcpu_id, crate::vm::VcpuRunState::WfiSleeping);
+        .set_vcpu_run_state(vcpu.vcpu_id, crate::vcpu_state::VcpuRunState::WfiSleeping);
     ktask::interruptible_sleep_until(deadline);
-    vcpu.vm
-        .set_vcpu_run_state(vcpu.vcpu_id, crate::vm::VcpuRunState::HostHandlingExit);
+    vcpu.vm.set_vcpu_run_state(
+        vcpu.vcpu_id,
+        crate::vcpu_state::VcpuRunState::HostHandlingExit,
+    );
     ExitAction::Resume
 }
 
@@ -518,7 +520,7 @@ impl VmmArch for RiscvHext {
         let code = cause & !(1u64 << 63);
 
         if is_interrupt {
-            vcpu.exit_category = crate::vm::EXIT_CAT_INTERRUPT;
+            vcpu.exit_category = crate::vcpu_state::EXIT_CAT_INTERRUPT;
             // Briefly enable HS-mode interrupts so the kernel can service
             // the pending interrupt (timer, IPI, etc.). Trap cleared SIE;
             // without this the interrupt stays pending and guest re-entry
@@ -537,16 +539,16 @@ impl VmmArch for RiscvHext {
             match code {
                 CAUSE_VIRTUAL_INSTRUCTION => {
                     // WFI trapped by hstatus.VTW=1.
-                    vcpu.exit_category = crate::vm::EXIT_CAT_HALT;
+                    vcpu.exit_category = crate::vcpu_state::EXIT_CAT_HALT;
                     handle_wfi(vcpu)
                 }
                 CAUSE_VS_ECALL => {
-                    vcpu.exit_category = crate::vm::EXIT_CAT_HYPERCALL;
+                    vcpu.exit_category = crate::vcpu_state::EXIT_CAT_HYPERCALL;
                     handle_vs_ecall(vcpu)
                 }
                 12 | 13 | 15 => {
                     // Page fault (shouldn't happen without vsatp).
-                    vcpu.exit_category = crate::vm::EXIT_CAT_OTHER;
+                    vcpu.exit_category = crate::vcpu_state::EXIT_CAT_OTHER;
                     log::error!(
                         "[HEXT] Page fault: cause={} pc={:#x} stval={:#x}",
                         code,
@@ -556,7 +558,7 @@ impl VmmArch for RiscvHext {
                     ExitAction::Exit
                 }
                 20 | 21 | 23 => {
-                    vcpu.exit_category = crate::vm::EXIT_CAT_MMIO;
+                    vcpu.exit_category = crate::vcpu_state::EXIT_CAT_MMIO;
                     let gpa = (vcpu.arch.htval_save << 2) | (vcpu.arch.stval_save & 0xFFF);
                     let Some(inst) = mmio_instruction(vcpu) else {
                         log::error!(
@@ -610,7 +612,7 @@ impl VmmArch for RiscvHext {
                     ExitAction::Exit
                 }
                 _ => {
-                    vcpu.exit_category = crate::vm::EXIT_CAT_OTHER;
+                    vcpu.exit_category = crate::vcpu_state::EXIT_CAT_OTHER;
                     log::error!(
                         "[HEXT] Unhandled exit: cause={} pc={:#x}",
                         code,

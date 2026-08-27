@@ -1160,7 +1160,7 @@ dependencies = [
  "ktime_types",
  "ktty",
  "kvfs",
- "kvmm",
+ "kvmm-api",
  "lazyinit",
  "linux-raw-sys",
  "macros",
@@ -3147,12 +3147,10 @@ name = "kvmm"
 version = "0.2.0-dev"
 dependencies = [
  "aarch64-cpu 10.0.0",
- "fs_context",
  "kaddr_layout",
  "kalloc",
  "kbuild_config",
  "kcpu_id_map",
- "kcred",
  "khal",
  "kirq",
  "klogger",
@@ -3160,14 +3158,27 @@ dependencies = [
  "ksync",
  "ktask",
  "ktime_types",
+ "log",
+ "percpu",
+ "vdev-core",
+ "vdev-test-mmio",
+]
+
+[[package]]
+name = "kvmm-api"
+version = "0.2.0-dev"
+dependencies = [
+ "fs_context",
+ "kaddr_layout",
+ "kcred",
+ "kpoll",
+ "ksync",
  "kvfs",
+ "kvmm",
  "linux-raw-sys",
  "log",
  "memaddr",
  "memspace",
- "percpu",
- "vdev-core",
- "vdev-test-mmio",
  "vdev-uart16550",
  "vdev-virtio-net",
  "vdev-vpl011",

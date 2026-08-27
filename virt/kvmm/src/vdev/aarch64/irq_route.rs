@@ -43,7 +43,11 @@ pub(crate) fn clear_owner_for_current_task() {
 /// Register or enable the host-backed guest virtual timer IRQ route.
 pub(crate) fn set_host_vtimer_irq_enabled(enabled: bool) {
     let desc = kirq::gic_level_irq_desc(HOST_VTIMER_IRQ as usize);
-    if enabled && !ensure_host_vtimer_route_registered(desc) {
+    if enabled {
+        if !ensure_host_vtimer_route_registered(desc) {
+            return;
+        }
+    } else if HOST_VTIMER_ROUTE_STATE.load(Ordering::Acquire) != ROUTE_REGISTERED {
         return;
     }
     kirq::enable(desc, enabled);

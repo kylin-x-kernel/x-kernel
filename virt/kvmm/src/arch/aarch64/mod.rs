@@ -12,8 +12,8 @@ use aarch64_cpu::registers::{DAIF, ReadWriteable};
 use super::VmmArch;
 use crate::{
     vcpu::{ExitAction, Vcpu},
+    vcpu_state::VcpuRunState,
     vdev::aarch64::{vpsci, vtimer},
-    vm::VcpuRunState,
 };
 
 core::arch::global_asm!(include_str!("el2_vmcs.S"));
@@ -298,7 +298,7 @@ impl VmmArch for Aarch64Vhe {
             // We do NOT yield here (that would deschedule on every host-timer
             // preemption and throttle the guest); host fairness is handled by
             // the run loop's bounded periodic yield.
-            vcpu.exit_category = crate::vm::EXIT_CAT_INTERRUPT;
+            vcpu.exit_category = crate::vcpu_state::EXIT_CAT_INTERRUPT;
             return ExitAction::Resume;
         }
 
@@ -309,23 +309,23 @@ impl VmmArch for Aarch64Vhe {
 
         match ec {
             EC_WFI_WFE => {
-                vcpu.exit_category = crate::vm::EXIT_CAT_HALT;
+                vcpu.exit_category = crate::vcpu_state::EXIT_CAT_HALT;
                 handle_wfi(vcpu, esr)
             }
             EC_HVC64 => {
-                vcpu.exit_category = crate::vm::EXIT_CAT_HYPERCALL;
+                vcpu.exit_category = crate::vcpu_state::EXIT_CAT_HYPERCALL;
                 handle_hvc(vcpu, esr)
             }
             EC_SMC64 => {
-                vcpu.exit_category = crate::vm::EXIT_CAT_HYPERCALL;
+                vcpu.exit_category = crate::vcpu_state::EXIT_CAT_HYPERCALL;
                 handle_smc(vcpu, esr)
             }
             EC_DATA_ABORT_LOWER => {
-                vcpu.exit_category = crate::vm::EXIT_CAT_MMIO;
+                vcpu.exit_category = crate::vcpu_state::EXIT_CAT_MMIO;
                 handle_data_abort(vcpu, esr)
             }
             _ => {
-                vcpu.exit_category = crate::vm::EXIT_CAT_OTHER;
+                vcpu.exit_category = crate::vcpu_state::EXIT_CAT_OTHER;
                 let far = vcpu.arch.far;
                 log::warn!(
                     "[VMM] Unhandled sync EC={:#x} ESR={:#x} FAR={:#x} ELR={:#x}",

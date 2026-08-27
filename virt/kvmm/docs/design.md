@@ -184,18 +184,12 @@ at `/proc/kvmm` through the procfs `vmm` feature (`procfs = { features =
 vCPU, `Relaxed` atomics); the run loop stamps guest/host ticks around each entry
 and the arch exit handler tags `vcpu.exit_category`.
 
-`loader.rs` reads guest images from the kernel VFS (`kfs`) into guest physical
-memory via `GuestMem::gpa_to_hpa`, and patches the guest DTB (initrd range,
-memory node, disabling unemulated nodes). It is self-contained (no device/vgic
-dependencies) and is the building block the `/dev/kvmm` ioctl path will use to
-boot real guests.
+Guest image loading and DTB patching live in `kvmm-api`, alongside the boot
+control-plane policy that chooses image paths, memory slots, and virtual
+platform wiring. `kvmm` exposes only the guest-memory mechanism that loader code
+uses through `GuestMem`.
 
-### `/dev/kvmm` device model and interrupt path (AArch64)
-
-`/dev/kvmm` (devfs `vmm` feature → `KvmmDevice`) is a write-command control
-plane: `echo "boot <bin> [@0xBASE]" > /dev/kvmm` loads a raw binary (FreeRTOS
-style — no DTB/initrd) at `base + KERNEL_OFF`, wires the emulated devices, and
-starts a small SMP VM. `attach`/`input`/`irq`/`dump` help drive and inspect it.
+### Virtual device model and interrupt path (AArch64)
 
 The shared device registry and cross-architecture device traits live under
 `src/vdev/`. AArch64 guest-platform devices live under `src/vdev/aarch64/` and
@@ -239,7 +233,7 @@ simplest possible guest:
 End-to-end this boots FreeRTOS, delivers its timer tick, and runs the Rhealstone
 benchmark.
 
-### `/dev/kvmm` RISC-V validation devices
+### RISC-V validation devices
 
 RISC-V guest-platform validation devices live under `src/vdev/riscv64/`. They
 are intentionally smaller than a production virtual platform: the goal is to
@@ -262,6 +256,30 @@ AArch64 while keeping the PLIC and timer model small enough for bring-up.
   injection (`hideleg`/`hie`) during per-CPU H-extension init, and exposes narrow
   helpers for the RISC-V vdev hooks to set or clear the current pCPU's `hvip`
   pending bits.
+
+**Console UART (`ns16550a`, polled).** The emulated 16550A (`vdev-uart16550`)
+drives the guest `ttyS0` in **polled mode**: the guest DTB `uart@10000000`
+node deliberately carries *no* `interrupts`/`interrupt-parent`, so Linux binds
+`ttyS0` without an IRQ and services it from its poll timer. Both directions
+work without any interrupt:
+
+- **TX** — the emulated transmit-holding register drains instantly, so `LSR`
+  always reports THR-empty; the guest writes each byte and moves on. Output is
+  line-buffered to the host log.
+- **RX** — host→guest bytes enter through `VmDevices::push_console`, which
+  pushes into the shared `RxChannel`. The guest's poll timer reads `LSR`, sees
+  `DATA_READY`, and drains the byte from `RBR`. No injection is needed.
+
+The UART *also* carries an optional interrupt path (`attach_irq` wires an
+`IrqSender`; `push_console` injects PLIC source 10 when RX interrupts are
+enabled; the THR-empty condition re-asserts source 10; `IIR` reports the
+highest-priority cause). It is dormant while the DTB omits `interrupts`, and
+exists so interrupt-mode `ttyS0` can be enabled later. It is intentionally
+**not** enabled today: declaring `interrupts = <10>` flips Linux into
+interrupt-driven mode, where TX blocks waiting for a THR-empty interrupt — and
+the rv64 external-interrupt delivery path (`hvip.VSEIP`) has not yet been
+validated end-to-end for this line, so the console TX stalled and even the
+login prompt never printed. Polled mode avoids that dependency entirely.
 
 **IRQ exit scheduling.** Kernel preemption is disabled here (cooperative
 scheduling), so the vCPU thread must give up its pCPU voluntarily — but *how

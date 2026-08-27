@@ -16,15 +16,16 @@
 extern crate alloc;
 
 pub mod arch;
-pub mod device;
-pub mod loader;
 pub mod mm;
 pub mod selftest;
 pub mod vcpu;
+pub mod vcpu_state;
 pub mod vdev;
 pub mod vm;
+pub mod vm_info;
 
-pub use device::KvmmDevice;
 pub use selftest::{vmm_selftest, vmm_selftest_guest_mem, vmm_selftest_multi_vm, vmm_selftest_smp};
 pub use vcpu::{ExitAction, Vcpu, spawn_vcpu_thread};
-pub use vm::{VcpuStats, Vm, VmConfig, VmRef, VmShared, dump_vm_info};
+pub use vcpu_state::{VcpuRunState, VcpuStats};
+pub use vm::{Vm, VmConfig, VmRef, VmShared};
+pub use vm_info::{VmInfo, dump_vm_info};

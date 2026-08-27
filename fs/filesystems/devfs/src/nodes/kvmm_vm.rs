@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! `/dev/kvmm` — kvmm VM control character device.
+//! `/dev/kvmm-vm` — fd-bound kvmm VM instance character device.
 
 use alloc::sync::Arc;
 
@@ -10,17 +10,17 @@ use kvfs::{DeviceId, DirMapping, SimpleFs};
 
 use crate::{DeviceFile, add_device_entry};
 
-/// Device ID for `/dev/kvmm` (misc-style major 251).
-pub const KVMM_DEVICE_ID: DeviceId = DeviceId::new(251, 0);
+/// Device ID for `/dev/kvmm-vm` (misc-style major 251, minor 1).
+pub const KVMM_VM_DEVICE_ID: DeviceId = DeviceId::new(251, 1);
 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     add_device_entry(
         root,
-        "kvmm",
+        "kvmm-vm",
         DeviceFile::new_character(
             fs.clone(),
-            KVMM_DEVICE_ID,
-            Arc::new(kvmm::KvmmDevice::new()),
+            KVMM_VM_DEVICE_ID,
+            Arc::new(kvmm_api::KvmmVmDevice::new()),
         ),
     );
 }

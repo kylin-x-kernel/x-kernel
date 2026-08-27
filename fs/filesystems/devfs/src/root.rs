@@ -32,7 +32,7 @@ pub fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     #[cfg(all(feature = "dice", target_os = "none"))]
     nodes::dice::add_root_entries(&mut root, fs.clone());
     #[cfg(feature = "vmm")]
-    nodes::kvmm::add_root_entries(&mut root, fs.clone());
+    nodes::kvmm_vm::add_root_entries(&mut root, fs.clone());
 
     SimpleDir::new_maker(fs, Arc::new(root))
 }

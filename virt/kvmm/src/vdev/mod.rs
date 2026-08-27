@@ -10,6 +10,7 @@
 //! submodules such as [`aarch64`].
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
@@ -18,7 +19,7 @@ pub mod dma;
 pub mod riscv64;
 
 pub use vdev_core::{
-    GuestDma, IrqController, IrqSender, MmioBus, MmioDevice, RxChannel, VcpuWaker,
+    GuestDma, IrqController, IrqSender, MmioBus, MmioDevice, RxChannel, TxChannel, VcpuWaker,
 };
 
 use crate::{arch::VmmArch, vcpu::Vcpu};
@@ -37,10 +38,17 @@ pub trait VcpuHookFactory<A: VmmArch>: Send + Sync {
     fn make_vcpu_hook(&self, vcpu_id: u32) -> Option<Box<dyn VcpuHook<A>>>;
 }
 
+/// Sentinel for "no console interrupt wired": [`VmDevices::push_console`]
+/// injects nothing.
+const NO_CONSOLE_IRQ: u32 = u32::MAX;
+
 /// KVMM-owned virtual device registry.
 pub struct VmDevices<A: VmmArch> {
-    common: vdev_core::VmDevices<RxChannel>,
+    common: vdev_core::VmDevices<RxChannel, TxChannel>,
     hook_factories: ksync::Mutex<Vec<Arc<dyn VcpuHookFactory<A>>>>,
+    /// Controller line raised when console RX data arrives, or
+    /// [`NO_CONSOLE_IRQ`] to leave the console in polled mode.
+    console_irq: AtomicU32,
 }
 
 impl<A: VmmArch> VmDevices<A> {
@@ -48,6 +56,7 @@ impl<A: VmmArch> VmDevices<A> {
         Self {
             common: vdev_core::VmDevices::new(),
             hook_factories: ksync::Mutex::new(Vec::new()),
+            console_irq: AtomicU32::new(NO_CONSOLE_IRQ),
         }
     }
 
@@ -95,11 +104,58 @@ impl<A: VmmArch> VmDevices<A> {
         self.common.set_console_rx(rx);
     }
 
-    pub fn push_console(&self, byte: u8) -> bool {
+    /// Install the guest→host console TX channel and switch the UART into
+    /// channel mode (guest output is forwarded to the channel instead of the
+    /// host kernel log). The channel is drained by the owning control device's
+    /// `read` path; see [`drain_console`](Self::drain_console).
+    pub fn set_console_tx(&self, tx: Arc<TxChannel>) {
+        tx.set_enabled(true);
+        self.common.set_console_tx(tx);
+    }
+
+    /// True if the guest has produced console output not yet drained.
+    pub fn console_has_output(&self) -> bool {
         self.common
-            .console_rx()
-            .as_ref()
-            .is_some_and(|rx| rx.push(byte))
+            .console_tx()
+            .map(|tx| tx.has_data())
+            .unwrap_or(false)
+    }
+
+    /// Drain pending guest console output into `buf`, returning the byte count.
+    /// Returns 0 when no channel is installed or nothing is pending.
+    pub fn drain_console(&self, buf: &mut [u8]) -> usize {
+        self.common
+            .console_tx()
+            .map(|tx| tx.drain(buf))
+            .unwrap_or(0)
+    }
+
+    /// Route console RX interrupts to controller line `irq` on vCPU 0.
+    ///
+    /// Only meaningful once an [`IrqController`] is installed. Leaving it unset
+    /// keeps the console in polled mode (the previous behaviour).
+    pub fn set_console_irq(&self, irq: u32) {
+        self.console_irq.store(irq, Ordering::Release);
+    }
+
+    /// Push one byte into the guest console RX FIFO.
+    ///
+    /// On success, and when a console interrupt is wired, raise it on vCPU 0
+    /// if the guest has enabled RX interrupts. Injecting through the interrupt
+    /// controller also wakes a vCPU parked in WFI so typed input is delivered
+    /// promptly rather than only on the next unrelated guest exit.
+    pub fn push_console(&self, byte: u8) -> bool {
+        let Some(rx) = self.common.console_rx() else {
+            return false;
+        };
+        if !rx.push(byte) {
+            return false;
+        }
+        let irq = self.console_irq.load(Ordering::Acquire);
+        if irq != NO_CONSOLE_IRQ && rx.irq_pending() {
+            self.common.inject_irq(0, irq);
+        }
+        true
     }
 
     pub fn device_names(&self) -> Vec<(alloc::string::String, u64)> {

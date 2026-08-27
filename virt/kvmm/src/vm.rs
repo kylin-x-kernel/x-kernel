@@ -4,128 +4,17 @@
 
 //! VM control block.
 
-use alloc::{
-    fmt::Write,
-    string::String,
-    sync::{Arc, Weak},
-    vec::Vec,
-};
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
+use alloc::{string::String, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 
 use crate::{
     arch::VmmArch,
     mm::{GuestMem, mmio::MmioBus},
     vcpu::{MAX_VCPUS, Vcpu},
+    vcpu_state::{VcpuRunState, VcpuStats},
     vdev::VmDevices,
+    vm_info::{VmInfo, register_vm},
 };
-
-// ---------------------------------------------------------------------------
-// VmInfo: type-erased VM introspection trait
-// ---------------------------------------------------------------------------
-
-/// Type-erased VM information for the global registry, used by `/proc/kvmm`.
-pub trait VmInfo: Send + Sync {
-    fn is_active(&self) -> bool;
-    fn nr_vcpus(&self) -> usize;
-    fn mem_base(&self) -> u64;
-    fn mem_size(&self) -> u64;
-    fn created_ticks(&self) -> u64;
-    fn vcpu_pcpu(&self, id: u32) -> i32;
-    fn vcpu_run_state(&self, id: u32) -> VcpuRunState;
-    fn vcpu_guest_ticks(&self, id: u32) -> u64;
-    fn vcpu_exit_ticks(&self, id: u32) -> u64;
-    fn vcpu_exit_count(&self, id: u32) -> u64;
-    fn vcpu_exit_breakdown(&self, id: u32) -> [u64; 5];
-    fn device_names(&self) -> Vec<(String, u64)>;
-}
-
-// ---------------------------------------------------------------------------
-// Global VM registry
-// ---------------------------------------------------------------------------
-
-static VM_REGISTRY: ksync::Mutex<Vec<Weak<dyn VmInfo>>> = ksync::Mutex::new(Vec::new());
-
-fn register_vm(vm: &Arc<dyn VmInfo>) {
-    VM_REGISTRY.lock().push(Arc::downgrade(vm));
-}
-
-/// Format a snapshot of all live VMs for `/proc/kvmm`.
-pub fn dump_vm_info() -> String {
-    let mut reg = VM_REGISTRY.lock();
-    reg.retain(|w| w.upgrade().is_some_and(|vm| vm.is_active()));
-
-    let freq = khal::time::freq();
-    let now = khal::time::now_ticks();
-    let mut out = String::new();
-    let _ = writeln!(out, "VMs: {}", reg.len());
-
-    for (idx, weak) in reg.iter().enumerate() {
-        let Some(vm) = weak.upgrade() else { continue };
-
-        let uptime_ms = ticks_to_us(now.as_raw().wrapping_sub(vm.created_ticks()), freq) / 1000;
-        let _ = writeln!(out);
-        let _ = writeln!(
-            out,
-            "[VM {}] up {}.{:03}s",
-            idx,
-            uptime_ms / 1000,
-            uptime_ms % 1000,
-        );
-        let nr = vm.nr_vcpus();
-        let _ = writeln!(out, "  vCPUs: {}", nr);
-        let _ = writeln!(out, "  Memory: {:#x} + {:#x}", vm.mem_base(), vm.mem_size());
-        for i in 0..nr as u32 {
-            let pcpu = vm.vcpu_pcpu(i);
-            let state = vm.vcpu_run_state(i);
-            let exits = vm.vcpu_exit_count(i);
-            let guest_t = vm.vcpu_guest_ticks(i);
-            let exit_t = vm.vcpu_exit_ticks(i);
-            let guest_us = ticks_to_us(guest_t, freq);
-            let exit_us = ticks_to_us(exit_t, freq);
-            let total = guest_t + exit_t;
-            let util = (guest_t * 100).checked_div(total).unwrap_or(0);
-            let bd = vm.vcpu_exit_breakdown(i);
-
-            if pcpu >= 0 {
-                let _ = write!(out, "  vCPU {}: pCPU {} state={}", i, pcpu, state.as_str());
-            } else {
-                let _ = write!(out, "  vCPU {}: offline state={}", i, state.as_str());
-            }
-            let _ = writeln!(
-                out,
-                " util={}% exits={} guest={}.{:03}ms exit={}.{:03}ms",
-                util,
-                exits,
-                guest_us / 1000,
-                guest_us % 1000,
-                exit_us / 1000,
-                exit_us % 1000,
-            );
-            let _ = writeln!(
-                out,
-                "    halt={} hcall={} mmio={} irq={} other={}",
-                bd[0], bd[1], bd[2], bd[3], bd[4],
-            );
-        }
-        let devices = vm.device_names();
-        if devices.is_empty() {
-            let _ = writeln!(out, "  Devices: (none)");
-        } else {
-            for (name, base) in &devices {
-                let _ = writeln!(out, "  Device: {} @ {:#x}", name, base);
-            }
-        }
-    }
-
-    out
-}
-
-fn ticks_to_us(ticks: u64, freq: u64) -> u64 {
-    if freq == 0 {
-        return 0;
-    }
-    ticks * 1_000_000 / freq
-}
 
 /// VM configuration.
 #[derive(Debug, Clone)]
@@ -159,86 +48,6 @@ impl VmConfig {
 
 const PCPU_NONE: i32 = -1;
 
-/// Coarse vCPU execution state.
-///
-/// Published by the vCPU run loop and consulted by
-/// [`VmShared::inject_irq`] to decide whether an injected virtual IRQ needs
-/// to actively wake or kick the target vCPU. Also useful for diagnostics.
-///
-/// This is deliberately coarse — the real interrupt-injection substrate
-/// (pending bitmap + list-register programming) and the cross-pCPU kick path
-/// are built on top of this state in a later stage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum VcpuRunState {
-    /// vCPU not yet started, or has exited.
-    Offline          = 0,
-    /// Trapped out of the guest; the host is handling the exit.
-    HostHandlingExit = 1,
-    /// Executing guest code at EL1.
-    RunningGuest     = 2,
-    /// Parked in the VMM WFI path in an interruptible sleep.
-    WfiSleeping      = 3,
-}
-
-impl VcpuRunState {
-    fn from_raw(raw: u8) -> Self {
-        match raw {
-            1 => Self::HostHandlingExit,
-            2 => Self::RunningGuest,
-            3 => Self::WfiSleeping,
-            _ => Self::Offline,
-        }
-    }
-
-    /// Short human-readable label for diagnostics.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Offline => "offline",
-            Self::HostHandlingExit => "host",
-            Self::RunningGuest => "guest",
-            Self::WfiSleeping => "wfi",
-        }
-    }
-}
-
-/// Per-vCPU profiling counters stored in `VmShared`.
-///
-/// Each vCPU thread writes its own slot (no contention); the procfs
-/// reader loads with `Relaxed` ordering — slightly stale is fine.
-pub struct VcpuStats {
-    pub guest_ticks: AtomicU64,
-    pub exit_ticks: AtomicU64,
-    pub exit_count: AtomicU64,
-    pub exits_halt: AtomicU64,
-    pub exits_hypercall: AtomicU64,
-    pub exits_mmio: AtomicU64,
-    pub exits_interrupt: AtomicU64,
-    pub exits_other: AtomicU64,
-}
-
-impl VcpuStats {
-    const fn new() -> Self {
-        Self {
-            guest_ticks: AtomicU64::new(0),
-            exit_ticks: AtomicU64::new(0),
-            exit_count: AtomicU64::new(0),
-            exits_halt: AtomicU64::new(0),
-            exits_hypercall: AtomicU64::new(0),
-            exits_mmio: AtomicU64::new(0),
-            exits_interrupt: AtomicU64::new(0),
-            exits_other: AtomicU64::new(0),
-        }
-    }
-}
-
-/// Exit reason categories for profiling.
-pub const EXIT_CAT_HALT: u8 = 0;
-pub const EXIT_CAT_HYPERCALL: u8 = 1;
-pub const EXIT_CAT_MMIO: u8 = 2;
-pub const EXIT_CAT_INTERRUPT: u8 = 3;
-pub const EXIT_CAT_OTHER: u8 = 4;
-
 /// Shared VM state accessible from every vCPU via `Arc`.
 ///
 /// Contains all VM-level resources: guest memory, MMIO bus, and
@@ -266,6 +75,9 @@ pub struct VmShared<A: VmmArch> {
     /// Cleared by [`shutdown`](Self::shutdown) so the VM drops out of
     /// `/proc/kvmm`.
     active: AtomicBool,
+    /// Set by [`request_stop`](Self::request_stop) to ask every vCPU thread to
+    /// leave its run loop at the next iteration so the VM can be torn down.
+    stop_requested: AtomicBool,
 }
 
 /// Reference-counted handle to a VM's shared state.
@@ -381,6 +193,30 @@ impl<A: VmmArch> VmShared<A> {
     /// Mark this VM as shut down so it no longer appears in `/proc/kvmm`.
     pub fn shutdown(&self) {
         self.active.store(false, Ordering::Release);
+    }
+
+    /// Ask every vCPU thread to leave its run loop.
+    ///
+    /// Sets the stop flag observed at the top of [`vmm_run_vcpu`] and wakes any
+    /// vCPU parked in the WFI path so it re-checks the flag promptly. This only
+    /// requests the stop; use [`Vm::stop_and_join`] to also wait for the vCPU
+    /// threads to exit.
+    ///
+    /// A vCPU spinning in guest mode without taking any exit will not observe
+    /// the request until its next exit (timer tick, hypercall, etc.).
+    pub fn request_stop(&self) {
+        self.stop_requested.store(true, Ordering::Release);
+        self.active.store(false, Ordering::Release);
+        for slot in &self.vcpu_tasks {
+            if let Some(task) = slot.lock().clone() {
+                ktask::interrupt_task(&task, true);
+            }
+        }
+    }
+
+    /// Whether a stop has been requested via [`request_stop`](Self::request_stop).
+    pub fn is_stop_requested(&self) -> bool {
+        self.stop_requested.load(Ordering::Acquire)
     }
 }
 
@@ -503,6 +339,7 @@ impl<A: VmmArch + 'static> Vm<A> {
             created_ticks: khal::time::now_ticks().as_raw(),
             nr_vcpus,
             active: AtomicBool::new(true),
+            stop_requested: AtomicBool::new(false),
         });
 
         Some(Self { shared })
@@ -542,5 +379,20 @@ impl<A: VmmArch + 'static> Vm<A> {
     /// Mark this VM as shut down (removes it from `/proc/kvmm`).
     pub fn shutdown(&self) {
         self.shared.shutdown();
+    }
+
+    /// Request every vCPU thread to stop and block until they have all exited.
+    ///
+    /// After this returns, no vCPU thread holds a reference to this VM's shared
+    /// state, so dropping the last `Vm` handle releases the guest memory. Safe
+    /// to call more than once; already-exited vCPUs join immediately.
+    pub fn stop_and_join(&self) {
+        self.shared.request_stop();
+        for slot in &self.shared.vcpu_tasks {
+            let task = slot.lock().take();
+            if let Some(task) = task {
+                task.join();
+            }
+        }
     }
 }

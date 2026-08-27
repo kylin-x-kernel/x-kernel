@@ -12,10 +12,11 @@ use crate::vdev::aarch64::vpsci;
 use crate::{
     arch::VmmArch,
     mm::GuestMem,
-    vm::{
+    vcpu_state::{
         EXIT_CAT_HALT, EXIT_CAT_HYPERCALL, EXIT_CAT_INTERRUPT, EXIT_CAT_MMIO, EXIT_CAT_OTHER,
-        VcpuRunState, VmRef, VmShared,
+        VcpuRunState,
     },
+    vm::{VmRef, VmShared},
 };
 
 /// VMM exit action returned by the architecture exit handler.
@@ -108,6 +109,17 @@ pub fn vmm_run_vcpu<A: VmmArch>(vcpu: &mut Vcpu<A>) -> Result<(), ()> {
     let yield_interval = (khal::time::freq() / 1000).max(1); // ~1 ms
 
     let result = loop {
+        // Host-requested teardown: leave the run loop so the owning task can
+        // join this thread and release the VM. Checked before entry (and after
+        // every exit, since exits loop back here).
+        if vcpu.vm.is_stop_requested() {
+            log::info!(
+                "[VMM] vcpu{}: stop requested, leaving run loop",
+                vcpu.vcpu_id
+            );
+            break Ok(());
+        }
+
         // The per-vCPU state that actually lives in *per-physical-CPU* hardware
         // — the Stage-2/EPT root (VTTBR/EPTP/hgatp), the guest EL1 register
         // bank, and, once interrupt injection lands, the GICH list registers —

@@ -175,6 +175,7 @@ xdice = { path = "tee/xdice", default-features = false, features = ["nostd"] }
 
 # Internal: virtualization
 kvmm = { path = "virt/kvmm" }
+kvmm-api = { path = "virt/kvmm-api" }
 vdev-core = { path = "virt/vdev/core" }
 vdev-test-mmio = { path = "virt/vdev/test-mmio" }
 vdev-uart16550 = { path = "virt/vdev/uart16550" }

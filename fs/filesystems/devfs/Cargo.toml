@@ -15,7 +15,7 @@ serial = ["kclass/char", "dep:console_driver"]
 memtrack = ["kalloc/tracking", "dep:gimli"]
 dev-log = []
 dice = ["dep:dice_driver", "dep:tee_crypto"]
-vmm = ["dep:kvmm"]
+vmm = ["dep:kvmm-api"]
 
 [dependencies]
 block.workspace = true
@@ -55,7 +55,7 @@ dice_driver = { workspace = true, optional = true }
 inputdev = { workspace = true, optional = true }
 klazy.workspace = true
 entropy.workspace = true
-kvmm = { workspace = true, optional = true }
+kvmm-api = { workspace = true, optional = true }
 tee_crypto = { workspace = true, features = ["alloc"], optional = true }
 kclass.workspace = true
 console_driver = { workspace = true, optional = true }
