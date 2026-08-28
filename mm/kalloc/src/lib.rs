@@ -16,7 +16,7 @@ use core::{
     alloc::{GlobalAlloc, Layout},
     fmt,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 #[allow(unused_imports)]
@@ -24,10 +24,14 @@ use alloc_engine::{
     AllocError, AllocResult, BaseAllocator, BuddyPageAllocator, ByteAllocator, PageAllocator,
 };
 use kaddr_layout::v2p;
-use kspin::{IrqSave, SpinNoIrq};
+use kspin::{IrqSave, NoPreempt, SpinNoIrq};
 use memaddr::PAGE_SIZE_4K;
 use strum::{IntoStaticStr, VariantArray};
 const MIN_HEAP_SIZE: usize = 0x8000; // 32 K
+
+/// Keep medium-sized buffers in the byte heap so they can reuse memory already
+/// transferred from the page allocator instead of requiring a new high-order block.
+const LARGE_ALLOC_THRESHOLD_BYTES: usize = 1024 * 1024;
 
 fn pages_to_bytes(num_pages: usize) -> usize {
     num_pages
@@ -41,6 +45,8 @@ fn kernel_virt_to_phys(vaddr: usize) -> usize {
 
 mod page;
 mod pcp;
+#[cfg(feature = "slab")]
+mod slab_cache;
 pub use page::GlobalPage;
 
 #[cfg(feature = "tracking")]
@@ -90,25 +96,126 @@ pub enum UsageKind {
 pub struct Usages([usize; UsageKind::VARIANTS.len()]);
 
 impl Usages {
-    /// Create a zero-initialized usage table.
+    /// Creates a zero-initialized usage snapshot.
     const fn new() -> Self {
         Self([0; UsageKind::VARIANTS.len()])
-    }
-
-    fn alloc(&mut self, kind: UsageKind, size: usize) {
-        self.0[kind as usize] += size;
-    }
-
-    fn dealloc(&mut self, kind: UsageKind, size: usize) {
-        self.0[kind as usize] = self.0[kind as usize]
-            .checked_sub(size)
-            .expect("kalloc usage underflow");
     }
 
     /// Return usage in bytes for the given kind.
     pub fn get(&self, kind: UsageKind) -> usize {
         self.0[kind as usize]
     }
+}
+
+/// Per-CPU cumulative counters from which [`Usages`] snapshots are collected.
+struct UsageCounters {
+    allocated_bytes: [AtomicUsize; UsageKind::VARIANTS.len()],
+    freed_bytes: [AtomicUsize; UsageKind::VARIANTS.len()],
+}
+
+impl UsageCounters {
+    const fn new() -> Self {
+        Self {
+            allocated_bytes: [const { AtomicUsize::new(0) }; UsageKind::VARIANTS.len()],
+            freed_bytes: [const { AtomicUsize::new(0) }; UsageKind::VARIANTS.len()],
+        }
+    }
+
+    fn alloc(&self, kind: UsageKind, size_bytes: usize) {
+        self.allocated_bytes[kind as usize]
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(size_bytes)
+            })
+            .expect("kalloc usage overflow");
+    }
+
+    fn dealloc(&self, kind: UsageKind, size_bytes: usize) {
+        // Release publishes the allocation that must precede every valid
+        // free. The snapshot acquires freed totals before reading allocations.
+        self.freed_bytes[kind as usize]
+            .fetch_update(Ordering::Release, Ordering::Relaxed, |current| {
+                current.checked_add(size_bytes)
+            })
+            .expect("kalloc freed usage overflow");
+    }
+}
+
+struct UsageTotals {
+    allocated_bytes: [u128; UsageKind::VARIANTS.len()],
+    freed_bytes: [u128; UsageKind::VARIANTS.len()],
+}
+
+impl UsageTotals {
+    const fn new() -> Self {
+        Self {
+            allocated_bytes: [0; UsageKind::VARIANTS.len()],
+            freed_bytes: [0; UsageKind::VARIANTS.len()],
+        }
+    }
+
+    fn collect_freed(&mut self, counters: &UsageCounters) {
+        for &kind in UsageKind::VARIANTS {
+            let index = kind as usize;
+            self.freed_bytes[index] = self.freed_bytes[index]
+                .checked_add(counters.freed_bytes[index].load(Ordering::Acquire) as u128)
+                .expect("kalloc freed usage total overflow");
+        }
+    }
+
+    fn collect_allocated(&mut self, counters: &UsageCounters) {
+        for &kind in UsageKind::VARIANTS {
+            let index = kind as usize;
+            self.allocated_bytes[index] = self.allocated_bytes[index]
+                .checked_add(counters.allocated_bytes[index].load(Ordering::Relaxed) as u128)
+                .expect("kalloc allocated usage total overflow");
+        }
+    }
+
+    fn finish(self) -> Usages {
+        let mut usages = Usages::new();
+        for &kind in UsageKind::VARIANTS {
+            let index = kind as usize;
+            let live_bytes = self.allocated_bytes[index]
+                .checked_sub(self.freed_bytes[index])
+                .expect("kalloc usage underflow");
+            usages.0[index] = usize::try_from(live_bytes).expect("kalloc usage overflow");
+        }
+        usages
+    }
+}
+
+#[percpu::def_percpu]
+static PERCPU_USAGE_COUNTERS: UsageCounters = UsageCounters::new();
+
+fn with_current_usage_counters<T>(f: impl FnOnce(&UsageCounters) -> T) -> T {
+    let _preempt_guard = NoPreempt::new();
+    // SAFETY: the guard pins this execution path while resolving the current
+    // CPU slot. Only shared references are created, and every field is atomic,
+    // so IRQ re-entry and remote snapshot readers cannot cause a data race.
+    let counters = unsafe { PERCPU_USAGE_COUNTERS.current_ref_raw() };
+    f(counters)
+}
+
+fn usage_snapshot() -> Usages {
+    let mut totals = UsageTotals::new();
+    let cpu_count = percpu::percpu_area_num();
+
+    // Read every freed counter first. Acquiring a recorded free also observes
+    // its causally preceding allocation before the second pass, which prevents
+    // a valid cross-CPU free from producing a spurious aggregate underflow.
+    for cpu_index in 0..cpu_count {
+        // SAFETY: `cpu_index` is bounded by the number of initialized per-CPU
+        // areas. Writers and this reader use only the slot's atomic fields.
+        let counters = unsafe { PERCPU_USAGE_COUNTERS.remote_ref_raw(cpu_index) };
+        totals.collect_freed(counters);
+    }
+    for cpu_index in 0..cpu_count {
+        // SAFETY: same bounds and atomic-access argument as the first pass.
+        let counters = unsafe { PERCPU_USAGE_COUNTERS.remote_ref_raw(cpu_index) };
+        totals.collect_allocated(counters);
+    }
+
+    totals.finish()
 }
 
 impl fmt::Debug for Usages {
@@ -128,10 +235,9 @@ impl fmt::Debug for Usages {
 /// there is no memory, asks the page allocator for more memory and adds it to
 /// the byte allocator.
 ///
-/// Currently, [`TlsfByteAllocator`] is used as the byte allocator, while
-/// [`BuddyPageAllocator`] is used as the page allocator.
-///
-/// [`TlsfByteAllocator`]: alloc_engine::TlsfByteAllocator
+/// The configured byte allocator serves sub-page requests, while
+/// [`BuddyPageAllocator`] provides backing pages and direct large allocations.
+/// Slab builds add a per-CPU object cache in front of the byte allocator.
 pub struct GlobalAllocator {
     balloc: SpinNoIrq<DefaultByteAllocator>,
     /// Whether the byte allocator already owns a bootstrap heap region.
@@ -139,7 +245,6 @@ pub struct GlobalAllocator {
     /// Whether the page allocator has at least one usable memory region.
     page_ready: AtomicBool,
     palloc: SpinNoIrq<BuddyPageAllocator<{ PAGE_SIZE_4K }>>,
-    usages: SpinNoIrq<Usages>,
 }
 
 impl Default for GlobalAllocator {
@@ -156,7 +261,6 @@ impl GlobalAllocator {
             heap_ready: AtomicBool::new(false),
             page_ready: AtomicBool::new(false),
             palloc: SpinNoIrq::new(BuddyPageAllocator::new()),
-            usages: SpinNoIrq::new(Usages::new()),
         }
     }
 
@@ -185,11 +289,17 @@ impl GlobalAllocator {
             .expect("failed to initialize heap memory");
     }
 
+    /// Initialize or extend only the backing page allocator.
+    ///
+    /// The byte allocator is bootstrapped lazily when memory is later added or
+    /// a byte allocation needs it. `va..va + size` must be a mapped, writable,
+    /// exclusive region that does not overlap an existing allocator region.
     pub fn init_page_allocator(&self, va: usize, size: usize) {
         self.init_or_extend_page_allocator(va, size)
             .expect("failed to initialize page allocator");
     }
 
+    /// Return whether the backing page allocator has a usable memory region.
     pub fn is_page_allocator_ready(&self) -> bool {
         self.page_ready.load(Ordering::Acquire)
     }
@@ -213,65 +323,121 @@ impl GlobalAllocator {
     /// memory, it asks the page allocator for more memory and adds it to the
     /// byte allocator.
     ///
-    /// Large allocations (over `PAGE_SIZE_4K / 2`) bypass the byte allocator
+    /// Large allocations (over `LARGE_ALLOC_THRESHOLD_BYTES`) bypass the byte allocator
     /// to avoid fragmenting the slab heap and are served directly from the
     /// page allocator.
     pub fn alloc(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
         // Large allocations: go directly to the page allocator.
-        if layout.size() > PAGE_SIZE_4K / 2 {
+        if layout.size() > LARGE_ALLOC_THRESHOLD_BYTES {
             return self.large_alloc(layout);
         }
+
+        #[cfg(feature = "slab")]
+        if let Some(size_class) = alloc_engine::SizeClass::from_layout(layout) {
+            let object = self.alloc_from_percpu_slab(size_class)?;
+            self.record_usage_alloc(UsageKind::RustHeap, layout.size());
+            return Ok(object);
+        }
+
+        let object = self.alloc_from_byte_allocator(layout)?;
+        self.record_usage_alloc(UsageKind::RustHeap, layout.size());
+        Ok(object)
+    }
+
+    /// Allocate through the globally locked byte allocator.
+    fn alloc_from_byte_allocator(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
         let mut balloc = self.balloc.lock();
         loop {
             let heap_ready = self.heap_ready.load(Ordering::Acquire);
             if heap_ready && let Ok(ptr) = balloc.allocate(layout) {
-                self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
                 return Ok(ptr);
             }
 
-            let old_size = if heap_ready { balloc.total_bytes() } else { 0 };
-            let exp_size = old_size
-                .max(layout.size())
-                .next_power_of_two()
-                .max(PAGE_SIZE_4K);
+            self.grow_byte_allocator(&mut balloc, layout)?;
+        }
+    }
 
-            let mut req_size = exp_size;
-            let min_size = if heap_ready {
-                PAGE_SIZE_4K.max(layout.size())
-            } else {
-                MIN_HEAP_SIZE.max(layout.size())
-            };
-            loop {
-                if !heap_ready {
-                    req_size = (req_size + MIN_HEAP_SIZE - 1) & !(MIN_HEAP_SIZE - 1);
+    /// Allocate a canonical slab object through the current CPU cache.
+    #[cfg(feature = "slab")]
+    fn alloc_from_percpu_slab(
+        &self,
+        size_class: alloc_engine::SizeClass,
+    ) -> AllocResult<NonNull<u8>> {
+        let _irq_guard = IrqSave::new();
+        // SAFETY: `_irq_guard` excludes same-CPU interrupt re-entry for this
+        // entire cache access. The per-CPU helper disables preemption while it
+        // obtains the non-escaping mutable reference.
+        if let Some(object) = unsafe { slab_cache::try_alloc(size_class) } {
+            return Ok(object);
+        }
+
+        let class_size = size_class.size();
+        let layout = Layout::from_size_align(class_size, class_size)
+            .expect("slab size classes must be powers of two");
+        let mut balloc = self.balloc.lock();
+        loop {
+            if self.heap_ready.load(Ordering::Acquire) {
+                // SAFETY: local IRQs remain disabled, `balloc` is the central
+                // slab allocator, and its lock gives exclusive mutable access.
+                if let Ok(object) = unsafe { slab_cache::refill_cache(size_class, &mut *balloc) } {
+                    return Ok(object);
                 }
-                let heap_addr = match self.alloc_pages(
-                    req_size / PAGE_SIZE_4K,
-                    PAGE_SIZE_4K,
-                    UsageKind::RustHeap,
-                ) {
-                    Ok(addr) => addr,
-                    Err(err) => {
-                        req_size /= 2;
-                        if req_size < min_size {
-                            return Err(err);
-                        }
-                        continue;
-                    }
-                };
-                debug!(
-                    "expand heap memory: [{:#x}, {:#x})",
-                    heap_addr,
-                    heap_addr + req_size
-                );
-                if heap_ready {
-                    balloc.add_region(heap_addr, req_size)?;
-                } else {
-                    balloc.init_region(heap_addr, req_size);
-                    self.heap_ready.store(true, Ordering::Release);
-                }
-                break;
             }
+
+            self.grow_byte_allocator(&mut balloc, layout)?;
+        }
+    }
+
+    /// Add one region to the byte allocator, reducing the request under
+    /// pressure until the minimum useful region size is reached.
+    fn grow_byte_allocator(
+        &self,
+        balloc: &mut DefaultByteAllocator,
+        layout: Layout,
+    ) -> AllocResult {
+        let heap_ready = self.heap_ready.load(Ordering::Acquire);
+        let old_size = if heap_ready { balloc.total_bytes() } else { 0 };
+        let exp_size = old_size
+            .max(layout.size())
+            .next_power_of_two()
+            .max(PAGE_SIZE_4K);
+
+        let mut req_size = exp_size;
+        let min_size = if heap_ready {
+            PAGE_SIZE_4K.max(layout.size())
+        } else {
+            MIN_HEAP_SIZE.max(layout.size())
+        };
+        loop {
+            if !heap_ready {
+                req_size = (req_size + MIN_HEAP_SIZE - 1) & !(MIN_HEAP_SIZE - 1);
+            }
+            let heap_addr = match self.alloc_pages(
+                req_size / PAGE_SIZE_4K,
+                PAGE_SIZE_4K,
+                UsageKind::RustHeap,
+            ) {
+                Ok(addr) => addr,
+                Err(err) => {
+                    req_size /= 2;
+                    if req_size < min_size {
+                        return Err(err);
+                    }
+                    continue;
+                }
+            };
+            debug!(
+                "expand heap memory: [{:#x}, {:#x})",
+                heap_addr,
+                heap_addr + req_size
+            );
+            if heap_ready {
+                balloc.add_region(heap_addr, req_size)?;
+            } else {
+                balloc.init_region(heap_addr, req_size);
+                self.heap_ready.store(true, Ordering::Release);
+            }
+            return Ok(());
         }
     }
 
@@ -290,9 +456,7 @@ impl GlobalAllocator {
                 );
             })?;
         // alloc_pages skips usages for RustHeap; track it here.
-        self.usages
-            .lock()
-            .alloc(UsageKind::RustHeap, pages_to_bytes(pages));
+        self.record_usage_alloc(UsageKind::RustHeap, pages_to_bytes(pages));
         // SAFETY: `addr` is non-null and properly aligned.
         Ok(unsafe { NonNull::new_unchecked(addr as *mut u8) })
     }
@@ -306,14 +470,31 @@ impl GlobalAllocator {
     /// [`alloc`]: GlobalAllocator::alloc
     pub fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
         // Large allocations bypassed the byte allocator.
-        if layout.size() > PAGE_SIZE_4K / 2 {
+        if layout.size() > LARGE_ALLOC_THRESHOLD_BYTES {
             let pages = layout.size().div_ceil(PAGE_SIZE_4K);
             // dealloc_pages handles usages tracking internally.
             self.dealloc_pages(ptr.as_ptr() as usize, pages, UsageKind::RustHeap);
         } else {
-            self.usages
-                .lock()
-                .dealloc(UsageKind::RustHeap, layout.size());
+            self.record_usage_dealloc(UsageKind::RustHeap, layout.size());
+
+            #[cfg(feature = "slab")]
+            if let Some(size_class) = alloc_engine::SizeClass::from_layout(layout) {
+                let _irq_guard = IrqSave::new();
+                // SAFETY: every eligible allocation is obtained from the
+                // central allocator with this class's canonical layout. Local
+                // IRQs stay disabled until the cache operation completes.
+                if unsafe { slab_cache::try_free(size_class, ptr) } {
+                    return;
+                }
+
+                let mut balloc = self.balloc.lock();
+                // SAFETY: the pointer has the canonical class provenance
+                // described above, local IRQs remain disabled, and `balloc`
+                // is the exclusively locked central allocator.
+                unsafe { slab_cache::drain_cache(size_class, &mut *balloc, ptr) };
+                return;
+            }
+
             self.balloc.lock().deallocate(ptr, layout);
         }
     }
@@ -344,7 +525,7 @@ impl GlobalAllocator {
             if let Some(addr) = pcp::try_alloc(num_pages) {
                 drop(_guard);
                 if !matches!(kind, UsageKind::RustHeap) {
-                    self.usages.lock().alloc(kind, pages_to_bytes(num_pages));
+                    self.record_usage_alloc(kind, pages_to_bytes(num_pages));
                 }
                 return Ok(addr);
             }
@@ -355,7 +536,7 @@ impl GlobalAllocator {
             let result = pcp::fill_cache(num_pages, &mut palloc);
             drop(palloc);
             if result.is_ok() && !matches!(kind, UsageKind::RustHeap) {
-                self.usages.lock().alloc(kind, pages_to_bytes(num_pages));
+                self.record_usage_alloc(kind, pages_to_bytes(num_pages));
             }
             return result;
         }
@@ -363,7 +544,7 @@ impl GlobalAllocator {
         // Slow path: multi-page or special alignment.
         let addr = self.palloc.lock().allocate_pages(num_pages, align_pow2)?;
         if !matches!(kind, UsageKind::RustHeap) {
-            self.usages.lock().alloc(kind, pages_to_bytes(num_pages));
+            self.record_usage_alloc(kind, pages_to_bytes(num_pages));
         }
         Ok(addr)
     }
@@ -395,7 +576,7 @@ impl GlobalAllocator {
         }
 
         if !matches!(kind, UsageKind::RustHeap) {
-            self.usages.lock().alloc(kind, size);
+            self.record_usage_alloc(kind, size);
         }
         Ok(addr)
     }
@@ -419,7 +600,7 @@ impl GlobalAllocator {
             .lock()
             .allocate_pages_at(va, num_pages, align_pow2)?;
         if kind != UsageKind::RustHeap {
-            self.usages.lock().alloc(kind, pages_to_bytes(num_pages));
+            self.record_usage_alloc(kind, pages_to_bytes(num_pages));
         }
         Ok(addr)
     }
@@ -435,7 +616,7 @@ impl GlobalAllocator {
     ///
     /// [`alloc_pages`]: GlobalAllocator::alloc_pages
     pub fn dealloc_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
-        self.usages.lock().dealloc(kind, pages_to_bytes(num_pages));
+        self.record_usage_dealloc(kind, pages_to_bytes(num_pages));
 
         // Fast path: 1–4 pages -> try to cache them per-CPU.
         if (1..=pcp::PCP_MAX_PAGES).contains(&num_pages) {
@@ -457,8 +638,18 @@ impl GlobalAllocator {
 
     /// Gives back the allocated DMA pages starts from `va` to the DMA page allocator.
     pub fn dealloc_dma_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
-        self.usages.lock().dealloc(kind, pages_to_bytes(num_pages));
+        self.record_usage_dealloc(kind, pages_to_bytes(num_pages));
         self.palloc.lock().deallocate_pages(va, num_pages);
+    }
+
+    /// Add diagnostic usage without placing allocation paths behind a usage lock.
+    fn record_usage_alloc(&self, kind: UsageKind, size_bytes: usize) {
+        with_current_usage_counters(|counters| counters.alloc(kind, size_bytes));
+    }
+
+    /// Record freed bytes for aggregate diagnostic accounting.
+    fn record_usage_dealloc(&self, kind: UsageKind, size_bytes: usize) {
+        with_current_usage_counters(|counters| counters.dealloc(kind, size_bytes));
     }
 
     fn init_or_extend_page_allocator(&self, va: usize, size: usize) -> AllocResult {
@@ -507,9 +698,18 @@ impl GlobalAllocator {
         self.palloc.lock().available_pages()
     }
 
-    /// Returns the usage statistics of the allocator.
+    /// Returns caller-live usage aggregated from all per-CPU counters.
+    ///
+    /// The snapshot is not linearized against concurrent allocation and free;
+    /// it may temporarily overstate or understate usage, but it is never used
+    /// for allocator ownership or reclaim decisions.
+    ///
+    /// # Panics
+    ///
+    /// Panics if cumulative accounting overflows or total recorded frees
+    /// exceed total recorded allocations for any [`UsageKind`].
     pub fn usages(&self) -> Usages {
-        *self.usages.lock()
+        usage_snapshot()
     }
 }
 
@@ -644,6 +844,7 @@ pub fn global_add_memory(va: usize, size: usize) -> AllocResult {
     GLOBAL_ALLOCATOR.add_memory(va, size)
 }
 
+/// Return whether the global backing page allocator is ready for requests.
 pub fn is_page_allocator_ready() -> bool {
     GLOBAL_ALLOCATOR.is_page_allocator_ready()
 }
@@ -654,15 +855,26 @@ pub mod tests_kalloc {
     use strum::VariantArray;
     use unittest::def_test;
 
-    use super::{UsageKind, Usages};
+    use super::{UsageCounters, UsageKind, UsageTotals};
+
+    fn snapshot(counters: &[&UsageCounters]) -> super::Usages {
+        let mut totals = UsageTotals::new();
+        for counter in counters {
+            totals.collect_freed(counter);
+        }
+        for counter in counters {
+            totals.collect_allocated(counter);
+        }
+        totals.finish()
+    }
 
     #[def_test]
     fn test_usages_alloc_dealloc() {
-        let mut usages = Usages::new();
+        let usages = UsageCounters::new();
         usages.alloc(UsageKind::RustHeap, 64);
-        assert_eq!(usages.get(UsageKind::RustHeap), 64);
+        assert_eq!(snapshot(&[&usages]).get(UsageKind::RustHeap), 64);
         usages.dealloc(UsageKind::RustHeap, 32);
-        assert_eq!(usages.get(UsageKind::RustHeap), 32);
+        assert_eq!(snapshot(&[&usages]).get(UsageKind::RustHeap), 32);
     }
 
     #[def_test]
@@ -672,10 +884,24 @@ pub mod tests_kalloc {
 
     #[def_test]
     fn test_usages_independent_kinds() {
-        let mut usages = Usages::new();
+        let usages = UsageCounters::new();
         usages.alloc(UsageKind::VirtMem, 10);
         usages.alloc(UsageKind::PageTable, 20);
-        assert_eq!(usages.get(UsageKind::VirtMem), 10);
-        assert_eq!(usages.get(UsageKind::PageTable), 20);
+        let snapshot = snapshot(&[&usages]);
+        assert_eq!(snapshot.get(UsageKind::VirtMem), 10);
+        assert_eq!(snapshot.get(UsageKind::PageTable), 20);
+    }
+
+    #[def_test]
+    fn test_usages_allow_cross_cpu_free() {
+        let allocating_cpu = UsageCounters::new();
+        let freeing_cpu = UsageCounters::new();
+        allocating_cpu.alloc(UsageKind::RustHeap, 64);
+        freeing_cpu.dealloc(UsageKind::RustHeap, 64);
+
+        assert_eq!(
+            snapshot(&[&allocating_cpu, &freeing_cpu]).get(UsageKind::RustHeap),
+            0
+        );
     }
 }
