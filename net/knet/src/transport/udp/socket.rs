@@ -17,8 +17,8 @@ use super::{
     state::UdpSocketState,
 };
 use crate::{
-    AncillaryData, KernelAncillaryData, RecvFlags, RecvOptions, SERVICE, SendFlags, SendOptions,
-    Shutdown, SocketAddrEx, SocketOps,
+    AncillaryData, ConnectOptions, KernelAncillaryData, RecvFlags, RecvOptions, SERVICE, SendFlags,
+    SendOptions, Shutdown, SocketAddrEx, SocketOps,
     consts::{UDP_RX_BUF_LEN, UDP_TX_BUF_LEN},
     ip::{IpAddress, IpEndpoint, Ipv4Address},
     ipv4,
@@ -401,7 +401,7 @@ impl SocketOps for UdpSocket {
         self.bind_endpoint(IpEndpoint::from(local_addr))
     }
 
-    fn connect(&self, remote_addr: SocketAddrEx) -> KResult {
+    fn connect(&self, remote_addr: SocketAddrEx, _options: ConnectOptions) -> KResult {
         if matches!(remote_addr, SocketAddrEx::Unspecified) {
             self.disconnect();
             debug!("UDP socket: disconnected");

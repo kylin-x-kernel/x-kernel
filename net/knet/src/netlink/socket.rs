@@ -19,7 +19,7 @@ use super::{
     wire::{NlMsgHeader, align},
 };
 use crate::{
-    RecvOptions, SendOptions, Shutdown, SocketAddrEx, SocketOps,
+    ConnectOptions, RecvOptions, SendOptions, Shutdown, SocketAddrEx, SocketOps,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
 };
 
@@ -224,7 +224,7 @@ impl SocketOps for NetlinkSocket {
 
     // TODO: Support netlink connect() semantics if future users rely on a
     // connected peer model. The current implementation only needs bind/send/recv.
-    fn connect(&self, _remote_addr: SocketAddrEx) -> KResult {
+    fn connect(&self, _remote_addr: SocketAddrEx, _options: ConnectOptions) -> KResult {
         Err(KError::OperationNotSupported)
     }
 

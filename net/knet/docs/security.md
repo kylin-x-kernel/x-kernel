@@ -48,7 +48,7 @@ driver layer / smoltcp / ringbuf
 - **设备输入**：driver 提供的 `NetBufHandle`、IRQ 唤醒、RX/TX 缓冲区生命周期；
 - **控制面输入**：每次发送携带的调用者凭据、批量 netlink message、header、
   attribute、route mutation、neighbor 更新；
-- **Unix / vsock 输入**：peer socket 数据、连接建立与关闭事件，
+- **Unix / vsock 输入**：peer socket 数据、连接建立与关闭事件、用户提供的 listen backlog，
   以及 pathname Unix socket 经 kvfs 解析的路径和 inode；
 - **上层 syscall 语义输入**：由 `posix/net` 传入的 socket 地址族、
   socket option、阻塞语义和权限决策结果。
@@ -211,6 +211,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 27. loopback UDP 交付边界：loopback xmit 必须在关闭 BH 前给完整 IPv4 UDP 盖戳，再于 `local_bh_disable` 下把同一 `PacketBuf` 放入共享 `NET_RX_QUEUE` 的 `pending_udp` 并 raise `NetRx`；`NetRx` 只取出 `pending_udp` 中的已盖戳 UDP，不查找 `LoopbackDevice`。`NetRx` 与 task fallback 只能通过 `SpinNoIrq` 查找 UDP PCB 并入队。完整 IPv4 UDP 不得依赖 poller `RUNNING` 所有权。TCP、ICMP、IPv6、分片和未命中 socket 的 UDP 由 `poll_rx` 从 `deferred` 交给任务 poller。
 28. `NET_RX_QUEUE` 容量与所有权边界：`pending_udp` 与 `deferred` 必须在设备创建时按 `SOCKET_BUFFER_SIZE` 预分配，`enqueue` 以两条队列长度与 in-flight 合计为上限拒绝超额报文，因此 `push_back` 不得在 `SpinNoIrq` 或 `NetRx` softirq 内触发扩容。`process_pending` 取出的盖戳 UDP 必须计入 in-flight 预留，批次大小不超过 `NET_RX_BUDGET`，在锁外交付；未命中 PCB 的报文必须仍唯一持有句柄，清除元数据后放入 `deferred`。队列满时 `enqueue` 必须把报文交还调用方，由发送路径在释放 `NET_RX_QUEUE` 与 BH guard 之后再 drop；`discard_ifindex` 必须先把匹配报文移出到局部容器，解锁后再释放，避免在 `SpinNoIrq` 内堆释放。发送路径的 task fallback 只处理进入时已有的 `pending_udp`，并按 `NET_RX_BUDGET` 拆成固定轮次。队列按 `ifindex` 区分报文所有者，`LoopbackDevice::drop` 必须调用 `discard_ifindex`；该清理对 `process_pending` 释放锁期间的在途报文是 best-effort，完整的设备身份语义需要等价于 Linux `skb->dev` 与 `NETREG_UNREGISTERING` 的注册状态。
 29. TCP listener 推进条件：收到 TCP 报文或 SYN 队列仍有 child 时，下一次实际网络 poll 必须刷新对应 listener。child 进入 accept 队列后才唤醒 `accept_poll`，唤醒发生在 entry 锁外。SYN 队列非空不会设置 `PollProgress::has_more`，未到期的协议 timer 继续等待 deadline 通知，避免半连接造成 poller 空转。
+30. Unix listener 资源边界：pending request 与容量预留之和不得超过 `LISTEN_QUEUE_SIZE`。每个连接的两个 64 KiB ring 只能在容量预留成功后分配；预留失败、中断或源 socket 状态拒绝连接时必须通过 RAII 归还名额。
 
 ## 线程安全
 
@@ -219,7 +220,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | `TcpSocket` | 字段满足 Send | 内部锁、atomic 和 global socket set 串行化共享状态 |
 | `UdpSocket` | 字段满足 Send | `Arc<UdpPcb>` 内的锁、atomic 和分桶 PCB registry 保护共享状态 |
 | `RawSocket` | 字段满足 Send | `RwLock`、atomic 和 immutable handle 保护共享状态 |
-| `StreamTransport` | 字段满足 Send | `Mutex<Option<Channel>>` 串行化本端操作，per-direction `SpinNoPreempt` 排序数据发布、半关闭与 EOF 判定，三组 `PollSet` 隔离读、写和连接状态 waiter |
+| `StreamTransport` | 字段满足 Send | `Mutex<Option<Channel>>` 串行化本端操作，`ListenerState` mutex 串行化 pending queue、容量预留、listen 与 shutdown，per-direction `SpinNoPreempt` 排序数据发布、半关闭与 EOF 判定，三组 `PollSet` 隔离读、写和连接状态 waiter |
 | `NetlinkSocket` | 字段满足 Send | `Arc<NetlinkSocketInner>` 内部使用 `RwLock`、发送事务 `Mutex`、rx queue `Mutex` 和 `PollSet`；每次发送显式携带调用者凭据，socket 不保存权限主体 |
 | `Service` | 字段满足 Send | 通过内部 `Mutex` 分别保护 Interface、Router、IngressProcessor、timeout 和可复用 batch；poller 以非阻塞方式取得共享推进锁并保留竞争期间的 batch；网络 timer 与 deferred-close deadline 使用原子值发布，不在周期采样回调路径获取 sleepable mutex |
 | `Router` | 在 `Service` 内使用 | 通过 `Service` 的 Router mutex 间接共享 |
@@ -263,6 +264,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-33 | link 复合更新发生部分提交 | 中 | 重命名成功后 MTU 或 flags 校验失败 | `Router::update_device_link` 在写入前校验目标设备、名称格式与唯一性和 MTU 范围；rtnetlink 入口忽略 `IFF_VOLATILE` 变更并拒绝实际改变的未支持可写位，设备 setter 只接收已验证值 |
 | T-34 | poller 推进权被普通任务持有的共享 mutex 长时间占用 | 中 | poller 取得 `RUNNING` 后等待被其他 socket 或控制面任务持有的 Router、IngressProcessor、Interface 或 socket-set | poll round 对这些共享锁使用 `try_lock`；竞争时保留待交接 batch，返回 `has_more` 并沿原四态状态机安排后续轮次；assist 仍限一轮，获取推进权采用机会式 CAS |
 | T-35 | loopback UDP 依赖 poller 所有权才能完成投递 | 中 | `sendto` 只把报文排进 TX queue，短 `SO_RCVTIMEO` 在 poller 被占用时到期 | loopback xmit 在关闭 BH 前盖戳并入 `NET_RX_QUEUE`，raise `NetRx`；BH 恢复时把完整 IPv4 UDP 写入 PCB；TCP/ICMP 与未命中 socket 的 UDP 仍走 poller |
+| T-36 | Unix stream listener 待处理连接耗尽内核内存 | 中 | 攻击者持续连接且服务端不执行 `accept` | backlog 按 Linux 计数规则转换并限制到 `LISTEN_QUEUE_SIZE`；容量预留先于 ring 分配；非阻塞连接返回 `EAGAIN`，阻塞连接按 `SO_SNDTIMEO` 等待容量，超时后返回 `EAGAIN`；shutdown 与 Drop 唤醒等待者 |
 
 影响等级定义：
 
@@ -300,6 +302,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | F-24 | 数据面共享锁竞争 | socket 或控制面任务持有 Router、IngressProcessor、Interface 或 socket-set | 当前 poll round 提前结束并保留 batch | 网络工作延后到下一轮 | 3 | 返回 `has_more`，单执行者完成 CAS 发布 `SCHEDULED`；raw、accepted 和 control batch 保持所有权，下一轮从保留位置继续 |
 | F-25 | 短超时 loopback UDP 在 poller 忙碌时丢包 | `sendto` 只通知 poller，`recvfrom` 的 1 jiffy 超时先到期 | 并发 libc-test `socket.exe` 间歇 `ETIMEDOUT` | 用户可见功能回归 | 3 | loopback UDP 在发送路径的 BH 窗口内由 `NetRx` 交付 PCB；poller 不再承担该交付；压力测试覆盖 SMP=1 与 SMP=4 的四并发短超时场景 |
 | F-26 | TCP child 永久滞留 SYN 队列 | packet mark 在 child 进入可接受状态前被消费，后续 ingress 或 timer poll 没有刷新 listener | accept 队列保持为空 | 服务端连接建立后仍阻塞于 `accept` | 2 | SYN 队列非空的 listener 在每次实际网络 poll 后刷新；仅在 child 移入 accept 队列后唤醒 waiter；SYN 队列不请求连续 poll |
+| F-27 | Unix listener shutdown 后连接或 accept 永久等待 | listener 状态改变时没有通知容量和请求事件 | 阻塞 `connect` 或 `accept` 无法返回 | 应用线程长期休眠 | 2 | `shutdown(SHUT_RD)` 和 Drop 同时通知 `capacity_available` 与 `request_available`；已排队请求先交付，空队列上的阻塞 `accept` 返回 `EINVAL`；设置了 `SO_SNDTIMEO` 的阻塞 `connect` 在容量等待超时后返回 `EAGAIN` |
 
 严重度定义：
 
@@ -315,7 +318,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - 无权限 netlink mutation 在 RX queue 中返回带 `EPERM` 的 `NLMSG_ERROR`；混合查询和 mutation 批次在修改状态前返回 syscall `EOPNOTSUPP`。
 - malformed Ethernet、ARP、IP、UDP、TCP 包在 RX 路径丢弃，并通过 warn 或 trace 记录。
 - UDP PCB 接收队列和 Router TX 队列满时映射为丢包或 `WouldBlock`，poller 负责等待 IO readiness。
-- smoltcp buffer 和 Unix stream ring buffer 满时映射为 `WouldBlock`，poller 负责等待 IO readiness；非阻塞 Unix stream send 已有进度时返回部分字节数。
+- smoltcp buffer 和 Unix stream ring buffer 满时映射为 `WouldBlock`，poller 负责等待 IO readiness；非阻塞 Unix stream send 已有进度时返回部分字节数。Unix listener backlog 满时非阻塞 `connect` 返回 `WouldBlock`；阻塞连接按 `SO_SNDTIMEO` 等待 `accept` 或 backlog 增长，超时后返回 `WouldBlock`。
 - loopback 和 Ethernet 队列满时丢包并记录 warn。共享 `NetRx` 队列满时 loopback xmit 仍对发送路径返回成功，对齐 Linux `loopback_xmit` 在 `__netif_rx` 返回 `NET_RX_DROP` 时仍给出 `NETDEV_TX_OK`。
 - panic 路径主要来自初始化顺序、内部 invariant 破坏和 `expect` 断言；新增公开入口应先返回 `KError`，再进入内部断言区。
 
@@ -353,6 +356,8 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - 仅含查询或仅含 mutation 的批次支持逐条处理，混合批次在状态更新前返回 `EOPNOTSUPP`，mutation 批次执行前检查完整 response 空间。
 - 新增 ring buffer 操作的 advance count 来自同一锁内同一批 slices。
 - Unix stream 的 write index 发布、方向关闭和空队列 EOF 判定保持同一个 per-direction 排序点，方向锁内不执行用户复制或 `PollSet` 唤醒，shutdown 在释放 `channel` mutex 后执行 waiter 唤醒。
+- Unix listener 改动保持 pending request 与 reservation 总数受 `LISTEN_QUEUE_SIZE` 限制，ring 分配位于容量预留之后，binding slot 和状态锁不跨阻塞等待，shutdown 与 Drop 唤醒 connect 和 accept waiter。
+- Unix pathname 文件系统上下文锁与 abstract binding 表锁在 transport callback 前释放，阻塞 connect 不持有地址查找层锁。
 - 新增外部网络输入使用 checked parser。
 - IPv4 分片重组改动保持队列数量、内存和超时上限，并拒绝重叠 range。
 - UDP registry 改动保持 bind、connect、普通接收和 ICMP error lookup 使用同一 PCB 所有权来源。`NetRx` 与 task 共享的 bucket、connected peer 和 PCB 接收队列必须使用 `SpinNoIrq`，sleepable 状态更新不得放在这些锁内。

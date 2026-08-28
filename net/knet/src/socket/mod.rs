@@ -147,6 +147,14 @@ impl RecvFlags {
 
 pub type AncillaryData = Box<dyn Any + Send + Sync>;
 
+/// Options for initiating a socket connection.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct ConnectOptions {
+    /// Return the protocol-specific nonblocking result when the connection
+    /// cannot complete immediately.
+    pub nonblocking: bool,
+}
+
 /// Options for accepting a connection from a listening socket.
 #[derive(Default, Debug, Clone, Copy)]
 pub struct AcceptOptions {
@@ -232,8 +240,12 @@ impl Shutdown {
 pub trait SocketOps: Configurable {
     /// Binds an unbound socket to the given address and port.
     fn bind(&self, local_addr: SocketAddrEx) -> KResult;
-    /// Connects the socket to a remote address.
-    fn connect(&self, remote_addr: SocketAddrEx) -> KResult;
+    /// Connects the socket using per-call blocking behavior.
+    ///
+    /// A nonblocking TCP connection that remains in progress returns
+    /// [`KError::InProgress`]. A nonblocking Unix stream connection whose
+    /// listener queue is full returns [`KError::WouldBlock`].
+    fn connect(&self, remote_addr: SocketAddrEx, options: ConnectOptions) -> KResult;
 
     /// Starts listening on the bound address and port.
     fn listen(&self, _backlog: usize) -> KResult {
@@ -267,8 +279,8 @@ impl<T: SocketOps + ?Sized> SocketOps for Box<T> {
         (**self).bind(local_addr)
     }
 
-    fn connect(&self, remote_addr: SocketAddrEx) -> KResult {
-        (**self).connect(remote_addr)
+    fn connect(&self, remote_addr: SocketAddrEx, options: ConnectOptions) -> KResult {
+        (**self).connect(remote_addr, options)
     }
 
     fn listen(&self, backlog: usize) -> KResult {

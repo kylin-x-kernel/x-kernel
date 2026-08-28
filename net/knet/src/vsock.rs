@@ -24,7 +24,8 @@ use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 
 pub use self::stream::VsockStreamTransport;
 use crate::{
-    AcceptOptions, RecvOptions, SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
+    AcceptOptions, ConnectOptions, RecvOptions, SendOptions, Shutdown, Socket, SocketAddrEx,
+    SocketOps,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
 };
 
@@ -99,7 +100,7 @@ impl SocketOps for VsockSocket {
         self.transport.bind(local_addr)
     }
 
-    fn connect(&self, remote_addr: SocketAddrEx) -> KResult {
+    fn connect(&self, remote_addr: SocketAddrEx, _options: ConnectOptions) -> KResult {
         let remote_addr = remote_addr.into_vsock()?;
         self.transport.connect(remote_addr)
     }

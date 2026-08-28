@@ -5,7 +5,7 @@
 use core::ffi::c_char;
 
 use knet::{
-    SocketAddrEx, SocketOps,
+    ConnectOptions, SocketAddrEx, SocketOps,
     unix::{StreamTransport, UnixAddr, UnixDomainSocket},
 };
 use kprocess;
@@ -46,7 +46,9 @@ pub fn sys_tee_scn_panic(panic_code: u32) -> TeeResult {
     let uuid = with_tee_ta_ctx(|ctx| Ok(ctx.uuid.clone()))?;
     let path = ta_unix_socket_path(&uuid)?;
     let remote_addr = SocketAddrEx::Unix(UnixAddr::Path(path.into()));
-    socket.connect(remote_addr).map_err(|_| TEE_ERROR_GENERIC)?;
+    socket
+        .connect(remote_addr, ConnectOptions::default())
+        .map_err(|_| TEE_ERROR_GENERIC)?;
 
     // Send panic command request to current TA
     let req = TeeRequest::Panic { panic_code };

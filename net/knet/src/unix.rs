@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use enum_dispatch::enum_dispatch;
 use hashbrown::HashMap;
 use kerrno::{KError, KResult};
-use kio::{IoBuf, Read, Write};
+use kio::{IoBuf, IoBufMut, Read, Write};
 use klazy::lazy_static;
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use ksync::Mutex;
@@ -24,7 +24,8 @@ use kvfs::{
 
 pub use self::{dgram::DgramTransport, stream::StreamTransport};
 use crate::{
-    AcceptOptions, RecvOptions, SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
+    AcceptOptions, ConnectOptions, RecvOptions, SendOptions, Shutdown, Socket, SocketAddrEx,
+    SocketOps,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
 };
 
@@ -44,12 +45,17 @@ pub trait UnixTransportOps: Configurable + Pollable + Send + Sync {
     fn listen(&self, _backlog: usize) -> KResult {
         Err(KError::OperationNotSupported)
     }
-    fn connect(&self, slot: &BindEntry, local_endpoint: &UnixAddr) -> KResult;
+    fn connect(
+        &self,
+        slot: &BindEntry,
+        local_endpoint: &UnixAddr,
+        options: ConnectOptions,
+    ) -> KResult;
 
     async fn accept(&self, nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)>;
 
     fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize>;
-    fn recv(&self, dst: impl Write, options: RecvOptions<'_>) -> KResult<usize>;
+    fn recv(&self, dst: impl Write + IoBufMut, options: RecvOptions<'_>) -> KResult<usize>;
 
     fn shutdown(&self, _how: Shutdown) -> KResult {
         Ok(())
@@ -102,7 +108,8 @@ struct PathBindEntry {
 }
 
 lazy_static! {
-    static ref ABSTRACT_BINDINGS: Mutex<HashMap<Arc<[u8]>, BindEntry>> = Mutex::new(HashMap::new());
+    static ref ABSTRACT_BINDINGS: Mutex<HashMap<Arc<[u8]>, Arc<BindEntry>>> =
+        Mutex::new(HashMap::new());
     static ref PATH_BINDINGS: Mutex<HashMap<usize, PathBindEntry>> = Mutex::new(HashMap::new());
 }
 
@@ -146,12 +153,12 @@ pub(crate) fn lookup_bind_entry<R>(
     match addr {
         UnixAddr::Unbound => Err(KError::InvalidInput),
         UnixAddr::Abstract(name) => {
-            let bindings = ABSTRACT_BINDINGS.lock();
-            if let Some(entry) = bindings.get(name) {
-                f(entry)
-            } else {
-                Err(KError::NotFound)
-            }
+            let entry = ABSTRACT_BINDINGS
+                .lock()
+                .get(name)
+                .cloned()
+                .ok_or(KError::ConnectionRefused)?;
+            f(entry.as_ref())
         }
         UnixAddr::Path(path) => {
             let fs_struct = kprocess::current_fs_context();
@@ -163,6 +170,7 @@ pub(crate) fn lookup_bind_entry<R>(
                 LookupFlags::follow(),
                 cred,
             )?;
+            drop(fs);
             loc.permission(Permission::MAY_WRITE, cred)?;
             if loc.getattr()?.mode.node_type() != NodeType::Socket {
                 return Err(KError::NotASocket);
@@ -192,13 +200,18 @@ fn lookup_or_create_bind_entry<R>(
     match addr {
         UnixAddr::Unbound => Err(KError::InvalidInput),
         UnixAddr::Abstract(name) => {
-            let mut bindings = ABSTRACT_BINDINGS.lock();
-            f(bindings.entry(name.clone()).or_default())
+            let entry = ABSTRACT_BINDINGS
+                .lock()
+                .entry(name.clone())
+                .or_insert_with(|| Arc::new(BindEntry::default()))
+                .clone();
+            f(entry.as_ref())
         }
         UnixAddr::Path(path) => {
             let fs_struct = kprocess::current_fs_context();
             let fs = fs_struct.lock();
             let loc = create_bind_location(fs.root(), fs.pwd(), path.as_ref(), mode, cred)?;
+            drop(fs);
             if loc.getattr()?.mode.node_type() != NodeType::Socket {
                 return Err(KError::NotASocket);
             }
@@ -279,19 +292,14 @@ impl SocketOps for UnixDomainSocket {
         self.bind_with_cred(local_endpoint, &cred, mode)
     }
 
-    fn connect(&self, remote_addr: SocketAddrEx) -> KResult {
+    fn connect(&self, remote_addr: SocketAddrEx, options: ConnectOptions) -> KResult {
         let remote_addr = remote_addr.into_unix()?;
         let local_endpoint = self.local_endpoint.lock().clone();
-        let mut peer_guard = self.peer_endpoint.lock();
-        if matches!(&*peer_guard, UnixAddr::Unbound) {
-            let cred = kprocess::current_cred();
-            lookup_bind_entry(&remote_addr, &cred, |slot| {
-                self.transport.connect(slot, &local_endpoint)
-            })?;
-            *peer_guard = remote_addr;
-        } else {
-            return Err(KError::InvalidInput);
-        }
+        let cred = kprocess::current_cred();
+        lookup_bind_entry(&remote_addr, &cred, |slot| {
+            self.transport.connect(slot, &local_endpoint, options)
+        })?;
+        *self.peer_endpoint.lock() = remote_addr;
         Ok(())
     }
 
@@ -313,7 +321,7 @@ impl SocketOps for UnixDomainSocket {
         self.transport.send(src, options)
     }
 
-    fn recv(&self, dst: impl Write, options: RecvOptions<'_>) -> KResult<usize> {
+    fn recv(&self, dst: impl Write + IoBufMut, options: RecvOptions<'_>) -> KResult<usize> {
         self.transport.recv(dst, options)
     }
 
@@ -341,5 +349,42 @@ impl Pollable for UnixDomainSocket {
         events: IoEvents,
     ) -> Result<(), PollRegisterError> {
         self.transport.register(context, events)
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use alloc::sync::Arc;
+
+    use kcred::Cred;
+    use kerrno::KError;
+    use unittest::{assert_eq, def_test};
+
+    use super::{ABSTRACT_BINDINGS, BindEntry, UnixAddr, lookup_bind_entry};
+
+    #[def_test]
+    fn unix_missing_abstract_address_returns_connection_refused() {
+        let addr = UnixAddr::Abstract(Arc::from(&b"xkernel-missing-abstract-socket"[..]));
+
+        assert_eq!(
+            lookup_bind_entry(&addr, &Cred::root(), |_| Ok(())),
+            Err(KError::ConnectionRefused)
+        );
+    }
+
+    #[def_test(serial)]
+    fn unix_abstract_lookup_releases_registry_before_callback() {
+        let name: Arc<[u8]> = Arc::from(&b"xkernel-abstract-lock-snapshot"[..]);
+        let addr = UnixAddr::Abstract(name.clone());
+        ABSTRACT_BINDINGS
+            .lock()
+            .insert(name.clone(), Arc::new(BindEntry::default()));
+
+        let result = lookup_bind_entry(&addr, &Cred::root(), |_| {
+            Ok(ABSTRACT_BINDINGS.try_lock().is_some())
+        });
+
+        ABSTRACT_BINDINGS.lock().remove(&name);
+        assert_eq!(result, Ok(true));
     }
 }

@@ -16,7 +16,7 @@ use kerrno::{KError, KResult, LinuxError};
 #[cfg(feature = "vsock")]
 use knet::vsock::{VsockSocket, VsockStreamTransport};
 use knet::{
-    AcceptOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
+    AcceptOptions, ConnectOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
     netlink::NetlinkSocket,
     packet::{PacketSocket, PacketSocketKind},
     raw::{IpProtocol, IpVersion, RawSocket},
@@ -138,13 +138,14 @@ pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<
 pub fn sys_connect(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<isize> {
     let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
 
-    socket_from_fd(fd)?.connect(addr).map_err(|e| {
-        if e == KError::WouldBlock {
-            KError::InProgress
-        } else {
-            e
-        }
-    })?;
+    let file = kprocess::current_resources().get_file(fd)?;
+    let socket = sock_from_file(&file)?;
+    socket.connect(
+        addr,
+        ConnectOptions {
+            nonblocking: file.is_nonblocking(),
+        },
+    )?;
 
     Ok(0)
 }

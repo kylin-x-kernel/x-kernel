@@ -3,197 +3,37 @@
 // See LICENSES for license details.
 
 //! Unix stream socket transport.
+
+mod channel;
+mod listener;
+
 use alloc::{boxed::Box, sync::Arc};
-use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use core::sync::atomic::Ordering;
 
 use async_trait::async_trait;
 use kerrno::{KError, KResult, LinuxError};
-use kio::{IoBuf, Read, Write};
-use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
-use kspin::SpinNoPreempt;
+use kio::{IoBuf, IoBufMut, Read, Write};
+use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use ksync::Mutex;
-use ringbuf::{
-    HeapCons, HeapProd, HeapRb,
-    traits::{Consumer, Observer, Producer, Split},
-};
+use ringbuf::traits::{Consumer, Observer, Producer};
 
+pub(crate) use self::listener::Bind;
+use self::{
+    channel::{Channel, StreamEndpoint},
+    listener::{ConnRequest, ListenerQueue},
+};
 use crate::{
-    RecvOptions, SendOptions, Shutdown,
+    ConnectOptions, RecvOptions, SendOptions, Shutdown,
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption, UnixCredentials},
     unix::{UnixAddr, UnixTransport, UnixTransportOps},
 };
 
-const STREAM_BUF_BYTES: usize = 64 * 1024;
-const STREAM_WRITABLE_MAX_OCCUPIED_BYTES: usize = STREAM_BUF_BYTES / 4;
-
-fn is_stream_writable(occupied_bytes: usize) -> bool {
-    occupied_bytes <= STREAM_WRITABLE_MAX_OCCUPIED_BYTES
-}
-
-fn new_ring_pair() -> (HeapProd<u8>, HeapCons<u8>) {
-    let rb = HeapRb::new(STREAM_BUF_BYTES);
-    rb.split()
-}
-
-fn finish_send_on_error(total: usize, error: KError) -> KResult<usize> {
-    if total > 0 { Ok(total) } else { Err(error) }
-}
-
-#[derive(Default)]
-struct StreamPollSets {
-    readable: PollSet,
-    writable: PollSet,
-    state: PollSet,
-}
-
-impl StreamPollSets {
-    fn register(
-        &self,
-        context: &mut PollContext<'_>,
-        events: IoEvents,
-    ) -> Result<(), PollRegisterError> {
-        let has_read_events =
-            events.intersects(IoEvents::IN | IoEvents::RDNORM | IoEvents::RDBAND | IoEvents::RDHUP);
-        let has_write_events =
-            events.intersects(IoEvents::OUT | IoEvents::WRNORM | IoEvents::WRBAND);
-        if has_read_events {
-            context.register(&self.readable)?;
-        }
-        if has_write_events {
-            context.register(&self.writable)?;
-        }
-        if !has_read_events && !has_write_events && events.intersects(IoEvents::ERR | IoEvents::HUP)
-        {
-            context.register(&self.state)?;
-        }
-        Ok(())
-    }
-
-    fn wake_state_change(&self) {
-        self.readable.wake();
-        self.writable.wake();
-        self.state.wake();
-    }
-}
-
-#[derive(Default)]
-struct StreamEndpoint {
-    polls: StreamPollSets,
-    /// Orders data publication, shutdown, and EOF observation for this
-    /// endpoint's transmit direction.
-    tx_order: SpinNoPreempt<()>,
-    rx_closed: AtomicBool,
-    tx_closed: AtomicBool,
-    is_listening: AtomicBool,
-    socket_error: AtomicI32,
-}
-
-fn new_duplex_channel(
-    client_endpoint: Arc<StreamEndpoint>,
-    server_endpoint: Arc<StreamEndpoint>,
-    pid: u32,
-) -> (Channel, Channel) {
-    let (client_tx, server_rx) = new_ring_pair();
-    let (server_tx, client_rx) = new_ring_pair();
-    (
-        Channel {
-            tx: client_tx,
-            rx: client_rx,
-            endpoint: client_endpoint.clone(),
-            peer_endpoint: server_endpoint.clone(),
-            peer_pid: pid,
-        },
-        Channel {
-            tx: server_tx,
-            rx: server_rx,
-            endpoint: server_endpoint,
-            peer_endpoint: client_endpoint,
-            peer_pid: pid,
-        },
-    )
-}
-
-struct Channel {
-    tx: HeapProd<u8>,
-    rx: HeapCons<u8>,
-    endpoint: Arc<StreamEndpoint>,
-    peer_endpoint: Arc<StreamEndpoint>,
-    peer_pid: u32,
-}
-
-impl Drop for Channel {
-    fn drop(&mut self) {
-        let (is_rx_changed, has_unread_input) = {
-            let _tx_order = self.peer_endpoint.tx_order.lock();
-            (
-                !self.endpoint.rx_closed.swap(true, Ordering::AcqRel),
-                self.rx.occupied_len() > 0,
-            )
-        };
-        let is_tx_changed = {
-            let _tx_order = self.endpoint.tx_order.lock();
-            !self.endpoint.tx_closed.swap(true, Ordering::AcqRel)
-        };
-        if has_unread_input {
-            self.peer_endpoint
-                .socket_error
-                .store(LinuxError::ECONNRESET.into_raw(), Ordering::Release);
-        }
-        if is_rx_changed || is_tx_changed || has_unread_input {
-            self.endpoint.polls.wake_state_change();
-            self.peer_endpoint.polls.wake_state_change();
-        }
-    }
-}
-
-pub struct Bind {
-    /// New connections are sent to this channel.
-    accept_tx: async_channel::Sender<ConnRequest>,
-    listener_endpoint: Arc<StreamEndpoint>,
-    pid: u32,
-}
-impl Bind {
-    fn connect(
-        &self,
-        client_endpoint: Arc<StreamEndpoint>,
-        local_addr: UnixAddr,
-        pid: u32,
-    ) -> KResult<Channel> {
-        if !self.listener_endpoint.is_listening.load(Ordering::Acquire)
-            || self.listener_endpoint.rx_closed.load(Ordering::Acquire)
-        {
-            return Err(KError::ConnectionRefused);
-        }
-        let server_endpoint = Arc::new(StreamEndpoint::default());
-        let (mut client_chan, mut server_chan) =
-            new_duplex_channel(client_endpoint, server_endpoint, 0);
-        client_chan.peer_pid = self.pid;
-        server_chan.peer_pid = pid;
-        self.accept_tx
-            .try_send(ConnRequest {
-                channel: server_chan,
-                addr: local_addr,
-                pid,
-            })
-            .map_err(|_| KError::ConnectionRefused)?;
-        self.listener_endpoint.polls.readable.wake();
-        Ok(client_chan)
-    }
-}
-
-struct ConnRequest {
-    channel: Channel,
-    addr: UnixAddr,
-    pid: u32,
-}
-
 pub struct StreamTransport {
     channel: Mutex<Option<Channel>>,
-    accept_rx: Mutex<Option<async_channel::Receiver<ConnRequest>>>,
-    /// Handle to the BindEntry's stream slot. Set when this transport is a
-    /// listener (bind() was called). On drop, the slot is cleared so the
-    /// Bind — and its pending ConnRequests — are released promptly.
+    listener: Mutex<Option<Arc<ListenerQueue>>>,
+    /// Handle to the `BindEntry` stream slot. The slot is cleared on drop so
+    /// stale addresses refuse new connections and pending requests are freed.
     bind_slot: Mutex<Option<Arc<Mutex<Option<Bind>>>>>,
     endpoint: Arc<StreamEndpoint>,
     options: GeneralOptions,
@@ -211,7 +51,7 @@ impl StreamTransport {
             .unwrap_or_default();
         StreamTransport {
             channel: Mutex::new(channel),
-            accept_rx: Mutex::new(None),
+            listener: Mutex::new(None),
             bind_slot: Mutex::new(None),
             endpoint,
             options: GeneralOptions::default(),
@@ -222,7 +62,7 @@ impl StreamTransport {
     pub fn new_pair(pid: u32) -> (Self, Self) {
         let endpoint1 = Arc::new(StreamEndpoint::default());
         let endpoint2 = Arc::new(StreamEndpoint::default());
-        let (chan1, chan2) = new_duplex_channel(endpoint1, endpoint2, pid);
+        let (chan1, chan2) = channel::new_duplex_channel(endpoint1, endpoint2, pid);
         let transport1 = StreamTransport::new_channel(Some(chan1), pid);
         let transport2 = StreamTransport::new_channel(Some(chan2), pid);
         (transport1, transport2)
@@ -243,7 +83,7 @@ impl Configurable for StreamTransport {
 
         match opt {
             O::SendBuffer(size) => {
-                **size = STREAM_BUF_BYTES;
+                **size = channel::STREAM_BUF_BYTES;
             }
             O::PassCredentials(_) => {}
             O::PeerCredentials(cred) => {
@@ -276,74 +116,100 @@ impl Configurable for StreamTransport {
 #[async_trait]
 impl UnixTransportOps for StreamTransport {
     fn bind(&self, entry: &super::BindEntry, _local_addr: &UnixAddr) -> KResult<()> {
-        // Clone the Arc handle so we can store it for cleanup on drop.
+        let channel = self.channel.lock();
+        if channel.is_some() {
+            return Err(KError::InvalidInput);
+        }
+        let mut listener_guard = self.listener.lock();
+        if listener_guard.is_some() {
+            return Err(KError::InvalidInput);
+        }
         let bind_slot_handle = entry.stream.clone();
         let mut slot = entry.stream.lock();
         if slot.is_some() {
             return Err(KError::AddrInUse);
         }
-        let mut guard = self.accept_rx.lock();
-        if guard.is_some() {
-            return Err(KError::InvalidInput);
-        }
-        let (tx, rx) = async_channel::unbounded();
+        let listener = Arc::new(ListenerQueue::new(self.endpoint.clone()));
         *slot = Some(Bind {
-            accept_tx: tx,
-            listener_endpoint: self.endpoint.clone(),
+            listener: listener.clone(),
             pid: self.pid,
         });
         drop(slot);
-        *guard = Some(rx);
+        *listener_guard = Some(listener);
+        drop(listener_guard);
+        drop(channel);
         *self.bind_slot.lock() = Some(bind_slot_handle);
         self.endpoint.polls.wake_state_change();
         Ok(())
     }
 
-    fn listen(&self, _backlog: usize) -> KResult<()> {
-        if self.channel.lock().is_some() || self.accept_rx.lock().is_none() {
+    fn listen(&self, backlog: usize) -> KResult<()> {
+        let channel = self.channel.lock();
+        if channel.is_some() {
             return Err(KError::InvalidInput);
         }
-        if !self.endpoint.is_listening.swap(true, Ordering::AcqRel) {
-            self.endpoint.polls.wake_state_change();
-        }
+        let listener = self.listener.lock().clone().ok_or(KError::InvalidInput)?;
+        let (became_listening, capacity_increased) = listener.configure_listen(backlog);
+        drop(channel);
+        listener.notify_listen_change(became_listening, capacity_increased);
         Ok(())
     }
 
-    fn connect(&self, slot: &super::BindEntry, local_addr: &UnixAddr) -> KResult<()> {
-        let mut guard = self.channel.lock();
-        if guard.is_some() {
+    fn connect(
+        &self,
+        slot: &super::BindEntry,
+        local_addr: &UnixAddr,
+        options: ConnectOptions,
+    ) -> KResult<()> {
+        let bind = slot
+            .stream
+            .lock()
+            .as_ref()
+            .cloned()
+            .ok_or(KError::ConnectionRefused)?;
+        let is_nonblocking = self.options.nonblocking() || options.nonblocking;
+        let reservation = bind
+            .listener
+            .reserve(is_nonblocking, self.options.send_timeout())?;
+
+        let mut channel = self.channel.lock();
+        if channel.is_some() {
             return Err(KError::AlreadyConnected);
         }
-        *guard = Some(
-            slot.stream
-                .lock()
-                .as_ref()
-                .ok_or(KError::NotConnected)?
-                .connect(self.endpoint.clone(), local_addr.clone(), self.pid)?,
-        );
+        if self
+            .listener
+            .lock()
+            .as_ref()
+            .is_some_and(|listener| listener.is_listening())
+        {
+            return Err(KError::InvalidInput);
+        }
+
+        let server_endpoint = Arc::new(StreamEndpoint::default());
+        let (mut client_channel, mut server_channel) =
+            channel::new_duplex_channel(self.endpoint.clone(), server_endpoint, 0);
+        client_channel.peer_pid = bind.pid;
+        server_channel.peer_pid = self.pid;
+        let commit_result = reservation.commit(ConnRequest {
+            channel: server_channel,
+            addr: local_addr.clone(),
+            pid: self.pid,
+        });
+        if let Err(error) = commit_result {
+            drop(channel);
+            bind.listener.notify_capacity_available();
+            return Err(error);
+        }
+        *channel = Some(client_channel);
+        drop(channel);
+        bind.listener.notify_request_available();
         self.endpoint.polls.wake_state_change();
         Ok(())
     }
 
     async fn accept(&self, nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)> {
-        if !self.endpoint.is_listening.load(Ordering::Acquire) {
-            return Err(KError::InvalidInput);
-        }
-        let rx = {
-            let guard = self.accept_rx.lock();
-            let Some(rx) = guard.as_ref() else {
-                return Err(KError::NotConnected);
-            };
-            rx.clone()
-        };
-        let request = if nonblocking {
-            rx.try_recv().map_err(|err| match err {
-                async_channel::TryRecvError::Empty => KError::WouldBlock,
-                async_channel::TryRecvError::Closed => KError::ConnectionReset,
-            })?
-        } else {
-            rx.recv().await.map_err(|_| KError::ConnectionReset)?
-        };
+        let listener = self.listener.lock().clone().ok_or(KError::InvalidInput)?;
+        let request = listener.accept(nonblocking).await?;
         let ConnRequest {
             channel,
             addr: peer_addr,
@@ -421,7 +287,8 @@ impl UnixTransportOps for StreamTransport {
             })
     }
 
-    fn recv(&self, mut dst: impl Write, options: RecvOptions) -> KResult<usize> {
+    fn recv(&self, mut dst: impl Write + IoBufMut, options: RecvOptions) -> KResult<usize> {
+        let is_zero_length = dst.remaining_mut() == 0;
         self.options
             .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
                 let mut guard = self.channel.lock();
@@ -430,6 +297,9 @@ impl UnixTransportOps for StreamTransport {
                 };
 
                 let occupied_before = chan.rx.occupied_len();
+                if is_zero_length && occupied_before > 0 {
+                    return Ok(0);
+                }
                 let count = {
                     let (left, right) = chan.rx.as_slices();
                     let mut count = dst.write(left)?;
@@ -444,7 +314,9 @@ impl UnixTransportOps for StreamTransport {
                 };
                 if count > 0 {
                     let occupied_after = occupied_before - count;
-                    if !is_stream_writable(occupied_before) && is_stream_writable(occupied_after) {
+                    if !channel::is_stream_writable(occupied_before)
+                        && channel::is_stream_writable(occupied_after)
+                    {
                         chan.peer_endpoint.polls.writable.wake();
                     }
                     return Ok(count);
@@ -470,11 +342,13 @@ impl UnixTransportOps for StreamTransport {
 
     fn shutdown(&self, how: Shutdown) -> KResult<()> {
         let channel = self.channel.lock();
-        let bind_slot = how
+        let listener = how
             .has_read()
-            .then(|| self.bind_slot.lock().clone())
+            .then(|| self.listener.lock().clone())
             .flatten();
-        let bind_guard = bind_slot.as_ref().map(|slot| slot.lock());
+        let is_listener_shutdown_changed = listener
+            .as_ref()
+            .is_some_and(|listener| listener.mark_receive_shutdown());
         let is_rx_changed = if how.has_read() {
             let _tx_order = channel
                 .as_ref()
@@ -483,17 +357,12 @@ impl UnixTransportOps for StreamTransport {
         } else {
             false
         };
-        drop(bind_guard);
         let is_tx_changed = if how.has_write() {
             let _tx_order = self.endpoint.tx_order.lock();
             !self.endpoint.tx_closed.swap(true, Ordering::AcqRel)
         } else {
             false
         };
-        if !is_rx_changed && !is_tx_changed {
-            return Ok(());
-        }
-
         let peer_endpoint = channel
             .as_ref()
             .map(|channel| channel.peer_endpoint.clone());
@@ -510,6 +379,13 @@ impl UnixTransportOps for StreamTransport {
             },
         );
         drop(channel);
+
+        if is_listener_shutdown_changed && let Some(listener) = listener.as_ref() {
+            listener.notify_shutdown();
+        }
+        if !is_rx_changed && !is_tx_changed {
+            return Ok(());
+        }
 
         if is_hung_up {
             self.endpoint.polls.wake_state_change();
@@ -534,6 +410,10 @@ impl UnixTransportOps for StreamTransport {
     }
 }
 
+fn finish_send_on_error(total: usize, error: KError) -> KResult<usize> {
+    if total > 0 { Ok(total) } else { Err(error) }
+}
+
 impl Pollable for StreamTransport {
     fn poll(&self) -> IoEvents {
         let mut events = IoEvents::empty();
@@ -552,7 +432,7 @@ impl Pollable for StreamTransport {
                 (
                     self.endpoint.tx_closed.load(Ordering::Acquire),
                     chan.peer_endpoint.rx_closed.load(Ordering::Acquire) || !chan.tx.read_is_held(),
-                    !chan.tx.read_is_held() || is_stream_writable(chan.tx.occupied_len()),
+                    !chan.tx.read_is_held() || channel::is_stream_writable(chan.tx.occupied_len()),
                 )
             };
             let is_receive_shutdown = is_rx_closed || is_peer_tx_closed;
@@ -565,11 +445,12 @@ impl Pollable for StreamTransport {
             );
             events.set(IoEvents::RDHUP, is_receive_shutdown);
             events.set(IoEvents::HUP, is_receive_shutdown && is_send_shutdown);
-        } else if let Some(accept_rx) = self.accept_rx.lock().as_ref() {
-            if self.endpoint.is_listening.load(Ordering::Acquire) {
+        } else if let Some(listener) = self.listener.lock().as_ref() {
+            let (is_listening, has_pending) = listener.poll_state();
+            if is_listening {
                 let is_rx_closed = self.endpoint.rx_closed.load(Ordering::Acquire);
                 let is_tx_closed = self.endpoint.tx_closed.load(Ordering::Acquire);
-                events.set(IoEvents::IN, is_rx_closed || !accept_rx.is_empty());
+                events.set(IoEvents::IN, is_rx_closed || has_pending);
                 events.set(IoEvents::RDHUP, is_rx_closed);
                 events.set(IoEvents::HUP, is_rx_closed && is_tx_closed);
             } else {
@@ -592,9 +473,10 @@ impl Pollable for StreamTransport {
 
 impl Drop for StreamTransport {
     fn drop(&mut self) {
-        // If this transport was a listener, release the Bind from the
-        // BindEntry so pending ConnRequests (and their ring buffers) are
-        // freed immediately instead of lingering until the inode is unlinked.
+        let listener = self.listener.lock().take();
+        if let Some(listener) = listener.as_ref() {
+            listener.close();
+        }
         if let Some(slot) = self.bind_slot.lock().take() {
             *slot.lock() = None;
         }
@@ -623,18 +505,21 @@ mod tests {
     };
 
     use kerrno::{KError, KResult, LinuxError};
-    use kio::Write;
+    use kio::{IoBufMut, Write};
     use kpoll::{IoEvents, PollRegistrations, PollSet, Pollable};
     use ksync::Mutex;
+    use ktask::future::block_on;
+    use ktime_types::TimeSpan;
     use ringbuf::traits::Observer;
     use unittest::{assert, assert_eq, def_test};
 
     use super::{
-        STREAM_BUF_BYTES, STREAM_WRITABLE_MAX_OCCUPIED_BYTES, StreamTransport, UnixTransportOps,
+        StreamTransport, UnixTransportOps,
+        channel::{STREAM_BUF_BYTES, STREAM_WRITABLE_MAX_OCCUPIED_BYTES},
     };
     use crate::{
-        RecvOptions, SendFlags, SendOptions, Shutdown,
-        options::{Configurable, GetSocketOption},
+        ConnectOptions, RecvFlags, RecvOptions, SendFlags, SendOptions, Shutdown,
+        options::{Configurable, GetSocketOption, SetSocketOption},
         unix::{BindEntry, UnixAddr},
     };
 
@@ -673,6 +558,12 @@ mod tests {
 
         fn flush(&mut self) -> KResult<()> {
             Ok(())
+        }
+    }
+
+    impl IoBufMut for PausingWriter {
+        fn remaining_mut(&self) -> usize {
+            usize::from(self.byte.is_none())
         }
     }
 
@@ -824,6 +715,27 @@ mod tests {
             Err(KError::WouldBlock)
         ));
         assert_eq!(left.send(&b""[..], nonblocking()), Ok(0));
+    }
+
+    #[def_test]
+    fn unix_stream_zero_length_recv_preserves_pending_data() {
+        let (left, right) = StreamTransport::new_pair(1);
+        let nonblocking = || RecvOptions {
+            flags: RecvFlags::DONT_WAIT,
+            ..RecvOptions::default()
+        };
+        let mut empty = [];
+
+        assert_eq!(
+            right.recv(&mut empty[..], nonblocking()),
+            Err(KError::WouldBlock)
+        );
+        assert_eq!(left.send(&b"x"[..], SendOptions::default()), Ok(1));
+        assert_eq!(right.recv(&mut empty[..], nonblocking()), Ok(0));
+
+        let mut byte = [0_u8; 1];
+        assert_eq!(right.recv(&mut byte[..], nonblocking()), Ok(1));
+        assert_eq!(byte, [b'x']);
     }
 
     #[def_test]
@@ -1109,8 +1021,245 @@ mod tests {
         listener.listen(1).unwrap();
 
         let client_read = register(&client, IoEvents::IN);
-        client.connect(&entry, &UnixAddr::Unbound).unwrap();
+        client
+            .connect(&entry, &UnixAddr::Unbound, ConnectOptions::default())
+            .unwrap();
         assert_eq!(client_read.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[def_test]
+    fn unix_stream_backlog_limits_pending_connections() {
+        let listener = StreamTransport::new(1);
+        let first = StreamTransport::new(2);
+        let second = StreamTransport::new(3);
+        let third = StreamTransport::new(4);
+        let entry = BindEntry::default();
+        let nonblocking = ConnectOptions { nonblocking: true };
+
+        listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+        listener.listen(1).unwrap();
+        first
+            .connect(&entry, &UnixAddr::Unbound, nonblocking)
+            .unwrap();
+        assert_eq!(
+            first.connect(&entry, &UnixAddr::Unbound, nonblocking),
+            Err(KError::AlreadyConnected)
+        );
+        second
+            .connect(&entry, &UnixAddr::Unbound, nonblocking)
+            .unwrap();
+        assert_eq!(
+            third.connect(&entry, &UnixAddr::Unbound, nonblocking),
+            Err(KError::WouldBlock)
+        );
+
+        let accepted = block_on(listener.accept(true)).unwrap();
+        third
+            .connect(&entry, &UnixAddr::Unbound, nonblocking)
+            .unwrap();
+        drop(accepted);
+    }
+
+    #[def_test]
+    fn unix_stream_connect_honors_send_timeout_when_backlog_is_full() {
+        let listener = StreamTransport::new(1);
+        let queued = StreamTransport::new(2);
+        let waiting = StreamTransport::new(3);
+        let entry = BindEntry::default();
+
+        listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+        listener.listen(0).unwrap();
+        queued
+            .connect(&entry, &UnixAddr::Unbound, ConnectOptions::default())
+            .unwrap();
+
+        let send_timeout = TimeSpan::from_nanos(1);
+        waiting
+            .set_option(SetSocketOption::SendTimeout(&send_timeout))
+            .unwrap();
+        assert_eq!(
+            waiting.connect(&entry, &UnixAddr::Unbound, ConnectOptions::default()),
+            Err(KError::WouldBlock)
+        );
+    }
+
+    #[def_test(serial)]
+    fn unix_stream_accept_releases_blocked_connector() {
+        let listener = Arc::new(StreamTransport::new(1));
+        let queued_client = StreamTransport::new(2);
+        let waiting_client = Arc::new(StreamTransport::new(3));
+        let entry = Arc::new(BindEntry::default());
+
+        listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+        listener.listen(0).unwrap();
+        queued_client
+            .connect(&entry, &UnixAddr::Unbound, ConnectOptions::default())
+            .unwrap();
+
+        let connect_result = Arc::new(Mutex::new(None));
+        let connect_task = ktask::spawn({
+            let waiting_client = waiting_client.clone();
+            let entry = entry.clone();
+            let connect_result = connect_result.clone();
+            move || {
+                *connect_result.lock() = Some(waiting_client.connect(
+                    &entry,
+                    &UnixAddr::Unbound,
+                    ConnectOptions::default(),
+                ));
+            }
+        });
+        let connector_is_waiting = wait_until(|| connect_task.state() == ktask::TaskState::Blocked);
+        if !connector_is_waiting {
+            listener.shutdown(Shutdown::Read).unwrap();
+            connect_task.join();
+        }
+        assert!(connector_is_waiting);
+
+        let first_accepted = block_on(listener.accept(false)).unwrap();
+        connect_task.join();
+        assert_eq!(connect_result.lock().take().unwrap(), Ok(()));
+        let second_accepted = block_on(listener.accept(true)).unwrap();
+        drop((first_accepted, second_accepted));
+    }
+
+    #[def_test]
+    fn unix_stream_repeated_listen_updates_backlog() {
+        let listener = StreamTransport::new(1);
+        let first = StreamTransport::new(2);
+        let second = StreamTransport::new(3);
+        let entry = BindEntry::default();
+        let nonblocking = ConnectOptions { nonblocking: true };
+
+        listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+        listener.listen(0).unwrap();
+        first
+            .connect(&entry, &UnixAddr::Unbound, nonblocking)
+            .unwrap();
+        assert_eq!(
+            second.connect(&entry, &UnixAddr::Unbound, nonblocking),
+            Err(KError::WouldBlock)
+        );
+
+        listener.listen(1).unwrap();
+        second
+            .connect(&entry, &UnixAddr::Unbound, nonblocking)
+            .unwrap();
+    }
+
+    #[def_test]
+    fn unix_stream_listening_socket_cannot_connect() {
+        let listener = StreamTransport::new(1);
+        let entry = BindEntry::default();
+
+        listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+        listener.listen(1).unwrap();
+        assert_eq!(
+            listener.connect(&entry, &UnixAddr::Unbound, ConnectOptions::default()),
+            Err(KError::InvalidInput)
+        );
+        assert_eq!(
+            block_on(listener.accept(true)).map(|_| ()),
+            Err(KError::WouldBlock)
+        );
+    }
+
+    #[def_test]
+    fn unix_stream_stale_listener_returns_connection_refused() {
+        let entry = BindEntry::default();
+        {
+            let listener = StreamTransport::new(1);
+            listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+            listener.listen(1).unwrap();
+        }
+
+        let client = StreamTransport::new(2);
+        assert_eq!(
+            client.connect(&entry, &UnixAddr::Unbound, ConnectOptions::default()),
+            Err(KError::ConnectionRefused)
+        );
+    }
+
+    #[def_test(serial)]
+    fn unix_stream_listener_shutdown_wakes_connect_and_rejects_empty_accept() {
+        let listener = Arc::new(StreamTransport::new(1));
+        let queued_client = StreamTransport::new(2);
+        let waiting_client = Arc::new(StreamTransport::new(3));
+        let entry = Arc::new(BindEntry::default());
+
+        listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+        listener.listen(0).unwrap();
+        queued_client
+            .connect(&entry, &UnixAddr::Unbound, ConnectOptions::default())
+            .unwrap();
+
+        let connect_result = Arc::new(Mutex::new(None));
+        let connect_task = ktask::spawn({
+            let waiting_client = waiting_client.clone();
+            let entry = entry.clone();
+            let connect_result = connect_result.clone();
+            move || {
+                *connect_result.lock() = Some(waiting_client.connect(
+                    &entry,
+                    &UnixAddr::Unbound,
+                    ConnectOptions::default(),
+                ));
+            }
+        });
+        let connector_is_waiting = wait_until(|| connect_task.state() == ktask::TaskState::Blocked);
+        if !connector_is_waiting {
+            listener.shutdown(Shutdown::Read).unwrap();
+            connect_task.join();
+        }
+        assert!(connector_is_waiting);
+
+        listener.shutdown(Shutdown::Read).unwrap();
+        connect_task.join();
+        assert_eq!(
+            connect_result.lock().take().unwrap(),
+            Err(KError::ConnectionRefused)
+        );
+
+        let accepted = block_on(listener.accept(false)).unwrap();
+        drop(accepted);
+        assert_eq!(
+            block_on(listener.accept(false)).map(|_| ()),
+            Err(KError::InvalidInput)
+        );
+        assert_eq!(
+            block_on(listener.accept(true)).map(|_| ()),
+            Err(KError::WouldBlock)
+        );
+    }
+
+    #[def_test(serial)]
+    fn unix_stream_listener_shutdown_wakes_blocked_accept() {
+        let listener = Arc::new(StreamTransport::new(1));
+        let entry = BindEntry::default();
+        listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+        listener.listen(1).unwrap();
+
+        let accept_result = Arc::new(Mutex::new(None));
+        let accept_task = ktask::spawn({
+            let listener = listener.clone();
+            let accept_result = accept_result.clone();
+            move || {
+                *accept_result.lock() = Some(block_on(listener.accept(false)).map(|_| ()));
+            }
+        });
+        let acceptor_is_waiting = wait_until(|| accept_task.state() == ktask::TaskState::Blocked);
+        if !acceptor_is_waiting {
+            listener.shutdown(Shutdown::Read).unwrap();
+            accept_task.join();
+        }
+        assert!(acceptor_is_waiting);
+
+        listener.shutdown(Shutdown::Read).unwrap();
+        accept_task.join();
+        assert_eq!(
+            accept_result.lock().take().unwrap(),
+            Err(KError::InvalidInput)
+        );
     }
 
     #[def_test]
@@ -1122,7 +1271,9 @@ mod tests {
         listener.listen(1).unwrap();
         let listener_read = register(&listener, IoEvents::IN);
 
-        client.connect(&entry, &UnixAddr::Unbound).unwrap();
+        client
+            .connect(&entry, &UnixAddr::Unbound, ConnectOptions::default())
+            .unwrap();
         assert_eq!(listener_read.0.load(Ordering::SeqCst), 1);
 
         listener.endpoint.polls.readable.wake();

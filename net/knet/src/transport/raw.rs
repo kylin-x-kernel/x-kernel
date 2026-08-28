@@ -23,7 +23,8 @@ use smoltcp::{
 };
 
 use crate::{
-    RecvFlags, RecvOptions, SERVICE, SOCKET_SET, SendOptions, Shutdown, SocketAddrEx, SocketOps,
+    ConnectOptions, RecvFlags, RecvOptions, SERVICE, SOCKET_SET, SendOptions, Shutdown,
+    SocketAddrEx, SocketOps,
     consts::{RAW_RX_BUF_LEN, RAW_TX_BUF_LEN},
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
@@ -178,7 +179,7 @@ impl SocketOps for RawSocket {
         Ok(())
     }
 
-    fn connect(&self, remote_addr: SocketAddrEx) -> KResult {
+    fn connect(&self, remote_addr: SocketAddrEx, _options: ConnectOptions) -> KResult {
         let remote_addr = remote_addr.into_ip()?;
         let remote = self.check_ip_version(remote_addr.ip().into())?;
         if self.local_addr.read().is_none() {

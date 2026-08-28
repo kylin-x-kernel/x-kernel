@@ -11,7 +11,7 @@ use alloc::{
 };
 
 use knet::{
-    RecvOptions, SendOptions, SocketAddrEx, SocketOps,
+    ConnectOptions, RecvOptions, SendOptions, SocketAddrEx, SocketOps,
     unix::{StreamTransport, UnixAddr, UnixDomainSocket},
 };
 use kprocess;
@@ -81,7 +81,9 @@ pub fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
     // Connect to dest TA via Unix socket
     let socket = UnixDomainSocket::new(StreamTransport::new(kprocess::current_user_thread().pid()));
     let remote_addr = SocketAddrEx::Unix(UnixAddr::Path(path.into()));
-    socket.connect(remote_addr).map_err(|_| TEE_ERROR_GENERIC)?;
+    socket
+        .connect(remote_addr, ConnectOptions::default())
+        .map_err(|_| TEE_ERROR_GENERIC)?;
 
     // Send open session request to dest TA
     let req = TeeRequest::OpenSession {
@@ -113,7 +115,9 @@ pub fn tee_ta_close_session(sess_id: SessionIdentity) -> TeeResult {
     let socket = UnixDomainSocket::new(StreamTransport::new(kprocess::current_user_thread().pid()));
     let path = ta_unix_socket_path(&sess_id.uuid)?;
     let remote_addr = SocketAddrEx::Unix(UnixAddr::Path(path.into()));
-    socket.connect(remote_addr).map_err(|_| TEE_ERROR_GENERIC)?;
+    socket
+        .connect(remote_addr, ConnectOptions::default())
+        .map_err(|_| TEE_ERROR_GENERIC)?;
 
     // Send close session request to dest TA
     let req = TeeRequest::CloseSession {
@@ -134,7 +138,9 @@ pub fn tee_ta_invoke_command(
     let socket = UnixDomainSocket::new(StreamTransport::new(kprocess::current_user_thread().pid()));
     let path = ta_unix_socket_path(&sess_id.uuid)?;
     let remote_addr = SocketAddrEx::Unix(UnixAddr::Path(path.into()));
-    socket.connect(remote_addr).map_err(|_| TEE_ERROR_GENERIC)?;
+    socket
+        .connect(remote_addr, ConnectOptions::default())
+        .map_err(|_| TEE_ERROR_GENERIC)?;
 
     // Send invoke command request to dest TA
     let req = TeeRequest::InvokeCommand {

@@ -8,12 +8,12 @@ use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use async_channel::TryRecvError;
 use async_trait::async_trait;
 use kerrno::{KError, KResult};
-use kio::{Read, Write};
+use kio::{IoBufMut, Read, Write};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::{Mutex, RwLock};
 
 use crate::{
-    AncillaryData, RecvFlags, RecvOptions, SendOptions, SocketAddrEx,
+    AncillaryData, ConnectOptions, RecvFlags, RecvOptions, SendOptions, SocketAddrEx,
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption, UnixCredentials},
     unix::{UnixAddr, UnixTransport, UnixTransportOps, lookup_bind_entry},
@@ -168,7 +168,12 @@ impl UnixTransportOps for DgramTransport {
         Ok(())
     }
 
-    fn connect(&self, slot: &super::BindEntry, _local_addr: &UnixAddr) -> KResult {
+    fn connect(
+        &self,
+        slot: &super::BindEntry,
+        _local_addr: &UnixAddr,
+        _options: ConnectOptions,
+    ) -> KResult {
         let mut guard = self.peer.write();
         if guard.is_some() {
             return Err(KError::AlreadyConnected);
@@ -220,7 +225,7 @@ impl UnixTransportOps for DgramTransport {
         Ok(len)
     }
 
-    fn recv(&self, mut dst: impl Write, mut options: RecvOptions) -> KResult<usize> {
+    fn recv(&self, mut dst: impl Write + IoBufMut, mut options: RecvOptions) -> KResult<usize> {
         self.options.recv_poller(self, move || {
             let mut guard = self.rx.lock();
             let Some((rx, _)) = guard.as_mut() else {

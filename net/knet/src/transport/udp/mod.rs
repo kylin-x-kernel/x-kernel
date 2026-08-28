@@ -48,7 +48,7 @@ mod tests {
         *,
     };
     use crate::{
-        RecvOptions, Shutdown, SocketAddrEx, SocketOps,
+        ConnectOptions, RecvOptions, Shutdown, SocketAddrEx, SocketOps,
         buf::{PacketBuf, PacketOwner},
         device::{LoopbackDevice, NetDevice},
         ip::{IpAddress, IpEndpoint, Ipv4Address},
@@ -111,7 +111,9 @@ mod tests {
         bind_udp_auto_pcb_for_test(socket.pcb.clone(), local, false).unwrap();
         socket.state().set_peer_endpoint(Some((remote, local.addr)));
 
-        socket.connect(SocketAddrEx::Unspecified).unwrap();
+        socket
+            .connect(SocketAddrEx::Unspecified, ConnectOptions::default())
+            .unwrap();
 
         assert_eq!(socket.state().local_endpoint(), None);
         assert_eq!(socket.state().peer_endpoint(), None);
@@ -136,7 +138,9 @@ mod tests {
         bind_udp_pcb(socket.pcb.clone(), local, false).unwrap();
         socket.state().set_peer_endpoint(Some((remote, local.addr)));
 
-        socket.connect(SocketAddrEx::Unspecified).unwrap();
+        socket
+            .connect(SocketAddrEx::Unspecified, ConnectOptions::default())
+            .unwrap();
 
         assert_eq!(socket.state().local_endpoint(), Some(local));
         assert_eq!(socket.state().peer_endpoint(), None);

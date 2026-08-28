@@ -23,8 +23,8 @@ use smoltcp::{
 };
 
 use crate::{
-    AcceptOptions, LISTEN_TABLE, RecvFlags, RecvOptions, SERVICE, SOCKET_SET, SendOptions,
-    Shutdown, Socket, SocketAddrEx, SocketOps,
+    AcceptOptions, ConnectOptions, LISTEN_TABLE, RecvFlags, RecvOptions, SERVICE, SOCKET_SET,
+    SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
     consts::{TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
@@ -342,7 +342,7 @@ impl SocketOps for TcpSocket {
             })
     }
 
-    fn connect(&self, remote_addr: SocketAddrEx) -> KResult {
+    fn connect(&self, remote_addr: SocketAddrEx, options: ConnectOptions) -> KResult {
         let remote_addr = remote_addr.into_ip()?;
         self.state
             .lock(State::Idle)
@@ -411,17 +411,30 @@ impl SocketOps for TcpSocket {
         ktask::yield_now();
 
         // Here our state must be `CONNECTING`, and only one thread can run here.
-        self.general.send_poller(self, || {
-            poll_interfaces();
-            let events = self.poll_connect();
-            if !events.contains(IoEvents::OUT) {
-                Err(KError::WouldBlock)
-            } else if self.state() == State::Connected {
-                Ok(())
-            } else {
-                Err(k_err_type!(ConnectionRefused, "connection refused"))
+        let is_nonblocking = self.general.nonblocking() || options.nonblocking;
+        let result = self
+            .general
+            .send_poller_with_nonblocking(self, is_nonblocking, || {
+                poll_interfaces();
+                let events = self.poll_connect();
+                if !events.contains(IoEvents::OUT) {
+                    Err(KError::WouldBlock)
+                } else if self.state() == State::Connected {
+                    Ok(())
+                } else {
+                    Err(k_err_type!(ConnectionRefused, "connection refused"))
+                }
+            });
+        match result {
+            Err(KError::WouldBlock) if is_nonblocking => {
+                // The one-shot nonblocking poll does not register a waker.
+                // Republish work so TCP keeps progressing after connect
+                // returns `EINPROGRESS`.
+                network_poller().notify(PollReason::Tx);
+                Err(KError::InProgress)
             }
-        })
+            _ => result,
+        }
     }
 
     fn listen(&self, backlog: usize) -> KResult {

@@ -21,7 +21,8 @@ use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::{Mutex, RwLock};
 
 use crate::{
-    RecvFlags, RecvOptions, SERVICE, SendOptions, Shutdown, SocketAddrEx, SocketOps,
+    ConnectOptions, RecvFlags, RecvOptions, SERVICE, SendOptions, Shutdown, SocketAddrEx,
+    SocketOps,
     buf::{PacketBuf, PacketType},
     device::LinkSendSnapshot,
     general::GeneralOptions,
@@ -357,7 +358,7 @@ impl SocketOps for PacketSocket {
         Ok(())
     }
 
-    fn connect(&self, _remote_addr: SocketAddrEx) -> KResult {
+    fn connect(&self, _remote_addr: SocketAddrEx, _options: ConnectOptions) -> KResult {
         Err(KError::OperationNotSupported)
     }
 
@@ -1140,7 +1141,10 @@ mod tests {
         let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_IP.to_be()).unwrap();
         let addr = SocketAddrEx::Packet(PacketAddr::new(ETH_P_IP.to_be(), 2));
 
-        assert_eq!(socket.connect(addr), Err(KError::OperationNotSupported));
+        assert_eq!(
+            socket.connect(addr, ConnectOptions::default()),
+            Err(KError::OperationNotSupported)
+        );
         assert_eq!(
             socket.peer_addr().err(),
             Some(KError::OperationNotSupported)
