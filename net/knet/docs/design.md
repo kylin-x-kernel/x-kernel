@@ -328,7 +328,7 @@ Loopback UDP 独立于 poller 执行权，发送路径在 BH 窗口内完成 xmi
 4. `Router::drain_rx_budgeted_into` 按 RX budget 从设备轮转拉取 `PacketBuf`，`next_rx_device` 在设备间保持公平并随设备删除修正。
 5. `IngressProcessor` 在 Router 和 smoltcp socket-set 锁外校验 IPv4 头、长度、校验和与本地目的地址，并完成 IPv4 分片重组。完整 UDP 数据报直接进入 crate 内 UDP PCB 分流，未命中 socket 的单播 UDP 触发 ICMPv4 Port Unreachable。
 6. TCP、raw IP、ICMP 和 IPv6 packet 保存在可复用 accepted batch 中。按 smoltcp socket-set、Router 的顺序取得两把锁后，`prepare_smoltcp_ingress` 更新 TCP listener 状态并将 batch 转入有界 smoltcp ingress queue；只有 control batch 时跳过 socket-set。锁竞争期间保留 raw、accepted 和 control batch，当前轮返回 `has_more`，后续轮次继续交接。
-7. `Service` 执行 `poll_maintenance`，按 RX budget 逐个调用 `poll_ingress_single`，并调用有界的 `poll_egress`。达到预算或时间边界后，剩余 ingress 保持 FIFO 顺序并进入后续轮次；`ListenTable::wake_touched_acceptors` 随后唤醒 accept 等待者。
+7. `Service` 执行 `poll_maintenance`，按 RX budget 逐个调用 `poll_ingress_single`，并调用有界的 `poll_egress`。达到预算或时间边界后，剩余 ingress 保持 FIFO 顺序并进入后续轮次；`ListenTable::refresh_acceptors` 随后刷新收到新报文或仍有 SYN child 的 listener，并唤醒已经可接受连接的等待者。等待中的 SYN child 不进入 `PollProgress::has_more`，后续推进仍由 RX、已有 ingress 或协议 timer 调度。
 8. `Router::dispatch_budgeted` 使用本轮剩余 TX budget 发送协议阶段新增的 packet，随后使用剩余 RX budget 再拉取一次设备队列。该尾部 RX 阶段让 loopback TCP/ICMP 完成 TX 与 smoltcp 交接，同时维持 assist 的单轮边界。
 9. Router、IngressProcessor、smoltcp socket-set 或 Interface 的共享 mutex 发生竞争时，poller 通过 `try_lock` 直接退让。`Service` 返回带 `has_more` 的进度，唯一执行者按原状态机归还执行权并安排后续轮次。
 10. `Interface::poll_at` 与 orphan `FIN_WAIT_2` deadline 共同决定下一次网络 deadline，`Service` 将其写入原子 deadline；`register_timer_callback(TIMER_SAMPLE_PERIOD)` 周期采样该值，到期后通过 `notify(PollReason::Timer)` 发布工作。尚未到期的 deadline 不进入 `PollProgress::has_more`。
@@ -400,7 +400,9 @@ Loopback UDP 独立于 poller 执行权，发送路径在 BH 窗口内完成 xmi
 - `LISTEN_TABLE` 用 `Mutex<HashMap<...>>` 管理 listener；每个 entry 的 `accept_poll`
   放在 entry 级 `Mutex` 之外，backlog 队列仍由该 `Mutex` 保护。`register_accept_waker`
   先无锁注册到 `accept_poll`，再短持锁做 readiness recheck，避免在队列锁内做
-  `Waker::clone` / `PollSet` 工作，同时保留 register-recheck。
+  `Waker::clone` / `PollSet` 工作，同时保留 register-recheck。poller 刷新收到新报文或
+  SYN 队列非空的 entry，确保 child 在后续 ingress 或 timer poll 中进入可接受状态后从
+  SYN 队列移入 accept 队列；`accept_poll` 唤醒发生在 entry 锁释放后。
 - TCP 状态转换使用 `StateLock` 的 atomic CAS，失败时返回当前状态。
 - socket option 和 shutdown 标志使用 atomics，跨线程读写只表达配置或关闭状态。
 - Unix stream 的 `channel: Mutex<Option<Channel>>` 串行化同一 endpoint 发起的 send、recv、shutdown 和 channel 释放。
@@ -481,7 +483,7 @@ polling waiter 也可能是该 source 的消费者。
 
 监听 socket 和 accepted child socket 分开管理。
 `ListenTable` 根据收到的 SYN 创建 child smoltcp socket，把待完成连接放入 backlog 队列。
-这个设计让 POSIX accept 语义集中在 knet 内部，代价是 listen table 必须 snoop TCP 首包并清理 aborted child。
+这个设计让 POSIX accept 语义集中在 knet 内部，代价是 listen table 必须 snoop TCP 首包、清理 aborted child，并在 child 保留于 SYN 队列期间随每次实际网络推进重新检查状态。SYN 队列本身不会请求连续 poll，协议 deadline 到期前不会形成空转。
 
 ### Unix stream 按 readiness 类别隔离 waiter
 

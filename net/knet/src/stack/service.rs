@@ -221,7 +221,7 @@ impl Service {
         drop(iface);
         let timer_has_more = has_immediate_timer_work(current, next_poll);
         self.update_poll_timeout(current, next_poll);
-        LISTEN_TABLE.wake_touched_acceptors(&mut sockets);
+        LISTEN_TABLE.refresh_acceptors(&mut sockets);
         drop(sockets);
 
         if has_reached_time_limit {

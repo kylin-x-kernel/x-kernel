@@ -210,6 +210,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 26. poller 锁竞争交接条件：持有全局推进权时，Router、IngressProcessor、smoltcp Interface 和 socket-set 只能通过 `try_lock` 获取；accepted batch 交接必须按 socket-set、Router 的顺序获取两把锁，只有 control batch 时跳过 socket-set；竞争必须返回 `has_more`。已经从设备取出的 raw batch、等待进入 smoltcp 的 accepted batch 和待发送 control batch 必须保留到成功交接，TCP listener preparation 与 accepted batch 入队必须处于同一次成功交接中。
 27. loopback UDP 交付边界：loopback xmit 必须在关闭 BH 前给完整 IPv4 UDP 盖戳，再于 `local_bh_disable` 下把同一 `PacketBuf` 放入共享 `NET_RX_QUEUE` 的 `pending_udp` 并 raise `NetRx`；`NetRx` 只取出 `pending_udp` 中的已盖戳 UDP，不查找 `LoopbackDevice`。`NetRx` 与 task fallback 只能通过 `SpinNoIrq` 查找 UDP PCB 并入队。完整 IPv4 UDP 不得依赖 poller `RUNNING` 所有权。TCP、ICMP、IPv6、分片和未命中 socket 的 UDP 由 `poll_rx` 从 `deferred` 交给任务 poller。
 28. `NET_RX_QUEUE` 容量与所有权边界：`pending_udp` 与 `deferred` 必须在设备创建时按 `SOCKET_BUFFER_SIZE` 预分配，`enqueue` 以两条队列长度与 in-flight 合计为上限拒绝超额报文，因此 `push_back` 不得在 `SpinNoIrq` 或 `NetRx` softirq 内触发扩容。`process_pending` 取出的盖戳 UDP 必须计入 in-flight 预留，批次大小不超过 `NET_RX_BUDGET`，在锁外交付；未命中 PCB 的报文必须仍唯一持有句柄，清除元数据后放入 `deferred`。队列满时 `enqueue` 必须把报文交还调用方，由发送路径在释放 `NET_RX_QUEUE` 与 BH guard 之后再 drop；`discard_ifindex` 必须先把匹配报文移出到局部容器，解锁后再释放，避免在 `SpinNoIrq` 内堆释放。发送路径的 task fallback 只处理进入时已有的 `pending_udp`，并按 `NET_RX_BUDGET` 拆成固定轮次。队列按 `ifindex` 区分报文所有者，`LoopbackDevice::drop` 必须调用 `discard_ifindex`；该清理对 `process_pending` 释放锁期间的在途报文是 best-effort，完整的设备身份语义需要等价于 Linux `skb->dev` 与 `NETREG_UNREGISTERING` 的注册状态。
+29. TCP listener 推进条件：收到 TCP 报文或 SYN 队列仍有 child 时，下一次实际网络 poll 必须刷新对应 listener。child 进入 accept 队列后才唤醒 `accept_poll`，唤醒发生在 entry 锁外。SYN 队列非空不会设置 `PollProgress::has_more`，未到期的协议 timer 继续等待 deadline 通知，避免半连接造成 poller 空转。
 
 ## 线程安全
 
@@ -298,6 +299,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | F-23 | IPv4 输出设备管理 down | `RTM_NEWLINK` 清除匹配路由设备的 `IFF_UP` | 当前 UDP 或 raw IP 发送失败 | 应用收到 `ENETUNREACH` | 4 | UDP 和 raw IP 在提交发送缓冲前通过 `SERVICE` 校验输出路由和设备管理状态 |
 | F-24 | 数据面共享锁竞争 | socket 或控制面任务持有 Router、IngressProcessor、Interface 或 socket-set | 当前 poll round 提前结束并保留 batch | 网络工作延后到下一轮 | 3 | 返回 `has_more`，单执行者完成 CAS 发布 `SCHEDULED`；raw、accepted 和 control batch 保持所有权，下一轮从保留位置继续 |
 | F-25 | 短超时 loopback UDP 在 poller 忙碌时丢包 | `sendto` 只通知 poller，`recvfrom` 的 1 jiffy 超时先到期 | 并发 libc-test `socket.exe` 间歇 `ETIMEDOUT` | 用户可见功能回归 | 3 | loopback UDP 在发送路径的 BH 窗口内由 `NetRx` 交付 PCB；poller 不再承担该交付；压力测试覆盖 SMP=1 与 SMP=4 的四并发短超时场景 |
+| F-26 | TCP child 永久滞留 SYN 队列 | packet mark 在 child 进入可接受状态前被消费，后续 ingress 或 timer poll 没有刷新 listener | accept 队列保持为空 | 服务端连接建立后仍阻塞于 `accept` | 2 | SYN 队列非空的 listener 在每次实际网络 poll 后刷新；仅在 child 移入 accept 队列后唤醒 waiter；SYN 队列不请求连续 poll |
 
 严重度定义：
 
@@ -356,6 +358,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - UDP registry 改动保持 bind、connect、普通接收和 ICMP error lookup 使用同一 PCB 所有权来源。`NetRx` 与 task 共享的 bucket、connected peer 和 PCB 接收队列必须使用 `SpinNoIrq`，sleepable 状态更新不得放在这些锁内。
 - 修改 poller 状态机或 `Service::poll_budgeted` 时验证四态转换、单执行者获取、一次 CAS 释放、分阶段 smoltcp 预算和 1 ms 软时间上限；`PollProgress::has_more` 只能包含立即工作，未来协议 deadline 必须等待 timer 到期后发布；TX waiter 只能由 `tx_capacity_changed` 触发全局容量唤醒。
 - 修改 `Service::poll_budgeted` 的锁路径时验证共享推进锁保持 `try_lock` 语义，竞争时设置 `has_more`，raw、accepted 和 control batch 在重试前保持所有权，TCP listener preparation 只在 accepted batch 能立即转入 Router 时执行。
+- 修改 TCP listener 推进时验证 SYN 队列非空的 entry 在实际网络 poll 后得到刷新，child 移入 accept 队列后才在 entry 锁外唤醒 waiter，并保持 SYN 队列不进入 `PollProgress::has_more`。
 - 修改 poller 执行边界时验证 assist 保持一次机会式 CAS 和单轮预算；loopback UDP 必须在发送路径的 BH/`NetRx` 窗口内进入 PCB，不依赖 poller 所有权。
 - 修改 `NET_RX_QUEUE` 时验证 `pending_udp` 与 `deferred` 在设备创建时完成预分配、`enqueue` 上限为两条队列长度与 in-flight 合计、`SpinNoIrq` 内不发生扩容、堆释放或 UDP PCB 交付，队列满与 `discard_ifindex` 都在锁外 drop `PacketBuf`，`process_pending` 批次不超过 `NET_RX_BUDGET`，以及发送路径 fallback 只执行固定轮次；共享该队列的单元测试必须声明 `serial`。
 - 修改 UDP PCB 队列时验证 PCB 创建时预留 1024 个指针大小的槽位、`PacketBuf` 在进入网络栈时建立引用计数生命周期、loopback 在关闭 BH 前写入已校验 UDP 元数据、softirq 与 `SpinNoIrq` 入队路径不分配或扩容、满队列报文在锁外释放、FIFO 顺序，以及 `MSG_PEEK` 的 payload 复制位于锁外。

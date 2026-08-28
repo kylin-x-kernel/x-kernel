@@ -65,6 +65,10 @@ impl ListenTableEntry {
             closed: false,
         }
     }
+
+    fn needs_refresh(&self) -> bool {
+        !self.closed && (self.touched || !self.syn_queue.is_empty())
+    }
 }
 
 impl ListenEntry {
@@ -207,7 +211,7 @@ impl ListenTable {
         entry.state.lock().touched = true;
     }
 
-    pub fn wake_touched_acceptors(&self, sockets: &mut SocketSet<'_>) {
+    pub fn refresh_acceptors(&self, sockets: &mut SocketSet<'_>) {
         let entries = {
             let entries = self.entries.lock();
             entries.values().cloned().collect::<Vec<_>>()
@@ -216,7 +220,11 @@ impl ListenTable {
         for entry in entries {
             let should_wake = {
                 let mut state = entry.state.lock();
-                if state.closed || !state.touched {
+                // A child can become acceptable while processing queued
+                // ingress or a protocol timer after the packet mark was
+                // consumed. Keep pending handshakes refreshable across later
+                // poll rounds.
+                if !state.needs_refresh() {
                     continue;
                 }
                 state.touched = false;
@@ -422,4 +430,46 @@ fn promote_ready_in_socket_set(
         }
     }
     moved
+}
+
+#[cfg(unittest)]
+mod tests {
+    use smoltcp::wire::{IpAddress, Ipv4Address};
+    use unittest::{assert, def_test};
+
+    use super::*;
+
+    fn pending_conn() -> PendingConn {
+        PendingConn {
+            accepted: AcceptedTcp {
+                handle: SocketHandle::default(),
+                local_endpoint: IpEndpoint::new(
+                    IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, 15)),
+                    8080,
+                ),
+                remote_endpoint: IpEndpoint::new(
+                    IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, 2)),
+                    49152,
+                ),
+            },
+        }
+    }
+
+    #[def_test]
+    fn pending_handshake_remains_refreshable_after_packet_mark_is_consumed() {
+        let mut entry = ListenTableEntry::new(1);
+        entry.touched = true;
+        assert!(entry.needs_refresh());
+
+        entry.syn_queue.push_back(pending_conn());
+        entry.touched = false;
+        assert!(entry.needs_refresh());
+
+        entry.syn_queue.clear();
+        assert!(!entry.needs_refresh());
+
+        entry.syn_queue.push_back(pending_conn());
+        entry.closed = true;
+        assert!(!entry.needs_refresh());
+    }
 }
