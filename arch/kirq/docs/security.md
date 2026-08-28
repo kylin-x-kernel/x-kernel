@@ -97,7 +97,7 @@ per-CPU atomic pending mask。调用方在访问前 pin 当前 CPU；pending mas
 其它相关 unsafe 边界位于模块外：
 
 - 架构 trap 入口由 `kcpu` 汇编和 trap dispatch 宏进入 `khal::irq` adapter；
-- 平台 IRQ backend 在 `drivers/irq` 中执行 MMIO、priority mask 和必要的汇编屏障；
+- 平台 IRQ backend 在 `drivers/platform/irq` 中执行 MMIO、priority mask 和必要的汇编屏障；
 - `kiface` 把平台实现绑定到 `IntrManagerIf`。
 
 因此本模块的主要安全责任不是局部内存安全，而是保持上下文、锁顺序和 completion

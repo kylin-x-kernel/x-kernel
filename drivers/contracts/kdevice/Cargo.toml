@@ -1,0 +1,18 @@
+[package]
+name = "kdevice"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Common device model types for x-kernel"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+device_res.workspace = true
+driver_base.workspace = true
+kspin.workspace = true
+lazyinit.workspace = true
+log.workspace = true
+unittest = { workspace = true }

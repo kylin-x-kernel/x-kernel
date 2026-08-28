@@ -1,0 +1,32 @@
+[package]
+name = "console-driver"
+description = "console and serial drivers for x-kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[features]
+default = []
+pl011 = ["dep:arm_pl011"]
+ns16550-mmio = []
+ns16550-ioport = ["dep:uart_16550"]
+
+[dependencies]
+driver_base = { workspace = true }
+kclass = { workspace = true, features = ["char"] }
+kdevice = { workspace = true }
+khal = { workspace = true }
+kirq = { workspace = true }
+kplat = { workspace = true }
+kspin = { workspace = true }
+lazyinit = { workspace = true }
+log = { workspace = true }
+memspace = { workspace = true }
+of = { workspace = true }
+unittest.workspace = true
+arm_pl011 = { version = "0.1", optional = true }
+uart_16550 = { version = "0.4", optional = true }

@@ -3,7 +3,7 @@
 ## 定位
 
 `fs_block` 不拥有 block identity、`dev_t` registry 或 VFS block-special file
-operations。那些职责分别属于 `drivers/block` 与 KVFS，和 Linux 的 block core / VFS
+operations。那些职责分别属于 `drivers/contracts/block` 与 KVFS，和 Linux 的 block core / VFS
 层次一致。
 
 本 crate 只保留 `SeekableDisk`：把 canonical `block::BlockDevice` 适配为带字节游标的

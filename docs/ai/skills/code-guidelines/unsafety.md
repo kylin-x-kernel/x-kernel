@@ -291,7 +291,7 @@ Avoid:
 
 Repository examples:
 
-- [drivers/net/src/net_buf.rs](/home/laoyekang/code/x-kernel/drivers/net/src/net_buf.rs:16)
+- [drivers/contracts/net/src/net_buf.rs](/home/laoyekang/code/x-kernel/drivers/contracts/net/src/net_buf.rs:16)
 - [mm/kalloc/src/lib.rs](/home/laoyekang/code/x-kernel/mm/kalloc/src/lib.rs:256)
 
 Relevant standard references:
@@ -384,7 +384,7 @@ Avoid:
 Repository examples:
 
 - [drivers/arm-gic/src/gicv3.rs](/home/laoyekang/code/x-kernel/drivers/arm-gic/src/gicv3.rs:121)
-- [drivers/console/src/ns16550_mmio.rs](/home/laoyekang/code/x-kernel/drivers/console/src/ns16550_mmio.rs:1)
+- [drivers/platform/console/src/ns16550_mmio.rs](/home/laoyekang/code/x-kernel/drivers/platform/console/src/ns16550_mmio.rs:1)
 
 Relevant standard references:
 

@@ -307,9 +307,6 @@ pub fn rust_main(arg: usize) -> ! {
     register_boot_console_runtime_region(boot_info);
     memspace::init_memory_management();
     kernel_boot::bootln!("memory space map ready");
-    // Install the OS-agnostic resource provider before any driver (including
-    // early device interrupts like the console input line) acquires a resource.
-    kdriver::install_resource_provider();
     khal::early_driver_init();
 
     kprintln!("{}", LOGO);

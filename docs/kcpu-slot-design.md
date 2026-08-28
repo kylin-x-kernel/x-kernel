@@ -57,7 +57,7 @@ Asterinas 的 CPU-local 实现提供了值得吸收的架构边界：
 | 调度器核心状态 | `task/ktask/src/run_queue.rs`、`task/ktask/src/timers.rs`、`task/ktask/src/future/time.rs` | run queue、idle task、退出队列、timer runtime | `current_ref_*_raw()`、手动 `NoPreempt`/IRQ guard |
 | IRQ、softirq 和 bottom-half | `arch/kirq/src/bottom_half/*.rs`、`io/watchdog/src/*.rs` | softirq context、worker/lockup 状态、IRQ 统计 | raw 指针或 `with_current()` |
 | IPI/TLB 与架构硬件状态 | `arch/kipi/src/*.rs`、`mm/kalloc/src/pcp.rs`、`virt/kvmm/src/arch/x86_64/vmx.rs` | TLB shootdown、per-CPU page cache、VMXON 状态 | 当前 CPU raw 访问，部分路径依赖 IRQ 关闭 |
-| 驱动和计时器缓存 | `drivers/timer/src/arm_generic.rs`、`drivers/x86-apic/src/lib.rs` | tick、APIC/定时器本地状态 | `read_current()`、`write_current_raw()` |
+| 驱动和计时器缓存 | `drivers/platform/timer/src/arm_generic.rs`、`drivers/platform/x86-apic/src/lib.rs` | tick、APIC/定时器本地状态 | `read_current()`、`write_current_raw()` |
 
 这些调用点共同依赖同一个底层模型：链接器把变量放入 `.percpu`，启动时复制 CPU area，架构寄存器保存当前 CPU base，访问器通过“base + symbol offset”定位实例。
 

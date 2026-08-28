@@ -62,7 +62,7 @@ trap handler registration 依赖 `kcpu::excp::register_trap_handler`，并且进
 
 MSI-X vector allocation、APIC destination selection 和 MSI message composition
 属于 IRQ core/backend 边界。当前由 `kirq::MsiBackendIf` 定义 backend contract，
-由 `drivers/x86-apic` 实现；`khal::irq` 不再暴露 APIC id 或裸 CPU vector。
+由 `drivers/platform/x86-apic` 实现；`khal::irq` 不再暴露 APIC id 或裸 CPU vector。
 
 ### 为什么 `IPI_IRQ` 不进入 `kirq`
 

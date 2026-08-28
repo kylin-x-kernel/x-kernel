@@ -1,0 +1,43 @@
+[package]
+name = "virtio"
+edition.workspace = true
+description = "Wrappers of some devices in the `virtio-drivers` crate, that implement traits in the `driver_base` series crates"
+documentation.workspace = true
+keywords = ["x-kernel", "driver", "virtio"]
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+categories.workspace = true
+
+[features]
+alloc = ["virtio-drivers/alloc"]
+block = ["dep:block", "alloc"]
+gpu = ["alloc", "display"]
+input = ["alloc", "dep:input"]
+net = ["alloc", "dep:net"]
+rng = ["alloc", "dep:char_driver"]
+socket = ["alloc", "dep:vsock"]
+virtio-9p = ["alloc"]
+
+[dependencies]
+bitflags = { workspace = true }
+driver_base = { workspace = true }
+device_res = { workspace = true }
+block = { workspace = true, optional = true }
+char_driver = { workspace = true, optional = true }
+display = { workspace = true, optional = true }
+input = { workspace = true, optional = true }
+net = { workspace = true, optional = true }
+vsock = { workspace = true, optional = true }
+log = { workspace = true }
+kspin = { workspace = true }
+ktime_types = { workspace = true }
+virtio-drivers = { workspace = true }
+unittest = { workspace = true }
+pci = { workspace = true }
+zerocopy = { workspace = true }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+safe-mmio = { workspace = true }

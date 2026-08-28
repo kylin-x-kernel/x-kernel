@@ -102,9 +102,9 @@
 
 位置：
 
-- `drivers/irq/src/gicv2.rs:167`
-- `drivers/irq/src/gicv3.rs:86`
-- `drivers/irq/src/riscv.rs:83`
+- `drivers/platform/irq/src/gicv2.rs:167`
+- `drivers/platform/irq/src/gicv3.rs:86`
+- `drivers/platform/irq/src/riscv.rs:83`
 
 不变量：
 

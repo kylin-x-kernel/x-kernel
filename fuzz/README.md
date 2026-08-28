@@ -1,6 +1,6 @@
 # x-kernel WFUZZ harness
 
-Fuzz target for [`drivers/rs-fdtree`](../drivers/rs-fdtree): random bytes → `LinuxFdt::new()` → traverse nodes/properties.
+Fuzz target for [`drivers/platform/rs-fdtree`](../drivers/platform/rs-fdtree): random bytes → `LinuxFdt::new()` → traverse nodes/properties.
 
 ## Layout
 

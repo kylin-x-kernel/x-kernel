@@ -8,7 +8,8 @@
 
 1. `docs/ai/review/common.md`；
 2. `docs/ai/skills/code-guidelines/SKILL.md`；
-3. 根据本文件路由出的相关主题文件。
+3. driver 相关变更还必须读取 `docs/ai/driver-subsystem-boundaries.md`；
+4. 根据本文件路由出的相关主题文件。
 
 `code-guidelines/SKILL.md` 是编码规范的权威入口。
 本文件定义如何在自动 review 中应用它，不复制并替代完整规范。
@@ -83,6 +84,8 @@
 
 检查：
 
+- driver 子系统边界是否符合 `docs/ai/driver-subsystem-boundaries.md`：
+  可复用具体驱动只能依赖 driver contract，不能直接调用 host-kernel API；
 - 新增 `pub` 是否真的需要跨 crate 暴露；
 - 仅供 crate 或父模块使用的 item 是否应为 `pub(crate)` / `pub(super)` / private；
 - 类型和 helper 是否放在真正拥有其状态、不变量和生命周期的 crate；

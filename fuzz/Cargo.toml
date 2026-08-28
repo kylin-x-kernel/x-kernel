@@ -11,7 +11,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-rs_fdtree = { path = "../drivers/rs-fdtree" }
+rs_fdtree = { path = "../drivers/platform/rs-fdtree" }
 
 [[bin]]
 name = "fdt_parse"

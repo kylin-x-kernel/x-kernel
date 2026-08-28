@@ -138,30 +138,37 @@ knet = { path = "net/knet" }
 ktty = { path = "io/ktty" }
 watchdog = { path = "io/watchdog" }
 
-# Internal: drivers
-aarch64-pmuv3 = { path = "drivers/aarch64-pmuv3" }
-block = { path = "drivers/block" }
-char_driver = { path = "drivers/char" }
-display = { path = "drivers/display" }
-driver_base = { path = "drivers/driver_base" }
-device_res = { path = "drivers/device-res", package = "device-res" }
-kclass = { path = "drivers/kclass" }
-kdevice = { path = "drivers/kdevice" }
-console_driver = { path = "drivers/console", package = "console-driver" }
-input = { path = "drivers/input" }
-kdriver = { path = "drivers/kdriver" }
-net = { path = "drivers/net" }
-pci = { path = "drivers/pci" }
-rs_fdtree = { path = "drivers/rs-fdtree" }
-virtio = { path = "drivers/virtio" }
-vsock = { path = "drivers/vsock" }
-acpi = { path = "drivers/acpi" }
-of = { path = "drivers/of" }
-dice_driver = { path = "drivers/dice", package = "dice-driver" }
-irq_driver = { path = "drivers/irq", package = "irq-driver" }
-rtc_driver = { path = "drivers/rtc", package = "rtc-driver" }
-timer_driver = { path = "drivers/timer", package = "timer-driver" }
-x86_apic = { path = "drivers/x86-apic", package = "x86-apic" }
+# Internal: driver contracts and model
+block = { path = "drivers/contracts/block" }
+char_driver = { path = "drivers/contracts/char" }
+display = { path = "drivers/contracts/display" }
+driver_base = { path = "drivers/contracts/driver_base" }
+device_res = { path = "drivers/contracts/device-res", package = "device-res" }
+kclass = { path = "drivers/contracts/kclass" }
+kdevice = { path = "drivers/contracts/kdevice" }
+input = { path = "drivers/contracts/input" }
+net = { path = "drivers/contracts/net" }
+vsock = { path = "drivers/contracts/vsock" }
+
+# Internal: portable concrete drivers
+virtio = { path = "drivers/devices/virtio" }
+
+# Internal: driver adapters and integration
+device_res_xkernel = { path = "drivers/adapters/xkernel/device-res", package = "device-res-xkernel" }
+kdriver = { path = "drivers/integration/kdriver" }
+
+# Internal: platform, firmware, and host driver support
+aarch64-pmuv3 = { path = "drivers/platform/aarch64-pmuv3" }
+console_driver = { path = "drivers/platform/console", package = "console-driver" }
+pci = { path = "drivers/platform/pci" }
+rs_fdtree = { path = "drivers/platform/rs-fdtree" }
+acpi = { path = "drivers/platform/acpi" }
+of = { path = "drivers/platform/of" }
+dice_driver = { path = "drivers/platform/dice", package = "dice-driver" }
+irq_driver = { path = "drivers/platform/irq", package = "irq-driver" }
+rtc_driver = { path = "drivers/platform/rtc", package = "rtc-driver" }
+timer_driver = { path = "drivers/platform/timer", package = "timer-driver" }
+x86_apic = { path = "drivers/platform/x86-apic", package = "x86-apic" }
 
 # Internal: platform variants
 kplat-aarch64 = { path = "platforms/kplat-aarch64", default-features = false }

@@ -1,0 +1,104 @@
+[package]
+name = "kdriver"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "device drivers for x-kernel"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[package.metadata.cargo-shear]
+ignored = ["display", "input", "kalloc", "vsock"]
+
+[features]
+pci-non-ecam = []
+net = ["dep:net", "kclass/net"]
+block = ["dep:block", "kclass/block"]
+char = ["dep:char_driver", "kclass/char"]
+display = ["dep:display", "kclass/display"]
+input = ["dep:input", "kclass/input"]
+vsock = ["dep:vsock", "kclass/vsock"]
+dma-trace = ["kdma/dma-trace"]
+
+# Concrete driver selection now gates directly on Cargo features; there is no
+# build.rs-generated cfg translation layer anymore.
+#
+# Drivers currently wired end-to-end in this crate:
+# - virtio-* families below
+# - ramdisk
+#
+# Other concrete-driver paths still exist in the source tree as dormant
+# placeholders, but they remain intentionally undeclared here until their
+# lower-level crate features and external dependencies are restored.
+virtio = ["dep:virtio", "dep:kalloc"]
+
+virtio-blk = ["block", "virtio", "virtio/block"]
+virtio-net = ["net", "virtio", "virtio/net"]
+virtio-gpu = ["display", "virtio", "virtio/gpu"]
+virtio-input = ["input", "virtio", "virtio/input"]
+virtio-socket = ["vsock", "virtio", "virtio/socket"]
+virtio-9p = ["virtio", "virtio/virtio-9p", "kclass/virtio-9p"]
+virtio-rng = ["char", "virtio", "virtio/rng"]
+
+console = ["char", "dep:console_driver"]
+console-pl011 = ["console", "console_driver/pl011"]
+console-ns16550-mmio = ["console", "console_driver/ns16550-mmio"]
+console-ns16550-ioport = ["console", "console_driver/ns16550-ioport"]
+
+# Per-instance UART serial drivers: each UART node becomes a char device. They
+# build on the matching console-* backend (early stdout console) and add the
+# kdriver serial driver module on top.
+serial-pl011 = ["console-pl011"]
+serial-ns16550-mmio = ["console-ns16550-mmio"]
+serial-ns16550-ioport = ["console-ns16550-ioport"]
+
+ramdisk = ["block", "block/ramdisk"]
+ramdisk-static = ["ramdisk", "block/ramdisk-static"]
+# Placeholder concrete-driver feature names kept so source-level cfg(feature =
+# "...") remains check-cfg-clean after removing the old build.rs mapping.
+# They intentionally do not enable downstream dependencies yet.
+ixgbe = ["net"]
+# any_firmware_driver is an umbrella feature: true whenever any DT/ACPI
+# platform driver is enabled. Code uses cfg(feature = "any_firmware_driver")
+# instead of repeating the full any(ahci, bcm2835-sdhci, sdmmc, fxmac) list.
+any_firmware_driver = []
+fxmac = ["any_firmware_driver", "net"]
+ahci = ["any_firmware_driver", "block"]
+bcm2835-sdhci = ["any_firmware_driver", "block"]
+sdmmc = ["any_firmware_driver", "block"]
+
+default = []
+
+[dependencies]
+kalloc = { workspace = true, optional = true }
+kdma.workspace = true
+device_res = { workspace = true }
+device_res_xkernel = { workspace = true }
+driver_base = { workspace = true }
+karch = { workspace = true }
+kclass = { workspace = true }
+kdevice = { workspace = true }
+block = { workspace = true, optional = true }
+char_driver = { workspace = true, optional = true }
+console_driver = { workspace = true, optional = true }
+display = { workspace = true, optional = true }
+input = { workspace = true, optional = true }
+net = { workspace = true, optional = true }
+pci = { workspace = true }
+vsock = { workspace = true, optional = true }
+virtio = { workspace = true, optional = true }
+khal = { workspace = true }
+ktime_types = { workspace = true }
+memspace = { workspace = true }
+kspin.workspace = true
+lazyinit.workspace = true
+cfg-if.workspace = true
+crate_interface.workspace = true
+log.workspace = true
+memaddr.workspace = true
+smallvec = { version = "1.15", features = ["const_generics", "union"] }
+unittest.workspace = true
+
+kbuild_config = { workspace = true }

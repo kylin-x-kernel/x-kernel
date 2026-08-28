@@ -76,6 +76,11 @@ ownership boundaries.
 - Keep `device_res` OS-agnostic. The driver framework exposes kernel IRQ
   capability to drivers by adapting devres IRQ resources to `kirq` in
   `kdriver::resource`; `kirq` must not depend on `device_res`.
+- Treat `docs/ai/driver-subsystem-boundaries.md` as a hard constraint for
+  driver work. Concrete reusable drivers must depend on driver subsystem
+  contracts, not host-kernel crates such as `khal`, `kirq`, `memspace`,
+  `kdma`, `kruntime`, `ktask`, or `kwork`. Host-specific crates may use those
+  APIs only while implementing provider contracts or integration glue.
 - Keep refactoring commits separate from feature or behavior commits.
 
 ## Build And Validation
