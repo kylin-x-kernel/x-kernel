@@ -2015,7 +2015,7 @@ pub(crate) fn migrate_entry(migrated_task: KtaskRef) {
 
 #[cfg(feature = "smp")]
 fn spawn_affinity_migration_task(migrated: KtaskRef) -> KtaskRef {
-    const MIGRATION_TASK_STACK_SIZE: usize = 4096;
+    const MIGRATION_TASK_STACK_SIZE: usize = 16384;
     TaskInner::new_internal(
         move || migrate_entry(migrated),
         "migration-task".into(),
