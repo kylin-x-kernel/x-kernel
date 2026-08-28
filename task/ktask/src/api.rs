@@ -8,9 +8,11 @@ use alloc::{
     string::String,
     sync::{Arc, Weak},
 };
-use core::sync::atomic::AtomicUsize;
+use core::{future::poll_fn, sync::atomic::AtomicUsize, task::Poll};
 
 use kspin::NoPreemptIrqSave;
+#[cfg(feature = "execution-accounting")]
+use ktime_types::MonotonicInstant;
 
 use crate::run_queue::task_run_queue;
 pub(crate) use crate::run_queue::{current_run_queue, select_run_queue, select_wake_run_queue};
@@ -30,6 +32,45 @@ pub type WeakKtaskRef = Weak<KTask>;
 pub use kcpu_id_map::KCpuMask;
 
 static CPU_NUM: AtomicUsize = AtomicUsize::new(1);
+
+/// Opaque identity for an execution currently owned by a task.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TaskExecutionContext {
+    words: [usize; 4],
+}
+
+impl TaskExecutionContext {
+    /// Creates an opaque task-local execution identity.
+    pub const fn new(words: [usize; 4]) -> Self {
+        Self { words }
+    }
+
+    /// Returns all opaque context words.
+    pub const fn words(self) -> [usize; 4] {
+        self.words
+    }
+
+    /// Returns one opaque context word.
+    pub const fn word(self, index: usize) -> Option<usize> {
+        if index < self.words.len() {
+            Some(self.words[index])
+        } else {
+            None
+        }
+    }
+}
+
+/// Scheduler bridge implemented by the crate that owns opaque executions.
+#[cfg(feature = "execution-accounting")]
+#[kiface::interface]
+pub trait TaskExecutionAccountingIf {
+    /// Accounts the current execution and returns the next tick deadline, if
+    /// the execution still needs one.
+    fn account_execution_tick(context: TaskExecutionContext) -> Option<MonotonicInstant>;
+
+    /// Returns the current execution tick deadline without doing accounting.
+    fn execution_tick_deadline(context: TaskExecutionContext) -> Option<MonotonicInstant>;
+}
 
 cfg_select! {
     feature = "sched_rr" => {
@@ -103,6 +144,11 @@ pub(crate) fn active_cpu_num() -> usize {
     CPU_NUM.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Returns the current monotonic time.
+pub fn monotonic_time() -> ktime_types::MonotonicInstant {
+    khal::time::monotonic_time()
+}
+
 /// Initializes the task scheduler for secondary CPUs.
 pub fn init_scheduler_secondary() {
     crate::run_queue::init_secondary();
@@ -111,6 +157,10 @@ pub fn init_scheduler_secondary() {
 /// Absolute monotonic ns of the next schedule-evaluation deadline, or `0` if none.
 #[percpu::def_percpu]
 static NEXT_SCHED_DEADLINE_NS: u64 = 0;
+
+/// Absolute monotonic ns of the current task execution-accounting tick.
+#[percpu::def_percpu]
+static NEXT_EXECUTION_TICK_DEADLINE_NS: u64 = 0;
 
 /// When set, [`rearm_local_timer`] updates software slots only and skips the
 /// hardware write. Used across timer-IRQ callback/drain/wake batches so
@@ -151,7 +201,7 @@ fn schedule_deadline_request(now_ns: u64, rel_ns: Option<u64>) -> (Option<u64>, 
     }
 }
 
-/// Re-arms the local CPU hardware timer to the earliest of schedule, worker,
+/// Re-arms the local CPU hardware timer to the earliest of schedule, execution,
 /// soft, and periodic-callback deadlines. Disarms the hardware when none remain.
 ///
 /// This is a pure hardware arbitration helper for scheduler deadlines: a due
@@ -172,31 +222,24 @@ pub(crate) fn rearm_local_timer(
     periodic_earliest: Option<u64>,
 ) {
     let _guard = NoPreemptIrqSave::new();
-    // SAFETY: `NoPreemptIrqSave` pins execution to this CPU and masks local
-    // IRQs, so the timer IRQ cannot observe half-updated per-CPU slots.
-    let now_ns = khal::time::monotonic_time_nanos();
     // SAFETY: same guard as above.
     let sched_ns = unsafe { NEXT_SCHED_DEADLINE_NS.read_current_raw() };
     let sched = (sched_ns != 0).then_some(sched_ns);
-    let worker = crate::workqueue::worker_tick_deadline_for_rearm(now_ns);
+    // SAFETY: same guard as above.
+    let execution_ns = unsafe { NEXT_EXECUTION_TICK_DEADLINE_NS.read_current_raw() };
+    let execution = (execution_ns != 0).then_some(execution_ns);
     // SAFETY: same guard as above; deferral is only toggled from timer IRQ.
     if unsafe { DEFER_LOCAL_TIMER_REARM.read_current_raw() } {
         return;
     }
     let soft = earliest_soft_deadline.map(|e| e.as_nanos_u64_saturating());
     let periodic = periodic_earliest.or_else(crate::timers::earliest_deadline);
-    match select_local_timer_deadline(sched, worker, soft, periodic) {
+    match select_local_timer_deadline(sched, execution, soft, periodic) {
         Some(d) => khal::time::arm_timer(ktime_types::MonotonicInstant::from_span_since_origin(
             ktime_types::TimeSpan::from_nanos(d),
         )),
         None => khal::time::disarm_timer(),
     }
-}
-
-pub(crate) fn sched_deadline_for_worker_timer_pull_in() -> Option<u64> {
-    // SAFETY: caller holds IRQ/preempt exclusion for the current CPU.
-    let sched_ns = unsafe { NEXT_SCHED_DEADLINE_NS.read_current_raw() };
-    (sched_ns != 0).then_some(sched_ns)
 }
 
 /// Begins deferring hardware timer writes on this CPU (timer-IRQ wake batch).
@@ -260,6 +303,81 @@ pub(crate) fn set_sched_deadline_ns(deadline_ns: Option<u64>) {
     }
 }
 
+fn set_execution_tick_deadline_ns(deadline_ns: Option<u64>) {
+    // SAFETY: caller holds a preempt/IRQ guard or runs in scheduler/timer
+    // context; only this CPU's slot is written.
+    unsafe {
+        NEXT_EXECUTION_TICK_DEADLINE_NS.write_current_raw(deadline_ns.unwrap_or(0));
+    }
+}
+
+fn execution_tick_deadline_for_context(context: TaskExecutionContext) -> Option<u64> {
+    #[cfg(feature = "execution-accounting")]
+    {
+        TaskExecutionAccountingIf::execution_tick_deadline(context)
+            .map(|deadline| deadline.span_since_origin().as_nanos_u64_saturating())
+    }
+    #[cfg(not(feature = "execution-accounting"))]
+    {
+        let _ = context;
+        None
+    }
+}
+
+fn refresh_execution_tick_deadline_slot_for(context: Option<TaskExecutionContext>) {
+    set_execution_tick_deadline_ns(context.and_then(execution_tick_deadline_for_context));
+}
+
+fn account_execution_tick_for_context(context: TaskExecutionContext) {
+    #[cfg(feature = "execution-accounting")]
+    let deadline = TaskExecutionAccountingIf::account_execution_tick(context)
+        .map(|deadline| deadline.span_since_origin().as_nanos_u64_saturating());
+    #[cfg(not(feature = "execution-accounting"))]
+    let deadline = {
+        let _ = context;
+        None
+    };
+    set_execution_tick_deadline_ns(deadline);
+}
+
+pub(crate) fn account_execution_context(context: Option<TaskExecutionContext>) {
+    match context {
+        Some(context) => account_execution_tick_for_context(context),
+        None => set_execution_tick_deadline_ns(None),
+    }
+}
+
+pub(crate) fn refresh_execution_tick_deadline_for_task(task: &KtaskRef) {
+    refresh_execution_tick_deadline_slot_for(task.execution_context());
+}
+
+/// Installs an opaque execution context on the current task.
+pub fn set_current_execution_context(
+    context: TaskExecutionContext,
+) -> Option<TaskExecutionContext> {
+    current().set_execution_context(context)
+}
+
+/// Clears the current task's opaque execution context if it matches.
+pub fn clear_current_execution_context(context: TaskExecutionContext) -> bool {
+    current().clear_execution_context(context)
+}
+
+/// Returns the current task's opaque execution context.
+pub fn current_execution_context() -> Option<TaskExecutionContext> {
+    current_may_uninit().and_then(|task| task.execution_context())
+}
+
+/// Refreshes the local execution-accounting tick deadline for current.
+pub fn refresh_current_execution_tick() {
+    let _guard = NoPreemptIrqSave::new();
+    refresh_execution_tick_deadline_slot_for(current_execution_context());
+    rearm_local_timer(
+        crate::future::earliest_deadline(khal::percpu::this_cpu_id()),
+        None,
+    );
+}
+
 /// Hardware-timer IRQ entry for dynamic schedule + soft + periodic timers:
 ///
 /// - Accounts real runtime for the current task first (so wake handling is not
@@ -284,8 +402,6 @@ pub fn on_timer_fire() {
         let sched_ns = unsafe { NEXT_SCHED_DEADLINE_NS.read_current_raw() };
         sched_ns != 0 && now_ns >= sched_ns
     };
-    let worker_tick_due = crate::workqueue::current_worker_tick_is_due(now_ns);
-
     // Account the interrupted task before waking anyone else.
     // Linux `entity_tick` (`check_preempt_tick`) only runs on the schedule
     // slot, not on every soft/periodic IRQ.
@@ -297,11 +413,9 @@ pub fn on_timer_fire() {
     }
     #[cfg(not(feature = "sched_eevdf"))]
     current_run_queue::<NoOp>().account_current_runtime(now_ns);
-    crate::workqueue::account_timer_worker_tick(worker_tick_due, sched_due);
     // Timer callbacks and soft-timer wakeups may register/cancel timers or
     // refresh scheduler slots. Defer their hardware writes until the final
-    // schedule/worker/soft/periodic arbitration below, after all wakeups have
-    // run and the current worker tick slot has been refreshed once.
+    // schedule/soft/periodic arbitration below, after all wakeups have run.
     begin_defer_local_timer_rearm();
     let (periodic_earliest, periodic_due) = crate::timers::run_due_and_earliest(now_ns);
     #[cfg(not(feature = "sched_stat"))]
@@ -323,9 +437,6 @@ pub fn on_timer_fire() {
     let _ = sched_due;
 
     current_run_queue::<NoOp>().refresh_sched_deadline(now_ns);
-    crate::workqueue::refresh_current_worker_tick_after_timer_callbacks(
-        khal::time::monotonic_time_nanos(),
-    );
     // Re-read after wakes so callbacks that armed a new soft timer are kept.
     let earliest_soft = crate::future::earliest_deadline(cpu_id);
     rearm_local_timer(earliest_soft, periodic_earliest);
@@ -528,6 +639,48 @@ pub fn yield_now() {
     current_run_queue::<NoPreemptIrqSave>().yield_current();
 }
 
+/// Blocks until `condition` becomes true, using `source` as the wake source.
+///
+/// The condition is checked before registration and again after registration so
+/// callers do not lose a state change that races with waiter setup.
+pub fn wait_for_poll_event_until<F>(
+    event: &kpoll::PollEvent,
+    mut condition: F,
+) -> Result<(), kpoll::PollRegisterError>
+where
+    F: FnMut() -> bool,
+{
+    assert_sleepable_context("wait_for_poll_event_until");
+    if condition() {
+        return Ok(());
+    }
+
+    let mut registrations = kpoll::PollRegistrations::new();
+    loop {
+        let observed_generation = event.generation();
+        crate::future::block_on(poll_fn(|cx| {
+            if condition() {
+                return Poll::Ready(Ok(true));
+            }
+
+            let mut context = registrations.context(cx);
+            if let Err(error) = event.register(&mut context) {
+                return Poll::Ready(Err(error));
+            }
+            drop(context);
+
+            if condition() || event.has_changed_since(observed_generation) {
+                Poll::Ready(Ok(true))
+            } else {
+                Poll::Pending
+            }
+        }))?;
+        if condition() {
+            return Ok(());
+        }
+    }
+}
+
 /// Current task is going to sleep for the given duration.
 ///
 /// # Panics
@@ -643,6 +796,7 @@ pub fn sched_stats_text() -> alloc::string::String {
 
 #[cfg(unittest)]
 mod tests_api {
+    use alloc::sync::Arc;
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use kirq::{
@@ -656,7 +810,8 @@ mod tests_api {
 
     use super::{
         MIN_SCHED_TIMER_NS, can_sleep_current_context_for_tests, current, sched_stats_text,
-        schedule_deadline_request, select_local_timer_deadline, with_wake_sync,
+        schedule_deadline_request, select_local_timer_deadline, wait_for_poll_event_until,
+        with_wake_sync,
     };
 
     static SOFTIRQ_SLEEPABLE_OBSERVED: AtomicBool = AtomicBool::new(true);
@@ -735,6 +890,37 @@ mod tests_api {
         assert!(inner_active);
         assert!(after_inner_still_active);
         assert!(!current().is_wake_sync());
+    }
+
+    #[def_test(serial)]
+    fn wait_for_poll_event_until_blocks_until_condition_and_notify() {
+        let event = Arc::new(kpoll::PollEvent::new());
+        let ready = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let waiter_event = event.clone();
+        let waiter_ready = ready.clone();
+        let waiter_finished = finished.clone();
+
+        crate::spawn(move || {
+            wait_for_poll_event_until(&waiter_event, || waiter_ready.load(Ordering::Acquire))
+                .expect("poll wait should register from task context");
+            waiter_finished.store(true, Ordering::Release);
+        });
+
+        for _ in 0..8 {
+            crate::yield_now();
+        }
+        assert!(!finished.load(Ordering::Acquire));
+
+        ready.store(true, Ordering::Release);
+        event.notify();
+        for _ in 0..1000 {
+            if finished.load(Ordering::Acquire) {
+                break;
+            }
+            crate::yield_now();
+        }
+        assert!(finished.load(Ordering::Acquire));
     }
 
     #[def_test]

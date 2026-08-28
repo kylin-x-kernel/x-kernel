@@ -19,9 +19,17 @@ config WORKQUEUE_WORKERS_PER_POOL
     default 4
     help
       Maximum number of worker tasks one per-CPU system worker pool may
-      run. IRQ-safe enqueue paths never create tasks; a provider-owned
-      manager task creates workers on demand up to this cap. Raising the
-      cap increases per-pool static worker records and the provider-side
-      wake-source table.
+      run. IRQ-safe enqueue paths never create tasks; a per-CPU manager task
+      creates workers on demand up to this cap. Raising the cap increases
+      per-pool static worker records and worker wake-source storage.
+
+config KFEAT_KWORK_STRESS
+    bool "Enable workqueue procfs stress trigger"
+    depends on KFEAT_FS
+    default n
+    help
+      Enable /proc/kwork_stress for manually triggered long-running workqueue
+      stress cases. This is a diagnostics-only interface and must remain
+      disabled in normal builds.
 
 endmenu

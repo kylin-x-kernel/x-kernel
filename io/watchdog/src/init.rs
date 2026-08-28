@@ -192,7 +192,7 @@ impl crate::watchdog_task::WatchdogTask for SystemWorkqueueCheck {
     }
 
     fn check(&self) -> bool {
-        kwork::system_workqueue_watchdog_check(
+        kwork::raw::system_workqueue_watchdog_check(
             khal::time::monotonic_time(),
             crate::lockup_detection::DEFAULT_SOFTLOCKUP_THRESHOLD,
         )

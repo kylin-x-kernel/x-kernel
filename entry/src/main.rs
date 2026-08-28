@@ -13,6 +13,12 @@ extern crate alloc;
 extern crate kfeat;
 extern crate kruntime;
 extern crate kuaccess;
+#[cfg(feature = "unittest")]
+extern crate kwork;
+#[cfg(feature = "unittest")]
+extern crate kworkerpool;
+#[cfg(feature = "unittest")]
+extern crate kworkqueue;
 
 mod image_metadata;
 mod runtime;

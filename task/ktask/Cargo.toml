@@ -25,6 +25,7 @@ sched_cfs = ["preempt"]
 sched_eevdf = ["preempt"]
 sched_stat = []
 arm-timer-resume-fixup = []
+execution-accounting = []
 
 test = ["percpu/sp-naive"]
 
@@ -35,7 +36,6 @@ khal.workspace = true
 ktime_types.workspace = true
 ktime.workspace = true
 kirq.workspace = true
-kwork.workspace = true
 kcpu_id_map.workspace = true
 backtrace = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }

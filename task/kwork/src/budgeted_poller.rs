@@ -425,3 +425,57 @@ where
         }
     })
 }
+
+#[cfg(unittest)]
+mod tests {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+
+    static POLL_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn poller() -> BudgetedPoller<usize, impl Fn(usize) -> BudgetedPollProgress> {
+        BudgetedPoller::new("budgeted_poller_test", 8, 1, 2, |budget| {
+            POLL_CALLS.fetch_add(budget, Ordering::AcqRel);
+            BudgetedPollProgress { has_more: false }
+        })
+    }
+
+    #[def_test(serial)]
+    fn notify_before_start_keeps_work_scheduled() {
+        POLL_CALLS.store(0, Ordering::Release);
+        let poller = poller();
+
+        assert_eq!(poller.notify_irq_safe(), false);
+        assert!(poller.is_scheduled_for_tests());
+        assert_eq!(POLL_CALLS.load(Ordering::Acquire), 0);
+    }
+
+    #[def_test(serial)]
+    fn scheduled_background_batch_runs_once_and_becomes_idle() {
+        POLL_CALLS.store(0, Ordering::Release);
+        let poller = poller();
+        poller.force_scheduled_for_tests();
+
+        poller.poll_background_batch_for_tests();
+
+        assert!(poller.is_idle_for_tests());
+        assert_eq!(POLL_CALLS.load(Ordering::Acquire), 8);
+    }
+
+    #[def_test(serial)]
+    fn notify_while_running_records_followup_round() {
+        POLL_CALLS.store(0, Ordering::Release);
+        let poller = poller();
+        poller.force_running_for_tests();
+
+        assert_eq!(poller.notify_irq_safe(), true);
+        assert!(poller.is_running_pending_for_tests());
+        poller.finish_run_for_tests(false);
+
+        assert!(poller.is_scheduled_for_tests());
+        assert_eq!(POLL_CALLS.load(Ordering::Acquire), 0);
+    }
+}

@@ -26,7 +26,7 @@ pub use backend::msi::{MsiAllocation, MsiKind, MsiMessage, alloc_msix, free_msix
 #[doc(hidden)]
 pub use backend::msi::{MsiBackendIf, MsiBackendToken};
 pub(crate) use backend::platform;
-pub use bottom_half::{context, deferred, init_workerqueue, lifecycle, softirq};
+pub use bottom_half::{context, deferred, lifecycle, softirq};
 pub use domain::IrqRef;
 pub(crate) use model::desc;
 pub use model::desc::{

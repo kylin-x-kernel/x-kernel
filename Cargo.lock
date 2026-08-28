@@ -1368,6 +1368,9 @@ dependencies = [
  "ktask",
  "kuaccess",
  "kvfs",
+ "kwork",
+ "kworkerpool",
+ "kworkqueue",
  "linux-raw-sys",
  "posix-process",
  "tee_kernel",
@@ -2509,8 +2512,6 @@ dependencies = [
  "kiface",
  "kpoll",
  "kspin 0.2.0-dev",
- "ktime_types",
- "kwork",
  "log",
  "percpu",
  "unittest",
@@ -2837,6 +2838,7 @@ dependencies = [
  "ktime",
  "ktime_types",
  "ktty",
+ "kwork",
  "memaddr",
  "memspace",
  "of",
@@ -2982,7 +2984,6 @@ dependencies = [
  "kspin 0.2.0-dev",
  "ktime",
  "ktime_types",
- "kwork",
  "lazyinit",
  "log",
  "memaddr",
@@ -3192,11 +3193,39 @@ dependencies = [
  "kbuild_config",
  "kcpu_id_map",
  "kiface",
+ "kipi",
+ "kirq",
  "klazy",
  "kpoll",
  "kspin 0.2.0-dev",
+ "ktask",
+ "ktime_types",
+ "kworkerpool",
+ "kworkqueue",
+ "log",
+ "unittest",
+]
+
+[[package]]
+name = "kworkerpool"
+version = "0.2.0-dev"
+dependencies = [
+ "kbuild_config",
+ "kcpu_id_map",
+ "kpoll",
+ "kspin 0.2.0-dev",
+ "ktask",
  "ktime_types",
  "log",
+ "unittest",
+]
+
+[[package]]
+name = "kworkqueue"
+version = "0.2.0-dev"
+dependencies = [
+ "kcpu_id_map",
+ "kspin 0.2.0-dev",
  "unittest",
 ]
 
@@ -4076,6 +4105,7 @@ dependencies = [
  "ktracing",
  "kvfs",
  "kvmm",
+ "kwork",
  "macros",
  "memaddr",
  "memspace",

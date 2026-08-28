@@ -43,7 +43,6 @@ mod task_registry;
 mod timers;
 mod tracing_hooks;
 mod wait_queue;
-mod workqueue;
 
 pub mod future;
 
@@ -51,5 +50,4 @@ pub use self::{
     api::{sleep, sleep_until, yield_now, *},
     softirqd::init_current_cpu as init_softirqd_current_cpu,
     tracing_hooks::register_sched_trace_hooks,
-    workqueue::init_system_workqueue_worker,
 };

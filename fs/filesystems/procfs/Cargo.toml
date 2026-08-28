@@ -10,6 +10,7 @@ repository.workspace = true
 
 [features]
 default = []
+kwork_stress = ["dep:kwork", "kwork/stress_test"]
 sysrq = ["ktask/snapshot"]
 tee = ["kprocess/tee", "dep:tee_task_iface"]
 lock_stat = ["dep:klockstat", "klockstat/stats"]
@@ -33,6 +34,7 @@ ktracing.workspace = true
 memaddr.workspace = true
 memspace.workspace = true
 unittest.workspace = true
+kwork = { workspace = true, optional = true }
 tee_task_iface = { workspace = true, optional = true }
 kvmm = { workspace = true, optional = true }
 

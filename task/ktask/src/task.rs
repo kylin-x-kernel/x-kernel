@@ -31,7 +31,7 @@ use kpoll::{Completion, PollRegistrations, PollSet};
 use kspin::SpinNoIrq;
 use memaddr::{VirtAddr, align_up_4k};
 
-use crate::{KCpuMask, KTask, KtaskRef, future::block_on, yield_now};
+use crate::{KCpuMask, KTask, KtaskRef, api::TaskExecutionContext, future::block_on, yield_now};
 
 enum TaskIdentity {
     Idle,
@@ -258,19 +258,11 @@ pub struct TaskInner {
     /// target run queue (waker expects to sleep soon).
     wake_sync_depth: AtomicUsize,
 
+    /// Opaque execution currently owned by this task, if any.
+    execution_context: SpinNoIrq<Option<TaskExecutionContext>>,
+
     interrupted: AtomicBool,
     interrupt_waker: PollSet,
-
-    /// Opaque kwork workerqueue callback context currently executed by this task, if any.
-    ///
-    /// Worker callbacks are sleepable and can migrate, so workerqueue
-    /// self-wait detection must be task-local rather than per-CPU.
-    workerqueue_current_work_key: AtomicUsize,
-    workerqueue_current_queue_key: AtomicUsize,
-    workerqueue_current_pool_key: AtomicUsize,
-    workerqueue_current_worker_id: AtomicUsize,
-    workerqueue_current_worker_token: AtomicUsize,
-    workerqueue_sleep_accounted: AtomicBool,
 
     exit_code: AtomicI32,
     wait_for_exit: Completion,
@@ -574,105 +566,6 @@ impl TaskInner {
         crate::run_queue::kick_running_task(self);
     }
 
-    pub(crate) fn set_workerqueue_current_work_context(
-        &self,
-        work_key: usize,
-        queue_key: usize,
-        pool_key: usize,
-        worker_id: usize,
-        worker_token: usize,
-    ) -> Option<(usize, usize, usize, usize, usize)> {
-        let previous_token = self
-            .workerqueue_current_worker_token
-            .swap(worker_token, Ordering::AcqRel);
-        let previous_worker = self
-            .workerqueue_current_worker_id
-            .swap(worker_id, Ordering::AcqRel);
-        let previous_pool = self
-            .workerqueue_current_pool_key
-            .swap(pool_key, Ordering::AcqRel);
-        let previous_queue = self
-            .workerqueue_current_queue_key
-            .swap(queue_key, Ordering::AcqRel);
-        let previous_work = self
-            .workerqueue_current_work_key
-            .swap(work_key, Ordering::AcqRel);
-        (previous_work != 0).then_some((
-            previous_work,
-            previous_queue,
-            previous_pool,
-            previous_worker,
-            previous_token,
-        ))
-    }
-
-    pub(crate) fn clear_workerqueue_current_work_context(
-        &self,
-        work_key: usize,
-        queue_key: usize,
-        pool_key: usize,
-        worker_id: usize,
-        worker_token: usize,
-    ) -> bool {
-        if self.workerqueue_current_queue_key.load(Ordering::Acquire) != queue_key {
-            return false;
-        }
-        if self.workerqueue_current_pool_key.load(Ordering::Acquire) != pool_key {
-            return false;
-        }
-        if self.workerqueue_current_worker_id.load(Ordering::Acquire) != worker_id {
-            return false;
-        }
-        if self
-            .workerqueue_current_worker_token
-            .load(Ordering::Acquire)
-            != worker_token
-        {
-            return false;
-        }
-        let cleared = self
-            .workerqueue_current_work_key
-            .compare_exchange(work_key, 0, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok();
-        if cleared {
-            self.workerqueue_current_queue_key
-                .store(0, Ordering::Release);
-            self.workerqueue_current_pool_key
-                .store(0, Ordering::Release);
-            self.workerqueue_current_worker_id
-                .store(0, Ordering::Release);
-            self.workerqueue_current_worker_token
-                .store(0, Ordering::Release);
-        }
-        cleared
-    }
-
-    pub(crate) fn workerqueue_current_work_context(
-        &self,
-    ) -> Option<(usize, usize, usize, usize, usize)> {
-        let work_key = self.workerqueue_current_work_key.load(Ordering::Acquire);
-        if work_key == 0 {
-            return None;
-        }
-        let queue_key = self.workerqueue_current_queue_key.load(Ordering::Acquire);
-        let pool_key = self.workerqueue_current_pool_key.load(Ordering::Acquire);
-        let worker_id = self.workerqueue_current_worker_id.load(Ordering::Acquire);
-        let worker_token = self
-            .workerqueue_current_worker_token
-            .load(Ordering::Acquire);
-        Some((work_key, queue_key, pool_key, worker_id, worker_token))
-    }
-
-    pub(crate) fn mark_workerqueue_sleep_accounted(&self) {
-        self.workerqueue_sleep_accounted
-            .store(true, Ordering::Release);
-    }
-
-    pub(crate) fn take_workerqueue_sleep_accounted(&self) -> bool {
-        self.workerqueue_sleep_accounted
-            .swap(false, Ordering::AcqRel)
-    }
-
     #[cfg(feature = "snapshot")]
     #[inline(always)]
     pub fn set_waiting_lock(&self, lock: usize, now: khal::time::TimerTicks) {
@@ -791,14 +684,9 @@ impl TaskInner {
             #[cfg(feature = "preempt")]
             preempt_disable_count: AtomicUsize::new(0),
             wake_sync_depth: AtomicUsize::new(0),
+            execution_context: SpinNoIrq::new(None),
             interrupted: AtomicBool::new(false),
             interrupt_waker: PollSet::new(),
-            workerqueue_current_work_key: AtomicUsize::new(0),
-            workerqueue_current_queue_key: AtomicUsize::new(0),
-            workerqueue_current_pool_key: AtomicUsize::new(0),
-            workerqueue_current_worker_id: AtomicUsize::new(0),
-            workerqueue_current_worker_token: AtomicUsize::new(0),
-            workerqueue_sleep_accounted: AtomicBool::new(false),
             exit_code: AtomicI32::new(0),
             wait_for_exit: Completion::new(),
             kstack: None,
@@ -898,7 +786,7 @@ impl TaskInner {
     }
 
     #[inline]
-    #[cfg(feature = "preempt")]
+    #[cfg(all(feature = "preempt", unittest))]
     pub(crate) fn is_preempt_pending(&self) -> bool {
         self.need_resched.load(Ordering::Acquire)
     }
@@ -920,6 +808,26 @@ impl TaskInner {
     #[inline]
     pub(crate) fn is_wake_sync(&self) -> bool {
         self.wake_sync_depth.load(Ordering::Relaxed) > 0
+    }
+
+    pub(crate) fn set_execution_context(
+        &self,
+        context: TaskExecutionContext,
+    ) -> Option<TaskExecutionContext> {
+        self.execution_context.lock().replace(context)
+    }
+
+    pub(crate) fn clear_execution_context(&self, context: TaskExecutionContext) -> bool {
+        let mut slot = self.execution_context.lock();
+        if *slot != Some(context) {
+            return false;
+        }
+        *slot = None;
+        true
+    }
+
+    pub(crate) fn execution_context(&self) -> Option<TaskExecutionContext> {
+        *self.execution_context.lock()
     }
 
     #[inline]

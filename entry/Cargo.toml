@@ -8,7 +8,14 @@ license.workspace = true
 homepage.workspace = true
 
 [features]
-unittest = ["dep:unittest", "dep:unittest_support"]
+unittest = [
+    "dep:kwork",
+    "dep:kworkerpool",
+    "dep:kworkqueue",
+    "dep:unittest",
+    "dep:unittest_support",
+    "ktask/execution-accounting",
+]
 dma-trace = ["kfeat/dma-trace"]
 
 [dependencies]
@@ -30,6 +37,9 @@ kernel-image-metadata = { workspace = true, features = ["kernel"] }
 kcpu_id_map.workspace = true
 linux-raw-sys.workspace = true
 posix-process.workspace = true
+kwork = { workspace = true, optional = true }
+kworkerpool = { workspace = true, optional = true }
+kworkqueue = { workspace = true, optional = true }
 unittest = { workspace = true, optional = true }
 unittest_support = { workspace = true, optional = true }
 

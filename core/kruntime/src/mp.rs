@@ -147,8 +147,12 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     kirq::enable(of::pmu_irq_or(kbuild_config::PMU_IRQ), true);
 
     ktask::init_softirqd_current_cpu();
-    ktask::init_system_workqueue_worker();
-
+    if kwork::raw::init_system_workqueue_worker_pools_for_cpu(logical_cpu_id).is_none() {
+        warn!(
+            "failed to initialize built-in workqueue worker pools on CPU {}",
+            logical_cpu_id.as_usize()
+        );
+    }
     karch::enable_local_irq();
 
     #[cfg(feature = "watchdog")]

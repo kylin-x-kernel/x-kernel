@@ -9,6 +9,8 @@ extern crate alloc;
 mod basic_nodes;
 mod device_nodes;
 mod irq_nodes;
+#[cfg(feature = "kwork_stress")]
+mod kwork_stress_nodes;
 mod mem_nodes;
 mod root;
 #[cfg(feature = "sysrq")]

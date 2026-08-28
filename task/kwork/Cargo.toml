@@ -11,15 +11,21 @@ description = "Generic kernel workerqueue core"
 
 [features]
 default = []
+stress_test = []
 
 [dependencies]
 bitflags = { workspace = true }
 kbuild_config = { workspace = true }
 kcpu_id_map = { workspace = true }
 kiface = { workspace = true }
+kipi = { workspace = true }
+kirq = { workspace = true }
 klazy = { workspace = true }
 kpoll = { workspace = true }
 kspin = { workspace = true }
 ktime_types = { workspace = true }
+kworkerpool = { workspace = true }
+kworkqueue = { workspace = true }
+ktask = { workspace = true, features = ["execution-accounting"] }
 log = { workspace = true }
 unittest = { workspace = true }

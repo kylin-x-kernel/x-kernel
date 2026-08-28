@@ -251,9 +251,9 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-20 | context misuse 日志风暴 | underflow 或 hardirq 中反复 local_bh_disable | 日志淹没真实故障，拉长 IRQ 处理时间 | warning 计数保留，日志只输出初始样本和 2 的幂次样本 |
 | T-21 | poll/future IRQ wake 被当作 future IRQ thread target | 后续 threaded IRQ 直接复用 poll/future wake bridge | 缺少 thread lifecycle、dev-id teardown、oneshot mask 和 scheduler ownership，导致悬空唤醒或错误 teardown | 文档明确 poll/future IRQ wake 只是临时 waiter notification；threaded IRQ、softirq 和 workerqueue 必须在 `kirq` 内形成独立所有权 |
 | T-21b | 多个 worker 并发 drain shared pool | pool/pwq/entry 归属未一致更新 | work 被重复执行，或其它 queue 的 active/in-flight token 泄漏 | `kwork` 的 shared ring entry 保存 owner/binding key；take/activate/cancel/finish 在 pool 与目标 pwq 下闭环记账 |
-| T-21c | workerqueue 等待式 API 在 interrupt-like context 调用 | hardirq/softirq/BH-disabled 中调用 `flush_work()` 或 `cancel_work_sync()` | 当前 CPU 等待自身 bottom-half 退出，导致死锁或调度状态错误 | `kwork` 在进入 `WorkqueueSyncWaitIf` 前通过 `kirq` 提供的 `WorkqueueContextIf` 执行 context gate 并返回 `InvalidContext` |
-| T-21d | work callback 等待自身完成 | callback 中调用 `flush_work(self)` 或 `cancel_work_sync(self)` | self-deadlock，worker 永远无法完成当前 callback | `kwork` 通过 `WorkqueueTaskContextIf` 在当前任务上记录 opaque work key，对同一 work 返回 `SelfWait`，不依赖 CPU affinity |
-| T-21e | 非 provider 路径直接 drain pool | 普通 callback 或 IRQ 路径调用 pool worker入口 | task-local worker identity 与 worker slot 不一致，破坏 wait/sleep 记账 | queue-level drain API 已删除；只有 ktask pool worker 调用 `SystemPoolBinding::run_one_work()` |
+| T-21c | workerqueue 等待式 API 在 interrupt-like context 调用 | hardirq/softirq/BH-disabled 中调用 `flush_work()` 或 `cancel_work_sync()` | 当前 CPU 等待自身 bottom-half 退出，导致死锁或调度状态错误 | `kwork` 在进入 sleepable wait 前直接查询 `kirq::context` 并返回 `InvalidContext` |
+| T-21d | scheduler worker-pool execution identity 泄漏到 work 生命周期 | `ktask` 保存 work/queue handle 或拥有 work 生命周期 | work 释放顺序被 scheduler 上下文污染，callback 退出后仍可访问已释放对象 | `ktask::TaskExecutionContext` 只保存 opaque pool/worker/token key，用于 `TaskExecutionAccountingIf` 的 CPU-intensive accounting；work identity 和 queue owner 留在 `kworkqueue` / `kwork` |
+| T-21e | 非 worker 路径直接 drain pool | 普通 callback 或 IRQ 路径调用 task-context pool worker 入口 | task-local worker identity 与 worker slot 不一致，破坏 wait/sleep 记账 | queue-level drain API 已删除；task-context work 只由 `kworkerpool::KtaskWorkerPool` worker loop 执行，BH work 只由 softirq drain 执行 |
 | T-21f | 设备生命周期 work 被强行 leak、提前释放或 wrong-queue cancel | workerqueue API 要求 `&'static Work`，队列只保存裸指针，或 cancel API 依赖调用方传入 owner queue | 多设备/热插拔驱动无法释放 work，或 queued/running callback 访问已释放设备状态 | M4C 使用 refcounted `ScheduledWork`；M4G 使用 dynamic `WorkQueueHandle` 表达 custom queue 生命周期；M4H 为 delayed work 增加 generation gate；pending/running callback 持有 handle clone，enqueue 不分配；pending owner queue 记录在 `ScheduledWork` 状态中，teardown 通过 `cancel_work_sync(work)` / `cancel_delayed_work_sync(work)`、`flush_work(work)` / `flush_delayed_work(work)` 或 `destroy_workqueue(queue)` 收敛生命周期 |
 | T-21g | worker callback 等待同 pool 中不可推进的 work | W1 callback 中 `flush_work(W2)`，且 W2 pending/running 属于同一 bounded execution pool | bounded worker pool 可能被等待关系耗尽，W2 无法完成，形成永久死锁 | `kwork` 在 `WorkState` 中记录 pending/running pool key，在 task-local context 中记录当前 pool key；同 pool pending/running wait 返回 `SelfWait`，等待循环也重查该谓词 |
 | T-22 | oneshot runtime 字段被误当成已实现行为 | 后续代码只改 flag，没有安装 mask protocol | oneshot IRQ 无法屏蔽重入或误解除 mask | review 要求 oneshot mask 和 thread identity 在 `IrqDescRuntimeState` owner 内成组实现 |
@@ -337,19 +337,18 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 - deferred executor 注册是单 owner。`softirq::init()` 在启动路径安装默认 owner；
   重复注册返回 `false`，空 executor 也返回 `false`；runner 在未注册时返回
   `NoExecutor`。
-- workerqueue 的 per-CPU bound `system_wq` pools 由 `kwork` 拥有队列和 work 状态。
-  `kirq` 只通过私有 provider 模块提供 IRQ/BH context predicate，
-  `ktask` 只通过 `kwork::WorkqueueHostIf` 提供每 CPU 一个 bounded
-  `kwork/system_wq/<cpu>:<worker_id>` 执行池。custom/dynamic queue 通过 per-CPU
-  pwq 挂接到同一 Default pool，不安装专属 worker task。向 pool 投递 work 前，
-  `kwork` 会确认目标 CPU 的 provider pool 已安装，避免 work 停在无人 drain 的 CPU pool。
-- workerqueue self-wait 诊断通过 `kwork::WorkqueueTaskContextIf` 使用任务本地 opaque
-  work/queue/pool/worker key。callback 可以 sleep/yield；诊断不能依赖 per-CPU slot，否则
-  worker 迁移后会漏检 self-wait、同 pool pending/running wait 或污染旧 CPU 状态。work key
-  来自 `ScheduledWork` 底层 allocation identity；queue entry 和 running callback 都持有
-  `ScheduledWork` clone，避免 work 状态在仍可观察时被释放。queue-level drain API 已删除，
-  task-local context 只由 provider-owned pool worker 安装。
-- `flush_work()` / `cancel_work_sync()` 使用 `WorkqueueSyncWaitIf` 阻塞等待 work
+- workerqueue 的 per-CPU built-in pools 由 `kwork` 装配。`kworkqueue` 持有 queue
+  和 work 状态，`kworkerpool::KtaskWorkerPool` 持有 normal worker/manager task，
+  `kirq` 只提供 IRQ/BH context predicate 和 BH softirq drain 执行域。
+  custom/dynamic queue 通过 per-CPU binding 挂接到同一 normal pool，不安装专属
+  worker task。向 pool 投递 work 前，`kwork` 会确认目标 CPU 的 built-in pool
+  已安装，避免 work 停在无人 drain 的 CPU pool。
+- worker-pool CPU-intensive 采样通过 `ktask::TaskExecutionContext` 使用任务本地 opaque
+  pool/worker/token key。callback 可以 sleep/yield；采样不能依赖 per-CPU slot，否则
+  worker 迁移后会漏 tick 或污染旧 CPU 状态。work key 来自 `kworkqueue::Work` identity；
+  queue entry 和 running callback 都持有 `ScheduledWork` clone，避免 work 状态在仍可观察时被释放。
+  queue-level drain API 已删除，task-local context 只由 pool worker 安装。
+- `flush_work()` / `cancel_work_sync()` 通过 `ktask` wait/yield 机制等待 work
   变为 idle。等待式 API 拒绝 hardirq、serving-softirq 和 BH-disabled context；
   pending owner queue 是 `ScheduledWork` 状态的一部分，cancel 路径从 work 反查并移除
   pending entry，避免调用方传错 queue 后把未取消 work 当成 idle。`cancel_work_sync()`

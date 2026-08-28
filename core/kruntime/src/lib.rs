@@ -532,7 +532,7 @@ fn init_interrupt() {
     if !kirq::softirq::init() {
         warn!("softirq hardirq-exit runner was already installed");
     }
-    if !kirq::init_workerqueue() {
+    if !kwork::raw::init_bottom_half_workerqueue() {
         warn!("bottom-half workerqueue softirq actions were already installed");
     }
 
@@ -573,8 +573,10 @@ fn init_interrupt() {
     );
 
     ktask::init_softirqd_current_cpu();
-    ktask::init_system_workqueue_worker();
-
+    if kwork::raw::init_system_workqueue_worker_pools_for_cpu(khal::percpu::this_cpu_id()).is_none()
+    {
+        warn!("failed to initialize built-in workqueue worker pools");
+    }
     // Enable IRQs before starting app
     karch::enable_local_irq();
 }
