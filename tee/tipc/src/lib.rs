@@ -43,7 +43,7 @@ pub const IPC_PORT_PATH_MAX: usize = 64;
 /// Maximum number of receive buffers in one channel queue.
 pub const IPC_CHAN_MAX_BUFS: usize = 32;
 /// Maximum size of one receive buffer.
-pub const IPC_CHAN_MAX_BUF_SIZE: usize = 4096;
+pub const IPC_CHAN_MAX_BUF_SIZE: usize = 8192;
 /// Maximum number of handles attached to one message.
 pub const IPC_MAX_MSG_HANDLES: usize = 8;
 /// Marks the server endpoint of a channel pair.

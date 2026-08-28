@@ -26,7 +26,7 @@ use vsock::{VsockConnectionInfo, VsockDevice, VsockTransportEvent, VsockTranspor
 use crate::as_driver_error;
 
 /// Per-vsock RX virtqueue buffer size.
-const RX_BUFFER_SIZE: usize = 4096;
+const RX_BUFFER_SIZE: usize = 8192;
 
 /// Low-level VirtIO vsock device.
 ///
