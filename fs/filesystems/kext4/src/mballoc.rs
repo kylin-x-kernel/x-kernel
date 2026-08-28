@@ -43,11 +43,14 @@ impl Ext4AllocationFlags {
 /// A Linux `ext4_allocation_request`-style allocation input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Ext4AllocationRequest {
+    // Logical block number: block index within the file (0-based).
     logical_start: LogicalBlock,
+    // Recommended block number.
     goal: Option<FilesystemBlock>,
     expected_len: BlockCount,
     min_len: BlockCount,
     flags: Ext4AllocationFlags,
+    // Keep the contents of the same inode as contiguous as possible.
     locality_group: BlockGroupNumber,
 }
 
@@ -420,7 +423,26 @@ impl BlockGroupFreeExtentCache {
         Ok(best)
     }
 
+    /// Rebuild the "order buckets" of free blocks.
     fn rebuild_order_buckets(&mut self) -> Ext4Result<()> {
+        // The run list is only ever produced by from_bitmap, mark_allocated,
+        // and mark_free; sorted, disjoint runs whose lengths sum to the
+        // cached free count are the cache's core invariant, mirroring the
+        // buddy-tree consistency checks in Linux mballoc.
+        debug_assert!(
+            self.free_runs
+                .windows(2)
+                .all(|pair| pair[0].end_bit() < pair[1].first_bit),
+            "free-extent cache runs are not sorted and disjoint"
+        );
+        debug_assert!(
+            self.free_runs
+                .iter()
+                .try_fold(0u32, |total, run| total.checked_add(run.len))
+                .is_some_and(|total| total == self.free_blocks),
+            "free-extent cache run lengths disagree with free_blocks={}",
+            self.free_blocks
+        );
         for bucket in &mut self.order_buckets {
             bucket.clear();
         }

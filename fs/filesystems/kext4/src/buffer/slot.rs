@@ -15,6 +15,7 @@ use super::{
 use crate::{Ext4Error, Ext4Result, UnsupportedKind, jbd2::TransactionId};
 
 pub(super) enum BufferContents {
+    // Initial state
     Loading,
     Ready {
         bytes: Arc<[u8]>,
@@ -104,11 +105,18 @@ impl MetadataBufferSlot {
     }
 
     pub(super) fn publish(&self, bytes: Arc<[u8]>) {
-        *lock(&self.contents) = BufferContents::Ready {
-            bytes,
-            state: MetadataBufferState::Clean,
-            checkpoints: VecDeque::new(),
-        };
+        {
+            let mut contents = lock(&self.contents);
+            debug_assert!(
+                matches!(&*contents, BufferContents::Loading),
+                "metadata buffer published twice"
+            );
+            *contents = BufferContents::Ready {
+                bytes,
+                state: MetadataBufferState::Clean,
+                checkpoints: VecDeque::new(),
+            };
+        }
         self.notify_all();
     }
 

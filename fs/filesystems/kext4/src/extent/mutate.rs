@@ -2081,7 +2081,14 @@ impl MutableExtent {
         Ok(validate_extent_len(merged_len, self.is_unwritten).is_ok())
     }
 
+    // Merge other into self by appending it after the end of self
     fn merge(self, other: Self) -> Ext4Result<Self> {
+        debug_assert!(
+            self.end() == Ok(other.logical) && self.physical_end() == Ok(other.physical.get()),
+            "merging non-contiguous extents {} and {} would corrupt the mapping",
+            self.logical,
+            other.logical
+        );
         let len = self.len.checked_add(other.len).ok_or(Ext4Error::Overflow)?;
         validate_extent_len(len, self.is_unwritten)?;
         Ok(Self { len, ..self })
@@ -2145,6 +2152,7 @@ fn validate_mutable_extents(
     Ok(())
 }
 
+// Merges adjacent extents that are logically and physically contiguous.
 fn merge_adjacent_extents(extents: &mut Vec<MutableExtent>) -> Ext4Result<()> {
     let mut index = 0usize;
     while index + 1 < extents.len() {
@@ -2157,6 +2165,12 @@ fn merge_adjacent_extents(extents: &mut Vec<MutableExtent>) -> Ext4Result<()> {
             index += 1;
         }
     }
+    debug_assert!(
+        extents
+            .windows(2)
+            .all(|pair| pair[0].end().is_ok_and(|end| end <= pair[1].logical)),
+        "extent mutation left overlapping logical ranges"
+    );
     Ok(())
 }
 

@@ -23,4 +23,4 @@ pub(crate) use group::{
     update_group_block_bitmap_metadata, update_group_inode_allocation_metadata,
     update_group_inode_bitmap_metadata,
 };
-pub use superblock::{JournalFields, Superblock};
+pub use superblock::{Ext4DiskSuperblock, JournalFields};

@@ -13,7 +13,7 @@ use block::BlockDeviceOperations;
 use ksync::Mutex;
 
 use crate::{
-    disk::{Superblock, superblock},
+    disk::{Ext4DiskSuperblock, superblock},
     error::{CorruptKind, Ext4Error, Ext4Result, UnsupportedKind},
     jbd2::{
         JournalBlock, JournalBlockMapper, JournalBlockReader, JournalBlockWriter,
@@ -818,7 +818,7 @@ impl Ext4SbInfo {
     fn write_ext4_superblock_recovery_feature(
         &self,
         update: impl FnOnce(&mut [u8]) -> Ext4Result<()>,
-    ) -> Ext4Result<Superblock> {
+    ) -> Ext4Result<Ext4DiskSuperblock> {
         let (block, offset, len) = self.primary_superblock_location()?;
         let end = offset.checked_add(len).ok_or(Ext4Error::Overflow)?;
 
@@ -826,7 +826,7 @@ impl Ext4SbInfo {
         self.device.read_blocks(block, 1, &mut bytes)?;
         let superblock_bytes = bytes.get_mut(offset..end).ok_or(Ext4Error::OutOfBounds)?;
         update(superblock_bytes)?;
-        let superblock = Superblock::decode(superblock_bytes)?;
+        let superblock = Ext4DiskSuperblock::decode(superblock_bytes)?;
         self.device.write_contiguous_blocks(block, 1, &bytes)?;
         self.flush_device()?;
         Ok(superblock)

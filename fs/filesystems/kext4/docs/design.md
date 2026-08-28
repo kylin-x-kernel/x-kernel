@@ -382,7 +382,7 @@ append、已有 HTree leaf split、线性目录转 HTree，以及转换后立即
 `ext4_rec_len_from_disk()` 一致地把原始 `0` 和 `0xffff` 解释为整个目录块；64 KiB 整块写回使用
 `0xffff`。`HTreeRootInfo` 统一校验 root 固定字段与磁盘 hash version，`Ext4SbInfo::decode_htree_root()`
 再结合 `large_dir` 校验树深并解码 count/limit，读写路径不再各自维护一套 root 规则。磁盘 root
-只接受 Linux 的 `0/1/2/6`。磁盘 `Superblock` 只保存 `s_def_hash_version`、`s_hash_seed` 和
+只接受 Linux 的 `0/1/2/6`。磁盘 `Ext4DiskSuperblock` 只保存 `s_def_hash_version`、`s_hash_seed` 和
 `s_flags` 事实；`Ext4SbInfo` 在 mount 阶段按 `ext4_hash_info_init()` 校验默认版本，并且只在
 启用 `DIR_INDEX` 时解释 signedness flags。显式 unsigned 优先，显式 signed 保持 signed；两者都
 未设置时按当前 Linux 的全局 unsigned-char 语义生成运行态 `hash_unsigned=3`。该初始化阶段只
@@ -478,7 +478,7 @@ counter 被 checkpoint 前的快照重新带回循环。重建时冻结的 `grou
 挂载时的值：replay 后的 descriptor 地址若与冻结表不一致，reload 直接报 corruption
 返回，不会带着分裂的地址状态继续清理。全部 orphan 清理完成后，recovery 再确认 JBD2
 `s_start` 为零，最后清除并 flush ext4 recovery feature；任一步失败都会返回错误，而不会先
-清除最终的磁盘恢复证据。Superblock decode 会保留越过 inode table 的原始
+清除最终的磁盘恢复证据。Ext4DiskSuperblock decode 会保留越过 inode table 的原始
 `s_last_orphan`，使显式 recovery 有机会处理该损坏，而普通 mount 仍因非零 orphan head 返回
 `NeedsRecovery`。Recovery 在 `iget` 前同时校验 inode table 上界、reserved inode 范围和经过
 checksum 验证的 inode bitmap 分配位；编号合法但 allocation bit 为零的 head 不读取 inode

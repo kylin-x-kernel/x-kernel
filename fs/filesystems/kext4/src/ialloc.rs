@@ -249,6 +249,13 @@ impl Ext4SbInfo {
             }
             Err(error) => return Err(error),
         };
+        // Reserved inodes are excluded by the scan itself, so handing one
+        // out would be an allocator bug, not a disk-data condition.
+        debug_assert!(
+            !self.is_reserved_inode(allocation.inode()),
+            "inode allocator handed out reserved inode {}",
+            allocation.inode()
+        );
         let inode_table_block = self.inode_table_entry_block_in_group(
             allocation.inode(),
             group_index,
@@ -441,6 +448,12 @@ impl Ext4SbInfo {
             bitmap_allocator::release_inode_to_bitmap(&mut bitmap_bytes, range, inode, |inode| {
                 self.is_reserved_inode(inode)
             })?;
+        debug_assert_eq!(released.inode(), inode, "freed a different inode");
+        debug_assert_eq!(
+            crate::superblock::is_ext4_bitmap_bit_set(&bitmap_bytes, released.bitmap_bit()),
+            Ok(false),
+            "released inode {inode} is still marked allocated in the bitmap"
+        );
         let mut inode_table_bytes = self
             .read_metadata_block(inode_table_block)?
             .as_ref()

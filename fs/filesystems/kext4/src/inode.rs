@@ -306,7 +306,12 @@ pub struct Ext4Timestamp {
 
 impl Ext4Timestamp {
     /// Creates a timestamp relative to the Unix epoch.
+    ///
+    /// Sub-second nanoseconds are normalized so any constructed timestamp
+    /// satisfies `nanos < NANOS_PER_SEC`.
     pub const fn new(seconds: i64, nanos: u32) -> Self {
+        let seconds = seconds + (nanos / ktime_types::NANOS_PER_SEC as u32) as i64;
+        let nanos = nanos % ktime_types::NANOS_PER_SEC as u32;
         Self { seconds, nanos }
     }
 

@@ -163,6 +163,23 @@ impl Ext4SbInfo {
             Err(Ext4Error::NoSpace) => return Err(Ext4Error::NoSpace),
             Err(error) => return Err(error),
         };
+        // Linux rejects an empty allocation with BUG_ON and treats any
+        // system-zone overlap as a filesystem error in
+        // ext4_mb_mark_diskspace_used; here both are internal invariants
+        // of the bitmap scan.
+        debug_assert!(
+            allocation.block_count() >= min_len && allocation.block_count() <= expected_len,
+            "allocated run {} outside requested bounds [{}, {}]",
+            allocation.block_count(),
+            min_len,
+            expected_len
+        );
+        debug_assert!(
+            (0..allocation.block_count().get()).all(|offset| range
+                .block_at(allocation.first_bitmap_bit() + offset)
+                .is_ok_and(|block| !self.is_system_zone_block(block))),
+            "block allocator handed out system-zone blocks"
+        );
 
         let mut descriptor_bytes = self
             .read_metadata_block(descriptor_block)?
@@ -354,6 +371,19 @@ impl Ext4SbInfo {
             block,
             |candidate| self.is_system_zone_block(candidate) && candidate != block,
         )?;
+        // Linux asserts block identity on the free path with BUG_ON; here
+        // the bitmap primitive guarantees it, so only the cleared bit is
+        // worth re-checking.
+        debug_assert_eq!(
+            released.block().get(),
+            block.get(),
+            "freed a different block"
+        );
+        debug_assert_eq!(
+            crate::superblock::is_ext4_bitmap_bit_set(&bitmap_bytes, released.bitmap_bit()),
+            Ok(false),
+            "released block {block} is still marked allocated in the bitmap"
+        );
 
         let mut descriptor_bytes = self
             .read_metadata_block(descriptor_block)?

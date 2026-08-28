@@ -877,6 +877,10 @@ fn has_checksum_v2_or_v3(superblock: &JournalSuperblock) -> bool {
 }
 
 fn next_log_block(superblock: &JournalSuperblock, block: JournalBlock) -> JournalBlock {
+    debug_assert!(
+        (superblock.first_log_block().get()..superblock.max_blocks()).contains(&block.get()),
+        "journal block {block} is outside the circular log range"
+    );
     let next = block.get() + 1;
     if next == superblock.max_blocks() {
         superblock.first_log_block()

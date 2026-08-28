@@ -835,6 +835,7 @@ impl Ext4SbInfo {
 
         loop {
             let absolute = cursor.absolute_offset(offset)?;
+            // Logical block number: block index within the file (0-based).
             let logical = LogicalBlock::new(absolute / block_size);
             let in_block =
                 usize::try_from(absolute % block_size).map_err(|_| Ext4Error::Overflow)?;
@@ -1036,6 +1037,12 @@ impl Ext4SbInfo {
         }
     }
 
+    /// Calculate the next allocation target (physical block number) after the given logical block.
+    /// # Return Value
+    /// - `Some(physical)` - The suggested physical block number for allocation
+    ///   (previous physical block + 1)
+    /// - `None` - No suggestion available (e.g., the logical block is 0, or the
+    ///   previous logical block is a hole)
     pub(crate) fn allocation_goal_after_previous_extent(
         &self,
         inode: &Ext4Inode,

@@ -14,7 +14,9 @@ use crate::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BlockGroupRange {
     group: BlockGroupNumber,
+    // First block number of this group.
     first_block: FilesystemBlock,
+    // The total number of blocks in this group.
     block_count: u32,
 }
 
@@ -100,9 +102,13 @@ impl BlockAllocation {
 /// One contiguous physical run selected from a block bitmap.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BlockRunAllocation {
+    // Which group this contiguous space belongs to.
     group: BlockGroupNumber,
+    // The physical block number converted from FilesystemBlock.
     first_block: PhysicalBlock,
+    // The number of contiguous blocks in a region within the group.
     block_count: BlockCount,
+    // Starting position of this range within the group, expressed as a bitmap bit index.
     first_bitmap_bit: u32,
 }
 
@@ -113,6 +119,13 @@ impl BlockRunAllocation {
         block_count: BlockCount,
         first_bitmap_bit: u32,
     ) -> Self {
+        debug_assert!(
+            first_bitmap_bit
+                .checked_add(block_count.get())
+                .is_some_and(|end_bit| end_bit <= range.block_count()),
+            "block run exceeds group: {first_bitmap_bit}, {block_count}, {}",
+            range.block_count()
+        );
         Self {
             group: range.group(),
             first_block: PhysicalBlock::new(first_block.get()),
@@ -194,6 +207,8 @@ pub(crate) fn allocate_block_run_from_bitmap(
     Err(Ext4Error::NoSpace)
 }
 
+/// @block: the block to be released.
+/// return: block information returned after release.
 pub(crate) fn release_block_to_bitmap(
     bitmap: &mut [u8],
     range: BlockGroupRange,

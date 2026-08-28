@@ -68,7 +68,7 @@ impl JournalFields {
 
 /// Decoded fields required to derive the initial ext4 storage layout.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Superblock {
+pub struct Ext4DiskSuperblock {
     inodes_count: u32,
     blocks_count: u64,
     reserved_blocks_count: u64,
@@ -97,7 +97,7 @@ pub struct Superblock {
     backup_groups: [u32; 2],
 }
 
-impl Superblock {
+impl Ext4DiskSuperblock {
     pub(crate) fn decode(input: &[u8]) -> Ext4Result<Self> {
         if input.len() != SUPERBLOCK_SIZE {
             return Err(Ext4Error::InvalidBufferLength {
@@ -449,7 +449,7 @@ impl Superblock {
 }
 
 pub(crate) fn clear_ext4_needs_recovery_feature(input: &mut [u8]) -> Ext4Result<()> {
-    let superblock = Superblock::decode(input)?;
+    let superblock = Ext4DiskSuperblock::decode(input)?;
     let mut incompat = features::IncompatFeatures::from_bits_retain(codec::le_u32(
         input,
         FEATURE_INCOMPAT_OFFSET,
@@ -461,7 +461,7 @@ pub(crate) fn clear_ext4_needs_recovery_feature(input: &mut [u8]) -> Ext4Result<
 }
 
 pub(crate) fn set_ext4_needs_recovery_feature(input: &mut [u8]) -> Ext4Result<()> {
-    let superblock = Superblock::decode(input)?;
+    let superblock = Ext4DiskSuperblock::decode(input)?;
     let mut incompat = features::IncompatFeatures::from_bits_retain(codec::le_u32(
         input,
         FEATURE_INCOMPAT_OFFSET,
@@ -472,8 +472,11 @@ pub(crate) fn set_ext4_needs_recovery_feature(input: &mut [u8]) -> Ext4Result<()
     update_feature_checksum(input, &superblock)
 }
 
-pub(crate) fn decrement_free_blocks_count(input: &mut [u8], blocks: u32) -> Ext4Result<Superblock> {
-    let superblock = Superblock::decode(input)?;
+pub(crate) fn decrement_free_blocks_count(
+    input: &mut [u8],
+    blocks: u32,
+) -> Ext4Result<Ext4DiskSuperblock> {
+    let superblock = Ext4DiskSuperblock::decode(input)?;
     let free_blocks_count = superblock
         .on_disk_free_blocks_count()
         .checked_sub(u64::from(blocks))
@@ -481,8 +484,11 @@ pub(crate) fn decrement_free_blocks_count(input: &mut [u8], blocks: u32) -> Ext4
     set_free_blocks_count(input, free_blocks_count)
 }
 
-pub(crate) fn increment_free_blocks_count(input: &mut [u8], blocks: u32) -> Ext4Result<Superblock> {
-    let superblock = Superblock::decode(input)?;
+pub(crate) fn increment_free_blocks_count(
+    input: &mut [u8],
+    blocks: u32,
+) -> Ext4Result<Ext4DiskSuperblock> {
+    let superblock = Ext4DiskSuperblock::decode(input)?;
     let free_blocks_count = superblock
         .on_disk_free_blocks_count()
         .checked_add(u64::from(blocks))
@@ -490,8 +496,11 @@ pub(crate) fn increment_free_blocks_count(input: &mut [u8], blocks: u32) -> Ext4
     set_free_blocks_count(input, free_blocks_count)
 }
 
-pub(crate) fn decrement_free_inodes_count(input: &mut [u8], inodes: u32) -> Ext4Result<Superblock> {
-    let superblock = Superblock::decode(input)?;
+pub(crate) fn decrement_free_inodes_count(
+    input: &mut [u8],
+    inodes: u32,
+) -> Ext4Result<Ext4DiskSuperblock> {
+    let superblock = Ext4DiskSuperblock::decode(input)?;
     let free_inodes_count = superblock
         .on_disk_free_inodes_count()
         .checked_sub(inodes)
@@ -499,8 +508,11 @@ pub(crate) fn decrement_free_inodes_count(input: &mut [u8], inodes: u32) -> Ext4
     set_free_inodes_count(input, free_inodes_count)
 }
 
-pub(crate) fn increment_free_inodes_count(input: &mut [u8], inodes: u32) -> Ext4Result<Superblock> {
-    let superblock = Superblock::decode(input)?;
+pub(crate) fn increment_free_inodes_count(
+    input: &mut [u8],
+    inodes: u32,
+) -> Ext4Result<Ext4DiskSuperblock> {
+    let superblock = Ext4DiskSuperblock::decode(input)?;
     let free_inodes_count = superblock
         .on_disk_free_inodes_count()
         .checked_add(inodes)
@@ -508,27 +520,33 @@ pub(crate) fn increment_free_inodes_count(input: &mut [u8], inodes: u32) -> Ext4
     set_free_inodes_count(input, free_inodes_count)
 }
 
-pub(crate) fn set_last_orphan(input: &mut [u8], last_orphan: u32) -> Ext4Result<Superblock> {
-    let superblock = Superblock::decode(input)?;
+pub(crate) fn set_last_orphan(
+    input: &mut [u8],
+    last_orphan: u32,
+) -> Ext4Result<Ext4DiskSuperblock> {
+    let superblock = Ext4DiskSuperblock::decode(input)?;
     if last_orphan > superblock.inodes_count() {
         return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeNumber));
     }
 
     input[LAST_ORPHAN_OFFSET..LAST_ORPHAN_OFFSET + 4].copy_from_slice(&last_orphan.to_le_bytes());
     update_feature_checksum(input, &superblock)?;
-    Superblock::decode(input)
+    Ext4DiskSuperblock::decode(input)
 }
 
-pub(crate) fn set_unsigned_hash_flag(input: &mut [u8]) -> Ext4Result<Superblock> {
-    let superblock = Superblock::decode(input)?;
+pub(crate) fn set_unsigned_hash_flag(input: &mut [u8]) -> Ext4Result<Ext4DiskSuperblock> {
+    let superblock = Ext4DiskSuperblock::decode(input)?;
     let flags = superblock.flags() | EXT2_FLAGS_UNSIGNED_HASH;
     input[FLAGS_OFFSET..FLAGS_OFFSET + 4].copy_from_slice(&flags.to_le_bytes());
     update_feature_checksum(input, &superblock)?;
-    Superblock::decode(input)
+    Ext4DiskSuperblock::decode(input)
 }
 
-fn set_free_blocks_count(input: &mut [u8], free_blocks_count: u64) -> Ext4Result<Superblock> {
-    let superblock = Superblock::decode(input)?;
+fn set_free_blocks_count(
+    input: &mut [u8],
+    free_blocks_count: u64,
+) -> Ext4Result<Ext4DiskSuperblock> {
+    let superblock = Ext4DiskSuperblock::decode(input)?;
     if free_blocks_count > superblock.blocks_count() {
         return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry));
     }
@@ -545,11 +563,14 @@ fn set_free_blocks_count(input: &mut [u8], free_blocks_count: u64) -> Ext4Result
             .copy_from_slice(&high.to_le_bytes());
     }
     update_feature_checksum(input, &superblock)?;
-    Superblock::decode(input)
+    Ext4DiskSuperblock::decode(input)
 }
 
-fn set_free_inodes_count(input: &mut [u8], free_inodes_count: u32) -> Ext4Result<Superblock> {
-    let superblock = Superblock::decode(input)?;
+fn set_free_inodes_count(
+    input: &mut [u8],
+    free_inodes_count: u32,
+) -> Ext4Result<Ext4DiskSuperblock> {
+    let superblock = Ext4DiskSuperblock::decode(input)?;
     if free_inodes_count > superblock.inodes_count() {
         return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeGeometry));
     }
@@ -557,10 +578,10 @@ fn set_free_inodes_count(input: &mut [u8], free_inodes_count: u32) -> Ext4Result
     input[FREE_INODES_COUNT_OFFSET..FREE_INODES_COUNT_OFFSET + 4]
         .copy_from_slice(&free_inodes_count.to_le_bytes());
     update_feature_checksum(input, &superblock)?;
-    Superblock::decode(input)
+    Ext4DiskSuperblock::decode(input)
 }
 
-fn update_feature_checksum(input: &mut [u8], superblock: &Superblock) -> Ext4Result<()> {
+fn update_feature_checksum(input: &mut [u8], superblock: &Ext4DiskSuperblock) -> Ext4Result<()> {
     if superblock.features().has_metadata_checksum() {
         let checksum = checksum::crc32c(u32::MAX, &input[..CHECKSUM_OFFSET]);
         input[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4].copy_from_slice(&checksum.to_le_bytes());
@@ -593,8 +614,9 @@ fn effective_want_extra_isize(
 #[cfg(test)]
 mod tests {
     use super::{
-        CHECKSUM_OFFSET, CRC32C_CHECKSUM_TYPE, EXT2_FLAGS_UNSIGNED_HASH, LINUX_DEFAULT_EXTRA_ISIZE,
-        MIN_EXTRA_ISIZE_OFFSET, SUPERBLOCK_SIZE, Superblock, WANT_EXTRA_ISIZE_OFFSET,
+        CHECKSUM_OFFSET, CRC32C_CHECKSUM_TYPE, EXT2_FLAGS_UNSIGNED_HASH, Ext4DiskSuperblock,
+        LINUX_DEFAULT_EXTRA_ISIZE, MIN_EXTRA_ISIZE_OFFSET, SUPERBLOCK_SIZE,
+        WANT_EXTRA_ISIZE_OFFSET,
     };
     use crate::{ChecksumTarget, CorruptKind, Ext4Error, disk::checksum};
 
@@ -607,7 +629,7 @@ mod tests {
 
     #[test]
     fn derives_linux_default_effective_want_extra_isize() {
-        let decoded = Superblock::decode(&valid_superblock()).unwrap();
+        let decoded = Ext4DiskSuperblock::decode(&valid_superblock()).unwrap();
 
         assert_eq!(decoded.min_extra_isize(), 0);
         assert_eq!(decoded.want_extra_isize(), LINUX_DEFAULT_EXTRA_ISIZE);
@@ -620,7 +642,7 @@ mod tests {
         put_u16(&mut bytes, MIN_EXTRA_ISIZE_OFFSET, 48);
         put_u16(&mut bytes, WANT_EXTRA_ISIZE_OFFSET, 64);
 
-        let decoded = Superblock::decode(&bytes).unwrap();
+        let decoded = Ext4DiskSuperblock::decode(&bytes).unwrap();
 
         assert_eq!(decoded.min_extra_isize(), 48);
         assert_eq!(decoded.want_extra_isize(), 64);
@@ -632,7 +654,7 @@ mod tests {
         put_u16(&mut bytes, MIN_EXTRA_ISIZE_OFFSET, 48);
         put_u16(&mut bytes, WANT_EXTRA_ISIZE_OFFSET, 64);
 
-        let decoded = Superblock::decode(&bytes).unwrap();
+        let decoded = Ext4DiskSuperblock::decode(&bytes).unwrap();
 
         assert_eq!(decoded.min_extra_isize(), 0);
         assert_eq!(decoded.want_extra_isize(), LINUX_DEFAULT_EXTRA_ISIZE);
@@ -643,7 +665,7 @@ mod tests {
         for descriptor_size in [64, 128, 1024] {
             let mut bytes = valid_superblock();
             put_u16(&mut bytes, 0xfe, descriptor_size);
-            assert!(Superblock::decode(&bytes).is_ok());
+            assert!(Ext4DiskSuperblock::decode(&bytes).is_ok());
         }
     }
 
@@ -653,7 +675,7 @@ mod tests {
             let mut bytes = valid_superblock();
             put_u16(&mut bytes, 0xfe, descriptor_size);
             assert_eq!(
-                Superblock::decode(&bytes),
+                Ext4DiskSuperblock::decode(&bytes),
                 Err(Ext4Error::Corrupt(CorruptKind::InvalidDescriptorSize))
             );
         }
@@ -664,7 +686,7 @@ mod tests {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, 0x14, 32_768);
         assert_eq!(
-            Superblock::decode(&bytes),
+            Ext4DiskSuperblock::decode(&bytes),
             Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry))
         );
     }
@@ -675,7 +697,7 @@ mod tests {
         put_u32(&mut bytes, 0x18, 0);
         put_u32(&mut bytes, 0x1c, 0);
         assert_eq!(
-            Superblock::decode(&bytes),
+            Ext4DiskSuperblock::decode(&bytes),
             Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry))
         );
     }
@@ -686,7 +708,7 @@ mod tests {
         put_u32(&mut bytes, 0x20, 32_769);
         put_u32(&mut bytes, 0x24, 32_769);
         assert_eq!(
-            Superblock::decode(&bytes),
+            Ext4DiskSuperblock::decode(&bytes),
             Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry))
         );
     }
@@ -696,7 +718,7 @@ mod tests {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, 0x24, 32_769);
         assert_eq!(
-            Superblock::decode(&bytes),
+            Ext4DiskSuperblock::decode(&bytes),
             Err(Ext4Error::Corrupt(CorruptKind::InvalidClusterGeometry))
         );
     }
@@ -706,7 +728,7 @@ mod tests {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, 0x64, RO_COMPAT_BIGALLOC);
         assert_eq!(
-            Superblock::decode(&bytes),
+            Ext4DiskSuperblock::decode(&bytes),
             Err(Ext4Error::UnsupportedFeature {
                 class: crate::FeatureClass::ReadOnlyCompatible,
                 bits: RO_COMPAT_BIGALLOC,
@@ -719,7 +741,7 @@ mod tests {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, 0x60, 0);
 
-        assert!(Superblock::decode(&bytes).is_ok());
+        assert!(Ext4DiskSuperblock::decode(&bytes).is_ok());
     }
 
     #[test]
@@ -734,7 +756,7 @@ mod tests {
         put_u32(&mut bytes, 0x60, INCOMPAT_64BIT);
 
         assert!(matches!(
-            Superblock::decode(&bytes),
+            Ext4DiskSuperblock::decode(&bytes),
             Err(Ext4Error::ChecksumMismatch {
                 target: ChecksumTarget::Superblock,
                 ..
@@ -748,7 +770,7 @@ mod tests {
         put_u32(&mut too_few, 0x00, 8);
         put_u32(&mut too_few, 0x28, 8);
         assert_eq!(
-            Superblock::decode(&too_few),
+            Ext4DiskSuperblock::decode(&too_few),
             Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeGeometry))
         );
 
@@ -756,14 +778,14 @@ mod tests {
         put_u32(&mut too_many, 0x00, 32_769);
         put_u32(&mut too_many, 0x28, 32_769);
         assert_eq!(
-            Superblock::decode(&too_many),
+            Ext4DiskSuperblock::decode(&too_many),
             Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeGeometry))
         );
 
         let mut count_mismatch = valid_superblock();
         put_u32(&mut count_mismatch, 0x00, 8191);
         assert_eq!(
-            Superblock::decode(&count_mismatch),
+            Ext4DiskSuperblock::decode(&count_mismatch),
             Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeGeometry))
         );
     }
@@ -773,12 +795,15 @@ mod tests {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, super::LAST_ORPHAN_OFFSET, 12);
 
-        let decoded = Superblock::decode(&bytes).unwrap();
+        let decoded = Ext4DiskSuperblock::decode(&bytes).unwrap();
         assert_eq!(decoded.last_orphan(), 12);
 
         let updated = super::set_last_orphan(&mut bytes, 13).unwrap();
         assert_eq!(updated.last_orphan(), 13);
-        assert_eq!(Superblock::decode(&bytes).unwrap().last_orphan(), 13);
+        assert_eq!(
+            Ext4DiskSuperblock::decode(&bytes).unwrap().last_orphan(),
+            13
+        );
     }
 
     #[test]
@@ -787,7 +812,7 @@ mod tests {
         put_u32(&mut bytes, 0x160, EXT2_FLAGS_UNSIGNED_HASH);
 
         assert_eq!(
-            Superblock::decode(&bytes)
+            Ext4DiskSuperblock::decode(&bytes)
                 .expect("decode unsigned-hash superblock")
                 .flags(),
             EXT2_FLAGS_UNSIGNED_HASH
@@ -807,7 +832,7 @@ mod tests {
             updated.flags() & EXT2_FLAGS_UNSIGNED_HASH,
             EXT2_FLAGS_UNSIGNED_HASH
         );
-        assert_eq!(Superblock::decode(&bytes).unwrap(), updated);
+        assert_eq!(Ext4DiskSuperblock::decode(&bytes).unwrap(), updated);
     }
 
     #[test]
@@ -815,7 +840,7 @@ mod tests {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, super::LAST_ORPHAN_OFFSET, 8193);
 
-        let decoded = Superblock::decode(&bytes).unwrap();
+        let decoded = Ext4DiskSuperblock::decode(&bytes).unwrap();
         assert_eq!(decoded.last_orphan(), 8193);
         assert_eq!(
             super::set_last_orphan(&mut bytes, 8193),
@@ -837,7 +862,7 @@ mod tests {
         super::clear_ext4_needs_recovery_feature(&mut bytes).unwrap();
 
         assert_eq!(
-            Superblock::decode(&bytes)
+            Ext4DiskSuperblock::decode(&bytes)
                 .unwrap()
                 .features()
                 .incompat()
@@ -855,7 +880,7 @@ mod tests {
         super::set_ext4_needs_recovery_feature(&mut bytes).unwrap();
 
         assert_ne!(
-            Superblock::decode(&bytes)
+            Ext4DiskSuperblock::decode(&bytes)
                 .unwrap()
                 .features()
                 .incompat()
@@ -879,7 +904,7 @@ mod tests {
 
         super::clear_ext4_needs_recovery_feature(&mut bytes).unwrap();
 
-        let decoded = Superblock::decode(&bytes).unwrap();
+        let decoded = Ext4DiskSuperblock::decode(&bytes).unwrap();
         assert_eq!(decoded.features().incompat().bits() & INCOMPAT_RECOVER, 0);
     }
 
@@ -893,7 +918,7 @@ mod tests {
 
         super::set_ext4_needs_recovery_feature(&mut bytes).unwrap();
 
-        let decoded = Superblock::decode(&bytes).unwrap();
+        let decoded = Ext4DiskSuperblock::decode(&bytes).unwrap();
         assert_ne!(decoded.features().incompat().bits() & INCOMPAT_RECOVER, 0);
     }
 

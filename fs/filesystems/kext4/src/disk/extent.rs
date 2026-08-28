@@ -29,6 +29,10 @@ pub(crate) fn encode_header(
     depth: u16,
     generation: u32,
 ) -> Ext4Result<()> {
+    debug_assert!(
+        entries <= max && depth <= EXTENT_MAX_DEPTH,
+        "extent header violates on-disk invariants: entries={entries}, max={max}, depth={depth}"
+    );
     if output.len() < EXTENT_HEADER_SIZE {
         return Err(crate::Ext4Error::Corrupt(crate::CorruptKind::Truncated));
     }
@@ -66,9 +70,13 @@ pub(crate) fn tail_offset(header: ExtentHeader) -> Ext4Result<usize> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ExtentHeader {
+    // number of valid entries
     entries: u16,
+    // capacity of store in entries
     max: u16,
+    // has tree real underlying blocks?
     depth: u16,
+    // generation of the tree
     generation: u32,
 }
 

@@ -17,7 +17,7 @@ use crate::{
     buffer::{Ext4MetadataIo, MetadataBuffer, MetadataWriteAccess},
     dirhash::DX_HASH_UNSIGNED_OFFSET,
     disk::{
-        BlockGroupDescriptor, GroupGeometry, GroupMutableState, Superblock, checksum,
+        BlockGroupDescriptor, Ext4DiskSuperblock, GroupGeometry, GroupMutableState, checksum,
         dir::DX_HASH_SIPHASH,
         features, superblock,
         superblock::{EXT2_FLAGS_SIGNED_HASH, EXT2_FLAGS_UNSIGNED_HASH},
@@ -187,7 +187,7 @@ impl Ext4RecoveryReport {
 }
 
 impl FilesystemLayout {
-    fn derive(superblock: &Superblock) -> Ext4Result<Self> {
+    fn derive(superblock: &Ext4DiskSuperblock) -> Ext4Result<Self> {
         let data_blocks = superblock
             .blocks_count()
             .checked_sub(u64::from(superblock.first_data_block()))
@@ -463,7 +463,7 @@ pub(crate) struct Ext4SbInfo {
     /// Geometry and feature bits never change after mount; live free-block
     /// and free-inode counters, the orphan-list head, and the recovery flag
     /// live in [`AllocatorState`] and are read through dedicated accessors.
-    pub(crate) superblock: Superblock,
+    pub(crate) superblock: Ext4DiskSuperblock,
     /// Per-group geometry (block/inode bitmap and inode-table addresses)
     /// frozen at mount.
     ///
@@ -589,7 +589,7 @@ impl Ext4SbInfo {
             superblock::SUPERBLOCK_OFFSET,
             &mut superblock_bytes,
         )?;
-        let superblock = Superblock::decode(&superblock_bytes)?;
+        let superblock = Ext4DiskSuperblock::decode(&superblock_bytes)?;
         superblock.features().validate_mount()?;
         let layout = FilesystemLayout::derive(&superblock)?;
         let filesystem_device = Arc::new(FilesystemDevice::open(
@@ -798,7 +798,7 @@ impl Ext4SbInfo {
     /// orphan-list head, and the recovery flag move with the allocator;
     /// use [`Self::free_blocks_count`], [`Self::free_inodes_count`], and
     /// [`Self::needs_recovery`] instead of the same-named fields here.
-    pub const fn superblock(&self) -> &Superblock {
+    pub const fn superblock(&self) -> &Ext4DiskSuperblock {
         &self.superblock
     }
 
@@ -1021,7 +1021,7 @@ impl Ext4SbInfo {
             .as_ref()
             .get(superblock_offset..superblock_offset + superblock_len)
             .ok_or(Ext4Error::OutOfBounds)?;
-        let superblock = Superblock::decode(superblock_bytes)?;
+        let superblock = Ext4DiskSuperblock::decode(superblock_bytes)?;
         superblock.features().validate_mount()?;
         let layout = FilesystemLayout::derive(&superblock)?;
         if layout != self.layout {
@@ -1065,7 +1065,7 @@ impl Ext4SbInfo {
 
     fn decode_group_descriptors(
         &self,
-        superblock: &Superblock,
+        superblock: &Ext4DiskSuperblock,
         layout: FilesystemLayout,
     ) -> Ext4Result<Vec<BlockGroupDescriptor>> {
         let descriptor_bytes = usize::try_from(layout.group_count)
@@ -2629,7 +2629,7 @@ mod tests {
         assert!(filesystem.needs_recovery());
         let on_disk_bytes = device.bytes();
         let on_disk_superblock =
-            Superblock::decode(&on_disk_bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+            Ext4DiskSuperblock::decode(&on_disk_bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
                 .expect("decode checkpointed primary superblock");
         assert!(on_disk_superblock.features().needs_recovery());
         let status = filesystem.journal_status().expect("journal status");
@@ -3131,8 +3131,9 @@ mod tests {
 
         {
             let bytes = device.bytes();
-            let persisted = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
-                .expect("decode persisted clean orphan superblock");
+            let persisted =
+                Ext4DiskSuperblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                    .expect("decode persisted clean orphan superblock");
             assert_eq!(persisted.last_orphan(), created.number().get());
             assert!(!persisted.features().needs_recovery());
         }
@@ -3147,8 +3148,9 @@ mod tests {
 
         {
             let bytes = device.bytes();
-            let persisted = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
-                .expect("decode recovered clean orphan superblock");
+            let persisted =
+                Ext4DiskSuperblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                    .expect("decode recovered clean orphan superblock");
             assert_eq!(persisted.last_orphan(), 0);
             assert!(!persisted.features().needs_recovery());
         }
@@ -3225,8 +3227,9 @@ mod tests {
 
         {
             let bytes = device.bytes();
-            let persisted = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
-                .expect("decode recovery-failed superblock");
+            let persisted =
+                Ext4DiskSuperblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                    .expect("decode recovery-failed superblock");
             assert_eq!(persisted.last_orphan(), orphan.get());
             assert!(persisted.features().needs_recovery());
         }
@@ -7565,8 +7568,9 @@ mod tests {
         create_journaled_orphan_test_image(&mke2fs, &image);
 
         let pristine = fs::read(&image).expect("read generated orphan recovery image");
-        let superblock = Superblock::decode(&pristine[1024..1024 + superblock::SUPERBLOCK_SIZE])
-            .expect("decode generated orphan recovery superblock");
+        let superblock =
+            Ext4DiskSuperblock::decode(&pristine[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                .expect("decode generated orphan recovery superblock");
         let out_of_range = superblock
             .inodes_count()
             .checked_add(1)
@@ -7577,8 +7581,9 @@ mod tests {
             fs::write(&image, &pristine).expect("restore pristine orphan recovery image");
             run_debugfs(&debugfs, &image, &format!("ssv last_orphan {head}"));
             let damaged = fs::read(&image).expect("read damaged orphan recovery image");
-            let persisted = Superblock::decode(&damaged[1024..1024 + superblock::SUPERBLOCK_SIZE])
-                .expect("decode damaged orphan recovery superblock");
+            let persisted =
+                Ext4DiskSuperblock::decode(&damaged[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                    .expect("decode damaged orphan recovery superblock");
             assert_eq!(persisted.last_orphan(), head);
 
             let device = Arc::new(LinuxImageDevice::new(damaged));
@@ -7590,8 +7595,9 @@ mod tests {
             );
 
             let bytes = device.bytes();
-            let recovered = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
-                .expect("decode recovered orphan superblock");
+            let recovered =
+                Ext4DiskSuperblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                    .expect("decode recovered orphan superblock");
             assert_eq!(recovered.last_orphan(), 0, "orphan head {head}");
             assert!(!recovered.features().needs_recovery(), "orphan head {head}");
 
@@ -7634,8 +7640,9 @@ mod tests {
         assert_eq!(Ext4SbInfo::recover(recovery_device), Ok(None));
 
         let bytes = device.bytes();
-        let recovered = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
-            .expect("decode recovered orphan superblock");
+        let recovered =
+            Ext4DiskSuperblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                .expect("decode recovered orphan superblock");
         assert_eq!(recovered.last_orphan(), 0);
         assert!(!recovered.features().needs_recovery());
 
@@ -7687,8 +7694,9 @@ mod tests {
         assert_eq!(Ext4SbInfo::recover(recovery_device), Ok(None));
 
         let bytes = device.bytes();
-        let recovered = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
-            .expect("decode recovered orphan superblock");
+        let recovered =
+            Ext4DiskSuperblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                .expect("decode recovered orphan superblock");
         assert_eq!(recovered.last_orphan(), 0);
         assert!(!recovered.features().needs_recovery());
 
@@ -7726,8 +7734,9 @@ mod tests {
 
         {
             let bytes = device.bytes();
-            let persisted = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
-                .expect("decode failed invalid-orphan recovery superblock");
+            let persisted =
+                Ext4DiskSuperblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                    .expect("decode failed invalid-orphan recovery superblock");
             assert_eq!(persisted.last_orphan(), 5);
             assert!(persisted.features().needs_recovery());
         }
@@ -7762,8 +7771,9 @@ mod tests {
             Err(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite))
         );
         let bytes = device.bytes();
-        let superblock = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
-            .expect("decode persisted clean orphan head");
+        let superblock =
+            Ext4DiskSuperblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                .expect("decode persisted clean orphan head");
         assert_eq!(superblock.last_orphan(), inode.number().get());
     }
 
@@ -7995,8 +8005,9 @@ mod tests {
         );
 
         let bytes = device.bytes();
-        let superblock = Superblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
-            .expect("decode recovery-failed superblock");
+        let superblock =
+            Ext4DiskSuperblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+                .expect("decode recovery-failed superblock");
         assert!(superblock.features().needs_recovery());
         assert_eq!(superblock.last_orphan(), inode.number().get());
         fs::remove_file(image).expect("remove recovery image");
@@ -8393,7 +8404,7 @@ mod tests {
             flags & TEST_EXT4_BG_INODE_UNINIT == 0,
         );
 
-        let superblock = Superblock::decode(&superblock_bytes).unwrap();
+        let superblock = Ext4DiskSuperblock::decode(&superblock_bytes).unwrap();
         if metadata_checksum {
             update_allocator_descriptor_bitmap_checksums(
                 &mut descriptor,
@@ -8507,7 +8518,7 @@ mod tests {
             .unwrap(),
         );
         let metadata_io = Ext4MetadataIo::new(filesystem_device.clone());
-        let superblock = Superblock::decode(&superblock_bytes).unwrap();
+        let superblock = Ext4DiskSuperblock::decode(&superblock_bytes).unwrap();
         let layout = FilesystemLayout::derive(&superblock).unwrap();
         let descriptors = vec![BlockGroupDescriptor::decode(&descriptor, true).unwrap()];
         let group_geometry = descriptors
@@ -8601,7 +8612,7 @@ mod tests {
             FilesystemDevice::open(device, TEST_BLOCK_SIZE, u64::from(block_count)).unwrap(),
         );
         let metadata_io = Ext4MetadataIo::new(filesystem_device.clone());
-        let superblock = Superblock::decode(&superblock_bytes).unwrap();
+        let superblock = Ext4DiskSuperblock::decode(&superblock_bytes).unwrap();
         let layout = FilesystemLayout::derive(&superblock).unwrap();
         let descriptors: Vec<BlockGroupDescriptor> = descriptors
             .iter()
@@ -8829,7 +8840,7 @@ mod tests {
         let superblock_bytes = bytes.get_mut(offset..end).unwrap();
         let compat = le_u32(superblock_bytes, 0x5c) | features::CompatFeatures::HAS_JOURNAL.bits();
         put_u32(superblock_bytes, 0x5c, compat);
-        filesystem.superblock = Superblock::decode(superblock_bytes).unwrap();
+        filesystem.superblock = Ext4DiskSuperblock::decode(superblock_bytes).unwrap();
         filesystem
             .device
             .write_contiguous_blocks(block, 1, &bytes)
@@ -8943,7 +8954,7 @@ mod tests {
         let ro_compat = le_u32(superblock_bytes, 0x64) | read_only_compat_features.bits();
         put_u32(superblock_bytes, 0x5c, compat);
         put_u32(superblock_bytes, 0x64, ro_compat);
-        filesystem.superblock = Superblock::decode(superblock_bytes).unwrap();
+        filesystem.superblock = Ext4DiskSuperblock::decode(superblock_bytes).unwrap();
         filesystem
             .device
             .write_contiguous_blocks(block, 1, &bytes)
@@ -8957,7 +8968,7 @@ mod tests {
         filesystem.device.read_blocks(block, 1, &mut bytes).unwrap();
         let superblock_bytes = bytes.get_mut(offset..end).unwrap();
         superblock_bytes[0xfc] = hash_version;
-        filesystem.superblock = Superblock::decode(superblock_bytes).unwrap();
+        filesystem.superblock = Ext4DiskSuperblock::decode(superblock_bytes).unwrap();
         filesystem
             .device
             .write_contiguous_blocks(block, 1, &bytes)
@@ -8973,7 +8984,7 @@ mod tests {
         let incompat = le_u32(superblock_bytes, 0x60) | features::IncompatFeatures::FLEX_BG.bits();
         put_u32(superblock_bytes, 0x60, incompat);
         superblock_bytes[0x174] = log_groups_per_flex;
-        let updated = Superblock::decode(superblock_bytes).unwrap();
+        let updated = Ext4DiskSuperblock::decode(superblock_bytes).unwrap();
         filesystem.layout = FilesystemLayout::derive(&updated).unwrap();
         filesystem.superblock = updated;
         filesystem
@@ -9542,7 +9553,7 @@ mod tests {
 }
 
 fn validate_group(
-    superblock: &Superblock,
+    superblock: &Ext4DiskSuperblock,
     layout: &FilesystemLayout,
     group: u32,
     descriptor: &BlockGroupDescriptor,

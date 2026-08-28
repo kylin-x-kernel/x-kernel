@@ -132,8 +132,8 @@ mod xattr;
 
 pub use dir::{DirectoryEntry, Ext4DirEntryRef, Ext4DirPos, Ext4DirSink};
 pub use disk::{
-    BlockGroupDescriptor, CompatFeatures, DirectoryFileType, FeatureSet, IncompatFeatures,
-    JournalFields, ReadOnlyCompatFeatures, Superblock,
+    BlockGroupDescriptor, CompatFeatures, DirectoryFileType, Ext4DiskSuperblock, FeatureSet,
+    IncompatFeatures, JournalFields, ReadOnlyCompatFeatures,
 };
 pub use error::{
     ChecksumTarget, CorruptKind, Ext4Error, Ext4Result, FeatureClass, UnsupportedKind,

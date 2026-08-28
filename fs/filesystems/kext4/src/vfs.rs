@@ -243,7 +243,7 @@ fn system_time_to_ext4(timestamp: SystemTime) -> Ext4Timestamp {
 
 fn ext4_timestamp_to_system_time(timestamp: Ext4Timestamp) -> SystemTime {
     SystemTime::from_unix_parts(timestamp.seconds(), timestamp.nanos())
-        .expect("decoded ext4 timestamps have normalized nanoseconds")
+        .expect("Ext4Timestamp normalizes sub-second nanoseconds")
 }
 
 #[cfg(feature = "times")]

@@ -96,12 +96,15 @@ impl InodeAllocation {
     }
 }
 
+/// Allocate a free inode from the inode bitmap.
+/// @goal: Expected inode number, preferably start searching from here.
 pub(crate) fn allocate_inode_from_bitmap(
     bitmap: &mut [u8],
     range: InodeGroupRange,
     goal: Option<InodeNumber>,
     mut is_protected: impl FnMut(InodeNumber) -> bool,
 ) -> Ext4Result<InodeAllocation> {
+    // Ensure the bitmap is large enough to hold all inodes in the range.
     validate_inode_bitmap_capacity(bitmap, range)?;
     let start = match goal {
         Some(goal) if range.contains(goal) => range.bit_index(goal)?,
@@ -109,12 +112,22 @@ pub(crate) fn allocate_inode_from_bitmap(
     };
 
     if let Some(allocation) = find_free_inode_linear(bitmap, range, start, &mut is_protected)? {
+        debug_assert_eq!(
+            is_bitmap_bit_set(bitmap, allocation.bitmap_bit()),
+            Ok(false),
+            "marking an in-use inode bitmap bit as allocated"
+        );
         set_bitmap_bit(bitmap, allocation.bitmap_bit())?;
         return Ok(allocation);
     }
     if start != 0
         && let Some(allocation) = find_free_inode_linear(bitmap, range, 0, &mut is_protected)?
     {
+        debug_assert_eq!(
+            is_bitmap_bit_set(bitmap, allocation.bitmap_bit()),
+            Ok(false),
+            "marking an in-use inode bitmap bit as allocated"
+        );
         set_bitmap_bit(bitmap, allocation.bitmap_bit())?;
         return Ok(allocation);
     }

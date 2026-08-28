@@ -17,9 +17,9 @@ use std::{
 use block::{BlockDeviceOperations, Device, DeviceKind, DriverError, DriverResult};
 
 use crate::{
-    BlockMapping, DirectoryFileType, Ext4DirEntryRef, Ext4DirPos, Ext4DirSink, Ext4Error,
-    Ext4Inode, Ext4Result, Ext4SbInfo, Ext4Timestamp, Ext4XattrNamespace, FilesystemBlock,
-    InodeKind, InodeNumber, LogicalBlock, Superblock, UnsupportedKind,
+    BlockMapping, DirectoryFileType, Ext4DirEntryRef, Ext4DirPos, Ext4DirSink, Ext4DiskSuperblock,
+    Ext4Error, Ext4Inode, Ext4Result, Ext4SbInfo, Ext4Timestamp, Ext4XattrNamespace,
+    FilesystemBlock, InodeKind, InodeNumber, LogicalBlock, UnsupportedKind,
     dirhash::DX_HASH_UNSIGNED_OFFSET,
     disk::superblock::{EXT2_FLAGS_SIGNED_HASH, EXT2_FLAGS_UNSIGNED_HASH},
     superblock::Ext4StatFsMode,
@@ -1863,7 +1863,8 @@ fn unsigned_linux_htree_split_remains_lookup_compatible() {
     run_e2fsck_optimize_directories(&e2fsck, &image);
 
     let bytes = fs::read(&image).expect("read generated unsigned htree image");
-    let superblock = Superblock::decode(&bytes[1024..2048]).expect("decode unsigned superblock");
+    let superblock =
+        Ext4DiskSuperblock::decode(&bytes[1024..2048]).expect("decode unsigned superblock");
     assert_ne!(superblock.flags() & EXT2_FLAGS_UNSIGNED_HASH, 0);
     assert_eq!(superblock.flags() & EXT2_FLAGS_SIGNED_HASH, 0);
 

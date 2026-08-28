@@ -1373,7 +1373,7 @@ impl Ext4SbInfo {
             }
         };
         let buffer = self.read_metadata_block(FilesystemBlock::new(physical.get()))?;
-        block[..block_size].copy_from_slice(&buffer.as_ref()[..block_size]);
+        block.copy_from_slice(&buffer.as_ref()[..block_size]);
         if directory.has_indexed_directory() {
             let (_, count_limit) = self.decode_htree_root(&block, block_size)?;
             self.verify_htree_block_checksum(
@@ -1765,7 +1765,7 @@ impl Ext4SbInfo {
         let root_physical = self.mapped_directory_block(directory, 0)?;
         let mut old_root = vec![0; block_size];
         let root_buffer = self.read_metadata_block(FilesystemBlock::new(root_physical.get()))?;
-        old_root[..block_size].copy_from_slice(&root_buffer.as_ref()[..block_size]);
+        old_root.copy_from_slice(&root_buffer.as_ref()[..block_size]);
         self.verify_directory_block(directory, 0, &old_root)?;
         let conversion = collect_linear_records_for_index_conversion(
             &old_root,
@@ -2203,7 +2203,7 @@ impl Ext4SbInfo {
     ) -> Ext4Result<Vec<u8>> {
         let mut bytes = vec![0; block_size];
         let buffer = self.read_metadata_block(FilesystemBlock::new(physical.get()))?;
-        bytes[..block_size].copy_from_slice(&buffer.as_ref()[..block_size]);
+        bytes.copy_from_slice(&buffer.as_ref()[..block_size]);
         Ok(bytes)
     }
 
@@ -2222,7 +2222,7 @@ impl Ext4SbInfo {
         let root_physical = self.mapped_directory_block(directory, 0)?;
         let mut root = vec![0; block_size];
         let root_buffer = self.read_metadata_block(FilesystemBlock::new(root_physical.get()))?;
-        root[..block_size].copy_from_slice(&root_buffer.as_ref()[..block_size]);
+        root.copy_from_slice(&root_buffer.as_ref()[..block_size]);
         let (root_info, root_count_limit) = self.decode_htree_root(&root, block_size)?;
         if root_info.indirect_levels() > 1 {
             return Err(Ext4Error::Unsupported(UnsupportedKind::LargeDir));
@@ -2271,7 +2271,7 @@ impl Ext4SbInfo {
         let node_physical = self.mapped_directory_block(directory, node_logical)?;
         let mut node = vec![0; block_size];
         let node_buffer = self.read_metadata_block(FilesystemBlock::new(node_physical.get()))?;
-        node[..block_size].copy_from_slice(&node_buffer.as_ref()[..block_size]);
+        node.copy_from_slice(&node_buffer.as_ref()[..block_size]);
         let node_count_limit =
             self.decode_htree_node_for_write(directory, node_logical, &node, block_size)?;
         self.verify_htree_block_checksum(
@@ -2532,8 +2532,9 @@ impl Ext4SbInfo {
                     .ok_or(Ext4Error::Overflow)?,
             )
             .ok_or(Ext4Error::Overflow)?;
+        let checksum_offset = tail_offset.checked_add(4).ok_or(Ext4Error::Overflow)?;
         let tail_reserved = bytes
-            .get(tail_offset..tail_offset + 4)
+            .get(tail_offset..checksum_offset)
             .ok_or(Ext4Error::Corrupt(CorruptKind::Truncated))?;
         let mut checksum = checksum::crc32c(
             inode_checksum_seed(
@@ -2547,7 +2548,7 @@ impl Ext4SbInfo {
         );
         checksum = checksum::crc32c(checksum, tail_reserved);
         checksum = checksum::crc32c(checksum, &0u32.to_le_bytes());
-        put_u32(bytes, tail_offset + 4, checksum)
+        put_u32(bytes, checksum_offset, checksum)
     }
 
     fn mapped_directory_block(
@@ -2580,9 +2581,10 @@ impl Ext4SbInfo {
                 actual: output.len(),
             });
         }
+        let output = &mut output[..block_size];
         let buffer = self.read_metadata_block(FilesystemBlock::new(physical.get()))?;
-        output[..block_size].copy_from_slice(&buffer.as_ref()[..block_size]);
-        self.verify_directory_block(directory, logical, &output[..block_size])?;
+        output.copy_from_slice(&buffer.as_ref()[..block_size]);
+        self.verify_directory_block(directory, logical, output)?;
         Ok(block_size)
     }
 
