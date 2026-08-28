@@ -169,6 +169,32 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
             .worker_tick_deadline(parts.worker, parts.token)
     }
 
+    /// Accounts that a ktask-backed worker blocked in a sleepable wait.
+    pub fn account_worker_blocked(
+        &self,
+        context: ktask::TaskExecutionContext,
+        now: MonotonicInstant,
+    ) -> Option<ActionBatch> {
+        let parts = decode_task_context(context)?;
+        let mut inner = self.inner.lock();
+        if parts.pool_id != inner.id() {
+            return None;
+        }
+        inner.worker_blocked(parts.worker, parts.token, now).ok()
+    }
+
+    /// Accounts that a ktask-backed worker resumed after a sleepable wait.
+    pub fn account_worker_resumed(&self, context: ktask::TaskExecutionContext) -> bool {
+        let Some(parts) = decode_task_context(context) else {
+            return false;
+        };
+        let mut inner = self.inner.lock();
+        if parts.pool_id != inner.id() {
+            return false;
+        }
+        inner.worker_resumed(parts.worker, parts.token).is_ok()
+    }
+
     /// Creates and activates one worker task for `worker`.
     pub fn start_worker_task<R>(
         &'static self,

@@ -62,6 +62,7 @@ const CASE_DESTROY_RACE: usize = 11;
 const CASE_DELAYED_CANCEL: usize = 12;
 const CASE_CANCEL_NONBLOCKING: usize = 13;
 const CASE_WAIT_DEADLOCK: usize = 14;
+const CASE_SLEEP_BLOCK: usize = 15;
 
 const PHASE_NONE: usize = 0;
 const PHASE_CANCEL_SPAWN: usize = 1;
@@ -218,8 +219,9 @@ pub fn stress_status_text() -> String {
                    yield-cpu [rounds], bh-drain [rounds], bh-highpri [rounds], budgeted-poller \
                    [rounds] [works], cancel-race [rounds] [works], disable-race [rounds] [works], \
                    destroy-race [rounds] [works], delayed-cancel [rounds] [works], \
-                   cancel-nonblocking [rounds] [works], wait-deadlock [rounds], all [rounds] \
-                   [works], smoke, soak [seconds] [works], bench [seconds] [works], dump\n"
+                   cancel-nonblocking [rounds] [works], wait-deadlock [rounds], sleep-block \
+                   [rounds], all [rounds] [works], smoke, soak [seconds] [works], bench [seconds] \
+                   [works], dump\n"
         .to_string();
     let case = CURRENT_CASE.load(Ordering::Acquire);
     let phase = CURRENT_PHASE.load(Ordering::Acquire);
@@ -309,6 +311,7 @@ pub fn run_stress_command(data: &[u8]) -> Result<String, StressError> {
         "delayed-cancel" => vec![run_delayed_cancel(args.as_slice())?],
         "cancel-nonblocking" => vec![run_cancel_nonblocking(args.as_slice())?],
         "wait-deadlock" => vec![run_wait_deadlock(args.as_slice())?],
+        "sleep-block" => vec![run_sleep_block(args.as_slice())?],
         "all" => run_all(args.as_slice())?,
         "smoke" => run_smoke()?,
         "soak" => vec![run_soak(args.as_slice())?],
@@ -592,6 +595,7 @@ fn run_all(args: &[&str]) -> Result<Vec<StressSummary>, StressError> {
         run_delayed_cancel(args)?,
         run_cancel_nonblocking(args)?,
         run_wait_deadlock(args)?,
+        run_sleep_block(args)?,
     ])
 }
 
@@ -611,6 +615,7 @@ fn run_smoke() -> Result<Vec<StressSummary>, StressError> {
         run_delayed_cancel(&["2", "8"])?,
         run_cancel_nonblocking(&["2", "8"])?,
         run_wait_deadlock(&["2"])?,
+        run_sleep_block(&["2"])?,
     ])
 }
 
@@ -657,6 +662,7 @@ fn run_soak_cycle(args: &[&str], iteration: usize) -> Result<Vec<StressSummary>,
     summaries.push(run_named_case("wait-deadlock", || {
         run_wait_deadlock(&["4"])
     })?);
+    summaries.push(run_named_case("sleep-block", || run_sleep_block(&["4"]))?);
     if iteration.is_multiple_of(SOAK_DYNAMIC_QUEUE_INTERVAL) {
         summaries.push(run_named_case("queue-flush", || run_queue_flush(args))?);
         summaries.push(run_named_case("static-queue", || run_static_queue(args))?);
@@ -718,6 +724,7 @@ fn case_id(case: &str) -> usize {
         "delayed-cancel" => CASE_DELAYED_CANCEL,
         "cancel-nonblocking" => CASE_CANCEL_NONBLOCKING,
         "wait-deadlock" => CASE_WAIT_DEADLOCK,
+        "sleep-block" => CASE_SLEEP_BLOCK,
         _ => CASE_NONE,
     }
 }
@@ -738,6 +745,7 @@ fn case_name(case: usize) -> &'static str {
         CASE_DELAYED_CANCEL => "delayed-cancel",
         CASE_CANCEL_NONBLOCKING => "cancel-nonblocking",
         CASE_WAIT_DEADLOCK => "wait-deadlock",
+        CASE_SLEEP_BLOCK => "sleep-block",
         _ => "none",
     }
 }
@@ -1686,6 +1694,81 @@ fn run_wait_deadlock(args: &[&str]) -> Result<StressSummary, StressError> {
     })
 }
 
+fn run_sleep_block(args: &[&str]) -> Result<StressSummary, StressError> {
+    let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
+    let cpus = ready_cpus(SystemPoolKind::Normal)?;
+    let completed = Arc::new(AtomicUsize::new(0));
+    let failures = Arc::new(AtomicUsize::new(0));
+    let per_cpu = per_cpu_counters();
+
+    for round in 0..rounds {
+        CURRENT_ROUND.store(round, Ordering::Release);
+        let cpu_id = cpus[round % cpus.len()];
+        let blocker_started = Arc::new(AtomicBool::new(false));
+        let release_blocker = Arc::new(AtomicBool::new(false));
+        let blocker_event = Arc::new(kpoll::PollEvent::new());
+        let progress_runs = Arc::new(AtomicUsize::new(0));
+
+        let started = blocker_started.clone();
+        let release = release_blocker.clone();
+        let event = blocker_event.clone();
+        let blocker_per_cpu = per_cpu.clone();
+        let blocker_completed = completed.clone();
+        let blocker = ScheduledWork::new(move |_| {
+            record_current_cpu(&blocker_per_cpu);
+            started.store(true, Ordering::Release);
+            if ktask::wait_for_poll_event_until(&event, || release.load(Ordering::Acquire)).is_ok()
+            {
+                blocker_completed.fetch_add(1, Ordering::AcqRel);
+            }
+        });
+
+        let runs = progress_runs.clone();
+        let release = release_blocker.clone();
+        let event = blocker_event.clone();
+        let progress_per_cpu = per_cpu.clone();
+        let progress_completed = completed.clone();
+        let progress = ScheduledWork::new(move |_| {
+            record_current_cpu(&progress_per_cpu);
+            runs.fetch_add(1, Ordering::AcqRel);
+            release.store(true, Ordering::Release);
+            event.notify();
+            progress_completed.fetch_add(1, Ordering::AcqRel);
+        });
+
+        expect_queued(system_wq().queue_work_on(cpu_id, &blocker))?;
+        wait_until(|| blocker_started.load(Ordering::Acquire))?;
+        expect_queued(system_wq().queue_work_on(cpu_id, &progress))?;
+
+        let progressed = wait_until_short(|| progress_runs.load(Ordering::Acquire) != 0);
+        if !progressed {
+            failures.fetch_add(1, Ordering::AcqRel);
+            release_blocker.store(true, Ordering::Release);
+            blocker_event.notify();
+        }
+
+        blocker.flush().map_err(StressError::FlushFailed)?;
+        progress.flush().map_err(StressError::FlushFailed)?;
+    }
+
+    if failures.load(Ordering::Acquire) != 0 {
+        return Err(StressError::Incomplete);
+    }
+
+    Ok(StressSummary {
+        case: "sleep-block",
+        rounds,
+        queued: rounds.saturating_mul(2),
+        completed: completed.load(Ordering::Acquire),
+        cancel: 0,
+        cancel_sync: 0,
+        would_deadlock: 0,
+        disabled: 0,
+        failures: 0,
+        active_cpus: active_cpu_count(&per_cpu),
+    })
+}
+
 fn stress_cpu(kind: SystemPoolKind) -> Result<LogicalCpuId, StressError> {
     let preferred = runtime::current_cpu_id();
     if ensure_pool_ready(kind, preferred) {
@@ -1748,6 +1831,16 @@ fn wait_until(mut ready: impl FnMut() -> bool) -> Result<(), StressError> {
             ktask::sleep(TimeSpan::from_millis(1));
         }
     }
+}
+
+fn wait_until_short(mut ready: impl FnMut() -> bool) -> bool {
+    for _ in 0..100_000 {
+        if ready() {
+            return true;
+        }
+        ktask::yield_now();
+    }
+    false
 }
 
 fn per_cpu_counters() -> Arc<Vec<AtomicUsize>> {

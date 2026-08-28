@@ -36,8 +36,9 @@ use crate::api::on_remote_resched_ipi;
 use crate::{
     KCpuMask, KtaskRef, Scheduler, TaskInner,
     api::{
-        account_execution_context, current, current_may_uninit, program_sched_deadline,
-        program_sched_deadline_for, rearm_local_timer, refresh_execution_tick_deadline_for_task,
+        account_execution_blocked, account_execution_context, account_execution_resumed, current,
+        current_may_uninit, program_sched_deadline, program_sched_deadline_for, rearm_local_timer,
+        refresh_execution_tick_deadline_for_task,
     },
     future::{block_on, earliest_deadline},
     task::{CurrentTask, TaskState},
@@ -1381,6 +1382,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
 
         // Deactivate while still Running / current, before any concurrent wake
         // can requeue us. Fair schedulers snapshot lag for later enqueue PLACE_LAG.
+        account_execution_blocked(curr.execution_context());
         self.inner
             .scheduler
             .lock()
@@ -1841,6 +1843,7 @@ impl RunQueue {
         #[cfg(feature = "preempt")]
         next_task.set_preempt_pending(false);
         next_task.set_state(TaskState::Running);
+        account_execution_resumed(next_task.execution_context());
         let program_next_deadline = |rq: &mut Self, next: &KtaskRef, now: u64| {
             let next_rel = {
                 let sched = rq.scheduler.lock();

@@ -124,6 +124,14 @@ impl ktask::TaskExecutionAccountingIf {
     fn execution_tick_deadline(context: ktask::TaskExecutionContext) -> Option<MonotonicInstant> {
         crate::builtinpool::system_execution_tick_deadline(context)
     }
+
+    fn execution_blocked(context: ktask::TaskExecutionContext) {
+        crate::builtinpool::account_system_execution_blocked(context, ktask::monotonic_time());
+    }
+
+    fn execution_resumed(context: ktask::TaskExecutionContext) {
+        crate::builtinpool::account_system_execution_resumed(context);
+    }
 }
 
 /// Runtime hook used by ktask-backed built-in worker-pool workers.

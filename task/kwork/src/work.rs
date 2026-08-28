@@ -1545,7 +1545,7 @@ fn select_balanced_normal_pool_cpu() -> LogicalCpuId {
 #[cfg(unittest)]
 mod tests {
     use alloc::vec::Vec;
-    use core::sync::atomic::{AtomicUsize, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use ktime_types::TimeSpan;
     use unittest::{assert, assert_eq, assert_ne, def_test};
@@ -1598,6 +1598,16 @@ mod tests {
             ktask::yield_now();
         }
         panic!("timed out waiting for expected atomic value");
+    }
+
+    fn wait_until_atomic_at_least(value: &AtomicUsize, expected: usize, retries: usize) -> bool {
+        for _ in 0..retries {
+            if value.load(Ordering::Acquire) >= expected {
+                return true;
+            }
+            ktask::yield_now();
+        }
+        false
     }
 
     #[def_test(serial)]
@@ -1742,6 +1752,60 @@ mod tests {
         assert_eq!(work.cancel(), CancelWorkResult::Running);
         blocker_finish.store(1, Ordering::Release);
         let _ = work.flush().expect("work flush should be sleepable");
+    }
+
+    #[def_test(serial)]
+    fn sleeping_worker_releases_pool_concurrency_for_queued_work() {
+        let cpu_id = runtime::current_cpu_id();
+        ensure_normal_pool_ready(cpu_id);
+
+        let blocker_started = Arc::new(AtomicUsize::new(0));
+        let release_blocker = Arc::new(AtomicBool::new(false));
+        let blocker_event = Arc::new(kpoll::PollEvent::new());
+        let progress_runs = Arc::new(AtomicUsize::new(0));
+
+        let started = blocker_started.clone();
+        let release = release_blocker.clone();
+        let event = blocker_event.clone();
+        let blocker = ScheduledWork::new(move |_| {
+            started.store(1, Ordering::Release);
+            ktask::wait_for_poll_event_until(&event, || release.load(Ordering::Acquire))
+                .expect("blocker wait should register");
+        });
+
+        let runs = progress_runs.clone();
+        let release = release_blocker.clone();
+        let event = blocker_event.clone();
+        let progress = ScheduledWork::new(move |_| {
+            runs.fetch_add(1, Ordering::AcqRel);
+            release.store(true, Ordering::Release);
+            event.notify();
+        });
+
+        assert_eq!(
+            system_wq().queue_work_on(cpu_id, &blocker),
+            QueueWorkResult::Queued
+        );
+        wait_for_atomic_value(&blocker_started, 1);
+        assert_eq!(
+            system_wq().queue_work_on(cpu_id, &progress),
+            QueueWorkResult::Queued
+        );
+
+        let progressed = wait_until_atomic_at_least(&progress_runs, 1, 100_000);
+        if !progressed {
+            release_blocker.store(true, Ordering::Release);
+            blocker_event.notify();
+        }
+        let _ = blocker.flush().expect("blocker flush should be sleepable");
+        let _ = progress
+            .flush()
+            .expect("progress flush should be sleepable");
+
+        assert!(
+            progressed,
+            "sleeping worker did not release worker-pool concurrency for queued work"
+        );
     }
 
     #[def_test(serial)]

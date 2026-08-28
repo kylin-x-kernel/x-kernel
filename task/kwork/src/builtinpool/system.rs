@@ -165,6 +165,39 @@ pub(crate) fn account_system_execution_tick(
     result.deadline
 }
 
+/// Reports that a built-in worker-pool execution entered a sleepable block.
+pub(crate) fn account_system_execution_blocked(
+    context: ktask::TaskExecutionContext,
+    now: MonotonicInstant,
+) {
+    let Some(decoded) = decode_task_context(context) else {
+        return;
+    };
+    let Some(kind) = SystemPoolKind::from_usize(decoded.pool_id.kind().as_usize()) else {
+        return;
+    };
+    let Some(pool) = system_pools().pool(kind, decoded.pool_id.cpu()) else {
+        return;
+    };
+    if let Some(actions) = pool.runtime().account_worker_blocked(context, now) {
+        super::pool::handle_actions(actions);
+    }
+}
+
+/// Reports that a built-in worker-pool execution resumed from a sleepable block.
+pub(crate) fn account_system_execution_resumed(context: ktask::TaskExecutionContext) {
+    let Some(decoded) = decode_task_context(context) else {
+        return;
+    };
+    let Some(kind) = SystemPoolKind::from_usize(decoded.pool_id.kind().as_usize()) else {
+        return;
+    };
+    let Some(pool) = system_pools().pool(kind, decoded.pool_id.cpu()) else {
+        return;
+    };
+    let _ = pool.runtime().account_worker_resumed(context);
+}
+
 /// Returns the next CPU-intensive tick deadline for a built-in pool execution.
 pub(crate) fn system_execution_tick_deadline(
     context: ktask::TaskExecutionContext,

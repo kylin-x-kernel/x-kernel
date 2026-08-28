@@ -44,6 +44,7 @@ destroy-race [rounds] [works]
 delayed-cancel [rounds] [works]
 cancel-nonblocking [rounds] [works]
 wait-deadlock [rounds]
+sleep-block [rounds]
 all [rounds] [works]
 smoke
 soak [seconds] [works]
@@ -111,6 +112,10 @@ baseline before scheduler, pool, or queue policy changes.
 - `wait-deadlock`: worker callbacks call queue-wide waiting APIs that target
   their own bounded pool. The case verifies that these public APIs reject the
   wait with `WouldDeadlock` and do not poison later queue use.
+- `sleep-block`: one normal worker blocks in a sleepable wait while another
+  work item is queued to the same CPU pool. The case verifies that the blocked
+  worker releases bounded-pool concurrency and a replacement worker can run the
+  queued work before the blocker is released.
 - `smoke`: short fixed suite that runs every case with small parameters.
 - `soak`: time-driven mixed suite. It repeatedly runs the concurrency-heavy
   cases with small fixed round batches and the requested work count until the

@@ -70,6 +70,12 @@ pub trait TaskExecutionAccountingIf {
 
     /// Returns the current execution tick deadline without doing accounting.
     fn execution_tick_deadline(context: TaskExecutionContext) -> Option<MonotonicInstant>;
+
+    /// Reports that the current execution is entering a sleepable block.
+    fn execution_blocked(context: TaskExecutionContext);
+
+    /// Reports that a previously blocked execution is running again.
+    fn execution_resumed(context: TaskExecutionContext);
 }
 
 cfg_select! {
@@ -345,6 +351,24 @@ pub(crate) fn account_execution_context(context: Option<TaskExecutionContext>) {
         Some(context) => account_execution_tick_for_context(context),
         None => set_execution_tick_deadline_ns(None),
     }
+}
+
+pub(crate) fn account_execution_blocked(context: Option<TaskExecutionContext>) {
+    #[cfg(feature = "execution-accounting")]
+    if let Some(context) = context {
+        TaskExecutionAccountingIf::execution_blocked(context);
+    }
+    #[cfg(not(feature = "execution-accounting"))]
+    let _ = context;
+}
+
+pub(crate) fn account_execution_resumed(context: Option<TaskExecutionContext>) {
+    #[cfg(feature = "execution-accounting")]
+    if let Some(context) = context {
+        TaskExecutionAccountingIf::execution_resumed(context);
+    }
+    #[cfg(not(feature = "execution-accounting"))]
+    let _ = context;
 }
 
 pub(crate) fn refresh_execution_tick_deadline_for_task(task: &KtaskRef) {

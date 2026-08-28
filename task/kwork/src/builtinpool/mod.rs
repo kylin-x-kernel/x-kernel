@@ -17,6 +17,7 @@ pub(crate) use pool::{
     BuiltinPoolEnqueueError, BuiltinPoolRuntime, SystemPoolBinding, handle_actions,
 };
 pub(crate) use system::{
+    account_system_execution_blocked, account_system_execution_resumed,
     account_system_execution_tick, init_system_worker_pools_for_cpu, is_system_worker_pool_ready,
     system_execution_tick_deadline, system_pool_for_cpu, system_pool_for_kind_cpu, system_pools,
 };
