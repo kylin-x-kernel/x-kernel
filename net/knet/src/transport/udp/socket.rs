@@ -23,8 +23,7 @@ use crate::{
     ip::{IpAddress, IpEndpoint, Ipv4Address},
     ipv4,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
-    poll_interfaces,
-    poller::{PollReason, network_poller},
+    poller::{PollReason, assist_once, network_poller},
     udp_err::QueuedUdpError,
 };
 
@@ -169,6 +168,12 @@ impl UdpSocket {
                 .map_err(|_| KError::from(LinuxError::EDESTADDRREQ))?,
         };
         validate_remote_endpoint(remote_endpoint)?;
+        let allow_broadcast = self.state().broadcast();
+        if matches!(&remote_endpoint.addr, IpAddress::Ipv4(addr) if addr.is_broadcast())
+            && !allow_broadcast
+        {
+            return Err(KError::from(LinuxError::EACCES));
+        }
 
         if self.state().local_endpoint().is_none() {
             self.bind_ephemeral()?;
@@ -195,6 +200,8 @@ impl UdpSocket {
                 SERVICE.prepare_and_send_ipv4_packet(
                     bound_source_addr,
                     &remote_endpoint.addr,
+                    self.state().bound_dev_if(),
+                    allow_broadcast,
                     &mut packet,
                     |packet, source_addr, route_mtu| {
                         let mtu_discovery = *self.pcb.mtu_discovery.read();
@@ -204,7 +211,7 @@ impl UdpSocket {
                     },
                 )?;
                 network_poller().notify(PollReason::Tx);
-                poll_interfaces();
+                assist_once();
                 Ok(payload_len)
             })
     }
@@ -271,7 +278,7 @@ impl UdpSocket {
         let datagram = match self.try_recv_datagram(mode) {
             Some(datagram) => datagram,
             None => {
-                poll_interfaces();
+                assist_once();
                 self.try_recv_datagram(mode).ok_or(KError::WouldBlock)?
             }
         };
@@ -288,7 +295,7 @@ impl UdpSocket {
     }
 
     fn recv_error_msg(&self, msg: &mut RecvErrorMsg<'_>) -> KResult<usize> {
-        poll_interfaces();
+        assist_once();
         let error = if msg.flags.contains(RecvFlags::PEEK) {
             self.state().peek_error()
         } else {
@@ -317,7 +324,7 @@ impl UdpSocket {
 impl Configurable for UdpSocket {
     fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<OptionHandled> {
         if let GetSocketOption::Error(error) = opt {
-            poll_interfaces();
+            assist_once();
             **error = self.state().consume_socket_error();
             return Ok(OptionHandled::Yes);
         }
@@ -491,7 +498,7 @@ impl SocketOps for UdpSocket {
 
     fn shutdown(&self, how: Shutdown) -> KResult {
         self.state().shutdown(how);
-        poll_interfaces();
+        assist_once();
         debug!("UDP socket: shutting down");
         Ok(())
     }
@@ -563,7 +570,7 @@ fn copy_udp_payload_to(
 
 impl Pollable for UdpSocket {
     fn poll(&self) -> IoEvents {
-        poll_interfaces();
+        assist_once();
         let mut events = IoEvents::empty();
         let can_receive = self.pcb.has_recv_data()
             || self.state().has_pending_error()

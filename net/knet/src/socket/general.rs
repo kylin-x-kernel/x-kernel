@@ -4,11 +4,11 @@
 
 //! General socket options and polling helpers.
 use core::{
-    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
     task::Waker,
 };
 
-use kerrno::KResult;
+use kerrno::{KError, KResult, LinuxError};
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use ktask::future::{block_on, poll_io, timeout};
 use ktime_types::TimeSpan;
@@ -24,11 +24,19 @@ pub(crate) struct GeneralOptions {
     nonblock: AtomicBool,
     /// Whether the socket should reuse the address.
     reuse_address: AtomicBool,
+    /// Whether the socket is allowed to send broadcast packets.
+    broadcast: AtomicBool,
 
     send_timeout_nanos: AtomicU64,
     recv_timeout_nanos: AtomicU64,
 
     device_mask: AtomicU32,
+    /// Address-derived RX mask, saved before intersecting `bound_dev_if`.
+    addr_device_mask: AtomicU32,
+    /// Bound device ifindex; 0 means unbound (`SO_BINDTODEVICE`).
+    ///
+    /// UDP transmit, receive demux, and RX waker masks honor this value.
+    bound_dev_if: AtomicI32,
 }
 impl Default for GeneralOptions {
     fn default() -> Self {
@@ -41,11 +49,14 @@ impl GeneralOptions {
         Self {
             nonblock: AtomicBool::new(false),
             reuse_address: AtomicBool::new(false),
+            broadcast: AtomicBool::new(false),
 
             send_timeout_nanos: AtomicU64::new(0),
             recv_timeout_nanos: AtomicU64::new(0),
 
             device_mask: AtomicU32::new(0),
+            addr_device_mask: AtomicU32::new(0),
+            bound_dev_if: AtomicI32::new(0),
         }
     }
 
@@ -57,6 +68,45 @@ impl GeneralOptions {
     /// Returns whether address reuse is enabled.
     pub fn reuse_address(&self) -> bool {
         self.reuse_address.load(Ordering::Relaxed)
+    }
+
+    /// Returns whether broadcast sending is enabled.
+    pub fn broadcast(&self) -> bool {
+        self.broadcast.load(Ordering::Relaxed)
+    }
+
+    /// Returns the bound device ifindex, or 0 if unbound.
+    pub fn bound_dev_if(&self) -> i32 {
+        self.bound_dev_if.load(Ordering::Relaxed)
+    }
+
+    fn bound_device_mask(&self) -> Option<u32> {
+        let ifindex = self.bound_dev_if();
+        (ifindex > 0).then(|| 1u32.checked_shl((ifindex - 1) as u32).unwrap_or(0))
+    }
+
+    /// Intersects `addr_mask` with [`Self::bound_dev_if`] when the socket is
+    /// bound to a device.
+    pub fn apply_bound_device_mask(&self, addr_mask: u32) {
+        self.addr_device_mask.store(addr_mask, Ordering::Release);
+        let mask = self
+            .bound_device_mask()
+            .map_or(addr_mask, |bound| addr_mask & bound);
+        self.set_device_mask(mask);
+    }
+
+    fn restore_addr_device_mask(&self) {
+        let addr_mask = self.addr_device_mask.load(Ordering::Acquire);
+        if addr_mask != 0 {
+            self.set_device_mask(addr_mask);
+        } else if self.device_mask() != 0 {
+            self.set_device_mask(u32::MAX);
+        }
+    }
+
+    #[cfg(unittest)]
+    pub fn set_bound_dev_if_for_test(&self, ifindex: i32) {
+        self.bound_dev_if.store(ifindex, Ordering::Relaxed);
     }
 
     /// Returns the configured send timeout.
@@ -164,6 +214,19 @@ impl Configurable for GeneralOptions {
             O::ReuseAddress(reuse) => {
                 **reuse = self.reuse_address();
             }
+            O::Broadcast(broadcast) => {
+                **broadcast = self.broadcast();
+            }
+            O::BindToDevice(name) => {
+                let ifindex = self.bound_dev_if();
+                **name = if ifindex > 0 && SERVICE.is_inited() {
+                    SERVICE
+                        .link_snapshot_for_ifindex(ifindex)
+                        .map(|link| link.name)
+                } else {
+                    None
+                };
+            }
             O::SendTimeout(timeout) => {
                 **timeout = TimeSpan::from_nanos(self.send_timeout_nanos.load(Ordering::Relaxed));
             }
@@ -184,6 +247,43 @@ impl Configurable for GeneralOptions {
             }
             O::ReuseAddress(reuse) => {
                 self.reuse_address.store(*reuse, Ordering::Relaxed);
+            }
+            O::Broadcast(broadcast) => {
+                self.broadcast.store(*broadcast, Ordering::Relaxed);
+            }
+            O::BindToDevice(name) => {
+                let ifindex = match name {
+                    None => 0,
+                    Some(dev_name) => {
+                        if dev_name.is_empty() {
+                            0
+                        } else if SERVICE.is_inited() {
+                            SERVICE
+                                .link_snapshots()
+                                .into_iter()
+                                .find(|link| &link.name == dev_name)
+                                .map(|link| link.ifindex)
+                                .ok_or(KError::from(LinuxError::ENODEV))?
+                        } else {
+                            return Err(KError::from(LinuxError::ENODEV));
+                        }
+                    }
+                };
+                self.bound_dev_if.store(ifindex, Ordering::Relaxed);
+                if ifindex > 0 {
+                    let stored = self.addr_device_mask.load(Ordering::Acquire);
+                    let current = self.device_mask();
+                    let addr_mask = if stored != 0 {
+                        stored
+                    } else if current == 0 {
+                        u32::MAX
+                    } else {
+                        current
+                    };
+                    self.apply_bound_device_mask(addr_mask);
+                } else {
+                    self.restore_addr_device_mask();
+                }
             }
             O::SendTimeout(timeout) => {
                 self.send_timeout_nanos

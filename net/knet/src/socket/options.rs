@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! Socket option types and configuration helpers.
-use alloc::boxed::Box;
+use alloc::{boxed::Box, string::String};
 
 use enum_dispatch::enum_dispatch;
 use kerrno::{KError, KResult, LinuxError};
@@ -70,6 +70,7 @@ define_options! {
     ReuseAddress(bool),
     Error(i32),
     DontRoute(bool),
+    Broadcast(bool),
     SendBuffer(usize),
     ReceiveBuffer(usize),
     KeepAlive(bool),
@@ -96,6 +97,7 @@ define_options! {
 
     // ---- Extra options ----
     NonBlocking(bool),
+    BindToDevice(Option<String>),
 }
 
 /// Whether a socket option is handled by a specific socket implementation.

@@ -130,6 +130,13 @@ pub(crate) fn network_poller() -> &'static NetworkPoller {
     &NETWORK_POLLER
 }
 
+/// Assists one already scheduled network polling round from task context.
+///
+/// The call does not publish new work or wait for another executor.
+pub(crate) fn assist_once() {
+    network_poller().assist_once();
+}
+
 fn poll_network_once(budget: PollBudget) -> kwork::BudgetedPollProgress {
     kwork::BudgetedPollProgress {
         has_more: NETWORK_POLLER.run_once(budget).has_more,

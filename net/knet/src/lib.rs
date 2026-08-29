@@ -8,6 +8,8 @@
 //!
 //! - [`TcpSocket`]: A TCP socket that provides POSIX-like APIs.
 //! - [`UdpSocket`]: A UDP socket that provides POSIX-like APIs.
+//! - [`send_link_frame`]: Sends a link-layer frame through a selected interface.
+//! - [`UdpDatagramRelay`]: A persistent nonblocking UDP relay socket.
 //! - [`dns_query`]: Function for DNS query.
 #![no_std]
 #![allow(rustdoc::broken_intra_doc_links)]
@@ -17,6 +19,7 @@ extern crate log;
 extern crate alloc;
 
 mod consts;
+mod control;
 mod device;
 mod ip;
 mod link;
@@ -30,16 +33,20 @@ pub mod unix;
 pub mod vsock;
 
 use alloc::{borrow::ToOwned, boxed::Box, sync::Arc};
-use core::net::SocketAddr;
 
+pub use control::{
+    NetInterfaceInfo, add_ipv4_route, del_ipv4_route, find_interface, set_interface_flags,
+    set_interface_ipv4_addr, set_interface_ipv4_broadcast, set_interface_ipv4_netmask,
+};
 #[cfg(feature = "vsock")]
 use kclass::{ClassDevice, VsockDeviceImpl, subscribe_vsock_available, vsock_devices};
 use kclass::{NetDevice, net_devices};
 use kdevice::subscribe_device_removed;
+#[cfg(feature = "vsock")]
 use kerrno::KError;
 use lazyinit::LazyInit;
-pub use link::packet;
 pub(crate) use link::{buf, wire};
+pub use link::{packet, send_link_frame};
 pub use socket::{
     file::{sock_alloc_file, sock_from_file},
     options, *,
@@ -47,7 +54,7 @@ pub use socket::{
 pub(crate) use socket::{general, state};
 pub(crate) use stack::{ipv4, listen_table, router, service, wrapper};
 pub(crate) use transport::udp_err;
-pub use transport::{raw, tcp, udp};
+pub use transport::{raw, tcp, udp, udp::UdpDatagramRelay};
 
 use crate::{
     consts::{GATEWAY, IP, IP_PREFIX, TIMER_SAMPLE_PERIOD},
@@ -79,6 +86,7 @@ pub fn init_network() {
             dev: lo_dev,
             addr: lo_ip,
             scope: ROUTE_SCOPE_HOST,
+            broadcast: None,
         })
         .expect("loopback IPv4 address must fit the interface");
 
@@ -97,6 +105,7 @@ pub fn init_network() {
                 dev: eth0_dev,
                 addr: eth0_ip,
                 scope: ROUTE_SCOPE_UNIVERSE,
+                broadcast: None,
             })
             .expect("Ethernet IPv4 address must fit the interface");
         router.add_rule(Rule::new(
@@ -143,13 +152,13 @@ fn subscribe_network_unregister(id: kdevice::DeviceId) {
 
 /// Removes a NIC from the network stack.
 ///
-/// Takes [`netlink::rtnl_lock`] so teardown is serialized with rtnetlink
-/// mutations, matching Linux `unregister_netdev()` in `net/core/dev.c`.
+/// Takes [`control::network_config_lock`] so teardown is serialized with
+/// control-plane mutations.
 pub(crate) fn unregister_netdev(id: kdevice::DeviceId) -> bool {
     if !SERVICE.is_inited() {
         return false;
     }
-    let _rtnl = netlink::rtnl_lock();
+    let _network_config_guard = control::network_config_lock();
     SERVICE.remove_device_by_model_id(id).is_some()
 }
 
@@ -198,65 +207,4 @@ fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
             warn!("vsock: detached removed device {:?}", id);
         }
     }));
-}
-
-/// Assists one already scheduled network polling round from task context.
-///
-/// The call does not publish new work or wait for another executor.
-pub fn poll_interfaces() {
-    poller::network_poller().assist_once();
-}
-
-/// Send a complete link-layer frame through the interface identified by `ifindex`.
-pub fn send_link_frame(ifindex: i32, frame: &[u8]) -> kerrno::KResult<usize> {
-    if !SERVICE.is_inited() {
-        return Err(kerrno::KError::OperationNotSupported);
-    }
-    SERVICE.send_link_frame(ifindex, frame)
-}
-
-/// Send a UDP datagram through the kernel network stack.
-pub fn send_udp_payload(dst: SocketAddr, payload: &[u8]) -> kerrno::KResult<usize> {
-    if !SERVICE.is_inited() {
-        return Err(kerrno::KError::OperationNotSupported);
-    }
-
-    let socket = udp::UdpSocket::new();
-    socket.send_datagram_now(dst, payload)
-}
-
-/// Persistent UDP relay socket for request/reply datagram flows.
-pub struct UdpDatagramRelay {
-    socket: udp::UdpSocket,
-}
-
-impl UdpDatagramRelay {
-    /// Create a UDP relay socket with an ephemeral local port.
-    pub fn new() -> kerrno::KResult<Self> {
-        Self::new_with_port(0)
-    }
-
-    /// Create a UDP relay socket bound to `local_port`.
-    pub fn new_with_port(local_port: u16) -> kerrno::KResult<Self> {
-        if !SERVICE.is_inited() {
-            return Err(kerrno::KError::OperationNotSupported);
-        }
-
-        let socket = udp::UdpSocket::new();
-        socket.bind(SocketAddrEx::Ip(SocketAddr::new(
-            core::net::IpAddr::V4(core::net::Ipv4Addr::UNSPECIFIED),
-            local_port,
-        )))?;
-        Ok(Self { socket })
-    }
-
-    /// Send a UDP datagram through this relay socket.
-    pub fn send_to(&self, dst: SocketAddr, payload: &[u8]) -> kerrno::KResult<usize> {
-        self.socket.send_datagram_now(dst, payload)
-    }
-
-    /// Try to receive a UDP datagram without blocking.
-    pub fn try_recv(&self, buf: &mut [u8]) -> kerrno::KResult<Option<(usize, SocketAddr)>> {
-        self.socket.recv_datagram_now(buf)
-    }
 }

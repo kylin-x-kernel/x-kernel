@@ -11,7 +11,7 @@ extern crate alloc;
 use ktime_types::TimeSpan;
 use unittest::def_test;
 
-use crate::options::{GetSocketOption, SetSocketOption, UnixCredentials};
+use crate::options::{Configurable, GetSocketOption, SetSocketOption, UnixCredentials};
 
 #[def_test]
 fn test_unix_credentials_construction() {
@@ -191,4 +191,78 @@ fn test_ttl_boundary_values() {
         SetSocketOption::Ttl(ttl) => assert_eq!(*ttl, 64),
         _ => panic!("Expected Ttl variant"),
     }
+}
+
+#[def_test]
+fn test_broadcast_option_get_set() {
+    use crate::socket::general::GeneralOptions;
+    let opts = GeneralOptions::new();
+    assert!(!opts.broadcast());
+
+    opts.set_option_inner(SetSocketOption::Broadcast(&true))
+        .unwrap();
+    assert!(opts.broadcast());
+
+    let mut val = false;
+    opts.get_option_inner(&mut GetSocketOption::Broadcast(&mut val))
+        .unwrap();
+    assert!(val);
+
+    opts.set_option_inner(SetSocketOption::Broadcast(&false))
+        .unwrap();
+    assert!(!opts.broadcast());
+
+    let mut val = true;
+    opts.get_option_inner(&mut GetSocketOption::Broadcast(&mut val))
+        .unwrap();
+    assert!(!val);
+}
+
+#[def_test]
+fn test_bindtodevice_option_default_and_unbind() {
+    use crate::socket::general::GeneralOptions;
+    let opts = GeneralOptions::new();
+    assert_eq!(opts.bound_dev_if(), 0);
+
+    // Unbinding (None) on an already-unbound socket is a no-op.
+    opts.set_option_inner(SetSocketOption::BindToDevice(&None))
+        .unwrap();
+    assert_eq!(opts.bound_dev_if(), 0);
+
+    // Getting on an unbound socket returns None.
+    let mut name = Some(alloc::string::String::from("eth0"));
+    opts.get_option_inner(&mut GetSocketOption::BindToDevice(&mut name))
+        .unwrap();
+    assert!(name.is_none());
+}
+
+#[def_test]
+fn test_bindtodevice_unbind_restores_addr_device_mask() {
+    use crate::socket::general::GeneralOptions;
+    let opts = GeneralOptions::new();
+    opts.apply_bound_device_mask(0b0110);
+    assert_eq!(opts.device_mask(), 0b0110);
+
+    opts.set_bound_dev_if_for_test(3);
+    opts.apply_bound_device_mask(0b0110);
+    assert_eq!(opts.device_mask(), 0b0100);
+
+    opts.set_option_inner(SetSocketOption::BindToDevice(&None))
+        .unwrap();
+    assert_eq!(opts.bound_dev_if(), 0);
+    assert_eq!(opts.device_mask(), 0b0110);
+}
+
+#[def_test]
+fn test_bindtodevice_unbind_without_addr_mask_uses_all_devices() {
+    use crate::socket::general::GeneralOptions;
+    let opts = GeneralOptions::new();
+    opts.set_bound_dev_if_for_test(1);
+    opts.apply_bound_device_mask(u32::MAX);
+    assert_eq!(opts.device_mask(), 1);
+
+    opts.set_option_inner(SetSocketOption::BindToDevice(&None))
+        .unwrap();
+    assert_eq!(opts.bound_dev_if(), 0);
+    assert_eq!(opts.device_mask(), u32::MAX);
 }

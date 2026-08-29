@@ -39,8 +39,13 @@ const ICMPV4_CODE_FRAG_EXPIRED: u8 = 1;
 
 pub(crate) type QueuedUdpError = UdpSocketQueuedError;
 
-fn queue_ipv4_error(local: SocketAddrV4, remote: SocketAddrV4, error: QueuedUdpError) {
-    if let Some(state) = udp::lookup_udp_error_state(local.into(), remote.into()) {
+fn queue_ipv4_error(
+    local: SocketAddrV4,
+    remote: SocketAddrV4,
+    ingress_ifindex: i32,
+    error: QueuedUdpError,
+) {
+    if let Some(state) = udp::lookup_udp_error_state(local.into(), remote.into(), ingress_ifindex) {
         if state.peer_endpoint().is_some() {
             state.record_socket_error(error.ancillary.errno);
         }
@@ -97,13 +102,13 @@ fn icmpv4_errno(icmp: &Icmpv4Slice<'_>) -> Option<(LinuxError, u32)> {
 ///
 /// ICMP errors quote the packet that triggered the error, so this path parses
 /// the outer IPv4 and ICMP headers, then the quoted IPv4 and UDP headers. The
-/// quoted UDP 4-tuple determines the receiving socket: a connected socket that
-/// matches the peer is preferred, and an unconnected socket bound to the local
-/// endpoint is used as a fallback.
+/// quoted UDP 4-tuple and `ingress_ifindex` determine the receiving socket: a
+/// connected socket that matches the peer is preferred, and an unconnected
+/// socket bound to the local endpoint is used as a fallback.
 ///
-/// This mirrors Linux's ICMP-to-socket error delivery path in `net/ipv4/icmp.c`
-/// and `ip_icmp_error()` in `net/ipv4/ip_sockglue.c`.
-pub(crate) fn inspect_icmpv4_error(packet: &[u8]) {
+/// This mirrors Linux's UDP ICMP error lookup in
+/// `net/ipv4/udp.c::__udp4_lib_err()`.
+pub(crate) fn inspect_icmpv4_error(packet: &[u8], ingress_ifindex: i32) {
     let ip_packet = match Ipv4Header::parse_input(packet) {
         Ok(header) if header.protocol() == ipv4::PROTOCOL_ICMP => header,
         _ => return,
@@ -157,7 +162,7 @@ pub(crate) fn inspect_icmpv4_error(packet: &[u8]) {
             offender: Some(offender),
         },
     };
-    queue_ipv4_error(local, remote, error);
+    queue_ipv4_error(local, remote, ingress_ifindex, error);
 }
 
 #[cfg(unittest)]
@@ -274,7 +279,7 @@ mod tests {
 
         register_udp_state_for_test(bound.clone());
         register_udp_state_for_test(connected.clone());
-        queue_ipv4_error(local, remote, queued_error(LinuxError::ECONNREFUSED, 1));
+        queue_ipv4_error(local, remote, 1, queued_error(LinuxError::ECONNREFUSED, 1));
 
         assert!(!bound.has_pending_error());
         assert!(connected.has_pending_error());
@@ -296,13 +301,41 @@ mod tests {
         )));
 
         register_udp_state_for_test(connected.clone());
-        queue_ipv4_error(local, remote, queued_error(LinuxError::ECONNREFUSED, 1));
+        queue_ipv4_error(local, remote, 1, queued_error(LinuxError::ECONNREFUSED, 1));
 
         assert_eq!(
             connected.consume_socket_error(),
             LinuxError::ECONNREFUSED.into_raw()
         );
         assert!(!connected.has_pending_error());
+
+        clear_registry();
+    }
+
+    #[def_test(serial)]
+    fn test_udp_error_respects_bound_device() {
+        clear_registry();
+
+        let local = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 8080);
+        let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 5353);
+        let connected = UdpSocketState::new();
+        connected.set_recv_err(true);
+        connected.set_local_endpoint(Some(endpoint(*local.ip(), local.port())));
+        connected.set_peer_endpoint(Some((
+            endpoint(*remote.ip(), remote.port()),
+            IpAddress::Ipv4((*local.ip()).into()),
+        )));
+        connected.set_bound_dev_if_for_test(2);
+        register_udp_state_for_test(connected.clone());
+
+        queue_ipv4_error(local, remote, 0, queued_error(LinuxError::ECONNREFUSED, 0));
+        assert!(!connected.has_pending_error());
+
+        queue_ipv4_error(local, remote, 1, queued_error(LinuxError::ECONNREFUSED, 1));
+        assert!(!connected.has_pending_error());
+
+        queue_ipv4_error(local, remote, 2, queued_error(LinuxError::ECONNREFUSED, 2));
+        assert!(connected.has_pending_error());
 
         clear_registry();
     }
@@ -344,7 +377,7 @@ mod tests {
         )
         .unwrap();
 
-        inspect_icmpv4_error(&error);
+        inspect_icmpv4_error(&error, 1);
 
         assert_eq!(
             connected.consume_socket_error(),

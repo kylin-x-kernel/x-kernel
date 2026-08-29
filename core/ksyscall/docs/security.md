@@ -62,6 +62,10 @@ resource owners
 | T-12 | syscall 热路径临时读取不可靠 RISC-V 硬件状态 | 中 | S-mode 读取 M-mode CSR fault 或跨 CPU 能力不一致 | RISC-V 能力事实来源保存在 `kcpu` 的 FDT 初始化 snapshot；`ksyscall` 只按 selected CPU mask 聚合 |
 | T-13 | `get_robust_list` 跨进程泄露目标线程用户地址 | 高 | 解析目标线程后调用 `kprocess::ptrace::check_read_real_creds_access()`；统一策略执行同线程组豁免、caller real UID/GID 对 target real/effective/saved IDs 的非对称匹配，以及当前以 euid 0 近似的 `CAP_SYS_PTRACE` 绕过，否则返回 `EPERM` |
 
+## 已知限制
+
+- `ioctl` 先按精确命令询问 `posix-net::handle_net_ioctl`，未命中再走文件 `ioctl`。socket 文件 vtable 尚未实现 `ioctl`，因此 SIOC* 仍挂在 syscall adapter，而不是 Linux `sock_ioctl` 形态。
+
 ## 审计清单
 
 - [ ] 新增 syscall 实现是否只做 ABI 适配，而不是复制 owner 状态机？

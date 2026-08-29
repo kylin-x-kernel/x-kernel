@@ -20,7 +20,7 @@ use super::{
     *,
 };
 use crate::{
-    SERVICE,
+    SERVICE, control,
     device::{
         LINK_FLAG_UP, LINK_FLAG_VOLATILE, LinkConfigUpdate, LinkKind, LinkSnapshot, NeighborState,
         NeighborUpdate,
@@ -317,7 +317,7 @@ pub(super) fn apply_link_update(request: LinkUpdateRequest) -> Result<(), LinuxE
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
-    let _rtnl = rtnl_lock();
+    let _network_config_guard = control::network_config_lock();
 
     let current_flags = SERVICE
         .link_snapshot_for_ifindex(request.index)
@@ -349,7 +349,7 @@ pub(super) fn add_addr(request: AddrRequest, flags: u16) -> Result<(), LinuxErro
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
-    let _rtnl = rtnl_lock();
+    let _network_config_guard = control::network_config_lock();
     let existing_action = if flags & NLM_F_REPLACE != 0 && flags & NLM_F_EXCL == 0 {
         ExistingIpv4AddrAction::Keep
     } else {
@@ -363,17 +363,17 @@ pub(super) fn del_addr(request: AddrRequest) -> Result<(), LinuxError> {
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
-    let _rtnl = rtnl_lock();
+    let _network_config_guard = control::network_config_lock();
     SERVICE.remove_ipv4_addr(entry)?;
     Ok(())
 }
 
 pub(super) fn add_route(request: RouteRequest, flags: u16) -> Result<(), LinuxError> {
-    let _rtnl = rtnl_lock();
+    let rule = route_rule_from_request(request)?;
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
-    let rule = route_rule_from_request(request)?;
+    let _network_config_guard = control::network_config_lock();
     let existing = SERVICE
         .route_snapshot()
         .into_iter()
@@ -392,7 +392,6 @@ pub(super) fn add_route(request: RouteRequest, flags: u16) -> Result<(), LinuxEr
 }
 
 pub(super) fn del_route(request: RouteRequest) -> Result<(), LinuxError> {
-    let _rtnl = rtnl_lock();
     validate_route_request(request)?;
     if normalize_route_table(request.table) != RT_TABLE_MAIN
         || normalize_route_type(request.route_type) != RTN_UNICAST
@@ -402,6 +401,7 @@ pub(super) fn del_route(request: RouteRequest) -> Result<(), LinuxError> {
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
+    let _network_config_guard = control::network_config_lock();
     if request.oif != 0 {
         ensure_link_exists(request.oif)?;
     }
@@ -415,7 +415,7 @@ pub(super) fn del_route(request: RouteRequest) -> Result<(), LinuxError> {
 }
 
 pub(super) fn add_neigh(request: NeighRequest, flags: u16) -> Result<(), LinuxError> {
-    let _rtnl = rtnl_lock();
+    let _network_config_guard = control::network_config_lock();
     if request.family != wire_route::FAMILY_IPV4 {
         return Err(LinuxError::EAFNOSUPPORT);
     }
@@ -472,6 +472,7 @@ fn ipv4_addr_entry_from_request(request: AddrRequest) -> Result<Ipv4AddrEntry, L
         dev,
         addr: crate::ip::Ipv4Cidr::new(address.into(), request.prefix_len),
         scope: request.scope,
+        broadcast: None,
     })
 }
 

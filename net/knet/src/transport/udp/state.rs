@@ -231,8 +231,21 @@ impl UdpSocketState {
         self.options.reuse_address()
     }
 
+    pub(crate) fn broadcast(&self) -> bool {
+        self.options.broadcast()
+    }
+
+    pub(crate) fn bound_dev_if(&self) -> i32 {
+        self.options.bound_dev_if()
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn set_bound_dev_if_for_test(&self, ifindex: i32) {
+        self.options.set_bound_dev_if_for_test(ifindex);
+    }
+
     pub(crate) fn set_device_mask(&self, mask: u32) {
-        self.options.set_device_mask(mask);
+        self.options.apply_bound_device_mask(mask);
     }
 
     pub(crate) fn register_rx_waker(

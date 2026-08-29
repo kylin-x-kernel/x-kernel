@@ -28,9 +28,9 @@ use knet::{
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK, O_RDWR},
     net::{
-        AF_INET, AF_INET6, AF_NETLINK, AF_PACKET, AF_UNIX, AF_VSOCK, IPPROTO_ICMP, IPPROTO_TCP,
-        IPPROTO_UDP, SHUT_RD, SHUT_RDWR, SHUT_WR, SOCK_DGRAM, SOCK_RAW, SOCK_SEQPACKET,
-        SOCK_STREAM, sockaddr, socklen_t,
+        AF_INET, AF_INET6, AF_NETLINK, AF_PACKET, AF_UNIX, AF_VSOCK, IPPROTO_TCP, IPPROTO_UDP,
+        SHUT_RD, SHUT_RDWR, SHUT_WR, SOCK_DGRAM, SOCK_RAW, SOCK_SEQPACKET, SOCK_STREAM, sockaddr,
+        socklen_t,
     },
 };
 use posix_types::{UserConstPtr, UserPtr};
@@ -40,6 +40,12 @@ use crate::addr::SocketAddrExt;
 fn socket_from_fd(fd: i32) -> KResult<Arc<Socket>> {
     let file = kprocess::current_resources().get_file(fd)?;
     sock_from_file(&file)
+}
+
+fn inet_raw_protocol(proto: u32) -> KResult<IpProtocol> {
+    u8::try_from(proto)
+        .map(IpProtocol::from)
+        .map_err(|_| KError::from(LinuxError::EINVAL))
 }
 
 /// Create a new socket of the specified domain, type, and protocol
@@ -66,10 +72,12 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             knet::Socket::Udp(Box::new(UdpSocket::new()))
         }
         (AF_INET, SOCK_RAW) => {
-            if proto != IPPROTO_ICMP as u32 {
-                return Err(KError::from(LinuxError::EPROTONOSUPPORT));
+            // SOCK_RAW requires CAP_NET_RAW, matching Linux semantics.
+            if !cred.is_privileged() {
+                return Err(KError::from(LinuxError::EPERM));
             }
-            knet::Socket::Raw(Box::new(RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp)))
+            let ip_proto = inet_raw_protocol(proto)?;
+            knet::Socket::Raw(Box::new(RawSocket::new(IpVersion::Ipv4, ip_proto)))
         }
         // IPv6 is not exposed yet because the address family lacks full support.
         // The previous raw ICMPv6-only path was removed with this policy.
@@ -262,4 +270,21 @@ pub fn sys_socketpair(
 
     fds.write_vm([fd1, fd2])?;
     Ok(0)
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn inet_raw_protocol_rejects_values_above_u8() {
+        assert_eq!(inet_raw_protocol(0).unwrap(), IpProtocol::from(0));
+        assert_eq!(inet_raw_protocol(255).unwrap(), IpProtocol::from(255));
+        assert_eq!(
+            inet_raw_protocol(256).unwrap_err(),
+            KError::from(LinuxError::EINVAL)
+        );
+    }
 }

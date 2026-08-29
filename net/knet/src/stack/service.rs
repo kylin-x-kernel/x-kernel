@@ -417,7 +417,7 @@ impl Service {
         let dst_addr = super::from_smoltcp_ip_address(*dst_addr);
         self.router
             .lock()
-            .output_route_source(&dst_addr)
+            .output_route_source(&dst_addr, 0)
             .map(super::to_smoltcp_ip_address)
     }
 
@@ -438,7 +438,7 @@ impl Service {
     }
 
     pub fn get_source_address(&self, dst_addr: &IpAddress) -> KResult<IpAddress> {
-        self.router.lock().output_route_source(dst_addr)
+        self.router.lock().output_route_source(dst_addr, 0)
     }
 
     #[cfg(unittest)]
@@ -454,12 +454,17 @@ impl Service {
         &self,
         bound_src: Option<IpAddress>,
         dst_addr: &IpAddress,
+        oif: i32,
+        allow_broadcast: bool,
         packet: &mut Option<Vec<u8>>,
         prepare: impl FnOnce(&mut [u8], IpAddress, Option<usize>) -> KResult,
     ) -> KResult {
         let mut router = self.router.lock();
+        if router.ipv4_dest_requires_broadcast(dst_addr) && !allow_broadcast {
+            return Err(KError::from(LinuxError::EACCES));
+        }
         let packet_len = packet.as_ref().ok_or(KError::InvalidInput)?.len();
-        let route_source = router.output_route_source(dst_addr)?;
+        let route_source = router.output_route_source(dst_addr, oif)?;
         let source_addr = bound_src.unwrap_or(route_source);
         let is_loopback = router.is_loopback_destination(dst_addr);
 
@@ -484,7 +489,7 @@ impl Service {
         if is_loopback {
             router.transmit_ipv4_now(packet, monotonic_time())
         } else {
-            router.queue_ipv4_packet(packet)
+            router.queue_ipv4_packet(packet, oif)
         }
     }
 
@@ -624,6 +629,10 @@ impl Service {
         self.router.lock().has_device(ifindex)
     }
 
+    pub fn device_index_by_name(&self, name: &str) -> Option<usize> {
+        self.router.lock().device_index_by_name(name)
+    }
+
     pub fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
         self.router.lock().link_send_snapshot_for_ifindex(ifindex)
     }
@@ -673,6 +682,26 @@ impl Service {
         Ok(is_last_owner)
     }
 
+    pub(crate) fn set_primary_ipv4_addr(
+        &self,
+        dev: usize,
+        addr: crate::ip::Ipv4Cidr,
+    ) -> Result<(), LinuxError> {
+        let mut router = self.router.lock();
+        router.set_primary_ipv4_addr(dev, addr)?;
+        let local_ipv4_addrs = router.local_ipv4_addrs();
+        self.replace_local_ipv4_views(&local_ipv4_addrs);
+        Ok(())
+    }
+
+    pub(crate) fn remove_primary_ipv4_addr(&self, dev: usize) -> Result<(), LinuxError> {
+        let mut router = self.router.lock();
+        router.remove_primary_ipv4_addr(dev)?;
+        let local_ipv4_addrs = router.local_ipv4_addrs();
+        self.replace_local_ipv4_views(&local_ipv4_addrs);
+        Ok(())
+    }
+
     pub(crate) fn route_snapshot(&self) -> Vec<Rule> {
         self.router.lock().route_snapshot()
     }
@@ -691,6 +720,22 @@ impl Service {
 
     pub(crate) fn remove_route_rule(&self, route: Rule) {
         self.router.lock().remove_exact_route_rule(route);
+    }
+
+    pub(crate) fn set_ipv4_broadcast(
+        &self,
+        dev: usize,
+        broadcast: crate::ip::Ipv4Address,
+    ) -> Result<(), LinuxError> {
+        self.router.lock().set_ipv4_broadcast(dev, broadcast)
+    }
+
+    pub(crate) fn set_ipv4_netmask(&self, dev: usize, prefix_len: u8) -> Result<(), LinuxError> {
+        let mut router = self.router.lock();
+        router.set_ipv4_netmask(dev, prefix_len)?;
+        let local_ipv4_addrs = router.local_ipv4_addrs();
+        self.replace_local_ipv4_views(&local_ipv4_addrs);
+        Ok(())
     }
 
     pub fn update_device_link(
@@ -725,8 +770,8 @@ impl Service {
 
     /// Removes a device and refreshes every address-derived data-plane view.
     ///
-    /// Callers must hold [`crate::netlink::rtnl_lock`], matching Linux
-    /// `unregister_netdevice()` which requires `ASSERT_RTNL()`.
+    /// Callers must hold [`crate::control::network_config_lock`] so device
+    /// removal cannot interleave with other control-plane mutations.
     pub(crate) fn remove_device_by_model_id(&self, id: kdevice::DeviceId) -> Option<()> {
         let mut router = self.router.lock();
         let effective_mtu = router.effective_mtu();
@@ -1013,12 +1058,15 @@ mod tests {
                 dev: loopback,
                 addr: Ipv4Cidr::new(loopback_addr, 8),
                 scope: ROUTE_SCOPE_HOST,
+                broadcast: None,
             })
             .unwrap();
         let packet =
             ipv4::build_ipv4_packet(loopback_addr, loopback_addr, ipv4::PROTOCOL_ICMP, 64, &[])
                 .unwrap();
-        router.queue_ipv4_packet(packet).unwrap();
+        router
+            .queue_ipv4_packet(packet, loopback as i32 + 1)
+            .unwrap();
         let round_started_at = monotonic_time();
 
         let (tx_packets, _) = dispatch_tx_budgeted(

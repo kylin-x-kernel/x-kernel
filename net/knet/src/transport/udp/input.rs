@@ -52,7 +52,11 @@ pub(crate) fn prepare_ipv4_packet(
 pub(crate) fn deliver_ipv4_packet(
     packet: PreparedUdpPacket,
 ) -> (InputDisposition, Option<PreparedUdpPacket>) {
-    let Some(pcb) = registry::lookup_udp_pcb(packet.local_addr(), packet.remote_addr()) else {
+    let Some(pcb) = registry::lookup_udp_pcb_on_device(
+        packet.local_addr(),
+        packet.remote_addr(),
+        packet.packet().ifindex(),
+    ) else {
         return (InputDisposition::NoSocket, Some(packet));
     };
 

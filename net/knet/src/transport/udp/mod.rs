@@ -8,11 +8,11 @@ mod input;
 mod output;
 mod pcb;
 mod registry;
+mod relay;
 mod socket;
 mod state;
 mod wait;
 
-pub use self::socket::UdpSocket;
 pub(crate) use self::{
     input::{InputDisposition, deliver_ipv4_packet, prepare_ipv4_packet},
     pcb::PreparedUdpPacket,
@@ -24,6 +24,7 @@ pub(crate) use self::{
     registry::{clear_udp_registry_for_test, register_udp_state_for_test},
     state::UdpSocketState,
 };
+pub use self::{relay::UdpDatagramRelay, socket::UdpSocket};
 
 const IPV4_HEADER_LEN: usize = 20;
 const IPV4_DEFAULT_TTL: u8 = 64;

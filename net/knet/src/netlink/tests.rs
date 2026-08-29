@@ -191,6 +191,7 @@ fn init_test_state() {
             dev: 0,
             addr: crate::ip::Ipv4Cidr::new(crate::ip::Ipv4Address::new(127, 0, 0, 1), 8),
             scope: wire_route::SCOPE_HOST,
+            broadcast: None,
         })
         .unwrap();
     router.add_rule(Rule::new(
@@ -206,6 +207,7 @@ fn init_test_state() {
             dev: 1,
             addr: crate::ip::Ipv4Cidr::new(crate::ip::Ipv4Address::new(192, 168, 1, 2), 24),
             scope: wire_route::SCOPE_UNIVERSE,
+            broadcast: None,
         })
         .unwrap();
     if SERVICE.is_inited() {

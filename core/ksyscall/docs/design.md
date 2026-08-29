@@ -119,6 +119,9 @@ ksyscall::dispatch_irq_syscall
 - `vfs/`
   - 路径和 VFS 语义相关 syscall
   - owner 在 `posix-fs` / `kvfs`
+- `ioctl`
+  - `dispatch.rs` 先询问 `posix-net::handle_net_ioctl` 的精确 SIOC* 清单，未命中再走 `posix-fs::sys_ioctl`
+  - 不按 `0x89xx` ioctl type space 过滤；socket 文件 vtable 尚未 override `ioctl`
 - `ipc/pipe.rs`
   - `pipe2`
   - owner 在 `kfd_objects::PipeObject`

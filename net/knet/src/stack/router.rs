@@ -171,6 +171,14 @@ pub struct Ipv4AddrEntry {
     pub dev: usize,
     pub addr: Ipv4Cidr,
     pub scope: u8,
+    /// Linux `ifa_broadcast` override. `None` means derive from the CIDR.
+    pub broadcast: Option<Ipv4Address>,
+}
+
+impl Ipv4AddrEntry {
+    fn effective_broadcast(self) -> Option<Ipv4Address> {
+        self.broadcast.or_else(|| self.addr.broadcast())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -304,15 +312,39 @@ impl Router {
 
     /// Returns the source address for an output route with an active device.
     ///
+    /// `oif` is a 1-based bound device index; `0` means the socket is unbound.
+    /// Limited broadcasts with a bound device use that device's primary
+    /// address (or `0.0.0.0`) without requiring a unicast route.
+    ///
     /// # Errors
     ///
-    /// Returns `ENETUNREACH` when the route or its device is absent, or when
-    /// the selected device is administratively down.
-    pub fn output_route_source(&self, dst: &IpAddress) -> KResult<IpAddress> {
+    /// Returns `ENETUNREACH` when the route or its device is absent, when
+    /// the selected device is administratively down, or when `oif` disagrees
+    /// with the looked-up output device.
+    pub fn output_route_source(&self, dst: &IpAddress, oif: i32) -> KResult<IpAddress> {
+        if dst.is_broadcast() && oif > 0 {
+            let device = self
+                .devices
+                .get((oif - 1) as usize)
+                .ok_or(KError::from(LinuxError::ENETUNREACH))?;
+            if !device.is_link_up() {
+                return Err(LinuxError::ENETUNREACH.into());
+            }
+            return Ok(self
+                .first_ipv4_addr_for_device(oif as u32)
+                .map(|cidr| IpAddress::Ipv4(cidr.address()))
+                .unwrap_or(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED)));
+        }
+        // Unbound limited broadcast still needs a route so the later
+        // dispatch flood has a source address.
+
         let rule = self
             .table
             .lookup(dst)
             .ok_or(KError::from(LinuxError::ENETUNREACH))?;
+        if oif > 0 && rule.dev != (oif - 1) as usize {
+            return Err(KError::from(LinuxError::ENETUNREACH));
+        }
         let device = self
             .devices
             .get(rule.dev)
@@ -344,7 +376,7 @@ impl Router {
             .is_some_and(|len| len <= DATA_TX_QUEUE_SIZE)
     }
 
-    pub fn queue_ipv4_packet(&mut self, packet: Vec<u8>) -> KResult {
+    pub fn queue_ipv4_packet(&mut self, packet: Vec<u8>, oif: i32) -> KResult {
         let packets = self.fragment_ipv4_packet_for_output(packet)?;
         if !self.can_enqueue_tx_packets(packets.len()) {
             return Err(KError::WouldBlock);
@@ -353,7 +385,7 @@ impl Router {
         self.data_tx_queue.extend(
             packets
                 .into_iter()
-                .map(|packet| PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack)),
+                .map(|packet| PacketBuf::from_ip_packet_vec(oif, packet, PacketOwner::Ipv4Stack)),
         );
         Ok(())
     }
@@ -420,15 +452,13 @@ impl Router {
                 entry.dev -= 1;
             }
         }
-        let mut orphaned_ipv4_sources = Vec::new();
         for source in removed_sources {
-            if !self.has_ipv4_address(source) && !orphaned_ipv4_sources.contains(&source) {
+            if !self.has_ipv4_address(source) {
                 self.table
                     .remove_configured_routes_with_source(source.into());
                 for device in &mut self.devices {
                     device.remove_pending_ipv4_source(source);
                 }
-                orphaned_ipv4_sources.push(source);
             }
         }
         self.rebuild_ipv4_address_routes();
@@ -440,6 +470,18 @@ impl Router {
 
     pub fn local_ipv4_addrs(&self) -> Vec<Ipv4Cidr> {
         self.ipv4_addrs.iter().map(|entry| entry.addr).collect()
+    }
+
+    /// Returns whether `address` is an IPv4 limited or directed broadcast.
+    pub(crate) fn ipv4_dest_requires_broadcast(&self, address: &IpAddress) -> bool {
+        let IpAddress::Ipv4(address) = *address else {
+            return false;
+        };
+        address.is_broadcast()
+            || self
+                .ipv4_addrs
+                .iter()
+                .any(|entry| entry.addr.is_directed_broadcast(address))
     }
 
     /// Returns the MTU advertised through the smoltcp device capabilities.
@@ -464,6 +506,21 @@ impl Router {
 
     pub fn has_device(&self, ifindex: i32) -> bool {
         Self::device_index(ifindex).is_some_and(|dev_index| self.devices.get(dev_index).is_some())
+    }
+
+    pub fn device_index_by_name(&self, name: &str) -> Option<usize> {
+        self.devices.iter().position(|device| device.name() == name)
+    }
+
+    fn first_ipv4_addr_for_device(&self, ifindex: u32) -> Option<Ipv4Cidr> {
+        ifindex
+            .checked_sub(1)
+            .and_then(|dev| {
+                self.ipv4_addrs
+                    .iter()
+                    .find(|entry| entry.dev == dev as usize)
+            })
+            .map(|entry| entry.addr)
     }
 
     pub fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
@@ -513,6 +570,70 @@ impl Router {
         Ok(())
     }
 
+    /// Updates the primary IPv4 address on `dev` in its owning address table.
+    ///
+    /// Other addresses on the device remain unchanged. Updating an existing
+    /// address resets its scope and broadcast fields like Linux
+    /// `SIOCSIFADDR`; setting the same local address is a no-op.
+    pub fn set_primary_ipv4_addr(&mut self, dev: usize, addr: Ipv4Cidr) -> Result<(), LinuxError> {
+        if dev >= self.devices.len() {
+            return Err(LinuxError::ENODEV);
+        }
+        if addr.prefix_len() > 32 || !addr.address().is_unicast() {
+            return Err(LinuxError::EINVAL);
+        }
+
+        let Some(primary_index) = self.ipv4_addrs.iter().position(|entry| entry.dev == dev) else {
+            return self.add_ipv4_addr(Ipv4AddrEntry {
+                dev,
+                addr,
+                scope: ROUTE_SCOPE_UNIVERSE,
+                broadcast: None,
+            });
+        };
+        let old = self.ipv4_addrs[primary_index];
+        if old.addr.address() == addr.address() {
+            return Ok(());
+        }
+
+        if self
+            .ipv4_addrs
+            .iter()
+            .skip(primary_index + 1)
+            .any(|entry| entry.dev == dev && entry.addr == addr)
+        {
+            return Err(LinuxError::EEXIST);
+        }
+        self.ipv4_addrs[primary_index] = Ipv4AddrEntry {
+            dev,
+            addr,
+            scope: ROUTE_SCOPE_UNIVERSE,
+            broadcast: None,
+        };
+        self.remove_ipv4_source_state_if_unowned(old.addr.address());
+        self.rebuild_ipv4_address_routes();
+        self.sync_device_ipv4_addrs();
+        Ok(())
+    }
+
+    /// Removes the primary IPv4 address from `dev`.
+    ///
+    /// Other addresses on the device remain unchanged. An interface without
+    /// an IPv4 address is accepted to match `SIOCSIFADDR 0.0.0.0`.
+    pub fn remove_primary_ipv4_addr(&mut self, dev: usize) -> Result<(), LinuxError> {
+        if dev >= self.devices.len() {
+            return Err(LinuxError::ENODEV);
+        }
+        let Some(primary_index) = self.ipv4_addrs.iter().position(|entry| entry.dev == dev) else {
+            return Ok(());
+        };
+        let old = self.ipv4_addrs.remove(primary_index);
+        self.remove_ipv4_source_state_if_unowned(old.addr.address());
+        self.rebuild_ipv4_address_routes();
+        self.sync_device_ipv4_addrs();
+        Ok(())
+    }
+
     pub fn remove_ipv4_addr(&mut self, entry: Ipv4AddrEntry) -> bool {
         let old_len = self.ipv4_addrs.len();
         self.ipv4_addrs
@@ -521,13 +642,7 @@ impl Router {
             return false;
         }
 
-        let source = IpAddress::Ipv4(entry.addr.address());
-        if !self.has_ipv4_address(entry.addr.address()) {
-            self.table.remove_configured_routes_with_source(source);
-            for device in &mut self.devices {
-                device.remove_pending_ipv4_source(entry.addr.address());
-            }
-        }
+        self.remove_ipv4_source_state_if_unowned(entry.addr.address());
         self.rebuild_ipv4_address_routes();
         self.sync_device_ipv4_addrs();
         true
@@ -575,6 +690,75 @@ impl Router {
 
     pub fn remove_exact_route_rule(&mut self, route: Rule) {
         self.table.remove_exact_rule(route);
+    }
+
+    pub fn set_ipv4_broadcast(
+        &mut self,
+        dev: usize,
+        broadcast: Ipv4Address,
+    ) -> Result<(), LinuxError> {
+        let entry = self
+            .ipv4_addrs
+            .iter_mut()
+            .find(|entry| entry.dev == dev)
+            .ok_or(LinuxError::EADDRNOTAVAIL)?;
+        entry.broadcast = Some(broadcast);
+        Ok(())
+    }
+
+    /// Updates the prefix length of the primary IPv4 address on `dev`.
+    ///
+    /// Linux `SIOCSIFNETMASK` keeps `ifa_scope` and only recalculates
+    /// `ifa_broadcast` when it still matches the old derived mask.
+    pub fn set_ipv4_netmask(&mut self, dev: usize, prefix_len: u8) -> Result<(), LinuxError> {
+        if prefix_len > 32 {
+            return Err(LinuxError::EINVAL);
+        }
+        let old = self
+            .ipv4_addrs
+            .iter()
+            .find(|entry| entry.dev == dev)
+            .copied()
+            .ok_or(LinuxError::EADDRNOTAVAIL)?;
+        if old.addr.prefix_len() == prefix_len {
+            return Ok(());
+        }
+
+        let old_derived_broadcast = old.addr.broadcast();
+        let has_broadcast_flag = self
+            .devices
+            .get(dev)
+            .is_some_and(|device| device.link_kind() == LinkKind::Ethernet);
+        let should_recalculate_broadcast = has_broadcast_flag
+            && prefix_len < 31
+            && old.effective_broadcast() == old_derived_broadcast;
+
+        let entry = self
+            .ipv4_addrs
+            .iter_mut()
+            .find(|entry| entry.dev == dev)
+            .ok_or(LinuxError::EADDRNOTAVAIL)?;
+        entry.addr = Ipv4Cidr::new(old.addr.address(), prefix_len);
+        if should_recalculate_broadcast {
+            entry.broadcast = None;
+        } else if entry.broadcast.is_none() {
+            entry.broadcast = old_derived_broadcast;
+        }
+
+        self.rebuild_ipv4_address_routes();
+        self.sync_device_ipv4_addrs();
+        Ok(())
+    }
+
+    fn remove_ipv4_source_state_if_unowned(&mut self, address: Ipv4Address) {
+        if self.has_ipv4_address(address) {
+            return;
+        }
+        self.table
+            .remove_configured_routes_with_source(IpAddress::Ipv4(address));
+        for device in &mut self.devices {
+            device.remove_pending_ipv4_source(address);
+        }
     }
 
     fn validate_configured_route(&self, rule: Rule) -> Result<(), LinuxError> {
@@ -932,6 +1116,7 @@ impl Router {
                 return false;
             }
 
+            let bound_if = packet.ifindex();
             let device_count = self.devices.len();
             let Some((last_device, preceding_devices)) = self.devices.split_last_mut() else {
                 return false;
@@ -939,21 +1124,18 @@ impl Router {
 
             let mut poll_next = false;
             for (dev_index, dev) in preceding_devices.iter_mut().enumerate() {
-                poll_next |= dev.send_ip_packet(
-                    dev_index as i32 + 1,
-                    dst_addr,
-                    src_addr,
-                    packet.clone(),
-                    timestamp,
-                );
+                let ifindex = dev_index as i32 + 1;
+                if bound_if != 0 && bound_if != ifindex {
+                    continue;
+                }
+                poll_next |=
+                    dev.send_ip_packet(ifindex, dst_addr, src_addr, packet.clone(), timestamp);
             }
-            poll_next |= last_device.send_ip_packet(
-                device_count as i32,
-                dst_addr,
-                src_addr,
-                packet,
-                timestamp,
-            );
+            let last_ifindex = device_count as i32;
+            if bound_if == 0 || bound_if == last_ifindex {
+                poll_next |=
+                    last_device.send_ip_packet(last_ifindex, dst_addr, src_addr, packet, timestamp);
+            }
             return poll_next;
         }
 
@@ -961,6 +1143,14 @@ impl Router {
             warn!("No route found for destination: {}", dst_addr);
             return false;
         };
+        let bound_if = packet.ifindex();
+        if bound_if != 0 && bound_if != rule.dev as i32 + 1 {
+            warn!(
+                "Dropping IPv4 packet bound to ifindex {bound_if} via device {}",
+                rule.dev as i32 + 1
+            );
+            return false;
+        }
         if !self.is_local_ipv4_source(header.src_addr()) {
             warn!(
                 "Dropping IPv4 packet with non-local source {} routed via {}",
@@ -1137,6 +1327,7 @@ mod tests {
             dev,
             addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24),
             scope: ROUTE_SCOPE_HOST,
+            broadcast: None,
         };
 
         router.add_ipv4_addr(entry).unwrap();
@@ -1161,6 +1352,28 @@ mod tests {
     }
 
     #[def_test]
+    fn ipv4_broadcast_detection_covers_limited_and_directed_addresses() {
+        let mut router = Router::new();
+        let dev = router.add_device(Box::new(LoopbackDevice::new()));
+        router
+            .add_ipv4_addr(Ipv4AddrEntry {
+                dev,
+                addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24),
+                scope: ROUTE_SCOPE_HOST,
+                broadcast: None,
+            })
+            .unwrap();
+
+        assert!(router.ipv4_dest_requires_broadcast(&IpAddress::Ipv4(Ipv4Address::BROADCAST)));
+        assert!(
+            router.ipv4_dest_requires_broadcast(&IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 255)))
+        );
+        assert!(
+            !router.ipv4_dest_requires_broadcast(&IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 8)))
+        );
+    }
+
+    #[def_test]
     fn ipv4_address_capacity_matches_smoltcp_interface_limit() {
         let mut router = Router::new();
         let dev = router.add_device(Box::new(LoopbackDevice::new()));
@@ -1171,6 +1384,7 @@ mod tests {
                     dev,
                     addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, index as u8 + 1), 32),
                     scope: ROUTE_SCOPE_HOST,
+                    broadcast: None,
                 })
                 .unwrap();
         }
@@ -1180,9 +1394,96 @@ mod tests {
                 dev,
                 addr: Ipv4Cidr::new(Ipv4Address::new(198, 51, 100, 1), 32),
                 scope: ROUTE_SCOPE_HOST,
+                broadcast: None,
             }),
             Err(LinuxError::ENOBUFS)
         );
+    }
+
+    #[def_test]
+    fn setting_primary_ipv4_address_keeps_secondary_addresses() {
+        let mut router = Router::new();
+        let dev = router.add_device(Box::new(LoopbackDevice::new()));
+        let primary = Ipv4AddrEntry {
+            dev,
+            addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24),
+            scope: ROUTE_SCOPE_HOST,
+            broadcast: Some(Ipv4Address::new(192, 0, 2, 111)),
+        };
+        let secondary = Ipv4AddrEntry {
+            dev,
+            addr: Ipv4Cidr::new(Ipv4Address::new(198, 51, 100, 7), 24),
+            scope: ROUTE_SCOPE_HOST,
+            broadcast: None,
+        };
+        router.add_ipv4_addr(primary).unwrap();
+        router.add_ipv4_addr(secondary).unwrap();
+
+        let replacement = Ipv4Cidr::new(Ipv4Address::new(203, 0, 113, 7), 24);
+        router.set_primary_ipv4_addr(dev, replacement).unwrap();
+
+        assert_eq!(router.ipv4_addr_entries().len(), 2);
+        assert_eq!(router.ipv4_addr_entries()[0].addr, replacement);
+        assert_eq!(router.ipv4_addr_entries()[0].scope, ROUTE_SCOPE_UNIVERSE);
+        assert_eq!(router.ipv4_addr_entries()[0].broadcast, None);
+        assert_eq!(router.ipv4_addr_entries()[1], secondary);
+    }
+
+    #[def_test]
+    fn removing_primary_ipv4_address_keeps_secondary_addresses() {
+        let mut router = Router::new();
+        let dev = router.add_device(Box::new(LoopbackDevice::new()));
+        let primary = Ipv4AddrEntry {
+            dev,
+            addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24),
+            scope: ROUTE_SCOPE_HOST,
+            broadcast: None,
+        };
+        let secondary = Ipv4AddrEntry {
+            dev,
+            addr: Ipv4Cidr::new(Ipv4Address::new(198, 51, 100, 7), 24),
+            scope: ROUTE_SCOPE_HOST,
+            broadcast: None,
+        };
+        router.add_ipv4_addr(primary).unwrap();
+        router.add_ipv4_addr(secondary).unwrap();
+
+        router.remove_primary_ipv4_addr(dev).unwrap();
+
+        assert_eq!(router.ipv4_addr_entries(), &[secondary]);
+    }
+
+    #[def_test]
+    fn setting_ipv4_netmask_keeps_secondary_scope_and_custom_broadcast() {
+        let mut router = Router::new();
+        let dev = router.add_device(Box::new(LoopbackDevice::new()));
+        let custom_broadcast = Ipv4Address::new(192, 0, 2, 111);
+        let secondary = Ipv4AddrEntry {
+            dev,
+            addr: Ipv4Cidr::new(Ipv4Address::new(198, 51, 100, 7), 24),
+            scope: ROUTE_SCOPE_UNIVERSE,
+            broadcast: None,
+        };
+        router
+            .add_ipv4_addr(Ipv4AddrEntry {
+                dev,
+                addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24),
+                scope: ROUTE_SCOPE_HOST,
+                broadcast: Some(custom_broadcast),
+            })
+            .unwrap();
+        router.add_ipv4_addr(secondary).unwrap();
+
+        router.set_ipv4_netmask(dev, 16).unwrap();
+
+        assert_eq!(router.ipv4_addr_entries().len(), 2);
+        assert_eq!(router.ipv4_addr_entries()[0].addr.prefix_len(), 16);
+        assert_eq!(router.ipv4_addr_entries()[0].scope, ROUTE_SCOPE_HOST);
+        assert_eq!(
+            router.ipv4_addr_entries()[0].broadcast,
+            Some(custom_broadcast)
+        );
+        assert_eq!(router.ipv4_addr_entries()[1], secondary);
     }
 
     #[def_test]
@@ -1193,6 +1494,7 @@ mod tests {
             dev,
             addr: Ipv4Cidr::new(Ipv4Address::new(198, 51, 100, 7), 24),
             scope: ROUTE_SCOPE_HOST,
+            broadcast: None,
         };
 
         router.add_ipv4_addr(entry).unwrap();
@@ -1209,6 +1511,46 @@ mod tests {
                 .table
                 .lookup(&IpAddress::Ipv4(Ipv4Address::new(198, 51, 100, 7)))
                 .is_none()
+        );
+    }
+
+    #[def_test]
+    fn configured_gateway_must_be_on_device_subnet() {
+        let mut router = Router::new();
+        let dev = router.add_device(Box::new(LoopbackDevice::new()));
+        router
+            .add_ipv4_addr(Ipv4AddrEntry {
+                dev,
+                addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24),
+                scope: ROUTE_SCOPE_HOST,
+                broadcast: None,
+            })
+            .unwrap();
+
+        let unreachable = Rule::new(
+            Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
+            Some(IpAddress::Ipv4(Ipv4Address::new(198, 51, 100, 1))),
+            dev,
+            IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 7)),
+        );
+        assert_eq!(
+            router.add_route_rule(unreachable),
+            Err(LinuxError::ENETUNREACH)
+        );
+
+        let default = Rule::new(
+            Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
+            Some(IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1))),
+            dev,
+            IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 7)),
+        );
+        router.add_route_rule(default).unwrap();
+        router.remove_exact_route_rule(default);
+        assert!(
+            router
+                .route_snapshot()
+                .iter()
+                .all(|route| !route.is_configured())
         );
     }
 }

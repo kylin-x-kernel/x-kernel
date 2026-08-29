@@ -24,7 +24,7 @@ use crate::{
     ConnectOptions, RecvFlags, RecvOptions, SERVICE, SendOptions, Shutdown, SocketAddrEx,
     SocketOps,
     buf::{PacketBuf, PacketType},
-    device::LinkSendSnapshot,
+    device::{ARPHRD_ETHER, LinkSendSnapshot},
     general::GeneralOptions,
     options::{
         Configurable, GetSocketOption, OptionHandled, PacketMembership, PacketStatistics,
@@ -35,8 +35,6 @@ use crate::{
 };
 
 const ETH_P_ALL: u16 = 0x0003;
-
-const ARPHRD_ETHER: u16 = 1;
 
 const PACKET_HOST: u8 = 0;
 const PACKET_BROADCAST: u8 = 1;

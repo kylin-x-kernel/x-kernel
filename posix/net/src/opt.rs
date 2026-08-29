@@ -12,12 +12,14 @@
 //! Linux stores nonzero send and receive timeouts in jiffies. Socket timeout
 //! conversion therefore rounds a userspace `timeval` up to one kernel tick.
 
+use alloc::{vec, vec::Vec};
+
 use kerrno::{KError, KResult, LinuxError};
 use knet::{
     options::{Configurable, GetSocketOption, SetSocketOption},
     sock_from_file,
 };
-use linux_raw_sys::net::socklen_t;
+use linux_raw_sys::net::{SO_BINDTODEVICE, SOL_SOCKET, socklen_t};
 use osvm::{VirtPtr, write_vm_mem};
 use posix_types::{UserConstPtr, UserPtr, UserRead};
 
@@ -28,6 +30,8 @@ const PROTO_IP: u32 = linux_raw_sys::net::IPPROTO_IP as u32;
 const PACKET_ADD_MEMBERSHIP: u32 = 1;
 const PACKET_DROP_MEMBERSHIP: u32 = 2;
 const PACKET_STATISTICS: u32 = 6;
+
+const IFNAMSIZ: usize = 16;
 
 mod conv {
     use kerrno::{KError, KResult};
@@ -179,6 +183,7 @@ macro_rules! call_dispatch {
             (SOL_SOCKET, SO_REUSEADDR) => ReuseAddress as IntBool,
             (SOL_SOCKET, SO_ERROR) => Error,
             (SOL_SOCKET, SO_DONTROUTE) => DontRoute as IntBool,
+            (SOL_SOCKET, SO_BROADCAST) => Broadcast as IntBool,
             (SOL_SOCKET, SO_SNDBUF) => SendBuffer as Int<usize>,
             (SOL_SOCKET, SO_RCVBUF) => ReceiveBuffer as Int<usize>,
             (SOL_SOCKET, SO_KEEPALIVE) => KeepAlive as IntBool,
@@ -210,6 +215,26 @@ macro_rules! call_dispatch {
             _ => return Err(KError::from(LinuxError::ENOPROTOOPT)),
         }
     }
+}
+
+/// Encodes Linux's `SO_BINDTODEVICE` getsockopt result.
+///
+/// An unbound socket returns a zero length without accessing `optval`. A bound
+/// socket requires an `IFNAMSIZ`-sized input buffer and returns the actual
+/// NUL-terminated interface-name length.
+fn encode_bound_device_name(name: Option<&str>, optlen: usize) -> KResult<Vec<u8>> {
+    let Some(name) = name else {
+        return Ok(Vec::new());
+    };
+    if optlen < IFNAMSIZ {
+        return Err(KError::InvalidInput);
+    }
+
+    let name = name.as_bytes();
+    let copy_len = name.len().min(IFNAMSIZ - 1);
+    let mut buf = vec![0u8; copy_len + 1];
+    buf[..copy_len].copy_from_slice(&name[..copy_len]);
+    Ok(buf)
 }
 
 /// Get socket options at a specified protocol level
@@ -253,7 +278,17 @@ pub fn sys_getsockopt(
             put(optval, &mut optlen, &sys_val)?;
         };
     }
-    call_dispatch!(dispatch, (level, optname));
+    if level == SOL_SOCKET && optname == SO_BINDTODEVICE {
+        let mut name: Option<alloc::string::String> = None;
+        socket.get_option(GetSocketOption::BindToDevice(&mut name))?;
+        let buf = encode_bound_device_name(name.as_deref(), optlen as usize)?;
+        if !buf.is_empty() {
+            osvm::write_vm_bytes(optval.as_ptr() as *mut u8, &buf)?;
+        }
+        optlen = buf.len() as socklen_t;
+    } else {
+        call_dispatch!(dispatch, (level, optname));
+    }
 
     optlen_ptr.write_vm(optlen)?;
     Ok(0)
@@ -293,20 +328,61 @@ pub fn sys_setsockopt(
         };
     }
 
-    call_dispatch!(dispatch, (level, optname));
+    if level == SOL_SOCKET && optname == SO_BINDTODEVICE {
+        if optlen == 0 {
+            socket.set_option(SetSocketOption::BindToDevice(&None))?;
+        } else {
+            // Linux `sock_setbindtodevice` copies at most IFNAMSIZ-1 bytes
+            // into a zeroed stack buffer; oversized optlen is truncated, not
+            // rejected.
+            let copy_len = (optlen as usize).min(IFNAMSIZ - 1);
+            let buf = osvm::load_vec::<u8>(optval.as_ptr(), copy_len)?;
+            let name_str = alloc::string::String::from_utf8(
+                buf.iter().copied().take_while(|&b| b != 0).collect(),
+            )
+            .map_err(|_| KError::InvalidInput)?;
+            if name_str.is_empty() {
+                socket.set_option(SetSocketOption::BindToDevice(&None))?;
+            } else {
+                socket.set_option(SetSocketOption::BindToDevice(&Some(name_str)))?;
+            }
+        }
+    } else {
+        call_dispatch!(dispatch, (level, optname));
+    }
 
     Ok(0)
 }
 
 #[cfg(unittest)]
 mod tests {
+    use kerrno::KError;
     use ktime_types::{NANOS_PER_SEC, TimeSpan};
     use linux_raw_sys::general::timeval;
     use unittest::{assert_eq, def_test};
 
-    use super::conv::SocketTimeout;
+    use super::{IFNAMSIZ, conv::SocketTimeout, encode_bound_device_name};
 
     const NANOS_PER_TICK: u64 = NANOS_PER_SEC / kbuild_config::TICKS_PER_SECOND as u64;
+
+    #[def_test]
+    fn unbound_device_get_accepts_zero_length() {
+        let encoded = encode_bound_device_name(None, 0).unwrap();
+
+        assert_eq!(encoded.len(), 0);
+        assert_eq!(encode_bound_device_name(None, IFNAMSIZ).unwrap().len(), 0);
+    }
+
+    #[def_test]
+    fn bound_device_get_requires_ifnamsiz_and_returns_actual_length() {
+        assert_eq!(
+            encode_bound_device_name(Some("eth0"), IFNAMSIZ - 1).unwrap_err(),
+            KError::InvalidInput
+        );
+
+        let encoded = encode_bound_device_name(Some("eth0"), IFNAMSIZ).unwrap();
+        assert_eq!(encoded.as_slice(), b"eth0\0");
+    }
 
     #[def_test]
     fn zero_socket_timeout_remains_infinite() {

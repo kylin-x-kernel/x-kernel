@@ -33,6 +33,8 @@ pub(crate) const LINK_FLAG_MULTICAST: u32 = 1 << 12;
 pub(crate) const LINK_FLAG_LOWER_UP: u32 = 1 << 16;
 const LINK_FLAG_DORMANT: u32 = 1 << 17;
 const LINK_FLAG_ECHO: u32 = 1 << 18;
+pub(crate) const ARPHRD_ETHER: u16 = 1;
+pub(crate) const ARPHRD_LOOPBACK: u16 = 772;
 pub(crate) const LINK_FLAG_VOLATILE: u32 = LINK_FLAG_LOOPBACK
     | LINK_FLAG_POINTOPOINT
     | LINK_FLAG_BROADCAST

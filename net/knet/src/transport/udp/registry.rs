@@ -89,23 +89,33 @@ impl UdpPcbRegistry {
         &self,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
+        ifindex: i32,
         map_pcb_fn: impl Fn(&Arc<UdpPcb>) -> T,
     ) -> Option<T> {
-        self.bucket(local_addr.port())
-            .lock()
-            .lookup_in_bucket(local_addr, remote_addr, map_pcb_fn)
+        self.bucket(local_addr.port()).lock().lookup_in_bucket(
+            local_addr,
+            remote_addr,
+            ifindex,
+            map_pcb_fn,
+        )
     }
 
-    fn lookup(&self, local_addr: SocketAddr, remote_addr: SocketAddr) -> Option<Arc<UdpPcb>> {
-        self.lookup_map(local_addr, remote_addr, |pcb| pcb.clone())
+    fn lookup(
+        &self,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        ifindex: i32,
+    ) -> Option<Arc<UdpPcb>> {
+        self.lookup_map(local_addr, remote_addr, ifindex, |pcb| pcb.clone())
     }
 
     fn lookup_state(
         &self,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
+        ifindex: i32,
     ) -> Option<Arc<UdpSocketState>> {
-        self.lookup_map(local_addr, remote_addr, |pcb| pcb.state.clone())
+        self.lookup_map(local_addr, remote_addr, ifindex, |pcb| pcb.state.clone())
     }
 
     fn bind(
@@ -265,6 +275,7 @@ impl UdpPcbBucket {
         &self,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
+        ifindex: i32,
         map_pcb_fn: impl Fn(&Arc<UdpPcb>) -> T,
     ) -> Option<T> {
         let records = self.by_port.get(&local_addr.port())?;
@@ -274,6 +285,9 @@ impl UdpPcbBucket {
         for record in records {
             let local_endpoint = record.local_endpoint;
             if !local_endpoint_matches(local_endpoint, local_addr) {
+                continue;
+            }
+            if !bound_device_matches(record.pcb.state.bound_dev_if(), ifindex) {
                 continue;
             }
 
@@ -423,20 +437,34 @@ pub(crate) fn register_udp_state_for_test(state: Arc<UdpSocketState>) {
     register_udp_pcb(UdpPcb::new(state));
 }
 
+#[cfg(unittest)]
 pub(super) fn lookup_udp_pcb(
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
 ) -> Option<Arc<UdpPcb>> {
+    lookup_udp_pcb_on_device(local_addr, remote_addr, 0)
+}
+
+pub(super) fn lookup_udp_pcb_on_device(
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    ifindex: i32,
+) -> Option<Arc<UdpPcb>> {
     init_udp_registry();
-    UDP_PCB_REGISTRY.lookup(local_addr, remote_addr)
+    UDP_PCB_REGISTRY.lookup(local_addr, remote_addr, ifindex)
 }
 
 pub(crate) fn lookup_udp_error_state(
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
+    ifindex: i32,
 ) -> Option<Arc<UdpSocketState>> {
     init_udp_registry();
-    UDP_PCB_REGISTRY.lookup_state(local_addr, remote_addr)
+    UDP_PCB_REGISTRY.lookup_state(local_addr, remote_addr, ifindex)
+}
+
+fn bound_device_matches(bound_dev_if: i32, packet_ifindex: i32) -> bool {
+    bound_dev_if == 0 || bound_dev_if == packet_ifindex
 }
 
 fn bucket_index_for_port(port: u16) -> usize {
@@ -719,6 +747,35 @@ mod tests {
         .expect("wildcard connected PCB should match");
 
         assert!(Arc::ptr_eq(&selected, &wildcard_connected));
+        clear_registry();
+    }
+
+    #[def_test(serial)]
+    fn lookup_skips_pcb_bound_to_another_device() {
+        clear_registry();
+
+        let local = endpoint(Ipv4Address::new(10, 0, 0, 2), 8068);
+        let bound_state = UdpSocketState::new();
+        bound_state.set_local_endpoint(Some(local));
+        bound_state.set_bound_dev_if_for_test(2);
+        let bound = UdpPcb::new(bound_state);
+        register_udp_pcb(bound.clone());
+
+        assert!(
+            lookup_udp_pcb_on_device(
+                socket_addr(Ipv4Address::new(10, 0, 0, 2), 8068),
+                socket_addr(Ipv4Address::new(192, 0, 2, 1), 67),
+                1,
+            )
+            .is_none()
+        );
+        let selected = lookup_udp_pcb_on_device(
+            socket_addr(Ipv4Address::new(10, 0, 0, 2), 8068),
+            socket_addr(Ipv4Address::new(192, 0, 2, 1), 67),
+            2,
+        )
+        .expect("bound PCB should match its device");
+        assert!(Arc::ptr_eq(&selected, &bound));
         clear_registry();
     }
 

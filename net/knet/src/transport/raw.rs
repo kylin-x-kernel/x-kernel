@@ -28,8 +28,7 @@ use crate::{
     consts::{RAW_RX_BUF_LEN, RAW_TX_BUF_LEN},
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
-    poll_interfaces,
-    poller::{PollReason, network_poller},
+    poller::{PollReason, assist_once, network_poller},
 };
 
 pub(crate) fn new_raw_socket(
@@ -210,7 +209,7 @@ impl SocketOps for RawSocket {
 
         self.general
             .send_poller_with_nonblocking(self, options.flags.nonblocking(), || {
-                poll_interfaces();
+                assist_once();
                 let written = self.with_smol_socket(|socket| {
                     if !socket.can_send() {
                         return Err(KError::WouldBlock);
@@ -294,7 +293,7 @@ impl SocketOps for RawSocket {
                     Ok(written)
                 })?;
                 network_poller().notify(PollReason::Tx);
-                poll_interfaces();
+                assist_once();
                 Ok(written)
             })
     }
@@ -307,7 +306,7 @@ impl SocketOps for RawSocket {
 
         self.general
             .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
-                poll_interfaces();
+                assist_once();
                 self.with_smol_socket(|socket| {
                     loop {
                         let packet = if options.flags.contains(RecvFlags::PEEK) {
@@ -372,7 +371,7 @@ impl SocketOps for RawSocket {
 
 impl Pollable for RawSocket {
     fn poll(&self) -> IoEvents {
-        poll_interfaces();
+        assist_once();
         let mut events = IoEvents::empty();
         self.with_smol_socket(|socket| {
             events.set(

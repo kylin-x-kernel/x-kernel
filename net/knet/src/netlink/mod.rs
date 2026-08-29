@@ -6,8 +6,8 @@
 //! protocol front end.
 //!
 //! Link, address, route, and neighbor objects are owned by devices and the
-//! Router. This module parses requests, serializes mutations with
-//! [`rtnl_lock`], and dumps live snapshots.
+//! Router. This module parses requests, serializes mutations with the shared
+//! network configuration lock, and dumps live snapshots.
 
 use alloc::{
     collections::VecDeque,
@@ -16,7 +16,7 @@ use alloc::{
 };
 use core::sync::atomic::AtomicU64;
 
-use ksync::{Mutex, MutexGuard, RwLock, static_lock};
+use ksync::{Mutex, RwLock, static_lock};
 
 use crate::general::GeneralOptions;
 
@@ -61,21 +61,7 @@ pub(super) const RTM_NEWNEIGH: u16 = 28;
 // pub(super) const RT_SCOPE_NOWHERE: u8 = 255;
 // pub(super) const RTM_NEWNEIGH_FAMILY: u8 = 0;
 
-pub(super) const ARPHRD_LOOPBACK: u16 = 772;
-pub(super) const ARPHRD_ETHER: u16 = 1;
-
-static_lock! {
-    pub(super) static RTNETLINK_MUTATION_LOCK: Mutex<()> = Mutex::new(());
-}
-
-/// Serializes rtnetlink mutations with device unregister.
-///
-/// Linux keeps this semaphore in `net/core/rtnetlink.c` as `rtnl_mutex` and
-/// exports `rtnl_lock()`. Device teardown in `net/core/dev.c` takes the same
-/// lock through `unregister_netdev()`.
-pub(crate) fn rtnl_lock() -> MutexGuard<'static, ()> {
-    RTNETLINK_MUTATION_LOCK.lock()
-}
+pub(super) use crate::device::{ARPHRD_ETHER, ARPHRD_LOOPBACK};
 
 static_lock! {
     pub(super) static UEVENT_SUBSCRIBERS: Mutex<Vec<Weak<NetlinkSocketInner>>> = Mutex::new(Vec::new());

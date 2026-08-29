@@ -67,7 +67,17 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
 
     let result = match sysno {
         // fs ctl
-        Sysno::ioctl => sys_ioctl(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::ioctl => {
+            let fd = uctx.arg0() as i32;
+            let cmd = uctx.arg1() as u32;
+            let arg = uctx.arg2();
+            // Ask posix-net by exact SIOC* command, not the 0x89xx type
+            // space. Unrecognized commands fall through to the file ioctl.
+            match handle_net_ioctl(fd, cmd, arg).transpose() {
+                Some(result) => result,
+                None => sys_ioctl(fd, cmd, arg),
+            }
+        }
         Sysno::chdir => sys_chdir(uctx.arg0().into()),
         Sysno::fchdir => sys_fchdir(uctx.arg0() as _),
         Sysno::chroot => sys_chroot(uctx.arg0().into()),

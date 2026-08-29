@@ -20,6 +20,7 @@ net/knet/
 ├── Cargo.toml
 └── src/
     ├── lib.rs
+    ├── control.rs
     ├── poller.rs
     ├── device/
     │   ├── mod.rs
@@ -60,6 +61,7 @@ net/knet/
     │   │   ├── mod.rs
     │   │   ├── output.rs
     │   │   ├── pcb.rs
+    │   │   ├── relay.rs
     │   │   ├── registry.rs
     │   │   ├── state.rs
     │   │   ├── socket.rs
@@ -126,13 +128,14 @@ core/kruntime
 | `poller` | 通过 `kwork::BudgetedPoller` 的四态状态机串行化执行者，使用 dynamic kwork queue 或 socket assist 预算推进 RX、smoltcp timer 和 TX |
 | `Service` | 持有加锁的 smoltcp `Interface`、`Router`、`IngressProcessor`、可复用 batch、poll timeout 和 RX waker 注册入口 |
 | `Router` | 管理设备列表、IPv4 地址、配置路由、地址派生路由、RX 设备游标、smoltcp ingress queue、control/data TX queue、IPv4 输出分片、next-hop 选择和 budget dispatch |
+| `control` | 持有跨 rtnetlink、legacy socket ioctl 和设备注销路径的 `network_config_lock`，并提供接口查询、IPv4 地址配置和 IPv4 路由配置辅助操作 |
 | `IngressProcessor` | 在 Router 锁外校验和重组 IPv4 输入，执行 crate 内 UDP 分流、UDP error 与 TCP listen snoop，并生成 ICMPv4 control packet |
 | `NetDevice` | 抽象 loopback 和 Ethernet 设备后端，持有接口名、MTU、管理 up 状态、link snapshot 和设备邻居状态，通过 `PacketBuf` 转移报文所有权，并使用 crate 内地址类型和 `MonotonicInstant` 表达设备边界 |
 | `PacketBuf` | 指针大小的引用计数报文句柄，保存报文数据、协议偏移、接口索引、包类型、校验状态、已校验传输层元数据和当前所有者；共享后的写操作通过写时复制保持各句柄状态独立 |
 | `link::wire` | 使用 `zerocopy` 校验和构造 Ethernet 与 Ethernet/IPv4 ARP 头部 |
 | `stack::ipv4` | 使用 `etherparse` 校验和构造 IPv4 与 ICMPv4 头部，并执行输出分片 |
 | `stack::fragment` | 按源地址、目的地址、标识、协议和接口重组本地 IPv4 分片，并限制队列数量、内存和存活时间 |
-| `transport::udp` | 维护 UDP PCB registry、接收队列、bind 与 connect 状态、校验和、socket option、异步错误和 IPv4 收发 |
+| `transport::udp` | 维护 UDP PCB registry、接收队列、bind 与 connect 状态、校验和、socket option、异步错误和 IPv4 收发，并提供持久化 `UdpDatagramRelay` |
 | `SocketSetWrapper` | 串行化 smoltcp socket set 与 TCP deferred-close 元数据访问，并在新增 socket 时通知等待者 |
 | `ListenTable` | 管理 TCP listen backlog、SYN 队列、accept 队列和 accept waker |
 | `GeneralOptions` | 统一管理 nonblock、reuseaddr、超时和设备 mask |
@@ -185,13 +188,13 @@ TCP、ICMP、IPv6、分片和未命中 socket 的 UDP 留在 `deferred`，由任
   以初始化 `SERVICE`、`SOCKET_SET`、`LISTEN_TABLE`
   和 Router 初始状态。`knet-poller` 的 dynamic workqueue 在这些对象完成初始化后启动。
 - **普通协议推进不应在硬中断上下文执行**：
-  `poll_interfaces`、socket send/recv/connect/accept、
+  `poller::assist_once`、socket send/recv/connect/accept、
   netlink mutation 等路径会获取 `Mutex` / `RwLock`
   并推进较重的数据路径，应在普通任务上下文中运行。
 - **IRQ 路径只做通知**：
   设备中断回调应只负责 ack 设备中断、登记 RX pending 并调度
   `NetRx` softirq，不应直接执行完整的协议推进或阻塞式 socket 语义。
-- **NetRx softirq 可交付 loopback UDP，但不得调用 `poll_interfaces`**：
+- **NetRx softirq 可交付 loopback UDP，但不得调用 `poller::assist_once`**：
   `NetRx` 运行在不可睡眠上下文。Ethernet 路径只消费 pending RX source
   并唤醒对应设备 RX `PollSet`，随后调度 `knet-poller` work 在 kwork 任务
   上下文执行受批次轮数上限约束的数据面推进。
@@ -201,7 +204,7 @@ TCP、ICMP、IPv6、分片和未命中 socket 的 UDP 留在 `deferred`，由任
   接收队列并唤醒 socket waiter，因此 action 的 UDP 投递热路径不执行堆分配。
   TCP、ICMP、IPv6、分片和未命中 socket 的 UDP 留在 `deferred`，由任务 poller
   通过 `poll_rx` 取出。
-  不得从 softirq 调用 `poll_interfaces` 或获取 `Service` / `SocketSet`
+  不得从 softirq 调用 `poller::assist_once` 或获取 `Service` / `SocketSet`
   的可睡眠锁。
 - **允许阻塞的路径依赖 poll/waker 语义**：
   阻塞式 socket 操作依赖 `PollSet`、waker
@@ -279,11 +282,11 @@ RTM_NEWADDR / DELADDR ┘                    ├─> smoltcp Interface / Ingress
                        │                    └─> NetDevice address projections
 RTM_GETADDR <──────── Router address snapshots
 DELADDR 最后持有者 ────────────────────────> Router 删除失效 prefsrc 路由
-设备移除 ── rtnl_lock ────────────> Service ──> Router 删除设备、地址、路由和邻居
+设备移除 ── network_config_lock ──> Service ──> Router 删除设备、地址、路由和邻居
 
-init_network / RTM_NEWROUTE / RTM_DELROUTE ──> Router routes
+init_network / RTM_NEWROUTE / RTM_DELROUTE / SIOCADDRT / SIOCDELRT ──> Router routes
+RTM_GETROUTE <──────────────────────────────────────────────────────── Router route snapshot
 RTM_NEWNEIGH ────────────────────────────────> NetDevice neighbor cache
-RTM_GETROUTE <─────────────────────────────── Router route snapshot
 RTM_GETNEIGH ────────────────────────────────> 后续范围
 ```
 
@@ -294,10 +297,10 @@ RTM_GETNEIGH ──────────────────────�
 | 初始 IPv4 地址条目 | `Router::ipv4_addrs` | `init_network` 通过 `Router::add_ipv4_addr` 注册，Router 同时生成 local 和 connected 路由 |
 | IPv4 地址条目 | smoltcp、IngressProcessor 和设备地址投影 | 地址加入、删除或所属设备移除时由 `Service` 刷新所有派生视图 |
 | 最后一个 IPv4 地址持有者 | `Router` 配置路由 | 地址删除时移除以该地址为 `prefsrc` 的配置路由 |
-| 已移除设备 | `Router` 路由与设备邻居 | `unregister_netdev` 持有 `rtnl_lock`，Router 删除该接口的路由和邻居并重编号后续接口索引 |
+| 已移除设备 | `Router` 路由与设备邻居 | `unregister_netdev` 持有 `network_config_lock`，Router 删除该接口的路由和邻居并重编号后续接口索引 |
 | `RTM_GETADDR` | Router 地址快照 | rtnetlink 直接读取 `Service::ipv4_addr_snapshots` |
 | 初始路由 | `Router` | `init_network` 直接调用 `Router::add_rule` |
-| `RTM_NEWROUTE` 与 `RTM_DELROUTE` | `Router` | rtnetlink 在 Router owner 内完成校验和 mutation |
+| `RTM_NEWROUTE` / `RTM_DELROUTE` / `SIOCADDRT` / `SIOCDELRT` | `Router` | 控制面在 Router owner 内完成校验和 mutation |
 | `RTM_NEWNEIGH` | 目标 `NetDevice` | rtnetlink 通过 `Service` 和 `Router` 把更新交给设备邻居表 |
 
 ### NAPI 风格推进状态
@@ -346,7 +349,7 @@ Loopback UDP 独立于 poller 执行权，发送路径在 BH 窗口内完成 xmi
 
 ### RX 推进
 
-1. `NetRx` softirq 在设备 RX pending 后调用 `NetworkPoller::notify(PollReason::Rx)`，调度 `knet-poller` work；socket recv 和 readiness 路径通过 `poll_interfaces` 尝试执行一次已有工作；TCP、UDP 和 raw TX 生产路径通过 `notify(PollReason::Tx)` 发布工作。TCP 从可编码为零窗口的低余量接收缓冲区消费数据时通过 `notify(PollReason::RxWindow)` 主动重开对端窗口。
+1. `NetRx` softirq 在设备 RX pending 后调用 `NetworkPoller::notify(PollReason::Rx)`，调度 `knet-poller` work；socket recv 和 readiness 路径通过 `poller::assist_once` 尝试执行一次已有工作；TCP、UDP 和 raw TX 生产路径通过 `notify(PollReason::Tx)` 发布工作。TCP 从可编码为零窗口的低余量接收缓冲区消费数据时通过 `notify(PollReason::RxWindow)` 主动重开对端窗口。
 2. 普通 `notify` 在 `IDLE` 上发布 `SCHEDULED` 并 queue `knet-poller` work。执行期间的新工作进入 `RUNNING_PENDING`；kwork callback 和 assist 只有一个能够通过 `SCHEDULED` 到 `RUNNING` 的 CAS。
 3. `Service` 先按 TX budget dispatch 已排队的 control 和 data packet，使 loopback TCP/ICMP TX 在同一轮进入 `NET_RX_QUEUE`；本轮后续 TX dispatch 复用剩余预算。Loopback UDP 不依赖这一轮：`prepare_and_send_ipv4_packet` 对 loopback 目的地址直接 xmit，`send_ip_packet` 在关闭 BH 前盖戳并入 `NET_RX_QUEUE`，raise `NetRx` 后 BH 恢复时把完整 UDP 数据报送入 PCB。
 4. `Router::drain_rx_budgeted_into` 按 RX budget 从设备轮转拉取 `PacketBuf`，`next_rx_device` 在设备间保持公平并随设备删除修正。
@@ -361,10 +364,10 @@ Loopback UDP 独立于 poller 执行权，发送路径在 BH 窗口内完成 xmi
 ### TX 路由
 
 1. TCP connect、send 和 close，raw send 以及 UDP data queue 提交完成后发布真实 TX 通知；调用方可随后通过 `assist_once` 协助执行已调度的一轮。TCP recv 只在消费前的 smoltcp 接收缓冲区余量低于最大窗口缩放量子时发布 `RxWindow` 通知，覆盖未缩放零窗口和缩放后仍编码为零的窗口。达到缩放量子后的窗口增长随 RX 或已登记的协议 timer poll 推进，避免每次应用读取都创建后台工作。TCP 文件关闭不会立即删除仍处于协议关闭过程中的 handle。
-2. crate 内 UDP 在 Router mutex 内选择处于管理 up 状态的输出设备、源地址和路由 MTU；路由缺失或输出设备管理 down 时返回 `ENETUNREACH`。写入 UDP 与 IPv4 头后，loopback 目的地址立即 `transmit_ipv4_now`；其余目的地址提交到 data TX queue。`transmit_ipv4_now` 忽略 `dispatch_ipv4_packet` 的 RX-ready 返回值：该 `bool` 是 poller 的 `poll_next` 提示，不是发送成败；共享 `NetRx` 队列满时丢包仍返回成功，对齐 Linux `loopback_xmit` 在 `NET_RX_DROP` 时返回 `NETDEV_TX_OK`。smoltcp 生成的 IP 包进入同一 data TX queue，`IngressProcessor` 生成的 ICMPv4 错误进入 control TX queue。
+2. crate 内 UDP 在 Router mutex 内选择处于管理 up 状态的输出设备、源地址和路由 MTU；路由缺失或输出设备管理 down 时返回 `ENETUNREACH`。写入 UDP 与 IPv4 头后，loopback 目的地址立即 `transmit_ipv4_now`；其余目的地址提交到 data TX queue。`transmit_ipv4_now` 忽略 `dispatch_ipv4_packet` 的 RX-ready 返回值：该 `bool` 是 poller 的 `poll_next` 提示，不是发送成败；共享 `NetRx` 队列满时丢包仍返回成功，对齐 Linux `loopback_xmit` 在 `NET_RX_DROP` 时返回 `NETDEV_TX_OK`。smoltcp 生成的 IP 包进入同一 data TX queue，`IngressProcessor` 生成的 ICMPv4 错误进入 control TX queue。入站 ICMPv4 错误携带入接口索引查找 UDP PCB，通过 `SO_BINDTODEVICE` 绑定设备的 socket 只接收来自该设备的错误。
 3. `IP_MTU_DISCOVER` 决定 UDP IPv4 头部的 DF 标志。超出路由 MTU 且允许分片的包由 `fragment_output_packet` 拆分，DF 包返回 `EMSGSIZE`。
 4. `Router::dispatch_budgeted` 优先接管 control packet，再按 IP 版本解析源地址和目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和，并将已校验的源地址随报文传给 `NetDevice`。
-5. 广播或组播包复制到所有设备；`0.0.0.0` 到 `255.255.255.255` 的受限广播允许在设备尚未分配 IPv4 地址时直接发送，用于 DHCP 初始化流量。
+5. 广播或组播包复制到所有设备；`SO_BINDTODEVICE` 会把受限广播限制在绑定网卡上。`0.0.0.0` 到 `255.255.255.255` 的受限广播允许在设备尚未分配 IPv4 地址时直接发送，用于 DHCP 初始化流量。未设置 `SO_BROADCAST` 时，受限广播和本地接口的定向广播发送返回 `EACCES`。
 6. 单播包通过 `RouteTable::lookup` 选择最长前缀路由。
 7. Ethernet 设备先查 ARP neighbor cache，命中后通过 `link::wire` 封装 Ethernet frame。
 8. 未命中时发送 ARP request，并把 IP 包放入 `pending_tx` 等待 neighbor 解析。
@@ -426,11 +429,12 @@ Loopback UDP 独立于 poller 执行权，发送路径在 BH 窗口内完成 xmi
 3. 仅含查询的批次逐条生成 response；仅含 mutation 的批次在检查完整批次的
    response queue 空间后逐条执行；混合查询和 mutation 的批次在修改状态前返回
    syscall `EOPNOTSUPP`。
-4. 每条 mutation 使用本次发送携带的凭据检查权限。跨 socket mutation 与设备移除通过 `rtnl_lock` 串行化，地址存在性判断、地址更新和依赖的 Router 路由清理处于同一事务作用域。无权限请求生成带 `EPERM`
+4. 每条 mutation 使用本次发送携带的凭据检查权限。跨 socket mutation 与设备移除通过 `network_config_lock` 串行化，地址存在性判断、地址更新和依赖的 Router 路由清理处于同一事务作用域。无权限请求生成带 `EPERM`
    的 `NLMSG_ERROR`，response 入队后发送入口返回已消费的请求长度。
 5. `RTM_GETLINK` 从设备实时快照生成 multi-part response，`RTM_NEWLINK` 在整组名称、MTU 和 flags 校验通过后直接更新目标设备。
 6. `RTM_GETADDR` 从 Router 地址快照生成 multi-part response；`RTM_NEWADDR` 和 `RTM_DELADDR` 直接调用 Router 地址 mutation，失败时返回 netlink error。重复地址策略在 Router 锁内判定；最后一个同值地址删除后，`RTM_DELADDR` 同时清理 Router 中以该地址为 `prefsrc` 的配置路由。
 7. `RTM_GETROUTE` 和 route mutation 直接访问 Router，neighbor mutation 直接访问目标设备的邻居表，create/replace 判定与更新在同一 Router 临界区完成，带 `NLM_F_ACK` 时返回 ack。未识别的 route attribute 按 Linux `rtm_to_fib_config` 跳过，不返回 `EOPNOTSUPP`。
+8. 传统 ioctl `SIOCSIFADDR`、`SIOCSIFNETMASK`、`SIOCSIFBRDADDR`、`SIOCADDRT` 和 `SIOCDELRT` 同样进入 Router / 设备 owner。`SIOCSIFADDR` 的 classful 前缀对齐 Linux 6.8 `inet_abc_len`：仅 `0.0.0.0` 和有限广播使用前缀 0，其余 `0.x.x.x` 走 class A `/8`。地址设置直接更新 Router 中的主地址条目，其余地址保持不变；`SIOCSIFADDR 0.0.0.0` 只删除主地址，供 DHCP deconfig 流程使用。`SIOCSIFNETMASK` 直接更新主地址前缀并保留 scope 和自定义 broadcast。`SIOCDELRT` 在未给出 `rt_dev`、未设置网关或网关为 `0.0.0.0` 时按 Linux `fib_nh_match` 通配对应字段，因此 BusyBox 的 `route del default gw 0.0.0.0 dev eth0` 可以删除旧默认路由。`SIOCSIFFLAGS` 当前只应用 `IFF_UP`，其余接口标志不改变设备状态。
 
 ## 并发模型
 
@@ -456,8 +460,8 @@ Loopback UDP 独立于 poller 执行权，发送路径在 BH 窗口内完成 xmi
 - Unix stream 每个 endpoint 的 `tx_order: SpinNoPreempt<()>` 是对应发送方向的共享排序点。本端 write shutdown、对端 read shutdown、write index 发布和对端空队列 EOF 判定都经过该锁。固定锁序为 `channel` mutex 后取得单个 `tx_order`，两个方向的顺序锁不会同时持有。
 - Unix stream 的 listener event 通知在 `ListenerState` 和源 socket `channel` 锁外执行；用户数据复制和 `PollSet` 唤醒在 `tx_order` 外执行。send 先写入未发布的 vacant 区域，再在锁内复检关闭状态并推进 write index；recv 读取为空后在锁内复查 occupied 长度和关闭状态；shutdown 完成状态发布并复制 peer endpoint 引用后释放 `channel` mutex，再执行 waiter 唤醒。
 - Unix stream 每个 endpoint 分别持有 readable、writable 和 connection-state 三组 `PollSet`。写入只唤醒 peer readable waiter，读取跨过发送缓冲低水位时只唤醒 peer writable waiter，半关闭只唤醒受影响方向，完整关闭通过 connection-state waiter 通知双方。
-- Router 直接持有配置路由、地址派生路由和动态选源状态，设备直接持有邻居表，netlink 仅承担协议解析、实时快照编码和 owner 调用。`rtnl_lock` 串行化不同 socket 的控制面 mutation 和 `unregister_netdev`。每个 socket 的发送事务、rx queue 和 subscriber 列表使用独立 `Mutex`。发送事务锁串行化同一 socket 的容量预检、mutation 执行和 response 入队。response 在 rx queue 锁外生成，只在容量检查和入队时持锁；锁顺序固定为发送事务锁、`rtnl_lock`、Router、ingress、Interface、netlink rx queue，未涉及的锁按该序列跳过。
-- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 使用调用方传入的同一个 `PollContext` 注册聚合 `timeout_poll` 和支持 interrupt-driven RX 的 Ethernet RX poll source；当前该 poll source 由 `NetRx` softirq 在设备 pending 后唤醒，普通 socket polling waiter 可以通过该 source 被唤醒，后台协议推进则由同一 softirq 调度的 `knet-poller` work 执行。registration 由跨越 `Pending` 的 `PollRegistrations` 统一管理。loopback 和未 attach `NetRxScheduler` 的 Ethernet 设备仍使用 `timeout_poll` 的聚合 waker，多任务广播由 `timeout_poll` 完成；设备层不得保存调用方的裸 waker或绕过 `Service` 注册互不等价的 task waker。
+- Router 直接持有配置路由、地址派生路由和动态选源状态，设备直接持有邻居表，netlink 仅承担协议解析、实时快照编码和 owner 调用。`control::network_config_lock` 串行化不同 socket 的控制面 mutation、legacy socket ioctl mutation 和 `unregister_netdev`。每个 socket 的发送事务、rx queue 和 subscriber 列表使用独立 `Mutex`。发送事务锁串行化同一 socket 的容量预检、mutation 执行和 response 入队。response 在 rx queue 锁外生成，只在容量检查和入队时持锁；锁顺序固定为发送事务锁、`network_config_lock`、Router、ingress、Interface、netlink rx queue，未涉及的锁按该序列跳过。
+- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。该掩码是地址派生掩码与 `SO_BINDTODEVICE` 的交集；解绑设备时恢复地址派生掩码，而不是无条件改成全设备。`Service::register_rx_waker` 使用调用方传入的同一个 `PollContext` 注册聚合 `timeout_poll` 和支持 interrupt-driven RX 的 Ethernet RX poll source；当前该 poll source 由 `NetRx` softirq 在设备 pending 后唤醒，普通 socket polling waiter 可以通过该 source 被唤醒，后台协议推进则由同一 softirq 调度的 `knet-poller` work 执行。registration 由跨越 `Pending` 的 `PollRegistrations` 统一管理。loopback 和未 attach `NetRxScheduler` 的 Ethernet 设备仍使用 `timeout_poll` 的聚合 waker，多任务广播由 `timeout_poll` 完成；设备层不得保存调用方的裸 waker或绕过 `Service` 注册互不等价的 task waker。
 - 每次 `Interface::poll` 也会刷新独立的协议 timer，使 TCP 重传等 deadline 不依赖阻塞中的 socket waiter。
 
 ## 设计决策
@@ -465,7 +469,7 @@ Loopback UDP 独立于 poller 执行权，发送路径在 BH 窗口内完成 xmi
 ### UDP 与 IPv4 数据路径迁出 smoltcp
 
 UDP PCB、bind 冲突检查、收发队列、IPv4 校验、分片重组、输出分片和 ICMPv4 差错均由 crate 内类型管理。
-TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推进依赖 NetRx softirq 调度的 `knet-poller` work、TX/timer 后台 poller 调度和显式 `poll_interfaces` assist。
+TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推进依赖 NetRx softirq 调度的 `knet-poller` work、TX/timer 后台 poller 调度和显式 `poller::assist_once` assist。
 该边界让 UDP 不再依赖 smoltcp socket handle，同时保留现有 TCP 和 raw socket 行为。
 
 ### NAPI 风格预算推进
@@ -480,7 +484,7 @@ RX、TX 与 timer 使用独立预算。`Service` 使用 smoltcp 分阶段 API �
 
 link 配置属于设备：接口名、MTU、管理 up 状态、operstate 和硬件地址通过 `NetDevice::link_snapshot` 统一导出，`RTM_GETLINK` 和 `RTM_NEWLINK` 直接访问该来源。AF_PACKET 热路径在单个 `SERVICE` 锁临界区内通过无分配的 `LinkSendSnapshot` 校验 up 状态、MTU 和硬件地址并发送，设备存在性检查使用 `has_device`，路由 MTU 查询直接读取匹配设备。设备配置或移除改变有效 MTU 时重建 smoltcp `Interface`，使缓存的 `DeviceCapabilities` 与设备集合一致；未改变有效 MTU 的配置更新保留当前 `Interface` 及其运行时缓存。
 
-IPv4 地址条目由 `Router` 保存。每个条目包含设备索引、IPv4 CIDR 和 scope，加入条目时检查设备、单播地址和 smoltcp 地址容量。Router 为每个条目生成 `/32` local 路由，并按地址网络生成 connected 路由；地址删除同时移除派生路由、失效首选源路由和设备 pending TX。`Service` 将 Router 地址投影到 smoltcp `Interface`、`IngressProcessor` 和设备，Ethernet 根据设备地址处理 ARP、定向广播和待解析报文。Router 直接保存配置路由及运行时选择信息，Ethernet 设备直接保存邻居表，路由和邻居 mutation 均访问各自 owner。设备移除由 `unregister_netdev` 在 `rtnl_lock` 下交给 Router，统一清理路由、地址和设备邻居并重编号后续接口索引。
+IPv4 地址条目由 `Router` 保存。每个条目包含设备索引、IPv4 CIDR、scope 和可选的 `ifa_broadcast` 覆盖值；未覆盖时广播地址由 CIDR 推导。加入条目时检查设备、单播地址和 smoltcp 地址容量。legacy ioctl 的地址和 netmask 更新在该 owner 内定位并修改主地址条目，保留同设备的其他地址；netmask 更新保留 scope，并只在旧 broadcast 属于掩码推导值时重新推导。Router 为每个条目生成 `/32` local 路由，并按地址网络生成 connected 路由；地址删除同时移除派生路由、失效首选源路由和设备 pending TX。`Service` 将 Router 地址投影到 smoltcp `Interface`、`IngressProcessor` 和设备，Ethernet 根据设备地址处理 ARP、定向广播和待解析报文。配置路由由 Router 持有，`RTM_NEWROUTE` / `SIOCADDRT` 在 Router 内校验网关必须落在出接口 IPv4 子网且不是定向广播。Ethernet 设备直接保存邻居表，路由和邻居 mutation 均访问各自 owner。设备移除由 `unregister_netdev` 在 `network_config_lock` 下交给 Router，统一清理路由、地址和设备邻居并重编号后续接口索引。
 
 ### pathname Unix socket 显式传递凭据
 
@@ -516,7 +520,7 @@ Loopback IPv4 UDP 已经由 `NetRx` 直接交付 PCB。Ethernet 以及需要 smo
 1. hardirq 仍只做设备 ack 和 `NetRxScheduler::schedule_rx()`；
 2. `NetRx` softirq 先按 NAPI-like source state 认领 Ethernet RX work；
 3. 若需要 sleepable 网络栈路径，softirq 只投递 workerqueue work，不直接调用
-   `poll_interfaces`；
+  `poller::assist_once`；
 4. worker 或全链路 nonblocking ingress 负责按 budget 推进 `Router` /
    `Service` receive path，并在数据入 socket queue 后唤醒 socket waiter；
 5. 该里程碑必须同时定义 RX buffer ownership、budget/repoll、cancel/flush 和

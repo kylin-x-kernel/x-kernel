@@ -154,7 +154,7 @@ impl IngressProcessor {
         }
 
         if let Some(ip_packet) = packet.network_packet() {
-            udp_err::inspect_icmpv4_error(ip_packet);
+            udp_err::inspect_icmpv4_error(ip_packet, packet.ifindex());
         }
         accepted_packets.push(packet);
     }
