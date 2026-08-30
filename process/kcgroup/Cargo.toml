@@ -1,6 +1,6 @@
 [package]
 name = "kcgroup"
-description = "Cgroup namespace and controller scaffolding for X-Kernel"
+description = "Cgroup v2 hierarchy and task membership for X-Kernel"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -9,3 +9,8 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+kerrno.workspace = true
+kidentity.workspace = true
+klazy.workspace = true
+ksync.workspace = true
+unittest.workspace = true

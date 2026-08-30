@@ -1,0 +1,41 @@
+[package]
+name = "mini-oci"
+description = "Minimal OCI runtime and static smoke-test bundle"
+enabled = true
+order = 30
+
+[prepare]
+env = [
+  "RUSTFLAGS=",
+  "CC=aarch64-linux-musl-gcc",
+  "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc",
+]
+commands = [
+  "cargo build --release --target aarch64-unknown-linux-musl",
+  "rm -rf out",
+  "mkdir -p out/bundle/rootfs/proc out/bundle/rootfs/tmp",
+  "cp target/aarch64-unknown-linux-musl/release/mini-oci out/mini-oci",
+  "cp target/aarch64-unknown-linux-musl/release/oci-test-init out/bundle/rootfs/init",
+  "cp config.json out/bundle/config.json",
+]
+
+[[install]]
+src = "out/mini-oci"
+dest = "/mini-oci"
+mode = "0755"
+
+[[install]]
+src = "out/bundle/config.json"
+dest = "/oci-smoke/config.json"
+mode = "0644"
+
+[[install]]
+src = "out/bundle/rootfs/init"
+dest = "/oci-smoke/rootfs/init"
+mode = "0755"
+
+[[autostart]]
+name = "oci-smoke"
+command = "/mini-oci run smoke /oci-smoke"
+background = false
+exit = false

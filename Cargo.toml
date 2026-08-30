@@ -115,6 +115,7 @@ fs_block = { path = "fs/block" }
 fs_boot = { path = "fs/boot" }
 procfs = { path = "fs/filesystems/procfs" }
 pipefs = { path = "fs/filesystems/pipefs" }
+cgroup2fs = { path = "fs/filesystems/cgroup2fs" }
 devfs = { path = "fs/filesystems/devfs" }
 fs9p = { path = "fs/filesystems/fs9p", default-features = false }
 v9fs = { path = "fs/bridges/v9fs" }

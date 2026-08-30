@@ -4,7 +4,9 @@
 
 use alloc::{borrow::Cow, sync::Arc};
 
-use kvfs::{DirMapping, RwFile, SimpleFile, SimpleFileOperation, SimpleFs, VfsError, VfsResult};
+use kvfs::{
+    CommandFile, DirMapping, SimpleFile, SimpleFileOperation, SimpleFs, VfsError, VfsResult,
+};
 
 fn sysrq_trigger_read() -> VfsResult<Cow<'static, [u8]>> {
     Ok(Cow::Borrowed(
@@ -35,9 +37,9 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
         "sysrq-trigger",
         SimpleFile::new_regular(
             fs,
-            RwFile::new(|op| match op {
+            CommandFile::new(|op| match op {
                 SimpleFileOperation::Read => sysrq_trigger_read().map(Some),
-                SimpleFileOperation::Write(data) => {
+                SimpleFileOperation::Write { data, .. } => {
                     sysrq_trigger_write(data)?;
                     Ok(None)
                 }

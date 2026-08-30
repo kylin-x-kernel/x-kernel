@@ -84,15 +84,7 @@ fn make_dir_child(parent: Option<Dentry>, name: &str, maker: DirMaker) -> Dentry
 }
 
 fn simple_file_inode(node: Arc<crate::SimpleFile>, flags: NodeFlags) -> Arc<VfsInode> {
-    let init = node.inode_init();
-    let node_type = init.node_type();
-    if matches!(
-        node_type,
-        NodeType::CharacterDevice | NodeType::BlockDevice | NodeType::Fifo | NodeType::Socket
-    ) {
-        return VfsInode::new_special(node, flags, init);
-    }
-    VfsInode::new_file_with_flags(node, flags, init)
+    node.new_inode(flags)
 }
 
 fn make_file_child(parent: Option<Dentry>, name: &str, node: Arc<crate::SimpleFile>) -> Dentry {
@@ -116,6 +108,11 @@ impl<'a> SimpleDirLookup<'a> {
         make_dir_child(Some(self.parent.clone()), name, maker)
     }
 
+    /// Creates a directory child from a caller-supplied persistent inode.
+    pub fn dir_from_inode(&self, name: &str, inode: Arc<VfsInode>) -> Dentry {
+        Dentry::new_dir_from_inode(inode, Some(self.parent.clone()), name.to_owned())
+    }
+
     /// Creates a file child entry under the lookup parent.
     pub fn file(&self, name: &str, entry: impl IntoDirMappingEntry) -> VfsResult<Dentry> {
         (entry.into_dir_mapping_entry().factory)(Some(self.parent.clone()), name)
@@ -134,7 +131,7 @@ impl<'a> SimpleDirLookup<'a> {
 /// Operations for a simple directory.
 pub trait SimpleDirOps: Send + Sync + 'static {
     /// Get the names of all children in the directory.
-    fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a>;
+    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>>;
     /// Look up a child directory or file by name.
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry>;
 
@@ -153,6 +150,22 @@ pub trait SimpleDirOps: Send + Sync + 'static {
         Err(VfsError::OperationNotPermitted)
     }
 
+    /// Creates a dynamic directory child from VFS-validated context.
+    fn mkdir(
+        &self,
+        _dir: &VfsInode,
+        _name: &str,
+        _mode: Umode,
+        _cred: &kcred::Cred,
+    ) -> VfsResult<Arc<VfsInode>> {
+        Err(VfsError::OperationNotPermitted)
+    }
+
+    /// Removes the VFS-resolved directory child from the backing store.
+    fn rmdir(&self, _dir: &VfsInode, _victim: &LockedDentry<'_>) -> VfsResult<()> {
+        Err(VfsError::OperationNotPermitted)
+    }
+
     /// Combines two directories into one.
     fn chain<N: SimpleDirOps>(self, other: N) -> ChainedDirOps<Self, N>
     where
@@ -163,14 +176,14 @@ pub trait SimpleDirOps: Send + Sync + 'static {
 }
 
 impl SimpleDirOps for DirMapping {
-    fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
+    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
         let names: Vec<Cow<'a, str>> = self
             .entries
             .lock()
             .keys()
             .map(|name| Cow::Owned(name.clone()))
             .collect();
-        Box::new(names.into_iter())
+        Ok(Box::new(names.into_iter()))
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
@@ -287,8 +300,8 @@ impl Default for DirMapping {
 pub struct ChainedDirOps<A, B>(A, B);
 
 impl<A: SimpleDirOps, B: SimpleDirOps> SimpleDirOps for ChainedDirOps<A, B> {
-    fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
-        Box::new(self.0.child_names().chain(self.1.child_names()))
+    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        Ok(Box::new(self.0.child_names()?.chain(self.1.child_names()?)))
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
@@ -320,33 +333,46 @@ impl<O: SimpleDirOps> SimpleDir<O> {
     /// Create a [`DirMaker`] from given directory operations.
     pub fn new_maker(fs: Arc<SimpleFs>, ops: Arc<O>) -> DirMaker {
         Arc::new(move || {
-            let dir = SimpleDir::new(
-                SimpleFsNode::new(
-                    fs.clone(),
-                    NodeType::Directory,
-                    NodePermission::from_bits_truncate(0o755),
-                ),
+            Self::new_inode_with_owner(
+                fs.clone(),
                 ops.clone(),
-            );
-            let private_data: Arc<dyn Any + Send + Sync> = dir.clone();
-            let inode_operations: Arc<dyn InodeOperations> =
-                Arc::new(SimpleDirInodeOperations::new(dir.clone()));
-            let file_operations: Arc<dyn FileOperations> =
-                Arc::new(SimpleDirFileOperations::new(dir.clone()));
-            let init = dir.node.inode_init();
-            let flags = if ops.supports_dentry_cache() {
-                NodeFlags::empty()
-            } else {
-                NodeFlags::NON_CACHEABLE
-            };
-            VfsInode::new_dir_with_operations(
-                private_data,
-                inode_operations,
-                file_operations,
-                flags,
-                init,
+                NodePermission::from_bits_truncate(0o755),
+                0,
+                0,
             )
         })
+    }
+
+    /// Creates one persistent VFS directory inode with explicit metadata.
+    pub fn new_inode_with_owner(
+        fs: Arc<SimpleFs>,
+        ops: Arc<O>,
+        permission: NodePermission,
+        uid: u32,
+        gid: u32,
+    ) -> Arc<VfsInode> {
+        let dir = SimpleDir::new(
+            SimpleFsNode::new_with_owner(fs, NodeType::Directory, permission, uid, gid),
+            ops.clone(),
+        );
+        let private_data: Arc<dyn Any + Send + Sync> = dir.clone();
+        let inode_operations: Arc<dyn InodeOperations> =
+            Arc::new(SimpleDirInodeOperations::new(dir.clone()));
+        let file_operations: Arc<dyn FileOperations> =
+            Arc::new(SimpleDirFileOperations::new(dir.clone()));
+        let init = dir.node.inode_init();
+        let flags = if ops.supports_dentry_cache() {
+            NodeFlags::empty()
+        } else {
+            NodeFlags::NON_CACHEABLE
+        };
+        VfsInode::new_dir_with_operations(
+            private_data,
+            inode_operations,
+            file_operations,
+            flags,
+            init,
+        )
     }
 
     fn read_dir_at(
@@ -358,7 +384,7 @@ impl<O: SimpleDirOps> SimpleDir<O> {
         let children = [DOT, DOTDOT]
             .into_iter()
             .map(Cow::Borrowed)
-            .chain(self.ops.child_names());
+            .chain(self.ops.child_names()?);
 
         let mut count = 0;
         for (i, name) in children.enumerate().skip(offset as usize) {
@@ -476,6 +502,22 @@ impl<O: SimpleDirOps> InodeDirOperations for SimpleDirInodeOperations<O> {
         let inode = entry.vfs_inode();
         drop(entry);
         dentry.instantiate(inode)
+    }
+
+    fn mkdir(
+        &self,
+        _idmap: &crate::MountIdmap,
+        dir: &VfsInode,
+        dentry: &LockedDentry<'_>,
+        mode: Umode,
+        cred: &kcred::Cred,
+    ) -> VfsResult<()> {
+        let inode = self.dir.ops.mkdir(dir, dentry.name(), mode, cred)?;
+        dentry.instantiate(inode)
+    }
+
+    fn rmdir(&self, dir: &VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
+        self.dir.ops.rmdir(dir, dentry)
     }
 
     fn symlink(

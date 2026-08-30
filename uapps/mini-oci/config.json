@@ -1,0 +1,16 @@
+{
+  "ociVersion": "1.1.0",
+  "hostname": "xkernel-oci",
+  "root": { "path": "rootfs", "readonly": false },
+  "process": {
+    "terminal": false,
+    "user": { "uid": 0, "gid": 0, "additionalGids": [] },
+    "args": ["/init"],
+    "env": ["OCI_SMOKE=1", "PATH=/bin:/usr/bin"],
+    "cwd": "/"
+  },
+  "mounts": [
+    { "destination": "/proc", "type": "proc", "source": "proc", "options": [] },
+    { "destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": [] }
+  ]
+}

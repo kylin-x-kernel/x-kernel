@@ -152,6 +152,7 @@ pub fn spawn_init_process(
 
     // Publish and activate through the standard fork path (caller-agnostic).
     publish_user_task(task)
+        .expect("Failed to prepare init process publication")
         .commit(|_| Ok(()))
         .expect("Failed to publish init process");
 }

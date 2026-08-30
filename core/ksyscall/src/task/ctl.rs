@@ -11,7 +11,7 @@
 
 use core::ffi::c_char;
 
-use kerrno::{KError, KResult};
+use kerrno::{KError, KResult, LinuxError};
 use ktask::current;
 use kuaccess::vm_load_string;
 use linux_raw_sys::general::{__user_cap_data_struct, __user_cap_header_struct};
@@ -117,6 +117,18 @@ pub fn sys_prctl(
             }
             return Ok(0);
         }
+        PR_SET_NO_NEW_PRIVS => {
+            if arg2 != 1 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
+                return Err(KError::InvalidInput);
+            }
+            return Err(KError::from(LinuxError::ENOSYS));
+        }
+        PR_GET_NO_NEW_PRIVS => {
+            if arg2 != 0 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
+                return Err(KError::InvalidInput);
+            }
+            return Ok(kprocess::current_user_thread().no_new_privileges() as isize);
+        }
         PR_CAPBSET_READ => {
             if arg2 > CAP_LAST_CAP {
                 return Err(KError::InvalidInput);
@@ -146,10 +158,6 @@ pub fn sys_prctl(
         // securebits are not tracked; nothing is set.
         PR_GET_SECUREBITS => return Ok(0),
         PR_SET_SECUREBITS => {}
-        // This kernel always grants full capabilities, so no_new_privs has no
-        // observable effect; report it as unset.
-        PR_GET_NO_NEW_PRIVS => return Ok(0),
-        PR_SET_NO_NEW_PRIVS => {}
         // child subreaper semantics are not tracked.
         PR_GET_CHILD_SUBREAPER => {
             if arg2 != 0 {
@@ -202,7 +210,7 @@ pub fn sys_prctl(
 
 #[cfg(unittest)]
 mod tests {
-    use kerrno::KError;
+    use kerrno::{KError, LinuxError};
     use linux_raw_sys::prctl::*;
     use unittest::{assert_eq, def_test};
 
@@ -258,6 +266,14 @@ mod tests {
     #[def_test(user, serial)]
     fn prctl_get_no_new_privs_reports_unset() {
         assert_eq!(sys_prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), Ok(0));
+    }
+
+    #[def_test(user, serial)]
+    fn prctl_set_no_new_privs_requires_exec_enforcement() {
+        assert_eq!(
+            sys_prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0),
+            Err(KError::from(LinuxError::ENOSYS))
+        );
     }
 
     #[def_test(user, serial)]

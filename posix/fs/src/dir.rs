@@ -4,7 +4,7 @@
 
 //! Directory and working-directory syscalls.
 
-use alloc::{ffi::CString, vec, vec::Vec};
+use alloc::{ffi::CString, format, string::ToString, vec, vec::Vec};
 use core::{
     ffi::c_char,
     mem::{align_of, offset_of},
@@ -242,14 +242,15 @@ pub fn sys_getcwd(buf: UserPtr<u8>, size: isize) -> KResult<isize> {
         return Ok(0);
     }
 
-    let cwd = kprocess::current_user_process()
-        .fs_context()?
-        .lock()
-        .pwd()
-        .absolute_path()?;
+    let fs_context = kprocess::current_user_process().fs_context()?;
+    let fs = fs_context.lock();
+    let cwd = match fs.pwd().render_from(fs.root())? {
+        kvfs::RenderedPath::Reachable(path) => path.to_string(),
+        kvfs::RenderedPath::Unreachable(path) => format!("(unreachable){path}"),
+    };
     debug!("sys_getcwd => cwd: {cwd}");
 
-    let cwd = CString::new(cwd.as_str()).map_err(|_| KError::InvalidInput)?;
+    let cwd = CString::new(cwd).map_err(|_| KError::InvalidInput)?;
     let cwd = cwd.as_bytes_with_nul();
 
     if cwd.len() <= size {

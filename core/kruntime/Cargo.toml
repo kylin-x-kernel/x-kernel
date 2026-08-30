@@ -25,6 +25,7 @@ fs9p = [
     "fs",
     "fs_boot/fs9p",
 ]
+fs_cgroup2 = ["fs", "fs_boot/cgroup2"]
 fs_ebpf = ["fs", "fs_boot/ebpf"]
 net = ["kdriver/net", "dep:knet"]
 vsock = ["net", "kdriver/vsock"]

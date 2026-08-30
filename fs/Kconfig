@@ -32,4 +32,12 @@ config KFEAT_FS_9P
       Enable the 9P filesystem client used for shared-directory mounts such as
       QEMU hostshare.
 
+config KFEAT_FS_CGROUP2
+    bool "Enable cgroup v2 filesystem support"
+    depends on KFEAT_FS
+    default y
+    help
+      Enable the cgroup v2 filesystem and mount the unified hierarchy at
+      /sys/fs/cgroup in the initial mount namespace.
+
 endmenu

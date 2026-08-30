@@ -68,6 +68,11 @@ resource owners
 
 ## 审计清单
 
+- cgroup/namespace flags 必须完整实现后才可从 `ENOSYS` 列表移除；adapter 不创建第二份
+  membership 或 namespace view state。
+- capability、seccomp 和 `no_new_privileges` 等安全 ABI 不允许返回与实际 enforcement
+  不一致的成功结果。
+
 - [ ] 新增 syscall 实现是否只做 ABI 适配，而不是复制 owner 状态机？
 - [ ] 新增 adapter 是否放在贴近 owner 的目录，而不是历史 API 杂项目录？
 - [ ] 用户指针访问是否都通过现有封装类型？

@@ -88,7 +88,8 @@ UTS 名称读写使用 `ksync::RwLock`，不应在禁止睡眠或已经持有不
 
 1. 取得 boot 阶段由 VFS 初始化的初始 `kvfs::MntNamespace`。
 2. 创建默认 `UtsNamespace`。
-3. 创建 IPC、PID-for-children、net、cgroup、time/time-for-children 的初始对象或占位对象。
+3. 创建 IPC、PID-for-children、net、time/time-for-children 的初始对象或占位对象，并
+   复用 `kcgroup::CgroupNamespace::initial()`；该对象已可被启动期 cgroup2fs 挂载使用。
 4. 将这些引用封装进一个 `Arc<NsProxy>`。
 
 `NsProxy::clone_for_child(flags, fs_context)` 是 clone 路径的核心选择器：
@@ -143,12 +144,21 @@ mount 查找子 mount 的层次。
   mutable rootfs。`NsProxy::new_initial` 只引用该对象。这对应 Linux 中
   `init_mnt_ns` 在 VFS mount 初始化后挂到 `init_task.nsproxy->mnt_ns`，而
   `fs_struct.root/pwd` 指向 topmost rootfs 的行为。
+- 初始 cgroup namespace 由 `kcgroup` 持有，`NsProxy::new_initial` 只复用其 `Arc`。
+  因此启动挂载与 PID 1 不会各自创建互不相干的 hierarchy。
 - mount propagation、shared/slave/private 传播组和 `setns` 尚未实现，因此当前 copy
   只覆盖基本 mount tree 隔离。
 - PID namespace 的对象图和编号链已经建立，但 syscall ABI 仍保持 root/global PID
   语义。`NsProxy` 只保存 `pid_ns_for_children`；完整 `CLONE_NEWPID` 支持要等
   task-active PID namespace、lookup、signal、wait、procfs 一起 namespace-aware
   后再打开。
+
+## Cgroup namespace clone
+
+`NsProxy` 保留 `CgroupNamespace` 对象模型，但 `CLONE_NEWCGROUP` 当前与其他尚未闭环的
+namespace flag 一样返回 `Unimplemented`。创建新 view 需要调用者 user namespace 中的
+统一 capability 授权；在 `kcred` 提供该授权上下文前，clone 层不能用 UID 临时判断，
+也不能向用户态宣称隔离已经生效。普通 fork/clone 继续共享父 namespace 的 `Arc`。
 
 ## Drop / 资源释放
 

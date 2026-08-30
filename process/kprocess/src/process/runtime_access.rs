@@ -178,6 +178,14 @@ impl Process {
             .ok_or(KError::NoSuchProcess)
     }
 
+    /// Returns the process cgroup namespace while runtime remains attached.
+    pub fn cgroup_ns(&self) -> KResult<Arc<kns::CgroupNamespace>> {
+        self.runtime()?
+            .nsproxy()
+            .map(|nsproxy| nsproxy.cgroup_ns().clone())
+            .ok_or(KError::NoSuchProcess)
+    }
+
     /// Returns a live address-space capability while runtime remains attached.
     pub fn address_space(&self) -> KResult<LiveAddressSpace> {
         self.runtime()

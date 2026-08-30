@@ -294,12 +294,12 @@ pub(crate) fn task_identity_matches_thread(task: &KtaskRef) -> bool {
 
 impl PreparedUserTask {
     /// Publishes the prepared user task to task/process registries.
-    pub(crate) fn publish(self) -> PublishedUserTask {
-        let rollback = process_publication().publish_task(&self.task);
-        PublishedUserTask {
+    pub(crate) fn publish(self) -> KResult<PublishedUserTask> {
+        let rollback = process_publication().publish_task(&self.task)?;
+        Ok(PublishedUserTask {
             task: self.task,
             rollback: Some(rollback),
-        }
+        })
     }
 }
 
@@ -529,10 +529,21 @@ impl ProcessPublication {
     }
 
     /// Publishes a task and its related process/group/session identities.
-    pub(crate) fn publish_task(&self, task: &KtaskRef) -> PublicationRollback {
+    pub(crate) fn publish_task(&self, task: &KtaskRef) -> KResult<PublicationRollback> {
         let thread = task.as_thread();
         let proc = thread.process();
         let tid = thread.tid();
+        let mut cgroup_target = proc.cgroup_transaction();
+        let task_cgroup = thread
+            .cgroup()
+            .expect("an unpublished user thread must have cgroup membership");
+        if let Some(target) = cgroup_target.as_ref() {
+            if !Arc::ptr_eq(target, &task_cgroup) {
+                thread.migrate_cgroup(target)?;
+            }
+        } else {
+            *cgroup_target = Some(task_cgroup);
+        }
         let mut tables = self.tables.write();
         let task_slot = tables
             .task_table
@@ -546,11 +557,11 @@ impl ProcessPublication {
         let domain = process_domain::write_lock();
         thread_binding.publish(&domain, proc, task);
         Self::publish_process_identity_slots(&domain, proc, &slots, process_effect);
-        PublicationRollback {
+        Ok(PublicationRollback {
             process: proc.clone(),
             thread_binding,
             process_effect,
-        }
+        })
     }
 
     fn rollback_task_publication(&self, rollback: PublicationRollback) {

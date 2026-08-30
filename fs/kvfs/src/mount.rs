@@ -330,6 +330,21 @@ impl MntNamespace {
         Ok(())
     }
 
+    /// Makes the mount rooted at `target` private.
+    ///
+    /// KVFS does not yet model shared propagation groups, so registered mounts
+    /// are private by construction and this operation is idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidInput`] unless `target` is the root of a
+    /// mount registered in this namespace.
+    pub fn make_mount_private(&self, target: &Path) -> VfsResult<()> {
+        let mounts = self.mounts.lock();
+        Self::registered_mount_at(&mounts, target)?;
+        Ok(())
+    }
+
     fn registered_mount_at<'a>(
         mounts: &HashMap<u64, Arc<Mount>>,
         target: &'a Path,
@@ -614,6 +629,15 @@ pub struct Path {
     dentry: Dentry,
 }
 
+/// A pathname rendered relative to a process root.
+#[derive(Debug, Eq, PartialEq)]
+pub enum RenderedPath {
+    /// The location is reachable below the requested root.
+    Reachable(PathBuf),
+    /// The location is outside the requested root.
+    Unreachable(PathBuf),
+}
+
 impl Path {
     /// Create a `struct path` from a mount and dentry.
     pub fn new(mnt: Arc<Mount>, dentry: Dentry) -> Self {
@@ -771,18 +795,66 @@ impl Path {
             return Ok(PathBuf::from(dynamic_name));
         }
 
-        let mut components = vec![];
-        let mut cur = self.clone();
-        loop {
-            cur.dentry.collect_absolute_path(&mut components);
-            cur = match cur.mnt.location() {
-                Some(loc) => loc,
-                None => break,
-            }
+        let (_, components) = self.render_components(None)?;
+        Ok(Self::components_to_path(&components))
+    }
+
+    /// Renders this location relative to `root` with mount-aware reachability.
+    pub fn render_from(&self, root: &Self) -> VfsResult<RenderedPath> {
+        let (is_reachable, components) = self.render_components(Some(root))?;
+        let path = Self::components_to_path(&components);
+        Ok(if is_reachable {
+            RenderedPath::Reachable(path)
+        } else {
+            RenderedPath::Unreachable(path)
+        })
+    }
+
+    /// Builds this location's path below `root`.
+    ///
+    /// Returns [`VfsError::NotFound`] when the location is outside `root`.
+    pub fn path_below(&self, root: &Self) -> VfsResult<PathBuf> {
+        match self.render_from(root)? {
+            RenderedPath::Reachable(path) => Ok(path),
+            RenderedPath::Unreachable(_) => Err(VfsError::NotFound),
         }
-        Ok(iter::once("/")
+    }
+
+    fn render_components(&self, root: Option<&Self>) -> VfsResult<(bool, Vec<String>)> {
+        let mut components = Vec::new();
+        let mut current = self.clone();
+        loop {
+            if root.is_some_and(|root| current.ptr_eq(root)) {
+                return Ok((true, components));
+            }
+
+            if !current.dentry.ptr_eq(&current.mnt.mnt.mnt_root) {
+                components.push(current.name());
+                let Some(parent) = current.dentry.parent() else {
+                    return Ok((root.is_none(), components));
+                };
+                current = current.with_dentry(parent);
+                continue;
+            }
+
+            let Some(mountpoint) = current.mnt.location() else {
+                return Ok((root.is_none(), components));
+            };
+            if root.is_some_and(|root| mountpoint.ptr_eq(root)) {
+                return Ok((true, components));
+            }
+            components.push(mountpoint.name());
+            let Some(parent) = mountpoint.parent() else {
+                return Ok((root.is_none(), components));
+            };
+            current = parent;
+        }
+    }
+
+    fn components_to_path(components: &[String]) -> PathBuf {
+        iter::once("/")
             .chain(components.iter().map(String::as_str).rev())
-            .collect())
+            .collect()
     }
 
     /// Returns a display pathname for this location.
@@ -1853,6 +1925,10 @@ mod tests {
 
         assert_eq!(child_root.name(), "");
         assert_eq!(child_path.as_str(), "/mnt");
+        assert_eq!(
+            child_root.render_from(&root_mount.root_path()),
+            Ok(RenderedPath::Reachable(PathBuf::from("/mnt")))
+        );
         assert!(child_root.dentry().is_root_of_mount());
         assert!(
             lookup_no_follow(&child_root, ".")
@@ -1880,6 +1956,10 @@ mod tests {
         let grandchild_path = grandchild_root.absolute_path().unwrap();
 
         assert_eq!(grandchild_path.as_str(), "/mnt/mnt");
+        assert_eq!(
+            grandchild_root.render_from(&root_mount.root_path()),
+            Ok(RenderedPath::Reachable(PathBuf::from("/mnt/mnt")))
+        );
         assert_eq!(grandchild_root.name(), "");
         assert!(grandchild_root.dentry().is_root_of_mount());
         assert!(
@@ -1887,6 +1967,17 @@ mod tests {
                 .unwrap()
                 .absolute_path()
                 == Ok(PathBuf::from("/mnt"))
+        );
+    }
+
+    #[def_test]
+    fn test_render_from_reports_unreachable_mount_tree() {
+        let first = Mount::new_root(&mock_filesystem(StatFsFlags::empty())).root_path();
+        let second = Mount::new_root(&mock_filesystem(StatFsFlags::empty())).root_path();
+
+        assert_eq!(
+            second.render_from(&first),
+            Ok(RenderedPath::Unreachable(PathBuf::from("/")))
         );
     }
 
@@ -2092,6 +2183,28 @@ mod tests {
 
         assert_eq!(mount_dir.unmount(), Err(VfsError::InvalidInput));
         assert_eq!(mount_dir.unmount_tree(), Err(VfsError::InvalidInput));
+    }
+
+    #[def_test]
+    fn test_make_mount_private_accepts_visible_initial_root() {
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let namespace = MntNamespace::build_initial_mount_tree(&root_fs).unwrap();
+        let visible_root = namespace.visible_root_path();
+
+        assert!(!visible_root.ptr_eq(&namespace.root_path()));
+        assert_eq!(namespace.make_mount_private(&visible_root), Ok(()));
+    }
+
+    #[def_test]
+    fn test_make_mount_private_rejects_non_mount_root_path() {
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
+        let mount_dir = lookup_no_follow(&namespace.root_path(), "mnt").unwrap();
+
+        assert_eq!(
+            namespace.make_mount_private(&mount_dir),
+            Err(VfsError::InvalidInput)
+        );
     }
 
     #[def_test]

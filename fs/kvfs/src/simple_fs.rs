@@ -5,6 +5,7 @@
 //! Simple filesystem scaffolding for the in-kernel VFS.
 
 use alloc::{string::String, sync::Arc};
+use core::any::Any;
 
 use ksync::Mutex;
 use ktime_types::SystemTime;
@@ -13,13 +14,14 @@ use slab::Slab;
 use crate::{
     Dentry, DeviceId, FileSystemType, InodeOperations, Metadata, MetadataUpdate, NodePermission,
     NodeType, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations, VfsInodeInit, VfsResult,
-    libfs::simple_statfs, simple_dir::DirMaker,
+    libfs::simple_statfs, simple_dir::DirMaker, type_map::TypeMap,
 };
 
 /// A simple filesystem implementation that uses a slab allocator for inodes.
 pub struct SimpleFs {
     fs_type: u32,
     inodes: Mutex<Slab<()>>,
+    private: Mutex<TypeMap>,
 }
 
 impl SimpleFs {
@@ -42,6 +44,7 @@ impl SimpleFs {
         let fs = Arc::new(Self {
             fs_type,
             inodes: Mutex::new(Slab::new()),
+            private: Mutex::new(TypeMap::default()),
         });
         let root = root(fs.clone());
         let root = Dentry::new_dir_from_inode(root(), None, String::new());
@@ -62,6 +65,22 @@ impl SimpleFs {
 
     fn release_inode(&self, ino: u64) {
         self.inodes.lock().remove(ino as usize - 1);
+    }
+
+    /// Attaches filesystem-instance state owned for the superblock lifetime.
+    pub fn set_private<T>(&self, value: Arc<T>)
+    where
+        T: Any + Send + Sync,
+    {
+        self.private.lock().insert_arc(value);
+    }
+
+    /// Returns filesystem-instance state of type `T` when installed.
+    pub fn private<T>(&self) -> Option<Arc<T>>
+    where
+        T: Any + Send + Sync,
+    {
+        self.private.lock().get::<T>()
     }
 }
 

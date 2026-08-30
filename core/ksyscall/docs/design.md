@@ -222,6 +222,15 @@ ksyscall::dispatch_irq_syscall
   - compound op（`REQUEUE` / `CMP_REQUEUE` / `WAKE_OP`）在单次
     `address_space` 锁内解析两个 key；robust-list 遍历在 `posix/process`
 
+## Container-related adapters
+
+`clone`/`clone3` 在统一 user-namespace capability 授权接入前对
+`CLONE_NEWCGROUP` 返回 `ENOSYS`，不以 UID 临时判断代替 namespace 创建权限。
+exec credential 路径尚未落实 `no_new_privileges` 的权限提升约束，因此
+`PR_SET_NO_NEW_PRIVS` 暂时返回 `ENOSYS`，`PR_GET_NO_NEW_PRIVS` 报告未设置。
+seccomp 同样尚无执行引擎，因此 `seccomp(2)` 和 `PR_SET_SECCOMP` 返回
+`ENOSYS`，不伪造成功。
+
 ## 非目标
 
 `ksyscall` 不负责：

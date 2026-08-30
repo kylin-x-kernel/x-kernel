@@ -332,6 +332,7 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         error!("tee_session_release_state on thread exit: {e:#010X?}");
     }
 
+    thr.detach_cgroup();
     let is_last_thread = process_exit::finish_thread_exit(process, &current(), exit_code);
 
     // `finish_thread_exit()` removes the current task from the process membership

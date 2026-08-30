@@ -1,0 +1,19 @@
+[package]
+name = "cgroup2fs"
+description = "Cgroup v2 filesystem adapter for X-Kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+kcgroup.workspace = true
+kcred.workspace = true
+klazy.workspace = true
+kprocess.workspace = true
+ksync.workspace = true
+kvfs.workspace = true
+macros.workspace = true
+unittest.workspace = true

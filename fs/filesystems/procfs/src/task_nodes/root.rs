@@ -24,10 +24,11 @@ use ktask::{KtaskRef, WeakKtaskRef, current};
 #[cfg(feature = "tee")]
 use kvfs::DirMapping;
 use kvfs::{
-    Dentry, FileOperations, InodeOperations, InodeSymlinkOperations, LookupFlags, LookupIntent,
-    MagicLinkOps, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType, ResolvedObject,
-    RwFile, SeqFileInode, SeqIterator, SimpleDir, SimpleDirLookup, SimpleDirOps, SimpleFile,
-    SimpleFileOperation, SimpleFs, SimpleFsNode, VfsError, VfsFile, VfsInode, VfsResult,
+    CommandFile, Dentry, FileOperations, InodeOperations, InodeSymlinkOperations, LookupFlags,
+    LookupIntent, MagicLinkOps, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType,
+    ResolvedObject, SeqFileInode, SeqIterator, SimpleDir, SimpleDirLookup, SimpleDirOps,
+    SimpleFile, SimpleFileOperation, SimpleFs, SimpleFsNode, VfsError, VfsFile, VfsInode,
+    VfsResult,
 };
 
 #[cfg(feature = "tee")]
@@ -50,16 +51,16 @@ struct ProcessTaskDir {
 }
 
 impl SimpleDirOps for ProcessTaskDir {
-    fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
+    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
         let Some(process) = self.process.upgrade() else {
-            return Box::new(iter::empty());
+            return Ok(Box::new(iter::empty()));
         };
-        Box::new(
+        Ok(Box::new(
             process
                 .threads()
                 .into_iter()
                 .map(|tid| tid.to_string().into()),
-        )
+        ))
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
@@ -443,22 +444,22 @@ struct ThreadFdDir {
 }
 
 impl SimpleDirOps for ThreadFdDir {
-    fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
+    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
         let Some(task) = self.task.upgrade() else {
-            return Box::new(iter::empty());
+            return Ok(Box::new(iter::empty()));
         };
         let Ok(resources) = task.as_thread().process().resources() else {
-            return Box::new(iter::empty());
+            return Ok(Box::new(iter::empty()));
         };
         let Ok(fd_table) = resources.fd_table() else {
-            return Box::new(iter::empty());
+            return Ok(Box::new(iter::empty()));
         };
         let ids = fd_table
             .read()
             .ids()
             .map(|id| Cow::Owned(id.to_string()))
             .collect::<Vec<_>>();
-        Box::new(ids.into_iter())
+        Ok(Box::new(ids.into_iter()))
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
@@ -543,17 +544,33 @@ fn namespace_link_target(kind: &str) -> String {
     format!("{kind}:[{}]", namespace_inode(kind))
 }
 
+fn task_namespace_link_target(kind: &str, task: &KtaskRef) -> VfsResult<String> {
+    if kind == "cgroup" {
+        let id = task
+            .as_thread()
+            .process()
+            .cgroup_ns()
+            .map_err(|_| VfsError::NotFound)?
+            .id()
+            .as_u64();
+        Ok(format!("{kind}:[{id}]"))
+    } else {
+        Ok(namespace_link_target(kind))
+    }
+}
+
 struct ThreadNsDir {
     fs: Arc<SimpleFs>,
+    task: WeakKtaskRef,
 }
 
 impl SimpleDirOps for ThreadNsDir {
-    fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
-        Box::new(
+    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        Ok(Box::new(
             ["mnt", "pid", "net", "ipc", "uts", "user", "cgroup"]
                 .into_iter()
                 .map(Cow::Borrowed),
-        )
+        ))
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
@@ -563,7 +580,8 @@ impl SimpleDirOps for ThreadNsDir {
         ) {
             return Err(VfsError::NotFound);
         }
-        let target = namespace_link_target(name);
+        let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
+        let target = task_namespace_link_target(name, &task)?;
         lookup.file(
             name,
             SimpleFile::new(self.fs.clone(), NodeType::Symlink, move || {
@@ -578,8 +596,8 @@ impl SimpleDirOps for ThreadNsDir {
 }
 
 impl SimpleDirOps for ThreadDir {
-    fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
-        Box::new(
+    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        Ok(Box::new(
             [
                 "stat",
                 "status",
@@ -598,7 +616,7 @@ impl SimpleDirOps for ThreadDir {
             ]
             .into_iter()
             .map(Cow::Borrowed),
-        )
+        ))
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
@@ -629,7 +647,7 @@ impl SimpleDirOps for ThreadDir {
                 name,
                 SimpleFile::new_regular(
                     fs.clone(),
-                    RwFile::new({
+                    CommandFile::new({
                         let task_weak = task_weak.clone();
                         move |req| {
                             let task = upgrade_task(&task_weak)?;
@@ -637,7 +655,7 @@ impl SimpleDirOps for ThreadDir {
                                 SimpleFileOperation::Read => {
                                     Ok(Some(format_oom_score_adj(task.as_thread().oom_score_adj())))
                                 }
-                                SimpleFileOperation::Write(data) => {
+                                SimpleFileOperation::Write { data, .. } => {
                                     if let Some(value) = parse_oom_score_adj_input(data)? {
                                         if !(OOM_SCORE_ADJ_MIN..=OOM_SCORE_ADJ_MAX).contains(&value)
                                         {
@@ -722,12 +740,41 @@ impl SimpleDirOps for ThreadDir {
             ),
             "cgroup" => lookup.file(
                 name,
-                SimpleFile::new_regular(fs.clone(), move || Ok("0::/\n")),
+                SimpleFile::new_regular(fs.clone(), {
+                    let task_weak = task_weak.clone();
+                    move || {
+                        let task = upgrade_task(&task_weak)?;
+                        let reader = current();
+                        let reader = reader.try_as_thread().ok_or(VfsError::NotFound)?;
+                        let view_root = reader
+                            .process()
+                            .cgroup_ns()
+                            .map_err(|_| VfsError::NotFound)?
+                            .root();
+                        Ok(format!(
+                            "0::{}\n",
+                            task.as_thread()
+                                .cgroup()
+                                .ok_or(VfsError::NotFound)?
+                                .path_from(&view_root)
+                                .map_err(|_| VfsError::NotFound)?
+                        ))
+                    }
+                }),
             ),
-            "ns" => Ok(lookup.dir(
-                name,
-                SimpleDir::new_maker(fs.clone(), Arc::new(ThreadNsDir { fs: fs.clone() })),
-            )),
+            "ns" => {
+                let task = task_weak.upgrade().ok_or(VfsError::NotFound)?;
+                Ok(lookup.dir(
+                    name,
+                    SimpleDir::new_maker(
+                        fs.clone(),
+                        Arc::new(ThreadNsDir {
+                            fs: fs.clone(),
+                            task: Arc::downgrade(&task),
+                        }),
+                    ),
+                ))
+            }
             "cmdline" => lookup.file(
                 name,
                 SimpleFile::new_regular(fs.clone(), {
@@ -748,7 +795,7 @@ impl SimpleDirOps for ThreadDir {
                 name,
                 SimpleFile::new_regular(
                     fs.clone(),
-                    RwFile::new({
+                    CommandFile::new({
                         let task_weak = task_weak.clone();
                         move |req| {
                             let task = upgrade_task(&task_weak)?;
@@ -761,7 +808,7 @@ impl SimpleDirOps for ThreadDir {
                                     bytes[copy_len] = b'\n';
                                     Ok(Some(bytes))
                                 }
-                                SimpleFileOperation::Write(data) => {
+                                SimpleFileOperation::Write { data, .. } => {
                                     if !data.is_empty() {
                                         let mut input = [0; 16];
                                         let copy_len = data.len().min(15);
@@ -826,13 +873,13 @@ impl ProcFsHandler {
 }
 
 impl SimpleDirOps for ProcFsHandler {
-    fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
-        Box::new(
+    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        Ok(Box::new(
             procfs::visible_processes()
                 .into_iter()
                 .map(|process| Cow::Owned(process.pid().to_string()))
                 .chain([Cow::Borrowed("self")]),
-        )
+        ))
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {

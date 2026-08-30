@@ -19,6 +19,7 @@ pub use exit::{
 use kidentity::PidHandle;
 use ksignal::Signo;
 use kspin::SpinNoIrq;
+use ksync::{Mutex, MutexGuard};
 use lazyinit::LazyInit;
 use linked_list_r4l::List;
 pub use runtime_access::{LiveAddressSpace, ProcessExecUpdate};
@@ -42,6 +43,7 @@ pub struct Process {
     /// transaction lock and is updating parent/children/publication state.
     exit_state: AtomicProcessExitState,
     thread_membership: SpinNoIrq<ThreadMembership>,
+    cgroup_target: Mutex<Option<Arc<kcgroup::Cgroup>>>,
     group_exit: SpinNoIrq<ThreadGroupExitState>,
     lifecycle: ProcessLifecycleState,
 
@@ -199,6 +201,7 @@ impl Process {
             leader_task_number,
             exit_state: AtomicProcessExitState::new(ProcessExitState::Running),
             thread_membership: SpinNoIrq::new(ThreadMembership::default()),
+            cgroup_target: Mutex::new(None),
             group_exit: SpinNoIrq::new(ThreadGroupExitState::default()),
             lifecycle: ProcessLifecycleState::new(),
             children: SpinNoIrq::new(List::new()),
@@ -207,6 +210,11 @@ impl Process {
             runtime_ref: SpinNoIrq::new(None),
             pid_publication_slot: SpinNoIrq::new(None),
         })
+    }
+
+    /// Serializes thread publication and whole-process cgroup migration.
+    pub(crate) fn cgroup_transaction(&self) -> MutexGuard<'_, Option<Arc<kcgroup::Cgroup>>> {
+        self.cgroup_target.lock()
     }
 
     fn attach_prepared_locked(

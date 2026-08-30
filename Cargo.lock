@@ -508,6 +508,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "cgroup2fs"
+version = "0.2.0-dev"
+dependencies = [
+ "kcgroup",
+ "kcred",
+ "klazy",
+ "kprocess",
+ "ksync",
+ "kvfs",
+ "macros",
+ "unittest",
+]
+
+[[package]]
 name = "char_driver"
 version = "0.2.0-dev"
 dependencies = [
@@ -1598,6 +1612,7 @@ dependencies = [
  "anon_inodefs",
  "block",
  "bpffs",
+ "cgroup2fs",
  "devfs",
  "fs_context",
  "kbuild_config",
@@ -2083,6 +2098,13 @@ version = "0.2.0-dev"
 [[package]]
 name = "kcgroup"
 version = "0.2.0-dev"
+dependencies = [
+ "kerrno",
+ "kidentity",
+ "klazy",
+ "ksync",
+ "unittest",
+]
 
 [[package]]
 name = "kclass"
@@ -2768,6 +2790,7 @@ dependencies = [
  "fs_context",
  "kaddr_layout",
  "karch",
+ "kcgroup",
  "kcpu_id_map",
  "kcred",
  "kerrno",

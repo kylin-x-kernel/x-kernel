@@ -64,6 +64,14 @@ VfsInode                 child cache
 filesystem operation traits
 ```
 
+`Path::render_from(root)` is the shared mount-aware pathname renderer for
+process-root-relative views. Crossing a mounted filesystem root contributes the
+covered mountpoint name before continuing in the parent mount. The result is
+typed as `RenderedPath::Reachable` or `RenderedPath::Unreachable`; `getcwd(2)`
+uses the latter to emit Linux's `(unreachable)` prefix instead of converting the
+condition to `ENOENT`. `absolute_path()` uses the same component traversal with
+the mount-tree root as its boundary.
+
 pipe/FIFO 遵循 Linux `inode`、`pipe_inode_info` 与 `file` 的三层所有权：
 
 ```text
@@ -464,6 +472,9 @@ reconfigure-purpose `FsContext` 和 per-mount flags，更新 `SuperBlock` 上所
 bind 创建。superblock flags 由 `AtomicSuperBlockFlags` 保存；普通 remount 在发布新 flags
 前调用 `FsContextOperations::reconfigure`，并由 per-superblock umount lock 串行化 hook
 和发布。文件系统后端固定报告只读时，切换到读写会返回 `ReadOnlyFilesystem`。
+`MntNamespace::make_mount_private()` 复用同一 registered-mount-root 校验。KVFS 当前没有
+shared propagation group，所有 mount tree 在构造和 namespace clone 后都不会向其它
+namespace 传播，因此 make-private 是幂等操作；递归请求不需要遍历或修改 descendants。
 mount 不保存“是否由 bind 创建”的来源状态；所有 mount 卸载都只移除 topology 节点，
 `VfsMount` 创建和复制时取得一个 superblock active 引用，最后释放时归还，对应 Linux
 `cleanup_mnt()` 中的 `dput(mnt_root)` 和 `deactivate_super(mnt_sb)`。非最后一个 mount
@@ -661,6 +672,22 @@ child cache 仍使用 mutex。RCU、seqcount lookup 和 lock-free dcache travers
   namei 层的 `may_mknod()` 统一分配 Linux 错误并返回通过校验的 `NodeType`。
   syscall 边界将该类型写回现有 `Umode` 后再开始 `dirfd`/pathname 解析。
 - namespace lock 使用 blocking lock，因为文件系统 callback 可以执行 I/O。
+
+### SimpleFile 写入模式
+
+普通 `SimpleFileOps` 保留 seekable 文件的覆盖写语义，offset 0 的短写不会隐式截断尾部。
+`CommandFile` 表达 procfs/cgroupfs 一类 command-style pseudo file。一次 write/writev
+请求先完整复制到最多 4096 字节的内核缓冲区，再作为一个命令交给 callback；文件 offset
+和此前写入均不参与命令拼接。callback 同时收到保存 opener credential 的 `VfsFile`，因此
+descriptor-based 授权不需要反向查询 current task。这样 command ABI 不会改变其它
+`SimpleFile` 使用者的 seekable 文件语义。
+
+`SimpleDirOps::mkdir()` 接收 VFS 已解析并加锁的 parent inode、准备后的 mode 和同一次
+pathname 操作的 credential；`rmdir()` 接收 parent inode 与加锁的 victim dentry。动态
+文件系统必须基于这些对象提交后端 mutation，不能按裸名称重新 lookup 或查询 ambient
+credential。`child_names()` 可传播生命周期或后端错误，使旧目录 fd 的 readdir 不会被
+静默转换为空目录。需要持久 identity 的 pseudo filesystem 可用 `SimpleFile::new_inode()`、
+`SimpleDir::new_inode_with_owner()` 和 `SimpleDirLookup::{file,dir}_from_inode()` 重用 inode。
 
 ## Drop / 资源释放
 

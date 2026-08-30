@@ -20,6 +20,7 @@ kaddr_layout.workspace = true
 karch.workspace = true
 kcpu_id_map.workspace = true
 kcred.workspace = true
+kcgroup.workspace = true
 kerrno.workspace = true
 kfd.workspace = true
 khal.workspace = true

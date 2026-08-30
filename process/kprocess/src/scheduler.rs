@@ -9,6 +9,36 @@ use ktask::{KtaskRef, current};
 
 use crate::{AsThread, Pid, Process, ProcessGroup, Tid, lookup};
 
+/// Moves all currently published threads in `process` to one cgroup.
+pub fn migrate_process_cgroup(process: &Process, target: &Arc<kcgroup::Cgroup>) -> KResult<()> {
+    migrate_process_cgroup_with(process, target, |_, _| Ok(()))
+}
+
+/// Moves a process after authorizing its stable source and destination groups.
+pub fn migrate_process_cgroup_with(
+    process: &Process,
+    target: &Arc<kcgroup::Cgroup>,
+    authorize: impl FnOnce(&Arc<kcgroup::Cgroup>, &Arc<kcgroup::Cgroup>) -> KResult<()>,
+) -> KResult<()> {
+    let mut cgroup_target = process.cgroup_transaction();
+    let tasks = lookup::process_tasks(process);
+    if tasks.is_empty() {
+        return Err(KError::NoSuchProcess);
+    }
+    let memberships = tasks
+        .iter()
+        .map(|task| task.as_thread().cgroup_membership())
+        .collect::<alloc::vec::Vec<_>>();
+    let source = memberships
+        .first()
+        .and_then(|membership| membership.cgroup())
+        .ok_or(KError::NoSuchProcess)?;
+    authorize(&source, target)?;
+    kcgroup::TaskMembership::migrate_group(&memberships, target)?;
+    *cgroup_target = Some(target.clone());
+    Ok(())
+}
+
 /// Resolves the task targeted by scheduler syscalls.
 pub fn target_task(pid: i32) -> KResult<KtaskRef> {
     if pid < 0 {

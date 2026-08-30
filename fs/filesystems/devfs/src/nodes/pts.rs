@@ -69,13 +69,13 @@ impl DeviceFileOps for Ptmx {
 pub struct PtsDir;
 
 impl SimpleDirOps for PtsDir {
-    fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
+    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
         let ids = PTS_TABLE
             .lock()
             .ids()
             .map(|it| Cow::Owned(it.to_string()))
             .collect::<Vec<_>>();
-        Box::new(ids.into_iter())
+        Ok(Box::new(ids.into_iter()))
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {

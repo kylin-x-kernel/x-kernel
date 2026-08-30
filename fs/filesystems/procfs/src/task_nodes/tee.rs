@@ -45,8 +45,8 @@ struct TaInfoDir {
 }
 
 impl SimpleDirOps for TaInfoDir {
-    fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
-        Box::new(["uuid", "ta_head"].into_iter().map(Cow::Borrowed))
+    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        Ok(Box::new(["uuid", "ta_head"].into_iter().map(Cow::Borrowed)))
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {

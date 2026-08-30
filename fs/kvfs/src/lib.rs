@@ -49,7 +49,7 @@ pub use fs_context::{FsContext, FsContextPurpose};
 pub use kiocb::Kiocb;
 pub use ktime_types::TimestampLimits;
 pub use lookup::{LookupFlags, LookupIntent, MagicLinkOps, ResolvedObject};
-pub use mount::{MntNamespace, Mount, MountFlags, MountIdmap, NamespaceClone, Path};
+pub use mount::{MntNamespace, Mount, MountFlags, MountIdmap, NamespaceClone, Path, RenderedPath};
 pub use namei::{DelayedCall, LastType, ParentLookup, dentry_open, may_mknod};
 pub use node::{
     Dentry, DentryOperations, DeviceFileOps, DirContext, DirEntrySink, FiemapCapability,
@@ -70,7 +70,7 @@ pub use simple_dir::{
     ChainedDirOps, DirMaker, DirMapping, IntoDirMappingEntry, SimpleDir, SimpleDirEntry,
     SimpleDirLookup, SimpleDirOps,
 };
-pub use simple_file::{RwFile, SimpleFile, SimpleFileOperation, SimpleFileOps};
+pub use simple_file::{CommandFile, SimpleFile, SimpleFileOperation, SimpleFileOps};
 pub use simple_fs::{SimpleFs, SimpleFsNode};
 pub use super_block::{
     MAX_LFS_FILESIZE, StatFs, StatFsFlags, SuperBlock, SuperBlockFlags, SuperBlockOperations,

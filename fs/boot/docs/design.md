@@ -42,9 +42,13 @@ visible root。bootstrap rootfs 保留在覆盖层下，对应 Linux 初始 root
 普通 task/eventfd/socket/pipe 路径运行前，runtime caller 只读取已发布对象。
 
 用户态启动前，真实 root 上再挂同一个共享 devtmpfs 以及 tmpfs、procfs、sysfs 和可选
-bpffs。每个固定路径直接使用已经由 init 段注册的 canonical descriptor 构造 `FsContext`，
-再调用 `MntNamespace::mount_new()`；boot 不按名称二次查表，也不直接调用具体 superblock
-constructor。devtmpfs/sysfs 的 internal mount 保证可见 mount 卸载后内核维护的树仍然存活。
+bpffs。`KFEAT_FS_CGROUP2=y` 时还会创建并挂载 `/sys/fs/cgroup`。通常每个固定路径直接
+使用已经由 init 段注册的 canonical descriptor 构造 `FsContext`，再调用
+`MntNamespace::mount_new()`。cgroup2 是启动期例外：PID 1 尚未创建，不能使用普通 mount
+路径的 current cgroup namespace，因此 `fs_boot` 请求 `cgroup2fs` 构造绑定
+`CgroupNamespace::initial()` 的 superblock，再通过 namespace attach 挂载；该 superblock
+仍引用 canonical `FILE_SYSTEM_TYPE`。boot 不按名称二次查表。devtmpfs/sysfs 的 internal
+mount 保证可见 mount 卸载后内核维护的树仍然存活。
 通用 mount helper 要求目标
 目录已经存在；需要由 boot 创建的路径先通过 `ensure_directory_path()` 逐级建立，9P 的动态
 `/mnt/hostshare` 与固定虚拟文件系统路径使用同一显式 policy，不把递归创建隐藏在 mount 机制中。
@@ -64,7 +68,8 @@ constructor。devtmpfs/sysfs 的 internal mount 保证可见 mount 卸载后内�
    只有 `EACCES`/`EINVAL` 会继续尝试下一种格式，其它错误立即停止启动。
 6. 成对更新 init root/pwd 到 overmount 后的真实 root。
 7. 初始化 `anon_inodefs` 与 `pipefs` 的 hidden mount。
-8. 通过同一个 `mount_new()` 对象入口在真实 root 上安装启动期虚拟文件系统。
+8. 在真实 root 上安装启动期虚拟文件系统；普通类型使用 `mount_new()`，启用的 cgroup2
+   使用 initial hierarchy superblock attach。
 
 ## 所有权与并发
 
@@ -84,4 +89,6 @@ registry，root 格式由 registry 探测结果决定。
   统一 init 段，descriptor 注册由实现自己拥有。
 - 空容量 loop disk 不参加 root fallback，但仍是正常 block-core 对象。
 - 固定虚拟文件系统路径属于 initial namespace policy，保持显式。
+- cgroup2 hierarchy 的启动挂载属于 feature-controlled boot policy；`mini-oci` 等用户态
+  消费者不负责初始化宿主机全局 hierarchy。
 - boot 负责递归创建其声明拥有的 mountpoint；KVFS mount helper 只挂载已解析目录。

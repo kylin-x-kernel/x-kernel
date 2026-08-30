@@ -310,7 +310,7 @@ fn publish_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskR
     let task = TaskInner::new_user(|| {}, format!("test-thread-{tid}"), task_number, thread);
 
     let task = prepare_task(task);
-    process_publication().publish_task(&task);
+    process_publication().publish_task(&task).unwrap();
     task
 }
 
@@ -1152,7 +1152,7 @@ fn test_complete_process_exit_wakes_parent_after_child_is_waitable() {
 #[def_test(serial)]
 fn test_child_exit_signal_info_carries_linux_child_payload() {
     let (child, prepared) = build_prepared_test_user_task();
-    let task = prepare_user_task(prepared).publish().activate();
+    let task = prepare_user_task(prepared).publish().unwrap().activate();
     process_exit::finish_thread_exit(&child, &task, 9 << 8);
 
     let siginfo = process_exit::child_exit_signal_info(&child, ksignal::Signo::SIGCHLD);
@@ -1481,7 +1481,7 @@ fn test_prepare_thread_clone_defers_tid_visibility_until_publication() {
 
     let (cloned, task_number) = prepared.into_parts();
     let task = TaskInner::new_user(|| {}, String::from("prepared-thread"), task_number, cloned);
-    let published = prepare_user_task(task).publish();
+    let published = prepare_user_task(task).publish().unwrap();
     let sibling_task = published.task().clone();
 
     let is_last = process.exit_thread(&sibling_task, 0);
@@ -1490,6 +1490,88 @@ fn test_prepare_thread_clone_defers_tid_visibility_until_publication() {
         "published sibling thread removal must not tear down the whole process"
     );
     drop(published);
+    process.exit_thread(&leader_task, 0);
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    process.free();
+    let _ = process_publication().unpublish_process_if_matches(&process);
+    drop(leader_task);
+    process_publication().cleanup();
+}
+
+#[def_test(user, serial)]
+fn test_process_migration_reconciles_a_prepared_sibling_at_publication() {
+    let process = ensure_init().fork(1742);
+    let leader_task = publish_test_thread(&process, process.pid());
+    let root = leader_task
+        .as_thread()
+        .cgroup()
+        .expect("published leader must have cgroup membership")
+        .hierarchy_root();
+    root.set_pids_subtree_enabled(true).unwrap();
+    let target = root.create_child("publish-migration-target").unwrap();
+
+    let prepared = leader_task
+        .as_thread()
+        .prepare_thread_clone()
+        .expect("thread clone should reserve its original cgroup");
+    scheduler::migrate_process_cgroup(&process, &target).unwrap();
+
+    let (cloned, task_number) = prepared.into_parts();
+    let sibling = prepare_user_task(TaskInner::new_user(
+        || {},
+        String::from("cgroup-reconciled-sibling"),
+        task_number,
+        cloned,
+    ))
+    .publish()
+    .unwrap();
+    assert!(Arc::ptr_eq(
+        &sibling
+            .task()
+            .as_thread()
+            .cgroup()
+            .expect("published sibling must have cgroup membership"),
+        &target
+    ));
+
+    sibling.task().as_thread().detach_cgroup();
+    leader_task.as_thread().detach_cgroup();
+    drop(sibling);
+    process.exit_thread(&leader_task, 0);
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    process.free();
+    let _ = process_publication().unpublish_process_if_matches(&process);
+    drop(leader_task);
+    root.remove_child("publish-migration-target").unwrap();
+    process_publication().cleanup();
+}
+
+#[def_test(user, serial)]
+fn test_cgroup_reconciliation_failure_does_not_publish_task() {
+    let process = ensure_init().fork(1743);
+    let leader_task = publish_test_thread(&process, process.pid());
+    let original = leader_task
+        .as_thread()
+        .cgroup()
+        .expect("published leader must have cgroup membership");
+    let prepared = leader_task
+        .as_thread()
+        .prepare_thread_clone()
+        .expect("thread clone should reserve its original cgroup");
+    let (cloned, task_number) = prepared.into_parts();
+    let sibling_tid = task_number.root_nr();
+    let sibling = prepare_user_task(TaskInner::new_user(
+        || {},
+        String::from("cgroup-reconciliation-failure"),
+        task_number,
+        cloned,
+    ));
+
+    *process.cgroup_transaction() = Some(kcgroup::CgroupNamespace::new().root());
+    assert!(sibling.publish().is_err());
+    assert!(process_publication().task(sibling_tid).is_err());
+
+    *process.cgroup_transaction() = Some(original);
     process.exit_thread(&leader_task, 0);
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     process.free();
@@ -1522,7 +1604,8 @@ fn test_scheduler_resolves_non_leader_tid_not_as_tgid() {
         task_number,
         cloned,
     ))
-    .publish();
+    .publish()
+    .unwrap();
     let sibling_task = sibling.task().clone();
 
     let by_tid = scheduler::task_by_tid(sibling_tid).expect("published sibling tid");
@@ -1587,7 +1670,7 @@ fn test_prepare_publish_stages_visibility_before_activation() {
         "prepared process leader must not appear in the thread set before publish"
     );
 
-    let published = prepare_user_task(prepared).publish();
+    let published = prepare_user_task(prepared).publish().unwrap();
 
     let published_task = publication
         .task(process.pid())
@@ -1686,7 +1769,7 @@ fn test_publish_user_task_exposes_handle_before_activation() {
         "prepared process must stay hidden before publication"
     );
 
-    let published = publish_user_task(prepared);
+    let published = publish_user_task(prepared).unwrap();
 
     let published_task = publication
         .task(process.pid())
@@ -1780,7 +1863,7 @@ fn test_zombie_process_stays_published_until_reaped() {
         "prepared child must not be visible before explicit publication"
     );
 
-    let published = prepare_user_task(prepared).publish();
+    let published = prepare_user_task(prepared).publish().unwrap();
 
     let published_before_exit = publication
         .published_process(child_pid)
@@ -1817,7 +1900,7 @@ fn test_published_process_count_ignores_retired_slots_before_cleanup() {
     let pid = process.pid();
     let publication = process_publication();
     let before = publication.published_process_count();
-    let published = prepare_user_task(prepared).publish();
+    let published = prepare_user_task(prepared).publish().unwrap();
 
     assert_eq!(
         publication.published_process_count(),
@@ -1846,7 +1929,7 @@ fn test_published_process_count_ignores_retired_slots_before_cleanup() {
 fn test_exit_and_reap_unpublish_tid_and_pid() {
     let (process, prepared) = build_prepared_test_user_task();
     let publication = process_publication();
-    let published = prepare_user_task(prepared).publish().activate();
+    let published = prepare_user_task(prepared).publish().unwrap().activate();
     let tid = published.as_thread().tid();
     let pid = process.pid();
 
@@ -1941,7 +2024,7 @@ fn test_procfs_visibility_requires_representative_task() {
     let (process, prepared) = build_prepared_test_user_task();
     let pid = process.pid();
     let publication = process_publication();
-    let published = prepare_user_task(prepared).publish();
+    let published = prepare_user_task(prepared).publish().unwrap();
 
     assert!(
         procfs::visible_processes()

@@ -89,6 +89,7 @@ sched_stat = ["ktask/sched_stat", "dep:procfs", "procfs/sched_stat"]
 fs_ext4 = ["dep:kext4", "kruntime/fs"]
 fs_fat = ["dep:fat", "kruntime/fs"]
 fs_9p = ["kruntime/fs9p"]
+fs_cgroup2 = ["kruntime/fs_cgroup2"]
 fs_times = ["fs_ext4", "kext4/times"]
 
 # Networking

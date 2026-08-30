@@ -14,8 +14,7 @@ pub enum CloneNsError {
     /// CLONE_FS`, or `CLONE_NEWPID | CLONE_PARENT`).
     InvalidFlagCombination,
     /// A namespace flag was requested that has no implementation yet (e.g.
-    /// `CLONE_NEWNET`, `CLONE_NEWUSER`, `CLONE_NEWCGROUP`, `CLONE_NEWPID`,
-    /// `CLONE_NEWTIME`).
+    /// `CLONE_NEWNET`, `CLONE_NEWUSER`, `CLONE_NEWPID`, `CLONE_NEWTIME`).
     Unimplemented,
     /// Mount namespace copy or filesystem-context retargeting failed.
     Mount(kvfs::VfsError),

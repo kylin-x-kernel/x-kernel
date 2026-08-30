@@ -59,6 +59,8 @@ kprocess / posix/process / ksyscall / ktty
    旧指针相同，避免静默覆盖未来的临时 subjective identity。
 13. **跨任务读取检查集中**：同线程组豁免、objective credential 快照、real-ID 匹配和
     特权绕过由 `ptrace::check_read_real_creds_access()` 一次组合，syscall 不重复拼接字段规则。
+14. **cgroup task identity 稳定**：cgroup 枚举必须同时匹配 registry task 的
+   `PidHandle` 与 membership 持有的 `Arc<PidHandle>`，不能只信任数值 TID。
 
 ## 线程安全
 
@@ -89,6 +91,7 @@ kprocess / posix/process / ksyscall / ktty
 | T-13 | 已退出进程因 runtime 尚未释放而被误判为 live | 中 | 退出尾段里当前线程仍强持有 `ProcessRuntime`，但进程已经进入 exited state | `live` 查询只看 exited state；runtime attachment 仅供内部 capability upgrade |
 | T-14 | 多目录分步发布暴露 task/process 可见性裂缝 | 中 | parent 已观察到新 tid/pidfd，但 task/process/group/session 目录仍未统一可见 | `ProcessPublication` 用单锁事务同时更新可观测目录；`clone` 在 publication 完成后才回写 `PARENT_SETTID` / `PIDFD` |
 | T-15 | staged publication 失败后残留未提交 child | 高 | `clone()` 返回错误，但 child 仍留在 parent.children / thread membership / PID 目录里 | publication handle 默认可回滚；失败时同步撤销目录可见性与未提交 child 关系 |
+| T-21 | prepared sibling 对齐 process cgroup 失败后触发 panic 或被发布到错误 cgroup | 高 | publication 前目标 cgroup 已失效或属于其他 hierarchy | cgroup reconciliation 在目录 reservation 前执行并传播错误；失败 task 保持不可见，由调用者的 clone 回滚路径清理 |
 | T-11 | 中断上下文误用放大关中断区间 | 中 | 在中断上下文中执行进程关系 mutation，或持有 `SpinNoIrq` 后调用长路径逻辑 | `kprocess` API 内部锁区保持短小；新增调用点应限制在 task/syscall 生命周期路径 |
 | T-16 | 凭据转换中途被其它检查观察 | 高 | 原地修改共享 credential，或逐字段发布 | prepare/commit 模型只替换完整 `Arc<Cred>`；读取者先克隆快照 |
 | T-17 | 下层资源 owner 反向读取 current task 造成层级倒置、身份变化或内核任务 panic | 高 | VFS 路径或匿名文件构造隐式调用 `current_cred()` | current helper 只服务明确的用户 task 入口；syscall 将一个 `Arc<Cred>` 显式传入 `kvfs` 和 fd 对象构造函数 |
@@ -97,6 +100,8 @@ kprocess / posix/process / ksyscall / ktty
 | T-20 | 失效 PID/TID 目录槽位无限保留 | 高 | wait/exit 只 retire slot 却不从 `BTreeMap` 删除，fork 密集工作负载累积数百 MiB RustHeap | `unpublish_task_if_matches`/`unpublish_process_if_matches` 在 retire 前用 `Arc::ptr_eq` 校验发布身份，再删除仍指向同一 cleanable slot 的目录项；复用后的 Reserved/Published 新身份不会被旧退出路径误退休 |
 | T-21 | zombie 或 reaper identity 继续固定 VFS mount | 高 | exited-state 已发布，但 runtime 的 fd table、`FsStruct` 或 `NsProxy` owner 仍存在 | 最后线程先取走 mm/files/fs/ns owner，再发布 exited state；空 owner 的 accessor 返回 `NoSuchProcess` |
 | T-22 | ptrace-style syscall 各自实现不一致的凭据比较 | 高 | syscall 逐字段比较 caller/target，错误处理 set-ID 凭据 | `kprocess::ptrace` 集中线程组、real-credential 和特权策略；字段匹配复用 `kcred` 的非对称谓词 |
+| T-23 | stale cgroup TID 映射到复用后的新 task | 高 | membership 数值仍在，而 registry 已发布同号新 task | membership pin 住 `PidHandle`；`cgroup_member_process_ids()` 用 `Arc::ptr_eq` 验证 lookup identity |
+| T-24 | cgroup 操作使用写入时的 ambient credential 绕过打开时权限 | 高 | descriptor 打开后 credential 改变，adapter 反向查询 current task | VFS DAC 负责 pathname/目录 mutation；command file 使用 `VfsFile::f_cred`，迁移 authorization 在 process cgroup gate 内执行 |
 
 影响等级定义：
 
@@ -131,7 +136,8 @@ kprocess / posix/process / ksyscall / ktty
 - `create_session` 和 `create_group` 在当前进程已经是 leader 时返回 `None`。
 - `init_proc` 在 init 尚未初始化时 panic，调用者需保证启动顺序。
 - `free` 在目标尚未退出时 panic，调用者需先完成 wait 条件判断。
-- 本 crate 不直接返回 Linux errno，errno 映射由 syscall 层完成。
+- cgroup facade 以 `KResult` 返回 lookup、`EPERM` 和 migration error；其他领域 API
+  继续在各自 adapter 边界映射错误。
 
 ## 隐私分析
 
@@ -143,6 +149,10 @@ UID/GID 和补充组，但不包含用户名、用户 payload、
 signal、scheduler 和 job-control 路径读取，调用者需要在上层执行可见性和权限控制。
 
 ## 已知限制
+
+- cgroup namespace 创建尚未执行 `CAP_SYS_ADMIN` 等价授权；user namespace capability
+  模型完成前 `CLONE_NEWCGROUP` 保持 `ENOSYS`。
+- PID namespace 尚未贯通 registry、procfs、signal 和 wait 的可见 PID 翻译。
 
 - subreaper 尚未实现，普通退出进程的子进程统一 reparent 到 init。
 - ID 冲突检查不在 `kprocess` 内集中执行，调用者需通过 registry 或 syscall 规则保证唯一性。
@@ -156,6 +166,8 @@ signal、scheduler 和 job-control 路径读取，调用者需要在上层执行
 修改本模块时需验证：
 
 - 新增公开 API 是否有外部调用者，内部 helper 优先保持 `pub(crate)`。
+- cgroup adapter 是否只依赖 `cgroup.rs` facade，且数值 task lookup 后继续验证
+  `PidHandle` 指针 identity。
 - 新增进程关系转换是否保持 parent/children、group/processes、session/process_groups 三组关系一致。
 - 新增锁嵌套是否遵循现有 API 内部加锁方式，避免外部持有成员锁后调用 mutation API。
 - 新增 task publication 或 rollback 是否通过同一事务对象同时处理全局 TID task slot 和进程内 thread member slot。

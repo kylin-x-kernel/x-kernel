@@ -41,6 +41,9 @@ root block device 名称来自内核构建配置；设备枚举和磁盘内容�
   teardown 内核仍在更新的共享树。
 - `anon_inodefs` 与 `pipefs` 必须在普通 task 可创建匿名 fd/pipe 前完成 hidden mount 发布；
   runtime 路径不得隐式执行首次初始化。
+- 启用 cgroup2 时，启动挂载必须与 initial `NsProxy` 复用
+  `CgroupNamespace::initial()`；不得在 PID 1 创建前调用依赖 current user process 的普通
+  cgroup2 mount 路径，也不得创建第二棵 hierarchy。
 
 ## 线程安全
 
@@ -59,6 +62,7 @@ boot 不另建移除订阅或设备生命周期状态。
 | T-06 | 只读 root device 无法启动 | 高 | root 探测只使用 RW flags，首轮 `EACCES` 后直接 panic | 按 Linux `mount_root_generic()` 对完整 filesystem 候选集执行 RW、RO 两轮探测；RO 轮同时设置 superblock 与 mount 只读位；root 镜像须预置必要 mountpoint |
 | T-07 | 9P 嵌套挂载点缺少父目录 | 中 | mount helper 只对最终 `/mnt/hostshare` 执行 `mkdir` | `mount_host_share()` 在挂载前通过 `ensure_directory_path()` 逐级创建 policy-owned 路径；通用 helper 要求目标已存在 |
 | T-08 | 匿名 fd/pipe 在 hidden pseudo fs 初始化前运行 | 高 | boot 漏掉初始化或把初始化推迟到 runtime first-use | `prepare_namespace()` 在发布真实 root 后显式初始化两个 filesystem，未初始化访问立即暴露契约错误 |
+| T-09 | 启动 cgroup2 挂载与 PID 1 使用不同 hierarchy | 高 | boot 和 `NsProxy` 分别创建 root，或 boot 隐式读取不存在的 current process | 两条路径共同使用 `CgroupNamespace::initial()`；boot 通过显式 initial superblock constructor 挂载 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -83,6 +87,8 @@ root/关键虚拟文件系统失败会停止启动，避免在不完整 namespac
 ## 审计清单
 
 - `fs_boot` 是否仍然不引用具体 block filesystem crate 或 `KFEAT_FS_*` 分支？
+- feature-controlled pseudo filesystem 是否只承载明确的 initial namespace policy，且启动
+  路径不依赖 current process？
 - 新 mount path 是 namespace policy，还是应进入通用 mount/type 层？
 - 新 filesystem 是否注册 canonical type，且没有在 procfs 或 POSIX 层增加名称表？
 - 新启动 mount 的 flags 是否写入 `Mount`；`/dev` 是否保持可访问设备节点？

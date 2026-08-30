@@ -5,6 +5,7 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
+use kcgroup::{Cgroup, TaskCharge, TaskMembership};
 use kcred::Cred;
 use kerrno::KResult;
 use ksignal::{SignalStack, api::ThreadSignalManager};
@@ -159,6 +160,8 @@ pub struct Thread {
     scheduler: Mutex<SchedulerState>,
     is_exiting: AtomicBool,
     accessing_user_memory: AtomicBool,
+    no_new_privileges: AtomicBool,
+    cgroup: TaskMembership,
     #[cfg(feature = "tee")]
     tee_session_ctx: Mutex<Option<Box<dyn TeeSessionCtxTrait>>>,
 }
@@ -171,8 +174,28 @@ impl Thread {
         task_number: Arc<kidentity::PidHandle>,
         cred: Arc<Cred>,
     ) -> Box<Self> {
+        let charge = runtime
+            .nsproxy()
+            .expect("initial process runtime must have a namespace owner")
+            .cgroup_ns()
+            .root()
+            .reserve_task()
+            .expect("initial process must fit in the root cgroup");
+        Self::new_with_charge(process, runtime, task_number, cred, charge, false)
+            .expect("initial task identity must be unique")
+    }
+
+    fn new_with_charge(
+        process: Arc<Process>,
+        runtime: Arc<ProcessRuntime>,
+        task_number: Arc<kidentity::PidHandle>,
+        cred: Arc<Cred>,
+        charge: TaskCharge,
+        no_new_privileges: bool,
+    ) -> KResult<Box<Self>> {
         let tid = task_number.root_nr();
-        Box::new(Thread {
+        let cgroup = charge.commit(task_number.clone())?;
+        Ok(Box::new(Thread {
             task_number,
             signal: ThreadSignalManager::new(tid, runtime.signal_manager().clone()),
             process,
@@ -186,9 +209,11 @@ impl Thread {
             scheduler: Mutex::new(SchedulerState::default()),
             is_exiting: AtomicBool::new(false),
             accessing_user_memory: AtomicBool::new(false),
+            no_new_privileges: AtomicBool::new(no_new_privileges),
+            cgroup,
             #[cfg(feature = "tee")]
             tee_session_ctx: Mutex::new(None),
-        })
+        }))
     }
 
     /// Forks a child process from this thread's current process and returns the
@@ -200,13 +225,17 @@ impl Thread {
 
     /// Prepares a child process clone together with its leader task identity.
     pub fn prepare_process_fork(&self, config: ProcessForkConfig) -> KResult<PreparedUserClone> {
+        let _transaction = self.process.cgroup_transaction();
+        let charge = self.cgroup.reserve_child()?;
         let (process_runtime, task_number) = fork_process_runtime(&self.process_runtime(), config)?;
-        let thread = Self::new(
+        let thread = Self::new_with_charge(
             process_runtime.process().clone(),
             process_runtime,
             task_number.clone(),
             self.subjective_cred(),
-        );
+            charge,
+            self.no_new_privileges(),
+        )?;
         Ok(PreparedUserClone {
             thread,
             task_number,
@@ -221,13 +250,17 @@ impl Thread {
 
     /// Prepares a sibling thread clone together with its thread identity.
     pub fn prepare_thread_clone(&self) -> KResult<PreparedUserClone> {
+        let _transaction = self.process.cgroup_transaction();
+        let charge = self.cgroup.reserve_child()?;
         let task_number = allocate_thread_task_number()?;
-        let thread = Self::new(
+        let thread = Self::new_with_charge(
             self.process.clone(),
             self.runtime.clone(),
             task_number.clone(),
             self.subjective_cred(),
-        );
+            charge,
+            self.no_new_privileges(),
+        )?;
         Ok(PreparedUserClone {
             thread,
             task_number,
@@ -237,6 +270,35 @@ impl Thread {
     /// Returns the user-visible thread identifier.
     pub fn tid(&self) -> Tid {
         self.task_number.root_nr()
+    }
+
+    /// Returns the task's canonical cgroup node.
+    pub fn cgroup(&self) -> Option<Arc<Cgroup>> {
+        self.cgroup.cgroup()
+    }
+
+    /// Moves this task to an existing cgroup.
+    pub fn migrate_cgroup(&self, target: &Arc<Cgroup>) -> KResult<()> {
+        self.cgroup.migrate(target)
+    }
+
+    /// Detaches this exiting thread from its cgroup.
+    pub fn detach_cgroup(&self) {
+        self.cgroup.detach();
+    }
+
+    /// Returns whether privilege-gaining exec transitions are disabled.
+    pub fn no_new_privileges(&self) -> bool {
+        self.no_new_privileges.load(Ordering::Acquire)
+    }
+
+    /// Permanently disables privilege-gaining exec transitions for this task.
+    pub fn set_no_new_privileges(&self) {
+        self.no_new_privileges.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn cgroup_membership(&self) -> &TaskMembership {
+        &self.cgroup
     }
 
     /// Returns the `clear_child_tid` user pointer for this thread.

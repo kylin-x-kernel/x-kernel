@@ -39,6 +39,8 @@ copy-in/copy-out 和 errno 映射属于 syscall 层或更上层策略代码。
 - `NsProxy` 不保存当前 user namespace；该引用属于 credentials。`MntNamespace`
   只保存拥有该 mount namespace 的 user namespace。
 - `NsProxy` 不保存 task-active PID namespace；该语义属于 task/PID identity。
+- initial `NsProxy` 必须复用 `CgroupNamespace::initial()`，保持 PID 1 的 namespace view
+  与启动期 `/sys/fs/cgroup` superblock 指向同一 hierarchy。
 - `kprocess::ProcessRuntime` 替换 `NsProxy` 时必须一次性发布完整的新
   `Arc<NsProxy>`，不能暴露半初始化 bundle。
 - `UtsInner` 的两个固定数组始终 NUL 初始化或由 ASCII 字节填充；setter 拒绝长度达到
@@ -105,8 +107,12 @@ user namespace 接入后，需要重新审计路径视图、PID 可见性和 cre
 
 ## 已知限制
 
-- `NEWPID`、`NEWNET`、`NEWUSER`、`NEWCGROUP`、`NEWTIME` 当前只建模类型或骨架，clone
-  路径返回未实现。
+- `CLONE_NEWCGROUP` 的对象模型已建立，但 capability/delegation 授权尚未接入；clone
+  路径因此返回 `ENOSYS`，不能据此宣称支持 cgroup namespace 创建。
+- `clone3(CLONE_INTO_CGROUP)`、`unshare(CLONE_NEWCGROUP)` 和 `setns()` 尚未实现。
+
+- `NEWPID`、`NEWNET`、`NEWUSER`、`NEWTIME` 当前只建模类型或骨架，clone 路径返回
+  未实现。
 - mount propagation、shared/slave/private 传播组、recursive bind 和 namespace fd/setns
   语义尚未由本 crate 闭环。
 - `IpcNamespace` 目前只是身份占位，SysV IPC manager 迁移需要后续补丁完成。

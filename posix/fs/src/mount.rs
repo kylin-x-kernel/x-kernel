@@ -119,10 +119,8 @@ fn path_mount(
     // combination execute with part of the request silently ignored.
     let unsupported_operations = linux_raw_sys::general::MS_MOVE
         | linux_raw_sys::general::MS_SHARED
-        | linux_raw_sys::general::MS_PRIVATE
         | linux_raw_sys::general::MS_SLAVE
-        | linux_raw_sys::general::MS_UNBINDABLE
-        | linux_raw_sys::general::MS_REC;
+        | linux_raw_sys::general::MS_UNBINDABLE;
     if flags & unsupported_operations != 0 {
         return Err(KError::InvalidInput);
     }
@@ -130,6 +128,18 @@ fn path_mount(
     let mount_flags = per_mount_flags(flags, target.mount().flags());
     let superblock_flags = superblock_flags(flags);
     let namespace = process.mnt_ns()?;
+
+    if flags & linux_raw_sys::general::MS_PRIVATE != 0 {
+        validate_private_propagation_flags(flags)?;
+        namespace.make_mount_private(target)?;
+        // Descendants are also private by construction, so MS_REC requires no
+        // additional traversal until KVFS gains shared propagation groups.
+        return Ok(());
+    }
+
+    if flags & linux_raw_sys::general::MS_REC != 0 {
+        return Err(KError::InvalidInput);
+    }
 
     if flags & (linux_raw_sys::general::MS_REMOUNT | linux_raw_sys::general::MS_BIND)
         == (linux_raw_sys::general::MS_REMOUNT | linux_raw_sys::general::MS_BIND)
@@ -211,6 +221,16 @@ fn superblock_flags(flags: u32) -> SuperBlockFlags {
         superblock_flags.insert(SuperBlockFlags::RDONLY);
     }
     superblock_flags
+}
+
+fn validate_private_propagation_flags(flags: u32) -> KResult<()> {
+    let allowed = linux_raw_sys::general::MS_PRIVATE
+        | linux_raw_sys::general::MS_REC
+        | linux_raw_sys::general::MS_SILENT;
+    if flags & !allowed != 0 {
+        return Err(KError::InvalidInput);
+    }
+    Ok(())
 }
 
 /// Map `mount(2)` MS_* flags to per-mount [`MountFlags`].
@@ -347,5 +367,38 @@ mod tests {
         assert!(result.contains(MountFlags::RDONLY));
         assert!(result.contains(MountFlags::NODEV));
         assert!(result.contains(MountFlags::NOEXEC));
+    }
+
+    #[def_test]
+    fn private_propagation_accepts_optional_recursive_scope() {
+        assert!(
+            super::validate_private_propagation_flags(linux_raw_sys::general::MS_PRIVATE).is_ok()
+        );
+        assert!(
+            super::validate_private_propagation_flags(
+                linux_raw_sys::general::MS_PRIVATE | linux_raw_sys::general::MS_REC
+            )
+            .is_ok()
+        );
+    }
+
+    #[def_test]
+    fn private_propagation_accepts_silent_flag() {
+        assert!(
+            super::validate_private_propagation_flags(
+                linux_raw_sys::general::MS_PRIVATE | linux_raw_sys::general::MS_SILENT
+            )
+            .is_ok()
+        );
+    }
+
+    #[def_test]
+    fn private_propagation_rejects_unrelated_flags() {
+        assert!(
+            super::validate_private_propagation_flags(
+                linux_raw_sys::general::MS_PRIVATE | linux_raw_sys::general::MS_RDONLY
+            )
+            .is_err()
+        );
     }
 }

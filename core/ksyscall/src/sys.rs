@@ -301,6 +301,5 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> KResult<isize> {
 
 /// Secure computing syscall for sandboxing (not fully implemented)
 pub fn sys_seccomp(_op: u32, _flags: u32, _args: *const ()) -> KResult<isize> {
-    warn!("dummy sys_seccomp");
-    Ok(0)
+    Err(KError::from(kerrno::LinuxError::ENOSYS))
 }

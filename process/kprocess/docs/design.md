@@ -38,6 +38,7 @@ process/kprocess/
 └── src/
     ├── lib.rs
     ├── capability.rs
+    ├── cgroup.rs
     ├── credentials.rs
     ├── ptrace.rs                 # ptrace-style 跨任务访问策略
     ├── job_control.rs
@@ -123,6 +124,7 @@ Process
 | `ProcessPublication` | 保存 published task/process/group/session 的全局可观测目录，并承载 publish / unpublish / lookup / iteration；目录更新在单次 publication 事务内完成，避免 task/process/group/session lookup 读到跨表半发布状态；其中 `published` 覆盖 waitable zombie 未 reap 的稳定身份，`live` 仅表示尚未 exited 的外部可操作进程 |
 | `kidentity` | 作为 process domain 的 identity owner，维护底层 `PidHandle` 与 `PidNamespace`；`kprocess` 当前对外仍暴露 root/global `Pid/Tid` 语义 |
 | `lookup` | `kprocess` 内部目录原语层，负责 `published/live` 合约下的 task/process/group 查找 |
+| `cgroup` | cgroup adapter facade；负责稳定 task identity 到 published process 的映射、事务内授权回调和整组迁移 |
 | `procfs` / `scheduler` / `job_control` / `pidfd` / `process_signals` / `resource_limits` / `process_exit` / `wait_reap` / `system_view` | 面向外部领域语义的窄接口层；外部模块通过这些模块表达“要做什么”，而不是自己理解 `published/live` |
 | `ParentRelation` | 封装 wait parent contract、当前 parent child-list slot 和预留 init reparent slot；这些状态只能在 process-domain 事务内作为同一父子关系更新 |
 | `GroupMembership` | 封装当前 `ProcessGroup` 和发布到 group 成员表的 slot；group move 通过该对象保持 group 指针与 member slot 成对切换 |
@@ -442,6 +444,28 @@ process group 和 session 是查询索引，不拥有成员进程或成员进程
 当前实现把退出进程的子进程统一 reparent 到 init。
 这满足基本 wait 和 orphan child 处理需求。
 subreaper 尚未实现，代码保留 TODO。
+
+## Cgroup membership 与 namespace staging
+
+每个 `Thread` 持有唯一的 `TaskMembership`。fork/clone 在任何可失败的 runtime 构造前
+预留 pids charge。`Process` 的 cgroup transaction gate 串行化 membership 选择、
+whole-process migration 和线程 publication：迁移更新已发布线程与 process target；稍后
+发布的 prepared sibling 会先迁移到该 target，再进入 task/thread registry；迁移失败时
+publication 返回错误，task 不会变为可见。因此稳定
+线程组不会被 fork/migrate 竞态拆散。线程退出在发布 process-exit 状态前显式 detach，
+`Drop` 仅是兜底。
+
+`cgroup.rs` 是文件系统 adapter 与 process internals 之间的稳定 facade。
+`cgroup_member_process_ids()` 只接受 canonical `Cgroup`，对每个 membership 的
+`Arc<PidHandle>` 执行 registry lookup 和指针 identity 校验，再返回去重后的 PID；
+它不会把 stale 数值 TID 映射成复用后的新 task。`migrate_cgroup_process()` 集中执行
+PID 解析和整组 membership transaction，并在 process cgroup gate 内把稳定 source、
+destination 交给文件系统提供的 authorization closure。`cgroup2fs` 因此可使用打开文件
+时保存的 credential 和 mount view 做授权，同时不依赖 `scheduler` 或 `procfs` 的内部
+查找接口，也不反向查询 ambient current credential。
+
+`CLONE_NEWCGROUP` 在统一 user-namespace capability 授权接入前返回 `ENOSYS`；namespace
+staging 不接收或重新查询当前 cgroup 来绕过该授权边界。
 
 ## Drop / 资源释放
 

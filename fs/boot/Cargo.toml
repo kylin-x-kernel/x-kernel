@@ -11,6 +11,7 @@ homepage.workspace = true
 default = ["dev-log"]
 dev-log = ["devfs/dev-log"]
 ebpf = ["dep:bpffs"]
+cgroup2 = ["dep:cgroup2fs"]
 fs9p = ["dep:v9fs", "dep:kclass", "dep:macros", "kclass/virtio-9p"]
 rootfs-secondary-block = []
 smp = ["procfs/smp"]
@@ -19,6 +20,7 @@ smp = ["procfs/smp"]
 anon_inodefs.workspace = true
 block.workspace = true
 bpffs = { workspace = true, optional = true }
+cgroup2fs = { workspace = true, optional = true }
 devfs.workspace = true
 fs_context.workspace = true
 kclass = { workspace = true, optional = true }

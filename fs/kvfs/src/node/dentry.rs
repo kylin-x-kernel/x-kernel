@@ -288,6 +288,11 @@ impl Deref for LockedDentry<'_> {
 }
 
 impl Dentry {
+    /// Returns the inode identity referenced by this positive dentry.
+    pub fn inode_ref(&self) -> Arc<VfsInode> {
+        self.vfs_inode()
+    }
+
     /// Gets the inode number of the instantiated dentry.
     pub fn inode(&self) -> u64 {
         self.vfs_inode().inode()

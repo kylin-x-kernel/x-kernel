@@ -293,7 +293,7 @@ impl CloneRequest {
             None
         };
 
-        publish_user_task(new_task).commit(|_| {
+        publish_user_task(new_task)?.commit(|_| {
             if self.flags.contains(CloneFlags::PARENT_SETTID)
                 && let Err(err) = (self.parent_tid as *mut Pid).write_vm(tid)
             {
@@ -499,11 +499,7 @@ mod tests_clone {
 
     #[def_test]
     fn test_validate_rejects_unimplemented_namespaces_with_enosys() {
-        for flags in [
-            CloneFlags::NEWNET,
-            CloneFlags::NEWUSER,
-            CloneFlags::NEWCGROUP,
-        ] {
+        for flags in [CloneFlags::NEWNET, CloneFlags::NEWUSER] {
             let mut req = CloneRequest::new();
             req.set_flags(flags);
             let err = req.validate_namespace_flags().unwrap_err();
@@ -514,6 +510,14 @@ mod tests_clone {
                 "expected ENOSYS for {flags:?}"
             );
         }
+    }
+
+    #[def_test]
+    fn test_validate_rejects_newcgroup_without_capability_model() {
+        let mut req = CloneRequest::new();
+        req.set_flags(CloneFlags::NEWCGROUP);
+        let err = req.validate_namespace_flags().unwrap_err();
+        assert_eq!(LinuxError::from(err), LinuxError::ENOSYS);
     }
 
     #[def_test]

@@ -105,7 +105,7 @@ impl NsProxy {
             ipc_ns: Arc::new(IpcNamespace::new()),
             pid_ns_for_children: root_pid_ns,
             net_ns: Arc::new(NetNamespace::new()),
-            cgroup_ns: Arc::new(CgroupNamespace::new()),
+            cgroup_ns: CgroupNamespace::initial(),
             time_ns: time_ns.clone(),
             time_ns_for_children: time_ns,
         })
@@ -117,8 +117,8 @@ impl NsProxy {
     /// - With `CLONE_NEWNS`, a new mount namespace is cloned from the parent.
     /// - With `CLONE_NEWUTS`, a new `UtsNamespace` is cloned from the parent.
     /// - With `CLONE_NEWIPC`, a new empty `IpcNamespace` is created.
-    /// - Unimplemented flags (`CLONE_NEWNET`, `CLONE_NEWUSER`, etc.) return
-    ///   `Err(())` so the caller can translate to the appropriate errno.
+    /// - Unimplemented flags (`CLONE_NEWCGROUP`, `CLONE_NEWNET`, etc.) return an
+    ///   error so the caller can translate it to the appropriate errno.
     pub fn clone_for_child(
         &self,
         flags: NamespaceFlags,
@@ -218,8 +218,11 @@ mod tests_nsproxy {
 
     #[def_test]
     fn test_nsproxy_initial_creation() {
-        let ns = make_nsproxy();
-        assert_eq!(ns.uts_ns.nodename(), b"kylin-x");
+        let first = make_nsproxy();
+        let second = make_nsproxy();
+        assert_eq!(first.uts_ns.nodename(), b"kylin-x");
+        assert!(Arc::ptr_eq(first.cgroup_ns(), second.cgroup_ns()));
+        assert!(Arc::ptr_eq(first.cgroup_ns(), &CgroupNamespace::initial()));
     }
 
     #[def_test]
@@ -300,7 +303,6 @@ mod tests_nsproxy {
     #[def_test]
     fn test_nsproxy_clone_unimplemented_flags_rejected() {
         let parent = make_nsproxy();
-
         assert!(
             parent
                 .clone_for_child(NamespaceFlags::NEWNET, NamespaceFsContext::Shared)
@@ -313,12 +315,12 @@ mod tests_nsproxy {
         );
         assert!(
             parent
-                .clone_for_child(NamespaceFlags::NEWCGROUP, NamespaceFsContext::Shared)
+                .clone_for_child(NamespaceFlags::NEWPID, NamespaceFsContext::Shared)
                 .is_err()
         );
         assert!(
             parent
-                .clone_for_child(NamespaceFlags::NEWPID, NamespaceFsContext::Shared)
+                .clone_for_child(NamespaceFlags::NEWCGROUP, NamespaceFsContext::Shared)
                 .is_err()
         );
     }

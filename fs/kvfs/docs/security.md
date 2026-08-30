@@ -29,6 +29,11 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   的文件操作读取。
 - superblock 默认 dentry operations 只接受内核构造的静态 table；dentry 绑定后不能
   从用户输入安装或替换 operation identity。
+- `AnonInodeFs::global()` 是运行时匿名文件创建入口，但它只接受已经由 boot 阶段
+  初始化好的 singleton；不从用户输入直接触发全局 VFS 初始化。
+- `Path::render_from()` 显式区分 requested root 可达与不可达。跨 mount 时必须加入
+  mountpoint 自身，不能把 mounted root 的空 dentry name 当作路径组件，也不能用普通
+  `Path::parent()` 的 `..` 语义跳过 mountpoint。
 - 文件系统类型注册表只接受内核构造的静态描述符；用户提供的类型名只能执行精确查找，
   不能安装或替换注册项。
 - `FsContext::data()` 只暴露 syscall 层已经有界复制的 opaque mount-data slice；filesystem
@@ -149,8 +154,10 @@ VFS inode-cache mutex 只保护 `New/Live/Freeing` entry；initializer、evictio
 final drop、Weak upgrade 失败的 `Live` 当成 cache miss 并行重建。
 可变 per-mount flags 存储在 `VfsMount::mnt_flags`，由 `flags()` 和 `set_flags()` 封装为
 强类型 `MountFlags`，并使用 relaxed ordering，因为 flags 不发布或保护其他 mount 状态。
-remount/reconfigure 在替换 flags 前校验目标是当前 mount namespace 中已注册 mount
-的根路径。普通 remount 独立接收 superblock flags 和 per-mount flags，并同步更新共享
+remount/reconfigure 和 make-private 在操作前校验目标是当前 mount namespace 中已注册
+mount 的根路径。make-private 依赖当前不存在 shared propagation group 的全局设计不变量，
+因此不会把一个真实 shared mount 静默当作 private。普通 remount 独立接收 superblock
+flags 和 per-mount flags，并同步更新共享
 superblock 的只读策略；`MS_REMOUNT|MS_BIND` 仅更新目标 mount 的 per-mount flags。
 superblock flags 由 `AtomicSuperBlockFlags` 封装为强类型 `SuperBlockFlags`；普通 remount
 构造 purpose 为 reconfigure 的 `FsContext`，在发布拟议 flags 前调用静态
@@ -261,6 +268,8 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-41 | 同一 block device 出现两个 mutable superblock，或 mount 到正在 teardown 的实例 | 高 | filesystem 每次 mount 自行分配 state，或 `get_tree` 与 active acquisition 间无状态校验 | KVFS 按 canonical `(s_type, BlockDevice)` 建立 nascent reservation 和独占 claim；同 identity 等待/复用，RO/RW 不一致或跨类型冲突返回 `EBUSY`；`mount_new` 在 dying/dead activation race 后重试 |
 | T-42 | filesystem 在 transaction 完成后继续使用失效的 mount data borrow | 高 | filesystem 把 `FsContext::data()` byte-slice 引用直接存入 superblock state | opaque data 只作为同步 context 输入；filesystem 必须解析并保存 owned/typed state，generic fill closure 为 `FnOnce` |
 | T-43 | resident inode 暴露磁盘格式无法保存的时间精度，或字段联动关系与磁盘不一致 | 中 | VFS 在 filesystem callback 后重新发布原请求，掩盖后端的范围钳制、字段专有粒度或忽略行为 | `TimestampLimits` 只处理 superblock 级公共能力；callback 复用 `MetadataUpdate` 返回实际生效字段，KVFS 只发布返回值；FAT 日期级 atime、2 秒 mtime/ctime 联动及 KVFS callback 回传测试约束该合同 |
+| T-44 | command-style pseudo file 把多次 write 按 offset 合并，或把一次 write_iter 拆成多次命令 | 高 | 复用普通 seekable `SimpleFileOps` 写语义 | `CommandFile` 完整复制最多 4096 字节的一次请求，忽略 offset，并把 `VfsFile::f_cred` 与完整缓冲区一次性交给 callback |
+| T-45 | 动态目录后端按名称重新解析 VFS 已锁定的 victim | 高 | `rmdir` callback 只收到字符串，replacement 竞争使后端删除不同 identity | `SimpleDirOps::rmdir` 接收 `LockedDentry`；后端可校验 `inode_ref()`，`mkdir` 同时接收 parent inode、prepared mode 和 credential |
 
 ## 故障模式与影响分析（FMEA）
 

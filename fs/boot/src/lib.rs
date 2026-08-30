@@ -101,6 +101,12 @@ fn init_host_9p_fs() {
 }
 
 /// Prepares the initial mount namespace from registered filesystem types.
+///
+/// # Panics
+///
+/// Panics if filesystem initcalls have not registered the required canonical
+/// types, or if bootstrap mounts, root device selection, root filesystem
+/// construction, or init `fs_struct` setup fails.
 pub fn prepare_namespace() {
     let bootstrap = memfs::ramfs::new_rootfs(SuperBlockFlags::empty());
     BootVfs::install_initial_root(bootstrap);
@@ -205,6 +211,24 @@ impl BootVfs {
             PSEUDO_FS_MOUNT_FLAGS,
         )
         .expect("Failed to mount sysfs");
+
+        #[cfg(feature = "cgroup2")]
+        {
+            self.ensure_directory_path("/sys/fs/cgroup")
+                .expect("Failed to create /sys/fs/cgroup mountpoint");
+            let mountpoint = self
+                .lookup("/sys/fs/cgroup")
+                .expect("Failed to resolve /sys/fs/cgroup mountpoint");
+            let super_block = cgroup2fs::new_initial_cgroup2fs(SuperBlockFlags::empty());
+            self.namespace
+                .attach_with_flags_and_devname(
+                    &mountpoint,
+                    &super_block,
+                    PSEUDO_FS_MOUNT_FLAGS,
+                    None,
+                )
+                .expect("Failed to mount cgroup2fs");
+        }
 
         #[cfg(feature = "ebpf")]
         {

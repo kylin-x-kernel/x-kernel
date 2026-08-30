@@ -14,6 +14,7 @@ mod tests;
 
 /// Capability-target validation helpers.
 pub mod capability;
+mod cgroup;
 mod credentials;
 /// Job-control query and mutation targets.
 pub mod job_control;
@@ -50,6 +51,7 @@ pub mod wait_reap;
 #[macro_use]
 extern crate klogger;
 
+pub use cgroup::{cgroup_member_process_ids, migrate_cgroup_process};
 pub use credentials::{current_cred, current_real_cred};
 pub use pidfd::PidFd;
 pub use posix_types::{Pid, Tid};
@@ -110,7 +112,9 @@ pub fn current_umask() -> u32 {
 ///
 /// Publication completes before the task becomes runnable.
 pub fn start_user_task(task: ktask::TaskInner) -> ktask::KtaskRef {
-    publish_user_task(task).activate()
+    publish_user_task(task)
+        .expect("user task publication must succeed")
+        .activate()
 }
 
 /// Publishes a fully constructed user task without making it runnable yet.
@@ -118,7 +122,12 @@ pub fn start_user_task(task: ktask::TaskInner) -> ktask::KtaskRef {
 /// The returned handle is visible to process/task lookups but must be
 /// explicitly committed via [`PublishedUserTask::commit`], activated directly,
 /// or aborted. Dropping the handle before activation rolls back publication.
-pub fn publish_user_task(task: ktask::TaskInner) -> PublishedUserTask {
+///
+/// # Errors
+///
+/// Returns an error when a prepared thread cannot be reconciled with its
+/// process's current cgroup before publication.
+pub fn publish_user_task(task: ktask::TaskInner) -> kerrno::KResult<PublishedUserTask> {
     publication::prepare_user_task(task).publish()
 }
 
