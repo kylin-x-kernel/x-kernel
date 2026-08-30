@@ -68,7 +68,7 @@ impl kirq::IntrManagerIf {
         }
     }
 
-    fn dispatch_irq(irq: usize) -> Option<kirq::PendingIrq> {
+    fn dispatch_irq(irq: usize) -> Option<kirq::Virq> {
         let mut irq = IrqType::new(irq);
         if matches!(irq, IrqType::Io) {
             let Some(ex_irq) = eiointc::claim_irq() else {
@@ -87,12 +87,10 @@ impl kirq::IntrManagerIf {
                 eiointc::complete_irq(irq);
             }
         }
-        Some(kirq::PendingIrq::new(kirq::IrqRef::Virq(irq.as_usize()), 0))
+        kirq::generic_handle_irq(kirq::PendingIrq::new(kirq::IrqRef::Virq(irq.as_usize()), 0))
     }
 
-    fn dispatch_nmi(_irq: usize) -> Option<kirq::DispatchedIrq> {
-        None
-    }
+    fn dispatch_nmi(_irq: usize) {}
 
     fn complete_irq(_completion_cookie: usize) {}
 

@@ -217,6 +217,12 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     #[cfg(feature = "watchdog")]
     watchdog::init_primary();
 
+    // Keep the PMU PPI masked until the watchdog has promoted it to NMI
+    // delivery on this CPU. This also enables the normal IRQ fallback when
+    // the configured NMI mechanism is unavailable at runtime.
+    #[cfg(feature = "pmu")]
+    khal::pmu::enable_irq();
+
     finish_allocator_init();
     log_memory_regions();
 
@@ -556,18 +562,12 @@ fn init_interrupt() {
         }),
     );
 
+    // PMU overflow dispatch.  Perf counters report overflow on the PMU
+    // interrupt line; register the dispatch handler under the `pmu` feature
+    // so it exists independently of the watchdog/hardlockup NMI path.  The
+    // platform owns the IRQ wiring; kruntime only triggers it.
     #[cfg(feature = "pmu")]
-    kirq::register_nmi(
-        kirq::gic_level_irq_desc(kbuild_config::PMU_IRQ),
-        alloc::sync::Arc::new(|_| {
-            debug!(
-                "PMU interrupt received on cpu {}",
-                khal::percpu::this_cpu_id().as_usize()
-            );
-            khal::pmu::dispatch_irq_overflows();
-            kirq::IrqEvent::HANDLED
-        }),
-    );
+    khal::pmu::register_overflow_dispatch();
 
     ktask::init_softirqd_current_cpu();
     if kwork::raw::init_system_workqueue_worker_pools_for_cpu(khal::percpu::this_cpu_id()).is_none()

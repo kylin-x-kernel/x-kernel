@@ -32,7 +32,8 @@ fn init_common() {
     });
     init_softlockup_detection();
 
-    // Register mutex deadlock check
+    // Register mutex deadlock check (checked from NMI context only).
+    #[cfg(feature = "nmi")]
     crate::register_watchdog_task(&crate::watchdog_task::MUTEX_DEADLOCK_CHECK);
     crate::register_watchdog_task(&SYSTEM_WORKQUEUE_CHECK);
 
@@ -46,72 +47,87 @@ fn init_common() {
 fn init_nmi_watchdog() {
     use crate::rendezvous as rv;
 
+    // Degraded build: the compiled-in NMI mechanism is not supported on this
+    // hardware, so there is nothing to arm.  `enable_periodic_nmi` would
+    // fail the same way; report it once instead of attempting.
+    if khal::nmi::mode() == khal::nmi::NmiMode::None {
+        log::warn!("[watchdog] NMI mechanism unavailable; hard lockup detection disabled");
+        return;
+    }
+
     // Register hard lockup detection task.
     crate::register_hardlockup_detection_task();
 
-    // TODO: read CPU max frequency from DT OPP table (opp-hz).
-    // TODO: read CPU max frequency from DT OPP table (opp-hz).
-    // For now assume 2.5 GHz.  The hardlockup period is threshold × freq,
-    // so over-estimating the cycle frequency stretches the real-time window
-    // and makes the detector less sensitive.
-    let cpu_freq_hz: u64 = 2_500_000_000;
-    // Use u128 intermediate to avoid overflow when threshold × cpu_freq_hz
-    // exceeds u64::MAX (e.g. ≥ 1.85 GHz with the 10 s default threshold).
-    let nmi_period_cycles = (crate::lockup_detection::DEFAULT_HARDLOCKUP_THRESHOLD.as_nanos()
-        * u128::from(cpu_freq_hz)
-        / ktime_types::NANOS_PER_SEC as u128) as u64;
-    khal::nmi::init(nmi_period_cycles);
-    khal::nmi::enable();
+    // Start periodic NMI delivery through the source‑neutral NMI interface.
+    // The platform backend (currently the PMU cycle counter) internally:
+    //   1. Computes the cycle threshold from period_ns.
+    //   2. Initialises the per-CPU counter hardware.
+    //   3. Registers our per-CPU callback.
+    //   4. Promotes the PMU line to NMI delivery on this CPU (PPI).
+    //   5. Starts the counter.
+    // Steps 2-4 are fallible; the counter and callback are set up *before*
+    // the line is promoted, so any failure is rolled back completely by
+    // `deinit_cycle_counter()` and promotion is the last fallible step.
+    // The PMU overflow-dispatch handler on the interrupt line is registered
+    // independently by the `pmu` feature init (kruntime), so perf overflow
+    // delivery works even without the hardlockup watchdog.
+    if !khal::nmi::enable_periodic_nmi(
+        crate::lockup_detection::DEFAULT_HARDLOCKUP_THRESHOLD.as_nanos() as u64,
+        || {
+            // Every NMI checks whether watchdog tasks on THIS CPU are healthy.
+            // If a failure is detected, THIS CPU becomes the cause CPU and
+            // triggers a global rendezvous.
 
-    // Register NMI handler
-    khal::nmi::register_nmi_handler(|| {
-        // Every NMI checks whether watchdog tasks on THIS CPU are healthy.
-        // If a failure is detected, THIS CPU becomes the cause CPU and
-        // triggers a global rendezvous.
-
-        let fail_name = crate::watchdog_task::check_watchdog_tasks();
-        if fail_name.is_some() {
-            if ktask::snapshot::nmi_begin() {
-                rv::try_trigger();
-            } else {
-                khal::kprint_atomic!("[watchdog] snapshot already running, skip NMI dump\n");
-            }
-        }
-
-        // Once any CPU triggered, ALL CPUs must rendezvous here.
-        if rv::is_triggered() {
-            rv::mark_arrived();
-            ktask::snapshot::nmi_collect_local();
-            let this_cpu = this_cpu_id().as_usize();
-            let is_cause = rv::cause_cpu() == Some(this_cpu);
-            if is_cause {
-                // Strong rendezvous: MUST wait until all CPUs are in NMI.
-                rv::wait_all_arrived_strong();
-
-                khal::kprint_atomic!(
-                    "[watchdog] failure detected on cpu {}, failed_task={:?}, arrived_mask={:#x}",
-                    this_cpu,
-                    fail_name,
-                    rv::arrived_bitmap()
-                );
-
-                // Cause CPU dumps all tasks for all CPUs.
-                ktask::snapshot::nmi_dump_all(rv::all_arrived_mask());
-
-                // Notify others that dump is done.
-                rv::mark_dump_done();
-                ktask::snapshot::nmi_finish();
-
-                // Hard stop on the cause CPU.
-                panic!("Watchdog task check failed (global dump)");
-            } else {
-                // Non-cause CPUs: spin until dump is done.
-                while !rv::is_dump_done() {
-                    core::hint::spin_loop();
+            let fail_name = crate::watchdog_task::check_watchdog_tasks();
+            if fail_name.is_some() {
+                if ktask::snapshot::nmi_begin() {
+                    rv::try_trigger();
+                } else {
+                    khal::kprint_atomic!("[watchdog] snapshot already running, skip NMI dump\n");
                 }
             }
-        }
-    });
+
+            // Once any CPU triggered, ALL CPUs must rendezvous here.
+            if rv::is_triggered() {
+                rv::mark_arrived();
+                ktask::snapshot::nmi_collect_local();
+                let this_cpu = this_cpu_id().as_usize();
+                let is_cause = rv::cause_cpu() == Some(this_cpu);
+                if is_cause {
+                    // Strong rendezvous: MUST wait until all CPUs are in NMI.
+                    rv::wait_all_arrived_strong();
+
+                    khal::kprint_atomic!(
+                        "[watchdog] failure detected on cpu {}, failed_task={:?}, \
+                         arrived_mask={:#x}",
+                        this_cpu,
+                        fail_name,
+                        rv::arrived_bitmap()
+                    );
+
+                    // Cause CPU dumps all tasks for all CPUs.
+                    ktask::snapshot::nmi_dump_all(rv::all_arrived_mask());
+
+                    // Notify others that dump is done.
+                    rv::mark_dump_done();
+                    ktask::snapshot::nmi_finish();
+
+                    // Hard stop on the cause CPU.
+                    panic!("Watchdog task check failed (global dump)");
+                } else {
+                    // Non-cause CPUs: spin until dump is done.
+                    while !rv::is_dump_done() {
+                        core::hint::spin_loop();
+                    }
+                }
+            }
+        },
+    ) {
+        log::error!(
+            "[watchdog] failed to arm periodic NMI on cpu {}; hard lockup detection disabled",
+            this_cpu_id().as_usize()
+        );
+    }
 }
 
 /// Initialize soft lockup detection.

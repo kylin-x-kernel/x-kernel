@@ -11,7 +11,8 @@ repository.workspace = true
 [features]
 default = []
 arm-el2 = []
-pmr = []
+nmi-hardware = []
+nmi-pseudo = []
 smp = []
 
 [dependencies]

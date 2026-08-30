@@ -31,13 +31,6 @@ enum ArchTrapOrigin {
 core::arch::global_asm!(
     include_str!("excp.S"),
     trapframe_size = const core::mem::size_of::<ExceptionContext>(),
-    // GICv3-only: mrs/msr ICC_PMR_EL1. GICv2 has no sysreg interface —
-    // enabling pmr on GICv2 will cause undefined-instruction exceptions.
-    PMR_SYSREG = const if cfg!(all(feature = "pmr", not(feature = "vmm"))) {
-        1u64
-    } else {
-        0u64
-    },
     TRAP_KIND_SYNC = const ArchTrap::Synchronous as u8,
     TRAP_KIND_IRQ = const ArchTrap::Irq as u8,
     TRAP_KIND_FIQ = const ArchTrap::Fiq as u8,
@@ -76,9 +69,75 @@ fn handle_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFlags) {
     );
 }
 
+/// Pseudo-NMI exception entry/exit handling, gated on the mechanism readiness
+/// flag that the platform derives from `detect_mode()`, so a degraded build
+/// (no active mechanism) behaves exactly like a plain-IRQ kernel and never
+/// touches the NMI-only registers.
+///
+/// Pseudo-NMI: saves the entry `ICC_PMR_EL1` value into the trapframe
+/// (where [`use_nmi_path`] classifies the interrupt) and opens the mask,
+/// then restores PMR before returning to the assembly epilogue.
+///
+/// Hardware NMI needs no entry/exit handling here: exception entry
+/// (SPINTMASK=0) sets `PSTATE.ALLINT=1` for the duration of the handler, the
+/// GIC IRQ dispatch path opens the ALLINT window for a normal IRQ so a
+/// Superpriority NMI can preempt it, and `ERET` restores the interrupted
+/// context's exact PSTATE from `SPSR_EL1` (which exception entry saved
+/// *before* setting ALLINT — the saved SPSR must not be modified).
+#[cfg(feature = "nmi-pseudo")]
+struct NmiExceptionGuard {
+    saved_pmr: u8,
+    pmr_active: bool,
+}
+
+#[cfg(feature = "nmi-pseudo")]
+impl NmiExceptionGuard {
+    fn new(tf: &mut ExceptionContext) -> Self {
+        let (saved_pmr, pmr_active) = if karch::pmr::is_ready() {
+            // Save the entry PMR so `use_nmi_path` can classify the
+            // interrupt and the exit path can restore it, then open the
+            // mask (the assembly prologue used to do this).  `is_ready()` is
+            // only set on GICv3, so a degraded build skips this entirely.
+            let saved = karch::pmr::read();
+            tf.pmr = saved as u64;
+            karch::pmr::write(karch::pmr::ALL);
+            (saved, true)
+        } else {
+            (0, false)
+        };
+        Self {
+            saved_pmr,
+            pmr_active,
+        }
+    }
+}
+
+#[cfg(feature = "nmi-pseudo")]
+impl Drop for NmiExceptionGuard {
+    fn drop(&mut self) {
+        if self.pmr_active {
+            // Mask IRQs while restoring PMR (the assembly epilogue used to
+            // do this); `eret` restores the interrupted DAIF.I afterwards.
+            // SAFETY: `msr daifset` only masks IRQs; the PMR value was saved
+            // at entry on this CPU.
+            unsafe { core::arch::asm!("msr daifset, #2", options(nomem, nostack)) };
+            karch::pmr::write(self.saved_pmr);
+        }
+    }
+}
+
 /// Architecture-specific trap entry point.
+///
+/// Pseudo-NMI PMR save/restore is performed here, gated on the runtime NMI
+/// mode so a degraded build (no active mechanism) behaves exactly like a
+/// plain-IRQ kernel and never touches the NMI-only registers.  Hardware-NMI
+/// ALLINT handling lives in the GIC dispatch paths
+/// (`dispatch_irq_from_irqson` / `dispatch_irq_from_irqsoff`), not in the
+/// exception entry.
 #[unsafe(no_mangle)]
 fn dispatch_exception(tf: &mut ExceptionContext, kind: ArchTrap, source: ArchTrapOrigin) {
+    #[cfg(feature = "nmi-pseudo")]
+    let _nmi_guard = NmiExceptionGuard::new(tf);
     let _tf_guard = crate::ExceptionContextGuard::new(tf);
     if matches!(
         source,
@@ -94,16 +153,8 @@ fn dispatch_exception(tf: &mut ExceptionContext, kind: ArchTrap, source: ArchTra
             panic!("Unhandled exception {:?}:\n{:#x?}", kind, tf);
         }
         ArchTrap::Irq => {
-            #[cfg(all(feature = "pmr", not(feature = "vmm")))]
-            if tf.spsr & (1 << 7) != 0
-                || (karch::pmr::is_ready() && tf.pmr as u8 <= karch::pmr::NMI_ONLY)
-            {
-                // PMR <= NMI_ONLY means only interrupts with priority below
-                // that threshold could have been delivered — i.e. pseudo‑NMI
-                // sources.  This relies on the invariant that NMI sources are
-                // programmed at priority 0 while every other interrupt stays
-                // at or above IRQ_THRESHOLD, enforced by the GIC init
-                // defaults and irq_driver::gic::set_prio.
+            #[cfg(feature = "nmi")]
+            if use_nmi_path(tf) {
                 dispatch_irq_trap!(NMI, 0);
                 return;
             }
@@ -152,4 +203,41 @@ fn dispatch_exception(tf: &mut ExceptionContext, kind: ArchTrap, source: ArchTra
             }
         }
     }
+}
+
+/// Whether the IRQ exception just taken must be dispatched through the
+/// lock‑free NMI path.
+///
+/// Routing is decided by the interrupted context's mask state, not by the
+/// type of interrupt that fired:
+///
+/// - `SPSR.I == 1`: the IRQ exception bypassed `DAIF.I`.  With hardware NMI
+///   (FEAT_NMI) only an IRQ with Superpriority can do that, so the NMI path
+///   is unambiguous; with pseudo‑NMI the PMR window is the only way an IRQ
+///   arrives while `DAIF.I` is set.
+/// - `SPSR.I == 0`: the context had IRQs enabled.  A hardware NMI that
+///   interrupted such a context still runs on the normal IRQ path (the GIC
+///   backend is responsible for acknowledging it — IAR1 returns a special
+///   INTID for pending NMI-attribute interrupts, and the real ack happens
+///   via `ICC_NMIAR1_EL1`); returning `false` here means "the context had
+///   IRQs enabled", not "this is not an NMI".
+#[cfg(feature = "nmi")]
+fn use_nmi_path(tf: &ExceptionContext) -> bool {
+    // Hardware NMI (FEAT_NMI): an IRQ exception taken while the interrupted
+    // context had IRQs masked must have bypassed DAIF.I.  Gated on the
+    // mechanism readiness flag so a degraded build never classifies an IRQ
+    // as an NMI.
+    #[cfg(feature = "nmi-hardware")]
+    if karch::allint_active() && tf.spsr & (1 << 7) != 0 {
+        return true;
+    }
+
+    // Pseudo-NMI: PMR lowered to NMI_ONLY lets only priority-0 (NMI)
+    // sources through, so the taken interrupt must be one.  `pmr::is_ready`
+    // is only set on GICv3, so a degraded build never takes this path.
+    #[cfg(feature = "nmi-pseudo")]
+    if karch::pmr::is_ready() && tf.pmr as u8 <= karch::pmr::NMI_ONLY {
+        return true;
+    }
+    false
 }

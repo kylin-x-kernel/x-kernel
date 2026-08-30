@@ -143,9 +143,6 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     #[cfg(feature = "ipi")]
     kirq::enable(kbuild_config::IPI_IRQ, true);
 
-    #[cfg(feature = "pmu")]
-    kirq::enable(of::pmu_irq_or(kbuild_config::PMU_IRQ), true);
-
     ktask::init_softirqd_current_cpu();
     if kwork::raw::init_system_workqueue_worker_pools_for_cpu(logical_cpu_id).is_none() {
         warn!(
@@ -157,6 +154,14 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
 
     #[cfg(feature = "watchdog")]
     watchdog::init_secondary();
+
+    // Unmask the PMU line only after the watchdog armed this CPU's overflow
+    // source (counter + NMI promotion), so no interrupt can be delivered
+    // before the source and its handler are ready.  In pmu-only builds
+    // (no NMI source) the watchdog block is compiled out and this runs
+    // unchanged right before idle.
+    #[cfg(feature = "pmu")]
+    khal::pmu::enable_irq();
 
     ktask::run_idle();
 }

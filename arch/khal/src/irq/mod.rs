@@ -9,5 +9,9 @@
 //! registration.
 
 mod manager;
+#[cfg(feature = "nmi")]
+mod nmi;
 
 pub use manager::*;
+#[cfg(feature = "nmi")]
+pub use nmi::*;

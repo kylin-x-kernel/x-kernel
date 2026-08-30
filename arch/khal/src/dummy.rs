@@ -97,13 +97,11 @@ impl kirq::IntrManagerIf {
 
     fn enable(_irq: usize, _enabled: bool) {}
 
-    fn dispatch_irq(_irq: usize) -> Option<kirq::PendingIrq> {
+    fn dispatch_irq(_irq: usize) -> Option<kirq::Virq> {
         None
     }
 
-    fn dispatch_nmi(_irq: usize) -> Option<kirq::DispatchedIrq> {
-        None
-    }
+    fn dispatch_nmi(_irq: usize) {}
 
     fn complete_irq(_completion_cookie: usize) {}
 

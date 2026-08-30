@@ -164,19 +164,25 @@ impl kirq::IntrManagerIf {
         );
     }
 
-    fn dispatch_irq(irq: usize) -> Option<kirq::PendingIrq> {
-        with_cause!(
+    fn dispatch_irq(irq: usize) -> Option<kirq::Virq> {
+        let pending_irq = with_cause!(
             irq,
             @S_TIMER => {
                 trace!("IRQ: timer");
-                Some(kirq::PendingIrq::new(kirq::IrqRef::Virq(irq), PLIC_COMPLETE_SKIP))
+                Some(kirq::PendingIrq::new(
+                    kirq::IrqRef::Virq(irq),
+                    PLIC_COMPLETE_SKIP,
+                ))
             },
             @S_SOFT => {
                 trace!("IRQ: IPI");
                 // SAFETY: the current trap cause is a pending supervisor
                 // software interrupt, so clearing that CSR bit acknowledges it.
                 unsafe { sip::clear_ssoft() };
-                Some(kirq::PendingIrq::new(kirq::IrqRef::Virq(irq), PLIC_COMPLETE_SKIP))
+                Some(kirq::PendingIrq::new(
+                    kirq::IrqRef::Virq(irq),
+                    PLIC_COMPLETE_SKIP,
+                ))
             },
             @S_EXT => {
                 let mut plic = plic().lock();
@@ -194,12 +200,11 @@ impl kirq::IntrManagerIf {
             @EX_IRQ => {
                 unreachable!("Device-side IRQs should be dispatch_irqd by triggering the External Interrupt.");
             }
-        )
+        );
+        kirq::generic_handle_irq(pending_irq?)
     }
 
-    fn dispatch_nmi(_irq: usize) -> Option<kirq::DispatchedIrq> {
-        None
-    }
+    fn dispatch_nmi(_irq: usize) {}
 
     fn complete_irq(completion_cookie: usize) {
         if completion_cookie == PLIC_COMPLETE_SKIP {

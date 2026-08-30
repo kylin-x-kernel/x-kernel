@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Pseudo-NMI registration and dispatch state.
+//! NMI registration and dispatch state.
 
 use alloc::collections::BTreeMap;
 
@@ -24,19 +24,26 @@ use crate::{
 ///   [`dispatch_nmi_handler`]). The normal IRQ path and process context never write
 ///   this table.
 /// - **READS**: NMI context only, via [`dispatch_nmi_handler`]. The lock is never
-///   acquired from a normal IRQ handler, so a pseudo-NMI that preempts a
+///   acquired from a normal IRQ handler, so an NMI that preempts a
 ///   normal IRQ never contends on this lock.
 ///
-/// [`SpinRaw`] (no IRQ / preempt guards) is therefore safe: boot-time writers
-/// run before any NMI can be delivered, and a pseudo-NMI cannot preempt
-/// another pseudo-NMI on the same CPU, so a writer and a reader never run
-/// concurrently on the same CPU.
+/// [`SpinRaw`] (no IRQ / preempt guards) is therefore safe:
+///
+/// - boot-time writers run before any NMI can be delivered;
+/// - a pseudo-NMI cannot preempt another pseudo-NMI on the same CPU (the NMI
+///   path never lowers PMR below `NMI_ONLY`), so a writer and a reader never
+///   run concurrently on the same CPU;
+/// - a hardware NMI can preempt a normal IRQ handler (the IRQ path opens the
+///   ALLINT window), but IRQ handlers never touch this table, and the NMI
+///   path keeps `PSTATE.ALLINT` set so a hardware NMI cannot preempt another
+///   NMI.
 static NMI_TABLE: SpinRaw<BTreeMap<Hwirq, Handler>> = SpinRaw::new(BTreeMap::new());
 
 /// Register an NMI handler for a hardware interrupt.
 ///
-/// The interrupt is configured as a pseudo-NMI with the highest GIC priority
-/// and routed through the lock-free `dispatch_nmi_handler` path. Unlike
+/// The interrupt is configured as an NMI by the platform (GIC priority 0 for
+/// pseudo-NMI, the GICv3.3 NMI attribute for hardware NMI) and routed through
+/// the lock-free `dispatch_nmi_handler` path. Unlike
 /// `register`, this function **never** acquires `IRQ_STATE.lock()` during
 /// dispatch — the handler is stored in a separate `NMI_TABLE` keyed by hwirq.
 ///
@@ -50,8 +57,9 @@ static NMI_TABLE: SpinRaw<BTreeMap<Hwirq, Handler>> = SpinRaw::new(BTreeMap::new
 ///   line, and rejects duplicates before touching any internal state.
 /// - Normally called **at boot time**, before `enable_local_irq()`, so that
 ///   no NMI can fire before registration is complete. It may also be called
-///   from an NMI handler itself — a pseudo-NMI cannot preempt another
-///   pseudo-NMI on the same CPU, so the registration cannot race a reader.
+///   from an NMI handler itself — NMIs cannot preempt NMIs on the same CPU
+///   (pseudo-NMI: PMR stays at `NMI_ONLY`; hardware NMI: ALLINT stays set),
+///   so the registration cannot race a reader.
 pub fn register_nmi(desc: IrqDesc, handler: Handler) -> bool {
     let hwirq = desc.hwirq;
 
@@ -104,7 +112,6 @@ pub fn register_nmi(desc: IrqDesc, handler: Handler) -> bool {
     // Pass the resolved descriptor so platform binding/configuration also
     // applies when the line only carries a dynamically allocated virq.
     configure_platform_irq(desc);
-    set_platform_irq_enabled(desc, true);
     true
 }
 

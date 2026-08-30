@@ -33,21 +33,16 @@ config KFEAT_SCHED_STAT
       prints them when reporting a soft lockup. Debug builds enable this by
       default, while release builds keep it opt-in.
 
-config KFEAT_PMU
-    bool "PMU support"
-    help
-      Enable Performance Monitor Unit support for hardware performance
-      counters and PMU-driven pseudo-NMI delivery.
-
 config KFEAT_WATCHDOG_HARDLOCKUP
     bool "Watchdog hard lockup detection"
     depends on KFEAT_WATCHDOG
     depends on MACHINE_AARCH64_QEMU
-    select KFEAT_PMU
+    depends on KFEAT_NMI
     help
-      Enable the hard lockup watchdog backend. On AArch64 QEMU virt this is
-      currently implemented through the PMU-driven NMI path and global snapshot
-      rendezvous.
+      Enable the hard lockup watchdog backend. Requires NMI support (the
+      source is selected together with NMI).  On AArch64 QEMU virt this is
+      currently implemented through the PMU-backed periodic NMI source and
+      global snapshot rendezvous.
 
 config KFEAT_LOCK_STAT
     bool "Lock contention statistics (/proc/lock_stat)"

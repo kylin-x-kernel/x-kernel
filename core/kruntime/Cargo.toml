@@ -37,7 +37,7 @@ arm-timer-resume-fixup = ["ktask/arm-timer-resume-fixup", "timer_driver/arm-time
 rootfs-secondary-block = ["fs", "fs_boot/rootfs-secondary-block"]
 watchdog = ["dep:watchdog"]
 watchdog_hardlockup = ["watchdog/nmi"]
-pmu = ["khal/pmu", "dep:of"]
+pmu = ["khal/pmu"]
 
 [dependencies]
 kalloc.workspace = true
@@ -53,7 +53,6 @@ kdma.workspace = true
 memaddr.workspace = true
 khal.workspace = true
 kirq.workspace = true
-of = { workspace = true, optional = true }
 ktime_types.workspace = true
 ktime.workspace = true
 kcpu.workspace = true

@@ -16,7 +16,6 @@ ignored = ["linkme"]
 [features]
 preempt = []
 smp = []
-pmr = ["karch/pmr"]
 stats = ["dep:klockstat", "dep:linkme", "klockstat/stats"]
 default = []
 

@@ -10,7 +10,6 @@ mod cpu;
 mod fp;
 mod irq;
 mod mmu;
-pub mod pmr;
 mod rng;
 mod tlb;
 mod tls;
@@ -25,10 +24,11 @@ pub use cache::{
 };
 pub use cpu::{await_interrupts, stop_cpu};
 pub use fp::enable_fp;
-#[allow(deprecated)]
+#[cfg(feature = "nmi-hardware")]
+pub use irq::{allint_active, allint_clear, allint_is_set, mark_allint_active};
 pub use irq::{
-    disable_local_irq, enable_local_irq, local_irq_enabled, prepare_enter_user_irq, restore_irq,
-    save_irq_and_disable,
+    disable_local_irq, enable_local_irq, local_irq_enabled, pmr, prepare_enter_user_irq,
+    restore_irq, save_irq_and_disable,
 };
 pub use mmu::{
     HwPageTableRoot, read_kernel_page_table, read_user_page_table, write_kernel_page_table,

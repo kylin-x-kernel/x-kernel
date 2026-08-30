@@ -172,7 +172,7 @@ ksched algorithms / karch context switch / allocator
 - **快速失败策略**：关键不变量处普遍使用 `assert!`（例如任务状态、IRQ 约束、CPU 编号）。
 - **延迟恢复策略**：抢占采用 pending + 安全点执行，尽量在一致状态下恢复调度。
 - **回收容错策略**：GC 对 `Arc::try_unwrap` 失败重排队，避免误释放。
-- **诊断增强**：`snapshot/watchdog` feature 通过共享任务注册表提供锁等待与回溯检查能力。
+- **诊断增强**：`snapshot/watchdog` feature 通过共享任务注册表提供锁等待与回溯检查能力；`watchdog_hardlockup` 在 NMI 上下文中检查硬锁（依赖根 Kconfig 的 `KFEAT_NMI`）。
 
 ## 隐私与数据暴露
 

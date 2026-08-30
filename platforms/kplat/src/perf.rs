@@ -15,4 +15,14 @@ pub trait PerfMgr {
     fn on_overflow() -> bool;
     /// Registers a callback for a counter index.
     fn reg_cb(idx: u32, cb: PerfCb) -> bool;
+    /// Register the PMU overflow-dispatch handler on the platform's PMU
+    /// interrupt line.
+    ///
+    /// The platform owns the architecture-specific wiring: the PMU IRQ
+    /// number, the interrupt descriptor, and the delivery mode (a normal IRQ
+    /// handler, or an NMI handler when the PMU is the compiled NMI source).
+    /// Called once at boot, before IRQs are enabled.
+    fn register_overflow_irq() -> bool;
+    /// Enable the PMU interrupt line on the current CPU.
+    fn enable_irq();
 }

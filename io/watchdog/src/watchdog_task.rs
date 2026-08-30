@@ -3,7 +3,6 @@
 // See LICENSES for license details.
 
 //! Watchdog task registration and checks.
-extern crate alloc;
 use alloc::vec::Vec;
 
 #[percpu::def_percpu]

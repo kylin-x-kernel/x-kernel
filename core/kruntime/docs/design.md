@@ -157,6 +157,24 @@ INITED_CPUS.load(Acquire) == kcpu_id_map::nr_cpus()
 
 从核在屏障之后开启本地 IRQ（及可选 watchdog），进入 `ktask::run_idle()`，**不**执行 `SystemInitEntry`。
 
+### NMI 初始化时序
+
+NMI 机制由平台探测并在每 CPU 使能，`kruntime` 负责在正确的初始化阶段调用
+`khal::nmi` 接口：
+
+- `early_driver_init`（GIC 初始化完成后）→ `khal::nmi::early_init()`：探测 GIC
+  版本与 FEAT_NMI，写入运行时机制（`Pseudo` / `Hardware` / `None`），并打印
+  `NMI mode: ...` 启动日志。
+- 主核 `final_init` 与每个从核 `final_init_ap` → `khal::nmi::late_init()`：每 CPU
+  使能。hardware 模式在此开启 `SCTLR_EL1.NMI` / ALLINT；pseudo 与降级（`None`）
+  无需 per-CPU 寄存器操作。
+- late-init 线程中的 `[watchdog] init_primary`（以及从核 idle 前的
+  `init_secondary`）调用 `init_nmi_watchdog`：`mode() == None` 时打印
+  "hard lockup detection disabled" 并跳过武装；否则经
+  `khal::nmi::enable_periodic_nmi` 用 PMU 周期源武装硬锁检测。
+- PMU 溢出分发由 `pmu` feature init 独立注册（normal IRQ 或 NMI fallback），与
+  watchdog 解耦，因此降级平台上 perf 事件仍可用。
+
 ## 启动流程（从核）
 
 ```
@@ -217,8 +235,8 @@ sleep-control 寄存器地址与 S5 写值）。x86-64（SeaBIOS）不受影响�
 | `ipi` | 依赖 `kipi`；IPI 中断处理 |
 | `fs` / `fs9p` / `net` / `vsock` / `display` / `input` | 驱动与子系统初始化（经 `kdriver`）；具体 filesystem feature 只负责链接其自注册实现 |
 | `rtc` | 启动时打印墙钟时间 |
-| `watchdog` / `watchdog_hardlockup` | 看门狗主/从核初始化 |
-| `pmu` | PMU 溢出中断 |
+| `watchdog` / `watchdog_hardlockup` | 看门狗主/从核初始化；`watchdog_hardlockup` 额外启用 NMI 驱动的硬锁检测（`watchdog/nmi`） |
+| `pmu` | PMU 溢出中断；`kruntime` 在 `pmu` feature 下独立注册溢出分发（`khal::pmu::register_overflow_dispatch`），perf 与 watchdog 解耦；配合 `watchdog_hardlockup` 时 PMU 线可被提升为周期 NMI 源 |
 | `arm-timer-resume-fixup` | 修复 AArch64 虚拟计时器在 idle/WFI 返回后的计数回退 |
 | `rootfs-secondary-block` | 将第二个块设备作为根文件系统后端 |
 

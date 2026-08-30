@@ -243,6 +243,18 @@ unsafe { asm!("movfr2gr.d {val}, $f0", val = out(reg) value) }
 与 FP 寄存器之间的数据搬移指令，不涉及内存访问。64 个函数各自硬编码了
 $f0–$f31 的寄存器编号。
 
+### 13. `NmiExceptionGuard::drop`（`aarch64/excp.rs`）
+
+```rust
+unsafe { core::arch::asm!("msr daifset, #2", options(nomem, nostack)) };
+```
+
+**不变量**：guard 仅在 `pmr_active`（入口 PMR 已保存并打开 mask）时执行恢复；
+`msr daifset` 只屏蔽 IRQ，随后写回的是同一 CPU 在入口保存的 `ICC_PMR_EL1`。
+
+**为何安全**：执行上下文为异常入口/出口（本 CPU、IRQ 关闭）；PMR 值属于当前
+CPU；`eret` 随后从 SPSR 恢复中断前的 DAIF 状态。
+
 ## 内存安全不变量
 
 以下不变量必须在任何时候都成立：
@@ -304,6 +316,7 @@ $f0–$f31 的寄存器编号。
 | T-10 | `init_trap()` 被重复调用导致硬件状态不一致 | 中 | 二次调用覆盖 GDT/IDT/向量表等已激活的硬件结构 | 由调用者保证仅调用一次（boot 阶段单线程执行）；无运行时防护 |
 | T-11 | x86_64 `orig_rax` 被恶意篡改导致 syscall 重启异常 | 中 | 用户态通过信号处理器修改 trap frame 中的 `orig_rax` | `orig_rax` 仅在 `syscall_entry` 汇编中写入；信号帧保存 `UserRestorableContext` 窄状态，不从用户栈恢复 `orig_rax`；x86_64 `EnterUserFrame.kernel_rsp` 也不进入用户信号帧；signal delivery 代码通过 `syscall_restart_error()` 判断重启条件 |
 | T-12 | `rollback_syscall` 在非 syscall 上下文调用 | 低 | 信号处理代码误判上下文类型 | `is_from_syscall()` 检查 `orig_rax != u64::MAX`，非 syscall 上下文时 `rollback_syscall()` 和 `restart_with_syscall()` 为 no-op |
+| T-13 | IRQ 被误分类为 NMI（或反之） | 高 | `use_nmi_path` 的 SPSR.I / 入口 PMR 判断错误，或机制 readiness 标志（`pmr::is_ready` / `allint_active`）错误 | NMI handler 在错误上下文约束下执行（如普通 IRQ 按 NMI 规则），或 Superpriority NMI 被当普通 IRQ 丢失优先级 | 分类依赖硬件状态快照 + readiness 双重门控；降级构建永不触碰 NMI 寄存器；NMI path 保持 ALLINT/PMR 防嵌套 |
 
 ## 故障模式与影响分析（FMEA）
 

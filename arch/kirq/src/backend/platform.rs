@@ -164,20 +164,28 @@ pub trait IntrManagerIf {
     /// not use this hook.
     fn enable(id: usize, on: bool);
 
-    /// Claims a pending interrupt without resolving it.
+    /// Claims, classifies, and dispatches an interrupt taken with IRQs enabled.
     ///
-    /// The backend must perform the controller claim and any required ack, but
-    /// must leave domain-local hwirq to virq translation to the returned
-    /// [`PendingIrq`]. `None` means spurious or no claim and must not trigger
-    /// generic handler dispatch.
-    fn dispatch_irq(id: usize) -> Option<PendingIrq>;
+    /// After the controller claim and required ack, the backend must call
+    /// exactly one generic entry:
+    ///
+    /// - [`crate::generic_handle_irq`] for a normal IRQ;
+    /// - [`crate::generic_handle_nmi`] for an NMI-class claim.
+    ///
+    /// The return value is the resolved normal `virq`, when one exists, and is
+    /// used only as metadata by the outer deferred-execution hook. `None` may
+    /// therefore mean an NMI-class claim, an unresolved normal claim, or a
+    /// spurious vector; dispatch and completion have already happened before
+    /// this method returns.
+    fn dispatch_irq(id: usize) -> Option<Virq>;
 
-    /// Claims a pending NMI, returning the raw hwirq and completion cookie.
+    /// Claims and dispatches an interrupt taken through the NMI entry path.
     ///
-    /// Unlike [`IntrManagerIf::dispatch_irq`], this bypasses virq translation
-    /// and never opens the normal IRQ window. It is only called from the NMI
-    /// entry path where normal IRQs are already masked.
-    fn dispatch_nmi(id: usize) -> Option<DispatchedIrq>;
+    /// The backend must call [`crate::generic_handle_nmi`] with a
+    /// [`DispatchedIrq`] containing the raw hwirq and completion cookie. Unlike
+    /// [`IntrManagerIf::dispatch_irq`], this path never opens the normal IRQ
+    /// window. It is only called where normal IRQs are already masked.
+    fn dispatch_nmi(id: usize);
 
     /// Completes a claimed interrupt with its opaque completion cookie.
     ///
@@ -245,12 +253,12 @@ pub(crate) fn set_platform_irq_enabled(desc: IrqDesc, on: bool) {
 }
 
 #[inline]
-pub(crate) fn platform_dispatch_irq(id: usize) -> Option<PendingIrq> {
+pub(crate) fn platform_dispatch_irq(id: usize) -> Option<Virq> {
     IntrManagerIf::dispatch_irq(id)
 }
 
 #[inline]
-pub(crate) fn platform_dispatch_nmi(id: usize) -> Option<DispatchedIrq> {
+pub(crate) fn platform_dispatch_nmi(id: usize) {
     IntrManagerIf::dispatch_nmi(id)
 }
 

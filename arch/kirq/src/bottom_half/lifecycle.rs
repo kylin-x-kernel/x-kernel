@@ -16,10 +16,11 @@ pub type IrqLifecycleHook = fn();
 
 /// Optional IRQ trap/preemption lifecycle callbacks.
 ///
-/// The hooks are intentionally minimal. They describe the normal IRQ dispatch
-/// lifetime while the trap adapter still has preemption disabled. They are not
-/// the hardirq-count boundary used by bottom-half context checks; that boundary
-/// is tracked by `kirq::context`.
+/// The hooks are intentionally minimal. They describe an IRQ-on exception
+/// lifetime while the trap adapter still has preemption disabled. The irqchip
+/// may subsequently classify the claim as a normal IRQ, NMI, or spurious. They
+/// are not the hardirq-count boundary used by bottom-half context checks; that
+/// boundary is tracked by `kirq::context`.
 #[derive(Clone, Copy, Default)]
 pub struct IrqLifecycleHooks {
     /// Called after the IRQ trap adapter disables preemption and before

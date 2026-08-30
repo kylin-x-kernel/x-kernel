@@ -24,8 +24,6 @@ pub fn init(gicd_base: memaddr::VirtAddr, gicc_base: memaddr::VirtAddr) {
     // discovery and point at the mapped GICv2 MMIO frames for this machine.
     let mut gic = unsafe { Gic::new(gicd_base, gicc_base, None) };
     gic.init();
-    #[cfg(feature = "pmr")]
-    karch::pmr::init(usize::from(gic.gicc_addr()));
     GIC.init_once(SpinNoIrq::new(gic));
     let cpu = GIC.lock().cpu_interface();
     TRAP_OP.init_once(cpu.trap_operations());
@@ -56,7 +54,6 @@ pub fn enable(irq: usize, enabled: bool) {
     gic.set_irq_enable(intid, enabled);
 }
 
-#[cfg(feature = "pmr")]
 pub fn set_prio(irq: usize, priority: u8) {
     // SAFETY: callers pass a hardware IRQ number understood by this GIC
     // instance; `IntId::raw` only wraps that validated numeric identifier.
@@ -65,14 +62,17 @@ pub fn set_prio(irq: usize, priority: u8) {
     gic.set_priority(intid, priority);
 }
 
-#[cfg(not(feature = "pmr"))]
-pub fn set_prio(_irq: usize, _priority: u8) {
-    unreachable!()
+/// IRQ path: ack + early EOI. GICv2 has no NMI classification.
+/// Mirrors `__gic_handle_irq_from_irqson`.
+pub(super) fn dispatch_irq_from_irqson() -> Option<kirq::Virq> {
+    let (hwirq, completion_cookie) = claim_irq()?;
+    kirq::generic_handle_irq(kirq::PendingIrq::new(
+        kirq::IrqRef::Domain(kirq::GIC_ROOT_DOMAIN, hwirq),
+        completion_cookie,
+    ))
 }
 
-/// IRQ path: ack + early EOI.  GICv2 has no pseudo‑NMI support.
-/// Returns (hwirq, cookie, false).  Mirrors `__gic_handle_irq_from_irqson`.
-pub fn dispatch_irq_from_irqson() -> Option<(usize, usize, bool)> {
+fn claim_irq() -> Option<(usize, usize)> {
     let ack = TRAP_OP.ack();
     if ack.is_special() {
         return None;
@@ -90,30 +90,17 @@ pub fn dispatch_irq_from_irqson() -> Option<(usize, usize, bool)> {
     TRAP_OP.eoi(ack);
     // Order the acknowledged interrupt before the handler.
     aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
-    Some((irq, u32::from(ack) as usize, false))
+    Some((irq, u32::from(ack) as usize))
 }
 
-/// NMI path: lower PMR to NMI_ONLY before ack, then restore.
-/// Mirrors `__gic_handle_irq_from_irqsoff`.
+/// NMI path: ack the interrupt for completion.
+///
+/// GICv2 has **no pseudo‑NMI support**: PMR masking cannot promote an IRQ
+/// into a non‑maskable interrupt, so this path is unreachable in a correct
+/// build (the platform rejects NMI on GICv2).  The interrupt is still
+/// acknowledged and completed so the GIC does not keep it pending.
 pub fn dispatch_irq_from_irqsoff() -> Option<(usize, usize)> {
-    #[cfg(feature = "nmi-pmu")]
-    let saved_pmr = karch::pmr::read();
-    #[cfg(feature = "nmi-pmu")]
-    {
-        karch::pmr::write(karch::pmr::NMI_ONLY);
-        // Ensure the PMR write is visible before the IAR read.
-        aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
-    }
-
-    let result = dispatch_irq_from_irqson();
-
-    // Restore PMR even on a spurious/EOI-only ack so the NMI window does
-    // not leak into the interrupted context.
-    #[cfg(feature = "nmi-pmu")]
-    karch::pmr::write(saved_pmr);
-
-    let (irq, cookie, _) = result?;
-    Some((irq, cookie))
+    claim_irq()
 }
 
 fn skip_dir_for_vmm_guest_irq(ack: Ack) -> bool {

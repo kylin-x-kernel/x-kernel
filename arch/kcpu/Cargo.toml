@@ -10,11 +10,13 @@ repository.workspace = true
 
 [features]
 default = []
+nmi = []
+nmi-hardware = ["nmi", "karch/nmi-hardware"]
 fp-simd = []
 tls = []
 vmm = []
 arm-el2 = ["karch/arm-el2"]
-pmr = ["karch/pmr"]
+nmi-pseudo = ["nmi", "karch/nmi-pseudo"]
 
 [dependencies]
 backtrace = { workspace = true }

@@ -200,6 +200,20 @@ TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换
    - 从 trap 返回 (iretq/eret/sret/ertn)
 ```
 
+#### AArch64 NMI 入口（pseudo / hardware）
+
+- **pseudo-NMI**：`dispatch_exception` 创建 `NmiExceptionGuard`（仅 `nmi-pseudo`
+  feature 且 `karch::pmr::is_ready()` 时激活）：把入口 `ICC_PMR_EL1` 存入
+  trapframe 的 `pmr` 字段并打开 PMR mask；`use_nmi_path()` 以 `pmr <= NMI_ONLY`
+  把中断分类为 NMI；返回前先 `daifset` 屏蔽 IRQ，再恢复入口 PMR。
+- **hardware NMI**：异常入口（SPINTMASK=0）由硬件置 `PSTATE.ALLINT=1`，异常处理
+  无需额外入口代码；`use_nmi_path()` 以 `karch::allint_active() && SPSR.I == 1`
+  分类（IRQ 屏蔽时仍到达的中断必然是 Superpriority NMI）；ALLINT 窗口由 GIC IRQ
+  dispatch 路径打开，`ERET` 从 SPSR 恢复中断前状态。
+- **运行时降级**：上述入口处理均以机制 readiness 为门控（`pmr::is_ready()` /
+  `allint_active()`），机制不可用（GICv2、无 FEAT_NMI）时行为与普通 IRQ 内核完全
+  一致，从不触碰 NMI-only 寄存器。
+
 ### 用户态进入/退出流程
 
 ```text

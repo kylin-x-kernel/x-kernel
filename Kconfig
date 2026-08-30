@@ -286,6 +286,62 @@ config KFEAT_SYMTAB
       Independent of KFEAT_DWARF. Full file/line resolution still happens
       on the host against kernel.debug.elf.
 
+config KFEAT_PMU
+    bool "PMU support"
+    depends on ARCH_AARCH64
+    help
+      Enable Performance Monitor Unit support for hardware performance
+      counters.  This is a generic feature whose current implementation is
+      AArch64-only; when NMI support is enabled, the PMU also serves as the
+      periodic NMI source.
+
+config KFEAT_NMI
+    bool "NMI support"
+    depends on MACHINE_AARCH64_QEMU
+    help
+      Enable non-maskable interrupt (NMI) support.  The NMI mechanism
+      (hardware NMI vs pseudo-NMI) is selected at build time below.
+      Enabling NMI requires exactly one NMI source (selected below), so
+      every NMI consumer is guaranteed a source at configuration time.
+      The mechanism is arch-neutral; current support is AArch64 QEMU only.
+
+choice
+    prompt "NMI mechanism"
+    depends on KFEAT_NMI
+    default KFEAT_NMI_MODE_PSEUDO
+
+config KFEAT_NMI_MODE_PSEUDO
+    bool "Pseudo-NMI (PMR priority masking)"
+    help
+      Use the GICv3 PMR priority mask to deliver NMIs as high-priority
+      interrupts.  Works on any GICv3 implementation; the PMR-based
+      interrupt masking discipline is compiled in.
+
+config KFEAT_NMI_MODE_HARDWARE
+    bool "Hardware NMI (GICv3.3 + FEAT_NMI)"
+    help
+      Use GICv3.3 NMI attribute interrupts with FEAT_NMI (Superpriority).
+      Requires GICv3.3 NMI attribute registers and a CPU implementing
+      FEAT_NMI; the platform validates this at boot and disables NMI if the
+      hardware does not match.
+
+endchoice
+
+choice
+    prompt "NMI source"
+    depends on KFEAT_NMI
+    default KFEAT_NMI_PMU
+
+config KFEAT_NMI_PMU
+    bool "PMU cycle counter"
+    select KFEAT_PMU
+    help
+      Use the PMU cycle counter as the periodic NMI source.
+
+# Future NMI sources (e.g. SDEI) are added as additional choice members.
+
+endchoice
+
 source "arch/kirq/Kconfig"
 source "task/ktask/Kconfig.diagnostics"
 

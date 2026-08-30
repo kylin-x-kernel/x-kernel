@@ -10,18 +10,17 @@ repository.workspace = true
 
 [package.metadata.cargo-shear]
 ignored = ["kcpu"]
-ignored-paths = ["src/peripherals/nmi/nmi_sdei.rs"]
 
 [features]
 default = []
 fp-simd = ["kcpu/fp-simd", "kernel_boot/fp-simd"]
 rtc = ["rtc_driver/pl031"]
 smp = ["kplat/smp"]
-nmi = ["nmi-pmu", "irq_driver/nmi-pmu", "kplat/nmi", "pmu"]
-pmu = ["kplat/pmu", "dep:aarch64-pmuv3"]
-pmr = []
-nmi-pmu = ["pmr", "pmu"]
-nmi-sdei = []
+nmi = ["kplat/nmi"]
+nmi-pseudo = ["nmi", "irq_driver/nmi-pseudo"]
+nmi-hardware = ["nmi", "irq_driver/nmi-hardware"]
+nmi-pmu = ["nmi", "pmu"]
+pmu = ["kplat/pmu", "dep:aarch64-pmuv3", "dep:kirq"]
 console-pl011 = ["console_driver/pl011"]
 console-ns16550-mmio = ["console_driver/ns16550-mmio"]
 kvm-guest-mem-share = []
@@ -32,6 +31,7 @@ vmm = ["timer_driver/vmm"]
 log = "0.4"
 console_driver = { workspace = true }
 irq_driver = { workspace = true }
+kirq = { workspace = true, optional = true }
 of = { workspace = true }
 khal = { workspace = true }
 ktime = { workspace = true }

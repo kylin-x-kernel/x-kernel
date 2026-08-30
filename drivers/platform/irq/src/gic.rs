@@ -4,13 +4,13 @@
 
 //! GIC interrupt controller integration for AArch64 platforms.
 
+use core::fmt;
+
 #[path = "gicv2.rs"]
 mod gicv2;
 #[path = "gicv3.rs"]
 mod gicv3;
 
-#[cfg(feature = "nmi-pmu")]
-use aarch64_cpu::registers::{DAIF, ReadWriteable};
 use kirq::TargetCpu;
 use lazyinit::LazyInit;
 use memaddr::{PhysAddr, VirtAddr};
@@ -36,10 +36,19 @@ pub const fn edge_irq_desc(hwirq: usize) -> kirq::IrqDesc {
     kirq::gic_edge_irq_desc(hwirq)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GicVersion {
     V2,
     V3,
+}
+
+impl fmt::Display for GicVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::V2 => "GICv2",
+            Self::V3 => "GICv3",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,7 +162,7 @@ pub fn set_config(config: GicConfig) {
     remember_config(config);
 }
 
-fn active_version() -> GicVersion {
+pub fn active_version() -> GicVersion {
     ACTIVE_GIC
         .get()
         .copied()
@@ -188,10 +197,15 @@ pub fn init_from_device_tree() {
 pub fn init_current_cpu() {
     match active_version() {
         GicVersion::V2 => gicv2::init_current_cpu(),
-        GicVersion::V3 => gicv3::init_current_cpu(),
+        GicVersion::V3 => {
+            gicv3::init_current_cpu();
+            // PMR (ICC_PMR_EL1) only exists on GICv3; on a degraded build
+            // (GICv2) it must never be touched, so only mark the CPU
+            // interface PMR-ready here.
+            #[cfg(feature = "nmi-pseudo")]
+            karch::pmr::mark_ready();
+        }
     }
-    // Per‑CPU: this CPU's GIC interface is now ready for PMR access.
-    karch::pmr::mark_ready();
 }
 
 pub fn set_trigger(interrupt_id: usize, edge: bool) {
@@ -208,42 +222,33 @@ pub fn enable(irq: usize, enabled: bool) {
     }
 }
 
-/// Open the pseudo‑NMI window for the normal IRQ path.
+/// Claim, classify, and dispatch an interrupt taken from an IRQ-on context.
 ///
-/// Sets PMR to [`pmr::NMI_ONLY`] so only pseudo‑NMIs can preempt
-/// the handler, then clears `DAIF.I` so those NMIs are delivered.
-/// PMR is restored by the exception exit path (saved at entry).
-///
-/// Must be called from IRQ exception context only (never from NMI).
-#[cfg(feature = "nmi-pmu")]
-fn open_nmi_window() {
-    assert!(karch::pmr::is_ready());
-    karch::pmr::write(karch::pmr::NMI_ONLY);
-    // Exception entry set DAIF.I; clear it so pseudo‑NMI can nest while
-    // normal IRQs remain gated by PMR. `modify` touches only the DAIF.I
-    // bit, so the D/A/F mask bits are preserved.
-    DAIF.modify(DAIF::I::Unmasked);
-}
-
-/// IRQ path: ack → RPR check → early EOI, version dispatch.
-/// Returns (hwirq, cookie, is_nmi) for window decision.
-pub fn gic_handle_irq_from_irqson(_unused: usize) -> Option<(usize, usize, bool)> {
+/// GICv3 uses the post-ack running priority, or the hardware-NMI acknowledge
+/// register, to select kirq's generic IRQ or NMI handler. GICv2 always uses the
+/// generic IRQ handler. The return value is resolved normal-IRQ metadata for
+/// the outer deferred hook, not a claim classification.
+fn gic_dispatch_irq_from_irqson(_unused: usize) -> Option<kirq::Virq> {
     match active_version() {
         GicVersion::V2 => gicv2::dispatch_irq_from_irqson(),
         GicVersion::V3 => gicv3::dispatch_irq_from_irqson(),
     }
 }
 
-/// NMI path: interrupt taken from a context with IRQs **disabled**.
+/// Dispatch an NMI taken from a context with IRQs **disabled**.
 ///
 /// Mirrors Linux `__gic_handle_irq_from_irqsoff`.  Dispatches to the
-/// version‑specific irqsoff backend (which saves PMR, lowers to
-/// NMI_ONLY before ack, then restores PMR).  Does **not** open the NMI
-/// window.  Caller must eventually invoke [`complete_irq`].
-pub fn gic_handle_irq_from_irqsoff(_unused: usize) -> Option<(usize, usize)> {
-    match active_version() {
+/// version‑specific irqsoff backend.  GICv3 saves/lowers/restores PMR around
+/// the ack; GICv2 merely acks (no pseudo‑NMI support). It does **not** open the
+/// NMI window. A valid claim is dispatched and completed through kirq's generic
+/// NMI helper before this function returns.
+fn gic_dispatch_nmi_from_irqsoff(_unused: usize) {
+    let claim = match active_version() {
         GicVersion::V2 => gicv2::dispatch_irq_from_irqsoff(),
         GicVersion::V3 => gicv3::dispatch_irq_from_irqsoff(),
+    };
+    if let Some((hwirq, completion_cookie)) = claim {
+        kirq::generic_handle_nmi(kirq::DispatchedIrq::new(hwirq, completion_cookie));
     }
 }
 
@@ -280,6 +285,30 @@ pub fn set_prio(irq: usize, priority: u8) {
     }
 }
 
+/// Return whether the active GIC advertises GICv3.3 NMI support.
+#[cfg(feature = "nmi-hardware")]
+pub fn supports_hardware_nmi() -> bool {
+    match active_version() {
+        GicVersion::V2 => false,
+        GicVersion::V3 => gicv3::supports_hardware_nmi(),
+    }
+}
+
+/// Set or clear the GICv3.3 NMI attribute for an interrupt line.
+///
+/// Returns `false` when the active GIC cannot program the attribute for
+/// this line (GICv2, unsupported INTID, or missing redistributor frame).
+#[cfg(feature = "nmi-hardware")]
+pub fn set_nmi_attr(irq: usize, nmi: bool) -> bool {
+    match active_version() {
+        GicVersion::V2 => {
+            warn!("hardware NMI is not supported on GICv2");
+            false
+        }
+        GicVersion::V3 => gicv3::set_nmi_attr(irq, nmi),
+    }
+}
+
 #[kplat::impl_dev_interface]
 impl kirq::IntrManagerIf {
     fn configure(desc: kirq::IrqDesc) {
@@ -300,28 +329,15 @@ impl kirq::IntrManagerIf {
 
     /// IRQ path: IRQs were enabled → may be IRQ or NMI.
     ///
-    /// Uses GIC RPR to detect NMIs: if NMI, skip the NMI window
-    /// (we ARE the NMI) and go through dispatch_subscribers (safe —
-    /// no locks held in IRQ-enabled context).
-    fn dispatch_irq(irq: usize) -> Option<kirq::PendingIrq> {
-        let (hwirq, completion_cookie, is_nmi) = crate::gic::gic_handle_irq_from_irqson(irq)?;
-
-        // Linux: open window only for non-NMI, after NMI is handled.
-        if !is_nmi {
-            #[cfg(feature = "nmi-pmu")]
-            crate::gic::open_nmi_window();
-        }
-
-        Some(kirq::PendingIrq::new(
-            kirq::IrqRef::Domain(GIC_ROOT_DOMAIN, hwirq),
-            completion_cookie,
-        ))
+    /// The GIC owns claim-time IRQ/NMI classification and invokes the matching
+    /// generic handler before returning to the common IRQ-entry tail.
+    fn dispatch_irq(irq: usize) -> Option<kirq::Virq> {
+        crate::gic::gic_dispatch_irq_from_irqson(irq)
     }
 
     /// NMI path: IRQs were disabled → no lock, no NMI window, PMR protected.
-    fn dispatch_nmi(irq: usize) -> Option<kirq::DispatchedIrq> {
-        let (hwirq, completion_cookie) = crate::gic::gic_handle_irq_from_irqsoff(irq)?;
-        Some(kirq::DispatchedIrq::new(hwirq, completion_cookie))
+    fn dispatch_nmi(irq: usize) {
+        crate::gic::gic_dispatch_nmi_from_irqsoff(irq);
     }
 
     /// Deactivate the interrupt.  PMR is restored by exception exit.

@@ -646,14 +646,41 @@ fn finish_irq_teardown(virq: Virq) {
 /// fired — a pseudo-NMI preempting a critical section. The handler uses the
 /// lock-free NMI path which only touches the NMI table, never `IRQ_STATE`.
 pub fn handle_nmi(vector: usize) -> bool {
-    if let Some(dispatched_irq) = platform_dispatch_nmi(vector) {
-        // The NMI backend returns a raw hwirq in the claimed IRQ object. Do not
-        // translate it through IRQ_STATE here; NMI dispatch is keyed by hwirq.
-        dispatch_nmi_handler(dispatched_irq.irq());
-        dispatched_irq.complete();
-    }
-
+    platform_dispatch_nmi(vector);
     true
+}
+
+/// Dispatches and completes a claimed normal IRQ.
+///
+/// This is the generic entry for an irqchip that has classified its claim as a
+/// normal IRQ. It resolves the claim, runs regular action fanout, and completes
+/// the controller claim. Its return value is only the resolved normal `virq`
+/// metadata used by the outer IRQ-exit deferred hook.
+///
+/// The caller must be the active [`IntrManagerIf::dispatch_irq`] invocation on
+/// the CPU that created `claim`, with local IRQs masked and generic hardirq
+/// context already entered.
+#[doc(hidden)]
+pub fn generic_handle_irq(claim: PendingIrq) -> Option<Virq> {
+    let resolved_irq = dispatch_actions(&claim);
+    claim.complete();
+    resolved_irq
+}
+
+/// Dispatches and completes a claimed NMI without touching normal IRQ state.
+///
+/// This is the generic entry for an irqchip that classifies an IRQ-on claim as
+/// NMI-class. Dispatch is keyed by the raw hwirq stored in `claim`; it bypasses
+/// domain translation and normal IRQ action fanout. [`handle_nmi`] also uses
+/// this helper for an interrupt that entered through the architecture's
+/// dedicated NMI path.
+///
+/// The claim must be consumed on the CPU that acknowledged it.
+#[doc(hidden)]
+pub fn generic_handle_nmi(claim: DispatchedIrq) {
+    // NMI dispatch is keyed by raw hwirq and must not touch IRQ_STATE.
+    dispatch_nmi_handler(claim.irq());
+    claim.complete();
 }
 
 /// Handles a normal IRQ after an architecture trap adapter has masked local
@@ -670,33 +697,30 @@ pub fn handle_nmi(vector: usize) -> bool {
 /// path and must not hold locks that can be taken by driver IRQ handlers.
 /// `handle_irq()` itself is non-sleepable.
 ///
-/// For a claimed normal IRQ, the generic ordering is:
+/// The irqchip classifies each successful claim and calls either
+/// [`generic_handle_irq`] or [`generic_handle_nmi`]. For a claimed normal IRQ,
+/// the generic ordering is:
 ///
-/// 1. enter lifecycle hooks;
-/// 2. enter generic hardirq context;
-/// 3. claim and ack through [`IntrManagerIf::dispatch_irq`];
-/// 4. run regular action fanout outside `IRQ_STATE`;
-/// 5. complete the controller claim through [`PendingIrq::complete`];
-/// 6. leave generic hardirq context;
-/// 7. run hardirq-exit deferred execution;
-/// 8. leave lifecycle hooks.
+/// 1. enter IRQ lifecycle hooks and generic hardirq context;
+/// 2. claim, ack, and classify through [`IntrManagerIf::dispatch_irq`];
+/// 3. invoke the irqchip-selected generic IRQ or NMI helper;
+/// 4. complete the controller claim inside that helper;
+/// 5. leave generic hardirq context;
+/// 6. run the common IRQ-exit deferred hook;
+/// 7. leave lifecycle hooks.
 ///
-/// Spurious vectors that cannot be claimed skip handler fanout and deferred
-/// execution, but still preserve lifecycle enter/exit pairing.
+/// As on Linux, an NMI discovered after entering from an IRQ-on context remains
+/// inside the outer IRQ lifecycle. Only its inner handler dispatch differs:
+/// it uses the lock-free NMI table rather than normal IRQ action state.
 pub fn handle_irq(vector: usize) -> bool {
     let lifecycle_guard = IrqLifecycleGuard::enter();
     let hardirq_context_guard = HardIrqContextGuard::enter();
 
-    if let Some(pending_irq) = platform_dispatch_irq(vector) {
-        run_claimed_irq_tail_with_context(
-            vector,
-            pending_irq,
-            PendingIrq::complete,
-            hardirq_context_guard,
-        );
-    } else {
-        drop(hardirq_context_guard);
-    }
+    // The irqchip consumes every successful claim through one of the generic
+    // helpers before returning. What remains here is the common outer
+    // IRQ-entry tail, including IRQ-on NMI and spurious-claim cases.
+    let resolved_irq = platform_dispatch_irq(vector);
+    run_irq_exit_tail_with_context(vector, resolved_irq, hardirq_context_guard);
 
     let _ = lifecycle_guard;
     true
@@ -709,17 +733,16 @@ fn run_claimed_irq_tail(
     complete_irq: impl FnOnce(PendingIrq),
 ) {
     let hardirq_context_guard = HardIrqContextGuard::enter();
-    run_claimed_irq_tail_with_context(vector, pending_irq, complete_irq, hardirq_context_guard);
-}
-
-fn run_claimed_irq_tail_with_context(
-    vector: usize,
-    pending_irq: PendingIrq,
-    complete_irq: impl FnOnce(PendingIrq),
-    hardirq_context_guard: HardIrqContextGuard,
-) {
     let resolved_irq = dispatch_actions(&pending_irq);
     complete_irq(pending_irq);
+    run_irq_exit_tail_with_context(vector, resolved_irq, hardirq_context_guard);
+}
+
+fn run_irq_exit_tail_with_context(
+    vector: usize,
+    resolved_irq: Option<Virq>,
+    hardirq_context_guard: HardIrqContextGuard,
+) {
     drop(hardirq_context_guard);
     crate::deferred::run_hardirq_exit_deferred(crate::deferred::DeferredRunContext::new(
         vector,
@@ -741,10 +764,10 @@ pub mod tests_irq {
 
     use super::{
         DYNAMIC_VIRQ_BASE, IRQ_STATE, IrqDesc, IrqDescError, IrqDomainId, IrqStateDesc,
-        WAIT_FOR_IN_FLIGHT_HOOK, dispatch_actions, run_claimed_irq_tail, try_disable_irq,
-        try_disable_irq_nosync, try_enable, try_enable_irq, try_free_irq, try_free_irq_action,
-        try_map, try_register, try_register_disabled, try_register_shared, try_synchronize_irq,
-        unregister,
+        WAIT_FOR_IN_FLIGHT_HOOK, dispatch_actions, run_claimed_irq_tail,
+        run_irq_exit_tail_with_context, try_disable_irq, try_disable_irq_nosync, try_enable,
+        try_enable_irq, try_free_irq, try_free_irq_action, try_map, try_register,
+        try_register_disabled, try_register_shared, try_synchronize_irq, unregister,
     };
     use crate::{
         GIC_ROOT_DOMAIN, IrqController, IrqEvent, IrqFlags, IrqLifecycleHooks, IrqRef, IrqSource,
@@ -1346,6 +1369,27 @@ pub mod tests_irq {
         crate::deferred::clear_deferred_executor();
         assert_ne!(IRQ_TAIL_COMPLETE_ORDER.load(Ordering::Relaxed), 0);
         assert_eq!(IRQ_TAIL_UNRESOLVED_DEFERRED.load(Ordering::Relaxed), 1);
+    }
+
+    #[def_test(serial)]
+    fn test_irq_on_empty_result_runs_common_deferred_tail() {
+        let _test_guard = IRQ_LIFECYCLE_TEST_LOCK.lock();
+        let _irq_guard = kspin::NoPreemptIrqSave::new();
+
+        IRQ_TAIL_UNRESOLVED_DEFERRED.store(0, Ordering::Relaxed);
+        crate::deferred::clear_deferred_executor();
+        assert!(crate::deferred::register_deferred_executor(
+            crate::deferred::DeferredExecutorHooks {
+                on_hardirq_exit: Some(test_irq_tail_unresolved_deferred_hook),
+            }
+        ));
+
+        let hardirq_context_guard = crate::context::HardIrqContextGuard::enter();
+        run_irq_exit_tail_with_context(IRQ_TAIL_TEST_VECTOR, None, hardirq_context_guard);
+
+        crate::deferred::clear_deferred_executor();
+        assert_eq!(IRQ_TAIL_UNRESOLVED_DEFERRED.load(Ordering::Relaxed), 1);
+        assert!(!crate::context::is_in_hardirq());
     }
 
     #[def_test(serial)]

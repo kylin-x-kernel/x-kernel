@@ -41,7 +41,7 @@ arch/kirq/src/
 │   ├── state.rs        # descriptor map, virq allocation, and action state
 │   ├── dispatch.rs     # normal IRQ action fanout
 │   ├── notify.rs       # IRQ line/source waiter registration and wake dispatch
-│   ├── nmi.rs          # pseudo-NMI registration and lock-minimal dispatch table
+│   ├── nmi.rs          # NMI（pseudo/hardware）registration and lock-minimal dispatch table
 │   └── manager.rs      # public API and dispatch-entry orchestration
 ├── domain/
 │   └── mod.rs          # per-domain lock-free reverse-map snapshots
@@ -76,17 +76,20 @@ CPU trap entry
             │       ├── IrqLifecycleGuard::enter()
             │       ├── HardIrqContextGuard::enter()
             │       ├── IntrManagerIf::dispatch_irq()
-            │       ├── dispatch_actions(&pending)
-            │       │       └── resolve + descriptor lookup under IRQ_STATE
-            │       ├── PendingIrq::complete()
+            │       │       └── irqchip claim + classify
+            │       │              ├── generic_handle_irq(PendingIrq)
+            │       │              │      ├── dispatch_actions()
+            │       │              │      └── PendingIrq::complete()
+            │       │              └── generic_handle_nmi(DispatchedIrq)
+            │       │                     ├── dispatch_nmi_handler()
+            │       │                     └── DispatchedIrq::complete()
             │       ├── drop HardIrqContextGuard
             │       ├── deferred::run_hardirq_exit_deferred()
             │       └── lifecycle guard drop
             │
             └── kirq::handle_nmi(vector)
                     ├── IntrManagerIf::dispatch_nmi()
-                    ├── dispatch_nmi_handler(raw_hwirq)
-                    └── DispatchedIrq::complete()
+                    └── generic_handle_nmi(DispatchedIrq)
 ```
 
 注册/配置路径：
@@ -135,16 +138,20 @@ register_nmi()
   `*_irq` 入口处理 descriptor 冲突和 enable/disable nesting。
 - `handle_irq()` 运行在 hardirq trap adapter 调用路径中。调用者必须已经屏蔽本地
   IRQ、禁用抢占并 pin 当前 CPU，函数本身不能睡眠。
-- `handle_nmi()` 运行在 pseudo-NMI adapter 调用路径中，不触碰 normal IRQ
-  dispatch fanout，不调用 lifecycle hooks，也不获取 `IRQ_STATE`。
+- `handle_nmi()` 运行在 IRQ-off NMI adapter 调用路径中（pseudo-NMI 或 hardware
+  NMI），不触碰 normal IRQ dispatch fanout，不调用 lifecycle hooks，也不获取
+  `IRQ_STATE`。若异常来自 IRQ-on context，入口已经执行普通 IRQ entry；GIC 在该外层
+  lifecycle 内调用 `generic_handle_nmi()`，与 Linux 的 IRQ-on NMI 语义一致。
 - `translate_hwirq()` 从 domain 发布的 immutable reverse-map snapshot 做 lock-free
   查询；strict domain miss 返回 `None`，不会伪装成 identity `virq`。
-- `IrqLifecycleHook` 在 trap adapter 已禁抢占、normal IRQ dispatch 生命周期仍未
-  结束时执行。它不是 hardirq-depth 边界；hardirq/softirq/BH 状态由
+- `IrqLifecycleHook` 在 trap adapter 已禁抢占、IRQ-on exception 生命周期仍未结束时
+  执行；该 exception 随后可能由 irqchip 分类为普通 IRQ、NMI 或 spurious。它不是
+  hardirq-depth 边界；hardirq/softirq/BH 状态由
   `kirq::context` 维护。hook 不能睡眠，不能等待可能被中断上下文持有的锁，也不能
   假设当前有进程上下文。
-- `DeferredExecutorHook` 在 normal IRQ controller completion 之后、generic hardirq
-  depth 已退出之后、lifecycle exit 之前执行。它只是后续 deferred execution
+- `DeferredExecutorHook` 在 IRQ-on controller dispatch 返回、generic hardirq depth
+  已退出之后、lifecycle exit 之前执行。若 claim 存在，generic IRQ/NMI helper 已先
+  完成 controller completion。它只是后续 deferred execution
   subsystem 的交接点，不能睡眠、不能递归调用 deferred runner，不能假设当前有进程
   或 task 上下文。
 - `alloc_msix()` / `free_msix()` 必须从普通内核上下文调用。它们通过 backend
@@ -171,13 +178,17 @@ handler fanout、上下文和 completion ordering；irqchip driver 负责具体�
 
 ### dispatch / claim / ack
 
-- `dispatch_irq(vector)` 必须完成控制器 claim 和必要 ack，使本次 pending interrupt
-  被表示为一个 `DispatchedIrq`。返回 `None` 表示 spurious/no claim，generic IRQ
-  core 不运行 handler fanout，也不运行 deferred executor。
-- normal dispatch 的 `DispatchedIrq::irq()` 应是 OS-visible virq。只有 legacy
-  unmapped line interrupt 可以显式 fallback raw hwirq；MSI mapping miss 不能 fallback
-  raw vector。
-- `dispatch_nmi(vector)` 返回 raw hwirq，不依赖 normal `IRQ_STATE` translation，也不
+- `dispatch_irq(vector)` 必须在控制器 claim/ack 后就地分类，并调用且只调用一个
+  generic entry：普通 IRQ 使用 `generic_handle_irq(PendingIrq)`，NMI 使用
+  `generic_handle_nmi(DispatchedIrq)`。这与 Linux irqchip 调用
+  `generic_handle_domain_irq()` / `generic_handle_domain_nmi()` 的边界一致。
+- `dispatch_irq()` 返回的 `Option<Virq>` 只给外层 deferred context 提供 resolved
+  normal virq 元数据；`None` 可能表示 NMI、strict domain miss 或 spurious，不能再被
+  当作 IRQ/NMI 分类结果。handler dispatch 和 completion 在返回前已经完成。
+- normal dispatch 的 `PendingIrq` 保存 `IrqRef` 与 completion cookie；domain hwirq
+  到 OS-visible virq 的解析仍由 `generic_handle_irq()` 在 `kirq` 内完成。
+- `dispatch_nmi(vector)` 在平台内 claim raw hwirq 并直接调用
+  `generic_handle_nmi(DispatchedIrq)`；它不依赖 normal `IRQ_STATE` translation，也不
   打开 normal IRQ window。
 - GIC backend 当前在 dispatch 中读取 IAR、过滤 special id，并把 completion cookie
   留给后续 deactivate/DIR。x86 APIC/IO-APIC edge/local vector 可以在 dispatch 阶段
@@ -188,10 +199,11 @@ handler fanout、上下文和 completion ordering；irqchip driver 负责具体�
 
 ### complete / EOI / deactivate
 
-- generic `kirq` 在 primary handler fanout 后调用
+- `generic_handle_irq()` 在 primary handler fanout 后调用
+  `PendingIrq::complete()`；`generic_handle_nmi()` 在 NMI callback 后调用
   `DispatchedIrq::complete()`。
-- `DispatchedIrq` 是 RAII guard；若 normal control flow 没有显式 complete，drop 会
-  补发 completion。guard 不是 `Send`，completion 必须发生在 claim 它的 CPU 上。
+- 两种 claim 都是 RAII guard；若 normal control flow 没有显式 complete，drop 会补发
+  completion。guard 不是 `Send`，completion 必须发生在 claim 它的 CPU 上。
 - `complete_irq(cookie)` 只完成 dispatch 返回的 cookie。level-triggered line 必须在
   handler fanout 后最终 EOI/deactivate，避免 handler 处理前重新触发。edge-triggered
   line 可以使用 cookie `0` no-op。
@@ -645,17 +657,18 @@ KIRQ 诊断通过 Kconfig 显式控制，而不是把生产诊断绑定到 `unit
 ```text
 register_deferred_executor()
    -> handle_irq()
-      -> dispatch_actions()
-      -> PendingIrq::complete()
+      -> IntrManagerIf::dispatch_irq()
+         -> generic IRQ/NMI helper (when a claim exists)
       -> run_hardirq_exit_deferred(ctx)
          └── call on_hardirq_exit(ctx)
    -> clear_deferred_executor()
 ```
 
 deferred executor 是单 owner hook。`softirq::init()` 把 softirq runner 安装为当前
-owner，`kruntime::init_interrupt()` 在开本地 IRQ 前调用它。没有 claim 到平台 IRQ 的
-spurious vector 不触发 deferred executor。pseudo-NMI path 也不触发 deferred
-executor。executor 在注册/清空控制面通过 `SpinNoIrq` 保持单 owner；IRQ-tail hot
+owner，`kruntime::init_interrupt()` 在开本地 IRQ 前调用它。与 Linux 的统一 IRQ
+exit 语义一致，每次 IRQ-on entry 都到达该 hook，包括 irqchip 随后识别出的 NMI 或
+spurious vector；专用 IRQ-off NMI path 不触发它。executor 在注册/清空控制面通过
+`SpinNoIrq` 保持单 owner；IRQ-tail hot
 path 从 atomic function-pointer slot 读取当前 hook，未安装 executor 时直接返回，不
 获取全局锁。workerqueue 通过显式 `queue_work()` handoff 进入
 `kwork/system_wq`；tasklet 和 threaded IRQ 后续应挂在 softirq 或显式 future API
@@ -739,8 +752,11 @@ descriptor-local `in_flight == 0`，并按 check/register/recheck 协议验证�
 1. `khal::irq::irq_handler()` 创建 `NoPreempt` guard。
 2. `kirq::handle_irq()` 创建 lifecycle guard，触发 `on_irq_enter`。
 3. `HardIrqContextGuard` 进入 generic hardirq context。
-4. 平台后端 claim pending IRQ，返回 `PendingIrq { IrqRef, completion cookie }`。
-5. `dispatch_actions(&pending)` 通过 domain snapshot 解析 `virq`，并复制 action
+4. 平台后端 claim 并分类；普通 IRQ 构造
+   `PendingIrq { IrqRef, completion cookie }`，直接调用
+   `generic_handle_irq()`。
+5. `generic_handle_irq()` 通过 `dispatch_actions(&pending)` 和 domain snapshot 解析
+   `virq`，并复制 action
    list；strict domain miss 保持未解析状态。resolve 与
    descriptor lookup 在同一个 `IRQ_STATE` 临界区内完成，避免 free/unregister 插入
    两者之间。若 snapshot 中存在 callback work，dispatch 同步增加该 descriptor 的
@@ -752,27 +768,42 @@ descriptor-local `in_flight == 0`，并按 check/register/recheck 协议验证�
    每个 handler 都收到 resolved `virq`，随后合并并分类每个 `IrqEvent`。若整条
    line 被认领，fanout 完成后调用 `kirq::notify` waiter dispatcher。本阶段不调度 threaded
    handler，也不做 per-action 统计。
-7. `PendingIrq::complete()` 完成控制器 EOI/deactivate。
+7. `generic_handle_irq()` 调用 `PendingIrq::complete()` 完成控制器
+   EOI/deactivate，并把 resolved virq 元数据返回给外层。
 8. `HardIrqContextGuard` 退出 generic hardirq context。
-9. 若本次 claim 到 IRQ，`run_hardirq_exit_deferred()` 调用当前注册的 deferred
-   executor；`DeferredRunContext::resolved_irq()` 携带上一步解析出的 IRQ identity，
-   strict domain miss 时为 `None`，不表达 handler 是否实际运行。
+9. `run_hardirq_exit_deferred()` 调用当前注册的 deferred executor；
+   `DeferredRunContext::resolved_irq()` 携带上一步解析出的 IRQ identity，NMI、strict
+   domain miss 或 spurious 时为 `None`，不表达 handler 是否实际运行。
    默认 owner 是 `softirq`，会在 context 允许时 drain 当前 CPU pending softirq；
    restart budget 未覆盖的 pending work 会交给当前 CPU 的 `ksoftirqd/N`。
 10. lifecycle guard drop，触发 `on_irq_exit`。
 11. 返回 `khal::irq` adapter 后释放 `NoPreempt`。
 
-### pseudo-NMI dispatch
+### NMI dispatch（pseudo-NMI / hardware NMI）
+
+dispatch 机制中立：两种机制都通过独立 `NMI_TABLE`（以 hwirq 为 key）派发，不触碰
+`IRQ_STATE`。平台 claim 方式不同：
 
 1. `khal::irq::nmi_handler()` 创建 `NoPreempt` guard。
-2. `kirq::handle_nmi()` 调用平台 NMI-specific dispatch path claim interrupt。
-3. 对 NMI claim，`DispatchedIrq::irq()` 表示 raw hwirq，而不是 translated virq。
-4. `dispatch_nmi_handler(hwirq)` 从 `NMI_TABLE` 克隆 handler。
+2. `kirq::handle_nmi()` 调用平台 NMI-specific dispatch path；平台 claim interrupt：
+   - pseudo-NMI（GICv3 PMR）：GIC IAR ack 返回 raw hwirq；
+   - hardware NMI（GICv3.3 + FEAT_NMI）：普通 IAR1 对 NMI-attribute 中断返回特殊
+     INTID，平台改从 `ICC_NMIAR1_EL1` ack 获得真实 INTID。
+3. 平台立即调用 `generic_handle_nmi(DispatchedIrq)`；其中的 `irq()` 表示 raw hwirq，
+   而不是 translated virq。
+4. generic helper 通过 `dispatch_nmi_handler(hwirq)` 从 `NMI_TABLE` 克隆 handler。
 5. 在不持有 NMI 表锁的情况下调用 handler。
 6. 完成 `DispatchedIrq`。
 
-NMI path 不触发 lifecycle hooks，避免 hardirq 扩展点被用于更严格的 pseudo-NMI
-执行上下文。
+IRQ-off NMI path 不触发 lifecycle hooks。IRQ-on entry 则已在 irqchip 分类之前执行普通
+IRQ lifecycle enter；GIC 只在其中用 `generic_handle_nmi()` 替换普通 action fanout，
+完成 NMI 后重新打开 NMI delivery，再返回统一 IRQ exit。这一时序对应 Linux
+`nmi_enter/handle/nmi_exit -> gic_unmask_pnmis -> irq_exit`。
+
+**运行时降级**：机制不可用时（`khal::nmi::mode() == NmiMode::None`，例如 GICv2 或
+缺少 FEAT_NMI），`register_nmi` 仍在 `IRQ_STATE` 安装 regular action fallback，
+平台不提升中断线；事件走 normal IRQ dispatch，由 fallback 调用同一个 NMI handler。
+因此 NMI handler 必须同时满足 normal-IRQ 与 NMI 两种上下文的约束。
 
 ## 并发模型
 
@@ -888,9 +919,14 @@ RX。
 
 ### 为什么 NMI 独立于 normal IRQ state
 
-pseudo-NMI 可以打断 normal IRQ critical section。如果 NMI dispatch 获取
-`IRQ_STATE`，它可能和被打断的 normal IRQ 路径自锁。因此 NMI handler 表独立存储，
-并以 hwirq 为 key 直接查找。
+pseudo-NMI 可以打断 normal IRQ critical section；hardware NMI 也会在 normal IRQ
+处理期间（IRQ path 打开 ALLINT 窗口）抢占。如果 NMI dispatch 获取 `IRQ_STATE`，
+它可能和被打断的 normal IRQ 路径自锁。因此 NMI handler 表独立存储，并以 hwirq 为
+key 直接查找。
+
+同 CPU 上的 NMI 嵌套由机制保证排除：pseudo-NMI 路径保持 PMR 不低于 `NMI_ONLY`，
+hardware NMI 路径保持 `PSTATE.ALLINT` 置位。因此 NMI 表写者（boot-time 或 NMI
+handler 自身）不会与读者并发。
 
 ### 为什么 normal IRQ claim 使用 `PendingIrq`
 

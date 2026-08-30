@@ -125,6 +125,11 @@ impl LockupDetection {
     }
 }
 
+/// Per-CPU soft/hard lockup detection state.
+///
+/// Only accessed on the owning CPU, from the pinned watchdog thread
+/// (soft-lockup timestamp), timer interrupt (tick / soft-lockup check),
+/// and NMI (hard-lockup check) contexts.
 #[percpu::def_percpu]
 pub static LOCKUP_DETECTION: LockupDetection = LockupDetection::new();
 

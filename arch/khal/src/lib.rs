@@ -96,13 +96,16 @@ pub use kplat::boot::final_init_ap as final_init_secondary;
 
 #[cfg(feature = "nmi")]
 pub mod nmi {
-    pub use kplat::nm_irq::{enable, init, register_nmi_handler};
+    pub use kplat::nm_irq::{
+        NmiCb, NmiMode, NmiSourceInfo, early_init, enable_periodic_nmi, info, late_init, mode,
+    };
 }
 
 #[cfg(feature = "pmu")]
 pub mod pmu {
     pub use kplat::perf::{
-        PerfCb, on_overflow as dispatch_irq_overflows, reg_cb as register_overflow_handler,
+        PerfCb, enable_irq, on_overflow as dispatch_irq_overflows,
+        reg_cb as register_overflow_handler, register_overflow_irq as register_overflow_dispatch,
     };
 }
 
@@ -114,8 +117,14 @@ pub mod pmu {
 /// the intentional stop for a lockup and panic into a platform power-off.
 #[inline]
 pub fn quiesce_nmi() {
-    #[cfg(feature = "nmi")]
-    kplat::nm_irq::disable();
+    #[cfg(feature = "nmi_pmu")]
+    {
+        // The periodic-source provider is per-CPU. Keep this CPU pinned while
+        // it finds and stops the local source; its counter access is safe
+        // against an in-flight NMI dispatch.
+        let _guard = kspin::NoPreempt::new();
+        kplat::nm_irq::quiesce_periodic_nmi();
+    }
 }
 #[inline]
 pub fn boot_info(arg: usize) -> &'static boot_info::BootInfo {

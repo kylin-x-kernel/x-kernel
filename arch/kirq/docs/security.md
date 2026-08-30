@@ -131,13 +131,16 @@ per-CPU atomic pending mask。调用方在访问前 pin 当前 CPU；pending mas
 - NMI dispatch 不得依赖 `IRQ_STATE`，否则 pseudo-NMI 可能打断 normal IRQ 持锁路径并
   自锁。
 - lifecycle exit hook 必须与本次 enter 捕获的 hook 配对，不能在处理中途因全局 hook
-  被清理而丢失。lifecycle 表示 trap/preempt-off 生命周期，不是 hardirq-depth 边界。
-- hardirq depth 必须由 `HardIrqContextGuard` 配对维护，并在 claimed normal IRQ 完成
-  controller completion 后、deferred executor 运行前退出。
+  被清理而丢失。lifecycle 表示 IRQ-on trap/preempt-off 生命周期，不是
+  hardirq-depth 边界；irqchip 后续把 claim 分类为 NMI 或 spurious 也不改变这层配对。
+- hardirq depth 必须由 `HardIrqContextGuard` 配对维护，并在 irqchip dispatch（包括其
+  generic IRQ/NMI helper 和 controller completion）返回后、deferred executor 运行前
+  退出。
 - `LocalBhGuard` 必须在整个 BH-disabled 生命周期内持有 `NoPreempt`，并且不能跨线程
   移动。这样 enter/drop 和 outermost drain 都绑定在同一 CPU 的 per-CPU depth 上。
-- deferred executor 只能在 claimed normal IRQ 完成 controller completion 且 generic
-  hardirq depth 已退出后运行；它不能持有 `DispatchedIrq` 或影响 completion ownership。
+- deferred executor 只能在 irqchip dispatch 返回且 generic hardirq depth 已退出后运行；
+  若存在 IRQ/NMI claim，其 generic helper 必须已经完成 controller completion。executor
+  不能持有 `PendingIrq` / `DispatchedIrq` 或影响 completion ownership。
 - softirq pending bit 不能通过 `load + store(0)` 获取；runner 必须使用 atomic
   `swap(0, Acquire)`，raise 必须用 `fetch_or(Release)`，避免 handler 期间重新 raise
   的 work 被覆盖。
@@ -179,7 +182,12 @@ mapping；最终清理由 `free_msix()` 在确认 handler state 已撤销后完�
 
 - 常规写入发生在 boot-time 或 NMI handler 自身；
 - normal IRQ 和进程上下文不读写 NMI 表；
-- pseudo-NMI 不会在同一 CPU 上嵌套打断另一个 pseudo-NMI handler。
+- pseudo-NMI 不会在同一 CPU 上嵌套打断另一个 pseudo-NMI handler（PMR 保持 `NMI_ONLY`）；
+- hardware NMI 不会在同一 CPU 上嵌套另一个 NMI（NMI path 保持 `PSTATE.ALLINT`
+  置位；normal IRQ path 只在打开 ALLINT 窗口时允许 Superpriority NMI 抢占，且
+  normal IRQ handler 从不访问 NMI 表）；
+- 运行时降级（`NmiMode::None`）时，NMI 条目对应的 regular fallback action 走
+  normal IRQ dispatch，`SpinRaw` 约束退化为普通 IRQ action 约束。
 
 ### Lifecycle hooks
 
@@ -232,12 +240,12 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-01 | IRQ metadata 配置错误 | 固件或平台提供错误 trigger/polarity/domain | 中断丢失、重复触发或无法 mask | `IrqDesc` 明确携带 metadata，平台 configure 只消费规范化描述 |
 | T-02 | handler 在全局 IRQ 锁内执行 | dispatch 未复制 action 就调用 | 回调重入注册/注销路径时死锁 | `dispatch_actions()` 先复制 action，再释放 `IRQ_STATE` |
 | T-03 | 数据面 mapping miss 被当作 identity virq | strict domain 未发布或缺失映射 | 错 handler 或错误确认中断 | `PendingIrq` 通过 domain snapshot 解析；strict miss 保持 unhandled |
-| T-04 | NMI path 获取 normal IRQ state | pseudo-NMI 打断 normal IRQ 持锁区 | 同 CPU 自锁或 NMI 延迟 | NMI 使用独立 `NMI_TABLE`，dispatch 不触碰 `IRQ_STATE` |
+| T-04 | NMI path 获取 normal IRQ state | pseudo/hardware NMI 打断 normal IRQ 持锁区（hardware NMI 在 IRQ path 打开 ALLINT 窗口时抢占） | 同 CPU 自锁或 NMI 延迟 | NMI 使用独立 `NMI_TABLE`，dispatch 不触碰 `IRQ_STATE`；NMI path 保持 ALLINT/PMR 防止 NMI 嵌套 |
 | T-05 | claimed IRQ 未 complete | normal control flow 提前返回或忘记显式 complete | 控制器认为中断仍 active，后续中断异常 | claimed IRQ guard Drop 补偿 completion |
 | T-06 | lifecycle enter/exit 不配对 | IRQ 中途 clear/re-register hook | hardirq nesting 或 deferred work 状态损坏 | guard 保存 entry 时的 exit hook 快照 |
 | T-07 | hook/handler 睡眠或持有错误锁 | 调用者违反 hardirq/NMI 上下文约束 | deadlock、latency spike 或调度状态错误 | rustdoc 和设计文档明确回调上下文，IRQ core 不提供 sleepable dispatch |
 | T-08 | IPI 请求先于内存发布被目标 CPU 观察 | 平台 `notify_cpu` 缺少顺序保证 | TLB shootdown 等跨核协议漏处理 | `IntrManagerIf::notify_cpu` 文档要求 publish-before-notify |
-| T-09 | deferred executor 在 completion 前或 hardirq depth 内运行 | executor work 拉长 active IRQ、影响 EOI/deactivate 或被误判为 hardirq | interrupt tail latency、controller 状态异常或 context 诊断错误 | `handle_irq()` 固定顺序为 dispatch、complete、drop hardirq context、deferred、lifecycle exit |
+| T-09 | deferred executor 在 completion 前或 hardirq depth 内运行 | executor work 拉长 active IRQ、影响 EOI/deactivate 或被误判为 hardirq | interrupt tail latency、controller 状态异常或 context 诊断错误 | irqchip 的 generic helper 在返回前 complete；`handle_irq()` 随后固定执行 drop hardirq context、deferred、lifecycle exit |
 | T-10 | 全局 reentry guard 抑制其它 CPU | SMP 上一个 CPU 的 executor 运行期间另一个 CPU 被跳过 | lost handoff opportunity | 当前不实现全局 guard；后续使用 per-CPU pending/reentry |
 | T-11 | per-CPU context 非原子状态被本地 IRQ 并发访问 | 普通任务查询被 IRQ 打断，同时读写同一 CPU slot | context snapshot 不一致或 data race | public path 用 `NoPreemptIrqSave`，hardirq/softirq IRQ-tail path 只走已 masked/pinned 的 `*_irqoff` helper |
 | T-12 | softirq pending 获取覆盖新 raise | runner 用 `load + store(0)` 清 pending | softirq work 丢失 | raise 用 `fetch_or(Release)`，runner 用 `swap(0, Acquire)` |
@@ -274,6 +282,7 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-36 | teardown wait 窗口重新 enable action-less line | 最后一个 action 已摘除并 mask 后，另一 CPU 调用 `enable_irq()` / legacy force-enable | descriptor 被删除后平台 line 又 unmasked，后续 unhandled IRQ 或 storm；或失败路径留下 merged metadata/domain mapping | `try_enable_irq()` lookup-only 解析已存在 descriptor，并拒绝 `teardown_depth != 0` 或 `action_count == 0` 的普通 enable；legacy force-enable 在 resolve/publish 前先检查已有 teardown descriptor |
 | T-37 | 等待式 teardown 持有 handler 需要的锁 | task context 持 driver lock 调用 `free_irq()` / `synchronize_irq()`，旧 handler snapshot 在另一 CPU 等同一把锁 | teardown 等 handler，handler 等 teardown caller，形成死锁 | public rustdoc 和设计文档明确等待时不能持有 handler 可能获取的锁或阻止 handler 退出的资源锁 |
 | T-38 | IRQ waiter 表拖慢所有 handled IRQ | fanout-complete path 对每个 IRQ 扫描全局 waiter 表，或已注销 IRQ 的 waiter entry 永久保留 | timer/IPI/设备 IRQ 在全局锁上竞争，运行时间越长 hot path 成本越高 | waiter table 按 `virq` 排序并用二分查找，空表通过 atomic entry-count hint 跳过锁；descriptor cleanup 在释放 `IRQ_STATE` 后移除对应 waiter entry 并唤醒遗留 waiter |
+| T-39 | hardware NMI ack 走错路径 | 平台未识别 IAR1 特殊 INTID、未改读 `ICC_NMIAR1_EL1` | NMI 无法 ack/派发，或误当作未知 IRQ | 平台 NMI dispatch 检测特殊 INTID 后从 NMIAR1 ack；`register_nmi` 同时安装 normal-IRQ fallback，保证降级平台仍可派发 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -294,7 +303,7 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | F-11 | descriptor mapping 冲突 | `try_*` API 返回错误或兼容 API warning/fail-fast | 阻止错误 metadata 进入 `IRQ_STATE` | `IrqDescError` 携带冲突字段 |
 | F-12 | descriptor 使用未知 domain | `try_*` API 返回 `UnknownDomain` | 设备初始化失败但不会创建不可达 IRQ | domain registry 边界校验先于状态变更 |
 | F-13 | controller completion cookie 错配 | complete 错误 active IRQ 或 no-op | 中断丢失、重复触发或 priority/deactivate 状态泄漏 | `PendingIrq`/`DispatchedIrq` 持有 opaque cookie，generic IRQ core 只把原 cookie 交还 backend |
-| F-14 | spurious vector 运行 IRQ tail | 没有 claim 到真实 IRQ 却运行 handler/deferred | 错误 handler 调用或 pending work 时序混乱 | `dispatch_irq()` 返回 `None` 时 `handle_irq()` 不运行 fanout 和 deferred executor |
+| F-14 | spurious vector 被当作真实 claim | 没有 claim 到中断却调用 generic IRQ/NMI helper | 错误 handler 调用或 completion | irqchip 只在有效 claim 后调用 generic helper；统一 IRQ-exit deferred hook 可以运行，但 `resolved_irq` 保持 `None` |
 | F-15 | IRQ waiter table owner 漂移 | fanout 已处理事件但没有通知 async waiter，或其它 crate 重新实现 wake bridge | poll/future 等待者可能延迟到下一次事件，或 shared fanout 顺序被破坏 | waiter table 和 fanout-complete dispatch 由 `kirq::notify` 持有；`kdriver` 和 devres 不参与 wake bridge |
 | F-16 | future `WakeThread` 被同步执行 | `WakeThread` return 被当成 handled primary work | future thread 未实现时错误唤醒或执行 sleepable work | 当前 `WakeThread` 分类保持 inert，threaded IRQ milestone 必须显式实现 thread ownership |
 | F-17 | action runtime 字段漂移 | `generation`、MSI marker、action list 或 oneshot pending 与 descriptor 不一致 | MSI free 判断、shared/threaded 诊断或 cleanup 决策错误 | descriptor merge/update 统一经过 `IrqStateDesc` 方法，后续新增字段必须同步在该 owner 内维护 |
@@ -304,6 +313,7 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | F-21 | 释放 shared line 的一个 action 时关闭整条线 | free-by-token 不检查剩余 action | 其它共享设备中断丢失 | `free_irq_action()` 只在最后一个 action 移除后产生 platform disable plan |
 | F-22 | enable_irq 作用于未知或无 action descriptor | 显式 enable 创建 descriptor 或 unmask 没有 handler 的 line | 未处理 IRQ 或错误平台状态 | `try_enable_irq()` 不创建 descriptor，未知 IRQ 返回 `UnknownIrq`，无 action 返回 `NoIrqAction` |
 | F-23 | enable_irq 与 free_irq wait 重叠 | teardown 已 mask line 但 descriptor 尚未清理 | platform line 在 action 删除后被重新打开 | `teardown_depth` 让 `try_enable_irq()` 返回 `TeardownInProgress` |
+| F-24 | NMI 机制运行时不可用 | 平台缺少 FEAT_NMI / GICv2，`mode()` 返回 `None` | NMI handler 改走 normal-IRQ fallback 路径 | 若 handler 假设 NMI 独占语义（不被打断），可能同 CPU 死锁或状态错乱 | `register_nmi` 文档要求 handler 同时满足 normal-IRQ 与 NMI 上下文；消费者先查 `khal::nmi::mode()` |
 
 ## 故障管理
 
@@ -314,8 +324,8 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
   维持控制器状态。
 - platform enable/disable 在需要平台绑定时才调用，plain dynamic virq 不强行触碰
   控制器。
-- platform dispatch 返回 `None` 的 spurious vector 不运行 handler fanout 或 deferred
-  executor。
+- platform spurious vector 不运行 generic handler fanout；它仍经过统一 IRQ-exit
+  deferred hook，与 Linux IRQ entry/exit 配对一致，且 `resolved_irq` 为 `None`。
 - context misuse 诊断使用 counters 保留完整次数，warning 输出限流。
 - `disable_irq()`、`synchronize_irq()` 和 `free_irq()` 在 interrupt-like context 中通过
   `try_*` API 返回 `InvalidContext`；兼容 wrapper 记录 warning 后返回失败值。

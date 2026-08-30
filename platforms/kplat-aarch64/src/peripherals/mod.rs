@@ -7,7 +7,7 @@
 #[cfg(any(feature = "kvm-guest-mem-share", feature = "kvm-mmio-guard"))]
 pub mod kvm;
 pub mod memory;
-#[cfg(any(feature = "nmi-pmu", feature = "nmi-sdei"))]
+#[cfg(feature = "nmi")]
 pub mod nmi;
 #[cfg(feature = "pmu")]
 pub mod pmu;

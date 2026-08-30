@@ -13,13 +13,17 @@
 ## 范围
 
 ```text
-arch/khal/src/irq/
-├── mod.rs       # adapter helper exports only
-└── manager.rs   # trap handlers
+arch/khal/src/
+├── irq/
+│   ├── mod.rs       # adapter helper exports only
+│   ├── manager.rs   # trap handlers
+│   └── nmi.rs       # khal::irq::configure_nmi（每 CPU 中断线提升，委托平台 NmiDef）
+└── lib.rs           # khal::nmi / khal::pmu 机制中立 facade（re-export kplat）
 ```
 
 generic IRQ state、descriptor、dispatch、NMI table、lifecycle hooks 和
-`IntrManagerIf` contract 由 `arch/kirq` 文档描述。
+`IntrManagerIf` contract 由 `arch/kirq` 文档描述。`khal::nmi` 只做机制中立
+facade，机制细节归 `kplat::nm_irq` 与平台实现。
 
 ## 架构
 
@@ -35,6 +39,19 @@ kcpu trap dispatch
 
 普通 IRQ API 调用路径应直接进入 `kirq`，不经过 `khal::irq` facade。
 
+NMI 机制 facade：
+
+```text
+watchdog / perf 消费者
+    |
+    `-- khal::nmi（re-export kplat::nm_irq）
+            |-- early_init / late_init   # 机制探测 + 每 CPU 使能
+            |-- mode / info              # 运行时机制查询（Pseudo / Hardware / None）
+            |-- enable_periodic_nmi      # 周期 NMI 源（当前为 PMU）
+            |-- quiesce_nmi               # 终止路径停靠本地周期源
+            `-- khal::irq::configure_nmi # 每 CPU 提升中断线
+```
+
 ## 调用约束 / 执行上下文
 
 - `irq_handler()` 与 `nmi_handler()` 只能由架构 trap dispatch 调用。
@@ -44,6 +61,19 @@ kcpu trap dispatch
 - `nmi_handler()` 调用 `kirq::handle_nmi()`；NMI raw-hwirq dispatch 语义由
   `kirq` 负责。
 - `khal::irq` 自身不保存 `IRQ_STATE` 或 `NMI_TABLE`，避免两个活跃 IRQ core。
+- `khal::nmi::early_init()`：GIC 初始化后、任何 NMI 使能前调用一次（平台
+  early_driver_init），探测机制并写入运行时 `NmiMode`。
+- `khal::nmi::late_init()`：主核 `final_init` 与每个从核 `final_init_ap` 各调用
+  一次（每 CPU）；hardware 模式在此开启 `SCTLR_EL1.NMI` / ALLINT 使能。
+- `khal::nmi::enable_periodic_nmi(period_ns, cb)`：每 CPU 调用；返回 `false`
+  表示本 CPU 无法武装（机制不可用或资源冲突），消费者应显式降级。
+- `khal::quiesce_nmi()`：仅供终止停机路径调用；以 `NoPreempt` 钉住当前 CPU，
+  停掉已武装的本地周期源但保留回调和 IRQ 配置。没有 `nmi_pmu` source 或本地
+  source 未初始化时为 no-op，调用后不得重新武装。
+- `khal::irq::configure_nmi(hwirq)`：PPI 需每 CPU 调用，SPI 幂等；返回 `false`
+  表示该线无法提升为 NMI（例如机制已降级为 `None`）。
+- `khal::nmi::mode()`：返回 `NmiMode::{Pseudo, Hardware, None}`，供消费者
+  （如 watchdog）判断是否启用依赖 NMI 的功能。
 
 ## 并发模型
 

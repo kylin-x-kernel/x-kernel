@@ -171,15 +171,16 @@ checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
 name = "arm-gic-driver"
-version = "0.16.5"
+version = "0.17.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a1ce13c5a40e028c7cb68b839880903d97db90fb78065c4f972ffbefbe83dae"
+checksum = "52210fc25fa222377dfabf2ffd2f07a751debe75d35c173ac14def04525541a5"
 dependencies = [
  "aarch64-cpu 11.2.0",
  "bitflags 2.13.1",
  "enum_dispatch",
  "log",
  "paste",
+ "thiserror",
  "tock-registers 0.10.1",
 ]
 
@@ -2673,6 +2674,7 @@ dependencies = [
  "kernel-boot",
  "kerrno",
  "khal",
+ "kirq",
  "klazy",
  "kplat",
  "ktime",
@@ -2877,7 +2879,6 @@ dependencies = [
  "kwork",
  "memaddr",
  "memspace",
- "of",
  "timer-driver",
  "unittest",
  "watchdog",

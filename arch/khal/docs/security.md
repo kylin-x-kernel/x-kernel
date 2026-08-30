@@ -8,13 +8,23 @@ generic `kirq` API。
 
 - `kcpu` trap dispatch 只在正确异常上下文调用 `irq_handler()` / `nmi_handler()`；
 - `kspin::NoPreempt` 能覆盖进入 `kirq` 的 adapter 调用区间；
-- `kirq` 维护 IRQ state、NMI table、dispatch 和 completion 不变量。
+- `kirq` 维护 IRQ state、NMI table、dispatch 和 completion 不变量；
+- `kplat::nm_irq` 的平台实现（`NmiDef` / `NmiPeriodic`）与 `karch` 的 NMI 寄存器
+  访问（PMR / ALLINT / SCTLR_EL1.NMI）正确反映机制与降级状态。
 
 ## 外部边界 / 攻击面
 
 1. **trap dispatch 边界**
    `kcpu` 通过 registered trap handler 进入本模块。错误 trap 分类会把 normal IRQ
    与 pseudo-NMI 语义混淆。
+
+2. **NMI 机制 facade 边界**
+   `khal::nmi` 把 `mode()` / `enable_periodic_nmi()` 等接口 re-export 给消费者。
+   机制不可用（`mode() == NmiMode::None`）时，消费者必须禁用依赖 NMI 的功能；
+   `configure_nmi` / `enable_periodic_nmi` 返回 `false` 表示该 CPU 无法使用 NMI。
+   最终停机路径经 `quiesce_nmi()` 停掉当前 CPU 的周期源；该路径持有
+   `NoPreempt`，并依赖 PMU backend 的共享计数器访问与原子 enabled 状态来安全
+   覆盖可能已经到达的 NMI 分发。
 
 本模块不直接处理用户指针、DMA buffer、设备 MMIO 或文件/网络数据。
 
@@ -45,6 +55,7 @@ generic `kirq` API。
 | T-02 | generic IRQ API 重新经由 `khal::irq` 导出 | 调用方把 HAL adapter 当公共 IRQ core | crate 边界退化，后续扩展回到 HAL | `khal::irq` 不 re-export `kirq::*`，调用方直接依赖 `kirq` |
 | T-03 | `IPI_IRQ` 移入 `kirq` | generic core 依赖 `kbuild_config` | crate 边界污染、特性耦合 | IPI 调用方直接使用 `kbuild_config::IPI_IRQ` |
 | T-04 | x86 helper 回流到 `khal::irq` | HAL adapter 再次暴露 APIC vector policy | crate 边界退化，驱动绕过 `kirq` MSI resource | `khal::irq` 不提供 MSI-X/APIC helper；x86 APIC 只实现 `kirq::MsiBackendIf` |
+| T-05 | 降级构建仍调用 NMI 接口 | 平台无 FEAT_NMI / GICv2 时消费者未检查 `mode()` | 无效寄存器访问或误报 NMI 已启用 | `mode() == None` 时平台返回 `false` / watchdog 启动期禁用 hardlockup；调用者契约要求先查询 `mode()` |
 
 ## 故障模式与影响分析（FMEA）
 

@@ -97,13 +97,11 @@ impl kirq::IntrManagerIf {
         enable(irq, enabled);
     }
 
-    fn dispatch_irq(vector: usize) -> Option<kirq::PendingIrq> {
-        dispatch_irq(vector)
+    fn dispatch_irq(vector: usize) -> Option<kirq::Virq> {
+        kirq::generic_handle_irq(dispatch_irq(vector)?)
     }
 
-    fn dispatch_nmi(_irq: usize) -> Option<kirq::DispatchedIrq> {
-        None
-    }
+    fn dispatch_nmi(_irq: usize) {}
 
     fn complete_irq(completion_cookie: usize) {
         if completion_cookie != 0 {

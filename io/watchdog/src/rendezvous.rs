@@ -39,23 +39,23 @@ static CAUSE_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// Per-cpu arrived bitmap stored in an AtomicUsize where bit i means CPU i arrived.
 static ARRIVED_BITMAP: AtomicUsize = AtomicUsize::new(0);
 
-#[inline]
 /// Returns whether a rendezvous is in progress.
+#[inline]
 pub fn is_triggered() -> bool {
     Phase::load() == Phase::Triggered
 }
 
-#[inline]
 /// Returns whether the dump phase has completed.
+#[inline]
 pub fn is_dump_done() -> bool {
     Phase::load() == Phase::DumpDone
 }
 
 /// Try to trigger rendezvous.
 ///
-/// Returns `true` if this CPU became the *cause CPU*.
+/// The calling CPU becomes the cause CPU only if this call transitions the
+/// rendezvous from idle to triggered.
 #[inline]
-/// Trigger a rendezvous if none is active.
 pub fn try_trigger() {
     let cpu = this_cpu_id().as_usize();
     if PHASE
@@ -71,8 +71,8 @@ pub fn try_trigger() {
     }
 }
 
-#[inline]
 /// Returns the CPU that triggered the rendezvous.
+#[inline]
 pub fn cause_cpu() -> Option<usize> {
     if Phase::load() == Phase::Idle {
         return None;
@@ -81,9 +81,8 @@ pub fn cause_cpu() -> Option<usize> {
     (cpu != usize::MAX).then_some(cpu)
 }
 
-/// Mark current cpu as arrived.
-#[inline]
 /// Mark the current CPU as arrived.
+#[inline]
 pub fn mark_arrived() {
     let id = this_cpu_id().as_usize();
     if id >= usize::BITS as usize {
@@ -93,12 +92,10 @@ pub fn mark_arrived() {
     ARRIVED_BITMAP.fetch_or(1usize << id, Ordering::AcqRel);
 }
 
-#[inline]
 pub fn arrived_bitmap() -> usize {
     ARRIVED_BITMAP.load(Ordering::Acquire)
 }
 
-#[inline]
 pub fn all_arrived_mask() -> usize {
     // Cover only the CPUs the platform actually described (DT/ACPI), not the
     // compile-time `NR_CPUS` cap; otherwise the rendezvous would wait forever
@@ -114,7 +111,6 @@ pub fn all_arrived_mask() -> usize {
 /// Busy-wait until all CPUs have arrived.
 ///
 /// This is a *strong* rendezvous: no timeout.
-#[inline]
 pub fn wait_all_arrived_strong() {
     let expect = all_arrived_mask();
     while arrived_bitmap() & expect != expect {
@@ -123,7 +119,6 @@ pub fn wait_all_arrived_strong() {
 }
 
 /// Mark dump done so other CPUs can release from spinning.
-#[inline]
 pub fn mark_dump_done() {
     PHASE.store(Phase::DumpDone as usize, Ordering::Release);
 }

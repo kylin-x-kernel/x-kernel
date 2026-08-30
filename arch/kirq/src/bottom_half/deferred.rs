@@ -6,9 +6,9 @@
 //!
 //! This module provides the first stable boundary for future IRQ bottom-half
 //! work. It does not implement softirq vectors, workerqueue execution, or IRQ
-//! threads; it only lets one owner install a bounded handoff that runs after a
-//! normal IRQ has been completed and after the generic hardirq context depth has
-//! been dropped.
+//! threads; it only lets one owner install a bounded handoff that runs during
+//! the common IRQ-on exit path after irqchip dispatch and after the generic
+//! hardirq context depth has been dropped.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -16,12 +16,12 @@ use kspin::SpinNoIrq;
 
 use crate::Virq;
 
-/// Callback invoked from the normal IRQ-tail path.
+/// Callback invoked from the common IRQ-on tail path.
 ///
 /// The callback runs while the architecture adapter still has preemption
-/// disabled, but after `kirq::context` has left hardirq context for the claimed
-/// IRQ. It must not sleep, allocate on the hot path, wait for scheduler
-/// activity, assume a current process thread, or recursively call
+/// disabled, but after `kirq::context` has left hardirq context for that IRQ-on
+/// exception. It must not sleep, allocate on the hot path, wait for
+/// scheduler activity, assume a current process thread, or recursively call
 /// [`run_hardirq_exit_deferred`].
 pub type DeferredExecutorHook = fn(DeferredRunContext);
 
@@ -33,7 +33,7 @@ pub type DeferredExecutorHook = fn(DeferredRunContext);
 /// from implicit extra owners here.
 #[derive(Clone, Copy, Default)]
 pub struct DeferredExecutorHooks {
-    /// Called after a normal IRQ was dispatched and completed.
+    /// Called after irqchip dispatch has returned and hardirq context ended.
     pub on_hardirq_exit: Option<DeferredExecutorHook>,
 }
 
@@ -51,7 +51,7 @@ pub struct DeferredRunContext {
 }
 
 impl DeferredRunContext {
-    /// Creates a deferred run context for a claimed normal IRQ.
+    /// Creates a deferred run context for an IRQ-on exception.
     pub const fn new(vector: usize, resolved_irq: Option<Virq>) -> Self {
         Self {
             vector,
@@ -64,8 +64,7 @@ impl DeferredRunContext {
         self.vector
     }
 
-    /// Returns the OS-visible IRQ resolved for this claim, if the claim source
-    /// mapped to a logical IRQ.
+    /// Returns the OS-visible normal IRQ resolved for this exception, if any.
     ///
     /// This is an identity hint for IRQ-tail hooks, not a handled marker. A
     /// value can be present even when dispatch found no descriptor or handler.
@@ -124,7 +123,8 @@ pub fn clear_deferred_executor() {
 ///
 /// The runner reads the single published hook from an atomic slot and never
 /// takes the registration lock on the IRQ-tail hot path. This function must not
-/// be called from the pseudo-NMI path.
+/// be called from the dedicated IRQ-off NMI path. An NMI classified inside an
+/// IRQ-on entry still reaches this common outer tail.
 pub fn run_hardirq_exit_deferred(ctx: DeferredRunContext) -> DeferredRunResult {
     let hook = DEFERRED_EXECUTOR_HOOK.load(Ordering::Acquire);
     if hook == 0 {

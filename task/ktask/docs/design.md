@@ -467,8 +467,8 @@ active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自�
 | `sched_cfs` | CFS 抢占式调度（隐含 `preempt`） |
 | `sched_eevdf` | EEVDF 抢占式调度（隐含 `preempt`） |
 | `snapshot` | 任务快照与回溯基础能力 |
-| `watchdog` | watchdog 诊断（依赖 `snapshot`） |
-| `ipi` | 由 `smp` 带上；远端 IPI 唤醒/重调度 |
+| `watchdog` | watchdog 诊断（依赖 `snapshot`）；`watchdog_hardlockup` 额外要求根 Kconfig 的 `KFEAT_NMI`（机制 + PMU 周期源，AArch64 QEMU） |
+| `ipi` | SMP 远端唤醒/重调度的必需能力 |
 | `tls` | 可选扩展能力 |
 
 `UserTaskRuntime` 是 `ktask` 的用户运行时接口。其 scheduler hook 可在关闭抢占的切换上下文

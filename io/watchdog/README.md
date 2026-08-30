@@ -15,39 +15,46 @@ system workqueue backlog check. That check is implemented by kwork and only
 registered through watchdog, so watchdog's own forward progress does not depend
 on system workqueue execution.
 
+The hard-lockup detector uses a periodic NMI to check each CPU's watchdog
+tasks, including whether timer interrupts are still arriving. On failure, all
+CPUs rendezvous, dump task snapshots, and the cause CPU panics.
+
 ## Usage
 
-### Initialization
+Initialization is per-CPU and performed by the kernel runtime:
 
 ```rust
-use watchdog::{init_primary, init_secondary};
-
-// Initialize on primary core
-init_primary();
-
-// Initialize on secondary cores (call when each secondary core boots)
-init_secondary();
+// Primary CPU, during kernel init.
+watchdog::init_primary();
+// Each secondary CPU, during its boot.
+watchdog::init_secondary();
 ```
 
-## Hardware Requirements
+Soft lockup detection requires the `watchdog` feature.  Hard lockup detection
+additionally requires `watchdog_hardlockup`, plus NMI support and a selected
+NMI source in the platform configuration (on AArch64 QEMU: `KFEAT_NMI` +
+`KFEAT_NMI_PMU`, backed by the PMU cycle counter).
 
-### PMU NMI Source
-- ARMv8-A architecture (AArch64)
-- PMUv3-compatible processor
-- Performance Monitoring Unit support
+## Architecture
 
-### SDEI NMI Source (Planned)
-- ARM SDEI compatible firmware/hypervisor
+Consumers never touch the NMI source.  The watchdog asks for a periodic NMI
+through the source-neutral `khal::nmi::enable_periodic_nmi(period_ns, cb)`
+interface; the platform backend (currently the PMU cycle counter) owns the
+counter, the per-CPU GIC promotion (priority 0 / NMI attribute), and the
+one-time global handler registration.
 
 ## Notes
 
-- Currently supports only AArch64 architecture
-- PMU support requires `pmu` feature enabled
-- Interrupt priority set to highest (0)
-- Requires initialization on each core in multi-core systems
+- Currently supported on AArch64 only.
+- Requires initialization on each core in multi-core systems.
+- The NMI interrupt is promoted to the highest GIC priority (0).
+- Hard lockup failure response: global snapshot dump via `ktask::snapshot`,
+  then panic on the cause CPU.
 
 ## Development Status
 
-- ✅ PMU NMI Source: Implemented
-- 🔄 SDEI NMI Source: In Development
-- ✅ Multi-core Support: Implemented
+- ✅ Soft lockup detection (timer + watchdog thread)
+- ✅ Hard lockup detection (PMU-backed periodic NMI source)
+- ✅ Multi-core support
+- ✅ Hardware NMI delivery (GICv3.3, verified on QEMU 11 TCG with
+  `-cpu max -accel tcg`, 2026-08-11)

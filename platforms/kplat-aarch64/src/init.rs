@@ -42,16 +42,22 @@ impl BootHandler {
         }
         irq_driver::gic::init_from_device_tree();
         console_driver::register_input_irq_handler();
+        #[cfg(feature = "nmi")]
+        khal::nmi::early_init();
     }
 
     fn final_init(_boot_info: &BootInfo) {
         irq_driver::gic::init_current_cpu();
         timer_driver::arm_generic::init_percpu();
+        #[cfg(feature = "nmi")]
+        khal::nmi::late_init();
     }
 
     #[cfg(feature = "smp")]
     fn final_init_ap(_cpu_id: kcpu_id_map::LogicalCpuId) {
         irq_driver::gic::init_current_cpu();
         timer_driver::arm_generic::init_percpu();
+        #[cfg(feature = "nmi")]
+        khal::nmi::late_init();
     }
 }

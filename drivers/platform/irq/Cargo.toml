@@ -10,8 +10,8 @@ repository.workspace = true
 
 [features]
 default = []
-pmr = ["karch/pmr"]
-nmi-pmu = ["pmr", "kplat/nmi"]
+nmi-hardware = ["kplat/nmi"]
+nmi-pseudo = ["karch/nmi-pseudo", "kplat/nmi"]
 
 [dependencies]
 karch = { workspace = true }
@@ -25,7 +25,7 @@ log = "0.4"
 memaddr = { workspace = true }
 memspace = { workspace = true }
 of = { workspace = true }
-arm-gic-driver = "0.16"
+arm-gic-driver = { workspace = true }
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 aarch64-cpu.workspace = true
