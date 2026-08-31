@@ -283,7 +283,9 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 **初始化流程**：
 
 1. `try_new(transport)` → `InnerDev::new(transport)`：协商 feature、分配 VirtIO 队列
-2. 记录 `SECTOR_SIZE`（512 字节）作为 `block_size`
+2. 通过 `InnerDev::readonly()` 读取协商后的 `VIRTIO_BLK_F_RO`，并经
+   `BlockDeviceOperations::is_inherently_read_only()` 交给 block core
+3. 记录 `SECTOR_SIZE`（512 字节）作为 `block_size`
 
 **读取流程**：
 
@@ -295,9 +297,10 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 **写入流程**：
 
 1. 调用 `write_block(block_id, buf)`
-2. 内部调用 `write_blocks(sector, in_buf)`，将写请求提交到 VirtIO 队列
-3. `virtio-drivers` 内部轮询等待设备响应
-4. 返回 `DriverResult`
+2. 在持有设备锁时检查 `InnerDev::readonly()`；只读设备直接返回 `DriverError::ReadOnly`
+3. 可写设备调用 `write_blocks(sector, in_buf)`，将写请求提交到 VirtIO 队列
+4. `virtio-drivers` 内部轮询等待设备响应
+5. 返回 `DriverResult`
 
 **刷新流程**：
 

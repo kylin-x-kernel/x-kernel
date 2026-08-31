@@ -7,7 +7,7 @@ use alloc::string::String;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use block::BlockDeviceOperations;
-use driver_base::{Device, DeviceKind, DriverResult};
+use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal,
@@ -127,8 +127,11 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     }
 
     fn write_sector(&self, sector: u64, in_buf: &[u8]) -> DriverResult {
-        self.device
-            .lock()
+        let mut device = self.device.lock();
+        if device.readonly() {
+            return Err(DriverError::ReadOnly);
+        }
+        device
             .write_blocks(sector as usize, in_buf)
             .map_err(as_driver_error)
     }
@@ -155,6 +158,10 @@ impl<H: Hal, T: Transport> BlockDeviceOperations for VirtIoBlkDev<H, T> {
         self.sector_size
     }
 
+    fn is_inherently_read_only(&self) -> bool {
+        self.device.lock().readonly()
+    }
+
     fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
         self.read_sector(block_id, buf)
     }
@@ -174,6 +181,8 @@ mod tests {
 
     use super::*;
     use crate::mock_virtio::{MockHal, MockTransport};
+
+    const VIRTIO_BLK_F_RO: u64 = 1 << 5;
 
     #[def_test]
     fn test_virtio_blk_init_failure_handling() {
@@ -206,5 +215,19 @@ mod tests {
     fn test_virtio_blk_concurrency_traits() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<VirtIoBlkDev<MockHal, MockTransport>>();
+    }
+
+    #[def_test]
+    fn test_read_only_feature_is_reported_and_rejects_writes() {
+        let mut transport = MockTransport::new();
+        transport.features = VIRTIO_BLK_F_RO;
+        let dev = VirtIoBlkDev::<MockHal, MockTransport>::try_new(transport)
+            .expect("initialize read-only virtio block device");
+
+        assert!(dev.is_inherently_read_only());
+        assert_eq!(
+            dev.write_block(0, &[0; SECTOR_SIZE]).unwrap_err(),
+            DriverError::ReadOnly
+        );
     }
 }

@@ -15,7 +15,9 @@ driver 报告的 disk identity、容量、block size 和 I/O completion 跨越 b
 - block offset 的加法必须 checked；
 - operations object、`Gendisk` 和 `BlockDevice` 都是 `Send + Sync`；
 - registry 锁内不执行 driver I/O 或 callback。
-- read-only state 只由 owning `Gendisk` 保存，所有 `BlockDevice` 写入在 backend 前检查它。
+- backend 固有只读能力由 `Gendisk` 在发布前保存且不可被管理接口清除；
+- 管理只读状态只由 owning `Gendisk` 保存，有效只读状态为两者的并集；
+- 所有 `BlockDevice` 写入在 backend 前检查有效只读状态。
 
 ## unsafe
 
@@ -31,6 +33,7 @@ driver 报告的 disk identity、容量、block size 和 I/O completion 跨越 b
 | 无效或越界 I/O | `InvalidInput`，不调用 backend |
 | backend I/O/flush 失败 | 原样传播 `DriverError` |
 | read-only disk 写入 | `ReadOnly`；KVFS 映射为 Linux `EPERM` |
+| 对固有只读 disk 执行 `BLKROSET 0` | `ReadOnlyFilesystem`（Linux `EROFS`），状态保持只读 |
 | 未知 disk-specific ioctl | `NotATty` |
 | disk 撤销后新 open/mount | canonical lookup 失败 |
 

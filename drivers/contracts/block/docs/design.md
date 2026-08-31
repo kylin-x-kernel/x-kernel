@@ -47,8 +47,13 @@ token，并在初始化失败或 final shutdown 进入 dead 后释放。因此�
 
 `BlockDevice` 在委托 backend 前校验 buffer 是 block-size 整数倍、完整 I/O extent 不越过
 capacity，并对 block offset 做 checked arithmetic。`Gendisk::new` 要求 block size 非零且
-初始容量的字节乘法可表示；`set_capacity` 对每次动态更新重复该边界校验。read-only 是
-`Gendisk` 的 canonical state，`BlockDevice::write_block` 在进入 backend 前统一拒绝写入。
+初始容量的字节乘法可表示；`set_capacity` 对每次动态更新重复该边界校验。
+
+backend 通过 `BlockDeviceOperations::is_inherently_read_only()` 报告设备生命周期内不可变的
+固有只读能力，`Gendisk::new` 在发布前保存该能力。`BLKROSET` 控制的管理只读状态单独保存在
+`Gendisk` 的原子状态中；有效只读状态是“固有只读或管理只读”。因此 `BLKROSET 0` 只能清除
+管理状态，不能把固有只读介质变为可写。`BlockDevice::write_block` 在进入 backend 前统一拒绝
+有效只读设备的写入。
 
 KVFS 负责 Linux `blkdev_read_iter` / `blkdev_write_iter` 对应的字节适配：完整对齐块直接
 传递调用方 buffer，首尾 partial block 复用单个 read-modify-write scratch buffer。普通

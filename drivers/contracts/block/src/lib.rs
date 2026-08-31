@@ -55,7 +55,7 @@ bitflags::bitflags! {
     }
 }
 
-const DISK_STATE_READ_ONLY: usize = 1 << 0;
+const DISK_STATE_ADMIN_READ_ONLY: usize = 1 << 0;
 
 /// I/O operations that a block storage backend must implement.
 ///
@@ -72,6 +72,14 @@ pub trait BlockDeviceOperations: Send + Sync {
     /// published. Mutable media capacity is represented by
     /// [`BlockDevice::set_capacity`], not by changing this value.
     fn block_size(&self) -> usize;
+
+    /// Returns whether the backend is inherently read-only.
+    ///
+    /// This capability must not change after the disk is published. The block
+    /// core combines it with the administratively controlled read-only state.
+    fn is_inherently_read_only(&self) -> bool {
+        false
+    }
 
     /// Reads blocked data from the given block.
     ///
@@ -122,6 +130,10 @@ impl<T: BlockDeviceOperations + ?Sized> BlockDeviceOperations for Arc<T> {
         (**self).block_size()
     }
 
+    fn is_inherently_read_only(&self) -> bool {
+        (**self).is_inherently_read_only()
+    }
+
     fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
         (**self).read_block(block_id, buf)
     }
@@ -167,6 +179,7 @@ pub struct Gendisk {
     major: u32,
     first_minor: u32,
     minors: u32,
+    is_inherently_read_only: bool,
     state: AtomicUsize,
     operations: Box<dyn BlockDeviceOperations + Send + Sync>,
 }
@@ -198,11 +211,13 @@ impl Gendisk {
         {
             return Err(DriverError::InvalidInput);
         }
+        let is_inherently_read_only = operations.is_inherently_read_only();
         Ok(Self {
             name,
             major,
             first_minor,
             minors,
+            is_inherently_read_only,
             state: AtomicUsize::new(0),
             operations,
         })
@@ -250,6 +265,10 @@ impl BlockDeviceOperations for Gendisk {
 
     fn block_size(&self) -> usize {
         self.operations.block_size()
+    }
+
+    fn is_inherently_read_only(&self) -> bool {
+        self.is_inherently_read_only
     }
 
     fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
@@ -424,9 +443,10 @@ impl BlockDevice {
             .expect("validated block-device capacity")
     }
 
-    /// Returns whether writes to this disk are prohibited.
+    /// Returns whether inherent or administrative policy prohibits writes.
     pub fn is_read_only(&self) -> bool {
-        self.disk.state.load(Ordering::Acquire) & DISK_STATE_READ_ONLY != 0
+        self.disk.is_inherently_read_only
+            || self.disk.state.load(Ordering::Acquire) & DISK_STATE_ADMIN_READ_ONLY != 0
     }
 
     /// Changes this disk's canonical read-only state.
@@ -436,17 +456,22 @@ impl BlockDevice {
     ///
     /// # Errors
     ///
-    /// Returns the driver callback error without changing the generic state.
-    pub fn set_disk_read_only(&self, read_only: bool) -> KResult<()> {
-        self.disk.operations.set_read_only(self, read_only)?;
-        if read_only {
+    /// Returns [`KError::ReadOnlyFilesystem`] when attempting to make an
+    /// inherently read-only disk writable. Returns a driver callback error
+    /// without changing the administrative state.
+    pub fn set_disk_read_only(&self, is_read_only: bool) -> KResult<()> {
+        if !is_read_only && self.disk.is_inherently_read_only {
+            return Err(KError::ReadOnlyFilesystem);
+        }
+        self.disk.operations.set_read_only(self, is_read_only)?;
+        if is_read_only {
             self.disk
                 .state
-                .fetch_or(DISK_STATE_READ_ONLY, Ordering::AcqRel);
+                .fetch_or(DISK_STATE_ADMIN_READ_ONLY, Ordering::AcqRel);
         } else {
             self.disk
                 .state
-                .fetch_and(!DISK_STATE_READ_ONLY, Ordering::AcqRel);
+                .fetch_and(!DISK_STATE_ADMIN_READ_ONLY, Ordering::AcqRel);
         }
         Ok(())
     }
@@ -494,6 +519,10 @@ impl BlockDeviceOperations for BlockDevice {
 
     fn block_size(&self) -> usize {
         self.disk.block_size()
+    }
+
+    fn is_inherently_read_only(&self) -> bool {
+        self.disk.is_inherently_read_only
     }
 
     fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
@@ -628,6 +657,8 @@ mod tests {
         block_size: usize,
     }
 
+    struct InherentlyReadOnlyDisk(MemoryDisk);
+
     impl MemoryDisk {
         fn new(blocks: u64) -> Self {
             Self(Mutex::new(vec![0; blocks as usize * BLOCK_SIZE]))
@@ -691,6 +722,32 @@ mod tests {
 
         fn flush(&self) -> DriverResult {
             Ok(())
+        }
+    }
+
+    impl BlockDeviceOperations for InherentlyReadOnlyDisk {
+        fn num_blocks(&self) -> u64 {
+            self.0.num_blocks()
+        }
+
+        fn block_size(&self) -> usize {
+            self.0.block_size()
+        }
+
+        fn is_inherently_read_only(&self) -> bool {
+            true
+        }
+
+        fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+            self.0.read_block(block_id, buf)
+        }
+
+        fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+            self.0.write_block(block_id, buf)
+        }
+
+        fn flush(&self) -> DriverResult {
+            self.0.flush()
         }
     }
 
@@ -794,6 +851,34 @@ mod tests {
         device.set_disk_read_only(false).expect("set disk writable");
         assert!(device.write_block(0, &[0; BLOCK_SIZE]).is_ok());
         del_gendisk(disk.device_number()).expect("remove read-only disk");
+    }
+
+    #[def_test(serial)]
+    fn inherently_read_only_disk_cannot_be_made_writable() {
+        let disk = Arc::new(
+            Gendisk::new(
+                String::from("test-inherently-read-only"),
+                246,
+                0,
+                1,
+                Box::new(InherentlyReadOnlyDisk(MemoryDisk::new(8))),
+            )
+            .expect("valid inherently read-only disk"),
+        );
+        let device = add_disk(disk.clone()).expect("publish inherently read-only disk");
+
+        assert!(device.is_read_only());
+        assert!(matches!(
+            device.set_disk_read_only(false),
+            Err(KError::ReadOnlyFilesystem)
+        ));
+        assert!(device.is_read_only());
+        assert_eq!(
+            device.write_block(0, &[0; BLOCK_SIZE]).unwrap_err(),
+            DriverError::ReadOnly
+        );
+
+        del_gendisk(disk.device_number()).expect("remove inherently read-only disk");
     }
 
     #[def_test(serial)]
