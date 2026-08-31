@@ -166,13 +166,14 @@ ksched algorithms / karch context switch / allocator
 | F-09 | idle-pull 与远端 wake 双锁顺序颠倒 | dest 持锁再锁 src | 死锁 | 调度停住 | 1 | 只锁 src 再 dest 入队；`resched` 已放下 dest 调度锁 |
 | F-10 | idle-pull 窗口 affinity 漏迁 | steal 后 dest 入队前 `setaffinity` | 任务在新掩码外运行 | 隔离违约 | 2 | dest 入队后复查 cpumask；enforce 对未占用 CPU 只改 mask |
 | F-11 | 运行中用户任务收不到 pending 信号 | `interrupt()` 只 wake waiter、不 kick CPU；NOHZ 已停表 | 目标停在用户态忙循环 | 定时信号（如 SIGALRM）永久延迟，workload 卡死 | 2 | `interrupt()` 对 `on_cpu` 任务置本 CPU `need_resched` 或发 reschedule IPI；用户返回路径在 preempt 后再查一次 `is_interrupted` |
+| F-12 | mutex wait watchdog 误报超长等待 | 扫描前取得的旧 tick 与并发更新的等待开始 tick 做无符号回绕减法 | 正常短等待被判为超时 | watchdog 错误触发停机路径 | 1 | 每个任务在读取等待快照后再采样当前 tick；开始时间晚于当前样本时丢弃本轮结果 |
 
 ## 故障管理
 
 - **快速失败策略**：关键不变量处普遍使用 `assert!`（例如任务状态、IRQ 约束、CPU 编号）。
 - **延迟恢复策略**：抢占采用 pending + 安全点执行，尽量在一致状态下恢复调度。
 - **回收容错策略**：GC 对 `Arc::try_unwrap` 失败重排队，避免误释放。
-- **诊断增强**：`snapshot/watchdog` feature 通过共享任务注册表提供锁等待与回溯检查能力；`watchdog_hardlockup` 在 NMI 上下文中检查硬锁（依赖根 Kconfig 的 `KFEAT_NMI`）。
+- **诊断增强**：`snapshot/watchdog` feature 通过共享任务注册表提供锁等待与回溯检查能力；mutex wait 的 elapsed 计算拒绝并发更新产生的 future sample；`watchdog_hardlockup` 在 NMI 上下文中检查硬锁（依赖根 Kconfig 的 `KFEAT_NMI`）。
 
 ## 隐私与数据暴露
 

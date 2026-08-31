@@ -995,8 +995,10 @@ mod tests_api {
 /// Returns `false` when a task appears to have been waiting on a lock for too long.
 ///
 /// Note: this is a *heuristic* watchdog check, not a full deadlock detector.
+/// The current time is sampled after each task's wait snapshot. A snapshot
+/// whose start time is still in the future is skipped as a concurrent update.
 #[cfg(feature = "watchdog")]
-pub fn check_mutex_deadlock(now: khal::time::TimerTicks) -> bool {
+pub fn check_mutex_deadlock() -> bool {
     let mut ok = true;
     crate::task_registry::for_each_tracked_task(khal::percpu::this_cpu_id(), |weaktask| {
         if !ok {
@@ -1007,7 +1009,11 @@ pub fn check_mutex_deadlock(now: khal::time::TimerTicks) -> bool {
                 return;
             };
 
-            let blocked = now.wrapping_duration_since(since);
+            let now = khal::time::now_ticks();
+            let Some(blocked_ticks) = now.as_raw().checked_sub(since.as_raw()) else {
+                return;
+            };
+            let blocked = khal::time::TimerTicks::from_raw(blocked_ticks);
             if khal::time::ticks_to_span(blocked) > ktime_types::TimeSpan::from_secs(20) {
                 // suspect stall (20s)
                 ok = false;

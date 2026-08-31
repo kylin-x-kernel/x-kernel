@@ -59,6 +59,6 @@ impl WatchdogTask for MutexDeadlockCheck {
     }
 
     fn check(&self) -> bool {
-        ktask::check_mutex_deadlock(khal::time::now_ticks())
+        ktask::check_mutex_deadlock()
     }
 }

@@ -74,7 +74,7 @@ update_current() → pending      blocked_resched / unblock_task / resched
 | `future::block_on` | 将 `Future` pending 映射为任务阻塞/唤醒 |
 | `WaitQueue` | 事件型阻塞等待 API |
 | `timers` | 显式周期回调（与调度 timer 解耦） |
-| `snapshot/task_registry` | 可选诊断：snapshot/watchdog/NMI 共享的任务遍历视图 |
+| `snapshot/task_registry` | 可选诊断：snapshot/watchdog/NMI 共享的任务遍历视图；mutex wait 检查在读取每个任务快照后采样当前 tick，并丢弃开始时间晚于当前样本的并发更新 |
 
 ## 创建与发布模型
 
