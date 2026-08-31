@@ -2,13 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! 9P filesystem adapter -- filesystem-level operations.
+//! Concrete 9P filesystem-level operations.
 
 use alloc::{boxed::Box, string::String, sync::Arc};
 
-use fs9p::{Session, Transport};
 use ksync::{Mutex, MutexGuard};
 use kvfs::{NodeFlags, StatFs, SuperBlock, SuperBlockOperations, VfsResult, path::MAX_NAME_LEN};
+use p9::{Session, Transport};
 
 use super::inode::{Inode, inode_init_from_attr};
 

@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Transport abstraction for 9P request/response traffic.
+//! Provider-neutral transport abstraction for 9P request/response traffic.
 
 use alloc::string::String;
 

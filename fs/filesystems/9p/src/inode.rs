@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! 9P inode wrapper and VFS node implementations.
+//! Concrete 9P inode and VFS node implementations.
 
 use alloc::{
     format,
@@ -10,7 +10,6 @@ use alloc::{
     sync::Arc,
 };
 
-use fs9p::FileAttr;
 use kcred::Cred;
 use ktime_types::SystemTime;
 use kvfs::{
@@ -19,6 +18,7 @@ use kvfs::{
     MetadataUpdate, NodeFlags, NodePermission, NodeType, Umode, VfsError, VfsFile, VfsInode,
     VfsInodeInit, VfsResult, inode_init_owner,
 };
+use p9::FileAttr;
 
 use super::{
     Fs9pFilesystem,

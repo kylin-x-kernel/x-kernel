@@ -1,6 +1,6 @@
 [package]
 name = "v9fs"
-description = "VFS bridge for the 9P client library"
+description = "9P filesystem implementation for X-Kernel VFS"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -13,9 +13,10 @@ documentation.workspace = true
 default = []
 
 [dependencies]
-fs9p.workspace = true
+p9.workspace = true
 kcred.workspace = true
 kerrno.workspace = true
 ksync.workspace = true
 ktime_types.workspace = true
 kvfs.workspace = true
+unittest.workspace = true

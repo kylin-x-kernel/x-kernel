@@ -4,7 +4,7 @@
 
 #![no_std]
 
-//! Lightweight 9P client library for no_std targets.
+//! Transport-independent 9P client library for `no_std` targets.
 
 extern crate alloc;
 

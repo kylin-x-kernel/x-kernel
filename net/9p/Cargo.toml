@@ -1,8 +1,8 @@
 [package]
-name = "fs9p"
+name = "p9"
 version = "0.1.0"
 edition = "2024"
-description = "A 9P client library for Rust."
+description = "Transport-independent 9P client library for Rust"
 license = "Apache-2.0"
 repository = "https://github.com/x-kernel/fs9p"
 homepage = "https://github.com/x-kernel/fs9p"
@@ -10,6 +10,7 @@ authors = ["Debin <luodeb@outlook.com>"]
 
 [dependencies]
 log = { version = "0.4", default-features = false }
+unittest.workspace = true
 
 [features]
 default = []

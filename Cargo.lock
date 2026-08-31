@@ -1593,13 +1593,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
-name = "fs9p"
-version = "0.1.0"
-dependencies = [
- "log",
-]
-
-[[package]]
 name = "fs_block"
 version = "0.2.0-dev"
 dependencies = [
@@ -3676,6 +3669,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "p9"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "unittest",
+]
+
+[[package]]
 name = "page_size"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5425,12 +5426,13 @@ dependencies = [
 name = "v9fs"
 version = "0.2.0-dev"
 dependencies = [
- "fs9p",
  "kcred",
  "kerrno",
  "ksync",
  "ktime_types",
  "kvfs",
+ "p9",
+ "unittest",
 ]
 
 [[package]]

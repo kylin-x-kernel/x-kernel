@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Path handling and directory entry parsing.
+//! 9P client path handling and directory entry parsing.
 
 use alloc::{string::String, vec::Vec};
 
@@ -111,27 +111,27 @@ fn parse_stat_name(buf: &[u8]) -> Result<String, String> {
     Ok(name)
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
     use alloc::vec;
 
-    use super::*;
+    use unittest::{assert, assert_eq, def_test};
 
-    #[test]
+    #[def_test]
     fn path_parts_rejects_root_escape() {
-        assert!(path_parts("").is_err());
-        assert!(path_parts("../host").is_err());
-        assert!(path_parts("/../../host").is_err());
+        assert!(super::path_parts("").is_err());
+        assert!(super::path_parts("../host").is_err());
+        assert!(super::path_parts("/../../host").is_err());
     }
 
-    #[test]
+    #[def_test]
     fn path_parts_normalizes_inside_root() {
-        assert_eq!(path_parts("/a/./b/../c").unwrap(), vec!["a", "c"]);
+        assert_eq!(super::path_parts("/a/./b/../c").unwrap(), vec!["a", "c"]);
     }
 
-    #[test]
+    #[def_test]
     fn split_parent_name_rejects_invalid_leaf() {
-        assert!(split_parent_name("/a/..").is_err());
-        assert!(split_parent_name("/a/").is_ok());
+        assert!(super::split_parent_name("/a/..").is_err());
+        assert!(super::split_parent_name("/a/").is_ok());
     }
 }

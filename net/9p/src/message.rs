@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Message builder and decoding helpers for 9P packets.
+//! Transport-independent message builder and decoding helpers for 9P packets.
 
 use alloc::{
     format,

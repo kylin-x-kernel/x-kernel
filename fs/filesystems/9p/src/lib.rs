@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! VFS bridge for the 9P client library.
+//! 9P filesystem implementation for X-Kernel VFS.
 #![cfg_attr(any(not(test), doc), no_std)]
 #![feature(likely_unlikely)]
 #![allow(clippy::new_ret_no_self)]
@@ -14,4 +14,4 @@ mod inode;
 mod util;
 
 pub use fs::Fs9pFilesystem;
-pub use fs9p::Transport;
+pub use p9::Transport;

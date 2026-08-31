@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! 9P protocol constants and data types.
+//! Transport-independent 9P protocol constants and data types.
 #![allow(unused)]
 /// Special values used by the protocol.
 pub const NO_FID: u32 = 0xFFFF_FFFF;
