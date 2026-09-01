@@ -2059,13 +2059,21 @@ mod tests {
     #[def_test(serial)]
     fn dynamic_queue_flush_runs_promoted_inactive_work() {
         let runs = Arc::new(AtomicUsize::new(0));
+        let blocker_started = Arc::new(AtomicUsize::new(0));
+        let release_blocker = Arc::new(AtomicBool::new(false));
         let queue = WorkQueueHandle::alloc(
             "kwork_promote_inactive_test",
             WorkQueueAttrs::new().with_max_active(1),
         )
         .expect("dynamic queue should allocate");
+        let started = blocker_started.clone();
+        let release = release_blocker.clone();
         let first_runs = runs.clone();
         let first = ScheduledWork::new(move |_| {
+            started.store(1, Ordering::Release);
+            while !release.load(Ordering::Acquire) {
+                ktask::yield_now();
+            }
             first_runs.fetch_add(1, Ordering::AcqRel);
         });
         let second_runs = runs.clone();
@@ -2076,10 +2084,20 @@ mod tests {
         let cpu_id = LogicalCpuId::new(0);
         ensure_normal_pool_ready(cpu_id);
         assert_eq!(queue.queue_work_on(cpu_id, &first), QueueWorkResult::Queued);
+        wait_for_atomic_value(&blocker_started, 1);
         assert_eq!(
             queue.queue_work_on(cpu_id, &second),
             QueueWorkResult::Queued
         );
+        let binding = queue
+            .queue
+            .core_binding(cpu_id)
+            .expect("test CPU should have a queue binding");
+        let snapshot = binding.snapshot();
+        assert_eq!(snapshot.active, 1);
+        assert_eq!(snapshot.pending, 1);
+        assert_eq!(snapshot.in_flight.iter().sum::<usize>(), 2);
+        release_blocker.store(true, Ordering::Release);
         assert!(queue.flush().expect("queue flush should be sleepable"));
         assert_eq!(runs.load(Ordering::Acquire), 2);
         queue.destroy().expect("destroy after flush should succeed");
