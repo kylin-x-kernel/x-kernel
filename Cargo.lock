@@ -30,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "acpi"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kaddr_layout",
  "lazyinit",
@@ -99,7 +99,7 @@ checksum = "250f629c0161ad8107cf89319e990051fae62832fd343083bea452d93e2205fd"
 
 [[package]]
 name = "alloc-engine"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "buddy_system_allocator",
  "criterion 0.5.1",
@@ -141,11 +141,11 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
 name = "anon"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kerrno",
  "khal",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ksync",
  "unittest",
  "vmobj",
@@ -153,7 +153,7 @@ dependencies = [
 
 [[package]]
 name = "anon_inodefs"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kcred",
  "klazy",
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "backtrace"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "addr2line",
  "gimli",
@@ -351,14 +351,14 @@ dependencies = [
 
 [[package]]
 name = "block"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "driver_base",
  "kdevice",
  "kerrno",
  "klazy",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ksync",
  "log",
  "unittest",
@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "boot-info"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kcpu_id_map",
  "unittest",
@@ -401,7 +401,7 @@ dependencies = [
 
 [[package]]
 name = "bpffs"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "anon_inodefs",
  "hashbrown 0.16.1",
@@ -510,7 +510,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "cgroup2fs"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kcgroup",
  "kcred",
@@ -524,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "char_driver"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "driver_base",
 ]
@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "console-driver"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "arm_pl011",
  "driver_base",
@@ -672,7 +672,7 @@ dependencies = [
  "khal",
  "kiface",
  "kirq",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "lazyinit",
  "log",
  "memspace",
@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "define-simple-interfaces"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kiface",
 ]
@@ -1139,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "devfs"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "backtrace",
  "bitmaps",
@@ -1167,7 +1167,7 @@ dependencies = [
  "knet",
  "kpoll",
  "kprocess",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ksync",
  "ktask",
  "ktime",
@@ -1188,9 +1188,9 @@ dependencies = [
 
 [[package]]
 name = "device-res"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ktime_types",
  "smallvec",
  "unittest",
@@ -1198,7 +1198,7 @@ dependencies = [
 
 [[package]]
 name = "device-res-xkernel"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "device-res",
  "kdma",
@@ -1213,7 +1213,7 @@ dependencies = [
 
 [[package]]
 name = "dice-driver"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kerrno",
  "khal",
@@ -1246,7 +1246,7 @@ dependencies = [
 
 [[package]]
 name = "display"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "driver_base",
  "unittest",
@@ -1254,11 +1254,11 @@ dependencies = [
 
 [[package]]
 name = "driver_base"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 
 [[package]]
 name = "drmdevice"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
  "display",
@@ -1363,7 +1363,7 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "entropy"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "char_driver",
  "karch",
@@ -1380,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "entry"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "fs_context",
  "kbuild_config",
@@ -1479,7 +1479,7 @@ dependencies = [
 
 [[package]]
 name = "fat"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "axfatfs",
  "block",
@@ -1496,13 +1496,13 @@ dependencies = [
 
 [[package]]
 name = "fbdevice"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "display",
  "kalloc",
  "kclass",
  "khal",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "lazyinit",
  "log",
  "memaddr",
@@ -1532,7 +1532,7 @@ checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "filemap"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "anon",
  "karch",
@@ -1557,7 +1557,7 @@ checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
 
 [[package]]
 name = "firmware-handoff"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 
 [[package]]
 name = "flagset"
@@ -1594,14 +1594,14 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "fs_block"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "block",
 ]
 
 [[package]]
 name = "fs_boot"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "anon_inodefs",
  "block",
@@ -1625,7 +1625,7 @@ dependencies = [
 
 [[package]]
 name = "fs_context"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "klazy",
  "ksync",
@@ -1895,7 +1895,7 @@ checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
 name = "impl-simple-interfaces"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "define-simple-interfaces",
  "kiface",
@@ -1935,7 +1935,7 @@ dependencies = [
 
 [[package]]
 name = "input"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "driver_base",
  "strum",
@@ -1943,7 +1943,7 @@ dependencies = [
 
 [[package]]
 name = "inputdev"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kclass",
  "kdevice",
@@ -1960,14 +1960,14 @@ checksum = "6045ea39e8d2862506c0dff6c65d068da362335df698bb1634033492740d2170"
 
 [[package]]
 name = "iov_iter"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kerrno",
 ]
 
 [[package]]
 name = "irq-driver"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "aarch64-cpu 10.0.0",
  "arm-gic-driver",
@@ -1977,7 +1977,7 @@ dependencies = [
  "kiface",
  "kirq",
  "kplat",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "lazyinit",
  "log",
  "memaddr",
@@ -2037,18 +2037,18 @@ dependencies = [
 
 [[package]]
 name = "kaddr_layout"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 
 [[package]]
 name = "kalloc"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "alloc-engine",
  "backtrace",
  "cfg-if",
  "kaddr_layout",
  "kerrno",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "log",
  "memaddr",
  "percpu",
@@ -2058,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "karch"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "aarch64-cpu 10.0.0",
  "cfg-if",
@@ -2075,18 +2075,18 @@ dependencies = [
 
 [[package]]
 name = "kbpf"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "kbuild_config"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 
 [[package]]
 name = "kcgroup"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kerrno",
  "kidentity",
@@ -2097,7 +2097,7 @@ dependencies = [
 
 [[package]]
 name = "kclass"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "block",
  "char_driver",
@@ -2105,7 +2105,7 @@ dependencies = [
  "driver_base",
  "input",
  "kdevice",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "lazyinit",
  "log",
  "net",
@@ -2115,7 +2115,7 @@ dependencies = [
 
 [[package]]
 name = "kcpu"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "aarch64-cpu 10.0.0",
  "backtrace",
@@ -2144,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "kcpu_id_map"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "acpi",
  "cpumask",
@@ -2157,14 +2157,14 @@ dependencies = [
 
 [[package]]
 name = "kcpu_slot"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kcpu_id_map",
 ]
 
 [[package]]
 name = "kcred"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "kerrno",
@@ -2174,11 +2174,11 @@ dependencies = [
 
 [[package]]
 name = "kdevice"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "device-res",
  "driver_base",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "lazyinit",
  "log",
  "unittest",
@@ -2186,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "kdma"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "alloc-engine",
  "kalloc",
@@ -2195,14 +2195,14 @@ dependencies = [
  "khal",
  "kiface",
  "kplat",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "log",
  "memaddr",
 ]
 
 [[package]]
 name = "kdriver"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "block",
  "cfg-if",
@@ -2224,7 +2224,7 @@ dependencies = [
  "khal",
  "kirq",
  "kpoll",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ksync",
  "ktask",
  "ktime_types",
@@ -2243,7 +2243,7 @@ dependencies = [
 
 [[package]]
 name = "kernel-boot"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "aarch64-cpu 10.0.0",
  "boot-info",
@@ -2265,11 +2265,11 @@ dependencies = [
 
 [[package]]
 name = "kernel-elf-loader"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 
 [[package]]
 name = "kernel-elf-parser"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "xmas-elf",
  "zero",
@@ -2278,7 +2278,7 @@ dependencies = [
 
 [[package]]
 name = "kernel-image-metadata"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 
 [[package]]
 name = "kernel_guard"
@@ -2302,7 +2302,7 @@ dependencies = [
 
 [[package]]
 name = "kerrno"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "linux_sysno",
  "log",
@@ -2312,7 +2312,7 @@ dependencies = [
 
 [[package]]
 name = "kexec"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "filemap",
  "kaddr_layout",
@@ -2335,7 +2335,7 @@ dependencies = [
 
 [[package]]
 name = "kext4"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "block",
@@ -2354,7 +2354,7 @@ dependencies = [
 
 [[package]]
 name = "kfd"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "anon_inodefs",
  "flatten_objects",
@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "kfd_objects"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "anon_inodefs",
  "bitflags 2.13.1",
@@ -2384,7 +2384,7 @@ dependencies = [
  "kpoll",
  "kprocess",
  "ksignal",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ksync",
  "ktask",
  "ktime",
@@ -2398,7 +2398,7 @@ dependencies = [
 
 [[package]]
 name = "kfeat"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "alloc-engine",
  "backtrace",
@@ -2422,7 +2422,7 @@ dependencies = [
  "kplat-x86_64",
  "kprocess",
  "kruntime",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ksync",
  "ksyscall",
  "ktask",
@@ -2436,12 +2436,12 @@ dependencies = [
 
 [[package]]
 name = "kfutex"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kerrno",
  "khal",
  "klazy",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ktask",
  "ktime_types",
  "kuaccess",
@@ -2452,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "khal"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "acpi",
  "bitflags 2.13.1",
@@ -2468,7 +2468,7 @@ dependencies = [
  "kiface",
  "kirq",
  "kplat",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ktime_types",
  "lazyinit",
  "linkme",
@@ -2483,7 +2483,7 @@ dependencies = [
 
 [[package]]
 name = "kidentity"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kerrno",
  "lazyinit",
@@ -2492,7 +2492,7 @@ dependencies = [
 
 [[package]]
 name = "kiface"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "define-simple-interfaces",
  "impl-simple-interfaces",
@@ -2503,7 +2503,7 @@ dependencies = [
 
 [[package]]
 name = "kio"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "autocfg",
  "heapless",
@@ -2514,7 +2514,7 @@ dependencies = [
 
 [[package]]
 name = "kipi"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "karch",
  "kbuild_config",
@@ -2522,7 +2522,7 @@ dependencies = [
  "khal",
  "kiface",
  "kirq",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ktime_types",
  "lazyinit",
  "log",
@@ -2534,14 +2534,14 @@ dependencies = [
 
 [[package]]
 name = "kirq"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "karch",
  "kbuild_config",
  "kiface",
  "kpoll",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "log",
  "percpu",
  "unittest",
@@ -2549,7 +2549,7 @@ dependencies = [
 
 [[package]]
 name = "klazy"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "paste",
  "unittest",
@@ -2557,7 +2557,7 @@ dependencies = [
 
 [[package]]
 name = "klockstat"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "klockstat-macros",
  "linkme",
@@ -2565,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "klockstat-macros"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2575,19 +2575,19 @@ dependencies = [
 
 [[package]]
 name = "klogger"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "cfg-if",
  "chrono",
  "kiface",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ktime_types",
  "log",
 ]
 
 [[package]]
 name = "knet"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "anon_inodefs",
  "async-channel",
@@ -2608,7 +2608,7 @@ dependencies = [
  "klazy",
  "kpoll",
  "kprocess",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ksync",
  "ktask",
  "ktime_types",
@@ -2626,7 +2626,7 @@ dependencies = [
 
 [[package]]
 name = "kns"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "fs_context",
@@ -2642,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "kplat"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "boot-info",
  "const-str",
@@ -2656,7 +2656,7 @@ dependencies = [
 
 [[package]]
 name = "kplat-aarch64"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "aarch64-pmuv3",
  "console-driver",
@@ -2686,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "kplat-loongarch64"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "console-driver",
  "kaddr_layout",
@@ -2700,7 +2700,7 @@ dependencies = [
  "kiface",
  "kirq",
  "kplat",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ktime",
  "ktime_types",
  "lazyinit",
@@ -2714,7 +2714,7 @@ dependencies = [
 
 [[package]]
 name = "kplat-macros"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2723,7 +2723,7 @@ dependencies = [
 
 [[package]]
 name = "kplat-riscv64"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "console-driver",
  "irq-driver",
@@ -2746,7 +2746,7 @@ dependencies = [
 
 [[package]]
 name = "kplat-x86_64"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "acpi",
  "boot-info",
@@ -2763,7 +2763,7 @@ dependencies = [
  "kirq",
  "klazy",
  "kplat",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ktime",
  "ktime_types",
  "log",
@@ -2776,10 +2776,10 @@ dependencies = [
 
 [[package]]
 name = "kpoll"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.1",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "linux-raw-sys",
  "smallvec",
  "unittest",
@@ -2787,7 +2787,7 @@ dependencies = [
 
 [[package]]
 name = "kprocess"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "anon_inodefs",
  "fs_context",
@@ -2807,7 +2807,7 @@ dependencies = [
  "kpoll",
  "kresources",
  "ksignal",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ksync",
  "ktask",
  "ktime_types",
@@ -2826,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "kresources"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kerrno",
  "kfd",
@@ -2839,7 +2839,7 @@ dependencies = [
 
 [[package]]
 name = "krlimit"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "linux-raw-sys",
  "unittest",
@@ -2847,7 +2847,7 @@ dependencies = [
 
 [[package]]
 name = "kruntime"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "backtrace",
  "boot-info",
@@ -2887,7 +2887,7 @@ dependencies = [
 
 [[package]]
 name = "ksched"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "linked_list_r4l",
  "unittest",
@@ -2895,7 +2895,7 @@ dependencies = [
 
 [[package]]
 name = "ksignal"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "cfg-if",
@@ -2905,7 +2905,7 @@ dependencies = [
  "kerrno",
  "khal",
  "kiface",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ktime_types",
  "linux-raw-sys",
  "log",
@@ -2929,7 +2929,7 @@ dependencies = [
 
 [[package]]
 name = "kspin"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "karch",
  "kiface",
@@ -2940,12 +2940,12 @@ dependencies = [
 
 [[package]]
 name = "ksync"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "event-listener",
  "khal",
  "klockstat",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ktask",
  "linkme",
  "lock_api",
@@ -2954,7 +2954,7 @@ dependencies = [
 
 [[package]]
 name = "ksyscall"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "entropy",
@@ -3002,7 +3002,7 @@ dependencies = [
 
 [[package]]
 name = "ktask"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "backtrace",
  "event-listener",
@@ -3019,7 +3019,7 @@ dependencies = [
  "klazy",
  "kpoll",
  "ksched",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ktime",
  "ktime_types",
  "lazyinit",
@@ -3031,24 +3031,24 @@ dependencies = [
 
 [[package]]
 name = "ktime"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "khal",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ktime_types",
  "unittest",
 ]
 
 [[package]]
 name = "ktime_types"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "unittest",
 ]
 
 [[package]]
 name = "ktimer"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "event-listener",
  "kbuild_config",
@@ -3080,12 +3080,12 @@ dependencies = [
 
 [[package]]
 name = "ktracing"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "karch",
  "khal",
  "klazy",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ktask",
  "ktracepoint",
  "lock_api",
@@ -3097,7 +3097,7 @@ dependencies = [
 
 [[package]]
 name = "ktty"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
  "console-driver",
@@ -3108,7 +3108,7 @@ dependencies = [
  "kpoll",
  "kprocess",
  "ksignal",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ksync",
  "ktask",
  "kvfs",
@@ -3120,14 +3120,14 @@ dependencies = [
 
 [[package]]
 name = "kuaccess"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "extern-trait",
  "kaddr_layout",
  "kerrno",
  "khal",
  "kprocess",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ksync",
  "ktask",
  "linkme",
@@ -3140,7 +3140,7 @@ dependencies = [
 
 [[package]]
 name = "kvfs"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "block",
@@ -3184,7 +3184,7 @@ dependencies = [
 
 [[package]]
 name = "kvmm"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "aarch64-cpu 10.0.0",
  "kaddr_layout",
@@ -3194,7 +3194,7 @@ dependencies = [
  "khal",
  "kirq",
  "klogger",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ksync",
  "ktask",
  "ktime_types",
@@ -3206,7 +3206,7 @@ dependencies = [
 
 [[package]]
 name = "kvmm-api"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "fs_context",
  "kaddr_layout",
@@ -3226,7 +3226,7 @@ dependencies = [
 
 [[package]]
 name = "kwork"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "kbuild_config",
@@ -3236,7 +3236,7 @@ dependencies = [
  "kirq",
  "klazy",
  "kpoll",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ktask",
  "ktime_types",
  "kworkerpool",
@@ -3247,12 +3247,12 @@ dependencies = [
 
 [[package]]
 name = "kworkerpool"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kbuild_config",
  "kcpu_id_map",
  "kpoll",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ktask",
  "ktime_types",
  "log",
@@ -3261,10 +3261,10 @@ dependencies = [
 
 [[package]]
 name = "kworkqueue"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kcpu_id_map",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "unittest",
 ]
 
@@ -3324,7 +3324,7 @@ checksum = "df1d3c3b53da64cf5760482273a98e575c651a67eec7f77df96b5b642de8f039"
 
 [[package]]
 name = "linux_sysno"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "serde",
  "serde_repr",
@@ -3367,7 +3367,7 @@ dependencies = [
 
 [[package]]
 name = "macros"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -3393,7 +3393,7 @@ dependencies = [
 
 [[package]]
 name = "memaddr"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "unittest",
 ]
@@ -3406,7 +3406,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memfs"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "hashbrown 0.16.1",
@@ -3434,7 +3434,7 @@ dependencies = [
 
 [[package]]
 name = "memspace"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "anon",
  "kaddr_layout",
@@ -3445,7 +3445,7 @@ dependencies = [
  "kerrno",
  "khal",
  "kplat",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ksync",
  "lazyinit",
  "log",
@@ -3487,10 +3487,10 @@ dependencies = [
 
 [[package]]
 name = "net"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "driver_base",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ksync",
  "log",
  "unittest",
@@ -3557,7 +3557,7 @@ dependencies = [
 
 [[package]]
 name = "of"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "lazyinit",
  "memaddr",
@@ -3579,7 +3579,7 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "osvm"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
  "extern-trait",
@@ -3697,7 +3697,7 @@ dependencies = [
 
 [[package]]
 name = "page_table"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.1",
@@ -3714,7 +3714,7 @@ dependencies = [
 
 [[package]]
 name = "pagecache"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kalloc",
  "kerrno",
@@ -3743,7 +3743,7 @@ dependencies = [
 
 [[package]]
 name = "pci"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kbuild_config",
  "khal",
@@ -3793,7 +3793,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pipefs"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kcred",
  "kerrno",
@@ -3906,7 +3906,7 @@ dependencies = [
 
 [[package]]
 name = "posix-bpf"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bpffs",
  "kbpf",
@@ -3920,7 +3920,7 @@ dependencies = [
 
 [[package]]
 name = "posix-fs"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "fs_context",
@@ -3946,7 +3946,7 @@ dependencies = [
 
 [[package]]
 name = "posix-ipc"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "filemap",
@@ -3968,7 +3968,7 @@ dependencies = [
 
 [[package]]
 name = "posix-mm"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "filemap",
@@ -3988,7 +3988,7 @@ dependencies = [
 
 [[package]]
 name = "posix-net"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
  "kbuild_config",
@@ -4009,7 +4009,7 @@ dependencies = [
 
 [[package]]
 name = "posix-process"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
  "fs_context",
@@ -4036,7 +4036,7 @@ dependencies = [
 
 [[package]]
 name = "posix-types"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
  "kerrno",
@@ -4138,7 +4138,7 @@ dependencies = [
 
 [[package]]
 name = "procfs"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kaddr_layout",
  "kalloc",
@@ -4461,7 +4461,7 @@ dependencies = [
 
 [[package]]
 name = "rs_fdtree"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 
 [[package]]
 name = "rsa"
@@ -4483,7 +4483,7 @@ dependencies = [
 
 [[package]]
 name = "rtc-driver"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "arm_pl031",
  "chrono",
@@ -5070,7 +5070,7 @@ dependencies = [
 
 [[package]]
 name = "tee_kernel"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
  "cfg-if",
@@ -5114,7 +5114,7 @@ dependencies = [
 
 [[package]]
 name = "tee_raw_sys"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
  "posix-types",
@@ -5122,7 +5122,7 @@ dependencies = [
 
 [[package]]
 name = "tee_task_iface"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
  "cfg-if",
@@ -5164,7 +5164,7 @@ dependencies = [
 
 [[package]]
 name = "timer-driver"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "aarch64-cpu 10.0.0",
  "int_ratio",
@@ -5200,7 +5200,7 @@ dependencies = [
 
 [[package]]
 name = "tipc"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "kerrno",
@@ -5208,7 +5208,7 @@ dependencies = [
  "klazy",
  "kpoll",
  "kprocess",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ktask",
  "ktime_types",
  "linux_sysno",
@@ -5222,12 +5222,12 @@ dependencies = [
 
 [[package]]
 name = "tipc_handle"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "kerrno",
  "kpoll",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "smallvec",
 ]
 
@@ -5384,14 +5384,14 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "unittest"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "macros",
 ]
 
 [[package]]
 name = "unittest_support"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "fs_context",
  "kaddr_layout",
@@ -5437,7 +5437,7 @@ dependencies = [
 
 [[package]]
 name = "v9fs"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kcred",
  "kerrno",
@@ -5450,14 +5450,14 @@ dependencies = [
 
 [[package]]
 name = "vdev-core"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "ksync",
 ]
 
 [[package]]
 name = "vdev-test-mmio"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "log",
  "vdev-core",
@@ -5465,7 +5465,7 @@ dependencies = [
 
 [[package]]
 name = "vdev-uart16550"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "klogger",
  "ksync",
@@ -5474,7 +5474,7 @@ dependencies = [
 
 [[package]]
 name = "vdev-virtio-net"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "knet",
  "log",
@@ -5483,7 +5483,7 @@ dependencies = [
 
 [[package]]
 name = "vdev-vpl011"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "klogger",
  "vdev-core",
@@ -5497,7 +5497,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "virtio"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "block",
@@ -5506,7 +5506,7 @@ dependencies = [
  "display",
  "driver_base",
  "input",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "ktime_types",
  "kvirtiodrivers",
  "linked_list_r4l",
@@ -5521,7 +5521,7 @@ dependencies = [
 
 [[package]]
 name = "vmobj"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "memaddr",
  "unittest",
@@ -5535,7 +5535,7 @@ checksum = "442887c63f2c839b346c192d047a7c87e73d0689c9157b00b53dcc27dd5ea793"
 
 [[package]]
 name = "vsock"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "driver_base",
 ]
@@ -5603,7 +5603,7 @@ dependencies = [
 
 [[package]]
 name = "watchdog"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kbuild_config",
  "kcpu_id_map",
@@ -5837,12 +5837,12 @@ dependencies = [
 
 [[package]]
 name = "x86-apic"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "kcpu_id_map",
  "kiface",
  "kirq",
- "kspin 0.2.0-rc3",
+ "kspin 0.3.0-dev",
  "lazyinit",
  "log",
  "memaddr",
@@ -5855,7 +5855,7 @@ dependencies = [
 
 [[package]]
 name = "x86-boot-common"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "boot-info",
  "kaddr_layout",
@@ -5879,7 +5879,7 @@ dependencies = [
 
 [[package]]
 name = "x86_64-boot-stub"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "boot-info",
  "kaddr_layout",
@@ -5890,7 +5890,7 @@ dependencies = [
 
 [[package]]
 name = "x86_64-uefi-loader"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "boot-info",
  "kbuild_config",
