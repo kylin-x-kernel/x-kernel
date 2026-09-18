@@ -26,7 +26,7 @@ const SYSSIZE_OFFSET: usize = 0x1f4;
 const PAYLOAD_OFFSET_OFFSET: usize = 0x248;
 const PAYLOAD_LENGTH_OFFSET: usize = 0x24c;
 const INIT_SIZE_OFFSET: usize = 0x260;
-const UEFI_IMAGE_SIZE_BYTES: u64 = 256 * 1024 * 1024;
+const MIN_UEFI_IMAGE_SIZE_BYTES: u64 = 256 * 1024 * 1024;
 
 pub(crate) struct X86BootInputs {
     boot_stub_elf: PathBuf,
@@ -130,8 +130,17 @@ impl X86BootInputs {
         )
         .with_path(&config_path)?;
 
+        let file_sizes = [
+            fs::metadata(&self.uefi_loader_efi)
+                .with_path(&self.uefi_loader_efi)?
+                .len(),
+            fs::metadata(kernel_elf).with_path(kernel_elf)?.len(),
+            fs::metadata(&config_path).with_path(&config_path)?.len(),
+        ];
+        let image_size = uefi_image_size(&file_sizes)?;
+        println!("Creating UEFI FAT image: {image_size} bytes");
         let image = fs::File::create(output).with_path(output)?;
-        image.set_len(UEFI_IMAGE_SIZE_BYTES).with_path(output)?;
+        image.set_len(image_size).with_path(output)?;
         drop(image);
 
         run(context, "mkfs.fat")
@@ -173,6 +182,35 @@ impl X86BootInputs {
                 .join("x86_64-unknown-uefi/release/x86_64-uefi-loader.efi"),
         }
     }
+}
+
+/// Size FAT32 media from its files, including allocation and filesystem overhead.
+fn uefi_image_size(file_sizes: &[u64]) -> Result<u64> {
+    let overflow = || Error::Message("UEFI image size overflow".to_string());
+    let mut payload_bytes = 0u64;
+    for &size in file_sizes {
+        if size > u64::from(u32::MAX) {
+            return Err(Error::Message(
+                "UEFI payload exceeds FAT32 maximum file size".to_string(),
+            ));
+        }
+        payload_bytes = payload_bytes.checked_add(size).ok_or_else(overflow)?;
+    }
+    const MIB: u64 = 1024 * 1024;
+    // Two FATs need at most eight bytes per 512-byte sector (one-sector clusters).
+    // Solve image >= payload + fixed overhead + image/64. The fixed MiB covers
+    // reserved sectors, directories, cluster rounding for our three files, and
+    // formatter alignment. Keep the existing minimum for small kernels.
+    let required = payload_bytes
+        .checked_add(MIB)
+        .and_then(|size| size.checked_mul(64))
+        .ok_or_else(overflow)?
+        .div_ceil(63);
+    let aligned = required
+        .div_ceil(MIB)
+        .checked_mul(MIB)
+        .ok_or_else(overflow)?;
+    Ok(aligned.max(MIN_UEFI_IMAGE_SIZE_BYTES))
 }
 
 fn build_boot_stub(context: &BuildContext) -> Result<()> {
@@ -368,7 +406,7 @@ fn write_u32(image: &mut [u8], offset: usize, value: u32) -> Result<()> {
 mod tests {
     use super::{
         INIT_SIZE_OFFSET, PAYLOAD_LENGTH_OFFSET, PAYLOAD_OFFSET_OFFSET, SECTOR_SIZE,
-        SETUP_SECTORS_OFFSET, SYSSIZE_OFFSET, assemble_linuxboot_prefix,
+        SETUP_SECTORS_OFFSET, SYSSIZE_OFFSET, assemble_linuxboot_prefix, uefi_image_size,
     };
 
     #[test]
@@ -392,6 +430,20 @@ mod tests {
                 .all(|byte| *byte == 0)
         );
         assert_eq!(&image[setup_size + 16..], &kernel);
+    }
+
+    #[test]
+    fn uefi_image_grows_with_payload_and_leaves_space_for_fat_metadata() {
+        const MIB: u64 = 1024 * 1024;
+        assert_eq!(uefi_image_size(&[MIB, 32 * MIB, 64]).unwrap(), 256 * MIB);
+        for kernel_bytes in [255 * MIB, 300 * MIB, u64::from(u32::MAX)] {
+            let payload_bytes = kernel_bytes + MIB + 64;
+            let image_bytes = uefi_image_size(&[MIB, kernel_bytes, 64]).unwrap();
+            assert!(image_bytes > 256 * MIB);
+            assert_eq!(image_bytes % MIB, 0);
+            assert!(image_bytes - payload_bytes >= image_bytes.div_ceil(64) + MIB);
+        }
+        assert!(uefi_image_size(&[u64::from(u32::MAX) + 1]).is_err());
     }
 
     fn read_u32(image: &[u8], offset: usize) -> u32 {

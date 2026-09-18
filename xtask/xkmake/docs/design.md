@@ -84,6 +84,8 @@ LCOV 到 Cobertura XML 的转换是 unittest 覆盖率流程的内部阶段，�
    `PT_LOAD` 内容计算 SHA-256。
 10. 从 finalized ELF 生成 raw BIN。
 11. x86_64 在进程内生成 LinuxBoot header/镜像，并创建 UEFI FAT 镜像。
+    FAT 镜像按引导器、内核 ELF 和配置文件的实际大小计算，预留两份 FAT、
+    目录和分配对齐空间，按 MiB 对齐且至少 256 MiB，支持较大的 UT/coverage 产物。
 12. 移除旧 manifest，提升所有产物，最后提升新 manifest 作为有效性标记。
 13. 从有效 bundle 刷新仓库根目录的 `xkernel_<platform>.*` 兼容产物，供
     Jenkins 制品传递和仍使用旧命名的工具消费。复制先写入不存在的同目录

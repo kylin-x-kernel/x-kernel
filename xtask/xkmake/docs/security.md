@@ -40,7 +40,8 @@ vsock 并产生 warning，不会阻止无 vsock 的虚拟机启动。端口与 C
 `--dry-run` 不执行任何探测。
 
 LinuxBoot header 与镜像拼装在进程内完成，ELF 符号、长度、偏移和整数
-转换均在写文件前校验。UEFI 镜像只写入临时 bundle 路径。OVMF 固件视为
+转换均在写文件前校验。UEFI 镜像容量根据输入文件长度计算，拒绝超过 FAT32
+单文件长度限制的输入，并检查容量算术溢出；只写入临时 bundle 路径。OVMF 固件视为
 用户选择的外部可信输入；可写 VARS 使用模板副本，XKMake 不修改原模板。
 
 文档流程只从已解析配置快照取得 feature。附加 Cargo 参数不经 shell

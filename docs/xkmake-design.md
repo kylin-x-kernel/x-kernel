@@ -249,7 +249,9 @@ The LinuxBoot image contains the Linux protocol setup, the low-address Rust
 boot stub, and the kernel ELF. XKMake parses the stub ELF symbol table and
 patches the Linux boot header in process; no script or shell pipeline owns the
 image format. The UEFI FAT image contains `BOOTX64.EFI`, `axboot.toml`, and
-`kernel.elf`.
+`kernel.elf`. Its capacity follows their actual lengths, with FAT metadata and
+allocation headroom, rounded to MiB and retaining a 256 MiB minimum. Larger
+unit-test and coverage kernels therefore do not depend on a fixed media limit.
 
 The versioned manifest records:
 
