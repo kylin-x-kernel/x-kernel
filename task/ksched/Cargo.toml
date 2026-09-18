@@ -13,5 +13,5 @@ description = "x-kernel scheduler algorithms in a unified interface"
 default = []
 
 [dependencies]
-linked_list_r4l.workspace = true
+intrusive-collections.workspace = true
 unittest = { workspace = true }

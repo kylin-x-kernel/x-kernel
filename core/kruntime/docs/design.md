@@ -2,6 +2,26 @@
 
 ## 定位
 
+启动时区分“run queue 已发布，可以接受任务”和“本 CPU 服务已准备完成，可以
+执行任务”。AP 在 scheduler 初始化返回后、发布 SCHED_READY_CPUS 之前持有
+NoPreempt，覆盖固定通知 drain、ksoftirqd、worker pool、开 IRQ 及可选 watchdog/
+PMU 初始化；进入 run_idle 前释放。请求保持 pending，不通过丢弃通知规避早调度。
+IRQ 关闭仍可能在内部锁释放时进行主动抢占检查，因此不能替代该 guard。
+
+主核在 scheduler 初始化返回后，同样保护 IRQ 服务与 late-init 任务的创建和激活，
+完成后释放 guard，再进入普通调度。late_init_main 的驱动/文件系统/网络阶段可能
+等待 I/O，不处于该保护范围。受保护启动区域不得显式 yield、阻塞或等待本 CPU
+尚未执行的任务；后续新增初始化步骤必须维护这个约束。
+
+单测启动钩子在所有 AP 的 run queue 就绪、主核尚未发布 INITED_CPUS 时逐核
+投递任务及重调度请求，任务检查 AP 服务准备完成标记。结果保留至测试执行，
+不依赖忙等时长；测试任务退出，无运行期 hook 或栈借用遗留。
+
+固定调度 IPI 的启用由 runtime 编排：主 CPU 在 late init 的 `kipi::init` 后启用；
+AP 在全局初始化屏障后、原本开启本地 IPI 线路的位置启用。该入口负责线路开启、
+发布 ENABLED 并 drain 早期请求。AP 的 `SCHED_READY_CPUS` 仍表示运行队列已注册，
+不改成“IRQ 已启用”；在两阶段之间发来的固定请求由静态原因位保留。
+
 `kruntime` 是 x-kernel 的**运行时编排层**：在平台引导代码将控制权交给内核后，负责主核/从核的初始化顺序、子系统装配，以及跳转到系统初始化入口（`entry` crate 提供的 `SystemInitEntry`）。它不实现具体设备驱动或 syscall，而是把 `khal`、`memspace`、`ktask`、`kdriver` 等按固定阶段串联起来。
 
 目标读者：需要理解启动链、SMP 屏障、或在此 crate 增加初始化钩子的内核开发者。

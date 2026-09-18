@@ -7,6 +7,7 @@
 mod cfs;
 mod eevdf;
 mod fifo;
+mod ready_list;
 mod round_robin;
 #[cfg(unittest)]
 mod tests;
@@ -68,10 +69,8 @@ pub trait BaseScheduler {
 
     /// Removes a ready task by reference. Returns the owned task if present.
     ///
-    /// # Safety
-    ///
-    /// The caller should ensure that the task is in the scheduler, otherwise
-    /// the behavior is undefined.
+    /// Callers should pass tasks assigned to this scheduler. FIFO/RR reject
+    /// detached tasks and tasks belonging to another ready queue with `None`.
     fn remove_task(&mut self, task: &Self::SchedItem) -> Option<Self::SchedItem>;
 
     /// Removes one ready waiter matching `want`, without selecting it to run.

@@ -2,6 +2,12 @@
 
 ## 定位
 
+远端重调度和运行任务 signal kick 使用 `kipi::notify_reschedule` 固定通知，
+不再向普通 IPI 回调队列插入闭包。`RescheduleIpiIf` 静态实现只调用原有
+`on_remote_resched_ipi` 设置当前任务抢占标志，不做调度记账或 timer 重编程。
+关闭 preempt 时处理端为空，但 SMP signal kick 仍发送 IPI，使 CPU 离开用户模式。
+本地提醒、任务归属和迁移锁序保持原有协议。
+
 `ktask` 是 x-kernel 的**内核任务管理与调度编排层**：提供任务创建/退出、阻塞与唤醒、每 CPU 运行队列、抢占控制、定时事件驱动，以及（可选）快照与 watchdog 诊断能力。
 
 它不实现具体硬件中断派发（由 `khal`/`kruntime` 负责），也不实现调度算法本体（由 `ksched` 提供），而是把这些能力在运行期组装成统一的任务模型。

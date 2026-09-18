@@ -23,9 +23,187 @@ const UNITS_PER_SLICE: usize = 5;
 const UNIT_NS: u64 = 4096;
 const SLICE: usize = UNITS_PER_SLICE * UNIT_NS as usize;
 
+#[def_test]
+fn eevdf_intrusive_identity_and_release() {
+    let mut left = EevdfScheduler::<usize, SLICE>::new();
+    let mut right = EevdfScheduler::<usize, SLICE>::new();
+    let a = Arc::new(EevdfEntity::new(0));
+    let b = Arc::new(EevdfEntity::new(1));
+    // Independent schedulers assign the same complete key to different tasks.
+    left.add_task(a.clone());
+    right.add_task(b.clone());
+    assert!(left.remove_task(&b).is_none());
+    assert!(!left.set_priority(&b, 5));
+    let detached = Arc::new(EevdfEntity::new(2));
+    detached.set_deadline_for_test(a.deadline());
+    let deadline = a.deadline();
+    assert!(left.set_priority(&detached, 5));
+    assert_eq!(a.deadline(), deadline);
+    assert!(detached.deadline() > deadline);
+    assert!(left.ready_indices_valid_for_test());
+    assert!(right.ready_indices_valid_for_test());
+    let removed = left.remove_task(&a).unwrap();
+    assert!(Arc::ptr_eq(&a, &removed));
+    drop(removed);
+    assert_eq!(Arc::strong_count(&a), 1);
+    assert!(left.ready_indices_valid_for_test());
+    right.enqueue_task(a.clone());
+    assert!(right.ready_indices_valid_for_test());
+    drop(right);
+    assert_eq!(Arc::strong_count(&a), 1);
+    assert_eq!(Arc::strong_count(&b), 1);
+    // Dropping a nonempty scheduler must unlink both fields, not fast_clear.
+    left.add_task(b.clone());
+    left.add_task(a.clone());
+    assert!(left.ready_indices_valid_for_test());
+}
+
+#[def_test]
+fn eevdf_intrusive_reuse_and_selection() {
+    const N: usize = 32;
+    let tasks: Vec<_> = (0..N)
+        .map(|i| Arc::new(EevdfEntity::<_, SLICE>::new(i)))
+        .collect();
+    let mut schedulers = [EevdfScheduler::new(), EevdfScheduler::new()];
+    let mut locations = [None; N];
+    let mut random = 0x8765_4321_u64;
+    for step in 0..2000 {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        let index = random as usize % N;
+        let task = &tasks[index];
+        if let Some(old) = locations[index].take() {
+            let old: usize = old;
+            assert!(schedulers[old].remove_task(task).is_some());
+            assert!(schedulers[old].remove_task(task).is_none());
+            assert_eq!(Arc::strong_count(task), 1);
+        }
+        if step % 5 != 0 {
+            let target = (random >> 32) as usize % 2;
+            task.set_vruntime_for_test((random % 31) as i64 - 15);
+            task.set_deadline_for_test(((random >> 12) % 17) as i64 - 8);
+            schedulers[target].inject_ready_for_test(task.clone());
+            locations[index] = Some(target);
+        }
+        assert!(schedulers.iter().all(|s| s.ready_indices_valid_for_test()));
+    }
+    for (index, location) in locations.iter_mut().enumerate() {
+        if let Some(cpu) = location.take() {
+            assert!(schedulers[cpu].remove_task(&tasks[index]).is_some());
+        }
+    }
+    assert!(schedulers.iter().all(|s| s.ready_indices_valid_for_test()));
+    // Negative keys, repeated deadlines and an ineligible deadline head.
+    // At equal weight V=(-4+0+4+8)/4=2; eligible task 1 has earlier deadline.
+    for (i, (vr, dl)) in [(-4, 2), (0, 1), (4, -2), (8, 1)].into_iter().enumerate() {
+        tasks[i].set_vruntime_for_test(vr);
+        tasks[i].set_deadline_for_test(dl);
+        schedulers[0].inject_ready_for_test(tasks[i].clone());
+    }
+    let picked = schedulers[0].pick_next_task().unwrap();
+    assert_eq!(*picked.inner(), 1);
+    schedulers[0].leave_current(picked, CurrentDisposition::Exit);
+    assert!(schedulers[0].ready_indices_valid_for_test());
+    let stolen = schedulers[0].steal_ready_task(|t| *t.inner() != 0).unwrap();
+    assert_eq!(*stolen.inner(), 2);
+    assert!(schedulers[0].ready_indices_valid_for_test());
+}
+
 // ============================================================================
 // FIFO scheduler tests
 // ============================================================================
+
+fn check_list_lifecycle<S, T>(
+    mut source: S,
+    mut dest: S,
+    tasks: Vec<Arc<T>>,
+) -> unittest::TestResult
+where
+    S: BaseScheduler<SchedItem = Arc<T>>,
+{
+    for task in &tasks {
+        source.add_task(task.clone());
+        assert!(dest.remove_task(task).is_none());
+    }
+    let mut source = alloc::boxed::Box::new(source);
+    assert!(source.steal_ready_task(|_| false).is_none());
+    for task in &tasks {
+        assert_eq!(Arc::strong_count(task), 2);
+        let removed = source.remove_task(task).unwrap();
+        assert!(Arc::ptr_eq(&removed, task));
+        assert!(source.remove_task(task).is_none());
+        dest.enqueue_task(removed);
+        assert!(source.remove_task(task).is_none());
+    }
+    drop(dest);
+    for task in &tasks {
+        assert_eq!(Arc::strong_count(task), 1);
+        source.enqueue_task(task.clone());
+    }
+    for task in &tasks {
+        let picked = source.pick_next_task().unwrap();
+        assert!(Arc::ptr_eq(&picked, task));
+        source.leave_current(picked, CurrentDisposition::Exit);
+    }
+    assert!(source.pick_next_task().is_none());
+    let weak: Vec<_> = tasks.iter().map(Arc::downgrade).collect();
+    for task in &tasks {
+        source.add_task(task.clone());
+    }
+    drop(tasks);
+    drop(source);
+    assert!(weak.iter().all(|task| task.upgrade().is_none()));
+    unittest::TestResult::Ok
+}
+
+#[def_test]
+fn fifo_list_lifecycle() {
+    let result = check_list_lifecycle(
+        FifoScheduler::new(),
+        FifoScheduler::new(),
+        (0..32).map(|i| Arc::new(FifoTask::new(i))).collect(),
+    );
+    assert_eq!(result, unittest::TestResult::Ok);
+}
+
+#[def_test]
+fn rr_list_lifecycle() {
+    let result = check_list_lifecycle(
+        RRScheduler::<_, 100>::new(),
+        RRScheduler::new(),
+        (0..32).map(|i| Arc::new(RRTask::new(i))).collect(),
+    );
+    assert_eq!(result, unittest::TestResult::Ok);
+}
+
+#[def_test]
+fn rr_preserves_preempt_budget_and_resets_yield() {
+    let mut scheduler = RRScheduler::<_, 100>::new();
+    let a = Arc::new(RRTask::new(0));
+    let b = Arc::new(RRTask::new(1));
+    scheduler.add_task(a.clone());
+    scheduler.add_task(b.clone());
+    let running = scheduler.pick_next_task().unwrap();
+    assert!(!scheduler.update_current(&running, 30));
+    scheduler.leave_current(running, CurrentDisposition::Preempt);
+    let running = scheduler.pick_next_task().unwrap();
+    assert!(Arc::ptr_eq(&running, &a));
+    assert_eq!(scheduler.next_preemption_ns(&running), Some(70));
+    scheduler.leave_current(running, CurrentDisposition::Yield);
+    let running = scheduler.pick_next_task().unwrap();
+    assert!(Arc::ptr_eq(&running, &b));
+    scheduler.leave_current(running, CurrentDisposition::Block);
+    let running = scheduler.pick_next_task().unwrap();
+    scheduler.enqueue_task(b);
+    assert_eq!(scheduler.next_preemption_ns(&running), Some(100));
+    assert!(scheduler.update_current(&running, 100));
+    scheduler.leave_current(running, CurrentDisposition::Preempt);
+    let first = scheduler.pick_next_task().unwrap();
+    let second = scheduler.pick_next_task().unwrap();
+    assert_eq!(*first.inner(), 1);
+    assert_eq!(*second.inner(), 0);
+}
 
 #[def_test]
 fn fifo_sched_order() {
@@ -318,6 +496,35 @@ fn eevdf_steal_ready_leaves_curr() {
     assert!(!sched.curr_is_none());
     assert!(stolen.needs_place_for_test());
     assert!(sched.steal_ready_task(|_| false).is_none());
+}
+
+#[def_test]
+fn eevdf_steal_predicate_retains_owner() {
+    let mut sched = EevdfScheduler::<usize, SLICE>::new();
+    let tasks: Vec<_> = (0..4).map(|id| Arc::new(EevdfEntity::new(id))).collect();
+    for task in &tasks {
+        sched.add_task(task.clone());
+    }
+    let mut retained = Vec::new();
+    assert!(
+        sched
+            .steal_ready_task(|task| {
+                retained.push(task.clone());
+                false
+            })
+            .is_none()
+    );
+    assert_eq!(retained.len(), tasks.len());
+    let target = retained.last().unwrap().clone();
+    let stolen = sched
+        .steal_ready_task(|task| Arc::ptr_eq(task, &target))
+        .unwrap();
+    assert!(Arc::ptr_eq(&stolen, &target));
+    assert!(sched.remove_task(&target).is_none());
+    drop((sched, retained, target, stolen));
+    for task in &tasks {
+        assert_eq!(Arc::strong_count(task), 1);
+    }
 }
 
 #[def_test]

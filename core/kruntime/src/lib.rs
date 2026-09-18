@@ -177,6 +177,9 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
         });
     }
 
+    #[cfg(all(unittest, feature = "smp"))]
+    self::mp::tests_startup_order::queue_early_tasks(cpu_id);
+
     kdriver::init_drivers();
     #[cfg(feature = "char")]
     ktty::tty::try_handoff_console();
@@ -210,6 +213,9 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
 
     #[cfg(feature = "ipi")]
     kipi::init();
+
+    #[cfg(feature = "ipi")]
+    kipi::enable_fixed_notifications();
 
     #[cfg(feature = "smp")]
     kipi::tlb::mark_all_cpus_started();
@@ -361,6 +367,9 @@ pub fn rust_main(arg: usize) -> ! {
     khal::final_init(boot_info);
 
     ktask::init_scheduler();
+    // Prepare IRQ services and the late-init task before any newly activated
+    // task can preempt this bootstrap frame at a nested guard release.
+    let startup_guard = kspin::NoPreempt::new();
     info!("Initialize interrupt handlers...");
     init_interrupt();
 
@@ -376,6 +385,8 @@ pub fn rust_main(arg: usize) -> ! {
     // permanently parked frame.
     drop(late_init);
     info!("Started late-init bootstrap thread.");
+    // Late initialization itself may block on I/O, so it runs preemptibly.
+    drop(startup_guard);
 
     // The boot task is PID 0 and remains outside the ordinary PID namespace.
     // Once the late-init thread is runnable it has no further initialization

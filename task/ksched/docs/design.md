@@ -19,6 +19,7 @@ task/ksched/
 │   ├── lib.rs          # BaseScheduler / CurrentDisposition
 │   ├── fifo.rs
 │   ├── round_robin.rs
+│   ├── ready_list.rs   # FIFO/RR shared intrusive queue
 │   ├── cfs.rs
 │   ├── eevdf.rs
 │   └── tests.rs
@@ -98,8 +99,17 @@ Blocked|Migrating --enqueue_task--> Ready
 - EEVDF `curr` 使用值快照而非 `Arc`/`Weak`：O(1) 统计、无原子 upgrade、不参与
   生命周期。
 - 不再维护未接线的 metadata 分离调度器；生产与单测统一走 entity 内嵌实现。
-- EEVDF eligible pick 走 `vrt_set`（vruntime 序）区间查询，而不是扫 deadline
-  序 ready 树。负 lag 的 ineligible 任务会堵在 deadline 队头，深队列下后者是 O(n)。
+- EEVDF ready 索引使用 intrusive-collections 0.10.2 的两棵 RBTree，分别按
+  `(deadline,id)` 和 `(vruntime,id)` 排序，直接索引同一实体，不再维护 id 反查表。
+  每实体预置两个 RBTreeAtomicLink；入队、摘除和查询不申请索引内存。FIFO/RR
+  统一使用同版本的 LinkedList，ksched 不再依赖 linked_list_r4l。
+  依赖启用 nightly 特性以保留 scheduler 的 const 构造，
+  由仓库现有 RUSTC_BOOTSTRAP 构建环境支持。
+- 每棵树缓存最早实体，常见最小值查询 O(1)；插入比较更新缓存，摘除最小值时
+  用游标后继更新，增删仍为 O(log N)。库的 front 本身不是 O(1)。
+- eligible pick 在 deadline 首节点有资格时直接返回，否则遍历 vruntime 的
+  有资格前缀，O(log N + E)，不收集临时 Vec。保留 id 次序、lag、权重记账、
+  curr、buddy/WF_SYNC、抢占和时间片算法。steal 保留 deadline 顺序和既有谓词签名。
 - EEVDF 虚拟时间（`vruntime` / `deadline` / `vlag`）用固定宽度 `i64`，墙钟
   （`slice_ns` / `request_ns` / `elapsed_ns`）用 `u64`。两边只经
   `vruntime_delta` / `vruntime_to_wall_ns` 转换；`Σ w·v` 乘除用 `i128`。
@@ -111,3 +121,49 @@ Blocked|Migrating --enqueue_task--> Ready
 调度器 ready 队列持有 Ready 任务的 `Arc`。运行任务的 owner 在 `ktask` 侧
 （current-task 指针、wait/waker、migration helper、exited list）。算法内部的
 `curr` 快照在 `leave_current` 时清除，不延长任务存活。
+
+EEVDF 两棵树各持一个已有 Arc，两个最早缓存按需各持一份；摘除两索引和更新
+缓存期间保留返还引用，释放附加引用不会触发最终实体析构。非空 scheduler Drop
+由树正常清理链接和持有，不能使用 fast_clear。迁移前两链接都必须摘除；排队期间
+deadline、vruntime、id 不变，set_priority 先摘树再改键。
+
+索引受既有 scheduler 锁串行保护，AtomicLink 不意味着无锁树。按实体删除先查键
+再核对地址；同键的另一实体不被删除。错误 scheduler 的 set_priority 对仍挂树的
+外来实体返回 false，避免修改别的树的排序字段。
+
+库的 intrusive_adapter! 宏不能表达 EevdfEntity 的 const 泛型，因此私有
+EntityAdapter 用同一模板的两种编译期字段投影实现 Adapter；不新增运行期模式。
+字段偏移使用 core::mem::offset_of!，Arc 转换由 DefaultPointerOps 完成，缓存引用
+由安全 cursor.clone_pointer 取得，不手写引用计数恢复。
+
+EEVDF steal 逐节点检查时，以游标 get_ptr 构造 ManuallyDrop<Arc<_>>
+临时借用视图，避免未命中节点的原子引用计数操作。谓词只接收 &Arc，
+命中后才 clone 一份真实强引用，结束游标借用，再走既有 remove_task。
+扫描期间树始终持有原有强引用；正常返回和 panic 都不释放借来的引用。
+
+## FIFO/RR 侵入式队列
+
+ReadyList 只收口 FIFO/RR 共有的队列操作，不持有调度策略。FifoTask 保留
+new/inner/into_inner/Deref，RRTask 保留 new/inner/Deref 和原时间片逻辑。
+移除旧容器专用的 GetLinks 实现，不向调用方暴露新链接。
+
+每个实体内嵌一个 LinkedListAtomicLink 和一个队列归属字。队列首次入队时取得
+全局唯一、永不复用的 usize 标识，构造仍是 const 且不分配内存；编号耗尽会在
+修改链表前明确 panic，不回绕。队列移动不改变标识，按任务摘除保持 O(1)。
+编号只在队列首次使用时访问全局原子计数，不在每次入队时竞争该计数。
+
+库的 AtomicLink 已负责拒绝重复入链。入链成功后才写入 owner，拒绝重复入队
+不会覆盖原归属；摘除时在释放 AtomicLink 之前清除 owner，避免覆盖另一个队列
+刚写入的新归属。owner 是原子身份标记而非发布锁，采用 Relaxed；实际链表访问
+由队列独占借用和外部 RQ 锁保护，链接跨队列占用由库的 acquire/release 维护。
+
+steal 使用游标逐个检查，命中只摘目标节点，未命中不改动链表。保留 Arc 谓词
+签名，以游标的原始数据指针构造 ManuallyDrop<Arc<T>> 临时视图，不增减引用计数。
+视图只以 &Arc 传给谓词，不能被移出；其存活期间游标独占借用列表，列表持有
+原有强引用。谓词 panic 不释放借用的引用；命中后的摘除转交列表的真实 Arc，
+此后不再使用临时视图。相比 clone_pointer，这避免每个被检查节点的原子计数成本。
+
+ReadyList Drop 正常逐个摘除并清除归属，外部仍持有的实体可以重新入队。
+队列拥有一个 Arc，摘除通过库转交所有权；不使用 fast_clear，不手写引用计数。
+ReadyItem 私有 unsafe trait 只约束字段偏移与字段封装，支持 RR const 泛型；
+ReadyAdapter 的正反投影使用具体字段 offset_of，不自写链表算法。

@@ -8,8 +8,7 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use linked_list_r4l::{GetLinks, Links, List};
-
+use super::ready_list::{ReadyItem, ReadyLinks, ReadyList};
 use crate::{BaseScheduler, CurrentDisposition};
 
 /// A task wrapper for the [`RRScheduler`].
@@ -18,7 +17,7 @@ use crate::{BaseScheduler, CurrentDisposition};
 pub struct RRTask<T, const MAX_SLICE_NS: usize> {
     inner: T,
     remaining_ns: AtomicU64,
-    links: Links<Self>,
+    links: ReadyLinks,
 }
 
 impl<T, const S: usize> RRTask<T, S> {
@@ -27,7 +26,7 @@ impl<T, const S: usize> RRTask<T, S> {
         Self {
             inner,
             remaining_ns: AtomicU64::new(S as u64),
-            links: Links::new(),
+            links: ReadyLinks::new(),
         }
     }
 
@@ -45,11 +44,12 @@ impl<T, const S: usize> RRTask<T, S> {
     }
 }
 
-impl<T, const MAX_SLICE_NS: usize> GetLinks for RRTask<T, MAX_SLICE_NS> {
-    type EntryType = Self;
+// SAFETY: OFFSET selects this private field, accessed only by ReadyList.
+unsafe impl<T, const S: usize> ReadyItem for RRTask<T, S> {
+    const OFFSET: usize = core::mem::offset_of!(Self, links);
 
-    fn get_links(data: &Self::EntryType) -> &Links<Self::EntryType> {
-        &data.links
+    fn ready_links(&self) -> &ReadyLinks {
+        &self.links
     }
 }
 
@@ -72,47 +72,14 @@ impl<T, const S: usize> Deref for RRTask<T, S> {
 /// [Round-Robin]: https://en.wikipedia.org/wiki/Round-robin_scheduling
 /// [`FifoScheduler`]: crate::FifoScheduler
 pub struct RRScheduler<T, const MAX_SLICE_NS: usize> {
-    ready_queue: List<Arc<RRTask<T, MAX_SLICE_NS>>>,
-}
-
-/// Unlink the first ready waiter matching `want`.
-///
-/// Same idle-pull lock concern as [`crate::FifoScheduler`]: do not drain the
-/// whole ready list after the first hit.
-fn steal_first_matching<T, const S: usize>(
-    queue: &mut List<Arc<RRTask<T, S>>>,
-    mut want: impl FnMut(&Arc<RRTask<T, S>>) -> bool,
-) -> Option<Arc<RRTask<T, S>>> {
-    let mut skipped = List::new();
-    while let Some(task) = queue.pop_front() {
-        if want(&task) {
-            prepend_in_order(queue, skipped);
-            return Some(task);
-        }
-        skipped.push_back(task);
-    }
-    *queue = skipped;
-    None
-}
-
-fn prepend_in_order<T, const S: usize>(
-    dest: &mut List<Arc<RRTask<T, S>>>,
-    mut front: List<Arc<RRTask<T, S>>>,
-) {
-    let mut rev: List<Arc<RRTask<T, S>>> = List::new();
-    while let Some(task) = front.pop_front() {
-        rev.push_front(task);
-    }
-    while let Some(task) = rev.pop_front() {
-        dest.push_front(task);
-    }
+    ready_queue: ReadyList<RRTask<T, MAX_SLICE_NS>>,
 }
 
 impl<T, const S: usize> RRScheduler<T, S> {
     /// Creates a new empty [`RRScheduler`].
     pub const fn new() -> Self {
         Self {
-            ready_queue: List::new(),
+            ready_queue: ReadyList::new(),
         }
     }
 
@@ -132,17 +99,14 @@ impl<T, const S: usize> BaseScheduler for RRScheduler<T, S> {
     }
 
     fn remove_task(&mut self, task: &Self::SchedItem) -> Option<Self::SchedItem> {
-        // SAFETY: scheduler tasks are only linked into `ready_queue` through
-        // this scheduler, so removing a known task preserves the intrusive-list
-        // membership invariant.
-        unsafe { self.ready_queue.remove(task) }
+        self.ready_queue.remove(task)
     }
 
     fn steal_ready_task<F>(&mut self, want: F) -> Option<Self::SchedItem>
     where
         F: FnMut(&Self::SchedItem) -> bool,
     {
-        steal_first_matching(&mut self.ready_queue, want)
+        self.ready_queue.steal(want)
     }
 
     fn pick_next_task(&mut self) -> Option<Self::SchedItem> {

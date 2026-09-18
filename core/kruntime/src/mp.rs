@@ -125,6 +125,12 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
 
     ktask::init_scheduler_secondary();
 
+    // Boot runs on idle: switching it out can postpone all remaining setup
+    // indefinitely. IRQ masking alone does not stop lock-drop preemption.
+    // Keep startup non-preemptible until every per-CPU service is prepared;
+    // this region must not explicitly yield or wait for a runnable task.
+    let startup_guard = kspin::NoPreempt::new();
+
     // Publish that this CPU's run queue is registered so the primary's
     // `start_secondary_cpus` can stop waiting and enter driver initialization
     // knowing cross-CPU placement onto this CPU is safe.
@@ -141,7 +147,7 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     }
 
     #[cfg(feature = "ipi")]
-    kirq::enable(kbuild_config::IPI_IRQ, true);
+    kipi::enable_fixed_notifications();
 
     ktask::init_softirqd_current_cpu();
     if kwork::raw::init_system_workqueue_worker_pools_for_cpu(logical_cpu_id).is_none() {
@@ -163,6 +169,11 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     #[cfg(feature = "pmu")]
     khal::pmu::enable_irq();
 
+    #[cfg(unittest)]
+    tests_startup_order::mark_complete(logical_cpu_id);
+
+    // Pending requests are preserved and may take effect on this release.
+    drop(startup_guard);
     ktask::run_idle();
 }
 
@@ -170,6 +181,62 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
 impl SecondaryKernelEntry {
     fn enter(logical_cpu_id: LogicalCpuId) -> ! {
         rust_main_secondary(logical_cpu_id)
+    }
+}
+
+#[cfg(unittest)]
+pub(super) mod tests_startup_order {
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use kcpu_id_map::{KCpuMaskExt, LogicalCpuId, for_each_present_logical_cpu};
+    use unittest::{assert, assert_eq, def_test};
+
+    // One-shot boot observations intentionally live for the whole test boot.
+    // No runtime hooks are installed, and tasks own no references to stack data.
+    static COMPLETE: [AtomicBool; kbuild_config::NR_CPUS] =
+        [const { AtomicBool::new(false) }; kbuild_config::NR_CPUS];
+    static RAN_EARLY: AtomicBool = AtomicBool::new(false);
+    static QUEUED: AtomicUsize = AtomicUsize::new(0);
+    static REMAINING: AtomicUsize = AtomicUsize::new(0);
+
+    pub(super) fn mark_complete(cpu_id: LogicalCpuId) {
+        COMPLETE[cpu_id.as_usize()].store(true, Ordering::Release);
+    }
+
+    pub(crate) fn queue_early_tasks(primary: LogicalCpuId) {
+        // All AP run queues exist, but APs still wait for the primary's
+        // INITED_CPUS publication. No task can pass the startup checkpoint yet.
+        for_each_present_logical_cpu(|_, cpu_id, _| {
+            if cpu_id == primary {
+                return;
+            }
+            let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
+                move || {
+                    if !COMPLETE[cpu_id.as_usize()].load(Ordering::Acquire) {
+                        RAN_EARLY.store(true, Ordering::Release);
+                    }
+                    REMAINING.fetch_sub(1, Ordering::AcqRel);
+                },
+                "startup_order_probe".into(),
+                kbuild_config::TASK_STACK_SIZE,
+            ));
+            task.set_cpumask(ktask::KCpuMask::one_shot_logical(cpu_id));
+            QUEUED.fetch_add(1, Ordering::Relaxed);
+            REMAINING.fetch_add(1, Ordering::Relaxed);
+            ktask::activate_task(&task);
+            kipi::notify_reschedule(cpu_id).expect("boot probe reschedule request failed");
+        });
+    }
+
+    #[def_test]
+    fn early_remote_task_waits_for_secondary_bootstrap() {
+        // Wait for explicit task completion, not a wall-clock delay or a fixed
+        // number of yields. The external QEMU timeout bounds a boot failure.
+        while REMAINING.load(Ordering::Acquire) != 0 {
+            ktask::yield_now();
+        }
+        assert_eq!(QUEUED.load(Ordering::Acquire), kcpu_id_map::nr_cpus() - 1);
+        assert!(!RAN_EARLY.load(Ordering::Acquire));
     }
 }
 

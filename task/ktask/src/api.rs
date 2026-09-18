@@ -477,6 +477,15 @@ pub(crate) fn on_remote_resched_ipi() {
     current().set_preempt_pending(true);
 }
 
+#[cfg(feature = "ipi")]
+#[kiface::provide]
+impl kipi::RescheduleIpiIf {
+    fn on_reschedule() {
+        #[cfg(all(feature = "preempt", feature = "smp"))]
+        on_remote_resched_ipi();
+    }
+}
+
 /// Consumes a pending preemption request before returning to ordinary task execution.
 ///
 /// This is intended for task/user return paths that are about to resume normal
@@ -919,31 +928,41 @@ mod tests_api {
     #[def_test(serial)]
     fn wait_for_poll_event_until_blocks_until_condition_and_notify() {
         let event = Arc::new(kpoll::PollEvent::new());
+        let started_event = Arc::new(kpoll::PollEvent::new());
+        let started = Arc::new(AtomicBool::new(false));
         let ready = Arc::new(AtomicBool::new(false));
         let finished = Arc::new(AtomicBool::new(false));
         let waiter_event = event.clone();
+        let waiter_started_event = started_event.clone();
+        let waiter_started = started.clone();
         let waiter_ready = ready.clone();
         let waiter_finished = finished.clone();
 
-        crate::spawn(move || {
-            wait_for_poll_event_until(&waiter_event, || waiter_ready.load(Ordering::Acquire))
-                .expect("poll wait should register from task context");
+        let waiter = crate::spawn(move || {
+            wait_for_poll_event_until(&waiter_event, || {
+                let is_ready = waiter_ready.load(Ordering::Acquire);
+                if !is_ready {
+                    waiter_started.store(true, Ordering::Release);
+                    waiter_started_event.notify();
+                }
+                is_ready
+            })
+            .expect("poll wait should register from task context");
             waiter_finished.store(true, Ordering::Release);
         });
 
-        for _ in 0..8 {
-            crate::yield_now();
-        }
-        assert!(!finished.load(Ordering::Acquire));
+        // Observe a false predicate explicitly; yielding cannot prove that a
+        // remote waiter has run, much less that it has parked.
+        wait_for_poll_event_until(&started_event, || started.load(Ordering::Acquire))
+            .expect("waiter should announce its first unsuccessful check");
+        let finished_before_notify = finished.load(Ordering::Acquire);
 
         ready.store(true, Ordering::Release);
         event.notify();
-        for _ in 0..1000 {
-            if finished.load(Ordering::Acquire) {
-                break;
-            }
-            crate::yield_now();
-        }
+        // Reap before assertions so a failing check cannot leave a live waiter.
+        let exit_code = waiter.join();
+        assert!(!finished_before_notify);
+        assert_eq!(exit_code, 0);
         assert!(finished.load(Ordering::Acquire));
     }
 

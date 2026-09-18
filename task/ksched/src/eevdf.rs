@@ -2,13 +2,16 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{
-    collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Weak},
-};
+use alloc::sync::{Arc, Weak};
 use core::{
+    mem::ManuallyDrop,
     ops::Deref,
+    ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+};
+
+use intrusive_collections::{
+    Adapter, DefaultLinkOps, DefaultPointerOps, KeyAdapter, RBTree, RBTreeAtomicLink,
 };
 
 use crate::{BaseScheduler, CurrentDisposition};
@@ -93,8 +96,13 @@ fn deadline_before(a_deadline: i64, a_id: u64, b_deadline: i64, b_id: u64) -> bo
 /// `request_ns`). Convert only through `vruntime_delta` / `vruntime_to_wall_ns`.
 ///
 /// `MAX_SLICE_NS` is both the default and maximum request length in nanoseconds.
+/// Two intrusive links are prepared with the entity; ready-queue operations
+/// reuse them without allocating. An entity must leave both indices before
+/// migration or changes to its ordering fields.
 pub struct EevdfEntity<T, const MAX_SLICE_NS: usize> {
     inner: T,
+    deadline_link: RBTreeAtomicLink,
+    vruntime_link: RBTreeAtomicLink,
     vruntime: AtomicI64,
     deadline: AtomicI64,
     /// Virtual lag `V - vruntime` saved when leaving the run queue (sleep).
@@ -114,6 +122,8 @@ impl<T, const S: usize> EevdfEntity<T, S> {
     pub const fn new(inner: T) -> Self {
         Self {
             inner,
+            deadline_link: RBTreeAtomicLink::new(),
+            vruntime_link: RBTreeAtomicLink::new(),
             vruntime: AtomicI64::new(0),
             deadline: AtomicI64::new(0),
             vlag: AtomicI64::new(0),
@@ -205,6 +215,69 @@ impl<T, const S: usize> Deref for EevdfEntity<T, S> {
     #[inline]
     fn deref(&self) -> &Self::Target {
         &self.inner
+    }
+}
+
+// intrusive_adapter! 0.10.2 cannot express const generics. Keep the two
+// projections here, using the library's Arc ownership and atomic link ops.
+struct EntityAdapter<T, const S: usize, const DEADLINE: bool> {
+    link_ops: <RBTreeAtomicLink as DefaultLinkOps>::Ops,
+    pointer_ops: DefaultPointerOps<Arc<EevdfEntity<T, S>>>,
+}
+
+impl<T, const S: usize, const D: bool> EntityAdapter<T, S, D> {
+    const NEW: Self = Self {
+        link_ops: <RBTreeAtomicLink as DefaultLinkOps>::NEW,
+        pointer_ops: DefaultPointerOps::new(),
+    };
+    const OFFSET: usize = if D {
+        core::mem::offset_of!(EevdfEntity<T, S>, deadline_link)
+    } else {
+        core::mem::offset_of!(EevdfEntity<T, S>, vruntime_link)
+    };
+}
+
+// SAFETY: each adapter selects one actual link field of the exact entity type.
+// get_link/get_value use inverse offsets within its Arc allocation; neither
+// changes ownership. DefaultPointerOps owns each tree's independent Arc.
+unsafe impl<T, const S: usize, const D: bool> Adapter for EntityAdapter<T, S, D> {
+    type LinkOps = <RBTreeAtomicLink as DefaultLinkOps>::Ops;
+    type PointerOps = DefaultPointerOps<Arc<EevdfEntity<T, S>>>;
+
+    /// # Safety
+    /// `link` must come from this adapter's get_link on a still-live entity.
+    unsafe fn get_value(&self, link: NonNull<RBTreeAtomicLink>) -> *const EevdfEntity<T, S> {
+        // SAFETY: Adapter requires a link previously projected by this adapter;
+        // subtracting the same field offset recovers its live owning allocation.
+        unsafe { link.as_ptr().cast::<u8>().sub(Self::OFFSET).cast() }
+    }
+
+    /// # Safety
+    /// `value` must point to a live, initialized entity of this exact type.
+    unsafe fn get_link(&self, value: *const EevdfEntity<T, S>) -> NonNull<RBTreeAtomicLink> {
+        // SAFETY: Adapter supplies a live entity; OFFSET selects its aligned,
+        // initialized link field without creating an exclusive entity reference.
+        unsafe { NonNull::new_unchecked(value.cast::<u8>().add(Self::OFFSET).cast_mut().cast()) }
+    }
+
+    fn link_ops(&self) -> &Self::LinkOps {
+        &self.link_ops
+    }
+
+    fn link_ops_mut(&mut self) -> &mut Self::LinkOps {
+        &mut self.link_ops
+    }
+
+    fn pointer_ops(&self) -> &Self::PointerOps {
+        &self.pointer_ops
+    }
+}
+
+impl<'a, T, const S: usize, const D: bool> KeyAdapter<'a> for EntityAdapter<T, S, D> {
+    type Key = (i64, u64);
+
+    fn get_key(&self, task: &'a EevdfEntity<T, S>) -> Self::Key {
+        (if D { task.deadline() } else { task.vruntime() }, task.id())
     }
 }
 
@@ -327,13 +400,12 @@ struct RunningEntitySnapshot {
 /// `MAX_SLICE_NS` is the default / maximum request length in nanoseconds.
 pub struct EevdfScheduler<T, const MAX_SLICE_NS: usize> {
     /// Ready tasks keyed by `(deadline, id)`.
-    ready_queue: BTreeMap<(i64, u64), Arc<EevdfEntity<T, MAX_SLICE_NS>>>,
-    /// Secondary index keyed by `(vruntime, id)` for O(log N) min-vruntime and
-    /// O(log N + E) eligible-task range queries.
-    vrt_set: BTreeSet<(i64, u64)>,
-    /// Reverse map from task id to its current deadline, used to look up the
-    /// `ready_queue` key for tasks found via `vrt_set` range queries.
-    id_to_deadline: BTreeMap<u64, i64>,
+    ready_queue: RBTree<EntityAdapter<T, MAX_SLICE_NS, true>>,
+    /// Same entities, keyed by `(vruntime, id)` for eligible-prefix queries.
+    vruntime_tree: RBTree<EntityAdapter<T, MAX_SLICE_NS, false>>,
+    /// Cached minima: RBTree::front itself takes O(log N).
+    first_deadline: Option<Arc<EevdfEntity<T, MAX_SLICE_NS>>>,
+    first_vruntime: Option<Arc<EevdfEntity<T, MAX_SLICE_NS>>>,
     /// Monotonic vruntime watermark (Linux `cfs_rq->min_vruntime`).
     ///
     /// Updated by [`Self::update_min_vruntime`]: off-tree but still-runnable
@@ -371,9 +443,10 @@ pub struct EevdfScheduler<T, const MAX_SLICE_NS: usize> {
 impl<T, const S: usize> EevdfScheduler<T, S> {
     pub const fn new() -> Self {
         Self {
-            ready_queue: BTreeMap::new(),
-            vrt_set: BTreeSet::new(),
-            id_to_deadline: BTreeMap::new(),
+            ready_queue: RBTree::new(EntityAdapter::NEW),
+            vruntime_tree: RBTree::new(EntityAdapter::NEW),
+            first_deadline: None,
+            first_vruntime: None,
             min_vruntime: 0,
             weighted_vruntime_sum: 0,
             total_weight: 0,
@@ -424,9 +497,23 @@ impl<T, const S: usize> EevdfScheduler<T, S> {
         let dl = task.deadline();
         let w = task.weight();
 
-        self.ready_queue.insert((dl, id), task);
-        self.vrt_set.insert((vr, id));
-        self.id_to_deadline.insert(id, dl);
+        assert!(!task.deadline_link.is_linked() && !task.vruntime_link.is_linked());
+        self.ready_queue.insert(task.clone());
+        self.vruntime_tree.insert(task.clone());
+        if self
+            .first_deadline
+            .as_ref()
+            .is_none_or(|first| (dl, id) < (first.deadline(), first.id()))
+        {
+            self.first_deadline = Some(task.clone());
+        }
+        if self
+            .first_vruntime
+            .as_ref()
+            .is_none_or(|first| (vr, id) < (first.vruntime(), first.id()))
+        {
+            self.first_vruntime = Some(task);
+        }
         self.weighted_vruntime_sum += vr as i128 * w as i128;
         self.total_weight += w;
         // Linux updates the watermark on enqueue while `cfs_rq->curr` is still
@@ -439,19 +526,49 @@ impl<T, const S: usize> EevdfScheduler<T, S> {
     }
 
     fn dequeue_by_key(&mut self, key: (i64, u64)) -> Option<Arc<EevdfEntity<T, S>>> {
-        let task = self.ready_queue.remove(&key)?;
+        let mut cursor = self.ready_queue.find_mut(&key);
+        let task = cursor.remove()?;
+        if self
+            .first_deadline
+            .as_ref()
+            .is_some_and(|first| Arc::ptr_eq(first, &task))
+        {
+            self.first_deadline = cursor.as_cursor().clone_pointer();
+        }
         let id = task.id();
         let w = task.weight();
         let vr = task.vruntime();
+        let mut cursor = self.vruntime_tree.find_mut(&(vr, id));
         assert!(
-            self.vrt_set.remove(&(vr, id)),
-            "EEVDF vrt_set out of sync with ready_queue for task {id}"
+            cursor
+                .get()
+                .is_some_and(|found| core::ptr::eq(found, Arc::as_ptr(&task)))
         );
-
-        self.id_to_deadline.remove(&id);
+        let secondary = cursor.remove().unwrap();
+        if self
+            .first_vruntime
+            .as_ref()
+            .is_some_and(|first| Arc::ptr_eq(first, &task))
+        {
+            self.first_vruntime = cursor.as_cursor().clone_pointer();
+        }
+        drop(secondary);
         self.weighted_vruntime_sum -= vr as i128 * w as i128;
         self.total_weight -= w;
         Some(task)
+    }
+
+    fn contains_task(&self, task: &Arc<EevdfEntity<T, S>>) -> bool {
+        self.ready_queue
+            .find(&(task.deadline(), task.id()))
+            .get()
+            .is_some_and(|found| core::ptr::eq(found, Arc::as_ptr(task)))
+    }
+
+    fn first_key(&self) -> Option<(i64, u64)> {
+        self.first_deadline
+            .as_ref()
+            .map(|task| (task.deadline(), task.id()))
     }
 
     /// Linux `update_min_vruntime`: never let the watermark jump onto an
@@ -474,7 +591,8 @@ impl<T, const S: usize> EevdfScheduler<T, S> {
         if let Some(curr) = self.curr {
             vruntime = curr.vruntime;
         }
-        if let Some(&(min_vr, _)) = self.vrt_set.iter().next() {
+        if let Some(first) = self.first_vruntime.as_ref() {
+            let min_vr = first.vruntime();
             vruntime = if self.curr.is_none() {
                 min_vr
             } else {
@@ -573,7 +691,8 @@ impl<T, const S: usize> EevdfScheduler<T, S> {
                 Self::stat_inc(&mut self.stats.buddy_pick_drop, self.stats_enabled);
                 return None;
             };
-            let Some(best) = self.ready_queue.get(&best_key) else {
+            let cursor = self.ready_queue.find(&best_key);
+            let Some(best) = cursor.get() else {
                 Self::stat_inc(&mut self.stats.buddy_pick_drop, self.stats_enabled);
                 return None;
             };
@@ -683,16 +802,17 @@ impl<T, const S: usize> EevdfScheduler<T, S> {
     /// Do not walk deadline order: PLACE_LAG negative lag parks ineligible
     /// tasks at the front, so a deep ready queue would be O(n) on every pick
     /// and preemption probe. The min-deadline task is still O(1) when it is
-    /// eligible; otherwise `vrt_set` ranges eligible entities in O(log n + E).
+    /// eligible; otherwise the vruntime tree scans the eligible prefix.
     fn earliest_eligible_key(&self, v: i64) -> Option<(i64, u64)> {
-        let (&first_key, first_task) = self.ready_queue.first_key_value()?;
+        let first_task = self.first_deadline.as_ref()?;
         if first_task.vruntime() <= v {
-            return Some(first_key);
+            return self.first_key();
         }
 
-        self.vrt_set
-            .range(..=(v, u64::MAX))
-            .filter_map(|&(_, id)| self.id_to_deadline.get(&id).copied().map(|dl| (dl, id)))
+        self.vruntime_tree
+            .iter()
+            .take_while(|task| task.vruntime() <= v)
+            .map(|task| (task.deadline(), task.id()))
             .min()
     }
 
@@ -804,7 +924,8 @@ impl<T, const S: usize> EevdfScheduler<T, S> {
         let Some(peer_key) = self.earliest_eligible_key(v) else {
             return false;
         };
-        let peer = self.ready_queue.get(&peer_key).unwrap();
+        let cursor = self.ready_queue.find(&peer_key);
+        let peer = cursor.get().unwrap();
         let curr_eligible = curr.vruntime <= v;
         let curr_before_peer = deadline_before(curr.deadline, curr.id, peer.deadline(), peer.id());
         let peer_wins = !(curr_eligible && curr_before_peer);
@@ -867,9 +988,10 @@ impl<T, const S: usize> EevdfScheduler<T, S> {
 
         let peer_key = match self.earliest_eligible_key(v) {
             Some(k) => k,
-            None => *self.ready_queue.keys().next().unwrap(),
+            None => self.first_key().unwrap(),
         };
-        let peer = self.ready_queue.get(&peer_key).unwrap();
+        let cursor = self.ready_queue.find(&peer_key);
+        let peer = cursor.get().unwrap();
         let curr_eligible = curr.vruntime <= v;
         let curr_before_peer = deadline_before(curr.deadline, curr.id, peer.deadline(), peer.id());
         let peer_wins = !(curr_eligible && curr_before_peer);
@@ -903,6 +1025,9 @@ impl<T, const S: usize> BaseScheduler for EevdfScheduler<T, S> {
     }
 
     fn remove_task(&mut self, task: &Self::SchedItem) -> Option<Self::SchedItem> {
+        if !self.contains_task(task) {
+            return None;
+        }
         self.clear_next_buddy_if(task);
         // Snapshot lag against the average that still includes this task and
         // the dequeued running task (`curr`), matching Linux avg_vruntime().
@@ -923,7 +1048,20 @@ impl<T, const S: usize> BaseScheduler for EevdfScheduler<T, S> {
     where
         F: FnMut(&Self::SchedItem) -> bool,
     {
-        let task = self.ready_queue.values().find(|task| want(task)).cloned()?;
+        let mut cursor = self.ready_queue.front();
+        let task = loop {
+            let pointer = cursor.get_ptr()?;
+            // SAFETY: DefaultPointerOps converted the tree's owning Arc into
+            // this exact data pointer. The cursor borrows the tree throughout
+            // want, preventing removal of that strong reference. Only &Arc is
+            // exposed; ManuallyDrop never releases the borrowed count, even on
+            // panic. A match clones a real owner before this view leaves scope.
+            let task = ManuallyDrop::new(unsafe { Arc::from_raw(pointer.as_ptr()) });
+            if want(&task) {
+                break Arc::clone(&task);
+            }
+            cursor.move_next();
+        };
         self.remove_task(&task)
     }
 
@@ -950,7 +1088,7 @@ impl<T, const S: usize> BaseScheduler for EevdfScheduler<T, S> {
 
         let v = self.avg_vruntime();
         let mut used_fallback = false;
-        let first_key = *self.ready_queue.keys().next().unwrap();
+        let first_key = self.first_key().unwrap();
         let eligible_key = self.earliest_eligible_key(v);
 
         let key = match eligible_key {
@@ -1117,7 +1255,8 @@ impl<T, const S: usize> BaseScheduler for EevdfScheduler<T, S> {
         }
 
         let old_weight = task.weight();
-        if let Some(removed) = self.dequeue_by_key((task.deadline(), task.id())) {
+        if self.contains_task(task) {
+            let removed = self.dequeue_by_key((task.deadline(), task.id())).unwrap();
             removed.nice.store(prio as i64, Ordering::Release);
             let new_weight = removed.weight();
             // Keep virtual lag consistent with weight-scaled lag when nice changes.
@@ -1130,6 +1269,9 @@ impl<T, const S: usize> BaseScheduler for EevdfScheduler<T, S> {
             removed.set_deadline(vr + vruntime_delta(remaining_ns, new_weight));
             self.requeue(removed);
         } else {
+            if task.deadline_link.is_linked() || task.vruntime_link.is_linked() {
+                return false;
+            }
             task.nice.store(prio as i64, Ordering::Release);
             let new_weight = task.weight();
             if new_weight != old_weight && new_weight != 0 {
@@ -1212,5 +1354,31 @@ impl<T, const S: usize> EevdfScheduler<T, S> {
 
     pub(crate) fn system_vruntime_for_test(&self) -> i64 {
         self.system_vruntime()
+    }
+
+    pub(crate) fn ready_indices_valid_for_test(&self) -> bool {
+        let same_members = self.ready_queue.iter().all(|task| {
+            self.vruntime_tree
+                .find(&(task.vruntime(), task.id()))
+                .get()
+                .is_some_and(|other| core::ptr::eq(task, other))
+        });
+        let same_first = |a: Option<&EevdfEntity<T, S>>, b: Option<&Arc<EevdfEntity<T, S>>>| {
+            a.map(core::ptr::from_ref) == b.map(Arc::as_ptr)
+        };
+        same_members
+            && self.ready_queue.iter().count() == self.vruntime_tree.iter().count()
+            && same_first(self.ready_queue.front().get(), self.first_deadline.as_ref())
+            && same_first(
+                self.vruntime_tree.front().get(),
+                self.first_vruntime.as_ref(),
+            )
+            && self.total_weight == self.ready_queue.iter().map(|t| t.weight()).sum::<i64>()
+            && self.weighted_vruntime_sum
+                == self
+                    .ready_queue
+                    .iter()
+                    .map(|t| t.vruntime() as i128 * t.weight() as i128)
+                    .sum::<i128>()
     }
 }

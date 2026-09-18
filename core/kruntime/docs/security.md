@@ -2,6 +2,21 @@
 
 ## 信任模型
 
+AP 剩余启动流程借用 idle task 的执行上下文，提前切换到持续 runnable 的任务
+可能无限推迟其初始化。NoPreempt 从 run queue 就绪通知发布前一直覆盖到本核
+必要服务准备完毕；内部 SpinNoIrq 退出只能恢复到外层禁抢占计数，不能提前切走。
+总 IRQ 的启用时机不变，guard 不阻止 IPI 的记录/处理，最终释放按既有路径消费
+need_resched。没有增加运行期 ready 状态判断、全局调度锁或清空通知的路径。
+
+主核仅保护早期服务准备与 late-init 激活，不能把可阻塞的 late-init 工作也包入
+禁抢占区域。初始化扩展不得在 guard 内主动调度或依赖未运行任务完成；NoPreempt
+防止抢占，不会把非法的主动等待自动变安全。未添加 unsafe 或更改 EEVDF 排序。
+
+固定 IPI 启用之前，当前 scheduler、普通 IPI 队列、控制器与共享 handler 必须就绪。
+主 CPU 通过 IRQ-save 临界区启用，AP 保持其原本关闭总 IRQ 的启动状态；启用 drain
+只设置重调度标志，不主动执行抢占检查或 timer 业务回调。不能在初始化时清除静态
+原因位，也不能在正常 handler 中提前消费尚未启用 CPU 的请求。CPU hotplug 不支持。
+
 `kruntime` 是平台引导层和内核运行时之间的可信编排层。它不直接解析 syscall 参数或用户指针，但它接收 boot 层传入的 `BootInfo`，安装早期内存、调度、中断和驱动运行环境，并在所有已发现 CPU 完成 runtime 初始化后调用 `SystemInitEntry::enter()`。
 
 ```

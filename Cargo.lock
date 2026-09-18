@@ -1959,6 +1959,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6045ea39e8d2862506c0dff6c65d068da362335df698bb1634033492740d2170"
 
 [[package]]
+name = "intrusive-collections"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b719c59241cfaac1042a6d26787e28ed7ee4a4e21a5a907786f54222d1b0062"
+dependencies = [
+ "memoffset",
+]
+
+[[package]]
 name = "iov_iter"
 version = "0.3.0-dev"
 dependencies = [
@@ -2873,6 +2882,7 @@ dependencies = [
  "kirq",
  "klogger",
  "knet",
+ "kspin 0.3.0-dev",
  "ktask",
  "ktime",
  "ktime_types",
@@ -2889,7 +2899,7 @@ dependencies = [
 name = "ksched"
 version = "0.3.0-dev"
 dependencies = [
- "linked_list_r4l",
+ "intrusive-collections",
  "unittest",
 ]
 

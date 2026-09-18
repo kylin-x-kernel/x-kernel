@@ -31,8 +31,6 @@ use ksched::{BaseScheduler, CurrentDisposition};
 use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 use lazyinit::LazyInit;
 
-#[cfg(all(feature = "preempt", feature = "smp"))]
-use crate::api::on_remote_resched_ipi;
 use crate::{
     KCpuMask, KtaskRef, Scheduler, TaskInner,
     api::{
@@ -829,9 +827,7 @@ fn request_resched_on(rq: &mut RunQueue) {
 
 #[cfg(all(feature = "preempt", feature = "smp", feature = "ipi"))]
 fn request_remote_resched(cpu_id: LogicalCpuId) -> kipi::Result<()> {
-    if let Err(err) = kipi::run_on_cpu(cpu_id, || {
-        on_remote_resched_ipi();
-    }) {
+    if let Err(err) = kipi::notify_reschedule(cpu_id) {
         warn!(
             "failed to request reschedule on CPU {}: {}",
             cpu_id.as_usize(),
@@ -868,10 +864,7 @@ pub(crate) fn kick_running_task(task: &TaskInner) {
             task.set_preempt_pending(true);
             return;
         }
-        let kick_result = kipi::run_on_cpu(cpu_id, || {
-            #[cfg(feature = "preempt")]
-            on_remote_resched_ipi();
-        });
+        let kick_result = kipi::notify_reschedule(cpu_id);
         if let Err(err) = &kick_result {
             warn!(
                 "failed to kick CPU {} for running task: {}",
@@ -2585,11 +2578,9 @@ mod tests_wake_affinity {
 
 #[cfg(all(feature = "preempt", unittest))]
 mod tests_interrupt_kick {
-    use core::sync::atomic::{AtomicUsize, Ordering};
+    use unittest::{assert, def_test};
 
-    use unittest::{assert, assert_eq, def_test};
-
-    use crate::{current, yield_now};
+    use crate::current;
 
     #[def_test(serial)]
     fn interrupt_current_sets_preempt_pending() {
@@ -2607,10 +2598,13 @@ mod tests_interrupt_kick {
     #[cfg(feature = "smp")]
     #[def_test(serial)]
     fn interrupt_running_remote_task_sets_preempt_pending() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
         use kcpu_id_map::LogicalCpuId;
         use khal::percpu::this_cpu_id;
+        use unittest::assert_eq;
 
-        use crate::{KCpuMask, set_task_affinity, spawn};
+        use crate::{KCpuMask, set_task_affinity, spawn, yield_now};
 
         const TIMEOUT_NS: u64 = 2_000_000_000;
 

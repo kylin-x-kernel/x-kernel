@@ -13,7 +13,7 @@ description = "Runtime library of X-kernel"
 default = []
 
 smp = ["khal/smp", "ktask/smp", "memspace/smp", "fs_boot?/smp", "ipi"]
-ipi = ["dep:kipi"]
+ipi = ["dep:kipi", "ktask/ipi"]
 
 char = ["kdriver/char", "dep:ktty"]
 display = ["kdriver/display", "dep:fbdevice"]
@@ -40,6 +40,7 @@ watchdog_hardlockup = ["watchdog/nmi"]
 pmu = ["khal/pmu"]
 
 [dependencies]
+kspin.workspace = true
 kalloc.workspace = true
 ktty = { workspace = true, optional = true }
 backtrace.workspace = true

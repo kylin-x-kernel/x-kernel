@@ -2,6 +2,21 @@
 
 ## 信任模型
 
+`reschedule` feature 的使用者必须链接调度接收端；系统通过 `ktask/ipi` 成对启用。
+未启用时不编译该通知模块，不用空接收端静默丢弃调度请求。
+
+固定通知 `notify_reschedule` 不要求普通回调队列 ready，但调用方必须已向合法
+目标的运行队列发布任务状态。CPU 范围/存在性由入口验证；静态槽不分配、不释放，
+也不保存任务指针。正常 handler 在 ENABLED 前不得取走原因；启用与发送共用
+一个原子字，避免独立 ready/pending 变量间的丢请求窗口。取走原因后不再清零，
+保证处理中到达的新原因保留。硬件仍依赖 publish-before-notify 契约。
+静态处理端仅设置本地抢占标志，不接触 RunQueue 可变引用、不分配、不睡眠。
+`enable_fixed_notifications` 只能在当前 scheduler、IPI 队列和 handler 已初始化后调用；
+它保存 IRQ 状态，不使用会在析构时主动调度的禁抢占 guard。没有新增 unsafe。
+调用者还须为 CPU-bound 启动路径，因为线路启用的内部锁可能触发已有抢占检查；
+主核 late-init 线程固定亲和性，AP 在 IRQ 关闭且尚未设置本次 pending 前开启线路。
+线路启用失败会 panic，不发布 ENABLED，避免软件 ready 与硬件线路状态失配。
+
 `kipi` 不是用户态边界模块，它的主要调用者是内核中的页表、I-cache 和
 跨 CPU 协调逻辑。信任关系如下：
 

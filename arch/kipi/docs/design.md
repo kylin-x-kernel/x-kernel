@@ -2,6 +2,19 @@
 
 ## 定位
 
+调度固定通知由 `reschedule` feature 控制，`ktask/ipi` 同时启用它并提供接收端。
+仅依赖通用 kipi（例如非 SMP 配置的 kwork）不要求调度 provider，也不启用
+固定通知的 handler 分支；不能把 kipi 出现在依赖图中等同于启用了 SMP 调度。
+
+固定调度通知由 `notification.rs` 提供：`notify_reschedule` 在静态 CPU 槽中发布原因，
+不经过通用闭包队列。原因与单向 ENABLED 位共用一个原子字，以 AcqRel RMW
+连接发送、启用和 drain。启用前只记请求；启用后每次发送 IPI，即使原因已经置位。
+公共处理顺序是 stop、TLB、固定调度通知、通用回调。`ktask` 通过静态
+`RescheduleIpiIf` 实现处理端，不引入反向 crate 依赖或动态订阅。
+主/AP 在 runtime 指定阶段调用 `enable_fixed_notifications`，此入口以 IRQ guard
+保护线路开启、ENABLED 发布及 drain，不在退出时主动执行抢占检查。
+该协议无运行期关闭或 CPU hotplug；本次不增加 timer 通知原因。
+
 `kipi` 是 X-Kernel 的跨 CPU 协调模块，向上提供：
 
 - 通用 IPI 回调投递与广播；

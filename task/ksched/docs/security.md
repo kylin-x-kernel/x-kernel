@@ -25,17 +25,45 @@ ktask RunQueue（唯一调用方）
 
 ## unsafe 代码清单
 
-各算法实现主要依赖安全集合/`Arc`。FIFO/RR 的 intrusive list `remove` 含
-`unsafe`，不变量由“任务只通过本调度器入链”维护；调用路径限于
-`remove_task`。
+各算法实现主要依赖安全集合/`Arc`。FIFO/RR 的 unsafe 集中在 ready_list：
+ReadyItem 声明具体字段偏移，ReadyAdapter 完成正反指针投影；按实体删除先核对
+非零且永不复用的队列身份，再使用 cursor_mut_from_ptr。不能仅凭 is_linked
+判断属于本队列。源队列独占借用阻止检查到摘除之间发生本队列修改。
+
+owner 只在库成功取得链接后写入，并在库释放链接之前清零。错误队列删除返回
+None；重复入队由 AtomicLink 拒绝，不覆盖 owner。队列移动不改变身份，Drop
+清除所有归属及拥有的 Arc。编号耗尽明确 panic，不复用身份造成误删。
+owner 不是链表同步锁；Relaxed 足够用于身份检查，同一队列的操作已有独占访问，
+其他队列只能写其自身身份或零，不能伪造本队列身份。跨队列取得链接依赖库的
+原子链接操作。所有链接和身份字段均不公开，不添加手写 Send/Sync。
+
+steal 的临时 Arc 视图是额外的原始所有权指针审计点：指针来自游标 get_ptr，
+没有经 &T 缩窄后再向前恢复 Arc 头部。列表仍拥有原来的强引用，ManuallyDrop
+阻止正常或 panic 路径释放它；谓词仅得到 &Arc，可 clone 但不能消费借来的 Arc。
+视图不逃逸，不在游标摘除后访问；真实所有权仍只经库的 remove 返回一次。
+
+EEVDF 新增私有 EntityAdapter 的两个原始指针投影：get_link 将活实体指针加上
+本适配器选定字段的 offset_of，get_value 对该适配器先前产出的链接指针做逆运算。
+偏移取自同一具体 EevdfEntity<T,S> 类型，不假设 Rust 字段排列或整数地址重建。
+树使用库的 DefaultPointerOps<Arc<_>> 管理所有权；无裸借用索引。
+适配器只负责字段定位而非树的平衡算法。宏不支持 const 泛型，故这里显式实现。
+EEVDF steal 另有原始所有权指针审计点：从游标 get_ptr（不是 &T）取得
+树拥有的 Arc 数据指针，ManuallyDrop 只借用该强引用，谓词只接收 &Arc。
+树借用覆盖整个谓词调用，阻止摘除和析构；panic 不释放借来的强引用。
+只有命中才 clone 真正拥有的 Arc，临时视图结束后走 remove_task；不在
+摘除后访问临时视图，也不向调用方转交这份借来的引用。
 
 ## 内存安全不变量
 
-1. Ready 任务的强引用仅由 ready 队列持有（外加调用方临时 `Arc`）。
+1. EEVDF Ready 任务的两棵树各持有一份 Arc，两个最早缓存和 next_buddy 可额外持有；
+   树摘除后再转移 CPU，返还持有覆盖附加引用释放，不能提前最终析构。
 2. EEVDF `curr` 不得持有 `Arc`；仅保存调度数值快照。
 3. `pick_next_task` 前 `curr` 必须为空（已 `leave_current`）。
 4. Exit 不得设置 PLACE_LAG；Block/Migrate 必须设置，供后续 `enqueue_task`。
 5. 运行实体调度字段变更后，`curr` 快照必须同步刷新。
+6. 两棵 EEVDF 树成员相同；挂树期间排序字段不变。修改优先级先摘两树再更新。
+7. 按实体摘除先核对键与指针身份，不用 is_linked 推断属于本树；错误队列中的
+   set_priority 不得修改挂在别处的实体。重复入队为调用方契约错误，链接断言会拒绝。
 
 ## 线程安全
 
@@ -52,6 +80,7 @@ IRQ/preempt 约束提供。
 | T-04 | 迁移后源 RQ 仍计入任务权重 | 中 | Migrate 未清 current 记账 | Migrate 走 `leave_current` 清快照 |
 | T-05 | `curr` 快照过期导致错误抢占/放置 | 中 | 改运行实体字段后未刷新 | `update_current`/`set_priority` 刷新；测试辅助显式同步 |
 | T-06 | idle-pull 偷走仍 `on_cpu` 的实体 | 高 | yield/preempt 入树后远端 `steal_ready_task` | 调度器只摘 ready waiter；ktask 谓词拒绝 `on_cpu`，不 `pick_next` |
+| T-07 | 双树或缓存残留导致错误选取/持有 | 高 | 摘除、改键或 Drop 漏清一份链接 | 同锁摘双树，游标后继更新缓存，正常树 Drop；成员/引用/重入测试 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -84,3 +113,5 @@ IRQ/preempt 约束提供。
 - [ ] Block 路径调用方是否另持强引用。
 - [ ] 单测是否覆盖五种 disposition 与 pick-without-leave。
 - [ ] `steal_ready_task` 是否走 `remove_task` 且不安装 `curr`。
+- [ ] EEVDF 双树和最早缓存是否一致，所有改键是否先摘树。
+- [ ] Adapter 的正反投影是否使用同一字段偏移，树是否持有真实 Arc。

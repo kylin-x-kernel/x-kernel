@@ -10,6 +10,7 @@ repository.workspace = true
 
 [features]
 default = []
+reschedule = []
 
 [dependencies]
 kiface.workspace = true

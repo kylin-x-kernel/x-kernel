@@ -4,15 +4,50 @@
 
 use alloc::sync::Arc;
 
-use linked_list_r4l::{List, def_node};
-
+use super::ready_list::{ReadyItem, ReadyLinks, ReadyList};
 use crate::{BaseScheduler, CurrentDisposition};
 
-def_node! {
-    /// A task wrapper for the [`FifoScheduler`].
-    ///
-    /// It add extra states to use in [`linked_list::List`].
-    pub struct FifoTask<T>(T);
+/// A task wrapper with embedded FIFO ready-queue linkage.
+pub struct FifoTask<T> {
+    inner: T,
+    links: ReadyLinks,
+}
+
+impl<T> FifoTask<T> {
+    /// Creates a task with detached linkage.
+    pub const fn new(inner: T) -> Self {
+        Self {
+            inner,
+            links: ReadyLinks::new(),
+        }
+    }
+
+    /// Returns the wrapped task.
+    pub const fn inner(&self) -> &T {
+        &self.inner
+    }
+
+    /// Consumes the detached wrapper and returns its task.
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+}
+
+impl<T> core::ops::Deref for FifoTask<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+// SAFETY: OFFSET selects this private field, accessed only by ReadyList.
+unsafe impl<T> ReadyItem for FifoTask<T> {
+    const OFFSET: usize = core::mem::offset_of!(Self, links);
+
+    fn ready_links(&self) -> &ReadyLinks {
+        &self.links
+    }
 }
 
 /// A simple FIFO (First-In-First-Out) cooperative scheduler.
@@ -26,45 +61,14 @@ def_node! {
 ///
 /// It internally uses a linked list as the ready queue.
 pub struct FifoScheduler<T> {
-    ready_queue: List<Arc<FifoTask<T>>>,
-}
-
-/// Unlink the first ready waiter matching `want`.
-///
-/// Idle-pull holds the source scheduler lock on the busiest CPU. Draining the
-/// whole list would be O(n) even when the head matches; stop at the hit so the
-/// tail stays linked and the cost is O(k) for the match index.
-fn steal_first_matching<T>(
-    queue: &mut List<Arc<FifoTask<T>>>,
-    mut want: impl FnMut(&Arc<FifoTask<T>>) -> bool,
-) -> Option<Arc<FifoTask<T>>> {
-    let mut skipped = List::new();
-    while let Some(task) = queue.pop_front() {
-        if want(&task) {
-            prepend_in_order(queue, skipped);
-            return Some(task);
-        }
-        skipped.push_back(task);
-    }
-    *queue = skipped;
-    None
-}
-
-fn prepend_in_order<T>(dest: &mut List<Arc<FifoTask<T>>>, mut front: List<Arc<FifoTask<T>>>) {
-    let mut rev: List<Arc<FifoTask<T>>> = List::new();
-    while let Some(task) = front.pop_front() {
-        rev.push_front(task);
-    }
-    while let Some(task) = rev.pop_front() {
-        dest.push_front(task);
-    }
+    ready_queue: ReadyList<FifoTask<T>>,
 }
 
 impl<T> FifoScheduler<T> {
     /// Creates a new empty [`FifoScheduler`].
     pub const fn new() -> Self {
         Self {
-            ready_queue: List::new(),
+            ready_queue: ReadyList::new(),
         }
     }
 
@@ -84,17 +88,14 @@ impl<T> BaseScheduler for FifoScheduler<T> {
     }
 
     fn remove_task(&mut self, task: &Self::SchedItem) -> Option<Self::SchedItem> {
-        // SAFETY: scheduler tasks are only linked into `ready_queue` through
-        // this scheduler, so removing a known task preserves the intrusive-list
-        // membership invariant.
-        unsafe { self.ready_queue.remove(task) }
+        self.ready_queue.remove(task)
     }
 
     fn steal_ready_task<F>(&mut self, want: F) -> Option<Self::SchedItem>
     where
         F: FnMut(&Self::SchedItem) -> bool,
     {
-        steal_first_matching(&mut self.ready_queue, want)
+        self.ready_queue.steal(want)
     }
 
     fn pick_next_task(&mut self) -> Option<Self::SchedItem> {

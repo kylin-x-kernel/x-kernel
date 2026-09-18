@@ -78,6 +78,7 @@ kwork = { path = "task/kwork" }
 ktask = { path = "task/ktask" }
 ksched = { path = "task/ksched" }
 linked_list_r4l = "0.3"
+intrusive-collections = { version = "=0.10.2", default-features = false, features = ["alloc", "nightly"] }
 
 # Internal: process management
 kfutex = { path = "process/kfutex" }
