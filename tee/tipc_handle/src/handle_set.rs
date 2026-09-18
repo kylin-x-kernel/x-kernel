@@ -2,6 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! Handle-set registration commands and event selection over shared objects.
+
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::any::Any;
 
@@ -53,6 +55,9 @@ pub enum HandleSetCommand {
 }
 
 /// Registration stored in a handle set.
+///
+/// Callers must pair the ID and object from the set's process-local table;
+/// this association is not checked. The cookie is separate from [`Handle::cookie`].
 #[derive(Clone)]
 pub struct HandleSetEntry {
     /// Process-local handle identifier returned in events.
@@ -65,7 +70,13 @@ pub struct HandleSetEntry {
     pub cookie: usize,
 }
 
-/// TIPC event multiplexer.
+/// TIPC event multiplexer over registrations keyed by process-local handle ID.
+///
+/// Owns strong child references under an IRQ-disabling lock; child `kind` and
+/// `poll` methods must not block or re-enter the set. Nested sets are rejected.
+/// As a [`Handle`], reports `READY` for matching child events without consuming
+/// them and forbids transfer. Closing clears entries and wakes waiters, but
+/// neither closes children nor prevents reuse of the set.
 pub struct HandleSet {
     entries: SpinNoIrq<BTreeMap<i32, HandleSetEntry>>,
     handle: HandleWaitState,
@@ -80,7 +91,49 @@ impl HandleSet {
         })
     }
 
-    /// Adds, removes, or modifies a registration.
+    /// Adds, removes, or replaces a registration and notifies set waiters.
+    ///
+    /// Add/modify store all fields. Cookie-checked commands require the stored
+    /// cookie, so `ModifyWithCookie` cannot change it. Deletes use only the ID
+    /// and, for `DeleteWithCookie`, cookie; they do not close the object.
+    /// See [`HandleSetEntry`] for the caller's ID/object obligations.
+    ///
+    /// Returns the removed cookie for `DeleteGetCookie`, otherwise `None`.
+    /// Errors leave entries unchanged and do not notify.
+    ///
+    /// # Errors
+    ///
+    /// - [`KError::InvalidInput`]: add/modify supplies a nested set.
+    /// - [`KError::AlreadyExists`]: add targets an occupied ID.
+    /// - [`KError::NotFound`]: delete/modify targets an absent ID or a
+    ///   cookie-checked command has a mismatched cookie.
+    ///
+    /// # Examples
+    ///
+    /// Register an existing non-set handle, poll it, then remove its registration.
+    ///
+    /// ```no_run
+    /// use tipc_handle::{HandleEventMask, HandleSet, HandleSetCommand, HandleSetEntry, HandleTable};
+    ///
+    /// fn observe(table: &HandleTable, id: i32) -> kerrno::KResult {
+    ///     let set = HandleSet::handle_set_create();
+    ///     let entry = HandleSetEntry {
+    ///         handle_id: id,
+    ///         handle: table.uctx_handle_get(id)?,
+    ///         event: HandleEventMask::MSG,
+    ///         cookie: 42,
+    ///     };
+    ///     set.handle_set_ctrl(HandleSetCommand::Add, entry.clone())?;
+    ///     if let Some(event) = set.poll_one()? {
+    ///         assert_eq!((event.handle, event.cookie), (id, 42));
+    ///     }
+    ///     assert_eq!(
+    ///         set.handle_set_ctrl(HandleSetCommand::DeleteGetCookie, entry)?,
+    ///         Some(42)
+    ///     );
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn handle_set_ctrl(
         &self,
         command: HandleSetCommand,
@@ -151,7 +204,16 @@ impl HandleSet {
         }
     }
 
-    /// Returns one ready entry, consuming edge-like events.
+    /// Returns the first matching event in ascending handle-ID order.
+    ///
+    /// Returns `None` if no events match. Polls each visited child with
+    /// `finalize = true` before filtering, so unmatched events may be consumed.
+    /// The cookie comes from the registration; selection is not fair.
+    /// See the [registration example](Self::handle_set_ctrl).
+    ///
+    /// # Errors
+    ///
+    /// [`KError::NotFound`] if the set is empty.
     pub fn poll_one(&self) -> KResult<Option<UEvent>> {
         let entries = self.entries.lock();
         if entries.is_empty() {
@@ -186,6 +248,16 @@ impl Handle for HandleSet {
         }
     }
 
+    /// Registers for set changes and a snapshot of each child's stored mask.
+    ///
+    /// Ignores the outer mask. Follow the registration/recheck sequence in the
+    /// [wait example](crate::HandleTable::register_wait_any_table_change).
+    ///
+    /// # Errors
+    ///
+    /// [`PollRegisterError::NoMemory`] if snapshot allocation fails; otherwise
+    /// propagates [`HandleWaitState::register`] and child [`Handle::register`]
+    /// errors. Partial registrations remain owned by the caller.
     fn register(
         &self,
         context: &mut PollContext<'_>,

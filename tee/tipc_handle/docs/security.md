@@ -1,133 +1,166 @@
-# tipc-handle — 安全与可靠性分析
+# tipc_handle — Security and Reliability Analysis
 
-## 信任模型
+## Trust Model
+
+This analysis covers the entire hand-written crate: [lib.rs](../src/lib.rs),
+[handle.rs](../src/handle.rs), [handle_set.rs](../src/handle_set.rs), and
+[handle_table.rs](../src/handle_table.rs). Dependency internals and macro-generated
+code are outside this inventory; their soundness remains a dependency assumption.
 
 ```text
-tipc::syscall / process runtime / TIPC core
-        │
-        │ Arc<dyn Handle>, process-local handle ids
-        ▼
-┌────────────────────────────────────────────┐
-│ tipc-handle                                │
-│                                            │
-│  Handle trait                              │
-│  HandleSet registration                    │
-│  HandleTable id ownership                  │
-└────────────────────────────────────────────┘
-        │
-        ▼
-kpoll / kspin / alloc
+User IPC arguments -> tipc syscall adapter -> process-local HandleTable / HandleSet
+Trusted IPC objects <--- Handle callbacks --- table and set operations
+                         |
+                   kpoll / kspin / alloc
 ```
 
-- handle id 来自用户态或上层调用者时不可信，只能在调用方持有的 `HandleTable` 中解析。
-- `HandleTable` 信任 `Arc<dyn Handle>` 的实现维护具体对象生命周期和 close 语义。
-- `HandleSet` 信任调用方传入的 `handle_id` 与 `Arc<dyn Handle>` 属于同一个 process-local table。
-- cookie 是调用方 opaque 数据，本 crate 只保存和返回，不解释其含义。
+The protected assets are `HandleTable.handles` (process-local object ownership),
+`HandleSetEntry.handle` and `handle_id` (event-to-object association), and waiter
+registrations (progress and lifetime). `Arc` ownership must remain valid; IDs
+must be resolved in the intended process table and paired with the right object.
 
-## 外部边界 / 攻击面
+The crate trusts kernel `Handle` implementations to report their kind faithfully,
+expose their concrete value through `as_any`, synchronize state, and honor poll,
+registration, and idempotent close contracts. It does not isolate a malicious
+kernel implementation. Process selection, object authorization, and user-memory
+validation belong to `kprocess` and the `tipc` adapter, not to this crate.
 
-| 边界 | 来源 | 进入形式 | 约束 |
-|------|------|----------|------|
-| handle id | syscall adapter 或内核调用者 | `i32` | 只能在当前 `HandleTable` 内解析 |
-| handle object | TIPC core | `Arc<dyn Handle>` | 必须实现正确的 `poll`、`register`、`close` 和 `is_sendable` |
-| handle set command | syscall adapter 或内核调用者 | `HandleSetCommand` | add/modify/delete 路径检查存在性和重复注册 |
-| event mask | wait/poll 调用方 | `HandleEventMask` | 仅影响调用方观察的事件子集 |
-| cookie | wait/poll 调用方 | `usize` | opaque，按值保存和返回 |
+## External Boundaries / Attack Surface
 
-本 crate 不直接访问用户指针、地址空间、MMIO、DMA、FFI 或 inline assembly。
+| Boundary | Input and direction | Validation and responsibility |
+|---|---|---|
+| B-01: process-local IDs | User-derived `i32` values pass through the adapter into table lookup/removal | `uctx_handle_get` and uninstall reject absent IDs with `KError::BadFileDescriptor`; the adapter's `get_handle` selects the current process table |
+| B-02: set registration | Adapter passes `HandleSetCommand` and `HandleSetEntry` into `handle_set_ctrl`; polling returns `UEvent` | Local checks reject duplicates, missing entries, cookie mismatches, and nested sets. Callers supply a consistent ID/object pair; cookies are opaque values, not credentials |
+| B-03: kernel object callbacks | Table/set code calls methods on supplied `Arc<dyn Handle>` objects and receives events/registration results | Trusted implementations own object state, callback behavior, and close effects; set polling holds its lock across child callbacks |
+| B-04: wait and cleanup integration | Callers supply `PollContext`, retain registration owners, and invoke table cleanup | `kpoll` owns registration storage; callers recheck readiness, release wait owners, and close handles at lifecycle boundaries |
 
-## unsafe 代码清单
+The [syscall adapter](../../tipc/src/syscall.rs) reads `UserEvent` through
+`UserPtr::read_vm`, rejects unknown commands in `handle_set_command`, and rejects
+unknown event bits with `HandleEventMask::from_bits`, both as `KError::InvalidInput`.
+It resolves the set and child through current-process lookups before calling this
+crate. These lookups do not make the whole registration operation atomic against
+concurrent close; kernel callers likewise must coordinate the association.
 
-`tee/tipc-handle/src` 当前没有 `unsafe` 块、`unsafe fn` 或 `unsafe impl`。
+This crate has no direct user-pointer, MMIO/PIO, DMA, FFI, or assembly interface.
+It does not parse firmware, boot metadata, device input, file contents, or network
+packets. User-derived IPC IDs, masks, and cookies remain relevant through the
+adapter above. IRQ interaction is through `kspin` guards and `kpoll` wake-ups,
+not a hardware input parser.
 
-持续审计要求：
+## Unsafe Code Inventory
 
-- 不使用裸指针保存 handle 所有权；
-- 不使用 unchecked downcast；
-- 不把 handle id 当作全局 capability；
-- 不在 `HandleSet` 中允许未经循环检测的嵌套。
+The four hand-written source files contain no `unsafe` blocks, functions, traits,
+implementations, FFI declarations, or assembly. `extern crate alloc` imports a
+Rust crate; it is not an FFI boundary. Unsafe behavior inside dependencies is
+outside this inventory, so absence of local unsafe is not a whole-kernel proof.
 
-## 内存安全不变量
+## Memory-Safety Invariants
 
-1. **handle 对象由 `Arc` 强引用持有**：`HandleTable` 和 `HandleSetEntry` 都保存 `Arc<dyn Handle>`，不会保存悬垂引用。
-2. **downcast 只用于类型判断**：`HandleTable` 通过 `as_any().is::<HandleSet>()` 和 `downcast_ref::<HandleSet>()` 识别 handle set，不做 unchecked cast。
-3. **handle set registration 清理先于 close**：删除普通 handle 时，先从所有 handle set 中移除 id，再调用目标 `close`。
-4. **handle set 删除自身 id**：删除 handle set 时同时从 `handle_set_ids` 移除，后续 detach 不再访问已移除 handle set。
-5. **禁止 handle set 嵌套**：`HandleSet::handle_set_ctrl` 拒绝 `HandleKind::HandleSet`，避免递归 poll 和循环引用。
+Tables, entries, and snapshots retain `Arc<dyn Handle>` references; checked `Any`
+type tests/downcasts identify sets without raw-pointer casts. Object allocation
+can outlive table removal or explicit close. These Rust ownership guarantees do
+not establish logical openness, process authorization, or freshness of an ID.
+There are no additional local unsafe preconditions to inventory.
 
-## 线程安全
+## Thread Safety
 
-| 状态 | 并发保护 | 风险控制 |
-|------|----------|----------|
-| handle table map | 调用方外部锁 | `HandleTable` 不自带锁，通常由 `RwLock` 包装 |
-| handle set entries | `SpinNoIrq<BTreeMap<...>>` | add/delete/modify/poll 串行化 |
-| handle waiters | `kpoll::PollSet` + caller-owned `PollRegistrations` | `HandleWaitState::notify` 唤醒注册者，owner drop 注销等待者 |
-| handle cookie | `AtomicUsize` | Acquire/Release 读写 caller cookie |
+| State | Protection and remaining obligation |
+|---|---|
+| Table mappings, set index, snapshot cache | Mutations require `&mut HandleTable`; shared process access uses an external `ksync::RwLock`. Callers coordinate multi-step operations |
+| Set entries | `SpinNoIrq` serializes changes and polling; child `kind`/`poll` must not block or re-enter the set |
+| Wait registrations | `PollSet` synchronizes storage; callers retain `PollRegistrations` across pending polls and clear/drop them on completion or error |
+| Object cookie | `AtomicUsize` uses release stores and acquire loads; this does not synchronize all object state |
 
-`HandleSet` 锁内只做 map 更新和短路径 poll，不应在锁内调用可能阻塞的操作。
+`Handle: Any + Send + Sync` constrains stored objects; this crate has no manual
+`Send`/`Sync` implementation. A set snapshots children before registering them
+outside its lock. `PollSet::wake` invokes wakers outside its source lock, but
+external caller locks can still be held. Allocation, IRQ/preemption guards, and
+callback requirements are detailed in [design.md](design.md).
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
-|------|----------|----------|----------|----------|
-| T-01 | 用户伪造 handle id 访问其它进程对象 | 高 | 把 id 当作全局 id 使用 | `HandleTable` 是 process-local，由调用方选择当前进程表 |
-| T-02 | handle set 持有已关闭 handle id | 中 | close 时未清理 registration | `uctx_handle_remove` 先 `detach_from_handle_sets` |
-| T-03 | handle set 嵌套导致递归或循环 poll | 高 | 注册另一个 `HandleSet` | `handle_set_ctrl` 拒绝 `HandleKind::HandleSet` |
-| T-04 | handle id 空间耗尽 | 中 | 进程持续打开 handle | 完整环形扫描后返回 `TooManyOpenFiles` |
-| T-05 | 错误的 `Arc<dyn Handle>` 与 id 不属于同一 table | 中 | 调用方构造不一致 registration | syscall adapter 应从同一 `HandleTable` 取 handle 后注册 |
-| T-06 | exec 后新映像继承旧 TIPC capability | 高 | exec 仅清理普通 `FD_CLOEXEC`，未关闭 process-local TIPC table | `Process::apply_exec_update` 调用 `uctx_handle_close_all`，显式关闭全部 TIPC handle |
-| T-07 | 进程退出后残留存活 port/channel owner | 中 | 退出路径不关闭 TIPC table，仅靠 GC 异步 drop runtime | `do_exit` 在发布 process exit 前经 `Process::close_all_tipc_handles` 调用 `uctx_handle_close_all` |
+Severity: **High** means UB, memory corruption, or privilege escalation;
+**Medium** means panic, unavailability, or inconsistent state; **Low** means
+performance degradation or reduced functionality.
 
-影响等级定义：
+| ID | Threat | Severity | Trigger | Response and residual risk |
+|---|---|---|---|---|
+| T-01 | Access to another process's handle object (B-01) | High | A caller selects another process's table or treats an ID as globally authoritative | The adapter selects `current_user_process`; table lookup rejects absent IDs. Correct process selection remains an external obligation; the table has no credential check |
+| T-02 | Stale or mismatched registration reports the wrong logical handle (B-01/B-02) | Medium | An ID is reused, a registration races with close, or a caller pairs an ID with a different object | Uninstall detaches the ID from sets still installed in the table before ordinary remove closes it. `Arc` preserves allocation, not identity freshness. Cross-operation races and retained/uninstalled sets are not covered; stronger caller serialization or generation-tagged IDs would be additional hardening |
+| T-03 | Old IPC capabilities survive an exec/exit boundary (B-04) | High | Integration drops references without explicitly closing objects | With TIPC enabled, `Process::apply_exec_update` closes the table on the successful exec-update path; `do_exit` calls `Process::close_all_tipc_handles` before exit publication. Object close behavior and successful runtime access remain external dependencies; table Drop alone is insufficient |
+| T-04 | Recursive set polling or reference cycles prevent progress/release (B-02/B-03) | Medium | Add/modify supplies a set as a child | `handle_set_ctrl` rejects `HandleKind::HandleSet` with `KError::InvalidInput`; the contract depends on truthful kernel implementations. Non-cyclic nesting is also unsupported |
+| T-05 | Handle and registration growth exhausts memory or CPU time (B-01/B-02/B-04) | Medium | A caller repeatedly installs objects, grows sets, or registers waits | Full ID-space scans return `TooManyOpenFiles`; fallible registration/snapshot allocation reports `NoMemory`. There is no local resource quota, and ordinary collection allocations are infallible APIs. Quotas would be additional hardening; allocator failure policy remains external |
+| T-06 | Callback re-entry deadlocks a set or caller lock (B-03/B-04) | Medium | Child polling blocks/re-enters under `SpinNoIrq`, or a waker reacquires a caller-held lock | The `Handle` contract forbids blocking/re-entrant set polling; child registration and source wake callbacks run outside their respective internal locks. Arbitrary implementation callbacks and external lock ordering remain caller obligations |
+| T-07 | A waiter misses progress or retains stale registrations (B-04) | Medium | It omits table-change registration/rechecks, drops its owner before pending, or retains partial registrations after failure | Cache invalidation notifies table waiters; the adapter registers objects and table changes before rechecking. `PollRegistrations` clear/Drop cancels queued waits. Other callers must follow the same protocol; notifications do not store readiness |
 
-- 高：可能造成跨进程 capability 暴露或 wait/poll 语义失控。
-- 中：可能导致单进程 TIPC handle 操作失败、资源泄漏或错误事件。
-- 低：短暂事件延迟或可重试错误。
+## Failure Modes and Effects Analysis (FMEA)
 
-## 故障模式与影响分析（FMEA）
+Severity: **1** fatal, **2** serious, **3** moderate, **4** minor.
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
-|------|----------|----------|----------|----------|--------|----------|
-| F-01 | `uctx_handle_get` 返回 `BadFileDescriptor` | id 不存在或已关闭 | 单次操作失败 | 调用方需处理无效 handle | 3 | map lookup typed error |
-| F-02 | `uctx_handle_install` 返回 `TooManyOpenFiles` | id 空间完整扫描无空位 | 新 handle 无法安装 | 进程 TIPC 能力耗尽 | 2 | 环形扫描并明确返回错误 |
-| F-03 | handle set add 返回 `AlreadyExists` | 重复注册同一 id | registration 失败 | 调用方需 modify 或 delete 后重试 | 3 | BTreeMap key 检查 |
-| F-04 | handle set poll 返回 `NotFound` | handle set 为空 | wait 失败 | 调用方需先注册 handle | 4 | 明确空集合错误 |
-| F-05 | delete/modify 返回 `NotFound` | 目标 registration 不存在或 cookie 不匹配 | 操作失败 | 调用方状态需同步 | 3 | 存在性和 cookie 检查 |
-| F-06 | exec 后残留 port 或 channel | exec 未清理独立 TIPC table | 新程序可使用旧 capability | 可能跨 credential transition 保留 IPC 权限 | 2 | exec 时关闭全部 TIPC handle |
-| F-07 | 进程退出后残留 port 或 channel | exit 未清理独立 TIPC table | 对端观察到已退出进程的存活连接 | 设备 shutdown 观察到存活 owner | 3 | 发布 process exit 前关闭全部 TIPC handle |
+| ID | Failure mode | Cause | Local effect | System effect | Severity | Response |
+|---|---|---|---|---|---|---|
+| F-01 | Lookup/removal rejected | Absent or negative ID | `BadFileDescriptor` | One IPC operation fails | 3 | Table lookup/uninstall rejects the ID without closing another entry |
+| F-02 | Registration command rejected | Duplicate/missing ID, cookie mismatch, or nested set | `AlreadyExists`, `NotFound`, or `InvalidInput` | Requested set update is not applied | 3 | `handle_set_ctrl` preserves entries on error; caller reconciles its state |
+| F-03 | Empty set cannot yield an event | No registrations | `poll_one` returns `NotFound` | Wait must be rebuilt or abandoned | 4 | Distinguish empty-set error from `Ok(None)` on a nonempty set |
+| F-04 | Wait registration fails partway | Storage allocation, exhausted registration IDs, or child rejection | `PollRegisterError`; earlier registrations may remain | Wait cannot proceed as requested | 3 | Caller clears/drops the owner; adapter maps errors through `map_register_error` |
+| F-05 | New handle cannot be installed | Every nonnegative ID is occupied | `TooManyOpenFiles` | Process cannot obtain another ID | 2 | Return exhaustion; release existing IDs before retrying |
+| F-06 | Ordinary allocation fails | Table/set growth or snapshot construction exhausts the allocator | No local recoverable allocation result | May terminate kernel execution depending on allocator policy | 1 | No local recovery guarantee; resource limits would require additional policy |
+| F-07 | Explicit cleanup is omitted or bypassed | Only table Drop runs, or runtime cleanup fails | Objects can remain logically active | IPC ownership survives its intended lifetime | 2 | Exec/exit integration invokes close-all; inspect integration errors and concrete close contracts rather than relying on reference release |
 
-严重度定义：
+## Failure Handling
 
-- 1：致命，可能导致内存破坏或权限提升。
-- 2：严重，导致进程 TIPC handle table 不可继续分配。
-- 3：一般，单个 handle 或 handle set 操作失败。
-- 4：轻微，可由调用方重新注册或重试恢复。
+Table/set operations use `KResult`; waiter registration uses
+`Result<(), PollRegisterError>`. In the adapter, `map_register_error` maps
+`NoMemory` and `IdExhausted` to `KError::NoMemory`, and `InvalidState` to
+`KError::InvalidInput`. Neither successful registration nor a wake proves
+readiness, so callers must recheck before waiting again.
 
-## 故障管理
+Single-entry remove detaches registrations in installed sets before close.
+Close-all first empties the table and invalidates its cache, then closes each
+object; it does not detach every registration before those callbacks.
+`HandleSet::close` clears its entries without closing children. Close callbacks
+return no error status. The crate has no local retry, panic recovery, or quota
+mechanism; it cannot turn arbitrary callback/allocator failures into `KResult`.
 
-- 所有外部可见失败使用 `KResult` 返回 typed error。
-- id lookup 失败返回 `BadFileDescriptor`。
-- handle set registration 不存在返回 `NotFound`。
-- 资源上限返回 `TooManyOpenFiles`。
-- close 路径唤醒等待者，使调用方能观察后续状态变化。
+Lifecycle integration is in [Process runtime access](../../../process/kprocess/src/process/runtime_access.rs)
+(`apply_exec_update`, `close_all_tipc_handles`) and the
+[process exit path](../../../posix/process/src/runtime.rs) (`do_exit`).
 
-## 隐私分析
+## Privacy Analysis
 
-本 crate 保存 process-local handle id、event mask、cookie 和 `Arc<dyn Handle>`。
-cookie 是调用方 opaque 数据，可能携带用户协议含义。
-本 crate 不输出除调用方已注册 cookie 和 handle id 之外的新信息。
+The crate retains IDs, event masks, cookies, and references to IPC objects, but
+does not inspect message payloads or memory-reference contents. Cookies can
+carry application meaning and are returned as event metadata. There is no local
+logging, redaction, encryption, or zeroization policy. Disclosure control depends
+on correct table selection and caller handling; retained snapshots can extend
+object lifetime after table removal.
 
-## 已知限制
+## Known Limitations
 
-- `HandleTable` 不内置锁，错误的外部并发使用会破坏逻辑一致性。
-- `HandleSet` 禁止嵌套，未实现 Trusty 的非循环嵌套语义。
-- `HandleSet` 信任调用方传入的 `handle_id` 与 `Arc<dyn Handle>` 对应同一 table。
+- IDs have no generation tag; object references may remain valid after close.
+- Set ID/object association and multi-step atomicity are caller responsibilities.
+- Nested sets and set transfer are unsupported; ascending-ID polling is not fair
+  and finalizes child events before filtering them.
+- No local quota bounds collections or ID scans. `Arc` retention can delay release.
+- No blanket IRQ/early-boot safety guarantee applies to allocating/callback paths.
 
-## 审计清单
+## Audit Checklist
 
-- [ ] 新增 handle 类型是否正确实现 `poll`、`register`、`close`、`cookie` 和 `is_sendable`？
-- [ ] 新增 handle table 操作是否保持 process-local id 语义？
-- [ ] 修改 close/remove 路径时是否仍先 detach handle set registration？
-- [ ] exec 和进程退出路径是否都调用 `uctx_handle_close_all`（后者经 `Process::close_all_tipc_handles`），而不是仅清空 table map 或依赖对象 Drop？
-- [ ] 修改 handle set 嵌套策略时是否补充循环检测和测试？
-- [ ] 新增 unsafe 时是否更新 unsafe 清单和 `SAFETY:` 注释？
+- [ ] Resolve user-derived IDs in the intended table; preserve ID/object association across concurrent operations (T-01/T-02).
+- [ ] Preserve single-remove detachment, close-all ordering, and explicit exec/exit close calls (T-02/T-03).
+- [ ] Keep truthful `kind`/`as_any`, nonblocking poll, and idempotent close contracts for new `Handle` implementations (T-04/T-06).
+- [ ] Preserve fallible registration error handling and registration-owner cleanup; assess new growth paths and quotas (T-05/T-07).
+- [ ] Register table changes and object events before rechecking readiness; retain the owner while pending (T-07).
+- [ ] Update the unsafe inventory if a hand-written unsafe, FFI, or assembly boundary is introduced.
+
+Existing checks in [tipc tests](../../tipc/src/tests.rs) include
+`handle_set_matches_trusty_empty_and_nested_rules` (T-04/F-03),
+`handle_table_close_detaches_handle_set_entries` and
+`handle_table_forgets_removed_handle_sets` (T-02), and
+`handle_set_is_not_sendable` (transfer restriction).
+[Process tests](../../../process/kprocess/src/tests.rs) include
+`test_tipc_handles_close_before_process_exit_publication` (T-03 cleanup ordering).
+These cover the named conditions, not every race or failure above. For remaining
+controls, review the referenced lookup, command, wait, and cleanup branches
+against the trigger and response columns. Referencing these tests does not
+assert that they were executed for this documentation change.

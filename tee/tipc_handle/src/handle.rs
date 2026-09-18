@@ -2,6 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! Handle contracts, event bits, and one-shot waiter notification storage.
+
 use core::{
     any::Any,
     sync::atomic::{AtomicUsize, Ordering},
@@ -56,21 +58,32 @@ pub enum HandleKind {
 }
 
 /// Common behavior shared by all TIPC kernel objects.
+///
+/// Implementations synchronize their state. [`Self::kind`] and [`Self::poll`]
+/// run under a set's IRQ-disabling lock and must not block or re-enter it.
+/// Registration and close may invoke wakers; callers must allow for re-entry.
 pub trait Handle: Any + Send + Sync {
     /// Returns the concrete handle kind.
     fn kind(&self) -> HandleKind;
 
     /// Returns events currently visible on the object.
     ///
-    /// If `finalize` is true, edge-like events such as `READY` after accept and
-    /// `SEND_UNBLOCKED` are consumed.
+    /// `finalize = false` preserves events; `true` may consume edge-like events
+    /// before the caller filters the returned mask.
     fn poll(&self, finalize: bool) -> HandleEventMask;
 
-    /// Registers the current task for an event transition.
+    /// Registers the wait represented by `context` for an event transition.
+    ///
+    /// `event_mask` selects interests but may allow extra wake-ups. Retain
+    /// [`kpoll::PollRegistrations`] across pending polls and recheck readiness
+    /// after registering or waking; see the [wait example](crate::HandleTable::register_wait_any_table_change).
     ///
     /// # Errors
     ///
-    /// Returns an error when the waiter registration cannot be retained.
+    /// [`PollRegisterError::NoMemory`] on allocation failure,
+    /// [`PollRegisterError::IdExhausted`] on exhausted registration IDs, or
+    /// [`PollRegisterError::InvalidState`] if the target rejects registration.
+    /// Partial registrations remain until the owner is cleared or dropped.
     fn register(
         &self,
         context: &mut PollContext<'_>,
@@ -87,22 +100,27 @@ pub trait Handle: Any + Send + Sync {
     fn cookie(&self) -> usize;
 
     /// Returns whether this handle may be attached to a TIPC message.
+    ///
+    /// Defaults to `true`; this query neither transfers nor authorizes a send.
     fn is_sendable(&self) -> bool {
         true
     }
 
-    /// Exposes the concrete value for checked downcasting.
+    /// Returns the concrete object for downcasting, including table cleanup.
     fn as_any(&self) -> &dyn Any;
 }
 
 /// Shared event notification and cookie storage embedded by TIPC objects.
+///
+/// Publish readiness before notifying. Notifications are one-shot hints;
+/// the concrete object owns readiness, independently of the atomic cookie.
 pub struct HandleWaitState {
     poll_set: PollSet,
     cookie: AtomicUsize,
 }
 
 impl HandleWaitState {
-    /// Creates an empty wait state.
+    /// Creates an allocated wait source with no registrations and a zero cookie.
     pub fn new() -> Self {
         Self {
             poll_set: PollSet::new(),
@@ -110,26 +128,56 @@ impl HandleWaitState {
         }
     }
 
-    /// Registers the current task for a future event.
+    /// Registers the wait represented by `context` for the next notification.
+    ///
+    /// Retain [`kpoll::PollRegistrations`] while pending; recheck readiness
+    /// after registering and register again after waking. Clearing or dropping
+    /// the owner cancels queued registrations.
+    ///
+    /// # Examples
+    ///
+    /// One poll round using the executor's context. Keep `owner` alive while
+    /// the result is `false`; clear it on completion or error.
+    ///
+    /// ```no_run
+    /// use core::task::Context;
+    ///
+    /// use kpoll::{PollRegisterError, PollRegistrations};
+    /// use tipc_handle::HandleWaitState;
+    ///
+    /// fn poll_ready(
+    ///     state: &HandleWaitState,
+    ///     is_ready: impl Fn() -> bool,
+    ///     owner: &mut PollRegistrations,
+    ///     cx: &Context<'_>,
+    /// ) -> Result<bool, PollRegisterError> {
+    ///     state.register(&mut owner.context(cx))?;
+    ///     Ok(is_ready()) // Recheck after registering to avoid missed wake-ups.
+    /// }
+    /// ```
     ///
     /// # Errors
     ///
-    /// Returns an error when the waiter registration cannot be retained.
+    /// [`PollRegisterError::NoMemory`] if registration storage cannot grow, or
+    /// [`PollRegisterError::IdExhausted`] if source registration IDs run out.
     pub fn register(&self, context: &mut PollContext<'_>) -> Result<(), PollRegisterError> {
         context.register(&self.poll_set)
     }
 
-    /// Wakes all tasks registered on this handle.
+    /// Detaches and wakes all currently registered waiters.
+    ///
+    /// IRQ-safe; invokes wakers outside the source lock. Notifications are not
+    /// retained, and cancellation may race with a final wake.
     pub fn notify(&self) {
         self.poll_set.wake();
     }
 
-    /// Stores an opaque caller cookie.
+    /// Stores an opaque caller cookie with release ordering.
     pub fn set_cookie(&self, cookie: usize) {
         self.cookie.store(cookie, Ordering::Release);
     }
 
-    /// Loads the opaque caller cookie.
+    /// Loads the opaque caller cookie with acquire ordering; initially zero.
     pub fn cookie(&self) -> usize {
         self.cookie.load(Ordering::Acquire)
     }

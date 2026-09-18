@@ -1,188 +1,197 @@
-# tipc-handle — 设计文档
+# tipc_handle — Design Document
 
-## 定位
+## Role
 
-`tipc-handle` 是 Trusty IPC handle 所有权和事件聚合 crate。
-它抽出 `Handle` trait、`HandleSet` 和 process-local `HandleTable`，
-让 `process/kprocess` 可以保存每进程 TIPC handle table，
-同时避免依赖完整 `tee/tipc` core。
+`tipc_handle` owns process-local handle IDs, shared object references, and event
+aggregation for X-Kernel. `process/kprocess` stores its `HandleTable`, while
+`tee/tipc` implements concrete objects through `Handle` and uses `HandleSet`
+for event selection.
 
-`tee/tipc` 依赖本 crate 来让 port、channel、memref 实现统一 handle 接口；
-`process/kprocess` 依赖本 crate 来在 `ProcessRuntime` 中挂接 `HandleTable`。
+`tipc` owns message transport and syscall argument/user-memory handling;
+`kprocess` selects the process and synchronizes its table. This crate does not
+schedule waits. API contracts and examples belong in rustdoc; threat analysis
+belongs in [security.md](security.md).
 
-## 背景
+## Background
 
-Trusty IPC 以整数 handle 作为进程本地对象能力。
-这些 handle 可以指向 port、channel、handle set 或 memref。
-如果 `HandleTable` 留在 `tee/tipc`，`kprocess` 需要依赖完整 TIPC core；
-如果 syscall adapter 又放入 `tee/tipc` 并依赖 `kprocess`，会形成循环依赖。
+Trusty IPC exposes integer handles for ports, channels, sets, and memory
+references. The process runtime needs to own these objects across syscalls and
+release them at exec or exit. Keeping the table in `tipc` would make `kprocess`
+depend on the IPC core, whose syscall adapter already uses `kprocess`.
+This crate separates their shared ownership and event contracts from concrete
+IPC behavior to avoid that dependency cycle.
 
-本 crate 把共享的 handle 状态边界独立出来：
+## Scope
 
-- handle trait 和事件位；
-- handle wait/cookie 存储；
-- handle set 事件聚合；
-- process-local integer id 到 `Arc<dyn Handle>` 的映射。
+The complete crate consists of [Cargo.toml](../Cargo.toml) and four source files:
 
-## 范围
+| File | Responsibility |
+|---|---|
+| [src/lib.rs](../src/lib.rs) | Private module declarations and public re-exports |
+| [src/handle.rs](../src/handle.rs) | `Handle`, event bits, object kinds, notification and cookie storage |
+| [src/handle_set.rs](../src/handle_set.rs) | Registration commands, `HandleSetEntry`, `UEvent`, and `HandleSet` |
+| [src/handle_table.rs](../src/handle_table.rs) | ID allocation, ownership, removal, and wait snapshots |
 
-```text
-tee/tipc-handle/
-├── Cargo.toml
-├── docs/
-│   ├── design.md
-│   └── security.md
-└── src/
-    ├── lib.rs
-    ├── handle.rs
-    ├── handle_set.rs
-    └── handle_table.rs
-```
-
-## 架构
+## Architecture
 
 ```text
-process/kprocess
-    │ owns RwLock<HandleTable>
-    ▼
-┌────────────────────────────────────────────┐
-│ tipc-handle                                │
-│                                            │
-│  Handle trait                              │
-│    ├─ poll/register/close                  │
-│    ├─ cookie                               │
-│    └─ checked downcast via Any             │
-│                                            │
-│  HandleSet                                 │
-│    └─ handle_id -> HandleSetEntry          │
-│                                            │
-│  HandleTable                               │
-│    ├─ handle_id -> Arc<dyn Handle>         │
-│    ├─ handle_set_ids                       │
-│    └─ cached wait_any_snapshot             │
-└────────────────────────────────────────────┘
-    ▲
-    │ implements Handle for TIPC objects
-tee/tipc
+kprocess::ProcessRuntime -- owns RwLock<HandleTable> --> tipc_handle
+ tipc syscall adapter   -- table and set operations --> tipc_handle
+ tipc_handle            -- Handle callbacks --------> tipc objects
+ tipc objects          -- HandleWaitState ----------> kpoll
 ```
 
-| 组件 | 职责 |
-|------|------|
-| `Handle` | 统一 port、channel、handle set、memref 的事件、close、cookie 和 downcast 接口 |
-| `HandleWaitState` | 保存等待者 `PollSet` 和 caller cookie，供具体 handle 嵌入 |
-| `HandleSet` | 多 handle 事件聚合器，返回 process-local handle id、事件和注册 cookie |
-| `HandleTable` | 进程本地 integer id 到 `Arc<dyn Handle>` 的映射，并在 close 时清理 handle set registration |
+| Interface group | Provider and consumer |
+|---|---|
+| `HandleTable` lookup, install, remove, snapshots | Process runtime and syscall adapter call this crate; `ProcessRuntime` owns the table under its `tipc` feature |
+| `HandleSet` creation, control, polling | Syscall adapter supplies resolved objects and receives `UEvent` values |
+| `Handle` kind, poll, register, close, cookie, downcast, sendability | This crate defines the contract; `tipc` supplies `IpcPort`, `IpcChan`, and `MemRef`, and this crate supplies `HandleSet`; table/set code and the adapter call these objects |
+| `HandleWaitState` registration, notification, cookie | Concrete objects, sets, and the table use this crate's wrapper over `PollSet` and `AtomicUsize` |
 
-## 调用约束 / 执行上下文
+`HandleTable.handles` maps IDs to `Arc<dyn Handle>`; `handle_set_ids` indexes
+installed sets for removal cleanup. Each `HandleSetEntry` also owns an `Arc`.
+A registration's cookie is independent of the object's cookie. Callers must
+associate an entry's ID and object with the same process-local table; the set
+does not resolve that association itself.
 
-- 本 crate 是 `no_std` 内核 crate，依赖 `alloc`、`kpoll`、`kspin`、`kerrno` 和 `smallvec`。
-- `Handle::register` 接收短生命周期 `PollContext` 并返回注册错误；调用方需要位于
-  调度器可用之后，并持有 `PollRegistrations` 跨越 `Pending`。
-- `HandleSet` 使用 `SpinNoIrq` 保护 registration，适合短临界区，不适合在锁内执行阻塞操作。
-- `HandleTable` 不内置锁，调用方通常把它放入 process-local `RwLock`。
-- 本 crate 不要求当前进程线程；只有持有 `HandleTable` 的上层调用者才决定 process-local 归属。
-- early boot 和中断上下文不应创建或操作会注册 waker 的 handle set。
+The crate is `no_std` with `alloc` and has no Cargo features or conditional
+source modules. Its dependencies are `bitflags` for event masks, `kerrno` for
+errors, `kpoll` for wait registrations, `kspin` for synchronization, and
+`smallvec` for the set-ID index (`const_new` and `union` features).
 
-## 状态机
+## Calling Constraints / Execution Context
 
-### Handle table 生命周期
+The crate does not require a current process thread; callers supply objects,
+tables, and `PollContext`. The syscall adapter supplies task context and
+scheduler-backed waiting. Registration itself records wakers rather than
+sleeping. Do not hold a table lock across a blocking wait or a pending poll.
 
-```text
-Arc<dyn Handle>
-  └─ uctx_handle_install()
-      ▼
-process-local integer id
-  ├─ uctx_handle_get()
-  ├─ wait_any_snapshot()
-  ├─ register_wait_any_table_change()
-  ├─ uctx_handle_uninstall()
-  │    └─ detach_from_handle_sets(id)
-  └─ uctx_handle_remove()
-       ├─ uctx_handle_uninstall(id)
-       └─ handle.close()
-  └─ uctx_handle_close_all() during exec / last-thread exit
-       ├─ remove all table ownership
-       ├─ clear handle-set registrations
-       └─ close every handle
-```
+Construction and collection growth require an initialized allocator and mapped
+kernel memory. Spin-lock operations require architecture IRQ support and any
+enabled preemption hooks, which operate on the current CPU. There is no direct
+MMIO or address-space manipulation in this crate. Early-boot use is valid only
+once the allocation and guard facilities needed by that path are available.
 
-handle id 只在一个 `HandleTable` 内有效。
-删除 handle 时会先从同 table 内所有 `HandleSet` 移除该 id，
-再关闭目标对象，避免 stale registration 继续报告已关闭对象。
-`wait_any_snapshot()` 在 handle table 增删之间复用缓存的
-`Arc<[(handle_id, handle)]>`，避免每次 wait-any poll 都重新分配并 clone
-整张表；install/uninstall 会让缓存失效并唤醒已注册的 wait-any 等待者。
+`HandleWaitState::notify` is IRQ-safe through `PollSet::wake`; this does not make
+allocating table/set operations generally IRQ-safe. Child `kind` and `poll`
+callbacks execute under the set's IRQ-disabling lock and must neither block nor
+re-enter the set. Table mutations and close can invoke callbacks under
+caller-held locks; callers must exclude lock-order cycles and re-entry into
+those locks.
 
-### Handle set registration
+## State Machines
 
-```text
-Empty
-  └─ Add(handle_id, handle, mask, cookie)
-      ▼
-Registered
-  ├─ Modify(...)
-  ├─ Delete(...)
-  ├─ poll_one()
-  └─ close()
-      ▼
-Empty
-```
+State is represented by collection membership and cache presence, not a
+lifecycle enum. `HandleKind` classifies objects and `HandleSetCommand` selects
+operations. The following transitions describe those actual data changes:
 
-当前禁止把 `HandleSet` 注册进另一个 `HandleSet`，避免第一阶段引入循环检测。
+| Owned state | Trigger | Result |
+|---|---|---|
+| Unoccupied table ID | Successful `uctx_handle_install` | ID owns a strong object reference |
+| Occupied table ID | `uctx_handle_uninstall` / `uctx_handle_remove` | Mapping is removed; only `remove` also closes the object |
+| Missing set entry | Successful `Add` | Entry stores the object, event mask, and cookie |
+| Existing set entry | Successful modify / delete command | Entry is replaced / removed; failed checks leave it unchanged |
+| Populated set | `HandleSet::close` | Entries are cleared; subsequent additions remain valid |
+| Missing snapshot cache | `wait_any_snapshot` | Cache is populated from current table membership |
+| Cached snapshot | Successful install/uninstall or `uctx_handle_close_all` | Internal cache is cleared; externally held snapshots remain unchanged |
 
-## 算法流程
+Object-specific open/closed states belong to the `Handle` implementation in
+`tipc`. Removing a table reference and closing the object are separate actions.
 
-### 安装 handle
+## Algorithms and Flows
 
-```text
-uctx_handle_install(handle)
-  → remember whether handle is HandleSet
-  → scan integer id space from next_id
-  → insert Arc<dyn Handle>
-  → if HandleSet, remember id in handle_set_ids
-  → update next_id
-```
+### Install and remove
 
-id 分配从 `next_id` 开始环形扫描。
-完整扫描仍找不到空位时返回 `TooManyOpenFiles`。
+`uctx_handle_install` scans free nonnegative IDs from `next_id`, wrapping after
+`i32::MAX`. It inserts the object, indexes concrete sets using checked `Any`
+downcasts, then invalidates the wait cache and notifies table waiters.
+ID-space exhaustion terminates the scan with an error.
 
-### 删除 handle
+`uctx_handle_uninstall` removes the mapping, removes its set index if applicable,
+detaches the ID from sets still installed in this table, and invalidates/notifies
+the wait cache. It returns the object without closing it, supporting speculative
+install rollback. `uctx_handle_remove` follows this with `Handle::close`.
 
-```text
-uctx_handle_remove(id)
-  → uctx_handle_uninstall(id)
-  → handle.close()
-```
+### Set registration and event selection
 
-先 detach 再 close，避免 close 触发等待者后仍能从 handle set 看到 stale id。
-`uctx_handle_uninstall` 只删除 id 并返回 `Arc<dyn Handle>`，
-用于 syscall 回滚等已经临时安装 handle 但还不能关闭底层对象的路径。
-普通 close 路径必须使用 `uctx_handle_remove`。
+`handle_set_ctrl` adds, replaces, or deletes entries under the set lock, then
+notifies set waiters after a successful operation. Add rejects duplicates;
+modify/delete require an existing ID. Cookie-checked commands additionally
+require equality with the stored cookie. Add/modify reject objects reporting
+`HandleKind::HandleSet`, preventing nested polling and reference cycles.
 
-`uctx_handle_close_all` 用于 exec 和进程退出两个边界。TIPC handle 不属于
-POSIX file descriptor table，也没有 inheritable 或 close-on-exec 标志，因此
-新可执行文件不得继承旧映像的 port、channel、handle set 或 memref。该方法先使
-整张表及其 wait-any snapshot 失效，再显式关闭每个对象；这保证 port 被取消
-发布，channel peer 被通知断开。进程最后一个线程退出时，`do_exit` 在发布
-process exit 之前经 `Process::close_all_tipc_handles` 调用同一方法，避免
-父进程 `wait` 返回或设备 shutdown 时仍观察到已退出进程的存活 handle owner。
+`poll_one` visits IDs in ascending order and calls each visited child's
+`poll(true)` before applying its event mask. It returns the first match with
+the registration cookie. An empty set is distinguished from a nonempty set
+without matching events. Filtering can discard events already consumed by a child;
+selection does not rotate for fairness. In contrast, the set's `Handle::poll`
+uses child `poll(false)` and reports aggregate `READY` without consuming events.
 
-## 并发模型
+### Waiting
 
-- `HandleWaitState` 使用 `kpoll::PollSet` 保存等待者，`AtomicUsize` 保存 cookie。
-- `HandleSet` 使用 `SpinNoIrq<BTreeMap<...>>` 串行化 add/delete/modify/poll。
-- `HandleTable` 本身不是并发容器；外部锁决定读写并发策略。
-- `Arc<dyn Handle>` 保存对象强引用，handle set registration 不依赖裸指针。
+`wait_any_snapshot` caches an ID-ordered `Arc<[(i32, Arc<dyn Handle>)]>` so repeated
+polls do not clone the whole table. Membership changes invalidate the cache,
+but previously returned snapshots retain their objects and may become stale.
 
-## 设计决策
+A set's `Handle::register` registers its own notification source, snapshots child
+objects and masks under the set lock, then registers children outside that lock.
+Registration errors propagate to the caller; partial registrations remain
+owned by its `PollRegistrations`.
 
-- **独立 crate 而不是 `tipc` 内部模块**：`kprocess` 只需要 handle table，不应依赖 port/channel/registry/syscall adapter。
-- **`HandleSet` 跟 `HandleTable` 一起下沉**：`HandleTable` 需要 close-detach handle set registration，二者共享同一所有权不变量。
-- **trait object 而不是 enum**：handle 的具体实现分布在 `tipc` core，使用 `Arc<dyn Handle>` 可以让 handle table 不依赖具体 TIPC 对象类型。
-- **禁止 handle set 嵌套**：第一阶段选择保守语义，避免循环检测和递归 poll。
+The [syscall wait paths](../../tipc/src/syscall.rs) retain `PollRegistrations`
+across pending polls. Wait-any registers both snapshot objects and table
+membership changes, then fetches the current snapshot and rechecks readiness.
+This covers a handle becoming ready or being installed during registration.
+Notifications are one-shot hints; callers register again and recheck after waking.
 
-## Drop / 资源释放
+## Concurrency Model
 
-- `HandleTable::uctx_handle_remove` 调用目标 handle 的 `close`，但不拥有具体对象的 drop 细节。
-- `HandleSet::close` 清空 registration 并通知等待者。
-- `HandleWaitState` 不拥有外部资源，drop 时只释放内部等待集合和 cookie。
+| Shared state | Synchronization |
+|---|---|
+| `HandleTable` fields | Caller-owned synchronization; `ProcessRuntime` uses `ksync::RwLock` |
+| `HandleSet.entries` | `SpinNoIrq<BTreeMap<i32, HandleSetEntry>>`; local IRQs and, when enabled in `kspin`, preemption are disabled |
+| Waiter storage | `kpoll::PollSet` protects registrations internally; wakers run outside its source lock |
+| `HandleWaitState.cookie` | Release stores and acquire loads on `AtomicUsize` |
+
+The set lock spans child polling, but child waiter registration uses a snapshot
+and runs after releasing it. This limits callback nesting during registration;
+polling still requires the nonblocking, non-reentrant contract above. The table's
+wait cache avoids allocation and per-object reference cloning on unchanged
+wait-any rounds, at the cost of keeping old objects alive in retained snapshots.
+Cookie ordering does not replace synchronization of the object's other state.
+
+## Design Decisions
+
+- **Shared ownership crate:** separating the table from `tipc` avoids a
+  `kprocess`/`tipc` dependency cycle while leaving IPC behavior with its owner.
+- **Sets colocated with the table:** removal needs to detach registrations in
+  installed sets, so both types share the same ownership boundary.
+- **Trait objects rather than a concrete-object enum:** `Arc<dyn Handle>` lets
+  `tipc` provide object types without becoming a dependency of this crate.
+- **No nested sets:** rejecting set children avoids recursive polling and set
+  reference cycles; non-cyclic nesting is also unsupported.
+- **Ordered maps and cached snapshots:** IDs provide deterministic traversal,
+  while snapshot reuse reduces repeated wait-any work. Selection does not
+  rotate for fairness, and ID allocation can scan the full occupied space.
+
+## Drop / Resource Release
+
+`uctx_handle_close_all` first empties the table, clears the set index, resets ID
+allocation, and invalidates/notifies the wait cache. It then calls `close` on
+each removed object; it does not detach every registration before those calls.
+`HandleSet::close` clears its entries and wakes waiters without closing children.
+Dropping a table only releases references; explicit close is needed for IPC
+shutdown effects. Old snapshots and external `Arc` references can outlive close.
+Dropping the last `PollSet` source wakes remaining waiters; dropping registration
+owners cancels still-queued registrations.
+
+With TIPC enabled, [Process::apply_exec_update](../../../process/kprocess/src/process/runtime_access.rs)
+closes the table on its successful exec-update path. The last-thread exit path
+in [do_exit](../../../posix/process/src/runtime.rs) calls
+`Process::close_all_tipc_handles` before publishing process exit. Concrete close
+behavior belongs to `tipc`: ports are unpublished and channel peers are notified.
+
+IDs can be reused and multiple IDs can refer to one object; a strong reference
+preserves allocation, not logical openness. Cleanup only tracks sets still
+installed in the same table. Set transfer is unsupported; external ID/object
+validation and synchronization remain caller responsibilities.

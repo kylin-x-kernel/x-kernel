@@ -2,6 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! Process-local handle IDs, explicit close paths, and cached wait snapshots.
+
 use alloc::{
     collections::{BTreeMap, btree_map::Entry},
     sync::Arc,
@@ -17,7 +19,14 @@ use crate::{Handle, HandleSet, HandleWaitState};
 /// Immutable handle list shared across `wait_any` poll attempts.
 type WaitAnySnapshot = Arc<[(i32, Arc<dyn Handle>)]>;
 
-/// Process-local mapping from integer IDs to TIPC kernel objects.
+/// Process-local mapping from nonnegative integer IDs to shared TIPC objects.
+///
+/// Callers select the owning process and synchronize access. Mutations may
+/// allocate and invoke callbacks under caller-held locks. IDs are reusable
+/// and local to this table; multiple IDs may refer to one object.
+///
+/// Drop only releases references. Use [`Self::uctx_handle_close_all`] for
+/// explicit shutdown; see the [crate example](crate#examples).
 #[derive(Default)]
 pub struct HandleTable {
     next_id: i32,
@@ -31,10 +40,7 @@ pub struct HandleTable {
 }
 
 impl HandleTable {
-    /// Creates an empty table.
-    ///
-    /// Not `const`: [`HandleWaitState`] embeds a [`kpoll::PollSet`] that
-    /// allocates on construction.
+    /// Creates an empty table, allocating its membership notification source.
     pub fn new() -> Self {
         Self {
             next_id: 0,
@@ -45,7 +51,14 @@ impl HandleTable {
         }
     }
 
-    /// Installs a handle and returns its process-local ID.
+    /// Installs a strong reference and returns a free process-local ID.
+    ///
+    /// Wraps from `i32::MAX` to zero. Success invalidates the wait cache and
+    /// notifies table waiters; no sendability or object-uniqueness check is made.
+    ///
+    /// # Errors
+    ///
+    /// [`KError::TooManyOpenFiles`] if every nonnegative ID is occupied.
     pub fn uctx_handle_install(&mut self, handle: Arc<dyn Handle>) -> KResult<i32> {
         let is_handle_set = handle.as_any().is::<HandleSet>();
         let start = self.next_id.max(0);
@@ -68,7 +81,13 @@ impl HandleTable {
         }
     }
 
-    /// Returns a strong reference to an installed handle.
+    /// Clones the strong reference associated with `id` in this table.
+    ///
+    /// Keeps the object allocated after removal, but does not prevent close.
+    ///
+    /// # Errors
+    ///
+    /// [`KError::BadFileDescriptor`] if `id` is absent or negative.
     pub fn uctx_handle_get(&self, id: i32) -> KResult<Arc<dyn Handle>> {
         self.handles
             .get(&id)
@@ -76,7 +95,13 @@ impl HandleTable {
             .ok_or(KError::BadFileDescriptor)
     }
 
-    /// Removes and closes one handle.
+    /// Uninstalls an entry, then explicitly closes its underlying object.
+    ///
+    /// Calls [`Self::uctx_handle_uninstall`] before [`Handle::close`].
+    ///
+    /// # Errors
+    ///
+    /// [`KError::BadFileDescriptor`] if `id` is absent; no close occurs.
     pub fn uctx_handle_remove(&mut self, id: i32) -> KResult {
         let handle = self.uctx_handle_uninstall(id)?;
         handle.close();
@@ -85,10 +110,9 @@ impl HandleTable {
 
     /// Closes and removes every handle owned by this process-local table.
     ///
-    /// This is used during exec, where no TIPC handle has an inheritable or
-    /// close-on-exec flag.  Each handle is explicitly closed so ports are
-    /// unpublished and channel peers are notified before their references are
-    /// dropped.
+    /// Empties the table, resets ID allocation and notifies waiters before
+    /// closing objects. Used for exec/exit cleanup; retained references and
+    /// snapshots remain allocated but observe closed objects.
     pub fn uctx_handle_close_all(&mut self) {
         let handles = core::mem::take(&mut self.handles);
         self.handle_set_ids.clear();
@@ -101,8 +125,13 @@ impl HandleTable {
 
     /// Removes one handle table entry without closing the underlying object.
     ///
-    /// This is used when a syscall installed handles speculatively and then
-    /// failed before returning the new identifiers to userspace.
+    /// Detaches the ID from sets still in the table, invalidates the wait cache,
+    /// and notifies waiters. Used for speculative-install rollback; the caller
+    /// assumes close responsibility. A removed set retains its own entries.
+    ///
+    /// # Errors
+    ///
+    /// [`KError::BadFileDescriptor`] if `id` is absent.
     pub fn uctx_handle_uninstall(&mut self, id: i32) -> KResult<Arc<dyn Handle>> {
         let handle = self.handles.remove(&id).ok_or(KError::BadFileDescriptor)?;
         if handle.as_any().is::<HandleSet>() {
@@ -127,8 +156,9 @@ impl HandleTable {
 
     /// Returns the cached handle list used by `wait_any`.
     ///
-    /// The cache is rebuilt only after the table changes, so repeated wait
-    /// polling does not clone every handle on every pass.
+    /// Returns an ID-ordered `Arc<[(i32, Arc<dyn Handle>)]>`, reused until the
+    /// table changes. Old snapshots retain removed/closed objects; fetch a new
+    /// snapshot after notification. See the [wait example](Self::register_wait_any_table_change).
     pub fn wait_any_snapshot(&mut self) -> WaitAnySnapshot {
         if let Some(snapshot) = &self.wait_any_snapshot {
             return snapshot.clone();
@@ -146,9 +176,44 @@ impl HandleTable {
 
     /// Registers the current task for handle-table membership changes.
     ///
-    /// Callers must recheck readiness after registering. An install or removal
-    /// may race with registration, and the recheck turns that race into an
-    /// immediate result instead of a missed wakeup.
+    /// Also register on each object for its events. Retain registrations while
+    /// pending and recheck readiness after registering to avoid missed wake-ups.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`HandleWaitState::register`] errors: allocation failure or
+    /// exhausted registration IDs.
+    ///
+    /// # Examples
+    ///
+    /// One wait round with exclusive table access. Keep `owner` across pending
+    /// rounds (`None`), clear it on completion/error, and release table locks
+    /// before yielding. An empty table waits for a later installation.
+    ///
+    /// ```no_run
+    /// use core::task::Context;
+    ///
+    /// use kpoll::{PollRegisterError, PollRegistrations};
+    /// use tipc_handle::{HandleEventMask, HandleTable};
+    ///
+    /// fn poll_any(
+    ///     table: &mut HandleTable,
+    ///     mask: HandleEventMask,
+    ///     owner: &mut PollRegistrations,
+    ///     cx: &Context<'_>,
+    /// ) -> Result<Option<(i32, HandleEventMask)>, PollRegisterError> {
+    ///     let mut context = owner.context(cx);
+    ///     table.register_wait_any_table_change(&mut context)?;
+    ///     for (_, handle) in table.wait_any_snapshot().iter() {
+    ///         handle.register(&mut context, mask)?;
+    ///     }
+    ///     // Recheck after all registrations; do not consume events here.
+    ///     Ok(table.wait_any_snapshot().iter().find_map(|(id, handle)| {
+    ///         let events = handle.poll(false) & mask;
+    ///         (!events.is_empty()).then_some((*id, events))
+    ///     }))
+    /// }
+    /// ```
     pub fn register_wait_any_table_change(
         &self,
         context: &mut PollContext<'_>,
