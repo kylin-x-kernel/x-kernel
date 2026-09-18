@@ -92,6 +92,12 @@ compare-exchange, and remote repair requests use an atomic pending mask.
 
 ## Failure handling and resource recovery
 
+ARM event programming converts the remaining logical duration, not the absolute
+deadline. Saturating multiplication, upward rounding, and the signed TVAL limit
+prevent a far-future request from wrapping into an immediate interrupt loop.
+This does not extend the clock source's valid lifetime across counter or
+nanosecond wrap; software must still recheck deadlines after bounded interrupts.
+
 Frequency discovery degrades through optional sources; invalid PIT samples
 return `None`. Configuration and initialization violations use assertions or
 `expect`, without a recovery protocol. `PitChannel2::drop` restores port `0x61`

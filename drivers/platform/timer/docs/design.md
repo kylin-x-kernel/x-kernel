@@ -131,9 +131,14 @@ A future deadline becomes a relative count clamped to `1..=u32::MAX`; an expired
 deadline uses count 1. Writing count 0 disarms the timer. TSC calibration does
 not calibrate the LAPIC event rate.
 
-ARM converts an absolute deadline to a relative interval clamped to `i32::MAX`
-ticks, writes the interval, then enables the selected timer. An expired deadline
-uses interval 0; disarming clears the enable bit. Long x86 and ARM deadlines can
+ARM samples logical counter time in nanoseconds, subtracts it from the software
+deadline with saturation, then converts the remaining duration to ticks rounded
+up and clamped to `i32::MAX`. Multiplication saturates before division: since
+`i32::MAX * 1_000_000_000` fits in `u64`, an overflowing product already requires
+the maximum countdown. This avoids absolute-deadline conversion wrap without
+wide division on the event path. The counter origin and resume offset are unchanged.
+The backend writes the interval before enabling the selected timer. An expired
+deadline uses interval 0; disarming clears the enable bit. Long x86 and ARM deadlines can
 therefore generate an earlier interrupt, at which software must recheck and
 rearm the remaining deadline.
 
