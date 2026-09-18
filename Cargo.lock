@@ -186,9 +186,9 @@ dependencies = [
 
 [[package]]
 name = "arm_pl011"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "efcf6afca4502993a737ba1e00952d1321078689da92bf7aab27d4e5756c0bec"
+checksum = "e32b9dcf7e8b53378fa5eff69bc4a9430d69ffea312170c1ce2b1eaec5ee18b9"
 dependencies = [
  "tock-registers 0.8.1",
 ]

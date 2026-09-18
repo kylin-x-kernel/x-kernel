@@ -26,9 +26,11 @@ configuration at call time.
 - `SerialPort::new_mmio_ns16550` and `Port::new` require the same mapping validity;
   register stride and width must match the device.
   Emergency handles reuse fixed values checked during normal construction.
-- PL011 volatile accesses in `EmergencyTx::try_send_raw` only touch FR/DR registers,
-  without accessing mutable storage owned by Rust.
-  NS16550 uses an independent local handle to the same hardware window or I/O ports.
+- `EmergencyTx::try_send_raw` builds an independent local handle for each backend
+  (`Pl011Uart::new` for PL011, `Port::new` or `uart_16550::SerialPort::new` for
+  NS16550) over the same hardware window or I/O ports.
+  The handles create no reference to the locked `Backend` and touch only status
+  and data registers, without accessing mutable storage owned by Rust.
 - NMI output does not read, dereference, or forcibly unlock `SpinNoIrq<Backend>`.
   It creates no `&mut Backend` overlapping the interrupted guard's borrow.
 

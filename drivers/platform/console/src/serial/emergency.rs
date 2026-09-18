@@ -4,6 +4,9 @@
 
 //! Best-effort UART transmission without borrowing the normal, locked backend.
 
+#[cfg(feature = "pl011")]
+use arm_pl011::Pl011Uart;
+
 #[cfg(feature = "ns16550-mmio")]
 use crate::ns16550_mmio::{Port, SerialRegWidth};
 
@@ -66,21 +69,11 @@ impl EmergencyTx {
         match self {
             #[cfg(feature = "pl011")]
             Self::Pl011 { base } => {
-                const FR_OFFSET: usize = 0x18;
-                const FR_TX_FULL: u32 = 1 << 5;
-
-                // SAFETY: SerialPort's constructor requires a valid, aligned
-                // PL011 mapping for its lifetime. Only device registers are
-                // accessed; no reference to the locked Backend is created.
-                let flags = unsafe { ((*base + FR_OFFSET) as *const u32).read_volatile() };
-                if flags & FR_TX_FULL != 0 {
-                    return false;
-                }
-                // SAFETY: the same mapping contains the 32-bit data register
-                // at offset zero. Concurrent hardware writers may lose bytes,
-                // but do not access shared Rust-owned mutable storage.
-                unsafe { (*base as *mut u32).write_volatile(u32::from(byte)) };
-                true
+                // A local handle over the same register window; no reference
+                // to the locked `Backend` is created. `try_putchar` only polls
+                // FR[TXFF] and writes DR, so it never reinitializes the device.
+                let mut uart = Pl011Uart::new(*base as *mut u8);
+                uart.try_putchar(byte)
             }
             #[cfg(feature = "ns16550-mmio")]
             Self::Ns16550Mmio {

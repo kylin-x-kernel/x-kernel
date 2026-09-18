@@ -39,9 +39,10 @@ The stdout instance is published through `LazyInit` after construction;
 the early console and runtime driver share one `Arc<SerialPort>`.
 
 Emergency transmission does not access `inner`.
-PL011 polls FR and writes DR directly.
-NS16550 creates a local register handle containing only fixed address information
-and calls the nonblocking `try_send_raw` without initializing the device.
+Each backend builds a local register handle containing only fixed address information
+and calls its nonblocking transmit primitive without initializing the device:
+PL011 uses `arm_pl011`'s local `Pl011Uart` handle and `try_putchar`;
+the NS16550 backends use `try_send_raw`.
 Each transmitted byte is polled at most 100,000 times.
 A failure immediately ends output of the current byte slice.
 This is an iteration budget, not a wall-clock time guarantee.
