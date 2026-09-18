@@ -1196,7 +1196,7 @@ mod tests {
         router
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev: loopback,
-                addr: Ipv4Cidr::new(loopback_addr, 8),
+                addr: Ipv4Cidr::new(loopback_addr, 8).unwrap(),
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: None,
             })
@@ -1227,7 +1227,7 @@ mod tests {
         router
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev: loopback,
-                addr: Ipv4Cidr::new(loopback_addr, 8),
+                addr: Ipv4Cidr::new(loopback_addr, 8).unwrap(),
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: None,
             })

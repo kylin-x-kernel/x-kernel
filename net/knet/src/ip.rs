@@ -182,10 +182,15 @@ pub(crate) struct Ipv4Cidr {
 }
 
 impl Ipv4Cidr {
-    pub(crate) const fn new(address: Ipv4Address, prefix_len: u8) -> Self {
-        Self {
-            address,
-            prefix_len,
+    /// Creates a CIDR when `prefix_len` is at most 32.
+    pub(crate) const fn new(address: Ipv4Address, prefix_len: u8) -> Option<Self> {
+        if prefix_len <= 32 {
+            Some(Self {
+                address,
+                prefix_len,
+            })
+        } else {
+            None
         }
     }
 
@@ -200,16 +205,13 @@ impl Ipv4Cidr {
     pub(crate) fn network(self) -> Self {
         let mask = prefix_mask(self.prefix_len);
         let addr = u32::from_be_bytes(self.address.octets()) & mask;
-        Self::new(
-            Ipv4Address::from_octets(addr.to_be_bytes()),
-            self.prefix_len,
-        )
+        Self {
+            address: Ipv4Address::from_octets(addr.to_be_bytes()),
+            prefix_len: self.prefix_len,
+        }
     }
 
     pub(crate) fn broadcast(self) -> Option<Ipv4Address> {
-        if self.prefix_len > 32 {
-            return None;
-        }
         let mask = prefix_mask(self.prefix_len);
         let addr = u32::from_be_bytes(self.address.octets());
         Some(Ipv4Address::from_octets((addr | !mask).to_be_bytes()))
@@ -349,7 +351,7 @@ mod tests {
     #[def_test]
     fn test_ip_address_and_cidr_helpers() {
         let addr = Ipv4Address::new(192, 0, 2, 1);
-        let cidr = Ipv4Cidr::new(addr, 24);
+        let cidr = Ipv4Cidr::new(addr, 24).unwrap();
         let ip_cidr = IpCidr::from(cidr);
 
         assert_eq!(cidr.address(), addr);
@@ -361,6 +363,7 @@ mod tests {
         assert!(ip_cidr.contains_addr(&IpAddress::from(addr)));
         assert!(IpAddress::from(Ipv4Address::UNSPECIFIED).is_unspecified());
         assert!(IpAddress::from(Ipv4Address::BROADCAST).is_broadcast());
+        assert_eq!(Ipv4Cidr::new(addr, 33), None);
     }
 
     #[def_test]

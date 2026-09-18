@@ -37,6 +37,10 @@ use crate::{
     socket::SocketOps,
 };
 
+fn valid_ipv4_cidr(address: crate::ip::Ipv4Address, prefix_len: u8) -> crate::ip::Ipv4Cidr {
+    crate::ip::Ipv4Cidr::new(address, prefix_len).unwrap()
+}
+
 struct TestDevice {
     link: LinkSnapshot,
     device_id: Option<kdevice::DeviceId>,
@@ -189,13 +193,13 @@ fn init_test_state() {
     router
         .add_ipv4_addr(Ipv4AddrEntry {
             dev: 0,
-            addr: crate::ip::Ipv4Cidr::new(crate::ip::Ipv4Address::new(127, 0, 0, 1), 8),
+            addr: valid_ipv4_cidr(crate::ip::Ipv4Address::new(127, 0, 0, 1), 8),
             scope: wire_route::SCOPE_HOST,
             broadcast: None,
         })
         .unwrap();
     router.add_rule(Rule::new(
-        crate::ip::Ipv4Cidr::new(crate::ip::Ipv4Address::UNSPECIFIED, 0).into(),
+        valid_ipv4_cidr(crate::ip::Ipv4Address::UNSPECIFIED, 0).into(),
         Some(crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
             192, 168, 1, 1,
         ))),
@@ -205,7 +209,7 @@ fn init_test_state() {
     router
         .add_ipv4_addr(Ipv4AddrEntry {
             dev: 1,
-            addr: crate::ip::Ipv4Cidr::new(crate::ip::Ipv4Address::new(192, 168, 1, 2), 24),
+            addr: valid_ipv4_cidr(crate::ip::Ipv4Address::new(192, 168, 1, 2), 24),
             scope: wire_route::SCOPE_UNIVERSE,
             broadcast: None,
         })
@@ -1249,7 +1253,7 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
         router
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev,
-                addr: crate::ip::Ipv4Cidr::new(addr, 24),
+                addr: valid_ipv4_cidr(addr, 24),
                 scope,
                 broadcast: None,
             })

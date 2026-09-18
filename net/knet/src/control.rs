@@ -99,10 +99,9 @@ pub fn set_interface_ipv4_addr(
     if addr.is_unspecified() {
         return SERVICE.remove_primary_ipv4_addr(dev);
     }
-    SERVICE.set_primary_ipv4_addr(
-        dev,
-        Ipv4Cidr::new(Ipv4Address::from_octets(addr.octets()), prefix_len),
-    )
+    let cidr = Ipv4Cidr::new(Ipv4Address::from_octets(addr.octets()), prefix_len)
+        .ok_or(LinuxError::EINVAL)?;
+    SERVICE.set_primary_ipv4_addr(dev, cidr)
 }
 
 /// Updates the prefix length of the first IPv4 address assigned to `name`.
@@ -218,13 +217,13 @@ pub fn del_ipv4_route(
 }
 
 fn ipv4_route_filter(dst: Option<Ipv4Addr>, dst_len: u8) -> Result<IpCidr, LinuxError> {
-    if dst_len > 32 {
-        return Err(LinuxError::EINVAL);
-    }
     let dst_addr = dst
         .map(|addr| Ipv4Address::from_octets(addr.octets()))
         .unwrap_or(Ipv4Address::UNSPECIFIED);
-    Ok(Ipv4Cidr::new(dst_addr, dst_len).network().into())
+    Ok(Ipv4Cidr::new(dst_addr, dst_len)
+        .ok_or(LinuxError::EINVAL)?
+        .network()
+        .into())
 }
 
 fn ipv4_configured_route_rule(

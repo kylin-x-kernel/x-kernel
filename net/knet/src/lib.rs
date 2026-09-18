@@ -81,7 +81,7 @@ pub fn init_network() {
     let mut router = Router::new();
     let lo_dev = router.add_device(Box::new(LoopbackDevice::new()));
 
-    let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8);
+    let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8).unwrap();
     router
         .add_ipv4_addr(Ipv4AddrEntry {
             dev: lo_dev,
@@ -96,7 +96,8 @@ pub fn init_network() {
         info!("  use NIC 0: {:?}", handle.name());
 
         let eth0_address = wire::MacAddress(handle.mac().0);
-        let eth0_ip = Ipv4Cidr::new(IP.parse().expect("Invalid IPv4 address"), IP_PREFIX);
+        let eth0_ip = Ipv4Cidr::new(IP.parse().expect("Invalid IPv4 address"), IP_PREFIX)
+            .expect("configured IPv4 prefix length must be valid");
 
         let eth0 = EthernetDevice::new("eth0".to_owned(), handle);
         let eth0_dev = router.add_device(Box::new(eth0));
@@ -110,7 +111,7 @@ pub fn init_network() {
             })
             .expect("Ethernet IPv4 address must fit the interface");
         router.add_rule(Rule::new(
-            Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
+            Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).unwrap().into(),
             Some(IpAddress::Ipv4(
                 GATEWAY.parse().expect("Invalid gateway address"),
             )),

@@ -505,13 +505,11 @@ fn ipv4_addr_entry_from_request(request: AddrRequest) -> Result<Ipv4AddrEntry, L
     if request.family != wire_route::FAMILY_IPV4 {
         return Err(LinuxError::EAFNOSUPPORT);
     }
-    if request.prefix_len > 32 {
-        return Err(LinuxError::EINVAL);
-    }
     let dev = request.index.checked_sub(1).ok_or(LinuxError::ENODEV)? as usize;
     Ok(Ipv4AddrEntry {
         dev,
-        addr: crate::ip::Ipv4Cidr::new(address.into(), request.prefix_len),
+        addr: crate::ip::Ipv4Cidr::new(address.into(), request.prefix_len)
+            .ok_or(LinuxError::EINVAL)?,
         scope: request.scope,
         broadcast: None,
     })
@@ -566,7 +564,11 @@ fn route_rule_from_request(request: RouteRequest) -> Result<Rule, LinuxError> {
     let IpAddress::Ipv4(dst) = dst else {
         return Err(LinuxError::EAFNOSUPPORT);
     };
-    let filter = IpCidr::Ipv4(Ipv4Cidr::new(dst.into(), request.dst_len).network());
+    let filter = IpCidr::Ipv4(
+        Ipv4Cidr::new(dst.into(), request.dst_len)
+            .expect("route prefix length was validated")
+            .network(),
+    );
     let dev = request.oif.checked_sub(1).ok_or(LinuxError::EOPNOTSUPP)? as usize;
     let gateway = request.gateway.map(to_kernel_ip).transpose()?;
     let prefsrc = request.prefsrc.map(to_kernel_ip).transpose()?;
