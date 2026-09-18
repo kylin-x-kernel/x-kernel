@@ -48,11 +48,15 @@ across its exit cleanup.
 ## Runtime and teardown flow
 
 The loop alternates user execution, trap handling, kernel CPU accounting and
-signal checks. `SkipSignalCheckOnce` suppresses the normal post-syscall signal
-check after signal return. Before reentering userspace, the loop clears the old
-interrupt flag, polls CPU timers and checks preemption; a newly raised interrupt
-causes another signal check. This prevents timer or scheduler work in that
-window from waiting for an unrelated future trap.
+signal checks. The loop clears the previous trap's interrupt flag before the
+normal pending-signal check. It must not clear that flag after checking signals:
+a concurrent group-exit sender could otherwise queue SIGKILL and set the flag
+in between, then lose its notification before the target enters a futex wait.
+`SkipSignalCheckOnce` suppresses the normal post-syscall signal check after
+signal return. Before reentering userspace, the loop polls CPU timers and checks
+preemption; an interrupt raised since the clear causes another signal check.
+Signals arriving after that final check retain their interrupt notification for
+the next interruptible wait or trap.
 
 `do_exit` performs the following order:
 

@@ -61,7 +61,7 @@ must retain the ordering described in the design document.
 | T-03 | Faulting file mappings deliver the wrong signal. | Medium | A file-backed access is beyond the backing object's valid extent. | Map `PageFaultOutcome::BusError` to SIGBUS; MM owns the classification. |
 | T-04 | Process completion exposes still-held resources. | Medium | Last-thread teardown notifies a waiter before detach. | Release mm/files/fs/ns and IPC state before `complete_process_exit`; logged cleanup failures remain a diagnostic limitation. |
 | T-05 | Bootstrap input prevents system startup. | Medium | Empty argv or resolution/loading/publication failure. | Fail-stop panic with context; bootstrap recovery is intentionally not provided. |
-| T-06 | Pending work is delayed before userspace reentry. | Medium | A timer/scheduler interrupt arrives after the normal signal check. | Clear old interrupt state before timer polling and check a newly set flag before reentry; CPU kick behavior is provided by the task layer. |
+| T-06 | A pending termination signal leaves a thread blocked indefinitely. | Medium | A sender queues a signal between the signal check and a later interrupt-flag clear. | Clear old interrupt state before checking pending signals; retain later notifications through timer polling, preemption and userspace reentry. Recheck newly raised interrupts before reentry; CPU kick behavior is provided by the task layer. |
 
 ## Failure-mode analysis
 

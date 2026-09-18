@@ -139,6 +139,11 @@ pub(crate) fn run_user_thread_loop(
             }
         }
 
+        // Consume the previous trap's interrupt before checking pending signals.
+        // A concurrent sender after this point must leave its notification set
+        // until we handle the signal or an interruptible syscall observes it.
+        curr.clear_interrupt();
+
         // Normally we check for pending signals after every trap return. The
         // exception is `rt_sigreturn`: it restores the pre-signal context, so
         // running `check_signals` here would see the same pending signal that the
@@ -156,9 +161,6 @@ pub(crate) fn run_user_thread_loop(
         }
 
         thr.set_cpu_state(CpuTimeState::User);
-        // Drop the trap-time interrupt flag before polling timers or preempting,
-        // so `is_interrupted` below means a *new* `interrupt()` from this window.
-        curr.clear_interrupt();
         poll_cpu_timers();
         ktask::check_preempt_pending();
         // `interrupt()` may have queued a signal in `poll_cpu_timers` (CPU-time
