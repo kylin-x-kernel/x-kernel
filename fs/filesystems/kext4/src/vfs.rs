@@ -845,12 +845,12 @@ fn reserve_delalloc_range(
     let Some((first, block_count)) = logical_block_range(pos, len, block_size)? else {
         return Ok(());
     };
-    // write_lock: reserve_delalloc_range is a check-then-act. With a shared
-    // read lock, two racing writers could both scan the same unreserved hole
-    // (both observe the same unallocated block) and then both insert a
-    // reservation for it, producing overlapping delayed extents. The insert
-    // path rejects that as InvalidDelayedAllocationState, surfacing as EIO.
-    sync::write_lock(ext4)
+    // read lock: the mount lock only borrows &Ext4SbInfo here. Scan-to-insert
+    // atomicity comes from the per-inode Ext4InodeState write lock held across
+    // Ext4Inode::reserve_delalloc_range, so reserves on different inodes never
+    // queue behind each other. Holders of the mount write lock (writeback,
+    // fsync, set_len) still exclude this shared guard.
+    sync::read_lock(ext4)
         .reserve_delalloc_range(inode, LogicalBlock::new(first), block_count)
         .map_err(into_vfs_err)
 }

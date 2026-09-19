@@ -11,6 +11,7 @@ use crate::{
     BlockMapping, ChecksumTarget, CorruptKind, Ext4Error, Ext4Result, Ext4SbInfo, FilesystemBlock,
     InodeNumber, LogicalBlock, UnsupportedKind,
     disk::{checksum, extent as disk_extent, inode as disk_inode},
+    extent::InodeMappingRoot,
     file::RegularWriteMetadata,
     jbd2::{JournalCredits, JournalHandle},
     superblock::replace_metadata_access_bytes,
@@ -871,8 +872,12 @@ impl Ext4Inode {
         self.with_state(|state| (state.is_immutable(), state.is_append_only()))
     }
 
-    pub(crate) fn block_mapping_root(&self) -> (u32, [u8; disk_inode::INODE_BLOCK_BYTES]) {
-        self.with_metadata(|metadata| (metadata.flags, metadata.block))
+    pub(crate) fn mapping_root(&self) -> InodeMappingRoot {
+        self.with_metadata(|metadata| InodeMappingRoot {
+            inode_flags: metadata.flags,
+            bytes: metadata.block,
+            generation: metadata.generation,
+        })
     }
 
     pub(crate) fn file_acl_block(&self) -> u64 {
@@ -1009,81 +1014,139 @@ impl Ext4Inode {
         self.flags() & disk_inode::EXT4_INDEX_FL != 0
     }
 
+    #[cfg(test)]
     fn unreserved_delalloc_extents(&self, start: u64, end: u64) -> Vec<(u64, u64)> {
-        self.with_state(|state| {
-            let mut extents = Vec::new();
-            let mut cursor = start;
-            for (&extent_start, &extent_end) in state.delayed_extents.range(..end) {
-                if extent_end <= cursor {
-                    continue;
-                }
-                if extent_start > cursor {
-                    extents.push((cursor, extent_start.min(end)));
-                }
-                cursor = cursor.max(extent_end);
-                if cursor >= end {
-                    break;
-                }
-            }
-            if cursor < end {
-                extents.push((cursor, end));
-            }
-            extents
-        })
+        self.with_state(|state| unreserved_delalloc_extents_in_state(state, start, end))
     }
 
+    #[cfg(test)]
     fn insert_unreserved_delalloc_extents(&self, extents: &[(u64, u64)]) -> Ext4Result<u64> {
-        self.update_state(|state| -> Ext4Result<u64> {
-            let mut previous_end = None;
-            let newly_reserved = extents.iter().try_fold(
-                0u64,
-                |total, &(extent_start, extent_end)| -> Ext4Result<u64> {
-                    if extent_start >= extent_end
-                        || previous_end.is_some_and(|previous_end| previous_end > extent_start)
-                    {
-                        return Err(Ext4Error::InvalidDelayedAllocationState);
+        self.update_state(|state| insert_unreserved_delalloc_extents_in_state(state, extents))
+    }
+
+    /// Reserves unallocated blocks in one logical range for delayed allocation.
+    ///
+    /// The scan-map-admission-insert sequence runs inside one critical
+    /// section holding the inode-state write lock, so two racing writers on
+    /// the same inode cannot both observe the same unreserved hole: the
+    /// overlapping-insert state that the mount-wide write lock used to
+    /// exclude is now structurally impossible, and reserves on different
+    /// inodes no longer serialize. Per-inode reservations and the mount-wide
+    /// aggregate are updated as one ext4-owned invariant; already allocated
+    /// or already reserved subranges consume no additional reservation.
+    ///
+    /// # Locking
+    ///
+    /// The closure must not call back into `Ext4Inode` state accessors (see
+    /// [`update_state`](Self::update_state)); mapping queries run
+    /// through [`Ext4SbInfo::map_blocks_with_root`] with a root sampled from
+    /// the held state. Mount-wide admission takes the allocator and delalloc
+    /// mutexes inside the state lock, matching the release-path lock order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an extent-validation, overflow, accounting, or no-space error
+    /// without publishing a partial mount reservation.
+    pub(crate) fn reserve_delalloc_range(
+        &self,
+        sb: &Ext4SbInfo,
+        start: LogicalBlock,
+        block_count: u64,
+    ) -> Ext4Result<()> {
+        let end = start
+            .get()
+            .checked_add(block_count)
+            .ok_or(Ext4Error::Overflow)?;
+        self.update_state(|state| {
+            regular_file_extent_mutation_supported(
+                state.metadata.kind,
+                state.metadata.flags,
+                sb.superblock().features().has_huge_file(),
+            )?;
+            if state.reserved_data_blocks > sb.delalloc_reserved_blocks() {
+                return Err(Ext4Error::InvalidDelayedAllocationState);
+            }
+            if block_count == 0 {
+                return Ok(());
+            }
+            let root = InodeMappingRoot {
+                inode_flags: state.metadata.flags,
+                bytes: state.metadata.block,
+                generation: state.metadata.generation,
+            };
+            let mut holes = Vec::new();
+            for (mut logical, extent_end) in
+                unreserved_delalloc_extents_in_state(state, start.get(), end)
+            {
+                while logical < extent_end {
+                    let mapping =
+                        sb.map_blocks_with_root(self, &root, LogicalBlock::new(logical))?;
+                    let mapping_len = match mapping {
+                        BlockMapping::Hole { len, .. }
+                        | BlockMapping::Mapped { len, .. }
+                        | BlockMapping::Unwritten { len, .. } => u64::from(len.get()),
+                    };
+                    if mapping_len == 0 {
+                        return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
                     }
-                    let overlaps_left = state
-                        .delayed_extents
-                        .range(..extent_end)
-                        .next_back()
-                        .is_some_and(|(_, reserved_end)| *reserved_end > extent_start);
-                    if overlaps_left {
-                        return Err(Ext4Error::InvalidDelayedAllocationState);
+                    let covered = mapping_len.min(extent_end - logical);
+                    let next = logical.checked_add(covered).ok_or(Ext4Error::Overflow)?;
+                    if matches!(mapping, BlockMapping::Hole { .. }) {
+                        if let Some((_, previous_end)) = holes.last_mut()
+                            && *previous_end == logical
+                        {
+                            *previous_end = next;
+                        } else {
+                            holes.push((logical, next));
+                        }
                     }
-                    previous_end = Some(extent_end);
+                    logical = next;
+                }
+            }
+
+            let reserved = holes
+                .iter()
+                .try_fold(0u64, |total, (hole_start, hole_end)| {
                     total
                         .checked_add(
-                            extent_end
-                                .checked_sub(extent_start)
+                            hole_end
+                                .checked_sub(*hole_start)
                                 .ok_or(Ext4Error::Overflow)?,
                         )
                         .ok_or(Ext4Error::Overflow)
-                },
-            )?;
-            let new_reserved_data_blocks = state
-                .reserved_data_blocks
-                .checked_add(newly_reserved)
-                .ok_or(Ext4Error::Overflow)?;
-
-            for &(extent_start, extent_end) in extents {
-                let left = state
-                    .delayed_extents
-                    .range(..extent_start)
-                    .next_back()
-                    .filter(|(_, reserved_end)| **reserved_end == extent_start)
-                    .map(|(&reserved_start, _)| reserved_start);
-                let right = state.delayed_extents.remove(&extent_end);
-                let merged_start = left.unwrap_or(extent_start);
-                if let Some(left) = left {
-                    state.delayed_extents.remove(&left);
-                }
-                state
-                    .delayed_extents
-                    .insert(merged_start, right.unwrap_or(extent_end));
+                })?;
+            // An empty reservation skips mount-wide accounting entirely: the
+            // mutex pair guards the aggregate against concurrent reserves, not
+            // an empty range against itself.
+            if reserved == 0 {
+                return Ok(());
             }
-            state.reserved_data_blocks = new_reserved_data_blocks;
-            Ok(newly_reserved)
+            // Check-then-act admission stays inside one critical section so the
+            // capacity check sees the same snapshot that the accumulation
+            // updates; otherwise two concurrent reserves could both pass on a
+            // stale free/reserved view and over-reserve the mount-wide total,
+            // starving later writes and underreporting statfs. Lock order stays
+            // allocator then delalloc, matching statfs.
+            {
+                let allocator = sync::mutex_lock(&sb.allocator);
+                let mut delalloc_reserved_blocks = sync::mutex_lock(&sb.delalloc_reserved_blocks);
+                let blocks_available = allocator
+                    .free_blocks_count
+                    .saturating_sub(*delalloc_reserved_blocks)
+                    .saturating_sub(sb.superblock().reserved_blocks_count());
+                if reserved > blocks_available {
+                    return Err(Ext4Error::NoSpace);
+                }
+                *delalloc_reserved_blocks = delalloc_reserved_blocks
+                    .checked_add(reserved)
+                    .ok_or(Ext4Error::Overflow)?;
+            }
+            let inserted_blocks = insert_unreserved_delalloc_extents_in_state(state, &holes)?;
+            assert_eq!(
+                inserted_blocks, reserved,
+                "validated delayed-allocation holes must preserve their block count"
+            );
+            Ok(())
         })
     }
 
@@ -1181,6 +1244,116 @@ impl fmt::Debug for Ext4Inode {
             .field("metadata", &self.metadata_snapshot())
             .finish_non_exhaustive()
     }
+}
+
+/// Returns the maximal disjoint sub-ranges of `[start, end)` not yet covered
+/// by delayed-allocation reservations, in ascending order; an empty result
+/// means the whole range is already reserved. Operates on the borrowed state
+/// directly — the caller already holds the inode-state lock.
+fn unreserved_delalloc_extents_in_state(
+    state: &Ext4InodeState,
+    start: u64,
+    end: u64,
+) -> Vec<(u64, u64)> {
+    let mut extents = Vec::new();
+    let mut cursor = start;
+    for (&extent_start, &extent_end) in state.delayed_extents.range(..end) {
+        if extent_end <= cursor {
+            continue;
+        }
+        if extent_start > cursor {
+            extents.push((cursor, extent_start.min(end)));
+        }
+        cursor = cursor.max(extent_end);
+        if cursor >= end {
+            break;
+        }
+    }
+    if cursor < end {
+        extents.push((cursor, end));
+    }
+    extents
+}
+
+fn insert_unreserved_delalloc_extents_in_state(
+    state: &mut Ext4InodeState,
+    extents: &[(u64, u64)],
+) -> Ext4Result<u64> {
+    let mut previous_end = None;
+    let newly_reserved = extents.iter().try_fold(
+        0u64,
+        |total, &(extent_start, extent_end)| -> Ext4Result<u64> {
+            if extent_start >= extent_end
+                || previous_end.is_some_and(|previous_end| previous_end > extent_start)
+            {
+                return Err(Ext4Error::InvalidDelayedAllocationState);
+            }
+            let overlaps_left = state
+                .delayed_extents
+                .range(..extent_end)
+                .next_back()
+                .is_some_and(|(_, reserved_end)| *reserved_end > extent_start);
+            if overlaps_left {
+                return Err(Ext4Error::InvalidDelayedAllocationState);
+            }
+            previous_end = Some(extent_end);
+            total
+                .checked_add(
+                    extent_end
+                        .checked_sub(extent_start)
+                        .ok_or(Ext4Error::Overflow)?,
+                )
+                .ok_or(Ext4Error::Overflow)
+        },
+    )?;
+    let new_reserved_data_blocks = state
+        .reserved_data_blocks
+        .checked_add(newly_reserved)
+        .ok_or(Ext4Error::Overflow)?;
+
+    for &(extent_start, extent_end) in extents {
+        let left = state
+            .delayed_extents
+            .range(..extent_start)
+            .next_back()
+            .filter(|(_, reserved_end)| **reserved_end == extent_start)
+            .map(|(&reserved_start, _)| reserved_start);
+        let right = state.delayed_extents.remove(&extent_end);
+        let merged_start = left.unwrap_or(extent_start);
+        if let Some(left) = left {
+            state.delayed_extents.remove(&left);
+        }
+        state
+            .delayed_extents
+            .insert(merged_start, right.unwrap_or(extent_end));
+    }
+    state.reserved_data_blocks = new_reserved_data_blocks;
+    Ok(newly_reserved)
+}
+
+/// Shared admission rule for mutating regular-file extent mappings.
+///
+/// Called both outside the inode-state lock (VFS entry checks) and inside it
+/// (`reserve_delalloc_range` reads the fields directly from the state), so
+/// the check takes values instead of an inode to stay lock-free.
+pub(crate) fn regular_file_extent_mutation_supported(
+    kind: InodeKind,
+    inode_flags: u32,
+    has_huge_file_feature: bool,
+) -> Ext4Result<()> {
+    if kind != InodeKind::RegularFile {
+        return Err(Ext4Error::Unsupported(UnsupportedKind::InodeKind));
+    }
+    if inode_flags & disk_inode::EXT4_EXTENTS_FL == 0 {
+        return Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode));
+    }
+    if inode_flags & disk_inode::EXT4_HUGE_FILE_FL != 0 {
+        if !has_huge_file_feature {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
+        }
+        return Err(Ext4Error::Unsupported(UnsupportedKind::HugeFile));
+    }
+    Ok(())
 }
 
 fn device_id_from_metadata(metadata: &Ext4InodeMetadata) -> Option<Ext4DeviceId> {
@@ -1344,9 +1517,10 @@ impl Ext4SbInfo {
 
     /// Reserves unallocated blocks in one logical range for delayed allocation.
     ///
-    /// Per-inode extent state and the mount-wide aggregate are updated by this
-    /// operation as one ext4-owned invariant. Already allocated or already
-    /// reserved subranges do not consume another reservation.
+    /// Delegates to [`Ext4Inode::reserve_delalloc_range`], which serializes
+    /// the reserve sequence on the per-inode state lock instead of a
+    /// mount-wide lock; callers are expected to hold only a shared mount
+    /// guard.
     ///
     /// # Errors
     ///
@@ -1358,73 +1532,7 @@ impl Ext4SbInfo {
         start: LogicalBlock,
         block_count: u64,
     ) -> Ext4Result<()> {
-        self.ensure_regular_file_mutation_supported(inode)?;
-        self.ensure_delalloc_accounting(inode)?;
-        if block_count == 0 {
-            return Ok(());
-        }
-        let end = start
-            .get()
-            .checked_add(block_count)
-            .ok_or(Ext4Error::Overflow)?;
-        let mut holes = Vec::new();
-        for (mut logical, extent_end) in inode.unreserved_delalloc_extents(start.get(), end) {
-            while logical < extent_end {
-                let mapping = self.map_blocks(inode, LogicalBlock::new(logical))?;
-                let mapping_len = match mapping {
-                    BlockMapping::Hole { len, .. }
-                    | BlockMapping::Mapped { len, .. }
-                    | BlockMapping::Unwritten { len, .. } => u64::from(len.get()),
-                };
-                if mapping_len == 0 {
-                    return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
-                }
-                let covered = mapping_len.min(extent_end - logical);
-                let next = logical.checked_add(covered).ok_or(Ext4Error::Overflow)?;
-                if matches!(mapping, BlockMapping::Hole { .. }) {
-                    if let Some((_, previous_end)) = holes.last_mut()
-                        && *previous_end == logical
-                    {
-                        *previous_end = next;
-                    } else {
-                        holes.push((logical, next));
-                    }
-                }
-                logical = next;
-            }
-        }
-
-        let reserved = holes.iter().try_fold(0u64, |total, (start, end)| {
-            total
-                .checked_add(end.checked_sub(*start).ok_or(Ext4Error::Overflow)?)
-                .ok_or(Ext4Error::Overflow)
-        })?;
-        // Check-then-act admission stays inside one critical section so the
-        // capacity check sees the same snapshot that the accumulation
-        // updates; otherwise two concurrent reserves could both pass on a
-        // stale free/reserved view and over-reserve the mount-wide total,
-        // starving later writes and underreporting statfs. Lock order stays
-        // allocator then delalloc, matching statfs.
-        {
-            let allocator = sync::mutex_lock(&self.allocator);
-            let mut delalloc_reserved_blocks = sync::mutex_lock(&self.delalloc_reserved_blocks);
-            let blocks_available = allocator
-                .free_blocks_count
-                .saturating_sub(*delalloc_reserved_blocks)
-                .saturating_sub(self.superblock().reserved_blocks_count());
-            if reserved > blocks_available {
-                return Err(Ext4Error::NoSpace);
-            }
-            *delalloc_reserved_blocks = delalloc_reserved_blocks
-                .checked_add(reserved)
-                .ok_or(Ext4Error::Overflow)?;
-        }
-        let inserted_blocks = inode.insert_unreserved_delalloc_extents(&holes)?;
-        assert_eq!(
-            inserted_blocks, reserved,
-            "validated delayed-allocation holes must preserve their block count"
-        );
-        Ok(())
+        inode.reserve_delalloc_range(self, start, block_count)
     }
 
     /// Releases delayed-allocation reservations overlapping a logical range.

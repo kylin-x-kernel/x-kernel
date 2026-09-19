@@ -14,6 +14,7 @@ pub(super) fn verify_extent_block_checksum(
     inode: &Ext4Inode,
     block: PhysicalBlock,
     bytes: &[u8],
+    generation: u32,
 ) -> Ext4Result<()> {
     let header = decode_header(bytes)?;
     let tail_offset = disk_extent::tail_offset(header)?;
@@ -24,7 +25,7 @@ pub(super) fn verify_extent_block_checksum(
     let seed = inode_checksum_seed(
         filesystem.superblock().checksum_seed(),
         inode.number(),
-        inode.generation(),
+        generation,
     );
     let actual = checksum::crc32c(seed, checksum_bytes);
     if actual != expected {

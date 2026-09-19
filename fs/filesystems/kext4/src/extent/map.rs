@@ -13,6 +13,22 @@ use crate::{
     inode::Ext4Inode,
 };
 
+/// Inode fields that locate and validate the on-disk block-mapping tree.
+///
+/// Sampled once while the inode-state lock is already held so a mapping walk
+/// never re-acquires it: the state RwLock is not reentrant, and a query
+/// running under the write side must not call back into `Ext4Inode`
+/// accessors that take the read side (`generation` is passed here for
+/// exactly that reason).
+pub(crate) struct InodeMappingRoot {
+    /// Inode flags selecting the extent-tree versus legacy block-map format.
+    pub(crate) inode_flags: u32,
+    /// The `i_block` bytes holding the mapping-tree root.
+    pub(crate) bytes: [u8; crate::disk::inode::INODE_BLOCK_BYTES],
+    /// Inode generation, the metadata-checksum seed input.
+    pub(crate) generation: u32,
+}
+
 impl Ext4SbInfo {
     /// Returns the Linux-compatible maximum byte size for this inode format.
     #[cfg(test)]
@@ -41,15 +57,37 @@ impl Ext4SbInfo {
 
     /// Maps a logical inode block without allocating or modifying metadata.
     pub fn map_blocks(&self, inode: &Ext4Inode, logical: LogicalBlock) -> Ext4Result<BlockMapping> {
-        let (inode_flags, block_root) = inode.block_mapping_root();
-        if inode_flags & crate::disk::inode::EXT4_EXTENTS_FL != 0 {
+        let root = inode.mapping_root();
+        self.map_blocks_with_root(inode, &root, logical)
+    }
+
+    /// Maps a logical inode block using a mapping root already sampled under
+    /// the inode-state lock.
+    ///
+    /// The caller must have obtained `root` while holding that lock, and the
+    /// walk must not call any `Ext4Inode` accessor that re-acquires it.
+    pub(crate) fn map_blocks_with_root(
+        &self,
+        inode: &Ext4Inode,
+        root: &InodeMappingRoot,
+        logical: LogicalBlock,
+    ) -> Ext4Result<BlockMapping> {
+        if root.inode_flags & crate::disk::inode::EXT4_EXTENTS_FL != 0 {
             if !self.superblock().features().has_extents() {
                 return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
             }
             let logical = u32::try_from(logical.get()).map_err(|_| Ext4Error::Overflow)?;
-            return self.map_extent_node(inode, &block_root, logical, None, None, None);
+            return self.map_extent_node(
+                inode,
+                &root.bytes,
+                root.generation,
+                logical,
+                None,
+                None,
+                None,
+            );
         }
-        self.map_legacy_blocks(inode, &block_root, logical)
+        self.map_legacy_blocks(inode, &root.bytes, logical)
     }
 
     /// Reports the mapping visible to Linux-style mapping queries.
@@ -99,10 +137,12 @@ impl Ext4SbInfo {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn map_extent_node(
         &self,
         inode: &Ext4Inode,
         bytes: &[u8],
+        generation: u32,
         logical: u32,
         expected_depth: Option<u16>,
         expected_lblk: Option<u32>,
@@ -129,11 +169,12 @@ impl Ext4SbInfo {
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidExtent))?;
         let bytes = block.as_ref();
         if self.superblock().features().has_metadata_checksum() {
-            verify_extent_block_checksum(self, inode, child_block, bytes)?;
+            verify_extent_block_checksum(self, inode, child_block, bytes, generation)?;
         }
         self.map_extent_node(
             inode,
             bytes,
+            generation,
             logical,
             Some(child_depth),
             Some(selected.index.block()),

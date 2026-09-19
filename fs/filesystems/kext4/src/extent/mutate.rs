@@ -739,7 +739,13 @@ impl Ext4SbInfo {
                 .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidExtent))?;
             let child = self.read_metadata_block(FilesystemBlock::new(child_block.get()))?;
             if self.superblock().features().has_metadata_checksum() {
-                verify_extent_block_checksum(self, inode, child_block, child.as_ref())?;
+                verify_extent_block_checksum(
+                    self,
+                    inode,
+                    child_block,
+                    child.as_ref(),
+                    inode.generation(),
+                )?;
             }
             parents.push(ExtentPathNode {
                 block,
@@ -1030,7 +1036,13 @@ impl Ext4SbInfo {
             let child_block = extent_index.leaf();
             let child_bytes = self.read_metadata_block(FilesystemBlock::new(child_block.get()))?;
             if self.superblock().features().has_metadata_checksum() {
-                verify_extent_block_checksum(self, inode, child_block, child_bytes.as_ref())?;
+                verify_extent_block_checksum(
+                    self,
+                    inode,
+                    child_block,
+                    child_bytes.as_ref(),
+                    inode.generation(),
+                )?;
             }
             self.collect_extent_node(
                 inode,

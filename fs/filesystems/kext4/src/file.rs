@@ -235,19 +235,11 @@ impl Ext4SbInfo {
         &self,
         inode: &Ext4Inode,
     ) -> Ext4Result<()> {
-        if inode.kind() != InodeKind::RegularFile {
-            return Err(Ext4Error::Unsupported(UnsupportedKind::InodeKind));
-        }
-        if !inode.has_extents() {
-            return Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode));
-        }
-        if inode.uses_huge_file_accounting() {
-            if !self.superblock().features().has_huge_file() {
-                return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
-            }
-            return Err(Ext4Error::Unsupported(UnsupportedKind::HugeFile));
-        }
-        Ok(())
+        crate::inode::regular_file_extent_mutation_supported(
+            inode.kind(),
+            inode.flags(),
+            self.superblock().features().has_huge_file(),
+        )
     }
 
     /// Commits metadata needed by this inode without forcing a checkpoint.
