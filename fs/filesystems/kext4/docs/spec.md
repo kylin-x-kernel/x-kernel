@@ -91,7 +91,7 @@ confidence 和 method limits。对比使用固定的 KExt4 历史基线，不保
 - journaled block/inode bitmap、连续 run allocation、order-bucket free-run cache、partial
   allocation 和 simplified Orlov inode-group selection；
 - sparse read、ordered-data writeback、writeback-time allocation、unwritten conversion、有限
-  preallocation、truncate 和 legacy orphan；
+  preallocation、truncate、orphan file 和 legacy orphan fallback；
 - linear/HTree lookup、create/mkdir/link/unlink/rmdir/rename、symlink、special inode 和
   inode-body/single-external-block xattr baseline。
 
@@ -104,7 +104,7 @@ confidence 和 method limits。对比使用固定的 KExt4 历史基线，不保
 - S1：一个 ext4 inode number 对应一个 live `VfsInode`/AddressSpace；
 - S1：core namespace removal 与 final inode eviction 分离；
 - S1：truncate 使用 core prepare → `AddressSpace` i_size/unmap/cache/unmap transaction → core finish；
-- S1：legacy orphan recovery、open-unlink、hard-link identity 和 rename-overwrite identity 已有
+- S1：orphan-file/legacy orphan recovery、open-unlink、hard-link identity 和 rename-overwrite identity 已有
   live 基线。
 
 这些工作已经塑造正确的 VFS/core ownership，不再继续扩展为 syscall 完备性阶段。
@@ -291,7 +291,8 @@ N5 advanced I/O / common features -> N6 replacement
   重叠；无 feature bitmap 的 v1 journal 保留每个 operation 同步 commit/checkpoint 退化路径；
 - truncate 的 orphan + `i_disksize` 更新保留强制 commit 边界，确保后续释放旧映射前已有可
   恢复状态；recovery-time orphan cleanup 也保持同步 commit/checkpoint，不加入普通 batch。
-  即使 JBD2 已 clean，只要 legacy orphan head 非零，首个 cleanup transaction 也会采用
+  即使 JBD2 已 clean，只要 legacy orphan head、orphan-file entry 或 `ORPHAN_PRESENT` 留下恢复证据，
+  首个 cleanup transaction 也会采用
   `PreserveDuringRecovery` 建立 recovery evidence；全部 cleanup 完成后确认 journal start 为零，
   再清除并 flush ext4 recovery feature。Reserved、越过 inode table 或 allocation bit 为零的
   head 在 inode-table decode 前被识别；成功加载后还会拒绝不可截断的 linked kind 和非法
@@ -302,7 +303,7 @@ N5 advanced I/O / common features -> N6 replacement
   transaction 等待需由 runtime inode 保存 tid，并在 mutation 完成后发布；
 - unit test 和真实 Linux ext4 镜像测试覆盖修改前预期错误、修改后 invariant abort、credit
   归还、多 handle 独立 stop、transaction-id wrap、FIFO checkpoint、replay 后 orphan cleanup，
-  clean journal 上持久化的 legacy orphan、recovery flush 失败后的证据保留与重试，以及最终
+  clean journal 上持久化的 orphan、recovery flush 失败后的证据保留与重试，以及最终
   `syncfs` drain/recovery 后的 e2fsck。
 
 移交 N2 的后续工作：

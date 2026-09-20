@@ -29,6 +29,7 @@ use crate::{
     },
     journal::MountedJournal,
     mballoc::BlockGroupFreeExtentCache,
+    orphan::OrphanInfo,
     types::{BlockGroupNumber, FilesystemBlock, InodeNumber, LogicalBlock},
 };
 
@@ -373,7 +374,8 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock()
 }
 
-/// Mutable block/inode accounting state guarded by the allocator lock.
+/// Mutable superblock recovery and block/inode accounting state guarded by
+/// the allocator lock.
 ///
 /// Linux keeps this state in `ext4_sb_info` under per-group spinlocks and
 /// percpu counters; KExt4 currently concentrates it in one sleepable mutex.
@@ -395,7 +397,8 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Holders may call into `metadata_io` and the journal while holding the
 /// lock, but must never re-enter anything that takes it again: public
 /// allocator entries as well as the lock-taking accessors (`groups()`,
-/// `free_blocks_count()`, `free_inodes_count()`, `needs_recovery()`) — use
+/// `free_blocks_count()`, `free_inodes_count()`, `needs_recovery()`,
+/// `has_orphan_present()`) — use
 /// the in-guard fields, the frozen `group_geometry` table, or the
 /// `*_in_group` lock-free variants instead (the lock is not recursive).
 /// Entries pre-warm the metadata cache
@@ -403,8 +406,9 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// before taking this lock so cold-cache device reads run outside the
 /// critical section; only the inode-table block whose address depends on
 /// the allocation decision is still read in-lock.
-/// Live counters and flags travel here. Feature bits and primary-superblock
-/// geometry stay in the frozen [`Ext4SbInfo::superblock`] mirror, and
+/// Live counters and mutable recovery flags travel here. Static feature bits
+/// and primary-superblock geometry stay in the frozen
+/// [`Ext4SbInfo::superblock`] mirror, and
 /// per-group addresses (block/inode bitmap, inode-table start) in the frozen
 /// [`Ext4SbInfo::group_geometry`] table, so lock-free readers never see
 /// allocator churn and never lock just to read static geometry (matching
@@ -428,6 +432,7 @@ pub(crate) struct AllocatorState {
     pub(crate) used_directories_count: u32,
     pub(crate) last_orphan: u32,
     pub(crate) needs_recovery: bool,
+    pub(crate) has_orphan_present: bool,
     pub(crate) groups: Vec<GroupMutableState>,
     pub(crate) block_free_extent_caches: Vec<Option<BlockGroupFreeExtentCache>>,
 }
@@ -449,9 +454,10 @@ pub(crate) struct Ext4SbInfo {
     pub(crate) delalloc_reserved_blocks: Mutex<u64>,
     /// Mount-time mirror of the decoded primary superblock.
     ///
-    /// Geometry and feature bits never change after mount; live free-block
-    /// and free-inode counters, the orphan-list head, and the recovery flag
-    /// live in [`AllocatorState`] and are read through dedicated accessors.
+    /// Geometry and static feature bits never change after mount; live
+    /// free-block/free-inode counters, the orphan-list head, `RECOVER`, and
+    /// `ORPHAN_PRESENT` live in [`AllocatorState`] and are read through
+    /// dedicated accessors.
     pub(crate) superblock: Ext4DiskSuperblock,
     /// Per-group geometry (block/inode bitmap and inode-table addresses)
     /// frozen at mount.
@@ -477,6 +483,7 @@ pub(crate) struct Ext4SbInfo {
     pub(crate) device: Arc<FilesystemDevice>,
     pub(crate) metadata_io: Ext4MetadataIo,
     pub(crate) journal: Option<Arc<MountedJournal>>,
+    pub(crate) orphan_info: Option<OrphanInfo>,
     pub(crate) layout: FilesystemLayout,
     // Read-only system zones scanned from the on-disk bitmap at mount time.
     // Zones are never removed and the release path rejects every system-zone
@@ -535,27 +542,28 @@ impl Ext4SbInfo {
         self.statfs_mode = statfs_mode;
     }
 
-    /// Recovers a filesystem journal and cleans the legacy orphan list.
+    /// Recovers a filesystem journal and cleans ext4 orphan metadata.
     ///
-    /// This entry point performs journal replay and orphan-list metadata writes.
-    /// It is intentionally separate from [`mount`](Self::mount); the writable
+    /// This entry point performs journal replay and orphan metadata writes. It
+    /// is intentionally separate from [`mount`](Self::mount); the writable
     /// mount path may persist Linux's default directory-hash signedness, but it
     /// does not implicitly perform recovery. A filesystem can have a clean
-    /// journal but still contain legacy orphan entries left by a committed
-    /// unlink or truncate. In that case this method performs journaled orphan
-    /// cleanup and returns `Ok(None)` because no journal replay report was
-    /// produced.
+    /// journal but still contain legacy-list or orphan-file entries left by a
+    /// committed unlink or truncate. In that case this method performs
+    /// journaled orphan cleanup and returns `Ok(None)` because no journal replay
+    /// report was produced.
     ///
     /// A successful return means that orphan cleanup has completed its journal
     /// commit and home-block checkpoint, the journal is marked empty, and the
-    /// ext4 recovery feature has been cleared on stable storage. On failure,
+    /// ext4 recovery features have been cleared on stable storage. On failure,
     /// the method does not intentionally clear the final on-disk recovery
     /// evidence before the corresponding journal or orphan work is durable.
     /// A reserved, out-of-range, or unallocated legacy orphan head, a linked
     /// inode kind that ext4 cannot truncate, and an invalid next pointer all
-    /// terminate the damaged chain through a journaled zero-head update.
-    /// Bitmap I/O/checksum failures, inode decode failures, and unsupported but
-    /// structurally valid cleanup work remain caller-visible errors.
+    /// terminate the damaged legacy chain through a journaled zero-head update.
+    /// Invalid orphan-file entries, bitmap I/O/checksum failures, inode decode
+    /// failures, and unsupported but structurally valid cleanup work remain
+    /// caller-visible errors.
     ///
     /// # Errors
     ///
@@ -677,6 +685,7 @@ impl Ext4SbInfo {
                 used_directories_count,
                 last_orphan: superblock.last_orphan(),
                 needs_recovery: superblock.features().needs_recovery(),
+                has_orphan_present: superblock.features().has_orphan_present(),
                 groups: group_states,
                 block_free_extent_caches,
             }),
@@ -689,6 +698,7 @@ impl Ext4SbInfo {
             device: filesystem_device,
             metadata_io,
             journal: None,
+            orphan_info: None,
             layout,
             system_zones: Vec::new(),
         };
@@ -696,12 +706,6 @@ impl Ext4SbInfo {
         let mut system_zones = filesystem.build_system_zones()?;
         let journal_location = filesystem.journal_location()?;
         if filesystem.needs_recovery() && !allow_recovery {
-            return Err(Ext4Error::NeedsRecovery);
-        }
-        if !allow_recovery
-            && (filesystem.orphan_head().is_some()
-                || filesystem.superblock().features().has_orphan_present())
-        {
             return Err(Ext4Error::NeedsRecovery);
         }
         filesystem.journal = match journal_location {
@@ -716,6 +720,16 @@ impl Ext4SbInfo {
         };
         filesystem.bitmap_maxbytes = filesystem.legacy_max_file_size()?;
         filesystem.system_zones = system_zones;
+        if !filesystem.needs_recovery() {
+            filesystem.initialize_orphan_info()?;
+        }
+        if !allow_recovery
+            && (filesystem.orphan_head().is_some()
+                || !filesystem.orphan_file_empty()?
+                || filesystem.has_orphan_present())
+        {
+            return Err(Ext4Error::NeedsRecovery);
+        }
         Ok(filesystem)
     }
 
@@ -782,11 +796,12 @@ impl Ext4SbInfo {
 
     /// Returns the decoded primary superblock.
     ///
-    /// The mirror is frozen at mount time: geometry and feature bits never
-    /// change while mounted. Live free-block/free-inode counters, the
-    /// orphan-list head, and the recovery flag move with the allocator;
-    /// use [`Self::free_blocks_count`], [`Self::free_inodes_count`], and
-    /// [`Self::needs_recovery`] instead of the same-named fields here.
+    /// The mirror is frozen after mount finalization: geometry and static
+    /// feature bits do not change while mounted. Live free-block/free-inode
+    /// counters, the orphan-list head, `RECOVER`, and `ORPHAN_PRESENT` move
+    /// with the allocator; use [`Self::free_blocks_count`],
+    /// [`Self::free_inodes_count`], [`Self::needs_recovery`], and
+    /// [`Self::has_orphan_present`] instead of their on-disk snapshots here.
     pub const fn superblock(&self) -> &Ext4DiskSuperblock {
         &self.superblock
     }
@@ -804,6 +819,11 @@ impl Ext4SbInfo {
     /// Returns whether the filesystem currently carries the recovery flag.
     pub fn needs_recovery(&self) -> bool {
         lock(&self.allocator).needs_recovery
+    }
+
+    /// Returns whether the orphan file may contain entries needing cleanup.
+    pub fn has_orphan_present(&self) -> bool {
+        lock(&self.allocator).has_orphan_present
     }
 
     /// Returns the immutable derived layout.
@@ -1024,6 +1044,7 @@ impl Ext4SbInfo {
         });
         alloc.last_orphan = superblock.last_orphan();
         alloc.needs_recovery = superblock.features().needs_recovery();
+        alloc.has_orphan_present = superblock.features().has_orphan_present();
         alloc.groups = groups
             .iter()
             .map(GroupMutableState::from_descriptor)

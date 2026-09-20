@@ -120,12 +120,13 @@ KVFS `VfsInode` 拥有，kext4 只在 release callback 中读取它。
 `Ext4Inode` 不再同时充当 aops object，因此不存在两个必须保持一致的 inode identity。
 
 allocator 可变状态（逐组可变 descriptor 字段、per-group free-extent cache、
-free-blocks/free-inodes/directory-inode 全局计数、orphan 头与 recovery 位）由 `Ext4SbInfo` 内的
+free-blocks/free-inodes/directory-inode 全局计数、orphan 头、`RECOVER` 与
+`ORPHAN_PRESENT` 位）由 `Ext4SbInfo` 内的
 `Mutex<AllocatorState>` 保护；mount-wide delayed-allocation 总量刻意放在该锁之外，
 由独立的 `delalloc_reserved_blocks: Mutex<u64>` 保护，对应 Linux
 `s_dirtyclusters_counter`（per-CPU 原子计数）的独立更新域——reserve/release 只与
 其他 delalloc 修改互相串行，不阻塞全局组分配。静态几何不受本锁变动：
-primary superblock 解出的 geometry/feature 留在挂载时冻结的 `superblock` mirror，
+primary superblock 解出的 geometry/static feature 留在挂载时冻结的 `superblock` mirror，
 逐组地址（block/inode bitmap、inode table）只保存在挂载时冻结的 `group_geometry`
 一维表中——`AllocatorState` 的逐组条目（`GroupMutableState`）只镜像计数、flags 与
 bitmap checksum 等可变字段，刻意不含地址字段，地址因此只有一个读取源，对应 Linux
@@ -154,7 +155,8 @@ bitmap 更新"的语义。多组扫描入口（`allocate_blocks_for_write()` /
 锁序固定为 bridge 挂载级锁 → allocator 锁 → delalloc 锁 → metadata-buffer /
 journal 内部锁，禁止反向等待。持 allocator 锁期间不得调用任何会重新取该锁的路径：
 不仅公开入口，取锁访问器（`groups()`/`free_blocks_count()`/`free_inodes_count()`/
-`needs_recovery()`）同样在禁止之列——守卫内直接访问锁内字段；inode 定位等几何
+`needs_recovery()`/`has_orphan_present()`）同样在禁止之列——守卫内直接访问锁内字段；
+inode 定位等几何
 计算读冻结的 `group_geometry` 表（无锁），持锁的分配路径使用 `*_in_group` 无锁
 变体（该锁不可重入，ksync 对同任务重入直接 panic）。delalloc 锁是独立的
 `Mutex<u64>`，delalloc 路径只对它加锁，读 free-blocks 时按上述锁序先取 allocator
@@ -346,7 +348,7 @@ truncate/remove 会在任何 metadata 写入前回退全树重写。局部 split
 namespace transaction
 删除 dirent
   -> 降低 nlink
-  -> nlink == 0 时加入 legacy orphan entry，并持久化 zero-link metadata
+  -> nlink == 0 时优先加入 orphan-file slot，满时回退 legacy orphan list，并持久化 zero-link metadata
   -> 返回更新后的 parent/target inode 给 kext4 KVFS 层
 
 最后一个 VFS inode/open-file 引用消失
@@ -450,7 +452,7 @@ xattr 会清除此标志，因为 inode-body/external 空间已经改变。`Jour
 同步回共享 VFS identity。Zero-link eviction 会复用 external xattr block 清理逻辑，先释放
 EA block，再释放 inode bitmap entry。
 
-Truncate 使用 legacy orphan list 保护 regular-file shrink。KExt4 的
+Truncate 使用 orphan file（满时回退 legacy orphan list）保护 regular-file shrink。KExt4 的
 `AddressSpaceOperations::set_len()` 按
 `prepare_regular_inode_truncate()` → `AddressSpace::truncate_setsize()`（先发布 VFS i_size，
 再执行 unmap/cache truncate/unmap）→
@@ -461,11 +463,22 @@ delalloc extent-status 尾部删除 → `finish_regular_inode_shrink()` 排序�
 `i_size_write()` 后执行其内部 `truncate_pagecache()`、再进行 filesystem block truncate
 的职责层次一致。`prepare_regular_inode_truncate()` 即使先提交了缩小后的 `i_disksize`，也必须
 保留旧 `i_size`，使随后 PageCache 能按真实旧 EOF 丢弃 folio、清零同页尾部并失效映射；不增加
-第二个 truncate operation hook。显式 recovery 在 journal 需要 replay 时先重放并保持 recovery flag，再遍历
-legacy orphan list；即使 journal 已 clean，只要 superblock 仍有 orphan head，也会执行同一
-cleanup。`nlink > 0` regular inode 完成中断的 truncate，`nlink == 0` inode 复用 final
+第二个 truncate operation hook。显式 recovery 在 journal 需要 replay 时先重放并保持 recovery flag，
+再初始化 mount-lifetime orphan info 并遍历 legacy list 和 orphan file；即使 journal 已 clean，
+只要 superblock 仍有 orphan head、orphan-file entry 或 `ORPHAN_PRESENT`，也会执行同一 cleanup。
+`nlink > 0` regular inode 完成中断的 truncate，`nlink == 0` inode 复用 final
 eviction 事务释放 external xattr、extent 和 inode bitmap。`recover()` 返回 `None` 只表示
 没有 journal replay report，不表示没有执行 orphan cleanup，也不降低成功返回的持久性保证。
+Orphan file backing inode 通过 Linux `EXT4_IGET_SPECIAL` 对等的内部入口加载，不进入 public
+iget、inode allocator 或 release。`Ext4SbInfo::orphan_info` 只保存 Linux `ext4_orphan_info`
+同层的 block identity、checksum seed 与增量 free-entry 计数；resident `Ext4Inode` 保存
+`i_orphan`/`i_orphan_idx` 对等的 `OrphanLocation`，不把运行时索引塞进按需解码的磁盘 inode 值。
+`OrphanInfo::add/remove` 直接拥有槽位选择、journaled block 更新和 free-entry 计数维护；
+`Ext4SbInfo` 负责 orphan 格式分派、legacy fallback 和 recovery 调度。格式参数借用现有磁盘
+superblock，I/O 借用现有 metadata object，不增加 operation context 或重复 geometry 字段。
+挂载级独占访问串行化槽位修改，因此不需要 Linux 并发分配器的 CPU hash、CAS 和原子计数。
+信息只在 journal replay 后初始化一次；recovery 每块只取一次 entry snapshot，逐 inode
+checkpoint 只重载 superblock/group 可变状态并增量维护 free-entry 计数，不重复扫描整个 orphan file。
 Legacy orphan 链的 `i_dtime` 是 journaled inode-table topology，不复制到 resident private
 state。链遍历直接读取 metadata cache 中的 inode-table bytes，前驱重连也按已经校验的 inode
 number 原位修改同一 bytes；它不会为了读取或更新前驱而构造另一个 `Ext4Inode`。因此两个同时
@@ -483,7 +496,8 @@ counter 被 checkpoint 前的快照重新带回循环。重建时冻结的 `grou
 `NeedsRecovery`。Recovery 在 `iget` 前同时校验 inode table 上界、reserved inode 范围和经过
 checksum 验证的 inode bitmap 分配位；编号合法但 allocation bit 为零的 head 不读取 inode
 table。成功加载 inode 后还会在执行 truncate/eviction 前验证：带链接的 inode kind 必须属于
-Linux ext4 可截断的 regular/directory/symlink，以及原始 `i_dtime` 必须为零或合法的下一
+Linux ext4 可截断的 regular/directory/非 fast symlink，以及原始 `i_dtime` 不得超过 inode
+上界；legacy next 还必须为零或合法的下一
 orphan 编号。命中这些 bad-orphan 条件时按 Linux `ext4_orphan_cleanup()` 的终止规则，用独立的
 一-credit transaction 把 head 清零。该 transaction 同样采用 `PreserveDuringRecovery` 并计为
 cleanup work，避免 replay 分支把已经推进的 journal sequence 回写成旧状态；只有 clear 的
@@ -643,14 +657,12 @@ allocator 的实际并发关系建立锁顺序；不以字段分组预设锁域�
 
 ## Drop / 资源释放
 
-Namespace removal 在修改目录项之前验证最后一个链接所需的 orphan 格式。
-`unlink`、`rmdir` 和覆盖式 `rename` 在需要 orphan entry 时，对 orphan-file 格式返回 `Unsupported`，
-不修改目录、链接数或 orphan 链，也不 abort journal。删除仍有其他硬链接的普通
-inode 不需要 orphan entry，因此继续允许。底层 orphan helper 保留格式检查，
-但不能依赖它在目录项已经修改后才拒绝操作。
+Namespace removal 在修改目录项之前验证 inode 的数据回收格式。`unlink`、`rmdir` 和覆盖式
+`rename` 在链接数归零时分配 orphan-file slot，满时使用 legacy list；删除仍有其他硬链接的
+普通 inode 不分配 orphan entry。最后一个 VFS 引用释放前，inode bitmap 和数据仍保持分配。
 
 已分配的 metadata/data blocks 通过 journaled bitmap helper 释放。Inode 删除路径先切断
-目录可达性，用 legacy orphan list 保护 zero-link cleanup；若 inode 带 external xattr
+目录可达性，用 orphan file 或 legacy fallback 保护 zero-link cleanup；若 inode 带 external xattr
 block，则先释放或降低 refcount，并清理 `i_file_acl`/`i_blocks`，然后 truncate
 extent-backed data，清理 inode metadata，最后释放 inode bitmap entry。
 

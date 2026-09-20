@@ -39,7 +39,7 @@ impl Ext4SbInfo {
             .ok_or(Ext4Error::OutOfBounds)?;
 
         // An uninitialized inode bitmap represents an entirely free
-        // non-reserved range, so no legacy orphan may point into it.
+        // non-reserved range, so no on-disk orphan entry may point into it.
         if descriptor.has_uninit_inode_bitmap() {
             return Ok(false);
         }
@@ -241,7 +241,7 @@ impl Ext4SbInfo {
             &mut bitmap_bytes,
             range,
             None,
-            |inode| self.is_reserved_inode(inode),
+            |inode| self.is_reserved_inode(inode) || self.is_special_inode_number(inode),
         ) {
             Ok(allocation) => allocation,
             Err(Ext4Error::NoSpace) => {
@@ -392,7 +392,7 @@ impl Ext4SbInfo {
         kind: InodeKind,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<InodeAllocation> {
-        if self.is_reserved_inode(inode) {
+        if self.is_reserved_inode(inode) || self.is_special_inode_number(inode) {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeBitmap));
         }
         ensure_metadata_credits(handle, INODE_ALLOCATOR_METADATA_CREDITS)?;
@@ -446,7 +446,7 @@ impl Ext4SbInfo {
         let mut bitmap_bytes = bitmap.as_ref().to_vec();
         let released =
             bitmap_allocator::release_inode_to_bitmap(&mut bitmap_bytes, range, inode, |inode| {
-                self.is_reserved_inode(inode)
+                self.is_reserved_inode(inode) || self.is_special_inode_number(inode)
             })?;
         debug_assert_eq!(released.inode(), inode, "freed a different inode");
         debug_assert_eq!(

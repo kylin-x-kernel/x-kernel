@@ -174,7 +174,7 @@ fn recover_rejects_clean_legacy_orphan_without_a_journal() {
 }
 
 #[def_test]
-fn recover_rejects_orphan_file_feature() {
+fn recover_rejects_orphan_file_without_backing_inode() {
     let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     set_allocator_feature_bits(
         &mut filesystem,
@@ -186,7 +186,7 @@ fn recover_rejects_orphan_file_feature() {
     let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
     assert_eq!(
         Ext4SbInfo::recover(recovery_device),
-        Err(Ext4Error::Unsupported(UnsupportedKind::OrphanFile))
+        Err(Ext4Error::Corrupt(CorruptKind::InvalidOrphanFile))
     );
 }
 

@@ -9,15 +9,12 @@ use alloc::vec;
 use unittest::def_test;
 
 use crate::{
-    BlockCount, BlockMapping, BlockMappingFlags, Ext4Error, Ext4SyncIntent, FilesystemBlock,
-    LogicalBlock, UnsupportedKind,
-    disk::features,
+    BlockCount, BlockMapping, BlockMappingFlags, Ext4SyncIntent, FilesystemBlock, LogicalBlock,
     file::RegularWriteMetadata,
     jbd2::{JournalCredits, JournalTransactions, TransactionId},
     superblock::test_fixtures::{
         TEST_BLOCK_SIZE, TEST_FREE_BLOCKS, allocate_checkpointed_regular_inode,
         install_test_internal_journal, journal_allocator_test_filesystem,
-        set_allocator_feature_bits,
     },
 };
 
@@ -241,35 +238,4 @@ fn truncate_shrink_releases_tail_blocks_and_zeroes_partial_eof_block() {
         .unwrap();
     assert_eq!(&eof_block[..17], &[0xa5; 17]);
     assert!(eof_block[17..].iter().all(|byte| *byte == 0));
-}
-
-#[def_test]
-fn truncate_rejects_orphan_file_feature() {
-    let (mut filesystem, _device) =
-        journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-    let inode = allocate_checkpointed_regular_inode(&mut filesystem);
-    install_test_internal_journal(&mut filesystem, 766);
-    let input = vec![0x3f; TEST_BLOCK_SIZE];
-    inode.set_size(input.len() as u64);
-    filesystem
-        .writeback_ordered_at(
-            &inode,
-            0,
-            &input,
-            input.len() as u64,
-            crate::Ext4Timestamp::new(33, 0),
-            Ext4SyncIntent::FullMetadata,
-        )
-        .unwrap();
-    install_test_internal_journal(&mut filesystem, 767);
-    set_allocator_feature_bits(
-        &mut filesystem,
-        features::CompatFeatures::ORPHAN_FILE,
-        features::ReadOnlyCompatFeatures::empty(),
-    );
-
-    assert_eq!(
-        filesystem.truncate_regular_inode(&inode, 23, crate::Ext4Timestamp::new(34, 0)),
-        Err(Ext4Error::Unsupported(UnsupportedKind::OrphanFile))
-    );
 }

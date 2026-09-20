@@ -9,99 +9,85 @@ use alloc::format;
 use unittest::def_test;
 
 use super::*;
-use crate::{disk::features, journal::RecoveryFlagPolicy, superblock::test_fixtures::*};
+use crate::{journal::RecoveryFlagPolicy, superblock::test_fixtures::*};
 
 #[def_test]
-fn namespace_rejects_orphan_file_before_metadata_changes() {
-    for (compat, ro_compat) in [
-        (
-            features::CompatFeatures::ORPHAN_FILE,
-            features::ReadOnlyCompatFeatures::empty(),
-        ),
-        (
-            features::CompatFeatures::empty(),
-            features::ReadOnlyCompatFeatures::ORPHAN_PRESENT,
-        ),
-    ] {
-        let (mut filesystem, device) = recovery_test_filesystem();
-        let root = filesystem
-            .internal_iget(crate::InodeNumber::new(2))
-            .unwrap();
-        let timestamp = crate::Ext4Timestamp::new(127, 0);
-        let target = filesystem
-            .create_regular_file(&root, b"target", 0o644, 0, 0, timestamp)
-            .unwrap();
-        let source = filesystem
-            .create_regular_file(&root, b"source", 0o644, 0, 0, timestamp)
-            .unwrap();
-        let directory = filesystem
-            .create_directory(&root, b"directory", 0o755, 0, 0, timestamp)
-            .unwrap();
-        filesystem.sync_filesystem().unwrap();
-        set_allocator_feature_bits(&mut filesystem, compat, ro_compat);
-        let before = device.bytes();
-        let parent_links = root.links_count();
-        let error = Err(Ext4Error::Unsupported(UnsupportedKind::OrphanFile));
+fn namespace_removal_tracks_orphan_file_until_final_eviction() {
+    let (mut filesystem, _device) = recovery_orphan_file_test_filesystem();
+    let root = filesystem
+        .internal_iget(crate::InodeNumber::new(2))
+        .unwrap();
+    let free_inodes = filesystem.free_inodes_count();
+    let parent_links = root.links_count();
+    let timestamp = crate::Ext4Timestamp::new(127, 0);
+    let target = filesystem
+        .create_regular_file(&root, b"target", 0o644, 0, 0, timestamp)
+        .unwrap();
+    let source = filesystem
+        .create_regular_file(&root, b"source", 0o644, 0, 0, timestamp)
+        .unwrap();
+    let directory = filesystem
+        .create_directory(&root, b"directory", 0o755, 0, 0, timestamp)
+        .unwrap();
 
-        assert_eq!(
-            filesystem.unlink(&root, b"target", &target, timestamp),
-            error
-        );
-        assert_eq!(
-            filesystem.remove_directory(&root, b"directory", &directory, timestamp),
-            error
-        );
-        assert_eq!(
-            filesystem.rename(
-                &root,
-                b"source",
-                &source,
-                &root,
-                b"target",
-                Some(&target),
-                timestamp,
-            ),
-            error
-        );
-        for (name, inode) in [
-            ("target", &target),
-            ("source", &source),
-            ("directory", &directory),
-        ] {
-            assert_eq!(
-                filesystem.lookup(&root, name).unwrap().unwrap().inode(),
-                inode.number()
-            );
-        }
-        assert_eq!(target.links_count(), 1);
-        assert_eq!(directory.links_count(), 2);
-        assert_eq!(root.links_count(), parent_links);
-        assert_eq!(filesystem.orphan_head(), None);
-        filesystem.sync_filesystem().unwrap();
-        assert!(
-            device.bytes() == before,
-            "rejected namespace mutation changed storage"
-        );
-        assert!(
-            filesystem
-                .journal
-                .as_ref()
-                .unwrap()
-                .begin(JournalCredits::new(1))
-                .is_ok()
-        );
+    filesystem
+        .link(&root, b"alias", &target, timestamp)
+        .unwrap();
+    filesystem
+        .unlink(&root, b"alias", &target, timestamp)
+        .unwrap();
+    assert_eq!(target.links_count(), 1);
+    assert_eq!(target.orphan_location(), None);
+    assert_eq!(filesystem.orphan_file_empty(), Ok(true));
 
-        filesystem
-            .link(&root, b"alias", &target, timestamp)
-            .unwrap();
-        assert_eq!(target.links_count(), 2);
-        filesystem
-            .unlink(&root, b"alias", &target, timestamp)
-            .unwrap();
-        assert_eq!(target.links_count(), 1);
-        assert!(filesystem.lookup(&root, "alias").unwrap().is_none());
-        filesystem.sync_filesystem().unwrap();
+    filesystem
+        .rename(
+            &root,
+            b"source",
+            &source,
+            &root,
+            b"target",
+            Some(&target),
+            timestamp,
+        )
+        .unwrap();
+    filesystem
+        .remove_directory(&root, b"directory", &directory, timestamp)
+        .unwrap();
+    filesystem
+        .unlink(&root, b"target", &source, timestamp)
+        .unwrap();
+    for name in ["source", "target", "directory", "alias"] {
+        assert!(filesystem.lookup(&root, name).unwrap().is_none());
     }
+    assert_eq!(root.links_count(), parent_links);
+    assert_eq!(filesystem.orphan_head(), None);
+    for inode in [&target, &source, &directory] {
+        assert_eq!(inode.links_count(), 0);
+        assert!(filesystem.is_inode_allocated(inode.number()).unwrap());
+        assert!(matches!(
+            inode.orphan_location(),
+            Some(crate::inode::OrphanLocation::File { .. })
+        ));
+    }
+    filesystem.sync_filesystem().unwrap();
+    assert_eq!(filesystem.orphan_file_empty(), Ok(false));
+
+    // Eviction order differs from insertion order and includes a directory.
+    for inode in [&directory, &target, &source] {
+        filesystem
+            .evict_unlinked_inode_with_policy(
+                inode,
+                timestamp,
+                RecoveryFlagPolicy::ClearAfterCheckpoint,
+            )
+            .unwrap();
+        assert_eq!(inode.orphan_location(), None);
+        assert!(!filesystem.is_inode_allocated(inode.number()).unwrap());
+    }
+    assert_eq!(filesystem.orphan_file_empty(), Ok(true));
+    assert_eq!(filesystem.free_inodes_count(), free_inodes);
+    filesystem.sync_filesystem().unwrap();
 }
 
 #[def_test]

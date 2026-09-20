@@ -196,6 +196,7 @@ impl Ext4SbInfo {
         let result = (|| {
             self.commit_running_metadata_transaction()?;
             self.drain_pending_checkpoints()?;
+            self.clear_ext4_orphan_present_feature_on_disk()?;
             self.flush_device()?;
             let _ = self.metadata_io.reclaim_unused(usize::MAX);
             Ok(())
@@ -208,10 +209,13 @@ impl Ext4SbInfo {
             self.drain_pending_checkpoints()?;
             self.enable_journal_revoke_feature()?;
         }
-        self.journal
+        let journal = self
+            .journal
             .as_ref()
             .cloned()
-            .ok_or(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite))
+            .ok_or(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite))?;
+        self.set_ext4_orphan_present_feature()?;
+        Ok(journal)
     }
 
     pub(crate) fn metadata_journal_for_mutation(
@@ -545,7 +549,7 @@ impl Ext4SbInfo {
         self.set_ext4_needs_recovery_feature()?;
         let superblock = journal.superblock();
         let mut blocks = self.metadata_io.journal_commit_blocks(commit)?;
-        self.merge_recovery_feature_into_journaled_superblock(commit.id(), &mut blocks)?;
+        self.merge_runtime_features_into_journaled_superblock(commit.id(), &mut blocks)?;
         let (persisted, active_superblock) = match persist_journal_commit(
             &superblock,
             self,
@@ -563,7 +567,7 @@ impl Ext4SbInfo {
         Ok(persisted)
     }
 
-    fn merge_recovery_feature_into_journaled_superblock(
+    fn merge_runtime_features_into_journaled_superblock(
         &self,
         transaction: TransactionId,
         blocks: &mut [JournalCommitBlock],
@@ -582,6 +586,9 @@ impl Ext4SbInfo {
                 .get_mut(superblock_offset..superblock_end)
                 .ok_or(Ext4Error::OutOfBounds)?;
             superblock::set_ext4_needs_recovery_feature(superblock_bytes)?;
+            if self.has_orphan_present() {
+                superblock::set_ext4_orphan_present_feature(superblock_bytes)?;
+            }
             let bytes: Arc<[u8]> = Arc::from(bytes.into_boxed_slice());
             self.metadata_io.replace_checkpoint_bytes(
                 superblock_block,
@@ -742,12 +749,15 @@ impl Ext4SbInfo {
         Ok((physical, bytes, superblock))
     }
 
-    fn clear_ext4_needs_recovery_feature(
+    fn clear_ext4_recovery_features(
         &mut self,
         marked: JournalMarkedEmpty,
     ) -> Ext4Result<Ext4RecoveryCleared> {
         self.ensure_journal_superblock_has_zero_start()?;
-        self.clear_ext4_needs_recovery_feature_on_disk()?;
+        if !self.orphan_file_empty()? {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidOrphanFile));
+        }
+        self.clear_ext4_recovery_features_on_disk()?;
         Ok(Ext4RecoveryCleared {
             report: Ext4RecoveryReport::from_journal_report(marked.report),
         })
@@ -768,20 +778,49 @@ impl Ext4SbInfo {
         if self.needs_recovery() {
             return Ok(());
         }
-        self.write_ext4_superblock_recovery_feature(superblock::set_ext4_needs_recovery_feature)?;
+        self.write_ext4_superblock_feature_update(superblock::set_ext4_needs_recovery_feature)?;
         // The disk copy still contains pre-checkpoint counters. Preserve the
         // newer in-memory metadata state while recording only the recovery bit.
         lock(&self.allocator).needs_recovery = true;
         Ok(())
     }
 
+    fn set_ext4_orphan_present_feature(&mut self) -> Ext4Result<()> {
+        if !self.superblock.features().has_orphan_file() || self.has_orphan_present() {
+            return Ok(());
+        }
+        self.write_ext4_superblock_feature_update(superblock::set_ext4_orphan_present_feature)?;
+        lock(&self.allocator).has_orphan_present = true;
+        Ok(())
+    }
+
+    fn clear_ext4_orphan_present_feature_on_disk(&mut self) -> Ext4Result<()> {
+        if !self.has_orphan_present() || !self.orphan_file_empty()? {
+            return Ok(());
+        }
+        self.write_ext4_superblock_feature_update(superblock::clear_ext4_orphan_present_feature)?;
+        lock(&self.allocator).has_orphan_present = false;
+        Ok(())
+    }
+
     fn clear_ext4_needs_recovery_feature_on_disk(&mut self) -> Ext4Result<()> {
-        self.write_ext4_superblock_recovery_feature(superblock::clear_ext4_needs_recovery_feature)?;
+        self.write_ext4_superblock_feature_update(superblock::clear_ext4_needs_recovery_feature)?;
         lock(&self.allocator).needs_recovery = false;
         Ok(())
     }
 
-    fn write_ext4_superblock_recovery_feature(
+    fn clear_ext4_recovery_features_on_disk(&mut self) -> Ext4Result<()> {
+        self.write_ext4_superblock_feature_update(|bytes| {
+            superblock::clear_ext4_needs_recovery_feature(bytes)?;
+            superblock::clear_ext4_orphan_present_feature(bytes)
+        })?;
+        let mut alloc = lock(&self.allocator);
+        alloc.needs_recovery = false;
+        alloc.has_orphan_present = false;
+        Ok(())
+    }
+
+    fn write_ext4_superblock_feature_update(
         &self,
         update: impl FnOnce(&mut [u8]) -> Ext4Result<()>,
     ) -> Ext4Result<Ext4DiskSuperblock> {
@@ -820,21 +859,29 @@ impl Ext4Recovery {
         })
     }
 
-    fn recover_clean_legacy_orphans(&mut self) -> Ext4Result<()> {
-        self.filesystem
-            .cleanup_legacy_orphans_preserving_recovery()?;
+    /// Cleans orphan metadata left after a fully checkpointed transaction.
+    ///
+    /// Structurally valid inodes whose format KExt4 cannot yet mutate remain
+    /// hard recovery errors. The orphan entry and recovery feature are kept
+    /// so a later implementation or Linux can finish the cleanup; silently
+    /// skipping such an inode would report a filesystem with live orphaned
+    /// resources as recovered.
+    fn recover_clean_orphans(&mut self) -> Ext4Result<()> {
+        self.filesystem.cleanup_orphans_preserving_recovery()?;
         self.filesystem.ensure_journal_superblock_has_zero_start()?;
-        self.filesystem.clear_ext4_needs_recovery_feature_on_disk()
+        if !self.filesystem.orphan_file_empty()? {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidOrphanFile));
+        }
+        self.filesystem.clear_ext4_recovery_features_on_disk()
     }
 
     pub(super) fn replay(mut self) -> Ext4Result<Option<Ext4RecoveryReport>> {
-        let features = self.filesystem.superblock().features();
-        if features.has_orphan_file() || features.has_orphan_present() {
-            return Err(Ext4Error::Unsupported(UnsupportedKind::OrphanFile));
-        }
-        if !features.needs_recovery() {
-            if self.filesystem.orphan_head().is_some() {
-                self.recover_clean_legacy_orphans()?;
+        if !self.filesystem.needs_recovery() {
+            if self.filesystem.orphan_head().is_some()
+                || !self.filesystem.orphan_file_empty()?
+                || self.filesystem.has_orphan_present()
+            {
+                self.recover_clean_orphans()?;
             }
             return Ok(None);
         }
@@ -844,14 +891,15 @@ impl Ext4Recovery {
         // never be entered while holding it — ksync mutexes are not
         // reentrant and reentry panics.
         self.filesystem.reload_mutable_metadata_state()?;
+        self.filesystem.initialize_orphan_info()?;
         self.filesystem
             .stage_replayed_journal_clean_state(applied)?;
-        let cleaned_orphans = if self.filesystem.orphan_head().is_some() {
-            self.filesystem
-                .cleanup_legacy_orphans_preserving_recovery()?
-        } else {
-            0
-        };
+        let cleaned_orphans =
+            if self.filesystem.orphan_head().is_some() || !self.filesystem.orphan_file_empty()? {
+                self.filesystem.cleanup_orphans_preserving_recovery()?
+            } else {
+                0
+            };
         let marked = if cleaned_orphans == 0 {
             self.filesystem.mark_journal_clean(applied)?
         } else {
@@ -860,7 +908,7 @@ impl Ext4Recovery {
                 report: applied.report(),
             }
         };
-        let cleared = self.filesystem.clear_ext4_needs_recovery_feature(marked)?;
+        let cleared = self.filesystem.clear_ext4_recovery_features(marked)?;
         let report = cleared.into_report();
         Ok(Some(report))
     }

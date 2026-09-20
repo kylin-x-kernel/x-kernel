@@ -21,10 +21,12 @@ pub(crate) const EXT2_FLAGS_UNSIGNED_HASH: u32 = 0x0002;
 const CHECKSUM_OFFSET: usize = 0x3fc;
 const CRC32C_CHECKSUM_TYPE: u8 = 1;
 const FEATURE_INCOMPAT_OFFSET: usize = 0x60;
+const FEATURE_RO_COMPAT_OFFSET: usize = 0x64;
 const FREE_BLOCKS_COUNT_LO_OFFSET: usize = 0x0c;
 const FREE_BLOCKS_COUNT_HI_OFFSET: usize = 0x158;
 const FREE_INODES_COUNT_OFFSET: usize = 0x10;
 const LAST_ORPHAN_OFFSET: usize = 0xe8;
+const ORPHAN_FILE_INODE_OFFSET: usize = 0x280;
 const MIN_EXTRA_ISIZE_OFFSET: usize = 0x15c;
 const WANT_EXTRA_ISIZE_OFFSET: usize = 0x15e;
 const FLAGS_OFFSET: usize = 0x160;
@@ -75,6 +77,7 @@ pub struct Ext4DiskSuperblock {
     free_blocks_count: u64,
     free_inodes_count: u32,
     last_orphan: u32,
+    orphan_file_inode: Option<NonZeroU32>,
     first_data_block: u32,
     block_size: u32,
     blocks_per_group: u32,
@@ -174,6 +177,11 @@ impl Ext4DiskSuperblock {
         let clusters_per_group = codec::le_u32(input, 0x24)?;
         let inodes_count = codec::le_u32(input, 0x00)?;
         let last_orphan = codec::le_u32(input, LAST_ORPHAN_OFFSET)?;
+        let orphan_file_inode = if features.has_orphan_file() {
+            NonZeroU32::new(codec::le_u32(input, ORPHAN_FILE_INODE_OFFSET)?)
+        } else {
+            None
+        };
         let inodes_per_group = codec::le_u32(input, 0x28)?;
         if blocks_count == 0 || blocks_per_group == 0 || inodes_per_group == 0 {
             return Err(Ext4Error::Corrupt(CorruptKind::ZeroGeometry));
@@ -183,6 +191,9 @@ impl Ext4DiskSuperblock {
         }
         if free_inodes_count > inodes_count {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeGeometry));
+        }
+        if orphan_file_inode.is_some_and(|inode| inode.get() > inodes_count) {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeNumber));
         }
         if u64::from(first_data_block) >= blocks_count
             || (block_size == 1024 && first_data_block == 0)
@@ -281,6 +292,7 @@ impl Ext4DiskSuperblock {
             free_blocks_count,
             free_inodes_count,
             last_orphan,
+            orphan_file_inode,
             first_data_block,
             block_size,
             blocks_per_group,
@@ -345,6 +357,11 @@ impl Ext4DiskSuperblock {
     /// Returns the legacy ext4 orphan-list head inode number, or zero.
     pub const fn last_orphan(&self) -> u32 {
         self.last_orphan
+    }
+
+    /// Returns the inode backing the ext4 orphan file, when encoded.
+    pub const fn orphan_file_inode(&self) -> Option<NonZeroU32> {
+        self.orphan_file_inode
     }
 
     /// Returns the first data block.
@@ -469,6 +486,26 @@ pub(crate) fn set_ext4_needs_recovery_feature(input: &mut [u8]) -> Ext4Result<()
     incompat.insert(features::IncompatFeatures::RECOVER);
     input[FEATURE_INCOMPAT_OFFSET..FEATURE_INCOMPAT_OFFSET + 4]
         .copy_from_slice(&incompat.bits().to_le_bytes());
+    update_feature_checksum(input, &superblock)
+}
+
+pub(crate) fn clear_ext4_orphan_present_feature(input: &mut [u8]) -> Ext4Result<()> {
+    update_ext4_orphan_present_feature(input, false)
+}
+
+pub(crate) fn set_ext4_orphan_present_feature(input: &mut [u8]) -> Ext4Result<()> {
+    update_ext4_orphan_present_feature(input, true)
+}
+
+fn update_ext4_orphan_present_feature(input: &mut [u8], is_present: bool) -> Ext4Result<()> {
+    let superblock = Ext4DiskSuperblock::decode(input)?;
+    let mut read_only_compat = features::ReadOnlyCompatFeatures::from_bits_retain(codec::le_u32(
+        input,
+        FEATURE_RO_COMPAT_OFFSET,
+    )?);
+    read_only_compat.set(features::ReadOnlyCompatFeatures::ORPHAN_PRESENT, is_present);
+    input[FEATURE_RO_COMPAT_OFFSET..FEATURE_RO_COMPAT_OFFSET + 4]
+        .copy_from_slice(&read_only_compat.bits().to_le_bytes());
     update_feature_checksum(input, &superblock)
 }
 

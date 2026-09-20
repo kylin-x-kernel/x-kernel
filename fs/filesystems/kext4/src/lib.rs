@@ -26,14 +26,14 @@
 //! VFS can run generic PageCache resize between Linux-style `i_disksize`
 //! commit and ext4 extent/orphan completion. Grow zeros any mapped old EOF tail
 //! before committing the larger disk size; sparse ranges continue to read as
-//! zeroes. Shrink uses the legacy ext4 orphan list, zeros the partial EOF block,
-//! removes tail extents, releases blocks, updates extent-backed `i_blocks`, and
-//! lets explicit recovery finish both `nlink > 0` regular-file truncation and
-//! `nlink == 0` final eviction from the legacy orphan list, including when the
-//! journal itself is already clean. Filesystems carrying the `huge_file`
+//! zeroes. Shrink uses the ext4 orphan file with legacy-list fallback, zeros
+//! the partial EOF block, removes tail extents, releases blocks, updates
+//! extent-backed `i_blocks`, and lets explicit recovery finish both `nlink >
+//! 0` regular-file truncation and `nlink == 0` final eviction, including when
+//! the journal itself is already clean. Filesystems carrying the `huge_file`
 //! feature can mutate ordinary inodes that retain 512-byte-sector `i_blocks`
-//! accounting; inodes using `EXT4_HUGE_FILE_FL` block-unit accounting and the
-//! ext4 orphan-file format remain unsupported.
+//! accounting; inodes using `EXT4_HUGE_FILE_FL` block-unit accounting remain
+//! unsupported.
 //!
 //! The first R7 namespace baseline can create regular files and directories in
 //! linear directories: it allocates the inode, inserts or

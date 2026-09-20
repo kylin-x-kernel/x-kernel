@@ -31,6 +31,8 @@ pub enum ChecksumTarget {
     ExtentBlock { inode: u32, block: u64 },
     /// A directory data block.
     DirectoryBlock { inode: u32, block: u64 },
+    /// A block in the ext4 orphan file.
+    OrphanFileBlock { inode: u32, block: u64 },
     /// An extended-attribute block.
     XattrBlock { inode: u32, block: u64 },
     /// A JBD2 journal superblock.
@@ -56,8 +58,6 @@ pub enum UnsupportedKind {
     ReservedInode,
     /// The filesystem stores its journal on another block device.
     ExternalJournal,
-    /// The filesystem uses ext4 orphan-file semantics, not the legacy orphan list.
-    OrphanFile,
     /// The directory uses an HTree shape this stage does not scan.
     IndexedDirectory,
     /// The directory needs the ext4 large_dir HTree depth extension.
@@ -142,6 +142,8 @@ pub enum CorruptKind {
     InvalidDirectoryEntry,
     /// The superblock selects an invalid default directory hash.
     InvalidDirectoryHash,
+    /// The orphan-file inode, block layout, magic, or entries are invalid.
+    InvalidOrphanFile,
     /// An extended-attribute entry or block is structurally invalid.
     InvalidXattr,
     /// The Ext4 journal location or JBD2 geometry is invalid.

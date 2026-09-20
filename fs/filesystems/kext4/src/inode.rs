@@ -461,6 +461,30 @@ pub(crate) struct Ext4InodeMetadata {
 }
 
 impl Ext4InodeMetadata {
+    fn is_fast_symlink(
+        &self,
+        filesystem_block_size: u32,
+        has_ea_inode_feature: bool,
+    ) -> Ext4Result<bool> {
+        if self.kind != InodeKind::Symlink || self.flags & disk_inode::EXT4_INLINE_DATA_FL != 0 {
+            return Ok(false);
+        }
+        let ea_blocks = if self.file_acl == 0 {
+            0
+        } else {
+            u64::from(filesystem_block_size) / 512
+        };
+        let data_blocks = self
+            .blocks
+            .checked_sub(ea_blocks)
+            .ok_or(Ext4Error::Overflow)?;
+        Ok(if has_ea_inode_feature {
+            self.disk_size != 0 && self.disk_size < disk_inode::INODE_BLOCK_BYTES as u64
+        } else {
+            data_blocks == 0
+        })
+    }
+
     fn from_raw(raw: disk_inode::RawInode, allow_zero_links: bool) -> Ext4Result<Self> {
         if raw.links_count() == 0 && !allow_zero_links {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
@@ -591,6 +615,18 @@ struct Ext4InodeState {
     reserved_data_blocks: u64,
     extent_status: ExtentStatusTree,
     is_extra_isize_expansion_disabled: bool,
+    orphan: Option<OrphanLocation>,
+}
+
+/// Orphan membership owned by the resident ext4 inode.
+///
+/// This safely combines Linux ext4's `i_orphan` / `i_orphan_idx` union with
+/// `EXT4_STATE_ORPHAN_FILE`. It is runtime state and is therefore kept out of
+/// the decoded on-disk inode metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OrphanLocation {
+    LegacyList,
+    File { index: u32 },
 }
 
 impl Ext4InodeState {
@@ -711,6 +747,7 @@ impl Ext4Inode {
                 reserved_data_blocks: 0,
                 extent_status: ExtentStatusTree::default(),
                 is_extra_isize_expansion_disabled: false,
+                orphan: None,
             }),
             writeback_lock: Mutex::new(()),
         }
@@ -816,6 +853,28 @@ impl Ext4Inode {
     #[cfg(unittest)]
     fn has_initialized_overwrite(&self, start: u64, count: u64, block_size: u32) -> bool {
         self.with_state(|state| state.has_initialized_overwrite(start, count, block_size))
+    }
+
+    pub(crate) fn orphan_location(&self) -> Option<OrphanLocation> {
+        self.with_state(|state| state.orphan)
+    }
+
+    pub(crate) fn bind_orphan(&self, location: OrphanLocation) -> Ext4Result<()> {
+        self.update_state(|state| match state.orphan {
+            None => {
+                state.orphan = Some(location);
+                Ok(())
+            }
+            Some(current) if current == location => Ok(()),
+            Some(_) => Err(Ext4Error::Corrupt(CorruptKind::InvalidInode)),
+        })
+    }
+
+    pub(crate) fn clear_orphan(&self, expected: OrphanLocation) {
+        self.update_state(|state| {
+            debug_assert_eq!(state.orphan, Some(expected));
+            state.orphan = None;
+        });
     }
 
     /// Returns this inode's number.
@@ -1061,6 +1120,16 @@ impl Ext4Inode {
         self.with_metadata(|metadata| metadata.block)
     }
 
+    /// Linux `ext4_can_truncate`: classification is independent of which
+    /// on-disk mapping formats this implementation can currently mutate.
+    pub(crate) fn can_truncate(&self, block_size: u32, has_ea_inode: bool) -> Ext4Result<bool> {
+        self.with_metadata(|metadata| match metadata.kind {
+            InodeKind::RegularFile | InodeKind::Directory => Ok(true),
+            InodeKind::Symlink => Ok(!metadata.is_fast_symlink(block_size, has_ea_inode)?),
+            _ => Ok(false),
+        })
+    }
+
     pub(crate) fn fast_symlink_target(
         &self,
         filesystem_block_size: u32,
@@ -1077,20 +1146,7 @@ impl Ext4Inode {
             return Err(Ext4Error::Unsupported(UnsupportedKind::EncryptedName));
         }
 
-        let ea_blocks = if metadata.file_acl == 0 {
-            0
-        } else {
-            u64::from(filesystem_block_size) / 512
-        };
-        let data_blocks = metadata
-            .blocks
-            .checked_sub(ea_blocks)
-            .ok_or(Ext4Error::Overflow)?;
-        let is_fast = if has_ea_inode_feature {
-            metadata.disk_size != 0 && metadata.disk_size < disk_inode::INODE_BLOCK_BYTES as u64
-        } else {
-            data_blocks == 0
-        };
+        let is_fast = metadata.is_fast_symlink(filesystem_block_size, has_ea_inode_feature)?;
         if is_fast {
             Ok(Some(
                 Self::validate_fast_symlink_target(&metadata)?.to_vec(),
@@ -1578,17 +1634,44 @@ impl Ext4SbInfo {
         self.iget_inner(number, false, false)
     }
 
+    pub(crate) fn special_iget(&self, number: InodeNumber) -> Ext4Result<Ext4Inode> {
+        if !self.is_special_inode_number(number) {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeNumber));
+        }
+        self.iget_inner(number, false, true)
+    }
+
+    /// Returns `None` only for an invalid orphan reference. Metadata read,
+    /// decode, checksum and unsupported cleanup errors remain distinguishable.
     pub(crate) fn orphan_iget_with_next(
         &self,
         number: InodeNumber,
-    ) -> Ext4Result<(Ext4Inode, Option<InodeNumber>)> {
+    ) -> Ext4Result<Option<(Ext4Inode, Option<InodeNumber>)>> {
+        if !self.is_valid_orphan_number(number) || !self.is_inode_allocated(number)? {
+            return Ok(None);
+        }
         let raw = self.raw_inode(number)?;
         let next = match raw.dtime() {
             0 => None,
             next => Some(InodeNumber::new(next)),
         };
         let inode = self.iget_from_raw(number, raw, true, true)?;
-        Ok((inode, next))
+        if next.is_some_and(|next| next.get() > self.superblock().inodes_count())
+            || (inode.links_count() != 0
+                && !inode.can_truncate(
+                    self.layout().block_size(),
+                    self.superblock().features().has_ea_inode(),
+                )?)
+        {
+            return Ok(None);
+        }
+        if inode.links_count() == 0 {
+            self.ensure_unlinked_inode_eviction_supported(&inode)?;
+        } else {
+            self.ensure_regular_file_mutation_supported(&inode)?;
+            self.ensure_inode_data_truncation_supported(&inode)?;
+        }
+        Ok(Some((inode, next)))
     }
 
     fn iget_inner(
@@ -1732,7 +1815,18 @@ impl Ext4SbInfo {
     }
 
     fn is_public_inode_number(&self, number: InodeNumber) -> bool {
-        number.get() == disk_inode::EXT4_ROOT_INO || number.get() >= self.superblock().first_inode()
+        !self.is_special_inode_number(number)
+            && (number.get() == disk_inode::EXT4_ROOT_INO
+                || number.get() >= self.superblock().first_inode())
+    }
+
+    pub(crate) fn is_special_inode_number(&self, number: InodeNumber) -> bool {
+        let inode = number.get();
+        (inode != disk_inode::EXT4_ROOT_INO && inode < self.superblock().first_inode())
+            || self
+                .superblock()
+                .orphan_file_inode()
+                .is_some_and(|orphan_file| orphan_file.get() == inode)
     }
 
     pub(crate) fn raw_inode(&self, number: InodeNumber) -> Ext4Result<disk_inode::RawInode> {
@@ -3134,6 +3228,32 @@ mod unittests {
 
     const fn timestamp(seconds: i64, nanos: u32) -> Ext4Timestamp {
         Ext4Timestamp::new(seconds, nanos)
+    }
+
+    #[def_test]
+    fn orphan_truncation_classifies_inode_kind_and_symlink_storage() {
+        for (kind, expected) in [
+            (InodeKind::RegularFile, true),
+            (InodeKind::Directory, true),
+            (InodeKind::Fifo, false),
+            (InodeKind::Socket, false),
+            (InodeKind::CharacterDevice, false),
+            (InodeKind::BlockDevice, false),
+        ] {
+            let mut metadata = regular_inode_metadata();
+            metadata.kind = kind;
+            assert_eq!(test_inode(metadata).can_truncate(4096, false), Ok(expected));
+        }
+        let mut metadata = regular_inode_metadata();
+        metadata.kind = InodeKind::Symlink;
+        metadata.disk_size = 9;
+        metadata.file_acl = 1;
+        metadata.blocks = 8;
+        let inode = test_inode(metadata);
+        assert_eq!(inode.can_truncate(4096, false), Ok(false));
+        inode.update_state(|state| state.metadata.blocks += 8);
+        assert_eq!(inode.can_truncate(4096, false), Ok(true));
+        assert_eq!(inode.can_truncate(4096, true), Ok(false));
     }
 
     #[def_test]

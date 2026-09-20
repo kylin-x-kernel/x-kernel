@@ -203,7 +203,7 @@ exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，
 | T-04 | journal credits 估算不足或按 data blocks 过度估算，导致 metadata update 在事务中途失败或被错误拒绝 | 中 | namespace remove、HTree 转换/split、writeback、truncate、preallocation discard 或 final eviction 修改 orphan、xattr、extent 和 inode metadata | namespace 插入预检显式记录 HTree 路径，转换后立即 split 按两个独立单块 extent 预估并在 inode flag 发布前加入 HTree credits；namespace removal 只覆盖 dirent、nlink 和 orphan metadata，不包含后续 final eviction；ordered writeback 固定为 path-local 算法，由 live cursor 按实际 unwritten conversion 和 hole allocation run 续订 handle，达到 transaction 上限时提交完整前缀并重启；legacy final eviction 和 extent truncate 按实际 tree blocks、需要 revoke 的旧 tree blocks 与 affected groups 计算，目录/block-mapped symlink 数据块释放按释放块数逐一计入 revoke credits；victim 带 external xattr 时 final eviction 预算包含 EA 清理 |
 | T-05 | 恶意 extent 或 bitmap metadata 导致释放不属于该 inode 的 block | 高 | 损坏镜像把 extent/xattr block 指向 system zone 或非法 group | release 或 mutation 前执行 block ownership、system-zone、bitmap 和 checksum 校验 |
 | T-06 | 设备写入/flush 失败让部分 metadata 可见 | 中 | commit、replay、checkpoint、显式 sync 或 xattr update 期间设备失败 | journal abort 保留 recovery state 或 pending checkpoint；后续 sync/mutation 返回 aborted，不跨 syscall 回滚内存修改；测试覆盖 explicit-sync commit、checkpoint、xattr 和 replay failure |
-| T-07 | clean journal 上残留 legacy orphan，mount 永久返回 `NeedsRecovery` | 中 | namespace transaction 已 checkpoint，但 final inode eviction 尚未发生 | 显式 recovery 无论 journal 是否需要 replay 都遍历 legacy orphan；clean 分支以 `PreserveDuringRecovery` 建立 recovery evidence，逐个同步 commit/checkpoint，确认 journal start 清零后才清除 recovery feature；zero-link entry 复用 journaled final-eviction 路径 |
+| T-07 | clean journal 上残留 orphan，mount 永久返回 `NeedsRecovery` | 中 | namespace transaction 已 checkpoint，但 final inode eviction 尚未发生 | 显式 recovery 无论 journal 是否需要 replay 都遍历 legacy list 与 orphan file；clean 分支以 `PreserveDuringRecovery` 建立 recovery evidence，逐个同步 commit/checkpoint，确认 journal start 清零且 orphan file 为空后才清除 recovery features；zero-link entry 复用 journaled final-eviction 路径 |
 | T-08 | free-block aggregate、delalloc 区间与 reservation aggregate 漂移导致过量预留 | 中 | VFS/ext4 两侧分别更新，或逐块 set 与 mount counter 只更新一侧 | block mutation 同时发布 superblock 与 group descriptor；ext4 range API 在独立 reservation mutex 下联合更新 inode interval、`i_reserved_data_blocks` 等价计数和 mount aggregate，admission/statfs 直接使用该 aggregate |
 | T-09 | 新建 inode 固定为 root，绕过调用者 owner 语义 | 高 | callback 丢弃 credential 或 ext4 constructor 隐式填入 UID/GID 0 | create/mkdir/mknod/symlink callback 使用 `inode_init_owner()`，显式 `uid`、`gid` 随同 namei transaction 持久化 |
 | T-10 | journal head 追上 tail 并覆盖尚未 checkpoint 的 commit | 高 | 多个 committed transaction 占满环形日志，追加仍继续写入 | 依据 oldest tail/current head 计算 live 空间，始终保留一个空 block；空间不足时先 checkpoint 最老 transaction 再重试，不发出覆盖写；真实 ext4 镜像测试覆盖双 transaction tail 推进 |
@@ -212,7 +212,7 @@ exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，
 | T-13 | 同一 inode 出现 snapshot 分叉，或 inode number reuse 继承旧 transient state | 中 | KVFS 初始化/释放期间并发 `iget`，namei 按编号重载 live child，或 orphan removal 为 resident 前驱解码临时对象 | KVFS-wide `(SuperBlock, ino)` table 的 `New/Live/Freeing` 是唯一 identity 状态；`New/Freeing` 等待并重试；kext4 向 unlink/rmdir/rename 传入既有 private component；legacy orphan next 只读写 journaled inode-table bytes；KExt4 无 resident cache；reuse 只能在 `Freeing` 完成并删除旧 slot 后发生 |
 | T-14 | shrink 后重新增长暴露旧 PageCache 数据 | 高 | ext4 backing prepare 提前把 VFS `i_size` 改成目标值，导致 `truncate_setsize()` 误判长度未变并跳过 folio 丢弃或 EOF 清零 | regular-file metadata publish 只更新 `i_disksize`；唯一 `i_size` 由 VFS 在 PageCache 顺序点发布；core prepare 与 KVFS shrink/regrow、partial-grow 回归测试共同约束该职责边界 |
 | T-15 | 扩大 `i_extra_isize` 时覆盖、丢失 xattr，生成 e2fsck 不接受的 external EA block，或在磁盘满时拒绝本可完成的更新 | 高 | xattr syscall 错误地同时改变 extra-isize、普通 inode dirty 路径漏掉扩展，新 extra fields 与旧 inline 区间重叠，external entry/block hash 留零，错误地 COW 内容未变的共享 block，或布局阶段的空闲块在 apply 前被占用 | 普通 set/remove 固定使用当前 extra-isize，统一 ordinary inode-dirty 入口再按 want/min/current 扩展；迁移采用 Linux 风格 entry-by-entry 选择且固定 `system.data`；内容未变的 external block 直接复用，需要新 block 的布局在 apply 前预分配并把 `NoSpace` 降级为 `no_expand`；同一 journal transaction 重写 external block、生成 Linux-compatible `e_hash`/`h_hash`、清理旧 inline 区并更新 inode checksum；单元测试覆盖 deferred expansion、目录 inode dirty、磁盘满共享 external 复用、迁移选择与独立固定 hash 向量 |
-| T-16 | 损坏 legacy orphan head 让挂载恢复失败、循环，或访问未分配/reserved inode | 中 | `s_last_orphan` 越界或指向 allocation bit 为零的 inode，已加载 inode 带不可截断的链接类型，或 `i_dtime` 指向非法 next | 普通 orphan API 继续严格拒绝非法编号；显式 recovery 在 inode-table decode 前验证编号和带 checksum 的 bitmap，加载后验证可截断类型与 next，并以 `PreserveDuringRecovery` journal transaction 持久化清零后终止 bad chain；bitmap I/O/checksum、inode decode 和合法但未支持的 cleanup 继续失败而不被降级 |
+| T-16 | 损坏 orphan entry 让挂载恢复失败、循环，或访问未分配/special inode | 中 | `s_last_orphan` 或 orphan-file slot 越界、指向 allocation bit 为零或内部 backing inode，已加载 inode 带不可截断的链接类型，或 legacy `i_dtime` 指向非法 next | 统一 `orphan_iget` 在 inode-table decode 前验证编号、special-inode 边界和带 checksum 的 bitmap，加载后验证格式与可清理性；legacy bad chain 以 `PreserveDuringRecovery` transaction 持久化清零，非法 orphan-file entry 跳过并继续处理后续有效槽位，最终保留恢复证据并失败；bitmap I/O/checksum、inode decode 和合法但未支持的 cleanup 不被降级 |
 | T-17 | `minixdf`/`bsddf` 改变 free-space 事实源或错误扣除 metadata overhead | 中 | 两种模式分别实现整套 statfs 公式，或 VFS integration 直接修改 free counters | typed mode 只选择 `blocks_count - overhead` 或原始 `blocks_count`；free/available/inode 统计走共享代码，Linux-image 回归测试验证两者除总块数外一致 |
 | T-18 | 128-byte inode 对外暴露不存在的纳秒精度，或新建 inode 丢失纳秒/扩展 epoch 并在 2038 年后回绕 | 中 | 只在 inode-table encode 时截断、VFS 比较原始高精度时间，或初始化结构只保存 base `u32` 秒 | KExt4 按 inode size 返回共享的 `TimestampLimits`，由唯一 KVFS `SuperBlock` 持有；`VfsInode::current_time()` 在比较、callback 和 publication 前只截断一次；新建 inode 保存完整 `Ext4Timestamp` 并通过 base/extra encoder 写盘，128-byte 格式在边界钳制，256-byte 格式保留纳秒和 epoch；回归测试覆盖两种 inode size 的能力选择、初始化编码和 resident publication |
 | T-19 | 合法 SIPHASH HTree 被误报损坏 | 中 | root `hash_version=6` 进入目录写路径 | 共享 HTree root decoder 只接受磁盘版本 `0/1/2/6`，HTree signedness 来自 mount state；SIPHASH 在需要密钥的 hash 边界返回 `Unsupported`，相关事务不能提交 metadata mutation |
@@ -220,17 +220,17 @@ exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，
 
 ## 故障模式与影响分析（FMEA）
 
-Namespace removal 对不支持的 orphan-file 格式必须在首个 metadata mutation 前
-拒绝，否则删除目录项后才遇到 `Unsupported` 会触发 fail-closed journal abort。
-共享的 eviction preflight 覆盖 unlink、rmdir、覆盖式 rename 和 final eviction；
-多硬链接且不会归零的普通 inode 不要求 orphan entry。回归检查拒绝后的目录项、
-链接数、orphan head、磁盘字节和 journal 可继续同步性。
+Namespace removal 的共享 eviction preflight 在首个 metadata mutation 前校验 inode 数据
+格式。Orphan file 在挂载/replay 后完成校验和初始化；运行时由 `OrphanInfo` 在挂载级独占访问下
+维护槽位和 free-entry 计数，metadata publication 成功后才更新计数，失败由 journal abort 路径
+保留磁盘恢复证据。多硬链接且不会归零的普通 inode 不分配 orphan entry。内核组件测试使用合成
+metadata 覆盖 unlink、rmdir、覆盖 rename 和乱序 final eviction；镜像互操作与 e2fsck 属于外部 harness。
 
 | 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
 |------|----------|----------|----------|----------|--------|----------|
-| F-01 | 对 Linux ext4 有效 feature 返回 unsupported | EA inode、bigalloc、orphan-file、inline-data write 等 feature 尚未实现 | 当前操作失败 | filesystem 仍保持可审计状态，但该能力不可用 | 3 | feature negotiation 和显式 `UnsupportedKind` |
+| F-01 | 对 Linux ext4 有效 feature 返回 unsupported | EA inode、bigalloc、inline-data write 等 feature 尚未实现 | 当前操作失败 | filesystem 仍保持可审计状态，但该能力不可用 | 3 | feature negotiation 和显式 `UnsupportedKind` |
 | F-02 | journal commit 或 checkpoint 失败 | 设备写入/flush 错误 | committing 或 pending checkpoint 状态保留并 abort journal | 当前 mount 后续 sync/mutation 拒绝继续，重新挂载时依赖 recovery | 2 | 失败返回前永久 abort；保留 recovery evidence 和 pending state，禁止后续 sync 假成功 |
-| F-03 | recovery-time orphan cleanup 失败 | crash 发生在 namespace commit 之后、final cleanup 之前，bad-orphan 链需要切断，或 bitmap/inode metadata、设备失败、inode 使用尚未支持的格式 | 明确的 bad-orphan 在 durable clear 后终止；不能安全降级的错误保留 orphan head 或 recovery evidence 并返回 | filesystem 不会在未持久化 cleanup 时被当作可写 root 暴露，也不会把 checksum/I/O 错误当成 stale orphan 丢弃 | 2 | legacy orphan cleanup 使用独立 journal transaction；bad-orphan clear 与普通 inode cleanup 都采用 `PreserveDuringRecovery`，checkpoint 后重载 mutable metadata state，成功后再继续；真实镜像测试覆盖 reserved/out-of-range、未分配 head、非法 next，flush-failure 测试覆盖证据保留和重试，N3 在最终执行图上补齐其余 fault/powercut 矩阵 |
+| F-03 | recovery-time orphan cleanup 失败 | crash 发生在 namespace commit 之后、final cleanup 之前，bad legacy chain 需要切断，或 orphan-file/bitmap/inode metadata、设备失败、inode 使用尚未支持的格式 | 明确的 legacy bad-orphan 在 durable clear 后终止；不能安全降级的错误保留 orphan entry 或 recovery evidence 并返回 | filesystem 不会在未持久化 cleanup 时被当作可写 root 暴露，也不会把 checksum/I/O 错误当成 stale orphan 丢弃 | 2 | orphan cleanup 使用独立 journal transaction；bad legacy clear 与普通 inode cleanup 都采用 `PreserveDuringRecovery`，checkpoint 后只重载 mutable superblock/group state 并增量维护 orphan-file free count，成功后再继续；N3 在最终执行图上补齐 fault/powercut 矩阵 |
 | F-04 | 粗粒度 write lock 串行化慢 mutation I/O | live kext4 KVFS 层在 blocking filesystem mutation 周围持有 mount-level core write guard | 吞吐下降 | 其他 KExt4 mutation 等待；只读路径仍可共享 read guard | 4 | inode private state 已有独立 state lock；N2 根据实际 worker 和共享状态继续建立 per-group/journal/metadata-buffer 锁域；锁拆分前不宣称 mutation 并发性能 |
 | F-05 | journal reservation 空间不足 | operation 的实际 metadata targets 超过空 journal 容量，或 reservation 混入另一个 lifecycle 阶段的工作 | 单次 mutation 无法容纳时在修改 metadata 前失败；writeback transaction 扩展失败时只提交完整前缀 | admission 失败保持磁盘不变；分段 writeback 的后续 transaction 若再失败，调用方可收到错误而 durable prefix 保留 | 3 | namespace 与 final eviction 分开预算；目录插入计划在事务前识别 HTree 转换/split，并把独立块 mapping 和 HTree credits 纳入同一预检；ordered writeback 在每个 live mapping run 前保证该操作及 inode publish 余量，先尝试 `reserve_more()`，容量不足则提交已 flush 的前缀、精确结算其 delalloc 后重开 transaction，只有连单次 mutation 都无法容纳时才在 admission 阶段拒绝；跨叶 truncate 在首个 metadata 写入前选择按 tree blocks/groups 估算的全树路径；由 small-journal actual-run restart、fragmented unwritten、failure/retry、rename-overwrite、balanced-split 和 preallocation-tail credit 回归测试约束 |
 | F-06 | PageCache 与 filesystem core 锁序反转 | writeback 持有 core mutex 等待 mapping mutex，同时 cache miss 持有 mapping mutex 进入 backing read | 并发 buffered I/O 和 `sync()` 停止推进 | watchdog 报告 mutex deadlock，filesystem workload 无法继续 | 2 | kext4 KVFS 层不在 PageCache traversal 外层持有 core mutex；同 inode writeback 独立串行化，batch callback 在 mapping/folio mutex 释放后才进入核心；VFS/MM 后续仍需消除 tree lock 下的 backing I/O |
@@ -251,9 +251,9 @@ Commit/checkpoint failure 会保留 committing 或 pending work 并永久 abort 
 丢失尚未落盘的 metadata；后续 sync 和 mutation 都观察 `JournalAborted`，不能把内存中的
 transaction 当作 durable。多个 pending commit 存在时，完成最老 transaction 只推进 journal
 tail；只有最后一个完成后才清除 journal start 和 ext4 recovery evidence。当前 inode sync
-采用提交整个 running transaction 的保守语义。显式 recovery 同样只有在 legacy orphan
-cleanup 全部完成 commit/checkpoint、确认 journal start 为零，并 flush 最终 superblock
-状态之后才能返回成功；在 cleanup durable 之前失败会保留 orphan head 或 recovery feature
+采用提交整个 running transaction 的保守语义。显式 recovery 同样只有在 legacy list 与
+orphan-file cleanup 全部完成 commit/checkpoint、确认 journal start 为零且 orphan file 为空，
+并 flush 最终 superblock 状态之后才能返回成功；在 cleanup durable 之前失败会保留 orphan entry 或 recovery feature
 作为下一次恢复入口，最终状态 flush 失败也必须向调用方返回错误。
 
 N1 已完成的 `MountedJournal` 边界必须继续保留 recovery evidence、revoke 和
@@ -280,7 +280,7 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
 - POSIX ACL 当前只是 core 内的 opaque xattr bytes，不实现 ACL permission enforcement、
   mode 同步或 inheritance，因此 kext4 KVFS 层不把 `system.posix_acl_*` 作为普通 xattr 暴露；
   mount parser 接受 `acl` 只用于兼容 Linux 默认开启选项的正向拼写，不得改变上述权限边界。
-- EA inode、oversized xattr、bigalloc、orphan-file、inline-data write、huge-file write
+- EA inode、oversized xattr、bigalloc、inline-data write、huge-file write
   block-unit accounting、encryption/casefold、direct I/O 和 mmap coherence 仍是后续工作。
 - HTree SIPHASH root 可以完成格式分类，但 encryption/casefold name-key 语义尚未实现；需要名称
   哈希的 create/unlink/rename 等操作返回 `EOPNOTSUPP`。

@@ -9,7 +9,7 @@ use alloc::vec;
 use unittest::def_test;
 
 use crate::{
-    BlockCount, Ext4Error, Ext4SyncIntent, LogicalBlock, UnsupportedKind,
+    BlockCount, Ext4Error, Ext4SyncIntent, LogicalBlock,
     disk::features,
     file::RegularWriteMetadata,
     jbd2::{JournalCredits, JournalTransactions, TransactionId},
@@ -103,7 +103,7 @@ fn orphan_cleanup_finishes_committed_shrink_after_crash_point() {
     assert_eq!(filesystem.orphan_head(), Some(inode.number()));
     assert_eq!(inode.size(), new_size);
 
-    assert_eq!(filesystem.cleanup_legacy_orphans().unwrap(), 1);
+    assert_eq!(filesystem.cleanup_orphans().unwrap(), 1);
 
     let recovered = filesystem.internal_iget(inode.number()).unwrap();
     assert_eq!(recovered.size(), new_size);
@@ -123,7 +123,7 @@ fn orphan_cleanup_finishes_committed_shrink_after_crash_point() {
 }
 
 #[def_test]
-fn cleanup_legacy_orphans_rejects_orphan_file_pending_feature() {
+fn cleanup_orphans_rejects_orphan_file_pending_feature() {
     let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     set_allocator_feature_bits(
         &mut filesystem,
@@ -132,8 +132,8 @@ fn cleanup_legacy_orphans_rejects_orphan_file_pending_feature() {
     );
 
     assert_eq!(
-        filesystem.cleanup_legacy_orphans(),
-        Err(Ext4Error::Unsupported(UnsupportedKind::OrphanFile))
+        filesystem.cleanup_orphans(),
+        Err(Ext4Error::Corrupt(crate::CorruptKind::InvalidOrphanFile))
     );
 }
 
@@ -157,9 +157,12 @@ fn legacy_orphan_cleanup_preserving_recovery_evicts_zero_link_inode() {
         .unwrap();
     journal.finish_checkpoint_for_test(&commit).unwrap();
 
-    let recovery_inode = filesystem.orphan_iget_with_next(inode.number()).unwrap().0;
+    let recovery_inode = filesystem
+        .recovery_orphan(inode.number(), super::OrphanLocation::LegacyList)
+        .unwrap()
+        .unwrap();
     filesystem
-        .cleanup_unlinked_orphan_from_head(
+        .cleanup_unlinked_orphan(
             &recovery_inode,
             crate::journal::RecoveryFlagPolicy::PreserveDuringRecovery,
         )

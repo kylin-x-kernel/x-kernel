@@ -937,12 +937,12 @@ impl Ext4SbInfo {
         self.update_unlinked_inode_metadata(inode, zero_link_size, timestamp, handle)
     }
 
-    pub(crate) fn cleanup_unlinked_orphan_from_head(
+    pub(crate) fn cleanup_unlinked_orphan(
         &mut self,
         inode: &Ext4Inode,
         recovery_flag_policy: crate::journal::RecoveryFlagPolicy,
     ) -> Ext4Result<()> {
-        if self.orphan_head() != Some(inode.number()) || inode.links_count() != 0 {
+        if inode.orphan_location().is_none() || inode.links_count() != 0 {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
         }
         self.evict_unlinked_inode_with_policy(inode, inode.ctime(), recovery_flag_policy)
@@ -1284,13 +1284,10 @@ impl Ext4SbInfo {
         }
     }
 
-    fn ensure_unlinked_inode_eviction_supported(&self, inode: &Ext4Inode) -> Ext4Result<()> {
-        // Removing the last name must establish orphan ownership. Reject an
-        // unsupported format before unlink/rmdir/rename changes any directory.
-        // Removing one of several hard links needs no orphan entry.
-        if inode.kind() == InodeKind::Directory || inode.links_count() <= 1 {
-            self.ensure_legacy_orphan_list_supported()?;
-        }
+    pub(crate) fn ensure_unlinked_inode_eviction_supported(
+        &self,
+        inode: &Ext4Inode,
+    ) -> Ext4Result<()> {
         match inode.kind() {
             InodeKind::RegularFile
             | InodeKind::Directory
@@ -1300,6 +1297,13 @@ impl Ext4SbInfo {
             | InodeKind::Fifo
             | InodeKind::Socket => {}
         }
+        self.ensure_inode_data_truncation_supported(inode)
+    }
+
+    pub(crate) fn ensure_inode_data_truncation_supported(
+        &self,
+        inode: &Ext4Inode,
+    ) -> Ext4Result<()> {
         if self.unlinked_inode_data_blocks(inode)? != 0 && !inode.has_extents() {
             return Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode));
         }

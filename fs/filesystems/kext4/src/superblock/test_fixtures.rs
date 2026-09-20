@@ -89,6 +89,7 @@ pub(crate) fn journal_allocator_test_filesystem(
             used_directories_count,
             last_orphan: superblock.last_orphan(),
             needs_recovery: superblock.features().needs_recovery(),
+            has_orphan_present: superblock.features().has_orphan_present(),
             block_free_extent_caches: vec![None; groups.len()],
             groups,
         }),
@@ -101,6 +102,7 @@ pub(crate) fn journal_allocator_test_filesystem(
         device: filesystem_device,
         metadata_io,
         journal: None,
+        orphan_info: None,
         layout,
         system_zones: Vec::new(),
     };
@@ -137,6 +139,8 @@ pub(crate) fn install_test_journal(
     let compat = le_u32(superblock_bytes, 0x5c) | features::CompatFeatures::HAS_JOURNAL.bits();
     put_u32(superblock_bytes, 0x5c, compat);
     filesystem.superblock = Ext4DiskSuperblock::decode(superblock_bytes).unwrap();
+    lock(&filesystem.allocator).has_orphan_present =
+        filesystem.superblock.features().has_orphan_present();
     filesystem
         .device
         .write_contiguous_blocks(block, 1, &bytes)
@@ -452,7 +456,14 @@ pub(crate) fn set_allocator_feature_bits(
     let ro_compat = le_u32(superblock_bytes, 0x64) | read_only_compat_features.bits();
     put_u32(superblock_bytes, 0x5c, compat);
     put_u32(superblock_bytes, 0x64, ro_compat);
+    if features::ReadOnlyCompatFeatures::from_bits_retain(ro_compat)
+        .contains(features::ReadOnlyCompatFeatures::METADATA_CSUM)
+    {
+        update_allocator_superblock_checksum(superblock_bytes);
+    }
     filesystem.superblock = Ext4DiskSuperblock::decode(superblock_bytes).unwrap();
+    lock(&filesystem.allocator).has_orphan_present =
+        filesystem.superblock.features().has_orphan_present();
     filesystem
         .device
         .write_contiguous_blocks(block, 1, &bytes)
@@ -544,6 +555,7 @@ pub(crate) fn allocator_multigroup_test_filesystem(
             used_directories_count,
             last_orphan: superblock.last_orphan(),
             needs_recovery: superblock.features().needs_recovery(),
+            has_orphan_present: superblock.features().has_orphan_present(),
             block_free_extent_caches: vec![None; groups.len()],
             groups,
         }),
@@ -556,6 +568,7 @@ pub(crate) fn allocator_multigroup_test_filesystem(
         device: filesystem_device,
         metadata_io,
         journal: None,
+        orphan_info: None,
         layout,
         system_zones: Vec::new(),
     };
@@ -724,6 +737,7 @@ pub(crate) fn allocator_test_filesystem_with_options(
             used_directories_count,
             last_orphan: superblock.last_orphan(),
             needs_recovery: superblock.features().needs_recovery(),
+            has_orphan_present: superblock.features().has_orphan_present(),
             block_free_extent_caches: vec![None; groups.len()],
             groups,
         }),
@@ -736,6 +750,7 @@ pub(crate) fn allocator_test_filesystem_with_options(
         device: filesystem_device,
         metadata_io,
         journal: None,
+        orphan_info: None,
         layout,
         system_zones: Vec::new(),
     };
@@ -854,6 +869,8 @@ pub(crate) fn set_allocator_default_hash_version(filesystem: &mut Ext4SbInfo, ha
     let superblock_bytes = bytes.get_mut(offset..end).unwrap();
     superblock_bytes[0xfc] = hash_version;
     filesystem.superblock = Ext4DiskSuperblock::decode(superblock_bytes).unwrap();
+    lock(&filesystem.allocator).has_orphan_present =
+        filesystem.superblock.features().has_orphan_present();
     filesystem
         .device
         .write_contiguous_blocks(block, 1, &bytes)
@@ -1021,4 +1038,68 @@ pub(crate) fn install_credit_limited_journal(
         JournalSuperblock::decode(&bytes, TEST_BLOCK_SIZE as u32, 1024, [0; 16]).unwrap();
     install_test_journal(filesystem, superblock);
     crate::journal::tests::limit_transaction_credits(filesystem, credits);
+}
+
+pub(crate) fn orphan_test_filesystem() -> (Ext4SbInfo, Ext4Inode) {
+    let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+    set_allocator_feature_bits(
+        &mut filesystem,
+        features::CompatFeatures::ORPHAN_FILE,
+        features::ReadOnlyCompatFeatures::empty(),
+    );
+    (filesystem, inode)
+}
+
+pub(crate) fn checksummed_orphan_test_filesystem() -> (Ext4SbInfo, Ext4Inode) {
+    let (mut filesystem, _device) = allocator_test_filesystem_with_options(
+        AllocatorGroupSpec {
+            free_blocks: TEST_FREE_BLOCKS,
+            free_inodes: TEST_FREE_INODES,
+            used_directories: 0,
+            flags: 0,
+            block_bitmap: [0x3f, 0, 0, 0],
+            inode_bitmap: [0xff, 0x03, 0, 0],
+        },
+        true,
+        false,
+        false,
+    );
+    let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+    set_allocator_feature_bits(
+        &mut filesystem,
+        features::CompatFeatures::ORPHAN_FILE,
+        features::ReadOnlyCompatFeatures::empty(),
+    );
+    (filesystem, inode)
+}
+
+/// Reopen through the real orphan-file loader after creating its backing inode.
+pub(crate) fn recovery_orphan_file_test_filesystem() -> (Ext4SbInfo, Arc<TestDevice>) {
+    let (mut filesystem, device) = recovery_test_filesystem();
+    let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+    let mut bytes = vec![0; TEST_BLOCK_SIZE];
+    put_u32(&mut bytes, TEST_BLOCK_SIZE - 8, 0x0b10_ca04);
+    inode.set_size(TEST_BLOCK_SIZE as u64);
+    filesystem
+        .writeback_ordered_at(
+            &inode,
+            0,
+            &bytes,
+            TEST_BLOCK_SIZE as u64,
+            crate::Ext4Timestamp::new(127, 0),
+            crate::Ext4SyncIntent::FullMetadata,
+        )
+        .unwrap();
+    filesystem.sync_filesystem().unwrap();
+    drop(filesystem);
+    {
+        let mut image = lock(&device.bytes);
+        let sb = &mut image[1024..2048];
+        let compat = le_u32(sb, 0x5c) | features::CompatFeatures::ORPHAN_FILE.bits();
+        put_u32(sb, 0x5c, compat);
+        put_u32(sb, 0x280, inode.number().get());
+    }
+    let filesystem = Ext4SbInfo::mount(device.clone()).unwrap();
+    (filesystem, device)
 }

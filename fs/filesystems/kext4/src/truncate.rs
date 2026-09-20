@@ -12,11 +12,11 @@ use crate::{
 };
 
 const INODE_UPDATE_CREDITS: u32 = 1;
-const ORPHAN_HEAD_UPDATE_CREDITS: u32 = 1;
+const ORPHAN_METADATA_UPDATE_CREDITS: u32 = 1;
 
 impl JournalCredits {
     const fn for_orphan_size_update() -> Self {
-        Self::new(INODE_UPDATE_CREDITS.saturating_add(ORPHAN_HEAD_UPDATE_CREDITS))
+        Self::new(INODE_UPDATE_CREDITS.saturating_add(ORPHAN_METADATA_UPDATE_CREDITS))
     }
 
     fn for_preallocation_discard(filesystem: &Ext4SbInfo, inode: &Ext4Inode) -> Ext4Result<Self> {
@@ -36,7 +36,7 @@ impl JournalCredits {
         let extent_credits =
             filesystem.extent_truncate_metadata_credits(inode, LogicalBlock::new(new_blocks))?;
         let credits = extent_credits
-            .checked_add(ORPHAN_HEAD_UPDATE_CREDITS)
+            .checked_add(ORPHAN_METADATA_UPDATE_CREDITS)
             .and_then(|credits| credits.checked_add(INODE_UPDATE_CREDITS))
             .ok_or(Ext4Error::Overflow)?;
         Ok(Self::new(credits))
@@ -47,10 +47,11 @@ impl Ext4SbInfo {
     /// Prepares a regular-file disk-size change using Linux-style ordering.
     ///
     /// Grow zeroes any mapped old EOF tail before committing a larger
-    /// `i_disksize`. Shrink first links the inode on the legacy orphan list
-    /// and commits the smaller `i_disksize`; the caller must resize the
-    /// generic page cache and then call [`Self::finish_regular_inode_shrink`]
-    /// so the extents are truncated and the orphan entry is removed.
+    /// `i_disksize`. Shrink first tracks the inode in the orphan file or its
+    /// legacy fallback and commits the smaller `i_disksize`; the caller must
+    /// resize the generic page cache and then call
+    /// [`Self::finish_regular_inode_shrink`] so the extents are truncated and
+    /// the orphan entry is removed.
     pub fn prepare_regular_inode_truncate(
         &mut self,
         inode: &Ext4Inode,
@@ -132,12 +133,12 @@ impl Ext4SbInfo {
         self.complete_metadata_mutation(handle, result)
     }
 
-    pub(crate) fn cleanup_regular_file_orphan_from_head(
+    pub(crate) fn cleanup_regular_file_orphan(
         &mut self,
         inode: &Ext4Inode,
         recovery_flag_policy: crate::journal::RecoveryFlagPolicy,
     ) -> Ext4Result<()> {
-        if self.orphan_head() != Some(inode.number()) {
+        if inode.orphan_location().is_none() {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
         }
         self.ensure_regular_file_mutation_supported(inode)?;
@@ -153,8 +154,7 @@ impl Ext4SbInfo {
         let credits = JournalCredits::for_regular_truncate(self, inode, target_size)?;
         let journal = self.metadata_journal_for_mutation(credits, recovery_flag_policy)?;
         let mut handle = journal.begin(credits)?;
-        let result =
-            self.cleanup_orphaned_inode_from_head_metadata(inode, target_size, &mut handle);
+        let result = self.cleanup_orphaned_inode_metadata(inode, target_size, &mut handle);
         self.complete_metadata_mutation_with_policy(handle, result, recovery_flag_policy)
     }
 
@@ -228,7 +228,7 @@ impl Ext4SbInfo {
         self.remove_orphan(inode, handle)
     }
 
-    fn cleanup_orphaned_inode_from_head_metadata(
+    fn cleanup_orphaned_inode_metadata(
         &mut self,
         inode: &Ext4Inode,
         target_size: u64,
