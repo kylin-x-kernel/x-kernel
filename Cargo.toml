@@ -8,6 +8,7 @@ members = [
     "boot/*",
     "task/kworkerpool",
     "task/kworkqueue",
+    "task/ktimer-core",
     "tee/tee_crypto",
     "tee/xdice",
 ]
@@ -76,6 +77,7 @@ kworkerpool = { path = "task/kworkerpool" }
 kworkqueue = { path = "task/kworkqueue" }
 kwork = { path = "task/kwork" }
 ktask = { path = "task/ktask" }
+ktimer_core = { path = "task/ktimer-core", package = "ktimer-core" }
 ksched = { path = "task/ksched" }
 linked_list_r4l = "0.3"
 intrusive-collections = { version = "=0.10.2", default-features = false, features = ["alloc", "nightly"] }

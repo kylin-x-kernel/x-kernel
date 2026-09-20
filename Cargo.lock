@@ -3032,6 +3032,7 @@ dependencies = [
  "kspin 0.3.0-dev",
  "ktime",
  "ktime_types",
+ "ktimer-core",
  "lazyinit",
  "log",
  "memaddr",
@@ -3072,6 +3073,19 @@ dependencies = [
  "ktime_types",
  "linux-raw-sys",
  "posix-types",
+ "unittest",
+]
+
+[[package]]
+name = "ktimer-core"
+version = "0.3.0-dev"
+dependencies = [
+ "intrusive-collections",
+ "karch",
+ "kcpu_id_map",
+ "kerrno",
+ "kspin 0.3.0-dev",
+ "ktime_types",
  "unittest",
 ]
 
@@ -5615,6 +5629,7 @@ dependencies = [
 name = "watchdog"
 version = "0.3.0-dev"
 dependencies = [
+ "karch",
  "kbuild_config",
  "kcpu_id_map",
  "khal",

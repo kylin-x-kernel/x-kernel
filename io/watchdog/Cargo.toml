@@ -13,6 +13,7 @@ default = []
 nmi = ["khal/nmi"]
 
 [dependencies]
+karch.workspace = true
 khal.workspace = true
 ktime_types.workspace = true
 ktask = { workspace = true, features = ["watchdog"] }

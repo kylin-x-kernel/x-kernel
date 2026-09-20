@@ -96,6 +96,26 @@ update_current() → pending      blocked_resched / unblock_task / resched
 | `timers` | 显式周期回调（与调度 timer 解耦） |
 | `snapshot/task_registry` | 可选诊断：snapshot/watchdog/NMI 共享的任务遍历视图；mutex wait 检查在读取每个任务快照后采样当前 tick，并丢弃开始时间晚于当前样本的并发更新 |
 
+### Prepared Timer Core Dependency
+
+`ktask` depends on `ktimer_core`, which owns prepared timer storage, deadline
+ordering, owner routing, dispatch and cancellation semantics. At this stage,
+the dependency is consumed by kernel unit tests, not by the production timer
+service: `timers.rs`, `future/time.rs` and hardware timer programming still use
+the existing implementation.
+
+Under `cfg(unittest)`, `lib.rs` links the core's registered tests. With `smp`,
+`tests_timer_routing.rs` also calls `ktimer_core::test_support` scenarios.
+The core owns the scenario state and timer assertions; `ktask` provides two
+concurrent tasks pinned to CPUs 0 and 1, joins them, and supplies `yield_now`.
+The dependency direction is `ktask -> ktimer_core`; the core does not depend on
+the task scheduler. These tests exercise core operations through scheduled
+workers, not through the hardware timer interrupt path.
+
+The `preempt` and `smp` features forward to the corresponding `ktimer_core`
+features to keep its lock configuration consistent with `ktask`. Feature
+forwarding does not initialize timer service state or establish CPU readiness.
+
 ## 创建与发布模型
 
 `ktask` 现在显式区分两段用户可见生命周期：

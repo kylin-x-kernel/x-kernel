@@ -30,6 +30,13 @@ extern crate log;
 
 extern crate alloc;
 
+// Link the standalone core's test descriptors without changing timer service.
+#[cfg(unittest)]
+extern crate ktimer_core;
+
+#[cfg(all(unittest, feature = "smp"))]
+mod tests_timer_routing;
+
 #[macro_use]
 mod run_queue;
 mod api;

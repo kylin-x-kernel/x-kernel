@@ -1,5 +1,56 @@
 # ktask — 安全与可靠性分析
 
+## Analysis Scope
+
+This document covers the security boundaries of the entire `task/ktask` crate:
+the `lib.rs` integration and `api.rs` entry points; task lifetime and context
+in `task.rs`; scheduling in `run_queue.rs`; blocking in `future/` and
+`wait_queue.rs`; timers in `timers.rs`; IRQ wait and daemon integration in
+`irq_wait.rs` and `softirqd.rs`; and diagnostics in `tracing_hooks.rs`,
+`task_registry.rs` and `snapshot/` when enabled. No production module is
+excluded from this scope. The unsafe inventory below highlights critical
+boundaries rather than claiming to enumerate every unsafe expression or prove
+all configurations correct.
+
+Test-only integration in `tests.rs` and `tests_timer_routing.rs` is covered as
+validation infrastructure, not as a production service. The prepared-timer
+routing driver must run both workers concurrently on the requested CPUs and
+join them before returning. `ktimer_core` owns timer scenario storage and
+cleanup checks; `ktask` owns task placement and completion. These tests do not
+establish hardware timer interrupt or IPI delivery correctness.
+
+Dependency internals (including `karch`, `kspin`, `percpu`, `ksched` and
+`ktimer_core`) are outside this crate's implementation analysis because their
+owners define and enforce those contracts. Their contracts at the `ktask`
+boundary remain in scope. See the core's [security analysis](../../ktimer-core/docs/security.md)
+for intrusive membership, callback lifetime and timer cancellation invariants.
+Production timers have not been migrated to that core in this change.
+
+## External Input Entry Points
+
+The public APIs defined by `ktask` do not accept raw-pointer or FFI parameters,
+dereference user buffers, or parse device, network, file, firmware or bootloader
+payloads. This does not mean the crate has no external inputs: trusted kernel
+adapters pass user-influenced values and hardware-driven events across the
+following boundaries. User-memory access and permission checks belong to those
+adapters, not to the scheduler.
+
+| Entry points | Input source and responsibility |
+| --- | --- |
+| `spawn_raw`, `spawn_with_name`, `spawn`, `prepare_task`, `activate_task`, `spawn_task`; `TaskInner::new_user`, `new_kthread`, `new_pidless_kthread`, `set_name` | Kernel task/process code supplies closures, names, stack sizes, task identities and runtime objects. Names may originate from users but arrive as Rust strings; task creation is not a user-buffer parser. Runtime and entry implementations remain trusted kernel code. |
+| `set_prio`, `set_task_prio`, `set_current_affinity`, `set_task_affinity`, `TaskInner::set_cpumask` | Scheduler/process adapters supply priorities and typed CPU masks, potentially derived from syscalls. Adapters enforce permissions; callers must respect the distinction between initial placement and migration of an active task. |
+| `sleep`, `sleep_until`, `interruptible_sleep_until`, `wait_for_poll_event_until`; `WaitQueue::wait_timeout`, `wait_timeout_until`; `future::register_timer`; `register_timer_callback` | Wait and timer clients supply durations, deadlines, wakers, predicates or callbacks. User timeout decoding belongs upstream. Callers must obey sleepability and callback-context contracts; the new core is not yet the production implementation of these APIs. |
+| `future::poll_io`, `future::register_irq_waker`; `WaitQueue` notification methods; `wake_task`, `interrupt_task`, `TaskInner::interrupt` | File, network, device and signal adapters deliver readiness or wakeup events. `poll_io` invokes a caller-supplied operation and forwards its typed result without interpreting payloads; IRQ waker registration delegates to `kirq`. Payload validation remains with the operation/provider. |
+| `on_timer_fire`, `register_timer_irq_note`, `register_sched_trace_hooks` | Runtime interrupt glue and kernel instrumentation provide timer events and function callbacks. IRQ routing is external; callbacks must satisfy their documented execution-context constraints. |
+| `set_current_execution_context`, `clear_current_execution_context`; `TaskInner::set_waiting_lock`, `push_held_lock`, `pop_held_lock`; `snapshot::trigger`, `dump_cpu_tasks`, `nmi_dump_all` | Kernel execution owners and diagnostic callers supply opaque identity words, lock-address identities, reason strings and CPU selections. These are not user-pointer access capabilities. Diagnostic output can expose task metadata; access control belongs to the invoking diagnostic interface. |
+
+The private `extern "C" fn task_entry()` in `src/task.rs` is a parameterless
+architecture context-switch trampoline, not a public FFI input service. Raw
+task/context pointers and test `RawWaker` callbacks are internal implementation
+boundaries covered by the lifetime invariants below. MMIO/PIO, DMA and hardware
+timer register access belong to HAL/drivers rather than a public payload API in
+this crate. The prepared-timer test integration adds no new external-input API.
+
 ## 概述
 
 固定调度 IPI 不携带任务指针，多个请求允许合并；发送必须在任务状态与运行队列

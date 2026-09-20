@@ -10,6 +10,8 @@
 #![doc = include_str!("../README.md")]
 #![no_std]
 
+pub mod cache;
+
 /// `kiface` for cross-PE pipeline synchronisation.
 ///
 /// SMP builds use the provider implemented by `kipi`; uniprocessor builds use

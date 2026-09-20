@@ -117,3 +117,11 @@ for users.
 - [ ] Do all rendezvous state transitions use the correct atomic ordering?
 - [ ] Does `nmi_begin()` protect every snapshot path against reentry?
 - [ ] Are NMI-unavailable and arming-failure paths explicitly logged and degraded?
+
+## Cache Alignment Boundary
+
+`LockupDetection` embeds its private atomic state in
+`karch::cache::CacheAligned`. The wrapper owns the state and changes layout only;
+it performs no unsafe access or synchronization. Existing atomic orderings,
+per-CPU access preconditions and NMI lifetime assumptions remain unchanged.
+The alignment policy is not a DMA or cache-maintenance contract.

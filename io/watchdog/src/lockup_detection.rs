@@ -5,6 +5,7 @@
 //! Soft/hard lockup detection state and helpers.
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use karch::cache::CacheAligned;
 use ktime_types::{MonotonicInstant, TimeSpan};
 
 use crate::watchdog_task::WatchdogTask;
@@ -22,8 +23,13 @@ pub const DEFAULT_HARDLOCKUP_THRESHOLD: TimeSpan = TimeSpan::from_secs(10);
 pub const DEFAULT_WATCHDOG_SAMPLE_PERIOD: TimeSpan = TimeSpan::from_secs(4);
 
 /// Per-CPU lockup detection state.
-#[repr(C, align(64))]
+#[repr(C)]
 pub struct LockupDetection {
+    state: CacheAligned<LockupState>,
+}
+
+#[repr(C)]
+struct LockupState {
     // === Softlockup Detection ===
     /// Timestamp when watchdog thread last ran (nanoseconds).
     /// Updated by watchdog thread, checked by timer interrupt.
@@ -49,10 +55,12 @@ impl LockupDetection {
     /// Create a new LockupDetection instance.
     pub const fn new() -> Self {
         Self {
-            soft_timestamp: AtomicU64::new(0),
-            soft_timestamp_initialized: AtomicBool::new(false),
-            hard_timestamp: AtomicU64::new(0),
-            hard_timestamp_initialized: AtomicBool::new(false),
+            state: CacheAligned::new(LockupState {
+                soft_timestamp: AtomicU64::new(0),
+                soft_timestamp_initialized: AtomicBool::new(false),
+                hard_timestamp: AtomicU64::new(0),
+                hard_timestamp_initialized: AtomicBool::new(false),
+            }),
         }
     }
 
@@ -65,20 +73,26 @@ impl LockupDetection {
     /// The watchdog thread should call this every time it gets scheduled.
     #[inline]
     pub fn touch_softlockup(&self, timestamp: MonotonicInstant) {
-        self.soft_timestamp
+        self.state
+            .soft_timestamp
             .store(timestamp.as_nanos_u64_saturating(), Ordering::Relaxed);
-        self.soft_timestamp_initialized
+        self.state
+            .soft_timestamp_initialized
             .store(true, Ordering::Release);
     }
 
     /// Get the soft timestamp.
     #[inline]
     pub fn soft_timestamp(&self) -> Option<MonotonicInstant> {
-        if !self.soft_timestamp_initialized.load(Ordering::Acquire) {
+        if !self
+            .state
+            .soft_timestamp_initialized
+            .load(Ordering::Acquire)
+        {
             return None;
         }
         Some(MonotonicInstant::from_span_since_origin(
-            TimeSpan::from_nanos(self.soft_timestamp.load(Ordering::Relaxed)),
+            TimeSpan::from_nanos(self.state.soft_timestamp.load(Ordering::Relaxed)),
         ))
     }
 
@@ -101,9 +115,11 @@ impl LockupDetection {
     /// Record a watchdog sample from the local timer IRQ.
     #[inline]
     pub fn timer_tick(&self, now: MonotonicInstant) {
-        self.hard_timestamp
+        self.state
+            .hard_timestamp
             .store(now.as_nanos_u64_saturating(), Ordering::Relaxed);
-        self.hard_timestamp_initialized
+        self.state
+            .hard_timestamp_initialized
             .store(true, Ordering::Release);
     }
 
@@ -115,11 +131,15 @@ impl LockupDetection {
     /// 4s samples on a live CPU.
     #[inline]
     pub fn check_hardlockup(&self, now: MonotonicInstant, threshold: TimeSpan) -> bool {
-        if !self.hard_timestamp_initialized.load(Ordering::Acquire) {
+        if !self
+            .state
+            .hard_timestamp_initialized
+            .load(Ordering::Acquire)
+        {
             return false;
         }
         let last = MonotonicInstant::from_span_since_origin(TimeSpan::from_nanos(
-            self.hard_timestamp.load(Ordering::Relaxed),
+            self.state.hard_timestamp.load(Ordering::Relaxed),
         ));
         now.saturating_duration_since(last) > threshold
     }
@@ -195,12 +215,24 @@ impl WatchdogTask for LockupDetection {
 
 #[cfg(unittest)]
 mod tests {
-    use unittest::{assert, def_test};
+    use unittest::{assert, assert_eq, def_test};
 
     use super::*;
 
     fn instant_secs(secs: u64) -> MonotonicInstant {
         MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(secs))
+    }
+
+    #[def_test]
+    fn lockup_state_uses_shared_cache_alignment() {
+        let states = [LockupDetection::new(), LockupDetection::new()];
+        let first = core::ptr::from_ref(&states[0]).addr();
+        let second = core::ptr::from_ref(&states[1]).addr();
+        let alignment = karch::cache::SMP_CACHE_BYTES;
+        assert_eq!(first % alignment, 0);
+        assert_eq!(second % alignment, 0);
+        assert!(size_of::<LockupDetection>().is_multiple_of(alignment));
+        assert!((first + size_of::<LockupDetection>() - 1) / alignment < second / alignment);
     }
 
     #[def_test]

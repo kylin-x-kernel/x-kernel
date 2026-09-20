@@ -1,0 +1,32 @@
+[package]
+name = "timer-core-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+default = ["smp"]
+smp = []
+stats = []
+
+[dependencies]
+intrusive-collections = { version = "=0.10.2", default-features = false, features = ["alloc", "nightly"] }
+kerrno = { path = "../../../../util/kerrno" }
+ktime_types = { path = "../../../../util/ktime_types" }
+
+[[bin]]
+name = "timer-core-bench"
+path = "main.rs"
+
+[[test]]
+name = "ownership"
+path = "ownership.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(unittest)"] }

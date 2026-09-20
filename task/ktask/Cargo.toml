@@ -16,8 +16,8 @@ snapshot = ["dep:backtrace"]
 ipi = ["dep:kipi", "kipi/reschedule"]
 watchdog = ["snapshot"]
 tls = ["khal/tls"]
-preempt = ["percpu/preempt", "kspin/preempt"]
-smp = ["kspin/smp", "ipi"]
+preempt = ["percpu/preempt", "kspin/preempt", "ktimer_core/preempt"]
+smp = ["kspin/smp", "ipi", "ktimer_core/smp"]
 
 sched_fifo = []
 sched_rr = ["preempt"]
@@ -31,6 +31,7 @@ test = ["percpu/sp-naive"]
 
 [dependencies]
 kerrno.workspace = true
+ktimer_core.workspace = true
 kidentity.workspace = true
 khal.workspace = true
 ktime_types.workspace = true

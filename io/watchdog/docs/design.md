@@ -109,8 +109,12 @@ must use it carefully.
 
 ## Concurrency
 
-- `LockupDetection` is per-CPU state with atomic fields (`AtomicU64`, `AtomicU32`,
-  and `AtomicBool`), allowing concurrent access from NMIs and timer interrupts.
+- `LockupDetection` holds its private `LockupState` in
+  `karch::cache::CacheAligned`, replacing its local 64-byte alignment literal.
+  The shared policy isolates independently updated state; `AtomicU64` and
+  `AtomicBool` fields, not the wrapper, provide synchronization between NMIs,
+  timer interrupts and the watchdog task. The public type and methods remain
+  unchanged, and no allocation or lock is added.
 - `WATCHDOG_TASK_QUEUE` is a per-CPU `Vec`.
   Registration occurs only during per-CPU initialization, when migration is impossible;
   NMI handlers only traverse it for reading.

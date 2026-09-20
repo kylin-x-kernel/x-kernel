@@ -11,6 +11,10 @@ This crate provides a uniform API across all supported architectures (AArch64, x
   both reads and writes instead.
 - **Cache maintenance** (AArch64): `flush_icache_all()`,
   `clean_dcache_line_to_poc(vaddr)`, `clean_dcache_range_to_poc(start, size)`
+- **Cache isolation layout**: `cache::CacheAligned<T>` and
+  `cache::SMP_CACHE_BYTES` expose the architecture-owned compile-time layout
+  policy, independent of cache-maintenance instruction strides. See
+  [the architecture policy table](docs/design.md).
 - **DMA ordering**: `dma_read_barrier()` — orders prior CPU stores before a
   device reads the same memory via DMA (`dbar 0` on LoongArch64, no-op on
   cache-coherent architectures)
