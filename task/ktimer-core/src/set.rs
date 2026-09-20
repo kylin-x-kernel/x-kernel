@@ -122,25 +122,27 @@ impl<const N: usize> TimerSet<N> {
     ) -> KResult<bool> {
         let timers = self.cpus.get(cpu.as_usize()).ok_or(KError::InvalidInput)?;
         let entry_ns = now_ns();
-        if !timers.lock().can_dispatch(entry_ns) {
+        let mut locked = timers.lock();
+        if !locked.can_dispatch(entry_ns) {
             return Ok(false);
         }
         let mut round_ns = entry_ns;
         let mut any_due = false;
         for round in 0..MAX_DISPATCH_ROUNDS {
             // SAFETY: exclusive CPU service and live borrowed storage are
-            // supplied by the caller. Cleanup ends before the next delivery.
-            any_due |= unsafe { super::dispatch::dispatch_round(timers, round_ns) };
+            // supplied by the caller. The guard belongs to this CPU's collection;
+            // dispatch releases it before callbacks and returns without a lock.
+            any_due |= unsafe { super::dispatch::dispatch_round(timers, round_ns, locked) };
             round_ns = now_ns();
-            let mut timers = timers.lock();
-            if !timers.can_dispatch(round_ns) {
+            locked = timers.lock();
+            if !locked.can_dispatch(round_ns) {
                 break;
             }
             if round + 1 == MAX_DISPATCH_ROUNDS {
                 // Repeated near-future rearm must not trap this IRQ or turn every
                 // scheduler IRQ into another unbounded software-timer pass.
                 let delay_ns = (round_ns - entry_ns).clamp(1, MAX_DISPATCH_BACKOFF_NS);
-                timers.defer_dispatch_until(round_ns.saturating_add(delay_ns));
+                locked.defer_dispatch_until(round_ns.saturating_add(delay_ns));
             }
         }
         Ok(any_due)
@@ -679,7 +681,13 @@ pub(crate) mod tests {
             let before_dispatch = calls.load(Ordering::Relaxed);
             // SAFETY: explicitly drive this node's owner; external storage is
             // live. Time reached the deadline after acceptance, before service.
-            let delivered = unsafe { dispatch::dispatch_round(&timer_set.cpus[selected], 10) };
+            let delivered = unsafe {
+                dispatch::dispatch_round(
+                    &timer_set.cpus[selected],
+                    10,
+                    timer_set.cpus[selected].lock(),
+                )
+            };
             assert_eq!(result, Ok(Some((selected.into(), true))));
             assert_eq!(clock_calls, 1);
             #[cfg(feature = "smp")]
@@ -736,7 +744,9 @@ pub(crate) mod tests {
             // arm must not acquire the wait-specific rejection behavior.
             let result = unsafe { timer_set.arm_on(&node, 0.into(), setting(deadline)) };
             // SAFETY: serve the matching test CPU with live callback-free storage.
-            let delivered = unsafe { crate::dispatch::dispatch_round(&timer_set.cpus[0], 10) };
+            let delivered = unsafe {
+                crate::dispatch::dispatch_round(&timer_set.cpus[0], 10, timer_set.cpus[0].lock())
+            };
             assert_eq!(result, Ok((0.into(), true)));
             assert!(delivered);
             assert!(!node.is_linked());
@@ -1097,7 +1107,13 @@ pub(crate) mod tests {
                 if cpu == 0 {
                     // SAFETY: driver pins this worker to owner CPU 0, with
                     // external node/handler ownership spanning the entire call.
-                    if !unsafe { dispatch_round(&scenario.timer_set.cpus[0], 10) } {
+                    if !unsafe {
+                        dispatch_round(
+                            &scenario.timer_set.cpus[0],
+                            10,
+                            scenario.timer_set.cpus[0].lock(),
+                        )
+                    } {
                         scenario.failed.store(true, Ordering::Relaxed);
                     }
                 } else {

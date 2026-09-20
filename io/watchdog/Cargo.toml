@@ -16,6 +16,7 @@ nmi = ["khal/nmi"]
 karch.workspace = true
 khal.workspace = true
 ktime_types.workspace = true
+kspin.workspace = true
 ktask = { workspace = true, features = ["watchdog"] }
 kwork = { workspace = true }
 log.workspace = true

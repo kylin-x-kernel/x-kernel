@@ -21,7 +21,13 @@ It accepts no user input.
 
 ### `init.rs`
 
-- The timer callback in `init_softlockup_detection` reads the previous report
+- `init_softlockup_detection` writes the per-CPU
+  `SOFTLOCKUP_TIMER: Option<ktask::Timer<SoftlockupTimer>>` under
+  `NoPreemptIrqSave`. Only initialization accesses this owner slot, once per
+  CPU; callbacks and NMIs never borrow it. The slot retains storage forever.
+  Its unsafe `Timer::start` call follows local scheduler/IRQ setup, with an
+  IRQ-compatible handler. Callback-scoped rearm retains the running CPU owner.
+- `SoftlockupTimer::on_expiration` reads the previous report
   timestamp through `LAST_SOFTLOCKUP_REPORT.current_ref_raw()` and updates it through
   `current_ref_mut_raw()`.
   Invariant: The callback runs with IRQs disabled and cannot migrate, so per-CPU raw
@@ -71,6 +77,8 @@ It accepts no user input.
 | T-03 | A CPU can never enter NMI context | High (initiating CPU spins forever) | The CPU's interrupt/NMI handling has stopped | The strong rendezvous intentionally has no timeout because the system is already unusable; documented in the design. |
 | T-04 | Snapshot reentry | Medium (snapshot corruption/deadlock) | NMI interrupts an existing snapshot operation | Skip the dump if `nmi_begin()` fails; `kprint_atomic!` bypasses normal serial locks for best-effort output. |
 | T-05 | False soft-lockup reports flood the console | Low (log storm) | The watchdog task is starved while the timer still runs | Limit reports to one per threshold interval. |
+| T-06 | Sampling accesses the wrong CPU or expired storage | High | Owner migration, duplicate initialization or premature release | Retain one owner in each per-CPU slot under an IRQ/preemption guard, reject duplicate initialization, and rearm only through callback-scoped control on the running CPU. No hotplug or runtime teardown is supported. |
+| T-07 | Late diagnostics trigger an IRQ catch-up loop | High | Reporting takes longer than the sample interval | Rearm once at completion plus the interval. Deadline range failure logs and stops sampling; loss of soft-lockup sampling is the residual risk. |
 
 ## Failure Mode and Effects Analysis (FMEA)
 

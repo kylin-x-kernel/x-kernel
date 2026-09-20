@@ -130,42 +130,78 @@ fn init_nmi_watchdog() {
     }
 }
 
-/// Initialize soft lockup detection.
-///
-/// A per-CPU watchdog task periodically updates a timestamp, and timer
-/// callbacks check whether the timestamp is stale.
-pub fn init_softlockup_detection() {
-    // Explicit sample period — Linux softlockup_thresh/5 (4s), independent of
-    // the dynamic schedule timer.
-    ktask::register_timer_callback(
-        core::time::Duration::from_nanos(
-            crate::lockup_detection::DEFAULT_WATCHDOG_SAMPLE_PERIOD.as_nanos_u64_saturating(),
-        ),
-        |_| {
-            let now = khal::time::monotonic_time();
-            crate::timer_tick(now);
+struct SoftlockupTimer;
 
-            if crate::check_softlockup(now) {
-                // SAFETY: timer callbacks run with interrupts disabled and cannot
-                // migrate while accessing the current CPU's report timestamp.
-                let last = unsafe { *LAST_SOFTLOCKUP_REPORT.current_ref_raw() };
-                if last.is_none_or(|last| {
-                    now.saturating_duration_since(last)
-                        > crate::lockup_detection::DEFAULT_SOFTLOCKUP_THRESHOLD
-                }) {
-                    log::error!(
-                        "[watchdog] softlockup detected on cpu {}",
-                        this_cpu_id().as_usize()
-                    );
-                    ktask::dump_sched_stats();
-                    // SAFETY: the same non-migrating timer callback exclusively
-                    // updates this CPU's report timestamp.
-                    unsafe { *LAST_SOFTLOCKUP_REPORT.current_ref_mut_raw() = Some(now) };
-                    ktask::snapshot::dump_cpu_tasks(this_cpu_id());
-                }
+#[percpu::def_percpu]
+static SOFTLOCKUP_TIMER: Option<ktask::Timer<SoftlockupTimer>> = None;
+
+#[cfg(unittest)]
+static SAMPLE_COUNTS: [core::sync::atomic::AtomicUsize; kbuild_config::NR_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; kbuild_config::NR_CPUS];
+
+impl ktask::TimerHandler for SoftlockupTimer {
+    fn on_expiration(&self, timer: ktask::TimerControl<'_>, _: ktask::Expiration) {
+        let now = khal::time::monotonic_time();
+        crate::timer_tick(now);
+
+        if crate::check_softlockup(now) {
+            // SAFETY: timer callbacks run with interrupts disabled and cannot
+            // migrate while accessing the current CPU's report timestamp.
+            let last = unsafe { *LAST_SOFTLOCKUP_REPORT.current_ref_raw() };
+            if last.is_none_or(|last| {
+                now.saturating_duration_since(last)
+                    > crate::lockup_detection::DEFAULT_SOFTLOCKUP_THRESHOLD
+            }) {
+                log::error!(
+                    "[watchdog] softlockup detected on cpu {}",
+                    this_cpu_id().as_usize()
+                );
+                ktask::dump_sched_stats();
+                // SAFETY: the same non-migrating timer callback exclusively
+                // updates this CPU's report timestamp.
+                unsafe { *LAST_SOFTLOCKUP_REPORT.current_ref_mut_raw() = Some(now) };
+                ktask::snapshot::dump_cpu_tasks(this_cpu_id());
             }
-        },
-    );
+        }
+        // Start a full interval after completion even when diagnostics ran late.
+        if let Err(error) = timer.rearm(
+            khal::time::monotonic_time() + crate::lockup_detection::DEFAULT_WATCHDOG_SAMPLE_PERIOD,
+        ) {
+            log::error!("[watchdog] softlockup sampling stopped: {error:?}");
+        }
+        #[cfg(unittest)]
+        SAMPLE_COUNTS[this_cpu_id().as_usize()].fetch_add(1, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Initialize soft lockup detection once on the current CPU after scheduler setup.
+///
+/// A per-CPU watchdog task periodically updates a timestamp, and a retained
+/// timer checks whether the timestamp is stale. Its callback rearms on that CPU.
+///
+/// # Panics
+/// Panics if this CPU's timer was already initialized or its first deadline
+/// exceeds the timer core's nanosecond range.
+pub fn init_softlockup_detection() {
+    let timer = ktask::Timer::new(SoftlockupTimer);
+    {
+        let _guard = kspin::NoPreemptIrqSave::new();
+        // SAFETY: the guard pins and masks this CPU. Only initialization writes
+        // the owner slot; neither the callback nor the NMI handler accesses it.
+        let slot = unsafe { SOFTLOCKUP_TIMER.current_ref_mut_raw() };
+        assert!(slot.is_none(), "softlockup timer already initialized");
+        let timer = slot.insert(timer);
+        // SAFETY: the local scheduler/IRQ service is initialized. The per-CPU
+        // slot retains storage forever; the handler preserves IRQ context and
+        // only performs the existing IRQ-safe local watchdog check/report.
+        unsafe {
+            timer.start(
+                khal::time::monotonic_time()
+                    + crate::lockup_detection::DEFAULT_WATCHDOG_SAMPLE_PERIOD,
+            )
+        }
+        .expect("watchdog sampling deadline must fit the timer core");
+    }
 
     let cpu_id = this_cpu_id();
     crate::touch_softlockup(khal::time::monotonic_time());
@@ -223,4 +259,37 @@ pub fn init_primary() {
 /// Initialize watchdogs on a secondary CPU.
 pub fn init_secondary() {
     init_common();
+}
+
+#[cfg(unittest)]
+mod timer_irq_tests {
+    //! Runtime integration probes, not timing benchmarks. Boot-created owners
+    //! are intentionally permanent; this test only observes their IRQ progress.
+    //! The time bound detects a missing rearm without requiring precise latency.
+
+    use core::sync::atomic::Ordering;
+
+    use unittest::{assert, def_test};
+
+    use super::*;
+
+    #[def_test(serial)]
+    fn softlockup_sampling_repeats_on_every_cpu() {
+        let before: alloc::vec::Vec<_> = SAMPLE_COUNTS[..kcpu_id_map::nr_cpus()]
+            .iter()
+            .map(|count| count.load(Ordering::Acquire))
+            .collect();
+        let limit = khal::time::monotonic_time() + TimeSpan::from_secs(15);
+        loop {
+            if before
+                .iter()
+                .enumerate()
+                .all(|(cpu, before)| SAMPLE_COUNTS[cpu].load(Ordering::Acquire) >= before + 2)
+            {
+                break;
+            }
+            assert!(khal::time::monotonic_time() < limit);
+            ktask::sleep(TimeSpan::from_millis(100));
+        }
+    }
 }

@@ -105,6 +105,8 @@ through its Arc, so transfer/sharing additionally requires `H: Send + Sync`.
 
 Dispatch on a CPU must be unique and nonrecursive, with production IRQs disabled
 and migration prevented. Handler and callback-local cleanup run outside timer locks.
+The initial guard passed to `dispatch_round` must belong to its supplied CPU lock;
+it is consumed before delivery. `dispatch_due` obtains both from the same CPU slot.
 The dispatch clock also runs outside locks; the future-only start clock runs once
 under the final lock(s) and must not take timer locks or call business code.
 

@@ -5640,6 +5640,7 @@ dependencies = [
  "kbuild_config",
  "kcpu_id_map",
  "khal",
+ "kspin 0.3.0-dev",
  "ktask",
  "ktime_types",
  "kwork",

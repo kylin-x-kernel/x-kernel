@@ -102,10 +102,19 @@ must use it carefully.
 ### Soft-Lockup Detection
 
 - The watchdog task pinned to each CPU calls `touch_softlockup` every 4 seconds.
-- On every tick, the timer callback calls `timer_tick()` and checks
+- Each CPU retains a `ktask::Timer<SoftlockupTimer>` in `SOFTLOCKUP_TIMER`,
+  allocated once during local initialization. The first sample is 4 seconds
+  later; the callback explicitly rearms on its owner CPU for completion time
+  plus 4 seconds. It does not chase missed samples or allocate timer storage.
+- On every sample, the timer callback calls `timer_tick()` and checks
   `now - soft_timestamp > 20s`.
   When the threshold is exceeded, it logs the failure and calls `dump_sched_stats`
   and `dump_cpu_tasks`, with reports rate-limited by the threshold interval.
+- The separate `register_timer_irq_note` hook still counts every timer IRQ for
+  hard-lockup detection. Neither this migration nor delayed sampling changes
+  NMI registration or the hard-lockup policy.
+- Reinitializing a CPU's sampling owner panics. An out-of-range initial deadline
+  also panics; an out-of-range callback rearm logs and stops sampling instead.
 
 ## Concurrency
 
@@ -141,4 +150,6 @@ must use it carefully.
 ## Drop and Resource Release
 
 Per-CPU state lives as long as the kernel and is not released at runtime.
+This includes the retained timer owners. Their handlers never access the
+owner slots and cannot drop or synchronously cancel their own delivery.
 `reset()` is used only when the rendezvous needs to be restarted.

@@ -5,7 +5,7 @@
 //! Borrowed dispatch: callbacks run outside the timer lock; storage stays external.
 
 use intrusive_collections::UnsafeRef;
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, SpinNoIrqGuard};
 
 use super::cpu::CpuTimers;
 
@@ -14,6 +14,7 @@ use super::cpu::CpuTimers;
 /// Callback-local resources retire before clearing running identity; the
 /// prepared handler and its captures remain externally owned for future calls.
 /// No callback is called while holding the timer lock.
+/// The initial guard is consumed so a preceding due check need not relock.
 ///
 /// # Safety
 /// The caller services the correct CPU and keeps every participating node fixed
@@ -23,11 +24,14 @@ use super::cpu::CpuTimers;
 /// The bound handler must suit the calling context, must not
 /// unwind, and must not retain node references beyond the call.
 /// Each node's with_handler storage contract must remain valid through dispatch.
-pub(super) unsafe fn dispatch_round(timers: &SpinNoIrq<CpuTimers>, due_at_ns: u64) -> bool {
-    let mut expired = {
-        let mut timers = timers.lock();
-        timers.take_expired(due_at_ns)
-    };
+/// `locked` must protect `timers`, not another CPU's collection.
+pub(super) unsafe fn dispatch_round(
+    timers: &SpinNoIrq<CpuTimers>,
+    due_at_ns: u64,
+    mut locked: SpinNoIrqGuard<'_, CpuTimers>,
+) -> bool {
+    let mut expired = locked.take_expired(due_at_ns);
+    drop(locked);
     let any_due = expired.is_some();
     while let Some((node, expiration)) = expired {
         // SAFETY: take_expired published running and the lock was released.
@@ -80,11 +84,11 @@ mod tests {
         // SAFETY: stable node, exclusively accessed through this CPU lock.
         unsafe { timers.lock().arm(&node, setting(10)) };
         // SAFETY: sole modeled dispatcher with retained node and callback storage.
-        assert!(unsafe { dispatch_round(&timers, 10) });
+        assert!(unsafe { dispatch_round(&timers, 10, timers.lock()) });
         assert_eq!(observed.load(Ordering::Relaxed), 10);
         assert_eq!(timers.lock().earliest_deadline_ns(), Some(20));
         // SAFETY: unchanged storage and serialized CPU service.
-        assert!(unsafe { dispatch_round(&timers, 20) });
+        assert!(unsafe { dispatch_round(&timers, 20, timers.lock()) });
         assert_eq!(observed.load(Ordering::Relaxed), 20);
         assert!(!node.is_linked());
         assert!(!timers.lock().is_running(&node));
@@ -109,10 +113,10 @@ mod tests {
         // SAFETY: fixed node, one collection, accesses under the owner lock.
         unsafe { timers.lock().arm(&node, setting(10)) };
         // SAFETY: callback cleanup only takes this unlocked owner lock.
-        assert!(unsafe { dispatch_round(&timers, 10) });
+        assert!(unsafe { dispatch_round(&timers, 10, timers.lock()) });
         assert_eq!(timers.lock().earliest_deadline_ns(), Some(20));
         // SAFETY: retained storage, sequential second delivery with no rearm.
-        assert!(unsafe { dispatch_round(&timers, 20) });
+        assert!(unsafe { dispatch_round(&timers, 20, timers.lock()) });
         assert!(!node.is_linked());
     }
 
@@ -134,11 +138,11 @@ mod tests {
         // SAFETY: stable node exclusively accessed under this CPU's lock.
         unsafe { timers.lock().arm(&node, setting(10)) };
         // SAFETY: serialized modeled dispatch, callbacks only use scoped rearm.
-        assert!(unsafe { dispatch_round(&timers, 10) });
+        assert!(unsafe { dispatch_round(&timers, 10, timers.lock()) });
         assert_eq!(timers.lock().earliest_deadline_ns(), Some(20));
         assert_eq!(rejected.load(Ordering::Relaxed), 1);
         // SAFETY: unchanged storage contract, final delivery drains the node.
-        assert!(unsafe { dispatch_round(&timers, 20) });
+        assert!(unsafe { dispatch_round(&timers, 20, timers.lock()) });
         assert!(!node.is_linked());
     }
 
@@ -159,7 +163,7 @@ mod tests {
             // SAFETY: both Arcs remain externally owned, node is idle between rounds.
             unsafe { timers.lock().arm(&node, setting(ns)) };
             // SAFETY: sole modeled dispatcher, retained node and handler storage.
-            assert!(unsafe { dispatch_round(&timers, ns) });
+            assert!(unsafe { dispatch_round(&timers, ns, timers.lock()) });
             assert_eq!(Arc::strong_count(&node), 1);
             assert_eq!(Arc::strong_count(&handler), 1);
             assert!(!node.is_linked());
@@ -190,11 +194,11 @@ mod tests {
             unsafe { timers.lock().arm(node, setting(10 + i as u64 * 10)) };
         }
         // SAFETY: sole modeled dispatcher, handlers remain valid throughout.
-        assert!(unsafe { dispatch_round(&timers, 10) });
+        assert!(unsafe { dispatch_round(&timers, 10, timers.lock()) });
         assert_eq!(first.load(Ordering::Relaxed), 1);
         assert_eq!(second.load(Ordering::Relaxed), 0);
         // SAFETY: same live bindings; final node is drained by this delivery.
-        assert!(unsafe { dispatch_round(&timers, 20) });
+        assert!(unsafe { dispatch_round(&timers, 20, timers.lock()) });
         assert_eq!(second.load(Ordering::Relaxed), 2);
         assert!(nodes.iter().all(|node| !node.is_linked()));
     }
@@ -203,6 +207,6 @@ mod tests {
     fn empty_dispatch_has_no_delivery() {
         let timers = SpinNoIrq::new(CpuTimers::new());
         // SAFETY: empty collection with no concurrent dispatcher or borrowed nodes.
-        assert!(!unsafe { dispatch_round(&timers, 10) });
+        assert!(!unsafe { dispatch_round(&timers, 10, timers.lock()) });
     }
 }

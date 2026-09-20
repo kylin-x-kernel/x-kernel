@@ -202,6 +202,8 @@ the deadline is still future on return and does not replace a waiter's wake/bloc
 ### Dispatch and Completion
 
 `TimerSet::dispatch_due` calls `dispatch_round` for at most three catch-up rounds.
+The due check passes its held CPU guard into the round's first dequeue, avoiding
+an adjacent unlock/relock. The round consumes that guard before invoking a handler.
 Each round fixes its eligibility cutoff. Under the CPU lock, `take_expired`
 removes one due node, snapshots its deadline and publishes running identity.
 After unlocking, dispatch invokes the bound handler.

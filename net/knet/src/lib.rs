@@ -59,7 +59,7 @@ pub(crate) use transport::udp_err;
 pub use transport::{raw, tcp, udp, udp::UdpDatagramRelay};
 
 use crate::{
-    consts::{GATEWAY, IP, IP_PREFIX, TIMER_SAMPLE_PERIOD},
+    consts::{GATEWAY, IP, IP_PREFIX},
     device::{EthernetDevice, LoopbackDevice},
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     listen_table::ListenTable,
@@ -74,6 +74,13 @@ static SOCKET_SET: LazyInit<SocketSetWrapper> = LazyInit::new();
 static SERVICE: LazyInit<Service> = LazyInit::new();
 
 /// Initializes the network subsystem by NIC devices.
+///
+/// Call once after scheduler and timer IRQ initialization. Publishes the global
+/// service and poller before starting the retained sampling timer.
+///
+/// # Panics
+/// Panics on repeated global initialization or if the initial sampling deadline
+/// exceeds the timer core's nanosecond range.
 pub fn init_network() {
     info!("Initialize network subsystem...");
 
@@ -139,7 +146,7 @@ pub fn init_network() {
     LISTEN_TABLE.init_once(ListenTable::new());
     udp::init_udp_registry();
     poller::network_poller().start();
-    ktask::register_timer_callback(TIMER_SAMPLE_PERIOD, |_| SERVICE.handle_timer_tick());
+    SERVICE.start_timer();
 }
 
 fn subscribe_network_unregister(id: kdevice::DeviceId) {

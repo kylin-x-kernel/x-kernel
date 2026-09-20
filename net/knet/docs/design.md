@@ -580,7 +580,7 @@ In the `SCHEDULED` state, the dynamic kwork of `knet-poller` and socket assist c
 | 13 | &emsp;`LISTEN_TABLE.init_once(ListenTable.new())` |
 | 14 | &emsp;`init_udp_registry()` |
 | 15 | &emsp;`network_poller.start()` |
-| 16 | &emsp;`register_timer_callback(TIMER_SAMPLE_PERIOD, SERVICE.handle_timer_tick)` |
+| 16 | &emsp;`SERVICE.start_timer()` after service and poller publication |
 
 Source: [`init_network`](../src/lib.rs) and [`Service::new`](../src/stack/service.rs). The pseudocode abbreviates address and route construction.
 
@@ -710,6 +710,15 @@ The global `SERVICE` is a `LazyInit<Service>`. Separate mutexes protect the smol
 `NetworkPoller` represents this execution right with the four states maintained by `kwork::BudgetedPoller`: `IDLE`, `SCHEDULED`, `RUNNING`, and `RUNNING_PENDING`. A kwork background batch may process 512 RX packets, 256 TX packets, and 32 timer events. A socket-assisted batch uses smaller budgets of 16, 16, and 8. Every round also has a 1-ms soft time limit. Background batches run at most four consecutive rounds, while one assistance call runs at most one round. When a background batch reaches its round limit, it queues another batch and releases the execution right.
 
 Protocol and IPv4 reassembly deadlines use separate `AtomicU64` fields. The periodic sampling callback is deliberately small: it checks the atomic deadline, wakes waiters, and notifies the poller. Each successful staged smoltcp poll refreshes the protocol timer through `Interface::poll_at`, so TCP retransmission and similar deadlines continue to advance even when socket waiters are blocked.
+
+`Service` owns a `ktask::Timer<NetworkTimer>`, constructed once and started
+after the global `SERVICE` and poller are published. The IRQ handler accesses
+that permanent service, then explicitly rearms for completion time plus 10 ms
+on the same CPU. Late samples do not trigger phase-aligned catch-up. Timer
+registration and renewal reuse owned storage without allocating; this is not
+an allocation-free claim for all network notification or protocol processing.
+An out-of-range rearm logs an error and stops sampling instead of panicking
+inside the IRQ. The core does not own a network interval or business counter.
 
 The global `SOCKET_SET` wraps `SocketSetState` in a single mutex. The smoltcp socket set and TCP deferred-close metadata share this ownership lock, so socket registration, protocol progress, close, and reclamation never transfer a handle between two mutexes. TCP transition admission uses atomic compare-and-swap through `StateLock::lock`, returning the observed state if admission fails; `StateGuard::transit` publishes the result or restores the previous state with an atomic store. Socket options and shutdown flags use atomics only for configuration and shutdown state shared across threads.
 

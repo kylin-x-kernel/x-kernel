@@ -34,4 +34,4 @@ pub const ETHERNET_MAX_PENDING_PACKETS: usize = 128;
 /// This is independent of the dynamic schedule timer. 10 ms matches the
 /// historical 100 Hz tick sampling interval so TCP/orphan timers are not
 /// delayed by coarser polling.
-pub const TIMER_SAMPLE_PERIOD: core::time::Duration = core::time::Duration::from_millis(10);
+pub const TIMER_SAMPLE_PERIOD: ktime_types::TimeSpan = ktime_types::TimeSpan::from_millis(10);

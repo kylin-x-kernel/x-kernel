@@ -18,7 +18,7 @@ in object state. This crate does not own process descriptor-number allocation.
 | Object | State and providers | Flow |
 |---|---|---|
 | `EventFd` | Atomic counter, semaphore flag, read/write `PollSet`s | `new_file` constructs anonymous private data; file read atomically decrements/reset-count, write conditionally adds, and each wakes the opposite side. |
-| `TimerFd` | Owned `ktask::Timer<TimerFdHandler>`, shared `TimerFdData`, programming `Mutex<()>` | `settime` validates and drains the old delivery before replacing state; callback/read/poll/gettime account elapsed periods. Read rearms the next periodic notification. |
+| `TimerFd` | Owned `ktask::Timer<TimerFdHandler>` with embedded clock/count/poll state, programming `Mutex<()>` | `settime` validates and drains the old delivery before replacing state; callback/read/poll/gettime account elapsed periods. Read rearms the next periodic notification. |
 | `Signalfd` | `RwLock<SignalSet>` and read `PollSet` | Each file read/poll resolves the current `ThreadSignalManager`, selects pending signals by the mask and serializes one 128-byte record per read. |
 | `Epoll` | `Arc<EpollInner>`, interest table, ready queue and poll set | `add`/`modify` register watched file poll sources; callbacks enqueue weak interest references; `poll_events` returns ready ABI events and rearms interests. |
 
@@ -99,9 +99,12 @@ before invoking the handler, so that direction is not inverted. The callback,
 poll and gettime never acquire the programming mutex. Wake calls are outside
 the inner lock; settime also drops the programming mutex before waking.
 
-The FD owns a timer and `Arc<TimerFdData>`; its handler owns only another data
-reference, not the FD. There is no timer-to-FD ownership cycle. Declaring the
-timer field first drains delivery before the FD drops its data reference.
+The FD owns a timer whose handler contains the clock/count/poll state directly.
+FD operations borrow it through `Timer::handler()`; no separate data Arc or
+back-reference to the FD is needed. Timer Drop drains delivery before destroying
+the handler. The primary objects use two allocations: `Arc<TimerFd>` and the
+core's stable node/handler allocation. `PollSet` has its own unchanged internal
+allocation; this is not a two-allocation claim for complete file creation.
 Last owner release reclaims pending one-shot or periodic storage; closing one
 duplicated file descriptor does not imply final release. Allocation occurs
 during construction, not each start/rearm/cancel. Arbitrary poll registration

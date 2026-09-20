@@ -94,7 +94,46 @@ fn ipv4_reassembly_timer_state(next: Option<MonotonicInstant>) -> u64 {
         .saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET)
 }
 
+struct NetworkTimer;
+
+#[cfg(unittest)]
+static SAMPLE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(unittest)]
+mod timer_irq_tests {
+    //! Runtime integration probe using the permanent boot-created service.
+    //! This only observes IRQ progress; the timeout is a hang bound, not a
+    //! latency requirement. No global registration is installed by the test.
+
+    use unittest::{assert, def_test};
+
+    use super::*;
+
+    #[def_test(serial)]
+    fn network_sampling_repeats_from_real_timer_irq() {
+        let before = SAMPLE_COUNT.load(Ordering::Acquire);
+        let limit = monotonic_time() + TimeSpan::from_secs(2);
+        while SAMPLE_COUNT.load(Ordering::Acquire) < before + 3 {
+            assert!(monotonic_time() < limit);
+            ktask::sleep(TimeSpan::from_millis(10));
+        }
+    }
+}
+
+impl ktask::TimerHandler for NetworkTimer {
+    fn on_expiration(&self, timer: ktask::TimerControl<'_>, _: ktask::Expiration) {
+        crate::SERVICE.handle_timer_tick();
+        // Preserve completion-relative sampling, without catch-up callbacks.
+        if let Err(error) = timer.rearm(monotonic_time() + crate::consts::TIMER_SAMPLE_PERIOD) {
+            log::error!("[knet] timer sampling stopped: {error:?}");
+        }
+        #[cfg(unittest)]
+        SAMPLE_COUNT.fetch_add(1, Ordering::Release);
+    }
+}
+
 pub struct Service {
+    timer: ktask::Timer<NetworkTimer>,
     pub(crate) iface: Mutex<Interface>,
     router: Mutex<Router>,
     ingress: Mutex<IngressProcessor>,
@@ -114,6 +153,7 @@ impl Service {
         let iface = Interface::new(config, &mut router, to_smoltcp_instant(monotonic_time()));
 
         let service = Self {
+            timer: ktask::Timer::new(NetworkTimer),
             iface: Mutex::new(iface),
             router: Mutex::new(router),
             ingress: Mutex::new(IngressProcessor::new()),
@@ -128,6 +168,21 @@ impl Service {
         };
         service.sync_local_ipv4_views();
         service
+    }
+
+    /// Starts sampling after the global service and poller have been published.
+    ///
+    /// # Panics
+    /// Panics if the first deadline exceeds the timer core's nanosecond range.
+    pub(crate) fn start_timer(&'static self) {
+        // SAFETY: network initialization follows local scheduler/IRQ setup.
+        // SERVICE and the poller are published and remain live. The handler
+        // performs IRQ-safe notification without sleeping or changing IRQ state.
+        unsafe {
+            self.timer
+                .start(monotonic_time() + crate::consts::TIMER_SAMPLE_PERIOD)
+        }
+        .expect("network sampling deadline must fit the timer core");
     }
 
     /// Advances the network data plane within one bounded poll round.

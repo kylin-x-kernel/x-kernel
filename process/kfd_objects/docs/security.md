@@ -9,7 +9,7 @@ masks, clock IDs, descriptor numbers and user data; those values can originate
 in userspace. `kvfs` supplies valid kernel byte slices to file operations and owns
 file flags/credentials; `ksignal` owns pending signals, `ktask::future` owns
 blocking, and `ktask::Timer` owns prepared timer delivery/cleanup. Protected
-timer assets are the private owned timer, `Arc<TimerFdData>` (clock ID,
+timer assets are the private owned timer, its embedded `TimerFdHandler` (clock ID,
 `SpinNoIrq<TimerFdInner>` and `PollSet`), and the programming `Mutex<()>`.
 Their storage must outlive delivery, updates must retain the documented lock
 order, and no callback may own the enclosing FD or wait on programming.
@@ -64,10 +64,12 @@ identity and serializes rollback with the control lock. The ready queue uses an
 IRQ-masking spin lock because timer callbacks can run its source waker directly
 in IRQ context; that callback must not acquire task-context-only config locks.
 
-Timer handlers hold only independent data, not the FD owning the timer. Final
-FD release drops the timer first, draining callback cleanup before releasing
-data. It must not occur within its own callback or while preventing that callback
-from progressing; syscall/file lifetime owners must preserve this constraint.
+Timer handlers embed their data without owning the enclosing FD. Public shared
+handler access is borrowed from the owned timer and adds no strong owner or raw
+pointer. Final FD release drops the timer first, draining callback cleanup before
+destroying the embedded state. It must not occur within its own callback or while
+preventing that callback from progressing; syscall/file lifetime owners must
+preserve this constraint.
 Weak epoll target references
 must be upgraded before access. Dropping poll-registration owners outside their
 mutex avoids unregister callbacks nesting under that lock.

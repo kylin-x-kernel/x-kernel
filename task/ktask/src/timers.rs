@@ -59,7 +59,12 @@ impl<H: TimerHandler + 'static> Timer<H> {
         }
     }
 
-    pub(crate) fn handler(&self) -> &H {
+    /// Borrows the handler stored beside the timer node without cloning or allocating.
+    /// The reference cannot outlive this timer. Handler state may be accessed
+    /// concurrently by IRQ delivery, so mutation requires interior synchronization.
+    /// Release any handler lock needed by delivery before cancelling or dropping
+    /// the timer; synchronous draining must let that delivery finish.
+    pub fn handler(&self) -> &H {
         self.inner.handler()
     }
 

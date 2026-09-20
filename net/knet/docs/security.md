@@ -194,6 +194,26 @@ used here as authenticated caller credentials.
 
 ## Unsafe Code Inventory
 
+### Owned Sampling Timer
+
+`stack/service.rs::Service::start_timer` calls unsafe `ktask::Timer::start`.
+The safe entry is `init_network`, after scheduler/IRQ initialization and
+publication of `SERVICE` and the poller. The protected asset is
+`Service::timer: ktask::Timer<NetworkTimer>`: its owner retains node/handler
+storage, and the globally referenced service remains live for the kernel
+lifetime. The handler never retains a raw pointer or callback control.
+It preserves IRQ state and only performs existing IRQ-safe deadline checks,
+wakes and poller notifications before completion-relative rearm.
+
+Premature publication would let an IRQ access an uninitialized service;
+starting only after publication mitigates that risk. A callback that chased
+missed periods could monopolize IRQ context; rearming once at completion plus
+10 ms avoids that catch-up loop. Deadline range rejection logs and stops
+sampling, with loss of timed network progression as the residual failure.
+No synchronous cancellation occurs from the handler. The owner is the first
+`Service` field so any future teardown drains it before dropping service state;
+runtime replacement of the global service is not supported.
+
 ### 1. Writing to Vacant Regions of the Unix Stream Ring Buffer
 
 Locations: `StreamTransport::send` in [src/unix/stream.rs](../src/unix/stream.rs), lines 256 and 260.

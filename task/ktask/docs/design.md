@@ -154,9 +154,19 @@ kruntime::init_scheduler()/init_scheduler_secondary()
 ordering, owner routing, dispatch and cancellation semantics. `timers.rs` now
 owns the static production `PREPARED_TIMERS` set. `on_timer_fire` dispatches its
 due callbacks outside timer/runqueue locks, with IRQs disabled on the owner CPU.
-Async `future::sleep*`, `future::timeout*` and timerfd now use the owned
-`ktask::Timer` adapter. Explicit waker registrations and periodic callers still use
-legacy sources, which remain separate participants in hardware arbitration.
+Async `future::sleep*`, `future::timeout*`, timerfd, network sampling and
+per-CPU watchdog sampling now use the owned `ktask::Timer` adapter. Network
+and watchdog handlers own their completion-relative periodic policy. Explicit
+waker registrations and the now-unused legacy periodic registration API remain
+separate participants in hardware arbitration pending legacy-source removal.
+With `sched_stat`, network/watchdog sampling now contributes to
+`timer_irq_soft` through prepared dispatch, not `timer_irq_periodic`.
+This is a diagnostic classification change, not a change in callback context.
+
+`Timer::handler()` exposes a shared borrow of prepared handler state, allowing
+owners such as timerfd to store callback data beside the node instead of in a
+separate Arc. It neither transfers ownership nor exposes the core node. The
+borrow is tied to the timer; concurrent state access still needs synchronization.
 
 `Timer<H>` binds the core's owned storage to the static production set. Start
 pins the current CPU and masks IRQs until registration and hardware refresh
