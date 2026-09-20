@@ -13,7 +13,7 @@ description = "x-kernel base task management module"
 default = []
 
 snapshot = ["dep:backtrace"]
-ipi = ["dep:kipi", "kipi/reschedule"]
+ipi = ["dep:kipi", "kipi/reschedule", "kipi/timer-reprogram"]
 watchdog = ["snapshot"]
 tls = ["khal/tls"]
 preempt = ["percpu/preempt", "kspin/preempt", "ktimer_core/preempt"]

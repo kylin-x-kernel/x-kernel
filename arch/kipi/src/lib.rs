@@ -32,15 +32,19 @@ use lazyinit::LazyInit;
 
 mod event;
 mod icache;
-#[cfg(feature = "reschedule")]
+#[cfg(any(feature = "reschedule", feature = "timer-reprogram"))]
 mod notification;
 mod queue;
 mod stop;
 pub mod tlb;
 
 pub use event::{Callback, MulticastCallback};
+#[cfg(any(feature = "reschedule", feature = "timer-reprogram"))]
+pub use notification::enable_fixed_notifications;
 #[cfg(feature = "reschedule")]
-pub use notification::{RescheduleIpiIf, enable_fixed_notifications, notify_reschedule};
+pub use notification::{RescheduleIpiIf, notify_reschedule};
+#[cfg(feature = "timer-reprogram")]
+pub use notification::{TimerReprogramIpiIf, notify_timer_reprogram};
 use queue::IpiEventQueue;
 
 /// Result type for IPI operations
@@ -280,7 +284,7 @@ pub fn ipi_handler() {
     // Process TLB shootdown requests before handling generic callbacks.
     tlb::handle_shootdown();
 
-    #[cfg(feature = "reschedule")]
+    #[cfg(any(feature = "reschedule", feature = "timer-reprogram"))]
     notification::handle_pending();
 
     // SAFETY: the handler runs on the current CPU and only accesses that CPU's

@@ -2,15 +2,37 @@
 
 ## 信任模型
 
-`reschedule` feature 的使用者必须链接调度接收端；系统通过 `ktask/ipi` 成对启用。
-未启用时不编译该通知模块，不用空接收端静默丢弃调度请求。
+### Fixed Timer Notification Boundary
+
+`notify_timer_reprogram` accepts only a typed CPU identifier from trusted kernel
+callers, not a timer pointer or user payload. It validates bounds and CPU mapping,
+but mapping presence alone does not prove service readiness. The caller publishes
+timer state and releases timer locks first. `timer-reprogram` links its own static
+provider; generic IPI users without fixed-notification features need no provider.
+
+| Threat | Asset / trigger / impact | Response |
+| --- | --- | --- |
+| Lost refresh | Timer progress; independent ready/pending publication or clearing after handling loses a request | Mitigate: readiness and reason bits share one AcqRel RMW word; take reasons before processing, never clear afterward; retain pre-enable requests. |
+| Cross-reason overwrite | Scheduler/timer progress; simultaneous requests erase another reason | Mitigate: fetch-or publishes independent bits, fetch-and retains ENABLED; test simultaneous reasons and requests during service. |
+| Receiver deadlock | Availability; sender holds a timer lock required by the endpoint | Mitigate: release timer locks before sending; endpoint cannot sleep, invoke callbacks or acquire runqueue locks. |
+| Premature endpoint access | State integrity; boot drain precedes local timer initialization | Mitigate: enablement contract includes local timer readiness; no CPU-hotplug/reset protocol. |
+
+The new fixed timer path adds no unsafe operations, allocation, payload storage
+or lifetime ownership. It relies on the interrupt backend's publish-before-notify
+contract and eventual target IRQ service. Long IRQ masking remains a latency risk.
+
+Each fixed-notification feature requires its matching provider. `ktask/ipi`
+enables both features and supplies both endpoints. The notification module is
+excluded only when neither feature is enabled; no empty fallback drops requests.
 
 固定通知 `notify_reschedule` 不要求普通回调队列 ready，但调用方必须已向合法
 目标的运行队列发布任务状态。CPU 范围/存在性由入口验证；静态槽不分配、不释放，
 也不保存任务指针。正常 handler 在 ENABLED 前不得取走原因；启用与发送共用
 一个原子字，避免独立 ready/pending 变量间的丢请求窗口。取走原因后不再清零，
 保证处理中到达的新原因保留。硬件仍依赖 publish-before-notify 契约。
-静态处理端仅设置本地抢占标志，不接触 RunQueue 可变引用、不分配、不睡眠。
+The scheduler endpoint only sets the local preemption flag; the independent
+timer endpoint refreshes hardware. Neither takes a mutable RunQueue reference,
+allocates or sleeps.
 `enable_fixed_notifications` 只能在当前 scheduler、IPI 队列和 handler 已初始化后调用；
 它保存 IRQ 状态，不使用会在析构时主动调度的禁抢占 guard。没有新增 unsafe。
 调用者还须为 CPU-bound 启动路径，因为线路启用的内部锁可能触发已有抢占检查；

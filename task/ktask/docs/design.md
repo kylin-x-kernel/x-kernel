@@ -151,10 +151,27 @@ kruntime::init_scheduler()/init_scheduler_secondary()
 ### Prepared timer core dependency
 
 `ktask` depends on `ktimer_core`, which owns prepared timer storage, deadline
-ordering, owner routing, dispatch, and cancellation. At this stage the
-dependency is consumed by kernel unit tests, not by the production timer
-service: `timers.rs`, `future/time.rs`, and hardware timer programming still
-use the existing implementation.
+ordering, owner routing, dispatch and cancellation semantics. `timers.rs` now
+owns the static production `PREPARED_TIMERS` set. `on_timer_fire` dispatches its
+due callbacks outside timer/runqueue locks, with IRQs disabled on the owner CPU.
+Existing sleep, async, timerfd and periodic callers are not migrated in this PR;
+their legacy sources remain separate participants in hardware arbitration.
+
+`rearm_local_timer` merges schedule, execution-accounting, legacy soft/periodic
+and prepared deadlines. It holds the prepared CPU lock through the hardware
+write. A timer notification takes the legacy wheel lock first, then that CPU
+lock; the programmer never takes a wheel or runqueue lock. Timer IRQ batching
+defers intermediate writes and re-reads all sources after callbacks and wakes.
+Core overload backoff changes only the prepared service deadline, not scheduler
+or accounting deadlines. An empty prepared queue cannot disarm another source.
+
+`ktask/ipi` enables `kipi/timer-reprogram` and supplies `TimerReprogramIpiIf`.
+The endpoint only re-reads current deadlines and programs hardware; it does not
+dispatch callbacks, account runtime or mark a reschedule request. Notifications
+must follow accepted registration after releasing timer locks and target the
+returned actual owner, including pending migration or running-owner retention.
+Removing a source membership may leave a harmless old interrupt. Every accepted
+replacement requires destination refresh even when concurrent starts replace it.
 
 Under `cfg(unittest)`, `lib.rs` links the core's registered tests. With `smp`,
 `tests_timer_routing.rs` also calls `ktimer_core::test_support` scenarios. The
@@ -163,6 +180,8 @@ tasks pinned to CPUs 0 and 1, joins them, and supplies `yield_now`. The
 dependency direction is `ktask -> ktimer_core`; the core does not depend on
 the task scheduler. These tests exercise core operations through scheduled
 workers, not through the hardware timer interrupt path.
+`tests_timer_irq.rs` separately exercises real local IRQ delivery, explicit rearm,
+notification-only service and repeated remote advances/pending migrations.
 
 The `preempt` and `smp` features forward to the matching `ktimer_core`
 features so lock configuration stays consistent. Feature forwarding does not

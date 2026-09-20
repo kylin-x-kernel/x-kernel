@@ -140,6 +140,14 @@ pub(crate) fn earliest_deadline(cpu_id: kcpu_id_map::LogicalCpuId) -> Option<Mon
     timer_runtime(cpu_id).lock().earliest_deadline()
 }
 
+/// Refreshes hardware while holding the local wheel lock through arbitration.
+#[cfg(feature = "ipi")]
+pub(crate) fn reprogram_local_timer() {
+    let _guard = kspin::NoPreemptIrqSave::new();
+    let wheel = timer_runtime(khal::percpu::this_cpu_id()).lock();
+    rearm_local_timer(wheel.earliest_deadline(), None);
+}
+
 /// Registers a timer that fires `waker` when `deadline` is reached.
 /// Returns `None` if `deadline` has already passed.
 pub fn register_timer(deadline: MonotonicInstant, waker: Waker) -> Option<TimerHandle> {
@@ -273,6 +281,39 @@ pub async fn timeout_at<F: IntoFuture>(
         }
     } else {
         Ok(f.await)
+    }
+}
+
+#[cfg(all(unittest, feature = "ipi"))]
+mod notification_tests {
+    use core::task::Waker;
+
+    use unittest::{assert, def_test};
+
+    use super::{TimerKey, timer_runtime};
+
+    #[def_test(serial)]
+    fn reprogram_notification_does_not_consume_due_timer() {
+        let _guard = kspin::NoPreemptIrqSave::new();
+        let cpu = khal::percpu::this_cpu_id();
+        let key = {
+            let mut runtime = timer_runtime(cpu).lock();
+            let key = TimerKey {
+                deadline: ktime_types::MonotonicInstant::from_span_since_origin(
+                    ktime_types::TimeSpan::from_nanos(0),
+                ),
+                key: runtime.key,
+            };
+            runtime.key += 1;
+            // Deliberately overdue: notification must only program hardware,
+            // leaving consumption to the actual timer IRQ after this guard.
+            runtime.wheel.insert(key, Waker::noop().clone());
+            key
+        };
+        kipi::TimerReprogramIpiIf::on_timer_reprogram();
+        let remained_pending = timer_runtime(cpu).lock().wheel.remove(&key).is_some();
+        super::reprogram_local_timer();
+        assert!(remained_pending);
     }
 }
 

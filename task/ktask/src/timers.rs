@@ -13,8 +13,13 @@ use core::{
 use khal::time::monotonic_time_nanos;
 use kspin::NoPreemptIrqSave;
 use ktime_types::SystemTime;
+use ktimer_core::TimerSet;
 
 use crate::api::rearm_local_timer;
+
+/// Static CPU queues used by the hardware timer service.
+/// Business registration adapters are introduced with caller migration.
+pub(crate) static PREPARED_TIMERS: TimerSet<{ kbuild_config::NR_CPUS }> = TimerSet::new();
 
 type TimerIrqNoteFn = fn();
 

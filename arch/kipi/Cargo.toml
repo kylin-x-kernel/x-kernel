@@ -11,8 +11,10 @@ repository.workspace = true
 [features]
 default = []
 reschedule = []
+timer-reprogram = []
 
 [dependencies]
+bitflags.workspace = true
 kiface.workspace = true
 karch = { workspace = true, features = ["smp"] }
 # `smp` here compiles khal's SmpStopIf no-op fallback out, so linking this

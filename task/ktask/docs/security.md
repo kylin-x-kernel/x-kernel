@@ -19,12 +19,41 @@ join them before returning. `ktimer_core` owns timer scenario storage and
 cleanup checks; `ktask` owns task placement and completion. These tests do
 not establish hardware timer interrupt or IPI delivery correctness.
 
-Dependency internals (`karch`, `kspin`, `percpu`, `ksched`, `ktimer_core`)
-are outside this crate's implementation analysis because their owners define
-and enforce those contracts. Their contracts at the `ktask` boundary remain
-in scope. See the core's [security analysis](../../ktimer-core/docs/security.md)
-for intrusive membership, callback lifetime, and timer cancellation.
-Production timers have not been migrated to that core in this change.
+Dependency internals (including `karch`, `kspin`, `percpu`, `ksched` and
+`ktimer_core`) are outside this crate's implementation analysis because their
+owners define and enforce those contracts. Their contracts at the `ktask`
+boundary remain in scope. See the core's [security analysis](../../ktimer-core/docs/security.md)
+for intrusive membership, callback lifetime and timer cancellation invariants.
+Production IRQ/hardware integration now services the core alongside legacy
+timers; business timer callers have not yet migrated.
+
+### Prepared Timer Platform Boundary
+
+#### Protected Asset
+
+| Object / type | Protection requirements |
+| --- | --- |
+| `timers.rs::PREPARED_TIMERS`: `TimerSet<{ kbuild_config::NR_CPUS }>` | Keep this `pub(crate)` static inaccessible outside `ktask`, at a stable address for the entire kernel lifetime, outliving all registrations, IRQ dispatch and IPI service. Access queue and owner state only through the core's lock protocol. Every registration must keep its node and handler fixed and live until pending and running accesses, including callback cleanup, have drained; the static set's lifetime alone does not retain borrowed timer storage. |
+
+`api.rs::on_timer_fire` calls unsafe `dispatch_due` only on the matching CPU,
+with IRQs disabled and no timer/runqueue lock held. The static set outlives all
+service. Registration must retain node/handler storage and obey the core's
+nonrecursive, non-unwinding callback contract; tests use owning `Timer` handles.
+`api.rs::rearm_local_timer` calls unsafe `reprogram_local_timer` under a CPU/IRQ
+guard. Its programmer only merges deadlines and writes hardware, never callbacks
+or scheduler locks. These are the new unsafe production call sites.
+
+| Threat | Asset / trigger / impact | Response |
+| --- | --- | --- |
+| Stale hardware write | Deadline integrity; concurrent remote advance overwritten by an old snapshot delays delivery | Mitigate: hold the prepared CPU lock through hardware write; notify actual destination after every accepted start. Platform must preserve publish-before-IPI ordering. |
+| Lock inversion | Availability; notification or callback re-enters a held timer lock and deadlocks | Mitigate: wheel before prepared CPU lock, callback outside locks, sender releases locks before notification; no runqueue lock in the programmer. |
+| Wrong-context delivery | Memory safety and scheduling; an IPI or recursive service invokes a timer callback | Mitigate: IPI endpoint only reprograms; timer IRQ owns dispatch, with IRQs disabled. Real-IRQ and notification-only tests check this separation. |
+| Premature boot service | Per-CPU state; notification drain touches an uninitialized scheduler or wheel | Mitigate: retain existing runtime enablement after scheduler and local timer state initialization; static set construction alone is not readiness. |
+| Lost independent deadline | Availability; empty/deferred prepared queue suppresses scheduler or legacy sources | Mitigate: merge all sources under the local IRQ guard; prepared backoff does not defer other sources. |
+
+`tests_timer_irq.rs` adds bounded real-IRQ/IPI validation infrastructure. Its
+owning handles drain callbacks before destruction. These tests do not establish
+a hard latency bound, complete allocation coverage, or exhaustive interleavings.
 
 A fixed reschedule IPI does not carry a task pointer; multiple requests may
 coalesce. Send happens after task-state and run-queue updates. The receiver

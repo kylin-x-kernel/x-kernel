@@ -5,7 +5,8 @@
 This analysis covers all production modules in `src/`, the `cfg(unittest)`
 test-support boundary and the host harness in `benches/host/`.
 The core owns prepared timer state, not task scheduling or POSIX timer semantics.
-This PR does not connect production IRQ/IPI, hardware programming or business users.
+Production IRQ/IPI and hardware adapters live in `ktask` and `kipi`, outside this
+crate's implementation audit; their contracts at this boundary remain in scope.
 The platform invoking unsafe public methods remains responsible for CPU readiness,
 execution context, monotonic time, hardware arbitration and remote notification.
 

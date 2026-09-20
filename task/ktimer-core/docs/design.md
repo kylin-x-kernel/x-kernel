@@ -7,11 +7,11 @@ It owns timer ordering, one-shot delivery, owner-CPU routing, cancellation,
 and the owning `Timer<H, N>` lifecycle. It does not implement POSIX timers;
 `process/ktimer` retains that separate responsibility.
 
-This PR introduces the core and its tests only. `ktask` links the kernel tests
-and supplies pinned worker tasks; its production timer implementation is unchanged.
-Production IRQ/IPI wiring, hardware deadline arbitration, asynchronous waits,
-timerfd, network/watchdog migration, and delayed work are not implemented here.
-Future platform integration must supply those services through the public contracts.
+`ktask` supplies production IRQ dispatch and locked hardware deadline arbitration;
+`kipi` supplies fixed timer-reprogram notifications through a `ktask` endpoint.
+These platform adapters remain outside the core. `ktask` also links kernel tests
+and supplies pinned worker tasks. Asynchronous waits, timerfd, network/watchdog
+migration and delayed work are separate integration work, not implemented here.
 
 The core avoids allocating registration records or temporary due-event batches.
 Storage is prepared once, then reused for starts, replacements and delivery.
@@ -298,7 +298,8 @@ release. Lifecycle comparison includes construction and destruction. Multithread
 ownership checks and Miri are distinct from single-thread timing.
 Batch-mean medians are not per-operation latency percentiles. Host results do not
 establish real IRQ/IPI latency, hardware safety or end-to-end business performance.
-Production integration and those acceptance tests belong to later PRs.
+Real IRQ/IPI integration checks live in `ktask::tests_timer_irq`; end-to-end
+business acceptance belongs to the later caller migration PRs.
 The one-shot API intentionally removes interval/tag parameters and accumulated
 counts. Later integration branches must migrate their periodic callers explicitly;
 old periodic benchmark results do not validate this API. Host checks cover

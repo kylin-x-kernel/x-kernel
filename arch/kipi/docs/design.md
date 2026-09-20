@@ -9,11 +9,35 @@
 固定调度通知由 `notification.rs` 提供：`notify_reschedule` 在静态 CPU 槽中发布原因，
 不经过通用闭包队列。原因与单向 ENABLED 位共用一个原子字，以 AcqRel RMW
 连接发送、启用和 drain。启用前只记请求；启用后每次发送 IPI，即使原因已经置位。
-公共处理顺序是 stop、TLB、固定调度通知、通用回调。`ktask` 通过静态
+公共处理顺序是 stop、TLB、固定通知、通用回调。`ktask` 通过静态
 `RescheduleIpiIf` 实现处理端，不引入反向 crate 依赖或动态订阅。
 主/AP 在 runtime 指定阶段调用 `enable_fixed_notifications`，此入口以 IRQ guard
 保护线路开启、ENABLED 发布及 drain，不在退出时主动执行抢占检查。
-该协议无运行期关闭或 CPU hotplug；本次不增加 timer 通知原因。
+The protocol has no runtime shutdown or CPU-hotplug support.
+
+### Timer Reprogram Notifications
+
+The independent `timer-reprogram` feature exports `notify_timer_reprogram` and
+`TimerReprogramIpiIf`; `ktask/ipi` enables it and supplies the static endpoint.
+Either fixed-notification feature compiles `notification.rs`; generic IPI users
+without either feature require neither provider. Each enabled feature requires
+its own provider, including non-SMP configurations that explicitly enable it.
+
+`PendingWord` stores ENABLED, RESCHEDULE and TIMER_REPROGRAM bits in one
+`AtomicUsize`. Its private `NotificationFlags` bitflags type represents snapshots
+and request masks; integer conversion stays at the atomic access boundary.
+Senders publish
+state first, then use an AcqRel fetch-or and send an IPI if ENABLED was observed.
+Boot enablement uses the same word and drains retained reasons. The receiver
+atomically takes all reasons, retaining ENABLED; requests arriving after that
+take remain for a later IPI. Handling order is stop, TLB, fixed timer refresh,
+fixed reschedule, generic callbacks. Fixed refresh does not queue a closure.
+
+The timer sender must release timer locks before notification. The endpoint
+re-reads local sources and programs hardware under their synchronization, without
+invoking timer callbacks or taking runqueue locks. Notifications may coalesce;
+successful return means accepted, not completed. Local IPI queue, scheduler,
+timer state, controller and handler must be ready before the existing boot drain.
 
 `kipi` 是 X-Kernel 的跨 CPU 协调模块，向上提供：
 
