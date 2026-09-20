@@ -23,7 +23,7 @@ use hashbrown::{HashMap, HashSet};
 use kcred::Cred;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollRegistrations, PollSet, Pollable};
-use kspin::SpinNoPreempt;
+use kspin::{SpinNoIrq, SpinNoPreempt};
 use ksync::Mutex;
 use kvfs::{FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
 use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT, epoll_event};
@@ -437,10 +437,11 @@ impl InterestWaker {
                 .ready_queue
                 .lock()
                 .push_back(Arc::downgrade(&interest));
+            // This callback may run in IRQ context. Avoid taking the
+            // task-context-only interest config lock just for tracing.
             trace!(
-                "Epoll: fd={} added to ready queue, events={:?} wake up poller",
-                interest.key.fd,
-                interest.interested_events()
+                "Epoll: fd={} added to ready queue; wake up poller",
+                interest.key.fd
             );
             epoll.poll_ready.wake();
         }
@@ -452,7 +453,10 @@ struct EpollInner {
     // per-interest registrations. Ready consumption keeps using finer locks.
     ctl_lock: Mutex<()>,
     interests: SpinNoPreempt<HashMap<EntryKey, Arc<EpollInterest>>>,
-    ready_queue: SpinNoPreempt<VecDeque<Weak<EpollInterest>>>,
+    // Poll source wakers may run directly from timer IRQ context. Mask local
+    // IRQs so an interrupt cannot recursively acquire this lock while the
+    // interrupted task is holding it.
+    ready_queue: SpinNoIrq<VecDeque<Weak<EpollInterest>>>,
     poll_ready: PollSet,
 }
 
@@ -461,7 +465,7 @@ impl Default for EpollInner {
         Self {
             ctl_lock: Mutex::new(()),
             interests: SpinNoPreempt::new(HashMap::new()),
-            ready_queue: SpinNoPreempt::new(VecDeque::new()),
+            ready_queue: SpinNoIrq::new(VecDeque::new()),
             poll_ready: PollSet::new(),
         }
     }

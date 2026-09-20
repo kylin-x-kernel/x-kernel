@@ -38,11 +38,13 @@ access requires a current user thread; a kernel task gets
 requires no current credentials because the caller supplies them.
 
 Timer polling/rearming requires initialized clock/timer/scheduler services.
-Timer callbacks use IRQ-safe inner state; epoll ready/config/table locks disable
-preemption but are not IRQ-masking locks. Do not infer interrupt-context support
-for arbitrary watched-file callbacks from the object API. No API is a general
-early-boot or reentrant-syscall guarantee; callers must satisfy provider context
-contracts and avoid holding locks across calls that can block.
+Timer callbacks use IRQ-safe inner state. Epoll's ready queue also uses an
+IRQ-masking lock because source wakers may enqueue an interest directly from
+timer IRQ context. Its config and table locks only disable preemption. Do not
+infer interrupt-context support for arbitrary watched-file callbacks from the
+object API. No API is a general early-boot or reentrant-syscall guarantee;
+callers must satisfy provider context contracts and avoid holding locks across
+calls that can block.
 
 ## State machines and algorithms
 
@@ -79,12 +81,13 @@ registered callback can retain the object.
 
 Signalfd mask changes take the RwLock and wake readers. Signal queues belong to
 `ksignal`, not this object. Epoll's `ctl_lock` serializes ADD/MOD/DEL including
-registration failure rollback. Separate `SpinNoPreempt` locks protect table,
-ready queue and per-interest configuration; atomics track queue membership and
-waker generation. Registration owners are replaced under their lock and dropped
-outside it to avoid nested unregister locks. The table owns interests; ready
-entries, watched files and callback owner references use weak links where
-specified by their structures, so expired targets can be removed while polling.
+registration failure rollback. `SpinNoPreempt` locks protect the table and
+per-interest configuration; `SpinNoIrq` protects the IRQ-reachable ready queue.
+Atomics track queue membership and waker generation. Registration owners are
+replaced under their lock and dropped outside it to avoid nested unregister
+locks. The table owns interests; ready entries, watched files and callback owner
+references use weak links where specified by their structures, so expired
+targets can be removed while polling.
 
 ## Decisions and limitations
 

@@ -49,7 +49,9 @@ updates share the inner lock; handle cancellation uses its own lock. Signalfd
 mask mutation uses its RwLock while signal access is through the current signal
 manager. Epoll table, ready queue, queue bit, waker generation and registration
 ownership must retain their coordinated protocol; MOD modifies existing interest
-identity and serializes rollback with the control lock.
+identity and serializes rollback with the control lock. The ready queue uses an
+IRQ-masking spin lock because timer callbacks can run its source waker directly
+in IRQ context; that callback must not acquire task-context-only config locks.
 
 Registered timer wakers hold strong object references, so the final `Drop` and
 its cancellation may occur later than file close. Weak epoll target references
@@ -67,6 +69,7 @@ mutex avoids unregister callbacks nesting under that lock.
 | T-05 | Stale epoll wake/config causes duplicate or wrong events | Medium | MOD/DEL or source wake races consumption | Stable interest identity, generation checks, queue bit and bounded/deduplicated consumption; preserve registration rollback protocol. |
 | T-06 | Wrong file type reaches backend state | Medium | Adapter passes unrelated file | Typed private-data lookup returns BadFileDescriptor; fd authorization remains outside this crate. |
 | T-07 | Kernel task accesses signalfd signal state | Medium | Read/poll without a user Thread | Read returns OperationNotPermitted; poll reports ERR; constructors require explicit credentials. |
+| T-08 | Timer IRQ recursively acquires an epoll lock held by the interrupted task | High | A source waker runs while task context owns the ready queue or config lock | Ready queue uses `SpinNoIrq`; IRQ-reachable wake and trace paths avoid the config lock. Keep IRQ-masked critical sections short. |
 
 ## Failure modes and management
 
@@ -96,4 +99,5 @@ claim they were executed by this documentation edit.
 - Check timer callback retention as well as final Drop cancellation.
 - Keep epoll MOD identity, queue deduplication and generation checks together.
 - Drop registration owners outside their mutex; verify callback lock context.
+- Keep IRQ-reachable epoll wake paths on IRQ-safe state and avoid task-only locks.
 - Keep limitations aligned with implementation rather than assumed Linux behavior.
