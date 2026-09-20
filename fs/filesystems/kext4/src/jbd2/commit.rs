@@ -227,19 +227,19 @@ impl JournalLogCommit {
     }
 
     /// Returns how many metadata updates were logged.
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) const fn update_count(&self) -> usize {
         self.update_count
     }
 
     /// Returns how many filesystem blocks were revoked.
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) const fn revoke_count(&self) -> usize {
         self.revoke_count
     }
 
     /// Returns how many journal blocks were consumed.
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) const fn journal_block_count(&self) -> u32 {
         self.journal_block_count
     }
@@ -253,7 +253,7 @@ pub(crate) struct JournalPersistedCommit {
 
 impl JournalPersistedCommit {
     /// Returns the logged transaction summary.
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) const fn log(&self) -> JournalLogCommit {
         self.log
     }
@@ -920,11 +920,13 @@ fn checked_offset(offset: usize, len: usize) -> Ext4Result<usize> {
     offset.checked_add(len).ok_or(Ext4Error::Overflow)
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
-    use std::{cell::RefCell, collections::BTreeMap};
+    use alloc::collections::BTreeMap;
+    use core::cell::RefCell;
 
     use block::DriverError;
+    use unittest::def_test;
 
     use super::*;
     use crate::jbd2::{
@@ -1078,7 +1080,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[def_test]
     fn writes_scannable_descriptor_data_and_commit_blocks() {
         let superblock = journal_superblock(1, 0, SEQUENCE);
         let journal = TestJournal::new();
@@ -1126,7 +1128,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn bounds_journal_write_batches() {
         let superblock = journal_superblock(1, 0, SEQUENCE);
         let journal = TestJournal::new();
@@ -1162,7 +1164,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn writes_v3_checksummed_transaction_that_replay_can_apply() {
         let superblock = journal_superblock(1, FEATURE_INCOMPAT_CSUM_V3, SEQUENCE);
         let journal = TestJournal::new();
@@ -1187,7 +1189,7 @@ mod tests {
         assert_eq!(replay.blocks.borrow().get(&400).unwrap()[0], 0x44);
     }
 
-    #[test]
+    #[def_test]
     fn writes_online_revoke_block_that_suppresses_older_replay() {
         let superblock = journal_superblock(
             1,
@@ -1229,7 +1231,7 @@ mod tests {
         assert!(!replay.blocks.borrow().contains_key(&300));
     }
 
-    #[test]
+    #[def_test]
     fn refuses_to_write_revoke_block_without_revoke_feature() {
         let superblock = journal_superblock(1, FEATURE_INCOMPAT_CSUM_V3, SEQUENCE);
         let journal = TestJournal::new();
@@ -1253,7 +1255,7 @@ mod tests {
         }));
     }
 
-    #[test]
+    #[def_test]
     fn writes_64bit_revoke_entries_without_truncating_block_numbers() {
         let superblock = journal_superblock(
             1,
@@ -1276,7 +1278,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn splits_revoke_records_across_multiple_revoke_blocks() {
         let superblock = journal_superblock(1, FEATURE_INCOMPAT_REVOKE, SEQUENCE);
         let journal = TestJournal::new();
@@ -1299,7 +1301,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn escapes_jbd2_magic_in_logged_data_and_replay_restores_it() {
         let superblock = journal_superblock(1, FEATURE_INCOMPAT_CSUM_V3, SEQUENCE);
         let journal = TestJournal::new();
@@ -1330,7 +1332,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn wraps_written_transaction_across_log_end() {
         let superblock = journal_superblock(1023, 0, SEQUENCE);
         let journal = TestJournal::new();
@@ -1361,7 +1363,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn rejects_blocks_that_do_not_match_commit_record() {
         let superblock = journal_superblock(1, 0, SEQUENCE);
         let journal = TestJournal::new();
@@ -1384,7 +1386,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn persisted_commit_marks_journal_active_and_recoverable() {
         let superblock = journal_superblock(0, 0, SEQUENCE);
         let journal = TestJournal::with_superblock(&superblock);
@@ -1419,7 +1421,7 @@ mod tests {
         assert_eq!(replay.blocks.borrow().get(&800).unwrap()[0], 0x88);
     }
 
-    #[test]
+    #[def_test]
     fn power_loss_after_first_activation_does_not_look_like_a_clean_journal() {
         let superblock = journal_superblock(0, 0, SEQUENCE);
         let journal = TestJournal::with_superblock(&superblock);
@@ -1452,7 +1454,7 @@ mod tests {
         assert_eq!(scan.next_sequence(), TransactionId::new(SEQUENCE));
     }
 
-    #[test]
+    #[def_test]
     fn checkpoint_finish_marks_journal_empty_after_persisted_commit() {
         let superblock = journal_superblock(0, FEATURE_INCOMPAT_CSUM_V3, SEQUENCE);
         let journal = TestJournal::with_superblock(&superblock);
@@ -1472,7 +1474,7 @@ mod tests {
         assert!(scan.transactions().is_empty());
     }
 
-    #[test]
+    #[def_test]
     fn persist_commit_rejects_active_journal_without_latest_commit() {
         let superblock = journal_superblock(1, 0, SEQUENCE);
         let journal = TestJournal::with_superblock(&superblock);
@@ -1485,7 +1487,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn append_space_keeps_one_block_between_head_and_tail() {
         let superblock = journal_superblock(1, 0, SEQUENCE);
 
@@ -1507,7 +1509,7 @@ mod tests {
         .unwrap();
     }
 
-    #[test]
+    #[def_test]
     fn appends_commits_and_advances_checkpoint_tail_in_order() {
         let superblock = journal_superblock(0, FEATURE_INCOMPAT_CSUM_V3, SEQUENCE);
         let journal = TestJournal::with_superblock(&superblock);

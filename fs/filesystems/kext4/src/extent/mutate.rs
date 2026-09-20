@@ -2272,20 +2272,22 @@ fn encode_extent_len(len: u32, is_unwritten: bool) -> Ext4Result<u16> {
     u16::try_from(len).map_err(|_| Ext4Error::Overflow)
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
+    use unittest::def_test;
+
     use super::{
         MutableExtent, balanced_partition_ranges, extent_tree_metadata_block_count,
         independent_block_extents, insert_extent_run, ordered_writeback_credit_bound,
     };
     use crate::{BlockCount, PhysicalBlock, extent::ExtentMappingState};
 
-    #[test]
+    #[def_test]
     fn single_block_writeback_covers_maximum_extent_path() {
         assert_eq!(ordered_writeback_credit_bound(1, 2), Ok(75));
     }
 
-    #[test]
+    #[def_test]
     fn multi_block_writeback_scales_credit_budget() {
         let single = ordered_writeback_credit_bound(1, 2).unwrap();
         let multiple = ordered_writeback_credit_bound(8, 16).unwrap();
@@ -2293,18 +2295,18 @@ mod tests {
         assert!(multiple > single);
     }
 
-    #[test]
+    #[def_test]
     fn writeback_credit_budget_is_not_truncated() {
         assert!(ordered_writeback_credit_bound(8, 16).unwrap() > 512);
     }
 
-    #[test]
+    #[def_test]
     fn writeback_credit_budget_follows_mapping_work() {
         assert_eq!(ordered_writeback_credit_bound(0, 0), Ok(8));
         assert_eq!(ordered_writeback_credit_bound(0, 1), Ok(40));
     }
 
-    #[test]
+    #[def_test]
     fn local_split_balances_new_partitions() {
         assert_eq!(
             balanced_partition_ranges(341, 340),
@@ -2312,7 +2314,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn independent_block_preflight_preserves_separate_extent_entries() {
         let existing = alloc::vec![
             MutableExtent::new(

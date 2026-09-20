@@ -181,11 +181,13 @@ fn validate_inode_bitmap_capacity(bitmap: &[u8], range: InodeGroupRange) -> Ext4
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
+    use unittest::def_test;
+
     use super::*;
 
-    #[test]
+    #[def_test]
     fn inode_allocation_skips_reserved_inodes() {
         let range =
             InodeGroupRange::new(BlockGroupNumber::new(0), InodeNumber::new(1), 16).unwrap();
@@ -200,7 +202,7 @@ mod tests {
         assert_eq!(bitmap, [0xff, 0x07]);
     }
 
-    #[test]
+    #[def_test]
     fn inode_release_rejects_reserved_and_duplicate_release() {
         let range =
             InodeGroupRange::new(BlockGroupNumber::new(0), InodeNumber::new(1), 16).unwrap();

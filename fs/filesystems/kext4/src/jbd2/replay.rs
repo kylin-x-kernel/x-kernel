@@ -4,7 +4,7 @@
 
 //! JBD2 recovery replay planning.
 
-#[cfg(test)]
+#[cfg(unittest)]
 use alloc::vec::Vec;
 use alloc::{collections::BTreeMap, vec};
 
@@ -29,7 +29,7 @@ struct JournalReplayUpdate {
 
 impl JournalReplayUpdate {
     /// Returns the committed transaction that owns this replay update.
-    #[cfg(test)]
+    #[cfg(unittest)]
     const fn transaction(&self) -> TransactionId {
         self.transaction
     }
@@ -60,7 +60,7 @@ pub(crate) trait JournalReplayBlockWriter {
 }
 
 /// Ordered metadata writes required to replay a scanned JBD2 log.
-#[cfg(test)]
+#[cfg(unittest)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct JournalReplayPlan {
     updates: Vec<JournalReplayUpdate>,
@@ -69,7 +69,7 @@ struct JournalReplayPlan {
     revoke_hit_count: usize,
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 impl JournalReplayPlan {
     /// Returns metadata updates in replay order.
     fn updates(&self) -> &[JournalReplayUpdate] {
@@ -153,7 +153,7 @@ impl JournalReplayApplied {
 /// while later transactions for the same filesystem block still replay. This
 /// mirrors Linux JBD2 recovery's revoke test without requiring a writable block
 /// device at this stage.
-#[cfg(test)]
+#[cfg(unittest)]
 fn plan_journal_replay(scan: &JournalLogScan) -> JournalReplayPlan {
     let latest_revokes = collect_latest_revokes(scan);
     let mut updates = Vec::new();
@@ -189,7 +189,7 @@ fn plan_journal_replay(scan: &JournalLogScan) -> JournalReplayPlan {
 ///
 /// The caller provides the validated filesystem block size so that every
 /// planned update is read and written as one complete ext4 block.
-#[cfg(test)]
+#[cfg(unittest)]
 fn replay_journal_plan(
     reader: &impl JournalBlockReader,
     writer: &impl JournalReplayBlockWriter,
@@ -314,9 +314,12 @@ fn committed_transactions(
         .filter(|transaction| transaction.state() == JournalTransactionState::Committed)
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
-    use std::{cell::RefCell, collections::BTreeMap};
+    use alloc::collections::BTreeMap;
+    use core::cell::RefCell;
+
+    use unittest::def_test;
 
     use super::*;
     use crate::{
@@ -395,7 +398,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[def_test]
     fn plans_committed_updates_in_log_order() {
         let superblock = journal_superblock(1);
         let mut journal = TestJournal::new();
@@ -438,7 +441,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn ignores_uncommitted_transaction_updates_and_revokes() {
         let superblock = journal_superblock(1);
         let mut journal = TestJournal::new();
@@ -456,7 +459,7 @@ mod tests {
         assert_eq!(plan.updates()[0].target(), JournalTargetBlock::new(100));
     }
 
-    #[test]
+    #[def_test]
     fn committed_revoke_suppresses_same_or_earlier_transaction_update() {
         let superblock = journal_superblock(1);
         let mut journal = TestJournal::new();
@@ -474,7 +477,7 @@ mod tests {
         assert_eq!(plan.revoke_hit_count(), 1);
     }
 
-    #[test]
+    #[def_test]
     fn later_update_after_revoke_still_replays() {
         let superblock = journal_superblock(1);
         let mut journal = TestJournal::new();
@@ -501,7 +504,7 @@ mod tests {
         assert_eq!(plan.updates()[0].log_block(), JournalBlock::new(7));
     }
 
-    #[test]
+    #[def_test]
     fn reads_escaped_replay_update_with_restored_magic() {
         let superblock = journal_superblock(1);
         let mut journal = TestJournal::new();
@@ -521,7 +524,7 @@ mod tests {
         assert_eq!(output[4], 0x33);
     }
 
-    #[test]
+    #[def_test]
     fn executes_replay_plan_and_flushes_writer() {
         let superblock = journal_superblock(1);
         let mut journal = TestJournal::new();
@@ -553,7 +556,7 @@ mod tests {
         assert!(*writer.is_flushed.borrow());
     }
 
-    #[test]
+    #[def_test]
     fn executes_scanned_replay_and_flushes_writer_without_plan_vector() {
         let superblock = journal_superblock(1);
         let mut journal = TestJournal::new();

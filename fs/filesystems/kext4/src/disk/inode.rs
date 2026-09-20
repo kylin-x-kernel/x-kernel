@@ -37,7 +37,7 @@ pub(crate) const EXT4_HUGE_FILE_FL: u32 = 0x0004_0000;
 pub(crate) const EXT4_EXTENTS_FL: u32 = 0x0008_0000;
 pub(crate) const EXT4_INLINE_DATA_FL: u32 = 0x1000_0000;
 pub(crate) const EXT4_CASEFOLD_FL: u32 = 0x4000_0000;
-#[cfg(test)]
+#[cfg(unittest)]
 pub(crate) const EXT4_EA_INODE_FL: u32 = 0x0020_0000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -237,13 +237,15 @@ fn extra_field_fits(extra_isize: u16, offset: usize, size: usize) -> Ext4Result<
     Ok(end <= available)
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
+    use unittest::def_test;
+
     use super::{
         ATIME_EXTRA_OFFSET, CTIME_EXTRA_OFFSET, EXTRA_ISIZE_OFFSET, MTIME_EXTRA_OFFSET, RawInode,
     };
 
-    #[test]
+    #[def_test]
     fn decodes_owner_and_timestamp_fields() {
         let mut bytes = [0; 256];
         put_u16(&mut bytes, 0x02, 0x5678);

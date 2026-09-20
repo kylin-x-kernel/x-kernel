@@ -30,15 +30,6 @@ pub(crate) struct InodeMappingRoot {
 }
 
 impl Ext4SbInfo {
-    /// Returns the Linux-compatible maximum byte size for this inode format.
-    #[cfg(test)]
-    pub fn max_file_size(&self, inode: &Ext4Inode) -> Ext4Result<u64> {
-        if inode.has_extents() {
-            return self.extent_max_file_size();
-        }
-        self.legacy_max_file_size()
-    }
-
     /// Returns the superblock-wide maximum size used by extent-format inodes.
     pub fn extent_max_file_size(&self) -> Ext4Result<u64> {
         extent_max_file_size(

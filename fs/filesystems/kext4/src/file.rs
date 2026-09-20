@@ -4,8 +4,6 @@
 
 use alloc::{vec, vec::Vec};
 
-#[cfg(any(test, unittest))]
-use crate::PhysicalBlock;
 use crate::{
     BlockCount, CorruptKind, Ext4Error, Ext4Result, Ext4SbInfo, FilesystemBlock, LogicalBlock,
     UnsupportedKind,
@@ -14,9 +12,6 @@ use crate::{
     jbd2::JournalCredits,
     mballoc::{Ext4AllocationFlags, Ext4AllocationRequest},
 };
-
-#[cfg(test)]
-mod raw_overwrite_tests;
 
 struct AllocatedWriteRun {
     first_block: FilesystemBlock,
@@ -447,60 +442,6 @@ impl Ext4SbInfo {
                 Ok(copied)
             }
         }
-    }
-
-    /// Raw overwrite of bytes inside already allocated regular-file blocks.
-    ///
-    /// This is not the Linux ext4 write path. It bypasses VFS/page-cache
-    /// coherence and JBD2 transaction handles, must not be wired to
-    /// `FileNodeOps::write_at`, and deliberately does not allocate blocks,
-    /// convert unwritten extents, extend `i_size`, or update inode timestamps.
-    ///
-    /// The full target byte range is validated before any data block is
-    /// written. If the range reaches a hole or unwritten extent, this method
-    /// returns `UnallocatedWrite` without modifying storage.
-    #[cfg(test)]
-    pub(crate) fn raw_overwrite_allocated_data_unjournaled(
-        &self,
-        inode: &Ext4Inode,
-        offset: u64,
-        input: &[u8],
-    ) -> Ext4Result<usize> {
-        if inode.kind() != InodeKind::RegularFile {
-            return Err(Ext4Error::Unsupported(UnsupportedKind::InodeKind));
-        }
-        if input.is_empty() || offset >= inode.size() {
-            return Ok(0);
-        }
-
-        let remaining_file = inode
-            .size()
-            .checked_sub(offset)
-            .ok_or(Ext4Error::Overflow)?;
-        let remaining_input = match usize::try_from(remaining_file) {
-            Ok(value) => value,
-            Err(_) => input.len(),
-        };
-        let total = input.len().min(remaining_input);
-        let block_size = u64::from(self.layout().block_size());
-        let block_size_usize = usize::try_from(block_size).map_err(|_| Ext4Error::Overflow)?;
-        let runs = self.collect_allocated_write_runs(inode, offset, total, block_size_usize)?;
-
-        let mut written = 0usize;
-        for run in &runs {
-            self.write_allocated_run(
-                run,
-                input,
-                block_size_usize,
-                PartialBlockWrite::PreserveExisting,
-            )?;
-            written = written
-                .checked_add(run.write_len)
-                .ok_or(Ext4Error::Overflow)?;
-        }
-
-        self.flush_device()?;
-        Ok(written)
     }
 
     /// Writes a dirty page-cache range through the ordered-data path.
@@ -1228,23 +1169,25 @@ fn block_count_for_byte_span(
     u32::try_from(block_count).map_err(|_| Ext4Error::Overflow)
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
+    use unittest::def_test;
+
     use super::normalize_write_allocation_len;
 
-    #[test]
+    #[def_test]
     fn normalized_allocation_keeps_single_block_writes_exact() {
         assert_eq!(normalize_write_allocation_len(1, 64, true), 1);
         assert_eq!(normalize_write_allocation_len(1, 64, false), 1);
     }
 
-    #[test]
+    #[def_test]
     fn normalized_allocation_expands_streaming_requests_within_hole() {
         assert_eq!(normalize_write_allocation_len(4, 128, true), 32);
         assert_eq!(normalize_write_allocation_len(4, 10, true), 10);
     }
 
-    #[test]
+    #[def_test]
     fn normalized_allocation_caps_random_requests() {
         assert_eq!(normalize_write_allocation_len(2, 128, false), 2);
         assert_eq!(normalize_write_allocation_len(4, 128, false), 8);
@@ -1257,7 +1200,7 @@ mod unittests {
     use unittest::{assert_eq, def_test};
 
     use super::*;
-    use crate::extent::BlockMappingFlags;
+    use crate::{PhysicalBlock, extent::BlockMappingFlags};
 
     #[def_test]
     fn hole_writeback_credits_grow_by_actual_allocation_run() {
@@ -1323,3 +1266,6 @@ mod unittests {
         );
     }
 }
+
+#[cfg(unittest)]
+mod component_tests;

@@ -218,14 +218,15 @@ impl JournalReplayBlockWriter for FilesystemDevice {
     }
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
     use alloc::vec::Vec;
-    use std::sync::Mutex;
 
     use block::{Device, DeviceKind, DriverError, DriverResult};
+    use unittest::def_test;
 
     use super::*;
+    use crate::sync::Mutex;
 
     const DEVICE_BLOCK_SIZE: usize = 512;
 
@@ -257,7 +258,7 @@ mod tests {
 
     impl BlockDeviceOperations for MemoryBlockDevice {
         fn num_blocks(&self) -> u64 {
-            (self.bytes.lock().unwrap().len() / DEVICE_BLOCK_SIZE) as u64
+            (self.bytes.lock().len() / DEVICE_BLOCK_SIZE) as u64
         }
 
         fn block_size(&self) -> usize {
@@ -275,7 +276,6 @@ mod tests {
             output.copy_from_slice(
                 self.bytes
                     .lock()
-                    .unwrap()
                     .get(start..end)
                     .ok_or(DriverError::InvalidInput)?,
             );
@@ -283,7 +283,7 @@ mod tests {
         }
 
         fn write_block(&self, block_id: u64, input: &[u8]) -> DriverResult {
-            self.write_lengths.lock().unwrap().push(input.len());
+            self.write_lengths.lock().push(input.len());
             let start = usize::try_from(block_id)
                 .map_err(|_| DriverError::InvalidInput)?
                 .checked_mul(DEVICE_BLOCK_SIZE)
@@ -293,7 +293,6 @@ mod tests {
                 .ok_or(DriverError::InvalidInput)?;
             self.bytes
                 .lock()
-                .unwrap()
                 .get_mut(start..end)
                 .ok_or(DriverError::InvalidInput)?
                 .copy_from_slice(input);
@@ -301,12 +300,12 @@ mod tests {
         }
 
         fn flush(&self) -> DriverResult {
-            *self.is_flushed.lock().unwrap() = true;
+            *self.is_flushed.lock() = true;
             Ok(())
         }
     }
 
-    #[test]
+    #[def_test]
     fn writes_filesystem_blocks_through_device_block_mapping() {
         let device = Arc::new(MemoryBlockDevice::new(8));
         let filesystem = FilesystemDevice::open(device.clone(), 1024, 4).unwrap();
@@ -316,12 +315,12 @@ mod tests {
             .write_contiguous_blocks(FilesystemBlock::new(2), 1, &input)
             .unwrap();
 
-        let bytes = device.bytes.lock().unwrap();
+        let bytes = device.bytes.lock();
         assert_eq!(&bytes[2048..3072], input.as_slice());
-        assert_eq!(device.write_lengths.lock().unwrap().as_slice(), &[1024]);
+        assert_eq!(device.write_lengths.lock().as_slice(), &[1024]);
     }
 
-    #[test]
+    #[def_test]
     fn rejects_partial_contiguous_filesystem_block_write() {
         let device = Arc::new(MemoryBlockDevice::new(8));
         let filesystem = FilesystemDevice::open(device, 1024, 4).unwrap();
@@ -335,7 +334,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn replay_writer_writes_one_block_and_flushes() {
         let device = Arc::new(MemoryBlockDevice::new(8));
         let filesystem = FilesystemDevice::open(device.clone(), 1024, 4).unwrap();
@@ -346,8 +345,8 @@ mod tests {
             .unwrap();
         filesystem.flush_replay().unwrap();
 
-        let bytes = device.bytes.lock().unwrap();
+        let bytes = device.bytes.lock();
         assert_eq!(&bytes[1024..2048], input.as_slice());
-        assert!(*device.is_flushed.lock().unwrap());
+        assert!(*device.is_flushed.lock());
     }
 }

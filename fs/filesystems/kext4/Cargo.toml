@@ -22,17 +22,7 @@ kerrno.workspace = true
 klogger.workspace = true
 macros.workspace = true
 ksync.workspace = true
+ktask.workspace = true
 kvfs.workspace = true
 ktime_types = { workspace = true }
 unittest = { workspace = true }
-
-[target.'cfg(target_os = "none")'.dependencies]
-ktask = { workspace = true }
-
-[dev-dependencies]
-kalloc = { workspace = true }
-
-
-[package.metadata.cargo-shear]
-# kalloc is indirectly used in tests, so ignore the unused dependency warning
-ignored = ["kalloc"]

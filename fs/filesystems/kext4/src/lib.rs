@@ -101,9 +101,6 @@ extern crate alloc;
 #[macro_use]
 extern crate klogger;
 
-#[cfg(not(target_os = "none"))]
-extern crate std;
-
 mod balloc;
 mod bitmap_allocator;
 mod buffer;
@@ -118,8 +115,6 @@ mod inode;
 mod io;
 mod jbd2;
 mod journal;
-#[cfg(test)]
-mod linux_image_tests;
 mod mballoc;
 mod namei;
 mod orphan;

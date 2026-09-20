@@ -135,12 +135,12 @@ impl Ext4AllocatedRun {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) const fn logical_start(self) -> LogicalBlock {
         self.logical_start
     }
 
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) fn group(self) -> BlockGroupNumber {
         self.allocation.group()
     }
@@ -153,12 +153,12 @@ impl Ext4AllocatedRun {
         self.allocation.block_count()
     }
 
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) const fn requested_len(self) -> BlockCount {
         self.requested_len
     }
 
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) fn is_partial(self) -> bool {
         self.block_count() < self.requested_len
     }
@@ -619,12 +619,14 @@ impl Ext4SbInfo {
     }
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
+    use unittest::def_test;
+
     use super::*;
     use crate::bitmap_allocator::BlockGroupRange;
 
-    #[test]
+    #[def_test]
     fn free_extent_cache_suggests_goal_inside_free_run() {
         let range =
             BlockGroupRange::new(BlockGroupNumber::new(0), FilesystemBlock::new(100), 32).unwrap();
@@ -644,7 +646,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn free_extent_cache_prefers_expected_run_over_short_goal_tail() {
         let range =
             BlockGroupRange::new(BlockGroupNumber::new(0), FilesystemBlock::new(100), 32).unwrap();
@@ -664,7 +666,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn free_extent_cache_tracks_allocate_and_release() {
         let range =
             BlockGroupRange::new(BlockGroupNumber::new(0), FilesystemBlock::new(100), 16).unwrap();
@@ -702,7 +704,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn free_extent_cache_uses_order_buckets_for_best_extent() {
         let range =
             BlockGroupRange::new(BlockGroupNumber::new(0), FilesystemBlock::new(200), 64).unwrap();
@@ -720,3 +722,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(unittest)]
+mod component_tests;

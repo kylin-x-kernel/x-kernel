@@ -11,7 +11,7 @@ mod validate;
 pub(crate) use map::InodeMappingRoot;
 pub(crate) use mutate::ordered_writeback_credit_bound;
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests;
 
 use crate::{BlockCount, PhysicalBlock};
@@ -58,3 +58,9 @@ pub(crate) enum ExtentMappingState {
     /// The extent is allocated but must read as zeroes until conversion.
     Unwritten,
 }
+
+#[cfg(unittest)]
+mod component_tests;
+
+#[cfg(unittest)]
+mod legacy_tests;

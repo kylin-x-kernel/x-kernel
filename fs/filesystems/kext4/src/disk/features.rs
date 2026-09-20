@@ -222,12 +222,14 @@ mod unittests {
     }
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
-    use super::{CompatFeatures, FeatureSet, IncompatFeatures};
-    use crate::{Ext4Error, FeatureClass, UnsupportedKind};
+    use unittest::def_test;
 
-    #[test]
+    use super::{CompatFeatures, FeatureSet, IncompatFeatures};
+    use crate::{Ext4Error, FeatureClass};
+
+    #[def_test]
     fn overlapping_feature_bits_remain_in_their_own_classes() {
         let features = FeatureSet::new(
             CompatFeatures::HAS_JOURNAL.bits(),
@@ -241,7 +243,7 @@ mod tests {
         assert_eq!(features.incompat(), IncompatFeatures::RECOVER);
     }
 
-    #[test]
+    #[def_test]
     fn unknown_incompatible_bits_are_retained_and_rejected() {
         const UNKNOWN: u32 = 1 << 31;
         let features = FeatureSet::new(0, UNKNOWN, 0);
@@ -253,16 +255,6 @@ mod tests {
                 class: FeatureClass::Incompatible,
                 bits: UNKNOWN,
             })
-        );
-    }
-
-    #[test]
-    fn mount_negotiation_rejects_filesystem_without_extents() {
-        let features = FeatureSet::new(0, IncompatFeatures::FILETYPE.bits(), 0);
-
-        assert_eq!(
-            features.validate_mount(),
-            Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentFilesystem))
         );
     }
 }

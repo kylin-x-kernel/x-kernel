@@ -4,7 +4,7 @@
 
 use alloc::{collections::BTreeMap, sync::Arc, vec};
 
-#[cfg(test)]
+#[cfg(unittest)]
 use super::slot::MetadataBufferState;
 use super::{
     access::{MetadataBuffer, MetadataWriteAccess, MetadataWriteback},
@@ -185,7 +185,7 @@ impl MetadataBlockCache {
         writeback.finish_checkpoint()
     }
 
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(super) fn begin_checkpoint_for_test(
         &self,
         block: FilesystemBlock,
@@ -213,7 +213,7 @@ impl MetadataBlockCache {
             .replace_checkpoint_bytes(transaction, bytes)
     }
 
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(super) fn cached_block_count(&self) -> usize {
         lock(&self.inner.entries).len()
     }
@@ -246,7 +246,7 @@ impl MetadataBlockCache {
         self.inner.device.flush()
     }
 
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(super) fn buffer_state(&self, block: FilesystemBlock) -> Ext4Result<MetadataBufferState> {
         self.load_slot(block)?.state()
     }

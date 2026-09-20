@@ -937,27 +937,6 @@ impl Ext4SbInfo {
         self.update_unlinked_inode_metadata(inode, zero_link_size, timestamp, handle)
     }
 
-    /// Releases a zero-link inode after its final VFS reference is gone.
-    ///
-    /// # Errors
-    ///
-    /// Format, journal, and device errors are propagated.
-    #[cfg(test)]
-    pub fn evict_unlinked_inode(
-        &mut self,
-        inode: &Ext4Inode,
-        timestamp: Ext4Timestamp,
-    ) -> Ext4Result<()> {
-        if inode.links_count() != 0 {
-            return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
-        }
-        self.evict_unlinked_inode_with_policy(
-            inode,
-            timestamp,
-            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
-        )
-    }
-
     pub(crate) fn cleanup_unlinked_orphan_from_head(
         &mut self,
         inode: &Ext4Inode,
@@ -3569,3 +3548,9 @@ fn put_u32(output: &mut [u8], offset: usize, value: u32) -> Ext4Result<()> {
         .copy_from_slice(&value.to_le_bytes());
     Ok(())
 }
+
+#[cfg(unittest)]
+mod tests;
+
+#[cfg(unittest)]
+mod component_tests;

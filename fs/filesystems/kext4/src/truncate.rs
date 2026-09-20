@@ -86,7 +86,7 @@ impl Ext4SbInfo {
     }
 
     /// Changes a regular file's visible length using Linux-style orphan protection.
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub fn truncate_regular_inode(
         &mut self,
         inode: &Ext4Inode,
@@ -283,3 +283,6 @@ fn file_block_count(size: u64, block_size: u32) -> Ext4Result<u64> {
         .checked_div(block_size)
         .ok_or(Ext4Error::Overflow)
 }
+
+#[cfg(unittest)]
+mod component_tests;

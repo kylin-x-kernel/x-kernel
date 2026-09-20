@@ -2349,7 +2349,6 @@ dependencies = [
  "bitflags 2.13.1",
  "block",
  "iov_iter",
- "kalloc",
  "kcred",
  "kerrno",
  "klogger",

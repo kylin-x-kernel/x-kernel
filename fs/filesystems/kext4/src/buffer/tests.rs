@@ -4,9 +4,10 @@
 
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
-use std::{sync::Barrier, thread, time::Duration};
 
 use block::{BlockDeviceOperations, Device, DeviceKind, DriverError, DriverResult};
+use ktime_types::TimeSpan;
+use unittest::def_test;
 
 use super::*;
 use crate::{
@@ -18,22 +19,22 @@ use crate::{
 const TEST_BLOCK_SIZE: usize = 512;
 
 struct TestDevice {
-    bytes: std::sync::Mutex<Box<[u8]>>,
+    bytes: crate::sync::Mutex<Box<[u8]>>,
     read_count: AtomicUsize,
     write_count: AtomicUsize,
     flush_count: AtomicUsize,
     failures_remaining: AtomicUsize,
-    delay: Duration,
+    delay: TimeSpan,
 }
 
 impl TestDevice {
-    fn new(block_count: usize, failures: usize, delay: Duration) -> Self {
+    fn new(block_count: usize, failures: usize, delay: TimeSpan) -> Self {
         let mut bytes = vec![0; block_count * TEST_BLOCK_SIZE];
         for (index, byte) in bytes.iter_mut().enumerate() {
             *byte = index as u8;
         }
         Self {
-            bytes: std::sync::Mutex::new(bytes.into_boxed_slice()),
+            bytes: crate::sync::Mutex::new(bytes.into_boxed_slice()),
             read_count: AtomicUsize::new(0),
             write_count: AtomicUsize::new(0),
             flush_count: AtomicUsize::new(0),
@@ -43,7 +44,7 @@ impl TestDevice {
     }
 
     fn byte_at(&self, offset: usize) -> u8 {
-        self.bytes.lock().unwrap()[offset]
+        self.bytes.lock()[offset]
     }
 }
 
@@ -59,7 +60,7 @@ impl Device for TestDevice {
 
 impl BlockDeviceOperations for TestDevice {
     fn num_blocks(&self) -> u64 {
-        (self.bytes.lock().unwrap().len() / TEST_BLOCK_SIZE) as u64
+        (self.bytes.lock().len() / TEST_BLOCK_SIZE) as u64
     }
 
     fn block_size(&self) -> usize {
@@ -77,7 +78,7 @@ impl BlockDeviceOperations for TestDevice {
         {
             return Err(DriverError::Io);
         }
-        thread::sleep(self.delay);
+        ktask::sleep(self.delay);
         let start = usize::try_from(block_id)
             .map_err(|_| DriverError::InvalidInput)?
             .checked_mul(TEST_BLOCK_SIZE)
@@ -85,7 +86,7 @@ impl BlockDeviceOperations for TestDevice {
         let end = start
             .checked_add(output.len())
             .ok_or(DriverError::InvalidInput)?;
-        let bytes = self.bytes.lock().unwrap();
+        let bytes = self.bytes.lock();
         output.copy_from_slice(bytes.get(start..end).ok_or(DriverError::InvalidInput)?);
         Ok(())
     }
@@ -102,7 +103,7 @@ impl BlockDeviceOperations for TestDevice {
         let end = start
             .checked_add(input.len())
             .ok_or(DriverError::InvalidInput)?;
-        let mut bytes = self.bytes.lock().unwrap();
+        let mut bytes = self.bytes.lock();
         bytes
             .get_mut(start..end)
             .ok_or(DriverError::InvalidInput)?
@@ -130,9 +131,9 @@ fn metadata_io_for(device: Arc<TestDevice>) -> Ext4MetadataIo {
     Ext4MetadataIo::new(Arc::new(filesystem_device))
 }
 
-#[test]
+#[def_test]
 fn repeated_reads_share_one_cached_block_and_pins_prevent_reclaim() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let cache = cache_for(device.clone());
 
     let first = cache.read(FilesystemBlock::new(1)).unwrap();
@@ -147,34 +148,37 @@ fn repeated_reads_share_one_cached_block_and_pins_prevent_reclaim() {
     assert_eq!(cache.cached_block_count(), 0);
 }
 
-#[test]
+#[def_test]
 fn concurrent_reads_coalesce_one_device_io() {
     const READER_COUNT: usize = 4;
 
-    let device = Arc::new(TestDevice::new(4, 0, Duration::from_millis(20)));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::from_millis(20)));
     let cache = cache_for(device.clone());
-    let barrier = Arc::new(Barrier::new(READER_COUNT));
+    let ready = Arc::new(AtomicUsize::new(0));
     let mut readers = vec![];
 
     for _ in 0..READER_COUNT {
         let cache = cache.clone();
-        let barrier = barrier.clone();
-        readers.push(thread::spawn(move || {
-            barrier.wait();
+        let ready = ready.clone();
+        readers.push(ktask::spawn(move || {
+            ready.fetch_add(1, Ordering::AcqRel);
+            while ready.load(Ordering::Acquire) < READER_COUNT {
+                ktask::yield_now();
+            }
             let buffer = cache.read(FilesystemBlock::new(2)).unwrap();
             assert_eq!(buffer.as_ref().len(), TEST_BLOCK_SIZE);
         }));
     }
     for reader in readers {
-        reader.join().unwrap();
+        reader.join();
     }
 
     assert_eq!(device.read_count.load(Ordering::Relaxed), 1);
 }
 
-#[test]
+#[def_test]
 fn failed_reads_are_removed_and_can_be_retried() {
-    let device = Arc::new(TestDevice::new(4, 1, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 1, TimeSpan::ZERO));
     let cache = cache_for(device.clone());
 
     assert!(matches!(
@@ -188,9 +192,9 @@ fn failed_reads_are_removed_and_can_be_retried() {
     assert_eq!(cache.cached_block_count(), 1);
 }
 
-#[test]
+#[def_test]
 fn write_access_pins_buffer_and_dirty_state_prevents_reclaim() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let cache = cache_for(device);
     let block = FilesystemBlock::new(1);
     let transaction = TransactionId::new(7);
@@ -213,9 +217,9 @@ fn write_access_pins_buffer_and_dirty_state_prevents_reclaim() {
     assert_eq!(cache.cached_block_count(), 1);
 }
 
-#[test]
+#[def_test]
 fn write_access_updates_cached_metadata_bytes_without_mutating_old_snapshots() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let cache = cache_for(device);
     let block = FilesystemBlock::new(1);
     let transaction = TransactionId::new(17);
@@ -240,9 +244,9 @@ fn write_access_updates_cached_metadata_bytes_without_mutating_old_snapshots() {
     );
 }
 
-#[test]
+#[def_test]
 fn write_access_rejects_other_running_transaction() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let cache = cache_for(device);
     let block = FilesystemBlock::new(1);
 
@@ -261,9 +265,9 @@ fn write_access_rejects_other_running_transaction() {
     drop(first);
 }
 
-#[test]
+#[def_test]
 fn create_access_skips_device_read_and_requires_full_initialization() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let cache = cache_for(device.clone());
     let block = FilesystemBlock::new(3);
     let transaction = TransactionId::new(19);
@@ -304,9 +308,9 @@ fn create_access_skips_device_read_and_requires_full_initialization() {
     assert_eq!(commit_block.bytes()[TEST_BLOCK_SIZE - 1], 0x1c);
 }
 
-#[test]
+#[def_test]
 fn checkpoint_returns_dirty_buffer_to_clean_reclaimable_state() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let cache = cache_for(device);
     let block = FilesystemBlock::new(1);
     let transaction = TransactionId::new(11);
@@ -331,9 +335,9 @@ fn checkpoint_returns_dirty_buffer_to_clean_reclaimable_state() {
     assert_eq!(cache.cached_block_count(), 0);
 }
 
-#[test]
+#[def_test]
 fn writeback_keeps_frozen_snapshot_while_next_transaction_updates_buffer() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let cache = cache_for(device.clone());
     let block = FilesystemBlock::new(1);
     let first_transaction = TransactionId::new(13);
@@ -375,9 +379,9 @@ fn writeback_keeps_frozen_snapshot_while_next_transaction_updates_buffer() {
     assert_eq!(device.write_count.load(Ordering::Relaxed), 0);
 }
 
-#[test]
+#[def_test]
 fn writeback_failure_records_buffer_error() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let cache = cache_for(device);
     let block = FilesystemBlock::new(1);
     let transaction = TransactionId::new(12);
@@ -397,9 +401,9 @@ fn writeback_failure_records_buffer_error() {
     assert_eq!(cache.cached_block_count(), 1);
 }
 
-#[test]
+#[def_test]
 fn metadata_io_write_access_consumes_journal_handle_credit() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let metadata_io = metadata_io_for(device);
     let journal = JournalTransactions::new(TransactionId::new(21));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -424,9 +428,9 @@ fn metadata_io_write_access_consumes_journal_handle_credit() {
     );
 }
 
-#[test]
+#[def_test]
 fn metadata_io_write_conflict_requires_transaction_abort_after_publication() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let metadata_io = metadata_io_for(device);
     let first_journal = JournalTransactions::new(TransactionId::new(31));
     let second_journal = JournalTransactions::new(TransactionId::new(41));
@@ -447,9 +451,9 @@ fn metadata_io_write_conflict_requires_transaction_abort_after_publication() {
     assert!(second_journal.is_aborted());
 }
 
-#[test]
+#[def_test]
 fn journal_abort_does_not_rewind_successful_prior_metadata_update() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let metadata_io = metadata_io_for(device);
     let journal = JournalTransactions::new(TransactionId::new(111));
     let first_block = FilesystemBlock::new(1);
@@ -496,9 +500,9 @@ fn journal_abort_does_not_rewind_successful_prior_metadata_update() {
     ));
 }
 
-#[test]
+#[def_test]
 fn metadata_io_create_conflict_requires_transaction_abort_after_publication() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let metadata_io = metadata_io_for(device);
     let first_journal = JournalTransactions::new(TransactionId::new(81));
     let second_journal = JournalTransactions::new(TransactionId::new(91));
@@ -525,9 +529,9 @@ fn metadata_io_create_conflict_requires_transaction_abort_after_publication() {
     assert!(second_journal.is_aborted());
 }
 
-#[test]
+#[def_test]
 fn metadata_io_forget_records_revoke_without_cached_buffer() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let metadata_io = metadata_io_for(device);
     let journal = JournalTransactions::new(TransactionId::new(82));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -545,9 +549,9 @@ fn metadata_io_forget_records_revoke_without_cached_buffer() {
     assert_eq!(commit.revoked_blocks().unwrap().as_ref(), &[block]);
 }
 
-#[test]
+#[def_test]
 fn metadata_io_forget_drops_cached_current_transaction_state() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let metadata_io = metadata_io_for(device);
     let journal = JournalTransactions::new(TransactionId::new(83));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -580,9 +584,9 @@ fn metadata_io_forget_drops_cached_current_transaction_state() {
     );
 }
 
-#[test]
+#[def_test]
 fn metadata_io_forget_without_revoke_drops_current_transaction_update() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let metadata_io = metadata_io_for(device);
     let journal = JournalTransactions::new(TransactionId::new(88));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -616,9 +620,9 @@ fn metadata_io_forget_without_revoke_drops_current_transaction_update() {
     );
 }
 
-#[test]
+#[def_test]
 fn metadata_io_forget_suppresses_older_checkpoint_home_write() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let metadata_io = metadata_io_for(device.clone());
     let journal = JournalTransactions::new(TransactionId::new(85));
     let block = FilesystemBlock::new(2);
@@ -656,9 +660,9 @@ fn metadata_io_forget_suppresses_older_checkpoint_home_write() {
     journal.finish_checkpoint_for_test(&first_commit).unwrap();
 }
 
-#[test]
+#[def_test]
 fn metadata_io_create_reuses_block_with_only_revoke_skipped_checkpoint_snapshot() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let metadata_io = metadata_io_for(device.clone());
     let journal = JournalTransactions::new(TransactionId::new(86));
     let block = FilesystemBlock::new(2);
@@ -720,9 +724,9 @@ fn metadata_io_create_reuses_block_with_only_revoke_skipped_checkpoint_snapshot(
     assert_eq!(device.write_count.load(Ordering::Relaxed), 1);
 }
 
-#[test]
+#[def_test]
 fn metadata_io_forget_rejects_in_flight_checkpoint_writeback() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let metadata_io = metadata_io_for(device);
     let journal = JournalTransactions::new(TransactionId::new(87));
     let block = FilesystemBlock::new(2);
@@ -746,14 +750,18 @@ fn metadata_io_forget_rejects_in_flight_checkpoint_writeback() {
         metadata_io.forget_metadata_block(block, &mut second_handle),
         Err(Ext4Error::JournalBusy)
     );
-    assert_eq!(second_handle.remaining_credits(), 1);
 
     writeback.finish_checkpoint().unwrap();
+    // JournalBusy must preserve the in-flight buffer. Once writeback ends,
+    // the same handle can retry; a reserved revoke is idempotent.
+    metadata_io
+        .forget_metadata_block(block, &mut second_handle)
+        .unwrap();
 }
 
-#[test]
+#[def_test]
 fn metadata_io_forget_keeps_cached_block_when_revoke_credit_is_missing() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let metadata_io = metadata_io_for(device);
     let block = FilesystemBlock::new(3);
     let _cached = metadata_io.read_block(block).unwrap();
@@ -771,9 +779,9 @@ fn metadata_io_forget_keeps_cached_block_when_revoke_credit_is_missing() {
     );
 }
 
-#[test]
+#[def_test]
 fn checkpoint_committed_writes_dirty_metadata_and_flushes() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let metadata_io = metadata_io_for(device.clone());
     let journal = JournalTransactions::new(TransactionId::new(51));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -806,9 +814,9 @@ fn checkpoint_committed_writes_dirty_metadata_and_flushes() {
     );
 }
 
-#[test]
+#[def_test]
 fn checkpoint_committed_writes_frozen_snapshot_while_next_transaction_stays_dirty() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let metadata_io = metadata_io_for(device.clone());
     let journal = JournalTransactions::new(TransactionId::new(52));
     let block = FilesystemBlock::new(2);
@@ -856,9 +864,9 @@ fn checkpoint_committed_writes_frozen_snapshot_while_next_transaction_stays_dirt
     assert_eq!(device.byte_at(device_offset), 0x53);
 }
 
-#[test]
+#[def_test]
 fn checkpoint_committed_preserves_multiple_frozen_transactions_in_order() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let metadata_io = metadata_io_for(device.clone());
     let journal = JournalTransactions::new(TransactionId::new(53));
     let block = FilesystemBlock::new(2);
@@ -939,9 +947,9 @@ fn checkpoint_committed_preserves_multiple_frozen_transactions_in_order() {
     assert_eq!(device.byte_at(device_offset), 0x55);
 }
 
-#[test]
+#[def_test]
 fn checkpoint_committed_writes_created_initialized_metadata_without_reading_old_block() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let metadata_io = metadata_io_for(device.clone());
     let journal = JournalTransactions::new(TransactionId::new(101));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -976,9 +984,9 @@ fn checkpoint_committed_writes_created_initialized_metadata_without_reading_old_
     );
 }
 
-#[test]
+#[def_test]
 fn journal_commit_blocks_capture_transaction_owned_metadata_snapshot() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let metadata_io = metadata_io_for(device);
     let journal = JournalTransactions::new(TransactionId::new(71));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -1004,9 +1012,9 @@ fn journal_commit_blocks_capture_transaction_owned_metadata_snapshot() {
     assert_eq!(&blocks[0].bytes()[..2], &[0x71, 0x72]);
 }
 
-#[test]
+#[def_test]
 fn checkpoint_committed_releases_unchanged_journaled_buffer_without_write() {
-    let device = Arc::new(TestDevice::new(4, 0, Duration::ZERO));
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
     let metadata_io = metadata_io_for(device.clone());
     let journal = JournalTransactions::new(TransactionId::new(61));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();

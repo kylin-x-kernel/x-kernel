@@ -5,11 +5,8 @@
 //! Filesystem-level JBD2 commit, checkpoint, and recovery glue.
 
 use alloc::{collections::BTreeMap, sync::Arc, vec};
-#[cfg(not(target_os = "none"))]
-use std::sync::Mutex;
 
 use block::BlockDeviceOperations;
-#[cfg(target_os = "none")]
 use ksync::Mutex;
 
 use crate::{
@@ -94,7 +91,7 @@ impl MountedJournal {
         lock(&self.state).storage.superblock = superblock;
     }
 
-    #[cfg(test)]
+    #[cfg(unittest)]
     fn pending_checkpoint_count(&self) -> usize {
         lock(&self.state).checkpoint_policies.len()
     }
@@ -170,22 +167,14 @@ impl MountedJournal {
         self.transactions.begin(credits)
     }
 
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) fn is_aborted(&self) -> bool {
         self.transactions.is_aborted()
     }
 
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) fn running_transaction(&self) -> Ext4Result<Option<TransactionId>> {
         self.transactions.running_transaction()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn force_commit_for_test(
-        &self,
-        transaction: TransactionId,
-    ) -> Ext4Result<Arc<RuntimeTransaction>> {
-        self.transactions.force_commit(transaction)
     }
 }
 
@@ -403,7 +392,7 @@ impl Ext4SbInfo {
         Ok(true)
     }
 
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) fn pending_checkpoint_count(&self) -> usize {
         self.journal
             .as_ref()
@@ -419,16 +408,6 @@ impl Ext4SbInfo {
             self.run_checkpoint_worker()?;
         }
         Ok(())
-    }
-
-    #[cfg(test)]
-    fn enqueue_metadata_checkpoint(
-        &mut self,
-        transaction: TransactionId,
-        recovery_flag_policy: RecoveryFlagPolicy,
-    ) -> Ext4Result<()> {
-        self.drain_pending_checkpoints()?;
-        self.append_metadata_checkpoint(transaction, recovery_flag_policy)
     }
 
     fn append_metadata_checkpoint(
@@ -471,14 +450,6 @@ impl Ext4SbInfo {
             return Err(error);
         }
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn enqueue_metadata_checkpoint_for_test(
-        &mut self,
-        transaction: TransactionId,
-    ) -> Ext4Result<()> {
-        self.enqueue_metadata_checkpoint(transaction, RecoveryFlagPolicy::ClearAfterCheckpoint)
     }
 
     pub(crate) fn fail_metadata_mutation(
@@ -557,11 +528,6 @@ impl Ext4SbInfo {
             journal.transactions.abort(error);
         }
         error
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_checkpoint_worker_for_test(&mut self) -> Ext4Result<()> {
-        self.run_checkpoint_worker()
     }
 
     #[allow(dead_code)]
@@ -1022,3 +988,12 @@ impl Ext4SbInfo {
         )
     }
 }
+
+#[cfg(unittest)]
+pub(crate) mod tests;
+
+#[cfg(unittest)]
+mod recovery_tests;
+
+#[cfg(unittest)]
+mod component_tests;

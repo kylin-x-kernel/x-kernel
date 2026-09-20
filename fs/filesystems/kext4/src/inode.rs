@@ -1413,12 +1413,6 @@ impl Ext4SbInfo {
         )
     }
 
-    /// Loads filesystem-private state for the root inode.
-    #[cfg(test)]
-    pub fn root_inode(&self) -> Ext4Result<Ext4Inode> {
-        self.load_inode_private(InodeNumber::new(disk_inode::EXT4_ROOT_INO))
-    }
-
     /// Decodes filesystem-private state for a public inode number.
     ///
     /// KVFS callers must invoke this only from the initializer reserved by its
@@ -2449,18 +2443,19 @@ fn inode_checksum(
     }
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
+    use unittest::def_test;
+
     use super::{
         EncodedTimestamp, Ext4DeviceId, Ext4Inode, Ext4InodeMetadata, Ext4Timestamp,
-        InodeInitialization, InodeKind, RawTimestampFields, disk_inode, encode_initialized_inode,
-        timestamp_limits_for_inode_size,
+        InodeInitialization, InodeKind, RawTimestampFields, disk_inode,
     };
     use crate::{CorruptKind, Ext4Error, InodeNumber, UnsupportedKind};
 
     const BLOCK_SIZE: u32 = 4096;
 
-    #[test]
+    #[def_test]
     fn exposes_immutable_and_append_only_inode_flags() {
         let inode = symlink_inode(
             9,
@@ -2474,7 +2469,7 @@ mod tests {
         assert!(inode.is_append_only());
     }
 
-    #[test]
+    #[def_test]
     fn classifies_fast_symlink_by_data_blocks_not_size_only() {
         let block = fast_symlink_block(b"hello.txt");
         let inode = symlink_inode(9, 0, 0, 0, block);
@@ -2486,7 +2481,7 @@ mod tests {
         assert_eq!(storage.as_deref(), Some(b"hello.txt".as_slice()));
     }
 
-    #[test]
+    #[def_test]
     fn classifies_short_block_mapped_symlink_as_block_mapped() {
         let inode = symlink_inode(9, 8, disk_inode::EXT4_EXTENTS_FL, 0, [0; 60]);
 
@@ -2497,7 +2492,7 @@ mod tests {
         assert_eq!(storage, None);
     }
 
-    #[test]
+    #[def_test]
     fn excludes_xattr_blocks_from_fast_symlink_data_blocks() {
         let block = fast_symlink_block(b"hello.txt");
         let inode = symlink_inode(9, 8, 0, 42, block);
@@ -2509,7 +2504,7 @@ mod tests {
         assert_eq!(storage.as_deref(), Some(b"hello.txt".as_slice()));
     }
 
-    #[test]
+    #[def_test]
     fn classifies_symlink_with_filesystem_ea_inode_feature_not_inode_flag() {
         let block = fast_symlink_block(b"hello.txt");
         let inode = symlink_inode(9, 8, 0, 0, block);
@@ -2521,7 +2516,7 @@ mod tests {
         assert_eq!(storage.as_deref(), Some(b"hello.txt".as_slice()));
     }
 
-    #[test]
+    #[def_test]
     fn ignores_inode_ea_inode_flag_when_filesystem_feature_is_absent() {
         let inode = symlink_inode(9, 8, disk_inode::EXT4_EA_INODE_FL, 0, [0; 60]);
 
@@ -2532,7 +2527,7 @@ mod tests {
         assert_eq!(storage, None);
     }
 
-    #[test]
+    #[def_test]
     fn rejects_zero_length_fast_symlink() {
         let inode = symlink_inode(0, 0, 0, 0, fast_symlink_block(b"hello.txt"));
 
@@ -2542,7 +2537,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn rejects_fast_symlink_size_that_reaches_past_i_block() {
         let inode = symlink_inode(60, 0, 0, 0, [b'a'; disk_inode::INODE_BLOCK_BYTES]);
 
@@ -2552,7 +2547,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn rejects_fast_symlink_without_nul_terminator_at_size() {
         let mut block = [b'a'; disk_inode::INODE_BLOCK_BYTES];
         block[..9].copy_from_slice(b"hello.txt");
@@ -2564,7 +2559,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn rejects_fast_symlink_with_embedded_nul_before_size() {
         let mut block = fast_symlink_block(b"hello.txt");
         block[4] = 0;
@@ -2576,7 +2571,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn decodes_old_device_id_from_i_block_zero() {
         let mut block = [0; disk_inode::INODE_BLOCK_BYTES];
         put_u32(&mut block, 0, (12 << 8) | 34);
@@ -2588,7 +2583,7 @@ mod tests {
         assert_eq!(device.minor(), 34);
     }
 
-    #[test]
+    #[def_test]
     fn decodes_new_device_id_from_i_block_one() {
         let mut block = [0; disk_inode::INODE_BLOCK_BYTES];
         put_u32(&mut block, 4, encode_new_device_id(0xabc, 0xdef0));
@@ -2600,7 +2595,7 @@ mod tests {
         assert_eq!(device.minor(), 0xdef0);
     }
 
-    #[test]
+    #[def_test]
     fn rejects_device_id_outside_ext4_new_encoding() {
         assert_eq!(
             Ext4DeviceId::new_checked(0x1000, 0),
@@ -2613,7 +2608,7 @@ mod tests {
         assert!(Ext4DeviceId::new_checked(0x0fff, 0x000f_ffff).is_ok());
     }
 
-    #[test]
+    #[def_test]
     fn special_inode_initialization_rejects_unencodable_device_id() {
         assert_eq!(
             InodeInitialization::special(
@@ -2626,7 +2621,7 @@ mod tests {
             Err(Ext4Error::Unsupported(UnsupportedKind::DeviceId))
         );
     }
-    #[test]
+    #[def_test]
     fn decodes_signed_timestamp_without_extra_epoch() {
         let timestamp =
             Ext4Timestamp::try_from(timestamp_fields(0xffff_ffff, None)).expect("decode timestamp");
@@ -2634,7 +2629,7 @@ mod tests {
         assert_eq!(timestamp, Ext4Timestamp::new(-1, 0));
     }
 
-    #[test]
+    #[def_test]
     fn decodes_timestamp_with_extra_epoch_and_nanoseconds() {
         let timestamp =
             Ext4Timestamp::try_from(timestamp_fields(0x8000_0000, Some((123_456_789 << 2) | 1)))
@@ -2643,7 +2638,7 @@ mod tests {
         assert_eq!(timestamp, Ext4Timestamp::new(2_147_483_648, 123_456_789));
     }
 
-    #[test]
+    #[def_test]
     fn rejects_timestamp_with_invalid_nanoseconds() {
         assert_eq!(
             Ext4Timestamp::try_from(timestamp_fields(0, Some(1_000_000_000 << 2))),
@@ -2651,7 +2646,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn encodes_timestamp_without_extra_field() {
         let encoded = Ext4Timestamp::new(-1, 0)
             .encode(false)
@@ -2666,7 +2661,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn truncates_nanoseconds_without_extra_timestamp_field() {
         let encoded = Ext4Timestamp::new(1, 1)
             .encode(false)
@@ -2681,7 +2676,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn clamps_seconds_without_extra_timestamp_field() {
         let encoded = Ext4Timestamp::new(i64::MAX, 0)
             .encode(false)
@@ -2696,7 +2691,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn encodes_timestamp_with_extra_epoch_and_nanoseconds() {
         let encoded = Ext4Timestamp::new(2_147_483_648, 123_456_789)
             .encode(true)
@@ -2709,66 +2704,6 @@ mod tests {
                 extra: Some((123_456_789 << 2) | 1),
             }
         );
-    }
-
-    #[test]
-    fn timestamp_limits_track_inode_extra_field_capacity() {
-        let legacy = timestamp_limits_for_inode_size(128);
-        assert_eq!(legacy.granularity_ns(), ktime_types::NANOS_PER_SEC as u32);
-        assert_eq!(legacy.minimum_seconds(), i32::MIN as i64);
-        assert_eq!(legacy.maximum_seconds(), i32::MAX as i64);
-
-        let extended = timestamp_limits_for_inode_size(256);
-        assert_eq!(extended.granularity_ns(), 1);
-        assert_eq!(extended.minimum_seconds(), i32::MIN as i64);
-        assert_eq!(extended.maximum_seconds(), 15_032_385_535);
-    }
-
-    #[test]
-    fn initialized_extended_inode_preserves_epoch_and_nanoseconds() {
-        let timestamp = Ext4Timestamp::new(2_147_483_648, 123_456_789);
-        let mut bytes = [0; 256];
-        encode_initialized_inode(
-            &mut bytes,
-            InodeNumber::new(11),
-            InodeInitialization::regular_file(0o644, 1000, 1001).with_timestamp(timestamp),
-            32,
-            false,
-            false,
-            0,
-        )
-        .unwrap();
-
-        let metadata =
-            Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false)
-                .unwrap();
-        assert_eq!(metadata.atime, timestamp);
-        assert_eq!(metadata.ctime, timestamp);
-        assert_eq!(metadata.mtime, timestamp);
-    }
-
-    #[test]
-    fn initialized_legacy_inode_clamps_post_2038_timestamp() {
-        let mut bytes = [0; disk_inode::GOOD_OLD_INODE_SIZE];
-        encode_initialized_inode(
-            &mut bytes,
-            InodeNumber::new(11),
-            InodeInitialization::regular_file(0o644, 1000, 1001)
-                .with_timestamp(Ext4Timestamp::new(2_147_483_648, 123_456_789)),
-            0,
-            false,
-            false,
-            0,
-        )
-        .unwrap();
-
-        let metadata =
-            Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false)
-                .unwrap();
-        let maximum = Ext4Timestamp::new(i32::MAX as i64, 0);
-        assert_eq!(metadata.atime, maximum);
-        assert_eq!(metadata.ctime, maximum);
-        assert_eq!(metadata.mtime, maximum);
     }
 
     fn symlink_inode(
@@ -2848,7 +2783,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[def_test]
     fn extra_isize_expansion_failure_state_is_resident_and_resettable() {
         let inode = test_inode(regular_inode_metadata());
         assert!(!inode.is_extra_isize_expansion_disabled());
@@ -2863,7 +2798,7 @@ mod tests {
         assert!(!inode.is_extra_isize_expansion_disabled());
     }
 
-    #[test]
+    #[def_test]
     fn delayed_allocation_extents_merge_split_and_count_blocks() {
         let inode = test_inode(regular_inode_metadata());
         assert_eq!(
@@ -3261,3 +3196,6 @@ mod unittests {
         }
     }
 }
+
+#[cfg(unittest)]
+mod component_tests;

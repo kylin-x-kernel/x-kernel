@@ -2,6 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use unittest::def_test;
+
 use super::{
     BlockMapping, BlockMappingFlags, ExtentMappingState,
     legacy::legacy_max_file_size,
@@ -10,7 +12,7 @@ use super::{
     validate::{decode_header, decode_leaf, find_index, map_leaf, validate_extent_entries},
 };
 
-#[test]
+#[def_test]
 fn max_file_sizes_match_linux_ext4_limits() {
     assert_eq!(extent_max_file_size(4096, true), Ok(17_592_186_040_320));
     assert_eq!(extent_max_file_size(4096, false), Ok(2_199_023_251_456));
@@ -22,7 +24,7 @@ use crate::{
     BlockCount, CorruptKind, Ext4Error, PhysicalBlock, UnsupportedKind, disk::extent as disk_extent,
 };
 
-#[test]
+#[def_test]
 fn find_index_uses_first_child_before_first_key() {
     let mut bytes = [0; 128];
     put_header(&mut bytes, 2, 4, 1);
@@ -35,7 +37,7 @@ fn find_index_uses_first_child_before_first_key() {
     assert_eq!(selected.next_lblk, Some(200));
 }
 
-#[test]
+#[def_test]
 fn map_leaf_caps_trailing_hole_at_parent_limit() {
     let mut bytes = [0; 128];
     put_header(&mut bytes, 1, 4, 0);
@@ -51,7 +53,7 @@ fn map_leaf_caps_trailing_hole_at_parent_limit() {
     );
 }
 
-#[test]
+#[def_test]
 fn validate_extent_entries_rejects_zero_length_extent() {
     let mut bytes = [0; 128];
     put_header(&mut bytes, 1, 4, 0);
@@ -64,7 +66,7 @@ fn validate_extent_entries_rejects_zero_length_extent() {
     );
 }
 
-#[test]
+#[def_test]
 fn validate_extent_entries_rejects_overlapping_extents() {
     let mut bytes = [0; 128];
     put_header(&mut bytes, 2, 4, 0);
@@ -78,7 +80,7 @@ fn validate_extent_entries_rejects_overlapping_extents() {
     );
 }
 
-#[test]
+#[def_test]
 fn validate_extent_entries_rejects_physical_system_zone_overlap() {
     let mut bytes = [0; 128];
     put_header(&mut bytes, 1, 4, 0);
@@ -91,7 +93,7 @@ fn validate_extent_entries_rejects_physical_system_zone_overlap() {
     );
 }
 
-#[test]
+#[def_test]
 fn validate_extent_entries_rejects_child_range_overflow() {
     let mut bytes = [0; 128];
     put_header(&mut bytes, 1, 4, 0);
@@ -104,7 +106,7 @@ fn validate_extent_entries_rejects_child_range_overflow() {
     );
 }
 
-#[test]
+#[def_test]
 fn insert_inline_extent_keeps_leaf_order() {
     let mut bytes = [0; 128];
     put_header(&mut bytes, 2, 4, 0);
@@ -136,7 +138,7 @@ fn insert_inline_extent_keeps_leaf_order() {
     );
 }
 
-#[test]
+#[def_test]
 fn insert_inline_extent_merges_adjacent_initialized_extents() {
     let mut bytes = [0; 128];
     put_header(&mut bytes, 2, 4, 0);
@@ -162,7 +164,7 @@ fn insert_inline_extent_merges_adjacent_initialized_extents() {
     assert!(!extent.is_unwritten());
 }
 
-#[test]
+#[def_test]
 fn insert_inline_extent_preserves_unwritten_state() {
     let mut bytes = [0; 128];
     put_header(&mut bytes, 0, 4, 0);
@@ -182,7 +184,7 @@ fn insert_inline_extent_preserves_unwritten_state() {
     assert_eq!(extent.actual_len(), 7);
 }
 
-#[test]
+#[def_test]
 fn insert_inline_extent_splits_run_larger_than_extent_entry() {
     let mut bytes = [0; 128];
     put_header(&mut bytes, 0, 4, 0);
@@ -212,7 +214,7 @@ fn insert_inline_extent_splits_run_larger_than_extent_entry() {
     );
 }
 
-#[test]
+#[def_test]
 fn insert_inline_extent_rejects_overlap() {
     let mut bytes = [0; 128];
     put_header(&mut bytes, 1, 4, 0);
@@ -231,7 +233,7 @@ fn insert_inline_extent_rejects_overlap() {
     );
 }
 
-#[test]
+#[def_test]
 fn insert_inline_extent_rejects_full_inline_root_without_merge() {
     let mut bytes = [0; 128];
     put_header(&mut bytes, 1, 1, 0);
@@ -250,7 +252,7 @@ fn insert_inline_extent_rejects_full_inline_root_without_merge() {
     );
 }
 
-#[test]
+#[def_test]
 fn insert_inline_extent_rejects_indexed_root() {
     let mut bytes = [0; 128];
     put_header(&mut bytes, 1, 4, 1);

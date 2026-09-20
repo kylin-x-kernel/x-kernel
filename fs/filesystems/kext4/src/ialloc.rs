@@ -599,3 +599,6 @@ impl Ext4SbInfo {
         Ok(())
     }
 }
+
+#[cfg(unittest)]
+mod component_tests;

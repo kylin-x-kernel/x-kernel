@@ -296,7 +296,7 @@ impl Ext4SbInfo {
     /// namespaces, plus opaque POSIX ACL xattr storage. The updated xattr set
     /// may be split between the inode body and one external xattr block, with
     /// refcount and checksum maintenance for the external part.
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub fn set_xattr(
         &mut self,
         inode: &Ext4Inode,
@@ -1005,7 +1005,7 @@ fn list_inline_xattr_names_from_bytes(
     )
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 fn set_xattr_value(
     xattrs: &mut Vec<Ext4Xattr>,
     namespace: Ext4XattrNamespace,
@@ -1059,7 +1059,7 @@ fn set_xattr_value_with_mode(
     Ok(XattrMutation::Changed)
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 fn remove_xattr_value(
     xattrs: &mut Vec<Ext4Xattr>,
     namespace: Ext4XattrNamespace,
@@ -1941,9 +1941,11 @@ fn validate_non_overlapping_value_ranges(ranges: &mut [(usize, usize)]) -> Ext4R
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
     use alloc::{format, vec, vec::Vec};
+
+    use unittest::def_test;
 
     use super::*;
 
@@ -1978,7 +1980,7 @@ mod tests {
         offset + disk_xattr::entry_len(name.len()).unwrap()
     }
 
-    #[test]
+    #[def_test]
     fn external_xattr_encode_matches_linux_hashes_for_multiple_entries() {
         // Non-repeating values of lengths 301 and 7 exercise both multi-word
         // folding and zero-padded final words.
@@ -2032,7 +2034,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn external_xattr_zero_entry_hash_disables_block_hash() {
         let mut block_hasher = ExternalXattrBlockHasher::new();
         block_hasher.update(0x1122_3344);
@@ -2042,7 +2044,7 @@ mod tests {
         assert_eq!(block_hasher.finish(), 0);
     }
 
-    #[test]
+    #[def_test]
     fn external_xattr_header_allows_nonzero_reserved_words() {
         let mut bytes = vec![0; disk_xattr::XATTR_HEADER_SIZE];
         put_u32(&mut bytes, 0x00, disk_xattr::XATTR_MAGIC).unwrap();
@@ -2058,14 +2060,14 @@ mod tests {
             .expect("reserved words are not an ext4 xattr validity requirement");
     }
 
-    #[test]
+    #[def_test]
     fn xattr_value_ranges_allow_shared_value() {
         let mut ranges = [(32, 48), (32, 48), (48, 52)];
 
         validate_non_overlapping_value_ranges(&mut ranges).unwrap();
     }
 
-    #[test]
+    #[def_test]
     fn xattr_value_ranges_reject_partial_overlap() {
         let mut ranges = [(32, 48), (40, 52)];
 
@@ -2075,7 +2077,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn external_xattr_entries_must_be_sorted() {
         let mut bytes = vec![0; 64];
         let next = put_xattr_entry(&mut bytes, 0, 1, b"z", 0, 0);
@@ -2088,7 +2090,7 @@ mod tests {
         decode_xattr_entries(&bytes, 0, XattrEntryOrder::Unchecked, &mut Vec::new()).unwrap();
     }
 
-    #[test]
+    #[def_test]
     fn xattr_entry_names_reject_embedded_nul() {
         let mut bytes = vec![0; 64];
         put_xattr_entry(&mut bytes, 0, 1, b"a\0b", 0, 0);
@@ -2099,7 +2101,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn inline_xattr_set_replace_and_remove_round_trips() {
         let mut bytes = vec![0; 128];
         let mut xattrs = Vec::new();
@@ -2135,7 +2137,7 @@ mod tests {
         assert_eq!(decoded[0].name_bytes(), b"alpha");
     }
 
-    #[test]
+    #[def_test]
     fn inline_xattr_listing_emits_only_borrowed_names() {
         let mut bytes = vec![0; 128];
         let xattrs = vec![
@@ -2164,7 +2166,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn xattr_set_mode_enforces_create_and_replace_atomically() {
         let mut xattrs = Vec::new();
         set_xattr_value_with_mode(
@@ -2229,7 +2231,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn replacing_an_identical_xattr_value_is_unchanged() {
         let mut xattrs = vec![Ext4Xattr {
             namespace: Ext4XattrNamespace::User,
@@ -2251,7 +2253,7 @@ mod tests {
         assert_eq!(xattrs[0].value(), b"value");
     }
 
-    #[test]
+    #[def_test]
     fn inline_xattr_encode_orders_entries_for_linux_lookup() {
         let mut bytes = vec![0; 128];
         let xattrs = vec![
@@ -2294,7 +2296,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn inline_xattr_encode_reports_external_block_requirement() {
         let xattrs = vec![Ext4Xattr {
             namespace: Ext4XattrNamespace::User,
@@ -2321,7 +2323,7 @@ mod tests {
             .collect()
     }
 
-    #[test]
+    #[def_test]
     fn xattr_set_uses_inode_and_external_block_without_rebalancing() {
         let inline = numbered_xattrs(10);
         let inline_capacity = inline_xattr_encoded_len(&inline).unwrap();
@@ -2352,7 +2354,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn xattr_set_keeps_current_extra_isize_when_value_moves_external() {
         let inline = vec![Ext4Xattr {
             namespace: Ext4XattrNamespace::User,
@@ -2385,7 +2387,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn xattr_mutation_reuses_unchanged_shared_external_block_when_disk_is_full() {
         let old_external = vec![Ext4Xattr {
             namespace: Ext4XattrNamespace::Security,
@@ -2424,7 +2426,7 @@ mod tests {
         assert_eq!(plan.external_block_action, ExternalXattrBlockAction::Reuse);
     }
 
-    #[test]
+    #[def_test]
     fn xattr_remove_preserves_unrelated_storage_regions() {
         let removed = Ext4Xattr {
             namespace: Ext4XattrNamespace::User,
@@ -2461,7 +2463,7 @@ mod tests {
         assert_eq!(plan.external_block_action, ExternalXattrBlockAction::Reuse);
     }
 
-    #[test]
+    #[def_test]
     fn extra_isize_layout_falls_back_to_minimum_then_current_size() {
         let candidates = extra_isize_layout_candidates(256, 0, 80, 16).unwrap();
         assert_eq!(candidates[0].unwrap().extra_isize, 80);
@@ -2472,7 +2474,7 @@ mod tests {
         assert_eq!(candidates[2].unwrap().inline_capacity, 128);
     }
 
-    #[test]
+    #[def_test]
     fn extra_isize_expansion_does_not_rebalance_existing_external_xattrs() {
         let inline = numbered_xattrs(4);
         let external = vec![Ext4Xattr {
@@ -2489,7 +2491,7 @@ mod tests {
         assert_eq!(plan.external, external);
     }
 
-    #[test]
+    #[def_test]
     fn extra_isize_expansion_moves_the_smallest_entry_that_frees_enough_space() {
         let small = Ext4Xattr {
             namespace: Ext4XattrNamespace::User,
@@ -2519,7 +2521,7 @@ mod tests {
         assert!(plan.inline.contains(&large));
     }
 
-    #[test]
+    #[def_test]
     fn extra_isize_expansion_uses_linux_last_entry_fallback() {
         let entries = [b"aaa", b"bbb", b"ccc"].map(|name| Ext4Xattr {
             namespace: Ext4XattrNamespace::User,
@@ -2542,7 +2544,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn extra_isize_expansion_keeps_system_data_in_the_inode_body() {
         let system_data = Ext4Xattr {
             namespace: Ext4XattrNamespace::System,
@@ -2565,7 +2567,7 @@ mod tests {
         assert_eq!(plan.external, vec![user]);
     }
 
-    #[test]
+    #[def_test]
     fn storage_plan_rejects_internal_extra_isize_shrink() {
         assert_eq!(
             validate_nonshrinking_extra_isize(32, 16),
@@ -2575,7 +2577,7 @@ mod tests {
         validate_nonshrinking_extra_isize(32, 64).unwrap();
     }
 
-    #[test]
+    #[def_test]
     fn xattr_mutation_credits_follow_storage_transition() {
         assert_eq!(
             xattr_mutation_credit_count(
@@ -2629,7 +2631,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn settable_xattr_validation_rejects_unsupported_namespace() {
         validate_settable_xattr(Ext4XattrNamespace::PosixAclAccess, b"").unwrap();
         validate_settable_xattr(Ext4XattrNamespace::PosixAclDefault, b"").unwrap();
@@ -2727,3 +2729,6 @@ mod unittests {
         );
     }
 }
+
+#[cfg(unittest)]
+mod component_tests;

@@ -4,13 +4,9 @@
 
 use alloc::{collections::VecDeque, sync::Arc};
 
-#[cfg(not(target_os = "none"))]
-use super::sync::Condvar;
-#[cfg(target_os = "none")]
-use super::sync::WaitQueue;
 use super::{
     access::{MetadataBuffer, MetadataWriteAccess, MetadataWriteback},
-    sync::{Mutex, lock},
+    sync::{Mutex, WaitQueue, lock},
 };
 use crate::{Ext4Error, Ext4Result, UnsupportedKind, jbd2::TransactionId};
 
@@ -58,20 +54,14 @@ fn transaction_conflict_error() -> Ext4Error {
 }
 
 pub(super) struct MetadataBufferSlot {
-    #[cfg(target_os = "none")]
     waiters: WaitQueue,
-    #[cfg(not(target_os = "none"))]
-    condition: Condvar,
     contents: Mutex<BufferContents>,
 }
 
 impl MetadataBufferSlot {
     pub(super) fn new() -> Self {
         Self {
-            #[cfg(target_os = "none")]
             waiters: WaitQueue::new(),
-            #[cfg(not(target_os = "none"))]
-            condition: Condvar::new(),
             contents: Mutex::new(BufferContents::Loading),
         }
     }
@@ -87,21 +77,9 @@ impl MetadataBufferSlot {
         )
     }
 
-    #[cfg(target_os = "none")]
     pub(super) fn wait_until_loaded(&self) {
         self.waiters
             .wait_until(|| !matches!(&*lock(&self.contents), BufferContents::Loading));
-    }
-
-    #[cfg(not(target_os = "none"))]
-    pub(super) fn wait_until_loaded(&self) {
-        let mut contents = lock(&self.contents);
-        while matches!(&*contents, BufferContents::Loading) {
-            contents = self
-                .condition
-                .wait(contents)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-        }
     }
 
     pub(super) fn publish(&self, bytes: Arc<[u8]>) {
@@ -594,7 +572,7 @@ impl MetadataBufferSlot {
         self.fail(error);
     }
 
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(super) fn state(&self) -> Ext4Result<MetadataBufferState> {
         match &*lock(&self.contents) {
             BufferContents::Ready {
@@ -615,14 +593,8 @@ impl MetadataBufferSlot {
         }
     }
 
-    #[cfg(target_os = "none")]
     fn notify_all(&self) {
         self.waiters.notify_all(false);
-    }
-
-    #[cfg(not(target_os = "none"))]
-    fn notify_all(&self) {
-        self.condition.notify_all();
     }
 }
 

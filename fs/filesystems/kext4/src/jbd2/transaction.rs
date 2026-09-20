@@ -14,27 +14,15 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt;
-#[cfg(not(target_os = "none"))]
-use std::sync::{Condvar, Mutex, MutexGuard};
 
-#[cfg(target_os = "none")]
 use ksync::{Mutex, MutexGuard};
-#[cfg(target_os = "none")]
 use ktask::WaitQueue;
 
 use super::{JournalPersistedCommit, TransactionId};
 use crate::{Ext4Error, Ext4Result, FilesystemBlock};
 
-#[cfg(target_os = "none")]
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock()
-}
-
-#[cfg(not(target_os = "none"))]
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Metadata journal credits reserved for one operation.
@@ -207,13 +195,13 @@ impl RuntimeTransaction {
     }
 
     /// Returns the credits reserved by handles in this transaction.
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub fn reserved_credits(&self) -> Ext4Result<u32> {
         Ok(self.frozen_state()?.reserved_credits)
     }
 
     /// Returns credits consumed for metadata buffer write access.
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub fn used_credits(&self) -> Ext4Result<u32> {
         Ok(self.frozen_state()?.used_credits)
     }
@@ -341,7 +329,7 @@ pub struct JournalCheckpoint {
 
 impl JournalCheckpoint {
     /// Returns the checkpointed transaction sequence.
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub const fn transaction(&self) -> TransactionId {
         self.transaction
     }
@@ -353,10 +341,7 @@ impl JournalCheckpoint {
 /// checkpoint ordering. `MountedJournal` drives persistence while the same
 /// runtime transaction moves through the phases represented here.
 pub(crate) struct JournalTransactions {
-    #[cfg(target_os = "none")]
     checkpoint_waiters: WaitQueue,
-    #[cfg(not(target_os = "none"))]
-    checkpoint_condition: Condvar,
     max_reserved_credits: u32,
     inner: Mutex<JournalInner>,
 }
@@ -372,7 +357,7 @@ impl fmt::Debug for JournalTransactions {
 
 impl JournalTransactions {
     /// Creates an unbounded transaction engine for isolated tests.
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub fn new(first_transaction: TransactionId) -> Self {
         Self::new_with_credit_limit(first_transaction, u32::MAX)
     }
@@ -383,10 +368,7 @@ impl JournalTransactions {
         max_reserved_credits: u32,
     ) -> Self {
         Self {
-            #[cfg(target_os = "none")]
             checkpoint_waiters: WaitQueue::new(),
-            #[cfg(not(target_os = "none"))]
-            checkpoint_condition: Condvar::new(),
             max_reserved_credits,
             inner: Mutex::new(JournalInner {
                 aborted: None,
@@ -533,7 +515,7 @@ impl JournalTransactions {
     }
 
     /// Returns whether this journal has been aborted.
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub fn is_aborted(&self) -> bool {
         lock(&self.inner).aborted.is_some()
     }
@@ -743,7 +725,7 @@ impl JournalTransactions {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) fn start_checkpoint_for_test(
         &self,
         commit: &Arc<RuntimeTransaction>,
@@ -765,7 +747,7 @@ impl JournalTransactions {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) fn finish_checkpoint_for_test(
         &self,
         commit: &Arc<RuntimeTransaction>,
@@ -785,27 +767,7 @@ impl JournalTransactions {
     }
 
     /// Waits for a committed transaction's checkpoint state.
-    #[cfg(all(test, not(target_os = "none")))]
-    pub fn wait_checkpoint(&self, transaction: TransactionId) -> Ext4Result<JournalCheckpoint> {
-        let mut inner = lock(&self.inner);
-        loop {
-            check_not_aborted(&inner)?;
-            if is_checkpointed(&inner, transaction) {
-                return Ok(JournalCheckpoint { transaction });
-            }
-            if is_checkpoint_pending(&inner, transaction) {
-                inner = self
-                    .checkpoint_condition
-                    .wait(inner)
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                continue;
-            }
-            return Err(Ext4Error::InvalidJournalTransaction);
-        }
-    }
-
-    /// Waits for a committed transaction's checkpoint state.
-    #[cfg(all(test, target_os = "none"))]
+    #[cfg(unittest)]
     pub fn wait_checkpoint(&self, transaction: TransactionId) -> Ext4Result<JournalCheckpoint> {
         self.checkpoint_waiters.wait_until(|| {
             let inner = lock(&self.inner);
@@ -848,14 +810,8 @@ impl JournalTransactions {
         running.with_running(f)
     }
 
-    #[cfg(target_os = "none")]
     fn notify_checkpoint_waiters(&self) {
         self.checkpoint_waiters.notify_all(false);
-    }
-
-    #[cfg(not(target_os = "none"))]
-    fn notify_checkpoint_waiters(&self) {
-        self.checkpoint_condition.notify_all();
     }
 }
 
@@ -888,7 +844,7 @@ const fn transaction_is_same_or_older(
     reference.get().wrapping_sub(transaction.get()) as i32 >= 0
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 fn is_checkpoint_pending(inner: &JournalInner, transaction: TransactionId) -> bool {
     inner
         .running
@@ -1048,15 +1004,14 @@ impl Drop for JournalHandle<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
-    #[cfg(not(target_os = "none"))]
-    use std::{sync::mpsc, thread, time::Duration};
+    use unittest::def_test;
 
     use super::*;
     use crate::FilesystemBlock;
 
-    #[test]
+    #[def_test]
     fn handles_share_running_transaction_and_consume_credits() {
         let journal = JournalTransactions::new(TransactionId::new(3));
         let mut first = journal.begin(JournalCredits::new(2)).unwrap();
@@ -1077,7 +1032,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn reserve_more_extends_handle_credit_budget() {
         let journal = JournalTransactions::new_with_credit_limit(TransactionId::new(8), 3);
         let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -1092,7 +1047,7 @@ mod tests {
             .unwrap();
     }
 
-    #[test]
+    #[def_test]
     fn reserve_more_rejects_transaction_limit_overflow() {
         let journal = JournalTransactions::new_with_credit_limit(TransactionId::new(8), 3);
         let mut handle = journal.begin(JournalCredits::new(2)).unwrap();
@@ -1104,7 +1059,7 @@ mod tests {
         assert_eq!(handle.remaining_credits(), 2);
     }
 
-    #[test]
+    #[def_test]
     fn repeated_metadata_block_consumes_one_credit() {
         let journal = JournalTransactions::new(TransactionId::new(10));
         let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -1127,7 +1082,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn shared_metadata_access_marks_each_handle_without_duplicate_membership() {
         let journal = JournalTransactions::new(TransactionId::new(11));
         let mut first = journal.begin(JournalCredits::new(1)).unwrap();
@@ -1147,7 +1102,7 @@ mod tests {
         assert_eq!(commit.metadata_blocks().unwrap().as_ref(), &[block]);
     }
 
-    #[test]
+    #[def_test]
     fn revoke_metadata_block_consumes_one_credit_once() {
         let journal = JournalTransactions::new(TransactionId::new(14));
         let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -1165,7 +1120,7 @@ mod tests {
         assert_eq!(commit.revoked_blocks().unwrap().as_ref(), &[block]);
     }
 
-    #[test]
+    #[def_test]
     fn revoke_replaces_metadata_update_in_same_transaction() {
         let journal = JournalTransactions::new(TransactionId::new(15));
         let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -1183,7 +1138,7 @@ mod tests {
         assert_eq!(commit.revoked_blocks().unwrap().as_ref(), &[block]);
     }
 
-    #[test]
+    #[def_test]
     fn metadata_update_cancels_revoke_in_same_transaction() {
         let journal = JournalTransactions::new(TransactionId::new(16));
         let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -1201,7 +1156,7 @@ mod tests {
         assert!(commit.revoked_blocks().unwrap().as_ref().is_empty());
     }
 
-    #[test]
+    #[def_test]
     fn abort_blocks_new_and_existing_handles() {
         let journal = JournalTransactions::new(TransactionId::new(1));
         let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -1219,7 +1174,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn commit_requires_all_handles_to_close() {
         let journal = JournalTransactions::new(TransactionId::new(1));
         let handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -1236,69 +1191,79 @@ mod tests {
         assert_eq!(checkpoint.transaction(), transaction);
     }
 
-    #[cfg(not(target_os = "none"))]
-    #[test]
+    #[def_test]
     fn wait_checkpoint_blocks_until_checkpoint_finishes() {
+        use core::sync::atomic::{AtomicBool, Ordering};
         let journal = Arc::new(JournalTransactions::new(TransactionId::new(17)));
         let handle = journal.begin(JournalCredits::new(1)).unwrap();
         let transaction = handle.id();
         drop(handle);
         let commit = journal.force_commit(transaction).unwrap();
-        let (ready_sender, ready_receiver) = mpsc::channel();
-        let (done_sender, done_receiver) = mpsc::channel();
-        let waiter_journal = journal.clone();
-
-        thread::spawn(move || {
-            ready_sender.send(()).unwrap();
-            let checkpoint = waiter_journal.wait_checkpoint(transaction).unwrap();
-            done_sender.send(checkpoint.transaction()).unwrap();
-        });
-
-        ready_receiver.recv().unwrap();
+        let ready = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(Mutex::new(None));
+        let waiter = {
+            let journal = journal.clone();
+            let ready = ready.clone();
+            let done = done.clone();
+            ktask::spawn(move || {
+                ready.store(true, Ordering::Release);
+                *lock(&done) = Some(
+                    journal
+                        .wait_checkpoint(transaction)
+                        .map(|checkpoint| checkpoint.transaction()),
+                );
+            })
+        };
+        while !ready.load(Ordering::Acquire) {
+            ktask::yield_now();
+        }
+        ktask::sleep(ktime_types::TimeSpan::from_millis(20));
         assert!(
-            done_receiver
-                .recv_timeout(Duration::from_millis(20))
-                .is_err()
+            lock(&done).is_none(),
+            "checkpoint wait returned before completion"
         );
         journal.finish_checkpoint_for_test(&commit).unwrap();
-        assert_eq!(
-            done_receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
-            transaction
-        );
+        waiter.join();
+        assert_eq!(lock(&done).take().unwrap(), Ok(transaction));
     }
 
-    #[cfg(not(target_os = "none"))]
-    #[test]
+    #[def_test]
     fn wait_checkpoint_wakes_when_journal_aborts() {
-        let journal = Arc::new(JournalTransactions::new(TransactionId::new(18)));
+        use core::sync::atomic::{AtomicBool, Ordering};
+        let journal = Arc::new(JournalTransactions::new(TransactionId::new(17)));
         let handle = journal.begin(JournalCredits::new(1)).unwrap();
         let transaction = handle.id();
-        let (ready_sender, ready_receiver) = mpsc::channel();
-        let (done_sender, done_receiver) = mpsc::channel();
-        let waiter_journal = journal.clone();
-
-        thread::spawn(move || {
-            ready_sender.send(()).unwrap();
-            done_sender
-                .send(waiter_journal.wait_checkpoint(transaction))
-                .unwrap();
-        });
-
-        ready_receiver.recv().unwrap();
+        drop(handle);
+        let _commit = journal.force_commit(transaction).unwrap();
+        let ready = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(Mutex::new(None));
+        let waiter = {
+            let journal = journal.clone();
+            let ready = ready.clone();
+            let done = done.clone();
+            ktask::spawn(move || {
+                ready.store(true, Ordering::Release);
+                *lock(&done) = Some(
+                    journal
+                        .wait_checkpoint(transaction)
+                        .map(|checkpoint| checkpoint.transaction()),
+                );
+            })
+        };
+        while !ready.load(Ordering::Acquire) {
+            ktask::yield_now();
+        }
+        ktask::sleep(ktime_types::TimeSpan::from_millis(20));
         assert!(
-            done_receiver
-                .recv_timeout(Duration::from_millis(20))
-                .is_err()
+            lock(&done).is_none(),
+            "checkpoint wait returned before completion"
         );
         journal.abort(Ext4Error::Device(block::DriverError::Io));
-        assert_eq!(
-            done_receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
-            Err(Ext4Error::JournalAborted)
-        );
-        drop(handle);
+        waiter.join();
+        assert_eq!(lock(&done).take().unwrap(), Err(Ext4Error::JournalAborted));
     }
 
-    #[test]
+    #[def_test]
     fn handle_stop_returns_unused_credits() {
         let journal = JournalTransactions::new(TransactionId::new(5));
         let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
@@ -1313,7 +1278,7 @@ mod tests {
         assert_eq!(commit.used_credits().unwrap(), 1);
     }
 
-    #[test]
+    #[def_test]
     fn one_handle_can_finish_while_another_handle_is_open() {
         let journal = JournalTransactions::new(TransactionId::new(6));
         let mut first = journal.begin(JournalCredits::new(1)).unwrap();
@@ -1332,7 +1297,7 @@ mod tests {
         assert_eq!(journal.force_commit(transaction).unwrap().id(), transaction);
     }
 
-    #[test]
+    #[def_test]
     fn commit_records_metadata_blocks_and_used_credits() {
         let journal = JournalTransactions::new(TransactionId::new(9));
         let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
@@ -1356,7 +1321,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn force_commit_returns_the_same_committing_transaction() {
         let journal = JournalTransactions::new(TransactionId::new(13));
         let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -1372,7 +1337,7 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
     }
 
-    #[test]
+    #[def_test]
     fn runtime_transaction_is_one_object_across_all_phases() {
         let journal = JournalTransactions::new(TransactionId::new(19));
         let handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -1402,7 +1367,7 @@ mod tests {
         assert!(matches!(&*lock(&commit.phase), TransactionPhase::Finished));
     }
 
-    #[test]
+    #[def_test]
     fn committing_transaction_rejects_a_foreign_journal_object() {
         let first = JournalTransactions::new(TransactionId::new(22));
         let second = JournalTransactions::new(TransactionId::new(22));
@@ -1421,7 +1386,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn abort_preserves_running_transaction_accounting_until_handles_stop() {
         let journal = JournalTransactions::new(TransactionId::new(20));
         let handle = journal.begin(JournalCredits::new(2)).unwrap();
@@ -1439,7 +1404,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn empty_handle_can_close_and_commit_without_metadata() {
         let journal = JournalTransactions::new(TransactionId::new(21));
         let handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -1452,7 +1417,7 @@ mod tests {
         assert!(commit.metadata_blocks().unwrap().as_ref().is_empty());
     }
 
-    #[test]
+    #[def_test]
     fn running_transaction_trigger_accounts_for_outstanding_credits() {
         let journal = JournalTransactions::new_with_credit_limit(TransactionId::new(32), 4);
         let mut first = journal.begin(JournalCredits::new(2)).unwrap();
@@ -1480,7 +1445,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn admission_rejects_one_handle_that_exceeds_limit() {
         let journal = JournalTransactions::new_with_credit_limit(TransactionId::new(33), 4);
 
@@ -1501,7 +1466,7 @@ mod tests {
         assert_eq!(journal.running_transaction().unwrap(), None);
     }
 
-    #[test]
+    #[def_test]
     fn admission_allows_active_handles_below_limit_and_waits_at_limit() {
         let journal = JournalTransactions::new_with_credit_limit(TransactionId::new(34), 4);
         let mut handle = journal.begin(JournalCredits::new(2)).unwrap();
@@ -1533,7 +1498,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn completion_requests_commit_only_after_the_last_handle_closes() {
         let journal = JournalTransactions::new_with_credit_limit(TransactionId::new(35), 2);
         let mut first = journal.begin(JournalCredits::new(2)).unwrap();
@@ -1562,7 +1527,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn completed_checkpoints_release_committed_transactions() {
         let journal = JournalTransactions::new(TransactionId::new(40));
         let first_handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -1592,7 +1557,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn checkpoint_rejects_out_of_order_transaction() {
         let journal = JournalTransactions::new(TransactionId::new(50));
         let first_handle = journal.begin(JournalCredits::new(1)).unwrap();
@@ -1616,7 +1581,7 @@ mod tests {
         assert_eq!(inner.checkpointed_through, second_transaction);
     }
 
-    #[test]
+    #[def_test]
     fn checkpoint_watermark_advances_across_transaction_wrap() {
         let journal = JournalTransactions::new(TransactionId::new(u32::MAX));
         let last_handle = journal.begin(JournalCredits::new(1)).unwrap();

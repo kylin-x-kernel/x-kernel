@@ -611,8 +611,10 @@ fn effective_want_extra_isize(
         .max(disk_want_extra_isize)
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
+    use unittest::def_test;
+
     use super::{
         CHECKSUM_OFFSET, CRC32C_CHECKSUM_TYPE, EXT2_FLAGS_UNSIGNED_HASH, Ext4DiskSuperblock,
         LINUX_DEFAULT_EXTRA_ISIZE, MIN_EXTRA_ISIZE_OFFSET, SUPERBLOCK_SIZE,
@@ -627,7 +629,7 @@ mod tests {
     const RO_COMPAT_BIGALLOC: u32 = 0x0200;
     const RO_COMPAT_METADATA_CSUM: u32 = 0x0400;
 
-    #[test]
+    #[def_test]
     fn derives_linux_default_effective_want_extra_isize() {
         let decoded = Ext4DiskSuperblock::decode(&valid_superblock()).unwrap();
 
@@ -635,7 +637,7 @@ mod tests {
         assert_eq!(decoded.want_extra_isize(), LINUX_DEFAULT_EXTRA_ISIZE);
     }
 
-    #[test]
+    #[def_test]
     fn effective_want_extra_isize_includes_disk_requirements() {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, 0x64, RO_COMPAT_EXTRA_ISIZE);
@@ -648,7 +650,7 @@ mod tests {
         assert_eq!(decoded.want_extra_isize(), 64);
     }
 
-    #[test]
+    #[def_test]
     fn effective_want_extra_isize_ignores_disk_fields_without_feature() {
         let mut bytes = valid_superblock();
         put_u16(&mut bytes, MIN_EXTRA_ISIZE_OFFSET, 48);
@@ -660,7 +662,7 @@ mod tests {
         assert_eq!(decoded.want_extra_isize(), LINUX_DEFAULT_EXTRA_ISIZE);
     }
 
-    #[test]
+    #[def_test]
     fn accepts_linux_64bit_descriptor_geometry() {
         for descriptor_size in [64, 128, 1024] {
             let mut bytes = valid_superblock();
@@ -669,7 +671,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[def_test]
     fn rejects_non_power_of_two_64bit_descriptor_sizes() {
         for descriptor_size in [32, 40, 48, 56, 96, 1025] {
             let mut bytes = valid_superblock();
@@ -681,7 +683,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[def_test]
     fn rejects_first_data_block_outside_filesystem() {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, 0x14, 32_768);
@@ -691,7 +693,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn rejects_zero_first_data_block_for_one_kib_blocks() {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, 0x18, 0);
@@ -702,7 +704,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn rejects_group_geometry_larger_than_bitmap() {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, 0x20, 32_769);
@@ -713,7 +715,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn rejects_cluster_geometry_larger_than_bitmap() {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, 0x24, 32_769);
@@ -723,7 +725,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn rejects_bigalloc_before_cluster_semantics_can_be_mounted() {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, 0x64, RO_COMPAT_BIGALLOC);
@@ -736,7 +738,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn decodes_non_extent_superblock_before_mount_negotiation() {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, 0x60, 0);
@@ -744,7 +746,7 @@ mod tests {
         assert!(Ext4DiskSuperblock::decode(&bytes).is_ok());
     }
 
-    #[test]
+    #[def_test]
     fn checksum_failure_precedes_mount_feature_negotiation() {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, 0x64, RO_COMPAT_METADATA_CSUM);
@@ -764,7 +766,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[def_test]
     fn rejects_invalid_inode_geometry() {
         let mut too_few = valid_superblock();
         put_u32(&mut too_few, 0x00, 8);
@@ -790,7 +792,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn decodes_and_updates_legacy_orphan_head() {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, super::LAST_ORPHAN_OFFSET, 12);
@@ -806,7 +808,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn preserves_directory_hash_flags_as_disk_facts() {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, 0x160, EXT2_FLAGS_UNSIGNED_HASH);
@@ -819,7 +821,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn setting_unsigned_hash_flag_updates_metadata_checksum() {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, 0x64, RO_COMPAT_METADATA_CSUM);
@@ -835,7 +837,7 @@ mod tests {
         assert_eq!(Ext4DiskSuperblock::decode(&bytes).unwrap(), updated);
     }
 
-    #[test]
+    #[def_test]
     fn decodes_out_of_range_orphan_head_for_recovery() {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, super::LAST_ORPHAN_OFFSET, 8193);
@@ -850,7 +852,7 @@ mod tests {
         assert_eq!(cleared.last_orphan(), 0);
     }
 
-    #[test]
+    #[def_test]
     fn clears_recovery_feature_without_metadata_checksum() {
         let mut bytes = valid_superblock();
         put_u32(
@@ -872,7 +874,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn sets_recovery_feature_without_metadata_checksum() {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, 0x60, INCOMPAT_EXTENTS | INCOMPAT_64BIT);
@@ -890,7 +892,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn clears_recovery_feature_and_updates_metadata_checksum() {
         let mut bytes = valid_superblock();
         put_u32(
@@ -908,7 +910,7 @@ mod tests {
         assert_eq!(decoded.features().incompat().bits() & INCOMPAT_RECOVER, 0);
     }
 
-    #[test]
+    #[def_test]
     fn sets_recovery_feature_and_updates_metadata_checksum() {
         let mut bytes = valid_superblock();
         put_u32(&mut bytes, 0x60, INCOMPAT_EXTENTS | INCOMPAT_64BIT);

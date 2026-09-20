@@ -94,13 +94,13 @@ impl JournalTransaction {
     }
 
     /// Returns the first log block consumed by the transaction.
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) const fn start(&self) -> JournalBlock {
         self.start
     }
 
     /// Returns the first log block after the scanned transaction.
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) const fn next_log_block(&self) -> JournalBlock {
         self.next_log_block
     }
@@ -637,9 +637,11 @@ fn checked_offset(offset: usize, len: usize) -> Ext4Result<usize> {
     offset.checked_add(len).ok_or(Ext4Error::Overflow)
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
-    use std::collections::BTreeMap;
+    use alloc::collections::BTreeMap;
+
+    use unittest::def_test;
 
     use super::*;
     use crate::jbd2::superblock::JOURNAL_SUPERBLOCK_SIZE;
@@ -681,7 +683,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[def_test]
     fn scans_committed_updates_and_revokes() {
         let superblock = journal_superblock(1, FEATURE_INCOMPAT_REVOKE);
         let mut journal = TestJournal::new();
@@ -737,7 +739,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn rejects_revoke_block_without_revoke_feature() {
         let superblock = journal_superblock(1, 0);
         let mut journal = TestJournal::new();
@@ -752,7 +754,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn leaves_transaction_uncommitted_at_sequence_boundary() {
         let superblock = journal_superblock(1, 0);
         let mut journal = TestJournal::new();
@@ -774,7 +776,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn wraps_descriptor_data_and_commit_across_log_end() {
         let superblock = journal_superblock(1023, 0);
         let mut journal = TestJournal::new();
@@ -790,7 +792,7 @@ mod tests {
         assert_eq!(transaction.next_log_block(), JournalBlock::new(3));
     }
 
-    #[test]
+    #[def_test]
     fn verifies_v3_control_and_data_checksums() {
         let superblock = journal_superblock(1, FEATURE_INCOMPAT_CSUM_V3);
         let checksum_seed = checksum::crc32c(u32::MAX, &UUID);
@@ -829,7 +831,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[def_test]
     fn rejects_v3_descriptor_checksum_mismatch() {
         let superblock = journal_superblock(1, FEATURE_INCOMPAT_CSUM_V3);
         let checksum_seed = checksum::crc32c(u32::MAX, &UUID);
@@ -852,7 +854,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[def_test]
     fn rejects_v3_commit_checksum_mismatch() {
         let superblock = journal_superblock(1, FEATURE_INCOMPAT_CSUM_V3);
         let checksum_seed = checksum::crc32c(u32::MAX, &UUID);
@@ -878,7 +880,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[def_test]
     fn rejects_v3_revoke_checksum_mismatch() {
         let incompat = FEATURE_INCOMPAT_REVOKE | FEATURE_INCOMPAT_CSUM_V3;
         let superblock = journal_superblock(1, incompat);
@@ -903,7 +905,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[def_test]
     fn rejects_v2_revoke_checksum_mismatch() {
         let incompat = FEATURE_INCOMPAT_REVOKE | FEATURE_INCOMPAT_CSUM_V2;
         let superblock = journal_superblock(1, incompat);
@@ -928,7 +930,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[def_test]
     fn scans_v3_checksum_tags_with_64bit_targets() {
         let incompat = FEATURE_INCOMPAT_CSUM_V3 | FEATURE_INCOMPAT_64BIT;
         let superblock = journal_superblock(1, incompat);
@@ -960,7 +962,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn scans_v2_checksum_tags_with_64bit_targets() {
         let incompat = FEATURE_INCOMPAT_CSUM_V2 | FEATURE_INCOMPAT_64BIT;
         let superblock = journal_superblock(1, incompat);
@@ -993,7 +995,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn scans_v2_checksum_tags_with_32bit_targets_and_uuid() {
         let superblock = journal_superblock(1, FEATURE_INCOMPAT_CSUM_V2);
         let checksum_seed = checksum::crc32c(u32::MAX, &UUID);
@@ -1024,7 +1026,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn scans_v2_checksum_same_uuid_tags_without_padding() {
         let superblock = journal_superblock(1, FEATURE_INCOMPAT_CSUM_V2);
         let checksum_seed = checksum::crc32c(u32::MAX, &UUID);
@@ -1065,7 +1067,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn scans_v2_checksum_64bit_same_uuid_tags_without_padding() {
         let incompat = FEATURE_INCOMPAT_CSUM_V2 | FEATURE_INCOMPAT_64BIT;
         let superblock = journal_superblock(1, incompat);
@@ -1117,7 +1119,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn scans_transaction_sequence_wraparound() {
         let superblock = journal_superblock_with_sequence(1, 0, u32::MAX);
         let mut journal = TestJournal::new();
@@ -1140,7 +1142,7 @@ mod tests {
         assert_eq!(scan.transactions()[1].sequence(), TransactionId::new(0));
     }
 
-    #[test]
+    #[def_test]
     fn rejects_first_tag_without_uuid() {
         let superblock = journal_superblock(1, 0);
         let mut journal = TestJournal::new();
@@ -1152,7 +1154,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn rejects_deleted_descriptor_tag() {
         let superblock = journal_superblock(1, 0);
         let mut journal = TestJournal::new();
@@ -1166,7 +1168,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn rejects_unknown_control_block_type_with_matching_sequence() {
         let superblock = journal_superblock(1, 0);
         let mut journal = TestJournal::new();
@@ -1178,7 +1180,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn scan_limit_reports_journal_too_large() {
         assert_eq!(
             ensure_scan_limit(MAX_SCANNED_UPDATES, 1, MAX_SCANNED_UPDATES),

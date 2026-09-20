@@ -84,7 +84,7 @@ impl BlockAllocation {
     }
 
     #[allow(dead_code)]
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) const fn group(self) -> BlockGroupNumber {
         self.group
     }
@@ -134,7 +134,7 @@ impl BlockRunAllocation {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) const fn group(self) -> BlockGroupNumber {
         self.group
     }
@@ -321,11 +321,13 @@ fn validate_bitmap_capacity(bitmap: &[u8], range: BlockGroupRange) -> Ext4Result
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
+    use unittest::def_test;
+
     use super::*;
 
-    #[test]
+    #[def_test]
     fn allocation_uses_goal_when_available() {
         let range =
             BlockGroupRange::new(BlockGroupNumber::new(2), FilesystemBlock::new(100), 32).unwrap();
@@ -348,7 +350,7 @@ mod tests {
         assert_eq!(bitmap[2] & 0b0000_0010, 0b0000_0010);
     }
 
-    #[test]
+    #[def_test]
     fn allocation_skips_protected_blocks_and_wraps() {
         let range =
             BlockGroupRange::new(BlockGroupNumber::new(0), FilesystemBlock::new(10), 8).unwrap();
@@ -369,7 +371,7 @@ mod tests {
         assert_eq!(bitmap, [0b1110_1111]);
     }
 
-    #[test]
+    #[def_test]
     fn allocation_reports_no_space_without_mutating_bitmap() {
         let range =
             BlockGroupRange::new(BlockGroupNumber::new(0), FilesystemBlock::new(10), 4).unwrap();
@@ -390,7 +392,7 @@ mod tests {
         assert_eq!(bitmap, before);
     }
 
-    #[test]
+    #[def_test]
     fn run_allocation_uses_goal_and_marks_contiguous_bits() {
         let range =
             BlockGroupRange::new(BlockGroupNumber::new(0), FilesystemBlock::new(10), 16).unwrap();
@@ -413,7 +415,7 @@ mod tests {
         assert_eq!(bitmap, [0xff, 0b0000_1111]);
     }
 
-    #[test]
+    #[def_test]
     fn run_allocation_can_return_partial_run_above_minimum() {
         let range =
             BlockGroupRange::new(BlockGroupNumber::new(0), FilesystemBlock::new(10), 16).unwrap();
@@ -434,7 +436,7 @@ mod tests {
         assert_eq!(bitmap, [0xff, 0xff]);
     }
 
-    #[test]
+    #[def_test]
     fn run_allocation_rejects_runs_shorter_than_minimum_without_mutating_bitmap() {
         let range =
             BlockGroupRange::new(BlockGroupNumber::new(0), FilesystemBlock::new(10), 16).unwrap();
@@ -455,7 +457,7 @@ mod tests {
         assert_eq!(bitmap, before);
     }
 
-    #[test]
+    #[def_test]
     fn run_allocation_stops_at_protected_blocks() {
         let range =
             BlockGroupRange::new(BlockGroupNumber::new(0), FilesystemBlock::new(10), 16).unwrap();
@@ -476,7 +478,7 @@ mod tests {
         assert_eq!(bitmap, [0xff, 0xff]);
     }
 
-    #[test]
+    #[def_test]
     fn release_clears_allocated_block_and_rejects_duplicate_release() {
         let range =
             BlockGroupRange::new(BlockGroupNumber::new(0), FilesystemBlock::new(50), 8).unwrap();

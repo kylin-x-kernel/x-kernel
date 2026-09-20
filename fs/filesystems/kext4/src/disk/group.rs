@@ -249,7 +249,7 @@ impl GroupMutableState {
     }
 
     /// Returns the block group flags.
-    #[cfg(test)]
+    #[cfg(unittest)]
     pub(crate) const fn flags(&self) -> u16 {
         self.flags
     }
@@ -629,8 +629,10 @@ fn put_u16_at(input: &mut [u8], offset: usize, value: u16) -> Ext4Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
+    use unittest::def_test;
+
     use super::{
         BlockGroupDescriptor, EXT4_BG_BLOCK_UNINIT, EXT4_BG_INODE_UNINIT,
         decrement_group_free_blocks_count, increment_group_free_blocks_count,
@@ -639,7 +641,7 @@ mod tests {
     };
     use crate::disk::checksum;
 
-    #[test]
+    #[def_test]
     fn decrements_64bit_group_free_blocks_and_updates_checksum() {
         let seed = 0x1234_5678;
         let group = 7;
@@ -662,7 +664,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn increment_rejects_counter_overflow() {
         let mut bytes = valid_group_descriptor();
         put_u16(&mut bytes, 12, 0xffff);
@@ -674,7 +676,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn non_64bit_counter_rejects_truncated_high_bits() {
         let mut bytes = valid_group_descriptor();
         put_u16(&mut bytes, 12, 0xffff);
@@ -685,7 +687,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn decodes_bitmap_checksums_and_itable_unused() {
         let bytes = descriptor_with_bitmap_metadata();
 
@@ -696,7 +698,7 @@ mod tests {
         assert_eq!(descriptor.itable_unused_count(), 0x0002_0003);
     }
 
-    #[test]
+    #[def_test]
     fn updates_block_bitmap_checksum_and_clears_uninit_flag() {
         let seed = 0x1122_3344;
         let group = 2;
@@ -726,7 +728,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn updates_inode_bitmap_checksum_and_clears_uninit_flag() {
         let seed = 0x5566_7788;
         let group = 3;
@@ -756,7 +758,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn inode_allocation_reduces_itable_unused_tail() {
         let seed = 0x99aa_bbcc;
         let group = 4;
@@ -786,7 +788,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn inode_allocation_treats_uninit_inode_bitmap_as_fully_unused() {
         let seed = 0x99aa_bbcc;
         let group = 4;
@@ -812,7 +814,7 @@ mod tests {
         assert_eq!(descriptor.itable_unused_count(), 21);
     }
 
-    #[test]
+    #[def_test]
     fn checked_u16_write_reports_truncated_descriptor() {
         let mut bytes = [0; 1];
 
@@ -822,7 +824,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn checked_u16_write_reports_offset_overflow() {
         let mut bytes = [0; 8];
 

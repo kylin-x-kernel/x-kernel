@@ -8,12 +8,12 @@ mod io;
 mod slot;
 mod sync;
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests;
 
 pub(crate) use access::{MetadataBuffer, MetadataWriteAccess};
-#[cfg(test)]
+#[cfg(unittest)]
 use cache::MetadataBlockCache;
 pub(crate) use io::Ext4MetadataIo;
-#[cfg(test)]
+#[cfg(unittest)]
 use slot::MetadataBufferState;
