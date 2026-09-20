@@ -111,7 +111,10 @@ unsafe impl lock_api::RawMutex for RawMutex {
 
     #[inline(always)]
     fn lock(&self) {
-        let current_id = current().owner_key();
+        // The same task resumes after blocking or migration. Reuse its handle
+        // for diagnostics instead of repeating IRQ-guarded per-CPU lookups.
+        let task = current();
+        let current_id = task.owner_key();
         let mut spin = Spin::new(self.config);
         let mut owner_id = self.owner_id.load(Ordering::Relaxed);
         #[cfg(feature = "stats")]
@@ -122,7 +125,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
                 owner_id,
                 current_id,
                 "{} tried to acquire mutex it already owns.",
-                current().id_name()
+                task.id_name()
             );
 
             if owner_id == 0 {
@@ -138,8 +141,8 @@ unsafe impl lock_api::RawMutex for RawMutex {
 
                         #[cfg(feature = "watchdog")]
                         {
-                            current().inner().clear_waiting_lock();
-                            current().inner().push_held_lock(self as *const _ as usize);
+                            task.inner().clear_waiting_lock();
+                            task.inner().push_held_lock(self as *const _ as usize);
                         }
                         break;
                     }
@@ -167,8 +170,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
             }
 
             #[cfg(feature = "watchdog")]
-            current()
-                .inner()
+            task.inner()
                 .set_waiting_lock(self as *const _ as usize, khal::time::now_ticks());
             block_on(listener);
             owner_id = self.owner_id.load(Ordering::Acquire);
@@ -177,7 +179,8 @@ unsafe impl lock_api::RawMutex for RawMutex {
 
     #[inline(always)]
     fn try_lock(&self) -> bool {
-        let current_id = current().owner_key();
+        let task = current();
+        let current_id = task.owner_key();
         // The reason for using a strong compare_exchange is explained here:
         // https://github.com/Amanieu/parking_lot/pull/207#issuecomment-575869107
         let acquired = self
@@ -188,7 +191,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
             #[cfg(feature = "stats")]
             self.record_acquisitions();
             #[cfg(feature = "watchdog")]
-            current().inner().push_held_lock(self as *const _ as usize);
+            task.inner().push_held_lock(self as *const _ as usize);
         }
         acquired
     }
@@ -199,14 +202,15 @@ unsafe impl lock_api::RawMutex for RawMutex {
         // successfully locked by the current guard holder, so releasing the
         // owner slot and waking one waiter upholds the raw mutex protocol.
         let owner_id = self.owner_id.swap(0, Ordering::Release);
+        let task = current();
         assert_eq!(
             owner_id,
-            current().owner_key(),
+            task.owner_key(),
             "{} tried to release mutex it doesn't own",
-            current().id_name()
+            task.id_name()
         );
         #[cfg(feature = "watchdog")]
-        current().inner().pop_held_lock(self as *const _ as usize);
+        task.inner().pop_held_lock(self as *const _ as usize);
         self.event.notify(1);
     }
 
