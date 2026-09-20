@@ -8,7 +8,8 @@ operations. `src/lib.rs` publicly exposes `epoll`, `eventfd`, `signalfd` and
 arguments, resolves descriptor tables and validates operation-specific flags;
 `kfd_objects` accepts resolved `VfsFile` references and typed object inputs.
 `anon_inodefs` creates anonymous files, `kvfs` dispatches their file operations,
-`kpoll` owns poll registration and `ktask::future` supplies blocking/timer runtime.
+`kpoll` owns poll registration, `ktask::future` supplies blocking, and
+`ktask::Timer` supplies owned one-shot timer delivery and synchronous teardown.
 Credentials are explicit constructor inputs captured by `VfsFile`, not duplicated
 in object state. This crate does not own process descriptor-number allocation.
 
@@ -17,7 +18,7 @@ in object state. This crate does not own process descriptor-number allocation.
 | Object | State and providers | Flow |
 |---|---|---|
 | `EventFd` | Atomic counter, semaphore flag, read/write `PollSet`s | `new_file` constructs anonymous private data; file read atomically decrements/reset-count, write conditionally adds, and each wakes the opposite side. |
-| `TimerFd` | Clock ID, `SpinNoIrq<TimerFdInner>`, timer-handle lock and `PollSet` | `settime` validates a deadline, cancels the old handle, updates state and arms a `ktask::future` timer; callback/read/poll tick expiration state. |
+| `TimerFd` | Owned `ktask::Timer<TimerFdHandler>`, shared `TimerFdData`, programming `Mutex<()>` | `settime` validates and drains the old delivery before replacing state; callback/read/poll/gettime account elapsed periods. Read rearms the next periodic notification. |
 | `Signalfd` | `RwLock<SignalSet>` and read `PollSet` | Each file read/poll resolves the current `ThreadSignalManager`, selects pending signals by the mask and serializes one 128-byte record per read. |
 | `Epoll` | `Arc<EpollInner>`, interest table, ready queue and poll set | `add`/`modify` register watched file poll sources; callbacks enqueue weak interest references; `poll_events` returns ready ABI events and rearms interests. |
 
@@ -38,7 +39,13 @@ access requires a current user thread; a kernel task gets
 requires no current credentials because the caller supplies them.
 
 Timer polling/rearming requires initialized clock/timer/scheduler services.
-Timer callbacks use IRQ-safe inner state. Epoll's ready queue also uses an
+Timer settime and read serialize through a sleepable programming mutex. Neither
+may run in IRQ context or while holding a lock needed by a pending callback.
+Final TimerFd owner release synchronously drains delivery and must not prevent
+the servicing CPU from progressing or run in that timer's callback.
+Timer callbacks use IRQ-safe inner state and wake pollers after unlocking it.
+Registered poll wakers must obey that hard-IRQ context contract.
+Epoll's ready queue also uses an
 IRQ-masking lock because source wakers may enqueue an interest directly from
 timer IRQ context. Its config and table locks only disable preemption. Do not
 infer interrupt-context support for arbitrary watched-file callbacks from the
@@ -56,6 +63,18 @@ deadline. Read consumes accumulated expirations. `settime` with zero value clear
 the interval/count/deadline. Validation happens before cancellation, preserving
 the previous timer when a new deadline is unrepresentable.
 
+Periodic notification is one-shot: after expiration the core node stays idle
+until read consumes the count and arms the next deadline. Read, poll, gettime
+and replacement account missed intervals arithmetically, anchored to the prior
+deadline, without one callback per missed interval. Tiny intervals therefore
+cannot keep IRQ dispatch busy merely because the file remains unread.
+The callback still wakes waiters when poll has already accounted the expiration.
+If realtime moved backwards and there is no unread expiration, the callback
+rearms the converted deadline instead. This is not clock-change cancellation.
+Business deadlines retain their full clock representation; only core scheduling
+is capped at its u64-nanosecond runtime horizon, never truncated to an earlier
+business expiration.
+
 Eventfd read decrements by one in semaphore mode and by the whole counter
 otherwise. The current implementation copies the pre-update counter to the
 caller in both modes; it does not claim Linux's semaphore-mode return value of
@@ -72,12 +91,21 @@ both fd number and weak file identity. Generation checks reject stale wakers.
 ## Concurrency and resource lifecycle
 
 Eventfd uses acquire loads and release/acquire fetch-update loops for its counter.
-Timer inner state and handle slots have separate `SpinNoIrq` locks. These protect
-their fields; they do not by themselves make every cancel/register/reprogram
-sequence one atomic transaction. Registered timer wakers own `Arc<TimerFd>`;
-`Drop` cancels a retained handle when final destruction actually occurs. Closing
-a file alone must not be described as proving immediate destruction, since a
-registered callback can retain the object.
+Timer settime/read take the programming mutex before the IRQ-safe inner lock.
+Settime synchronously cancels before taking the inner lock, so it never waits
+for a callback while owning the callback's state lock. Read/start may take a
+core queue lock while holding inner state; core dispatch releases queue locks
+before invoking the handler, so that direction is not inverted. The callback,
+poll and gettime never acquire the programming mutex. Wake calls are outside
+the inner lock; settime also drops the programming mutex before waking.
+
+The FD owns a timer and `Arc<TimerFdData>`; its handler owns only another data
+reference, not the FD. There is no timer-to-FD ownership cycle. Declaring the
+timer field first drains delivery before the FD drops its data reference.
+Last owner release reclaims pending one-shot or periodic storage; closing one
+duplicated file descriptor does not imply final release. Allocation occurs
+during construction, not each start/rearm/cancel. Arbitrary poll registration
+and waker costs are outside this timer-storage guarantee.
 
 Signalfd mask changes take the RwLock and wake readers. Signal queues belong to
 `ksignal`, not this object. Epoll's `ctl_lock` serializes ADD/MOD/DEL including
@@ -98,5 +126,5 @@ Current timer clock selection treats MONOTONIC/BOOTTIME as monotonic and other
 IDs as realtime; the adapter must restrict accepted clock IDs. Signalfd mask
 filtering (including uncatchable signals) belongs to its syscall adapter. This
 backend does not promise complete Linux epoll graph/cycle validation, timer
-clock-change cancellation, semaphore-mode return compatibility or synchronous
-file-close cancellation of retained timer callbacks.
+clock-change cancellation or semaphore-mode return compatibility. Timerfd
+teardown applies to final object ownership, not every descriptor close.

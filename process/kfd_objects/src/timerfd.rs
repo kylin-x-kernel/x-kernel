@@ -2,10 +2,15 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! `timerfd` object implementation.
+//! File-backed timer expiration accounting on an owned, reusable one-shot timer.
+//!
+//! [`TimerFd::new_file`] creates the file used by syscall adapters. Periodic
+//! counts are maintained here, not in the timer core; reading an expiration
+//! count rearms its next notification. See the crate design for locking and
+//! the final-owner teardown contract.
 
-use alloc::{sync::Arc, task::Wake};
-use core::{mem::size_of, task::Waker};
+use alloc::sync::Arc;
+use core::mem::size_of;
 
 use anon_inodefs::AnonInodeFs;
 use kcred::Cred;
@@ -13,7 +18,8 @@ use kerrno::{KError, KResult};
 use khal::time::monotonic_time;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use kspin::SpinNoIrq;
-use ktask::future::{TimerHandle, block_on, cancel_timer, poll_io, register_timer};
+use ksync::Mutex;
+use ktask::future::{block_on, poll_io};
 use ktime_types::{MonotonicInstant, SystemTime, TimeSpan};
 use kvfs::{FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
 use linux_raw_sys::general::{CLOCK_BOOTTIME, CLOCK_MONOTONIC};
@@ -114,24 +120,48 @@ impl TimerFdInner {
     }
 }
 
-struct TimerFdWaker(Arc<TimerFd>);
-
-impl Wake for TimerFdWaker {
-    fn wake(self: Arc<Self>) {
-        self.0.on_timer_expired();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.on_timer_expired();
-    }
-}
-
-/// File-like timer object for `timerfd_*` syscalls.
-pub struct TimerFd {
+// The callback owns only shared clock/count/waiter data, never the FD that
+// owns its timer. Last FD release can therefore drain delivery without a cycle.
+struct TimerFdData {
     clock_id: u32,
     inner: SpinNoIrq<TimerFdInner>,
     poll_rx: PollSet,
-    timer_handle: SpinNoIrq<Option<TimerHandle>>,
+}
+
+struct TimerFdHandler(Arc<TimerFdData>);
+
+fn core_deadline(deadline: TimerDeadline) -> MonotonicInstant {
+    let horizon = MonotonicInstant::from_span_since_origin(TimeSpan::from_nanos(u64::MAX));
+    deadline.monotonic_deadline().min(horizon)
+}
+
+impl ktask::TimerHandler for TimerFdHandler {
+    fn on_expiration(&self, timer: ktask::TimerControl<'_>, _: ktask::Expiration) {
+        let mut inner = self.0.inner.lock();
+        let has_expiration = inner.tick(clock_now(self.0.clock_id));
+        if !has_expiration && let Some(deadline) = inner.deadline {
+            // Realtime may have moved backwards. Normal expiration stays
+            // disarmed until read; tiny user intervals must not loop in IRQ.
+            timer
+                .rearm(core_deadline(deadline))
+                .expect("bounded timerfd deadline is valid");
+        }
+        drop(inner);
+        // A competing poll may have accounted expiration without notifying
+        // existing waiters. Delivery must still publish that readiness.
+        if has_expiration {
+            self.0.poll_rx.wake();
+        }
+    }
+}
+
+/// File-like timer object for timerfd syscalls.
+pub struct TimerFd {
+    // Drain the callback before releasing the FD's shared state.
+    timer: ktask::Timer<TimerFdHandler>,
+    data: Arc<TimerFdData>,
+    // Settime/read serialize programming; callbacks/poll/gettime never take it.
+    programming: Mutex<()>,
 }
 
 impl TimerFd {
@@ -139,8 +169,13 @@ impl TimerFd {
     ///
     /// MONOTONIC and BOOTTIME use monotonic time; other IDs select realtime.
     /// The caller must initialize the timer runtime before programming it.
+    /// Preparation allocates; subsequent programming reuses the timer storage.
+    ///
+    /// # Panics
+    /// Panics if the timer provider violates its newly allocated exclusive
+    /// storage invariant. Allocation failure follows the kernel allocator policy.
     pub fn new(clock_id: u32) -> Arc<Self> {
-        Arc::new(Self {
+        let data = Arc::new(TimerFdData {
             clock_id,
             inner: SpinNoIrq::new(TimerFdInner {
                 deadline: None,
@@ -148,7 +183,11 @@ impl TimerFd {
                 expirations: 0,
             }),
             poll_rx: PollSet::new(),
-            timer_handle: SpinNoIrq::new(None),
+        });
+        Arc::new(Self {
+            timer: ktask::Timer::new(TimerFdHandler(data.clone())),
+            data,
+            programming: Mutex::new(()),
         })
     }
 
@@ -158,6 +197,9 @@ impl TimerFd {
     ///
     /// Returns `KError::InvalidInput` for unknown open-flag bits and forwards
     /// errors from anonymous-inode file creation.
+    ///
+    /// # Panics
+    /// Has the timer-preparation invariant panic described by [`Self::new`].
     pub fn new_file(clock_id: u32, open_flags: u32, cred: Arc<Cred>) -> KResult<Arc<VfsFile>> {
         let open_flags = OpenFlags::from_bits(open_flags).ok_or(KError::InvalidInput)?;
         AnonInodeFs::global().get_file(
@@ -180,72 +222,33 @@ impl TimerFd {
             .ok_or(KError::BadFileDescriptor)
     }
 
-    fn cancel_pending_timer(&self) {
-        if let Some(handle) = self.timer_handle.lock().take() {
-            cancel_timer(&handle);
-        }
-    }
-
-    fn make_waker(self: &Arc<Self>) -> Waker {
-        Waker::from(Arc::new(TimerFdWaker(self.clone())))
-    }
-
-    fn arm_or_fire(self: &Arc<Self>) {
-        loop {
-            let deadline = match self.inner.lock().deadline {
-                Some(deadline) => deadline,
-                None => return,
-            };
-
-            let handle = register_timer(deadline.monotonic_deadline(), self.make_waker());
-            if let Some(handle) = handle {
-                *self.timer_handle.lock() = Some(handle);
-                return;
-            }
-
-            let mut inner = self.inner.lock();
-            let was_zero = inner.expirations == 0;
-            let has_expiration = inner.tick(clock_now(self.clock_id));
-            drop(inner);
-
-            if has_expiration && was_zero {
-                self.poll_rx.wake();
-            }
-        }
-    }
-
-    fn on_timer_expired(self: &Arc<Self>) {
-        let mut inner = self.inner.lock();
-        let was_zero = inner.expirations == 0;
-        let has_expiration = inner.tick(clock_now(self.clock_id));
-        drop(inner);
-
-        if has_expiration && was_zero {
-            self.poll_rx.wake();
-        }
-        self.arm_or_fire();
-    }
-
-    /// Program the timer and return the previous `(interval, remaining)` pair.
-    ///
+    /// Programs the timer and returns the previous (interval, remaining) pair.
+    /// Runs in sleepable task context; concurrent programming is serialized.
+    /// Zero value disarms and clears unread expirations. A periodic timer keeps
+    /// accumulating elapsed intervals while unread, without recurring IRQ work;
+    /// the next notification is armed when a read consumes its count.
     ///
     /// # Errors
     ///
     /// Returns [`KError::InvalidInput`] if the requested deadline cannot be
     /// represented. Validation failures leave the existing timer unchanged.
+    ///
+    /// # Panics
+    /// Panics if initialized CPU routing or hardware notification fails, or if
+    /// internal clock-domain/bounded-deadline invariants are violated.
     pub fn settime(
-        self: &Arc<Self>,
+        &self,
         absolute: bool,
         value: TimeSpan,
         interval: TimeSpan,
     ) -> KResult<(TimeSpan, TimeSpan)> {
-        let now = clock_now(self.clock_id);
+        let now = clock_now(self.data.clock_id);
         let deadline = if value.is_zero() {
             None
         } else {
             Some(
                 if absolute {
-                    TimerDeadline::from_absolute(self.clock_id, value)
+                    TimerDeadline::from_absolute(self.data.clock_id, value)
                 } else {
                     now.checked_add(value)
                 }
@@ -253,61 +256,87 @@ impl TimerFd {
             )
         };
 
-        self.cancel_pending_timer();
-
-        let mut inner = self.inner.lock();
+        let programming = self.programming.lock();
+        // Never wait with the callback's state lock held. Programming requests
+        // serialize here; the callback only takes data.inner and its core lock.
+        self.timer.cancel_sync();
+        let mut inner = self.data.inner.lock();
+        let now = clock_now(self.data.clock_id);
+        inner.tick(now);
         let old_interval = inner.interval;
         let old_remaining = inner
             .deadline
             .and_then(|deadline| deadline.checked_duration_since(now))
             .unwrap_or(TimeSpan::ZERO);
-
-        let Some(deadline) = deadline else {
-            inner.deadline = None;
-            inner.interval = TimeSpan::ZERO;
-            inner.expirations = 0;
-            return Ok((old_interval, old_remaining));
+        inner.deadline = deadline;
+        inner.interval = if deadline.is_some() {
+            interval
+        } else {
+            TimeSpan::ZERO
         };
-
-        inner.deadline = Some(deadline);
-        inner.interval = interval;
         inner.expirations = 0;
-
-        let fired = inner.tick(now);
-        drop(inner);
-
-        if fired {
-            self.poll_rx.wake();
+        let fired = inner.tick(clock_now(self.data.clock_id));
+        if !fired && let Some(deadline) = inner.deadline {
+            // SAFETY: settime runs in initialized task context. The FD retains
+            // independent callback data; the handler preserves hard-IRQ context
+            // and only updates locked state/rearms before waking outside locks.
+            unsafe { self.timer.start(core_deadline(deadline)) }
+                .expect("bounded timerfd deadline and current CPU are valid");
         }
-        self.arm_or_fire();
-
+        drop(inner);
+        drop(programming);
+        if fired {
+            self.data.poll_rx.wake();
+        }
         Ok((old_interval, old_remaining))
     }
 
-    /// Query the current timer setting as `(interval, remaining)`.
+    /// Returns `(interval, remaining)` after accounting for elapsed intervals.
+    /// Does not consume unread expirations; newly observed readiness wakes pollers.
+    ///
+    /// # Panics
+    /// Panics if internal state no longer matches the clock domain fixed at creation.
     pub fn gettime(&self) -> (TimeSpan, TimeSpan) {
-        let inner = self.inner.lock();
+        let mut inner = self.data.inner.lock();
+        let now = clock_now(self.data.clock_id);
+        let was_zero = inner.expirations == 0;
+        let has_expiration = inner.tick(now);
         let remaining = inner
             .deadline
-            .and_then(|deadline| deadline.checked_duration_since(clock_now(self.clock_id)))
+            .and_then(|deadline| deadline.checked_duration_since(now))
             .unwrap_or(TimeSpan::ZERO);
-        (inner.interval, remaining)
-    }
-}
-
-impl Drop for TimerFd {
-    fn drop(&mut self) {
-        if let Some(handle) = self.timer_handle.get_mut().take() {
-            cancel_timer(&handle);
+        let setting = (inner.interval, remaining);
+        drop(inner);
+        if was_zero && has_expiration {
+            self.data.poll_rx.wake();
         }
+        setting
+    }
+
+    fn read_expirations(&self) -> KResult<u64> {
+        let _programming = self.programming.lock();
+        let mut inner = self.data.inner.lock();
+        inner.tick(clock_now(self.data.clock_id));
+        if inner.expirations == 0 {
+            return Err(KError::WouldBlock);
+        }
+        let count = core::mem::take(&mut inner.expirations);
+        if let Some(deadline) = inner.deadline {
+            // SAFETY: file reads run in initialized task context. The owned
+            // handler retains only independent state and obeys IRQ constraints.
+            // The state lock serializes this rearm with callback accounting.
+            unsafe { self.timer.start(core_deadline(deadline)) }
+                .expect("bounded timerfd deadline and current CPU are valid");
+        }
+        Ok(count)
     }
 }
 
 impl Pollable for TimerFd {
     fn poll(&self) -> IoEvents {
         let mut events = IoEvents::empty();
-        let mut inner = self.inner.lock();
-        inner.tick(clock_now(self.clock_id));
+        let mut inner = self.data.inner.lock();
+        inner.tick(clock_now(self.data.clock_id));
         events.set(IoEvents::IN, inner.expirations > 0);
         events
     }
@@ -318,7 +347,7 @@ impl Pollable for TimerFd {
         events: IoEvents,
     ) -> Result<(), PollRegisterError> {
         if events.contains(IoEvents::IN) {
-            context.register(&self.poll_rx)?;
+            context.register(&self.data.poll_rx)?;
         }
         Ok(())
     }
@@ -348,17 +377,9 @@ impl FileOperations for TimerfdFops {
             IoEvents::IN,
             file.is_nonblocking(),
             || {
-                let mut inner = timerfd.inner.lock();
-                inner.tick(clock_now(timerfd.clock_id));
-                if inner.expirations > 0 {
-                    let count = inner.expirations;
-                    inner.expirations = 0;
-                    drop(inner);
-                    buf[..size_of::<u64>()].copy_from_slice(&count.to_ne_bytes());
-                    Ok(size_of::<u64>())
-                } else {
-                    Err(KError::WouldBlock)
-                }
+                let count = timerfd.read_expirations()?;
+                buf[..size_of::<u64>()].copy_from_slice(&count.to_ne_bytes());
+                Ok(size_of::<u64>())
             },
         ))
     }
@@ -393,6 +414,185 @@ mod timerfd_tests {
 
     fn monotonic(span: TimeSpan) -> TimerDeadline {
         TimerDeadline::Monotonic(MonotonicInstant::from_span_since_origin(span))
+    }
+
+    #[def_test(serial)]
+    fn poll_before_irq_preserves_waiter_notification() {
+        use alloc::task::Wake;
+        use core::{
+            sync::atomic::{AtomicUsize, Ordering},
+            task::Waker,
+        };
+
+        struct WakeCount(AtomicUsize);
+        impl Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        for interval in [TimeSpan::ZERO, TimeSpan::from_millis(5)] {
+            let tfd = TimerFd::new(CLOCK_MONOTONIC);
+            let counters = [0; 2].map(|_| Arc::new(WakeCount(AtomicUsize::new(0))));
+            let registrations = counters.each_ref().map(|counter| {
+                tfd.data
+                    .poll_rx
+                    .register(&Waker::from(counter.clone()))
+                    .unwrap()
+            });
+            let pin = kspin::NoPreempt::new();
+            {
+                let _irq = kspin::NoPreemptIrqSave::new();
+                assert!(!tfd.poll().contains(IoEvents::IN));
+                let deadline = monotonic_time();
+                // Construct the due-but-undelivered state without taking the
+                // sleepable settime mutex while IRQ delivery is masked.
+                {
+                    let mut inner = tfd.data.inner.lock();
+                    inner.deadline = Some(TimerDeadline::Monotonic(deadline));
+                    inner.interval = interval;
+                }
+                // SAFETY: initialized task context, with CPU migration and IRQ
+                // delivery disabled. The owned handler retains independent data
+                // and only locks IRQ-safe state and wakes these atomic counters.
+                unsafe { tfd.timer.start(deadline) }.unwrap();
+                assert!(tfd.poll().contains(IoEvents::IN));
+                assert!(counters.iter().all(|c| c.0.load(Ordering::Relaxed) == 0));
+            }
+            // No read/gettime may consume readiness or supply another wakeup.
+            let limit = monotonic_time() + TimeSpan::from_secs(2);
+            while counters.iter().any(|c| c.0.load(Ordering::Relaxed) == 0)
+                && monotonic_time() < limit
+            {
+                core::hint::spin_loop();
+            }
+            tfd.timer.cancel_sync();
+            let all_woken = counters.iter().all(|c| c.0.load(Ordering::Relaxed) > 0);
+            let is_readable = tfd.poll().contains(IoEvents::IN);
+            drop(pin);
+            drop(registrations);
+            drop(tfd);
+            assert!(
+                all_woken,
+                "poll must not suppress the timer IRQ notification"
+            );
+            assert!(is_readable, "notification must not consume expirations");
+        }
+    }
+
+    #[def_test]
+    fn test_timerfd_last_owner_drop_releases_periodic_storage() {
+        let tfd = TimerFd::new(CLOCK_MONOTONIC);
+        tfd.settime(false, TimeSpan::from_secs(60), TimeSpan::from_secs(1))
+            .unwrap();
+        let owner = Arc::downgrade(&tfd);
+        let data = Arc::downgrade(&tfd.data);
+        drop(tfd);
+        assert!(owner.upgrade().is_none());
+        assert!(data.upgrade().is_none());
+    }
+
+    #[def_test(serial)]
+    fn test_timerfd_periodic_irq_and_disarm() {
+        let tfd = TimerFd::new(CLOCK_MONOTONIC);
+        tfd.settime(false, TimeSpan::from_millis(2), TimeSpan::from_millis(2))
+            .unwrap();
+        let limit = monotonic_time() + TimeSpan::from_secs(2);
+        while tfd.data.inner.lock().expirations == 0 && monotonic_time() < limit {
+            ktask::yield_now();
+        }
+        // Inspect without poll/tick: only actual timer IRQ delivery increments it.
+        assert!(tfd.data.inner.lock().expirations > 0);
+        ktask::sleep(TimeSpan::from_millis(6));
+        assert!(tfd.read_expirations().unwrap() >= 2);
+        tfd.settime(false, TimeSpan::ZERO, TimeSpan::ZERO).unwrap();
+        ktask::sleep(TimeSpan::from_millis(10));
+        let inner = tfd.data.inner.lock();
+        assert_eq!(inner.expirations, 0);
+        assert!(inner.deadline.is_none());
+    }
+
+    #[def_test]
+    fn test_timerfd_gettime_advances_unread_periods() {
+        let tfd = TimerFd::new(CLOCK_MONOTONIC);
+        tfd.settime(true, TimeSpan::from_nanos(1), TimeSpan::from_secs(1))
+            .unwrap();
+        let (_, remaining) = tfd.gettime();
+        assert!(remaining > TimeSpan::ZERO);
+        assert!(remaining <= TimeSpan::from_secs(1));
+        assert!(tfd.read_expirations().unwrap() > 0);
+    }
+
+    #[def_test(serial)]
+    fn test_timerfd_tiny_interval_waits_for_read_before_rearming() {
+        let tfd = TimerFd::new(CLOCK_MONOTONIC);
+        tfd.settime(false, TimeSpan::from_millis(2), TimeSpan::from_nanos(1))
+            .unwrap();
+        let limit = monotonic_time() + TimeSpan::from_secs(2);
+        while tfd.data.inner.lock().expirations == 0 && monotonic_time() < limit {
+            ktask::yield_now();
+        }
+        let first_count = tfd.data.inner.lock().expirations;
+        assert!(first_count > 0);
+        ktask::sleep(TimeSpan::from_millis(5));
+        assert_eq!(tfd.data.inner.lock().expirations, first_count);
+        assert!(tfd.read_expirations().unwrap() > first_count);
+        tfd.settime(false, TimeSpan::ZERO, TimeSpan::ZERO).unwrap();
+    }
+
+    #[def_test]
+    fn test_timerfd_settime_returns_advanced_old_period() {
+        let tfd = TimerFd::new(CLOCK_MONOTONIC);
+        tfd.settime(true, TimeSpan::from_nanos(1), TimeSpan::from_secs(1))
+            .unwrap();
+        // Model an unread overdue period without relying on IRQ timing.
+        tfd.data.inner.lock().deadline = Some(monotonic(TimeSpan::from_nanos(1)));
+        let (interval, remaining) = tfd.settime(false, TimeSpan::ZERO, TimeSpan::ZERO).unwrap();
+        assert_eq!(interval, TimeSpan::from_secs(1));
+        assert!(remaining > TimeSpan::ZERO);
+        assert!(remaining <= interval);
+        assert!(!tfd.poll().contains(IoEvents::IN));
+    }
+
+    #[def_test]
+    fn test_timerfd_large_monotonic_deadline_is_not_truncated() {
+        let tfd = TimerFd::new(CLOCK_MONOTONIC);
+        let value = TimeSpan::from_secs(u64::MAX);
+        tfd.settime(true, value, TimeSpan::ZERO).unwrap();
+        assert_eq!(tfd.data.inner.lock().deadline, Some(monotonic(value)));
+        assert!(!tfd.poll().contains(IoEvents::IN));
+    }
+
+    #[def_test]
+    fn test_timerfd_concurrent_programming_then_disarm() {
+        let tfd = TimerFd::new(CLOCK_MONOTONIC);
+        let workers = [false, true].map(|periodic| {
+            let tfd = tfd.clone();
+            ktask::spawn(move || {
+                for _ in 0..32 {
+                    tfd.settime(
+                        false,
+                        TimeSpan::from_secs(60),
+                        if periodic {
+                            TimeSpan::from_secs(1)
+                        } else {
+                            TimeSpan::ZERO
+                        },
+                    )
+                    .unwrap();
+                    tfd.settime(false, TimeSpan::ZERO, TimeSpan::ZERO).unwrap();
+                }
+            })
+        });
+        for worker in workers {
+            assert_eq!(worker.join(), 0);
+        }
+        tfd.settime(false, TimeSpan::ZERO, TimeSpan::ZERO).unwrap();
+        assert_eq!(tfd.gettime(), (TimeSpan::ZERO, TimeSpan::ZERO));
+        assert!(!tfd.poll().contains(IoEvents::IN));
+        let data = Arc::downgrade(&tfd.data);
+        drop(tfd);
+        assert!(data.upgrade().is_none());
     }
 
     #[def_test]
@@ -448,7 +648,7 @@ mod timerfd_tests {
         let tfd = TimerFd::new(linux_raw_sys::general::CLOCK_REALTIME);
         let deadline = TimerDeadline::Realtime(SystemTime::from_unix_seconds(100));
         {
-            let mut inner = tfd.inner.lock();
+            let mut inner = tfd.data.inner.lock();
             inner.deadline = Some(deadline);
             inner.interval = TimeSpan::from_secs(2);
             inner.expirations = 3;
@@ -459,7 +659,7 @@ mod timerfd_tests {
             Err(KError::InvalidInput)
         );
 
-        let inner = tfd.inner.lock();
+        let inner = tfd.data.inner.lock();
         assert_eq!(inner.deadline, Some(deadline));
         assert_eq!(inner.interval, TimeSpan::from_secs(2));
         assert_eq!(inner.expirations, 3);

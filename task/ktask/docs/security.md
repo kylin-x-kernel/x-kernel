@@ -25,8 +25,8 @@ owners define and enforce those contracts. Their contracts at the `ktask`
 boundary remain in scope. See the core's [security analysis](../../ktimer-core/docs/security.md)
 for intrusive membership, callback lifetime and timer cancellation invariants.
 Production IRQ/hardware integration now services the core alongside legacy
-timers. Async sleep/timeout now use owned timers; explicit waker registrations,
-timerfd and periodic callers remain on their existing paths.
+timers. Async sleep/timeout and timerfd now use owned timers; explicit waker
+registrations and periodic callers remain on their existing paths.
 
 ### Prepared Timer Platform Boundary
 
