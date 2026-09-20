@@ -14,7 +14,7 @@ use core::ffi::c_char;
 
 use kaddr_layout::USER_HEAP_BASE;
 use kerrno::{KError, KResult};
-use kexec::{ExecRequest, load_user_app_request};
+use kexec::{ExecFailure, ExecRequest, load_user_app_request};
 use khal::uspace::UserContext;
 use ktask::current;
 use kuaccess::vm_load_string;
@@ -90,7 +90,16 @@ pub fn sys_execve(
             cred,
         ),
     );
-    let (entry_point, user_stack_base) = load_result?;
+    let (entry_point, user_stack_base) = match load_result {
+        Ok(image) => image,
+        Err(ExecFailure::BeforeCommit(error)) => return Err(error),
+        Err(ExecFailure::AfterCommit(error)) => {
+            drop(aspace);
+            error!("sys_execve: image commit failed; terminating current process: {error}");
+            posix_process::do_exit(ksignal::Signo::SIGSEGV as i32, true);
+            return Ok(0);
+        }
+    };
     drop(aspace);
 
     curr.set_name(entry_name.as_str());
@@ -112,7 +121,11 @@ pub fn sys_execve(
         exec_update.with_ta_head_bytes(ta_head_bytes)
     };
 
-    process.apply_exec_update(exec_update)?;
+    if let Err(error) = process.apply_exec_update(exec_update) {
+        error!("sys_execve: post-commit process update failed; terminating: {error}");
+        posix_process::do_exit(ksignal::Signo::SIGSEGV as i32, true);
+        return Ok(0);
+    }
     let mut exec_cred = thread.prepare_creds();
     exec_cred.apply_exec();
     thread.commit_creds(exec_cred);

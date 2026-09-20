@@ -13,6 +13,7 @@ tee = ["dep:tee_task_iface", "kprocess/tee"]
 tee_ta_sign = ["tee_task_iface/tee_ta_sign"]
 
 [dependencies]
+entropy.workspace = true
 kaddr_layout.workspace = true
 kerrno.workspace = true
 kcred.workspace = true

@@ -6,8 +6,9 @@
 //!
 //! Create an [`ExecRequest`], optionally call [`ExecRequest::prepare`] to pin and
 //! inspect the executable, and use [`load_user_app_request`] to replace an address
-//! space. The loader owns image layout; MM owns mappings and pages. Errors after
-//! address-space clearing are not rolled back.
+//! space. The loader owns image layout; MM owns mappings and pages.
+//! [`ExecFailure`] tells callers whether an error occurred before or after the
+//! old address space was cleared.
 //!
 //! # Example
 //!
@@ -36,7 +37,10 @@ extern crate alloc;
 #[macro_use]
 extern crate klogger;
 
+mod elf_image;
 mod loader;
 mod lru_cache;
 
-pub use self::loader::{BinPrm, ExecRequest, ExecSource, clear_elf_cache, load_user_app_request};
+pub use self::loader::{
+    BinPrm, ExecFailure, ExecRequest, ExecSource, clear_elf_cache, load_user_app_request,
+};

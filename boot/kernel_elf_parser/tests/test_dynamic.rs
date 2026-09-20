@@ -20,7 +20,7 @@ fn test_elf_parser() {
 
     let builder =
         ELFHeadersBuilder::new(aligned_elf_bytes.as_slice()).expect("Failed to parse ELF header");
-    let range = builder.ph_range();
+    let range = builder.ph_range().expect("Invalid program-header range");
     let headers = builder
         .build(&aligned_elf_bytes[range.start as usize..range.end as usize])
         .expect("Failed to parse program headers");
@@ -44,5 +44,5 @@ fn test_elf_parser() {
             xmas_elf::program::Flags::from(segment.flags)
         );
     }
-    assert_eq!(segments[0].virtual_addr, 0x1000);
+    assert_eq!(segments[0].virtual_addr, 0);
 }

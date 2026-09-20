@@ -5,11 +5,11 @@
 //! ELF loading for user programs.
 
 use alloc::{borrow::ToOwned, string::String, sync::Arc, vec, vec::Vec};
-use core::{ffi::CStr, iter};
+use core::{ffi::CStr, fmt, iter};
 
 use filemap::new_file_private_vma;
 use kcred::Cred;
-use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_stack_region};
+use kernel_elf_parser::{AuxEntry, AuxType, ELFHeaders, ELFHeadersBuilder, app_stack_region};
 use kerrno::{KError, KResult};
 use khal::paging::{MappingFlags, PageSize};
 use ksync::{Mutex, static_lock};
@@ -18,9 +18,46 @@ use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use memspace::{MmSpace, VmRuntimeRef};
 use ouroboros::self_referencing;
 
-use super::lru_cache::LruCache;
+use super::{
+    elf_image::{ExecLayoutPlan, ValidatedElfImage},
+    lru_cache::LruCache,
+};
 
 const SCRIPT_RECURSION_MAX: usize = 4;
+const ELF_HEADER_READ_SIZE: usize = 4096;
+const INTERPRETER_PATH_MAX: usize = 4096;
+
+/// Failure while replacing a user address space.
+///
+/// The variants identify whether the old user image still exists. Callers may
+/// return [`Self::BeforeCommit`] to the old program as an ordinary exec error.
+/// They must terminate the task after [`Self::AfterCommit`] because the old
+/// image has already been discarded and cannot safely resume.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecFailure {
+    /// Loading failed before `MmSpace::clear`; the old image is intact.
+    BeforeCommit(KError),
+    /// Loading failed after `MmSpace::clear`; the old image is gone.
+    AfterCommit(KError),
+}
+
+impl ExecFailure {
+    /// Returns the underlying kernel error.
+    pub const fn into_error(self) -> KError {
+        match self {
+            Self::BeforeCommit(error) | Self::AfterCommit(error) => error,
+        }
+    }
+}
+
+impl fmt::Display for ExecFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BeforeCommit(error) => write!(formatter, "exec failed before commit: {error}"),
+            Self::AfterCommit(error) => write!(formatter, "exec failed after commit: {error}"),
+        }
+    }
+}
 
 fn mapping_flags(flags: xmas_elf::program::Flags) -> MappingFlags {
     let mut mapping_flags = MappingFlags::USER;
@@ -226,57 +263,58 @@ impl BinPrm {
 
 struct PreparedExecImage {
     binprm: BinPrm,
-    interpreter: Option<Arc<VfsFile>>,
+    execfn: String,
+    executable: PreparedElfImage,
+    interpreter: Option<PreparedElfImage>,
+    layout: ExecLayoutPlan,
 }
 
-fn map_elf<'a>(
-    uspace: &mut MmSpace,
-    base: usize,
-    entry: &'a ElfCacheEntry,
-) -> KResult<ELFParser<'a>> {
-    let elf_parser = ELFParser::new(entry.borrow_elf(), base).map_err(|_| KError::InvalidData)?;
-    let file = entry.borrow_file();
+struct PreparedElfImage {
+    cache_entry: Arc<ElfCacheEntry>,
+    image: ValidatedElfImage,
+}
 
-    for ph in elf_parser
-        .headers()
-        .ph
-        .iter()
-        .filter(|ph| ph.get_type() == Ok(xmas_elf::program::Type::Load))
-    {
-        let vaddr = ph.virtual_addr as usize + elf_parser.base();
+impl PreparedElfImage {
+    fn new(cache_entry: Arc<ElfCacheEntry>) -> KResult<Self> {
+        let image =
+            ValidatedElfImage::new(cache_entry.borrow_elf(), cache_entry.borrow_file().size())?;
+        Ok(Self { cache_entry, image })
+    }
+}
+
+fn map_elf(uspace: &mut MmSpace, load_bias: usize, prepared: &PreparedElfImage) -> KResult {
+    let file = prepared.cache_entry.borrow_file();
+
+    for segment in prepared.image.segments() {
+        let mapped_start = load_bias
+            .checked_add(segment.mapping_start)
+            .ok_or(KError::InvalidExecutable)?;
+        let mapped_end = load_bias
+            .checked_add(segment.mapping_end)
+            .ok_or(KError::InvalidExecutable)?;
         debug!(
             "Mapping ELF segment: [{:#x?}, {:#x?}) flags: {}",
-            vaddr,
-            vaddr + ph.mem_size as usize,
-            ph.flags
+            mapped_start, mapped_end, segment.flags
         );
-        let seg_pad = vaddr.align_offset_4k();
-        assert_eq!(seg_pad, ph.offset as usize % PAGE_SIZE_4K);
-
-        let seg_align_size =
-            (ph.mem_size as usize + seg_pad + PAGE_SIZE_4K - 1) & !(PAGE_SIZE_4K - 1);
-        let seg_start = VirtAddr::from_usize(vaddr);
-        let mapped_start = seg_start.align_down_4k();
-        let file_start = (ph.offset as usize).align_down_4k() as u64;
 
         // PT_LOAD mappings follow the Linux rule that both VMA start and file
         // offset are aligned down to the page boundary. The page prefix before
         // `p_vaddr` still belongs to the mapped file object and must not be
         // silently zero-filled.
-        let flags = mapping_flags(ph.flags);
+        let flags = mapping_flags(segment.flags);
         let (vma, runtime) = new_file_private_vma(
-            mapped_start,
-            seg_align_size,
+            VirtAddr::from_usize(mapped_start),
+            segment.mapping_size(),
             PageSize::Size4K,
             file.clone(),
-            file_start,
-            Some(ph.offset + ph.file_size),
+            segment.file_start,
+            Some(segment.file_data_end),
             flags,
         )?;
         uspace.map_runtime_vma(vma, false, runtime)?;
     }
 
-    Ok(elf_parser)
+    Ok(())
 }
 
 fn map_elf_error(err: &'static str) -> KError {
@@ -295,19 +333,27 @@ struct ElfCacheEntry {
 
 impl ElfCacheEntry {
     fn load_file(file: Arc<VfsFile>) -> KResult<Result<Self, Vec<u8>>> {
-        let mut data = vec![0; 4096];
-        let mut pos = 0;
-        let read = file.read_from(&mut data[..], &mut pos)?;
-        data.truncate(read);
+        let initial_size = usize::try_from(file.size().min(ELF_HEADER_READ_SIZE as u64))
+            .map_err(|_| KError::InvalidExecutable)?;
+        let mut data = vec![0; initial_size];
+        read_exact_at(&file, &mut data, 0)?;
         match ElfCacheEntry::try_new_or_recover::<KError>(file.clone(), data, |data| {
             let builder = ELFHeadersBuilder::new(data).map_err(map_elf_error)?;
-            let range = builder.ph_range();
-            if range.end as usize <= data.len() {
-                builder.build(&data[range.start as usize..range.end as usize])
+            let range = builder.ph_range().map_err(map_elf_error)?;
+            if range.end > file.size() {
+                return Err(KError::InvalidExecutable);
+            }
+            let range_start =
+                usize::try_from(range.start).map_err(|_| KError::InvalidExecutable)?;
+            let range_end = usize::try_from(range.end).map_err(|_| KError::InvalidExecutable)?;
+            if range_end <= data.len() {
+                builder.build(&data[range_start..range_end])
             } else {
-                let mut buf = vec![0; (range.end - range.start) as usize];
-                let mut pos = range.start;
-                file.read_from(&mut buf[..], &mut pos)?;
+                let range_len = range_end
+                    .checked_sub(range_start)
+                    .ok_or(KError::InvalidExecutable)?;
+                let mut buf = vec![0; range_len];
+                read_exact_at(&file, &mut buf, range.start)?;
                 builder.build(&buf)
             }
             .map_err(map_elf_error)
@@ -327,7 +373,20 @@ impl ElfCacheEntry {
     }
 }
 
-struct ElfLoader(LruCache<ElfCacheEntry, 32>);
+fn read_exact_at(file: &VfsFile, output: &mut [u8], offset: u64) -> KResult {
+    let mut position = offset;
+    let mut filled = 0;
+    while filled < output.len() {
+        let read = file.read_from(&mut output[filled..], &mut position)?;
+        if read == 0 {
+            return Err(KError::InvalidExecutable);
+        }
+        filled = filled.checked_add(read).ok_or(KError::InvalidExecutable)?;
+    }
+    Ok(())
+}
+
+struct ElfLoader(LruCache<Arc<ElfCacheEntry>, 32>);
 type CacheProbeResult = Result<(), Vec<u8>>;
 type PreparedImageResult = Result<PreparedExecImage, (BinPrm, Vec<u8>)>;
 
@@ -346,17 +405,18 @@ impl ElfLoader {
         true
     }
 
-    fn cached_entry(&self, loc: &Path) -> Option<&ElfCacheEntry> {
+    fn cached_entry(&self, loc: &Path) -> Option<Arc<ElfCacheEntry>> {
         self.0
             .items()
             .find(|entry| entry.borrow_file().path().ptr_eq(loc))
+            .cloned()
     }
 
     fn ensure_cached(&mut self, file: Arc<VfsFile>) -> KResult<CacheProbeResult> {
         if !self.access_cached(file.path()) {
             match ElfCacheEntry::load_file(file)? {
                 Ok(entry) => {
-                    self.0.put(entry);
+                    self.0.put(Arc::new(entry));
                 }
                 Err(data) => return Ok(Err(data)),
             }
@@ -365,25 +425,38 @@ impl ElfLoader {
     }
 
     fn interp_path(entry: &ElfCacheEntry) -> KResult<Option<String>> {
-        let Some(header) = entry
+        let mut interpreters = entry
             .borrow_elf()
             .ph
             .iter()
-            .find(|ph| ph.get_type() == Ok(xmas_elf::program::Type::Interp))
-        else {
+            .filter(|header| header.get_type() == Ok(xmas_elf::program::Type::Interp));
+        let Some(header) = interpreters.next() else {
             return Ok(None);
         };
+        if interpreters.next().is_some() {
+            return Err(KError::InvalidExecutable);
+        }
+
+        let path_len = usize::try_from(header.file_size).map_err(|_| KError::InvalidExecutable)?;
+        if path_len == 0 || path_len > INTERPRETER_PATH_MAX {
+            return Err(KError::InvalidExecutable);
+        }
+        let end = header
+            .offset
+            .checked_add(header.file_size)
+            .ok_or(KError::InvalidExecutable)?;
 
         let file = entry.borrow_file();
-        let mut data = vec![0; header.file_size as usize];
-        let mut pos = header.offset;
-        let read = file.read_from(&mut data[..], &mut pos)?;
-        assert_eq!(data.len(), read);
+        if end > file.size() {
+            return Err(KError::InvalidExecutable);
+        }
+        let mut data = vec![0; path_len];
+        read_exact_at(file, &mut data, header.offset)?;
 
         let ldso = CStr::from_bytes_with_nul(&data)
             .ok()
             .and_then(|cstr| cstr.to_str().ok())
-            .ok_or(KError::InvalidInput)?;
+            .ok_or(KError::InvalidExecutable)?;
         Ok(Some(ldso.to_owned()))
     }
 
@@ -393,13 +466,11 @@ impl ElfLoader {
             Err(data) => return Ok(Err((binprm, data))),
         }
 
-        let interpreter = {
-            let executable = self
-                .cached_entry(binprm.location())
-                .expect("executable entry must be cached before exec commit");
-            Self::interp_path(executable)?
-        };
-        let interpreter = if let Some(ldso) = interpreter {
+        let executable_entry = self
+            .cached_entry(binprm.location())
+            .ok_or(KError::InvalidExecutable)?;
+        let interpreter_path = Self::interp_path(&executable_entry)?;
+        let interpreter_entry = if let Some(ldso) = interpreter_path {
             debug!("Loading dynamic linker: {ldso}");
             let fs_struct = kprocess::current_fs_context();
             let fs = fs_struct.lock();
@@ -413,51 +484,94 @@ impl ElfLoader {
             location.permission(Permission::MAY_EXEC, binprm.cred())?;
             let file = open_exec_file(&location, binprm.cred().clone())?;
             match self.ensure_cached(file.clone())? {
-                Ok(_) => Some(file),
-                Err(_) => return Err(KError::InvalidInput),
+                Ok(_) => Some(
+                    self.cached_entry(file.path())
+                        .ok_or(KError::InvalidExecutable)?,
+                ),
+                Err(_) => return Err(KError::InvalidExecutable),
             }
         } else {
             None
         };
+
+        let executable = PreparedElfImage::new(executable_entry)?;
+        let interpreter = interpreter_entry.map(PreparedElfImage::new).transpose()?;
+        let layout = ExecLayoutPlan::new(
+            &executable.image,
+            interpreter.as_ref().map(|interpreter| &interpreter.image),
+        )?;
+        let execfn = binprm.display_path().to_owned();
         Ok(Ok(PreparedExecImage {
             binprm,
+            execfn,
+            executable,
             interpreter,
+            layout,
         }))
     }
 
-    fn commit_prepared_binprm(
-        &mut self,
-        uspace: &mut MmSpace,
-        prepared: &PreparedExecImage,
-    ) -> KResult<(VirtAddr, Vec<AuxEntry>)> {
+    fn commit_prepared_binprm(uspace: &mut MmSpace, prepared: &PreparedExecImage) -> KResult {
+        let executable_bias = prepared.layout.executable_bias();
+
         // Point of no return: from here on the old user image is discarded and
         // all remaining work must consume prevalidated, already-pinned objects.
         uspace.clear();
         ksignal::map_signal_trampoline(uspace)?;
 
-        let elf = self
-            .cached_entry(prepared.binprm.location())
-            .expect("prepared executable entry must remain cached while loading");
-        let ldso = prepared.interpreter.as_ref().map(|file| {
-            self.cached_entry(file.path())
-                .expect("prepared interpreter entry must remain cached while loading")
-        });
+        map_elf(uspace, executable_bias, &prepared.executable)?;
+        if let (Some(interpreter), Some(interpreter_bias)) = (
+            prepared.interpreter.as_ref(),
+            prepared.layout.interpreter_bias(),
+        ) {
+            map_elf(uspace, interpreter_bias, interpreter)?;
+        }
 
-        let elf = map_elf(uspace, kaddr_layout::USER_SPACE_BASE, elf)?;
-        let ldso = ldso
-            .map(|elf| map_elf(uspace, kaddr_layout::USER_INTERP_BASE, elf))
-            .transpose()?;
-
-        let entry = VirtAddr::from_usize(
-            ldso.as_ref()
-                .map_or_else(|| elf.entry(), |ldso| ldso.entry()),
-        );
-        let auxv = elf
-            .aux_vector(PAGE_SIZE_4K, ldso.map(|elf| elf.base()))
-            .collect::<Vec<_>>();
-
-        Ok((entry, auxv))
+        Ok(())
     }
+}
+
+fn exec_entry(prepared: &PreparedExecImage) -> KResult<VirtAddr> {
+    let executable_bias = prepared.layout.executable_bias();
+    let entry = if let (Some(interpreter), Some(interpreter_bias)) = (
+        prepared.interpreter.as_ref(),
+        prepared.layout.interpreter_bias(),
+    ) {
+        interpreter.image.entry(interpreter_bias)?
+    } else {
+        prepared.executable.image.entry(executable_bias)?
+    };
+    Ok(VirtAddr::from_usize(entry))
+}
+
+fn initial_aux_vector(prepared: &PreparedExecImage) -> KResult<Vec<AuxEntry>> {
+    let executable_bias = prepared.layout.executable_bias();
+    let image = &prepared.executable.image;
+    let mut auxv = vec![
+        AuxEntry::new(
+            AuxType::PHDR,
+            image.program_header_address(executable_bias)?,
+        ),
+        AuxEntry::new(AuxType::PHENT, image.program_header_entry_size()),
+        AuxEntry::new(AuxType::PHNUM, image.program_header_count()),
+        AuxEntry::new(AuxType::PAGESZ, PAGE_SIZE_4K),
+        AuxEntry::new(AuxType::ENTRY, image.entry(executable_bias)?),
+    ];
+    if let Some(interpreter_bias) = prepared.layout.interpreter_bias() {
+        auxv.push(AuxEntry::new(AuxType::BASE, interpreter_bias));
+    }
+    auxv.extend(identity_aux_entries(prepared.binprm.cred()));
+    Ok(auxv)
+}
+
+fn identity_aux_entries(cred: &Cred) -> [AuxEntry; 5] {
+    let is_secure = cred.ruid() != cred.euid() || cred.rgid() != cred.egid();
+    [
+        AuxEntry::new(AuxType::UID, cred.ruid() as usize),
+        AuxEntry::new(AuxType::EUID, cred.euid() as usize),
+        AuxEntry::new(AuxType::GID, cred.rgid() as usize),
+        AuxEntry::new(AuxType::EGID, cred.egid() as usize),
+        AuxEntry::new(AuxType::SECURE, usize::from(is_secure)),
+    ]
 }
 
 static_lock! {
@@ -488,45 +602,102 @@ pub fn clear_elf_cache() {
 ///
 /// # Errors
 ///
-/// Returns `InvalidExecutable` for a non-ELF/non-script image, `FilesystemLoop`
-/// after four script redirects, `InvalidInput` for invalid interpreter text or
-/// interpreter image, and `ArgumentListTooLong` for an unrepresentable/oversized
-/// initial stack. Propagates VFS, ELF parser (`InvalidData`), MM mapping/population/
-/// write errors, and optional TA-signature rejection (`PermissionDenied`).
-/// Failures after `MmSpace::clear` leave the old image destroyed; this API has
-/// no rollback and the caller must not resume the previous user image.
+/// Returns `InvalidExecutable` for a malformed, unsupported-architecture,
+/// non-ELF/non-script image or invalid ELF interpreter, `InvalidInput` for a
+/// non-UTF-8 or empty script-interpreter line, `FilesystemLoop` after four script
+/// redirects, `NoMemory` when the validated images cannot fit below the fixed
+/// heap, and `ArgumentListTooLong` for an unrepresentable/oversized initial stack.
+/// Propagates VFS and MM mapping/population/write errors, and optional TA-signature
+/// rejection (`PermissionDenied`). Errors before `MmSpace::clear` are wrapped in
+/// [`ExecFailure::BeforeCommit`]. Mapping, population, or write errors after the
+/// clear are wrapped in [`ExecFailure::AfterCommit`]; the caller must terminate
+/// the task because the previous user image no longer exists.
 ///
 /// # Panics
 ///
-/// Loader assertions panic on mismatched ELF virtual/file page offsets, a short
-/// PT_INTERP read, or a prepared cache entry missing at commit. Current-context
-/// and filesystem initialization preconditions must also hold.
+/// Current-context and filesystem initialization preconditions must hold.
 pub fn load_user_app_request(
     uspace: &mut MmSpace,
     request: ExecRequest,
-) -> KResult<(VirtAddr, VirtAddr)> {
+) -> Result<(VirtAddr, VirtAddr), ExecFailure> {
     load_user_app_request_inner(uspace, request, 0)
 }
 
-fn script_interpreter_args(line: &str, script_path: &str, original_args: &[String]) -> Vec<String> {
-    line.trim()
+fn script_interpreter_args(
+    line: &str,
+    script_path: &str,
+    original_args: &[String],
+) -> KResult<Vec<String>> {
+    let args = line
+        .trim()
         .splitn(2, |c: char| c.is_ascii_whitespace())
         .map(|s| s.trim_ascii().to_owned())
         .chain(iter::once(script_path.to_owned()))
         .chain(original_args.iter().skip(1).cloned())
-        .collect()
+        .collect::<Vec<_>>();
+    if args.first().is_none_or(String::is_empty) {
+        return Err(KError::InvalidInput);
+    }
+    Ok(args)
 }
 
 fn load_user_app_request_inner(
     uspace: &mut MmSpace,
     request: ExecRequest,
+    script_depth: usize,
+) -> Result<(VirtAddr, VirtAddr), ExecFailure> {
+    let prepared =
+        prepare_user_app_request(request, script_depth).map_err(ExecFailure::BeforeCommit)?;
+    let entry = exec_entry(&prepared).map_err(ExecFailure::BeforeCommit)?;
+    let auxv = initial_aux_vector(&prepared).map_err(ExecFailure::BeforeCommit)?;
+
+    let ustack_top = VirtAddr::from_usize(kaddr_layout::USER_STACK_TOP);
+    let ustack_size = kaddr_layout::USER_STACK_SIZE;
+    let ustack_start = ustack_top - ustack_size;
+    let mut random_bytes = [0_u8; 16];
+    entropy::fill_random(&mut random_bytes);
+    let stack_data = app_stack_region(
+        prepared.binprm.args(),
+        prepared.binprm.envs(),
+        &auxv,
+        ustack_top.into(),
+        &random_bytes,
+        &prepared.execfn,
+    )
+    .map_err(|_| ExecFailure::BeforeCommit(KError::ArgumentListTooLong))?;
+    if stack_data.len() > ustack_size {
+        return Err(ExecFailure::BeforeCommit(KError::ArgumentListTooLong));
+    }
+    let user_sp = ustack_top - stack_data.len();
+
+    commit_user_app_image(
+        uspace,
+        &prepared,
+        ustack_start,
+        ustack_top,
+        user_sp,
+        &stack_data,
+    )
+    .map_err(ExecFailure::AfterCommit)?;
+
+    Ok((entry, user_sp))
+}
+
+fn prepare_user_app_request(
+    request: ExecRequest,
     mut script_depth: usize,
-) -> KResult<(VirtAddr, VirtAddr)> {
+) -> KResult<PreparedExecImage> {
     let mut request = request;
-    let prepared = loop {
+    let mut original_execfn = None;
+    loop {
         let binprm = request.prepare()?;
         match ELF_LOADER.lock().prepare_binprm(binprm)? {
-            Ok(prepared) => break prepared,
+            Ok(mut prepared) => {
+                if let Some(execfn) = original_execfn {
+                    prepared.execfn = execfn;
+                }
+                return Ok(prepared);
+            }
             Err((binprm, data)) => {
                 if !data.starts_with(b"#!") {
                     return Err(KError::InvalidExecutable);
@@ -541,7 +712,8 @@ fn load_user_app_request_inner(
                     .unwrap_or(head.len());
                 let line = core::str::from_utf8(&head[..pos]).map_err(|_| KError::InvalidInput)?;
 
-                let new_args = script_interpreter_args(line, binprm.display_path(), binprm.args());
+                original_execfn.get_or_insert_with(|| binprm.display_path().to_owned());
+                let new_args = script_interpreter_args(line, binprm.display_path(), binprm.args())?;
                 let interpreter = new_args.first().ok_or(KError::InvalidInput)?.clone();
                 request = ExecRequest::from_path(
                     interpreter,
@@ -552,43 +724,36 @@ fn load_user_app_request_inner(
                 script_depth += 1;
             }
         }
-    };
+    }
+}
 
-    let (entry, auxv) = ELF_LOADER
-        .lock()
-        .commit_prepared_binprm(uspace, &prepared)?;
+fn commit_user_app_image(
+    uspace: &mut MmSpace,
+    prepared: &PreparedExecImage,
+    ustack_start: VirtAddr,
+    ustack_top: VirtAddr,
+    user_sp: VirtAddr,
+    stack_data: &[u8],
+) -> KResult {
+    ElfLoader::commit_prepared_binprm(uspace, prepared)?;
 
-    let ustack_top = VirtAddr::from_usize(kaddr_layout::USER_STACK_TOP);
-    let ustack_size = kaddr_layout::USER_STACK_SIZE;
-    let ustack_start = ustack_top - ustack_size;
     debug!("Mapping user stack: {ustack_start:#x?} -> {ustack_top:#x?}");
 
     uspace.map(
         ustack_start,
-        ustack_size,
+        kaddr_layout::USER_STACK_SIZE,
         MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
         false,
         VmRuntimeRef::new_anon_private(ustack_start, PageSize::Size4K),
     )?;
 
-    let stack_data = app_stack_region(
-        prepared.binprm.args(),
-        prepared.binprm.envs(),
-        &auxv,
-        ustack_top.into(),
-    )
-    .map_err(|_| KError::ArgumentListTooLong)?;
-    if stack_data.len() > ustack_size {
-        return Err(KError::ArgumentListTooLong);
-    }
-    let user_sp = ustack_top - stack_data.len();
     let user_sp_aligned = user_sp.align_down_4k();
     uspace.populate_area(
         user_sp_aligned,
         (ustack_top - user_sp_aligned).align_up_4k(),
         MappingFlags::READ | MappingFlags::WRITE,
     )?;
-    uspace.write(user_sp, stack_data.as_slice())?;
+    uspace.write(user_sp, stack_data)?;
 
     let heap_start = VirtAddr::from_usize(kaddr_layout::USER_HEAP_BASE);
     let heap_size = kaddr_layout::USER_HEAP_SIZE;
@@ -600,18 +765,22 @@ fn load_user_app_request_inner(
         VmRuntimeRef::new_anon_private(heap_start, PageSize::Size4K),
     )?;
 
-    Ok((entry, user_sp))
+    Ok(())
 }
 
 #[cfg(unittest)]
 mod tests {
     use alloc::{borrow::ToOwned, vec};
 
+    use kernel_elf_parser::AuxType;
+    use kerrno::KError;
     use khal::paging::MappingFlags;
     use unittest::def_test;
     use xmas_elf::program::{FLAG_R, FLAG_W, FLAG_X, Flags};
 
-    use super::{ExecRequest, ExecSource, mapping_flags, script_interpreter_args};
+    use super::{
+        ExecRequest, ExecSource, identity_aux_entries, mapping_flags, script_interpreter_args,
+    };
 
     #[def_test]
     fn test_mapping_flags_sets_user_and_requested_permissions() {
@@ -670,7 +839,8 @@ mod tests {
             "arg2".to_owned(),
         ];
         let rewritten =
-            script_interpreter_args("/bin/sh -e", "/tmp/script.sh", original.as_slice());
+            script_interpreter_args("/bin/sh -e", "/tmp/script.sh", original.as_slice())
+                .expect("valid interpreter line");
 
         assert_eq!(rewritten.len(), 5);
         assert_eq!(rewritten[0], "/bin/sh");
@@ -678,5 +848,41 @@ mod tests {
         assert_eq!(rewritten[2], "/tmp/script.sh");
         assert_eq!(rewritten[3], "arg1");
         assert_eq!(rewritten[4], "arg2");
+    }
+
+    #[def_test]
+    fn script_interpreter_args_rejects_empty_line() {
+        assert_eq!(
+            script_interpreter_args("   ", "/tmp/script.sh", &[]),
+            Err(KError::InvalidInput)
+        );
+    }
+
+    #[def_test]
+    fn identity_aux_entries_report_ids_and_secure_exec() {
+        let mut cred = kcred::Cred::root();
+        cred.set_resgid(Some(100), Some(200), Some(300))
+            .expect("root must be able to set group IDs");
+        cred.set_resuid(Some(1000), Some(2000), Some(3000))
+            .expect("root must be able to set user IDs");
+
+        let entries = identity_aux_entries(&cred);
+        assert!(entries[0].get_type() == AuxType::UID);
+        assert_eq!(entries[0].value(), 1000);
+        assert!(entries[1].get_type() == AuxType::EUID);
+        assert_eq!(entries[1].value(), 2000);
+        assert!(entries[2].get_type() == AuxType::GID);
+        assert_eq!(entries[2].value(), 100);
+        assert!(entries[3].get_type() == AuxType::EGID);
+        assert_eq!(entries[3].value(), 200);
+        assert!(entries[4].get_type() == AuxType::SECURE);
+        assert_eq!(entries[4].value(), 1);
+    }
+
+    #[def_test]
+    fn identity_aux_entries_include_zero_secure_value() {
+        let entries = identity_aux_entries(&kcred::Cred::new(1000, 100));
+        assert!(entries[4].get_type() == AuxType::SECURE);
+        assert_eq!(entries[4].value(), 0);
     }
 }

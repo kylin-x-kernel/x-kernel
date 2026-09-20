@@ -45,6 +45,8 @@ use crate::auxv::{AuxEntry, AuxType};
 /// * `envs` - Environment variables of the application
 /// * `auxv` - Auxiliary vectors of the application
 /// * `sp`   - Highest address of the stack
+/// * `random_bytes` - Random bytes referenced by `AT_RANDOM`
+/// * `execfn` - Executed pathname referenced by `AT_EXECFN`
 ///
 /// # Return
 ///
@@ -58,7 +60,15 @@ pub fn app_stack_region(
     envs: &[String],
     auxv: &[AuxEntry],
     sp: usize,
+    random_bytes: &[u8; 16],
+    execfn: &str,
 ) -> Result<Vec<u8>, &'static str> {
+    // Accept callers that already terminate their input, but rebuild the
+    // terminal entry after helper-owned entries so none are hidden behind it.
+    let auxv = &auxv[..auxv
+        .iter()
+        .position(|entry| entry.get_type() == AuxType::NULL)
+        .unwrap_or(auxv.len())];
     let mut data = VecDeque::new();
     let mut push = |src: &[u8]| -> Result<usize, &'static str> {
         data.extend(src.iter().cloned());
@@ -66,8 +76,9 @@ pub fn app_stack_region(
         sp.checked_sub(data.len()).ok_or("user stack overflow")
     };
 
-    // define a random string with 16 bytes
-    let random_str_pos = push("0123456789abcdef".as_bytes())?;
+    let random_bytes_pos = push(random_bytes)?;
+    push(b"\0")?;
+    let execfn_pos = push(execfn.as_bytes())?;
     // Push arguments and environment variables
     let envs_slice: Result<Vec<_>, _> = envs
         .iter()
@@ -118,13 +129,17 @@ pub fn app_stack_region(
             break;
         }
     }
-    push(auxv.as_bytes())?;
-    if !has_random {
-        push(AuxEntry::new(AuxType::RANDOM, random_str_pos).as_bytes())?;
-    }
+    // `push` prepends data, so build the auxiliary vector from its terminal
+    // entry backwards. The returned stack then presents regular entries first
+    // and AT_NULL last as required by the ELF process ABI.
+    push(AuxEntry::new(AuxType::NULL, 0).as_bytes())?;
     if !has_execfn {
-        push(AuxEntry::new(AuxType::EXECFN, argv_slice[0]).as_bytes())?;
+        push(AuxEntry::new(AuxType::EXECFN, execfn_pos).as_bytes())?;
     }
+    if !has_random {
+        push(AuxEntry::new(AuxType::RANDOM, random_bytes_pos).as_bytes())?;
+    }
+    push(auxv.as_bytes())?;
 
     // Push the argv and envp pointers
     push(padding_null.as_bytes())?;

@@ -14,11 +14,10 @@ used for loading a given application into the physical memory of the kernel.
 ## Examples
 
 ```rust
-use std::collections::BTreeMap;
 use kernel_elf_parser::{AuxEntry, AuxType};
 let args: Vec<String> = vec!["arg1".to_string(), "arg2".to_string(), "arg3".to_string()];
 let envs: Vec<String> = vec!["LOG=file".to_string()];
-let mut auxv = [
+let auxv = [
     AuxEntry::new(AuxType::PHDR, 0x1000),
     AuxEntry::new(AuxType::PHENT, 1024),
     AuxEntry::new(AuxType::PHNUM, 10),
@@ -27,8 +26,17 @@ let mut auxv = [
 ];
 // The highest address of the user stack.
 let ustack_end = 0x4000_0000;
+let random_bytes = [0x5a; 16];
 
-let stack_data = kernel_elf_parser::app_stack_region(&args, &envs, &auxv, ustack_end);
+let stack_data = kernel_elf_parser::app_stack_region(
+    &args,
+    &envs,
+    &auxv,
+    ustack_end,
+    &random_bytes,
+    "/bin/example",
+)
+.expect("initial stack must fit");
 
 // args length
 assert_eq!(stack_data[0..8], [3, 0, 0, 0, 0, 0, 0, 0]);

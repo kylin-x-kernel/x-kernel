@@ -131,6 +131,11 @@ const _: () = assert!(USER_STACK_TOP > USER_STACK_SIZE);
 const _: () = assert!(SIGNAL_TRAMPOLINE > USER_SPACE_BASE);
 const _: () = assert!(USER_HEAP_BASE >= USER_SPACE_BASE);
 const _: () = assert!(USER_HEAP_BASE + USER_HEAP_SIZE <= USER_SPACE_BASE + USER_SPACE_SIZE);
+const USER_HEAP_LIMIT: usize = match USER_HEAP_BASE.checked_add(USER_HEAP_SIZE_MAX) {
+    Some(limit) => limit,
+    None => panic!("maximum user heap range overflows"),
+};
+const _: () = assert!(SIGNAL_TRAMPOLINE >= USER_HEAP_LIMIT);
 
 /// Runtime offset from physical kernel load address to the linked kernel-image
 /// virtual address.

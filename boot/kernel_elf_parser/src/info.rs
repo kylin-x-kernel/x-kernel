@@ -5,7 +5,7 @@
 //! ELF information parsed from the ELF file
 
 use alloc::vec::Vec;
-use core::ops::Range;
+use core::{mem::size_of, ops::Range};
 
 use xmas_elf::{
     header::Class,
@@ -23,15 +23,64 @@ impl<'a> ELFHeadersBuilder<'a> {
         }))
     }
 
-    pub fn ph_range(&self) -> Range<u64> {
+    /// Returns the byte range occupied by the program-header table.
+    ///
+    /// The range is derived from untrusted ELF fields and is therefore checked
+    /// for multiplication and addition overflow before it is returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the entry size does not match the ELF class or
+    /// when the table range cannot be represented as a `u64` range.
+    pub fn ph_range(&self) -> Result<Range<u64>, &'static str> {
         let start = self.0.header.pt2.ph_offset();
-        let size = self.0.header.pt2.ph_entry_size() as u64 * self.0.header.pt2.ph_count() as u64;
-        start..start + size
+        let entry_size = u64::from(self.0.header.pt2.ph_entry_size());
+        let expected_entry_size = match self.0.header.pt1.class() {
+            Class::ThirtyTwo => size_of::<ProgramHeader32>() as u64,
+            Class::SixtyFour => size_of::<ProgramHeader64>() as u64,
+            Class::None | Class::Other(_) => return Err("Invalid ELF class"),
+        };
+        if entry_size != expected_entry_size {
+            return Err("Invalid program-header entry size");
+        }
+        let count = u64::from(self.0.header.pt2.ph_count());
+        let size = entry_size
+            .checked_mul(count)
+            .ok_or("Program-header table size overflows")?;
+        let end = start
+            .checked_add(size)
+            .ok_or("Program-header table range overflows")?;
+        Ok(start..end)
     }
 
+    /// Builds the parsed ELF headers from the complete program-header table.
+    ///
+    /// `ph` must contain exactly the byte range returned by [`Self::ph_range`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ELF class is unsupported, the program-header
+    /// entry size or table length is inconsistent with the ELF header, or a
+    /// program-header entry cannot be parsed.
     pub fn build(mut self, ph: &[u8]) -> Result<ELFHeaders<'a>, &'static str> {
+        let entry_size = usize::from(self.0.header.pt2.ph_entry_size());
+        let expected_entry_size = match self.0.header.pt1.class() {
+            Class::ThirtyTwo => size_of::<ProgramHeader32>(),
+            Class::SixtyFour => size_of::<ProgramHeader64>(),
+            Class::None | Class::Other(_) => return Err("Invalid ELF class"),
+        };
+        if entry_size != expected_entry_size {
+            return Err("Invalid program-header entry size");
+        }
+        let expected_len = entry_size
+            .checked_mul(usize::from(self.0.header.pt2.ph_count()))
+            .ok_or("Program-header table size overflows")?;
+        if ph.len() != expected_len {
+            return Err("Incomplete program-header table");
+        }
+
         self.0.ph = ph
-            .chunks_exact(self.0.header.pt2.ph_entry_size() as usize)
+            .chunks_exact(entry_size)
             .map(|chunk| match self.0.header.pt1.class() {
                 Class::ThirtyTwo => {
                     let ph: &ProgramHeader32 = zero::read(chunk);
