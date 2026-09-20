@@ -34,6 +34,9 @@ net/knet/
     │   ├── socket.rs
     │   ├── tests.rs
     │   └── wire.rs
+    ├── runtime/
+    │   ├── mod.rs
+    │   └── tx_queue.rs
     ├── socket/
     │   ├── file.rs
     │   ├── general.rs
@@ -210,13 +213,13 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 
 * **Normal protocol processing runs in task context**
 
-  Paths such as `poller::assist_once`, socket `send` / `recv` / `connect` / `accept`, and netlink mutations may acquire `Mutex` or `RwLock` objects and may execute relatively heavy data-plane work. These paths must run in normal task context.
+  Paths such as `NetworkPoller::assist_once`, socket `send` / `recv` / `connect` / `accept`, and netlink mutations may acquire `Mutex` or `RwLock` objects and may execute relatively heavy data-plane work. These paths must run in normal task context.
 
 * **IRQ handlers only signal RX work**
 
   A device interrupt handler should only acknowledge the device interrupt, mark RX work as pending, and schedule the `NetRx` softirq. It must not run full protocol processing or blocking socket operations directly.
 
-* **`NetRx` may deliver loopback UDP, but must not call `poller::assist_once`**
+* **`NetRx` may deliver loopback UDP, but must not call `NetworkPoller::assist_once`**
 
   `NetRx` runs in a non-sleepable context.
 
@@ -226,7 +229,7 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 
   TCP, ICMP, IPv6, fragmented packets, and UDP packets that do not match a socket remain in `deferred`. They are later drained by the task poller through `poll_rx`.
 
-  Code running in softirq context must not call `poller::assist_once` or acquire sleepable locks owned by `Service` or `SocketSet`.
+  Code running in softirq context must not call `NetworkPoller::assist_once` or acquire sleepable locks owned by `Service` or `SocketSet`.
 
 * **Blocking operations depend on poll and waker semantics**
 
@@ -671,7 +674,7 @@ UDP builds IPv4 packets in knet; TCP and raw sockets submit packets through smol
 | 12 | &emsp;**else**: |
 | 13 | &emsp;&emsp;enqueue all fragments with the bound interface, or return `WouldBlock` |
 | 14 | &emsp;release Router |
-| 15 | &emsp;notify(Tx); assist_once() |
+| 15 | &emsp;network_poller().notify(Tx); network_poller().assist_once() |
 | 16 | **Procedure** `dispatch_budgeted(tx_budget)` |
 | 17 | &emsp;**repeat** up to $B_{\mathrm{tx}}$ times: |
 | 18 | &emsp;&emsp;packet = pop control queue first, otherwise data queue |
@@ -778,7 +781,7 @@ Ethernet RX source registration is protected by `NET_RX_SOURCES: SpinNoIrq<NetRx
 
 ### UDP and IPv4 Data Paths
 
-Crate-local types own UDP PCBs, bind-conflict checks, send and receive queues, IPv4 validation, fragment reassembly, output fragmentation, and ICMPv4 errors. TCP, raw IP, and IPv6 use the smoltcp socket set, driven by `knet-poller` and explicit `poller::assist_once` calls. This boundary keeps UDP independent of smoltcp socket handles while preserving TCP and raw-socket semantics.
+Crate-local types own UDP PCBs, bind-conflict checks, send and receive queues, IPv4 validation, fragment reassembly, output fragmentation, and ICMPv4 errors. TCP, raw IP, and IPv6 use the smoltcp socket set, driven by `knet-poller` and explicit `NetworkPoller::assist_once` calls. This boundary keeps UDP independent of smoltcp socket handles while preserving TCP and raw-socket semantics.
 
 ### Budgeted Processing
 
@@ -788,7 +791,7 @@ Loopback UDP is delivered directly to the PCB within the transmit path's bottom-
 
 RX, TX, and timers have separate budgets, and each `Service` round has a 1 ms soft time limit. Staged smoltcp APIs bound ingress and egress work. TX stages share one budget, as do the main and final RX stages, allowing loopback TCP and ICMP to complete a device round trip within one assist. Control traffic takes priority over data traffic. Router, Interface, or socket-set contention ends the round with `has_more` set. IPv4 reassembly processing acquires the `IngressProcessor` lock only for pending expiry events; contention preserves those events while TX continues. Expiry events are processed under the timer budget across successive rounds.
 
-TCP sends fill the smoltcp buffer and notify the poller, which advances the protocol and dispatches TX in bounded batches. TCP receives publish `RxWindow` when free buffer space before the read is below the maximum window-scaling quantum; subsequent window growth uses RX and timer processing. TCP and raw sockets register aggregate send wakers with smoltcp, while `PollProgress::tx_capacity_changed` wakes poller TX waiters when Router data-queue slots become available. Separate atomic deadline sources track protocol and deferred-close timers and IPv4 reassembly. Periodic sampling wakes socket waiters and notifies the poller when deadlines expire.
+TCP sends fill the smoltcp buffer and notify the poller, which advances the protocol and dispatches TX in bounded batches. TCP receives publish `RxWindow` when free buffer space before the read is below the maximum window-scaling quantum; subsequent window growth uses RX and timer processing. TCP and raw sockets register aggregate send wakers with smoltcp. `DataTxQueue` owns bounded data-TX packets and capacity waiters under the Router mutex. `Service` registers send waiters and wakes them after TX releases queue capacity and the Router lock; `NetworkPoller` owns execution scheduling. Separate atomic deadline sources track protocol and deferred-close timers and IPv4 reassembly. Periodic sampling wakes socket waiters and notifies the poller when deadlines expire.
 
 ### Control-Plane State Ownership
 

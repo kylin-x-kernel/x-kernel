@@ -6,6 +6,7 @@
 use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
 
 use kerrno::{KError, KResult, LinuxError};
+use kpoll::{PollContext, PollRegisterError, PollSet};
 use ktime_types::MonotonicInstant;
 use smoltcp::{
     phy::{DeviceCapabilities, Medium},
@@ -27,6 +28,7 @@ use crate::{
         LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice,
     },
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
+    runtime::tx_queue::DataTxQueue,
 };
 
 const CONTROL_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
@@ -275,7 +277,7 @@ impl RouteTable {
 pub struct Router {
     rx_queue: VecDeque<PacketBuf>,
     control_tx_queue: VecDeque<PacketBuf>,
-    data_tx_queue: VecDeque<PacketBuf>,
+    data_tx_queue: DataTxQueue,
     next_rx_device: usize,
     ipv4_addrs: Vec<Ipv4AddrEntry>,
     next_ipv4_identification: u16,
@@ -293,7 +295,7 @@ impl Router {
         Self {
             rx_queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
             control_tx_queue: VecDeque::with_capacity(CONTROL_TX_QUEUE_SIZE),
-            data_tx_queue: VecDeque::with_capacity(DATA_TX_QUEUE_SIZE),
+            data_tx_queue: DataTxQueue::with_capacity(DATA_TX_QUEUE_SIZE),
             next_rx_device: 0,
             ipv4_addrs: Vec::new(),
             next_ipv4_identification: 1,
@@ -362,32 +364,37 @@ impl Router {
     }
 
     pub fn can_enqueue_tx_packet(&self) -> bool {
-        self.data_tx_queue.len() < DATA_TX_QUEUE_SIZE
+        !self.data_tx_queue.is_full()
     }
 
     pub(crate) fn available_tx_packet_slots(&self) -> usize {
-        DATA_TX_QUEUE_SIZE.saturating_sub(self.data_tx_queue.len())
+        self.data_tx_queue.available()
+    }
+
+    pub(super) fn register_tx_waker(
+        &self,
+        context: &mut PollContext<'_>,
+    ) -> Result<(), PollRegisterError> {
+        self.data_tx_queue.register_capacity_waker(context)
+    }
+
+    pub(super) fn tx_capacity_poll(&self) -> PollSet {
+        self.data_tx_queue.capacity_poll()
     }
 
     pub fn can_enqueue_tx_packets(&self, packet_count: usize) -> bool {
-        self.data_tx_queue
-            .len()
-            .checked_add(packet_count)
-            .is_some_and(|len| len <= DATA_TX_QUEUE_SIZE)
+        self.data_tx_queue.can_push(packet_count)
     }
 
     pub fn queue_ipv4_packet(&mut self, packet: Vec<u8>, oif: i32) -> KResult {
         let packets = self.fragment_ipv4_packet_for_output(packet)?;
-        if !self.can_enqueue_tx_packets(packets.len()) {
-            return Err(KError::WouldBlock);
-        }
-
-        self.data_tx_queue.extend(
-            packets
-                .into_iter()
-                .map(|packet| PacketBuf::from_ip_packet_vec(oif, packet, PacketOwner::Ipv4Stack)),
-        );
-        Ok(())
+        self.data_tx_queue
+            .try_extend(
+                packets.into_iter().map(|packet| {
+                    PacketBuf::from_ip_packet_vec(oif, packet, PacketOwner::Ipv4Stack)
+                }),
+            )
+            .map_err(|_| KError::WouldBlock)
     }
 
     /// Returns whether `dst` is routed through a loopback device.
@@ -1334,7 +1341,12 @@ mod tests {
     #[def_test]
     fn data_dispatch_frees_data_tx_capacity() {
         let mut router = Router::new();
-        router.data_tx_queue.push_back(tx_packet_buf(vec![0; 20]));
+        assert!(
+            router
+                .data_tx_queue
+                .try_push(tx_packet_buf(vec![0; 20]))
+                .is_ok()
+        );
         let capacity_before = router.available_tx_packet_slots();
 
         let (work_done, _) = router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1);
@@ -1579,22 +1591,25 @@ mod tests {
     }
 }
 
-pub struct TxToken<'a>(&'a mut VecDeque<PacketBuf>);
+pub struct TxToken<'a>(&'a mut DataTxQueue);
 
 impl smoltcp::phy::TxToken for TxToken<'_> {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        debug_assert!(self.0.len() < SOCKET_BUFFER_SIZE);
-
         let mut ip_packet = vec![0u8; len];
         let result = f(&mut ip_packet);
-        self.0.push_back(PacketBuf::from_ip_packet_vec(
-            0,
-            ip_packet,
-            PacketOwner::Ipv4Stack,
-        ));
+        assert!(
+            self.0
+                .try_push(PacketBuf::from_ip_packet_vec(
+                    0,
+                    ip_packet,
+                    PacketOwner::Ipv4Stack,
+                ))
+                .is_ok(),
+            "smoltcp consumed a TX token without queue capacity"
+        );
         result
     }
 }
@@ -1618,7 +1633,7 @@ impl smoltcp::phy::Device for Router {
     type TxToken<'a> = TxToken<'a>;
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        if self.rx_queue.is_empty() || self.data_tx_queue.len() >= DATA_TX_QUEUE_SIZE {
+        if self.rx_queue.is_empty() || self.data_tx_queue.is_full() {
             None
         } else {
             Some((
@@ -1629,7 +1644,7 @@ impl smoltcp::phy::Device for Router {
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        if self.data_tx_queue.len() >= DATA_TX_QUEUE_SIZE {
+        if self.data_tx_queue.is_full() {
             None
         } else {
             Some(TxToken(&mut self.data_tx_queue))

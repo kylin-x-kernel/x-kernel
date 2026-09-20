@@ -152,21 +152,24 @@ impl Service {
         );
         let mut timer_events = ipv4_expiration.timer_events;
         if !self.try_flush_ingress_batches(&mut accepted_packets, &mut control_packets) {
-            return deferred_poll_progress(0, 0, timer_events, false);
+            return deferred_poll_progress(0, 0, timer_events);
         }
 
         let Some(mut router) = self.router.try_lock() else {
-            return deferred_poll_progress(0, 0, timer_events, false);
+            return deferred_poll_progress(0, 0, timer_events);
         };
-        let tx_capacity_before = router.available_tx_packet_slots();
-        let (mut tx_packets, mut has_reached_time_limit) = dispatch_tx_budgeted(
+        let TxDispatchProgress {
+            packet_count: mut tx_packets,
+            mut has_reached_time_limit,
+            capacity_poll,
+        } = dispatch_tx_budgeted(
             &mut router,
             device_timestamp,
             budget.tx_packets,
             round_started_at,
         );
-        let mut tx_capacity_changed = router.available_tx_packet_slots() > tx_capacity_before;
         drop(router);
+        wake_tx_capacity_waiters(capacity_poll);
         let mut tx_remaining = budget.tx_packets.saturating_sub(tx_packets);
 
         let rx_progress = self.poll_device_rx_budgeted(
@@ -184,38 +187,18 @@ impl Service {
         let mut rx_packets = rx_progress.packets;
         has_reached_time_limit |= rx_progress.has_reached_time_limit;
         if rx_progress.has_lock_contention {
-            return deferred_poll_progress(
-                rx_packets,
-                tx_packets,
-                timer_events,
-                tx_capacity_changed,
-            );
+            return deferred_poll_progress(rx_packets, tx_packets, timer_events);
         }
 
         let Some(mut sockets) = SOCKET_SET.inner.try_lock() else {
-            return deferred_poll_progress(
-                rx_packets,
-                tx_packets,
-                timer_events,
-                tx_capacity_changed,
-            );
+            return deferred_poll_progress(rx_packets, tx_packets, timer_events);
         };
         let Some(mut router) = self.router.try_lock() else {
-            return deferred_poll_progress(
-                rx_packets,
-                tx_packets,
-                timer_events,
-                tx_capacity_changed,
-            );
+            return deferred_poll_progress(rx_packets, tx_packets, timer_events);
         };
         let current = now();
         let Some(mut iface) = self.iface.try_lock() else {
-            return deferred_poll_progress(
-                rx_packets,
-                tx_packets,
-                timer_events,
-                tx_capacity_changed,
-            );
+            return deferred_poll_progress(rx_packets, tx_packets, timer_events);
         };
         // Maintenance and one egress pass remain bounded and preserve protocol
         // progress after bulk RX or TX reaches the round time limit.
@@ -272,17 +255,20 @@ impl Service {
         if has_reached_time_limit {
             tx_remaining = 0;
         }
-        let tx_capacity_before = router.available_tx_packet_slots();
-        let (dispatched, tx_time_limit) = dispatch_tx_budgeted(
+        let TxDispatchProgress {
+            packet_count: dispatched,
+            has_reached_time_limit: tx_time_limit,
+            capacity_poll,
+        } = dispatch_tx_budgeted(
             &mut router,
             device_timestamp,
             tx_remaining,
             round_started_at,
         );
         tx_packets += dispatched;
-        tx_capacity_changed |= router.available_tx_packet_slots() > tx_capacity_before;
         has_reached_time_limit |= tx_time_limit;
         drop(router);
+        wake_tx_capacity_waiters(capacity_poll);
 
         let rx_remaining = budget.rx_packets.saturating_sub(rx_packets);
         if !has_reached_time_limit && rx_remaining > 0 {
@@ -296,12 +282,7 @@ impl Service {
             );
             rx_packets += tail_progress.packets;
             if tail_progress.has_lock_contention {
-                return deferred_poll_progress(
-                    rx_packets,
-                    tx_packets,
-                    timer_events,
-                    tx_capacity_changed,
-                );
+                return deferred_poll_progress(rx_packets, tx_packets, timer_events);
             }
         }
 
@@ -311,12 +292,7 @@ impl Service {
         self.update_poll_timeout(timer_current, next_poll);
 
         let Some(mut router) = self.router.try_lock() else {
-            return deferred_poll_progress(
-                rx_packets,
-                tx_packets,
-                timer_events,
-                tx_capacity_changed,
-            );
+            return deferred_poll_progress(rx_packets, tx_packets, timer_events);
         };
         let ingress_has_more = router.has_pending_ingress();
         let rx_has_more = router.has_immediate_rx_work();
@@ -325,7 +301,6 @@ impl Service {
             rx_packets,
             tx_packets,
             timer_events,
-            tx_capacity_changed,
             has_more: rx_has_more
                 || ingress_has_more
                 || tx_has_more
@@ -586,6 +561,18 @@ impl Service {
                 device.register_rx_waker(&source_waker, context)?;
             }
         }
+        Ok(source_waker)
+    }
+
+    /// Registers protocol progress and data-queue capacity for a send recheck.
+    ///
+    /// The caller must recheck send readiness after registration.
+    pub(crate) fn register_tx_waker(
+        &self,
+        context: &mut PollContext<'_>,
+    ) -> Result<Waker, PollRegisterError> {
+        let source_waker = self.register_rx_waker(u32::MAX, context)?;
+        self.router.lock().register_tx_waker(context)?;
         Ok(source_waker)
     }
 
@@ -959,15 +946,20 @@ fn deferred_poll_progress(
     rx_packets: usize,
     tx_packets: usize,
     timer_events: usize,
-    tx_capacity_changed: bool,
 ) -> PollProgress {
     PollProgress {
         rx_packets,
         tx_packets,
         timer_events,
-        tx_capacity_changed,
         has_more: true,
     }
+}
+
+struct TxDispatchProgress {
+    packet_count: usize,
+    has_reached_time_limit: bool,
+    /// Captured under the queue lock and consumed after releasing that lock.
+    capacity_poll: Option<PollSet>,
 }
 
 fn dispatch_tx_budgeted(
@@ -975,7 +967,8 @@ fn dispatch_tx_budgeted(
     timestamp: MonotonicInstant,
     budget: usize,
     round_started_at: MonotonicInstant,
-) -> (usize, bool) {
+) -> TxDispatchProgress {
+    let capacity_before = router.available_tx_packet_slots();
     let mut work_done = 0;
     let mut remaining = budget;
     let mut has_reached_time_limit = false;
@@ -994,7 +987,19 @@ fn dispatch_tx_budgeted(
         }
     }
 
-    (work_done, has_reached_time_limit)
+    let capacity_poll =
+        (router.available_tx_packet_slots() > capacity_before).then(|| router.tx_capacity_poll());
+    TxDispatchProgress {
+        packet_count: work_done,
+        has_reached_time_limit,
+        capacity_poll,
+    }
+}
+
+fn wake_tx_capacity_waiters(capacity_poll: Option<PollSet>) {
+    if let Some(capacity_poll) = capacity_poll {
+        capacity_poll.wake();
+    }
 }
 
 fn has_immediate_timer_work(current: SmoltcpInstant, next_poll: Option<SmoltcpInstant>) -> bool {
@@ -1040,8 +1045,10 @@ fn output_ipv4_packet_count(
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::{boxed::Box, vec, vec::Vec};
+    use alloc::{boxed::Box, sync::Weak, task::Wake, vec, vec::Vec};
+    use core::{sync::atomic::AtomicBool, task::Context};
 
+    use kpoll::PollRegistrations;
     use smoltcp::iface::SocketSet;
     use unittest::{assert, def_test};
 
@@ -1059,6 +1066,53 @@ mod tests {
         tx_packets: 1,
         timer_events: 1,
     };
+
+    struct TxCapacityWakeProbe {
+        service: Weak<Service>,
+        wake_count: AtomicUsize,
+        was_router_unlocked: AtomicBool,
+    }
+
+    impl Wake for TxCapacityWakeProbe {
+        fn wake(self: Arc<Self>) {
+            let was_unlocked = self
+                .service
+                .upgrade()
+                .is_some_and(|service| service.router.try_lock().is_some());
+            self.was_router_unlocked
+                .store(was_unlocked, Ordering::Relaxed);
+            self.wake_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[def_test(serial)]
+    fn tx_capacity_wakes_after_router_unlock_before_deferred_return() {
+        let mut router = Router::new();
+        let token =
+            smoltcp::phy::Device::transmit(&mut router, SmoltcpInstant::from_millis(0)).unwrap();
+        smoltcp::phy::TxToken::consume(token, 20, |bytes| bytes.fill(0));
+        let service = Arc::new(Service::new(router));
+        let probe = Arc::new(TxCapacityWakeProbe {
+            service: Arc::downgrade(&service),
+            wake_count: AtomicUsize::new(0),
+            was_router_unlocked: AtomicBool::new(false),
+        });
+        let waker = Waker::from(probe.clone());
+        let context = Context::from_waker(&waker);
+        let mut registrations = PollRegistrations::new();
+        service
+            .register_tx_waker(&mut registrations.context(&context))
+            .unwrap();
+
+        // Force the round to return before protocol processing, after TX.
+        let _iface = service.iface.lock();
+        let progress = service.poll_budgeted(TEST_POLL_BUDGET);
+
+        assert_eq!(progress.tx_packets, 1);
+        assert!(progress.has_more);
+        assert_eq!(probe.wake_count.load(Ordering::Relaxed), 1);
+        assert!(probe.was_router_unlocked.load(Ordering::Relaxed));
+    }
 
     #[def_test]
     fn test_smoltcp_deadline_clamps_expired_delay() {
@@ -1240,7 +1294,7 @@ mod tests {
             .unwrap();
         let round_started_at = monotonic_time();
 
-        let (tx_packets, _) = dispatch_tx_budgeted(
+        let tx_progress = dispatch_tx_budgeted(
             &mut router,
             round_started_at,
             TEST_POLL_BUDGET.tx_packets,
@@ -1253,7 +1307,8 @@ mod tests {
             &mut packets,
         );
 
-        assert_eq!(tx_packets, 1);
+        assert_eq!(tx_progress.packet_count, 1);
+        assert!(tx_progress.capacity_poll.is_some());
         assert_eq!(rx_progress.work_done, 1);
     }
 }

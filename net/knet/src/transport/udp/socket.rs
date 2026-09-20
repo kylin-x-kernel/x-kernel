@@ -23,7 +23,7 @@ use crate::{
     ip::{IpAddress, IpEndpoint, Ipv4Address},
     ipv4,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
-    poller::{PollReason, assist_once, network_poller},
+    poller::{PollReason, network_poller},
     udp_err::QueuedUdpError,
 };
 
@@ -204,7 +204,7 @@ impl UdpSocket {
                     },
                 )?;
                 network_poller().notify(PollReason::Tx);
-                assist_once();
+                network_poller().assist_once();
                 Ok(payload_len)
             })
     }
@@ -271,7 +271,7 @@ impl UdpSocket {
         let datagram = match self.try_recv_datagram(mode) {
             Some(datagram) => datagram,
             None => {
-                assist_once();
+                network_poller().assist_once();
                 self.try_recv_datagram(mode).ok_or(KError::WouldBlock)?
             }
         };
@@ -288,7 +288,7 @@ impl UdpSocket {
     }
 
     fn recv_error_msg(&self, msg: &mut RecvErrorMsg<'_>) -> KResult<usize> {
-        assist_once();
+        network_poller().assist_once();
         let error = if msg.flags.contains(RecvFlags::PEEK) {
             self.state().peek_error()
         } else {
@@ -317,7 +317,7 @@ impl UdpSocket {
 impl Configurable for UdpSocket {
     fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<OptionHandled> {
         if let GetSocketOption::Error(error) = opt {
-            assist_once();
+            network_poller().assist_once();
             **error = self.state().consume_socket_error();
             return Ok(OptionHandled::Yes);
         }
@@ -489,7 +489,7 @@ impl SocketOps for UdpSocket {
 
     fn shutdown(&self, how: Shutdown) -> KResult {
         self.state().shutdown(how);
-        assist_once();
+        network_poller().assist_once();
         debug!("UDP socket: shutting down");
         Ok(())
     }
@@ -561,7 +561,7 @@ fn copy_udp_payload_to(
 
 impl Pollable for UdpSocket {
     fn poll(&self) -> IoEvents {
-        assist_once();
+        network_poller().assist_once();
         let mut events = IoEvents::empty();
         let can_receive = self.pcb.has_recv_data()
             || self.state().has_pending_error()

@@ -153,9 +153,7 @@ impl GeneralOptions {
         &self,
         context: &mut PollContext<'_>,
     ) -> Result<Waker, PollRegisterError> {
-        let source_waker = SERVICE.register_rx_waker(u32::MAX, context)?;
-        crate::poller::network_poller().register_tx_waker(context)?;
-        Ok(source_waker)
+        SERVICE.register_tx_waker(context)
     }
 
     /// Poll for send readiness and run the provided operation.

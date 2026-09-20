@@ -28,7 +28,7 @@ use crate::{
     consts::{TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
-    poller::{PollReason, assist_once, network_poller},
+    poller::{PollReason, network_poller},
     state::*,
 };
 
@@ -150,7 +150,7 @@ impl TcpSocket {
                 *self.bound_endpoint.lock() = empty_endpoint();
             }
             if progress_immediately {
-                assist_once();
+                network_poller().assist_once();
             }
         }
 
@@ -162,7 +162,7 @@ impl TcpSocket {
                 self.unregister_bound_endpoint();
                 *self.bound_endpoint.lock() = empty_endpoint();
                 if progress_immediately {
-                    assist_once();
+                    network_poller().assist_once();
                 }
                 Ok(())
             })?;
@@ -410,7 +410,7 @@ impl SocketOps for TcpSocket {
         let result = self
             .general
             .send_poller_with_nonblocking(self, is_nonblocking, || {
-                assist_once();
+                network_poller().assist_once();
                 let events = self.poll_connect();
                 if !events.contains(IoEvents::OUT) {
                     Err(KError::WouldBlock)
@@ -473,7 +473,7 @@ impl SocketOps for TcpSocket {
         let bound_endpoint = self.bound_endpoint()?;
         self.general
             .recv_poller_with_nonblocking(self, options.nonblocking, || {
-                assist_once();
+                network_poller().assist_once();
                 let accepted = {
                     let mut sockets = SOCKET_SET.inner.lock();
                     LISTEN_TABLE.accept(bound_endpoint, &mut sockets)?
@@ -538,7 +538,7 @@ impl SocketOps for TcpSocket {
         let received =
             self.general
                 .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
-                    assist_once();
+                    network_poller().assist_once();
                     self.with_smol_socket(|socket| {
                         if socket.can_recv() {
                             if options.flags.contains(RecvFlags::PEEK) {
@@ -628,7 +628,7 @@ fn should_poll_receive_window(
 
 impl Pollable for TcpSocket {
     fn poll(&self) -> IoEvents {
-        assist_once();
+        network_poller().assist_once();
         let mut events = match self.state() {
             State::Connecting => self.poll_connect(),
             State::Connected | State::Idle | State::Closed => self.poll_stream(),
@@ -692,7 +692,7 @@ impl Drop for TcpSocket {
         sockets.defer_tcp_close(self.dispatch_irq);
         drop(sockets);
         network_poller().notify(PollReason::Tx);
-        assist_once();
+        network_poller().assist_once();
     }
 }
 
