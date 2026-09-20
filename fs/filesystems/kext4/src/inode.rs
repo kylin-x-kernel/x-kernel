@@ -1014,12 +1014,12 @@ impl Ext4Inode {
         self.flags() & disk_inode::EXT4_INDEX_FL != 0
     }
 
-    #[cfg(test)]
+    #[cfg(unittest)]
     fn unreserved_delalloc_extents(&self, start: u64, end: u64) -> Vec<(u64, u64)> {
         self.with_state(|state| unreserved_delalloc_extents_in_state(state, start, end))
     }
 
-    #[cfg(test)]
+    #[cfg(unittest)]
     fn insert_unreserved_delalloc_extents(&self, extents: &[(u64, u64)]) -> Ext4Result<u64> {
         self.update_state(|state| insert_unreserved_delalloc_extents_in_state(state, extents))
     }
