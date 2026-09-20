@@ -372,6 +372,30 @@ impl Process {
         self.runtime().map(|runtime| runtime.set_heap_top(top))
     }
 
+    /// Runs `f` with the process timer manager locked, then re-derives the
+    /// CPU-timer polling gate from the post-`f` manager state.
+    ///
+    /// Single refresh point for `cpu_timers_armed`: every wrapper that
+    /// mutates timer state or advances timers in a poll goes through here.
+    /// The refresh also runs when `f` fails, so a manager method that errors
+    /// after partially mutating state cannot leave the gate stale. The only
+    /// other refresh is `ProcessRuntime::clear_posix_timers`, which process
+    /// teardown reaches directly without this wrapper. Read-only timer
+    /// queries deliberately bypass this helper to avoid the gate rescan.
+    ///
+    /// The armed-poll path performs one extra runtime lookup on top of the
+    /// gate check; that path only runs while CPU timers exist.
+    fn with_timer_manager_mut<R>(
+        &self,
+        f: impl FnOnce(&mut ktimer::ProcessTimerManager) -> KResult<R>,
+    ) -> KResult<R> {
+        let runtime = self.runtime()?;
+        let mut manager = runtime.timer_manager().lock();
+        let result = f(&mut manager);
+        runtime.set_cpu_timers_armed(manager.any_cpu_timer_armed());
+        result
+    }
+
     /// Creates a POSIX timer while runtime remains attached.
     ///
     /// # Errors
@@ -383,12 +407,7 @@ impl Process {
         clock_id: i32,
         notify: PosixTimerCreateNotify,
     ) -> KResult<i32> {
-        self.runtime().and_then(|runtime| {
-            runtime
-                .timer_manager()
-                .lock()
-                .create_posix_timer(clock_id, notify)
-        })
+        self.with_timer_manager_mut(|manager| manager.create_posix_timer(clock_id, notify))
     }
 
     /// Returns the current POSIX timer state while runtime remains attached.
@@ -421,8 +440,8 @@ impl Process {
         value: TimeSpan,
     ) -> KResult<((TimeSpan, TimeSpan), Option<TimerDelivery>)> {
         let (process_utime, process_stime) = self.process_cpu_times();
-        self.runtime().and_then(|runtime| {
-            runtime.timer_manager().lock().set_posix_timer(
+        self.with_timer_manager_mut(|manager| {
+            manager.set_posix_timer(
                 timer_id,
                 absolute,
                 interval,
@@ -440,8 +459,7 @@ impl Process {
     /// Returns `KError::NoSuchProcess` when runtime is gone and forwards the
     /// matching `ktimer::ProcessTimerManager::delete_posix_timer` error contract.
     pub fn delete_posix_timer(&self, timer_id: i32) -> KResult<()> {
-        self.runtime()
-            .and_then(|runtime| runtime.timer_manager().lock().delete_posix_timer(timer_id))
+        self.with_timer_manager_mut(|manager| manager.delete_posix_timer(timer_id))
     }
 
     /// Returns the POSIX timer overrun count while runtime remains attached.
@@ -488,14 +506,14 @@ impl Process {
         remaining: TimeSpan,
     ) -> KResult<(TimeSpan, TimeSpan)> {
         let (process_utime, process_stime) = self.process_cpu_times();
-        self.runtime().map(|runtime| {
-            runtime.timer_manager().lock().set_itimer(
+        self.with_timer_manager_mut(|manager| {
+            Ok(manager.set_itimer(
                 timer_type,
                 interval,
                 remaining,
                 process_utime,
                 process_stime,
-            )
+            ))
         })
     }
 
@@ -506,13 +524,20 @@ impl Process {
     }
 
     /// Polls CPU-driven timers while runtime remains attached.
+    ///
+    /// Gated by [`ProcessRuntime::cpu_timers_armed`]: processes without any
+    /// CPU-time timer skip the process-wide CPU-time sampling, which is the
+    /// dominant fixed cost of this poll. The gate is re-derived from the
+    /// timer manager after every real poll so one-shot expiry and interval
+    /// exhaustion clear it without an explicit disarm call.
     pub(crate) fn poll_cpu_timers(&self) -> KResult<Vec<TimerDelivery>> {
+        let runtime = self.runtime()?;
+        if !runtime.cpu_timers_armed() {
+            return Ok(Vec::new());
+        }
         let (process_utime, process_stime) = self.process_cpu_times();
-        self.runtime().map(|runtime| {
-            runtime
-                .timer_manager()
-                .lock()
-                .poll_cpu_timers(process_utime, process_stime)
+        self.with_timer_manager_mut(|manager| {
+            Ok(manager.poll_cpu_timers(process_utime, process_stime))
         })
     }
 

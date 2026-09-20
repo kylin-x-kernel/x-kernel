@@ -112,6 +112,9 @@ impl ProcessTimerManager {
     }
 
     /// Polls the CPU-based interval timers against aggregated process CPU time.
+    ///
+    /// The iterated sets must stay in sync with `any_cpu_timer_armed`; see
+    /// the sync note there.
     pub fn poll_cpu_timers(
         &mut self,
         process_utime: TimeSpan,
@@ -152,6 +155,23 @@ impl ProcessTimerManager {
         }
 
         deliveries
+    }
+
+    /// Returns whether any CPU-time-driven timer is currently armed.
+    ///
+    /// Used as the fast-path gate for per-trap CPU-timer polling: false means
+    /// `poll_cpu_timers` cannot produce a delivery, so callers can skip the
+    /// process-wide CPU-time sampling entirely. Wall-clock timers
+    /// (ITIMER_REAL, monotonic POSIX clocks) never arm this gate.
+    pub fn any_cpu_timer_armed(&self) -> bool {
+        if self.itimers[ITIMER_VIRTUAL_INDEX].deadline().is_some()
+            || self.itimers[ITIMER_PROF_INDEX].deadline().is_some()
+        {
+            return true;
+        }
+        self.posix_timers
+            .values()
+            .any(|timer| timer.is_process_cpu() && timer.is_armed())
     }
 
     /// Creates a POSIX timer with the given clock and notification policy.
@@ -372,6 +392,60 @@ mod tests {
         TimerDelivery, TimerSignal,
         posix_timer::{PosixTimerCreateNotify, PosixTimerSigValue},
     };
+
+    #[def_test]
+    fn test_any_cpu_timer_armed_tracks_arm_and_disarm() {
+        let mut manager = ProcessTimerManager::new(1);
+        assert!(!manager.any_cpu_timer_armed());
+
+        // Wall-clock itimers never arm the CPU-timer gate.
+        manager.set_itimer(
+            ITimerType::Real,
+            TimeSpan::from_nanos(10),
+            TimeSpan::from_nanos(10),
+            TimeSpan::ZERO,
+            TimeSpan::ZERO,
+        );
+        assert!(!manager.any_cpu_timer_armed());
+
+        manager.set_itimer(
+            ITimerType::Virtual,
+            TimeSpan::ZERO,
+            TimeSpan::from_nanos(10),
+            TimeSpan::ZERO,
+            TimeSpan::ZERO,
+        );
+        assert!(manager.any_cpu_timer_armed());
+
+        // One-shot expiry disarms through update(); the gate mirrors that.
+        manager.poll_cpu_timers(TimeSpan::from_nanos(10), TimeSpan::ZERO);
+        assert!(!manager.any_cpu_timer_armed());
+
+        // Process-CPU POSIX timers participate in the gate.
+        let timer_id = manager
+            .create_posix_timer(
+                CLOCK_PROCESS_CPUTIME_ID as i32,
+                PosixTimerCreateNotify::Signal {
+                    signo: Signo::SIGRTMIN,
+                    target_tid: None,
+                    value: PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap();
+        manager
+            .set_posix_timer(
+                timer_id,
+                false,
+                TimeSpan::from_nanos(5),
+                TimeSpan::from_nanos(5),
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+            )
+            .unwrap();
+        assert!(manager.any_cpu_timer_armed());
+        manager.delete_posix_timer(timer_id).unwrap();
+        assert!(!manager.any_cpu_timer_armed());
+    }
 
     #[def_test]
     fn test_process_timer_manager_set_itimer_returns_previous_values() {

@@ -252,6 +252,10 @@ impl PosixTimer {
         self.clock == PosixTimerClock::ProcessCpu
     }
 
+    pub(crate) fn is_armed(&self) -> bool {
+        self.spec.deadline().is_some()
+    }
+
     pub(crate) fn arm_deadline(&mut self, owner_pid: Pid) {
         let runtime_deadline = self
             .spec

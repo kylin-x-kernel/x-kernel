@@ -8,7 +8,7 @@ mod runtime_state;
 use alloc::{string::String, sync::Arc, vec::Vec};
 #[cfg(feature = "tee")]
 use core::any::Any;
-use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use fs_context::FsStruct;
 use kerrno::{KError, KResult};
@@ -126,6 +126,19 @@ pub(crate) struct ProcessRuntime {
     runtime_state: ProcessRuntimeState,
     nsproxy: RwLock<Option<Arc<NsProxy>>>,
     signal_manager: Arc<ProcessSignalManager>,
+    /// Fast-path gate for per-trap CPU-timer polling.
+    ///
+    /// True only while at least one CPU-time-driven timer (ITIMER_VIRTUAL,
+    /// ITIMER_PROF, process-CPU POSIX timer) may be armed. Arm paths re-derive
+    /// it eagerly, and the real poll path re-derives it after each poll (the
+    /// Linux `stop_process_timers` pattern), so one-shot expiry and interval
+    /// exhaustion clear it without an explicit disarm call.
+    ///
+    /// Read without the timer-manager lock, like Linux `timers_active`: a
+    /// concurrent arm is only guaranteed visible to other threads after a
+    /// bounded delay (one trap plus cache propagation), which can delay --
+    /// never lose -- a CPU-timer delivery.
+    cpu_timers_armed: AtomicBool,
     #[cfg(feature = "tee")]
     tee_ta_ctx: RwLock<TeeTaCtx>,
     #[cfg(feature = "tee")]
@@ -265,6 +278,7 @@ impl ProcessRuntime {
                 signal_actions,
                 config.signal_trampoline,
             )),
+            cpu_timers_armed: AtomicBool::new(false),
         });
         runtime.process.set_runtime_ref(&runtime);
         runtime
@@ -404,6 +418,17 @@ impl ProcessRuntime {
         self.runtime_state.timer_manager()
     }
 
+    /// Returns whether CPU-time-driven timer polling must run for this
+    /// process. See the field-level doc for the gate invariant.
+    pub(crate) fn cpu_timers_armed(&self) -> bool {
+        self.cpu_timers_armed.load(Ordering::Acquire)
+    }
+
+    /// Re-derives the CPU-timer polling gate from the timer manager state.
+    pub(crate) fn set_cpu_timers_armed(&self, armed: bool) {
+        self.cpu_timers_armed.store(armed, Ordering::Release);
+    }
+
     /// Records the CPU that currently owns this process mm residency.
     pub fn set_mm_resident_cpu(&self, cpu_id: kcpu_id_map::LogicalCpuId) {
         self.runtime_state.mm_cpu_residency().set_cpu(cpu_id);
@@ -438,7 +463,9 @@ impl ProcessRuntime {
 
     /// Clears all process POSIX timers.
     pub fn clear_posix_timers(&self) {
-        self.timer_manager().lock().clear_posix_timers();
+        let mut manager = self.timer_manager().lock();
+        manager.clear_posix_timers();
+        self.set_cpu_timers_armed(manager.any_cpu_timer_armed());
     }
 }
 
