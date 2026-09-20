@@ -1,591 +1,851 @@
-# ktask — 设计文档
+# ktask — Design
 
-## 定位
+## Purpose and ownership
 
-远端重调度和运行任务 signal kick 使用 `kipi::notify_reschedule` 固定通知，
-不再向普通 IPI 回调队列插入闭包。`RescheduleIpiIf` 静态实现只调用原有
-`on_remote_resched_ipi` 设置当前任务抢占标志，不做调度记账或 timer 重编程。
-关闭 preempt 时处理端为空，但 SMP signal kick 仍发送 IPI，使 CPU 离开用户模式。
-本地提醒、任务归属和迁移锁序保持原有协议。
+Remote reschedule and a running-task signal kick use the fixed
+`kipi::notify_reschedule` notification. They do not enqueue a closure on the
+ordinary IPI callback queue. The static `RescheduleIpiIf` implementation only
+calls the existing `on_remote_resched_ipi` path to set the current task's
+preempt pending bit. It does not account runtime or reprogram timers. With
+preemption compiled out the handler is empty, but an SMP signal kick still
+sends the IPI so the CPU leaves user mode. Local kick, task ownership, and
+migrate lock order keep the existing protocol.
 
-`ktask` 是 x-kernel 的**内核任务管理与调度编排层**：提供任务创建/退出、阻塞与唤醒、每 CPU 运行队列、抢占控制、定时事件驱动，以及（可选）快照与 watchdog 诊断能力。
+`ktask` is X-Kernel's kernel task runtime and scheduling orchestration layer.
+It owns task create/exit, block/wake, per-CPU run queues, preemption control,
+timer-driven events, and optional snapshot/watchdog diagnostics.
 
-它不实现具体硬件中断派发（由 `khal`/`kruntime` 负责），也不实现调度算法本体（由 `ksched` 提供），而是把这些能力在运行期组装成统一的任务模型。
+It does not implement hardware IRQ dispatch (`khal` / `kruntime`) or class
+algorithms (`ksched`). It assembles those capabilities into one task model at
+runtime.
 
-目标读者：需要理解任务切换路径、抢占触发时机、SMP run queue 行为，或准备在 `ktask` 增加调度/诊断能力的开发者。
+Callers that need switch paths, preemption timing, SMP run-queue behavior, or
+new scheduling/diagnostic hooks should start here.
 
-## 背景
+## Background
 
-x-kernel 将“**调度算法**”与“**任务运行时**”分离：
+X-Kernel splits class algorithms from the task runtime:
 
-- `ksched`：提供 FIFO/RR/CFS/EEVDF 等算法 trait 与实体。
-- `ktask`：维护任务生命周期、当前任务上下文、每 CPU run queue、切换与阻塞语义。
+- `ksched` supplies FIFO / RR / CFS / EEVDF algorithm traits and entities.
+- `ktask` owns lifecycle, current-task context, per-CPU run queues, switch,
+  and block/wake.
 
-`ktask` 通过 `kiface` 实现 `kspin::KernelGuardIf`，把 `kspin` 的 guard acquire/release 与任务抢占计数挂接，形成“临界区退出时再检查抢占”的延迟抢占模型。
+`ktask` implements `kspin::KernelGuardIf` so `kspin` guard acquire/release
+hooks the task preempt count: a critical section defers the preemption check
+until it exits.
 
-## 抢占检查的迭代退出
+## Preempt-check stack bound
 
-`current_check_preempt_pending()` 在循环中处理 `need_resched`。
-运行队列 guard 恢复 IRQ 时可能产生新的调度请求，因此不能让该 guard 的析构
-再次递归调用抢占检查。每轮在释放 guard 前临时增加一次禁抢占计数：
-计数从 1 变成 2，guard 释放后回到 1，最后通过 `enable_preempt(false)` 回到 0。
-新请求由下一轮循环处理，不丢弃请求，也不随请求次数增长调用栈。
+`current_check_preempt_pending()` consumes `need_resched` in a loop. Restoring
+IRQs from a run-queue guard can publish a new request, so that guard's drop
+must not recurse into another check. Each round temporarily raises the preempt
+disable count before releasing the guard: 1 → 2, drop returns to 1, then
+`enable_preempt(false)` returns to 0. The next loop iteration handles a new
+request. Requests are not dropped, and the call stack does not grow with
+request count.
 
-这层临时保护只覆盖抢占检查自身的 guard 释放；普通 guard 的退出行为保持不变。
-调度返回后仍是原任务恢复执行，因此临时计数的增加和撤销归属于同一个任务，
-即使该任务曾切换或迁移到其他 CPU，也必须配对。
-UT 在任务私有的测试探针中重新发布请求，检查处理完毕、计数平衡和栈深度有界；
-该探针及测试字段不进入普通内核。
+That extra count covers only this check's own guard drop. Ordinary guard exit
+is unchanged. After the check returns, the same task resumes, so the bump and
+the matching drop belong to that task even if it switched or migrated.
+Unittests republish requests through a task-private probe and check completion,
+count balance, and bounded stack depth. The probe is not compiled into a
+normal kernel.
 
-## 范围
+## Source scope
 
-涉及的源文件：
+The analysis covers the entire crate, including feature-gated code and tests.
 
 ```text
 task/ktask/
 ├── src/
-│   ├── lib.rs                # 模块导出、feature 总览
-│   ├── api.rs                # 对外 API（spawn/yield/sleep/affinity/exit/tick）
-│   ├── task.rs               # TaskInner/CurrentTask/状态与上下文
-│   ├── run_queue.rs          # per-CPU run queue、resched、切换、GC task
+│   ├── lib.rs                 # exports and feature overview
+│   ├── macros.rs              # crate-local percpu_static!
+│   ├── api.rs                 # spawn / yield / sleep / affinity / exit / tick
+│   ├── task.rs                # TaskInner / CurrentTask / state / context
+│   ├── irq_wait.rs            # kirq::IrqSyncWaitIf provider
+│   ├── softirqd.rs            # ksoftirqd/N daemon
+│   ├── run_queue/             # per-CPU RQ: ownership, placement, switch, GC
+│   │   ├── mod.rs             # RunQueue type, per-CPU slots, registry, init
+│   │   ├── rq.rs              # leave / pick / switch / kick
+│   │   ├── placement.rs       # spawn / wake CPU choice (no remote sched lock)
+│   │   ├── ownership.rs       # cpu_id and nr_running / nr_home
+│   │   ├── idle_pull.rs       # steal a Ready !on_cpu waiter onto an idle CPU
+│   │   ├── migrate.rs         # affinity: migrate_current / migrate_entry
+│   │   ├── gc.rs              # delayed exit reclaim
+│   │   ├── stats.rs           # sched_stat counters and /proc text
+│   │   └── tests.rs           # run-queue unittests
 │   ├── future/
-│   │   ├── mod.rs            # block_on、waker 到 unblock 的桥接
-│   │   ├── poll.rs           # poll 辅助
-│   │   └── time.rs           # sleep timer future
-│   ├── wait_queue.rs         # 事件驱动阻塞等待抽象
-│   ├── timers.rs             # tick 回调与 timer event 分发
-│   ├── tracing_hooks.rs      # 调度 trace hook 注册与触发
-│   └── snapshot/             # 可选：任务/CPU 快照与回溯导出
+│   │   ├── mod.rs             # block_on and waker-to-unblock bridge
+│   │   ├── poll.rs            # poll helpers
+│   │   └── time.rs            # sleep timer future
+│   ├── wait_queue.rs          # event-driven blocking wait
+│   ├── timers.rs              # tick callbacks and timer-event dispatch
+│   ├── tracing_hooks.rs       # sched trace hook registration
+│   ├── tests_timer_routing.rs # unittest: ktimer_core owner routing
+│   └── snapshot/              # optional task/CPU snapshot and backtrace
 ├── Cargo.toml
 ├── Kconfig
 └── docs/
-    └── design.md
+    ├── design.md
+    └── security.md
 ```
 
-`ktask` 也是 `kwork` 的 provider owner：它提供 system/custom kwork task host、
-task-local worker context、completion wait，以及 delayed work 使用的 monotonic timer
-waker 注册。`kwork` 仍只消费 provider trait，不直接依赖 `ktask`。
+`run_queue/` is split by duty. Callers still enter only through
+`current_run_queue` / `select_run_queue` / `select_wake_run_queue` /
+`task_run_queue` / `enforce_affinity_placement`. CPU choice lives in
+`placement.rs` because it reads each CPU's `nr_running` / `nr_home`; `ksched`
+holds one RQ lock and never sees remote load. `rq.rs` owns local leave / pick /
+switch. `idle_pull.rs` steals across CPUs. `migrate.rs` only moves a task after
+an affinity change. `gc.rs` only consumes `EXITED_TASKS`.
 
-## 架构
+`ktask` is also the `kwork` provider owner: system/custom kwork task hosts,
+task-local worker context, completion wait, and monotonic timer waker
+registration for delayed work. `kwork` still consumes provider traits and does
+not depend on `ktask` directly.
+
+## Architecture
 
 ```text
 kruntime::init_scheduler()/init_scheduler_secondary()
         │
         ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ per-CPU RUN_QUEUE + Scheduler(ksched) + IDLE_TASK + GC task     │
+│ run_queue/                                                      │
+│   mod.rs        RUN_QUEUE / RUN_QUEUES / IDLE_TASK / init       │
+│   placement.rs  spawn idle-first, wake SIS, idle-pull source    │
+│   ownership.rs  cpu_id / nr_running / nr_home                   │
+│   idle_pull.rs  steal a Ready !on_cpu waiter onto an idle CPU   │
+│   rq.rs         leave / pick / switch_to / kick                 │
+│   migrate.rs    affinity: migrate_current / migrate_entry       │
+│   gc.rs         delayed EXITED_TASKS reclaim                    │
+│   stats.rs      optional sched_stat                             │
 └─────────────────────────────────────────────────────────────────┘
         │                         │
         │ on_timer_fire()         │ block/wake/exit/yield
         ▼                         ▼
-update_current() → pending      blocked_resched / unblock_task / resched
+   update_current() → pending      blocked_resched / unblock_task / resched
         │                         │
-        └─────── 延迟到抢占安全点（enable_preempt）───────┘
+        └────── deferred until enable_preempt safe point ──────┘
                                   │
                                   ▼
-                             switch_to()
+                       rq.rs::switch_to()
 ```
 
-| 组件 | 职责 |
-|------|------|
-| `TaskInner` / `CurrentTask` | 任务元数据、状态机、上下文、抢占计数 |
-| `RunQueue` | 每 CPU 调度容器；维护算法实例与切换过程 |
-| `Scheduler` (`ksched`) | `add_task/pick_next/update_current/next_preemption_ns/enqueue_task/leave_current/steal_ready_task` 算法策略（运行任务统一经 `leave_current` 离开；Block/Migrate 记 vlag，唤醒/迁入经 `enqueue_task` PLACE_LAG；idle-pull 经 `steal_ready_task` 再 PLACE_LAG；EEVDF `curr` 仅为数值快照；slice/request 以 ns 计） |
-| `future::block_on` | 将 `Future` pending 映射为任务阻塞/唤醒 |
-| `WaitQueue` | 事件型阻塞等待 API |
-| `timers` | 显式周期回调（与调度 timer 解耦） |
-| `snapshot/task_registry` | 可选诊断：snapshot/watchdog/NMI 共享的任务遍历视图；mutex wait 检查在读取每个任务快照后采样当前 tick，并丢弃开始时间晚于当前样本的并发更新 |
+| Component | Role |
+|---|---|
+| `TaskInner` / `CurrentTask` | Task metadata, state machine, context, preempt count |
+| `RunQueue` (`run_queue/mod.rs`) | Per-CPU container: algorithm lock, `nr_running` / `nr_home`, per-CPU slots, bring-up |
+| `rq.rs` | Local leave / pick / `switch_to` / kick |
+| `placement.rs` | Spawn idle-first, wake SIS, idle-pull source choice; no remote RQ lock for policy |
+| `ownership.rs` | `cpu_id` and `nr_running` / `nr_home` accounting |
+| `idle_pull.rs` | Steal a Ready `!on_cpu` waiter from a busier CPU onto an about-to-idle CPU |
+| `migrate.rs` | Affinity enforcement after `set_cpumask`: current `migrate_current`, ready `migrate_entry` |
+| `gc.rs` | Delayed per-CPU `try_unwrap` of exited tasks |
+| `stats.rs` | Optional `sched_stat` counters |
+| `Scheduler` (`ksched`) | `add_task` / `pick_next` / `update_current` / `next_preemption_ns` / `enqueue_task` / `leave_current` / `steal_ready_task`. A running task always leaves through `leave_current`. Block/Migrate record vlag; wake/migrate-in use `enqueue_task` PLACE_LAG; idle-pull uses `steal_ready_task` then PLACE_LAG. EEVDF `curr` is a numeric snapshot only. Slice/request are in ns. |
+| `future::block_on` | Maps `Future` pending onto task block/wake |
+| `WaitQueue` | Event-driven blocking wait API |
+| `timers` | Explicit periodic callbacks, decoupled from the schedule timer |
+| `snapshot` / `task_registry` | Optional diagnostics: snapshot / watchdog / NMI share a task walk. Mutex-wait checks sample the current tick after each task snapshot and drop a start time later than that sample. |
 
-### Prepared Timer Core Dependency
+### Prepared timer core dependency
 
 `ktask` depends on `ktimer_core`, which owns prepared timer storage, deadline
-ordering, owner routing, dispatch and cancellation semantics. At this stage,
-the dependency is consumed by kernel unit tests, not by the production timer
-service: `timers.rs`, `future/time.rs` and hardware timer programming still use
-the existing implementation.
+ordering, owner routing, dispatch, and cancellation. At this stage the
+dependency is consumed by kernel unit tests, not by the production timer
+service: `timers.rs`, `future/time.rs`, and hardware timer programming still
+use the existing implementation.
 
 Under `cfg(unittest)`, `lib.rs` links the core's registered tests. With `smp`,
-`tests_timer_routing.rs` also calls `ktimer_core::test_support` scenarios.
-The core owns the scenario state and timer assertions; `ktask` provides two
-concurrent tasks pinned to CPUs 0 and 1, joins them, and supplies `yield_now`.
-The dependency direction is `ktask -> ktimer_core`; the core does not depend on
+`tests_timer_routing.rs` also calls `ktimer_core::test_support` scenarios. The
+core owns scenario state and timer assertions; `ktask` provides two concurrent
+tasks pinned to CPUs 0 and 1, joins them, and supplies `yield_now`. The
+dependency direction is `ktask -> ktimer_core`; the core does not depend on
 the task scheduler. These tests exercise core operations through scheduled
 workers, not through the hardware timer interrupt path.
 
-The `preempt` and `smp` features forward to the corresponding `ktimer_core`
-features to keep its lock configuration consistent with `ktask`. Feature
-forwarding does not initialize timer service state or establish CPU readiness.
+The `preempt` and `smp` features forward to the matching `ktimer_core`
+features so lock configuration stays consistent. Feature forwarding does not
+initialize timer-service state or mark a CPU ready.
 
-## 创建与发布模型
+## Execution context and calling constraints
 
-`ktask` 现在显式区分两段用户可见生命周期：
+`run_queue/` files constrain execution context. Callers still use the original
+entries:
 
-- `prepare_task()`：只把 `TaskInner` 转成 `Arc`，task 还没有进入 run queue；
-- `activate_task()`：把 prepared task 放入 run queue，使其变成 runnable；
-- `spawn_task()`：保留为通用快捷入口，等价于 `prepare_task() + activate_task()`。
+- `mod.rs` `init` / `init_secondary` run once per CPU at scheduler bring-up.
+  Only then may this CPU's `RUN_QUEUE` and the matching `RUN_QUEUES` slot be
+  read.
+- `&mut RunQueue` from `current_run_queue` / `get_run_queue` must be used
+  under a `BaseGuard` (usually `NoPreemptIrqSave`). A successful `try_get`
+  only means that CPU has registered; it does not mean the caller holds that
+  CPU's IRQ/preempt exclusion.
+- `placement.rs` may run on spawn, affinity migrate-in, and wake (including
+  post-IRQ unblock). Placement only Relaxed-reads each CPU's `nr_running` /
+  `nr_home` and does not take a remote `scheduler` lock.
+- `rq.rs` `leave_current` / `pick` / `resched` / `switch_to` operate only on
+  the current CPU's queue. `switch_to` requires local IRQs already off.
+  Idle-pull runs from task context when this CPU is about to idle.
+- `migrate.rs` `enforce_affinity_placement` runs in task context after
+  `set_cpumask`. A remote running task only gets a resched IPI; the caller
+  does not `switch_to` on the remote CPU.
+- `gc.rs` `poll_gc` runs only in the per-CPU gc task and may block on
+  `WAIT_FOR_EXIT`.
+- IRQ / IPI paths may call `request_remote_resched` / `kick_running_task`,
+  but must not `account` / `refresh` the dest RQ from an IPI callback.
 
-这样需要额外发布步骤的调用方可以先完成 registry 或其它外部可见状态更新，
-再让 task 对调度器可见。用户进程创建路径必须遵守这个顺序。
+These APIs are not general early-boot helpers except the documented bring-up
+entries. Sleepable waits require a current task and a sleepable context.
+Reentrancy is bounded by the preempt-check loop above; ordinary scheduling is
+not reentrant under a held RQ guard.
 
-PID 1 不再有特殊的 bootstrap 转换路径：late-init 线程通过
-`posix-process::spawn_init_process` 构造一个全新的 `User` 身份任务，runtime 在
-`new_user()` 构造时一次性就绪。`UserRuntimeSlot` 因此简化为构造时填充的不可变容器
-（`ready()` 建造，`get()` 只读），不再有 `EMPTY -> INSTALLING -> READY` 状态机或
-事后 `install_user_runtime()` 补装。页表由调度器在首次 switch-in 时通过
-`switch_page_table_root` 自动激活，无需 `activate_current_user_page_table` 这类
-"运行中任务热切页表"的特例接口。
+## Concurrency model
 
-## 核心流程
+- Local schedule operations hold a `BaseGuard` via `CurrentRunQueueRef` /
+  `KRunQueueRef`. `scheduler` then uses `SpinRaw` because IRQ/preempt
+  exclusion is already provided by the guard.
+- `placement.rs` only reads remote atomic heuristics. `ksched` operates only
+  on the already-chosen RQ lock.
+- Idle-pull: `resched` drops the dest scheduler lock first, locks only src
+  for `steal_ready_task`, then locks dest to enqueue. Dest-then-src deadlocks
+  against a remote wake.
+- Each `RUN_QUEUES` `Once` slot is written once by that CPU's `init` /
+  `init_secondary`.
+- Blocked wake versus `on_cpu` uses the Dekker handshake in the SMP section
+  below.
 
-### 1) 初始化流程
+## Creation and publication
 
-主核：
+`ktask` splits the user-visible lifetime into two stages:
+
+- `prepare_task()` turns `TaskInner` into an `Arc` without placing the task
+  on a run queue.
+- `activate_task()` publishes the prepared task onto a run queue so it
+  becomes runnable.
+- `spawn_task()` remains the generic shortcut: `prepare_task()` plus
+  `activate_task()`.
+
+Callers that need extra publication can finish registry or other externally
+visible state before the scheduler can see the task. User-process creation
+must keep that order.
+
+PID 1 has no special bootstrap conversion path. Late-init threads go through
+`posix-process::spawn_init_process` and construct a fresh `User` identity;
+the runtime is ready once at `new_user()`. `UserRuntimeSlot` is therefore an
+immutable container filled at construction (`ready()` builds, `get()` is
+read-only). There is no `EMPTY -> INSTALLING -> READY` state machine and no
+later `install_user_runtime()`. The page table is activated on first
+switch-in through `switch_page_table_root`; there is no
+`activate_current_user_page_table` hot-install path for a running task.
+
+## Critical flows
+
+### Initialization
+
+Boot CPU:
 
 ```text
 init_scheduler()
   → run_queue::init()
-  → 创建 per-CPU idle task（绑定本 CPU）
-  → 创建 per-CPU run queue（含 gc task）
-  → 初始化 current 为 main task
+  → create the per-CPU idle task (pinned to this CPU)
+  → create the per-CPU run queue (including the gc task)
+  → install current as the main task
 
 kruntime::init_interrupt()
   → kirq::softirq::init()
   → ktask::init_softirqd_current_cpu()
-  → 创建并激活绑定 boot CPU 的 ksoftirqd/0
+  → create and activate ksoftirqd/0 pinned to the boot CPU
   → ktask::init_system_workqueue_worker()
-  → 创建并激活绑定 boot CPU 的 kwork/system_wq/0:manager
-  → 创建并激活 boot CPU 的初始 kwork/system_wq/0:M worker
+  → create and activate kwork/system_wq/0:manager pinned to the boot CPU
+  → create and activate the initial kwork/system_wq/0:M worker
   → enable_local_irq()
 ```
 
-从核：
+Secondary CPU:
 
 ```text
 init_scheduler_secondary()
   → run_queue::init_secondary()
-  → 初始化 current 为 idle task
-  → 创建本 CPU run queue（含 gc task）
+  → install current as the idle task
+  → create this CPU's run queue (including the gc task)
 
 rust_main_secondary()
   → ktask::init_softirqd_current_cpu()
-  → 创建并激活绑定当前 CPU 的 ksoftirqd/N
+  → create and activate ksoftirqd/N pinned to this CPU
   → ktask::init_system_workqueue_worker()
-  → 创建并激活绑定当前 CPU 的 kwork/system_wq/N:manager
-  → 创建并激活当前 CPU 的初始 kwork/system_wq/N:M worker
+  → create and activate kwork/system_wq/N:manager pinned to this CPU
+  → create and activate the initial kwork/system_wq/N:M worker
   → enable_local_irq()
 ```
 
-`ksoftirqd/N` 是 `kirq::softirq::SoftirqDaemonIf` 的 `ktask` provider。`kirq`
-只维护 per-CPU softirq pending bit 并在需要退避执行时唤醒当前 CPU daemon；
-daemon 任务由 `ktask` 创建、pin 到对应 CPU，并用 IRQ-safe `PollSet` 阻塞等待
-唤醒。daemon 在普通任务上下文调用 `kirq::softirq::run_pending_softirqs()`，
-用于承接 hardirq-exit/BH-enable 直跑未覆盖或 restart budget 之外的 softirq work。
-provider 的 `needs_resched()` 只读当前任务的抢占请求，供 `kirq` 在批次边界决定
-是否提前退避；不会消费请求或调用调度器，无当前任务或未启用 preempt 时返回 false。
-daemon 每完成一轮实际 softirq work 后会主动 `yield_now()`，再回到外层 pending
-检查/等待循环；这对应 Linux `run_ksoftirqd()` 在 `__do_softirq()` 后执行
-`cond_resched()` 的调度友好语义。若等待注册因内存压力等原因失败，daemon 也会
-先让出 CPU 再重试，避免无 waiter 的紧循环。
+`ksoftirqd/N` is the `ktask` provider for `kirq::softirq::SoftirqDaemonIf`.
+`kirq` only keeps per-CPU softirq pending bits and wakes the current CPU's
+daemon when it must defer work. `ktask` creates the daemon, pins it to that
+CPU, and blocks it on an IRQ-safe `PollSet`. The daemon calls
+`kirq::softirq::run_pending_softirqs()` from ordinary task context for work
+that hardirq-exit / BH-enable did not cover or that exceeded the restart
+budget. `needs_resched()` only Acquire-reads the current task's preempt
+request so `kirq` can decide whether to back off at a batch boundary. It does
+not consume the request or call the scheduler; it returns false with no
+current task or without `preempt`. After each real softirq batch the daemon
+calls `yield_now()` before the outer pending/wait loop, matching Linux
+`run_ksoftirqd()` `cond_resched()` after `__do_softirq()`. If wait
+registration fails (for example under memory pressure), the daemon yields
+and retries instead of spinning without a waiter.
 
-`kworkerpool` 依赖 `ktask` 创建 `kwork/normal/<cpu>:<worker_id>` worker task
-和 `kwork/normal/<cpu>/manager` manager task。`kwork` 拥有 builtin queue/pool
-实例和 enqueue 语义；`kworkqueue` 负责 queue 状态；`kworkerpool` 负责 worker
-调度、动态伸缩和 CPU-intensive accounting。system/custom/dynamic task-context
-queue 都绑定到同 CPU 的 Normal pool，不创建 queue-owned worker。每个 CPU 启动一个
-pinned manager task 和少量初始 worker；当 pool 发现 runnable work 仍存在但没有
-running/idle/preparing worker 时，只唤醒 manager，由 manager 在 task context 创建新的
-bounded worker。一个 callback sleep 只阻塞当前 worker task，已有或新建 worker 可以
-继续执行同 CPU 同 kind pool 上其它 runnable work。worker 使用 `PollSet` 等待 pool
-ready，唤醒路径可从 hardirq/softirq/BH-disabled context 调用；worker callback 在普通
-任务上下文执行，可以睡眠，但不继承排队方的进程上下文。与此相对，BH workqueue
-callback 在 `kirq` softirq context 执行，不是 `ktask` worker task；
-`ktask::sleep()`、`sleep_until()` 和
-`interruptible_sleep_until()` 在 hardirq/softirq/BH-disabled context fail-fast，
-防止 BH callback 或其它 interrupt-like path 进入阻塞调度路径。`yield_now()` 仍按
-D1 决策只表达主动让出 CPU，不作为 sleep/blocking API。
-创建 worker task 的动作只发生在 manager task context，不在 IRQ-safe enqueue path
-或 `kwork` pool lock 内执行。
+`kworkerpool` depends on `ktask` to create `kwork/normal/<cpu>:<worker_id>`
+worker tasks and `kwork/normal/<cpu>/manager` manager tasks. `kwork` owns
+builtin queue/pool instances and enqueue semantics; `kworkqueue` owns queue
+state; `kworkerpool` owns worker scheduling, dynamic scaling, and
+CPU-intensive accounting. System / custom / dynamic task-context queues bind
+to the same CPU's Normal pool and do not create queue-owned workers. Each
+CPU starts one pinned manager and a few initial workers. When the pool still
+has runnable work but no running / idle / preparing worker, it only wakes
+the manager; the manager creates a bounded new worker in task context. One
+callback sleep blocks only that worker task; existing or newly created
+workers can keep running other work on the same CPU and kind. Workers wait
+on a `PollSet`; the wake path may run from hardirq / softirq / BH-disabled
+context. Worker callbacks run in ordinary task context and may sleep, but
+they do not inherit the enqueueing process context. BH workqueue callbacks
+run in `kirq` softirq context, not as `ktask` worker tasks.
+`ktask::sleep()`, `sleep_until()`, and `interruptible_sleep_until()`
+fail-fast in hardirq / softirq / BH-disabled context so a BH callback or
+other interrupt-like path cannot enter a blocking schedule path.
+`yield_now()` only yields the CPU and is not a sleep/blocking API. Creating
+a worker task happens only in manager task context, never on an IRQ-safe
+enqueue path or under a `kwork` pool lock.
 
-`WorkQueueHandle::alloc()` 只创建逻辑 queue 并配置 per-CPU pwq 的 `max_active`。
-`WorkQueue::start()` 对 static custom queue 执行同样的策略配置。两者都不进入 ktask
-registry，也不创建 queue-owned worker。`destroy()` 设置 queue enqueue gate 并等待
-shared pools 中属于该 queue 的 pending/running instance 清零；pool worker 生命周期
-不受 queue destroy 影响。
+`WorkQueueHandle::alloc()` only creates a logical queue and configures
+per-CPU pwq `max_active`. `WorkQueue::start()` applies the same policy to a
+static custom queue. Neither enters the ktask registry nor creates
+queue-owned workers. `destroy()` closes the enqueue gate and waits until
+pending/running instances of that queue in the shared pools reach zero.
+Pool worker lifetime is independent of queue destroy.
 
-`TaskExecutionContext` 在当前 `TaskInner` 上保存 opaque worker-pool execution key，
-供 scheduler tick 调用 `TaskExecutionAccountingIf` 做 CPU-intensive 采样。这个状态跟随
-任务迁移，不依赖 per-CPU slot。work key 和 queue owner 仍由 `kworkqueue` / `kwork`
-持有；`ktask` 不拥有 work 生命周期，也不保存 work handle。pool drain 入口在
-`kworkerpool::WorkerTask` 循环内，不存在供 callback 调用的 queue-level drain API。
-workerqueue sleepable wait 直接复用 ktask 的 yield/wait 能力；`kwork` 在阻塞前完成
-interrupt-context gate，并在唤醒后重查自身 lifecycle predicate。
+`TaskExecutionContext` stores an opaque worker-pool execution key on the
+current `TaskInner` so the scheduler tick can call
+`TaskExecutionAccountingIf` for CPU-intensive sampling. That state follows
+the task across migration and does not use a per-CPU slot. Work keys and
+queue owners stay in `kworkqueue` / `kwork`; `ktask` does not own work
+lifetime or store work handles. Pool drain lives inside the
+`kworkerpool::WorkerTask` loop; there is no queue-level drain API for
+callbacks. Sleepable workerqueue waits reuse ktask yield/wait. `kwork`
+finishes its interrupt-context gate before blocking and rechecks its own
+lifecycle predicate after wake.
 
-### 2) 调度与切换
+### Schedule and switch
 
-主动切换路径：
+Voluntary switch paths:
 
 - `yield_now()` → `yield_current()` → `resched()`
 - `exit()` → `exit_current()` → `resched()`
-- `blocked_resched()`（阻塞）→ `resched()`
+- `blocked_resched()` → `resched()`
 
-`resched()` 在当前 CPU 的调度器上 `pick_next_task()`；无就绪任务时先做 idle-pull
-（从 `nr_running >= 2` 的核偷 Ready 且 `!on_cpu` 的 waiter），再回退到本 CPU `IDLE_TASK`。
+`resched()` calls `pick_next_task()` on this CPU's scheduler. If there is no
+ready task it first idle-pulls a Ready `!on_cpu` waiter from a CPU with
+`nr_running >= 2`, then falls back to this CPU's `IDLE_TASK`.
 
-### 3) 硬件定时器驱动与动态 schedule timer
+### Hardware timer drive and dynamic schedule timer
 
-`ktask` 拥有全部硬件定时器驱动逻辑：`kruntime` 只注册时钟中断向量，中断处理直接调用
-`ktask::on_timer_fire()`。调度与 soft timer 共用每 CPU oneshot 硬件，按绝对 ns deadline
-仲裁，**不再**依赖固定 `TICKS_PER_SECOND` 调度节拍：
+`ktask` owns all hardware timer-drive logic. `kruntime` only registers the
+clock interrupt vector; the handler calls `ktask::on_timer_fire()`. Schedule
+and soft timers share a per-CPU oneshot device and arbitrate by absolute-ns
+deadline. They no longer depend on a fixed `TICKS_PER_SECOND` schedule tick:
 
-1. IRQ 入口先调用 `register_timer_irq_note` 钩子（watchdog 硬锁心跳按任意
-   timer IRQ 计，不只 4s sample），再按 `now - last_accounted_ns` 对当前任务
-   `update_current(elapsed_ns)`（idle 跳过；只在 request 用完时要求 resched）。
-   **仅到期的 schedule slot** 再跑 Linux `entity_tick` / `check_preempt_tick`：
-   pick 会变（eligible NEXT_BUDDY，或更早 deadline）才置 `need_resched`。
-   soft/periodic IRQ 只记账，避免 WF_SYNC 刚换上 later-deadline wakee 就被抢回。
-   ineligible buddy 由 `next_preemption_ns` 武装 until-eligible，不对其它
-   waiter 做 10µs 轮询。IRQ 尾探测抢不过仍立即返回。
-2. 运行到期的显式周期回调（`register_timer_callback(period, ...)`）；唤醒批次内推迟
-   硬件 rearm，排空 soft-timer wheel 并 wake，再重读 soft earliest。
-3. 用 `next_preemption_ns(current)` 重算可选的 `NEXT_SCHED_DEADLINE`，再
-   `rearm_local_timer` 到
+1. The IRQ entry first calls the `register_timer_irq_note` hook (watchdog
+   hardlock heartbeat counts any timer IRQ, not only the 4s sample), then
+   charges the current task with `update_current(elapsed_ns)` from
+   `now - last_accounted_ns` (idle is skipped; resched is requested only
+   when the request is exhausted). Only an expired schedule slot then runs
+   Linux `entity_tick` / `check_preempt_tick`: `need_resched` is set only
+   when pick would change (eligible NEXT_BUDDY or an earlier deadline).
+   Soft/periodic IRQs only account, so a later-deadline WF_SYNC wakee is not
+   immediately pulled back. An ineligible buddy is armed until eligible by
+   `next_preemption_ns`; other waiters are not polled every 10 µs. A failed
+   IRQ-tail probe still returns immediately.
+2. Due explicit periodic callbacks (`register_timer_callback(period, ...)`)
+   run next. Hardware rearm is deferred across the wake batch, the soft-timer
+   wheel is drained and woken, then the soft earliest is reread.
+3. `next_preemption_ns(current)` recomputes the optional
+   `NEXT_SCHED_DEADLINE`, then `rearm_local_timer` to
 
 ```text
 min(next_sched_deadline?, earliest_soft?, earliest_periodic?)
 ```
 
-   三者皆空时 `disarm_timer()`。过期/陈旧 IRQ 只补账并重装，不做 catch-up tick 循环。
-   在 `sched_stat` 下按是否命中 schedule / soft / periodic deadline 分类计数
-   （`timer_irq_sched` / `timer_irq_soft` / `timer_irq_periodic` / `timer_irq_stale`），
-   便于核对取消固定 10ms tick 后的 IRQ 构成；分类在 drain/run 之后从 schedule slot、
-   非空 soft wakers、`run_due_and_earliest` 的 due 标志推导，默认 release 不额外查询
-   timer wheel。
+   If all three are empty, `disarm_timer()` runs. Stale/expired IRQs only
+   catch up accounting and rearm; they do not loop catch-up ticks. With
+   `sched_stat`, IRQs are classified after drain/run from the schedule slot,
+   nonempty soft wakers, and `run_due_and_earliest`'s due flag
+   (`timer_irq_sched` / `timer_irq_soft` / `timer_irq_periodic` /
+   `timer_irq_stale`). Default release does not query the timer wheel again.
 
-schedule deadline 经 `program_sched_deadline` 写入：对齐 Linux `hrtick_start`，
-正的相对延迟下限 10μs；`next_preemption_ns == 0` 或 slot 已到期时先打
-`need_resched` 并消费该 one-shot schedule slot，绝不武装硬件 interval=0，也不把
-已到期 slot 每 10μs 循环后推（避免 timer IRQ 活锁）。该下限只作用于 schedule 源，
-不影响 soft/periodic 精度；pending 抢占在临界区退出后的安全点消费。
+Schedule deadlines are written by `program_sched_deadline`, matching Linux
+`hrtick_start`: a positive relative delay is floored at 10 µs. When
+`next_preemption_ns == 0` or the slot is already due, the path sets
+`need_resched` and consumes that oneshot schedule slot. It never arms
+hardware with interval 0 and never pushes an already-due slot forward every
+10 µs (that livelocks the timer IRQ). The floor applies only to the schedule
+source and does not affect soft/periodic precision. Pending preemption is
+consumed at the next safe point after the critical section exits.
 
-该路径 soft deadline 以 `MonotonicInstant` 贯穿 timer wheel 到
-`rearm_local_timer`；装入硬件前再转换为绝对 ns / ticks。上下文切换、
-block/exit/migrate、优先级变更与本地 `request_resched` 也会补账并刷新
-schedule deadline。远端 wake 的 IPI 只置 `need_resched`（与改周期 tick 之前相同）；
-IRQ 尾 `peer_preempts_curr` 决定是否切换，探测失败才在 `preempt_resched` 里武装
-剩余 request 的 backup hrtick。不要在 IPI 里 `account`/`refresh` 目标 RQ：那会与
-waker 持有的远端 `&mut RunQueue` 别名，并把 schedule slot 重编程或 disarm，导致
-busy home 上空等一整段 request。
-由于 oneshot/NOHZ CPU 可能已彻底停表，`smp` 不带 `ipi` 无法可靠推进远端 runnable
-任务，`ktask` 在编译期拒绝该配置，不提供虚假的本地 fallback。
+Soft deadlines stay as `MonotonicInstant` from the timer wheel through
+`rearm_local_timer`, then convert to absolute ns / ticks just before the
+hardware. Context switch, block/exit/migrate, priority change, and local
+`request_resched` also account and refresh the schedule deadline. A remote
+wake IPI only sets `need_resched` (same as before the periodic-tick change).
+IRQ-tail `peer_preempts_curr` decides whether to switch; a failed probe arms
+the remaining-request backup hrtick in `preempt_resched`. Do not
+`account` / `refresh` the dest RQ from the IPI: that aliases the waker's
+remote `&mut RunQueue` and can reprogram or disarm the schedule slot, leaving
+a busy home idle for a full request. Because a oneshot/NOHZ CPU may have
+stopped its clock entirely, `smp` without `ipi` cannot reliably advance a
+remote runnable task. `ktask` rejects that configuration at compile time and
+does not offer a fake local fallback.
 
-`register_timer`/`sleep_until` 在关抢占下读取 `this_cpu_id`、入队，并（仍持有 wheel 的
-`SpinNoIrq` 锁、IRQ 关闭）立即调 `rearm_local_timer()`；`cancel_timer`/`TimerFuture::drop`
-在本地移除最早项时同样重装。远程取消最早项不发 IPI，由对方 CPU 至多一次陈旧 IRQ 自纠正。
+`register_timer` / `sleep_until` read `this_cpu_id`, enqueue, and (still
+holding the wheel `SpinNoIrq` lock with IRQs off) immediately call
+`rearm_local_timer()`. `cancel_timer` / `TimerFuture::drop` rearm the same
+way when they remove the local earliest item. Remote cancel of the earliest
+item does not send an IPI; the dest CPU self-corrects on at most one stale
+IRQ.
 
-`on_timer_fire` 在唤醒批次内推迟硬件 rearm（`DEFER_LOCAL_TIMER_REARM`），避免每次 wake
-用过期 soft earliest 覆盖刚刷新的 schedule slot；批次结束后重读 soft earliest 再仲裁。
-`switch_to` 经 `program_sched_deadline_for(incoming, …)` 写入：立即请求的 pending 落在
-入场任务上（此时 `current()` 仍是出场任务）。NOHZ 下 lone runner 墙钟时间在 add/wake/
-priority 变更前经 RQ `flush_running_runtime` 注入 EEVDF `curr`，避免 PLACE_LAG 用陈旧 V。
-`last_accounted_ns` 只在持有该 RQ 的 scheduler `SpinRaw` 时更新，这样远端 wake flush
-与本地 timer `account_current_runtime` 不会对同一段墙钟重复或漏记。
+`on_timer_fire` defers hardware rearm across a wake batch
+(`DEFER_LOCAL_TIMER_REARM`) so each wake does not overwrite a freshly
+refreshed schedule slot with a stale soft earliest. After the batch it
+rereads the soft earliest and arbitrates. `switch_to` writes through
+`program_sched_deadline_for(incoming, …)`: an immediate pending request lands
+on the incoming task because `current()` is still the outgoing task. Under
+NOHZ, lone-runner wall time is flushed into EEVDF `curr` via
+`flush_running_runtime` before add/wake/priority change so PLACE_LAG does
+not use a stale V. `last_accounted_ns` is updated only while holding that
+RQ's scheduler `SpinRaw`, so a remote wake flush and local timer
+`account_current_runtime` cannot double-count or drop the same wall interval.
 
-显式周期回调在 hard IRQ/本地 IRQ 关闭上下文执行，必须短小且不阻塞。回调调用前释放
-callback vector 的 Rust 借用并以 `Arc` 固定闭包生命周期，因此回调内追加注册安全；
-每次 deadline 从**回调完成时刻 + period** 重算，超期只执行一次，不 catch-up、不立即
-重入。注册新周期源时重装仍携带当前 soft deadline，不能把已有 sleep/timeout 推迟；
-超出 `u64` ns 的 `Duration` 饱和到最远期限而不是截断成短周期。
+Explicit periodic callbacks run in hard IRQ / local-IRQ-off context. They
+must be short and non-blocking. The callback vector's Rust borrow is dropped
+and the closure is pinned with `Arc` before the call, so registering another
+callback from inside a callback is safe. Each deadline is recomputed from
+**callback completion + period**. Overrun runs once: no catch-up and no
+immediate reentry. Rearm after registering a new periodic source still
+carries the current soft deadline and must not delay existing sleeps /
+timeouts. A `Duration` beyond `u64` ns saturates to the farthest deadline
+instead of truncating to a short period.
 
-`ktask` 仍采用延迟抢占：timer 路径通常只打 pending，真正 `preempt_resched()` 在抢占
-重新允许的安全点触发。
+`ktask` still uses deferred preemption: the timer path usually only sets
+pending; the real `preempt_resched()` runs at the next safe point where
+preemption is allowed again.
 
-### 4) 抢占与 kspin 的接口耦合
+### Preemption and the kspin interface
 
-`kspin` guard acquire/release 会调用 `KernelGuardIf::disable_preempt/enable_preempt`。`ktask` 提供该接口实现：
+`kspin` guard acquire/release call
+`KernelGuardIf::disable_preempt` / `enable_preempt`. `ktask` implements that
+interface:
 
-- `disable_preempt()`：当前任务 `preempt_disable_count += 1`
-- `enable_preempt(true)`：计数降为 0 时检查 `need_resched`；若当前 CPU 不在异常/IRQ
-  trapframe 作用域内，才进入 `preempt_resched()`
+- `disable_preempt()`: current task `preempt_disable_count += 1`
+- `enable_preempt(true)`: when the count reaches 0, check `need_resched`;
+  enter `preempt_resched()` only if this CPU is not inside an exception/IRQ
+  trapframe scope
 
-该设计将“临界区边界”与“抢占检查点”绑定，避免在持锁/临界区中途切换任务。异常/IRQ
-入口通过 `in_exception_context()` 暴露当前 CPU 是否仍在 trapframe guard 作用域内；在该
-guard 尚未释放时，抢占只保留 `need_resched` pending，不实际切换任务，避免普通任务观察到
-仍属于异常路径的 per-CPU trapframe。
+This binds the critical-section boundary to the preemption checkpoint so a
+task does not switch mid-lock. Exception/IRQ entry exposes whether this CPU
+is still inside a trapframe guard via `in_exception_context()`. While that
+guard is held, preemption only keeps `need_resched` pending and does not
+switch, so an ordinary task never observes a still-exceptional per-CPU
+trapframe.
 
-IRQ 分发完成并向中断控制器回写完成状态后，`khal` 在释放 IRQ handler 的 `NoPreempt`
-guard 前暂时挂起 active-exception 标记。这样 `enable_preempt` 可在 IRQ 尾部、IRQ 仍关闭
-的安全窗口消费 pending；被中断任务恢复后再还原标记并返回异常。若不做该尾部补查，
-IPI wake 在 EL1 exception 内只会留下 pending，可能一直等到下一次 schedule timer
-或安全点。
+After IRQ dispatch completes and the interrupt controller is acked, `khal`
+temporarily suspends the active-exception mark before releasing the IRQ
+handler's `NoPreempt` guard. That lets `enable_preempt` consume pending at
+IRQ tail while IRQs are still off. The mark is restored before returning to
+the interrupted task. Without that tail check, an IPI wake inside an EL1
+exception would leave pending until the next schedule timer or safe point.
 
-异常路径可能进入会阻塞的后端（例如用户缺页处理），任务也可能在 trap handler
-返回前被调度到其它 CPU。为避免原 CPU 上的 active-exception slot 变成 stale 状态，
-`switch_to()` 在切离当前任务、更新 `CurrentTask` 之前会挂起并清空当前 CPU 的
-active exception context；当该任务被切回并从底层上下文切换返回时，再把挂起的
-active exception context 恢复到当前 CPU。否则旧 CPU 会一直认为自己仍在异常上下文，
-或迁移后的任务在 trap handler 后半段错误允许抢占。
+An exception path may enter a blocking backend (for example a user page
+fault), and the task may migrate before the trap handler returns. To keep
+the old CPU's active-exception slot from going stale, `switch_to()` suspends
+and clears the current CPU's active exception context before replacing
+`CurrentTask`. When that task is switched back and returns from the
+low-level context switch, the suspended context is restored. Otherwise the
+old CPU would keep believing it is in exception context, or the migrated
+task would wrongly allow preemption in the second half of the trap handler.
 
-### 5) 阻塞/唤醒与 WaitQueue/Future
+### Block / wake and WaitQueue / Future
 
-- `future::PreparedTaskWait` 在发布操作前校验可睡眠上下文，并分配一个
-  `KWaker` Arc；保留一个 task 强引用供 `blocked_resched` 使用。句柄不实现
-  Send/Sync，`park()` 校验当前任务身份；跨上下文传递的是只持 task Weak 的 Waker。
-- `PreparedTaskWait::park()` 和 `block_on` 共享原有的两次 woke 检查：先检查
-  latch，再持 run-queue 锁复查，最后由 `blocked_resched` 发布 Blocked 并释放
-  latch 锁。park 不分配 waker、不注册等待、不检查 signal；调用方保留事件注册，
-  每次返回后重查谓词。虚假唤醒和旧 wake hint 不代表操作完成。
-- prepare 拒绝无任务、idle、IRQ 屏蔽、hardirq/softirq/BH-disabled，以及有
-  preempt 计数配置下的非零禁抢占深度；不能动态识别所有禁止睡眠的锁，调用方
-  仍须负责锁约束。block_on 不新增这套入口校验，保持既有行为。
-- `future::block_on` 在 `Poll::Pending` 下走 `blocked_resched()`，把当前任务置为 `Blocked`。
-- 若 waker 在 `Poll::Pending` 与提交阻塞之间触发，`block_on` 清除 wake 标志后立即重新 poll；不能先 yield，否则满载 CPU 会把已完成的 wake-before-block 竞态转换为无关 runnable task 的排队延迟。
-- 若当前任务正在执行 kwork callback，`block_on` 会在函数级边界通知 `kwork`
-  worker-pool accounting；任务真正进入 `Blocked` 的收敛点由 scheduler hook 对齐
-  Linux `wq_worker_sleeping()`，切回 `Running` 时再配对 resume accounting。
-- waker 触发时通过 `select_wake_run_queue(...).unblock_task(..., true)` 将任务恢复为 `Ready`。
-- SMP 下唤醒按 Linux `select_idle_sibling`：`prev_cpu`（`task.cpu_id()`）空闲则回家；否则在 cpumask 里找 `nr_running == 0` 的核；都忙则留在 prev；home 不在 cpumask 且无 idle 时才走 `find_idlest_cpu`。
-- `unblock_task(..., true)` 对本 CPU 设置 `need_resched`；对远端 CPU 在 `ipi + preempt` 可用时请求远端设置 `need_resched`。
-- `TaskInner::interrupt()` 在 wake `interrupt_waker` 之后对仍 `on_cpu` 的任务
-  `kick_running_task()`：本 CPU 在 `preempt` 下置 `need_resched`，远端一律发
-  IPI（`smp` 已带 `ipi`）。信号投递给正在用户态运行的任务必须走这条路径；
-  NOHZ lone runner 没有周期 tick 兜底。
-- `WaitQueue` 基于 `event_listener` 封装等待与通知，支持超时与条件等待。
-- `TaskInner::join()` 使用 `kpoll::Completion` 作为 per-task exit wait source。任务退出时先发布
-  `exit_code`，再把 state 切到 `Exited` 并 `complete_all()`；joiner 的真实完成条件仍是
-  `TaskState::Exited`，completion 只负责避免丢失 wake 并支持 late joiner。
-- `ktask` 通过 `kirq::IrqSyncWaitIf` 提供 completion-backed blocking wait，使
-  `kirq::synchronize_irq()` / `free_irq()` 能阻塞当前 task；IRQ descriptor 生命周期和
-  `in_flight` predicate 仍由 `kirq` 拥有。
+- `future::PreparedTaskWait` checks sleepable context before publication and
+  allocates a `KWaker` Arc. It keeps one strong task ref for
+  `blocked_resched`. The handle is not `Send`/`Sync`; `park()` checks current
+  task identity. Cross-context delivery uses a Waker that holds only a task
+  Weak.
+- `PreparedTaskWait::park()` and `block_on` share the existing two woke
+  checks: latch first, then again under the run-queue lock, then
+  `blocked_resched` publishes Blocked and releases the latch lock. Park does
+  not allocate a waker, register a wait, or check signals. The caller keeps
+  event registration and rechecks the predicate after every return. A
+  spurious wake or stale hint is not completion.
+- Prepare rejects no-task, idle, IRQ-masked, hardirq/softirq/BH-disabled, and
+  (when preempt counting is configured) a nonzero disable depth. It cannot
+  dynamically recognize every unsleepable lock; the caller still owns lock
+  constraints. `block_on` does not add this entry check and keeps its
+  existing behavior.
+- `future::block_on` takes `blocked_resched()` on `Poll::Pending` and marks
+  the current task `Blocked`.
+- If the waker fires between `Poll::Pending` and the block commit, `block_on`
+  clears the wake flag and immediately repolls. It must not yield first: on a
+  fully loaded CPU that would turn a completed wake-before-block race into
+  queueing delay for an unrelated runnable task.
+- If the current task is inside a kwork callback, `block_on` notifies
+  `kwork` worker-pool accounting at the function boundary. The real
+  `Blocked` convergence is aligned with Linux `wq_worker_sleeping()` through
+  the scheduler hook and is paired with resume accounting when returning to
+  `Running`.
+- A waker restores the task to `Ready` through
+  `select_wake_run_queue(...).unblock_task(..., true)`.
+- SMP wake follows Linux `select_idle_sibling`: go home if `prev_cpu`
+  (`task.cpu_id()`) is idle; otherwise pick a `nr_running == 0` CPU in the
+  cpumask; if all are busy stay on prev; only if home is outside the cpumask
+  and no idle CPU exists does it use `find_idlest_cpu`.
+- `unblock_task(..., true)` sets `need_resched` on this CPU and, when
+  `ipi + preempt` are available, requests the same on a remote CPU.
+- After waking `interrupt_waker`, `TaskInner::interrupt()` calls
+  `kick_running_task()` if the task is still `on_cpu`: local `need_resched`
+  under `preempt`, remote IPI always (`smp` already implies `ipi`). Signal
+  delivery to a task running in user mode must take this path; a NOHZ lone
+  runner has no periodic tick fallback.
+- `WaitQueue` wraps `event_listener` wait/notify and supports timeout and
+  predicate wait.
+- `TaskInner::join()` uses `kpoll::Completion` as the per-task exit wait
+  source. Exit publishes `exit_code`, then moves state to `Exited` and
+  `complete_all()`. The joiner's real completion condition remains
+  `TaskState::Exited`; completion only avoids a lost wake and supports a late
+  joiner.
+- `ktask` provides `kirq::IrqSyncWaitIf` completion-backed blocking wait so
+  `kirq::synchronize_irq()` / `free_irq()` can block the current task. IRQ
+  descriptor lifetime and the `in_flight` predicate stay in `kirq`.
 
-### 6) 退出回收（GC task）
+### Exit reclaim (GC task)
 
-每 CPU run queue 在创建时自动加入一个 `gc` 任务，循环执行 `poll_gc`：
+Each CPU run queue is created with a `gc` task that loops on `poll_gc`:
 
-- 消费 `EXITED_TASKS` 列表
-- `Arc::try_unwrap` 成功则立即回收
-- 否则放回队列等待外部引用释放
-- 通过 `WAIT_FOR_EXIT` waker 休眠/唤醒
+- consume the `EXITED_TASKS` list
+- reclaim immediately on successful `Arc::try_unwrap`
+- otherwise push back and wait for external refs to drop
+- sleep/wake through the `WAIT_FOR_EXIT` waker
 
-这是一种延迟回收模型，避免在退出与切换关键路径直接执行慢释放。
-`WAIT_FOR_EXIT` 保持 `PollSet` 事件语义，因为同一 CPU 的 GC task 会连续观察多批退出任务；
-它不同于单个 task 的 sticky exit completion。
+This is delayed reclaim so the exit/switch hot path does not do a slow drop.
+`WAIT_FOR_EXIT` keeps `PollSet` event semantics because the same CPU's GC
+task observes successive batches of exited tasks. It is not a per-task sticky
+exit completion.
 
-## SMP 语义
+## SMP semantics
 
-- 每 CPU 一个 `RUN_QUEUE`、`IDLE_TASK`、`EXITED_TASKS`、`WAIT_FOR_EXIT`。
-- `task.cpu_id` 表示 **runqueue ownership**，不是业务路径各自维护的辅助字段：
-  - runnable / running：任务当前归属的 run queue CPU
-  - blocked：保留上一次归属 CPU，供 `select_wake_run_queue` 做 wake affinity
-- 所有 ownership 更新收敛到 `RunQueue` 封装入口，调用方不得直接 `Scheduler::add_task` /
-  `enqueue_task` / `leave_current` 或散落调用 `set_cpu_id`：
-  - `publish_task`：新任务首次入队（`spawn` / per-CPU gc）
-  - `enqueue_task`：非当前 Ready 任务入队（unblock / affinity migrate-in / idle-pull）
-  - `leave_current`：当前运行任务离开执行槽（Yield / Preempt / Block / Migrate / Exit）
-  - `switch_to_local`：不经 ready 队列、直接 `switch_to` 的本地 helper（如 migration task）
-  - `set_owner_cpu`：仅用于 run queue 尚未建立时的 boot bring-up（main / idle）
-- `switch_to` 在 SMP 下检查 `next_task.cpu_id() == rq.cpu_id`，防止错队列切换。
-- `select_run_queue` 对齐 Linux fork 的 `find_idlest_cpu`：**idle-first**
-  （`nr_running == 0`，睡觉的核也算 idle），再比 `nr_home`。SIS 已验证后，
-  clone 落到 sleeper 核上安全——被挤走的 worker 下次还能找 idle。空闲核之间仍
-  优先 `nr_home` 更低的（空核优于有人睡觉的核）。并列 `prefer_local`，再 RR。
-- `select_wake_run_queue` 对齐 Linux `select_idle_sibling`：prev 空闲则回家，
-  否则找一颗 `nr_running == 0` 的核。曾经「始终粘 home」时，home 忙 → idle
-  溢出会把 schbench 锁成 ~3 路（RPS ~450→~325）；SIS 下被挤走的 worker 下次
-  仍可再找 idle（抢椅子，平均仍约 4 路）。无 idle 时留在 prev。
-- 当前无周期 balancer。跨核除 affinity 与上述 wake SIS 外，即将 idle 时
-  做 Linux 风格 idle-pull：只从 `nr_running >= 2` 的核偷 **Ready && `!on_cpu`**
-  的 waiter，经源 RQ `steal_ready_task`（内部 `remove_task`，记 PLACE_LAG）再
-  本核 `enqueue_task`。只锁 src，再锁 dest 入队，避免 dest-then-src 与远端 wake
-  死锁。入队后复查 cpumask：steal 到 enqueue 之间 affinity 可能已排除 dest，
-  不含本核则立刻 `migrate_entry`，不在非法 CPU 上 pick。曾经把仍 `on_cpu` 的
-  任务偷到另一核（yield/preempt 入树到 `switch_to` 完成之间），两核同跑一份栈；
-  现必须拒绝 `on_cpu`。steal 会改 `cpu_id`，SIS 下这是预期的抢椅子：下次唤醒
-  prev 空闲则回家，否则再找 idle。
-  spawn / `activate_task` / affinity migrate-in 仍走 `find_idlest_cpu`。
-- `add_task` 首次入队后总是 `request_resched`（远端 IPI / 本地 pending 并刷新
-  schedule deadline）。动态 timer 在 lone task 时已 disarm，busy 本核也不能依赖不存在的
-  周期 tick 日后发现新 peer。
-- EEVDF（`ksched`）对齐 Linux `pick_eevdf` / `place_entity`：
-  - 唤醒 `PLACE_LAG`：`vruntime = V - lag`（lag 先按 `(W+w)/W` 膨胀），deadline 用**完整 request**
-    （`vd = ve + r/w`，request 以 ns 计，默认 `DEFAULT_SLICE_NS` = 2ms），不造假短 deadline，
-    也不把 wakee 额外钳到 V / `min_vruntime`（负 lag 允许暂时 ineligible）；
-    `min_vruntime` 按 Linux `update_min_vruntime` 计入离树 `curr`；
-  - **非自愿** `preempt_resched` 先 `peer_preempts_curr()`（`curr` 离树比 deadline），
-    同伴更早或 WF_SYNC 的 eligible buddy 才 `leave_current(Preempt)`+`pick`；否则清 pending
-    直接返回（避免无意义再入队，也保证 `switch_to` 前 ready 队列持有 prev 的 `Arc`）。
-    探测失败路径在同一次 scheduler 锁内完成 account + probe + `next_preemption_ns`，
-    出锁后再 `program_sched_deadline` / rearm，避免三次加锁拉长关中断窗口；
-  - `update_current` 对齐 Linux `update_deadline`：request 完成后赋新 `vd = ve + r/w`，
-    仅在有等待同伴时 resched；lone task 不装 schedule timer；
-  - 唤醒按 Linux `NEXT_BUDDY` / `set_next_buddy` 提名 wakee（保留更早
-    deadline 的既有 buddy），**不要求** `curr` 已安装：远端 futex 常在
-    目标 `leave` 之后、`pick` 之前入队；`curr` 为空时跳过提名，随后 pick
-    会把刚放回的 runner 再跑完一段 request（schbench p99.9 ≈ 2ms）。
-    `pick` 优先 eligible buddy；WF_SYNC 再设 `prefer_sync_buddy`；
-  - futex 等路径用 `with_wake_sync`（Linux `WF_SYNC`）：eligible next buddy 可
-    sync-preempt 半截 curr（即使 deadline 更晚）。`mark_sync_wake_preempt` 当时
-    就设 `prefer_sync_buddy`，且失败的 `peer_preempts_curr` 不得清掉 sync 标记，
-    否则远端 slice-expire pick / 随后 IPI 探测看不到 buddy。account + PLACE +
-    提名必须在同一把 scheduler 锁里完成。
-  - `TaskInner::interrupt()` 对 `interrupt_waker` 走 `with_wake_sync`（信号发送方
-    随后往往会 block）。若目标正在 CPU 上运行，再 kick 该 CPU：本 CPU 在
-    `preempt` 下置 `need_resched`，远端发 IPI（`smp` 已带 `ipi`）。IPI 把
-    `UserContext::run` 拉回内核；`preempt` 只在回调里多置 `need_resched`。
-    这是 Linux `kick_process` 在 NOHZ 下的对应物。只采样一次 `on_cpu`/`cpu_id`。
-- 当前任务离开统一走 `leave_current`：
-  - `yield_current` → `Yield`（重置 request 并再入队；`Running -> Ready` 必须成功）
-  - `preempt_resched` → `Preempt`（保留剩余 slice 并再入队；同上）
-  - `blocked_resched` → `Block`（记 vlag，不入队；into_raw 当前槽位计 1，调用方须另持强引用以满足 `strong_count > 1`；缺则 panic，见 `# Panics` 与 unittest）
-  - `migrate_current` → `Migrate`（源 RQ 记 vlag 供目的端 PLACE_LAG，不入队）
-  - `exit_current` → `Exit`（清除 current 记账，不设置 PLACE_LAG）
-- 所有离开路径（含 `yield_current`）均在 `leave_current` / requeue **之前**按当前时间
-  `update_current`；`switch_to` 不再对已经入树的 prev 补账，避免修改有序队列 key 后破坏
-  调度器索引与权重聚合。
-- idle 不进入调度器 `curr`：yield/preempt 只做 `Running -> Ready`，不
-  `leave_current` / 不入队。EEVDF 下 idle 保持 `curr == None`，`peer_preempts`
-  在空 `curr` 时把「ready 非空」视为可抢占即可。
-- 经 `switch_to_local` 上 CPU 的助手在入场时 `sync_running_curr`；`preempt_resched`
-  只探测、不再 sync（避免把 idle 写进 `curr`）。
-- EEVDF `curr` 只保存 identity/vruntime/deadline/weight 快照，不持有任务 `Arc`；
-  `pick_next` 要求此前已 `leave_current`，不再静默擦除陈旧状态。
-- `set_task_affinity`：写 `cpumask` 后 `enforce_affinity_placement`。只在任务
-  **正在占用**某颗 CPU 时迁移：current 立即 `migrate_current`；ready 已在禁止
-  RQ 上则 `remove_task` 再 `migrate_entry`（目的 RQ 入队后 `request_resched_on`，
-  与 `add_task` 相同）；远端 running 在 `preempt`+`ipi` 下 `request_resched`，
-  由 `preempt_resched`/`yield_current` 发现 mask 不含本 CPU 后强制迁移，调用方
-  自旋等到离开非法 CPU；迁不走返回 `false`（syscall 侧 `EBUSY`）。
-  未 `activate` 的 prepared 任务、Blocked/Exited、以及 idle-pull steal 到 dest
-  入队之间（Ready、不在任何队列）都不占用 CPU，只改 mask；下一次入队
-  （`activate_task` / wake / dest `commit_idle_pull`）按新 mask 选核。
-  dest 入队后仍复查 cpumask，不含本核则立刻 `migrate_entry`，不在非法 CPU 上 pick。
-  首次绑核用 `set_cpumask` 再 `activate_task`（ksoftirqd / watchdog），不要把
-  未入队任务送进迁移路径。
-- 对 `Blocked` 任务重新入队时，SMP 唤醒方先发布目标 RQ 与 wake flags；若
-  `task.on_cpu()` 仍为真，则由原 CPU 在 switch-out 清零 `on_cpu` 后原子认领并完成入队。
-  该 handoff 防止重复入队，也避免唤醒方持 `NoPreemptIrqSave` 关中断自旋等待远端 CPU。
-  `arm_wake_enqueue` / `on_cpu` / `set_on_cpu(false)` / `take_wake_enqueue` 四处
-  均为 SeqCst，并且在 store 与对侧 load 之间加 `SeqCst` fence（x86 `MFENCE`，
-  AArch64 `DMB ISH`）。这是两变量 Dekker 的内存模型要求，不是模拟器兜底：
-  SeqCst store 再 SeqCst load **另一个**地址并不构成 store→load 屏障
-  （C++20 P0668，Rust 跟随）。Release/Acquire 在真机上就会双边漏看；去掉
-  fence 后 LLVM 可把 SeqCst 降为普通 store/load，x86 TSO 同样允许漏看。
-  不可把 fence 降为 acquire/release（x86 上只有 SeqCst fence 会发出 `MFENCE`）。
-  QEMU TCG（IK9KW6）只是最先观测到失效的环境；任务会停在 `Ready` 却不在任何
-  run queue。
-  现有 unittest `wake_of_switching_task_defers_enqueue_without_spinning` 只覆盖
-  单线程 Deferred 路径，打不出跨 CPU store-buffering。guest 内再写 block/wake
-  对打也不能在无 fence 时被预期为超时：IK9KW6 单 VM 连跑 20 次全过，要靠宿主机
-  上多 VM 并发拉长 TCG 交错窗口。确定性回归因此记手工复现，不塞一条假绿压力单测。
+- Each CPU has one `RUN_QUEUE`, `IDLE_TASK`, `EXITED_TASKS`, and
+  `WAIT_FOR_EXIT`.
+- `task.cpu_id` is **run-queue ownership**, not an ad hoc helper:
+  - runnable / running: CPU whose run queue currently owns the task
+  - blocked: last owner CPU, used as wake-affinity preference by
+    `select_wake_run_queue`
+- All ownership updates go through `RunQueue` wrappers. Callers must not call
+  `Scheduler::add_task` / `enqueue_task` / `leave_current` or scatter
+  `set_cpu_id`:
+  - `publish_task`: first enqueue of a new task (`spawn` / per-CPU gc)
+  - `enqueue_task`: enqueue a non-current Ready task (unblock / affinity
+    migrate-in / idle-pull)
+  - `leave_current`: current running task leaves the execution slot (Yield /
+    Preempt / Block / Migrate / Exit)
+  - `switch_to_local`: local helper that `switch_to`s without the ready queue
+    (for example a migration task)
+  - `set_owner_cpu`: only boot bring-up of main / idle before a run queue
+    exists
+- SMP `switch_to` checks `next_task.cpu_id() == rq.cpu_id` so a task cannot
+  switch onto the wrong queue.
+- `placement.rs` (`select_run_queue`) matches Linux fork `find_idlest_cpu`:
+  **idle-first** (`nr_running == 0`; a sleeper CPU still counts as idle),
+  then `nr_home`. After SIS is in place, landing a clone on a sleeper CPU is
+  safe: the displaced worker can seek idle on the next wake. Among idle CPUs,
+  lower `nr_home` still wins (an empty CPU beats a sleeper's CPU). Ties use
+  `prefer_local`, then RR.
+- `placement.rs` (`select_wake_run_queue`) matches Linux `select_idle_sibling`:
+  go home if prev is idle, otherwise pick a `nr_running == 0` CPU. Sticky-home
+  plus "home busy → idle overflow" collapsed schbench to about 3-way
+  parallelism (RPS ~450 → ~325). Under SIS the displaced worker can seek idle
+  again (musical chairs, still about 4-way on average). Stay on prev when no
+  idle CPU exists.
+- There is no periodic balancer. Besides affinity and the wake SIS above,
+  an about-to-idle CPU does a Linux-style idle-pull: steal one
+  **Ready && `!on_cpu`** waiter from a CPU with `nr_running >= 2`, through
+  source `steal_ready_task` (internal `remove_task`, PLACE_LAG) then local
+  `enqueue_task`. Lock only src, then dest enqueue, so dest-then-src cannot
+  deadlock against a remote wake. Recheck cpumask after enqueue: affinity
+  may have excluded dest between steal and enqueue; if dest is not allowed,
+  `migrate_entry` immediately so this CPU does not pick a forbidden task.
+  Stealing an still-`on_cpu` task (yield/preempt requeue before `switch_to`
+  finishes) ran the same stack on two CPUs; `on_cpu` must be rejected.
+  Steal changes `cpu_id`. Under SIS that is expected musical chairs: the
+  next wake goes home if prev is idle, otherwise seeks idle again.
+  Spawn / `activate_task` / affinity migrate-in still use `find_idlest_cpu`.
+- `add_task` always `request_resched` after first enqueue (remote IPI / local
+  pending plus schedule-deadline refresh). A dynamic timer is already disarmed
+  for a lone task; a busy home cannot rely on a nonexistent periodic tick to
+  discover a new peer later.
+- EEVDF (`ksched`) matches Linux `pick_eevdf` / `place_entity`:
+  - Wake `PLACE_LAG`: `vruntime = V - lag` (lag first inflated by `(W+w)/W`).
+    Deadline uses the **full request** (`vd = ve + r/w`, request in ns,
+    default `DEFAULT_SLICE_NS` = 2 ms). It does not invent a short deadline
+    and does not clamp the wakee extra to V / `min_vruntime` (negative lag
+    may be temporarily ineligible). `min_vruntime` includes off-tree `curr`
+    as in Linux `update_min_vruntime`.
+  - Involuntary `preempt_resched` first calls `peer_preempts_curr()`
+    (`curr` compared off-tree by deadline). Only a peer with an earlier
+    deadline, or a WF_SYNC eligible buddy, does `leave_current(Preempt)` +
+    `pick`. Otherwise pending is cleared and the path returns (avoids a
+    pointless requeue and keeps prev's `Arc` on the ready queue before
+    `switch_to`). The failed-probe path finishes account + probe +
+    `next_preemption_ns` under one scheduler lock, then
+    `program_sched_deadline` / rearm after unlock, so three lock acquires
+    do not stretch the IRQ-off window.
+  - `update_current` matches Linux `update_deadline`: after a completed
+    request assign `vd = ve + r/w` and resched only if a waiter exists. A
+    lone task does not arm a schedule timer.
+  - Wake nominates the wakee as Linux `NEXT_BUDDY` / `set_next_buddy`
+    (keeping an existing earlier-deadline buddy). `curr` need not already
+    be installed: a remote futex often enqueues after dest `leave` and
+    before `pick`. Skipping nomination when `curr` is empty would let pick
+    run the just-requeued runner for another full request (schbench
+    p99.9 ≈ 2 ms). Pick prefers an eligible buddy; WF_SYNC then sets
+    `prefer_sync_buddy`.
+  - Futex-like paths use `with_wake_sync` (Linux `WF_SYNC`): an eligible
+    next buddy may sync-preempt a half-finished curr even with a later
+    deadline. `mark_sync_wake_preempt` sets `prefer_sync_buddy` immediately,
+    and a failed `peer_preempts_curr` must not clear the sync mark, or a
+    later remote slice-expire pick / IPI probe would miss the buddy.
+    Account + PLACE + nomination must finish under one scheduler lock.
+  - `TaskInner::interrupt()` uses `with_wake_sync` for `interrupt_waker`
+    (the signal sender often blocks next). If the target is on a CPU, kick
+    that CPU: local `need_resched` under `preempt`, remote IPI (`smp`
+    already implies `ipi`). The IPI pulls `UserContext::run` back into the
+    kernel; `preempt` only additionally sets `need_resched` in the handler.
+    This is the NOHZ counterpart of Linux `kick_process`. Sample
+    `on_cpu` / `cpu_id` once.
+- A running task always leaves through `leave_current`:
+  - `yield_current` → `Yield` (reset request and requeue; `Running -> Ready`
+    must succeed)
+  - `preempt_resched` → `Preempt` (keep remaining slice and requeue; same)
+  - `blocked_resched` → `Block` (record vlag, do not enqueue; the into_raw
+    current slot counts as 1, so the caller must hold another strong ref to
+    keep `strong_count > 1`; otherwise panic — see `# Panics` and the
+    unittest)
+  - `migrate_current` → `Migrate` (source RQ records vlag for dest
+    PLACE_LAG, does not enqueue)
+  - `exit_current` → `Exit` (clear current accounting, no PLACE_LAG)
+- Every leave path, including `yield_current`, calls `update_current` at
+  current time **before** `leave_current` / requeue. `switch_to` does not
+  re-account an already-enqueued prev, which would mutate an ordered-queue
+  key and break scheduler index and weight aggregation.
+- Idle does not enter scheduler `curr`: yield/preempt only do
+  `Running -> Ready`, without `leave_current` / enqueue. Under EEVDF idle
+  keeps `curr == None`; `peer_preempts` treats nonempty ready as preemptible
+  when `curr` is empty.
+- Helpers that enter the CPU through `switch_to_local` call
+  `sync_running_curr` on entry. `preempt_resched` only probes and does not
+  sync (so idle is not written into `curr`).
+- EEVDF `curr` stores only an identity / vruntime / deadline / weight
+  snapshot and does not hold a task `Arc`. `pick_next` requires a prior
+  `leave_current` and no longer silently erases stale state.
+- `set_task_affinity` writes `cpumask` then `enforce_affinity_placement`.
+  Migration happens only while the task **occupies** a CPU: current
+  immediately `migrate_current`; ready already on a forbidden RQ is
+  `remove_task` then `migrate_entry` (dest enqueue then `request_resched_on`,
+  same as `add_task`); a remote running task under `preempt`+`ipi` gets
+  `request_resched`, and `preempt_resched` / `yield_current` force-migrate
+  when the mask no longer contains this CPU. The caller spins until the
+  task leaves the forbidden CPU; failure returns `false` (syscall `EBUSY`).
+  A prepared-but-not-activated task, Blocked/Exited, and the idle-pull
+  steal-to-enqueue gap (Ready, on no queue) do not occupy a CPU, so the
+  path is mask-only. The next enqueue (`activate_task` / wake / dest
+  `commit_idle_pull`) chooses a CPU from the new mask. Dest still rechecks
+  cpumask after enqueue and `migrate_entry`s immediately if dest is
+  forbidden. First pin uses `set_cpumask` then `activate_task` (ksoftirqd /
+  watchdog); do not send an unpublished task through the migrate path.
+- When re-enqueueing a `Blocked` task, the SMP waker first publishes the
+  dest RQ and wake flags. If `task.on_cpu()` is still true, the outgoing
+  CPU claims the flags atomically after clearing `on_cpu` and finishes
+  enqueue. That handoff prevents double enqueue and avoids spinning
+  IRQ-off under `NoPreemptIrqSave` waiting for the remote CPU.
+  `arm_wake_enqueue` / `on_cpu` / `set_on_cpu(false)` / `take_wake_enqueue`
+  are all SeqCst, with a `SeqCst` fence between each store and the other
+  side's load (x86 `MFENCE`, AArch64 `DMB ISH`). That is the two-variable
+  Dekker memory-model requirement, not an emulator workaround: a SeqCst
+  store followed by a SeqCst load of **another** address is not a
+  store→load barrier (C++20 P0668; Rust follows). Release/Acquire can miss
+  on both sides on real hardware; without the fence LLVM may lower SeqCst
+  to ordinary store/load, and x86 TSO can still miss. Do not weaken the
+  fence to acquire/release (only a SeqCst fence emits `MFENCE` on x86).
+  QEMU TCG (IK9KW6) was only the first place the bug showed up: the task
+  stays `Ready` but is on no run queue.
+  The existing unittest
+  `wake_of_switching_task_defers_enqueue_without_spinning` covers only the
+  single-threaded Deferred path and cannot hit cross-CPU store-buffering.
+  A guest block/wake pair also cannot be expected to time out without the
+  fence: IK9KW6 passed 20 serial runs in one VM; concurrent host VMs are
+  needed to stretch the TCG interleaving window. Deterministic regression
+  is therefore a manual reproduction, not a false-green stress unittest.
 
-  **IK9KW6 手工复现（aarch64 QEMU TCG，`NR_CPUS=4`）**
+  **IK9KW6 manual reproduction (aarch64 QEMU TCG, `NR_CPUS=4`)**
 
-  1. 并行启动 3 个隔离 TCG VM，各跑 harness `process-ipc-smoke,getrusage-reentry`
-     （不要串行、不要单 VM 连刷）。
-  2. 无 `SeqCst` fence 时，首轮即可有 VM 卡在
-     `shm_deadlock::shm_deadlock_shmget_vs_shmat`：现场
-     `state=Ready`、`on_cpu=0`、`wake_enqueue_flags=0x05`（`PENDING|RESCHED`），
-     原 CPU 跑 idle，后续 wake 不再走 `Blocked→Ready`。
-  3. 对照：同一二进制 KVM、或仅在 store 与对侧 load 之间保留 `SeqCst` fence，
-     24/24 通过。完整撤掉 wake handoff 同样 24/24，但会回到 IRQ-off 自旋。
-- 远端 run queue 唤醒/首次入队都不会直接切换远端 CPU；在支持 IPI 和抢占时，通过远端 pending-resched 请求把切换推迟到远端安全点。
-- `TaskInner::on_cpu_mask()` 现在只表示 `ktask` 自己的调度驻留快照；用户地址空间
-  的 TLB shootdown 目标集合由 `memspace::MmCpuResidency` 持有。当前实现只在
-  switch-in 时保守聚合设置该 mask，允许 over-target，但不保证在 switch-away
-  后立即回收旧 CPU footprint。
+  1. Start 3 isolated TCG VMs in parallel, each running harness
+     `process-ipc-smoke,getrusage-reentry` (not serial, not one VM
+     hammered repeatedly).
+  2. Without the `SeqCst` fence, the first round can already stick a VM in
+     `shm_deadlock::shm_deadlock_shmget_vs_shmat`: `state=Ready`,
+     `on_cpu=0`, `wake_enqueue_flags=0x05` (`PENDING|RESCHED`), the old
+     CPU runs idle, and later wakes no longer take `Blocked→Ready`.
+  3. Control: the same binary under KVM, or with the `SeqCst` fence kept
+     between store and the other load, passes 24/24. Removing the entire
+     wake handoff also passes 24/24 but returns to IRQ-off spinning.
+- Remote run-queue wake / first enqueue never switches the remote CPU
+  directly. With IPI and preemption, a remote pending-resched request
+  defers the switch to the remote safe point.
+- `TaskInner::on_cpu_mask()` is now only `ktask`'s own residency snapshot.
+  User address-space TLB shootdown targets live in
+  `memspace::MmCpuResidency`. The current implementation only
+  conservatively aggregates the mask on switch-in (over-target is allowed)
+  and does not guarantee immediate reclaim of the old CPU footprint after
+  switch-away.
 
-## 调度点模型（何时可能发生切换）
+## When a switch can happen
 
-| 场景 | 是否立即切换 |
-|------|--------------|
-| `yield_now()` | 是（主动 `resched`） |
-| `blocked_resched()` | 是 |
-| `exit_current()` | 是 |
-| schedule timer 触发 `update_current` | 否（通常先设置 pending） |
-| 本 CPU waker 唤醒任务 | 否（设置 pending，安全点抢占） |
-| 远端 waker 唤醒任务 | 否（可通过 IPI 请求远端 pending 并刷新 schedule deadline） |
-| `add_task` / `migrate_entry`（本地 busy/idle 或远端） | 否（`request_resched`；远端 IPI） |
-| `enable_preempt` 且 `need_resched` | 可能（触发 `preempt_resched`） |
+| Scenario | Immediate switch? |
+|---|---|
+| `yield_now()` | Yes (voluntary `resched`) |
+| `blocked_resched()` | Yes |
+| `exit_current()` | Yes |
+| Schedule timer `update_current` | No (usually sets pending first) |
+| Local-CPU waker | No (sets pending; preempt at a safe point) |
+| Remote waker | No (may IPI remote pending and refresh the schedule deadline) |
+| `add_task` / `migrate_entry` (local busy/idle or remote) | No (`request_resched`; remote IPI) |
+| `enable_preempt` with `need_resched` | Maybe (`preempt_resched`) |
 
-因此 `ktask` 不是“固定节拍必切换”模型，而是“动态 schedule timer + 安全点执行”的抢占模型。
+`ktask` is therefore not a "fixed tick always switches" model. It is a
+dynamic schedule timer plus safe-point preemption model.
 
-## Cargo Features
+## Cargo features
 
-| Feature | 作用 |
-|---------|------|
-| `preempt` | 启用抢占逻辑与 `kspin` preempt 接口 |
-| `smp` | 多核 run queue 与迁移；同时启用 `ipi` |
-| `sched_fifo` | FIFO 协作式调度 |
-| `sched_rr` | RR 抢占式调度（隐含 `preempt`） |
-| `sched_cfs` | CFS 抢占式调度（隐含 `preempt`） |
-| `sched_eevdf` | EEVDF 抢占式调度（隐含 `preempt`） |
-| `snapshot` | 任务快照与回溯基础能力 |
-| `watchdog` | watchdog 诊断（依赖 `snapshot`）；`watchdog_hardlockup` 额外要求根 Kconfig 的 `KFEAT_NMI`（机制 + PMU 周期源，AArch64 QEMU） |
-| `ipi` | SMP 远端唤醒/重调度的必需能力 |
-| `tls` | 可选扩展能力 |
+| Feature | Role |
+|---|---|
+| `preempt` | Preemption logic and the `kspin` preempt interface |
+| `smp` | Multi-CPU run queues and migration; also enables `ipi` |
+| `sched_fifo` | FIFO cooperative scheduling |
+| `sched_rr` | RR preemptive scheduling (implies `preempt`) |
+| `sched_cfs` | CFS preemptive scheduling (implies `preempt`) |
+| `sched_eevdf` | EEVDF preemptive scheduling (implies `preempt`) |
+| `snapshot` | Task snapshot and backtrace foundation |
+| `watchdog` | Watchdog diagnostics (depends on `snapshot`); `watchdog_hardlockup` also needs root Kconfig `KFEAT_NMI` (mechanism + PMU period source, AArch64 QEMU) |
+| `ipi` | Required for SMP remote wake / reschedule |
+| `tls` | Optional extension |
 
-`UserTaskRuntime` 是 `ktask` 的用户运行时接口。其 scheduler hook 可在关闭抢占的切换上下文
-调用，因此实现不得阻塞、递归调度或依赖普通的 current-process 上下文。`TaskIdentity::User`
-将 `PidHandle` 与 `UserRuntimeSlot` 放在同一分支；任何用户 task（包括 PID 1 init）都由
-`TaskInner::new_user(..., user_runtime)` 在构造时一次性填充 runtime，不存在事后补装路径。
-内核 task（`KernelThread` / `Internal`）不带 runtime。需要用户执行上下文
-的 unittest 通过正常的 `TaskInner::new_user` 构造并启动独立用户 task；测试完成后由调用方等待
-该 task 退出，不再向 non-user task 临时注入 runtime。
+`UserTaskRuntime` is `ktask`'s user-runtime interface. Its scheduler hooks
+may run in a preempt-disabled switch context, so implementations must not
+block, recurse into the scheduler, or depend on ordinary current-process
+context. `TaskIdentity::User` keeps `PidHandle` and `UserRuntimeSlot` on the
+same variant. Every user task, including PID 1 init, is filled once by
+`TaskInner::new_user(..., user_runtime)` at construction. There is no later
+install path. Kernel tasks (`KernelThread` / `Internal`) have no runtime.
+Unittests that need a user execution context construct and start a separate
+user task through normal `TaskInner::new_user` and wait for it to exit;
+they do not temporarily inject a runtime into a non-user task.
 
-调度算法默认由 Kconfig 选择（默认 EEVDF）。
+The scheduling algorithm is selected by Kconfig (default EEVDF).
 
-## 亚 tick / 竞争唤醒测试约定
+## Sub-tick / contended wake tests
 
-`future/time.rs` 中的 unittest 拆成两类：
+`future/time.rs` unittests split into two classes:
 
-- **Idle**：无同 CPU 自旋负载，断言 median `< 6ms`，验证 soft-timer 不会被取整到旧的
-  10ms tick。
-- **Contended（EEVDF）**：同 CPU `spin_loop` spinner，上限为
-  `request + DEFAULT_SLICE_NS + 2ms`。这测的是调度唤醒延迟预算，不是 timer 取整。
+- **Idle**: no same-CPU spin load; assert median `< 6ms` so the soft timer is
+  not rounded to the old 10 ms tick.
+- **Contended (EEVDF)**: same-CPU `spin_loop` spinner; upper bound is
+  `request + DEFAULT_SLICE_NS + 2ms`. This measures schedule wake-delay
+  budget, not timer rounding.
 
-默认 request 长度见 `ksched::DEFAULT_SLICE_NS`（2ms）。
-RR 不共用这个 EEVDF request：其历史 quantum 由
-`ksched::DEFAULT_RR_SLICE_NS` 保持为 50ms，避免把 RR 上下文切换率放大 25 倍。
+Default request length is `ksched::DEFAULT_SLICE_NS` (2 ms). RR does not
+share this EEVDF request: its historical quantum stays
+`ksched::DEFAULT_RR_SLICE_NS` = 50 ms so RR context-switch rate is not
+multiplied by 25.
 
-## 设计决策
+## Design decisions
 
-### 为何采用 per-CPU run queue
+### Why `run_queue.rs` became a directory
 
-降低全局锁竞争与缓存抖动；调度路径以本 CPU 局部状态为主，便于 SMP 扩展。
+One file holding placement, switch, affinity, GC, and counters would tangle
+SMP rules with local leave/pick once class placement (for example RT
+pin-home) is added. After the split, `placement.rs` only reads per-CPU load
+heuristics; `rq.rs` only leave/pick/switches on the already-chosen RQ;
+`idle_pull.rs` steals across CPUs; `migrate.rs` only moves a task after a
+mask change. External entries and lock order are unchanged.
 
-### 为何 tick 不直接切换
+### Why per-CPU run queues
 
-中断处理主体与临界区中直接切换会放大并发复杂度。调度延迟到 `enable_preempt` 安全点；
-IRQ handler 仅在设备完成、active-exception 标记已暂时挂起后提供一个尾部安全点。
+They cut global lock contention and cache thrash. The schedule path stays
+mostly CPU-local and extends more cleanly to SMP.
 
-### 为何唤醒路径优先选择当前 CPU
+### Why a tick does not switch immediately
 
-wait/future 唤醒通常发生在释放资源或发送事件的线程上下文中。若目标任务 affinity 允许当前 CPU，将其放入当前 run queue 可减少跨核唤醒延迟，并让 `need_resched` 在本 CPU 的抢占安全点生效；当 affinity 不允许时仍回退到普通选队逻辑。
+Switching from the interrupt body or mid-critical-section grows concurrency
+complexity. Scheduling waits for an `enable_preempt` safe point. The IRQ
+handler only offers a tail safe point after device completion and after the
+active-exception mark is temporarily suspended.
 
-### 为何引入 `KernelGuardIf` 接口
+### Why wake prefers the current CPU when allowed
 
-`kspin` 作为基础库不应直接依赖 `ktask`。通过接口反向注入，打破潜在循环依赖并保持模块边界清晰。
+Wait/future wakes usually run in the thread that released a resource or
+signaled an event. If the target's affinity allows this CPU, enqueueing
+locally cuts cross-CPU wake latency and lets `need_resched` take effect at
+this CPU's preempt safe point. If affinity forbids this CPU, ordinary
+placement is used.
 
-### 为何使用 GC task 回收退出任务
+### Why `KernelGuardIf`
 
-任务退出时可能仍被 joiner 或切换路径持有引用；延迟回收可避免 use-after-free 与路径上的慢释放开销。
+`kspin` as a base library must not depend on `ktask`. Injecting the
+interface the other way breaks a potential cycle and keeps the crate
+boundary clear.
 
-## 与 `kruntime` 的边界
+### Why a GC task reclaims exited tasks
 
-- `kruntime` 负责注册时钟（及 IPI/PMU）中断向量；定时器中断处理只调用 `ktask::on_timer_fire()`。
-- `ktask` 负责全部硬件定时器驱动：动态 schedule deadline、soft timer wheel、显式周期回调、
-  硬件重装，并将到期事件转换为调度记账、抢占请求、定时事件唤醒。
-- `kruntime` 不感知具体调度算法；`ktask` 不负责硬件 IRQ 路由。
+An exiting task may still be held by a joiner or the switch path. Delayed
+reclaim avoids use-after-free and a slow drop on the hot path.
 
-## 调度统计
+## Drop / resource release
 
-启用 `sched_stat` feature 后，`ktask` 维护每 CPU 基础计数（选核、唤醒、
-本地/远端 resched、tick/抢占跳过、switch）。`/proc/sched_stat` 提供进程上下文
-快照；EEVDF 构建额外输出 `wake_handoff` / `wake_sync_preempt` 等算法计数。
-watchdog 触发时调用 `dump_sched_stats()` 做不分配内存的基础输出。
+- `KRunQueueRef` / `CurrentRunQueueRef` call `G::release` in `Drop`,
+  matching acquire. The preempt-check path temporarily raises the disable
+  count so drop cannot recurse into scheduling.
+- Exited tasks first enter `EXITED_TASKS`. `gc.rs` `poll_gc` uses
+  `Arc::try_unwrap` to delay-drop `TaskInner` and its stack. `switch_to`
+  must not drop the task that just switched away.
 
-## 冗余与过载
+## Boundary with `kruntime`
 
-- **冗余设计**：每 CPU 独立 idle/gc 与 run queue，避免单点队列。
-- **过载控制**：由算法层（`ksched`）与任务阻塞模型共同承担；`ktask` 在
-  spawn / affinity migrate-in 上做 `find_idlest_cpu` 选队，即将 idle 时
-  idle-pull 一颗 Ready `!on_cpu` waiter。没有周期 load-balance 守护线程。
+- `kruntime` registers the clock (and IPI/PMU) interrupt vectors. The timer
+  interrupt handler only calls `ktask::on_timer_fire()`.
+- `ktask` owns all hardware timer drive: dynamic schedule deadline, soft
+  timer wheel, explicit periodic callbacks, hardware rearm, and converting
+  due events into schedule accounting, preempt requests, and timer wakes.
+- `kruntime` does not know the class algorithm. `ktask` does not route
+  hardware IRQs.
+
+## Scheduler statistics
+
+With the `sched_stat` feature, `ktask` keeps per-CPU base counters
+(placement, wake, local/remote resched, tick/preempt skips, switch).
+`/proc/sched_stat` is a process-context snapshot. EEVDF additionally emits
+algorithm counters such as `wake_handoff` / `wake_sync_preempt`. A watchdog
+trigger calls `dump_sched_stats()` for allocation-free base output.
+
+## Redundancy and overload
+
+- **Redundancy**: each CPU has its own idle/gc and run queue, so there is no
+  single global queue.
+- **Overload**: class algorithms (`ksched`) and the block model share the
+  load. `ktask` places spawn / affinity migrate-in with `find_idlest_cpu`
+  and idle-pulls one Ready `!on_cpu` waiter when about to idle. There is no
+  periodic load-balance daemon.

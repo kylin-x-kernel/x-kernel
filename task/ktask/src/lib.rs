@@ -38,9 +38,10 @@ extern crate ktimer_core;
 mod tests_timer_routing;
 
 #[macro_use]
-mod run_queue;
+mod macros;
 mod api;
 mod irq_wait;
+mod run_queue;
 #[cfg(feature = "snapshot")]
 pub mod snapshot;
 mod softirqd;
