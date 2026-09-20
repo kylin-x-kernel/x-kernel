@@ -78,11 +78,10 @@ fn local_delivery(repeats: usize) -> bool {
     }
     let _pin = kspin::NoPreempt::new();
     let cpu = khal::percpu::this_cpu_id();
-    let timer = Timer::new(&PREPARED_TIMERS, Probe::new(cpu, repeats));
+    let timer = crate::Timer::new(Probe::new(cpu, repeats));
     // SAFETY: this initialized CPU is pinned; only its real IRQ dispatches.
     // Storage is owned, the handler is bounded and refresh follows acceptance.
-    let started = unsafe { timer.start_on(cpu, instant(now() + 2_000_000)) }.is_ok();
-    refresh_local();
+    let started = unsafe { timer.start(instant(now() + 2_000_000)) }.is_ok();
     let delivered = wait_for(timer.handler(), repeats);
     timer.cancel_sync();
     refresh_local();
@@ -106,35 +105,30 @@ fn callback_can_start_cancel_and_replace_another_prepared_timer() {
     assert!(karch::local_irq_enabled());
     let _pin = kspin::NoPreempt::new();
     let cpu = khal::percpu::this_cpu_id();
-    let child = Arc::new(Timer::new(&PREPARED_TIMERS, Probe::new(cpu, 1)));
+    let child = Arc::new(crate::Timer::new(Probe::new(cpu, 1)));
     let is_valid = Arc::new(AtomicBool::new(true));
     let callback_child = child.clone();
     let callback_valid = is_valid.clone();
-    let parent = Timer::new(
-        &PREPARED_TIMERS,
-        move |_: TimerControl<'_>, _: Expiration| {
-            // SAFETY: real IRQ on the pinned initialized CPU, child ownership
-            // survives the callback. No timer lock is held; refresh below joins
-            // the IRQ batch and never dispatches the child inline.
-            let first = unsafe { callback_child.start_on(cpu, instant(now() + 1_000_000_000)) };
-            let removed = callback_child.try_cancel() == ktimer_core::CancelResult::Removed;
-            // SAFETY: same owned child and local service; replace with a near
-            // deadline and arrange local hardware refresh after registration.
-            let second = unsafe { callback_child.start_on(cpu, instant(now() + 2_000_000)) };
-            refresh_local();
-            if first.is_err()
-                || !removed
-                || second.is_err()
-                || callback_child.handler().calls.load(Ordering::Acquire) != 0
-            {
-                callback_valid.store(false, Ordering::Release);
-            }
-        },
-    );
+    let parent = crate::Timer::new(move |_: TimerControl<'_>, _: Expiration| {
+        // SAFETY: real IRQ on the pinned initialized CPU, child ownership
+        // survives the callback. No timer lock is held; adapter refresh joins
+        // the IRQ batch and never dispatches the child inline.
+        let first = unsafe { callback_child.start(instant(now() + 1_000_000_000)) };
+        let removed = callback_child.try_cancel() == ktimer_core::CancelResult::Removed;
+        // SAFETY: same owned child and local service; replace with a near
+        // deadline and arrange local hardware refresh after registration.
+        let second = unsafe { callback_child.start(instant(now() + 2_000_000)) };
+        if first.is_err()
+            || !removed
+            || second.is_err()
+            || callback_child.handler().calls.load(Ordering::Acquire) != 0
+        {
+            callback_valid.store(false, Ordering::Release);
+        }
+    });
     // SAFETY: owned registration on this initialized pinned CPU; refresh follows
     // acceptance, real timer IRQ is the only dispatcher and callbacks are bounded.
-    let started = unsafe { parent.start_on(cpu, instant(now() + 2_000_000)) }.is_ok();
-    refresh_local();
+    let started = unsafe { parent.start(instant(now() + 2_000_000)) }.is_ok();
     let delivered = wait_for(child.handler(), 1);
     parent.cancel_sync();
     child.cancel_sync();

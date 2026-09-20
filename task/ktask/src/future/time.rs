@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Async time utilities and timer wheel integration.
+//! Owned async sleep timers and legacy waker registrations.
 
 use alloc::collections::BTreeMap;
 use core::{
@@ -42,30 +42,6 @@ impl TimerRuntime {
         TimerRuntime {
             key: 0,
             wheel: BTreeMap::new(),
-        }
-    }
-
-    fn add(&mut self, deadline: MonotonicInstant) -> Option<TimerKey> {
-        if deadline <= monotonic_time() {
-            return None;
-        }
-
-        let key = TimerKey {
-            deadline,
-            key: self.key,
-        };
-        self.wheel.insert(key, Waker::noop().clone());
-        self.key += 1;
-
-        Some(key)
-    }
-
-    fn poll(&mut self, key: &TimerKey, cx: &mut Context<'_>) -> Poll<()> {
-        if let Some(w) = self.wheel.get_mut(key) {
-            *w = cx.waker().clone();
-            Poll::Pending
-        } else {
-            Poll::Ready(())
         }
     }
 
@@ -141,7 +117,6 @@ pub(crate) fn earliest_deadline(cpu_id: kcpu_id_map::LogicalCpuId) -> Option<Mon
 }
 
 /// Refreshes hardware while holding the local wheel lock through arbitration.
-#[cfg(feature = "ipi")]
 pub(crate) fn reprogram_local_timer() {
     let _guard = kspin::NoPreemptIrqSave::new();
     let wheel = timer_runtime(khal::percpu::this_cpu_id()).lock();
@@ -183,60 +158,105 @@ pub fn cancel_timer(handle: &TimerHandle) {
     }
 }
 
-/// Future returned by `sleep` and `sleep_until`.
+struct SleepState {
+    is_expired: bool,
+    waker: Option<Waker>,
+}
+
+impl SleepState {
+    fn complete(&mut self) -> Option<Waker> {
+        self.is_expired = true;
+        self.waker.take()
+    }
+}
+
+struct SleepHandler(SpinNoIrq<SleepState>);
+
+impl crate::TimerHandler for SleepHandler {
+    fn on_expiration(&self, _: crate::TimerControl<'_>, _: crate::Expiration) {
+        let waker = self.0.lock().complete();
+        // Waker code may take task/runqueue locks: never call it under our lock.
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
+/// Future returned by sleep utilities, owning its prepared timer.
+///
+/// Dropping it synchronously cancels delivery. Do not drop it from its own
+/// wake callback or while preventing the callback's CPU from progressing.
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct TimerFuture {
-    key: TimerKey,
-    cpu_id: LogicalCpuId,
+    // Timer Drop drains delivery before releasing its embedded wake state.
+    timer: crate::Timer<SleepHandler>,
+}
+
+impl TimerFuture {
+    fn new(deadline: MonotonicInstant) -> Result<Self, KError> {
+        let timer = crate::Timer::new(SleepHandler(SpinNoIrq::new(SleepState {
+            is_expired: false,
+            waker: None,
+        })));
+        // SAFETY: task sleep runs after local scheduler/IRQ setup. The handler
+        // only publishes completion and wakes the task outside its state lock,
+        // matching the existing IRQ-delivered task-waker contract.
+        if !unsafe { timer.start_if_future(deadline) }? {
+            timer.handler().0.lock().is_expired = true;
+        }
+        Ok(Self { timer })
+    }
 }
 
 impl Future for TimerFuture {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        timer_runtime(self.cpu_id).lock().poll(&self.key, cx)
-    }
-}
-
-impl Drop for TimerFuture {
-    fn drop(&mut self) {
-        let mut guard = timer_runtime(self.cpu_id).lock();
-        let local = self.cpu_id == khal::percpu::this_cpu_id();
-        let was_earliest = guard.earliest_deadline() == Some(self.key.deadline);
-        guard.cancel(&self.key);
-        if local && was_earliest {
-            rearm_local_timer(guard.earliest_deadline(), None);
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        // Clone/drop arbitrary waker implementations outside the state lock.
+        let replacement = cx.waker().clone();
+        let mut state = self.timer.handler().0.lock();
+        if state.is_expired {
+            drop(state);
+            return Poll::Ready(());
         }
+        let previous = state.waker.replace(replacement);
+        drop(state);
+        drop(previous);
+        Poll::Pending
     }
 }
 
-/// Waits until `duration` has elapsed.
+/// Waits until duration has elapsed.
+///
+/// # Panics
+/// Panics if adding duration overflows the monotonic time representation.
 pub async fn sleep(duration: TimeSpan) {
     sleep_until(monotonic_time() + duration).await
 }
 
-/// Waits until `deadline` is reached.
+/// Waits until deadline is reached.
+///
+/// Deadlines beyond the timer's u64-nanosecond runtime horizon remain pending
+/// throughout that supported runtime, rather than failing a long syscall wait.
+/// A future deadline prepares one owned allocation on the first poll. The
+/// executor's waker must support hard-IRQ wake without sleeping or unwinding.
+/// Dropping a pending wait drains its callback; do not drop from its own wake
+/// callback or while holding a lock that callback needs.
+///
+/// # Panics
+/// Panics if the initialized CPU/service invariant is violated during start
+/// or notification. Allocation failure follows the kernel allocator policy.
 pub async fn sleep_until(deadline: MonotonicInstant) {
-    // Pin across CPU id + wheel insert + rearm (see `register_timer`).
-    let (key, cpu_id) = {
-        let _pin = kspin::NoPreempt::new();
-        let cpu_id = khal::percpu::this_cpu_id();
-        // Register the timer and re-arm the hardware while still under the wheel
-        // lock, then drop the guard before awaiting: a `SpinNoIrq` guard must not
-        // be held across the `.await` (it would block the timer IRQ that wakes us).
-        let key = {
-            let mut guard = timer_runtime(cpu_id).lock();
-            let key = guard.add(deadline);
-            if key.is_some() {
-                rearm_local_timer(guard.earliest_deadline(), None);
-            }
-            key
-        };
-        (key, cpu_id)
-    };
-    if let Some(key) = key {
-        TimerFuture { key, cpu_id }.await;
+    if deadline <= monotonic_time() {
+        return;
     }
+    // TimeSpan supports longer syscall waits than the core runtime horizon.
+    // The horizon is a valid future deadline, never an inactive sentinel; it
+    // cannot wake this wait early while the supported clock is below u64::MAX.
+    let horizon = MonotonicInstant::from_span_since_origin(TimeSpan::from_nanos(u64::MAX));
+    TimerFuture::new(deadline.min(horizon))
+        .expect("bounded sleep deadline and current CPU are valid")
+        .await;
 }
 
 /// Error returned by [`timeout`] and [`timeout_at`].
@@ -318,6 +338,131 @@ mod notification_tests {
 }
 
 #[cfg(unittest)]
+mod owned_sleep_tests {
+    use alloc::{sync::Arc, task::Wake};
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+
+    struct WakeCount(AtomicUsize);
+
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[def_test(serial)]
+    fn ready_operation_wins_at_expired_timeout() {
+        assert_eq!(
+            crate::future::block_on(timeout_at(
+                Some(MonotonicInstant::ORIGIN),
+                core::future::ready(17),
+            )),
+            Ok(17)
+        );
+        assert!(
+            crate::future::block_on(timeout_at(
+                Some(MonotonicInstant::ORIGIN),
+                core::future::pending::<()>(),
+            ))
+            .is_err()
+        );
+    }
+
+    #[def_test(serial)]
+    fn real_irq_completes_before_first_poll() {
+        let _pin = kspin::NoPreempt::new();
+        let mut future = TimerFuture::new(monotonic_time() + TimeSpan::from_millis(1)).unwrap();
+        let limit = monotonic_time() + TimeSpan::from_secs(2);
+        while !future.timer.handler().0.lock().is_expired && monotonic_time() < limit {
+            core::hint::spin_loop();
+        }
+        future.timer.cancel_sync();
+        assert!(
+            Pin::new(&mut future)
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_ready()
+        );
+    }
+
+    #[def_test(serial)]
+    fn oversized_sleep_stays_pending_but_core_input_is_rejected() {
+        let deadline = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(u64::MAX));
+        assert!(TimerFuture::new(deadline).is_err());
+        let mut wait = core::pin::pin!(sleep_until(deadline));
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+    }
+
+    #[def_test(serial)]
+    fn expired_before_poll_completes_without_waking() {
+        let mut future = TimerFuture::new(MonotonicInstant::ORIGIN).unwrap();
+        let count = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let waker = Waker::from(count.clone());
+        assert!(
+            Pin::new(&mut future)
+                .poll(&mut Context::from_waker(&waker))
+                .is_ready()
+        );
+        assert_eq!(count.0.load(Ordering::Relaxed), 0);
+        assert!(future.timer.handler().0.lock().waker.is_none());
+    }
+
+    #[def_test(serial)]
+    fn completion_notifies_latest_waker_and_poll_stays_ready() {
+        let mut future = TimerFuture::new(monotonic_time() + TimeSpan::from_secs(60)).unwrap();
+        future.timer.cancel_sync();
+        let first = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let second = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let first_waker = Waker::from(first.clone());
+        let second_waker = Waker::from(second.clone());
+        assert!(
+            Pin::new(&mut future)
+                .poll(&mut Context::from_waker(&first_waker))
+                .is_pending()
+        );
+        assert!(
+            Pin::new(&mut future)
+                .poll(&mut Context::from_waker(&second_waker))
+                .is_pending()
+        );
+        // Model completion after replacing the registered waker. Actual IRQ
+        // delivery is exercised by the subtick sleep/timeout tests below.
+        let wake = future.timer.handler().0.lock().complete().unwrap();
+        wake.wake();
+        assert_eq!(first.0.load(Ordering::Relaxed), 0);
+        assert_eq!(second.0.load(Ordering::Relaxed), 1);
+        assert!(
+            Pin::new(&mut future)
+                .poll(&mut Context::from_waker(&second_waker))
+                .is_ready()
+        );
+        assert!(future.timer.handler().0.lock().complete().is_none());
+    }
+
+    #[def_test(serial)]
+    fn drop_pending_sleep_releases_callback_and_waker() {
+        let mut future = TimerFuture::new(monotonic_time() + TimeSpan::from_secs(60)).unwrap();
+        let count = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let waker = Waker::from(count.clone());
+        assert!(
+            Pin::new(&mut future)
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        drop(future);
+        assert_eq!(Arc::strong_count(&count), 2);
+        assert_eq!(count.0.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[cfg(unittest)]
 #[allow(missing_docs)]
 mod tests_subtick_precision {
     use alloc::{string::String, sync::Arc};
@@ -338,7 +483,7 @@ mod tests_subtick_precision {
     /// jitter, while keeping the worst-case runtime modest.
     const SAMPLES: usize = 10;
 
-    /// Idle-CPU bound for a short timed wait (timer wheel + modest wake latency).
+    /// Idle-CPU bound for a short timed wait (timer delivery + modest wake latency).
     ///
     /// This is **not** a guarantee under same-CPU CPU-bound competition; use the
     /// contended tests for that.

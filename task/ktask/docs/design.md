@@ -154,8 +154,32 @@ kruntime::init_scheduler()/init_scheduler_secondary()
 ordering, owner routing, dispatch and cancellation semantics. `timers.rs` now
 owns the static production `PREPARED_TIMERS` set. `on_timer_fire` dispatches its
 due callbacks outside timer/runqueue locks, with IRQs disabled on the owner CPU.
-Existing sleep, async, timerfd and periodic callers are not migrated in this PR;
-their legacy sources remain separate participants in hardware arbitration.
+Async `future::sleep*` and `future::timeout*` now use the owned `ktask::Timer`
+adapter. Explicit waker registrations, timerfd and periodic callers still use
+legacy sources, which remain separate participants in hardware arbitration.
+
+`Timer<H>` binds the core's owned storage to the static production set. Start
+pins the current CPU and masks IRQs until registration and hardware refresh
+finish. Idle/pending replacement selects that CPU; a running callback retains
+its actual owner, which receives a fixed IPI if remote. Local refresh acquires
+the legacy wheel before the prepared CPU lock. Cancellation delegates to the
+core and can leave a harmless stale IRQ. No automatic periodic policy is added.
+
+Each pending async sleep allocates one core-owned node/handler object. Its
+`SleepHandler` embeds `SpinNoIrq<SleepState>` (`is_expired`, `Option<Waker>`),
+without a second state allocation or a preallocated pool. `poll` and completion
+serialize on that lock, so either completion observes the registered waker or
+poll observes completion. Completion takes the waker and wakes outside the lock;
+poll clones/replaces/drops wakers outside the lock except for swapping the value.
+Waker implementations still determine their own clone/drop costs. This is not
+a claim that creating a sleep or every executor operation is allocation-free.
+
+Dropping the future drains delivery through the owned timer before freeing wake
+state. An elapsed locked registration completes without queuing a callback.
+Sleep deadlines beyond the core horizon are capped at `u64::MAX` nanoseconds,
+remaining pending throughout the supported clock lifetime (strictly below that
+horizon). The public raw timer API rejects over-horizon input. `timeout_at`
+keeps operation-first polling when both branches are ready.
 
 `rearm_local_timer` merges schedule, execution-accounting, legacy soft/periodic
 and prepared deadlines. It holds the prepared CPU lock through the hardware
@@ -422,10 +446,10 @@ stopped its clock entirely, `smp` without `ipi` cannot reliably advance a
 remote runnable task. `ktask` rejects that configuration at compile time and
 does not offer a fake local fallback.
 
-`register_timer` / `sleep_until` read `this_cpu_id`, enqueue, and (still
+Legacy `register_timer` reads `this_cpu_id`, enqueues, and (still
 holding the wheel `SpinNoIrq` lock with IRQs off) immediately call
-`rearm_local_timer()`. `cancel_timer` / `TimerFuture::drop` rearm the same
-way when they remove the local earliest item. Remote cancel of the earliest
+`rearm_local_timer()`. Legacy `cancel_timer` rearms the same
+way when it removes the local earliest item. Remote cancel of the earliest
 item does not send an IPI; the dest CPU self-corrects on at most one stale
 IRQ.
 

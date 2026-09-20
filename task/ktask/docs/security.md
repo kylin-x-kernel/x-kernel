@@ -25,7 +25,8 @@ owners define and enforce those contracts. Their contracts at the `ktask`
 boundary remain in scope. See the core's [security analysis](../../ktimer-core/docs/security.md)
 for intrusive membership, callback lifetime and timer cancellation invariants.
 Production IRQ/hardware integration now services the core alongside legacy
-timers; business timer callers have not yet migrated.
+timers. Async sleep/timeout now use owned timers; explicit waker registrations,
+timerfd and periodic callers remain on their existing paths.
 
 ### Prepared Timer Platform Boundary
 
@@ -54,6 +55,28 @@ or scheduler locks. These are the new unsafe production call sites.
 `tests_timer_irq.rs` adds bounded real-IRQ/IPI validation infrastructure. Its
 owning handles drain callbacks before destruction. These tests do not establish
 a hard latency bound, complete allocation coverage, or exhaustive interleavings.
+
+### Owned Async Wait Boundary
+
+| Asset / type | Protection requirements |
+| --- | --- |
+| `timers.rs::Timer<H>` containing `ktimer_core::Timer<H, NR_CPUS>` | Private owned node/handler storage is retained through dispatch cleanup; no raw node, mutable handler or storage owner is exposed. Start pins execution with IRQs masked and refreshes the actual owner only after releasing core locks. |
+| `future/time.rs::SleepHandler(SpinNoIrq<SleepState>)` | Completion and poll serialize `is_expired` and `Option<Waker>` under the same lock. Waker clone, wake and destruction occur outside it. Owned-timer Drop drains delivery before handler storage is released. |
+
+| Threat | Trigger / impact | Response |
+| --- | --- | --- |
+| Lost sleep wake | IRQ completes between readiness check and waker publication; wait never resumes | Mitigate: both operations use one state lock; completion publishes the terminal state before taking the waker. Poll after completion returns ready. |
+| Callback use-after-free | Future is dropped while its callback still accesses wake state | Mitigate: core-owned timer Drop synchronously drains callback and cleanup. No second independent wake-state lifetime is introduced. |
+| Wait/callback deadlock | An executor drops the future from its own wake callback, or while holding a callback-required lock | Accepted caller constraint: do not synchronously tear down this wait in those contexts; core cancellation spins and cannot force progress. Kernel wakers schedule tasks rather than polling/dropping futures inline. |
+| Waker reentry under lock | Custom waker clone/drop/wake takes a task lock or reenters polling | Mitigate: invoke waker operations outside the sleep-state lock. Executor wakers must still support the existing nonblocking, non-unwinding hard-IRQ wake contract. |
+| Early long-wait return | Sleep duration exceeds the core's nanosecond horizon | Mitigate: cap only the sleep adapter at the supported clock horizon; it remains pending while the clock is below that horizon. Raw `Timer::start` rejects such input instead. |
+
+`timers.rs::Timer::{start,start_if_future}` are the new unsafe adapters. Their
+guards establish CPU/IRQ stability, the core owns storage, and callers retain
+the initialized-service and callback-context obligations. The private async
+constructor supplies the existing kernel IRQ-waker contract. Preparation still
+allocates once and allocator exhaustion follows kernel policy; no bounded pool
+or allocation-free sleep construction is claimed.
 
 A fixed reschedule IPI does not carry a task pointer; multiple requests may
 coalesce. Send happens after task-state and run-queue updates. The receiver
@@ -111,9 +134,10 @@ and permission checks belong to those adapters, not to the scheduler.
 
 | Boundary / entry | Inputs and direction | Local check / responsibility |
 |---|---|---|
+| `Timer::new`, `Timer::start`, `Timer::try_cancel`, `Timer::cancel_sync` | Trusted kernel owners supply handlers and absolute monotonic deadlines | Core validates deadline range; unsafe start requires initialized service and IRQ-compatible callbacks. Cancellation is not a permanent shutdown. Owners must not block callback progress during synchronous teardown. |
 | `spawn_raw`, `spawn_with_name`, `spawn`, `prepare_task`, `activate_task`, `spawn_task`; `TaskInner::new_user`, `new_kthread`, `new_pidless_kthread`, `set_name` | Kernel task/process code supplies closures, names, stack sizes, identities, and runtime objects | Names may originate from users but arrive as Rust strings; task creation is not a user-buffer parser. Runtime and entry implementations remain trusted kernel code. |
 | `set_prio`, `set_task_prio`, `set_current_affinity`, `set_task_affinity`, `TaskInner::set_cpumask` | Scheduler/process adapters supply priorities and typed CPU masks, possibly from syscalls | Adapters enforce permissions. Callers must distinguish initial placement from migrating an already-active task. |
-| `sleep`, `sleep_until`, `interruptible_sleep_until`, `wait_for_poll_event_until`; `WaitQueue::wait_timeout`, `wait_timeout_until`; `future::register_timer`; `register_timer_callback` | Wait and timer clients supply durations, deadlines, wakers, predicates, or callbacks | User timeout decoding belongs upstream. Callers must obey sleepability and callback-context contracts. The new core is not yet the production implementation of these APIs. |
+| `sleep`, `sleep_until`, `interruptible_sleep_until`, `wait_for_poll_event_until`; `WaitQueue::wait_timeout`, `wait_timeout_until`; `future::register_timer`; `register_timer_callback` | Wait and timer clients supply durations, deadlines, wakers, predicates, or callbacks | User timeout decoding belongs upstream. Callers must obey sleepability and callback-context contracts. Async `future::sleep*` and `future::timeout*` use owned timers; explicit waker registration and periodic callbacks still use legacy timers. |
 | `future::poll_io`, `future::register_irq_waker`; `WaitQueue` notify; `wake_task`, `interrupt_task`, `TaskInner::interrupt` | File, network, device, and signal adapters deliver readiness or wakeup | `poll_io` invokes a caller-supplied operation and forwards its typed result without interpreting payloads. IRQ waker registration delegates to `kirq`. Payload validation remains with the operation/provider. |
 | `on_timer_fire`, `register_timer_irq_note`, `register_sched_trace_hooks` | Runtime interrupt glue and kernel instrumentation provide timer events and function callbacks | IRQ routing is external. Callbacks must satisfy their documented execution-context constraints. |
 | `set_current_execution_context`, `clear_current_execution_context`; `TaskInner::set_waiting_lock`, `push_held_lock`, `pop_held_lock`; `snapshot::trigger`, `dump_cpu_tasks`, `nmi_dump_all` | Kernel execution owners and diagnostic callers supply opaque identity words, lock-address identities, reason strings, and CPU selections | These are not user-pointer access capabilities. Diagnostic output can expose task metadata; access control belongs to the invoking diagnostic interface. |
