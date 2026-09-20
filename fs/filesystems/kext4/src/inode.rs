@@ -506,15 +506,107 @@ impl Ext4InodeMetadata {
     }
 }
 
+/// Bounded, disposable extent-status proofs for reservation preparation.
+/// Only initialized mappings are cached; physical addresses and delayed
+/// reservation accounting remain outside this tree.
+#[derive(Default)]
+struct ExtentStatusTree {
+    ranges: BTreeMap<u64, ExtentStatus>,
+}
+
+#[derive(Clone, Copy)]
+struct ExtentStatus {
+    /// Length in logical blocks; entries are nonempty and never overflow.
+    len: u64,
+    kind: ExtentStatusKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExtentStatusKind {
+    /// Initialized storage, not a guarantee that dirty data is durable.
+    Written,
+    // Future states require explicit transition and eviction rules.
+    // Unwritten: allocated physical storage that is not yet initialized.
+    // Unwritten,
+    // Delayed: delayed-allocation reservation, not disposable cache data.
+    // Delayed,
+    // Hole: a range without allocated storage.
+    // Hole,
+}
+
+impl ExtentStatusTree {
+    const MAX_RANGES: usize = 64;
+
+    fn contains_written(&self, start: u64, end: u64) -> bool {
+        start < end
+            && self
+                .ranges
+                .range(..=start)
+                .next_back()
+                .is_some_and(|(&range_start, status)| {
+                    status.kind == ExtentStatusKind::Written && end <= range_start + status.len
+                })
+    }
+
+    fn cache_written(&mut self, mut start: u64, mut end: u64) {
+        if start >= end || self.contains_written(start, end) {
+            return;
+        }
+        if let Some((&previous_start, &status)) = self.ranges.range(..=start).next_back()
+            && status.kind == ExtentStatusKind::Written
+            && previous_start + status.len >= start
+        {
+            start = previous_start;
+            end = end.max(previous_start + status.len);
+            self.ranges.remove(&previous_start);
+        }
+        while let Some((&next_start, &status)) = self.ranges.range(start..=end).next() {
+            end = end.max(next_start + status.len);
+            self.ranges.remove(&next_start);
+        }
+        // Eviction only causes a slow-path lookup; fragmented files must not
+        // grow an unbounded second extent index in resident inode memory.
+        if self.ranges.len() == Self::MAX_RANGES {
+            self.clear();
+        }
+        self.ranges.insert(
+            start,
+            ExtentStatus {
+                len: end - start,
+                kind: ExtentStatusKind::Written,
+            },
+        );
+    }
+
+    /// Drops reconstructible proofs, never delayed-allocation reservations.
+    fn clear(&mut self) {
+        self.ranges.clear();
+    }
+}
+
 struct Ext4InodeState {
     metadata: Ext4InodeMetadata,
     visible_size: u64,
     delayed_extents: BTreeMap<u64, u64>,
     reserved_data_blocks: u64,
+    extent_status: ExtentStatusTree,
     is_extra_isize_expansion_disabled: bool,
 }
 
 impl Ext4InodeState {
+    // Called under the inode-state lock; no nested state accessor is allowed.
+    fn has_initialized_overwrite(&self, start: u64, count: u64, block_size: u32) -> bool {
+        let Some(end) = start.checked_add(count) else {
+            return false;
+        };
+        // Extensions, partial EOF blocks and pending reservations still need
+        // the slow path's mapping and accounting validation.
+        self.reserved_data_blocks == 0
+            && self.delayed_extents.is_empty()
+            && end <= self.visible_size.min(self.metadata.disk_size) / u64::from(block_size)
+            && self.extent_status.contains_written(start, end)
+    }
+
     /// Returns the inode owner's user ID.
     ///
     /// No locking here: only valid while the caller already holds the inode-state
@@ -617,6 +709,7 @@ impl Ext4Inode {
                 visible_size,
                 delayed_extents: BTreeMap::new(),
                 reserved_data_blocks: 0,
+                extent_status: ExtentStatusTree::default(),
                 is_extra_isize_expansion_disabled: false,
             }),
             writeback_lock: Mutex::new(()),
@@ -695,8 +788,34 @@ impl Ext4Inode {
     }
 
     fn publish_metadata(&self, metadata: Ext4InodeMetadata) -> Ext4Result<()> {
-        self.update_state(|state| state.metadata = metadata);
+        self.update_state(|state| {
+            if metadata.block != state.metadata.block
+                || metadata.flags != state.metadata.flags
+                || metadata.kind != state.metadata.kind
+                || metadata.disk_size < state.metadata.disk_size
+            {
+                state.extent_status.clear();
+            }
+            state.metadata = metadata;
+        });
         Ok(())
+    }
+
+    /// Forgets initialized-range proofs before any extent-tree mutation,
+    /// including mutations of external leaves that leave the inode root intact.
+    /// The caller holds exclusive mount access through `&mut Ext4SbInfo`.
+    pub(crate) fn invalidate_extent_status(&self) {
+        self.update_state(|state| state.extent_status.clear());
+    }
+
+    #[cfg(unittest)]
+    fn cache_initialized_blocks(&self, start: u64, end: u64) {
+        self.update_state(|state| state.extent_status.cache_written(start, end));
+    }
+
+    #[cfg(unittest)]
+    fn has_initialized_overwrite(&self, start: u64, count: u64, block_size: u32) -> bool {
+        self.with_state(|state| state.has_initialized_overwrite(start, count, block_size))
     }
 
     /// Returns this inode's number.
@@ -750,7 +869,12 @@ impl Ext4Inode {
 
     /// Updates the VFS-visible inode size without changing `i_disksize`.
     pub fn set_size(&self, size: u64) {
-        self.update_state(|state| state.visible_size = size);
+        self.update_state(|state| {
+            if size < state.visible_size {
+                state.extent_status.clear();
+            }
+            state.visible_size = size;
+        });
     }
 
     /// Captures the generic inode attributes under one state lock.
@@ -1063,6 +1187,9 @@ impl Ext4Inode {
                 state.metadata.flags,
                 sb.superblock().features().has_huge_file(),
             )?;
+            if state.has_initialized_overwrite(start.get(), block_count, sb.layout().block_size()) {
+                return Ok(());
+            }
             if state.reserved_data_blocks > sb.delalloc_reserved_blocks() {
                 return Err(Ext4Error::InvalidDelayedAllocationState);
             }
@@ -1091,6 +1218,12 @@ impl Ext4Inode {
                     }
                     let covered = mapping_len.min(extent_end - logical);
                     let next = logical.checked_add(covered).ok_or(Ext4Error::Overflow)?;
+                    if matches!(mapping, BlockMapping::Mapped { .. }) {
+                        let mapped_end = logical
+                            .checked_add(mapping_len)
+                            .ok_or(Ext4Error::Overflow)?;
+                        state.extent_status.cache_written(logical, mapped_end);
+                    }
                     if matches!(mapping, BlockMapping::Hole { .. }) {
                         if let Some((_, previous_end)) = holes.last_mut()
                             && *previous_end == logical
@@ -1515,6 +1648,9 @@ impl Ext4SbInfo {
     /// the reserve sequence on the per-inode state lock instead of a
     /// mount-wide lock; callers are expected to hold only a shared mount
     /// guard.
+    /// Initialized mapping ranges are cached under that same state lock;
+    /// in-file overwrites reuse them while no delayed reservations remain.
+    /// Extent mutations and size shrink invalidate the cached ranges.
     ///
     /// # Errors
     ///
@@ -2863,6 +2999,113 @@ mod unittests {
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
+
+    #[def_test]
+    fn extent_status_merges_written_ranges_at_maximum_block_boundary() {
+        let mut cache = ExtentStatusTree::default();
+        cache.cache_written(u64::MAX - 2, u64::MAX);
+        cache.cache_written(u64::MAX - 6, u64::MAX - 4);
+        assert!(!cache.contains_written(u64::MAX - 6, u64::MAX));
+        cache.cache_written(u64::MAX - 5, u64::MAX - 1);
+        assert!(cache.contains_written(u64::MAX - 6, u64::MAX));
+        assert_eq!(cache.ranges.len(), 1);
+        assert_eq!(cache.ranges[&(u64::MAX - 6)].len, 6);
+        cache.cache_written(0, u64::MAX);
+        assert!(cache.contains_written(0, u64::MAX));
+        assert_eq!(cache.ranges[&0].len, u64::MAX);
+        cache.cache_written(9, 8);
+        cache.cache_written(u64::MAX, u64::MAX);
+        assert_eq!(cache.ranges.len(), 1);
+    }
+
+    #[def_test]
+    fn initialized_ranges_cover_random_overwrites_without_bridging_holes() {
+        let mut metadata = regular_inode_metadata();
+        metadata.disk_size = 8 * 4096;
+        let inode = test_inode(metadata);
+        inode.cache_initialized_blocks(0, 3);
+        inode.cache_initialized_blocks(4, 8);
+        for block in [7, 1, 4, 0, 6, 2, 5] {
+            assert!(inode.has_initialized_overwrite(block, 1, 4096));
+        }
+        assert!(!inode.has_initialized_overwrite(3, 1, 4096));
+        assert!(!inode.has_initialized_overwrite(2, 3, 4096));
+        inode.cache_initialized_blocks(3, 4);
+        assert!(inode.has_initialized_overwrite(0, 8, 4096));
+    }
+
+    #[def_test]
+    fn initialized_overwrites_exclude_extensions_and_pending_reservations() {
+        let mut metadata = regular_inode_metadata();
+        metadata.disk_size = 2 * 4096 + 1;
+        let inode = test_inode(metadata);
+        inode.cache_initialized_blocks(0, 8);
+        assert!(inode.has_initialized_overwrite(0, 2, 4096));
+        assert!(!inode.has_initialized_overwrite(2, 1, 4096));
+        assert!(!inode.has_initialized_overwrite(0, 0, 4096));
+        assert!(!inode.has_initialized_overwrite(u64::MAX, 2, 4096));
+        inode.set_size(8 * 4096);
+        assert!(!inode.has_initialized_overwrite(2, 1, 4096));
+        inode.insert_unreserved_delalloc_extents(&[(6, 7)]).unwrap();
+        assert!(!inode.has_initialized_overwrite(0, 1, 4096));
+        inode.remove_delalloc_from(6).unwrap();
+        assert!(inode.has_initialized_overwrite(0, 1, 4096));
+    }
+
+    #[def_test]
+    fn initialized_overwrites_are_invalidated_by_shrink_and_mapping_changes() {
+        let mut metadata = regular_inode_metadata();
+        metadata.disk_size = 4 * 4096;
+        let inode = test_inode(metadata);
+        inode.cache_initialized_blocks(0, 4);
+        inode.set_size(4096);
+        inode.set_size(4 * 4096);
+        assert!(!inode.has_initialized_overwrite(0, 1, 4096));
+
+        inode.cache_initialized_blocks(0, 4);
+        inode.invalidate_extent_status();
+        assert!(!inode.has_initialized_overwrite(0, 1, 4096));
+
+        inode.cache_initialized_blocks(0, 4);
+        let mut metadata = inode.metadata_snapshot();
+        metadata.block[0] = 1;
+        inode.publish_metadata(metadata).unwrap();
+        assert!(!inode.has_initialized_overwrite(0, 1, 4096));
+
+        inode.cache_initialized_blocks(0, 4);
+        let mut metadata = inode.metadata_snapshot();
+        metadata.disk_size = 4096;
+        inode.publish_metadata(metadata).unwrap();
+        assert!(!inode.has_initialized_overwrite(0, 1, 4096));
+    }
+
+    #[def_test]
+    fn initialized_overwrites_survive_timestamp_updates() {
+        let mut metadata = regular_inode_metadata();
+        metadata.disk_size = 4 * 4096;
+        let inode = test_inode(metadata);
+        inode.cache_initialized_blocks(0, 4);
+        let mut metadata = inode.metadata_snapshot();
+        metadata.mtime = timestamp(123, 0);
+        inode.publish_metadata(metadata).unwrap();
+        assert!(inode.has_initialized_overwrite(0, 4, 4096));
+    }
+
+    #[def_test]
+    fn initialized_range_cache_is_bounded_and_eviction_requires_revalidation() {
+        let mut cache = ExtentStatusTree::default();
+        for index in 0..ExtentStatusTree::MAX_RANGES as u64 {
+            cache.cache_written(index * 2, index * 2 + 1);
+        }
+        assert!(cache.contains_written(0, 1));
+        let last = ExtentStatusTree::MAX_RANGES as u64 * 2;
+        cache.cache_written(last, last + 1);
+        assert!(!cache.contains_written(0, 1));
+        assert!(cache.contains_written(last, last + 1));
+        assert!(cache.ranges.len() <= ExtentStatusTree::MAX_RANGES);
+        cache.cache_written(0, 1);
+        assert!(cache.contains_written(0, 1));
+    }
 
     fn test_inode(metadata: Ext4InodeMetadata) -> Ext4Inode {
         Ext4Inode::new(InodeNumber::new(12), metadata)

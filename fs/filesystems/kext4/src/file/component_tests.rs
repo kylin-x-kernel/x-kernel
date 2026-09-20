@@ -73,6 +73,117 @@ fn delayed_allocation_range_updates_inode_and_mount_accounting_together() {
 }
 
 #[def_test]
+fn delayed_allocation_reuses_existing_reservations_when_space_is_exhausted() {
+    let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+    let available = filesystem.statfs().unwrap().blocks_available;
+    assert!(available > 0);
+    filesystem
+        .reserve_delalloc_range(&inode, LogicalBlock::new(0), available)
+        .unwrap();
+    assert_eq!(filesystem.statfs().unwrap().blocks_available, 0);
+
+    filesystem
+        .reserve_delalloc_range(&inode, LogicalBlock::new(0), available)
+        .unwrap();
+    assert_eq!(filesystem.delalloc_reserved_block_count(), available);
+    assert_eq!(
+        filesystem.reserve_delalloc_range(&inode, LogicalBlock::new(available), 1),
+        Err(Ext4Error::NoSpace)
+    );
+    assert_eq!(filesystem.delalloc_reserved_block_count(), available);
+    filesystem.release_all_delalloc(&inode).unwrap();
+    assert_eq!(filesystem.delalloc_reserved_block_count(), 0);
+    assert!(!inode.has_delalloc_reservations());
+}
+
+#[def_test]
+fn delayed_allocation_only_reserves_holes_between_allocated_blocks() {
+    for mapping_state in [
+        ExtentMappingState::Initialized,
+        ExtentMappingState::Unwritten,
+    ] {
+        let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+        let journal = JournalTransactions::new(TransactionId::new(389));
+        let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
+        let physical = allocate_contiguous_blocks(&mut filesystem, 2, &mut handle);
+        filesystem
+            .insert_extent_mapping(
+                &inode,
+                LogicalBlock::new(1),
+                physical,
+                BlockCount::new(2),
+                mapping_state,
+                &mut handle,
+            )
+            .unwrap();
+        filesystem
+            .update_inode_size_metadata(
+                &inode,
+                4 * TEST_BLOCK_SIZE as u64,
+                crate::Ext4Timestamp::new(9, 0),
+                &mut handle,
+            )
+            .unwrap();
+        let free_before = filesystem.statfs().unwrap().blocks_free;
+        let mapping_before = filesystem.map_blocks(&inode, LogicalBlock::new(1)).unwrap();
+
+        filesystem
+            .reserve_delalloc_range(&inode, LogicalBlock::new(1), 2)
+            .unwrap();
+        assert!(!inode.has_delalloc_reservations());
+        assert_eq!(filesystem.delalloc_reserved_block_count(), 0);
+        assert_eq!(filesystem.statfs().unwrap().blocks_free, free_before);
+
+        filesystem
+            .reserve_delalloc_range(&inode, LogicalBlock::new(0), 4)
+            .unwrap();
+        assert_eq!(filesystem.delalloc_reserved_block_count(), 2);
+        assert_eq!(filesystem.statfs().unwrap().blocks_free, free_before - 2);
+        filesystem
+            .reserve_delalloc_range(&inode, LogicalBlock::new(0), 4)
+            .unwrap();
+        assert_eq!(filesystem.delalloc_reserved_block_count(), 2);
+        assert_eq!(
+            filesystem.map_blocks(&inode, LogicalBlock::new(1)).unwrap(),
+            mapping_before
+        );
+        filesystem.release_all_delalloc(&inode).unwrap();
+        assert_eq!(filesystem.delalloc_reserved_block_count(), 0);
+        assert_eq!(filesystem.statfs().unwrap().blocks_free, free_before);
+        assert!(!inode.has_delalloc_reservations());
+
+        // Prime the overwrite cache, then turn part of that range into a
+        // hole. A stale proof would incorrectly skip this reservation.
+        filesystem
+            .reserve_delalloc_range(&inode, LogicalBlock::new(1), 2)
+            .unwrap();
+        filesystem
+            .remove_extent_range(
+                &inode,
+                LogicalBlock::new(1),
+                BlockCount::new(1),
+                &mut handle,
+            )
+            .unwrap();
+        filesystem
+            .reserve_delalloc_range(&inode, LogicalBlock::new(1), 2)
+            .unwrap();
+        assert_eq!(filesystem.delalloc_reserved_block_count(), 1);
+        assert!(matches!(
+            filesystem.report_mapping(&inode, LogicalBlock::new(1)),
+            Ok(BlockMapping::Hole {
+                flags: BlockMappingFlags::DELAYED,
+                ..
+            })
+        ));
+        filesystem.release_all_delalloc(&inode).unwrap();
+        assert_eq!(filesystem.delalloc_reserved_block_count(), 0);
+    }
+}
+
+#[def_test]
 fn delayed_allocation_rejects_legacy_inode_before_reserving_space() {
     let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let inode = allocate_checkpointed_regular_inode(&mut filesystem);
