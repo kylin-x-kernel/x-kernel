@@ -29,6 +29,16 @@ Current shared skills:
   Linux memory-management semantic knowledge base for X-Kernel MM design,
   covering address space, VMA, mmap, faults, anonymous memory, file-backed
   mmap, COW, brk, madvise, msync, and mlock.
+- `docs/ai/skills/xkernel-mm-design-workflow/SKILL.md`:
+  multi-agent design-first workflow for X-Kernel memory subsystem topics,
+  coordinating Linux semantic analysis, X-Kernel adaptation, arbiter review,
+  and implementation task splitting without code generation.
+- `docs/ai/skills/pr-ci-review/SKILL.md`:
+  Gitee PR lifecycle: creating/updating PRs, tracking the latest Jenkins CI
+  status and diagnosing failures, and reading the latest review opinions from
+  the Gitee PR comment area.
+
+The complete skill index is `docs/ai/skills/README.md`.
 
 The project's own automatic code review rules are located in `docs/ai/review/`.
 

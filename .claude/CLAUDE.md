@@ -16,6 +16,12 @@ This shared skill is the canonical source for:
 When this file and the shared build workflow skill overlap,
 follow the shared skill.
 
+The complete skill index is `docs/ai/skills/README.md`.
+Consult it when a task falls outside the two skills above.
+For example, Gitee PR creation, Jenkins CI status tracking, and
+review-opinion reading are covered by
+`docs/ai/skills/pr-ci-review/SKILL.md`.
+
 ## Coding Guidelines
 
 When writing or reviewing Rust kernel code,

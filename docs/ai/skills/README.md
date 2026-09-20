@@ -31,9 +31,6 @@ Current skills:
 - `code-guidelines/`:
   executable coding and code-review conventions for Rust kernel code,
   backed by `docs/coding-guidelines/`.
-- `unsafe-audit-workflow/`:
-  standards-first workflow for unsafe auditing, independent confirmation,
-  remediation ordering, and reporting standard gaps during unsafe cleanup.
 - `test-harness/`:
   shared Starry Test Harness workflow for regression cases,
   suite registration, execution, and result inspection.
@@ -51,3 +48,8 @@ Current skills:
   multi-agent design-first workflow for X-Kernel memory subsystem topics,
   coordinating Linux semantic analysis, X-Kernel adaptation, arbiter review,
   and implementation task splitting without code generation.
+- `pr-ci-review/`:
+  Gitee PR lifecycle: creating/updating PRs, tracking latest Jenkins CI
+  status and failure diagnosis, and reading the latest review opinions from
+  the Gitee PR comment area (AI summary + human comments) rather than from
+  the Jenkins console.
