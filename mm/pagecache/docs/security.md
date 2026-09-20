@@ -14,6 +14,8 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
 
 ## unsafe 代码清单
 
+所有页内存 unsafe 操作集中在私有 `src/folio.rs`，字段不向其他模块开放。
+
 1. `Folio::new_zeroed()`：对页分配器返回的独占可写页清零。
 2. `Folio::data()`：在持有 `&mut Folio` 时构造独占的页大小 mutable slice。
 

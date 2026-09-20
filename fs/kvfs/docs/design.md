@@ -29,8 +29,10 @@ FAT、9p 和其他未覆盖同步的后端保持既有返回行为。它们的�
 - `src/namei.rs`：路径遍历和 open 流程。
 - `src/permission.rs`：owner/group/other DAC 与 open access 映射。
 - `src/node/`：dentry、inode、inode identity 状态机及文件系统 operation traits。
-- `src/address_space.rs`：inode-owned `AddressSpace`、其私有 `PageCache` 实现，以及
-  writeback 与 truncate/invalidation 边界。
+- `src/address_space/`：inode-owned `AddressSpace`、其私有 `PageCache` 实现，以及
+  writeback 与 truncate/invalidation 边界。`mod.rs` 定义对象和构造；`operations.rs`
+  定义 callback 与默认实现；`filemap.rs`、`readahead.rs`、`writeback.rs`、`truncate.rs`
+  分别承载算法编排；`views.rs` 管理注册与失效通知；`tests/` 按算法组织回归。
 - `src/fiemap.rs`：与用户 ABI 解耦的 inode FIEMAP 请求状态、标志和安全输出接口。
 - `src/file.rs`：打开文件及其可变状态。
 - `src/xattr.rs`：xattr 名称/标志、namespace 权限和 `Path` 语义入口。

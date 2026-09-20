@@ -25,6 +25,16 @@ runtime 不能直接引用它。
 - VM object-id、mapped-view registration 或 PTE invalidation；
 - VMA、fault dispatch、权限和 syscall ABI。
 
+实现按职责分为私有模块，crate root 只导出领域类型：
+
+- `mapping_pages.rs`：容器、锁内 resident tree/dirty marks 与 dirty reconciliation；
+- `folio.rs`：页分配、数据访问、dirty/writeback 状态和释放；
+- `filemap.rs`：lookup、materialize 和 insert-if-absent；
+- `readahead.rs`：连续 cached run 查询；
+- `truncate.rs`：尺寸变化时的页移除、尾页清零和 final teardown；
+- `writeback.rs`：dirty candidate、batch helper、开始/完成协议与结果类型；
+- `tests/`：resident storage、truncate 和 writeback 测试。
+
 ## 架构
 
 ```text
