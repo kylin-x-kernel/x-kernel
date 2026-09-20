@@ -119,7 +119,10 @@ KFEAT_SYMTAB=n 时同样会落盘一个空的 16 字节 blob。`util/backtrace`
 的 build.rs 以 `cargo:rerun-if-changed` 跟踪 `$TARGET_DIR/kbuild/
 ksymtab.bin`，而 Cargo 对不存在的 `rerun-if-changed` 输入一律视为
 dirty，会导致 backtrace 及其全部传递依赖在每次构建时被全量重编译。
-保持该输入始终存在且内容稳定，才能让后续构建完整命中 Cargo 增量缓存。
+因此 xkmake 在首次调用 Cargo 前准备该输入：关闭 KFEAT_SYMTAB 时写入
+稳定的空 blob；开启时保留已有符号表，并只在文件缺失时写入空 blob。
+这样 clean build 结束后不会因为输入从缺失变为存在而额外触发下一次构建，
+后续构建也能完整命中 Cargo 增量缓存。
 
 ### Symbolize
 

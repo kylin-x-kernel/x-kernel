@@ -290,6 +290,7 @@ fn generate_build_configuration(context: &BuildContext) -> Result<()> {
 
     generate_kernel_build_files(&context.config, &context.build_files())?;
     crate::linker::generate(&context.config, &context.linker_script, context.verbosity)?;
+    crate::symtab::prepare_input(context)?;
     Ok(())
 }
 

@@ -50,11 +50,24 @@ struct SymtabEntry {
 /// be relinked so the embedded table catches up with the symbol layout).
 pub(crate) fn generate(context: &BuildContext) -> Result<bool> {
     let blob = build_blob(&context.cargo_elf)?;
-    let output = context.target_dir.join("kbuild").join("ksymtab.bin");
+    let output = blob_path(context);
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent).with_path(parent)?;
     }
     write_if_changed(&output, &blob)
+}
+
+/// Prepare the symbol-table input before Cargo evaluates build-script freshness.
+///
+/// An enabled build preserves an existing table for incremental relinking and
+/// bootstraps a missing table with an empty blob. A disabled build always uses
+/// the empty blob, including after switching from an enabled configuration.
+pub(crate) fn prepare_input(context: &BuildContext) -> Result<()> {
+    prepare_input_at(
+        &blob_path(context),
+        context.config.is_enabled("KFEAT_SYMTAB"),
+    )?;
+    Ok(())
 }
 
 /// Ensure the blob input always exists when `KFEAT_SYMTAB` is disabled.
@@ -67,12 +80,26 @@ pub(crate) fn generate(context: &BuildContext) -> Result<bool> {
 /// input present and content-stable across builds, so the build script only
 /// reruns when the symbol table actually changes.
 pub(crate) fn ensure_empty(context: &BuildContext) -> Result<()> {
-    let output = context.target_dir.join("kbuild").join("ksymtab.bin");
+    let output = blob_path(context);
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent).with_path(parent)?;
     }
     write_if_changed(&output, &empty_blob())?;
     Ok(())
+}
+
+fn blob_path(context: &BuildContext) -> std::path::PathBuf {
+    context.target_dir.join("kbuild").join("ksymtab.bin")
+}
+
+fn prepare_input_at(output: &Path, is_enabled: bool) -> Result<bool> {
+    if is_enabled && output.is_file() {
+        return Ok(false);
+    }
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent).with_path(parent)?;
+    }
+    write_if_changed(output, &empty_blob())
 }
 
 fn build_blob(elf_path: &Path) -> Result<Vec<u8>> {
@@ -181,5 +208,26 @@ mod tests {
         assert_eq!(blob[0..4], SYMTAB_MAGIC.to_le_bytes());
         // Round-trip through the kernel-side parser contract: count 0.
         assert_eq!(u32::from_le_bytes(blob[4..8].try_into().unwrap()), 0);
+    }
+
+    #[test]
+    fn cargo_input_exists_before_the_first_build() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("kbuild/ksymtab.bin");
+
+        assert!(prepare_input_at(&output, false).unwrap());
+        assert_eq!(fs::read(&output).unwrap(), empty_blob());
+        assert!(!prepare_input_at(&output, false).unwrap());
+    }
+
+    #[test]
+    fn enabled_build_preserves_an_existing_symbol_table() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("kbuild/ksymtab.bin");
+        fs::create_dir_all(output.parent().unwrap()).unwrap();
+        fs::write(&output, b"existing table").unwrap();
+
+        assert!(!prepare_input_at(&output, true).unwrap());
+        assert_eq!(fs::read(output).unwrap(), b"existing table");
     }
 }
