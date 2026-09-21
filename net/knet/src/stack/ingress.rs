@@ -12,14 +12,14 @@ use smoltcp::{
     wire::{IpAddress as SmoltcpIpAddress, IpProtocol, Ipv6Packet, TcpPacket},
 };
 
-use super::{
-    fragment::{Ipv4Reassembler, Ipv4ReassemblyResult},
-    ipv4::{self, Icmpv4Error, Ipv4Error, Ipv4Header},
-};
 use crate::{
     LISTEN_TABLE,
     buf::PacketBuf,
     ip::{Ipv4Address, Ipv4Cidr},
+    network::{
+        fragment::{Ipv4Reassembler, Ipv4ReassemblyResult},
+        ipv4::{self, Icmpv4Error, Ipv4Error, Ipv4Header},
+    },
     udp, udp_err,
 };
 

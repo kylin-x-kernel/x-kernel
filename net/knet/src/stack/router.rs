@@ -14,7 +14,6 @@ use smoltcp::{
     wire::Ipv6Packet,
 };
 
-use super::ipv4::{self, Ipv4Error, Ipv4Header};
 pub(crate) use crate::netlink::{
     RT_SCOPE_HOST as ROUTE_SCOPE_HOST, RT_SCOPE_LINK as ROUTE_SCOPE_LINK,
     RT_SCOPE_UNIVERSE as ROUTE_SCOPE_UNIVERSE, RT_TABLE_MAIN as ROUTE_TABLE_MAIN,
@@ -28,6 +27,7 @@ use crate::{
         LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice,
     },
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
+    network::ipv4::{self, Ipv4Error, Ipv4Header},
     runtime::tx_queue::DataTxQueue,
 };
 
@@ -371,14 +371,14 @@ impl Router {
         self.data_tx_queue.available()
     }
 
-    pub(super) fn register_tx_waker(
+    pub(crate) fn register_tx_waker(
         &self,
         context: &mut PollContext<'_>,
     ) -> Result<(), PollRegisterError> {
         self.data_tx_queue.register_capacity_waker(context)
     }
 
-    pub(super) fn tx_capacity_poll(&self) -> PollSet {
+    pub(crate) fn tx_capacity_poll(&self) -> PollSet {
         self.data_tx_queue.capacity_poll()
     }
 

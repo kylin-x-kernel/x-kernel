@@ -24,7 +24,7 @@ mod device;
 mod ip;
 mod link;
 pub mod netlink;
-mod poller;
+mod network;
 mod runtime;
 mod socket;
 mod stack;
@@ -49,13 +49,15 @@ use kerrno::KError;
 use lazyinit::LazyInit;
 pub(crate) use link::{buf, wire};
 pub use link::{packet, send_link_frame};
+pub(crate) use network::ipv4;
+pub(crate) use runtime::{poller, service};
 pub use socket::{
     file::{sock_alloc_file, sock_from_file},
     options, *,
 };
 pub(crate) use socket::{general, state};
-pub(crate) use stack::{ipv4, listen_table, router, service, wrapper};
-pub(crate) use transport::udp_err;
+pub(crate) use stack::{router, socket_set};
+pub(crate) use transport::{listen_table, udp_err};
 pub use transport::{raw, tcp, udp, udp::UdpDatagramRelay};
 
 use crate::{
@@ -65,7 +67,7 @@ use crate::{
     listen_table::ListenTable,
     router::{Ipv4AddrEntry, ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE, Router, Rule},
     service::Service,
-    wrapper::SocketSetWrapper,
+    socket_set::SocketSetWrapper,
 };
 
 static LISTEN_TABLE: LazyInit<ListenTable> = LazyInit::new();

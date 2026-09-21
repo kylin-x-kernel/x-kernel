@@ -4,6 +4,7 @@
 
 //! Internet transport socket implementations.
 
+pub(crate) mod listen_table;
 pub mod raw;
 pub mod tcp;
 pub mod udp;

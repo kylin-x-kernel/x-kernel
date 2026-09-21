@@ -34,8 +34,16 @@ net/knet/
     │   ├── socket.rs
     │   ├── tests.rs
     │   └── wire.rs
+    ├── network/
+    │   ├── ipv4/
+    │   │   ├── mod.rs
+    │   │   └── process.rs
+    │   ├── fragment.rs
+    │   └── mod.rs
     ├── runtime/
     │   ├── mod.rs
+    │   ├── poller.rs
+    │   ├── service.rs
     │   └── tx_queue.rs
     ├── socket/
     │   ├── file.rs
@@ -46,14 +54,11 @@ net/knet/
     │   ├── test_options.rs
     │   └── test_state.rs
     ├── stack/
-    │   ├── fragment.rs
     │   ├── ingress.rs
-    │   ├── ipv4.rs
-    │   ├── listen_table.rs
     │   ├── mod.rs
     │   ├── router.rs
-    │   ├── service.rs
-    │   └── wrapper.rs
+    │   ├── socket_set.rs
+    │   └── time.rs
     ├── transport/
     │   ├── udp/
     │   │   ├── input.rs
@@ -65,6 +70,7 @@ net/knet/
     │   │   ├── socket.rs
     │   │   ├── state.rs
     │   │   └── wait.rs
+    │   ├── listen_table.rs
     │   ├── mod.rs
     │   ├── raw.rs
     │   ├── tcp.rs
@@ -85,7 +91,6 @@ net/knet/
     ├── control.rs
     ├── ip.rs
     ├── lib.rs
-    ├── poller.rs
     ├── unix.rs
     └── vsock.rs
 ```
@@ -610,7 +615,7 @@ In the `SCHEDULED` state, the dynamic kwork of `knet-poller` and socket assist c
 | 15 | &emsp;`network_poller.start()` |
 | 16 | &emsp;`SERVICE.start_timer()` after service and poller publication |
 
-Source: [`init_network`](../src/lib.rs) and [`Service::new`](../src/stack/service.rs). The pseudocode abbreviates address and route construction.
+Source: [`init_network`](../src/lib.rs) and [`Service::new`](../src/runtime/service.rs). The pseudocode abbreviates address and route construction.
 
 ### RX Progress
 
@@ -674,7 +679,7 @@ The 1 ms limit is a soft bound checked between work batches. Maintenance and one
 
 A background callback runs at most four rounds, each with fresh budgets; assist runs at most one. Completion reschedules immediate work or notifications received during execution. The periodic timer callback checks protocol and reassembly deadlines, wakes waiters, and publishes timer work. Future deadlines alone do not set `has_more`.
 
-Sources: [`poller`](../src/poller.rs), [`Service`](../src/stack/service.rs), [`IngressProcessor`](../src/stack/ingress.rs), and [`Router`](../src/stack/router.rs).
+Sources: [`poller`](../src/runtime/poller.rs), [`Service`](../src/runtime/service.rs), [`IngressProcessor`](../src/stack/ingress.rs), and [`Router`](../src/stack/router.rs).
 
 ### TX Routing
 
@@ -725,7 +730,7 @@ IPv4 limited broadcast is replicated subject to interface binding. Other IPv4 de
 
 `EthernetDevice` currently accepts IPv4 output only. It checks link state, source, and MTU, then sends limited and directed broadcasts to the Ethernet broadcast address. Other next hops use the ARP cache: a valid entry permits immediate transmission; an unresolved or expired entry triggers an ARP request when needed and retains the packet in bounded `pending_tx`. A full pending queue drops the packet. IPv6 remains available in the smoltcp and loopback paths, while the Ethernet adapter drops IPv6 output.
 
-Sources: [`UDP send`](../src/transport/udp/socket.rs), [`Service::prepare_and_send_ipv4_packet`](../src/stack/service.rs), [`Router`](../src/stack/router.rs), and [`EthernetDevice::send_ip_packet`](../src/device/ethernet.rs).
+Sources: [`UDP send`](../src/transport/udp/socket.rs), [`Service::prepare_and_send_ipv4_packet`](../src/runtime/service.rs), [`Router`](../src/stack/router.rs), and [`EthernetDevice::send_ip_packet`](../src/device/ethernet.rs).
 
 ## Concurrency Model
 

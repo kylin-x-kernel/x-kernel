@@ -7,7 +7,7 @@
 //! [`Ipv4Reassembler`] groups fragments by addresses, identification,
 //! protocol, and input interface. Each queue stores non-overlapping payload
 //! ranges in offset order until the first header and complete payload are
-//! available. [`crate::router::Router`] drives insertion and timeout removal,
+//! available. [`crate::stack::ingress::IngressProcessor`] drives insertion and timeout removal,
 //! then feeds complete packets back through IPv4 input validation.
 //!
 //! Queue count, retained bytes, and lifetime are bounded. Expired queues retain

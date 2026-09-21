@@ -27,10 +27,13 @@ use crate::{
     LISTEN_TABLE, SOCKET_SET,
     buf::PacketBuf,
     device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborUpdate},
-    ip::IpAddress,
+    ip::{self, IpAddress},
     poller::{PollBudget, PollProgress},
     router::{NeighborUpdatePolicy, Router, Rule},
-    stack::ingress::{IngressProcessor, prepare_smoltcp_ingress},
+    stack::{
+        ingress::{IngressProcessor, prepare_smoltcp_ingress},
+        time::{earliest_poll_deadline, has_immediate_timer_work, now, to_smoltcp_instant},
+    },
 };
 
 const IPV4_HEADER_LEN: usize = 20;
@@ -64,22 +67,6 @@ struct Ipv4ExpirationProgress {
 pub(crate) enum ExistingIpv4AddrAction {
     Keep,
     Reject,
-}
-
-fn to_smoltcp_instant(instant: MonotonicInstant) -> SmoltcpInstant {
-    let micros = instant.span_since_origin().as_micros();
-    let micros = i64::try_from(micros).unwrap_or(i64::MAX);
-    SmoltcpInstant::from_micros_const(micros)
-}
-
-#[cfg(unittest)]
-fn from_smoltcp_instant(instant: SmoltcpInstant) -> MonotonicInstant {
-    let micros = u64::try_from(instant.total_micros()).unwrap_or(0);
-    MonotonicInstant::from_span_since_origin(TimeSpan::from_micros(micros))
-}
-
-pub(crate) fn now() -> SmoltcpInstant {
-    to_smoltcp_instant(monotonic_time())
 }
 
 fn ipv4_reassembly_timer_state(next: Option<MonotonicInstant>) -> u64 {
@@ -528,11 +515,11 @@ impl Service {
         &self,
         dst_addr: &SmoltcpIpAddress,
     ) -> KResult<SmoltcpIpAddress> {
-        let dst_addr = super::from_smoltcp_ip_address(*dst_addr);
+        let dst_addr = ip::from_smoltcp_ip_address(*dst_addr);
         self.router
             .lock()
             .output_route_source(&dst_addr, 0)
-            .map(super::to_smoltcp_ip_address)
+            .map(ip::to_smoltcp_ip_address)
     }
 
     pub fn get_source_address(&self, dst_addr: &IpAddress) -> KResult<IpAddress> {
@@ -1057,17 +1044,6 @@ fn wake_tx_capacity_waiters(capacity_poll: Option<PollSet>) {
     }
 }
 
-fn has_immediate_timer_work(current: SmoltcpInstant, next_poll: Option<SmoltcpInstant>) -> bool {
-    next_poll.is_some_and(|deadline| deadline <= current)
-}
-
-fn earliest_poll_deadline(
-    protocol: Option<SmoltcpInstant>,
-    deferred_close: Option<SmoltcpInstant>,
-) -> Option<SmoltcpInstant> {
-    [protocol, deferred_close].into_iter().flatten().min()
-}
-
 fn output_ipv4_packet_count(
     router: &Router,
     dst_addr: &IpAddress,
@@ -1112,8 +1088,8 @@ mod tests {
         buf::PacketOwner,
         device::LoopbackDevice,
         ip::{Ipv4Address, Ipv4Cidr},
+        ipv4,
         router::{Ipv4AddrEntry, ROUTE_SCOPE_HOST},
-        stack::ipv4,
     };
 
     const TEST_POLL_BUDGET: PollBudget = PollBudget {
@@ -1167,50 +1143,6 @@ mod tests {
         assert!(progress.has_more);
         assert_eq!(probe.wake_count.load(Ordering::Relaxed), 1);
         assert!(probe.was_router_unlocked.load(Ordering::Relaxed));
-    }
-
-    #[def_test]
-    fn test_smoltcp_deadline_clamps_expired_delay() {
-        let current = MonotonicInstant::from_span_since_origin(TimeSpan::from_micros(10_000));
-        let deadline = from_smoltcp_instant(SmoltcpInstant::from_micros_const(9_999));
-
-        assert_eq!(deadline.saturating_duration_since(current), TimeSpan::ZERO);
-    }
-
-    #[def_test]
-    fn test_smoltcp_deadline_preserves_future_delay() {
-        let current = MonotonicInstant::from_span_since_origin(TimeSpan::from_micros(10_000));
-        let deadline = from_smoltcp_instant(SmoltcpInstant::from_micros_const(12_500));
-
-        assert_eq!(
-            deadline.checked_duration_since(current),
-            Some(TimeSpan::from_micros(2_500))
-        );
-    }
-
-    #[def_test]
-    fn deadline_crossed_during_round_is_immediate_work() {
-        let current = SmoltcpInstant::from_millis(10);
-        let future = SmoltcpInstant::from_millis(11);
-        let later = SmoltcpInstant::from_millis(12);
-
-        assert!(!has_immediate_timer_work(current, Some(future)));
-        assert!(has_immediate_timer_work(later, Some(future)));
-    }
-
-    #[def_test]
-    fn due_timer_is_immediate_work() {
-        let current = SmoltcpInstant::from_millis(10);
-
-        assert!(has_immediate_timer_work(current, Some(current)));
-    }
-
-    #[def_test]
-    fn deferred_close_deadline_can_precede_protocol_deadline() {
-        let close = SmoltcpInstant::from_millis(10);
-        let protocol = SmoltcpInstant::from_millis(20);
-
-        assert!(earliest_poll_deadline(Some(protocol), Some(close)) == Some(close));
     }
 
     #[def_test]

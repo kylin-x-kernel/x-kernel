@@ -10,6 +10,8 @@ use core::{
     str::FromStr,
 };
 
+use smoltcp::wire::IpAddress as SmoltcpIpAddress;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct Ipv4Address([u8; 4]);
 
@@ -337,6 +339,22 @@ fn prefix_mask(prefix_len: u8) -> u32 {
         0 => 0,
         1..=32 => u32::MAX << (32 - prefix_len),
         _ => u32::MAX,
+    }
+}
+
+/// Converts a smoltcp address into the in-kernel address representation.
+pub(crate) fn from_smoltcp_ip_address(addr: SmoltcpIpAddress) -> IpAddress {
+    match addr {
+        SmoltcpIpAddress::Ipv4(addr) => IpAddress::Ipv4(addr.into()),
+        SmoltcpIpAddress::Ipv6(addr) => IpAddress::Ipv6(addr.into()),
+    }
+}
+
+/// Converts an in-kernel address into the smoltcp address representation.
+pub(crate) fn to_smoltcp_ip_address(addr: IpAddress) -> SmoltcpIpAddress {
+    match addr {
+        IpAddress::Ipv4(addr) => SmoltcpIpAddress::Ipv4(addr.into()),
+        IpAddress::Ipv6(addr) => SmoltcpIpAddress::Ipv6(addr.into()),
     }
 }
 

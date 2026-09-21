@@ -926,7 +926,7 @@ mod tests {
     #[def_test]
     fn deferred_close_reaps_protocol_closed_socket() {
         let current = Instant::from_millis(10);
-        let mut sockets = crate::wrapper::SocketSetState::new();
+        let mut sockets = crate::socket_set::SocketSetState::new();
         let handle = sockets.add(new_tcp_socket());
         sockets.defer_tcp_close(handle);
 
@@ -941,7 +941,7 @@ mod tests {
         let current = Instant::from_millis(10);
         let mut socket = new_tcp_socket();
         socket.listen(49152).unwrap();
-        let mut sockets = crate::wrapper::SocketSetState::new();
+        let mut sockets = crate::socket_set::SocketSetState::new();
         let handle = sockets.add(socket);
         sockets.defer_tcp_close(handle);
 

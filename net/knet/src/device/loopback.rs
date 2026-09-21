@@ -26,7 +26,7 @@ use crate::{
 /// RX wakeups use a single stored [`Waker`], not a multi-waiter [`kpoll::PollSet`].
 /// That is intentional and not a multi-task regression:
 ///
-/// 1. [`crate::stack::service::Service::register_rx_waker`] registers each
+/// 1. [`crate::service::Service::register_rx_waker`] registers each
 ///    waiting **task** on the shared `timeout_poll` [`kpoll::PollSet`] (true
 ///    multi-waiter fan-out, including edge-triggered rechecks).
 /// 2. It then installs one `timeout_poll`-backed **source** waker on this
