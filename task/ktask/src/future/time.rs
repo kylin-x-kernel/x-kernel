@@ -2,9 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Owned async sleep timers and legacy waker registrations.
+//! Owned async sleep timers and operation-first timeouts.
 
-use alloc::collections::BTreeMap;
 use core::{
     fmt,
     pin::Pin,
@@ -12,151 +11,10 @@ use core::{
 };
 
 use futures_util::{FutureExt, select_biased};
-use kcpu_id_map::LogicalCpuId;
 use kerrno::KError;
 use khal::time::monotonic_time;
 use kspin::SpinNoIrq;
 use ktime_types::{MonotonicInstant, TimeSpan};
-
-use crate::api::rearm_local_timer;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct TimerKey {
-    deadline: MonotonicInstant,
-    key: u64,
-}
-
-#[derive(Debug)]
-pub struct TimerHandle {
-    key: TimerKey,
-    cpu_id: LogicalCpuId,
-}
-
-struct TimerRuntime {
-    key: u64,
-    wheel: BTreeMap<TimerKey, Waker>,
-}
-
-impl TimerRuntime {
-    const fn new() -> Self {
-        TimerRuntime {
-            key: 0,
-            wheel: BTreeMap::new(),
-        }
-    }
-
-    fn add_with_waker(&mut self, deadline: MonotonicInstant, waker: Waker) -> Option<TimerKey> {
-        if deadline <= monotonic_time() {
-            return None;
-        }
-        let key = TimerKey {
-            deadline,
-            key: self.key,
-        };
-        self.wheel.insert(key, waker);
-        self.key += 1;
-        Some(key)
-    }
-
-    fn cancel(&mut self, key: &TimerKey) {
-        self.wheel.remove(key);
-    }
-
-    fn take_expired_wakers(&mut self) -> BTreeMap<TimerKey, Waker> {
-        if self.wheel.is_empty() {
-            return BTreeMap::new();
-        }
-
-        let now = monotonic_time();
-
-        let pending = self.wheel.split_off(&TimerKey {
-            deadline: now,
-            key: u64::MAX,
-        });
-
-        core::mem::replace(&mut self.wheel, pending)
-    }
-
-    /// Earliest pending soft-timer deadline, or `None` if the wheel is empty.
-    ///
-    /// `TimerKey` orders by `deadline` first, so `first_key_value()` is the
-    /// minimum-deadline entry.
-    fn earliest_deadline(&self) -> Option<MonotonicInstant> {
-        self.wheel.first_key_value().map(|(k, _)| k.deadline)
-    }
-}
-
-percpu_static! {
-    TIMER_RUNTIME: SpinNoIrq<TimerRuntime> = SpinNoIrq::new(TimerRuntime::new()),
-}
-
-fn timer_runtime(cpu_id: LogicalCpuId) -> &'static SpinNoIrq<TimerRuntime> {
-    // SAFETY:
-    // 1. `cpu_id` is either returned by `this_cpu_id()` or stored from a
-    //    previously returned value, so it identifies an initialized CPU.
-    // 2. `TIMER_RUNTIME` is a `SpinNoIrq<TimerRuntime>`, and all mutable
-    //    accesses to the timer wheel go through the lock.
-    unsafe { TIMER_RUNTIME.remote_ref_raw(cpu_id.as_usize()) }
-}
-
-/// Drains expired timers and returns the next deadline, all under a single
-/// wheel-lock acquisition. The returned wakers must be woken by the caller
-/// (outside the lock) before re-arming the hardware.
-pub(crate) fn drain_expired_and_get_earliest(
-    cpu_id: kcpu_id_map::LogicalCpuId,
-) -> (BTreeMap<TimerKey, Waker>, Option<MonotonicInstant>) {
-    let mut guard = timer_runtime(cpu_id).lock();
-    let wakers = guard.take_expired_wakers();
-    let earliest = guard.earliest_deadline();
-    (wakers, earliest)
-}
-
-/// Returns the earliest pending soft-timer deadline on `cpu_id`.
-pub(crate) fn earliest_deadline(cpu_id: kcpu_id_map::LogicalCpuId) -> Option<MonotonicInstant> {
-    timer_runtime(cpu_id).lock().earliest_deadline()
-}
-
-/// Refreshes hardware while holding the local wheel lock through arbitration.
-pub(crate) fn reprogram_local_timer() {
-    let _guard = kspin::NoPreemptIrqSave::new();
-    let wheel = timer_runtime(khal::percpu::this_cpu_id()).lock();
-    rearm_local_timer(wheel.earliest_deadline(), None);
-}
-
-/// Registers a timer that fires `waker` when `deadline` is reached.
-/// Returns `None` if `deadline` has already passed.
-pub fn register_timer(deadline: MonotonicInstant, waker: Waker) -> Option<TimerHandle> {
-    // Pin to this CPU across id selection, wheel insert, and local rearm so an
-    // affinity migrate cannot insert on one RQ and reprogram another.
-    let _pin = kspin::NoPreempt::new();
-    let cpu_id = khal::percpu::this_cpu_id();
-    let mut guard = timer_runtime(cpu_id).lock();
-    let key = guard.add_with_waker(deadline, waker)?;
-    // While still under the wheel lock (IRQs masked), pull the hardware
-    // deadline forward to the new earliest soft timer so timeouts wake on time.
-    rearm_local_timer(guard.earliest_deadline(), None);
-    drop(guard);
-    Some(TimerHandle { key, cpu_id })
-}
-
-/// Cancels a previously registered timer. Safe to call from any CPU.
-///
-/// If the cancelled entry was the earliest on this CPU's wheel, the local
-/// hardware timer is re-armed to the next earliest deadline. Cancelling the
-/// earliest entry on a *remote* CPU is left to self-correct: that CPU's timer
-/// fires at the now-stale deadline, and its handler recomputes the next one
-/// (at most one spurious IRQ), so no cross-CPU IPI is needed.
-pub fn cancel_timer(handle: &TimerHandle) {
-    let mut guard = timer_runtime(handle.cpu_id).lock();
-    // IRQs are masked on this CPU while the lock is held, so `this_cpu_id()`
-    // is stable here and matches the CPU whose hardware timer we re-arm.
-    let local = handle.cpu_id == khal::percpu::this_cpu_id();
-    let was_earliest = guard.earliest_deadline() == Some(handle.key.deadline);
-    guard.cancel(&handle.key);
-    if local && was_earliest {
-        rearm_local_timer(guard.earliest_deadline(), None);
-    }
-}
 
 struct SleepState {
     is_expired: bool,
@@ -301,39 +159,6 @@ pub async fn timeout_at<F: IntoFuture>(
         }
     } else {
         Ok(f.await)
-    }
-}
-
-#[cfg(all(unittest, feature = "ipi"))]
-mod notification_tests {
-    use core::task::Waker;
-
-    use unittest::{assert, def_test};
-
-    use super::{TimerKey, timer_runtime};
-
-    #[def_test(serial)]
-    fn reprogram_notification_does_not_consume_due_timer() {
-        let _guard = kspin::NoPreemptIrqSave::new();
-        let cpu = khal::percpu::this_cpu_id();
-        let key = {
-            let mut runtime = timer_runtime(cpu).lock();
-            let key = TimerKey {
-                deadline: ktime_types::MonotonicInstant::from_span_since_origin(
-                    ktime_types::TimeSpan::from_nanos(0),
-                ),
-                key: runtime.key,
-            };
-            runtime.key += 1;
-            // Deliberately overdue: notification must only program hardware,
-            // leaving consumption to the actual timer IRQ after this guard.
-            runtime.wheel.insert(key, Waker::noop().clone());
-            key
-        };
-        kipi::TimerReprogramIpiIf::on_timer_reprogram();
-        let remained_pending = timer_runtime(cpu).lock().wheel.remove(&key).is_some();
-        super::reprogram_local_timer();
-        assert!(remained_pending);
     }
 }
 

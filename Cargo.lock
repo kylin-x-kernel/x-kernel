@@ -3046,7 +3046,6 @@ dependencies = [
  "kpoll",
  "ksched",
  "kspin 0.3.0-dev",
- "ktime",
  "ktime_types",
  "ktimer-core",
  "lazyinit",

@@ -58,10 +58,7 @@ impl TimerHandler for Probe {
 
 fn refresh_local() {
     let _guard = kspin::NoPreemptIrqSave::new();
-    crate::api::rearm_local_timer(
-        crate::future::earliest_deadline(khal::percpu::this_cpu_id()),
-        None,
-    );
+    crate::api::rearm_local_timer();
 }
 
 fn wait_for(probe: &Probe, count: usize) -> bool {

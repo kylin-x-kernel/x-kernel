@@ -406,9 +406,10 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   等待 `in_flight` 归零；completion 只是 wake source，等待返回后仍必须重查
   descriptor predicate。后续 IRQ thread / workerqueue 引入后可以复用同一等待边界，
   但上下文禁止规则保持不变。
-- `flush_work()` / `cancel_work_sync()` 覆盖普通 work item；delayed work 由
-  `kwork::DelayedScheduledWork` 提供 timer 到期后投递普通 work 的核心语义。当前仍不提供
-  自动 delayed retry、完整 Linux concurrent-flusher 接力、CPU hotplug drain 或 rescuer 语义。
+- `flush_work()` / `cancel_work_sync()` cover ordinary work items. The legacy
+  delayed-work product API and timer adapter have been removed. Automatic delayed
+  retry, full Linux concurrent-flusher handoff, CPU hotplug drain and rescuer
+  semantics remain unsupported.
 - `WakeThread`、`IrqThreadSlot` 和 oneshot pending 只是 foundation state。它们尚未绑定
   scheduler task、workerqueue、mask protocol、thread teardown、CPU affinity 或
   per-action statistics；带 future-only thread slot 的 action 在当前 core 中不可

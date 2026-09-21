@@ -15,7 +15,6 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use bitflags::bitflags;
 use kcpu_id_map::LogicalCpuId;
 use kspin::SpinNoIrq;
-use ktime_types::TimeSpan;
 
 use crate::{
     builtinpool::{self, SystemPoolBinding, SystemPoolKind},
@@ -23,7 +22,7 @@ use crate::{
         self, BottomHalfWorkQueueKind, SystemWorkQueueKind, system_bh_highpri_wq, system_bh_wq,
         system_percpu_wq, system_wq,
     },
-    runtime::{self, WorkqueueTimerHandle},
+    runtime,
 };
 
 pub const DEFAULT_WORKQUEUE_MAX_ACTIVE: usize = 256;
@@ -52,18 +51,6 @@ pub enum QueueWorkResult {
     QueueFull,
     Disabled,
     InvalidCpu,
-    WorkerUnavailable,
-}
-
-/// Result of a delayed-work schedule attempt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum QueueDelayedWorkResult {
-    Queued,
-    AlreadyQueued,
-    QueueFull,
-    Disabled,
-    InvalidCpu,
-    TimerUnavailable,
     WorkerUnavailable,
 }
 
@@ -396,91 +383,6 @@ impl WorkQueue {
         }
     }
 
-    fn mark_delayed_on(
-        &'static self,
-        cpu_id: LogicalCpuId,
-        work: &ScheduledWork,
-    ) -> QueueDelayedWorkResult {
-        self.mark_delayed_on_ref(WorkQueueRef::Static(self), cpu_id, work)
-    }
-
-    fn mark_delayed_on_ref(
-        &self,
-        queue_ref: WorkQueueRef,
-        cpu_id: LogicalCpuId,
-        work: &ScheduledWork,
-    ) -> QueueDelayedWorkResult {
-        if self.destroyed.load(Ordering::Acquire) {
-            return QueueDelayedWorkResult::Disabled;
-        }
-        let Some(binding) = self.core.binding(cpu_id) else {
-            return QueueDelayedWorkResult::InvalidCpu;
-        };
-        if self.pool_for_cpu(cpu_id).is_none() {
-            return QueueDelayedWorkResult::WorkerUnavailable;
-        }
-        match binding.mark_delayed(work.core()) {
-            Ok(()) => {
-                register_workqueue_ref(&queue_ref);
-                work.install_binding(queue_ref, cpu_id, binding.owner());
-                hold_scheduled_work(work);
-                QueueDelayedWorkResult::Queued
-            }
-            Err(kworkqueue::QueueWorkError::AlreadyQueued)
-            | Err(kworkqueue::QueueWorkError::NotPendingDelayed) => {
-                QueueDelayedWorkResult::AlreadyQueued
-            }
-            Err(kworkqueue::QueueWorkError::Disabled) => QueueDelayedWorkResult::Disabled,
-            Err(kworkqueue::QueueWorkError::PendingFull) => QueueDelayedWorkResult::QueueFull,
-        }
-    }
-
-    fn activate_delayed_on(
-        &'static self,
-        cpu_id: LogicalCpuId,
-        work: &ScheduledWork,
-    ) -> QueueWorkResult {
-        let Some(binding) = self.core.binding(cpu_id) else {
-            return QueueWorkResult::InvalidCpu;
-        };
-        if self.destroyed.load(Ordering::Acquire) {
-            self.discard_timer_pending_work(cpu_id, binding, work);
-            return QueueWorkResult::Disabled;
-        }
-        if self.pool_for_cpu(cpu_id).is_none() {
-            self.discard_timer_pending_work(cpu_id, binding, work);
-            return QueueWorkResult::WorkerUnavailable;
-        }
-        let op = match binding.activate_delayed(work.core()) {
-            Ok(kworkqueue::QueueWorkOutcome::Runnable(op))
-            | Ok(kworkqueue::QueueWorkOutcome::Inactive(op)) => op,
-            Ok(kworkqueue::QueueWorkOutcome::QueuedWhileRunning) => {
-                return QueueWorkResult::Queued;
-            }
-            Err(kworkqueue::QueueWorkError::AlreadyQueued)
-            | Err(kworkqueue::QueueWorkError::NotPendingDelayed) => {
-                return QueueWorkResult::AlreadyQueued;
-            }
-            Err(kworkqueue::QueueWorkError::Disabled) => {
-                self.discard_timer_pending_work(cpu_id, binding, work);
-                return QueueWorkResult::Disabled;
-            }
-            Err(kworkqueue::QueueWorkError::PendingFull) => return QueueWorkResult::QueueFull,
-        };
-        match self.apply_executor_op(cpu_id, op) {
-            Ok(()) => QueueWorkResult::Queued,
-            Err(error) => {
-                self.rollback_queued_work(cpu_id, binding, work);
-                match error {
-                    crate::builtinpool::BuiltinPoolEnqueueError::QueueFull => {
-                        QueueWorkResult::QueueFull
-                    }
-                    _ => QueueWorkResult::WorkerUnavailable,
-                }
-            }
-        }
-    }
-
     pub fn flush(&self) -> Result<bool, WorkqueueError> {
         if runtime::is_invalid_wait_context() {
             return Err(WorkqueueError::InvalidContext);
@@ -601,41 +503,6 @@ impl WorkQueue {
         release_scheduled_work(work.core().key());
         work.notify_state_change();
         self.notify_state_change();
-    }
-
-    fn discard_timer_pending_work(
-        &self,
-        cpu_id: LogicalCpuId,
-        binding: CoreQueueBinding<'_>,
-        work: &ScheduledWork,
-    ) {
-        match binding.cancel_work(work.core()) {
-            kworkqueue::CancelWorkResult::CanceledPending {
-                remove_op,
-                promote_op,
-            } => {
-                work.clear_binding_if_owner(binding.owner());
-                let _ = self.apply_executor_op(cpu_id, remove_op);
-                if let Some(op) = promote_op {
-                    let _ = self.apply_executor_op(cpu_id, op);
-                }
-                release_scheduled_work(work.core().key());
-                work.notify_state_change();
-                self.notify_state_change();
-            }
-            kworkqueue::CancelWorkResult::CanceledRunningRequeue { remove_op } => {
-                let _ = self.apply_executor_op(cpu_id, remove_op);
-            }
-            kworkqueue::CancelWorkResult::CanceledDelayed => {
-                work.clear_binding_if_owner(binding.owner());
-                release_scheduled_work(work.core().key());
-                work.notify_state_change();
-                self.notify_state_change();
-            }
-            kworkqueue::CancelWorkResult::WaitingRunning(_)
-            | kworkqueue::CancelWorkResult::NotPending
-            | kworkqueue::CancelWorkResult::Busy => {}
-        }
     }
 
     fn rescue_pending_work_for_flush(
@@ -1318,212 +1185,6 @@ pub(crate) fn apply_promote_inactive(
     Ok(())
 }
 
-/// Timer-triggered wrapper around a [`ScheduledWork`].
-#[derive(Clone)]
-pub struct DelayedScheduledWork {
-    inner: Arc<DelayedScheduledWorkInner>,
-}
-
-struct DelayedScheduledWorkInner {
-    work: ScheduledWork,
-    timer: SpinNoIrq<Option<DelayedTimerSlot>>,
-    generation: AtomicUsize,
-}
-
-enum DelayedTimerSlot {
-    Arming {
-        generation: usize,
-    },
-    Armed {
-        generation: usize,
-        handle: Arc<dyn WorkqueueTimerHandle>,
-    },
-}
-
-impl DelayedScheduledWork {
-    pub fn new<F>(callback: F) -> Self
-    where
-        F: Fn(&ScheduledWork) + Send + Sync + 'static,
-    {
-        Self {
-            inner: Arc::new(DelayedScheduledWorkInner {
-                work: ScheduledWork::new(callback),
-                timer: SpinNoIrq::new(None),
-                generation: AtomicUsize::new(1),
-            }),
-        }
-    }
-
-    pub fn schedule_after_with(
-        &self,
-        delay: TimeSpan,
-        attrs: ScheduleAttrs,
-    ) -> QueueDelayedWorkResult {
-        let queue = attrs.queue().queue();
-        let cpu_id = attrs
-            .explicit_cpu()
-            .unwrap_or_else(|| queue.default_target_cpu());
-        if delay.is_zero() {
-            return queue_work_result_to_delayed(queue.queue_work_on(cpu_id, &self.inner.work));
-        }
-
-        let result = queue.mark_delayed_on(cpu_id, &self.inner.work);
-        if result != QueueDelayedWorkResult::Queued {
-            return result;
-        }
-        let generation = self.inner.next_generation();
-        *self.inner.timer.lock() = Some(DelayedTimerSlot::Arming { generation });
-        let inner = self.inner.clone();
-        let Some(handle) = runtime::arm_timer(
-            ktask::monotonic_time() + delay,
-            Arc::new(move || {
-                inner.fire_timer(queue, cpu_id, generation);
-            }),
-        ) else {
-            self.inner.fire_timer(queue, cpu_id, generation);
-            return QueueDelayedWorkResult::Queued;
-        };
-        let mut timer = self.inner.timer.lock();
-        match timer.as_mut() {
-            Some(DelayedTimerSlot::Arming {
-                generation: pending_generation,
-            }) if *pending_generation == generation => {
-                *timer = Some(DelayedTimerSlot::Armed { generation, handle });
-            }
-            _ => {
-                let _ = handle.cancel();
-            }
-        }
-        QueueDelayedWorkResult::Queued
-    }
-
-    pub fn mod_schedule_after_with(
-        &self,
-        delay: TimeSpan,
-        attrs: ScheduleAttrs,
-    ) -> QueueDelayedWorkResult {
-        // `mod` is an enqueue-style API and may be used from contexts that
-        // cannot sleep. It cancels pending state without waiting for a running
-        // callback; a running callback keeps the work busy and the schedule
-        // attempt reports that through the normal queue result.
-        let _ = self.cancel();
-        self.schedule_after_with(delay, attrs)
-    }
-
-    pub fn disable(&self) -> Result<usize, DisableWorkError> {
-        self.inner.work.disable()
-    }
-
-    pub fn enable(&self) -> Result<usize, EnableWorkError> {
-        self.inner.work.enable()
-    }
-
-    pub fn is_disabled(&self) -> bool {
-        self.inner.work.is_disabled()
-    }
-
-    /// Attempts to cancel this delayed work without waiting.
-    ///
-    /// A pending timer is removed from the ktask timer wheel. Already running
-    /// callbacks are reported as [`CancelWorkResult::Running`].
-    pub fn cancel(&self) -> CancelWorkResult {
-        let canceled_timer = {
-            let mut timer = self.inner.timer.lock();
-            self.inner.next_generation();
-            match timer.take() {
-                Some(DelayedTimerSlot::Armed { handle, .. }) => handle.cancel(),
-                Some(DelayedTimerSlot::Arming { .. }) | None => false,
-            }
-        };
-        match self.inner.work.cancel() {
-            CancelWorkResult::NotPending if canceled_timer => CancelWorkResult::CancelledPending,
-            result => result,
-        }
-    }
-
-    pub fn cancel_sync(&self) -> Result<bool, WorkqueueError> {
-        {
-            let mut timer = self.inner.timer.lock();
-            self.inner.next_generation();
-            if let Some(DelayedTimerSlot::Armed { handle, .. }) = timer.take() {
-                let _ = handle.cancel();
-            }
-        }
-        self.inner.work.cancel_sync()
-    }
-}
-
-impl DelayedScheduledWorkInner {
-    fn next_generation(&self) -> usize {
-        loop {
-            let current = self.generation.load(Ordering::Acquire);
-            let next = current
-                .checked_add(1)
-                .expect("delayed work generation exhausted");
-            if next == 0 {
-                panic!("delayed work generation exhausted");
-            }
-            if self
-                .generation
-                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                return next;
-            }
-        }
-    }
-
-    fn fire_timer(&self, queue: &'static WorkQueue, cpu_id: LogicalCpuId, generation: usize) {
-        {
-            let mut timer = self.timer.lock();
-            if self.generation.load(Ordering::Acquire) != generation {
-                return;
-            }
-            let Some(slot_generation) = timer.as_ref().map(DelayedTimerSlot::generation) else {
-                return;
-            };
-            if slot_generation != generation {
-                return;
-            }
-            let _ = timer.take();
-        }
-        let result = queue.activate_delayed_on(cpu_id, &self.work);
-        if result != QueueWorkResult::Queued {
-            self.work
-                .clear_binding_if_owner(binding_owner(queue, cpu_id));
-            release_scheduled_work(self.work.core().key());
-            self.work.notify_state_change();
-            queue.notify_state_change();
-        }
-    }
-}
-
-fn binding_owner(queue: &'static WorkQueue, cpu_id: LogicalCpuId) -> kworkqueue::EntryOwner {
-    queue
-        .core_binding(cpu_id)
-        .expect("timer callback uses a previously validated CPU")
-        .owner()
-}
-
-impl DelayedTimerSlot {
-    fn generation(&self) -> usize {
-        match self {
-            Self::Arming { generation } | Self::Armed { generation, .. } => *generation,
-        }
-    }
-}
-
-fn queue_work_result_to_delayed(result: QueueWorkResult) -> QueueDelayedWorkResult {
-    match result {
-        QueueWorkResult::Queued => QueueDelayedWorkResult::Queued,
-        QueueWorkResult::AlreadyQueued => QueueDelayedWorkResult::AlreadyQueued,
-        QueueWorkResult::QueueFull => QueueDelayedWorkResult::QueueFull,
-        QueueWorkResult::Disabled => QueueDelayedWorkResult::Disabled,
-        QueueWorkResult::InvalidCpu => QueueDelayedWorkResult::InvalidCpu,
-        QueueWorkResult::WorkerUnavailable => QueueDelayedWorkResult::WorkerUnavailable,
-    }
-}
-
 static SYSTEM_WQ_BALANCE_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 fn select_balanced_normal_pool_cpu() -> LogicalCpuId {
@@ -1547,8 +1208,7 @@ mod tests {
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use ktime_types::TimeSpan;
-    use unittest::{assert, assert_eq, assert_ne, def_test};
+    use unittest::{assert, assert_eq, def_test};
 
     use super::*;
     use crate::runtime::init_system_workqueue_worker_pools_for_cpu;
@@ -1608,83 +1268,6 @@ mod tests {
             ktask::yield_now();
         }
         false
-    }
-
-    #[def_test(serial)]
-    fn delayed_zero_delay_queues_immediately_without_timer() {
-        ensure_normal_pool_ready(runtime::current_cpu_id());
-        let runs = Arc::new(AtomicUsize::new(0));
-        let work_runs = runs.clone();
-        let work = DelayedScheduledWork::new(move |_| {
-            work_runs.fetch_add(1, Ordering::AcqRel);
-        });
-
-        assert_eq!(
-            work.schedule_after_with(TimeSpan::ZERO, ScheduleAttrs::system()),
-            QueueDelayedWorkResult::Queued
-        );
-        assert_ne!(
-            work.inner.work.core().status(),
-            kworkqueue::WorkStatus::DelayedPending
-        );
-        let _ = work.inner.work.cancel_sync();
-    }
-
-    #[def_test(serial)]
-    fn stale_delayed_timer_generation_does_not_activate_work() {
-        let work = DelayedScheduledWork::new(|_| {});
-        let queue = system_wq();
-        let cpu_id = runtime::current_cpu_id();
-        ensure_normal_pool_ready(cpu_id);
-
-        assert_eq!(
-            queue.mark_delayed_on(cpu_id, &work.inner.work),
-            QueueDelayedWorkResult::Queued
-        );
-        let stale_generation = work.inner.next_generation();
-        work.inner.next_generation();
-        work.inner.fire_timer(queue, cpu_id, stale_generation);
-
-        assert_eq!(
-            work.inner.work.core().status(),
-            kworkqueue::WorkStatus::DelayedPending
-        );
-        assert_eq!(
-            work.inner
-                .work
-                .cancel_sync()
-                .expect("cancel should be sleepable"),
-            true
-        );
-    }
-
-    #[def_test(serial)]
-    fn cancel_sync_prevents_late_timer_from_requeueing() {
-        let runs = Arc::new(AtomicUsize::new(0));
-        let work_runs = runs.clone();
-        let work = DelayedScheduledWork::new(move |_| {
-            work_runs.fetch_add(1, Ordering::AcqRel);
-        });
-        let queue = system_wq();
-        let cpu_id = runtime::current_cpu_id();
-        ensure_normal_pool_ready(cpu_id);
-
-        assert_eq!(
-            queue.mark_delayed_on(cpu_id, &work.inner.work),
-            QueueDelayedWorkResult::Queued
-        );
-        let stale_generation = work.inner.generation.load(Ordering::Acquire);
-        assert_eq!(
-            work.cancel_sync().expect("cancel should be sleepable"),
-            true
-        );
-
-        work.inner.fire_timer(queue, cpu_id, stale_generation);
-        assert_eq!(
-            work.inner.work.core().status(),
-            kworkqueue::WorkStatus::Idle
-        );
-        assert_eq!(runs.load(Ordering::Acquire), 0);
     }
 
     #[def_test(serial)]
@@ -1837,112 +1420,6 @@ mod tests {
         assert_eq!(work.cancel(), CancelWorkResult::Running);
         finish.store(1, Ordering::Release);
         let _ = work.flush().expect("work flush should be sleepable");
-    }
-
-    #[def_test(serial)]
-    fn delayed_nonzero_timer_cancel_does_not_wait_or_activate_work() {
-        let runs = Arc::new(AtomicUsize::new(0));
-        let work_runs = runs.clone();
-        let work = DelayedScheduledWork::new(move |_| {
-            work_runs.fetch_add(1, Ordering::AcqRel);
-        });
-        let cpu_id = runtime::current_cpu_id();
-        ensure_normal_pool_ready(cpu_id);
-
-        assert_eq!(
-            work.schedule_after_with(
-                TimeSpan::from_millis(20),
-                ScheduleAttrs::system().on_cpu(cpu_id)
-            ),
-            QueueDelayedWorkResult::Queued
-        );
-        assert_eq!(work.cancel(), CancelWorkResult::CancelledPending);
-        ktask::sleep(TimeSpan::from_millis(30));
-        assert_eq!(runs.load(Ordering::Acquire), 0);
-        assert_eq!(
-            work.inner.work.core().status(),
-            kworkqueue::WorkStatus::Idle
-        );
-    }
-
-    #[def_test(serial)]
-    fn mod_delayed_work_replaces_pending_timer_without_waiting() {
-        let runs = Arc::new(AtomicUsize::new(0));
-        let work_runs = runs.clone();
-        let work = DelayedScheduledWork::new(move |_| {
-            work_runs.fetch_add(1, Ordering::AcqRel);
-        });
-        let cpu_id = runtime::current_cpu_id();
-        ensure_normal_pool_ready(cpu_id);
-        let attrs = ScheduleAttrs::system().on_cpu(cpu_id);
-
-        assert_eq!(
-            work.schedule_after_with(TimeSpan::from_millis(20), attrs),
-            QueueDelayedWorkResult::Queued
-        );
-        assert_eq!(
-            work.mod_schedule_after_with(TimeSpan::ZERO, attrs),
-            QueueDelayedWorkResult::Queued
-        );
-        wait_for_atomic_value(&runs, 1);
-        ktask::sleep(TimeSpan::from_millis(30));
-        assert_eq!(runs.load(Ordering::Acquire), 1);
-        assert_eq!(
-            work.inner.work.core().status(),
-            kworkqueue::WorkStatus::Idle
-        );
-    }
-
-    #[def_test(serial)]
-    fn delayed_nonzero_timer_cancel_does_not_activate_work() {
-        let runs = Arc::new(AtomicUsize::new(0));
-        let work_runs = runs.clone();
-        let work = DelayedScheduledWork::new(move |_| {
-            work_runs.fetch_add(1, Ordering::AcqRel);
-        });
-        let cpu_id = runtime::current_cpu_id();
-        ensure_normal_pool_ready(cpu_id);
-
-        assert_eq!(
-            work.schedule_after_with(
-                TimeSpan::from_millis(20),
-                ScheduleAttrs::system().on_cpu(cpu_id)
-            ),
-            QueueDelayedWorkResult::Queued
-        );
-        assert!(work.cancel_sync().expect("cancel should be sleepable"));
-        ktask::sleep(TimeSpan::from_millis(30));
-        assert_eq!(runs.load(Ordering::Acquire), 0);
-        assert_eq!(
-            work.inner.work.core().status(),
-            kworkqueue::WorkStatus::Idle
-        );
-    }
-
-    #[def_test(serial)]
-    fn delayed_nonzero_timer_activates_work() {
-        let runs = Arc::new(AtomicUsize::new(0));
-        let work_runs = runs.clone();
-        let work = DelayedScheduledWork::new(move |_| {
-            work_runs.fetch_add(1, Ordering::AcqRel);
-        });
-        let cpu_id = runtime::current_cpu_id();
-        ensure_normal_pool_ready(cpu_id);
-
-        assert_eq!(
-            work.schedule_after_with(
-                TimeSpan::from_millis(1),
-                ScheduleAttrs::system().on_cpu(cpu_id)
-            ),
-            QueueDelayedWorkResult::Queued
-        );
-        wait_for_atomic_value(&runs, 1);
-        let _ = work.inner.work.flush();
-        assert!(work.inner.timer.lock().is_none());
-        assert_eq!(
-            work.inner.work.core().status(),
-            kworkqueue::WorkStatus::Idle
-        );
     }
 
     #[def_test(serial)]

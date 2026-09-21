@@ -18,7 +18,7 @@ use crate::run_queue::task_run_queue;
 pub(crate) use crate::run_queue::{current_run_queue, select_run_queue, select_wake_run_queue};
 pub use crate::{
     task::{CurrentTask, TaskInner, TaskState, UserTaskRuntime},
-    timers::{register_timer_callback, register_timer_irq_note},
+    timers::register_timer_irq_note,
     wait_queue::WaitQueue,
 };
 
@@ -179,7 +179,7 @@ static DEFER_LOCAL_TIMER_REARM: bool = false;
 ///
 /// Shorter delays do not buy fairness and can livelock the CPU in timer IRQs
 /// when `next_preemption_ns` returns 0 (arm interval 0 → immediate re-entry
-/// before `check_preempt_pending` runs). Soft/periodic deadlines are unaffected.
+/// before `check_preempt_pending` runs). Owned timer deadlines are unaffected.
 const MIN_SCHED_TIMER_NS: u64 = 10_000;
 
 /// Picks the earliest absolute deadline across all local timer sources.
@@ -188,14 +188,9 @@ const MIN_SCHED_TIMER_NS: u64 = 10_000;
 pub(crate) fn select_local_timer_deadline(
     sched: Option<u64>,
     worker: Option<u64>,
-    soft: Option<u64>,
-    periodic: Option<u64>,
     prepared: Option<u64>,
 ) -> Option<u64> {
-    [sched, worker, soft, periodic, prepared]
-        .into_iter()
-        .flatten()
-        .min()
+    [sched, worker, prepared].into_iter().flatten().min()
 }
 
 /// Converts a scheduler-relative request into a one-shot absolute deadline and
@@ -212,25 +207,18 @@ fn schedule_deadline_request(now_ns: u64, rel_ns: Option<u64>) -> (Option<u64>, 
 }
 
 /// Re-arms the local CPU hardware timer to the earliest of schedule, execution,
-/// soft, periodic-callback and prepared deadlines. Disarms when none remain.
+/// and prepared deadlines. Disarms when none remain.
 ///
 /// This is a pure hardware arbitration helper for scheduler deadlines: a due
 /// scheduler slot is consumed only by timer IRQ / switch paths that have already
 /// run scheduler accounting. This mirrors Linux hrtick start/restart behavior,
 /// where reprogramming the hrtimer never substitutes for `task_tick()`.
 ///
-/// When `periodic_earliest` is `Some`, it is used instead of rescanning the
-/// per-CPU periodic-callback vector (e.g. after `run_due_and_earliest`).
-///
 /// # Synchronization
 /// This function pins execution to the current CPU and masks local IRQs while
-/// reading per-CPU deadline slots and programming hardware. Callers passing a
-/// soft-timer deadline must still synchronize with that timer wheel while
-/// computing `earliest_soft_deadline`.
-pub(crate) fn rearm_local_timer(
-    earliest_soft_deadline: Option<ktime_types::MonotonicInstant>,
-    periodic_earliest: Option<u64>,
-) {
+/// reading per-CPU deadline slots and programming hardware. The prepared CPU
+/// lock is held through the hardware write so remote starts cannot be lost.
+pub(crate) fn rearm_local_timer() {
     let _guard = NoPreemptIrqSave::new();
     // SAFETY: same guard as above.
     let sched_ns = unsafe { NEXT_SCHED_DEADLINE_NS.read_current_raw() };
@@ -242,17 +230,13 @@ pub(crate) fn rearm_local_timer(
     if unsafe { DEFER_LOCAL_TIMER_REARM.read_current_raw() } {
         return;
     }
-    let soft = earliest_soft_deadline.map(|e| e.as_nanos_u64_saturating());
-    let periodic = periodic_earliest.or_else(crate::timers::earliest_deadline);
     // SAFETY: the guard pins this CPU with IRQs masked. The static set and all
     // participating storage remain live. The programmer only selects values
     // and writes hardware, without acquiring timer/runqueue locks or callbacks.
-    // Any old wheel lock is acquired before the prepared lock, never inside it.
     unsafe {
         crate::timers::PREPARED_TIMERS.reprogram_local_timer(
             khal::percpu::this_cpu_id(),
-            |prepared| match select_local_timer_deadline(sched, execution, soft, periodic, prepared)
-            {
+            |prepared| match select_local_timer_deadline(sched, execution, prepared) {
                 Some(d) => {
                     khal::time::arm_timer(ktime_types::MonotonicInstant::from_span_since_origin(
                         ktime_types::TimeSpan::from_nanos(d),
@@ -413,18 +397,15 @@ pub fn current_execution_context() -> Option<TaskExecutionContext> {
 pub fn refresh_current_execution_tick() {
     let _guard = NoPreemptIrqSave::new();
     refresh_execution_tick_deadline_slot_for(current_execution_context());
-    rearm_local_timer(
-        crate::future::earliest_deadline(khal::percpu::this_cpu_id()),
-        None,
-    );
+    rearm_local_timer();
 }
 
-/// Hardware-timer IRQ entry for dynamic schedule + soft + periodic timers:
+/// Hardware-timer IRQ entry for schedule, execution-accounting and owned timers:
 ///
 /// - Accounts real runtime for the current task first (so wake handling is not
 ///   charged to the wrong task). A due schedule slot runs Linux `entity_tick`
-///   (`check_preempt_tick`); soft/periodic IRQs only account.
-/// - Runs due periodic/prepared callbacks and drains the soft-timer wheel.
+///   (`check_preempt_tick`); other timer IRQs only account.
+/// - Runs due owned timer callbacks, including async wait completion.
 /// - Refreshes the schedule deadline (`next_preemption_ns` arms until-eligible
 ///   only for an ineligible WF_SYNC buddy) and re-arms hardware.
 ///
@@ -453,7 +434,7 @@ pub fn on_timer_fire() {
     };
     // Account the interrupted task before waking anyone else.
     // Linux `entity_tick` (`check_preempt_tick`) only runs on the schedule
-    // slot, not on every soft/periodic IRQ.
+    // slot, not on every owned timer IRQ.
     #[cfg(feature = "sched_eevdf")]
     if sched_due {
         current_run_queue::<NoOp>().account_sched_tick(now_ns);
@@ -462,13 +443,10 @@ pub fn on_timer_fire() {
     }
     #[cfg(not(feature = "sched_eevdf"))]
     current_run_queue::<NoOp>().account_current_runtime(now_ns);
-    // Timer callbacks and soft-timer wakeups may register/cancel timers or
+    // Timer callbacks and their wakeups may register/cancel timers or
     // refresh scheduler slots. Defer their hardware writes until the final
-    // schedule/soft/periodic arbitration below, after all wakeups have run.
+    // arbitration below, after all wakeups have run.
     begin_defer_local_timer_rearm();
-    let (_, periodic_due) = crate::timers::run_due_and_earliest(now_ns);
-    #[cfg(not(feature = "sched_stat"))]
-    let _ = periodic_due;
 
     // SAFETY: this is the matching CPU's non-nested timer IRQ, with IRQs masked.
     // The static set's registration boundary preserves node/handler storage.
@@ -480,15 +458,10 @@ pub fn on_timer_fire() {
     #[cfg(not(feature = "sched_stat"))]
     let _ = prepared_due;
 
-    let (wakers, _) = crate::future::drain_expired_and_get_earliest(cpu_id);
-
     #[cfg(feature = "sched_stat")]
     {
-        let soft_due = prepared_due || !wakers.is_empty();
-        crate::run_queue::note_timer_irq(sched_due, soft_due, periodic_due);
-    }
-    for (_, waker) in wakers {
-        waker.wake();
+        // Keep the diagnostic field layout; the removed periodic source is zero.
+        crate::run_queue::note_timer_irq(sched_due, prepared_due, false);
     }
     end_defer_local_timer_rearm();
 
@@ -496,11 +469,8 @@ pub fn on_timer_fire() {
     let _ = sched_due;
 
     current_run_queue::<NoOp>().refresh_sched_deadline(now_ns);
-    // Re-read after wakes so callbacks that armed a new soft timer are kept.
-    let earliest_soft = crate::future::earliest_deadline(cpu_id);
-    // Prepared callbacks may register legacy periodic sources too. Re-read all
-    // sources rather than retaining the earlier periodic scan's snapshot.
-    rearm_local_timer(earliest_soft, None);
+    // Re-read under the CPU timer lock after callbacks and wakeups.
+    rearm_local_timer();
 }
 
 /// Called from a remote reschedule IPI: request preemption.
@@ -529,7 +499,7 @@ impl kipi::TimerReprogramIpiIf {
     fn on_timer_reprogram() {
         // IRQs stay masked through arbitration. No accounting, scheduling or
         // timer delivery belongs in this notification endpoint.
-        crate::future::reprogram_local_timer();
+        rearm_local_timer();
     }
 }
 
@@ -903,53 +873,46 @@ mod tests_api {
     #[def_test]
     fn timer_arbiter_picks_earliest_deadline() {
         assert_eq!(
-            select_local_timer_deadline(Some(30), Some(15), Some(10), Some(20), None),
+            select_local_timer_deadline(Some(30), Some(15), Some(10)),
             Some(10)
         );
         assert_eq!(
-            select_local_timer_deadline(Some(50), Some(5), Some(8), None, None),
+            select_local_timer_deadline(Some(50), Some(5), Some(8)),
             Some(5)
         );
-        assert_eq!(
-            select_local_timer_deadline(None, None, Some(7), None, None),
-            Some(7)
-        );
+        assert_eq!(select_local_timer_deadline(None, None, Some(7)), Some(7));
     }
 
     #[def_test]
     fn timer_arbiter_disarms_when_all_empty() {
-        assert_eq!(
-            select_local_timer_deadline(None, None, None, None, None),
-            None
-        );
+        assert_eq!(select_local_timer_deadline(None, None, None), None);
     }
 
     #[def_test]
     fn timer_arbiter_merges_prepared_without_losing_other_sources() {
         assert_eq!(
-            select_local_timer_deadline(Some(30), Some(40), Some(50), Some(60), Some(10)),
+            select_local_timer_deadline(Some(30), Some(40), Some(10)),
             Some(10)
         );
         assert_eq!(
-            select_local_timer_deadline(Some(30), Some(40), Some(5), Some(60), Some(10)),
+            select_local_timer_deadline(Some(30), Some(5), Some(10)),
             Some(5)
         );
+        assert_eq!(select_local_timer_deadline(None, None, Some(0)), Some(0));
         assert_eq!(
-            select_local_timer_deadline(None, None, None, None, Some(0)),
-            Some(0)
-        );
-        assert_eq!(
-            select_local_timer_deadline(None, None, None, None, Some(u64::MAX)),
+            select_local_timer_deadline(None, None, Some(u64::MAX)),
             Some(u64::MAX)
         );
     }
 
     #[def_test]
-    fn timer_arbiter_keeps_sched_when_soft_fires_early() {
-        // Soft IRQ at T=10 must not clear a later schedule deadline at T=50;
-        // re-arbitration after soft drain still sees the schedule source.
-        let after_soft = select_local_timer_deadline(Some(50), None, None, None, None);
-        assert_eq!(after_soft, Some(50));
+    fn timer_arbiter_keeps_sched_after_owned_timer_delivery() {
+        // Delivery at T=10 must not clear a later schedule deadline at T=50.
+        assert_eq!(
+            select_local_timer_deadline(Some(50), None, Some(10)),
+            Some(10)
+        );
+        assert_eq!(select_local_timer_deadline(Some(50), None, None), Some(50));
     }
 
     #[def_test]
@@ -957,7 +920,7 @@ mod tests_api {
         // Expired deadlines remain the earliest absolute value; the IRQ path
         // re-accounts and reprograms rather than skipping them.
         assert_eq!(
-            select_local_timer_deadline(Some(1), Some(100), Some(150), Some(200), None),
+            select_local_timer_deadline(Some(1), Some(100), Some(150)),
             Some(1)
         );
     }

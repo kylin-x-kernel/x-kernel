@@ -18,6 +18,15 @@ Storage is prepared once, then reused for starts, replacements and delivery.
 Construction, final destruction and resources used by caller callbacks are outside
 the core's allocation-free operation interval.
 
+## Initial Owner Selection
+
+`Timer::new_on` validates a platform-supplied initial CPU before allocation and
+binds the unpublished node to that route. `Timer::new` retains the CPU0 default.
+This is a lock-route hint, not CPU affinity or registration. Initializing the
+likely first-start owner avoids routing a fresh node through another CPU's locks.
+Once published, all route changes still use the existing ordered migration locks;
+running callbacks retain their owner. No storage or callback ownership changes.
+
 ## Source Layout and Dependencies
 
 | File | Responsibility |

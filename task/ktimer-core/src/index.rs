@@ -60,6 +60,23 @@ unsafe impl Sync for TimerNode {}
 unsafe impl Send for TimerNode {}
 
 impl TimerNode {
+    /// Binds an unpublished node with an explicit initial lock route.
+    ///
+    /// # Safety
+    /// Uphold with_handler's stable-handler contract. initial_cpu must index
+    /// the collection used for all subsequent operations on this node.
+    pub(super) unsafe fn with_handler_on<H: TimerHandler>(
+        deadline: Deadline,
+        handler: &H,
+        initial_cpu: LogicalCpuId,
+    ) -> Self {
+        // SAFETY: the caller retains the bound handler at a stable address.
+        // This node is still unpublished, so no route locks are needed yet.
+        let mut node = unsafe { Self::with_handler(deadline, handler) };
+        node.owner_cpu = AtomicUsize::new(initial_cpu.as_usize());
+        node
+    }
+
     pub(super) fn owner_cpu(&self) -> LogicalCpuId {
         LogicalCpuId::new(self.owner_cpu.load(Ordering::Acquire))
     }

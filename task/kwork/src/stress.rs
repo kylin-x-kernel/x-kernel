@@ -24,9 +24,8 @@ use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use ktime_types::TimeSpan;
 
 use crate::{
-    BudgetedPollProgress, BudgetedPoller, CancelWorkResult, DelayedScheduledWork,
-    QueueDelayedWorkResult, QueueWorkResult, ScheduleAttrs, ScheduledWork, WorkQueue,
-    WorkQueueAttrs, WorkQueueHandle, WorkqueueError,
+    BudgetedPollProgress, BudgetedPoller, CancelWorkResult, QueueWorkResult, ScheduleAttrs,
+    ScheduledWork, WorkQueue, WorkQueueAttrs, WorkQueueHandle, WorkqueueError,
     builtinpool::{self, SystemPoolKind},
     runtime, system_bh_highpri_wq, system_percpu_wq, system_wq,
 };
@@ -59,7 +58,6 @@ const CASE_BUDGETED_POLLER: usize = 8;
 const CASE_CANCEL_RACE: usize = 9;
 const CASE_DISABLE_RACE: usize = 10;
 const CASE_DESTROY_RACE: usize = 11;
-const CASE_DELAYED_CANCEL: usize = 12;
 const CASE_CANCEL_NONBLOCKING: usize = 13;
 const CASE_WAIT_DEADLOCK: usize = 14;
 const CASE_SLEEP_BLOCK: usize = 15;
@@ -218,10 +216,9 @@ pub fn stress_status_text() -> String {
                    [works], balanced-fanout [rounds] [works], percpu-fanout [rounds] [works], \
                    yield-cpu [rounds], bh-drain [rounds], bh-highpri [rounds], budgeted-poller \
                    [rounds] [works], cancel-race [rounds] [works], disable-race [rounds] [works], \
-                   destroy-race [rounds] [works], delayed-cancel [rounds] [works], \
-                   cancel-nonblocking [rounds] [works], wait-deadlock [rounds], sleep-block \
-                   [rounds], all [rounds] [works], smoke, soak [seconds] [works], bench [seconds] \
-                   [works], dump\n"
+                   destroy-race [rounds] [works], cancel-nonblocking [rounds] [works], \
+                   wait-deadlock [rounds], sleep-block [rounds], all [rounds] [works], smoke, \
+                   soak [seconds] [works], bench [seconds] [works], dump\n"
         .to_string();
     let case = CURRENT_CASE.load(Ordering::Acquire);
     let phase = CURRENT_PHASE.load(Ordering::Acquire);
@@ -308,7 +305,6 @@ pub fn run_stress_command(data: &[u8]) -> Result<String, StressError> {
         "cancel-race" => vec![run_cancel_race(args.as_slice())?],
         "disable-race" => vec![run_disable_race(args.as_slice())?],
         "destroy-race" => vec![run_destroy_race(args.as_slice())?],
-        "delayed-cancel" => vec![run_delayed_cancel(args.as_slice())?],
         "cancel-nonblocking" => vec![run_cancel_nonblocking(args.as_slice())?],
         "wait-deadlock" => vec![run_wait_deadlock(args.as_slice())?],
         "sleep-block" => vec![run_sleep_block(args.as_slice())?],
@@ -592,7 +588,6 @@ fn run_all(args: &[&str]) -> Result<Vec<StressSummary>, StressError> {
         run_cancel_race(args)?,
         run_disable_race(args)?,
         run_destroy_race(args)?,
-        run_delayed_cancel(args)?,
         run_cancel_nonblocking(args)?,
         run_wait_deadlock(args)?,
         run_sleep_block(args)?,
@@ -612,7 +607,6 @@ fn run_smoke() -> Result<Vec<StressSummary>, StressError> {
         run_cancel_race(&["2", "8"])?,
         run_disable_race(&["2", "8"])?,
         run_destroy_race(&["2", "8"])?,
-        run_delayed_cancel(&["2", "8"])?,
         run_cancel_nonblocking(&["2", "8"])?,
         run_wait_deadlock(&["2"])?,
         run_sleep_block(&["2"])?,
@@ -653,9 +647,6 @@ fn run_soak_cycle(args: &[&str], iteration: usize) -> Result<Vec<StressSummary>,
     })?);
     summaries.push(run_named_case("cancel-race", || run_cancel_race(args))?);
     summaries.push(run_named_case("disable-race", || run_disable_race(args))?);
-    summaries.push(run_named_case("delayed-cancel", || {
-        run_delayed_cancel(args)
-    })?);
     summaries.push(run_named_case("cancel-nonblocking", || {
         run_cancel_nonblocking(args)
     })?);
@@ -721,7 +712,6 @@ fn case_id(case: &str) -> usize {
         "cancel-race" => CASE_CANCEL_RACE,
         "disable-race" => CASE_DISABLE_RACE,
         "destroy-race" => CASE_DESTROY_RACE,
-        "delayed-cancel" => CASE_DELAYED_CANCEL,
         "cancel-nonblocking" => CASE_CANCEL_NONBLOCKING,
         "wait-deadlock" => CASE_WAIT_DEADLOCK,
         "sleep-block" => CASE_SLEEP_BLOCK,
@@ -742,7 +732,6 @@ fn case_name(case: usize) -> &'static str {
         CASE_CANCEL_RACE => "cancel-race",
         CASE_DISABLE_RACE => "disable-race",
         CASE_DESTROY_RACE => "destroy-race",
-        CASE_DELAYED_CANCEL => "delayed-cancel",
         CASE_CANCEL_NONBLOCKING => "cancel-nonblocking",
         CASE_WAIT_DEADLOCK => "wait-deadlock",
         CASE_SLEEP_BLOCK => "sleep-block",
@@ -1453,63 +1442,6 @@ fn run_destroy_race(args: &[&str]) -> Result<StressSummary, StressError> {
     })
 }
 
-fn run_delayed_cancel(args: &[&str]) -> Result<StressSummary, StressError> {
-    let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
-    let works = parse_arg(args, 1, DEFAULT_WORKS, 1, MAX_WORKS)?;
-    let cpus = ready_cpus(SystemPoolKind::Normal)?;
-    let completed = Arc::new(AtomicUsize::new(0));
-    let cancel_sync = Arc::new(AtomicUsize::new(0));
-    let per_cpu = per_cpu_counters();
-
-    for round in 0..rounds {
-        let cpu_id = cpus[round % cpus.len()];
-        let mut batch = Vec::new();
-        for idx in 0..works {
-            let completed = completed.clone();
-            let per_cpu = per_cpu.clone();
-            let work = DelayedScheduledWork::new(move |_| {
-                record_current_cpu(&per_cpu);
-                completed.fetch_add(1, Ordering::AcqRel);
-            });
-            let attrs = ScheduleAttrs::system().on_cpu(cpu_id);
-            match work.schedule_after_with(TimeSpan::from_millis(1), attrs) {
-                QueueDelayedWorkResult::Queued => {}
-                other => return Err(delayed_to_stress_error(other)),
-            }
-            if idx % 3 == 0 {
-                if work.cancel_sync().map_err(StressError::FlushFailed)? {
-                    cancel_sync.fetch_add(1, Ordering::AcqRel);
-                }
-            } else if idx % 3 == 1 {
-                match work.mod_schedule_after_with(TimeSpan::ZERO, attrs) {
-                    QueueDelayedWorkResult::Queued => {}
-                    other => return Err(delayed_to_stress_error(other)),
-                }
-            }
-            batch.push(work);
-        }
-        ktask::sleep(TimeSpan::from_millis(2));
-        for work in &batch {
-            if work.cancel_sync().map_err(StressError::FlushFailed)? {
-                cancel_sync.fetch_add(1, Ordering::AcqRel);
-            }
-        }
-    }
-
-    Ok(StressSummary {
-        case: "delayed-cancel",
-        rounds,
-        queued: rounds * works,
-        completed: completed.load(Ordering::Acquire),
-        cancel: 0,
-        cancel_sync: cancel_sync.load(Ordering::Acquire),
-        would_deadlock: 0,
-        disabled: 0,
-        failures: 0,
-        active_cpus: active_cpu_count(&per_cpu),
-    })
-}
-
 fn run_cancel_nonblocking(args: &[&str]) -> Result<StressSummary, StressError> {
     let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
     let works = parse_arg(args, 1, DEFAULT_WORKS, 1, MAX_WORKS)?;
@@ -1570,28 +1502,6 @@ fn run_cancel_nonblocking(args: &[&str]) -> Result<StressSummary, StressError> {
                     }
                 }
             }
-
-            let completed_ref = completed.clone();
-            let per_cpu_ref = per_cpu.clone();
-            let delayed = DelayedScheduledWork::new(move |_| {
-                record_current_cpu(&per_cpu_ref);
-                completed_ref.fetch_add(1, Ordering::AcqRel);
-            });
-            match delayed.schedule_after_with(
-                TimeSpan::from_millis(10),
-                ScheduleAttrs::system().on_cpu(cpu_id),
-            ) {
-                QueueDelayedWorkResult::Queued => {}
-                other => return Err(delayed_to_stress_error(other)),
-            }
-            match delayed.cancel() {
-                CancelWorkResult::CancelledPending => {
-                    canceled.fetch_add(1, Ordering::AcqRel);
-                }
-                _ => {
-                    failures.fetch_add(1, Ordering::AcqRel);
-                }
-            }
         }
 
         blocker_finish.store(true, Ordering::Release);
@@ -1607,7 +1517,7 @@ fn run_cancel_nonblocking(args: &[&str]) -> Result<StressSummary, StressError> {
     Ok(StressSummary {
         case: "cancel-nonblocking",
         rounds,
-        queued: rounds.saturating_mul(works).saturating_mul(2) + rounds,
+        queued: rounds.saturating_mul(works) + rounds,
         completed: completed.load(Ordering::Acquire),
         cancel: canceled.load(Ordering::Acquire),
         cancel_sync: 0,
@@ -1876,33 +1786,6 @@ where
         },
         format!("{}/{}", name, cpu_id.as_usize()),
     );
-}
-
-fn delayed_to_stress_error(result: QueueDelayedWorkResult) -> StressError {
-    match result {
-        QueueDelayedWorkResult::Queued => StressError::Incomplete,
-        QueueDelayedWorkResult::AlreadyQueued
-        | QueueDelayedWorkResult::QueueFull
-        | QueueDelayedWorkResult::Disabled
-        | QueueDelayedWorkResult::InvalidCpu
-        | QueueDelayedWorkResult::TimerUnavailable
-        | QueueDelayedWorkResult::WorkerUnavailable => {
-            StressError::QueueFailed(queue_work_result_from_delayed(result))
-        }
-    }
-}
-
-fn queue_work_result_from_delayed(result: QueueDelayedWorkResult) -> QueueWorkResult {
-    match result {
-        QueueDelayedWorkResult::Queued => QueueWorkResult::Queued,
-        QueueDelayedWorkResult::AlreadyQueued => QueueWorkResult::AlreadyQueued,
-        QueueDelayedWorkResult::QueueFull => QueueWorkResult::QueueFull,
-        QueueDelayedWorkResult::Disabled => QueueWorkResult::Disabled,
-        QueueDelayedWorkResult::InvalidCpu => QueueWorkResult::InvalidCpu,
-        QueueDelayedWorkResult::TimerUnavailable | QueueDelayedWorkResult::WorkerUnavailable => {
-            QueueWorkResult::WorkerUnavailable
-        }
-    }
 }
 
 fn parse_arg(

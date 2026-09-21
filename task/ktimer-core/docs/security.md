@@ -18,6 +18,14 @@ Synchronous cancellation is not permission to violate callback lock ordering.
 
 ## Assets and External Boundaries
 
+The safe `Timer::new_on` constructor accepts an initial CPU index and validates
+it before allocating timer storage; invalid input drops the supplied handler.
+Its private node binding initializes the route only before publication. It does
+not call the migration-only owner setter without locks, enqueue a node, or grant
+IRQ readiness. The default constructor still uses the valid CPU0 slot because
+`TimerSet::new` rejects empty sets. Published nodes keep the same locking and
+synchronous destruction invariants regardless of their initial route.
+
 | Asset or boundary | Data direction and protection |
 | --- | --- |
 | `TimerData<H>` node/handler allocation | `Timer` owns it; tree and dispatch borrow it. Preserve stable address, initialized type and lifetime until all accesses drain. |
@@ -127,10 +135,10 @@ implementation; inclusion does not by itself make the named API unsafe to call.
 
 | Source and entities | Unsafe operation, required invariant and enforcing boundary |
 | --- | --- |
-| `src/timer.rs`: safe `Timer::new` | Its internal unsafe block calls private `TimerNode::with_handler` to bind the typed handler pointer. The uniquely owned, unpublished Arc is already at its final address; the constructor establishes the invariant without caller safety obligations. |
+| `src/timer.rs`: safe `Timer::new` and `Timer::new_on`, private `prepare` | The shared preparation helper internally calls unsafe `TimerNode::with_handler_on` with a validated route to bind the typed handler pointer. The uniquely owned, unpublished Arc is already at its final address; neither public constructor requires caller unsafe obligations. |
 | `src/timer.rs`: safe `Timer::handler`, `try_cancel`, `cancel_sync` | Internal unsafe blocks recover the shared handler or call owner-routed node operations. The private stable Arc, static set and exact type pairing enforce ownership and lifetime. Safe `Drop::drop` calls `cancel_sync` before field destruction; it contains no unsafe block itself. |
 | `src/timer.rs`: `unsafe fn Timer::start_on`, `start_on_if_future` | Internal unsafe blocks register the privately owned node through the timer set. Storage invariants are enforced by the owning wrapper; callers must additionally uphold the documented platform placement, dispatch, clock and notification contracts. |
-| `src/index.rs`: `TimerNode::with_handler`, `call_typed_handler`, `handler`, `invoke` | Construct erased pointer/function pair and recover shared `&H`. Pointer originates from initialized `&H`, has its alignment/type, and remains valid without moves, exclusive borrows or destruction; invocation uses the live running owner outside locks. Placeholder bindings must never be used for typed handler access. |
+| `src/index.rs`: `TimerNode::with_handler`, `with_handler_on`, `call_typed_handler`, `handler`, `invoke` | Construct erased pointer/function pair and recover shared `&H`. Pointer originates from initialized `&H`, has its alignment/type, and remains valid without moves, exclusive borrows or destruction; invocation uses the live running owner outside locks. The initial route is set before publication. Placeholder bindings must never be used for typed handler access. |
 | `src/index.rs`: `TimerNode::deadline`, `replace_deadline`, `NodeAdapter::get_key` | Read/write `UnsafeCell<Deadline>`. Owner serialization excludes competing writers; replacement requires unlinking. The private adapter reads stable linked keys only. |
 | `src/index.rs`: `TimerNode::set_owner_cpu` | Publish route only after ordered old/new locking, route revalidation, exclusion of running delivery, old membership removal and new membership insertion; all operations use the same set. |
 | `src/index.rs`: `TimerIndex::insert`, `remove`, `earliest_deadline_ns`, `pop_due`, generated `NodeAdapter` | Intrusive borrowed pointers and cursor-from-pointer removal. Insert requires stable live unlinked nodes; removal requires membership in this exact tree. Cached pointers always name current members and are updated on removal. The adapter uses the actual embedded link field. |

@@ -18,7 +18,7 @@ Stress cases run only through `/proc/kwork_stress`, including the short
 ## Boundary
 
 The stress subsystem is a `kwork` runtime user. It must use public product
-APIs such as `ScheduledWork`, `DelayedScheduledWork`, `WorkQueueHandle`,
+APIs such as `ScheduledWork`, `WorkQueueHandle`,
 `system_wq`, `system_bh_wq`, `flush`, `cancel`, and `cancel_sync`.
 
 It must not reach into `kworkqueue` binding internals or `kworkerpool` worker
@@ -41,7 +41,6 @@ budgeted-poller [rounds] [works]
 cancel-race [rounds] [works]
 disable-race [rounds] [works]
 destroy-race [rounds] [works]
-delayed-cancel [rounds] [works]
 cancel-nonblocking [rounds] [works]
 wait-deadlock [rounds]
 sleep-block [rounds]
@@ -102,10 +101,7 @@ baseline before scheduler, pool, or queue policy changes.
 - `destroy-race`: a dynamic queue is destroyed while a producer is still
   enqueueing to it, covering disabled queue publication, flush-on-destroy, and
   producer-side disabled returns.
-- `delayed-cancel`: delayed work is scheduled, modified to immediate, canceled
-  before expiry, and canceled after timer expiry windows to exercise stale
-  timer generation handling.
-- `cancel-nonblocking`: pending normal work and delayed work are canceled with
+- `cancel-nonblocking`: pending normal work is canceled with
   the non-waiting public `cancel` API while a running blocker keeps the queue
   serial. The case also verifies that canceling a running work returns the
   running result without blocking.

@@ -4,17 +4,12 @@
 
 //! Built-in workqueue runtime helpers.
 
-use alloc::{sync::Arc, task::Wake};
-use core::{
-    future::poll_fn,
-    sync::atomic::{AtomicBool, Ordering},
-    task::{Poll, Waker},
-};
+use alloc::sync::Arc;
+use core::{future::poll_fn, task::Poll};
 
 use kcpu_id_map::LogicalCpuId;
 use kirq::softirq::{SoftirqVec, open_softirq, raise_softirq};
 use kpoll::{PollEvent, PollRegistrations};
-use kspin::SpinNoIrq;
 use ktime_types::{MonotonicInstant, TimeSpan};
 use kworkerpool::{
     ActionBatch, PoolEntry, PoolId, RunnableClaim, RunnableClaimer, WorkerExecutionToken, WorkerId,
@@ -40,79 +35,11 @@ pub fn init_system_workqueue_worker_pools_for_cpu(
     crate::builtinpool::init_system_worker_pools_for_cpu(cpu_id, BuiltinWorkerRuntime::new)
 }
 
-/// Timer handle used by delayed work.
-pub(crate) trait WorkqueueTimerHandle: Send + Sync {
-    /// Cancels the timer.
-    fn cancel(&self) -> bool;
-}
-
-struct TimerWake {
-    done: AtomicBool,
-    callback: Arc<dyn Fn() + Send + Sync>,
-}
-
-impl TimerWake {
-    fn new(callback: Arc<dyn Fn() + Send + Sync>) -> Self {
-        Self {
-            done: AtomicBool::new(false),
-            callback,
-        }
-    }
-
-    fn cancel(&self) -> bool {
-        !self.done.swap(true, Ordering::AcqRel)
-    }
-
-    fn fire(&self) {
-        if !self.done.swap(true, Ordering::AcqRel) {
-            (self.callback)();
-        }
-    }
-}
-
-impl Wake for TimerWake {
-    fn wake(self: Arc<Self>) {
-        self.fire();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.fire();
-    }
-}
-
 /// Returns the logical CPU currently executing the caller.
 pub(crate) fn current_cpu_id() -> LogicalCpuId {
     ktask::current_may_uninit()
         .map(|task| task.cpu_id())
         .unwrap_or(LogicalCpuId::new(0))
-}
-
-/// Arms a one-shot timer.
-pub(crate) fn arm_timer(
-    deadline: MonotonicInstant,
-    callback: Arc<dyn Fn() + Send + Sync>,
-) -> Option<Arc<dyn WorkqueueTimerHandle>> {
-    struct TimerHandle {
-        wake: Arc<TimerWake>,
-        handle: SpinNoIrq<Option<ktask::future::TimerHandle>>,
-    }
-
-    impl WorkqueueTimerHandle for TimerHandle {
-        fn cancel(&self) -> bool {
-            if let Some(handle) = self.handle.lock().take() {
-                ktask::future::cancel_timer(&handle);
-            }
-            self.wake.cancel()
-        }
-    }
-
-    let wake = Arc::new(TimerWake::new(callback));
-    let waker = Waker::from(wake.clone());
-    let handle = ktask::future::register_timer(deadline, waker)?;
-    Some(Arc::new(TimerHandle {
-        wake,
-        handle: SpinNoIrq::new(Some(handle)),
-    }))
 }
 
 #[kiface::provide]

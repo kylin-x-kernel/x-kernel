@@ -54,6 +54,29 @@ pub use timer::{CancelResult, Timer};
 
 mod ownership_races;
 
+#[test]
+fn explicit_initial_owner_allows_move_and_dispatch() {
+    use ktime_types::{MonotonicInstant, TimeSpan};
+    static TIMERS: TimerSet<2> = TimerSet::new();
+    let timer = Timer::new_on(&TIMERS, 1.into(), |_: TimerControl<'_>, _: Expiration| {}).unwrap();
+    let moved = timer;
+    assert_eq!(moved.try_cancel(), CancelResult::Inactive);
+    // SAFETY: live owned storage, serialized modeled CPUs and empty callback.
+    unsafe {
+        moved
+            .start_on(
+                0.into(),
+                MonotonicInstant::from_span_since_origin(TimeSpan::from_nanos(10)),
+            )
+            .unwrap();
+        assert!(TIMERS.dispatch_due(0.into(), || 10).unwrap());
+    }
+    assert!(!moved.cancel_sync());
+    drop(moved);
+    let idle = Timer::new_on(&TIMERS, 1.into(), |_: TimerControl<'_>, _: Expiration| {}).unwrap();
+    drop(idle);
+}
+
 struct State {
     entered: AtomicBool,
     can_finish: AtomicBool,

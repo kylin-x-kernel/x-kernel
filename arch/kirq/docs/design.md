@@ -565,7 +565,7 @@ flush_work(work) / cancel_work_sync(work)
    -> wait through ktask wait/yield helpers and recheck kwork-owned work state
 ```
 
-`kwork` owns the product API (`ScheduledWork`, `DelayedScheduledWork`,
+`kwork` owns the product API (`ScheduledWork`,
 `WorkQueue`, `WorkQueueHandle`, system queue helpers and `BudgetedPoller`) and
 wires `kworkqueue` queue state to `kworkerpool` execution pools. `kwork` reads
 `kirq::context` directly for sleepable wait gating and registers BH softirq
@@ -598,11 +598,9 @@ leave work pending in a pool that nobody can drain.
 the shared Default pools; they do not receive dedicated ktask workers or a host
 registry. `flush_workqueue()` snapshots and waits all per-CPU pwqs.
 `destroy_workqueue()` gates new enqueue and drains pending/running work, while
-pool workers remain alive. `DelayedScheduledWork` adds
-`timer -> queue_work` delayed execution through `kwork`; non-zero delay
-registration currently requires task context because ktask timer registration
-may allocate. Timer-fire enqueue failure is retained in `kwork` as a ready
-delayed state that can be canceled or flushed rather than being dropped.
+pool workers remain alive. The legacy delayed-work wrapper and its waker-timer
+provider have been removed. A replacement delayed-work API requires a separate
+lifecycle design; ordinary workqueue enqueue and teardown remain available.
 Queue-level drain APIs were removed; task-context work only runs from
 `kworkerpool::KtaskWorkerPool` worker loops, and bottom-half work only runs from
 the registered softirq drain actions.

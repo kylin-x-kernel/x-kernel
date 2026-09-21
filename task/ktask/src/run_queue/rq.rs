@@ -35,7 +35,6 @@ use crate::{
         refresh_execution_tick_deadline_for_task,
     },
     current_may_uninit,
-    future::earliest_deadline,
     task::{CurrentTask, TaskState},
     tracing_hooks::{fire_context_switch, fire_task_wakeup},
 };
@@ -58,7 +57,7 @@ pub(super) fn request_resched_on(rq: &mut RunQueue) {
             rq.scheduler.lock().next_preemption_ns(&curr_arc)
         };
         program_sched_deadline(now_ns, next_rel);
-        rearm_local_timer(earliest_deadline(cpu_id), None);
+        rearm_local_timer();
     } else {
         #[cfg(all(feature = "smp", feature = "ipi"))]
         {
@@ -416,7 +415,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             if !peer_wins {
                 self.current_task.set_preempt_pending(false);
                 program_sched_deadline(now_ns, next_rel);
-                rearm_local_timer(earliest_deadline(self.inner.cpu_id), None);
+                rearm_local_timer();
                 return;
             }
         } else {
@@ -588,7 +587,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             .set_priority(&self.current_task, prio);
         if ok {
             self.refresh_sched_deadline(now_ns);
-            rearm_local_timer(earliest_deadline(self.inner.cpu_id), None);
+            rearm_local_timer();
         }
         ok
     }
@@ -876,7 +875,7 @@ impl RunQueue {
             // this point `current()` is still the outgoing task.
             program_sched_deadline_for(Some(next), now, next_rel);
             refresh_execution_tick_deadline_for_task(next);
-            rearm_local_timer(earliest_deadline(rq.cpu_id), None);
+            rearm_local_timer();
         };
 
         if prev_task.ptr_eq(&next_task) {

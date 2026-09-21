@@ -3,7 +3,7 @@
 ## Role
 
 `kwork` is the kernel-facing workqueue product layer. It exposes callback work
-objects, delayed work, dynamic logical queues, built-in system queues,
+objects, dynamic logical queues, built-in system queues,
 bottom-half queues, budgeted polling, stress hooks, and watchdog integration.
 
 The crate assembles two lower-level cores:
@@ -14,7 +14,7 @@ The crate assembles two lower-level cores:
 
 `kwork` owns the concrete callback storage and the built-in mapping between
 logical queues and execution pools. It depends directly on `ktask` for task
-workers, waits, and timers, and on `kirq` for bottom-half execution and
+workers and timed waits, and on `kirq` for bottom-half execution and
 interrupt-context checks.
 
 ## Public API
@@ -22,7 +22,6 @@ interrupt-context checks.
 The crate root intentionally exposes only product-level APIs:
 
 - `ScheduledWork` is a reusable callback work item.
-- `DelayedScheduledWork` is delayed work with generation-protected timer state.
 - `WorkQueue` is a static logical queue.
 - `WorkQueueHandle` is an allocated dynamic logical queue owner.
 - `ScheduleAttrs` selects the target queue family and optional CPU.
@@ -57,17 +56,6 @@ use kwork::{ScheduleAttrs, ScheduledWork};
 
 let work = ScheduledWork::new(|_| {});
 let _ = work.schedule_with(ScheduleAttrs::system().on_cpu(LogicalCpuId::new(0)));
-```
-
-Delayed work:
-
-```rust
-use ktime_types::TimeSpan;
-use kwork::{DelayedScheduledWork, ScheduleAttrs};
-
-let work = DelayedScheduledWork::new(|_| {});
-let _ = work.schedule_after_with(TimeSpan::from_millis(10), ScheduleAttrs::system());
-let _ = work.cancel_sync();
 ```
 
 Bottom-half work:
@@ -112,8 +100,8 @@ owner/key/payload values into `kworkerpool`. When a worker claims an entry,
 `kwork` maps the entry back to the queue binding and scheduled work handle,
 then runs the callback with internal locks released.
 
-`ScheduledWork` and `DelayedScheduledWork` are reference-counted internally.
-Pending entries, running callbacks, and delayed timers hold their own handle
+`ScheduledWork` is reference-counted internally.
+Pending entries and running callbacks hold their own handle
 clone, so the work object remains alive until the asynchronous instance is no
 longer observable.
 
@@ -123,7 +111,7 @@ Immediate enqueue paths may be called from task context, hardirq, softirq, or
 BH-disabled context after the work object has already been created. They do not
 run callbacks, create worker tasks, or allocate work objects.
 
-`cancel()` is non-blocking. It may remove pending queued or delayed work from
+`cancel()` is non-blocking. It may remove pending queued work from
 IRQ-adjacent contexts and returns `Running` instead of waiting when a callback
 is already executing.
 
@@ -133,9 +121,10 @@ before blocking and returns `WorkqueueError::InvalidContext` from
 interrupt-like contexts. A normal worker callback that would wait on work owned
 by its own per-CPU normal pool receives `WorkqueueError::WouldDeadlock`.
 
-Non-zero delayed work scheduling creates a timer handle and therefore requires
-a context where allocation and ktask timer setup are valid. A zero delay is
-converted to immediate enqueue.
+The legacy delayed-work product API is removed along with its waker-timer
+provider. This crate exposes immediate enqueue only; a replacement delayed-work
+API requires a separate lifecycle design. The lower-level `kworkqueue` delayed
+state contract is unchanged and does not register any timer by itself.
 
 ## Progress Model
 

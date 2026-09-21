@@ -24,6 +24,13 @@ new scheduling/diagnostic hooks should start here.
 
 ## Background
 
+Owned timer preparation uses `ktimer_core::Timer::new_on` with a snapshot of the
+current logical CPU after platform per-CPU initialization. The platform accessor
+protects the CPU-ID read; allocation does not require extending that critical
+section. This avoids an unnecessary first-arm migration for same-CPU use. If
+preparation and start occur on different CPUs, the existing start routing moves
+the node normally. Timer IRQ readiness remains a start-time requirement.
+
 X-Kernel splits class algorithms from the task runtime:
 
 - `ksched` supplies FIFO / RR / CFS / EEVDF algorithm traits and entities.
@@ -79,7 +86,7 @@ task/ktask/
 │   │   ├── poll.rs            # poll helpers
 │   │   └── time.rs            # sleep timer future
 │   ├── wait_queue.rs          # event-driven blocking wait
-│   ├── timers.rs              # tick callbacks and timer-event dispatch
+│   ├── timers.rs              # owned timer adapter and IRQ heartbeat hook
 │   ├── tracing_hooks.rs       # sched trace hook registration
 │   ├── tests_timer_routing.rs # unittest: ktimer_core owner routing
 │   └── snapshot/              # optional task/CPU snapshot and backtrace
@@ -145,7 +152,7 @@ kruntime::init_scheduler()/init_scheduler_secondary()
 | `Scheduler` (`ksched`) | `add_task` / `pick_next` / `update_current` / `next_preemption_ns` / `enqueue_task` / `leave_current` / `steal_ready_task`. A running task always leaves through `leave_current`. Block/Migrate record vlag; wake/migrate-in use `enqueue_task` PLACE_LAG; idle-pull uses `steal_ready_task` then PLACE_LAG. EEVDF `curr` is a numeric snapshot only. Slice/request are in ns. |
 | `future::block_on` | Maps `Future` pending onto task block/wake |
 | `WaitQueue` | Event-driven blocking wait API |
-| `timers` | Explicit periodic callbacks, decoupled from the schedule timer |
+| `timers` | Owned timer adapter, static CPU queues and timer IRQ heartbeat hook |
 | `snapshot` / `task_registry` | Optional diagnostics: snapshot / watchdog / NMI share a task walk. Mutex-wait checks sample the current tick after each task snapshot and drop a start time later than that sample. |
 
 ### Prepared timer core dependency
@@ -156,9 +163,9 @@ owns the static production `PREPARED_TIMERS` set. `on_timer_fire` dispatches its
 due callbacks outside timer/runqueue locks, with IRQs disabled on the owner CPU.
 Async `future::sleep*`, `future::timeout*`, timerfd, network sampling and
 per-CPU watchdog sampling now use the owned `ktask::Timer` adapter. Network
-and watchdog handlers own their completion-relative periodic policy. Explicit
-waker registrations and the now-unused legacy periodic registration API remain
-separate participants in hardware arbitration pending legacy-source removal.
+and watchdog handlers own their completion-relative periodic policy. The former
+waker map and periodic callback vector, including their registration APIs, are
+removed; all general timer delivery now uses this one prepared source.
 With `sched_stat`, network/watchdog sampling now contributes to
 `timer_irq_soft` through prepared dispatch, not `timer_irq_periodic`.
 This is a diagnostic classification change, not a change in callback context.
@@ -172,7 +179,7 @@ borrow is tied to the timer; concurrent state access still needs synchronization
 pins the current CPU and masks IRQs until registration and hardware refresh
 finish. Idle/pending replacement selects that CPU; a running callback retains
 its actual owner, which receives a fixed IPI if remote. Local refresh acquires
-the legacy wheel before the prepared CPU lock. Cancellation delegates to the
+only the prepared CPU lock. Cancellation delegates to the
 core and can leave a harmless stale IRQ. No automatic periodic policy is added.
 
 Each pending async sleep allocates one core-owned node/handler object. Its
@@ -191,10 +198,9 @@ remaining pending throughout the supported clock lifetime (strictly below that
 horizon). The public raw timer API rejects over-horizon input. `timeout_at`
 keeps operation-first polling when both branches are ready.
 
-`rearm_local_timer` merges schedule, execution-accounting, legacy soft/periodic
-and prepared deadlines. It holds the prepared CPU lock through the hardware
-write. A timer notification takes the legacy wheel lock first, then that CPU
-lock; the programmer never takes a wheel or runqueue lock. Timer IRQ batching
+`rearm_local_timer` merges schedule, execution-accounting and prepared deadlines.
+It holds the prepared CPU lock through the hardware write. A timer notification
+uses the same arbitration; the programmer never takes a runqueue lock. Timer IRQ batching
 defers intermediate writes and re-reads all sources after callbacks and wakes.
 Core overload backoff changes only the prepared service deadline, not scheduler
 or accounting deadlines. An empty prepared queue cannot disarm another source.
@@ -402,7 +408,7 @@ ready task it first idle-pulls a Ready `!on_cpu` waiter from a CPU with
 
 `ktask` owns all hardware timer-drive logic. `kruntime` only registers the
 clock interrupt vector; the handler calls `ktask::on_timer_fire()`. Schedule
-and soft timers share a per-CPU oneshot device and arbitrate by absolute-ns
+and owned timers share a per-CPU oneshot device and arbitrate by absolute-ns
 deadline. They no longer depend on a fixed `TICKS_PER_SECOND` schedule tick:
 
 1. The IRQ entry first calls the `register_timer_irq_note` hook (watchdog
@@ -412,26 +418,26 @@ deadline. They no longer depend on a fixed `TICKS_PER_SECOND` schedule tick:
    when the request is exhausted). Only an expired schedule slot then runs
    Linux `entity_tick` / `check_preempt_tick`: `need_resched` is set only
    when pick would change (eligible NEXT_BUDDY or an earlier deadline).
-   Soft/periodic IRQs only account, so a later-deadline WF_SYNC wakee is not
+   Owned timer IRQs only account, so a later-deadline WF_SYNC wakee is not
    immediately pulled back. An ineligible buddy is armed until eligible by
    `next_preemption_ns`; other waiters are not polled every 10 µs. A failed
    IRQ-tail probe still returns immediately.
-2. Due explicit periodic callbacks (`register_timer_callback(period, ...)`)
-   run next. Hardware rearm is deferred across the wake batch, the soft-timer
-   wheel is drained and woken, then the soft earliest is reread.
+2. Due owned timers run outside timer/runqueue locks, with IRQs disabled.
+   Hardware rearm is deferred across callback delivery and its wakeups.
 3. `next_preemption_ns(current)` recomputes the optional
    `NEXT_SCHED_DEADLINE`, then `rearm_local_timer` to
 
 ```text
-min(next_sched_deadline?, earliest_soft?, earliest_periodic?)
+min(next_sched_deadline?, next_execution_tick_deadline?, prepared_service_deadline?)
 ```
 
    If all three are empty, `disarm_timer()` runs. Stale/expired IRQs only
    catch up accounting and rearm; they do not loop catch-up ticks. With
-   `sched_stat`, IRQs are classified after drain/run from the schedule slot,
-   nonempty soft wakers, and `run_due_and_earliest`'s due flag
+   `sched_stat`, IRQs are classified from the schedule slot and prepared
+   dispatch result. The existing diagnostic field names remain
    (`timer_irq_sched` / `timer_irq_soft` / `timer_irq_periodic` /
-   `timer_irq_stale`). Default release does not query the timer wheel again.
+   `timer_irq_stale`); `timer_irq_periodic` stays zero because that source was
+   removed. The `soft` name denotes owned timer delivery, not softirq execution.
 
 Schedule deadlines are written by `program_sched_deadline`, matching Linux
 `hrtick_start`: a positive relative delay is floored at 10 µs. When
@@ -439,12 +445,12 @@ Schedule deadlines are written by `program_sched_deadline`, matching Linux
 `need_resched` and consumes that oneshot schedule slot. It never arms
 hardware with interval 0 and never pushes an already-due slot forward every
 10 µs (that livelocks the timer IRQ). The floor applies only to the schedule
-source and does not affect soft/periodic precision. Pending preemption is
+source and does not affect owned timer precision. Pending preemption is
 consumed at the next safe point after the critical section exits.
 
-Soft deadlines stay as `MonotonicInstant` from the timer wheel through
-`rearm_local_timer`, then convert to absolute ns / ticks just before the
-hardware. Context switch, block/exit/migrate, priority change, and local
+Owned timers accept `MonotonicInstant` and store bounded absolute nanoseconds
+in the core. Hardware arbitration reads the current prepared service deadline
+under its CPU lock. Context switch, block/exit/migrate, priority change, and local
 `request_resched` also account and refresh the schedule deadline. A remote
 wake IPI only sets `need_resched` (same as before the periodic-tick change).
 IRQ-tail `peer_preempts_curr` decides whether to switch; a failed probe arms
@@ -456,17 +462,14 @@ stopped its clock entirely, `smp` without `ipi` cannot reliably advance a
 remote runnable task. `ktask` rejects that configuration at compile time and
 does not offer a fake local fallback.
 
-Legacy `register_timer` reads `this_cpu_id`, enqueues, and (still
-holding the wheel `SpinNoIrq` lock with IRQs off) immediately call
-`rearm_local_timer()`. Legacy `cancel_timer` rearms the same
-way when it removes the local earliest item. Remote cancel of the earliest
-item does not send an IPI; the dest CPU self-corrects on at most one stale
-IRQ.
+Accepted starts refresh the actual owner after releasing registration locks.
+Cancellation can leave a stale hardware IRQ, which rechecks the current queues;
+it never permits callback storage to be freed before synchronous drain.
 
 `on_timer_fire` defers hardware rearm across a wake batch
-(`DEFER_LOCAL_TIMER_REARM`) so each wake does not overwrite a freshly
-refreshed schedule slot with a stale soft earliest. After the batch it
-rereads the soft earliest and arbitrates. `switch_to` writes through
+(`DEFER_LOCAL_TIMER_REARM`) to avoid redundant hardware writes during callback
+delivery. After the batch it rereads the prepared queue and current schedule
+and execution slots, then arbitrates. `switch_to` writes through
 `program_sched_deadline_for(incoming, …)`: an immediate pending request lands
 on the incoming task because `current()` is still the outgoing task. Under
 NOHZ, lone-runner wall time is flushed into EEVDF `curr` via
@@ -475,15 +478,12 @@ not use a stale V. `last_accounted_ns` is updated only while holding that
 RQ's scheduler `SpinRaw`, so a remote wake flush and local timer
 `account_current_runtime` cannot double-count or drop the same wall interval.
 
-Explicit periodic callbacks run in hard IRQ / local-IRQ-off context. They
-must be short and non-blocking. The callback vector's Rust borrow is dropped
-and the closure is pinned with `Arc` before the call, so registering another
-callback from inside a callback is safe. Each deadline is recomputed from
-**callback completion + period**. Overrun runs once: no catch-up and no
-immediate reentry. Rearm after registering a new periodic source still
-carries the current soft deadline and must not delay existing sleeps /
-timeouts. A `Duration` beyond `u64` ns saturates to the farthest deadline
-instead of truncating to a short period.
+Owned timer callbacks run in hard IRQ / local-IRQ-off context and must be short
+and non-blocking. Repetition is a handler policy expressed with `TimerControl`:
+network and watchdog sampling rearm from callback completion plus their period.
+The core retains running/cleanup protection and overload backoff; it does not
+infer a periodic policy. Independent schedule and execution deadlines remain
+eligible even while prepared delivery is deferred by overload protection.
 
 `ktask` still uses deferred preemption: the timer path usually only sets
 pending; the real `preempt_resched()` runs at the next safe point where
@@ -814,11 +814,13 @@ The scheduling algorithm is selected by Kconfig (default EEVDF).
 
 `future/time.rs` unittests split into two classes:
 
-- **Idle**: no same-CPU spin load; assert median `< 6ms` so the soft timer is
-  not rounded to the old 10 ms tick.
-- **Contended (EEVDF)**: same-CPU `spin_loop` spinner; upper bound is
-  `request + DEFAULT_SLICE_NS + 2ms`. This measures schedule wake-delay
-  budget, not timer rounding.
+- **Idle**: no same-CPU spin load; log latency against a 6 ms reference budget
+  to observe owned sleep timer precision.
+- **Contended (EEVDF)**: same-CPU `spin_loop` spinner; log latency against
+  `request + DEFAULT_SLICE_NS + 2ms` to observe schedule wake delay.
+
+These tests assert no early completion, not a wall-clock upper bound. Host load
+and QEMU timing affect latency; performance comparisons require controlled runs.
 
 Default request length is `ksched::DEFAULT_SLICE_NS` (2 ms). RR does not
 share this EEVDF request: its historical quantum stays
@@ -880,8 +882,8 @@ reclaim avoids use-after-free and a slow drop on the hot path.
 
 - `kruntime` registers the clock (and IPI/PMU) interrupt vectors. The timer
   interrupt handler only calls `ktask::on_timer_fire()`.
-- `ktask` owns all hardware timer drive: dynamic schedule deadline, soft
-  timer wheel, explicit periodic callbacks, hardware rearm, and converting
+- `ktask` owns all hardware timer drive: dynamic schedule and execution deadlines,
+  owned timer dispatch, hardware rearm, and converting
   due events into schedule accounting, preempt requests, and timer wakes.
 - `kruntime` does not know the class algorithm. `ktask` does not route
   hardware IRQs.

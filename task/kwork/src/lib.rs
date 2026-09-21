@@ -45,17 +45,6 @@
 //! queue.destroy().expect("destroy from task context");
 //! ```
 //!
-//! # Delayed work
-//!
-//! ```rust
-//! use ktime_types::TimeSpan;
-//! use kwork::{DelayedScheduledWork, ScheduleAttrs};
-//!
-//! let work = DelayedScheduledWork::new(|_| {});
-//! let _ = work.schedule_after_with(TimeSpan::from_millis(10), ScheduleAttrs::system());
-//! let _ = work.cancel_sync();
-//! ```
-//!
 //! # Cancellation and blocking rules
 //!
 //! `flush`, `cancel_sync`, and dynamic queue `destroy` may block and must be
@@ -81,10 +70,10 @@ pub use builtinwq::{system_bh_highpri_wq, system_bh_wq, system_percpu_wq, system
 #[cfg(feature = "stress_test")]
 pub use stress::{StressError, StressSummary, run_stress_command, stress_status_text};
 pub use work::{
-    CancelWorkResult, DEFAULT_WORKQUEUE_MAX_ACTIVE, DelayedScheduledWork, DisableWorkError,
-    EnableWorkError, MAX_WORKQUEUE_PENDING, QueueDelayedWorkResult, QueueWorkResult, ScheduleAttrs,
-    ScheduledWork, WorkQueue, WorkQueueAllocError, WorkQueueAttrs, WorkQueueFlags, WorkQueueHandle,
-    WorkQueueMaxActive, WorkqueueError,
+    CancelWorkResult, DEFAULT_WORKQUEUE_MAX_ACTIVE, DisableWorkError, EnableWorkError,
+    MAX_WORKQUEUE_PENDING, QueueWorkResult, ScheduleAttrs, ScheduledWork, WorkQueue,
+    WorkQueueAllocError, WorkQueueAttrs, WorkQueueFlags, WorkQueueHandle, WorkQueueMaxActive,
+    WorkqueueError,
 };
 
 /// Low-level workerqueue runtime surface used by startup and watchdog glue.

@@ -34,6 +34,26 @@ pub(super) fn run() {
     assert_eq!(control, (1, 1));
 
     static TIMERS: TimerSet<2> = TimerSet::new();
+    let rejected = counted(|| {
+        assert!(Timer::new_on(&TIMERS, 2.into(), |_: TimerControl<'_>, _: Expiration| {}).is_err());
+    });
+    assert_eq!(rejected, (0, 0));
+    let initial = Timer::new_on(&TIMERS, 1.into(), |_: TimerControl<'_>, _: Expiration| {
+        panic!("cancelled timer must not fire")
+    })
+    .unwrap();
+    assert_eq!(initial.try_cancel(), CancelResult::Inactive);
+    let initial_operations = counted(|| {
+        // SAFETY: owned storage, serialized modeled CPUs, no real IRQ service.
+        let first = unsafe { initial.start_on(0.into(), deadline(10)) }.unwrap();
+        assert_eq!(first, (0.into(), true));
+        // SAFETY: pending replacement uses the same modeled collection.
+        let replacement = unsafe { initial.start_on(1.into(), deadline(20)) }.unwrap();
+        assert_eq!(replacement, (1.into(), false));
+        assert!(initial.cancel_sync());
+    });
+    assert_eq!(initial_operations, (0, 0));
+    assert_eq!(counted(|| drop(initial)), (0, 1));
     let calls = Arc::new(super::AtomicUsize::new(0));
     let hits = calls.clone();
     let child = Arc::new(Timer::new(&TIMERS, |_: TimerControl<'_>, _: Expiration| {

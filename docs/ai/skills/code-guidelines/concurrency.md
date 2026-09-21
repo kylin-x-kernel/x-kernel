@@ -139,11 +139,10 @@ before `block_on`; SMP spin after a failed first try). See
 - use `WorkQueueHandle::alloc()` when a driver or subsystem needs its own ordered
   work stream, bounded worker pool, or explicit `WorkQueueHandle::destroy()`
   lifecycle;
-- use delayed work for timer-triggered task-context work, not as a replacement
-  for ordinary softirq polling or immediate IRQ bottom halves;
+- timer-triggered task work must use an explicitly owned timer and ordinary
+  queued work; the legacy delayed-work wrapper is no longer provided;
 - queueing APIs may be used from IRQ-like context, but `ScheduledWork::flush()`,
-  `ScheduledWork::cancel_sync()`, `DelayedScheduledWork::flush()`,
-  `DelayedScheduledWork::cancel_sync()`, `WorkQueue::flush()`,
+  `ScheduledWork::cancel_sync()`, `WorkQueue::flush()`,
   `WorkQueueHandle::flush()`, and `WorkQueueHandle::destroy()` must run from
   sleepable task context;
 - before freeing state captured by a work callback, stop new producers first,

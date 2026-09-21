@@ -16,10 +16,9 @@ and must not sleep or call workqueue wait APIs.
 
 - callers submit callbacks and perform flush, cancel, disable, and destroy
   operations;
-- `ktask` provides worker tasks, manager tasks, waits, timers, and scheduler
+- `ktask` provides worker tasks, manager tasks, timed waits, and scheduler
   execution accounting;
 - `kirq` provides bottom-half softirq execution and interrupt-context checks;
-- delayed work depends on timer cancellation and generation checks;
 - callback-captured resources remain owned by the caller.
 
 The crate does not directly access user memory, MMIO, DMA buffers, firmware
@@ -34,18 +33,18 @@ they are not converted back into references.
 
 ## Core Invariants
 
-- Pending entries, running callbacks, and delayed timers hold references that
+- Pending entries and running callbacks hold references that
   keep scheduled work alive.
-- Dynamic queue owners are retained by queued, running, and delayed instances.
-- `WorkInstanceId` protects pending, running, and delayed state from stale
-  timer or completion events.
+- Dynamic queue owners are retained by queued and running instances.
+- `WorkInstanceId` protects pending and running state from stale completion
+  events.
 - `WorkerExecutionToken` protects worker-slot reuse during tick and finish
   accounting.
 - Queue binding keys must match the selected per-CPU queue binding.
 - Enqueue failure must leave no partial workqueue or worker-pool state.
 - Active, in-flight, runnable, deferred, and worker concurrency counters must
   stay consistent with their backing records.
-- Worker wake, callback execution, timer registration, and sleepable wait
+- Worker wake, callback execution, and sleepable wait
   happen after internal spin locks are released.
 - Completion wake sources are notifications only; waiters must recheck queue
   and work state.
@@ -61,7 +60,6 @@ they are not converted back into references.
 | T-03 | Enqueue targets an invalid CPU or an uninitialized pool | Work never runs | Return `InvalidCpu` or `WorkerUnavailable` before committing state |
 | T-04 | Shared pending storage is full | Lost or half-queued work | Return `QueueFull` and preserve the previous work state |
 | T-05 | Dynamic queue is destroyed while producers still run | Callback may outlive external teardown | Destroy gate rejects later enqueue and flushes accepted work; callers must stop producers first |
-| T-06 | Delayed timer fires after cancel or modification | Canceled work is requeued | Generation and instance checks discard stale timer events |
 | T-07 | Queue active accounting uses the wrong binding | Other queues are throttled or leaked | Entries carry binding owner and key; promotion and finish filter by binding |
 | T-08 | Stale pool entry is claimed | Wrong callback runs or accounting leaks | Claim revalidates work state and repairs stale accounting |
 | T-09 | CPU-intensive callback monopolizes a bounded pool | Other work stops progressing | Scheduler tick accounting marks the worker CPU-intensive and wakes management |
@@ -71,8 +69,8 @@ they are not converted back into references.
 
 ## Failure Handling
 
-Public operations return typed results: enqueue paths use `QueueWorkResult` and
-`QueueDelayedWorkResult`; non-blocking cancellation uses `CancelWorkResult`;
+Public operations return typed results: enqueue paths use `QueueWorkResult`;
+non-blocking cancellation uses `CancelWorkResult`;
 wait and teardown paths use `WorkqueueError`.
 
 Internal stale states do not panic. They complete associated waiters when
@@ -81,6 +79,9 @@ can expose the underlying race.
 
 ## Known Limits
 
+- No delayed-work product API is provided. Removing its legacy timer adapter
+  eliminates that callback/lifetime boundary; lower-level queue state support
+  remains separate and cannot independently start a timer.
 - `WORKQUEUE_PENDING_CAP` is a fixed per-pool entry capacity.
 - `WORKQUEUE_WORKERS_PER_POOL` is a fixed worker-slot limit.
 - `WQ_MEM_RECLAIM` and rescuer workers are not implemented.

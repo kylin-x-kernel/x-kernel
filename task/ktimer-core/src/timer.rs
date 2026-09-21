@@ -50,11 +50,50 @@ impl<H: TimerHandler + 'static, const N: usize> Timer<H, N> {
     /// This preparation may allocate; subsequent start/cancel operations do not.
     /// Allocation failure follows the configured allocator's failure policy;
     /// this constructor does not return a recoverable allocation error.
+    /// Initially routes to CPU0; use [`Self::new_on`] to choose another initial
+    /// route. This is not affinity: start_on still selects the execution CPU.
     ///
     /// # Panics
     /// Panics if the newly created private Arc is not uniquely owned; this
     /// internal invariant failure is unreachable from valid caller input.
     pub fn new(timers: &'static TimerSet<N>, handler: H) -> Self {
+        Self::prepare(timers, LogicalCpuId::new(0), handler)
+    }
+
+    /// Allocates inactive storage with a validated initial CPU lock route.
+    /// Does not enqueue, program hardware or constrain later placement.
+    /// Choosing the likely first-start CPU avoids an initial route migration.
+    /// No CPU execution or IRQ readiness is required until the timer is started.
+    /// Allocation failure follows the configured allocator's failure policy.
+    ///
+    /// # Errors
+    /// Returns InvalidInput before allocating timer storage if initial_cpu is
+    /// outside this collection. The supplied handler is dropped on rejection.
+    ///
+    /// # Panics
+    /// Panics if the newly allocated private Arc is not uniquely owned, an
+    /// internal invariant failure unreachable from valid caller input.
+    ///
+    /// # Examples
+    /// ```
+    /// use ktimer_core::{CancelResult, Expiration, Timer, TimerControl, TimerSet};
+    /// static TIMERS: TimerSet<2> = TimerSet::new();
+    /// let timer = Timer::new_on(&TIMERS, 1.into(), |_: TimerControl<'_>, _: Expiration| {}).unwrap();
+    /// assert_eq!(timer.try_cancel(), CancelResult::Inactive);
+    /// ```
+    pub fn new_on(
+        timers: &'static TimerSet<N>,
+        initial_cpu: LogicalCpuId,
+        handler: H,
+    ) -> KResult<Self> {
+        if initial_cpu.as_usize() >= N {
+            return Err(kerrno::KError::InvalidInput);
+        }
+        Ok(Self::prepare(timers, initial_cpu, handler))
+    }
+
+    // Both constructors establish an in-range route; TimerSet rejects N=0.
+    fn prepare(timers: &'static TimerSet<N>, initial_cpu: LogicalCpuId, handler: H) -> Self {
         let deadline = Deadline::ZERO;
         let mut data = Arc::new(TimerData {
             node: TimerNode::new(deadline),
@@ -65,7 +104,9 @@ impl<H: TimerHandler + 'static, const N: usize> Timer<H, N> {
         // address. Only the disjoint node field is replaced. No mutable access
         // to handler or the allocation is exposed after this binding. Drop drains
         // all borrowed node/handler accesses before releasing the private Arc.
-        entry.node = unsafe { TimerNode::with_handler(deadline, &entry.handler) };
+        // The validated initial route is installed before publication, not by
+        // bypassing the lock protocol for a previously published node.
+        entry.node = unsafe { TimerNode::with_handler_on(deadline, &entry.handler, initial_cpu) };
         Self { timers, data }
     }
 
@@ -217,6 +258,32 @@ mod tests {
 
     fn deadline(ns: u64) -> MonotonicInstant {
         MonotonicInstant::from_span_since_origin(TimeSpan::from_nanos(ns))
+    }
+
+    #[def_test(serial)]
+    fn initial_owner_is_validated_and_does_not_pin_later_starts() {
+        static TIMERS: TimerSet<2> = TimerSet::new();
+        let hits = Arc::new(AtomicUsize::new(0));
+        assert!(Timer::new_on(&TIMERS, 2.into(), Handler(hits.clone())).is_err());
+        assert_eq!(hits.load(Ordering::Relaxed), 100);
+        let timer = Timer::new_on(&TIMERS, 1.into(), Handler(hits.clone())).unwrap();
+        assert_eq!(timer.data.node.owner_cpu(), 1.into());
+        assert_eq!(timer.try_cancel(), CancelResult::Inactive);
+        // SAFETY: owned storage, modeled CPUs and serialized dispatch; the
+        // initial route is a hint, not a restriction on the first start.
+        let first = unsafe { timer.start_on(0.into(), deadline(10)) }.unwrap();
+        assert_eq!(first, (0.into(), true));
+        // SAFETY: retained pending node can migrate to another modeled CPU.
+        let replacement = unsafe { timer.start_on(1.into(), deadline(20)) }.unwrap();
+        assert_eq!(replacement, (1.into(), false));
+        assert!(timer.cancel_sync());
+        drop(timer);
+        let idle = Timer::new_on(&TIMERS, 1.into(), Handler(hits.clone())).unwrap();
+        drop(idle);
+        assert_eq!(hits.load(Ordering::Relaxed), 300);
+        assert_eq!(Arc::strong_count(&hits), 1);
+        // SAFETY: both modeled queues are drained; no callback can remain.
+        assert!(!unsafe { TIMERS.dispatch_due(1.into(), || 30) }.unwrap());
     }
 
     #[def_test(serial)]

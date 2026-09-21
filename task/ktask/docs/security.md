@@ -24,11 +24,19 @@ Dependency internals (including `karch`, `kspin`, `percpu`, `ksched` and
 owners define and enforce those contracts. Their contracts at the `ktask`
 boundary remain in scope. See the core's [security analysis](../../ktimer-core/docs/security.md)
 for intrusive membership, callback lifetime and timer cancellation invariants.
-Production IRQ/hardware integration now services the core alongside legacy
-timers. Async sleep/timeout and timerfd now use owned timers; explicit waker
-registrations and periodic callers remain on their existing paths.
+Production IRQ/hardware integration services the prepared core as its only
+general timer source. Async sleep/timeout, timerfd, network and watchdog sampling
+use owned timers; the legacy waker map and periodic callback vector are removed.
 
 ### Prepared Timer Platform Boundary
+
+`Timer::new` reads the platform CPU ID after per-CPU initialization and passes
+it to the core's checked initial-route constructor. The snapshot is not an
+affinity guarantee: migration after the read cannot invalidate storage, and
+start still selects and locks its actual destination. No IRQ or queue service
+is performed during preparation. CPU bounds are checked before storage is
+allocated; an invalid platform CPU is treated as an initialization invariant
+failure. Allocation and callback lifetime guarantees are unchanged.
 
 #### Protected Asset
 
@@ -47,10 +55,10 @@ or scheduler locks. These are the new unsafe production call sites.
 | Threat | Asset / trigger / impact | Response |
 | --- | --- | --- |
 | Stale hardware write | Deadline integrity; concurrent remote advance overwritten by an old snapshot delays delivery | Mitigate: hold the prepared CPU lock through hardware write; notify actual destination after every accepted start. Platform must preserve publish-before-IPI ordering. |
-| Lock inversion | Availability; notification or callback re-enters a held timer lock and deadlocks | Mitigate: wheel before prepared CPU lock, callback outside locks, sender releases locks before notification; no runqueue lock in the programmer. |
+| Lock inversion | Availability; notification or callback re-enters a held timer lock and deadlocks | Mitigate: callback outside locks, sender releases registration locks before notification; the programmer runs under the prepared CPU lock and takes no runqueue lock. |
 | Wrong-context delivery | Memory safety and scheduling; an IPI or recursive service invokes a timer callback | Mitigate: IPI endpoint only reprograms; timer IRQ owns dispatch, with IRQs disabled. Real-IRQ and notification-only tests check this separation. |
-| Premature boot service | Per-CPU state; notification drain touches an uninitialized scheduler or wheel | Mitigate: retain existing runtime enablement after scheduler and local timer state initialization; static set construction alone is not readiness. |
-| Lost independent deadline | Availability; empty/deferred prepared queue suppresses scheduler or legacy sources | Mitigate: merge all sources under the local IRQ guard; prepared backoff does not defer other sources. |
+| Premature boot service | Per-CPU state; notification drain touches an uninitialized scheduler or timer service | Mitigate: retain existing runtime enablement after scheduler and local timer state initialization; static set construction alone is not readiness. |
+| Lost independent deadline | Availability; empty/deferred prepared queue suppresses scheduler or execution-accounting deadlines | Mitigate: merge all three sources under the local IRQ guard; prepared backoff does not defer other sources. |
 
 `tests_timer_irq.rs` adds bounded real-IRQ/IPI validation infrastructure. Its
 owning handles drain callbacks before destruction. These tests do not establish
@@ -137,7 +145,7 @@ and permission checks belong to those adapters, not to the scheduler.
 | `Timer::new`, `Timer::handler`, `Timer::start`, `Timer::try_cancel`, `Timer::cancel_sync` | Trusted kernel owners supply handlers and absolute monotonic deadlines; shared handler access exposes only that owner's typed state | Core validates deadline range; unsafe start requires initialized service and IRQ-compatible callbacks. Cancellation is not a permanent shutdown. Owners must not block callback progress during synchronous teardown. |
 | `spawn_raw`, `spawn_with_name`, `spawn`, `prepare_task`, `activate_task`, `spawn_task`; `TaskInner::new_user`, `new_kthread`, `new_pidless_kthread`, `set_name` | Kernel task/process code supplies closures, names, stack sizes, identities, and runtime objects | Names may originate from users but arrive as Rust strings; task creation is not a user-buffer parser. Runtime and entry implementations remain trusted kernel code. |
 | `set_prio`, `set_task_prio`, `set_current_affinity`, `set_task_affinity`, `TaskInner::set_cpumask` | Scheduler/process adapters supply priorities and typed CPU masks, possibly from syscalls | Adapters enforce permissions. Callers must distinguish initial placement from migrating an already-active task. |
-| `sleep`, `sleep_until`, `interruptible_sleep_until`, `wait_for_poll_event_until`; `WaitQueue::wait_timeout`, `wait_timeout_until`; `future::register_timer`; `register_timer_callback` | Wait and timer clients supply durations, deadlines, wakers, predicates, or callbacks | User timeout decoding belongs upstream. Callers must obey sleepability and callback-context contracts. Async waits, timerfd, network and watchdog sampling use owned timers. Explicit waker registration remains legacy; the legacy periodic API has no remaining production caller. |
+| `sleep`, `sleep_until`, `interruptible_sleep_until`, `wait_for_poll_event_until`; `WaitQueue::wait_timeout`, `wait_timeout_until` | Wait clients supply durations, deadlines, wakers and predicates | User timeout decoding belongs upstream. Callers must obey sleepability and callback-context contracts. All timeout delivery uses owned timers; no raw waker registration API remains. |
 | `future::poll_io`, `future::register_irq_waker`; `WaitQueue` notify; `wake_task`, `interrupt_task`, `TaskInner::interrupt` | File, network, device, and signal adapters deliver readiness or wakeup | `poll_io` invokes a caller-supplied operation and forwards its typed result without interpreting payloads. IRQ waker registration delegates to `kirq`. Payload validation remains with the operation/provider. |
 | `on_timer_fire`, `register_timer_irq_note`, `register_sched_trace_hooks` | Runtime interrupt glue and kernel instrumentation provide timer events and function callbacks | IRQ routing is external. Callbacks must satisfy their documented execution-context constraints. |
 | `set_current_execution_context`, `clear_current_execution_context`; `TaskInner::set_waiting_lock`, `push_held_lock`, `pop_held_lock`; `snapshot::trigger`, `dump_cpu_tasks`, `nmi_dump_all` | Kernel execution owners and diagnostic callers supply opaque identity words, lock-address identities, reason strings, and CPU selections | These are not user-pointer access capabilities. Diagnostic output can expose task metadata; access control belongs to the invoking diagnostic interface. |
@@ -247,7 +255,7 @@ Invariants:
 
 ### `timers.rs` / `task_registry.rs` / `snapshot`
 
-- `timers` uses raw references into the per-CPU callback container.
+- `timers` binds owned core storage and publishes the timer IRQ heartbeat hook.
 - `task_registry` stores weak-ref slots with `Box::into_raw` / `from_raw`.
 - `snapshot` holds trap-frame snapshots in `UnsafeCell` and `unsafe impl Sync`.
 
@@ -256,17 +264,9 @@ Invariants:
 1. A `task_registry` slot holds 0 or a valid `Box<WeakKtaskRef>` pointer.
 2. The CAS winner is responsible for release.
 3. Snapshot reads/writes obey session serialization (`begin` / `finish`).
-4. Periodic callback invocation does not keep a borrow of the callback
-   vector: pin the closure with `Arc`, mark the current entry inactive, then
-   write the new deadline by stable index after the callback. Registration
-   only appends and never deletes, so a realloc from a callback-time
-   register cannot dangle.
-5. The periodic deadline advances one period from callback completion. An
-   oversized `Duration` saturates to `u64::MAX`. Narrow truncation and
-   overrun catch-up IRQ loops are forbidden. Arbitration skips the
-   `u64::MAX` sentinel so an in-flight item is not armed as the farthest
-   deadline into a 32-bit TVAL.
-6. `register_timer_irq_note` only stores a `'static fn()`. The timer IRQ
+4. Owned timer storage is retained through callback cleanup. The core owns
+   membership and routing; `ktask` preserves owner notification and IRQ context.
+5. `register_timer_irq_note` only stores a `'static fn()`. The timer IRQ
    path Acquire-loads then transmutes the call; the hook must be short and
    non-blocking.
 
@@ -322,15 +322,15 @@ Invariants:
 | T-07c | `blocked_resched` without an extra strong ref frees the task at switch | High | Caller did not clone current | rustdoc `# Panics`; `#[track_caller]` plus `strong_count > 1`; `block_on` clones first; unittest `blocked_resched_survives_with_caller_owned_ref`. |
 | T-07d | Prepared wait blocks the wrong task or an atomic context | High | Handle moved across a coroutine, or `park` after taking a lock | Handle is `!Send`/`!Sync`. Prepare checks context before allocation; `park` asserts task identity and context. Callers still own lock constraints that cannot be checked dynamically. |
 | T-07e | Early or spurious wake loses a notification or completes early | High | Predicate check races `park`, or the scheduler wakes the task alone | Reuse `KWaker` dual latch checks and the RQ handshake; hold a strong task ref across switch; `park` only returns a wake hint; the caller rechecks the predicate and owns event registration. |
-| T-08 | A long periodic callback stalls scheduling or livelocks IRQs | High | Callback abuse or runtime longer than the period | API requires short, non-blocking hardirq callbacks. One IRQ calls each due callback at most once; the next deadline is computed from completion time. |
+| T-08 | A long or repeatedly rearmed callback stalls scheduling | High | Callback abuse or repeated already-due rearm | API requires short, non-blocking hardirq callbacks. Core dispatch bounds catch-up rounds for deadlines reached during delivery. Residual: it cannot interrupt a callback or bound one round that continually rearms at or before its fixed cutoff. |
 | T-09 | Remote wake is not scheduled promptly | Medium | Task is on a remote RQ but that CPU has not reached a preempt safe point | SMP requires IPI. Remote IPI only sets `need_resched`. A failed probe arms backup hrtick in dest `preempt_resched`. Residual: IPI send failure or a late safe point. |
 | T-09b | IRQ teardown wait blocks the current task in the wrong context | High | Hardirq/softirq/BH-disabled path indirectly calls the `IrqSyncWaitIf` provider | `kirq` context-gates before entering the provider. `ktask` only supplies the blocking mechanism and does not relax IRQ-sync API constraints. |
 | T-09f | Softirq schedule query consumes the task request early | Medium | A batch-boundary query clears `need_resched` or schedules directly | `SoftirqDaemonIf::needs_resched()` only Acquire-reads. Real scheduling stays at a safe point. Returns false with no task or without `preempt`. |
 | T-09c | Workerqueue wait bypasses `kwork` lifecycle predicates | High | A `ktask` wait helper blocks without letting `kwork` recheck work state | `ktask` only supplies yield/wait. Work state, cancel/flush predicates, and the deadlock gate stay in `kwork`. |
 | T-09d | Custom/dynamic workqueue wrongly creates a dedicated task | Medium | Queue-level API reintroduces host/stop/wake or stores a `WorkQueueHandle` | Normal worker/manager kthreads belong to the built-in per-CPU workerpool. All logical queues share pool tasks. Destroy does not enter `ktask`. |
 | T-09e | Interrupt-like context calls `ktask::sleep*()` directly | High | BH workqueue callback, softirq action, hardirq, or BH-disabled path bypasses the upper context gate | `sleep()`, `sleep_until()`, and `interruptible_sleep_until()` check `kirq::context::is_in_interrupt_context()` and fail-fast. `yield_now()` is not a sleep/blocking API. |
-| T-10 | Absolute timer deadline / period truncates on integer conversion | High | `as_nanos()` `u128` is narrowed to `u64` | HAL keeps `MonotonicInstant`. The backend clamps at the register boundary. Periodic `Duration` conversion saturates to `u64::MAX`. |
-| T-11 | An already-due schedule slot is rearmed repeatedly in a non-preemptible region | High | An immediate request is rewritten as a periodic 10 µs hrtick | A due slot only sets pending and is cleared immediately. Soft/periodic deadlines stay independent. |
+| T-10 | Absolute timer deadline truncates on integer conversion | High | `as_nanos()` `u128` is narrowed to `u64` | The raw owned timer API rejects deadlines beyond `u64` nanoseconds without changing the prior setting. Async waits saturate to that horizon. HAL backends clamp at the hardware register boundary. |
+| T-11 | An already-due schedule slot is rearmed repeatedly in a non-preemptible region | High | An immediate request is rewritten as a periodic 10 µs hrtick | A due slot only sets pending and is cleared immediately. Owned timer deadlines stay independent. |
 | T-12 | Idle-pull steals a still-`on_cpu` task | High | Remote steal after yield/preempt requeue and before `switch_to` finishes | Steal only Ready && `!on_cpu`. `can_idle_pull_task` rejects `on_cpu`. |
 | T-12a | Steal changes `cpu_id` and moves prev away | Medium | Wake follows the new CPU after idle-pull migrate-in | Wake uses `select_idle_sibling` (home if prev is idle, otherwise seek idle). Matches Linux musical chairs. |
 | T-12b | Idle-pull mid-state is missed by `setaffinity` | High | Ready on no RQ after steal and before dest enqueue | That window is mask-only, same as unpublished. Dest rechecks cpumask after enqueue and `migrate_entry`s if dest is not allowed. |
@@ -347,7 +347,7 @@ Invariants:
 | F-05 | Remote resched request is lost or consumed late | IPI send failure, or no safe point before EL1 IRQ return | Woken task is delayed | Throughput / latency jitter | 3 | SMP requires IPI. Send pending only (do not account/refresh dest RQ in the IPI). Arm backup hrtick on a failed probe. Record send failure. Suspend the exception mark after IRQ completion for a tail check. |
 | F-06 | Algorithm `update_current` / `next_preemption_ns` misbehaves | Scheduler implementation bug | Distorted preempt policy | Starvation / jitter | 2 | `ksched` unittests plus trace-hook diagnostics. |
 | F-07 | Soft-timer deadline truncates to an already-due hardware time | Deadline exceeds the hardware nanosecond range | Timer fires immediately and repeatedly | IRQ storm; task and network paths stall | 1 | Typed deadline through the HAL; backend uses checked conversion and clamps out-of-range values to the farthest representable deadline. |
-| F-08 | Periodic callback overruns and becomes due again immediately | Deadline chases the old period or is recomputed from IRQ entry time | Consecutive hardirq callbacks | CPU livelock; schedule / soft-timer starvation | 1 | Mark inactive before the callback; rearm once from fresh monotonic time + period after completion. |
+| F-08 | Near-future rearm becomes due again during callback delivery | Delivery outlasts the new deadline | Repeated catch-up rounds | CPU pressure and delayed timer delivery | 1 | Limit catch-up rounds and back off prepared service; independent scheduler deadlines remain eligible. Network/watchdog use completion-relative periods. A callback that loops or continually rearms at/before the fixed round cutoff remains invalid usage and can prevent IRQ exit. |
 | F-09 | Idle-pull and remote wake invert lock order | Dest holds its lock then locks src | Deadlock | Scheduler stops | 1 | Lock only src, then dest enqueue. `resched` has already dropped the dest scheduler lock. |
 | F-10 | Affinity missed in the idle-pull window | `setaffinity` after steal and before dest enqueue | Task runs outside the new mask | Isolation violation | 2 | Recheck cpumask after dest enqueue. Enforce is mask-only when the task does not occupy a CPU. |
 | F-11 | A running user task never sees a pending signal | `interrupt()` only wakes waiters and does not kick the CPU; NOHZ has stopped the clock | Target stays in a user busy loop | Timed signals (for example SIGALRM) are delayed forever; the workload hangs | 2 | `interrupt()` sets local `need_resched` or sends a reschedule IPI for an `on_cpu` task. The user-return path rechecks `is_interrupted` after preempt. |
