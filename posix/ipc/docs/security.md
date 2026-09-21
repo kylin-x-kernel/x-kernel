@@ -20,7 +20,7 @@ fault isolation to `filemap`/`memspace`.
 | `sys_msgrcv` | User selector/flags and output buffer | Invalid `MSG_COPY` combination/unknown ID → EINVAL; removed queue → EIDRM; no match → ENOMSG; oversized message without truncation → E2BIG; copies propagate errors before removal. |
 | `sys_msgctl` | User command/metadata; metadata to user buffer | Unsupported command/index/ID → EINVAL; removed queue → EIDRM; copy failures propagate. Owner/creator/root and qbytes privilege branches exist, but caller UID is currently zero. |
 | `sys_shmget` / `ShmInner::new` | Size/flags/key and explicit credential snapshot into file construction | Zero page count, missing keyed object or size/mode mismatch → InvalidInput; file create/unlink/open/truncate errors propagate. Size arithmetic is not comprehensively guarded here. |
-| `sys_shmat` | User ID/address/flags into MM | Unknown ID or unrounded unaligned address → InvalidInput; no free range → NoMemory; mapping errors propagate. Flags are truncated; segment lock is released before mapping. |
+| `sys_shmat` | User ID/address/flags into MM | Unknown ID, unrounded unaligned address or SHM_REMAP with an address that is zero after rounding → InvalidInput; no free range → NoMemory; mapping errors propagate. Flags are truncated; segment lock is released before mapping. |
 | `sys_shmctl` | User command and `shmid_ds` buffer | Unknown ID/command → InvalidInput; fault-aware copies propagate. IPC_STAT with null buffer succeeds without copying. IPC_SET replaces the whole structure. |
 | `sys_shmdt` | User start address into attachment lookup | Unknown address/segment/range → InvalidInput; MM errors propagate before accounting removal. |
 

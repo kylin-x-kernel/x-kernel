@@ -467,12 +467,14 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> KResult<isize> {
 ///
 /// Multiple attachments per PID are allowed. SHM_RDONLY removes write access;
 /// SHM_RND rounds an address down. This may sleep and allocate VMA state.
+/// SHM_REMAP rejects a zero address, including one produced by SHM_RND.
 ///
 /// # Errors
 ///
 /// Returns `KError::InvalidInput` for an unknown ID or unrounded unaligned
-/// address, and `KError::NoMemory` when no free range exists. Forwards process
-/// address-space, filemap and VMA installation errors.
+/// address or SHM_REMAP with a zero rounded address, and `KError::NoMemory`
+/// when no free range exists. Forwards process address-space, filemap and VMA
+/// installation errors.
 pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
     let shm_inner_arc = {
         let shm_manager = SHM_MANAGER.lock();
@@ -507,6 +509,11 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
         } else {
             0
         };
+        // A remap needs an explicit destination; rounding must not turn it
+        // into an automatic-address attachment.
+        if start_aligned == 0 && shm_flg.contains(ShmAtFlags::SHM_REMAP) {
+            return Err(KError::InvalidInput);
+        }
         let aspace_base = mapping.aspace().base();
         let aspace_end = mapping.aspace().end();
         let search_range = VirtAddrRange::new(aspace_base, aspace_end);

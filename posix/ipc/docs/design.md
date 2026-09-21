@@ -48,7 +48,9 @@ An existing keyed segment requires exactly matching size and mapping flags.
 
 `sys_shmat` snapshots the segment file/flags/length, drops the segment lock,
 obtains a mapping owner and selects a free range. `SHM_RDONLY` removes write
-permission; `SHM_RND` rounds a supplied address down. It calls
+permission; `SHM_RND` rounds a supplied address down. `SHM_REMAP` with a zero
+address (including a nonzero address rounded to zero) returns `EINVAL` before
+free-range selection, VMA installation or attachment bookkeeping. It calls
 `mmap_shared_file`, installs the runtime VMA, records the range in `ShmInner`,
 then updates the manager address index. Multiple attachments of the same segment
 by the same process are supported and tracked independently by start address.
@@ -86,8 +88,9 @@ only releases this crate's references; mappings may still keep file state alive.
 
 Message permission helpers are called with hard-coded UID/GID zero, so they do
 not enforce real per-user isolation. Shared-memory authorization and Linux flag
-semantics are incomplete: `SHM_REMAP` is parsed but not implemented, unknown bits
-are truncated, and creation/exclusive/huge-page semantics are not fully checked.
+semantics are incomplete: nonzero-address `SHM_REMAP` replacement is not
+implemented, unknown bits are truncated, and creation/exclusive/huge-page
+semantics are not fully checked.
 `IPC_SET` for shm replaces the user-supplied ABI structure, including fields
 normally maintained by the kernel. IPC namespaces, full Linux accounting and
 robust global ID exhaustion handling are not provided here.
