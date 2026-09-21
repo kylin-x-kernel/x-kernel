@@ -5,247 +5,219 @@
 //! Buddy page allocator.
 //!
 //! Manages contiguous physical memory regions using the binary buddy algorithm.
-//! Each order-`k` free chunk stores an intrusive link to the next free chunk of
-//! the same order, so no external metadata arrays are needed.
-//!
-//! References: Asterinas `frame-allocator/src/set.rs` (BuddySet), Linux `mm/page_alloc.c`.
+//! Free chunks carry intrusive links; an allocator-owned bitmap certifies free
+//! chunk heads before their headers are read. Coalescing probes one buddy per
+//! order and unlinks it directly, independent of free-list length.
+
+use intrusive_collections::{LinkedList, LinkedListAtomicLink, UnsafeRef, intrusive_adapter};
 
 use crate::{AllocError, AllocResult};
 
 /// Maximum buddy order. With 4 KiB pages this gives 2^20 × 4 KiB = 4 GiB blocks.
 const MAX_ORDER: usize = 20;
 
-/// Up to 8 separate memory regions can be registered.
+/// Up to 64 separate memory regions can be registered.
 const MAX_REGIONS: usize = 64;
 
-/// Sentinel: no free chunk at this order.
-const LIST_EMPTY: usize = 0;
+/// Small regions keep their free-head bitmap inside the allocator itself.
+const INLINE_BITMAP_WORDS: usize = 4;
+const WORD_BITS: usize = usize::BITS as usize;
 
-/// Number of pages in a chunk of the given order.
 const fn order_pages(order: usize) -> usize {
     1 << order
 }
 
-/// Byte size of a chunk of the given order.
 const fn order_size<const PAGE_SIZE: usize>(order: usize) -> usize {
     order_pages(order) * PAGE_SIZE
 }
 
-// ---------------------------------------------------------------------------
-// Intrusive free-node stored in the first bytes of every free chunk
-// ---------------------------------------------------------------------------
+/// Initialized only while the chunk belongs to a free list.
+struct FreeNode {
+    link: LinkedListAtomicLink,
+    order: usize,
+}
 
-/// Layout of a free chunk's header (written into the chunk itself).
-/// The first 8 bytes store the next pointer; the following `usize` stores the order.
-struct FreeNode;
+// `UnsafeRef` owns nothing: it only lets a list link a chunk whose storage is
+// owned by the caller of this allocator and never freed through the list.
+intrusive_adapter!(FreeNodeAdapter = UnsafeRef<FreeNode>: FreeNode { link => LinkedListAtomicLink });
 
-impl FreeNode {
-    const ORDER_OFFSET: usize = core::mem::size_of::<usize>();
+/// A set bit certifies an initialized free node, not merely an unused page.
+/// Large regions reserve bitmap pages which are never handed to callers.
+struct FreeHeadBitmap {
+    inline: [usize; INLINE_BITMAP_WORDS],
+    /// Zero selects inline storage; otherwise points to the reserved prefix.
+    storage: usize,
+}
 
-    /// Read the next pointer from a free chunk.
-    ///
-    /// # Safety
-    /// `addr` must point to a valid, writable free chunk within a managed region.
-    unsafe fn read_next(addr: usize) -> usize {
-        // SAFETY: caller guarantees addr is a valid free chunk address.
-        unsafe { *(addr as *const usize) }
-    }
-
-    /// Write the next pointer into a free chunk.
-    ///
-    /// # Safety
-    /// `addr` must point to a valid, writable free chunk within a managed region.
-    unsafe fn write_next(addr: usize, next: usize) {
-        // SAFETY: caller guarantees addr is a valid free chunk address.
-        unsafe { (addr as *mut usize).write(next) };
-    }
-
-    /// Write the order into a free chunk.
-    ///
-    /// # Safety
-    /// `addr` must point to a valid, writable free chunk within a managed region.
-    unsafe fn write_order(addr: usize, order: usize) {
-        // SAFETY: caller guarantees addr is within a valid free chunk.
-        unsafe { ((addr + Self::ORDER_OFFSET) as *mut usize).write(order) };
-    }
-
-    /// Write both fields atomically from the caller's perspective.
-    ///
-    /// # Safety
-    /// `addr` must point to a valid, writable free chunk within a managed region.
-    unsafe fn write(addr: usize, next: usize, order: usize) {
-        // SAFETY: caller guarantees addr is a valid free chunk address.
-        unsafe {
-            Self::write_next(addr, next);
-            Self::write_order(addr, order);
+impl FreeHeadBitmap {
+    fn word(&self, index: usize) -> usize {
+        if self.storage == 0 {
+            self.inline[index]
+        } else {
+            // SAFETY: Region indexes this bitmap only for its usable pages.
+            // add_region reserved and zeroed enough aligned words for every
+            // registered page, and callers cannot allocate the bitmap prefix.
+            unsafe { (self.storage as *const usize).add(index).read() }
         }
+    }
+
+    fn set(&mut self, page: usize, is_free_head: bool) {
+        let index = page / WORD_BITS;
+        let mask = 1 << (page % WORD_BITS);
+        let word = if is_free_head {
+            self.word(index) | mask
+        } else {
+            self.word(index) & !mask
+        };
+        if self.storage == 0 {
+            self.inline[index] = word;
+        } else {
+            // SAFETY: The index is within the reserved, initialized bitmap;
+            // exclusive Region access serializes bitmap and list transitions.
+            unsafe { (self.storage as *mut usize).add(index).write(word) };
+        }
+    }
+
+    fn contains(&self, page: usize) -> bool {
+        self.word(page / WORD_BITS) & (1 << (page % WORD_BITS)) != 0
     }
 }
 
-// ---------------------------------------------------------------------------
-// Region
-// ---------------------------------------------------------------------------
-
-/// One managed contiguous memory region.
+/// One exclusively owned contiguous region, including its reserved metadata.
 struct Region {
-    /// Start address of the allocatable heap (page-aligned).
+    region_start: usize,
     heap_start: usize,
-    /// Number of pages in the heap.
     total_pages: usize,
-    /// Number of currently free pages.
     free_pages: usize,
-    /// Per-order freelist heads. `LIST_EMPTY` means the list is empty.
-    free_lists: [usize; MAX_ORDER + 1],
+    free_lists: [LinkedList<FreeNodeAdapter>; MAX_ORDER + 1],
+    free_heads: FreeHeadBitmap,
+}
+
+impl Drop for Region {
+    fn drop(&mut self) {
+        // Free chunks belong to the caller's memory, not to this Region, so
+        // retiring a region must not write into them. `LinkedList::drop` clears
+        // by walking each list and storing an unlink marker into every node;
+        // once the caller reuses or re-registers that memory, those stores land
+        // on blocks another allocator has published, leaving a bitmap-certified
+        // free head whose link reads as unlinked. A later removal then follows
+        // the marker as if it were a node pointer. `fast_clear` drops only the
+        // list headers, which is all a retiring Region may touch.
+        for list in &mut self.free_lists {
+            list.fast_clear();
+        }
+    }
 }
 
 impl Region {
-    fn new(heap_start: usize, total_pages: usize) -> Self {
-        Self {
-            heap_start,
-            total_pages,
-            free_pages: 0,
-            free_lists: [LIST_EMPTY; MAX_ORDER + 1],
-        }
-    }
-
     fn contains<const PAGE_SIZE: usize>(&self, addr: usize) -> bool {
         addr >= self.heap_start && addr < self.heap_start + self.total_pages * PAGE_SIZE
     }
 
-    /// Push a free chunk of the given `order` onto the appropriate freelist.
+    fn is_free<const PAGE_SIZE: usize>(&self, addr: usize, order: usize) -> bool {
+        if !self.contains::<PAGE_SIZE>(addr)
+            || !addr.is_multiple_of(PAGE_SIZE)
+            || !self
+                .free_heads
+                .contains((addr - self.heap_start) / PAGE_SIZE)
+        {
+            return false;
+        }
+        // SAFETY: The out-of-band bitmap certifies an initialized FreeNode
+        // still owned by this region. No allocated page contents are inspected.
+        unsafe { (*(addr as *const FreeNode)).order == order }
+    }
+
     fn push_free<const PAGE_SIZE: usize>(&mut self, addr: usize, order: usize) {
         debug_assert!(order <= MAX_ORDER);
+        debug_assert!(addr.is_multiple_of(order_size::<PAGE_SIZE>(order)));
+        debug_assert!(self.contains::<PAGE_SIZE>(addr));
         debug_assert!(
-            addr >= self.heap_start,
-            "push_free: addr {:#x} below heap_start {:#x}",
-            addr,
-            self.heap_start
+            addr + order_size::<PAGE_SIZE>(order) <= self.heap_start + self.total_pages * PAGE_SIZE
         );
-        debug_assert!(
-            addr + order_size::<PAGE_SIZE>(order) <= self.heap_start + self.total_pages * PAGE_SIZE,
-            "push_free: chunk @ {:#x} order {} exceeds region end",
-            addr,
-            order
-        );
-
-        let prev_head = self.free_lists[order];
-        // SAFETY: addr is page-aligned, within region bounds, and the chunk is
-        // not currently in use — writing the free-node header is safe.
-        unsafe { FreeNode::write(addr, prev_head, order) };
-        self.free_lists[order] = addr;
+        let page = (addr - self.heap_start) / PAGE_SIZE;
+        debug_assert!(!self.free_heads.contains(page));
+        // SAFETY: The allocator exclusively owns this aligned, free chunk.
+        // add_region validates that one page holds a FreeNode. The freshly
+        // initialized node stays at this address until removed from this list,
+        // so the `UnsafeRef` never dangles and owns no storage.
+        unsafe {
+            (addr as *mut FreeNode).write(FreeNode {
+                link: LinkedListAtomicLink::new(),
+                order,
+            });
+            self.free_lists[order].push_front(UnsafeRef::from_raw(addr as *const FreeNode));
+        }
+        self.free_heads.set(page, true);
         self.free_pages += order_pages(order);
     }
 
-    /// Pop a free chunk of the given `order`. Returns `None` if empty.
-    fn pop_free<const PAGE_SIZE: usize>(&mut self, order: usize) -> Option<usize> {
-        let head = self.free_lists[order];
-        if head == LIST_EMPTY {
-            return None;
-        }
-        // SAFETY: head was just verified non-empty; it points to a free chunk
-        // whose first bytes store the next pointer.
-        let next = unsafe { FreeNode::read_next(head) };
-        self.free_lists[order] = next;
+    /// Unlink a known free chunk without searching its order's list.
+    fn remove_free<const PAGE_SIZE: usize>(&mut self, addr: usize, order: usize) {
+        debug_assert!(self.is_free::<PAGE_SIZE>(addr, order));
+        // SAFETY: Callers obtained this address from this order's list or from
+        // is_free, which validates bitmap membership and node order. Exclusive
+        // Region access keeps the initialized node on that list until removal.
+        let removed = unsafe {
+            self.free_lists[order]
+                .cursor_mut_from_ptr(addr as *const FreeNode)
+                .remove()
+        };
+        debug_assert!(removed.is_some());
+        self.free_heads
+            .set((addr - self.heap_start) / PAGE_SIZE, false);
         self.free_pages -= order_pages(order);
-        Some(head)
     }
 
-    /// Allocate a chunk of `order` pages from this region.
-    fn alloc_order<const PAGE_SIZE: usize>(&mut self, order: usize) -> Option<usize> {
-        // Find the smallest non-empty order >= requested order.
-        let mut src_order = order;
-        while src_order <= MAX_ORDER && self.free_lists[src_order] == LIST_EMPTY {
-            src_order += 1;
-        }
-        if src_order > MAX_ORDER {
-            return None;
-        }
-
-        // Pop from the found order.
-        let chunk = self.pop_free::<PAGE_SIZE>(src_order).unwrap();
-
-        // Split down to the requested order, pushing right buddies.
-        let addr = chunk;
-        let mut cur_order = src_order;
-        while cur_order > order {
-            cur_order -= 1;
-            let right = addr + order_size::<PAGE_SIZE>(cur_order);
-            self.push_free::<PAGE_SIZE>(right, cur_order);
-            // addr stays as the left half.
-        }
-
+    fn pop_free<const PAGE_SIZE: usize>(&mut self, order: usize) -> Option<usize> {
+        let node = self.free_lists[order].pop_front()?;
+        let addr = UnsafeRef::into_raw(node) as usize;
+        self.free_heads
+            .set((addr - self.heap_start) / PAGE_SIZE, false);
+        self.free_pages -= order_pages(order);
         Some(addr)
     }
 
-    /// Try to find a free chunk at exactly `target` with the given order.
-    /// Used by `allocate_pages_at`.
+    fn alloc_order<const PAGE_SIZE: usize>(&mut self, order: usize) -> Option<usize> {
+        let src_order = (order..=MAX_ORDER).find(|&i| !self.free_lists[i].is_empty())?;
+        let addr = self.pop_free::<PAGE_SIZE>(src_order)?;
+        self.split_towards::<PAGE_SIZE>(addr, src_order, addr, order);
+        Some(addr)
+    }
+
+    /// Return each unselected half once; the target half remains allocated.
+    fn split_towards<const PAGE_SIZE: usize>(
+        &mut self,
+        mut addr: usize,
+        mut src_order: usize,
+        target: usize,
+        order: usize,
+    ) {
+        while src_order > order {
+            src_order -= 1;
+            let right = addr + order_size::<PAGE_SIZE>(src_order);
+            if target >= right {
+                self.push_free::<PAGE_SIZE>(addr, src_order);
+                addr = right;
+            } else {
+                self.push_free::<PAGE_SIZE>(right, src_order);
+            }
+        }
+        debug_assert_eq!(addr, target);
+    }
+
     fn alloc_at<const PAGE_SIZE: usize>(&mut self, target: usize, order: usize) -> Option<usize> {
-        if !self.contains::<PAGE_SIZE>(target) {
+        if !self.contains::<PAGE_SIZE>(target)
+            || !target.is_multiple_of(order_size::<PAGE_SIZE>(order))
+        {
             return None;
         }
-
-        // Try to find a free block that covers `target`.
         for src_order in order..=MAX_ORDER {
-            let mut prev: usize = LIST_EMPTY;
-            let mut cur = self.free_lists[src_order];
-            while cur != LIST_EMPTY {
-                // SAFETY: cur is a free chunk address popped from the freelist;
-                // its first bytes hold the next pointer.
-                let next = unsafe { FreeNode::read_next(cur) };
-                let chunk_end = cur + order_size::<PAGE_SIZE>(src_order);
-                if target >= cur && target < chunk_end {
-                    // Found a chunk that covers the target. Remove from list.
-                    if prev == LIST_EMPTY {
-                        self.free_lists[src_order] = next;
-                    } else {
-                        // SAFETY: prev is another free chunk; writing its next
-                        // pointer is safe for the same reason as read_next.
-                        unsafe { FreeNode::write_next(prev, next) };
-                    }
-                    self.free_pages -= order_pages(src_order);
-
-                    // Split into three parts: left, middle (target), right.
-                    // Left part (from cur to target, if any).
-                    let mut left = cur;
-                    let mut lo = src_order;
-                    while lo > order && left < target {
-                        lo -= 1;
-                        let half = left + order_size::<PAGE_SIZE>(lo);
-                        if target >= half {
-                            // target is in the right half; left half goes back.
-                            self.push_free::<PAGE_SIZE>(left, lo);
-                            left = half;
-                        }
-                        // else target is in the left half; right half goes back
-                        else {
-                            self.push_free::<PAGE_SIZE>(half, lo);
-                        }
-                    }
-                    debug_assert_eq!(left, target);
-                    // Right part (from target + size to end, if any).
-                    let target_end = target + order_size::<PAGE_SIZE>(order);
-                    let right = target_end;
-                    let remaining_size = cur + order_size::<PAGE_SIZE>(src_order) - target_end;
-                    if remaining_size > 0 {
-                        // Split the remainder into maximal-order chunks.
-                        let mut r_off = 0usize;
-                        let mut r_order = MAX_ORDER;
-                        while r_off < remaining_size / PAGE_SIZE {
-                            let chunk_pages = 1 << r_order;
-                            while r_order > 0
-                                && (r_off + chunk_pages > remaining_size / PAGE_SIZE
-                                    || !right.is_multiple_of(order_size::<PAGE_SIZE>(r_order)))
-                            {
-                                r_order -= 1;
-                            }
-                            self.push_free::<PAGE_SIZE>(right + r_off * PAGE_SIZE, r_order);
-                            r_off += 1 << r_order;
-                        }
-                    }
-                    return Some(target);
-                }
-                prev = cur;
-                cur = next;
+            let addr = target & !(order_size::<PAGE_SIZE>(src_order) - 1);
+            if self.is_free::<PAGE_SIZE>(addr, src_order) {
+                self.remove_free::<PAGE_SIZE>(addr, src_order);
+                self.split_towards::<PAGE_SIZE>(addr, src_order, target, order);
+                return Some(target);
             }
         }
         None
@@ -295,34 +267,59 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         self.add_region(base, size)
     }
 
-    /// Add a memory region to the allocator.
+    /// Add exclusively owned, page-aligned writable storage to the allocator.
+    ///
+    /// Regions larger than the inline bitmap reserve a page-rounded prefix for
+    /// one free-head bit per registered page. Statistics and allocations exclude
+    /// that prefix. Storage must remain valid until reset and must not overlap
+    /// live allocations or another allocator's region.
     pub fn add_region(&mut self, base: usize, size: usize) -> AllocResult {
         if self.region_count >= MAX_REGIONS {
             return Err(AllocError::NoMemory);
         }
-        if size < PAGE_SIZE || !base.is_multiple_of(PAGE_SIZE) {
+        if !PAGE_SIZE.is_power_of_two()
+            || PAGE_SIZE < core::mem::size_of::<FreeNode>()
+            || base == 0
+            || size < PAGE_SIZE
+            || !base.is_multiple_of(PAGE_SIZE)
+        {
             return Err(AllocError::InvalidInput);
         }
-
-        let heap_start = base;
         let heap_size = size - (size % PAGE_SIZE);
-        if heap_size == 0 {
-            return Err(AllocError::InvalidInput);
-        }
-        let total_pages = heap_size / PAGE_SIZE;
-
-        // Check overlap with existing regions.
-        let heap_end = heap_start + heap_size;
-        for i in 0..self.region_count {
-            if let Some(ref r) = self.regions[i] {
-                let r_end = r.heap_start + r.total_pages * PAGE_SIZE;
-                if heap_start < r_end && r.heap_start < heap_end {
-                    return Err(AllocError::MemoryOverlap);
-                }
+        let region_end = base
+            .checked_add(heap_size)
+            .ok_or(AllocError::InvalidInput)?;
+        let registered_pages = heap_size / PAGE_SIZE;
+        // Overlap checks include metadata pages, not just allocatable chunks.
+        for region in self.regions[..self.region_count].iter().flatten() {
+            let end = region.heap_start + region.total_pages * PAGE_SIZE;
+            if base < end && region.region_start < region_end {
+                return Err(AllocError::MemoryOverlap);
             }
         }
-
-        let mut region = Region::new(heap_start, total_pages);
+        let metadata_pages = if registered_pages <= INLINE_BITMAP_WORDS * WORD_BITS {
+            0
+        } else {
+            registered_pages.div_ceil(8).div_ceil(PAGE_SIZE)
+        };
+        let heap_start = base + metadata_pages * PAGE_SIZE;
+        let total_pages = registered_pages - metadata_pages;
+        if metadata_pages != 0 {
+            // SAFETY: The caller supplies exclusive, writable region storage.
+            // The checked prefix fits the region and is excluded from the heap.
+            unsafe { core::ptr::write_bytes(base as *mut u8, 0, metadata_pages * PAGE_SIZE) };
+        }
+        let mut region = Region {
+            region_start: base,
+            heap_start,
+            total_pages,
+            free_pages: 0,
+            free_lists: [const { LinkedList::new(FreeNodeAdapter::NEW) }; MAX_ORDER + 1],
+            free_heads: FreeHeadBitmap {
+                inline: [0; INLINE_BITMAP_WORDS],
+                storage: if metadata_pages == 0 { 0 } else { base },
+            },
+        };
 
         // Break the region into maximal-order buddy chunks.
         let mut offset = 0usize;
@@ -408,37 +405,17 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
             return region.alloc_order::<PS>(order);
         }
 
-        // Larger alignment than chunk size: need to find a bigger block
-        // and split it so the target sub-block is aligned.
+        // Large-alignment allocation retains the existing search policy.
+        // Once selected, a node is removed through the same bitmap/list update.
         for src_order in order..=MAX_ORDER {
-            let mut prev: usize = LIST_EMPTY;
-            let mut cur = region.free_lists[src_order];
-            while cur != LIST_EMPTY {
-                // SAFETY: cur is a free chunk address from the freelist;
-                // its first bytes store the next pointer.
-                let next = unsafe { FreeNode::read_next(cur) };
-                if cur.is_multiple_of(align_pages * PS) {
-                    // Remove from list.
-                    if prev == LIST_EMPTY {
-                        region.free_lists[src_order] = next;
-                    } else {
-                        // SAFETY: prev is another free chunk; updating its
-                        // next pointer is safe.
-                        unsafe { FreeNode::write_next(prev, next) };
-                    }
-                    region.free_pages -= order_pages(src_order);
-
-                    // Split down.
-                    let addr = cur;
-                    let mut cur_order = src_order;
-                    while cur_order > order {
-                        cur_order -= 1;
-                        region.push_free::<PS>(addr + order_size::<PS>(cur_order), cur_order);
-                    }
-                    return Some(addr);
-                }
-                prev = cur;
-                cur = next;
+            let addr = region.free_lists[src_order]
+                .iter()
+                .map(|node| node as *const FreeNode as usize)
+                .find(|addr| addr.is_multiple_of(align_pages * PS));
+            if let Some(addr) = addr {
+                region.remove_free::<PS>(addr, src_order);
+                region.split_towards::<PS>(addr, src_order, addr, order);
+                return Some(addr);
             }
         }
         None
@@ -461,38 +438,10 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         // Try to merge with buddy repeatedly.
         while cur_order < MAX_ORDER {
             let buddy = cur_addr ^ order_size::<PAGE_SIZE>(cur_order);
-            // Check if buddy is free and of the same order.
-            let found = {
-                let mut prev: usize = LIST_EMPTY;
-                let mut cur = region.free_lists[cur_order];
-                let mut found = false;
-                while cur != LIST_EMPTY {
-                    if cur == buddy {
-                        // Remove buddy from freelist.
-                        // SAFETY: cur is a free chunk; reading its next
-                        // pointer is safe.
-                        let next = unsafe { FreeNode::read_next(cur) };
-                        if prev == LIST_EMPTY {
-                            region.free_lists[cur_order] = next;
-                        } else {
-                            // SAFETY: prev is another free chunk; updating
-                            // its next pointer is safe.
-                            unsafe { FreeNode::write_next(prev, next) };
-                        }
-                        region.free_pages -= order_pages(cur_order);
-                        found = true;
-                        break;
-                    }
-                    prev = cur;
-                    // SAFETY: cur is on the freelist; its first bytes are the
-                    // next pointer.
-                    cur = unsafe { FreeNode::read_next(cur) };
-                }
-                found
-            };
-            if !found {
+            if !region.is_free::<PAGE_SIZE>(buddy, cur_order) {
                 break;
             }
+            region.remove_free::<PAGE_SIZE>(buddy, cur_order);
             cur_addr = cur_addr.min(buddy);
             cur_order += 1;
         }
@@ -538,7 +487,7 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
     // Statistics
     // ------------------------------------------------------------------
 
-    /// Total number of managed pages.
+    /// Total number of allocatable pages, excluding reserved bitmap storage.
     pub fn total_pages(&self) -> usize {
         let mut total = 0;
         for i in 0..self.region_count {
@@ -566,7 +515,7 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         self.free_pages()
     }
 
-    /// Managed bytes (total heap size across all regions).
+    /// Allocatable bytes across all regions, excluding reserved bitmap storage.
     pub fn managed_bytes(&self) -> usize {
         self.total_pages() * PAGE_SIZE
     }
@@ -689,26 +638,59 @@ pub fn split_to_chunks<const PAGE_SIZE: usize>(
 #[cfg(unittest)]
 #[allow(missing_docs)]
 mod tests {
+    use core::ptr::NonNull;
+
     use unittest::def_test;
 
     use super::*;
 
     const PAGE: usize = 4096;
 
-    fn make_alloc() -> BuddyAllocator<PAGE> {
-        let mut b = BuddyAllocator::<PAGE>::new();
-        // 256 pages = 1 MiB heap, plenty for tests.
-        let heap = alloc::vec![0u8; 256 * PAGE];
-        let base = heap.as_ptr() as usize;
-        let size = heap.len();
-        b.init_region(base, size).unwrap();
-        core::mem::forget(heap); // Don't drop — the allocator owns it.
-        b
+    struct TestHeap {
+        ptr: NonNull<u8>,
+        layout: core::alloc::Layout,
+    }
+
+    impl TestHeap {
+        fn new(pages: usize) -> Self {
+            let layout = core::alloc::Layout::from_size_align(
+                pages * PAGE,
+                pages.next_power_of_two() * PAGE,
+            )
+            .unwrap();
+            // SAFETY: layout has nonzero size and power-of-two alignment. The
+            // returned storage remains owned by this fixture until Drop.
+            let ptr = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(layout) }).unwrap();
+            Self { ptr, layout }
+        }
+
+        fn base(&self) -> usize {
+            self.ptr.as_ptr() as usize
+        }
+
+        fn size(&self) -> usize {
+            self.layout.size()
+        }
+    }
+
+    impl Drop for TestHeap {
+        fn drop(&mut self) {
+            // SAFETY: Tests discard the nested buddy and its allocations before
+            // dropping this unique backing allocation with its original layout.
+            unsafe { alloc::alloc::dealloc(self.ptr.as_ptr(), self.layout) };
+        }
+    }
+
+    fn make_alloc() -> (TestHeap, BuddyAllocator<PAGE>) {
+        let heap = TestHeap::new(256);
+        let mut buddy = BuddyAllocator::new();
+        buddy.init_region(heap.base(), heap.size()).unwrap();
+        (heap, buddy)
     }
 
     #[def_test]
     fn test_init_and_stats() {
-        let b = make_alloc();
+        let (_heap, b) = make_alloc();
         assert_eq!(b.total_pages(), 256);
         assert_eq!(b.free_pages(), 256);
         assert_eq!(b.used_pages(), 0);
@@ -716,7 +698,7 @@ mod tests {
 
     #[def_test]
     fn test_alloc_one_page() {
-        let mut b = make_alloc();
+        let (_heap, mut b) = make_alloc();
         let addr = b.allocate_pages(1, PAGE).unwrap();
         assert!(addr.is_multiple_of(PAGE));
         assert_eq!(b.used_pages(), 1);
@@ -725,7 +707,7 @@ mod tests {
 
     #[def_test]
     fn test_alloc_dealloc_one_page() {
-        let mut b = make_alloc();
+        let (_heap, mut b) = make_alloc();
         let addr = b.allocate_pages(1, PAGE).unwrap();
         b.deallocate_pages(addr, 1);
         assert_eq!(b.free_pages(), 256);
@@ -734,7 +716,7 @@ mod tests {
 
     #[def_test]
     fn test_alloc_multi_page() {
-        let mut b = make_alloc();
+        let (_heap, mut b) = make_alloc();
         let addr = b.allocate_pages(4, PAGE).unwrap(); // order 2
         assert!(addr.is_multiple_of(PAGE));
         assert_eq!(b.used_pages(), 4);
@@ -744,7 +726,7 @@ mod tests {
 
     #[def_test]
     fn test_alloc_exhaust_then_free() {
-        let mut b = make_alloc();
+        let (_heap, mut b) = make_alloc();
         let mut addrs = alloc::vec::Vec::new();
         // Allocate 256 single pages.
         for _ in 0..256 {
@@ -761,7 +743,7 @@ mod tests {
 
     #[def_test]
     fn test_merge_on_dealloc() {
-        let mut b = make_alloc();
+        let (_heap, mut b) = make_alloc();
         // Allocate 8 single pages (order 0), then free them — they should
         // merge into larger blocks.
         let mut addrs = alloc::vec::Vec::new();
@@ -779,7 +761,7 @@ mod tests {
 
     #[def_test]
     fn test_alloc_large_order() {
-        let mut b = make_alloc();
+        let (_heap, mut b) = make_alloc();
         let addr = b.allocate_pages(64, PAGE).unwrap(); // order 6
         assert_eq!(b.used_pages(), 64);
         b.deallocate_pages(addr, 64);
@@ -788,25 +770,189 @@ mod tests {
 
     #[def_test]
     fn test_add_region() {
+        let heap1 = TestHeap::new(32);
+        let heap2 = TestHeap::new(64);
         let mut b = BuddyAllocator::<PAGE>::new();
-        let heap1 = alloc::vec![0u8; 32 * PAGE];
-        let heap2 = alloc::vec![0u8; 64 * PAGE];
-        b.init_region(heap1.as_ptr() as usize, heap1.len()).unwrap();
-        core::mem::forget(heap1);
-        b.add_region(heap2.as_ptr() as usize, heap2.len()).unwrap();
-        core::mem::forget(heap2);
+        b.init_region(heap1.base(), heap1.size()).unwrap();
+        b.add_region(heap2.base(), heap2.size()).unwrap();
         assert_eq!(b.total_pages(), 96);
         assert_eq!(b.free_pages(), 96);
     }
 
     #[def_test]
     fn test_overlap_rejected() {
+        let heap = TestHeap::new(64);
         let mut b = BuddyAllocator::<PAGE>::new();
-        let heap = alloc::vec![0u8; 64 * PAGE];
-        let base = heap.as_ptr() as usize;
-        b.init_region(base, 64 * PAGE).unwrap();
-        assert!(b.add_region(base, 32 * PAGE).is_err());
-        core::mem::forget(heap);
+        b.init_region(heap.base(), heap.size()).unwrap();
+        assert_eq!(
+            b.add_region(heap.base(), 32 * PAGE),
+            Err(AllocError::MemoryOverlap)
+        );
+    }
+
+    #[def_test]
+    fn test_free_permutations_preserve_live_pages_and_fully_coalesce() {
+        for pages in [256, 1024] {
+            let heap = TestHeap::new(pages);
+            for permutation in 0..3 {
+                let mut b = BuddyAllocator::<PAGE>::new();
+                b.init_region(heap.base(), heap.size()).unwrap();
+                let total = b.total_pages();
+                let mut addrs = alloc::vec::Vec::new();
+                for _ in 0..total {
+                    let addr = b.allocate_pages(1, PAGE).unwrap();
+                    // SAFETY: The allocation is exclusive and one page long.
+                    // Arbitrary payload must never be read as free-list links.
+                    unsafe { core::ptr::write_bytes(addr as *mut u8, 0xa5, PAGE) };
+                    addrs.push(addr);
+                }
+                addrs.sort_unstable();
+                assert!(!addrs.windows(2).any(|pair| pair[0] == pair[1]));
+                let heap_start = addrs[0];
+                match permutation {
+                    1 => addrs.reverse(),
+                    2 => {
+                        let mut seed = 0x12345678u64;
+                        for i in (1..addrs.len()).rev() {
+                            seed ^= seed << 13;
+                            seed ^= seed >> 7;
+                            seed ^= seed << 17;
+                            addrs.swap(i, seed as usize % (i + 1));
+                        }
+                    }
+                    _ => {}
+                }
+                for (index, addr) in addrs.into_iter().enumerate() {
+                    // SAFETY: This page has not yet been freed. Other frees must
+                    // neither merge it nor overwrite its live payload.
+                    unsafe {
+                        assert_eq!(*(addr as *const u8), 0xa5);
+                        assert_eq!(*((addr + PAGE - 1) as *const u8), 0xa5);
+                    }
+                    b.deallocate_pages(addr, 1);
+                    assert_eq!(b.free_pages(), index + 1);
+                }
+                // Recover every maximal chunk, not just the free-page counter.
+                let chunks: alloc::vec::Vec<_> =
+                    split_to_chunks::<PAGE>(heap_start, total * PAGE).collect();
+                for &(addr, order) in &chunks {
+                    assert_eq!(b.allocate_pages_at(addr, 1 << order, PAGE), Ok(addr));
+                }
+                assert_eq!(b.free_pages(), 0);
+                for (addr, order) in chunks {
+                    b.deallocate_pages(addr, 1 << order);
+                }
+                assert_eq!(b.free_pages(), total);
+            }
+        }
+    }
+
+    #[def_test]
+    fn test_allocated_buddy_cannot_forge_free_membership() {
+        let (_heap, mut b) = make_alloc();
+        let live = b.allocate_pages(1, PAGE).unwrap();
+        let released = b.allocate_pages(1, PAGE).unwrap();
+        assert_eq!(live ^ PAGE, released);
+        // SAFETY: This still-allocated page belongs exclusively to the test.
+        // Even a well-formed header with a matching order is caller payload,
+        // not evidence that the page belongs to an allocator free list.
+        unsafe {
+            (live as *mut FreeNode).write(FreeNode {
+                link: LinkedListAtomicLink::new(),
+                order: 0,
+            });
+        }
+        b.deallocate_pages(released, 1);
+        assert_eq!(b.free_pages(), 255);
+        assert!(b.allocate_pages_at(live, 2, PAGE).is_err());
+        b.deallocate_pages(live, 1);
+        assert_eq!(b.allocate_pages_at(live, 2, PAGE), Ok(live));
+        b.deallocate_pages(live, 2);
+        assert_eq!(b.free_pages(), 256);
+    }
+
+    #[def_test]
+    fn test_bitmap_storage_is_reserved_and_overlap_checked() {
+        let heap = TestHeap::new(1024);
+        let mut b = BuddyAllocator::<PAGE>::new();
+        b.init_region(heap.base(), heap.size()).unwrap();
+        assert_eq!(b.total_pages(), 1023);
+        assert_eq!(b.free_pages(), 1023);
+        assert!(b.allocate_pages_at(heap.base(), 1, PAGE).is_err());
+        assert_eq!(
+            b.add_region(heap.base(), PAGE),
+            Err(AllocError::MemoryOverlap)
+        );
+        let mut addrs = alloc::vec::Vec::new();
+        while let Ok(addr) = b.allocate_pages(1, PAGE) {
+            assert!(addr >= heap.base() + PAGE);
+            addrs.push(addr);
+        }
+        assert_eq!(addrs.len(), 1023);
+        for addr in addrs {
+            b.deallocate_pages(addr, 1);
+        }
+        b.reset();
+        b.add_region(heap.base(), heap.size()).unwrap();
+        assert_eq!(b.free_pages(), 1023);
+    }
+
+    #[def_test]
+    fn test_single_page_region_keeps_inline_metadata() {
+        let heap = TestHeap::new(1);
+        let mut b = BuddyAllocator::<PAGE>::new();
+        b.init_region(heap.base(), heap.size()).unwrap();
+        assert_eq!(b.allocate_pages(1, PAGE), Ok(heap.base()));
+        assert_eq!(b.free_pages(), 0);
+        b.deallocate_pages(heap.base(), 1);
+        assert_eq!(b.free_pages(), 1);
+    }
+
+    #[def_test]
+    fn test_alloc_at_preserves_each_unselected_page_once() {
+        let heap = TestHeap::new(64);
+        let mut b = BuddyAllocator::<PAGE>::new();
+        b.init_region(heap.base(), heap.size()).unwrap();
+        let target = heap.base() + 20 * PAGE;
+        assert_eq!(b.allocate_pages_at(target, 4, PAGE), Ok(target));
+        assert_eq!(b.free_pages(), 60);
+        let mut addrs = alloc::vec::Vec::new();
+        while let Ok(addr) = b.allocate_pages(1, PAGE) {
+            assert!(!(target..target + 4 * PAGE).contains(&addr));
+            addrs.push(addr);
+            assert!(addrs.len() <= 60);
+        }
+        addrs.sort_unstable();
+        assert_eq!(addrs.len(), 60);
+        assert!(!addrs.windows(2).any(|pair| pair[0] == pair[1]));
+        for addr in addrs {
+            b.deallocate_pages(addr, 1);
+        }
+        b.deallocate_pages(target, 4);
+        assert_eq!(b.allocate_pages(64, PAGE), Ok(heap.base()));
+        b.deallocate_pages(heap.base(), 64);
+    }
+
+    #[def_test]
+    fn test_alignment_and_region_edges_preserve_free_chunks() {
+        let heap = TestHeap::new(64);
+        let mut b = BuddyAllocator::<PAGE>::new();
+        b.init_region(heap.base() + PAGE, 62 * PAGE).unwrap();
+        assert!(b.allocate_pages_at(heap.base() + PAGE, 4, PAGE).is_err());
+        assert_eq!(b.free_pages(), 62);
+        let aligned = b.allocate_pages(1, 16 * PAGE).unwrap();
+        assert!(aligned.is_multiple_of(16 * PAGE));
+        b.deallocate_pages(aligned, 1);
+        let mut addrs = alloc::vec::Vec::new();
+        while let Ok(addr) = b.allocate_pages(1, PAGE) {
+            assert!((heap.base() + PAGE..heap.base() + 63 * PAGE).contains(&addr));
+            addrs.push(addr);
+        }
+        assert_eq!(addrs.len(), 62);
+        for addr in addrs {
+            b.deallocate_pages(addr, 1);
+        }
+        assert_eq!(b.free_pages(), 62);
     }
 
     #[def_test]
@@ -856,7 +1002,7 @@ mod tests {
     fn test_split_to_chunks_recombine_after_alloc() {
         // Allocate 3 pages, free them via split_to_chunks, then re-allocate.
         // The buddy should merge chunks back so that a 3-page request succeeds.
-        let mut b = make_alloc();
+        let (_heap, mut b) = make_alloc();
         let addr = b.allocate_pages(3, PAGE).unwrap();
         // Decompose the 3-page range and return each chunk.
         let chunks: alloc::vec::Vec<_> = split_to_chunks::<PAGE>(addr, 3 * PAGE).collect();

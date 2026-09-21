@@ -103,6 +103,7 @@ version = "0.3.0-dev"
 dependencies = [
  "buddy_system_allocator",
  "criterion 0.5.1",
+ "intrusive-collections",
  "kerrno",
  "rand",
  "rlsf",
