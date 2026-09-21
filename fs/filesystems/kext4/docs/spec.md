@@ -64,11 +64,11 @@ confidence 和 method limits。对比使用固定的 KExt4 历史基线，不保
 
 - `fs/filesystems/kext4` 拥有 ext4 磁盘格式、校验、JBD2、metadata buffer、extent、allocator、
   orphan、xattr、持久化不变量和直接 KVFS operation 实现；磁盘算法不保存 KVFS 对象回指。
-- KVFS 拥有 dentry、inode identity、open file、AddressSpace（含私有 `PageCache` folio
+- KVFS 拥有 dentry、inode identity、open file、AddressSpace（含直接持有的 `MappingPages` folio
   storage）、mmap view 和 mount tree 生命周期。
 - `kext4::vfs` 只做语义转换、对象绑定和错误映射，不建立第二套 dentry cache、普通文件数据
   cache、resident inode wrapper 或 journal coordinator。
-- 普通文件数据只通过 inode-owned AddressSpace/PageCache；ext4 元数据只通过 KExt4
+- 普通文件数据只通过 inode-owned AddressSpace/MappingPages；ext4 元数据只通过 KExt4
   metadata buffer 和 JBD2 transaction 修改。
 - KExt4 是 ext4 行为和接口的唯一实现，不保留旧后端兼容路径。
 - 不通过关闭 journal、checksum、barrier/flush、跳过 e2fsck 或扩大一个全局锁来伪造结果。
@@ -131,7 +131,7 @@ confidence 和 method limits。对比使用固定的 KExt4 历史基线，不保
 POSIX / KVFS
     |
     +-- mount / dentry / VfsInode / VfsFile
-    +-- inode-owned AddressSpace / private PageCache folio storage / mmap views
+    +-- inode-owned AddressSpace / embedded MappingPages folio storage / mmap views
                          |
                          v
                   kext4::Ext4Inode
@@ -167,7 +167,7 @@ POSIX / KVFS
 | --- | --- |
 | `super_block` / `ext4_sb_info` | KVFS `SuperBlock` + KExt4 `Ext4SbInfo` mount-private owner；通用 block size/maxbytes 留在 KVFS |
 | `ext4_inode_info` | 唯一 `Ext4Inode` private component；`i_size/i_disksize`、sync tids、delalloc/PA/extent-status |
-| `address_space` | KVFS `AddressSpace` 唯一拥有 identity/views/host；`PageCache` 是其私有 folio storage，KExt4 提供所有 inode 共享的静态 aops，并只从 host 借用 `Ext4Inode` |
+| `address_space` | KVFS `AddressSpace` 唯一拥有 identity/views/host；`MappingPages` 是其直接持有的 folio storage，KExt4 提供所有 inode 共享的静态 aops，并只从 host 借用 `Ext4Inode` |
 | `jbd2_journal` | mount-wide `MountedJournal`；聚合磁盘 journal、transaction engine 和 checkpoint queue |
 | running/committing/checkpoint transaction | `MountedJournal`、checkpoint queue 和 metadata buffer 共同维护明确 ownership |
 | extent status tree | per-inode logical-range cache，不替代磁盘 extent tree |

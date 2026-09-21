@@ -191,17 +191,17 @@ sys_mmap / sys_munmap / sys_mprotect / sys_brk
 
 源码范围：
 
-- `mm/pagecache/src/lib.rs`
+- `mm/pagecache/src/`：`folio`、`mapping_pages`、`filemap`、`readahead`、`truncate`、`writeback`。
 
 核心类型：
 
-- `PageCache`
+- `MappingPages`
 - `PageCacheKind`
 - `Folio`
 
 职责：
 
-- 作为 `kvfs::AddressSpace` 私有持有的 cache storage/algorithm component。
+- 作为 `kvfs::AddressSpace.i_pages` 直接持有的 cache storage/algorithm component。
 - 提供 sparse folio storage、dirty/writeback 和 cached-folio resize 算法。
 - 由 owning `AddressSpace` 传入当前 inode size 和 materialize/writeback callback。
 

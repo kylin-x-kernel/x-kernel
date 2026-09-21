@@ -99,7 +99,7 @@ fn failed_prefix_writeback_redirties_and_retry_converges() {
     );
     assert_eq!(control.nr_to_write(), 1);
     for (index, expected_dirty) in [(0, false), (1, true)] {
-        let state = address_space.page_cache.with_folio(index, |folio| {
+        let state = address_space.i_pages.with_folio(index, |folio| {
             let folio = folio.expect("failed batch folio remains cached");
             (folio.is_dirty(), folio.is_under_writeback())
         });
@@ -117,7 +117,7 @@ fn failed_prefix_writeback_redirties_and_retry_converges() {
         .expect("redirtied batch converges on retry");
     assert_eq!(control.nr_to_write(), 0);
     for index in 0..2 {
-        let state = address_space.page_cache.with_folio(index, |folio| {
+        let state = address_space.i_pages.with_folio(index, |folio| {
             let folio = folio.expect("retried batch folio remains cached");
             (folio.is_dirty(), folio.is_under_writeback())
         });

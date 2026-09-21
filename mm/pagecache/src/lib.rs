@@ -4,7 +4,7 @@
 
 //! Page-cache storage and algorithms.
 //!
-//! [`PageCache`] is an implementation component owned by the VFS inode
+//! [`MappingPages`] is an implementation component owned by the VFS inode
 //! address space. It is not a second Linux `address_space` analogue and must
 //! not be held directly by VMA or open-file runtimes.
 #![no_std]
@@ -19,7 +19,7 @@ mod truncate;
 mod writeback;
 
 pub use folio::Folio;
-pub use mapping_pages::{PageCache, PageCacheKind};
+pub use mapping_pages::{MappingPages, PageCacheKind};
 pub use writeback::{WritebackPassOutcome, WritebackRangeOutcome, WritebackStats};
 
 /// Page index within a mapping.

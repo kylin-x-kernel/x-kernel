@@ -60,7 +60,7 @@ impl AddressSpace {
         if let Some(start) = invalid_start {
             self.invalidate_mappings_from(start);
         }
-        self.page_cache.resize_cached_folios(old_len, len);
+        self.i_pages.resize_cached_folios(old_len, len);
         if let Some(start) = invalid_start {
             self.invalidate_mappings_from(start);
         }
@@ -78,7 +78,7 @@ impl AddressSpace {
     /// Drops cached pages during final inode teardown.
     pub fn truncate_final(&self) -> VfsResult<()> {
         let _invalidate_guard = self.invalidate_lock.write();
-        self.page_cache.truncate_final()?;
+        self.i_pages.truncate_final()?;
         Ok(())
     }
 }

@@ -112,7 +112,7 @@ fn truncate_publishes_i_size_before_two_mapping_invalidations() {
     );
     let address_space = inode.address_space();
     address_space
-        .page_cache
+        .i_pages
         .filemap_add_folio(1, 0, b"cached tail")
         .expect("cache tail page");
     let notifier = Arc::new(RecordingNotifier {
@@ -152,11 +152,11 @@ fn truncate_shrink_then_regrow_does_not_reveal_discarded_cache() {
     let address_space = inode.address_space();
     let stale = vec![0x5a; PAGE_SIZE_4K];
     address_space
-        .page_cache
+        .i_pages
         .filemap_add_folio(0, 0, &stale)
         .expect("cache first page");
     address_space
-        .page_cache
+        .i_pages
         .filemap_add_folio(1, 0, &stale)
         .expect("cache second page");
 
@@ -192,7 +192,7 @@ fn truncate_partial_page_growth_zeros_cached_old_eof() {
     let address_space = inode.address_space();
     let stale = vec![0x5a; PAGE_SIZE_4K];
     address_space
-        .page_cache
+        .i_pages
         .filemap_add_folio(0, 0, &stale)
         .expect("cache partial EOF page");
 

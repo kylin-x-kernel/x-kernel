@@ -29,7 +29,7 @@ FAT、9p 和其他未覆盖同步的后端保持既有返回行为。它们的�
 - `src/namei.rs`：路径遍历和 open 流程。
 - `src/permission.rs`：owner/group/other DAC 与 open access 映射。
 - `src/node/`：dentry、inode、inode identity 状态机及文件系统 operation traits。
-- `src/address_space/`：inode-owned `AddressSpace`、其私有 `PageCache` 实现，以及
+- `src/address_space/`：inode-owned `AddressSpace`、其直接持有的 `MappingPages` 容器，以及
   writeback 与 truncate/invalidation 边界。`mod.rs` 定义对象和构造；`operations.rs`
   定义 callback 与默认实现；`filemap.rs`、`readahead.rs`、`writeback.rs`、`truncate.rs`
   分别承载算法编排；`views.rs` 管理注册与失效通知；`tests/` 按算法组织回归。
@@ -566,8 +566,10 @@ invalidate exclusive lock 下执行，并在 backing prepare 后、释放 block 
 在同一 generic-write data-lock 临界区发布接受后的 `i_size`，而不把 ext4 语义伪装成
 libfs helper。
 
-`AddressSpace` 自己持有 object-id、mapped views、静态共享的 `AddressSpaceOperations` 和私有
-`PageCache` storage。`PageCache` 不保存 length、object-id、views 或 invalidation
+`AddressSpace` 自己持有 object-id、mapped views、静态共享的 `AddressSpaceOperations` 和
+`i_pages: MappingPages`。该字段直接组合缓存容器，不单独分配 `Arc`，对应 Linux
+`address_space::i_pages`；Folio 自身仍用 `Arc<Mutex<Folio>>` 保持引用和页锁生命周期。
+`MappingPages` 不保存 length、object-id、views 或 invalidation
 lifecycle；writeback 的 EOF 也由 `AddressSpace` 从 inode 读取后传入。
 构造 API 只接受 `&'static dyn AddressSpaceOperations`，因此 aops 不是 inode private object。
 Backing-store callbacks 只从当前 `AddressSpace` 的 `mapping->host` 借用唯一 filesystem-private

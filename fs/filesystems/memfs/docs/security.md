@@ -4,7 +4,7 @@
 `memfs` 信任 VFS 已完成路径解析和父目录权限检查，并信任 callback 传入的 `Cred`
 是该次完整操作使用的稳定快照。它负责维护目录结构、inode
 生命周期、符号链接内容，以及 regular-file inode 与 VFS-owned `AddressSpace`
-（其私有 `PageCache` storage）的绑定关系。
+（其私有 `MappingPages` storage）的绑定关系。
 
 ## 外部边界 / 攻击面
 
@@ -24,7 +24,7 @@
 
 - 同一 regular-file inode 最多拥有一个 `VfsInode::i_mapping`
   `AddressSpace`。
-- 同一 inode `AddressSpace` 最多拥有一个私有 `PageCache` 实现组件。
+- 同一 inode `AddressSpace` 最多拥有一个私有 `MappingPages` 实现组件。
 - 同一 memfs backing inode number 必须以所属 `SuperBlock` 为联合键进入 VFS-wide identity
   table 并取得唯一
   `VfsInode`；`MemoryFs` 不得保存第二张 VFS inode cache。
@@ -43,7 +43,7 @@
 - regular-file content ownership 位于 `VfsInode::i_mapping` 下，不引入第二套
   file-backed content ownership。
 - `kvfs::AddressSpace` 只通过 `Arc` 传播，不暴露共享裸指针或内部
-  `PageCache` storage。
+  `MappingPages` storage。
 
 ## 威胁分析
 

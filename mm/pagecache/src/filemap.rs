@@ -10,15 +10,15 @@ use kerrno::{KError, KResult};
 use ksync::Mutex;
 use memaddr::PAGE_SIZE_4K;
 
-use crate::{Folio, PageCache, PageIndex};
+use crate::{Folio, MappingPages, PageIndex};
 
-impl PageCache {
+impl MappingPages {
     /// Runs `f` with the cached folio at `index`, if present.
     ///
     /// Dirty-state changes made by `f` are reflected in the cache's writeback
     /// index before this method returns.
     pub fn with_folio<R>(&self, index: PageIndex, f: impl FnOnce(Option<&mut Folio>) -> R) -> R {
-        let folio = self.inner.lock().pages.get(&index).cloned();
+        let folio = self.state.lock().entries.get(&index).cloned();
         if let Some(folio) = folio {
             let (result, needs_dirty_reconciliation) = {
                 let mut locked = folio.lock();
@@ -47,14 +47,14 @@ impl PageCache {
         f: impl FnOnce(&mut Folio) -> KResult<R>,
     ) -> KResult<R> {
         let folio = {
-            let mut inner = self.inner.lock();
-            if let Some(folio) = inner.pages.get(&index) {
+            let mut state = self.state.lock();
+            if let Some(folio) = state.entries.get(&index) {
                 folio.clone()
             } else {
                 let mut folio = instantiate_folio(index)?;
                 folio.set_warn_on_dirty_drop(self.warn_on_dirty_drop());
                 let folio = Arc::new(Mutex::new(folio));
-                inner.pages.insert(index, folio.clone());
+                state.entries.insert(index, folio.clone());
                 folio
             }
         };
@@ -83,11 +83,11 @@ impl PageCache {
         let mut folio = Folio::new_zeroed()?;
         folio.data()[offset..end].copy_from_slice(src);
         folio.set_warn_on_dirty_drop(self.warn_on_dirty_drop());
-        let mut inner = self.inner.lock();
-        if inner.pages.contains_key(&index) {
+        let mut state = self.state.lock();
+        if state.entries.contains_key(&index) {
             return Ok(false);
         }
-        inner.pages.insert(index, Arc::new(Mutex::new(folio)));
+        state.entries.insert(index, Arc::new(Mutex::new(folio)));
         Ok(true)
     }
 }

@@ -18,7 +18,7 @@ extents feature，个别 legacy inode 的 `write_begin`/`page_mkwrite` 也会在
 reservation 和用户数据标脏前同步拒绝。
 
 KExt4 的 KVFS operation 实现信任 KVFS 已经提供内核拥有的 path name、dentry、inode `AddressSpace`
-（含私有 `PageCache` storage）和文件生命周期回调。KExt4 核心不直接解引用用户态指针。
+（含直接持有的 `MappingPages` storage）和文件生命周期回调。KExt4 核心不直接解引用用户态指针。
 它也信任 `fill_super` 只接收 KVFS 已按 canonical `(s_type, BlockDevice)` reservation 并持有
 独占 claim 的 nascent superblock；KExt4 不建立平行的 device-to-mount cache。
 

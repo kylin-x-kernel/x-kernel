@@ -162,13 +162,13 @@ File
   -> inode location
   -> VfsInode { i_size, i_mapping }
        -> AddressSpace { host, a_ops, object_id, MappingView }
-            -> private pagecache::PageCache folio storage
+            -> i_pages: pagecache::MappingPages (directly owned folio storage)
        -> object invalidate work
 
 filemap
   -> builds file-backed VmArea + VmRuntimeRef
   -> registers MappingView
-  -> owns VfsFile reference, not the underlying PageCache
+  -> owns VfsFile reference, not the underlying MappingPages
 ```
 
 当前语义：

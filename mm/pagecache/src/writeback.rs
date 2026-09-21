@@ -10,7 +10,7 @@ use kerrno::{KError, KResult};
 use ksync::{Mutex, MutexGuard};
 use memaddr::PAGE_SIZE_4K;
 
-use crate::{Folio, PageCache, PageIndex};
+use crate::{Folio, MappingPages, PageIndex};
 
 type IndexedFolio = (PageIndex, Arc<Mutex<Folio>>);
 
@@ -108,11 +108,11 @@ impl WritebackStats {
     }
 }
 
-impl PageCache {
+impl MappingPages {
     fn finish_writeback(&self, index: PageIndex, folio: &Arc<Mutex<Folio>>, is_complete: bool) {
-        let mut inner = self.inner.lock();
-        let is_current = inner
-            .pages
+        let mut state = self.state.lock();
+        let is_current = state
+            .entries
             .get(&index)
             .is_some_and(|current| Arc::ptr_eq(current, folio));
         let mut locked = folio.lock();
@@ -124,28 +124,33 @@ impl PageCache {
             return;
         }
         if locked.is_dirty() {
-            inner.dirty_pages.insert(index);
+            state.dirty_marks.insert(index);
         } else {
-            inner.dirty_pages.remove(&index);
+            state.dirty_marks.remove(&index);
         }
     }
 
     fn collect_dirty_folios_in_range(&self, start: u64, end: u64) -> Vec<IndexedFolio> {
-        let inner = self.inner.lock();
+        let state = self.state.lock();
         if start >= end {
             return Vec::new();
         }
         let first_index = start / PAGE_SIZE_4K as u64;
         let last_index = (end - 1) / PAGE_SIZE_4K as u64;
-        inner
-            .dirty_pages
+        state
+            .dirty_marks
             .range(first_index..=last_index)
-            .filter_map(|index| inner.pages.get(index).map(|folio| (*index, folio.clone())))
+            .filter_map(|index| {
+                state
+                    .entries
+                    .get(index)
+                    .map(|folio| (*index, folio.clone()))
+            })
             .collect()
     }
 
     // A dirty tag only selects a candidate. Mapping identity and folio state
-    // must be checked in one inner -> folio critical section before I/O owns
+    // must be checked in one state -> folio critical section before I/O owns
     // the folio, otherwise truncate or replacement can detach a collected Arc.
     fn start_writeback_for_candidate<'a>(
         &self,
@@ -153,25 +158,25 @@ impl PageCache {
         candidate: &'a Arc<Mutex<Folio>>,
         stats: &mut WritebackStats,
     ) -> Option<MutexGuard<'a, Folio>> {
-        let mut inner = self.inner.lock();
-        let Some(current) = inner.pages.get(&index).cloned() else {
-            inner.dirty_pages.remove(&index);
+        let mut state = self.state.lock();
+        let Some(current) = state.entries.get(&index).cloned() else {
+            state.dirty_marks.remove(&index);
             return None;
         };
 
         if !Arc::ptr_eq(&current, candidate) {
             let is_current_dirty = current.lock().is_dirty();
             if is_current_dirty {
-                inner.dirty_pages.insert(index);
+                state.dirty_marks.insert(index);
             } else {
-                inner.dirty_pages.remove(&index);
+                state.dirty_marks.remove(&index);
             }
             return None;
         }
 
         let mut folio = candidate.lock();
         if !folio.is_dirty() {
-            inner.dirty_pages.remove(&index);
+            state.dirty_marks.remove(&index);
             return None;
         }
         if folio.is_under_writeback() {
@@ -181,15 +186,15 @@ impl PageCache {
 
         folio.clear_dirty();
         folio.start_writeback();
-        inner.dirty_pages.remove(&index);
-        drop(inner);
+        state.dirty_marks.remove(&index);
+        drop(state);
         Some(folio)
     }
 
     /// Writes back dirty cached folios intersecting `[start, end)`.
     ///
     /// The callback runs with the candidate folio locked and must not re-enter
-    /// this [`PageCache`].
+    /// this [`MappingPages`].
     pub fn writeback_until(
         &self,
         visible_len: u64,

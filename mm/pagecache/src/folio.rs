@@ -10,7 +10,7 @@ use khal::mem::{PhysAddr, VirtAddr, v2p};
 use log::warn;
 use memaddr::PAGE_SIZE_4K;
 
-/// Cached folio stored inside a [`crate::PageCache`].
+/// Cached folio stored inside a [`crate::MappingPages`].
 #[derive(Debug)]
 pub struct Folio {
     addr: VirtAddr,

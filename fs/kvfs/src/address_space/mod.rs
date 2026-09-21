@@ -7,7 +7,7 @@
 use alloc::{collections::BTreeMap, sync::Arc};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use pagecache::{PageCache, PageCacheKind};
+use pagecache::{MappingPages, PageCacheKind};
 use views::RegisteredView;
 use vmobj::{FileObjectId, MappingViewId, VmObjectId};
 
@@ -38,7 +38,8 @@ pub struct AddressSpace {
     object_id: VmObjectId,
     invalidate_lock: RwLock<()>,
     views: Mutex<BTreeMap<MappingViewId, RegisteredView>>,
-    page_cache: Arc<PageCache>,
+    /// Resident folios and dirty marks, corresponding to Linux `i_pages`.
+    i_pages: MappingPages,
 }
 
 impl AddressSpace {
@@ -56,7 +57,7 @@ impl AddressSpace {
             )),
             invalidate_lock: RwLock::new(()),
             views: Mutex::new(BTreeMap::new()),
-            page_cache: PageCache::new(kind),
+            i_pages: MappingPages::new(kind),
         })
     }
 
@@ -81,7 +82,7 @@ impl AddressSpace {
 
     /// Returns `address_space::nrpages`.
     pub fn nrpages(&self) -> u64 {
-        self.page_cache.nrpages()
+        self.i_pages.nrpages()
     }
 
     fn visible_len(&self) -> VfsResult<u64> {

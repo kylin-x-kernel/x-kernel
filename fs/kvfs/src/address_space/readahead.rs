@@ -30,10 +30,12 @@ impl ReadaheadControl {
         }
     }
 
+    /// Returns the first page index in the requested window.
     pub fn start_index(&self) -> PageIndex {
         self.start_index
     }
 
+    /// Returns the number of pages in the requested window.
     pub fn count(&self) -> usize {
         self.count
     }
@@ -51,7 +53,7 @@ impl ReadaheadControl {
             return Ok(false);
         }
         self.address_space
-            .page_cache
+            .i_pages
             .filemap_add_folio(index, offset, src)
     }
 }
@@ -78,7 +80,7 @@ impl AddressSpace {
         let last_index = end.div_ceil(PAGE_SIZE_4K as u64);
         let count =
             usize::try_from(last_index - start_index).map_err(|_| VfsError::InvalidInput)?;
-        if count > 1 && self.page_cache.cached_run_len(start_index, count) < count {
+        if count > 1 && self.i_pages.cached_run_len(start_index, count) < count {
             self.readahead(ReadaheadControl::new(self.clone(), start_index, count))?;
         }
         Ok(())

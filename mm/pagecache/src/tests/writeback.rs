@@ -71,7 +71,7 @@ fn failed_writeback_restores_dirty_state() {
 fn clean_folio_with_stale_dirty_tag_is_not_written() {
     let cache = new_cache(PageCacheKind::FileBacked);
     cache.filemap_add_folio(0, 0, b"clean").unwrap();
-    cache.inner.lock().dirty_pages.insert(0);
+    cache.state.lock().dirty_marks.insert(0);
     let mut writes = 0usize;
 
     let stats = cache
@@ -122,7 +122,7 @@ fn stale_collected_folio_is_not_written_or_tagged_as_replacement() {
     let cache = new_cache(PageCacheKind::FileBacked);
     write_cached(&cache, 0, &vec![1; PAGE_SIZE_4K]).unwrap();
     write_cached(&cache, PAGE_SIZE_4K as u64, &vec![2; PAGE_SIZE_4K]).unwrap();
-    let cache_during_io = cache.clone();
+    let cache_during_io = &cache;
     let mut write_offsets = Vec::new();
 
     cache
@@ -137,9 +137,9 @@ fn stale_collected_folio_is_not_written_or_tagged_as_replacement() {
                 if offset == 0 {
                     let replacement = Arc::new(Mutex::new(Folio::new_zeroed()?));
                     let old = cache_during_io
-                        .inner
+                        .state
                         .lock()
-                        .pages
+                        .entries
                         .insert(1, replacement)
                         .expect("collected folio");
                     old.lock().clear_dirty();
@@ -194,13 +194,13 @@ fn failed_writeback_does_not_redirty_detached_folio() {
     let cache = new_cache(PageCacheKind::FileBacked);
     write_cached(&cache, 0, b"dirty").unwrap();
     let detached = cache
-        .inner
+        .state
         .lock()
-        .pages
+        .entries
         .get(&0)
         .cloned()
         .expect("cached folio");
-    let cache_during_io = cache.clone();
+    let cache_during_io = &cache;
 
     let outcome = cache
         .write_cache_pages(
@@ -269,21 +269,21 @@ fn batched_writeback_preserves_concurrent_redirty() {
     let cache = new_cache(PageCacheKind::FileBacked);
     write_cached(&cache, 0, b"old").unwrap();
 
-    let cache_during_io = cache.clone();
+    let cache_during_io = &cache;
     let mut first_snapshot = Vec::new();
     let mut dirty_indices_before_redirty = Vec::new();
     let mut state_during_io = None;
     let mut dirty_indices_after_redirty = Vec::new();
     cache
         .write_cache_pages(3, 0, u64::MAX, usize::MAX, PAGE_SIZE_4K, &mut |_, data| {
-            dirty_indices_before_redirty = dirty_indices(&cache_during_io);
+            dirty_indices_before_redirty = dirty_indices(cache_during_io);
             state_during_io = Some(cache_during_io.with_folio(0, |folio| {
                 let folio = folio.expect("folio under writeback");
                 (folio.is_dirty(), folio.is_under_writeback())
             }));
             first_snapshot.extend_from_slice(&data[..3]);
-            write_cached(&cache_during_io, 0, b"new")?;
-            dirty_indices_after_redirty = dirty_indices(&cache_during_io);
+            write_cached(cache_during_io, 0, b"new")?;
+            dirty_indices_after_redirty = dirty_indices(cache_during_io);
             Ok(WritebackRangeOutcome::complete(data.len()))
         })
         .unwrap();

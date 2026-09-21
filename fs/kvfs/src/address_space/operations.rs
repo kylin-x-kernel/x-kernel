@@ -47,18 +47,22 @@ impl PageMkwriteRequest {
 }
 
 impl WriteBeginRequest {
+    /// Creates a request for a buffered-write byte range.
     pub const fn new(pos: u64, len: usize) -> Self {
         Self { pos, len }
     }
 
+    /// Returns the starting file byte offset.
     pub const fn pos(self) -> u64 {
         self.pos
     }
 
+    /// Returns the requested byte count.
     pub const fn len(self) -> usize {
         self.len
     }
 
+    /// Returns whether the requested byte range is empty.
     pub const fn is_empty(self) -> bool {
         self.len == 0
     }
@@ -73,22 +77,27 @@ pub struct WriteEndRequest {
 }
 
 impl WriteEndRequest {
+    /// Creates a request for a buffered-write byte range.
     pub const fn new(pos: u64, len: usize, copied: usize) -> Self {
         Self { pos, len, copied }
     }
 
+    /// Returns the starting file byte offset.
     pub const fn pos(self) -> u64 {
         self.pos
     }
 
+    /// Returns the requested byte count.
     pub const fn len(self) -> usize {
         self.len
     }
 
+    /// Returns whether the requested byte range is empty.
     pub const fn is_empty(self) -> bool {
         self.len == 0
     }
 
+    /// Returns the number of bytes copied into the cache.
     pub const fn copied(self) -> usize {
         self.copied
     }

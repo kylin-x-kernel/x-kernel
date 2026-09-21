@@ -17,7 +17,7 @@ use crate::{Kiocb, VfsError, VfsResult};
 impl AddressSpace {
     /// Runs `f` with the cached folio at `index`, if present.
     pub fn with_folio<R>(&self, index: PageIndex, f: impl FnOnce(Option<&mut Folio>) -> R) -> R {
-        self.page_cache.with_folio(index, f)
+        self.i_pages.with_folio(index, f)
     }
 
     /// Runs `f` with the folio at `index`, materializing it when absent.
@@ -26,7 +26,7 @@ impl AddressSpace {
         index: PageIndex,
         f: impl FnOnce(&mut Folio) -> KResult<R>,
     ) -> KResult<R> {
-        self.page_cache.with_folio_or_create(
+        self.i_pages.with_folio_or_create(
             index,
             |index| {
                 let mut folio = Folio::new_zeroed()?;
@@ -213,8 +213,7 @@ impl AddressSpace {
             self.ops
                 .write_begin(self, WriteBeginRequest::new(pos, step))?;
             if prepared_end > visible_len {
-                self.page_cache
-                    .resize_cached_folios(visible_len, prepared_end);
+                self.i_pages.resize_cached_folios(visible_len, prepared_end);
                 // Another iteration is reached only after `write_end` accepts
                 // this full range and publishes the same EOF under data_lock.
                 visible_len = prepared_end;

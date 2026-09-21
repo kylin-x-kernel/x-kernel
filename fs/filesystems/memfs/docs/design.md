@@ -37,7 +37,7 @@ MemoryFs
 VFS-wide identity table: (SuperBlock, ino)
   -> VfsInode
        -> i_mapping: kvfs::AddressSpace
-            -> page_cache: pagecache::PageCache (private implementation)
+            -> i_pages: pagecache::MappingPages (directly owned)
 
 VfsFile::mapping()
   -> VfsInode::i_mapping / kvfs::AddressSpace
@@ -74,7 +74,7 @@ than a memfs-backed pseudo sysfs.
    父目录的组继承与子目录 setgid 传播。
 3. `memfs` 创建对应 inode；`VfsInode` 构造时持有稳定的 `kvfs::AddressSpace`。
 4. 首次通过 KFS page-cache file path 进入文件缓存路径。
-5. `AddressSpace` 建立唯一的私有 `PageCache` 实现组件。
+5. `AddressSpace` 建立唯一的私有 `MappingPages` 实现组件。
 6. open-file、mmap、truncate 和 evict 路径复用同一个 address-space mapping。
 
 ### 创建匿名文件
@@ -148,5 +148,5 @@ FIFO 和设备 inode 在 VFS open 时安装专用 operation table，不继承该
 
 ## Drop / 资源释放
 
-- inode 释放时，`AddressSpace` 与其私有 `PageCache` 随引用计数释放。
+- inode 释放时，`AddressSpace` 在最后一个引用释放时销毁，其直接持有的 `MappingPages` 随字段释放。
 - 目录删除逻辑由 `InodeRef` 和 nlink 维护。

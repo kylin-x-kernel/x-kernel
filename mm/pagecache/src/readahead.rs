@@ -4,18 +4,18 @@
 
 //! Resident-run lookup for readahead windows.
 
-use crate::{PageCache, PageIndex};
+use crate::{MappingPages, PageIndex};
 
-impl PageCache {
+impl MappingPages {
     /// Returns the number of contiguous cached folios starting at `start`.
     pub fn cached_run_len(&self, start: PageIndex, count: usize) -> usize {
         if count == 0 {
             return 0;
         }
-        let inner = self.inner.lock();
+        let state = self.state.lock();
         let mut found = 0usize;
         for index in start..start.saturating_add(count as u64) {
-            if !inner.pages.contains_key(&index) {
+            if !state.entries.contains_key(&index) {
                 break;
             }
             found += 1;

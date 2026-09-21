@@ -127,7 +127,9 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   address-space operation table 必须是所有 inode 共享的静态表，callback 只使用传入 mapping
   的唯一 host inode/superblock，不得把 filesystem inode 同时作为 aops object，也不得保存平行
   owner 回指。通用 block size 和 max file size 只由 `SuperBlock` 保存。
-  不得向 MM 暴露或额外强持有内部 `PageCache`。
+  `MappingPages` 由 AddressSpace 直接持有，不能作为可独立 clone 的缓存 owner 暴露给
+  filemap 或文件系统。entries 与派生 dirty marks 由同一 mutex 维护，Folio 的引用
+  继续独立保活页数据；该调整不改变 invalidate lock 或 mapping identity 校验。
 - `SuperBlock` 的 operation table 与 filesystem-private state 分离，对应 Linux `s_op` 与
   `s_fs_info`。构造 API 只接受静态共享 operation table；filesystem callback 必须通过绑定到
   `&SuperBlock` 的 typed borrow 恢复 private state，不得取得可逃逸的 private owner、在

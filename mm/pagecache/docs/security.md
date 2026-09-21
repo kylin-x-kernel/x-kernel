@@ -27,20 +27,21 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
 - `Folio::dirty` 是状态源，dirty index 只承担 `PAGECACHE_TAG_DIRTY` 风格的候选枚举；
 - 对外 folio 操作返回时，dirty 状态变化已反映到当前 resident folio 的 dirty tag；
   已从 resident tree 移除的 index 不得残留在 dirty index；
-- dirty tag 命中不构成写回许可；开始 I/O 前必须在 PageCache inner lock → folio lock
+- dirty tag 命中不构成写回许可；开始 I/O 前必须在 MappingPages state lock → folio lock
   的同一临界区重新校验 mapping identity、dirty 和 writeback 状态；
 - writeback 完成时必须按相同锁序重新校验 mapping identity；失败只重新标脏当前
   resident folio，已脱离 mapping 的 folio 只结束 writeback；
-- `PageCache` 中不存在可与 inode `i_size` 分歧的 length 字段；
+- `MappingPages` 中不存在可与 inode `i_size` 分歧的 length 字段；
 - VM object-id、views 和 notifier 不进入本 crate。
 
 ## 线程安全
 
 folio tree/dirty index 与 folio data 分层加锁。需要同时核对两层状态时，锁顺序固定为
-PageCache inner lock → folio lock；folio access closure 释放 folio lock 后再执行 dirty
-index reconciliation。文件系统 I/O 在 tree lock 外执行，避免把 sleepable backing
-operation 放入缓存索引临界区。`writeback_until` 会在 folio lock 下调用 backend
-callback，该 callback 不得重入同一个 `PageCache`；batch writeback 则在调用 backend
+MappingPages state lock → folio lock；folio access closure 释放 folio lock 后再执行 dirty
+index reconciliation。writeback 的文件系统 I/O 在 tree lock 外执行。
+现有 materialize closure 在 tree lock 下运行，可能调用 backing read；禁止重入同一
+容器。该读入路径的锁范围没有在本次结构重构中改变。`writeback_until` 会在 folio lock 下调用 backend
+callback，该 callback 不得重入同一个 `MappingPages`；batch writeback 则在调用 backend
 前释放 folio lock。
 
 ## 威胁分析
@@ -55,7 +56,7 @@ callback，该 callback 不得重入同一个 `PageCache`；batch writeback 则�
 | T-06 | dirty index 漏项导致 fsync 漏写 | folio dirty 状态转换时 reconciliation，resize/writeback 显式同步索引 |
 | T-07 | writeback 完成覆盖并发 redirty | batch 完成阶段重新读取最终状态；单页写回后的 clean → dirty writer 重新设置 tag |
 | T-08 | truncate/replace 后写回已脱离 mapping 的旧 folio | 开始与完成写回时均在固定锁序下校验当前 `Arc` identity；失败不重新标脏旧 folio |
-| T-09 | 文件增长后 cached tail 的清零结果未进入 writeback | growth 在 inner lock → folio lock 下同时设置 dirty bit 和 dirty tag |
+| T-09 | 文件增长后 cached tail 的清零结果未进入 writeback | growth 在 state lock → folio lock 下同时设置 dirty bit 和 dirty tag |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -74,7 +75,7 @@ callback，该 callback 不得重入同一个 `PageCache`；batch writeback 则�
   对全部 resident folio 的扫描，但尚未实现 Linux XArray tag/reclaim；
 - 尚未实现 Linux 完整的 wait-on-writeback/invalidate 协调；本 crate 在开始和完成 I/O
   时校验 mapping identity，I/O 期间的 resize/invalidate 仍依赖 owner 串行化；
-- `writeback_until` 持 folio lock 调用 backend，callback 重入同一个 `PageCache` 会造成
+- `writeback_until` 持 folio lock 调用 backend，callback 重入同一个 `MappingPages` 会造成
   死锁；
 - 没有自适应 readahead、swap、memcg、NUMA 或 THP；
 - inode/MM 一致性由 `kvfs::AddressSpace` 的事务保证，不在本 crate 重复实现。
@@ -89,6 +90,7 @@ callback，该 callback 不得重入同一个 `PageCache`；batch writeback 则�
 - dirty 状态变化返回前是否更新 dirty index，并发 redirty 后索引是否继续保留；
 - dirty tag 候选是否在开始写回前重新校验当前 mapping identity 和 folio 状态；
 - shrink 和 final teardown 是否同步删除对应 dirty index；
-- PageCache/folio 双锁路径是否保持 PageCache inner → folio 顺序；
-- `writeback_until` backend callback 是否避免重入同一个 `PageCache`；
-- 是否在 tree lock 下调用了可能阻塞的文件系统 I/O。
+- MappingPages/folio 双锁路径是否保持 MappingPages state → folio 顺序；
+- `writeback_until` backend callback 是否避免重入同一个 `MappingPages`；
+- writeback 是否在 tree lock 外调用 backend，materialize closure 是否避免重入；
+- `MappingPagesState` 是否保持 crate 内部可见，容器是否始终由 AddressSpace 直接持有。

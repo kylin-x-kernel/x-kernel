@@ -4,26 +4,26 @@
 
 //! Shared fixtures for cache algorithm tests.
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::vec::Vec;
 
 use kerrno::KResult;
 use memaddr::PAGE_SIZE_4K;
 
-use crate::{Folio, PageCache, PageCacheKind, PageIndex};
+use crate::{Folio, MappingPages, PageCacheKind, PageIndex};
 
 mod mapping_pages;
 mod truncate;
 mod writeback;
 
-fn new_cache(kind: PageCacheKind) -> Arc<PageCache> {
-    PageCache::new(kind)
+fn new_cache(kind: PageCacheKind) -> MappingPages {
+    MappingPages::new(kind)
 }
 
-fn dirty_indices(cache: &PageCache) -> Vec<PageIndex> {
-    cache.inner.lock().dirty_pages.iter().copied().collect()
+fn dirty_indices(cache: &MappingPages) -> Vec<PageIndex> {
+    cache.state.lock().dirty_marks.iter().copied().collect()
 }
 
-fn write_cached(cache: &PageCache, offset: u64, src: &[u8]) -> KResult<()> {
+fn write_cached(cache: &MappingPages, offset: u64, src: &[u8]) -> KResult<()> {
     let mut written = 0usize;
     while written < src.len() {
         let pos = offset + written as u64;

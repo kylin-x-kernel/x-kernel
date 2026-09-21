@@ -30,6 +30,7 @@ pub enum WritebackSyncMode {
 }
 
 impl WritebackControl {
+    /// Selects all cached pages for synchronous writeback.
     pub const fn all(data_only: bool) -> Self {
         Self {
             range_start: 0,
@@ -41,6 +42,7 @@ impl WritebackControl {
         }
     }
 
+    /// Selects cached pages at or after the supplied byte offset.
     pub const fn from(range_start: u64, data_only: bool) -> Self {
         Self {
             range_start,
@@ -52,6 +54,10 @@ impl WritebackControl {
         }
     }
 
+    /// Selects pages intersecting the half-open byte range.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` if `range_start + len` overflows.
     pub fn range(range_start: u64, len: usize, data_only: bool) -> VfsResult<Self> {
         let range_end = range_start
             .checked_add(len as u64)
@@ -66,36 +72,44 @@ impl WritebackControl {
         })
     }
 
+    /// Sets the requested writeback synchronization mode.
     pub const fn with_sync_mode(mut self, sync_mode: WritebackSyncMode) -> Self {
         self.sync_mode = sync_mode;
         self
     }
 
+    /// Sets the maximum number of pages to write.
     pub const fn with_nr_to_write(mut self, nr_to_write: usize) -> Self {
         self.nr_to_write = nr_to_write;
         self
     }
 
+    /// Returns the inclusive byte offset at which the range starts.
     pub const fn range_start(self) -> u64 {
         self.range_start
     }
 
+    /// Returns the exclusive byte offset at which the range ends.
     pub const fn range_end(self) -> u64 {
         self.range_end
     }
 
+    /// Returns the requested synchronization mode.
     pub const fn sync_mode(self) -> WritebackSyncMode {
         self.sync_mode
     }
 
+    /// Returns the remaining page budget.
     pub const fn nr_to_write(self) -> usize {
         self.nr_to_write
     }
 
+    /// Returns the number of pages skipped so far.
     pub const fn pages_skipped(self) -> usize {
         self.pages_skipped
     }
 
+    /// Returns whether only data-integrity metadata is required.
     pub const fn is_data_only(self) -> bool {
         self.data_only
     }
@@ -136,7 +150,7 @@ impl AddressSpace {
         control: &mut WritebackControl,
         mut write_folio_fn: impl FnMut(PageIndex, &[u8], usize) -> VfsResult<()>,
     ) -> VfsResult<()> {
-        let stats = self.page_cache.writeback_until(
+        let stats = self.i_pages.writeback_until(
             self.visible_len()?,
             control.range_start(),
             control.range_end(),
@@ -158,7 +172,7 @@ impl AddressSpace {
         max_bytes: usize,
         mut write_range_fn: impl FnMut(u64, &[u8]) -> VfsResult<WritebackRangeOutcome>,
     ) -> VfsResult<()> {
-        let outcome = self.page_cache.write_cache_pages(
+        let outcome = self.i_pages.write_cache_pages(
             self.visible_len()?,
             control.range_start(),
             control.range_end(),
