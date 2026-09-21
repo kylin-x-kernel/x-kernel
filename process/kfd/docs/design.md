@@ -68,9 +68,11 @@ run their close callbacks under the table lock.
 
 `From<kvfs::Metadata>` populates `Kstat`; conversion to Linux ABI values starts
 with a zero value then assigns fields. Time values become seconds/nanoseconds;
-`statx` splits device major/minor and advertises 4096-byte atomic-write units for
-regular-file modes. Numeric casts follow target field widths; conversion is not
-a fallible range-checking API. ABI copyout belongs to POSIX/user-access code.
+`statx` sets `stx_mask` to `STATX_BASIC_STATS` for the basic fields populated by
+every conversion, splits device major/minor, and additionally advertises
+4096-byte atomic-write units for regular-file modes. Numeric casts follow
+target field widths; conversion is not a fallible range-checking API. ABI
+copyout belongs to POSIX/user-access code.
 
 ## Decisions and resource release
 

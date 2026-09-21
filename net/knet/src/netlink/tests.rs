@@ -25,7 +25,7 @@ use super::{
     *,
 };
 use crate::{
-    RecvFlags, RecvOptions, SERVICE, SendOptions, SocketAddrEx,
+    KernelAncillaryData, RecvFlags, RecvOptions, SERVICE, SendOptions, SocketAddrEx,
     buf::PacketBuf,
     device::{
         IF_OPER_DOWN, IF_OPER_UNKNOWN, IF_OPER_UP, LINK_FLAG_BROADCAST, LINK_FLAG_LOOPBACK,
@@ -34,7 +34,10 @@ use crate::{
     },
     router::{Ipv4AddrEntry, Router, Rule},
     service::Service,
-    socket::SocketOps,
+    socket::{
+        SocketOps,
+        options::{Configurable, SetSocketOption},
+    },
 };
 
 fn valid_ipv4_cidr(address: crate::ip::Ipv4Address, prefix_len: u8) -> crate::ip::Ipv4Cidr {
@@ -1101,6 +1104,68 @@ fn test_publish_kobject_uevent_appends_monotonic_seqnum() {
         .parse::<u64>()
         .unwrap();
     assert!(second_seq > first_seq);
+}
+
+#[def_test(serial)]
+fn test_kobject_uevent_passcred_reports_kernel_credentials() {
+    let socket = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT);
+    socket
+        .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 0, groups: 1 }))
+        .unwrap();
+    socket
+        .set_option(SetSocketOption::PassCredentials(&true))
+        .unwrap();
+    publish_kobject_uevent(1, b"change@/devices/test\0");
+
+    let mut data = [0u8; 128];
+    let mut ancillary = Vec::new();
+    socket
+        .recv(
+            Cursor::new(data.as_mut_slice()),
+            RecvOptions {
+                ancillary: Some(&mut ancillary),
+                ..RecvOptions::default()
+            },
+        )
+        .unwrap();
+
+    let credentials = ancillary
+        .pop()
+        .unwrap()
+        .downcast::<KernelAncillaryData>()
+        .unwrap();
+    let KernelAncillaryData::Credentials(credentials) = *credentials else {
+        panic!("expected SCM_CREDENTIALS ancillary data");
+    };
+    assert_eq!(credentials.pid, 0);
+    assert_eq!(credentials.uid, 0);
+    assert_eq!(credentials.gid, 0);
+}
+
+#[def_test(serial)]
+fn test_route_netlink_passcred_does_not_forge_kernel_credentials() {
+    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    socket
+        .set_option(SetSocketOption::PassCredentials(&true))
+        .unwrap();
+    socket.inner.rx_queue.lock().push_back(NetlinkPacket {
+        from: NetlinkAddr { pid: 0, groups: 0 },
+        data: vec![1, 2, 3, 4],
+    });
+
+    let mut data = [0u8; 4];
+    let mut ancillary = Vec::new();
+    socket
+        .recv(
+            Cursor::new(data.as_mut_slice()),
+            RecvOptions {
+                ancillary: Some(&mut ancillary),
+                ..RecvOptions::default()
+            },
+        )
+        .unwrap();
+
+    assert!(ancillary.is_empty());
 }
 
 #[def_test(serial)]

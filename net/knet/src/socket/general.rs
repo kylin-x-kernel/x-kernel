@@ -26,6 +26,8 @@ pub(crate) struct GeneralOptions {
     reuse_address: AtomicBool,
     /// Whether the socket is allowed to send broadcast packets.
     broadcast: AtomicBool,
+    /// Whether received messages include sender credentials.
+    pass_credentials: AtomicBool,
 
     send_timeout_nanos: AtomicU64,
     recv_timeout_nanos: AtomicU64,
@@ -47,6 +49,7 @@ impl GeneralOptions {
             nonblock: AtomicBool::new(false),
             reuse_address: AtomicBool::new(false),
             broadcast: AtomicBool::new(false),
+            pass_credentials: AtomicBool::new(false),
 
             send_timeout_nanos: AtomicU64::new(0),
             recv_timeout_nanos: AtomicU64::new(0),
@@ -69,6 +72,11 @@ impl GeneralOptions {
     /// Returns whether broadcast sending is enabled.
     pub fn broadcast(&self) -> bool {
         self.broadcast.load(Ordering::Relaxed)
+    }
+
+    /// Returns whether credential ancillary messages are enabled.
+    pub fn pass_credentials(&self) -> bool {
+        self.pass_credentials.load(Ordering::Relaxed)
     }
 
     /// Returns the bound device ifindex, or 0 if unbound.
@@ -224,6 +232,9 @@ impl Configurable for GeneralOptions {
             O::Broadcast(broadcast) => {
                 **broadcast = self.broadcast();
             }
+            O::PassCredentials(enabled) => {
+                **enabled = self.pass_credentials();
+            }
             O::BindToDevice(name) => {
                 let ifindex = self.bound_dev_if();
                 **name = if ifindex > 0 && SERVICE.is_inited() {
@@ -257,6 +268,9 @@ impl Configurable for GeneralOptions {
             }
             O::Broadcast(broadcast) => {
                 self.broadcast.store(*broadcast, Ordering::Relaxed);
+            }
+            O::PassCredentials(enabled) => {
+                self.pass_credentials.store(*enabled, Ordering::Relaxed);
             }
             O::BindToDevice(name) => {
                 let ifindex = match name {

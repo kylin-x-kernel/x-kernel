@@ -26,8 +26,9 @@ modifying class registry semantics, or adding new device categories.
 - No driver binding or probing: the discover → match → bind pipeline is
   owned by `kdevice` and `kdriver`; kclass consumes the already-bound
   device object at publish time.
-- No device lifecycle ownership: hotplug state transitions are
-  `kdevice` events that kclass observes, never drives.
+- No device lifecycle or node-allocation ownership: hotplug state transitions,
+  class indices, major/minor numbers, and `devname` templates belong to
+  `kdevice`. kclass only supplies class-specific metadata at activation.
 - No runtime dispatch policy between consumers: after publication the
   consumer holds `ClassDevice<T>` directly and kclass steps out of the
   call path.
@@ -76,7 +77,9 @@ drivers/contracts/kclass/
     │  │     ACTIVATION_BRIDGE           │    │
     │  │  (kdevice event subscriber)     │    │
     │  │  Activated → notify_class_avail │    │
+    │  │              + register node     │    │
     │  │  Removed   → remove_class_device│    │
+    │  │              + unregister node   │    │
     │  └─────────────┬───────────────────┘    │
     │                │                        │
     │  ┌─────────────┴───────────────────┐    │
@@ -121,6 +124,7 @@ drivers/contracts/kclass/
 | `ClassDeviceInner<T>` | `ClassDevice` internal shared state: parent, runtime, name, kind, irq, metadata |
 | `ClassRegistry<T>` | Typed registry: publish (unique publication), devices (enumerate available), find (lookup by id), subscribe (availability notification), remove (remove by id) |
 | `ACTIVATION_BRIDGE` | Global event bridge: subscribes to `kdevice` `Activated` / `Removed` events and drives class-level notify/remove |
+| `ClassRuntimeMetadata::device_node_class` | Supplies input capability metadata or the DRM primary class to `kdevice`; other runtime classes return no node request |
 | `class_registries!` macro | Declaratively generates all 7 class registries and their companion functions |
 | `ClassDeviceMetadata` | Optional class-specific metadata (currently only the input class carries physical_location / unique_id) |
 | `prelude` module | Centralized re-export of all public types for publishers such as `kdriver` |
@@ -143,7 +147,7 @@ drivers/contracts/kclass/
                          ▼
                     ┌──────────┐
                     │Available │  ← parent.state == Active;
-                    │(active)  │     availability callbacks fired
+                    │(active)  │     DeviceNode assigned, then callbacks fired
                     └────┬─────┘
                          │ kdevice Removed event
                          ▼
@@ -155,7 +159,7 @@ drivers/contracts/kclass/
 | From | To | Trigger |
 |----|----|----------|
 | — | Published | Driver calls `publish_<class>(parent, runtime)` |
-| Published | Available | `kdevice` dispatches the `Activated` event; `notify_class_available` invokes subscriber callbacks |
+| Published | Available | `kdevice` dispatches `Activated`; `notify_class_available` registers any class node and then invokes subscriber callbacks |
 | Published | Available (immediate) | `parent.state()` is already `Active` at publish time (desc-adoption path) |
 | Available | Removed | `kdevice` dispatches the `Removed` event; `remove_class_device` removes the entry |
 | Published | — | Publishing the same `DeviceId` again returns `AlreadyExists` |
@@ -186,8 +190,9 @@ resident runtime is never silently replaced.
    - if the same id already exists → `AlreadyExists`, and the
      class-specific publish already performed is undone;
    - otherwise → push.
-8. If the device is already `Active`, `notify_class_available` fires
-   synchronously, notifying all registered subscribers.
+8. If the device is already `Active`, `notify_class_available` runs
+   synchronously. Input and display classes first register a `DeviceNode` in
+   `kdevice`, then notify class subscribers.
 
 ### Device enumeration and lookup
 
@@ -204,7 +209,7 @@ resident runtime is never silently replaced.
 2. The callback is stored as
    `ClassAvailabilityCallback<T> = Arc<dyn Fn(ClassDevice<T>) + Send + Sync>`.
 3. When a device becomes `Active`, `notify_class_available` invokes all
-   subscriber callbacks outside the lock.
+   node and class-subscriber callbacks outside the class-registry lock.
 4. A subscriber may use the device immediately or cache the reference
    inside the callback.
 5. Callbacks run outside the lock so reentrancy inside subscriber code
@@ -217,10 +222,13 @@ resident runtime is never silently replaced.
 
 1. A `DeviceEventKind::Activated` subscriber is registered: on each event
    it calls `notify_class_available(kind, id)`, dispatching on
-   `DeviceKind` to the matching class notify function.
+   `DeviceKind` to the matching class notify function. Input and display
+   notify functions capture their class metadata and call
+   `kdevice::register_device_node` before availability callbacks.
 2. A `DeviceEventKind::Removed` subscriber is registered: on each event it
-   calls `remove_class_device(id)`, which walks every class registry and
-   removes the id.
+   calls `remove_class_device(id)`, which walks every class registry, removes
+   the id, unregisters its optional `DeviceNode`, and then runs class-specific
+   unpublish cleanup.
 3. The bridge completes inside `LazyInit::call_once`, guaranteeing a
    single registration.
 

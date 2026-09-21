@@ -25,7 +25,9 @@ reachable from the documented publish/query/subscribe API.
 │  │   devices/find/subscribe │
 │  ├─ ClassDevice::with()     │
 │  │   trait delegation       │
-│  └─ Event bridge dispatch   │
+│  ├─ Event bridge dispatch   │
+│  └─ DeviceNode metadata     │
+│      handoff to kdevice     │
 │                             │
 │ (no unsafe boundary in      │
 │  kclass — see below)        │
@@ -61,6 +63,9 @@ from:
 - **Event bridge**: the arrival order of `Activated` / `Removed` events
   dispatched by `kdevice`. kclass trusts kdevice to dispatch only after
   state transitions complete.
+- **Device-node metadata**: active input and display runtimes supply immutable
+  class metadata to `kdevice`. The node registry validates class capacity and
+  owns index, major/minor, and `devname` assignment.
 - **ClassDevice trait delegation**: when upper subsystems call trait
   methods through `ClassDevice<T>`, calls delegate to the runtime trait
   object. kclass itself performs no argument validation — it trusts each
@@ -109,6 +114,13 @@ by a `GlobalPage` RAII allocation that lives for the kernel lifetime).
 6. **device_kind validation**: `publish_<class>()` verifies the runtime's
    `device_kind` against the registry type before constructing the
    `ClassDevice`; a mismatch returns `InvalidInput` without publishing.
+7. **Node assignment follows activation**: kclass requests a `DeviceNode` only
+   after observing `DeviceEvent::Activated`. It unregisters that node before
+   class-specific cleanup on `DeviceEvent::Removed`.
+8. **Node allocation failure does not hide the runtime**: a failed node
+   registration is logged, but class availability callbacks still run. The
+   typed runtime remains usable even when a Linux-compatible projection cannot
+   be allocated.
 
 ## Thread Safety
 
@@ -131,6 +143,8 @@ by a `GlobalPage` RAII allocation that lives for the kernel lifetime).
 | T-06 | device_kind validation bypassed at publish | Medium | Driver misuses a publish function (e.g. `publish_block` for a net device) | Explicit `device_kind != $kind` check returns `InvalidInput` without publishing |
 | T-07 | `find`/`devices` return non-`Active` devices | Low | `is_available()` filtering removed or broken | Both paths filter through `is_available()`; removed devices are swap_remove'd |
 | T-08 | Reentrancy into the same registry from a subscriber callback deadlocks | Medium | Callback calls `publish_*` / `subscribe_*` | `notify_class_available` runs callbacks outside the lock, so reentrancy cannot deadlock (but may build long call chains) |
+| T-09 | A node is visible before the underlying runtime is active | Medium — userspace could open a node whose class runtime cannot serve requests | Node registration happens during publication | Registration is driven only by the `Activated` event, after the class registry releases its lock |
+| T-10 | Node allocation failure suppresses unrelated class consumers | Medium — kernel subsystems could miss an otherwise usable device | The class index pool is exhausted | The failure is logged and ordinary class availability callbacks continue |
 
 Impact levels:
 
@@ -149,6 +163,7 @@ Impact levels:
 | F-06 | `devices()` returns a very large `Vec` | Many devices active at once | Allocation may fail | Caller gets an empty `Vec` (no OOM handling) | 4 | `Vec::collect` may fail; callers should handle empty results |
 | F-07 | Duplicate publish | Driver bypasses the normal remove/add lifecycle | publish returns `AlreadyExists` | New runtime not visible | 4 | Class-specific publish is rolled back; the resident object is kept |
 | F-08 | Missing input metadata | Non-input class does not override `class_metadata` | `physical_location()` / `unique_id()` return empty strings | Input device identity incomplete | 4 | `ClassRuntimeMetadata` default returns `empty()`; the input class overrides explicitly |
+| F-09 | Device-node allocation fails | The fixed class index range is exhausted | No `/dev` or `/sys` projection is created for the runtime | Linux-compatible discovery is unavailable for that device | 3 | kdevice returns an error; kclass logs it and still notifies typed class consumers |
 
 Severity levels:
 
@@ -163,6 +178,8 @@ Severity levels:
   `InvalidInput`, `AlreadyExists`); nothing panics.
 - devices, find, subscribe, and remove are infallible; publish reports
   duplicate identity explicitly.
+- Device-node allocation failures are isolated from the typed class registry;
+  the runtime remains available to direct class consumers.
 - A subscriber callback panic currently has no unwind protection;
   subscriber implementation quality is relied upon.
 - `ClassDevice`'s `driver_name()` / `driver_id()` use `expect` — valid
@@ -194,6 +211,9 @@ registries and `ClassDevice` objects.
   class-specific metadata requires a trait change.
 - `ClassDevice` has no pre-removal notification (e.g. "device about to be
   removed").
+- Device-node templates currently cover only input event devices and DRM
+  primary nodes. Other classes remain discoverable through kclass without a
+  Linux-compatible node projection.
 
 ## Audit Checklist
 
@@ -211,4 +231,7 @@ When modifying this module, verify:
   `parent.driver_id()`.
 - Registry-lock critical sections still call no external callbacks (deadlock
   prevention).
+- Device-node registration remains after `Activated` and before availability
+  callbacks; removal unregisters the node before class cleanup.
+- A node-allocation error must not suppress typed class availability callbacks.
 - Framebuffer changes respect the `Arc<DeviceObject>` lifetime guarantee.

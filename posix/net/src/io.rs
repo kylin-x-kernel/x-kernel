@@ -25,8 +25,8 @@ use kvfs::VfsFile;
 use linux_raw_sys::{
     general::timespec,
     net::{
-        MSG_CTRUNC, MSG_DONTWAIT, MSG_ERRQUEUE, MSG_PEEK, MSG_TRUNC, SCM_RIGHTS, SOL_SOCKET,
-        cmsghdr, mmsghdr, msghdr, sockaddr, socklen_t,
+        MSG_CTRUNC, MSG_DONTWAIT, MSG_ERRQUEUE, MSG_PEEK, MSG_TRUNC, SCM_CREDENTIALS, SCM_RIGHTS,
+        SOL_SOCKET, cmsghdr, mmsghdr, msghdr, sockaddr, socklen_t, ucred,
     },
 };
 use osvm::{VirtPtr, VmBytes, VmBytesMut, write_vm_mem};
@@ -89,6 +89,7 @@ fn parse_send_cmsgs(
 enum SocketAncillary {
     Rights { fds: Vec<Arc<VfsFile>> },
     IpError(SocketErrorInfo),
+    Credentials(knet::options::UnixCredentials),
 }
 
 fn into_socket_ancillary(ancillary: AncillaryData) -> Option<SocketAncillary> {
@@ -106,6 +107,9 @@ fn into_socket_ancillary(ancillary: AncillaryData) -> Option<SocketAncillary> {
         let ancillary = ancillary.downcast::<KernelAncillaryData>().ok()?;
         return Some(match *ancillary {
             KernelAncillaryData::IpError(err) => SocketAncillary::IpError(err),
+            KernelAncillaryData::Credentials(credentials) => {
+                SocketAncillary::Credentials(credentials)
+            }
         });
     }
 
@@ -139,6 +143,25 @@ fn push_socket_cmsg(
             Ok(written)
         }),
         SocketAncillary::IpError(err) => push_ip_recverr_cmsg(builder, err),
+        SocketAncillary::Credentials(credentials) => {
+            builder.push(SOL_SOCKET, SCM_CREDENTIALS, |data| {
+                if data.len() < size_of::<ucred>() {
+                    return Err(KError::from(LinuxError::ENOBUFS));
+                }
+                let credentials = ucred {
+                    pid: credentials.pid,
+                    uid: credentials.uid,
+                    gid: credentials.gid,
+                };
+                // SAFETY: the destination has room for one `ucred`; ancillary
+                // byte buffers do not promise `ucred` alignment, so the write
+                // must be unaligned. Every field is initialized above.
+                unsafe {
+                    core::ptr::write_unaligned(data.as_mut_ptr().cast::<ucred>(), credentials);
+                }
+                Ok(size_of::<ucred>())
+            })
+        }
     }
 }
 

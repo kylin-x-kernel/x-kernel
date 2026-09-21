@@ -51,6 +51,7 @@ These crates or modules adapt the portable driver contracts to X-Kernel:
 |----------------|------|
 | `device-res-xkernel` | Implements `device-res` provider traits using `memspace`, `kirq`, `kdma`, and `khal`. |
 | `kdriver` | X-Kernel driver orchestration: bus discovery, provider holder, concrete-driver glue, and publication into `kclass`. |
+| `kdevice-uevent` | Adapts ordered `kdevice` node lifecycle events to X-Kernel kobject netlink messages and shared sysfs formatting. |
 | `irq-driver`, `timer-driver`, `rtc-driver`, `x86-apic`, `aarch64-pmuv3` | Host/platform driver integration pieces. |
 | `console-driver` | Boot and console integration; ordinary reusable serial drivers should use driver contracts instead. |
 | `pci`, `of`, `acpi`, `dice-driver`, `rs_fdtree` | Firmware, bus, and boot-discovery support. Keep host-specific conversions in adapter code, not in `kdevice` or portable drivers. |

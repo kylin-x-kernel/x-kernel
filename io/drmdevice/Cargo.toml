@@ -13,15 +13,13 @@ documentation.workspace = true
 bytemuck.workspace = true
 display.workspace = true
 kalloc.workspace = true
-kclass.workspace = true
-kdevice.workspace = true
+kclass = { workspace = true, features = ["display"] }
 khal.workspace = true
 ktime_types.workspace = true
 kpoll.workspace = true
 ksync.workspace = true
 ktask.workspace = true
 kvfs.workspace = true
-lazyinit.workspace = true
 log.workspace = true
 memaddr.workspace = true
 posix-types.workspace = true

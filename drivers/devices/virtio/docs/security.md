@@ -316,6 +316,10 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 - **故障恢复**：
   - 网络设备：`recycle_tx`/`recycle_rx` 回收缓冲区后可继续操作。
   - 其他设备：单次操作失败后可重试，设备状态由 `virtio-drivers` 管理。
+- **Input-name sanitization**: `VirtIoInputDev::try_new` applies
+  `trim_end_matches('\0')` before storing a device-provided name. This removes
+  VirtIO configuration padding so trailing NUL bytes cannot leak into class
+  metadata, sysfs attributes, or uevent property values.
 
 ## 隐私分析
 

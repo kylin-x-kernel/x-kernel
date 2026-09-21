@@ -17,13 +17,14 @@ use core::{borrow::Borrow, cmp::Ordering};
 use hashbrown::HashMap;
 use iov_iter::{IovIterDest, IovIterSource};
 use kcred::Cred;
-use klazy::Once;
 use ksync::Mutex;
 use ktime_types::SystemTime;
+#[cfg(unittest)]
+use kvfs::Mount;
 use kvfs::{
     AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FileDirOperations,
     FileOperations, FileSystemType, FsContext, FsContextOperations, InodeDirOperations,
-    InodeOperations, InodeSymlinkOperations, Kiocb, LockedDentry, Metadata, MetadataUpdate, Mount,
+    InodeOperations, InodeSymlinkOperations, Kiocb, LockedDentry, Metadata, MetadataUpdate,
     NodeFlags, NodePermission, NodeType, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations,
     Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest,
     WriteEndRequest, get_tree_nodev, inode_init_owner,
@@ -33,7 +34,6 @@ use slab::Slab;
 
 pub(crate) const RAMFS_MAGIC: u32 = 0x8584_58f6;
 pub(crate) const TMPFS_MAGIC: u32 = 0x0102_1994;
-static SYSFS: Once<(Arc<SuperBlock>, Arc<Mount>)> = Once::new();
 
 fn tmpfs_get_tree(
     context: &mut FsContext<'_>,
@@ -45,63 +45,21 @@ fn tmpfs_get_tree(
     })
 }
 
-fn sysfs_get_tree(
-    context: &mut FsContext<'_>,
-    _lookup_root: &kvfs::Path,
-    _lookup_pwd: &kvfs::Path,
-) -> VfsResult<Arc<SuperBlock>> {
-    get_tree_nodev(context, |file_system_type, flags| {
-        Ok(new_sysfs_with_type(file_system_type, flags))
-    })
-}
-
 static TMPFS_CONTEXT_OPERATIONS: FsContextOperations = FsContextOperations::new(tmpfs_get_tree);
-static SYSFS_CONTEXT_OPERATIONS: FsContextOperations = FsContextOperations::new(sysfs_get_tree);
 
 fn init_tmpfs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
     context.set_operations(&TMPFS_CONTEXT_OPERATIONS);
     Ok(())
 }
 
-fn init_sysfs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
-    context.set_operations(&SYSFS_CONTEXT_OPERATIONS);
-    Ok(())
-}
-
 /// Registered tmpfs filesystem type.
 pub static TMPFS_TYPE: FileSystemType = FileSystemType::nodev("tmpfs", init_tmpfs_context);
-
-/// Registered sysfs filesystem type.
-pub static SYSFS_TYPE: FileSystemType = FileSystemType::nodev("sysfs", init_sysfs_context);
 
 #[macros::register_init]
 fn init_memory_filesystems() {
     kvfs::register_filesystem(&ramfs::RAMFS_TYPE)
         .expect("ramfs filesystem type must register once");
     kvfs::register_filesystem(&TMPFS_TYPE).expect("tmpfs filesystem type must register once");
-    kvfs::register_filesystem(&SYSFS_TYPE).expect("sysfs filesystem type must register once");
-}
-
-/// Returns the shared sysfs superblock.
-///
-/// The singleton retains an internal root mount because the directory tree is
-/// owned by this superblock rather than by a separate kernfs root. Visible
-/// mounts therefore cannot tear down the shared kernel-populated tree.
-pub fn new_sysfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
-    new_sysfs_with_type(&SYSFS_TYPE, superblock_flags)
-}
-
-fn new_sysfs_with_type(
-    file_system_type: &'static FileSystemType,
-    superblock_flags: SuperBlockFlags,
-) -> Arc<SuperBlock> {
-    let (super_block, _internal_mount) = SYSFS.call_once(|| {
-        let super_block =
-            ramfs::new_ramfs_with_file_system_type_and_flags(file_system_type, superblock_flags);
-        let internal_mount = Mount::new_root(&super_block);
-        (super_block, internal_mount)
-    });
-    super_block.clone()
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]

@@ -10,7 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [features]
-input = ["dep:inputdev", "kclass/input"]
+input = ["kclass/input"]
 serial = ["kclass/char", "dep:console_driver"]
 memtrack = ["kalloc/tracking", "dep:gimli"]
 dev-log = []
@@ -52,12 +52,11 @@ flatten_objects = "0.2.4"
 backtrace.workspace = true
 gimli = { version = "*", default-features = false, optional = true }
 dice_driver = { workspace = true, optional = true }
-inputdev = { workspace = true, optional = true }
 klazy.workspace = true
 entropy.workspace = true
 kvmm-api = { workspace = true, optional = true }
 tee_crypto = { workspace = true, features = ["alloc"], optional = true }
-kclass.workspace = true
+kclass = { workspace = true, features = ["display"] }
 console_driver = { workspace = true, optional = true }
 driver_base.workspace = true
 kdevice.workspace = true

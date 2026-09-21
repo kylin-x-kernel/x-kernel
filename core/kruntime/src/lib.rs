@@ -180,6 +180,8 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     #[cfg(all(unittest, feature = "smp"))]
     self::mp::tests_startup_order::queue_early_tasks(cpu_id);
 
+    #[cfg(feature = "fs")]
+    fs_boot::init_device_discovery();
     kdriver::init_drivers();
     #[cfg(feature = "char")]
     ktty::tty::try_handoff_console();

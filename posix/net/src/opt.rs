@@ -19,7 +19,9 @@ use knet::{
     options::{Configurable, GetSocketOption, SetSocketOption},
     sock_from_file,
 };
-use linux_raw_sys::net::{SO_BINDTODEVICE, SOL_SOCKET, socklen_t};
+use linux_raw_sys::net::{
+    SO_ATTACH_FILTER, SO_BINDTODEVICE, SO_DETACH_FILTER, SOL_SOCKET, socklen_t,
+};
 use osvm::{VirtPtr, write_vm_mem};
 use posix_types::{UserConstPtr, UserPtr, UserRead};
 
@@ -32,6 +34,75 @@ const PACKET_DROP_MEMBERSHIP: u32 = 2;
 const PACKET_STATISTICS: u32 = 6;
 
 const IFNAMSIZ: usize = 16;
+const BPF_MAX_INSNS: usize = 4096;
+const BPF_CLASS_MASK: u16 = 0x07;
+const BPF_JMP: u16 = 0x05;
+const BPF_RET: u16 = 0x06;
+const BPF_OP_MASK: u16 = 0xf0;
+const BPF_JA: u16 = 0x00;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SockFilter {
+    code: u16,
+    jt: u8,
+    jf: u8,
+    k: u32,
+}
+
+// SAFETY: `SockFilter` is the Linux classic-BPF instruction ABI and contains
+// only plain integer fields with no invalid bit patterns.
+unsafe impl UserRead for SockFilter {}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SockFprog {
+    len: u16,
+    filter: usize,
+}
+
+// SAFETY: `SockFprog` is copied only as an ABI carrier. The embedded pointer
+// is validated and copied through `UserConstPtr` before any instruction use.
+unsafe impl UserRead for SockFprog {}
+
+fn validate_classic_filter(program: SockFprog) -> KResult<()> {
+    let len = usize::from(program.len);
+    if len == 0 || len > BPF_MAX_INSNS || program.filter == 0 {
+        return Err(KError::InvalidInput);
+    }
+    let instructions = UserConstPtr::<SockFilter>::from(program.filter).load_vm_vec(len)?;
+    validate_classic_filter_instructions(&instructions)
+}
+
+fn validate_classic_filter_instructions(instructions: &[SockFilter]) -> KResult<()> {
+    let len = instructions.len();
+    if instructions
+        .last()
+        .is_none_or(|instruction| instruction.code & BPF_CLASS_MASK != BPF_RET)
+    {
+        return Err(KError::InvalidInput);
+    }
+    for (index, instruction) in instructions.iter().enumerate() {
+        if instruction.code & BPF_CLASS_MASK != BPF_JMP {
+            continue;
+        }
+        let remaining = len - index - 1;
+        if instruction.code & BPF_OP_MASK == BPF_JA {
+            if instruction.k as usize >= remaining {
+                return Err(KError::InvalidInput);
+            }
+        } else if usize::from(instruction.jt) >= remaining
+            || usize::from(instruction.jf) >= remaining
+        {
+            return Err(KError::InvalidInput);
+        }
+    }
+    Ok(())
+}
+
+fn supports_kobject_filter_compat(socket: &knet::Socket) -> bool {
+    matches!(socket, knet::Socket::Netlink(netlink) if netlink.is_kobject_uevent())
+}
 
 mod conv {
     use kerrno::{KError, KResult};
@@ -237,7 +308,14 @@ fn encode_bound_device_name(name: Option<&str>, optlen: usize) -> KResult<Vec<u8
     Ok(buf)
 }
 
-/// Get socket options at a specified protocol level
+/// Gets a socket option at a specified protocol level.
+///
+/// # Errors
+///
+/// Returns an error if `fd` is invalid or is not a socket, if `level` and
+/// `optname` do not name a supported option, if the supplied output length is
+/// too small, or if `optval` or `optlen_ptr` cannot be accessed in user memory.
+/// Option-specific failures from the underlying socket are also propagated.
 pub fn sys_getsockopt(
     fd: i32,
     level: u32,
@@ -265,6 +343,7 @@ pub fn sys_getsockopt(
 
     let file = kprocess::current_resources().get_file(fd)?;
     let socket = sock_from_file(&file)?;
+
     macro_rules! dispatch {
         ($which:ident) => {
             let mut val = Default::default();
@@ -294,7 +373,15 @@ pub fn sys_getsockopt(
     Ok(0)
 }
 
-/// Set socket options at a specified protocol level
+/// Sets a socket option at a specified protocol level.
+///
+/// # Errors
+///
+/// Returns an error if `fd` is invalid or is not a socket, if `level` and
+/// `optname` do not name a supported option, if `optlen` is invalid for that
+/// option, or if `optval` cannot be read from user memory. Invalid classic-BPF
+/// programs and option-specific failures from the underlying socket are also
+/// propagated.
 pub fn sys_setsockopt(
     fd: i32,
     level: u32,
@@ -316,6 +403,20 @@ pub fn sys_setsockopt(
 
     let file = kprocess::current_resources().get_file(fd)?;
     let socket = sock_from_file(&file)?;
+    if level == SOL_SOCKET && optname == SO_ATTACH_FILTER {
+        if !supports_kobject_filter_compat(socket.as_ref()) {
+            return Err(KError::OperationNotSupported);
+        }
+        let program = get::<SockFprog>(optval, optlen)?;
+        validate_classic_filter(program)?;
+        return Ok(0);
+    }
+    if level == SOL_SOCKET && optname == SO_DETACH_FILTER {
+        if !supports_kobject_filter_compat(socket.as_ref()) {
+            return Err(KError::OperationNotSupported);
+        }
+        return Ok(0);
+    }
     macro_rules! dispatch {
         ($which:ident) => {
             let val = get(optval, optlen)?;
@@ -361,7 +462,10 @@ mod tests {
     use linux_raw_sys::general::timeval;
     use unittest::{assert_eq, def_test};
 
-    use super::{IFNAMSIZ, conv::SocketTimeout, encode_bound_device_name};
+    use super::{
+        BPF_JA, BPF_JMP, BPF_RET, IFNAMSIZ, SockFilter, conv::SocketTimeout,
+        encode_bound_device_name, validate_classic_filter_instructions,
+    };
 
     const NANOS_PER_TICK: u64 = NANOS_PER_SEC / kbuild_config::TICKS_PER_SECOND as u64;
 
@@ -416,5 +520,41 @@ mod tests {
         .unwrap();
 
         assert_eq!(timeout, TimeSpan::from_nanos(NANOS_PER_TICK));
+    }
+
+    #[def_test]
+    fn classic_filter_requires_a_return_terminator() {
+        let unterminated = [SockFilter {
+            code: 0,
+            jt: 0,
+            jf: 0,
+            k: 0,
+        }];
+        assert_eq!(
+            validate_classic_filter_instructions(&unterminated),
+            Err(KError::InvalidInput)
+        );
+    }
+
+    #[def_test]
+    fn classic_filter_rejects_out_of_range_jumps() {
+        let program = [
+            SockFilter {
+                code: BPF_JMP | BPF_JA,
+                jt: 0,
+                jf: 0,
+                k: 1,
+            },
+            SockFilter {
+                code: BPF_RET,
+                jt: 0,
+                jf: 0,
+                k: u32::MAX,
+            },
+        ];
+        assert_eq!(
+            validate_classic_filter_instructions(&program),
+            Err(KError::InvalidInput)
+        );
     }
 }

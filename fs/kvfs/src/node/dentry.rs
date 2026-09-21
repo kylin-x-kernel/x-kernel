@@ -843,6 +843,28 @@ impl Dentry {
         }
     }
 
+    /// Invalidates one cached child after an out-of-band namespace change.
+    ///
+    /// Dynamic filesystems use this when their backing registry changes
+    /// without going through a VFS create, unlink, or rename operation. Both
+    /// positive and negative entries are removed. Invalidating a directory
+    /// also forgets its cached descendants while existing external references
+    /// retain the old inode in the usual unlinked-object state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::NotADirectory`] when this dentry cannot contain
+    /// children, or the normal filename validation error for an invalid child
+    /// name.
+    pub fn invalidate_cached_child(&self, name: &str) -> VfsResult<()> {
+        self.as_dir()?;
+        Self::verify_child_name(name)?;
+        let dir_inode = self.vfs_inode();
+        let _namespace_guard = dir_inode.lock_namespace_exclusive();
+        self.forget_cache_entry(name);
+        Ok(())
+    }
+
     /// Inserts a child dentry if the cache has no live entry with the same name.
     ///
     /// Returns the existing entry when the name is already cached.
@@ -2068,7 +2090,7 @@ mod tests_dentry {
     }
 
     #[def_test]
-    fn test_forget_cache_entry_handles_negative_dentry() {
+    fn test_invalidate_cached_child_handles_negative_dentry() {
         let fs = Arc::new(MockFilesystem);
         let root = make_dir_entry(fs, 20, "");
         let negative = Dentry::new_negative(Some(root.clone()), String::from("missing"));
@@ -2076,7 +2098,7 @@ mod tests_dentry {
         root.insert_cache(negative.name_snapshot(), negative.clone());
         assert!(root.lookup_cache("missing").unwrap().ptr_eq(&negative));
 
-        root.forget_cache_entry("missing");
+        root.invalidate_cached_child("missing").unwrap();
         assert!(root.lookup_cache("missing").is_none());
     }
 
@@ -2571,7 +2593,7 @@ mod tests_dentry {
         assert!(cached_weak.upgrade().is_some());
         assert!(root.lookup_cache("cached").is_some());
 
-        root.forget_cache_entry("cached");
+        root.invalidate_cached_child("cached").unwrap();
         assert!(cached_weak.upgrade().is_none());
 
         let parent = make_dir_entry(fs.clone(), 15, "parent");

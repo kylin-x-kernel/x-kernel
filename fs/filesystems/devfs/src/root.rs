@@ -6,9 +6,10 @@ use alloc::sync::Arc;
 
 use kvfs::{DirMaker, DirMapping, SimpleDir, SimpleFs};
 
-use crate::nodes;
+use crate::{dynamic, nodes};
 
 pub fn builder(fs: Arc<SimpleFs>) -> DirMaker {
+    dynamic::initialize(fs.clone());
     let mut root = DirMapping::new();
 
     nodes::null_zero_full::add_root_entries(&mut root, fs.clone());

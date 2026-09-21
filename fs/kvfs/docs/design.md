@@ -604,6 +604,12 @@ FIEMAP writer 只在一次同步调用中借用，不由 VFS 或文件系统保�
 修改；buffered write、shared write fault 和 truncate 都从 exclusive 侧更新 mapping 状态，
 同时不扩大成文件系统挂载级写阻塞。
 
+由外部注册表驱动命名空间的动态文件系统通过
+`Dentry::invalidate_cached_child()` 报告带外增删。该接口在父目录 namespace
+exclusive lock 下同时驱逐 positive/negative child；目录 child 还递归 forget 已缓存后代。
+文件系统只应失效实际变化的最高层路径，以保持未变化目录及其 mountpoint 的 dentry
+身份。
+
 superblock 默认 dentry operations 使用静态引用，对应 Linux `s_d_op`；dentry 只保存继承的
 table identity，不把 operation object 变成 dentry-private runtime state。
 

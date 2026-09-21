@@ -70,7 +70,7 @@ fn subscribe_input_unregister() {
     }));
 }
 
-/// Drain all registered input device handles out of the input subsystem.
-pub fn input_drain_devices() -> Vec<ClassDevice<InputDeviceImpl>> {
-    INPUT_DEVICES.lock().drain(..).collect()
+/// Return a snapshot of all registered input device handles.
+pub fn input_devices() -> Vec<ClassDevice<InputDeviceImpl>> {
+    INPUT_DEVICES.lock().clone()
 }

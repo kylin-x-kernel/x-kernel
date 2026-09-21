@@ -7,6 +7,9 @@
 //! This crate hosts stable, shared device-model concepts that should be
 //! reusable by `kdriver` and higher-level subsystems without forcing them to
 //! depend on the driver orchestration layer.
+//! It also owns stable Linux-facing device-node identity: class index,
+//! major/minor number, `devname`, and the immutable metadata projected by
+//! `devfs` and `sysfs`.
 //!
 //! # Lock-order discipline
 //!
@@ -54,6 +57,7 @@ extern crate alloc;
 
 pub mod bus;
 pub mod device;
+mod device_node;
 pub mod driver;
 mod lifecycle;
 mod registry;
@@ -73,6 +77,12 @@ pub use device::{
     resource::{
         DmaSpec, IoPortRange, IrqResource, IrqTrigger, MmioRegion, ResourceDesc, ResourceSet,
     },
+};
+pub use device_node::{
+    DeviceNode, DeviceNodeCallback, DeviceNodeClass, DeviceNodeEvent, DeviceNodeKind,
+    DeviceNodeLifecycleCallback, DeviceNodeLifecycleEvent, InputDeviceNodeId,
+    InputDeviceNodeMetadata, device_nodes_snapshot, install_device_node_lifecycle_publisher,
+    register_device_node, subscribe_device_nodes, unregister_device_node,
 };
 pub use driver::{
     CompatibleAliasMatcher, DeviceDriver, DeviceMatcher, DriverId, DriverInfo, DriverObject,

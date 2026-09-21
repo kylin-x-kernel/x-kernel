@@ -7,7 +7,8 @@
 use ktime_types::SystemTime;
 use kvfs::DeviceId;
 use linux_raw_sys::general::{
-    S_IFMT, S_IFREG, STATX_ATTR_WRITE_ATOMIC, STATX_WRITE_ATOMIC, stat, statx, statx_timestamp,
+    S_IFMT, S_IFREG, STATX_ATTR_WRITE_ATOMIC, STATX_BASIC_STATS, STATX_WRITE_ATOMIC, stat, statx,
+    statx_timestamp,
 };
 
 /// Kernel stat structure containing file metadata.
@@ -115,6 +116,7 @@ impl From<Kstat> for statx {
         // SAFETY: `statx` is a POD struct from `linux_raw_sys`. All-zeroes is a valid
         // initial state for every field (integers become 0, reserved fields become 0).
         let mut statx: statx = unsafe { core::mem::zeroed() };
+        statx.stx_mask = STATX_BASIC_STATS;
         statx.stx_blksize = value.blksize as _;
         statx.stx_attributes = 0;
         statx.stx_attributes_mask = STATX_ATTR_WRITE_ATOMIC as _;
@@ -152,5 +154,18 @@ impl From<Kstat> for statx {
         }
 
         statx
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn statx_reports_all_populated_basic_fields() {
+        let result = statx::from(Kstat::default());
+        assert_eq!(result.stx_mask & STATX_BASIC_STATS, STATX_BASIC_STATS);
     }
 }

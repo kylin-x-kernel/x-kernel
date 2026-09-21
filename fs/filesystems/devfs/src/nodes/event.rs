@@ -2,20 +2,19 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{format, string::ToString, sync::Arc, vec};
+use alloc::{string::ToString, sync::Arc, vec, vec::Vec};
 
 use bitmaps::Bitmap;
 use kclass::ClassDevice;
 #[allow(unused_imports)]
 use kclass::prelude::{DriverError, Event, EventType, InputDevice, InputDeviceId, InputDeviceImpl};
-use kdevice::subscribe_device_removed;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;
 use ktime_types::SystemTime;
 use kvfs::{
-    DeviceFileOps, DeviceId, DirMapping, NodeFlags, SimpleDir, SimpleFs, VfsFile, VfsFileBuilder,
-    VfsInode, VfsResult,
+    DeviceFileOps, DirMapping, NodeFlags, SimpleDir, SimpleFs, VfsFile, VfsFileBuilder, VfsInode,
+    VfsResult,
 };
 use linux_raw_sys::{
     general::{__kernel_old_time_t, __kernel_suseconds_t},
@@ -24,7 +23,7 @@ use linux_raw_sys::{
 use posix_types::{InputId, UserPtr};
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
-use crate::{DeviceFile, add_device_entry};
+use crate::dynamic::DynamicDeviceDir;
 
 const KEY_CNT: usize = EventType::Key.bits_count();
 
@@ -34,13 +33,31 @@ struct Inner {
     key_state: Bitmap<KEY_CNT>,
 }
 impl Inner {
-    fn has_event(&mut self) -> bool {
-        let Some(device) = self.device.as_mut() else {
-            self.read_ahead = None;
-            return false;
-        };
-        if self.read_ahead.is_none() {
-            match device.read_event() {
+    fn detach(&mut self) {
+        self.device = None;
+        self.read_ahead = None;
+        self.key_state = Bitmap::new();
+    }
+
+    fn live_device(&mut self) -> KResult<&mut ClassDevice<InputDeviceImpl>> {
+        if self
+            .device
+            .as_ref()
+            .is_none_or(|device| !device.is_available())
+        {
+            self.detach();
+            return Err(KError::NoSuchDevice);
+        }
+
+        self.device.as_mut().ok_or(KError::NoSuchDevice)
+    }
+
+    fn has_event(&mut self) -> KResult<bool> {
+        let needs_read = self.read_ahead.is_none();
+        let device = self.live_device()?;
+        if needs_read {
+            let event_result = device.read_event();
+            match event_result {
                 Ok(event) => {
                     if event.event_type == EventType::Key as u16 {
                         if event.value == 0 {
@@ -57,7 +74,7 @@ impl Inner {
                 }
             }
         }
-        self.read_ahead.is_some()
+        Ok(self.read_ahead.is_some())
     }
 }
 
@@ -93,32 +110,14 @@ impl EventDev {
         }
     }
 
-    fn subscribe_removed(self: &Arc<Self>) {
-        let weak = Arc::downgrade(self);
-        subscribe_device_removed(Arc::new(move |id| {
-            let Some(device) = weak.upgrade() else {
-                return;
-            };
-            if device.detach_removed(id) {
-                info!("evdev: detached removed input device {:?}", id);
-            }
-        }));
-    }
-
-    fn detach_removed(&self, id: kdevice::DeviceId) -> bool {
+    pub(crate) fn detach(&self) {
         let mut inner = self.inner.lock();
-        if inner.device.as_ref().is_none_or(|device| device.id() != id) {
-            return false;
-        }
-        inner.device = None;
-        inner.read_ahead = None;
-        inner.key_state = Bitmap::new();
+        inner.detach();
         drop(inner);
         self.poll_set.wake();
-        true
     }
 
-    fn get_event_bits(&self, arg: usize, size: usize, ty: u8) -> KResult<usize> {
+    fn get_event_bits(&self, inner: &mut Inner, arg: usize, size: usize, ty: u8) -> KResult<usize> {
         let user_bits = UserPtr::<u8>::from(arg);
         if ty == 0 {
             let len = self.ev_bits.as_bytes().len().min(size);
@@ -127,8 +126,7 @@ impl EventDev {
         } else {
             let ty = EventType::from_repr(ty).ok_or(KError::InvalidInput)?;
             let mut bits = vec![0u8; size];
-            let mut inner = self.inner.lock();
-            let device = inner.device.as_mut().ok_or(KError::NoSuchDevice)?;
+            let device = inner.live_device()?;
             match device.get_event_bits(ty, &mut bits) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -146,10 +144,23 @@ impl EventDev {
 }
 
 fn return_str(arg: usize, size: usize, s: &str) -> KResult<usize> {
-    let len = s.len().min(size);
-    UserPtr::<u8>::from(arg).write_vm_slice(&s.as_bytes()[..len])?;
+    if size == 0 {
+        return Ok(0);
+    }
+    let value = evdev_string_bytes(s, size);
+    let len = value.len();
+    UserPtr::<u8>::from(arg).write_vm_slice(&value)?;
     Ok(len)
 }
+
+fn evdev_string_bytes(s: &str, size: usize) -> Vec<u8> {
+    let len = s.len().saturating_add(1).min(size);
+    let content_len = s.len().min(len);
+    let mut value = vec![0; len];
+    value[..content_len].copy_from_slice(&s.as_bytes()[..content_len]);
+    value
+}
+
 fn return_zero_bits(arg: usize, size: usize, bits: usize) -> KResult<usize> {
     let len = bits.div_ceil(8).min(size);
     let zeros = vec![0u8; len];
@@ -190,6 +201,10 @@ impl DeviceFileOps for EventDev {
     }
 
     fn read(&self, _file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+        let mut inner = self.inner.lock();
+        // Linux evdev reports ENODEV before handling a zero-length read once
+        // the device has disappeared.
+        inner.live_device()?;
         if buf.is_empty() {
             return Ok(0);
         }
@@ -197,10 +212,14 @@ impl DeviceFileOps for EventDev {
             return Err(KError::InvalidInput);
         }
         let mut read = 0;
-        let mut inner = self.inner.lock();
         for out in buf.chunks_exact_mut(size_of::<InputEvent>()) {
-            if !inner.has_event() {
-                break;
+            match inner.has_event() {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(err) if read == 0 => return Err(err),
+                // Preserve completed records. The next read observes the
+                // terminal detached state and returns ENODEV.
+                Err(_) => break,
             }
             let Some((time, event)) = inner.read_ahead.take() else {
                 break;
@@ -229,13 +248,14 @@ impl DeviceFileOps for EventDev {
     }
 
     fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
+        let mut inner = self.inner.lock();
+        inner.live_device()?;
         match cmd {
             EVIOCGVERSION => {
                 UserPtr::<u32>::from(arg).write_vm(0x10001)?;
                 Ok(0)
             }
             EVIOCGID => {
-                let inner = self.inner.lock();
                 let device = inner.device.as_ref().ok_or(KError::NoSuchDevice)?;
                 let device_id = device.device_id();
                 UserPtr::<InputId>::from(arg).write_vm(InputId {
@@ -272,20 +292,17 @@ impl DeviceFileOps for EventDev {
                         match nr {
                             // EVIOCGNAME
                             0x06 => {
-                                let inner = self.inner.lock();
                                 let device = inner.device.as_ref().ok_or(KError::NoSuchDevice)?;
                                 return return_str(arg, size, device.name());
                             }
                             // EVIOCGPHYS
                             0x07 => {
-                                let inner = self.inner.lock();
                                 let device = inner.device.as_ref().ok_or(KError::NoSuchDevice)?;
                                 let value = device.physical_location().to_string();
                                 return return_str(arg, size, &value);
                             }
                             // EVIOCGUNIQ
                             0x08 => {
-                                let inner = self.inner.lock();
                                 let device = inner.device.as_ref().ok_or(KError::NoSuchDevice)?;
                                 let value = device.unique_id().to_string();
                                 return return_str(arg, size, &value);
@@ -298,7 +315,7 @@ impl DeviceFileOps for EventDev {
                             }
                             // EVIOCGKEY
                             0x18 => {
-                                let key_bits = self.inner.lock().key_state.as_bytes().to_vec();
+                                let key_bits = inner.key_state.as_bytes().to_vec();
                                 let len = key_bits.len().min(size);
                                 UserPtr::<u8>::from(arg).write_vm_slice(&key_bits[..len])?;
                                 return Ok(len);
@@ -318,7 +335,7 @@ impl DeviceFileOps for EventDev {
                             _ => {}
                         }
                         if nr & !EventType::MAX == EventType::COUNT {
-                            return self.get_event_bits(arg, size, nr & EventType::MAX);
+                            return self.get_event_bits(&mut inner, arg, size, nr & EventType::MAX);
                         }
                         const ABS_CNT: u8 = 0x40;
                         if nr & !(ABS_CNT - 1) == ABS_CNT {
@@ -351,9 +368,15 @@ impl DeviceFileOps for EventDev {
 
 impl Pollable for EventDev {
     fn poll(&self) -> IoEvents {
+        let mut inner = self.inner.lock();
         let mut events = IoEvents::empty();
-        events.set(IoEvents::IN, self.inner.lock().has_event());
-        events
+        match inner.has_event() {
+            Ok(has_event) => {
+                events.set(IoEvents::IN, has_event);
+                events
+            }
+            Err(_) => IoEvents::ERR | IoEvents::HUP,
+        }
     }
 
     fn register(
@@ -371,34 +394,25 @@ impl Pollable for EventDev {
     }
 }
 
-pub fn input_devices(fs: Arc<SimpleFs>) -> DirMapping {
-    let mut inputs = DirMapping::new();
-    let mut input_id = 0;
-    let input_devices = inputdev::input_drain_devices();
-    let mut keys = [0; 0x300usize.div_ceil(8)];
-    for (i, device) in input_devices.into_iter().enumerate() {
-        assert!(device.get_event_bits(EventType::Key, &mut keys).unwrap());
-
-        let event_dev = Arc::new(EventDev::new(device));
-        event_dev.subscribe_removed();
-
-        let dev = DeviceFile::new_character(fs.clone(), DeviceId::new(13, (i + 1) as _), event_dev);
-
-        const BTN_MOUSE: usize = 0x110;
-        if keys[BTN_MOUSE / 8] & (1 << (BTN_MOUSE % 8)) != 0 {
-            // Mouse
-            add_device_entry(&mut inputs, "mice", dev);
-        } else {
-            add_device_entry(&mut inputs, format!("event{input_id}"), dev);
-            input_id += 1;
-        }
-    }
-    inputs
-}
-
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     root.add(
         "input",
-        SimpleDir::new_maker(fs.clone(), Arc::new(input_devices(fs.clone()))),
+        SimpleDir::new_maker(fs, Arc::new(DynamicDeviceDir::input())),
     );
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::{assert_eq, def_test};
+
+    use super::evdev_string_bytes;
+
+    #[def_test]
+    fn evdev_strings_follow_linux_truncation_and_nul_rules() {
+        assert_eq!(evdev_string_bytes("key", 0), b"");
+        assert_eq!(evdev_string_bytes("key", 2), b"ke");
+        assert_eq!(evdev_string_bytes("key", 3), b"key");
+        assert_eq!(evdev_string_bytes("key", 4), b"key\0");
+        assert_eq!(evdev_string_bytes("key", 8), b"key\0");
+    }
 }

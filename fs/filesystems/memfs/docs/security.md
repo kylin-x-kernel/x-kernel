@@ -14,7 +14,7 @@
 - `VfsInode::i_mapping` 暴露的 address-space/page-cache owner
 - inode-owned `kvfs::AddressSpace` 暴露的 MM shared object identity
 - create/mkdir/mknod/symlink callback 的 mode 与 `&Cred`
-- `tmpfs` / `sysfs` nodev factory 创建的 superblock
+- Superblocks created by the `tmpfs` nodev factory.
 
 ## unsafe 代码清单
 
@@ -34,12 +34,8 @@
 - 新 inode 的 UID/GID 必须来自 `inode_init_owner()`；setgid 父目录的 GID 与 mode
   传播必须在 inode 发布前完成。
 - filesystem type factory 不得把 per-mount policy 写入共享 superblock flags。
-- sysfs 的所有可见 mount 必须复用 `SYSFS` 中发布的同一 superblock，不能建立与 boot
-  `/sys` 内容分离的第二棵树。
-- sysfs singleton 必须保留 internal root mount 的 active 引用，不能让可见 mount 的
-  卸载触发共享内核目录树 teardown。
 
-## 线程安全
+## Thread Safety
 
 - inode metadata、目录项和 mapping state 都通过对应 owner 的锁保护。
 - root 与后续 lookup/create/link 使用同一 VFS-wide identity table 和 superblock key；新 identity 在可见前
@@ -48,8 +44,6 @@
   file-backed content ownership。
 - `kvfs::AddressSpace` 只通过 `Arc` 传播，不暴露共享裸指针或内部
   `PageCache` storage。
-- sysfs singleton 的 superblock 与 internal mount 由同一个 `Once` 发布，首次构造完成前
-  不会返回半初始化对象。
 
 ## 威胁分析
 
@@ -74,12 +68,8 @@
      `fsuid/fsgid`，setgid 父目录继承父 GID。
 
 6. nodev factory 把 `nosuid/nodev/noexec` 固化到 filesystem instance。
-   - 防护：`TMPFS_TYPE` / `SYSFS_TYPE` factory 只接收 VFS-wide `SuperBlockFlags`；调用者在
-     attach 时另行设置每个 mount 的策略。
-
-7. 第二次挂载 sysfs 得到空白的独立目录树。
-   - 防护：`new_sysfs(SuperBlockFlags)` 和 `SYSFS_TYPE` factory 读取同一个
-     `Once<(Arc<SuperBlock>, Arc<Mount>)>`；internal mount 保持 shared tree active。
+   - Mitigation: The `TMPFS_TYPE` factory accepts only VFS-wide
+     `SuperBlockFlags`; callers apply per-mount policy when attaching the mount.
 
 ## 故障模式与影响分析（FMEA）
 
@@ -113,4 +103,3 @@
 - 所有 inode 创建路径是否接收 `&Cred` 并在发布前调用 `inode_init_owner()`。
 - setgid 父目录的普通 child GID 和子目录 setgid bit 是否有测试覆盖。
 - filesystem type factory 是否只创建 superblock，而不决定 per-mount flags。
-- sysfs mount 是否始终复用 `new_sysfs(SuperBlockFlags)` 发布的 superblock。

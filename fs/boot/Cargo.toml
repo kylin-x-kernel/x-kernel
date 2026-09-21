@@ -27,6 +27,7 @@ kclass = { workspace = true, optional = true }
 kbuild_config.workspace = true
 kerrno.workspace = true
 kcred.workspace = true
+kdevice_uevent.workspace = true
 ksync.workspace = true
 kvfs.workspace = true
 log.workspace = true
@@ -34,4 +35,5 @@ macros = { workspace = true, optional = true }
 memfs.workspace = true
 procfs.workspace = true
 pipefs.workspace = true
+sysfs.workspace = true
 v9fs = { workspace = true, optional = true }

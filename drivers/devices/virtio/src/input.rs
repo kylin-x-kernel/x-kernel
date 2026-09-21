@@ -59,6 +59,7 @@ impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
     pub fn try_new(transport: T) -> DriverResult<Self> {
         let mut device = InnerDev::new(transport).map_err(as_driver_error)?;
         let name = device.name().unwrap_or_else(|_| String::from("<unknown>"));
+        let name = String::from(name.trim_end_matches('\0'));
         let ids = device.ids().map_err(as_driver_error)?;
 
         Ok(Self {

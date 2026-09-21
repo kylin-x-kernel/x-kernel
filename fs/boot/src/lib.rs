@@ -44,6 +44,16 @@ const TMPFS_MOUNT_FLAGS: MountFlags = MountFlags::NOSUID
     .union(MountFlags::NODEV)
     .union(MountFlags::RELATIME);
 
+/// Initializes device discovery projections and lifecycle publication.
+///
+/// This runs before driver discovery so sysfs paths are projected before add
+/// events and removal ordering is owned by the device lifecycle coordinator,
+/// independent of when userspace mounts sysfs.
+pub fn init_device_discovery() {
+    sysfs::init_device_projection();
+    kdevice_uevent::init();
+}
+
 #[cfg(feature = "fs9p")]
 struct Virtio9pTransport(Mutex<ClassDevice<Virtio9pDeviceImpl>>);
 
@@ -205,7 +215,7 @@ impl BootVfs {
             .expect("Failed to create /sys mountpoint");
         self.mount_at(
             "/sys",
-            &memfs::SYSFS_TYPE,
+            &sysfs::FILE_SYSTEM_TYPE,
             None,
             SuperBlockFlags::empty(),
             PSEUDO_FS_MOUNT_FLAGS,
@@ -243,9 +253,6 @@ impl BootVfs {
             )
             .expect("Failed to mount bpffs");
         }
-        self.create_sys_graphics_links()
-            .expect("Failed to create sys graphics links");
-
         if let Err(err) = devfs::bind_dev_log() {
             if err != kerrno::LinuxError::ENOSYS && err != kerrno::LinuxError::EOPNOTSUPP {
                 panic!("Failed to bind dev-log: {err}");
@@ -311,19 +318,6 @@ impl BootVfs {
             &self.root,
             &self.root,
         )?;
-        Ok(())
-    }
-
-    fn create_sys_graphics_links(&self) -> kvfs::VfsResult<()> {
-        self.ensure_directory_path("/sys/class/graphics/fb0/device")?;
-        let cred = kcred::initial_cred();
-        let symlink_result = Filename::new("/sys/class/graphics/fb0/device/subsystem")
-            .symlink_at(&self.root, &self.root, "whatever", &cred);
-        if let Err(err) = symlink_result
-            && err != kvfs::VfsError::AlreadyExists
-        {
-            return Err(err);
-        }
         Ok(())
     }
 }

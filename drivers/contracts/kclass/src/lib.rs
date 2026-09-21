@@ -10,14 +10,16 @@
 //! Drivers publish runtime capabilities here after probe succeeds so subsystems
 //! can enumerate existing devices and subscribe to later availability without
 //! depending on probe order.
+//! Input and display classes also translate their runtime metadata into
+//! [`kdevice::DeviceNode`] registrations when the parent device becomes active.
 
 #![no_std]
 
 extern crate alloc;
 
-#[cfg(feature = "virtio-9p")]
-use alloc::string::String;
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+#[cfg(feature = "input")]
+use alloc::collections::BTreeMap;
+use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kdevice::{DeviceEvent, DeviceEventKind, DeviceId, DeviceObject};
@@ -148,6 +150,23 @@ macro_rules! class_registry {
                 (device, registry.availability_callbacks())
             };
 
+            if let Some(node_class) = device.with(ClassRuntimeMetadata::device_node_class)
+                && let Err(error) = kdevice::register_device_node(
+                    id,
+                    node_class,
+                    String::from(device.name()),
+                    String::from(device.driver_name()),
+                    device.location(),
+                )
+            {
+                log::warn!(
+                    "device class '{}': failed to assign a device node for {:?}: {}",
+                    $kind.as_str(),
+                    id,
+                    error,
+                );
+            }
+
             for callback in callbacks {
                 callback(device.clone());
             }
@@ -157,6 +176,7 @@ macro_rules! class_registry {
         fn $remove_fn(id: DeviceId) {
             let removed = { $registry_fn().lock().remove(id) };
             if let Some(device) = removed {
+                kdevice::unregister_device_node(id);
                 device.with(ClassRuntimeMetadata::unpublish_class);
             }
         }
@@ -274,6 +294,10 @@ trait ClassRuntimeMetadata {
     }
 
     fn unpublish_class(&self) {}
+
+    fn device_node_class(&self) -> Option<kdevice::DeviceNodeClass> {
+        None
+    }
 }
 
 #[cfg(feature = "block")]
@@ -291,12 +315,45 @@ impl ClassRuntimeMetadata for BlockDeviceImpl {
 impl ClassRuntimeMetadata for CharDeviceImpl {}
 
 #[cfg(feature = "display")]
-impl ClassRuntimeMetadata for DisplayDeviceImpl {}
+impl ClassRuntimeMetadata for DisplayDeviceImpl {
+    fn device_node_class(&self) -> Option<kdevice::DeviceNodeClass> {
+        Some(kdevice::DeviceNodeClass::Drm)
+    }
+}
 
 #[cfg(feature = "input")]
 impl ClassRuntimeMetadata for InputDeviceImpl {
     fn class_metadata(&self) -> ClassDeviceMetadata {
         ClassDeviceMetadata::input(self.physical_location().into(), self.unique_id().into())
+    }
+
+    fn device_node_class(&self) -> Option<kdevice::DeviceNodeClass> {
+        let mut event_types = alloc::vec![0; (EventType::COUNT as usize).div_ceil(8)];
+        let mut event_codes = BTreeMap::new();
+        for raw in 0..EventType::COUNT {
+            let Some(event_type) = EventType::from_repr(raw) else {
+                continue;
+            };
+            let mut codes = alloc::vec![0; event_type.bits_count().div_ceil(8)];
+            if self
+                .get_event_bits(event_type, &mut codes)
+                .is_ok_and(|is_supported| is_supported)
+            {
+                event_types[raw as usize / 8] |= 1 << (raw as usize % 8);
+                event_codes.insert(raw, codes);
+            }
+        }
+        let id = self.device_id();
+        Some(kdevice::DeviceNodeClass::Input(
+            kdevice::InputDeviceNodeMetadata::new(
+                String::from(self.name()),
+                String::from(self.physical_location()),
+                String::from(self.unique_id()),
+                kdevice::InputDeviceNodeId::new(id.bus_type, id.vendor, id.product, id.version),
+                event_types,
+                event_codes,
+            ),
+        ))
     }
 }
 

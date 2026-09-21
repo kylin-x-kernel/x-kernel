@@ -186,6 +186,8 @@ pub struct SocketErrorInfo {
 #[derive(Debug, Clone)]
 pub enum KernelAncillaryData {
     IpError(SocketErrorInfo),
+    /// Trusted sender credentials attached by a kernel transport.
+    Credentials(options::UnixCredentials),
 }
 
 /// Options for sending data to a socket.

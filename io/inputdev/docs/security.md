@@ -1,61 +1,50 @@
-# inputdev — Security And Reliability
+# inputdev — Security and reliability
 
-## Scope
+## Analysis scope
 
-This analysis covers the entire crate — the single `src/lib.rs` (the
-global input registry, `init_input`, register/remove wiring, and
-`input_drain_devices`). No modules are excluded; the crate holds no
-unsafe code and no device semantics of its own.
+This analysis covers the whole crate, which currently consists of
+`src/lib.rs`. No source module or test-only path is excluded.
 
-Registry-only crate: it stores handles produced by `kclass` and hands
-them to the input consumer. It processes no untrusted input, holds no
-device state of its own, and adds no boundary — the security posture is
-"keep the registry consistent and never fabricate handles".
+## Trust model
 
-## External Boundaries
+The crate receives class handles and removal ids from trusted kernel driver
+infrastructure. `kdevice` and `kclass` create and validate those handles and
+ids; `inputdev` trusts that contract and does not independently revalidate
+their provenance or internal identity. Its local validation is limited to
+deduplicating registration by id and removing the matching lifecycle entry.
+It has no user-memory, MMIO, DMA, network, or filesystem boundary and contains
+no unsafe code.
 
-None of its own. The `ClassDevice<InputDeviceImpl>` handles it stores are
-created by trusted kernel driver code; the callbacks it subscribes
-(`subscribe_input_available`, `subscribe_device_removed`) are invoked by
-the trusted driver core.
+## Invariants and thread safety
 
-## Unsafe Code
+- At most one stored handle has a given driver-core id.
+- Every registry mutation is serialized by the same mutex.
+- Snapshot callers receive cloned handles; reading the registry does not alter
+  availability for another caller.
+- Removal of an absent id is a no-op.
 
-None. The crate contains no `unsafe`, no FFI, and no inline assembly.
-
-## Invariants
-
-- The registry holds at most one handle per device id (deduplication
-  under the registry lock).
-- A handle in the registry is either available or removed exactly once;
-  `swap_remove` preserves the map semantics (no duplicate removals).
-- `register_input_device` before `init_input` is a no-op (`is_inited`
-  guard), so early callbacks cannot create a half-initialized registry.
-
-## Threat Analysis
+## Threat analysis
 
 | ID | Threat | Impact | Trigger | Existing control |
 |----|--------|--------|---------|------------------|
-| T-01 | Duplicate registration flooding the registry | Low — unbounded growth | Bus re-probe storms | Id deduplication under the lock: a device registers once. |
-| T-02 | Stale handle used after removal | Low — I/O to a removed device | Consumer drained a handle that was then removed | Accepted by design: `Arc` handles keep the object alive; removal only detaches it from the registry. The device core owns post-removal I/O error semantics. |
-| T-03 | Registry lock held across a blocking callback | Medium — system stall | Future callback doing slow work | Current callbacks are push/remove only; the notify callback design keeps work out of the lock (documented in the design doc). |
+| T-01 | Duplicate callbacks grow the registry | Low — unbounded registry memory growth | Probe notification repeats | Deduplicate by id under the registry lock. |
+| T-02 | One consumer hides devices from another | Medium — peer consumers omit live devices | A destructive registry read | `input_devices` returns a clone and preserves the registry. |
+| T-03 | Consumer retains a removed handle | Medium — stale operations can outlive hot-unplug | Hot-unplug races a snapshot | Accepted by design: driver-core availability remains authoritative for post-removal semantics, and consumers must return `ENODEV` after removal. |
 
-## Failure Modes
+Retaining a class handle across removal is an explicitly accepted residual
+risk. `inputdev` cannot invalidate cloned handles already owned by consumers;
+the driver core remains responsible for making the removed state authoritative,
+and each consumer must translate that state into its post-removal error
+semantics.
 
-| ID | Failure mode | Local effect | System effect | Severity | Handling |
-|----|--------------|--------------|---------------|----------|----------|
-| F-01 | Removal of an absent id | No-op (logged) | None | 4 | Position lookup fails silently. |
-| F-02 | Drain before any device registered | Empty `Vec` returned | Consumer sees no devices | 3 | Normal empty-state behavior. |
+## Failure modes and limitations
 
-## Known Limitations
+An empty snapshot is valid. Handle order is unstable after removal. There is no
+blocking wait API; consumers that need change notification subscribe at the
+class or devfs layer.
 
-- No wait/queue mechanism: consumers cannot block awaiting new devices;
-  they rely on the subscription callbacks.
-- Order after `swap_remove` is not stable; consumers must not assume
-  registration order.
+## Audit checklist
 
-## Audit Checklist
-
-- Registry mutations stay under the single lock and keep the
-  dedup-by-id invariant.
-- New subscription points keep the "no work under the lock" pattern.
+- Keep registration deduplication and mutation under one lock.
+- Do not reintroduce destructive drain semantics.
+- Keep slow consumer work outside the registry lock.

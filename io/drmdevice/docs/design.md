@@ -2,140 +2,131 @@
 
 ## Purpose
 
-`drmdevice` implements a minimal resource-backed DRM/KMS device (`Card0`,
-driver identity `simpledrm`) over the registered display scanout backend.
-It speaks the Linux DRM user-space protocol — legacy libdrm ioctls and the
-atomic-KMS paths modern compositors use — so unmodified user-space DRM
-clients can drive the kernel's display output.
+`drmdevice` implements a minimal Linux DRM/KMS primary device over one
+`ClassDevice<DisplayDeviceImpl>`. Each `DrmCard` owns its KMS state and remains
+bound to the display handle supplied at construction.
 
 ## Responsibilities
 
-- Provide `Card0`, a `DeviceFileOps` character device: `ioctl` dispatch
-  over the DRM ioctl set, `read` (vblank event consumption), `mmap`
-  (dumb-buffer backing), `poll` (vblank/event readiness via `kpoll`
-  `PollSet`), and node flags.
-- Implement the legacy DRM ioctls: version/unique/set_version, getcap /
-  setclientcap, auth / authmagic, dirtyfb, prime handle exchange,
-  mode-card resource listing, get/set CRTC, page flip, encoder and
-  connector queries, framebuffer create/remove, and dumb-buffer
-  creation/allocation.
-- Maintain the KMS object model: dumb buffers (`dumbs` map with handle
-  and `mmap` offset allocators), framebuffers (`fbs` map), property blobs
-  (user blobs plus synthesized system blobs such as the IN-FORMATS blob,
-  built once behind double-checked locking), and mode state
-  (`ModesetState`, `LegacyCrtcState`).
-- Generate vblank events (`events` queue plus a monotonic `sequence`
-  counter) and expose them to poll/read.
-- Register display scanout backends: seed from the `kclass` display
-  registry and expose `available()` for whether a scanout backend exists.
-- Define the user-space wire types (`drm.rs`, layout-compatible with
-  Linux `include/uapi/drm/drm.h`, derived `UserRead`/`UserWrite` for
-  user-pointer copies) and the protocol constants (`consts.rs`: ioctl
-  encoding, capability ids, property ids, format FourCCs, driver
-  identity, limits).
-
-## Non-Responsibilities
-
-- No rendering or GPU command submission: this is KMS-only (modesetting
-  and scanout); there is no render node and no GEM execbuf.
-- No hardware access: mode state and pixels flow through the registered
-  display scanout backend (`ClassDevice<DisplayDeviceImpl>`); the crate
-  never touches MMIO.
-- No connector hotplug notification: the connector set is fixed to the
-  primary scanout.
-- No DMA-BUF implementation: prime ioctls exchange handles at the
-  protocol level without cross-device buffer sharing semantics.
+- Dispatch the supported DRM ioctl ABI and validate user-provided object ids,
+  geometry, formats, arrays, and property values.
+- Own legacy and atomic KMS state for one primary card.
+- Allocate dumb buffers, framebuffer objects, property blobs, and the backing
+  display scanout resources associated with them.
+- Queue bounded vblank/page-flip events and implement read and poll readiness.
+- Translate KMS presentation requests into the bound `DisplayDevice` contract.
 
 ## Scope
 
 ```text
-io/drmdevice/
-├── src/
-│   ├── lib.rs      # module wiring, available()
-│   ├── card0.rs    # Card0 device, ioctl handlers, KMS object state
-│   ├── drm.rs      # uapi struct definitions, DrmIoctl dispatch trait
-│   └── consts.rs   # ioctl numbers, caps, property ids, FourCCs, limits
-└── Cargo.toml
+io/drmdevice/src/
+├── lib.rs      # public DrmCard export
+├── card0.rs    # device I/O, ioctl handlers, KMS and buffer state
+├── drm.rs      # Linux UAPI wire structures
+└── consts.rs   # ioctl, capability, property, and format constants
 ```
+
+Device-node discovery, card index allocation, and hotplug projection belong to
+`devfs`; this crate implements the operations behind one node.
 
 ## Architecture
 
 ```text
-user space (libdrm / compositor)
-   |  ioctl/read/mmap/poll on the DRM node
-   v
-Card0: DeviceFileOps (kvfs)
-   |  DrmIoctl::handle / handle_raw  (drm.rs: user struct copies)
-   |
-   +-- dumb buffers -- offsets --> mmap (retained GlobalPage backing)
-   +-- framebuffers / blobs ----> ModesetState / LegacyCrtcState
-   +-- vblank events -----------> events queue + PollSet (kpoll)
-   |
-   v
-primary ClassDevice<DisplayDeviceImpl> (display scanout backend, via kclass)
+/dev/dri/cardN (created by devfs)
+        │ ioctl/read/mmap/poll
+        ▼
+DrmCard
+├── bound display ClassDevice
+├── KMS + legacy CRTC state
+├── dumb buffers and framebuffer objects
+├── property blobs
+└── bounded vblank event queue + PollSet
+        │
+        ▼
+DisplayDevice scanout operations
 ```
 
-## Execution Context
+The implemented protocol covers legacy libdrm and atomic KMS paths used by
+compositors. It is KMS-only: there is no render node or command submission.
 
-- All entry points run in process syscall context through `kvfs`
-  `DeviceFileOps`; blocking is not performed — poll integration is
-  non-blocking readiness via `kpoll`.
-- `read` copies queued vblank events to user buffers; the event queue is
-  bounded (`MAX_EVENTS`).
-- State is mutated only under its per-object locks; no task/workqueue is
-  spawned by this crate.
+The `display` contract crate provides the `DisplayDevice` interface, concrete
+display drivers publish implementations through `kclass`, and `kclass`
+forwards the contract through `ClassDevice<DisplayDeviceImpl>`. `DrmCard` is
+the consumer. The scanout call direction is therefore `DrmCard` -> bound
+`ClassDevice<DisplayDeviceImpl>` -> `DisplayDevice` for display information,
+resource creation and destruction, and presentation. devfs only selects the
+exact published class handle and passes it to `DrmCard::new`.
 
-## Concurrency Model
+The public `DeviceFileOps` entries interact with card state as follows:
 
-- Fine-grained state: separate `Mutex`es for modeset state, legacy CRTC
-  state, dumb buffers, framebuffers, user blobs, system blobs, retained
-  pages, and the event queue; id and offset allocation use fetch-add
-  atomics.
-- The IN-FORMATS system blob uses double-checked locking: an
-  `AtomicU32` fast path (`Acquire`/`Release`) guards a `Mutex`-protected
-  build-once section, so concurrent ioctls build it exactly once.
-- The event queue plus `PollSet` pair event production (vblank ticks)
-  with poll/read consumers; sequence numbers are monotonic via atomic.
-- Lock ordering is local (each handler takes the locks it needs without
-  nesting beyond blob-build and system-blob insert).
+- `ioctl` dispatches through `DrmIoctl::handle_raw`; typed handlers validate
+  user data and read or update the modeset, legacy CRTC, dumb-buffer,
+  framebuffer, and blob tables. Atomic property updates use `apply_prop`, and
+  successful scanout changes flow through `present_fb` to the bound display.
+- `read` removes complete `DrmEventVblank` records from the bounded `events`
+  queue and returns `EAGAIN` when no event is ready.
+- `mmap` resolves an offset in the `dumbs` table, retains the backing page in
+  `retained_pages`, and passes its physical range to `MmapMapper`.
+- `poll` reads display availability and event-queue state. `register_poll`
+  registers the caller with `poll_rx`; `queue_flip_event` and
+  `notify_removed` wake that `PollSet` after an event or removal transition.
 
-## Error Model
+## Execution context
 
-- Handlers return `VfsResult<usize>`; user-space mistakes (bad ids,
-  small user arrays, unknown ioctls) map to VFS error codes.
-- `report_user_array` implements the DRM user-array protocol: report the
-  required count, then copy out at most the caller-provided capacity.
-- Absent scanout backend: `available()` is false and mode ioctls fail;
-  the device node may exist without a working display.
+All entry points run in process syscall context through `DeviceFileOps`. They
+may allocate, copy user memory, and acquire sleepable mutexes. They are not
+valid in interrupt context. No task or workqueue is created by this crate.
 
-## External Boundary And Inputs
+## Device lifecycle
 
-- All ioctl payloads arrive from user memory as raw bytes and are copied
-  in/out through `UserPtr` with `bytemuck` pod types; struct layouts are
-  fixed by the Linux uapi contract, and counts/pointers from user space
-  are validated before copy-out (capacity checks in
-  `report_user_array`).
-- `mmap` maps dumb-buffer backing pages into the caller's address space
-  through the VFS mmap mapper; backing pages are retained
-  (`retained_pages`) so a mapping outliving its framebuffer keeps valid
-  memory.
-- The display backend side is trusted kernel-internal: scanout handles
-  come from the `kclass` registry, not from user space.
+`DrmCard::new` receives the exact display class handle represented by its
+`cardN` node. Every operation that needs scanout calls `display()`, which checks
+`ClassDevice::is_available` and returns `ENODEV` after driver-core removal. A
+card never falls back to another registered display, so an open fd cannot be
+silently redirected when card indices are reused.
 
-## Design Decisions
+`DrmCard::notify_removed` is the public wakeup hook for this lifecycle. devfs
+installs it as the card's removal callback and invokes it after removing the
+registry record and before releasing the character-device number. The method
+wakes `poll_rx`, causing blocked poll waiters to reevaluate `DrmCard::poll`;
+the failed display availability check then reports `POLLERR|POLLHUP`.
 
-- One fixed device (`Card0`, identity `simpledrm`): the goal is a
-  protocol-compatible modesetting surface over the scanout backend, not a
-  full DRM core; a static device keeps the object model small.
-- Re-declare uapi structs instead of binding headers: the set is small
-  and stable, `repr(C)` plus `bytemuck` gives checked copies, and the
-  kernel stays header-free.
-- Legacy plus atomic ioctls over one state model: compositors use
-  atomic paths, simple clients use legacy CRTC calls; both mutate the
-  same `ModesetState` so the two interfaces cannot diverge.
-- Dumb buffers with retained backing pages: user-space may keep a
-  mapping after removing the framebuffer; retention turns that from a
-  use-after-free hazard into a bounded memory cost.
-- Build-once system blobs behind double-checked atomics: the IN-FORMATS
-  blob is read on every atomic check but must be allocated once; the
-  atomic fast path keeps per-frame ioctls lock-free on the hot path.
+## Buffer and framebuffer lifecycle
+
+`DRM_IOCTL_MODE_CREATE_DUMB` validates geometry, allocates zeroed contiguous
+`GlobalPage` backing, creates the display scanout resource, then publishes a
+handle and mmap offset in the dumb-buffer table. `DRM_IOCTL_MODE_DESTROY_DUMB`
+removes that table entry and asks the bound display to destroy the associated
+scanout resource. A missing handle is already destroyed and succeeds.
+
+`DRM_IOCTL_MODE_ADDFB2` validates one dumb-buffer handle and creates a
+framebuffer id that refers to its scanout resource. `DRM_IOCTL_MODE_RMFB`
+removes the framebuffer record and clears matching legacy CRTC state. mmap
+clones the dumb buffer's `GlobalPage` into `retained_pages` before installing a
+physical mapping. Because the mapping interface has no unmap notification,
+those clones remain until the `DrmCard` is dropped, allowing a mapping to
+outlive later framebuffer or dumb-table removal.
+
+## Concurrency model
+
+Separate mutexes protect modeset state, legacy CRTC state, dumb buffers,
+framebuffers, user and system blobs, retained pages, and the event queue. Ids,
+offsets, and event sequence numbers use atomics. The IN-FORMATS blob uses an
+atomic fast path plus a mutex-protected build-once section. The event queue is
+bounded and integrated with `PollSet`.
+
+## Error model
+
+Invalid user pointers, object ids, array capacities, dimensions, formats, and
+unsupported ioctls return VFS errors. A removed display returns `ENODEV`;
+`poll` reports `POLLERR|POLLHUP`. Dumb-buffer pages remain retained while a
+mapping can reference them.
+
+## Design decisions
+
+- Bind every instance to one class handle, allowing independent state for
+  multiple `cardN` nodes.
+- Keep node naming and numbering in devfs, the shared device-lifecycle owner.
+- Use local Linux UAPI structures with `repr(C)` and typed user-copy helpers.
+- Share one state model between legacy and atomic paths.
+- Retain mapped pages independently of framebuffer table lifetime.

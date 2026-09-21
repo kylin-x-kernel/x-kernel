@@ -3,8 +3,8 @@
 ## Scope
 
 This analysis covers the entire `kdevice` crate: `src/lib.rs`,
-`src/bus/`, `src/device/`, `src/driver/`, `src/lifecycle/`,
-`src/registry/`, and `src/topology/`. No modules are excluded; all
+`src/bus/`, `src/device/`, `src/device_node.rs`, `src/driver/`,
+`src/lifecycle/`, `src/registry/`, and `src/topology/`. No modules are excluded; all
 state machines and locks are reachable from the lifecycle API audited
 below.
 
@@ -45,6 +45,8 @@ below.
   callbacks while holding a per-object lock).
 - `kdevice` trusts subscriber callbacks not to call driver-core mutators
   (subscriber contract).
+- `kdevice` trusts `kclass` to register device nodes only for active runtime
+  capabilities and to provide bounded, driver-derived class metadata.
 - `kdevice` is called only from process/task context (it uses no
   IRQ-safe locks).
 
@@ -63,6 +65,10 @@ hardware, firmware, or network input. Its safety boundaries are:
 - **Subscriber callback safety**: subscribers run outside kdevice locks,
   but a callback violating the contract (calling a driver-core mutator)
   could deadlock or corrupt state.
+- **Device-node projection integrity**: devfs and sysfs trust one
+  `DeviceNode` snapshot for class index, major/minor, `devname`, driver name,
+  topology, and input metadata. A mismatched or prematurely reused assignment
+  would create inconsistent user-visible device identity.
 - **ID allocator overflow**: the `AtomicU64` id counters can theoretically
   overflow (~1.8×10^19 allocations), after which they panic.
 - **Arc reference cycles**: DeviceObject parent→child and child→parent
@@ -125,12 +131,25 @@ uses the standard safe abstractions: `SpinNoPreempt`, `AtomicU8`,
 10. **Parent/child detach**: the remove path removes the child from the
     parent's children list and clears the child's parent pointer,
     preventing stale parent references.
+11. **Device-node assignment consistency**: class index, `DeviceNumber`, and
+    `devname` are created together under the node-registry lock and stored in
+    one immutable `DeviceNode` publication with shared atomic lifecycle state.
+12. **No premature node replacement or index reuse**: removal marks the node
+    unavailable but keeps it reserved through `Removing`, host remove
+    publication, and `Removed` callbacks. The same core ID returns
+    `ResourceBusy`, and the class index is released only after the sequence.
+13. **Lifecycle event ordering**: projection add precedes host add publication;
+    projection quiesce precedes host remove publication, which precedes
+    projection deletion. A removal request that overlaps add publication is
+    retained as `RemovePending` and completed by the add-publishing thread, so
+    callbacks cannot observe remove before add.
 
 ## Thread Safety
 
 | Type | Send condition | Sync condition |
 |------|-----------|-----------|
 | `DeviceRegistry` | fields are `Send` | `SpinNoPreempt` provides interior mutability |
+| `DeviceNodeRegistry` | maps, index sets, and callbacks are `Send` | a separate `SpinNoPreempt` serializes assignment and snapshots |
 | `DeviceObject` | `Arc<DeviceObject>` is `Send + Sync` | `AtomicU8` + `SpinNoPreempt` + `AtomicUsize` |
 | `BusInstance` | `Arc<BusInstance>` is `Send + Sync` | internal `SpinNoPreempt` guards all mutable fields |
 | `BusTypeObject` | `Arc<BusTypeObject>` is `Send + Sync` | internal `SpinNoPreempt` |
@@ -147,12 +166,15 @@ uses the standard safe abstractions: `SpinNoPreempt`, `AtomicU8`,
 | T-03 | Same descriptor probed concurrently | Medium | Two paths probe the same `DeviceDescId` at once | `mark_device_desc_probing` succeeds only on Pending→Probing; the concurrent loser sees Probing and returns Requeue |
 | T-04 | Subscriber callback panic blocks later subscribers | Medium | One callback panics; later ones are skipped | No `catch_unwind` today; callbacks run in iteration order; subscriber quality relied upon |
 | T-05 | Subscriber callback calls a mutator, deadlocking | High | A subscriber calls `probe_device_desc` and friends | Not enforced by code: the subscriber contract is documentation-only (`lifecycle/subscribers.rs` has no runtime check), so prevention relies on auditing subscriber implementations — recorded here as an accepted, audit-enforced rule. |
-| T-06 | ID counter overflow panic | Low | `AtomicU64` reaches `u64::MAX` | No code-level overflow detection exists: the allocators use bare `fetch_add(1, Relaxed)` (`device/desc.rs`, `driver/mod.rs`, `bus/mod.rs`) and wrap around, with the panicking path only reachable after ~5.8×10^5 years at 10^6 allocations/s. Accepted as practically unreachable; adding a saturating check would cost a branch on every allocation. |
+| T-06 | ID counter overflow | High — a kernel panic prevents identity reuse after exhaustion | `AtomicU64` reaches `u64::MAX` | `fetch_add_u64` panics instead of returning a duplicate id; exhaustion is practically unreachable at a 64-bit width. |
 | T-07 | `find_bus_type` panics on a missing bus type | Medium | A bus instance is created before `register_bus_type` | `default_bus_manager` fixes the order: register_bus_type before register_bus_instance |
 | T-08 | Driver probe failure leaves devres uncleaned | Medium | Driver registers devres then panics during probe (unwinding skips cleanup) | x-kernel is `#![no_std]` with no unwinding today; probe failure cleans up explicitly via `run_cleanups` |
 | T-09 | Parent/child relations survive device removal | Medium | The remove path forgets to detach | `remove_device_from_index` removes the child from the parent's list and clears children's parent pointers |
 | T-10 | `DeviceRecord` snapshot inconsistent with the live object | Low | Snapshot built under one lock, fields read under another | `record_snapshot()` reads the `AtomicU8` lifecycle first, then takes the per-object lock for state fields |
 | T-11 | Arc reference cycles leak device/bus objects | Medium | parent↔child `Arc`s never broken | Remove path runs explicit `detach_child` + `set_parent(None)`; controller↔bus `set_child_bus`/`set_controller` are managed by backends |
+| T-12 | A class index or core ID is reused before projections remove the old node | Medium — stale files or operations could collide with a replacement node | Hot-unplug races a new device in the same class | Removing nodes remain in the registry and unavailable; same-ID registration returns `ResourceBusy`, and the index is released only after `Removed` callbacks return |
+| T-13 | Filesystem projections disagree about device identity | Medium — `/dev` and `/sys` could describe different devices | A consumer independently derives names or numbers | `DeviceNode` is the single immutable source consumed by both devfs and sysfs; allocation templates are private to kdevice |
+| T-14 | Concurrent registration and removal invert add/remove events | Medium — listeners retain a ghost node after observing remove followed by add | Removal begins after registry insertion but before add callbacks finish | Publishing transitions to `RemovePending`; the add-publishing thread emits add first, then performs the complete ordered removal sequence |
 
 Impact levels:
 
@@ -174,6 +196,8 @@ Impact levels:
 | F-08 | `desc.parent` points at a removed parent | Parent device removed before the child is published | `attach_device_parent` runs after publish; parent may be gone | Child has no parent; device tree incomplete | 4 | `attach_device_parent` failure logs a warning and does not block child activation |
 | F-09 | BusInstance.devices inconsistent with DeviceRegistry.devices | One path updated only one side | Snapshots may miss or include stale devices | Inconsistent query results | 3 | `add_device` updates both inside the registry lock; remove likewise |
 | F-10 | Descriptor `attempted` list grows without bound | Many drivers fail to match one descriptor | attempted `Vec` grows | Per-descriptor memory grows | 4 | Device removal clears `attempted` on requeue; the list is bounded by the driver count |
+| F-11 | Device-node class index range is exhausted | More than 32 input or 64 DRM primary devices are active | New node registration returns `ResourceBusy` | The runtime device remains active but has no Linux node projection | 3 | Existing assignments remain unchanged; kclass logs the failure |
+| F-12 | Device-node subscriber panics | Projection callback has a kernel bug | Later callbacks do not run | One or more filesystem projections may miss the transition before panic aborts | 2 | Callbacks run without registry locks; panic isolation is unavailable in the current panic=abort kernel |
 
 Severity levels:
 
@@ -205,8 +229,9 @@ Severity levels:
 
 `kdevice` handles device identity data (`DeviceIdentity`: PCI
 vendor/device ID/class, platform alias/firmware_id), bus topology
-(`DeviceLocation`, `BusInfo`), and device metadata (`DeviceRecord`),
-visible through `Debug` output and snapshot functions.
+(`DeviceLocation`, `BusInfo`), device metadata (`DeviceRecord`), and
+Linux-facing device-node identity and input capability metadata, visible
+through `Debug` output and snapshot functions.
 
 The module processes no user data, persists nothing, and logs nothing
 itself (all logging belongs to upper layers such as `kdriver`).
@@ -222,6 +247,8 @@ itself (all logging belongs to upper layers such as `kdriver`).
   insert/lookup instead of O(1), in exchange for no hashing dependency.
 - Subscribers cannot unsubscribe: once registered, a callback lives as
   long as the registry.
+- Device-node allocation currently supports only input event nodes and DRM
+  primary nodes, with Linux ABI-sized pools of 32 and 64 entries.
 - `DeviceTopology::snapshot()` allocates a fresh `Vec` on every call; no
   caching.
 - Parent/child relations are single-level (no cross-bus hierarchy); a
@@ -242,6 +269,10 @@ When modifying this module, verify:
 - New subscriber event kinds update `DeviceEventKind::COUNT` and
   `index()`.
 - New registry queries never hold a per-object lock.
+- Device-node names and numbers remain private allocation policy in kdevice;
+  projection crates consume `DeviceNode` without reassigning identity.
+- Node removal keeps the class index reserved until every projection callback
+  returns.
 - Changes to `DeviceObject::begin_removing`'s CAS logic get a concurrency
   review.
 - New `DeviceDriver` methods keep the `DriverObject` delegation path

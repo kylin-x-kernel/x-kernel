@@ -425,6 +425,34 @@ With `vsock_tipc_bridge`, `BridgeConnectionState` tracks the TIPC side in `bridg
 
 `VsockOnly` waits for the dynamic service name on port 0; `TipcSendBlocked` retains one record for retry. `Invalid`, `TipcClosed`, and `Closed` are declared but unused variants. Cleanup removes the entry and closes its channel rather than transitioning through those variants.
 
+### Kobject uevent delivery
+
+`NETLINK_KOBJECT_UEVENT` sockets subscribe by binding a multicast group. Kernel
+publishers append `SEQNUM` and enqueue each message only for matching groups.
+The credential path crosses three knet modules. `GeneralOptions` in
+`socket/general` stores the receiver's `SO_PASSCRED` selection.
+`NetlinkSocket::recv`, the `SocketOps::recv` implementation invoked by POSIX
+`recvmsg`, first verifies that the socket protocol is
+`NETLINK_KOBJECT_UEVENT`, then reads that option for each dequeued kernel
+uevent and constructs a trusted
+`UnixCredentials { pid: 0, uid: 0, gid: 0 }` sender identity. Other netlink
+protocols never receive these synthetic credentials. The receive path wraps
+that value in the public `KernelAncillaryData::Credentials` variant from
+`socket/mod` and appends it to the receive ancillary-data vector. The POSIX
+layer consumes that variant and serializes it as `SCM_CREDENTIALS`, allowing
+udev-compatible receivers to verify the kernel publication path without
+consulting current-process credentials.
+
+User-space uevent receivers commonly install a classic BPF filter. The POSIX
+socket-option layer accepts attach/detach only on kobject-uevent sockets,
+bounds the program at 4096 instructions, verifies the final return and all
+jump targets, and treats the accepted filter as a delivery optimization. The
+current knet queue does not execute the filter, so receivers may see additional
+valid kernel uevents and must retain their ordinary subsystem checks.
+`NetlinkSocket::is_kobject_uevent` is the public protocol query used by that
+POSIX option layer to restrict this classic-BPF compatibility behavior to
+`NETLINK_KOBJECT_UEVENT` sockets.
+
 ### Rtnetlink Control Plane
 
 The rtnetlink control plane provides the interface for querying and modifying network configuration through netlink messages. It handles operations on links, IPv4 addresses, routes, and neighbor state, reads live snapshots from the corresponding network owners, and forwards configuration changes to `Service`, `Router`, or `NetDevice` as appropriate.
@@ -898,7 +926,7 @@ With `vsock_tipc_bridge` enabled, `bind()` rejects explicit binding to ports in 
 | DNS | smoltcp DNS support is compiled in; knet exposes no public resolver API. |
 | AF_PACKET | Ethernet raw/datagram sockets with byte- and frame-bounded queues; filters `PACKET_OTHERHOST`. Membership changes, connect, peer queries, shutdown, listen, and accept are unsupported. |
 | rtnetlink operations | Supports link queries/updates, IPv4 address and route queries/add/delete, and IPv4 neighbor updates. Other message types return `NLMSG_ERROR` with `EOPNOTSUPP`; neighbors accept only incomplete/permanent states with no flags. |
-| Netlink sockets | Route sockets reject multicast subscriptions, userspace-peer destinations, and mixed query/mutation batches. Connect, peer queries, and shutdown are unsupported. |
+| Netlink sockets | Route sockets reject multicast subscriptions, userspace-peer destinations, and mixed query/mutation batches. Kobject-uevent sockets support group delivery, `SO_PASSCRED`, and validated no-op classic-BPF attach/detach compatibility. Connect, peer queries, and shutdown are unsupported. |
 | Socket options | Options unhandled by the selected protocol return `ENOPROTOOPT`. |
 | Unix datagrams | Receive queues use unbounded `async_channel` queues. |
 | vsock / TIPC bridge | Stream transport only; the bridge forwards bytes, excluding TIPC handles and memory references. |

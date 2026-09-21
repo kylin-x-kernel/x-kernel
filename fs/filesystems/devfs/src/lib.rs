@@ -13,6 +13,7 @@ extern crate klogger;
 extern crate alloc;
 
 mod device_file;
+mod dynamic;
 mod nodes;
 mod root;
 

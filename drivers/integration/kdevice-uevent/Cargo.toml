@@ -1,0 +1,16 @@
+[package]
+name = "kdevice-uevent"
+description = "X-Kernel device lifecycle uevent integration"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+kdevice.workspace = true
+klazy.workspace = true
+knet.workspace = true
+unittest.workspace = true

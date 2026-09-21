@@ -4,14 +4,15 @@
 
 `kdevice` is x-kernel's shared device-model type crate. It provides the
 stable type definitions for the bus / device / driver triple, the global
-object registries, the lifecycle state machine, and the event
-distribution infrastructure.
+object registries, the lifecycle state machine, Linux-compatible device-node
+identity assignment, and event distribution infrastructure.
 
 `kdevice` is the bottom of the device-driver stack — `kdriver` (driver
 orchestration) and `kclass` (the typed class layer) are built on top of
 it, but `kdevice` itself depends on neither. All persistent device
 topology information (bus instances, device objects, driver objects,
-discovery descriptors) is managed here.
+discovery descriptors) and shared device-node identity (class index,
+major/minor, and `devname`) is managed here.
 
 The intended audience is developers implementing new bus matchers,
 modifying the device lifecycle state machine, or extending global registry
@@ -57,6 +58,8 @@ drivers/contracts/kdevice/
     │   │                         #   DeviceUse (RAII usage-count guard)
     │   ├── handles.rs            # BusHandle, DeviceCore, DriverCore
     │   └── resource.rs           # resource type re-exports
+    ├── device_node.rs            # DeviceNode identity, class allocators,
+    │                             # snapshots and lifecycle subscribers
     ├── driver/
     │   └── mod.rs                # DriverId, DriverInfo, DriverObject,
     │                             #   DeviceDriver trait, DeviceMatcher impls,
@@ -113,6 +116,15 @@ drivers/contracts/kdevice/
     │  └──────────────────────────────────────┘    │
     │                                              │
     │  ┌──────────────────────────────────────┐    │
+    │  │   device_node::DeviceNodeRegistry     │    │
+    │  │   DeviceId -> DeviceNode              │    │
+    │  │   eventN/cardN allocation + events    │    │
+    │  └──────────────┬───────────────────────┘    │
+    │                 │                             │
+    │                 ├──────────► devfs projection │
+    │                 └──────────► sysfs projection │
+    │                                              │
+    │  ┌──────────────────────────────────────┐    │
     │  │   registry::DeviceRegistry            │    │
     │  │   (SpinNoPreempt global lock)          │    │
     │  │                                       │    │
@@ -142,6 +154,7 @@ drivers/contracts/kdevice/
 | Component | Responsibility |
 |------|------|
 | `DeviceRegistry` | Global object index; BTreeMaps for descriptors/devices/buses/drivers; id allocation |
+| `DeviceNodeRegistry` | Linux-compatible class index, device number, `devname`, and node lifecycle authority; orders projection callbacks around one host lifecycle publisher |
 | `DeviceObject` | Core runtime device object; `AtomicU8` lifecycle state + CAS transitions; devres cleanup list; usage count |
 | `DeviceUse` | RAII guard; blocks device removal while held |
 | `BusInstance` | Runtime bus instance; controller / devices / drivers lists; probe statistics |
@@ -153,6 +166,42 @@ drivers/contracts/kdevice/
 | `DeviceEvent` / `DeviceEventKind` | The 5 lifecycle events; bucketed subscribers |
 | `DeviceTopology` | Read-only topology snapshot; bus/driver-filtered iterators |
 | Lifecycle API | `register_bus_instance`, `register_driver_object`, `probe_device_desc`, `adopt_active_device`, `remove_device_managed` |
+
+## Device-node identity lifecycle
+
+`kclass` calls `register_device_node` from the `Activated` event path for
+runtime classes that require Linux character nodes. The caller supplies the
+driver-core id, class-specific metadata, runtime name, driver name, and bus
+location. `kdevice` assigns the lowest free class index and derives both the
+Linux `DeviceNumber` and path below `/dev` from one class template:
+
+| Kind | Names | Device numbers | Capacity |
+|------|-------|----------------|----------|
+| input | `input/eventN` | major 13, minor `64 + N` | 32 |
+| DRM primary | `dri/cardN` | major 226, minor `N` | 64 |
+
+Registration inserts the complete `DeviceNode` in Publishing state before
+delivering `Added` to subscribers. `subscribe_device_nodes` installs a
+callback and returns the current snapshot under one lock, allowing devfs and
+sysfs to initialize without a subscribe/snapshot gap. After projection
+subscribers return from `Added`, the single host lifecycle publisher receives
+the matching add event and the node becomes Published.
+
+Removal atomically changes the node from Published to Removing while it remains
+reserved in the registry. If removal arrives while add callbacks are still
+running, the state instead becomes RemovePending; the add-publishing thread
+finishes the add event before advancing it to Removing. Projection subscribers
+then receive `Removing` so they can reject new operations and wait for
+in-flight work. The host lifecycle publisher receives remove while paths still
+exist. Projection subscribers finally receive `Removed`; only after those
+callbacks return does the registry mark the node Removed, delete it, and
+release the class index. Registration of the same core ID returns
+`ResourceBusy` during this sequence.
+
+Device-node callbacks run outside the registry lock and may allocate or enter
+filesystem code, but they must run in normal task context. The host lifecycle
+publisher must be installed before the first device node; late installation is
+rejected instead of backfilling synthetic add events.
 
 ## State Machine
 
@@ -324,6 +373,10 @@ prevent deadlock, every path must follow:
   per-object lock.
 - **Forbidden**: calling driver-core mutators from a lifecycle subscriber
   callback.
+- The device-node registry is independent of `DeviceRegistry`. Callers must
+  finish the core lifecycle transition and release all driver-core locks before
+  registering or unregistering a `DeviceNode`; `kclass` performs this from the
+  lock-free event callback path.
 
 The `DeviceObject::begin_removing` CAS loop needs no per-object spinlock —
 the lifecycle field is an `AtomicU8`, allowing lock-free reads plus a CAS
@@ -333,6 +386,9 @@ write.
 
 - **`DeviceRegistry`**: one global `SpinNoPreempt`; all lookup/add/remove
   happen under it.
+- **`DeviceNodeRegistry`**: a separate global `SpinNoPreempt` protects node
+  records, class index sets, and subscriber lists. Callbacks receive owned
+  clones after the lock is released.
 - **`BusInstance`**: internal device/driver/controller lists each under
   `SpinNoPreempt`.
 - **`DeviceObject`**: `lifecycle` is an `AtomicU8` + CAS (lock-free read

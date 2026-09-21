@@ -117,6 +117,7 @@ fat = { path = "fs/filesystems/fat" }
 fs_block = { path = "fs/block" }
 fs_boot = { path = "fs/boot" }
 procfs = { path = "fs/filesystems/procfs" }
+sysfs = { path = "fs/filesystems/sysfs" }
 pipefs = { path = "fs/filesystems/pipefs" }
 cgroup2fs = { path = "fs/filesystems/cgroup2fs" }
 devfs = { path = "fs/filesystems/devfs" }
@@ -160,6 +161,7 @@ virtio = { path = "drivers/devices/virtio" }
 # Internal: driver adapters and integration
 device_res_xkernel = { path = "drivers/adapters/xkernel/device-res", package = "device-res-xkernel" }
 kdriver = { path = "drivers/integration/kdriver" }
+kdevice_uevent = { path = "drivers/integration/kdevice-uevent", package = "kdevice-uevent" }
 
 # Internal: platform, firmware, and host driver support
 aarch64-pmuv3 = { path = "drivers/platform/aarch64-pmuv3" }

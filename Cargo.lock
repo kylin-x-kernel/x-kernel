@@ -1154,7 +1154,6 @@ dependencies = [
  "flatten_objects",
  "gimli 0.34.0",
  "inherit-methods-macro",
- "inputdev",
  "kalloc",
  "kclass",
  "kcred",
@@ -1264,14 +1263,12 @@ dependencies = [
  "display",
  "kalloc",
  "kclass",
- "kdevice",
  "khal",
  "kpoll",
  "ksync",
  "ktask",
  "ktime_types",
  "kvfs",
- "lazyinit",
  "log",
  "macros",
  "memaddr",
@@ -1612,6 +1609,7 @@ dependencies = [
  "kbuild_config",
  "kclass",
  "kcred",
+ "kdevice-uevent",
  "kerrno",
  "ksync",
  "kvfs",
@@ -1620,6 +1618,7 @@ dependencies = [
  "memfs",
  "pipefs",
  "procfs",
+ "sysfs",
  "v9fs",
 ]
 
@@ -2196,6 +2195,16 @@ dependencies = [
  "kspin 0.3.0-dev",
  "lazyinit",
  "log",
+ "unittest",
+]
+
+[[package]]
+name = "kdevice-uevent"
+version = "0.3.0-dev"
+dependencies = [
+ "kdevice",
+ "klazy",
+ "knet",
  "unittest",
 ]
 
@@ -3443,7 +3452,6 @@ dependencies = [
  "hashbrown 0.16.1",
  "iov_iter",
  "kcred",
- "klazy",
  "ksync",
  "ktime_types",
  "kvfs",
@@ -4974,6 +4982,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "sysfs"
+version = "0.3.0-dev"
+dependencies = [
+ "kdevice",
+ "kdevice-uevent",
+ "klazy",
+ "ksync",
+ "kvfs",
+ "lazyinit",
+ "macros",
+ "unittest",
 ]
 
 [[package]]
