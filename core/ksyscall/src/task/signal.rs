@@ -337,7 +337,6 @@ pub fn sys_rt_sigsuspend(
 ) -> KResult<isize> {
     posix_types::check_sigset_size(sigsetsize)?;
 
-    let current = ktask::current();
     let current_thread = kprocess::current_user_thread();
 
     let set: SignalSet = set.read_vm()?.into();
@@ -345,6 +344,31 @@ pub fn sys_rt_sigsuspend(
     let old_blocked = signal.set_blocked(set);
     signal.set_saved_sigmask(old_blocked);
 
+    wait_for_deliverable_signal()
+}
+
+/// Suspends the current user thread without changing its signal mask.
+///
+/// Runs in sleepable user-thread context. A caught signal runs its handler and
+/// then returns `EINTR`, even with `SA_RESTART`. Internally returns
+/// [`LinuxError::ERESTARTNOHAND`] so the user-return path can restart the wait
+/// when no handler is delivered. Waiter allocation failure yields and retries.
+///
+/// See <https://man7.org/linux/man-pages/man2/pause.2.html>.
+#[cfg(target_arch = "x86_64")]
+pub fn sys_pause() -> KResult<isize> {
+    wait_for_deliverable_signal()
+}
+
+/// Blocks the current user thread until an unblocked signal is pending.
+///
+/// Must run in sleepable user-thread context without spinlocks held. Leaves
+/// both the active and saved signal masks unchanged; the user-return path
+/// handles signal disposition and syscall restart after this wait completes.
+fn wait_for_deliverable_signal() -> KResult<isize> {
+    let current = ktask::current();
+    let current_thread = kprocess::current_user_thread();
+    let signal = current_thread.signal_manager();
     let mut registrations = PollRegistrations::new();
     ktask::future::block_on(poll_fn(|cx| {
         loop {
@@ -360,7 +384,7 @@ pub fn sys_rt_sigsuspend(
                 Err(_) => {
                     // Cannot sleep without a registration. Yield and retry
                     // rather than returning ENOMEM: POSIX/Linux require
-                    // sigsuspend to surface only EINTR (via ERESTARTNOHAND).
+                    // these waits to surface only EINTR (via ERESTARTNOHAND).
                     drop(context);
                     ktask::yield_now();
                     continue;

@@ -597,6 +597,8 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
             uctx.arg2().into(),
             uctx.arg3() as _,
         ),
+        #[cfg(target_arch = "x86_64")]
+        Sysno::pause => sys_pause(),
         Sysno::rt_sigsuspend => sys_rt_sigsuspend(uctx, uctx.arg0().into(), uctx.arg1() as _),
         Sysno::kill => sys_kill(uctx.arg0() as _, uctx.arg1() as _),
         Sysno::tkill => sys_tkill(uctx.arg0() as _, uctx.arg1() as _),

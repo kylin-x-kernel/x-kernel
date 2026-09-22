@@ -81,6 +81,22 @@ copy wrappers.
 | T-12 | Syscall hot path reads unreliable RISC-V hardware state | Medium | S-mode reads of M-mode CSRs faulting, or capability divergence across CPUs | The source of truth is the FDT-initialized snapshot in `kcpu`; `ksyscall` only aggregates over the selected CPU mask |
 | T-13 | `get_robust_list` leaks another process's user addresses | High | target resolution | After resolving the target thread, `kprocess::ptrace::check_read_real_creds_access()` applies the uniform policy: same-thread-group exemption, asymmetric matching of caller real UID/GID against target real/effective/saved IDs, and the euid-0 approximation of `CAP_SYS_PTRACE`; otherwise `EPERM` |
 
+## Signal-wait reliability
+
+`pause` and `rt_sigsuspend` use one interruptible wait in sleepable current-user-
+thread context, with no spinlock held across blocking. Checking pending signals
+before waiter registration and retrying when an interrupt wins registration
+prevents lost wakeups. Blocked signals do not finish the wait; signal disposition
+is resolved by the existing user-return path, which restarts `ERESTARTNOHAND`
+when no handler is delivered. Neither syscall reports a successful return.
+
+`pause` does not copy user memory or change the active/saved signal masks.
+`rt_sigsuspend` validates and copies its mask before installing it, and retains
+its existing saved-mask restoration on handler-frame setup. Registration failure
+cannot leak `ENOMEM` through either wait: it yields and retries. Persistent
+allocation failure may therefore consume scheduler time; normal waiting uses
+registered wakeups rather than polling or a timer.
+
 ## Known limitations
 
 - `ioctl` first asks `posix-net::handle_net_ioctl` for exact commands, then

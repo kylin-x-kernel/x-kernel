@@ -148,9 +148,18 @@ ksyscall::dispatch_irq_syscall
   `kprocess` current-thread state and architecture thread context.
 - `task/signal.rs`: `rt_sigprocmask` / `rt_sigaction` / `rt_sigpending` /
   `kill` / `tkill` / `tgkill` / `rt_sigqueueinfo` / `rt_tgsigqueueinfo` /
-  `rt_sigreturn` / `rt_sigtimedwait` / `rt_sigsuspend` / `sigaltstack` /
+  `rt_sigreturn` / `rt_sigtimedwait` / `rt_sigsuspend` / `pause` / `sigaltstack` /
   `signalfd4`; owners in `kprocess` per-thread signal state, the `ksignal`
-  signal model, and `kfd_objects::Signalfd`.
+  signal model, and `kfd_objects::Signalfd`. `pause` (x86_64 syscall 34) and
+  `rt_sigsuspend` share the internal `wait_for_deliverable_signal` helper.
+  Only `rt_sigsuspend` replaces the mask and saves the old mask for signal-frame
+  restoration; `pause` changes neither mask. The helper checks unblocked pending
+  signals before registering an interrupt waiter, rechecks when registration
+  races an interrupt, and blocks through `block_on` while waiting. Registration
+  failure yields and retries without exposing `ENOMEM`. Both return
+  `ERESTARTNOHAND`: handler delivery changes this to `EINTR` regardless of
+  `SA_RESTART`, while no handler delivery restarts the syscall. The supported
+  aarch64, riscv64, and loongarch64 syscall tables have no `pause` entry.
 - `task/cpu_time.rs`: `times`; owners in `kprocess` process CPU-time
   accounting and `khal` clock queries.
 - `task/rusage.rs`: `getrusage`; owner `kprocess` CPU-time sampling state.
