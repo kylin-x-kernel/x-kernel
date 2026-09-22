@@ -22,6 +22,10 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
 ## 内存安全不变量
 
 - 每个 `Folio` 独占一页；
+- `FolioBatch` 只持有有界、升序的引用；引用存活不等于 mapping identity 仍有效；
+- batch clear/drop 不结束 writeback；任何已开始的写回必须先显式完成，包括失败后缀；
+- 遍历候选和待完成批次各最多 31 页，连续写回数据最多 31 页；临时内存不随
+  整个 dirty range 或被截断的页数增长；
 - 一个 page index 最多关联一个 cached folio；
 - folio bytes、dirty 和 writeback 状态只在 folio lock 下访问；
 - `Folio::dirty` 是状态源，dirty index 只承担 `PAGECACHE_TAG_DIRTY` 风格的候选枚举；
@@ -56,6 +60,7 @@ callback，该 callback 不得重入同一个 `MappingPages`；batch writeback �
 | T-06 | dirty index 漏项导致 fsync 漏写 | folio dirty 状态转换时 reconciliation，resize/writeback 显式同步索引 |
 | T-07 | writeback 完成覆盖并发 redirty | batch 完成阶段重新读取最终状态；单页写回后的 clean → dirty writer 重新设置 tag |
 | T-08 | truncate/replace 后写回已脱离 mapping 的旧 folio | 开始与完成写回时均在固定锁序下校验当前 `Arc` identity；失败不重新标脏旧 folio |
+| T-10 | 大映射写回或 truncate 整段收集引用耗尽临时内存 | 固定容量 FolioBatch；dirty 游标前进；删除后复用 batch |
 | T-09 | 文件增长后 cached tail 的清零结果未进入 writeback | growth 在 state lock → folio lock 下同时设置 dirty bit 和 dirty tag |
 
 ## 故障模式与影响分析（FMEA）

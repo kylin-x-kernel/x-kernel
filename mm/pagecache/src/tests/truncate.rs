@@ -71,3 +71,26 @@ fn final_truncate_discards_dirty_folios() {
     assert_eq!(cache.nrpages(), 0);
     assert!(dirty_indices(&cache).is_empty());
 }
+
+#[def_test]
+fn shrink_and_final_teardown_remove_multiple_sparse_batches() {
+    let cache = new_cache(PageCacheKind::FileBacked);
+    let count = crate::FolioBatch::CAPACITY * 3 + 2;
+    for index in 0..count {
+        write_cached(&cache, (index * 2 * PAGE_SIZE_4K) as u64, b"dirty").unwrap();
+    }
+    // Teardown uses page indices directly and must handle the maximum index
+    // without wrapping a traversal cursor back to zero.
+    cache.filemap_add_folio(u64::MAX, 0, b"last").unwrap();
+    let retained = cache.state.lock().entries[&((count - 1) as u64 * 2)].clone();
+    let new_len = (crate::FolioBatch::CAPACITY * 2 * PAGE_SIZE_4K + 1) as u64;
+    cache.resize_cached_folios((count * 2 * PAGE_SIZE_4K) as u64, new_len);
+    assert_eq!(cache.nrpages(), (crate::FolioBatch::CAPACITY + 1) as u64);
+    assert!(!retained.lock().is_dirty());
+    cache.with_folio((crate::FolioBatch::CAPACITY * 2) as u64, |folio| {
+        assert!(folio.unwrap().data()[1..].iter().all(|byte| *byte == 0));
+    });
+    cache.truncate_final().unwrap();
+    assert_eq!(cache.nrpages(), 0);
+    assert!(dirty_indices(&cache).is_empty());
+}

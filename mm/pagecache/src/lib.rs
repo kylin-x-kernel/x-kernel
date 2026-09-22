@@ -13,12 +13,14 @@ extern crate alloc;
 
 mod filemap;
 mod folio;
+mod folio_batch;
 mod mapping_pages;
 mod readahead;
 mod truncate;
 mod writeback;
 
 pub use folio::Folio;
+pub(crate) use folio_batch::FolioBatch;
 pub use mapping_pages::{MappingPages, PageCacheKind};
 pub use writeback::{WritebackPassOutcome, WritebackRangeOutcome, WritebackStats};
 

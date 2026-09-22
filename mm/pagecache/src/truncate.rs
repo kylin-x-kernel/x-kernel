@@ -4,12 +4,10 @@
 
 //! Cached folio resize and final teardown.
 
-use alloc::vec::Vec;
-
 use kerrno::KResult;
 use memaddr::PAGE_SIZE_4K;
 
-use crate::{MappingPages, mapping_pages::MappingPagesState};
+use crate::{FolioBatch, MappingPages, PageIndex, mapping_pages::MappingPagesState};
 
 impl MappingPages {
     /// Updates cached folios for a change in the owning inode's visible size.
@@ -27,18 +25,7 @@ impl MappingPages {
         }
 
         let first_truncated = len.div_ceil(PAGE_SIZE_4K as u64);
-        let dropped_folios = state
-            .entries
-            .range(first_truncated..)
-            .map(|(index, folio)| (*index, folio.clone()))
-            .collect::<Vec<_>>();
-        // Explicit truncation owns the data discard, so clear dirty before
-        // eviction rather than requiring writeback.
-        for (_, folio) in &dropped_folios {
-            folio.lock().clear_dirty();
-        }
-        state.entries.retain(|index, _| *index < first_truncated);
-        state.dirty_marks.retain(|index| *index < first_truncated);
+        Self::remove_folios_from(&mut state, first_truncated);
 
         let tail_index = len / PAGE_SIZE_4K as u64;
         let tail_off = (len % PAGE_SIZE_4K as u64) as usize;
@@ -58,21 +45,33 @@ impl MappingPages {
     /// Unlike ordinary invalidation, final teardown may discard dirty folios
     /// because no later backing-store writeback is possible.
     pub fn truncate_final(&self) -> KResult<()> {
-        let dropped_folios = {
-            let mut state = self.state.lock();
-            let dropped = state
-                .entries
-                .iter()
-                .map(|(index, folio)| (*index, folio.clone()))
-                .collect::<Vec<_>>();
-            state.entries.clear();
-            state.dirty_marks.clear();
-            dropped
-        };
-        for (_, folio) in &dropped_folios {
-            folio.lock().clear_dirty();
-        }
+        Self::remove_folios_from(&mut self.state.lock(), 0);
         Ok(())
+    }
+
+    fn remove_folios_from(state: &mut MappingPagesState, first_index: PageIndex) {
+        let mut batch = FolioBatch::new();
+        loop {
+            for (index, folio) in state
+                .entries
+                .range(first_index..)
+                .take(FolioBatch::CAPACITY)
+            {
+                batch.push(*index, folio.clone());
+            }
+            if batch.len() == 0 {
+                break;
+            }
+            // The state lock preserves identity throughout each removal. The
+            // owner authorizes discarding data, so clear dirty before eviction.
+            for (index, folio) in batch.iter() {
+                folio.lock().clear_dirty();
+                state.entries.remove(index);
+                state.dirty_marks.remove(index);
+            }
+            batch.clear();
+        }
+        state.dirty_marks.retain(|index| *index < first_index);
     }
 
     fn zero_growth_tail(&self, state: &mut MappingPagesState, old_len: u64, new_len: u64) {

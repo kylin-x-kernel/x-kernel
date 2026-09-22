@@ -317,3 +317,162 @@ fn batched_writeback_preserves_concurrent_redirty() {
     });
     assert_eq!(final_state, (false, false));
 }
+
+#[def_test]
+fn writeback_scans_sparse_windows_without_pinning_the_whole_range() {
+    let cache = new_cache(PageCacheKind::FileBacked);
+    let count = crate::FolioBatch::CAPACITY * 2 + 3;
+    for index in 0..count {
+        write_cached(&cache, (index * 2 * PAGE_SIZE_4K) as u64, b"x").unwrap();
+    }
+    let last_index = ((count - 1) * 2) as u64;
+    let last = cache.state.lock().entries[&last_index].clone();
+    let mut distant_ref_count = 0;
+    let mut writes = Vec::new();
+    let stats = cache
+        .writeback_until(
+            (count * 2 * PAGE_SIZE_4K) as u64,
+            0,
+            u64::MAX,
+            usize::MAX,
+            &mut |index, _, _| {
+                if index == 0 {
+                    // Only the mapping and this test retain the distant page.
+                    distant_ref_count = Arc::strong_count(&last);
+                }
+                writes.push(index);
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(distant_ref_count, 2);
+    assert_eq!(stats.pages_written, count);
+    assert_eq!(
+        writes,
+        (0..count).map(|i| (i * 2) as u64).collect::<Vec<_>>()
+    );
+    assert!(dirty_indices(&cache).is_empty());
+}
+
+#[def_test]
+fn batched_writeback_bounds_submissions_and_completes_eof_tail() {
+    let cache = new_cache(PageCacheKind::FileBacked);
+    let capacity = crate::FolioBatch::CAPACITY;
+    let visible_len = capacity * 2 * PAGE_SIZE_4K + 123;
+    write_cached(&cache, 0, &vec![0x37; visible_len]).unwrap();
+    let mut writes = Vec::new();
+    let outcome = cache
+        .write_cache_pages(
+            visible_len as u64,
+            0,
+            u64::MAX,
+            usize::MAX,
+            usize::MAX,
+            &mut |offset, data| {
+                writes.push((offset, data.len()));
+                assert!(data.iter().all(|byte| *byte == 0x37));
+                Ok(WritebackRangeOutcome::complete(data.len()))
+            },
+        )
+        .unwrap();
+    assert_eq!(outcome.error(), None);
+    assert_eq!(outcome.stats().pages_written, capacity * 2 + 1);
+    assert_eq!(
+        writes,
+        vec![
+            (0, capacity * PAGE_SIZE_4K),
+            ((capacity * PAGE_SIZE_4K) as u64, capacity * PAGE_SIZE_4K),
+            ((capacity * 2 * PAGE_SIZE_4K) as u64, 123),
+        ]
+    );
+    assert!(dirty_indices(&cache).is_empty());
+}
+
+#[def_test]
+fn batched_writeback_budget_stops_inside_second_window() {
+    let cache = new_cache(PageCacheKind::FileBacked);
+    let capacity = crate::FolioBatch::CAPACITY;
+    let count = capacity * 2 + 1;
+    write_cached(&cache, 0, &vec![1; count * PAGE_SIZE_4K]).unwrap();
+    let mut lengths = Vec::new();
+    let outcome = cache
+        .write_cache_pages(
+            (count * PAGE_SIZE_4K) as u64,
+            0,
+            u64::MAX,
+            capacity + 2,
+            usize::MAX,
+            &mut |_, data| {
+                lengths.push(data.len());
+                Ok(WritebackRangeOutcome::complete(data.len()))
+            },
+        )
+        .unwrap();
+    assert_eq!(outcome.stats().pages_written, capacity + 2);
+    assert_eq!(lengths, vec![capacity * PAGE_SIZE_4K, 2 * PAGE_SIZE_4K]);
+    assert_eq!(
+        dirty_indices(&cache),
+        ((capacity + 2) as u64..count as u64).collect::<Vec<_>>()
+    );
+    cache.truncate_final().unwrap();
+}
+
+#[def_test]
+fn second_batch_error_finishes_prefix_and_leaves_unvisited_pages_dirty() {
+    let cache = new_cache(PageCacheKind::FileBacked);
+    let capacity = crate::FolioBatch::CAPACITY;
+    let count = capacity * 2 + 3;
+    write_cached(&cache, 0, &vec![1; count * PAGE_SIZE_4K]).unwrap();
+    let outcome = cache
+        .write_cache_pages(
+            (count * PAGE_SIZE_4K) as u64,
+            0,
+            u64::MAX,
+            usize::MAX,
+            usize::MAX,
+            &mut |offset, data| {
+                if offset == 0 {
+                    Ok(WritebackRangeOutcome::complete(data.len()))
+                } else {
+                    Ok(WritebackRangeOutcome::failed(
+                        PAGE_SIZE_4K + 123,
+                        KError::InvalidInput,
+                    ))
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(outcome.error(), Some(KError::InvalidInput));
+    assert_eq!(outcome.stats().pages_written, capacity + 1);
+    assert_eq!(
+        dirty_indices(&cache),
+        ((capacity + 1) as u64..count as u64).collect::<Vec<_>>()
+    );
+    for index in 0..count as u64 {
+        cache.with_folio(index, |folio| assert!(!folio.unwrap().is_under_writeback()));
+    }
+    cache.truncate_final().unwrap();
+}
+
+#[def_test]
+fn redirty_in_previous_window_is_left_for_the_next_pass() {
+    let cache = new_cache(PageCacheKind::FileBacked);
+    let count = crate::FolioBatch::CAPACITY * 2 + 1;
+    write_cached(&cache, 0, &vec![1; count * PAGE_SIZE_4K]).unwrap();
+    let outcome = cache
+        .write_cache_pages(
+            (count * PAGE_SIZE_4K) as u64,
+            0,
+            u64::MAX,
+            usize::MAX,
+            usize::MAX,
+            &mut |_, data| {
+                write_cached(&cache, 0, b"new")?;
+                Ok(WritebackRangeOutcome::complete(data.len()))
+            },
+        )
+        .unwrap();
+    assert_eq!(outcome.stats().pages_written, count);
+    assert_eq!(dirty_indices(&cache), vec![0]);
+    cache.truncate_final().unwrap();
+}

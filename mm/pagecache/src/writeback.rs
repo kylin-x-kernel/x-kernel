@@ -10,15 +10,7 @@ use kerrno::{KError, KResult};
 use ksync::{Mutex, MutexGuard};
 use memaddr::PAGE_SIZE_4K;
 
-use crate::{Folio, MappingPages, PageIndex};
-
-type IndexedFolio = (PageIndex, Arc<Mutex<Folio>>);
-
-struct BatchedFolio {
-    index: PageIndex,
-    folio: Arc<Mutex<Folio>>,
-    byte_len: usize,
-}
+use crate::{Folio, FolioBatch, MappingPages, PageIndex};
 
 /// Result counters for one writeback pass.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -133,23 +125,28 @@ impl MappingPages {
         }
     }
 
-    fn collect_dirty_folios_in_range(&self, start: u64, end: u64) -> Vec<IndexedFolio> {
+    // Like filemap_get_folios_tag: advance monotonically, holding references
+    // only for one bounded window. Concurrent changes are revalidated at start.
+    fn collect_dirty_folios(
+        &self,
+        next_index: &mut PageIndex,
+        end_index: PageIndex,
+        batch: &mut FolioBatch,
+    ) {
+        batch.clear();
         let state = self.state.lock();
-        if start >= end {
-            return Vec::new();
+        for index in state.dirty_marks.range(*next_index..end_index) {
+            // end_index comes from an exclusive byte endpoint, so index + 1
+            // is representable even for a range ending at u64::MAX.
+            *next_index = *index + 1;
+            if let Some(folio) = state.entries.get(index) {
+                batch.push(*index, folio.clone());
+                if batch.is_full() {
+                    return;
+                }
+            }
         }
-        let first_index = start / PAGE_SIZE_4K as u64;
-        let last_index = (end - 1) / PAGE_SIZE_4K as u64;
-        state
-            .dirty_marks
-            .range(first_index..=last_index)
-            .filter_map(|index| {
-                state
-                    .entries
-                    .get(index)
-                    .map(|folio| (*index, folio.clone()))
-            })
-            .collect()
+        *next_index = end_index;
     }
 
     // A dirty tag only selects a candidate. Mapping identity and folio state
@@ -196,6 +193,8 @@ impl MappingPages {
 
     /// Writes back dirty cached folios intersecting `[start, end)`.
     ///
+    /// Candidates are scanned in bounded ascending windows. Concurrent dirtying
+    /// behind the cursor is left for a later pass; dirtying ahead may be observed.
     /// The callback runs with the candidate folio locked and must not re-enter
     /// this [`MappingPages`].
     pub fn writeback_until(
@@ -207,41 +206,50 @@ impl MappingPages {
         write_folio_fn: &mut impl FnMut(PageIndex, &[u8], usize) -> KResult<()>,
     ) -> KResult<WritebackStats> {
         let mut stats = WritebackStats::default();
-        if max_pages == 0 {
+        if max_pages == 0 || start >= end {
             return Ok(stats);
         }
-        let folios = self.collect_dirty_folios_in_range(start, end);
+        let mut scan_index = start / PAGE_SIZE_4K as u64;
+        let end_index = (end - 1) / PAGE_SIZE_4K as u64 + 1;
+        let mut candidates = FolioBatch::new();
 
-        for (index, folio) in folios {
-            if stats.pages_written >= max_pages {
-                break;
+        'scan: while scan_index < end_index {
+            self.collect_dirty_folios(&mut scan_index, end_index, &mut candidates);
+            for &(index, ref folio) in candidates.iter() {
+                if stats.pages_written >= max_pages {
+                    break 'scan;
+                }
+                let page_start = index
+                    .checked_mul(PAGE_SIZE_4K as u64)
+                    .ok_or(KError::InvalidInput)?;
+                let valid_len = visible_len
+                    .saturating_sub(page_start)
+                    .min(PAGE_SIZE_4K as u64) as usize;
+                if valid_len == 0 {
+                    continue;
+                }
+                let Some(mut locked) = self.start_writeback_for_candidate(index, folio, &mut stats)
+                else {
+                    continue;
+                };
+                let result = write_folio_fn(index, &locked.data()[..valid_len], valid_len);
+                drop(locked);
+                if let Err(error) = result {
+                    self.finish_writeback(index, folio, false);
+                    return Err(error);
+                }
+                self.finish_writeback(index, folio, true);
+                stats.wrote(1);
             }
-            let page_start = index
-                .checked_mul(PAGE_SIZE_4K as u64)
-                .ok_or(KError::InvalidInput)?;
-            let valid_len = visible_len
-                .saturating_sub(page_start)
-                .min(PAGE_SIZE_4K as u64) as usize;
-            if valid_len == 0 {
-                continue;
-            }
-            let Some(mut locked) = self.start_writeback_for_candidate(index, &folio, &mut stats)
-            else {
-                continue;
-            };
-            let result = write_folio_fn(index, &locked.data()[..valid_len], valid_len);
-            drop(locked);
-            if let Err(error) = result {
-                self.finish_writeback(index, &folio, false);
-                return Err(error);
-            }
-            self.finish_writeback(index, &folio, true);
-            stats.wrote(1);
         }
         Ok(stats)
     }
 
-    /// Writes back dirty cached folios in contiguous batches.
+    /// Writes back dirty cached folios in contiguous batches of at most 31 folios.
+    ///
+    /// The byte and page limits may further shorten each batch. Enumeration is
+    /// incremental as in [`Self::writeback_until`]. The callback runs without
+    /// mapping or folio locks; completion revalidates each resident identity.
     pub fn write_cache_pages(
         &self,
         visible_len: u64,
@@ -252,21 +260,23 @@ impl MappingPages {
         write_range_fn: &mut impl FnMut(u64, &[u8]) -> KResult<WritebackRangeOutcome>,
     ) -> KResult<WritebackPassOutcome> {
         let mut stats = WritebackStats::default();
-        if max_pages == 0 {
+        if max_pages == 0 || start >= end {
             return Ok(WritebackPassOutcome::complete(stats));
         }
-        let folios = self.collect_dirty_folios_in_range(start, end);
+        let mut scan_index = start / PAGE_SIZE_4K as u64;
+        let end_index = (end - 1) / PAGE_SIZE_4K as u64 + 1;
+        let mut candidates = FolioBatch::new();
 
         let max_bytes = max_bytes.max(PAGE_SIZE_4K);
         let mut batch_start = 0u64;
         let mut next_index = None;
         let mut batch_data = Vec::new();
-        let mut batch_folios = Vec::new();
+        let mut batch_folios = FolioBatch::new();
 
         let flush_batch =
             |batch_start: u64,
              batch_data: &mut Vec<u8>,
-             batch_folios: &mut Vec<BatchedFolio>,
+             batch_folios: &mut FolioBatch,
              write_range_fn: &mut dyn FnMut(u64, &[u8]) -> KResult<WritebackRangeOutcome>,
              stats: &mut WritebackStats|
              -> Option<KError> {
@@ -281,88 +291,87 @@ impl MappingPages {
                     (outcome.completed_bytes(), outcome.error())
                 };
 
-                let mut batch_offset = 0usize;
-                for BatchedFolio {
-                    index,
-                    folio,
-                    byte_len,
-                } in batch_folios.iter()
-                {
-                    let folio_end = batch_offset.saturating_add(*byte_len);
+                for (position, (index, folio)) in batch_folios.iter().enumerate() {
+                    // A contiguous submission contains full pages followed by
+                    // at most one EOF tail. No per-entry byte length is needed.
+                    let folio_end = ((position + 1) * PAGE_SIZE_4K).min(batch_data.len());
                     let is_complete = folio_end <= completed_bytes;
                     self.finish_writeback(*index, folio, is_complete);
                     if is_complete {
                         stats.wrote(1);
                     }
-                    batch_offset = folio_end;
                 }
                 batch_folios.clear();
                 batch_data.clear();
                 error
             };
 
-        for (index, folio) in folios {
-            if stats.pages_written >= max_pages {
-                break;
-            }
-            let page_start = index
-                .checked_mul(PAGE_SIZE_4K as u64)
-                .ok_or(KError::InvalidInput)?;
-            let valid_len = visible_len
-                .saturating_sub(page_start)
-                .min(PAGE_SIZE_4K as u64) as usize;
-            if valid_len == 0 {
-                continue;
-            }
-
-            let contiguous = next_index == Some(index);
-            let would_overflow = batch_data.len().saturating_add(valid_len) > max_bytes;
-            let would_exceed_pages =
-                stats.pages_written.saturating_add(batch_folios.len()) >= max_pages;
-            if !batch_data.is_empty() && (!contiguous || would_overflow || would_exceed_pages) {
-                if let Some(error) = flush_batch(
-                    batch_start,
-                    &mut batch_data,
-                    &mut batch_folios,
-                    write_range_fn,
-                    &mut stats,
-                ) {
-                    return Ok(WritebackPassOutcome::failed(stats, error));
-                }
+        'scan: while scan_index < end_index {
+            self.collect_dirty_folios(&mut scan_index, end_index, &mut candidates);
+            for &(index, ref folio) in candidates.iter() {
                 if stats.pages_written >= max_pages {
-                    break;
+                    break 'scan;
                 }
-            }
+                let page_start = index
+                    .checked_mul(PAGE_SIZE_4K as u64)
+                    .ok_or(KError::InvalidInput)?;
+                let valid_len = visible_len
+                    .saturating_sub(page_start)
+                    .min(PAGE_SIZE_4K as u64) as usize;
+                if valid_len == 0 {
+                    continue;
+                }
 
-            let Some(mut locked) = self.start_writeback_for_candidate(index, &folio, &mut stats)
-            else {
-                if let Some(error) = flush_batch(
-                    batch_start,
-                    &mut batch_data,
-                    &mut batch_folios,
-                    write_range_fn,
-                    &mut stats,
-                ) {
-                    return Ok(WritebackPassOutcome::failed(stats, error));
+                let contiguous = next_index == Some(index);
+                let would_overflow = batch_data.len().saturating_add(valid_len) > max_bytes;
+                let would_exceed_pages =
+                    stats.pages_written.saturating_add(batch_folios.len()) >= max_pages;
+                if !batch_data.is_empty()
+                    && (!contiguous
+                        || would_overflow
+                        || would_exceed_pages
+                        || batch_folios.is_full())
+                {
+                    if let Some(error) = flush_batch(
+                        batch_start,
+                        &mut batch_data,
+                        &mut batch_folios,
+                        write_range_fn,
+                        &mut stats,
+                    ) {
+                        return Ok(WritebackPassOutcome::failed(stats, error));
+                    }
+                    if stats.pages_written >= max_pages {
+                        break 'scan;
+                    }
                 }
-                if stats.pages_written >= max_pages {
-                    break;
-                }
-                next_index = None;
-                continue;
-            };
 
-            if batch_data.is_empty() {
-                batch_start = page_start;
+                let Some(mut locked) = self.start_writeback_for_candidate(index, folio, &mut stats)
+                else {
+                    if let Some(error) = flush_batch(
+                        batch_start,
+                        &mut batch_data,
+                        &mut batch_folios,
+                        write_range_fn,
+                        &mut stats,
+                    ) {
+                        return Ok(WritebackPassOutcome::failed(stats, error));
+                    }
+                    if stats.pages_written >= max_pages {
+                        break 'scan;
+                    }
+                    next_index = None;
+                    continue;
+                };
+
+                if batch_data.is_empty() {
+                    batch_start = page_start;
+                }
+                batch_data.extend_from_slice(&locked.data()[..valid_len]);
+                drop(locked);
+                batch_folios.push(index, folio.clone());
+                next_index = Some(index + 1);
             }
-            batch_data.extend_from_slice(&locked.data()[..valid_len]);
-            drop(locked);
-            batch_folios.push(BatchedFolio {
-                index,
-                folio,
-                byte_len: valid_len,
-            });
-            next_index = Some(index + 1);
         }
 
         if let Some(error) = flush_batch(
