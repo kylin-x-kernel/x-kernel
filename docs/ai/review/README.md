@@ -79,3 +79,11 @@ docs/ai/review/
 5. 发现型规则只评论 PR diff 中可评论的行，不借 review 处理无关历史问题。
 6. 示例应使用 X-Kernel 的目录、类型和工作流，不继续引入 Asterinas 专有表述。
 7. 规则更新后，应同步检查 `x-review` 中阶段到文件路径的映射。
+
+## 显式文档审查
+
+文档审查检查点位于 [`module-docs/`](module-docs/README.md)，由本仓库维护。
+与上面的代码审查 agent 不同，`docreview` 的检查点由 x-review 程序从固定 PR HEAD
+快照读取、校验并注入模型输入，不要求模型再自行读取检查表。
+`docreview crate=xxx` 使用同一来源；只有显式文档命令才运行这些检查。
+工作簿和导出 TSV 的更新方法、规则 ID 与执行器的兼容约定见该目录说明。
