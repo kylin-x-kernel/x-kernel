@@ -36,9 +36,10 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use kbuild_config::IPI_IRQ;
 use kcpu_id_map::{KCpuMask, KCpuMaskExt, LogicalCpuId, for_each_present_logical_cpu};
+use kcpu_slot::cpu_slot_cell;
 use khal::percpu::this_cpu_id;
 use kirq::TargetCpu;
-use kspin::NoPreempt;
+use kspin::{NoPreempt, NoPreemptIrqSave};
 use ktime_types::TimeSpan;
 use memaddr::VirtAddr;
 use page_table::TlbFlushIf;
@@ -59,8 +60,9 @@ static REQUEST_SLOTS: [ShootdownRequestSlot; kbuild_config::NR_CPUS] =
 static PENDING_EPOCH_BY_CPU: [AtomicU64; kbuild_config::NR_CPUS] =
     [const { AtomicU64::new(0) }; kbuild_config::NR_CPUS];
 
-#[percpu::def_percpu]
-static LAST_HANDLED_PENDING_EPOCH: u64 = 0;
+cpu_slot_cell! {
+    static LAST_HANDLED_PENDING_EPOCH: u64 = 0;
+}
 
 const SHOOTDOWN_WARN: TimeSpan = TimeSpan::from_secs(1);
 
@@ -377,14 +379,14 @@ fn current_pending_epoch(cpu: usize) -> u64 {
 
 #[inline]
 fn last_handled_pending_epoch() -> u64 {
-    // SAFETY: this reads the current CPU's local per-CPU slot only.
-    unsafe { LAST_HANDLED_PENDING_EPOCH.read_current_raw() }
+    let guard = NoPreemptIrqSave::new();
+    LAST_HANDLED_PENDING_EPOCH.read(&guard)
 }
 
 #[inline]
 fn set_last_handled_pending_epoch(epoch: u64) {
-    // SAFETY: this writes the current CPU's local per-CPU slot only.
-    unsafe { LAST_HANDLED_PENDING_EPOCH.write_current_raw(epoch) }
+    let guard = NoPreemptIrqSave::new();
+    LAST_HANDLED_PENDING_EPOCH.write(&guard, epoch);
 }
 
 /// Shared shootdown logic: publish `vaddr`, send IPIs to every CPU set in

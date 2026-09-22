@@ -10,6 +10,7 @@ use alloc::{
 };
 use core::{future::poll_fn, sync::atomic::AtomicUsize, task::Poll};
 
+use kcpu_slot::cpu_slot_cell;
 use kspin::NoPreemptIrqSave;
 #[cfg(feature = "execution-accounting")]
 use ktime_types::MonotonicInstant;
@@ -160,20 +161,24 @@ pub fn init_scheduler_secondary() {
     crate::run_queue::init_secondary();
 }
 
-/// Absolute monotonic ns of the next schedule-evaluation deadline, or `0` if none.
-#[percpu::def_percpu]
-static NEXT_SCHED_DEADLINE_NS: u64 = 0;
+cpu_slot_cell! {
+    /// Absolute monotonic ns of the next schedule-evaluation deadline, or
+    /// `0` if none.
+    static NEXT_SCHED_DEADLINE_NS: u64 = 0;
+}
 
-/// Absolute monotonic ns of the current task execution-accounting tick.
-#[percpu::def_percpu]
-static NEXT_EXECUTION_TICK_DEADLINE_NS: u64 = 0;
+cpu_slot_cell! {
+    /// Absolute monotonic ns of the current task execution-accounting tick.
+    static NEXT_EXECUTION_TICK_DEADLINE_NS: u64 = 0;
+}
 
-/// When set, [`rearm_local_timer`] updates software slots only and skips the
-/// hardware write. Used across timer-IRQ callback/drain/wake batches so
-/// reentrant timer registration or wakeup accounting cannot program hardware
-/// from an intermediate view before the final arbitration.
-#[percpu::def_percpu]
-static DEFER_LOCAL_TIMER_REARM: bool = false;
+cpu_slot_cell! {
+    /// When set, [`rearm_local_timer`] updates software slots only and skips
+    /// the hardware write. Used across timer-IRQ callback/drain/wake batches
+    /// so reentrant timer registration or wakeup accounting cannot program
+    /// hardware from an intermediate view before the final arbitration.
+    static DEFER_LOCAL_TIMER_REARM: bool = false;
+}
 
 /// Minimum schedule-timer delay, matching Linux `hrtick_start()`.
 ///
@@ -219,15 +224,12 @@ fn schedule_deadline_request(now_ns: u64, rel_ns: Option<u64>) -> (Option<u64>, 
 /// reading per-CPU deadline slots and programming hardware. The prepared CPU
 /// lock is held through the hardware write so remote starts cannot be lost.
 pub(crate) fn rearm_local_timer() {
-    let _guard = NoPreemptIrqSave::new();
-    // SAFETY: same guard as above.
-    let sched_ns = unsafe { NEXT_SCHED_DEADLINE_NS.read_current_raw() };
+    let guard = NoPreemptIrqSave::new();
+    let sched_ns = NEXT_SCHED_DEADLINE_NS.read(&guard);
     let sched = (sched_ns != 0).then_some(sched_ns);
-    // SAFETY: same guard as above.
-    let execution_ns = unsafe { NEXT_EXECUTION_TICK_DEADLINE_NS.read_current_raw() };
+    let execution_ns = NEXT_EXECUTION_TICK_DEADLINE_NS.read(&guard);
     let execution = (execution_ns != 0).then_some(execution_ns);
-    // SAFETY: same guard as above; deferral is only toggled from timer IRQ.
-    if unsafe { DEFER_LOCAL_TIMER_REARM.read_current_raw() } {
+    if DEFER_LOCAL_TIMER_REARM.read(&guard) {
         return;
     }
     // SAFETY: the guard pins this CPU with IRQs masked. The static set and all
@@ -251,14 +253,14 @@ pub(crate) fn rearm_local_timer() {
 
 /// Begins deferring hardware timer writes on this CPU (timer-IRQ wake batch).
 pub(crate) fn begin_defer_local_timer_rearm() {
-    // SAFETY: timer IRQ / IRQ-off on this CPU only.
-    unsafe { DEFER_LOCAL_TIMER_REARM.write_current_raw(true) };
+    let pin = NoPreemptIrqSave::new();
+    DEFER_LOCAL_TIMER_REARM.write(&pin, true);
 }
 
 /// Ends deferred rearm mode. Caller must perform the final [`rearm_local_timer`].
 pub(crate) fn end_defer_local_timer_rearm() {
-    // SAFETY: timer IRQ / IRQ-off on this CPU only.
-    unsafe { DEFER_LOCAL_TIMER_REARM.write_current_raw(false) };
+    let pin = NoPreemptIrqSave::new();
+    DEFER_LOCAL_TIMER_REARM.write(&pin, false);
 }
 
 /// Programs the next schedule-evaluation deadline from a relative `next_preemption_ns`.
@@ -304,18 +306,17 @@ pub(crate) fn program_sched_deadline_for(
 /// # IRQ safety
 /// Caller must have IRQs (and preemption) disabled on this CPU.
 pub(crate) fn set_sched_deadline_ns(deadline_ns: Option<u64>) {
-    // SAFETY: IRQ/preempt disabled; only this CPU's slot is written.
-    unsafe {
-        NEXT_SCHED_DEADLINE_NS.write_current_raw(deadline_ns.unwrap_or(0));
-    }
+    // The nested pin upgrades whatever masking the caller had; the store
+    // lands on this CPU's own cell.
+    let pin = NoPreemptIrqSave::new();
+    NEXT_SCHED_DEADLINE_NS.write(&pin, deadline_ns.unwrap_or(0));
 }
 
 fn set_execution_tick_deadline_ns(deadline_ns: Option<u64>) {
-    // SAFETY: caller holds a preempt/IRQ guard or runs in scheduler/timer
-    // context; only this CPU's slot is written.
-    unsafe {
-        NEXT_EXECUTION_TICK_DEADLINE_NS.write_current_raw(deadline_ns.unwrap_or(0));
-    }
+    // The nested pin upgrades whatever masking the caller had; the store
+    // lands on this CPU's own cell.
+    let pin = NoPreemptIrqSave::new();
+    NEXT_EXECUTION_TICK_DEADLINE_NS.write(&pin, deadline_ns.unwrap_or(0));
 }
 
 fn execution_tick_deadline_for_context(context: TaskExecutionContext) -> Option<u64> {
@@ -427,9 +428,10 @@ pub fn on_timer_fire() {
     crate::timers::run_timer_irq_note();
 
     let sched_due = {
-        // SAFETY: timer IRQ context; IRQs are masked on this CPU, so only this
-        // CPU's `NEXT_SCHED_DEADLINE_NS` slot is read.
-        let sched_ns = unsafe { NEXT_SCHED_DEADLINE_NS.read_current_raw() };
+        // The tick runs with IRQs masked; the nested pin adds the CPU-local
+        // exclusion proof instead of relying on that fact.
+        let pin = NoPreemptIrqSave::new();
+        let sched_ns = NEXT_SCHED_DEADLINE_NS.read(&pin);
         sched_ns != 0 && now_ns >= sched_ns
     };
     // Account the interrupted task before waking anyone else.
@@ -735,8 +737,10 @@ where
 ///
 /// # Panics
 ///
-/// Panics in hardirq, softirq, or BH-disabled context. Interrupt-like contexts
-/// have no sleepable task state and must not enter the blocking scheduler path.
+/// Panics in hardirq, softirq, or BH-disabled context, and in task context
+/// with local IRQs disabled or a no-preempt section held: those contexts have
+/// no stable CPU identity across the blocking switch and must not enter the
+/// blocking scheduler path.
 pub fn sleep(dur: ktime_types::TimeSpan) {
     assert_sleepable_context("sleep");
     sleep_until_unchecked(khal::time::monotonic_time() + dur);
@@ -746,8 +750,10 @@ pub fn sleep(dur: ktime_types::TimeSpan) {
 ///
 /// # Panics
 ///
-/// Panics in hardirq, softirq, or BH-disabled context. Interrupt-like contexts
-/// have no sleepable task state and must not enter the blocking scheduler path.
+/// Panics in hardirq, softirq, or BH-disabled context, and in task context
+/// with local IRQs disabled or a no-preempt section held: those contexts have
+/// no stable CPU identity across the blocking switch and must not enter the
+/// blocking scheduler path.
 pub fn sleep_until(deadline: ktime_types::MonotonicInstant) {
     assert_sleepable_context("sleep_until");
     sleep_until_unchecked(deadline);
@@ -764,8 +770,10 @@ pub fn sleep_until(deadline: ktime_types::MonotonicInstant) {
 ///
 /// # Panics
 ///
-/// Panics in hardirq, softirq, or BH-disabled context. Interrupt-like contexts
-/// have no sleepable task state and must not enter the blocking scheduler path.
+/// Panics in hardirq, softirq, or BH-disabled context, and in task context
+/// with local IRQs disabled or a no-preempt section held: those contexts have
+/// no stable CPU identity across the blocking switch and must not enter the
+/// blocking scheduler path.
 pub fn interruptible_sleep_until(deadline: ktime_types::MonotonicInstant) {
     assert_sleepable_context("interruptible_sleep_until");
     if let Err(error) = crate::future::block_on(crate::future::interruptible(
@@ -782,7 +790,8 @@ pub fn interruptible_sleep_until(deadline: ktime_types::MonotonicInstant) {
 fn assert_sleepable_context(operation: &'static str) {
     assert!(
         can_sleep_current_context(),
-        "{operation} called from non-sleepable interrupt-like context"
+        "{operation} called from non-sleepable context: interrupt-like, local IRQs disabled, or \
+         no-preempt section held"
     );
 }
 
@@ -791,7 +800,23 @@ fn sleep_until_unchecked(deadline: ktime_types::MonotonicInstant) {
 }
 
 fn can_sleep_current_context() -> bool {
-    !kirq::context::is_in_interrupt_context()
+    if kirq::context::is_in_interrupt_context() {
+        return false;
+    }
+    // Blocking must not run with local IRQs masked: the task would switch out
+    // inside an IRQ-off window and could resume on another CPU while the
+    // masked section still assumes it is pinned to this one (see
+    // `CpuPin` in `kcpu_slot`).
+    if !karch::local_irq_enabled() {
+        return false;
+    }
+    // A held no-preempt section must not span a switch either; its preempt
+    // credit would leak across the switched-out interval.
+    #[cfg(feature = "preempt")]
+    if current().preempt_section_held() {
+        return false;
+    }
+    true
 }
 
 #[cfg(unittest)]
@@ -1039,6 +1064,17 @@ mod tests_api {
     #[def_test(serial)]
     fn sleep_context_gate_rejects_bh_disabled_context() {
         let _bh = local_bh_disable();
+        assert!(!can_sleep_current_context_for_tests());
+    }
+
+    #[def_test]
+    fn sleep_context_gate_accepts_plain_task_context() {
+        assert!(can_sleep_current_context_for_tests());
+    }
+
+    #[def_test(serial)]
+    fn sleep_context_gate_rejects_irqs_disabled_context() {
+        let _irqs_off = kspin::NoPreemptIrqSave::new();
         assert!(!can_sleep_current_context_for_tests());
     }
 }

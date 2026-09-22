@@ -47,7 +47,7 @@ log.workspace = true
 memaddr.workspace = true
 kaddr_layout.workspace = true
 page_table = { workspace = true }
-percpu.workspace = true
+kcpu_slot.workspace = true
 kiface.workspace = true
 acpi = { workspace = true }
 of = { workspace = true }

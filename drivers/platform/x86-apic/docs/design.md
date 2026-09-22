@@ -53,7 +53,7 @@ init_primary(io_apic_paddr)
   ├─ LocalApicBuilder: timer 0xf0 / error 0xf2 / spurious 0xf1
   └─ map + init IO-APIC  ──> IO_APIC: LazyInit<SpinNoIrq<IoApic>>
 
-per-CPU: LOCAL_APIC_PTR (percpu) holds a leaked LocalApic handle
+per-CPU: LOCAL_APIC_PTR (kcpu_slot::cpu_slot_cell!) holds a leaked LocalApic handle
          installed by init_primary / init_secondary
 
 kirq::MsiBackendIf ──> MsixVectorAllocator (bitmap, 0x40..0xf0)

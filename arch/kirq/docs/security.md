@@ -92,16 +92,19 @@ kirq
 
 安全不变量是：快照发布前完全初始化，发布后不可变，且永不释放。
 
-`arch/kirq/src/bottom_half/context.rs` 也使用 `percpu` raw access：
+`arch/kirq/src/bottom_half/context.rs` 使用 `kcpu_slot` 的
+`CpuSlotCell<SpinNoIrq<IrqContextState>>`：
 
-- `IRQ_CONTEXT_STATE.current_ref_raw()` 用于复制当前 CPU 的 context snapshot；
-- `IRQ_CONTEXT_STATE.current_ref_mut_raw()` 用于更新当前 CPU 的 context depth。
+- `current_state_snapshot()` 在 `NoPreemptIrqSave` pin 下取当前 CPU 的 slot，并经
+  `SpinNoIrq` 共享读取 context snapshot；
+- `with_current_state_irqoff()` 在同一 pin 下经 `SpinNoIrq` 更新当前 CPU 的
+  context depth。
 
-这些访问由两类上下文保护：public 查询使用 `NoPreemptIrqSave`，当前 CPU 被 pin
-住且本地 IRQ 被屏蔽；hardirq guard 和 softirq IRQ-tail hot path 使用 crate-local
-`*_irqoff` helper，调用方必须已经建立 local-IRQ-masked + CPU-pinned 上下文。
-因此普通任务查询不会与本地 hardirq guard 并发读写同一个非原子 per-CPU slot，
-IRQ-tail hardirq/softirq 也不会重复保存/恢复 IRQ state。
+对象排他性由 `SpinNoIrq` 建立；`NoPreemptIrqSave` 只负责固定 CPU 并屏蔽本地 IRQ
+重入。hardirq guard 和 softirq IRQ-tail hot path 使用 crate-local `*_irqoff`
+helper，调用方必须已经建立 local-IRQ-masked + CPU-pinned 上下文。因此普通任务查询
+不会与本地 hardirq guard 并发读写同一个 per-CPU slot，IRQ-tail hardirq/softirq
+也不会重复保存/恢复 IRQ state。
 
 `arch/kirq/src/bottom_half/softirq.rs` 使用 `SOFTIRQ_PENDING.current_ref_raw()` 访问当前 CPU 的
 per-CPU atomic pending mask。调用方在访问前 pin 当前 CPU；pending mask 自身是

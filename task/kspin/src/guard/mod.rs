@@ -32,6 +32,8 @@ pub trait BaseGuard {
 }
 
 mod arch;
+mod percpu;
 mod types;
 
+pub use percpu::CurrentCpuIf;
 pub use types::{IrqSave, NoOp, NoPreempt, NoPreemptIrqSave};

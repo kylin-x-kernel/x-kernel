@@ -43,7 +43,8 @@ use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use kcpu_id_map::{LogicalCpuId, RawCpuId, raw_cpu_id};
-use kspin::{IrqSave, SpinNoIrq};
+use kcpu_slot::{CpuLocalGuard, cpu_slot_cell};
+use kspin::{NoPreemptIrqSave, SpinNoIrq};
 use lazyinit::LazyInit;
 use memaddr::{PhysAddr, pa};
 use memspace::iomap_device;
@@ -75,8 +76,9 @@ const MSIX_VECTOR_COUNT: usize = (APIC_TIMER_VECTOR as usize) - (MSIX_VECTOR_BAS
 const MSIX_VECTOR_WORD_BITS: usize = u64::BITS as usize;
 const MSIX_VECTOR_WORDS: usize = MSIX_VECTOR_COUNT.div_ceil(MSIX_VECTOR_WORD_BITS);
 
-#[percpu::def_percpu]
-static LOCAL_APIC_PTR: usize = 0;
+cpu_slot_cell! {
+    static LOCAL_APIC_PTR: usize = 0;
+}
 
 static IS_X2APIC: AtomicBool = AtomicBool::new(false);
 static XAPIC_BASE: AtomicU64 = AtomicU64::new(0);
@@ -281,8 +283,8 @@ pub fn irq_trigger_mode(irq: usize) -> Option<IoApicTriggerMode> {
 /// Panics if the current CPU has not installed its Local APIC handle
 /// (i.e. `init_primary`/`init_secondary` has not run on this CPU).
 pub fn with_local_apic<R>(f: impl FnOnce(&mut LocalApic) -> R) -> R {
-    let _irq_guard = IrqSave::new();
-    let lapic = local_apic_ptr();
+    let irq_guard = NoPreemptIrqSave::new();
+    let lapic = local_apic_ptr(&irq_guard);
     assert!(
         !lapic.is_null(),
         "local APIC is not initialized on this CPU"
@@ -459,17 +461,14 @@ fn build_local_apic() -> LocalApic {
 
 fn install_local_apic(lapic: LocalApic) {
     let ptr = Box::into_raw(Box::new(lapic)) as usize;
-    // SAFETY: x86_64 per-CPU slots are written through a single `gs` access, and
-    // each CPU installs its LAPIC handle exactly once during local APIC bring-up.
-    unsafe {
-        assert_eq!(LOCAL_APIC_PTR.read_current_raw(), 0);
-        LOCAL_APIC_PTR.write_current_raw(ptr);
-    }
+    let guard = NoPreemptIrqSave::new();
+    assert_eq!(LOCAL_APIC_PTR.read(&guard), 0);
+    LOCAL_APIC_PTR.write(&guard, ptr);
 }
 
-fn local_apic_ptr() -> *mut LocalApic {
-    // SAFETY: x86_64 per-CPU slot reads use a single `gs` access, so the value
-    // cannot be torn by preemption. The slot stores either 0 or a pointer
-    // previously produced by `Box::into_raw` in `install_local_apic`.
-    unsafe { LOCAL_APIC_PTR.read_current_raw() as *mut LocalApic }
+fn local_apic_ptr(pin: &impl CpuLocalGuard) -> *mut LocalApic {
+    // The guard keeps execution on the CPU whose slot contains either 0 or the
+    // pointer published by `install_local_apic`. The single-word load cannot
+    // tear, and the leaked pointee remains valid for the kernel's life.
+    LOCAL_APIC_PTR.read(pin) as *mut LocalApic
 }

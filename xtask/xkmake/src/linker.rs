@@ -55,6 +55,10 @@ fn render(arch: KernelArch, nr_cpus: usize, dwarf: bool) -> String {
         )
         .replace("%NR_CPUS%", &nr_cpus.to_string())
         .replace(
+            "%CPU_SLOT_AREA_ALIGN%",
+            &kaddr_layout::CPU_SLOT_AREA_ALIGN.to_string(),
+        )
+        .replace(
             "%BUILD_INFO_SIZE%",
             &kernel_image_metadata::BUILD_INFO_DESCRIPTOR_SIZE.to_string(),
         )
@@ -96,11 +100,13 @@ mod tests {
 
         assert!(content.starts_with("OUTPUT_ARCH(riscv)"));
         assert!(content.contains("BASE_ADDRESS = 0xffffffe000000000;"));
-        assert!(content.contains("ALIGN(64) * 8;"));
+        assert!(content.contains("ALIGN(_cpu_slot_template_size, 128);"));
+        assert!(content.contains("ALIGN(_cpu_slot_template_lma_end, 128);"));
         assert!(content.contains("debug_info : { . += SIZEOF(.debug_info); }"));
         assert!(!content.contains("%ARCH%"));
         assert!(!content.contains("%KIMAGE_VADDR%"));
         assert!(!content.contains("%NR_CPUS%"));
+        assert!(!content.contains("%CPU_SLOT_AREA_ALIGN%"));
         assert!(!content.contains("%BUILD_INFO_SIZE%"));
         assert!(!content.contains("%DWARF%"));
     }

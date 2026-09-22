@@ -28,8 +28,8 @@ vdev-core.workspace = true
 vdev-test-mmio.workspace = true
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-percpu.workspace = true
+kcpu_slot.workspace = true
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 aarch64-cpu.workspace = true
-percpu.workspace = true
+kcpu_slot.workspace = true

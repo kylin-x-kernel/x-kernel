@@ -27,29 +27,32 @@ It accepts no user input.
   CPU; callbacks and NMIs never borrow it. The slot retains storage forever.
   Its unsafe `Timer::start` call follows local scheduler/IRQ setup, with an
   IRQ-compatible handler. Callback-scoped rearm retains the running CPU owner.
-- `SoftlockupTimer::on_expiration` reads the previous report
-  timestamp through `LAST_SOFTLOCKUP_REPORT.current_ref_raw()` and updates it through
-  `current_ref_mut_raw()`.
-  Invariant: The callback runs with IRQs disabled and cannot migrate, so per-CPU raw
-  pointer access cannot race with migration. The same non-migrating callback
-  exclusively performs updates.
+- The timer callback in `init_softlockup_detection` reads and writes
+  `LAST_SOFTLOCKUP_REPORT` through the guard-based per-CPU `read`/`write`
+  accessors under `NoPreemptIrqSave`.
+  Invariant: This plain `Option<MonotonicInstant>` is only read and written by
+  the current CPU's timer callback, and the accessors never return a reference.
   Safe entry point: The timer callback registered by `init_softlockup_detection`.
 
 ### `lockup_detection.rs`
 
-- `touch_softlockup`, `timer_tick`, `check_softlockup`, and
-  `register_hardlockup_detection_task` access `LOCKUP_DETECTION.current_ref_{mut_}raw()`.
-  Invariant: Watchdog tasks are pinned to a CPU with preemption disabled;
-  timer callbacks run with IRQs disabled. Neither path can migrate.
+- `current_lockup_detection` constructs a kernel-lifetime shared reference from
+  the current CPU's slot.
+  Invariant: Callers are pinned watchdog tasks, timer IRQs, or NMIs; the slot is
+  initialized and cannot migrate. `LockupDetection` exposes only shared
+  operations over atomic fields, so these contexts may access it concurrently.
   Safe entry points: The callbacks and pinned tasks registered by `init_softlockup_detection`.
 
 ### `watchdog_task.rs`
 
-- `register_watchdog_task` and `check_watchdog_tasks` access
-  `WATCHDOG_TASK_QUEUE.current_ref_mut_raw()`.
-  Invariant: Registration occurs only during per-CPU initialization, when migration
-  is impossible. Checks run in NMI context and cannot migrate.
-  Safe entry points: `init_nmi_watchdog` and `register_watchdog_task`.
+- `current_task_list` constructs a shared reference from the current CPU's slot.
+  The caller must be pinned to an initialized CPU; the inner
+  `UnsafeCell<Vec<_>>` is reachable only through the registration/publication
+  protocol.
+- `WatchdogTaskList: Sync`: Per-CPU initialization exclusively mutates the list
+  before publication; the `Release` publish permanently closes the mutation
+  phase, and NMIs form a shared slice only after an `Acquire` observes it. Any
+  registration after publication panics.
 
 ## Memory Safety Invariants
 
@@ -61,7 +64,11 @@ It accepts no user input.
 ## Thread Safety
 
 - NMIs and timer interrupts may concurrently access the same CPU's `LockupDetection`;
-  all fields are atomic.
+  all entry points hold only shared references and all fields are atomic, with
+  the heartbeat using `Release` writes and `Acquire` reads.
+- The watchdog task list is published with a `Release` store before NMIs are
+  armed; after an NMI's `Acquire` succeeds the list is permanently read-only and
+  never overlaps the `Vec` mutation of the registration phase.
 - Global rendezvous atomics are visible across CPUs.
   `try_trigger` uses `compare_exchange` to select a unique initiating CPU.
 - `ARRIVED_BITMAP` bits are written by CPU ID.

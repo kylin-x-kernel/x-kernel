@@ -33,23 +33,23 @@
 
 ## 背景
 
-X-Kernel 当前直接依赖 `percpu 0.4`。它的 `.percpu` 模板、64 字节对齐、架构寄存器和基本整数 raw access 都很简洁，适合热路径，但访问安全主要依赖调用者正确使用 `read_current_raw()`、`current_ref_mut_raw()` 和 IRQ/preemption guard。
+X-Kernel 此前直接依赖 `percpu 0.4`。它的 `.percpu` 模板、64 字节对齐、架构寄存器和基本整数 raw access 都很简洁，适合热路径，但访问安全主要依赖调用者正确使用 `read_current_raw()`、`current_ref_mut_raw()` 和 IRQ/preemption guard。迁移现已完成：crates.io 的 `percpu` crate、`.percpu` 区域与 `non-zero-vma` feature 均已删除。
 
 Asterinas 的 CPU-local 实现提供了值得吸收的架构边界：
 
 - `CpuSlot<T, S>` 与仅当前 CPU 的 `CpuSlotCell<T>` 分离；
 - 静态对象与动态对象分离；
-- `PinCurrentCpu` 显式表示 CPU 不迁移；
+- `CpuPin` 显式表示 CPU 不迁移；
 - 动态对象可以对每个 CPU 独立执行初始化和析构；
 - `!Copy`、`!Clone`、`!Send` 防止 storage handle 被错误复制或跨任务发送；
 - x86 等架构保留单指令 `GS:[offset]` fast path。
 
 `kcpu_slot` 采用两者的组合：保留 X-Kernel 的低层 section/寄存器模型，吸收 Asterinas 的类型和生命周期模型。
 
-## 当前 X-Kernel 的 percpu 使用现状
+## 迁移前的 percpu 使用现状（历史背景）
 
-当前工作区直接依赖 crates.io `percpu 0.4`，在多个架构和子系统中使用
-`#[percpu::def_percpu]`。当前使用可以分为以下几类：
+迁移前工作区直接依赖 crates.io `percpu 0.4`，在多个架构和子系统中使用
+`#[percpu::def_percpu]`。当时的使用可以分为以下几类：
 
 | 使用类别 | 代表位置 | 典型数据 | 当前访问方式 |
 |---|---|---|---|
@@ -130,14 +130,14 @@ percpu area 初始化 → 当前 CPU base 寄存器 → CPU ID/BSP 状态 → tr
 
 | 现有问题 | `kcpu_slot` 解决方案 |
 |---|---|
-| raw API 依赖调用者记忆安全条件 | 用 `CpuSlot<T>`、`CpuSlotCell<T>` 和 `PinCurrentCpu` 区分访问语义 |
-| 迁移与 IRQ 重入语义混在一起 | `PinCurrentCpu` 只表达 CPU 固定，IRQ 重入继续由上层现有 IRQ guard 负责 |
+| raw API 依赖调用者记忆安全条件 | 用 `CpuSlot<T>`、`CpuSlotCell<T>` 和 `CpuPin` 区分访问语义 |
+| 迁移与 IRQ 重入语义混在一起 | `CpuPin` 只表达 CPU 固定，IRQ 重入继续由上层现有 IRQ guard 负责 |
 | 静态 bitwise copy 约束隐含 | 静态 slot 明确要求复制安全的初始状态；debug 下追踪模板是否已被提前使用 |
 | 没有动态对象生命周期 | 提供 `DynamicCpuSlot<T>` 与 `CpuSlotChunk`，按 CPU 独立初始化、失败回滚和析构 |
 | 远端访问容易数据竞争 | 默认只开放 `T: Sync` 的远端共享读取；远端写入改由原子、IPI 或调用方锁协议完成 |
 | 初始化流程散落在平台和上游依赖 | `kcpu_slot` 只提供当前 CPU area 初始化；BSP/AP 生命周期和 online 状态由平台唯一管理 |
 | fast path 与类型安全难以兼顾 | `cpu_slot!`/`cpu_slot_cell!` 生成隐藏 `.cpu_slot.template` 模板、正常地址 descriptor 和 typed offset；不依赖 `def_percpu` |
-| 抢占 guard 后端重复 | `PinCurrentCpu` 只定义 CPU 固定契约，具体由 `kspin`/调度器提供，不再让业务 crate 直接依赖另一套 percpu guard 实现 |
+| 抢占 guard 后端重复 | `CpuPin` 只定义 CPU 固定契约，具体由 `kspin`/调度器提供，不再让业务 crate 直接依赖另一套 percpu guard 实现 |
 
 ## crate 放置位置
 
@@ -157,7 +157,7 @@ percpu area 初始化 → 当前 CPU base 寄存器 → CPU ID/BSP 状态 → tr
 arch/kcpu_slot
     ├── arch-specific base-register code
     ├── linker/boot contract
-    └── PinCurrentCpu trait
+    └── CpuPin trait
           ▲
           ├── arch/khal
           ├── task/ktask + task/kspin
@@ -180,7 +180,7 @@ arch/kcpu_slot/
 │   ├── static_local.rs     # 静态 CPU-local storage
 │   ├── dynamic_local.rs    # 动态 chunk 和对象分配
 │   ├── cell.rs             # 当前 CPU cell
-│   ├── guard.rs            # PinCurrentCpu / access guard
+│   ├── guard.rs            # CpuPin / access guard
 │   ├── arch/
 │   │   ├── mod.rs
 │   │   ├── x86_64.rs
@@ -200,7 +200,7 @@ arch/kcpu_slot/
 - IRQ 控制器操作；
 - 通用内存分配器策略。
 
-这些能力通过 `KcpuSlotPlatform` 和 `PinCurrentCpu` 接口注入。
+这些能力通过 `KcpuSlotPlatform` 和 `CpuPin` 接口注入。
 
 ## 架构
 
@@ -226,8 +226,8 @@ cpu_slot! {
 
 #### `CpuSlotCell<T>`
 
-由 `cpu_slot_cell!` 创建，只允许访问当前 CPU 的实例；其类型必须实现 sealed 的
-`StaticSlotValue`：
+由 `cpu_slot_cell!` 创建，只允许访问当前 CPU 的实例；其类型必须实现 `unsafe trait`
+`StaticSlotValue`，实现者需自行保证模板值可按位复制到各 CPU area：
 
 ```rust
 cpu_slot_cell! {
@@ -258,7 +258,7 @@ let counters = chunk.alloc(|cpu| CpuCounter::new(cpu))?;
 
 ```rust
 unsafe trait CpuSlotStorage<T: 'static> {
-    fn ptr_current(&self, pin: &impl PinCurrentCpu) -> *mut T;
+    fn ptr_current(&self, pin: &impl CpuPin) -> *mut T;
     fn ptr_cpu(&self, cpu: CpuId) -> *mut T;
     unsafe fn drop_cpu(&mut self, cpu: CpuId);
 }
@@ -274,7 +274,7 @@ unsafe trait CpuSlotStorage<T: 'static> {
 ### CPU 固定接口
 
 ```rust
-pub unsafe trait PinCurrentCpu {
+pub unsafe trait CpuPin {
     fn current_cpu(&self) -> CpuId;
 }
 ```
@@ -285,17 +285,17 @@ pub unsafe trait PinCurrentCpu {
 - `kspin::IrqSave`；
 - trap/IRQ 框架提供的不可迁移 guard。
 
-`PinCurrentCpu` 只表达“不会迁移”，不自动表达“不会被 IRQ 重入”。需要引用非
+`CpuPin` 只表达“不会迁移”，不自动表达“不会被 IRQ 重入”。需要引用非
 `Sync` 对象或可被 IRQ 访问的对象时，调用方必须使用上层已有的 IRQ guard。
 
 建议提供两个入口：
 
 ```rust
-pub unsafe fn get_with<'a>(&'a self, pin: &'a PinCurrentCpu)
+pub unsafe fn get_with<'a>(&'a self, pin: &'a CpuPin)
     -> &'a T;
 ```
 
-其中 `get_with_irq` 的 guard 同时实现 `PinCurrentCpu`，从而把 IRQ 重入约束编码进类型。
+其中 `get_with_irq` 的 guard 同时实现 `CpuPin`，从而把 IRQ 重入约束编码进类型。
 
 ## 调用约束 / 执行上下文
 
@@ -312,7 +312,7 @@ pub unsafe fn get_with<'a>(&'a self, pin: &'a PinCurrentCpu)
 
 - `get_with` 不阻塞、不睡眠；可在调度器、IRQ-disabled 区间和普通内核线程中使用。
 - 传出的引用生命周期不能超过 pin guard。
-- `CpuSlotCell` 的连续操作若要求读写同一 CPU 实例，必须持有 `PinCurrentCpu`；若可能被 IRQ 访问，必须关本地 IRQ。
+- `CpuSlotCell` 的连续操作若要求读写同一 CPU 实例，必须持有 `CpuPin`；若可能被 IRQ 访问，必须关本地 IRQ。
 - `get_on_cpu` 只能返回 `T: Sync` 的共享引用；远端写入不提供无条件安全 API，必须由调用方提供同步协议。
 
 ### 禁止场景
@@ -358,8 +358,10 @@ X86_64、AArch64、RISC-V、LoongArch 优先使用架构特定指令生成 offse
 
 ### 静态对象复制
 
-1. 链接脚本将模板 LMA 与 CPU area 分开，并按模板实际大小的 64 字节对齐值设置
-   area stride；
+1. 链接脚本将模板 LMA 与 CPU area 分开，并按模板实际大小向上对齐到
+   `CPU_SLOT_AREA_ALIGN`（`kaddr_layout` 提供，覆盖受支持平台最大数据 cache
+   line）设置 area stride，同时按同一值对齐 area 起始地址，保证相邻 CPU area
+   不共享 cache line；
 2. BSP/AP 启动上下文调用 `initialize_cpu`，复制隐藏模板并安装当前 CPU base；
 3. `kcpu_slot` 不维护 CPU count、online bitmap 或 BSP/AP 状态机；
 4. AP 完成平台自己的 CPU ID 初始化后，再开放 IRQ。
@@ -380,7 +382,7 @@ X86_64、AArch64、RISC-V、LoongArch 优先使用架构特定指令生成 offse
 ### 本 CPU
 
 CPU-local 的主要收益是避免跨 CPU 共享。静态值的当前 CPU 可变访问通过
-`PinCurrentCpu` 保证不迁移；IRQ 重入由上层现有 IRQ guard 管理。
+`CpuPin` 保证不迁移；IRQ 重入由上层现有 IRQ guard 管理。
 
 ### 远端 CPU
 
@@ -413,7 +415,7 @@ CPU-local 的主要收益是避免跨 CPU 共享。静态值的当前 CPU 可变
 2. **不保留 `def_percpu` 兼容层**：新调用点只能使用 `cpu_slot!`/`cpu_slot_cell!`。迁移作为一次架构切换提交完成，目标镜像不同时启用旧 `.percpu` 与 `.cpu_slot.template`。
 3. **引入 typed descriptor**：公开 descriptor 不携带 VMA 0 存储，模板和访问路径分离。
 4. **拆分 `CpuSlot` 与 `CpuSlotCell`**：让“可远端共享引用”和“当前 CPU 内部可变状态”具有不同 API。
-5. **统一 `PinCurrentCpu`**：表达 CPU 固定；抢占和 IRQ 的具体 guard 由平台/调度器提供。
+5. **统一 `CpuPin`**：表达 CPU 固定；抢占和 IRQ 的具体 guard 由平台/调度器提供。
 6. **动态对象按 CPU 独立构造**：不对包含堆指针、锁或引用计数的对象执行无条件字节复制。
 7. **远端写入默认关闭**：远端写入极易造成隐蔽数据竞争，优先通过原子、IPI 或锁完成。
 
@@ -428,37 +430,58 @@ CPU-local 的主要收益是避免跨 CPU 共享。静态值的当前 CPU 可变
 
 ## 安全访问 API 演进计划
 
-当前版本已经通过 `PinCurrentCpu` 表达“执行上下文固定在某个逻辑 CPU”，但 slot
-访问仍保留 `unsafe`，以便在 guard 适配尚未完成前验证底层布局和指针不变量。后续
-不应让所有调用点长期手写 `unsafe`，计划按以下两层契约演进：
+两层契约已落地第一阶段：`CpuLocalGuard` capability trait 与 guard 约束的安全访问器
+均已实现，普通共享与按值访问已提供 guard 约束的安全方法；架构 IRQ、PMU、timer、
+APIC、VMX、scheduler 与 CPU 身份递归链等路径仍保留命名明确的 unsafe raw 边界。
 
-1. **CPU 固定契约**：由 `kspin::NoPreempt`、`NoPreemptIrqSave` 以及 IRQ/trap 或
-   调度器提供的真实上下文实现 `unsafe PinCurrentCpu`。该 trait 只保证 CPU 身份和
-   base 对应关系稳定，不单独证明可以安全持有 slot 引用。
-2. **本地访问能力**：在 `kcpu_slot` 中增加更强的 `CpuLocalGuard`（名称可调整）
-   capability trait，要求实现者同时保证任务不会迁移、访问期间不会发生会触碰同一
-   slot 的本地 IRQ 重入。首版只为 `NoPreemptIrqSave` 实现该能力，不把
-   `NoPreempt` 或 `IrqSave` 自动视为同等级 guard。
-3. **安全访问器**：为 `CpuSlot`、`CpuSlotCell` 和 `DynamicCpuSlot` 提供接收
-   `&impl CpuLocalGuard` 的安全 `get`/`get_mut`/`read`/`write`；返回引用的生命周期
-   受 guard 约束。`CpuSlotCell::read`/`write` 仍只提供普通内存读写，不承诺原子性。
-4. **远端读取**：继续只对 `T: Sync` 提供安全远端读取；远端写入由原子、IPI 或上层
-   锁协议实现，不增加无条件的通用写接口。
-5. **底层逃生口**：保留初始化、自定义 storage 和特殊架构路径所需的
-   `unsafe` `*_unchecked` API，并把安全不变量集中在这些少数边界，而不是扩散到
-   普通业务调用点。
+1. **CPU 固定契约（已实现）**：`kspin::IrqSave`、`NoPreemptIrqSave`（以及启用
+   `preempt` feature 的 `NoPreempt`）实现 `unsafe CpuPin`；guard 通过
+   `kspin::CurrentCpuIf`（由 `kplat` 提供）获取当前逻辑 CPU。IRQ/trap 上下文与
+   调度器 pinned context 后续补齐。该 trait 只保证 CPU 身份和 base 对应关系稳定，
+   不单独证明可以安全持有 slot 引用。
+2. **本地访问能力（已实现）**：`kcpu_slot::CpuLocalGuard` 要求实现者同时保证任务
+   不会迁移、访问期间不会发生会触碰同一 slot 的本地 IRQ 重入。当前唯一实现是
+   `kspin::NoPreemptIrqSave`，不把 `NoPreempt` 或 `IrqSave` 自动视为同等级 guard。
+3. **安全访问器（已实现）**：安全面只有 `CpuSlot::get`、`DynamicCpuSlot::get`
+   和按值的 `CpuSlotCell::read`/`write`，它们接收 `CpuLocalGuard`，返回引用的
+   生命周期受 guard 约束。通用可变引用访问只保留 `unsafe` 的
+   `get_mut_unchecked`（`CpuPin` 约束）：原设计的 `CpuSlot::get_mut`、
+   `CpuSlotCell::get_mut` 和 `DynamicCpuSlot::get_mut` 因 `NoPreemptIrqSave`
+   可嵌套、不同 guard 之间仍能对同一 slot 制造重叠 `&mut T` 而被删除。
+   运行时借用跟踪（Asterinas 式 per-slot 计数）因与单指令 fast path 冲突而暂缓。
+   `CpuSlotCell::read`/`write` 仍只提供普通内存读写，不承诺原子性。
+4. **远端读取（维持现状）**：只对 `T: Sync` 提供安全远端读取；远端写入由原子、
+   IPI 或上层锁协议实现，不增加无条件的通用写接口。
+5. **底层逃生口（已保留）**：初始化、自定义 storage 和特殊架构路径所需的
+   `unsafe` `*_unchecked` API 保留更宽的 `CpuPin` 约束，安全不变量集中在
+   这些少数边界，而不是扩散到普通业务调用点。
 
 该演进不改变最终镜像只保留一套 CPU-local 机制的目标；在调用点迁移完成前，
 `kspin` guard 适配和安全访问器可以先独立验证，但不引入旧 `percpu` 的兼容层。
 
 ## 与现有 X-Kernel 的迁移策略
 
-1. 第一阶段，完成新 crate 的 `.cpu_slot.template` 布局、架构寄存器和 typed API。
-2. 第二阶段，将 `khal::percpu::current_task_ptr`、CPU ID、BSP 标记迁移到 `CpuSlotCell`。
-3. 第三阶段，将调度器 run queue、timer runtime、softirq 状态迁移到 `CpuSlot<T>`，为访问点补齐 `PinCurrentCpu`。
-4. 第四阶段，为统计计数器、可选 cache 和模块生命周期对象引入 `DynamicCpuSlot<T>`。
-5. 迁移以一次架构切换完成：删除旧 `percpu` 依赖、`.percpu` 区域和旧 base owner，
-   最终镜像只保留 `.cpu_slot.template` 和 `kcpu_slot`。
+迁移约定：**中间阶段只要求编译通过，运行验收只在迁移全部完成后进行一次**。
+因此不做任何"中间态可运行"的桥接——调用点直接迁到最终形态（静态
+`cpu_slot!`/`cpu_slot_cell!`，寄存器寻址），从寄存器翻转提交起镜像不可启动，
+直到最后的清理提交恢复。
+
+迁移已完成：
+
+1. 新 crate 的 `.cpu_slot.template` 布局、架构寄存器、typed API 与 guard 约束的
+   安全访问器（`cpu_slot!`/`cpu_slot_cell!`、`CpuPin`/`CpuLocalGuard`）。
+2. 迁移期共存改造曾把 `.percpu` 挪到非零 VMA 并启用 percpu 的 `non-zero-vma`
+   feature，使 `.cpu_slot.template` 独占 VMA 0；该共存方案已随迁移结束删除。
+3. 寄存器翻转与平台标识迁移：`boot_cpu_init`/`ap_cpu_init` 改调 `kcpu_slot`
+   初始化（base = `_cpu_slot_area_start + cpu * stride`，链接脚本预留区，无需堆），
+   `KPCB_ID`/`KPCB_BSP`/`current_task_ptr` 迁为 `cpu_slot_cell!`，
+   `CurrentCpuIf` 改读新 cell。
+4. 逐 crate 迁移其余 per-CPU 调用点（ktask run queue/timers、kirq softirq/BH
+   状态、kcpu GDT/TSS、kalloc、kvmm、drivers 等）；`Arc`/`Weak` 等 `!Copy` 载荷
+   按 raw handle + 手工引用计数迁移，运行期对象用 `DynamicCpuSlot<T>`。
+5. 清理提交删除了全部 `percpu` 依赖、`.percpu` 区域与 `non-zero-vma` feature；
+   目标镜像只保留 `.cpu_slot.template` 和 `kcpu_slot`。整机启动验收
+   （`make run`、`make unittest`）在清理完成后执行。
 
 ## 评审与验证要求
 
@@ -471,4 +494,4 @@ CPU-local 的主要收益是避免跨 CPU 共享。静态值的当前 CPU 可变
 - 非 `Sync` 类型只能通过 IRQ guard 访问的编译测试；
 - 无效 CPU ID、未初始化 base、未对齐 base 和重复释放测试；
 - x86_64、AArch64、RISC-V64、LoongArch64 的链接/启动 smoke test；
-- 最终镜像链接测试，确认 `PinCurrentCpu` provider、架构 base 和 section 符号都存在。
+- 最终镜像链接测试，确认 `CpuPin` provider、架构 base 和 section 符号都存在。

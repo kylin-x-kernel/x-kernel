@@ -23,7 +23,7 @@ impl RunQueue {
     /// dest-then-src: that deadlocks against remote wake. Never steals
     /// `on_cpu` tasks (yield/preempt are already in the ready tree). After
     /// enqueue, drop the waiter if its cpumask no longer contains this CPU.
-    pub(super) fn idle_pull(&mut self) -> bool {
+    pub(super) fn idle_pull(&self) -> bool {
         let dest = self.cpu_id.as_usize();
         let nr_cpus = kcpu_id_map::nr_cpus();
         let mut tried = KCpuMask::new();
@@ -55,7 +55,7 @@ impl RunQueue {
     /// `cpu_id` still at src. `set_task_affinity` in that window is mask-only;
     /// recheck after `enqueue_task` so this CPU does not pick a task the new
     /// mask forbids.
-    fn commit_idle_pull(&mut self, stolen: KtaskRef) -> bool {
+    fn commit_idle_pull(&self, stolen: KtaskRef) -> bool {
         let dest = self.cpu_id.as_usize();
         self.enqueue_task(stolen.clone());
         if stolen.cpumask().get(dest) {
@@ -71,12 +71,12 @@ impl RunQueue {
 
     /// Dequeue a stealable waiter from this (source) RQ. Caller must not hold
     /// the destination scheduler lock.
-    fn steal_ready_for_idle_pull(&mut self, dest_cpu: LogicalCpuId) -> Option<KtaskRef> {
+    fn steal_ready_for_idle_pull(&self, dest_cpu: LogicalCpuId) -> Option<KtaskRef> {
         let dest_idx = dest_cpu.as_usize();
         let now_ns = khal::time::monotonic_time_nanos();
         let stolen = {
             let mut sched = self.scheduler.lock();
-            let elapsed = Self::advance_account_epoch(&mut self.last_accounted_ns, now_ns);
+            let elapsed = Self::advance_account_epoch(&self.last_accounted_ns, now_ns);
             #[cfg(feature = "sched_eevdf")]
             sched.account_curr_elapsed(elapsed);
             #[cfg(not(feature = "sched_eevdf"))]

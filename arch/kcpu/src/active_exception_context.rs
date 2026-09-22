@@ -20,28 +20,30 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use kcpu_slot::cpu_slot;
+
 use crate::ExceptionContext;
 
-/// Stores the pointer to the currently active trapframe.
-///
-/// 0 means no active trapframe.
-#[percpu::def_percpu]
-static ACTIVE_EXCEPTION_CONTEXT_PTR: AtomicUsize = AtomicUsize::new(0);
+cpu_slot! {
+    /// Stores the pointer to the currently active trapframe.
+    ///
+    /// 0 means no active trapframe.
+    static ACTIVE_EXCEPTION_CONTEXT_PTR: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+}
 
 /// Returns whether the current CPU is executing inside an exception context.
 #[inline]
 pub fn in_exception_context() -> bool {
-    // SAFETY: `current_ref_raw()` returns a raw pointer to this CPU's per-CPU
+    // SAFETY: the slot reference names this CPU's per-CPU
     // data area. The pointer is normally written by this CPU's exception guard
     // while IRQs are off. A delayed guard drop may restore its original slot
     // after the task migrated, but that path uses CAS and does not publish data
     // to other CPUs, so Relaxed ordering is sufficient for this diagnostic state.
-    unsafe {
-        ACTIVE_EXCEPTION_CONTEXT_PTR
-            .current_ref_raw()
-            .load(Ordering::Relaxed)
-            != 0
-    }
+    ACTIVE_EXCEPTION_CONTEXT_PTR
+        .current_shared()
+        .load(Ordering::Relaxed)
+        != 0
 }
 
 /// Returns a copy of the currently active trapframe, if any.
@@ -51,15 +53,13 @@ pub fn in_exception_context() -> bool {
 /// accidentally retain a borrowed reference after the trap handler unwinds.
 #[inline]
 pub fn active_exception_context() -> Option<ExceptionContext> {
-    // SAFETY: `current_ref_raw()` returns a raw pointer to this CPU's per-CPU
+    // SAFETY: the slot reference names this CPU's per-CPU
     // data area. The `load` is a best-effort atomic read; Relaxed ordering is
     // sufficient because callers only need a best-effort diagnostic snapshot.
     // Delayed restoration after migration is guarded by compare_exchange.
-    let ptr = unsafe {
-        ACTIVE_EXCEPTION_CONTEXT_PTR
-            .current_ref_raw()
-            .load(Ordering::Relaxed)
-    };
+    let ptr = ACTIVE_EXCEPTION_CONTEXT_PTR
+        .current_shared()
+        .load(Ordering::Relaxed);
 
     if ptr == 0 {
         None
@@ -113,12 +113,12 @@ impl ExceptionContextGuard {
     pub fn new(tf: &ExceptionContext) -> Self {
         let ptr = tf as *const ExceptionContext as usize;
 
-        // SAFETY: `current_ref_raw()` points to this CPU's per-CPU data.
+        // SAFETY: the slot reference names this CPU's per-CPU data.
         // The swap is safe because: (1) the slot address is captured before
         // any trap backend can block or migrate; (2) trap handlers run with
         // IRQs off on entry, so no concurrent same-CPU trap install races this
         // operation; (3) `ptr` is derived from a live `&ExceptionContext`.
-        let slot = unsafe { ACTIVE_EXCEPTION_CONTEXT_PTR.current_ref_raw() };
+        let slot = ACTIVE_EXCEPTION_CONTEXT_PTR.current_shared();
         let prev = slot.swap(ptr, Ordering::Relaxed);
 
         Self { slot, ptr, prev }
@@ -129,10 +129,10 @@ impl ExceptionContextGuard {
 /// restore the same context when this task is scheduled again.
 #[inline]
 pub fn suspend_active_exception_context() -> SuspendedExceptionContext {
-    // SAFETY: `current_ref_raw()` points to this CPU's per-CPU data. Scheduling
+    // SAFETY: the slot reference names this CPU's per-CPU data. Scheduling
     // owns the current CPU here and is about to switch away from the task whose
     // trap stack owns the pointer.
-    let slot = unsafe { ACTIVE_EXCEPTION_CONTEXT_PTR.current_ref_raw() };
+    let slot = ACTIVE_EXCEPTION_CONTEXT_PTR.current_shared();
     SuspendedExceptionContext {
         ptr: slot.swap(0, Ordering::Relaxed),
     }
@@ -146,10 +146,10 @@ pub fn resume_active_exception_context(suspended: SuspendedExceptionContext) {
         return;
     }
 
-    // SAFETY: `current_ref_raw()` points to this CPU's per-CPU data. The token
+    // SAFETY: the slot reference names this CPU's per-CPU data. The token
     // is restored only after the owning task's saved context has resumed on this
     // CPU, so the pointer again describes this CPU's active trap stack.
-    let slot = unsafe { ACTIVE_EXCEPTION_CONTEXT_PTR.current_ref_raw() };
+    let slot = ACTIVE_EXCEPTION_CONTEXT_PTR.current_shared();
     slot.store(suspended.ptr, Ordering::Relaxed);
 }
 
@@ -161,11 +161,11 @@ impl ExceptionContextGuard {
         // pointer remains valid even if this task migrated before `Drop`.
         let original_slot = unsafe { &*self.slot };
 
-        // SAFETY: `current_ref_raw()` points to this CPU's per-CPU data. If the
+        // SAFETY: the slot reference names this CPU's per-CPU data. If the
         // task resumed on a different CPU, the scheduler restored `self.ptr` into
         // this current slot and the guard must unwind it to the previous nested
         // context there.
-        let current_slot = unsafe { ACTIVE_EXCEPTION_CONTEXT_PTR.current_ref_raw() };
+        let current_slot = ACTIVE_EXCEPTION_CONTEXT_PTR.current_shared();
 
         if core::ptr::eq(current_slot, self.slot) {
             if let Err(_observed) = original_slot.compare_exchange(

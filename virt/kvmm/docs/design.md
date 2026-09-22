@@ -106,7 +106,7 @@ Multi-CPU support requires careful separation of per-CPU and per-vCPU state:
 | Layer | AArch64 | RISC-V | x86_64 |
 |-------|---------|--------|--------|
 | Per-CPU hw init | none (VHE transparent) | `hext_init()` — set `hstatus.VTW` | `vmx_percpu_init()` — CR fixup + VMXON |
-| Per-CPU state | — | hstatus CSR | VMXON region (`#[percpu::def_percpu]`) |
+| Per-CPU state | — | hstatus CSR | VMXON region (`kcpu_slot` static slot) |
 | Per-vCPU state | `Aarch64Vcpu` (GPRs, sysregs, host_vbar, host_tpidr) | `RiscvVcpu` (GPRs, CSRs) | `X86Vcpu` (GPRs, VMCS page) |
 
 Key design decisions:
@@ -328,9 +328,9 @@ Refactored all three backends to eliminate global mutable state:
 
 - **AArch64**: Moved `host_vbar` / `host_tpidr` from `.bss` globals into per-vCPU
   `Aarch64Vcpu` struct. Assembly offsets updated accordingly.
-- **x86_64**: Replaced static VMXON BSS with `#[percpu::def_percpu]` dynamic allocation.
-  Moved VMCS from shared state into per-vCPU `X86Vcpu`. Added `VMXON_DONE` percpu flag
-  for idempotent init.
+- **x86_64**: Replaced static VMXON BSS with a `kcpu_slot` per-CPU slot holding a
+  dynamically allocated VMXON page. Moved VMCS from shared state into per-vCPU
+  `X86Vcpu`. Added a `VMXON_DONE` per-CPU flag for idempotent init.
 - **RISC-V**: Already per-hart (CSR-based), no changes needed.
 - **VmmArch trait**: Added `init_vcpu(vcpu, entry, sp) -> bool` unified interface.
 - **Selftest**: Added `vmm_selftest_smp()` — 2 vCPUs × N CPUs with CPU pinning.

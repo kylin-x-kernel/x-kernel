@@ -267,7 +267,7 @@ syscall 可被信号中断并需要重启。`orig_rax` 字段保存入口时的�
 ## 并发模型
 
 - **per-CPU 数据**：`ACTIVE_EXCEPTION_CONTEXT_PTR`、x86_64 的 `TSS` 和 `GDT`
-  均通过 `#[percpu::def_percpu]` 定义，每个 CPU 有独立副本，无需锁保护。
+  均通过 `kcpu_slot` 的 `cpu_slot_cell!` 定义，每个 CPU 有独立副本，无需锁保护。
 - **`ExceptionContextGuard`**：安装 trapframe 时保存原始 per-CPU slot 地址，
   并用 `AtomicUsize::swap` 记录前一个值。Drop 时不重新计算当前 CPU，而是对
   原始 slot 和当前 CPU slot 做 `compare_exchange(ptr, prev)` 恢复。这样即使

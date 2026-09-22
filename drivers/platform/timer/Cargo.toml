@@ -23,13 +23,14 @@ kcpu_id_map = { workspace = true }
 kiface = { workspace = true }
 klazy = { workspace = true }
 log = "0.4"
-percpu.workspace = true
+kcpu_slot.workspace = true
 unittest.workspace = true
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 aarch64-cpu.workspace = true
 of = { workspace = true }
 int_ratio = { workspace = true }
+kspin.workspace = true
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 kernel_boot = { workspace = true }

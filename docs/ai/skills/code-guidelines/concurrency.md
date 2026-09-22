@@ -42,6 +42,12 @@ atomics, interrupts, wait/wake paths, or shared mutable state.
 - if a path may reach `block_on`, `wait`, `sleep`,
   event listeners, scheduler operations, or code that can return
   `WouldBlock` and then wait, the path must not hold a spinlock;
+  `ktask` enforces this at runtime: the sleep entry points
+  (`sleep`, `sleep_until`, `interruptible_sleep_until`,
+  `wait_for_poll_event_until`) panic when local IRQs are disabled
+  or a no-preempt section is held, in addition to interrupt-like
+  contexts, because a switch there could migrate the task while the
+  masked section still assumes it is pinned;
 - if driver callbacks are wrapped by a class or runtime spinlock,
   keep that lock scope tightly around the actual driver register
   or queue access, then drop it before touching sleepable subsystem locks;

@@ -16,7 +16,7 @@ snapshot = ["dep:backtrace"]
 ipi = ["dep:kipi", "kipi/reschedule", "kipi/timer-reprogram"]
 watchdog = ["snapshot"]
 tls = ["khal/tls"]
-preempt = ["percpu/preempt", "kspin/preempt", "ktimer_core/preempt"]
+preempt = ["kspin/preempt", "ktimer_core/preempt"]
 smp = ["kspin/smp", "ipi", "ktimer_core/smp"]
 
 sched_fifo = []
@@ -27,7 +27,6 @@ sched_stat = []
 arm-timer-resume-fixup = []
 execution-accounting = []
 
-test = ["percpu/sp-naive"]
 
 [dependencies]
 kerrno.workspace = true
@@ -37,6 +36,7 @@ khal.workspace = true
 ktime_types.workspace = true
 kirq.workspace = true
 kcpu_id_map.workspace = true
+kcpu_slot.workspace = true
 backtrace = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }
 kpoll = { workspace = true }
@@ -51,7 +51,6 @@ kspin = { workspace = true }
 lazyinit = { workspace = true }
 log = { workspace = true }
 memaddr = { workspace = true }
-percpu = { workspace = true }
 kbuild_config = { workspace = true }
 karch = { workspace = true }
 klazy = { workspace = true }

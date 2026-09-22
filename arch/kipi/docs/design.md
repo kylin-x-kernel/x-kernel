@@ -266,9 +266,13 @@ orchestrator 全程持有 `NoPreempt` 守卫钉在本 CPU 上（见设计决策�
 ### 通用 IPI 队列
 
 - 队列是 **每 CPU 独占消费、远程生产** 模型。
-- 远程 CPU 通过 `remote_ref_raw(...).lock()` 入队。
+- 远程 CPU 在 `IPI_QUEUE_READY` 的 Acquire 读取后取得共享的
+  `LazyInit<SpinNoIrq<IpiEventQueue>>` 引用，再通过内层锁入队；不会为了加锁
+  先构造指向远端槽位的 `&mut`。
 - 当前 CPU 只在本地 IPI handler 中 `pop_one()`。
 - 队列锁使用 `SpinNoIrq`，因为会被 IPI handler 触达。
+- 目标 CPU 完成本地队列初始化后以 Release 写入 `IPI_QUEUE_READY`；发送端的
+  Acquire 既拒绝未就绪目标，也发布 `LazyInit` 中的队列对象。
 
 ### TLB request slot
 

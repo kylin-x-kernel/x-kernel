@@ -34,10 +34,8 @@ mod tests;
 
 use alloc::collections::VecDeque;
 #[cfg(feature = "smp")]
-use alloc::sync::Weak;
-use core::ptr::NonNull;
-#[cfg(feature = "smp")]
 use core::sync::atomic::AtomicUsize;
+use core::{ptr::NonNull, sync::atomic::AtomicU64};
 
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use khal::percpu::this_cpu_id;
@@ -64,14 +62,39 @@ use crate::{
     task::{CurrentTask, TaskState},
 };
 
-percpu_static! {
-    RUN_QUEUE: LazyInit<RunQueue> = LazyInit::new(),
-    EXITED_TASKS: VecDeque<KtaskRef> = VecDeque::new(),
-    WAIT_FOR_EXIT: LazyInit<PollSet> = LazyInit::new(),
-    IDLE_TASK: LazyInit<KtaskRef> = LazyInit::new(),
-    /// Stores the weak reference to the previous task that is running on this CPU.
-    #[cfg(feature = "smp")]
-    PREV_TASK: Weak<crate::KTask> = Weak::new(),
+// Scheduler payloads use allocation-free template markers (lazy-uninitialized,
+// empty deque, empty weak), so `StaticSlotValue`'s container blanket impls
+// carry the template-copy proof; drops happen only through owner-code
+// assignment and removal (a `PREV_TASK` overwrite drops the previous weak,
+// GC pops drop deque entries), never through storage teardown.
+// Macro-generated wrapper modules do not inherit the invocation site's
+// lexical scope, so payload types are anchored absolutely.
+// SAFETY: `LazyInit::new()` is an uninitialized marker with no owned payload.
+kcpu_slot::cpu_slot_cell_with_template! {
+    static RUN_QUEUE: lazyinit::LazyInit<crate::run_queue::RunQueue> =
+        unsafe { lazyinit::LazyInit::new() };
+}
+// SAFETY: both the lock and deque are empty and own no allocation.
+kcpu_slot::cpu_slot_cell_with_template! {
+    static EXITED_TASKS: kspin::SpinNoIrq<alloc::collections::vec_deque::VecDeque<crate::KtaskRef>> =
+        unsafe { kspin::SpinNoIrq::new(alloc::collections::vec_deque::VecDeque::new()) };
+}
+// SAFETY: `LazyInit::new()` is an uninitialized marker with no owned payload.
+kcpu_slot::cpu_slot_cell_with_template! {
+    static WAIT_FOR_EXIT: lazyinit::LazyInit<kpoll::PollSet> = unsafe { lazyinit::LazyInit::new() };
+}
+// SAFETY: `LazyInit::new()` is an uninitialized marker with no owned payload.
+kcpu_slot::cpu_slot_cell_with_template! {
+    static IDLE_TASK: lazyinit::LazyInit<crate::KtaskRef> =
+        unsafe { lazyinit::LazyInit::new() };
+}
+#[cfg(feature = "smp")]
+// SAFETY: the lock is unlocked and `Weak::new()` owns no allocation.
+kcpu_slot::cpu_slot_cell_with_template! {
+    /// Stores the weak reference to the previous task that is running on this
+    /// CPU.
+    static PREV_TASK: kspin::SpinNoIrq<alloc::sync::Weak<crate::KTask>> =
+        unsafe { kspin::SpinNoIrq::new(alloc::sync::Weak::new()) };
 }
 
 struct RunQueueRegistry([Once<usize>; kbuild_config::NR_CPUS]);
@@ -86,23 +109,23 @@ impl RunQueueRegistry {
     }
 
     #[cfg(feature = "smp")]
-    fn get(&self, index: usize) -> &'static mut RunQueue {
+    fn get(&self, index: usize) -> &'static RunQueue {
         self.try_get(index)
             .expect("run queue must be registered before cross-CPU lookup")
     }
 
     /// Returns the run queue for `index` if that CPU has finished scheduler bring-up.
     #[cfg(feature = "smp")]
-    fn try_get(&self, index: usize) -> Option<&'static mut RunQueue> {
+    fn try_get(&self, index: usize) -> Option<&'static RunQueue> {
         let run_queue = *self.0.get(index)?.get()?;
         // SAFETY:
         // - each slot is initialized exactly once during per-CPU scheduler
         //   bring-up before remote scheduling can reference it;
         // - the stored address points at a per-CPU `RunQueue` whose lifetime
         //   is the entire kernel run;
-        // - callers use the returned reference under the scheduler's existing
-        //   CPU ownership and IRQ/preemption exclusion rules.
-        Some(unsafe { &mut *(run_queue as *mut RunQueue) })
+        // - publication through `Once` keeps the pointee live for the kernel;
+        // - remote mutation is restricted to the RQ lock and atomic fields.
+        Some(unsafe { &*(run_queue as *const RunQueue) })
     }
 }
 
@@ -110,49 +133,72 @@ static RUN_QUEUES: RunQueueRegistry = RunQueueRegistry::new();
 
 #[inline(always)]
 fn current_run_queue_ptr() -> NonNull<RunQueue> {
-    // SAFETY: the current CPU's `RUN_QUEUE` percpu slot is initialized during
-    // scheduler bring-up before normal scheduling paths run. This helper takes
-    // the address of the initialized inner `RunQueue`, not the outer
-    // `LazyInit<RunQueue>` wrapper.
-    unsafe { NonNull::from(RUN_QUEUE.current_ref_raw().get_unchecked()) }
+    // The guard-free shared accessor is sound because `LazyInit<RunQueue>` is
+    // `Sync`; the inner run queue is published during bring-up before normal
+    // scheduling paths run.
+    let rq = RUN_QUEUE
+        .shared_current()
+        .get()
+        .expect("run queue must be initialized before registration");
+    NonNull::from(rq)
 }
 
 #[inline(always)]
-pub(crate) fn current_run_queue_mut() -> &'static mut RunQueue {
-    // SAFETY: the current CPU's `RUN_QUEUE` percpu slot is initialized before
-    // scheduling code runs, and callers obtain mutable access only within the
-    // scheduler's current-CPU ownership rules.
-    unsafe { RUN_QUEUE.current_ref_mut_raw().get_mut_unchecked() }
-}
-
-#[inline(always)]
-fn current_exited_tasks_mut() -> &'static mut VecDeque<KtaskRef> {
-    // SAFETY: callers use this only while operating on the current CPU's
-    // scheduler state, where the percpu exited-task list has been initialized.
-    unsafe { EXITED_TASKS.current_ref_mut_raw() }
+pub(crate) fn current_run_queue_ref() -> &'static RunQueue {
+    // The returned reference is shared; all mutable run-queue state is behind
+    // the scheduler lock or atomic fields.
+    RUN_QUEUE
+        .shared_current()
+        .get()
+        .expect("run queue must be initialized before use")
 }
 
 #[inline(always)]
 fn current_wait_for_exit() -> &'static PollSet {
-    // SAFETY: the current CPU's percpu `WAIT_FOR_EXIT` PollSet is initialized
-    // during scheduler bring-up before GC or exit paths use it.
-    unsafe { WAIT_FOR_EXIT.current_ref_raw().get_unchecked() }
+    WAIT_FOR_EXIT
+        .shared_current()
+        .get()
+        .expect("wait-for-exit must be initialized before GC/exit paths")
 }
 
 #[inline(always)]
 fn current_idle_task() -> &'static KtaskRef {
-    // SAFETY: the current CPU's idle-task percpu slot is initialized during
-    // scheduler bring-up before reschedule paths can use it.
-    unsafe { IDLE_TASK.current_ref_raw().get_unchecked() }
+    IDLE_TASK
+        .shared_current()
+        .get()
+        .expect("idle task must be initialized before reschedule")
 }
 
-#[cfg(feature = "smp")]
-#[inline(always)]
-fn current_prev_task_mut() -> &'static mut Weak<crate::KTask> {
-    // SAFETY: callers touch `PREV_TASK` only while scheduling on the current
-    // CPU with IRQs disabled, so the current CPU's percpu slot is initialized
-    // and accessed under the scheduler's ownership rules.
-    unsafe { PREV_TASK.current_ref_mut_raw() }
+#[inline]
+fn with_run_queue<R>(f: impl FnOnce(&mut LazyInit<RunQueue>) -> R) -> R {
+    // Bring-up runs on the owning CPU with IRQs off; the guard pins it while
+    // the lazy slot is published.
+    let guard = kspin::NoPreemptIrqSave::new();
+    // SAFETY: the guard pins the owning CPU and this is the only access while
+    // the lazy slot is being published.
+    f(unsafe { RUN_QUEUE.get_mut_unchecked(&guard) })
+}
+
+#[inline]
+fn with_idle_task<R>(f: impl FnOnce(&mut LazyInit<KtaskRef>) -> R) -> R {
+    // As `with_run_queue`.
+    let guard = kspin::NoPreemptIrqSave::new();
+    // SAFETY: as `with_run_queue`.
+    f(unsafe { IDLE_TASK.get_mut_unchecked(&guard) })
+}
+
+#[inline]
+fn with_wait_for_exit<R>(f: impl FnOnce(&mut LazyInit<PollSet>) -> R) -> R {
+    // As `with_run_queue`; the GC/exit paths run on the owning CPU.
+    let guard = kspin::NoPreemptIrqSave::new();
+    // SAFETY: as `with_run_queue`.
+    f(unsafe { WAIT_FOR_EXIT.get_mut_unchecked(&guard) })
+}
+
+#[inline]
+fn with_exited_tasks<R>(f: impl FnOnce(&mut VecDeque<KtaskRef>) -> R) -> R {
+    // `SpinNoIrq` is `Sync`; object exclusivity comes from its lock.
+    f(&mut EXITED_TASKS.shared_current().lock())
 }
 
 /// Returns a guard over the current CPU's run queue.
@@ -163,7 +209,7 @@ fn current_prev_task_mut() -> &'static mut Weak<crate::KTask> {
 pub(crate) fn current_run_queue<G: BaseGuard>() -> CurrentRunQueueRef<'static, G> {
     let irq_state = G::acquire();
     CurrentRunQueueRef {
-        inner: current_run_queue_mut(),
+        inner: current_run_queue_ref(),
         current_task: current(),
         state: irq_state,
         _phantom: core::marker::PhantomData,
@@ -176,7 +222,7 @@ pub(crate) fn current_run_queue<G: BaseGuard>() -> CurrentRunQueueRef<'static, G
 /// Panics if that CPU has not registered a run queue yet.
 #[cfg(feature = "smp")]
 #[inline]
-fn get_run_queue(index: usize) -> &'static mut RunQueue {
+fn get_run_queue(index: usize) -> &'static RunQueue {
     RUN_QUEUES.get(index)
 }
 pub(crate) struct RunQueue {
@@ -191,7 +237,7 @@ pub(crate) struct RunQueue {
     /// Always updated while holding [`Self::scheduler`]. Remote wakes and the
     /// local timer IRQ both take that lock, so they cannot double-count or drop
     /// a NOHZ gap before PLACE_LAG.
-    last_accounted_ns: u64,
+    last_accounted_ns: AtomicU64,
     /// Runnable-task snapshot (block discharges). Spawn idle-first looks at
     /// this: `nr_running == 0` outranks any busy CPU, including vs a sleeper's
     /// [`Self::nr_home`].
@@ -223,7 +269,7 @@ enum WakeEnqueue {
 /// If you want to perform scheduling operations on the current run queue,
 /// see [`CurrentRunQueueRef`].
 pub(crate) struct KRunQueueRef<'a, G: BaseGuard> {
-    inner: &'a mut RunQueue,
+    inner: &'a RunQueue,
     state: G::State,
     _phantom: core::marker::PhantomData<G>,
 }
@@ -233,7 +279,7 @@ pub(crate) struct KRunQueueRef<'a, G: BaseGuard> {
 /// [`CurrentRunQueueRef`] is used to get a reference to the run queue on current CPU,
 /// in which scheduling operations can be performed.
 pub(crate) struct CurrentRunQueueRef<'a, G: BaseGuard> {
-    inner: &'a mut RunQueue,
+    inner: &'a RunQueue,
     current_task: CurrentTask,
     state: G::State,
     _phantom: core::marker::PhantomData<G>,
@@ -252,7 +298,7 @@ pub(crate) fn init() {
     idle_task.set_cpumask(KCpuMask::one_shot_logical(cpu_id));
     #[cfg(feature = "smp")]
     RunQueue::set_owner_cpu(&idle_task, cpu_id);
-    IDLE_TASK.with_current(|i| {
+    with_idle_task(|i| {
         i.init_once(idle_task.into_arc());
     });
 
@@ -267,14 +313,14 @@ pub(crate) fn init() {
     // before any concurrent task access can occur.
     unsafe { CurrentTask::init_current(main_task.clone()) }
 
-    RUN_QUEUE.with_current(|rq| {
+    with_run_queue(|rq| {
         rq.init_once(RunQueue::new(cpu_id));
     });
     RUN_QUEUES.register_current(cpu_id, current_run_queue_ptr());
     #[cfg(feature = "smp")]
-    current_run_queue_mut().charge_rq_load(&main_task);
+    current_run_queue_ref().charge_rq_load(&main_task);
     #[cfg(feature = "smp")]
-    current_run_queue_mut().charge_home(&main_task);
+    current_run_queue_ref().charge_home(&main_task);
 }
 
 pub(crate) fn init_secondary() {
@@ -287,14 +333,14 @@ pub(crate) fn init_secondary() {
     RunQueue::set_owner_cpu(&idle_task, cpu_id);
     #[cfg(feature = "snapshot")]
     crate::task_registry::record_tracked_task(&idle_task);
-    IDLE_TASK.with_current(|i| {
+    with_idle_task(|i| {
         i.init_once(idle_task.clone());
     });
     // SAFETY: scheduler bring-up installs the first current task for this CPU
     // before any concurrent task access can occur.
     unsafe { CurrentTask::init_current(idle_task) }
 
-    RUN_QUEUE.with_current(|rq| {
+    with_run_queue(|rq| {
         rq.init_once(RunQueue::new(cpu_id));
     });
     RUN_QUEUES.register_current(cpu_id, current_run_queue_ptr());

@@ -20,7 +20,7 @@ use kspin::BaseGuard;
 
 use super::KRunQueueRef;
 #[cfg(not(feature = "smp"))]
-use super::current_run_queue_mut;
+use super::current_run_queue_ref;
 #[cfg(feature = "smp")]
 use super::get_run_queue;
 #[cfg(all(feature = "smp", feature = "sched_stat"))]
@@ -40,7 +40,7 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'s
     {
         let _ = task;
         KRunQueueRef {
-            inner: current_run_queue_mut(),
+            inner: current_run_queue_ref(),
             state: irq_state,
             _phantom: core::marker::PhantomData,
         }
@@ -80,7 +80,7 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueR
     {
         let _ = task;
         KRunQueueRef {
-            inner: current_run_queue_mut(),
+            inner: current_run_queue_ref(),
             state: irq_state,
             _phantom: core::marker::PhantomData,
         }
@@ -118,7 +118,7 @@ pub(crate) fn task_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'sta
     {
         let _ = task;
         KRunQueueRef {
-            inner: current_run_queue_mut(),
+            inner: current_run_queue_ref(),
             state: irq_state,
             _phantom: core::marker::PhantomData,
         }
@@ -156,7 +156,7 @@ fn select_run_queue_index(cpumask: &KCpuMask, prefer_local: bool) -> usize {
     let rr_token = RUN_QUEUE_INDEX.fetch_add(1, Ordering::Relaxed);
     let prefer = prefer_local.then(|| this_cpu_id().as_usize());
     let index = find_idlest_cpu(cpumask, rr_token, prefer, |idx| {
-        RUN_QUEUES.try_get(idx).as_deref().map(spawn_idlest_key)
+        RUN_QUEUES.try_get(idx).map(spawn_idlest_key)
     });
     #[cfg(feature = "sched_stat")]
     sched_stat_inc(&sched_stat_cpu(LogicalCpuId::new(index)).select_task);

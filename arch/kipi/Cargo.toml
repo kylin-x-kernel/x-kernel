@@ -28,6 +28,6 @@ lazyinit.workspace = true
 log.workspace = true
 memaddr.workspace = true
 page_table = { workspace = true, features = ["smp"] }
-percpu.workspace = true
+kcpu_slot.workspace = true
 unittest.workspace = true
 kbuild_config.workspace = true

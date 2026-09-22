@@ -45,8 +45,13 @@ impl IrqContextState {
     }
 }
 
-#[percpu::def_percpu]
-static IRQ_CONTEXT_STATE: IrqContextState = IrqContextState::empty();
+// Macro-generated wrapper modules do not inherit the invocation site's
+// lexical scope and interpolated `super` resolves against the invocation
+// module's parent, so private local types must be anchored absolutely.
+kcpu_slot::cpu_slot_cell_with_template! {
+    static IRQ_CONTEXT_STATE: kspin::SpinNoIrq<crate::bottom_half::context::IrqContextState> =
+        unsafe { kspin::SpinNoIrq::new(crate::bottom_half::context::IrqContextState::empty()) };
+}
 
 #[cfg(any(unittest, feature = "irq_stat"))]
 static CONTEXT_UNDERFLOW_WARNINGS: AtomicUsize = AtomicUsize::new(0);
@@ -354,9 +359,12 @@ impl Drop for LocalBhGuard {
 
 #[inline]
 fn current_state_snapshot() -> IrqContextSnapshot {
-    // SAFETY: the caller pins the current CPU and masks local IRQs before
-    // reading this non-atomic per-CPU slot.
-    unsafe { (*IRQ_CONTEXT_STATE.current_ref_raw()).snapshot() }
+    // Nested save/restore is near-free on already-masked entry paths, and the
+    // guard gives the copy real CPU-local exclusion.
+    let pin = NoPreemptIrqSave::new();
+    // The guard-bounded accessor selects this CPU's permanently allocated
+    // lock; the lock provides synchronized access to the state itself.
+    IRQ_CONTEXT_STATE.get(&pin).lock().snapshot()
 }
 
 /// Returns the current CPU IRQ-context snapshot when the caller already masked
@@ -368,23 +376,24 @@ pub(crate) fn irq_context_snapshot_irqoff() -> IrqContextSnapshot {
 
 #[inline]
 fn with_current_state(f: impl FnOnce(&mut IrqContextState)) {
-    with_current_state_result(|state| {
-        f(state);
-    });
+    with_current_state_irqoff(f)
 }
 
 #[inline]
 fn with_current_state_result<T>(f: impl FnOnce(&mut IrqContextState) -> T) -> T {
-    let _guard = NoPreemptIrqSave::new();
     with_current_state_irqoff(f)
 }
 
 #[inline]
 fn with_current_state_irqoff<T>(f: impl FnOnce(&mut IrqContextState) -> T) -> T {
-    // SAFETY: the caller pins the current CPU and masks local IRQs while the
-    // current per-CPU slot is mutably borrowed.
-    let state = unsafe { IRQ_CONTEXT_STATE.current_ref_mut_raw() };
-    f(state)
+    // Nested save/restore is near-free on already-masked entry paths, and the
+    // guard gives the mutable borrow real CPU-local exclusion instead of a
+    // caller-side comment.
+    let pin = NoPreemptIrqSave::new();
+    // The guard-bounded accessor selects this CPU's permanently allocated lock;
+    // object uniqueness is then provided by SpinNoIrq, independently of nested
+    // pins.
+    f(&mut IRQ_CONTEXT_STATE.get(&pin).lock())
 }
 
 /// Restores the current CPU IRQ-context snapshot when the caller already masked

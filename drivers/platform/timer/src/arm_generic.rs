@@ -15,7 +15,11 @@ use aarch64_cpu::registers::{
 #[cfg(not(feature = "vmm"))]
 use aarch64_cpu::registers::{CNTP_CTL_EL0, CNTP_TVAL_EL0};
 use int_ratio::Ratio;
+#[cfg(feature = "arm-timer-resume-fixup")]
+use kcpu_slot::cpu_slot_cell;
 use klazy::Once;
+#[cfg(feature = "arm-timer-resume-fixup")]
+use kspin::NoPreemptIrqSave;
 use ktime_types::Frequency;
 #[cfg(feature = "arm-timer-resume-fixup")]
 use log::info;
@@ -29,8 +33,9 @@ static TIMER_INIT_TICKS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "arm-timer-resume-fixup")]
 static TICK_RESUME_OFFSET: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "arm-timer-resume-fixup")]
-#[percpu::def_percpu]
-static LAST_LOGICAL_TICKS: u64 = 0;
+cpu_slot_cell! {
+    static LAST_LOGICAL_TICKS: u64 = 0;
+}
 #[cfg(feature = "arm-timer-resume-fixup")]
 static IPI_FIXUP_PENDING: AtomicUsize = AtomicUsize::new(0);
 static CNTPCT_TO_NANOS_RATIO: Once<Ratio> = Once::new();
@@ -197,13 +202,12 @@ pub fn init(config: TimerConfig) {
 /// current CPU.
 pub fn init_percpu() {
     #[cfg(feature = "arm-timer-resume-fixup")]
-    // SAFETY: this initializes only the current CPU's percpu logical-tick slot
-    // during local timer bring-up, before normal timer events use it.
-    unsafe {
-        LAST_LOGICAL_TICKS.write_current_raw(logical_ticks(
-            raw_now_ticks(),
-            TICK_RESUME_OFFSET.load(Ordering::Relaxed),
-        ));
+    {
+        let guard = NoPreemptIrqSave::new();
+        LAST_LOGICAL_TICKS.write(
+            &guard,
+            logical_ticks(raw_now_ticks(), TICK_RESUME_OFFSET.load(Ordering::Relaxed)),
+        );
     }
     rearm_local_timer_irq();
 }
@@ -502,11 +506,10 @@ fn logical_ticks(raw_ticks: u64, resume_offset: u64) -> u64 {
 #[cfg(feature = "arm-timer-resume-fixup")]
 #[inline]
 fn track_logical_ticks(ticks: u64) -> u64 {
-    // Safety: this only accesses the current CPU's percpu timer state.
-    let last = unsafe { LAST_LOGICAL_TICKS.read_current_raw() };
+    let guard = NoPreemptIrqSave::new();
+    let last = LAST_LOGICAL_TICKS.read(&guard);
     if ticks > last {
-        // SAFETY: this updates only the current CPU's percpu logical-tick slot.
-        unsafe { LAST_LOGICAL_TICKS.write_current_raw(ticks) };
+        LAST_LOGICAL_TICKS.write(&guard, ticks);
         ticks
     } else {
         last

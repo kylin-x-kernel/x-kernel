@@ -146,7 +146,7 @@ version = "0.3.0-dev"
 dependencies = [
  "kerrno",
  "khal",
- "kspin 0.3.0-dev",
+ "kspin",
  "ksync",
  "unittest",
  "vmobj",
@@ -359,7 +359,7 @@ dependencies = [
  "kdevice",
  "kerrno",
  "klazy",
- "kspin 0.3.0-dev",
+ "kspin",
  "ksync",
  "log",
  "unittest",
@@ -673,7 +673,7 @@ dependencies = [
  "khal",
  "kiface",
  "kirq",
- "kspin 0.3.0-dev",
+ "kspin",
  "lazyinit",
  "log",
  "memspace",
@@ -761,17 +761,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe4266f1bd910c087ff8c7848882217b2b079742877b21d29614c11c16087d70"
 dependencies = [
  "bitmaps",
-]
-
-[[package]]
-name = "crate_interface"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70272a03a2cef15589bac05d3d15c023752f5f8f2da8be977d983a9d9e6250fb"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -1167,7 +1156,7 @@ dependencies = [
  "knet",
  "kpoll",
  "kprocess",
- "kspin 0.3.0-dev",
+ "kspin",
  "ksync",
  "ktask",
  "ktime",
@@ -1190,7 +1179,7 @@ dependencies = [
 name = "device-res"
 version = "0.3.0-dev"
 dependencies = [
- "kspin 0.3.0-dev",
+ "kspin",
  "ktime_types",
  "smallvec",
  "unittest",
@@ -1500,7 +1489,7 @@ dependencies = [
  "kalloc",
  "kclass",
  "khal",
- "kspin 0.3.0-dev",
+ "kspin",
  "lazyinit",
  "log",
  "memaddr",
@@ -1992,7 +1981,7 @@ dependencies = [
  "kiface",
  "kirq",
  "kplat",
- "kspin 0.3.0-dev",
+ "kspin",
  "lazyinit",
  "log",
  "memaddr",
@@ -2062,11 +2051,12 @@ dependencies = [
  "backtrace",
  "cfg-if",
  "kaddr_layout",
+ "kbuild_config",
+ "kcpu_slot",
  "kerrno",
- "kspin 0.3.0-dev",
+ "kspin",
  "log",
  "memaddr",
- "percpu",
  "strum",
  "unittest",
 ]
@@ -2079,10 +2069,10 @@ dependencies = [
  "cfg-if",
  "kbuild_config",
  "kcpu_id_map",
+ "kcpu_slot",
  "kiface",
  "loongArch64",
  "memaddr",
- "percpu",
  "riscv",
  "x86",
  "x86_64",
@@ -2120,7 +2110,7 @@ dependencies = [
  "driver_base",
  "input",
  "kdevice",
- "kspin 0.3.0-dev",
+ "kspin",
  "lazyinit",
  "log",
  "net",
@@ -2139,6 +2129,7 @@ dependencies = [
  "karch",
  "kbuild_config",
  "kcpu_id_map",
+ "kcpu_slot",
  "kerrno",
  "klazy",
  "lazyinit",
@@ -2148,7 +2139,6 @@ dependencies = [
  "memaddr",
  "of",
  "page_table",
- "percpu",
  "riscv",
  "static_assertions",
  "tock-registers 0.9.0",
@@ -2174,7 +2164,11 @@ dependencies = [
 name = "kcpu_slot"
 version = "0.3.0-dev"
 dependencies = [
+ "kaddr_layout",
+ "kbuild_config",
  "kcpu_id_map",
+ "kiface",
+ "x86_64",
 ]
 
 [[package]]
@@ -2193,7 +2187,7 @@ version = "0.3.0-dev"
 dependencies = [
  "device-res",
  "driver_base",
- "kspin 0.3.0-dev",
+ "kspin",
  "lazyinit",
  "log",
  "unittest",
@@ -2220,7 +2214,7 @@ dependencies = [
  "khal",
  "kiface",
  "kplat",
- "kspin 0.3.0-dev",
+ "kspin",
  "log",
  "memaddr",
 ]
@@ -2233,7 +2227,7 @@ dependencies = [
  "cfg-if",
  "char_driver",
  "console-driver",
- "crate_interface 0.3.0",
+ "crate_interface",
  "device-res",
  "device-res-xkernel",
  "display",
@@ -2249,7 +2243,7 @@ dependencies = [
  "khal",
  "kirq",
  "kpoll",
- "kspin 0.3.0-dev",
+ "kspin",
  "ksync",
  "ktask",
  "ktime_types",
@@ -2304,26 +2298,6 @@ dependencies = [
 [[package]]
 name = "kernel-image-metadata"
 version = "0.3.0-dev"
-
-[[package]]
-name = "kernel_guard"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d10c55bedf6789bc3748e0d8756ee639df1ae25144fd3525ed311044bd9a739f"
-dependencies = [
- "cfg-if",
- "crate_interface 0.1.4",
-]
-
-[[package]]
-name = "kernel_guard"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfacac34d77b445f5ad7522174fb0846fb82015c64b574fbe4be07b1b4eb6302"
-dependencies = [
- "cfg-if",
- "crate_interface 0.3.0",
-]
 
 [[package]]
 name = "kerrno"
@@ -2409,7 +2383,7 @@ dependencies = [
  "kpoll",
  "kprocess",
  "ksignal",
- "kspin 0.3.0-dev",
+ "kspin",
  "ksync",
  "ktask",
  "ktime",
@@ -2447,7 +2421,7 @@ dependencies = [
  "kplat-x86_64",
  "kprocess",
  "kruntime",
- "kspin 0.3.0-dev",
+ "kspin",
  "ksync",
  "ksyscall",
  "ktask",
@@ -2466,7 +2440,7 @@ dependencies = [
  "kerrno",
  "khal",
  "klazy",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktask",
  "ktime_types",
  "kuaccess",
@@ -2488,12 +2462,13 @@ dependencies = [
  "kaddr_layout",
  "kalloc",
  "kcpu",
+ "kcpu_slot",
  "kernel-boot",
  "kerrno",
  "kiface",
  "kirq",
  "kplat",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktime_types",
  "lazyinit",
  "linkme",
@@ -2502,7 +2477,6 @@ dependencies = [
  "multiboot2",
  "of",
  "page_table",
- "percpu",
  "unittest",
 ]
 
@@ -2545,16 +2519,16 @@ dependencies = [
  "karch",
  "kbuild_config",
  "kcpu_id_map",
+ "kcpu_slot",
  "khal",
  "kiface",
  "kirq",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktime_types",
  "lazyinit",
  "log",
  "memaddr",
  "page_table",
- "percpu",
  "unittest",
 ]
 
@@ -2565,11 +2539,11 @@ dependencies = [
  "bitflags 2.13.2",
  "karch",
  "kbuild_config",
+ "kcpu_slot",
  "kiface",
  "kpoll",
- "kspin 0.3.0-dev",
+ "kspin",
  "log",
- "percpu",
  "unittest",
 ]
 
@@ -2606,7 +2580,7 @@ dependencies = [
  "cfg-if",
  "chrono",
  "kiface",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktime_types",
  "log",
 ]
@@ -2634,7 +2608,7 @@ dependencies = [
  "klazy",
  "kpoll",
  "kprocess",
- "kspin 0.3.0-dev",
+ "kspin",
  "ksync",
  "ktask",
  "ktime_types",
@@ -2673,11 +2647,11 @@ dependencies = [
  "boot-info",
  "const-str",
  "kcpu_id_map",
+ "kcpu_slot",
  "kerrno",
  "kiface",
  "kplat-macros",
- "kspin 0.1.1",
- "percpu",
+ "kspin",
 ]
 
 [[package]]
@@ -2692,6 +2666,7 @@ dependencies = [
  "kbuild_config",
  "kcpu",
  "kcpu_id_map",
+ "kcpu_slot",
  "kernel-boot",
  "kerrno",
  "khal",
@@ -2699,12 +2674,12 @@ dependencies = [
  "kirq",
  "klazy",
  "kplat",
+ "kspin",
  "ktime",
  "lazyinit",
  "log",
  "memaddr",
  "of",
- "percpu",
  "rtc-driver",
  "timer-driver",
  "unittest",
@@ -2726,7 +2701,7 @@ dependencies = [
  "kiface",
  "kirq",
  "kplat",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktime",
  "ktime_types",
  "lazyinit",
@@ -2789,7 +2764,7 @@ dependencies = [
  "kirq",
  "klazy",
  "kplat",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktime",
  "ktime_types",
  "log",
@@ -2805,7 +2780,7 @@ name = "kpoll"
 version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
- "kspin 0.3.0-dev",
+ "kspin",
  "linux-raw-sys",
  "smallvec",
  "unittest",
@@ -2833,7 +2808,7 @@ dependencies = [
  "kpoll",
  "kresources",
  "ksignal",
- "kspin 0.3.0-dev",
+ "kspin",
  "ksync",
  "ktask",
  "ktime_types",
@@ -2899,7 +2874,7 @@ dependencies = [
  "kirq",
  "klogger",
  "knet",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktask",
  "ktime",
  "ktime_types",
@@ -2932,7 +2907,7 @@ dependencies = [
  "kerrno",
  "khal",
  "kiface",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktime_types",
  "linux-raw-sys",
  "log",
@@ -2946,19 +2921,10 @@ dependencies = [
 
 [[package]]
 name = "kspin"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d841fd3aeaa9a55871068f5c3ce48497a6dbcf14e20ca7784a9f68bfdb4c825"
-dependencies = [
- "cfg-if",
- "kernel_guard 0.1.3",
-]
-
-[[package]]
-name = "kspin"
 version = "0.3.0-dev"
 dependencies = [
  "karch",
+ "kcpu_slot",
  "kiface",
  "klockstat",
  "linkme",
@@ -2972,7 +2938,7 @@ dependencies = [
  "event-listener",
  "khal",
  "klockstat",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktask",
  "linkme",
  "lock_api",
@@ -3037,6 +3003,7 @@ dependencies = [
  "karch",
  "kbuild_config",
  "kcpu_id_map",
+ "kcpu_slot",
  "kerrno",
  "khal",
  "kidentity",
@@ -3046,13 +3013,12 @@ dependencies = [
  "klazy",
  "kpoll",
  "ksched",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktime_types",
  "ktimer-core",
  "lazyinit",
  "log",
  "memaddr",
- "percpu",
  "unittest",
 ]
 
@@ -3061,7 +3027,7 @@ name = "ktime"
 version = "0.3.0-dev"
 dependencies = [
  "khal",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktime_types",
  "unittest",
 ]
@@ -3100,7 +3066,7 @@ dependencies = [
  "karch",
  "kcpu_id_map",
  "kerrno",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktime_types",
  "unittest",
 ]
@@ -3125,7 +3091,7 @@ dependencies = [
  "karch",
  "khal",
  "klazy",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktask",
  "ktracepoint",
  "lock_api",
@@ -3148,7 +3114,7 @@ dependencies = [
  "kpoll",
  "kprocess",
  "ksignal",
- "kspin 0.3.0-dev",
+ "kspin",
  "ksync",
  "ktask",
  "kvfs",
@@ -3167,7 +3133,7 @@ dependencies = [
  "kerrno",
  "khal",
  "kprocess",
- "kspin 0.3.0-dev",
+ "kspin",
  "ksync",
  "ktask",
  "linkme",
@@ -3231,15 +3197,15 @@ dependencies = [
  "kalloc",
  "kbuild_config",
  "kcpu_id_map",
+ "kcpu_slot",
  "khal",
  "kirq",
  "klogger",
- "kspin 0.3.0-dev",
+ "kspin",
  "ksync",
  "ktask",
  "ktime_types",
  "log",
- "percpu",
  "vdev-core",
  "vdev-test-mmio",
 ]
@@ -3276,7 +3242,7 @@ dependencies = [
  "kirq",
  "klazy",
  "kpoll",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktask",
  "ktime_types",
  "kworkerpool",
@@ -3292,7 +3258,7 @@ dependencies = [
  "kbuild_config",
  "kcpu_id_map",
  "kpoll",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktask",
  "ktime_types",
  "log",
@@ -3304,7 +3270,7 @@ name = "kworkqueue"
 version = "0.3.0-dev"
 dependencies = [
  "kcpu_id_map",
- "kspin 0.3.0-dev",
+ "kspin",
  "unittest",
 ]
 
@@ -3484,7 +3450,7 @@ dependencies = [
  "kerrno",
  "khal",
  "kplat",
- "kspin 0.3.0-dev",
+ "kspin",
  "ksync",
  "lazyinit",
  "log",
@@ -3529,7 +3495,7 @@ name = "net"
 version = "0.3.0-dev"
 dependencies = [
  "driver_base",
- "kspin 0.3.0-dev",
+ "kspin",
  "ksync",
  "log",
  "unittest",
@@ -3799,29 +3765,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6305423e0e7738146434843d1694d621cce767262b2a86910beab705e4493d9"
 dependencies = [
  "base64ct",
-]
-
-[[package]]
-name = "percpu"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53cf38d521e1c0c7d294e2653c4a93edb3b60ebb1bc529e2f19a647be8e36176"
-dependencies = [
- "cfg-if",
- "kernel_guard 0.2.0",
- "percpu_macros",
- "x86",
-]
-
-[[package]]
-name = "percpu_macros"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb63182b558734ab0fc668b599d89ea97f0f176dabdaae4fdde8ce564644487e"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -5223,15 +5166,16 @@ dependencies = [
  "int_ratio",
  "kbuild_config",
  "kcpu_id_map",
+ "kcpu_slot",
  "kernel-boot",
  "khal",
  "kiface",
  "kirq",
  "klazy",
+ "kspin",
  "ktime_types",
  "log",
  "of",
- "percpu",
  "raw-cpuid 11.6.0",
  "riscv",
  "sbi-rt",
@@ -5261,7 +5205,7 @@ dependencies = [
  "klazy",
  "kpoll",
  "kprocess",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktask",
  "ktime_types",
  "linux_sysno",
@@ -5280,7 +5224,7 @@ dependencies = [
  "bitflags 2.13.2",
  "kerrno",
  "kpoll",
- "kspin 0.3.0-dev",
+ "kspin",
  "smallvec",
 ]
 
@@ -5559,7 +5503,7 @@ dependencies = [
  "display",
  "driver_base",
  "input",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktime_types",
  "kvirtiodrivers",
  "linked_list_r4l",
@@ -5661,13 +5605,13 @@ dependencies = [
  "karch",
  "kbuild_config",
  "kcpu_id_map",
+ "kcpu_slot",
  "khal",
- "kspin 0.3.0-dev",
+ "kspin",
  "ktask",
  "ktime_types",
  "kwork",
  "log",
- "percpu",
  "unittest",
 ]
 
@@ -5895,14 +5839,14 @@ name = "x86-apic"
 version = "0.3.0-dev"
 dependencies = [
  "kcpu_id_map",
+ "kcpu_slot",
  "kiface",
  "kirq",
- "kspin 0.3.0-dev",
+ "kspin",
  "lazyinit",
  "log",
  "memaddr",
  "memspace",
- "percpu",
  "raw-cpuid 11.6.0",
  "x2apic",
  "x86_64",

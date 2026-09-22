@@ -7,15 +7,19 @@
 use alloc::format;
 
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
+use kcpu_slot::cpu_slot_cell_with_template;
 use khal::percpu::this_cpu_id;
+use kspin::NoPreemptIrqSave;
 use ktime_types::TimeSpan;
 use log::{debug, warn};
 
-/// Per-CPU timestamp of the last softlockup report.
-/// Rate-limits reports to one per threshold period so a genuine lockup
-/// doesn't dump on every timer tick.
-#[percpu::def_percpu]
-static LAST_SOFTLOCKUP_REPORT: Option<ktime_types::MonotonicInstant> = None;
+// Per-CPU timestamp of the last softlockup report. It rate-limits reports to
+// one per threshold period so a genuine lockup does not dump every timer tick.
+kcpu_slot::cpu_slot_cell_with_template! {
+    // SAFETY: `None` contains no initialized `MonotonicInstant` payload, so
+    // copying the template creates independent empty options for every CPU.
+    static LAST_SOFTLOCKUP_REPORT: Option<ktime_types::MonotonicInstant> = unsafe { None };
+}
 
 const SOFTLOCKUP_TOUCH_INTERVAL: TimeSpan = TimeSpan::from_secs(4);
 const WATCHDOG_TASK_PRIO: isize = -20;
@@ -57,6 +61,7 @@ fn init_nmi_watchdog() {
 
     // Register hard lockup detection task.
     crate::register_hardlockup_detection_task();
+    crate::watchdog_task::publish_watchdog_tasks();
 
     // Start periodic NMI delivery through the source‑neutral NMI interface.
     // The platform backend (currently the PMU cycle counter) internally:
@@ -132,8 +137,12 @@ fn init_nmi_watchdog() {
 
 struct SoftlockupTimer;
 
-#[percpu::def_percpu]
-static SOFTLOCKUP_TIMER: Option<ktask::Timer<SoftlockupTimer>> = None;
+// The per-CPU slot retains the timer for the kernel lifetime; the `None`
+// template owns no payload, so the certified-initializer form is used.
+cpu_slot_cell_with_template! {
+    static SOFTLOCKUP_TIMER: Option<ktask::Timer<crate::init::SoftlockupTimer>> =
+        unsafe { None };
+}
 
 #[cfg(unittest)]
 static SAMPLE_COUNTS: [core::sync::atomic::AtomicUsize; kbuild_config::NR_CPUS] =
@@ -145,9 +154,8 @@ impl ktask::TimerHandler for SoftlockupTimer {
         crate::timer_tick(now);
 
         if crate::check_softlockup(now) {
-            // SAFETY: timer callbacks run with interrupts disabled and cannot
-            // migrate while accessing the current CPU's report timestamp.
-            let last = unsafe { *LAST_SOFTLOCKUP_REPORT.current_ref_raw() };
+            let guard = NoPreemptIrqSave::new();
+            let last = LAST_SOFTLOCKUP_REPORT.read(&guard);
             if last.is_none_or(|last| {
                 now.saturating_duration_since(last)
                     > crate::lockup_detection::DEFAULT_SOFTLOCKUP_THRESHOLD
@@ -157,9 +165,7 @@ impl ktask::TimerHandler for SoftlockupTimer {
                     this_cpu_id().as_usize()
                 );
                 ktask::dump_sched_stats();
-                // SAFETY: the same non-migrating timer callback exclusively
-                // updates this CPU's report timestamp.
-                unsafe { *LAST_SOFTLOCKUP_REPORT.current_ref_mut_raw() = Some(now) };
+                LAST_SOFTLOCKUP_REPORT.write(&guard, Some(now));
                 ktask::snapshot::dump_cpu_tasks(this_cpu_id());
             }
         }
@@ -185,10 +191,11 @@ impl ktask::TimerHandler for SoftlockupTimer {
 pub fn init_softlockup_detection() {
     let timer = ktask::Timer::new(SoftlockupTimer);
     {
-        let _guard = kspin::NoPreemptIrqSave::new();
-        // SAFETY: the guard pins and masks this CPU. Only initialization writes
-        // the owner slot; neither the callback nor the NMI handler accesses it.
-        let slot = unsafe { SOFTLOCKUP_TIMER.current_ref_mut_raw() };
+        let guard = kspin::NoPreemptIrqSave::new();
+        // SAFETY: the guard pins this CPU with local IRQs masked, and only
+        // initialization mutates the owner slot; the callback and the NMI
+        // handler never access it.
+        let slot = unsafe { SOFTLOCKUP_TIMER.get_mut_unchecked(&guard) };
         assert!(slot.is_none(), "softlockup timer already initialized");
         let timer = slot.insert(timer);
         // SAFETY: the local scheduler/IRQ service is initialized. The per-CPU

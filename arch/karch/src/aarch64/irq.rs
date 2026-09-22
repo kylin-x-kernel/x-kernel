@@ -71,24 +71,27 @@ const ALLINT_MASK: u64 = 1 << 13;
 /// (UNDEFINED).  The NMI mode itself lives in the platform; this is only a
 /// derived readiness flag, mirroring [`pmr::READY`].
 #[cfg(feature = "nmi-hardware")]
-#[percpu::def_percpu]
-static ALLINT_ACTIVE: bool = false;
+kcpu_slot::cpu_slot! {
+    static ALLINT_ACTIVE: core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
+}
 
 #[cfg(feature = "nmi-hardware")]
 #[inline]
 pub fn allint_active() -> bool {
-    // SAFETY: `ALLINT_ACTIVE` is a `def_percpu` static with independent
-    // slots per CPU, accessed via `TPIDR_EL1` on AArch64; no other CPU can
-    // alias this slot.
-    unsafe { ALLINT_ACTIVE.read_current_raw() }
+    // IRQ masking queries this itself, so a higher-level guard would recurse;
+    // `AtomicBool: Sync`, so guard-free shared access stays valid under NMI.
+    ALLINT_ACTIVE
+        .current_shared()
+        .load(core::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(feature = "nmi-hardware")]
 #[inline]
 pub fn mark_allint_active() {
-    // SAFETY: per‑CPU slot; written once during per‑CPU init with no
-    // concurrent access.
-    unsafe { ALLINT_ACTIVE.write_current_raw(true) };
+    ALLINT_ACTIVE
+        .current_shared()
+        .store(true, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Read `PSTATE.ALLINT` (ALLINT system register, `s3_0_c4_c3_0`).
@@ -316,16 +319,19 @@ pub fn disable_local_exceptions() {
 pub mod pmr {
     // ── Per‑CPU readiness ───────────────────────────────────────────
 
-    #[percpu::def_percpu]
-    static READY: bool = false;
+    kcpu_slot::cpu_slot! {
+        static READY: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
+    }
 
     #[inline]
     pub fn is_ready() -> bool {
-        // SAFETY: `READY` is a `def_percpu` static, so each CPU has its own
-        // independent slot.  `read_current_raw` accesses only the current
-        // CPU's slot (via `TPIDR_EL1` on AArch64); no other CPU can alias
-        // this slot.
-        unsafe { READY.read_current_raw() }
+        // PMR readiness is queried by the IRQ-mask implementation itself, so a
+        // higher-level guard would recurse; `AtomicBool: Sync` keeps the
+        // guard-free shared access valid under overlapping NMI queries.
+        READY
+            .current_shared()
+            .load(core::sync::atomic::Ordering::Relaxed)
     }
 
     /// Mark the current CPU's PMR interface as initialised.
@@ -336,11 +342,9 @@ pub mod pmr {
     /// (PMR‑based instead of DAIF) is active on this CPU.
     #[inline]
     pub fn mark_ready() {
-        // SAFETY: `READY` is a `def_percpu` static with independent slots per
-        // CPU.  `write_current_raw` accesses only the current CPU's slot; no
-        // other CPU writes this slot, and the write is a simple boolean store
-        // with no lifetime or aliasing concerns.
-        unsafe { READY.write_current_raw(true) };
+        READY
+            .current_shared()
+            .store(true, core::sync::atomic::Ordering::Relaxed);
     }
 
     // ── Register access (GICv3 `ICC_PMR_EL1`) ──────────────────────

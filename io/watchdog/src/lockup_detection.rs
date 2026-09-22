@@ -6,6 +6,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use karch::cache::CacheAligned;
+use kcpu_slot::cpu_slot_cell;
 use ktime_types::{MonotonicInstant, TimeSpan};
 
 use crate::watchdog_task::WatchdogTask;
@@ -75,7 +76,7 @@ impl LockupDetection {
     pub fn touch_softlockup(&self, timestamp: MonotonicInstant) {
         self.state
             .soft_timestamp
-            .store(timestamp.as_nanos_u64_saturating(), Ordering::Relaxed);
+            .store(timestamp.as_nanos_u64_saturating(), Ordering::Release);
         self.state
             .soft_timestamp_initialized
             .store(true, Ordering::Release);
@@ -92,7 +93,7 @@ impl LockupDetection {
             return None;
         }
         Some(MonotonicInstant::from_span_since_origin(
-            TimeSpan::from_nanos(self.state.soft_timestamp.load(Ordering::Relaxed)),
+            TimeSpan::from_nanos(self.state.soft_timestamp.load(Ordering::Acquire)),
         ))
     }
 
@@ -117,7 +118,7 @@ impl LockupDetection {
     pub fn timer_tick(&self, now: MonotonicInstant) {
         self.state
             .hard_timestamp
-            .store(now.as_nanos_u64_saturating(), Ordering::Relaxed);
+            .store(now.as_nanos_u64_saturating(), Ordering::Release);
         self.state
             .hard_timestamp_initialized
             .store(true, Ordering::Release);
@@ -129,6 +130,26 @@ impl LockupDetection {
     /// `threshold`. Wall time is required because the NMI source is a PMU
     /// cycle budget at an assumed CPU frequency: two NMIs can fall between
     /// 4s samples on a live CPU.
+    ///
+    /// # Examples
+    ///
+    /// The local timer IRQ must refresh the heartbeat before an NMI checks it:
+    ///
+    /// ```no_run
+    /// use ktime_types::{MonotonicInstant, TimeSpan};
+    ///
+    /// // Local timer IRQ: refresh this CPU's heartbeat.
+    /// fn on_timer_irq(now: MonotonicInstant) {
+    ///     watchdog::timer_tick(now);
+    /// }
+    ///
+    /// // Pseudo-NMI: report when the heartbeat is stale.
+    /// fn on_nmi(det: &watchdog::LockupDetection, now: MonotonicInstant, threshold: TimeSpan) {
+    ///     if det.check_hardlockup(now, threshold) {
+    ///         // report and enter the hard-lockup rendezvous
+    ///     }
+    /// }
+    /// ```
     #[inline]
     pub fn check_hardlockup(&self, now: MonotonicInstant, threshold: TimeSpan) -> bool {
         if !self
@@ -139,7 +160,7 @@ impl LockupDetection {
             return false;
         }
         let last = MonotonicInstant::from_span_since_origin(TimeSpan::from_nanos(
-            self.state.hard_timestamp.load(Ordering::Relaxed),
+            self.state.hard_timestamp.load(Ordering::Acquire),
         ));
         now.saturating_duration_since(last) > threshold
     }
@@ -150,20 +171,26 @@ impl LockupDetection {
 /// Only accessed on the owning CPU, from the pinned watchdog thread
 /// (soft-lockup timestamp), timer interrupt (tick / soft-lockup check),
 /// and NMI (hard-lockup check) contexts.
-#[percpu::def_percpu]
-pub static LOCKUP_DETECTION: LockupDetection = LockupDetection::new();
+// SAFETY: the template contains only atomic integers and booleans initialized
+// to their const reset state; each copied area owns independent atomics.
+unsafe impl kcpu_slot::StaticSlotValue for LockupDetection {}
+
+cpu_slot_cell! {
+    static LOCKUP_DETECTION: crate::lockup_detection::LockupDetection =
+        crate::lockup_detection::LockupDetection::new();
+}
+
+#[inline]
+fn current_lockup_detection() -> &'static LockupDetection {
+    let area = kcpu_slot::area(khal::percpu::this_cpu_id())
+        .expect("current CPU lockup-detection area is not published");
+    LOCKUP_DETECTION.shared_at(area)
+}
 
 /// Touch softlockup timestamp from the per-CPU watchdog task.
 #[inline]
 pub fn touch_softlockup(timestamp: MonotonicInstant) {
-    // SAFETY: `current_ref_mut_raw` accesses the per‑CPU instance for the
-    // current CPU. The per-CPU watchdog task is pinned before it is activated,
-    // so this short access cannot resume on a different CPU.
-    unsafe {
-        LOCKUP_DETECTION
-            .current_ref_mut_raw()
-            .touch_softlockup(timestamp);
-    }
+    current_lockup_detection().touch_softlockup(timestamp);
 }
 
 /// Refresh the hardlockup heartbeat.
@@ -173,33 +200,21 @@ pub fn touch_softlockup(timestamp: MonotonicInstant) {
 /// delayed.
 #[inline]
 pub fn timer_tick(now: MonotonicInstant) {
-    // SAFETY: `current_ref_mut_raw` accesses the per‑CPU instance for the
-    // current CPU.  Timer callbacks run with interrupts disabled on the
-    // local CPU, so the pointer is stable.
-    unsafe {
-        LOCKUP_DETECTION.current_ref_mut_raw().timer_tick(now);
-    }
+    current_lockup_detection().timer_tick(now);
 }
 
 /// Check softlockup of a CPU.
 #[inline]
 pub fn check_softlockup(now: MonotonicInstant) -> bool {
-    // SAFETY: `current_ref_mut_raw` accesses the per‑CPU instance for the
-    // current CPU from timer interrupt context (interrupts disabled).
-    unsafe {
-        LOCKUP_DETECTION
-            .current_ref_mut_raw()
-            .check_softlockup(now, DEFAULT_SOFTLOCKUP_THRESHOLD)
-    }
+    current_lockup_detection().check_softlockup(now, DEFAULT_SOFTLOCKUP_THRESHOLD)
 }
 
 /// Register the hard lockup detection task on the current CPU.
 pub fn register_hardlockup_detection_task() {
-    // SAFETY: `current_ref_raw` obtains a shared reference to the per‑CPU
-    // `LockupDetection` for the current CPU.  The returned `&'static`
-    // reference is valid as long as the per‑CPU storage exists (the
-    // lifetime of the kernel).  Called once during init on the owning CPU.
-    let task: &'static LockupDetection = unsafe { LOCKUP_DETECTION.current_ref_raw() };
+    // The returned `&'static` reference is valid for the kernel lifetime
+    // (per-CPU slot storage is never torn down). Called once during init on
+    // the owning CPU.
+    let task: &'static LockupDetection = current_lockup_detection();
     crate::watchdog_task::register_watchdog_task(task);
 }
 

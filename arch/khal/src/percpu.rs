@@ -4,37 +4,25 @@
 
 //! CPU-local data structures.
 
+use kcpu_slot::cpu_slot_cell;
 pub use kplat::cpu::*;
 
-#[percpu::def_percpu]
-static CURRENT_TASK_PTR: usize = 0;
+cpu_slot_cell! {
+    /// Owning raw pointer to this CPU's current task; `0` means no task.
+    static CURRENT_TASK_PTR: usize = 0;
+}
 
 /// Gets the pointer to the current task with preemption-safety.
 ///
 /// Preemption may be enabled when calling this function. This function will
 /// guarantee the correctness even the current task is preempted.
+///
+/// The read uses the single-instruction current-CPU accessor (not a guard) so
+/// it stays a short sequence on every architecture and can be called from
+/// contexts that predate any guard — including the preempt-count callback.
 #[inline]
 pub fn current_task_ptr<T>() -> *const T {
-    #[cfg(target_arch = "x86_64")]
-    // SAFETY: on x86_64 the per-CPU task pointer is read with a single `gs`
-    // access, so the value cannot be torn by preemption.
-    unsafe {
-        // on x86, only one instruction is needed to read the per-CPU task pointer from `gs:[off]`.
-        CURRENT_TASK_PTR.read_current_raw() as _
-    }
-    #[cfg(any(
-        target_arch = "aarch64",
-        target_arch = "riscv32",
-        target_arch = "riscv64",
-        target_arch = "loongarch64"
-    ))]
-    // SAFETY: interrupts are masked for the duration of the multi-instruction
-    // per-CPU read sequence, so the current CPU context cannot change midway.
-    unsafe {
-        // on RISC-V and LA64, reading `CURRENT_TASK_PTR` requires multiple instruction, so we disable local IRQs.
-        let _guard = kspin::IrqSave::new();
-        CURRENT_TASK_PTR.read_current_raw() as *const T
-    }
+    CURRENT_TASK_PTR.load_current() as *const T
 }
 
 /// Sets the pointer to the current task with preemption-safety.
@@ -47,24 +35,9 @@ pub fn current_task_ptr<T>() -> *const T {
 /// The given `ptr` must be pointed to a valid task structure.
 #[inline]
 pub unsafe fn set_current_task_ptr<T>(ptr: *const T) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        // SAFETY: the caller guarantees `ptr` targets a valid task structure,
-        // and x86 updates the per-CPU pointer atomically through `gs`.
-        unsafe { CURRENT_TASK_PTR.write_current_raw(ptr as usize) }
-    }
-    #[cfg(any(
-        target_arch = "aarch64",
-        target_arch = "riscv32",
-        target_arch = "riscv64",
-        target_arch = "loongarch64"
-    ))]
-    {
-        let _guard = kspin::IrqSave::new();
-        // SAFETY: the caller guarantees `ptr` targets a valid task structure,
-        // and interrupts are masked across the multi-instruction update.
-        unsafe { CURRENT_TASK_PTR.write_current_raw(ptr as usize) }
-    }
+    // SAFETY: the caller guarantees `ptr` targets a valid task structure, and
+    // the single-instruction store stays on this CPU's slot.
+    CURRENT_TASK_PTR.store_current(ptr as usize);
 }
 #[cfg(feature = "smp")]
 pub use kplat::cpu::ap_cpu_init as init_secondary;

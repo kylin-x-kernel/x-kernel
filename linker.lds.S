@@ -116,17 +116,6 @@ SECTIONS
         _etbss = .;
     }
 
-    . = ALIGN(4K);
-    _percpu_start = .;
-    _percpu_end = _percpu_start + SIZEOF(.percpu);
-    .percpu 0x0 : AT(_percpu_start) {
-        _percpu_load_start = .;
-        *(.percpu .percpu.*)
-        _percpu_load_end = .;
-        . = _percpu_load_start + ALIGN(64) * %NR_CPUS%;
-    }
-    . = _percpu_end;
-
     /* Independent typed per-CPU slot template and reserved areas. */
     . = ALIGN(4K);
     _cpu_slot_template_lma_start = .;
@@ -137,8 +126,8 @@ SECTIONS
     }
     _cpu_slot_template_size = _cpu_slot_template_vma_end - _cpu_slot_template_vma_start;
     _cpu_slot_template_lma_end = _cpu_slot_template_lma_start + _cpu_slot_template_size;
-    _cpu_slot_area_stride = ALIGN(_cpu_slot_template_size, 64);
-    _cpu_slot_area_start = ALIGN(_cpu_slot_template_lma_end, 64);
+    _cpu_slot_area_stride = ALIGN(_cpu_slot_template_size, %CPU_SLOT_AREA_ALIGN%);
+    _cpu_slot_area_start = ALIGN(_cpu_slot_template_lma_end, %CPU_SLOT_AREA_ALIGN%);
     _cpu_slot_area_end = _cpu_slot_area_start + _cpu_slot_area_stride * %NR_CPUS%;
     . = _cpu_slot_area_end;
 

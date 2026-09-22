@@ -56,7 +56,7 @@ allocates or sleeps.
 │  └──────────────┘   └──────────────────┘  │
 └───────────────────────────────────────────┘
    │
-   │ kiface / raw per-cpu refs / IRQ backend
+   │ kiface / checked publication / IRQ backend
    v
 平台中断控制器与 CPU 本地执行上下文
 ```
@@ -75,9 +75,9 @@ allocates or sleeps.
    通过 `kirq::notify_cpu()` 与 GIC/APIC/SBI 等后端交互，依赖其
    IPI 投递和发布顺序正确。
 
-2. **per-CPU 原始引用边界**  
-   使用 `remote_ref_raw()` / `current_ref_mut_raw()` 访问每 CPU 队列，
-   依赖“目标 CPU 的本地队列已经初始化”这一前提。
+2. **per-CPU slot 引用边界**
+   私有 `ipi_queue()` 从显式 CPU area 构造共享 `LazyInit<SpinNoIrq<_>>`
+   引用，依赖“目标 CPU 的本地队列已经初始化”这一前提；队列修改只经锁完成。
 
 3. **页表一致性边界**  
    `tlb.rs` 与 `page_table`、`memspace` 的一致性协议耦合，
@@ -100,31 +100,21 @@ allocates or sleeps.
 
 ## unsafe 代码清单
 
-### 1. `IPI_EVENT_QUEUE.remote_ref_raw()` / `current_ref_mut_raw()`
-
-位置：
-
-- `arch/kipi/src/lib.rs:133`
-- `arch/kipi/src/lib.rs:185`
-- `arch/kipi/src/lib.rs:254`
+### 1. `ipi_queue()` 的显式 CPU-area 访问
 
 不变量：
 
 - 目标 CPU 必须存在于逻辑 CPU 映射中；
 - 目标 CPU 的本地 IPI 队列必须已经初始化；
-- 当前 CPU 访问 `current_ref_mut_raw()` 时只能操作自己的本地槽位。
+- 返回值只允许作为共享引用使用；任何生产或消费都必须取得内层 `SpinNoIrq`。
 
 防护：
 
 - 对外 API 在远程入队前显式检查 `IPI_QUEUE_READY`；
-- 当前 CPU 路径只从本地 handler 访问当前槽位。
+- `IPI_QUEUE_READY` 由目标 CPU 在初始化后 Release 发布，发送端 Acquire 检查；
+- accessor 不构造远端 `&mut`，多生产者和本地消费者都由同一把锁串行化。
 
-### 2. `LAST_HANDLED_PENDING_EPOCH` 的原始 per-CPU 访问
-
-位置：
-
-- `arch/kipi/src/tlb.rs:362`
-- `arch/kipi/src/tlb.rs:368`
+### 2. `LAST_HANDLED_PENDING_EPOCH` 的 guard-backed per-CPU 访问
 
 不变量：
 
@@ -133,6 +123,7 @@ allocates or sleeps.
 
 防护：
 
+- helper 获取 `NoPreemptIrqSave`，通过按值 `read`/`write` 完成一次访问，不生成引用；
 - helper 只暴露“当前 CPU 读/写”接口，不提供跨 CPU 写路径。
 
 ### 3. 平台 `notify_cpu()` 中的内联汇编屏障
@@ -158,7 +149,8 @@ allocates or sleeps.
 以下不变量对 `kipi` 的健壮性和内存安全都关键：
 
 1. **每 CPU 队列必须先初始化再被远程访问**  
-   `remote_ref_raw()` 没有运行时恢复能力，前置条件错了就是逻辑错误。
+   私有 area accessor 没有运行时恢复能力，前置条件错了就是逻辑错误；
+   `IPI_QUEUE_READY` 的 Release/Acquire 是该初始化发布协议。
 
 2. **TLB 请求必须先 publish，再允许目标 CPU 看到 IPI**  
    否则目标 CPU 可能跳过 request，发起 CPU 永久等不到 ack。

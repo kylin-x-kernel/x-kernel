@@ -91,7 +91,9 @@ mod lock;
 mod rwlock;
 mod tests;
 
-pub use guard::{BaseGuard, IrqSave, KernelGuardIf, NoOp, NoPreempt, NoPreemptIrqSave};
+pub use guard::{
+    BaseGuard, CurrentCpuIf, IrqSave, KernelGuardIf, NoOp, NoPreempt, NoPreemptIrqSave,
+};
 /// Declares a static lock unchanged when lock statistics are disabled.
 #[cfg(not(feature = "stats"))]
 #[macro_export]
@@ -128,6 +130,11 @@ pub type SpinNoPreemptGuard<'a, T> = SpinLockGuard<'a, NoPreempt, T>;
 /// This is the safest option and can be used from any context
 /// including interrupt handlers.
 pub type SpinNoIrq<T> = SpinLock<NoPreemptIrqSave, T>;
+
+// SAFETY: `SpinNoIrq::new()` is an allocation-free template (plain lock state
+// around `UnsafeCell` storage); locks are constructed in place per CPU and
+// the per-CPU slot storage never drops them.
+unsafe impl<T: Send + 'static> kcpu_slot::StaticSlotValue for SpinNoIrq<T> {}
 
 /// Guard for [`SpinNoIrq`].
 pub type SpinNoIrqGuard<'a, T> = SpinLockGuard<'a, NoPreemptIrqSave, T>;

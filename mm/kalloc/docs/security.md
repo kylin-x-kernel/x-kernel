@@ -91,6 +91,11 @@ per-CPU guard 保护 metadata 并发，但不能修复 caller 伪造的 pointer�
 - object size/alignment 足以容纳 link；编译期断言验证 link 不超过最小 8 字节 class；
 - list mutation 期间 local IRQ 保持关闭，远程 CPU 不修改本 CPU list。
 
+crate-private `AllocLocalOwner` 持有 `IrqSave` 并作为所有 PCP/slab cache 操作的必需
+参数。cache 模块只在 owner 的可变借用范围内构造临时引用，不把引用返回给调用者；
+因此 raw per-CPU 可变访问集中在两个 owner-backed helper。该协议不支持 NMI 进入
+allocator，NMI 路径必须使用预分配存储。
+
 `GlobalAllocator::alloc_from_percpu_slab()` 和 `dealloc()` 建立 IRQ guard 并按
 `SizeClass` 路由；`with_object_cache!` 保持 enum class 与 `ObjectCache<N>` 一致。
 
@@ -187,6 +192,12 @@ alignment 与 allocation 时一致。null free 被接受，其他 provenance 不
 | ready flags | Release store / Acquire load | 并发重复初始化的高层协议错误 |
 | 各类 usage | per-CPU cumulative atomics；free Release / snapshot Acquire | 跨 CPU/跨种类线性化快照、allocator metadata publication、即时 wrong-kind free 检测 |
 | tracking map | `SpinNoIrq<GlobalState>` + per-CPU recursion guard | visitor 对 tracking state 的递归获取 |
+
+tracking recursion guard 使用 per-CPU `AtomicBool::swap`，并在读取标记前获取
+`NoPreemptIrqSave`。RAII 析构保证正常返回及 unwind 路径都清除原 CPU 的标记，避免
+旧的普通 bool 在迁移或提前退出后留在错误 CPU。代价是 tracking callback、backtrace
+和 tracking 锁期间均保持 IRQ/preemption disabled；这是 feature-gated 诊断成本，
+tracking 数据不可用于正常运行时延迟基线。
 
 既定嵌套锁顺序是 tracking state（启用时）→ `balloc` → `palloc`。byte heap 扩容是
 `balloc -> palloc`；其他路径不得持有 `palloc` 再获取 `balloc`。usage accounting 不增加

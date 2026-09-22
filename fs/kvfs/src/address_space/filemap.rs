@@ -57,8 +57,7 @@ impl AddressSpace {
             .checked_mul(PAGE_SIZE_4K as u64)
             .ok_or(VfsError::InvalidInput)?;
         let _invalidate_guard = self.invalidate_lock.read();
-        self.with_folio(index, |folio| {
-            let folio = folio.ok_or(VfsError::InvalidData)?;
+        self.with_folio_or_create(index, |folio| {
             let file_len = inode.size();
             if pos >= file_len {
                 return Err(VfsError::BadAddress);
@@ -212,11 +211,9 @@ impl AddressSpace {
             let prepared_end = pos.checked_add(step as u64).ok_or(VfsError::InvalidInput)?;
             self.ops
                 .write_begin(self, WriteBeginRequest::new(pos, step))?;
-            if prepared_end > visible_len {
+            let grew_cache = prepared_end > visible_len;
+            if grew_cache {
                 self.i_pages.resize_cached_folios(visible_len, prepared_end);
-                // Another iteration is reached only after `write_end` accepts
-                // this full range and publishes the same EOF under data_lock.
-                visible_len = prepared_end;
             }
             let copied = match self.with_folio_or_create(index, |folio| {
                 let data = folio.data();
@@ -228,7 +225,14 @@ impl AddressSpace {
             }) {
                 Ok(copied) => copied,
                 Err(error) => {
-                    let _ = self.ops.write_end(self, WriteEndRequest::new(pos, step, 0));
+                    if let Err(cancel_error) =
+                        self.ops.write_end(self, WriteEndRequest::new(pos, step, 0))
+                    {
+                        log::warn!(
+                            "failed to cancel buffered write at {pos} (len {step}): \
+                             {cancel_error:?}"
+                        );
+                    }
                     return Err(error);
                 }
             };
@@ -241,6 +245,17 @@ impl AddressSpace {
             if accepted < copied {
                 iter.revert(copied - accepted)?;
             }
+            // `write_end` publishes EOF as `pos + accepted`; roll the cache back
+            // to that same end so unaccepted bytes are not left cached and dirty
+            // beyond the visible size.
+            let accepted_end = pos
+                .checked_add(accepted as u64)
+                .ok_or(VfsError::InvalidInput)?;
+            if grew_cache && accepted_end < prepared_end {
+                self.i_pages
+                    .resize_cached_folios(prepared_end, accepted_end);
+            }
+            visible_len = visible_len.max(accepted_end);
             if accepted == 0 {
                 break;
             }

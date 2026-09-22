@@ -12,7 +12,13 @@ repository.workspace = true
 default = []
 
 [dependencies]
+kaddr_layout.workspace = true
+kbuild_config.workspace = true
 kcpu_id_map.workspace = true
+kiface.workspace = true
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86_64 = { workspace = true }
 
 [lints.clippy]
 new_without_default = "allow"

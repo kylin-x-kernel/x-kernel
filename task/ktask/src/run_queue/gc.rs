@@ -15,7 +15,7 @@ use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use khal::percpu::this_cpu_id;
 use kpoll::{PollRegistrations, PollSet};
 
-use super::{EXITED_TASKS, WAIT_FOR_EXIT, current_wait_for_exit};
+use super::{current_wait_for_exit, with_exited_tasks, with_wait_for_exit};
 use crate::{KCpuMask, KtaskRef, TaskInner, future::block_on};
 
 /// Pins a per-CPU GC task and initializes [`WAIT_FOR_EXIT`] for this CPU.
@@ -30,7 +30,7 @@ pub(super) fn spawn_gc_task(cpu_id: LogicalCpuId) -> KtaskRef {
     )
     .into_arc();
     gc_task.set_cpumask(KCpuMask::one_shot_logical(cpu_id));
-    WAIT_FOR_EXIT.with_current(|wait_for_exit| {
+    with_wait_for_exit(|wait_for_exit| {
         wait_for_exit.init_once(PollSet::new());
     });
     gc_task
@@ -39,11 +39,10 @@ pub(super) fn spawn_gc_task(cpu_id: LogicalCpuId) -> KtaskRef {
 pub(super) fn poll_gc(cx: &mut Context<'_>, registrations: &mut PollRegistrations) -> Poll<()> {
     loop {
         // Drop all exited tasks and recycle resources.
-        let n = EXITED_TASKS.with_current(|exited_tasks| exited_tasks.len());
+        let n = with_exited_tasks(|exited_tasks| exited_tasks.len());
         for _ in 0..n {
             // Do not do the slow drops in the critical section.
-            let Some(task) = EXITED_TASKS.with_current(|exited_tasks| exited_tasks.pop_front())
-            else {
+            let Some(task) = with_exited_tasks(|exited_tasks| exited_tasks.pop_front()) else {
                 continue;
             };
             match Arc::try_unwrap(task) {
@@ -54,7 +53,7 @@ pub(super) fn poll_gc(cx: &mut Context<'_>, registrations: &mut PollRegistration
                 Err(task) => {
                     // Otherwise (e.g, `switch_to` is not completed, held by the
                     // joiner, etc), push it back and wait for them to drop first.
-                    EXITED_TASKS.with_current(|exited_tasks| exited_tasks.push_back(task));
+                    with_exited_tasks(|exited_tasks| exited_tasks.push_back(task));
                 }
             }
         }
@@ -81,7 +80,7 @@ pub(super) fn poll_gc(cx: &mut Context<'_>, registrations: &mut PollRegistration
 
         // New tasks might be added during the above section, recheck it to
         // prevent us from sleeping indefinitely.
-        if EXITED_TASKS.with_current(|exited_tasks| exited_tasks.is_empty()) {
+        if with_exited_tasks(|exited_tasks| exited_tasks.is_empty()) {
             break;
         }
 

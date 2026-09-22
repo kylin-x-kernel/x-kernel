@@ -124,9 +124,14 @@ must use it carefully.
   `AtomicBool` fields, not the wrapper, provide synchronization between NMIs,
   timer interrupts and the watchdog task. The public type and methods remain
   unchanged, and no allocation or lock is added.
-- `WATCHDOG_TASK_QUEUE` is a per-CPU `Vec`.
-  Registration occurs only during per-CPU initialization, when migration is impossible;
-  NMI handlers only traverse it for reading.
+- `LockupDetection`'s task, IRQ, and NMI entry points take only shared
+  references; all state transitions go through atomic fields, so no overlapping
+  mutable reference is ever formed for the atomics.
+- The per-CPU watchdog task list is a one-time publication object: per-CPU
+  initialization exclusively writes the `Vec`, then publishes it with a
+  `Release` store once all registrations are complete. Periodic NMIs may only
+  traverse it after an `Acquire` observes publication, and only through a
+  shared slice.
 - The rendezvous uses global atomics (`PHASE`, `CAUSE_CPU`, and `ARRIVED_BITMAP`)
   and spinning, without taking locks in NMI context.
 - NMI paths never acquire ordinary IRQ spinlocks, avoiding self-deadlock when a
@@ -145,6 +150,9 @@ must use it carefully.
   detection is disabled, rather than failing silently.
 - **Snapshot reentry protection:** If `nmi_begin()` fails because another snapshot
   is in progress, skip the current dump.
+- **Publish before arming NMI:** The task list is permanently read-only once
+  published; periodic NMIs are armed only after publication, and a failed arming
+  does not reopen the registration window.
 - **Soft-lockup report rate limit:** At most one report per threshold interval.
 
 ## Drop and Resource Release

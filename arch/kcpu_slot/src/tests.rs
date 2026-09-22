@@ -6,7 +6,10 @@
 mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::*;
+    // The file module is `crate::tests` (lib.rs declares `mod tests;`), so the
+    // crate-root exports — including the `#[macro_export]` macros — resolve
+    // through `crate`, not `super`.
+    use crate::*;
 
     cpu_slot! {
         static TEST_SLOT: usize = 0;
@@ -25,7 +28,7 @@ mod tests {
     }
     // SAFETY: The test never migrates; the reported CPU and base are whatever
     // the caller chose for the duration of the test.
-    unsafe impl PinCurrentCpu for TestPin {
+    unsafe impl CpuPin for TestPin {
         fn current_cpu(&self) -> CpuId {
             self.cpu
         }
@@ -35,7 +38,35 @@ mod tests {
         }
     }
 
-    #[repr(align(64))]
+    /// A [`TestPin`] that also claims the stronger local-access capability.
+    struct TestLocalGuard(TestPin);
+    // SAFETY: The test never migrates and never runs IRQ handlers, which is
+    // exactly the capability this impl claims.
+    unsafe impl CpuPin for TestLocalGuard {
+        fn current_cpu(&self) -> CpuId {
+            self.0.current_cpu()
+        }
+
+        fn base(&self) -> usize {
+            self.0.base()
+        }
+    }
+    // SAFETY: See the `CpuPin` impl above.
+    unsafe impl CpuLocalGuard for TestLocalGuard {}
+
+    #[test]
+    fn area_stride_is_cache_line_aligned() {
+        for size in [1usize, 63, 64, 65, 128, 2322, 2368, 4096] {
+            let area_stride = stride(size);
+            assert!(area_stride >= size);
+            assert!(
+                area_stride.is_multiple_of(kaddr_layout::CPU_SLOT_AREA_ALIGN),
+                "stride({size}) = {area_stride} is not area-aligned"
+            );
+        }
+    }
+
+    #[repr(align(128))]
     struct Backing([u8; 256]);
 
     #[test]
@@ -59,12 +90,13 @@ mod tests {
 
         // The dynamic handle uses the CPU identity carried by the pin; the
         // architecture base is unrelated to this caller-owned chunk.
-        let pin = TestPin {
+        let guard = TestLocalGuard(TestPin {
             cpu: CpuId::new(1),
             base: 0,
-        };
+        });
+        assert_eq!(*slot.get(&guard).unwrap(), 11);
         // SAFETY: CPU 1 was initialized by `alloc` and the pin is pinned to it.
-        assert_eq!(unsafe { *slot.get(&pin).unwrap() }, 11);
+        assert_eq!(*unsafe { slot.get_unchecked(&guard.0) }.unwrap(), 11);
     }
 
     #[test]
@@ -74,25 +106,27 @@ mod tests {
         let slot = unsafe { CpuSlot::<usize>::from_offset_fn(|| 0) };
         let cell = unsafe { CpuSlotCell::<usize>::from_offset_fn(|| 0) };
         // SAFETY: The array is unique, aligned, initialized, and outlives the
-        // pin and the accesses below.
+        // guard and the accesses below.
         let mut area = [0usize; 8];
-        let pin = TestPin {
+        let mut guard = TestLocalGuard(TestPin {
             cpu: CpuId::new(0),
             base: area.as_mut_ptr() as usize,
-        };
-        // SAFETY: `area` is an initialized, writable CPU area and the pin is pinned.
+        });
+        // SAFETY: `area` is unique and no other reference to this slot exists.
+        *unsafe { slot.get_mut_unchecked(&guard) } = 42;
+        assert_eq!(*slot.get(&guard), 42);
+        cell.write(&guard, 7);
+        assert_eq!(cell.read(&guard), 7);
+
+        // The unchecked entries reach the same storage for a plain pin.
+        // SAFETY: `area` remains valid, and the references below do not
+        // outlive the exclusive uses in this test.
         unsafe {
-            *slot.get_mut(&pin) = 42;
+            *slot.get_mut_unchecked(&guard.0) = 43;
+            assert_eq!(*slot.get_unchecked(&guard.0), 43);
+            cell.write_unchecked(&guard.0, 8);
+            assert_eq!(cell.read_unchecked(&guard.0), 8);
         }
-        // SAFETY: `area` remains valid and exclusively owned for this test.
-        let got = unsafe { slot.get(&pin) };
-        assert_eq!(*got, 42);
-        // SAFETY: The cell is initialized and accessed through the same pin.
-        unsafe {
-            cell.write(&pin, 7);
-        }
-        // SAFETY: See above.
-        assert_eq!(unsafe { cell.read(&pin) }, 7);
     }
 
     #[test]
@@ -104,6 +138,26 @@ mod tests {
             unsafe { CpuSlotChunk::from_raw_parts(backing.0.as_mut_ptr(), 2, 100).unwrap() };
         let result = chunk.alloc::<u64, ()>(|_| Ok(0u64));
         assert!(matches!(result, Err(SlotInitError::Misaligned)));
+    }
+
+    #[test]
+    fn chunk_rejects_stride_that_breaks_area_alignment() {
+        // 192 is a multiple of 8 but not of the area alignment, so per-CPU
+        // objects would share cache lines across CPUs.
+        let mut backing = Backing([0; 256]);
+        // SAFETY: `backing` outlives the chunk and provides enough space.
+        let chunk =
+            unsafe { CpuSlotChunk::from_raw_parts(backing.0.as_mut_ptr(), 2, 192).unwrap() };
+        assert!(matches!(
+            chunk.alloc::<u64, ()>(|_| Ok(0u64)),
+            Err(SlotInitError::Misaligned)
+        ));
+    }
+
+    #[test]
+    fn dynamic_handle_is_sync() {
+        fn assert_sync<T: Sync>() {}
+        assert_sync::<DynamicCpuSlot<'static, usize>>();
     }
 
     #[test]

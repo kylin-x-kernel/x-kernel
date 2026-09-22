@@ -22,5 +22,5 @@ kiface = { workspace = true }
 kpoll = { workspace = true }
 kspin = { workspace = true }
 log = { workspace = true }
-percpu = { workspace = true }
+kcpu_slot = { workspace = true }
 unittest = { workspace = true }

@@ -4,8 +4,11 @@
 
 //! Minimal fixed-vector softirq foundation.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(any(unittest, feature = "irq_stat"))]
+use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::Ordering;
 
+use kcpu_slot::{CpuPin, cpu_slot};
 use kspin::{NoPreempt, NoPreemptIrqSave, SpinNoIrq};
 
 use crate::{
@@ -115,8 +118,10 @@ impl SoftirqVec {
 const SOFTIRQ_MAX_RESTART: usize = 10;
 const SOFTIRQ_VALID_MASK: usize = (1usize << SoftirqVec::COUNT) - 1;
 
-#[percpu::def_percpu]
-static SOFTIRQ_PENDING: AtomicUsize = AtomicUsize::new(0);
+cpu_slot! {
+    static SOFTIRQ_PENDING: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+}
 
 static SOFTIRQ_ACTIONS: SpinNoIrq<[Option<SoftirqAction>; SoftirqVec::COUNT]> =
     SpinNoIrq::new([None; SoftirqVec::COUNT]);
@@ -178,8 +183,15 @@ impl SoftirqCpuStats {
 }
 
 #[cfg(any(unittest, feature = "irq_stat"))]
-#[percpu::def_percpu]
-static SOFTIRQ_STATS: SoftirqCpuStats = SoftirqCpuStats::new();
+// SAFETY: every field is an `AtomicUsize`; copying the all-zero template
+// creates independent atomic objects without ownership or drop state.
+unsafe impl kcpu_slot::StaticSlotValue for SoftirqCpuStats {}
+
+#[cfg(any(unittest, feature = "irq_stat"))]
+cpu_slot! {
+    static SOFTIRQ_STATS: crate::bottom_half::softirq::SoftirqCpuStats =
+        crate::bottom_half::softirq::SoftirqCpuStats::new();
+}
 
 /// Softirq diagnostic counters.
 #[cfg(any(unittest, feature = "irq_stat"))]
@@ -244,9 +256,9 @@ pub fn is_softirq_open(vec: SoftirqVec) -> bool {
 /// wake because their exit paths are responsible for draining or deferring the
 /// pending work.
 pub fn raise_softirq(vec: SoftirqVec) {
-    let _guard = NoPreemptIrqSave::new();
-    if mark_softirq_pending(vec) {
-        wake_softirqd_if_needed();
+    let guard = NoPreemptIrqSave::new();
+    if mark_softirq_pending(&guard, vec) {
+        wake_softirqd_if_needed(&guard);
     }
 }
 
@@ -254,19 +266,19 @@ pub fn raise_softirq(vec: SoftirqVec) {
 ///
 /// The function still pins the current CPU before touching per-CPU state.
 pub fn raise_softirq_irqoff(vec: SoftirqVec) {
-    let _guard = NoPreempt::new();
+    let guard = NoPreempt::new();
 
     #[cfg(any(unittest, feature = "irq_context_debug"))]
     let restore_irq_enabled = karch::local_irq_enabled();
     #[cfg(any(unittest, feature = "irq_context_debug"))]
     if restore_irq_enabled {
-        let warning_count = record_irqoff_misuse_warning();
+        let warning_count = record_irqoff_misuse_warning(&guard);
         warn!("raise_softirq_irqoff called with local IRQs enabled ({warning_count} warnings)");
         karch::disable_local_irq();
     }
 
-    if mark_softirq_pending(vec) {
-        wake_softirqd_if_needed();
+    if mark_softirq_pending(&guard, vec) {
+        wake_softirqd_if_needed(&guard);
     }
 
     #[cfg(any(unittest, feature = "irq_context_debug"))]
@@ -277,8 +289,8 @@ pub fn raise_softirq_irqoff(vec: SoftirqVec) {
 
 /// Returns the current CPU's pending softirq bit mask.
 pub fn local_softirq_pending() -> usize {
-    let _guard = NoPreemptIrqSave::new();
-    pending_ref().load(Ordering::Acquire) & SOFTIRQ_VALID_MASK
+    let guard = NoPreemptIrqSave::new();
+    SOFTIRQ_PENDING.current(&guard).load(Ordering::Acquire) & SOFTIRQ_VALID_MASK
 }
 
 /// Runs pending softirqs on the current CPU when context permits it.
@@ -295,12 +307,13 @@ pub(crate) fn run_pending_softirqs_irqoff() -> SoftirqRunResult {
 }
 
 fn run_pending_softirqs_irqoff_with_resched(needs_resched: impl Fn() -> bool) -> SoftirqRunResult {
-    let _guard = NoPreempt::new();
-    if pending_ref().load(Ordering::Acquire) & SOFTIRQ_VALID_MASK == 0 {
+    let guard = NoPreempt::new();
+    let pending_slot = SOFTIRQ_PENDING.current(&guard);
+    if pending_slot.load(Ordering::Acquire) & SOFTIRQ_VALID_MASK == 0 {
         return SoftirqRunResult::NoPending;
     }
     if !can_run_softirqs() {
-        record_context_deferred_run();
+        record_context_deferred_run(&guard);
         return SoftirqRunResult::Deferred;
     }
 
@@ -308,7 +321,7 @@ fn run_pending_softirqs_irqoff_with_resched(needs_resched: impl Fn() -> bool) ->
     let mut ran_any = false;
 
     loop {
-        let pending = pending_ref().swap(0, Ordering::Acquire) & SOFTIRQ_VALID_MASK;
+        let pending = pending_slot.swap(0, Ordering::Acquire) & SOFTIRQ_VALID_MASK;
         if pending == 0 {
             return if ran_any {
                 SoftirqRunResult::Ran
@@ -317,20 +330,20 @@ fn run_pending_softirqs_irqoff_with_resched(needs_resched: impl Fn() -> bool) ->
             };
         }
 
-        run_pending_batch(pending);
+        run_pending_batch(&guard, pending);
         ran_any = true;
 
         restarts_left -= 1;
-        let remaining = pending_ref().load(Ordering::Acquire) & SOFTIRQ_VALID_MASK;
+        let remaining = pending_slot.load(Ordering::Acquire) & SOFTIRQ_VALID_MASK;
         if remaining == 0 {
             return SoftirqRunResult::Ran;
         }
         if restarts_left == 0 {
-            record_restart_limit_hit();
+            record_restart_limit_hit(&guard);
         }
         // Finish the current batch before yielding so even a busy daemon makes progress.
         if restarts_left == 0 || needs_resched() {
-            wake_softirqd();
+            wake_softirqd(&guard);
             return SoftirqRunResult::Deferred;
         }
     }
@@ -341,9 +354,9 @@ fn run_pending_softirqs_irqoff_with_resched(needs_resched: impl Fn() -> bool) ->
 pub(crate) fn softirq_diagnostics() -> SoftirqDiagnostics {
     let mut diagnostics = SoftirqDiagnostics::default();
     for cpu in 0..kbuild_config::NR_CPUS {
-        // SAFETY: `cpu` is bounded by `NR_CPUS`, the same compile-time bound
-        // used by the per-CPU storage implementation.
-        unsafe { SOFTIRQ_STATS.remote_ref_raw(cpu) }.add_to(&mut diagnostics);
+        if let Some(area) = kcpu_slot::area(kcpu_slot::CpuId::new(cpu)) {
+            SOFTIRQ_STATS.at(&area).add_to(&mut diagnostics);
+        }
     }
     diagnostics
 }
@@ -352,9 +365,9 @@ pub(crate) fn softirq_diagnostics() -> SoftirqDiagnostics {
 #[cfg(any(unittest, feature = "irq_stat"))]
 pub(crate) fn clear_softirq_diagnostics() {
     for cpu in 0..kbuild_config::NR_CPUS {
-        // SAFETY: `cpu` is bounded by `NR_CPUS`, the same compile-time bound
-        // used by the per-CPU storage implementation.
-        unsafe { SOFTIRQ_STATS.remote_ref_raw(cpu) }.clear();
+        if let Some(area) = kcpu_slot::area(kcpu_slot::CpuId::new(cpu)) {
+            SOFTIRQ_STATS.at(&area).clear();
+        }
     }
 }
 
@@ -384,8 +397,10 @@ pub fn softirq_action_matches_for_tests(vec: SoftirqVec, action: SoftirqAction) 
 /// Clears a pending softirq bit on the current CPU.
 #[cfg(unittest)]
 pub fn clear_softirq_pending_for_tests(vec: SoftirqVec) {
-    let _guard = NoPreemptIrqSave::new();
-    pending_ref().fetch_and(!vec.bit(), Ordering::Release);
+    let guard = NoPreemptIrqSave::new();
+    SOFTIRQ_PENDING
+        .current(&guard)
+        .fetch_and(!vec.bit(), Ordering::Release);
 }
 
 #[cfg(unittest)]
@@ -453,24 +468,26 @@ fn run_hardirq_exit_softirqs(_ctx: DeferredRunContext) {
 }
 
 #[inline]
-fn wake_softirqd_if_needed() {
+fn wake_softirqd_if_needed(pin: &impl CpuPin) {
     let snapshot = context::irq_context_snapshot_irqoff();
     if snapshot.is_in_interrupt_context() {
-        record_daemon_wake_suppressed_context();
+        record_daemon_wake_suppressed_context(pin);
         return;
     }
-    wake_softirqd();
+    wake_softirqd(pin);
 }
 
 #[inline]
-fn mark_softirq_pending(vec: SoftirqVec) -> bool {
-    let previous = pending_ref().fetch_or(vec.bit(), Ordering::Release);
+fn mark_softirq_pending(pin: &impl CpuPin, vec: SoftirqVec) -> bool {
+    let previous = SOFTIRQ_PENDING
+        .current(pin)
+        .fetch_or(vec.bit(), Ordering::Release);
     previous & SOFTIRQ_VALID_MASK == 0
 }
 
 #[inline]
-fn wake_softirqd() {
-    record_daemon_wake_request();
+fn wake_softirqd(pin: &impl CpuPin) {
+    record_daemon_wake_request(pin);
 
     #[cfg(unittest)]
     if SOFTIRQ_DAEMON_WAKE_ENABLED.load(Ordering::Acquire) == 0 {
@@ -486,7 +503,16 @@ fn can_run_softirqs() -> bool {
     !snapshot.is_in_interrupt_context()
 }
 
-fn run_pending_batch(mut pending: usize) {
+/// Runs one batch of pending softirq vectors with local IRQs enabled.
+///
+/// `pin` is only used to select the current CPU's per-CPU slot area for the
+/// `record_*` helpers. It is not a `CpuLocalGuard`: local IRQs are enabled
+/// below, so an IRQ handler may re-enter and touch the same slots. That is
+/// sound only because every slot reached through `pin` here holds an atomic
+/// payload (`CpuSlot::current` requires `T: Sync`), which is safe for IRQ
+/// re-entry. Any non-atomic slot access added to this region must re-acquire a
+/// fresh pin after `enable_local_irq()` instead of reusing this one.
+fn run_pending_batch(pin: &impl CpuPin, mut pending: usize) {
     let actions = *SOFTIRQ_ACTIONS.lock();
     let _softirq_context = SoftIrqContextGuard::enter_irqoff();
     karch::enable_local_irq();
@@ -499,7 +525,7 @@ fn run_pending_batch(mut pending: usize) {
             continue;
         };
         let Some(action) = actions[vec.as_usize()] else {
-            record_unhandled_vector_warning();
+            record_unhandled_vector_warning(pin);
             warn!("softirq vector {} has no registered action", vec.as_usize());
             continue;
         };
@@ -512,7 +538,7 @@ fn run_pending_batch(mut pending: usize) {
         {
             let after = context::irq_context_snapshot();
             if after != before {
-                let warning_count = record_context_leak_warning();
+                let warning_count = record_context_leak_warning(pin);
                 warn!(
                     "softirq vector {} leaked context state: before={:?} after={:?} \
                      ({warning_count} warnings)",
@@ -525,25 +551,16 @@ fn run_pending_batch(mut pending: usize) {
                 karch::enable_local_irq();
             }
         }
-        record_softirq_run();
+        record_softirq_run(pin);
     }
 
     karch::disable_local_irq();
 }
 
-#[inline]
-fn pending_ref() -> &'static AtomicUsize {
-    // SAFETY: callers pin the current CPU before accessing this per-CPU atomic
-    // slot. The atomic itself handles IRQ re-entry publication.
-    unsafe { SOFTIRQ_PENDING.current_ref_raw() }
-}
-
 #[cfg(any(unittest, feature = "irq_stat"))]
 #[inline]
-fn softirq_stats_current() -> &'static SoftirqCpuStats {
-    // SAFETY: callers are already running on a valid CPU; the returned slot is
-    // per-CPU and all fields are atomic for interrupt re-entry publication.
-    unsafe { SOFTIRQ_STATS.current_ref_raw() }
+fn with_softirq_stats<R>(pin: &impl CpuPin, f: impl FnOnce(&SoftirqCpuStats) -> R) -> R {
+    f(SOFTIRQ_STATS.current(pin))
 }
 
 #[cfg(any(unittest, feature = "irq_stat"))]
@@ -553,47 +570,69 @@ fn softirq_stat_inc(counter: &AtomicUsize) -> usize {
 }
 
 #[inline]
-fn record_softirq_run() {
+fn record_softirq_run(pin: &impl CpuPin) {
     #[cfg(any(unittest, feature = "irq_stat"))]
-    softirq_stat_inc(&softirq_stats_current().runs);
+    with_softirq_stats(pin, |stats| softirq_stat_inc(&stats.runs));
+
+    #[cfg(not(any(unittest, feature = "irq_stat")))]
+    let _ = pin;
 }
 
 #[inline]
-fn record_restart_limit_hit() {
+fn record_restart_limit_hit(pin: &impl CpuPin) {
     #[cfg(any(unittest, feature = "irq_stat"))]
-    softirq_stat_inc(&softirq_stats_current().restart_limit_hits);
+    with_softirq_stats(pin, |stats| softirq_stat_inc(&stats.restart_limit_hits));
+
+    #[cfg(not(any(unittest, feature = "irq_stat")))]
+    let _ = pin;
 }
 
 #[inline]
-fn record_unhandled_vector_warning() {
+fn record_unhandled_vector_warning(pin: &impl CpuPin) {
     #[cfg(any(unittest, feature = "irq_stat"))]
-    softirq_stat_inc(&softirq_stats_current().unhandled_vector_warnings);
+    with_softirq_stats(pin, |stats| {
+        softirq_stat_inc(&stats.unhandled_vector_warnings)
+    });
+
+    #[cfg(not(any(unittest, feature = "irq_stat")))]
+    let _ = pin;
 }
 
 #[inline]
-fn record_daemon_wake_request() {
+fn record_daemon_wake_request(pin: &impl CpuPin) {
     #[cfg(any(unittest, feature = "irq_stat"))]
-    softirq_stat_inc(&softirq_stats_current().daemon_wake_requests);
+    with_softirq_stats(pin, |stats| softirq_stat_inc(&stats.daemon_wake_requests));
+
+    #[cfg(not(any(unittest, feature = "irq_stat")))]
+    let _ = pin;
 }
 
 #[inline]
-fn record_daemon_wake_suppressed_context() {
+fn record_daemon_wake_suppressed_context(pin: &impl CpuPin) {
     #[cfg(any(unittest, feature = "irq_stat"))]
-    softirq_stat_inc(&softirq_stats_current().daemon_wake_suppressed_context);
+    with_softirq_stats(pin, |stats| {
+        softirq_stat_inc(&stats.daemon_wake_suppressed_context)
+    });
+
+    #[cfg(not(any(unittest, feature = "irq_stat")))]
+    let _ = pin;
 }
 
 #[inline]
-fn record_context_deferred_run() {
+fn record_context_deferred_run(pin: &impl CpuPin) {
     #[cfg(any(unittest, feature = "irq_stat"))]
-    softirq_stat_inc(&softirq_stats_current().context_deferred_runs);
+    with_softirq_stats(pin, |stats| softirq_stat_inc(&stats.context_deferred_runs));
+
+    #[cfg(not(any(unittest, feature = "irq_stat")))]
+    let _ = pin;
 }
 
 #[cfg(any(unittest, feature = "irq_context_debug"))]
 #[inline]
-fn record_context_leak_warning() -> usize {
+fn record_context_leak_warning(pin: &impl CpuPin) -> usize {
     #[cfg(any(unittest, feature = "irq_stat"))]
     {
-        softirq_stat_inc(&softirq_stats_current().context_leak_warnings)
+        with_softirq_stats(pin, |stats| softirq_stat_inc(&stats.context_leak_warnings))
     }
 
     #[cfg(not(any(unittest, feature = "irq_stat")))]
@@ -604,10 +643,10 @@ fn record_context_leak_warning() -> usize {
 
 #[cfg(any(unittest, feature = "irq_context_debug"))]
 #[inline]
-fn record_irqoff_misuse_warning() -> usize {
+fn record_irqoff_misuse_warning(pin: &impl CpuPin) -> usize {
     #[cfg(any(unittest, feature = "irq_stat"))]
     {
-        softirq_stat_inc(&softirq_stats_current().irqoff_misuse_warnings)
+        with_softirq_stats(pin, |stats| softirq_stat_inc(&stats.irqoff_misuse_warnings))
     }
 
     #[cfg(not(any(unittest, feature = "irq_stat")))]

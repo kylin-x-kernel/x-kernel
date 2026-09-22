@@ -10,12 +10,42 @@ use core::{
 };
 
 use backtrace::Backtrace;
-use kspin::SpinNoIrq;
+use kcpu_slot::cpu_slot_cell;
+use kspin::{NoPreemptIrqSave, SpinNoIrq};
 
 pub(crate) static TRACKING_ENABLED: AtomicBool = AtomicBool::new(false);
 
-#[percpu::def_percpu]
-pub(crate) static IN_GLOBAL_ALLOCATOR: bool = false;
+cpu_slot_cell! {
+    pub(crate) static IN_GLOBAL_ALLOCATOR: AtomicBool = AtomicBool::new(false);
+}
+
+/// Pins diagnostic tracking to one CPU and restores its recursion marker.
+///
+/// Tracking deliberately holds IRQs and preemption disabled across the
+/// callback. It is a diagnostic-only feature, and this cost avoids migration
+/// or interrupt recursion while allocation itself may recursively allocate.
+struct TrackingRecursionGuard {
+    pin: NoPreemptIrqSave,
+}
+
+impl TrackingRecursionGuard {
+    fn try_enter() -> Option<Self> {
+        let pin = NoPreemptIrqSave::new();
+        // The guard fixes the current CPU for the returned reference; the slot
+        // contains an atomic, so shared access is valid across readers.
+        let marker = IN_GLOBAL_ALLOCATOR.get(&pin);
+        (!marker.swap(true, Ordering::AcqRel)).then_some(Self { pin })
+    }
+}
+
+impl Drop for TrackingRecursionGuard {
+    fn drop(&mut self) {
+        // `self.pin` still fixes this destructor to the CPU whose marker was
+        // set, and the atomic permits shared concurrent access.
+        let marker = IN_GLOBAL_ALLOCATOR.get(&self.pin);
+        marker.store(false, Ordering::Release);
+    }
+}
 
 /// Metadata for each allocation made by the global allocator.
 #[derive(Debug)]
@@ -55,17 +85,14 @@ pub fn tracking_enabled() -> bool {
 }
 
 pub(crate) fn with_state<R>(f: impl FnOnce(Option<&mut GlobalState>) -> R) -> R {
-    IN_GLOBAL_ALLOCATOR.with_current(|in_global| {
-        if *in_global || !tracking_enabled() {
-            f(None)
-        } else {
-            *in_global = true;
-            let mut state = STATE.lock();
-            let result = f(Some(&mut state));
-            *in_global = false;
-            result
-        }
-    })
+    if !tracking_enabled() {
+        return f(None);
+    }
+    let Some(_recursion_guard) = TrackingRecursionGuard::try_enter() else {
+        return f(None);
+    };
+    let mut state = STATE.lock();
+    f(Some(&mut state))
 }
 
 /// Returns the current generation of the global allocator.

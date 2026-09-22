@@ -33,7 +33,10 @@ pub struct WritebackStats {
 ///
 /// `completed_bytes` is always a prefix of the submitted range. An error may
 /// therefore report progress made by an earlier filesystem transaction while
-/// leaving only the uncompleted suffix dirty for retry.
+/// leaving only the uncompleted suffix dirty for retry. A successful outcome
+/// may likewise report a short prefix, which is treated as progress: folios
+/// fully inside the prefix finish writeback and the remaining suffix stays
+/// dirty for a later pass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WritebackRangeOutcome {
     completed_bytes: usize,
@@ -219,6 +222,9 @@ impl MappingPages {
             let valid_len = visible_len
                 .saturating_sub(page_start)
                 .min(PAGE_SIZE_4K as u64) as usize;
+            if valid_len == 0 {
+                continue;
+            }
             let Some(mut locked) = self.start_writeback_for_candidate(index, &folio, &mut stats)
             else {
                 continue;
@@ -271,9 +277,6 @@ impl MappingPages {
                     .unwrap_or_else(|error| WritebackRangeOutcome::failed(0, error));
                 let (completed_bytes, error) = if outcome.completed_bytes() > batch_data.len() {
                     (0, Some(KError::InvalidInput))
-                } else if outcome.error().is_none() && outcome.completed_bytes() != batch_data.len()
-                {
-                    (outcome.completed_bytes(), Some(KError::InvalidInput))
                 } else {
                     (outcome.completed_bytes(), outcome.error())
                 };

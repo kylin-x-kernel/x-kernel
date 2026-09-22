@@ -41,7 +41,6 @@ mod tests_timer_routing;
 mod tests_timer_irq;
 
 #[macro_use]
-mod macros;
 mod api;
 mod irq_wait;
 mod run_queue;

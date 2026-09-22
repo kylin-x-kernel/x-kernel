@@ -107,6 +107,17 @@ pub const SIGNAL_TRAMPOLINE: usize = CURRENT_USER_LAYOUT.signal_trampoline;
 pub const USER_STACK_TOP: usize = CURRENT_USER_LAYOUT.user_stack_top;
 pub const USER_STACK_SIZE: usize = CURRENT_USER_LAYOUT.user_stack_size;
 
+/// Alignment of the per-CPU slot areas reserved by the linker.
+///
+/// Both the `_cpu_slot_area_stride` and `_cpu_slot_area_start` linker values are
+/// rounded up to this alignment, and it bounds the largest data-cache line the
+/// kernel supports. Keeping the stride and every area base a multiple of it
+/// guarantees that no two CPU areas ever share a cache line, so a lock word in
+/// one CPU's area cannot false-share with another CPU's data. The linker-script
+/// generator substitutes the same constant, so the Rust layout and the linker
+/// calculation cannot drift.
+pub const CPU_SLOT_AREA_ALIGN: usize = 128;
+
 /// Boot-only MMIO slots are sized to a 2 MiB block so the early page-table
 /// layout can reserve devices on a coarse, architecture-friendly boundary
 /// without encoding full physical addresses into virtual addresses.
@@ -117,6 +128,9 @@ pub const BOOT_UART_SLOT_VADDR: usize = BOOT_IO_VADDR + BOOT_UART_SLOT * BOOT_IO
 const fn is_power_of_two(value: usize) -> bool {
     value != 0 && (value & (value - 1)) == 0
 }
+
+const _: () = assert!(is_power_of_two(CPU_SLOT_AREA_ALIGN));
+const _: () = assert!(CPU_SLOT_AREA_ALIGN >= 64);
 
 const _: () = assert!(is_power_of_two(BOOT_IO_SLOT_SIZE));
 const _: () = assert!(BOOT_IO_VSIZE == 0 || BOOT_IO_SLOT_SIZE <= BOOT_IO_VSIZE);

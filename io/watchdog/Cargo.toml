@@ -20,7 +20,7 @@ kspin.workspace = true
 ktask = { workspace = true, features = ["watchdog"] }
 kwork = { workspace = true }
 log.workspace = true
-percpu.workspace = true
+kcpu_slot.workspace = true
 kbuild_config = { workspace = true }
 kcpu_id_map = { workspace = true }
 unittest.workspace = true

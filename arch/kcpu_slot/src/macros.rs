@@ -61,14 +61,28 @@ macro_rules! __cpu_slot_symbol_offset {
 }
 
 /// Declares a typed immutable/mutable per-CPU slot template.
+///
+/// `$ty` and `$value` are expanded inside a generated wrapper module that
+/// does **not** inherit the invocation site's lexical scope — anchor local
+/// types with `super::` or absolute paths; primitives and crate-rooted paths
+/// work as-is.
 #[macro_export]
 macro_rules! cpu_slot {
     ($(#[$meta:meta])* $vis:vis static $name:ident : $ty:ty = $value:expr $(;)?) => {
         #[allow(non_snake_case, dead_code)]
         mod $name {
+            // The template is never read by Rust code - only its link-time
+            // symbol offset matters - so the wrapper may be `Sync` for any
+            // payload (per-CPU areas are filled in place per CPU).
+            #[repr(transparent)]
+            pub struct Template<T: $crate::StaticSlotValue>(::core::cell::UnsafeCell<T>);
+            unsafe impl<T: $crate::StaticSlotValue> Sync for Template<T> {}
+
             #[used]
             #[unsafe(link_section = ".cpu_slot.template")]
-            pub static TEMPLATE: $ty = $value;
+            pub static TEMPLATE: Template<$ty> = Template(::core::cell::UnsafeCell::new(
+                $value,
+            ));
 
             #[inline]
             pub fn offset() -> usize {
@@ -84,14 +98,28 @@ macro_rules! cpu_slot {
 }
 
 /// Declares an interior-mutable per-CPU slot template.
+///
+/// `$ty` and `$value` are expanded inside a generated wrapper module that
+/// does **not** inherit the invocation site's lexical scope — anchor local
+/// types with `super::` or absolute paths; primitives and crate-rooted paths
+/// work as-is.
 #[macro_export]
 macro_rules! cpu_slot_cell {
     ($(#[$meta:meta])* $vis:vis static $name:ident : $ty:ty = $value:expr $(;)?) => {
         #[allow(non_snake_case, dead_code)]
         mod $name {
+            // The template is never read by Rust code - only its link-time
+            // symbol offset matters - so the wrapper may be `Sync` for any
+            // payload (per-CPU areas are filled in place per CPU).
+            #[repr(transparent)]
+            pub struct Template<T: $crate::StaticSlotValue>(::core::cell::UnsafeCell<T>);
+            unsafe impl<T: $crate::StaticSlotValue> Sync for Template<T> {}
+
             #[used]
             #[unsafe(link_section = ".cpu_slot.template")]
-            pub static TEMPLATE: $ty = $value;
+            pub static TEMPLATE: Template<$ty> = Template(::core::cell::UnsafeCell::new(
+                $value,
+            ));
 
             #[inline]
             pub fn offset() -> usize {
@@ -102,6 +130,35 @@ macro_rules! cpu_slot_cell {
             // SAFETY: `$name::offset` is this module's own offset function for a
             // `.cpu_slot.template` symbol, so it satisfies `from_offset_fn`'s
             // precondition by construction.
+            unsafe { $crate::CpuSlotCell::from_offset_fn($name::offset) };
+    };
+}
+
+/// Declares an interior-mutable slot with an explicitly certified initializer.
+///
+/// Use this only when template safety belongs to the exact initializer rather
+/// than to every value of the payload type, such as an empty `Vec` or an
+/// uninitialized `LazyInit`.
+#[macro_export]
+macro_rules! cpu_slot_cell_with_template {
+    ($(#[$meta:meta])* $vis:vis static $name:ident : $ty:ty = unsafe { $value:expr } $(;)?) => {
+        #[allow(non_snake_case, dead_code)]
+        mod $name {
+            #[repr(transparent)]
+            pub struct Template<T>(::core::cell::UnsafeCell<T>);
+            unsafe impl<T> Sync for Template<T> {}
+
+            #[used]
+            #[unsafe(link_section = ".cpu_slot.template")]
+            pub static TEMPLATE: Template<$ty> = Template(::core::cell::UnsafeCell::new($value));
+
+            #[inline]
+            pub fn offset() -> usize {
+                $crate::__cpu_slot_symbol_offset!(TEMPLATE)
+            }
+        }
+        $(#[$meta])* #[allow(dead_code)] $vis static $name: $crate::CpuSlotCell<$ty> =
+            // SAFETY: the offset names the certified template above.
             unsafe { $crate::CpuSlotCell::from_offset_fn($name::offset) };
     };
 }

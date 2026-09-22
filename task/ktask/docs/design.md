@@ -66,7 +66,6 @@ The analysis covers the entire crate, including feature-gated code and tests.
 task/ktask/
 ├── src/
 │   ├── lib.rs                 # exports and feature overview
-│   ├── macros.rs              # crate-local percpu_static!
 │   ├── api.rs                 # spawn / yield / sleep / affinity / exit / tick
 │   ├── task.rs                # TaskInner / CurrentTask / state / context
 │   ├── irq_wait.rs            # kirq::IrqSyncWaitIf provider
@@ -455,10 +454,10 @@ under its CPU lock. Context switch, block/exit/migrate, priority change, and loc
 wake IPI only sets `need_resched` (same as before the periodic-tick change).
 IRQ-tail `peer_preempts_curr` decides whether to switch; a failed probe arms
 the remaining-request backup hrtick in `preempt_resched`. Do not
-`account` / `refresh` the dest RQ from the IPI: that aliases the waker's
-remote `&mut RunQueue` and can reprogram or disarm the schedule slot, leaving
-a busy home idle for a full request. Because a oneshot/NOHZ CPU may have
-stopped its clock entirely, `smp` without `ipi` cannot reliably advance a
+`account` / `refresh` the dest RQ from the IPI: that races the waker's remote
+run-queue critical section and can reprogram or disarm the schedule slot,
+leaving a busy home idle for a full request. Because a oneshot/NOHZ CPU may
+have stopped its clock entirely, `smp` without `ipi` cannot reliably advance a
 remote runnable task. `ktask` rejects that configuration at compile time and
 does not offer a fake local fallback.
 
@@ -477,6 +476,25 @@ NOHZ, lone-runner wall time is flushed into EEVDF `curr` via
 not use a stale V. `last_accounted_ns` is updated only while holding that
 RQ's scheduler `SpinRaw`, so a remote wake flush and local timer
 `account_current_runtime` cannot double-count or drop the same wall interval.
+The field is an `AtomicU64` solely to provide interior mutability through the
+shared `&RunQueue`; its `Relaxed` load/store supplies no synchronization,
+which still comes entirely from that same scheduler `SpinRaw`. The run-queue
+registry and remote `KRunQueueRef` publish only a shared `&RunQueue`, so
+remote mutation goes through the RQ lock or atomic fields and never creates a
+cross-CPU whole-object `&'static mut RunQueue`.
+
+The local `CurrentRunQueueRef` likewise holds only `&RunQueue`; its guard
+expresses the execution-context constraint, not whole-object uniqueness.
+Scheduler algorithm state is mutated through `SpinRaw<Scheduler>`, and load
+snapshots / the account epoch use atomic interior mutability, so neither local
+nor remote access forms a long-lived `&mut RunQueue`.
+
+The exited-task queue and `PREV_TASK` each use `SpinNoIrq` inside their
+per-CPU slot. Scheduling, GC, and the context-switch continuation only
+clear/push/pop/clone/replace within the short critical section and never
+return a long-lived `&mut VecDeque` or `&mut Weak` out of the slot. The outer
+short `NoPreempt` only prevents migration while resolving the current-CPU
+slot; the inner lock provides actual object exclusivity.
 
 Owned timer callbacks run in hard IRQ / local-IRQ-off context and must be short
 and non-blocking. Repetition is a handler policy expressed with `TimerControl`:

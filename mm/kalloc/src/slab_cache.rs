@@ -20,6 +20,7 @@ use core::{
 };
 
 use alloc_engine::{AllocError, AllocResult, ByteAllocator, SizeClass};
+use kcpu_slot::cpu_slot_cell;
 use memaddr::PAGE_SIZE_4K;
 
 /// Target object bytes in one refill or drain batch.
@@ -274,66 +275,98 @@ impl PerCpuSlabCache {
     }
 }
 
-#[percpu::def_percpu]
-static PERCPU_SLAB_CACHE: PerCpuSlabCache = PerCpuSlabCache::new();
+// SAFETY: `new()` contains only empty fixed-capacity object caches; no
+// allocation or owned object is present in the copied template.
+unsafe impl kcpu_slot::StaticSlotValue for PerCpuSlabCache {}
+
+cpu_slot_cell! {
+    static PERCPU_SLAB_CACHE: crate::slab_cache::PerCpuSlabCache =
+        crate::slab_cache::PerCpuSlabCache::new();
+}
 
 /// Pop an object from the current CPU cache.
 ///
-/// # Safety
-///
-/// Local IRQs must remain disabled for the entire call so an interrupt cannot
-/// obtain an aliasing mutable reference to this CPU's cache.
+/// The owner keeps this operation pinned with local IRQs disabled.
 #[inline]
-pub(crate) unsafe fn try_alloc(size_class: SizeClass) -> Option<NonNull<u8>> {
-    PERCPU_SLAB_CACHE.with_current(|cache| cache.try_alloc(size_class))
+pub(crate) fn try_alloc(
+    owner: &mut crate::AllocLocalOwner,
+    size_class: SizeClass,
+) -> Option<NonNull<u8>> {
+    let pin = owner.guard();
+    // SAFETY: `owner` proves exclusive access to this CPU's slab cache.
+    unsafe {
+        PERCPU_SLAB_CACHE
+            .get_mut_unchecked(pin)
+            .try_alloc(size_class)
+    }
 }
 
 /// Cache a freed object on the current CPU.
 ///
 /// # Safety
 ///
-/// Local IRQs must remain disabled for the entire call. `object` must be a
-/// live allocation made with the canonical layout for `size_class`, and the
-/// caller must have ended all access to it.
+/// `object` must be a live allocation made with the canonical layout for
+/// `size_class`, and the caller must have ended all access to it. The owner
+/// supplies the current-CPU exclusion requirement.
 #[inline]
-pub(crate) unsafe fn try_free(size_class: SizeClass, object: NonNull<u8>) -> bool {
-    PERCPU_SLAB_CACHE.with_current(|cache| {
-        // SAFETY: forwarded from this function's caller.
-        unsafe { cache.try_free(size_class, object) }.is_ok()
-    })
+pub(crate) unsafe fn try_free(
+    owner: &mut crate::AllocLocalOwner,
+    size_class: SizeClass,
+    object: NonNull<u8>,
+) -> bool {
+    let pin = owner.guard();
+    // SAFETY: the pointer provenance contract is forwarded from this
+    // function's caller; `owner` establishes exclusive local cache access.
+    unsafe {
+        PERCPU_SLAB_CACHE
+            .get_mut_unchecked(pin)
+            .try_free(size_class, object)
+    }
+    .is_ok()
 }
 
 /// Refill the current CPU cache while holding the central allocator lock.
 ///
 /// # Safety
 ///
-/// Local IRQs must remain disabled for the entire call. `allocator` must be
-/// the central byte allocator used for all objects in these caches.
+/// `allocator` must be the central byte allocator used for all objects in
+/// these caches. The owner supplies the current-CPU exclusion requirement.
 pub(crate) unsafe fn refill_cache<A: ByteAllocator>(
+    owner: &mut crate::AllocLocalOwner,
     size_class: SizeClass,
     allocator: &mut A,
 ) -> AllocResult<NonNull<u8>> {
-    PERCPU_SLAB_CACHE
-        .with_current(|cache| cache.refill(size_class, allocator))
-        .ok_or(AllocError::NoMemory)
+    let pin = owner.guard();
+    // SAFETY: `owner` proves exclusive access to this CPU's slab cache.
+    unsafe {
+        PERCPU_SLAB_CACHE
+            .get_mut_unchecked(pin)
+            .refill(size_class, allocator)
+    }
+    .ok_or(AllocError::NoMemory)
 }
 
 /// Drain an overfull current-CPU cache while holding the central lock.
 ///
 /// # Safety
 ///
-/// Local IRQs must remain disabled for the entire call. `object` must satisfy
-/// [`try_free`]'s pointer contract, and `allocator` must be the central byte
-/// allocator that supplied every cached object.
+/// `object` must satisfy [`try_free`]'s pointer contract, and `allocator` must
+/// be the central byte allocator that supplied every cached object. The owner
+/// supplies the current-CPU exclusion requirement.
 pub(crate) unsafe fn drain_cache<A: ByteAllocator>(
+    owner: &mut crate::AllocLocalOwner,
     size_class: SizeClass,
     allocator: &mut A,
     object: NonNull<u8>,
 ) {
-    PERCPU_SLAB_CACHE.with_current(|cache| {
-        // SAFETY: forwarded from this function's caller.
-        unsafe { cache.drain(size_class, allocator, object) }
-    });
+    let pin = owner.guard();
+    // SAFETY: the pointer and allocator provenance contracts are forwarded
+    // from this function's caller; `owner` serializes local cache mutation.
+    unsafe {
+        PERCPU_SLAB_CACHE
+            .get_mut_unchecked(pin)
+            .drain(size_class, allocator, object)
+    };
 }
 
 #[cfg(unittest)]

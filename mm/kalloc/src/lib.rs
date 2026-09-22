@@ -24,7 +24,8 @@ use alloc_engine::{
     AllocError, AllocResult, BaseAllocator, BuddyPageAllocator, ByteAllocator, PageAllocator,
 };
 use kaddr_layout::v2p;
-use kspin::{IrqSave, NoPreempt, SpinNoIrq};
+use kcpu_slot::{CpuId, CpuPin, cpu_slot_cell};
+use kspin::{NoPreempt, NoPreemptIrqSave, SpinNoIrq};
 use memaddr::PAGE_SIZE_4K;
 use strum::{IntoStaticStr, VariantArray};
 const MIN_HEAP_SIZE: usize = 0x8000; // 32 K
@@ -53,6 +54,31 @@ pub use page::GlobalPage;
 mod tracking;
 #[cfg(feature = "tracking")]
 pub use tracking::*;
+
+/// Exclusive access capability for the current CPU's allocator caches.
+///
+/// This type is crate-private so cache access cannot escape the allocator
+/// entry points. Keeping its IRQ guard alive pins execution to one CPU and
+/// excludes interrupt re-entry until the cache operation has completed.
+pub(crate) struct AllocLocalOwner {
+    guard: NoPreemptIrqSave,
+}
+
+impl AllocLocalOwner {
+    #[inline]
+    fn acquire() -> Self {
+        Self {
+            guard: NoPreemptIrqSave::new(),
+        }
+    }
+
+    /// Returns the guard so cache accessors can borrow it mutably, which
+    /// bounds the returned cache reference to the call.
+    #[inline]
+    fn guard(&mut self) -> &mut NoPreemptIrqSave {
+        &mut self.guard
+    }
+}
 
 // Exactly one allocator feature must be selected. Kernel builds get it
 // through kfeat; host test builds pass it explicitly (e.g.
@@ -184,34 +210,50 @@ impl UsageTotals {
     }
 }
 
-#[percpu::def_percpu]
-static PERCPU_USAGE_COUNTERS: UsageCounters = UsageCounters::new();
+// SAFETY: every field is an array of zero-initialized atomics with no
+// ownership or drop state.
+unsafe impl kcpu_slot::StaticSlotValue for crate::UsageCounters {}
+
+cpu_slot_cell! {
+    static PERCPU_USAGE_COUNTERS: crate::UsageCounters = crate::UsageCounters::new();
+}
 
 fn with_current_usage_counters<T>(f: impl FnOnce(&UsageCounters) -> T) -> T {
     let _preempt_guard = NoPreempt::new();
-    // SAFETY: the guard pins this execution path while resolving the current
-    // CPU slot. Only shared references are created, and every field is atomic,
-    // so IRQ re-entry and remote snapshot readers cannot cause a data race.
-    let counters = unsafe { PERCPU_USAGE_COUNTERS.current_ref_raw() };
+    // Early-boot allocation can precede this CPU's area publication; skip the
+    // diagnostic accounting instead of panicking on an unpublished area.
+    let Some(area) = kcpu_slot::area(_preempt_guard.current_cpu()) else {
+        return f(&UsageCounters::new());
+    };
+    let counters = PERCPU_USAGE_COUNTERS.shared_at(area);
     f(counters)
 }
 
 fn usage_snapshot() -> Usages {
     let mut totals = UsageTotals::new();
-    let cpu_count = percpu::percpu_area_num();
+    // `NR_CPUS` is the exact bound on publishable areas: `kcpu_slot::area`
+    // indexes the `NR_CPUS`-sized area-state table, so every CPU that can ever
+    // be published lies in this range. Areas are published monotonically and
+    // never unpublished, so a CPU skipped here as unpublished can only be
+    // skipped in the freed pass and then included in the allocated pass, which
+    // keeps `allocated >= freed` and cannot trip the `finish` underflow check.
+    let cpu_count = kbuild_config::NR_CPUS;
 
     // Read every freed counter first. Acquiring a recorded free also observes
     // its causally preceding allocation before the second pass, which prevents
     // a valid cross-CPU free from producing a spurious aggregate underflow.
     for cpu_index in 0..cpu_count {
-        // SAFETY: `cpu_index` is bounded by the number of initialized per-CPU
-        // areas. Writers and this reader use only the slot's atomic fields.
-        let counters = unsafe { PERCPU_USAGE_COUNTERS.remote_ref_raw(cpu_index) };
+        let Some(area) = kcpu_slot::area(CpuId::new(cpu_index)) else {
+            continue;
+        };
+        let counters = PERCPU_USAGE_COUNTERS.shared_at(area);
         totals.collect_freed(counters);
     }
     for cpu_index in 0..cpu_count {
-        // SAFETY: same bounds and atomic-access argument as the first pass.
-        let counters = unsafe { PERCPU_USAGE_COUNTERS.remote_ref_raw(cpu_index) };
+        let Some(area) = kcpu_slot::area(CpuId::new(cpu_index)) else {
+            continue;
+        };
+        let counters = PERCPU_USAGE_COUNTERS.shared_at(area);
         totals.collect_allocated(counters);
     }
 
@@ -363,11 +405,10 @@ impl GlobalAllocator {
         &self,
         size_class: alloc_engine::SizeClass,
     ) -> AllocResult<NonNull<u8>> {
-        let _irq_guard = IrqSave::new();
-        // SAFETY: `_irq_guard` excludes same-CPU interrupt re-entry for this
-        // entire cache access. The per-CPU helper disables preemption while it
-        // obtains the non-escaping mutable reference.
-        if let Some(object) = unsafe { slab_cache::try_alloc(size_class) } {
+        let mut local_owner = AllocLocalOwner::acquire();
+        // `local_owner` excludes same-CPU interrupt re-entry and pins this
+        // operation until the cache access has completed.
+        if let Some(object) = slab_cache::try_alloc(&mut local_owner, size_class) {
             return Ok(object);
         }
 
@@ -377,9 +418,12 @@ impl GlobalAllocator {
         let mut balloc = self.balloc.lock();
         loop {
             if self.heap_ready.load(Ordering::Acquire) {
-                // SAFETY: local IRQs remain disabled, `balloc` is the central
-                // slab allocator, and its lock gives exclusive mutable access.
-                if let Ok(object) = unsafe { slab_cache::refill_cache(size_class, &mut *balloc) } {
+                // SAFETY: `balloc` is the exclusively locked central slab
+                // allocator, `local_owner` protects this CPU's cache, and no
+                // object provenance is consumed by refill.
+                let refilled =
+                    unsafe { slab_cache::refill_cache(&mut local_owner, size_class, &mut *balloc) };
+                if let Ok(object) = refilled {
                     return Ok(object);
                 }
             }
@@ -479,11 +523,11 @@ impl GlobalAllocator {
 
             #[cfg(feature = "slab")]
             if let Some(size_class) = alloc_engine::SizeClass::from_layout(layout) {
-                let _irq_guard = IrqSave::new();
+                let mut local_owner = AllocLocalOwner::acquire();
                 // SAFETY: every eligible allocation is obtained from the
                 // central allocator with this class's canonical layout. Local
                 // IRQs stay disabled until the cache operation completes.
-                if unsafe { slab_cache::try_free(size_class, ptr) } {
+                if unsafe { slab_cache::try_free(&mut local_owner, size_class, ptr) } {
                     return;
                 }
 
@@ -491,7 +535,7 @@ impl GlobalAllocator {
                 // SAFETY: the pointer has the canonical class provenance
                 // described above, local IRQs remain disabled, and `balloc`
                 // is the exclusively locked central allocator.
-                unsafe { slab_cache::drain_cache(size_class, &mut *balloc, ptr) };
+                unsafe { slab_cache::drain_cache(&mut local_owner, size_class, &mut *balloc, ptr) };
                 return;
             }
 
@@ -521,19 +565,25 @@ impl GlobalAllocator {
 
         // Fast path: 1–4 pages with standard alignment -> PCP cache.
         if (1..=pcp::PCP_MAX_PAGES).contains(&num_pages) && align_pow2 <= PAGE_SIZE_4K {
-            let _guard = IrqSave::new();
-            if let Some(addr) = pcp::try_alloc(num_pages) {
-                drop(_guard);
+            let mut local_owner = AllocLocalOwner::acquire();
+            if let Some(addr) = pcp::try_alloc(&mut local_owner, num_pages) {
+                drop(local_owner);
                 if !matches!(kind, UsageKind::RustHeap) {
                     self.record_usage_alloc(kind, pages_to_bytes(num_pages));
                 }
                 return Ok(addr);
             }
-            drop(_guard);
+            drop(local_owner);
 
             // Cache miss: batch-fill from the global allocator.
+            //
+            // Acquire the owner before `palloc`: it stores the pre-lock IRQ
+            // state, so nesting it inside the `SpinNoIrq` guard would restore
+            // "IRQs disabled" when it drops after `palloc` already re-enabled
+            // them, leaking an IRQ-off window back to the caller.
+            let mut local_owner = AllocLocalOwner::acquire();
             let mut palloc = self.palloc.lock();
-            let result = pcp::fill_cache(num_pages, &mut palloc);
+            let result = pcp::fill_cache(&mut local_owner, num_pages, &mut palloc);
             drop(palloc);
             if result.is_ok() && !matches!(kind, UsageKind::RustHeap) {
                 self.record_usage_alloc(kind, pages_to_bytes(num_pages));
@@ -620,15 +670,18 @@ impl GlobalAllocator {
 
         // Fast path: 1–4 pages -> try to cache them per-CPU.
         if (1..=pcp::PCP_MAX_PAGES).contains(&num_pages) {
-            let _guard = IrqSave::new();
-            if pcp::try_free(num_pages, va) {
+            let mut local_owner = AllocLocalOwner::acquire();
+            if pcp::try_free(&mut local_owner, num_pages, va) {
                 return;
             }
-            drop(_guard);
+            drop(local_owner);
 
-            // Cache full: bulk-drain to the global allocator.
+            // Cache full: bulk-drain to the global allocator. Acquire the owner
+            // before `palloc` for the same IRQ-state nesting reason as
+            // `alloc_pages`.
+            let mut local_owner = AllocLocalOwner::acquire();
             let mut palloc = self.palloc.lock();
-            pcp::drain_cache(num_pages, &mut palloc, va);
+            pcp::drain_cache(&mut local_owner, num_pages, &mut palloc, va);
             return;
         }
 

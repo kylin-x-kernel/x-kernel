@@ -30,6 +30,11 @@ per-CPU slab cache 是当前 object-cache 设计的初版。它减少稳定小�
 byte allocator 锁的竞争，但不取代中央 allocator，也不提供完整 reclaim、CPU
 hotplug 或 NMI 支持。
 
+PCP 和 slab cache 的可变访问统一经 crate-private `AllocLocalOwner`。owner 持有
+`IrqSave`，把“固定在当前 CPU 且禁止本地 IRQ 重入”的条件贯穿一次同步 cache 操作；
+PCP/slab 模块不再自行读取 raw per-CPU base，也不向调用者返回 cache 引用。owner
+只建立执行上下文排他性，具体 object/page provenance 仍由相应 allocation API 负责。
+
 ## 范围
 
 本设计覆盖：
@@ -98,6 +103,11 @@ Other paths:
   GlobalPage --------------------------------------> page APIs + Drop
   tracking ----------------------------------------> wraps Rust GlobalAlloc path
 ```
+
+启用 `tracking` 时，递归标记是 per-CPU `AtomicBool`。一个 RAII guard 在读取标记前
+禁用抢占和 IRQ，并在析构时清除同一 CPU 的标记。该 guard 会跨 backtrace、tracking
+锁以及被包装的 allocation callback；这是诊断 feature 为保证递归和迁移语义付出的
+延迟成本，不属于正常关闭 tracking 时的热路径。
 
 `GlobalAllocator` 的主要状态为：
 

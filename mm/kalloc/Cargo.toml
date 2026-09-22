@@ -23,6 +23,7 @@ kerrno.workspace = true
 kspin.workspace = true
 log.workspace = true
 memaddr.workspace = true
-percpu.workspace = true
+kcpu_slot.workspace = true
+kbuild_config.workspace = true
 strum = { workspace = true }
 unittest.workspace = true

@@ -93,7 +93,7 @@ impl AddressSpace {
             let Some(hit) = registered.view.page_hit(object_start, len) else {
                 continue;
             };
-            object_end = object_end.max(registered.view.object_end());
+            object_end = object_end.max(hit.object_end());
             hits.push(hit.clone());
             if let Some(notifier) = &registered.notifier {
                 notifiers.push((hit, notifier.clone()));

@@ -8,9 +8,6 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
-[package.metadata.cargo-shear]
-ignored = ["kspin"]
-
 [features]
 smp = ["kspin/smp"]
 nmi = []
@@ -19,12 +16,12 @@ pmu = []
 [dependencies]
 boot_info = { workspace = true }
 kcpu_id_map = { workspace = true }
+kcpu_slot = { workspace = true }
 kerrno = { workspace = true }
 kiface.workspace = true
 const-str = "0.6.2"
 kplat-macros = { path = "../kplat-macros" }
-kspin = "0.1"
-percpu = { workspace = true }
+kspin = { workspace = true }
 
 [package.metadata.docs.rs]
 all-features = true

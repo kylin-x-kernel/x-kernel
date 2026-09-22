@@ -19,7 +19,7 @@ join them before returning. `ktimer_core` owns timer scenario storage and
 cleanup checks; `ktask` owns task placement and completion. These tests do
 not establish hardware timer interrupt or IPI delivery correctness.
 
-Dependency internals (including `karch`, `kspin`, `percpu`, `ksched` and
+Dependency internals (including `karch`, `kspin`, `kcpu_slot`, `ksched` and
 `ktimer_core`) are outside this crate's implementation analysis because their
 owners define and enforce those contracts. Their contracts at the `ktask`
 boundary remain in scope. See the core's [security analysis](../../ktimer-core/docs/security.md)
@@ -128,7 +128,7 @@ ksched algorithms / karch context switch / allocator
 
 - Trust `karch` context-switch primitives and the stack-switch ABI.
 - Trust `kspin` guard acquire/release order and the preempt hook wiring.
-- Trust `percpu` CPU-local access.
+- Trust `kcpu_slot` CPU-local access.
 - Trust `ksched` not to return an illegal entity state.
 
 ## External boundaries and validation responsibilities
@@ -158,6 +158,13 @@ MMIO/PIO, DMA, and hardware timer register access belong to HAL/drivers
 rather than a public payload API in this crate. The prepared-timer test
 integration adds no new external-input API.
 
+### Per-CPU run-queue access invariants
+
+- The local `kcpu_slot` raw helpers resolve a long-lived shared `&RunQueue`
+  for the current CPU.
+- `RUN_QUEUES` publishes long-lived remote shared references through
+  `Once<usize>`.
+
 ## Preempt-check stack bound
 
 A wake after IRQ restore can republish `need_resched`. If run-queue guard
@@ -165,6 +172,26 @@ drop recursed into another preempt check, successive requests would keep old
 frames from returning, walk past the task stack, and corrupt adjacent
 objects. Heap-allocated task stacks have no unmapped guard page; growing
 the stack does not replace eliminating that unbounded growth.
+
+The corresponding per-CPU invariants are:
+
+1. Each CPU's `RUN_QUEUE` is accessible only after `init` / `init_secondary`.
+2. `CurrentRunQueueRef` and the remote `KRunQueueRef` hold only a shared
+   `&RunQueue`; state changes go through the scheduler lock or atomic fields,
+   and the guard expresses an execution-context constraint, not Rust
+   uniqueness.
+3. `RUN_QUEUES` completes its initialization writes before any read, and
+   remote callers only obtain `&RunQueue`; remote state changes must go
+   through the scheduler `SpinRaw` or atomic fields, never a whole-object
+   `&mut`.
+4. The atomic operations on `last_accounted_ns` only provide interior
+   mutability; every read/write still requires the scheduler lock, and
+   `Ordering::Relaxed` is not itself a cross-field synchronization protocol.
+5. Runtime mutation of `EXITED_TASKS` and `PREV_TASK` goes through their
+   per-CPU `SpinNoIrq` locks; `NoPreempt` only fixes the CPU while resolving
+   the slot and does not replace the inner lock's object exclusivity. No
+   blocking is allowed under the lock, and GC drops the lock before running a
+   potentially slow task drop.
 
 The check consumes new requests in a loop and keeps an extra preempt-disable
 count while releasing its own guard. After release it pairs the temporary

@@ -96,6 +96,13 @@ RAII guards that manage critical sections:
 - `IrqSave`: Saves/restores IRQ state
 - `NoPreemptIrqSave`: Disables both preemption and IRQs
 
+Guards also implement the `kcpu_slot` execution-context contracts:
+`IrqSave`, `NoPreemptIrqSave` (and `NoPreempt` with the `preempt` feature)
+implement `CpuPin`, and `NoPreemptIrqSave` additionally implements
+`CpuLocalGuard`, which is what makes `kcpu_slot`'s safe slot accessors
+available. Guards learn the current logical CPU through the
+`CurrentCpuIf` interface, provided by the platform layer.
+
 ### Locks (`lock` module)
 Generic spinlock implementation `SpinLock<G, T>` parameterized by guard type.
 

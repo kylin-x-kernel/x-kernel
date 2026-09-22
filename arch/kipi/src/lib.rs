@@ -28,7 +28,6 @@ use kcpu_id_map::{LogicalCpuId, for_each_present_logical_cpu, raw_cpu_id};
 use khal::percpu::this_cpu_id;
 use kirq::TargetCpu as IpiTarget;
 use kspin::SpinNoIrq;
-use lazyinit::LazyInit;
 
 mod event;
 mod icache;
@@ -74,8 +73,22 @@ impl core::fmt::Display for KipiError {
     }
 }
 
-#[percpu::def_percpu]
-static IPI_EVENT_QUEUE: LazyInit<SpinNoIrq<IpiEventQueue>> = LazyInit::new();
+// SAFETY: `LazyInit::new()` contains no initialized value or owned resource.
+// Each CPU initializes only its own copied marker in place.
+kcpu_slot::cpu_slot_cell_with_template! {
+    static IPI_EVENT_QUEUE: lazyinit::LazyInit<kspin::SpinNoIrq<crate::queue::IpiEventQueue>> =
+        unsafe { lazyinit::LazyInit::new() };
+}
+
+/// Shares a CPU's IPI queue (current or remote); all queue mutation is
+/// serialized by the inner `SpinNoIrq`.
+#[inline]
+fn ipi_queue(
+    cpu: LogicalCpuId,
+) -> Option<&'static lazyinit::LazyInit<kspin::SpinNoIrq<crate::queue::IpiEventQueue>>> {
+    let area = kcpu_slot::area(cpu)?;
+    Some(IPI_EVENT_QUEUE.shared_at(area))
+}
 
 static IPI_QUEUE_READY: [AtomicBool; kbuild_config::NR_CPUS] =
     [const { AtomicBool::new(false) }; kbuild_config::NR_CPUS];
@@ -89,11 +102,14 @@ fn is_ipi_queue_ready(cpu_id: LogicalCpuId) -> bool {
 ///
 /// This must run on every CPU before that CPU can receive callbacks through
 /// [`run_on_cpu`] or either broadcast API.
+///
+/// # Panics
+/// Panics if the current CPU's slot area has not been published yet.
 pub fn init() {
     let cpu_id = this_cpu_id();
-    IPI_EVENT_QUEUE.with_current(|ipi_queue| {
-        ipi_queue.init_once(SpinNoIrq::new(IpiEventQueue::default()));
-    });
+    ipi_queue(cpu_id)
+        .expect("current CPU area must be published before IPI initialization")
+        .init_once(SpinNoIrq::new(IpiEventQueue::default()));
     IPI_QUEUE_READY[cpu_id.as_usize()].store(true, Ordering::Release);
 }
 
@@ -119,6 +135,10 @@ pub fn init() {
 ///
 /// Returns `KipiError::TargetCpuNotReady` if the destination CPU exists but
 /// has not finished initializing its local IPI queue.
+///
+/// # Panics
+/// Panics if the destination CPU reports ready but its slot area or local IPI
+/// queue is not actually initialized.
 pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: LogicalCpuId, callback: T) -> Result<()> {
     let cpu_num = kbuild_config::NR_CPUS;
     let dest_cpu_index = dest_cpu.as_usize();
@@ -150,10 +170,10 @@ pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: LogicalCpuId, callback: T) -> Res
             );
             return Err(KipiError::TargetCpuNotReady);
         }
-        // SAFETY: `dest_cpu` was validated as present in the logical CPU map,
-        // and `is_ipi_queue_ready(dest_cpu)` proves the target CPU has already
-        // initialized its local per-CPU queue storage.
-        unsafe { IPI_EVENT_QUEUE.remote_ref_raw(dest_cpu_index) }
+        ipi_queue(dest_cpu)
+            .expect("ready IPI CPU area must be published")
+            .get()
+            .expect("ready IPI queue must be initialized")
             .lock()
             .push(this_cpu_id(), callback.into());
         kirq::notify_cpu(IPI_IRQ, IpiTarget::Specific(dest_cpu_index));
@@ -201,6 +221,14 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
 ///
 /// Use this variant when all CPUs, including the caller, must observe the same
 /// IPI-handler execution context.
+///
+/// # Errors
+/// Returns `KipiError::InvalidCpuId` when the broadcast target set is invalid
+/// for this CPU map.
+///
+/// # Panics
+/// Panics if the current CPU's slot area is not published or its local IPI
+/// queue has not been initialized.
 pub fn run_on_each_cpu_via_ipi<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
     debug!("Send IPI event to every CPU, including self");
     let current_cpu_id = this_cpu_id();
@@ -209,9 +237,10 @@ pub fn run_on_each_cpu_via_ipi<T: Into<MulticastCallback>>(callback: T) -> Resul
     validate_broadcast_targets(current_cpu_id, true)?;
 
     // Push to current CPU's queue so it runs from IPI context too
-    // SAFETY: this runs on the current CPU, whose local per-CPU queue storage
-    // has already been initialized before cross-CPU IPI use is allowed.
-    unsafe { IPI_EVENT_QUEUE.current_ref_mut_raw() }
+    ipi_queue(current_cpu_id)
+        .expect("local IPI CPU area must be published")
+        .get()
+        .expect("local IPI queue must be initialized")
         .lock()
         .push(current_cpu_id, callback.clone().into_unicast());
 
@@ -260,10 +289,10 @@ fn validate_broadcast_targets(current_cpu_id: LogicalCpuId, include_self: bool) 
 fn enqueue_broadcast_to_others(current_cpu_id: LogicalCpuId, callback: &MulticastCallback) {
     for_each_present_logical_cpu(|_, cpu_id, _| {
         if cpu_id != current_cpu_id {
-            // SAFETY: `validate_broadcast_targets` already ensured every
-            // destination present CPU has initialized its local per-CPU queue
-            // storage before any enqueue happens.
-            unsafe { IPI_EVENT_QUEUE.remote_ref_raw(cpu_id.as_usize()) }
+            ipi_queue(cpu_id)
+                .expect("ready IPI CPU area must be published")
+                .get()
+                .expect("ready IPI queue must be initialized")
                 .lock()
                 .push(current_cpu_id, callback.clone().into_unicast());
         }
@@ -278,6 +307,10 @@ fn enqueue_broadcast_to_others(current_cpu_id: LogicalCpuId, callback: &Multicas
 /// A system-wide stop request is processed before anything else: once a stop
 /// is in progress, every non-orchestrator CPU acknowledges and parks here and
 /// never reaches the TLB shootdown or callback queues.
+///
+/// # Panics
+/// Panics if the current CPU's slot area is not published or its local IPI
+/// queue has not been initialized.
 pub fn ipi_handler() {
     stop::handle_stop_request();
 
@@ -287,9 +320,10 @@ pub fn ipi_handler() {
     #[cfg(any(feature = "reschedule", feature = "timer-reprogram"))]
     notification::handle_pending();
 
-    // SAFETY: the handler runs on the current CPU and only accesses that CPU's
-    // already-initialized local IPI queue.
-    while let Some((src_cpu_id, callback)) = unsafe { IPI_EVENT_QUEUE.current_ref_mut_raw() }
+    while let Some((src_cpu_id, callback)) = ipi_queue(this_cpu_id())
+        .expect("local IPI CPU area must be published")
+        .get()
+        .expect("local IPI queue must be initialized")
         .lock()
         .pop_one()
     {

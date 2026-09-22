@@ -8,11 +8,9 @@
 /// model-specific registers to configure the handler for `syscall` instruction.
 ///
 /// # Notes
-/// Before calling this function, the initialization function of the [`percpu`]
-/// crate should have been invoked to ensure that the per-CPU data structures
-/// are set up correctly (i.e., by calling `khal::percpu::init_primary`).
-///
-/// [`percpu`]: https://docs.rs/percpu/latest/percpu/index.html
+/// Before calling this function, the per-CPU slot area must have been published
+/// so per-CPU data structures are set up correctly (i.e., by calling
+/// `khal::percpu::init_primary`, which initializes `kcpu_slot`).
 pub fn init_trap() {
     crate::userspace_common::init_exception_table();
     super::gdt::init();

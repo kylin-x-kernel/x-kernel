@@ -52,3 +52,17 @@ cfg_if::cfg_if! {
         pub use self::arm::*;
     }
 }
+
+/// Provides `kcpu_slot`'s single-instruction fallback with this crate's local
+/// IRQ save/disable primitive, so AArch64's PMR/NMI masking rules stay in one
+/// place.
+#[kiface::provide]
+impl kcpu_slot::CpuLocalIrqIf {
+    fn save_and_disable() -> usize {
+        crate::save_irq_and_disable()
+    }
+
+    fn restore(state: usize) {
+        crate::restore_irq(state);
+    }
+}

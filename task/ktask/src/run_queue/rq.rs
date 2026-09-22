@@ -6,7 +6,8 @@
 
 use alloc::sync::Arc;
 #[cfg(feature = "smp")]
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use kcpu_id_map::LogicalCpuId;
 use khal::percpu::this_cpu_id;
@@ -14,19 +15,17 @@ use ksched::{BaseScheduler, CurrentDisposition};
 use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 
 #[cfg(feature = "smp")]
-use super::PREV_TASK;
-#[cfg(feature = "smp")]
 use super::migrate::spawn_affinity_migration_task;
 #[cfg(all(feature = "preempt", feature = "smp"))]
 use super::stats::record_remote_resched;
 #[cfg(feature = "sched_stat")]
 use super::stats::{sched_stat_cpu, sched_stat_inc};
 use super::{
-    CurrentRunQueueRef, KRunQueueRef, RunQueue, WakeEnqueue, current_exited_tasks_mut,
-    current_idle_task, current_wait_for_exit, gc,
+    CurrentRunQueueRef, KRunQueueRef, RunQueue, WakeEnqueue, current_idle_task,
+    current_wait_for_exit, gc, with_exited_tasks,
 };
 #[cfg(feature = "smp")]
-use super::{current_prev_task_mut, get_run_queue};
+use super::{PREV_TASK, get_run_queue};
 use crate::{
     KtaskRef, Scheduler, TaskInner,
     api::{
@@ -40,7 +39,7 @@ use crate::{
 };
 
 #[cfg(feature = "preempt")]
-pub(super) fn request_resched_on(rq: &mut RunQueue) {
+pub(super) fn request_resched_on(rq: &RunQueue) {
     let cpu_id = rq.cpu_id;
     if cpu_id == this_cpu_id() {
         #[cfg(feature = "sched_stat")]
@@ -233,8 +232,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         let is_idle = curr.is_idle();
         let (elapsed, should_preempt) = {
             let mut sched = self.inner.scheduler.lock();
-            let elapsed =
-                RunQueue::advance_account_epoch(&mut self.inner.last_accounted_ns, now_ns);
+            let elapsed = RunQueue::advance_account_epoch(&self.inner.last_accounted_ns, now_ns);
             if is_idle {
                 (elapsed, false)
             } else {
@@ -468,7 +466,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             // `current_run_queue::<NoPreemptIrqSave>()`, so IRQs and
             // preemption are disabled while touching the current CPU's percpu
             // exited-task list.
-            current_exited_tasks_mut().clear();
+            with_exited_tasks(|tasks| tasks.clear());
             khal::power::power_off();
         } else {
             // Notify the joiner task.
@@ -479,7 +477,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             // preemption are disabled while touching current-CPU percpu
             // scheduler queues and wakers.
             // Push current task to the `EXITED_TASKS` list, which will be consumed by the GC task.
-            current_exited_tasks_mut().push_back(curr.clone());
+            with_exited_tasks(|tasks| tasks.push_back(curr.clone()));
             // Wake up the GC task to drop the exited tasks.
             current_wait_for_exit().wake();
 
@@ -621,10 +619,10 @@ impl RunQueue {
             scheduler.set_stats_enabled(true);
             scheduler
         };
-        let mut rq = Self {
+        let rq = Self {
             cpu_id,
             scheduler: SpinRaw::new(scheduler),
-            last_accounted_ns: 0,
+            last_accounted_ns: AtomicU64::new(0),
             #[cfg(feature = "smp")]
             nr_running: AtomicUsize::new(0),
             #[cfg(feature = "smp")]
@@ -641,13 +639,13 @@ impl RunQueue {
     /// Returns `(elapsed, should_preempt, peer_wins, next_rel_on_probe_fail)`.
     #[cfg(all(feature = "preempt", feature = "sched_eevdf"))]
     fn account_peer_probe_and_next_deadline(
-        &mut self,
+        &self,
         now_ns: u64,
         curr: &KtaskRef,
         is_idle: bool,
     ) -> (u64, bool, bool, Option<u64>) {
         let mut sched = self.scheduler.lock();
-        let elapsed = Self::advance_account_epoch(&mut self.last_accounted_ns, now_ns);
+        let elapsed = Self::advance_account_epoch(&self.last_accounted_ns, now_ns);
         let should_preempt = if is_idle || elapsed == 0 {
             false
         } else {
@@ -666,13 +664,16 @@ impl RunQueue {
     ///
     /// Caller must hold [`Self::scheduler`] so remote wake flush and local
     /// timer accounting cannot race on this field.
-    pub(super) fn advance_account_epoch(last_accounted_ns: &mut u64, now_ns: u64) -> u64 {
-        let elapsed = if *last_accounted_ns == 0 {
+    pub(super) fn advance_account_epoch(last_accounted_ns: &AtomicU64, now_ns: u64) -> u64 {
+        // The scheduler lock serializes this load/store with scheduler state;
+        // Relaxed supplies interior mutability, not synchronization.
+        let previous_ns = last_accounted_ns.load(Ordering::Relaxed);
+        let elapsed = if previous_ns == 0 {
             0
         } else {
-            now_ns.saturating_sub(*last_accounted_ns)
+            now_ns.saturating_sub(previous_ns)
         };
-        *last_accounted_ns = now_ns;
+        last_accounted_ns.store(now_ns, Ordering::Relaxed);
         elapsed
     }
 
@@ -681,9 +682,9 @@ impl RunQueue {
     /// NOHZ may leave a lone task without timer IRQs for a long time. Wakes and
     /// new publishes must flush that elapsed time into EEVDF `curr` before
     /// computing system V / PLACE_LAG.
-    pub(super) fn flush_running_runtime(&mut self, now_ns: u64) {
+    pub(super) fn flush_running_runtime(&self, now_ns: u64) {
         let mut sched = self.scheduler.lock();
-        let elapsed = Self::advance_account_epoch(&mut self.last_accounted_ns, now_ns);
+        let elapsed = Self::advance_account_epoch(&self.last_accounted_ns, now_ns);
         if elapsed == 0 {
             return;
         }
@@ -698,7 +699,7 @@ impl RunQueue {
     /// Publish a newly runnable task onto this run queue's scheduler.
     ///
     /// This is the only path that should call `Scheduler::add_task` from ktask.
-    fn publish_task(&mut self, task: KtaskRef) {
+    fn publish_task(&self, task: KtaskRef) {
         #[cfg(feature = "smp")]
         self.attach_owner(&task);
         #[cfg(feature = "smp")]
@@ -713,13 +714,13 @@ impl RunQueue {
     /// This is the only path that should call `Scheduler::enqueue_task` from ktask.
     /// Running tasks leave through `leave_current` on the yield/preempt/block/migrate/exit paths.
     #[cfg(feature = "smp")]
-    pub(super) fn enqueue_task(&mut self, task: KtaskRef) {
+    pub(super) fn enqueue_task(&self, task: KtaskRef) {
         self.enqueue_ready_task(task, false);
     }
 
     /// Enqueue a ready task, optionally arming WF_SYNC in the same lock as
     /// NEXT_BUDDY nomination (Linux `ttwu` / `check_preempt_wakeup`).
-    fn enqueue_ready_task(&mut self, task: KtaskRef, is_wake_sync: bool) {
+    fn enqueue_ready_task(&self, task: KtaskRef, is_wake_sync: bool) {
         #[cfg(feature = "smp")]
         self.attach_owner(&task);
         #[cfg(feature = "smp")]
@@ -728,7 +729,7 @@ impl RunQueue {
         self.charge_home(&task);
         let now_ns = khal::time::monotonic_time_nanos();
         let mut sched = self.scheduler.lock();
-        let elapsed = Self::advance_account_epoch(&mut self.last_accounted_ns, now_ns);
+        let elapsed = Self::advance_account_epoch(&self.last_accounted_ns, now_ns);
         #[cfg(feature = "sched_eevdf")]
         sched.account_curr_elapsed(elapsed);
         #[cfg(not(feature = "sched_eevdf"))]
@@ -753,7 +754,7 @@ impl RunQueue {
     /// the helper into `curr` here so later peer-preempt probes see it; idle
     /// never takes this path.
     #[cfg(feature = "smp")]
-    fn switch_to_local(&mut self, prev_task: CurrentTask, next_task: KtaskRef) {
+    fn switch_to_local(&self, prev_task: CurrentTask, next_task: KtaskRef) {
         #[cfg(feature = "smp")]
         self.attach_owner(&next_task);
         #[cfg(feature = "sched_eevdf")]
@@ -770,7 +771,7 @@ impl RunQueue {
     /// Returns whether the transition was rejected, enqueued immediately, or
     /// handed to the CPU completing the task's switch-out.
     pub(super) fn put_task_with_state(
-        &mut self,
+        &self,
         task: KtaskRef,
         current_state: TaskState,
         is_wake_sync: bool,
@@ -807,7 +808,7 @@ impl RunQueue {
 
     /// Core reschedule subroutine.
     /// Pick the next task to run and switch to it.
-    fn resched(&mut self) {
+    fn resched(&self) {
         #[cfg(feature = "sched_stat")]
         sched_stat_inc(&sched_stat_cpu(self.cpu_id).resched);
         let next = self
@@ -834,7 +835,7 @@ impl RunQueue {
         self.switch_to(current(), next);
     }
 
-    fn switch_to(&mut self, prev_task: CurrentTask, next_task: KtaskRef) {
+    fn switch_to(&self, prev_task: CurrentTask, next_task: KtaskRef) {
         // Make sure that IRQs are disabled by kernel guard or other means.
         assert!(
             !karch::local_irq_enabled(),
@@ -861,10 +862,10 @@ impl RunQueue {
         next_task.set_preempt_pending(false);
         next_task.set_state(TaskState::Running);
         account_execution_resumed(next_task.execution_context());
-        let program_next_deadline = |rq: &mut Self, next: &KtaskRef, now: u64| {
+        let program_next_deadline = |rq: &Self, next: &KtaskRef, now: u64| {
             let next_rel = {
                 let sched = rq.scheduler.lock();
-                rq.last_accounted_ns = now;
+                rq.last_accounted_ns.store(now, Ordering::Relaxed);
                 if next.is_idle() {
                     None
                 } else {
@@ -936,7 +937,7 @@ impl RunQueue {
             // Store the weak pointer of **prev_task** in percpu variable `PREV_TASK`.
             #[cfg(feature = "smp")]
             {
-                *current_prev_task_mut() = Arc::downgrade(&prev_task);
+                *PREV_TASK.shared_current().lock() = Arc::downgrade(&prev_task);
             }
 
             // The strong reference count of `prev_task` will be decremented by 1,
@@ -963,16 +964,16 @@ impl RunQueue {
 
 /// Clear the `on_cpu` field of previous task running on this CPU.
 #[cfg(feature = "smp")]
-pub(crate) unsafe fn clear_prev_task_on_cpu(current_rq: &mut RunQueue) {
+pub(crate) unsafe fn clear_prev_task_on_cpu(current_rq: &RunQueue) {
     // SAFETY: this is called on the CPU that owns `PREV_TASK`, after the
     // context switch completed and before another previous-task record is
     // installed.
-    let prev_task = unsafe {
-        PREV_TASK
-            .current_ref_raw()
-            .upgrade()
-            .expect("Invalid prev_task pointer or prev_task has been dropped")
-    };
+    let prev_task = PREV_TASK
+        .shared_current()
+        .lock()
+        .clone()
+        .upgrade()
+        .expect("Invalid prev_task pointer or prev_task has been dropped");
     prev_task.set_on_cpu(false);
     // Matching Dekker store-load fence; see `TaskInner::arm_wake_enqueue`.
     core::sync::atomic::fence(Ordering::SeqCst);

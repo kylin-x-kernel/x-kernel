@@ -9,7 +9,7 @@ use core::{
     ptr::NonNull,
 };
 
-use crate::{CpuId, PinCurrentCpu};
+use crate::{CpuId, CpuLocalGuard, CpuPin};
 
 /// Error returned when a per-CPU dynamic initializer fails or the chunk is
 /// misused.
@@ -78,14 +78,26 @@ impl CpuSlotChunk {
     /// reclaimed, which keeps live-handle ownership independent of the chunk.
     ///
     /// `init` receives the logical [`CpuId`] it must construct a value for.
+    ///
+    /// # Errors
+    /// Returns [`SlotInitError::NoSpace`] when the chunk has no suitably
+    /// aligned space left, [`SlotInitError::Misaligned`] when the backing base
+    /// or the stride is not area-aligned, and [`SlotInitError::Init`] when
+    /// `init` fails for one CPU (values already constructed are dropped).
     pub fn alloc<T: 'static, E>(
         &self,
         mut init: impl FnMut(CpuId) -> Result<T, E>,
     ) -> Result<DynamicCpuSlot<'_, T>, SlotInitError<E>> {
         let align = mem::align_of::<T>();
         let size = mem::size_of::<T>();
-        if !(self.base.as_ptr() as usize).is_multiple_of(align)
+        // Requiring the area alignment (not just `align_of::<T>()`) keeps the
+        // chunk's per-CPU regions from sharing a cache line, so a lock word in
+        // one CPU's object cannot false-share with another CPU's data.
+        let base = self.base.as_ptr() as usize;
+        if !base.is_multiple_of(align)
             || !self.area_stride.is_multiple_of(align)
+            || !base.is_multiple_of(crate::layout::AREA_ALIGN)
+            || !self.area_stride.is_multiple_of(crate::layout::AREA_ALIGN)
         {
             return Err(SlotInitError::Misaligned);
         }
@@ -157,18 +169,15 @@ pub struct DynamicCpuSlot<'a, T: 'static> {
 }
 
 impl<T: 'static> DynamicCpuSlot<'_, T> {
-    /// Reads the pinned CPU's initialized value.
+    /// Shares the pinned CPU's initialized value through a guard that excludes
+    /// local IRQ reentry.
     ///
-    /// # Safety
-    /// The caller must hold a CPU pin with a valid CPU ID and obey `T`'s
-    /// aliasing requirements.
-    pub unsafe fn get<'a>(&'a self, pin: &'a impl PinCurrentCpu) -> Option<&'a T> {
-        let cpu = pin.current_cpu().as_usize();
-        if cpu >= self.chunk.cpu_count {
-            return None;
-        }
-        // SAFETY: The chunk owns an initialized value at this offset.
-        Some(unsafe { &*self.chunk.element_ptr(self.offset, cpu).as_ptr() })
+    /// Returns `None` when the guard reports a CPU outside the chunk.
+    pub fn get<'a>(&'a self, guard: &'a impl CpuLocalGuard) -> Option<&'a T> {
+        // SAFETY: The guard pins this CPU and excludes local IRQ reentry for
+        // the duration of `'a`, so no conflicting access can overlap the
+        // returned reference.
+        unsafe { self.get_unchecked(guard) }
     }
 
     /// Reads a remote CPU's value when sharing `T` is safe.
@@ -186,13 +195,31 @@ impl<T: 'static> DynamicCpuSlot<'_, T> {
         Some(unsafe { &*self.chunk.element_ptr(self.offset, cpu.as_usize()).as_ptr() })
     }
 
-    /// Mutably accesses the pinned CPU's value.
+    /// Reads the pinned CPU's initialized value through a plain
+    /// [`CpuPin`].
+    ///
+    /// # Safety
+    /// The caller must hold a CPU pin with a valid CPU ID and obey `T`'s
+    /// aliasing requirements, including exclusion of local IRQ handlers that
+    /// can access this value.
+    pub unsafe fn get_unchecked<'a>(&'a self, pin: &'a impl CpuPin) -> Option<&'a T> {
+        let cpu = pin.current_cpu().as_usize();
+        if cpu >= self.chunk.cpu_count {
+            return None;
+        }
+        // SAFETY: The chunk owns an initialized value at this offset.
+        Some(unsafe { &*self.chunk.element_ptr(self.offset, cpu).as_ptr() })
+    }
+
+    /// Mutably accesses the pinned CPU's value through a plain
+    /// [`CpuPin`].
     ///
     /// # Safety
     /// The caller must pin execution with a valid CPU ID and provide exclusive
-    /// access to this CPU's value.
+    /// access to this CPU's value, including exclusion of local IRQ handlers
+    /// that can access it.
     #[allow(clippy::mut_from_ref)]
-    pub unsafe fn get_mut<'a>(&'a self, pin: &'a impl PinCurrentCpu) -> Option<&'a mut T> {
+    pub unsafe fn get_mut_unchecked<'a>(&'a self, pin: &'a impl CpuPin) -> Option<&'a mut T> {
         let cpu = pin.current_cpu().as_usize();
         if cpu >= self.chunk.cpu_count {
             return None;
@@ -216,6 +243,21 @@ impl<T: 'static> Drop for DynamicCpuSlot<'_, T> {
         }
     }
 }
+
+// SAFETY: A handle's fields are immutable once `alloc` returns. Each thread
+// only observes its own CPU's value through the supplied guard, so sharing
+// `&DynamicCpuSlot<T>` across threads never shares one `T` instance and
+// requires only `T: Send`; the one accessor that does share a value across
+// threads (`get_remote`) independently requires `T: Sync`.
+unsafe impl<T: Send + 'static> Sync for DynamicCpuSlot<'_, T> {}
+
+// SAFETY: The handle uniquely owns its per-CPU values (its `Drop` runs
+// exactly once, wherever the owner moves it), so moving it between threads
+// moves `T` values and requires only `T: Send`. The shared `&CpuSlotChunk`
+// is only read through the immutable element addressing that post-allocation
+// access uses; the allocation-time bump cursor that makes `CpuSlotChunk`
+// `!Sync` is never touched through a handle.
+unsafe impl<T: Send + 'static> Send for DynamicCpuSlot<'_, T> {}
 
 fn align_up(value: usize, align: usize) -> Option<usize> {
     debug_assert!(align.is_power_of_two());

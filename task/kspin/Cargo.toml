@@ -22,6 +22,7 @@ default = []
 [dependencies]
 kiface = { workspace = true }
 karch = { workspace = true }
+kcpu_slot = { workspace = true }
 klockstat = { workspace = true, optional = true }
 linkme = { workspace = true, optional = true }
 unittest.workspace = true

@@ -29,6 +29,7 @@
 //! reentrancy from interrupt handlers on the same CPU.
 
 use alloc_engine::{AllocResult, BuddyPageAllocator, PageAllocator, split_to_chunks};
+use kcpu_slot::cpu_slot_cell;
 use memaddr::PAGE_SIZE_4K;
 
 // ---------------------------------------------------------------------------
@@ -291,8 +292,13 @@ impl PerCpuPageSet {
 // Per-CPU storage
 // ---------------------------------------------------------------------------
 
-#[percpu::def_percpu]
-static PCP_PAGESET: PerCpuPageSet = PerCpuPageSet::new();
+// SAFETY: `new()` contains only empty fixed-capacity per-CPU page caches; no
+// allocation or owned page is present in the copied template.
+unsafe impl kcpu_slot::StaticSlotValue for PerCpuPageSet {}
+
+cpu_slot_cell! {
+    static PCP_PAGESET: crate::pcp::PerCpuPageSet = crate::pcp::PerCpuPageSet::new();
+}
 
 // ---------------------------------------------------------------------------
 // Public module API
@@ -303,18 +309,20 @@ static PCP_PAGESET: PerCpuPageSet = PerCpuPageSet::new();
 /// Returns `None` if the corresponding cache is empty.
 /// `num_pages` must be in 1..=4; other values always return `None`.
 ///
-/// # Safety
-///
-/// Must be called with local IRQs disabled.
+/// The owner keeps this operation pinned with local IRQs disabled.
 #[inline]
-pub(crate) fn try_alloc(num_pages: usize) -> Option<usize> {
-    PCP_PAGESET.with_current(|pageset| match num_pages {
-        1 => pageset.cache1.try_pop(),
-        2 => pageset.cache2.try_pop(),
-        3 => pageset.cache3.try_pop(),
-        4 => pageset.cache4.try_pop(),
-        _ => None,
-    })
+pub(crate) fn try_alloc(owner: &mut crate::AllocLocalOwner, num_pages: usize) -> Option<usize> {
+    let pin = owner.guard();
+    // SAFETY: `owner` proves exclusive access to this CPU's page cache.
+    unsafe {
+        match num_pages {
+            1 => PCP_PAGESET.get_mut_unchecked(pin).cache1.try_pop(),
+            2 => PCP_PAGESET.get_mut_unchecked(pin).cache2.try_pop(),
+            3 => PCP_PAGESET.get_mut_unchecked(pin).cache3.try_pop(),
+            4 => PCP_PAGESET.get_mut_unchecked(pin).cache4.try_pop(),
+            _ => None,
+        }
+    }
 }
 
 /// Try to push a freed block of `num_pages` into the per-CPU cache.
@@ -323,18 +331,36 @@ pub(crate) fn try_alloc(num_pages: usize) -> Option<usize> {
 /// and the caller should fall back to the global buddy allocator.
 /// `num_pages` must be in 1..=4.
 ///
-/// # Safety
-///
-/// Must be called with local IRQs disabled.
+/// The owner keeps this operation pinned with local IRQs disabled.
 #[inline]
-pub(crate) fn try_free(num_pages: usize, addr: usize) -> bool {
-    PCP_PAGESET.with_current(|pageset| match num_pages {
-        1 => pageset.cache1.try_push(addr).is_ok(),
-        2 => pageset.cache2.try_push(addr).is_ok(),
-        3 => pageset.cache3.try_push(addr).is_ok(),
-        4 => pageset.cache4.try_push(addr).is_ok(),
-        _ => false,
-    })
+pub(crate) fn try_free(owner: &mut crate::AllocLocalOwner, num_pages: usize, addr: usize) -> bool {
+    let pin = owner.guard();
+    // SAFETY: `owner` proves exclusive access to this CPU's page cache.
+    unsafe {
+        match num_pages {
+            1 => PCP_PAGESET
+                .get_mut_unchecked(pin)
+                .cache1
+                .try_push(addr)
+                .is_ok(),
+            2 => PCP_PAGESET
+                .get_mut_unchecked(pin)
+                .cache2
+                .try_push(addr)
+                .is_ok(),
+            3 => PCP_PAGESET
+                .get_mut_unchecked(pin)
+                .cache3
+                .try_push(addr)
+                .is_ok(),
+            4 => PCP_PAGESET
+                .get_mut_unchecked(pin)
+                .cache4
+                .try_push(addr)
+                .is_ok(),
+            _ => false,
+        }
+    }
 }
 
 /// Bulk-fill the cache for `num_pages`-size blocks from the buddy allocator.
@@ -346,16 +372,21 @@ pub(crate) fn try_free(num_pages: usize, addr: usize) -> bool {
 ///
 /// Must be called while holding the global buddy allocator lock (IRQs disabled).
 pub(crate) fn fill_cache(
+    owner: &mut crate::AllocLocalOwner,
     num_pages: usize,
     palloc: &mut BuddyPageAllocator<PAGE_SIZE_4K>,
 ) -> AllocResult<usize> {
-    PCP_PAGESET.with_current(|pageset| match num_pages {
-        1 => pageset.cache1.alloc(palloc),
-        2 => pageset.cache2.alloc(palloc),
-        3 => pageset.cache3.alloc(palloc),
-        4 => pageset.cache4.alloc(palloc),
-        _ => unreachable!("fill_cache: num_pages={} not in 1..=4", num_pages),
-    })
+    let pin = owner.guard();
+    // SAFETY: `owner` proves exclusive access to this CPU's page cache.
+    unsafe {
+        match num_pages {
+            1 => PCP_PAGESET.get_mut_unchecked(pin).cache1.alloc(palloc),
+            2 => PCP_PAGESET.get_mut_unchecked(pin).cache2.alloc(palloc),
+            3 => PCP_PAGESET.get_mut_unchecked(pin).cache3.alloc(palloc),
+            4 => PCP_PAGESET.get_mut_unchecked(pin).cache4.alloc(palloc),
+            _ => unreachable!("fill_cache: num_pages={} not in 1..=4", num_pages),
+        }
+    }
 }
 
 /// Bulk-drain the cache for `num_pages`-size blocks to the buddy allocator.
@@ -365,17 +396,34 @@ pub(crate) fn fill_cache(
 ///
 /// Must be called while holding the global buddy allocator lock (IRQs disabled).
 pub(crate) fn drain_cache(
+    owner: &mut crate::AllocLocalOwner,
     num_pages: usize,
     palloc: &mut BuddyPageAllocator<PAGE_SIZE_4K>,
     addr: usize,
 ) {
-    PCP_PAGESET.with_current(|pageset| match num_pages {
-        1 => pageset.cache1.dealloc(palloc, addr),
-        2 => pageset.cache2.dealloc(palloc, addr),
-        3 => pageset.cache3.dealloc(palloc, addr),
-        4 => pageset.cache4.dealloc(palloc, addr),
-        _ => unreachable!("drain_cache: num_pages={} not in 1..=4", num_pages),
-    });
+    let pin = owner.guard();
+    // SAFETY: `owner` proves exclusive access to this CPU's page cache.
+    unsafe {
+        match num_pages {
+            1 => PCP_PAGESET
+                .get_mut_unchecked(pin)
+                .cache1
+                .dealloc(palloc, addr),
+            2 => PCP_PAGESET
+                .get_mut_unchecked(pin)
+                .cache2
+                .dealloc(palloc, addr),
+            3 => PCP_PAGESET
+                .get_mut_unchecked(pin)
+                .cache3
+                .dealloc(palloc, addr),
+            4 => PCP_PAGESET
+                .get_mut_unchecked(pin)
+                .cache4
+                .dealloc(palloc, addr),
+            _ => unreachable!("drain_cache: num_pages={} not in 1..=4", num_pages),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -840,6 +840,13 @@ impl TaskInner {
         self.preempt_disable_count.load(Ordering::Acquire) == current_disable_count
     }
 
+    /// Returns whether the task currently holds a no-preempt section.
+    #[inline]
+    #[cfg(feature = "preempt")]
+    pub(crate) fn preempt_section_held(&self) -> bool {
+        self.preempt_disable_count.load(Ordering::Acquire) != 0
+    }
+
     #[inline]
     #[cfg(feature = "preempt")]
     pub(crate) fn disable_preempt(&self) {
@@ -1186,7 +1193,7 @@ extern "C" fn task_entry() -> ! {
         // Clear the prev task on CPU before running the task entry function.
         // SAFETY: a first-run task reaches this point with IRQs disabled and
         // owns its current CPU's run queue after the context switch.
-        let run_queue = crate::run_queue::current_run_queue_mut();
+        let run_queue = crate::run_queue::current_run_queue_ref();
         crate::run_queue::clear_prev_task_on_cpu(run_queue);
     }
     // Enable irq (if feature "irq" is enabled) before running the task entry function.

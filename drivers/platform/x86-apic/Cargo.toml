@@ -18,7 +18,7 @@ memspace = { workspace = true }
 memaddr = { workspace = true }
 kirq = { workspace = true }
 kiface = { workspace = true }
-percpu = { workspace = true }
+kcpu_slot = { workspace = true }
 log = "0.4"
 lazyinit = "0.2"
 

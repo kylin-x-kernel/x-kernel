@@ -4,6 +4,9 @@
 
 //! Intel VMX constants, VMCS field encodings, and inline helpers.
 
+use kcpu_slot::cpu_slot_cell;
+use kspin::NoPreemptIrqSave;
+
 /// VMX MSR addresses.
 pub const MSR_IA32_FEATURE_CONTROL: u32 = 0x0000_003a;
 pub const MSR_IA32_VMX_BASIC: u32 = 0x0000_0480;
@@ -361,15 +364,18 @@ pub fn vmptrld(pa: u64) -> bool {
 
 // ── Per-CPU VMXON ──
 
-#[percpu::def_percpu]
-static VMXON_DONE: bool = false;
+cpu_slot_cell! {
+    static VMXON_DONE: bool = false;
+}
 
 /// Per-CPU VMX init: CR fixup + VMXON with a dynamically allocated page.
 ///
 /// Must be called on each CPU that will run vCPUs.
 pub fn vmx_percpu_init() -> bool {
-    // SAFETY: reading per-CPU flag on the pinned CPU.
-    if unsafe { VMXON_DONE.read_current_raw() } {
+    // VMX control registers and VMXON state are CPU-local. Keep the complete
+    // transition on one CPU rather than guarding only the per-CPU flag loads.
+    let guard = NoPreemptIrqSave::new();
+    if VMXON_DONE.read(&guard) {
         return true;
     }
 
@@ -406,8 +412,7 @@ pub fn vmx_percpu_init() -> bool {
     // Leak the page — VMXON region must remain valid while VMX is active.
     core::mem::forget(page);
 
-    // SAFETY: single-threaded per-CPU init path.
-    unsafe { VMXON_DONE.write_current_raw(true) };
+    VMXON_DONE.write(&guard, true);
     log::info!("[VMX] VMXON success (revision={:#x})", basic.revision);
     true
 }

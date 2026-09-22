@@ -43,6 +43,7 @@ ksyscall = { path = "core/ksyscall" }
 karch = { path = "arch/karch" }
 kcpu = { path = "arch/kcpu" }
 kcpu_id_map = { path = "arch/kcpu_id_map" }
+kcpu_slot = { path = "arch/kcpu_slot" }
 khal = { path = "arch/khal" }
 kirq = { path = "arch/kirq" }
 kipi = { path = "arch/kipi" }
@@ -250,7 +251,6 @@ log = "0.4"
 int_ratio = "0.1"
 ouroboros = { version = "0.18.5", default-features = false }
 paste = "1.0"
-percpu = "0.4"
 proc-macro2 = "1.0"
 quote = "1.0"
 rand_chacha = { version = "0.3", default-features = false }
