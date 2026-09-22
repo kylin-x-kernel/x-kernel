@@ -58,16 +58,27 @@ impl UserContext {
     /// (saved in `sepc`).
     ///
     /// This function returns when an exception or syscall occurs.
-    pub fn run(&mut self) -> ReturnReason {
+    ///
+    /// Invokes `on_user_enter` immediately before entering user space and
+    /// `on_user_exit` after restoring kernel context, before IRQ dispatch.
+    /// Both callbacks run with local IRQs masked and must return with them
+    /// masked, without sleeping or scheduling.
+    pub fn run(
+        &mut self,
+        on_user_enter: impl FnOnce(),
+        on_user_exit: impl FnOnce(),
+    ) -> ReturnReason {
         unsafe extern "C" {
             fn enter_user(uctx: &mut UserContext);
         }
 
         karch::disable_local_irq();
+        on_user_enter();
         // SAFETY: `enter_user` is an assembly stub that restores user registers and
         // executes `ertn`. `UserContext` fields are set up by `new()` with valid PRMD
         // (PLV=UMODE, PIE) and user entry point.
         unsafe { enter_user(self) };
+        on_user_exit();
 
         let estat = estat::read();
         let badv = badv::read().vaddr();

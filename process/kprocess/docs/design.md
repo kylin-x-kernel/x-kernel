@@ -82,6 +82,14 @@ retains init identity; orphan reparenting reserves an init relation slot.
 - `TaskStat`, `system_view`, nice/scheduler and CPU-accounting APIs provide
   procfs/scheduler snapshots rather than owning hardware scheduling policy.
 
+CPU accounting uses `Inactive`, `Kernel`, and `User` states, following Linux
+generic vtime. Switch-out settles the interval; switch-in starts kernel time.
+User transitions are marked at `UserContext::run` boundaries before IRQ dispatch.
+Sampling settles the elapsed interval under `SpinNoPreempt`, advancing
+`last_wall` so later samples cannot count the same interval again.
+The existing exit flag prevents restarting finalized accounting during cleanup.
+Separate IRQ/steal/guest accounting remains outside this model.
+
 ## Execution context and calling constraints
 
 Construction, fork, runtime capability acquisition, publication, cgroup migration

@@ -217,16 +217,16 @@ TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换
 ### 用户态进入/退出流程
 
 ```text
-UserContext::run(&mut self) -> ReturnReason:
+UserContext::run(&mut self, on_user_enter, on_user_exit) -> ReturnReason:
 1. karch::disable_local_irq()
-2. 保存内核 TLS 指针，设置用户 TLS 指针
+2. 调用 on_user_enter，再保存内核 TLS 指针、设置用户 TLS 指针
 3. 调用 enter_user() [汇编]:
    - 从 trap frame 恢复用户寄存器
    - 切换用户页表
    - 返回用户态 (sysret/eret/sret/ertn)
 4. [用户态执行，直到 trap/异常/syscall]
 5. 汇编 trap 入口触发，保存寄存器，返回 run()
-6. 恢复内核 TLS 指针
+6. 恢复内核 TLS 指针，调用 on_user_exit（IRQ 分发之前）
 7. 分类返回原因:
    - Syscall: 特定异常号 (int 0x80 / SVC / ecall / syscall)
      x86_64: syscall_entry 汇编将 rax 压入 orig_rax 字段，

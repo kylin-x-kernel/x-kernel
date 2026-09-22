@@ -136,16 +136,27 @@ impl UserContext {
     /// (saved in `elr`).
     ///
     /// This function returns when an exception or syscall occurs.
-    pub fn run(&mut self) -> ReturnReason {
+    ///
+    /// Invokes `on_user_enter` immediately before entering user space and
+    /// `on_user_exit` after restoring kernel context, before IRQ dispatch.
+    /// Both callbacks run with local IRQs masked and must return with them
+    /// masked, without sleeping or scheduling.
+    pub fn run(
+        &mut self,
+        on_user_enter: impl FnOnce(),
+        on_user_exit: impl FnOnce(),
+    ) -> ReturnReason {
         unsafe extern "C" {
             unsafe fn enter_user(uctx: &mut UserContext) -> ArchTrap;
         }
 
         karch::disable_local_irq(); // updated module reference from asm -> instrs
+        on_user_enter();
         // SAFETY: `enter_user` is an assembly stub that restores user registers from
         // `UserContext` and executes `eret`. `UserContext` fields are set up by `new()`
         // with valid EL0t SPSR and user entry point.
         let trap_kind = unsafe { enter_user(self) };
+        on_user_exit();
 
         let ret = match trap_kind {
             ArchTrap::Irq => {

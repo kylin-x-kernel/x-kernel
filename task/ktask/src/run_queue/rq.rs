@@ -913,9 +913,6 @@ impl RunQueue {
             if let Some(runtime) = prev_task.user_runtime() {
                 runtime.on_leave()
             }
-            if let Some(runtime) = next_task.user_runtime() {
-                runtime.on_enter()
-            }
         }
 
         // Program the schedule timer for the incoming task before switching.
@@ -952,6 +949,9 @@ impl RunQueue {
 
             (*prev_ctx_ptr).switch_to(&*next_ctx_ptr);
             khal::context::resume_active_exception_context(suspended_exception);
+            if let Some(runtime) = current().user_runtime() {
+                runtime.on_enter();
+            }
 
             // Current it's **next_task** running on this CPU, clear the `prev_task`'s `on_cpu` field
             // to indicate that it has finished its scheduling process and no longer running on this CPU.

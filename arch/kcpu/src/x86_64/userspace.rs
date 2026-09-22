@@ -152,7 +152,16 @@ impl UserContext {
     /// (saved in `rip`).
     ///
     /// This function returns when an exception or syscall occurs.
-    pub fn run(&mut self) -> ReturnReason {
+    ///
+    /// Invokes `on_user_enter` immediately before entering user space and
+    /// `on_user_exit` after restoring kernel context, before IRQ dispatch.
+    /// Both callbacks run with local IRQs masked and must return with them
+    /// masked, without sleeping or scheduling.
+    pub fn run(
+        &mut self,
+        on_user_enter: impl FnOnce(),
+        on_user_exit: impl FnOnce(),
+    ) -> ReturnReason {
         unsafe extern "C" {
             unsafe fn enter_user(frame: &mut EnterUserFrame);
         }
@@ -162,6 +171,8 @@ impl UserContext {
 
         karch::disable_local_irq();
 
+        // Accounting must run while the kernel TLS base is installed.
+        on_user_enter();
         let kernel_fs_base = karch::read_thread_pointer();
         // SAFETY: Setting FS base to the user value; the kernel value is saved and restored after `enter_user` returns.
         unsafe { karch::write_thread_pointer(self.fs_base as _) };
@@ -182,6 +193,7 @@ impl UserContext {
         self.fs_base = karch::read_thread_pointer() as _;
         // SAFETY: Restoring the kernel FS base that was saved before entering user mode.
         unsafe { karch::write_thread_pointer(kernel_fs_base) };
+        on_user_exit();
 
         let cr2 = Cr2::read().unwrap().as_u64() as usize;
         let vector = self.vector as u8;

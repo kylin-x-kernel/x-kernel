@@ -5,7 +5,7 @@
 use kcpu_id_map::LogicalCpuId;
 use ktask::{TaskInner, UserTaskRuntime};
 
-use super::Thread;
+use super::{CpuTimeState, Thread};
 
 /// Helper trait to access the thread from a task.
 pub trait AsThread {
@@ -23,6 +23,17 @@ pub trait AsThread {
 }
 
 impl UserTaskRuntime for Thread {
+    fn on_enter(&self) {
+        // Exit cleanup can block after the final CPU time was published.
+        if !self.is_exiting() {
+            self.set_cpu_state(CpuTimeState::Kernel);
+        }
+    }
+
+    fn on_leave(&self) {
+        self.set_cpu_state(CpuTimeState::Inactive);
+    }
+
     fn set_user_mm_resident_cpu(&self, cpu_id: LogicalCpuId) {
         self.set_process_mm_resident_cpu(cpu_id);
     }

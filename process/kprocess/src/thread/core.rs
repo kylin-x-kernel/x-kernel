@@ -9,6 +9,7 @@ use kcgroup::{Cgroup, TaskCharge, TaskMembership};
 use kcred::Cred;
 use kerrno::KResult;
 use ksignal::{SignalStack, api::ThreadSignalManager};
+use kspin::SpinNoPreempt;
 use ksync::{Mutex, RwLock};
 use ktask::KtaskRef;
 use ktime_types::TimeSpan;
@@ -160,7 +161,7 @@ pub struct Thread {
     clear_child_tid: AtomicUsize,
     robust_list_head: AtomicUsize,
     signal: Arc<ThreadSignalManager>,
-    time: Mutex<CpuTimeStatistics>,
+    time: SpinNoPreempt<CpuTimeStatistics>,
     nice: AtomicI32,
     scheduler: Mutex<SchedulerState>,
     is_exiting: AtomicBool,
@@ -209,7 +210,7 @@ impl Thread {
             cred: RwLock::new(cred),
             clear_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
-            time: Mutex::new(CpuTimeStatistics::new()),
+            time: SpinNoPreempt::new(CpuTimeStatistics::new()),
             nice: AtomicI32::new(NiceValue::default().as_i32()),
             scheduler: Mutex::new(SchedulerState::default()),
             is_exiting: AtomicBool::new(false),
@@ -530,9 +531,13 @@ impl Thread {
         self.process().pid()
     }
 
-    /// Returns sampled user and kernel CPU time.
+    /// Settles the elapsed interval and returns sampled user and kernel CPU time.
+    ///
+    /// May sample another thread; serializes with scheduling and user/kernel
+    /// transitions under a non-sleeping lock with preemption disabled.
+    /// Must not be called from interrupt context.
     pub fn sample_cpu_time(&self) -> (TimeSpan, TimeSpan) {
-        self.time.lock().sample()
+        self.time.lock().sample(khal::time::monotonic_time())
     }
 
     /// Returns the sum of user and kernel CPU time consumed by this thread.
@@ -541,9 +546,15 @@ impl Thread {
         utime.saturating_add(stime)
     }
 
-    /// Updates the accounting state used for subsequent CPU-time samples.
+    /// Settles the current interval and changes the CPU-accounting state.
+    ///
+    /// Called for this thread at scheduling and user/kernel boundaries with
+    /// IRQs masked, or to close its final interval during exit. Never sleeps.
+    /// Must not be called from interrupt context.
     pub fn set_cpu_state(&self, state: CpuTimeState) {
-        self.time.lock().set_state(state);
+        self.time
+            .lock()
+            .set_state(state, khal::time::monotonic_time());
     }
 
     /// Temporarily swaps the blocked-signal mask while executing `f`.

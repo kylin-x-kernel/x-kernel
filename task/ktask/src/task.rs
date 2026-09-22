@@ -94,9 +94,9 @@ pub enum TaskState {
 /// or depend on ordinary current-process state. Shared state accessed by
 /// callbacks must be synchronized for concurrent scheduler activity.
 pub trait UserTaskRuntime: Send + Sync + Any {
-    /// Called when the task is switched in.
+    /// Called on the incoming task after switching stacks, including first entry.
     fn on_enter(&self) {}
-    /// Called when the task is switched out.
+    /// Called on the outgoing task before saving its context.
     fn on_leave(&self) {}
     /// Marks that the current CPU may retain TLB state for this task's user
     /// address space.
@@ -1175,6 +1175,9 @@ impl Deref for CurrentTask {
 }
 
 extern "C" fn task_entry() -> ! {
+    if let Some(runtime) = crate::current().user_runtime() {
+        runtime.on_enter();
+    }
     #[cfg(feature = "smp")]
     // SAFETY: this runs as the first code on a scheduled task after the
     // context switch, which is exactly when the previous-task on-CPU marker

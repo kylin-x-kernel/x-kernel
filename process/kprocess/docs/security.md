@@ -84,7 +84,9 @@ sleepable owner locks; TEE callbacks do likewise. They must not reenter the same
 lock. Current-user helpers are not IRQ/early-boot/kernel-task APIs; initialization
 and allocator/scheduler/clock assumptions are explicit in design.md.
 
-Per-thread CPU accounting has a mutex; aggregate counters are relaxed atomics.
+Per-thread CPU accounting uses `SpinNoPreempt` for non-sleeping scheduler updates
+and synchronized remote samples; interrupt handlers must not access this state.
+Aggregate counters are relaxed atomics.
 Their snapshots are not transactionally tied to every directory/resource field.
 `ExecMetadata` atomically replaces its pair, while separate getters can straddle
 updates. Timer signal dequeue callbacks validate timer sequence through ktimer;

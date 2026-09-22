@@ -69,10 +69,11 @@ pub(crate) fn run_user_thread_loop(
     info!("Enter user space: ip={:#x}, sp={:#x}", uctx.ip(), uctx.sp());
 
     while !thr.is_exiting() {
-        let reason = uctx.run();
+        let reason = uctx.run(
+            || thr.set_cpu_state(CpuTimeState::User),
+            || thr.set_cpu_state(CpuTimeState::Kernel),
+        );
         let mut runtime_action = UserThreadRuntimeAction::Continue;
-
-        thr.set_cpu_state(CpuTimeState::Kernel);
 
         match reason {
             ReturnReason::Syscall => {
@@ -86,7 +87,6 @@ pub(crate) fn run_user_thread_loop(
                     .expect("current user thread must still expose process address space");
                 let outcome = address_space.lock().handle_page_fault(addr, flags);
                 if outcome.is_retryable() {
-                    thr.set_cpu_state(CpuTimeState::User);
                     ktask::check_preempt_pending();
                     continue;
                 } else if !outcome.is_resolved() {
@@ -160,7 +160,6 @@ pub(crate) fn run_user_thread_loop(
             }
         }
 
-        thr.set_cpu_state(CpuTimeState::User);
         poll_cpu_timers();
         ktask::check_preempt_pending();
         // `interrupt()` may have queued a signal in `poll_cpu_timers` (CPU-time
@@ -361,7 +360,8 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
     // already observes NoSuchProcess for this tid, but `thr` still holds the
     // current thread object for local teardown. Close its CPU-accounting
     // interval before any parent waiter can observe and reap the zombie.
-    thr.set_cpu_state(kprocess::CpuTimeState::None);
+    thr.set_exit();
+    thr.set_cpu_state(CpuTimeState::Inactive);
     let (thread_utime, thread_stime) = thr.sample_cpu_time();
     process_exit::record_exited_thread_cpu_time(process, thread_utime, thread_stime);
 
@@ -407,8 +407,6 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
             let _ = kprocess::process_signals::send_to_thread(None, tid, Some(sig.clone()));
         }
     }
-
-    thr.set_exit();
 }
 
 /// Queues a fatal signal for the current process or starts group exit.
