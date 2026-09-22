@@ -5,8 +5,12 @@
 #![cfg_attr(not(test), no_std)]
 
 mod cfs;
+mod class;
+mod clock;
 mod eevdf;
+mod entity;
 mod fifo;
+mod policy;
 mod ready_list;
 mod round_robin;
 #[cfg(unittest)]
@@ -15,8 +19,12 @@ mod tests;
 extern crate alloc;
 
 pub use cfs::{CFSTask, CFScheduler};
+pub use class::{Decision, EnqueueKind, LeaveReason, UpdateKind};
+pub use clock::RqClock;
 pub use eevdf::{EevdfEntity, EevdfScheduler, EevdfStats};
+pub use entity::{KernelClass, SchedTask};
 pub use fifo::{FifoScheduler, FifoTask};
+pub use policy::{Nice, SchedAttr, SchedClass, SchedError, SchedPolicy};
 pub use round_robin::{RRScheduler, RRTask};
 
 /// How a running task leaves its current execution slot on a run queue.
