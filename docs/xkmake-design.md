@@ -142,7 +142,7 @@ The selected product is explicit. A normal session starts with a checked-in
 platform defconfig:
 
 ```bash
-cp platforms/aarch64-qemu-virt/defconfig .config
+cp platforms/kplat-aarch64/qemu_defconfig .config
 make defconfig
 ```
 
@@ -287,10 +287,10 @@ memory and SMP
 
 Supported QEMU platforms are:
 
-- `aarch64-qemu-virt`;
-- `riscv64-qemu-virt`;
-- `loongarch64-qemu-virt`.
-- `x86_64-qemu-virt`.
+- `kplat-aarch64`;
+- `kplat-riscv64`;
+- `kplat-loongarch64`.
+- `kplat-x86_64`.
 
 x86_64 uses LinuxBoot by default and accepts `--boot uefi` for OVMF execution.
 UEFI firmware is resolved from explicit CLI paths, environment variables,

@@ -41,7 +41,7 @@ sudo apt install qemu-system
 
 #### 从平台 defconfig 开始
 ```bash
-cp platforms/aarch64-qemu-virt/defconfig .config
+cp platforms/kplat-aarch64/qemu_defconfig .config
 make defconfig
 ```
 
@@ -101,11 +101,11 @@ make build
 支持直接在 QEMU 上运行内核：
 
 ```bash
-cp platforms/aarch64-qemu-virt/defconfig .config
+cp platforms/kplat-aarch64/qemu_defconfig .config
 make defconfig
 make run
 
-cp platforms/x86_64-qemu-virt/defconfig .config
+cp platforms/kplat-x86_64/qemu_defconfig .config
 make defconfig
 make run
 make run UEFI=y

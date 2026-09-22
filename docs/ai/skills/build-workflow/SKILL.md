@@ -51,7 +51,7 @@ pinned version constants. Cargo installs these executables under
 Start from an explicit platform defconfig:
 
 ```bash
-cp platforms/aarch64-qemu-virt/defconfig .config
+cp platforms/kplat-aarch64/qemu_defconfig .config
 make defconfig
 ```
 
@@ -159,10 +159,10 @@ make run
 
 XKMake supports QEMU boot for:
 
-- `aarch64-qemu-virt`;
-- `riscv64-qemu-virt`;
-- `loongarch64-qemu-virt`;
-- `x86_64-qemu-virt`.
+- `kplat-aarch64`;
+- `kplat-riscv64`;
+- `kplat-loongarch64`;
+- `kplat-x86_64`.
 
 x86_64 defaults to LinuxBoot. Select the UEFI image with either form:
 

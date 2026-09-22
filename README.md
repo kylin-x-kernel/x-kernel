@@ -43,7 +43,7 @@ sudo apt install qemu-system
 
 #### start from a platform defconfig
 ```bash
-cp platforms/aarch64-qemu-virt/defconfig .config
+cp platforms/kplat-aarch64/qemu_defconfig .config
 make defconfig
 ```
 
@@ -103,11 +103,11 @@ This expands `.config` when needed and creates a versioned bundle under
 we support directly running the kernel on QEMU
 
 ```bash
-cp platforms/aarch64-qemu-virt/defconfig .config
+cp platforms/kplat-aarch64/qemu_defconfig .config
 make defconfig
 make run
 
-cp platforms/x86_64-qemu-virt/defconfig .config
+cp platforms/kplat-x86_64/qemu_defconfig .config
 make defconfig
 make run
 make run UEFI=y
