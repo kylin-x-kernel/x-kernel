@@ -1,0 +1,14 @@
+[package]
+name = "vdev-virtio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Reusable VirtIO MMIO transport, virtqueue, and device-model infrastructure"
+
+[dependencies]
+log.workspace = true
+kspin.workspace = true
+vdev-core.workspace = true

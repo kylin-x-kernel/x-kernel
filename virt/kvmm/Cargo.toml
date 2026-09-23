@@ -26,6 +26,8 @@ kirq.workspace = true
 ktime_types.workspace = true
 vdev-core.workspace = true
 vdev-test-mmio.workspace = true
+vdev-virtio-blk.workspace = true
+unittest.workspace = true
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 kcpu_slot.workspace = true

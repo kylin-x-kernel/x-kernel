@@ -9,5 +9,7 @@
 pub use vdev_core as core;
 pub use vdev_test_mmio as test_mmio;
 pub use vdev_uart16550 as uart16550;
+pub use vdev_virtio as virtio;
+pub use vdev_virtio_blk as virtio_blk;
 pub use vdev_virtio_net as virtio_net;
 pub use vdev_vpl011 as vpl011;

@@ -25,10 +25,12 @@ linux-raw-sys.workspace = true
 # Guest device models are wired per target architecture.
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 vdev-uart16550.workspace = true
+vdev-virtio-blk.workspace = true
 vdev-virtio-net.workspace = true
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 vdev-vpl011.workspace = true
+vdev-virtio-blk.workspace = true
 vdev-virtio-net.workspace = true
 memspace.workspace = true
 memaddr.workspace = true

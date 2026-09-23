@@ -365,7 +365,16 @@ fn build_and_start_rv64(
         vm.shared()
             .devices()
             .register_mmio(Box::new(vdev_virtio_net::VirtioNet::new(
-                vm_id, irq_sender, dma,
+                vm_id,
+                irq_sender.clone(),
+                dma.clone(),
+            )));
+        vm.shared()
+            .devices()
+            .register_mmio(Box::new(vdev_virtio_blk::bus::VirtioBlkDevice::new(
+                irq_sender,
+                dma,
+                vdev_virtio_blk::bus::DEFAULT_CAPACITY_BYTES,
             )));
     }
 
@@ -411,6 +420,11 @@ fn unmap_rv64_mmio(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
             "virtio-net",
             vdev_virtio_net::VIRTIO_NET_BASE,
             vdev_virtio_net::VIRTIO_NET_SIZE,
+        ),
+        (
+            "virtio-blk",
+            vdev_virtio_blk::bus::VIRTIO_BLK_BASE,
+            vdev_virtio_blk::bus::VIRTIO_BLK_SIZE,
         ),
     ];
 
@@ -598,7 +612,16 @@ fn build_and_start_aarch64(
         vm.shared()
             .devices()
             .register_mmio(Box::new(vdev_virtio_net::VirtioNet::new(
-                vm_id, irq_sender, dma,
+                vm_id,
+                irq_sender.clone(),
+                dma.clone(),
+            )));
+        vm.shared()
+            .devices()
+            .register_mmio(Box::new(vdev_virtio_blk::bus::VirtioBlkDevice::new(
+                irq_sender,
+                dma,
+                vdev_virtio_blk::bus::DEFAULT_CAPACITY_BYTES,
             )));
     }
 

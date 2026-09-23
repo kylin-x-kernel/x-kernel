@@ -1,0 +1,16 @@
+[package]
+name = "vdev-virtio-blk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "VirtIO MMIO block device model and MmioDevice binding"
+
+[dependencies]
+log.workspace = true
+kspin.workspace = true
+ksync.workspace = true
+vdev-core.workspace = true
+vdev-virtio.workspace = true

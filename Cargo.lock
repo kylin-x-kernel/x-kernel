@@ -3207,8 +3207,10 @@ dependencies = [
  "ktask",
  "ktime_types",
  "log",
+ "unittest",
  "vdev-core",
  "vdev-test-mmio",
+ "vdev-virtio-blk",
 ]
 
 [[package]]
@@ -3227,6 +3229,7 @@ dependencies = [
  "memaddr",
  "memspace",
  "vdev-uart16550",
+ "vdev-virtio-blk",
  "vdev-virtio-net",
  "vdev-vpl011",
 ]
@@ -5471,6 +5474,26 @@ dependencies = [
  "klogger",
  "ksync",
  "vdev-core",
+]
+
+[[package]]
+name = "vdev-virtio"
+version = "0.3.0-dev"
+dependencies = [
+ "kspin",
+ "log",
+ "vdev-core",
+]
+
+[[package]]
+name = "vdev-virtio-blk"
+version = "0.3.0-dev"
+dependencies = [
+ "kspin",
+ "ksync",
+ "log",
+ "vdev-core",
+ "vdev-virtio",
 ]
 
 [[package]]

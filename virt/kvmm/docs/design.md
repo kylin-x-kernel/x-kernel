@@ -192,8 +192,14 @@ uses through `GuestMem`.
 ### Virtual device model and interrupt path (AArch64)
 
 The shared device registry and cross-architecture device traits live under
-`src/vdev/`. AArch64 guest-platform devices live under `src/vdev/aarch64/` and
-are the sandbox used to bring up and debug the whole interrupt path with the
+`src/vdev/`, backed by the VMM-agnostic `vdev-core` interfaces. Reusable device
+models are their own `virt/vdev/*` crates: `vdev-virtio` owns the VirtIO MMIO
+transport, virtqueue, and device-model infrastructure, and `vdev-virtio-blk`
+owns the VirtIO block model plus its `MmioDevice` binding over a
+`vdev_core::GuestDma` capability. KVMM keeps only the `GuestDma` implementation
+(`src/vdev/dma.rs`), the world-switch hook traits, and the architecture-specific
+platform devices. AArch64 guest-platform devices live under `src/vdev/aarch64/`
+and are the sandbox used to bring up and debug the whole interrupt path with the
 simplest possible guest:
 
 - **`stage2` maps only guest RAM** (Normal). Every device region is left

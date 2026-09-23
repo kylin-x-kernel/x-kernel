@@ -197,6 +197,8 @@ kvmm-api = { path = "virt/kvmm-api" }
 vdev-core = { path = "virt/vdev/core" }
 vdev-test-mmio = { path = "virt/vdev/test-mmio" }
 vdev-uart16550 = { path = "virt/vdev/uart16550" }
+vdev-virtio = { path = "virt/vdev/virtio" }
+vdev-virtio-blk = { path = "virt/vdev/virtio-blk" }
 vdev-virtio-net = { path = "virt/vdev/virtio-net" }
 vdev-vpl011 = { path = "virt/vdev/vpl011" }
 

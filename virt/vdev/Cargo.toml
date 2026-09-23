@@ -12,5 +12,7 @@ description = "Virtual device crate collection"
 vdev-core.workspace = true
 vdev-test-mmio.workspace = true
 vdev-uart16550.workspace = true
+vdev-virtio.workspace = true
+vdev-virtio-blk.workspace = true
 vdev-virtio-net.workspace = true
 vdev-vpl011.workspace = true
