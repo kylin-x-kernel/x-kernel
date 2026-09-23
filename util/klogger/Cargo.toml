@@ -17,3 +17,4 @@ kiface.workspace = true
 kspin.workspace = true
 ktime_types.workspace = true
 log.workspace = true
+unittest.workspace = true

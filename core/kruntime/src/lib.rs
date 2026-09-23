@@ -139,6 +139,41 @@ const fn configured_log_level() -> &'static str {
     }
 }
 
+/// Resolve the boot-time log level: a `loglevel=` kernel command-line
+/// parameter overrides the Kconfig default, in the style of Linux's
+/// `loglevel=` parameter but using X-Kernel's own level values (`0..=5` in
+/// off/error/warn/info/debug/trace order, or a level name). `quiet` and
+/// `debug` are accepted as shorthand for `loglevel=2` (warn) and
+/// `loglevel=4` (debug) respectively. Invalid `loglevel=` values are
+/// reported and ignored, falling back to the Kconfig default.
+fn resolve_boot_log_level() -> &'static str {
+    if let Some(cmdline) = khal::cmdline() {
+        for token in cmdline.split_ascii_whitespace() {
+            if let Some(value) = token.strip_prefix("loglevel=")
+                && !value.is_empty()
+            {
+                return if klogger::parse_log_level(value).is_some() {
+                    value
+                } else {
+                    warn!(
+                        "ignoring invalid loglevel={value} on the kernel command line; expected a \
+                         level 0..=5 or off/error/warn/info/debug/trace"
+                    );
+                    configured_log_level()
+                };
+            }
+        }
+        for token in cmdline.split_ascii_whitespace() {
+            match token {
+                "quiet" => return "2",
+                "debug" => return "4",
+                _ => {}
+            }
+        }
+    }
+    configured_log_level()
+}
+
 #[derive(Debug, Clone, Copy)]
 struct RegionLogSummary {
     name: &'static str,
@@ -333,7 +368,7 @@ pub fn rust_main(arg: usize) -> ! {
     );
 
     klogger::init_klogger();
-    klogger::set_log_level(configured_log_level()); // no effect if set `log-level-*` features
+    klogger::set_log_level(resolve_boot_log_level());
     info!("Logging is enabled.");
     info!(
         "Primary CPU {} started, boot_info = {arg:#x}.",

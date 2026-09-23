@@ -27,6 +27,14 @@
 #     - VSOCK_CID           Preferred guest CID for vhost-vsock (default 103; must be >= 3;
 #                           when busy, the next free CID up to 203 is picked)
 #     - QEMU_ARGS           Extra QEMU args, appended verbatim after `--`
+#     - LOG                 Kernel command-line log level for `make run` /
+#                           `make justrun` / `make debug`; shorthand for
+#                           `QEMU_ARGS="-append loglevel=<LOG>"`, e.g.
+#                           `make run LOG=4` (0-5 in off/error/warn/info/
+#                           debug/trace order, or a level name). Takes effect
+#                           at boot without a rebuild; ignored on the UEFI
+#                           boot path. (Note: `make symbolize LOG=<file>`
+#                           reuses this variable as the panic log file path.)
 #     - XKMAKE_ARGS         Extra flags forwarded to every xkmake invocation
 #
 # * Test harness — `make ci-test`:
@@ -167,17 +175,27 @@ build:
 	@echo "Building x-kernel..."
 	@$(XKMAKE) build $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
 
+# Extra QEMU args for the run targets: `LOG` is sugar for `-append
+# loglevel=<LOG>` (the kernel command line on `-kernel` boot paths).
+# QEMU honors only the last `-append`, so a `QEMU_ARGS` that also passes
+# `-append` would silently swallow `LOG`; warn and drop `LOG` instead.
+ifneq (,$(and $(strip $(LOG)),$(filter -append%,$(QEMU_ARGS))))
+$(warning LOG="$(LOG)" is ignored: QEMU_ARGS already passes -append, and QEMU keeps only the last one)
+override LOG :=
+endif
+RUN_QEMU_ARGS = $(strip $(if $(strip $(LOG)),-append loglevel=$(LOG)) $(QEMU_ARGS))
+
 run:
 	@echo "Running x-kernel..."
-	@$(XKMAKE) run $(XKMAKE_BUILD_ARGS) $(XKMAKE_RUN_ARGS) $(XKMAKE_ARGS) $(if $(strip $(QEMU_ARGS)),-- $(QEMU_ARGS))
+	@$(XKMAKE) run $(XKMAKE_BUILD_ARGS) $(XKMAKE_RUN_ARGS) $(XKMAKE_ARGS) $(if $(strip $(RUN_QEMU_ARGS)),-- $(RUN_QEMU_ARGS))
 
 justrun:
-	@$(XKMAKE) run --no-build $(XKMAKE_BUILD_ARGS) $(XKMAKE_RUN_ARGS) $(XKMAKE_ARGS) $(if $(strip $(QEMU_ARGS)),-- $(QEMU_ARGS))
+	@$(XKMAKE) run --no-build $(XKMAKE_BUILD_ARGS) $(XKMAKE_RUN_ARGS) $(XKMAKE_ARGS) $(if $(strip $(RUN_QEMU_ARGS)),-- $(RUN_QEMU_ARGS))
 
 debug: build
 	@set -eu; \
 	elf="$$($(XKMAKE) config bundle-elf --target-dir "$(TARGET_DIR)")"; \
-	$(XKMAKE) run --no-build $(XKMAKE_BUILD_ARGS) $(XKMAKE_RUN_ARGS) $(XKMAKE_ARGS) -- $(QEMU_ARGS) -s -S & \
+	$(XKMAKE) run --no-build $(XKMAKE_BUILD_ARGS) $(XKMAKE_RUN_ARGS) $(XKMAKE_ARGS) -- $(RUN_QEMU_ARGS) -s -S & \
 	qemu_pid=$$!; \
 	trap 'kill $$qemu_pid 2>/dev/null || true' EXIT INT TERM; \
 	$(GDB) "$$elf" \

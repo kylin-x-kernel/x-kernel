@@ -26,11 +26,14 @@ kaddr_layout.workspace = true
 kalloc.workspace = true
 kcpu_id_map.workspace = true
 kdevice.workspace = true
+kcred.workspace = true
 khal.workspace = true
 klockstat = { workspace = true, optional = true }
+klogger.workspace = true
 kprocess.workspace = true
 ktask.workspace = true
 ktracing.workspace = true
+log.workspace = true
 memaddr.workspace = true
 memspace.workspace = true
 unittest.workspace = true

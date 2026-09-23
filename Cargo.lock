@@ -2583,6 +2583,7 @@ dependencies = [
  "kspin",
  "ktime_types",
  "log",
+ "unittest",
 ]
 
 [[package]]
@@ -4126,15 +4127,18 @@ dependencies = [
  "kalloc",
  "kbuild_config",
  "kcpu_id_map",
+ "kcred",
  "kdevice",
  "khal",
  "klockstat",
+ "klogger",
  "kprocess",
  "ktask",
  "ktracing",
  "kvfs",
  "kvmm",
  "kwork",
+ "log",
  "macros",
  "memaddr",
  "memspace",

@@ -4,9 +4,23 @@
 
 //! Early-boot display of metadata embedded in the kernel image.
 
+/// Prints the embedded build info, substituting the log level that is
+/// actually active at boot (the embedded `log_level` line only records the
+/// Kconfig default; a `loglevel=` command-line override may differ).
 pub(crate) fn print() {
     match kernel_image_metadata::embedded_build_info() {
-        Ok(build_info) => kprintln!("{}", build_info.trim_end_matches('\n')),
+        Ok(build_info) => {
+            for line in build_info.trim_end_matches('\n').lines() {
+                if line.starts_with("log_level = ") {
+                    kprintln!(
+                        "log_level = {}",
+                        klogger::level_name(klogger::current_log_level())
+                    );
+                } else {
+                    kprintln!("{line}");
+                }
+            }
+        }
         Err(error) => kprintln!("build_info = unavailable ({error})"),
     }
 

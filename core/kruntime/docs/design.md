@@ -116,6 +116,7 @@ BootInfo*
     → memspace::init_memory_management
     → early_driver_init
     → klogger + backtrace (链接符号 _stext/_etext)
+        (日志等级：优先取启动命令行 `loglevel=` / `quiet` / `debug`，否则 Kconfig 默认)
     → final_init
     → init_scheduler
     → init_interrupt (softirq runner、kwork/system_wq、定时器 tick、IPI、PMU 基础 handler)
