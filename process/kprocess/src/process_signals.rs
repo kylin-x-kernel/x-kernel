@@ -62,12 +62,21 @@ impl ksignal::CurrentSignalDispatch {
 
 /// Sends a signal to a process identified by PID.
 ///
+/// A PID that is still published but has already exited (a not-yet-reaped
+/// zombie) is a valid target: Linux discards the signal but reports success,
+/// so `kill(2)` does not observe a spurious `ESRCH` before the parent reaps the
+/// child. Only an unpublished PID yields `KError::NoSuchProcess`.
+///
 /// # Errors
 ///
-/// Returns `KError::NoSuchProcess` for an unpublished/exited PID or a missing
-/// runtime signal manager. PID zero selects the current user process.
+/// Returns `KError::NoSuchProcess` for an unpublished PID or a live PID whose
+/// runtime signal manager is already gone. PID zero selects the current user
+/// process.
 pub fn send_to_process(pid: Pid, sig: Option<SignalInfo>) -> KResult<()> {
-    let proc = lookup::live_process(pid)?;
+    let proc = lookup::published_process(pid)?;
+    if proc.is_waitable_zombie() {
+        return Ok(());
+    }
     send_to_process_ref(&proc, sig)
 }
 

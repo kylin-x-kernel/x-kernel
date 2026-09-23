@@ -65,8 +65,11 @@ retains init identity; orphan reparenting reserves an init relation slot.
   resolve non-exited processes. Query/pidfd views may retain published zombies.
   `procfs` additionally requires a representative published task for listing.
 - `process_signals` resolves process/group/thread targets and calls `ksignal`,
-  interrupting a chosen task. `None` probes a target without queuing a signal.
-  These helpers do not perform all syscall permission checks.
+  interrupting a chosen task. Process-directed sends target published identities:
+  a still-published zombie accepts no delivery but reports success, so `kill(2)`
+  does not observe `ESRCH` before the parent reaps it. `None` probes a target
+  without queuing a signal. These helpers do not perform all syscall permission
+  checks.
 - `process_exit` and `wait_reap` are used by lifecycle/syscall owners to sequence
   last-thread cleanup, stable exit publication, child scanning and final identity
   removal. `PidFd` implements `Pollable` and anonymous-file operations against

@@ -27,7 +27,7 @@ use crate::{
     AsThread, ForkAddressSpace, ForkFdTable, ForkFs, ForkParent, ForkSignalActions, Process,
     ProcessExitPublication, ProcessForkConfig, build_process_thread,
     process::INIT_PROC,
-    process_exit, procfs,
+    process_exit, process_signals, procfs,
     publication::{prepare_user_task, process_publication, task_identity_matches_thread},
     publish_user_task, scheduler, wait_reap,
 };
@@ -750,6 +750,33 @@ fn test_exited_process_is_not_live_even_if_runtime_still_exists() {
 
     drop(prepared);
     wait_reap::assert_reap_zombie_process(&proc);
+}
+
+#[def_test(user, serial)]
+fn test_signal_send_reaches_published_zombie_until_reaped() {
+    let (proc, prepared) = build_prepared_test_user_task();
+    let publication = process_publication();
+    publication.publish_process_identity(&proc);
+
+    let sigterm = ksignal::SignalInfo::new_kernel(ksignal::Signo::SIGTERM);
+    process_exit::finalize_process_exit(&proc);
+
+    assert!(
+        process_signals::send_to_process(proc.pid(), None).is_ok(),
+        "kill(zombie, 0) must succeed while the child is still published"
+    );
+    assert!(
+        process_signals::send_to_process(proc.pid(), Some(sigterm.clone())).is_ok(),
+        "kill(zombie, SIGTERM) must succeed while the child is still published"
+    );
+
+    drop(prepared);
+    wait_reap::assert_reap_zombie_process(&proc);
+
+    assert!(
+        process_signals::send_to_process(proc.pid(), Some(sigterm)).is_err(),
+        "kill on a reaped PID must report ESRCH"
+    );
 }
 
 #[def_test(serial)]
