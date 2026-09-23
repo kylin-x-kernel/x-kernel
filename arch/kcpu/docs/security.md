@@ -133,6 +133,24 @@ unsafe extern "C" fn context_switch(_current_stack: &mut u64, _next_stack: &u64)
 **为何安全**：`FpState`/`FpuState`/`FxStateBlock` 的布局通过
 `static_assertions` 或 `repr(C, align(...))` 保证与指令期望一致。
 
+### 5a. x86_64 信号帧 FP/SIMD 恢复（`x86_64/userspace.rs`）
+
+信号处理函数可能在用户态使用 XMM/MXCSR，因此 `UserRestorableContext`
+在信号投递时用 `FXSAVE` 抓取被中断的 FP/SIMD 状态，并在 `rt_sigreturn`
+时用 `FXRSTOR` 恢复（`FxStateBlock` 为 `repr(C, align(16))`，信号帧字段
+由 Rust 布局保证 16 字节对齐）。
+
+**不变量**：从用户可写信号帧取回的 `MXCSR` 必须清除不受支持的位后才能
+执行 `FXRSTOR`。
+
+**为何安全**：`MXCSR` 是 `FXRSTOR` 唯一的数据相关 `#GP` 来源（除对齐外）。
+内核在首次使用时对 CPU 执行一次 `FXSAVE` 得到受信任的 `MXCSR` feature
+mask 并缓存（mask 为 0 时回退到架构默认 `0x0000ffbf`，与 Linux
+`fpu__init_system_mxcsr` 一致）；恢复前执行 `saved.sse_mxcsr &= mask`，
+因此被篡改的帧不会让内核在 `FXRSTOR` 中触发 `#GP`。其余 `FXSAVE` 字段
+不会被 `FXRSTOR` 校验。注意：64 位 Linux 对非法 `MXCSR` 采取拒绝并投递
+`SIGSEGV` 的策略，这里选择掩码清除，使 `rt_sigreturn` 保持不可失败。
+
 ### 6. `ExtendedState::default`（`x86_64/ctx.rs:310`）
 
 ```rust
@@ -317,6 +335,7 @@ CPU；`eret` 随后从 SPSR 恢复中断前的 DAIF 状态。
 | T-11 | x86_64 `orig_rax` 被恶意篡改导致 syscall 重启异常 | 中 | 用户态通过信号处理器修改 trap frame 中的 `orig_rax` | `orig_rax` 仅在 `syscall_entry` 汇编中写入；信号帧保存 `UserRestorableContext` 窄状态，不从用户栈恢复 `orig_rax`；x86_64 `EnterUserFrame.kernel_rsp` 也不进入用户信号帧；signal delivery 代码通过 `syscall_restart_error()` 判断重启条件 |
 | T-12 | `rollback_syscall` 在非 syscall 上下文调用 | 低 | 信号处理代码误判上下文类型 | `is_from_syscall()` 检查 `orig_rax != u64::MAX`，非 syscall 上下文时 `rollback_syscall()` 和 `restart_with_syscall()` 为 no-op |
 | T-13 | IRQ 被误分类为 NMI（或反之） | 高 | `use_nmi_path` 的 SPSR.I / 入口 PMR 判断错误，或机制 readiness 标志（`pmr::is_ready` / `allint_active`）错误 | NMI handler 在错误上下文约束下执行（如普通 IRQ 按 NMI 规则），或 Superpriority NMI 被当普通 IRQ 丢失优先级 | 分类依赖硬件状态快照 + readiness 双重门控；降级构建永不触碰 NMI 寄存器；NMI path 保持 ALLINT/PMR 防嵌套 |
+| T-14 | x86_64 用户态构造恶意信号帧 FP 状态使内核 `FXRSTOR` 触发 `#GP` | 高 | 用户在 `rt_sigreturn` 前篡改信号帧中的 `MXCSR` 为保留位 | 内核态 `#GP`，若不可恢复则系统崩溃 | `MXCSR` 在执行 `FXRSTOR` 前与内核缓存的可信 feature mask 按位与，清除不受支持的位；`FxStateBlock` 的 16 字节对齐由 `repr(C, align(16))` 与信号帧字段天然对齐共同保证；其余 `FXSAVE` 字段不被 `FXRSTOR` 校验 |
 
 ## 故障模式与影响分析（FMEA）
 

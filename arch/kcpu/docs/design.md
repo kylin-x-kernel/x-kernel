@@ -128,9 +128,12 @@ EnterUserFrame    (x86_64 私有 trap-return 汇编帧)
       │           - 不进入 UserContext，也不进入用户可见 signal frame
 
 UserRestorableContext
-      │           信号帧保存的窄类型，仅包含 ABI `mcontext_t` 未覆盖且允许
-      │           从用户信号帧恢复的用户态语义状态；不包含 x86_64
-      │           EnterUserFrame 私有字段或 syscall restart scratch 字段。
+      │           信号帧保存的类型，包含 ABI `mcontext_t` 未覆盖且允许从用户
+      │           信号帧恢复的用户态语义状态；不包含 x86_64 EnterUserFrame
+      │           私有字段或 syscall restart scratch 字段。
+      │           x86_64 额外携带一份 FXSAVE 快照（x87/MMX/XMM/MXCSR），
+      │           使被信号打断的 FP/SIMD 状态在处理函数运行后仍可恢复；
+      │           其他架构仅携带各自所需的窄状态。
 
 TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换)
                   x86_64:      { kstack_top, rsp, fs_base, cr3, ext_state? }
@@ -318,9 +321,11 @@ kernel stack restore slot、trap frame stack alignment 等汇编私有不变量�
 `EnterUserFrame` 内。
 
 信号处理不直接把完整 `UserContext` 放入用户栈。`UContext/MContext` 承载
-用户 ABI 寄存器状态，`UserRestorableContext` 只补充 ABI 上下文未覆盖的窄状态，
-避免 x86_64 `EnterUserFrame.kernel_rsp` 等内核私有字段泄露到 signal frame 或被
-`sigreturn` 恢复。
+用户 ABI 寄存器状态，`UserRestorableContext` 补充 ABI 上下文未覆盖的状态
+（x86_64 为段基址与 FXSAVE FP/SIMD 快照），避免 x86_64
+`EnterUserFrame.kernel_rsp` 等内核私有字段泄露到 signal frame 或被 `sigreturn`
+恢复。每个信号帧持有独立的 FP 快照，因此嵌套信号也能逐层恢复被中断的 FP/SIMD
+状态。
 
 ### 为什么 LoongArch64 有软件非对齐模拟
 

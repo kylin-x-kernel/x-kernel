@@ -29,6 +29,14 @@ struct SignalFrame {
     saved: UserRestorableContext,
 }
 
+// The x86_64 restorable context holds an FXSAVE block that `restore` feeds to
+// `FXRSTOR`, which requires 16-byte alignment. Rust's field layout keeps
+// `saved` naturally aligned inside the frame; this guards that invariant.
+const _: () = assert!(
+    core::mem::offset_of!(SignalFrame, saved) % core::mem::align_of::<UserRestorableContext>() == 0,
+    "signal-frame restorable state must be naturally aligned"
+);
+
 /// Thread-level signal manager.
 ///
 /// Owns the per-thread pending queue, blocked set, saved sigmask, and

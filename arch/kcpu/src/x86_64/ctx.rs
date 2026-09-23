@@ -15,6 +15,7 @@ use core::{
 };
 
 use memaddr::VirtAddr;
+use x86_64::registers::mxcsr::MxCsr;
 
 /// Saved registers when a trap (interrupt or exception) occurs.
 #[repr(C)]
@@ -261,7 +262,7 @@ struct ContextSwitchFrame {
 ///
 /// See <https://www.felixcloutier.com/x86/fxsave> for more details.
 #[repr(C, align(16))]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct FxStateBlock {
     /// FPU control word.
     pub fpu_ctrl: u16,
@@ -289,6 +290,47 @@ pub struct FxStateBlock {
 
 static_assertions::const_assert_eq!(core::mem::size_of::<FxStateBlock>(), 512);
 
+/// x87 FPU control word after `FNINIT` (`0x037f`).
+///
+/// Intel SDM: all exceptions masked (`0x3f`), extended 64-bit precision
+/// (`PC=11`, `0x0300`), round-to-nearest, and reserved bit 6 (`0x40`) set.
+/// The `x86_64` crate exposes no x87 control-word type, so this stays explicit.
+const X87_FPU_CONTROL_WORD_FNINIT: u16 = 0x037f;
+
+/// `MXCSR` after reset, assembled from the `x86_64` crate's mask bits
+/// (Intel SDM volume 2A): all SIMD exceptions masked, round-to-nearest,
+/// flush-to-zero and denormals-are-zero clear.
+const MXCSR_RESET: u32 = MxCsr::INVALID_OPERATION_MASK.bits()
+    | MxCsr::DENORMAL_MASK.bits()
+    | MxCsr::DIVIDE_BY_ZERO_MASK.bits()
+    | MxCsr::OVERFLOW_MASK.bits()
+    | MxCsr::UNDERFLOW_MASK.bits()
+    | MxCsr::PRECISION_MASK.bits();
+
+impl FxStateBlock {
+    /// Returns the architectural power-on FP/SIMD state.
+    ///
+    /// Used as the baseline before `FXSAVE` populates the block, so fields
+    /// `FXSAVE` does not write (such as the reserved padding) stay zero.
+    pub const fn initial() -> Self {
+        Self {
+            fpu_ctrl: X87_FPU_CONTROL_WORD_FNINIT,
+            fpu_status: 0,
+            // FXSAVE stores the abridged tag word. A clean `fninit` state saves as 0,
+            // not 0xffff like the legacy x87 environment format.
+            fpu_tag: 0,
+            fpu_opcode: 0,
+            fpu_ip: 0,
+            fpu_dp: 0,
+            sse_mxcsr: MXCSR_RESET,
+            sse_mxcsr_mask: 0,
+            st_space: [0; 16],
+            xmm_space: [0; 32],
+            _padding: [0; 12],
+        }
+    }
+}
+
 /// Extended state of a task, such as FP/SIMD states.
 pub struct ExtendedState {
     /// Memory region for the FXSAVE/FXRSTOR instruction.
@@ -314,21 +356,7 @@ impl ExtendedState {
     /// Returns the extended state with initialized values.
     pub const fn default() -> Self {
         Self {
-            fxsave_area: FxStateBlock {
-                fpu_ctrl: 0x037f,
-                fpu_status: 0,
-                // FXSAVE stores the abridged tag word. A clean `fninit` state saves as 0,
-                // not 0xffff like the legacy x87 environment format.
-                fpu_tag: 0,
-                fpu_opcode: 0,
-                fpu_ip: 0,
-                fpu_dp: 0,
-                sse_mxcsr: 0x1f80,
-                sse_mxcsr_mask: 0,
-                st_space: [0; 16],
-                xmm_space: [0; 32],
-                _padding: [0; 12],
-            },
+            fxsave_area: FxStateBlock::initial(),
         }
     }
 }

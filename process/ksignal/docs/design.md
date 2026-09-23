@@ -149,9 +149,12 @@ set by `rt_sigsuspend` and consumed by the next caught-signal frame build
   frame — so no kernel-side indirect call risk is introduced.
 - The signal frame embeds both the ABI `ucontext_t`/`siginfo_t` (user-visible
   layout, musl-compatible register numbering) and a private
-  `UserRestorableContext` so `sigreturn` restores privileged/restorable
-  state from a kernel-controlled copy even though the ABI part is
-  user-writable.
+  `UserRestorableContext` carrying the state `mcontext_t` does not cover:
+  segment bases plus, on x86_64, an `FXSAVE` snapshot of the interrupted
+  x87/MMX/XMM/MXCSR state. Each frame owns its snapshot, so nested signals
+  restore the FP/SIMD state layer by layer. The region is written into the
+  user-writable frame, so `restore` treats it as untrusted input (x86_64
+  clears unsupported `MXCSR` bits before `FXRSTOR`).
 - x86_64 pushes the restorer address on the user stack to match the
   kernel-only `SA_RESTORER` ABI; other architectures use the return-address
   register.
