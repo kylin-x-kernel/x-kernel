@@ -5,6 +5,7 @@
 //! Dirty-tag enumeration and synchronous writeback completion.
 
 use alloc::{sync::Arc, vec::Vec};
+use core::ops::Range;
 
 use kerrno::{KError, KResult};
 use ksync::{Mutex, MutexGuard};
@@ -12,96 +13,12 @@ use memaddr::PAGE_SIZE_4K;
 
 use crate::{Folio, FolioBatch, MappingPages, PageIndex};
 
-/// Result counters for one writeback pass.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct WritebackStats {
-    /// Dirty folios successfully written and cleaned.
-    pub pages_written: usize,
-    /// Dirty folios left for a later writeback pass.
-    pub pages_skipped: usize,
-}
-
-/// Filesystem result for one contiguous page-cache writeback range.
+/// Result of one contiguous filesystem writeback submission.
 ///
-/// `completed_bytes` is always a prefix of the submitted range. An error may
-/// therefore report progress made by an earlier filesystem transaction while
-/// leaving only the uncompleted suffix dirty for retry. A successful outcome
-/// may likewise report a short prefix, which is treated as progress: folios
-/// fully inside the prefix finish writeback and the remaining suffix stays
-/// dirty for a later pass.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WritebackRangeOutcome {
-    completed_bytes: usize,
-    error: Option<KError>,
-}
-
-impl WritebackRangeOutcome {
-    /// Reports complete success for a submitted byte range.
-    pub const fn complete(completed_bytes: usize) -> Self {
-        Self {
-            completed_bytes,
-            error: None,
-        }
-    }
-
-    /// Reports a completed prefix followed by an error.
-    pub const fn failed(completed_bytes: usize, error: KError) -> Self {
-        Self {
-            completed_bytes,
-            error: Some(error),
-        }
-    }
-
-    /// Returns the completed prefix length.
-    pub const fn completed_bytes(self) -> usize {
-        self.completed_bytes
-    }
-
-    /// Returns the error following the completed prefix, if any.
-    pub const fn error(self) -> Option<KError> {
-        self.error
-    }
-}
-
-/// Page-cache result for one batched writeback pass.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WritebackPassOutcome {
-    stats: WritebackStats,
-    error: Option<KError>,
-}
-
-impl WritebackPassOutcome {
-    const fn complete(stats: WritebackStats) -> Self {
-        Self { stats, error: None }
-    }
-
-    const fn failed(stats: WritebackStats, error: KError) -> Self {
-        Self {
-            stats,
-            error: Some(error),
-        }
-    }
-
-    /// Returns counters accumulated before the pass stopped.
-    pub const fn stats(self) -> WritebackStats {
-        self.stats
-    }
-
-    /// Returns the callback error that stopped the pass, if any.
-    pub const fn error(self) -> Option<KError> {
-        self.error
-    }
-}
-
-impl WritebackStats {
-    fn wrote(&mut self, pages: usize) {
-        self.pages_written = self.pages_written.saturating_add(pages);
-    }
-
-    fn skipped(&mut self, pages: usize) {
-        self.pages_skipped = self.pages_skipped.saturating_add(pages);
-    }
-}
+/// Success reports a completed byte prefix; failure reports a completed byte
+/// prefix and its error. A short success leaves the suffix dirty for a later
+/// pass. This protocol carries no pass budget or statistics.
+pub type WritebackRangeResult = Result<usize, (usize, KError)>;
 
 impl MappingPages {
     fn finish_writeback(&self, index: PageIndex, folio: &Arc<Mutex<Folio>>, is_complete: bool) {
@@ -156,7 +73,7 @@ impl MappingPages {
         &self,
         index: PageIndex,
         candidate: &'a Arc<Mutex<Folio>>,
-        stats: &mut WritebackStats,
+        pages_skipped: &mut usize,
     ) -> Option<MutexGuard<'a, Folio>> {
         let mut state = self.state.lock();
         let Some(current) = state.entries.get(&index).cloned() else {
@@ -180,7 +97,7 @@ impl MappingPages {
             return None;
         }
         if folio.is_under_writeback() {
-            stats.skipped(1);
+            *pages_skipped = pages_skipped.saturating_add(1);
             return None;
         }
 
@@ -191,7 +108,12 @@ impl MappingPages {
         Some(folio)
     }
 
-    /// Writes back dirty cached folios intersecting `[start, end)`.
+    /// Writes back dirty cached folios intersecting the half-open `range`.
+    ///
+    /// `nr_to_write` and `pages_skipped` exclusively borrow the owner's control
+    /// fields. Completed pages consume budget immediately, and busy dirty pages
+    /// increment skips, including when a later callback fails. There is no
+    /// separate pass state to merge after return.
     ///
     /// Candidates are scanned in bounded ascending windows. Concurrent dirtying
     /// behind the cursor is left for a later pass; dirtying ahead may be observed.
@@ -200,23 +122,22 @@ impl MappingPages {
     pub fn writeback_until(
         &self,
         visible_len: u64,
-        start: u64,
-        end: u64,
-        max_pages: usize,
+        range: Range<u64>,
+        nr_to_write: &mut usize,
+        pages_skipped: &mut usize,
         write_folio_fn: &mut impl FnMut(PageIndex, &[u8], usize) -> KResult<()>,
-    ) -> KResult<WritebackStats> {
-        let mut stats = WritebackStats::default();
-        if max_pages == 0 || start >= end {
-            return Ok(stats);
+    ) -> KResult<()> {
+        if *nr_to_write == 0 || range.is_empty() {
+            return Ok(());
         }
-        let mut scan_index = start / PAGE_SIZE_4K as u64;
-        let end_index = (end - 1) / PAGE_SIZE_4K as u64 + 1;
+        let mut scan_index = range.start / PAGE_SIZE_4K as u64;
+        let end_index = (range.end - 1) / PAGE_SIZE_4K as u64 + 1;
         let mut candidates = FolioBatch::new();
 
         'scan: while scan_index < end_index {
             self.collect_dirty_folios(&mut scan_index, end_index, &mut candidates);
             for &(index, ref folio) in candidates.iter() {
-                if stats.pages_written >= max_pages {
+                if *nr_to_write == 0 {
                     break 'scan;
                 }
                 let page_start = index
@@ -228,7 +149,8 @@ impl MappingPages {
                 if valid_len == 0 {
                     continue;
                 }
-                let Some(mut locked) = self.start_writeback_for_candidate(index, folio, &mut stats)
+                let Some(mut locked) =
+                    self.start_writeback_for_candidate(index, folio, pages_skipped)
                 else {
                     continue;
                 };
@@ -239,13 +161,19 @@ impl MappingPages {
                     return Err(error);
                 }
                 self.finish_writeback(index, folio, true);
-                stats.wrote(1);
+                *nr_to_write -= 1;
             }
         }
-        Ok(stats)
+        Ok(())
     }
 
     /// Writes back dirty cached folios in contiguous batches of at most 31 folios.
+    ///
+    /// The callback returns a completed byte prefix on success, or
+    /// `(completed_prefix_bytes, error)` on failure. Only fully completed folios
+    /// consume the borrowed budget. A short success leaves the suffix dirty;
+    /// an oversized prefix returns `InvalidInput` and credits no pages. All started folios finish before an
+    /// error is returned, and progress remains in the borrowed control fields.
     ///
     /// The byte and page limits may further shorten each batch. Enumeration is
     /// incremental as in [`Self::writeback_until`]. The callback runs without
@@ -253,18 +181,17 @@ impl MappingPages {
     pub fn write_cache_pages(
         &self,
         visible_len: u64,
-        start: u64,
-        end: u64,
-        max_pages: usize,
+        range: Range<u64>,
+        nr_to_write: &mut usize,
+        pages_skipped: &mut usize,
         max_bytes: usize,
-        write_range_fn: &mut impl FnMut(u64, &[u8]) -> KResult<WritebackRangeOutcome>,
-    ) -> KResult<WritebackPassOutcome> {
-        let mut stats = WritebackStats::default();
-        if max_pages == 0 || start >= end {
-            return Ok(WritebackPassOutcome::complete(stats));
+        write_range_fn: &mut impl FnMut(u64, &[u8]) -> WritebackRangeResult,
+    ) -> KResult<()> {
+        if *nr_to_write == 0 || range.is_empty() {
+            return Ok(());
         }
-        let mut scan_index = start / PAGE_SIZE_4K as u64;
-        let end_index = (end - 1) / PAGE_SIZE_4K as u64 + 1;
+        let mut scan_index = range.start / PAGE_SIZE_4K as u64;
+        let end_index = (range.end - 1) / PAGE_SIZE_4K as u64 + 1;
         let mut candidates = FolioBatch::new();
 
         let max_bytes = max_bytes.max(PAGE_SIZE_4K);
@@ -273,43 +200,44 @@ impl MappingPages {
         let mut batch_data = Vec::new();
         let mut batch_folios = FolioBatch::new();
 
-        let flush_batch =
-            |batch_start: u64,
-             batch_data: &mut Vec<u8>,
-             batch_folios: &mut FolioBatch,
-             write_range_fn: &mut dyn FnMut(u64, &[u8]) -> KResult<WritebackRangeOutcome>,
-             stats: &mut WritebackStats|
-             -> Option<KError> {
-                if batch_data.is_empty() {
-                    return None;
-                }
-                let outcome = write_range_fn(batch_start, batch_data)
-                    .unwrap_or_else(|error| WritebackRangeOutcome::failed(0, error));
-                let (completed_bytes, error) = if outcome.completed_bytes() > batch_data.len() {
-                    (0, Some(KError::InvalidInput))
-                } else {
-                    (outcome.completed_bytes(), outcome.error())
-                };
-
-                for (position, (index, folio)) in batch_folios.iter().enumerate() {
-                    // A contiguous submission contains full pages followed by
-                    // at most one EOF tail. No per-entry byte length is needed.
-                    let folio_end = ((position + 1) * PAGE_SIZE_4K).min(batch_data.len());
-                    let is_complete = folio_end <= completed_bytes;
-                    self.finish_writeback(*index, folio, is_complete);
-                    if is_complete {
-                        stats.wrote(1);
-                    }
-                }
-                batch_folios.clear();
-                batch_data.clear();
-                error
+        let flush_batch = |batch_start: u64,
+                           batch_data: &mut Vec<u8>,
+                           batch_folios: &mut FolioBatch,
+                           write_range_fn: &mut dyn FnMut(u64, &[u8]) -> WritebackRangeResult,
+                           nr_to_write: &mut usize|
+         -> KResult<()> {
+            if batch_data.is_empty() {
+                return Ok(());
+            }
+            let (completed_bytes, error) = match write_range_fn(batch_start, batch_data) {
+                Ok(completed_bytes) => (completed_bytes, None),
+                Err((completed_bytes, error)) => (completed_bytes, Some(error)),
             };
+            let (completed_bytes, error) = if completed_bytes > batch_data.len() {
+                (0, Some(KError::InvalidInput))
+            } else {
+                (completed_bytes, error)
+            };
+
+            for (position, (index, folio)) in batch_folios.iter().enumerate() {
+                // A contiguous submission contains full pages followed by
+                // at most one EOF tail. No per-entry byte length is needed.
+                let folio_end = ((position + 1) * PAGE_SIZE_4K).min(batch_data.len());
+                let is_complete = folio_end <= completed_bytes;
+                self.finish_writeback(*index, folio, is_complete);
+                if is_complete {
+                    *nr_to_write -= 1;
+                }
+            }
+            batch_folios.clear();
+            batch_data.clear();
+            error.map_or(Ok(()), Err)
+        };
 
         'scan: while scan_index < end_index {
             self.collect_dirty_folios(&mut scan_index, end_index, &mut candidates);
             for &(index, ref folio) in candidates.iter() {
-                if stats.pages_written >= max_pages {
+                if *nr_to_write == 0 {
                     break 'scan;
                 }
                 let page_start = index
@@ -324,40 +252,36 @@ impl MappingPages {
 
                 let contiguous = next_index == Some(index);
                 let would_overflow = batch_data.len().saturating_add(valid_len) > max_bytes;
-                let would_exceed_pages =
-                    stats.pages_written.saturating_add(batch_folios.len()) >= max_pages;
+                let would_exceed_pages = batch_folios.len() >= *nr_to_write;
                 if !batch_data.is_empty()
                     && (!contiguous
                         || would_overflow
                         || would_exceed_pages
                         || batch_folios.is_full())
                 {
-                    if let Some(error) = flush_batch(
+                    flush_batch(
                         batch_start,
                         &mut batch_data,
                         &mut batch_folios,
                         write_range_fn,
-                        &mut stats,
-                    ) {
-                        return Ok(WritebackPassOutcome::failed(stats, error));
-                    }
-                    if stats.pages_written >= max_pages {
+                        nr_to_write,
+                    )?;
+                    if *nr_to_write == 0 {
                         break 'scan;
                     }
                 }
 
-                let Some(mut locked) = self.start_writeback_for_candidate(index, folio, &mut stats)
+                let Some(mut locked) =
+                    self.start_writeback_for_candidate(index, folio, pages_skipped)
                 else {
-                    if let Some(error) = flush_batch(
+                    flush_batch(
                         batch_start,
                         &mut batch_data,
                         &mut batch_folios,
                         write_range_fn,
-                        &mut stats,
-                    ) {
-                        return Ok(WritebackPassOutcome::failed(stats, error));
-                    }
-                    if stats.pages_written >= max_pages {
+                        nr_to_write,
+                    )?;
+                    if *nr_to_write == 0 {
                         break 'scan;
                     }
                     next_index = None;
@@ -374,15 +298,13 @@ impl MappingPages {
             }
         }
 
-        if let Some(error) = flush_batch(
+        flush_batch(
             batch_start,
             &mut batch_data,
             &mut batch_folios,
             write_range_fn,
-            &mut stats,
-        ) {
-            return Ok(WritebackPassOutcome::failed(stats, error));
-        }
-        Ok(WritebackPassOutcome::complete(stats))
+            nr_to_write,
+        )?;
+        Ok(())
     }
 }

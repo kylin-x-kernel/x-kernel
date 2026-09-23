@@ -22,7 +22,7 @@ mod writeback;
 pub use folio::Folio;
 pub(crate) use folio_batch::FolioBatch;
 pub use mapping_pages::{MappingPages, PageCacheKind};
-pub use writeback::{WritebackPassOutcome, WritebackRangeOutcome, WritebackStats};
+pub use writeback::WritebackRangeResult;
 
 /// Page index within a mapping.
 pub type PageIndex = u64;

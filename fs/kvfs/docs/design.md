@@ -590,6 +590,11 @@ inode `write_count`，成功后用 `FMode::WRITER` 记录当前 file 持有该�
 `get_write_access()`/`FMODE_WRITER` 和 `ext4_release_file()` 的调用时序。当前 KVFS
 尚未实现 executable deny-write 导致的 negative count 状态。
 
+`WritebackControl` 独占拥有页预算与 skip 计数，MappingPages 通过字段借用原地更新，
+错误返回也保留已完成进度。byte-range callback 的 `WritebackRangeResult` 是
+`Result<usize, (usize, VfsError)>` 的别名，
+表达完成前缀或完成前缀与错误，不再导出独立 writeback outcome 类型。
+
 ## 并发模型
 
 dentry 的 inode 和 children 由各自 mutex 保护；静态 operation table 在首次绑定

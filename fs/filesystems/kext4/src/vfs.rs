@@ -16,8 +16,8 @@ use kvfs::{
     LockedDentry, Metadata, MetadataUpdate, NodePermission, NodeType, PageMkwriteRequest,
     ReadaheadControl, RenameFlags, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations,
     Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest,
-    WriteEndRequest, WritebackControl, WritebackRangeOutcome, XattrName, XattrNameRef,
-    XattrNameSink, XattrSetFlags, default_evict_inode, inode_init_owner,
+    WriteEndRequest, WritebackControl, XattrName, XattrNameRef, XattrNameSink, XattrSetFlags,
+    default_evict_inode, inode_init_owner,
 };
 
 use crate::{
@@ -1432,35 +1432,21 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
             let visible_size = vfs_inode.size();
             let disk_size = inode.disk_size();
             let write_end = offset.saturating_add(data.len() as u64);
-            let outcome = {
-                let mut state = sync::write_lock(ext4);
-                match state.writeback_ordered_at(
-                    inode,
-                    offset,
-                    data,
-                    visible_size,
-                    timestamp,
-                    intent,
-                ) {
-                    Ok(completed_bytes) => WritebackRangeOutcome::complete(completed_bytes),
-                    Err(failure) => {
-                        error!(
-                            "KExt4 inode {} writeback at offset {offset} for {} bytes failed: \
-                             completed {} bytes, visible size {visible_size}, disk size \
-                             {disk_size}, write end {write_end}: {:?}",
-                            inode.number().get(),
-                            data.len(),
-                            failure.completed_bytes(),
-                            failure.error()
-                        );
-                        WritebackRangeOutcome::failed(
-                            failure.completed_bytes(),
-                            into_vfs_err(failure.error()),
-                        )
-                    }
-                }
-            };
-            Ok(outcome)
+            let mut state = sync::write_lock(ext4);
+            state
+                .writeback_ordered_at(inode, offset, data, visible_size, timestamp, intent)
+                .map_err(|failure| {
+                    error!(
+                        "KExt4 inode {} writeback at offset {offset} for {} bytes failed: \
+                         completed {} bytes, visible size {visible_size}, disk size {disk_size}, \
+                         write end {write_end}: {:?}",
+                        inode.number().get(),
+                        data.len(),
+                        failure.completed_bytes(),
+                        failure.error()
+                    );
+                    (failure.completed_bytes(), into_vfs_err(failure.error()))
+                })
         })?;
         Ok(())
     }

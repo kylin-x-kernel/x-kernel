@@ -12,7 +12,7 @@ use memaddr::PAGE_SIZE_4K;
 use unittest::{assert_eq, def_test};
 
 use super::{dirty_indices, new_cache, write_cached};
-use crate::{Folio, PageCacheKind, WritebackRangeOutcome};
+use crate::{Folio, PageCacheKind};
 
 #[def_test]
 fn writeback_uses_owner_supplied_visible_length() {
@@ -21,12 +21,15 @@ fn writeback_uses_owner_supplied_visible_length() {
     write_cached(&cache, 0, &vec![0x33; visible_len as usize]).unwrap();
     let mut writes = Vec::new();
 
+    let initial_budget = usize::MAX;
+    let mut nr_to_write = initial_budget;
+    let mut pages_skipped = 0;
     cache
         .writeback_until(
             visible_len,
-            0,
-            u64::MAX,
-            usize::MAX,
+            0..u64::MAX,
+            &mut nr_to_write,
+            &mut pages_skipped,
             &mut |index, _data, valid_len| {
                 writes.push((index, valid_len));
                 Ok(())
@@ -50,10 +53,17 @@ fn failed_writeback_restores_dirty_state() {
     let cache = new_cache(PageCacheKind::FileBacked);
     write_cached(&cache, 0, b"dirty").unwrap();
 
+    let initial_budget = 1;
+    let mut nr_to_write = initial_budget;
+    let mut pages_skipped = 0;
     assert_eq!(
-        cache.writeback_until(5, 0, u64::MAX, 1, &mut |_, _, _| {
-            Err(KError::InvalidInput)
-        }),
+        cache.writeback_until(
+            5,
+            0..u64::MAX,
+            &mut nr_to_write,
+            &mut pages_skipped,
+            &mut |_, _, _| { Err(KError::InvalidInput) }
+        ),
         Err(KError::InvalidInput)
     );
     assert_eq!(dirty_indices(&cache), vec![0]);
@@ -74,16 +84,25 @@ fn clean_folio_with_stale_dirty_tag_is_not_written() {
     cache.state.lock().dirty_marks.insert(0);
     let mut writes = 0usize;
 
-    let stats = cache
-        .writeback_until(PAGE_SIZE_4K as u64, 0, u64::MAX, 1, &mut |_, _, _| {
-            writes += 1;
-            Ok(())
-        })
+    let initial_budget = 1;
+    let mut nr_to_write = initial_budget;
+    let mut pages_skipped = 0;
+    cache
+        .writeback_until(
+            PAGE_SIZE_4K as u64,
+            0..u64::MAX,
+            &mut nr_to_write,
+            &mut pages_skipped,
+            &mut |_, _, _| {
+                writes += 1;
+                Ok(())
+            },
+        )
         .unwrap();
 
     assert_eq!(writes, 0);
-    assert_eq!(stats.pages_written, 0);
-    assert_eq!(stats.pages_skipped, 0);
+    assert_eq!(initial_budget - nr_to_write, 0);
+    assert_eq!(pages_skipped, 0);
     assert!(dirty_indices(&cache).is_empty());
 }
 
@@ -95,12 +114,15 @@ fn writeback_until_respects_dirty_index_and_page_budget() {
     assert_eq!(dirty_indices(&cache), vec![0, 1]);
 
     let mut writes = Vec::new();
-    let stats = cache
+    let initial_budget = 1;
+    let mut nr_to_write = initial_budget;
+    let mut pages_skipped = 0;
+    cache
         .writeback_until(
             (PAGE_SIZE_4K * 2) as u64,
-            0,
-            u64::MAX,
-            1,
+            0..u64::MAX,
+            &mut nr_to_write,
+            &mut pages_skipped,
             &mut |index, _data, valid_len| {
                 writes.push((index, valid_len));
                 Ok(())
@@ -108,7 +130,7 @@ fn writeback_until_respects_dirty_index_and_page_budget() {
         )
         .unwrap();
 
-    assert_eq!(stats.pages_written, 1);
+    assert_eq!(initial_budget - nr_to_write, 1);
     assert_eq!(writes, vec![(0, PAGE_SIZE_4K)]);
     assert_eq!(dirty_indices(&cache), vec![1]);
     cache.with_folio(1, |folio| {
@@ -125,17 +147,21 @@ fn stale_collected_folio_is_not_written_or_tagged_as_replacement() {
     let cache_during_io = &cache;
     let mut write_offsets = Vec::new();
 
+    let initial_budget = usize::MAX;
+    let mut nr_to_write = initial_budget;
+    let mut pages_skipped = 0;
     cache
         .write_cache_pages(
             (PAGE_SIZE_4K * 2) as u64,
-            0,
-            u64::MAX,
-            usize::MAX,
+            0..u64::MAX,
+            &mut nr_to_write,
+            &mut pages_skipped,
             PAGE_SIZE_4K,
             &mut |offset, data| {
                 write_offsets.push(offset);
                 if offset == 0 {
-                    let replacement = Arc::new(Mutex::new(Folio::new_zeroed()?));
+                    let replacement =
+                        Arc::new(Mutex::new(Folio::new_zeroed().map_err(|error| (0, error))?));
                     let old = cache_during_io
                         .state
                         .lock()
@@ -144,7 +170,7 @@ fn stale_collected_folio_is_not_written_or_tagged_as_replacement() {
                         .expect("collected folio");
                     old.lock().clear_dirty();
                 }
-                Ok(WritebackRangeOutcome::complete(data.len()))
+                Ok(data.len())
             },
         )
         .unwrap();
@@ -164,19 +190,20 @@ fn batched_writeback_failure_restores_dirty_index() {
     write_cached(&cache, 0, &vec![1; PAGE_SIZE_4K]).unwrap();
     write_cached(&cache, PAGE_SIZE_4K as u64, &vec![2; PAGE_SIZE_4K]).unwrap();
 
-    let outcome = cache
-        .write_cache_pages(
-            (PAGE_SIZE_4K * 2) as u64,
-            0,
-            u64::MAX,
-            usize::MAX,
-            PAGE_SIZE_4K * 2,
-            &mut |_, _| Ok(WritebackRangeOutcome::failed(0, KError::InvalidInput)),
-        )
-        .unwrap();
+    let initial_budget = usize::MAX;
+    let mut nr_to_write = initial_budget;
+    let mut pages_skipped = 0;
+    let outcome = cache.write_cache_pages(
+        (PAGE_SIZE_4K * 2) as u64,
+        0..u64::MAX,
+        &mut nr_to_write,
+        &mut pages_skipped,
+        PAGE_SIZE_4K * 2,
+        &mut |_, _| Err((0, KError::InvalidInput)),
+    );
 
-    assert_eq!(outcome.error(), Some(KError::InvalidInput));
-    assert_eq!(outcome.stats().pages_written, 0);
+    assert_eq!(outcome.err(), Some(KError::InvalidInput));
+    assert_eq!(initial_budget - nr_to_write, 0);
     assert_eq!(dirty_indices(&cache), vec![0, 1]);
     for index in 0..2 {
         cache.with_folio(index, |folio| {
@@ -202,21 +229,22 @@ fn failed_writeback_does_not_redirty_detached_folio() {
         .expect("cached folio");
     let cache_during_io = &cache;
 
-    let outcome = cache
-        .write_cache_pages(
-            PAGE_SIZE_4K as u64,
-            0,
-            u64::MAX,
-            usize::MAX,
-            PAGE_SIZE_4K,
-            &mut |_, _| {
-                cache_during_io.resize_cached_folios(PAGE_SIZE_4K as u64, 0);
-                Ok(WritebackRangeOutcome::failed(0, KError::InvalidInput))
-            },
-        )
-        .unwrap();
+    let initial_budget = usize::MAX;
+    let mut nr_to_write = initial_budget;
+    let mut pages_skipped = 0;
+    let outcome = cache.write_cache_pages(
+        PAGE_SIZE_4K as u64,
+        0..u64::MAX,
+        &mut nr_to_write,
+        &mut pages_skipped,
+        PAGE_SIZE_4K,
+        &mut |_, _| {
+            cache_during_io.resize_cached_folios(PAGE_SIZE_4K as u64, 0);
+            Err((0, KError::InvalidInput))
+        },
+    );
 
-    assert_eq!(outcome.error(), Some(KError::InvalidInput));
+    assert_eq!(outcome.err(), Some(KError::InvalidInput));
     assert!(dirty_indices(&cache).is_empty());
     let detached_state = {
         let folio = detached.lock();
@@ -233,24 +261,20 @@ fn batched_writeback_failure_cleans_only_complete_prefix_folios() {
     write_cached(&cache, (PAGE_SIZE_4K * 2) as u64, &vec![3; PAGE_SIZE_4K]).unwrap();
 
     let completed_bytes = PAGE_SIZE_4K + PAGE_SIZE_4K / 2;
-    let outcome = cache
-        .write_cache_pages(
-            (PAGE_SIZE_4K * 3) as u64,
-            0,
-            u64::MAX,
-            usize::MAX,
-            PAGE_SIZE_4K * 3,
-            &mut |_, _| {
-                Ok(WritebackRangeOutcome::failed(
-                    completed_bytes,
-                    KError::InvalidInput,
-                ))
-            },
-        )
-        .unwrap();
+    let initial_budget = usize::MAX;
+    let mut nr_to_write = initial_budget;
+    let mut pages_skipped = 0;
+    let outcome = cache.write_cache_pages(
+        (PAGE_SIZE_4K * 3) as u64,
+        0..u64::MAX,
+        &mut nr_to_write,
+        &mut pages_skipped,
+        PAGE_SIZE_4K * 3,
+        &mut |_, _| Err((completed_bytes, KError::InvalidInput)),
+    );
 
-    assert_eq!(outcome.error(), Some(KError::InvalidInput));
-    assert_eq!(outcome.stats().pages_written, 1);
+    assert_eq!(outcome.err(), Some(KError::InvalidInput));
+    assert_eq!(initial_budget - nr_to_write, 1);
     assert_eq!(dirty_indices(&cache), vec![1, 2]);
     for (index, expected_dirty) in [(0, false), (1, true), (2, true)] {
         let state = cache.with_folio(index, |folio| {
@@ -274,18 +298,28 @@ fn batched_writeback_preserves_concurrent_redirty() {
     let mut dirty_indices_before_redirty = Vec::new();
     let mut state_during_io = None;
     let mut dirty_indices_after_redirty = Vec::new();
+    let initial_budget = usize::MAX;
+    let mut nr_to_write = initial_budget;
+    let mut pages_skipped = 0;
     cache
-        .write_cache_pages(3, 0, u64::MAX, usize::MAX, PAGE_SIZE_4K, &mut |_, data| {
-            dirty_indices_before_redirty = dirty_indices(cache_during_io);
-            state_during_io = Some(cache_during_io.with_folio(0, |folio| {
-                let folio = folio.expect("folio under writeback");
-                (folio.is_dirty(), folio.is_under_writeback())
-            }));
-            first_snapshot.extend_from_slice(&data[..3]);
-            write_cached(cache_during_io, 0, b"new")?;
-            dirty_indices_after_redirty = dirty_indices(cache_during_io);
-            Ok(WritebackRangeOutcome::complete(data.len()))
-        })
+        .write_cache_pages(
+            3,
+            0..u64::MAX,
+            &mut nr_to_write,
+            &mut pages_skipped,
+            PAGE_SIZE_4K,
+            &mut |_, data| {
+                dirty_indices_before_redirty = dirty_indices(cache_during_io);
+                state_during_io = Some(cache_during_io.with_folio(0, |folio| {
+                    let folio = folio.expect("folio under writeback");
+                    (folio.is_dirty(), folio.is_under_writeback())
+                }));
+                first_snapshot.extend_from_slice(&data[..3]);
+                write_cached(cache_during_io, 0, b"new").map_err(|error| (0, error))?;
+                dirty_indices_after_redirty = dirty_indices(cache_during_io);
+                Ok(data.len())
+            },
+        )
         .unwrap();
 
     assert!(dirty_indices_before_redirty.is_empty());
@@ -306,9 +340,14 @@ fn batched_writeback_preserves_concurrent_redirty() {
     assert!(!observed.2);
 
     cache
-        .write_cache_pages(3, 0, u64::MAX, usize::MAX, PAGE_SIZE_4K, &mut |_, data| {
-            Ok(WritebackRangeOutcome::complete(data.len()))
-        })
+        .write_cache_pages(
+            3,
+            0..u64::MAX,
+            &mut nr_to_write,
+            &mut pages_skipped,
+            PAGE_SIZE_4K,
+            &mut |_, data| Ok(data.len()),
+        )
         .unwrap();
     assert!(dirty_indices(&cache).is_empty());
     let final_state = cache.with_folio(0, |folio| {
@@ -329,12 +368,15 @@ fn writeback_scans_sparse_windows_without_pinning_the_whole_range() {
     let last = cache.state.lock().entries[&last_index].clone();
     let mut distant_ref_count = 0;
     let mut writes = Vec::new();
-    let stats = cache
+    let initial_budget = usize::MAX;
+    let mut nr_to_write = initial_budget;
+    let mut pages_skipped = 0;
+    cache
         .writeback_until(
             (count * 2 * PAGE_SIZE_4K) as u64,
-            0,
-            u64::MAX,
-            usize::MAX,
+            0..u64::MAX,
+            &mut nr_to_write,
+            &mut pages_skipped,
             &mut |index, _, _| {
                 if index == 0 {
                     // Only the mapping and this test retain the distant page.
@@ -346,7 +388,7 @@ fn writeback_scans_sparse_windows_without_pinning_the_whole_range() {
         )
         .unwrap();
     assert_eq!(distant_ref_count, 2);
-    assert_eq!(stats.pages_written, count);
+    assert_eq!(initial_budget - nr_to_write, count);
     assert_eq!(
         writes,
         (0..count).map(|i| (i * 2) as u64).collect::<Vec<_>>()
@@ -361,22 +403,23 @@ fn batched_writeback_bounds_submissions_and_completes_eof_tail() {
     let visible_len = capacity * 2 * PAGE_SIZE_4K + 123;
     write_cached(&cache, 0, &vec![0x37; visible_len]).unwrap();
     let mut writes = Vec::new();
-    let outcome = cache
-        .write_cache_pages(
-            visible_len as u64,
-            0,
-            u64::MAX,
-            usize::MAX,
-            usize::MAX,
-            &mut |offset, data| {
-                writes.push((offset, data.len()));
-                assert!(data.iter().all(|byte| *byte == 0x37));
-                Ok(WritebackRangeOutcome::complete(data.len()))
-            },
-        )
-        .unwrap();
-    assert_eq!(outcome.error(), None);
-    assert_eq!(outcome.stats().pages_written, capacity * 2 + 1);
+    let initial_budget = usize::MAX;
+    let mut nr_to_write = initial_budget;
+    let mut pages_skipped = 0;
+    let outcome = cache.write_cache_pages(
+        visible_len as u64,
+        0..u64::MAX,
+        &mut nr_to_write,
+        &mut pages_skipped,
+        usize::MAX,
+        &mut |offset, data| {
+            writes.push((offset, data.len()));
+            assert!(data.iter().all(|byte| *byte == 0x37));
+            Ok(data.len())
+        },
+    );
+    assert_eq!(outcome.err(), None);
+    assert_eq!(initial_budget - nr_to_write, capacity * 2 + 1);
     assert_eq!(
         writes,
         vec![
@@ -395,20 +438,22 @@ fn batched_writeback_budget_stops_inside_second_window() {
     let count = capacity * 2 + 1;
     write_cached(&cache, 0, &vec![1; count * PAGE_SIZE_4K]).unwrap();
     let mut lengths = Vec::new();
-    let outcome = cache
-        .write_cache_pages(
-            (count * PAGE_SIZE_4K) as u64,
-            0,
-            u64::MAX,
-            capacity + 2,
-            usize::MAX,
-            &mut |_, data| {
-                lengths.push(data.len());
-                Ok(WritebackRangeOutcome::complete(data.len()))
-            },
-        )
-        .unwrap();
-    assert_eq!(outcome.stats().pages_written, capacity + 2);
+    let initial_budget = capacity + 2;
+    let mut nr_to_write = initial_budget;
+    let mut pages_skipped = 0;
+    let outcome = cache.write_cache_pages(
+        (count * PAGE_SIZE_4K) as u64,
+        0..u64::MAX,
+        &mut nr_to_write,
+        &mut pages_skipped,
+        usize::MAX,
+        &mut |_, data| {
+            lengths.push(data.len());
+            Ok(data.len())
+        },
+    );
+    assert_eq!(outcome, Ok(()));
+    assert_eq!(initial_budget - nr_to_write, capacity + 2);
     assert_eq!(lengths, vec![capacity * PAGE_SIZE_4K, 2 * PAGE_SIZE_4K]);
     assert_eq!(
         dirty_indices(&cache),
@@ -423,27 +468,25 @@ fn second_batch_error_finishes_prefix_and_leaves_unvisited_pages_dirty() {
     let capacity = crate::FolioBatch::CAPACITY;
     let count = capacity * 2 + 3;
     write_cached(&cache, 0, &vec![1; count * PAGE_SIZE_4K]).unwrap();
-    let outcome = cache
-        .write_cache_pages(
-            (count * PAGE_SIZE_4K) as u64,
-            0,
-            u64::MAX,
-            usize::MAX,
-            usize::MAX,
-            &mut |offset, data| {
-                if offset == 0 {
-                    Ok(WritebackRangeOutcome::complete(data.len()))
-                } else {
-                    Ok(WritebackRangeOutcome::failed(
-                        PAGE_SIZE_4K + 123,
-                        KError::InvalidInput,
-                    ))
-                }
-            },
-        )
-        .unwrap();
-    assert_eq!(outcome.error(), Some(KError::InvalidInput));
-    assert_eq!(outcome.stats().pages_written, capacity + 1);
+    let initial_budget = usize::MAX;
+    let mut nr_to_write = initial_budget;
+    let mut pages_skipped = 0;
+    let outcome = cache.write_cache_pages(
+        (count * PAGE_SIZE_4K) as u64,
+        0..u64::MAX,
+        &mut nr_to_write,
+        &mut pages_skipped,
+        usize::MAX,
+        &mut |offset, data| {
+            if offset == 0 {
+                Ok(data.len())
+            } else {
+                Err((PAGE_SIZE_4K + 123, KError::InvalidInput))
+            }
+        },
+    );
+    assert_eq!(outcome.err(), Some(KError::InvalidInput));
+    assert_eq!(initial_budget - nr_to_write, capacity + 1);
     assert_eq!(
         dirty_indices(&cache),
         ((capacity + 1) as u64..count as u64).collect::<Vec<_>>()
@@ -459,20 +502,80 @@ fn redirty_in_previous_window_is_left_for_the_next_pass() {
     let cache = new_cache(PageCacheKind::FileBacked);
     let count = crate::FolioBatch::CAPACITY * 2 + 1;
     write_cached(&cache, 0, &vec![1; count * PAGE_SIZE_4K]).unwrap();
-    let outcome = cache
-        .write_cache_pages(
-            (count * PAGE_SIZE_4K) as u64,
-            0,
-            u64::MAX,
-            usize::MAX,
-            usize::MAX,
-            &mut |_, data| {
-                write_cached(&cache, 0, b"new")?;
-                Ok(WritebackRangeOutcome::complete(data.len()))
-            },
-        )
-        .unwrap();
-    assert_eq!(outcome.stats().pages_written, count);
+    let initial_budget = usize::MAX;
+    let mut nr_to_write = initial_budget;
+    let mut pages_skipped = 0;
+    let outcome = cache.write_cache_pages(
+        (count * PAGE_SIZE_4K) as u64,
+        0..u64::MAX,
+        &mut nr_to_write,
+        &mut pages_skipped,
+        usize::MAX,
+        &mut |_, data| {
+            write_cached(&cache, 0, b"new").map_err(|error| (0, error))?;
+            Ok(data.len())
+        },
+    );
+    assert_eq!(outcome, Ok(()));
+    assert_eq!(initial_budget - nr_to_write, count);
     assert_eq!(dirty_indices(&cache), vec![0]);
     cache.truncate_final().unwrap();
+}
+
+#[def_test]
+fn skipped_and_completed_pages_remain_accounted_after_error() {
+    let cache = new_cache(PageCacheKind::FileBacked);
+    write_cached(&cache, 0, &vec![1; PAGE_SIZE_4K * 3]).unwrap();
+    // Model a folio redirtied while another writeback owns it.
+    cache.with_folio(0, |folio| folio.unwrap().start_writeback());
+    let mut nr_to_write = 3;
+    let mut pages_skipped = 7;
+    let result = cache.writeback_until(
+        (PAGE_SIZE_4K * 3) as u64,
+        0..u64::MAX,
+        &mut nr_to_write,
+        &mut pages_skipped,
+        &mut |index, _, _| {
+            if index == 2 {
+                Err(KError::InvalidInput)
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert_eq!(result, Err(KError::InvalidInput));
+    assert_eq!(nr_to_write, 2);
+    assert_eq!(pages_skipped, 8);
+    assert_eq!(dirty_indices(&cache), vec![0, 2]);
+    cache.with_folio(0, |folio| folio.unwrap().end_writeback());
+    cache.truncate_final().unwrap();
+}
+
+#[def_test]
+fn batch_prefix_validation_preserves_progress_and_finishes_all_folios() {
+    for (prefix, expected_remaining) in [(PAGE_SIZE_4K, 1), (PAGE_SIZE_4K * 2 + 1, 2)] {
+        let cache = new_cache(PageCacheKind::FileBacked);
+        write_cached(&cache, 0, &vec![1; PAGE_SIZE_4K * 2]).unwrap();
+        let mut nr_to_write = 2;
+        let mut pages_skipped = 0;
+        let result = cache.write_cache_pages(
+            (PAGE_SIZE_4K * 2) as u64,
+            0..u64::MAX,
+            &mut nr_to_write,
+            &mut pages_skipped,
+            PAGE_SIZE_4K * 2,
+            &mut |_, _| Ok(prefix),
+        );
+        let expected_result = if prefix <= PAGE_SIZE_4K * 2 {
+            Ok(())
+        } else {
+            Err(KError::InvalidInput)
+        };
+        assert_eq!(result, expected_result);
+        assert_eq!(nr_to_write, expected_remaining);
+        for index in 0..2 {
+            cache.with_folio(index, |folio| assert!(!folio.unwrap().is_under_writeback()));
+        }
+        cache.truncate_final().unwrap();
+    }
 }

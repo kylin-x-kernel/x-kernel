@@ -53,6 +53,7 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
 
 ## 内存安全不变量
 
+- 写回错误返回前保留已完成页的预算更新，并结束所有已开始的 folio writeback；
 - `LockedDentry` 的 location guard 限定借用的 dentry name 生命周期。
 - `parent` 和 `name` 在同一个 location write lock 下同时替换。
 - rename 期间 source dentry 和对应 `VfsInode` 保持存活。

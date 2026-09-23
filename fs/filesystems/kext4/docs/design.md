@@ -528,7 +528,8 @@ truncate planner 按实际 tree blocks、revoke targets 和 affected groups 单�
 
 分段 writeback 的返回值采用“可能部分完成”的契约：后续 transaction 失败不会撤销已经提交的
 durable prefix，也不会把其 delalloc reservation 重新计入。core 把已完成字节前缀经 KVFS 返回
-给 PageCache；完全落在该前缀内的 folio 结束 writeback，跨越前缀边界的 folio 和剩余后缀保持
+给 MappingPages，KVFS callback 使用 `Result<usize, (usize, VfsError)>` 直接表达
+提交长度或完成前缀与错误，不再包装 WritebackRangeOutcome；完全落在该前缀内的 folio 结束 writeback，跨越前缀边界的 folio 和剩余后缀保持
 dirty。再次提交时只重试 dirty suffix，并从 live mapping 重新判断当前状态。普通可重试错误
 允许在当前 mount 重试；device 或 JBD2 错误则永久 abort 当前 mount journal，恢复路径是
 recovery/remount 后重新提交，不能声称同一 mount 上必然收敛。

@@ -8,7 +8,7 @@ use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 
 use ksync::Mutex;
 use memaddr::PAGE_SIZE_4K;
-use pagecache::{Folio, PageIndex, WritebackRangeOutcome};
+use pagecache::{Folio, PageIndex};
 use unittest::def_test;
 
 use super::{
@@ -42,10 +42,10 @@ impl AddressSpaceOperations for PrefixRetryWritebackOps {
 
     fn writepages(&self, mapping: &AddressSpace, control: &mut WritebackControl) -> VfsResult<()> {
         mapping.writeback_cached_ranges(control, PAGE_SIZE_4K * 2, |offset, data| {
-            let start = usize::try_from(offset).map_err(|_| VfsError::InvalidInput)?;
+            let start = usize::try_from(offset).map_err(|_| (0, VfsError::InvalidInput))?;
             let end = start
                 .checked_add(data.len())
-                .ok_or(VfsError::InvalidInput)?;
+                .ok_or((0, VfsError::InvalidInput))?;
             let mut state = self.state.lock();
             if state.durable.len() < end {
                 state.durable.resize(end, 0);
@@ -55,13 +55,10 @@ impl AddressSpaceOperations for PrefixRetryWritebackOps {
                 let prefix = data.len() / 2;
                 state.durable[start..start + prefix].copy_from_slice(&data[..prefix]);
                 state.fail_once = false;
-                return Ok(WritebackRangeOutcome::failed(
-                    prefix,
-                    VfsError::InvalidInput,
-                ));
+                return Err((prefix, VfsError::InvalidInput));
             }
             state.durable[start..end].copy_from_slice(data);
-            Ok(WritebackRangeOutcome::complete(data.len()))
+            Ok(data.len())
         })
     }
 }
@@ -126,4 +123,49 @@ fn failed_prefix_writeback_redirties_and_retry_converges() {
     let state = operations.state.lock();
     assert_eq!(state.calls, 2);
     assert_eq!(state.durable, input);
+}
+
+#[def_test]
+fn single_folio_failure_preserves_control_progress_for_retry() {
+    let input = vec![0x6d; PAGE_SIZE_4K * 3];
+    let inode = VfsInode::new_file_with_address_space_and_flags(
+        Arc::new(TruncateOps),
+        NodeFlags::ALWAYS_CACHE,
+        &super::TRUNCATE_OPERATIONS,
+        VfsInodeInit::new(
+            4,
+            input.len() as u64,
+            Umode::new(NodeType::RegularFile, NodePermission::default()),
+        ),
+    );
+    let mapping = inode.address_space();
+    mapping.write_cached_bytes(0, &input).unwrap();
+    let mut control = WritebackControl::all(false).with_nr_to_write(3);
+    let _invalidate_guard = mapping.invalidate_lock.read();
+    let result = mapping.writeback_cached_folios(&mut control, |index, _, _| {
+        if index == 1 {
+            Err(VfsError::InvalidInput)
+        } else {
+            Ok(())
+        }
+    });
+    assert_eq!(result, Err(VfsError::InvalidInput));
+    assert_eq!(control.nr_to_write(), 2);
+    assert_eq!(control.pages_skipped(), 0);
+    let mut retried = Vec::new();
+    mapping
+        .writeback_cached_folios(&mut control, |index, _, _| {
+            retried.push(index);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(retried, vec![1, 2]);
+    assert_eq!(control.nr_to_write(), 0);
+    for index in 0..3 {
+        mapping.i_pages.with_folio(index, |folio| {
+            let folio = folio.unwrap();
+            assert!(!folio.is_dirty());
+            assert!(!folio.is_under_writeback());
+        });
+    }
 }

@@ -90,6 +90,11 @@ state-lock 临界区内同步 dirty tag，不能依赖 folio access 的 reconcil
 
 ### Writeback
 
+写回进度只由 KVFS `WritebackControl` 拥有。MappingPages 独占借用其预算和 skip
+字段原地更新，返回 `KResult<()>`，后续错误不会丢失先前进度；不另建 stats/pass
+对象。byte callback 使用 `Result<usize, (usize, KError)>` 返回完成前缀，或完成前缀
+与错误。完成所有已开始的 folio 后再传播错误，只有完整成功页消耗预算。
+
 `writeback_until` 和 `write_cache_pages` 接收 owner 传入的
 `visible_len`，据此裁剪最后一个 folio 的有效字节。成功后清 dirty；失败时恢复
 仍属于当前 mapping 的 folio 为 dirty，并结束 under-writeback 状态。

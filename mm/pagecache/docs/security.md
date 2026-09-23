@@ -21,6 +21,7 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
 
 ## 内存安全不变量
 
+- 写回错误返回前保留已完成页的预算更新，并结束所有已开始的 folio writeback；
 - 每个 `Folio` 独占一页；
 - `FolioBatch` 只持有有界、升序的引用；引用存活不等于 mapping identity 仍有效；
 - batch clear/drop 不结束 writeback；任何已开始的写回必须先显式完成，包括失败后缀；

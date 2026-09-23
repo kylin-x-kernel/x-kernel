@@ -4,12 +4,15 @@
 
 //! Writeback control and filesystem dispatch.
 
-use pagecache::{PageIndex, WritebackRangeOutcome, WritebackStats};
+use pagecache::{PageIndex, WritebackRangeResult};
 
 use super::AddressSpace;
 use crate::{VfsError, VfsResult};
 
-/// Writeback range and mode for `AddressSpaceOperations::writepages`.
+/// Writeback request and authoritative progress for one `writepages` operation.
+///
+/// Cache algorithms borrow the budget and skip fields in place. Successfully
+/// completed pages remain accounted even if a later write fails.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WritebackControl {
     range_start: u64,
@@ -113,11 +116,6 @@ impl WritebackControl {
     pub const fn is_data_only(self) -> bool {
         self.data_only
     }
-
-    fn account_stats(&mut self, stats: WritebackStats) {
-        self.nr_to_write = self.nr_to_write.saturating_sub(stats.pages_written);
-        self.pages_skipped = self.pages_skipped.saturating_add(stats.pages_skipped);
-    }
 }
 
 impl AddressSpace {
@@ -150,18 +148,20 @@ impl AddressSpace {
         control: &mut WritebackControl,
         mut write_folio_fn: impl FnMut(PageIndex, &[u8], usize) -> VfsResult<()>,
     ) -> VfsResult<()> {
-        let stats = self.i_pages.writeback_until(
+        self.i_pages.writeback_until(
             self.visible_len()?,
-            control.range_start(),
-            control.range_end(),
-            control.nr_to_write(),
+            control.range_start()..control.range_end(),
+            &mut control.nr_to_write,
+            &mut control.pages_skipped,
             &mut write_folio_fn,
-        )?;
-        control.account_stats(stats);
-        Ok(())
+        )
     }
 
     /// Writes cached dirty ranges through the supplied backing-store writer.
+    ///
+    /// The writer returns `Ok(completed_prefix_bytes)` on success, or
+    /// `Err((completed_prefix_bytes, error))` on failure. A failure before any
+    /// progress uses a zero prefix. Invalid prefix lengths return `InvalidInput`.
     ///
     /// The writer reports a completed byte prefix even when a later
     /// filesystem transaction fails. Complete folios in that prefix finish
@@ -170,17 +170,15 @@ impl AddressSpace {
         &self,
         control: &mut WritebackControl,
         max_bytes: usize,
-        mut write_range_fn: impl FnMut(u64, &[u8]) -> VfsResult<WritebackRangeOutcome>,
+        mut write_range_fn: impl FnMut(u64, &[u8]) -> WritebackRangeResult,
     ) -> VfsResult<()> {
-        let outcome = self.i_pages.write_cache_pages(
+        self.i_pages.write_cache_pages(
             self.visible_len()?,
-            control.range_start(),
-            control.range_end(),
-            control.nr_to_write(),
+            control.range_start()..control.range_end(),
+            &mut control.nr_to_write,
+            &mut control.pages_skipped,
             max_bytes,
             &mut write_range_fn,
-        )?;
-        control.account_stats(outcome.stats());
-        outcome.error().map_or(Ok(()), Err)
+        )
     }
 }
