@@ -128,8 +128,9 @@ ksyscall::dispatch_irq_syscall
   `kprocess` CPU-time queries.
 - `time/sleep.rs`: `nanosleep` / `clock_nanosleep`; owners in the `ktask`
   sleep runtime and `khal` clock queries.
-- `time/itimer.rs`: `getitimer` / `setitimer`; owner `ProcessTimerManager`
-  legacy interval-timer state.
+- `time/itimer.rs`: `getitimer` / `setitimer` / `alarm` (x86_64 ABI); owner
+  `ProcessTimerManager` legacy interval-timer state. `alarm` is a one-shot
+  `ITIMER_REAL` adapter that reports the previous remaining seconds.
 - `time/posix_timer.rs`: `timer_create` / `timer_gettime` / `timer_settime`
   / `timer_delete` / `timer_getoverrun`; owners in `ProcessTimerManager`
   POSIX timer state and the `kprocess` timer delivery runtime.

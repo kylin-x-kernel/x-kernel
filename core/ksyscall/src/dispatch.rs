@@ -684,6 +684,8 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         Sysno::clock_getres => sys_clock_getres(uctx.arg0() as _, uctx.arg1().into()),
         Sysno::getitimer => sys_getitimer(uctx.arg0() as _, uctx.arg1().into()),
         Sysno::setitimer => sys_setitimer(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2().into()),
+        #[cfg(target_arch = "x86_64")]
+        Sysno::alarm => sys_alarm(uctx.arg0() as _),
 
         // msg
         Sysno::msgget => sys_msgget(uctx.arg0() as _, uctx.arg1() as _),
