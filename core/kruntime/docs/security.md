@@ -29,8 +29,8 @@ kernel-boot / 平台固件
 │     early runtime / scheduler / IRQ               │
 │     spawn PID-less late_init thread               │
 │   late_init_main                                  │
-│     drivers / fs / net / SMP / .init_array        │
-│     INITED_CPUS barrier                           │
+│     SMP / CPU services / INITED_CPUS barrier      │
+│     drivers / fs / net / .init_array               │
 │     SystemInitEntry::enter()  -> spawn PID 1      │
 │   rust_main_secondary                             │
 │     AP runtime init -> INITED_CPUS -> run_idle    │
@@ -51,7 +51,7 @@ kernel-boot / 平台固件
 | `BootInfo` | CPU ID、内存表、boot console PA/VA/size | 错误内存映射、错误 CPU 初始化、MMIO 区域越界 | `khal::firmware::init`、`khal::mem::init` 和 `memspace` 负责校验；boot console VA/PA 页内偏移由 `assert_eq!` 检查 |
 | 链接符号 | `_stext`、`_etext`、`.init_array` 边界 | backtrace 范围错误、构造函数表越界、任意跳转 | 只取 ZST 符号地址；`.init_array` 通过链接脚本和 `#[register_init]` 约束 |
 | SMP bring-up | DT/ACPI 发现的 present CPU、AP 栈、`boot_ap` | 从核使用错误栈、AP 未启动导致主核自旋 | 每个 AP 使用独立 boot stack；`SCHED_READY_CPUS` 串行握手（等 AP 注册 run queue）；全局完成由 `INITED_CPUS == nr_cpus()` 判断 |
-| 中断和 timer | softirq runner、timer/IPI/PMU IRQ 号与 handler | 未安装 runner 或未注册 handler 时中断 bottom-half、timer deadline 错乱 | `init_interrupt` 先安装 softirq runner 和注册 handler 再 `enable_local_irq()`；从核在完成本地 runtime 初始化和全局屏障后才开 IRQ |
+| IRQ and timer | Softirq runner and timer/IPI/PMU handlers | Interrupt delivery before handler readiness | The primary installs handlers before IRQ enable; APs enable local IRQs after softirq/worker setup and before publishing service completion. PMU IRQ enable follows watchdog setup. |
 | NMI 机制 | GIC 版本 / FEAT_NMI 探测与每 CPU 使能（`khal::nmi::early_init` / `late_init`） | 机制误判导致无效寄存器访问，或 watchdog 误报 hardlockup | 平台 `detect_mode()` 门控；`NmiMode::None` 时 watchdog 启动期禁用硬锁检测；所有 NMI 寄存器访问均有 readiness 门控 |
 | DMA 页表属性 | `kdma` 传入的内核 VA、size、flags | 错误修改内核页表属性 | `DmaPageTableIf::protect` 委托 `memspace::kernel_layout().protect()` 进行范围和页表处理 |
 
@@ -128,10 +128,17 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 
 ## 线程安全
 
-- `INITED_CPUS` 使用 `Release`/`Acquire` 作为全局 runtime-ready 屏障。主核 late-init 线程和每个从核完成本地 runtime 初始化后递增；`SystemInitEntry::enter()` 和依赖跨 CPU 调度的 late-start worker 只在屏障满足后运行。
+- `INITED_CPUS: AtomicUsize` is private boot-lifetime state. Only the primary
+  publishes the first Release increment, releasing AP setup. Each AP publishes
+  once after its local service initialization. The primary's final Acquire load
+  observes the Release RMW sequence before entering device discovery or drivers.
+  The counter describes CPU services, not completed filesystem/network startup.
 - `SCHED_READY_CPUS` 只表达 AP 已注册 run queue（进入 runtime 后进一步完成内存管理与调度器初始化），不代表 AP 初始化完成；它与 `INITED_CPUS` 分离，避免把“可跨核调度”/“可启动下一个 AP”和“全局 runtime ready”混在一起。
 - `LoggerAdapter::cpu_id()` 和 `task_id()` 在 `is_init_ok()` 前避免读取可能未就绪的 current task / CPU-local 运行时状态；非 SMP 构建下 CPU ID 固定为 0。
-- 从核在 `INITED_CPUS` 屏障后才启用 IPI/PMU IRQ、本地 IRQ 和 watchdog，并最终进入 `ktask::run_idle()`。
+- APs retain the startup preemption guard through fixed-notification enable,
+  softirq/worker setup, IRQ enable, watchdog/PMU setup, and completion publication.
+  They must not wait for primary driver initialization or local runnable tasks
+  during this phase. The primary would otherwise wait for an AP that cannot finish.
 - `DmaPageTableIf::protect()` 通过 `memspace::kernel_layout().lock()` 串行化内核页表属性更新。
 
 ## 威胁分析
@@ -140,7 +147,7 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 |------|----------|----------|----------|----------|
 | T-01 | `.init_array` 槽位不是有效函数指针，`init_cb` 跳转到非法地址 | 高 | 链接脚本错误、恶意/损坏对象文件、内存破坏 | 仅信任注册宏生成条目；链接脚本保留并界定 `.init_array`；启动期集中调用 |
 | T-02 | `BootInfo` 内存表或 CPU 拓扑错误 | 高 | boot 层 bug、固件表异常、虚拟化环境错误 | 由 `khal::firmware` / `khal::mem` / `kcpu_id_map` 建立运行时视图；后续初始化只消费该视图 |
-| T-03 | AP 未完成初始化时进入系统 init 或跨 CPU worker | 中 | `INITED_CPUS` 计数错误、CPU 数来源错误 | 跨核 spawn 由 `SCHED_READY_CPUS` 提前守护；系统 init 入口等待 `INITED_CPUS == kcpu_id_map::nr_cpus()`；计数均使用 Release/Acquire |
+| T-03 | Drivers use AP services before preparation completes | Medium | Publishing `INITED_CPUS` before local service setup, or entering drivers before the barrier | Mitigated by separate run-queue registration and service-completion barriers, Release/Acquire publication, and waiting before driver initialization; boot tests observe completion at the driver boundary. |
 | T-04 | 从核使用错误或重叠 boot stack | 高 | AP 启动循环越界、并发启动复用槽位 | `secondary_cpu_index < NR_CPUS - 1`；串行 `boot_ap` + `SCHED_READY_CPUS` 握手；每 AP 独立槽 |
 | T-05 | PID 1 被提前消耗 | 中 | late-init 线程或后台 worker 获得 Linux-visible identity；`SystemInitEntry` 未先创建 init | boot、idle、late-init 和普通内核 worker 使用 PID-less identity；init 创建路径断言 root PID 为 1 |
 | T-06 | IRQ 在 handler 注册前启用 | 高 | `init_interrupt` 顺序被改坏、平台提前开 IRQ | 主核先安装 softirq hardirq-exit runner，再注册 timer/IPI/PMU handler，最后开本地 IRQ；从核初始化完成后再开 IRQ |
@@ -156,7 +163,7 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 | F-01 | 全局 allocator 没有可用 FREE 区域 | 固件内存表错误或 boot 层漏报 | allocator 初始化不完整 | 早期分配失败或 panic，系统无法启动 | 1 | 启动期快速失败；依赖 boot/mem 子系统校验 |
 | F-02 | boot console MMIO VA/PA 页内偏移不一致 | `BootInfo` 填写错误 | `assert_eq!` 失败 | 启动中止 | 2 | 显式偏移检查后才注册 fixed device region |
 | F-03 | 某从核未递增 `SCHED_READY_CPUS` | `boot_ap` 失败、固件未唤醒 AP、AP 在 memspace/scheduler 初始化期 trap | 主核卡在 AP bring-up | late init 无法继续 | 2 | `start_secondary_cpus()` 返回 `boot_ap` 错误；启动期 hang 依赖平台日志/调试 |
-| F-04 | 某 CPU 未递增 `INITED_CPUS` | 从核 init hang、主核 late init panic | 全局 ready 屏障不满足 | 系统 init 不启动或从核不进 idle | 2 | 启动日志；watchdog feature 或外部复位 |
+| F-04 | A CPU never publishes service completion | AP setup hangs or waits for primary driver startup | The CPU-service barrier does not complete | Driver initialization and system init cannot start | 2 | No waits on drivers or local runnable tasks during AP setup; boot logs and optional watchdog/external reset. There is no local timeout. |
 | F-05 | `register_init` 回调 panic | 子系统 init bug | `.init_array` 遍历中断 | 后续 init 不执行，panic 后关机 | 2 | 回调保持短小、无阻塞；新增回调需审计 panic 路径 |
 | F-06 | `SystemInitEntry` provider 缺失或重复 | `entry` 未提供实现或多个实现冲突 | 链接失败 | 无法生成镜像 | 2 | `kiface` exactly-one provider 构建期发现 |
 | F-07 | PID 1 断言失败 | Linux-visible task 在 init 前抢先消耗 root PID | `assert_eq!` panic | 启动中止 | 2 | boot、idle、late-init 和普通内核 worker 使用 PID-less identity |

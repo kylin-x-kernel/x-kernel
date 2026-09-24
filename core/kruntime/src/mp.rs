@@ -139,10 +139,9 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     #[cfg(feature = "ipi")]
     kipi::init();
 
-    info!("Secondary CPU {:x} init OK.", logical_cpu_id.as_usize());
-    super::INITED_CPUS.fetch_add(1, Ordering::Release);
-
-    while !super::is_init_ok() {
+    // Only the primary publishes the first completion, after all AP run queues
+    // exist and its own IPI/watchdog services are prepared.
+    while super::INITED_CPUS.load(Ordering::Acquire) == 0 {
         core::hint::spin_loop();
     }
 
@@ -172,6 +171,11 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     #[cfg(unittest)]
     tests_startup_order::mark_complete(logical_cpu_id);
 
+    info!("Secondary CPU {:x} init OK.", logical_cpu_id.as_usize());
+    // Publish service completion rather than arrival at the rendezvous. Nothing
+    // before this publication may wait for primary driver initialization.
+    super::INITED_CPUS.fetch_add(1, Ordering::Release);
+
     // Pending requests are preserved and may take effect on this release.
     drop(startup_guard);
     ktask::run_idle();
@@ -198,9 +202,20 @@ pub(super) mod tests_startup_order {
     static RAN_EARLY: AtomicBool = AtomicBool::new(false);
     static QUEUED: AtomicUsize = AtomicUsize::new(0);
     static REMAINING: AtomicUsize = AtomicUsize::new(0);
+    static SERVICES_READY_BEFORE_DRIVERS: AtomicBool = AtomicBool::new(false);
 
     pub(super) fn mark_complete(cpu_id: LogicalCpuId) {
         COMPLETE[cpu_id.as_usize()].store(true, Ordering::Release);
+    }
+
+    pub(crate) fn record_service_barrier(primary: LogicalCpuId) {
+        let mut all_complete = true;
+        for_each_present_logical_cpu(|_, cpu_id, _| {
+            if cpu_id != primary {
+                all_complete &= COMPLETE[cpu_id.as_usize()].load(Ordering::Acquire);
+            }
+        });
+        SERVICES_READY_BEFORE_DRIVERS.store(all_complete, Ordering::Release);
     }
 
     pub(crate) fn queue_early_tasks(primary: LogicalCpuId) {
@@ -226,6 +241,11 @@ pub(super) mod tests_startup_order {
             ktask::activate_task(&task);
             kipi::notify_reschedule(cpu_id).expect("boot probe reschedule request failed");
         });
+    }
+
+    #[def_test]
+    fn cpu_services_are_ready_before_driver_initialization() {
+        assert!(SERVICES_READY_BEFORE_DRIVERS.load(Ordering::Acquire));
     }
 
     #[def_test]

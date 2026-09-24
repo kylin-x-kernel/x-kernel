@@ -17,10 +17,11 @@ IRQ 关闭仍可能在内部锁释放时进行主动抢占检查，因此不能�
 投递任务及重调度请求，任务检查 AP 服务准备完成标记。结果保留至测试执行，
 不依赖忙等时长；测试任务退出，无运行期 hook 或栈借用遗留。
 
-固定调度 IPI 的启用由 runtime 编排：主 CPU 在 late init 的 `kipi::init` 后启用；
-AP 在全局初始化屏障后、原本开启本地 IPI 线路的位置启用。该入口负责线路开启、
-发布 ENABLED 并 drain 早期请求。AP 的 `SCHED_READY_CPUS` 仍表示运行队列已注册，
-不改成“IRQ 已启用”；在两阶段之间发来的固定请求由静态原因位保留。
+Runtime enables fixed notifications after `kipi::init` on the primary, then
+releases AP service initialization. Each AP enables notifications before creating
+its local services and publishing completion. The notification entry enables the
+line, publishes ENABLED, and drains early requests. `SCHED_READY_CPUS` still means
+run-queue registration, not IRQ readiness; static reason bits retain early requests.
 
 `kruntime` 是 x-kernel 的**运行时编排层**：在平台引导代码将控制权交给内核后，负责主核/从核的初始化顺序、子系统装配，以及跳转到系统初始化入口（`entry` crate 提供的 `SystemInitEntry`）。它不实现具体设备驱动或 syscall，而是把 `khal`、`memspace`、`ktask`、`kdriver` 等按固定阶段串联起来。
 
@@ -72,8 +73,9 @@ kernel-boot (汇编 / MMU / BootInfo)
         ▼
 ┌───────────────────────────────────────────────────────────────┐
 │  late_init (Internal, PID-less bootstrap thread)              │
-│    drivers / fs / net / SMP / IPI / init_cb                  │
-│    等待 INITED_CPUS == nr_cpus                                │
+│    SMP / IPI / CPU services                                  │
+│    wait for INITED_CPUS == nr_cpus                            │
+│    drivers / fs / net / init_cb                               │
 │    SystemInitEntry::enter() ─────────────► entry crate        │
 │    entry spawns and activates fresh PID 1 init task           │
 │    return, then exit                                           │
@@ -84,7 +86,7 @@ kernel-boot (汇编 / MMU / BootInfo)
 ┌───────────────────────────────────────────────────────────────┐
 │  kruntime::rust_main_secondary (从核)                          │
 │    percpu / trap / memspace 从核 / 调度器从核 / IPI            │
-│    等待 is_init_ok() → run_idle()                             │
+│    wait for primary -> local services -> publish -> idle      │
 └───────────────────────────────────────────────────────────────┘
 
 侧向接线（链接期，非启动顺序）：
@@ -125,8 +127,16 @@ BootInfo*
     → boot task (PID 0) block forever
 
 late-init thread (Internal, PID-less):
-    → [smp] start_secondary_cpus  (返回前已确保每个 AP 的 run queue 注册)
-    → init_drivers  (可能跨核 spawn 内核线程; 此时跨核选择不会命中未注册 RQ)
+    -> [smp] start_secondary_cpus (all AP run queues registered)
+    -> init_cpu_services:
+        -> [ipi] kipi::init, enable_fixed_notifications
+        -> [watchdog] init_primary
+        -> [pmu] enable_irq
+        -> INITED_CPUS += 1 (release AP service initialization)
+        -> wait until is_init_ok() (all AP services prepared)
+        -> [smp] mark_all_cpus_started (enable TLB shootdowns)
+    -> [fs] init_device_discovery
+    -> init_drivers (cross-CPU services are now available)
     → [char] console handoff
     → entropy::init
     → init_setup::init_cb (filesystem/subsystem self-registration)
@@ -134,12 +144,7 @@ late-init thread (Internal, PID-less):
     → [fs] fs_boot (root namespace, virtual filesystems)
     → [fs9p] fs_boot host-share mount
     → [net/vsock] knet
-    → [ipi] kipi::init, mark_all_cpus_started
-        (khal::power 的 SMP stop 由 kipi 在链接期提供 SmpStopIf provider)
-    → [watchdog] init_primary
     → finish_allocator_init, log_memory_regions
-    → INITED_CPUS += 1
-    → spin until is_init_ok()
     → [vsock_tipc_bridge] start_vsock_bridge (依赖跨 CPU 调度，必须在屏障后)
     → SystemInitEntry::enter()
         (entry; spawn 出全新 PID 1 用户任务 init，返回)
@@ -170,13 +175,23 @@ init 不再经历"原地变身"：late-init 线程通过 `SystemInitEntry::enter
 INITED_CPUS.load(Acquire) == kcpu_id_map::nr_cpus()
 ```
 
-- 主核在完成自身初始化后对 `INITED_CPUS` 执行 `fetch_add(1, Release)`。
-- 每个从核在 `rust_main_secondary` 末尾同样 `fetch_add(1, Release)`。
-- PID-less late-init 线程在调用 `SystemInitEntry::enter()` 前自旋等待计数达到 `nr_cpus()`（运行时从设备树/ACPI 发现的实际核数，而非编译期 `NR_CPUS` 上限），保证系统初始化入口启动时所有逻辑 CPU 已完成 runtime 初始化。QEMU `-smp` 与 `NR_CPUS` 不再强耦合：给少于 `NR_CPUS` 的核不会死锁，给多于 `NR_CPUS` 的核会被告警截断。
-- 依赖跨 CPU task spawn 的 late-start worker，例如 vsock-TIPC bridge，
-  在该屏障之后、`SystemInitEntry::enter()` 之前启动，避免调度到尚未注册的 secondary run queue。
+- The primary is the first CPU to increment `INITED_CPUS` with Release ordering,
+  after preparing its IPI, watchdog, and PMU services. APs wait for a nonzero
+  Acquire load before completing their local service setup.
+- Each AP increments once after fixed notifications, ksoftirqd, worker-pool
+  initialization, local IRQ enable, and optional watchdog/PMU setup. The existing
+  worker-pool failure policy remains a warning; completion does not turn that
+  best-effort initialization into a success guarantee.
+- The primary waits for the runtime-discovered `nr_cpus()`, not the configured
+  `NR_CPUS` capacity, before device discovery and driver initialization. The final
+  Acquire load observes the Release RMW sequence of CPU completions.
+- CPU readiness is not driver, filesystem, or network readiness. The bridge and
+  `SystemInitEntry::enter()` remain after their subsystem initialization.
 
-从核在屏障之后开启本地 IRQ（及可选 watchdog），进入 `ktask::run_idle()`，**不**执行 `SystemInitEntry`。
+An AP releases its startup preemption guard after publishing completion and then
+enters idle. No AP service initialization may wait for primary driver startup or
+for a task that cannot run until that guard is released. Otherwise the primary
+and AP would wait for each other. APs never call `SystemInitEntry`.
 
 ### NMI 初始化时序
 
@@ -205,14 +220,21 @@ SecondaryKernelEntry::enter(logical_cpu_id)
     → final_init_secondary, init_scheduler_secondary
     → SCHED_READY_CPUS += 1  (供 start_secondary_cpus 等待; RQ 已注册, 跨核 spawn 安全)
     → [ipi] kipi::init
-    → INITED_CPUS += 1
-    → spin until is_init_ok()
-    → enable IPI/PMU IRQ, enable_local_irq
-    → [watchdog] init_secondary
+    -> wait until INITED_CPUS != 0 (primary services prepared)
+    -> enable_fixed_notifications
+    -> init_softirqd_current_cpu, initialize local worker pools
+    -> enable_local_irq
+    -> [watchdog] init_secondary
+    -> [pmu] enable_irq
+    -> INITED_CPUS += 1 (publish local service completion)
+    -> release startup preemption guard
     → run_idle()  (永不返回)
 ```
 
-`start_secondary_cpus` 与从核通过 `SCHED_READY_CPUS` 握手：主核每启动一个 AP，等待其在 `ktask::init_scheduler_secondary()` 之后递增 `SCHED_READY_CPUS` 再启动下一个。旧握手只在“AP 进入 runtime”时放行，但此时 run queue 尚未注册；新握手把放行点后移到 run queue 注册后，因而返回后调用方可安全假设每个 present CPU 均可被跨核 spawn 命中，主核随即进入 `init_drivers` 等可能跨核 spawn 内核线程的初始化阶段。
+`start_secondary_cpus` waits for each AP's `SCHED_READY_CPUS` publication after
+scheduler initialization before starting the next AP. This permits cross-CPU
+task placement but does not permit assuming that local services are ready.
+The primary subsequently completes `init_cpu_services` before entering drivers.
 
 ## `.init_array` 与 `register_init`
 

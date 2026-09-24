@@ -107,6 +107,8 @@ impl klogger::LoggerAdapter {
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+// The primary publishes first to release AP service bring-up. Each AP adds its
+// completion after local services exist; the final acquire covers them all.
 static INITED_CPUS: AtomicUsize = AtomicUsize::new(0);
 
 /// High-level system-init handoff performed after runtime bring-up.
@@ -215,6 +217,11 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     #[cfg(all(unittest, feature = "smp"))]
     self::mp::tests_startup_order::queue_early_tasks(cpu_id);
 
+    init_cpu_services();
+
+    #[cfg(all(unittest, feature = "smp"))]
+    self::mp::tests_startup_order::record_service_barrier(cpu_id);
+
     #[cfg(feature = "fs")]
     fs_boot::init_device_discovery();
     kdriver::init_drivers();
@@ -248,36 +255,12 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     #[cfg(feature = "vsock")]
     knet::init_vsock();
 
-    #[cfg(feature = "ipi")]
-    kipi::init();
-
-    #[cfg(feature = "ipi")]
-    kipi::enable_fixed_notifications();
-
-    #[cfg(feature = "smp")]
-    kipi::tlb::mark_all_cpus_started();
-
-    #[cfg(feature = "watchdog")]
-    watchdog::init_primary();
-
-    // Keep the PMU PPI masked until the watchdog has promoted it to NMI
-    // delivery on this CPU. This also enables the normal IRQ fallback when
-    // the configured NMI mechanism is unavailable at runtime.
-    #[cfg(feature = "pmu")]
-    khal::pmu::enable_irq();
-
     finish_allocator_init();
     log_memory_regions();
 
     info!("Primary CPU {} init OK.", cpu_id.as_usize());
-    INITED_CPUS.fetch_add(1, Ordering::Release);
-
-    while !is_init_ok() {
-        core::hint::spin_loop();
-    }
-
-    // Depends on cross-CPU task spawn, so it must run after every secondary CPU
-    // has registered its run queue (the `is_init_ok` barrier above).
+    // CPU services are ready before drivers; the network service itself must
+    // also exist before the bridge starts.
     #[cfg(feature = "vsock_tipc_bridge")]
     knet::start_vsock_bridge();
 
@@ -286,6 +269,32 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     SystemInitEntry::enter();
 
     // The late-init thread has finished its job; `task_entry` will exit it.
+}
+
+/// Completes boot CPU services before drivers can publish cross-CPU work.
+fn init_cpu_services() {
+    #[cfg(feature = "ipi")]
+    kipi::init();
+
+    #[cfg(feature = "ipi")]
+    kipi::enable_fixed_notifications();
+
+    #[cfg(feature = "watchdog")]
+    watchdog::init_primary();
+
+    // Keep the PMU PPI masked until watchdog setup has selected NMI delivery.
+    #[cfg(feature = "pmu")]
+    khal::pmu::enable_irq();
+
+    // APs cannot complete while the primary is still zero. Release them before
+    // drivers, which may themselves wait for work on those CPUs.
+    INITED_CPUS.fetch_add(1, Ordering::Release);
+    while !is_init_ok() {
+        core::hint::spin_loop();
+    }
+
+    #[cfg(feature = "smp")]
+    kipi::tlb::mark_all_cpus_started();
 }
 
 /// Prepare the PID-less late-init bootstrap thread on the boot CPU.
