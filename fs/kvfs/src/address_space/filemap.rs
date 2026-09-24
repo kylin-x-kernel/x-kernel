@@ -14,6 +14,14 @@ use pagecache::{Folio, PageIndex};
 use super::{AddressSpace, PageMkwriteRequest, WriteBeginRequest, WriteEndRequest};
 use crate::{Kiocb, VfsError, VfsResult};
 
+fn write_prefix_or_error(written: usize, error: VfsError) -> VfsResult<usize> {
+    if written == 0 {
+        Err(error)
+    } else {
+        Ok(written)
+    }
+}
+
 impl AddressSpace {
     /// Runs `f` with the cached folio at `index`, if present.
     pub fn with_folio<R>(&self, index: PageIndex, f: impl FnOnce(Option<&mut Folio>) -> R) -> R {
@@ -209,36 +217,52 @@ impl AddressSpace {
             let page_off = (pos % memaddr::PAGE_SIZE_4K as u64) as usize;
             let step = (len - written).min(memaddr::PAGE_SIZE_4K - page_off);
             let prepared_end = pos.checked_add(step as u64).ok_or(VfsError::InvalidInput)?;
-            self.ops
-                .write_begin(self, WriteBeginRequest::new(pos, step))?;
+            if let Err(error) = self
+                .ops
+                .write_begin(self, WriteBeginRequest::new(pos, step))
+            {
+                return write_prefix_or_error(written, error);
+            }
             let grew_cache = prepared_end > visible_len;
             if grew_cache {
                 self.i_pages.resize_cached_folios(visible_len, prepared_end);
             }
-            let copied = match self.with_folio_or_create(index, |folio| {
+            let mut copied = 0;
+            let copy_result = self.with_folio_or_create(index, |folio| {
                 let data = folio.data();
-                let copied = iter.copy_from_iter(&mut data[page_off..page_off + step])?;
+                copied = iter.copy_from_iter(&mut data[page_off..page_off + step])?;
                 if copied != 0 {
                     self.dirty_folio(folio)?;
                 }
-                Ok(copied)
-            }) {
-                Ok(copied) => copied,
+                Ok(())
+            });
+            if let Err(error) = copy_result {
+                iter.revert(copied)?;
+                if let Err(cancel_error) =
+                    self.ops.write_end(self, WriteEndRequest::new(pos, step, 0))
+                {
+                    log::warn!(
+                        "failed to cancel buffered write at {pos} (len {step}): {cancel_error:?}"
+                    );
+                }
+                if grew_cache {
+                    self.i_pages.resize_cached_folios(prepared_end, visible_len);
+                }
+                return write_prefix_or_error(written, error);
+            }
+            let accepted = match self
+                .ops
+                .write_end(self, WriteEndRequest::new(pos, step, copied))
+            {
+                Ok(accepted) => accepted,
                 Err(error) => {
-                    if let Err(cancel_error) =
-                        self.ops.write_end(self, WriteEndRequest::new(pos, step, 0))
-                    {
-                        log::warn!(
-                            "failed to cancel buffered write at {pos} (len {step}): \
-                             {cancel_error:?}"
-                        );
+                    iter.revert(copied)?;
+                    if grew_cache {
+                        self.i_pages.resize_cached_folios(prepared_end, visible_len);
                     }
-                    return Err(error);
+                    return write_prefix_or_error(written, error);
                 }
             };
-            let accepted = self
-                .ops
-                .write_end(self, WriteEndRequest::new(pos, step, copied))?;
             if accepted > copied {
                 return Err(VfsError::InvalidInput);
             }

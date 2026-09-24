@@ -11,6 +11,7 @@ the protocol boundary.
 
 - Protocol parsing must not read beyond the received message.
 - A response must match the expected operation before its payload is consumed.
+- A write response must not claim more bytes than the request supplied.
 - Transport and protocol failures are returned to the caller as errors.
 - Session and fid lifecycle operations must remain ordered through the mutable
   session interface.

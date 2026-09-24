@@ -540,6 +540,8 @@ VFS rename 入口再次检查组合不变量，文件系统 helper 再检查自�
 默认 `FileOperations::read_iter` 使用页大小的内核缓冲区适配标量 read 回调。
 一次迭代已经读取部分数据后，后续回调错误转换为已完成字节数，使 stream I/O
 保持 POSIX partial-read 语义；首个回调失败时保留原错误。
+默认 `write_iter` 只推进已被标量 write 接受的迭代器与 `ki_pos`，短写回退剩余输入；
+`i_size` 由 `write_end` 或实际写入 backing store 的文件系统回调发布。
 
 `libfs::new_pseudo_super_block()` 对应 Linux `init_pseudo()` 与
 `pseudo_fs_fill_super()`：统一安装共享 simple `s_op`、`s_magic`、page-size geometry、
@@ -709,12 +711,12 @@ child cache 仍使用 mutex。RCU、seqcount lookup 和 lock-free dcache travers
 
 ### SimpleFile 写入模式
 
-普通 `SimpleFileOps` 保留 seekable 文件的覆盖写语义，offset 0 的短写不会隐式截断尾部。
+`SimpleFileOps` 默认拒绝写入；需要可写文件时，由具体操作对象实现写入语义。
 `CommandFile` 表达 procfs/cgroupfs 一类 command-style pseudo file。一次 write/writev
 请求先完整复制到最多 4096 字节的内核缓冲区，再作为一个命令交给 callback；文件 offset
 和此前写入均不参与命令拼接。callback 同时收到保存 opener credential 的 `VfsFile`，因此
-descriptor-based 授权不需要反向查询 current task。这样 command ABI 不会改变其它
-`SimpleFile` 使用者的 seekable 文件语义。
+descriptor-based 授权不需要反向查询 current task。`SimpleFile` 根据具体操作对象的
+`write_iter` 分派写入算法，不通过额外的模式字段选择。
 
 `SimpleDirOps::mkdir()` 接收 VFS 已解析并加锁的 parent inode、准备后的 mode 和同一次
 pathname 操作的 credential；`rmdir()` 接收 parent inode 与加锁的 victim dentry。动态

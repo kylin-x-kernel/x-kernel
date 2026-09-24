@@ -807,6 +807,9 @@ impl P9Session {
 
         let mut offset = 0;
         let wrote = read_u32(&resp, &mut offset)? as usize;
+        if wrote > data.len() {
+            return Err(String::from("9P write response exceeds request length"));
+        }
         Ok(wrote)
     }
 

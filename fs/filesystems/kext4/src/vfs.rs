@@ -1397,20 +1397,18 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
         let ext4 = ext4_private(&super_block)?;
         let block_size = super_block.block_size();
         let accepted = request.copied();
-        if accepted != 0 {
-            let end = match request.pos().checked_add(accepted as u64) {
-                Some(end) => end,
-                None => {
-                    release_delalloc_range(ext4, inode, request.pos(), request.len(), block_size)?;
-                    return Err(VfsError::InvalidInput);
-                }
-            };
-            if let Err(error) = mapping.write_end_set_size(end) {
+        let accepted_end = match request.pos().checked_add(accepted as u64) {
+            Some(end) => end,
+            None => {
                 release_delalloc_range(ext4, inode, request.pos(), request.len(), block_size)?;
-                return Err(error);
+                return Err(VfsError::InvalidInput);
             }
-        }
+        };
         finish_delalloc_write(ext4, inode, request, accepted, block_size)?;
+        if accepted != 0 {
+            // The accepted prefix may still be dirty if size publication fails.
+            mapping.write_end_set_size(accepted_end)?;
+        }
         Ok(accepted)
     }
 

@@ -1800,6 +1800,19 @@ impl VfsInode {
         self.mapping.truncate_setsize_after_backing_change(len)
     }
 
+    /// Publishes growth after a backing regular file has accepted write bytes.
+    /// Other inode types do not acquire a data size from scalar writes.
+    pub fn grow_size_after_backing_write(&self, end: u64) -> VfsResult<()> {
+        if self.node_type() != NodeType::RegularFile {
+            return Ok(());
+        }
+        let _data_guard = self.data_lock.write();
+        if end > self.size() {
+            self.mapping.truncate_setsize_after_backing_change(end)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn lock_data(&self) -> RwLockWriteGuard<'_, ()> {
         self.data_lock.write()
     }
@@ -2833,6 +2846,8 @@ mod tests {
         let inode = VfsInode::new_special(node, NodeFlags::NON_CACHEABLE, init);
         assert_eq!(inode.metadata().inode, 7);
         assert_eq!(inode.metadata().rdev, DeviceId::new(1, 3));
+        assert_eq!(inode.grow_size_after_backing_write(16), Ok(()));
+        assert_eq!(inode.size(), 0);
     }
 
     #[def_test]

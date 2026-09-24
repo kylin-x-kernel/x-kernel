@@ -143,6 +143,8 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   必须按 file mode 注册队列，不能由用户 event mask 删除 HUP/ERR 的唤醒来源。
 - `PIPE_BUF` 原子性必须按完整用户写请求判定，不能因 iterator 的内部暂存 chunk 而把
   大写入变成原子写；部分写入后必须回退未提交的 source iterator 进度。
+- 可写控制文件只消费本次 write buffer；写命令不得通过 `i_size` 推断持久内容长度，
+  普通文件的大小只能在 backing store 接受写入后发布。
 - pathname FIFO 的自动 atime/mtime/ctime 更新必须经过 VFS mount/time policy 和
   filesystem `update_time` callback；匿名 pipe 不得更新 pathname inode metadata。
 - immutable simple symlink 的目标只由 `VfsInode` cached-link 状态持有；
@@ -277,7 +279,7 @@ KVFS 返回映射后的错误，不伪造成功字节数，也不重试可能已
 | T-41 | 同一 block device 出现两个 mutable superblock，或 mount 到正在 teardown 的实例 | 高 | filesystem 每次 mount 自行分配 state，或 `get_tree` 与 active acquisition 间无状态校验 | KVFS 按 canonical `(s_type, BlockDevice)` 建立 nascent reservation 和独占 claim；同 identity 等待/复用，RO/RW 不一致或跨类型冲突返回 `EBUSY`；`mount_new` 在 dying/dead activation race 后重试 |
 | T-42 | filesystem 在 transaction 完成后继续使用失效的 mount data borrow | 高 | filesystem 把 `FsContext::data()` byte-slice 引用直接存入 superblock state | opaque data 只作为同步 context 输入；filesystem 必须解析并保存 owned/typed state，generic fill closure 为 `FnOnce` |
 | T-43 | resident inode 暴露磁盘格式无法保存的时间精度，或字段联动关系与磁盘不一致 | 中 | VFS 在 filesystem callback 后重新发布原请求，掩盖后端的范围钳制、字段专有粒度或忽略行为 | `TimestampLimits` 只处理 superblock 级公共能力；callback 复用 `MetadataUpdate` 返回实际生效字段，KVFS 只发布返回值；FAT 日期级 atime、2 秒 mtime/ctime 联动及 KVFS callback 回传测试约束该合同 |
-| T-44 | command-style pseudo file 把多次 write 按 offset 合并，或把一次 write_iter 拆成多次命令 | 高 | 复用普通 seekable `SimpleFileOps` 写语义 | `CommandFile` 完整复制最多 4096 字节的一次请求，忽略 offset，并把 `VfsFile::f_cred` 与完整缓冲区一次性交给 callback |
+| T-44 | command-style pseudo file 把多次 write 按 offset 合并，或把一次 write_iter 拆成多次命令 | 高 | 默认标量写入算法处理 command 文件 | `CommandFile` 自有 `write_iter` 完整复制最多 4096 字节的一次请求，忽略 offset，并把 `VfsFile::f_cred` 与完整缓冲区一次性交给 callback |
 | T-45 | 动态目录后端按名称重新解析 VFS 已锁定的 victim | 高 | `rmdir` callback 只收到字符串，replacement 竞争使后端删除不同 identity | `SimpleDirOps::rmdir` 接收 `LockedDentry`；后端可校验 `inode_ref()`，`mkdir` 同时接收 parent inode、prepared mode 和 credential |
 
 ## 故障模式与影响分析（FMEA）

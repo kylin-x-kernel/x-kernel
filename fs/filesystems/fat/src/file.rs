@@ -57,8 +57,11 @@ fn grow_file(block_size: usize, file: &mut ff::File<'static>, len: u64) -> VfsRe
 
     while pos < len {
         let write = (block_size - (pos as usize & (block_size - 1))).min((len - pos) as usize);
-        file.write(&block[0..write]).map_err(into_vfs_err)?;
-        pos += write as u64;
+        let written = file.write(&block[0..write]).map_err(into_vfs_err)?;
+        if written == 0 {
+            return Err(VfsError::WriteZero);
+        }
+        pos += written as u64;
     }
     Ok(())
 }
@@ -140,24 +143,36 @@ impl FileOperations for FatFileInode {
         }
     }
 
-    fn write(&self, _file: &VfsFile, mut buf: &[u8], offset: u64) -> VfsResult<usize> {
-        let mut fs = self.fs.lock();
-        let block_size = fs.inner.cluster_size() as usize;
-        let file = self.inner.borrow_mut(&mut fs);
-        if offset > file_size(file) {
-            grow_file(block_size, file, offset)?;
-        }
-        file.seek(SeekFrom::Start(offset)).map_err(into_vfs_err)?;
+    fn write(&self, opened_file: &VfsFile, mut buf: &[u8], offset: u64) -> VfsResult<usize> {
+        let (result, size) = {
+            let mut fs = self.fs.lock();
+            let block_size = fs.inner.cluster_size() as usize;
+            let file = self.inner.borrow_mut(&mut fs);
+            let result = (|| {
+                if offset > file_size(file) {
+                    grow_file(block_size, file, offset)?;
+                }
+                file.seek(SeekFrom::Start(offset)).map_err(into_vfs_err)?;
 
-        let mut written = 0;
-        loop {
-            let n = file.write(buf).map_err(into_vfs_err)?;
-            if n == 0 {
-                return Ok(written);
-            }
-            written += n;
-            buf = &buf[n..];
-        }
+                let mut written = 0;
+                while !buf.is_empty() {
+                    let n = match file.write(buf) {
+                        Ok(n) => n,
+                        Err(_) if written != 0 => break,
+                        Err(error) => return Err(into_vfs_err(error)),
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    written += n;
+                    buf = &buf[n..];
+                }
+                Ok(written)
+            })();
+            (result, file_size(file))
+        };
+        opened_file.inode().grow_size_after_backing_write(size)?;
+        result
     }
 }
 

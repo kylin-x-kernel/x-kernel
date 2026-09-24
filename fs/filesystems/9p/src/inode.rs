@@ -562,9 +562,16 @@ impl FileOperations for Inode {
         }
     }
 
-    fn write(&self, _file: &VfsFile, buf: &[u8], offset: u64) -> VfsResult<usize> {
+    fn write(&self, file: &VfsFile, buf: &[u8], offset: u64) -> VfsResult<usize> {
         if self.node_type == NodeType::RegularFile {
-            self.write_regular_at(buf, offset)
+            let written = self.write_regular_at(buf, offset)?;
+            if written != 0 {
+                let end = offset
+                    .checked_add(written as u64)
+                    .ok_or(VfsError::FileTooLarge)?;
+                file.inode().grow_size_after_backing_write(end)?;
+            }
+            Ok(written)
         } else {
             Err(VfsError::InvalidInput)
         }

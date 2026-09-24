@@ -24,28 +24,17 @@ use crate::{
 pub trait SimpleFileOps: Send + Sync + 'static {
     /// Reads all content in the file.
     fn read_all(&self) -> VfsResult<Cow<'_, [u8]>>;
-    /// Replaces the file's content with `data`.
-    fn write_all(&self, data: &[u8]) -> VfsResult<()>;
 
-    /// Writes data using ordinary seekable-file semantics.
-    fn write(&self, _file: &VfsFile, data: &[u8], offset: u64) -> VfsResult<usize> {
-        let current = self.read_all()?;
-        let mut current = current.to_vec();
-        let offset = usize::try_from(offset).map_err(|_| VfsError::FileTooLarge)?;
-        let end = offset
-            .checked_add(data.len())
-            .ok_or(VfsError::FileTooLarge)?;
-        if end > current.len() {
-            current.resize(end, 0);
-        }
-        current[offset..end].copy_from_slice(data);
-        self.write_all(&current)?;
-        Ok(data.len())
+    /// Handles one scalar write; read-only files reject it by default.
+    fn write(&self, _file: &VfsFile, _data: &[u8], _offset: u64) -> VfsResult<usize> {
+        Err(VfsError::BadFileDescriptor)
     }
 
-    /// Returns whether one write request must reach `write` as one buffer.
-    fn consumes_write_atomically(&self) -> bool {
-        false
+    /// Handles one iterator write, preserving the operation's own write semantics.
+    fn write_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> VfsResult<usize> {
+        crate::file::scalar_write_iter(iocb, iter, |file, data, offset| {
+            self.write(file, data, offset)
+        })
     }
 }
 
@@ -53,7 +42,7 @@ pub trait SimpleFileOps: Send + Sync + 'static {
 pub enum SimpleFileOperation<'a> {
     /// Reading the file's content
     Read,
-    /// Replacing the file's content
+    /// Consuming one write request.
     Write {
         /// Open file description whose opener credential governs the command.
         file: &'a VfsFile,
@@ -85,17 +74,53 @@ where
         (self.0)(SimpleFileOperation::Read).map(|it| Cow::Owned(it.unwrap().into()))
     }
 
-    fn write_all(&self, _data: &[u8]) -> VfsResult<()> {
-        Err(VfsError::BadFileDescriptor)
-    }
-
     fn write(&self, file: &VfsFile, data: &[u8], _offset: u64) -> VfsResult<usize> {
         (self.0)(SimpleFileOperation::Write { file, data })?;
         Ok(data.len())
     }
 
-    fn consumes_write_atomically(&self) -> bool {
-        true
+    fn write_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> VfsResult<usize> {
+        const MAX_COMMAND_SIZE: usize = 4096;
+        let count = iter.count();
+        if count == 0 {
+            return Ok(0);
+        }
+        if count > MAX_COMMAND_SIZE {
+            return Err(VfsError::FileTooLarge);
+        }
+        let mut command = alloc::vec![0; count];
+        let mut copied = 0;
+        while copied < count {
+            let read = match iter.copy_from_iter(&mut command[copied..]) {
+                Ok(read) => read,
+                Err(error) => {
+                    iter.revert(copied)?;
+                    return Err(error);
+                }
+            };
+            if read == 0 {
+                iter.revert(copied)?;
+                return Err(VfsError::BadAddress);
+            }
+            copied += read;
+        }
+        let written = match self.write(iocb.file(), &command, iocb.ki_pos()) {
+            Ok(written) => written,
+            Err(error) => {
+                iter.revert(count)?;
+                return Err(error);
+            }
+        };
+        if written > count {
+            iter.revert(count)?;
+            return Err(VfsError::InvalidData);
+        }
+        iter.revert(count - written)?;
+        if written == 0 {
+            return Err(VfsError::WriteZero);
+        }
+        iocb.advance(written);
+        Ok(written)
     }
 }
 
@@ -106,10 +131,6 @@ where
 {
     fn read_all(&self) -> VfsResult<Cow<'_, [u8]>> {
         (self)().map(|it| Cow::Owned(it.into()))
-    }
-
-    fn write_all(&self, _data: &[u8]) -> VfsResult<()> {
-        Err(VfsError::BadFileDescriptor)
     }
 }
 
@@ -231,56 +252,7 @@ impl FileOperations for SimpleFile {
     }
 
     fn write_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> VfsResult<usize> {
-        if !self.ops.consumes_write_atomically() {
-            let mut total = 0;
-            let mut chunk = [0; memaddr::PAGE_SIZE_4K];
-            while iter.count() != 0 {
-                let want = chunk.len().min(iter.count());
-                let copied = match iter.copy_from_iter(&mut chunk[..want]) {
-                    Ok(copied) => copied,
-                    Err(_) if total != 0 => break,
-                    Err(error) => return Err(error),
-                };
-                if copied == 0 {
-                    break;
-                }
-                let written = self
-                    .ops
-                    .write(iocb.file(), &chunk[..copied], iocb.ki_pos())?;
-                if written == 0 {
-                    return Err(VfsError::WriteZero);
-                }
-                total += written;
-                iocb.advance(written);
-                iocb.file().update_size_after_write(iocb.ki_pos())?;
-                if written < copied {
-                    break;
-                }
-            }
-            return Ok(total);
-        }
-
-        const MAX_COMMAND_SIZE: usize = 4096;
-        let count = iter.count();
-        if count == 0 {
-            return Ok(0);
-        }
-        if count > MAX_COMMAND_SIZE {
-            return Err(VfsError::FileTooLarge);
-        }
-        let mut command = alloc::vec![0; count];
-        let mut copied = 0;
-        while copied < count {
-            let read = iter.copy_from_iter(&mut command[copied..])?;
-            if read == 0 {
-                return Err(VfsError::BadAddress);
-            }
-            copied += read;
-        }
-        let written = self.ops.write(iocb.file(), &command, iocb.ki_pos())?;
-        iocb.advance(written);
-        iocb.file().update_size_after_write(iocb.ki_pos())?;
-        Ok(written)
+        self.ops.write_iter(iocb, iter)
     }
 }
 
@@ -331,6 +303,7 @@ mod tests {
 
         assert_eq!(file.write(b"first"), Ok(5));
         assert_eq!(file.position(), 5);
+        assert_eq!(file.inode().size(), 0);
         assert_eq!(file.write(b""), Ok(0));
         assert_eq!(file.write(b"second"), Ok(6));
         let mut positioned_offset = 123;
@@ -339,6 +312,7 @@ mod tests {
             Ok(10)
         );
         assert_eq!(positioned_offset, 133);
+        assert_eq!(file.inode().size(), 0);
         assert_eq!(
             *commands.lock(),
             vec![

@@ -176,30 +176,12 @@ pub trait FileOperations: Send + Sync + 'static {
     }
 
     /// Writes file data from an iterator source.
+    ///
+    /// The backing implementation owns any resulting inode size change.
     fn write_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> VfsResult<usize> {
-        let mut total = 0usize;
-        let mut chunk = [0u8; memaddr::PAGE_SIZE_4K];
-        while iter.count() != 0 {
-            let want = chunk.len().min(iter.count());
-            if want == 0 {
-                break;
-            }
-            let copied = iter.copy_from_iter(&mut chunk[..want])?;
-            if copied == 0 {
-                break;
-            }
-            let written = self.write(iocb.file(), &chunk[..copied], iocb.ki_pos())?;
-            if written == 0 {
-                return Err(VfsError::WriteZero);
-            }
-            total += written;
-            iocb.advance(written);
-            iocb.file().update_size_after_write(iocb.ki_pos())?;
-            if written < copied {
-                break;
-            }
-        }
-        Ok(total)
+        scalar_write_iter(iocb, iter, |file, buf, offset| {
+            self.write(file, buf, offset)
+        })
     }
 
     /// Manipulates the underlying device parameters of special files.
@@ -262,6 +244,53 @@ pub trait FileOperations: Send + Sync + 'static {
     ) -> Result<(), PollRegisterError> {
         Ok(())
     }
+}
+
+pub(crate) fn scalar_write_iter(
+    iocb: &mut Kiocb<'_>,
+    iter: &mut IovIterSource<'_>,
+    mut write: impl FnMut(&VfsFile, &[u8], u64) -> VfsResult<usize>,
+) -> VfsResult<usize> {
+    let mut total = 0usize;
+    let mut chunk = [0u8; memaddr::PAGE_SIZE_4K];
+    while iter.count() != 0 {
+        let want = chunk.len().min(iter.count());
+        let copied = match iter.copy_from_iter(&mut chunk[..want]) {
+            Ok(copied) => copied,
+            Err(_) if total != 0 => break,
+            Err(error) => return Err(error),
+        };
+        if copied == 0 {
+            break;
+        }
+        let written = match write(iocb.file(), &chunk[..copied], iocb.ki_pos()) {
+            Ok(written) => written,
+            Err(error) => {
+                iter.revert(copied)?;
+                if total != 0 {
+                    break;
+                }
+                return Err(error);
+            }
+        };
+        if written > copied {
+            iter.revert(copied)?;
+            return Err(VfsError::InvalidData);
+        }
+        iter.revert(copied - written)?;
+        if written == 0 {
+            if total != 0 {
+                break;
+            }
+            return Err(VfsError::WriteZero);
+        }
+        total += written;
+        iocb.advance(written);
+        if written < copied {
+            break;
+        }
+    }
+    Ok(total)
 }
 
 impl FileOperations for EmptyFileOperations {}
@@ -820,18 +849,6 @@ impl VfsFile {
         }
     }
 
-    pub(crate) fn update_size_after_write(&self, end: u64) -> VfsResult<()> {
-        if self.is_stream() || self.inode().node_type() != NodeType::RegularFile {
-            return Ok(());
-        }
-
-        let inode = self.inode();
-        if end > inode.size() {
-            inode.update_size_after_backing_change(end)?;
-        }
-        Ok(())
-    }
-
     pub(crate) fn file_accessed(&self) {
         if !self.flags().contains(OpenFlags::NO_ATIME) {
             self.path().touch_atime();
@@ -1042,6 +1059,24 @@ mod tests {
 
     struct SyncOperations {
         intents: Mutex<Vec<bool>>,
+    }
+
+    struct ShortWriteOperations;
+
+    impl FileOperations for ShortWriteOperations {
+        fn write(&self, _file: &VfsFile, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
+            Ok(2)
+        }
+    }
+
+    #[def_test]
+    fn scalar_write_iter_rewinds_unaccepted_bytes() {
+        let file = sync_test_file(Arc::new(ShortWriteOperations), FMode::WRITE);
+        let mut iocb = Kiocb::new(&file, 7);
+        let mut iter = iov_iter_kvec_source(b"abcdef");
+        assert_eq!(file.operations().write_iter(&mut iocb, &mut iter), Ok(2));
+        assert_eq!(iter.count(), 4);
+        assert_eq!(iocb.ki_pos(), 9);
     }
 
     impl FileOperations for SyncOperations {
