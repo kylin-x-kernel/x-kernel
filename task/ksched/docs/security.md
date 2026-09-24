@@ -3,7 +3,7 @@
 ## 信任模型
 
 ```
-ktask RunQueue（唯一调用方）
+ktask RunQueue（生产调用方，仍走插件）
    │
    │ BaseScheduler safe API
    │
@@ -11,10 +11,19 @@ ktask RunQueue（唯一调用方）
 ┌──────────────────────────────────┐
 │  FIFO / RR / CFS / EEVDF         │
 └──────────────────────────────────┘
+
+Scheduler（ktask 尚未调用）
+   │  调用方必须已持有目标 RQ 锁
+   v
+Stop / Deadline / RT（未接线） -> Fair EEVDF -> Idle
 ```
 
-- 调用方必须保证：同一 RQ 上序列化访问；运行任务离开必经 `leave_current`。
-- 调度器信任传入的 `SchedItem` 与任务状态已由 `ktask` 校验。
+- 插件调用方必须保证：同一 RQ 上序列化访问；运行任务离开必经 `leave_current`。
+- 读写 `RqCell` 的 `Scheduler` 方法是 `unsafe`。`RqLocked::assume()` 只出现在
+  这些 `unsafe fn` 内部，前提由调用方在 `# Safety` 里保证：已持有该 RQ 锁。
+  `init_attr_unpublished` 仍是 `pub(crate)`，只适用于尚未发布、由创建者独占
+  的任务。本 crate 不检查锁本身。
+- 调度器信任传入的任务状态已由调用方校验。用户策略只经 `SchedAttr::validate`。
 
 ## 外部边界 / 攻击面
 
@@ -53,6 +62,19 @@ EEVDF steal 另有原始所有权指针审计点：从游标 get_ptr（不是 &T
 只有命中才 clone 真正拥有的 Arc，临时视图结束后走 remove_task；不在
 摘除后访问临时视图，也不向调用方转交这份借来的引用。
 
+`FairClass` 另有一套 `FairAdapter`，投影的是 `SchedTask<T>` 里
+`fair.deadline_link` / `fair.vruntime_link`，不是插件 `EevdfEntity`。
+`get_link` / `get_value` 用同一字段 `offset_of` 互逆，不改 `Arc` 所有权；
+两棵树各持一份 `Arc`。`KeyAdapter::get_key` 在安全函数里 `RqLocked::assume()`：
+插入、查找和游标只从已持有令牌的 `FairClass` 方法进入；`RBTree` 的 `Drop`
+走 `clear()`，不调用 `get_key`，所以非空 `Scheduler` 析构不会在无锁下读
+`RqCell`。
+
+`RqCell` 的 `get` / `set` 是 `UnsafeCell` 读写。读要求指针有效、值已初始化、
+无并发写；写还要求独占。这三件事都由 `RqLocked` 加上 `new`/`set` 的完整 `Copy`
+值保证。`seat` 与 `attr`、Fair 虚拟时间字段走同一套令牌。`class` 仍是
+`AtomicU8`，给无锁的 `sched_class()` 读。
+
 ## 内存安全不变量
 
 1. EEVDF Ready 任务的两棵树各持有一份 Arc，两个最早缓存和 next_buddy 可额外持有；
@@ -81,6 +103,8 @@ IRQ/preempt 约束提供。
 | T-05 | `curr` 快照过期导致错误抢占/放置 | 中 | 改运行实体字段后未刷新 | `update_current`/`set_priority` 刷新；测试辅助显式同步 |
 | T-06 | idle-pull 偷走仍 `on_cpu` 的实体 | 高 | yield/preempt 入树后远端 `steal_ready_task` | 调度器只摘 ready waiter；ktask 谓词拒绝 `on_cpu`，不 `pick_next` |
 | T-07 | 双树或缓存残留导致错误选取/持有 | 高 | 摘除、改键或 Drop 漏清一份链接 | 同锁摘双树，游标后继更新缓存，正常树 Drop；成员/引用/重入测试 |
+| T-08 | `Scheduler` 在未持 RQ 锁时写 `RqCell` | 高 | 调用方违反锁契约 | 文档约定；令牌只在 `Scheduler` 入口和未发布初始化处构造 |
+| T-09 | 仲裁器 `curr` 的 `Arc` 在 Block 后成为唯一引用 | 高 | 调用方未另持任务 | `leave` 释放仲裁器引用；调用方必须另持任务 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -103,6 +127,8 @@ IRQ/preempt 约束提供。
 ## 已知限制
 
 - CFS 在 `ktask` feature 接线仍指向历史 `axsched` 名称时不可用；算法本体在本 crate。
+- `Scheduler` 尚未替换 `ktask` 的 `BaseScheduler`。Stop、Deadline、RT 没有队列，
+  对应 `sched_setscheduler` 策略在 `SchedAttr::validate` 被拒绝。
 
 ## 审计清单
 
@@ -115,3 +141,5 @@ IRQ/preempt 约束提供。
 - [ ] `steal_ready_task` 是否走 `remove_task` 且不安装 `curr`。
 - [ ] EEVDF 双树和最早缓存是否一致，所有改键是否先摘树。
 - [ ] Adapter 的正反投影是否使用同一字段偏移，树是否持有真实 Arc。
+- [ ] `Scheduler` 调用是否仍在 RQ 锁下；`curr` 的 `Arc` 是否在 leave 时释放。
+- [ ] 未接线 class 的用户策略是否仍被 `validate` 拒绝。

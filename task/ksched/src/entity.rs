@@ -2,12 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Scheduled task: caller inner data plus class and attribute state.
-
-#![expect(
-    dead_code,
-    reason = "RQ-protected seat/attr accessors wire up with the class arbitrator next."
-)]
+//! Scheduled task: caller inner data plus class, attribute, and Fair state.
 
 use core::{
     cell::UnsafeCell,
@@ -15,7 +10,9 @@ use core::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
-use crate::policy::{SchedAttr, SchedClass, SchedError};
+use intrusive_collections::RBTreeAtomicLink;
+
+use crate::policy::{Nice, SchedAttr, SchedClass, SchedError};
 
 /// Zero-sized token: RQ-protected fields may be read or written.
 ///
@@ -72,6 +69,11 @@ impl<V: Copy> RqCell<V> {
             *self.0.get() = v;
         }
     }
+
+    pub fn update(&self, tok: RqLocked, f: impl FnOnce(V) -> V) {
+        let next = f(self.get(tok));
+        self.set(next, tok);
+    }
 }
 
 /// Which ready structure currently holds this task.
@@ -93,7 +95,7 @@ pub(crate) enum QueueSeat {
 }
 
 impl QueueSeat {
-    const fn from_u8(raw: u8) -> Self {
+    pub(crate) const fn from_u8(raw: u8) -> Self {
         match raw {
             1 => Self::Stop,
             2 => Self::Deadline,
@@ -106,7 +108,7 @@ impl QueueSeat {
 
     /// Seat for `c`'s class queue. Not [`SchedClass::as_u8`]: that encoding
     /// has no `Detached` and would map Fair (3) onto [`Self::Rt`].
-    const fn from_sched_class(c: SchedClass) -> Self {
+    pub(crate) const fn from_sched_class(c: SchedClass) -> Self {
         match c {
             SchedClass::Stop => Self::Stop,
             SchedClass::Deadline => Self::Deadline,
@@ -116,8 +118,49 @@ impl QueueSeat {
         }
     }
 
-    const fn as_u8(self) -> u8 {
+    pub(crate) const fn as_u8(self) -> u8 {
         self as u8
+    }
+}
+
+const _: () = {
+    assert!(QueueSeat::from_sched_class(SchedClass::Fair).as_u8() == QueueSeat::Fair as u8);
+    assert!(QueueSeat::from_u8(0).as_u8() == QueueSeat::Detached as u8);
+    assert!(QueueSeat::Fair.as_u8() != SchedClass::Fair.as_u8());
+};
+
+/// EEVDF virtual-time fields and ready-tree links.
+///
+/// Present on every [`SchedTask`], including Idle. Only Fair reads and
+/// writes it. Links are prepared here so enqueue does not allocate an
+/// index node.
+pub(crate) struct FairEntity {
+    pub(crate) vruntime: RqCell<i64>,
+    pub(crate) deadline: RqCell<i64>,
+    pub(crate) vlag: RqCell<i64>,
+    pub(crate) slice_left_ns: RqCell<u64>,
+    pub(crate) request_ns: RqCell<u64>,
+    pub(crate) weight: RqCell<u32>,
+    pub(crate) tree_id: RqCell<u64>,
+    /// Link in the deadline-ordered ready tree.
+    pub(crate) deadline_link: RBTreeAtomicLink,
+    /// Link in the vruntime-ordered tree used for the eligible prefix.
+    pub(crate) vruntime_link: RBTreeAtomicLink,
+}
+
+impl FairEntity {
+    const fn new(request_ns: u64) -> Self {
+        Self {
+            vruntime: RqCell::new(0),
+            deadline: RqCell::new(0),
+            vlag: RqCell::new(0),
+            slice_left_ns: RqCell::new(request_ns),
+            request_ns: RqCell::new(request_ns),
+            weight: RqCell::new(Nice::DEFAULT.weight()),
+            tree_id: RqCell::new(0),
+            deadline_link: RBTreeAtomicLink::new(),
+            vruntime_link: RBTreeAtomicLink::new(),
+        }
     }
 }
 
@@ -142,6 +185,7 @@ pub struct SchedTask<T> {
     class: AtomicU8,
     seat: RqCell<QueueSeat>,
     attr: RqCell<SchedAttr>,
+    pub(crate) fair: FairEntity,
 }
 
 impl<T> SchedTask<T> {
@@ -161,6 +205,7 @@ impl<T> SchedTask<T> {
             class: AtomicU8::new(class.as_u8()),
             seat: RqCell::new(QueueSeat::Detached),
             attr: RqCell::new(attr),
+            fair: FairEntity::new(crate::DEFAULT_SLICE_NS),
         }
     }
 
@@ -185,12 +230,17 @@ impl<T> SchedTask<T> {
     /// # Errors
     ///
     /// Returns the first [`SchedAttr::validate`] failure.
+    #[expect(
+        dead_code,
+        reason = "ktask still publishes tasks through the plugin schedulers"
+    )]
     pub(crate) fn init_attr_unpublished(&self, attr: SchedAttr) -> Result<(), SchedError> {
         attr.validate()?;
         // SAFETY: the creator still exclusively owns this unpublished task;
         // it is not on any run queue and no other CPU can observe it.
         let tok = unsafe { RqLocked::assume() };
         self.attr.set(attr, tok);
+        self.fair.weight.set(attr.nice.weight(), tok);
         self.class.store(attr.class().as_u8(), Ordering::Release);
         Ok(())
     }
@@ -199,8 +249,13 @@ impl<T> SchedTask<T> {
         self.attr.get(tok)
     }
 
+    /// Store `attr` and the nice weight Fair uses for vruntime.
+    ///
+    /// Fair rescale reads [`FairEntity::weight`], so this must run before
+    /// `attr_changed`.
     pub(crate) fn set_attr(&self, attr: SchedAttr, tok: RqLocked) {
         self.attr.set(attr, tok);
+        self.fair.weight.set(attr.nice.weight(), tok);
     }
 
     pub(crate) fn set_class(&self, class: SchedClass, _tok: RqLocked) {
@@ -213,6 +268,47 @@ impl<T> SchedTask<T> {
 
     pub(crate) fn set_seat(&self, seat: QueueSeat, tok: RqLocked) {
         self.seat.set(seat, tok);
+    }
+
+    pub(crate) fn fair(&self) -> &FairEntity {
+        &self.fair
+    }
+}
+
+#[cfg(unittest)]
+impl<T> SchedTask<T> {
+    fn test_token() -> RqLocked {
+        // SAFETY: kernel unittests run on one thread, so this read or write
+        // cannot interleave with a `Scheduler` update of the same cell.
+        unsafe { RqLocked::assume() }
+    }
+
+    pub(crate) fn vruntime_for_test(&self) -> i64 {
+        self.fair.vruntime.get(Self::test_token())
+    }
+
+    pub(crate) fn set_vruntime_for_test(&self, v: i64) {
+        self.fair.vruntime.set(v, Self::test_token());
+    }
+
+    pub(crate) fn vlag_for_test(&self) -> i64 {
+        self.fair.vlag.get(Self::test_token())
+    }
+
+    pub(crate) fn set_vlag_for_test(&self, lag: i64) {
+        self.fair.vlag.set(lag, Self::test_token());
+    }
+
+    pub(crate) fn deadline_for_test(&self) -> i64 {
+        self.fair.deadline.get(Self::test_token())
+    }
+
+    pub(crate) fn set_deadline_for_test(&self, d: i64) {
+        self.fair.deadline.set(d, Self::test_token());
+    }
+
+    pub(crate) fn slice_for_test(&self) -> u64 {
+        self.fair.slice_left_ns.get(Self::test_token())
     }
 }
 

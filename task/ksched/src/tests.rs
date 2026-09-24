@@ -2,10 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Kernel unit tests for FIFO / RR / CFS / EEVDF (`make unittest`).
+//! Kernel unit tests for the plugin schedulers and the Fair/Idle arbitrator.
 //!
-//! Cases live here. EEVDF construction helpers (`*_for_test`) are a
-//! `#[cfg(unittest)]` impl at the bottom of `eevdf.rs`, not extra tests.
+//! Cases live here. Plugin EEVDF helpers (`*_for_test`) stay in `eevdf.rs`.
+//! Fair arbitrator helpers stay on `SchedTask` and `Scheduler`.
 
 #![cfg(unittest)]
 
@@ -1937,4 +1937,474 @@ fn eevdf_weighted_tasks_get_proportional_cpu() {
         let err = (got as f64 - expected).abs() / expected;
         assert!(err < 0.10);
     }
+}
+
+const SLICE_NS: u64 = DEFAULT_SLICE_NS;
+
+macro_rules! under_rq {
+    ($expr:expr) => {{
+        // SAFETY: this unittest owns the scheduler and every task it passes.
+        // The harness runs on one thread, so no other context accesses those
+        // `RqCell`s during the call.
+        unsafe { $expr }
+    }};
+}
+
+fn sched() -> Scheduler<usize> {
+    let idle = Arc::new(SchedTask::new_kernel(0usize, KernelClass::Idle));
+    Scheduler::new(idle, 0)
+}
+
+fn task(id: usize) -> Arc<SchedTask<usize>> {
+    Arc::new(SchedTask::new(id))
+}
+
+fn pick_id(s: &mut Scheduler<usize>, now_ns: u64) -> usize {
+    *under_rq!(s.pick_next(now_ns)).inner()
+}
+
+fn parked_wakee(id: usize) -> Arc<SchedTask<usize>> {
+    let t = task(id);
+    t.set_vlag_for_test(-(SLICE_NS as i64));
+    t
+}
+
+#[def_test]
+fn pick_never_none_idle_fallback() {
+    let mut s = sched();
+    assert!(s.current().is_none());
+    assert_eq!(pick_id(&mut s, 0), 0);
+    assert!(s.current().is_some_and(|c| c.is_idle_class()));
+}
+
+#[def_test]
+fn fair_outranks_idle_and_yield_requeues() {
+    let mut s = sched();
+    under_rq!(s.install_current(task(1), 0));
+    let decision = under_rq!(s.enqueue(task(2), EnqueueKind::New, 0));
+    assert_eq!(s.nr_queued(), 1);
+    assert!(decision.next_event_ns.is_some());
+
+    under_rq!(s.yield_current(SLICE_NS));
+    assert!(s.current().is_none());
+    assert_eq!(s.nr_queued(), 2);
+
+    let first = pick_id(&mut s, SLICE_NS);
+    assert!(first == 1 || first == 2);
+    assert_eq!(s.nr_queued(), 1);
+}
+
+#[def_test]
+fn exhausted_request_asks_for_resched() {
+    let mut s = sched();
+    under_rq!(s.install_current(task(1), 0));
+    let _ = under_rq!(s.enqueue(task(2), EnqueueKind::New, 0));
+    let decision = under_rq!(s.update(SLICE_NS + 1, UpdateKind::Account));
+    assert!(decision.resched);
+}
+
+#[def_test]
+fn lone_fair_does_not_resched_on_account_or_wake_probe() {
+    let mut s = sched();
+    under_rq!(s.install_current(task(1), 0));
+    assert!(!under_rq!(s.update(SLICE_NS + 1, UpdateKind::Account)).resched);
+    assert!(!under_rq!(s.update(SLICE_NS + 1, UpdateKind::WakeProbe)).resched);
+}
+
+#[def_test]
+fn block_then_idle_fallback() {
+    let mut s = sched();
+    under_rq!(s.install_current(task(1), 0));
+    under_rq!(s.block_current(0));
+    assert!(s.current().is_none());
+    assert_eq!(s.nr_queued(), 0);
+    assert_eq!(pick_id(&mut s, 0), 0);
+}
+
+#[def_test]
+fn steal_matching_fair_waiter() {
+    let mut s = sched();
+    under_rq!(s.install_current(task(1), 0));
+    under_rq!(s.enqueue(task(2), EnqueueKind::New, 0));
+    under_rq!(s.enqueue(task(3), EnqueueKind::New, 0));
+    let stolen =
+        under_rq!(s.steal(&mut |queued| *queued.inner() == 2, 0)).expect("waiter 2 is queued");
+    assert_eq!(*stolen.inner(), 2);
+    assert_eq!(s.nr_queued(), 1);
+}
+
+#[def_test]
+fn steal_ready_leaves_curr() {
+    let mut s = sched();
+    let runner = task(1);
+    under_rq!(s.install_current(runner.clone(), 0));
+    under_rq!(s.enqueue(task(2), EnqueueKind::New, 0));
+    let _ = under_rq!(s.steal(&mut |queued| *queued.inner() == 2, 0));
+    assert!(s.current().is_some_and(|c| Arc::ptr_eq(c, &runner)));
+}
+
+#[def_test]
+fn set_attr_rejects_idle_and_keeps_class() {
+    let mut s = sched();
+    let idle = under_rq!(s.pick_next(0));
+    let err = under_rq!(s.set_attr(&idle, SchedAttr::DEFAULT, 0)).unwrap_err();
+    assert_eq!(err, SchedError::KernelClassImmutable);
+    assert_eq!(idle.sched_class(), SchedClass::Idle);
+}
+
+#[def_test]
+fn set_attr_rejects_unwired_policy() {
+    let mut s = sched();
+    let runner = task(1);
+    under_rq!(s.install_current(runner.clone(), 0));
+    let fifo = SchedAttr {
+        policy: SchedPolicy::Fifo,
+        nice: Nice::DEFAULT,
+    };
+    assert_eq!(
+        under_rq!(s.set_attr(&runner, fifo, 0)).unwrap_err(),
+        SchedError::InvalidPolicy
+    );
+    assert_eq!(runner.sched_class(), SchedClass::Fair);
+    assert_eq!(under_rq!(s.attr(&runner)).policy, SchedPolicy::Normal);
+}
+
+#[def_test]
+fn leave_dispositions_clear_curr_and_place_rules() {
+    let mut s = sched();
+    let t = task(1);
+    under_rq!(s.install_current(t.clone(), 0));
+
+    under_rq!(s.yield_current(0));
+    assert!(s.current().is_none());
+    assert_eq!(s.nr_queued(), 1);
+
+    let curr = under_rq!(s.pick_next(0));
+    let slice_before = curr.slice_for_test();
+    let _ = under_rq!(s.update(UNIT_NS, UpdateKind::Account));
+    let remaining = curr.slice_for_test();
+    assert!(remaining < slice_before);
+    under_rq!(s.preempt_current(UNIT_NS));
+    assert!(s.current().is_none());
+    assert_eq!(curr.slice_for_test(), remaining);
+
+    let curr = under_rq!(s.pick_next(UNIT_NS));
+    under_rq!(s.block_current(UNIT_NS));
+    assert!(s.current().is_none());
+    assert_eq!(s.nr_queued(), 0);
+
+    let _ = under_rq!(s.enqueue(curr, EnqueueKind::Wake { sync: false }, UNIT_NS));
+    let curr = under_rq!(s.pick_next(UNIT_NS));
+    under_rq!(s.migrate_current(UNIT_NS));
+    assert!(s.current().is_none());
+    assert_eq!(s.nr_queued(), 0);
+    let _ = under_rq!(s.enqueue(curr, EnqueueKind::MigrateIn, UNIT_NS));
+    assert_eq!(s.nr_queued(), 1);
+
+    let curr = under_rq!(s.pick_next(UNIT_NS));
+    let _ = under_rq!(s.exit_current(UNIT_NS));
+    assert!(s.current().is_none());
+    assert_eq!(s.nr_queued(), 0);
+    let _ = curr;
+}
+
+#[def_test]
+fn curr_holds_arc_until_leave_drops_it() {
+    let mut s = sched();
+    let t = task(1);
+    under_rq!(s.install_current(t.clone(), 0));
+    assert_eq!(Arc::strong_count(&t), 2);
+    let pin = t.clone();
+    assert!(Arc::strong_count(&t) > 2);
+    under_rq!(s.block_current(0));
+    assert!(s.current().is_none());
+    assert_eq!(Arc::strong_count(&t), 2);
+    drop(pin);
+    assert_eq!(Arc::strong_count(&t), 1);
+}
+
+#[def_test]
+fn install_current_places_unplaced_entity() {
+    let mut s = sched();
+    let t = task(1);
+    assert_eq!(t.vruntime_for_test(), 0);
+    assert_eq!(t.deadline_for_test(), 0);
+    under_rq!(s.install_current(t.clone(), 0));
+    assert_eq!(t.vruntime_for_test(), 0);
+    assert_eq!(t.deadline_for_test(), SLICE_NS as i64);
+}
+
+#[def_test]
+fn min_vruntime_includes_off_tree_curr() {
+    let mut s = sched();
+    let runner = task(1);
+    under_rq!(s.install_current(runner.clone(), 0));
+    let _ = under_rq!(s.update(2 * UNIT_NS, UpdateKind::Account));
+
+    let parked = parked_wakee(2);
+    let _ = under_rq!(s.enqueue(
+        parked.clone(),
+        EnqueueKind::Wake { sync: false },
+        2 * UNIT_NS,
+    ));
+    assert!(parked.vruntime_for_test() > s.avg_vruntime_for_test());
+    assert!(s.min_vruntime_for_test() <= runner.vruntime_for_test());
+    assert!(s.min_vruntime_for_test() < parked.vruntime_for_test());
+}
+
+#[def_test]
+fn block_does_not_park_min_vruntime_on_ineligible_ready() {
+    let mut s = sched();
+    let runner = task(1);
+    under_rq!(s.install_current(runner.clone(), 0));
+    let _ = under_rq!(s.update(2 * UNIT_NS, UpdateKind::Account));
+
+    let parked = parked_wakee(2);
+    let _ = under_rq!(s.enqueue(
+        parked.clone(),
+        EnqueueKind::Wake { sync: false },
+        2 * UNIT_NS,
+    ));
+    under_rq!(s.block_current(2 * UNIT_NS));
+
+    assert!(s.min_vruntime_for_test() < parked.vruntime_for_test());
+    assert!(s.min_vruntime_for_test() <= runner.vruntime_for_test());
+}
+
+#[def_test]
+fn enqueue_after_block_does_not_raise_min_onto_ineligible() {
+    let mut s = sched();
+    let runner = task(1);
+    under_rq!(s.install_current(runner.clone(), 0));
+    let _ = under_rq!(s.update(2 * UNIT_NS, UpdateKind::Account));
+
+    let parked = parked_wakee(2);
+    let _ = under_rq!(s.enqueue(
+        parked.clone(),
+        EnqueueKind::Wake { sync: false },
+        2 * UNIT_NS,
+    ));
+    under_rq!(s.block_current(2 * UNIT_NS));
+    let floor = s.min_vruntime_for_test();
+
+    let _ = under_rq!(s.enqueue(task(3), EnqueueKind::New, 2 * UNIT_NS));
+    assert_eq!(s.min_vruntime_for_test(), floor);
+    assert!(floor < parked.vruntime_for_test());
+    assert!(floor <= runner.vruntime_for_test());
+}
+
+#[def_test]
+fn exit_does_not_park_min_vruntime_on_ineligible_ready() {
+    let mut s = sched();
+    let runner = task(1);
+    under_rq!(s.install_current(runner.clone(), 0));
+    let _ = under_rq!(s.update(2 * UNIT_NS, UpdateKind::Account));
+
+    let parked = parked_wakee(2);
+    let _ = under_rq!(s.enqueue(
+        parked.clone(),
+        EnqueueKind::Wake { sync: false },
+        2 * UNIT_NS,
+    ));
+    let _ = under_rq!(s.exit_current(2 * UNIT_NS));
+
+    assert!(s.min_vruntime_for_test() < parked.vruntime_for_test());
+    assert!(s.min_vruntime_for_test() <= runner.vruntime_for_test());
+}
+
+#[def_test]
+fn yield_does_not_park_min_vruntime_on_ineligible_ready() {
+    let mut s = sched();
+    let runner = task(1);
+    under_rq!(s.install_current(runner.clone(), 0));
+    let _ = under_rq!(s.update(2 * UNIT_NS, UpdateKind::Account));
+
+    let parked = parked_wakee(2);
+    let _ = under_rq!(s.enqueue(
+        parked.clone(),
+        EnqueueKind::Wake { sync: false },
+        2 * UNIT_NS,
+    ));
+    under_rq!(s.yield_current(2 * UNIT_NS));
+
+    assert!(s.min_vruntime_for_test() < parked.vruntime_for_test());
+    assert_eq!(pick_id(&mut s, 2 * UNIT_NS), 1);
+}
+
+#[def_test]
+fn dequeue_lag_includes_curr() {
+    let mut s = sched();
+    let runner = task(1);
+    under_rq!(s.install_current(runner.clone(), 0));
+    runner.set_vruntime_for_test(0x1400);
+
+    let ready = task(2);
+    ready.set_vruntime_for_test(0);
+    ready.set_deadline_for_test(1);
+    s.inject_ready_for_test(ready.clone());
+
+    let removed = under_rq!(s.dequeue(&ready, 0)).unwrap();
+    assert_eq!(removed.vlag_for_test(), 0xa00);
+}
+
+#[def_test]
+fn zero_lag_wake_placement_includes_current() {
+    let mut s = sched();
+    let runner = task(1);
+    under_rq!(s.install_current(runner.clone(), 0));
+    runner.set_vruntime_for_test(0x1400);
+
+    let ready = task(2);
+    ready.set_vruntime_for_test(0);
+    ready.set_deadline_for_test(1);
+    s.inject_ready_for_test(ready);
+
+    let wakee = task(3);
+    wakee.set_vlag_for_test(0);
+    let _ = under_rq!(s.enqueue(wakee.clone(), EnqueueKind::Wake { sync: false }, 0));
+    assert_eq!(wakee.vruntime_for_test(), 0xa00);
+}
+
+#[def_test]
+fn migrate_in_restores_saved_lag() {
+    let mut s = sched();
+    let runner = task(1);
+    under_rq!(s.install_current(runner.clone(), 0));
+    let _ = under_rq!(s.enqueue(task(2), EnqueueKind::New, 0));
+    let _ = under_rq!(s.update(2 * UNIT_NS, UpdateKind::Account));
+    under_rq!(s.block_current(2 * UNIT_NS));
+    let lag = runner.vlag_for_test();
+    assert_eq!(lag, -(UNIT_NS as i64));
+
+    let _ = under_rq!(s.enqueue(runner.clone(), EnqueueKind::MigrateIn, 2 * UNIT_NS));
+    assert_eq!(runner.vruntime_for_test(), 2 * UNIT_NS as i64);
+    assert_eq!(s.nr_queued(), 2);
+}
+
+#[def_test]
+fn async_wake_later_deadline_does_not_preempt() {
+    let mut s = sched();
+    let runner = task(1);
+    under_rq!(s.install_current(runner.clone(), 0));
+    let _ = under_rq!(s.update(2 * UNIT_NS, UpdateKind::Account));
+
+    let wakee = task(2);
+    wakee.set_vlag_for_test(0);
+    let _ = under_rq!(s.enqueue(
+        wakee.clone(),
+        EnqueueKind::Wake { sync: false },
+        2 * UNIT_NS,
+    ));
+    assert!(wakee.deadline_for_test() > runner.deadline_for_test());
+    assert!(!under_rq!(s.update(2 * UNIT_NS, UpdateKind::SchedTick)).resched);
+    assert!(!s.has_sync_wake_for_test());
+}
+
+#[def_test]
+fn sync_wake_preempts_eligible_later_deadline_buddy() {
+    let mut s = sched();
+    let runner = task(1);
+    under_rq!(s.install_current(runner.clone(), 0));
+    let _ = under_rq!(s.update(2 * UNIT_NS, UpdateKind::Account));
+
+    let wakee = task(2);
+    wakee.set_vlag_for_test(0);
+    let decision =
+        under_rq!(s.enqueue(wakee.clone(), EnqueueKind::Wake { sync: true }, 2 * UNIT_NS));
+    assert!(wakee.deadline_for_test() > runner.deadline_for_test());
+    assert!(s.has_sync_wake_for_test());
+    assert!(decision.resched);
+
+    under_rq!(s.preempt_current(2 * UNIT_NS));
+    assert_eq!(pick_id(&mut s, 2 * UNIT_NS), 2);
+}
+
+#[def_test]
+fn sync_wake_prefers_buddy_on_pick_without_probe() {
+    let mut s = sched();
+    under_rq!(s.install_current(task(1), 0));
+    let _ = under_rq!(s.update(SLICE_NS, UpdateKind::Account));
+
+    let wakee = task(2);
+    wakee.set_vlag_for_test(0);
+    let _ = under_rq!(s.enqueue(wakee, EnqueueKind::Wake { sync: true }, SLICE_NS));
+    under_rq!(s.preempt_current(SLICE_NS));
+    assert_eq!(pick_id(&mut s, SLICE_NS), 2);
+}
+
+#[def_test]
+fn failed_sync_probe_does_not_clear_mark() {
+    let mut s = sched();
+    under_rq!(s.install_current(task(1), 0));
+    let _ = under_rq!(s.update(UNIT_NS, UpdateKind::Account));
+
+    let wakee = task(2);
+    wakee.set_vlag_for_test(-(SLICE_NS as i64));
+    let _ = under_rq!(s.enqueue(wakee.clone(), EnqueueKind::Wake { sync: true }, UNIT_NS));
+    assert!(wakee.vruntime_for_test() > s.avg_vruntime_for_test());
+    assert!(s.has_sync_wake_for_test());
+    assert!(!under_rq!(s.update(UNIT_NS, UpdateKind::SchedTick)).resched);
+    assert!(s.has_sync_wake_for_test());
+}
+
+#[def_test]
+fn set_attr_nice_on_running_task() {
+    let mut s = sched();
+    let runner = task(1);
+    under_rq!(s.install_current(runner.clone(), 0));
+    let attr = SchedAttr {
+        policy: SchedPolicy::Normal,
+        nice: Nice::new(-5).unwrap(),
+    };
+    let _ = under_rq!(s.set_attr(&runner, attr, 0)).unwrap();
+    assert_eq!(under_rq!(s.attr(&runner)).nice, Nice::new(-5).unwrap());
+}
+
+#[def_test]
+fn heavier_nice_advances_vruntime_slower() {
+    let mut light_rq = sched();
+    let light = task(1);
+    under_rq!(light_rq.install_current(light.clone(), 0));
+    let light_attr = SchedAttr {
+        policy: SchedPolicy::Normal,
+        nice: Nice::new(10).unwrap(),
+    };
+    let _ = under_rq!(light_rq.set_attr(&light, light_attr, 0)).unwrap();
+    let _ = under_rq!(light_rq.update(UNIT_NS, UpdateKind::Account));
+
+    let mut heavy_rq = sched();
+    let heavy = task(1);
+    under_rq!(heavy_rq.install_current(heavy.clone(), 0));
+    let heavy_attr = SchedAttr {
+        policy: SchedPolicy::Normal,
+        nice: Nice::new(-10).unwrap(),
+    };
+    let _ = under_rq!(heavy_rq.set_attr(&heavy, heavy_attr, 0)).unwrap();
+    let _ = under_rq!(heavy_rq.update(UNIT_NS, UpdateKind::Account));
+
+    assert!(heavy.vruntime_for_test() < light.vruntime_for_test());
+}
+
+#[def_test]
+fn next_event_tracks_remaining_request() {
+    let mut s = sched();
+    under_rq!(s.install_current(task(1), 0));
+    assert!(under_rq!(s.next_event_ns()).is_none());
+    let _ = under_rq!(s.enqueue(task(2), EnqueueKind::New, 0));
+    let _ = under_rq!(s.update(UNIT_NS, UpdateKind::Account));
+    let next = under_rq!(s.next_event_ns()).unwrap();
+    assert!(next > 0);
+    assert!(next < SLICE_NS);
+}
+
+#[def_test]
+fn next_event_tracks_until_eligible_sync_buddy() {
+    let mut s = sched();
+    under_rq!(s.install_current(task(1), 0));
+    let wakee = task(2);
+    wakee.set_vlag_for_test(-(UNIT_NS as i64));
+    let decision = under_rq!(s.enqueue(wakee, EnqueueKind::Wake { sync: true }, 0));
+    let next = decision.next_event_ns.unwrap();
+    assert!(next > 0);
+    assert!(next < SLICE_NS);
 }

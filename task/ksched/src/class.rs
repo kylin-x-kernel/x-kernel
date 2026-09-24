@@ -4,11 +4,6 @@
 
 //! Per-class operations. The class arbitrator iterates [`ClassOps`] by rank.
 
-#![expect(
-    dead_code,
-    reason = "ClassOps is implemented by per-class modules in a follow-up PR."
-)]
-
 use alloc::sync::Arc;
 
 use crate::{
@@ -39,6 +34,9 @@ pub enum LeaveReason {
     Preempt,
     /// Going to sleep.
     Block,
+    /// Leaving this CPU for another run queue. Same lag snapshot as
+    /// [`Self::Block`]; the destination enqueues with [`EnqueueKind::MigrateIn`].
+    Migrate,
     /// Exiting.
     Exit,
 }
@@ -124,7 +122,7 @@ pub(crate) trait ClassOps<T> {
     /// Must not enqueue: the arbitrator `curr` slot already owns the `Arc`.
     fn set_curr(&mut self, task: &SchedTask<T>, clk: &RqClock, tok: RqLocked);
 
-    /// The runner is leaving. Requeue on yield/preempt; drop on block/exit.
+    /// The runner is leaving. Requeue on yield/preempt; drop on block/migrate/exit.
     fn put_prev(
         &mut self,
         prev: Arc<SchedTask<T>>,

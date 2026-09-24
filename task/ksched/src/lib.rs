@@ -6,6 +6,7 @@
 
 mod cfs;
 mod class;
+mod classes;
 mod clock;
 mod eevdf;
 mod entity;
@@ -13,6 +14,7 @@ mod fifo;
 mod policy;
 mod ready_list;
 mod round_robin;
+mod scheduler;
 #[cfg(unittest)]
 mod tests;
 
@@ -26,6 +28,7 @@ pub use entity::{KernelClass, SchedTask};
 pub use fifo::{FifoScheduler, FifoTask};
 pub use policy::{Nice, SchedAttr, SchedClass, SchedError, SchedPolicy};
 pub use round_robin::{RRScheduler, RRTask};
+pub use scheduler::Scheduler;
 
 /// How a running task leaves its current execution slot on a run queue.
 ///
