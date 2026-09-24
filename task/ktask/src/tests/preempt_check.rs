@@ -60,6 +60,11 @@ fn renewed_preemption_requests_do_not_accumulate_stack_frames() {
     let task = crate::current();
     let probe = &task.preempt_check_probe;
     let _fixture = ArmedProbe(probe);
+    // Measure only the injected guard-release requests. An unrelated IRQ tail
+    // can enter the same check with an exception frame and inflate the address
+    // difference without recursive guard release. This guard leaves preemption
+    // enabled so an actual guard-drop recursion remains observable.
+    let _irq = kspin::IrqSave::new();
     assert!(task.can_preempt(0));
     {
         let _guard = kspin::NoPreempt::new();
