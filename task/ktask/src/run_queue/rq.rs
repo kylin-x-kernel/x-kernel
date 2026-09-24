@@ -174,7 +174,7 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
     /// This function does nothing if the task is not in [`TaskState::Blocked`],
     /// which means the task is already unblocked by other cores.
     pub fn unblock_task(&mut self, task: KtaskRef, resched: bool) {
-        let task_id_name = task.id_name();
+        // Wakeups can originate in IRQ context; never allocate a task-name string.
         let task_id = task.trace_id();
         // Try to change the state of the task from `Blocked` to `Ready`,
         // if successful, the task will be put into this run queue,
@@ -191,7 +191,7 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
             // Since now, the task to be unblocked is in the `Ready` state.
             let cpu_id = self.inner.cpu_id;
             debug!(
-                "task unblock: {task_id_name} on run_queue {}",
+                "task unblock: trace_id={task_id} on run_queue {}",
                 cpu_id.as_usize()
             );
             #[cfg(feature = "sched_stat")]
