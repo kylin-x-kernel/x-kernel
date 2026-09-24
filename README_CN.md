@@ -4,6 +4,10 @@ X-Kernel 是一个使用 Rust 编写的多架构单体内核。它提供模块�
 
 本项目受 [StarryOS](https://github.com/Starry-OS/StarryOS) 启发，StarryOS 是清华大学基于 [ArceOS](https://github.com/arceos-org/arceos) 开发的实验性单体操作系统。
 
+## 社区
+
+欢迎加入 X-Kernel Zulip 社区，讨论开发、提出问题并协作贡献：<https://x-kernel.zulipchat.com>
+
 ## 支持的架构
 
 - [x] RISC-V 64

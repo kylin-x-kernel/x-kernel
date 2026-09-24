@@ -6,6 +6,10 @@ X-Kernel is a multi-architecture monolithic kernel written in Rust. It provides 
 
 This project is inspired by [StarryOS](https://github.com/Starry-OS/StarryOS), an experimental monolithic OS based on [ArceOS](https://github.com/arceos-org/arceos), developed by Tsinghua University.
 
+## Community
+
+Join the X-Kernel Zulip community to discuss development, ask questions, and coordinate contributions: <https://x-kernel.zulipchat.com>
+
 ## Supported Architectures
 
 - [x] RISC-V 64
