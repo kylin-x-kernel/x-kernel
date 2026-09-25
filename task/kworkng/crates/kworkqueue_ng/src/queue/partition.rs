@@ -289,7 +289,11 @@ impl QueuePartition {
 
     /// Charges allowance when waiting work becomes ready, not when it is claimed.
     fn release_waiting(self: &Arc<Self>, partition: &mut PartitionState) -> Option<Arc<Waker>> {
-        let remaining = self.max_active.get() - partition.active;
+        let remaining = self
+            .max_active
+            .get()
+            .checked_sub(partition.active)
+            .expect("active allowance cannot exceed max_active");
         let released =
             partition
                 .waiting

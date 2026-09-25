@@ -51,6 +51,11 @@ must not reenter registration/inspection. No spinlock is held across output.
 Weak entries are pruned on both registration and inspection. Registry work is
 linear in registered records and has no worst-case reporting deadline.
 
+A zero inspection threshold suppresses warnings while retaining weak-entry
+pruning. The returned boolean reports whether a scan occurred, not queue health
+or whether warnings are enabled. Such a pass does not consume the warning
+opportunity when a later inspection supplies a nonzero threshold.
+
 A monitor reference can temporarily outlive partition destruction, but retains
 only plain diagnostic storage. The last Arc frees that storage; the next registry
 pass removes the weak slot. No explicit unregister, reader drain, GC extension,

@@ -72,6 +72,40 @@ fn busy_directory_skips_without_waiting() {
     assert_eq!(reports, 1);
 }
 
+/// Zero suppresses warnings but still prunes records without consuming a warning.
+/// # Panics
+/// Panics if a zero threshold reports, skips pruning or suppresses a later warning.
+#[def_test]
+fn zero_threshold_prunes_without_consuming_warning() {
+    let directory = Directory::new();
+    let live = directory.register("live".into(), 0.into());
+    live.publish_interval(Some(MonotonicInstant::ORIGIN));
+    let expired = directory.register("expired".into(), 0.into());
+    drop(expired);
+    assert_eq!(directory.records.lock().len(), 2);
+
+    assert!(
+        directory.inspect(0.into(), now(), TimeSpan::ZERO, |_, _, _| {
+            panic!("zero threshold must not report")
+        })
+    );
+    assert_eq!(directory.records.lock().len(), 1);
+
+    let mut reports = 0;
+    assert!(directory.inspect(
+        0.into(),
+        now(),
+        TimeSpan::from_secs(10),
+        |name, cpu, elapsed| {
+            assert_eq!(name, "live");
+            assert_eq!(cpu, 0.into());
+            assert_eq!(elapsed, TimeSpan::from_secs(20));
+            reports += 1;
+        }
+    ));
+    assert_eq!(reports, 1);
+}
+
 /// CPU filtering preserves other CPUs' warning opportunities.
 /// # Panics
 /// Panics on wrong identity, cross-CPU suppression or duplicate reporting.

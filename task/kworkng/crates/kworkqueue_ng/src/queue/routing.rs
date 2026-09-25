@@ -67,10 +67,10 @@ impl Queue {
         let count = self.config.cpus().len();
         // Bounded wrap avoids usize overflow disturbing non-power-of-two
         // CPU sets. Relaxed suffices: this counter publishes no other data.
-        let _ = self
-            .next_cpu_index
+        self.next_cpu_index
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 Some(if next == count - 1 { 0 } else { next + 1 })
-            });
+            })
+            .expect("unconditional round-robin advance");
     }
 }

@@ -44,6 +44,11 @@ impl Directory {
     /// directory skips this pass; a busy record skips only that record. False means
     /// no pass occurred, not that the queues are healthy. No deadline is promised.
     ///
+    /// A zero threshold suppresses all warnings, not just throttling. Inspection
+    /// still prunes expired records and returns true if the directory was scanned;
+    /// true does not mean warning generation is enabled. A zero-threshold pass
+    /// does not consume warning opportunities for a later nonzero threshold.
+    ///
     /// report runs after record protection ends, but under the sleepable registry
     /// mutex. It must only emit diagnostics, never register queues or reenter this
     /// directory. Temporary references own diagnostic data only; dropping them can
