@@ -723,6 +723,8 @@ pub mod tests_softirq {
 
     #[def_test(serial)]
     fn test_softirq_runs_in_vector_order() {
+        // Publish the complete batch before any IRQ-tail runner can take it.
+        let _irq = kspin::NoPreemptIrqSave::new();
         let _wake_gate = begin_softirq_test();
         ORDER_SEQ.store(1, Ordering::Relaxed);
         HIGH_ORDER.store(0, Ordering::Relaxed);
@@ -759,6 +761,8 @@ pub mod tests_softirq {
 
     #[def_test(serial)]
     fn test_task_context_raise_requests_softirq_daemon_wake() {
+        // Keep the publication and exact wake counters in one local test window.
+        let _irq = kspin::NoPreemptIrqSave::new();
         let _wake_gate = begin_softirq_test();
         let _timer = ScopedSoftirqAction::clear(SoftirqVec::Timer);
 
@@ -771,6 +775,9 @@ pub mod tests_softirq {
 
     #[def_test(serial)]
     fn test_softirq_action_runs_with_local_irq_enabled() {
+        // Exclude automatic drains before our explicit pass. The dispatcher
+        // itself must enable IRQs inside the action despite this outer guard.
+        let _irq = kspin::NoPreemptIrqSave::new();
         let _wake_gate = begin_softirq_test();
         ACTION_IRQ_ENABLED.store(0, Ordering::Relaxed);
         let _block = ScopedSoftirqAction::install(SoftirqVec::Block, record_local_irq_state_action);
@@ -784,6 +791,10 @@ pub mod tests_softirq {
 
     #[def_test(serial)]
     fn test_softirq_reraise_is_not_lost() {
+        // The daemon gate alone does not stop real IRQ tails from consuming
+        // pending work before the explicit pass. Keep setup and inspection pinned
+        // and IRQ-masked; the dispatcher still enables IRQs for each action.
+        let _irq = kspin::NoPreemptIrqSave::new();
         let _wake_gate = begin_softirq_test();
         RERAISE_CALLS.store(0, Ordering::Relaxed);
         let _rcu = ScopedSoftirqAction::install(SoftirqVec::Rcu, reraise_action);
@@ -795,6 +806,9 @@ pub mod tests_softirq {
 
     #[def_test(serial)]
     fn test_softirq_restart_limit_preserves_pending() {
+        // Prevent another IRQ-tail pass between our bounded run and inspection
+        // of its retained pending bit and exact restart/wake counters.
+        let _irq = kspin::NoPreemptIrqSave::new();
         let _wake_gate = begin_softirq_test();
         LIMIT_CALLS.store(0, Ordering::Relaxed);
         let _sched = ScopedSoftirqAction::install(SoftirqVec::Sched, always_reraise_action);
@@ -811,6 +825,8 @@ pub mod tests_softirq {
 
     #[def_test(serial)]
     fn test_softirq_resched_finishes_batch_and_preserves_pending() {
+        // Retained pending belongs to the next explicit pass, not an IRQ tail.
+        let _irq = kspin::NoPreemptIrqSave::new();
         let _wake_gate = begin_softirq_test();
         RERAISE_CALLS.store(0, Ordering::Relaxed);
         HIGH_ORDER.store(0, Ordering::Relaxed);
@@ -834,6 +850,8 @@ pub mod tests_softirq {
 
     #[def_test(serial)]
     fn test_softirq_empty_pending_does_not_query_resched() {
+        // Otherwise an automatic drain could bypass the injected resched query.
+        let _irq = kspin::NoPreemptIrqSave::new();
         let _wake_gate = begin_softirq_test();
         let _high = ScopedSoftirqAction::install(SoftirqVec::High, high_action);
         raise_softirq(SoftirqVec::High);
@@ -881,6 +899,9 @@ pub mod tests_softirq {
 
     #[def_test(serial)]
     fn test_softirq_context_restored_after_handler_leak() {
+        // Attribute the deliberate leak to our explicit pass and inspect it
+        // before an IRQ tail or task migration can change the observed state.
+        let _irq = kspin::NoPreemptIrqSave::new();
         let _wake_gate = begin_softirq_test();
         let _tasklet =
             ScopedSoftirqAction::install(SoftirqVec::Tasklet, leak_softirq_context_action);
@@ -895,6 +916,10 @@ pub mod tests_softirq {
 
     #[def_test(serial)]
     fn test_softirq_deferred_in_hardirq_context() {
+        // A synthetic context guard does not mask hardware IRQs. A real IRQ
+        // returning inside that scope would add another deferred-run observation.
+        // Restore actions and synthetic context before restoring local IRQs.
+        let _irq = kspin::NoPreemptIrqSave::new();
         let _wake_gate = begin_softirq_test();
         clear_irq_context_diagnostics();
         HIGH_ORDER.store(0, Ordering::Relaxed);
@@ -919,6 +944,8 @@ pub mod tests_softirq {
 
     #[def_test(serial)]
     fn test_repeated_task_context_raise_requests_single_daemon_wake() {
+        // An intervening drain would legitimately make the second raise wake again.
+        let _irq = kspin::NoPreemptIrqSave::new();
         let _wake_gate = begin_softirq_test();
         let _timer = ScopedSoftirqAction::clear(SoftirqVec::Timer);
         let _high = ScopedSoftirqAction::clear(SoftirqVec::High);
@@ -933,6 +960,9 @@ pub mod tests_softirq {
     #[def_test(serial)]
     fn test_raise_softirq_irqoff_reports_enabled_irq_misuse() {
         let _wake_gate = begin_softirq_test();
+        // Keep IRQs enabled to exercise misuse, but prevent IRQ-tail consumption
+        // until the action guard clears our pending bit before BH is re-enabled.
+        let _bh = local_bh_disable();
         let _timer = ScopedSoftirqAction::clear(SoftirqVec::Timer);
 
         assert!(karch::local_irq_enabled());
@@ -946,6 +976,8 @@ pub mod tests_softirq {
 
     #[def_test(serial)]
     fn test_softirq_diagnostics_clear() {
+        // Do not admit local IRQ-tail observations between clearing and reading.
+        let _irq = kspin::NoPreemptIrqSave::new();
         let _wake_gate = begin_softirq_test();
         let _ = softirq_diagnostics();
         clear_softirq_diagnostics();
