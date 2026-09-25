@@ -105,7 +105,7 @@ impl<S> BottomHalfService<S> {
     /// It must not invoke business work inline. Prepare outside spinlocked/IRQ
     /// paths; construction does not publish readiness or install a handler.
     #[cfg(unittest)]
-    fn with_dispatch(
+    pub(crate) fn with_dispatch(
         cpu: LogicalCpuId,
         budget: NonZeroUsize,
         dispatch: Arc<PartitionDispatch<S>>,

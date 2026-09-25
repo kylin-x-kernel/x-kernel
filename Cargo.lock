@@ -1388,6 +1388,7 @@ dependencies = [
  "kworkerpool",
  "kworkerpool_ng",
  "kworkqueue",
+ "kworkqueue_ng",
  "linux-raw-sys",
  "posix-process",
  "tee_kernel",
@@ -3293,6 +3294,24 @@ version = "0.3.0-dev"
 dependencies = [
  "kcpu_id_map",
  "kspin",
+ "unittest",
+]
+
+[[package]]
+name = "kworkqueue_ng"
+version = "0.3.0-dev"
+dependencies = [
+ "intrusive-collections",
+ "kcpu_id_map",
+ "kerrno",
+ "khal",
+ "kirq",
+ "kpoll",
+ "kspin",
+ "ksync",
+ "ktask",
+ "ktime_types",
+ "kworkerpool_ng",
  "unittest",
 ]
 

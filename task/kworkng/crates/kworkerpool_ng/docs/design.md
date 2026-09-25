@@ -13,7 +13,9 @@ This stage leaves the existing production workqueue unchanged.
 All modules are private; the crate root re-exports the dispatcher/source types,
 acquisition/execution traits, normal services, BH services and their error types.
 Unit tests live under their owning modules using standard Rust module paths.
-Test-only constructors remain private; no unused cross-crate fixtures are exported.
+Under `cfg(unittest)`, `test_support` exports two controlled fixtures consumed by
+queue-core integration tests: a held source inspection and a local BH service
+binding. Production constructors retain CPU validation and notification setup.
 
 | Source | Responsibility |
 | --- | --- |

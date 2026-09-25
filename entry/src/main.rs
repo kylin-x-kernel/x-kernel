@@ -21,6 +21,8 @@ extern crate kworkerpool;
 extern crate kworkerpool_ng;
 #[cfg(feature = "unittest")]
 extern crate kworkqueue;
+#[cfg(feature = "unittest")]
+extern crate kworkqueue_ng;
 
 mod image_metadata;
 mod runtime;

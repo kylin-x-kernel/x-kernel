@@ -1,0 +1,32 @@
+[package]
+name = "kworkqueue_ng"
+version.workspace = true
+edition.workspace = true
+publish = false
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+description = "Prepared work lifecycle and per-CPU queue management"
+
+[features]
+stall-check = []
+self-wait-check = []
+
+[dependencies]
+kcpu_id_map.workspace = true
+kerrno.workspace = true
+ktime_types.workspace = true
+unittest.workspace = true
+intrusive-collections.workspace = true
+kpoll.workspace = true
+kspin.workspace = true
+ksync.workspace = true
+ktask.workspace = true
+kworkerpool_ng.workspace = true
+khal.workspace = true
+kirq.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(unittest)'] }

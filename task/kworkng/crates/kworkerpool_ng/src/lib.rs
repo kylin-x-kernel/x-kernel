@@ -46,6 +46,10 @@
 
 extern crate alloc;
 
+/// Controlled execution fixtures used by queue-core kernel integration tests.
+#[cfg(unittest)]
+pub mod test_support;
+
 mod bottom_half;
 pub use bottom_half::{
     BottomHalfPrepareError, BottomHalfPriority, BottomHalfRunError, BottomHalfService,
