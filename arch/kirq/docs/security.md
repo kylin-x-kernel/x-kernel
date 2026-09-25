@@ -1,5 +1,13 @@
 # kirq — 安全与可靠性分析
 
+## Effective Context Boundary
+
+`context::is_softirq_context` adds no raw-pointer or external-data input. It uses
+the existing context snapshot and hardirq-first classification. This mitigates
+executing BH-only callbacks inside a hardirq that interrupted softirq: an active
+softirq nesting count alone is insufficient. CPU pinning and pass serialization
+remain execution-provider obligations; the query changes no context state.
+
 ## 信任模型
 
 测试辅助 `ScopedHardIrqContext` 自己持有 `NoPreemptIrqSave`，先固定 CPU 并

@@ -100,7 +100,7 @@ impl PreparedTaskWait {
     /// is disabled where that depth is tracked.
     pub fn prepare() -> KResult<Self> {
         let curr = crate::current_may_uninit().ok_or(KError::InvalidInput)?;
-        if !can_prepare_wait(&curr) {
+        if !crate::is_sleepable_context() {
             return Err(KError::InvalidInput);
         }
         let task = curr.clone();
@@ -135,22 +135,11 @@ impl PreparedTaskWait {
             "prepared wait belongs to another task"
         );
         assert!(
-            can_prepare_wait(&curr),
+            crate::is_sleepable_context(),
             "prepared wait cannot park in this context"
         );
         self.kwaker.park();
     }
-}
-
-fn can_prepare_wait(task: &KtaskRef) -> bool {
-    if task.is_idle() || !karch::local_irq_enabled() || kirq::context::is_in_interrupt_context() {
-        return false;
-    }
-    #[cfg(feature = "preempt")]
-    if !task.can_preempt(0) {
-        return false;
-    }
-    true
 }
 
 /// Blocks the current task until the given future is resolved.

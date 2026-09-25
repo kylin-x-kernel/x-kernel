@@ -2,6 +2,14 @@
 
 ## Purpose and ownership
 
+`is_sleepable_context` provides a nonblocking context query for execution-service
+startup and joined teardown. Sleep assertions and prepared waits reuse this
+query: it requires an initialized non-idle task, no interrupt-like context,
+enabled local IRQs and, when tracked, no preemption protection.
+It neither grants permission across later context changes nor detects dependency
+cycles or held sleepable locks. Workerpool callers query before taking service
+locks; task and timer providers must still be initialized before startup.
+
 Remote reschedule and a running-task signal kick use the fixed
 `kipi::notify_reschedule` notification. They do not enqueue a closure on the
 ordinary IPI callback queue. The static `RescheduleIpiIf` implementation only

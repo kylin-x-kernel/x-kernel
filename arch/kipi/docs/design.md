@@ -19,11 +19,13 @@ The protocol has no runtime shutdown or CPU-hotplug support.
 
 The independent `timer-reprogram` feature exports `notify_timer_reprogram` and
 `TimerReprogramIpiIf`; `ktask/ipi` enables it and supplies the static endpoint.
-Either fixed-notification feature compiles `notification.rs`; generic IPI users
-without either feature require neither provider. Each enabled feature requires
-its own provider, including non-SMP configurations that explicitly enable it.
+Any fixed-notification feature compiles `notification.rs`; generic IPI users
+without these features require no fixed endpoint. The scheduler and timer
+features each require their own provider, including non-SMP configurations that
+explicitly enable them. The BH feature calls kirq directly and needs no new provider.
 
-`PendingWord` stores ENABLED, RESCHEDULE and TIMER_REPROGRAM bits in one
+`PendingWord` stores ENABLED, RESCHEDULE, TIMER_REPROGRAM, BOTTOM_HALF and
+HIGHPRI_BOTTOM_HALF bits in one
 `AtomicUsize`. Its private `NotificationFlags` bitflags type represents snapshots
 and request masks; integer conversion stays at the atomic access boundary.
 Senders publish
@@ -31,13 +33,42 @@ state first, then use an AcqRel fetch-or and send an IPI if ENABLED was observed
 Boot enablement uses the same word and drains retained reasons. The receiver
 atomically takes all reasons, retaining ENABLED; requests arriving after that
 take remain for a later IPI. Handling order is stop, TLB, fixed timer refresh,
-fixed reschedule, generic callbacks. Fixed refresh does not queue a closure.
+fixed reschedule, BH pending publication, generic callbacks. Fixed refresh does
+not queue a closure.
 
 The timer sender must release timer locks before notification. The endpoint
 re-reads local sources and programs hardware under their synchronization, without
 invoking timer callbacks or taking runqueue locks. Notifications may coalesce;
 successful return means accepted, not completed. Local IPI queue, scheduler,
 timer state, controller and handler must be ready before the existing boot drain.
+
+### Bottom-Half Notifications
+
+Fixed-notification storage, boot handshake and BH notification APIs are always
+compiled. Only scheduler and timer endpoints require feature selection because
+their implementations are supplied by external providers. The built-in
+`notify_bottom_half` and `notify_highpri_bottom_half` call kirq directly;
+this stage does not change production runtime registration. The ordinary reason raises kirq's local Tasklet
+vector; the high-priority reason raises High. Both reuse the existing pending word,
+CPU validation, boot handshake and shared IPI. There is no additional pending
+array, closure queue, allocation, callback interface or reverse dependency.
+
+Senders publish source demand and release source locks before notifying. Reasons
+are taken before delivery, so a new request during delivery remains for another
+IPI. Both categories can coexist; coalescing is not a callback-count guarantee.
+Every post-enable request sends an IPI, including self, as with timer notification.
+IPI handling only marks softirq pending. Actual BH actions run at hardirq exit or
+in ksoftirqd, under kirq's context and restart-budget rules, not in the fixed handler.
+
+ENABLED means fixed IPI delivery is ready, not that a workqueue service is ready.
+The service owner must install its action and prepare target state before exposing
+producers. Boot drain can precede the AP's ksoftirqd creation: softirq pending is
+static and retained, and the daemon checks it before registering/sleeping. The AP
+startup NoPreempt guard remains necessary. No CPU hotplug/reset is supported.
+
+This unit provides the transport only. It neither replaces production kwork's
+registered actions nor publishes new workng services. A non-IPI configuration
+uses local kirq raising; linking kipi alone does not enable an IPI line.
 
 `kipi` 是 X-Kernel 的跨 CPU 协调模块，向上提供：
 
@@ -74,6 +105,7 @@ arch/kipi/
 │   ├── lib.rs
 │   ├── event.rs
 │   ├── queue.rs
+│   ├── notification.rs
 │   ├── icache.rs
 │   ├── stop.rs
 │   └── tlb.rs
@@ -85,6 +117,7 @@ arch/kipi/
 - `lib.rs`：对外 API、每 CPU 事件队列、IPI handler；
 - `event.rs`：单播/广播回调模型；
 - `queue.rs`：每 CPU FIFO 队列；
+- `notification.rs`: allocation-free fixed reasons and their boot handshake;
 - `icache.rs`：I-cache 跨核 flush 的 crate interface 实现；
 - `stop.rs`：系统级 CPU 停机协议（电源终点前停靠其它 CPU）；
 - `tlb.rs`：TLB shootdown 发布、IPI 发送、确认和等待协议。

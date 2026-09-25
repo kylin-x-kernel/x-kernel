@@ -18,6 +18,8 @@ extern crate kwork;
 #[cfg(feature = "unittest")]
 extern crate kworkerpool;
 #[cfg(feature = "unittest")]
+extern crate kworkerpool_ng;
+#[cfg(feature = "unittest")]
 extern crate kworkqueue;
 
 mod image_metadata;

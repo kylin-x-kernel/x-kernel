@@ -1,0 +1,27 @@
+[package]
+name = "kworkerpool_ng"
+version.workspace = true
+edition.workspace = true
+publish = false
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+description = "Execution service and retained source demand for prepared work"
+
+[dependencies]
+unittest.workspace = true
+intrusive-collections.workspace = true
+kpoll.workspace = true
+kspin.workspace = true
+kcpu_id_map.workspace = true
+khal.workspace = true
+kirq.workspace = true
+kipi.workspace = true
+ktime_types.workspace = true
+ktask.workspace = true
+kbuild_config.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(unittest)'] }

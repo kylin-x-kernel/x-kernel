@@ -31,19 +31,19 @@ use kspin::SpinNoIrq;
 
 mod event;
 mod icache;
-#[cfg(any(feature = "reschedule", feature = "timer-reprogram"))]
 mod notification;
 mod queue;
 mod stop;
 pub mod tlb;
 
 pub use event::{Callback, MulticastCallback};
-#[cfg(any(feature = "reschedule", feature = "timer-reprogram"))]
-pub use notification::enable_fixed_notifications;
 #[cfg(feature = "reschedule")]
 pub use notification::{RescheduleIpiIf, notify_reschedule};
 #[cfg(feature = "timer-reprogram")]
 pub use notification::{TimerReprogramIpiIf, notify_timer_reprogram};
+pub use notification::{
+    enable_fixed_notifications, notify_bottom_half, notify_highpri_bottom_half,
+};
 use queue::IpiEventQueue;
 
 /// Result type for IPI operations
@@ -317,7 +317,6 @@ pub fn ipi_handler() {
     // Process TLB shootdown requests before handling generic callbacks.
     tlb::handle_shootdown();
 
-    #[cfg(any(feature = "reschedule", feature = "timer-reprogram"))]
     notification::handle_pending();
 
     while let Some((src_cpu_id, callback)) = ipi_queue(this_cpu_id())

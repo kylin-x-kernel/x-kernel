@@ -7,6 +7,7 @@ members = [
     # boot and loader
     "boot/*",
     "task/kworkerpool",
+    "task/kworkng/crates/kworkerpool_ng",
     "task/kworkqueue",
     "task/ktimer-core",
     "tee/tee_crypto",
@@ -75,6 +76,7 @@ kpoll = { path = "task/kpoll" }
 kspin = { path = "task/kspin" }
 ksync = { path = "task/ksync" }
 kworkerpool = { path = "task/kworkerpool" }
+kworkerpool_ng = { path = "task/kworkng/crates/kworkerpool_ng" }
 kworkqueue = { path = "task/kworkqueue" }
 kwork = { path = "task/kwork" }
 ktask = { path = "task/ktask" }

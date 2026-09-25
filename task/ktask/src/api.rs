@@ -789,9 +789,9 @@ pub fn interruptible_sleep_until(deadline: ktime_types::MonotonicInstant) {
 
 fn assert_sleepable_context(operation: &'static str) {
     assert!(
-        can_sleep_current_context(),
-        "{operation} called from non-sleepable context: interrupt-like, local IRQs disabled, or \
-         no-preempt section held"
+        is_sleepable_context(),
+        "{operation} called from non-sleepable context: no non-idle current task, interrupt-like, \
+         local IRQs disabled, or no-preempt section held"
     );
 }
 
@@ -799,8 +799,8 @@ fn sleep_until_unchecked(deadline: ktime_types::MonotonicInstant) {
     crate::future::block_on(crate::future::sleep_until(deadline));
 }
 
-fn can_sleep_current_context() -> bool {
-    if kirq::context::is_in_interrupt_context() {
+fn can_sleep_task_context(task: &KtaskRef) -> bool {
+    if task.is_idle() || kirq::context::is_in_interrupt_context() {
         return false;
     }
     // Blocking must not run with local IRQs masked: the task would switch out
@@ -813,15 +813,29 @@ fn can_sleep_current_context() -> bool {
     // A held no-preempt section must not span a switch either; its preempt
     // credit would leak across the switched-out interval.
     #[cfg(feature = "preempt")]
-    if current().preempt_section_held() {
+    if task.preempt_section_held() {
         return false;
     }
     true
 }
 
+/// Reports whether the current task can enter a blocking wait now.
+///
+/// Requires an initialized non-idle task, no interrupt-like context (including
+/// BH-disabled sections), enabled local IRQs and, when tracked, no preemption
+/// protection. Call before acquiring wait-path spinlocks. This is a snapshot,
+/// not permission across later context changes; it does not detect application
+/// dependency cycles or held sleepable locks.
+pub fn is_sleepable_context() -> bool {
+    let Some(task) = current_may_uninit() else {
+        return false;
+    };
+    can_sleep_task_context(&task)
+}
+
 #[cfg(unittest)]
 pub fn can_sleep_current_context_for_tests() -> bool {
-    can_sleep_current_context()
+    is_sleepable_context()
 }
 
 /// Exits the current task.
@@ -1076,6 +1090,37 @@ mod tests_api {
     fn sleep_context_gate_rejects_irqs_disabled_context() {
         let _irqs_off = kspin::NoPreemptIrqSave::new();
         assert!(!can_sleep_current_context_for_tests());
+    }
+
+    /// Service context checks reject IRQ-masked and preemption-protected callers.
+    ///
+    /// # Panics
+    /// Panics if a protected context is accepted or the plain task is rejected.
+    #[def_test(serial)]
+    fn service_sleep_context_tracks_local_protection() {
+        assert!(super::is_sleepable_context());
+        {
+            let _irqs_off = kspin::NoPreemptIrqSave::new();
+            assert!(!super::is_sleepable_context());
+        }
+        #[cfg(feature = "preempt")]
+        {
+            let _no_preempt = kspin::NoPreempt::new();
+            assert!(!super::is_sleepable_context());
+        }
+        assert!(super::is_sleepable_context());
+    }
+
+    /// Idle tasks cannot enter the blocking scheduler even with IRQs enabled.
+    ///
+    /// # Panics
+    /// Panics if the shared gate accepts an idle task or rejects the test task.
+    #[def_test(serial)]
+    fn sleep_context_gate_rejects_idle_task() {
+        assert!(super::is_sleepable_context());
+        let idle = crate::TaskInner::new_current_idle("sleep-gate-idle".into()).into_arc();
+        assert!(!super::can_sleep_task_context(&idle));
+        assert!(super::is_sleepable_context());
     }
 }
 

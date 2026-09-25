@@ -177,6 +177,15 @@ pub fn is_serving_softirq() -> bool {
     irq_context_snapshot().is_serving_softirq()
 }
 
+/// Reports effective softirq execution, excluding a nested hardirq.
+///
+/// Unlike [`is_serving_softirq`], this is false while a hardirq interrupts an
+/// active softirq handler. It observes context without entering or pinning it.
+#[inline]
+pub fn is_softirq_context() -> bool {
+    interrupt_context_level() == InterruptContextLevel::Softirq
+}
+
 /// Returns whether local bottom halves are disabled on the current CPU.
 #[inline]
 pub fn is_bh_disabled() -> bool {
@@ -538,10 +547,20 @@ pub mod tests_context {
     #[def_test(serial)]
     fn test_hardirq_level_takes_precedence_over_softirq() {
         clear_irq_context_diagnostics();
-        let _softirq = SoftIrqContextGuard::enter();
         let _irq_guard = kspin::NoPreemptIrqSave::new();
-        let _hardirq = HardIrqContextGuard::enter();
-        assert_eq!(interrupt_context_level(), InterruptContextLevel::Hardirq);
+        assert!(!super::is_softirq_context());
+        {
+            let _softirq = SoftIrqContextGuard::enter();
+            assert!(super::is_softirq_context());
+            {
+                let _hardirq = HardIrqContextGuard::enter();
+                assert!(is_serving_softirq());
+                assert!(!super::is_softirq_context());
+                assert_eq!(interrupt_context_level(), InterruptContextLevel::Hardirq);
+            }
+            assert!(super::is_softirq_context());
+        }
+        assert!(!super::is_softirq_context());
     }
 
     #[def_test(serial)]

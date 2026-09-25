@@ -2,6 +2,12 @@
 
 ## Scope and trust model
 
+`api::is_sleepable_context` accepts no external input and adds no unsafe boundary.
+It rejects missing or idle current tasks, interrupt-like/IRQ-masked contexts,
+and preemption protection when tracked. Sleep assertions and prepared waits
+share this gate to avoid inconsistent acceptance. This mitigates invalid-context service startup/stop;
+the caller remains responsible for dependency cycles and provider readiness.
+
 This document covers the security boundaries of the entire `task/ktask` crate:
 the `lib.rs` integration and `api.rs` entry points; task lifetime and context
 in `task.rs`; scheduling in `run_queue.rs`; blocking in `future/` and

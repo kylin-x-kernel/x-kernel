@@ -1,5 +1,14 @@
 # kirq — 设计文档
 
+## Effective Softirq Context
+
+`context::is_softirq_context` observes `interrupt_context_level` and is true only
+when the effective level is Softirq. A hardirq interrupting a softirq handler
+therefore returns false, while `is_serving_softirq` continues to report the active
+softirq nesting. Execution services use the former to reject invalid BH dispatch
+before acquiring work. This query neither pins the CPU nor serializes passes;
+the caller establishes those conditions. Existing nesting APIs are unchanged.
+
 ## 定位
 
 `kirq` 是 X-Kernel 的通用中断核心。它位于架构 trap 适配层和平台中断

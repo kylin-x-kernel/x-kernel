@@ -19,6 +19,8 @@ bitflags::bitflags! {
         const RESCHEDULE = 1 << 1;
         #[cfg(any(feature = "timer-reprogram", unittest))]
         const TIMER_REPROGRAM = 1 << 2;
+        const BOTTOM_HALF = 1 << 3;
+        const HIGHPRI_BOTTOM_HALF = 1 << 4;
     }
 }
 
@@ -114,6 +116,38 @@ pub fn notify_timer_reprogram(cpu_id: LogicalCpuId) -> Result<()> {
     notify(cpu_id, NotificationFlags::TIMER_REPROGRAM)
 }
 
+/// Requests the destination CPU's ordinary BH service without allocation.
+///
+/// Publish source demand and release its locks before calling. The receiver only
+/// raises `kirq::softirq::SoftirqVec::Tasklet`; callbacks run later in softirq
+/// context, never in this function or the fixed IPI handler. The caller must
+/// prepare the destination service and install its softirq action before
+/// publishing demand. This API does not register a service or retain its storage.
+///
+/// May run in task, softirq or hardirq context, including with IRQs disabled.
+/// Does not sleep or enqueue a closure. Success means accepted, not completed;
+/// repeated requests may coalesce. Before fixed notifications are enabled,
+/// requests remain pending for boot drain; afterward every request sends an IPI,
+/// including a request to self. Does not support CPU hotplug or NMI context.
+///
+/// # Errors
+/// Returns [`KipiError::InvalidCpuId`] for an out-of-range or absent CPU.
+pub fn notify_bottom_half(cpu_id: LogicalCpuId) -> Result<()> {
+    notify(cpu_id, NotificationFlags::BOTTOM_HALF)
+}
+
+/// Requests the destination CPU's high-priority BH service without allocation.
+///
+/// Has the publication, context, readiness and coalescing contract of
+/// [`notify_bottom_half`], but raises `kirq::softirq::SoftirqVec::High` instead
+/// of `Tasklet`. The two categories retain independent pending bits.
+///
+/// # Errors
+/// Returns [`KipiError::InvalidCpuId`] for an out-of-range or absent CPU.
+pub fn notify_highpri_bottom_half(cpu_id: LogicalCpuId) -> Result<()> {
+    notify(cpu_id, NotificationFlags::HIGHPRI_BOTTOM_HALF)
+}
+
 fn notify(cpu_id: LogicalCpuId, reason: NotificationFlags) -> Result<()> {
     let pending = PENDING
         .get(cpu_id.as_usize())
@@ -137,6 +171,10 @@ fn notify(cpu_id: LogicalCpuId, reason: NotificationFlags) -> Result<()> {
 /// drain. There is no shutdown or CPU-hotplug protocol, or queued closure dispatch.
 /// Boot callers must defer preemption until their remaining per-CPU services
 /// are prepared: IRQ masking does not prevent a later lock-drop reschedule.
+/// kirq's softirq pending storage must be usable. BH actions
+/// and destination services must be installed before their producers publish
+/// demand. Boot drain only marks softirq pending; a daemon started afterward
+/// observes that retained state before sleeping.
 ///
 /// # Panics
 /// Panics if the IPI line cannot be enabled; readiness is not published on failure.
@@ -159,7 +197,22 @@ pub(crate) fn handle_pending() {
     if reasons.contains(NotificationFlags::RESCHEDULE) {
         RescheduleIpiIf::on_reschedule();
     }
+    handle_bottom_half(reasons);
 }
+
+fn handle_bottom_half(reasons: NotificationFlags) {
+    use kirq::softirq::{SoftirqVec, raise_softirq_irqoff};
+
+    if reasons.contains(NotificationFlags::HIGHPRI_BOTTOM_HALF) {
+        raise_softirq_irqoff(SoftirqVec::High);
+    }
+    if reasons.contains(NotificationFlags::BOTTOM_HALF) {
+        raise_softirq_irqoff(SoftirqVec::Tasklet);
+    }
+}
+
+#[cfg(unittest)]
+mod bottom_half_tests;
 
 #[cfg(unittest)]
 mod tests {
@@ -238,5 +291,47 @@ mod tests {
             super::notify_timer_reprogram(kbuild_config::NR_CPUS.into()),
             Err(crate::KipiError::InvalidCpuId)
         );
+    }
+
+    /// All fixed reasons survive boot enablement without overwriting each other.
+    ///
+    /// # Panics
+    /// Panics if enablement drops a reason or returns the readiness bit as work.
+    #[def_test]
+    fn bottom_half_and_existing_reasons_survive_boot_drain() {
+        let pending = PendingWord::new();
+        let reasons = NotificationFlags::BOTTOM_HALF
+            | NotificationFlags::HIGHPRI_BOTTOM_HALF
+            | NotificationFlags::TIMER_REPROGRAM
+            | NotificationFlags::RESCHEDULE;
+        for reason in reasons.iter() {
+            assert!(!pending.request(reason));
+        }
+        assert!(pending.take().is_empty());
+        pending.enable();
+        assert_eq!(pending.take(), reasons);
+        assert!(pending.take().is_empty());
+    }
+
+    /// Requests racing an earlier BH drain remain independent and observable.
+    ///
+    /// # Panics
+    /// Panics if a coalesced or post-drain category is lost.
+    #[def_test]
+    fn bottom_half_coalesces_without_losing_requests_during_service() {
+        let pending = PendingWord::new();
+        pending.enable();
+        for reason in [
+            NotificationFlags::BOTTOM_HALF,
+            NotificationFlags::HIGHPRI_BOTTOM_HALF,
+        ] {
+            assert!(pending.request(reason));
+            assert!(pending.request(reason));
+            assert_eq!(pending.take(), reason);
+            assert!(pending.request(reason));
+            assert!(pending.request(NotificationFlags::TIMER_REPROGRAM));
+            assert_eq!(pending.take(), reason | NotificationFlags::TIMER_REPROGRAM);
+            assert!(pending.take().is_empty());
+        }
     }
 }

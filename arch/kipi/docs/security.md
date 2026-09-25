@@ -8,7 +8,7 @@
 callers, not a timer pointer or user payload. It validates bounds and CPU mapping,
 but mapping presence alone does not prove service readiness. The caller publishes
 timer state and releases timer locks first. `timer-reprogram` links its own static
-provider; generic IPI users without fixed-notification features need no provider.
+provider; generic IPI and BH users need no scheduler or timer provider.
 
 | Threat | Asset / trigger / impact | Response |
 | --- | --- | --- |
@@ -21,9 +21,33 @@ The new fixed timer path adds no unsafe operations, allocation, payload storage
 or lifetime ownership. It relies on the interrupt backend's publish-before-notify
 contract and eventual target IRQ service. Long IRQ masking remains a latency risk.
 
-Each fixed-notification feature requires its matching provider. `ktask/ipi`
-enables both features and supplies both endpoints. The notification module is
-excluded only when neither feature is enabled; no empty fallback drops requests.
+Scheduler and timer fixed-notification features require matching providers.
+`ktask/ipi` enables these two features and supplies both endpoints. Built-in BH
+notifications call kirq directly. The notification module is always compiled;
+linking it does not enable delivery or satisfy service initialization contracts.
+No empty fallback drops requests for a feature-selected endpoint.
+
+### Fixed BH Notification Boundary
+
+The protected asset is the static `PENDING: [PendingWord; NR_CPUS]`, including
+independent ordinary/high-priority BH reasons. Only typed kernel CPU identifiers
+enter the two public notification functions; no Work pointer, user data or closure
+is accepted. Bounds and present-CPU mapping are checked before indexing/publication.
+All existing atomic ordering and enablement invariants also protect these bits.
+The BH path adds no unsafe code or allocation and does not own service storage.
+
+| Threat | Asset / trigger / impact | Response |
+| --- | --- | --- |
+| Lost BH opportunity | Queue progress; clearing requests after delivery loses a concurrent kick | Mitigate: take reasons before delivery, retain ENABLED and reuse AcqRel request/enable handshake; category bits are independent. |
+| Hardirq callback execution | Context integrity; an IPI directly executes business Work | Eliminate from this path: receiver only calls kirq's local softirq raise; kirq decides when a BH pass may run. |
+| Premature service use | Availability; demand becomes visible before target action/state exists | Transfer readiness to the service owner: prepare and install before exposing producers; fixed ENABLED is not service readiness. |
+| Early daemon absence | Progress; boot drain precedes AP ksoftirqd creation | Mitigate: retained static softirq pending and daemon's initial pending check; runtime keeps startup non-preemptible until local services exist. |
+| IPI flood or masked IRQs | Availability/latency; excessive trusted notifications or blocked target | Accept existing transport limitation: reasons coalesce but post-enable calls each send an IPI; no rate/latency bound or NMI/hotplug support. |
+
+Serial transport integration tests temporarily replace Tasklet/High actions and
+restore them with kirq's scoped guards. They require quiescent production BH queues
+and acknowledge callbacks before restoring handlers. They do not establish global
+workng service lifetime/readiness or production-load performance acceptance.
 
 固定通知 `notify_reschedule` 不要求普通回调队列 ready，但调用方必须已向合法
 目标的运行队列发布任务状态。CPU 范围/存在性由入口验证；静态槽不分配、不释放，
