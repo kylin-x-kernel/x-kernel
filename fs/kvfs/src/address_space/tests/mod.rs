@@ -13,6 +13,7 @@ use unittest::def_test;
 use super::{AddressSpace, AddressSpaceOperations, empty_address_space_operations};
 use crate::{FileOperations, InodeOperations, VfsError, VfsResult};
 
+mod read;
 mod truncate;
 mod writeback;
 

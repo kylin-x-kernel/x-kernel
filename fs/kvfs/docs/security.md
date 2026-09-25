@@ -328,6 +328,13 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 - `FsContext` 能承载 binary mountdata bytes，但不负责具体 representation 的解析或
   filesystem-specific remount parsing。
 
+### Buffered read 窗口提示的有效性
+
+`prepared_end` 仅控制预读窗口准备的频率，不表示该区间仍驻留，不授权绕过 folio 查找、
+锁定或按需加载。窗口批量准备不新增裸页引用、长期 pin、用户复制期间的索引锁或
+invalidate lock；不改变原有读取的文件长度快照和并发 truncate 语义。短复制必须立即
+停止，复制和 readahead 的错误继续传播，不能因为窗口准备成功而忽略它们。
+
 ## 审计清单
 
 - 新 syscall flags 是否在 ABI 边界完成类型转换。

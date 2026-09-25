@@ -107,15 +107,20 @@ impl AddressSpace {
         Ok(read)
     }
 
-    fn read_from_page_cache(
+    pub(super) fn read_from_page_cache(
         self: &Arc<Self>,
         iter: &mut IovIterDest<'_>,
         mut offset: u64,
         file_len: u64,
     ) -> VfsResult<usize> {
         let mut total = 0usize;
+        let mut prepared_end = offset;
         while iter.count() != 0 && offset < file_len {
-            self.prepare_read_window(offset, iter.count(), file_len)?;
+            if offset >= prepared_end {
+                prepared_end = self.prepare_read_window(offset, iter.count(), file_len)?;
+            }
+            // Window preparation is only a readahead hint. Resolve each folio
+            // again so a page removed after preparation follows the miss path.
             let copied = self.copy_folio_to_iter(iter, offset, file_len)?;
             if copied == 0 {
                 break;

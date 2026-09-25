@@ -59,18 +59,22 @@ impl ReadaheadControl {
 }
 
 impl AddressSpace {
+    /// Prepares one bounded window and returns its exclusive byte end.
+    ///
+    /// The caller consumes this window before preparing the next one. This
+    /// does not pin resident folios or guarantee that they remain cached.
     pub(super) fn prepare_read_window(
         self: &Arc<Self>,
         offset: u64,
         count: usize,
         file_len: u64,
-    ) -> VfsResult<()> {
+    ) -> VfsResult<u64> {
         let count = u64::try_from(count).map_err(|_| VfsError::InvalidInput)?;
         let remaining =
             usize::try_from((file_len - offset).min(count)).map_err(|_| VfsError::InvalidInput)?;
         let read_len = remaining.min(MAX_READAHEAD_BYTES);
         if read_len == 0 {
-            return Ok(());
+            return Ok(offset);
         }
 
         let start_index = offset / PAGE_SIZE_4K as u64;
@@ -83,7 +87,7 @@ impl AddressSpace {
         if count > 1 && self.i_pages.cached_run_len(start_index, count) < count {
             self.readahead(ReadaheadControl::new(self.clone(), start_index, count))?;
         }
-        Ok(())
+        Ok(end)
     }
 
     /// Starts readahead for a range of folios.

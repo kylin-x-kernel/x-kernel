@@ -726,6 +726,15 @@ credential。`child_names()` 可传播生命周期或后端错误，使旧目录
 静默转换为空目录。需要持久 identity 的 pseudo filesystem 可用 `SimpleFile::new_inode()`、
 `SimpleDir::new_inode_with_owner()` 和 `SimpleDirLookup::{file,dir}_from_inode()` 重用 inode。
 
+### Buffered read 窗口批量准备
+
+缓存读循环保存本次请求已准备窗口的 exclusive byte end。仅在进入下一个窗口时调用
+`prepare_read_window`，每个窗口最多覆盖 128 KiB 请求字节；非页对齐窗口可能涉及 33 页。
+消费窗口时仍逐页通过 `with_folio_or_create` 重新查找并锁定 folio，准备结果只是预读提示，
+不缓存页面存在性的承诺，不持有整批 folio 引用，也不跨页复制持有 mapping 索引锁。
+因此准备后被移除的页仍走既有按需加载路径。EOF、短复制和错误沿用原有读取处理。
+128 KiB 对齐全热读取的窗口存在性查询由 527 次降为 32 次；实际逐页获取仍为 32 次。
+
 ## Drop / 资源释放
 
 VFS 对象通过 `Arc`/`Weak` 管理生命周期。unlink、rename replacement 和 forget 会从
