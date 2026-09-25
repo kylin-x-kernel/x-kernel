@@ -21,7 +21,7 @@ mod writeback;
 
 pub use folio::Folio;
 pub(crate) use folio_batch::FolioBatch;
-pub use mapping_pages::{MappingPages, PageCacheKind};
+pub use mapping_pages::MappingPages;
 pub use writeback::WritebackRangeResult;
 
 /// Page index within a mapping.

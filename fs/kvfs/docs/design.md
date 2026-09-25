@@ -571,6 +571,7 @@ libfs helper。
 `AddressSpace` 自己持有 object-id、mapped views、静态共享的 `AddressSpaceOperations` 和
 `i_pages: MappingPages`。该字段直接组合缓存容器，不单独分配 `Arc`，对应 Linux
 `address_space::i_pages`；Folio 自身仍用 `Arc<Mutex<Folio>>` 保持引用和页锁生命周期。
+`read_folio` 从 Folio 自身获取稳定 index；AddressSpace 构造不再传入仅控制诊断的 mapping kind。
 `MappingPages` 不保存 length、object-id、views 或 invalidation
 lifecycle；writeback 的 EOF 也由 `AddressSpace` 从 inode 读取后传入。
 构造 API 只接受 `&'static dyn AddressSpaceOperations`，因此 aops 不是 inode private object。

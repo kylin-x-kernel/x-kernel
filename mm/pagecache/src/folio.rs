@@ -10,18 +10,20 @@ use khal::mem::{PhysAddr, VirtAddr, v2p};
 use log::warn;
 use memaddr::PAGE_SIZE_4K;
 
+use crate::PageIndex;
+
 /// Cached folio stored inside a [`crate::MappingPages`].
 #[derive(Debug)]
 pub struct Folio {
+    index: PageIndex,
     addr: VirtAddr,
     dirty: bool,
     writeback: bool,
-    warn_on_dirty_drop: bool,
 }
 
 impl Folio {
-    /// Allocates a fresh zero-filled folio.
-    pub fn new_zeroed() -> KResult<Self> {
+    /// Allocates a zero-filled folio with a stable index, retained after detach.
+    pub fn new_zeroed(index: PageIndex) -> KResult<Self> {
         let addr = global_allocator()
             .alloc_pages(1, PAGE_SIZE_4K, UsageKind::PageCache)
             .map_err(|_| KError::NoMemory)?;
@@ -30,11 +32,16 @@ impl Folio {
         // region owned by this folio. Zeroing exactly one page is sound.
         unsafe { core::ptr::write_bytes(addr.as_mut_ptr(), 0, PAGE_SIZE_4K) };
         Ok(Self {
+            index,
             addr,
             dirty: false,
             writeback: false,
-            warn_on_dirty_drop: false,
         })
+    }
+
+    /// Returns the immutable page index; this does not prove mapping residency.
+    pub const fn index(&self) -> PageIndex {
+        self.index
     }
 
     /// Returns the physical address of this folio.
@@ -70,10 +77,6 @@ impl Folio {
         self.dirty = false;
     }
 
-    pub(super) fn set_warn_on_dirty_drop(&mut self, enabled: bool) {
-        self.warn_on_dirty_drop = enabled;
-    }
-
     /// Returns the folio contents as a mutable 4 KiB slice.
     pub fn data(&mut self) -> &mut [u8] {
         // SAFETY: the folio uniquely owns the page at `self.addr`; callers
@@ -85,8 +88,11 @@ impl Folio {
 
 impl Drop for Folio {
     fn drop(&mut self) {
-        if self.dirty && self.warn_on_dirty_drop {
-            warn!("dropping dirty file-backed folio without writeback");
+        if self.dirty || self.writeback {
+            warn!(
+                "dropping folio {} with dirty={} writeback={}",
+                self.index, self.dirty, self.writeback
+            );
         }
         global_allocator().dealloc_pages(self.addr.as_usize(), 1, UsageKind::PageCache);
     }

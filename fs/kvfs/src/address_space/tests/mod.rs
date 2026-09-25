@@ -7,7 +7,7 @@
 use alloc::sync::Weak;
 
 use memaddr::PAGE_SIZE_4K;
-use pagecache::{Folio, PageCacheKind, PageIndex};
+use pagecache::Folio;
 use unittest::def_test;
 
 use super::{AddressSpace, AddressSpaceOperations, empty_address_space_operations};
@@ -28,12 +28,7 @@ impl AddressSpaceOperations for TruncateOps {
         mapping.truncate_setsize(len)
     }
 
-    fn read_folio(
-        &self,
-        _mapping: &AddressSpace,
-        folio: &mut Folio,
-        _index: PageIndex,
-    ) -> VfsResult<usize> {
+    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<usize> {
         folio.data().fill(0);
         Ok(folio.data().len())
     }
@@ -41,16 +36,8 @@ impl AddressSpaceOperations for TruncateOps {
 
 #[def_test]
 fn address_space_identity_is_owned_by_address_space() {
-    let first = AddressSpace::new(
-        Weak::new(),
-        empty_address_space_operations(),
-        PageCacheKind::InMemory,
-    );
-    let second = AddressSpace::new(
-        Weak::new(),
-        empty_address_space_operations(),
-        PageCacheKind::InMemory,
-    );
+    let first = AddressSpace::new(Weak::new(), empty_address_space_operations());
+    let second = AddressSpace::new(Weak::new(), empty_address_space_operations());
 
     assert_ne!(first.object_id(), second.object_id());
 }

@@ -1561,7 +1561,7 @@ impl VfsInode {
             private_data,
             inode_operations,
             file_operations,
-            flags,
+            flags: _,
             address_space_operations,
             init,
         } = parts;
@@ -1574,7 +1574,7 @@ impl VfsInode {
             inode_operations,
             file_operations: file_operations.unwrap_or_else(no_open_file_operations),
             private_data,
-            mapping: AddressSpace::new_default(this.clone(), address_space_operations, flags),
+            mapping: AddressSpace::new(this.clone(), address_space_operations),
             special_state: InodeSpecialState::new(),
         })
     }

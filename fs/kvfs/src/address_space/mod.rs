@@ -7,11 +7,11 @@
 use alloc::{collections::BTreeMap, sync::Arc};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use pagecache::{MappingPages, PageCacheKind};
+use pagecache::MappingPages;
 use views::RegisteredView;
 use vmobj::{FileObjectId, MappingViewId, VmObjectId};
 
-use crate::{Mutex, NodeFlags, RwLock, VfsError, VfsResult, WeakVfsInode};
+use crate::{Mutex, RwLock, VfsError, VfsResult, WeakVfsInode};
 
 mod filemap;
 mod operations;
@@ -44,11 +44,7 @@ pub struct AddressSpace {
 
 impl AddressSpace {
     /// Creates an address space for `inode`.
-    pub fn new(
-        inode: WeakVfsInode,
-        ops: &'static dyn AddressSpaceOperations,
-        kind: PageCacheKind,
-    ) -> Arc<Self> {
+    pub fn new(inode: WeakVfsInode, ops: &'static dyn AddressSpaceOperations) -> Arc<Self> {
         Arc::new(Self {
             inode,
             ops,
@@ -57,17 +53,8 @@ impl AddressSpace {
             )),
             invalidate_lock: RwLock::new(()),
             views: Mutex::new(BTreeMap::new()),
-            i_pages: MappingPages::new(kind),
+            i_pages: MappingPages::new(),
         })
-    }
-
-    /// Creates the default address space for an inode with the given flags.
-    pub fn new_default(
-        inode: WeakVfsInode,
-        ops: &'static dyn AddressSpaceOperations,
-        inode_flags: NodeFlags,
-    ) -> Arc<Self> {
-        Self::new(inode, ops, address_space_mapping_kind(inode_flags))
     }
 
     /// Returns the inode owning this address space.
@@ -99,14 +86,6 @@ impl core::fmt::Debug for AddressSpace {
             .field("object_id", &self.object_id())
             .field("nrpages", &self.nrpages())
             .finish()
-    }
-}
-
-pub(crate) fn address_space_mapping_kind(inode_flags: NodeFlags) -> PageCacheKind {
-    if inode_flags.contains(NodeFlags::ALWAYS_CACHE) {
-        PageCacheKind::InMemory
-    } else {
-        PageCacheKind::FileBacked
     }
 }
 

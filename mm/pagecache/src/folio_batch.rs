@@ -8,7 +8,7 @@ use alloc::sync::Arc;
 
 use ksync::Mutex;
 
-use crate::{Folio, PageIndex};
+use crate::Folio;
 
 /// A bounded, ascending collection of mapping folio references.
 ///
@@ -16,10 +16,10 @@ use crate::{Folio, PageIndex};
 /// ownership. Callers must finish any started writeback before clearing the
 /// batch; releasing references does not change folio state.
 ///
-/// The index accompanies the reference because Folio does not yet own its
-/// index. It is the lookup identity to revalidate, not a second mapping owner.
+/// Entries follow mapping traversal order. The folio owns its index; batch
+/// storage holds only references, as Linux folio_batch does.
 pub(crate) struct FolioBatch {
-    entries: [Option<(PageIndex, Arc<Mutex<Folio>>)>; Self::CAPACITY],
+    entries: [Option<Arc<Mutex<Folio>>>; Self::CAPACITY],
     len: usize,
 }
 
@@ -41,14 +41,13 @@ impl FolioBatch {
         self.len == Self::CAPACITY
     }
 
-    /// Adds an entry after all existing indices, with space available.
-    pub(crate) fn push(&mut self, index: PageIndex, folio: Arc<Mutex<Folio>>) {
-        debug_assert!(self.len == 0 || self.entries[self.len - 1].as_ref().unwrap().0 < index);
-        self.entries[self.len] = Some((index, folio));
+    /// Appends a reference in traversal order, with space available.
+    pub(crate) fn push(&mut self, folio: Arc<Mutex<Folio>>) {
+        self.entries[self.len] = Some(folio);
         self.len += 1;
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &(PageIndex, Arc<Mutex<Folio>>)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Arc<Mutex<Folio>>> {
         self.entries[..self.len].iter().flatten()
     }
 

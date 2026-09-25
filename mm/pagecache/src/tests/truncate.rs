@@ -10,11 +10,10 @@ use memaddr::PAGE_SIZE_4K;
 use unittest::{assert_eq, def_test};
 
 use super::{dirty_indices, new_cache, write_cached};
-use crate::PageCacheKind;
 
 #[def_test]
 fn shrink_drops_full_folios_and_zeros_surviving_tail() {
-    let cache = new_cache(PageCacheKind::InMemory);
+    let cache = new_cache();
     write_cached(&cache, 0, &vec![0x5a; PAGE_SIZE_4K * 2]).unwrap();
 
     let new_len = (PAGE_SIZE_4K / 2) as u64;
@@ -36,7 +35,7 @@ fn shrink_drops_full_folios_and_zeros_surviving_tail() {
 
 #[def_test]
 fn growth_zeros_cached_tail_and_marks_it_dirty() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     cache
         .filemap_add_folio(0, 0, &vec![0x5a; PAGE_SIZE_4K])
         .unwrap();
@@ -64,7 +63,7 @@ fn growth_zeros_cached_tail_and_marks_it_dirty() {
 }
 #[def_test]
 fn final_truncate_discards_dirty_folios() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     write_cached(&cache, 0, b"dirty").unwrap();
 
     cache.truncate_final().unwrap();
@@ -74,7 +73,7 @@ fn final_truncate_discards_dirty_folios() {
 
 #[def_test]
 fn shrink_and_final_teardown_remove_multiple_sparse_batches() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     let count = crate::FolioBatch::CAPACITY * 3 + 2;
     for index in 0..count {
         write_cached(&cache, (index * 2 * PAGE_SIZE_4K) as u64, b"dirty").unwrap();
@@ -93,4 +92,20 @@ fn shrink_and_final_teardown_remove_multiple_sparse_batches() {
     cache.truncate_final().unwrap();
     assert_eq!(cache.nrpages(), 0);
     assert!(dirty_indices(&cache).is_empty());
+}
+
+#[def_test]
+fn mapping_drop_cleans_retained_folios_across_batches() {
+    let retained = {
+        let cache = new_cache();
+        let count = crate::FolioBatch::CAPACITY * 2 + 1;
+        write_cached(&cache, 0, &vec![0x5a; count * PAGE_SIZE_4K]).unwrap();
+        let retained = cache.state.lock().entries[&(crate::FolioBatch::CAPACITY as u64)].clone();
+        assert!(retained.lock().is_dirty());
+        retained
+    };
+    let folio = retained.lock();
+    assert_eq!(folio.index(), crate::FolioBatch::CAPACITY as u64);
+    assert!(!folio.is_dirty());
+    assert!(!folio.is_under_writeback());
 }

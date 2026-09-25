@@ -157,10 +157,13 @@ mutex 下才能保持索引一致性。Folio 的数据与 flags 仍封装在 `fo
 2. 不保存 length。唯一 EOF 是 `VfsInode::size()`。
 3. 不保存 object-id 或 views。它们属于 `kvfs::AddressSpace`，对应 Linux
    `address_space::i_mmap`。
-4. `PageCacheKind` 只决定 dirty folio 被意外 drop 时是否告警，不建立第二套对象类型。
-5. resident folio 使用 `BTreeMap`，dirty tag 使用独立 `BTreeSet`。该集合只是补足
+4. resident folio 使用 `BTreeMap`，dirty tag 使用独立 `BTreeSet`。该集合只是补足
    `BTreeMap` 缺少 per-entry mark 的能力，writeback 成本因此与 dirty folio 数量相关；
    未来可用 Linux XArray dirty tag 风格实现替换具体索引，不改变 `AddressSpace` 契约。
+
+Folio 的 immutable `index` 对应 Linux `folio::index`，detach 后仍保留，供批处理和
+identity 校验使用；FolioBatch 只存引用，entries key 在插入时必须匹配该 index。
+归属仍由 owning AddressSpace 的 `i_pages[index]` Arc identity 表达，不增加反向 owner。
 
 ## Drop / 资源释放
 
@@ -170,3 +173,6 @@ folio 引用仍通过 `Arc` 保活页数据。
 `truncate_final()` 是 inode final teardown 的显式丢弃路径；普通 writeback 失败仍保留
 dirty 状态。shrink 和 final teardown 会同时删除 resident folio 与对应 dirty index；
 surviving truncated tail 被清零并重新加入 dirty index。
+
+MappingPages 的 Drop 复用显式 truncate 清理，先清 dirty、删除 entries/marks，再释放
+引用；外部持有的 folio 也完成清理。Folio drop 检查不再保存按 mapping 类型区分的策略。

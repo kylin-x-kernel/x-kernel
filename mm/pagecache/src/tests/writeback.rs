@@ -12,11 +12,11 @@ use memaddr::PAGE_SIZE_4K;
 use unittest::{assert_eq, def_test};
 
 use super::{dirty_indices, new_cache, write_cached};
-use crate::{Folio, PageCacheKind};
+use crate::Folio;
 
 #[def_test]
 fn writeback_uses_owner_supplied_visible_length() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     let visible_len = PAGE_SIZE_4K as u64 + 123;
     write_cached(&cache, 0, &vec![0x33; visible_len as usize]).unwrap();
     let mut writes = Vec::new();
@@ -50,7 +50,7 @@ fn writeback_uses_owner_supplied_visible_length() {
 
 #[def_test]
 fn failed_writeback_restores_dirty_state() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     write_cached(&cache, 0, b"dirty").unwrap();
 
     let initial_budget = 1;
@@ -79,7 +79,7 @@ fn failed_writeback_restores_dirty_state() {
 
 #[def_test]
 fn clean_folio_with_stale_dirty_tag_is_not_written() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     cache.filemap_add_folio(0, 0, b"clean").unwrap();
     cache.state.lock().dirty_marks.insert(0);
     let mut writes = 0usize;
@@ -108,7 +108,7 @@ fn clean_folio_with_stale_dirty_tag_is_not_written() {
 
 #[def_test]
 fn writeback_until_respects_dirty_index_and_page_budget() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     write_cached(&cache, 0, &vec![1; PAGE_SIZE_4K]).unwrap();
     write_cached(&cache, PAGE_SIZE_4K as u64, &vec![2; PAGE_SIZE_4K]).unwrap();
     assert_eq!(dirty_indices(&cache), vec![0, 1]);
@@ -141,7 +141,7 @@ fn writeback_until_respects_dirty_index_and_page_budget() {
 
 #[def_test]
 fn stale_collected_folio_is_not_written_or_tagged_as_replacement() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     write_cached(&cache, 0, &vec![1; PAGE_SIZE_4K]).unwrap();
     write_cached(&cache, PAGE_SIZE_4K as u64, &vec![2; PAGE_SIZE_4K]).unwrap();
     let cache_during_io = &cache;
@@ -160,8 +160,9 @@ fn stale_collected_folio_is_not_written_or_tagged_as_replacement() {
             &mut |offset, data| {
                 write_offsets.push(offset);
                 if offset == 0 {
-                    let replacement =
-                        Arc::new(Mutex::new(Folio::new_zeroed().map_err(|error| (0, error))?));
+                    let replacement = Arc::new(Mutex::new(
+                        Folio::new_zeroed(1).map_err(|error| (0, error))?,
+                    ));
                     let old = cache_during_io
                         .state
                         .lock()
@@ -186,7 +187,7 @@ fn stale_collected_folio_is_not_written_or_tagged_as_replacement() {
 
 #[def_test]
 fn batched_writeback_failure_restores_dirty_index() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     write_cached(&cache, 0, &vec![1; PAGE_SIZE_4K]).unwrap();
     write_cached(&cache, PAGE_SIZE_4K as u64, &vec![2; PAGE_SIZE_4K]).unwrap();
 
@@ -218,7 +219,7 @@ fn batched_writeback_failure_restores_dirty_index() {
 
 #[def_test]
 fn failed_writeback_does_not_redirty_detached_folio() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     write_cached(&cache, 0, b"dirty").unwrap();
     let detached = cache
         .state
@@ -255,7 +256,7 @@ fn failed_writeback_does_not_redirty_detached_folio() {
 
 #[def_test]
 fn batched_writeback_failure_cleans_only_complete_prefix_folios() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     write_cached(&cache, 0, &vec![1; PAGE_SIZE_4K]).unwrap();
     write_cached(&cache, PAGE_SIZE_4K as u64, &vec![2; PAGE_SIZE_4K]).unwrap();
     write_cached(&cache, (PAGE_SIZE_4K * 2) as u64, &vec![3; PAGE_SIZE_4K]).unwrap();
@@ -290,7 +291,7 @@ fn batched_writeback_failure_cleans_only_complete_prefix_folios() {
 
 #[def_test]
 fn batched_writeback_preserves_concurrent_redirty() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     write_cached(&cache, 0, b"old").unwrap();
 
     let cache_during_io = &cache;
@@ -359,7 +360,7 @@ fn batched_writeback_preserves_concurrent_redirty() {
 
 #[def_test]
 fn writeback_scans_sparse_windows_without_pinning_the_whole_range() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     let count = crate::FolioBatch::CAPACITY * 2 + 3;
     for index in 0..count {
         write_cached(&cache, (index * 2 * PAGE_SIZE_4K) as u64, b"x").unwrap();
@@ -398,7 +399,7 @@ fn writeback_scans_sparse_windows_without_pinning_the_whole_range() {
 
 #[def_test]
 fn batched_writeback_bounds_submissions_and_completes_eof_tail() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     let capacity = crate::FolioBatch::CAPACITY;
     let visible_len = capacity * 2 * PAGE_SIZE_4K + 123;
     write_cached(&cache, 0, &vec![0x37; visible_len]).unwrap();
@@ -433,7 +434,7 @@ fn batched_writeback_bounds_submissions_and_completes_eof_tail() {
 
 #[def_test]
 fn batched_writeback_budget_stops_inside_second_window() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     let capacity = crate::FolioBatch::CAPACITY;
     let count = capacity * 2 + 1;
     write_cached(&cache, 0, &vec![1; count * PAGE_SIZE_4K]).unwrap();
@@ -464,7 +465,7 @@ fn batched_writeback_budget_stops_inside_second_window() {
 
 #[def_test]
 fn second_batch_error_finishes_prefix_and_leaves_unvisited_pages_dirty() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     let capacity = crate::FolioBatch::CAPACITY;
     let count = capacity * 2 + 3;
     write_cached(&cache, 0, &vec![1; count * PAGE_SIZE_4K]).unwrap();
@@ -499,7 +500,7 @@ fn second_batch_error_finishes_prefix_and_leaves_unvisited_pages_dirty() {
 
 #[def_test]
 fn redirty_in_previous_window_is_left_for_the_next_pass() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     let count = crate::FolioBatch::CAPACITY * 2 + 1;
     write_cached(&cache, 0, &vec![1; count * PAGE_SIZE_4K]).unwrap();
     let initial_budget = usize::MAX;
@@ -524,7 +525,7 @@ fn redirty_in_previous_window_is_left_for_the_next_pass() {
 
 #[def_test]
 fn skipped_and_completed_pages_remain_accounted_after_error() {
-    let cache = new_cache(PageCacheKind::FileBacked);
+    let cache = new_cache();
     write_cached(&cache, 0, &vec![1; PAGE_SIZE_4K * 3]).unwrap();
     // Model a folio redirtied while another writeback owns it.
     cache.with_folio(0, |folio| folio.unwrap().start_writeback());
@@ -554,7 +555,7 @@ fn skipped_and_completed_pages_remain_accounted_after_error() {
 #[def_test]
 fn batch_prefix_validation_preserves_progress_and_finishes_all_folios() {
     for (prefix, expected_remaining) in [(PAGE_SIZE_4K, 1), (PAGE_SIZE_4K * 2 + 1, 2)] {
-        let cache = new_cache(PageCacheKind::FileBacked);
+        let cache = new_cache();
         write_cached(&cache, 0, &vec![1; PAGE_SIZE_4K * 2]).unwrap();
         let mut nr_to_write = 2;
         let mut pages_skipped = 0;

@@ -12,7 +12,7 @@ use alloc::{
 
 use ksync::Mutex;
 use memaddr::PAGE_SIZE_4K;
-use pagecache::{Folio, PageCacheKind, PageIndex};
+use pagecache::Folio;
 use unittest::def_test;
 use vmobj::{
     MappingViewKind, MappingViewNotifier, MappingViewSpec, ObjectInvalidateWork, ObjectViewHit,
@@ -46,12 +46,7 @@ struct PanicWritebackOps;
 static PANIC_WRITEBACK_OPERATIONS: PanicWritebackOps = PanicWritebackOps;
 
 impl AddressSpaceOperations for PanicWritebackOps {
-    fn read_folio(
-        &self,
-        _mapping: &AddressSpace,
-        folio: &mut Folio,
-        _index: PageIndex,
-    ) -> VfsResult<usize> {
+    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<usize> {
         folio.data().fill(0);
         Ok(folio.data().len())
     }
@@ -69,11 +64,7 @@ impl AddressSpaceOperations for PanicWritebackOps {
 /// without forcing ordinary writeback.
 #[def_test]
 fn evict_discards_dirty_folios_without_writeback() {
-    let address_space = AddressSpace::new(
-        Weak::new(),
-        &PANIC_WRITEBACK_OPERATIONS,
-        PageCacheKind::InMemory,
-    );
+    let address_space = AddressSpace::new(Weak::new(), &PANIC_WRITEBACK_OPERATIONS);
     address_space
         .write_cached_bytes(0, b"hello world")
         .expect("page-cache write should succeed");
@@ -88,11 +79,7 @@ fn evict_discards_dirty_folios_without_writeback() {
 /// does not spuriously write back clean folios.
 #[def_test]
 fn evict_on_clean_address_space_writes_back_zero_folios() {
-    let address_space = AddressSpace::new(
-        Weak::new(),
-        &PANIC_WRITEBACK_OPERATIONS,
-        PageCacheKind::InMemory,
-    );
+    let address_space = AddressSpace::new(Weak::new(), &PANIC_WRITEBACK_OPERATIONS);
 
     // Evict on a clean cache should succeed.
     address_space.evict().expect("evict should succeed");

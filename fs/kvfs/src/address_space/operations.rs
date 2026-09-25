@@ -5,7 +5,7 @@
 //! Filesystem callbacks and default address-space operations.
 
 use memaddr::PAGE_SIZE_4K;
-use pagecache::{Folio, PageIndex};
+use pagecache::Folio;
 
 use super::{AddressSpace, ReadaheadControl, WritebackControl};
 use crate::{NodeFlags, NodeType, VfsError, VfsResult};
@@ -123,12 +123,8 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
     }
 
     /// Reads backing storage into a newly materialized folio.
-    fn read_folio(
-        &self,
-        mapping: &AddressSpace,
-        folio: &mut Folio,
-        index: PageIndex,
-    ) -> VfsResult<usize> {
+    fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<usize> {
+        let index = folio.index();
         let page = folio.data();
         let offset = index
             .checked_mul(page.len() as u64)
@@ -257,13 +253,7 @@ static IN_MEMORY_ADDRESS_SPACE_OPERATIONS: InMemoryAddressSpaceOperations =
     InMemoryAddressSpaceOperations;
 
 impl AddressSpaceOperations for InMemoryAddressSpaceOperations {
-    fn read_folio(
-        &self,
-        _mapping: &AddressSpace,
-        folio: &mut Folio,
-        page_index: PageIndex,
-    ) -> VfsResult<usize> {
-        let _ = page_index;
+    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<usize> {
         let page = folio.data();
         page.fill(0);
         Ok(page.len())
@@ -293,12 +283,7 @@ struct EmptyAddressSpaceOperations;
 static EMPTY_ADDRESS_SPACE_OPERATIONS: EmptyAddressSpaceOperations = EmptyAddressSpaceOperations;
 
 impl AddressSpaceOperations for EmptyAddressSpaceOperations {
-    fn read_folio(
-        &self,
-        _mapping: &AddressSpace,
-        _folio: &mut Folio,
-        _index: PageIndex,
-    ) -> VfsResult<usize> {
+    fn read_folio(&self, _mapping: &AddressSpace, _folio: &mut Folio) -> VfsResult<usize> {
         Err(VfsError::InvalidInput)
     }
 

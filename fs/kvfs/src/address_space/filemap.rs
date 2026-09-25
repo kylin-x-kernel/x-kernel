@@ -37,8 +37,8 @@ impl AddressSpace {
         self.i_pages.with_folio_or_create(
             index,
             |index| {
-                let mut folio = Folio::new_zeroed()?;
-                self.read_folio(&mut folio, index)?;
+                let mut folio = Folio::new_zeroed(index)?;
+                self.read_folio(&mut folio)?;
                 Ok(folio)
             },
             f,
@@ -79,8 +79,8 @@ impl AddressSpace {
         })
     }
 
-    fn read_folio(&self, folio: &mut Folio, index: PageIndex) -> VfsResult<usize> {
-        self.ops.read_folio(self, folio, index)
+    fn read_folio(&self, folio: &mut Folio) -> VfsResult<usize> {
+        self.ops.read_folio(self, folio)
     }
 
     fn dirty_folio(&self, folio: &mut Folio) -> VfsResult<bool> {

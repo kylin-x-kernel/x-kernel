@@ -8,7 +8,7 @@ use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 
 use ksync::Mutex;
 use memaddr::PAGE_SIZE_4K;
-use pagecache::{Folio, PageIndex};
+use pagecache::Folio;
 use unittest::def_test;
 
 use super::{
@@ -30,12 +30,7 @@ struct PrefixRetryWritebackOps {
 }
 
 impl AddressSpaceOperations for PrefixRetryWritebackOps {
-    fn read_folio(
-        &self,
-        _mapping: &AddressSpace,
-        folio: &mut Folio,
-        _index: PageIndex,
-    ) -> VfsResult<usize> {
+    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<usize> {
         folio.data().fill(0);
         Ok(folio.data().len())
     }

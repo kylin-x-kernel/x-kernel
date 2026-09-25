@@ -21,13 +21,14 @@ use crate::{Folio, FolioBatch, MappingPages, PageIndex};
 pub type WritebackRangeResult = Result<usize, (usize, KError)>;
 
 impl MappingPages {
-    fn finish_writeback(&self, index: PageIndex, folio: &Arc<Mutex<Folio>>, is_complete: bool) {
+    fn finish_writeback(&self, folio: &Arc<Mutex<Folio>>, is_complete: bool) {
         let mut state = self.state.lock();
+        let mut locked = folio.lock();
+        let index = locked.index();
         let is_current = state
             .entries
             .get(&index)
             .is_some_and(|current| Arc::ptr_eq(current, folio));
-        let mut locked = folio.lock();
         if is_current && !is_complete {
             locked.mark_dirty();
         }
@@ -57,7 +58,7 @@ impl MappingPages {
             // is representable even for a range ending at u64::MAX.
             *next_index = *index + 1;
             if let Some(folio) = state.entries.get(index) {
-                batch.push(*index, folio.clone());
+                batch.push(folio.clone());
                 if batch.is_full() {
                     return;
                 }
@@ -136,10 +137,11 @@ impl MappingPages {
 
         'scan: while scan_index < end_index {
             self.collect_dirty_folios(&mut scan_index, end_index, &mut candidates);
-            for &(index, ref folio) in candidates.iter() {
+            for folio in candidates.iter() {
                 if *nr_to_write == 0 {
                     break 'scan;
                 }
+                let index = folio.lock().index();
                 let page_start = index
                     .checked_mul(PAGE_SIZE_4K as u64)
                     .ok_or(KError::InvalidInput)?;
@@ -157,10 +159,10 @@ impl MappingPages {
                 let result = write_folio_fn(index, &locked.data()[..valid_len], valid_len);
                 drop(locked);
                 if let Err(error) = result {
-                    self.finish_writeback(index, folio, false);
+                    self.finish_writeback(folio, false);
                     return Err(error);
                 }
-                self.finish_writeback(index, folio, true);
+                self.finish_writeback(folio, true);
                 *nr_to_write -= 1;
             }
         }
@@ -219,12 +221,12 @@ impl MappingPages {
                 (completed_bytes, error)
             };
 
-            for (position, (index, folio)) in batch_folios.iter().enumerate() {
+            for (position, folio) in batch_folios.iter().enumerate() {
                 // A contiguous submission contains full pages followed by
                 // at most one EOF tail. No per-entry byte length is needed.
                 let folio_end = ((position + 1) * PAGE_SIZE_4K).min(batch_data.len());
                 let is_complete = folio_end <= completed_bytes;
-                self.finish_writeback(*index, folio, is_complete);
+                self.finish_writeback(folio, is_complete);
                 if is_complete {
                     *nr_to_write -= 1;
                 }
@@ -236,10 +238,11 @@ impl MappingPages {
 
         'scan: while scan_index < end_index {
             self.collect_dirty_folios(&mut scan_index, end_index, &mut candidates);
-            for &(index, ref folio) in candidates.iter() {
+            for folio in candidates.iter() {
                 if *nr_to_write == 0 {
                     break 'scan;
                 }
+                let index = folio.lock().index();
                 let page_start = index
                     .checked_mul(PAGE_SIZE_4K as u64)
                     .ok_or(KError::InvalidInput)?;
@@ -293,7 +296,7 @@ impl MappingPages {
                 }
                 batch_data.extend_from_slice(&locked.data()[..valid_len]);
                 drop(locked);
-                batch_folios.push(index, folio.clone());
+                batch_folios.push(folio.clone());
                 next_index = Some(index + 1);
             }
         }

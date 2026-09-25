@@ -40,6 +40,8 @@ impl MappingPages {
     ///
     /// Dirty-state changes made by `f` are reflected in the cache's writeback
     /// index before this method returns.
+    /// The factory must return a folio at the requested index; a mismatch is
+    /// rejected with `InvalidInput` before publication.
     pub fn with_folio_or_create<R>(
         &self,
         index: PageIndex,
@@ -51,8 +53,10 @@ impl MappingPages {
             if let Some(folio) = state.entries.get(&index) {
                 folio.clone()
             } else {
-                let mut folio = instantiate_folio(index)?;
-                folio.set_warn_on_dirty_drop(self.warn_on_dirty_drop());
+                let folio = instantiate_folio(index)?;
+                if folio.index() != index {
+                    return Err(KError::InvalidInput);
+                }
                 let folio = Arc::new(Mutex::new(folio));
                 state.entries.insert(index, folio.clone());
                 folio
@@ -80,9 +84,8 @@ impl MappingPages {
         if end > PAGE_SIZE_4K {
             return Err(KError::InvalidInput);
         }
-        let mut folio = Folio::new_zeroed()?;
+        let mut folio = Folio::new_zeroed(index)?;
         folio.data()[offset..end].copy_from_slice(src);
-        folio.set_warn_on_dirty_drop(self.warn_on_dirty_drop());
         let mut state = self.state.lock();
         if state.entries.contains_key(&index) {
             return Ok(false);

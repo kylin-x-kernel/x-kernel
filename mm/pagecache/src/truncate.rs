@@ -52,22 +52,24 @@ impl MappingPages {
     fn remove_folios_from(state: &mut MappingPagesState, first_index: PageIndex) {
         let mut batch = FolioBatch::new();
         loop {
-            for (index, folio) in state
+            for (_, folio) in state
                 .entries
                 .range(first_index..)
                 .take(FolioBatch::CAPACITY)
             {
-                batch.push(*index, folio.clone());
+                batch.push(folio.clone());
             }
             if batch.len() == 0 {
                 break;
             }
             // The state lock preserves identity throughout each removal. The
             // owner authorizes discarding data, so clear dirty before eviction.
-            for (index, folio) in batch.iter() {
-                folio.lock().clear_dirty();
-                state.entries.remove(index);
-                state.dirty_marks.remove(index);
+            for folio in batch.iter() {
+                let mut locked = folio.lock();
+                let index = locked.index();
+                locked.clear_dirty();
+                state.entries.remove(&index);
+                state.dirty_marks.remove(&index);
             }
             batch.clear();
         }
@@ -93,5 +95,13 @@ impl MappingPages {
         folio.mark_dirty();
         drop(folio);
         state.dirty_marks.insert(tail_index);
+    }
+}
+
+impl Drop for MappingPages {
+    fn drop(&mut self) {
+        // Exclusive container ownership excludes in-flight mapping operations.
+        // Clear discarded data even when an external Arc keeps a folio alive.
+        Self::remove_folios_from(&mut self.state.lock(), 0);
     }
 }
