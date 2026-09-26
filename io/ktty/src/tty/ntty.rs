@@ -2,12 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use console_driver::runtime::{active_console_id, read_active_console, write_active_console};
 use klazy::lazy_static;
-use ktask::future::register_irq_waker;
 
 use super::Tty;
 use crate::terminal::ldisc::{ProcessMode, TtyConfig, TtyRead, TtyWrite};
@@ -46,7 +45,11 @@ fn backend_state() -> ConsoleBackendState {
 ///
 /// If no suitable console handle is found, the native TTY continues to use
 /// the direct `khal::console` path.
+/// Called in late-init task context after ordinary worker pools are ready.
 pub fn try_handoff_console() {
+    // Connect input even when userspace has not opened the TTY yet. IRQs before
+    // this point only collect bytes in the shared stdout port's receive ring.
+    let _tty = &*N_TTY;
     if backend_state() == ConsoleBackendState::RuntimeOwned {
         return;
     }
@@ -130,18 +133,25 @@ lazy_static! {
 }
 
 fn new_n_tty() -> Arc<NTtyDriver> {
-    Tty::new(
+    let has_input_irq = khal::console::interrupt_id().is_some();
+    let tty = Tty::new(
         Arc::default(),
         TtyConfig {
             reader: Console,
             writer: Console,
-            process_mode: if let Some(irq) = khal::console::interrupt_id() {
-                ProcessMode::External(Box::new(move |context: &mut kpoll::PollContext<'_>| {
-                    register_irq_waker(irq, context)
-                }))
+            process_mode: if has_input_irq {
+                ProcessMode::Work(khal::percpu::this_cpu_id())
             } else {
                 ProcessMode::Manual
             },
         },
-    )
+    );
+    if has_input_irq {
+        let (work, cpu_id) = tty.ldisc.lock().input_work().unwrap();
+        console_driver::serial::stdout_port()
+            .expect("console input IRQ requires a stdout port")
+            .attach_input_work(work, cpu_id)
+            .expect("failed to connect console input work");
+    }
+    tty
 }

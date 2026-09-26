@@ -10,10 +10,13 @@ use core::{
     task::Poll,
 };
 
+use console_driver::serial::InputWork;
+use kcpu_id_map::LogicalCpuId;
 use kerrno::{KError, KResult};
 use kpoll::{PollContext, PollRegisterError, PollRegistrations, PollSet};
 use ksignal::SignalInfo;
 use ktask::future::block_on;
+use kworkng::{SubmitError, WorkHandle};
 use linux_raw_sys::general::{
     ECHOCTL, ECHOK, ICRNL, IGNCR, ISIG, VEOF, VERASE, VKILL, VMIN, VTIME,
 };
@@ -25,6 +28,7 @@ use ringbuf::{
 use crate::terminal::{Terminal, termios::Termios2};
 
 const BUF_SIZE: usize = 80;
+const INPUT_WORK_BUDGET_BYTES: usize = 256;
 
 type ReadBuf = Arc<ringbuf::StaticRb<u8, BUF_SIZE>>;
 
@@ -43,9 +47,16 @@ pub enum ProcessMode {
     /// Spawns task for processing inputs, relying on external events to wake
     /// up.
     ///
-    /// In this mode a dedicated task is spawned to dispatch_irq inputs. When there's
+    /// In this mode a dedicated task processes inputs. When there's
     /// nothing to read the argument is invoked to register rx waker.
     External(ExternalRegisterFn),
+    /// Processes input in finite task-context work rounds on a ready CPU.
+    ///
+    /// Construct in sleepable context after normal-worker startup.
+    /// The owner must connect the
+    /// work to its input source, submit an initial check, and stop submissions
+    /// before permanently shutting down the work at teardown.
+    Work(LogicalCpuId),
     /// Do not process inputs.
     ///
     /// This is only used by the master side of pseudo tty. The argument is the
@@ -80,6 +91,20 @@ struct InputReader<R, W> {
     line_read: Option<usize>,
     clear_line_buf: Arc<AtomicBool>,
 }
+
+#[derive(Debug, PartialEq, Eq)]
+enum InputStop {
+    InputEmpty,
+    OutputFull,
+    BudgetExhausted,
+}
+
+struct InputProgress {
+    bytes_consumed: usize,
+    bytes_published: usize,
+    stop: InputStop,
+}
+
 impl<R: TtyRead, W: TtyWrite> InputReader<R, W> {
     /// Pulls bytes from the reader into the line buffer and pushes
     /// processed bytes toward the consumer.
@@ -89,22 +114,65 @@ impl<R: TtyRead, W: TtyWrite> InputReader<R, W> {
     /// Only via the internal `try_push(..).unwrap()` if the output ring
     /// were full; the `is_full` guard above the push excludes that path.
     pub fn poll(&mut self) -> bool {
+        self.process_batch(usize::MAX, usize::MAX).bytes_published > 0
+    }
+
+    fn process_budget(&mut self, budget: usize) -> InputProgress {
+        let mut total = InputProgress {
+            bytes_consumed: 0,
+            bytes_published: 0,
+            stop: InputStop::InputEmpty,
+        };
+        loop {
+            let progress = self.process_batch(
+                budget - total.bytes_consumed,
+                budget - total.bytes_published,
+            );
+            total.bytes_consumed += progress.bytes_consumed;
+            total.bytes_published += progress.bytes_published;
+            total.stop = progress.stop;
+            if total.stop != InputStop::InputEmpty
+                || (progress.bytes_consumed == 0 && progress.bytes_published == 0)
+            {
+                return total;
+            }
+        }
+    }
+
+    fn process_batch(&mut self, input_budget: usize, output_budget: usize) -> InputProgress {
+        let mut progress = InputProgress {
+            bytes_consumed: 0,
+            bytes_published: 0,
+            stop: InputStop::InputEmpty,
+        };
         if self.clear_line_buf.swap(false, Ordering::Relaxed) {
             self.line_buf.clear();
+            self.line_read = None;
+        }
+        if input_budget == 0 || output_budget == 0 {
+            progress.stop = InputStop::BudgetExhausted;
+            return progress;
         }
         if self.read_range.is_empty() {
             let read = self.reader.read(&mut self.read_buf);
             self.read_range = 0..read;
         }
         let term = self.terminal.load_termios();
-        let mut sent = 0;
         loop {
+            if progress.bytes_consumed == input_budget || progress.bytes_published == output_budget
+            {
+                progress.stop = InputStop::BudgetExhausted;
+                break;
+            }
             if let Some(offset) = &mut self.line_read {
-                let read = self.buf_tx.push_slice(&self.line_buf[*offset..]);
+                let pending = &self.line_buf[*offset..];
+                let count = pending.len().min(output_budget - progress.bytes_published);
+                let read = self.buf_tx.push_slice(&pending[..count]);
                 if read == 0 {
+                    progress.stop = InputStop::OutputFull;
                     break;
                 }
-                sent += read;
+                progress.bytes_published += read;
                 *offset += read;
                 if *offset == self.line_buf.len() {
                     self.line_read = None;
@@ -112,11 +180,16 @@ impl<R: TtyRead, W: TtyWrite> InputReader<R, W> {
                 }
                 continue;
             }
-            if self.buf_tx.is_full() || self.read_range.is_empty() {
+            if self.buf_tx.is_full() {
+                progress.stop = InputStop::OutputFull;
+                break;
+            }
+            if self.read_range.is_empty() {
                 break;
             }
             let mut ch = self.read_buf[self.read_range.start];
             self.read_range.start += 1;
+            progress.bytes_consumed += 1;
 
             if ch == b'\r' {
                 if term.has_iflag(IGNCR) {
@@ -134,7 +207,7 @@ impl<R: TtyRead, W: TtyWrite> InputReader<R, W> {
             }
             if !term.canonical() {
                 self.buf_tx.try_push(ch).unwrap();
-                sent += 1;
+                progress.bytes_published += 1;
                 continue;
             }
 
@@ -158,13 +231,13 @@ impl<R: TtyRead, W: TtyWrite> InputReader<R, W> {
                 continue;
             }
 
-            if ch.is_ascii_graphic() {
+            if ch.is_ascii_graphic() || matches!(ch, b' ' | b'\t') {
                 self.line_buf.push(ch);
                 continue;
             }
         }
 
-        sent > 0
+        progress
     }
 
     fn check_send_signal(&self, term: &Termios2, ch: u8) {
@@ -218,7 +291,19 @@ impl<R: TtyRead> SimpleReader<R> {
 enum Processor<R, W> {
     Manual(InputReader<R, W>),
     External(Arc<PollSet>),
+    Work {
+        work: InputWork,
+        cpu_id: LogicalCpuId,
+        poll_rx: Arc<PollSet>,
+    },
     None(SimpleReader<R>, Arc<PollSet>),
+}
+
+fn queue_input_work(cpu_id: LogicalCpuId, work: &InputWork) {
+    match work.queue_default(Some(cpu_id)) {
+        Ok(_) | Err(SubmitError::AlreadyQueued | SubmitError::Closed) => {}
+        error => warn!("TTY input work could not be queued: {error:?}"),
+    }
 }
 
 pub struct LineDiscipline<R, W> {
@@ -230,6 +315,11 @@ pub struct LineDiscipline<R, W> {
 }
 
 impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
+    /// Creates input processing state without starting Work-mode callbacks.
+    ///
+    /// # Panics
+    /// Work mode requires sleepable context and initialized normal workers.
+    /// Allocation failure is fatal.
     pub fn new(terminal: Arc<Terminal>, config: TtyConfig<R, W>) -> Self {
         let (buf_tx, buf_rx) = ReadBuf::default().split();
 
@@ -286,6 +376,32 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
                 );
                 Processor::External(poll_rx)
             }
+            ProcessMode::Work(cpu_id) => {
+                let poll_rx = Arc::new(PollSet::new());
+                let ready = poll_rx.clone();
+                let reader = ksync::Mutex::new(reader);
+                let work: InputWork = Arc::new_cyclic(|weak| {
+                    // Requeue must not keep the callback's owner alive forever.
+                    let weak = weak.clone();
+                    let callback: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+                        let progress = reader.lock().process_budget(INPUT_WORK_BUDGET_BYTES);
+                        if progress.bytes_published > 0 {
+                            ready.wake();
+                        }
+                        if progress.stop == InputStop::BudgetExhausted
+                            && let Some(work) = weak.upgrade()
+                        {
+                            queue_input_work(cpu_id, &work);
+                        }
+                    });
+                    WorkHandle::new(callback).expect("TTY input requires normal workers")
+                });
+                Processor::Work {
+                    work,
+                    cpu_id,
+                    poll_rx,
+                }
+            }
             ProcessMode::None(poll_rx) => {
                 // Destruct the reader here
                 Processor::None(
@@ -310,6 +426,18 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
     pub fn drain_input(&mut self) {
         self.buf_rx.clear();
         self.clear_line_buf.store(true, Ordering::Relaxed);
+        if let Processor::Work { cpu_id, work, .. } = &self.processor {
+            queue_input_work(*cpu_id, work);
+        }
+    }
+
+    /// Returns the work and its fixed queue binding for host input integration.
+    /// Cloning it does not start processing or keep the line discipline alive.
+    pub(crate) fn input_work(&self) -> Option<(InputWork, LogicalCpuId)> {
+        match &self.processor {
+            Processor::Work { work, cpu_id, .. } => Some((work.clone(), *cpu_id)),
+            _ => None,
+        }
     }
 
     pub fn poll_read(&mut self) -> bool {
@@ -339,7 +467,9 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
                 // recheck by waking the current waiter.
                 context.wake_by_ref();
             }
-            Processor::External(set) | Processor::None(_, set) => {
+            Processor::External(set)
+            | Processor::None(_, set)
+            | Processor::Work { poll_rx: set, .. } => {
                 context.register(set)?;
             }
         }
@@ -380,7 +510,11 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
         }
 
         let read = self.buf_rx.pop_slice(buf);
-        self.poll_tx.wake();
+        if let Processor::Work { cpu_id, work, .. } = &self.processor {
+            queue_input_work(*cpu_id, work);
+        } else {
+            self.poll_tx.wake();
+        }
         Ok(read)
     }
 }
@@ -713,5 +847,124 @@ mod ldisc_tests {
         ldisc.register_rx(&mut context).unwrap();
 
         assert!(wake_counter.woke.load(Ordering::Relaxed));
+    }
+
+    fn await_input<R: TtyRead>(ldisc: &mut LineDiscipline<R, MockWriter>) {
+        let mut registrations = PollRegistrations::new();
+        block_on(poll_fn(|cx| {
+            ldisc.register_rx(&mut registrations.context(cx)).unwrap();
+            if ldisc.poll_read() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }));
+    }
+
+    #[def_test]
+    fn work_drains_multiple_budgets_and_resumes_after_read_space() {
+        for raw in [false, true] {
+            let mut data = b"ab \t".repeat(INPUT_WORK_BUDGET_BYTES);
+            data.push(b'\n');
+            let terminal = Arc::new(Terminal::default());
+            if raw {
+                set_termios(&terminal, |term| term.c_lflag &= !(ICANON | ISIG | ECHO));
+            }
+            let mut ldisc = LineDiscipline::new(
+                terminal,
+                TtyConfig {
+                    reader: MockReader::with_chunk_limit(&data, 7),
+                    writer: MockWriter::default(),
+                    process_mode: ProcessMode::Work(khal::percpu::this_cpu_id()),
+                },
+            );
+            let (work, cpu_id) = ldisc.input_work().unwrap();
+            let weak = Arc::downgrade(&work);
+            ldisc.drain_input();
+            let mut received = Vec::new();
+            while received.len() < data.len() {
+                await_input(&mut ldisc);
+                let mut bytes = [0; 11];
+                let count = ldisc.read(&mut bytes).unwrap();
+                received.extend_from_slice(&bytes[..count]);
+            }
+            work.shutdown().unwrap();
+            assert_eq!(received, data);
+            ldisc.drain_input();
+            assert_eq!(work.queue_default(Some(cpu_id)), Err(SubmitError::Closed));
+            assert!(!ldisc.poll_read());
+            drop(ldisc);
+            drop(work);
+            assert!(weak.upgrade().is_none());
+        }
+    }
+
+    #[def_test]
+    fn input_and_pending_output_each_obey_the_budget() {
+        let (mut ldisc, _) = new_manual_ldisc(&[b'a'; 600], |_| {});
+        let Processor::Manual(reader) = &mut ldisc.processor else {
+            unreachable!()
+        };
+        let progress = reader.process_budget(256);
+        assert_eq!(progress.bytes_consumed, 256);
+        assert_eq!(progress.bytes_published, 0);
+        assert_eq!(progress.stop, InputStop::BudgetExhausted);
+        reader.line_read = Some(0);
+        let progress = reader.process_budget(7);
+        assert_eq!(progress.bytes_published, 7);
+        assert_eq!(progress.stop, InputStop::BudgetExhausted);
+        reader.clear_line_buf.store(true, Ordering::Relaxed);
+        reader.process_budget(0);
+        assert!(reader.line_read.is_none());
+    }
+
+    #[def_test]
+    fn running_empty_read_keeps_a_concurrent_submission() {
+        struct Reader {
+            entered: Arc<AtomicBool>,
+            release: Arc<AtomicBool>,
+            gate: Arc<ktask::WaitQueue>,
+            source: MockReader,
+        }
+        impl TtyRead for Reader {
+            fn read(&mut self, buf: &mut [u8]) -> usize {
+                assert!(ktask::is_sleepable_context());
+                if !self.entered.swap(true, Ordering::AcqRel) {
+                    self.gate.notify_all(false);
+                    self.gate
+                        .wait_until(|| self.release.load(Ordering::Acquire));
+                    return 0;
+                }
+                self.source.read(buf)
+            }
+        }
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(ktask::WaitQueue::new());
+        let mut ldisc = LineDiscipline::new(
+            Arc::default(),
+            TtyConfig {
+                reader: Reader {
+                    entered: entered.clone(),
+                    release: release.clone(),
+                    gate: gate.clone(),
+                    source: MockReader::new(b"z\n"),
+                },
+                writer: MockWriter::default(),
+                process_mode: ProcessMode::Work(khal::percpu::this_cpu_id()),
+            },
+        );
+        let (work, cpu) = ldisc.input_work().unwrap();
+        queue_input_work(cpu, &work);
+        gate.wait_until(|| entered.load(Ordering::Acquire));
+        let submitted = work.queue_default(Some(cpu));
+        release.store(true, Ordering::Release);
+        gate.notify_all(false);
+        await_input(&mut ldisc);
+        let mut bytes = [0; 8];
+        let count = ldisc.read(&mut bytes).unwrap();
+        work.shutdown().unwrap();
+        assert!(submitted.is_ok());
+        assert_eq!(&bytes[..count], b"z\n");
     }
 }

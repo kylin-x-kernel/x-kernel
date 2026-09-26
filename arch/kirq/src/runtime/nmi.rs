@@ -151,7 +151,6 @@ pub fn unregister_nmi(desc: IrqDesc) -> bool {
         // Carry the full stored descriptor so the disable is not silently
         // skipped for lines whose hwirq falls above DYNAMIC_VIRQ_BASE.
         set_platform_irq_enabled(stored_desc, false);
-        super::notify::remove_irq_waiters(virq);
     }
     true
 }

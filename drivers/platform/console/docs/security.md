@@ -31,7 +31,7 @@ configuration at call time.
   NS16550) over the same hardware window or I/O ports.
   The handles create no reference to the locked `Backend` and touch only status
   and data registers, without accessing mutable storage owned by Rust.
-- NMI output does not read, dereference, or forcibly unlock `SpinNoIrq<Backend>`.
+- NMI output does not read, dereference, or forcibly unlock `SpinNoIrq<SerialIo>`.
   It creates no `&mut Backend` overlapping the interrupted guard's borrow.
 
 ## Thread Safety
@@ -45,6 +45,25 @@ This path provides no Linux nbcon-style ownership arbitration and does not suppo
 concurrent changes to the baud rate or other configuration.
 
 ## Threats and Failure Handling
+
+Prepared receive buffers hold untrusted UART bytes without interpreting them.
+They have a fixed 4096-byte capacity and never overwrite unread data. Overflow
+discards the new byte and increments a saturating software-loss count; hardware
+FIFO loss is separate and cannot be inferred from this count. Each collection
+attempt is bounded to 256 hardware samples, even when the buffer is full.
+Bounded sampling cannot recover from a faulting or stalled individual MMIO access.
+Preparation can fail allocation without installing partial state, and allocation
+or disposal of an unused preparation occurs outside the port lock. Receive
+methods never call wake callbacks or acquire task locks under that lock.
+The stdout IRQ path enables storage before action registration. Allocation
+failure prevents publishing an unprepared receiver. Early IRQs may collect bytes
+before the TTY work is attached; attachment schedules an initial drain.
+
+Prepared kworkng publication does not allocate or sleep and happens outside the
+port lock. AlreadyQueued coalesces input notifications; Closed is expected after
+shutdown. Unexpected rejection is logged, not retried in IRQ context. Owners
+must detach and successfully shutdown before releasing callback resources;
+shutdown closes admission for stale clones and waits for execution to end.
 
 | Risk | Trigger | Mitigation and Residual Limitations |
 |------|---------|------------------------------------|

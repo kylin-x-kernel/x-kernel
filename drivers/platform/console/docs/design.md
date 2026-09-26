@@ -4,11 +4,12 @@
 
 This crate connects `khal::console::ConsoleIf` to the platform UART and shares
 the early stdout instance with the runtime serial driver.
-This document focuses on the boundary between normal output and NMI emergency output.
+It separates normal and NMI emergency output and owns optional bounded input storage.
 
 - `src/lib.rs`: Resolves stdout, maps MMIO, implements `ConsoleIf`, and registers input IRQs.
 - `src/serial.rs`: Defines one `SerialPort` per UART, publishes stdout, and shares instances.
 - `src/serial/emergency.rs`: Transmits emergency output without taking ordinary locks.
+- `src/serial/input.rs`: Stores bounded input and counts software overflow under the port lock.
 - `src/ns16550_mmio.rs`: Accesses NS16550 MMIO registers using the stride and width specified by the device tree.
 - `src/runtime.rs`: Selects the runtime console and adapts it to a character device.
 
@@ -25,7 +26,7 @@ subsystem lock and the per-device lock non-nested is deliberate
 
 ```text
 runtime::write_active_console -> active_handle -> CharDevice::write
-                              -> SerialPort::write_data  -> inner: SpinNoIrq<Backend> -> UART
+                              -> SerialPort::write_data  -> io: SpinNoIrq<SerialIo> -> UART
 Emergency output -> SerialPort::write_data_atomic -> EmergencyTx              -> UART
 runtime::read_active_console  -> active_handle -> CharDevice::read
                               -> SerialPort::read_data   -> UART
@@ -38,7 +39,7 @@ the same construction path.
 The stdout instance is published through `LazyInit` after construction;
 the early console and runtime driver share one `Arc<SerialPort>`.
 
-Emergency transmission does not access `inner`.
+Emergency transmission does not access `io`.
 Each backend builds a local register handle containing only fixed address information
 and calls its nonblocking transmit primitive without initializing the device:
 PL011 uses `arm_pl011`'s local `Pl011Uart` handle and `try_putchar`;
@@ -47,6 +48,40 @@ Each transmitted byte is polled at most 100,000 times.
 A failure immediately ends output of the current byte slice.
 This is an iteration budget, not a wall-clock time guarantee.
 Newline and backspace conversions follow the corresponding backend's transmit semantics.
+
+## Receive Storage
+
+`SerialIo` owns the backend and optional `SerialInput` under the same port
+lock. `SerialInput` uses a `ringbuf::LocalRb` with a fixed 4096-byte heap allocation;
+the exclusive port lock makes separate producer/consumer synchronization unnecessary.
+Storage preparation allocates outside the lock, rechecks before installation,
+and preserves an existing buffer on repeated preparation. No normal receive
+operation allocates or grows the buffer.
+
+Collection reads at most 256 hardware bytes, retaining older buffered data and
+counting rejected new bytes with a saturating `u64`. Reading consumes buffered
+bytes first and, when necessary, samples at most one further hardware batch.
+An empty output slice neither consumes input nor reads hardware. Boot and runtime
+handles share this state; `getchar` cannot bypass older buffered input.
+
+The stdout IRQ registration path prepares storage before publishing its action.
+The action acknowledges and collects a receive batch under the port lock, then
+submits the bound `InputWork` after unlocking. An unrelated IRQ reports unhandled.
+Ports without prepared IRQ input retain direct hardware reads.
+
+`InputWork` is a shared prepared `kworkng::WorkHandle`. Its outer Arc allows the
+TTY callback to hold a Weak for self-requeue rather than form an ownership cycle.
+The binding records a fixed normal-worker CPU, not hardware IRQ affinity.
+TTY late-init attaches the work after normal workers are ready and submits an
+initial pass to process pre-attachment bytes and sub-threshold FIFO tails.
+Callbacks never execute inline in the submitting IRQ.
+
+Attachment rejects duplicates. Owners serialize attach/detach, detach the
+producer, then call shutdown without port or TTY locks. Retained IRQ clones can
+submit until shutdown closes admission; successful shutdown also drains callbacks.
+Callback resources remain live through this barrier. Last-handle Drop is not a
+synchronous barrier. Callbacks must not strongly own their port. The native
+console is permanent; dynamic switching and UART hot-unplug are not implemented.
 
 ## Calling Constraints and Concurrency
 

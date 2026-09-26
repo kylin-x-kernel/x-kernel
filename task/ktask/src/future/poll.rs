@@ -2,12 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Async helpers built on top of pollable I/O and IRQ wakers.
+//! Async helpers built on top of pollable I/O readiness.
 
 use core::{future::poll_fn, task::Poll};
 
 use kerrno::{KError, KResult};
-use kpoll::{IoEvents, PollContext, PollRegisterError, PollRegistrations, Pollable};
+use kpoll::{IoEvents, PollRegisterError, PollRegistrations, Pollable};
 
 /// A helper to wrap a synchronous non-blocking I/O function into an
 /// asynchronous function.
@@ -54,12 +54,4 @@ fn map_register_error(error: PollRegisterError) -> KError {
         PollRegisterError::NoMemory | PollRegisterError::IdExhausted => KError::NoMemory,
         PollRegisterError::InvalidState => KError::InvalidInput,
     }
-}
-
-/// Registers a waker for the given IRQ number.
-pub fn register_irq_waker(
-    irq: usize,
-    context: &mut PollContext<'_>,
-) -> Result<(), PollRegisterError> {
-    kirq::register_irq_waker(irq, context)
 }

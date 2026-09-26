@@ -16,6 +16,8 @@ ns16550-mmio = []
 ns16550-ioport = ["dep:uart_16550"]
 
 [dependencies]
+kworkng.workspace = true
+kcpu_id_map.workspace = true
 driver_base = { workspace = true }
 kclass = { workspace = true, features = ["char"] }
 kdevice = { workspace = true }
@@ -25,6 +27,7 @@ kirq = { workspace = true }
 kspin = { workspace = true }
 lazyinit = { workspace = true }
 log = { workspace = true }
+ringbuf = { workspace = true }
 memspace = { workspace = true }
 of = { workspace = true }
 unittest.workspace = true

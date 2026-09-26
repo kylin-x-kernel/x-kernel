@@ -91,7 +91,7 @@ impl Drop for DispatchedIrq {
     }
 }
 
-/// A pending interrupt claimed by the platform, before subscriber dispatch.
+/// A pending interrupt claimed by the platform, before action dispatch.
 #[derive(Debug)]
 pub struct PendingIrq {
     source: IrqRef,

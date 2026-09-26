@@ -83,7 +83,7 @@
 | T-01 | 大量 waiter 耗尽内存 | 中 | 用户并发 poll/epoll 放大 | `try_reserve` 返回 `NoMemory`；syscall 映射 `ENOMEM` |
 | T-02 | 等待结束后残留 waiter | 中 | 缺少 owner / 忘记 clear | 普通 poll 经 `PollContext`，单源 bridge 持有单个 guard；RAII Drop 注销 |
 | T-03 | ABA 误删新 waiter | 高 | slot 复用后旧 guard drop | token 含单调 `id` |
-| T-04 | IRQ wake 持锁重入死锁 | 高 | 外层锁内调用 `wake` 且回调反取锁 | wake 锁外执行；`kirq::notify` 先 clone 再 unlock；register clone / cancel drop 均在锁外 |
+| T-04 | IRQ wake 持锁重入死锁 | 高 | 外层锁内调用 `wake` 且回调反取锁 | wake 在外层锁释放后执行；register clone / cancel drop 均在锁外 |
 | T-05 | OOM panic 代替错误返回 | 中 | 注册路径裸 `push`/`with_capacity` | 注册路径统一 `try_reserve`；已知限制仅限 `PollSet::new` 的 `Arc::new` |
 | T-06 | 迟到 wake 被当成最终状态 | 低 | cancel 与 wake 竞态 | 文档约定 wake 可迟到；调用方必须 recheck |
 | T-07 | Completion lost wake | 高 | 只 register 不 recheck，或把 wake 当完成态 | rustdoc 和 design 强制 `try_wait -> register -> try_wait` 协议 |
@@ -134,7 +134,7 @@
   wait / interruptible / knet-rx；注册失败不得在无 waiter 时入睡）。
 - [x] register 之后一定有 readiness recheck（含 `poll_interrupt` Ready 竞态）。
 - [ ] 注册增长使用 `try_reserve`，wake 路径锁内不分配。
-- [x] `wake` 不在持锁状态下调用 `Waker`（含 `kirq::notify` 全局表锁）。
+- [x] `wake` 不在持锁状态下调用 `Waker`（含 IRQ descriptor 状态锁）。
 - [x] `Completion` 文档要求 register 后 recheck，并说明 `complete_all/reinit` 约束。
 - [ ] 外层锁顺序不会与 wake 回调反向。
 - [ ] epoll interest 在 DEL/ONESHOT/Drop 时清空 registration，MOD 原地更新配置并重装 registration。

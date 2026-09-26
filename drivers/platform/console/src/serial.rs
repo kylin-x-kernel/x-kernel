@@ -14,23 +14,33 @@
 //! lock, so an NMI can print even after interrupting a lock holder.
 
 mod emergency;
+mod input;
 
-use alloc::sync::Arc;
+use alloc::{boxed::Box, collections::TryReserveError, sync::Arc};
 
 #[cfg(feature = "pl011")]
 use arm_pl011::Pl011Uart;
+use driver_base::DriverError;
 use emergency::EmergencyTx;
+use input::SerialInput;
+use kcpu_id_map::LogicalCpuId;
 use khal::mem::PhysAddr;
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 use khal::mem::VirtAddr;
-use kirq::IrqDesc;
+use kirq::{IrqDesc, IrqEvent};
 use kspin::SpinNoIrq;
+use kworkng::{SubmitError, WorkHandle};
 use lazyinit::LazyInit;
 #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
 use uart_16550::SerialPort as SerialPort16550;
 
 #[cfg(feature = "ns16550-mmio")]
 use crate::ns16550_mmio::{Port as Ns16550MmioPort, SerialRegWidth};
+
+/// Prepared normal-worker input processing shared by the TTY and its UART.
+/// The outer Arc permits weak self-requeue without a callback ownership cycle.
+/// Prepare after worker startup; detach and shutdown before releasing resources.
+pub type InputWork = Arc<WorkHandle<Box<dyn Fn() + Send + Sync>>>;
 
 /// Physical identity of a UART.
 ///
@@ -90,19 +100,21 @@ impl Backend {
         }
     }
 
-    fn ack_interrupt(&mut self) {
+    fn ack_interrupt(&mut self) -> bool {
         match self {
             #[cfg(feature = "pl011")]
             Backend::Pl011(uart) => {
                 if uart.is_receive_interrupt() {
                     uart.ack_interrupts();
+                    return true;
                 }
+                false
             }
             // The NS16550 backends have no explicit ack in the existing code.
             #[cfg(feature = "ns16550-mmio")]
-            Backend::Ns16550Mmio(_) => {}
+            Backend::Ns16550Mmio(_) => false,
             #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
-            Backend::Ns16550IoPort(_) => {}
+            Backend::Ns16550IoPort(_) => false,
         }
     }
 }
@@ -136,10 +148,15 @@ fn ns16550_mmio_putchar(uart: &mut Ns16550MmioPort, c: u8) {
 /// Use [`Self::read_data`] and [`Self::write_data`] for normal I/O, or
 /// [`Self::write_data_atomic`] for emergency output that bypasses the port lock.
 pub struct SerialPort {
-    inner: SpinNoIrq<Backend>,
+    io: SpinNoIrq<SerialIo>,
     emergency_tx: EmergencyTx,
     ident: SerialIdent,
     role: SerialRole,
+}
+
+struct SerialIo {
+    backend: Backend,
+    input: Option<SerialInput>,
 }
 
 impl SerialPort {
@@ -240,7 +257,10 @@ impl SerialPort {
         role: SerialRole,
     ) -> Self {
         Self {
-            inner: SpinNoIrq::new(backend),
+            io: SpinNoIrq::new(SerialIo {
+                backend,
+                input: None,
+            }),
             emergency_tx,
             ident,
             role,
@@ -251,9 +271,9 @@ impl SerialPort {
     ///
     /// Must not be called from NMI context; use [`Self::write_data_atomic`].
     pub fn write_data(&self, bytes: &[u8]) {
-        let mut backend = self.inner.lock();
+        let mut io = self.io.lock();
         for &c in bytes {
-            backend.send_byte(c);
+            io.backend.send_byte(c);
         }
     }
 
@@ -267,12 +287,23 @@ impl SerialPort {
         self.emergency_tx.write_data(bytes);
     }
 
+    /// Reads one byte through the same input state as [`Self::read_data`].
+    /// Not NMI-safe.
     pub fn getchar(&self) -> Option<u8> {
-        self.inner.lock().try_receive()
+        let mut byte = [0];
+        (self.read_data(&mut byte) != 0).then_some(byte[0])
     }
 
+    /// Reads available input without waiting, preserving buffered byte order.
+    ///
+    /// Unprepared ports read hardware directly. Prepared ports consume stored
+    /// bytes first, then sample at most one hardware receive budget. Not NMI-safe.
     pub fn read_data(&self, bytes: &mut [u8]) -> usize {
-        let mut backend = self.inner.lock();
+        let mut io = self.io.lock();
+        let SerialIo { backend, input } = &mut *io;
+        if let Some(input) = input {
+            return input.read(bytes, || backend.try_receive());
+        }
         let mut read_len = 0;
         while read_len < bytes.len() {
             if let Some(c) = backend.try_receive() {
@@ -286,7 +317,104 @@ impl SerialPort {
     }
 
     pub fn ack_interrupt(&self) {
-        self.inner.lock().ack_interrupt();
+        self.io.lock().backend.ack_interrupt();
+    }
+
+    /// Prepares receive storage before enabling buffered IRQ input.
+    ///
+    /// Startup/task context only; allocation and discarded preparations stay
+    /// outside the port lock. Repeated calls preserve existing input.
+    /// The console continues using direct input until this is explicitly called.
+    pub(crate) fn prepare_irq_input(&self) -> Result<(), TryReserveError> {
+        if self.io.lock().input.is_some() {
+            return Ok(());
+        }
+        let mut prepared = Some(SerialInput::try_new()?);
+        {
+            let mut io = self.io.lock();
+            if io.input.is_none() {
+                io.input = prepared.take();
+            }
+        }
+        Ok(())
+    }
+
+    /// Collects a bounded hardware batch without allocating or waking tasks.
+    ///
+    /// Returns the number read from hardware, including overflow losses.
+    /// Does nothing until receive storage is prepared. Not NMI-safe.
+    #[cfg(all(unittest, feature = "pl011"))]
+    pub(crate) fn collect_input(&self) -> usize {
+        let mut io = self.io.lock();
+        let SerialIo { backend, input } = &mut *io;
+        input
+            .as_mut()
+            .map_or(0, |input| input.collect(|| backend.try_receive()))
+    }
+
+    /// Collects this port's receive event and queues its existing input work.
+    ///
+    /// IRQ-safe, not NMI-safe. Hardware sampling is bounded and serialized with
+    /// task reads; worker submission happens after releasing the port lock.
+    pub(crate) fn handle_input_irq(&self) -> IrqEvent {
+        let (has_input_event, work) = {
+            let mut io = self.io.lock();
+            let SerialIo { backend, input } = &mut *io;
+            let Some(input) = input else {
+                return IrqEvent::NOT_HANDLED;
+            };
+            let is_receive_pending = backend.ack_interrupt();
+            let received = input.collect(|| backend.try_receive());
+            (is_receive_pending || received > 0, input.work.clone())
+        };
+        if !has_input_event {
+            return IrqEvent::NOT_HANDLED;
+        }
+        if let Some((work, cpu_id)) = work {
+            queue_input_work(&work, cpu_id);
+        }
+        IrqEvent::HANDLED
+    }
+
+    /// Connects the sole input processor and requests an initial receive pass.
+    ///
+    /// Task context only, serialized with detach by the owner. Receive storage
+    /// must already be prepared and the target CPU's worker pool initialized.
+    /// The callback must not strongly own this port. Duplicate binding is an
+    /// error, not replacement; input collected before binding is preserved.
+    /// Successful attachment records the binding, not completion of the pass.
+    /// Unexpected queue rejection is logged; this API does not retry it.
+    ///
+    /// # Errors
+    /// Returns `BadState` without prepared storage, or `AlreadyExists` when
+    /// another processor is attached.
+    pub fn attach_input_work(
+        &self,
+        work: InputWork,
+        cpu_id: LogicalCpuId,
+    ) -> Result<(), DriverError> {
+        {
+            let mut io = self.io.lock();
+            let input = io.input.as_mut().ok_or(DriverError::BadState)?;
+            if input.work.is_some() {
+                return Err(DriverError::AlreadyExists);
+            }
+            input.work = Some((work.clone(), cpu_id));
+        }
+        // Also check bytes received before the connection and sub-threshold
+        // FIFO tails; neither necessarily produces another interrupt.
+        queue_input_work(&work, cpu_id);
+        Ok(())
+    }
+
+    /// Removes the input-work binding without waiting or discarding bytes.
+    ///
+    /// Task context only, serialized with attach by the owner. Detach, then call
+    /// shutdown outside port/TTY locks before releasing callback resources.
+    /// Earlier IRQ clones may submit until shutdown closes and drains the work.
+    /// Destroying the port additionally requires synchronizing its IRQ action.
+    pub fn detach_input_work(&self) -> Option<(InputWork, LogicalCpuId)> {
+        self.io.lock().input.as_mut()?.work.take()
     }
 
     /// Physical identity, for matching against a device-model node.
@@ -297,6 +425,13 @@ impl SerialPort {
     /// Functional role of this port.
     pub fn role(&self) -> SerialRole {
         self.role
+    }
+}
+
+fn queue_input_work(work: &InputWork, cpu_id: LogicalCpuId) {
+    match work.queue_default(Some(cpu_id)) {
+        Ok(_) | Err(SubmitError::AlreadyQueued | SubmitError::Closed) => {}
+        result => log::warn!("console: input work submission failed: {result:?}"),
     }
 }
 
@@ -342,6 +477,80 @@ mod tests {
 
     use super::*;
 
+    #[cfg(feature = "pl011")]
+    #[def_test]
+    fn input_irq_binding_initial_pass_duplicate_and_stop() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut registers = [0u32; 18];
+        registers[6] = 1 << 4;
+        // SAFETY: the aligned window covers PL011 registers and outlives the
+        // port and work. Only this test accesses registers; the work callback
+        // tests the lock but does not access hardware.
+        let port = Arc::new(unsafe {
+            SerialPort::new_mmio_pl011(
+                VirtAddr::from_usize(registers.as_mut_ptr() as usize),
+                PhysAddr::from_usize(0),
+                size_of_val(&registers),
+                SerialRole::Auxiliary,
+            )
+        });
+        let passes = Arc::new(AtomicUsize::new(0));
+        let count = passes.clone();
+        let weak_port = Arc::downgrade(&port);
+        let callback: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+            // Reentering the port is required for real TTY reads and echo.
+            // It must not run inline while IRQ/attach holds that lock.
+            core::assert!(weak_port.upgrade().unwrap().io.try_lock().is_some());
+            count.fetch_add(1, Ordering::Release);
+        });
+        let work = Arc::new(WorkHandle::new(callback).unwrap());
+        let cpu_id = khal::percpu::this_cpu_id();
+        assert_eq!(
+            port.attach_input_work(work.clone(), cpu_id),
+            Err(DriverError::BadState)
+        );
+        assert_eq!(port.handle_input_irq(), IrqEvent::NOT_HANDLED);
+        port.prepare_irq_input().unwrap();
+        registers[0] = 7;
+        registers[6] = 0;
+        // The emulated register window does not implement FIFO popping.
+        // One IRQ therefore collects precisely its maximum batch.
+        assert_eq!(port.handle_input_irq(), IrqEvent::HANDLED);
+        registers[6] = 1 << 4;
+        assert_eq!(passes.load(Ordering::Acquire), 0);
+        port.attach_input_work(work.clone(), cpu_id).unwrap();
+        work.flush().unwrap();
+        assert_eq!(passes.load(Ordering::Acquire), 1);
+        assert_eq!(
+            port.attach_input_work(work.clone(), cpu_id),
+            Err(DriverError::AlreadyExists)
+        );
+        assert_eq!(port.handle_input_irq(), IrqEvent::NOT_HANDLED);
+        assert_eq!(passes.load(Ordering::Acquire), 1);
+        let mut bytes = [0; input::RECEIVE_BUDGET_BYTES];
+        assert_eq!(port.read_data(&mut bytes), bytes.len());
+        assert!(bytes.iter().all(|byte| *byte == 7));
+
+        // A receive status can require ack even if task-side sampling emptied
+        // the FIFO first. That is still this port's event on a shared IRQ.
+        registers[16] = 1 << 4;
+        assert_eq!(port.handle_input_irq(), IrqEvent::HANDLED);
+        work.flush().unwrap();
+        assert_eq!(passes.load(Ordering::Acquire), 2);
+        let stale = port.io.lock().input.as_ref().unwrap().work.clone().unwrap();
+        let detached = port.detach_input_work().unwrap();
+        detached.0.shutdown().unwrap();
+        assert!(port.detach_input_work().is_none());
+        assert_eq!(
+            stale.0.queue_default(Some(stale.1)),
+            Err(SubmitError::Closed)
+        );
+        assert_eq!(port.handle_input_irq(), IrqEvent::HANDLED);
+        assert_eq!(passes.load(Ordering::Acquire), 2);
+        assert_eq!(registers[17], 0x7ff);
+    }
+
     #[def_test]
     fn stdout_port_registered_at_boot() {
         // The platform `early_driver_init` registers the stdout UART before
@@ -349,11 +558,59 @@ mod tests {
         assert!(stdout_port().is_some());
     }
 
+    #[cfg(feature = "pl011")]
+    #[def_test]
+    fn buffered_port_preparation_preserves_shared_input_and_hardware_tail() {
+        let mut registers = [0u32; 18];
+        registers[6] = 1 << 4;
+        let base = VirtAddr::from_usize(registers.as_mut_ptr() as usize);
+        // SAFETY: this aligned register window covers PL011 accesses and
+        // outlives both local port handles; no other CPU accesses it.
+        let boot = Arc::new(unsafe {
+            SerialPort::new_mmio_pl011(
+                base,
+                PhysAddr::from_usize(0),
+                size_of_val(&registers),
+                SerialRole::Stdout,
+            )
+        });
+        let runtime = boot.clone();
+        assert_eq!(boot.collect_input(), 0);
+        assert_eq!(boot.getchar(), None);
+        boot.prepare_irq_input().unwrap();
+        {
+            let mut io = boot.io.lock();
+            let mut bytes = [1, 2, 3].into_iter();
+            io.input.as_mut().unwrap().collect(|| bytes.next());
+        }
+        runtime.prepare_irq_input().unwrap();
+        assert_eq!(runtime.getchar(), Some(1));
+        let mut output = [0; 2];
+        assert_eq!(boot.read_data(&mut output), 2);
+        assert_eq!(output, [2, 3]);
+
+        registers[0] = 7;
+        registers[6] = 0;
+        assert_eq!(boot.collect_input(), input::RECEIVE_BUDGET_BYTES);
+        registers[6] = 1 << 4;
+        let mut output = [0; input::RECEIVE_BUDGET_BYTES + 1];
+        assert_eq!(runtime.read_data(&mut output), input::RECEIVE_BUDGET_BYTES);
+        assert_eq!(runtime.getchar(), None);
+        assert!(
+            output[..input::RECEIVE_BUDGET_BYTES]
+                .iter()
+                .all(|b| *b == 7)
+        );
+        let dropped = boot.io.lock().input.as_ref().unwrap().dropped_bytes;
+        assert_eq!(dropped, 0);
+        assert_eq!(registers[6], 1 << 4);
+    }
+
     #[def_test]
     fn atomic_console_write_does_not_take_normal_locks() {
         let port = stdout_port().expect("boot registered a stdout");
         let _io_guard = khal::console::IO_LOCK.lock();
-        let _port_guard = port.inner.lock();
+        let _port_guard = port.io.lock();
         // Empty output exercises both adapters without depending on UART
         // timing or modifying the permanently registered boot console.
         khal::console::write_data_atomic(b"");
@@ -380,7 +637,7 @@ mod tests {
         registers[12..].fill(0x1234_5678);
         let before = registers;
         {
-            let _guard = port.inner.lock();
+            let _guard = port.io.lock();
             port.write_data_atomic(b"atomic");
         }
         assert_eq!(registers[0], u32::from(b'c'));
@@ -429,7 +686,7 @@ mod tests {
             };
             let before = registers;
             {
-                let _guard = port.inner.lock();
+                let _guard = port.io.lock();
                 port.write_data_atomic(b"atomic");
             }
             let preserved_bits = match width {

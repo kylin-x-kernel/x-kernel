@@ -36,6 +36,18 @@ references to `Session` and `ProcessGroup` objects.
 
 ## Thread Safety
 
+Native input work is prepared after kworkng startup in sleepable context.
+IRQ producers only collect UART data and submit prepared work; they never parse,
+echo or signal inline. Reader mutation is serialized by a sleepable mutex;
+port locks are released before submission and reader locks before notification.
+Bounded input and output work prevents a single round from draining indefinitely.
+Full output waits for reader consumption instead of busy requeueing.
+
+Self-requeue uses Weak ownership. Teardown must detach the producer then call
+shutdown outside port/TTY locks, preserving callback resources until successful
+drain. Shutdown rejects stale producer handles. Dropping one clone is not a
+completion barrier. The native console remains kernel-lifetime.
+
 termios, window size, session, and foreground state are each protected by
 spin locks. No user-memory access or process-table lookup happens inside
 a lock, keeping the critical sections small. Poll waiters are woken only

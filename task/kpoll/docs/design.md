@@ -79,7 +79,7 @@ Pollable::register(context, events)
   `Waker::clone` 在加锁前完成；cancel 摘取的 `Waker` 在解锁后 drop，避免自定义
   waker 回调在 `SpinNoIrq` 内重入。
 - **不得在持有可能与 scheduler/Waker 回调反向的外层锁时调用 `wake`**。
-  `kirq::notify` 在唤醒前克隆 `PollSet` 并释放全局表锁。
+  IRQ 同步完成通知也必须在释放 descriptor 状态锁后执行。
 - **注册可失败**：扩容失败返回 `PollRegisterError::NoMemory`；ID 耗尽返回
   `IdExhausted`；目标未就绪返回 `InvalidState`。上层映射为 `KError::NoMemory` /
   `ENOMEM` 或 `InvalidInput` / `EINVAL`。

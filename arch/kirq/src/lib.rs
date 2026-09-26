@@ -36,8 +36,4 @@ pub use model::desc::{
     gic_irq_desc, gic_level_irq_desc, io_apic_irq_desc, plic_irq_desc,
 };
 pub(crate) use runtime::{action, dispatch, nmi, state};
-pub use runtime::{
-    manager::*,
-    notify::{register_irq_source_waker, register_irq_waker},
-    sync_wait::IrqSyncWaitIf,
-};
+pub use runtime::{manager::*, sync_wait::IrqSyncWaitIf};

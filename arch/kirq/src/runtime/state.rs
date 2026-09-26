@@ -573,7 +573,7 @@ pub(super) struct IrqState {
     /// Primary OS-visible IRQ namespace.
     ///
     /// `virq` is the stable key used by registration, unregister, descriptor
-    /// queries, and normal subscriber dispatch.
+    /// queries, and normal action dispatch.
     pub(super) descs: BTreeMap<Virq, IrqStateDesc>,
     /// Per-domain control-plane state.
     ///
@@ -870,10 +870,7 @@ pub(crate) fn free_msi_if_unused(
         return false;
     }
     if !state.is_unused(virq) {
-        warn!(
-            "refusing to free MSI IRQ {virq} while a handler or wake subscription is still \
-             registered"
-        );
+        warn!("refusing to free MSI IRQ {virq} while it is still in use");
         return false;
     }
 
@@ -882,10 +879,5 @@ pub(crate) fn free_msi_if_unused(
         return false;
     }
 
-    let removed = state.remove_msi_if_unused(virq).is_some();
-    drop(state);
-    if removed {
-        super::notify::remove_irq_waiters(virq);
-    }
-    removed
+    state.remove_msi_if_unused(virq).is_some()
 }

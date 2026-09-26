@@ -1,6 +1,29 @@
 # ktty — Design
 
-## Purpose
+## Native Console Input Work
+
+Native consoles with an input IRQ use `ProcessMode::Work` and a prepared
+`kworkng::WorkHandle`; they do not subscribe to generic IRQ notifications.
+Preparation requires sleepable context after normal-worker initialization.
+Late-init attaches the work to the stdout port even before userspace opens TTY.
+Consoles without an IRQ retain Manual mode; PTY processing is unchanged.
+
+The callback owns `Mutex<InputReader>` and a readable PollSet, but no strong
+reference back to the line discipline or its work. Weak self-requeue shares
+the producer's fixed CPU binding. Each round consumes at most 256 input bytes
+or publishes at most 256 output bytes, including partial canonical-line delivery.
+Incomplete canonical input consumes budget even without output. Input-empty and
+output-full stop processing; budget exhaustion requeues. Reads and drain_input
+resubmit when output capacity becomes available. kworkng owns pending/running
+state; TTY does not duplicate it.
+
+Echo and signal delivery run in task context under the reader mutex, without
+port or TTY spinlocks. Wake and requeue occur after releasing that mutex.
+Canonical input retains command spaces and tabs. Discarding a pending canonical
+line also resets its delivery offset. The existing canonical-line Vec policy
+is unchanged; a per-round budget is not a maximum line length.
+
+## Terminal Layer
 
 `ktty` implements the X-Kernel terminal layer: terminal devices, the line
 discipline, pseudo-terminals, and the POSIX job-control interface. The

@@ -507,9 +507,9 @@ core per API:
    `IrqDescRuntimeState`, invokes each handler in order, and passes the
    resolved `virq` as the handler argument. Each wrapper then converts the
    devres handler's `device_res::IrqEvent` into `kirq::IrqEvent`.
-4. After the whole line's fanout, `kirq` merges the source bitmap and
-   `kirq::notify` wakes line/source waiters directly. `kdriver` installs
-   no dispatch hook and takes no part in the async wake bridge.
+4. After the whole line's fanout, `kirq` aggregates the handled result.
+   Device subsystems own readiness wakeup and deferred-work submission;
+   there is no generic line/source waiter table or kdriver wake bridge.
 5. `release_irq` calls `kirq::free_irq_action()` for shared hardirq
    tokens, removing only the action belonging to this devres handler.
 

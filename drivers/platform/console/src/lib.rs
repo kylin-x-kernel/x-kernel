@@ -45,7 +45,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 use khal::mem::PhysAddr;
-use kirq::{IrqActionToken, IrqDesc, IrqEvent};
+use kirq::{IrqActionToken, IrqDesc};
 use kspin::SpinNoIrq;
 #[cfg(feature = "ns16550-mmio")]
 pub use ns16550_mmio::SerialRegWidth;
@@ -329,13 +329,6 @@ pub fn init_stdout_ioport(port: u16, irq: Option<IrqDesc>) {
     serial::register_early_stdout(Arc::new(uart), irq);
 }
 
-fn handle_input_irq(_irq: usize) -> IrqEvent {
-    if let Some(port) = serial::stdout_port() {
-        port.ack_interrupt();
-    }
-    IrqEvent::HANDLED
-}
-
 /// Register the stdout console's input interrupt handler.
 ///
 /// Must be called after the platform IRQ provider is up; platforms differ on
@@ -350,13 +343,16 @@ pub fn register_input_irq_handler() {
     if INPUT_IRQ_REGISTERED.load(Ordering::Acquire) {
         return;
     }
+    let port = serial::stdout_port().expect("console IRQ requires a stdout port");
+    port.prepare_irq_input()
+        .expect("failed to allocate console input buffer");
     if INPUT_IRQ_REGISTERED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
         return;
     }
-    match kirq::try_register_shared(virq, Arc::new(handle_input_irq)) {
+    match kirq::try_register_shared(virq, Arc::new(move |_| port.handle_input_irq())) {
         Ok(Some(token)) => *INPUT_IRQ.lock() = Some(token),
         Ok(None) => {
             INPUT_IRQ_REGISTERED.store(false, Ordering::Release);

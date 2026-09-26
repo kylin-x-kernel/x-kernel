@@ -319,9 +319,8 @@ pub fn descriptor(virq: Virq) -> Option<IrqDesc> {
 /// sole regular IRQ action. The public API still accepts only one regular
 /// handler per IRQ line.
 ///
-/// This is different from wakeup subscription: the registered handler is invoked
-/// directly on dispatch, while wakeup subscribers only participate in the wakeup
-/// notification path.
+/// The handler runs directly on dispatch. Device subsystems own deferred work
+/// and wake their readers when data becomes ready.
 pub fn register(spec: impl Into<IrqSpec>, handler: Handler) -> bool {
     match try_register(spec, handler) {
         Ok(registered) => registered,
@@ -625,17 +624,12 @@ fn try_free_irq_inner(
 }
 
 fn finish_irq_teardown(virq: Virq) {
-    let removed_desc = {
-        let _control_guard = IRQ_CONTROL_LOCK.lock();
-        let mut state = IRQ_STATE.lock();
-        if let Some(entry) = state.descs.get_mut(&virq) {
-            entry.finish_teardown();
-        }
-        state.remove_if_unused_with_desc(virq)
-    };
-    if removed_desc.is_some() {
-        super::notify::remove_irq_waiters(virq);
+    let _control_guard = IRQ_CONTROL_LOCK.lock();
+    let mut state = IRQ_STATE.lock();
+    if let Some(entry) = state.descs.get_mut(&virq) {
+        entry.finish_teardown();
     }
+    state.remove_if_unused_with_desc(virq);
 }
 
 /// Handles a pseudo-NMI after an architecture trap adapter has disabled
@@ -775,8 +769,7 @@ pub mod tests_irq {
         action::{IrqAction, IrqActionFlags, IrqThreadSlot},
         clear_irq_lifecycle_hooks,
         lifecycle::IrqLifecycleGuard,
-        register_irq_lifecycle_hooks, register_irq_source_waker, register_irq_waker,
-        runtime::notify,
+        register_irq_lifecycle_hooks,
         softirq::{
             SoftirqRunResult, SoftirqVec, clear_softirq_diagnostics, local_softirq_pending,
             raise_softirq, run_pending_softirqs, softirq_diagnostics,
@@ -1498,63 +1491,6 @@ pub mod tests_irq {
         assert_eq!(SHARED_B_CALLS.load(Ordering::Relaxed), 1);
         assert!(try_free_irq_action(virq, token_a).unwrap().is_some());
         assert!(try_free_irq_action(virq, token_b).unwrap().is_some());
-    }
-
-    #[def_test(serial)]
-    fn test_dispatch_wakes_kirq_owned_line_and_source_waiters() {
-        let virq = 0x3130;
-        let line_counter = Box::leak(Box::new(AtomicUsize::new(0)));
-        let source_counter = Box::leak(Box::new(AtomicUsize::new(0)));
-        let line_waker = make_waker(line_counter);
-        let source_waker = make_waker(source_counter);
-        let line_cx = Context::from_waker(&line_waker);
-        let source_cx = Context::from_waker(&source_waker);
-        let mut line_registrations = PollRegistrations::new();
-        let mut source_registrations = PollRegistrations::new();
-
-        {
-            let mut context = line_registrations.context(&line_cx);
-            register_irq_waker(virq, &mut context).unwrap();
-        }
-        {
-            let mut context = source_registrations.context(&source_cx);
-            register_irq_source_waker(virq, 1, &mut context).unwrap();
-        }
-        let token = try_register_shared(virq, Arc::new(test_shared_b_handler))
-            .expect("shared register should work")
-            .expect("shared action token");
-
-        let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
-        dispatch_actions(&pending);
-
-        assert_eq!(line_counter.load(Ordering::SeqCst), 1);
-        assert_eq!(source_counter.load(Ordering::SeqCst), 1);
-        assert!(try_free_irq_action(virq, token).unwrap().is_some());
-        assert!(!notify::has_irq_waiters_for_tests(virq));
-    }
-
-    #[def_test(serial)]
-    fn test_irq_waiters_are_removed_with_unused_descriptor() {
-        let virq = 0x3132;
-        let wake_counter = Box::leak(Box::new(AtomicUsize::new(0)));
-        let waker = make_waker(wake_counter);
-        let cx = Context::from_waker(&waker);
-        let mut registrations = PollRegistrations::new();
-        let baseline_entries = notify::waiter_entry_count_for_tests();
-
-        {
-            let mut context = registrations.context(&cx);
-            register_irq_waker(virq, &mut context).unwrap();
-        }
-        assert!(notify::has_irq_waiters_for_tests(virq));
-        assert_eq!(notify::waiter_entry_count_for_tests(), baseline_entries + 1);
-
-        assert!(try_register(virq, Arc::new(test_handler)).expect("register should work"));
-        assert!(unregister(virq).is_some());
-
-        assert!(!notify::has_irq_waiters_for_tests(virq));
-        assert_eq!(notify::waiter_entry_count_for_tests(), baseline_entries);
-        assert_eq!(wake_counter.load(Ordering::SeqCst), 1);
     }
 
     #[def_test(serial)]

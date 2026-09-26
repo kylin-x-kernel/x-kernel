@@ -226,6 +226,7 @@ klockstat-macros = { path = "util/klockstat-macros" }
 aarch64-cpu = "10.0"
 arm-gic-driver = "0.17.13"
 bitflags = "2.10"
+ringbuf = { version = "0.4.8", default-features = false, features = ["alloc"] }
 bytemuck = { version = "1.23", features = ["unsound_ptr_pod_impl"] }
 cfg-if = "1.0"
 zerocopy = { version = "0.8", features = ["derive"] }

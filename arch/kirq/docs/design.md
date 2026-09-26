@@ -60,7 +60,6 @@ arch/kirq/src/
 │   ├── action.rs       # internal regular IRQ action and return classification
 │   ├── state.rs        # descriptor map, virq allocation, and action state
 │   ├── dispatch.rs     # normal IRQ action fanout
-│   ├── notify.rs       # IRQ line/source waiter registration and wake dispatch
 │   ├── nmi.rs          # NMI（pseudo/hardware）registration and lock-minimal dispatch table
 │   └── manager.rs      # public API and dispatch-entry orchestration
 ├── domain/
@@ -352,9 +351,9 @@ devres IRQ request 通过 `kirq::try_register_shared()` 安装 shared action，�
 `kirq::free_irq_action()` 删除单个 action；只有最后一个 action 离开时，
 `kirq` 才 mask line、等待 `in_flight` 归零并清理 descriptor。这样 shared IRQ 的
 fanout、teardown 和后续 threaded/oneshot 扩展点都集中在 IRQ core，而不是隐藏在
-devres adapter 的本地聚合表中。handler return 的 `IrqEvent` sources 由 `kirq`
-在同一 line 的 fanout 完成后合并，并由 `kirq` 自己的 waiter notification 模块统一
-唤醒 line/source waiter。`kdriver` 不再参与 IRQ wake bridge；它只负责 devres IRQ
+devres adapter 的本地聚合表中。handler return 的 `IrqEvent` 由 `kirq`
+在同一 line 的 fanout 完成后合并；数据就绪通知由设备子系统负责。
+`kdriver` 不参与 IRQ wake bridge；它只负责 devres IRQ
 resource 到 `kirq` action 生命周期的适配。
 
 ### MSI/MSI-X
@@ -397,53 +396,21 @@ handler first, then free the MSI resource.
 published mapping; if backend release fails, the OS-side mapping is retained so
 cleanup can be retried.
 
-### Async notification bridge
+### Device-owned readiness
 
-```text
-kirq action fanout
-   -> merge IrqEvent sources for the resolved virq
-   -> kirq::notify::dispatch_irq_event_waiters(virq, sources)
-      ├── line-level PollSet wake
-      └── matching source PollSet wake
-```
+Regular IRQ dispatch invokes device actions, aggregates their handled result, and
+completes the platform claim. It does not maintain a line/source subscription
+table or notify generic IRQ waiters. Device subsystems own readiness and wakeup.
 
-`kirq` 不再提供旧的 line-level wake subscription API，也不再通过 `kdriver` 安装
-fanout-complete hook。当前 poll/future IRQ wake 的生产路径由 `kirq::notify`
-直接持有 waiter table：任务上下文注册 line/source waiter，hardirq fanout 完成后
-`kirq` 在锁内 clone 匹配的 `PollSet`，释放锁后先 wake line waiter，再按 source
-index wake source waiter。`drivers/irq-notify` 兼容 crate 已移除；上层内核子系统
-直接调用 `kirq` 的 waiter 注册 API。
+The native console action collects UART bytes into bounded per-port storage and
+submits prepared kworkng work after releasing the port lock. TTY parses input,
+echoes, delivers signals, and wakes readable waiters in normal-worker context.
+Networking similarly owns its receive processing and socket readiness.
 
-这个 notification 模块仍只是迁移桥，不是 Linux threaded IRQ、softirq 或 workerqueue
-的最终模型。后续 bottom-half 能力应在 `kirq` 内形成明确的 softirq / IRQ thread /
-workerqueue 所有权；等待者表和 poll/waitqueue 集成后续可继续迁移到通用
-async/wait notification 层。
-
-#### Linux 对照与后续替代形态
-
-当前 `kirq::notify` 的生产调用方只有两类：
-
-- `ktask::future::register_irq_waker()`，被 `ktty` 等代码用来等待某条 IRQ line 被认领；
-- `knet` 的 RX source waiter，用于在网络 RX IRQ source 到来后唤醒协议栈 poll 任务。
-
-这不是 Linux 中的通用 IRQ core 语义。Linux 网卡路径通常是：驱动 probe 时注册
-NAPI poller；硬中断 handler 只确认设备事件、mask/ack 必要状态，然后调用
-`napi_schedule_irqoff()` / `__napi_schedule()`；NAPI 被挂到 per-CPU poll list 后
-raise `NET_RX_SOFTIRQ`；协议栈在 softirq/NAPI poll 中消费 RX ring、提交 skb，最后
-由 socket 层的 `sk_data_ready()` / `sock_def_readable()` 唤醒 socket waitqueue。
-也就是说，“上层任务被唤醒”属于协议栈或具体子系统的 readiness/waitqueue 语义，
-不是 IRQ core 也不是 devres provider 的职责。
-
-因此后续替代方向是：
-
-- `kdriver::resource` / devres 只管理 IRQ resource lifetime，把 handler/action 接入
-  `kirq`，不注册上层 async waiter；
-- 网卡驱动通过网络子系统注册 NAPI-like poller 或 RX bottom-half 对象；IRQ handler
-  在 hardirq 中只调度该 bottom half，不直接唤醒协议栈任务；
-- `knet` 在 RX poll/协议栈处理产生 socket readiness 后，使用自身的 `PollSet` /
-  socket waitqueue 唤醒等待者；
-- `ktty` 等 line-level IRQ waiter 也应迁到对应设备/TTY 输入队列的 readiness
-  waitqueue；直接等待 IRQ line 只作为过渡或诊断机制保留。
+`kdriver::resource` and devres manage IRQ resource lifetime, not upper-layer
+waiter registration. Descriptor-local in-flight completion remains part of
+`synchronize_irq()` and `free_irq()`; it is not an event subscription. Hardirq
+lifecycle hooks and deferred-executor handoff are unchanged.
 
 `kirq` owns hardirq dispatch, softirq and IRQ-thread execution infrastructure.
 `kworkng` owns general sleepable workqueues. Networking, TTY and block
@@ -703,7 +670,7 @@ descriptor-local `in_flight == 0`，并按 check/register/recheck 协议验证�
    resolved `virq`。
 6. 在不持有 `IRQ_STATE` 的情况下按 snapshot 顺序调用所有 action primary handler，
    每个 handler 都收到 resolved `virq`，随后合并并分类每个 `IrqEvent`。若整条
-   line 被认领，fanout 完成后调用 `kirq::notify` waiter dispatcher。本阶段不调度 threaded
+   line 未被认领，则记录未处理告警；没有通用 IRQ waiter 通知。本阶段不调度 threaded
    handler，也不做 per-action 统计。
 7. `generic_handle_irq()` 调用 `PendingIrq::complete()` 完成控制器
    EOI/deactivate，并把 resolved virq 元数据返回给外层。
@@ -797,12 +764,6 @@ IRQ lifecycle enter；GIC 只在其中用 `generic_handle_nmi()` 替换普通 ac
   只从 atomic function-pointer slot 读取 hook，不持锁调用 owner。当前不使用全局
   reentry guard，避免 SMP 上一个 CPU 的 hardirq-exit handoff 误抑制另一个 CPU；
   softirq 已使用 per-CPU pending/reentry 模型。
-- `IRQ_WAITERS` 使用 `SpinNoIrq<Vec<IrqPollSets>>` 保护按 `virq` 排序的
-  line/source waiter table。fanout-complete hot path 先通过 atomic entry-count
-  hint 跳过完全空表，再用二分查找定位 `virq` 并只在锁内 clone 匹配的 `PollSet`，
-  锁外执行 wake。新 entry 插入使用 `try_reserve()` 把 OOM 显式返回给注册方；
-  descriptor cleanup 会在释放 `IRQ_STATE` 后移除该 `virq` 的 waiter entry，
-  避免已注销 IRQ 的 waiter 表长期增长。
 - `PendingIrq` / `DispatchedIrq` 用 RAII 保证 claimed interrupt 最终 complete，同时通过
   `PhantomData<*mut ()>` 阻止跨线程/跨 CPU 发送。
 
@@ -834,14 +795,14 @@ lifecycle hook 表示 hardirq enter/exit 通知，deferred executor 表示 hardi
 ownership 明确，也避免多个未排序 hook 在 hardirq exit 上产生隐式依赖。后续如果
 softirq 需要再分发多个 consumer，应由 softirq subsystem 显式维护 dispatcher。
 
-### 为什么移除 irq_notify crate
+### Why generic IRQ subscriptions were removed
 
-`irq_notify` 的剩余职责曾经只是把旧的 `register_irq_waker()` /
-`register_source_waker()` 转发到 `kirq`，没有独立状态或 owner。IRQ waiter table 和
-fanout-complete wake dispatch 的 owner 是 `kirq`，上层内核子系统直接依赖 `kirq`；
-`kdriver` 和 devres 不承载 poll/future IRQ wake bridge。
-Softirq and IRQ-thread semantics belong to `kirq`; sleepable workqueues
-belong to `kworkng`. Generic async/wait notification owns waiter registration.
+After native TTY input moved to device-submitted work, no production consumer
+needed the generic line/source waiter table. Removing both registration APIs
+and dispatch-time notification keeps device readiness with its owning subsystem
+and removes unrelated global subscription bookkeeping from IRQ processing.
+Softirq and IRQ-thread semantics belong to `kirq`; sleepable workqueues belong
+to `kworkng`.
 
 NetRx direct progress 是 workerqueue foundation 之后的独立里程碑。当前 `NetRx`
 softirq 只能作为网络 fallback worker 的 wake source；后续里程碑再决定由 softirq
@@ -874,9 +835,8 @@ lock-free snapshot 解析，避免每次中断都查询控制面的 mapping tabl
 - `clear_deferred_executor()` 清空 hardirq-exit handoff owner；正常运行期应由
   deferred execution owner 一次性注册。
 - `unregister()` 移除 regular action，并在 descriptor 无 action 使用者时
-  删除 `IRQ_STATE` 条目、禁用平台 IRQ，并移除对应 IRQ waiter entry。MSI
-  descriptor 仍由 MSI resource owner 最终释放，`free_msix()` 删除 MSI descriptor
-  时同样移除对应 waiter entry。
+  删除 `IRQ_STATE` 条目并禁用平台 IRQ。MSI descriptor 仍由 MSI resource owner
+  最终通过 `free_msix()` 释放；不存在额外的通用 IRQ waiter entry。
   如果 action 已经从 dispatch table 摘除，但 scheduler wait provider 无法等待
   escaped handler snapshot 退出，`free_irq()` / `unregister()` 采用 fail-stop
   语义 panic；这样避免调用方继续释放设备状态，而旧 handler 仍可能在其它 CPU 上运行。
