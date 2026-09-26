@@ -298,7 +298,7 @@ impl FileSharedRuntime {
                     && !page_flags.contains(MappingFlags::WRITE)
                 {
                     self.check_shared_write_fault_allowed()?;
-                    address_space.page_mkwrite(pn, |_folio| {
+                    self.0.source.file().page_mkwrite(pn, |_folio| {
                         pgtbl.remap(addr, paddr, flags).map_err(map_paging_err)?;
                         populated = 1;
                         KResult::Ok(())

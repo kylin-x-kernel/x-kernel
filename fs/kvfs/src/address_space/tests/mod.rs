@@ -21,14 +21,14 @@ struct TruncateOps;
 
 static TRUNCATE_OPERATIONS: TruncateOps = TruncateOps;
 
-impl InodeOperations for TruncateOps {}
+impl InodeOperations for TruncateOps {
+    fn set_len(&self, inode: &crate::VfsInode, len: u64) -> VfsResult<()> {
+        inode.truncate_setsize(len)
+    }
+}
 impl FileOperations for TruncateOps {}
 
 impl AddressSpaceOperations for TruncateOps {
-    fn set_len(&self, mapping: &AddressSpace, len: u64) -> VfsResult<()> {
-        mapping.truncate_setsize(len)
-    }
-
     fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<usize> {
         folio.data().fill(0);
         Ok(folio.data().len())

@@ -30,6 +30,7 @@ use kvfs::{
     WriteEndRequest, get_tree_nodev, inode_init_owner,
     libfs::{simple_getattr, simple_rename, simple_statfs, simple_write_end},
 };
+use pagecache::Folio;
 use slab::Slab;
 
 pub(crate) const RAMFS_MAGIC: u32 = 0x8584_58f6;
@@ -436,6 +437,12 @@ impl MemoryNode {
 }
 
 impl InodeOperations for MemoryNode {
+    fn set_len(&self, vfs_inode: &VfsInode, len: u64) -> VfsResult<()> {
+        self.inode.as_file()?;
+        self.inode.metadata.lock().size = len;
+        vfs_inode.truncate_setsize(len)
+    }
+
     fn directory_operations(&self) -> Option<&dyn InodeDirOperations> {
         if self.node_type() == NodeType::Directory {
             Some(self)
@@ -813,9 +820,10 @@ struct MemoryAddressSpaceOperations;
 static MEMORY_ADDRESS_SPACE_OPERATIONS: MemoryAddressSpaceOperations = MemoryAddressSpaceOperations;
 
 impl AddressSpaceOperations for MemoryAddressSpaceOperations {
-    fn read_at(&self, _mapping: &AddressSpace, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
-        buf.fill(0);
-        Ok(buf.len())
+    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<usize> {
+        let data = folio.data();
+        data.fill(0);
+        Ok(data.len())
     }
 
     fn writepages(
@@ -824,14 +832,6 @@ impl AddressSpaceOperations for MemoryAddressSpaceOperations {
         _control: &mut kvfs::WritebackControl,
     ) -> VfsResult<()> {
         Ok(())
-    }
-
-    fn set_len(&self, mapping: &AddressSpace, len: u64) -> VfsResult<()> {
-        let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
-        let node = vfs_inode.private::<MemoryNode>()?;
-        node.inode.as_file()?;
-        node.inode.metadata.lock().size = len;
-        mapping.truncate_setsize(len)
     }
 
     fn write_begin(&self, mapping: &AddressSpace, _request: WriteBeginRequest) -> VfsResult<()> {

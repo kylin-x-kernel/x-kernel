@@ -551,17 +551,23 @@ superblock publish 时继承该静态 table；已有 parent/superblock 的新 de
 文件系统在 `alloc_file_pseudo()` 后补装。
 
 `VfsInode` 的 data lock 串行化 buffered write 与 truncate。shared-file write fault 不取得
-该独占锁；`AddressSpace::page_mkwrite()` 取得 address-space invalidate shared lock，再在
-folio lock 内重新检查 EOF、调用文件系统 mapping-prepare callback、标脏 folio并完成 PTE
+该独占锁；`VfsFile::page_mkwrite()` 取得 address-space invalidate shared lock，再在
+folio lock 内重新检查 EOF、调用 `FileMappingOperations` prepare callback、标脏 folio 并完成 PTE
 更新。`AddressSpace::writepages_control()` 同样在 address-space invalidate shared lock 下完成
 整次 writeback，包括 backing-store I/O；因此 set-length 不会在已选中的 folio 写回期间发布
-新 EOF 或移除该 folio。文件系统 `AddressSpaceOperations::set_len()` 在 address-space
+新 EOF 或移除该 folio。文件系统 `InodeOperations::set_len()` 在 address-space
 invalidate exclusive lock 下执行，并在 backing prepare 后、释放 block 前调用一次
-`AddressSpace::truncate_setsize()`。该入口按 Linux `truncate_setsize()` 顺序先发布唯一的
+`VfsInode::truncate_setsize()`。该入口先发布唯一的
 `inode::i_size`，再执行第一次 mapped-view unmap、cached-folio truncate 和第二次 unmap；
 第二轮用于清理 cache truncate 窗口中产生的 private COW PTE。Backing filesystem 的 prepare
 阶段不得提前修改该 `i_size`，否则这里无法取得真实旧 EOF，可能跳过 folio 丢弃和同页增长区间
 清零。
+无独立 backing 的文件使用 inode operation 的默认截断实现；有 backing 状态的文件系统
+覆盖它，并在调用 `truncate_setsize()` 前完成自身准备。
+
+`AddressSpaceOperations` 只提供 folio 读取、写回及缓存状态回调；不再通过字节级
+`read_at`/`write_at` 默认转接。文件系统需要的字节读取可留在其私有 backing helper 中，
+由 `read_folio` 和 `readahead` 显式复用。
 
 `simple_write_end` 保留在 `kvfs::libfs`，只服务 ramfs/memfs 风格的 aops。
 块设备文件系统完成自己的 write-end 后，经 `AddressSpace::write_end_set_size()`
@@ -694,7 +700,7 @@ child cache 仍使用 mutex。RCU、seqcount lookup 和 lock-free dcache travers
   具体文件系统 crate，`/proc/filesystems` 也不维护平行的名称表。
 - 不为 immutable simple symlink 增加文件系统私有 target 字段；cached-link 是唯一目标
   owner，operation table 只标识并读取该 inode 状态。
-- `AddressSpaceOperations::set_len()` 必须进入 `truncate_setsize()`；文件系统不能自行组合
+- `InodeOperations::set_len()` 必须进入 `VfsInode::truncate_setsize()`；文件系统不能自行组合
   i_size、cache resize 和 mmap invalidation，也不能建立第二套 EOF/cache owner。
 - `VfsInode` 直接保存唯一的 `Arc<AddressSpace>`，不增加单字段 address-space wrapper；
   `VfsFile` 保存 Linux 风格的 `f_mapping` 引用，MM runtime 只保存 `VfsFile`。

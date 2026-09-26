@@ -20,9 +20,7 @@ mod truncate;
 mod views;
 mod writeback;
 
-pub use operations::{
-    AddressSpaceOperations, PageMkwriteRequest, WriteBeginRequest, WriteEndRequest,
-};
+pub use operations::{AddressSpaceOperations, WriteBeginRequest, WriteEndRequest};
 pub(crate) use operations::{default_address_space_operations, empty_address_space_operations};
 pub use readahead::ReadaheadControl;
 pub use views::AddressSpaceViewGuard;

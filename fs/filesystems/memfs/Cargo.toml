@@ -12,6 +12,7 @@ repository.workspace = true
 iov_iter.workspace = true
 kcred.workspace = true
 kvfs.workspace = true
+pagecache.workspace = true
 macros.workspace = true
 memaddr.workspace = true
 ktime_types.workspace = true

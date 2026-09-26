@@ -178,7 +178,8 @@ KExt4 的 KVFS operation 实现信任 KVFS 已经提供内核拥有的 path name
 分别作为 `s_op`/`s_fs_info` 保存；`s_op` 是所有挂载共享的真正静态表，private object 由
 superblock 独占且只能借用恢复，不存在承载 mount identity 的 operation wrapper 或可逃逸的
 typed owner。所有 inode mapping 也共享静态 `Ext4AddressSpaceOperations`，callback 只从
-`mapping->host` 借用唯一 `Ext4Inode`。仍需联合修改
+`mapping->host` 借用唯一 `Ext4Inode`；共享写 fault 的准备由 `Ext4Inode` 的
+`FileMappingOperations` 完成。仍需联合修改
 superblock/group metadata 的 mutation 由挂载级 write guard 串行化；只读 core 操作共享进入，
 delalloc range 与 mount aggregate 则在 shared guard 下由独立 reservation mutex 联合更新。KVFS
 cache 合并并发 `iget` 并封闭 `New/Freeing`；ext4 private metadata 与 transient state 在 inode

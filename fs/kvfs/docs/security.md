@@ -107,7 +107,8 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
   type、block size 和 `rdev`；外部 filesystem bridge 不直接取得内部 `Arc<VfsInode>`。
 - split truncate 必须在 inode data lock 与 address-space invalidate exclusive lock 下恰好
   调用一次 `truncate_setsize()`；该入口先发布 `i_size`，并在 cache truncate 前后各执行
-  一次 mmap invalidation。文件系统负责维护 backing prepare 后失败的磁盘恢复协议。
+  一次 mmap invalidation。有独立 backing 的文件系统必须覆盖默认 `set_len()`，并负责维护
+  backing prepare 后失败的磁盘恢复协议。
 - VFS-wide identity table 按 `(SuperBlock, inode number)` 联合索引，是唯一的 hashed resident inode
   identity table；`SuperBlock`、filesystem 和 bridge 不得再保存第二个 hashed cache 字段。Linux 风格的
   pseudo/unhashed inode 可以不进入表，但同一 filesystem identity 不得混用直接构造和 hashed initializer。
@@ -391,5 +392,5 @@ invalidate lock；不改变原有读取的文件长度快照和并发 truncate �
 - FIEMAP 后端是否只调用 `fill_next_extent()`，并在返回 `false` 后立即停止。
 - FIEMAP 后端是否在 VFS 持有的 inode data read lock 内完成请求的 `SYNC` 写回，再开始遍历。
 - shared-file write fault 是否在 address-space invalidate shared lock 和 folio lock 内完成
-  filesystem `page_mkwrite` prepare、folio dirty 和 writable PTE publish，且不取得 inode
+  `FileMappingOperations::page_mkwrite` prepare、folio dirty 和 writable PTE publish，且不取得 inode
   exclusive data lock。

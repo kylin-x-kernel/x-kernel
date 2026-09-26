@@ -11,7 +11,7 @@ use kerrno::KResult;
 use memaddr::PAGE_SIZE_4K;
 use pagecache::{Folio, PageIndex};
 
-use super::{AddressSpace, PageMkwriteRequest, WriteBeginRequest, WriteEndRequest};
+use super::{AddressSpace, WriteBeginRequest, WriteEndRequest};
 use crate::{Kiocb, VfsError, VfsResult};
 
 fn write_prefix_or_error(written: usize, error: VfsError) -> VfsResult<usize> {
@@ -55,9 +55,10 @@ impl AddressSpace {
     ///
     /// Returns [`VfsError::BadAddress`] if truncate moved the folio beyond EOF,
     /// or propagates filesystem preparation, dirtying, and PTE-update errors.
-    pub fn page_mkwrite<R>(
+    pub(crate) fn page_mkwrite<R>(
         &self,
         index: PageIndex,
+        prepare: impl FnOnce(u64, usize) -> VfsResult<()>,
         f: impl FnOnce(&mut Folio) -> VfsResult<R>,
     ) -> VfsResult<R> {
         let inode = self.inode().ok_or(VfsError::InvalidInput)?;
@@ -72,8 +73,7 @@ impl AddressSpace {
             }
             let len = usize::try_from((file_len - pos).min(PAGE_SIZE_4K as u64))
                 .map_err(|_| VfsError::InvalidInput)?;
-            self.ops
-                .page_mkwrite(self, PageMkwriteRequest::new(pos, len))?;
+            prepare(pos, len)?;
             self.dirty_folio(folio)?;
             f(folio)
         })

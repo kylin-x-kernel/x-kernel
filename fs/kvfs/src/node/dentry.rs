@@ -1588,6 +1588,8 @@ mod tests_dentry {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use ktime_types::SystemTime;
+    use memaddr::PAGE_SIZE_4K;
+    use pagecache::Folio;
     use unittest::{assert, def_test};
 
     use super::{Dentry, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive};
@@ -1596,6 +1598,7 @@ mod tests_dentry {
         InodeDirOperations, InodeOperations, InodeSymlinkOperations, LockedDentry, Metadata,
         MetadataUpdate, NodeFlags, NodePermission, NodeType, RenameFlags, StatFs, SuperBlock,
         SuperBlockOperations, Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
+        WritebackControl,
     };
 
     struct MockFilesystem;
@@ -1735,27 +1738,43 @@ mod tests_dentry {
     static MOCK_ADDRESS_SPACE_OPERATIONS: MockAddressSpaceOperations = MockAddressSpaceOperations;
 
     impl AddressSpaceOperations for MockAddressSpaceOperations {
-        fn read_at(&self, mapping: &AddressSpace, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+        fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<usize> {
             let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
             let data = inode.private::<MockFileOps>()?.data.lock();
-            let start = offset as usize;
+            let start = folio
+                .index()
+                .checked_mul(PAGE_SIZE_4K as u64)
+                .and_then(|offset| usize::try_from(offset).ok())
+                .ok_or(VfsError::InvalidInput)?;
             if start >= data.len() {
                 return Ok(0);
             }
+            let buf = folio.data();
             let count = buf.len().min(data.len() - start);
             buf[..count].copy_from_slice(&data[start..start + count]);
             Ok(count)
         }
 
-        fn write_at(&self, mapping: &AddressSpace, buf: &[u8], offset: u64) -> VfsResult<usize> {
+        fn writepages(
+            &self,
+            mapping: &AddressSpace,
+            control: &mut WritebackControl,
+        ) -> VfsResult<()> {
             let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
-            let mut data = inode.private::<MockFileOps>()?.data.lock();
-            let start = offset as usize;
-            if start + buf.len() > data.len() {
-                data.resize(start + buf.len(), 0);
-            }
-            data[start..start + buf.len()].copy_from_slice(buf);
-            Ok(buf.len())
+            let backing = inode.private::<MockFileOps>()?;
+            mapping.writeback_cached_folios(control, |index, buf, valid_len| {
+                let start = index
+                    .checked_mul(PAGE_SIZE_4K as u64)
+                    .and_then(|offset| usize::try_from(offset).ok())
+                    .ok_or(VfsError::InvalidInput)?;
+                let end = start.checked_add(valid_len).ok_or(VfsError::InvalidInput)?;
+                let mut data = backing.data.lock();
+                if end > data.len() {
+                    data.resize(end, 0);
+                }
+                data[start..end].copy_from_slice(&buf[..valid_len]);
+                Ok(())
+            })
         }
     }
 

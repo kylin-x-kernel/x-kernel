@@ -24,5 +24,6 @@ macros.workspace = true
 ksync.workspace = true
 ktask.workspace = true
 kvfs.workspace = true
+pagecache.workspace = true
 ktime_types = { workspace = true }
 unittest = { workspace = true }

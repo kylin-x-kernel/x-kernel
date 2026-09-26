@@ -314,6 +314,17 @@ impl FiemapCapability<'_> {
 
 /// Inode operation table installed on VFS inodes.
 pub trait InodeOperations: Send + Sync + 'static {
+    /// Changes a regular file's length while its inode data and address-space
+    /// invalidate locks are held exclusively.
+    ///
+    /// The default publishes the size and invalidates cached mappings for a
+    /// file with no independent backing store. Filesystems with backing state
+    /// override this method to prepare it, call [`VfsInode::truncate_setsize`]
+    /// exactly once, then release obsolete backing blocks.
+    fn set_len(&self, inode: &VfsInode, len: u64) -> VfsResult<()> {
+        inode.truncate_setsize(len)
+    }
+
     /// Checks access to this inode for the supplied task credentials.
     fn permission(
         &self,
@@ -1786,12 +1797,22 @@ impl VfsInode {
 
     pub(crate) fn set_len(&self, len: u64) -> VfsResult<()> {
         let _data_guard = self.data_lock.write();
-        self.mapping.set_len(len)?;
+        let _invalidate_guard = self.mapping.lock_invalidate_exclusive();
+        self.inode_operations.set_len(self, len)?;
         if self.size() == len {
             Ok(())
         } else {
             Err(VfsError::InvalidData)
         }
+    }
+
+    /// Publishes the size prepared by an inode `set_len` implementation.
+    ///
+    /// The caller must hold the inode data and address-space invalidate locks
+    /// exclusively; [`Self::set_len`] provides both locks. Call this before
+    /// releasing backing blocks that may still be reachable from cached folios.
+    pub fn truncate_setsize(&self, len: u64) -> VfsResult<()> {
+        self.mapping.truncate_setsize(len)
     }
 
     /// Records a file length already changed by the backing filesystem.

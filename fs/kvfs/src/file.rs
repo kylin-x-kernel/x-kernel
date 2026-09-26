@@ -19,6 +19,7 @@ use kerrno::LinuxError;
 use kpoll::{IoEvents, PollContext, PollRegisterError};
 use linux_raw_sys::general::O_ACCMODE;
 use log::warn;
+use pagecache::{Folio, PageIndex};
 
 use crate::{
     AddressSpace, DirContext, Kiocb, MagicLinkOps, MmapMapper, Mutex, MutexGuard, NodeFlags,
@@ -86,12 +87,27 @@ pub trait FileDirOperations: Send + Sync {
     fn iterate_shared(&self, file: &VfsFile, ctx: &mut DirContext<'_>) -> VfsResult<usize>;
 }
 
+/// Filesystem preparation for writable shared file-mapping faults.
+pub trait FileMappingOperations: Send + Sync {
+    /// Prepares the valid file bytes in a cached folio before it becomes writable.
+    ///
+    /// The address-space invalidate lock is held for reading and the target
+    /// folio is locked. Implementations may reserve backing storage but must
+    /// not acquire the invalidate lock exclusively.
+    fn page_mkwrite(&self, file: &VfsFile, pos: u64, len: usize) -> VfsResult<()>;
+}
+
 /// File operations installed on file-capable inodes.
 ///
 /// The same operation table is attached to the inode and used by opened file
 /// descriptions. Implementations that need per-open behavior may update the
 /// [`VfsFileBuilder`] during `open`.
 pub trait FileOperations: Send + Sync + 'static {
+    /// Returns shared file-mapping fault operations when this file needs them.
+    fn mapping_operations(&self) -> Option<&dyn FileMappingOperations> {
+        None
+    }
+
     /// Returns directory iteration operations when this file supports readdir.
     fn dir_operations(&self) -> Option<&dyn FileDirOperations> {
         None
@@ -675,6 +691,27 @@ impl VfsFile {
     /// `VfsFile` borrow.
     pub fn mapping(&self) -> &Arc<AddressSpace> {
         self.location.mapping()
+    }
+
+    /// Prepares and dirties a cached folio for a shared writable fault.
+    ///
+    /// The supplied closure updates the page table while the folio remains
+    /// locked. A fault beyond the current EOF returns [`VfsError::BadAddress`].
+    pub fn page_mkwrite<R>(
+        &self,
+        index: PageIndex,
+        update_mapping: impl FnOnce(&mut Folio) -> VfsResult<R>,
+    ) -> VfsResult<R> {
+        self.mapping().page_mkwrite(
+            index,
+            |pos, len| {
+                if let Some(ops) = self.operations().mapping_operations() {
+                    ops.page_mkwrite(self, pos, len)?;
+                }
+                Ok(())
+            },
+            update_mapping,
+        )
     }
 
     /// Writes all dirty cached pages for this file.

@@ -2351,6 +2351,7 @@ dependencies = [
  "ktime_types",
  "kvfs",
  "macros",
+ "pagecache",
  "unittest",
 ]
 
@@ -3489,6 +3490,7 @@ dependencies = [
  "linux-raw-sys",
  "macros",
  "memaddr",
+ "pagecache",
  "slab",
  "unittest",
 ]

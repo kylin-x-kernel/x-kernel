@@ -25,7 +25,7 @@ to `posix/mm`.
 - Writable regular-file `MAP_SHARED` must use write-fault dirty tracking:
   initial shared file PTEs are installed without write permission, and the
   first write fault must hold the address-space invalidate lock shared and the
-  target folio lock while completing filesystem `page_mkwrite` preparation,
+  target folio lock while completing `FileMappingOperations::page_mkwrite` preparation,
   marking the inode-owned folio dirty, and making the PTE writable. Truncate
   and cache invalidation take the invalidate lock exclusively.
 - `mprotect()` must not upgrade existing shared file PTEs directly to writable;

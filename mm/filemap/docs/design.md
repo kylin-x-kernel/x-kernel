@@ -145,7 +145,7 @@ sys_mmap
 5. Otherwise the runtime materializes a folio through inode-owned
    `kvfs::AddressSpace` and maps the folio into the page table.
 6. Shared writable mappings initially install the PTE without write permission.
-   The first write fault enters `kvfs::AddressSpace::page_mkwrite()`, which
+   The first write fault enters `kvfs::VfsFile::page_mkwrite()`, which
    takes the address-space invalidate lock shared, locks the target folio,
    rechecks EOF, invokes the filesystem preparation callback, marks the folio
    dirty, and only then remaps the PTE writable.

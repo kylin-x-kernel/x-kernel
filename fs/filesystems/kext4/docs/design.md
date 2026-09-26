@@ -453,8 +453,8 @@ xattr 会清除此标志，因为 inode-body/external 空间已经改变。`Jour
 EA block，再释放 inode bitmap entry。
 
 Truncate 使用 orphan file（满时回退 legacy orphan list）保护 regular-file shrink。KExt4 的
-`AddressSpaceOperations::set_len()` 按
-`prepare_regular_inode_truncate()` → `AddressSpace::truncate_setsize()`（先发布 VFS i_size，
+`InodeOperations::set_len()` 按
+`prepare_regular_inode_truncate()` → `VfsInode::truncate_setsize()`（先发布 VFS i_size，
 再执行 unmap/cache truncate/unmap）→
 delalloc extent-status 尾部删除 → `finish_regular_inode_shrink()` 排序。是否删除 delalloc
 以旧 `i_size` 为准，是否释放磁盘 mapping 以旧 `i_disksize` 为准；因此截断到

@@ -35,11 +35,13 @@ mod types;
 mod xattr;
 
 pub use address_space::{
-    AddressSpace, AddressSpaceOperations, AddressSpaceViewGuard, PageMkwriteRequest,
-    ReadaheadControl, WriteBeginRequest, WriteEndRequest, WritebackControl, WritebackSyncMode,
+    AddressSpace, AddressSpaceOperations, AddressSpaceViewGuard, ReadaheadControl,
+    WriteBeginRequest, WriteEndRequest, WritebackControl, WritebackSyncMode,
 };
 pub use fiemap::{FiemapExtentFlags, FiemapExtentInfo, FiemapExtentWriter, FiemapFlags};
-pub use file::{FMode, FileDirOperations, FileOperations, VfsFile, VfsFileBuilder};
+pub use file::{
+    FMode, FileDirOperations, FileMappingOperations, FileOperations, VfsFile, VfsFileBuilder,
+};
 pub use file_system_type::{
     FileSystemType, FileSystemTypeFlags, FsContextOperations, GetTreeFn, InitFsContextFn,
     ReconfigureFn, get_filesystem_type, register_filesystem, registered_filesystems,

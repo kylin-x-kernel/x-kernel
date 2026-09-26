@@ -11,14 +11,15 @@ use kerrno::LinuxError;
 use ktime_types::SystemTime;
 use kvfs::{
     AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FMode, FiemapExtentFlags,
-    FiemapExtentInfo, FiemapFlags, FileDirOperations, FileOperations, InodeAttributeOperations,
-    InodeDirOperations, InodeFiemapOperations, InodeOperations, InodeSymlinkOperations, Kiocb,
-    LockedDentry, Metadata, MetadataUpdate, NodePermission, NodeType, PageMkwriteRequest,
-    ReadaheadControl, RenameFlags, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations,
-    Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest,
-    WriteEndRequest, WritebackControl, XattrName, XattrNameRef, XattrNameSink, XattrSetFlags,
-    default_evict_inode, inode_init_owner,
+    FiemapExtentInfo, FiemapFlags, FileDirOperations, FileMappingOperations, FileOperations,
+    InodeAttributeOperations, InodeDirOperations, InodeFiemapOperations, InodeOperations,
+    InodeSymlinkOperations, Kiocb, LockedDentry, Metadata, MetadataUpdate, NodePermission,
+    NodeType, ReadaheadControl, RenameFlags, StatFs, SuperBlock, SuperBlockFlags,
+    SuperBlockOperations, Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
+    WriteBeginRequest, WriteEndRequest, WritebackControl, XattrName, XattrNameRef, XattrNameSink,
+    XattrSetFlags, default_evict_inode, inode_init_owner,
 };
+use pagecache::Folio;
 
 use crate::{
     BlockMapping, BlockMappingFlags, DirectoryFileType, Ext4DeviceId, Ext4DirEntryRef, Ext4DirPos,
@@ -910,6 +911,37 @@ fn finish_delalloc_write(
 }
 
 impl InodeOperations for Ext4Inode {
+    fn set_len(&self, vfs_inode: &VfsInode, len: u64) -> VfsResult<()> {
+        let super_block = vfs_inode.super_block()?;
+        let ext4 = ext4_private(&super_block)?;
+        if len > Ext4SuperOperations::max_file_size(ext4, &super_block, self) {
+            return Err(VfsError::FileTooLarge);
+        }
+        let (visible_size, disk_size) = self.sizes();
+        let is_visible_shrink = len < visible_size;
+        let is_disk_shrink = len < disk_size;
+        {
+            let mut state = sync::write_lock(ext4);
+            state
+                .prepare_regular_inode_truncate(self, len, current_ext4_timestamp(vfs_inode))
+                .map_err(into_vfs_err)?
+        }
+        vfs_inode.truncate_setsize(len)?;
+        let mut state = sync::write_lock(ext4);
+        if is_visible_shrink {
+            let first_unneeded = first_logical_block_after_len(len, super_block.block_size());
+            state
+                .truncate_delalloc_range(self, LogicalBlock::new(first_unneeded))
+                .map_err(into_vfs_err)?;
+        }
+        if is_disk_shrink {
+            state
+                .finish_regular_inode_shrink(self, len)
+                .map_err(into_vfs_err)?;
+        }
+        Ok(())
+    }
+
     fn directory_operations(&self) -> Option<&dyn InodeDirOperations> {
         if self.kind() == InodeKind::Directory {
             Some(self)
@@ -1348,34 +1380,29 @@ struct Ext4AddressSpaceOperations;
 
 static EXT4_ADDRESS_SPACE_OPERATIONS: Ext4AddressSpaceOperations = Ext4AddressSpaceOperations;
 
-impl AddressSpaceOperations for Ext4AddressSpaceOperations {
-    fn read_at(&self, mapping: &AddressSpace, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
-        let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
-        let inode = vfs_inode.private::<Ext4Inode>()?;
-        let super_block = vfs_inode.super_block()?;
-        let ext4 = ext4_private(&super_block)?;
-        match inode.kind() {
-            InodeKind::RegularFile => sync::read_lock(ext4)
-                .read_at(inode, offset, buf)
-                .map_err(into_vfs_err),
-            InodeKind::Symlink => sync::read_lock(ext4)
-                .read_link_at(inode, offset, buf)
-                .map_err(into_vfs_err),
-            _ => Err(VfsError::InvalidInput),
-        }
+fn read_backing_at(mapping: &AddressSpace, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+    let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
+    let inode = vfs_inode.private::<Ext4Inode>()?;
+    let super_block = vfs_inode.super_block()?;
+    let ext4 = ext4_private(&super_block)?;
+    match inode.kind() {
+        InodeKind::RegularFile => sync::read_lock(ext4)
+            .read_at(inode, offset, buf)
+            .map_err(into_vfs_err),
+        InodeKind::Symlink => sync::read_lock(ext4)
+            .read_link_at(inode, offset, buf)
+            .map_err(into_vfs_err),
+        _ => Err(VfsError::InvalidInput),
     }
+}
 
-    fn page_mkwrite(&self, mapping: &AddressSpace, request: PageMkwriteRequest) -> VfsResult<()> {
-        let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
-        let inode = vfs_inode.private::<Ext4Inode>()?;
-        if inode.kind() != InodeKind::RegularFile {
-            return Err(VfsError::InvalidInput);
-        }
-        let super_block = vfs_inode.super_block()?;
-        let ext4 = ext4_private(&super_block)?;
-        let mut len = request.len();
-        check_write_limit(ext4, &super_block, inode, request.pos(), &mut len)?;
-        reserve_delalloc_range(ext4, inode, request.pos(), len, super_block.block_size())
+impl AddressSpaceOperations for Ext4AddressSpaceOperations {
+    fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<usize> {
+        let offset = folio
+            .index()
+            .checked_mul(PAGE_SIZE_4K as u64)
+            .ok_or(VfsError::InvalidInput)?;
+        read_backing_at(mapping, folio.data(), offset)
     }
 
     fn write_begin(&self, mapping: &AddressSpace, request: WriteBeginRequest) -> VfsResult<()> {
@@ -1421,7 +1448,7 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
         let intent = Ext4SyncIntent::from_data_only(control.is_data_only());
         let timestamp = current_ext4_timestamp(&vfs_inode);
 
-        // A cache miss may enter `read_at()` while the PageCache mapping lock is
+        // A cache miss may enter `read_folio()` while the PageCache mapping lock is
         // held. Keep the core mutex out of PageCache traversal so writeback
         // cannot acquire the same locks in the opposite order.
         mapping.writeback_cached_ranges(control, MAX_WRITEBACK_BYTES, |offset, data| {
@@ -1449,39 +1476,6 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
         Ok(())
     }
 
-    fn set_len(&self, mapping: &AddressSpace, len: u64) -> VfsResult<()> {
-        let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
-        let inode = vfs_inode.private::<Ext4Inode>()?;
-        let super_block = vfs_inode.super_block()?;
-        let ext4 = ext4_private(&super_block)?;
-        if len > Ext4SuperOperations::max_file_size(ext4, &super_block, inode) {
-            return Err(VfsError::FileTooLarge);
-        }
-        let (visible_size, disk_size) = inode.sizes();
-        let is_visible_shrink = len < visible_size;
-        let is_disk_shrink = len < disk_size;
-        {
-            let mut state = sync::write_lock(ext4);
-            state
-                .prepare_regular_inode_truncate(inode, len, current_ext4_timestamp(&vfs_inode))
-                .map_err(into_vfs_err)?
-        }
-        mapping.truncate_setsize(len)?;
-        let mut state = sync::write_lock(ext4);
-        if is_visible_shrink {
-            let first_unneeded = first_logical_block_after_len(len, super_block.block_size());
-            state
-                .truncate_delalloc_range(inode, LogicalBlock::new(first_unneeded))
-                .map_err(into_vfs_err)?;
-        }
-        if is_disk_shrink {
-            state
-                .finish_regular_inode_shrink(inode, len)
-                .map_err(into_vfs_err)?;
-        }
-        Ok(())
-    }
-
     fn readahead(&self, mapping: &AddressSpace, control: ReadaheadControl) -> VfsResult<()> {
         if control.count() == 0 {
             return Ok(());
@@ -1496,7 +1490,7 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
             .checked_mul(PAGE_SIZE_4K)
             .ok_or(VfsError::InvalidInput)?;
         let mut data = vec![0u8; len];
-        let read = self.read_at(mapping, &mut data, offset)?;
+        let read = read_backing_at(mapping, &mut data, offset)?;
         let mut copied = 0usize;
         while copied < read {
             let page_index = control.start_index() + (copied / PAGE_SIZE_4K) as u64;
@@ -1509,6 +1503,10 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
 }
 
 impl FileOperations for Ext4Inode {
+    fn mapping_operations(&self) -> Option<&dyn FileMappingOperations> {
+        (self.kind() == InodeKind::RegularFile).then_some(self)
+    }
+
     fn dir_operations(&self) -> Option<&dyn FileDirOperations> {
         if self.kind() == InodeKind::Directory {
             Some(self)
@@ -1573,6 +1571,15 @@ impl FileOperations for Ext4Inode {
             })
             .map_err(into_vfs_err)?;
         Ok(())
+    }
+}
+
+impl FileMappingOperations for Ext4Inode {
+    fn page_mkwrite(&self, file: &VfsFile, pos: u64, mut len: usize) -> VfsResult<()> {
+        let super_block = ext4_super_block(file.inode())?;
+        let ext4 = ext4_private(&super_block)?;
+        check_write_limit(ext4, &super_block, self, pos, &mut len)?;
+        reserve_delalloc_range(ext4, self, pos, len, super_block.block_size())
     }
 }
 

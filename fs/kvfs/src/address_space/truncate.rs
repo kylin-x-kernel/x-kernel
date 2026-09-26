@@ -7,24 +7,22 @@
 use memaddr::PAGE_SIZE_4K;
 
 use super::AddressSpace;
-use crate::{VfsError, VfsResult};
+use crate::{RwLockWriteGuard, VfsError, VfsResult};
 
 impl AddressSpace {
-    /// Changes the backing file length through this address space.
-    pub fn set_len(&self, len: u64) -> VfsResult<()> {
-        let _invalidate_guard = self.invalidate_lock.write();
-        self.ops.set_len(self, len)
+    pub(crate) fn lock_invalidate_exclusive(&self) -> RwLockWriteGuard<'_, ()> {
+        self.invalidate_lock.write()
     }
 
     /// Publishes `inode::i_size` and updates mapped/cache state in Linux order.
     ///
-    /// Filesystem `set_len` implementations call this after preparing their
-    /// backing-store mutation and before releasing blocks. The enclosing
-    /// [`Self::set_len`] call holds the address-space invalidate lock
-    /// exclusively. Shrink performs `i_size_write`, unmap, cache truncation,
+    /// Filesystem inode `set_len` implementations call this after preparing their
+    /// backing-store mutation and before releasing blocks. The inode truncate
+    /// path holds the address-space invalidate lock exclusively. Shrink performs
+    /// `i_size_write`, unmap, cache truncation,
     /// then a second unmap so a concurrent private COW fault cannot survive
     /// beyond the new EOF.
-    pub fn truncate_setsize(&self, len: u64) -> VfsResult<()> {
+    pub(crate) fn truncate_setsize(&self, len: u64) -> VfsResult<()> {
         let inode = self.inode().ok_or(VfsError::InvalidInput)?;
         let old_len = inode.size();
         inode.set_size(len);

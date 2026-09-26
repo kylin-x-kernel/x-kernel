@@ -22,7 +22,15 @@ use super::{
     super::{AddressSpace, AddressSpaceOperations, WritebackControl},
     TRUNCATE_OPERATIONS, TruncateOps,
 };
-use crate::{NodeFlags, NodePermission, NodeType, Umode, VfsInode, VfsInodeInit, VfsResult};
+use crate::{
+    FileOperations, InodeOperations, NodeFlags, NodePermission, NodeType, Umode, VfsInode,
+    VfsInodeInit, VfsResult,
+};
+
+struct CacheOnlyFileOps;
+
+impl InodeOperations for CacheOnlyFileOps {}
+impl FileOperations for CacheOnlyFileOps {}
 
 struct RecordingNotifier {
     address_space: Weak<AddressSpace>,
@@ -83,6 +91,36 @@ fn evict_on_clean_address_space_writes_back_zero_folios() {
 
     // Evict on a clean cache should succeed.
     address_space.evict().expect("evict should succeed");
+}
+
+#[def_test]
+fn default_cached_file_inode_truncates_without_filesystem_set_len() {
+    let old_len = (PAGE_SIZE_4K * 2) as u64;
+    let inode = VfsInode::new_file_with_flags(
+        Arc::new(CacheOnlyFileOps),
+        NodeFlags::ALWAYS_CACHE,
+        VfsInodeInit::new(
+            4,
+            old_len,
+            Umode::new(NodeType::RegularFile, NodePermission::default()),
+        ),
+    );
+    let address_space = inode.address_space();
+    address_space
+        .write_cached_bytes(PAGE_SIZE_4K as u64, b"stale")
+        .expect("cache file data");
+
+    inode.set_len(0).expect("shrink cache-only file");
+    assert_eq!(inode.size(), 0);
+    assert_eq!(address_space.nrpages(), 0);
+
+    inode.set_len(old_len).expect("regrow cache-only file");
+    address_space
+        .with_folio_or_create(1, |folio| {
+            assert!(folio.data().iter().all(|byte| *byte == 0));
+            Ok(())
+        })
+        .expect("regrown bytes are zero");
 }
 
 #[def_test]
