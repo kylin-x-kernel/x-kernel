@@ -9,7 +9,7 @@ use alloc::{sync::Weak, vec, vec::Vec};
 use iov_iter::{IovSink, iov_iter_dest, iov_iter_kvec_dest};
 use kerrno::{KError, KResult};
 use memaddr::PAGE_SIZE_4K;
-use pagecache::{Folio, PageCacheKind, PageIndex};
+use pagecache::Folio;
 use unittest::def_test;
 
 use super::AddressSpace;
@@ -19,12 +19,8 @@ struct ReadOps;
 static READ_OPS: ReadOps = ReadOps;
 
 impl AddressSpaceOperations for ReadOps {
-    fn read_folio(
-        &self,
-        _mapping: &AddressSpace,
-        folio: &mut Folio,
-        index: PageIndex,
-    ) -> VfsResult<usize> {
+    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<usize> {
+        let index = folio.index();
         folio.data().fill((index % 251) as u8);
         Ok(PAGE_SIZE_4K)
     }
@@ -32,7 +28,7 @@ impl AddressSpaceOperations for ReadOps {
 
 #[def_test]
 fn buffered_read_crosses_windows_with_unaligned_eof_and_cache_holes() {
-    let mapping = AddressSpace::new(Weak::new(), &READ_OPS, PageCacheKind::InMemory);
+    let mapping = AddressSpace::new(Weak::new(), &READ_OPS);
     let file_len = 70 * PAGE_SIZE_4K + 17;
     for index in (0..70).step_by(2) {
         mapping
@@ -79,7 +75,7 @@ impl IovSink for ShortSink {
 #[def_test]
 fn buffered_read_stops_on_short_or_zero_copy() {
     for limit in [0, 23] {
-        let mapping = AddressSpace::new(Weak::new(), &READ_OPS, PageCacheKind::InMemory);
+        let mapping = AddressSpace::new(Weak::new(), &READ_OPS);
         let mut sink = ShortSink { copied: 0, limit };
         let mut iter = iov_iter_dest(&mut sink);
         assert_eq!(
@@ -119,7 +115,7 @@ impl IovSink for InvalidatingSink<'_> {
 
 #[def_test]
 fn buffered_read_resolves_pages_removed_after_window_preparation() {
-    let mapping = AddressSpace::new(Weak::new(), &READ_OPS, PageCacheKind::InMemory);
+    let mapping = AddressSpace::new(Weak::new(), &READ_OPS);
     for index in 0..3 {
         mapping
             .with_folio_or_create(index, |folio| {
