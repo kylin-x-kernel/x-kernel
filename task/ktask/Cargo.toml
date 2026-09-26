@@ -25,7 +25,6 @@ sched_cfs = ["preempt"]
 sched_eevdf = ["preempt"]
 sched_stat = []
 arm-timer-resume-fixup = []
-execution-accounting = []
 
 
 [dependencies]

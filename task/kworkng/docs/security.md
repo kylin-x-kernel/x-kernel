@@ -3,7 +3,8 @@
 ## Scope And Trust Boundaries
 
 This analysis covers all kworkng production modules, optional diagnostic features
-and the isolated and live kernel test fixtures. Internal queue state and execution-provider
+and the isolated/live kernel test fixtures, including the opt-in release runner
+in `benches/kernel.rs`. Internal queue state and execution-provider
 implementations are analyzed in the adjacent kworkqueue_ng and kworkerpool_ng
 security documents. `kruntime` owns the all-CPU startup barrier and initializes
 services before exposing driver producers; `knet` owns network callback state.
@@ -23,6 +24,16 @@ security principals. IRQ-safe publication is not an NMI-safe interface.
 
 ## Protected Assets
 
+The release runner is trusted test code selected only by build configuration.
+It intentionally occupies workers and replaces userspace startup, so enabling
+it in a deployed image is an availability risk. The option defaults off, has no
+user-facing trigger, and is excluded from unit-test builds. A host timeout is
+required to detect hung drains; a passing soak does not prove absence of leaks.
+Runner result and progress records bypass log filtering through `klogger`
+console output. Missing pass markers or a timeout still invalidate acceptance;
+normal power-off alone is not proof of success.
+
+
 | Asset | Protection and required lifetime |
 | --- | --- |
 | SERVICES: Once<Services> | Private write-once storage; Release/Acquire publishes all defaults together; retain successful services for kernel life |
@@ -39,6 +50,7 @@ security principals. IRQ-safe publication is not an NMI-safe interface.
 | Site | Invariant and enforcing boundary |
 | --- | --- |
 | defaults.rs borrowed queue/modify methods | Caller-supplied Pin plus unsafe retention/producer-join/drain contract; selector resolves initialized providers |
+| benches/kernel.rs measure/stress publication | Each producer owns a pinned Work and its atomic captures, flushes each occurrence, and synchronously cancels before release. Callbacks do not block, so all three providers are valid. Kernel panic aborts the run rather than unwinding borrowed storage. |
 | normal_queue.rs static publication | Static shared Work cannot move or expire; private normal-only construction certifies callback context |
 | work_handle.rs and delayed_work_handle.rs publication closures | Owner borrow retains stable storage; private gate excludes publication after shutdown; only normal queues exposed |
 | owned.rs Storage<W>: Sync | W: Drain requires Send + Sync; private UnsafeCell mutated only by unique final reclamation after drain |

@@ -11,8 +11,16 @@ synchronous waits require sleepable task context.
 This crate does not activate itself. `kruntime` initializes it once after all CPU
 services are ready and before driver initialization. Network polling uses a
 prepared static Work on a private NormalQueue. There is no legacy selection
-switch, GC extension or benchmark startup path. Legacy implementation removal
-is a separate change.
+switch or GC extension. The legacy workqueue crates
+and their task-accounting hooks have been removed.
+
+The default-off `bench` feature includes `benches/kernel.rs` in release kernels.
+The boot integration invokes it after runtime initialization instead of launching
+userspace, then powers off. It exercises the same published services without
+replacing actions or registries. See `benches/README.md` for scope and commands.
+The runner's optional `klogger` dependency supplies unfiltered console output
+for results and progress, so boot log-level overrides cannot hide acceptance
+records. It does not change the system-wide log filter.
 
 Scope: `services.rs`, `defaults.rs`, `queue.rs`, `normal_queue.rs`, `owned.rs`,
 `work_handle.rs` and `delayed_work_handle.rs`. Queue state, timer transfer, color

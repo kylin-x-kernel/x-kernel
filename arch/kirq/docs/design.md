@@ -26,11 +26,11 @@ the caller establishes those conditions. Existing nesting APIs are unchanged.
 控制器后端之间，向驱动、IPI、计时器和 NMI 使用者提供统一的 IRQ 描述、
 注册、映射、使能、dispatch 和完成语义。
 
-`kirq` 位于 irqchip 驱动之上。各 irqchip 驱动只负责具体控制器行为
-（configure、mask/unmask、claim、complete、priority、IPI delivery），并通过
-`kirq::IntrManagerIf` 接入。中断处理核心能力和 Linux-style 扩展语义中，IRQ
-context、softirq 和 threaded IRQ 属于 `kirq`；通用 sleepable workerqueue 已抽到
-`kwork`，`kirq` 只为 `kwork` 提供 IRQ/BH context provider。
+`kirq` sits above irqchip drivers, which implement controller operations
+(configure, mask/unmask, claim, complete, priority and IPI delivery) through
+`kirq::IntrManagerIf`. IRQ context, softirq and threaded IRQ semantics belong
+to kirq. General sleepable workqueues belong to `kworkng`; kirq supplies
+IRQ/BH context and dispatch capabilities.
 
 `khal::irq` 只保留 trap-entry adapter 和 HAL 特定 helper；generic IRQ state 与
 dispatch ownership 属于 `kirq`。
@@ -445,10 +445,9 @@ raise `NET_RX_SOFTIRQ`；协议栈在 softirq/NAPI poll 中消费 RX ring、提�
 - `ktty` 等 line-level IRQ waiter 也应迁到对应设备/TTY 输入队列的 readiness
   waitqueue；直接等待 IRQ line 只作为过渡或诊断机制保留。
 
-`kirq` 的长期 owner 是 hardirq dispatch、softirq 和 IRQ thread 等中断执行上下文
-基础设施；通用 sleepable workerqueue 由 `kwork` 拥有，`kirq` 只在需要时消费它或
-提供 IRQ/BH context capability。具体“事件变为可读/可写后唤醒谁”应由网络、TTY、块
-设备等上层子系统拥有。
+`kirq` owns hardirq dispatch, softirq and IRQ-thread execution infrastructure.
+`kworkng` owns general sleepable workqueues. Networking, TTY and block
+subsystems own the decision to wake waiters when their data becomes ready.
 
 ### Lifecycle hook
 
@@ -553,108 +552,24 @@ drain 在每批 action 完成且仍有 pending 时，通过 `SoftirqDaemonIf::ne
 `open_softirq()` 只用于 init-time 注册。本阶段没有 unregister API；runner 在
 `SpinNoIrq` 下复制 action table snapshot，但不会持有注册锁执行 action。
 
-### Workerqueue foundation
+### Workqueue Integration
 
-Workerqueue state and lifecycle rules are owned by `task/kwork`. This section
-documents how IRQ bottom-half code consumes `kwork`; the authoritative
-queue/pool state machines are documented in `task/kwork/docs/design.md`,
-`task/kworkqueue`, and `task/kworkerpool`.
+Workqueue ownership belongs to `task/kworkng` and its `kworkqueue_ng` and
+`kworkerpool_ng` subcrates. See their design and security documents for queue
+state, prepared storage, cancellation and shutdown contracts. `kirq` does not
+own work objects or normal worker tasks.
 
-```text
-schedule_work(work_item)
-   -> queue_work(default system_wq, work_item)
-   -> select a ready normal per-CPU built-in pool
-queue_work_on(cpu, work_item)
-   -> queue_work(cpu-bound queue binding, work_item)
-   -> clone ScheduledWork handle into fixed-capacity pending entry without allocation
-   -> reject the target pool if its built-in pool is not ready
-   -> submit a runnable/deferred entry to kworkerpool
+`kworkng::runtime::init` registers Tasklet and High actions after all CPU
+services are ready. Fixed `kipi` reasons raise the target CPU's softirq bits;
+local dispatch and ksoftirqd both enter the same bounded BH service. Pending
+demand survives a budget-limited pass and requests another pass.
 
-kwork/normal/<cpu>:<worker_id>
-   -> wait until the CPU-bound system pool has runnable work
-   -> kworkerpool worker loop claims one runnable entry
-   -> kwork runtime maps opaque entry owner/key back to a queue binding and ScheduledWork
-   -> may select work from any logical queue attached to this pool
-   -> callback runs in sleepable task context with kwork locks released
-   -> publish completion and queue/pool accounting
-
-flush_work(work) / cancel_work_sync(work)
-   -> reject hardirq/serving-softirq/BH-disabled context
-   -> reject self-wait from the worker currently running the same work
-   -> reject flush of another work that cannot make progress in the current execution pool
-   -> wait through ktask wait/yield helpers and recheck kwork-owned work state
-```
-
-`kwork` owns the product API (`ScheduledWork`,
-`WorkQueue`, `WorkQueueHandle`, system queue helpers and `BudgetedPoller`) and
-wires `kworkqueue` queue state to `kworkerpool` execution pools. `kwork` reads
-`kirq::context` directly for sleepable wait gating and registers BH softirq
-actions during runtime init.
-`ScheduledWork` is a refcounted owner handle: queue entries and running callbacks
-keep their own handle clone, so a work item remains alive while it is queued or
-executing. This lets device-owned work be allocated during probe/init and
-dropped after teardown instead of forcing `Box::leak()` or global static work
-objects. `ScheduledWork` state records the queue that owns the current pending entry,
-so `cancel_work()` and `cancel_work_sync()` remove pending work by looking at the
-work itself rather than trusting a caller-supplied queue pointer.
-
-The task-context model is pool-centric. The default `system_wq` selector rotates
-across ready normal per-CPU pools, while explicit `queue_work_on(cpu, work)` or
-`ScheduleAttrs::on_cpu()` targets a specific logical CPU. `kworkerpool` creates
-and manages the bounded pinned `kwork/normal/<cpu>:<worker_id>` workers and the
-per-CPU manager task through ktask-backed pool runtime. A sleeping callback only
-blocks its own worker task; another idle worker can drain other runnable work
-from any logical queue attached to the same CPU pool. Scheduler-side
-`TaskExecutionContext` drives CPU-intensive accounting; workerpool policy also
-handles dynamic worker creation and idle retire. Rescuer, unbound and ordered
-semantics are later milestones.
-Explicit CPU enqueue rejects logical CPU ids outside `NR_CPUS` with
-`QueueWorkResult::InvalidCpu`; it does not silently redirect work to CPU0.
-System queues also reject target CPU pools whose workers are not installed yet
-with `QueueWorkResult::WorkerUnavailable`, so explicit CPU targeting cannot
-leave work pending in a pool that nobody can drain.
-`WorkQueueHandle` is a logical subsystem queue corresponding to Linux
-`workqueue_struct`. custom and dynamic queues attach through per-CPU pwqs to
-the shared Default pools; they do not receive dedicated ktask workers or a host
-registry. `flush_workqueue()` snapshots and waits all per-CPU pwqs.
-`destroy_workqueue()` gates new enqueue and drains pending/running work, while
-pool workers remain alive. The legacy delayed-work wrapper and its waker-timer
-provider have been removed. A replacement delayed-work API requires a separate
-lifecycle design; ordinary workqueue enqueue and teardown remain available.
-Queue-level drain APIs were removed; task-context work only runs from
-`kworkerpool::KtaskWorkerPool` worker loops, and bottom-half work only runs from
-the registered softirq drain actions.
-
-`kwork::queue_work()`, `schedule_work()`, and `schedule_work_on()` may be called from
-hardirq, active softirq, BH-disabled, or task context. The successful enqueue
-path only clones the `ScheduledWork` handle, uses preallocated queue slots, and does
-not allocate or execute callbacks. Worker callbacks receive `&ScheduledWork`, run in
-ordinary ktask context, and may sleep, but they must not rely on being
-associated with the task that queued the work. Device callbacks that need
-device state should capture an owner-safe reference such as a `Weak<Device>`
-and tolerate teardown racing with callback execution.
-
-`flush_work()` waits for the queued/running instance observed when the call
-starts. A running `ScheduledWork` cannot queue itself; such an attempt returns
-`AlreadyQueued`. Callers that need teardown semantics must stop producers before
-flushing.
-In the bounded M4E pool model, a worker callback must not wait for work that
-cannot make progress in the same execution pool. `kwork` records the pending
-pool identity for queued entries and the running pool identity for callbacks,
-then returns `SelfWait` for same-pool pending/running waits instead of blocking
-forever. This is intentionally conservative until a later milestone adds
-Linux-like pool accounting and worker replacement semantics.
-`cancel_work_sync()` derives the pending owner queue from the `ScheduledWork`, removes
-that pending entry, or sets the running instance's cancel gate. The gate rejects
-new queue attempts with `QueueWorkResult::Disabled` until the callback exits,
-and then the caller waits for idle. These waiting APIs use
-ktask wait/yield helpers; the completion is only a wake source and `kwork`
-always rechecks `WorkStatus` predicates after wake. Waiting APIs may sleep and therefore return
-`InvalidContext` from hardirq, active softirq, or BH-disabled context. Calling
-them from invalid interrupt-like context is rejected before blocking.
-Scheduler-side worker-pool execution identity is stored as opaque
-`ktask::TaskExecutionContext` for CPU-intensive accounting; work identity and
-queue ownership remain in `kworkqueue` / `kwork`.
+Normal callbacks run on pinned worker tasks and may sleep. BH callbacks run
+inside softirq context and must not block. Prepared submission is allocation
+free; borrowed Work requires the caller to retain pinned storage through drain.
+Safe owned handles arrange deferred cleanup on the normal service. Synchronous
+waits check sleepability and optional self-wait diagnostics. Neither IRQ context
+checks nor self-wait detection prove the absence of arbitrary dependency cycles.
 
 ### IRQ diagnostics configuration
 
@@ -685,15 +600,16 @@ register_deferred_executor()
    -> clear_deferred_executor()
 ```
 
-deferred executor 是单 owner hook。`softirq::init()` 把 softirq runner 安装为当前
-owner，`kruntime::init_interrupt()` 在开本地 IRQ 前调用它。与 Linux 的统一 IRQ
-exit 语义一致，每次 IRQ-on entry 都到达该 hook，包括 irqchip 随后识别出的 NMI 或
-spurious vector；专用 IRQ-off NMI path 不触发它。executor 在注册/清空控制面通过
-`SpinNoIrq` 保持单 owner；IRQ-tail hot
-path 从 atomic function-pointer slot 读取当前 hook，未安装 executor 时直接返回，不
-获取全局锁。workerqueue 通过显式 `queue_work()` handoff 进入
-`kwork/system_wq`；tasklet 和 threaded IRQ 后续应挂在 softirq 或显式 future API
-之上，而不是增加额外 implicit deferred owner。
+The deferred executor is a single-owner hook. `softirq::init()` installs the
+softirq runner before local IRQs are enabled by `kruntime::init_interrupt()`.
+Every IRQ-on entry reaches the exit hook, including an entry subsequently
+identified as NMI or spurious; the dedicated IRQ-off NMI path does not.
+Registration and clearing use `SpinNoIrq`. The IRQ-tail hot path reads an atomic
+function-pointer slot and returns immediately when empty, without a global lock.
+
+Workqueues use explicit submission through `kworkng::DefaultQueue::Normal`.
+Tasklets and IRQ threads must use their corresponding execution infrastructure,
+not install a competing implicit deferred-executor owner.
 
 ## 算法流程
 
@@ -865,16 +781,11 @@ IRQ lifecycle enter；GIC 只在其中用 `generic_handle_nmi()` 替换普通 ac
   当前 CPU 的 daemon，不创建任务、不阻塞、不依赖 `ktask`。provider 必须可从
   IRQ-disabled context 调用。`ktask` 在每个 CPU local IRQ 打开前创建并 pin
   `ksoftirqd/N`，所以 daemon drain 的是同一 CPU 的 per-CPU pending mask。
-- `kwork` 直接依赖 `ktask`/`kirq` 完成 built-in workerpool 装配：`ktask`
-  提供 worker/manager kthread、wait、timer 和 task-local execution context，
-  `kirq` 提供 interrupt-like context 判定和 BH softirq drain 执行域。enqueue
-  热路径不创建任务、不阻塞。
-- `TaskExecutionContext` 是 scheduler-owned task-local execution context：
-  `kworkerpool` 在 worker callback 前写入 opaque pool/worker/token key，scheduler
-  tick 通过 `TaskExecutionAccountingIf` 回调 `kwork` builtin pool 做 CPU-intensive
-  accounting。work identity 和 queue owner 不进入 `ktask`。
-- workerqueue sleepable wait 使用 ktask wait/yield helper；`kwork` 拥有 work
-  lifecycle predicate，completion 只负责唤醒，等待返回后必须重查 `WorkStatus`。
+- `kworkng` owns service publication; `kworkerpool_ng` uses ktask task/wait/timer
+  services and kirq's BH execution context. IRQ-safe submission does not create
+  tasks or block. No scheduler execution-accounting provider is needed.
+- `kworkqueue_ng` owns work lifecycle predicates. Wake notifications are hints;
+  synchronous waits recheck their predicate after waking.
 - softirq diagnostics 记录 context leak、restart-limit、unhandled vector、action run、
   daemon wake request、context-suppressed wake、context-deferred run 和
   `raise_softirq_irqoff()` 的 IRQ-enabled 误用。它们用于发现 “softirq action 过重
@@ -929,9 +840,8 @@ softirq 需要再分发多个 consumer，应由 softirq subsystem 显式维护 d
 `register_source_waker()` 转发到 `kirq`，没有独立状态或 owner。IRQ waiter table 和
 fanout-complete wake dispatch 的 owner 是 `kirq`，上层内核子系统直接依赖 `kirq`；
 `kdriver` 和 devres 不承载 poll/future IRQ wake bridge。
-后续 Linux-style softirq 和 IRQ thread 应由 `kirq` 提供；通用 sleepable workerqueue
-由 `kwork` 提供；poll/waitqueue 等待者注册则由通用 async/wait notification 层
-承接。
+Softirq and IRQ-thread semantics belong to `kirq`; sleepable workqueues
+belong to `kworkng`. Generic async/wait notification owns waiter registration.
 
 NetRx direct progress 是 workerqueue foundation 之后的独立里程碑。当前 `NetRx`
 softirq 只能作为网络 fallback worker 的 wake source；后续里程碑再决定由 softirq

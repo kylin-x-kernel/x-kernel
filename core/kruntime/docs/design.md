@@ -10,9 +10,13 @@ of exposing drivers without workqueue services. There is no legacy fallback or
 implementation-selection Kconfig. AP initialization creates ksoftirqd but does
 not create legacy worker pools.
 
-The `kwork` dependency temporarily retains the task execution-accounting kiface
-provider; it does not start legacy services. The obsolete procfs stress trigger
-is no longer exposed. Removal of the old implementation is a separate change.
+The legacy workqueue crates, scheduler accounting provider and procfs stress
+trigger are removed. Only prepared workqueue services are linked.
+
+`KFEAT_WORKQUEUE_BENCH` optionally routes the production entry, after upper
+runtime initialization, through `run_boot_benchmarks` instead of userspace.
+The kworkng runner uses already published services and powers off on completion.
+The default configuration and unit-test entry do not execute this path.
 
 ## 定位
 
@@ -193,10 +197,9 @@ INITED_CPUS.load(Acquire) == kcpu_id_map::nr_cpus()
 - The primary is the first CPU to increment `INITED_CPUS` with Release ordering,
   after preparing its IPI, watchdog, and PMU services. APs wait for a nonzero
   Acquire load before completing their local service setup.
-- Each AP increments once after fixed notifications, ksoftirqd, worker-pool
-  initialization, local IRQ enable, and optional watchdog/PMU setup. The existing
-  worker-pool failure policy remains a warning; completion does not turn that
-  best-effort initialization into a success guarantee.
+- Each AP increments once after fixed notifications, ksoftirqd initialization,
+  local IRQ enable, and optional watchdog/PMU setup. Workqueue services are
+  initialized centrally only after every CPU reports completion.
 - The primary waits for the runtime-discovered `nr_cpus()`, not the configured
   `NR_CPUS` capacity, before device discovery and driver initialization. The final
   Acquire load observes the Release RMW sequence of CPU completions.
@@ -237,7 +240,7 @@ SecondaryKernelEntry::enter(logical_cpu_id)
     → [ipi] kipi::init
     -> wait until INITED_CPUS != 0 (primary services prepared)
     -> enable_fixed_notifications
-    -> init_softirqd_current_cpu, initialize local worker pools
+    -> init_softirqd_current_cpu
     -> enable_local_irq
     -> [watchdog] init_secondary
     -> [pmu] enable_irq

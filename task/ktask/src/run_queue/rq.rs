@@ -28,11 +28,7 @@ use super::{
 use super::{PREV_TASK, get_run_queue};
 use crate::{
     KtaskRef, Scheduler, TaskInner,
-    api::{
-        account_execution_blocked, account_execution_context, account_execution_resumed, current,
-        program_sched_deadline, program_sched_deadline_for, rearm_local_timer,
-        refresh_execution_tick_deadline_for_task,
-    },
+    api::{current, program_sched_deadline, program_sched_deadline_for, rearm_local_timer},
     current_may_uninit,
     task::{CurrentTask, TaskState},
     tracing_hooks::{fire_context_switch, fire_task_wakeup},
@@ -265,7 +261,6 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         }
         #[cfg(not(feature = "sched_stat"))]
         let _ = elapsed;
-        account_execution_context(self.current_task.execution_context());
         if should_preempt {
             #[cfg(feature = "preempt")]
             self.current_task.set_preempt_pending(true);
@@ -553,7 +548,6 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
 
         // Deactivate while still Running / current, before any concurrent wake
         // can requeue us. Fair schedulers snapshot lag for later enqueue PLACE_LAG.
-        account_execution_blocked(curr.execution_context());
         self.inner
             .scheduler
             .lock()
@@ -861,7 +855,6 @@ impl RunQueue {
         #[cfg(feature = "preempt")]
         next_task.set_preempt_pending(false);
         next_task.set_state(TaskState::Running);
-        account_execution_resumed(next_task.execution_context());
         let program_next_deadline = |rq: &Self, next: &KtaskRef, now: u64| {
             let next_rel = {
                 let sched = rq.scheduler.lock();
@@ -875,7 +868,6 @@ impl RunQueue {
             // Immediate requests must arm pending on the *incoming* task: at
             // this point `current()` is still the outgoing task.
             program_sched_deadline_for(Some(next), now, next_rel);
-            refresh_execution_tick_deadline_for_task(next);
             rearm_local_timer();
         };
 

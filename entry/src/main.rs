@@ -14,15 +14,9 @@ extern crate kfeat;
 extern crate kruntime;
 extern crate kuaccess;
 #[cfg(feature = "unittest")]
-extern crate kwork;
-#[cfg(feature = "unittest")]
-extern crate kworkerpool;
-#[cfg(feature = "unittest")]
 extern crate kworkerpool_ng;
 #[cfg(feature = "unittest")]
 extern crate kworkng;
-#[cfg(feature = "unittest")]
-extern crate kworkqueue;
 #[cfg(feature = "unittest")]
 extern crate kworkqueue_ng;
 
@@ -88,6 +82,8 @@ fn kernel_main() {
     print_boot_info();
 
     runtime::init_runtime();
+
+    kruntime::run_boot_benchmarks();
 
     let args = CMDLINE
         .iter()

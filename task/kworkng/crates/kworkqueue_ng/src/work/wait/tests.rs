@@ -145,7 +145,7 @@ fn callback_self_stop_preserves_successor_and_allows_reuse() {
 /// Nested callbacks retain the outer identity without rejecting unrelated Work.
 ///
 /// # Panics
-/// Panics on a lost outer identity, false-positive idle wait or changed task accounting.
+/// Panics on a lost outer identity or false-positive idle wait.
 #[cfg(feature = "self-wait-check")]
 #[def_test]
 fn nested_callbacks_preserve_outer_self_wait_identity() {
@@ -154,7 +154,6 @@ fn nested_callbacks_preserve_outer_self_wait_identity() {
         let weak = weak.clone();
         Work::with_callback(Box::new(move || {
             let outer = weak.upgrade().unwrap();
-            let accounting = ktask::current_execution_context();
             let inner = Work::with_callback(|| {
                 assert_eq!(outer.cancel_sync(), Err(WaitError::SelfWait));
                 let unrelated = Work::<()>::new();
@@ -164,7 +163,6 @@ fn nested_callbacks_preserve_outer_self_wait_identity() {
             inner.claim().unwrap().run();
             assert_eq!(inner.cancel_sync(), Ok(false));
             assert_eq!(outer.cancel_sync(), Err(WaitError::SelfWait));
-            assert_eq!(ktask::current_execution_context(), accounting);
         }))
     });
     assert!(outer.accept(()).is_ok());

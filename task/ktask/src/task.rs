@@ -31,7 +31,7 @@ use kpoll::{Completion, PollRegistrations, PollSet};
 use kspin::SpinNoIrq;
 use memaddr::{VirtAddr, align_up_4k};
 
-use crate::{KCpuMask, KTask, KtaskRef, api::TaskExecutionContext, future::block_on, yield_now};
+use crate::{KCpuMask, KTask, KtaskRef, future::block_on, yield_now};
 
 enum TaskIdentity {
     Idle,
@@ -259,9 +259,6 @@ pub struct TaskInner {
     /// When non-zero, wakees may sync-preempt an eligible next-buddy on the
     /// target run queue (waker expects to sleep soon).
     wake_sync_depth: AtomicUsize,
-
-    /// Opaque execution currently owned by this task, if any.
-    execution_context: SpinNoIrq<Option<TaskExecutionContext>>,
 
     interrupted: AtomicBool,
     interrupt_waker: PollSet,
@@ -688,7 +685,6 @@ impl TaskInner {
             #[cfg(all(unittest, feature = "preempt"))]
             preempt_check_probe: tests_preempt_check::Probe::new(),
             wake_sync_depth: AtomicUsize::new(0),
-            execution_context: SpinNoIrq::new(None),
             interrupted: AtomicBool::new(false),
             interrupt_waker: PollSet::new(),
             exit_code: AtomicI32::new(0),
@@ -812,26 +808,6 @@ impl TaskInner {
     #[inline]
     pub(crate) fn is_wake_sync(&self) -> bool {
         self.wake_sync_depth.load(Ordering::Relaxed) > 0
-    }
-
-    pub(crate) fn set_execution_context(
-        &self,
-        context: TaskExecutionContext,
-    ) -> Option<TaskExecutionContext> {
-        self.execution_context.lock().replace(context)
-    }
-
-    pub(crate) fn clear_execution_context(&self, context: TaskExecutionContext) -> bool {
-        let mut slot = self.execution_context.lock();
-        if *slot != Some(context) {
-            return false;
-        }
-        *slot = None;
-        true
-    }
-
-    pub(crate) fn execution_context(&self) -> Option<TaskExecutionContext> {
-        *self.execution_context.lock()
     }
 
     #[inline]

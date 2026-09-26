@@ -2,6 +2,11 @@
 
 ## Workqueue Publication Boundary
 
+The default-off `workqueue-bench` feature exposes a boot test path, not an
+untrusted runtime request. It intentionally suppresses userspace and powers off
+after the kworkng workload. Production deployment must leave this feature off;
+test automation must impose a host timeout for stalled waits or joins.
+
 The protected asset is the kernel-lifetime `kworkng` service set and its per-CPU
 execution providers. Publishing work before remote CPU services exist could lose
 notifications or strand callbacks. The all-CPU completion barrier precedes

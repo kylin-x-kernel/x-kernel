@@ -1,5 +1,14 @@
 menu "Prepared Workqueue Defaults"
 
+config WORKQUEUE_WORKERS_PER_POOL
+    usize "Maximum worker tasks per CPU"
+    range 1 16
+    default 4
+    help
+      Maximum normal worker tasks managed on each boot CPU. The manager
+      creates workers in task context; prepared IRQ submissions never do.
+      Keep the existing symbol so saved configurations retain their limit.
+
 config KWORKNG_NORMAL_MAX_ACTIVE
     usize "Default threaded queue release limit per CPU"
     range 1 65535
@@ -15,5 +24,22 @@ config KWORKNG_BH_MAX_ACTIVE
     help
       Ready-plus-running allowance per CPU and BH priority queue.
       Does not activate NG services or replace existing workqueues.
+
+config KFEAT_WORKQUEUE_BENCH
+    bool "Run prepared workqueue benchmarks and soak instead of userspace"
+    default n
+    help
+      Run the kernel release benchmark and mixed reuse workload after boot.
+      Prints results independently of log level. Powers off after completion.
+      This is a test-only entry, not a workqueue implementation selector.
+
+config WORKQUEUE_SOAK_SECONDS
+    usize "Prepared workqueue soak duration in seconds"
+    depends on KFEAT_WORKQUEUE_BENCH
+    range 0 86400
+    default 1800
+    help
+      Zero runs only the benchmark rounds. Use an external timeout to detect
+      hangs; the duration does not bound boot, measurement or final drain.
 
 endmenu

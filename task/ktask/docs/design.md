@@ -112,10 +112,9 @@ holds one RQ lock and never sees remote load. `rq.rs` owns local leave / pick /
 switch. `idle_pull.rs` steals across CPUs. `migrate.rs` only moves a task after
 an affinity change. `gc.rs` only consumes `EXITED_TASKS`.
 
-`ktask` is also the `kwork` provider owner: system/custom kwork task hosts,
-task-local worker context, completion wait, and monotonic timer waker
-registration for delayed work. `kwork` still consumes provider traits and does
-not depend on `ktask` directly.
+`kworkerpool_ng` uses `ktask` for pinned task creation, prepared waits and
+owned timers. `kworkqueue_ng` retains work lifecycle and wait predicates;
+optional task-local work context supports self-wait diagnostics only.
 
 ## Architecture
 
@@ -205,12 +204,12 @@ remaining pending throughout the supported clock lifetime (strictly below that
 horizon). The public raw timer API rejects over-horizon input. `timeout_at`
 keeps operation-first polling when both branches are ready.
 
-`rearm_local_timer` merges schedule, execution-accounting and prepared deadlines.
+`rearm_local_timer` merges schedule and prepared deadlines.
 It holds the prepared CPU lock through the hardware write. A timer notification
 uses the same arbitration; the programmer never takes a runqueue lock. Timer IRQ batching
 defers intermediate writes and re-reads all sources after callbacks and wakes.
 Core overload backoff changes only the prepared service deadline, not scheduler
-or accounting deadlines. An empty prepared queue cannot disarm another source.
+deadlines. An empty prepared queue cannot disarm another source.
 
 `ktask/ipi` enables `kipi/timer-reprogram` and supplies `TimerReprogramIpiIf`.
 The endpoint only re-reads current deadlines and programs hardware; it does not
@@ -321,9 +320,6 @@ kruntime::init_interrupt()
   → kirq::softirq::init()
   → ktask::init_softirqd_current_cpu()
   → create and activate ksoftirqd/0 pinned to the boot CPU
-  → ktask::init_system_workqueue_worker()
-  → create and activate kwork/system_wq/0:manager pinned to the boot CPU
-  → create and activate the initial kwork/system_wq/0:M worker
   → enable_local_irq()
 ```
 
@@ -338,9 +334,6 @@ init_scheduler_secondary()
 rust_main_secondary()
   → ktask::init_softirqd_current_cpu()
   → create and activate ksoftirqd/N pinned to this CPU
-  → ktask::init_system_workqueue_worker()
-  → create and activate kwork/system_wq/N:manager pinned to this CPU
-  → create and activate the initial kwork/system_wq/N:M worker
   → enable_local_irq()
 ```
 
@@ -359,45 +352,24 @@ calls `yield_now()` before the outer pending/wait loop, matching Linux
 registration fails (for example under memory pressure), the daemon yields
 and retries instead of spinning without a waiter.
 
-`kworkerpool` depends on `ktask` to create `kwork/normal/<cpu>:<worker_id>`
-worker tasks and `kwork/normal/<cpu>/manager` manager tasks. `kwork` owns
-builtin queue/pool instances and enqueue semantics; `kworkqueue` owns queue
-state; `kworkerpool` owns worker scheduling, dynamic scaling, and
-CPU-intensive accounting. System / custom / dynamic task-context queues bind
-to the same CPU's Normal pool and do not create queue-owned workers. Each
-CPU starts one pinned manager and a few initial workers. When the pool still
-has runnable work but no running / idle / preparing worker, it only wakes
-the manager; the manager creates a bounded new worker in task context. One
-callback sleep blocks only that worker task; existing or newly created
-workers can keep running other work on the same CPU and kind. Workers wait
-on a `PollSet`; the wake path may run from hardirq / softirq / BH-disabled
-context. Worker callbacks run in ordinary task context and may sleep, but
-they do not inherit the enqueueing process context. BH workqueue callbacks
-run in `kirq` softirq context, not as `ktask` worker tasks.
-`ktask::sleep()`, `sleep_until()`, and `interruptible_sleep_until()`
-fail-fast in hardirq / softirq / BH-disabled context so a BH callback or
-other interrupt-like path cannot enter a blocking schedule path.
-`yield_now()` only yields the CPU and is not a sleep/blocking API. Creating
-a worker task happens only in manager task context, never on an IRQ-safe
-enqueue path or under a `kwork` pool lock.
+After all CPU services are ready, `kruntime::late_init_main` initializes
+`kworkng` once. `kworkerpool_ng` creates pinned normal managers and workers
+through `ktask`; logical queues share these per-CPU execution services rather
+than owning worker tasks. Retained demand wakes the manager, which creates
+additional workers in sleepable task context within its configured limit.
+Worker occupancy and retirement are explicit pool state, not scheduler tick
+accounting or scheduler block/resume hooks.
 
-`WorkQueueHandle::alloc()` only creates a logical queue and configures
-per-CPU pwq `max_active`. `WorkQueue::start()` applies the same policy to a
-static custom queue. Neither enters the ktask registry nor creates
-queue-owned workers. `destroy()` closes the enqueue gate and waits until
-pending/running instances of that queue in the shared pools reach zero.
-Pool worker lifetime is independent of queue destroy.
+Normal callbacks may sleep but do not inherit the submitting process context.
+BH callbacks run in `kirq` softirq context. `ktask::sleep()`, `sleep_until()`
+and `interruptible_sleep_until()` reject hardirq, softirq and BH-disabled
+contexts. `yield_now()` is not a sleep/blocking API. Prepared waits provide
+durable wake-before-park handling; the queue layer checks context, self-wait
+and work lifecycle predicates before blocking and after wake.
 
-`TaskExecutionContext` stores an opaque worker-pool execution key on the
-current `TaskInner` so the scheduler tick can call
-`TaskExecutionAccountingIf` for CPU-intensive sampling. That state follows
-the task across migration and does not use a per-CPU slot. Work keys and
-queue owners stay in `kworkqueue` / `kwork`; `ktask` does not own work
-lifetime or store work handles. Pool drain lives inside the
-`kworkerpool::WorkerTask` loop; there is no queue-level drain API for
-callbacks. Sleepable workerqueue waits reuse ktask yield/wait. `kwork`
-finishes its interrupt-context gate before blocking and rechecks its own
-lifecycle predicate after wake.
+Queue closure does not own delayed timers. Callers stop producers and drain
+caller-owned delayed work before closing a queue. Pool task lifetime remains
+independent of individual queue lifetime.
 
 ### Schedule and switch
 
@@ -435,10 +407,10 @@ deadline. They no longer depend on a fixed `TICKS_PER_SECOND` schedule tick:
    `NEXT_SCHED_DEADLINE`, then `rearm_local_timer` to
 
 ```text
-min(next_sched_deadline?, next_execution_tick_deadline?, prepared_service_deadline?)
+min(next_sched_deadline?, prepared_service_deadline?)
 ```
 
-   If all three are empty, `disarm_timer()` runs. Stale/expired IRQs only
+   If both sources are empty, `disarm_timer()` runs. Stale/expired IRQs only
    catch up accounting and rearm; they do not loop catch-up ticks. With
    `sched_stat`, IRQs are classified from the schedule slot and prepared
    dispatch result. The existing diagnostic field names remain
@@ -476,7 +448,7 @@ it never permits callback storage to be freed before synchronous drain.
 `on_timer_fire` defers hardware rearm across a wake batch
 (`DEFER_LOCAL_TIMER_REARM`) to avoid redundant hardware writes during callback
 delivery. After the batch it rereads the prepared queue and current schedule
-and execution slots, then arbitrates. `switch_to` writes through
+slot, then arbitrates. `switch_to` writes through
 `program_sched_deadline_for(incoming, …)`: an immediate pending request lands
 on the incoming task because `current()` is still the outgoing task. Under
 NOHZ, lone-runner wall time is flushed into EEVDF `curr` via
@@ -508,7 +480,7 @@ Owned timer callbacks run in hard IRQ / local-IRQ-off context and must be short
 and non-blocking. Repetition is a handler policy expressed with `TimerControl`:
 network and watchdog sampling rearm from callback completion plus their period.
 The core retains running/cleanup protection and overload backoff; it does not
-infer a periodic policy. Independent schedule and execution deadlines remain
+infer a periodic policy. The independent schedule deadline remains
 eligible even while prepared delivery is deferred by overload protection.
 
 `ktask` still uses deferred preemption: the timer path usually only sets
@@ -573,11 +545,6 @@ task would wrongly allow preemption in the second half of the trap handler.
   clears the wake flag and immediately repolls. It must not yield first: on a
   fully loaded CPU that would turn a completed wake-before-block race into
   queueing delay for an unrelated runnable task.
-- If the current task is inside a kwork callback, `block_on` notifies
-  `kwork` worker-pool accounting at the function boundary. The real
-  `Blocked` convergence is aligned with Linux `wq_worker_sleeping()` through
-  the scheduler hook and is paired with resume accounting when returning to
-  `Running`.
 - A waker restores the task to `Ready` through
   `select_wake_run_queue(...).unblock_task(..., true)`.
 - SMP wake follows Linux `select_idle_sibling`: go home if `prev_cpu`
@@ -908,7 +875,7 @@ reclaim avoids use-after-free and a slow drop on the hot path.
 
 - `kruntime` registers the clock (and IPI/PMU) interrupt vectors. The timer
   interrupt handler only calls `ktask::on_timer_fire()`.
-- `ktask` owns all hardware timer drive: dynamic schedule and execution deadlines,
+- `ktask` owns all hardware timer drive: dynamic schedule deadlines,
   owned timer dispatch, hardware rearm, and converting
   due events into schedule accounting, preempt requests, and timer wakes.
 - `kruntime` does not know the class algorithm. `ktask` does not route

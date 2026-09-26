@@ -2,9 +2,10 @@
 
 ## 定位
 
-调度固定通知由 `reschedule` feature 控制，`ktask/ipi` 同时启用它并提供接收端。
-仅依赖通用 kipi（例如非 SMP 配置的 kwork）不要求调度 provider，也不启用
-固定通知的 handler 分支；不能把 kipi 出现在依赖图中等同于启用了 SMP 调度。
+The `reschedule` feature selects fixed scheduler notifications; `ktask/ipi`
+enables it and supplies the receiver. Depending on generic kipi alone, such as
+in a non-SMP kworkng configuration, does not require a scheduler provider or
+enable the scheduler handler branch. Fixed BH notification support is independent.
 
 固定调度通知由 `notification.rs` 提供：`notify_reschedule` 在静态 CPU 槽中发布原因，
 不经过通用闭包队列。原因与单向 ENABLED 位共用一个原子字，以 AcqRel RMW
@@ -66,8 +67,8 @@ producers. Boot drain can precede the AP's ksoftirqd creation: softirq pending i
 static and retained, and the daemon checks it before registering/sleeping. The AP
 startup NoPreempt guard remains necessary. No CPU hotplug/reset is supported.
 
-This unit provides the transport only. It neither replaces production kwork's
-registered actions nor publishes new workng services. A non-IPI configuration
+This unit provides the transport only. The kworkng runtime owns action
+registration and service publication. A non-IPI configuration
 uses local kirq raising; linking kipi alone does not enable an IPI line.
 
 `kipi` 是 X-Kernel 的跨 CPU 协调模块，向上提供：

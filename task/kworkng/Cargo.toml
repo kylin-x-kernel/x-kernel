@@ -1,5 +1,6 @@
 [package]
 name = "kworkng"
+autobenches = false
 version.workspace = true
 edition.workspace = true
 publish = false
@@ -13,6 +14,8 @@ description = "Prepared workqueue APIs and safe ownership wrappers"
 [features]
 # Select live-service integration tests instead of replaceable service fixtures.
 system = []
+# Kernel-only runner; keep host auto-discovery off. See benches/README.md.
+bench = ["system", "dep:klogger"]
 stall-check = ["kworkqueue_ng/stall-check", "dep:watchdog", "watchdog/workqueue-stall-check", "dep:kiface"]
 self-wait-check = ["kworkqueue_ng/self-wait-check"]
 
@@ -30,6 +33,7 @@ unittest.workspace = true
 watchdog = { workspace = true, optional = true }
 kiface = { workspace = true, optional = true }
 log.workspace = true
+klogger = { workspace = true, optional = true }
 kbuild_config.workspace = true
 
 [lints.rust]

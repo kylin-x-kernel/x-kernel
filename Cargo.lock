@@ -1384,11 +1384,8 @@ dependencies = [
  "ktask",
  "kuaccess",
  "kvfs",
- "kwork",
- "kworkerpool",
  "kworkerpool_ng",
  "kworkng",
- "kworkqueue",
  "kworkqueue_ng",
  "linux-raw-sys",
  "posix-process",
@@ -2886,7 +2883,6 @@ dependencies = [
  "ktime",
  "ktime_types",
  "ktty",
- "kwork",
  "kworkng",
  "memaddr",
  "memspace",
@@ -3242,41 +3238,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kwork"
-version = "0.3.0-dev"
-dependencies = [
- "bitflags 2.13.2",
- "kbuild_config",
- "kcpu_id_map",
- "kiface",
- "kipi",
- "kirq",
- "klazy",
- "kpoll",
- "kspin",
- "ktask",
- "ktime_types",
- "kworkerpool",
- "kworkqueue",
- "log",
- "unittest",
-]
-
-[[package]]
-name = "kworkerpool"
-version = "0.3.0-dev"
-dependencies = [
- "kbuild_config",
- "kcpu_id_map",
- "kpoll",
- "kspin",
- "ktask",
- "ktime_types",
- "log",
- "unittest",
-]
-
-[[package]]
 name = "kworkerpool_ng"
 version = "0.3.0-dev"
 dependencies = [
@@ -3303,6 +3264,7 @@ dependencies = [
  "kiface",
  "kirq",
  "klazy",
+ "klogger",
  "kspin",
  "ktask",
  "ktime_types",
@@ -3311,15 +3273,6 @@ dependencies = [
  "log",
  "unittest",
  "watchdog",
-]
-
-[[package]]
-name = "kworkqueue"
-version = "0.3.0-dev"
-dependencies = [
- "kcpu_id_map",
- "kspin",
- "unittest",
 ]
 
 [[package]]

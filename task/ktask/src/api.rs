@@ -12,8 +12,6 @@ use core::{future::poll_fn, sync::atomic::AtomicUsize, task::Poll};
 
 use kcpu_slot::cpu_slot_cell;
 use kspin::NoPreemptIrqSave;
-#[cfg(feature = "execution-accounting")]
-use ktime_types::MonotonicInstant;
 
 use crate::run_queue::task_run_queue;
 pub(crate) use crate::run_queue::{current_run_queue, select_run_queue, select_wake_run_queue};
@@ -33,51 +31,6 @@ pub type WeakKtaskRef = Weak<KTask>;
 pub use kcpu_id_map::KCpuMask;
 
 static CPU_NUM: AtomicUsize = AtomicUsize::new(1);
-
-/// Opaque identity for an execution currently owned by a task.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TaskExecutionContext {
-    words: [usize; 4],
-}
-
-impl TaskExecutionContext {
-    /// Creates an opaque task-local execution identity.
-    pub const fn new(words: [usize; 4]) -> Self {
-        Self { words }
-    }
-
-    /// Returns all opaque context words.
-    pub const fn words(self) -> [usize; 4] {
-        self.words
-    }
-
-    /// Returns one opaque context word.
-    pub const fn word(self, index: usize) -> Option<usize> {
-        if index < self.words.len() {
-            Some(self.words[index])
-        } else {
-            None
-        }
-    }
-}
-
-/// Scheduler bridge implemented by the crate that owns opaque executions.
-#[cfg(feature = "execution-accounting")]
-#[kiface::interface]
-pub trait TaskExecutionAccountingIf {
-    /// Accounts the current execution and returns the next tick deadline, if
-    /// the execution still needs one.
-    fn account_execution_tick(context: TaskExecutionContext) -> Option<MonotonicInstant>;
-
-    /// Returns the current execution tick deadline without doing accounting.
-    fn execution_tick_deadline(context: TaskExecutionContext) -> Option<MonotonicInstant>;
-
-    /// Reports that the current execution is entering a sleepable block.
-    fn execution_blocked(context: TaskExecutionContext);
-
-    /// Reports that a previously blocked execution is running again.
-    fn execution_resumed(context: TaskExecutionContext);
-}
 
 cfg_select! {
     feature = "sched_rr" => {
@@ -168,11 +121,6 @@ cpu_slot_cell! {
 }
 
 cpu_slot_cell! {
-    /// Absolute monotonic ns of the current task execution-accounting tick.
-    static NEXT_EXECUTION_TICK_DEADLINE_NS: u64 = 0;
-}
-
-cpu_slot_cell! {
     /// When set, [`rearm_local_timer`] updates software slots only and skips
     /// the hardware write. Used across timer-IRQ callback/drain/wake batches
     /// so reentrant timer registration or wakeup accounting cannot program
@@ -192,10 +140,9 @@ const MIN_SCHED_TIMER_NS: u64 = 10_000;
 /// Returns [`None`] when every source is empty (hardware timer should disarm).
 pub(crate) fn select_local_timer_deadline(
     sched: Option<u64>,
-    worker: Option<u64>,
     prepared: Option<u64>,
 ) -> Option<u64> {
-    [sched, worker, prepared].into_iter().flatten().min()
+    [sched, prepared].into_iter().flatten().min()
 }
 
 /// Converts a scheduler-relative request into a one-shot absolute deadline and
@@ -211,8 +158,8 @@ fn schedule_deadline_request(now_ns: u64, rel_ns: Option<u64>) -> (Option<u64>, 
     }
 }
 
-/// Re-arms the local CPU hardware timer to the earliest of schedule, execution,
-/// and prepared deadlines. Disarms when none remain.
+/// Re-arms the local CPU hardware timer to the earliest schedule or prepared
+/// deadline. Disarms when neither source remains.
 ///
 /// This is a pure hardware arbitration helper for scheduler deadlines: a due
 /// scheduler slot is consumed only by timer IRQ / switch paths that have already
@@ -227,8 +174,6 @@ pub(crate) fn rearm_local_timer() {
     let guard = NoPreemptIrqSave::new();
     let sched_ns = NEXT_SCHED_DEADLINE_NS.read(&guard);
     let sched = (sched_ns != 0).then_some(sched_ns);
-    let execution_ns = NEXT_EXECUTION_TICK_DEADLINE_NS.read(&guard);
-    let execution = (execution_ns != 0).then_some(execution_ns);
     if DEFER_LOCAL_TIMER_REARM.read(&guard) {
         return;
     }
@@ -238,7 +183,7 @@ pub(crate) fn rearm_local_timer() {
     unsafe {
         crate::timers::PREPARED_TIMERS.reprogram_local_timer(
             khal::percpu::this_cpu_id(),
-            |prepared| match select_local_timer_deadline(sched, execution, prepared) {
+            |prepared| match select_local_timer_deadline(sched, prepared) {
                 Some(d) => {
                     khal::time::arm_timer(ktime_types::MonotonicInstant::from_span_since_origin(
                         ktime_types::TimeSpan::from_nanos(d),
@@ -312,96 +257,7 @@ pub(crate) fn set_sched_deadline_ns(deadline_ns: Option<u64>) {
     NEXT_SCHED_DEADLINE_NS.write(&pin, deadline_ns.unwrap_or(0));
 }
 
-fn set_execution_tick_deadline_ns(deadline_ns: Option<u64>) {
-    // The nested pin upgrades whatever masking the caller had; the store
-    // lands on this CPU's own cell.
-    let pin = NoPreemptIrqSave::new();
-    NEXT_EXECUTION_TICK_DEADLINE_NS.write(&pin, deadline_ns.unwrap_or(0));
-}
-
-fn execution_tick_deadline_for_context(context: TaskExecutionContext) -> Option<u64> {
-    #[cfg(feature = "execution-accounting")]
-    {
-        TaskExecutionAccountingIf::execution_tick_deadline(context)
-            .map(|deadline| deadline.span_since_origin().as_nanos_u64_saturating())
-    }
-    #[cfg(not(feature = "execution-accounting"))]
-    {
-        let _ = context;
-        None
-    }
-}
-
-fn refresh_execution_tick_deadline_slot_for(context: Option<TaskExecutionContext>) {
-    set_execution_tick_deadline_ns(context.and_then(execution_tick_deadline_for_context));
-}
-
-fn account_execution_tick_for_context(context: TaskExecutionContext) {
-    #[cfg(feature = "execution-accounting")]
-    let deadline = TaskExecutionAccountingIf::account_execution_tick(context)
-        .map(|deadline| deadline.span_since_origin().as_nanos_u64_saturating());
-    #[cfg(not(feature = "execution-accounting"))]
-    let deadline = {
-        let _ = context;
-        None
-    };
-    set_execution_tick_deadline_ns(deadline);
-}
-
-pub(crate) fn account_execution_context(context: Option<TaskExecutionContext>) {
-    match context {
-        Some(context) => account_execution_tick_for_context(context),
-        None => set_execution_tick_deadline_ns(None),
-    }
-}
-
-pub(crate) fn account_execution_blocked(context: Option<TaskExecutionContext>) {
-    #[cfg(feature = "execution-accounting")]
-    if let Some(context) = context {
-        TaskExecutionAccountingIf::execution_blocked(context);
-    }
-    #[cfg(not(feature = "execution-accounting"))]
-    let _ = context;
-}
-
-pub(crate) fn account_execution_resumed(context: Option<TaskExecutionContext>) {
-    #[cfg(feature = "execution-accounting")]
-    if let Some(context) = context {
-        TaskExecutionAccountingIf::execution_resumed(context);
-    }
-    #[cfg(not(feature = "execution-accounting"))]
-    let _ = context;
-}
-
-pub(crate) fn refresh_execution_tick_deadline_for_task(task: &KtaskRef) {
-    refresh_execution_tick_deadline_slot_for(task.execution_context());
-}
-
-/// Installs an opaque execution context on the current task.
-pub fn set_current_execution_context(
-    context: TaskExecutionContext,
-) -> Option<TaskExecutionContext> {
-    current().set_execution_context(context)
-}
-
-/// Clears the current task's opaque execution context if it matches.
-pub fn clear_current_execution_context(context: TaskExecutionContext) -> bool {
-    current().clear_execution_context(context)
-}
-
-/// Returns the current task's opaque execution context.
-pub fn current_execution_context() -> Option<TaskExecutionContext> {
-    current_may_uninit().and_then(|task| task.execution_context())
-}
-
-/// Refreshes the local execution-accounting tick deadline for current.
-pub fn refresh_current_execution_tick() {
-    let _guard = NoPreemptIrqSave::new();
-    refresh_execution_tick_deadline_slot_for(current_execution_context());
-    rearm_local_timer();
-}
-
-/// Hardware-timer IRQ entry for schedule, execution-accounting and owned timers:
+/// Hardware-timer IRQ entry for scheduling and owned timers:
 ///
 /// - Accounts real runtime for the current task first (so wake handling is not
 ///   charged to the wrong task). A due schedule slot runs Linux `entity_tick`
@@ -911,35 +767,23 @@ mod tests_api {
 
     #[def_test]
     fn timer_arbiter_picks_earliest_deadline() {
-        assert_eq!(
-            select_local_timer_deadline(Some(30), Some(15), Some(10)),
-            Some(10)
-        );
-        assert_eq!(
-            select_local_timer_deadline(Some(50), Some(5), Some(8)),
-            Some(5)
-        );
-        assert_eq!(select_local_timer_deadline(None, None, Some(7)), Some(7));
+        assert_eq!(select_local_timer_deadline(Some(30), Some(10)), Some(10));
+        assert_eq!(select_local_timer_deadline(Some(5), Some(8)), Some(5));
+        assert_eq!(select_local_timer_deadline(None, Some(7)), Some(7));
     }
 
     #[def_test]
     fn timer_arbiter_disarms_when_all_empty() {
-        assert_eq!(select_local_timer_deadline(None, None, None), None);
+        assert_eq!(select_local_timer_deadline(None, None), None);
     }
 
     #[def_test]
     fn timer_arbiter_merges_prepared_without_losing_other_sources() {
+        assert_eq!(select_local_timer_deadline(Some(30), Some(10)), Some(10));
+        assert_eq!(select_local_timer_deadline(Some(5), Some(10)), Some(5));
+        assert_eq!(select_local_timer_deadline(None, Some(0)), Some(0));
         assert_eq!(
-            select_local_timer_deadline(Some(30), Some(40), Some(10)),
-            Some(10)
-        );
-        assert_eq!(
-            select_local_timer_deadline(Some(30), Some(5), Some(10)),
-            Some(5)
-        );
-        assert_eq!(select_local_timer_deadline(None, None, Some(0)), Some(0));
-        assert_eq!(
-            select_local_timer_deadline(None, None, Some(u64::MAX)),
+            select_local_timer_deadline(None, Some(u64::MAX)),
             Some(u64::MAX)
         );
     }
@@ -947,21 +791,15 @@ mod tests_api {
     #[def_test]
     fn timer_arbiter_keeps_sched_after_owned_timer_delivery() {
         // Delivery at T=10 must not clear a later schedule deadline at T=50.
-        assert_eq!(
-            select_local_timer_deadline(Some(50), None, Some(10)),
-            Some(10)
-        );
-        assert_eq!(select_local_timer_deadline(Some(50), None, None), Some(50));
+        assert_eq!(select_local_timer_deadline(Some(50), Some(10)), Some(10));
+        assert_eq!(select_local_timer_deadline(Some(50), None), Some(50));
     }
 
     #[def_test]
     fn timer_arbiter_past_deadline_still_selected() {
         // Expired deadlines remain the earliest absolute value; the IRQ path
         // re-accounts and reprograms rather than skipping them.
-        assert_eq!(
-            select_local_timer_deadline(Some(1), Some(100), Some(150)),
-            Some(1)
-        );
+        assert_eq!(select_local_timer_deadline(Some(1), Some(150)), Some(1));
     }
 
     #[def_test]

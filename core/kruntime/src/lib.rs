@@ -19,6 +19,7 @@
 //! - `pmu`: PMU overflow IRQ handler
 //! - `arm-timer-resume-fixup`: repair virtual timer regressions after idle/WFI
 //! - `rootfs-secondary-block`: mount the secondary block device as the root FS
+//! - `workqueue-bench`: opt-in release workqueue benchmarks before userspace
 //!
 //! All features are optional and disabled by default.
 
@@ -26,9 +27,22 @@
 
 extern crate alloc;
 
-// Retain the legacy task-accounting provider until the old kwork crates are
-// removed. No legacy worker pools or BH actions are started.
-extern crate kwork as _;
+/// Runs the explicitly configured workqueue test workload before userspace.
+///
+/// Call once in sleepable boot context after runtime initialization. With
+/// `workqueue-bench` enabled outside unit tests, completion powers off the
+/// machine; otherwise this is a no-op.
+///
+/// # Panics
+/// The opt-in runner panics on invalid duration, submission/drain errors,
+/// callback count or placement mismatches, and failed task joins.
+pub fn run_boot_benchmarks() {
+    #[cfg(all(feature = "workqueue-bench", not(unittest)))]
+    {
+        kworkng::benchmarks::run(kbuild_config::WORKQUEUE_SOAK_SECONDS);
+        khal::power::power_off();
+    }
+}
 
 #[cfg(unittest)]
 mod tests_workqueue;

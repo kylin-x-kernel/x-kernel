@@ -298,12 +298,11 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-19 | BH-disabled 被误判为普通 task context | diagnostics 只区分 hardirq/softirq/task | sleepable future callback 可能在 BH-disabled 区间运行 | `InterruptContextLevel::BhDisabled` 和 docs 明确其 non-sleepable 语义 |
 | T-20 | context misuse 日志风暴 | underflow 或 hardirq 中反复 local_bh_disable | 日志淹没真实故障，拉长 IRQ 处理时间 | warning 计数保留，日志只输出初始样本和 2 的幂次样本 |
 | T-21 | poll/future IRQ wake 被当作 future IRQ thread target | 后续 threaded IRQ 直接复用 poll/future wake bridge | 缺少 thread lifecycle、dev-id teardown、oneshot mask 和 scheduler ownership，导致悬空唤醒或错误 teardown | 文档明确 poll/future IRQ wake 只是临时 waiter notification；threaded IRQ、softirq 和 workerqueue 必须在 `kirq` 内形成独立所有权 |
-| T-21b | 多个 worker 并发 drain shared pool | pool/pwq/entry 归属未一致更新 | work 被重复执行，或其它 queue 的 active/in-flight token 泄漏 | `kwork` 的 shared ring entry 保存 owner/binding key；take/activate/cancel/finish 在 pool 与目标 pwq 下闭环记账 |
-| T-21c | workerqueue 等待式 API 在 interrupt-like context 调用 | hardirq/softirq/BH-disabled 中调用 `flush_work()` 或 `cancel_work_sync()` | 当前 CPU 等待自身 bottom-half 退出，导致死锁或调度状态错误 | `kwork` 在进入 sleepable wait 前直接查询 `kirq::context` 并返回 `InvalidContext` |
-| T-21d | scheduler worker-pool execution identity 泄漏到 work 生命周期 | `ktask` 保存 work/queue handle 或拥有 work 生命周期 | work 释放顺序被 scheduler 上下文污染，callback 退出后仍可访问已释放对象 | `ktask::TaskExecutionContext` 只保存 opaque pool/worker/token key，用于 `TaskExecutionAccountingIf` 的 CPU-intensive accounting；work identity 和 queue owner 留在 `kworkqueue` / `kwork` |
-| T-21e | 非 worker 路径直接 drain pool | 普通 callback 或 IRQ 路径调用 task-context pool worker 入口 | task-local worker identity 与 worker slot 不一致，破坏 wait/sleep 记账 | queue-level drain API 已删除；task-context work 只由 `kworkerpool::KtaskWorkerPool` worker loop 执行，BH work 只由 softirq drain 执行 |
-| T-21f | 设备生命周期 work 被强行 leak、提前释放或 wrong-queue cancel | workerqueue API 要求 `&'static Work`，队列只保存裸指针，或 cancel API 依赖调用方传入 owner queue | 多设备/热插拔驱动无法释放 work，或 queued/running callback 访问已释放设备状态 | M4C 使用 refcounted `ScheduledWork`；M4G 使用 dynamic `WorkQueueHandle` 表达 custom queue 生命周期；M4H 为 delayed work 增加 generation gate；pending/running callback 持有 handle clone，enqueue 不分配；pending owner queue 记录在 `ScheduledWork` 状态中，teardown 通过 `cancel_work_sync(work)` / `cancel_delayed_work_sync(work)`、`flush_work(work)` / `flush_delayed_work(work)` 或 `destroy_workqueue(queue)` 收敛生命周期 |
-| T-21g | worker callback 等待同 pool 中不可推进的 work | W1 callback 中 `flush_work(W2)`，且 W2 pending/running 属于同一 bounded execution pool | bounded worker pool 可能被等待关系耗尽，W2 无法完成，形成永久死锁 | `kwork` 在 `WorkState` 中记录 pending/running pool key，在 task-local context 中记录当前 pool key；同 pool pending/running wait 返回 `SelfWait`，等待循环也重查该谓词 |
+| T-21b | Duplicate work execution | Concurrent claims or cancellation race | Corrupt callback state or leak in-flight ownership | Transfer: `kworkqueue_ng` owns synchronized claim/cancel/finish; `kworkerpool_ng` owns worker occupancy. |
+| T-21c | Blocking from BH context | A BH callback invokes a synchronous wait | Deadlock or invalid scheduling | Mitigate: kirq exposes context predicates; workqueue waits reject non-sleepable contexts. |
+| T-21d | Work storage released while borrowed | Producer or callback outlives storage | Use-after-free | Transfer: caller-owned pinned Work requires explicit drain; safe owned handles defer reclamation to the normal service. |
+| T-21e | BH callback executed in the wrong context | Direct service entry outside target CPU softirq | Invalid per-CPU access or blocking | Mitigate: BH service validates CPU and softirq context; kirq owns softirq entry/exit. |
+| T-21g | Callback dependency cycle | Callback waits on work that cannot progress | Bounded pool starvation or deadlock | Accept residual risk: optional self-wait checks catch local cases, not arbitrary dependency cycles; callers must avoid those cycles. |
 | T-22 | oneshot runtime 字段被误当成已实现行为 | 后续代码只改 flag，没有安装 mask protocol | oneshot IRQ 无法屏蔽重入或误解除 mask | review 要求 oneshot mask 和 thread identity 在 `IrqDescRuntimeState` owner 内成组实现 |
 | T-23 | threaded slot 提前保存 task/worker 指针 | 未建立线程生命周期、取消、CPU 亲和和退出同步 | handler return 后唤醒已释放对象，或在 hardirq 中触发 sleepable 路径 | 当前 `IrqThreadSlot` 不携带目标，带 slot 的 action 不会被当前 dispatch 路径同步执行；后续 milestone 必须先定义所有权和 teardown ordering |
 | T-24 | action snapshot 与 cleanup 分离不完整 | dispatch 多次取锁并依赖跨锁状态 | unregister/free 与 dispatch 交错后调用 stale callback 或保留 stale mapping | `IrqActionSnapshot` 在一个 `IRQ_STATE` 临界区内形成完整快照，回调只使用快照 |
@@ -387,25 +386,14 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 - deferred executor 注册是单 owner。`softirq::init()` 在启动路径安装默认 owner；
   重复注册返回 `false`，空 executor 也返回 `false`；runner 在未注册时返回
   `NoExecutor`。
-- workerqueue 的 per-CPU built-in pools 由 `kwork` 装配。`kworkqueue` 持有 queue
-  和 work 状态，`kworkerpool::KtaskWorkerPool` 持有 normal worker/manager task，
-  `kirq` 只提供 IRQ/BH context predicate 和 BH softirq drain 执行域。
-  custom/dynamic queue 通过 per-CPU binding 挂接到同一 normal pool，不安装专属
-  worker task。向 pool 投递 work 前，`kwork` 会确认目标 CPU 的 built-in pool
-  已安装，避免 work 停在无人 drain 的 CPU pool。
-- worker-pool CPU-intensive 采样通过 `ktask::TaskExecutionContext` 使用任务本地 opaque
-  pool/worker/token key。callback 可以 sleep/yield；采样不能依赖 per-CPU slot，否则
-  worker 迁移后会漏 tick 或污染旧 CPU 状态。work key 来自 `kworkqueue::Work` identity；
-  queue entry 和 running callback 都持有 `ScheduledWork` clone，避免 work 状态在仍可观察时被释放。
-  queue-level drain API 已删除，task-local context 只由 pool worker 安装。
-- `flush_work()` / `cancel_work_sync()` 通过 `ktask` wait/yield 机制等待 work
-  变为 idle。等待式 API 拒绝 hardirq、serving-softirq 和 BH-disabled context；
-  pending owner queue 是 `ScheduledWork` 状态的一部分，cancel 路径从 work 反查并移除
-  pending entry，避免调用方传错 queue 后把未取消 work 当成 idle。`cancel_work_sync()`
-  在 running instance 上设置 cancel gate，阻止新的 queue attempt 在 teardown
-  等待窗口内重新排队；它不是独立的 work 状态变体。
-  驱动释放设备状态前仍必须停止新的 queue 来源，并等待或取消相关 `ScheduledWork`；callback
-  捕获设备对象时应使用 owner-safe 引用，避免 work 与设备之间形成不可释放强引用环。
+- `kworkng` publishes per-CPU normal/BH services only after preparation and
+  action registration. `kworkqueue_ng` owns queue/work state;
+  `kworkerpool_ng` owns normal managers and workers. `kirq` supplies context
+  predicates and BH dispatch, not work storage or scheduler accounting.
+- Synchronous work waits require sleepable context. Before freeing device state,
+  callers must stop producers and drain owned delayed timers and work. Queue
+  closure alone is not timer shutdown. See `task/kworkng/docs/security.md` for
+  safe-handle deferred reclamation and borrowed-storage obligations.
 
 ## 隐私分析
 
@@ -420,9 +408,9 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
 - MSI/MSI-X 当前只提供最小 allocation/message bridge，不支持 interrupt remapping、
   managed IRQ、affinity rebalance 或动态 post-enable MSI-X table entry 管理。
 - lifecycle hook 目前是单 owner 模型，不是 notifier chain。
-- deferred executor 目前是 softirq 的单 owner hardirq-exit handoff，不是
-  workerqueue 或 threaded IRQ 实现；workerqueue 只通过显式 `queue_work()` handoff
-  到 `kwork/system_wq`。
+- The deferred executor is softirq's single-owner hardirq-exit handoff, not
+  a workqueue or IRQ thread. Workqueues use explicit publication through
+  `kworkng::DefaultQueue::Normal`.
 - `/proc/interrupts` 仍无 per-IRQ/per-CPU 统计输出。
 - poll/future IRQ waiter notification 不是最终 waitqueue、softirq、workerqueue 或
   threaded IRQ 模型；IRQ waiter table 当前由 `kirq::notify` 持有。

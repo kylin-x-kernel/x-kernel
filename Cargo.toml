@@ -6,11 +6,9 @@ members = [
     "entry",
     # boot and loader
     "boot/*",
-    "task/kworkerpool",
     "task/kworkng/crates/kworkerpool_ng",
     "task/kworkng/crates/kworkqueue_ng",
     "task/kworkng",
-    "task/kworkqueue",
     "task/ktimer-core",
     "tee/tee_crypto",
     "tee/xdice",
@@ -77,12 +75,9 @@ kuaccess = { path = "core/kuaccess" }
 kpoll = { path = "task/kpoll" }
 kspin = { path = "task/kspin" }
 ksync = { path = "task/ksync" }
-kworkerpool = { path = "task/kworkerpool" }
 kworkerpool_ng = { path = "task/kworkng/crates/kworkerpool_ng" }
 kworkqueue_ng = { path = "task/kworkng/crates/kworkqueue_ng" }
 kworkng = { path = "task/kworkng" }
-kworkqueue = { path = "task/kworkqueue" }
-kwork = { path = "task/kwork" }
 ktask = { path = "task/ktask" }
 ktimer_core = { path = "task/ktimer-core", package = "ktimer-core" }
 ksched = { path = "task/ksched" }

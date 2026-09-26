@@ -249,11 +249,15 @@ pub use delayed_work_handle::DelayedWorkHandle;
 
 mod services;
 
+#[cfg(all(feature = "bench", not(unittest)))]
+#[path = "../benches/kernel.rs"]
+pub mod benchmarks;
+
 /// Kernel startup integration, separate from ordinary queue-user APIs.
 ///
 /// Call [`runtime::init`] once after all boot CPUs have task/timer/softirq providers and
-/// before exposing work-producing drivers. This does not select NG automatically;
-/// the startup integrator must exclude legacy BH action installation.
+/// before exposing work-producing drivers. The caller must reserve Tasklet/High
+/// actions for these services; initialization rejects already occupied actions.
 pub mod runtime {
     pub use kworkerpool_ng::{BottomHalfPrepareError, NormalRuntimeError};
 
