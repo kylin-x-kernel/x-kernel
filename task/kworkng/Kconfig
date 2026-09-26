@@ -1,0 +1,19 @@
+menu "Prepared Workqueue Defaults"
+
+config KWORKNG_NORMAL_MAX_ACTIVE
+    usize "Default threaded queue release limit per CPU"
+    range 1 65535
+    default 256
+    help
+      Ready-plus-running allowance per CPU, not the worker task count or
+      the number of waiting submissions. Does not activate NG services.
+
+config KWORKNG_BH_MAX_ACTIVE
+    usize "Default BH queue release limit per CPU"
+    range 1 65535
+    default 64
+    help
+      Ready-plus-running allowance per CPU and BH priority queue.
+      Does not activate NG services or replace existing workqueues.
+
+endmenu

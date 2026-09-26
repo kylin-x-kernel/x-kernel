@@ -1,5 +1,18 @@
 # kirq — 安全与可靠性分析
 
+## Softirq Group Registration Boundary
+
+`open_softirqs` accepts trusted kernel enum/function pairs, not raw or external
+data. The protected asset is `SOFTIRQ_ACTIONS`, the fixed action table. Partial
+registration could leave a service exposing only one required BH priority; the
+mitigation is validation and publication under the same IRQ-safe table lock.
+Duplicates, occupied slots and excessive length return false without mutation.
+No callbacks run under the lock, and no allocation or new unsafe operation is
+introduced. The caller must prepare action dependencies before registration and
+publish its own readiness separately. There is no runtime removal/drain guarantee.
+Tests cover conflict rollback, successful group installation, repeated registration,
+duplicate vectors, empty input and oversized input.
+
 ## Effective Context Boundary
 
 `context::is_softirq_context` adds no raw-pointer or external-data input. It uses

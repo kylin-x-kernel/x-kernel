@@ -42,7 +42,13 @@
 //!     - `driver_ramdisk`: Use the RAM disk to emulate the block device.
 //!     - `driver-ixgbe`: Enable the Intel 82599 10Gbit NIC driver.
 //!     - `driver-bcm2835-sdhci`: Enable the BCM2835 SDHCI driver (Raspberry Pi SD card).
+//! - Diagnostics:
+//!     - `kwork_stall_check`: Link prepared workqueue stall inspection and enable
+//!       watchdog boot initialization; periodic inspection requires system integration.
 #![no_std]
+
+#[cfg(feature = "kwork_stall_check")]
+extern crate kworkng as _;
 
 #[cfg(feature = "fs_fat")]
 extern crate fat as _;

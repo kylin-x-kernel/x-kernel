@@ -231,13 +231,38 @@ pub enum SoftirqRunResult {
 /// This API is intended for init-time registration. It does not support
 /// unregistering actions while the system is running.
 pub fn open_softirq(vec: SoftirqVec, action: SoftirqAction) -> bool {
-    let mut actions = SOFTIRQ_ACTIONS.lock();
-    let slot = &mut actions[vec.as_usize()];
-    if slot.is_some() {
+    if !open_softirqs(&[(vec, action)]) {
         warn!("softirq vector {} already registered", vec.as_usize());
         return false;
     }
-    *slot = Some(action);
+    true
+}
+
+/// Registers a group of fixed softirq actions atomically at initialization.
+///
+/// Returns false without modifying any slot if an entry repeats a vector or
+/// any requested vector is already occupied. An empty group succeeds unchanged.
+/// At most [`SoftirqVec::COUNT`] entries are accepted. Validation and publication
+/// share the action-table lock, so dispatch snapshots cannot see a partial group.
+/// No allocation, callback or pending-bit change occurs here.
+///
+/// Actions must be ready to run before registration. This does not publish the
+/// caller's service readiness and does not provide runtime unregistration.
+pub fn open_softirqs(entries: &[(SoftirqVec, SoftirqAction)]) -> bool {
+    if entries.len() > SoftirqVec::COUNT {
+        return false;
+    }
+    let mut actions = SOFTIRQ_ACTIONS.lock();
+    let mut seen = 0;
+    for &(vec, _) in entries {
+        if seen & vec.bit() != 0 || actions[vec.as_usize()].is_some() {
+            return false;
+        }
+        seen |= vec.bit();
+    }
+    for &(vec, action) in entries {
+        actions[vec.as_usize()] = Some(action);
+    }
     true
 }
 
@@ -694,6 +719,51 @@ pub mod tests_softirq {
 
     fn high_action() {
         record_order(&HIGH_ORDER);
+    }
+
+    /// Group registration either installs both entries or preserves every slot.
+    ///
+    /// # Panics
+    /// Panics on partial publication, replacement or missing installed actions.
+    #[def_test(serial)]
+    fn test_softirq_group_registration_is_all_or_nothing() {
+        let _wake_gate = begin_softirq_test();
+        let _first = ScopedSoftirqAction::clear(SoftirqVec::IrqPoll);
+        let _second = ScopedSoftirqAction::install(SoftirqVec::Rcu, timer_action);
+        let entries: [(SoftirqVec, super::SoftirqAction); 2] = [
+            (SoftirqVec::IrqPoll, high_action),
+            (SoftirqVec::Rcu, high_action),
+        ];
+        assert!(!super::open_softirqs(&entries));
+        assert!(!super::is_softirq_open(SoftirqVec::IrqPoll));
+        assert!(super::softirq_action_matches_for_tests(
+            SoftirqVec::Rcu,
+            timer_action
+        ));
+        {
+            let _empty = ScopedSoftirqAction::clear(SoftirqVec::Rcu);
+            assert!(super::open_softirqs(&entries));
+            for (vec, action) in entries {
+                assert!(super::softirq_action_matches_for_tests(vec, action));
+            }
+            assert!(!super::open_softirqs(&entries));
+        }
+    }
+
+    /// Duplicate and oversized groups reject unchanged; empty input is a no-op.
+    ///
+    /// # Panics
+    /// Panics if invalid input installs an action or empty input fails.
+    #[def_test(serial)]
+    fn test_softirq_group_registration_validates_before_publication() {
+        let _wake_gate = begin_softirq_test();
+        let _empty = ScopedSoftirqAction::clear(SoftirqVec::IrqPoll);
+        assert!(super::open_softirqs(&[]));
+        let entry = (SoftirqVec::IrqPoll, high_action as super::SoftirqAction);
+        assert!(!super::open_softirqs(&[entry, entry]));
+        assert!(!super::is_softirq_open(SoftirqVec::IrqPoll));
+        assert!(!super::open_softirqs(&[entry; SoftirqVec::COUNT + 1]));
+        assert!(!super::is_softirq_open(SoftirqVec::IrqPoll));
     }
 
     fn timer_action() {

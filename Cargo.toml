@@ -9,6 +9,7 @@ members = [
     "task/kworkerpool",
     "task/kworkng/crates/kworkerpool_ng",
     "task/kworkng/crates/kworkqueue_ng",
+    "task/kworkng",
     "task/kworkqueue",
     "task/ktimer-core",
     "tee/tee_crypto",
@@ -79,6 +80,7 @@ ksync = { path = "task/ksync" }
 kworkerpool = { path = "task/kworkerpool" }
 kworkerpool_ng = { path = "task/kworkng/crates/kworkerpool_ng" }
 kworkqueue_ng = { path = "task/kworkng/crates/kworkqueue_ng" }
+kworkng = { path = "task/kworkng" }
 kworkqueue = { path = "task/kworkqueue" }
 kwork = { path = "task/kwork" }
 ktask = { path = "task/ktask" }

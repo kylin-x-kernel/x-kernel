@@ -1,5 +1,16 @@
 # kirq — 设计文档
 
+## Atomic Softirq Group Registration
+
+`bottom_half/softirq.rs::open_softirqs` registers a bounded set of fixed actions
+under one action-table lock. It validates every vector and existing slot before
+writing, rejecting duplicate vectors, oversized input or conflicts unchanged.
+An empty group succeeds without effects. Single registration delegates to this
+transaction and retains its existing conflict warning. This supports publishing
+both workqueue BH priorities without partial installation. It does not initialize
+the caller's providers, modify pending bits or offer runtime unregistration.
+Dispatch copies an action under the table lock and releases it before invocation.
+
 ## Effective Softirq Context
 
 `context::is_softirq_context` observes `interrupt_context_level` and is true only

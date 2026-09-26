@@ -1387,6 +1387,7 @@ dependencies = [
  "kwork",
  "kworkerpool",
  "kworkerpool_ng",
+ "kworkng",
  "kworkqueue",
  "kworkqueue_ng",
  "linux-raw-sys",
@@ -2428,6 +2429,7 @@ dependencies = [
  "ksyscall",
  "ktask",
  "ktracing",
+ "kworkng",
  "linux_sysno",
  "memspace",
  "procfs",
@@ -3286,6 +3288,26 @@ dependencies = [
  "ktask",
  "ktime_types",
  "unittest",
+]
+
+[[package]]
+name = "kworkng"
+version = "0.3.0-dev"
+dependencies = [
+ "kbuild_config",
+ "kcpu_id_map",
+ "khal",
+ "kiface",
+ "kirq",
+ "klazy",
+ "kspin",
+ "ktask",
+ "ktime_types",
+ "kworkerpool_ng",
+ "kworkqueue_ng",
+ "log",
+ "unittest",
+ "watchdog",
 ]
 
 [[package]]
@@ -5671,6 +5693,7 @@ dependencies = [
  "kcpu_id_map",
  "kcpu_slot",
  "khal",
+ "kiface",
  "kspin",
  "ktask",
  "ktime_types",

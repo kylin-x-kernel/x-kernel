@@ -20,6 +20,8 @@ extern crate kworkerpool;
 #[cfg(feature = "unittest")]
 extern crate kworkerpool_ng;
 #[cfg(feature = "unittest")]
+extern crate kworkng;
+#[cfg(feature = "unittest")]
 extern crate kworkqueue;
 #[cfg(feature = "unittest")]
 extern crate kworkqueue_ng;

@@ -2,6 +2,12 @@
 
 ## Purpose
 
+The optional `workqueue-stall-check` feature declares `WorkqueueStallCheck` through
+`kiface`. A linked workqueue provider implements task-context, warning-only backlog
+inspection. This contract does not depend on a concrete workqueue implementation,
+install a periodic invocation or alter existing soft/hard lockup checks. Calling
+it from the watchdog task is a separate integration step.
+
 `io/watchdog` provides X-Kernel's soft-lockup and hard-lockup detection:
 
 - Soft lockup: A watchdog task on each CPU periodically updates a timestamp;

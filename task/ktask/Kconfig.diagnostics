@@ -24,6 +24,15 @@ config KFEAT_WATCHDOG
       Enable watchdog-driven diagnostic checks such as soft lockup detection
       and lock-wait heuristics.
 
+config KFEAT_KWORK_STALL_CHECK
+    bool "Prepared workqueue stall diagnostics"
+    depends on KFEAT_WATCHDOG
+    help
+      Enable warning-only backlog records and the watchdog inspection provider
+      for prepared workqueues. Requires watchdog boot initialization. This
+      prepares the diagnostic interface; periodic inspection is wired by the
+      workqueue system integration, not by enabling unit tests.
+
 config KFEAT_SCHED_STAT
     bool "Scheduler statistics"
     default y if BUILD_TYPE_DEBUG

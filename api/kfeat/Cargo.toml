@@ -156,6 +156,7 @@ snapshot = ["ktask/snapshot"]
 sysrq = ["dep:procfs", "procfs/sysrq"]
 kwork_stress = ["dep:procfs", "procfs/kwork_stress"]
 watchdog = ["kruntime/watchdog", "ksync/watchdog"]
+kwork_stall_check = ["watchdog", "dep:kworkng", "kworkng/stall-check"]
 watchdog_hardlockup = ["kruntime/watchdog_hardlockup"]
 irq_context_debug = ["irq_stat", "dep:kirq", "kirq/irq_context_debug"]
 irq_stat = ["dep:kirq", "kirq/irq_stat"]
@@ -199,6 +200,7 @@ tracepoint = ["ktracing/tracepoint"]
 ebpf = ["dep:kbpf", "ksyscall/ebpf", "kruntime/fs_ebpf"]
 
 [dependencies]
+kworkng = { workspace = true, optional = true }
 alloc-engine = { workspace = true, optional = true }
 memspace = { workspace = true, optional = true }
 kalloc = { workspace = true, optional = true }
