@@ -10,10 +10,11 @@ it is pinned to the owning CPU, runs with elevated scheduler priority, and
 periodically updates the local CPU timestamp. Timer interrupt callbacks check
 whether that timestamp is stale.
 
-The NMI watchdog path also runs registered health checks, including the kwork
-system workqueue backlog check. That check is implemented by kwork and only
-registered through watchdog, so watchdog's own forward progress does not depend
-on system workqueue execution.
+With `KFEAT_KWORK_STALL_CHECK`, the per-CPU watchdog task also requests warning-only
+workqueue backlog inspection through `WorkqueueStallCheck`. This never runs in
+NMI or timer IRQ context, does not panic or recover queues, and does not require
+workqueue callbacks to run in order to inspect their progress. The old fatal
+system-workqueue check is no longer registered.
 
 The hard-lockup detector uses a periodic NMI to check each CPU's watchdog
 tasks, including whether timer interrupts are still arriving. On failure, all

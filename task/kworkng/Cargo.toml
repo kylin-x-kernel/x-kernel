@@ -11,6 +11,8 @@ documentation.workspace = true
 description = "Prepared workqueue APIs and safe ownership wrappers"
 
 [features]
+# Select live-service integration tests instead of replaceable service fixtures.
+system = []
 stall-check = ["kworkqueue_ng/stall-check", "dep:watchdog", "watchdog/workqueue-stall-check", "dep:kiface"]
 self-wait-check = ["kworkqueue_ng/self-wait-check"]
 

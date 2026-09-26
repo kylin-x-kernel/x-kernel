@@ -215,17 +215,24 @@
 //!
 //! Default per-CPU queue allowances are configured separately by
 //! `KWORKNG_NORMAL_MAX_ACTIVE` and `KWORKNG_BH_MAX_ACTIVE`.
-//! `stall-check` enables warning-only backlog diagnostics; scheduling the watchdog
-//! inspection is a separate integration step, with no GC or automatic recovery.
+//! `stall-check` enables warning-only backlog inspection from the watchdog task,
+//! with no GC or automatic recovery.
+//! `system` selects live boot-service tests instead of replaceable fixtures; it
+//! does not select between legacy and prepared production implementations.
 //! `self-wait-check` enables additional self-wait diagnostics, not permission for
-//! callback dependency cycles. Neither feature changes storage ownership.
+//! callback dependency cycles. These features do not change storage ownership.
 
 #![no_std]
 
 extern crate alloc;
 
-#[cfg(unittest)]
+#[cfg(all(unittest, not(feature = "system")))]
 mod owned_tests;
+
+#[cfg(all(unittest, feature = "system"))]
+mod live_owned_tests;
+#[cfg(all(unittest, feature = "system"))]
+mod system_tests;
 
 mod defaults;
 pub use defaults::{DefaultQueue, ServiceError};

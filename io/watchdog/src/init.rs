@@ -39,7 +39,6 @@ fn init_common() {
     // Register mutex deadlock check (checked from NMI context only).
     #[cfg(feature = "nmi")]
     crate::register_watchdog_task(&crate::watchdog_task::MUTEX_DEADLOCK_CHECK);
-    crate::register_watchdog_task(&SYSTEM_WORKQUEUE_CHECK);
 
     #[cfg(feature = "nmi")]
     init_nmi_watchdog();
@@ -237,24 +236,13 @@ fn start_softlockup_watchdog_task(cpu_id: LogicalCpuId) {
 fn softlockup_watchdog_task() {
     loop {
         crate::touch_softlockup(khal::time::monotonic_time());
-        ktask::sleep(SOFTLOCKUP_TOUCH_INTERVAL);
-    }
-}
-
-struct SystemWorkqueueCheck;
-
-static SYSTEM_WORKQUEUE_CHECK: SystemWorkqueueCheck = SystemWorkqueueCheck;
-
-impl crate::watchdog_task::WatchdogTask for SystemWorkqueueCheck {
-    fn name(&self) -> &str {
-        "SystemWorkqueue"
-    }
-
-    fn check(&self) -> bool {
-        kwork::raw::system_workqueue_watchdog_check(
+        #[cfg(feature = "workqueue-stall-check")]
+        crate::WorkqueueStallCheck::inspect(
+            khal::percpu::this_cpu_id(),
             khal::time::monotonic_time(),
             crate::lockup_detection::DEFAULT_SOFTLOCKUP_THRESHOLD,
-        )
+        );
+        ktask::sleep(SOFTLOCKUP_TOUCH_INTERVAL);
     }
 }
 

@@ -23,13 +23,4 @@ config WORKQUEUE_WORKERS_PER_POOL
       creates workers on demand up to this cap. Raising the cap increases
       per-pool static worker records and worker wake-source storage.
 
-config KFEAT_KWORK_STRESS
-    bool "Enable workqueue procfs stress trigger"
-    depends on KFEAT_FS
-    default n
-    help
-      Enable /proc/kwork_stress for manually triggered long-running workqueue
-      stress cases. This is a diagnostics-only interface and must remain
-      disabled in normal builds.
-
 endmenu

@@ -8,7 +8,8 @@ extern crate alloc;
 
 /// Optional workqueue warning provider, called only from sleepable task context.
 /// Enabling `workqueue-stall-check` requires exactly one linked implementation.
-/// This contract does not install a periodic check. It is separate from fatal
+/// The per-CPU watchdog task invokes it between timestamp updates and sleep.
+/// It is separate from fatal
 /// IRQ/NMI checks and must not drain or recover queues. Busy or uninitialized
 /// services may skip inspection without reporting.
 #[cfg(feature = "workqueue-stall-check")]

@@ -260,6 +260,21 @@ fn usage_snapshot() -> Usages {
     totals.finish()
 }
 
+/// Reads cumulative successful heap allocation bytes on the guarded CPU for tests.
+///
+/// Keep the same IRQ/preemption guard across both readings and the measured
+/// operation. Frees never reduce this counter; remote CPU allocations are excluded.
+/// This is not live usage, an allocation-attempt counter or NMI attribution.
+///
+/// # Panics
+/// Panics if this CPU's allocator accounting area has not been published.
+#[cfg(unittest)]
+pub fn current_cpu_allocated_bytes_for_test(guard: &NoPreemptIrqSave) -> usize {
+    let area = kcpu_slot::area(guard.current_cpu()).expect("allocator CPU area is initialized");
+    PERCPU_USAGE_COUNTERS.shared_at(area).allocated_bytes[UsageKind::RustHeap as usize]
+        .load(Ordering::Relaxed)
+}
+
 impl fmt::Debug for Usages {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut d = f.debug_struct("UsageStats");

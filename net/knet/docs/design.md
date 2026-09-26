@@ -8,7 +8,7 @@
 
 x-kernel needs socket semantics that can serve both POSIX syscalls and in-kernel clients. `knet` owns protocol state, packet queues, routing, and progress scheduling, while its surrounding subsystems supply device access, task scheduling, filesystem operations, and caller context.
 
-The POSIX network layer in `posix/net` handles syscall arguments, user-memory access, file descriptors, and ABI conversion. `kvfs` owns pathname resolution and access checks, and `anon_inodefs` creates socket files. `kclass` supplies registered network and vsock device handles; concrete drivers own hardware and virtqueue operations. `kirq` supplies the generic softirq mechanism, while `ktask`, `kwork`, and `kpoll` supply timer callbacks, task-context polling, and readiness registration. `knet` determines how these facilities advance network work.
+The POSIX network layer in `posix/net` handles syscall arguments, user-memory access, file descriptors, and ABI conversion. `kvfs` owns pathname resolution and access checks, and `anon_inodefs` creates socket files. `kclass` supplies registered network and vsock device handles; concrete drivers own hardware and virtqueue operations. `kirq` supplies the generic softirq mechanism, while `ktask`, `kworkng`, and `kpoll` supply timer callbacks, task-context polling, and readiness registration. `knet` determines how these facilities advance network work.
 
 ## Scope
 
@@ -183,7 +183,7 @@ virtio-vsock driver")
 Solid arrows show the main API and packet-path relationships; the dotted arrow
 shows rtnetlink configuration through `control` and the owning components.
 `Service` coordinates IP processing and `Router`; `poller` advances RX, protocol
-timers, and TX through kwork or socket-assist polling. AF_PACKET receives frame
+timers, and TX through kworkng or socket-assist polling. AF_PACKET receives frame
 subscriptions from `EthernetDevice`, while Unix and vsock use their own transports.
 
 | Component | Responsibility |
@@ -228,7 +228,7 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 
   `NetRx` runs in a non-sleepable context.
 
-  For Ethernet devices, it only consumes pending RX sources, wakes the corresponding device RX `PollSet`, and schedules `knet-poller`. The actual data-plane processing then runs in kwork task context and is bounded by the configured number of poll rounds.
+  For Ethernet devices, it only consumes pending RX sources, wakes the corresponding device RX `PollSet`, and schedules `knet-poller`. The actual data-plane processing then runs in kworkng task context and is bounded by the configured number of poll rounds.
 
   Loopback UDP uses a more direct path. Before BH is disabled, the transmit path validates the UDP packet and stores the source/destination information and payload range in the existing `PacketBuf` control metadata. The same `NetRx` action then drains only these prepared handles from `pending_udp`, looks up the PCB through the `SpinNoIrq` registry, moves the packet into a receive queue with reserved capacity, and wakes the socket waiter. The hot UDP delivery path therefore performs no heap allocation.
 
@@ -571,20 +571,32 @@ stateDiagram-v2
 |---|---|---|---|
 | `IDLE` | `notify` | `SCHEDULED` | Queues `knet-poller` work. |
 | `SCHEDULED` | `notify` | `SCHEDULED` | The existing wake-up remains valid. |
-| `SCHEDULED` | A kwork callback or assist acquires execution ownership | `RUNNING` | The current executor runs one round or a bounded batch of rounds. |
+| `SCHEDULED` | A kworkng callback or assist acquires execution ownership | `RUNNING` | The current executor runs one round or a bounded batch of rounds. |
 | `RUNNING` | `notify` | `RUNNING_PENDING` | The current executor is responsible for scheduling follow-up work when it finishes. |
 | `RUNNING_PENDING` | `notify` | `RUNNING_PENDING` | The pending state is preserved. |
 | `RUNNING` | Finishes with no immediate work remaining | `IDLE` | No wake-up is issued. |
 | `RUNNING` | Finishes with immediate work remaining | `SCHEDULED` | Queues `knet-poller` work for the next round. |
 | `RUNNING_PENDING` | Finishes | `SCHEDULED` | Queues `knet-poller` work for the next round. |
 
-`SCHEDULED` means that pending work has been published for further processing. `RUNNING` means that a single executor currently owns the right to run the poller, while `RUNNING_PENDING` records new notifications that arrive during execution. On completion, a single CAS returns execution ownership and publishes either `IDLE` or `SCHEDULED`. When `notify` races with completion, the event is preserved through the same atomic state-transition sequence.
+`SCHEDULED` means that pending work has been published for further processing. `RUNNING` means that a single executor currently owns the right to run the poller, while `RUNNING_PENDING` records new notifications that arrive during execution. `PollState` encodes these conceptual states with `is_running` and `has_pending` under one `SpinNoIrq` lock. Completion releases execution ownership and combines budget exhaustion with notifications received while running. Follow-up submission occurs outside the lock.
 
-In the `SCHEDULED` state, the dynamic kwork of `knet-poller` and socket assist compete for execution ownership of the next batch. Loopback UDP does not depend on poller ownership; its transmit path completes xmit and `NetRx` delivery within the BH-disabled window.
+In the `SCHEDULED` state, the reusable static Work of `knet-poller` and socket assist compete for execution ownership of the next batch. Loopback UDP does not depend on poller ownership; its transmit path completes xmit and `NetRx` delivery within the BH-disabled window.
 
 `Interface::poll_at` and TCP deferred close share the protocol timer source, while the IPv4 reassembly queue uses a separate timer source. When a timer expires, it schedules the poller and wakes tasks waiting for socket readiness.
 
 ## Algorithms
+
+### Prepared Polling Work
+
+`init_network` initializes the static `NetworkPoller` before installing NIC
+notification sources. Its embedded Work is reused for the kernel lifetime.
+After network state initialization, `start` binds a private `NormalQueue` to
+the boot CPU set with `CurrentCpu` routing and a per-CPU active limit of one.
+The poller state lock additionally serializes actual network polling across
+CPUs and foreground assistance. No state lock is held during queue submission
+or network processing. Notifications arriving before queue readiness retain
+pending demand and are replayed by `start`. These IRQ-side notifications do
+not allocate submission storage or execute the data plane.
 
 ### Network Initialization
 
@@ -740,7 +752,7 @@ Concurrency is organized around a single owner for protocol progress, with finer
 
 The global `SERVICE` is a `LazyInit<Service>`. Separate mutexes protect the smoltcp `Interface`, the `Router`, the `IngressProcessor`, and each reusable RX, accepted-packet, and control-packet batch. The poller acquires the first three with `try_lock`. If any of these locks is contended, the poller retains the batch and reports that work remains immediately available. These batches are accessed only by the executor that owns the global protocol-progress right.
 
-`NetworkPoller` represents this execution right with the four states maintained by `kwork::BudgetedPoller`: `IDLE`, `SCHEDULED`, `RUNNING`, and `RUNNING_PENDING`. A kwork background batch may process 512 RX packets, 256 TX packets, and 32 timer events. A socket-assisted batch uses smaller budgets of 16, 16, and 8. Every round also has a 1-ms soft time limit. Background batches run at most four consecutive rounds, while one assistance call runs at most one round. When a background batch reaches its round limit, it queues another batch and releases the execution right.
+`NetworkPoller` represents this execution right with two locked booleans (`is_running`, `has_pending`) corresponding to four conceptual states: `IDLE`, `SCHEDULED`, `RUNNING`, and `RUNNING_PENDING`. A prepared kworkng background batch may process 512 RX packets, 256 TX packets, and 32 timer events. A socket-assisted batch uses smaller budgets of 16, 16, and 8. Every round also has a 1-ms soft time limit. Background batches run at most four consecutive rounds, while one assistance call runs at most one round. When a background batch reaches its round limit, it queues another batch and releases the execution right.
 
 Protocol and IPv4 reassembly deadlines use separate `AtomicU64` fields. The periodic sampling callback is deliberately small: it checks the atomic deadline, wakes waiters, and notifies the poller. Each successful staged smoltcp poll refreshes the protocol timer through `Interface::poll_at`, so TCP retransmission and similar deadlines continue to advance even when socket waiters are blocked.
 
@@ -827,7 +839,7 @@ Crate-local types own UDP PCBs, bind-conflict checks, send and receive queues, I
 
 ### Budgeted Processing
 
-The `NetRx` softirq, socket TX paths, protocol timers, and socket assist share one `NetworkPoller`. Its four-state atomic state machine publishes pending work and grants execution to a single owner through a `SCHEDULED -> RUNNING` CAS. Notifications received during execution set `RUNNING_PENDING`, causing completion to schedule another batch. Assist only consumes scheduled work; it neither creates events nor waits for ownership.
+The `NetRx` softirq, socket TX paths, protocol timers, and socket assist share one `NetworkPoller`. Its IRQ-safe state lock protects pending demand and grants execution to a single owner through `PollState::claim`. Notifications received during execution set `RUNNING_PENDING`, causing completion to schedule another batch. Assist only consumes scheduled work; it neither creates events nor waits for ownership.
 
 Loopback UDP is delivered directly to the PCB within the transmit path's bottom-half window, following the Linux sequence from `dev_queue_xmit` through `loopback_xmit` and `__netif_rx` to softirq processing at `local_bh_enable`. TCP, ICMP, and IPv6 use the poller's TX-then-RX rounds.
 

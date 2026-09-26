@@ -1,12 +1,27 @@
 # kruntime — 设计文档
 
+## System Workqueue Startup
+
+`late_init_main` calls `kworkng::runtime::init` after `init_cpu_services` has
+observed completion from every boot CPU, before driver discovery and network
+initialization. This sleepable phase creates per-CPU normal managers, normal/BH
+default queues and both Tasklet/High actions. Startup failure stops boot instead
+of exposing drivers without workqueue services. There is no legacy fallback or
+implementation-selection Kconfig. AP initialization creates ksoftirqd but does
+not create legacy worker pools.
+
+The `kwork` dependency temporarily retains the task execution-accounting kiface
+provider; it does not start legacy services. The obsolete procfs stress trigger
+is no longer exposed. Removal of the old implementation is a separate change.
+
 ## 定位
 
-启动时区分“run queue 已发布，可以接受任务”和“本 CPU 服务已准备完成，可以
-执行任务”。AP 在 scheduler 初始化返回后、发布 SCHED_READY_CPUS 之前持有
-NoPreempt，覆盖固定通知 drain、ksoftirqd、worker pool、开 IRQ 及可选 watchdog/
-PMU 初始化；进入 run_idle 前释放。请求保持 pending，不通过丢弃通知规避早调度。
-IRQ 关闭仍可能在内部锁释放时进行主动抢占检查，因此不能替代该 guard。
+Startup distinguishes a published run queue that accepts tasks from a CPU whose
+services are ready to execute them. After scheduler initialization, each AP holds
+NoPreempt before publishing SCHED_READY_CPUS, through fixed-notification drain,
+ksoftirqd creation, IRQ enable and optional watchdog/PMU initialization. It releases
+the guard before run_idle. Requests remain pending rather than being discarded.
+IRQ masking alone is insufficient because internal lock release can check preemption.
 
 主核在 scheduler 初始化返回后，同样保护 IRQ 服务与 late-init 任务的创建和激活，
 完成后释放 guard，再进入普通调度。late_init_main 的驱动/文件系统/网络阶段可能
@@ -121,7 +136,7 @@ BootInfo*
         (日志等级：优先取启动命令行 `loglevel=` / `quiet` / `debug`，否则 Kconfig 默认)
     → final_init
     → init_scheduler
-    → init_interrupt (softirq runner、kwork/system_wq、定时器 tick、IPI、PMU 基础 handler)
+    → init_interrupt (softirq runner, timer tick, IPI, PMU handlers, ksoftirqd)
     → create late-init bootstrap thread (Internal, PID-less)
     → activate late-init thread
     → boot task (PID 0) block forever

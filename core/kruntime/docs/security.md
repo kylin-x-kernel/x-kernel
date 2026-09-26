@@ -1,5 +1,20 @@
 # kruntime — 安全与可靠性分析
 
+## Workqueue Publication Boundary
+
+The protected asset is the kernel-lifetime `kworkng` service set and its per-CPU
+execution providers. Publishing work before remote CPU services exist could lose
+notifications or strand callbacks. The all-CPU completion barrier precedes
+workqueue initialization, and drivers are exposed only after successful service
+publication. Failure is fatal at startup; there is no partially operational
+legacy fallback. Normal workers may sleep, while BH callbacks must remain bounded
+and nonblocking. Legacy worker pools and BH actions are not installed.
+
+IRQ allocation probes exist only in unittest builds. Their test-owned timers
+are drained before work storage; producers stop before final synchronous work
+cancellation. Allocation counters cover successful heap bytes on the guarded
+caller CPU, not remote execution, allocation attempts or NMI.
+
 ## 信任模型
 
 AP 剩余启动流程借用 idle task 的执行上下文，提前切换到持续 runnable 的任务
@@ -51,7 +66,7 @@ kernel-boot / 平台固件
 | `BootInfo` | CPU ID、内存表、boot console PA/VA/size | 错误内存映射、错误 CPU 初始化、MMIO 区域越界 | `khal::firmware::init`、`khal::mem::init` 和 `memspace` 负责校验；boot console VA/PA 页内偏移由 `assert_eq!` 检查 |
 | 链接符号 | `_stext`、`_etext`、`.init_array` 边界 | backtrace 范围错误、构造函数表越界、任意跳转 | 只取 ZST 符号地址；`.init_array` 通过链接脚本和 `#[register_init]` 约束 |
 | SMP bring-up | DT/ACPI 发现的 present CPU、AP 栈、`boot_ap` | 从核使用错误栈、AP 未启动导致主核自旋 | 每个 AP 使用独立 boot stack；`SCHED_READY_CPUS` 串行握手（等 AP 注册 run queue）；全局完成由 `INITED_CPUS == nr_cpus()` 判断 |
-| IRQ and timer | Softirq runner and timer/IPI/PMU handlers | Interrupt delivery before handler readiness | The primary installs handlers before IRQ enable; APs enable local IRQs after softirq/worker setup and before publishing service completion. PMU IRQ enable follows watchdog setup. |
+| IRQ and timer | Softirq runner and timer/IPI/PMU handlers | Interrupt delivery before handler readiness | The primary installs handlers before IRQ enable; APs enable local IRQs after ksoftirqd setup and before publishing service completion. Workqueue service publication follows the all-CPU barrier. PMU IRQ enable follows watchdog setup. |
 | NMI 机制 | GIC 版本 / FEAT_NMI 探测与每 CPU 使能（`khal::nmi::early_init` / `late_init`） | 机制误判导致无效寄存器访问，或 watchdog 误报 hardlockup | 平台 `detect_mode()` 门控；`NmiMode::None` 时 watchdog 启动期禁用硬锁检测；所有 NMI 寄存器访问均有 readiness 门控 |
 | DMA 页表属性 | `kdma` 传入的内核 VA、size、flags | 错误修改内核页表属性 | `DmaPageTableIf::protect` 委托 `memspace::kernel_layout().protect()` 进行范围和页表处理 |
 

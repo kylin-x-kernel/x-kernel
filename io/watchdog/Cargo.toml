@@ -20,7 +20,6 @@ khal.workspace = true
 ktime_types.workspace = true
 kspin.workspace = true
 ktask = { workspace = true, features = ["watchdog"] }
-kwork = { workspace = true }
 log.workspace = true
 kcpu_slot.workspace = true
 kbuild_config = { workspace = true }

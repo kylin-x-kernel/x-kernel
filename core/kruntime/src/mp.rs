@@ -149,12 +149,6 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     kipi::enable_fixed_notifications();
 
     ktask::init_softirqd_current_cpu();
-    if kwork::raw::init_system_workqueue_worker_pools_for_cpu(logical_cpu_id).is_none() {
-        warn!(
-            "failed to initialize built-in workqueue worker pools on CPU {}",
-            logical_cpu_id.as_usize()
-        );
-    }
     karch::enable_local_irq();
 
     #[cfg(feature = "watchdog")]

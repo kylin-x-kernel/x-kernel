@@ -4,9 +4,10 @@
 
 The optional `workqueue-stall-check` feature declares `WorkqueueStallCheck` through
 `kiface`. A linked workqueue provider implements task-context, warning-only backlog
-inspection. This contract does not depend on a concrete workqueue implementation,
-install a periodic invocation or alter existing soft/hard lockup checks. Calling
-it from the watchdog task is a separate integration step.
+inspection. The per-CPU watchdog task invokes it after updating its soft-lockup
+timestamp and before sleeping for four seconds. It does not depend on a concrete
+workqueue implementation. Queue backlog only produces warnings; the legacy fatal
+system-workqueue check is no longer registered. Soft/hard lockup checks are unchanged.
 
 `io/watchdog` provides X-Kernel's soft-lockup and hard-lockup detection:
 
@@ -66,7 +67,7 @@ this crate is the NMI consumer.
 | `init_nmi_watchdog` | Boot, with the NMI feature | Checks `khal::nmi::mode()`; logs and disables hard-lockup detection when it returns `None`. |
 | NMI callback registered through `enable_periodic_nmi` | NMI context | Only NMI-safe operations: atomics, snapshots, and `kprint_atomic!`, including lock-free argument formatting. Ordinary IRQ spinlocks are forbidden. |
 | Timer callback (`timer_tick` / soft-lockup check) | Timer interrupt, with IRQs disabled | Per-CPU atomic accesses. |
-| Watchdog task | One task pinned to each CPU | Only updates the soft-lockup timestamp and sleeps for 4 seconds. |
+| Watchdog task | One task pinned to each CPU | Updates the soft-lockup timestamp, optionally inspects workqueue backlog, then sleeps for 4 seconds. |
 
 ## State Machines
 

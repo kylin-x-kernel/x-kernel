@@ -8,10 +8,11 @@ Prepared submission reuses stable storage, avoiding per-submission allocation
 from task, BH and hard IRQ context. NMI is unsupported. Preparation and
 synchronous waits require sleepable task context.
 
-This crate does not activate itself. Production startup and network callers
-continue using their existing implementation until the integrator explicitly
-switches them. No experimental selection Kconfig, GC extension, benchmark startup
-or legacy removal is included here.
+This crate does not activate itself. `kruntime` initializes it once after all CPU
+services are ready and before driver initialization. Network polling uses a
+prepared static Work on a private NormalQueue. There is no legacy selection
+switch, GC extension or benchmark startup path. Legacy implementation removal
+is a separate change.
 
 Scope: `services.rs`, `defaults.rs`, `queue.rs`, `normal_queue.rs`, `owned.rs`,
 `work_handle.rs` and `delayed_work_handle.rs`. Queue state, timer transfer, color
@@ -54,7 +55,7 @@ by its constructor from the permanent normal default, never a caller-supplied qu
 - `kspin`: IRQ-compatible handle closure gates and isolated test fixture selection.
 - `kbuild_config`: independent default normal/BH release limits; neither starts services.
 - Optional `watchdog`/`kiface`: task-context warning contract, provided by this
-  crate when `stall-check` is enabled. The watchdog loop is not changed here.
+  crate when `stall-check` is enabled. The per-CPU watchdog task invokes it.
 - `log` and `unittest`: diagnostics and kernel test registration.
 
 ## Initialization And Failure
@@ -154,12 +155,13 @@ arbitrary dependency cycles or destructor-originated waits. `stall-check` attach
 named records before queue exposure and implements `watchdog::WorkqueueStallCheck`.
 Inspection borrows the published services and delegates to the core directory.
 Unready services and a busy diagnostic directory can be skipped; output is warning-only.
-There is no reporting deadline, automatic recovery or GC work. Scheduling the
-inspection belongs to the later system integration.
+There is no reporting deadline, automatic recovery or GC work. The watchdog task
+inspects between its soft-lockup timestamp update and its four-second sleep;
+timer IRQ and NMI handlers never inspect queue state.
 
 ## Validation
 
-Serial kernel tests select separate Arc-owned Once instances and restore legacy BH
+Without the `system` feature, serial kernel tests select separate Arc-owned Once instances and restore legacy BH
 actions. Selection uses a test-only lock; every read retains the chosen instance
 for its closure, so no borrowed service/queue reference escapes fixture lifetime.
 Production Once is never reset. Installation and reads exercise the same Once
@@ -171,4 +173,9 @@ and delayed capture destruction after timer/callback drain. Tests also dispatch
 both actions before publication, verify rejection then successful later submission,
 and observe real diagnostic backlog before and after cancellation. Scoped service teardown
 joins normal workers so terminal reclamation tails finish before the next fixture.
-These fixtures do not establish acceptance of a production startup switch.
+The runtime enables `system`, which selects live-service tests instead of these
+replaceable fixtures. This feature changes test selection only, not production
+implementation selection. Live tests leave the permanent Once and both BH
+actions installed, covering all CPU/categories, safe ownership, deferred release
+and delayed work. `kruntime` additionally probes real hard IRQ publication,
+caller-CPU allocation counters, timer cancellation races and payload visibility.

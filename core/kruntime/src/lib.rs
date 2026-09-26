@@ -26,6 +26,13 @@
 
 extern crate alloc;
 
+// Retain the legacy task-accounting provider until the old kwork crates are
+// removed. No legacy worker pools or BH actions are started.
+extern crate kwork as _;
+
+#[cfg(unittest)]
+mod tests_workqueue;
+
 #[macro_use]
 extern crate klogger;
 
@@ -218,6 +225,16 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     self::mp::tests_startup_order::queue_early_tasks(cpu_id);
 
     init_cpu_services();
+
+    // All target CPUs can now receive notifications and run worker tasks.
+    // Publish services before exposing any work-producing drivers.
+    kworkng::runtime::init(
+        core::num::NonZeroUsize::new(kbuild_config::WORKQUEUE_WORKERS_PER_POOL)
+            .expect("positive configured worker limit"),
+        ktime_types::TimeSpan::from_secs(30),
+        core::num::NonZeroUsize::new(64).unwrap(),
+    )
+    .expect("system workqueue services must be ready before driver initialization");
 
     #[cfg(all(unittest, feature = "smp"))]
     self::mp::tests_startup_order::record_service_barrier(cpu_id);
@@ -592,9 +609,6 @@ fn init_interrupt() {
     if !kirq::softirq::init() {
         warn!("softirq hardirq-exit runner was already installed");
     }
-    if !kwork::raw::init_bottom_half_workerqueue() {
-        warn!("bottom-half workerqueue softirq actions were already installed");
-    }
 
     // Timer interrupt handler. All hardware-timer driving — periodic-tick
     // bookkeeping, soft-timer wheel drain, and hardware re-arm — lives in
@@ -627,10 +641,6 @@ fn init_interrupt() {
     khal::pmu::register_overflow_dispatch();
 
     ktask::init_softirqd_current_cpu();
-    if kwork::raw::init_system_workqueue_worker_pools_for_cpu(khal::percpu::this_cpu_id()).is_none()
-    {
-        warn!("failed to initialize built-in workqueue worker pools");
-    }
     // Enable IRQs before starting app
     karch::enable_local_irq();
 }

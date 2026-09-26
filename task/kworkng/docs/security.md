@@ -3,9 +3,12 @@
 ## Scope And Trust Boundaries
 
 This analysis covers all kworkng production modules, optional diagnostic features
-and the isolated kernel test fixtures. Internal queue state and execution-provider
+and the isolated and live kernel test fixtures. Internal queue state and execution-provider
 implementations are analyzed in the adjacent kworkqueue_ng and kworkerpool_ng
-security documents. Production startup/caller migration is outside this PR.
+security documents. `kruntime` owns the all-CPU startup barrier and initializes
+services before exposing driver producers; `knet` owns network callback state.
+The `system` feature excludes replaceable registry/action fixtures from live
+boot-service tests. Production publication is never reset in either mode.
 
 Inputs are trusted kernel configuration, callbacks, shared captures, queue names,
 CPU IDs and monotonic durations. This crate exposes no public raw-pointer or FFI
@@ -111,5 +114,6 @@ interprets nor zeroizes them. Names must not be used to expose secrets through l
 Review checks: one raw Arc transfer/reconstruction, no W destruction before drain,
 no exposed mutable pinned storage, permanent normal provider availability, matching
 CPU/category binding, atomic action publication, and no waiting/destruction while
-holding the test fixture selector or admission gate. Tests cover controlled races and lifecycle
-outcomes, not exhaustive concurrent schedules or a production-system migration.
+holding the test fixture selector or admission gate. Live-service tests cover
+boot-installed providers, controlled races and lifecycle outcomes; neither test
+mode proves all concurrent schedules or worst-case latency under arbitrary load.

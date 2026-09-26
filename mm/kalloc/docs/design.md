@@ -1,5 +1,13 @@
 # kalloc — 设计文档
 
+## Test Allocation Probe
+
+Unittest builds expose `current_cpu_allocated_bytes_for_test`, a read-only view
+of successful cumulative Rust heap bytes on one CPU. The caller keeps the same
+IRQ/preemption guard across the before/after samples and measured operation.
+Frees cannot hide intervening allocations. This probe adds no production
+instrumentation and does not measure remote CPUs, failed attempts or live usage.
+
 ## 定位
 
 `kalloc` 是 x-kernel 的内核全局内存分配层。它接收启动阶段交付的空闲内存区域，

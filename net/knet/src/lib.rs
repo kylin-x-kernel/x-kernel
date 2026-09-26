@@ -86,6 +86,9 @@ static SERVICE: LazyInit<Service> = LazyInit::new();
 pub fn init_network() {
     info!("Initialize network subsystem...");
 
+    // Prepare stable Work storage before installing NIC notification sources.
+    let _ = poller::network_poller();
+
     let mut net_devs = net_devices();
 
     let mut router = Router::new();

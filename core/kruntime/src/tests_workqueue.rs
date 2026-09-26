@@ -2,6 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Workqueue stress procfs nodes.
+//! Live boot service probes; no registry or softirq action replacement.
 
-pub(crate) mod root;
+mod allocation;
+mod delayed;
+mod visibility;

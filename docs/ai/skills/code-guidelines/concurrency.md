@@ -138,38 +138,33 @@ before `block_on`; SMP spin after a failed first try). See
 
 ## Workerqueue Usage
 
-- use `kwork` when hardirq, softirq, timer, or other non-sleepable paths need
+- use `kworkng` when hardirq, softirq, timer, or other non-sleepable paths need
   to defer sleepable work into task context;
-- use `kwork::schedule_work()` / `kwork::schedule_work_on()` for small shared jobs that do not
-  need subsystem ordering or teardown isolation;
-- use `WorkQueueHandle::alloc()` when a driver or subsystem needs its own ordered
-  work stream, bounded worker pool, or explicit `WorkQueueHandle::destroy()`
-  lifecycle;
-- timer-triggered task work must use an explicitly owned timer and ordinary
-  queued work; the legacy delayed-work wrapper is no longer provided;
-- queueing APIs may be used from IRQ-like context, but `ScheduledWork::flush()`,
-  `ScheduledWork::cancel_sync()`, `WorkQueue::flush()`,
-  `WorkQueueHandle::flush()`, and `WorkQueueHandle::destroy()` must run from
-  sleepable task context;
-- before freeing state captured by a work callback, stop new producers first,
-  then cancel or flush the work, and finally destroy any dynamic workqueue.
+- prepare `WorkHandle` or `DelayedWorkHandle` in sleepable task context and
+  reuse it for allocation-free IRQ-safe submissions;
+- use `NormalQueue::new()` when a subsystem needs independent routing,
+  flush/closure or per-CPU active limits; system defaults share normal workers;
+- use safe static work publication for kernel-lifetime Work; borrowed Work and
+  BH submission remain unsafe because the caller must pin and retain storage;
+- synchronous flush, cancel, shutdown and queue drain require sleepable context;
+- stop external producers and shut down owned handles before subsystem teardown;
+  drain delayed timers explicitly before closing their queue. Queue closure alone
+  does not cancel caller-owned timers or remove callback dependency cycles.
 
 Example:
 
 ```text
-let queue = kwork::WorkQueueHandle::alloc("net-reset", kwork::WorkQueueAttrs::new())?;
-let reset_work = kwork::ScheduledWork::new(|work| {
-    // Runs in kwork task context; sleeping operations are allowed here.
-});
+let queue = kworkng::NormalQueue::new("net-reset", config)?;
+let reset_work = kworkng::WorkHandle::new(move || reset_device())?;
 
 irq_handler_or_softirq_path() {
-    let _ = queue.queue_work(&reset_work);
+    reset_work.queue(&queue, None)?;
 }
 
 device_teardown() {
     stop_irq_or_other_producers();
-    reset_work.cancel_sync()?;
-    queue.destroy()?;
+    reset_work.shutdown()?;
+    queue.close_and_drain()?;
 }
 ```
 

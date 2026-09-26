@@ -25,7 +25,8 @@ ktime_types = { workspace = true }
 ksync = { workspace = true }
 kspin = { workspace = true }
 ktask = { workspace = true }
-kwork = { workspace = true }
+kworkng.workspace = true
+kcpu_id_map.workspace = true
 kprocess = { workspace = true }
 kcred = { workspace = true }
 kerrno = { workspace = true }

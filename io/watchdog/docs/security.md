@@ -13,7 +13,9 @@ external payload. Its caller must be a sleepable task with no held spinlocks;
 it must not be called from the existing NMI or timer IRQ checks. A provider that
 blocks indefinitely or attempts queue recovery could stall monitoring, so the
 contract is warning-only and permits skipping busy or uninitialized state. This
-change adds no automatic invocation; existing monitoring remains unchanged.
+provider is invoked by the per-CPU watchdog task, never by IRQ/NMI checks.
+Before workqueue publication it may skip inspection. Queue stalls do not enter
+the fatal rendezvous; the legacy system-workqueue fatal check is removed.
 Enabling the feature requires exactly one `kiface` implementation at link time.
 
 ## External Boundaries and Attack Surface

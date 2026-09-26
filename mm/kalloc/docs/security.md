@@ -1,5 +1,13 @@
 # kalloc — 安全与可靠性分析
 
+## Test Probe Boundary
+
+The unittest-only allocation probe borrows a `NoPreemptIrqSave` guard and reads
+an existing per-CPU atomic counter through a published CPU area. It does not
+change allocator metadata or expose mutable references. The guard prevents task
+migration and ordinary local IRQ attribution during measurement; NMI attribution
+and remote allocation are outside the contract. No production API is added.
+
 ## 概述
 
 `kalloc` 位于内核内存 ownership 的基础层。它把未经类型化的虚拟地址 region 转换为

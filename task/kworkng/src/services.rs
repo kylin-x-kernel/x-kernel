@@ -220,11 +220,11 @@ static SERVICES: Once<Services> = Once::new();
 // The closure cannot leak a borrow of a replaceable test fixture. Production
 // uses the permanent Once directly, with no lock or reference-count operation.
 fn with_registry<R>(read: impl FnOnce(&Once<Services>) -> R) -> R {
-    #[cfg(not(unittest))]
+    #[cfg(any(not(unittest), feature = "system"))]
     {
         read(&SERVICES)
     }
-    #[cfg(unittest)]
+    #[cfg(all(unittest, not(feature = "system")))]
     {
         let registry = tests::registry();
         read(registry.as_deref().unwrap_or(&SERVICES))
@@ -370,5 +370,5 @@ fn run(priority: BottomHalfPriority) {
     });
 }
 
-#[cfg(unittest)]
+#[cfg(all(unittest, not(feature = "system")))]
 pub(crate) mod tests;
