@@ -88,6 +88,8 @@
   可复用具体驱动只能依赖 driver contract，不能直接调用 host-kernel API；
 - 新增 `pub` 是否真的需要跨 crate 暴露；
 - 仅供 crate 或父模块使用的 item 是否应为 `pub(crate)` / `pub(super)` / private；
+- 本 PR 删除某 item 的唯一外部调用点后，其可见性是否同步收窄
+  （遗留的孤儿 `pub` 按 visibility finding 报告）；
 - 类型和 helper 是否放在真正拥有其状态、不变量和生命周期的 crate；
 - 公共能力是否错误地放在 arch 私有、platform 私有或具体驱动目录；
 - 公共接口是否泄露实现类型、内部字段或锁；
@@ -223,6 +225,8 @@ diff 出现内联汇编、手写底层 CPU 操作或通用数据结构/算法时
 - public API 是否说明参数、返回值、errors、panics 和 safety；
 - 标识符是否用反引号，完整句子是否有标点；
 - 行为、签名或错误变化后，相邻文档是否同步；
+- 新增等待、断言或防御逻辑隐含的新契约（回调不得重入、调用时机限制等）
+  是否已写入被改函数的 rustdoc；
 - 架构、状态机、生命周期、并发模型变化是否更新 `docs/design.md`；
 - trust boundary、unsafe、不变量或失败处理变化是否更新 `docs/security.md`。
 
