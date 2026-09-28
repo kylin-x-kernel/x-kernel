@@ -11,11 +11,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{
-    ffi::CStr,
-    iter, str,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use core::{ffi::CStr, iter, str};
 
 use kaddr_layout::{SIGNAL_TRAMPOLINE, USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
 use khal::paging::MappingFlags;
@@ -234,16 +230,14 @@ fn render_maps_line(item: &MapsEntry) -> String {
 
 struct MapsIter {
     aspace: LiveAddressSpace,
-    heap_top: Arc<AtomicUsize>,
     entries: Vec<MapsEntry>,
     next_index: usize,
 }
 
 impl MapsIter {
-    /// Holds the process mm alive, mirroring Linux `proc_maps_open()`
-    /// `get_task_mm()`: the file keeps working after the process exits, and
-    /// reads re-walk the current VMA list under the mm lock, so a live
-    /// process's new mmap/munmap operations show up on the next read.
+    /// Retains the captured MM and its matching heap marker after process exit.
+    /// Reads re-walk that MM's VMA list; same-image mapping and heap updates
+    /// remain visible, while a later process binding cannot retarget this view.
     ///
     /// Fails with `NoSuchProcess` when the runtime is already detached (the
     /// process is gone even though the task may not be reclaimed yet).
@@ -251,7 +245,6 @@ impl MapsIter {
         let process = task.as_thread().process();
         Ok(Self {
             aspace: process.address_space()?,
-            heap_top: process.heap_top_handle()?,
             entries: Vec::new(),
             next_index: 0,
         })
@@ -276,7 +269,7 @@ impl SeqIterator for MapsIter {
                 offset,
                 inode,
                 path,
-                name: special_mapping_name(start, end, self.heap_top.load(Ordering::Relaxed)),
+                name: special_mapping_name(start, end, self.aspace.heap_top()),
             });
         }
     }
@@ -903,6 +896,8 @@ impl SimpleDirOps for ProcFsHandler {
 #[cfg(unittest)]
 mod tests {
     use khal::paging::MappingFlags;
+    use kprocess::AsThread;
+    use kvfs::SeqIterator;
     use unittest::{assert_eq, def_test};
 
     use super::{
@@ -910,6 +905,48 @@ mod tests {
         format_task_status, maps_permissions, namespace_inode, namespace_link_target,
         parse_oom_score_adj_input, render_maps_line, special_mapping_name,
     };
+
+    #[def_test(user)]
+    fn test_maps_rewind_observes_captured_image_heap_updates() {
+        let task = ktask::current();
+        let process = task.as_thread().process();
+        let old_heap_top = process.heap_top().unwrap();
+        let mut maps = super::MapsIter::new(&task).unwrap();
+        let start = memaddr::VirtAddr::from_usize(super::USER_HEAP_BASE);
+        let end = super::USER_HEAP_BASE + memaddr::PAGE_SIZE_4K;
+        maps.aspace
+            .lock()
+            .map(
+                start,
+                memaddr::PAGE_SIZE_4K,
+                MappingFlags::READ | MappingFlags::WRITE,
+                false,
+                memspace::VmRuntimeRef::new_anon_private(start, khal::paging::PageSize::Size4K),
+            )
+            .unwrap();
+        process.set_heap_top(end).unwrap();
+        maps.rewind();
+        let entry = maps
+            .entries
+            .iter()
+            .find(|entry| entry.start == start.as_usize())
+            .unwrap();
+        assert_eq!(entry.name, Some("[heap]"));
+
+        process.set_heap_top(super::USER_HEAP_BASE).unwrap();
+        maps.rewind();
+        let entry = maps
+            .entries
+            .iter()
+            .find(|entry| entry.start == start.as_usize())
+            .unwrap();
+        assert_eq!(entry.name, None);
+        maps.aspace
+            .lock()
+            .unmap(start, memaddr::PAGE_SIZE_4K)
+            .unwrap();
+        process.set_heap_top(old_heap_top).unwrap();
+    }
 
     #[def_test]
     fn test_namespace_inode_has_expected_known_values() {

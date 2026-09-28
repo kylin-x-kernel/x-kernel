@@ -12,11 +12,15 @@ calls to those owners rather than duplicating their registries.
 ## Architecture and entry points
 
 Boot code calls `spawn_init_process` with argv, environment, a syscall dispatcher
-and an exit callback. It allocates root PID 1, prepares and loads an `ExecRequest`,
+and an exit callback. It allocates root PID 1, resolves executable metadata,
+calls `prepare_user_app_request` to own a validated image and initial stack,
+then `load_prepared_user_app` to install into its unpublished, user-empty MM. It
 creates the process/thread runtime, installs console stdio, seeds the task's page
 table root, and publishes with `publish_user_task(...).commit(...)`. It creates a
 fresh task and leaves the bootstrap thread intact. It does not acquire a
 controlling terminal; session/TTY acquisition belongs to later userspace.
+Neither preparation nor installation requires a current user thread or changes
+the bootstrap task's active MM. Init never discards an existing user image.
 
 Clone adapters use `new_user_task` with matching `PidHandle` and `Thread` values.
 The returned task is still unpublished: the caller completes process publication
@@ -66,20 +70,28 @@ the next interruptible wait or trap.
 1. Traverse the registered robust-futex list, then clear `clear_child_tid` and
    wake its futex if the write and key resolution succeed.
 2. Release optional per-thread TEE state and detach cgroup membership.
-3. Remove the thread from process membership/publication, close its CPU-accounting
-   interval and accumulate final thread CPU time.
+3. Capture the thread's exit MM pin and scheduling context in `kprocess` before
+   removing membership/publication. Mark the thread exiting, close its
+   CPU-accounting interval and accumulate final thread CPU time.
 4. For the last thread, detach the mm owner, clear SysV shm accounting, release
    optional TEE private state, then detach files, filesystem context and namespaces.
    With TIPC enabled, close process-local handles before publishing process exit.
 5. Complete process exit/parent notification. If group exit was requested and
    not already marked, mark it and send SIGKILL to surviving sibling threads.
-6. Mark the current thread exited; the trap loop subsequently stops.
+6. Return to the kernel continuation; the trap loop stops before user reentry.
+   `check_signals` rejects an already exiting thread before touching its signal
+   queue or constructing a user frame, including the next signal-loop iteration
+   after a fatal signal itself called `do_exit`.
 
 ## Concurrency and resource release
 
 This crate creates no global process registry or additional lifecycle lock.
 `kprocess` serializes membership, parent notification and runtime owner slots.
 Objects taken out of owner slots are destroyed outside the slot locks.
+The exiting task's structural MM pin survives through task destruction; it is
+not an active MM user and does not keep old user mappings accessible. Scheduler
+residency and AArch64 ASID selection follow its captured MM, not a survivor's
+later runtime binding. Membership count alone does not imply a finished CPU tail.
 `SHM_MANAGER` serializes shared-memory exit accounting. Robust-futex updates use
 `kuaccess` atomic load/compare-exchange and `kfutex` keys/wake queues; the list
 walk yields between nodes and has a fixed traversal limit.

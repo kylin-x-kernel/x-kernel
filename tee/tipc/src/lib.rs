@@ -78,6 +78,7 @@ impl IpcUuid {
     }
 
     /// Creates an identity from the crate-internal UUID representation.
+    #[cfg(feature = "tee")]
     pub(crate) const fn from_uuid(uuid: uuid::Uuid) -> Self {
         Self(uuid)
     }

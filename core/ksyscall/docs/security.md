@@ -36,7 +36,7 @@ resource owners
 
 ## Unsafe inventory
 
-The crate contains three audited unsafe sites; all carry inline `SAFETY:`
+The production code contains four audited unsafe sites; all carry inline `SAFETY:`
 notes. There are no hand-written unsafe traits, FFI, or inline assembly.
 
 | Site | Operation | Invariant |
@@ -44,6 +44,11 @@ notes. There are no hand-written unsafe traits, FFI, or inline assembly.
 | `sys.rs` (`sethostname`) | stack `[u8; N]` reborrowed as `MaybeUninit<u8>` for copy-from-user | the array is live with trivially initializable bytes; only `buf[..len]` is read after the copy (same pattern as `devfs/nodes/loop.rs`) |
 | `task/clone3.rs` | fully initialized `#[repr(C)]` integer struct viewed as `MaybeUninit<u8>` for a versioned in-place user copy | `kargs` is zero-initialized first, so bytes beyond the caller's struct version stay zero; the reinterpretation is size-preserving |
 | `time/posix_timer.rs` | read of `sigevent._sigev_un._tid` | guarded by `sigev_notify == SIGEV_THREAD_ID`, the ABI-defined selector for that union arm; the tid is validated positive and owned by the process before use |
+| `task/execve.rs` | replace current MM and activate its page table | candidate comes from `new_user_empty`, all old-user inputs are owned, no old-MM lock or user-copy window crosses activation; post-exchange errors are fatal and user entry requires complete image/context setup |
+
+The unittest exit-tail fixture additionally calls the replacement helper with
+a fresh kernel-valid MM while two real threads are published, verifying rejection
+without activation. It holds no MM guard or old-user access window at that call.
 
 All other user-memory access goes through the `posix-types`/`osvm` checked
 copy wrappers.
@@ -99,6 +104,8 @@ registered wakeups rather than polling or a timer.
 
 ## Known limitations
 
+- Exec supports only a live single-threaded process. Independent CLONE_VM peers
+  retain their old MM; this is not a de_thread or vfork implementation.
 - `ioctl` first asks `posix-net::handle_net_ioctl` for exact commands, then
   falls back to file `ioctl`. Socket file vtables do not yet implement
   `ioctl`, so SIOC* still hangs on the syscall adapter instead of the Linux
@@ -107,6 +114,20 @@ registered wakeups rather than polling or a timer.
   return success inconsistent with actual enforcement (currently `ENOSYS`).
 
 ## Audit checklist
+
+- After MM exchange, keep all fallible installation and process-update work
+  inside the fatal boundary; never resume the old user context.
+- Release MM guards and temporary active users before fatal exit. Old-MM
+  retirement may sleep, but must not dispatch user signals against the new MM.
+- Reset old user registrations before fallible image installation. Preserve the
+  TEE session for fatal cleanup until the successful exec tail.
+- Keep exit-tail root observations tied to the captured MM, not the process's
+  newer binding. A structural pin does not authorize user-memory access.
+- Keep unittest injection request-local. Borrowed-MM observers must not reenter
+  the same MM mutex or wait for a peer requiring it. Do not hold IRQ/preemption
+  exclusion across blocking or migration.
+- Use noncreating accessors when checking TEE cleanup, and release observers
+  before testing reclamation. Tests must not supply the cleanup they verify.
 
 - cgroup/namespace flags may leave the `ENOSYS` list only when fully
   implemented; adapters do not create a second membership or namespace-view
@@ -123,3 +144,7 @@ registered wakeups rather than polling or a timer.
   architecture owner instead of ad-hoc probing in the adapter?
 - When owner routing changes, are this crate's and the owner's documents
   updated together?
+
+The exec and exit-tail regressions in `src/task/tests/` cover the exec
+boundaries above. Synthetic-image and injected-error cases do not establish
+real user-program execution or allocator-exhaustion behavior.

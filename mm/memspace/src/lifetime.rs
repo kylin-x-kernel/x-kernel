@@ -104,8 +104,10 @@ impl MmUserHandle {
 
     /// Creates another active user if the address space has not been torn down.
     ///
-    /// This is valid only in sleepable task context. The returned handle has
-    /// the same drop contract as [`MmUserHandle`].
+    /// Acquisition only increments atomic reference counts: it does not allocate
+    /// or take the MM mutex, and may run under a short spinlock. The returned
+    /// handle must outlive that critical section and be released in sleepable
+    /// task context, following the drop contract of [`MmUserHandle`].
     pub fn clone_user_unless_zero(&self) -> Option<Self> {
         let lifetime = self.lifetime.as_ref()?;
         if !lifetime.acquire_user() {
@@ -170,6 +172,10 @@ impl Drop for MmUserHandle {
 ///
 /// This reserves the Linux `mm_count` role for observers that need stable mm
 /// identity without extending the lifetime of user mappings.
+/// Cloning only increments reference counts, without allocation or MM locking;
+/// it never acquires an active user. Final release can destroy the page table
+/// and must occur outside spinlocks in sleepable context after CPU use has ended.
+#[derive(Clone)]
 #[doc(hidden)]
 pub struct MmPin {
     address_space: Arc<Mutex<MmSpace>>,

@@ -143,7 +143,10 @@ impl Process {
     /// `NoSuchProcess` and is dropped rather than waking a half-exited thread.
     ///
     /// Returns `true` if this was the last thread in the process.
+    /// Captures structural MM ownership before retirement; callers must finish
+    /// user-memory cleanup first and perform no subsequent user access.
     pub(crate) fn exit_thread(self: &Arc<Self>, task: &KtaskRef, exit_code: i32) -> bool {
+        task.as_thread().capture_exit_address_space();
         let tid = task.as_thread().tid();
         {
             let mut group_exit = self.group_exit.lock();
@@ -154,6 +157,9 @@ impl Process {
 
         let is_last = {
             let mut thread_membership = self.thread_membership.lock();
+            // Check the real boundary, including direct kprocess test callers.
+            #[cfg(unittest)]
+            assert!(task.as_thread().has_exit_address_space());
             thread_membership.retire(tid);
             thread_membership.is_empty()
         };

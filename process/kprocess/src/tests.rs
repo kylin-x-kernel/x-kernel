@@ -330,7 +330,7 @@ fn mapped_test_address_space() -> Arc<ksync::Mutex<memspace::MmSpace>> {
     Arc::new(ksync::Mutex::new(aspace))
 }
 
-fn process_with_address_space(
+pub(crate) fn process_with_address_space(
     pid: crate::Pid,
     address_space: Arc<ksync::Mutex<memspace::MmSpace>>,
 ) -> (Arc<Process>, TaskInner) {
@@ -780,6 +780,72 @@ fn test_signal_send_reaches_published_zombie_until_reaped() {
 }
 
 #[def_test(serial)]
+fn test_runtime_mm_capability_outlives_exit_and_preserves_metadata() {
+    let address_space = mapped_test_address_space();
+    let (mm_id, residency) = {
+        let aspace = address_space.lock();
+        (aspace.mm_id(), aspace.cpu_residency().clone())
+    };
+    let (proc, task) = process_with_address_space(8_139, address_space.clone());
+    let runtime = proc.runtime_ref().expect("runtime must be attached");
+    // Exercise acquisition in a non-sleeping section, but release the returned
+    // capability only after leaving it: final release can tear down mappings.
+    let capability = {
+        let _pin = kspin::NoPreemptIrqSave::new();
+        runtime.address_space().expect("MM user must be live")
+    };
+    assert_eq!(runtime.mm_id(), mm_id);
+    assert!(!proc.exit_mm().expect("runtime must be attached"));
+    assert!(runtime.address_space().is_none());
+    assert_eq!(address_space.lock().vmas().count(), 1);
+
+    drop(capability);
+    assert_eq!(address_space.lock().vmas().count(), 0);
+    assert!(!proc.exit_mm().expect("exit must be idempotent"));
+    assert_eq!(runtime.mm_id(), mm_id);
+    let cpu = khal::percpu::this_cpu_id();
+    runtime.set_mm_resident_cpu(cpu);
+    assert!(residency.snapshot().get(cpu.as_usize()));
+    residency.clear_cpu(cpu);
+    let observed = runtime.pinned_address_space_for_teardown_observation();
+    assert!(Arc::ptr_eq(&observed, &address_space));
+
+    process_exit::finalize_process_exit(&proc);
+    wait_reap::assert_reap_zombie_process(&proc);
+    drop(task);
+    drop(runtime);
+    assert_eq!(observed.lock().mm_id(), mm_id);
+    assert_eq!(observed.lock().vmas().count(), 0);
+}
+
+#[def_test(serial)]
+fn test_runtime_pin_retains_exited_mm_until_task_drop() {
+    let address_space = mapped_test_address_space();
+    let observer = Arc::downgrade(&address_space);
+    let (proc, task) = process_with_address_space(8_140, address_space);
+    assert!(proc.exit_mm().expect("runtime must be attached"));
+    {
+        let pinned = observer.upgrade().expect("runtime pin must retain MM");
+        assert_eq!(pinned.lock().vmas().count(), 0);
+    }
+    process_exit::finalize_process_exit(&proc);
+    wait_reap::assert_reap_zombie_process(&proc);
+    drop(task);
+    assert!(observer.upgrade().is_none(), "runtime pin must be released");
+}
+
+#[def_test(serial)]
+fn test_runtime_drop_releases_active_mm_user() {
+    let address_space = mapped_test_address_space();
+    let (proc, task) = process_with_address_space(8_141, address_space.clone());
+    process_exit::finalize_process_exit(&proc);
+    wait_reap::assert_reap_zombie_process(&proc);
+    assert_eq!(address_space.lock().vmas().count(), 1);
+    drop(task);
+    assert_eq!(address_space.lock().vmas().count(), 0);
+}
+
+#[def_test(serial)]
 fn test_exit_cleanup_clears_exclusive_address_space() {
     let (proc, _task) = process_with_address_space(8_130, mapped_test_address_space());
 
@@ -873,6 +939,7 @@ fn test_exit_cleanup_ignores_non_runtime_address_space_refs() {
 fn test_exit_cleanup_preserves_clone_vm_address_space_until_last_runtime_user() {
     let shared_address_space = mapped_test_address_space();
     let (parent, parent_task) = process_with_address_space(8_132, shared_address_space.clone());
+    parent.set_heap_top(0x6000).unwrap();
     let child = parent_task
         .as_thread()
         .prepare_process_fork(ProcessForkConfig {
@@ -887,6 +954,21 @@ fn test_exit_cleanup_preserves_clone_vm_address_space_until_last_runtime_user() 
         .expect("CLONE_VM test child should prepare");
     let child_process = child.process().clone();
 
+    assert_eq!(child_process.address_space().unwrap().heap_top(), 0x6000);
+    parent.set_heap_top(0x7000).unwrap();
+    assert_eq!(child_process.address_space().unwrap().heap_top(), 0x6000);
+    child_process.set_heap_top(0x8000).unwrap();
+    assert_eq!(parent.address_space().unwrap().heap_top(), 0x7000);
+
+    assert_eq!(parent.mm_id().unwrap(), child_process.mm_id().unwrap());
+    assert!(Arc::ptr_eq(
+        &parent
+            .pinned_address_space_for_teardown_observation()
+            .unwrap(),
+        &child_process
+            .pinned_address_space_for_teardown_observation()
+            .unwrap(),
+    ));
     assert!(
         !parent.exit_mm().expect("runtime must be attached"),
         "shared VM mappings must remain while another process runtime still uses the mm"
@@ -917,6 +999,7 @@ fn test_exit_cleanup_preserves_clone_vm_address_space_until_last_runtime_user() 
 #[def_test(serial)]
 fn test_clone_fs_shares_the_filesystem_context_umask() {
     let (parent, parent_task) = process_with_address_space(8_136, mapped_test_address_space());
+    parent.set_heap_top(0x6000).unwrap();
     parent
         .replace_umask(0o7000)
         .expect("parent runtime must expose its filesystem context");
@@ -941,6 +1024,10 @@ fn test_clone_fs_shares_the_filesystem_context_umask() {
         })
         .expect("CLONE_FS test child should prepare");
     let child_process = child.process().clone();
+    assert_eq!(child_process.address_space().unwrap().heap_top(), 0x6000);
+    child_process.set_heap_top(0x7000).unwrap();
+    assert_eq!(parent.address_space().unwrap().heap_top(), 0x6000);
+    assert!(parent.mm_id().unwrap() != child_process.mm_id().unwrap());
     child_process
         .replace_umask(0o077)
         .expect("child runtime must expose the shared filesystem context");
@@ -1511,13 +1598,23 @@ fn test_prepare_thread_clone_defers_tid_visibility_until_publication() {
     let published = prepare_user_task(task).publish().unwrap();
     let sibling_task = published.task().clone();
 
+    assert!(!thread.has_exit_address_space());
+    assert!(!sibling_task.as_thread().has_exit_address_space());
     let is_last = process.exit_thread(&sibling_task, 0);
     assert!(
         !is_last,
         "published sibling thread removal must not tear down the whole process"
     );
+    assert!(sibling_task.as_thread().has_exit_address_space());
+    assert!(!sibling_task.as_thread().is_exiting());
+    assert!(!process.contains_published_tid(tid));
+    assert!(crate::lookup::task(tid).is_err());
+    assert_eq!(process.thread_count(), 1);
+    assert!(!process.exit_thread(&sibling_task, 0));
     drop(published);
-    process.exit_thread(&leader_task, 0);
+    assert!(process.exit_thread(&leader_task, 0));
+    assert!(thread.has_exit_address_space());
+    assert_eq!(process.thread_count(), 0);
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     process.free();
     let _ = process_publication().unpublish_process_if_matches(&process);

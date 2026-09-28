@@ -98,7 +98,10 @@ pub fn current_user_process_address_space() -> LiveAddressSpace {
         .expect("current user thread must still expose process address space")
 }
 
-/// Returns the current process address-space identity without taking the aspace lock.
+/// Returns the current process's bound MM identity without taking the MM mutex.
+///
+/// The process binding lock selects the identity. Each MM has an immutable
+/// identity, but successful exec replaces the binding and its returned identity.
 ///
 /// # Panics
 ///

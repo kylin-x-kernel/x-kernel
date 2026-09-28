@@ -16,6 +16,10 @@ use crate::{Process, ProcessExitPublication, process_signals, wait_reap};
 /// identity-check against the live publication slot before retiring it. See
 /// the visibility contract below: the global TID entry
 /// is removed before later teardown steps such as fd/mm cleanup complete.
+/// The thread captures its structural MM pin and scheduling metadata before
+/// retirement. Finish all user-memory cleanup before this call; after it returns,
+/// the exiting continuation must not access user memory or return to user mode.
+/// The pin preserves the root until task destruction, not live user mappings.
 pub fn finish_thread_exit(process: &Arc<Process>, task: &KtaskRef, exit_code: i32) -> bool {
     process.exit_thread(task, exit_code)
 }

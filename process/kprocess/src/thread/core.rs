@@ -9,7 +9,7 @@ use kcgroup::{Cgroup, TaskCharge, TaskMembership};
 use kcred::Cred;
 use kerrno::KResult;
 use ksignal::{SignalStack, api::ThreadSignalManager};
-use kspin::SpinNoPreempt;
+use kspin::{SpinNoIrq, SpinNoPreempt};
 use ksync::{Mutex, RwLock};
 use ktask::KtaskRef;
 use ktime_types::TimeSpan;
@@ -19,7 +19,7 @@ use tee_task_iface::TeeSessionCtxTrait;
 use super::cpu_time::{CpuTimeState, CpuTimeStatistics};
 use crate::{
     Pid, Process, ProcessForkConfig, ProcessRuntime, Tid, allocate_thread_task_number,
-    fork_process_runtime,
+    fork_process_runtime, process_runtime::ExitAddressSpace,
 };
 
 /// The current user thread handle.
@@ -156,6 +156,8 @@ pub struct Thread {
     task_number: Arc<kidentity::PidHandle>,
     process: Arc<Process>,
     runtime: Arc<ProcessRuntime>,
+    // Installed once before membership retirement; released only with Thread.
+    exit_address_space: SpinNoIrq<Option<ExitAddressSpace>>,
     real_cred: RwLock<Arc<Cred>>,
     cred: RwLock<Arc<Cred>>,
     clear_child_tid: AtomicUsize,
@@ -206,6 +208,7 @@ impl Thread {
             signal: ThreadSignalManager::new(tid, runtime.signal_manager().clone()),
             process,
             runtime,
+            exit_address_space: SpinNoIrq::new(None),
             real_cred: RwLock::new(cred.clone()),
             cred: RwLock::new(cred),
             clear_child_tid: AtomicUsize::new(0),
@@ -344,14 +347,23 @@ impl Thread {
     }
 
     /// Resets thread-private exec state that still points into the old user image.
-    pub fn reset_after_exec(&self) {
+    ///
+    /// Clears clear_child_tid, the robust-list head and alternate signal stack.
+    /// Call immediately after successful MM exchange, before fallible new-image work.
+    pub fn reset_user_state_after_exec(&self) {
         self.set_clear_child_tid(0);
         self.set_robust_list_head(0);
         self.signal.set_stack(SignalStack::default());
-        #[cfg(feature = "tee")]
-        {
-            *self.tee_session_ctx.lock() = None;
-        }
+    }
+
+    /// Releases the old TEE session at the successful exec tail after credential commit.
+    ///
+    /// Takes the slot, releases its mutex, then drops the session. This does not
+    /// perform the active close-all cleanup used by fatal exit.
+    #[cfg(feature = "tee")]
+    pub fn reset_tee_session_after_exec(&self) {
+        let session = self.tee_session_ctx.lock().take();
+        drop(session);
     }
 
     /// Returns the robust-futex list head pointer registered by this thread.
@@ -518,12 +530,46 @@ impl Thread {
     }
 
     pub(crate) fn set_process_mm_resident_cpu(&self, cpu_id: kcpu_id_map::LogicalCpuId) {
-        self.process_runtime().set_mm_resident_cpu(cpu_id);
+        let exit_address_space = self.exit_address_space.lock();
+        if let Some(snapshot) = exit_address_space.as_ref() {
+            snapshot.set_mm_resident_cpu(cpu_id);
+        } else {
+            self.runtime.set_mm_resident_cpu(cpu_id);
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
     pub(crate) fn process_page_table_hw_root(&self) -> karch::HwPageTableRoot {
-        self.process_runtime().page_table_hw_root()
+        let exit_address_space = self.exit_address_space.lock();
+        if let Some(snapshot) = exit_address_space.as_ref() {
+            snapshot.page_table_hw_root()
+        } else {
+            self.runtime.page_table_hw_root()
+        }
+    }
+
+    /// Pins the current scheduling context before this thread becomes unpublished.
+    /// No allocation or MM mutex; lock order is thread exit lock, then binding.
+    /// Never replace an installed owner, even on repeated exit.
+    pub(crate) fn capture_exit_address_space(&self) {
+        let mut snapshot = self.exit_address_space.lock();
+        if snapshot.is_none() {
+            *snapshot = Some(self.runtime.capture_exit_address_space());
+        }
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn has_exit_address_space(&self) -> bool {
+        self.exit_address_space.lock().is_some()
+    }
+
+    /// Inspects the retained tuple without preparing an ASID on the test CPU.
+    #[cfg(unittest)]
+    pub(crate) fn exit_address_space_matches(
+        &self,
+        matches: impl FnOnce(&ExitAddressSpace) -> bool,
+    ) -> bool {
+        self.exit_address_space.lock().as_ref().is_some_and(matches)
     }
 
     /// Returns the owning process ID under the current root/global PID semantics.

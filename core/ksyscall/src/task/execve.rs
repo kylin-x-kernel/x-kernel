@@ -9,12 +9,15 @@
 //! - Program loading and initialization
 //! - Argument and environment passing
 
-use alloc::{string::ToString, sync::Arc, vec::Vec};
+use alloc::{
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
 use core::ffi::c_char;
 
-use kaddr_layout::USER_HEAP_BASE;
 use kerrno::{KError, KResult};
-use kexec::{ExecFailure, ExecRequest, load_user_app_request};
+use kexec::{ExecRequest, load_prepared_user_app, prepare_user_app_request};
 use khal::uspace::UserContext;
 use ktask::current;
 use kuaccess::vm_load_string;
@@ -49,6 +52,23 @@ pub fn sys_execve(
             .collect::<Result<Vec<_>, _>>()?
     };
 
+    exec_owned(
+        uctx,
+        path,
+        args,
+        envs,
+        #[cfg(unittest)]
+        None,
+    )
+}
+
+pub(super) fn exec_owned(
+    uctx: &mut UserContext,
+    path: String,
+    args: Vec<String>,
+    envs: Vec<String>,
+    #[cfg(unittest)] mut probe: Option<&mut lifecycle_tests::ExecProbe>,
+) -> KResult<isize> {
     debug!("sys_execve <= path: {path:?}, args: {args:?}, envs: {envs:?}");
 
     let curr = current();
@@ -78,34 +98,20 @@ pub fn sys_execve(
         .unwrap_or_else(|_| path.clone());
     let entry_name = loc.name();
 
-    let aspace_ref = process.address_space()?;
-    let mut aspace = aspace_ref.lock();
-    let load_result = load_user_app_request(
-        &mut aspace,
-        ExecRequest::from_resolved_with_display(
-            loc.clone(),
-            path.clone(),
-            args.clone(),
-            envs.clone(),
-            cred,
-        ),
-    );
-    let (entry_point, user_stack_base) = match load_result {
-        Ok(image) => image,
-        Err(ExecFailure::BeforeCommit(error)) => return Err(error),
-        Err(ExecFailure::AfterCommit(error)) => {
-            drop(aspace);
-            error!("sys_execve: image commit failed; terminating current process: {error}");
-            posix_process::do_exit(ksignal::Signo::SIGSEGV as i32, true);
-            return Ok(0);
-        }
+    let prepared = prepare_user_app_request(ExecRequest::from_resolved_with_display(
+        loc,
+        path,
+        args.clone(),
+        envs,
+        cred,
+    ))?;
+    let exec_update = kprocess::ProcessExecUpdate::new(absolute_path.clone(), Arc::new(args));
+    #[cfg(unittest)]
+    let (prepared, exec_update) = if let Some(probe) = probe.as_deref_mut() {
+        probe.attach_failure_probes(prepared, exec_update)
+    } else {
+        (prepared, exec_update)
     };
-    drop(aspace);
-
-    curr.set_name(entry_name.as_str());
-
-    let exec_update =
-        kprocess::ProcessExecUpdate::new(absolute_path.clone(), Arc::new(args), USER_HEAP_BASE);
 
     #[cfg(feature = "tee")]
     let exec_update = {
@@ -121,20 +127,57 @@ pub fn sys_execve(
         exec_update.with_ta_head_bytes(ta_head_bytes)
     };
 
-    if let Err(error) = process.apply_exec_update(exec_update) {
-        error!("sys_execve: post-commit process update failed; terminating: {error}");
-        posix_process::do_exit(ksignal::Signo::SIGSEGV as i32, true);
-        return Ok(0);
+    let new_mm = memspace::MmSpace::new_user_empty()?;
+    // SAFETY: new_user_empty preserves kernel mappings. All request/metadata
+    // inputs are owned, with no old-MM guard or user-copy window retained.
+    // After exchange, only successful installation/context reset or fatal exit
+    // can finish this syscall; the previous user context is never resumed.
+    unsafe {
+        kprocess::replace_current_address_space(
+            new_mm,
+            #[cfg(unittest)]
+            probe
+                .as_ref()
+                .is_some_and(|probe| probe.should_fail_precheck()),
+        )?;
     }
+    thread.reset_user_state_after_exec();
+    // Keep every fallible post-exchange operation inside this fatal boundary.
+    // The closure releases temporary MM owners and locks before do_exit.
+    let committed: KResult<_> = (|| {
+        #[cfg(unittest)]
+        if let Some(probe) = probe.as_deref_mut() {
+            probe.on_activated()?;
+        }
+        let image = {
+            let aspace = process.address_space()?;
+            load_prepared_user_app(&mut aspace.lock(), prepared)?
+        };
+        curr.set_name(entry_name.as_str());
+        let updated = process.apply_exec_update(exec_update);
+        #[cfg(unittest)]
+        if let Some(probe) = probe {
+            probe.observe_update(&process, image.0.as_usize(), image.1.as_usize());
+        }
+        updated?;
+        Ok(image)
+    })();
+    let (entry_point, user_stack_base) = match committed {
+        Ok(image) => image,
+        Err(error) => {
+            error!("sys_execve: image commit failed; terminating current process: {error}");
+            posix_process::do_exit(ksignal::Signo::SIGSEGV as i32, true);
+            return Ok(0);
+        }
+    };
     let mut exec_cred = thread.prepare_creds();
     exec_cred.apply_exec();
     thread.commit_creds(exec_cred);
-    thread.reset_after_exec();
+    #[cfg(feature = "tee")]
+    thread.reset_tee_session_after_exec();
 
-    // execve replaces the entire address space.  The old mappings are
-    // now destroyed (including any System-V shared memory attachments).
-    // Clear the stale ShmManager entries so the process can re-attach
-    // the same segments later.
+    // This process no longer uses the old mappings, even if VM-sharing peers
+    // retain them. Drop its stale attachment bookkeeping before new user entry.
     posix_ipc::SHM_MANAGER.lock().clear_proc_shm(process.pid());
 
     // execve replaces the whole user register context.  Do not inherit any
@@ -149,3 +192,68 @@ pub fn sys_execve(
     uctx.set_tls(0);
     Ok(0)
 }
+
+#[cfg(unittest)]
+mod tests {
+    use alloc::format;
+
+    use ksignal::SignalStack;
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test(user, serial)]
+    fn empty_exec_path_preserves_current_image() {
+        let thread = kprocess::current_user_thread();
+        let process = thread.process();
+        let signal = thread.signal_manager();
+        let original_tid = thread.clear_child_tid();
+        let original_robust = thread.robust_list_head();
+        let original_stack = signal.stack();
+        let mm_id = process.mm_id().unwrap();
+        let heap = process.heap_top().unwrap();
+        let snapshot = || {
+            process
+                .address_space()
+                .unwrap()
+                .lock()
+                .vmas()
+                .map(|vma| (vma.start(), vma.end(), vma.flags()))
+                .collect::<Vec<_>>()
+        };
+        let mappings = snapshot();
+        let mut uctx = UserContext::new(0x1234, 0x8000usize.into(), 0x5678);
+        uctx.set_tls(0x9000);
+        // Debug includes private registers without reading struct padding.
+        let context = format!("{uctx:?}");
+        // These registrations are observed only; this path must never dereference them.
+        thread.set_clear_child_tid(0x4000);
+        thread.set_robust_list_head(0x5000);
+        signal.set_stack(SignalStack {
+            sp: 0x6000,
+            flags: 0,
+            size: 0x2000,
+        });
+
+        assert_eq!(
+            exec_owned(&mut uctx, String::new(), Vec::new(), Vec::new(), None),
+            Err(KError::NotFound)
+        );
+        assert_eq!(process.mm_id().unwrap(), mm_id);
+        assert_eq!(snapshot(), mappings);
+        assert_eq!(process.heap_top().unwrap(), heap);
+        assert_eq!(thread.clear_child_tid(), 0x4000);
+        assert_eq!(thread.robust_list_head(), 0x5000);
+        let stack = signal.stack();
+        assert_eq!((stack.sp, stack.flags, stack.size), (0x6000, 0, 0x2000));
+        assert_eq!(format!("{uctx:?}"), context);
+        assert!(!thread.is_exiting());
+        thread.set_clear_child_tid(original_tid);
+        thread.set_robust_list_head(original_robust);
+        signal.set_stack(original_stack);
+    }
+}
+
+#[cfg(unittest)]
+#[path = "tests/exec_lifecycle.rs"]
+pub(super) mod lifecycle_tests;

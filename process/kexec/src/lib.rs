@@ -5,10 +5,10 @@
 //! User program loading and exec image setup over the memory-management APIs.
 //!
 //! Create an [`ExecRequest`], optionally call [`ExecRequest::prepare`] to pin and
-//! inspect the executable, and use [`load_user_app_request`] to replace an address
-//! space. The loader owns image layout; MM owns mappings and pages.
-//! [`ExecFailure`] tells callers whether an error occurred before or after the
-//! old address space was cleared.
+//! inspect the executable. [`prepare_user_app_request`] validates and owns the
+//! image/stack; [`load_prepared_user_app`] installs it into a user-empty MM.
+//! The loader owns image layout; MM owns mappings and pages. Callers own the
+//! commitment boundary and failure policy; neither loader operation clears an MM.
 //!
 //! # Example
 //!
@@ -41,6 +41,12 @@ mod elf_image;
 mod loader;
 mod lru_cache;
 
+#[cfg(unittest)]
+pub use elf_image::tests::executable_bytes as test_executable_bytes;
+#[cfg(unittest)]
+pub use loader::PartialInstallProbe;
+
 pub use self::loader::{
-    BinPrm, ExecFailure, ExecRequest, ExecSource, clear_elf_cache, load_user_app_request,
+    BinPrm, ExecRequest, ExecSource, PreparedExecImage, clear_elf_cache, load_prepared_user_app,
+    prepare_user_app_request,
 };

@@ -40,7 +40,7 @@ is complete.
 
 ## Unsafe inventory
 
-The explicit unsafe operation is in `src/process/tree.rs`,
+The intrusive-list unsafe operation is in `src/process/tree.rs`,
 `Process::remove_child_slot_from_parent_locked`: `children.remove(slot)` operates
 on an intrusive list. Its SAFETY comment requires the process-domain lock to
 serialize every child-list mutation, a membership check proving this exact slot
@@ -48,10 +48,18 @@ is in this exact parent's list, and absence of concurrent unlink between check
 and removal. The write-guard parameter plus pointer-identity search provide the
 local guarded path; `parent.children` is also locked during removal.
 
-There are no explicit unsafe functions/traits/impls, FFI declarations or inline
-assembly elsewhere in this crate. The intrusive-list macro/provider and task/MM
-integration still have external safety contracts; this inventory covers explicit
-source boundaries rather than claiming generated/provider code has no unsafe.
+`src/process_runtime/runtime_state.rs::replace_current_address_space` is an
+unsafe CPU-state handoff. Its caller guarantees a fresh user-empty MM preserving
+kernel mappings, sleepable entry without locks or old-user access windows, and
+no return to the old user context after success. Current live single-thread
+membership and the live binding are checked before exchange. The complete new
+binding retains its root; the displaced binding retains the old root through
+activation. IRQ/preemption exclusion covers binding exchange, residency, ASID
+preparation and ktask's saved/hardware root update. No MM mutex, allocation or
+callback occurs inside that section; all displaced/candidate drops are outside.
+The caller must reset old user registrations immediately after success, before
+fallible new-image work or fatal cleanup. TEE reset stays at successful exec tail.
+Signal delivery during sleepable old-MM teardown would violate this contract.
 
 ## Memory and lifecycle invariants
 
@@ -83,6 +91,38 @@ Cgroup authorization and scheduler validation closures execute under their
 sleepable owner locks; TEE callbacks do likewise. They must not reenter the same
 lock. Current-user helpers are not IRQ/early-boot/kernel-task APIs; initialization
 and allocator/scheduler/clock assumptions are explicit in design.md.
+
+The process-MM binding uses `SpinNoIrq` because scheduling reads it with IRQs
+disabled. `ProcessAddressSpace::new` acquires the MM mutex and allocates the heap
+marker before the binding is published; it must run in sleepable context outside
+spinlocks. Snapshot capture does not call this constructor. Binding critical
+sections only copy identity, clone an active user or
+structural observer, take the user slot, or update residency/ASID metadata.
+Heap marker selection is protected by the same binding lock; numeric heap
+updates use the existing release/acquire atomic ordering. `LiveAddressSpace`
+captures user and heap together, preventing a retained MM view from consulting
+another binding's heap marker. This is not an atomic snapshot of all VMAs or
+all process resources. Its heap accessor takes no binding lock under the MM lock.
+Never acquire the MM mutex, allocate, invoke callbacks, or drop an active user
+under this lock. Last-user release and runtime destruction require sleepable
+context outside the MM mutex. Scheduling may nest runqueue -> thread exit-snapshot
+lock -> binding -> residency/ASID locks, never the reverse. A retained pin preserves object identity
+after exit, but does not grant permission to access torn-down user mappings.
+
+Membership retirement is preceded by one-way installation of `ExitAddressSpace`
+in the exiting Thread. Pin, residency and AArch64 ASID context are captured from
+one locked binding, preventing later binding changes from retargeting its root
+or residency updates. Capture clones `MmPin` and metadata references, without
+allocation, MM locking, user acquisition or owner release.
+Snapshot presence, not the later exiting flag, selects scheduler metadata.
+AArch64 prepares the retained context on each switch, preserving rollover.
+No path clears or overwrites the snapshot before Thread destruction; TaskGC's
+final drop occurs outside scheduler/queue locks after the task can no longer run.
+Runtime lifetime alone is not evidence of old-root retention. The POSIX exit
+caller must complete user cleanup before retirement and prevent later signal
+frame writes/user return. The structural pin does not authorize either operation.
+ASID root preparation changes CPU-local allocator state and must accompany a
+matching hardware activation; read-only observations must not prepare a root.
 
 Per-thread CPU accounting uses `SpinNoPreempt` for non-sleeping scheduler updates
 and synchronized remote samples; interrupt handlers must not access this state.

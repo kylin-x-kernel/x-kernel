@@ -102,6 +102,7 @@ pub use process_group::ProcessGroup;
 pub(crate) use process_group::ProcessGroupMemberSlot;
 pub use process_runtime::{
     ForkAddressSpace, ForkFdTable, ForkFs, ForkParent, ForkSignalActions, ProcessForkConfig,
+    replace_current_address_space,
 };
 pub(crate) use process_runtime::{ProcessRuntime, fork_process_runtime};
 pub use publication::PublishedUserTask;

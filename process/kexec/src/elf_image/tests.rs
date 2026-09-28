@@ -102,6 +102,13 @@ fn basic_segments() -> [TestSegment; 2] {
     ]
 }
 
+/// Builds native ELF metadata for kernel-side loader and exec tests.
+///
+/// The payload is not executable code; callers must not enter its user entry point.
+pub fn executable_bytes() -> Vec<u8> {
+    test_elf(3, current_machine(), 0x100, &basic_segments())
+}
+
 #[def_test]
 fn validates_position_independent_load_layout() {
     let data = test_elf(3, current_machine(), 0x100, &basic_segments());

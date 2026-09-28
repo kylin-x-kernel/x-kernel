@@ -264,10 +264,21 @@ Invariants:
 
 Invariants:
 
-1. Task context is mutated only on the controlled schedule path.
+1. Task context is mutated only on the controlled schedule path or the current
+   user-task root replacement boundary, with IRQs/preemption excluded.
 2. The current-task pointer on each CPU always names a live task object.
 3. The stack is freed only after the task is no longer running and has no
    remaining refs (gc task + `Arc::try_unwrap`).
+
+`api.rs::replace_current_user_page_table` mutates only the running task's saved
+root and activates it on that CPU. Its unsafe caller must retain valid old/new
+roots, preserve kernel mappings, publish the matching process binding, prepare
+the AArch64 ASID locally, and exclude outstanding context borrows. IRQ/preemption
+exclusion prevents concurrent scheduling mutation. The helper follows the
+architecture switcher's root-write/flush ordering; it neither drops MM owners
+nor calls runtime hooks. User entry remains forbidden until image/context setup
+is complete. The unittest root reader returns a value under IRQ/preemption
+exclusion and does not add a mutable context escape.
 
 ### `task.rs`: immutable user-runtime slot
 

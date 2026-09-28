@@ -32,7 +32,7 @@ The analysis covers the entire crate, including feature-gated code and tests.
 | `src/publication.rs`, `src/process_domain.rs`, `src/lookup.rs`, `src/lifecycle.rs` | Directory slots, relation transaction lock, lookup and exit events/CPU totals. |
 | `src/process_group.rs`, `src/session.rs` | Group member slots, session groups and controlling terminal. |
 | `src/capability.rs`, `src/cgroup.rs`, `src/credentials.rs`, `src/job_control.rs`, `src/pidfd.rs`, `src/process_exit.rs`, `src/process_signals.rs`, `src/procfs.rs`, `src/ptrace.rs`, `src/resource_limits.rs`, `src/scheduler.rs`, `src/stat.rs`, `src/system_view.rs`, `src/timer_delivery.rs`, `src/wait_reap.rs` | Domain-specific public queries, updates, callbacks and snapshots. |
-| `src/tests.rs` | Process-domain regression cases; additional modules have inline tests. |
+| `src/tests.rs`, `src/process_runtime/tests_runtime_state.rs` | Process-domain and captured-MM regression cases; additional modules have inline tests. |
 
 ```text
 TaskInner --owns user runtime--> Thread --owns--> ProcessRuntime
@@ -172,7 +172,8 @@ Wait scans/matches/consumes under the domain write lock and returns a stable
 entry outside that lock. `finish_thread_exit` retires TID visibility before later
 resource teardown, so external thread lookup stops targeting exit-tail tasks.
 
-Exec updates optional TA context, heap, signal dispositions, POSIX timers,
+Exec initializes the new image's heap marker when constructing its MM binding.
+The subsequent process update handles optional TA context, signal dispositions, POSIX timers,
 close-on-exec files and optional IPC/private state, then publishes path/cmdline
 under one `ExecMetadata` lock. A failure closing descriptors can occur after
 earlier changes: the operation is not an all-state rollback transaction. The
@@ -188,8 +189,9 @@ references and then observes them under the domain read lock. Tree/member/group
 locks protect local containers; cross-object invariants require the domain token.
 Session terminal and group lists have their own IRQ-safe spin locks.
 
-Runtime fs/ns slots and exec metadata use RwLock; mm-user state, CPU accounting,
-scheduler state and timers use mutexes. Thread credential commit takes objective
+Runtime fs/ns slots and exec metadata use RwLock; the process-MM binding uses
+SpinNoIrq. CPU accounting, scheduler state and timers retain their own locks.
+Thread credential commit takes objective
 then subjective credential write locks and asserts the pointers were not
 independently overridden. CPU totals use relaxed nanosecond atomics and are
 observational counters, not publication barriers. Heap and thread control fields
@@ -207,6 +209,71 @@ user clears mappings; `LiveAddressSpace` delays that event while held. Exit take
 owner slots once and drops objects outside their locks; repeated detach is safe
 while the runtime shell remains reachable. Zombies/pidfds retain stable identity
 without requiring attached files, filesystem paths or namespaces.
+
+`ProcessRuntimeState` directly owns a `ProcessAddressSpace` under `SpinNoIrq`:
+active user, structural pin, MM identity, CPU residency, heap marker and existing
+AArch64 ASID context all belong to one binding. Private `ProcessAddressSpace::new`
+collects that tuple in sleepable context before publication. The IRQ-safe lock
+serves scheduler callbacks, including IRQ-tail scheduling. Accessors return owned
+capabilities or scalar values, not references into the binding. Residency updates
+and ASID preparation remain non-sleeping; lock order is runqueue, thread exit-snapshot
+lock, process-MM binding, then residency/ASID lock. Paths may omit intermediate
+locks, but no reverse acquisition is allowed.
+
+User acquisition under the binding lock only increments reference counts. Exit
+takes the user slot under the lock, then releases it in sleepable context outside
+both the binding lock and the MM mutex. The pin and activation metadata survive
+that release for scheduling tails. Runtime destruction also releases the user
+before dropping the pin, without holding the binding lock. Timers remain separate.
+
+`replace_current_address_space` constructs a complete candidate in sleepable
+context through the same constructor as initial setup. It requires a live current
+user task which is the sole published thread. Under the binding lock and local
+exclusion it exchanges owners, marks new residency, prepares the AArch64 ASID (or
+uses the cached non-AArch64 root), then activates saved and hardware roots through
+ktask. Old residency bits remain conservative. All displaced/candidate destruction
+occurs outside guards; no error follows exchange.
+
+Exec immediately resets old user registrations after replacement, before fallible
+new-image work. Sleep/preemption during old-owner release must not deliver user
+signals. TEE session cleanup stays at the successful exec tail, preserving fatal
+cleanup state until then.
+
+Before `Process::exit_thread` retires membership or the TID, the exiting Thread
+installs one immutable `ExitAddressSpace` containing a clone of the binding's
+`MmPin`, matching CPU residency and, on AArch64, its ASID context. Pin cloning
+only increments structural reference counts; capture clones the matching tuple
+under thread and binding `SpinNoIrq` locks. It takes no MM mutex and allocates
+nothing. The thread lock is released before membership retirement and directory
+callbacks. Repeated exit never replaces or drops the installed snapshot.
+
+Snapshot presence immediately selects the thread's scheduler residency/root
+callbacks, independently of `is_exiting`. Live threads still select the runtime.
+AArch64 prepares a root through the captured ASID context on every switch so
+rollover remains supported; no frozen ASID scalar is stored. Other architectures
+retain their saved-root switch path. Old residency bits remain conservative.
+The snapshot has no active MM user and cannot delay last-user mapping clear.
+It survives runtime binding changes, process reap and remaining exit work until
+Thread destruction. TaskGC drops the task outside its queue lock after its final
+switch; extra task owners can delay that destruction. User cleanup must precede
+`finish_thread_exit`; the POSIX continuation owns skipping subsequent user signal
+delivery and user return.
+
+Structural ownership and captured-view regressions live in
+`src/process_runtime/tests_runtime_state.rs`. Cross-crate scheduling and exec
+coverage lives in `core/ksyscall/src/task/tests/exit_tail.rs`.
+
+`LiveAddressSpace` captures an active MM user and the binding's heap marker under
+that same lock. Its `heap_top()` reads the captured atomic without reacquiring the
+binding lock, including while holding the MM mutex. A procfs maps iterator uses
+this paired capability rather than separately looking up the process heap.
+The marker is live within that image, not a frozen numeric snapshot, but a later
+binding cannot retarget an existing capability. Final capability release still
+requires sleepable context outside the MM mutex.
+
+Process heap getters/setters act on the bound marker. Fork continues to copy the
+parent's current heap value into a new per-process marker, including CLONE_VM;
+this does not introduce shared-brk semantics.
 
 Preallocated intrusive child slots keep commit-time relations within the
 non-sleeping domain boundary; stable publication slots separate visibility from

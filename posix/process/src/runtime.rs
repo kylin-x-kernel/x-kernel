@@ -441,11 +441,17 @@ pub fn raise_signal_fatal(sig: SignalInfo) -> KResult<()> {
 /// actions retain the signal manager's context changes. Stop currently exits
 /// with code 1, and CoreDump exits without generating a core file.
 /// This may block and must not run in interrupt context.
+/// Exited threads do not dequeue signals or construct further user frames.
 pub fn check_signals(
     thr: &Thread,
     uctx: &mut UserContext,
     restore_blocked: Option<SignalSet>,
 ) -> bool {
+    // do_exit returns to the kernel loop; its remaining iterations must not
+    // touch user mappings or repeat teardown after membership/MM release.
+    if thr.is_exiting() {
+        return false;
+    }
     let Some((sig, os_action)) = thr.signal_manager().check_signals(uctx, restore_blocked) else {
         return false;
     };

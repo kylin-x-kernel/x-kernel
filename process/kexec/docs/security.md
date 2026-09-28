@@ -50,19 +50,28 @@ implementation; dependency soundness remains external.
 
 `BinPrm` pins the executable and owns args/env/cred. `PreparedExecImage` pins the
 validated executable and interpreter cache entries with `Arc`, so cache eviction
-cannot invalidate their header views. Mapping code delegates VMA construction
+cannot invalidate their header views. It also owns the bounded, encoded initial
+stack and validated entry/SP; it holds neither a target MM nor a loader guard.
+Mapping code delegates VMA construction
 and installation to `filemap`/`MmSpace`. Private LRU indices assume
 valid bounded storage (production capacity 32). Safe indexing can panic on a
 broken cache invariant; it does not create a raw-memory access boundary.
 
 ## Thread safety
 
-`ELF_LOADER` protects cache lookup, insertion, and preparation. Commit consumes
+`ELF_LOADER` protects cache lookup, insertion, and related file reads, but is
+released before final validation and stack preparation. Installation consumes
 only request-owned `Arc` entries and does not reacquire the cache lock.
 The caller exclusively borrows the target `MmSpace`; it must separately prevent
 other threads from executing an obsolete image during a process exec protocol.
 VFS work while holding loader/current-filesystem locks can block and must not
 reenter the same lock chain.
+
+Unittest partial-install observers borrow the target MM without owning it.
+They must not reacquire its mutex or wait for a peer that needs that mutex.
+Blocking and migration require IRQs/preemption enabled; scheduler callbacks
+must use cached binding metadata rather than enter the borrowed MM.
+These request-local probes are absent from production builds.
 
 ## Threat analysis
 
@@ -70,7 +79,7 @@ reenter the same lock chain.
 |---|---|---|---|---|---|
 | T-01 | Malformed executable disrupts loading | Medium | Invalid identity, architecture, header, load segment, or interpreter text | A wrong mapping, kernel panic, or denial of exec could follow if metadata reached MM unchecked. | `ValidatedElfImage::new` in `src/elf_image.rs` validates image metadata. In `src/loader.rs`, `ElfCacheEntry::load_file`, `read_exact_at`, `ElfLoader::interp_path`, and `script_interpreter_args` reject invalid table ranges, alignments, short reads, and interpreter text with recoverable errors; scripts stop after four redirects. |
 | T-02 | Excessive file-derived allocation/mapping | Medium | ELF advertises huge ranges or lengths | Kernel memory pressure or an oversized user mapping could deny service. | `ValidatedElfImage::new` bounds ELF64 tables and segments with checked arithmetic; `ElfLoader::interp_path` caps PT_INTERP at 4096 bytes; `ExecLayoutPlan::new` requires complete image spans below the heap. Allocator failure remains governed by kernel policy. |
-| T-03 | Resume of a destroyed image | High | Mapping or stack work fails after `MmSpace::clear` | Resuming the old instruction pointer could execute in a partial or unmapped address space. | `load_user_app_request` returns `ExecFailure::AfterCommit`; `sys_execve` drops the address-space lock and terminates the process with `SIGSEGV`. Other callers must apply the same policy. There is no rollback. |
+| T-03 | Resume of a destroyed image | High | Mapping or stack work fails after the caller discards its old image | Resuming the old instruction pointer could execute in a partial or unmapped address space. | `load_prepared_user_app` returns the mapping error; the exec caller drops the address-space lock and terminates with `SIGSEGV`. Callers own the commitment boundary and must not resume a discarded image. There is no rollback. |
 | T-04 | Changed file uses stale metadata | Medium | Executable contents change after caching | Header-derived mappings can disagree with the current file contents. | `ElfLoader` keys entries by path identity and pins files, while `clear_elf_cache` provides explicit invalidation. No content-version check exists; dependence on VFS write exclusion or explicit flushing is an accepted residual risk. |
 | T-05 | Prepared entry is evicted before commit | Low | Concurrent loads or explicit cache flush during the prepare/commit gap | A dangling parsed-header view could otherwise cause invalid reads or wrong mappings. | `PreparedElfImage` retains an `Arc<ElfCacheEntry>`; `LruCache::flush` removes reuse visibility but cannot invalidate the request. |
 | T-06 | Wrong executable authority | High | Consumer substitutes display text for a resolved object or supplies stale credentials | The kernel could execute a different file or bypass the intended authorization decision. | `ExecRequest::prepare` retains the resolved `Path` and checks `Permission::MAY_EXEC` with the supplied snapshot. Caller ownership of snapshot freshness and the broader exec authorization remains explicit. |
@@ -80,16 +89,22 @@ reenter the same lock chain.
 
 | ID | Failure mode | Cause | Local effect | System effect | Severity (1-4) | Handling |
 |---|---|---|---|---|---|---|
-| F-01 | Preparation fails | VFS resolution/open/permission or invalid image | `KResult` error before clear | Old image retained | 3 | Caller reports normal preparation failure. |
+| F-01 | Preparation fails | VFS resolution/open/permission or invalid image | `KResult` error before activation | Old image retained | 3 | Caller reports normal preparation failure. |
 | F-02 | Script recursion exhausted | More than four redirects | `FilesystemLoop` | Exec rejected | 3 | Stop before commit. |
-| F-03 | Post-clear failure | Mapping, population, or write failure | Partially rebuilt address space | Old image cannot resume | 1 | Return `ExecFailure::AfterCommit`; the syscall path terminates the process rather than returning errno. |
-| F-04 | ELF validation fails | Wrong architecture, malformed range, invalid alignment, short read, or no load gap | `InvalidExecutable` or `NoMemory` before clear | Old image retained | 3 | Reject the prepared request without entering commit. |
+| F-03 | Post-activation failure | Mapping, population, or write failure | Partially populated new address space | Old image cannot resume | 1 | Return the underlying error; the syscall path catches installation failure and terminates rather than returning errno. |
+| F-04 | ELF validation fails | Wrong architecture, malformed range, invalid alignment, short read, or no load gap | `InvalidExecutable` or `NoMemory` before activation | Old image retained | 3 | Reject the prepared request without entering commit. |
 | F-05 | Stale cache | File changed without invalidation | Old parsed headers | Wrong load semantics | 2 | Explicit flush only; residual coherence limitation. |
 
 ## Failure management and privacy
 
-Preparation failures and destructive-commit failures retain their underlying
-`KError` in `ExecFailure`. Invalid executable, filesystem loop, address-layout
+The split installer rejects an MM with existing user VMAs before mutation.
+After that check, mapping failures may leave partial contents. It does not
+clear old mappings, select a process failure policy, or publish an MM. Init
+installs into an unpublished empty MM; exec installs into a fresh MM already
+activated by its caller. VM-sharing peers keep their original MM.
+
+Preparation and installation failures return their underlying `KError` without
+encoding caller policy. Invalid executable, filesystem loop, address-layout
 exhaustion, argument-list size, MM/VFS, and optional signature errors remain
 distinct. The syscall path exposes only pre-commit errors as errno and turns a
 post-commit error into process termination. Allocator failure has no local
@@ -103,7 +118,7 @@ not explicitly erase them. The crate does not intentionally log their contents.
 - Preserve current-fs initialization and a consistent credential snapshot.
 - Keep file-private mappings on the approved MM APIs and align both offsets.
 - Never imply an arbitrary load error leaves the previous address space intact.
-- Preserve phase-aware handling when adding a new `load_user_app_request` caller.
+- Make the commitment boundary and post-commit failure handling explicit in callers.
 - Add architecture-derived `AT_HWCAP` and `AT_PLATFORM` before claiming full
   dynamic-runtime auxiliary-vector compatibility.
 - Reassess file-change invalidation when VFS gains an executable-write exclusion

@@ -65,6 +65,65 @@ pub fn current() -> CurrentTask {
     CurrentTask::get()
 }
 
+/// Updates the current user task's saved root and activates it on this CPU.
+///
+/// # Panics
+/// Panics if there is no current task; debug builds also check exclusion/user state.
+///
+/// # Safety
+/// IRQs and preemption must already be disabled. The caller must publish a
+/// matching current process binding and retain both old and new roots through
+/// activation. The new root must preserve kernel mappings, and on AArch64 its
+/// ASID must be prepared on this CPU. No borrowed task context may span this
+/// call, and user execution must wait until its image/context are ready.
+pub unsafe fn replace_current_user_page_table(root: karch::HwPageTableRoot) {
+    debug_assert!(!karch::local_irq_enabled());
+    let task = current();
+    debug_assert!(task.user_runtime().is_some());
+    #[cfg(feature = "preempt")]
+    debug_assert!(task.preempt_section_held());
+    // SAFETY: this is the running task, exclusively owned by this CPU for
+    // context mutation with IRQs/preemption excluded. The caller forbids
+    // outstanding context borrows and retains the valid kernel-mapped root.
+    unsafe { (*task.ctx_mut_ptr()).set_page_table_root(root) };
+    // SAFETY: the published binding retains this root and kernel mappings;
+    // the caller prepared its CPU-local ASID and excludes context switches.
+    unsafe { karch::write_user_page_table(root) };
+    // CR3 writes flush on x86; AArch64 uses prepared ASIDs and TTBR0's ISB.
+    // Untagged RISC-V/LoongArch roots need the switcher's explicit local flush.
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    karch::flush_tlb(None);
+    #[cfg(unittest)]
+    {
+        // Check before a switch-in can repair a stale saved root on AArch64.
+        assert_eq!(current_user_page_table_root(), root);
+        assert_eq!(karch::read_user_page_table(), root);
+    }
+}
+
+/// Reads the current task's saved page-table root for unit-test observations.
+///
+/// Excludes local IRQs and preemption while reading; does not prepare an ASID
+/// or change the hardware root. Callers comparing hardware must keep their own
+/// exclusion guard across both reads. Does not sleep or retain a task reference.
+///
+/// # Panics
+/// Panics if the scheduler has no current task.
+#[cfg(unittest)]
+pub fn current_user_page_table_root() -> karch::HwPageTableRoot {
+    let _pin = NoPreemptIrqSave::new();
+    let task = current();
+    #[cfg(target_arch = "aarch64")]
+    let root = task.ctx().ttbr0_el1;
+    #[cfg(target_arch = "x86_64")]
+    let root = task.ctx().cr3;
+    #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+    let root = task.ctx().satp;
+    #[cfg(target_arch = "loongarch64")]
+    let root = task.ctx().pgdl;
+    root
+}
+
 /// Initializes the task scheduler (for the primary CPU).
 pub fn init_scheduler() {
     init_scheduler_with_cpu_num(kcpu_id_map::nr_cpus());
@@ -723,8 +782,12 @@ mod tests_api {
     };
 
     static SOFTIRQ_SLEEPABLE_OBSERVED: AtomicBool = AtomicBool::new(true);
+    static SOFTIRQ_IRQS_ENABLED_OBSERVED: AtomicBool = AtomicBool::new(false);
+    static SOFTIRQ_SERVING_OBSERVED: AtomicBool = AtomicBool::new(false);
 
     fn record_sleep_gate_from_softirq() {
+        SOFTIRQ_IRQS_ENABLED_OBSERVED.store(karch::local_irq_enabled(), Ordering::Release);
+        SOFTIRQ_SERVING_OBSERVED.store(kirq::context::is_serving_softirq(), Ordering::Release);
         SOFTIRQ_SLEEPABLE_OBSERVED.store(can_sleep_current_context_for_tests(), Ordering::Release);
     }
 
@@ -863,13 +926,20 @@ mod tests_api {
     #[def_test(serial)]
     fn sleep_context_gate_rejects_softirq_context() {
         let _wake_gate = begin_softirq_test();
+        // Keep IRQ tails and CPU migration out of the raise-to-drain window.
+        // The softirq dispatcher itself enables IRQs while invoking the callback.
+        let _irqs_off = kspin::NoPreemptIrqSave::new();
         SOFTIRQ_SLEEPABLE_OBSERVED.store(true, Ordering::Release);
+        SOFTIRQ_IRQS_ENABLED_OBSERVED.store(false, Ordering::Release);
+        SOFTIRQ_SERVING_OBSERVED.store(false, Ordering::Release);
         let _softirq_action =
             ScopedSoftirqAction::install(SoftirqVec::Block, record_sleep_gate_from_softirq);
 
         raise_softirq(SoftirqVec::Block);
         assert_eq!(kirq::softirq::run_pending_softirqs(), SoftirqRunResult::Ran);
 
+        assert!(SOFTIRQ_IRQS_ENABLED_OBSERVED.load(Ordering::Acquire));
+        assert!(SOFTIRQ_SERVING_OBSERVED.load(Ordering::Acquire));
         assert!(!SOFTIRQ_SLEEPABLE_OBSERVED.load(Ordering::Acquire));
     }
 

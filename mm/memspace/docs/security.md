@@ -61,6 +61,10 @@
 - `MmUserHandle` 是唯一能保留用户映射生命周期的 capability；`MmPin` 和普通
   `Arc<Mutex<MmSpace>>` observer 只能保留对象可观察性，不能阻止最后一个 user
   释放时清空映射。
+- `MmPin` can be cloned in a short critical section. Final release can destroy
+  the page table and requires sleepable context outside spinlocks, after CPUs
+  stop using that root. Cloning cannot resurrect active users of a torn-down MM.
+  An exiting thread's pin does not authorize further access to user memory.
 
 ## 线程安全
 
@@ -72,10 +76,14 @@
   spinlock.
 - `msync_range()` may block through file-backed runtime/provider sync and is
   only valid in process context.
-- `MmCpuResidency` 只允许在调度切换边界做“先加入新 mm、后移除旧 mm”的保守更新，
-  不能在 page-table flush 路径中重建目标集合。
+- Scheduling adds the CPU to the new `MmCpuResidency` before activating its
+  root; old-MM CPU bits remain conservative rather than being cleared at each
+  switch. Page-table flush paths must not reconstruct the target set.
 - `MmUserHandle::clone_user_unless_zero()` 和最后一个 user release 使用同一个原子
   状态转换；进入 torn-down 状态后，`MmPin::try_upgrade_user()` 必须失败。
+  Cloning can acquire an active user under a short spinlock, but the returned
+  handle must be released outside it. Last-user release locks the MM and clears
+  mappings; it requires sleepable context without the MM lock already held.
 
 ## 威胁分析
 

@@ -361,19 +361,29 @@ mod tests_wake_affinity {
 
     #[def_test]
     fn can_idle_pull_task_rejects_on_cpu() {
-        let task = test_task_on(1);
+        let task = test_task_on(0);
         let mut mask = KCpuMask::new();
         mask.set(0, true);
-        mask.set(1, true);
         task.set_cpumask(mask);
         assert!(can_idle_pull_task(task.as_ref(), 0));
         task.set_on_cpu(true);
         assert!(!can_idle_pull_task(task.as_ref(), 0));
         task.set_on_cpu(false);
+        assert!(can_idle_pull_task(task.as_ref(), 0));
+    }
+
+    #[def_test]
+    fn can_idle_pull_task_rejects_disallowed_cpu() -> unittest::TestResult {
+        if kcpu_id_map::nr_cpus() < 2 {
+            return unittest::TestResult::Ignored;
+        }
+        let task = test_task_on(1);
         let mut only_home = KCpuMask::new();
         only_home.set(1, true);
         task.set_cpumask(only_home);
         assert!(!can_idle_pull_task(task.as_ref(), 0));
+        assert!(can_idle_pull_task(task.as_ref(), 1));
+        unittest::TestResult::Ok
     }
 }
 

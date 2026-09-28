@@ -519,4 +519,4 @@ fn ranges_overlap(left: &Range<usize>, right: &Range<usize>) -> bool {
 }
 
 #[cfg(unittest)]
-mod tests;
+pub(crate) mod tests;

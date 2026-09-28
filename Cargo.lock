@@ -2976,6 +2976,7 @@ dependencies = [
  "kpoll",
  "kprocess",
  "ksignal",
+ "kspin",
  "ktask",
  "ktime",
  "ktime_types",
@@ -2985,6 +2986,7 @@ dependencies = [
  "kvfs",
  "linux-raw-sys",
  "linux_sysno",
+ "memspace",
  "num_enum",
  "osvm",
  "pipefs",
@@ -2999,6 +3001,7 @@ dependencies = [
  "tee_task_iface",
  "tipc",
  "unittest",
+ "unittest_support",
 ]
 
 [[package]]

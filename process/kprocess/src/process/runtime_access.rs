@@ -7,7 +7,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use fs_context::FsStruct;
 use kcred::Cred;
@@ -31,13 +31,25 @@ use crate::{AsThread, ProcessRuntime};
 /// Holding this value keeps the process mm user alive, so the returned
 /// `MmSpace` cannot be torn down by process exit until the capability is
 /// dropped.
+/// Dropping it may lock the MM and tear down mappings. Release it only in
+/// sleepable task context, outside spinlocks and the MM mutex.
+/// Its heap marker belongs to the captured program image: later changes to
+/// the process binding do not retarget this capability.
 pub struct LiveAddressSpace {
     mm_user: MmUserHandle,
+    heap_top: Arc<AtomicUsize>,
 }
 
 impl LiveAddressSpace {
-    pub(crate) fn new(mm_user: MmUserHandle) -> Self {
-        Self { mm_user }
+    pub(crate) fn new(mm_user: MmUserHandle, heap_top: Arc<AtomicUsize>) -> Self {
+        Self { mm_user, heap_top }
+    }
+
+    /// Returns the live heap top of the captured image, not the current process image.
+    ///
+    /// Does not acquire a lock; may be read while holding this capability's MM mutex.
+    pub fn heap_top(&self) -> usize {
+        self.heap_top.load(Ordering::Acquire)
     }
 
     /// Locks the live address space.
@@ -117,25 +129,35 @@ impl LiveAddressSpaceMappingGuard<'_> {
     }
 }
 
-/// Process-shared state updates that become visible after a successful exec.
+/// Owned process-state update bundle applied during committed exec.
+/// Updates may become visible before final success; application is not transactional.
 pub struct ProcessExecUpdate {
+    #[cfg(unittest)]
+    failure_hits: Option<Arc<AtomicUsize>>,
     pub(super) exe_path: String,
     pub(super) cmdline: Arc<Vec<String>>,
-    pub(super) heap_top: usize,
     #[cfg(feature = "tee")]
     pub(super) ta_head_bytes: Vec<u8>,
 }
 
 impl ProcessExecUpdate {
-    /// Creates a process exec update with the new executable metadata and heap top.
-    pub fn new(exe_path: String, cmdline: Arc<Vec<String>>, heap_top: usize) -> Self {
+    /// Creates a process exec update with the new executable metadata.
+    pub fn new(exe_path: String, cmdline: Arc<Vec<String>>) -> Self {
         Self {
+            #[cfg(unittest)]
+            failure_hits: None,
             exe_path,
             cmdline,
-            heap_top,
             #[cfg(feature = "tee")]
             ta_head_bytes: Vec::new(),
         }
+    }
+
+    /// Injects a request-local error after real exec metadata publication.
+    #[cfg(unittest)]
+    pub fn with_failure_probe(mut self, hits: Arc<AtomicUsize>) -> Self {
+        self.failure_hits = Some(hits);
+        self
     }
 
     /// Installs the TEE TA header bytes that should be applied on exec.
@@ -229,18 +251,18 @@ impl Process {
     }
 
     /// Returns the pinned address-space object for teardown-state observation.
+    /// This unittest-only observer does not retain active user mappings. Use a
+    /// weak reference when testing reclamation so the observer cannot mask it.
+    ///
+    /// # Errors
+    /// Returns `NoSuchProcess` when the process runtime is no longer reachable.
     #[cfg(unittest)]
-    pub(crate) fn pinned_address_space_for_teardown_observation(
-        &self,
-    ) -> KResult<Arc<Mutex<MmSpace>>> {
-        self.runtime().map(|runtime| {
-            runtime
-                .pinned_address_space_for_teardown_observation()
-                .clone()
-        })
+    pub fn pinned_address_space_for_teardown_observation(&self) -> KResult<Arc<Mutex<MmSpace>>> {
+        self.runtime()
+            .map(|runtime| runtime.pinned_address_space_for_teardown_observation())
     }
 
-    /// Returns the immutable address-space identity while runtime remains attached.
+    /// Returns the bound address-space identity while runtime remains attached.
     ///
     /// # Errors
     ///
@@ -254,6 +276,7 @@ impl Process {
     ///
     /// Returns `true` when this was the last runtime user and user mappings
     /// were cleared.
+    /// Requires sleepable task context, with no spinlock or this MM's mutex held.
     ///
     /// # Errors
     ///
@@ -350,16 +373,6 @@ impl Process {
     /// be upgraded.
     pub fn heap_top(&self) -> KResult<usize> {
         self.runtime().map(|runtime| runtime.heap_top())
-    }
-
-    /// Returns a shared handle to the heap top (live while the process runs).
-    ///
-    /// # Errors
-    ///
-    /// Returns `KError::NoSuchProcess` when the weak process runtime can no longer
-    /// be upgraded.
-    pub fn heap_top_handle(&self) -> KResult<Arc<AtomicUsize>> {
-        self.runtime().map(|runtime| runtime.heap_top_handle())
     }
 
     /// Sets the current process heap top.
@@ -563,13 +576,17 @@ impl Process {
     }
 
     /// Applies the process-shared post-exec state transition.
+    /// The new MM binding already owns its initialized heap marker; this update
+    /// does not reset or replace it.
     ///
     /// # Errors
     ///
     /// Returns `KError::NoSuchProcess` for an unreachable runtime and forwards
-    /// `kresources::ProcessResources::close_cloexec_files` errors. Earlier heap,
+    /// `kresources::ProcessResources::close_cloexec_files` errors. Earlier
     /// signal and timer updates are not rolled back on that error; executable
     /// metadata is published only after cleanup succeeds.
+    /// In unittest builds, a selected request may return `NoMemory` after
+    /// publication; this exercises the caller's fatal policy, not rollback.
     pub fn apply_exec_update(&self, update: ProcessExecUpdate) -> KResult<()> {
         let runtime = self.runtime()?;
 
@@ -577,7 +594,6 @@ impl Process {
         runtime.with_tee_ta_ctx_mut(|tee_ta_ctx| {
             tee_ta_ctx.init_ta_ctx(update.exe_path.as_str(), update.ta_head_bytes.as_slice());
         });
-        runtime.set_heap_top(update.heap_top);
         runtime.reset_signal_actions();
         runtime.clear_posix_timers();
         runtime.resources().close_cloexec_files()?;
@@ -586,6 +602,11 @@ impl Process {
         #[cfg(feature = "tee")]
         runtime.clear_tee_runtime_private();
         runtime.set_exec_metadata(update.exe_path, update.cmdline);
+        #[cfg(unittest)]
+        if let Some(hits) = update.failure_hits {
+            hits.fetch_add(1, Ordering::Relaxed);
+            return Err(KError::NoMemory);
+        }
         Ok(())
     }
 

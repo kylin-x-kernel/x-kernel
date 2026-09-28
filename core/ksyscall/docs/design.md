@@ -86,6 +86,30 @@ ksyscall::dispatch_irq_syscall
    `rtld_fini` → SIGSEGV on exit), and aarch64 `x2` / riscv/loongarch64
    `a2` would keep the old `envp`.
 
+## Exec image commitment
+
+`task/execve.rs` copies pathname, argv and envp before entering the private
+`exec_owned` body. Both the syscall and focused kernel tests use this body;
+eligibility, path lookup and credential-aware loading are not duplicated.
+Preparation owns the request and process metadata without locking or clearing
+the old MM. Every exec creates a fresh user-empty MM. The current-only kprocess
+replacement helper publishes a coherent binding and asks ktask to activate its
+saved and hardware roots; independent CLONE_VM peers keep their old MM.
+Preparation and replacement precheck errors return normally. Successful exchange
+is the commitment boundary: old registrations reset immediately, then a fallible
+block installs the image and applies metadata. All its temporary MM owners/locks
+drop before fatal SIGSEGV cleanup. There is no rollback to the old user image.
+Credential, TEE-session, IPC and context setup retain their success-tail roles.
+
+Regression coverage lives in `src/task/tests/exec_lifecycle.rs` and
+`src/task/tests/exit_tail.rs`. It checks the commitment boundary, independent
+VM-sharing peer survival, retained-image identity, and exit-tail root lifetime
+across scheduling and CPU migration. Request-local unittest probes exercise
+post-commit failures without exposing a production fault-injection interface.
+Synthetic ELF fixtures verify installation, not execution of user instructions.
+The external harness `exec-mm-semantics` suite covers runnable-image behavior:
+successful exec, ordinary preparation errors, and VM-sharing peer isolation.
+
 ## Owner alignment
 
 - `vfs/`: path and VFS syscalls; owners in `posix-fs` / `kvfs`.

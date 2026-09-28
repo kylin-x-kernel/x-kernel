@@ -8,7 +8,7 @@ mod runtime_state;
 use alloc::{string::String, sync::Arc, vec::Vec};
 #[cfg(feature = "tee")]
 use core::any::Any;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use fs_context::FsStruct;
 use kerrno::{KError, KResult};
@@ -20,6 +20,8 @@ use ksignal::{
 };
 use ksync::{Mutex, RwLock, spin::SpinNoIrq};
 use memspace::process_lifetime::MmUserHandle;
+pub(crate) use runtime_state::ExitAddressSpace;
+pub use runtime_state::replace_current_address_space;
 #[cfg(feature = "tee")]
 use tee_task_iface::TeeTaCtx;
 #[cfg(feature = "tipc")]
@@ -351,20 +353,18 @@ impl ProcessRuntime {
 
     /// Returns a live address-space capability if user mappings are still active.
     pub(crate) fn address_space(&self) -> Option<LiveAddressSpace> {
-        self.runtime_state
-            .clone_mm_user()
-            .map(LiveAddressSpace::new)
+        self.runtime_state.address_space()
     }
 
     /// Returns the pinned address-space object for teardown-state observation.
     #[cfg(unittest)]
     pub(crate) fn pinned_address_space_for_teardown_observation(
         &self,
-    ) -> &Arc<Mutex<memspace::MmSpace>> {
+    ) -> Arc<Mutex<memspace::MmSpace>> {
         self.runtime_state.pinned_address_space()
     }
 
-    /// Returns the immutable address-space identity used by private futex keys.
+    /// Returns the bound address-space identity used by private futex keys.
     pub fn mm_id(&self) -> u64 {
         self.runtime_state.mm_id()
     }
@@ -403,11 +403,6 @@ impl ProcessRuntime {
         self.runtime_state.heap_top()
     }
 
-    /// Returns a shared handle to the heap top (live while the process runs).
-    pub fn heap_top_handle(&self) -> Arc<AtomicUsize> {
-        self.runtime_state.heap_top_handle()
-    }
-
     /// Sets the top address of the user heap.
     pub fn set_heap_top(&self, top: usize) {
         self.runtime_state.set_heap_top(top);
@@ -429,9 +424,14 @@ impl ProcessRuntime {
         self.cpu_timers_armed.store(armed, Ordering::Release);
     }
 
+    /// Captures structural ownership and matching metadata for an exiting thread.
+    pub(crate) fn capture_exit_address_space(&self) -> ExitAddressSpace {
+        self.runtime_state.capture_exit_address_space()
+    }
+
     /// Records the CPU that currently owns this process mm residency.
     pub fn set_mm_resident_cpu(&self, cpu_id: kcpu_id_map::LogicalCpuId) {
-        self.runtime_state.mm_cpu_residency().set_cpu(cpu_id);
+        self.runtime_state.set_mm_resident_cpu(cpu_id);
     }
 
     /// Returns the hardware page-table root for this process.

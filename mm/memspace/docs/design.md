@@ -21,6 +21,10 @@ VMA metadata、运行时执行引用和页表状态。
   对应 Linux `mm_users`，表示仍有 runtime 或临时路径 active 使用用户映射；
   `MmPin` 预留 Linux `mm_count` 风格对象 pin，只保证 `MmSpace` 对象和稳定
   identity 可观察，不延长用户映射生命周期。
+  `MmPin::clone` only increments reference counts; it neither allocates nor
+  takes the MM lock or acquires an active user. Before unpublishing an exiting
+  thread, kprocess retains a pin with matching residency and ASID metadata.
+  The final pin must survive while scheduling can still use that root.
 
 Linux 对应关系：
 
@@ -222,9 +226,13 @@ dirty tracking.
   user 释放时会获取 `MmSpace` 主锁并执行 `clear()`。
 - `MmUserHandle::clone_user_unless_zero()` 与最后一个 user release 通过同一个原子
   状态转换互斥；一旦进入 torn-down 状态，后续 `MmPin` 不能再升级为 active user。
-- `MmCpuResidency` 由 `MmSpace` 拥有，用于记录“哪些 CPU 可能还保留该地址空间
-  的 TLB 状态”。调度切换路径在切入新 mm 前先 set CPU，硬件切换完成后再从旧 mm
-  clear CPU，保证 shootdown 最多过度命中、不会漏掉目标 CPU。
+  Cloning only increments reference counts and can run under a short spinlock
+  without allocation or MM locking. Release the returned handle outside that
+  critical section, in sleepable task context without holding the MM lock.
+- `MmSpace` owns `MmCpuResidency`, which records CPUs that may retain its TLB
+  state. Scheduling adds the CPU to the new MM before switching and does not
+  immediately clear it from the old MM. Conservative retention can target extra
+  CPUs for shootdown but must not omit CPUs that still need invalidation.
 - `InvalidateSink` 使用 `SpinNoIrq` 保护短队列操作，不在该锁内执行 runtime
   unmap 或获取 `MmSpace` 主锁。
 - `PageTable::modify()` 提供页表独占修改 guard。

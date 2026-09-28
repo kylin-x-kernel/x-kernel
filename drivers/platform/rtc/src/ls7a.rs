@@ -135,9 +135,7 @@ fn read_year_consistent<R: RtcToyAccess>(regs: &mut R) -> Option<(u32, u32)> {
 /// apply its own failed-sample policy.
 fn read_rtc_from<R: RtcToyAccess>(regs: &mut R) -> Option<SystemTime> {
     regs.write_ctrl(TOY_ENABLE | OSC_ENABLE);
-    let Some((year, low)) = read_year_consistent(regs) else {
-        return None;
-    };
+    let (year, low) = read_year_consistent(regs)?;
     let sample = build_system_time(year, low);
     if sample.is_none() {
         log::warn!(

@@ -90,6 +90,8 @@ pub type TeeResult<T = ()> = Result<T, u32>;
 
 pub use tee_api_defines_extensions::*;
 #[cfg(unittest)]
+pub use tee_session::ExecSessionFixture;
+#[cfg(unittest)]
 pub use tee_session::set_tee_session_ctx;
 pub use tee_session::tee_session_release_state;
 

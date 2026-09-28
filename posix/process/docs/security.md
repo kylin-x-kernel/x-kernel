@@ -13,8 +13,10 @@ executable formats or maintain process registries itself.
 ## External boundaries and validation
 
 `spawn_init_process(args, envs, ...)` passes path/argv/envp to `ExecRequest` and
-`load_user_app_request`; filesystem resolution and executable validation belong
-to those providers. Missing argv or bootstrap failures panic.
+`prepare_user_app_request`; filesystem resolution and executable validation belong
+to those providers. `load_prepared_user_app` receives only an unpublished empty
+MM and owned preparation result. Publication follows successful installation;
+missing argv or bootstrap failures panic.
 `run_user_thread_loop` receives architecture trap results and the saved user
 context. It uses structured MM fault outcomes and signal actions, not raw
 user-supplied exception interpretations.
@@ -42,6 +44,12 @@ and userspace access contracts remain in their providers. The task's PID handle
 and installed `Thread` must agree before publication. Last-thread runtime owners
 must be detached before parent-visible completion so zombie identity cannot keep
 files, mounts or active mm ownership alive.
+An exiting Thread retains only the structural MM pin and coherent scheduling
+metadata captured before unpublication. This protects its saved/installed root,
+not user mappings. `check_signals` therefore returns immediately for an exiting
+thread: no pending handler can write a user frame and no fatal action can repeat
+teardown after its active MM owner has been detached. The trap loop's exit check
+continues to prohibit user reentry.
 
 ## Thread safety
 

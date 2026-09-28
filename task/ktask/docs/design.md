@@ -302,8 +302,15 @@ the runtime is ready once at `new_user()`. `UserRuntimeSlot` is therefore an
 immutable container filled at construction (`ready()` builds, `get()` is
 read-only). There is no `EMPTY -> INSTALLING -> READY` state machine and no
 later `install_user_runtime()`. The page table is activated on first
-switch-in through `switch_page_table_root`; there is no
-`activate_current_user_page_table` hot-install path for a running task.
+switch-in through `switch_page_table_root`. Exec uses the narrow unsafe
+`replace_current_user_page_table` for a running user task after kprocess
+publishes its replacement binding. The caller holds IRQ/preemption exclusion
+and retains both roots; ktask updates the saved context and hardware without
+allocation, callbacks or fallible work. AArch64 requires the caller's prepared
+ASID and the register writer's ISB; x86 CR3 writes flush translations; RISC-V
+and LoongArch use explicit local flushes (SFENCE.VMA and DBAR/INVTLB).
+The unittest-only `current_user_page_table_root` returns a scalar saved root
+under its own `NoPreemptIrqSave`, without exposing a context borrow.
 
 ## Critical flows
 
@@ -797,6 +804,12 @@ install path. Kernel tasks (`KernelThread` / `Internal`) have no runtime.
 Unittests that need a user execution context construct and start a separate
 user task through normal `TaskInner::new_user` and wait for it to exit;
 they do not temporarily inject a runtime into a non-user task.
+
+With `cfg(unittest)`, `current_user_page_table_root()` reads the current task's
+saved root under local IRQ/preemption exclusion. It neither installs a root nor
+prepares an AArch64 ASID. Scheduling regression tests hold an outer exclusion
+guard when comparing this snapshot with the hardware root, and acquire any MM
+metadata before entering that guard. The observer is absent from production.
 
 The scheduling algorithm is selected by Kconfig (default EEVDF).
 

@@ -8,9 +8,14 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use kcpu_id_map::LogicalCpuId;
 use ktime_types::{MonotonicInstant, TimeSpan};
-use ktimer_core::{Expiration, Timer, TimerControl, TimerHandler};
-use unittest::{assert, assert_eq, def_test};
+#[cfg(feature = "ipi")]
+use ktimer_core::Timer;
+use ktimer_core::{Expiration, TimerControl, TimerHandler};
+#[cfg(feature = "ipi")]
+use unittest::assert_eq;
+use unittest::{assert, def_test};
 
+#[cfg(feature = "ipi")]
 use crate::timers::PREPARED_TIMERS;
 
 fn now() -> u64 {

@@ -11,7 +11,7 @@ use alloc::{
 
 use fs_context::copy_init_fs_struct;
 use kcred::initial_cred;
-use kexec::{ExecRequest, load_user_app_request};
+use kexec::{ExecRequest, load_prepared_user_app, prepare_user_app_request};
 use khal::uspace::UserContext;
 use kprocess::{UserThreadRuntimeAction, build_process_thread, publish_user_task};
 use ksync::Mutex;
@@ -82,19 +82,17 @@ pub fn spawn_init_process(
         .map(|p| p.to_string())
         .unwrap_or_else(|_| init_path.clone());
 
-    // Load the image through the same loader entry point used by exec, reusing
-    // the resolved location (and the args/envs already cloned into `binprm`) to
-    // avoid a redundant lookup and a second full copy of args/envs.
-    let (entry_vaddr, ustack_top) = load_user_app_request(
-        &mut uspace,
-        ExecRequest::from_resolved(
-            binprm.location().clone(),
-            binprm.args().to_vec(),
-            binprm.envs().to_vec(),
-            cred.clone(),
-        ),
-    )
-    .unwrap_or_else(|e| panic!("Failed to load init image: {e}"));
+    // Prepare without touching the unpublished MM, then install without any
+    // destructive exec commitment or current-user-runtime requirement.
+    let prepared = prepare_user_app_request(ExecRequest::from_resolved(
+        binprm.location().clone(),
+        binprm.args().to_vec(),
+        binprm.envs().to_vec(),
+        cred.clone(),
+    ))
+    .unwrap_or_else(|e| panic!("Failed to prepare init image: {e}"));
+    let (entry_vaddr, ustack_top) = load_prepared_user_app(&mut uspace, prepared)
+        .unwrap_or_else(|e| panic!("Failed to load init image: {e}"));
 
     let uctx = UserContext::new(entry_vaddr.into(), ustack_top, 0);
     let page_table_root = uspace.page_table_hw_root();

@@ -5,7 +5,7 @@
 //! ELF loading for user programs.
 
 use alloc::{borrow::ToOwned, string::String, sync::Arc, vec, vec::Vec};
-use core::{ffi::CStr, fmt, iter};
+use core::{ffi::CStr, iter};
 
 use filemap::new_file_private_vma;
 use kcred::Cred;
@@ -26,38 +26,6 @@ use super::{
 const SCRIPT_RECURSION_MAX: usize = 4;
 const ELF_HEADER_READ_SIZE: usize = 4096;
 const INTERPRETER_PATH_MAX: usize = 4096;
-
-/// Failure while replacing a user address space.
-///
-/// The variants identify whether the old user image still exists. Callers may
-/// return [`Self::BeforeCommit`] to the old program as an ordinary exec error.
-/// They must terminate the task after [`Self::AfterCommit`] because the old
-/// image has already been discarded and cannot safely resume.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExecFailure {
-    /// Loading failed before `MmSpace::clear`; the old image is intact.
-    BeforeCommit(KError),
-    /// Loading failed after `MmSpace::clear`; the old image is gone.
-    AfterCommit(KError),
-}
-
-impl ExecFailure {
-    /// Returns the underlying kernel error.
-    pub const fn into_error(self) -> KError {
-        match self {
-            Self::BeforeCommit(error) | Self::AfterCommit(error) => error,
-        }
-    }
-}
-
-impl fmt::Display for ExecFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::BeforeCommit(error) => write!(formatter, "exec failed before commit: {error}"),
-            Self::AfterCommit(error) => write!(formatter, "exec failed after commit: {error}"),
-        }
-    }
-}
 
 fn mapping_flags(flags: xmas_elf::program::Flags) -> MappingFlags {
     let mut mapping_flags = MappingFlags::USER;
@@ -261,12 +229,43 @@ impl BinPrm {
     }
 }
 
-struct PreparedExecImage {
-    binprm: BinPrm,
-    execfn: String,
+/// Validated image and owned initial stack, ready to install into an empty user MM.
+///
+/// Executable/interpreter files remain pinned independently of the ELF cache.
+/// Arguments, environment and execfn are encoded in the owned stack bytes.
+/// This value holds no loader lock and does not refer to a target MM.
+pub struct PreparedExecImage {
     executable: PreparedElfImage,
     interpreter: Option<PreparedElfImage>,
     layout: ExecLayoutPlan,
+    stack_data: Vec<u8>,
+    entry: VirtAddr,
+    user_sp: VirtAddr,
+    #[cfg(unittest)]
+    partial_probe: Option<PartialInstallProbe>,
+}
+
+/// Request-local partial-install evidence; absent from non-unittest builds.
+#[cfg(unittest)]
+pub struct PartialInstallProbe {
+    /// Counts successful arrivals after ELF mapping, before stack/heap mapping.
+    pub hits: Arc<core::sync::atomic::AtomicUsize>,
+    /// Scalar handshake with an independent old-MM peer.
+    pub stage: Arc<core::sync::atomic::AtomicUsize>,
+    /// Optional destination validated by the caller against its original eligible CPUs.
+    pub target_cpu: Option<usize>,
+    /// Observes borrowed mappings and schedules without reacquiring this MM.
+    /// The peer must never require this MM mutex or an inverse lock.
+    pub observe: fn(&MmSpace, &core::sync::atomic::AtomicUsize, Option<usize>),
+}
+
+#[cfg(unittest)]
+impl PreparedExecImage {
+    /// Selects a single partial-install failure for this owned image only.
+    pub fn with_partial_install_probe(mut self, probe: PartialInstallProbe) -> Self {
+        self.partial_probe = Some(probe);
+        self
+    }
 }
 
 struct PreparedElfImage {
@@ -460,13 +459,17 @@ impl ElfLoader {
         Ok(Some(ldso.to_owned()))
     }
 
-    fn prepare_binprm(&mut self, binprm: BinPrm) -> KResult<PreparedImageResult> {
-        match self.ensure_cached(binprm.executable().clone())? {
+    fn prepare_binprm(
+        binprm: BinPrm,
+        original_execfn: Option<&str>,
+    ) -> KResult<PreparedImageResult> {
+        let mut loader = ELF_LOADER.lock();
+        match loader.ensure_cached(binprm.executable().clone())? {
             Ok(_) => {}
             Err(data) => return Ok(Err((binprm, data))),
         }
 
-        let executable_entry = self
+        let executable_entry = loader
             .cached_entry(binprm.location())
             .ok_or(KError::InvalidExecutable)?;
         let interpreter_path = Self::interp_path(&executable_entry)?;
@@ -483,9 +486,10 @@ impl ElfLoader {
             )?;
             location.permission(Permission::MAY_EXEC, binprm.cred())?;
             let file = open_exec_file(&location, binprm.cred().clone())?;
-            match self.ensure_cached(file.clone())? {
+            match loader.ensure_cached(file.clone())? {
                 Ok(_) => Some(
-                    self.cached_entry(file.path())
+                    loader
+                        .cached_entry(file.path())
                         .ok_or(KError::InvalidExecutable)?,
                 ),
                 Err(_) => return Err(KError::InvalidExecutable),
@@ -493,6 +497,7 @@ impl ElfLoader {
         } else {
             None
         };
+        drop(loader);
 
         let executable = PreparedElfImage::new(executable_entry)?;
         let interpreter = interpreter_entry.map(PreparedElfImage::new).transpose()?;
@@ -500,52 +505,65 @@ impl ElfLoader {
             &executable.image,
             interpreter.as_ref().map(|interpreter| &interpreter.image),
         )?;
-        let execfn = binprm.display_path().to_owned();
+        let entry = exec_entry(&executable, interpreter.as_ref(), &layout)?;
+        let auxv = initial_aux_vector(&executable.image, &layout, binprm.cred())?;
+        let (user_sp, stack_data) = prepare_initial_stack(
+            binprm.args(),
+            binprm.envs(),
+            &auxv,
+            original_execfn.unwrap_or(binprm.display_path()),
+        )?;
         Ok(Ok(PreparedExecImage {
-            binprm,
-            execfn,
             executable,
             interpreter,
             layout,
+            stack_data,
+            entry,
+            user_sp,
+            #[cfg(unittest)]
+            partial_probe: None,
         }))
-    }
-
-    fn commit_prepared_binprm(uspace: &mut MmSpace, prepared: &PreparedExecImage) -> KResult {
-        let executable_bias = prepared.layout.executable_bias();
-
-        // Point of no return: from here on the old user image is discarded and
-        // all remaining work must consume prevalidated, already-pinned objects.
-        uspace.clear();
-        ksignal::map_signal_trampoline(uspace)?;
-
-        map_elf(uspace, executable_bias, &prepared.executable)?;
-        if let (Some(interpreter), Some(interpreter_bias)) = (
-            prepared.interpreter.as_ref(),
-            prepared.layout.interpreter_bias(),
-        ) {
-            map_elf(uspace, interpreter_bias, interpreter)?;
-        }
-
-        Ok(())
     }
 }
 
-fn exec_entry(prepared: &PreparedExecImage) -> KResult<VirtAddr> {
+fn map_prepared_image(uspace: &mut MmSpace, prepared: &PreparedExecImage) -> KResult {
     let executable_bias = prepared.layout.executable_bias();
-    let entry = if let (Some(interpreter), Some(interpreter_bias)) = (
+
+    ksignal::map_signal_trampoline(uspace)?;
+
+    map_elf(uspace, executable_bias, &prepared.executable)?;
+    if let (Some(interpreter), Some(interpreter_bias)) = (
         prepared.interpreter.as_ref(),
         prepared.layout.interpreter_bias(),
     ) {
+        map_elf(uspace, interpreter_bias, interpreter)?;
+    }
+
+    Ok(())
+}
+
+fn exec_entry(
+    executable: &PreparedElfImage,
+    interpreter: Option<&PreparedElfImage>,
+    layout: &ExecLayoutPlan,
+) -> KResult<VirtAddr> {
+    let executable_bias = layout.executable_bias();
+    let entry = if let (Some(interpreter), Some(interpreter_bias)) =
+        (interpreter, layout.interpreter_bias())
+    {
         interpreter.image.entry(interpreter_bias)?
     } else {
-        prepared.executable.image.entry(executable_bias)?
+        executable.image.entry(executable_bias)?
     };
     Ok(VirtAddr::from_usize(entry))
 }
 
-fn initial_aux_vector(prepared: &PreparedExecImage) -> KResult<Vec<AuxEntry>> {
-    let executable_bias = prepared.layout.executable_bias();
-    let image = &prepared.executable.image;
+fn initial_aux_vector(
+    image: &ValidatedElfImage,
+    layout: &ExecLayoutPlan,
+    cred: &Cred,
+) -> KResult<Vec<AuxEntry>> {
+    let executable_bias = layout.executable_bias();
     let mut auxv = vec![
         AuxEntry::new(
             AuxType::PHDR,
@@ -556,10 +574,10 @@ fn initial_aux_vector(prepared: &PreparedExecImage) -> KResult<Vec<AuxEntry>> {
         AuxEntry::new(AuxType::PAGESZ, PAGE_SIZE_4K),
         AuxEntry::new(AuxType::ENTRY, image.entry(executable_bias)?),
     ];
-    if let Some(interpreter_bias) = prepared.layout.interpreter_bias() {
+    if let Some(interpreter_bias) = layout.interpreter_bias() {
         auxv.push(AuxEntry::new(AuxType::BASE, interpreter_bias));
     }
-    auxv.extend(identity_aux_entries(prepared.binprm.cred()));
+    auxv.extend(identity_aux_entries(cred));
     Ok(auxv)
 }
 
@@ -587,42 +605,6 @@ pub fn clear_elf_cache() {
     tee_task_iface::tasign::clear_ta_head_cache();
 }
 
-/// Load a user app from an owned executable request.
-///
-/// This is the exec-facing entry point when the caller has already resolved
-/// the executable location, for example through a procfs magic link.
-///
-/// Requires task context, an initialized filesystem context for path/interpreter
-/// lookup, and exclusive ownership of `uspace`. It may block on VFS and loader locks.
-///
-/// # Returns
-///
-/// Returns `(entry_point, initial_stack_pointer)` after mapping the executable,
-/// optional interpreter, signal trampoline, stack, and heap.
-///
-/// # Errors
-///
-/// Returns `InvalidExecutable` for a malformed, unsupported-architecture,
-/// non-ELF/non-script image or invalid ELF interpreter, `InvalidInput` for a
-/// non-UTF-8 or empty script-interpreter line, `FilesystemLoop` after four script
-/// redirects, `NoMemory` when the validated images cannot fit below the fixed
-/// heap, and `ArgumentListTooLong` for an unrepresentable/oversized initial stack.
-/// Propagates VFS and MM mapping/population/write errors, and optional TA-signature
-/// rejection (`PermissionDenied`). Errors before `MmSpace::clear` are wrapped in
-/// [`ExecFailure::BeforeCommit`]. Mapping, population, or write errors after the
-/// clear are wrapped in [`ExecFailure::AfterCommit`]; the caller must terminate
-/// the task because the previous user image no longer exists.
-///
-/// # Panics
-///
-/// Current-context and filesystem initialization preconditions must hold.
-pub fn load_user_app_request(
-    uspace: &mut MmSpace,
-    request: ExecRequest,
-) -> Result<(VirtAddr, VirtAddr), ExecFailure> {
-    load_user_app_request_inner(uspace, request, 0)
-}
-
 fn script_interpreter_args(
     line: &str,
     script_path: &str,
@@ -641,63 +623,44 @@ fn script_interpreter_args(
     Ok(args)
 }
 
-fn load_user_app_request_inner(
-    uspace: &mut MmSpace,
-    request: ExecRequest,
-    script_depth: usize,
-) -> Result<(VirtAddr, VirtAddr), ExecFailure> {
-    let prepared =
-        prepare_user_app_request(request, script_depth).map_err(ExecFailure::BeforeCommit)?;
-    let entry = exec_entry(&prepared).map_err(ExecFailure::BeforeCommit)?;
-    let auxv = initial_aux_vector(&prepared).map_err(ExecFailure::BeforeCommit)?;
-
+fn prepare_initial_stack(
+    args: &[String],
+    envs: &[String],
+    auxv: &[AuxEntry],
+    execfn: &str,
+) -> KResult<(VirtAddr, Vec<u8>)> {
     let ustack_top = VirtAddr::from_usize(kaddr_layout::USER_STACK_TOP);
     let ustack_size = kaddr_layout::USER_STACK_SIZE;
-    let ustack_start = ustack_top - ustack_size;
     let mut random_bytes = [0_u8; 16];
     entropy::fill_random(&mut random_bytes);
-    let stack_data = app_stack_region(
-        prepared.binprm.args(),
-        prepared.binprm.envs(),
-        &auxv,
-        ustack_top.into(),
-        &random_bytes,
-        &prepared.execfn,
-    )
-    .map_err(|_| ExecFailure::BeforeCommit(KError::ArgumentListTooLong))?;
+    let stack_data = app_stack_region(args, envs, auxv, ustack_top.into(), &random_bytes, execfn)
+        .map_err(|_| KError::ArgumentListTooLong)?;
     if stack_data.len() > ustack_size {
-        return Err(ExecFailure::BeforeCommit(KError::ArgumentListTooLong));
+        return Err(KError::ArgumentListTooLong);
     }
     let user_sp = ustack_top - stack_data.len();
 
-    commit_user_app_image(
-        uspace,
-        &prepared,
-        ustack_start,
-        ustack_top,
-        user_sp,
-        &stack_data,
-    )
-    .map_err(ExecFailure::AfterCommit)?;
-
-    Ok((entry, user_sp))
+    Ok((user_sp, stack_data))
 }
 
-fn prepare_user_app_request(
-    request: ExecRequest,
-    mut script_depth: usize,
-) -> KResult<PreparedExecImage> {
+/// Resolves and validates an executable, including its complete initial stack.
+///
+/// Requires sleepable task context and initialized filesystem/entropy services.
+/// Kernel callers use the initial filesystem context; no current user MM is
+/// required or modified. The result owns its pinned files and encoded argv/env.
+///
+/// # Errors
+///
+/// Propagates VFS, signature, ELF/layout and interpreter errors. Script recursion
+/// is bounded; oversized stacks return `ArgumentListTooLong`. No target is modified.
+pub fn prepare_user_app_request(request: ExecRequest) -> KResult<PreparedExecImage> {
+    let mut script_depth = 0;
     let mut request = request;
     let mut original_execfn = None;
     loop {
         let binprm = request.prepare()?;
-        match ELF_LOADER.lock().prepare_binprm(binprm)? {
-            Ok(mut prepared) => {
-                if let Some(execfn) = original_execfn {
-                    prepared.execfn = execfn;
-                }
-                return Ok(prepared);
-            }
+        match ElfLoader::prepare_binprm(binprm, original_execfn.as_deref())? {
+            Ok(prepared) => return Ok(prepared),
             Err((binprm, data)) => {
                 if !data.starts_with(b"#!") {
                     return Err(KError::InvalidExecutable);
@@ -727,15 +690,53 @@ fn prepare_user_app_request(
     }
 }
 
-fn commit_user_app_image(
+/// Installs a prepared image into an exclusively borrowed, user-empty MM.
+///
+/// May allocate and block in sleepable task context. The caller supplies valid
+/// kernel mappings; this function neither clears old mappings nor switches MM,
+/// publishes a process, or selects fatal-error policy. No current user is needed.
+///
+/// # Returns
+///
+/// The entry point and initial user stack pointer, in that order.
+///
+/// # Errors
+///
+/// Returns `InvalidInput` without mapping if user VMAs already exist. Mapping,
+/// population and write errors can leave a partially installed image; the caller
+/// must discard it or apply its post-commit failure policy, not resume old code.
+pub fn load_prepared_user_app(
     uspace: &mut MmSpace,
-    prepared: &PreparedExecImage,
-    ustack_start: VirtAddr,
-    ustack_top: VirtAddr,
-    user_sp: VirtAddr,
-    stack_data: &[u8],
-) -> KResult {
-    ElfLoader::commit_prepared_binprm(uspace, prepared)?;
+    prepared: PreparedExecImage,
+) -> KResult<(VirtAddr, VirtAddr)> {
+    if uspace.vmas().next().is_some() {
+        return Err(KError::InvalidInput);
+    }
+    map_prepared_image(uspace, &prepared)?;
+    #[cfg(unittest)]
+    if let Some(probe) = &prepared.partial_probe {
+        assert!(
+            uspace
+                .find_vma(prepared.entry)
+                .unwrap()
+                .flags()
+                .contains(MappingFlags::USER | MappingFlags::EXECUTE)
+        );
+        assert!(uspace.find_vma(prepared.user_sp).is_none());
+        assert!(
+            uspace
+                .find_vma(kaddr_layout::USER_HEAP_BASE.into())
+                .is_none()
+        );
+        probe
+            .hits
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        (probe.observe)(uspace, &probe.stage, probe.target_cpu);
+        return Err(KError::NoMemory);
+    }
+    let ustack_top = VirtAddr::from_usize(kaddr_layout::USER_STACK_TOP);
+    let ustack_start = ustack_top - kaddr_layout::USER_STACK_SIZE;
+    let user_sp = prepared.user_sp;
 
     debug!("Mapping user stack: {ustack_start:#x?} -> {ustack_top:#x?}");
 
@@ -753,7 +754,7 @@ fn commit_user_app_image(
         (ustack_top - user_sp_aligned).align_up_4k(),
         MappingFlags::READ | MappingFlags::WRITE,
     )?;
-    uspace.write(user_sp, stack_data)?;
+    uspace.write(user_sp, &prepared.stack_data)?;
 
     let heap_start = VirtAddr::from_usize(kaddr_layout::USER_HEAP_BASE);
     let heap_size = kaddr_layout::USER_HEAP_SIZE;
@@ -765,22 +766,147 @@ fn commit_user_app_image(
         VmRuntimeRef::new_anon_private(heap_start, PageSize::Size4K),
     )?;
 
-    Ok(())
+    Ok((prepared.entry, user_sp))
 }
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::{borrow::ToOwned, vec};
+    use alloc::{borrow::ToOwned, string::String, sync::Arc, vec, vec::Vec};
 
     use kernel_elf_parser::AuxType;
     use kerrno::KError;
     use khal::paging::MappingFlags;
+    use kvfs::{
+        Dentry, DirMapping, FileSystemType, Mount, NodeFlags, NodePermission, Path, SimpleDir,
+        SimpleFile, SimpleFs, VfsInode,
+    };
+    use memaddr::VirtAddr;
+    use memspace::MmSpace;
     use unittest::def_test;
     use xmas_elf::program::{FLAG_R, FLAG_W, FLAG_X, Flags};
 
     use super::{
         ExecRequest, ExecSource, identity_aux_entries, mapping_flags, script_interpreter_args,
     };
+    use crate::elf_image::tests::executable_bytes;
+
+    static TEST_FS: FileSystemType = FileSystemType::internal("kexec-test");
+
+    fn image_request(data: Vec<u8>, args: Vec<String>) -> ExecRequest {
+        let size = data.len() as u64;
+        let mut inode = None;
+        let super_block = SimpleFs::new_with(&TEST_FS, 0, |fs| {
+            let file = SimpleFile::new_regular_with_permission(
+                fs.clone(),
+                NodePermission::from_bits_truncate(0o555),
+                move || Ok(data.clone()),
+            );
+            // Scalar reads expose the bytes; the loader also needs their inode size.
+            let init = file.inode_init().with_size(size);
+            inode = Some(VfsInode::new_file_with_operations(
+                file.clone(),
+                kvfs::empty_inode_operations(),
+                file,
+                NodeFlags::empty(),
+                init,
+            ));
+            SimpleDir::new_maker(fs, Arc::new(DirMapping::new()))
+        });
+        let mount = Mount::new_root(&super_block);
+        let dentry = Dentry::new_file_from_inode(inode.unwrap(), None, "app".into());
+        ExecRequest::from_resolved_with_display(
+            Path::new(mount, dentry),
+            "/fixture/app".into(),
+            args,
+            vec!["EXEC_TEST=owned".into()],
+            kcred::initial_cred(),
+        )
+    }
+
+    #[def_test]
+    fn prepared_image_survives_cache_clear_and_rejections_preserve_installed_mm() {
+        let request = image_request(
+            executable_bytes(),
+            vec!["app".into(), "owned-argument".into()],
+        );
+        let prepared = super::prepare_user_app_request(request).expect("prepare fixture");
+        assert!(!prepared.stack_data.is_empty());
+        assert!(prepared.stack_data.len() <= kaddr_layout::USER_STACK_SIZE);
+        assert_eq!(
+            prepared.user_sp.as_usize(),
+            kaddr_layout::USER_STACK_TOP - prepared.stack_data.len()
+        );
+        assert_eq!(prepared.user_sp.as_usize() % 16, 0);
+        for encoded in [
+            b"app\0".as_slice(),
+            b"owned-argument\0",
+            b"EXEC_TEST=owned\0",
+            b"/fixture/app\0",
+        ] {
+            assert!(
+                prepared
+                    .stack_data
+                    .windows(encoded.len())
+                    .any(|s| s == encoded)
+            );
+        }
+        assert!(super::ELF_LOADER.try_lock().is_some());
+        super::clear_elf_cache();
+        let expected_stack = prepared.stack_data.clone();
+        let expected_entry = prepared.entry;
+        let expected_sp = prepared.user_sp;
+        let mut mm = MmSpace::new_user_empty().expect("empty user MM");
+        assert!(mm.vmas().next().is_none());
+        assert_eq!(
+            super::load_prepared_user_app(&mut mm, prepared),
+            Ok((expected_entry, expected_sp))
+        );
+        // SimpleFile has no folio reader; inspect ELF VMAs without faulting them.
+        assert!(
+            mm.find_vma(expected_entry)
+                .unwrap()
+                .flags()
+                .contains(MappingFlags::USER | MappingFlags::EXECUTE)
+        );
+        assert!(
+            mm.find_vma(VirtAddr::from_usize(kaddr_layout::USER_HEAP_BASE))
+                .is_some()
+        );
+        let mut actual_stack = vec![0; expected_stack.len()];
+        mm.read(expected_sp, &mut actual_stack).unwrap();
+        assert_eq!(actual_stack, expected_stack);
+        let vma_count = mm.vmas().count();
+
+        let second = super::prepare_user_app_request(image_request(executable_bytes(), vec![]))
+            .expect("prepare second fixture");
+        assert_eq!(
+            super::load_prepared_user_app(&mut mm, second),
+            Err(KError::InvalidInput)
+        );
+        assert_eq!(mm.vmas().count(), vma_count);
+        actual_stack.fill(0);
+        mm.read(expected_sp, &mut actual_stack).unwrap();
+        assert_eq!(actual_stack, expected_stack);
+
+        for (data, args, error) in [
+            (b"not ELF".to_vec(), vec![], KError::InvalidExecutable),
+            (
+                executable_bytes(),
+                vec!["x".repeat(kaddr_layout::USER_STACK_SIZE)],
+                KError::ArgumentListTooLong,
+            ),
+        ] {
+            assert!(matches!(
+                super::prepare_user_app_request(image_request(data, args)),
+                Err(actual) if actual == error
+            ));
+            assert_eq!(mm.vmas().count(), vma_count);
+            actual_stack.fill(0);
+            mm.read(expected_sp, &mut actual_stack).unwrap();
+            assert_eq!(actual_stack, expected_stack);
+        }
+        super::clear_elf_cache();
+    }
 
     #[def_test]
     fn test_mapping_flags_sets_user_and_requested_permissions() {

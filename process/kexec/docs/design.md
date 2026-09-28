@@ -14,7 +14,7 @@ credential commit, and post-exec policy belong to callers.
   through VFS while enforcing the supplied credential's execute permission.
 - Parse and validate ELF metadata, normalize load segments, choose non-overlapping
   image addresses, and construct the initial auxiliary vector.
-- Replace an exclusively borrowed address space with the executable mappings,
+- Install into an exclusively borrowed, user-empty address space the executable mappings,
   signal trampoline, initial stack, and heap.
 - Maintain a bounded cache of parsed executable headers and keep prepared cache
   entries alive until commit finishes.
@@ -33,8 +33,9 @@ credential commit, and post-exec policy belong to callers.
 
 ## Source scope and architecture
 
-`src/lib.rs` re-exports `ExecSource`, `ExecRequest`, `BinPrm`, `ExecFailure`,
-`load_user_app_request`, and `clear_elf_cache`. `src/elf_image.rs` validates ELF
+`src/lib.rs` re-exports `ExecSource`, `ExecRequest`, `BinPrm`, `PreparedExecImage`,
+`prepare_user_app_request`, `load_prepared_user_app`, and `clear_elf_cache`.
+`src/elf_image.rs` validates ELF
 metadata, normalizes load segments, and plans executable/interpreter addresses.
 `src/loader.rs` contains VFS loading, request preparation, the global `ElfLoader`,
 and `ElfCacheEntry`.
@@ -43,11 +44,13 @@ indexed MRU/LRU links; its production capacity is 32.
 
 The public interaction directions are:
 
-- `core/ksyscall` and `posix/process` construct `ExecRequest` and call
-  `load_user_app_request`; `kexec` consumes the request and mutates their
-  exclusively supplied `MmSpace`.
+- `posix/process` prepares an owned image with `prepare_user_app_request`, then
+  calls `load_prepared_user_app` on init's unpublished, user-empty `MmSpace`.
+  `core/ksyscall` uses the same split APIs and owns its commitment boundary:
+  it activates a fresh user-empty MM between preparation and installation, leaving
+  independent VM-sharing peers on the old MM. The loader does not perform activation.
 - `ExecRequest::prepare` resolves and pins a `BinPrm` without changing an address
-  space. `load_user_app_request` accepts either an unprepared request or the same
+  space. Full preparation accepts either a pathname or an already resolved
   request after this inspection step.
 - `devfs` memory-tracking support calls `clear_elf_cache`; the operation removes
   cache visibility while in-flight prepared requests retain their `Arc` entries.
@@ -71,8 +74,9 @@ or MM ownership.
 ExecRequest -> prepare -> BinPrm (owned args/env/cred + pinned VfsFile/Path)
     -> ELF cache / script redirects / PT_INTERP resolution
     -> validate ELF and construct ExecLayoutPlan
-    -> PreparedExecImage (Arc-pinned cache entries + normalized segments)
-    -> MmSpace::clear -> signal trampoline -> main/interpreter PT_LOAD
+    -> PreparedExecImage (pinned entries + layout + owned stack + entry/SP)
+    -> load_prepared_user_app(user-empty MM)
+    -> signal trampoline -> main/interpreter PT_LOAD
     -> anonymous stack -> stack population/write -> anonymous heap
     -> (entry point, stack pointer)
 ```
@@ -125,14 +129,15 @@ PT_LOAD memory ranges may touch but must not overlap. Page overlap caused only
 by alignment between consecutive segments is assigned to the later segment,
 matching the final fixed mapping ownership.
 
-`ExecLayoutPlan` is complete before `MmSpace::clear`. `ET_EXEC` retains absolute
-addresses. An `ET_DYN` main image receives an alignment-correct bias at the user
-base. For an `ET_DYN` interpreter, `USER_INTERP_BASE` is a search hint: the
+`ExecLayoutPlan` is complete before address-space replacement and activation.
+`ET_EXEC` retains absolute addresses. An `ET_DYN` main image receives an
+alignment-correct bias at the user base. For an `ET_DYN` interpreter,
+`USER_INTERP_BASE` is a search hint: the
 planner reserves the main image's complete load span, searches for an aligned
 gap below `USER_HEAP_BASE`, and falls back below the hint when necessary. The
 selected bias drives both segment addresses and `AT_BASE`.
 
-Commit clears the address space, maps the signal trampoline, and maps the
+Installation checks that the target has no user VMAs, maps the signal trampoline, and maps the
 prevalidated PT_LOAD segments for the main executable and optional dynamic
 interpreter. Segment virtual/file starts are aligned down to 4 KiB; their page
 offset relationship was already validated during preparation.
@@ -149,30 +154,39 @@ and `AT_PLATFORM` are not yet supplied, so dynamic runtimes that require either
 entry remain outside the supported ABI. The interpreter entry is selected when
 present.
 
-The outer flow builds argc/argv/env/aux data with `app_stack_region` and checks
-its configured stack capacity before commit. It then maps an anonymous stack,
-populates/writes its pages, and maps an anonymous heap. The returned tuple is
+Preparation builds argc/argv/env/aux data with `app_stack_region` and checks
+its configured stack capacity. The ready value owns these encoded bytes rather
+than retaining a second copy of the original argument strings. Installation maps
+an anonymous stack, populates/writes its pages, and maps an anonymous heap. The returned tuple is
 entry address and user SP.
 
 ## Commit boundary and error handling
 
 ELF parsing, segment validation, interpreter resolution, address planning,
 auxiliary-vector scalar computation, random-byte generation, and initial-stack
-construction happen before destructive commit. `MmSpace::clear` is the point
-after which the old image is gone. Mapping, population, and writes can still
-fail after that point. `load_user_app_request` reports pre-clear failures as
-`ExecFailure::BeforeCommit` and post-clear failures as
-`ExecFailure::AfterCommit`. The syscall layer returns the former as errno and
-terminates the process with `SIGSEGV` for the latter. The init-process caller
-panics on either class because it has no prior user image to resume.
+construction happen without access to a target MM. The installer consumes the
+ready value and never clears or switches address spaces. It rejects a nonempty
+target with `InvalidInput` before mutation; later failures can leave partial
+mappings that the caller must discard or handle as a fatal post-commit failure.
 
-The loader does not roll back a partial commit. Callers outside the existing
-syscall and init paths must preserve the same phase-aware policy.
+In the exec syscall, successful process-MM binding exchange is the commitment
+boundary: the caller cannot resume the old user image. Both loader APIs return
+ordinary `KError` values. Preparation and replacement precheck errors return as
+errno; after exchange, fallible installation and process-update work follows the
+caller's fatal `SIGSEGV` policy. Installation targets a fresh activated MM, not
+the old MM retained by independent users. The init-process caller
+uses the split APIs directly and panics on preparation or installation failure
+because it has no prior user image to resume.
+
+The loader does not roll back partial installation. Callers own commitment and
+failure policy; installation itself does not require a current user process.
 
 ## Concurrency and cache lifecycle
 
 The global sleepable `ELF_LOADER` mutex serializes cache lookup, insertion, and
-request preparation, including associated VFS work. `PreparedExecImage` holds
+associated VFS work. The guard is released once executable/interpreter entries
+are pinned, before final validation, layout and stack construction.
+`PreparedExecImage` holds
 `Arc<ElfCacheEntry>` references for the executable and interpreter, so commit no
 longer reacquires the cache lock and eviction or `clear_elf_cache` cannot
 invalidate an in-flight request. The address space is independently protected by
@@ -184,18 +198,30 @@ the header cache does not unmap an executable. `clear_elf_cache` also clears the
 TA header cache when the signing feature is active. No file-change invalidation
 is integrated.
 
-The request lifecycle is `ExecRequest -> BinPrm -> PreparedExecImage -> commit`.
-Before the clear boundary, dropping any state releases its file and cache-entry
-references without changing the target address space. After clear, mapped files
-are retained by MM-owned VMA runtimes; dropping `PreparedExecImage` only releases
-header metadata. `MmSpace::clear` or process teardown releases the mapped VMAs,
-stack, and heap through their owning MM types.
+The request lifecycle is `ExecRequest -> BinPrm -> PreparedExecImage -> installation`.
+Before installation, dropping prepared state releases its file/cache references
+and stack bytes without changing any target. After installation, mapped files
+are retained by MM-owned VMA runtimes; dropping `PreparedExecImage` releases its
+header references and staging stack bytes. MM teardown, including last-active-user
+clear, releases mapped VMAs, stack and heap through their owning MM types. Exec
+replacement does not clear an old MM while independent active users retain it.
 
 ## Decisions and limitations
 
 Common file-private VMA construction keeps ELF mappings aligned with mmap/COW
 ownership. Stack and heap use normal anonymous MM APIs. Metadata and stack bytes
-are prepared before destructive commit; fallible MM operations remain after it
-and are phase-tagged. Known constraints include stale cache contents, fixed
+are prepared without a target MM; fallible installation remains separate. The
+exec syscall replaces only its own process binding, preserving independent
+CLONE_VM peers' old image, and distinguishes errors at the exchange boundary.
+Known constraints include stale cache contents, fixed
 rather than randomized load hints, missing `AT_HWCAP`/`AT_PLATFORM`, and no
 complete exec credential/namespace transaction within this crate.
+
+## Regression Support
+
+Unittest-only ELF fixtures and request-local partial-install probes support the
+exec lifecycle tests in `core/ksyscall/src/task/tests/exec_lifecycle.rs`.
+They check that installation errors propagate through the caller's commitment
+policy. The fixture payload contains metadata, not executable user instructions.
+Probe mechanics and observation contracts are documented alongside the test
+interfaces in `src/loader.rs`; production loading has no injection selector.

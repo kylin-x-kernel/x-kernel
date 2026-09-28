@@ -41,10 +41,17 @@ fn validate_requeue_count(value: u32) -> KResult<usize> {
     }
 }
 
+/// Observes the actual private syscall resolver for the current user image.
+#[cfg(unittest)]
+pub(crate) fn observe_private_futex_key(address: usize) -> KResult<FutexKey> {
+    resolve_key(address, true)
+}
+
 fn resolve_key(address: usize, is_private: bool) -> KResult<FutexKey> {
     if is_private {
-        // Private keys only need `mm_id` + VA; `mm_id` is immutable for the
-        // lifetime of the address space, so skip the mmap/munmap mutex.
+        // Private keys need only the bound MM identity and VA, not the
+        // mmap/munmap mutex. The binding lock selects the identity: an MM's
+        // identity is immutable, but exec replaces the process's bound MM.
         return FutexKey::resolve_private(current_user_mm_id(), address);
     }
     let address_space = current_user_process_address_space();
@@ -57,7 +64,8 @@ fn resolve_key(address: usize, is_private: bool) -> KResult<FutexKey> {
 /// Shared (non-private) compound operations must not resolve `uaddr` and
 /// `uaddr2` separately; a concurrent `mmap`/`munmap` could otherwise observe
 /// inconsistent backing metadata within a single syscall. Private keys skip
-/// the address-space lock entirely.
+/// that MM mutex, but capture one identity under the process binding lock for
+/// both keys. Exec changes the binding, not an existing MM's identity.
 fn resolve_key_pair(
     first: usize,
     second: usize,
