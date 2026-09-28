@@ -443,6 +443,33 @@ fn test_signal_stack_default_disabled() {
 }
 
 #[def_test]
+fn test_signal_action_abi_roundtrip() {
+    extern "C" fn handler(_: i32) {}
+
+    let mut mask = SignalSet::default();
+    mask.add(Signo::SIGUSR2);
+    for disposition in [
+        SignalDisposition::Default,
+        SignalDisposition::Ignore,
+        SignalDisposition::Handler(handler),
+    ] {
+        let raw = posix_types::k_sigaction::from(SignalAction {
+            flags: SignalActionFlags::RESTART,
+            mask,
+            disposition,
+            restorer: None,
+        });
+        let restored = posix_types::k_sigaction::from(SignalAction::from(raw));
+        assert_eq!(
+            restored.sa_handler_kernel.map(|f| f as usize),
+            raw.sa_handler_kernel.map(|f| f as usize)
+        );
+        assert_eq!(restored.sa_flags, raw.sa_flags);
+        assert_eq!(restored.sa_mask.sig, raw.sa_mask.sig);
+    }
+}
+
+#[def_test]
 fn test_signal_action_default() {
     let action = SignalAction::default();
     assert!(matches!(

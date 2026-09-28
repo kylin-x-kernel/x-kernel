@@ -7,9 +7,7 @@
 use core::ffi::c_ulong;
 
 use kerrno::{KError, KResult};
-use linux_raw_sys::general::{
-    __kernel_sighandler_t, __sigrestore_t, kernel_sigset_t, sigevent, siginfo_t, sigval_t,
-};
+use linux_raw_sys::general::{kernel_sigaction, kernel_sigset_t, sigevent, siginfo_t, sigval_t};
 
 use crate::{UserRead, UserWrite};
 
@@ -50,19 +48,18 @@ impl From<kernel_sigset_t> for k_sigset {
 }
 
 /// A raw `sigaction` carrier used at the syscall boundary.
-#[derive(Debug, Clone, Copy, UserRead, UserWrite)]
-#[repr(C)]
+///
+/// Reuses the target Linux definition, including its optional restorer slot,
+/// so syscall copies cannot diverge from the architecture's field layout.
 #[allow(non_camel_case_types)]
-pub struct k_sigaction {
-    /// Raw user signal-handler address or Linux special disposition value.
-    pub handler: __kernel_sighandler_t,
-    /// Raw ABI flags, validated by the consuming signal adapter.
-    pub flags: c_ulong,
-    /// User-space signal-return trampoline address.
-    pub restorer: __sigrestore_t,
-    /// Signals blocked while the handler runs.
-    pub mask: k_sigset,
-}
+pub type k_sigaction = kernel_sigaction;
+
+// SAFETY: the target ABI record contains only nullable function addresses and
+// integer flags/mask words. This crate copies, but never invokes, the addresses.
+unsafe impl UserRead for k_sigaction {}
+// SAFETY: on supported 64-bit targets every field is a fully initialized
+// pointer-sized value or mask word; the ABI record has no implicit padding.
+unsafe impl UserWrite for k_sigaction {}
 
 /// A raw `siginfo_t` carrier used at the syscall boundary.
 #[derive(Clone, UserRead, UserWrite)]
