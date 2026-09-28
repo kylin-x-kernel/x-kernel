@@ -43,22 +43,6 @@ impl RunQueue {
         Self::set_owner_cpu(task, self.cpu_id);
     }
 
-    /// Includes `task` in this RQ's `nr_running` snapshot if not already charged.
-    pub(super) fn charge_rq_load(&self, task: &KtaskRef) {
-        if task.mark_rq_load_charged() {
-            self.nr_running.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    /// Drops `task` from this RQ's `nr_running` snapshot if it was charged.
-    ///
-    /// No-op for `switch_to_local` helpers that were never published.
-    pub(super) fn discharge_rq_load(&self, task: &KtaskRef) {
-        if task.clear_rq_load_charged() {
-            self.nr_running.fetch_sub(1, Ordering::Relaxed);
-        }
-    }
-
     /// Includes `task` in this RQ's sticky-home occupancy if not already charged.
     pub(super) fn charge_home(&self, task: &KtaskRef) {
         if task.mark_home_charged() {

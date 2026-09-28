@@ -2,9 +2,8 @@
 
 ## 定位
 
-`ksched` 提供可插拔的调度算法实现（FIFO / RR / CFS / EEVDF），以及一套
-尚未接入 `ktask` 的类仲裁器。生产路径仍由 `ktask` 通过 `BaseScheduler`
-选择插件。仲裁器按 Linux 秩遍历 Stop、Deadline、RT、Fair、Idle：这一层
+`ksched` 的生产调度器是类仲裁器。`ktask` 在持有运行队列锁时调用
+`Scheduler`。仲裁器按 Linux 秩遍历 Stop、Deadline、RT、Fair、Idle：这一层
 只实现 Fair（EEVDF）和 Idle，更高三档 `pick_next` 返回空、`enqueue` 视为
 编程错误。
 
@@ -19,19 +18,15 @@
 ```
 task/ksched/
 ├── src/
-│   ├── lib.rs          # BaseScheduler / CurrentDisposition；双导出 Scheduler
-│   ├── fifo.rs
-│   ├── round_robin.rs
-│   ├── ready_list.rs   # FIFO/RR shared intrusive queue
-│   ├── cfs.rs
-│   ├── eevdf.rs        # 插件 EEVDF，ktask 仍可选用
+│   ├── lib.rs          # Scheduler / SchedTask
+│   ├── config.rs       # SCHED_FAIR_REQUEST_US → DEFAULT_SLICE_NS
 │   ├── policy.rs       # SchedClass 秩与用户策略
 │   ├── entity.rs       # SchedTask、FairEntity、RQ 令牌
 │   ├── class.rs        # ClassOps
 │   ├── classes/        # fair.rs（EEVDF）、idle.rs
 │   ├── scheduler.rs    # 五档仲裁；Stop/DL/RT 未接线
 │   ├── clock.rs
-│   └── tests.rs        # 插件与 Fair/Idle 仲裁器单测
+│   └── tests.rs        # Fair/Idle 仲裁器单测
 └── docs/
 ```
 
@@ -49,15 +44,15 @@ Blocked|Migrating --enqueue_task--> Ready
 
 | 组件 | 职责 |
 |------|------|
-| `CurrentDisposition` | 当前任务离开原因的封闭枚举 |
-| `BaseScheduler::leave_current` | 运行任务离开执行槽的唯一转换 |
-| `BaseScheduler::enqueue_task` | 非当前 Ready 任务入队（唤醒 / 迁入） |
-| `BaseScheduler::steal_ready_task` | 摘一颗匹配谓词的 ready waiter（idle-pull）；不 `pick_next`、不安装 `curr` |
-| `EevdfScheduler::curr` | 非 owning 的运行实体数值快照 |
+| `LeaveReason` | 当前任务离开原因的封闭枚举 |
+| `Scheduler::leave` / yield / preempt / block / migrate / exit | 运行任务离开执行槽的唯一转换 |
+| `Scheduler::enqueue` | 非当前 Ready 任务入队（唤醒 / 迁入） |
+| `Scheduler::steal` | 摘一颗匹配谓词的 ready waiter（idle-pull）；不 `pick_next`、不安装 `curr` |
+| `Scheduler::curr` | 运行任务的 `Arc`，`leave` 时交还 |
 
 ## 类仲裁器
 
-`Scheduler` 与插件并行存在，`ktask` 还不调用它。
+`ktask` 在持有运行队列锁时调用 `Scheduler`。
 
 ```
 pick_next: Stop -> Deadline -> RT -> Fair -> Idle
@@ -71,8 +66,8 @@ pick_next: Stop -> Deadline -> RT -> Fair -> Idle
 | `IdleClass` | 每 RQ 一个钉住的 idle；不入队 |
 | `Scheduler::curr` | 运行任务的 `Arc`，`leave` 时交还 |
 
-读写 `RqCell` 的公开方法是 `unsafe`：调用方必须已持有该 RQ 锁，本 crate
-不检查锁本身。crate 自己不采样时钟、不加锁、不切栈。`now_ns` 由调用方传入。
+公开方法是安全的。调用方必须已持有该 RQ 锁；本 crate 不检查锁本身，
+也不采样时钟、不加锁、不切栈。`now_ns` 由调用方传入。
 
 Fair 的放置与插件 EEVDF 对齐：`vruntime = V - lag`，离树的 runner 计入
 `min_vruntime` 和平均 **V**，Block/Migrate 记 lag，Exit 不记，yield/preempt
@@ -132,14 +127,12 @@ Idle 任务拒绝 `set_attr`（`KernelClassImmutable`）。
 
 ## 设计决策
 
-- 类仲裁器与插件分开落地。这一层接上 Fair/Idle，生产路径仍是 `BaseScheduler`。
-  切 `ktask` 留到后面。Fair 的默认 request 用已有的 `DEFAULT_SLICE_NS`。
+- 生产路径走 `Scheduler`。Fair 默认 request 来自 Kconfig
+  `SCHED_FAIR_REQUEST_US`。Stop / Deadline / RT 仍只占秩。
 - `Scheduler::curr` 持有运行任务的 `Arc`，和插件 EEVDF 的数值快照不是同一套
   所有权。`leave` 释放仲裁器这份引用；Block 路径仍要求调用方另持一份。
-- 用 `CurrentDisposition` 替代布尔 `preempt` + 散落的 `account_sleep`，避免调用方
+- 用 `LeaveReason` 替代布尔 `preempt` + 散落的 `account_sleep`，避免调用方
   记住隐藏不变量。
-- EEVDF `curr` 使用值快照而非 `Arc`/`Weak`：O(1) 统计、无原子 upgrade、不参与
-  生命周期。
 - 不再维护未接线的 metadata 分离调度器；生产与单测统一走 entity 内嵌实现。
 - EEVDF ready 索引使用 intrusive-collections 0.10.2 的两棵 RBTree，分别按
   `(deadline,id)` 和 `(vruntime,id)` 排序，直接索引同一实体，不再维护 id 反查表。

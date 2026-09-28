@@ -150,8 +150,8 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
     let mut fut = pin!(f.into_future());
 
     let curr = current();
-    // Caller-owned strong ref for `blocked_resched`: into_raw current = 1;
-    // this clone is the required second (also seeds KWaker's weak upgrade).
+    // Caller-owned strong ref for `blocked_resched`: current slot +
+    // Scheduler.curr + this clone (also seeds KWaker's weak upgrade).
     let task = curr.clone();
 
     let kwaker = KWaker::new(&task);

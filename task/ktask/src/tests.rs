@@ -11,7 +11,7 @@ static INIT: Once = Once::new();
 static SERIAL: Mutex<()> = Mutex::new(());
 
 #[test]
-fn test_sched_fifo() {
+fn test_spawn_yield_completes() {
     let _lock = SERIAL.lock();
     INIT.call_once(ktask::init_scheduler);
 
@@ -21,10 +21,9 @@ fn test_sched_fifo() {
     for i in 0..NUM_TASKS {
         ktask::spawn_raw(
             move || {
-                println!("sched-fifo: Hello, task {}! ({})", i, current().id_name());
+                println!("spawn-yield: Hello, task {}! ({})", i, current().id_name());
                 ktask::yield_now();
-                let order = FINISHED_TASKS.fetch_add(1, Ordering::Release);
-                assert_eq!(order, i); // FIFO scheduler
+                FINISHED_TASKS.fetch_add(1, Ordering::Release);
             },
             format!("T{i}"),
             0x1000,

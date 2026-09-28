@@ -7,7 +7,6 @@
 use core::sync::atomic::Ordering;
 
 use kcpu_id_map::LogicalCpuId;
-use ksched::BaseScheduler;
 
 use super::{
     KCpuMask, RUN_QUEUES, RunQueue, get_run_queue,
@@ -57,14 +56,14 @@ impl RunQueue {
     /// mask forbids.
     fn commit_idle_pull(&self, stolen: KtaskRef) -> bool {
         let dest = self.cpu_id.as_usize();
-        self.enqueue_task(stolen.clone());
+        let _ = self.enqueue_task(stolen.clone());
         if stolen.cpumask().get(dest) {
             return true;
         }
-        let Some(removed) = self.scheduler.lock().remove_task(&stolen) else {
+        let now_ns = khal::time::monotonic_time_nanos();
+        let Some(removed) = self.with_sched(|s| s.dequeue(&stolen, now_ns)) else {
             return false;
         };
-        self.discharge_rq_load(&removed);
         migrate_entry(removed);
         false
     }
@@ -75,17 +74,9 @@ impl RunQueue {
         let dest_idx = dest_cpu.as_usize();
         let now_ns = khal::time::monotonic_time_nanos();
         let stolen = {
-            let mut sched = self.scheduler.lock();
-            let elapsed = Self::advance_account_epoch(&self.last_accounted_ns, now_ns);
-            #[cfg(feature = "sched_eevdf")]
-            sched.account_curr_elapsed(elapsed);
-            #[cfg(not(feature = "sched_eevdf"))]
-            {
-                let _ = elapsed;
-            }
-            sched.steal_ready_task(|task| can_idle_pull_task(task, dest_idx))?
+            let _elapsed = Self::advance_account_epoch(&self.last_accounted_ns, now_ns);
+            self.with_sched(|s| s.steal(&mut |task| can_idle_pull_task(task, dest_idx), now_ns))?
         };
-        self.discharge_rq_load(&stolen);
         Some(stolen)
     }
 }

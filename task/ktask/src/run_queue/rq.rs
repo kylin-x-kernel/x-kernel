@@ -11,18 +11,18 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use kcpu_id_map::LogicalCpuId;
 use khal::percpu::this_cpu_id;
-use ksched::{BaseScheduler, CurrentDisposition};
+use ksched::{Decision, EnqueueKind, Nice, SchedAttr, SchedPolicy, UpdateKind};
 use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 
 #[cfg(feature = "smp")]
 use super::migrate::spawn_affinity_migration_task;
-#[cfg(all(feature = "preempt", feature = "smp"))]
+#[cfg(feature = "smp")]
 use super::stats::record_remote_resched;
 #[cfg(feature = "sched_stat")]
 use super::stats::{sched_stat_cpu, sched_stat_inc};
 use super::{
-    CurrentRunQueueRef, KRunQueueRef, RunQueue, WakeEnqueue, current_idle_task,
-    current_wait_for_exit, gc, with_exited_tasks,
+    CurrentRunQueueRef, KRunQueueRef, RunQueue, WakeEnqueue, current_wait_for_exit, gc,
+    with_exited_tasks,
 };
 #[cfg(feature = "smp")]
 use super::{PREV_TASK, get_run_queue};
@@ -34,27 +34,24 @@ use crate::{
     tracing_hooks::{fire_context_switch, fire_task_wakeup},
 };
 
-#[cfg(feature = "preempt")]
 pub(super) fn request_resched_on(rq: &RunQueue) {
     let cpu_id = rq.cpu_id;
     if cpu_id == this_cpu_id() {
         #[cfg(feature = "sched_stat")]
         sched_stat_inc(&sched_stat_cpu(cpu_id).local_resched);
         current().set_preempt_pending(true);
-        // A newly runnable peer may require an earlier schedule deadline even
-        // when the current task previously needed no timer (lone task).
+        // A newly runnable peer may need an earlier deadline than the lone
+        // runner, whose schedule timer may currently be disarmed.
         let now_ns = khal::time::monotonic_time_nanos();
-        let curr = current();
-        let next_rel = if curr.is_idle() {
+        let next_rel = if current().is_idle() {
             None
         } else {
-            let curr_arc = curr.clone();
-            rq.scheduler.lock().next_preemption_ns(&curr_arc)
+            rq.scheduler.lock().next_event_ns()
         };
         program_sched_deadline(now_ns, next_rel);
         rearm_local_timer();
     } else {
-        #[cfg(all(feature = "smp", feature = "ipi"))]
+        #[cfg(feature = "smp")]
         {
             let resched_result = request_remote_resched(cpu_id);
             record_remote_resched(cpu_id, resched_result.is_err());
@@ -62,7 +59,7 @@ pub(super) fn request_resched_on(rq: &RunQueue) {
     }
 }
 
-#[cfg(all(feature = "preempt", feature = "smp", feature = "ipi"))]
+#[cfg(feature = "smp")]
 pub(super) fn request_remote_resched(cpu_id: LogicalCpuId) -> kipi::Result<()> {
     if let Err(err) = kipi::notify_reschedule(cpu_id) {
         warn!(
@@ -88,8 +85,6 @@ pub(super) fn request_remote_resched(cpu_id: LogicalCpuId) -> kipi::Result<()> {
 /// `interrupted`; a stale IPI is a spurious resched. The IPI itself pulls
 /// `UserContext::run` back; `preempt` only adds `need_resched` in the callback.
 pub(crate) fn kick_running_task(task: &TaskInner) {
-    #[cfg(not(any(feature = "smp", feature = "preempt")))]
-    let _ = task;
     #[cfg(feature = "smp")]
     {
         if !task.on_cpu() {
@@ -97,7 +92,6 @@ pub(crate) fn kick_running_task(task: &TaskInner) {
         }
         let cpu_id = task.cpu_id();
         if cpu_id == this_cpu_id() {
-            #[cfg(feature = "preempt")]
             task.set_preempt_pending(true);
             return;
         }
@@ -109,10 +103,9 @@ pub(crate) fn kick_running_task(task: &TaskInner) {
                 err
             );
         }
-        #[cfg(feature = "preempt")]
         record_remote_resched(cpu_id, kick_result.is_err());
     }
-    #[cfg(all(not(feature = "smp"), feature = "preempt"))]
+    #[cfg(not(feature = "smp"))]
     {
         if task.is_running() {
             task.set_preempt_pending(true);
@@ -151,18 +144,9 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
         }
         #[cfg(feature = "sched_stat")]
         sched_stat_inc(&sched_stat_cpu(self.inner.cpu_id).add_task);
-        // Flush wall time into the running entity before placement so a NOHZ
-        // lone task cannot leave system V stale across add/wake.
         let now_ns = khal::time::monotonic_time_nanos();
-        self.inner.flush_running_runtime(now_ns);
-        self.inner.publish_task(task);
-
-        // Dynamic schedule timers are disarmed while a task runs alone, so
-        // every newly published peer must refresh the target CPU. This is also
-        // required for a busy local CPU: there is no periodic tick to discover
-        // the new ready entity later.
-        #[cfg(feature = "preempt")]
-        request_resched_on(self.inner);
+        let decision = self.inner.publish_task(task, EnqueueKind::New, now_ns);
+        self.inner.kick(decision);
     }
 
     /// Unblock one task by inserting it into the run queue.
@@ -180,7 +164,7 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
         // Account + PLACE + WF_SYNC share one scheduler lock so a remote CPU
         // cannot leave/pick between flush and nominate (HEAD had no flush).
         let is_wake_sync = current_may_uninit().is_some_and(|c| c.is_wake_sync());
-        let wake_enqueue =
+        let (wake_enqueue, decision) =
             self.inner
                 .put_task_with_state(task, TaskState::Blocked, is_wake_sync, resched);
         if wake_enqueue != WakeEnqueue::Rejected {
@@ -196,9 +180,10 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
             // Fire the task wakeup tracepoint.
             fire_task_wakeup(task_id);
 
-            #[cfg(feature = "preempt")]
-            if resched && wake_enqueue == WakeEnqueue::Enqueued {
-                request_resched_on(self.inner);
+            if let Some(decision) = decision
+                && resched
+            {
+                self.inner.kick(decision);
             }
         }
     }
@@ -214,11 +199,10 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         self.account_runtime(now_ns, false);
     }
 
-    /// Linux `entity_tick`: account, then EEVDF `check_preempt_tick`.
+    /// Linux `entity_tick`: account, then same-class tick preemption.
     ///
     /// Only the due schedule slot uses this. Soft/periodic IRQs must not
     /// re-evaluate pick — that ping-ponged WF_SYNC later-deadline handoffs.
-    #[cfg(feature = "sched_eevdf")]
     pub fn account_sched_tick(&mut self, now_ns: u64) {
         self.account_runtime(now_ns, true);
     }
@@ -226,22 +210,15 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     fn account_runtime(&mut self, now_ns: u64, is_sched_tick: bool) {
         let curr = &self.current_task;
         let is_idle = curr.is_idle();
+        let kind = if is_sched_tick {
+            UpdateKind::SchedTick
+        } else {
+            UpdateKind::Account
+        };
         let (elapsed, should_preempt) = {
-            let mut sched = self.inner.scheduler.lock();
             let elapsed = RunQueue::advance_account_epoch(&self.inner.last_accounted_ns, now_ns);
-            if is_idle {
-                (elapsed, false)
-            } else {
-                let curr_arc = curr.clone();
-                let mut should_preempt = elapsed > 0 && sched.update_current(&curr_arc, elapsed);
-                #[cfg(feature = "sched_eevdf")]
-                if is_sched_tick && !should_preempt {
-                    should_preempt = sched.check_preempt_tick();
-                }
-                #[cfg(not(feature = "sched_eevdf"))]
-                let _ = is_sched_tick;
-                (elapsed, should_preempt)
-            }
+            let should_preempt = self.inner.with_sched(|s| s.update(now_ns, kind)).resched;
+            (elapsed, should_preempt)
         };
         self.apply_runtime_account_side_effects(elapsed, is_idle, should_preempt);
     }
@@ -252,29 +229,25 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         is_idle: bool,
         should_preempt: bool,
     ) {
-        if is_idle {
-            return;
-        }
-        #[cfg(feature = "sched_stat")]
-        if should_preempt && elapsed > 0 {
-            sched_stat_inc(&sched_stat_cpu(self.inner.cpu_id).tick_preempt);
+        if !is_idle {
+            #[cfg(feature = "sched_stat")]
+            if should_preempt && elapsed > 0 {
+                sched_stat_inc(&sched_stat_cpu(self.inner.cpu_id).tick_preempt);
+            }
         }
         #[cfg(not(feature = "sched_stat"))]
         let _ = elapsed;
         if should_preempt {
-            #[cfg(feature = "preempt")]
             self.current_task.set_preempt_pending(true);
         }
     }
 
     /// Recomputes the per-CPU schedule deadline for the running task.
     pub fn refresh_sched_deadline(&mut self, now_ns: u64) {
-        let curr = &self.current_task;
-        let next_rel = if curr.is_idle() {
+        let next_rel = if self.current_task.is_idle() {
             None
         } else {
-            let curr_arc = curr.clone();
-            self.inner.scheduler.lock().next_preemption_ns(&curr_arc)
+            self.inner.with_sched(|s| s.next_event_ns())
         };
         program_sched_deadline(now_ns, next_rel);
     }
@@ -302,16 +275,8 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             curr.transition_state(TaskState::Running, TaskState::Ready),
             "yield_current requires Running -> Ready before leave_current"
         );
-        // Idle is never tracked by the algorithm; only flip Ready so `resched`
-        // can re-select it (or another task) without enqueueing into the RQ.
-        // EEVDF `curr` stays unset for idle (see `switch_to_local` sync).
-        if !curr.is_idle() {
-            self.inner
-                .scheduler
-                .lock()
-                .leave_current(curr.clone(), CurrentDisposition::Yield);
-        }
-        self.inner.resched();
+        let (_, pull_if_empty) = self.inner.leave_and_publish(|s| s.yield_current(now_ns));
+        self.inner.resched(pull_if_empty);
     }
 
     /// Migrate the current task to a new run queue matching its CPU affinity and reschedule.
@@ -332,12 +297,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         // Migration helper already owns a strong ref (spawned with curr.clone()).
         // Deactivate on the source RQ before departure; destination `enqueue_task`
         // then applies PLACE_LAG via `needs_place`.
-        self.inner
-            .scheduler
-            .lock()
-            .leave_current(curr.clone(), CurrentDisposition::Migrate);
-        #[cfg(feature = "smp")]
-        self.inner.discharge_rq_load(curr);
+        self.inner.with_sched(|s| s.migrate_current(now_ns));
 
         // Mark current task's state as `Ready`,
         // but, do not put current task to the scheduler of this run queue.
@@ -356,7 +316,6 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// Note:
     /// preemption may happened in `enable_preempt`, which is called
     /// each time a [`kspin::NoPreemptGuard`] is dropped.
-    #[cfg(feature = "preempt")]
     pub fn preempt_resched(&mut self) {
         // There is no need to disable IRQ and preemption here, because
         // they both have been disabled in `current_check_preempt_pending`.
@@ -383,7 +342,6 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             can_preempt
         );
 
-        #[cfg(feature = "sched_eevdf")]
         let affinity_ok = {
             #[cfg(feature = "smp")]
             {
@@ -395,19 +353,25 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             }
         };
 
-        #[cfg(feature = "sched_eevdf")]
         if can_preempt && affinity_ok {
-            // One scheduler lock: account, EEVDF peer probe, and — when the
-            // probe fails — next_preemption_ns. Re-arm hardware after release.
-            let curr_arc = self.current_task.clone();
             let is_idle = self.current_task.is_idle();
-            let (elapsed, should_preempt, peer_wins, next_rel) = self
-                .inner
-                .account_peer_probe_and_next_deadline(now_ns, &curr_arc, is_idle);
-            self.apply_runtime_account_side_effects(elapsed, is_idle, should_preempt);
-            if !peer_wins {
+            let (elapsed, decision) = {
+                let elapsed =
+                    RunQueue::advance_account_epoch(&self.inner.last_accounted_ns, now_ns);
+                let decision = self
+                    .inner
+                    .with_sched(|s| s.update(now_ns, UpdateKind::WakeProbe));
+                (elapsed, decision)
+            };
+            self.apply_runtime_account_side_effects(elapsed, is_idle, decision.resched);
+            if !decision.resched {
                 self.current_task.set_preempt_pending(false);
-                program_sched_deadline(now_ns, next_rel);
+                let rel = if is_idle {
+                    None
+                } else {
+                    decision.next_event_ns
+                };
+                program_sched_deadline(now_ns, rel);
                 rearm_local_timer();
                 return;
             }
@@ -415,13 +379,8 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             self.account_current_runtime(now_ns);
         }
 
-        #[cfg(not(feature = "sched_eevdf"))]
-        self.account_current_runtime(now_ns);
-
         let curr = &self.current_task;
         if can_preempt {
-            // Affinity violations always migrate, even when no ready peer would
-            // win an ordinary EEVDF probe (Linux `__set_cpus_allowed_ptr`).
             #[cfg(feature = "smp")]
             if !curr.cpumask().get(this_cpu_id().as_usize()) {
                 let migration_task = spawn_affinity_migration_task(curr.clone());
@@ -432,16 +391,8 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
                 curr.transition_state(TaskState::Running, TaskState::Ready),
                 "preempt_resched requires Running -> Ready before leave_current"
             );
-            if !curr.is_idle() {
-                // The into_raw current slot already counts as one strong ref.
-                // leave_current(Preempt) requeues a second Arc so the task stays
-                // alive across switch_to's current-pointer handoff.
-                self.inner
-                    .scheduler
-                    .lock()
-                    .leave_current(curr.clone(), CurrentDisposition::Preempt);
-            }
-            self.inner.resched();
+            let (_, pull_if_empty) = self.inner.leave_and_publish(|s| s.preempt_current(now_ns));
+            self.inner.resched(pull_if_empty);
         } else {
             curr.set_preempt_pending(true);
         }
@@ -464,31 +415,21 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             with_exited_tasks(|tasks| tasks.clear());
             khal::power::power_off();
         } else {
-            // Notify the joiner task.
             curr.notify_exit(exit_code);
-
-            // SAFETY: `exit_current` runs under
-            // `current_run_queue::<NoPreemptIrqSave>()`, so IRQs and
-            // preemption are disabled while touching current-CPU percpu
-            // scheduler queues and wakers.
-            // Push current task to the `EXITED_TASKS` list, which will be consumed by the GC task.
-            with_exited_tasks(|tasks| tasks.push_back(curr.clone()));
-            // Wake up the GC task to drop the exited tasks.
-            current_wait_for_exit().wake();
-
-            // Exited list owns the task; `leave_current(Exit)` clears scheduler
-            // current accounting (e.g. EEVDF `curr`) and must not arm PLACE_LAG.
-            self.inner
-                .scheduler
-                .lock()
-                .leave_current(curr.clone(), CurrentDisposition::Exit);
-            #[cfg(feature = "smp")]
-            self.inner.discharge_rq_load(curr);
             #[cfg(feature = "smp")]
             self.inner.discharge_home(curr);
 
-            // Schedule to next task.
-            self.inner.resched();
+            // SAFETY: `exit_current` runs under
+            // `current_run_queue::<NoPreemptIrqSave>()`, so IRQs and
+            // preemption are disabled while touching this CPU's exited list
+            // and waking GC. The Arc returned by `exit_current` is the one
+            // that goes on `EXITED_TASKS` (`refactor_ksched`); do not also
+            // clone `curr` onto that list.
+            let (exited, pull_if_empty) = self.inner.leave_and_publish(|s| s.exit_current(now_ns));
+            with_exited_tasks(|tasks| tasks.push_back(exited));
+            current_wait_for_exit().wake();
+
+            self.inner.resched(pull_if_empty);
         }
         unreachable!("task exited!");
     }
@@ -496,7 +437,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// Block the current task and reschedule.
     ///
     /// Marks the current task `Blocked` and leaves the scheduler without requeue
-    /// ([`CurrentDisposition::Block`]).
+    /// ([`ksched::LeaveReason::Block`]).
     ///
     /// Workerqueue callbacks are accounted here, not in higher-level wait
     /// wrappers: this is the scheduler's Running→Blocked convergence point and
@@ -509,17 +450,17 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// 1. The caller must hold the wait-queue / waker lock represented by `woke`.
     /// 2. The current task must be running and must not be idle.
     /// 3. The caller must keep an **extra** [`KtaskRef`] to the current task across
-    ///    the context switch. The into_raw current slot contributes one strong
-    ///    ref; the caller's clone (e.g. from [`crate::future::block_on`]) is the
-    ///    second. Together they satisfy `switch_to`'s `strong_count > 1` check.
-    ///    `leave_current(Block)` does not requeue, so that caller-owned clone is
-    ///    what keeps the task alive until the wait queue / waker takes over.
-    ///    Do not drop the clone thinking the current slot "does not count".
+    ///    the context switch. The into_raw current slot, `Scheduler.curr`, and
+    ///    the caller's clone (e.g. from [`crate::future::block_on`]) are three
+    ///    strong refs (`strong_count > 2`) before leave. Policy block does not
+    ///    requeue, so that clone keeps the task alive until the wait queue
+    ///    takes over. Do not drop the clone thinking the current slot counts
+    ///    as the extra ref.
     /// 4. The wait-queue lock is released inside this function before rescheduling.
     ///
     /// # Panics
     ///
-    /// Panics if `Arc::strong_count(current) <= 1` (missing caller-owned ref).
+    /// Panics if `Arc::strong_count(current) <= 2` (missing caller-owned ref).
     /// This is a hard scheduler invariant: there is no recovery path. New
     /// wait-queue / timer callers must clone current before entry — see the
     /// `blocked_resched_survives_with_caller_owned_ref` unittest for a
@@ -535,25 +476,19 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         // we must not block current task with preemption disabled.
         // Current expected preempt count is 2 for `NoPreemptIrqSave` because we also hold
         // the `woke` SpinNoIrqGuard lock here.
-        #[cfg(feature = "preempt")]
         assert!(curr.can_preempt(2));
-        // Current slot (into_raw) = 1; caller's clone (e.g. block_on) = 2nd.
+        // CurrentTask slot + Scheduler.curr + caller clone (e.g. block_on).
         let strong = Arc::strong_count(curr);
         assert!(
-            strong > 1,
-            "blocked_resched: strong_count={strong} (need > 1); into_raw current slot counts as 1 \
-             — caller must hold another KtaskRef across switch (see block_on / blocked_resched \
-             rustdoc)"
+            strong > 2,
+            "blocked_resched: strong_count={strong} (need > 2); into_raw current slot and \
+             Scheduler.curr count as 2 — caller must hold another KtaskRef across switch (see \
+             block_on / blocked_resched rustdoc)"
         );
 
         // Deactivate while still Running / current, before any concurrent wake
         // can requeue us. Fair schedulers snapshot lag for later enqueue PLACE_LAG.
-        self.inner
-            .scheduler
-            .lock()
-            .leave_current(curr.clone(), CurrentDisposition::Block);
-        #[cfg(feature = "smp")]
-        self.inner.discharge_rq_load(curr);
+        let (_, pull_if_empty) = self.inner.leave_and_publish(|s| s.block_current(now_ns));
 
         // Mark the task as blocked, this has to be done before adding it to the wait queue
         // while holding the lock of the wait queue.
@@ -566,57 +501,42 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         // see `unblock_task()` for details.
 
         debug!("task block: {}", curr.id_name());
-        self.inner.resched();
+        self.inner.resched(pull_if_empty);
     }
 
     pub fn set_current_priority(&mut self, prio: isize) -> bool {
         let now_ns = khal::time::monotonic_time_nanos();
-        self.account_current_runtime(now_ns);
-        let ok = self
-            .inner
-            .scheduler
-            .lock()
-            .set_priority(&self.current_task, prio);
-        if ok {
-            self.refresh_sched_deadline(now_ns);
-            rearm_local_timer();
-        }
-        ok
+        let Some(decision) = self.inner.set_fair_nice(&self.current_task, prio, now_ns) else {
+            return false;
+        };
+        self.inner.kick(decision);
+        true
     }
 }
 
 impl<G: BaseGuard> KRunQueueRef<'_, G> {
     pub fn set_task_priority(&mut self, task: &KtaskRef, prio: isize) -> bool {
         let now_ns = khal::time::monotonic_time_nanos();
-        self.inner.flush_running_runtime(now_ns);
-        let ok = self.inner.scheduler.lock().set_priority(task, prio);
-        #[cfg(feature = "preempt")]
-        if ok {
-            // Weight/deadline changes must re-arbitrate the target CPU timer;
-            // otherwise NOHZ keeps waiting on a stale schedule deadline.
-            request_resched_on(self.inner);
-        }
-        ok
+        let Some(decision) = self.inner.set_fair_nice(task, prio, now_ns) else {
+            return false;
+        };
+        self.inner.kick(decision);
+        true
     }
 }
 
 impl RunQueue {
     /// Create a new run queue for the specified CPU.
     /// The run queue is initialized with a per-CPU gc task in its scheduler.
-    pub(super) fn new(cpu_id: LogicalCpuId) -> Self {
+    pub(super) fn new(cpu_id: LogicalCpuId, idle: KtaskRef) -> Self {
         let gc_task = gc::spawn_gc_task(cpu_id);
 
-        let scheduler = Scheduler::new();
-        #[cfg(all(feature = "sched_stat", feature = "sched_eevdf"))]
-        let scheduler = {
-            let mut scheduler = scheduler;
-            scheduler.set_stats_enabled(true);
-            scheduler
-        };
+        let now_ns = khal::time::monotonic_time_nanos();
+        let scheduler = Scheduler::new(idle, now_ns);
         let rq = Self {
             cpu_id,
             scheduler: SpinRaw::new(scheduler),
-            last_accounted_ns: AtomicU64::new(0),
+            last_accounted_ns: AtomicU64::new(now_ns),
             #[cfg(feature = "smp")]
             nr_running: AtomicUsize::new(0),
             #[cfg(feature = "smp")]
@@ -624,43 +544,77 @@ impl RunQueue {
         };
         // Publish through the ownership-aware entry so secondary-CPU gc tasks
         // do not keep the default `cpu_id == 0`.
-        rq.publish_task(gc_task);
+        rq.publish_task(gc_task, EnqueueKind::New, now_ns);
         rq
     }
 
-    /// Account, EEVDF peer-preempt probe, and backup deadline under one lock.
-    ///
-    /// Returns `(elapsed, should_preempt, peer_wins, next_rel_on_probe_fail)`.
-    #[cfg(all(feature = "preempt", feature = "sched_eevdf"))]
-    fn account_peer_probe_and_next_deadline(
-        &self,
-        now_ns: u64,
-        curr: &KtaskRef,
-        is_idle: bool,
-    ) -> (u64, bool, bool, Option<u64>) {
+    pub(crate) fn with_sched<R>(&self, f: impl FnOnce(&mut Scheduler) -> R) -> R {
         let mut sched = self.scheduler.lock();
-        let elapsed = Self::advance_account_epoch(&self.last_accounted_ns, now_ns);
-        let should_preempt = if is_idle || elapsed == 0 {
-            false
-        } else {
-            sched.update_current(curr, elapsed)
+        let r = f(&mut sched);
+        #[cfg(feature = "smp")]
+        self.store_load(Self::load_count(&sched));
+        r
+    }
+
+    /// `nr_queued` plus the non-idle runner, matching `refactor_ksched`.
+    #[cfg(feature = "smp")]
+    fn load_count(sched: &Scheduler) -> usize {
+        sched.nr_queued() + usize::from(sched.current().is_some_and(|t| !t.is_idle_class()))
+    }
+
+    #[cfg(feature = "smp")]
+    fn store_load(&self, n: usize) {
+        self.nr_running.store(n, Ordering::Relaxed);
+    }
+
+    /// Leave the runner and report whether the ready tree is empty in the same hold.
+    fn leave_and_publish<R>(&self, leave: impl FnOnce(&mut Scheduler) -> R) -> (R, bool) {
+        self.with_sched(|s| {
+            let r = leave(s);
+            (r, s.nr_queued() == 0)
+        })
+    }
+
+    /// Request a preempt probe on this RQ's CPU. Local: always set
+    /// `need_resched` and re-arm the timer. Remote: IPI only.
+    ///
+    /// `Decision` is unused: the target CPU re-probes in `preempt_resched`.
+    /// Waker-side `next_event_ns` must not program dest's timer.
+    pub(crate) fn kick(&self, decision: Decision) {
+        let _ = decision;
+        request_resched_on(self);
+    }
+
+    /// Install a runner that did not come from `pick_next` (boot `main`, AP idle,
+    /// or the affinity migration helper).
+    pub(super) fn install_running(&self, task: &KtaskRef) {
+        let now_ns = khal::time::monotonic_time_nanos();
+        self.with_sched(|s| s.install_current(task.clone(), now_ns));
+        self.last_accounted_ns.store(now_ns, Ordering::Relaxed);
+    }
+
+    /// Store a Fair nice value. `None` when `prio` is out of range or the
+    /// task is the Idle class.
+    pub(super) fn set_fair_nice(
+        &self,
+        task: &KtaskRef,
+        prio: isize,
+        now_ns: u64,
+    ) -> Option<Decision> {
+        let nice = Nice::new(prio as i32).ok()?;
+        let attr = SchedAttr {
+            policy: SchedPolicy::Normal,
+            nice,
         };
-        let peer_wins = sched.peer_preempts_curr();
-        let next_rel = if !peer_wins && !is_idle {
-            sched.next_preemption_ns(curr)
-        } else {
-            None
-        };
-        (elapsed, should_preempt, peer_wins, next_rel)
+        self.with_sched(|s| s.set_attr(task, attr, now_ns)).ok()
     }
 
     /// Advances the account epoch and returns elapsed wall time.
     ///
-    /// Caller must hold [`Self::scheduler`] so remote wake flush and local
-    /// timer accounting cannot race on this field.
+    /// `last_accounted_ns` is a best-effort Relaxed timestamp. Callers sample
+    /// it outside [`Self::scheduler`]; a race only affects diagnostic
+    /// elapsed, not scheduler state.
     pub(super) fn advance_account_epoch(last_accounted_ns: &AtomicU64, now_ns: u64) -> u64 {
-        // The scheduler lock serializes this load/store with scheduler state;
-        // Relaxed supplies interior mutability, not synchronization.
         let previous_ns = last_accounted_ns.load(Ordering::Relaxed);
         let elapsed = if previous_ns == 0 {
             0
@@ -677,68 +631,38 @@ impl RunQueue {
     /// new publishes must flush that elapsed time into EEVDF `curr` before
     /// computing system V / PLACE_LAG.
     pub(super) fn flush_running_runtime(&self, now_ns: u64) {
-        let mut sched = self.scheduler.lock();
-        let elapsed = Self::advance_account_epoch(&self.last_accounted_ns, now_ns);
-        if elapsed == 0 {
-            return;
-        }
-        #[cfg(feature = "sched_eevdf")]
-        sched.account_curr_elapsed(elapsed);
-        #[cfg(not(feature = "sched_eevdf"))]
-        {
-            let _ = elapsed;
-        }
+        let _elapsed = Self::advance_account_epoch(&self.last_accounted_ns, now_ns);
+        let _ = self.with_sched(|s| s.update(now_ns, UpdateKind::Account));
     }
 
-    /// Publish a newly runnable task onto this run queue's scheduler.
+    /// Place `task` onto this queue's policy and take ownership.
     ///
-    /// This is the only path that should call `Scheduler::add_task` from ktask.
-    fn publish_task(&self, task: KtaskRef) {
+    /// Spawn, wake, idle-pull, and affinity migrate-in all go through here so
+    /// `cpu_id` / `nr_home` move with the enqueue. Callers must not
+    /// `Scheduler::enqueue` a published task without this.
+    pub(super) fn publish_task(&self, task: KtaskRef, kind: EnqueueKind, now_ns: u64) -> Decision {
         #[cfg(feature = "smp")]
         self.attach_owner(&task);
         #[cfg(feature = "smp")]
-        self.charge_rq_load(&task);
-        #[cfg(feature = "smp")]
         self.charge_home(&task);
-        self.scheduler.lock().add_task(task);
+        let _elapsed = Self::advance_account_epoch(&self.last_accounted_ns, now_ns);
+        self.with_sched(|s| s.enqueue(task, kind, now_ns))
     }
 
-    /// Enqueue a non-current ready task onto this run queue (unblock / migrate-in).
+    /// Enqueue a non-current ready task onto this run queue (migrate-in).
     ///
-    /// This is the only path that should call `Scheduler::enqueue_task` from ktask.
-    /// Running tasks leave through `leave_current` on the yield/preempt/block/migrate/exit paths.
+    /// Running tasks leave through yield / preempt / block / migrate / exit.
     #[cfg(feature = "smp")]
-    pub(super) fn enqueue_task(&self, task: KtaskRef) {
-        self.enqueue_ready_task(task, false);
+    pub(super) fn enqueue_task(&self, task: KtaskRef) -> Decision {
+        let now_ns = khal::time::monotonic_time_nanos();
+        self.publish_task(task, EnqueueKind::MigrateIn, now_ns)
     }
 
     /// Enqueue a ready task, optionally arming WF_SYNC in the same lock as
     /// NEXT_BUDDY nomination (Linux `ttwu` / `check_preempt_wakeup`).
-    fn enqueue_ready_task(&self, task: KtaskRef, is_wake_sync: bool) {
-        #[cfg(feature = "smp")]
-        self.attach_owner(&task);
-        #[cfg(feature = "smp")]
-        self.charge_rq_load(&task);
-        #[cfg(feature = "smp")]
-        self.charge_home(&task);
+    fn enqueue_ready_task(&self, task: KtaskRef, is_wake_sync: bool) -> Decision {
         let now_ns = khal::time::monotonic_time_nanos();
-        let mut sched = self.scheduler.lock();
-        let elapsed = Self::advance_account_epoch(&self.last_accounted_ns, now_ns);
-        #[cfg(feature = "sched_eevdf")]
-        sched.account_curr_elapsed(elapsed);
-        #[cfg(not(feature = "sched_eevdf"))]
-        {
-            let _ = elapsed;
-        }
-        sched.enqueue_task(task);
-        #[cfg(feature = "sched_eevdf")]
-        if is_wake_sync {
-            sched.mark_sync_wake_preempt();
-        }
-        #[cfg(not(feature = "sched_eevdf"))]
-        {
-            let _ = is_wake_sync;
-        }
+        self.publish_task(task, EnqueueKind::Wake { sync: is_wake_sync }, now_ns)
     }
 
     /// Attach a local helper task and switch to it without enqueueing.
@@ -751,8 +675,9 @@ impl RunQueue {
     fn switch_to_local(&self, prev_task: CurrentTask, next_task: KtaskRef) {
         #[cfg(feature = "smp")]
         self.attach_owner(&next_task);
-        #[cfg(feature = "sched_eevdf")]
-        self.scheduler.lock().sync_running_curr(&next_task);
+        self.with_sched(|s| {
+            s.install_current(next_task.clone(), khal::time::monotonic_time_nanos());
+        });
         self.switch_to(prev_task, next_task);
     }
 
@@ -770,7 +695,7 @@ impl RunQueue {
         current_state: TaskState,
         is_wake_sync: bool,
         resched: bool,
-    ) -> WakeEnqueue {
+    ) -> (WakeEnqueue, Option<Decision>) {
         #[cfg(not(feature = "smp"))]
         let _ = resched;
         // If the task's state matches `current_state`, set its state to `Ready` and
@@ -786,42 +711,40 @@ impl RunQueue {
                 self.attach_owner(&task);
                 task.arm_wake_enqueue(is_wake_sync, resched);
                 if task.on_cpu() {
-                    return WakeEnqueue::Deferred;
+                    return (WakeEnqueue::Deferred, None);
                 }
                 if task.take_wake_enqueue().is_none() {
-                    return WakeEnqueue::Deferred;
+                    return (WakeEnqueue::Deferred, None);
                 }
             }
-            // TODO: priority
-            self.enqueue_ready_task(task, is_wake_sync);
-            WakeEnqueue::Enqueued
+            let decision = self.enqueue_ready_task(task, is_wake_sync);
+            (WakeEnqueue::Enqueued, Some(decision))
         } else {
-            WakeEnqueue::Rejected
+            (WakeEnqueue::Rejected, None)
         }
     }
 
     /// Core reschedule subroutine.
-    /// Pick the next task to run and switch to it.
-    fn resched(&self) {
+    ///
+    /// `pull_if_empty` is the ready-tree emptiness sampled in the same sched
+    /// lock as leave. Re-taking the lock just to read `nr_queued` is avoided.
+    fn resched(&self, pull_if_empty: bool) {
         #[cfg(feature = "sched_stat")]
         sched_stat_inc(&sched_stat_cpu(self.cpu_id).resched);
-        let next = self
-            .scheduler
-            .lock()
-            .pick_next_task()
-            .unwrap_or_else(|| current_idle_task().clone());
+        let now_ns = khal::time::monotonic_time_nanos();
         #[cfg(feature = "smp")]
-        let next = if next.is_idle() && self.idle_pull() {
-            self.scheduler.lock().pick_next_task().unwrap_or(next)
-        } else {
-            next
-        };
+        if pull_if_empty {
+            let _ = self.idle_pull();
+        }
+        #[cfg(not(feature = "smp"))]
+        let _ = pull_if_empty;
+        let next = self.with_sched(|s| s.pick_next(now_ns));
         #[cfg(feature = "sched_stat")]
         if next.is_idle() {
             sched_stat_inc(&sched_stat_cpu(self.cpu_id).pick_idle);
         }
         assert!(
-            next.is_ready(),
+            next.is_ready() || next.is_idle(),
             "next {} is not ready: {:?}",
             next.id_name(),
             next.state()
@@ -852,18 +775,14 @@ impl RunQueue {
 
         let now_ns = khal::time::monotonic_time_nanos();
 
-        #[cfg(feature = "preempt")]
         next_task.set_preempt_pending(false);
         next_task.set_state(TaskState::Running);
         let program_next_deadline = |rq: &Self, next: &KtaskRef, now: u64| {
-            let next_rel = {
-                let sched = rq.scheduler.lock();
-                rq.last_accounted_ns.store(now, Ordering::Relaxed);
-                if next.is_idle() {
-                    None
-                } else {
-                    sched.next_preemption_ns(next)
-                }
+            rq.last_accounted_ns.store(now, Ordering::Relaxed);
+            let next_rel = if next.is_idle() {
+                None
+            } else {
+                rq.with_sched(|s| s.next_event_ns())
             };
             // Immediate requests must arm pending on the *incoming* task: at
             // this point `current()` is still the outgoing task.
@@ -985,20 +904,14 @@ pub(crate) unsafe fn clear_prev_task_on_cpu(current_rq: &RunQueue) {
     );
 
     let target_cpu = prev_task.cpu_id();
-    if target_cpu == current_rq.cpu_id {
-        current_rq.enqueue_ready_task(prev_task, is_wake_sync);
-        #[cfg(feature = "preempt")]
-        if resched {
-            request_resched_on(current_rq);
-        }
+    let is_local = target_cpu == current_rq.cpu_id;
+    let target_rq = if is_local {
+        current_rq
     } else {
-        let target_rq = get_run_queue(target_cpu.as_usize());
-        target_rq.enqueue_ready_task(prev_task, is_wake_sync);
-        #[cfg(feature = "preempt")]
-        if resched {
-            request_resched_on(target_rq);
-        }
+        get_run_queue(target_cpu.as_usize())
+    };
+    let decision = target_rq.enqueue_ready_task(prev_task, is_wake_sync);
+    if resched {
+        target_rq.kick(decision);
     }
-    #[cfg(not(feature = "preempt"))]
-    let _ = resched;
 }

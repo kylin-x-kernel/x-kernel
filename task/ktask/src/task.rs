@@ -222,13 +222,6 @@ pub struct TaskInner {
     /// Used to indicate whether the task is running on a CPU.
     #[cfg(feature = "smp")]
     on_cpu: AtomicBool,
-    /// Whether this task currently contributes to its owner RQ `nr_running`.
-    ///
-    /// Set on `publish_task` / `enqueue_task`, cleared on block / migrate /
-    /// exit / idle-pull steal. `switch_to_local` helpers never charge, so their
-    /// `leave_current(Exit)` must not underflow the snapshot.
-    #[cfg(feature = "smp")]
-    rq_load_charged: AtomicBool,
     /// Whether this task currently contributes to its owner RQ `nr_home`.
     ///
     /// Counts sticky-home occupancy (running, ready, or blocked on this CPU).
@@ -248,11 +241,9 @@ pub struct TaskInner {
     #[cfg(feature = "smp")]
     on_cpu_mask: SpinNoIrq<KCpuMask>,
 
-    #[cfg(feature = "preempt")]
     need_resched: AtomicBool,
-    #[cfg(feature = "preempt")]
     preempt_disable_count: AtomicUsize,
-    #[cfg(all(unittest, feature = "preempt"))]
+    #[cfg(unittest)]
     preempt_check_probe: tests_preempt_check::Probe,
 
     /// Nesting depth for Linux-style `WF_SYNC` wake scopes ([`crate::with_wake_sync`]).
@@ -671,18 +662,14 @@ impl TaskInner {
             #[cfg(feature = "smp")]
             on_cpu: AtomicBool::new(false),
             #[cfg(feature = "smp")]
-            rq_load_charged: AtomicBool::new(false),
-            #[cfg(feature = "smp")]
             home_charged: AtomicBool::new(false),
             #[cfg(feature = "smp")]
             wake_enqueue_flags: AtomicU8::new(0),
             #[cfg(feature = "smp")]
             on_cpu_mask: SpinNoIrq::new(KCpuMask::new()),
-            #[cfg(feature = "preempt")]
             need_resched: AtomicBool::new(false),
-            #[cfg(feature = "preempt")]
             preempt_disable_count: AtomicUsize::new(0),
-            #[cfg(all(unittest, feature = "preempt"))]
+            #[cfg(unittest)]
             preempt_check_probe: tests_preempt_check::Probe::new(),
             wake_sync_depth: AtomicUsize::new(0),
             interrupted: AtomicBool::new(false),
@@ -733,6 +720,11 @@ impl TaskInner {
         Arc::new(KTask::new(self))
     }
 
+    /// Wrap as the per-CPU Idle class task. Fair tasks use [`Self::into_arc`].
+    pub(crate) fn into_arc_kernel(self, class: ksched::KernelClass) -> KtaskRef {
+        Arc::new(KTask::new_kernel(self, class))
+    }
+
     /// Returns the current state of the task.
     #[inline]
     pub fn state(&self) -> TaskState {
@@ -780,13 +772,11 @@ impl TaskInner {
     }
 
     #[inline]
-    #[cfg(feature = "preempt")]
     pub(crate) fn set_preempt_pending(&self, pending: bool) {
         self.need_resched.store(pending, Ordering::Release)
     }
 
     #[inline]
-    #[cfg(feature = "preempt")]
     pub(crate) fn is_preempt_pending(&self) -> bool {
         self.need_resched.load(Ordering::Acquire)
     }
@@ -811,26 +801,22 @@ impl TaskInner {
     }
 
     #[inline]
-    #[cfg(feature = "preempt")]
     pub(crate) fn can_preempt(&self, current_disable_count: usize) -> bool {
         self.preempt_disable_count.load(Ordering::Acquire) == current_disable_count
     }
 
     /// Returns whether the task currently holds a no-preempt section.
     #[inline]
-    #[cfg(feature = "preempt")]
     pub(crate) fn preempt_section_held(&self) -> bool {
         self.preempt_disable_count.load(Ordering::Acquire) != 0
     }
 
     #[inline]
-    #[cfg(feature = "preempt")]
     pub(crate) fn disable_preempt(&self) {
         self.preempt_disable_count.fetch_add(1, Ordering::Release);
     }
 
     #[inline]
-    #[cfg(feature = "preempt")]
     pub(crate) fn enable_preempt(&self, resched: bool) {
         if self.preempt_disable_count.fetch_sub(1, Ordering::Release) == 1 && resched {
             // If current task is pending to be preempted, do rescheduling.
@@ -838,7 +824,6 @@ impl TaskInner {
         }
     }
 
-    #[cfg(feature = "preempt")]
     pub(crate) fn current_check_preempt_pending() {
         use kspin::NoPreemptIrqSave;
         loop {
@@ -911,22 +896,6 @@ impl TaskInner {
     #[inline]
     pub(crate) fn on_cpu(&self) -> bool {
         self.on_cpu.load(Ordering::SeqCst)
-    }
-
-    /// Marks this task as counted in its owner RQ load snapshot.
-    ///
-    /// Returns `true` if this call made the charged→true transition.
-    #[cfg(feature = "smp")]
-    pub(crate) fn mark_rq_load_charged(&self) -> bool {
-        !self.rq_load_charged.swap(true, Ordering::Relaxed)
-    }
-
-    /// Clears the RQ load-snapshot charge.
-    ///
-    /// Returns `true` if this call made the charged→false transition.
-    #[cfg(feature = "smp")]
-    pub(crate) fn clear_rq_load_charged(&self) -> bool {
-        self.rq_load_charged.swap(false, Ordering::Relaxed)
     }
 
     /// Marks this task as counted in its owner RQ home-occupancy snapshot.
@@ -1181,7 +1150,7 @@ extern "C" fn task_entry() -> ! {
     crate::exit(0);
 }
 
-#[cfg(all(unittest, feature = "preempt"))]
+#[cfg(unittest)]
 #[path = "tests/preempt_check.rs"]
 mod tests_preempt_check;
 

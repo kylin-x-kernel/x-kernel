@@ -37,9 +37,6 @@ KFEAT_DRIVER_CONSOLE_NS16550_MMIO=y
 # KFEAT_DWARF is not set
 KFEAT_FS_TIMES=y
 # KFEAT_NET is not set
-# KFEAT_SCHED_CFS is not set
-# KFEAT_SCHED_FIFO is not set
-# KFEAT_SCHED_RR is not set
 # KFEAT_TA_VERIFY_WITH_ROOT is not set
 # KFEAT_TEE is not set
 # KFEAT_TEE_TA_SIGN is not set

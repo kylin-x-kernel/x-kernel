@@ -85,15 +85,7 @@ impl kirq::softirq::SoftirqDaemonIf {
 }
 
 fn task_needs_resched(task: Option<&TaskInner>) -> bool {
-    #[cfg(feature = "preempt")]
-    {
-        task.is_some_and(TaskInner::is_preempt_pending)
-    }
-    #[cfg(not(feature = "preempt"))]
-    {
-        let _ = task;
-        false
-    }
+    task.is_some_and(TaskInner::is_preempt_pending)
 }
 
 fn softirqd_main(cpu_id: LogicalCpuId, wake_source: PollSet) {
@@ -164,7 +156,6 @@ mod tests {
 
     static TEST_DRAIN_RUNS: AtomicUsize = AtomicUsize::new(0);
 
-    #[cfg(feature = "preempt")]
     fn resched_and_reraise_action() {
         if TEST_DRAIN_RUNS.fetch_add(1, Ordering::SeqCst) == 0 {
             crate::current().set_preempt_pending(true);
@@ -222,14 +213,6 @@ mod tests {
         assert_eq!(task_needs_resched(None), false);
     }
 
-    #[cfg(not(feature = "preempt"))]
-    #[def_test]
-    fn test_softirq_resched_without_preemption_is_false() {
-        let _guard = kspin::NoPreemptIrqSave::new();
-        assert_eq!(kirq::softirq::SoftirqDaemonIf::needs_resched(), false);
-    }
-
-    #[cfg(feature = "preempt")]
     #[def_test(serial)]
     fn test_softirq_resched_query_preserves_task_request() {
         let _guard = kspin::NoPreemptIrqSave::new();
@@ -247,7 +230,6 @@ mod tests {
         assert_eq!(preserved, true);
     }
 
-    #[cfg(feature = "preempt")]
     #[def_test(serial)]
     fn test_softirq_resched_handoff_remains_drainable() {
         use kirq::softirq::{SoftirqRunResult, SoftirqVec};

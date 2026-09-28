@@ -1,0 +1,11 @@
+menu "CPU scheduler"
+
+config SCHED_FAIR_REQUEST_US
+    usize "Fair/EEVDF request length (microseconds)"
+    range 100 100000
+    default 2000
+    help
+      Default wall-clock request assigned to a Fair task on first
+      enqueue. Virtual deadline uses this length. Default 2 000 (2 ms).
+
+endmenu

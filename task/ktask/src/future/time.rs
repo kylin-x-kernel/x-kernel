@@ -341,13 +341,11 @@ mod tests_subtick_precision {
         }
     }
 
-    #[cfg(feature = "sched_eevdf")]
     struct SameCpuSpinner {
         task: crate::KtaskRef,
         stop: Arc<AtomicBool>,
     }
 
-    #[cfg(feature = "sched_eevdf")]
     impl Drop for SameCpuSpinner {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::Release);
@@ -358,7 +356,6 @@ mod tests_subtick_precision {
     }
 
     /// Pins a `spin_loop` worker to this CPU so timer wakes compete for the RQ.
-    #[cfg(feature = "sched_eevdf")]
     fn spawn_same_cpu_spinner() -> SameCpuSpinner {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = stop.clone();
@@ -433,7 +430,6 @@ mod tests_subtick_precision {
     }
 
     /// Contended: same-CPU spinner; latency may include one default request slice.
-    #[cfg(feature = "sched_eevdf")]
     #[def_test(serial)]
     fn test_contended_subtick_sleep_within_slice_budget() {
         const REQUEST: TimeSpan = TimeSpan::from_millis(1);
@@ -462,7 +458,6 @@ mod tests_subtick_precision {
     }
 
     /// Contended: same-CPU spinner against `timeout`.
-    #[cfg(feature = "sched_eevdf")]
     #[def_test(serial)]
     fn test_contended_subtick_timeout_within_slice_budget() {
         const REQUEST: TimeSpan = TimeSpan::from_millis(2);

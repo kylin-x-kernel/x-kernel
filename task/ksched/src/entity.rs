@@ -310,6 +310,26 @@ impl<T> SchedTask<T> {
     pub(crate) fn slice_for_test(&self) -> u64 {
         self.fair.slice_left_ns.get(Self::test_token())
     }
+
+    pub(crate) fn set_request_ns_for_test(&self, ns: u64) -> bool {
+        if ns == 0 {
+            return false;
+        }
+        let tok = Self::test_token();
+        self.fair.request_ns.set(ns, tok);
+        self.fair.slice_left_ns.set(ns, tok);
+        true
+    }
+
+    pub(crate) fn reset_slice_for_test(&self) {
+        let tok = Self::test_token();
+        let request = self.fair.request_ns.get(tok);
+        self.fair.slice_left_ns.set(request, tok);
+    }
+
+    pub(crate) fn request_ns_for_test(&self) -> u64 {
+        self.fair.request_ns.get(Self::test_token())
+    }
 }
 
 impl<T> Deref for SchedTask<T> {

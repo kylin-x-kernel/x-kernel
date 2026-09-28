@@ -253,7 +253,7 @@ pub(super) fn find_idle_pull_src(
 /// Rejects still-`on_cpu` tasks: yield/preempt requeue before `switch_to`
 /// finishes, and stealing that stack races the outgoing CPU.
 #[cfg(feature = "smp")]
-pub(super) fn can_idle_pull_task(task: &KtaskRef, dest_cpu: usize) -> bool {
+pub(super) fn can_idle_pull_task(task: &crate::KTask, dest_cpu: usize) -> bool {
     task.is_ready() && !task.on_cpu() && !task.is_idle() && task.cpumask().get(dest_cpu)
 }
 

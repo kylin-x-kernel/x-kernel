@@ -293,13 +293,7 @@ fn scheduler_target(pid: i32) -> KResult<ktask::KtaskRef> {
 }
 
 fn configured_scheduler_policy() -> u32 {
-    if kbuild_config::KFEAT_SCHED_FIFO {
-        SCHED_FIFO
-    } else if kbuild_config::KFEAT_SCHED_RR {
-        SCHED_RR
-    } else {
-        SCHED_NORMAL
-    }
+    SCHED_NORMAL
 }
 
 fn validate_scheduler_policy(policy: i32) -> KResult<u32> {

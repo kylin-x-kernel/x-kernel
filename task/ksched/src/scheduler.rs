@@ -2,8 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Class arbitrator. `ktask` still drives [`crate::BaseScheduler`]; this type
-//! is the Fair and Idle implementation of the per-class operations.
+//! Class arbitrator. `ktask` drives this type on the production path.
 //!
 //! [`Scheduler`] owns the five class ranks and the runner `Arc`. Stop,
 //! Deadline, and RT are rank slots: `pick_next` returns [`None`] and
@@ -236,15 +235,12 @@ impl<T> Scheduler<T> {
         }
     }
 
-    /// # Safety
+    /// RQ-lock token for `RqCell` access.
     ///
-    /// The caller holds the owning run-queue lock for this scheduler and for
-    /// every [`SchedTask`] the enclosing call reads or writes. No other
-    /// context accesses those `RqCell`s until the call returns.
-    unsafe fn token() -> RqLocked {
-        // SAFETY: `RqLocked::assume`. The caller of this `unsafe fn` holds
-        // the owning run-queue lock, so this token does not alias a
-        // concurrent `RqCell` read or write.
+    /// `ktask` calls every public method while holding this RQ's lock, so
+    /// `RqCell` fields may be read and written.
+    fn token() -> RqLocked {
+        // SAFETY: ktask serializes all Scheduler calls on this RQ.
         unsafe { RqLocked::assume() }
     }
 
@@ -369,21 +365,14 @@ impl<T> Scheduler<T> {
     /// let mut rq = Scheduler::new(idle, 0);
     /// assert!(rq.current().is_none());
     ///
-    /// let main = Arc::new(SchedTask::new(1usize));
-    /// // Caller holds this run queue's lock.
-    /// unsafe { rq.install_current(main.clone(), 0) };
+    ///     let main = Arc::new(SchedTask::new(1usize));
+    /// rq.install_current(main.clone(), 0);
     /// assert!(rq.current().is_some_and(|c| Arc::ptr_eq(c, &main)));
     /// ```
     ///
-    /// `ktask` still boots through [`crate::BaseScheduler`].
-    ///
-    /// # Safety
-    ///
-    /// The caller holds the owning run-queue lock. `task` is exclusively
-    /// owned or published only on that run queue.
-    pub unsafe fn install_current(&mut self, task: Arc<SchedTask<T>>, now_ns: u64) {
-        // SAFETY: caller holds the owning run-queue lock.
-        let tok = unsafe { Self::token() };
+    /// Boot `main` and AP idle call this before the first `pick_next`.
+    pub fn install_current(&mut self, task: Arc<SchedTask<T>>, now_ns: u64) {
+        let tok = Self::token();
         assert!(self.curr.is_none(), "install_current on a live runner");
         let _ = self.clock.advance(now_ns);
         let clock = self.clock;
@@ -409,13 +398,8 @@ impl<T> Scheduler<T> {
     }
 
     /// Charge and probe without switching.
-    ///
-    /// # Safety
-    ///
-    /// The caller holds the owning run-queue lock.
-    pub unsafe fn update(&mut self, now_ns: u64, kind: UpdateKind) -> Decision {
-        // SAFETY: caller holds the owning run-queue lock.
-        let tok = unsafe { Self::token() };
+    pub fn update(&mut self, now_ns: u64, kind: UpdateKind) -> Decision {
+        let tok = Self::token();
         let exhausted = self.charge(now_ns, tok);
         let resched = self.resched_needed(kind, exhausted, tok);
         Decision {
@@ -425,19 +409,8 @@ impl<T> Scheduler<T> {
     }
 
     /// Charge, enqueue, then probe wakeup preemption.
-    ///
-    /// # Safety
-    ///
-    /// The caller holds the owning run-queue lock. `task` is exclusively
-    /// owned or published only on that run queue.
-    pub unsafe fn enqueue(
-        &mut self,
-        task: Arc<SchedTask<T>>,
-        kind: EnqueueKind,
-        now_ns: u64,
-    ) -> Decision {
-        // SAFETY: caller holds the owning run-queue lock.
-        let tok = unsafe { Self::token() };
+    pub fn enqueue(&mut self, task: Arc<SchedTask<T>>, kind: EnqueueKind, now_ns: u64) -> Decision {
+        let tok = Self::token();
         let _ = self.charge(now_ns, tok);
         let class = task.sched_class();
         let clock = self.clock;
@@ -453,18 +426,8 @@ impl<T> Scheduler<T> {
     }
 
     /// Take a queued (non-current) task off this RQ.
-    ///
-    /// # Safety
-    ///
-    /// The caller holds the owning run-queue lock. `task` is published only
-    /// on that run queue.
-    pub unsafe fn dequeue(
-        &mut self,
-        task: &SchedTask<T>,
-        now_ns: u64,
-    ) -> Option<Arc<SchedTask<T>>> {
-        // SAFETY: caller holds the owning run-queue lock.
-        let tok = unsafe { Self::token() };
+    pub fn dequeue(&mut self, task: &SchedTask<T>, now_ns: u64) -> Option<Arc<SchedTask<T>>> {
+        let tok = Self::token();
         let _ = self.charge(now_ns, tok);
         if task.seat(tok) == QueueSeat::Detached {
             return None;
@@ -476,18 +439,12 @@ impl<T> Scheduler<T> {
     }
 
     /// Idle-pull source: steal one Fair waiter that matches `want`.
-    ///
-    /// # Safety
-    ///
-    /// The caller holds the owning run-queue lock for this scheduler, and
-    /// not the destination run queue.
-    pub unsafe fn steal(
+    pub fn steal(
         &mut self,
         want: &mut dyn FnMut(&SchedTask<T>) -> bool,
         now_ns: u64,
     ) -> Option<Arc<SchedTask<T>>> {
-        // SAFETY: caller holds the owning run-queue lock.
-        let tok = unsafe { Self::token() };
+        let tok = Self::token();
         let _ = self.charge(now_ns, tok);
         let clock = self.clock;
         let fair_curr = Self::curr_for(&self.curr, SchedClass::Fair);
@@ -499,13 +456,8 @@ impl<T> Scheduler<T> {
     /// # Panics
     ///
     /// A previous runner is still recorded in `curr`.
-    ///
-    /// # Safety
-    ///
-    /// The caller holds the owning run-queue lock.
-    pub unsafe fn pick_next(&mut self, now_ns: u64) -> Arc<SchedTask<T>> {
-        // SAFETY: caller holds the owning run-queue lock.
-        let tok = unsafe { Self::token() };
+    pub fn pick_next(&mut self, now_ns: u64) -> Arc<SchedTask<T>> {
+        let tok = Self::token();
         assert!(
             self.curr.is_none(),
             "pick_next requires the current task to have already left"
@@ -523,58 +475,33 @@ impl<T> Scheduler<T> {
     }
 
     /// Voluntary yield: requeue the runner.
-    ///
-    /// # Safety
-    ///
-    /// The caller holds the owning run-queue lock.
-    pub unsafe fn yield_current(&mut self, now_ns: u64) {
-        // SAFETY: caller holds the owning run-queue lock.
-        let tok = unsafe { Self::token() };
+    pub fn yield_current(&mut self, now_ns: u64) {
+        let tok = Self::token();
         let _ = self.leave(now_ns, LeaveReason::Yield, tok);
     }
 
     /// Involuntary preemption: requeue the runner.
-    ///
-    /// # Safety
-    ///
-    /// The caller holds the owning run-queue lock.
-    pub unsafe fn preempt_current(&mut self, now_ns: u64) {
-        // SAFETY: caller holds the owning run-queue lock.
-        let tok = unsafe { Self::token() };
+    pub fn preempt_current(&mut self, now_ns: u64) {
+        let tok = Self::token();
         let _ = self.leave(now_ns, LeaveReason::Preempt, tok);
     }
 
     /// The runner is going to sleep. Caller must hold its own `Arc`.
-    ///
-    /// # Safety
-    ///
-    /// The caller holds the owning run-queue lock.
-    pub unsafe fn block_current(&mut self, now_ns: u64) {
-        // SAFETY: caller holds the owning run-queue lock.
-        let tok = unsafe { Self::token() };
+    pub fn block_current(&mut self, now_ns: u64) {
+        let tok = Self::token();
         let _ = self.leave(now_ns, LeaveReason::Block, tok);
     }
 
     /// The runner is moving to another CPU. Caller must hold its own `Arc`
     /// and enqueue it on the destination with [`EnqueueKind::MigrateIn`].
-    ///
-    /// # Safety
-    ///
-    /// The caller holds the owning run-queue lock.
-    pub unsafe fn migrate_current(&mut self, now_ns: u64) {
-        // SAFETY: caller holds the owning run-queue lock.
-        let tok = unsafe { Self::token() };
+    pub fn migrate_current(&mut self, now_ns: u64) {
+        let tok = Self::token();
         let _ = self.leave(now_ns, LeaveReason::Migrate, tok);
     }
 
     /// The runner is exiting. Returns the `Arc` for the exited list.
-    ///
-    /// # Safety
-    ///
-    /// The caller holds the owning run-queue lock.
-    pub unsafe fn exit_current(&mut self, now_ns: u64) -> Arc<SchedTask<T>> {
-        // SAFETY: caller holds the owning run-queue lock.
-        let tok = unsafe { Self::token() };
+    pub fn exit_current(&mut self, now_ns: u64) -> Arc<SchedTask<T>> {
+        let tok = Self::token();
         self.leave(now_ns, LeaveReason::Exit, tok)
     }
 
@@ -590,20 +517,14 @@ impl<T> Scheduler<T> {
     ///
     /// Panics if a class change finds `task` queued (`seat != Detached`) but
     /// the old class tree does not hold it.
-    ///
-    /// # Safety
-    ///
-    /// The caller holds the owning run-queue lock. `task` is exclusively
-    /// owned or published only on that run queue.
-    pub unsafe fn set_attr(
+    pub fn set_attr(
         &mut self,
         task: &Arc<SchedTask<T>>,
         attr: SchedAttr,
         now_ns: u64,
     ) -> Result<Decision, SchedError> {
         attr.validate()?;
-        // SAFETY: caller holds the owning run-queue lock.
-        let tok = unsafe { Self::token() };
+        let tok = Self::token();
         if task.sched_class().is_kernel_only() {
             let _ = self.charge(now_ns, tok);
             return Err(SchedError::KernelClassImmutable);
@@ -661,46 +582,27 @@ impl<T> Scheduler<T> {
     }
 
     /// Read the task's stored attributes under the RQ lock.
-    ///
-    /// # Safety
-    ///
-    /// The caller holds the owning run-queue lock. `task` is exclusively
-    /// owned or published only on that run queue.
-    pub unsafe fn attr(&self, task: &SchedTask<T>) -> SchedAttr {
-        // SAFETY: caller holds the owning run-queue lock.
-        task.attr(unsafe { Self::token() })
+    pub fn attr(&self, task: &SchedTask<T>) -> SchedAttr {
+        task.attr(Self::token())
     }
 
     /// Read-only next-event query after a switch, under the RQ lock.
-    ///
-    /// # Safety
-    ///
-    /// The caller holds the owning run-queue lock.
-    pub unsafe fn next_event_ns(&self) -> Option<u64> {
-        // SAFETY: caller holds the owning run-queue lock.
-        self.compute_next_event(unsafe { Self::token() })
+    pub fn next_event_ns(&self) -> Option<u64> {
+        self.compute_next_event(Self::token())
     }
 }
 
 #[cfg(unittest)]
 impl<T> Scheduler<T> {
-    pub(crate) fn min_vruntime_for_test(&self) -> i64 {
-        self.classes.fair.min_vruntime_for_test()
+    pub(crate) fn curr_is_none(&self) -> bool {
+        self.curr.is_none()
     }
 
-    pub(crate) fn avg_vruntime_for_test(&self) -> i64 {
-        self.classes
-            .fair
-            .avg_vruntime_for_test(Self::curr_for(&self.curr, SchedClass::Fair))
+    pub(crate) fn fair_mut(&mut self) -> &mut FairClass<T> {
+        &mut self.classes.fair
     }
 
-    pub(crate) fn inject_ready_for_test(&mut self, task: Arc<SchedTask<T>>) {
-        self.classes
-            .fair
-            .inject_ready_for_test(task, Self::curr_for(&self.curr, SchedClass::Fair));
-    }
-
-    pub(crate) fn has_sync_wake_for_test(&self) -> bool {
-        self.classes.fair.has_sync_wake_for_test()
+    pub(crate) fn idle_task(&self) -> &Arc<SchedTask<T>> {
+        self.classes.idle.idle()
     }
 }

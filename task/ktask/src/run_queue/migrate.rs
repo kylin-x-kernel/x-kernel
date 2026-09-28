@@ -5,13 +5,10 @@
 //! Affinity updates and cross-RQ migrate-in.
 
 use khal::percpu::this_cpu_id;
-use ksched::BaseScheduler;
 
-#[cfg(all(feature = "preempt", feature = "ipi"))]
+#[cfg(feature = "smp")]
 use super::rq::request_remote_resched;
-#[cfg(feature = "preempt")]
-use super::rq::request_resched_on;
-#[cfg(feature = "preempt")]
+#[cfg(feature = "smp")]
 use super::stats::record_remote_resched;
 use super::{
     current_run_queue,
@@ -27,12 +24,8 @@ pub(crate) fn migrate_entry(migrated_task: KtaskRef) {
     let rq = select_run_queue::<kspin::NoPreemptIrqSave>(&migrated_task);
     let now_ns = khal::time::monotonic_time_nanos();
     rq.inner.flush_running_runtime(now_ns);
-    rq.inner.enqueue_task(migrated_task);
-    // Same kick as `add_task`: a NOHZ idle or lone-task destination may have
-    // its schedule timer disarmed, so the migrated peer needs a resched probe
-    // (local deadline refresh or remote IPI) to avoid indefinite starvation.
-    #[cfg(feature = "preempt")]
-    request_resched_on(rq.inner);
+    let decision = rq.inner.enqueue_task(migrated_task);
+    rq.inner.kick(decision);
 }
 
 pub(super) fn spawn_affinity_migration_task(migrated: KtaskRef) -> KtaskRef {
@@ -50,8 +43,8 @@ fn try_remove_ready_task(task: &KtaskRef) -> Option<KtaskRef> {
     if !task.is_ready() {
         return None;
     }
-    let removed = rq.inner.scheduler.lock().remove_task(task)?;
-    rq.inner.discharge_rq_load(&removed);
+    let now_ns = khal::time::monotonic_time_nanos();
+    let removed = rq.inner.with_sched(|s| s.dequeue(task, now_ns))?;
     Some(removed)
 }
 
@@ -99,7 +92,7 @@ pub(crate) fn enforce_affinity_placement(task: &KtaskRef) -> bool {
     }
 
     if task.is_running() {
-        #[cfg(all(feature = "preempt", feature = "ipi"))]
+        #[cfg(feature = "smp")]
         {
             let cpu_id = task.cpu_id();
             debug_assert_ne!(cpu_id, this_cpu_id());
@@ -111,7 +104,7 @@ pub(crate) fn enforce_affinity_placement(task: &KtaskRef) -> bool {
                 core::hint::spin_loop();
             }
         }
-        #[cfg(not(all(feature = "preempt", feature = "ipi")))]
+        #[cfg(not(feature = "smp"))]
         {
             return false;
         }

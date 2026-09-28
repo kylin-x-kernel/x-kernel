@@ -25,6 +25,11 @@ impl<T> IdleClass<T> {
     pub fn new(idle: Arc<SchedTask<T>>) -> Self {
         Self { idle }
     }
+
+    #[cfg(unittest)]
+    pub(crate) fn idle(&self) -> &Arc<SchedTask<T>> {
+        &self.idle
+    }
 }
 
 impl<T> ClassOps<T> for IdleClass<T> {

@@ -161,14 +161,6 @@ fn current_wait_for_exit() -> &'static PollSet {
         .expect("wait-for-exit must be initialized before GC/exit paths")
 }
 
-#[inline(always)]
-fn current_idle_task() -> &'static KtaskRef {
-    IDLE_TASK
-        .shared_current()
-        .get()
-        .expect("idle task must be initialized before reschedule")
-}
-
 #[inline]
 fn with_run_queue<R>(f: impl FnOnce(&mut LazyInit<RunQueue>) -> R) -> R {
     // Bring-up runs on the owning CPU with IRQs off; the guard pins it while
@@ -238,12 +230,12 @@ pub(crate) struct RunQueue {
     /// local timer IRQ both take that lock, so they cannot double-count or drop
     /// a NOHZ gap before PLACE_LAG.
     last_accounted_ns: AtomicU64,
-    /// Runnable-task snapshot (block discharges). Spawn idle-first looks at
-    /// this: `nr_running == 0` outranks any busy CPU, including vs a sleeper's
-    /// [`Self::nr_home`].
+    /// Runnable snapshot: `nr_queued + (curr is a non-idle class)`.
     ///
-    /// Relaxed: heuristic only. Updated under [`Self::scheduler`] via
-    /// [`TaskInner::mark_rq_load_charged`] / [`TaskInner::clear_rq_load_charged`].
+    /// Same formula as `refactor_ksched` `RunQueue::load_count`. Written
+    /// under [`Self::scheduler`] after every policy mutation. Incremental
+    /// charge/discharge drifted when idle was `curr` and Fair still had
+    /// waiters, so SIS never saw a free CPU.
     #[cfg(feature = "smp")]
     nr_running: AtomicUsize,
     /// Sticky-home occupancy: running, ready, **and** blocked tasks whose
@@ -298,8 +290,9 @@ pub(crate) fn init() {
     idle_task.set_cpumask(KCpuMask::one_shot_logical(cpu_id));
     #[cfg(feature = "smp")]
     RunQueue::set_owner_cpu(&idle_task, cpu_id);
+    let idle_task = idle_task.into_arc_kernel(ksched::KernelClass::Idle);
     with_idle_task(|i| {
-        i.init_once(idle_task.into_arc());
+        i.init_once(idle_task.clone());
     });
 
     // Put the subsequent execution into the `main` task.
@@ -314,11 +307,10 @@ pub(crate) fn init() {
     unsafe { CurrentTask::init_current(main_task.clone()) }
 
     with_run_queue(|rq| {
-        rq.init_once(RunQueue::new(cpu_id));
+        rq.init_once(RunQueue::new(cpu_id, idle_task));
     });
     RUN_QUEUES.register_current(cpu_id, current_run_queue_ptr());
-    #[cfg(feature = "smp")]
-    current_run_queue_ref().charge_rq_load(&main_task);
+    current_run_queue_ref().install_running(&main_task);
     #[cfg(feature = "smp")]
     current_run_queue_ref().charge_home(&main_task);
 }
@@ -327,7 +319,8 @@ pub(crate) fn init_secondary() {
     let cpu_id = this_cpu_id();
 
     // Put the subsequent execution into the `idle` task.
-    let idle_task = TaskInner::new_current_idle("idle".into()).into_arc();
+    let idle_task =
+        TaskInner::new_current_idle("idle".into()).into_arc_kernel(ksched::KernelClass::Idle);
     idle_task.set_state(TaskState::Running);
     #[cfg(feature = "smp")]
     RunQueue::set_owner_cpu(&idle_task, cpu_id);
@@ -338,10 +331,11 @@ pub(crate) fn init_secondary() {
     });
     // SAFETY: scheduler bring-up installs the first current task for this CPU
     // before any concurrent task access can occur.
-    unsafe { CurrentTask::init_current(idle_task) }
+    unsafe { CurrentTask::init_current(idle_task.clone()) }
 
     with_run_queue(|rq| {
-        rq.init_once(RunQueue::new(cpu_id));
+        rq.init_once(RunQueue::new(cpu_id, idle_task.clone()));
     });
     RUN_QUEUES.register_current(cpu_id, current_run_queue_ptr());
+    current_run_queue_ref().install_running(&idle_task);
 }

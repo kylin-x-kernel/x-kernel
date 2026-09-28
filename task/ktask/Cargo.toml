@@ -19,17 +19,13 @@ tls = ["khal/tls"]
 preempt = ["kspin/preempt", "ktimer_core/preempt"]
 smp = ["kspin/smp", "ipi", "ktimer_core/smp"]
 
-sched_fifo = []
-sched_rr = ["preempt"]
-sched_cfs = ["preempt"]
-sched_eevdf = ["preempt"]
 sched_stat = []
 arm-timer-resume-fixup = []
 
 
 [dependencies]
 kerrno.workspace = true
-ktimer_core.workspace = true
+ktimer_core = { workspace = true, features = ["preempt"] }
 kidentity.workspace = true
 khal.workspace = true
 ktime_types.workspace = true
@@ -46,7 +42,7 @@ futures-util = { version = "0.3", default-features = false, features = [
     "alloc",
     "async-await-macro",
 ] }
-kspin = { workspace = true }
+kspin = { workspace = true, features = ["preempt"] }
 lazyinit = { workspace = true }
 log = { workspace = true }
 memaddr = { workspace = true }

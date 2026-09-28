@@ -352,13 +352,13 @@ Invariants:
 | T-07 | Affinity migrate race drops a task | Medium | Concurrent mutation during migrate | `migrate_current` is under the run-queue critical section. `enforce_affinity_placement` holds the RQ lock for `remove_task` of a queued ready task, is mask-only when the task does not occupy a CPU, and waits for remote preempt to finish a running task. |
 | T-07a | `setaffinity` succeeds but the task stays on a forbidden CPU | High | Non-current path only writes the mask | Success requires the task not occupy a forbidden CPU (running/queued must move; unpublished is mask-only); otherwise `false`/`EBUSY`. `preempt_resched`/`yield` force affinity migrate. |
 | T-07b | A running-task leave path skips deactivate and leaves scheduler residue | High | A new leave path bypasses the unified API | All leaves go through `leave_current`. EEVDF `curr` is non-owning. `pick_next` asserts. |
-| T-07c | `blocked_resched` without an extra strong ref frees the task at switch | High | Caller did not clone current | rustdoc `# Panics`; `#[track_caller]` plus `strong_count > 1`; `block_on` clones first; unittest `blocked_resched_survives_with_caller_owned_ref`. |
+| T-07c | `blocked_resched` without an extra strong ref frees the task at switch | High | Caller did not clone current | rustdoc `# Panics`; `#[track_caller]` plus `strong_count > 2`; `block_on` clones first; unittest `blocked_resched_survives_with_caller_owned_ref`. |
 | T-07d | Prepared wait blocks the wrong task or an atomic context | High | Handle moved across a coroutine, or `park` after taking a lock | Handle is `!Send`/`!Sync`. Prepare checks context before allocation; `park` asserts task identity and context. Callers still own lock constraints that cannot be checked dynamically. |
 | T-07e | Early or spurious wake loses a notification or completes early | High | Predicate check races `park`, or the scheduler wakes the task alone | Reuse `KWaker` dual latch checks and the RQ handshake; hold a strong task ref across switch; `park` only returns a wake hint; the caller rechecks the predicate and owns event registration. |
 | T-08 | A long or repeatedly rearmed callback stalls scheduling | High | Callback abuse or repeated already-due rearm | API requires short, non-blocking hardirq callbacks. Core dispatch bounds catch-up rounds for deadlines reached during delivery. Residual: it cannot interrupt a callback or bound one round that continually rearms at or before its fixed cutoff. |
 | T-09 | Remote wake is not scheduled promptly | Medium | Task is on a remote RQ but that CPU has not reached a preempt safe point | SMP requires IPI. Remote IPI only sets `need_resched`. A failed probe arms backup hrtick in dest `preempt_resched`. Residual: IPI send failure or a late safe point. |
 | T-09b | IRQ teardown wait blocks the current task in the wrong context | High | Hardirq/softirq/BH-disabled path indirectly calls the `IrqSyncWaitIf` provider | `kirq` context-gates before entering the provider. `ktask` only supplies the blocking mechanism and does not relax IRQ-sync API constraints. |
-| T-09f | Softirq schedule query consumes the task request early | Medium | A batch-boundary query clears `need_resched` or schedules directly | `SoftirqDaemonIf::needs_resched()` only Acquire-reads. Real scheduling stays at a safe point. Returns false with no task or without `preempt`. |
+| T-09f | Softirq schedule query consumes the task request early | Medium | A batch-boundary query clears `need_resched` or schedules directly | `SoftirqDaemonIf::needs_resched()` only Acquire-reads. Real scheduling stays at a safe point. Returns false with no task. |
 | T-09c | Workerqueue wait bypasses `kworkqueue_ng` lifecycle predicates | High | A `ktask` wait helper blocks without letting `kworkqueue_ng` recheck work state | `ktask` only supplies yield/wait. Work state, cancel/flush predicates, and the deadlock gate stay in `kworkqueue_ng`. |
 | T-09d | Custom/dynamic workqueue wrongly creates a dedicated task | Medium | Queue-level API reintroduces host/stop/wake or stores a `WorkQueueHandle` | Normal worker/manager tasks belong to `kworkerpool_ng`. Logical queues share pool tasks; queue closure may wait through `ktask` but does not own or destroy those tasks. |
 | T-09e | Interrupt-like context calls `ktask::sleep*()` directly | High | BH workqueue callback, softirq action, hardirq, or BH-disabled path bypasses the upper context gate | `sleep()`, `sleep_until()`, and `interruptible_sleep_until()` check `kirq::context::is_in_interrupt_context()` and fail-fast. `yield_now()` is not a sleep/blocking API. |
@@ -420,7 +420,7 @@ Known limits:
    affinity, wake `select_idle_sibling`, spawn idle-first plus `nr_home`,
    and idle-pull of one Ready `!on_cpu` waiter from a CPU with
    `nr_running >= 2` when about to idle. `on_cpu` must be rejected; only src
-   is locked. `add_task` always `request_resched` (including a busy home) so
+   is locked. `add_task` always `kick(Decision)` (including a busy home) so
    a new peer is not invisible after the dynamic timer is disarmed.
    EEVDF: wake PLACE_LAG plus a full-request deadline; involuntary preempt
    first `peer_preempts_curr` then decides `leave_current(Preempt)`; wake
@@ -433,17 +433,18 @@ Known limits:
    EEVDF `curr` is not a task-lifetime owner.
 2. `select_run_queue` is idle-first (`nr_running == 0`) then `nr_home`.
    `select_wake_run_queue` matches `select_idle_sibling` (home if prev is
-   idle, otherwise `nr_running == 0`; stay on prev if none idle; `find_idlest`
+   idle, otherwise `nr_running == 0` from `load_count`; stay on prev if none idle; `find_idlest`
    only when home is outside the cpumask and no idle CPU exists). Do not add
    a separate sticky-home idle overflow before SIS.
-3. SMP must enable `ipi`: a remote wake's preempt request sets
-   `need_resched` through IPI. `interrupt()` of a running task (signal
-   delivery) uses the same IPI; otherwise a NOHZ lone runner never leaves
-   user mode. `smp && !ipi` is a compile-time reject. IPI callbacks must
-   not account/refresh the dest RQ.
-4. `on_timer_fire` defers hardware rearm across a wake batch and rereads
-   the soft earliest afterwards. `account_sched_tick` (`check_preempt_tick`)
-   runs only when the schedule slot is due; otherwise it only accounts.
+3. SMP must enable `ipi`: a remote wake's `kick` sets `need_resched`
+   through IPI. `interrupt()` of a running task (signal delivery) uses the
+   same IPI; otherwise a NOHZ lone runner never leaves user mode.
+   `smp && !ipi` is a compile-time reject. IPI callbacks must not lock or
+   reprogram dest's scheduler.
+4. `on_timer_fire` defers hardware rearm across a wake batch and then
+   refreshes the schedule slot from `next_event_ns`. `account_sched_tick`
+   (`check_preempt_tick`) runs only when the schedule slot is due;
+   otherwise it only accounts.
    Immediate preempt pending from `switch_to` lands on the incoming task.
    Under NOHZ, running-entity wall time is flushed before add/wake.
 5. The `unsafe` surface is still large and should keep shrinking into
@@ -463,8 +464,6 @@ timer routing. Test source existence is not execution proof.
 - New block/wake logic keeps `TaskState` transitions one-way and correct.
 - `smp` paths consider the `on_cpu` / migrate concurrency window.
 - Exit and reclaim avoid early free and leaked refs.
-- Behavior is consistent with and without `preempt` (no missing feature
-  branch).
 - Tick / preempt changes do not switch mid-critical-section.
 - Wake-handoff / memory-order changes follow the IK9KW6 3-way TCG steps in
   `docs/design.md`. Do not substitute one-VM hammering or a guest stress

@@ -538,6 +538,8 @@ impl<T> FairClass<T> {
     }
 
     fn requeue_prev(&mut self, prev: Arc<SchedTask<T>>, tok: RqLocked) {
+        // `prev` is inserted first, so `curr = None` still sees it in the tree
+        // and an ahead waiter cannot raise `min_vruntime` past it.
         self.enqueue_tree(prev, None, tok);
     }
 
@@ -838,17 +840,49 @@ impl<T> FairClass<T> {
         unsafe { self.avg_vruntime(curr, RqLocked::assume()) }
     }
 
-    pub(crate) fn inject_ready_for_test(
-        &mut self,
-        task: Arc<SchedTask<T>>,
-        curr: Option<&SchedTask<T>>,
-    ) {
+    pub(crate) fn inject_ready_for_test(&mut self, task: Arc<SchedTask<T>>) {
         // SAFETY: kernel unittests run on one thread and own this class.
         let tok = unsafe { RqLocked::assume() };
-        self.enqueue_tree(task, curr, tok);
+        self.enqueue_tree(task, None, tok);
     }
 
     pub(crate) fn has_sync_wake_for_test(&self) -> bool {
         self.has_sync_wake
+    }
+
+    pub(crate) fn ready_indices_valid_for_test(&self) -> bool {
+        // SAFETY: ksched unittests are single-threaded.
+        let tok = unsafe { RqLocked::assume() };
+        let same_members = self.ready.iter().all(|task| {
+            self.vruntime_tree
+                .find(&(task.fair().vruntime.get(tok), task.fair().tree_id.get(tok)))
+                .get()
+                .is_some_and(|other| core::ptr::eq(task, other))
+        });
+        let same_first = |tree_front: Option<&SchedTask<T>>, cached: Option<&Arc<SchedTask<T>>>| {
+            tree_front.map(core::ptr::from_ref) == cached.map(Arc::as_ptr)
+        };
+        same_members
+            && self.ready.iter().count() == self.vruntime_tree.iter().count()
+            && self.ready.iter().count() == self.queued
+            && same_first(self.ready.front().get(), self.first_deadline.as_ref())
+            && same_first(
+                self.vruntime_tree.front().get(),
+                self.first_vruntime.as_ref(),
+            )
+            && self.total_weight
+                == self
+                    .ready
+                    .iter()
+                    .map(|task| Self::weight(task, tok))
+                    .sum::<i64>()
+            && self.sum_wv
+                == self
+                    .ready
+                    .iter()
+                    .map(|task| {
+                        task.fair().vruntime.get(tok) as i128 * Self::weight(task, tok) as i128
+                    })
+                    .sum::<i128>()
     }
 }

@@ -25,9 +25,6 @@ IPI_IRQ=0x8000000000000001
 # KFEAT_FS_FAT is not set
 KFEAT_FS_TIMES=y
 KFEAT_NET=y
-# KFEAT_SCHED_CFS is not set
-# KFEAT_SCHED_FIFO is not set
-# KFEAT_SCHED_RR is not set
 # KFEAT_VIRTIO_BUS_MMIO is not set
 KFEAT_VSOCK=y
 # KFEAT_VMM is not set

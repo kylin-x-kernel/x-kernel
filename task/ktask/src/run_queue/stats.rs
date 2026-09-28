@@ -13,13 +13,10 @@ use core::sync::atomic::AtomicU64;
 #[cfg(feature = "sched_stat")]
 use core::sync::atomic::Ordering;
 
-#[cfg(any(feature = "sched_stat", all(feature = "preempt", feature = "smp")))]
+#[cfg(any(feature = "sched_stat", feature = "smp"))]
 use kcpu_id_map::LogicalCpuId;
 #[cfg(feature = "sched_stat")]
 use khal::percpu::this_cpu_id;
-
-#[cfg(all(feature = "sched_stat", feature = "sched_eevdf", feature = "smp"))]
-use super::RUN_QUEUES;
 
 #[cfg(feature = "sched_stat")]
 pub(super) struct SchedCpuStats {
@@ -214,49 +211,6 @@ pub(crate) fn sched_stats_text() -> String {
         );
     }
 
-    #[cfg(all(feature = "sched_eevdf", feature = "smp"))]
-    {
-        // Per-CPU guard + skip unregistered RQs: `/proc/sched_stat` must not
-        // hold IRQ/preempt off across all CPUs, nor panic on a present-but-not-
-        // brought-up CPU.
-        for cpu in 0..kcpu_id_map::nr_cpus() {
-            let stats = {
-                let _guard = kspin::NoPreemptIrqSave::new();
-                let Some(rq) = RUN_QUEUES.try_get(cpu) else {
-                    continue;
-                };
-                rq.scheduler.lock().stats()
-            };
-            let _ = writeln!(
-                out,
-                "[eevdf_stat] cpu={} picks={} deadline_preempt={} fallback_no_eligible={} \
-                 slice_expired={} wake_handoff={} wake_handoff_skipped_busy={} \
-                 wake_sync_preempt={}",
-                cpu,
-                stats.picks_total,
-                stats.preempt_by_deadline,
-                stats.fallback_no_eligible,
-                stats.slice_expired,
-                stats.wake_handoff,
-                stats.wake_handoff_skipped_busy,
-                stats.wake_sync_preempt,
-            );
-            let _ = writeln!(
-                out,
-                "[eevdf_wake] cpu={} mark={} mark_no_buddy={} nom_no_curr={} probe_no_buddy={} \
-                 probe_ineligible={} probe_false_buddy={} buddy_drop={}",
-                cpu,
-                stats.wake_sync_mark,
-                stats.wake_sync_mark_no_buddy,
-                stats.wake_nominate_no_curr,
-                stats.probe_sync_no_buddy,
-                stats.probe_sync_ineligible,
-                stats.probe_false_with_buddy,
-                stats.buddy_pick_drop,
-            );
-        }
-    }
-
     let _ = writeln!(out, "[sched_stat] end");
     out
 }
@@ -299,12 +253,7 @@ pub(crate) fn record_preempt_pending_blocked(can_preempt: bool, in_exception: bo
 #[inline]
 pub(crate) fn record_preempt_pending_blocked(_can_preempt: bool, _in_exception: bool) {}
 
-#[cfg(all(
-    feature = "preempt",
-    feature = "smp",
-    feature = "ipi",
-    feature = "sched_stat"
-))]
+#[cfg(all(feature = "smp", feature = "sched_stat"))]
 #[inline]
 pub(super) fn record_remote_resched(cpu_id: LogicalCpuId, failed: bool) {
     let stats = sched_stat_cpu(cpu_id);
@@ -314,11 +263,6 @@ pub(super) fn record_remote_resched(cpu_id: LogicalCpuId, failed: bool) {
     }
 }
 
-#[cfg(all(
-    feature = "preempt",
-    feature = "smp",
-    feature = "ipi",
-    not(feature = "sched_stat")
-))]
+#[cfg(all(feature = "smp", not(feature = "sched_stat")))]
 #[inline]
 pub(super) fn record_remote_resched(_cpu_id: LogicalCpuId, _failed: bool) {}

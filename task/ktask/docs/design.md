@@ -41,7 +41,7 @@ the node normally. Timer IRQ readiness remains a start-time requirement.
 
 X-Kernel splits class algorithms from the task runtime:
 
-- `ksched` supplies FIFO / RR / CFS / EEVDF algorithm traits and entities.
+- `ksched` supplies the Fair/Idle class arbitrator (`Scheduler`).
 - `ktask` owns lifecycle, current-task context, per-CPU run queues, switch,
   and block/wake.
 
@@ -229,9 +229,11 @@ workers, not through the hardware timer interrupt path.
 `tests_timer_irq.rs` separately exercises real local IRQ delivery, explicit rearm,
 notification-only service and repeated remote advances/pending migrations.
 
-The `preempt` and `smp` features forward to the matching `ktimer_core`
-features so lock configuration stays consistent. Feature forwarding does not
-initialize timer-service state or mark a CPU ready.
+`kspin` and `ktimer_core` preemption are always on. The leftover `preempt`
+Cargo feature still forwards the same knobs; this crate does not gate
+code on it. The `smp` feature forwards to `ktimer_core/smp` so lock
+configuration stays consistent. Feature forwarding does not initialize
+timer-service state or mark a CPU ready.
 
 ## Execution context and calling constraints
 
@@ -346,7 +348,7 @@ that hardirq-exit / BH-enable did not cover or that exceeded the restart
 budget. `needs_resched()` only Acquire-reads the current task's preempt
 request so `kirq` can decide whether to back off at a batch boundary. It does
 not consume the request or call the scheduler; it returns false with no
-current task or without `preempt`. After each real softirq batch the daemon
+current task. After each real softirq batch the daemon
 calls `yield_now()` before the outer pending/wait loop, matching Linux
 `run_ksoftirqd()` `cond_resched()` after `__do_softirq()`. If wait
 registration fails (for example under memory pressure), the daemon yields
@@ -430,16 +432,14 @@ consumed at the next safe point after the critical section exits.
 Owned timers accept `MonotonicInstant` and store bounded absolute nanoseconds
 in the core. Hardware arbitration reads the current prepared service deadline
 under its CPU lock. Context switch, block/exit/migrate, priority change, and local
-`request_resched` also account and refresh the schedule deadline. A remote
-wake IPI only sets `need_resched` (same as before the periodic-tick change).
-IRQ-tail `peer_preempts_curr` decides whether to switch; a failed probe arms
-the remaining-request backup hrtick in `preempt_resched`. Do not
-`account` / `refresh` the dest RQ from the IPI: that races the waker's remote
-run-queue critical section and can reprogram or disarm the schedule slot,
-leaving a busy home idle for a full request. Because a oneshot/NOHZ CPU may
-have stopped its clock entirely, `smp` without `ipi` cannot reliably advance a
-remote runnable task. `ktask` rejects that configuration at compile time and
-does not offer a fake local fallback.
+`kick` also account and refresh the schedule deadline. A remote wake IPI
+only sets `need_resched`. IRQ-tail `WakeProbe` decides whether to switch; a
+failed probe arms the remaining-request backup hrtick in `preempt_resched`.
+Do not `account` / `refresh` dest's scheduler or timer from the IPI: that
+races the waker's remote run-queue critical section. Because a oneshot/NOHZ CPU may have stopped its clock
+entirely, `smp` without `ipi` cannot reliably advance a remote runnable
+task. `ktask` rejects that configuration at compile time and does not offer
+a fake local fallback.
 
 Accepted starts refresh the actual owner after releasing registration locks.
 Cancellation can leave a stale hardware IRQ, which rechecks the current queues;
@@ -612,11 +612,12 @@ exit completion.
   lower `nr_home` still wins (an empty CPU beats a sleeper's CPU). Ties use
   `prefer_local`, then RR.
 - `placement.rs` (`select_wake_run_queue`) matches Linux `select_idle_sibling`:
-  go home if prev is idle, otherwise pick a `nr_running == 0` CPU. Sticky-home
-  plus "home busy → idle overflow" collapsed schbench to about 3-way
-  parallelism (RPS ~450 → ~325). Under SIS the displaced worker can seek idle
-  again (musical chairs, still about 4-way on average). Stay on prev when no
-  idle CPU exists.
+  go home if prev is idle, otherwise pick a `nr_running == 0` CPU.
+  `nr_running` is `refactor_ksched`'s `load_count`: queued plus a non-idle
+  runner. Sticky-home plus "home busy → idle overflow" collapsed schbench to
+  about 3-way parallelism (RPS ~450 → ~325). Under SIS the displaced worker
+  can seek idle again (musical chairs, still about 4-way on average). Stay on
+  prev when no idle CPU exists.
 - There is no periodic balancer. Besides affinity and the wake SIS above,
   an about-to-idle CPU does a Linux-style idle-pull: steal one
   **Ready && `!on_cpu`** waiter from a CPU with `nr_running >= 2`, through
@@ -630,10 +631,10 @@ exit completion.
   Steal changes `cpu_id`. Under SIS that is expected musical chairs: the
   next wake goes home if prev is idle, otherwise seeks idle again.
   Spawn / `activate_task` / affinity migrate-in still use `find_idlest_cpu`.
-- `add_task` always `request_resched` after first enqueue (remote IPI / local
-  pending plus schedule-deadline refresh). A dynamic timer is already disarmed
-  for a lone task; a busy home cannot rely on a nonexistent periodic tick to
-  discover a new peer later.
+- `add_task` always `kick` after first enqueue (local `need_resched` plus
+  timer re-arm; remote IPI). A dynamic timer is already disarmed for a lone
+  task; a busy home cannot rely on a nonexistent periodic tick to discover a
+  new peer later.
 - EEVDF (`ksched`) matches Linux `pick_eevdf` / `place_entity`:
   - Wake `PLACE_LAG`: `vruntime = V - lag` (lag first inflated by `(W+w)/W`).
     Deadline uses the **full request** (`vd = ve + r/w`, request in ns,
@@ -701,9 +702,9 @@ exit completion.
 - `set_task_affinity` writes `cpumask` then `enforce_affinity_placement`.
   Migration happens only while the task **occupies** a CPU: current
   immediately `migrate_current`; ready already on a forbidden RQ is
-  `remove_task` then `migrate_entry` (dest enqueue then `request_resched_on`,
+  `remove_task` then `migrate_entry` (dest enqueue then `kick(Decision)`,
   same as `add_task`); a remote running task under `preempt`+`ipi` gets
-  `request_resched`, and `preempt_resched` / `yield_current` force-migrate
+  a reschedule IPI, and `preempt_resched` / `yield_current` force-migrate
   when the mask no longer contains this CPU. The caller spins until the
   task leaves the forbidden CPU; failure returns `false` (syscall `EBUSY`).
   A prepared-but-not-activated task, Blocked/Exited, and the idle-pull
@@ -769,7 +770,7 @@ exit completion.
 | Schedule timer `update_current` | No (usually sets pending first) |
 | Local-CPU waker | No (sets pending; preempt at a safe point) |
 | Remote waker | No (may IPI remote pending and refresh the schedule deadline) |
-| `add_task` / `migrate_entry` (local busy/idle or remote) | No (`request_resched`; remote IPI) |
+| `add_task` / `migrate_entry` (local busy/idle or remote) | No (`kick(Decision)`; remote IPI) |
 | `enable_preempt` with `need_resched` | Maybe (`preempt_resched`) |
 
 `ktask` is therefore not a "fixed tick always switches" model. It is a
@@ -781,10 +782,6 @@ dynamic schedule timer plus safe-point preemption model.
 |---|---|
 | `preempt` | Preemption logic and the `kspin` preempt interface |
 | `smp` | Multi-CPU run queues and migration; also enables `ipi` |
-| `sched_fifo` | FIFO cooperative scheduling |
-| `sched_rr` | RR preemptive scheduling (implies `preempt`) |
-| `sched_cfs` | CFS preemptive scheduling (implies `preempt`) |
-| `sched_eevdf` | EEVDF preemptive scheduling (implies `preempt`) |
 | `snapshot` | Task snapshot and backtrace foundation |
 | `watchdog` | Watchdog diagnostics (depends on `snapshot`); `watchdog_hardlockup` also needs root Kconfig `KFEAT_NMI` (mechanism + PMU period source, AArch64 QEMU) |
 | `ipi` | Required for SMP remote wake / reschedule |

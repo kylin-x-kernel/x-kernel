@@ -29,9 +29,9 @@ mod tests_blocked_resched {
         STRONG_OK.store(0, Ordering::Release);
 
         let waiter = spawn(move || {
-            // into_raw current slot = 1; this clone is the required second.
+            // CurrentTask slot + Scheduler.curr + this clone (`strong_count > 2`).
             let keep_alive = current().clone();
-            if Arc::strong_count(&keep_alive) > 1 {
+            if Arc::strong_count(&keep_alive) > 2 {
                 STRONG_OK.store(1, Ordering::Release);
             }
 
@@ -55,6 +55,14 @@ mod tests_blocked_resched {
         }
         assert_eq!(STRONG_OK.load(Ordering::Acquire), 1);
         assert_eq!(RESUMED.load(Ordering::Acquire), 1);
+    }
+
+    /// `resched` must accept idle fallback (`Ready` or still `Running` idle).
+    #[def_test]
+    fn yield_now_repeatedly_does_not_panic() {
+        for _ in 0..8 {
+            yield_now();
+        }
     }
 }
 
@@ -177,11 +185,12 @@ mod tests_wake_affinity {
         task.set_state(TaskState::Blocked);
         task.set_on_cpu(true);
 
-        let result = select_wake_run_queue::<NoPreemptIrqSave>(&task)
+        let (result, decision) = select_wake_run_queue::<NoPreemptIrqSave>(&task)
             .inner
             .put_task_with_state(task.clone(), TaskState::Blocked, false, true);
 
         assert!(result == WakeEnqueue::Deferred);
+        assert!(decision.is_none());
         assert_eq!(task.take_wake_enqueue(), Some((false, true)));
         task.set_on_cpu(false);
     }
@@ -357,18 +366,18 @@ mod tests_wake_affinity {
         mask.set(0, true);
         mask.set(1, true);
         task.set_cpumask(mask);
-        assert!(can_idle_pull_task(&task, 0));
+        assert!(can_idle_pull_task(task.as_ref(), 0));
         task.set_on_cpu(true);
-        assert!(!can_idle_pull_task(&task, 0));
+        assert!(!can_idle_pull_task(task.as_ref(), 0));
         task.set_on_cpu(false);
         let mut only_home = KCpuMask::new();
         only_home.set(1, true);
         task.set_cpumask(only_home);
-        assert!(!can_idle_pull_task(&task, 0));
+        assert!(!can_idle_pull_task(task.as_ref(), 0));
     }
 }
 
-#[cfg(all(feature = "preempt", unittest))]
+#[cfg(unittest)]
 mod tests_interrupt_kick {
     use unittest::{assert, def_test};
 

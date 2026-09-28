@@ -2899,6 +2899,7 @@ name = "ksched"
 version = "0.3.0-dev"
 dependencies = [
  "intrusive-collections",
+ "kbuild_config",
  "unittest",
 ]
 

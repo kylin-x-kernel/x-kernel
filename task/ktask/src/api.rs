@@ -32,29 +32,9 @@ pub use kcpu_id_map::KCpuMask;
 
 static CPU_NUM: AtomicUsize = AtomicUsize::new(1);
 
-cfg_select! {
-    feature = "sched_rr" => {
-        const MAX_SLICE_NS: usize = ksched::DEFAULT_RR_SLICE_NS as usize;
-        pub(crate) type KTask = ksched::RRTask<TaskInner, MAX_SLICE_NS>;
-        pub(crate) type Scheduler = ksched::RRScheduler<TaskInner, MAX_SLICE_NS>;
-    }
-    feature = "sched_cfs" => {
-        pub(crate) type KTask = axsched::CFSTask<TaskInner>;
-        pub(crate) type Scheduler = axsched::CFScheduler<TaskInner>;
-    }
-    feature = "sched_eevdf" => {
-        const MAX_SLICE_NS: usize = ksched::DEFAULT_SLICE_NS as usize;
-        pub(crate) type KTask = ksched::EevdfEntity<TaskInner, MAX_SLICE_NS>;
-        pub(crate) type Scheduler = ksched::EevdfScheduler<TaskInner, MAX_SLICE_NS>;
-    }
-    _ => {
-        // If no scheduler features are set, use FIFO as the default.
-        pub(crate) type KTask = ksched::FifoTask<TaskInner>;
-        pub(crate) type Scheduler = ksched::FifoScheduler<TaskInner>;
-    }
-}
+pub(crate) type KTask = ksched::SchedTask<TaskInner>;
+pub(crate) type Scheduler = ksched::Scheduler<TaskInner>;
 
-#[cfg(feature = "preempt")]
 #[kiface::provide]
 impl kspin::KernelGuardIf {
     fn disable_preempt() {
@@ -97,7 +77,7 @@ fn init_scheduler_with_cpu_num(cpu_num: usize) {
 
     crate::run_queue::init();
 
-    info!("  use {} scheduler.", Scheduler::scheduler_name());
+    info!("  use Fair/Idle class arbitrator.");
 }
 
 pub(crate) fn active_cpu_num() -> usize {
@@ -228,17 +208,12 @@ pub(crate) fn program_sched_deadline_for(
     rel_ns: Option<u64>,
 ) {
     let (deadline, is_immediate) = schedule_deadline_request(now_ns, rel_ns);
-    #[cfg(feature = "preempt")]
     if is_immediate {
         if let Some(task) = task {
             task.set_preempt_pending(true);
         } else if let Some(curr) = current_may_uninit() {
             curr.set_preempt_pending(true);
         }
-    }
-    #[cfg(not(feature = "preempt"))]
-    {
-        let _ = (is_immediate, task);
     }
     set_sched_deadline_ns(deadline);
 }
@@ -293,14 +268,11 @@ pub fn on_timer_fire() {
     // Account the interrupted task before waking anyone else.
     // Linux `entity_tick` (`check_preempt_tick`) only runs on the schedule
     // slot, not on every owned timer IRQ.
-    #[cfg(feature = "sched_eevdf")]
     if sched_due {
         current_run_queue::<NoOp>().account_sched_tick(now_ns);
     } else {
         current_run_queue::<NoOp>().account_current_runtime(now_ns);
     }
-    #[cfg(not(feature = "sched_eevdf"))]
-    current_run_queue::<NoOp>().account_current_runtime(now_ns);
     // Timer callbacks and their wakeups may register/cancel timers or
     // refresh scheduler slots. Defer their hardware writes until the final
     // arbitration below, after all wakeups have run.
@@ -327,17 +299,13 @@ pub fn on_timer_fire() {
     let _ = sched_due;
 
     current_run_queue::<NoOp>().refresh_sched_deadline(now_ns);
-    // Re-read under the CPU timer lock after callbacks and wakeups.
     rearm_local_timer();
 }
 
 /// Called from a remote reschedule IPI: request preemption.
 ///
-/// Match the pre-NOHZ path: only set `need_resched`. Accounting and timer
-/// refresh here raced the waker's `&mut RunQueue` and could reprogram (or
-/// disarm) the target's schedule slot before the IRQ-tail `peer_preempts_curr`
-/// probe. A failed probe arms the backup hrtick in `preempt_resched`.
-#[cfg(all(feature = "preempt", feature = "smp"))]
+/// Only set `need_resched`. The IRQ-tail probe arms the hrtick.
+#[cfg(feature = "smp")]
 pub(crate) fn on_remote_resched_ipi() {
     current().set_preempt_pending(true);
 }
@@ -346,7 +314,7 @@ pub(crate) fn on_remote_resched_ipi() {
 #[kiface::provide]
 impl kipi::RescheduleIpiIf {
     fn on_reschedule() {
-        #[cfg(all(feature = "preempt", feature = "smp"))]
+        #[cfg(feature = "smp")]
         on_remote_resched_ipi();
     }
 }
@@ -368,15 +336,11 @@ impl kipi::TimerReprogramIpiIf {
 /// current task is initialized, and it still obeys the normal preemption guards:
 /// a context switch is only performed when the current task can be preempted and
 /// the CPU is no longer inside an active exception context.
-#[cfg(feature = "preempt")]
 pub fn check_preempt_pending() {
     if current_may_uninit().is_some() {
         crate::task::TaskInner::current_check_preempt_pending();
     }
 }
-
-#[cfg(not(feature = "preempt"))]
-pub fn check_preempt_pending() {}
 
 /// Adds the given task to the run queue, returns the task reference.
 pub fn spawn_task(task: TaskInner) -> KtaskRef {
@@ -668,7 +632,6 @@ fn can_sleep_task_context(task: &KtaskRef) -> bool {
     }
     // A held no-preempt section must not span a switch either; its preempt
     // credit would leak across the switched-out interval.
-    #[cfg(feature = "preempt")]
     if task.preempt_section_held() {
         return false;
     }
@@ -889,9 +852,6 @@ mod tests_api {
             assert!(text.contains("timer_irq_sched="));
             assert!(text.contains("timer_irq_stale="));
             assert!(text.contains("[sched_stat] end"));
-            #[cfg(all(feature = "sched_eevdf", feature = "smp"))]
-            assert!(text.contains("[eevdf_stat]"));
-            #[cfg(not(all(feature = "sched_eevdf", feature = "smp")))]
             assert!(!text.contains("[eevdf_stat]"));
         }
         #[cfg(not(feature = "sched_stat"))]
@@ -941,7 +901,6 @@ mod tests_api {
             let _irqs_off = kspin::NoPreemptIrqSave::new();
             assert!(!super::is_sleepable_context());
         }
-        #[cfg(feature = "preempt")]
         {
             let _no_preempt = kspin::NoPreempt::new();
             assert!(!super::is_sleepable_context());

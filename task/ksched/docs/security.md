@@ -3,24 +3,17 @@
 ## 信任模型
 
 ```
-ktask RunQueue（生产调用方，仍走插件）
-   │
-   │ BaseScheduler safe API
-   │
-   v
-┌──────────────────────────────────┐
-│  FIFO / RR / CFS / EEVDF         │
-└──────────────────────────────────┘
-
-Scheduler（ktask 尚未调用）
-   │  调用方必须已持有目标 RQ 锁
+ktask RunQueue（生产调用方）
+   │  持有 RQ 锁后调用 Scheduler
    v
 Stop / Deadline / RT（未接线） -> Fair EEVDF -> Idle
 ```
 
-- 插件调用方必须保证：同一 RQ 上序列化访问；运行任务离开必经 `leave_current`。
-- 读写 `RqCell` 的 `Scheduler` 方法是 `unsafe`。`RqLocked::assume()` 只出现在
-  这些 `unsafe fn` 内部，前提由调用方在 `# Safety` 里保证：已持有该 RQ 锁。
+- 调用方必须保证：同一 RQ 上序列化访问；运行任务离开必经
+  `yield_current` / `preempt_current` / `block_current` / `migrate_current` /
+  `exit_current`。
+- `Scheduler` 的公有方法是安全的。`RqLocked::assume()` 只出现在私有
+  `token()` 里：`ktask` 在持有该 RQ 锁时调用这些方法。
   `init_attr_unpublished` 仍是 `pub(crate)`，只适用于尚未发布、由创建者独占
   的任务。本 crate 不检查锁本身。
 - 调度器信任传入的任务状态已由调用方校验。用户策略只经 `SchedAttr::validate`。
@@ -98,7 +91,7 @@ IRQ/preempt 约束提供。
 |------|----------|----------|----------|----------|
 | T-01 | 漏 `leave_current` 导致陈旧 `curr`/统计失真 | 高 | 新 leave 路径未接入统一 API | 统一 `leave_current`；EEVDF `pick_next` 断言 |
 | T-02 | 调度器持有运行任务 `Arc` 拖住生命周期 | 高 | `curr` 强引用未释放 | `curr` 改为非 owning 快照 |
-| T-03 | Exit 误设 PLACE_LAG | 中 | Exit 与 Block 共用 sleep 记账 | `CurrentDisposition::Exit` 单独分支 |
+| T-03 | Exit 误设 PLACE_LAG | 中 | Exit 与 Block 共用 sleep 记账 | `LeaveReason::Exit` 单独分支 |
 | T-04 | 迁移后源 RQ 仍计入任务权重 | 中 | Migrate 未清 current 记账 | Migrate 走 `leave_current` 清快照 |
 | T-05 | `curr` 快照过期导致错误抢占/放置 | 中 | 改运行实体字段后未刷新 | `update_current`/`set_priority` 刷新；测试辅助显式同步 |
 | T-06 | idle-pull 偷走仍 `on_cpu` 的实体 | 高 | yield/preempt 入树后远端 `steal_ready_task` | 调度器只摘 ready waiter；ktask 谓词拒绝 `on_cpu`，不 `pick_next` |
