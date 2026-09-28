@@ -2,12 +2,20 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Provider-neutral transport abstraction for 9P request/response traffic.
+//! Provider-neutral transport connection used by the 9P client.
 
-use alloc::string::String;
+use kerrno::KResult;
 
-/// Transport for sending raw 9P requests and receiving replies.
-pub trait Transport: Send + Sync {
-    /// Send `req` and write the response into `resp`, returning the used length.
-    fn request(&self, req: &[u8], resp: &mut [u8]) -> Result<usize, String>;
+/// One connected 9P transport endpoint.
+pub trait P9Transport: Send {
+    /// Sends one raw request and waits for its response.
+    ///
+    /// This operation may block and must run in task context without a
+    /// spinlock held or interrupts disabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport-specific kernel error when the request cannot be
+    /// completed. The response buffer contents are unspecified on error.
+    fn request(&mut self, request: &[u8], response: &mut [u8]) -> KResult<usize>;
 }

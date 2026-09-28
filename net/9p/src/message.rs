@@ -2,13 +2,14 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Transport-independent message builder and decoding helpers for 9P packets.
+//! Message builder and decoding helpers for 9P packets.
 
 use alloc::{
-    format,
     string::{String, ToString},
     vec::Vec,
 };
+
+use kerrno::{KError, KResult};
 
 use crate::protocol::Qid;
 
@@ -24,10 +25,6 @@ impl Message {
         buf.push(msg_type);
         buf.extend_from_slice(&tag.to_le_bytes());
         Self { buf }
-    }
-
-    pub(crate) fn push_u8(&mut self, value: u8) {
-        self.buf.push(value);
     }
 
     pub(crate) fn push_u16(&mut self, value: u16) {
@@ -60,63 +57,48 @@ impl Message {
     }
 }
 
-pub(crate) fn read_u8(buf: &[u8], offset: &mut usize) -> Result<u8, String> {
+pub(crate) fn read_u8(buf: &[u8], offset: &mut usize) -> KResult<u8> {
     Ok(read_exact(buf, offset, 1)?[0])
 }
 
-pub(crate) fn read_u16(buf: &[u8], offset: &mut usize) -> Result<u16, String> {
+pub(crate) fn read_u16(buf: &[u8], offset: &mut usize) -> KResult<u16> {
     let bytes = read_exact(buf, offset, 2)?;
     Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
-pub(crate) fn read_u32(buf: &[u8], offset: &mut usize) -> Result<u32, String> {
+pub(crate) fn read_u32(buf: &[u8], offset: &mut usize) -> KResult<u32> {
     let bytes = read_exact(buf, offset, 4)?;
     Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
-pub(crate) fn read_u64(buf: &[u8], offset: &mut usize) -> Result<u64, String> {
+pub(crate) fn read_u64(buf: &[u8], offset: &mut usize) -> KResult<u64> {
     let bytes = read_exact(buf, offset, 8)?;
     Ok(u64::from_le_bytes([
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
     ]))
 }
 
-pub(crate) fn read_str(buf: &[u8], offset: &mut usize) -> Result<String, String> {
+pub(crate) fn read_str(buf: &[u8], offset: &mut usize) -> KResult<String> {
     let len = read_u16(buf, offset)? as usize;
-    let value = core::str::from_utf8(read_exact(buf, offset, len)?)
-        .map_err(|_| String::from("invalid utf8"))?;
+    let value =
+        core::str::from_utf8(read_exact(buf, offset, len)?).map_err(|_| KError::InvalidData)?;
     Ok(value.to_string())
 }
 
-fn read_exact<'a>(buf: &'a [u8], offset: &mut usize, len: usize) -> Result<&'a [u8], String> {
-    let end = offset
-        .checked_add(len)
-        .ok_or_else(|| String::from("short buffer"))?;
-    let bytes = buf
-        .get(*offset..end)
-        .ok_or_else(|| String::from("short buffer"))?;
+fn read_exact<'a>(buf: &'a [u8], offset: &mut usize, len: usize) -> KResult<&'a [u8]> {
+    let end = offset.checked_add(len).ok_or(KError::InvalidData)?;
+    let bytes = buf.get(*offset..end).ok_or(KError::InvalidData)?;
     *offset = end;
     Ok(bytes)
 }
 
-pub(crate) fn read_qid(buf: &[u8], offset: &mut usize) -> Result<Qid, String> {
+pub(crate) fn read_qid(buf: &[u8], offset: &mut usize) -> KResult<Qid> {
     let type_ = read_u8(buf, offset)?;
     let version = read_u32(buf, offset)?;
     let path = read_u64(buf, offset)?;
     Ok(Qid {
         type_,
-        _version: version,
-        _path: path,
+        version,
+        path,
     })
-}
-
-pub(crate) fn dump_hex(buf: &[u8]) -> String {
-    let mut out = String::new();
-    for (idx, byte) in buf.iter().enumerate() {
-        if idx > 0 {
-            out.push(' ');
-        }
-        out.push_str(&format!("{:02x}", byte));
-    }
-    out
 }

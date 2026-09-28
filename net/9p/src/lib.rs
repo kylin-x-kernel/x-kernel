@@ -4,15 +4,18 @@
 
 #![no_std]
 
-//! Transport-independent 9P client library for `no_std` targets.
+//! 9P2000.L protocol client objects for `no_std` targets.
 
 extern crate alloc;
 
+mod client;
 mod message;
-mod parse;
 mod protocol;
-mod session;
 mod transport;
 
-pub use session::{FileAttr, P9DirEntry, P9Session as Session};
-pub use transport::Transport;
+pub use client::{
+    FileAttr, P9Client, P9DirEntry, P9Fid, P9OpenFlags, P9OpenMode, P9SetAttr, P9SetAttrTime,
+    P9StatFs,
+};
+pub use protocol::Qid;
+pub use transport::P9Transport;

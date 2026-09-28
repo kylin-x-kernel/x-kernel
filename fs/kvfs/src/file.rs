@@ -453,6 +453,11 @@ impl VfsFileBuilder {
         self.mode
     }
 
+    /// Returns the open flags supplied for this in-progress open.
+    pub fn flags(&self) -> OpenFlags {
+        self.flags
+    }
+
     /// Returns whether this open request has normalized nonblocking semantics.
     pub fn is_nonblocking(&self) -> bool {
         self.flags.contains(OpenFlags::NONBLOCK)

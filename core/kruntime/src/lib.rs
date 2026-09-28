@@ -278,7 +278,7 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
         fs_boot::mount_virtual_filesystems();
     }
 
-    #[cfg(feature = "fs9p")]
+    #[cfg(all(feature = "fs9p", not(unittest)))]
     fs_boot::mount_host_share("/mnt/hostshare");
 
     #[cfg(feature = "net")]

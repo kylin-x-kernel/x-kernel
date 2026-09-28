@@ -1,6 +1,6 @@
 [package]
 name = "v9fs"
-description = "9P filesystem implementation for X-Kernel VFS"
+description = "VFS adapter for the 9P2000.L client"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -16,7 +16,6 @@ default = []
 p9.workspace = true
 kcred.workspace = true
 kerrno.workspace = true
-ksync.workspace = true
 ktime_types.workspace = true
 kvfs.workspace = true
 unittest.workspace = true

@@ -2,8 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Transport-independent 9P protocol constants and data types.
-#![allow(unused)]
+//! 9P protocol constants and data types.
+
 /// Special values used by the protocol.
 pub const NO_FID: u32 = 0xFFFF_FFFF;
 pub const NO_TAG: u16 = 0xFFFF;
@@ -14,14 +14,12 @@ pub const TATTACH: u8 = 104;
 pub const RATTACH: u8 = 105;
 pub const RERROR: u8 = 107;
 pub const RLERROR: u8 = 7;
+pub const TSTATFS: u8 = 8;
+pub const RSTATFS: u8 = 9;
 pub const TREMOVE: u8 = 122;
 pub const RREMOVE: u8 = 123;
 pub const TWALK: u8 = 110;
 pub const RWALK: u8 = 111;
-pub const TOPEN: u8 = 112;
-pub const ROPEN: u8 = 113;
-pub const TCREATE: u8 = 114;
-pub const RCREATE: u8 = 115;
 pub const TREAD: u8 = 116;
 pub const RREAD: u8 = 117;
 pub const TWRITE: u8 = 118;
@@ -34,6 +32,10 @@ pub const TLINK: u8 = 70;
 pub const RLINK: u8 = 71;
 pub const TMKDIR: u8 = 72;
 pub const RMKDIR: u8 = 73;
+pub const TRENAMEAT: u8 = 74;
+pub const RRENAMEAT: u8 = 75;
+pub const TUNLINKAT: u8 = 76;
+pub const RUNLINKAT: u8 = 77;
 pub const TSYMLINK: u8 = 16;
 pub const RSYMLINK: u8 = 17;
 pub const TMKNOD: u8 = 18;
@@ -42,8 +44,6 @@ pub const TSETATTR: u8 = 26;
 pub const RSETATTR: u8 = 27;
 pub const TLOPEN: u8 = 12;
 pub const RLOPEN: u8 = 13;
-pub const TLCREATE: u8 = 14;
-pub const RLCREATE: u8 = 15;
 pub const TGETATTR: u8 = 24;
 pub const RGETATTR: u8 = 25;
 pub const TRENAME: u8 = 20;
@@ -53,35 +53,59 @@ pub const RREADDIR: u8 = 41;
 pub const TFSYNC: u8 = 50;
 pub const RFSYNC: u8 = 51;
 
-pub const OREAD: u8 = 0;
-#[allow(dead_code)]
-pub const OWRITE: u8 = 1;
-#[allow(dead_code)]
-pub const ORDWR: u8 = 2;
-#[allow(dead_code)]
-pub const OTRUNC: u8 = 0x10;
-#[allow(dead_code)]
-pub const OAPPEND: u8 = 0x80;
-
 pub const P9_DOTL_RDONLY: u32 = 0;
 pub const P9_DOTL_WRONLY: u32 = 1;
 pub const P9_DOTL_RDWR: u32 = 2;
-pub const P9_DOTL_CREATE: u32 = 0x100;
-pub const P9_DOTL_TRUNC: u32 = 0x1000;
-pub const P9_DOTL_APPEND: u32 = 0x2000;
+pub const P9L_MODE_MASK: u32 = 0x1fff;
 
-pub const P9_ATTR_SIZE: u32 = 1 << 3;
 pub const P9_SETATTR_MODE: u32 = 1;
+pub const P9_SETATTR_UID: u32 = 1 << 1;
+pub const P9_SETATTR_GID: u32 = 1 << 2;
+pub const P9_SETATTR_SIZE: u32 = 1 << 3;
+pub const P9_SETATTR_ATIME: u32 = 1 << 4;
+pub const P9_SETATTR_MTIME: u32 = 1 << 5;
+pub const P9_SETATTR_CTIME: u32 = 1 << 6;
+pub const P9_SETATTR_ATIME_SET: u32 = 1 << 7;
+pub const P9_SETATTR_MTIME_SET: u32 = 1 << 8;
+pub const P9_DOTL_AT_REMOVEDIR: u32 = 0x200;
 pub const P9_STATS_BASIC: u64 = 0x000007ff;
+pub const P9_STATS_GEN: u64 = 1 << 12;
 
-pub const DMDIR: u32 = 0x8000_0000;
+pub const P9_IOHDRSZ: u32 = 24;
+pub const P9_MAXWELEM: usize = 16;
+pub const DEFAULT_MSIZE: u32 = 128 * 1024 + P9_IOHDRSZ;
 
-pub const DEFAULT_MSIZE: u32 = 16384;
-
-/// Qid identifies a file within a 9P server.
-#[derive(Clone, Copy, Debug)]
+/// Identifies one file object within a 9P server.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Qid {
     pub(crate) type_: u8,
-    pub(crate) _version: u32,
-    pub(crate) _path: u64,
+    pub(crate) version: u32,
+    pub(crate) path: u64,
+}
+
+impl Qid {
+    /// Returns the protocol file-type bits.
+    pub const fn file_type(self) -> u8 {
+        self.type_
+    }
+
+    /// Returns the server-maintained file version.
+    pub const fn version(self) -> u32 {
+        self.version
+    }
+
+    /// Returns the server-stable file identity used as the VFS inode number.
+    pub const fn path(self) -> u64 {
+        self.path
+    }
+
+    /// Returns whether this qid identifies a directory.
+    pub const fn is_dir(self) -> bool {
+        self.type_ & 0x80 != 0
+    }
+
+    /// Returns whether this qid identifies a symbolic link.
+    pub const fn is_symlink(self) -> bool {
+        self.type_ & 0x02 != 0
+    }
 }

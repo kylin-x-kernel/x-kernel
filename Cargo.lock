@@ -1604,11 +1604,11 @@ dependencies = [
  "kcred",
  "kdevice-uevent",
  "kerrno",
- "ksync",
  "kvfs",
  "log",
  "macros",
  "memfs",
+ "p9",
  "pipefs",
  "procfs",
  "sysfs",
@@ -3709,8 +3709,11 @@ dependencies = [
 
 [[package]]
 name = "p9"
-version = "0.1.0"
+version = "0.3.0-dev"
 dependencies = [
+ "bitflags 2.13.2",
+ "kerrno",
+ "ksync",
  "log",
  "unittest",
 ]
@@ -5465,7 +5468,6 @@ version = "0.3.0-dev"
 dependencies = [
  "kcred",
  "kerrno",
- "ksync",
  "ktime_types",
  "kvfs",
  "p9",

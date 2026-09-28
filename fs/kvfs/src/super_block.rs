@@ -515,7 +515,7 @@ impl SuperBlock {
     }
 
     /// Returns the root dentry for this superblock.
-    pub fn root_dir(self: &Arc<Self>) -> Dentry {
+    pub fn root_dir(&self) -> Dentry {
         self.root
             .get()
             .expect("a published superblock must have a root dentry")

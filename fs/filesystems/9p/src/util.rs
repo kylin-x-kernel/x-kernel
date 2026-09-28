@@ -2,41 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Utilities for the concrete 9P filesystem implementation.
+//! 9P adapter utilities.
 
-use alloc::string::String;
-
-use kerrno::LinuxError;
-use kvfs::{DeviceId, NodeType, VfsError};
-
-/// Convert a 9P session error (String) into a VFS error.
-///
-/// The 9P `Session` methods return `Result<..., String>` where the error
-/// string may contain a numeric errno (from `rlerror errno=N`) or a
-/// human-readable message.
-pub(crate) fn into_vfs_err(err: String) -> VfsError {
-    // Try to parse "rlerror errno=N" format from RLERROR responses.
-    if let Some(rest) = err.strip_prefix("rlerror errno=")
-        && let Ok(errno) = rest.trim().parse::<i32>()
-    {
-        return VfsError::from(LinuxError::new(errno));
-    }
-
-    // Map well-known messages.
-    let linux_error = if err.contains("not found") || err.contains("walk failed") {
-        LinuxError::ENOENT
-    } else if err.contains("not a directory") {
-        LinuxError::ENOTDIR
-    } else if err.contains("not initialized") || err.contains("not available") {
-        LinuxError::ENODEV
-    } else if err.contains("requires 9P2000.L") || err.contains("unsupported") {
-        LinuxError::EOPNOTSUPP
-    } else {
-        LinuxError::EIO
-    };
-
-    VfsError::from(linux_error)
-}
+use kvfs::{DeviceId, NodeType};
 
 /// Decode a 9P2000.L st_rdev value with Linux new_decode_dev semantics.
 pub(crate) fn dotl_decode_dev(encoded: u64) -> DeviceId {
@@ -62,34 +30,31 @@ pub(crate) fn dtype_to_vfs(dtype: u8) -> NodeType {
 
 #[cfg(unittest)]
 mod tests {
-    use kvfs::{DeviceId, NodeType};
     use unittest::{assert_eq, def_test};
 
-    #[def_test]
-    fn dotl_device_number_decoding_matches_linux_layout() {
-        for (major, minor) in [(0, 0), (1, 2), (0x123, 0x4_5678), (0xfff, 0xf_ffff)] {
-            let encoded = DeviceId::new(major, minor).0;
-            let decoded = super::dotl_decode_dev(encoded);
+    use super::*;
 
-            assert_eq!(decoded.major(), major);
-            assert_eq!(decoded.minor(), minor);
-        }
+    #[def_test]
+    fn dotl_device_number_uses_linux_encoding() {
+        let major = 0xabc_u32;
+        let minor = 0xdef01_u32;
+        let encoded = ((major & 0xfff) << 8) | (minor & 0xff) | ((minor & !0xff) << 12);
+
+        let device = dotl_decode_dev(u64::from(encoded));
+
+        assert_eq!(device.major(), major);
+        assert_eq!(device.minor(), minor);
     }
 
     #[def_test]
-    fn directory_entry_types_match_linux_values() {
-        for (dtype, node_type) in [
-            (1, NodeType::Fifo),
-            (2, NodeType::CharacterDevice),
-            (4, NodeType::Directory),
-            (6, NodeType::BlockDevice),
-            (8, NodeType::RegularFile),
-            (10, NodeType::Symlink),
-            (12, NodeType::Socket),
-            (0, NodeType::Unknown),
-            (u8::MAX, NodeType::Unknown),
-        ] {
-            assert_eq!(super::dtype_to_vfs(dtype), node_type);
-        }
+    fn dotl_directory_entry_types_map_to_vfs_types() {
+        assert_eq!(dtype_to_vfs(1), NodeType::Fifo);
+        assert_eq!(dtype_to_vfs(2), NodeType::CharacterDevice);
+        assert_eq!(dtype_to_vfs(4), NodeType::Directory);
+        assert_eq!(dtype_to_vfs(6), NodeType::BlockDevice);
+        assert_eq!(dtype_to_vfs(8), NodeType::RegularFile);
+        assert_eq!(dtype_to_vfs(10), NodeType::Symlink);
+        assert_eq!(dtype_to_vfs(12), NodeType::Socket);
+        assert_eq!(dtype_to_vfs(0xff), NodeType::Unknown);
     }
 }

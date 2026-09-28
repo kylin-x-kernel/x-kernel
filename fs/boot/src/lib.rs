@@ -17,13 +17,15 @@ extern crate alloc;
 extern crate log;
 
 #[cfg(feature = "fs9p")]
-use alloc::{boxed::Box, string::String};
+use alloc::boxed::Box;
 use alloc::{format, sync::Arc, vec::Vec};
 
 #[cfg(feature = "fs9p")]
-use kclass::{ClassDevice, Virtio9pDevice as _, Virtio9pDeviceImpl, virtio_9p_devices};
+use kclass::{
+    ClassDevice, Virtio9pDevice as _, Virtio9pDeviceImpl, prelude::DriverError, virtio_9p_devices,
+};
 #[cfg(feature = "fs9p")]
-use ksync::Mutex;
+use kerrno::KError;
 #[cfg(feature = "fs9p")]
 use kvfs::{FileSystemType, FsContext, FsContextOperations};
 use kvfs::{
@@ -55,14 +57,29 @@ pub fn init_device_discovery() {
 }
 
 #[cfg(feature = "fs9p")]
-struct Virtio9pTransport(Mutex<ClassDevice<Virtio9pDeviceImpl>>);
+struct Virtio9pTransport(ClassDevice<Virtio9pDeviceImpl>);
 
 #[cfg(feature = "fs9p")]
-impl v9fs::Transport for Virtio9pTransport {
-    fn request(&self, req: &[u8], resp: &mut [u8]) -> Result<usize, String> {
-        let dev = self.0.lock();
-        dev.request(req, resp)
-            .map_err(|err| format!("virtio-9p error: {err:?}"))
+impl p9::P9Transport for Virtio9pTransport {
+    fn request(&mut self, request: &[u8], response: &mut [u8]) -> kerrno::KResult<usize> {
+        self.0
+            .request(request, response)
+            .map_err(map_9p_driver_error)
+    }
+}
+
+#[cfg(feature = "fs9p")]
+fn map_9p_driver_error(error: DriverError) -> KError {
+    match error {
+        DriverError::AlreadyExists => KError::AlreadyExists,
+        DriverError::WouldBlock => KError::WouldBlock,
+        DriverError::BadState => KError::BadState,
+        DriverError::InvalidInput => KError::InvalidInput,
+        DriverError::Io => KError::Io,
+        DriverError::NoMemory => KError::NoMemory,
+        DriverError::ReadOnly => KError::ReadOnlyFilesystem,
+        DriverError::ResourceBusy => KError::ResourceBusy,
+        DriverError::Unsupported => KError::OperationNotSupported,
     }
 }
 
@@ -80,15 +97,13 @@ fn host_9p_get_tree(
         None => devices.pop(),
     }
     .ok_or(kvfs::VfsError::NoSuchDevice)?;
-    let mount_tag = handle.mount_tag();
-
     info!("Mount 9P filesystem...");
     info!("  use virtio-9p device: {:?}", handle.name());
-    info!("  mount tag: {:?}", mount_tag);
+    info!("  mount tag: {:?}", handle.mount_tag());
 
-    let transport = Box::new(Virtio9pTransport(Mutex::new(handle)));
+    let transport = Box::new(Virtio9pTransport(handle));
     kvfs::get_tree_nodev(context, move |file_system_type, superblock_flags| {
-        v9fs::Fs9pFilesystem::mount(file_system_type, superblock_flags, transport, mount_tag)
+        v9fs::mount(file_system_type, superblock_flags, transport)
     })
 }
 

@@ -1,15 +1,19 @@
 [package]
 name = "p9"
-version = "0.1.0"
-edition = "2024"
-description = "Transport-independent 9P client library for Rust"
-license = "Apache-2.0"
-repository = "https://github.com/x-kernel/fs9p"
-homepage = "https://github.com/x-kernel/fs9p"
-authors = ["Debin <luodeb@outlook.com>"]
+description = "Transport-independent 9P2000.L client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
 
 [dependencies]
-log = { version = "0.4", default-features = false }
+bitflags.workspace = true
+kerrno.workspace = true
+ksync.workspace = true
+log.workspace = true
 unittest.workspace = true
 
 [features]
