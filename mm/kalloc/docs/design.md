@@ -20,7 +20,7 @@ byte allocator、全局 page buddy 以及相应的 per-CPU cache。
 - 页表、用户虚拟内存、page cache 和通用连续页使用者；
 - `kdma` 等需要 DMA32 物理地址的子系统；
 - 使用 [`GlobalPage`](../src/page.rs) 管理连续页生命周期的内核组件；
-- 可选的 allocation tracking 和 TEE/DICE C ABI 兼容层。
+- 可选的 allocation tracking。
 
 ## 背景
 
@@ -55,8 +55,7 @@ mm/kalloc/
 │   ├── page.rs         # GlobalPage RAII 封装
 │   ├── pcp.rs          # 1–4 页 per-CPU page cache
 │   ├── slab_cache.rs   # slab 配置下的 per-CPU object cache
-│   ├── tracking.rs     # 可选 allocation tracking
-│   └── ffi.rs          # TEE/DICE 配置下的 C ABI allocation/memory shims
+│   └── tracking.rs     # 可选 allocation tracking
 └── docs/
     ├── design.md
     └── security.md
@@ -81,12 +80,13 @@ mm/kalloc/
 其他可选能力：
 
 - `tracking`：记录 Rust 全局堆 allocation 的 layout、backtrace 和 generation；
-- `tee` / `dice`：编译 `ffi.rs` 中的 C allocation 与 memory symbols。
+- `tee` / `dice`：本 crate 内已无代码受其门控。两个 feature 仍保留声明，因为
+  `api/kfeat`（`dice`）与 `tee_kernel`（`tee`）的 feature 图会启用它们。
 
 ## 架构
 
 ```text
-                       Rust alloc / kernel callers / C shims
+                       Rust alloc / kernel callers
                                       |
                                       v
                               GlobalAllocator
@@ -299,15 +299,21 @@ slab object 会使这些中央视图与 caller-live usage 存在预期差异。
 
 tracking 只用于诊断，不改变 allocator ownership。它引入全局 tracking lock、backtrace
 采集和 map 操作，因此启用后的性能不能代表普通 allocation 路径。直接调用
-`GlobalAllocator` page/byte API 的路径（包括本 crate 的 C shims）不经过这个 wrapper，
-不会自动加入 tracking map。
+`GlobalAllocator` page/byte API 的路径不经过这个 wrapper，不会自动加入 tracking map。
 
-### C ABI shims
+### C ABI symbols
 
-启用 `tee` 或 `dice` 后，`ffi.rs` 导出 `malloc`、`free`、`calloc`、`memcpy`、
-`memmove`、`memset`、`memcmp` 和 `__memcpy_chk`。C allocation 在返回给 caller 的地址
-前保存一个 `usize` 大小的 user-size header，`free` 据此重建原始 layout。所有 raw
-pointer 与 length 合法性仍由 C caller 保证。
+本 crate 不再导出任何 C ABI symbol。原先 `ffi.rs` 在 `tee` / `dice` 下导出 `malloc`、
+`free`、`calloc`、`memcpy`、`memmove`、`memset`、`memcmp` 和 `__memcpy_chk`，供当时的
+C 组件（mbedtls 等）链接；TEE 加密栈已改为纯 Rust 实现，树内也没有其他 C 代码进入内核
+镜像，因此整个模块被移除。
+
+移除后 `memcpy` / `memmove` / `memset` / `memcmp` 由 rustc 为目标附带的
+`compiler_builtins` 提供——它以弱符号导出这四个名字，链接时自然生效。这一点很关键：
+`core::ptr::write_bytes` 与 `copy_nonoverlapping` / `copy` 会被 LLVM 降成对同名 C 符号的
+调用，因此**谁提供这个强符号，谁就决定了全内核页清零与页拷贝的实现**。之前手写 shim 以
+`#[no_mangle]` 强符号顶掉弱定义，把逐字节循环变成了整个内核的 mem 原语；现在交回上游实现，
+不再需要本 crate 维护其正确性与性能。
 
 ## 调用约束 / 执行上下文
 
@@ -376,5 +382,3 @@ usage、`used_bytes()` 和 `used_pages()` 分别反映不同层次，且读取�
 - PCP 和 slab cache 在达到各自水位时批量归还，但没有 shutdown、CPU-offline 或全局
   pressure flush。
 - 直接 page API 的 caller 必须显式成对 deallocate；`GlobalPage` 通过 `Drop` 自动完成。
-- C `malloc`/`calloc` allocation 必须由同模块的 `free` 释放；其 size header 与用户地址
-  具有相同生命周期。

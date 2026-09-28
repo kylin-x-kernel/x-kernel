@@ -6,8 +6,6 @@ license.workspace = true
 homepage.workspace = true
 
 [features]
-tee = []
-dice = []
 default = []
 tlsf = ["alloc-engine/tlsf"]
 slab = ["alloc-engine/slab"]

@@ -409,6 +409,9 @@ impl<M: PagingMetaData> ToFlush<M> {
 pub struct PageTableMut<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> {
     inner: &'a mut PageTable64<M, PTE, H>,
     flush: ToFlush<M>,
+    /// Whether an entry was installed into a previously unused slot on an
+    /// architecture that needs no invalidation for that transition.
+    fresh_map: bool,
 }
 
 impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Deref
@@ -426,6 +429,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         Self {
             inner,
             flush: ToFlush::None,
+            fresh_map: false,
         }
     }
 
@@ -526,7 +530,15 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
             return Err(PtError::AlreadyMapped);
         }
         *entry = PageTableEntry::new_page(paddr.align_down(page_size), flags, page_size.is_huge());
-        self.flush(vaddr);
+        // The entry was verified unused above, so architectures that cannot
+        // cache a translation for an invalid entry need no invalidation here;
+        // they only owe the other walkers an ordered entry write, which
+        // `finish` emits once for the whole batch.
+        if M::INVALID_TO_VALID_NEEDS_TLBI {
+            self.flush(vaddr);
+        } else {
+            self.fresh_map = true;
+        }
         Ok(())
     }
 
@@ -898,6 +910,12 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
                 }
             }
         }
+        // A pending invalidation already ends with a full-system barrier, so
+        // the weaker store-only fence is only needed when nothing was flushed.
+        if self.fresh_map && !had_pending {
+            M::fence_fresh_map();
+        }
+        self.fresh_map = false;
         self.flush = ToFlush::None;
         TlbFlushReceipt::new(had_pending)
     }
@@ -1472,5 +1490,124 @@ mod tests {
             assert_eq!(OTHER_FLUSHES.load(Ordering::Relaxed), 0);
             assert_eq!(FREED_FRAMES.load(Ordering::Relaxed), DropMeta::LEVELS);
         }
+    }
+
+    /// Models an architecture whose walkers cannot cache a translation for an
+    /// invalid entry, so a fresh mapping skips invalidation and only fences.
+    struct FreshMapMeta;
+
+    static FRESH_MAP_INVALIDATIONS: AtomicUsize = AtomicUsize::new(0);
+    static FRESH_MAP_FENCES: AtomicUsize = AtomicUsize::new(0);
+
+    impl PagingMetaData for FreshMapMeta {
+        type VirtAddr = VirtAddr;
+
+        const INVALID_TO_VALID_NEEDS_TLBI: bool = false;
+        const LEVELS: usize = 4;
+        const PA_MAX_BITS: usize = usize::BITS as usize - 1;
+        const VA_MAX_BITS: usize = usize::BITS as usize - 1;
+
+        fn vaddr_is_valid(_vaddr: usize) -> bool {
+            true
+        }
+
+        fn paddr_is_valid(_paddr: usize) -> bool {
+            true
+        }
+
+        fn flush_tlb(_vaddr: Option<Self::VirtAddr>) {
+            FRESH_MAP_INVALIDATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn fence_fresh_map() {
+            FRESH_MAP_FENCES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    type FreshMapPageTable = PageTable64<FreshMapMeta, TestEntry, TestHandler>;
+
+    fn reset_fresh_map_counters() {
+        FRESH_MAP_INVALIDATIONS.store(0, Ordering::Relaxed);
+        FRESH_MAP_FENCES.store(0, Ordering::Relaxed);
+    }
+
+    #[def_test(serial)]
+    fn fresh_map_fences_once_without_invalidating() {
+        reset_fresh_map_counters();
+        let mut table = FreshMapPageTable::try_new_kernel().expect("fresh-map page table");
+
+        let receipt = {
+            let mut guard = table.modify();
+            guard
+                .map(
+                    vaddr(0x4000),
+                    paddr(0x20_0000),
+                    PageSize::Size4K,
+                    PagingFlags::READ | PagingFlags::WRITE,
+                )
+                .expect("first fresh map");
+            guard
+                .map(
+                    vaddr(0x5000),
+                    paddr(0x21_0000),
+                    PageSize::Size4K,
+                    PagingFlags::READ | PagingFlags::WRITE,
+                )
+                .expect("second fresh map");
+            guard.finish()
+        };
+
+        assert!(!receipt.had_pending());
+        assert_eq!(FRESH_MAP_INVALIDATIONS.load(Ordering::Relaxed), 0);
+        // Two fresh maps in one boundary share a single fence.
+        assert_eq!(FRESH_MAP_FENCES.load(Ordering::Relaxed), 1);
+    }
+
+    #[def_test(serial)]
+    fn unmap_still_invalidates_on_a_fence_only_architecture() {
+        reset_fresh_map_counters();
+        let mut table = FreshMapPageTable::try_new_kernel().expect("fresh-map page table");
+        {
+            let mut guard = table.modify();
+            guard
+                .map(
+                    vaddr(0x4000),
+                    paddr(0x20_0000),
+                    PageSize::Size4K,
+                    PagingFlags::READ | PagingFlags::WRITE,
+                )
+                .expect("fresh map before unmap");
+            guard.finish();
+        }
+        reset_fresh_map_counters();
+
+        let receipt = {
+            let mut guard = table.modify();
+            let _ = guard.unmap(vaddr(0x4000)).expect("unmap fresh page");
+            guard.finish()
+        };
+
+        assert!(receipt.had_pending());
+        assert!(FRESH_MAP_INVALIDATIONS.load(Ordering::Relaxed) > 0);
+        // The invalidation sequence already orders the entry write.
+        assert_eq!(FRESH_MAP_FENCES.load(Ordering::Relaxed), 0);
+    }
+
+    #[def_test(serial)]
+    fn fresh_map_invalidates_when_architecture_requires_it() {
+        // `TestMeta` keeps the conservative default, so installing into an
+        // unused entry must still be reported as a pending invalidation.
+        let mut table = TestPageTable::try_new_kernel().expect("default-policy page table");
+        let mut guard = table.modify();
+        guard
+            .map(
+                vaddr(0x4000),
+                paddr(0x20_0000),
+                PageSize::Size4K,
+                PagingFlags::READ | PagingFlags::WRITE,
+            )
+            .expect("fresh map under default policy");
+        let receipt = guard.finish();
+        assert!(receipt.had_pending());
     }
 }

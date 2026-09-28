@@ -105,6 +105,11 @@ The following responsibilities belong to other layers:
     └────────────────────────────finish()──> None
 ```
 
+`PageTableMut` carries an independent `fresh_map` flag for architectures whose
+`INVALID_TO_VALID_NEEDS_TLBI` is `false`. `map()` sets it instead of recording
+an address, and `finish()` clears it after emitting `fence_fresh_map()` once,
+skipped when the same boundary already invalidated something.
+
 | From | To | Trigger |
 |------|----|---------|
 | `None` | `Addresses` | First call to `flush(vaddr)`. |
@@ -162,13 +167,27 @@ Three-level page tables (Sv39) skip P4 and start at P3.
 
 1. `PageTableMut` maintains a `ToFlush` value.
 2. Each successful PTE change made by
-   `map/unmap/remap/protect/replace_if_same` records its address with `flush(vaddr)`.
+   `unmap/remap/protect/replace_if_same` records its address with `flush(vaddr)`.
+   `map` records the address only when the architecture reports
+   `INVALID_TO_VALID_NEEDS_TLBI`; it always installs into a slot it verified
+   unused, and an architecture that cannot cache a translation for an invalid
+   entry has nothing to invalidate there.
 3. Up to 16 addresses are retained for individual invalidation.
    Exceeding this threshold changes the state to `Full`.
 4. `finish()` invalidates each recorded address for `Addresses`, or performs
-   a full invalidation for the target scope for `Full`, then returns a
-   `TlbFlushReceipt`.
+   a full invalidation for the target scope for `Full`. When nothing was
+   pending and at least one fresh mapping was installed, it emits
+   `M::fence_fresh_map()` instead, so the entry writes reach other translation
+   table walkers without the cost of an invalidation broadcast. It then
+   returns a `TlbFlushReceipt`.
 5. `Drop` calls `finish()` automatically to finalize pending invalidations.
+
+Because `TlbFlushReceipt` reports only pending invalidations, a boundary that
+installed fresh mappings on a fence-only architecture returns a receipt with
+`had_pending() == false`. Callers that release a physical frame after removing
+it from a PTE still rely on an invalidation having run, and that path is
+unaffected: removal always records an address, so its receipt reports pending
+work.
 
 `TlbFlushReceipt` marks an explicit ordering boundary after page table changes.
 It hides architecture-specific details and indicates that flush finalization

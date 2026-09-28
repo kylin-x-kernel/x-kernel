@@ -9,11 +9,8 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 
-[package.metadata.cargo-shear]
-ignored = ["kalloc"]
-
 [features]
-default = ["linux_sysno/tee", "kalloc/tee", "tee_ss_smx"]
+default = ["linux_sysno/tee", "tee_ss_smx"]
 tee_cfg_memtag = []
 tee_ss_smx = []
 csv_huk_key = ["dep:kcpu"]
@@ -22,7 +19,6 @@ dice_huk_key = ["dep:dice_driver", "dep:xdice"]
 virtcca_huk_key = []
 
 [dependencies]
-kalloc.workspace = true
 unittest.workspace = true
 unittest_support.workspace = true
 xdice = { workspace = true, optional = true, features = ["nostd"] }

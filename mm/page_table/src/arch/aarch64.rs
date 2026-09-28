@@ -205,6 +205,10 @@ pub struct A64PagingMetaData;
 impl PagingMetaData for A64PagingMetaData {
     type VirtAddr = VirtAddr;
 
+    // ARMv8 does not cache a translation for an invalid entry, so making an
+    // unused entry valid needs no TLBI; the entry write only has to reach the
+    // other translation table walkers in the Inner Shareable domain.
+    const INVALID_TO_VALID_NEEDS_TLBI: bool = false;
     const LEVELS: usize = 4;
     const PA_MAX_BITS: usize = 48;
     const VA_MAX_BITS: usize = 48;
@@ -217,6 +221,11 @@ impl PagingMetaData for A64PagingMetaData {
     #[inline]
     fn flush_tlb(vaddr: Option<VirtAddr>) {
         karch::flush_tlb(vaddr);
+    }
+
+    #[inline]
+    fn fence_fresh_map() {
+        karch::dsb_ishst();
     }
 
     #[cfg(feature = "smp")]

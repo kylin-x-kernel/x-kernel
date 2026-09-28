@@ -47,9 +47,7 @@ ipi = ["dep:kipi", "kruntime/ipi", "ktask?/ipi"]
 dma-trace = ["kdriver/dma-trace"]
 dev_log = ["devfs/dev-log"]
 dice = [
-    "dep:kalloc",
     "dep:tee_kernel",
-    "kalloc/dice",
     "tee_kernel/dice_huk_key",
     "devfs/dice",
 ]

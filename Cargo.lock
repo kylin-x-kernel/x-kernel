@@ -5105,7 +5105,6 @@ dependencies = [
  "entropy",
  "fs_context",
  "hex",
- "kalloc",
  "kcpu",
  "kerrno",
  "khal",

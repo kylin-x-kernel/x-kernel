@@ -9,9 +9,6 @@
 extern crate log;
 extern crate alloc;
 
-#[cfg(any(feature = "dice", feature = "tee"))]
-mod ffi;
-
 use core::{
     alloc::{GlobalAlloc, Layout},
     fmt,

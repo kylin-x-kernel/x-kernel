@@ -237,6 +237,10 @@ pub type PtResult<T = ()> = Result<T, PtError>;
 /// - `LEVELS` must be 3 or 4 (matching `walk_page_table!` macro support).
 /// - `PA_MAX_BITS` and `VA_MAX_BITS` must match the hardware configuration.
 /// - `flush_tlb()` must actually invalidate the relevant TLB entries.
+/// - `INVALID_TO_VALID_NEEDS_TLBI` may only be `false` when the architecture
+///   guarantees that no translation for an invalid entry can be cached, and
+///   `fence_fresh_map()` then orders the entry write against other
+///   translation table walkers.
 pub trait PagingMetaData: Sync + Send {
     /// Number of page table levels (3 or 4).
     const LEVELS: usize;
@@ -249,6 +253,17 @@ pub trait PagingMetaData: Sync + Send {
 
     /// Maximum valid physical address.
     const PA_MAX_ADDR: usize = (1 << Self::PA_MAX_BITS) - 1;
+
+    /// Whether making a previously invalid entry valid requires a TLB
+    /// invalidation.
+    ///
+    /// Architectures whose walkers cannot hold a translation for an invalid
+    /// entry may set this to `false`, so installing a fresh mapping skips the
+    /// invalidation and only runs [`fence_fresh_map`](Self::fence_fresh_map).
+    /// Architectures that may cache invalid entries must keep the default,
+    /// otherwise a walker can keep using the stale invalid translation after
+    /// the entry became valid.
+    const INVALID_TO_VALID_NEEDS_TLBI: bool = true;
 
     /// Virtual address type for this architecture.
     type VirtAddr: MemoryAddr;
@@ -272,6 +287,19 @@ pub trait PagingMetaData: Sync + Send {
     /// If `vaddr` is `None`, flushes the entire TLB; otherwise flushes
     /// only the entry mapping `vaddr`.
     fn flush_tlb(vaddr: Option<Self::VirtAddr>);
+
+    /// Orders freshly installed page-table entries against other translation
+    /// table walkers.
+    ///
+    /// Runs once per finalization boundary in which entries were installed
+    /// into previously unused slots without an invalidation, so the entry
+    /// writes are observable before another PE walks them. Architectures that
+    /// invalidate on a fresh mapping never reach this hook, because the
+    /// invalidation sequence already orders the write.
+    ///
+    /// Default: no barrier.
+    #[inline]
+    fn fence_fresh_map() {}
 
     /// Flush TLB on CPUs that may still retain the target user address
     /// space's translations.

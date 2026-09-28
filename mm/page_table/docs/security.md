@@ -37,7 +37,11 @@ Callers (memspace, kexec, ...)
   virtual address and `alloc_frame()` returns an aligned physical frame.
 - **PagingMetaData implementors** must ensure that `flush_tlb()` invalidates
   the required translations and that `vaddr_is_valid()` / `paddr_is_valid()`
-  reflect hardware address constraints.
+  reflect hardware address constraints. An implementor that clears
+  `INVALID_TO_VALID_NEEDS_TLBI` asserts that its walkers cannot hold a
+  translation for an invalid entry, and must supply a `fence_fresh_map()`
+  that orders the entry write against every other translation table walker
+  that may observe it.
 
 ## Unsafe Code Inventory
 
@@ -123,7 +127,14 @@ needed.
    must outlive the entire destruction sequence.
 3. **TLB consistency**: PTE changes require TLB invalidation to prevent CPUs from
    using stale mappings. `PageTableMut::finish()` and `Drop` finalize pending
-   invalidations.
+   invalidations. The one exception is an invalid-to-valid transition on an
+   architecture that reports `INVALID_TO_VALID_NEEDS_TLBI == false`: no stale
+   translation can exist for a slot that was verified unused, so `map()`
+   records a fence request instead of an invalidation, and `finish()` emits
+   `fence_fresh_map()` once per boundary unless an invalidation already ran,
+   because that sequence ends in a stronger full-system barrier. Every other
+   transition (valid-to-valid replacement, permission change, unmap, teardown)
+   still invalidates unconditionally.
 4. **Injective p2v mapping**: `H::p2v()` must map distinct physical addresses to
    distinct virtual addresses; otherwise references created by `table_of` /
    `table_of_mut` may alias.
@@ -181,7 +192,7 @@ Status describes the controls present in this revision:
 |----|--------|--------|---------|-----------------------------|--------|
 | T-01 | `PagingHandler::p2v()` returns an incorrect virtual address, causing invalid memory access through table slices. | High | A faulty conversion or a missing direct-map mapping. | [`PagingHandlerImpl::p2v`](../../../arch/khal/src/paging.rs) delegates through `khal::mem::p2v` to [`kaddr_layout::p2v`](../../kaddr_layout/src/lib.rs), which uses checked addition of `PAGE_OFFSET`; `v2p` rejects addresses outside the linear-map and kernel-image windows. The provider verification conditions below check the remaining mapping obligation. No page-table-local check proves that the returned virtual page is mapped. | Delegated to `khal`, `kaddr_layout`, and the direct-map owner. |
 | T-02 | `PagingHandler::alloc_frame()` returns a live frame again, causing page table frames to alias. | High | Duplicate allocation by the frame allocator. | [`PagingHandlerImpl::alloc_frame`](../../../arch/khal/src/paging.rs) asserts `is_page_allocator_ready()` and calls `alloc_pages(1, PAGE_SIZE_4K, UsageKind::PageTable)`. [`GlobalAllocator::alloc_pages`](../../kalloc/src/lib.rs) protects PCP access with `IrqSave` and global allocation with `palloc.lock()`. Verify live-frame uniqueness and alignment as specified below. `alloc_table()` zeroes frames but does not detect duplicates. | Delegated to `kalloc` / `alloc-engine`; uniqueness is not rechecked here. |
-| T-03 | A PTE changes without TLB invalidation, leaving stale mappings in use. | High | Direct memory writes bypass `PageTableMut`. | `map`, `unmap`, `remap`, `protect`, and `replace_if_same` record invalidations; `PageTableMut::drop` calls `finish()`. `finish_reports_explicit_flush_boundary` checks pending-state finalization. Direct PTE memory writes remain outside this API contract. | Mitigated for the listed mutation APIs. |
+| T-03 | A PTE changes without TLB invalidation, leaving stale mappings in use. | High | Direct memory writes bypass `PageTableMut`. | `map`, `unmap`, `remap`, `protect`, and `replace_if_same` record invalidations; `PageTableMut::drop` calls `finish()`. `finish_reports_explicit_flush_boundary` checks pending-state finalization. `map` skips the invalidation only for a slot it verified unused and only when the architecture reports `INVALID_TO_VALID_NEEDS_TLBI == false`; `fresh_map_fences_once_without_invalidating` and `unmap_still_invalidates_on_a_fence_only_architecture` pin that boundary, and `fresh_map_invalidates_when_architecture_requires_it` pins the conservative default. Direct PTE memory writes remain outside this API contract. | Mitigated for the listed mutation APIs. |
 | T-04 | Unsynchronized mutations or aliases of a shared page table cause a data race. | High | Callers bypass exclusive access or mutate shared physical subtrees without coordination. | `PageTable64::modify(&mut self)` requires exclusive Rust access to one table object. The caller must also lock accesses through distinct objects sharing `copy_from()` subtrees; the borrow checker cannot detect those physical aliases. | Partial; shared-subtree synchronization belongs to callers. |
 | T-05 | Dropping a `copy_from` source leaves borrowed entries pointing to freed frames. | High | The source is dropped before its destination. | `copy_from()` marks `borrowed_entries`, and `PageTable64::drop` skips those subtrees. This prevents double release by the borrower but does not keep the source alive. The source-outlives-destination contract must be checked at each call site. | Partial; source lifetime is caller-owned and not type-checked. |
 | T-06 | `map_region` leaves partial mappings after failure. | Medium | An intermediate mapping returns `AlreadyMapped` or `NoMemory`. | `map_region()` returns the first `map()` error without rollback. Reproduce by pre-mapping a later page, mapping a region spanning it, then querying the successful prefix. Callers requiring atomic behavior must clean up that prefix without removing pre-existing mappings. | Accepted limitation; rollback and recovery belong to the caller. |
@@ -220,6 +231,26 @@ with a recording `PagingMetaData` implementation and frame-release handler:
 - `kernel_drop_skips_user_asid_flush` checks the kernel-table exclusion even
   when a provider is installed. Both exclusion cases still release all table
   frames.
+
+### Fresh-Map Invalidation Policy Coverage
+
+The `table64.rs::tests` fresh-map cases run a recording `PagingMetaData` whose
+`INVALID_TO_VALID_NEEDS_TLBI` is `false`, which models AArch64:
+
+- `fresh_map_fences_once_without_invalidating` installs two pages into unused
+  slots in one boundary and checks that no invalidation was issued, that the
+  receipt reports nothing pending, and that the two maps share a single fence.
+- `unmap_still_invalidates_on_a_fence_only_architecture` checks that removing
+  the mapping still invalidates and does not add a redundant fence.
+- `fresh_map_invalidates_when_architecture_requires_it` checks that a metadata
+  implementation keeping the default still reports a pending invalidation for
+  the same fresh map.
+
+These tests use serial execution because they read process-wide counters. The
+page tables are never installed in hardware, so they validate the bookkeeping
+contract rather than real walker behaviour; the claim that AArch64 walkers
+cannot cache an invalid translation is an architecture property, not something
+these tests can prove.
 
 These tests use serial execution and a scoped probe reset to isolate their
 recordings. The page tables are never installed in hardware. The destructor's
