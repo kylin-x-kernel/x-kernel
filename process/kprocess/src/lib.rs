@@ -127,11 +127,14 @@ pub(crate) fn allocate_thread_task_number()
 /// Runtime action requested by a syscall after handling a user trap.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UserThreadRuntimeAction {
-    /// Continue with the normal post-syscall signal check.
+    /// Continue with the normal post-syscall signal check and syscall restart.
     #[default]
     Continue,
-    /// Skip the post-syscall signal check once (used by rt_sigreturn).
-    SkipSignalCheckOnce,
+    /// Signal return already decided whether the interrupted syscall restarts.
+    ///
+    /// The caller still delivers signals that became pending while the handler
+    /// ran. It must not apply `restart_syscall` to the restored context.
+    SkipSyscallRestart,
 }
 
 /// Returns the current process-owned resources.

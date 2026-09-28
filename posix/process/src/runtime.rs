@@ -144,20 +144,19 @@ pub(crate) fn run_user_thread_loop(
         // until we handle the signal or an interruptible syscall observes it.
         curr.clear_interrupt();
 
-        // Normally we check for pending signals after every trap return. The
-        // exception is `rt_sigreturn`: it restores the pre-signal context, so
-        // running `check_signals` here would see the same pending signal that the
-        // handler just finished processing and immediately re-enter the handler,
-        // looping forever. Skipping this check once is safe because the restored
-        // context already has the correct signal state.
-        if runtime_action != UserThreadRuntimeAction::SkipSignalCheckOnce {
-            let mut handled_signal = false;
-            while check_signals(&thr, &mut uctx, None) {
-                handled_signal = true;
-            }
-            if !handled_signal {
-                restart_syscall_without_signal(&mut uctx);
-            }
+        // The handler path dequeues a signal before entering userspace, so this
+        // check cannot see that same instance again. A signal queued while the
+        // handler blocked it becomes deliverable once `rt_sigreturn` restores
+        // the previous mask; leaving it pending drops the handler until some
+        // later trap, and an interruptible wait in between never notices it.
+        // Restart was already applied or discarded when the signal frame was
+        // built, so signal return must not roll the restored context back.
+        let mut handled_signal = false;
+        while check_signals(&thr, &mut uctx, None) {
+            handled_signal = true;
+        }
+        if runtime_action != UserThreadRuntimeAction::SkipSyscallRestart && !handled_signal {
+            restart_syscall_without_signal(&mut uctx);
         }
 
         poll_cpu_timers();
@@ -165,8 +164,7 @@ pub(crate) fn run_user_thread_loop(
         // `interrupt()` may have queued a signal in `poll_cpu_timers` (CPU-time
         // timer) or while this task was preempted (for example `alarm_task`).
         // Re-handle before `uctx.run()`; a NOHZ lone runner may never trap again.
-        // `rt_sigreturn` still skips the trap check above. This path only runs
-        // when a *new* interrupt arrived after `clear_interrupt`.
+        // This path only runs when a new interrupt arrived after `clear_interrupt`.
         if curr.is_interrupted() {
             while check_signals(&thr, &mut uctx, None) {}
         }

@@ -52,8 +52,11 @@ signal checks. The loop clears the previous trap's interrupt flag before the
 normal pending-signal check. It must not clear that flag after checking signals:
 a concurrent group-exit sender could otherwise queue SIGKILL and set the flag
 in between, then lose its notification before the target enters a futex wait.
-`SkipSignalCheckOnce` suppresses the normal post-syscall signal check after
-signal return. Before reentering userspace, the loop polls CPU timers and checks
+Signal return still runs the pending-signal check. The handled signal was
+dequeued before the handler ran, so the check delivers only a signal queued
+while that handler blocked it and made deliverable when the previous mask is
+restored. Restart of the interrupted syscall is not applied again on this path.
+Before reentering userspace, the loop polls CPU timers and checks
 preemption; an interrupt raised since the clear causes another signal check.
 Signals arriving after that final check retain their interrupt notification for
 the next interruptible wait or trap.

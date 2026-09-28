@@ -71,7 +71,7 @@ fn sys_riscv_flush_icache(flags: usize) -> KResult<isize> {
 /// Writes the result register, encoding ordinary failures as negative Linux
 /// errno (including `ENOSYS` for unknown/unsupported calls). Enabled TEE/TIPC
 /// extensions retain their own status conventions. Returns `Continue`, or
-/// `SkipSignalCheckOnce` after successful `rt_sigreturn`. The caller performs
+/// `SkipSyscallRestart` after successful `rt_sigreturn`. The caller performs
 /// the runtime action; dispatch itself does not enter user mode.
 ///
 /// # Panics
@@ -865,15 +865,13 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
 
     uctx.set_retval(result.unwrap_or_else(|err| -LinuxError::from(err).into_raw() as _) as _);
 
-    // rt_sigreturn restores the saved context from before the signal handler ran.
-    // If we allow the normal post-syscall signal check to run, it may immediately
-    // re-deliver the same signal whose handler just returned, causing an infinite
-    // loop.  Returning from a signal handler is not a "normal" syscall return — the
-    // restored context already represents where the thread was before the signal
-    // arrived, so no additional signal processing is needed.  Skipping this check
-    // matches Linux kernel behavior (see arch/*/kernel/signal.c: restore_sigcontext).
+    // The signal frame already recorded whether the interrupted syscall should
+    // restart. Applying that decision again would roll back the restored context.
+    // Pending signals are still delivered by the caller: the handled signal was
+    // dequeued before the handler ran, and one queued during the handler is a
+    // new instance that becomes deliverable when this return restores the mask.
     if sysno == Sysno::rt_sigreturn && result.is_ok() {
-        UserThreadRuntimeAction::SkipSignalCheckOnce
+        UserThreadRuntimeAction::SkipSyscallRestart
     } else {
         UserThreadRuntimeAction::Continue
     }
