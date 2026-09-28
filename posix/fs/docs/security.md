@@ -126,6 +126,12 @@ kfd resources / kvfs / device and pipe implementations
 12. Xattr 输入 name/value 必须先复制到有上限的内核缓冲区；list name sink 的累计长度不得
     超过 `XATTR_LIST_MAX`。`size == 0` 查询不得访问输出指针或物化名称序列，非零短缓冲区
     必须返回 `ERANGE`，raw set flags 不得进入 KVFS。
+13. `mount`/`umount2` 必须在改变 mount namespace 状态之前用 syscall 入口捕获的那一份
+    credential snapshot 校验 mount privilege；未授权调用在 mount point 状态校验之前返回
+    `EPERM`，与 Linux `may_mount()` 的 `CAP_SYS_ADMIN` 门禁对应。
+14. 挂载授权只发生在 syscall 边界：`kvfs::MntNamespace` 的 `mount_new`、`attach_bind`、
+    `remount`、`reconfigure_mount` 和 `detach` 保持显式调用契约，不引入隐式
+    current-process 查询；内核内部调用方自行保证已获得授权。
 
 ## 线程安全
 

@@ -114,6 +114,11 @@ fn path_mount(
         return Err(KError::InvalidInput);
     }
 
+    // Linux authorizes the call in `path_mount()` right after the `MS_NOUSER`
+    // rejection and before dispatching any operation, so an unauthorized caller
+    // cannot tell which operation it asked for.
+    require_mount_privilege(cred)?;
+
     // Reject unsupported mount operations before selecting an implemented
     // operation. Otherwise a supported bit could make an unsupported
     // combination execute with part of the request silently ignored.
@@ -186,6 +191,19 @@ fn lookup_mount_path(process: &Process, name: &str, cred: &kcred::Cred) -> KResu
         LookupFlags::follow(),
         cred,
     )
+}
+
+/// Rejects mount namespace mutations from callers without mount privilege.
+///
+/// x-kernel models the mount privilege as effective UID 0, standing in for
+/// Linux `CAP_SYS_ADMIN` in the mount namespace's user namespace; the check
+/// reports `EPERM` like Linux `may_mount()`.
+fn require_mount_privilege(cred: &kcred::Cred) -> KResult<()> {
+    if cred.is_privileged() {
+        Ok(())
+    } else {
+        Err(KError::OperationNotPermitted)
+    }
 }
 
 fn do_loopback(
@@ -302,6 +320,10 @@ pub fn sys_umount2(target: UserConstPtr<c_char>, flags: i32) -> KResult<isize> {
     let process = current_user_process();
     let cred = kprocess::current_cred();
     let target = lookup_mount_path(&process, &target, &cred)?;
+    // Lookup errors keep their priority, but no namespace state may change
+    // before authorization; Linux `can_umount()` checks the same privilege
+    // before validating the mount point.
+    require_mount_privilege(&cred)?;
     process.mnt_ns()?.detach(&target)?;
     Ok(0)
 }
@@ -399,6 +421,35 @@ mod tests {
                 linux_raw_sys::general::MS_PRIVATE | linux_raw_sys::general::MS_RDONLY
             )
             .is_err()
+        );
+    }
+
+    #[def_test]
+    fn mount_privilege_rejects_a_non_root_effective_uid() {
+        assert_eq!(
+            super::require_mount_privilege(&kcred::Cred::new(1000, 1000)),
+            Err(kerrno::KError::OperationNotPermitted)
+        );
+    }
+
+    #[def_test]
+    fn mount_privilege_accepts_root_credentials() {
+        assert!(super::require_mount_privilege(&kcred::Cred::root()).is_ok());
+    }
+
+    #[def_test]
+    fn mount_privilege_uses_the_effective_uid_not_the_real_uid() {
+        // A setuid-root program that drops its effective UID keeps real UID 0,
+        // and must lose mount privilege with it. `Cred::new` cannot express
+        // that state because it sets every user ID at once.
+        let mut cred = kcred::Cred::root();
+        cred.set_resuid(Some(0), Some(1000), Some(0)).unwrap();
+
+        assert_eq!(cred.ruid(), 0);
+        assert_eq!(cred.euid(), 1000);
+        assert_eq!(
+            super::require_mount_privilege(&cred),
+            Err(kerrno::KError::OperationNotPermitted)
         );
     }
 }

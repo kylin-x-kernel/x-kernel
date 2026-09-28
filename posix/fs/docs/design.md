@@ -304,7 +304,9 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
    用户指针只在 syscall 边界访问，随后捕获一次 process/credential 上下文并进入 `do_mount()`。
 2. `do_mount()` 按当前 `FsStruct` 解析 target，再把 resolved `Path` 交给
    `path_mount()`；对应 Linux 的 syscall、`do_mount()` 和 `path_mount()` 分层。
-3. `path_mount()` 丢弃旧 mount magic，拒绝 `MS_NOUSER`，并在操作分派前统一拒绝当前未实现
+3. `path_mount()` 丢弃旧 mount magic，拒绝 `MS_NOUSER`，随后在操作分派前按本次 syscall
+   捕获的 credential snapshot 校验 mount privilege（非特权调用返回 `EPERM`，对应 Linux
+   `path_mount()` 中的 `may_mount()`），并统一拒绝当前未实现
    的 move、shared/slave/unbindable propagation 和 recursive-bind bits；随后从同一份
    `MS_*` 参数分别生成 superblock
    flags 和 per-mount `MountFlags`。remount 未显式指定
@@ -399,6 +401,13 @@ dispatch 前返回 `InvalidInput`；
 `sys_umount2` 对 force、detach、expire、nofollow 返回 `InvalidInput`。
 显式拒绝比静默忽略更安全，
 因为静默忽略会让用户态误以为已经获得异步卸载或 bind mount 等语义。
+mount privilege 在 syscall 边界用本次调用捕获的 credential snapshot 判定：`path_mount()`
+在 `MS_NOUSER` 之后、operation dispatch 之前校验，`sys_umount2()` 在 target lookup 之后、
+namespace detach 之前校验。因此不可解析的 target 仍优先返回查找错误，非特权调用者能解析到
+的 target 一律得到 `EPERM`，`MS_MOVE` 这类未实现操作对非特权调用者也先得到 `EPERM`。
+当前模型以 `euid == 0` 代表 Linux mount namespace user namespace 中的 `CAP_SYS_ADMIN`，
+尚未实现 capability 与 user namespace 授权；`MntNamespace` 的 `mount_new`、`attach_bind`、
+`remount`、`reconfigure_mount` 和 `detach` 保留显式调用契约，授权由调用方负责。
 
 ### 部分兼容占位
 
