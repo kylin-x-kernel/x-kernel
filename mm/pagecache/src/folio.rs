@@ -59,16 +59,18 @@ impl Folio {
         self.dirty
     }
 
-    /// Returns whether a synchronous writeback pass is writing this folio.
+    /// Returns whether a writeback pass is writing this folio.
     pub fn is_under_writeback(&self) -> bool {
         self.writeback
     }
 
     pub(super) fn start_writeback(&mut self) {
+        debug_assert!(!self.writeback);
         self.writeback = true;
     }
 
     pub(super) fn end_writeback(&mut self) {
+        debug_assert!(self.writeback);
         self.writeback = false;
     }
 

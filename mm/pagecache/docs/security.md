@@ -30,12 +30,14 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
 - 一个 page index 最多关联一个 cached folio；发布前校验 tree key 与 folio immutable index 一致；
 - folio bytes、dirty 和 writeback 状态只在 folio lock 下访问；
 - `Folio::dirty` 是状态源，dirty index 只承担 `PAGECACHE_TAG_DIRTY` 风格的候选枚举；
+- `Folio::writeback` 是状态源，writeback index 只承担等待枚举；
 - 对外 folio 操作返回时，dirty 状态变化已反映到当前 resident folio 的 dirty tag；
   已从 resident tree 移除的 index 不得残留在 dirty index；
 - dirty tag 命中不构成写回许可；开始 I/O 前必须在 MappingPages state lock → folio lock
   的同一临界区重新校验 mapping identity、dirty 和 writeback 状态；
 - writeback 完成时必须按相同锁序重新校验 mapping identity；失败只重新标脏当前
   resident folio，已脱离 mapping 的 folio 只结束 writeback；
+- 清 writeback 位及 mark 后释放两层锁再唤醒；等待者重查位；
 - `MappingPages` 中不存在可与 inode `i_size` 分歧的 length 字段；
 - VM object-id、views 和 notifier 不进入本 crate。
 
@@ -79,8 +81,8 @@ callback，该 callback 不得重入同一个 `MappingPages`；batch writeback �
 
 - resident folio tree 和 dirty index 分别使用 `BTreeMap`/`BTreeSet`；已消除 writeback
   对全部 resident folio 的扫描，但尚未实现 Linux XArray tag/reclaim；
-- 尚未实现 Linux 完整的 wait-on-writeback/invalidate 协调；本 crate 在开始和完成 I/O
-  时校验 mapping identity，I/O 期间的 resize/invalidate 仍依赖 owner 串行化；
+- truncate/invalidate 尚未接入 folio writeback 等待与二次移除；I/O 期间的
+  resize/invalidate 仍依赖 owner 串行化；
 - `writeback_until` 持 folio lock 调用 backend，callback 重入同一个 `MappingPages` 会造成
   死锁；
 - 没有自适应 readahead、swap、memcg、NUMA 或 THP；

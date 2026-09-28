@@ -11,6 +11,9 @@ use crate::{FolioBatch, MappingPages, PageIndex, mapping_pages::MappingPagesStat
 
 impl MappingPages {
     /// Updates cached folios for a change in the owning inode's visible size.
+    ///
+    /// Does not wait for writeback. The owner must serialize size changes and
+    /// cache population, and exclude writeback through completion while resizing.
     pub fn resize_cached_folios(&self, old_len: u64, len: u64) {
         let mut state = self.state.lock();
         if len == old_len {
@@ -44,6 +47,8 @@ impl MappingPages {
     ///
     /// Unlike ordinary invalidation, final teardown may discard dirty folios
     /// because no later backing-store writeback is possible.
+    /// The owner must exclude cache population and writeback through completion;
+    /// removing writeback marks here does not wait for outstanding I/O.
     pub fn truncate_final(&self) -> KResult<()> {
         Self::remove_folios_from(&mut self.state.lock(), 0);
         Ok(())
@@ -70,10 +75,12 @@ impl MappingPages {
                 locked.clear_dirty();
                 state.entries.remove(&index);
                 state.dirty_marks.remove(&index);
+                state.writeback_marks.remove(&index);
             }
             batch.clear();
         }
         state.dirty_marks.retain(|index| *index < first_index);
+        state.writeback_marks.retain(|index| *index < first_index);
     }
 
     fn zero_growth_tail(&self, state: &mut MappingPagesState, old_len: u64, new_len: u64) {

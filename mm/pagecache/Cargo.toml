@@ -12,6 +12,7 @@ kalloc = { workspace = true }
 kerrno = { workspace = true }
 khal = { workspace = true }
 ksync = { workspace = true }
+ktask = { workspace = true }
 log = { workspace = true }
 memaddr = { workspace = true }
 unittest = { workspace = true }

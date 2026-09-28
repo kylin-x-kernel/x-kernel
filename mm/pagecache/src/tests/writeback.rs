@@ -5,9 +5,11 @@
 //! Writeback identity, completion and redirty tests.
 
 use alloc::{sync::Arc, vec, vec::Vec};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use kerrno::KError;
 use ksync::Mutex;
+use ktask::WaitQueue;
 use memaddr::PAGE_SIZE_4K;
 use unittest::{assert_eq, def_test};
 
@@ -200,12 +202,25 @@ fn batched_writeback_failure_restores_dirty_index() {
         &mut nr_to_write,
         &mut pages_skipped,
         PAGE_SIZE_4K * 2,
-        &mut |_, _| Err((0, KError::InvalidInput)),
+        &mut |_, _| {
+            core::assert_eq!(
+                cache
+                    .state
+                    .lock()
+                    .writeback_marks
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec![0, 1]
+            );
+            Err((0, KError::InvalidInput))
+        },
     );
 
     assert_eq!(outcome.err(), Some(KError::InvalidInput));
     assert_eq!(initial_budget - nr_to_write, 0);
     assert_eq!(dirty_indices(&cache), vec![0, 1]);
+    assert!(cache.state.lock().writeback_marks.is_empty());
     for index in 0..2 {
         cache.with_folio(index, |folio| {
             let folio = folio.expect("failed batch folio");
@@ -241,6 +256,7 @@ fn failed_writeback_does_not_redirty_detached_folio() {
         PAGE_SIZE_4K,
         &mut |_, _| {
             cache_during_io.resize_cached_folios(PAGE_SIZE_4K as u64, 0);
+            core::assert!(cache_during_io.state.lock().writeback_marks.is_empty());
             Err((0, KError::InvalidInput))
         },
     );
@@ -252,6 +268,57 @@ fn failed_writeback_does_not_redirty_detached_folio() {
         (folio.is_dirty(), folio.is_under_writeback())
     };
     assert_eq!(detached_state, (false, false));
+}
+
+#[def_test]
+fn range_wait_wakes_after_batch_writeback() {
+    let cache = Arc::new(new_cache());
+    write_cached(&cache, 0, b"old").unwrap();
+    let entered = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
+    let ready = Arc::new(WaitQueue::new());
+    let mut waiter = None;
+    let mut nr_to_write = 1;
+    let mut pages_skipped = 0;
+
+    cache
+        .write_cache_pages(
+            3,
+            0..u64::MAX,
+            &mut nr_to_write,
+            &mut pages_skipped,
+            PAGE_SIZE_4K,
+            &mut |_, data| {
+                core::assert_eq!(
+                    cache
+                        .state
+                        .lock()
+                        .writeback_marks
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    vec![0]
+                );
+                let waiting_cache = cache.clone();
+                let waiting_entered = entered.clone();
+                let waiting_finished = finished.clone();
+                let waiting_ready = ready.clone();
+                waiter = Some(ktask::spawn(move || {
+                    waiting_entered.store(true, Ordering::Release);
+                    waiting_ready.notify_all(false);
+                    waiting_cache.wait_on_writeback_range(0..PAGE_SIZE_4K as u64);
+                    waiting_finished.store(true, Ordering::Release);
+                }));
+                ready.wait_until(|| entered.load(Ordering::Acquire));
+                core::assert!(!finished.load(Ordering::Acquire));
+                Ok(data.len())
+            },
+        )
+        .unwrap();
+
+    assert_eq!(waiter.expect("writeback waiter").join(), 0);
+    assert!(finished.load(Ordering::Acquire));
+    assert!(cache.state.lock().writeback_marks.is_empty());
 }
 
 #[def_test]

@@ -3753,6 +3753,7 @@ dependencies = [
  "kerrno",
  "khal",
  "ksync",
+ "ktask",
  "log",
  "memaddr",
  "unittest",

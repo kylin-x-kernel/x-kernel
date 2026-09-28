@@ -2,13 +2,14 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Dirty-tag enumeration and synchronous writeback completion.
+//! Dirty-tag enumeration, writeback completion, and waiting.
 
 use alloc::{sync::Arc, vec::Vec};
 use core::ops::Range;
 
 use kerrno::{KError, KResult};
 use ksync::{Mutex, MutexGuard};
+use ktask::WaitQueue;
 use memaddr::PAGE_SIZE_4K;
 
 use crate::{Folio, FolioBatch, MappingPages, PageIndex};
@@ -20,7 +21,99 @@ use crate::{Folio, FolioBatch, MappingPages, PageIndex};
 /// pass. This protocol carries no pass budget or statistics.
 pub type WritebackRangeResult = Result<usize, (usize, KError)>;
 
+// Uses the same hashed wait-bucket pattern as Linux's folio_wait_table,
+// without a per-folio waiter field. Wakeups notify the entire bucket rather
+// than matching a folio/bit key; each waiter rechecks its own folio's state.
+static WRITEBACK_WAITERS: [WaitQueue; 256] = [const { WaitQueue::new() }; 256];
+
+fn writeback_waiters(folio: &Arc<Mutex<Folio>>) -> &'static WaitQueue {
+    let address = Arc::as_ptr(folio) as usize;
+    &WRITEBACK_WAITERS[((address >> 3) ^ (address >> 11)) % WRITEBACK_WAITERS.len()]
+}
+
+fn wait_on_writeback(folio: &Arc<Mutex<Folio>>) {
+    writeback_waiters(folio).wait_until(|| !folio.lock().is_under_writeback());
+}
+
+// Returns the covering half-open page range; empty byte ranges cover no pages.
+fn byte_range_to_page_range(range: Range<u64>) -> (PageIndex, PageIndex) {
+    if range.is_empty() {
+        return (0, 0);
+    }
+    (
+        range.start / PAGE_SIZE_4K as u64,
+        (range.end - 1) / PAGE_SIZE_4K as u64 + 1,
+    )
+}
+
+enum FolioMark {
+    Dirty,
+    Writeback,
+}
+
 impl MappingPages {
+    /// Waits for tagged resident writeback discovered while scanning a byte range.
+    ///
+    /// Scans the half-open range once in ascending index order. Writeback started
+    /// behind the cursor, including on replacement folios, may be missed. This
+    /// is not a snapshot of all writeback at entry and does not guarantee that
+    /// the range is free of writeback on return. It neither submits dirty folios
+    /// nor reports I/O errors. The owner supplies submission, error handling and
+    /// any serialization required by its operation; this is not a standalone
+    /// fsync or truncate protocol.
+    ///
+    /// Holds bounded folio references but no mapping or folio lock while
+    /// sleeping. Callers must recheck residency after a wake because a folio
+    /// can be detached while writeback runs. Call only from sleepable task context.
+    pub fn wait_on_writeback_range(&self, range: Range<u64>) {
+        if range.is_empty() {
+            return;
+        }
+        let (mut scan_index, end_index) = byte_range_to_page_range(range);
+        let mut batch = FolioBatch::new();
+
+        while scan_index < end_index {
+            self.collect_marked_folios(
+                FolioMark::Writeback,
+                &mut scan_index,
+                end_index,
+                &mut batch,
+            );
+            for folio in batch.iter() {
+                wait_on_writeback(folio);
+            }
+        }
+    }
+
+    // Like filemap_get_folios_tag, collect one bounded window of resident refs.
+    // Marks only select candidates; the mapping lock is released on return.
+    fn collect_marked_folios(
+        &self,
+        mark: FolioMark,
+        next_index: &mut PageIndex,
+        end_index: PageIndex,
+        batch: &mut FolioBatch,
+    ) {
+        batch.clear();
+        let state = self.state.lock();
+        let marks = match mark {
+            FolioMark::Dirty => &state.dirty_marks,
+            FolioMark::Writeback => &state.writeback_marks,
+        };
+        for index in marks.range(*next_index..end_index) {
+            // end_index comes from an exclusive byte endpoint, so index + 1
+            // is representable even for a range ending at u64::MAX.
+            *next_index = *index + 1;
+            if let Some(folio) = state.entries.get(index) {
+                batch.push(folio.clone());
+                if batch.is_full() {
+                    return;
+                }
+            }
+        }
+        *next_index = end_index;
+    }
+
     fn finish_writeback(&self, folio: &Arc<Mutex<Folio>>, is_complete: bool) {
         let mut state = self.state.lock();
         let mut locked = folio.lock();
@@ -33,38 +126,17 @@ impl MappingPages {
             locked.mark_dirty();
         }
         locked.end_writeback();
-        if !is_current {
-            return;
-        }
-        if locked.is_dirty() {
-            state.dirty_marks.insert(index);
-        } else {
-            state.dirty_marks.remove(&index);
-        }
-    }
-
-    // Like filemap_get_folios_tag: advance monotonically, holding references
-    // only for one bounded window. Concurrent changes are revalidated at start.
-    fn collect_dirty_folios(
-        &self,
-        next_index: &mut PageIndex,
-        end_index: PageIndex,
-        batch: &mut FolioBatch,
-    ) {
-        batch.clear();
-        let state = self.state.lock();
-        for index in state.dirty_marks.range(*next_index..end_index) {
-            // end_index comes from an exclusive byte endpoint, so index + 1
-            // is representable even for a range ending at u64::MAX.
-            *next_index = *index + 1;
-            if let Some(folio) = state.entries.get(index) {
-                batch.push(folio.clone());
-                if batch.is_full() {
-                    return;
-                }
+        if is_current {
+            state.writeback_marks.remove(&index);
+            if locked.is_dirty() {
+                state.dirty_marks.insert(index);
+            } else {
+                state.dirty_marks.remove(&index);
             }
         }
-        *next_index = end_index;
+        drop(locked);
+        drop(state);
+        writeback_waiters(folio).notify_all(false);
     }
 
     // A dirty tag only selects a candidate. Mapping identity and folio state
@@ -105,6 +177,7 @@ impl MappingPages {
         folio.clear_dirty();
         folio.start_writeback();
         state.dirty_marks.remove(&index);
+        state.writeback_marks.insert(index);
         drop(state);
         Some(folio)
     }
@@ -131,12 +204,16 @@ impl MappingPages {
         if *nr_to_write == 0 || range.is_empty() {
             return Ok(());
         }
-        let mut scan_index = range.start / PAGE_SIZE_4K as u64;
-        let end_index = (range.end - 1) / PAGE_SIZE_4K as u64 + 1;
+        let (mut scan_index, end_index) = byte_range_to_page_range(range);
         let mut candidates = FolioBatch::new();
 
         'scan: while scan_index < end_index {
-            self.collect_dirty_folios(&mut scan_index, end_index, &mut candidates);
+            self.collect_marked_folios(
+                FolioMark::Dirty,
+                &mut scan_index,
+                end_index,
+                &mut candidates,
+            );
             for folio in candidates.iter() {
                 if *nr_to_write == 0 {
                     break 'scan;
@@ -192,8 +269,7 @@ impl MappingPages {
         if *nr_to_write == 0 || range.is_empty() {
             return Ok(());
         }
-        let mut scan_index = range.start / PAGE_SIZE_4K as u64;
-        let end_index = (range.end - 1) / PAGE_SIZE_4K as u64 + 1;
+        let (mut scan_index, end_index) = byte_range_to_page_range(range);
         let mut candidates = FolioBatch::new();
 
         let max_bytes = max_bytes.max(PAGE_SIZE_4K);
@@ -237,7 +313,12 @@ impl MappingPages {
         };
 
         'scan: while scan_index < end_index {
-            self.collect_dirty_folios(&mut scan_index, end_index, &mut candidates);
+            self.collect_marked_folios(
+                FolioMark::Dirty,
+                &mut scan_index,
+                end_index,
+                &mut candidates,
+            );
             for folio in candidates.iter() {
                 if *nr_to_write == 0 {
                     break 'scan;

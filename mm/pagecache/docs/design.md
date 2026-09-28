@@ -45,6 +45,7 @@ VfsInode
             -> Mutex<MappingPagesState>
                  -> BTreeMap<PageIndex, Arc<Mutex<Folio>>> entries
                  -> BTreeSet<PageIndex> dirty_marks (派生索引)
+                 -> BTreeSet<PageIndex> writeback_marks (派生索引)
 ```
 
 `kvfs::AddressSpace` 在 materialize 时提供闭包，由自己的
@@ -54,6 +55,7 @@ VfsInode
 `Folio::dirty` 是 dirty 状态源。Rust `BTreeMap` 没有 Linux XArray 的 per-entry
 mark，因此 `dirty_marks` 只作为 `PAGECACHE_TAG_DIRTY` 的派生索引，用于枚举
 writeback 候选，不提供写回许可，也不引入第二份 folio 状态。
+`writeback_marks` 同理作为 `PAGECACHE_TAG_WRITEBACK` 的派生索引，只用于有界等待枚举。
 
 ## 调用约束 / 执行上下文
 
@@ -115,6 +117,8 @@ mapping identity；只有仍是当前 resident folio 的失败写回才能重新
 已移除或替换的 folio 只结束 under-writeback。batch writeback 同时核对最终 dirty 状态；
 单页同步 writeback 在持有 folio lock 的 callback 成功后保持 clean，后续 writer 会在
 clean → dirty 状态变化时重新插入 tag。
+开始时同步设置 writeback 位与 mark；完成时按 folio identity 清 mark，释放锁后
+唤醒共享哈希等待队列。等待者持有 folio 引用并重查 writeback 位。
 
 `with_folio` 和 `with_folio_or_create` 只在 closure 前后的最终 dirty 状态不同时执行
 reconciliation。dirty → dirty 和 clean → clean 不改变 tag，避免只读访问 dirty folio
@@ -136,9 +140,8 @@ reconciliation。dirty → dirty 和 clean → clean 不改变 tag，避免只�
   backend callback；该 callback 不得重入同一个 `MappingPages`；
 - `write_cache_pages` 在锁内完成状态过渡和数据复制，释放 folio lock 后才调用 batch
   backend callback；
-- 当前没有 Linux 完整的 wait-on-writeback/invalidate 协调。候选收集、开始写回和完成
-  阶段的 stale-folio 窗口由本 crate 自身关闭；I/O 期间的 resize/invalidate 仍须由 owner
-  在完整 writeback operation 外串行化。
+- `wait_on_writeback_range` 不持锁睡眠；truncate/invalidate 的两轮移除尚未接入等待。
+  I/O 期间的 resize/invalidate 仍须由 owner 在完整 writeback operation 外串行化。
 
 ## 设计决策
 
@@ -157,8 +160,8 @@ mutex 下才能保持索引一致性。Folio 的数据与 flags 仍封装在 `fo
 2. 不保存 length。唯一 EOF 是 `VfsInode::size()`。
 3. 不保存 object-id 或 views。它们属于 `kvfs::AddressSpace`，对应 Linux
    `address_space::i_mmap`。
-4. resident folio 使用 `BTreeMap`，dirty tag 使用独立 `BTreeSet`。该集合只是补足
-   `BTreeMap` 缺少 per-entry mark 的能力，writeback 成本因此与 dirty folio 数量相关；
+4. resident folio 使用 `BTreeMap`，dirty/writeback tag 使用独立 `BTreeSet`。该集合只是补足
+   `BTreeMap` 缺少 per-entry mark 的能力，枚举成本因此与 tagged folio 数量相关；
    未来可用 Linux XArray dirty tag 风格实现替换具体索引，不改变 `AddressSpace` 契约。
 
 Folio 的 immutable `index` 对应 Linux `folio::index`，detach 后仍保留，供批处理和

@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Resident folio storage and its derived dirty index.
+//! Resident folio storage and its derived state indexes.
 
 use alloc::{
     collections::{BTreeMap, BTreeSet},
@@ -19,9 +19,11 @@ pub(super) struct MappingPagesState {
     // the enumeration role of Linux `PAGECACHE_TAG_DIRTY`. `Folio::dirty`
     // remains the authoritative dirty state.
     pub(super) dirty_marks: BTreeSet<PageIndex>,
+    // Derived PAGECACHE_TAG_WRITEBACK index for waits.
+    pub(super) writeback_marks: BTreeSet<PageIndex>,
 }
 
-/// Resident folios and dirty marks embedded in one inode address space.
+/// Resident folios and dirty/writeback marks embedded in one inode address space.
 ///
 /// This is the mapping's page index, corresponding to Linux `i_pages`.
 /// The owning address space supplies filesystem operations, size and
@@ -37,6 +39,7 @@ impl MappingPages {
             state: Mutex::new(MappingPagesState {
                 entries: BTreeMap::new(),
                 dirty_marks: BTreeSet::new(),
+                writeback_marks: BTreeSet::new(),
             }),
         }
     }
