@@ -4047,6 +4047,7 @@ dependencies = [
  "posix-fs",
  "posix-ipc",
  "tee_kernel",
+ "unittest",
 ]
 
 [[package]]

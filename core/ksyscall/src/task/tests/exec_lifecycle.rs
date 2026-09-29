@@ -668,7 +668,7 @@ fn run_child(
             if case == Case::Retirement {
                 assert_retirement_pending(pending);
             }
-            assert!(!posix_process::check_signals(&thread, &mut uctx, None));
+            assert!(posix_process::check_signals(&thread, &mut uctx, None).is_none());
             let after = signal.pending();
             assert!((pending & !after).is_empty() && (after & !pending).is_empty());
             assert_eq!(format!("{uctx:?}"), context_before);
@@ -694,7 +694,7 @@ fn run_child(
     let context = format!("{uctx:?}");
     posix_process::do_exit(0, false);
     assert!(thread.is_exiting());
-    assert!(!posix_process::check_signals(&thread, &mut uctx, None));
+    assert!(posix_process::check_signals(&thread, &mut uctx, None).is_none());
     let after = signal.pending();
     assert!((pending & !after).is_empty() && (after & !pending).is_empty());
     assert_eq!(format!("{uctx:?}"), context);

@@ -3,6 +3,11 @@
 // See LICENSES for license details.
 
 //! Linux `signalfd` object support.
+//!
+//! Blocking reads interrupted before consuming a record return `ERESTARTSYS`.
+//! Signal delivery decides whether to retry after the handler (`SA_RESTART`)
+//! or expose `EINTR`. Reads try to consume a record before waiting; nonblocking
+//! reads never wait and return `EAGAIN` when no matching record is pending.
 
 use alloc::sync::Arc;
 use core::mem;
@@ -10,7 +15,7 @@ use core::mem;
 use anon_inodefs::AnonInodeFs;
 use bitflags::bitflags;
 use kcred::Cred;
-use kerrno::{KError, KResult};
+use kerrno::{KError, KResult, LinuxError};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use kprocess::AsThread;
 use ksignal::{SignalInfo, SignalSet, api::ThreadSignalManager};
@@ -171,6 +176,36 @@ struct SignalfdAccess {
 }
 
 impl SignalfdAccess {
+    async fn read(&self, buf: &mut [u8], is_nonblocking: bool) -> KResult<usize> {
+        let mut read_record_fn = || {
+            let sig_info = self.dequeue_signal().ok_or(KError::WouldBlock)?;
+            let sfd_info = SignalfdSiginfo::from_signal_info(&sig_info);
+            buf[..SIGNALFD_SIGINFO_SIZE].copy_from_slice(sfd_info.as_bytes());
+            if self.has_pending_signals() {
+                self.signalfd.poll_rx.wake();
+            }
+            Ok(SIGNALFD_SIGINFO_SIZE)
+        };
+
+        // Available records and nonblocking EAGAIN take precedence over a task
+        // interrupt. Only a read that actually needs to wait is interruptible.
+        match read_record_fn() {
+            Err(KError::WouldBlock) if !is_nonblocking => {}
+            result => return result,
+        }
+        match poll_io(self, IoEvents::IN, false, &mut read_record_fn).await {
+            // poll_io checks interruption before readiness. Recheck records so
+            // a simultaneous arrival still wins, as on the initial attempt.
+            Err(KError::Interrupted) => read_record_fn().map_err(|error| match error {
+                // No record was consumed. Signal delivery decides whether the
+                // handler permits retry (SA_RESTART) or the caller gets EINTR.
+                KError::WouldBlock => KError::from(LinuxError::ERESTARTSYS),
+                error => error,
+            }),
+            result => result,
+        }
+    }
+
     fn has_pending_signals(&self) -> bool {
         let mask = self.signalfd.mask();
         let pending = self.signal.pending();
@@ -233,26 +268,7 @@ impl FileOperations for SignalfdFops {
             return Err(KError::InvalidInput);
         }
 
-        let access = Self::access(file)?;
-        block_on(poll_io(
-            &access,
-            IoEvents::IN,
-            file.is_nonblocking(),
-            || {
-                if let Some(sig_info) = access.dequeue_signal() {
-                    let sfd_info = SignalfdSiginfo::from_signal_info(&sig_info);
-                    buf[..SIGNALFD_SIGINFO_SIZE].copy_from_slice(sfd_info.as_bytes());
-
-                    if access.has_pending_signals() {
-                        access.signalfd.poll_rx.wake();
-                    }
-
-                    Ok(SIGNALFD_SIGINFO_SIZE)
-                } else {
-                    Err(KError::WouldBlock)
-                }
-            },
-        ))
+        block_on(Self::access(file)?.read(buf, file.is_nonblocking()))
     }
 
     fn release(&self, _inode: &VfsInode, _file: &VfsFile) -> KResult<()> {
@@ -278,10 +294,90 @@ impl FileOperations for SignalfdFops {
 
 #[cfg(unittest)]
 mod tests {
-    use ksignal::{ChildExitInfo, ChildExitSignalInfo, Signo};
+    use ksignal::{
+        ChildExitInfo, ChildExitSignalInfo, Signo,
+        api::{ProcessSignalManager, SignalActions},
+    };
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
+
+    fn signal_access() -> SignalfdAccess {
+        let mut mask = SignalSet::default();
+        mask.add(Signo::SIGUSR1);
+        let process = Arc::new(ProcessSignalManager::new(
+            Arc::new(ksync::spin::SpinNoIrq::new(SignalActions::default())),
+            0,
+        ));
+        let signal = ThreadSignalManager::new(1, process);
+        signal.set_blocked(mask);
+        SignalfdAccess {
+            signalfd: Signalfd::new(mask),
+            signal,
+        }
+    }
+
+    #[def_test]
+    fn test_signalfd_ready_and_nonblocking_reads_precede_interrupt() {
+        let access = signal_access();
+        let mut buf = [0; SIGNALFD_SIGINFO_SIZE];
+        let task = current();
+
+        // Record results before assertions so the task interrupt cannot leak
+        // into the test runner even if a regression makes an assertion fail.
+        task.interrupt();
+        let empty = block_on(access.read(&mut buf, true));
+        let empty_preserved_interrupt = task.is_interrupted();
+        task.clear_interrupt();
+        assert_eq!(empty, Err(KError::WouldBlock));
+        assert!(empty_preserved_interrupt);
+
+        for is_nonblocking in [true, false] {
+            assert!(
+                !access
+                    .signal
+                    .send_signal(SignalInfo::new_kernel(Signo::SIGUSR1))
+            );
+            task.interrupt();
+            let ready = block_on(access.read(&mut buf, is_nonblocking));
+            let ready_preserved_interrupt = task.is_interrupted();
+            task.clear_interrupt();
+            assert_eq!(ready, Ok(SIGNALFD_SIGINFO_SIZE));
+            assert!(ready_preserved_interrupt);
+            assert!(!access.has_pending_signals());
+        }
+
+        task.interrupt();
+        let waiting = block_on(access.read(&mut buf, false));
+        task.clear_interrupt();
+        assert_eq!(waiting, Err(KError::from(LinuxError::ERESTARTSYS)));
+    }
+
+    #[def_test]
+    fn test_signalfd_record_arriving_during_wait_precedes_interrupt() {
+        use core::{
+            future::Future,
+            pin::pin,
+            task::{Context, Poll, Waker},
+        };
+
+        let access = signal_access();
+        let mut buf = [0; SIGNALFD_SIGINFO_SIZE];
+        let mut read = pin!(access.read(&mut buf, false));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(read.as_mut().poll(&mut cx).is_pending());
+        assert!(
+            !access
+                .signal
+                .send_signal(SignalInfo::new_kernel(Signo::SIGUSR1))
+        );
+        let task = current();
+        task.interrupt();
+        let result = read.as_mut().poll(&mut cx);
+        task.clear_interrupt();
+        assert_eq!(result, Poll::Ready(Ok(SIGNALFD_SIGINFO_SIZE)));
+        assert!(!access.has_pending_signals());
+    }
 
     #[def_test]
     fn test_signalfd_poll_empty() {

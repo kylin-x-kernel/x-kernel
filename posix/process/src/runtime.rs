@@ -151,13 +151,11 @@ pub(crate) fn run_user_thread_loop(
         // later trap, and an interruptible wait in between never notices it.
         // Restart was already applied or discarded when the signal frame was
         // built, so signal return must not roll the restored context back.
-        let mut handled_signal = false;
-        while check_signals(&thr, &mut uctx, None) {
-            handled_signal = true;
+        let mut has_installed_handler = false;
+        while let Some(action) = check_signals(&thr, &mut uctx, None) {
+            has_installed_handler |= matches!(action, SignalOSAction::Handler);
         }
-        if runtime_action != UserThreadRuntimeAction::SkipSyscallRestart && !handled_signal {
-            restart_syscall_without_signal(&mut uctx);
-        }
+        restart_syscall_without_handler(&mut uctx, runtime_action, has_installed_handler);
 
         poll_cpu_timers();
         ktask::check_preempt_pending();
@@ -166,7 +164,7 @@ pub(crate) fn run_user_thread_loop(
         // Re-handle before `uctx.run()`; a NOHZ lone runner may never trap again.
         // This path only runs when a new interrupt arrived after `clear_interrupt`.
         if curr.is_interrupted() {
-            while check_signals(&thr, &mut uctx, None) {}
+            while check_signals(&thr, &mut uctx, None).is_some() {}
         }
     }
 }
@@ -433,28 +431,28 @@ pub fn raise_signal_fatal(sig: SignalInfo) -> KResult<()> {
     Ok(())
 }
 
-/// Handles one pending signal and reports whether one was consumed.
+/// Handles one pending signal and returns the action that was performed.
 ///
 /// `thr` and `uctx` must belong to the current user thread. `restore_blocked`
 /// supplies the optional mask restoration passed to its signal manager.
 /// Terminate/CoreDump/Stop actions perform group teardown; handlers and continue
-/// actions retain the signal manager's context changes. Stop currently exits
-/// with code 1, and CoreDump exits without generating a core file.
+/// actions retain the signal manager's context changes. Only Handler resolves
+/// syscall restart state; Continue must not suppress the no-handler path.
+/// Stop currently exits with code 1, and CoreDump exits without generating a
+/// core file.
 /// This may block and must not run in interrupt context.
 /// Exited threads do not dequeue signals or construct further user frames.
 pub fn check_signals(
     thr: &Thread,
     uctx: &mut UserContext,
     restore_blocked: Option<SignalSet>,
-) -> bool {
+) -> Option<SignalOSAction> {
     // do_exit returns to the kernel loop; its remaining iterations must not
     // touch user mappings or repeat teardown after membership/MM release.
     if thr.is_exiting() {
-        return false;
+        return None;
     }
-    let Some((sig, os_action)) = thr.signal_manager().check_signals(uctx, restore_blocked) else {
-        return false;
-    };
+    let (sig, os_action) = thr.signal_manager().check_signals(uctx, restore_blocked)?;
 
     let signo = sig.signo();
     match os_action {
@@ -463,10 +461,20 @@ pub fn check_signals(
         SignalOSAction::Stop => do_exit(1, true),
         SignalOSAction::Continue | SignalOSAction::Handler => {}
     }
-    true
+    Some(os_action)
 }
 
-fn restart_syscall_without_signal(uctx: &mut UserContext) {
+fn restart_syscall_without_handler(
+    uctx: &mut UserContext,
+    runtime_action: UserThreadRuntimeAction,
+    has_installed_handler: bool,
+) {
+    // Consuming a default SIGCONT does not install a handler. Wait until the
+    // entire signal scan finishes so a later handler can still reject restart.
+    // sigreturn has already restored a context whose restart was decided.
+    if has_installed_handler || runtime_action == UserThreadRuntimeAction::SkipSyscallRestart {
+        return;
+    }
     let Some(err) = uctx.syscall_restart_error() else {
         return;
     };
@@ -479,5 +487,65 @@ fn restart_syscall_without_signal(uctx: &mut UserContext) {
             uctx.restart_with_syscall(Sysno::restart_syscall as usize);
         }
         _ => {}
+    }
+}
+
+// x86 exposes syscall-origin state through set_sysno; other architectures keep
+// it private to trap entry. Do not add an architecture API just for these tests.
+#[cfg(all(unittest, target_arch = "x86_64"))]
+mod tests {
+    use ksignal::{
+        SignalAction,
+        api::{ProcessSignalManager, SignalActions, ThreadSignalManager},
+    };
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+
+    fn interrupted_context(error: LinuxError) -> UserContext {
+        let mut uctx = UserContext::new(0x1004, 0x2000usize.into(), 7);
+        uctx.save_syscall_args();
+        uctx.set_sysno(Sysno::read as usize);
+        uctx.set_retval((-(error.into_raw() as isize)) as usize);
+        uctx
+    }
+
+    #[def_test]
+    fn default_continue_does_not_suppress_syscall_restart() {
+        let process = Arc::new(ProcessSignalManager::new(
+            Arc::new(ksync::spin::SpinNoIrq::new(SignalActions::default())),
+            0,
+        ));
+        let signal = ThreadSignalManager::new(1, process);
+        let mut uctx = interrupted_context(LinuxError::ERESTARTSYS);
+        let action = signal.dispatch_irq_signal(
+            &mut uctx,
+            SignalSet::default(),
+            &SignalInfo::new_kernel(Signo::SIGCONT),
+            &SignalAction::default(),
+        );
+        assert_eq!(action, Some(SignalOSAction::Continue));
+        let has_installed_handler = matches!(action, Some(SignalOSAction::Handler));
+        restart_syscall_without_handler(
+            &mut uctx,
+            UserThreadRuntimeAction::Continue,
+            has_installed_handler,
+        );
+        assert!(uctx.syscall_restart_error().is_none());
+        assert!(uctx.ip() < 0x1004);
+    }
+
+    #[def_test]
+    fn handler_and_sigreturn_contexts_are_not_restarted_again() {
+        for (runtime_action, has_installed_handler) in [
+            (UserThreadRuntimeAction::Continue, true),
+            (UserThreadRuntimeAction::SkipSyscallRestart, false),
+            (UserThreadRuntimeAction::SkipSyscallRestart, true),
+        ] {
+            let mut uctx = interrupted_context(LinuxError::ERESTARTSYS);
+            restart_syscall_without_handler(&mut uctx, runtime_action, has_installed_handler);
+            assert_eq!(uctx.ip(), 0x1004);
+            assert_eq!(uctx.syscall_restart_error(), Some(LinuxError::ERESTARTSYS));
+        }
     }
 }

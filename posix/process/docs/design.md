@@ -28,7 +28,8 @@ before activation. Its closure enters `run_user_thread_loop`, which calls the
 provided dispatcher for syscalls and `MmSpace::handle_page_fault` for faults.
 `BusError` maps to SIGBUS; other unresolved faults map to SIGSEGV. Retryable faults
 retry user execution after checking preemption. Signal delivery is delegated to
-`Thread::signal_manager`; default actions call `do_exit`.
+`Thread::signal_manager`; fatal and stop actions call `do_exit`, while continue
+actions leave the running thread alive.
 
 A concrete integration example is `spawn_init_process` in `src/init_process.rs`:
 it shows identity/runtime preparation, task construction, publication and the
@@ -60,6 +61,10 @@ Signal return still runs the pending-signal check. The handled signal was
 dequeued before the handler ran, so the check delivers only a signal queued
 while that handler blocked it and made deliverable when the previous mask is
 restored. Restart of the interrupted syscall is not applied again on this path.
+For other traps, only installation of a user handler resolves restart state
+through the handler's flags. Consuming a default continue action does not:
+after the full signal scan, an unresolved restart code follows the no-handler
+restart path. Internal restart codes must not become user-visible errno values.
 Before reentering userspace, the loop polls CPU timers and checks
 preemption; an interrupt raised since the clear causes another signal check.
 Signals arriving after that final check retain their interrupt notification for

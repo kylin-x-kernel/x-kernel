@@ -283,7 +283,7 @@ pub fn sys_rt_sigtimedwait(
                 signal.set_blocked(old_blocked);
                 return Poll::Ready(Some(sig));
             }
-            if check_signals(&current_thread, uctx, Some(old_blocked)) {
+            if check_signals(&current_thread, uctx, Some(old_blocked)).is_some() {
                 return Poll::Ready(None);
             }
 

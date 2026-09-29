@@ -20,6 +20,9 @@ missing argv or bootstrap failures panic.
 `run_user_thread_loop` receives architecture trap results and the saved user
 context. It uses structured MM fault outcomes and signal actions, not raw
 user-supplied exception interpretations.
+Internal syscall restart codes are resolved according to handler installation,
+not merely signal consumption. Default continue actions cannot suppress this
+resolution, and signal return must not restart an already restored context.
 
 `exit_robust_list` reads the registered userspace head and linked nodes through
 `read_vm`; failed reads stop the walk. Pointer low-bit tags distinguish PI
