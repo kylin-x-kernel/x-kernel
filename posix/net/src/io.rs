@@ -11,7 +11,11 @@
 //! - Ancillary data (control messages)
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::{any::TypeId, net::Ipv4Addr};
+use core::{
+    any::TypeId,
+    mem::{offset_of, size_of},
+    net::Ipv4Addr,
+};
 
 use kerrno::{KError, KResult, LinuxError};
 use khal::time::monotonic_time;
@@ -29,7 +33,7 @@ use linux_raw_sys::{
         SOL_SOCKET, cmsghdr, mmsghdr, msghdr, sockaddr, socklen_t, ucred,
     },
 };
-use osvm::{VirtPtr, VmBytes, VmBytesMut, write_vm_mem};
+use osvm::{VirtPtr, VmBytes, VmBytesMut};
 use posix_types::{IoVec, IoVectorBuf, TimeSpanLike, UserConstPtr, UserPtr};
 
 use crate::{
@@ -46,6 +50,47 @@ fn parse_send_flags(flags: u32) -> SendFlags {
         send_flags |= SendFlags::DONT_WAIT;
     }
     send_flags
+}
+
+/// Returns a user pointer to the field `offset` bytes into the user value at `base`.
+fn field_ptr<S, F>(base: UserPtr<S>, offset: usize) -> UserPtr<F> {
+    UserPtr::from(base.as_ptr().addr().wrapping_add(offset))
+}
+
+/// Returns a user pointer to entry `index` of the user `mmsghdr` array `msgvec`.
+fn mmsg_entry(msgvec: UserPtr<mmsghdr>, index: usize) -> UserPtr<mmsghdr> {
+    field_ptr(msgvec, index.wrapping_mul(size_of::<mmsghdr>()))
+}
+
+/// Copies the `msghdr` fields that `recvmsg` updates back to the user header.
+///
+/// Linux writes back only these output fields. Copying the whole header would
+/// also copy its implicit padding, which is uninitialized in a kernel value.
+fn write_recvmsg_outputs(hdr: UserPtr<msghdr>, msg: &msghdr) -> KResult<()> {
+    field_ptr(hdr, offset_of!(msghdr, msg_namelen)).write_vm(msg.msg_namelen)?;
+    field_ptr(hdr, offset_of!(msghdr, msg_controllen)).write_vm(msg.msg_controllen)?;
+    field_ptr(hdr, offset_of!(msghdr, msg_flags)).write_vm(msg.msg_flags)?;
+    Ok(())
+}
+
+/// Copies the `recvmsg` output fields and `msg_len` of each received message
+/// to the leading entries of the user array `msgvec`.
+fn write_recvmmsg_outputs(msgvec: UserPtr<mmsghdr>, msgs: &[mmsghdr]) -> KResult<()> {
+    for (index, msg) in msgs.iter().enumerate() {
+        let entry = mmsg_entry(msgvec, index);
+        write_recvmsg_outputs(field_ptr(entry, offset_of!(mmsghdr, msg_hdr)), &msg.msg_hdr)?;
+        field_ptr(entry, offset_of!(mmsghdr, msg_len)).write_vm(msg.msg_len)?;
+    }
+    Ok(())
+}
+
+/// Copies `msg_len` of each sent message to the leading entries of the user
+/// array `msgvec`, the only field `sendmmsg` updates.
+fn write_sendmmsg_outputs(msgvec: UserPtr<mmsghdr>, msgs: &[mmsghdr]) -> KResult<()> {
+    for (index, msg) in msgs.iter().enumerate() {
+        field_ptr(mmsg_entry(msgvec, index), offset_of!(mmsghdr, msg_len)).write_vm(msg.msg_len)?;
+    }
+    Ok(())
 }
 
 fn parse_recvmmsg_timeout(timeout: UserConstPtr<timespec>) -> KResult<Option<TimeSpan>> {
@@ -415,7 +460,7 @@ pub fn sys_recvmsg(fd: i32, msg: UserPtr<msghdr>, flags: u32) -> KResult<isize> 
         },
     );
     msg_value.msg_namelen = msg_namelen as _;
-    write_vm_mem(msg.as_ptr().cast_mut(), core::slice::from_ref(&msg_value))?;
+    write_recvmsg_outputs(msg, &msg_value)?;
     result
 }
 
@@ -462,9 +507,6 @@ pub fn sys_sendmmsg(fd: i32, msgvec: UserPtr<mmsghdr>, vlen: u32, flags: u32) ->
                 sent += 1;
             }
             Err(e) => {
-                if sent > 0 {
-                    write_vm_mem(msgvec.as_ptr().cast_mut(), &msgvec_value)?;
-                }
                 if sent == 0 {
                     return Err(e);
                 }
@@ -472,9 +514,7 @@ pub fn sys_sendmmsg(fd: i32, msgvec: UserPtr<mmsghdr>, vlen: u32, flags: u32) ->
             }
         }
     }
-    if sent > 0 {
-        write_vm_mem(msgvec.as_ptr().cast_mut(), &msgvec_value)?;
-    }
+    write_sendmmsg_outputs(msgvec, &msgvec_value[..sent as usize])?;
     Ok(sent)
 }
 
@@ -512,7 +552,8 @@ pub fn sys_recvmmsg(
             break;
         }
         msg.msg_hdr.msg_flags = 0;
-        match recv_impl(
+        let mut msg_namelen = msg.msg_hdr.msg_namelen as socklen_t;
+        let result = recv_impl(
             fd,
             IoVectorBuf::from_iovecs(IoVec::load_from_user(
                 posix_types::UserConstPtr::from(msg.msg_hdr.msg_iov as usize),
@@ -521,6 +562,8 @@ pub fn sys_recvmmsg(
             .into_io(),
             flags,
             RecvOutput {
+                addr: UserPtr::from(msg.msg_hdr.msg_name as usize),
+                addrlen: RecvAddrLen::Value(&mut msg_namelen),
                 cmsg_builder: (!msg.msg_hdr.msg_control.is_null()).then(|| {
                     CMsgBuilder::new(
                         UserPtr::from(msg.msg_hdr.msg_control as *mut cmsghdr),
@@ -528,18 +571,16 @@ pub fn sys_recvmmsg(
                     )
                 }),
                 msg_flags: Some(&mut msg.msg_hdr.msg_flags),
-                ..RecvOutput::new(
-                    UserPtr::from(msg.msg_hdr.msg_name as usize),
-                    UserPtr::from(&mut msg.msg_hdr.msg_namelen as *mut _ as *mut socklen_t),
-                )
+                out_flags: None,
             },
-        ) {
+        );
+        msg.msg_hdr.msg_namelen = msg_namelen as _;
+        match result {
             Ok(n) => {
                 msg.msg_len = n as u32;
                 received += 1;
             }
             Err(e) => {
-                write_vm_mem(msgvec.as_ptr().cast_mut(), &msgvec_value)?;
                 if received == 0 {
                     return Err(e);
                 }
@@ -548,8 +589,6 @@ pub fn sys_recvmmsg(
         }
     }
 
-    if received > 0 {
-        write_vm_mem(msgvec.as_ptr().cast_mut(), &msgvec_value)?;
-    }
+    write_recvmmsg_outputs(msgvec, &msgvec_value[..received as usize])?;
     Ok(received)
 }

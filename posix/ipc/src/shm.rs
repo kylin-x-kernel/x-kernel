@@ -38,6 +38,7 @@ fn new_shmid_ds(
             mode,
             seq: 0,
             pad: 0,
+            abi_pad: 0,
             unused0: 0,
             unused1: 0,
         },

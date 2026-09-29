@@ -53,6 +53,7 @@ impl MessageQueue {
                     mode,
                     seq: 0,
                     pad: 0,
+                    abi_pad: 0,
                     unused0: 0,
                     unused1: 0,
                 },
@@ -609,6 +610,7 @@ pub fn sys_msgctl(msqid: i32, cmd: i32, buf: UserPtr<u8>) -> KResult<isize> {
             mode: 0o600,
             pad: 0,
             seq: 0,
+            abi_pad: 0,
             unused0: 0,
             unused1: 0,
         };

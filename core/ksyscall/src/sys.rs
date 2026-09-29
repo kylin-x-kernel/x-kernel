@@ -24,10 +24,10 @@ use linux_raw_sys::{
         LINUX_REBOOT_CMD_SW_SUSPEND, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
         LINUX_REBOOT_MAGIC2A, LINUX_REBOOT_MAGIC2B, LINUX_REBOOT_MAGIC2C,
     },
-    system::{new_utsname, sysinfo},
+    system::new_utsname,
 };
 use osvm::{VirtPtr, write_vm_mem};
-use posix_types::{UserConstPtr, UserPtr};
+use posix_types::{UserConstPtr, UserPtr, system::k_sysinfo};
 
 // Re-export the architecture-specific syscalls (e.g. `sys_riscv_hwprobe` on
 // riscv64) so dispatch can reach them via `crate::sys::*`. Gated to riscv64
@@ -102,23 +102,8 @@ pub fn sys_uname(name: UserPtr<new_utsname>) -> KResult<isize> {
 }
 
 /// Get general system information such as process count and memory unit
-pub fn sys_sysinfo(info: UserPtr<sysinfo>) -> KResult<isize> {
-    let mut kinfo = sysinfo {
-        uptime: 0,
-        loads: [0; 3],
-        totalram: 0,
-        freeram: 0,
-        sharedram: 0,
-        bufferram: 0,
-        totalswap: 0,
-        freeswap: 0,
-        procs: 0,
-        pad: 0,
-        totalhigh: 0,
-        freehigh: 0,
-        mem_unit: 0,
-        _f: linux_raw_sys::system::__IncompleteArrayField::new(),
-    };
+pub fn sys_sysinfo(info: UserPtr<k_sysinfo>) -> KResult<isize> {
+    let mut kinfo = k_sysinfo::default();
     kinfo.procs = kprocess::system_view::process_count() as _;
     kinfo.mem_unit = 1;
 
@@ -324,4 +309,31 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> KResult<isize> {
 /// Secure computing syscall for sandboxing (not fully implemented)
 pub fn sys_seccomp(_op: u32, _flags: u32, _args: *const ()) -> KResult<isize> {
     Err(KError::from(kerrno::LinuxError::ENOSYS))
+}
+
+#[cfg(unittest)]
+mod tests_sysinfo {
+    use alloc::vec;
+    use core::mem::{offset_of, size_of};
+
+    use posix_types::{UserPtr, system::k_sysinfo};
+    use unittest::def_test;
+    use unittest_support::TestUserBuffer;
+
+    use super::sys_sysinfo;
+
+    #[def_test(user)]
+    fn test_sysinfo_zeroes_abi_padding() {
+        let size = size_of::<k_sysinfo>();
+        let buf = TestUserBuffer::new(size).unwrap();
+        buf.write_bytes(&vec![0x5a; size]).unwrap();
+
+        sys_sysinfo(UserPtr::from(buf.as_user_ptr::<k_sysinfo>())).unwrap();
+
+        let bytes = buf.read_bytes(size).unwrap();
+        let gap = offset_of!(k_sysinfo, pad) + size_of::<u16>()..offset_of!(k_sysinfo, totalhigh);
+        let tail = offset_of!(k_sysinfo, mem_unit) + size_of::<u32>()..size;
+        assert!(bytes[gap].iter().all(|&byte| byte == 0));
+        assert!(bytes[tail].iter().all(|&byte| byte == 0));
+    }
 }

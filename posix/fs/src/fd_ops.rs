@@ -16,7 +16,7 @@ use kerrno::{KError, KResult};
 use kvfs::{FMode, OpenFlags, pipe::PipeObject};
 use linux_raw_sys::general::*;
 use memfs::shmem;
-use posix_types::UserPtr;
+use posix_types::{UserPtr, fs::k_flock64};
 
 const SETFL_MASK: OpenFlags = OpenFlags::APPEND
     .union(OpenFlags::NONBLOCK)
@@ -119,7 +119,7 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
         F_SETLK | F_SETLKW => Ok(0),
         F_OFD_SETLK | F_OFD_SETLKW => Ok(0),
         F_GETLK | F_OFD_GETLK => {
-            let arg = UserPtr::<flock64>::from(arg);
+            let arg = UserPtr::<k_flock64>::from(arg);
             let mut lock = arg.read_vm()?;
             lock.l_type = F_UNLCK as _;
             arg.write_vm(lock)?;

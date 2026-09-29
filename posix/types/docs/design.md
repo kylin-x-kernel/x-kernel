@@ -39,7 +39,13 @@ initialized byte representation including padding. Neither implies permission
 or semantic validity. Scalars, arrays, raw pointers, `UserPtr` itself, and the
 POD `linux_raw_sys` structures listed in the domain modules carry these traits
 through audited `unsafe impl`s; derive macros from `macros` are re-exported for
-external ABI structs.
+external ABI structs. Linux structures whose `linux_raw_sys` definition has
+implicit padding do not carry `UserWrite`; `k_epoll_event`, `k_sysinfo`, and
+`k_flock64` replace them with explicit padding fields named `abi_pad*`, and
+compile-time assertions pin their size, alignment, and field offsets to the
+`linux_raw_sys` definition. They follow their domain module's export path:
+`k_epoll_event` is re-exported at the crate root through `io`, while
+`k_sysinfo` and `k_flock64` stay under `system` and `fs`.
 
 `IoVec::load_from_user` copies descriptor arrays; `IoVectorBuf::from_iovecs`
 enforces the Linux `IOV_MAX`-style bound (at most 1024 descriptors), rejects

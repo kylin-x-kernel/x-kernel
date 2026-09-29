@@ -39,12 +39,13 @@ those controls where required.
 | Source and function | Operation / invariant | Enforcing context |
 |---|---|---|
 | `src/signalfd.rs`, `SignalfdSiginfo::from_signal_info` | Reads both integer/pointer views of a C `sigval_t` union sharing storage. | `SignalInfo::sigval` supplies the value; adjacent SAFETY states both views may be read regardless of the written member. No pointer is dereferenced. The provider must supply initialized union storage. |
-| `src/epoll.rs`, test helper `assert_epoll_event` | Reads packed `epoll_event.events` and `.data` with `read_unaligned`. | Test supplies an initialized event; the SAFETY comments explicitly account for Linux ABI packed fields. |
 | `src/eventfd.rs`, `test_eventfd_register` | Constructs a `Waker` from `RawWaker`. | Test-only no-op callbacks never dereference the null data pointer, as the adjacent SAFETY comment requires. |
 | `src/timerfd.rs`, `TimerFd::settime`, `TimerFd::read_expirations` | Call unsafe `Timer::start` with a core-bounded deadline. | Initialized task/timer services; owned stable handler data; hard-IRQ-compatible state locking and poll wake; no synchronous cancellation under the handler state lock. |
 | `src/timerfd.rs`, `poll_before_irq_preserves_waiter_notification` test | Starts a due timer with local delivery temporarily masked. | Initialized kernel test service, CPU pinning, owned independent data and atomic-only test wakers; the timer is cancelled before final release. |
 
-There is no explicit FFI declaration or inline assembly. Signal output has a
+There is no explicit FFI declaration or inline assembly. Epoll output uses the
+`posix_types::k_epoll_event` carrier, whose padding is an explicit zeroed field.
+Signal output has a
 compile-time 128-byte size assertion and initializes all output fields/padding;
 serialization uses `zerocopy::IntoBytes`. Unsafe descriptions above do not replace
 provider contracts or prove that all upstream union construction is correct.

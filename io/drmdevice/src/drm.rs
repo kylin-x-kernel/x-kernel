@@ -50,6 +50,7 @@ pub struct DrmVersion {
     pub version_major: c_int,
     pub version_minor: c_int,
     pub version_patchlevel: c_int,
+    pub abi_pad: u32,
     pub name_len: usize,
     pub name: UserPtr<u8>,
     pub date_len: usize,
@@ -181,6 +182,7 @@ pub struct DrmModeFbCmd2 {
     pub handles: [u32; 4],
     pub pitches: [u32; 4],
     pub offsets: [u32; 4],
+    pub abi_pad: u32,
     pub modifier: [u64; 4],
 }
 
@@ -215,6 +217,7 @@ pub struct DrmModeDestroyDumb {
 pub struct DrmModeGetPlaneRes {
     pub plane_id_ptr: UserPtr<u32>,
     pub count_planes: u32,
+    pub abi_pad: u32,
 }
 
 #[repr(C)]
@@ -237,6 +240,7 @@ pub struct DrmModeObjGetProperties {
     pub count_props: u32,
     pub obj_id: u32,
     pub obj_type: u32,
+    pub abi_pad: u32,
 }
 
 #[repr(C)]

@@ -26,7 +26,8 @@ use kpoll::{IoEvents, PollContext, PollRegisterError, PollRegistrations, PollSet
 use kspin::{SpinNoIrq, SpinNoPreempt};
 use ksync::Mutex;
 use kvfs::{FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
-use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT, epoll_event};
+use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT};
+use posix_types::k_epoll_event;
 
 /// A ready event returned by an [`Epoll`] instance.
 #[derive(Clone, Copy)]
@@ -749,7 +750,7 @@ impl Epoll {
     ///
     /// Returns a mapped poll-source registration error when no event was emitted.
     /// If events were already written, returns their count and requeues retry work.
-    pub fn poll_events(&self, out: &mut [epoll_event]) -> KResult<usize> {
+    pub fn poll_events(&self, out: &mut [k_epoll_event]) -> KResult<usize> {
         trace!("Epoll: poll_events called, out.len()={}", out.len());
 
         let mut count = 0;
@@ -802,18 +803,12 @@ impl Epoll {
 
             match interest.consume(file.as_ref()) {
                 ConsumeResult::EventAndKeep(event) => {
-                    out[count] = epoll_event {
-                        events: event.events.bits(),
-                        data: event.user_data,
-                    };
+                    out[count] = k_epoll_event::new(event.events.bits(), event.user_data);
                     count += 1;
                     deferred_keep.push(Arc::downgrade(&interest));
                 }
                 ConsumeResult::EventAndRemove(event) => {
-                    out[count] = epoll_event {
-                        events: event.events.bits(),
-                        data: event.user_data,
-                    };
+                    out[count] = k_epoll_event::new(event.events.bits(), event.user_data);
                     count += 1;
                     interest.mark_not_in_queue();
                     let registered_events = interest.registered_events();
@@ -940,16 +935,14 @@ impl FileOperations for EventpollFops {
 #[cfg(unittest)]
 mod epoll_tests {
     use alloc::sync::Arc;
-    use core::{
-        ptr,
-        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-    };
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use anon_inodefs::AnonInodeFs;
     use kerrno::KError;
     use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
     use kvfs::{FMode, FileOperations, OpenFlags, VfsFile};
-    use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT, epoll_event};
+    use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT};
+    use posix_types::k_epoll_event;
     use unittest::def_test;
 
     use super::{
@@ -957,16 +950,9 @@ mod epoll_tests {
         register_events,
     };
 
-    fn assert_epoll_event(event: &epoll_event, events: u32, data: u64) {
-        // SAFETY: `event` is a valid initialized `epoll_event`. The Linux ABI
-        // type is packed, so field reads must be explicitly unaligned.
-        let actual_events = unsafe { ptr::addr_of!(event.events).read_unaligned() };
-        // SAFETY: `event` is a valid initialized `epoll_event`. The Linux ABI
-        // type is packed, so field reads must be explicitly unaligned.
-        let actual_data = unsafe { ptr::addr_of!(event.data).read_unaligned() };
-
-        assert_eq!(actual_events, events);
-        assert_eq!(actual_data, data);
+    fn assert_epoll_event(event: &k_epoll_event, events: u32, data: u64) {
+        assert_eq!(event.events(), events);
+        assert_eq!(event.data(), data);
     }
 
     enum TestFileKind {
@@ -1189,7 +1175,7 @@ mod epoll_tests {
     #[def_test]
     fn test_epoll_poll_events_empty() {
         let epoll = Epoll::new();
-        let mut out = [epoll_event { events: 0, data: 0 }; 4];
+        let mut out = [k_epoll_event::default(); 4];
         assert_eq!(epoll.poll_events(&mut out), Err(KError::WouldBlock));
     }
 
@@ -1215,7 +1201,7 @@ mod epoll_tests {
             queue.push_back(weak);
         }
 
-        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        let mut out = [k_epoll_event::default(); 1];
         assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
         assert_epoll_event(&out[0], IoEvents::IN.bits(), 7);
         assert_eq!(epoll.inner.ready_queue.lock().len(), 1);
@@ -1238,7 +1224,7 @@ mod epoll_tests {
             )
             .unwrap();
 
-        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        let mut out = [k_epoll_event::default(); 1];
         assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
         assert_epoll_event(&out[0], IoEvents::IN.bits(), 7);
         assert_eq!(epoll.poll().bits(), IoEvents::empty().bits());
@@ -1265,7 +1251,7 @@ mod epoll_tests {
             .lock()
             .push_back(Arc::downgrade(&interest));
 
-        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        let mut out = [k_epoll_event::default(); 1];
         assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
         assert_epoll_event(&out[0], IoEvents::IN.bits(), 7);
         assert_eq!(epoll.poll().bits(), IoEvents::empty().bits());
@@ -1293,7 +1279,7 @@ mod epoll_tests {
             queue.push_back(weak);
         }
 
-        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        let mut out = [k_epoll_event::default(); 1];
         assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
         assert_epoll_event(&out[0], IoEvents::IN.bits(), 7);
         assert_eq!(epoll.poll().bits(), IoEvents::empty().bits());
@@ -1320,7 +1306,7 @@ mod epoll_tests {
             .lock()
             .push_back(Arc::downgrade(&interest));
 
-        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        let mut out = [k_epoll_event::default(); 1];
         assert_eq!(epoll.poll_events(&mut out), Err(KError::WouldBlock));
         assert_eq!(epoll.poll().bits(), IoEvents::empty().bits());
     }
@@ -1345,7 +1331,7 @@ mod epoll_tests {
             .lock()
             .push_back(Arc::downgrade(&interest));
 
-        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        let mut out = [k_epoll_event::default(); 1];
         assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
         assert_epoll_event(&out[0], IoEvents::HUP.bits(), 7);
 
@@ -1382,7 +1368,7 @@ mod epoll_tests {
             .lock()
             .push_back(Arc::downgrade(&interest));
 
-        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        let mut out = [k_epoll_event::default(); 1];
         assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
         assert_epoll_event(&out[0], IoEvents::OUT.bits(), 7);
         assert_eq!(state.poll_count(), 1);
@@ -1416,7 +1402,7 @@ mod epoll_tests {
 
         assert!(epoll.inner.ready_queue.lock().len() <= 1);
 
-        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        let mut out = [k_epoll_event::default(); 1];
         assert_eq!(epoll.poll_events(&mut out), Err(KError::WouldBlock));
         assert_eq!(epoll.poll().bits(), IoEvents::empty().bits());
     }
@@ -1471,7 +1457,7 @@ mod epoll_tests {
             )
             .unwrap();
 
-        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        let mut out = [k_epoll_event::default(); 1];
         assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
         assert_epoll_event(&out[0], IoEvents::IN.bits(), 9);
     }

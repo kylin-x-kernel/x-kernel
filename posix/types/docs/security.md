@@ -47,7 +47,7 @@ The crate never dereferences a user pointer itself; every access goes through
 |---|---|---|---|---|
 | T-01 | Kernel dereference of a forged user address | High (if violated) | bypassing the wrappers and dereferencing directly | no deref API exists; review rule: adapters must use `osvm`-routed helpers only |
 | T-02 | Invalid bit pattern typed as `T` (e.g. padding or union read as bool) | High (if violated) | `read_uninit` + `assume_init` on a non-`UserRead` type | `read_vm` requires `T: UserRead`; `read_uninit` returns `MaybeUninit` precisely to keep this decision explicit |
-| T-03 | Padding-byte information disclosure to user space | Medium | `UserWrite` on a struct with implicit padding | trait contract forbids implicit padding; write-side impls are limited to audited PODs; residual risk on newly attached structs is handled at review time |
+| T-03 | Padding-byte information disclosure to user space | High | `UserWrite` on a struct with implicit padding, or a raw `osvm` write of such a struct | trait contract forbids implicit padding; padded `linux_raw_sys` structs use explicit-padding `k_*` carriers with layout assertions instead of carrying `UserWrite`; newly attached impls and raw `osvm` writes, which have no `UserWrite` bound, remain review-time checks |
 | T-04 | Unbounded allocation via user length | Medium | `load_vm_vec(ptr, huge_len)` or unbounded `load_string` | bounded variants exist and are preferred; adapters must cap counts (documented caller contract, same class as Linux `memdup_user`) |
 | T-05 | TOCTOU on copied descriptors or strings | Low/Medium | user mutates memory between copy and use | copies are single-pass snapshots at copy time; semantic revalidation is the adapter's documented responsibility |
 | T-06 | iovec count/length abuse | Medium | > 1024 segments, negative `iov_len`, total overflow | rejected in `from_iovecs` before any user-memory I/O |
@@ -86,7 +86,11 @@ and converts without inspection beyond UTF-8 checks and logs nothing.
 ## Audit checklist
 
 - Never attach `UserRead`/`UserWrite` to a struct with implicit padding on the
-  write side or non-POD fields on the read side.
+  write side or non-POD fields on the read side. For a padded Linux structure,
+  add a `k_*` carrier with explicit padding fields and layout assertions.
+- Adapters that write through `osvm` directly (`write_vm_mem` or a raw-pointer
+  `write_vm`), which has no `UserWrite` bound, must copy only padding-free
+  values, e.g. individual output fields; prefer `UserPtr::write_vm`.
 - Adapters must cap `len` before `load_vm_vec` and prefer bounded string loads.
 - New ABI carriers belong in the domain modules with a `SAFETY` comment, not as
   ad-hoc reinterprets in adapters.

@@ -13,9 +13,9 @@ use kpoll::IoEvents;
 use ktask::future::{self, block_on, poll_io};
 use ktime_types::TimeSpan;
 use linux_raw_sys::general::{
-    EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, epoll_event, timespec,
+    EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, timespec,
 };
-use posix_types::{TimeSpanLike, UserConstPtr, UserPtr, k_sigset};
+use posix_types::{TimeSpanLike, UserConstPtr, UserPtr, k_epoll_event, k_sigset};
 
 bitflags! {
     // Flags for the `epoll_create1` syscall.
@@ -43,7 +43,7 @@ pub fn sys_epoll_ctl(
     epfd: i32,
     op: u32,
     fd: i32,
-    event: UserConstPtr<epoll_event>,
+    event: UserConstPtr<k_epoll_event>,
 ) -> KResult<isize> {
     let epoll_file = kprocess::current_resources().get_file(epfd)?;
     let epoll = Epoll::from_file(&epoll_file)?;
@@ -52,13 +52,13 @@ pub fn sys_epoll_ctl(
 
     let parse_event = || -> KResult<(EpollEvent, EpollFlags)> {
         let event = event.read_vm()?;
-        let events = IoEvents::from_bits_truncate(event.events);
+        let events = IoEvents::from_bits_truncate(event.events());
         let flags =
-            EpollFlags::from_bits(event.events & !events.bits()).ok_or(KError::InvalidInput)?;
+            EpollFlags::from_bits(event.events() & !events.bits()).ok_or(KError::InvalidInput)?;
         Ok((
             EpollEvent {
                 events,
-                user_data: event.data,
+                user_data: event.data(),
             },
             flags,
         ))
@@ -83,7 +83,7 @@ pub fn sys_epoll_ctl(
 
 fn do_epoll_wait(
     epfd: i32,
-    events: UserPtr<epoll_event>,
+    events: UserPtr<k_epoll_event>,
     maxevents: i32,
     timeout: Option<TimeSpan>,
     sigmask: UserConstPtr<k_sigset>,
@@ -101,7 +101,7 @@ fn do_epoll_wait(
     // `posix-types::UserPtr` models copy-to-user semantics rather than a borrowed
     // mutable user slice, so we stage ready events in kernel memory and copy them
     // back once polling completes.
-    let mut output = vec![epoll_event { events: 0, data: 0 }; maxevents as usize];
+    let mut output = vec![k_epoll_event::default(); maxevents as usize];
     let sigmask = sigmask
         .check_non_null()
         .map(UserConstPtr::read_vm)
@@ -127,7 +127,7 @@ fn do_epoll_wait(
 /// Waits for epoll events with a millisecond timeout.
 pub fn sys_epoll_pwait(
     epfd: i32,
-    events: UserPtr<epoll_event>,
+    events: UserPtr<k_epoll_event>,
     maxevents: i32,
     timeout: i32,
     sigmask: UserConstPtr<k_sigset>,
@@ -144,7 +144,7 @@ pub fn sys_epoll_pwait(
 /// Waits for epoll events with a high-precision timeout.
 pub fn sys_epoll_pwait2(
     epfd: i32,
-    events: UserPtr<epoll_event>,
+    events: UserPtr<k_epoll_event>,
     maxevents: i32,
     timeout: UserConstPtr<timespec>,
     sigmask: UserConstPtr<k_sigset>,
@@ -157,4 +157,62 @@ pub fn sys_epoll_pwait2(
         .map(|timeout| timeout.try_into_time_span())
         .transpose()?;
     do_epoll_wait(epfd, events, maxevents, timeout, sigmask, sigsetsize)
+}
+
+#[cfg(unittest)]
+mod tests_epoll_padding {
+    use alloc::vec;
+    use core::mem::size_of;
+
+    use linux_raw_sys::general::{EPOLL_CTL_ADD, EPOLLIN};
+    use posix_types::{UserConstPtr, UserPtr, k_epoll_event};
+    use unittest::def_test;
+    use unittest_support::{TestUserBuffer, TestUserValue};
+
+    use super::{sys_epoll_create1, sys_epoll_ctl, sys_epoll_pwait};
+    use crate::{ipc::sys_eventfd2, vfs::sys_close};
+
+    #[def_test(user)]
+    fn test_epoll_wait_zeroes_abi_padding() {
+        const EVENTS: usize = 4;
+        let epfd = sys_epoll_create1(0).unwrap() as i32;
+        let interest = TestUserValue::from_value(k_epoll_event::new(EPOLLIN, 7)).unwrap();
+        let mut fds = vec![];
+        for _ in 0..EVENTS {
+            let fd = sys_eventfd2(1, 0).unwrap() as i32;
+            sys_epoll_ctl(
+                epfd,
+                EPOLL_CTL_ADD,
+                fd,
+                UserConstPtr::from(interest.as_user_ptr().addr()),
+            )
+            .unwrap();
+            fds.push(fd);
+        }
+
+        let event_size = size_of::<k_epoll_event>();
+        let buf = TestUserBuffer::new(EVENTS * event_size).unwrap();
+        buf.write_bytes(&vec![0x5a; EVENTS * event_size]).unwrap();
+        let ready = sys_epoll_pwait(
+            epfd,
+            UserPtr::from(buf.as_user_ptr::<k_epoll_event>()),
+            EVENTS as i32,
+            0,
+            UserConstPtr::default(),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(ready, EVENTS as isize);
+        // The padding sits between the `u32` events and the `u64` data; the
+        // range is empty on x86_64, where the ABI packs the structure.
+        let pad = size_of::<u32>()..event_size - size_of::<u64>();
+        let bytes = buf.read_bytes(EVENTS * event_size).unwrap();
+        for event in bytes.chunks_exact(event_size) {
+            assert!(event[pad.clone()].iter().all(|&byte| byte == 0));
+        }
+        for fd in fds.into_iter().chain([epfd]) {
+            sys_close(fd).unwrap();
+        }
+    }
 }

@@ -34,6 +34,9 @@ pub struct IpcPerm {
     pub seq: c_ushort,
     /// Padding
     pub pad: c_ushort,
+    /// The 4-byte alignment hole Linux leaves after `__pad2` (`pad` here) on
+    /// 64-bit targets; always zero so no uninitialized bytes reach user memory.
+    pub abi_pad: u32,
     /// Unused field
     pub unused0: c_long,
     /// Unused field
