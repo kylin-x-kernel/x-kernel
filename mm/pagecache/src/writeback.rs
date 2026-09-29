@@ -31,8 +31,15 @@ fn writeback_waiters(folio: &Arc<Mutex<Folio>>) -> &'static WaitQueue {
     &WRITEBACK_WAITERS[((address >> 3) ^ (address >> 11)) % WRITEBACK_WAITERS.len()]
 }
 
-fn wait_on_writeback(folio: &Arc<Mutex<Folio>>) {
-    writeback_waiters(folio).wait_until(|| !folio.lock().is_under_writeback());
+pub(super) fn wait_on_writeback(folio: &Arc<Mutex<Folio>>) {
+    writeback_waiters(folio).wait_until(|| {
+        let is_complete = !folio.lock().is_under_writeback();
+        #[cfg(unittest)]
+        if !is_complete {
+            crate::tests::observe_writeback_wait(folio);
+        }
+        is_complete
+    });
 }
 
 // Returns the covering half-open page range; empty byte ranges cover no pages.
@@ -257,6 +264,8 @@ impl MappingPages {
     /// The byte and page limits may further shorten each batch. Enumeration is
     /// incremental as in [`Self::writeback_until`]. The callback runs without
     /// mapping or folio locks; completion revalidates each resident identity.
+    /// The callback must not wait for or truncate folios in its submitted batch:
+    /// their writeback completes only after the callback returns.
     pub fn write_cache_pages(
         &self,
         visible_len: u64,

@@ -89,6 +89,8 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
     /// callback, including backing-store I/O. Implementations may block, but
     /// must not enter the inode truncate path or otherwise require the
     /// invalidate lock exclusively.
+    /// Buffered-write rollback may wait for writeback while holding the inode
+    /// data lock, so this callback and its I/O completion must not acquire it.
     fn writepages(&self, mapping: &AddressSpace, control: &mut WritebackControl) -> VfsResult<()> {
         mapping.writeback_cached_folios(control, |_, _, _| Err(VfsError::NoSuchDevice))
     }

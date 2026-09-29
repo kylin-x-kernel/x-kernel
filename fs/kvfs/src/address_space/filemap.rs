@@ -206,6 +206,10 @@ impl AddressSpace {
         Ok(())
     }
 
+    // The caller holds the inode data lock through rollback to keep size and
+    // competing writes stable. Rollback may wait for concurrent writeback;
+    // filesystem callbacks have returned before cache shrink, so their locks
+    // are released. Writeback completion must not depend on the data lock.
     fn perform_write(
         &self,
         offset: u64,

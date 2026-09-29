@@ -49,7 +49,7 @@ index reconciliation。writeback 的文件系统 I/O 在 tree lock 外执行。
 现有 materialize closure 在 tree lock 下运行，可能调用 backing read；禁止重入同一
 容器。该读入路径的锁范围没有在本次结构重构中改变。`writeback_until` 会在 folio lock 下调用 backend
 callback，该 callback 不得重入同一个 `MappingPages`；batch writeback 则在调用 backend
-前释放 folio lock。
+前释放 folio lock，但回调不得等待或截断自身提交批次的 folio，否则完成路径无法执行。
 
 ## 威胁分析
 
@@ -81,8 +81,8 @@ callback，该 callback 不得重入同一个 `MappingPages`；batch writeback �
 
 - resident folio tree 和 dirty index 分别使用 `BTreeMap`/`BTreeSet`；已消除 writeback
   对全部 resident folio 的扫描，但尚未实现 Linux XArray tag/reclaim；
-- truncate/invalidate 尚未接入 folio writeback 等待与二次移除；I/O 期间的
-  resize/invalidate 仍依赖 owner 串行化；
+- truncate 等待写回时释放 mapping/folio 锁，重新加锁后复核 identity 与 writeback；
+  owner 仍须串行化尺寸变化并禁止在截断范围内重新填页；
 - `writeback_until` 持 folio lock 调用 backend，callback 重入同一个 `MappingPages` 会造成
   死锁；
 - 没有自适应 readahead、swap、memcg、NUMA 或 THP；

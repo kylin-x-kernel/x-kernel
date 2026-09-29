@@ -140,8 +140,8 @@ reconciliation。dirty → dirty 和 clean → clean 不改变 tag，避免只�
   backend callback；该 callback 不得重入同一个 `MappingPages`；
 - `write_cache_pages` 在锁内完成状态过渡和数据复制，释放 folio lock 后才调用 batch
   backend callback；
-- `wait_on_writeback_range` 不持锁睡眠；truncate/invalidate 的两轮移除尚未接入等待。
-  I/O 期间的 resize/invalidate 仍须由 owner 在完整 writeback operation 外串行化。
+- `wait_on_writeback_range` 不持锁睡眠；truncate 先移除非忙页，再等待写回并复核 identity 后移除余页。
+  KVFS 仍用 invalidate shared lock 覆盖完整 writeback operation，本阶段不缩小其锁范围。
 
 ## 设计决策
 
@@ -175,7 +175,8 @@ AddressSpace 销毁时容器随字段释放；entries 持有的 folio 引用随�
 folio 引用仍通过 `Arc` 保活页数据。
 `truncate_final()` 是 inode final teardown 的显式丢弃路径；普通 writeback 失败仍保留
 dirty 状态。shrink 和 final teardown 会同时删除 resident folio 与对应 dirty index；
-surviving truncated tail 被清零并重新加入 dirty index。
+surviving truncated tail 等待写回后清零并重新加入 dirty index；增长时保留尾页，在 folio 锁内清零并标脏，无需等待持数据副本的批量写回。
 
-MappingPages 的 Drop 复用显式 truncate 清理，先清 dirty、删除 entries/marks，再释放
-引用；外部持有的 folio 也完成清理。Folio drop 检查不再保存按 mapping 类型区分的策略。
+MappingPages 的 Drop 不等待 I/O：最终所有权排除仍借用容器的写回操作；在任务上下文中
+清 dirty 后，由字段析构释放 entries/marks，外部持有的 folio 也完成清理。
+需要等待写回的清理通过显式 `truncate_final()` 完成。

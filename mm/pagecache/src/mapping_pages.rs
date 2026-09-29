@@ -28,6 +28,7 @@ pub(super) struct MappingPagesState {
 /// This is the mapping's page index, corresponding to Linux `i_pages`.
 /// The owning address space supplies filesystem operations, size and
 /// invalidation serialization; this container does not own that state.
+/// Operations and final destruction require sleepable task context.
 pub struct MappingPages {
     pub(super) state: Mutex<MappingPagesState>,
 }

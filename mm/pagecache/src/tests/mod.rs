@@ -4,9 +4,12 @@
 
 //! Shared fixtures for cache algorithm tests.
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use kerrno::KResult;
+use ksync::{Mutex, static_lock};
+use ktask::WaitQueue;
 use memaddr::PAGE_SIZE_4K;
 
 use crate::{Folio, MappingPages, PageIndex};
@@ -38,4 +41,41 @@ fn write_cached(cache: &MappingPages, offset: u64, src: &[u8]) -> KResult<()> {
         written += step;
     }
     Ok(())
+}
+
+// One scoped observer is installed by the truncate concurrency test. Other
+// tests can write back concurrently: notifications match the retained Arc.
+type WritebackWaitSignal = (Arc<Mutex<Folio>>, Arc<AtomicBool>, Arc<WaitQueue>);
+static_lock! {
+    static WRITEBACK_WAIT_SIGNAL: Mutex<Option<WritebackWaitSignal>> = Mutex::new(None);
+}
+
+struct WritebackWaitObservation;
+
+impl WritebackWaitObservation {
+    fn new(folio: Arc<Mutex<Folio>>, entered: Arc<AtomicBool>, events: Arc<WaitQueue>) -> Self {
+        let mut signal = WRITEBACK_WAIT_SIGNAL.lock();
+        assert!(
+            signal.is_none(),
+            "writeback wait observer already installed"
+        );
+        *signal = Some((folio, entered, events));
+        Self
+    }
+}
+
+impl Drop for WritebackWaitObservation {
+    fn drop(&mut self) {
+        WRITEBACK_WAIT_SIGNAL.lock().take();
+    }
+}
+
+pub(super) fn observe_writeback_wait(folio: &Arc<Mutex<Folio>>) {
+    let signal = WRITEBACK_WAIT_SIGNAL.lock();
+    if let Some((observed, entered, events)) = signal.as_ref()
+        && Arc::ptr_eq(observed, folio)
+    {
+        entered.store(true, Ordering::Release);
+        events.notify_all(false);
+    }
 }

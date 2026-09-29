@@ -255,7 +255,13 @@ fn failed_writeback_does_not_redirty_detached_folio() {
         &mut pages_skipped,
         PAGE_SIZE_4K,
         &mut |_, _| {
-            cache_during_io.resize_cached_folios(PAGE_SIZE_4K as u64, 0);
+            // Model a detached in-flight reference directly: truncate now
+            // waits for this callback to finish before removing the folio.
+            let mut state = cache_during_io.state.lock();
+            state.entries.remove(&0);
+            state.dirty_marks.remove(&0);
+            state.writeback_marks.remove(&0);
+            drop(state);
             core::assert!(cache_during_io.state.lock().writeback_marks.is_empty());
             Err((0, KError::InvalidInput))
         },
