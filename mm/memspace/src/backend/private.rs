@@ -22,7 +22,7 @@ use vmobj::{
     ObjectViewHit,
 };
 
-use super::{alloc_frame, dealloc_frame, map_paging_err, pages_in};
+use super::{alloc_frame, dealloc_frame, map_paging_err};
 use crate::{
     FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmArea, VmBackingInfo, VmBackingKind,
     backend::{BackendOps, FaultCompletion, FaultCompletionResult},
@@ -521,11 +521,9 @@ pub fn unmap_private_object_range(
     pgtbl: &mut PageTableMut,
 ) -> KResult {
     let detached = object.detach_range(object_start, range.size());
-    for addr in pages_in(range, size)? {
-        if let Ok((_frame, _flags, page_size)) = pgtbl.unmap(addr) {
-            assert_eq!(page_size, size);
-        }
-    }
+    pgtbl
+        .unmap_sparse_region(range.start, range.size(), size)
+        .map_err(super::map_paging_err)?;
     pgtbl.finish();
     release_private_object_pages(detached.finalize_release());
     Ok(())

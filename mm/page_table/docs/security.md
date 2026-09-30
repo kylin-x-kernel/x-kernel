@@ -80,7 +80,10 @@ side effects. The frame must remain live throughout every access to the slice.
 **Callers**: `walk_page_table!` in `ref` mode, `dealloc_tree()`, and `next_table()`.
 Root access relies on ownership of the allocated root frame. Descending into a
 subtable relies on the intermediate entry identifying a live table frame;
-`next_table()` rejects a zero physical address and huge-page entries.
+`next_table()` and `next_table_mut()` reject a zero physical address,
+retain the huge-page error, and require `is_table()` before translating a child
+address. This also protects recursive destruction from non-present huge leaves
+whose architecture-specific `is_huge()` predicate returns false.
 
 ### 3. `table_of_mut()` (`table64.rs`)
 
@@ -162,6 +165,20 @@ needed.
     boundary. The caller must still stop hardware use of the address space.
 
 ## Thread Safety
+
+`unmap_sparse_region` requires a uniform leaf size and validates address/length
+alignment, checked end arithmetic, canonical endpoints, and root-table coverage
+before clearing entries. Missing subtrees and non-present leaf entries are
+skipped without allocation or invalidation. Only architecture-classified table
+pointers are descended into, so non-present huge leaves cannot make the walker
+interpret backing data as a page table. A different present leaf size
+returns `MappedToHugePage` instead of clearing outside the requested range.
+On traversal error, a cleared prefix remains pending in the guard; callers must
+not release backing frames as if the whole range succeeded. No intermediate
+table frame is reclaimed by this API, so it introduces no table-walk-cache
+reclamation boundary. All cleared leaves retain the normal flush-before-free
+obligation. Tests cover sparse/dense boundaries, high addresses, three-level
+tables, huge leaves, invalid ranges, and deferred flush state.
 
 | Type | `Send` condition | `Sync` condition |
 |------|------------------|------------------|

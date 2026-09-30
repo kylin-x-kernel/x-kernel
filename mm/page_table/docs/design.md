@@ -163,11 +163,32 @@ Three-level page tables (Sv39) skip P4 and start at P3.
    remaining size.
 4. Return an error if any mapping fails. Earlier mappings are not rolled back.
 
+### Sparse Region Unmapping (`unmap_sparse_region`)
+
+The caller supplies a uniform leaf page size and an aligned virtual range.
+The operation validates the range before mutation, then walks allocated tables
+once per covered subtree. A missing intermediate entry skips its entire clipped
+coverage interval; an allocated leaf table is scanned in place. Directories
+are identified by architecture-specific `is_table()`: normally a present
+non-huge entry, but on LoongArch a nonzero physical address without attributes.
+Non-present leaves are left unchanged even when `is_huge()` returns false.
+The walk neither allocates nor frees table frames.
+Its structure follows Linux v7.0 (`028ef9c96e96`) `zap_*_range`, adapted to this
+crate's three/four-level tables and uniform backing page-size contract.
+
+Every cleared leaf records an invalidation through the existing `flush` state.
+A present leaf of a different size is an error, including a partially covered
+huge page: the API does not split huge mappings. A mismatch can leave a cleared
+prefix, so callers must preserve backing ownership on error and allow pending
+invalidations to finish. This does not change the strict, hole-rejecting
+`unmap_region` API. Unit tests count visited entries only in test builds to
+verify subtree skipping without timing thresholds.
+
 ### Batched TLB Invalidation
 
 1. `PageTableMut` maintains a `ToFlush` value.
 2. Each successful PTE change made by
-   `unmap/remap/protect/replace_if_same` records its address with `flush(vaddr)`.
+   `unmap/unmap_sparse_region/remap/protect/replace_if_same` records its address with `flush(vaddr)`.
    `map` records the address only when the architecture reports
    `INVALID_TO_VALID_NEEDS_TLBI`; it always installs into a slot it verified
    unused, and an architecture that cannot cache a translation for an invalid
@@ -341,6 +362,9 @@ traversal adapt to either layout.
   - With `feature = "copy-from"`, entries marked in `borrowed_entries` are
     skipped so that subtrees shared from the source page table are not freed.
   - Child tables are freed recursively before their parent table frame.
+    Both read-only and mutable descent require `is_table()`, so destruction
+    leaves non-present huge data mappings untouched rather than treating their
+    backing addresses as child tables.
 - **`PageTableMut::finish`** finalizes pending TLB invalidations and returns a
   `TlbFlushReceipt`, providing an explicit flush-before-free ordering point.
 - **`PageTableMut::drop`** calls `finish()` automatically as a fallback when

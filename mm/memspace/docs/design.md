@@ -178,6 +178,14 @@ kvfs::AddressSpace / anon object
 
 ### Private anonymous discard / COW
 
+Private-anon and private-file teardown share `unmap_private_object_range`.
+After detaching the object slots, it calls the page-table sparse range API,
+which skips absent subtrees instead of probing every virtual page from the
+root. It retains the runtime's uniform page size, address-space lock, explicit
+TLB finish, and final object/frame release. The shared helper also serves
+private discard and address-space cleanup; VMA deletion, object-page indexing,
+shared backends, and intermediate page-table reclamation are unchanged.
+
 - `AnonymousPrivate` 和 `FilePrivate` 的 post-write private pages 由
   `AnonPrivateObject` 持有。
 - `MADV_DONTNEED` 通过 runtime 将 VMA range 转成 object range，再由

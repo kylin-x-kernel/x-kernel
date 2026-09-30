@@ -44,8 +44,8 @@ impl fmt::Debug for PagingFlags {
 ///
 /// - `EMPTY` represents an unused entry (all bits zero).
 /// - `is_present()` returns `false` for `EMPTY` entries.
-/// - `paddr()` for a non-present entry may return an invalid address; callers
-///   must check `is_present()` before using `paddr()`.
+/// - Before using `paddr()`, callers must establish a present leaf or a
+///   table pointer via `is_table()`; a non-present leaf is not a table.
 pub trait PageTableEntry: fmt::Debug + Clone + Copy + Sync + Send + Sized {
     /// The sentinel value for an unused entry (all bits zero).
     const EMPTY: Self;
@@ -97,6 +97,14 @@ pub trait PageTableEntry: fmt::Debug + Clone + Copy + Sync + Send + Sized {
 
     /// Returns `true` if this entry maps a huge/superpage.
     fn is_huge(&self) -> bool;
+
+    /// Returns whether a non-leaf-level entry points to a next-level table.
+    ///
+    /// Only call this above the final page-table level. Architectures whose
+    /// directories lack the present bit must override this classification.
+    fn is_table(&self) -> bool {
+        self.is_present() && !self.is_huge()
+    }
 
     /// Clears this entry, setting it to `EMPTY`.
     #[inline]

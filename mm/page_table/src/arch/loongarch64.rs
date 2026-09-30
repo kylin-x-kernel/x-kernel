@@ -149,6 +149,11 @@ impl PageTableEntry for La64PageEntry {
     fn is_huge(&self) -> bool {
         LaFlags::from_bits_truncate(self.0).contains(LaFlags::GH)
     }
+
+    fn is_table(&self) -> bool {
+        // Directory descriptors contain only a nonzero physical address.
+        self.0 != 0 && self.0 & !Self::PADDR_MASK == 0
+    }
 }
 
 crate::impl_pte_debug!(La64PageEntry);

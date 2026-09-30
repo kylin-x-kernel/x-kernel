@@ -54,6 +54,11 @@
 - private-anon page state 必须由 `AnonPrivateObject` 持有，runtime 不能拥有独立
   private frame table。
 - detach frame、unmap PTE、TLB finalization、frame release 必须保持顺序。
+- 私有映射的 sparse range unmap 只跳过不存在的页表子树和 non-present
+  项；实际叶大小必须符合 runtime。页表遍历失败时保留 backing ownership，
+  detached slots 的 RAII rollback 恢复对象记录；已经清除的 PTE 前缀可在
+  后续 fault 中重新建立，不能在失败路径提前释放 frame。原地址空间锁与
+  TLB guard 仍覆盖该过程，不释放中间页表。
 - `mremap` move-style source retirement must not call ordinary runtime
   `unmap()` on the moved source range.
 - `resolve_futex_backing()` 对 shared VMA 必须返回 object-relative offset；
