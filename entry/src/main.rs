@@ -94,7 +94,7 @@ fn kernel_main() {
 
     // Spawn PID 1 as a fresh user task and return. This runs on the PID-less
     // late-init bootstrap thread, which is not transformed into init.
-    posix_process::spawn_init_process(&args, &envs, ksyscall::dispatch_irq_syscall, || {
+    posix_process::spawn_init_process(&args, &envs, ksyscall::handle_syscall, || {
         if let Err(err) = kvfs::sync_filesystems() {
             warn!("sync filesystems after init exit failed: {err:?}");
         }

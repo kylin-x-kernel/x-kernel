@@ -45,7 +45,7 @@ pub(crate) fn new_raw_socket(
 
 /// A raw IP socket used for ICMP and ICMPv6 traffic.
 pub struct RawSocket {
-    dispatch_irq: SocketHandle,
+    handle: SocketHandle,
     ip_version: IpVersion,
     local_addr: RwLock<Option<IpAddress>>,
     peer_addr: RwLock<Option<IpAddress>>,
@@ -57,10 +57,10 @@ pub struct RawSocket {
 
 impl RawSocket {
     pub fn new(ip_version: IpVersion, ip_protocol: IpProtocol) -> Self {
-        let dispatch_irq = SOCKET_SET.add(new_raw_socket(ip_version, ip_protocol));
+        let handle = SOCKET_SET.add(new_raw_socket(ip_version, ip_protocol));
         let general = GeneralOptions::new();
         Self {
-            dispatch_irq,
+            handle,
             ip_version,
             local_addr: RwLock::new(None),
             peer_addr: RwLock::new(None),
@@ -72,7 +72,7 @@ impl RawSocket {
     }
 
     fn with_smol_socket<R>(&self, f: impl FnOnce(&mut smol::Socket) -> R) -> R {
-        SOCKET_SET.with_socket_mut::<smol::Socket, _, _>(self.dispatch_irq, f)
+        SOCKET_SET.with_socket_mut::<smol::Socket, _, _>(self.handle, f)
     }
 
     fn check_ip_version(&self, addr: IpAddress) -> KResult<IpAddress> {
@@ -398,7 +398,7 @@ impl Pollable for RawSocket {
 impl Drop for RawSocket {
     fn drop(&mut self) {
         let _ = self.shutdown(Shutdown::Both);
-        SOCKET_SET.remove(self.dispatch_irq);
+        SOCKET_SET.remove(self.handle);
     }
 }
 

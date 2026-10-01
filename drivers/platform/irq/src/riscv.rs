@@ -198,7 +198,7 @@ impl kirq::IntrManagerIf {
                 ))
             },
             @EX_IRQ => {
-                unreachable!("Device-side IRQs should be dispatch_irqd by triggering the External Interrupt.");
+                unreachable!("Device-side IRQs should be handled by triggering the External Interrupt.");
             }
         );
         kirq::generic_handle_irq(pending_irq?)

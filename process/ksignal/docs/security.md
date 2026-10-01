@@ -33,7 +33,7 @@ an inline `SAFETY:` justification.
 | `types.rs` `ChildExitSignalInfo::new` | `_sigchld` arm write | `CLD_*` codes select the arm and every exposed field is initialized |
 | `types.rs` `timer_id`/`timer_overrun`/`timer_signal_seq`/`sigval` | arm reads | guarded by `SI_TIMER` or negative `si_code` checks |
 | `types.rs` `unsafe impl Send/Sync for SignalInfo` | auto-trait override | payload is opaque ABI bits, not dereferenceable aliases; mutation requires `&mut` |
-| `api/thread.rs` `restore` | `&*(sp as *const SignalFrame)` | trusts that user `sp` maps the frame previously written by `dispatch_irq_signal` |
+| `api/thread.rs` `restore` | `&*(sp as *const SignalFrame)` | trusts that user `sp` maps the frame previously written by `handle_signal` |
 
 The union-arm reads are the `k_sigval`/`siginfo_t` ABI boundary: the kernel
 treats payload fields as raw bits and never dereferences pointer-like values

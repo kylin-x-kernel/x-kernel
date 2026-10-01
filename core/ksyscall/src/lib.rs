@@ -25,7 +25,7 @@ mod task;
 mod time;
 mod vfs;
 
-pub use dispatch::dispatch_irq_syscall;
+pub use dispatch::handle_syscall;
 pub use ktty::terminal;
 pub use posix_fs::file;
 pub use sys::sys_getrandom;

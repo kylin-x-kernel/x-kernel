@@ -276,7 +276,7 @@ impl CloneRequest {
             set_child_tid,
             task_number,
             thr,
-            crate::dispatch_irq_syscall,
+            crate::handle_syscall,
         );
         // Linux copies the creator's CPU affinity into the child. schbench
         // relies on this: the message thread pins itself to the worker CPU set

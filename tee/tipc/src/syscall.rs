@@ -80,7 +80,7 @@ impl From<IpcUuid> for TipcUuid {
 }
 
 /// Dispatches one TIPC syscall from the userspace context.
-pub fn dispatch_irq_tipc_syscall(sysno: Sysno, uctx: &mut UserContext) -> KResult<isize> {
+pub fn handle_tipc_syscall(sysno: Sysno, uctx: &mut UserContext) -> KResult<isize> {
     match sysno {
         Sysno::tipc_port_create => sys_tipc_port_create(
             uctx.arg0().into(),

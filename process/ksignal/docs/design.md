@@ -46,7 +46,7 @@ posix/process runtime (check_signals -> process teardown)
                   \                            /
                    `Weak` registry, process fallback dequeue
                                 |
-              dispatch_irq_signal -> SignalFrame on user stack
+              handle_signal -> SignalFrame on user stack
                                 |
               arch::UContext / MContext + signal trampoline page
 ```
@@ -78,7 +78,7 @@ non-blocking thread while pruning dead `Weak` entries. The thread-level
 process `has_pending`) to avoid locks on the common no-signal return. The
 slow path dequeues against `!blocked`, consults dequeue observers (used by
 `kprocess` timer delivery to drop stale POSIX timer signals), then dispatches
-through `dispatch_irq_signal`.
+through `handle_signal`.
 
 Handler dispatch builds a `SignalFrame { ucontext, siginfo, saved }` on the
 user stack (alternate stack when `SA_ONSTACK` and configured), rewrites
@@ -102,8 +102,8 @@ and `SA_NOCLDWAIT` request autoreap.
 
 - All managers are lock-based (`SpinNoIrq`) and involve no sleeping within
   this crate; they are safe on syscall and trap return paths.
-- `dispatch_irq_signal`, `check_signals`, and `restore` run on the
-  user-return path of the owning thread; `dispatch_irq_signal` writes to
+- `handle_signal`, `check_signals`, and `restore` run on the
+  user-return path of the owning thread; `handle_signal` writes to
   user memory through `osvm` checked access (`write_vm`), so it may fail on
   an unmapped stack, which is reported as `CoreDump`.
 - Handler invocation itself never happens here: the caller observing

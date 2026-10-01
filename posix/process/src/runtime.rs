@@ -240,7 +240,7 @@ fn mark_futex_owner_died(address: usize, tid: Tid, is_pending: bool) -> KResult<
     }
 }
 
-fn dispatch_irq_futex_death(
+fn handle_futex_death(
     entry: *mut RobustList,
     offset: i64,
     tid: Tid,
@@ -288,7 +288,7 @@ fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
         };
         if entry_address != pending_address
             && !entry_is_pi
-            && dispatch_irq_futex_death(entry_address, offset, tid, false).is_err()
+            && handle_futex_death(entry_address, offset, tid, false).is_err()
         {
             break;
         }
@@ -302,7 +302,7 @@ fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
     }
 
     if !pending_address.is_null() && !pending_is_pi {
-        let _ = dispatch_irq_futex_death(pending_address, offset, tid, true);
+        let _ = handle_futex_death(pending_address, offset, tid, true);
     }
 }
 
@@ -518,7 +518,7 @@ mod tests {
         ));
         let signal = ThreadSignalManager::new(1, process);
         let mut uctx = interrupted_context(LinuxError::ERESTARTSYS);
-        let action = signal.dispatch_irq_signal(
+        let action = signal.handle_signal(
             &mut uctx,
             SignalSet::default(),
             &SignalInfo::new_kernel(Signo::SIGCONT),

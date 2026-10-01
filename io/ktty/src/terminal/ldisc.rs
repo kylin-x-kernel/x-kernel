@@ -440,6 +440,22 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
         }
     }
 
+    /// Returns the effective VMIN for the current termios, shared by
+    /// `read()` and `poll_read()` so both paths agree on readability.
+    ///
+    /// The VTIME inter-byte timer is not modeled yet, so a non-canonical
+    /// mode with `VTIME > 0` is approximated like canonical mode as
+    /// `VMIN == 1`: block until at least one byte is available and return
+    /// whatever is buffered.
+    fn effective_vmin(&self) -> usize {
+        let term = self.terminal.termios.lock();
+        if term.canonical() || term.special_char(VTIME) > 0 {
+            1
+        } else {
+            term.special_char(VMIN) as usize
+        }
+    }
+
     pub fn poll_read(&mut self) -> bool {
         match &mut self.processor {
             Processor::Manual(reader) => {
@@ -451,12 +467,7 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
         if self.buf_rx.is_empty() {
             return false;
         }
-        let term = self.terminal.termios.lock().clone();
-        let vmin = if term.canonical() {
-            1
-        } else {
-            term.special_char(VMIN) as usize
-        };
+        let vmin = self.effective_vmin();
         vmin == 0 || self.buf_rx.occupied_len() >= vmin
     }
 
@@ -489,16 +500,7 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
             };
         }
 
-        let term = self.terminal.termios.lock().clone();
-        let vmin = if term.canonical() {
-            1
-        } else {
-            let vtime = term.special_char(VTIME);
-            if vtime > 0 {
-                todo!();
-            }
-            term.special_char(VMIN) as usize
-        };
+        let vmin = self.effective_vmin();
 
         if buf.len() < vmin {
             return Err(KError::WouldBlock);
@@ -781,6 +783,25 @@ mod ldisc_tests {
         assert_eq!(ldisc.read(&mut buf).unwrap(), 2);
         assert_eq!(&buf[..2], b"ab");
         assert!(writer.written().is_empty());
+    }
+
+    #[def_test]
+    fn test_noncanonical_vtime_reads_single_byte() {
+        let (mut ldisc, _) = new_manual_ldisc(b"a", |terminal| {
+            set_termios(terminal, |term| {
+                term.c_lflag &= !ICANON;
+                term.c_cc[VMIN as usize] = 1;
+                term.c_cc[VTIME as usize] = 1;
+            });
+        });
+
+        assert!(ldisc.poll_read());
+        let mut buf = [0; 8];
+        assert_eq!(ldisc.read(&mut buf).unwrap(), 1);
+        assert_eq!(&buf[..1], b"a");
+
+        assert!(!ldisc.poll_read());
+        assert!(matches!(ldisc.read(&mut buf), Err(KError::WouldBlock)));
     }
 
     #[def_test]

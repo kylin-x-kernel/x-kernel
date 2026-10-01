@@ -78,7 +78,7 @@ fn sys_riscv_flush_icache(flags: usize) -> KResult<isize> {
 ///
 /// Handler access to missing current process/thread state or uninitialized
 /// providers can panic. Allocation failure follows kernel allocator policy.
-pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
+pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
     let Some(sysno) = Sysno::new(uctx.sysno()) else {
         warn!("Invalid syscall number: {}", uctx.sysno());
         uctx.set_retval(-LinuxError::ENOSYS.into_raw() as _);
@@ -840,7 +840,7 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         // TEE syscalls (500-599)
         #[cfg(feature = "tee")]
         _ if (500..600).contains(&uctx.sysno()) => {
-            match tee_kernel::tee::dispatch_irq_tee_syscall(sysno, uctx) {
+            match tee_kernel::tee::handle_tee_syscall(sysno, uctx) {
                 Ok(_) => Ok(tee_kernel::TEE_SUCCESS as isize),
                 Err(errno) => Ok(errno as isize),
             }
@@ -849,7 +849,7 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         // TIPC syscalls (>=600) return TIPC-specific error codes
         // (not Linux errno) so that rust-libtipc can map them correctly.
         #[cfg(feature = "tipc")]
-        _ if uctx.sysno() >= 600 => match tipc::syscall::dispatch_irq_tipc_syscall(sysno, uctx) {
+        _ if uctx.sysno() >= 600 => match tipc::syscall::handle_tipc_syscall(sysno, uctx) {
             Ok(ret) => Ok(ret),
             Err(err) => Ok(tipc::error::kerror_to_tipc_errno(err, sysno) as isize),
         },

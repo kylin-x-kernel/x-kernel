@@ -91,7 +91,7 @@ pub struct SessionIdentity {
 /// Global TA context shared across all sessions of one TA instance.
 #[derive(Debug)]
 pub struct TeeTaCtx {
-    pub session_dispatch_irq: u32,
+    pub session_handle: u32,
     pub open_sessions: HashMap<u32, SessionIdentity>,
     pub uuid: String,
     pub ta_head: ta_head,
@@ -100,7 +100,7 @@ pub struct TeeTaCtx {
 impl Default for TeeTaCtx {
     fn default() -> Self {
         TeeTaCtx {
-            session_dispatch_irq: 0,
+            session_handle: 0,
             open_sessions: HashMap::new(),
             uuid: uuid_crate::Uuid::default().to_string(),
             ta_head: ta_head::default(),

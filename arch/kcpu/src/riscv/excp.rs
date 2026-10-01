@@ -24,15 +24,15 @@ core::arch::global_asm!(
 );
 
 /// Advances the PC after a breakpoint exception.
-fn dispatch_irq_breakpoint(sepc: &mut usize) {
+fn handle_breakpoint(sepc: &mut usize) {
     debug!("Exception(Breakpoint) @ {sepc:#x} ");
     *sepc += 2
 }
 
 /// Dispatches a page fault and panics if unhandled.
-fn dispatch_irq_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFlags) {
+fn handle_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFlags) {
     let vaddr = va!(stval::read());
-    if dispatch_irq_trap!(PAGE_FAULT, vaddr, access_flags) {
+    if handle_trap!(PAGE_FAULT, vaddr, access_flags) {
         return;
     }
     if tf.fixup_exception() {
@@ -40,7 +40,7 @@ fn dispatch_irq_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFla
     }
     core::hint::cold_path();
     panic!(
-        "Undispatch_irqd Supervisor Page Fault @ {:#x}, fault_vaddr={:#x} ({:?}):\n{:#x?}\n{}",
+        "Unhandled Supervisor Page Fault @ {:#x}, fault_vaddr={:#x} ({:?}):\n{:#x?}\n{}",
         tf.sepc,
         vaddr,
         access_flags,
@@ -56,20 +56,18 @@ fn riscv_trap_handler(tf: &mut ExceptionContext) {
     let scause = scause::read();
     if let Ok(cause) = scause.cause().try_into::<I, E>() {
         match cause {
-            Trap::Exception(E::LoadPageFault) => dispatch_irq_page_fault(tf, PageFaultFlags::READ),
-            Trap::Exception(E::StorePageFault) => {
-                dispatch_irq_page_fault(tf, PageFaultFlags::WRITE)
-            }
+            Trap::Exception(E::LoadPageFault) => handle_page_fault(tf, PageFaultFlags::READ),
+            Trap::Exception(E::StorePageFault) => handle_page_fault(tf, PageFaultFlags::WRITE),
             Trap::Exception(E::InstructionPageFault) => {
-                dispatch_irq_page_fault(tf, PageFaultFlags::EXECUTE)
+                handle_page_fault(tf, PageFaultFlags::EXECUTE)
             }
-            Trap::Exception(E::Breakpoint) => dispatch_irq_breakpoint(&mut tf.sepc),
+            Trap::Exception(E::Breakpoint) => handle_breakpoint(&mut tf.sepc),
             Trap::Interrupt(_) => {
-                dispatch_irq_trap!(IRQ, scause.bits());
+                handle_trap!(IRQ, scause.bits());
             }
             _ => {
                 panic!(
-                    "Undispatch_irqd trap {:?} @ {:#x}, stval={:#x}:\n{:#x?}\n{}",
+                    "Unhandled trap {:?} @ {:#x}, stval={:#x}:\n{:#x?}\n{}",
                     cause,
                     tf.sepc,
                     stval::read(),

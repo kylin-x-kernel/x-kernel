@@ -28,7 +28,7 @@ resolution, and signal return must not restart an already restored context.
 `read_vm`; failed reads stop the walk. Pointer low-bit tags distinguish PI
 entries, which are skipped. The walk stops at the sentinel or
 `ROBUST_LIST_LIMIT`, then separately handles a nonnull non-PI pending entry.
-`dispatch_irq_futex_death` checks signed address addition/conversion and uses
+`handle_futex_death` checks signed address addition/conversion and uses
 fault-aware atomic access. It changes only a word whose owner TID matches; the
 pending unlocked-word case can wake a waiter without changing ownership.
 `do_exit` writes zero to the userspace `clear_child_tid` pointer and wakes only

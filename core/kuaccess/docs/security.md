@@ -26,7 +26,7 @@
 
 - `check_access()` 只允许访问用户空间有效区间。
 - `atomic_cmpxchg_u32()` / `atomic_load_u32()` / `atomic_u32_eq()` 额外要求地址 4 字节对齐。
-- `dispatch_irq_page_fault()` 仅在当前线程显式进入用户内存访问窗口时处理 fault。
+- `handle_page_fault()` 仅在当前线程显式进入用户内存访问窗口时处理 fault。
 - 普通复制不能在禁 IRQ 的异常处理路径等待块设备完成。调用方必须允许睡眠，
   且不得持有禁止睡眠的锁；不通过放宽块驱动上下文检查规避这一要求。
 - `kuaccess` 必须保留 `MmSpace::handle_page_fault()` 的 typed outcome 分类：

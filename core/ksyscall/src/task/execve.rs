@@ -76,7 +76,7 @@ pub(super) fn exec_owned(
     let process = thread.process().clone();
 
     if kprocess::scheduler::process_task_count(process.as_ref()) > 1 {
-        // TODO: dispatch_irq multi-thread case
+        // TODO: handle multi-thread case
         error!("sys_execve: multi-thread not supported");
         return Err(KError::WouldBlock);
     }

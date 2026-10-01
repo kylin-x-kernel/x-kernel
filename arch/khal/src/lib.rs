@@ -104,8 +104,8 @@ pub mod nmi {
 #[cfg(feature = "pmu")]
 pub mod pmu {
     pub use kplat::perf::{
-        PerfCb, enable_irq, on_overflow as dispatch_irq_overflows,
-        reg_cb as register_overflow_handler, register_overflow_irq as register_overflow_dispatch,
+        PerfCb, enable_irq, on_overflow as handle_overflows, reg_cb as register_overflow_handler,
+        register_overflow_irq as register_overflow_dispatch,
     };
 }
 

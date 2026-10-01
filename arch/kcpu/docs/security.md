@@ -379,7 +379,7 @@ CPU；`eret` 随后从 SPSR 恢复中断前的 DAIF 状态。
 1. **trap handler 不支持嵌套**：`ExceptionContextGuard` 使用单个 per-CPU
    指针，深层嵌套异常仅通过 guard 链恢复前一个值，不维护完整栈。
 
-2. **IRQ handler 最多一个**：`dispatch_irq_trap!` 宏仅调用第一个注册的
+2. **IRQ handler 最多一个**：`handle_trap!` 宏仅调用第一个注册的
    handler，多个 handler 时打印警告并忽略后续。
 
 3. **LoongArch64 非对齐模拟范围有限**：仅覆盖基本加载/存储和标量浮点指令，

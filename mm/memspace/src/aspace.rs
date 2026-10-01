@@ -429,6 +429,9 @@ impl MmSpace {
         }
     }
 
+    /// Classifies a fault outcome as handled/callable from the fault-adapter
+    /// test suite; no production caller remains.
+    #[cfg(unittest)]
     fn page_fault_outcome_is_handled(outcome: PageFaultOutcome) -> bool {
         outcome.is_resolved() || outcome.is_retryable()
     }
@@ -1575,16 +1578,6 @@ impl MmSpace {
         access_flags: PageFaultFlags,
     ) -> PageFaultOutcome {
         self.handle_fault_input(FaultInput::new(vaddr, access_flags))
-    }
-
-    /// Legacy bool-shaped page-fault hook retained for current trap callers.
-    pub fn dispatch_irq_page_fault(
-        &mut self,
-        vaddr: VirtAddr,
-        access_flags: PageFaultFlags,
-    ) -> bool {
-        let outcome = self.handle_page_fault(vaddr, access_flags);
-        Self::page_fault_outcome_is_handled(outcome)
     }
 
     /// Attempts to clone the current address space into a new one.

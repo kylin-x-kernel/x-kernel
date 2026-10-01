@@ -42,7 +42,7 @@ pub(crate) fn new_tcp_socket() -> smol::Socket<'static> {
 /// A TCP socket that provides POSIX-like APIs.
 pub struct TcpSocket {
     state: StateLock,
-    dispatch_irq: SocketHandle,
+    handle: SocketHandle,
     bound_endpoint: Mutex<IpListenEndpoint>,
     accepted_remote_endpoint: Option<IpEndpoint>,
     bound_registered: AtomicBool,
@@ -56,10 +56,10 @@ pub struct TcpSocket {
 impl TcpSocket {
     /// Creates a new TCP socket.
     pub fn new() -> Self {
-        let dispatch_irq = SOCKET_SET.add(new_tcp_socket());
+        let handle = SOCKET_SET.add(new_tcp_socket());
         Self {
             state: StateLock::new(State::Idle),
-            dispatch_irq,
+            handle,
             bound_endpoint: Mutex::new(empty_endpoint()),
             accepted_remote_endpoint: None,
             bound_registered: AtomicBool::new(false),
@@ -74,13 +74,13 @@ impl TcpSocket {
     /// Creates a new TCP socket that is already connected,
     /// using the given local and remote endpoints.
     fn new_connected(
-        dispatch_irq: SocketHandle,
+        handle: SocketHandle,
         local_endpoint: IpEndpoint,
         remote_endpoint: IpEndpoint,
     ) -> Self {
         let result = Self {
             state: StateLock::new(State::Connected),
-            dispatch_irq,
+            handle,
             bound_endpoint: Mutex::new(empty_endpoint()),
             accepted_remote_endpoint: Some(remote_endpoint),
             bound_registered: AtomicBool::new(false),
@@ -115,7 +115,7 @@ impl TcpSocket {
     }
 
     fn with_smol_socket<R>(&self, f: impl FnOnce(&mut smol::Socket) -> R) -> R {
-        SOCKET_SET.with_socket_mut::<smol::Socket, _, _>(self.dispatch_irq, f)
+        SOCKET_SET.with_socket_mut::<smol::Socket, _, _>(self.handle, f)
     }
 
     // File close must inspect the receive queue before any protocol packet is
@@ -202,7 +202,7 @@ impl TcpSocket {
             smol::State::Established => {
                 self.state.set(State::Connected); // connected
                 if let Some(remote) = socket.remote_endpoint() {
-                    debug!("TCP socket {}: connected to {}", self.dispatch_irq, remote);
+                    debug!("TCP socket {}: connected to {}", self.handle, remote);
                 }
                 true
             }
@@ -374,7 +374,7 @@ impl SocketOps for TcpSocket {
                     let mut sockets = SOCKET_SET.inner.lock();
                     let mut iface = crate::SERVICE.iface.lock();
                     let context = iface.context();
-                    let socket = sockets.get_mut::<smol::Socket>(self.dispatch_irq);
+                    let socket = sockets.get_mut::<smol::Socket>(self.handle);
                     socket
                         .connect(context, remote_endpoint, bound_endpoint)
                         .map_err(|e| match e {
@@ -667,12 +667,12 @@ impl Pollable for TcpSocket {
 impl Drop for TcpSocket {
     fn drop(&mut self) {
         if let Err(err) = self.shutdown_inner(Shutdown::Both, false, false) {
-            warn!("TCP socket {}: shutdown failed: {}", self.dispatch_irq, err);
+            warn!("TCP socket {}: shutdown failed: {}", self.handle, err);
         }
         self.unregister_bound_endpoint();
 
         let mut sockets = SOCKET_SET.inner.lock();
-        let socket = sockets.get_mut::<smol::Socket>(self.dispatch_irq);
+        let socket = sockets.get_mut::<smol::Socket>(self.handle);
         let has_unread_data = socket.can_recv();
         let is_protocol_closed = {
             // Linux aborts a TCP close with unread receive data. Keep the
@@ -685,11 +685,11 @@ impl Drop for TcpSocket {
             socket.state() == smol::State::Closed
         };
         if is_protocol_closed && !has_unread_data && socket.local_endpoint().is_none() {
-            sockets.remove(self.dispatch_irq);
+            sockets.remove(self.handle);
             return;
         }
 
-        sockets.defer_tcp_close(self.dispatch_irq);
+        sockets.defer_tcp_close(self.handle);
         drop(sockets);
         network_poller().notify(PollReason::Tx);
         network_poller().assist_once();

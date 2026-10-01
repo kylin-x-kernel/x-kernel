@@ -86,7 +86,7 @@ arch/kcpu/
 
 | 层次 | 组件 | 职责 |
 | ---- | ---- | ---- |
-| 共享 | `excp.rs` | `IRQ`、`PAGE_FAULT` 分布式切片，`dispatch_irq_trap!` 宏 |
+| 共享 | `excp.rs` | `IRQ`、`PAGE_FAULT` 分布式切片，`handle_trap!` 宏 |
 | 共享 | `active_exception_context.rs` | per-CPU 当前 trapframe 跟踪（`ExceptionContextGuard`） |
 | 共享 | `userspace_common.rs` | `ReturnReason`、`ExceptionKind`、异常表排序与修正 |
 | 架构 | `ctx.rs` | `ExceptionContext`、`TaskContext`、FP 状态 |
@@ -194,7 +194,7 @@ TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换
    a. 创建 ExceptionContextGuard（安装 per-CPU 活跃 trapframe 指针）
    b. 按向量号/cause/ESR/estat 分类异常
    c. Page Fault: 读故障地址 → 尝试注册 handler → 尝试异常表修正 → panic
-   d. IRQ: dispatch_irq_trap!(IRQ, ...)
+   d. IRQ: handle_trap!(IRQ, ...)
    e. Breakpoint: 日志 + 推进 PC
    f. LoongArch64 非对齐: emulate_unaligned() 指令模拟
    g. 其他异常: panic 附加诊断信息

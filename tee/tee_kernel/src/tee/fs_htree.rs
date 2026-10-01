@@ -656,20 +656,20 @@ where
         &TeeFsHtreeData,
         &dyn TeeFsHtreeStorageOps,
         // Option<&mut FileVariant>,
-    ) -> TeeResult, // visitor 现在接收 RefMut<HtreeNode>
+    ) -> TeeResult,
 {
-    // 遍历左子树
+    // Traverse the left subtree.
     if let Some(left_child_arc) = node.left.get_mut() {
         post_order_traverse_mut(left_child_arc, ht_data, storage, visitor)?;
     }
 
-    // 遍历右子树
+    // Traverse the right subtree.
     if let Some(right_child_arc) = node.right.get_mut() {
         post_order_traverse_mut(right_child_arc, ht_data, storage, visitor)?;
     }
-    // `try_borrow_mut()` 会返回 Err，这里使用 `ok()` 忽略错误，
-    // TODO 实际应用中你可能需要更健壮的错误处理。
-    visitor(node, ht_data, storage)?; // 将 RefMut<HtreeNode> 传递给 visitor
+
+    // Visit the current node; errors propagate to the caller.
+    visitor(node, ht_data, storage)?;
 
     Ok(())
 }

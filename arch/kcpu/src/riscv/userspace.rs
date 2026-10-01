@@ -97,7 +97,7 @@ impl UserContext {
             let stval = stval::read();
             match cause {
                 Trap::Interrupt(_) => {
-                    dispatch_irq_trap!(IRQ, scause.bits());
+                    handle_trap!(IRQ, scause.bits());
                     ReturnReason::Interrupt
                 }
                 Trap::Exception(E::UserEnvCall) => {

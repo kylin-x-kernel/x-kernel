@@ -52,7 +52,7 @@ core/ksyscall/
 user trap / arch syscall entry
     │
     v
-ksyscall::dispatch_irq_syscall
+ksyscall::handle_syscall
     │ decode sysno + ABI arguments
     ├─ vfs adapter  ───────────> posix-fs / kvfs
     ├─ ipc adapter  ───────────> kfd_objects::{EventFd, PipeObject}

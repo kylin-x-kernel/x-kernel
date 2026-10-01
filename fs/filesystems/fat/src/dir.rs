@@ -289,7 +289,7 @@ impl InodeDirOperations for FatDirInode {
         let dir = self.inner.borrow(&fs);
 
         // The default implementation throws EEXIST if dst exists, so we need to
-        // dispatch_irq it
+        // handle it
         match dst_dir.inner.borrow(&fs).remove(dst_name) {
             Ok(_) => {}
             Err(fatfs::Error::NotFound) => {}

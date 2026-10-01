@@ -128,7 +128,7 @@ pub fn sys_ppoll(
     } else {
         Some(timeout.read_vm()?.try_into_time_span()?)
     };
-    // TODO: dispatch_irq signal
+    // TODO: handle signal
     let sigmask = if sigmask.is_null() {
         None
     } else {

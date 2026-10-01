@@ -95,7 +95,7 @@ pub use tee_session::ExecSessionFixture;
 pub use tee_session::set_tee_session_ctx;
 pub use tee_session::tee_session_release_state;
 
-/// 7th syscall register argument (see NOTE TODO in `dispatch_irq_tee_syscall`).
+/// 7th syscall register argument (see NOTE TODO in `handle_tee_syscall`).
 fn tee_syscall_arg6(uctx: &UserContext) -> usize {
     cfg_if::cfg_if! {
         if #[cfg(target_arch = "aarch64")] {
@@ -122,7 +122,7 @@ fn tee_syscall_storage_create_extras(uctx: &UserContext) -> (usize, *mut c_uint)
 }
 
 /// Dispatch TEE-specific syscalls from the userspace context
-pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResult {
+pub fn handle_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResult {
     // Handle TEE-specific syscalls here
     match sysno {
         Sysno::tee_scn_return => sys_tee_scn_return(uctx.arg0() as _),

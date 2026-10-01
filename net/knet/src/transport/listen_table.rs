@@ -278,10 +278,10 @@ impl ListenTable {
             warn!("Failed to listen on {}: {:?}", endpoint, err);
             return;
         }
-        let dispatch_irq = sockets.add(socket);
+        let handle = sockets.add(socket);
         state.syn_queue.push_back(PendingConn {
             accepted: AcceptedTcp {
-                handle: dispatch_irq,
+                handle,
                 local_endpoint: dst,
                 remote_endpoint: src,
             },

@@ -87,7 +87,7 @@ impl UserContext {
         let ret = match estat.cause() {
             Trap::Interrupt(_) => {
                 let interrupt_id: usize = estat.is().trailing_zeros() as usize;
-                dispatch_irq_trap!(IRQ, interrupt_id);
+                handle_trap!(IRQ, interrupt_id);
                 ReturnReason::Interrupt
             }
             Trap::Exception(Exception::Syscall) => {

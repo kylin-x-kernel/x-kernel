@@ -19,15 +19,15 @@ core::arch::global_asm!(
 );
 
 /// Advances the PC after a breakpoint exception.
-fn dispatch_irq_breakpoint(era: &mut usize) {
+fn handle_breakpoint(era: &mut usize) {
     debug!("Exception(Breakpoint) @ {era:#x} ");
     *era += 4;
 }
 
 /// Dispatches a page fault and panics if unhandled.
-fn dispatch_irq_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFlags) {
+fn handle_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFlags) {
     let vaddr = va!(badv::read().vaddr());
-    if dispatch_irq_trap!(PAGE_FAULT, vaddr, access_flags) {
+    if handle_trap!(PAGE_FAULT, vaddr, access_flags) {
         return;
     }
     if tf.fixup_exception() {
@@ -35,7 +35,7 @@ fn dispatch_irq_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFla
     }
     core::hint::cold_path();
     panic!(
-        "Undispatch_irqd PLV0 Page Fault @ {:#x}, fault_vaddr={:#x} ({:?}):\n{:#x?}\n{}",
+        "Unhandled PLV0 Page Fault @ {:#x}, fault_vaddr={:#x} ({:?}):\n{:#x?}\n{}",
         tf.era,
         vaddr,
         access_flags,
@@ -53,17 +53,17 @@ fn loongarch64_trap_handler(tf: &mut ExceptionContext) {
     match estat.cause() {
         Trap::Exception(Exception::LoadPageFault)
         | Trap::Exception(Exception::PageNonReadableFault) => {
-            dispatch_irq_page_fault(tf, PageFaultFlags::READ)
+            handle_page_fault(tf, PageFaultFlags::READ)
         }
         Trap::Exception(Exception::StorePageFault)
         | Trap::Exception(Exception::PageModifyFault) => {
-            dispatch_irq_page_fault(tf, PageFaultFlags::WRITE)
+            handle_page_fault(tf, PageFaultFlags::WRITE)
         }
         Trap::Exception(Exception::FetchPageFault)
         | Trap::Exception(Exception::PageNonExecutableFault) => {
-            dispatch_irq_page_fault(tf, PageFaultFlags::EXECUTE);
+            handle_page_fault(tf, PageFaultFlags::EXECUTE);
         }
-        Trap::Exception(Exception::Breakpoint) => dispatch_irq_breakpoint(&mut tf.era),
+        Trap::Exception(Exception::Breakpoint) => handle_breakpoint(&mut tf.era),
         Trap::Exception(Exception::AddressNotAligned) => unsafe {
             // SAFETY: Called within a trap handler for an AddressNotAligned exception.
             // `tf` is a valid ExceptionContext with `era` pointing to the faulting instruction.
@@ -71,11 +71,11 @@ fn loongarch64_trap_handler(tf: &mut ExceptionContext) {
         },
         Trap::Interrupt(_) => {
             let interrupt_id: usize = estat.is().trailing_zeros() as usize;
-            dispatch_irq_trap!(IRQ, interrupt_id);
+            handle_trap!(IRQ, interrupt_id);
         }
         trap => {
             panic!(
-                "Undispatch_irqd trap {:?} @ {:#x}:\n{:#x?}\n{}",
+                "Unhandled trap {:?} @ {:#x}:\n{:#x?}\n{}",
                 trap,
                 tf.era,
                 tf,

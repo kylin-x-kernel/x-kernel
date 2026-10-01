@@ -38,15 +38,15 @@ fn with_pmu_inited<R>(f: impl FnOnce(&mut PmuManager) -> R) -> R {
     f(pmu)
 }
 
-pub fn reg_handler_overflow_handler(index: u32, handler: PerfCb) -> bool {
+pub fn register_overflow_handler(index: u32, handler: PerfCb) -> bool {
     let idx = index as usize;
     if idx >= MAX_PMU_COUNTERS {
-        warn!("reg_handler_overflow_handler: index {idx} out of range");
+        warn!("register_overflow_handler: index {idx} out of range");
         return false;
     }
     with_pmu_inited(|pmu| {
         if pmu.counters[idx].is_none() {
-            warn!("reg_handler_overflow_handler: counter {idx} not initialised");
+            warn!("register_overflow_handler: counter {idx} not initialised");
             return false;
         }
         pmu.overflow_handlers[idx] = Some(handler);
@@ -155,7 +155,7 @@ pub fn is_enabled(index: u32) -> bool {
     with_counter(index, |counter| enabled = counter.is_enabled());
     enabled
 }
-pub fn dispatch_irq_overflows() -> bool {
+pub fn handle_overflows() -> bool {
     // Called from PMU IRQ/NMI context on the current CPU. Active counters
     // expose their state through `&self` plus atomics, so shared access also
     // permits the terminal quiesce path to race with a pending overflow.
@@ -189,18 +189,18 @@ macro_rules! pmu_if_impl {
         #[kiface::provide]
         impl kplat::perf::PerfMgr {
             fn on_overflow() -> bool {
-                $crate::peripherals::pmu::dispatch_irq_overflows()
+                $crate::peripherals::pmu::handle_overflows()
             }
 
             fn reg_cb(index: u32, handler: PerfCb) -> bool {
-                $crate::peripherals::pmu::reg_handler_overflow_handler(index, handler)
+                $crate::peripherals::pmu::register_overflow_handler(index, handler)
             }
 
             fn register_overflow_irq() -> bool {
                 let irq = of::pmu_irq_or(kbuild_config::PMU_IRQ);
                 let desc = kirq::gic_level_irq_desc(irq);
                 let handler = alloc::sync::Arc::new(|_| {
-                    $crate::peripherals::pmu::dispatch_irq_overflows();
+                    $crate::peripherals::pmu::handle_overflows();
                     kirq::IrqEvent::HANDLED
                 });
                 // Normal IRQ delivery in pmu-only builds; NMI registration
@@ -273,7 +273,7 @@ macro_rules! nmi_pmu_if_impl {
                     return false;
                 }
 
-                if !$crate::peripherals::pmu::reg_handler_overflow_handler(
+                if !$crate::peripherals::pmu::register_overflow_handler(
                     $crate::peripherals::pmu::CYCLE_COUNTER_IDX,
                     handler,
                 ) {

@@ -11,7 +11,10 @@ use core::{
 
 use backtrace::Backtrace;
 use kexec::clear_elf_cache;
-use kvfs::{DeviceFileOps, DirMapping, NodeFlags, SimpleFs, VfsFile, VfsResult};
+use kvfs::{
+    DeviceFileOps, DirMapping, NodeFlags, SimpleFs, VfsError, VfsFile, VfsFileBuilder, VfsInode,
+    VfsResult,
+};
 
 use crate::{DeviceFile, add_device_entry};
 
@@ -137,6 +140,14 @@ fn run_memory_analysis() {
 pub(crate) struct MemTrack;
 
 impl DeviceFileOps for MemTrack {
+    fn open(&self, _inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
+        // A command-driven control device: every write must be matched against
+        // the command table from offset 0, so declare the node a non-seekable
+        // stream and keep kvfs from advancing `f_pos` between writes.
+        file.stream_open();
+        Ok(())
+    }
+
     fn supports_read(&self) -> bool {
         true
     }
@@ -145,8 +156,10 @@ impl DeviceFileOps for MemTrack {
         true
     }
 
-    fn read(&self, _file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
-        Ok(buf.len())
+    fn read(&self, _file: &VfsFile, _buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+        // A control device: the profiling report is printed to the console by
+        // the "end\n" write command, so reads have nothing to return (EOF).
+        Ok(0)
     }
 
     fn write(&self, _file: &VfsFile, buf: &[u8], offset: u64) -> VfsResult<usize> {
@@ -162,7 +175,7 @@ impl DeviceFileOps for MemTrack {
                     run_memory_analysis();
                     kalloc::disable_tracking();
                 }
-                _ => {}
+                _ => return Err(VfsError::InvalidInput),
             }
         }
         Ok(buf.len())

@@ -123,22 +123,22 @@ impl<'a> SocketSetWrapper<'a> {
     }
 
     pub fn add<T: AnySocket<'a>>(&self, socket: T) -> SocketHandle {
-        let dispatch_irq = self.inner.lock().add(socket);
+        let handle = self.inner.lock().add(socket);
         self.new_socket.notify(1);
-        dispatch_irq
+        handle
     }
 
-    pub fn with_socket_mut<T: AnySocket<'a>, R, F>(&self, dispatch_irq: SocketHandle, f: F) -> R
+    pub fn with_socket_mut<T: AnySocket<'a>, R, F>(&self, handle: SocketHandle, f: F) -> R
     where
         F: FnOnce(&mut T) -> R,
     {
         let mut set = self.inner.lock();
-        let socket = set.get_mut(dispatch_irq);
+        let socket = set.get_mut(handle);
         f(socket)
     }
 
-    pub fn remove(&self, dispatch_irq: SocketHandle) {
-        self.inner.lock().remove(dispatch_irq);
+    pub fn remove(&self, handle: SocketHandle) {
+        self.inner.lock().remove(handle);
     }
 }
 

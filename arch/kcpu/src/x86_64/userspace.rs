@@ -275,7 +275,7 @@ impl UserContext {
             }
             LEGACY_SYSCALL_VECTOR => ReturnReason::Syscall,
             IRQ_VECTOR_START..=IRQ_VECTOR_END => {
-                dispatch_irq_trap!(IRQ, vector as _);
+                handle_trap!(IRQ, vector as _);
                 ReturnReason::Interrupt
             }
             _ => ReturnReason::Exception(ExceptionInfo {

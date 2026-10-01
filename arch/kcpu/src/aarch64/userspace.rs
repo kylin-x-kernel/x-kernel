@@ -160,7 +160,7 @@ impl UserContext {
 
         let ret = match trap_kind {
             ArchTrap::Irq => {
-                dispatch_irq_trap!(IRQ, 0);
+                handle_trap!(IRQ, 0);
                 ReturnReason::Interrupt
             }
             ArchTrap::Fiq | ArchTrap::SError => ReturnReason::Unknown,

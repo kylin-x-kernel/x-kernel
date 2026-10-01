@@ -43,7 +43,7 @@ pub fn access_user_memory<R>(f: impl FnOnce() -> R) -> R {
 }
 
 #[register_trap_handler(PAGE_FAULT)]
-fn dispatch_irq_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool {
+fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool {
     let Some(curr) = current_may_uninit() else {
         return false;
     };

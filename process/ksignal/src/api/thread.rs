@@ -128,7 +128,7 @@ impl ThreadSignalManager {
     /// otherwise the action the caller must perform. A user-memory write
     /// failure is reported as [`SignalOSAction::CoreDump`] instead of an
     /// error so the fatal path stays uniform.
-    pub fn dispatch_irq_signal(
+    pub fn handle_signal(
         &self,
         uctx: &mut UserContext,
         restore_blocked: SignalSet,
@@ -224,8 +224,7 @@ impl ThreadSignalManager {
                 .unwrap_or(current_blocked);
             let action = self.proc.actions.lock()[sig.signo()].clone();
 
-            if let Some(os_action) = self.dispatch_irq_signal(uctx, restore_blocked, &sig, &action)
-            {
+            if let Some(os_action) = self.handle_signal(uctx, restore_blocked, &sig, &action) {
                 break Some((sig, os_action));
             }
         }
@@ -259,7 +258,7 @@ impl ThreadSignalManager {
     ///
     /// The frame is read back directly from the user stack at `uctx.sp()`;
     /// this trusts that the stack still maps the frame previously written by
-    /// [`Self::dispatch_irq_signal`]. A user thread that corrupts that stack
+    /// [`Self::handle_signal`]. A user thread that corrupts that stack
     /// before `rt_sigreturn` causes the kernel-side access to fault through
     /// the normal kernel fault path.
     ///

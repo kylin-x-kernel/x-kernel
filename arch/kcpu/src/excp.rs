@@ -30,7 +30,7 @@ pub static NMI: [fn(usize) -> bool];
 pub static PAGE_FAULT: [fn(VirtAddr, PageFaultFlags) -> bool];
 
 #[allow(unused_macros)]
-macro_rules! dispatch_irq_trap {
+macro_rules! handle_trap {
     ($trap:ident, $($args:tt)*) => {{
         let mut iter = $crate::excp::$trap.iter();
         if let Some(func) = iter.next() {
