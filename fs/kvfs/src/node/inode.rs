@@ -31,9 +31,10 @@ use super::{
 };
 use crate::{
     AddressSpace, AddressSpaceOperations, DelayedCall, Dentry, DeviceId, FiemapExtentInfo,
-    FileOperations, LockedDentry, Metadata, MetadataUpdate, MountIdmap, Mutex, NodePermission,
-    NodeType, Path, Permission, RwLock, RwLockReadGuard, RwLockWriteGuard, SuperBlock, Umode,
-    VfsError, VfsFileBuilder, VfsResult, XattrName, XattrNameSink, XattrSetFlags,
+    FileOperations, InodeTimes, LockedDentry, Metadata, MetadataUpdate, MountIdmap, Mutex,
+    NodePermission, NodeType, Path, Permission, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    SuperBlock, Umode, VfsError, VfsFileBuilder, VfsResult, XattrName, XattrNameSink,
+    XattrSetFlags,
     address_space::{default_address_space_operations, empty_address_space_operations},
     generic_permission,
     pipe::{PipeObject, fifo_file_operations},
@@ -517,13 +518,13 @@ impl InodeOwner {
 }
 
 #[derive(Clone, Copy)]
-struct InodeTimes {
+struct StoredInodeTimes {
     accessed_at: InodeTimestamp,
     modified_at: InodeTimestamp,
     changed_at: InodeTimestamp,
 }
 
-impl InodeTimes {
+impl StoredInodeTimes {
     fn new(
         accessed_at: InodeTimestamp,
         modified_at: InodeTimestamp,
@@ -628,6 +629,18 @@ pub trait InodeAttributeOperations: Send + Sync {
     /// Builds a snapshot using the inode number owned by the VFS identity.
     fn fill_metadata(&self, inode_number: u64, block_size: u64) -> Metadata;
 
+    /// Returns the resident access, modification, and status-change
+    /// timestamps under a single storage lock.
+    ///
+    /// Implementations read cached resident state and never refresh from
+    /// backing store. This is the cheap counterpart to
+    /// [`InodeAttributeOperations::fill_metadata`] for callers that only need
+    /// timestamps, such as the RELATIME and equal-to-now early-exit
+    /// predicates in `Path::touch_atime` and `Path::update_cmtime`; it
+    /// parallels Linux reading `inode->{i_atime,i_mtime,i_ctime}` directly
+    /// instead of filling a `struct kstat`.
+    fn times(&self) -> InodeTimes;
+
     /// Returns the inode mode without requiring a full metadata snapshot.
     fn mode(&self) -> Umode;
 
@@ -693,7 +706,7 @@ struct OwnedInodeAttributes {
     generation: u32,
     rdev: DeviceId,
     size: Mutex<u64>,
-    times: Mutex<InodeTimes>,
+    times: Mutex<StoredInodeTimes>,
     block_accounting: Mutex<InodeBlockAccounting>,
 }
 
@@ -706,7 +719,7 @@ impl OwnedInodeAttributes {
             generation: init.generation,
             rdev: init.rdev,
             size: Mutex::new(init.size),
-            times: Mutex::new(InodeTimes::new(
+            times: Mutex::new(StoredInodeTimes::new(
                 init.accessed_at,
                 init.modified_at,
                 init.changed_at,
@@ -829,11 +842,24 @@ impl OwnedInodeAttributes {
             ctime: times.changed_at.as_system_time(),
         }
     }
+
+    fn times(&self) -> InodeTimes {
+        let stored = self.times.lock();
+        InodeTimes {
+            accessed_at: stored.accessed_at.as_system_time(),
+            modified_at: stored.modified_at.as_system_time(),
+            changed_at: stored.changed_at.as_system_time(),
+        }
+    }
 }
 
 impl InodeAttributeOperations for OwnedInodeAttributes {
     fn fill_metadata(&self, inode_number: u64, block_size: u64) -> Metadata {
         OwnedInodeAttributes::fill_metadata(self, inode_number, block_size)
+    }
+
+    fn times(&self) -> InodeTimes {
+        OwnedInodeAttributes::times(self)
     }
 
     fn mode(&self) -> Umode {
@@ -945,6 +971,10 @@ impl InodeAttributes {
     fn metadata(&self, inode_number: u64) -> Metadata {
         self.operations
             .fill_metadata(inode_number, 1_u64 << self.block_bits)
+    }
+
+    fn times(&self) -> InodeTimes {
+        self.operations.times()
     }
 
     fn mode(&self) -> Umode {
@@ -2272,6 +2302,12 @@ impl VfsInode {
             })
     }
 
+    /// Returns the resident access, modification, and status-change
+    /// timestamps read under a single storage lock.
+    pub(crate) fn times(&self) -> InodeTimes {
+        self.attributes.times()
+    }
+
     /// Sets the link count.
     pub fn set_link_count(&self, link_count: u64) {
         self.attributes.set_link_count(link_count);
@@ -2709,6 +2745,15 @@ mod tests {
             metadata.inode = inode_number;
             metadata.block_size = block_size;
             metadata
+        }
+
+        fn times(&self) -> InodeTimes {
+            let metadata = self.metadata.lock();
+            InodeTimes {
+                accessed_at: metadata.atime,
+                modified_at: metadata.mtime,
+                changed_at: metadata.ctime,
+            }
         }
 
         fn mode(&self) -> Umode {

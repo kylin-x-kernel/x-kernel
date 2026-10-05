@@ -80,7 +80,9 @@ pub use super_block::{
     sync_filesystems,
 };
 pub(crate) use type_map::TypeMap;
-pub use types::{DeviceId, Metadata, MetadataUpdate, NodePermission, NodeType, SetattrTime, Umode};
+pub use types::{
+    DeviceId, InodeTimes, Metadata, MetadataUpdate, NodePermission, NodeType, SetattrTime, Umode,
+};
 pub use xattr::{XATTR_NAME_MAX, XattrName, XattrNameRef, XattrNameSink, XattrSetFlags};
 
 pub type VfsError = kerrno::KError;

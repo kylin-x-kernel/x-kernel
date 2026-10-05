@@ -906,25 +906,26 @@ impl Path {
             return;
         }
 
-        let metadata = self.metadata();
-        let now = self.inode().current_time();
+        let inode = self.inode();
+        let now = inode.current_time();
+        let times = inode.times();
         if mount_flags.contains(MountFlags::RELATIME)
-            && metadata.mtime < metadata.atime
-            && metadata.ctime < metadata.atime
-            && now.duration_since(metadata.atime).unwrap_or(TimeSpan::ZERO)
+            && times.modified_at < times.accessed_at
+            && times.changed_at < times.accessed_at
+            && now
+                .duration_since(times.accessed_at)
+                .unwrap_or(TimeSpan::ZERO)
                 < TimeSpan::from_secs(24 * 60 * 60)
         {
             return;
         }
-        if metadata.atime == now {
+        if times.accessed_at == now {
             return;
         }
 
         // Linux treats atime persistence as best effort so a read that already
         // completed is never converted into an update-time failure.
-        let _ = self
-            .inode()
-            .update_time(self.dentry(), now, InodeUpdateTime::Access);
+        let _ = inode.update_time(self.dentry(), now, InodeUpdateTime::Access);
     }
 
     pub(crate) fn update_cmtime(&self) -> VfsResult<()> {
@@ -932,13 +933,13 @@ impl Path {
             return Ok(());
         }
 
-        let metadata = self.metadata();
-        let now = self.inode().current_time();
-        if metadata.mtime == now && metadata.ctime == now {
+        let inode = self.inode();
+        let now = inode.current_time();
+        let times = inode.times();
+        if times.modified_at == now && times.changed_at == now {
             return Ok(());
         }
-        self.inode()
-            .update_time(self.dentry(), now, InodeUpdateTime::ChangeAndModification)
+        inode.update_time(self.dentry(), now, InodeUpdateTime::ChangeAndModification)
     }
 
     /// Changes this inode's owner after applying Linux chown/chgrp authorization.
@@ -2531,5 +2532,114 @@ mod tests {
         assert_eq!(MountFlags::RELATIME.bits(), 0x20);
         assert_eq!(MountFlags::RDONLY.bits(), 0x40);
         assert_eq!(MountFlags::NOSYMFOLLOW.bits(), 0x80);
+    }
+
+    /// Seeds all three resident timestamps to `time` through the direct
+    /// setters, bypassing setattr policy.
+    fn seed_times(root: &Path, time: SystemTime) {
+        let inode = root.inode();
+        inode.set_accessed_at(time);
+        inode.set_modified_at(time);
+        inode.set_changed_at(time);
+    }
+
+    #[def_test]
+    fn test_inode_times_returns_seeded_timestamps() {
+        let fs = mock_filesystem(StatFsFlags::empty());
+        let root = Mount::new_root(&fs).root_path();
+
+        let accessed_at = SystemTime::from_unix_parts(11, 111).unwrap();
+        let modified_at = SystemTime::from_unix_parts(12, 222).unwrap();
+        let changed_at = SystemTime::from_unix_parts(13, 333).unwrap();
+
+        let inode = root.inode();
+        inode.set_accessed_at(accessed_at);
+        inode.set_modified_at(modified_at);
+        inode.set_changed_at(changed_at);
+
+        let times = inode.times();
+        assert_eq!(times.accessed_at, accessed_at);
+        assert_eq!(times.modified_at, modified_at);
+        assert_eq!(times.changed_at, changed_at);
+    }
+
+    #[def_test]
+    fn test_relatime_future_atime_skips_touch_atime() {
+        let fs = mock_filesystem(StatFsFlags::empty());
+        let root = Mount::new_root_with_flags(&fs, MountFlags::RELATIME).root_path();
+
+        let accessed_at = SystemTime::from_unix_parts(4_102_444_800, 0).unwrap();
+        let inode = root.inode();
+        inode.set_accessed_at(accessed_at);
+        inode.set_modified_at(SystemTime::from_unix_seconds(1));
+        inode.set_changed_at(SystemTime::from_unix_seconds(1));
+
+        root.touch_atime();
+
+        let times = inode.times();
+        assert_eq!(times.accessed_at, accessed_at);
+        assert_eq!(times.modified_at, SystemTime::from_unix_seconds(1));
+        assert_eq!(times.changed_at, SystemTime::from_unix_seconds(1));
+    }
+
+    #[def_test]
+    fn test_relatime_equal_times_updates_atime() {
+        let fs = mock_filesystem(StatFsFlags::empty());
+        let root = Mount::new_root_with_flags(&fs, MountFlags::RELATIME).root_path();
+        seed_times(&root, SystemTime::from_unix_seconds(1));
+
+        let before = root.inode().current_time();
+        root.touch_atime();
+
+        let times = root.inode().times();
+        assert!(times.accessed_at >= before);
+        assert_eq!(times.modified_at, SystemTime::from_unix_seconds(1));
+        assert_eq!(times.changed_at, SystemTime::from_unix_seconds(1));
+    }
+
+    #[def_test]
+    fn test_update_cmtime_advances_mtime_and_ctime() {
+        let fs = mock_filesystem(StatFsFlags::empty());
+        let root = Mount::new_root(&fs).root_path();
+        seed_times(&root, SystemTime::from_unix_seconds(1));
+
+        let before = root.inode().current_time();
+        assert_eq!(root.update_cmtime(), Ok(()));
+
+        let times = root.inode().times();
+        assert!(times.modified_at >= before);
+        assert_eq!(times.modified_at, times.changed_at);
+        assert_eq!(times.accessed_at, SystemTime::from_unix_seconds(1));
+    }
+
+    #[def_test]
+    fn test_readonly_mount_skips_time_updates() {
+        let fs = mock_filesystem(StatFsFlags::empty());
+        let root = Mount::new_root_with_flags(&fs, MountFlags::RDONLY).root_path();
+        seed_times(&root, SystemTime::from_unix_seconds(1));
+
+        assert_eq!(root.update_cmtime(), Ok(()));
+        root.touch_atime();
+
+        let times = root.inode().times();
+        assert_eq!(times.accessed_at, SystemTime::from_unix_seconds(1));
+        assert_eq!(times.modified_at, SystemTime::from_unix_seconds(1));
+        assert_eq!(times.changed_at, SystemTime::from_unix_seconds(1));
+    }
+
+    #[def_test]
+    fn test_non_relatime_overwrites_future_atime() {
+        let fs = mock_filesystem(StatFsFlags::empty());
+        let root = Mount::new_root(&fs).root_path();
+
+        let inode = root.inode();
+        inode.set_accessed_at(SystemTime::from_unix_parts(4_102_444_800, 0).unwrap());
+        inode.set_modified_at(SystemTime::from_unix_seconds(1));
+        inode.set_changed_at(SystemTime::from_unix_seconds(1));
+
+        let before = root.inode().current_time();
+        root.touch_atime();
+
+        assert!(inode.times().accessed_at >= before);
     }
 }

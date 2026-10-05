@@ -420,7 +420,9 @@ inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `seta
 自动 I/O 时间更新使用 Linux `FS_UPD_ATIME` / `FS_UPD_CMTIME` 对应的
 `InodeUpdateTime`，并经 filesystem `update_time` callback 落盘。授权完成后的显式时间值由
 `VfsInode::truncate_timestamp()` 准备；自动更新时间通过 `current_time()` 取得可表示值，并在
-atime/mtime/ctime 比较之前使用。callback 返回实际生效的 `MetadataUpdate`；resident attribute
+atime/mtime/ctime 比较之前使用。该比较经 `InodeAttributeOperations::times()` 在单次存储锁内
+读取驻留时间戳，命中早退时不再构造完整 metadata 快照；未命中时的 `update_time` 落盘路径
+不变。callback 返回实际生效的 `MetadataUpdate`；resident attribute
 setter 只发布返回字段及其最终值，因而后端可以降低字段精度、联动多个时间字段或明确忽略
 无法持久化的字段，setter 本身不再重复执行 capability policy。
 
@@ -531,7 +533,10 @@ open 记录当前 `w_counter`，poll 仅在此 file 存活期间见过新的 wri
 策略，在一次成功的 `write`/`write_iter` 后执行 mtime/ctime 更新；迭代 I/O 内部的
 4 KiB chunk 不各自更新时间。`PIPE_BUF` 原子性按调用开始时的完整写请求判定，内部
 暂存 chunk 不会把大写入错误地提升为原子写；发生部分写入时，未提交的 source iterator
-进度会回退。atime 热路径只读取 `MountFlags` 和 `SuperBlockFlags`，不调用 `statfs`；
+进度会回退。atime 热路径只读取 `MountFlags` 和 `SuperBlockFlags`，不调用 `statfs`，
+也不构造完整 `Metadata` 快照；RELATIME 与“等于当前时间”早退谓词通过
+`InodeAttributeOperations::times()` 在单次存储锁内读取驻留 atime/mtime/ctime，对应 Linux
+直接读取 `inode->{i_atime,i_mtime,i_ctime}` 而非填充 `struct kstat`；
 RELATIME 使用 Linux 的 `mtime/ctime >= atime` 与“至少 24 小时”边界。
 
 rename 在 syscall 边界用 `RenameFlags::from_bits` 拒绝未知位，并拒绝互斥模式。

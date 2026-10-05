@@ -13,8 +13,8 @@ use kvfs::{
     AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FMode, FiemapExtentFlags,
     FiemapExtentInfo, FiemapFlags, FileDirOperations, FileMappingOperations, FileOperations,
     InodeAttributeOperations, InodeDirOperations, InodeFiemapOperations, InodeOperations,
-    InodeSymlinkOperations, Kiocb, LockedDentry, Metadata, MetadataUpdate, NodePermission,
-    NodeType, ReadaheadControl, RenameFlags, StatFs, SuperBlock, SuperBlockFlags,
+    InodeSymlinkOperations, InodeTimes, Kiocb, LockedDentry, Metadata, MetadataUpdate,
+    NodePermission, NodeType, ReadaheadControl, RenameFlags, StatFs, SuperBlock, SuperBlockFlags,
     SuperBlockOperations, Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
     WriteBeginRequest, WriteEndRequest, WritebackControl, XattrName, XattrNameRef, XattrNameSink,
     XattrSetFlags, default_evict_inode, inode_init_owner,
@@ -509,6 +509,15 @@ impl InodeAttributeOperations for Ext4Inode {
     fn fill_metadata(&self, inode_number: u64, block_size: u64) -> Metadata {
         debug_assert_eq!(inode_number, u64::from(self.number().get()));
         metadata_from_inode(self, block_size)
+    }
+
+    fn times(&self) -> InodeTimes {
+        let stat = self.stat();
+        InodeTimes {
+            accessed_at: ext4_timestamp_to_system_time(stat.atime),
+            modified_at: ext4_timestamp_to_system_time(stat.mtime),
+            changed_at: ext4_timestamp_to_system_time(stat.ctime),
+        }
     }
 
     fn mode(&self) -> Umode {

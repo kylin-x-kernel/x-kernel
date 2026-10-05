@@ -183,6 +183,22 @@ pub struct Metadata {
     pub ctime: SystemTime,
 }
 
+/// Inode access, modification, and status-change timestamps.
+///
+/// A cheap copyable snapshot of the resident timestamps read under a single
+/// storage lock; the timestamp-only counterpart to [`Metadata`]. Field names
+/// follow the `VfsInode` timestamp setter family and correspond to
+/// [`Metadata::atime`], [`Metadata::mtime`], and [`Metadata::ctime`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InodeTimes {
+    /// Time of last access
+    pub accessed_at: SystemTime,
+    /// Time of last modification
+    pub modified_at: SystemTime,
+    /// Time of last status change
+    pub changed_at: SystemTime,
+}
+
 /// Filesystem node metadata update.
 #[derive(Default, Clone, Debug)]
 pub struct MetadataUpdate {
