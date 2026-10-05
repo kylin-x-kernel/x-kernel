@@ -41,6 +41,7 @@ file operation object、typed private object、名称、flags 和 credential 都
 | T-02 | 每个 file 分配独立 inode 或 operation state | 中 | caller 绕过 singleton 或 filesystem 保存 per-file table | 唯一公开创建入口复用 singleton inode；operation tables 为静态/共享对象 |
 | T-03 | 不受支持的 open flags 泄漏到 file 状态 | 中 | caller 混入 create/path/exec flags | `get_file()` 只保留 access mode 与 `NONBLOCK` |
 | T-04 | dentry operation 与 superblock 不一致 | 中 | per-file 手动安装 `d_op` | dentry 从 superblock `s_d_op` 对应物自动继承，绑定后不可替换 |
+| T-05 | 共享 singleton 的 metadata 被单个调用者跨进程改写 | 中 | 持有任意匿名 fd 的特权 credential 调用 `fchown(at)`/`fchmod`/`futimens` | `AnonInodeOperations` 显式覆写 `setattr`：owner/mode/时间保持拒绝语义（`EOPNOTSUPP`），不继承 KVFS 公共回退层；`ftruncate` 保持非普通文件的 `EINVAL`；测试覆盖各字段拒绝与 resident 属性不变 |
 
 ## 故障模式与影响分析（FMEA）
 

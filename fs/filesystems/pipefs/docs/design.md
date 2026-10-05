@@ -78,6 +78,14 @@ inode 或 `PipeObject`。同一 pipe 的 buffer、reader/writer 和 wait queue �
 - inode private 与 file private 保存同一个 `Arc<PipeObject>`；这是 Linux `inode->i_pipe`
   与 `file->private_data` 指向同一对象的所有权表达，不是两份 pipe state。
 - pipe/FIFO 数据通路仍由 KVFS 共用，避免为匿名 pipe 和 pathname FIFO 复制算法。
+- pipe inode 保持 `empty_inode_operations()`，不安装任何专属 metadata 表：KVFS
+  `InodeOperations::setattr` 的默认公共回退层（Linux `notify_change` → `simple_setattr`
+  的对应物）使匿名 pipe 的 `fchownat`/`fchmod`/`utimensat` 与 `fstat` 可见的
+  owner/mode/时间更新天然可用；size 更新被回退层以 `EINVAL` 拒绝，与 Linux 对非普通文件
+  truncate 的拒绝一致。
+- 匿名 pipe file operations 与 pathname FIFO 一致地维护 I/O 时间戳：成功 write 后更新
+  mtime/ctime，成功 read 后更新 atime（Linux `fs/pipe.c` `pipe_write`/`pipe_read` 的
+  对应行为），依赖上述公共回退层落盘。
 
 ## Drop / 资源释放
 

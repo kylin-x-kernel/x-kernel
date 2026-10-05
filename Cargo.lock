@@ -3815,6 +3815,7 @@ dependencies = [
  "klazy",
  "kpoll",
  "ktime",
+ "ktime_types",
  "kvfs",
  "memaddr",
  "unittest",

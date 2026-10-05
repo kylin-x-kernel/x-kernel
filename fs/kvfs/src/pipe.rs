@@ -621,19 +621,46 @@ impl FileOperations for PipeFileOperations {
     }
 
     fn read(&self, file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
-        pipe_read(file, buf)
+        let read = pipe_read(file, buf)?;
+        if read > 0 {
+            file.file_accessed();
+        }
+        Ok(read)
     }
 
     fn read_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterDest<'_>) -> VfsResult<usize> {
-        pipe_read_iter(iocb, iter)
+        let read = pipe_read_iter(iocb, iter)?;
+        if read > 0 {
+            iocb.file().file_accessed();
+        }
+        Ok(read)
     }
 
+    // Timestamps update only after the bytes are already queued for the
+    // reader, and a timestamp failure propagates as the syscall result. This
+    // mirrors Linux `pipe_write()` (`err = file_update_time(filp);
+    // if (err) ret = err;` after the copy loop, fs/pipe.c:617) and the shared
+    // pathname FIFO table below. Reachability differs between the two: the
+    // anonymous-pipe inode uses `empty_inode_operations()`, whose common
+    // `setattr` fallback cannot fail for times-only updates, so propagation
+    // here is defensive parity rather than a reachable error path; pathname
+    // FIFOs keep their backend filesystem table, whose `setattr` can fail,
+    // making the propagated error reachable there by design.
     fn write(&self, file: &VfsFile, buf: &[u8], _offset: u64) -> VfsResult<usize> {
-        pipe_write(file, buf)
+        let written = pipe_write(file, buf)?;
+        if written > 0 {
+            file.file_update_time()?;
+        }
+        Ok(written)
     }
 
+    /// See [`Self::write`] for the timestamp-update contract.
     fn write_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> VfsResult<usize> {
-        pipe_write_iter(iocb, iter)
+        let written = pipe_write_iter(iocb, iter)?;
+        if written > 0 {
+            iocb.file().file_update_time()?;
+        }
+        Ok(written)
     }
 
     fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {

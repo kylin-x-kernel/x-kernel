@@ -122,6 +122,8 @@ impl DentryOperations for PipeDentryOperations {
 mod tests {
     use kerrno::KError;
     use kpoll::IoEvents;
+    use ktime_types::SystemTime;
+    use kvfs::{SetattrTime, VfsError};
     use unittest::def_test;
 
     use super::*;
@@ -249,5 +251,87 @@ mod tests {
 
         let payload = [1u8; 128];
         assert_eq!(write_file.write(&payload), Err(KError::WouldBlock));
+    }
+
+    #[def_test]
+    fn anonymous_pipe_accepts_owner_update() {
+        let (read_file, _write_file, _) = pipe_files();
+        let cred = kcred::initial_cred();
+
+        read_file
+            .path()
+            .chown(Some(1234), Some(5678), &cred)
+            .expect("pipe fd accepts chown");
+
+        let metadata = read_file.path().getattr().unwrap();
+        assert_eq!(metadata.uid, 1234);
+        assert_eq!(metadata.gid, 5678);
+    }
+
+    #[def_test]
+    fn anonymous_pipe_accepts_mode_update() {
+        let (read_file, _write_file, _) = pipe_files();
+        let cred = kcred::initial_cred();
+
+        read_file
+            .path()
+            .chmod(NodePermission::from_bits_truncate(0o640), &cred)
+            .expect("pipe fd accepts chmod");
+
+        let mode = read_file.path().getattr().unwrap().mode;
+        let permission = mode.permission();
+        assert!(permission.contains(NodePermission::OWNER_READ));
+        assert!(permission.contains(NodePermission::OWNER_WRITE));
+        assert!(permission.contains(NodePermission::GROUP_READ));
+        assert!(!permission.contains(NodePermission::GROUP_WRITE));
+        assert!(!permission.contains(NodePermission::OTHER_READ));
+    }
+
+    #[def_test]
+    fn anonymous_pipe_accepts_time_update() {
+        let (read_file, _write_file, _) = pipe_files();
+        let cred = kcred::initial_cred();
+        let past = SetattrTime::Explicit(SystemTime::from_unix_seconds(1));
+
+        read_file
+            .path()
+            .set_times(Some(past), Some(past), &cred)
+            .expect("pipe fd accepts utimens");
+
+        let metadata = read_file.path().getattr().unwrap();
+        assert_eq!(metadata.atime.unix_seconds(), 1);
+        assert_eq!(metadata.mtime.unix_seconds(), 1);
+    }
+
+    #[def_test]
+    fn anonymous_pipe_truncate_is_invalid() {
+        let (_read_file, write_file, _) = pipe_files();
+
+        assert!(matches!(
+            write_file.truncate(16),
+            Err(VfsError::InvalidInput)
+        ));
+    }
+
+    #[def_test]
+    fn anonymous_pipe_io_updates_timestamps() {
+        let (read_file, write_file, _) = pipe_files();
+        let cred = kcred::initial_cred();
+        let past = SetattrTime::Explicit(SystemTime::from_unix_seconds(1));
+        read_file
+            .path()
+            .set_times(Some(past), Some(past), &cred)
+            .expect("pipe fd accepts utimens");
+
+        let data = b"hello";
+        assert_eq!(write_file.write(data).unwrap(), data.len());
+        let after_write = read_file.path().getattr().unwrap();
+        assert!(after_write.mtime.unix_seconds() > 1);
+        assert!(after_write.ctime.unix_seconds() > 1);
+
+        let mut buf = [0u8; 5];
+        assert_eq!(read_file.read(&mut buf).unwrap(), data.len());
+        let after_read = read_file.path().getattr().unwrap();
+        assert!(after_read.atime.unix_seconds() > 1);
     }
 }

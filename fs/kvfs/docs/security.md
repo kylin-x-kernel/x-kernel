@@ -93,7 +93,11 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
 - `mkdir` 必须先清除用户 mode 中的 set-user-ID/set-group-ID 位；只有 setgid 父目录可由
   `inode_init_owner()` 给新子目录重新添加 set-group-ID。
 - metadata 更新必须先通过 `Path::chown/chmod/set_times` 授权；后端 `setattr` callback
-  只执行已授权的 mutation，不能作为 syscall 层的公开绕过入口。
+  只执行已授权的 mutation，不能作为 syscall 层的公开绕过入口。默认实现是公共回退层，
+  只接受 owner/mode/时间并原样发布，size 一律拒绝：未安装专属表的 inode 不得通过回退
+  路径伪造 `i_size` 或获得任何超出 `Path` 授权的变更能力。回退层只适用于 identity 与
+  metadata 均为自身持有的 inode；跨文件共享 identity 的 inode（anon_inodefs singleton）
+  必须显式覆写 `setattr` 保留拒绝语义，防止一次授权更新被所有持有者观察到。
 - timestamp 授权必须区分 touch 与显式 times 数组；单个 `UTIME_NOW` 与
   `UTIME_OMIT` 的组合仍属于显式请求。
 - `TimestampLimits` 构造时必须拒绝零值、超过一秒的粒度和反向范围；通用 superblock

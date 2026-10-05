@@ -90,6 +90,13 @@ state，不需要文件系统级 mutex。VFS 对象内部同步由 KVFS 负责�
   tables 使用静态对象，不放入 runtime state。
 - 所有普通匿名 file 共享 inode；需要独立 inode/security context 的 Linux
   `anon_inode_create_getfile()` 语义尚未实现，不能用复制 singleton state 伪装。
+- `AnonInodeOperations` 显式覆写 `setattr`：owner/mode/时间更新保持拒绝语义
+  （`EOPNOTSUPP`），不继承 KVFS 公共回退层——公共回退层的前提是 inode identity 与
+  metadata 均为自身持有，而 singleton 被所有进程的
+  eventfd/epoll/timerfd/signalfd/pidfd/socket/BPF 匿名 fd 共同引用，接受一次
+  fallback 更新就会改写所有进程 `fstat` 自己匿名 fd 时看到的共享 uid/gid/mode/时间戳。
+  size 更新沿用公共回退层的 `EINVAL`，使 `ftruncate` 对非普通文件保持在文档化 errno
+  上，与匿名管道一致。
 - 初始化显式发生在 boot，而不是在任意 runtime caller 的首次访问中执行复杂 VFS 构造。
 
 ## Drop / 资源释放

@@ -426,6 +426,19 @@ atime/mtime/ctime 比较之前使用。该比较经 `InodeAttributeOperations::t
 setter 只发布返回字段及其最终值，因而后端可以降低字段精度、联动多个时间字段或明确忽略
 无法持久化的字段，setter 本身不再重复执行 capability policy。
 
+`InodeOperations::setattr` 的默认实现是公共回退层，对应 Linux `notify_change()` 把
+没有 `->setattr` 的 inode 路由到 `simple_setattr()` 的形态：owner/mode/时间更新被接受并
+发布到 resident 属性，因此使用 `empty_inode_operations()` 的无后端 inode（匿名管道、
+伪文件系统根等）无需专属表即可支持 `fchownat`/`fchmod`/`utimensat` 与自动
+I/O 时间更新。回退层的前提是 inode identity 独立、metadata 仅驻留于自身；刻意共享
+identity 的 inode 不满足该前提，必须显式覆写 `setattr` 保留拒绝语义——anon_inodefs
+singleton 即此策略，它被所有进程的 eventfd/epoll/timerfd/signalfd/pidfd/socket/BPF
+匿名 fd 共同引用，接受一次 fallback 更新就会改写所有进程 `fstat` 自己匿名 fd 时看到的
+共享属性。回退层拒绝 size 更新并以 `EINVAL` 报错：这类 inode 没有可截断的存储，
+发布伪造的 `i_size` 会破坏语义；这与 Linux 在 syscall 边界对非普通文件 truncate 返回
+`EINVAL` 的可达行为一致，而自带存储的文件系统（memfs、kext4、fat、9p 等）各自实现的
+`setattr` 不受影响。授权仍然只发生在 `Path` 层，回退表不重复执行 policy。
+
 Xattr 也由 `Path` 统一承载 mount、namespace 和 DAC 策略，再进入
 `InodeOperations::{get,list,set,remove}_xattr`。get/set/remove 输入名称以受检的内核
 `Vec<u8>` 保存；list 通过 `XattrNameRef` 与 `XattrNameSink` 逐项传递可分片借用的完整名称，

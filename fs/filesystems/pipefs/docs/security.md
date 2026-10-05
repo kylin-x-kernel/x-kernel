@@ -41,6 +41,7 @@ pipefs type、operation tables 和 boot wiring 是受信任内核代码。status
 | T-03 | inode owner 固定 root | 中 | 忽略调用 credential | inode init 使用传入 `Cred::fsuid/fsgid()` |
 | T-04 | 未初始化 pipefs 被 syscall 使用 | 高 | boot wiring 缺失 | `global()` panic，使错误在启动/测试期显式失败 |
 | T-05 | dentry 名称泄漏错误 identity | 低 | 使用固定 `[pipe]` 或 anon dname | 静态 pipefs dentry table 从唯一 inode number 生成 `pipe:[ino]` |
+| T-06 | pipe inode metadata 越过 DAC 授权被修改 | 中 | 绕过 `Path` 层直接进入 inode 表 | inode 保持 `empty_inode_operations()`，metadata 更新只经 `Path::chown/chmod/set_times` 授权后由 KVFS 公共回退层发布；size 更新一律 `EINVAL` |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -66,6 +67,8 @@ number，不包含 pipe payload、credential 或用户地址。
 - 尚未支持 Linux notification pipe 与 `O_DIRECT` packet mode。
 - hidden pipefs 不支持运行期卸载。
 - pipe resource accounting/limits 仍由当前 `kvfs::pipe` 能力决定。
+- pipe inode 的 owner/mode/时间更新只保留在 resident `VfsInode` 中（pipefs 无后端存储，
+  对应 Linux pipefs 同样不持久化）。
 
 ## 审计清单
 
@@ -74,3 +77,5 @@ number，不包含 pipe payload、credential 或用户地址。
 - owner 是否来自调用 credential，而不是固定 root 或重新读取 current task？
 - dentry 是否显示 `pipe:[ino]`，且 operation table 来自 superblock 默认 `s_d_op`？
 - 新错误路径是否在返回 fd 前完整释放局部 file/inode/pipe state？
+- pipe inode 是否仍使用 `empty_inode_operations()`，metadata 变更是否全部经过 `Path`
+  授权层而不是专属表？

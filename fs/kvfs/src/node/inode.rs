@@ -354,22 +354,48 @@ pub trait InodeOperations: Send + Sync + 'static {
 
     /// Updates inode metadata and returns the values actually applied.
     ///
+    /// The default implementation is the common fallback for inodes whose
+    /// metadata lives solely in the resident [`VfsInode`], mirroring the Linux
+    /// VFS layer where `notify_change()` routes an inode without a
+    /// `->setattr` method to `simple_setattr()`. Owner, permission mode, and
+    /// timestamp updates are accepted and published to the resident attributes,
+    /// so anonymous inodes without backing storage (pipes, pseudo-filesystem
+    /// roots) support `fchownat`, `fchmod`, and `utimensat` without installing
+    /// a dedicated table. The fallback presumes the inode's identity and
+    /// metadata are its own: an inode deliberately shared across unrelated
+    /// files (the `anon_inodefs` singleton) must override `setattr` to keep
+    /// rejection semantics, because a fallback update there would mutate
+    /// metadata that every holder of the shared inode observes. Size changes
+    /// are refused: these inodes carry no truncate semantics, and reporting a
+    /// fabricated size through `fstat` would misrepresent them. This matches
+    /// Linux, where truncation of a non-regular file is rejected with
+    /// `EINVAL` before any `->setattr` runs.
+    ///
     /// Filesystems must omit fields they ignored and return any value they
     /// normalized to match their storage or protocol representation. KVFS
     /// publishes only the returned values to the resident inode.
     ///
+    /// Authorization already happened at the VFS `Path` layer (`chown`,
+    /// `chmod`, `set_times`, and `truncate` check ownership and write access
+    /// before reaching this table), so implementations apply the update
+    /// without re-running policy checks.
+    ///
     /// # Errors
     ///
-    /// Returns [`VfsError::OperationNotSupported`] by default. Filesystem
-    /// implementations may return other errors when validation or persistence
-    /// fails; on error KVFS does not publish any returned metadata.
+    /// Returns [`VfsError::InvalidInput`] by default when a size change is
+    /// requested. Filesystem implementations may return other errors when
+    /// validation or persistence fails; on error KVFS does not publish any
+    /// returned metadata.
     fn setattr(
         &self,
         _idmap: &MountIdmap,
         _dentry: &Dentry,
-        _attr: MetadataUpdate,
+        update: MetadataUpdate,
     ) -> VfsResult<MetadataUpdate> {
-        Err(VfsError::OperationNotSupported)
+        if update.size.is_some() {
+            return Err(VfsError::InvalidInput);
+        }
+        Ok(update)
     }
 
     /// Applies an automatic VFS timestamp update and returns the values
@@ -1161,6 +1187,12 @@ fn no_open_file_operations() -> Arc<dyn FileOperations> {
 }
 
 /// Returns the shared no-op inode operation table.
+///
+/// The table carries no method overrides, so it inherits the trait defaults:
+/// DAC permission checks, the common metadata-update fallback, and rejection
+/// of every capability the inode does not declare. This is the counterpart of
+/// Linux `empty_iops`, the table `inode_init_always()` installs before a
+/// filesystem assigns its own.
 pub fn empty_inode_operations() -> Arc<dyn InodeOperations> {
     EMPTY_INODE_OPERATIONS.clone()
 }
