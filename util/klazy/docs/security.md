@@ -129,7 +129,8 @@ pub unsafe fn into_inner_unchecked(self) -> T
 **不变量**：消费 `self` 时，内部值必须已经初始化完成。
 
 **为何安全**：`self` 被按值消费后，不会再有其他并发访问路径；
-唯一剩余前提是 `MaybeUninit<T>` 中确实已经写入了有效 `T`。
+`MaybeUninit<T>` 中必须已写入有效 `T`。提取函数先以 `ManuallyDrop`
+包裹单元格，再 `read` 移出值，抑制仍为 `Ready` 的单元格再次析构该值。
 
 ### 7. `unsafe impl Sync/Send for Once<T>`（`util/klazy/src/once.rs:76`）
 
@@ -188,7 +189,8 @@ core::ptr::drop_in_place((*self.storage.get()).as_mut_ptr());
    原始 `u8`）来保证。
 
 4. **无 double-drop**：`Drop` 仅在状态为 `Ready` 时调用 `drop_in_place`。
-   `try_call_once` 错误路径不会 drop 从未 write 的值。
+   `try_call_once` 错误路径不会 drop 从未 write 的值；消费提取路径通过
+   `ManuallyDrop` 抑制旧单元格的析构，将唯一析构责任交给返回值的所有者。
 
 ## 线程安全
 

@@ -190,3 +190,7 @@ autoderef 不发生，因此调用方必须手写 `(**NAME).clone()` 才能拿�
 `Once<T>` 实现了 `Drop`：状态为 `Ready` 时，通过 `ptr::drop_in_place`
 drop 内部 `T`。未初始化的单元格 drop 时不会触碰 `MaybeUninit` storage
 （无 UB）。
+
+`try_into_inner` / `into_inner_unchecked` 将值的所有权移交给调用者；
+提取前用 `ManuallyDrop` 抑制被消费单元格的析构，防止仍为 `Ready` 的
+单元格再次析构已经移出的值。

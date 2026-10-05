@@ -441,10 +441,12 @@ impl<T> Once<T> {
 
     /// Extract the initialized value. Must only be called when Ready.
     unsafe fn extract_value_unchecked(self) -> T {
+        let this = core::mem::ManuallyDrop::new(self);
         // SAFETY:
         // - Caller ensures value is initialized
         // - We own the Once, so we can move the value out
-        unsafe { (*self.storage.get()).as_ptr().read() }
+        // - ManuallyDrop prevents the Ready cell from dropping the moved value
+        unsafe { (*this.storage.get()).as_ptr().read() }
     }
 
     /// Returns a reference to the inner value if the [`Once`] has been initialized.
@@ -646,6 +648,34 @@ mod unittest_tests {
         }
 
         assert_eq!(once.get().copied(), Some(13));
+    }
+
+    #[def_test]
+    fn extracting_value_transfers_drop_ownership() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountDrop<'a>(&'a AtomicUsize);
+
+        impl Drop for CountDrop<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let drops = AtomicUsize::new(0);
+        let value = Once::initialized(CountDrop(&drops))
+            .try_into_inner()
+            .unwrap();
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        drop(value);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+
+        let once = Once::initialized(CountDrop(&drops));
+        // SAFETY: this owned cell was initialized immediately above.
+        let value = unsafe { once.into_inner_unchecked() };
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        drop(value);
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
     }
 
     #[def_test]
