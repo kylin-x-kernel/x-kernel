@@ -11,6 +11,12 @@ current-thread, lock and cleanup contracts. `kidentity` supplies number identity
 and mapping invariants; `ksignal`, `kcgroup`, `kns`, `kresources` and filesystem
 providers supply their respective state and validation.
 
+Signal handler ownership is detached during last-thread cleanup before notifying
+the parent, outside process-domain and membership locks. Runtime destruction
+also detaches it for failed or abandoned unpublished children. Retaining a
+manager for observation or prepared notification does not retain that ownership;
+configuration operations reject inactive owners rather than recreating defaults.
+
 Protected assets are stable PID/TID bindings, parent/child membership, exit
 visibility, runtime mm/files/fs/ns ownership, objective/subjective credentials,
 cgroup charge, signal recipients, timer generations and controlling-terminal
@@ -147,6 +153,17 @@ missing targets are ignored by delivery glue rather than reviving retired tasks.
 | T-09 | Exec failure leaves partially updated runtime | Medium | Close-on-exec cleanup returns error | Error propagates before metadata pair publication; earlier timer/heap/signal changes are not rolled back. Caller must handle exec failure state appropriately. |
 
 ## Failure modes and handling
+
+Clone preparation initializes the child's blocked mask from the creating thread
+before task publication or activation. `ksignal::ThreadSignalManager::set_blocked`
+continues to remove SIGKILL/SIGSTOP. The copy does not transfer pending signals
+or grant access to another thread's private queue, and adds no fallible step to
+the existing preparation/publication rollback protocol.
+Initial action configuration is passed by value; shared action ownership is
+created only through the signal manager's fork operations. `kprocess` no longer
+returns an independently retainable action-table lock to its callers.
+Exec resets only this process's configuration, preventing a CLONE_SIGHAND peer
+from losing its handlers or action metadata when another process execs.
 
 | ID | Failure mode | Cause | Local effect | System effect | Severity (1–4) | Controls |
 |---|---|---|---|---|---|---|

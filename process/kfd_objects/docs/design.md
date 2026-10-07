@@ -19,7 +19,7 @@ in object state. This crate does not own process descriptor-number allocation.
 |---|---|---|
 | `EventFd` | Atomic counter, semaphore flag, read/write `PollSet`s | `new_file` constructs anonymous private data; file read atomically decrements/reset-count, write conditionally adds, and each wakes the opposite side. |
 | `TimerFd` | Owned `ktask::Timer<TimerFdHandler>` with embedded clock/count/poll state, programming `Mutex<()>` | `settime` validates and drains the old delivery before replacing state; callback/read/poll/gettime account elapsed periods. Read rearms the next periodic notification. |
-| `Signalfd` | `RwLock<SignalSet>` and read `PollSet` | Each file read/poll resolves the current `ThreadSignalManager`, selects pending signals by the mask and serializes one 128-byte record per read. |
+| `Signalfd` | `RwLock<SignalSet>` | Each file read/poll resolves the current `ThreadSignalManager`, selects pending signals by the mask and serializes one 128-byte record per read. Signal configuration owns the shared notification source. |
 | `Epoll` | `Arc<EpollInner>`, interest table, ready queue and poll set | `add`/`modify` register watched file poll sources; callbacks enqueue weak interest references; `poll_events` returns ready ABI events and rearms interests. |
 
 `from_file` retrieves the typed private data and rejects an unrelated file.
@@ -35,6 +35,21 @@ attempt and one post-signal attempt preserve ready/nonblocking behavior. A still
 signal wait returns the file-wait marker, not a Linux restart code. The syscall
 boundary and signal delivery own restart policy; ordinary errors keep their
 existing meaning. Other object waits retain their own documented paths.
+
+Signalfd read/poll registration subscribes to the accessing thread's shared
+signal-configuration source. Mask updates notify that same source. Blocked
+signals therefore wake signalfd waits even though they do not interrupt handler
+delivery. The file remains independent of its creator: each access resolves the
+current thread, and readiness/dequeue retain the thread/process pending mask
+checks. The poll loop's register-then-recheck closes arrival races.
+
+Epoll ADD captures an optional weak file poll source before publishing an
+interest, including when the file is already ready or IN is not requested.
+Signalfd supplies its registering thread's signal source. Rearm and MOD retain
+that source; only DEL followed by ADD captures a new one. Expiration of a source
+does not redirect registration or synthesize HUP. Readiness still uses the
+current caller's pending queues. Files without a captured source retain their
+ordinary `register_poll` path.
 
 File construction requires allocator and initialized anonymous-inode filesystem.
 `read`/`write` may block through their polling futures unless the file carries
@@ -94,6 +109,13 @@ The ready scan is bounded by the queue length at entry and deduplicates keys,
 so synchronous requeue cannot keep one call running indefinitely. A key contains
 both fd number and weak file identity. Generation checks reject stale wakers.
 
+A failed MOD restores the previous configuration, but source registration has
+already advanced the waker generation. Enabled interests are therefore queued
+for a readiness check and rearm retry, waking epoll waiters without relying on
+the invalidated old callback. This is a retry hint, not a fabricated file event:
+consumption still checks the file. Persistent registration failure uses the
+existing bounded poll-error/retry path. A previously fired OneShot stays disabled.
+
 ## Concurrency and resource lifecycle
 
 Eventfd uses acquire loads and release/acquire fetch-update loops for its counter.
@@ -116,7 +138,8 @@ duplicated file descriptor does not imply final release. Allocation occurs
 during construction, not each start/rearm/cancel. Arbitrary poll registration
 and waker costs are outside this timer-storage guarantee.
 
-Signalfd mask changes take the RwLock and wake readers. Signal queues belong to
+Signalfd mask changes release the RwLock before notifying the updater's shared
+signal source. Reads consume pending without a file-level broadcast. Signal queues belong to
 `ksignal`, not this object. Epoll's `ctl_lock` serializes ADD/MOD/DEL including
 registration failure rollback. `SpinNoPreempt` locks protect the table and
 per-interest configuration; `SpinNoIrq` protects the IRQ-reachable ready queue.

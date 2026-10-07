@@ -13,8 +13,8 @@ use fs_context::FsStruct;
 use kcred::Cred;
 use kerrno::{KError, KResult};
 use khal::paging::MappingFlags;
-use ksignal::api::{ProcessSignalManager, SignalActions};
-use ksync::{Mutex, MutexGuard, spin::SpinNoIrq as KSyncSpinNoIrq};
+use ksignal::api::ProcessSignalManager;
+use ksync::{Mutex, MutexGuard};
 use ktime_types::TimeSpan;
 use ktimer::{PosixTimerCreateNotify, TimerDelivery};
 use memaddr::VirtAddr;
@@ -295,16 +295,6 @@ impl Process {
     pub fn signal_manager(&self) -> KResult<Arc<ProcessSignalManager>> {
         self.runtime()
             .map(|runtime| runtime.signal_manager().clone())
-    }
-
-    /// Returns the shared signal actions while runtime remains attached.
-    ///
-    /// # Errors
-    ///
-    /// Returns `KError::NoSuchProcess` when the weak process runtime can no longer
-    /// be upgraded.
-    pub fn signal_actions(&self) -> KResult<Arc<KSyncSpinNoIrq<SignalActions>>> {
-        self.signal_manager().map(|signal| signal.actions.clone())
     }
 
     /// Returns a stable objective credential snapshot for one published thread.
@@ -594,7 +584,7 @@ impl Process {
         runtime.with_tee_ta_ctx_mut(|tee_ta_ctx| {
             tee_ta_ctx.init_ta_ctx(update.exe_path.as_str(), update.ta_head_bytes.as_slice());
         });
-        runtime.reset_signal_actions();
+        runtime.reset_signal_actions()?;
         runtime.clear_posix_timers();
         runtime.resources().close_cloexec_files()?;
         #[cfg(feature = "tipc")]
@@ -617,7 +607,18 @@ impl Process {
     /// Returns `KError::NoSuchProcess` when the weak process runtime can no longer
     /// be upgraded.
     pub fn reset_signal_actions(&self) -> KResult<()> {
-        self.runtime().map(|runtime| runtime.reset_signal_actions())
+        self.runtime()?.reset_signal_actions()
+    }
+
+    /// Releases signal configuration ownership during last-thread cleanup.
+    /// Idempotent. Call outside process-domain, membership and signal locks,
+    /// before publishing process completion to the parent.
+    ///
+    /// # Errors
+    /// Returns `NoSuchProcess` when the runtime is no longer reachable.
+    pub fn exit_signal_handlers(&self) -> KResult<()> {
+        self.runtime()?.signal_manager().release_handlers();
+        Ok(())
     }
 
     /// Clears all process POSIX timers.

@@ -110,7 +110,7 @@ pub fn spawn_init_process(
         Arc::new(args.to_vec()),
         Arc::new(Mutex::new(uspace)),
         fs_context,
-        Arc::default(),
+        Default::default(),
         cred,
     );
 

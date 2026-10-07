@@ -6,10 +6,16 @@
 
 #![cfg(unittest)]
 
-use alloc::format;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use alloc::{
+    format,
+    sync::{Arc, Weak},
+    task::Wake,
+};
+use core::{
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    task::{Context, Waker},
+};
 
-use kspin::SpinNoIrq;
 use ktime_types::TimeSpan;
 use unittest::{assert, assert_eq, def_test};
 
@@ -21,13 +27,351 @@ use crate::{
 };
 
 fn new_thread_manager() -> alloc::sync::Arc<ThreadSignalManager> {
-    let actions = alloc::sync::Arc::new(SpinNoIrq::new(SignalActions::default()));
-    let proc = alloc::sync::Arc::new(ProcessSignalManager::new(actions, 0));
+    let proc = alloc::sync::Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
     ThreadSignalManager::new(1, proc)
+}
+
+struct PendingWake {
+    reader: Weak<ThreadSignalManager>,
+    signo: Signo,
+    calls: AtomicUsize,
+    saw_pending: AtomicBool,
+}
+
+impl Wake for PendingWake {
+    fn wake(self: Arc<Self>) {
+        if let Some(reader) = self.reader.upgrade() {
+            // Reenter both pending and ownership paths before recording the wake.
+            self.saw_pending
+                .store(reader.pending().has(self.signo), Ordering::Relaxed);
+            let _ = reader.process().signal_action(self.signo);
+        }
+        self.calls.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn observe_pending(
+    source: &kpoll::WeakPollSet,
+    reader: &Arc<ThreadSignalManager>,
+    signo: Signo,
+) -> (Arc<PendingWake>, kpoll::PollRegistrations) {
+    let observed = Arc::new(PendingWake {
+        reader: Arc::downgrade(reader),
+        signo,
+        calls: AtomicUsize::new(0),
+        saw_pending: AtomicBool::new(false),
+    });
+    let waker = Waker::from(observed.clone());
+    let context = Context::from_waker(&waker);
+    let mut registrations = kpoll::PollRegistrations::new();
+    registrations
+        .context(&context)
+        .register_weak(source)
+        .unwrap();
+    (observed, registrations)
+}
+
+#[def_test]
+fn test_shared_arrival_notifications_do_not_share_pending() {
+    let parent = new_thread_manager();
+    let shared = ThreadSignalManager::new(2, Arc::new(parent.process().fork_shared().unwrap()));
+    let private = ThreadSignalManager::new(3, Arc::new(parent.process().fork_private().unwrap()));
+    let source = parent.pending_source().unwrap();
+    let (observed, _registration) = observe_pending(&source, &shared, Signo::SIGUSR1);
+    let (isolated, _private_registration) =
+        observe_pending(&private.pending_source().unwrap(), &private, Signo::SIGUSR1);
+    let _ = shared
+        .process()
+        .send_signal(SignalInfo::new_kernel(Signo::SIGUSR1));
+    assert_eq!(observed.calls.load(Ordering::Relaxed), 1);
+    assert!(observed.saw_pending.load(Ordering::Relaxed));
+    assert!(parent.pending().is_empty());
+    assert_eq!(isolated.calls.load(Ordering::Relaxed), 0);
+
+    let (observed, _registration) = observe_pending(&source, &shared, Signo::SIGUSR2);
+    let _ = shared.send_signal(SignalInfo::new_kernel(Signo::SIGUSR2));
+    assert_eq!(observed.calls.load(Ordering::Relaxed), 1);
+    assert!(observed.saw_pending.load(Ordering::Relaxed));
+    assert!(!shared.process().pending().has(Signo::SIGUSR2));
+    assert!(parent.pending().is_empty());
+
+    let (observed, _registration) = observe_pending(&source, &parent, Signo::SIGUSR1);
+    shared.notify_pending().unwrap();
+    assert_eq!(observed.calls.load(Ordering::Relaxed), 1);
+    assert!(!observed.saw_pending.load(Ordering::Relaxed));
+
+    let (observed, _registration) = observe_pending(&source, &shared, Signo::SIGWINCH);
+    let _ = shared.send_signal(SignalInfo::new_kernel(Signo::SIGWINCH));
+    assert_eq!(observed.calls.load(Ordering::Relaxed), 0);
+    let mut blocked = SignalSet::default();
+    blocked.add(Signo::SIGWINCH);
+    shared.set_blocked(blocked);
+    assert!(!shared.send_signal(SignalInfo::new_kernel(Signo::SIGWINCH)));
+    assert_eq!(observed.calls.load(Ordering::Relaxed), 1);
+    assert!(observed.saw_pending.load(Ordering::Relaxed));
+}
+
+#[def_test]
+fn test_exec_detaches_source_and_release_expires_it_with_manager_alive() {
+    let parent = new_thread_manager();
+    let child = ThreadSignalManager::new(2, Arc::new(parent.process().fork_shared().unwrap()));
+    let old = child.pending_source().unwrap();
+    child.process().reset_actions_for_exec().unwrap();
+    let (old_observed, _old_registration) = observe_pending(&old, &child, Signo::SIGUSR1);
+    let current = child.pending_source().unwrap();
+    let (new_observed, _new_registration) = observe_pending(&current, &child, Signo::SIGUSR1);
+    let _ = child.send_signal(SignalInfo::new_kernel(Signo::SIGUSR1));
+    assert_eq!(old_observed.calls.load(Ordering::Relaxed), 0);
+    assert_eq!(new_observed.calls.load(Ordering::Relaxed), 1);
+    assert!(new_observed.saw_pending.load(Ordering::Relaxed));
+
+    parent.process().release_handlers();
+    assert_eq!(old_observed.calls.load(Ordering::Relaxed), 1);
+    let (dead_observed, dead_registration) = observe_pending(&old, &child, Signo::SIGUSR1);
+    assert!(dead_registration.is_empty());
+    child.notify_pending().unwrap();
+    assert_eq!(dead_observed.calls.load(Ordering::Relaxed), 0);
+
+    let (released, _registration) = observe_pending(&current, &child, Signo::SIGUSR1);
+    child.process().release_handlers();
+    assert_eq!(released.calls.load(Ordering::Relaxed), 1);
+    assert!(matches!(
+        child.pending_source(),
+        Err(kerrno::KError::NoSuchProcess)
+    ));
+    assert_eq!(child.notify_pending(), Err(kerrno::KError::NoSuchProcess));
+    let (_, registration) = observe_pending(&current, &child, Signo::SIGUSR1);
+    assert!(registration.is_empty());
+    let mut registrations = kpoll::PollRegistrations::new();
+    let context = Context::from_waker(Waker::noop());
+    assert_eq!(
+        child.register_pending(&mut registrations.context(&context)),
+        Err(kpoll::PollRegisterError::InvalidState)
+    );
+}
+
+#[def_test]
+fn test_sole_owner_exec_preserves_source_and_pending_before_registration() {
+    let thread = new_thread_manager();
+    let source = thread.pending_source().unwrap();
+    let _ = thread.send_signal(SignalInfo::new_kernel(Signo::SIGUSR1));
+    thread.process().reset_actions_for_exec().unwrap();
+    let (observed, _registration) = observe_pending(&source, &thread, Signo::SIGUSR1);
+    assert_eq!(observed.calls.load(Ordering::Relaxed), 0);
+    assert!(thread.pending().has(Signo::SIGUSR1));
+    // A repeated standard signal may still request a recheck.
+    let _ = thread.send_signal(SignalInfo::new_kernel(Signo::SIGUSR1));
+    assert_eq!(observed.calls.load(Ordering::Relaxed), 1);
+    assert!(observed.saw_pending.load(Ordering::Relaxed));
+}
+
+#[def_test]
+fn test_child_exit_commit_uses_source_current_at_publication() {
+    let parent = new_thread_manager();
+    let child = ThreadSignalManager::new(2, Arc::new(parent.process().fork_shared().unwrap()));
+    let (old_observed, _old_registration) =
+        observe_pending(&child.pending_source().unwrap(), &child, Signo::SIGCHLD);
+    let prepared = child
+        .process()
+        .prepare_child_exit_signal(new_sigchld_child_exit_signal())
+        .unwrap();
+    assert!(child.pending().is_empty());
+    assert_eq!(old_observed.calls.load(Ordering::Relaxed), 0);
+    child.process().reset_actions_for_exec().unwrap();
+    let (current_observed, _registration) =
+        observe_pending(&child.pending_source().unwrap(), &child, Signo::SIGCHLD);
+    let _ = child.process().commit_child_exit_signal(prepared);
+    assert_eq!(old_observed.calls.load(Ordering::Relaxed), 0);
+    assert_eq!(current_observed.calls.load(Ordering::Relaxed), 1);
+    assert!(current_observed.saw_pending.load(Ordering::Relaxed));
 }
 
 static DEQUEUED_SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
 static LAST_DEQUEUED_SIGNAL: AtomicUsize = AtomicUsize::new(0);
+
+#[def_test]
+fn test_process_fork_shares_or_copies_complete_actions_not_pending() {
+    extern "C" fn handler(_: i32) {}
+    extern "C" fn restorer() {}
+
+    let parent = ProcessSignalManager::new(SignalActions::default(), 0);
+    let mut mask = SignalSet::default();
+    mask.add(Signo::SIGUSR2);
+    parent
+        .set_signal_action(
+            Signo::SIGUSR1,
+            SignalAction {
+                disposition: SignalDisposition::Handler(handler),
+                flags: SignalActionFlags::RESTART | SignalActionFlags::RESTORER,
+                mask,
+                restorer: Some(restorer),
+            },
+        )
+        .unwrap();
+    let _ = parent.send_signal(SignalInfo::new_kernel(Signo::SIGTERM));
+    let shared = parent.fork_shared().unwrap();
+    let private = parent.fork_private().unwrap();
+    for child in [&shared, &private] {
+        let action = child.signal_action(Signo::SIGUSR1).unwrap();
+        assert!(matches!(action.disposition, SignalDisposition::Handler(f)
+            if f as usize == handler as *const () as usize));
+        assert_eq!(
+            action.flags.bits(),
+            (SignalActionFlags::RESTART | SignalActionFlags::RESTORER).bits()
+        );
+        assert!(action.mask.has(Signo::SIGUSR2));
+        assert_eq!(
+            action.restorer.map(|f| f as usize),
+            Some(restorer as *const () as usize)
+        );
+        assert!(child.pending().is_empty());
+    }
+    shared
+        .set_signal_action(Signo::SIGUSR1, SignalAction::default())
+        .unwrap();
+    let action = parent.signal_action(Signo::SIGUSR1).unwrap();
+    assert!(matches!(action.disposition, SignalDisposition::Default));
+    assert!(action.flags.is_empty());
+    assert!(action.mask.is_empty());
+    assert!(action.restorer.is_none());
+    assert!(matches!(
+        private.signal_action(Signo::SIGUSR1).unwrap().disposition,
+        SignalDisposition::Handler(_)
+    ));
+    private
+        .set_signal_action(
+            Signo::SIGUSR1,
+            SignalAction {
+                disposition: SignalDisposition::Ignore,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        parent.signal_action(Signo::SIGUSR1).unwrap().disposition,
+        SignalDisposition::Default
+    ));
+    assert!(parent.pending().has(Signo::SIGTERM));
+}
+
+#[def_test]
+fn test_exec_reset_keeps_ignored_disposition_and_pending() {
+    let process = ProcessSignalManager::new(SignalActions::default(), 0);
+    process
+        .set_signal_action(
+            Signo::SIGUSR1,
+            SignalAction {
+                disposition: SignalDisposition::Ignore,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    process
+        .set_signal_action(
+            Signo::SIGUSR2,
+            SignalAction {
+                flags: SignalActionFlags::RESTART,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let _ = process.send_signal(SignalInfo::new_kernel(Signo::SIGTERM));
+    process.reset_actions_for_exec().unwrap();
+    assert!(matches!(
+        process.signal_action(Signo::SIGUSR1).unwrap().disposition,
+        SignalDisposition::Ignore
+    ));
+    assert!(
+        process
+            .signal_action(Signo::SIGUSR2)
+            .unwrap()
+            .flags
+            .is_empty()
+    );
+    assert!(process.pending().has(Signo::SIGTERM));
+}
+
+#[def_test]
+fn test_exec_resets_ignored_metadata_without_changing_shared_peer() {
+    extern "C" fn restorer() {}
+    let parent = alloc::sync::Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
+    let mut mask = SignalSet::default();
+    mask.add(Signo::SIGUSR2);
+    parent
+        .set_signal_action(
+            Signo::SIGUSR1,
+            SignalAction {
+                disposition: SignalDisposition::Ignore,
+                flags: SignalActionFlags::RESTART | SignalActionFlags::RESTORER,
+                mask,
+                restorer: Some(restorer),
+            },
+        )
+        .unwrap();
+    let child = parent.fork_shared().unwrap();
+    let _ = child.send_signal(SignalInfo::new_kernel(Signo::SIGTERM));
+    child.reset_actions_for_exec().unwrap();
+    let reset = child.signal_action(Signo::SIGUSR1).unwrap();
+    assert!(matches!(reset.disposition, SignalDisposition::Ignore));
+    assert!(reset.flags.is_empty());
+    assert!(reset.mask.is_empty());
+    assert!(reset.restorer.is_none());
+    let retained = parent.signal_action(Signo::SIGUSR1).unwrap();
+    assert!(retained.flags.contains(SignalActionFlags::RESTART));
+    assert!(retained.mask.has(Signo::SIGUSR2));
+    assert!(retained.restorer.is_some());
+    assert!(child.pending().has(Signo::SIGTERM));
+    assert!(parent.pending().is_empty());
+
+    // A later clone must inherit the detached configuration, not the peer's.
+    let grandchild = child.fork_shared().unwrap();
+    grandchild
+        .set_signal_action(Signo::SIGUSR1, SignalAction::default())
+        .unwrap();
+    assert!(matches!(
+        child.signal_action(Signo::SIGUSR1).unwrap().disposition,
+        SignalDisposition::Default
+    ));
+    assert!(matches!(
+        parent.signal_action(Signo::SIGUSR1).unwrap().disposition,
+        SignalDisposition::Ignore
+    ));
+    // Retaining the manager for a query is not an extra configuration owner.
+    let query = parent.clone();
+    parent.reset_actions_for_exec().unwrap();
+    assert!(
+        query
+            .signal_action(Signo::SIGUSR1)
+            .unwrap()
+            .flags
+            .is_empty()
+    );
+}
+
+#[def_test]
+fn test_exec_resets_caught_handler_only_in_executing_process() {
+    extern "C" fn handler(_: i32) {}
+    let parent = ProcessSignalManager::new(SignalActions::default(), 0);
+    parent
+        .set_signal_action(
+            Signo::SIGUSR1,
+            SignalAction {
+                disposition: SignalDisposition::Handler(handler),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let child = parent.fork_shared().unwrap();
+    child.reset_actions_for_exec().unwrap();
+    assert!(matches!(
+        child.signal_action(Signo::SIGUSR1).unwrap().disposition,
+        SignalDisposition::Default
+    ));
+    assert!(matches!(
+        parent.signal_action(Signo::SIGUSR1).unwrap().disposition,
+        SignalDisposition::Handler(_)
+    ));
+}
 
 fn record_dequeued_signal(sig: &SignalInfo) -> SignalDequeueAction {
     LAST_DEQUEUED_SIGNAL.store(sig.signo() as usize, Ordering::Relaxed);
@@ -540,7 +884,16 @@ fn test_thread_signal_manager_send_signal_and_pending_merge() {
 fn test_thread_signal_manager_send_signal_ignored_and_blocked_paths() {
     let thread = new_thread_manager();
 
-    thread.process().actions.lock()[Signo::SIGUSR1].disposition = SignalDisposition::Ignore;
+    thread
+        .process()
+        .set_signal_action(
+            Signo::SIGUSR1,
+            SignalAction {
+                disposition: SignalDisposition::Ignore,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     assert!(!thread.send_signal(SignalInfo::new_kernel(Signo::SIGUSR1)));
     assert!(!thread.pending().has(Signo::SIGUSR1));
 
@@ -588,13 +941,17 @@ fn test_process_signal_manager_can_restart_and_signal_ignored() {
     let thread = new_thread_manager();
     let proc = thread.process();
 
-    assert!(!proc.can_restart(Signo::SIGTERM));
-    proc.actions.lock()[Signo::SIGTERM].flags |= SignalActionFlags::RESTART;
-    assert!(proc.can_restart(Signo::SIGTERM));
+    assert!(!proc.can_restart(Signo::SIGTERM).unwrap());
+    let mut action = proc.signal_action(Signo::SIGTERM).unwrap();
+    action.flags |= SignalActionFlags::RESTART;
+    proc.set_signal_action(Signo::SIGTERM, action.clone())
+        .unwrap();
+    assert!(proc.can_restart(Signo::SIGTERM).unwrap());
 
-    assert!(proc.signal_ignored(Signo::SIGCHLD));
-    proc.actions.lock()[Signo::SIGTERM].disposition = SignalDisposition::Ignore;
-    assert!(proc.signal_ignored(Signo::SIGTERM));
+    assert!(proc.signal_ignored(Signo::SIGCHLD).unwrap());
+    action.disposition = SignalDisposition::Ignore;
+    proc.set_signal_action(Signo::SIGTERM, action).unwrap();
+    assert!(proc.signal_ignored(Signo::SIGTERM).unwrap());
 }
 
 #[def_test]
@@ -602,7 +959,14 @@ fn test_process_signal_manager_pending_and_ignored_send() {
     let thread = new_thread_manager();
     let proc = thread.process();
 
-    proc.actions.lock()[Signo::SIGUSR2].disposition = SignalDisposition::Ignore;
+    proc.set_signal_action(
+        Signo::SIGUSR2,
+        SignalAction {
+            disposition: SignalDisposition::Ignore,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(
         proc.send_signal(SignalInfo::new_kernel(Signo::SIGUSR2)),
         None
@@ -638,8 +1002,10 @@ fn test_process_signal_manager_child_exit_sigchld_uses_linux_default_semantics()
     let thread = new_thread_manager();
     let proc = thread.process();
 
-    assert!(proc.signal_ignored(Signo::SIGCHLD));
-    let prepared = proc.prepare_child_exit_signal(new_sigchld_child_exit_signal());
+    assert!(proc.signal_ignored(Signo::SIGCHLD).unwrap());
+    let prepared = proc
+        .prepare_child_exit_signal(new_sigchld_child_exit_signal())
+        .unwrap();
     assert!(!prepared.should_autoreap());
     assert!(
         !proc.pending().has(Signo::SIGCHLD),
@@ -656,21 +1022,40 @@ fn test_process_signal_manager_child_exit_sigchld_uses_linux_default_semantics()
     sigchld.add(Signo::SIGCHLD);
     let _ = thread.dequeue_signal(&sigchld);
 
-    let (result, target_tid) = proc.send_child_exit_signal(new_sigchld_child_exit_signal());
+    let (result, target_tid) = proc
+        .send_child_exit_signal(new_sigchld_child_exit_signal())
+        .unwrap();
     assert_eq!(target_tid, Some(1));
     assert!(!result.should_autoreap());
     assert!(proc.pending().has(Signo::SIGCHLD));
 
     let _ = thread.dequeue_signal(&sigchld);
-    proc.actions.lock()[Signo::SIGCHLD].disposition = SignalDisposition::Ignore;
-    let (result, target_tid) = proc.send_child_exit_signal(new_sigchld_child_exit_signal());
+    proc.set_signal_action(
+        Signo::SIGCHLD,
+        SignalAction {
+            disposition: SignalDisposition::Ignore,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (result, target_tid) = proc
+        .send_child_exit_signal(new_sigchld_child_exit_signal())
+        .unwrap();
     assert_eq!(target_tid, None);
     assert!(result.should_autoreap());
     assert!(!proc.pending().has(Signo::SIGCHLD));
 
-    proc.actions.lock()[Signo::SIGCHLD].disposition = SignalDisposition::Default;
-    proc.actions.lock()[Signo::SIGCHLD].flags |= SignalActionFlags::NOCLDWAIT;
-    let (result, target_tid) = proc.send_child_exit_signal(new_sigchld_child_exit_signal());
+    proc.set_signal_action(
+        Signo::SIGCHLD,
+        SignalAction {
+            flags: SignalActionFlags::NOCLDWAIT,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (result, target_tid) = proc
+        .send_child_exit_signal(new_sigchld_child_exit_signal())
+        .unwrap();
     assert_eq!(target_tid, Some(1));
     assert!(result.should_autoreap());
     assert!(proc.pending().has(Signo::SIGCHLD));
@@ -680,7 +1065,9 @@ fn test_process_signal_manager_child_exit_sigchld_uses_linux_default_semantics()
 fn test_child_exit_sigchld_commit_reselects_target_after_mask_change() {
     let thread = new_thread_manager();
     let proc = thread.process();
-    let prepared = proc.prepare_child_exit_signal(new_sigchld_child_exit_signal());
+    let prepared = proc
+        .prepare_child_exit_signal(new_sigchld_child_exit_signal())
+        .unwrap();
 
     let mut blocked = SignalSet::default();
     blocked.add(Signo::SIGCHLD);

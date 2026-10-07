@@ -2,7 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{sync::Arc, task::Wake};
+use alloc::{
+    sync::{Arc, Weak},
+    task::Wake,
+};
 use core::{mem, task::Waker};
 
 use kspin::SpinNoIrq;
@@ -171,7 +174,26 @@ pub struct PollSet {
     inner: Arc<PollSetInner>,
 }
 
+/// A captured source identity that does not keep its waiters or owner alive.
+#[derive(Clone)]
+pub struct WeakPollSet {
+    inner: Weak<PollSetInner>,
+}
+
+impl WeakPollSet {
+    pub(crate) fn upgrade(&self) -> Option<PollSet> {
+        self.inner.upgrade().map(|inner| PollSet { inner })
+    }
+}
+
 impl PollSet {
+    /// Captures this source without allocating or registering a waiter.
+    pub fn downgrade(&self) -> WeakPollSet {
+        WeakPollSet {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+
     /// Creates an empty poll source.
     pub fn new() -> Self {
         Self {

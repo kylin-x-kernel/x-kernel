@@ -237,6 +237,8 @@ impl Thread {
     }
 
     /// Prepares a child process clone together with its leader task identity.
+    /// Copies this thread's blocked signal mask before publication; the child's
+    /// private and process-wide pending queues start empty even with shared actions.
     ///
     /// # Errors
     ///
@@ -257,6 +259,7 @@ impl Thread {
             charge,
             self.no_new_privileges(),
         )?;
+        thread.signal.set_blocked(self.signal.blocked());
         Ok(PreparedUserClone {
             thread,
             task_number,
@@ -274,6 +277,8 @@ impl Thread {
     }
 
     /// Prepares a sibling thread clone together with its thread identity.
+    /// Copies this thread's blocked signal mask before publication. Private
+    /// pending starts empty; the existing process-wide pending queue stays shared.
     ///
     /// # Errors
     ///
@@ -291,6 +296,7 @@ impl Thread {
             charge,
             self.no_new_privileges(),
         )?;
+        thread.signal.set_blocked(self.signal.blocked());
         Ok(PreparedUserClone {
             thread,
             task_number,

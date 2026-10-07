@@ -52,6 +52,14 @@ provider contracts or prove that all upstream union construction is correct.
 
 ## Thread safety and lifetime invariants
 
+Direct signalfd waits use the accessing thread's shared signal configuration,
+not the file creator. Epoll captures a weak source at ADD and retains it across
+MOD/rearm even after source destruction; it never silently binds to another
+process. A shared-source wake is only a hint: poll/read still filter the current
+thread/process pending queues with the file's mask. Registration errors propagate,
+and kpoll guards cancel registrations without retaining configuration ownership.
+Mask updates notify only the updater's source, not every process sharing the file.
+
 Counter updates must use one atomic transition. Timer expiration/deadline/count
 updates share the inner IRQ-safe lock. Settime/read serialize through the
 programming mutex; synchronous cancellation happens before acquiring inner
@@ -95,7 +103,7 @@ mutex avoids unregister callbacks nesting under that lock.
 | ID | Failure mode | Cause | Local effect | System effect | Severity (1–4) | Controls |
 |---|---|---|---|---|---|---|
 | F-01 | Anonymous file allocation fails | Anonymous-inode provider failure | No file returned | Descriptor creation fails | 3 | Propagate provider errors; references release normally. |
-| F-02 | Poll registration fails | Watched source rejects registration | Interest cannot be armed | Readiness wait may need retry | 3 | ADD rollback, MOD configuration restoration; poll preserves already-emitted partial results and requeues for retry. |
+| F-02 | Poll registration fails | Watched source rejects registration | Interest cannot be armed | Readiness wait may need retry | 3 | ADD rollback; MOD restores configuration and queues enabled interests for recheck/rearm because old callback generations are invalid. Fired OneShot stays disabled. Poll preserves already-emitted partial results and requeues for retry. |
 | F-03 | Timer interval advance overflows | Deadline exceeds clock representation | Next deadline can disappear | Periodic notification stops | 3 | Saturating expiration accounting and checked deadline addition; document finite representational range. |
 | F-04 | Short I/O buffer | Caller supplies insufficient bytes | No record transfer | Caller must supply valid size | 4 | InvalidInput before copying/consuming. |
 | F-05 | Callback/drain deadlock | Synchronous teardown while holding callback state or blocking its CPU | Final release cannot finish | Task or CPU stalls | 2 | Settime cancels outside inner state; callback never acquires programming; final-owner callers must permit callback progress. |
@@ -113,6 +121,10 @@ last-owner reclamation, periodic read/rearm, tiny intervals, competing
 programming and poll-before-IRQ notification, signalfd layout/payload and epoll
 registration/trigger races. Their presence is not a
 claim they were executed by this documentation edit.
+
+MOD failure tests cover later readiness, repeated registration failure, queued
+events, partial-registration cancellation and preserving a disabled OneShot.
+They use explicit source readiness and injected errors, not timing thresholds.
 
 ## Audit checklist
 

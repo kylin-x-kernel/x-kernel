@@ -199,6 +199,8 @@ pub fn publish_user_task(task: ktask::TaskInner) -> kerrno::KResult<PublishedUse
 ///
 /// Pass the returned thread to [`ktask::TaskInner::new_user`] so the task and
 /// its runtime are constructed as one object.
+/// `signal_actions` is an owned initial configuration; use the thread clone
+/// preparation APIs to share an existing process's signal configuration.
 #[allow(clippy::too_many_arguments)]
 pub fn build_process_thread(
     process: alloc::sync::Arc<Process>,
@@ -207,7 +209,7 @@ pub fn build_process_thread(
     cmdline: alloc::sync::Arc<alloc::vec::Vec<alloc::string::String>>,
     address_space: alloc::sync::Arc<ksync::Mutex<memspace::MmSpace>>,
     fs_context: alloc::sync::Arc<ksync::Mutex<fs_context::FsStruct>>,
-    signal_actions: alloc::sync::Arc<ksync::spin::SpinNoIrq<ksignal::api::SignalActions>>,
+    signal_actions: ksignal::api::SignalActions,
     credentials: alloc::sync::Arc<kcred::Cred>,
 ) -> alloc::boxed::Box<Thread> {
     build_process_thread_with_config(
@@ -231,7 +233,7 @@ pub(crate) fn build_process_thread_with_config(
     cmdline: alloc::sync::Arc<alloc::vec::Vec<alloc::string::String>>,
     address_space: alloc::sync::Arc<ksync::Mutex<memspace::MmSpace>>,
     fs_context: alloc::sync::Arc<ksync::Mutex<fs_context::FsStruct>>,
-    signal_actions: alloc::sync::Arc<ksync::spin::SpinNoIrq<ksignal::api::SignalActions>>,
+    signal_actions: ksignal::api::SignalActions,
     credentials: alloc::sync::Arc<kcred::Cred>,
     config: process_runtime::ProcessRuntimeConfig,
 ) -> alloc::boxed::Box<Thread> {

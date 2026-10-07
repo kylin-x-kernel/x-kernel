@@ -33,9 +33,9 @@ pub use completion::Completion;
 pub use event::PollEvent;
 pub use events::IoEvents;
 pub use registration::{PollContext, PollRegisterError, PollRegistration, PollRegistrations};
-pub use source::PollSet;
 #[cfg(feature = "stats")]
 pub use source::WakerStats;
+pub use source::{PollSet, WeakPollSet};
 
 /// A source whose readiness can be queried and whose wake sources can be
 /// registered for one logical wait operation.

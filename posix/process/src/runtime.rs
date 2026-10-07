@@ -362,6 +362,9 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
     process_exit::record_exited_thread_cpu_time(process, thread_utime, thread_stime);
 
     if is_last_thread {
+        if let Err(err) = process.exit_signal_handlers() {
+            error!("exit_signal_handlers on process exit failed: {err:?}");
+        }
         if let Err(err) = process.exit_mm() {
             error!("exit_mm on process exit failed: {err:?}");
         }
@@ -512,10 +515,7 @@ mod tests {
 
     #[def_test]
     fn default_continue_does_not_suppress_syscall_restart() {
-        let process = Arc::new(ProcessSignalManager::new(
-            Arc::new(ksync::spin::SpinNoIrq::new(SignalActions::default())),
-            0,
-        ));
+        let process = Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
         let signal = ThreadSignalManager::new(1, process);
         let mut uctx = interrupted_context(LinuxError::ERESTARTSYS);
         let action = signal.handle_signal(

@@ -39,8 +39,8 @@ posix/process runtime (check_signals -> process teardown)
                        |
         ProcessSignalManager           ThreadSignalManager
         ├─ pending: PendingSignals     ├─ pending: PendingSignals
-        ├─ actions: Arc<SpinNoIrq<     ├─ blocked / saved_sigmask
-        │           SignalActions>>    ├─ stack: SignalStack
+        ├─ handlers: Option<Arc<      ├─ blocked / saved_sigmask
+        │           SignalHandlers>>   ├─ stack: SignalStack
         ├─ children: Vec<(tid, Weak)>  └─ possibly_has_signal
         └─ has_pending: AtomicBool              |
                   \                            /
@@ -56,9 +56,62 @@ pending queue; each `ThreadSignalManager` registers itself with the process
 manager through a `Weak` reference at creation. Thread dequeue first drains
 the thread queue, then falls back to the process queue. `SignalActions` is
 shared by `Arc` so `sigaction` updates are immediately visible to every
-thread.
+thread. Its shared reference stays inside the signal managers: constructors
+take an owned `SignalActions` value, and `fork_shared` / `fork_private` create
+new process managers with shared configuration or an independent snapshot.
+Both create empty pending queues and separate thread lists. Callers query or
+replace actions through manager methods, not by retaining the underlying lock
+or cloning its reference.
+
+`SignalHandlers` owns the shared action table, its content lock, and the
+`pending_changed` poll source shared by CLONE_SIGHAND peers.
+`ProcessSignalManager.handlers` owns this process's reference, with a separate
+lock for changing that reference. The shared object embeds its action table,
+so no separate table allocation is required. Access takes ownership then table
+locks; only shared fork clones the shared object's reference.
+`reset_actions_for_exec` resets a sole owner's table in place. With other owners
+it allocates a replacement outside the locks, rechecks ownership, then copies and
+resets the current snapshot before publishing the replacement. The old reference
+is dropped outside the ownership lock. Temporary manager references do not count
+as table owners. Concurrent fork sees either the pre-exec or post-exec table.
+Reset preserves only ignore dispositions; all action flags, masks and restorers
+are cleared. Pending and blocked masks are unaffected. Last-thread cleanup
+takes the optional configuration reference under the ownership lock and drops
+it outside that lock, before parent-visible process completion. Runtime teardown
+does the same for unpublished clone rollback; manager Drop is an idempotent
+fallback. Retained manager references cannot retain or recreate configuration
+ownership. Configuration access and fork/exec return `NoSuchProcess` after
+release; signal send and prepared child-exit commit discard late delivery.
+Sole-owner exec retains the arrival source; shared-owner exec creates a fresh
+source. Neither change moves pending signals or rebinds captured weak sources.
+Final configuration release drops its source outside signal locks, waking any
+remaining registrations even if manager references are still retained.
 
 ## Queuing and delivery algorithm
+
+Each shared handler object owns a `pending_changed` poll source. Process send,
+thread send, and prepared child-exit commit publish pending state and its hint
+under the manager ownership lock, then clone only the selected PollSet. They
+release all signal locks before waking and dropping that temporary source.
+Child-exit preparation captures policy, not a source; commit selects the current
+source. A delayed pre-detach notification therefore still reaches the old source.
+Notifications include accepted signals blocked from handler delivery and may
+repeat for an already-pending standard signal. Thread managers expose
+`register_pending` for signalfd waits. A notification only requests a recheck of
+the caller's own pending sets; it neither consumes a signal nor makes another
+thread's private signal readable. Waiters register before their final readiness
+check, and registration guards cancel subscriptions on drop. This follows Linux's
+signal-side notification ownership without binding a signalfd to its creator.
+
+Both managers expose `pending_source() -> KResult<WeakPollSet>` and
+`notify_pending() -> KResult<()>`; inactive ownership returns `NoSuchProcess`.
+Capture does not add a handler owner or keep the source alive. Explicit notify
+clones the current PollSet under ownership, then wakes outside signal locks;
+it does not publish pending data or imply matching readiness. Thread registration
+captures a weak source, releases ownership, then calls `register_weak`.
+Already-inactive capture maps to `PollRegisterError::InvalidState`; a captured
+source that later dies registers successfully without installing a waiter or
+rebinding. Ordinary fork has an independent source despite any shared file.
 
 `PendingSignals` keeps one `Option<Box<SignalInfo>>` per standard signal
 (1-31; at most one pending instance) and one `VecDeque` per real-time signal
@@ -129,9 +182,14 @@ set by `rt_sigsuspend` and consumed by the next caught-signal frame build
 
 ## Concurrency
 
-- `ProcessSignalManager.pending`, `.actions`, `.children` and each thread's
-  `pending`/`blocked`/`saved_sigmask`/`stack` are independent `SpinNoIrq`
-  cells; no cross-field lock ordering exists inside this crate.
+- Lock order is `ProcessSignalManager.handlers` -> `SignalHandlers.actions` ->
+  children/blocked during delivery classification. Fork/exec use the same
+  ownership-before-content order; they do not lock another process's ownership.
+- Pending queues and each thread's saved mask/stack have separate locks.
+  Send retains the ownership lock through pending publication, excluding
+  ownership release. Actions/children/blocked locks are released before pending
+  insertion; notification happens after all signal locks are released.
+  Dequeue observers, user-memory access and wakes run outside configuration locks.
 - `send_signal` reads actions and scans children inside one actions-lock
   generation to keep the disposition decision and target scan coherent; the
   doc comments deliberately do not claim Linux's global `sighand->siglock`
@@ -167,7 +225,14 @@ set by `rt_sigsuspend` and consumed by the next caught-signal frame build
 ## Resource lifecycle
 
 Managers are created by `kprocess` when a process/thread runtime is built
-(`ThreadSignalManager::new` self-registers with the process manager). No
-kernel resources are allocated beyond the queues themselves; frame memory
-lives in user address space and alternate stacks are user-owned. There is
-no explicit Drop behavior in this crate.
+(`ThreadSignalManager::new` self-registers with the process manager). Shared
+signal configuration, pending queues and poll sources are kernel-owned; frame
+memory lives in user address space and alternate stacks are user-owned.
+
+The last thread's exit releases its process's shared-configuration ownership.
+`ProcessSignalManager::drop` repeats that idempotent release as a fallback.
+The removed configuration reference is dropped outside the ownership lock;
+other processes may still own the same configuration. Final poll-source
+destruction detaches registrations and can synchronously invoke their wakers.
+Configuration release must therefore occur outside process-domain, membership
+and signal locks, as required by `release_handlers`.

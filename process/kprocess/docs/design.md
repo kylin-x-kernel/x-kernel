@@ -148,6 +148,19 @@ lock. Runtime preparation then clones/shares mm, signal actions and fd table;
 `AttachedForkProcess` rolls back the attached relation if preparation fails.
 The new thread starts from the caller's subjective credential snapshot and
 inherits no-new-privileges. A sibling clone shares the existing runtime.
+Both clone preparation paths copy the calling thread's blocked signal mask
+before returning the child for publication, including when the caller is not
+the process leader. Subsequent mask changes remain thread-local. New private
+pending queues are empty; a new process also starts with empty process pending,
+while a sibling retains access to the existing process pending queue. Sharing
+signal actions does not share blocked masks or copy pending signals.
+Initial runtime construction passes owned action values to `ksignal`. Fork
+asks the parent signal manager to create the new process manager; `kprocess`
+does not hold or expose the shared action-table reference. Exec delegates the
+action reset to that manager, without changing pending or blocked ownership.
+Exec detaches signal configuration when another process shares it; otherwise
+it resets in place. Ignore dispositions survive, but all flags, masks and
+restorers are cleared. Other processes retain their full original configuration.
 
 Publication reconciles the thread's cgroup under the gate, reserves table/member
 slots under the publication table write lock, then publishes all visible slots
@@ -181,6 +194,12 @@ combined metadata update is atomic, but separate path and cmdline calls need not
 observe the same generation across a concurrent exec.
 
 ## Concurrency model
+
+Last-thread POSIX cleanup calls `exit_signal_handlers` before process completion,
+outside membership and process-domain locks. It releases this process's handler
+ownership even if a prepared notification or observer retains its signal manager.
+`ProcessRuntime::drop` also releases it for unpublished fork rollback. Both paths
+are idempotent; surviving CLONE_SIGHAND peers retain their own ownership.
 
 Lock order for publication is process cgroup gate → publication tables → process
 domain → small spin-locked slots. Exit/reap retire visibility under the domain

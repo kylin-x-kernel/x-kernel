@@ -1,5 +1,15 @@
 # kpoll — 设计文档
 
+## Weak Source Capture
+
+`WeakPollSet` retains only the identity of an existing source. Capturing or
+cloning it neither allocates a new source nor installs a waiter. Registration
+temporarily upgrades it and uses the existing one-shot registration owner;
+an expired source succeeds before reserving storage or cloning a waker.
+Expiry never selects a replacement source. The temporary strong reference may
+be the last owner, so registration can trigger source-destruction wakeups.
+Callers must release outer locks that waker callbacks could reenter first.
+
 ## 定位
 
 `kpoll` 是 x-kernel 中 I/O readiness 查询与 one-shot waiter 注册的核心原语。

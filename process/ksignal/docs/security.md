@@ -62,8 +62,34 @@ treats payload fields as raw bits and never dereferences pointer-like values
 
 ## Thread safety
 
+Signal-arrival poll notifications and temporary-source drops run after releasing
+all signal locks. Registration also runs outside those locks, including weak
+upgrade and its potentially final strong-reference drop.
+Registered callbacks must be nonblocking and valid in the sender's context.
+Notifications are shared by CLONE_SIGHAND peers, but consumers check their own thread's
+pending set and mask; no signal payload is exposed through the wake operation.
+Registration may fail and callers must propagate the error instead of sleeping
+without a subscription. Dropped guards cancel waits; a concurrent late wake is
+allowed by kpoll and never grants readiness by itself.
+Weak source capture cannot retain handler ownership or prevent source death.
+An expired captured source never rebinds after exec. Inactive manager capture
+returns `NoSuchProcess`, mapped to `InvalidState` by thread registration; normal
+expiry after capture is a successful registration with no waiter installed.
+
 Managers use per-field `SpinNoIrq` cells; `SignalActions` is `Arc`-shared
-and locked per access. `SignalSet` is a plain `Copy` bitmap shared by value.
+and locked per access. Its shared reference is internal to signal managers;
+external callers receive action values, not an independently retainable lock.
+Fork copies the whole action snapshot under its lock and releases the lock
+before allocating the independent child state. An outer process ownership lock
+serializes table selection with fork and exec. The lock order is ownership,
+represented by `ProcessSignalManager.handlers`, then `SignalHandlers.actions`,
+children, blocked; no path takes another process's ownership lock.
+Only shared fork adds a table owner, so a sole-owner count under the ownership
+lock permits in-place reset. Exec allocation and old-table destruction happen
+outside signal locks. Pending publication holds the ownership lock after
+classification locks are released, so release and acceptance are serialized.
+No waker runs under the ownership lock. `SignalSet` is a plain `Copy` bitmap
+shared by value.
 `SignalInfo` `Send`/`Sync` rely on the opaque-bits invariant above. The
 global observer table is lock-serialized. `find_target_thread` mutates the
 children list (prune) during sends from any thread.
@@ -82,6 +108,8 @@ metadata, not user file content. No other user data is processed or logged.
 
 ## Known limitations
 
+- Notification scope does not imply readable data: pending queues remain private
+  to a process/thread, and unselected or repeated signals may request rechecks.
 - `SIGSTKFLT` default action follows Linux (terminate) though it is unused.
 - `SignalOSAction::Stop`/`Continue` are reported, but job-control stop state
   is approximated by the posix runtime (documented there: stop currently

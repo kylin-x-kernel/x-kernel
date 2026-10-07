@@ -108,13 +108,14 @@ pub fn send_to_process_ref(proc: &Arc<Process>, sig: Option<SignalInfo>) -> KRes
 /// # Errors
 ///
 /// Forwards `Process::signal_manager` errors when the destination runtime is
-/// gone. The returned preparation must be committed after exit-state publication.
+/// gone, or `NoSuchProcess` after its signal configuration ownership is released.
+/// The returned preparation must be committed after exit-state publication.
 pub fn prepare_child_exit_to_process_ref(
     proc: &Arc<Process>,
     sig: SigchldChildExitSignalInfo,
 ) -> KResult<PreparedChildExitSignal> {
     let signal_manager = proc.signal_manager()?;
-    let prepared = signal_manager.prepare_child_exit_signal(sig);
+    let prepared = signal_manager.prepare_child_exit_signal(sig)?;
     Ok(PreparedChildExitSignal {
         signal_manager,
         prepared,

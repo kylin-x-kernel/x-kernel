@@ -1,5 +1,15 @@
 # kvfs - 安全与可靠性分析
 
+## Captured Poll Source Boundary
+
+Backends choose the captured wait source; KVFS does not infer identity from
+readiness or retain a file/process owner through `FilePollSource`. Disjoint
+events and expired sources register nothing and allocate nothing. Capture
+errors propagate without publishing a registration. Consumers must retain
+successful registrations, recheck readiness, and keep an expired binding
+distinct from an absent binding. Registration may run waker callbacks when
+its temporary source owner is released, so conflicting outer locks are forbidden.
+
 ## 信任模型
 
 用户提供的路径、open flags、rename flags、mount flags 和 mount data 不可信。POSIX syscall 层

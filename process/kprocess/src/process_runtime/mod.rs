@@ -15,10 +15,10 @@ use kerrno::{KError, KResult};
 use kns::{NamespaceFsContext, NsProxy};
 use kresources::ProcessResources;
 use ksignal::{
-    MAX_SIGNALS, SignalDisposition, Signo,
+    Signo,
     api::{ProcessSignalManager, SignalActions},
 };
-use ksync::{Mutex, RwLock, spin::SpinNoIrq};
+use ksync::{Mutex, RwLock};
 use memspace::process_lifetime::MmUserHandle;
 pub(crate) use runtime_state::ExitAddressSpace;
 pub use runtime_state::replace_current_address_space;
@@ -206,7 +206,7 @@ impl ProcessRuntime {
         cmdline: Arc<Vec<String>>,
         address_space: Arc<Mutex<memspace::MmSpace>>,
         fs_context: Arc<Mutex<FsStruct>>,
-        signal_actions: Arc<SpinNoIrq<SignalActions>>,
+        signal_actions: SignalActions,
         config: ProcessRuntimeConfig,
     ) -> Arc<Self> {
         let nsproxy = NsProxy::new_initial();
@@ -230,7 +230,7 @@ impl ProcessRuntime {
         cmdline: Arc<Vec<String>>,
         address_space: Arc<Mutex<memspace::MmSpace>>,
         fs_context: Arc<Mutex<FsStruct>>,
-        signal_actions: Arc<SpinNoIrq<SignalActions>>,
+        signal_actions: SignalActions,
         config: ProcessRuntimeConfig,
         nsproxy: Arc<NsProxy>,
     ) -> Arc<Self> {
@@ -242,7 +242,7 @@ impl ProcessRuntime {
             cmdline,
             mm_user,
             fs_context,
-            signal_actions,
+            ProcessSignalManager::new(signal_actions, config.signal_trampoline),
             config,
             nsproxy,
         )
@@ -255,7 +255,7 @@ impl ProcessRuntime {
         cmdline: Arc<Vec<String>>,
         mm_user: MmUserHandle,
         fs_context: Arc<Mutex<FsStruct>>,
-        signal_actions: Arc<SpinNoIrq<SignalActions>>,
+        signal_manager: ProcessSignalManager,
         config: ProcessRuntimeConfig,
         nsproxy: Arc<NsProxy>,
     ) -> Arc<Self> {
@@ -276,10 +276,7 @@ impl ProcessRuntime {
             posix_state,
             runtime_state,
             nsproxy: RwLock::new(Some(nsproxy)),
-            signal_manager: Arc::new(ProcessSignalManager::new(
-                signal_actions,
-                config.signal_trampoline,
-            )),
+            signal_manager: Arc::new(signal_manager),
             cpu_timers_armed: AtomicBool::new(false),
         });
         runtime.process.set_runtime_ref(&runtime);
@@ -448,17 +445,12 @@ impl ProcessRuntime {
 
     /// Resets process-wide signal actions after exec.
     ///
-    /// Linux preserves handlers explicitly set to `SIG_IGN` across exec, while
-    /// caught handlers are reset to `SIG_DFL` and their flags/masks/restorer are
-    /// cleared.
-    pub fn reset_signal_actions(&self) {
-        let mut actions = self.signal_manager.actions.lock();
-        for raw in 1..=MAX_SIGNALS as u8 {
-            let signo = Signo::from_repr(raw).expect("valid signal number");
-            if !matches!(actions[signo].disposition, SignalDisposition::Ignore) {
-                actions[signo] = Default::default();
-            }
-        }
+    /// Detaches shared configuration before resetting it. Linux preserves
+    /// `SIG_IGN` dispositions, resets caught handlers to `SIG_DFL`, and clears
+    /// flags/masks/restorers for every action, including ignored ones.
+    /// Returns `NoSuchProcess` after last-thread signal ownership cleanup.
+    pub fn reset_signal_actions(&self) -> KResult<()> {
+        self.signal_manager.reset_actions_for_exec()
     }
 
     /// Clears all process POSIX timers.
@@ -466,6 +458,14 @@ impl ProcessRuntime {
         let mut manager = self.timer_manager().lock();
         manager.clear_posix_timers();
         self.set_cpu_timers_armed(manager.any_cpu_timer_armed());
+    }
+}
+
+impl Drop for ProcessRuntime {
+    fn drop(&mut self) {
+        // Unpublished fork rollback must release ownership even when an
+        // observer retains the signal manager. Normal exit already did this.
+        self.signal_manager.release_handlers();
     }
 }
 
@@ -485,13 +485,16 @@ pub(crate) fn fork_process_runtime(
     let attached_process = AttachedForkProcess::new(process);
 
     let address_space = prepare_fork_address_space(parent, config.address_space)?;
-    let signal_actions = prepare_fork_signal_actions(parent, config.signal_actions);
+    let signal_manager = match config.signal_actions {
+        ForkSignalActions::Shared => parent.signal_manager().fork_shared()?,
+        ForkSignalActions::Private => parent.signal_manager().fork_private()?,
+    };
     let process_runtime = finish_fork_runtime(
         parent,
         attached_process.process().clone(),
         fs_namespaces,
         address_space,
-        signal_actions,
+        signal_manager,
         config,
     )?;
     attached_process.commit();
@@ -551,25 +554,12 @@ fn prepare_fork_address_space(
     Ok(ForkAddressSpaceState { mm_user })
 }
 
-fn prepare_fork_signal_actions(
-    parent: &Arc<ProcessRuntime>,
-    mode: ForkSignalActions,
-) -> Arc<SpinNoIrq<SignalActions>> {
-    if matches!(mode, ForkSignalActions::Shared) {
-        parent.signal_manager().actions.clone()
-    } else {
-        Arc::new(SpinNoIrq::new(
-            parent.signal_manager().actions.lock().clone(),
-        ))
-    }
-}
-
 fn finish_fork_runtime(
     parent: &Arc<ProcessRuntime>,
     process: Arc<Process>,
     fs_namespaces: ForkFsNamespaces,
     address_space: ForkAddressSpaceState,
-    signal_actions: Arc<SpinNoIrq<SignalActions>>,
+    signal_manager: ProcessSignalManager,
     config: ProcessForkConfig,
 ) -> KResult<Arc<ProcessRuntime>> {
     let exec_metadata = parent.exec_metadata();
@@ -579,7 +569,7 @@ fn finish_fork_runtime(
         exec_metadata.cmdline().clone(),
         address_space.mm_user,
         fs_namespaces.fs_context,
-        signal_actions,
+        signal_manager,
         ProcessRuntimeConfig::default(),
         fs_namespaces.nsproxy,
     );

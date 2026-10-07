@@ -25,7 +25,7 @@ use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollRegistrations, PollSet, Pollable};
 use kspin::{SpinNoIrq, SpinNoPreempt};
 use ksync::Mutex;
-use kvfs::{FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
+use kvfs::{FMode, FileOperations, FilePollSource, OpenFlags, VfsFile, VfsInode};
 use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT};
 use posix_types::k_epoll_event;
 
@@ -178,6 +178,9 @@ impl Eq for EntryKey {}
 
 struct EpollInterest {
     key: EntryKey,
+    // Captured at ADD even when ready or not interested in the source's events.
+    // An expired Some remains bound; MOD and rearm must never recapture it.
+    poll_source: Option<FilePollSource>,
     config: SpinNoPreempt<EpollInterestConfig>,
     // Sleepable: held only while swapping the owner, not across file poll hooks.
     // Old `PollRegistrations` must be dropped outside this lock so source
@@ -189,14 +192,32 @@ struct EpollInterest {
 }
 
 impl EpollInterest {
-    fn new(key: EntryKey, event: EpollEvent, flags: EpollFlags) -> Self {
+    fn new(
+        key: EntryKey,
+        event: EpollEvent,
+        flags: EpollFlags,
+        poll_source: Option<FilePollSource>,
+    ) -> Self {
         Self {
             key,
+            poll_source,
             config: SpinNoPreempt::new(EpollInterestConfig::new(event, flags)),
             registrations: Mutex::new(PollRegistrations::new()),
             in_ready_queue: AtomicBool::new(false),
             last_reported_events: AtomicUsize::new(IoEvents::empty().bits() as usize),
             waker_generation: AtomicUsize::new(0),
+        }
+    }
+
+    fn register_poll(
+        &self,
+        file: &VfsFile,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
+        match &self.poll_source {
+            Some(source) => source.register(context, events),
+            None => file.register_poll(context, events),
         }
     }
 
@@ -432,20 +453,7 @@ impl InterestWaker {
         let Some(epoll) = self.epoll.upgrade() else {
             return;
         };
-
-        if interest.try_mark_in_queue() {
-            epoll
-                .ready_queue
-                .lock()
-                .push_back(Arc::downgrade(&interest));
-            // This callback may run in IRQ context. Avoid taking the
-            // task-context-only interest config lock just for tracing.
-            trace!(
-                "Epoll: fd={} added to ready queue; wake up poller",
-                interest.key.fd
-            );
-            epoll.poll_ready.wake();
-        }
+        epoll.queue_interest(&interest);
     }
 }
 
@@ -459,6 +467,21 @@ struct EpollInner {
     // interrupted task is holding it.
     ready_queue: SpinNoIrq<VecDeque<Weak<EpollInterest>>>,
     poll_ready: PollSet,
+}
+
+impl EpollInner {
+    fn queue_interest(&self, interest: &Arc<EpollInterest>) {
+        if interest.try_mark_in_queue() {
+            self.ready_queue.lock().push_back(Arc::downgrade(interest));
+            // Source callbacks can run in IRQ context; do not take the
+            // task-context config lock here, including for tracing.
+            trace!(
+                "Epoll: fd={} added to ready queue; wake up poller",
+                interest.key.fd
+            );
+            self.poll_ready.wake();
+        }
+    }
 }
 
 impl Default for EpollInner {
@@ -556,7 +579,8 @@ impl Epoll {
         let mut registrations = PollRegistrations::new();
         {
             let mut poll_context = registrations.context(&context);
-            file.register_poll(&mut poll_context, registered_events)
+            interest
+                .register_poll(&file, &mut poll_context, registered_events)
                 .map_err(map_register_error)?;
         }
         // Drop the previous owner outside the Mutex to avoid nesting source
@@ -612,7 +636,8 @@ impl Epoll {
             let mut registrations = PollRegistrations::new();
             {
                 let mut poll_context = registrations.context(&context);
-                file.register_poll(&mut poll_context, registered_events)
+                interest
+                    .register_poll(&file, &mut poll_context, registered_events)
                     .map_err(map_register_error)?;
             }
             drop(interest.replace_registrations(registrations));
@@ -638,7 +663,7 @@ impl Epoll {
     /// # Errors
     ///
     /// Returns `KError::AlreadyExists` for the same fd/file key; forwards mapped
-    /// poll-source registration failures and rolls back insertion.
+    /// poll-source capture or registration failures and rolls back insertion.
     pub fn add(
         &self,
         fd: i32,
@@ -648,13 +673,15 @@ impl Epoll {
     ) -> KResult<()> {
         let _ctl_guard = self.inner.ctl_lock.lock();
         let key = EntryKey::new(fd, &file);
-        let interest = Arc::new(EpollInterest::new(key.clone(), event, flags));
-        let mut guard = self.inner.interests.lock();
-        if guard.contains_key(&key) {
+        if self.inner.interests.lock().contains_key(&key) {
             return Err(KError::AlreadyExists);
         }
-        guard.insert(key.clone(), Arc::clone(&interest));
-        drop(guard);
+        let poll_source = file.capture_poll_source().map_err(map_register_error)?;
+        let interest = Arc::new(EpollInterest::new(key.clone(), event, flags, poll_source));
+        self.inner
+            .interests
+            .lock()
+            .insert(key.clone(), Arc::clone(&interest));
         trace!(
             "Epoll add fd: {} interest {:?} ",
             fd,
@@ -683,7 +710,8 @@ impl Epoll {
     /// # Errors
     ///
     /// Returns `KError::NotFound` for an absent fd/file key; forwards mapped
-    /// registration failures after restoring the previous configuration.
+    /// registration failures after restoring the previous configuration and
+    /// queueing enabled interests for a readiness check and rearm retry.
     pub fn modify(
         &self,
         fd: i32,
@@ -711,6 +739,11 @@ impl Epoll {
         };
         if let Err(err) = registration_result {
             interest.restore_config(snapshot);
+            // Registration already advanced the waker generation. Restoring
+            // config alone leaves the old source wakers unable to notify us.
+            if interest.is_enabled() {
+                self.inner.queue_interest(&interest);
+            }
             return Err(err);
         }
         if interest.is_in_queue() {
@@ -940,7 +973,8 @@ mod epoll_tests {
     use anon_inodefs::AnonInodeFs;
     use kerrno::KError;
     use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
-    use kvfs::{FMode, FileOperations, OpenFlags, VfsFile};
+    use ksync::Mutex;
+    use kvfs::{FMode, FileOperations, FilePollSource, OpenFlags, VfsFile};
     use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT};
     use posix_types::k_epoll_event;
     use unittest::def_test;
@@ -969,6 +1003,7 @@ mod epoll_tests {
         kind: TestFileKind,
         poll_count: AtomicUsize,
         fail_register: AtomicBool,
+        is_ready: AtomicBool,
         poll_set: PollSet,
     }
 
@@ -978,6 +1013,7 @@ mod epoll_tests {
                 kind,
                 poll_count: AtomicUsize::new(0),
                 fail_register: AtomicBool::new(false),
+                is_ready: AtomicBool::new(false),
                 poll_set: PollSet::new(),
             }
         }
@@ -995,9 +1031,14 @@ mod epoll_tests {
         fn poll(&self) -> IoEvents {
             match self.kind {
                 TestFileKind::Ready | TestFileKind::Rewake => IoEvents::IN,
-                TestFileKind::EmptyRewake
-                | TestFileKind::PollSetBacked
-                | TestFileKind::InvalidRegister => IoEvents::empty(),
+                TestFileKind::EmptyRewake | TestFileKind::InvalidRegister => IoEvents::empty(),
+                TestFileKind::PollSetBacked => {
+                    if self.is_ready.load(Ordering::Acquire) {
+                        IoEvents::IN
+                    } else {
+                        IoEvents::empty()
+                    }
+                }
                 TestFileKind::Hup => IoEvents::HUP,
                 TestFileKind::CountedOut => {
                     self.poll_count.fetch_add(1, Ordering::AcqRel);
@@ -1012,6 +1053,8 @@ mod epoll_tests {
             _events: IoEvents,
         ) -> Result<(), PollRegisterError> {
             if self.fail_register.load(Ordering::Acquire) {
+                // Exercise rollback even after a source installed a waiter.
+                context.register(&self.poll_set)?;
                 return Err(PollRegisterError::InvalidState);
             }
             match self.kind {
@@ -1068,6 +1111,217 @@ mod epoll_tests {
 
     fn test_file_state(file: &VfsFile) -> Arc<TestFile> {
         TestFileFops::state(file)
+    }
+
+    struct CapturedSourceFile {
+        source: Mutex<PollSet>,
+        is_ready: AtomicBool,
+        fail_capture: AtomicBool,
+        captures: AtomicUsize,
+        fallback_registrations: AtomicUsize,
+    }
+
+    impl CapturedSourceFile {
+        fn replace_source(&self) -> PollSet {
+            core::mem::replace(&mut *self.source.lock(), PollSet::new())
+        }
+
+        fn current_source(&self) -> PollSet {
+            self.source.lock().clone()
+        }
+    }
+
+    struct CapturedSourceFops;
+
+    impl FileOperations for CapturedSourceFops {
+        fn poll(&self, file: &VfsFile) -> IoEvents {
+            let state = file.private_data_get::<CapturedSourceFile>().unwrap();
+            if state.is_ready.load(Ordering::Acquire) {
+                IoEvents::IN
+            } else {
+                IoEvents::empty()
+            }
+        }
+
+        fn capture_poll_source(
+            &self,
+            file: &VfsFile,
+        ) -> Result<Option<FilePollSource>, PollRegisterError> {
+            let state = file.private_data_get::<CapturedSourceFile>().unwrap();
+            state.captures.fetch_add(1, Ordering::Relaxed);
+            if state.fail_capture.load(Ordering::Acquire) {
+                return Err(PollRegisterError::InvalidState);
+            }
+            Ok(Some(FilePollSource::new(
+                state.current_source().downgrade(),
+                IoEvents::IN,
+            )))
+        }
+
+        fn register_poll(
+            &self,
+            file: &VfsFile,
+            context: &mut PollContext<'_>,
+            _events: IoEvents,
+        ) -> Result<(), PollRegisterError> {
+            let state = file.private_data_get::<CapturedSourceFile>().unwrap();
+            state.fallback_registrations.fetch_add(1, Ordering::Relaxed);
+            context.register(&state.current_source())
+        }
+    }
+
+    fn captured_source_file() -> (Arc<VfsFile>, Arc<CapturedSourceFile>) {
+        let state = Arc::new(CapturedSourceFile {
+            source: Mutex::new(PollSet::new()),
+            is_ready: AtomicBool::new(false),
+            fail_capture: AtomicBool::new(false),
+            captures: AtomicUsize::new(0),
+            fallback_registrations: AtomicUsize::new(0),
+        });
+        let file = AnonInodeFs::global()
+            .get_file(
+                "[epoll-captured-source-test]",
+                Arc::new(CapturedSourceFops),
+                state.clone(),
+                FMode::READ | FMode::WRITE | FMode::STREAM,
+                OpenFlags::empty(),
+                kcred::initial_cred(),
+            )
+            .expect("captured-source test file opens");
+        (file, state)
+    }
+
+    #[def_test]
+    fn test_epoll_captured_source_ready_add_and_no_in_mod() {
+        for flags in [
+            EpollFlags::empty(),
+            EpollFlags::EDGE_TRIGGER,
+            EpollFlags::ONESHOT,
+        ] {
+            for is_ready_at_add in [false, true] {
+                let epoll = Epoll::new();
+                let (file, state) = captured_source_file();
+                state.is_ready.store(is_ready_at_add, Ordering::Release);
+                let event = EpollEvent {
+                    events: IoEvents::IN,
+                    user_data: 7,
+                };
+                let add_event = EpollEvent {
+                    events: if is_ready_at_add {
+                        IoEvents::IN
+                    } else {
+                        IoEvents::OUT
+                    },
+                    ..event
+                };
+                epoll.add(3, file.clone(), add_event, flags).unwrap();
+                assert_eq!(state.captures.load(Ordering::Relaxed), 1);
+                let original = state.replace_source();
+                assert_eq!(original.wake(), 0);
+                let mut out = [k_epoll_event::default(); 1];
+                if is_ready_at_add {
+                    assert_eq!(epoll.poll_events(&mut out), Ok(1));
+                    assert_epoll_event(&out[0], IoEvents::IN.bits(), 7);
+                }
+                state.is_ready.store(false, Ordering::Release);
+                // This also rearms a fired ONESHOT without capturing again.
+                epoll.modify(3, file.clone(), event, flags).unwrap();
+                assert_eq!(epoll.poll_events(&mut out), Err(KError::WouldBlock));
+                assert_eq!(state.current_source().wake(), 0);
+                assert_eq!(original.wake(), 1);
+                state.is_ready.store(true, Ordering::Release);
+                assert_eq!(epoll.poll_events(&mut out), Ok(1));
+                assert_epoll_event(&out[0], IoEvents::IN.bits(), 7);
+
+                state.is_ready.store(false, Ordering::Release);
+                assert_eq!(epoll.poll_events(&mut out), Err(KError::WouldBlock));
+                if flags.contains(EpollFlags::ONESHOT) {
+                    assert_eq!(original.wake(), 0);
+                    epoll.modify(3, file.clone(), event, flags).unwrap();
+                }
+                // LT/ET rearm after consumption must retain the ADD source too.
+                assert_eq!(state.current_source().wake(), 0);
+                assert_eq!(original.wake(), 1);
+                assert_eq!(state.captures.load(Ordering::Relaxed), 1);
+                assert_eq!(state.fallback_registrations.load(Ordering::Relaxed), 0);
+                epoll.delete(3, file).unwrap();
+                assert_eq!(original.wake(), 0);
+            }
+        }
+    }
+
+    #[def_test]
+    fn test_epoll_dead_captured_source_never_rebinds() {
+        for flags in [
+            EpollFlags::empty(),
+            EpollFlags::EDGE_TRIGGER,
+            EpollFlags::ONESHOT,
+        ] {
+            let epoll = Epoll::new();
+            let (file, state) = captured_source_file();
+            let event = EpollEvent {
+                events: IoEvents::IN,
+                user_data: 7,
+            };
+            epoll.add(3, file.clone(), event, flags).unwrap();
+            let original = state.replace_source();
+            assert!(epoll.poll().is_empty());
+            // No retained strong source owner: its final drop wakes the interest.
+            drop(original);
+            assert!(epoll.poll().contains(IoEvents::IN));
+            let mut out = [k_epoll_event::default(); 1];
+            assert_eq!(epoll.poll_events(&mut out), Err(KError::WouldBlock));
+            assert!(epoll.poll().is_empty());
+            epoll.modify(3, file.clone(), event, flags).unwrap();
+            assert_eq!(state.current_source().wake(), 0);
+            assert_eq!(state.captures.load(Ordering::Relaxed), 1);
+            assert_eq!(state.fallback_registrations.load(Ordering::Relaxed), 0);
+            assert_eq!(epoll.poll_events(&mut out), Err(KError::WouldBlock));
+
+            // A dead subscription neither fabricates HUP nor disables current readiness.
+            state.is_ready.store(true, Ordering::Release);
+            epoll.modify(3, file.clone(), event, flags).unwrap();
+            assert_eq!(epoll.poll_events(&mut out), Ok(1));
+            assert_epoll_event(&out[0], IoEvents::IN.bits(), 7);
+            epoll.delete(3, file.clone()).unwrap();
+            state.is_ready.store(false, Ordering::Release);
+            epoll.add(3, file.clone(), event, flags).unwrap();
+            assert_eq!(state.captures.load(Ordering::Relaxed), 2);
+            assert_eq!(state.current_source().wake(), 1);
+            epoll.delete(3, file).unwrap();
+        }
+    }
+
+    #[def_test]
+    fn test_epoll_capture_failure_and_duplicate_priority() {
+        let epoll = Epoll::new();
+        let (file, state) = captured_source_file();
+        let event = EpollEvent {
+            events: IoEvents::IN,
+            user_data: 7,
+        };
+        state.fail_capture.store(true, Ordering::Release);
+        assert_eq!(
+            epoll.add(3, file.clone(), event, EpollFlags::empty()),
+            Err(KError::InvalidInput)
+        );
+        assert!(epoll.inner.interests.lock().is_empty());
+        assert_eq!(state.current_source().wake(), 0);
+        state.fail_capture.store(false, Ordering::Release);
+        epoll
+            .add(3, file.clone(), event, EpollFlags::empty())
+            .unwrap();
+        state.fail_capture.store(true, Ordering::Release);
+        assert_eq!(
+            epoll.add(3, file.clone(), event, EpollFlags::empty()),
+            Err(KError::AlreadyExists)
+        );
+        epoll
+            .modify(3, file.clone(), event, EpollFlags::empty())
+            .unwrap();
+        assert_eq!(state.captures.load(Ordering::Relaxed), 2);
+        epoll.delete(3, file).unwrap();
+        assert_eq!(state.current_source().wake(), 0);
     }
 
     #[def_test]
@@ -1191,6 +1445,7 @@ mod epoll_tests {
                 user_data: 7,
             },
             EpollFlags::empty(),
+            None,
         ));
         interest.in_ready_queue.store(true, Ordering::Release);
 
@@ -1242,6 +1497,7 @@ mod epoll_tests {
                 user_data: 7,
             },
             EpollFlags::EDGE_TRIGGER,
+            None,
         ));
         interest.in_ready_queue.store(true, Ordering::Release);
 
@@ -1269,6 +1525,7 @@ mod epoll_tests {
                 user_data: 7,
             },
             EpollFlags::EDGE_TRIGGER,
+            None,
         ));
         interest.in_ready_queue.store(true, Ordering::Release);
 
@@ -1297,6 +1554,7 @@ mod epoll_tests {
                 user_data: 7,
             },
             EpollFlags::EDGE_TRIGGER,
+            None,
         ));
         interest.in_ready_queue.store(true, Ordering::Release);
 
@@ -1323,6 +1581,7 @@ mod epoll_tests {
                 user_data: 7,
             },
             EpollFlags::EDGE_TRIGGER,
+            None,
         ));
         interest.in_ready_queue.store(true, Ordering::Release);
         epoll
@@ -1359,6 +1618,7 @@ mod epoll_tests {
                 user_data: 7,
             },
             EpollFlags::EDGE_TRIGGER,
+            None,
         ));
         interest.in_ready_queue.store(true, Ordering::Release);
 
@@ -1386,6 +1646,7 @@ mod epoll_tests {
                 user_data: 7,
             },
             EpollFlags::EDGE_TRIGGER,
+            None,
         ));
 
         for _ in 0..70 {
@@ -1524,6 +1785,164 @@ mod epoll_tests {
         assert_eq!(event.events.bits(), IoEvents::OUT.bits());
         assert_eq!(event.user_data, 7);
         assert!(matches!(interest.config.lock().mode, TriggerMode::Edge));
+    }
+
+    #[def_test]
+    fn test_epoll_failed_modify_keeps_future_notifications() {
+        for flags in [EpollFlags::empty(), EpollFlags::EDGE_TRIGGER] {
+            let epoll = Epoll::new();
+            let file = test_file(TestFileKind::PollSetBacked);
+            let state = test_file_state(&file);
+            epoll
+                .add(
+                    3,
+                    file.clone(),
+                    EpollEvent {
+                        events: IoEvents::IN,
+                        user_data: 7,
+                    },
+                    flags,
+                )
+                .unwrap();
+            state.set_fail_register(true);
+            assert_eq!(
+                epoll.modify(
+                    3,
+                    file.clone(),
+                    EpollEvent {
+                        events: IoEvents::OUT,
+                        user_data: 9,
+                    },
+                    EpollFlags::ONESHOT
+                ),
+                Err(KError::InvalidInput)
+            );
+            state.set_fail_register(false);
+            state.is_ready.store(true, Ordering::Release);
+            state.poll_set.wake();
+            assert!(
+                epoll.poll().contains(IoEvents::IN),
+                "failed MOD must not strand the original interest"
+            );
+            let mut events = [k_epoll_event::default()];
+            assert_eq!(epoll.poll_events(&mut events).unwrap(), 1);
+            assert_epoll_event(&events[0], IoEvents::IN.bits(), 7);
+        }
+    }
+
+    #[def_test]
+    fn test_epoll_failed_modify_retries_registration_and_cleans_up() {
+        for flags in [
+            EpollFlags::empty(),
+            EpollFlags::EDGE_TRIGGER,
+            EpollFlags::ONESHOT,
+        ] {
+            let epoll = Epoll::new();
+            let file = test_file(TestFileKind::PollSetBacked);
+            let state = test_file_state(&file);
+            let event = EpollEvent {
+                events: IoEvents::IN,
+                user_data: 7,
+            };
+            epoll.add(3, file.clone(), event, flags).unwrap();
+            let notifications = PollSet::new();
+            let waker = core::task::Waker::from(Arc::new(notifications.clone()));
+            let registration = epoll.inner.poll_ready.register(&waker).unwrap();
+            state.set_fail_register(true);
+            assert_eq!(
+                epoll.modify(3, file.clone(), event, flags),
+                Err(KError::InvalidInput)
+            );
+            // MOD recovery must wake existing epoll waiters, not merely enqueue.
+            assert!(!registration.cancel());
+            let mut events = [k_epoll_event::default()];
+            for _ in 0..2 {
+                assert!(epoll.poll().contains(IoEvents::IN));
+                assert_eq!(epoll.poll_events(&mut events), Err(KError::InvalidInput));
+            }
+            state.set_fail_register(false);
+            assert_eq!(epoll.poll_events(&mut events), Err(KError::WouldBlock));
+            assert!(epoll.poll().is_empty());
+            state.is_ready.store(true, Ordering::Release);
+            state.poll_set.wake();
+            assert!(epoll.poll().contains(IoEvents::IN));
+            assert_eq!(epoll.poll_events(&mut events).unwrap(), 1);
+            assert_epoll_event(&events[0], IoEvents::IN.bits(), 7);
+            epoll.delete(3, file).unwrap();
+            assert_eq!(
+                state.poll_set.wake(),
+                0,
+                "all registrations must be cancelled"
+            );
+            assert_eq!(epoll.poll_events(&mut events), Err(KError::WouldBlock));
+        }
+    }
+
+    #[def_test]
+    fn test_epoll_failed_modify_does_not_enable_fired_oneshot() {
+        let epoll = Epoll::new();
+        let file = test_file(TestFileKind::PollSetBacked);
+        let state = test_file_state(&file);
+        let event = EpollEvent {
+            events: IoEvents::IN,
+            user_data: 7,
+        };
+        state.is_ready.store(true, Ordering::Release);
+        epoll
+            .add(3, file.clone(), event, EpollFlags::ONESHOT)
+            .unwrap();
+        let mut events = [k_epoll_event::default()];
+        assert_eq!(epoll.poll_events(&mut events).unwrap(), 1);
+        state.is_ready.store(false, Ordering::Release);
+        state.set_fail_register(true);
+        assert_eq!(
+            epoll.modify(3, file.clone(), event, EpollFlags::ONESHOT),
+            Err(KError::InvalidInput)
+        );
+        state.set_fail_register(false);
+        state.is_ready.store(true, Ordering::Release);
+        assert_eq!(state.poll_set.wake(), 0);
+        assert!(epoll.poll().is_empty());
+        assert_eq!(epoll.poll_events(&mut events), Err(KError::WouldBlock));
+        epoll
+            .modify(3, file.clone(), event, EpollFlags::ONESHOT)
+            .unwrap();
+        assert_eq!(epoll.poll_events(&mut events).unwrap(), 1);
+    }
+
+    #[def_test]
+    fn test_epoll_failed_modify_preserves_queued_readiness() {
+        for flags in [EpollFlags::empty(), EpollFlags::EDGE_TRIGGER] {
+            let epoll = Epoll::new();
+            let file = test_file(TestFileKind::PollSetBacked);
+            let state = test_file_state(&file);
+            let event = EpollEvent {
+                events: IoEvents::IN,
+                user_data: 7,
+            };
+            epoll.add(3, file.clone(), event, flags).unwrap();
+            state.is_ready.store(true, Ordering::Release);
+            state.poll_set.wake();
+            state.set_fail_register(true);
+            assert_eq!(
+                epoll.modify(
+                    3,
+                    file.clone(),
+                    EpollEvent {
+                        events: IoEvents::OUT,
+                        user_data: 9,
+                    },
+                    EpollFlags::ONESHOT
+                ),
+                Err(KError::InvalidInput)
+            );
+            state.set_fail_register(false);
+            let mut events = [k_epoll_event::default(); 2];
+            assert_eq!(epoll.poll_events(&mut events).unwrap(), 1);
+            assert_epoll_event(&events[0], IoEvents::IN.bits(), 7);
+            state.is_ready.store(false, Ordering::Release);
+            assert_eq!(epoll.poll_events(&mut events), Err(KError::WouldBlock));
+        }
     }
 
     #[def_test]

@@ -87,7 +87,7 @@ pub fn sys_rt_sigaction(
     let old_action = current_thread
         .process()
         .signal_manager()?
-        .replace_signal_action(signo, new_action);
+        .replace_signal_action(signo, new_action)?;
 
     if let Some(oldact) = oldact.check_non_null() {
         oldact.write_vm(old_action.into())?;
@@ -469,7 +469,8 @@ pub fn sys_signalfd4(
     if fd != -1 {
         let file = kprocess::current_resources().get_file(fd)?;
         let signalfd = Signalfd::from_file(&file)?;
-        signalfd.update_mask(mask);
+        let thread = kprocess::current_user_thread();
+        signalfd.update_mask(mask, thread.signal_manager())?;
         return Ok(fd as _);
     }
 

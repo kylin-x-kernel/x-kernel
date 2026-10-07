@@ -71,7 +71,7 @@ fn run_in_user_task(test: &TestDescriptor, init_thread: InitTestThreadHook) -> T
         Arc::new(vec![]),
         Arc::new(Mutex::new(aspace)),
         fs_context::copy_init_fs_struct(),
-        Arc::new(SpinNoIrq::new(SignalActions::default())),
+        SignalActions::default(),
         initial_cred(),
     );
     init_thread(&thread);

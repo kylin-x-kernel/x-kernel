@@ -14,7 +14,110 @@ use core::{
 
 use unittest::{assert, assert_eq, def_test};
 
-use super::{Completion, PollEvent, PollRegistrations, PollSet};
+use super::{Completion, PollEvent, PollRegistrations, PollSet, WeakPollSet};
+
+#[def_test]
+fn test_weak_source_cancel_wake_and_expiry() {
+    let source = PollSet::new();
+    let weak = source.downgrade();
+    let counter = new_counter();
+    let waker = make_waker(counter);
+    let context = Context::from_waker(&waker);
+    let mut registrations = PollRegistrations::new();
+    registrations
+        .context(&context)
+        .register_weak(&weak)
+        .unwrap();
+    assert_eq!(registrations.len(), 1);
+    registrations.clear();
+    assert_eq!(source.wake(), 0);
+    registrations
+        .context(&context)
+        .register_weak(&weak)
+        .unwrap();
+    assert_eq!(source.wake(), 1);
+    registrations.clear();
+    registrations
+        .context(&context)
+        .register_weak(&weak)
+        .unwrap();
+    drop(source);
+    assert_eq!(counter.load(Ordering::SeqCst), 2);
+    registrations
+        .context(&context)
+        .register_weak(&weak)
+        .unwrap();
+    assert!(registrations.is_empty());
+    assert_eq!(counter.load(Ordering::SeqCst), 2);
+}
+
+struct LastStrongRelease {
+    owner: kspin::SpinNoIrq<Option<PollSet>>,
+    source: WeakPollSet,
+    clones: AtomicUsize,
+    wakes: AtomicUsize,
+}
+
+unsafe fn last_strong_clone(data: *const ()) -> RawWaker {
+    // SAFETY: the test keeps the boxed state alive until all wakers are dropped.
+    let state = unsafe { &*data.cast::<LastStrongRelease>() };
+    state.clones.fetch_add(1, Ordering::SeqCst);
+    let owner = state.owner.lock().take();
+    drop(owner);
+    RawWaker::new(data, &LAST_STRONG_VTABLE)
+}
+
+unsafe fn last_strong_wake(data: *const ()) {
+    // SAFETY: the test keeps the boxed state alive until all wakers are dropped.
+    let state = unsafe { &*data.cast::<LastStrongRelease>() };
+    core::assert!(state.owner.lock().is_none());
+    let context = Context::from_waker(Waker::noop());
+    let mut registrations = PollRegistrations::new();
+    registrations
+        .context(&context)
+        .register_weak(&state.source)
+        .unwrap();
+    core::assert!(registrations.is_empty());
+    state.wakes.fetch_add(1, Ordering::SeqCst);
+}
+
+static LAST_STRONG_VTABLE: RawWakerVTable = RawWakerVTable::new(
+    last_strong_clone,
+    last_strong_wake,
+    last_strong_wake,
+    waker_drop,
+);
+
+#[def_test]
+fn test_weak_registration_last_temporary_owner_release_reenters() {
+    let source = PollSet::new();
+    let state = Box::new(LastStrongRelease {
+        source: source.downgrade(),
+        owner: kspin::SpinNoIrq::new(Some(source)),
+        clones: AtomicUsize::new(0),
+        wakes: AtomicUsize::new(0),
+    });
+    let raw = RawWaker::new(&*state as *const _ as *const (), &LAST_STRONG_VTABLE);
+    // SAFETY: state is stable in its Box and outlives the waker, its clones and
+    // registrations. Callbacks only borrow it; the no-op drop owns no reference.
+    let waker = unsafe { Waker::from_raw(raw) };
+    let context = Context::from_waker(&waker);
+    let mut registrations = PollRegistrations::new();
+    // Waker cloning removes the external owner after register_weak upgrades.
+    registrations
+        .context(&context)
+        .register_weak(&state.source)
+        .unwrap();
+    assert_eq!(state.clones.load(Ordering::SeqCst), 1);
+    assert_eq!(state.wakes.load(Ordering::SeqCst), 1);
+    assert_eq!(registrations.len(), 1);
+    registrations
+        .context(&context)
+        .register_weak(&state.source)
+        .unwrap();
+    assert!(registrations.is_empty());
+    assert_eq!(state.clones.load(Ordering::SeqCst), 1);
+}
 
 fn new_counter() -> &'static AtomicUsize {
     Box::leak(Box::new(AtomicUsize::new(0)))

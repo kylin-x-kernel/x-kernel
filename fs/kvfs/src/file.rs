@@ -16,7 +16,7 @@ use core::{
 use iov_iter::{IovIterDest, IovIterSource, iov_iter_kvec_dest, iov_iter_kvec_source};
 use kcred::Cred;
 use kerrno::LinuxError;
-use kpoll::{IoEvents, PollContext, PollRegisterError};
+use kpoll::{IoEvents, PollContext, PollRegisterError, WeakPollSet};
 use linux_raw_sys::general::O_ACCMODE;
 use log::warn;
 use pagecache::{Folio, PageIndex};
@@ -25,6 +25,42 @@ use crate::{
     AddressSpace, DirContext, Kiocb, MagicLinkOps, MmapMapper, Mutex, MutexGuard, NodeFlags,
     NodeType, OpenFlags, Path, TypeMap, VfsError, VfsInode, VfsResult,
 };
+
+/// A captured, event-filtered wait source independent of current file readiness.
+///
+/// Retains neither the source owner nor the file. An expired source stays bound
+/// to its original identity and does not synthesize readiness or hangup events.
+#[derive(Clone)]
+pub struct FilePollSource {
+    source: WeakPollSet,
+    events: IoEvents,
+}
+
+impl FilePollSource {
+    /// Creates a single-source binding without allocating or registering.
+    pub fn new(source: WeakPollSet, events: IoEvents) -> Self {
+        Self { source, events }
+    }
+
+    /// Registers only when the requested events intersect this source's events.
+    ///
+    /// Readiness must still be checked through the file. Call without locks that
+    /// waker callbacks could reenter, including when the source is being retired.
+    ///
+    /// # Errors
+    /// Propagates registration errors for a live, matching source. An expired
+    /// source or disjoint event mask succeeds without registering or allocating.
+    pub fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
+        if events.intersects(self.events) {
+            context.register_weak(&self.source)?;
+        }
+        Ok(())
+    }
+}
 
 bitflags::bitflags! {
     /// Open-file mode flags stored in `VfsFile::f_mode`.
@@ -252,6 +288,8 @@ pub trait FileOperations: Send + Sync + 'static {
     }
 
     /// Registers a poll waiter for an open file description.
+    ///
+    /// Used when no captured source was provided.
     fn register_poll(
         &self,
         _file: &VfsFile,
@@ -259,6 +297,21 @@ pub trait FileOperations: Send + Sync + 'static {
         _events: IoEvents,
     ) -> Result<(), PollRegisterError> {
         Ok(())
+    }
+
+    /// Captures an optional wait-source identity without registering a waiter.
+    ///
+    /// `None` preserves the ordinary `register_poll` path. A captured source
+    /// remains authoritative even after expiry; consumers must not fall back
+    /// to recapturing a source in another caller's context.
+    ///
+    /// # Errors
+    /// Returns a registration error when the backend cannot capture its source.
+    fn capture_poll_source(
+        &self,
+        _file: &VfsFile,
+    ) -> Result<Option<FilePollSource>, PollRegisterError> {
+        Ok(None)
     }
 }
 
@@ -1052,6 +1105,14 @@ impl VfsFile {
     ) -> Result<(), PollRegisterError> {
         self.operations().register_poll(self, context, events)
     }
+
+    /// Captures the backend's optional wait source, independently of readiness.
+    ///
+    /// # Errors
+    /// Propagates the backend's capture error without installing registrations.
+    pub fn capture_poll_source(&self) -> Result<Option<FilePollSource>, PollRegisterError> {
+        self.operations().capture_poll_source(self)
+    }
 }
 
 impl Drop for VfsFile {
@@ -1097,6 +1158,48 @@ mod tests {
         )
         .finish()
         .unwrap()
+    }
+
+    struct PollCaptureOperations(kpoll::PollSet);
+
+    impl FileOperations for PollCaptureOperations {
+        fn capture_poll_source(
+            &self,
+            _file: &VfsFile,
+        ) -> Result<Option<FilePollSource>, PollRegisterError> {
+            Ok(Some(FilePollSource::new(self.0.downgrade(), IoEvents::IN)))
+        }
+    }
+
+    #[def_test]
+    fn captured_poll_source_filters_cancels_and_expires() {
+        let default = sync_test_file(Arc::new(EmptyFileOperations), FMode::READ);
+        assert!(default.capture_poll_source().unwrap().is_none());
+        let ops = Arc::new(PollCaptureOperations(kpoll::PollSet::new()));
+        let file = sync_test_file(ops.clone(), FMode::READ);
+        let captured = file.capture_poll_source().unwrap().unwrap();
+        let context = core::task::Context::from_waker(core::task::Waker::noop());
+        let mut registrations = kpoll::PollRegistrations::new();
+        captured
+            .register(&mut registrations.context(&context), IoEvents::OUT)
+            .unwrap();
+        assert!(registrations.is_empty());
+        captured
+            .register(&mut registrations.context(&context), IoEvents::IN)
+            .unwrap();
+        assert_eq!(registrations.len(), 1);
+        registrations.clear();
+        assert_eq!(ops.0.wake(), 0);
+        captured
+            .register(&mut registrations.context(&context), IoEvents::IN)
+            .unwrap();
+        assert_eq!(ops.0.wake(), 1);
+        drop(file);
+        drop(ops);
+        captured
+            .register(&mut registrations.context(&context), IoEvents::IN)
+            .unwrap();
+        assert!(registrations.is_empty());
     }
 
     struct SyncOperations {

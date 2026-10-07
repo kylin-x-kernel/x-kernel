@@ -1,5 +1,14 @@
 # kpoll — 安全与可靠性分析
 
+## Weak Source Lifetime
+
+Weak capture cannot prolong source ownership or revive a destroyed source.
+Registration guards remain weak even after a successful temporary upgrade.
+The existing token checks govern cancellation and late wakes; source expiry is
+not a registration error or a readiness event. Temporary-owner release occurs
+after source locking ends, but callers must also exclude outer callback locks.
+No new unsafe production code or allocator-failure policy is introduced.
+
 ## 信任模型
 
 ```

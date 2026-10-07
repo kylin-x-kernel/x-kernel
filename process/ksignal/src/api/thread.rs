@@ -198,7 +198,9 @@ impl ThreadSignalManager {
                 }
 
                 if action.flags.contains(SignalActionFlags::RESETHAND) {
-                    self.proc.actions.lock()[signo] = SignalAction::default();
+                    self.proc
+                        .set_signal_action(signo, SignalAction::default())
+                        .ok()?;
                 }
                 *self.blocked.lock() |= add_blocked;
                 Some(SignalOSAction::Handler)
@@ -222,7 +224,7 @@ impl ThreadSignalManager {
             let restore_blocked = restore_blocked
                 .or_else(|| self.take_saved_sigmask())
                 .unwrap_or(current_blocked);
-            let action = self.proc.actions.lock()[sig.signo()].clone();
+            let action = self.proc.signal_action(sig.signo()).ok()?;
 
             if let Some(os_action) = self.handle_signal(uctx, restore_blocked, &sig, &action) {
                 break Some((sig, os_action));
@@ -279,6 +281,7 @@ impl ThreadSignalManager {
     /// Sends a signal to the thread.
     ///
     /// Returns `true` if the caller should interrupt the task.
+    /// Drops the signal and returns `false` after process configuration release.
     ///
     /// A `true` result means this generation decision found the signal neither
     /// blocked nor ignored. The caller performs the actual task interrupt.
@@ -290,8 +293,12 @@ impl ThreadSignalManager {
     #[must_use]
     pub fn send_signal(&self, sig: SignalInfo) -> bool {
         let signo = sig.signo();
+        let owner = self.proc.handlers.lock();
+        let Some(handlers) = owner.as_ref() else {
+            return false;
+        };
         let (ignored, is_blocked) = {
-            let actions = self.proc.actions.lock();
+            let actions = handlers.actions.lock();
             let is_blocked = self.signal_blocked(signo);
             (
                 super::process::signal_ignored_by(&actions, signo),
@@ -306,7 +313,45 @@ impl ThreadSignalManager {
         if self.pending.lock().put_signal(sig) {
             self.possibly_has_signal.store(true, Ordering::Release);
         }
+        let source = handlers.pending_changed.clone();
+        drop(owner);
+        source.wake();
         !is_blocked
+    }
+
+    /// Captures this thread's current shared arrival source without retaining it.
+    /// See [`ProcessSignalManager::pending_source`] for lifetime and error semantics.
+    pub fn pending_source(&self) -> KResult<kpoll::WeakPollSet> {
+        self.proc.pending_source()
+    }
+
+    /// Notifies the current shared arrival source without changing pending signals.
+    /// See [`ProcessSignalManager::notify_pending`] for context and error semantics.
+    pub fn notify_pending(&self) -> KResult<()> {
+        self.proc.notify_pending()
+    }
+
+    /// Registers for signal-arrival notifications, including blocked signals.
+    ///
+    /// Registration may allocate and must run in task context. The caller must
+    /// recheck its pending mask after registering to close the check/wait race.
+    /// Wakers run synchronously on signal send, outside all signal locks,
+    /// and must not block. Notifications are shared with CLONE_SIGHAND peers; each
+    /// reader must recheck its own thread's pending signals and selection mask.
+    ///
+    /// # Errors
+    ///
+    /// Propagates poll registration allocation or identity exhaustion errors.
+    /// Returns `InvalidState` if configuration ownership was already released.
+    /// A source that expires after capture succeeds without rebinding.
+    pub fn register_pending(
+        &self,
+        context: &mut kpoll::PollContext<'_>,
+    ) -> Result<(), kpoll::PollRegisterError> {
+        let source = self
+            .pending_source()
+            .map_err(|_| kpoll::PollRegisterError::InvalidState)?;
+        context.register_weak(&source)
     }
 
     /// Returns the current blocked signal set.

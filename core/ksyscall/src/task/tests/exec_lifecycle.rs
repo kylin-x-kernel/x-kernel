@@ -295,6 +295,7 @@ impl ExecProbe {
                 .signal_manager()
                 .unwrap()
                 .signal_action(Signo::SIGUSR1)
+                .unwrap()
                 .disposition,
             SignalDisposition::Default
         ));
@@ -541,24 +542,32 @@ fn run_child(
         process
             .set_heap_top(kaddr_layout::USER_HEAP_BASE + 4096)
             .unwrap();
-        process.signal_manager().unwrap().set_signal_action(
-            Signo::SIGUSR1,
-            SignalAction {
-                disposition: SignalDisposition::Handler(unused_handler),
-                ..SignalAction::default()
-            },
-        );
+        process
+            .signal_manager()
+            .unwrap()
+            .set_signal_action(
+                Signo::SIGUSR1,
+                SignalAction {
+                    disposition: SignalDisposition::Handler(unused_handler),
+                    ..SignalAction::default()
+                },
+            )
+            .unwrap();
     }
     if let Some(retirement) = &probe.retirement {
         let signals = process.signal_manager().unwrap();
-        signals.set_signal_action(
-            Signo::SIGUSR1,
-            SignalAction {
-                disposition: SignalDisposition::Handler(unused_handler),
-                ..SignalAction::default()
-            },
-        );
-        signals.set_signal_action(Signo::SIGTERM, SignalAction::default());
+        signals
+            .set_signal_action(
+                Signo::SIGUSR1,
+                SignalAction {
+                    disposition: SignalDisposition::Handler(unused_handler),
+                    ..SignalAction::default()
+                },
+            )
+            .unwrap();
+        signals
+            .set_signal_action(Signo::SIGTERM, SignalAction::default())
+            .unwrap();
         signal.set_blocked(SignalSet::default());
         assert!(signal.pending().is_empty());
         retirement.is_ready.store(true, Ordering::Release);
@@ -653,6 +662,10 @@ fn run_child(
             assert_eq!(result, Ok(0));
             assert_eq!(probe.after_exchange, 1);
             assert!(thread.is_exiting());
+            assert_eq!(
+                signal.process().signal_action(Signo::SIGUSR1).err(),
+                Some(KError::NoSuchProcess)
+            );
             if let Some(target) = probe.switch.target_cpu {
                 assert_eq!(khal::percpu::this_cpu_id().as_usize(), target);
                 assert_eq!(probe.empty_migration_hits, usize::from(case == Case::Fatal));
@@ -679,14 +692,18 @@ fn run_child(
     // Pending handlers and fatal signals must not run on the exit continuation.
     extern "C" fn unused_handler(_: i32) {}
     let process_signals = process.signal_manager().unwrap();
-    process_signals.set_signal_action(
-        Signo::SIGUSR1,
-        SignalAction {
-            disposition: SignalDisposition::Handler(unused_handler),
-            ..SignalAction::default()
-        },
-    );
-    process_signals.set_signal_action(Signo::SIGTERM, SignalAction::default());
+    process_signals
+        .set_signal_action(
+            Signo::SIGUSR1,
+            SignalAction {
+                disposition: SignalDisposition::Handler(unused_handler),
+                ..SignalAction::default()
+            },
+        )
+        .unwrap();
+    process_signals
+        .set_signal_action(Signo::SIGTERM, SignalAction::default())
+        .unwrap();
     signal.set_blocked(SignalSet::default());
     assert!(signal.send_signal(SignalInfo::new_kernel(Signo::SIGUSR1)));
     assert!(signal.send_signal(SignalInfo::new_kernel(Signo::SIGTERM)));
@@ -694,6 +711,10 @@ fn run_child(
     let context = format!("{uctx:?}");
     posix_process::do_exit(0, false);
     assert!(thread.is_exiting());
+    assert_eq!(
+        process_signals.signal_action(Signo::SIGUSR1).err(),
+        Some(KError::NoSuchProcess)
+    );
     assert!(posix_process::check_signals(&thread, &mut uctx, None).is_none());
     let after = signal.pending();
     assert!((pending & !after).is_empty() && (after & !pending).is_empty());

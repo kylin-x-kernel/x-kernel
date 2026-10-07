@@ -42,7 +42,8 @@ pub use address_space::{
 };
 pub use fiemap::{FiemapExtentFlags, FiemapExtentInfo, FiemapExtentWriter, FiemapFlags};
 pub use file::{
-    FMode, FileDirOperations, FileMappingOperations, FileOperations, VfsFile, VfsFileBuilder,
+    FMode, FileDirOperations, FileMappingOperations, FileOperations, FilePollSource, VfsFile,
+    VfsFileBuilder,
 };
 pub use file_system_type::{
     FileSystemType, FileSystemTypeFlags, FsContextOperations, GetTreeFn, InitFsContextFn,

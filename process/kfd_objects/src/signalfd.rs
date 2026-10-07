@@ -16,7 +16,7 @@ use anon_inodefs::AnonInodeFs;
 use bitflags::bitflags;
 use kcred::Cred;
 use kerrno::{KError, KResult, LinuxError};
-use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use kprocess::AsThread;
 use ksignal::{SignalInfo, SignalSet, api::ThreadSignalManager};
 use ksync::RwLock;
@@ -24,7 +24,7 @@ use ktask::{
     current,
     future::{block_on, poll_io},
 };
-use kvfs::{FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
+use kvfs::{FMode, FileOperations, FilePollSource, OpenFlags, VfsFile, VfsInode};
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
 use zerocopy::{Immutable, IntoBytes};
 
@@ -117,7 +117,6 @@ impl SignalfdSiginfo {
 /// Signal file private data.
 pub struct Signalfd {
     mask: RwLock<SignalSet>,
-    poll_rx: PollSet,
 }
 
 impl Signalfd {
@@ -125,7 +124,6 @@ impl Signalfd {
     pub fn new(mask: SignalSet) -> Arc<Self> {
         Arc::new(Self {
             mask: RwLock::new(mask),
-            poll_rx: PollSet::new(),
         })
     }
 
@@ -157,12 +155,14 @@ impl Signalfd {
             .ok_or(KError::BadFileDescriptor)
     }
 
-    /// Replaces the signal selection mask and wakes readers to recheck readiness.
+    /// Replaces the file mask and notifies the updating thread's shared signal source.
     ///
     /// The syscall adapter is responsible for removing uncatchable signals.
-    pub fn update_mask(&self, mask: SignalSet) {
+    /// File aliases share the mask, but unrelated signal sources are not notified.
+    /// Returns `NoSuchProcess` if the updater has released its signal configuration.
+    pub fn update_mask(&self, mask: SignalSet, signal: &ThreadSignalManager) -> KResult<()> {
         *self.mask.write() = mask;
-        self.poll_rx.wake();
+        signal.notify_pending()
     }
 
     fn mask(&self) -> SignalSet {
@@ -181,9 +181,6 @@ impl SignalfdAccess {
             let sig_info = self.dequeue_signal().ok_or(KError::WouldBlock)?;
             let sfd_info = SignalfdSiginfo::from_signal_info(&sig_info);
             buf[..SIGNALFD_SIGINFO_SIZE].copy_from_slice(sfd_info.as_bytes());
-            if self.has_pending_signals() {
-                self.signalfd.poll_rx.wake();
-            }
             Ok(SIGNALFD_SIGINFO_SIZE)
         };
 
@@ -231,7 +228,7 @@ impl Pollable for SignalfdAccess {
         events: IoEvents,
     ) -> Result<(), PollRegisterError> {
         if events.contains(IoEvents::IN) {
-            context.register(&self.signalfd.poll_rx)?;
+            self.signal.register_pending(context)?;
         }
         Ok(())
     }
@@ -285,15 +282,31 @@ impl FileOperations for SignalfdFops {
         context: &mut PollContext<'_>,
         events: IoEvents,
     ) -> Result<(), PollRegisterError> {
-        if let Ok(access) = Self::access(file) {
-            access.register(context, events)?;
-        }
-        Ok(())
+        Self::access(file)
+            .map_err(|_| PollRegisterError::InvalidState)?
+            .register(context, events)
+    }
+
+    fn capture_poll_source(
+        &self,
+        _file: &VfsFile,
+    ) -> Result<Option<FilePollSource>, PollRegisterError> {
+        let signal = Self::current_signal().map_err(|_| PollRegisterError::InvalidState)?;
+        let source = signal
+            .pending_source()
+            .map_err(|_| PollRegisterError::InvalidState)?;
+        Ok(Some(FilePollSource::new(source, IoEvents::IN)))
     }
 }
 
 #[cfg(unittest)]
 mod tests {
+    use core::{
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{Context, Waker},
+    };
+
+    use kpoll::PollRegistrations;
     use ksignal::{
         ChildExitInfo, ChildExitSignalInfo, Signo,
         api::{ProcessSignalManager, SignalActions},
@@ -305,10 +318,7 @@ mod tests {
     fn signal_access() -> SignalfdAccess {
         let mut mask = SignalSet::default();
         mask.add(Signo::SIGUSR1);
-        let process = Arc::new(ProcessSignalManager::new(
-            Arc::new(ksync::spin::SpinNoIrq::new(SignalActions::default())),
-            0,
-        ));
+        let process = Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
         let signal = ThreadSignalManager::new(1, process);
         signal.set_blocked(mask);
         SignalfdAccess {
@@ -379,11 +389,207 @@ mod tests {
         assert!(!access.has_pending_signals());
     }
 
+    struct WakeCount(AtomicUsize);
+
+    impl alloc::task::Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[def_test]
+    fn signalfd_arrival_wakes_blocked_process_and_thread_readers() {
+        let process = Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
+        let signal = ThreadSignalManager::new(1, process.clone());
+        let mut mask = SignalSet::default();
+        mask.add(Signo::SIGURG);
+        signal.set_blocked(mask);
+        let access = SignalfdAccess {
+            signalfd: Signalfd::new(mask),
+            signal,
+        };
+        let count = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let waker = Waker::from(count.clone());
+        let cx = Context::from_waker(&waker);
+        let mut registrations = PollRegistrations::new();
+        access
+            .register(&mut registrations.context(&cx), IoEvents::IN)
+            .unwrap();
+        assert!(access.poll().is_empty());
+        assert_eq!(
+            process.send_signal(SignalInfo::new_kernel(Signo::SIGURG)),
+            None
+        );
+        assert!(count.0.load(Ordering::Relaxed) > 0);
+        assert!(access.poll().contains(IoEvents::IN));
+        assert_eq!(access.dequeue_signal().unwrap().signo(), Signo::SIGURG);
+        assert!(access.poll().is_empty());
+
+        access
+            .register(&mut registrations.context(&cx), IoEvents::IN)
+            .unwrap();
+        count.0.store(0, Ordering::Relaxed);
+        assert!(
+            !access
+                .signal
+                .send_signal(SignalInfo::new_kernel(Signo::SIGURG))
+        );
+        assert!(count.0.load(Ordering::Relaxed) > 0);
+        assert_eq!(access.dequeue_signal().unwrap().signo(), Signo::SIGURG);
+
+        access
+            .register(&mut registrations.context(&cx), IoEvents::IN)
+            .unwrap();
+        drop(registrations);
+        count.0.store(0, Ordering::Relaxed);
+        let _ = process.send_signal(SignalInfo::new_kernel(Signo::SIGURG));
+        assert_eq!(count.0.load(Ordering::Relaxed), 0);
+    }
+
+    #[def_test]
+    fn signalfd_shared_file_keeps_readiness_local_to_accessing_process() {
+        let mut mask = SignalSet::default();
+        mask.add(Signo::SIGURG);
+        let signalfd = Signalfd::new(mask);
+        let make_access = || {
+            let process = Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
+            let signal = ThreadSignalManager::new(1, process);
+            signal.set_blocked(mask);
+            SignalfdAccess {
+                signalfd: signalfd.clone(),
+                signal,
+            }
+        };
+        let first = make_access();
+        let second = make_access();
+        let count = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let waker = Waker::from(count.clone());
+        let cx = Context::from_waker(&waker);
+        let mut registrations = PollRegistrations::new();
+        second
+            .register(&mut registrations.context(&cx), IoEvents::IN)
+            .unwrap();
+        let _ = first
+            .signal
+            .send_signal(SignalInfo::new_kernel(Signo::SIGURG));
+        assert_eq!(count.0.load(Ordering::Relaxed), 0);
+        assert!(first.poll().contains(IoEvents::IN));
+        assert!(second.poll().is_empty());
+        let _ = second
+            .signal
+            .send_signal(SignalInfo::new_kernel(Signo::SIGURG));
+        assert!(count.0.load(Ordering::Relaxed) > 0);
+        assert!(second.poll().contains(IoEvents::IN));
+    }
+
+    #[def_test]
+    fn signalfd_mask_update_notifies_only_updaters_shared_source() {
+        let process = Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
+        let shared = Arc::new(process.fork_shared().unwrap());
+        let private = Arc::new(process.fork_private().unwrap());
+        let signalfd = Signalfd::new(SignalSet::default());
+        let first = SignalfdAccess {
+            signalfd: signalfd.clone(),
+            signal: ThreadSignalManager::new(1, process),
+        };
+        let peer = SignalfdAccess {
+            signalfd: signalfd.clone(),
+            signal: ThreadSignalManager::new(2, shared),
+        };
+        let independent = SignalfdAccess {
+            signalfd: signalfd.clone(),
+            signal: ThreadSignalManager::new(3, private),
+        };
+        let mut mask = SignalSet::default();
+        mask.add(Signo::SIGURG);
+        peer.signal.set_blocked(mask);
+        let _ = peer
+            .signal
+            .send_signal(SignalInfo::new_kernel(Signo::SIGURG));
+
+        let shared_count = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let private_count = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let shared_waker = Waker::from(shared_count.clone());
+        let private_waker = Waker::from(private_count.clone());
+        let shared_cx = Context::from_waker(&shared_waker);
+        let private_cx = Context::from_waker(&private_waker);
+        let mut shared_registrations = PollRegistrations::new();
+        let mut private_registrations = PollRegistrations::new();
+        first
+            .register(&mut shared_registrations.context(&shared_cx), IoEvents::IN)
+            .unwrap();
+        independent
+            .register(
+                &mut private_registrations.context(&private_cx),
+                IoEvents::IN,
+            )
+            .unwrap();
+        assert_eq!(shared_registrations.len(), 1);
+        assert_eq!(private_registrations.len(), 1);
+        signalfd.update_mask(mask, &peer.signal).unwrap();
+        assert_eq!(shared_count.0.load(Ordering::Relaxed), 1);
+        assert_eq!(private_count.0.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            posix_types::k_sigset::from(peer.signal.blocked()).0,
+            posix_types::k_sigset::from(mask).0
+        );
+        assert!(peer.poll().contains(IoEvents::IN));
+        assert!(first.poll().is_empty());
+        assert!(independent.poll().is_empty());
+        assert_eq!(
+            posix_types::k_sigset::from(independent.signalfd.mask()).0,
+            posix_types::k_sigset::from(mask).0
+        );
+        assert_eq!(peer.dequeue_signal().unwrap().signo(), Signo::SIGURG);
+    }
+
+    #[def_test]
+    fn signalfd_child_exit_wakes_without_unblocked_delivery_target() {
+        let process = Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
+        let signal = ThreadSignalManager::new(1, process.clone());
+        let mut mask = SignalSet::default();
+        mask.add(Signo::SIGCHLD);
+        signal.set_blocked(mask);
+        let access = SignalfdAccess {
+            signalfd: Signalfd::new(mask),
+            signal,
+        };
+        let count = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let waker = Waker::from(count.clone());
+        let cx = Context::from_waker(&waker);
+        let mut registrations = PollRegistrations::new();
+        access
+            .register(&mut registrations.context(&cx), IoEvents::IN)
+            .unwrap();
+        let child = ChildExitInfo::from_wait_status(
+            42,
+            1000,
+            0,
+            ktime_types::TimeSpan::from_nanos(0),
+            ktime_types::TimeSpan::from_nanos(0),
+        );
+        let (_, target) = process
+            .send_child_exit_signal(ChildExitSignalInfo::new_sigchld(child))
+            .unwrap();
+        assert_eq!(target, None);
+        assert!(count.0.load(Ordering::Relaxed) > 0);
+        assert!(access.poll().contains(IoEvents::IN));
+        assert_eq!(access.dequeue_signal().unwrap().signo(), Signo::SIGCHLD);
+    }
+
     #[def_test]
     fn test_signalfd_poll_empty() {
         let file = Signalfd::new_file(SignalSet::default(), 0, kcred::initial_cred())
             .expect("signalfd file opens");
         assert!(file.poll().contains(IoEvents::ERR));
+        assert!(matches!(
+            file.capture_poll_source(),
+            Err(PollRegisterError::InvalidState)
+        ));
     }
 
     #[def_test]

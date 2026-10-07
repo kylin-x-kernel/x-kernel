@@ -54,6 +54,16 @@ syscall 层统一拒绝。字符设备 open 若替换操作表，同步由最终
 FAT、9p 和其他未覆盖同步的后端保持既有返回行为。它们的真实持久化能力、匿名事件
 对象及其他伪文件的同步语义仍需单独完善；本次不通过全局修改默认值扩大影响范围。
 
+## Captured Poll Sources
+
+Open-file operations may supply one `FilePollSource` containing a weak source
+and its supported events. `VfsFile` forwards capture to its file operations.
+Ordinary backends return no captured source
+and retain their existing registration path. Capture fixes wait-source identity,
+not readiness: consumers still query the file in the current calling context.
+Event filtering and weak registration introduce no additional owner or source
+list. An expired captured source must not fall back to the default path.
+
 ## 范围
 
 - `src/open_flags.rs`：原始 `O_*` 参数的规范化与 open intent。

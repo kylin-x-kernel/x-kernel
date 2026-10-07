@@ -18,6 +18,7 @@ use khal::{
     paging::MappingFlags,
 };
 use kpoll::{Completion, PollRegistrations};
+use ksignal::Signo;
 use ktask::{TaskInner, prepare_task};
 use ktime_types::TimeSpan;
 use memspace::VmRuntimeRef;
@@ -34,6 +35,86 @@ use crate::{
 
 fn new_wake_counter() -> &'static AtomicUsize {
     Box::leak(Box::new(AtomicUsize::new(0)))
+}
+
+#[def_test]
+fn test_shared_signal_exec_and_clone_concurrently_preserve_peer() {
+    use ksignal::{
+        SignalAction, SignalActionFlags, SignalDisposition, SignalSet, Signo,
+        api::{ProcessSignalManager, SignalActions},
+    };
+
+    for iteration in 0..16 {
+        let original = ProcessSignalManager::new(SignalActions::default(), 0);
+        let mut mask = SignalSet::default();
+        mask.add(Signo::SIGUSR2);
+        original
+            .set_signal_action(
+                Signo::SIGUSR1,
+                SignalAction {
+                    disposition: SignalDisposition::Ignore,
+                    flags: SignalActionFlags::RESTART,
+                    mask,
+                    restorer: None,
+                },
+            )
+            .unwrap();
+        let left = Arc::new(original.fork_shared().unwrap());
+        let right = original.fork_shared().unwrap();
+        let start = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(ktask::WaitQueue::new());
+        let exec_valid = Arc::new(AtomicBool::new(false));
+        let clone_valid = Arc::new(AtomicBool::new(false));
+        let exec = ktask::spawn({
+            let start = start.clone();
+            let gate = gate.clone();
+            let valid = exec_valid.clone();
+            move || {
+                gate.wait_until(|| start.load(Ordering::Acquire));
+                right.reset_actions_for_exec().unwrap();
+                valid.store(
+                    right
+                        .signal_action(Signo::SIGUSR1)
+                        .unwrap()
+                        .flags
+                        .is_empty(),
+                    Ordering::Release,
+                );
+            }
+        });
+        let clone = ktask::spawn({
+            let left = left.clone();
+            let start = start.clone();
+            let gate = gate.clone();
+            let valid = clone_valid.clone();
+            move || {
+                gate.wait_until(|| start.load(Ordering::Acquire));
+                let child = if iteration % 2 == 0 {
+                    left.fork_shared().unwrap()
+                } else {
+                    left.fork_private().unwrap()
+                };
+                let action = child.signal_action(Signo::SIGUSR1).unwrap();
+                // Either side of exec is valid, but never a mixed snapshot.
+                valid.store(
+                    action.flags.is_empty() == action.mask.is_empty()
+                        && matches!(action.disposition, SignalDisposition::Ignore),
+                    Ordering::Release,
+                );
+            }
+        });
+        start.store(true, Ordering::Release);
+        gate.notify_all(false);
+        left.reset_actions_for_exec().unwrap();
+        assert_eq!(exec.join(), 0);
+        assert_eq!(clone.join(), 0);
+        assert!(exec_valid.load(Ordering::Acquire));
+        assert!(clone_valid.load(Ordering::Acquire));
+        assert!(left.signal_action(Signo::SIGUSR1).unwrap().flags.is_empty());
+        let action = original.signal_action(Signo::SIGUSR1).unwrap();
+        assert!(action.flags.contains(SignalActionFlags::RESTART));
+        assert!(action.mask.has(Signo::SIGUSR2));
+    }
 }
 
 /// # Safety
@@ -266,9 +347,7 @@ fn build_prepared_test_user_task() -> (Arc<Process>, TaskInner) {
     ksignal::map_signal_trampoline(&mut aspace).expect("signal trampoline should map");
     let address_space = Arc::new(ksync::Mutex::new(aspace));
     let fs_context = fs_context::copy_init_fs_struct();
-    let signal_actions = Arc::new(ksync::spin::SpinNoIrq::new(
-        ksignal::api::SignalActions::default(),
-    ));
+    let signal_actions = ksignal::api::SignalActions::default();
 
     let thread = build_process_thread(
         process.clone(),
@@ -292,9 +371,7 @@ fn publish_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskR
     ksignal::map_signal_trampoline(&mut aspace).expect("signal trampoline should map");
     let address_space = Arc::new(ksync::Mutex::new(aspace));
     let fs_context = fs_context::copy_init_fs_struct();
-    let signal_actions = Arc::new(ksync::spin::SpinNoIrq::new(
-        ksignal::api::SignalActions::default(),
-    ));
+    let signal_actions = ksignal::api::SignalActions::default();
     let credentials = initial_cred();
 
     let thread = build_process_thread(
@@ -338,9 +415,7 @@ pub(crate) fn process_with_address_space(
     let task_number = kidentity::PidHandle::fixed_root(pid);
     let process = parent.fork_with_task_number(task_number.clone(), Some(ksignal::Signo::SIGCHLD));
     let fs_context = fs_context::copy_init_fs_struct();
-    let signal_actions = Arc::new(ksync::spin::SpinNoIrq::new(
-        ksignal::api::SignalActions::default(),
-    ));
+    let signal_actions = ksignal::api::SignalActions::default();
 
     let thread = build_process_thread(
         process.clone(),
@@ -639,9 +714,7 @@ fn test_clone_parent_inherits_callers_exit_signal_contract() {
     let parent =
         init.fork_with_task_number(parent_task_number.clone(), Some(ksignal::Signo::SIGUSR1));
     let fs_context = fs_context::copy_init_fs_struct();
-    let signal_actions = Arc::new(ksync::spin::SpinNoIrq::new(
-        ksignal::api::SignalActions::default(),
-    ));
+    let signal_actions = ksignal::api::SignalActions::default();
     let thread = build_process_thread(
         parent.clone(),
         parent_task_number.clone(),
@@ -874,6 +947,7 @@ fn test_exit_cleanup_clears_exclusive_address_space() {
 fn test_exit_owners_detach_before_process_exit_publication() {
     let (proc, _task) = process_with_address_space(8_137, mapped_test_address_space());
     let resources = proc.resources().expect("runtime must expose resources");
+    let signals = proc.signal_manager().unwrap();
 
     assert!(proc.address_space().is_ok());
     assert!(resources.fd_table().is_ok());
@@ -881,6 +955,12 @@ fn test_exit_owners_detach_before_process_exit_publication() {
     assert!(proc.mnt_ns().is_ok());
     assert!(proc.uts_ns().is_ok());
 
+    proc.exit_signal_handlers().unwrap();
+    assert_eq!(
+        signals.signal_action(Signo::SIGUSR1).err(),
+        Some(kerrno::KError::NoSuchProcess)
+    );
+    proc.exit_signal_handlers().unwrap();
     proc.exit_mm().expect("runtime must be attached");
     proc.exit_files().expect("runtime must be attached");
     proc.exit_fs().expect("runtime must be attached");
@@ -1119,6 +1199,41 @@ fn test_failed_private_vm_fork_after_parent_mm_teardown_rolls_back_tree_relation
 }
 
 #[def_test(serial)]
+fn abandoned_clone_releases_handlers_despite_retained_manager() {
+    let (parent, task) = process_with_address_space(8_151, mapped_test_address_space());
+    let prepared = task
+        .as_thread()
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Shared,
+            fs: ForkFs::Private,
+            signal_actions: ForkSignalActions::Shared,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::empty(),
+            exit_signal: Some(Signo::SIGCHLD),
+        })
+        .unwrap();
+    let child = prepared.process().clone();
+    let observer = child.signal_manager().unwrap();
+    child.discard_unpublished();
+    drop(prepared);
+    assert_eq!(
+        observer.signal_action(Signo::SIGUSR1).err(),
+        Some(kerrno::KError::NoSuchProcess)
+    );
+    assert!(
+        parent
+            .signal_manager()
+            .unwrap()
+            .signal_action(Signo::SIGUSR1)
+            .is_ok()
+    );
+    parent.exit_mm().unwrap();
+    process_exit::finalize_process_exit(&parent);
+    wait_reap::assert_reap_zombie_process(&parent);
+}
+
+#[def_test(serial)]
 fn test_failed_fork_after_parent_files_exit_rolls_back_tree_relation() {
     let (parent, parent_task) = process_with_address_space(8_138, mapped_test_address_space());
     let child_count_before = parent.children().len();
@@ -1309,6 +1424,77 @@ fn test_thread_scheduler_parameters_are_a_consistent_snapshot() {
     assert_eq!(parameters.policy(), Some(1));
     assert_eq!(parameters.priority(), 9);
 
+    process.discard_unpublished();
+}
+
+#[def_test(user, serial)]
+fn test_clone_inherits_calling_thread_mask_without_copying_private_pending() {
+    use ksignal::{SignalInfo, SignalSet, Signo};
+
+    let same_set = |actual: SignalSet, expected: SignalSet| {
+        (actual & !expected).is_empty() && (expected & !actual).is_empty()
+    };
+    let (process, task) = build_prepared_test_user_task();
+    let leader = task.as_thread();
+    let mut leader_mask = SignalSet::default();
+    leader_mask.add(Signo::SIGUSR1);
+    leader.signal_manager().set_blocked(leader_mask);
+    let caller = leader.clone_thread_in_process().unwrap();
+    assert!(same_set(caller.signal_manager().blocked(), leader_mask));
+
+    let mut caller_mask = SignalSet::default();
+    caller_mask.add(Signo::SIGUSR2);
+    let mut requested_mask = caller_mask;
+    requested_mask.add(Signo::SIGKILL);
+    requested_mask.add(Signo::SIGSTOP);
+    caller.signal_manager().set_blocked(requested_mask);
+    assert!(same_set(caller.signal_manager().blocked(), caller_mask));
+    assert!(same_set(leader.signal_manager().blocked(), leader_mask));
+    assert!(
+        !caller
+            .signal_manager()
+            .send_signal(SignalInfo::new_kernel(Signo::SIGUSR2))
+    );
+    let _ = caller
+        .signal_manager()
+        .process()
+        .send_signal(SignalInfo::new_kernel(Signo::SIGTERM));
+
+    let sibling = caller.clone_thread_in_process().unwrap();
+    assert!(same_set(sibling.signal_manager().blocked(), caller_mask));
+    let mut shared_pending = SignalSet::default();
+    shared_pending.add(Signo::SIGTERM);
+    assert!(same_set(sibling.signal_manager().pending(), shared_pending));
+    sibling.signal_manager().set_blocked(SignalSet::default());
+    assert!(same_set(caller.signal_manager().blocked(), caller_mask));
+
+    for signal_actions in [ForkSignalActions::Private, ForkSignalActions::Shared] {
+        let child = caller
+            .fork_process_child(ProcessForkConfig {
+                parent: ForkParent::Caller,
+                address_space: if signal_actions == ForkSignalActions::Shared {
+                    ForkAddressSpace::Shared
+                } else {
+                    ForkAddressSpace::Private
+                },
+                fs: ForkFs::Private,
+                signal_actions,
+                fd_table: ForkFdTable::Private,
+                namespace_flags: kns::NamespaceFlags::empty(),
+                exit_signal: Some(Signo::SIGCHLD),
+            })
+            .unwrap();
+        assert!(same_set(child.signal_manager().blocked(), caller_mask));
+        assert!(child.signal_manager().pending().is_empty());
+        child.signal_manager().set_blocked(SignalSet::default());
+        assert!(same_set(caller.signal_manager().blocked(), caller_mask));
+        assert!(same_set(leader.signal_manager().blocked(), leader_mask));
+        child.process().discard_unpublished();
+    }
+    assert!(same_set(
+        caller.signal_manager().pending(),
+        caller_mask | shared_pending
+    ));
     process.discard_unpublished();
 }
 
@@ -1957,9 +2143,7 @@ fn test_prepare_user_task_rejects_mismatched_task_and_thread_identity() {
         Arc::new(vec![]),
         Arc::new(ksync::Mutex::new(aspace)),
         fs_context::copy_init_fs_struct(),
-        Arc::new(ksync::spin::SpinNoIrq::new(
-            ksignal::api::SignalActions::default(),
-        )),
+        ksignal::api::SignalActions::default(),
         initial_cred(),
     );
 

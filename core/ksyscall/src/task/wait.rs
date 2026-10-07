@@ -266,7 +266,7 @@ mod tests_wait {
 
     use kerrno::LinuxError;
     use kprocess::{current_user_process, process_exit, wait_reap};
-    use ksignal::{SignalActionFlags, SignalDisposition, Signo};
+    use ksignal::{SignalAction, SignalActionFlags, SignalDisposition, Signo};
     use ktask::WaitQueue;
     use unittest::{assert_eq, def_test};
 
@@ -565,16 +565,18 @@ mod tests_wait {
         let parent = current_user_process();
         let child = parent.fork(8_230);
         let child_pid = child.pid();
-        let actions = parent
-            .signal_actions()
-            .expect("current process should expose signal actions");
-        let old_action = {
-            let mut actions = actions.lock();
-            let old_action = actions[Signo::SIGCHLD].clone();
-            actions[Signo::SIGCHLD].disposition = SignalDisposition::Ignore;
-            actions[Signo::SIGCHLD].flags = SignalActionFlags::empty();
-            old_action
-        };
+        let signals = parent
+            .signal_manager()
+            .expect("current process signal manager");
+        let old_action = signals
+            .replace_signal_action(
+                Signo::SIGCHLD,
+                Some(SignalAction {
+                    disposition: SignalDisposition::Ignore,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
 
         let echld = Arc::new(AtomicUsize::new(0));
         let reaped = Arc::new(AtomicUsize::new(0));
@@ -627,7 +629,9 @@ mod tests_wait {
         finished_wq.wait_until(|| finished.load(Ordering::Acquire) == 1);
         wait_test_sync::disarm_register_barrier();
         assert_eq!(waiter.join(), 0);
-        actions.lock()[Signo::SIGCHLD] = old_action;
+        signals
+            .set_signal_action(Signo::SIGCHLD, old_action)
+            .unwrap();
 
         assert_eq!(echld.load(Ordering::Acquire), 1);
         assert_eq!(
@@ -647,16 +651,18 @@ mod tests_wait {
         let parent = current_user_process();
         let child = parent.fork(8_231);
         let child_pid = child.pid();
-        let actions = parent
-            .signal_actions()
-            .expect("current process should expose signal actions");
-        let old_action = {
-            let mut actions = actions.lock();
-            let old_action = actions[Signo::SIGCHLD].clone();
-            actions[Signo::SIGCHLD].disposition = SignalDisposition::Default;
-            actions[Signo::SIGCHLD].flags = SignalActionFlags::NOCLDWAIT;
-            old_action
-        };
+        let signals = parent
+            .signal_manager()
+            .expect("current process signal manager");
+        let old_action = signals
+            .replace_signal_action(
+                Signo::SIGCHLD,
+                Some(SignalAction {
+                    flags: SignalActionFlags::NOCLDWAIT,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
 
         assert!(
             complete_sigchld_child_exit(&parent, &child),
@@ -670,7 +676,9 @@ mod tests_wait {
             WaitOptions::WNOHANG,
         )
         .expect_err("autoreaped child must not remain waitable");
-        actions.lock()[Signo::SIGCHLD] = old_action;
+        signals
+            .set_signal_action(Signo::SIGCHLD, old_action)
+            .unwrap();
 
         assert_eq!(LinuxError::from(err), LinuxError::ECHILD);
     }

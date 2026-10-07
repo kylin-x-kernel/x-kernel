@@ -11,7 +11,7 @@ use core::{
 use smallvec::SmallVec;
 
 use crate::{
-    PollSet,
+    PollSet, WeakPollSet,
     source::{PollSetInner, RegistrationToken},
 };
 
@@ -152,6 +152,22 @@ impl Drop for PollContext<'_> {
 }
 
 impl PollContext<'_> {
+    /// Registers against a captured source without retaining it across the wait.
+    ///
+    /// An expired source succeeds without allocating or cloning the waker. It
+    /// never selects a replacement source. Releasing the temporary strong
+    /// reference may wake waiters, so callers must release locks that callbacks
+    /// could reenter before calling this method.
+    ///
+    /// # Errors
+    /// Returns the same registration errors as [`Self::register`] for a live source.
+    pub fn register_weak(&mut self, source: &WeakPollSet) -> Result<(), PollRegisterError> {
+        let Some(source) = source.upgrade() else {
+            return Ok(());
+        };
+        self.register(&source)
+    }
+
     /// Registers the current logical wait with `source`.
     ///
     /// # Errors
