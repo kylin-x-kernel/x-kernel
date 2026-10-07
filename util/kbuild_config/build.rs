@@ -54,7 +54,6 @@ fn main() {
         for name in [
             "KFEAT_ENTROPY_ARCH_CPU",
             "KFEAT_ENTROPY_SMCCC_TRNG",
-            "KFEAT_ENTROPY_TRUST_HOST",
             "KFEAT_ENTROPY_JITTER",
             "KFEAT_DRIVER_VIRTIO_RNG",
         ] {
@@ -70,8 +69,8 @@ fn main() {
             "// No config.rs generated yet\npub const SEV_CBIT_POS: u32 = 0;\npub const \
              SCHED_FAIR_REQUEST_US: usize = 2000;\npub const KFEAT_ENTROPY_ARCH_CPU: bool = \
              false;\npub const KFEAT_ENTROPY_SMCCC_TRNG: bool = false;\npub const \
-             KFEAT_ENTROPY_TRUST_HOST: bool = false;\npub const KFEAT_ENTROPY_JITTER: bool = \
-             false;\npub const KFEAT_DRIVER_VIRTIO_RNG: bool = false;\n",
+             KFEAT_ENTROPY_JITTER: bool = false;\npub const KFEAT_DRIVER_VIRTIO_RNG: bool = \
+             false;\n",
         )
         .expect("Failed to write empty config.rs");
     }

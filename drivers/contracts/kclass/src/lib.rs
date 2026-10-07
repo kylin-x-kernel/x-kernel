@@ -398,6 +398,10 @@ impl HwrngDevice for ClassDevice<HwrngDeviceImpl> {
     fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
         self.with(|device| device.read(buf))
     }
+
+    fn is_failed(&self) -> bool {
+        self.with(|device| device.is_failed())
+    }
 }
 
 #[cfg(feature = "display")]

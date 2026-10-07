@@ -33,9 +33,20 @@ pub trait HwrngDevice: Device {
     /// # Errors
     /// Returns [`DriverError::InvalidInput`] if sleeping is forbidden.
     /// Other errors may come from wait registration or the device.
+    /// A read error alone does not establish device failure; consult [`Self::is_failed`].
     /// An error does not cancel a request submitted by an earlier readiness
     /// check. Task interruption does not end the read.
     fn read(&self, buf: &mut [u8]) -> DriverResult<usize>;
+
+    /// Whether this instance has entered a terminal device failure state.
+    ///
+    /// Non-sleeping. Once true, remains true for the lifetime of the instance.
+    /// False means no terminal failure has been established, not that a read
+    /// will succeed or hardware will make progress. Wait registration failures
+    /// and invalid caller contexts must not set this state. Consumers may retry
+    /// failed reads in valid task context while this remains false.
+    /// This is not permission to release outstanding DMA or reset the device.
+    fn is_failed(&self) -> bool;
 }
 
 #[cfg(unittest)]

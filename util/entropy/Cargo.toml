@@ -13,18 +13,21 @@ documentation.workspace = true
 default = []
 entropy_arch_cpu = ["dep:karch"]
 entropy_smccc_trng = ["dep:kplat-aarch64"]
-entropy_trust_host = []
 entropy_jitter = []
-entropy_virtio_rng = ["dep:char_driver", "dep:kclass"]
+entropy_virtio_rng = ["dep:hwrng", "dep:kspin", "dep:kdevice", "dep:kclass", "dep:kworkng"]
 
 [dependencies]
-char_driver = { workspace = true, optional = true }
-kclass = { workspace = true, features = ["char"], optional = true }
+kworkng = { workspace = true, optional = true }
+hwrng = { workspace = true, optional = true }
+kdevice = { workspace = true, optional = true }
+kspin = { workspace = true, optional = true }
+kclass = { workspace = true, features = ["hwrng"], optional = true }
 khal.workspace = true
 karch = { workspace = true, optional = true }
 klazy.workspace = true
 ksync.workspace = true
 ktask.workspace = true
+ktime_types.workspace = true
 log.workspace = true
 rand_chacha.workspace = true
 unittest.workspace = true

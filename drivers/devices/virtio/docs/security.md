@@ -345,3 +345,33 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 - [ ] 新增原子操作的内存序不低于已有要求
 - [ ] Drop 实现正确处理所有状态（已实现 net 设备 Drop，其他设备无需自定义 Drop）
 - [ ] 新增 panic 路径有对应的 PanicGuard 或等效保护
+
+## IRQ-driven RNG safety boundary
+
+`rng.rs::RngRequest` confines unsafe submission and completion to an
+exclusively borrowed request. The original Box address, length and live token
+are preserved until completion; Pending forbids CPU consumption and duplicate
+submission. Queue and buffer are retained together if Drop observes Pending.
+Successful completion validates `1..=256` before making bytes readable. A
+malformed token or terminal error cannot release storage still owned by DMA.
+
+The unsafe Send implementation requires HAL DMA/MMIO virtual mappings that
+remain valid across CPUs and threads, stable backing allocations, and Send HAL
+and transport types. Shared access is separately serialized by the device's
+`SpinNoIrq`; the request itself does not implement Sync. The host must preserve
+transport mappings and IRQ resources for the published device lifetime.
+
+The IRQ callback holds a Weak reference and upgrades only for the call. IRQ
+registration precedes enabling interrupts; registration failure drops an idle
+request. Notification runs after releasing the request lock. Host wait errors
+do not imply a device fault or revoke live DMA. `is_failed` reports only the
+sticky device fault. Empty used rings (`NotReady`) retain Pending without
+poisoning the source; mismatched tokens remain terminal and cannot justify
+freeing or resubmitting storage whose DMA ownership is unresolved.
+
+The VMM controls bytes, completion length and timing. Length validation protects
+CPU copies but cannot establish entropy quality or force device progress.
+There is no completion timeout and no reset/hotplug protocol. With X-Kernel HAL,
+reclaim competes for the global kdma lock, also used by other DMA operations and
+page-table changes. Lock-wait latency in hard IRQ context is an accepted,
+unbounded-by-this-driver limitation, not a verified latency guarantee.

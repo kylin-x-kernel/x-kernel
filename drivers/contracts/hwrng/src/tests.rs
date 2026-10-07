@@ -51,6 +51,10 @@ impl Device for TestDevice {
 }
 
 impl HwrngDevice for TestDevice {
+    fn is_failed(&self) -> bool {
+        false
+    }
+
     fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
         if buf.is_empty() {
             return Ok(0);

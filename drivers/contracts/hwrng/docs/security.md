@@ -24,8 +24,9 @@ be notified in IRQ context without allocation or sleeping.
 
 `DriverError::InvalidInput` and `NoMemory` can arise from the wait provider
 without a hardware fault. Since the shared error no longer records its origin,
-a consumer must use device state or other evidence before permanently
-disabling the source. A wait error does not cancel an in-flight DMA request.
+a consumer must check `HwrngDevice::is_failed` before permanently disabling
+the source on a read error. Terminal state is monotonic; host wait failures
+never establish it. False does not guarantee eventual completion. A wait error does not cancel an in-flight DMA request.
 No random bytes are logged by the contract. Source health tests, DMA teardown,
 and malicious-device isolation remain outside this crate.
 

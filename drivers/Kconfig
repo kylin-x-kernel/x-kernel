@@ -217,13 +217,25 @@ config KFEAT_DRIVER_VIRTIO_SOCKET
       platforms.
 
 config KFEAT_DRIVER_VIRTIO_RNG
-    bool "virtio-rng entropy source"
-    depends on KFEAT_CHAR
-    default y
+    bool "virtio-rng hardware driver"
+    default n
     help
       Enable the virtio-rng hardware entropy source driver. Required on
       virtio-based virtual platforms (QEMU/CrosVM) when guest randomness should
-      come from the VMM-provided entropy device.
+      come from the VMM-provided entropy device. Enable
+      KFEAT_ENTROPY_VIRTIO_RNG separately to connect it to the entropy pool.
+      Disabled by default; virtual platform defconfigs enable it explicitly.
+
+config KFEAT_ENTROPY_VIRTIO_RNG
+    bool "Use VirtIO RNG as a trusted entropy source"
+    depends on KFEAT_DRIVER_VIRTIO_RNG
+    help
+      Connect discovered VirtIO RNG devices to the kernel entropy pool through
+      the Hwrng class. The driver can be enabled independently of this consumer.
+      Enabling this trusts the VMM / host: its bytes are mixed into the pool
+      and may establish random-number readiness without another entropy source.
+      Disable this for isolated deployments that must not trust host entropy;
+      the hardware driver can remain enabled independently.
 
 config KFEAT_ENTROPY_ARCH_CPU
     bool "CPU instruction RNG (AArch64 RNDR / x86 RDSEED·RDRAND)"
@@ -253,22 +265,6 @@ config KFEAT_ENTROPY_SMCCC_TRNG
 
       Defaults to n on non-AArch64 architectures. Kept visible on all arches
       so shared kernel crates can always reference the Kconfig constant.
-
-config KFEAT_ENTROPY_TRUST_HOST
-    bool "Mix VirtIO RNG entropy (trust the VMM / host)"
-    default y if KFEAT_DRIVER_VIRTIO_RNG
-    help
-      When enabled, VirtIO RNG bytes are mixed into the kernel entropy pool
-      during reseed alongside CPU / SMCCC / SoC sources. This is appropriate
-      for QEMU, crosvm, and other development VMs where the host provides
-      randomness through virtio-rng.
-
-      Disable this for bare-metal or isolated deployments where the VMM must
-      not influence kernel randomness. VirtIO RNG may still be probed, but it
-      will not participate in hardware reseed when this option is off.
-
-      Defaults to n when VirtIO RNG is not selected. Kept visible so shared
-      entropy code can always reference the Kconfig constant.
 
 config KFEAT_ENTROPY_JITTER
     bool "Software jitter entropy (timer / interrupt timing noise)"

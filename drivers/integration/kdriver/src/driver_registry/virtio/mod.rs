@@ -217,7 +217,7 @@ fn activate_virtio_mmio(device: Arc<DeviceObject>, device_kind: DeviceKind) -> D
 }
 
 #[cfg(feature = "virtio")]
-fn dispatch_virtio_try_new<T: virtio::Transport + 'static>(
+fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
     parent: Arc<DeviceObject>,
     kind: DeviceKind,
     transport: T,
@@ -252,9 +252,9 @@ fn dispatch_virtio_try_new<T: virtio::Transport + 'static>(
             kclass::publish_virtio_9p(parent, VirtIo9p::try_new(transport, irq)?).map(drop)
         }
         #[cfg(feature = "virtio-rng")]
-        DeviceKind::Char => {
+        DeviceKind::Hwrng => {
             use glue::VirtIoRng;
-            kclass::publish_char(parent, VirtIoRng::try_new(transport, irq)?).map(drop)
+            kclass::publish_hwrng(parent, VirtIoRng::try_new(transport, irq)?).map(drop)
         }
         _ => Err(DriverError::Unsupported),
     }
@@ -328,7 +328,7 @@ virtio_driver_pair!(
 virtio_driver_pair!(
     virtio_rng_pci_descriptor,
     virtio_rng_mmio_descriptor,
-    DeviceKind::Char,
+    DeviceKind::Hwrng,
     virtio_type::RNG,
     "virtio-rng-pci",
     "virtio-rng-mmio"

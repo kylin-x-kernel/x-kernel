@@ -104,14 +104,18 @@ cfg_if! {
         pub struct VirtIoRng;
 
         impl VirtIoRng {
-            pub fn try_new<T: virtio::Transport + 'static>(
+            pub fn try_new<T: virtio::Transport + Send + 'static>(
                 transport: T,
-                _irq: Option<usize>,
-            ) -> DriverResult<kclass::prelude::CharDeviceImpl> {
-                Ok(Box::new(virtio::VirtIoRngDev::<VirtIoHalImpl, T>::try_new(
+                irq: Option<usize>,
+            ) -> DriverResult<kclass::prelude::HwrngDeviceImpl> {
+                let irq = irq.ok_or(driver_base::DriverError::InvalidInput)?;
+                let device = virtio::VirtIoRngDev::<VirtIoHalImpl, T>::try_new_irq(
                     transport,
+                    crate::rng_completion::new_rng_completion(),
                     crate::resource::resource_provider(),
-                )?))
+                    device_res::IrqResource::new(irq, device_res::IrqTrigger::Unknown(0)),
+                )?;
+                Ok(device)
             }
         }
     }

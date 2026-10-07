@@ -510,3 +510,54 @@ No concrete driver imports ktask/kirq.
 Request tests live in blk/tests/requests.rs and remain a child of the requests
 module through #[path]. The blk directory holds runtime request code; requests
 does not need a separate directory solely to contain tests.
+
+## IRQ-driven RNG adapter
+
+`rng.rs` provides `VirtIoRngDev`, implementing `HwrngDevice` through the
+nonblocking request and completion APIs in `kvirtiodrivers` 0.13.4. Production
+probe registers its IRQ before publishing it in the Hwrng class. The old Char
+adapter and polling timeout have been removed.
+Only VirtIO RNG devices with a usable IRQ are supported. Missing IRQ resources
+or failure to register the completion IRQ cause probe to fail, and the device
+is not published in the Hwrng class. This intentionally narrows compatibility
+relative to the old polling adapter; there is no polling fallback.
+`driver_virtio_rng` enables Hwrng through `kdriver/virtio-rng`; neither its
+Cargo feature nor `KFEAT_DRIVER_VIRTIO_RNG` requires the Char subsystem.
+The driver defaults to disabled globally. QEMU/crosvm defconfigs enable it
+explicitly; bare-metal configurations such as RK3588 do not inherit it.
+The driver switch does not enable the entropy consumer. Select
+`KFEAT_ENTROPY_VIRTIO_RNG` separately to connect Hwrng devices to the pool;
+Kconfig requires `KFEAT_DRIVER_VIRTIO_RNG` for this source.
+
+`RngRequest` owns a 256-byte Box and its `VirtIORng` queue together. Its state
+moves from Idle to Pending(token), then to Readable(remaining: Range<usize>) after reclaim,
+and back to Idle when cached bytes are consumed. `NotReady` preserves Pending
+without a fault or reader notification; a later completion IRQ can reclaim the
+same submission. `WrongToken` is terminal: with one outstanding request it is
+an invalid completion, not an out-of-order result to retry. Submission errors
+for a full queue or invalid fixed buffer likewise indicate broken invariants.
+A stored fault is terminal and exposed through `HwrngDevice::is_failed`.
+Host wait errors do not set it. Subsequent reads can join the same Pending
+request or consume bytes already reclaimed by IRQ after a wait error.
+Only `read` submits; readers never poll the used ring. The hard IRQ handler
+acks status, attempts at most one completion for a queue interrupt, drops the
+request lock and then notifies waiters. Copying cached bytes to the caller and
+submitting the next request happen in task context.
+
+The host injects `RngCompletion` and an IRQ provider. `try_new_irq` installs a
+weak callback before enabling completion interrupts. The device owns the IRQ
+guard; the weak callback avoids an ownership cycle. `SpinNoIrq` serializes
+readers with completion. No device lock spans host waiting or notification.
+Empty reads do no I/O; wait failures leave submitted DMA storage owned by the
+driver. Short reads retain their unused cached suffix.
+
+Completion includes HAL unshare in hard IRQ context. The backend must be
+IRQ-safe and non-sleeping. X-Kernel's backend takes the global kdma allocator
+lock during unmap; one-request reclamation does not imply bounded IRQ latency.
+This change preserves inline reclaim and does not introduce a softirq path.
+
+Device removal/rebinding is unsupported. Dropping a Pending request retains
+its queue and buffer rather than freeing live DMA storage; normal idle/readable
+requests are released. Tests emulate ring completion and IRQ delivery to check
+reclaim-before-wake, short reads, spurious interrupts, malformed completions,
+wait failures, and retention of outstanding storage without real-device timing.

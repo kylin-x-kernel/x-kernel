@@ -114,7 +114,7 @@ const fn as_device_kind(t: VirtIoDevType) -> Option<DeviceKind> {
     match t {
         Block => Some(DeviceKind::Block),
         Network => Some(DeviceKind::Net),
-        EntropySource => Some(DeviceKind::Char),
+        EntropySource => Some(DeviceKind::Hwrng),
         GPU => Some(DeviceKind::Display),
         Input => Some(DeviceKind::Input),
         Socket => Some(DeviceKind::Vsock),

@@ -681,6 +681,7 @@ registers its device wake source with `PollSet`, checks the driver's readiness
 predicate, and parks if the request is still pending.
 `notify` wakes registered tasks so they can check readiness again. The
 provider owns wait registrations; the concrete driver owns its request and DMA
-buffer.
+buffer. The current entropy integration uses one worker per selected VirtIO RNG source,
+issuing reads serially.
 
 The `hwrng` feature compiles this provider for injection into concrete drivers.

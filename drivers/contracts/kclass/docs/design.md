@@ -279,8 +279,8 @@ framebuffer special-casing or unsafe boundary.
 
 The `hwrng` feature adds `HwrngDeviceImpl = Arc<dyn HwrngDevice + Send + Sync>`
 and the standard class publication and discovery APIs.
-`ClassDevice<HwrngDeviceImpl>` forwards `read` without holding the registry
-lock, allowing the driver to sleep. The host must prepare completion delivery
+`ClassDevice<HwrngDeviceImpl>` forwards `read` and the terminal `is_failed`
+query without holding the registry lock. Only the read operation may sleep. The host must prepare completion delivery
 before publication; kclass does not implement waiting or entropy trust policy.
 
 ## Concurrency Model

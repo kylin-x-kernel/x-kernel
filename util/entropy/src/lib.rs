@@ -9,11 +9,11 @@
 //!
 //! 1. Architecture CPU RNG (AArch64 RNDR / x86 RDSEED·RDRAND when `entropy_arch_cpu` is set)
 //! 2. SMCCC firmware TRNG (when `entropy_smccc_trng` is set)
-//! 3. VirtIO RNG (when `entropy_virtio_rng` and `entropy_trust_host` are set)
+//! 3. VirtIO RNG (when `entropy_virtio_rng` is enabled, trusting the host)
 //! 4. Software jitter (when `entropy_jitter` is set; timer / interrupt timing noise)
 //!
 //! VirtIO reads are deferred until the first [`fill_random`] call so boot does
-//! not block in a pre-interrupt virtqueue poll. CPU, SMCCC, and jitter sources
+//! not start a collector before interrupts are ready. CPU, SMCCC, and jitter sources
 //! are mixed eagerly during [`init`]. The pool's bootstrap seed also mixes
 //! jitter (when enabled) so the ChaCha20 state is not derived from ticks alone.
 //! [`is_ready`] becomes true once quality entropy (hardware or jitter) has been
@@ -133,7 +133,7 @@ fn bootstrap_seed() -> [u8; SEED_SIZE] {
 
 /// Initialize the entropy pool and probe optional hardware sources.
 ///
-/// Must be called after driver probe so VirtIO RNG char devices are visible.
+/// Must be called after driver probe so VirtIO RNG devices are visible.
 /// HRNG sources (CPU RNDR, SMCCC TRNG) are mixed immediately; VirtIO and any
 /// remaining sources are mixed on the first [`fill_random`] call.
 pub fn init() {
@@ -237,7 +237,7 @@ fn try_enable_hardware_once() {
     let mixed = mix_hardware_entropy(HW_RESEED_BYTES);
     if mixed.is_empty() {
         if !is_hardware_ready() && source::any_reseed_source_available() {
-            log::warn!("entropy: hardware sources present but initial reseed failed");
+            log::debug!("entropy: hardware seeding deferred");
         }
         schedule_unready_hardware_retry();
         return;
@@ -305,17 +305,29 @@ fn maybe_reseed_from_hardware(request_len: usize) {
         return;
     }
 
-    // Hardware reads happen outside the pool lock (may block). Mixing still
-    // takes the lock inside `mix_samples`. If mixing yields nothing, force the
-    // counter back to the threshold so a later caller can retry the claim.
-    let mixed = mix_hardware_entropy(HW_RESEED_BYTES);
-    if mixed.is_empty() {
-        POOL.lock().bytes_since_reseed = HW_RESEED_INTERVAL;
-    }
+    // Hardware reads happen outside the pool lock (may block). Mixing takes
+    // the lock inside `mix_samples`. No immediate sample may mean an async
+    // VirtIO read is in progress, so keep the next attempt interval intact.
+    let _ = mix_hardware_entropy(HW_RESEED_BYTES);
 }
 
 fn mix_eager_hardware_entropy(len: usize) -> alloc::vec::Vec<&'static str> {
     mix_samples(source::read_all_eager(len))
+}
+
+#[cfg(feature = "entropy_virtio_rng")]
+fn mix_virtio_entropy(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    {
+        let mut pool = POOL.lock();
+        pool.mix_bytes(bytes);
+        pool.bytes_since_reseed = 0;
+    }
+    HW_READY.store(true, Ordering::Release);
+    UNREADY_HW_RETRY_DELAY.store(0, Ordering::Release);
+    mark_ready();
 }
 
 fn mix_hardware_entropy(len: usize) -> alloc::vec::Vec<&'static str> {

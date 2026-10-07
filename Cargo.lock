@@ -1355,14 +1355,18 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 name = "entropy"
 version = "0.3.0-dev"
 dependencies = [
- "char_driver",
+ "hwrng",
  "karch",
  "kclass",
+ "kdevice",
  "khal",
  "klazy",
  "kplat-aarch64",
+ "kspin",
  "ksync",
  "ktask",
+ "ktime_types",
+ "kworkng",
  "log",
  "rand_chacha 0.3.1",
  "unittest",
@@ -3201,9 +3205,9 @@ dependencies = [
 
 [[package]]
 name = "kvirtiodrivers"
-version = "0.13.3"
+version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a849490b1ee4001d897784ce8203950fc3bb990b61385096b10709d707b8a2a"
+checksum = "595ef5ddca8cc67ca73adf936e6374d2826a59d602559e948b5b5fb9e751eee1"
 dependencies = [
  "bitflags 2.13.2",
  "enumn",
@@ -5564,13 +5568,12 @@ version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
  "block",
- "char_driver",
  "device-res",
  "display",
  "driver_base",
+ "hwrng",
  "input",
  "kspin",
- "ktime_types",
  "kvirtiodrivers",
  "linked_list_r4l",
  "log",

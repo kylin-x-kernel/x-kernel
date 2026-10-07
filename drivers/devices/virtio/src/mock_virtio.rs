@@ -91,6 +91,17 @@ pub struct MockTransport {
     pub features: u64,
     pub config_space: RefCell<[u8; 256]>,
     pub interrupt_ack_count: Arc<AtomicUsize>,
+    pub interrupt_status: Arc<AtomicUsize>,
+    pub queue: Option<Arc<kspin::SpinNoIrq<MockQueue>>>,
+}
+
+/// Optional ring addresses for tests that emulate a device on real descriptors.
+#[derive(Default)]
+pub struct MockQueue {
+    pub size: usize,
+    pub descriptors: usize,
+    pub available: usize,
+    pub used: usize,
 }
 
 impl MockTransport {
@@ -105,6 +116,8 @@ impl MockTransport {
             features: 0,
             config_space: RefCell::new([0; 256]),
             interrupt_ack_count: Arc::new(AtomicUsize::new(0)),
+            interrupt_status: Arc::new(AtomicUsize::new(0)),
+            queue: None,
         }
     }
 }
@@ -149,14 +162,26 @@ impl Transport for MockTransport {
     fn queue_set(
         &mut self,
         _queue: u16,
-        _size: u32,
-        _descriptors: PhysAddr,
-        _driver_area: PhysAddr,
-        _device_area: PhysAddr,
+        size: u32,
+        descriptors: PhysAddr,
+        driver_area: PhysAddr,
+        device_area: PhysAddr,
     ) {
+        if let Some(queue) = &self.queue {
+            *queue.lock() = MockQueue {
+                size: size as usize,
+                descriptors: descriptors as usize,
+                available: driver_area as usize,
+                used: device_area as usize,
+            };
+        }
     }
 
-    fn queue_unset(&mut self, _queue: u16) {}
+    fn queue_unset(&mut self, _queue: u16) {
+        if let Some(queue) = &self.queue {
+            *queue.lock() = MockQueue::default();
+        }
+    }
 
     fn queue_used(&mut self, _queue: u16) -> bool {
         false
@@ -164,7 +189,7 @@ impl Transport for MockTransport {
 
     fn ack_interrupt(&mut self) -> InterruptStatus {
         self.interrupt_ack_count.fetch_add(1, Ordering::Relaxed);
-        InterruptStatus::empty()
+        InterruptStatus::from_bits_truncate(self.interrupt_status.swap(0, Ordering::Relaxed) as u32)
     }
 
     fn read_config_generation(&self) -> u32 {

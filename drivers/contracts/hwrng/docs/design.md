@@ -29,7 +29,10 @@ Reads and host waits return the shared `DriverError`. `InvalidInput` identifies
 a context that cannot sleep, while `NoMemory` can mean wait registration
 failed. These errors alone do not establish device failure, and the error type
 does not encode whether a failure came from the host or the device. Entropy
-consumers must not permanently disable a source for every read error. A read
+consumers use `HwrngDevice::is_failed` before permanently disabling a source
+on a read error. This non-sleeping query reports a monotonic terminal device
+state; false does not promise hardware progress. Host wait errors never set it.
+Retries require a valid sleepable context and consumer-owned backoff. A read
 error delivers no bytes and does not invalidate a submitted DMA request. The
 contract does not define hotplug, reset or an offline event protocol; the
 driver and host own resource lifetime.

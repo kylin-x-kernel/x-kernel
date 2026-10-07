@@ -49,12 +49,12 @@ pub const fn device_kind_to_virtio_type(kind: DeviceKind) -> Option<u32> {
     match kind {
         DeviceKind::Net => Some(virtio_type::NET),
         DeviceKind::Block => Some(virtio_type::BLOCK),
-        DeviceKind::Char => Some(virtio_type::RNG),
+        DeviceKind::Char => None,
         DeviceKind::Display => Some(virtio_type::GPU),
         DeviceKind::Input => Some(virtio_type::INPUT),
         DeviceKind::Vsock => Some(virtio_type::VSOCK),
         DeviceKind::Fs9p => Some(virtio_type::NINEP),
-        DeviceKind::Hwrng => None,
+        DeviceKind::Hwrng => Some(virtio_type::RNG),
         DeviceKind::Bus => None,
     }
 }

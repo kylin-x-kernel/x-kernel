@@ -7,13 +7,21 @@
 use alloc::vec::Vec;
 
 #[cfg(feature = "entropy_arch_cpu")]
-use crate::arch_cpu;
+mod arch_cpu;
+#[cfg(feature = "entropy_arch_cpu")]
+use self::arch_cpu::ArchCpuSource;
 #[cfg(feature = "entropy_jitter")]
-use crate::jitter;
+mod jitter;
+#[cfg(feature = "entropy_jitter")]
+use self::jitter::JitterSource;
 #[cfg(all(feature = "entropy_smccc_trng", target_arch = "aarch64"))]
-use crate::smccc_trng;
+mod smccc_trng;
+#[cfg(all(feature = "entropy_smccc_trng", target_arch = "aarch64"))]
+use self::smccc_trng::SmcccTrngSource;
 #[cfg(feature = "entropy_virtio_rng")]
-use crate::virtio;
+mod virtio;
+#[cfg(feature = "entropy_virtio_rng")]
+use self::virtio::VirtioRngSource;
 
 /// Trust / quality tier for an entropy source.
 ///
@@ -27,6 +35,7 @@ enum SourceTier {
     ))]
     Hrng,
     /// VMM-provided entropy (VirtIO RNG); only trusted when the host is trusted.
+    #[cfg(feature = "entropy_virtio_rng")]
     HostTrusted,
     /// Software-collected entropy such as timer / interrupt jitter.
     Software,
@@ -64,7 +73,8 @@ enum SourceReadError {
     Unavailable,
     /// The source is usable but has no entropy sample right now.
     NoEntropy,
-    /// The source reported an I/O failure or timed out.
+    /// The SMCCC firmware source reported an invalid parameter or failure.
+    #[cfg(all(feature = "entropy_smccc_trng", target_arch = "aarch64"))]
     Failed,
 }
 
@@ -86,136 +96,6 @@ trait EntropySource: Sync {
 
     /// Read up to `len` bytes from the source.
     fn read(&self, len: usize) -> SourceReadResult;
-}
-
-#[cfg(feature = "entropy_arch_cpu")]
-struct ArchCpuSource;
-
-#[cfg(feature = "entropy_arch_cpu")]
-impl EntropySource for ArchCpuSource {
-    fn name(&self) -> &'static str {
-        "cpu-rng"
-    }
-
-    fn tier(&self) -> SourceTier {
-        SourceTier::Hrng
-    }
-
-    fn init(&self) {
-        arch_cpu::init();
-    }
-
-    fn availability(&self) -> SourceAvailability {
-        if arch_cpu::is_available() {
-            SourceAvailability::Available
-        } else {
-            SourceAvailability::Unavailable
-        }
-    }
-
-    fn read(&self, len: usize) -> SourceReadResult {
-        read_optional_source(self.availability(), len, arch_cpu::read)
-    }
-}
-
-#[cfg(all(feature = "entropy_smccc_trng", target_arch = "aarch64"))]
-struct SmcccTrngSource;
-
-#[cfg(all(feature = "entropy_smccc_trng", target_arch = "aarch64"))]
-impl EntropySource for SmcccTrngSource {
-    fn name(&self) -> &'static str {
-        "smccc-trng"
-    }
-
-    fn tier(&self) -> SourceTier {
-        SourceTier::Hrng
-    }
-
-    fn init(&self) {
-        smccc_trng::init();
-    }
-
-    fn availability(&self) -> SourceAvailability {
-        if smccc_trng::is_available() {
-            SourceAvailability::Available
-        } else {
-            SourceAvailability::Unavailable
-        }
-    }
-
-    fn read(&self, len: usize) -> SourceReadResult {
-        if len == 0 {
-            return Err(SourceReadError::EmptyRequest);
-        }
-        if !self.availability().is_available() {
-            return Err(SourceReadError::Unavailable);
-        }
-        smccc_trng::read(len).map_err(map_smccc_trng_error)
-    }
-}
-
-#[cfg(feature = "entropy_virtio_rng")]
-struct VirtioRngSource;
-
-#[cfg(feature = "entropy_virtio_rng")]
-impl EntropySource for VirtioRngSource {
-    fn name(&self) -> &'static str {
-        "virtio-rng"
-    }
-
-    fn tier(&self) -> SourceTier {
-        SourceTier::HostTrusted
-    }
-
-    fn init(&self) {
-        virtio::register_sources();
-    }
-
-    fn availability(&self) -> SourceAvailability {
-        if virtio::is_present() {
-            SourceAvailability::Available
-        } else if virtio::is_disabled() {
-            SourceAvailability::Failed
-        } else {
-            SourceAvailability::TemporarilyUnavailable
-        }
-    }
-
-    fn read(&self, len: usize) -> SourceReadResult {
-        if len == 0 {
-            return Err(SourceReadError::EmptyRequest);
-        }
-        if !virtio::is_present() {
-            return Err(SourceReadError::Unavailable);
-        }
-        virtio::read(len).ok_or(SourceReadError::Failed)
-    }
-}
-
-#[cfg(feature = "entropy_jitter")]
-struct JitterSource;
-
-#[cfg(feature = "entropy_jitter")]
-impl EntropySource for JitterSource {
-    fn name(&self) -> &'static str {
-        "jitter"
-    }
-
-    fn tier(&self) -> SourceTier {
-        SourceTier::Software
-    }
-
-    fn init(&self) {
-        jitter::init();
-    }
-
-    fn availability(&self) -> SourceAvailability {
-        SourceAvailability::Available
-    }
-
-    fn read(&self, len: usize) -> SourceReadResult {
-        read_optional_source(self.availability(), len, jitter::read)
-    }
 }
 
 #[cfg(feature = "entropy_arch_cpu")]
@@ -258,11 +138,11 @@ fn read_optional_source(
 }
 
 #[cfg(all(feature = "entropy_smccc_trng", target_arch = "aarch64"))]
-fn map_smccc_trng_error(error: smccc_trng::ReadError) -> SourceReadError {
+fn map_smccc_trng_error(error: crate::smccc_trng::ReadError) -> SourceReadError {
     match error {
-        smccc_trng::ReadError::Unavailable => SourceReadError::Unavailable,
-        smccc_trng::ReadError::NoEntropy => SourceReadError::NoEntropy,
-        smccc_trng::ReadError::InvalidParameter | smccc_trng::ReadError::Failed => {
+        crate::smccc_trng::ReadError::Unavailable => SourceReadError::Unavailable,
+        crate::smccc_trng::ReadError::NoEntropy => SourceReadError::NoEntropy,
+        crate::smccc_trng::ReadError::InvalidParameter | crate::smccc_trng::ReadError::Failed => {
             SourceReadError::Failed
         }
     }
@@ -324,8 +204,8 @@ pub(crate) fn available_summary() -> alloc::string::String {
 
 /// Read from every eager-eligible source that succeeds.
 ///
-/// Eager sources exclude [`SourceTier::HostTrusted`] (VirtIO) so boot does not
-/// block in a pre-interrupt virtqueue poll.
+/// Eager sources exclude host-trusted sources (VirtIO) so boot does not
+/// start the VirtIO collector before interrupts are ready.
 pub(crate) fn read_all_eager(len: usize) -> Vec<SourceSample> {
     let mut samples = Vec::new();
 
@@ -379,7 +259,8 @@ fn source_tier_allowed_for_reseed(source: &dyn EntropySource) -> bool {
         ))]
         SourceTier::Hrng => true,
         SourceTier::Software => true,
-        SourceTier::HostTrusted => cfg!(feature = "entropy_trust_host"),
+        #[cfg(feature = "entropy_virtio_rng")]
+        SourceTier::HostTrusted => true,
     }
 }
 
@@ -395,6 +276,7 @@ fn include_in_eager_reseed(source: &dyn EntropySource) -> bool {
         ))]
         SourceTier::Hrng => true,
         SourceTier::Software => true,
+        #[cfg(feature = "entropy_virtio_rng")]
         SourceTier::HostTrusted => false,
     }
 }
@@ -476,15 +358,11 @@ mod tests {
 
     #[cfg(feature = "entropy_virtio_rng")]
     #[def_test]
-    fn test_host_trusted_gated_by_trust_host() {
-        if VIRTIO_RNG_SOURCE.availability().is_available() {
-            assert_eq!(
-                include_in_reseed(&VIRTIO_RNG_SOURCE),
-                cfg!(feature = "entropy_trust_host")
-            );
-        } else {
-            assert!(!include_in_reseed(&VIRTIO_RNG_SOURCE));
-        }
+    fn test_host_source_reseed_requires_availability() {
+        assert_eq!(
+            include_in_reseed(&VIRTIO_RNG_SOURCE),
+            VIRTIO_RNG_SOURCE.availability().is_available()
+        );
     }
 
     #[def_test]
