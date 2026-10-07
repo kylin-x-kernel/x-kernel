@@ -1391,6 +1391,17 @@ mod tests {
         assert!(!modify.finish().had_pending());
     }
 
+    /// Pins the AArch64 fresh-map policy: flush-free invalid→valid
+    /// transitions (PR !852) correlated with KVM-killed vCPUs on aarch64
+    /// daily runs ("kvm run failed Function not implemented"). Re-landing
+    /// the optimization must be a deliberate, reviewed decision — flip this
+    /// assertion only with the root cause fixed.
+    #[cfg(target_arch = "aarch64")]
+    #[def_test]
+    fn aarch64_fresh_map_keeps_conservative_tlbi() {
+        assert!(crate::arch::aarch64::A64PagingMetaData::INVALID_TO_VALID_NEEDS_TLBI);
+    }
+
     #[cfg(target_arch = "aarch64")]
     #[def_test]
     fn sparse_unmap_and_drop_skip_nonpresent_arm_huge_leaves() {

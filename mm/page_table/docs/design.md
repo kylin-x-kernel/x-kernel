@@ -110,6 +110,12 @@ The following responsibilities belong to other layers:
 an address, and `finish()` clears it after emitting `fence_fresh_map()` once,
 skipped when the same boundary already invalidated something.
 
+No in-tree architecture currently opts in: AArch64 kept the default `true`
+after PR !852 correlated the flush-free fresh map with KVM-killed vCPUs on
+aarch64 daily runs ("kvm run failed Function not implemented", Stage-2 aborts
+on IPA outside RAM, builds #78-#85). The mechanism remains available pending
+a proven root cause.
+
 | From | To | Trigger |
 |------|----|---------|
 | `None` | `Addresses` | First call to `flush(vaddr)`. |
