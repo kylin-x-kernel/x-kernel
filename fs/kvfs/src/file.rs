@@ -1105,6 +1105,63 @@ mod tests {
 
     struct ShortWriteOperations;
 
+    struct InterruptedAfterBlock(AtomicU32);
+
+    impl FileOperations for InterruptedAfterBlock {
+        fn read(&self, _: &VfsFile, buf: &mut [u8], _: u64) -> VfsResult<usize> {
+            if self.0.fetch_add(1, Ordering::Relaxed) != 0 {
+                return Err(VfsError::IoWaitInterrupted);
+            }
+            buf.fill(0x37);
+            Ok(buf.len())
+        }
+
+        fn write(&self, _: &VfsFile, buf: &[u8], _: u64) -> VfsResult<usize> {
+            if self.0.fetch_add(1, Ordering::Relaxed) != 0 {
+                return Err(VfsError::IoWaitInterrupted);
+            }
+            assert!(buf.iter().all(|byte| *byte == 0x37));
+            Ok(buf.len())
+        }
+    }
+
+    #[def_test]
+    fn iterator_progress_overrides_later_file_wait_interruption() {
+        let length = memaddr::PAGE_SIZE_4K + 19;
+        let file = sync_test_file(
+            Arc::new(InterruptedAfterBlock(AtomicU32::new(0))),
+            FMode::READ,
+        );
+        let mut bytes = vec![0; length];
+        let mut iter = iov_iter_kvec_dest(&mut bytes);
+        let mut iocb = Kiocb::new(&file, 3);
+        assert_eq!(
+            file.operations().read_iter(&mut iocb, &mut iter),
+            Ok(memaddr::PAGE_SIZE_4K)
+        );
+        assert_eq!(iter.count(), 19);
+        assert_eq!(iocb.ki_pos(), 3 + memaddr::PAGE_SIZE_4K as u64);
+        assert!(
+            bytes[..memaddr::PAGE_SIZE_4K]
+                .iter()
+                .all(|byte| *byte == 0x37)
+        );
+        assert!(bytes[memaddr::PAGE_SIZE_4K..].iter().all(|byte| *byte == 0));
+        let file = sync_test_file(
+            Arc::new(InterruptedAfterBlock(AtomicU32::new(0))),
+            FMode::WRITE,
+        );
+        bytes.fill(0x37);
+        let mut iter = iov_iter_kvec_source(&bytes);
+        let mut iocb = Kiocb::new(&file, 3);
+        assert_eq!(
+            file.operations().write_iter(&mut iocb, &mut iter),
+            Ok(memaddr::PAGE_SIZE_4K)
+        );
+        assert_eq!(iter.count(), 19);
+        assert_eq!(iocb.ki_pos(), 3 + memaddr::PAGE_SIZE_4K as u64);
+    }
+
     impl FileOperations for ShortWriteOperations {
         fn write(&self, _file: &VfsFile, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
             Ok(2)

@@ -169,6 +169,11 @@ pub enum KErrorKind {
     ConnectionAborted,
     /// File is too large for the filesystem or VFS limit.
     FileTooLarge,
+    /// An opted-in file wait was interrupted by a signal.
+    ///
+    /// Defaults to EINTR. This does not establish that an enclosing transfer
+    /// made no progress; its owner must preserve completed bytes first.
+    IoWaitInterrupted,
 }
 
 impl KErrorKind {
@@ -221,6 +226,7 @@ impl KErrorKind {
             WouldBlock => "Operation would block",
             WriteZero => "Write zero",
             FileTooLarge => "File too large",
+            IoWaitInterrupted => "File wait interrupted",
         }
     }
 
@@ -281,6 +287,7 @@ impl KErrorKind {
             43 => WriteZero,
             44 => ConnectionAborted,
             45 => FileTooLarge,
+            46 => IoWaitInterrupted,
             _ => return None,
         })
     }
@@ -321,7 +328,7 @@ impl From<KErrorKind> for LinuxError {
             FilesystemLoop => LinuxError::ELOOP,
             IllegalBytes => LinuxError::EILSEQ,
             InProgress => LinuxError::EINPROGRESS,
-            Interrupted => LinuxError::EINTR,
+            Interrupted | IoWaitInterrupted => LinuxError::EINTR,
             InvalidExecutable => LinuxError::ENOEXEC,
             InvalidInput | InvalidData => LinuxError::EINVAL,
             Io => LinuxError::EIO,
@@ -476,6 +483,16 @@ impl KError {
     pub fn canonicalize(self) -> Self {
         KErrorKind::try_from(self).map_or_else(Into::into, Into::into)
     }
+
+    /// Recognizes interruption without discarding its source information.
+    ///
+    /// Includes Linux EINTR but not internal syscall restart codes.
+    pub fn is_interrupted(self) -> bool {
+        matches!(
+            self.canonicalize(),
+            Self::Interrupted | Self::IoWaitInterrupted
+        )
+    }
 }
 
 impl<E: Into<KErrorKind>> From<E> for KError {
@@ -608,7 +625,8 @@ kerror_consts!(
     WouldBlock,
     WriteZero,
     ConnectionAborted,
-    FileTooLarge
+    FileTooLarge,
+    IoWaitInterrupted
 );
 
 /// A specialized [`Result`] type with [`KError`] as the error type.
@@ -729,8 +747,9 @@ mod tests {
     #[test]
     fn test_try_from() {
         let max_code = KErrorKind::COUNT as i32;
-        assert_eq!(max_code, 45);
-        assert_eq!(max_code, KError::FileTooLarge.code());
+        assert_eq!(max_code, 46);
+        assert_eq!(KError::FileTooLarge.code(), 45);
+        assert_eq!(max_code, KError::IoWaitInterrupted.code());
 
         assert_eq!(KError::AddrInUse.code(), 1);
         assert_eq!(Ok(KError::AddrInUse), KError::try_from_i32(1));
@@ -739,7 +758,10 @@ mod tests {
             Ok(KError::ConnectionAborted),
             KError::try_from_i32(KError::ConnectionAborted.code())
         );
-        assert_eq!(Ok(KError::FileTooLarge), KError::try_from_i32(max_code));
+        assert_eq!(
+            Ok(KError::IoWaitInterrupted),
+            KError::try_from_i32(max_code)
+        );
         assert_eq!(Err(max_code + 1), KError::try_from_i32(max_code + 1));
         assert_eq!(Err(0), KError::try_from_i32(0));
         assert_eq!(Err(i32::MAX), KError::try_from_i32(i32::MAX));
@@ -769,6 +791,7 @@ mod tests_unittest {
     use crate::{KError, KErrorKind, LinuxError};
 
     const KIND_LINUX_PAIRS: &[(KErrorKind, LinuxError)] = &[
+        (KErrorKind::IoWaitInterrupted, LinuxError::EINTR),
         (KErrorKind::AddrInUse, LinuxError::EADDRINUSE),
         (KErrorKind::AlreadyConnected, LinuxError::EISCONN),
         (KErrorKind::AlreadyExists, LinuxError::EEXIST),
@@ -880,7 +903,8 @@ mod tests_unittest {
             let mapped = KErrorKind::try_from(linux);
             if matches!(
                 kind,
-                KErrorKind::BadState
+                KErrorKind::IoWaitInterrupted
+                    | KErrorKind::BadState
                     | KErrorKind::InvalidData
                     | KErrorKind::UnexpectedEof
                     | KErrorKind::WriteZero
@@ -920,5 +944,21 @@ mod tests_unittest {
         );
         assert_eq!(KError::WouldBlock.code(), KErrorKind::WouldBlock.code());
         assert_eq!(KError::try_from_i32(-123456), Err(-123456));
+    }
+
+    #[def_test]
+    fn file_wait_interruption_preserves_source_and_defaults_to_eintr() {
+        let marker = KError::IoWaitInterrupted;
+        assert_eq!(KError::FileTooLarge.code(), 45);
+        assert_eq!(marker.code(), 46);
+        assert_eq!(KError::try_from_i32(marker.code()), Ok(marker));
+        assert_eq!(marker.canonicalize(), marker);
+        assert_ne!(marker, KError::Interrupted);
+        assert_eq!(LinuxError::from(marker), LinuxError::EINTR);
+        assert!(marker.is_interrupted());
+        assert!(KError::Interrupted.is_interrupted());
+        assert!(KError::from(LinuxError::EINTR).is_interrupted());
+        assert!(!KError::from(LinuxError::ERESTARTSYS).is_interrupted());
+        assert!(!KError::WouldBlock.is_interrupted());
     }
 }

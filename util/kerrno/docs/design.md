@@ -37,6 +37,13 @@ semantic distinctions.
 
 ## Interfaces and caller obligations
 
+Interruption category checks preserve source identity: `is_interrupted()`
+recognizes ordinary interruption, Linux EINTR and opted-in file-wait interruption.
+The latter defaults to EINTR; only a caller that has already preserved the
+enclosing transfer's progress may promote it to syscall restart. Canonicalization
+does not discard kernel-kind distinctions and internal restart codes are not
+ordinary interruption-category errors.
+
 Subsystems construct `KError` from semantic kinds; Linux-facing adapters use
 `LinuxError` at the ABI edge. `Display` presents descriptions and `Debug`
 identifies the stored domain. `k_err_type!(Kind [, message])` constructs an error

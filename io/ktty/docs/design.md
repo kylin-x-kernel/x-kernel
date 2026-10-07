@@ -106,6 +106,13 @@ re-opens `/dev/console` in user mode.
 
 ## Calling Constraints
 
+TTY reads use `kvfs::poll_file_io`: available input is attempted before waiting
+and rechecked after signal interruption. A still-blocked read returns the
+file-wait marker; the read syscall boundary and signal delivery decide whether
+to restart or report EINTR. Line-discipline consumption remains responsible for
+the returned byte count. This does not add output backpressure, VTIME handling,
+or partial reads below VMIN; those remain outside the wait contract.
+
 TTY ioctl paths require the current task to be a user-process thread,
 because permission and session checks depend on `current_user_thread()`.
 User pointers are read or written only at the ioctl boundary; internal

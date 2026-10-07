@@ -30,8 +30,14 @@ points. A constructor/use example is in crate rustdoc.
 
 ## Execution context
 
+Eventfd read/write and timerfd read use `kvfs::poll_file_io`: an initial operation
+attempt and one post-signal attempt preserve ready/nonblocking behavior. A still-blocked
+signal wait returns the file-wait marker, not a Linux restart code. The syscall
+boundary and signal delivery own restart policy; ordinary errors keep their
+existing meaning. Other object waits retain their own documented paths.
+
 File construction requires allocator and initialized anonymous-inode filesystem.
-`read`/`write` may block through `block_on(poll_io(...))` unless the file carries
+`read`/`write` may block through their polling futures unless the file carries
 NONBLOCK. The authoritative nonblocking flag is on `VfsFile`. Epoll control uses
 a sleepable mutex and may allocate; it must run in task context. Signalfd data
 access requires a current user thread; a kernel task gets

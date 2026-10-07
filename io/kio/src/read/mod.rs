@@ -35,7 +35,7 @@ pub fn default_read_exact<R: Read + ?Sized>(this: &mut R, mut buf: &mut [u8]) ->
             Ok(n) => {
                 buf = &mut buf[n..];
             }
-            Err(e) if e.canonicalize() == Error::Interrupted => continue,
+            Err(e) if e.is_interrupted() => continue,
             Err(e) => return Err(e),
         }
     }
@@ -94,7 +94,7 @@ pub fn default_read_buf_exact<R: Read + ?Sized>(
         let prev_written = cursor.written();
         match this.read_buf(cursor.reborrow()) {
             Ok(()) => {}
-            Err(e) if e.canonicalize() == Error::Interrupted => continue,
+            Err(e) if e.is_interrupted() => continue,
             Err(e) => return Err(e),
         }
 
@@ -146,7 +146,7 @@ pub fn default_read_to_end<R: Read + ?Sized>(
                     buf.extend_from_slice(&probe[..n]);
                     return Ok(n);
                 }
-                Err(e) if e.canonicalize() == Error::Interrupted => continue,
+                Err(e) if e.is_interrupted() => continue,
                 Err(e) => return Err(e),
             }
         }
@@ -192,7 +192,7 @@ pub fn default_read_to_end<R: Read + ?Sized>(
         let mut cursor = read_buf.unfilled();
         let result = loop {
             match r.read_buf(cursor.reborrow()) {
-                Err(e) if e.canonicalize() == Error::Interrupted => continue,
+                Err(e) if e.is_interrupted() => continue,
                 res => break res,
             }
         };

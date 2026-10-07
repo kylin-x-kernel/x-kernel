@@ -9,8 +9,8 @@ use kerrno::{KError, KResult, LinuxError};
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use kprocess::{AsThread, ControllingTerminal, Pid, Process, ProcessGroup, SetTerminalResult};
 use ksync::Mutex;
-use ktask::future::{block_on, poll_io};
-use kvfs::{DeviceFileOps, NodeFlags, VfsFile, VfsFileBuilder, VfsInode};
+use ktask::future::block_on;
+use kvfs::{DeviceFileOps, NodeFlags, VfsFile, VfsFileBuilder, VfsInode, poll_file_io};
 use osvm::{VirtMutPtr, VirtPtr};
 
 use crate::terminal::{
@@ -217,18 +217,23 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
     }
 
     fn read(&self, file: &VfsFile, buf: &mut [u8], _offset: u64) -> KResult<usize> {
-        block_on(poll_io(self, IoEvents::IN, file.is_nonblocking(), || {
-            if self.is_ptm || self.terminal.job_control.current_in_foreground() {
-                self.ldisc.lock().read(buf)
-            } else {
-                // TODO: a background process group reading the controlling
-                // terminal should receive SIGTTIN (or `EIO` when SIGTTIN is
-                // ignored/blocked or the group is orphaned), per POSIX. For now
-                // we silently block until the reader reaches the foreground,
-                // which can stall job control.
-                Err(KError::WouldBlock)
-            }
-        }))
+        block_on(poll_file_io(
+            self,
+            IoEvents::IN,
+            file.is_nonblocking(),
+            || {
+                if self.is_ptm || self.terminal.job_control.current_in_foreground() {
+                    self.ldisc.lock().read(buf)
+                } else {
+                    // TODO: a background process group reading the controlling
+                    // terminal should receive SIGTTIN (or `EIO` when SIGTTIN is
+                    // ignored/blocked or the group is orphaned), per POSIX. For now
+                    // we silently block until the reader reaches the foreground,
+                    // which can stall job control.
+                    Err(KError::WouldBlock)
+                }
+            },
+        ))
     }
 
     fn write(&self, _file: &VfsFile, buf: &[u8], _offset: u64) -> KResult<usize> {

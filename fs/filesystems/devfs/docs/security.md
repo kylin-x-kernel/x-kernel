@@ -17,6 +17,14 @@ User space can open, read, poll, mmap, and issue ioctls through the generated
 character nodes. The projection never accepts user-selected device numbers or
 kernel object identities and does not allocate identifiers itself.
 
+`DeviceFile` supplies inode identity, not open-file dispatch. Both registered
+character opens and PTMX master replacement use KVFS's single character adapter.
+VFS derives capabilities from the final backend and file open mode; poll results,
+event masks and registration errors remain the backend's responsibility.
+PTMX installs and opens its master once, outside the PTS table lock. Successful
+open transfers release responsibility to the final file; a failed backend open
+must roll back its own incomplete setup. Path permissions remain unchanged.
+
 The evdev path copies user buffers through `UserPtr`; device events and
 capability bitmaps originate from the backing input driver. The DRM user-memory
 boundary is documented in `io/drmdevice/docs/security.md`.

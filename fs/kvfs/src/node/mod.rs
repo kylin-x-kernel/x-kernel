@@ -13,7 +13,7 @@ pub(crate) use dentry::{
     DentryKey, LookupCreateResult, d_inode, d_is_dir, d_is_negative, d_is_symlink,
     d_really_is_positive,
 };
-pub use device::{DeviceFileOps, MmapMapper, cdev_add, cdev_del};
+pub use device::{DeviceFileOps, MmapMapper, cdev_add, cdev_del, open_character_device};
 pub use dir::{DirContext, DirEntrySink};
 pub use inode::{
     FiemapCapability, GetattrQueryFlags, GetattrRequestMask, InodeAttributeOperations,

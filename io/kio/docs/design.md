@@ -84,6 +84,10 @@ Interfaces are grouped by provider and caller direction:
 
 ## Execution context and concurrency
 
+Helpers documented to retry interruption use the error's interruption category,
+including opted-in file-wait interruption, without changing their accumulated
+progress. They do not decide Linux syscall restart or inspect signal handlers.
+
 No production path uses locks, atomics, CPU-local state, current-process lookup,
 or the scheduler directly. Mutation is controlled by exclusive Rust borrows;
 `Send` and `Sync` are automatic and depend on contained values and closures.

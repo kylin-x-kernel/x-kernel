@@ -2,16 +2,15 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Device file node — a VFS adapter that wraps [`DeviceFileOps`] into a
-//! filesystem-accessible special file (char/block device).
+//! Filesystem node projection for character and block devices.
 
 use alloc::{string::String, sync::Arc};
 
 use inherit_methods_macro::inherit_methods;
 use kvfs::{
     Dentry, DeviceFileOps, DeviceId, DirMapping, InodeOperations, Metadata, MetadataUpdate,
-    MmapMapper, NodeFlags, NodePermission, NodeType, SimpleDirLookup, SimpleFs, SimpleFsNode,
-    VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult, cdev_add,
+    NodeFlags, NodePermission, NodeType, SimpleDirLookup, SimpleFs, SimpleFsNode, VfsInode,
+    VfsInodeInit, VfsResult, cdev_add,
 };
 
 /// A VFS node representing a character or block special file.
@@ -73,12 +72,6 @@ impl DeviceFile {
     pub fn inode_init(&self) -> VfsInodeInit {
         self.node.inode_init()
     }
-
-    fn operations(&self) -> VfsResult<&Arc<dyn DeviceFileOps>> {
-        self.character_operations
-            .as_ref()
-            .ok_or(VfsError::NoSuchDevice)
-    }
 }
 
 #[inherit_methods(from = "self.node")]
@@ -97,24 +90,6 @@ impl InodeOperations for DeviceFile {
         _dentry: &kvfs::Dentry,
         update: MetadataUpdate,
     ) -> VfsResult<MetadataUpdate>;
-}
-
-impl kvfs::FileOperations for DeviceFile {
-    fn read(&self, file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
-        self.operations()?.read(file, buf, offset)
-    }
-
-    fn write(&self, file: &VfsFile, buf: &[u8], offset: u64) -> VfsResult<usize> {
-        self.operations()?.write(file, buf, offset)
-    }
-
-    fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
-        self.operations()?.ioctl(file, cmd, arg)
-    }
-
-    fn mmap(&self, file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
-        self.operations()?.mmap(file, mapper)
-    }
 }
 
 pub(crate) fn device_dentry(

@@ -150,6 +150,14 @@ non-final component 的普通 symlink、magic-link、`NO_MAGIC_LINKS` 和
 
 ### 文件数据流
 
+非定位读写请求在对象及 iterator 汇总完成量后，仅把显式文件等待中断标记转换为
+`ERESTARTSYS`，由信号交付根据 handler 标志决定重启或 EINTR。转换位于完整请求
+helper，而不是各 syscall 入口：`read/write/readv/writev` 与
+`preadv2/pwritev2(offset=-1, flags=0)` 共用该出口。正数、零和普通错误保持不变。
+复制类 syscall 直接使用底层 VFS 操作，在整个复制请求汇总完成量后才应用同一转换；
+已有输出优先返回正数，不能把单次底层等待升级为整个请求重放。定位 I/O 和未接入标记
+的对象保持原有中断契约。
+
 ```text
 user buffer / iovec
     │ VmBytes / VmBytesMut / IoVectorBuf
@@ -162,9 +170,13 @@ FileLike::read/write
     └─ device-specific FileLike implementation
 ```
 
-`sendfile`、`copy_file_range` 和 `splice` 共享 `SendFile`/`do_send`，
-用 4 KiB 中间缓冲区在源和目标 fd 之间搬运数据。
-使用用户提供 offset 指针时，读写成功后会把新的 offset 写回用户地址。
+`sendfile`、`copy_file_range` 和 `splice` 将内核态偏移交给
+`kvfs::transfer_files`，由 VFS 管理缓冲传输、文件位置和管道消费。
+syscall 层保留参数校验、用户 offset 回写及整个请求的重启决策。
+`sendfile` 在传输返回后回写显式 offset，包括 EOF 和错误；
+`splice` 仅在非负结果后回写，先目标再源，首次回写错误即返回；
+`copy_file_range` 仅在正数结果后回写，两端回写都会尝试。
+回写失败可返回 EFAULT，但不回滚已发生的输出。
 
 ## 算法流程
 
@@ -345,10 +357,10 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
 
 文档使用者需要特别注意跨对象操作：
 `renameat2` 会解析旧目录和新目录后交给 VFS rename；
-`sendfile`/`copy_file_range`/`splice` 在一个循环里交替读写两个 fd；
+文件到文件复制按对象地址顺序锁定位置，同一打开文件只取一次锁；管道路径先等
+数据或空间，再在管道锁内获取非管道文件位置锁，不跨管道等待持有位置锁；
 设备节点的 open 语义由 VFS/device file operations 自身处理。
-这些路径不在 `posix-fs` 中显式定义全局锁顺序，
-因此新增代码应避免在持有 fd 表或目录 offset 锁时进入可能回调同一资源的复杂路径。
+新增代码应避免在持有 fd 表或目录 offset 锁时进入可能回调同一资源的复杂路径。
 
 ## 设计决策
 
@@ -456,9 +468,10 @@ pathname DAC。这对应 Linux `vfs_truncate()` 与 `do_ftruncate()` 的语义�
 
 ### 复制类 syscall 使用中间缓冲区
 
-`do_send` 使用 4 KiB 临时缓冲区实现 fd-to-fd 复制。
-实现简单并复用 `FileLike` 的 read/write 语义，
-代价是没有零拷贝，也没有完整处理 `copy_file_range` 的同文件重叠和跨文件系统限制。
+KVFS 的传输入口负责文件缓冲和管道消费，syscall 不自行循环调用对象读写。
+短写计入累计量后返回；后续传输错误不能覆盖已完成量。零完成量的文件等待中断
+才可请求信号重启。显式 offset 回写失败是传输后的独立错误，不属于该累计规则。
+尚无零拷贝，也没有完整处理 `copy_file_range` 的同文件重叠和跨文件系统限制。
 `copy_file_range` 当前只接受 `flags == 0`，
 非零 flags 会在 syscall 边界返回 `InvalidInput`。
 

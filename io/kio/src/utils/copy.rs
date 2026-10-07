@@ -14,7 +14,7 @@
 use alloc::{collections::vec_deque::VecDeque, vec::Vec};
 use core::{io::BorrowedBuf, mem::MaybeUninit};
 
-use crate::{BufReader, BufWriter, DEFAULT_BUF_SIZE, Error, Read, Result, Write};
+use crate::{BufReader, BufWriter, DEFAULT_BUF_SIZE, Read, Result, Write};
 
 /// Copies the entire contents of a reader into a writer.
 ///
@@ -70,7 +70,7 @@ where
     loop {
         match reader.read_buf(buf.unfilled()) {
             Ok(()) => {}
-            Err(e) if e.canonicalize() == Error::Interrupted => continue,
+            Err(e) if e.is_interrupted() => continue,
             Err(e) => return Err(e),
         };
 
@@ -154,7 +154,7 @@ where
         loop {
             match self.read(&mut []) {
                 Ok(_) => {}
-                Err(e) if e.canonicalize() == Error::Interrupted => continue,
+                Err(e) if e.is_interrupted() => continue,
                 Err(e) => return Err(e),
             }
             let buf = self.buffer();
@@ -245,7 +245,7 @@ impl<I: Write + ?Sized> BufferedWriterSpec for BufWriter<I> {
                         // SAFETY: BorrowedBuf guarantees all of its filled bytes are init
                         unsafe { buf.set_len(buf.len() + bytes_read) };
                     }
-                    Err(ref e) if e.canonicalize() == Error::Interrupted => {}
+                    Err(ref e) if e.is_interrupted() => {}
                     Err(e) => return Err(e),
                 }
             } else {

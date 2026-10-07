@@ -16,7 +16,9 @@ use linux_raw_sys::ioctl::FIONREAD;
 use memaddr::PAGE_SIZE_4K;
 use osvm::VirtMutPtr;
 
-use crate::{FMode, FileOperations, Kiocb, VfsFile, VfsFileBuilder, VfsInode, VfsResult};
+use crate::{
+    FMode, FileOperations, Kiocb, VfsFile, VfsFileBuilder, VfsInode, VfsResult, poll_file_io,
+};
 
 /// Initial pipe buffer capacity in bytes.
 pub(crate) const RING_BUFFER_INIT_SIZE: usize = 65536;
@@ -42,7 +44,7 @@ impl PipeState {
         self.capacity.saturating_sub(self.buffer.len())
     }
 
-    fn read_into(&mut self, dst: &mut [u8]) -> usize {
+    fn copy_prefix(&self, dst: &mut [u8]) -> usize {
         let count = dst.len().min(self.buffer.len());
         if count == 0 {
             return 0;
@@ -55,6 +57,11 @@ impl PipeState {
         if tail_len != 0 {
             dst[head_len..count].copy_from_slice(&tail[..tail_len]);
         }
+        count
+    }
+
+    fn read_into(&mut self, dst: &mut [u8]) -> usize {
+        let count = self.copy_prefix(dst);
         drop(self.buffer.drain(..count));
         count
     }
@@ -243,12 +250,153 @@ impl PipeObject {
         self.state.lock().buffer.len()
     }
 
+    /// Transfers buffered bytes to a non-pipe destination without consuming a
+    /// rejected suffix. Runs in sleepable task context under this pipe's mutex.
+    /// `write_fn` must not reenter a pipe. Callers must not hold file-position
+    /// locks; the callback may lock its non-pipe destination. Callback errors are not
+    /// mistaken for an empty source pipe.
+    /// An oversized callback result returns EIO without consuming pipe data;
+    /// side effects in the destination cannot be rolled back.
+    pub(crate) fn splice_read(
+        &self,
+        nonblocking: bool,
+        scratch: &mut [u8],
+        mut write_fn: impl FnMut(&[u8]) -> KResult<usize>,
+    ) -> KResult<usize> {
+        if scratch.is_empty() {
+            return Ok(0);
+        }
+        let result = block_on(poll_file_io(self, IoEvents::IN, nonblocking, || {
+            let mut state = self.state.lock();
+            let count = scratch.len().min(state.buffer.len());
+            if count == 0 {
+                return if state.writers == 0 {
+                    Ok(Ok(0))
+                } else {
+                    Err(KError::WouldBlock)
+                };
+            }
+            state.copy_prefix(&mut scratch[..count]);
+            let result = write_fn(&scratch[..count]);
+            if let Ok(written) = result {
+                if written > count {
+                    return Ok(Err(KError::Io));
+                }
+                drop(state.buffer.drain(..written));
+            }
+            Ok(result)
+        }))?;
+        if matches!(result, Ok(count) if count > 0) {
+            self.wr_wait.wake();
+        }
+        result
+    }
+
+    /// Publishes bytes read from a non-pipe source only after reserving space.
+    /// Runs in sleepable task context under this pipe's mutex. `read_fn` must
+    /// not reenter a pipe. Callers must not hold file-position locks; the callback
+    /// may lock its non-pipe source position. A positive result is
+    /// fully accepted, including short reads; source errors do not trigger a
+    /// wait for destination space.
+    /// An oversized callback result returns EIO without publishing pipe data;
+    /// side effects in the source cannot be rolled back.
+    pub(crate) fn splice_write(
+        &self,
+        nonblocking: bool,
+        scratch: &mut [u8],
+        mut read_fn: impl FnMut(&mut [u8]) -> KResult<usize>,
+    ) -> KResult<usize> {
+        if scratch.is_empty() {
+            return Ok(0);
+        }
+        let result = block_on(poll_file_io(self, IoEvents::OUT, nonblocking, || {
+            let mut state = self.state.lock();
+            if state.readers == 0 {
+                drop(state);
+                let _ = send_sig_current(Signo::SIGPIPE);
+                return Ok(Err(KError::BrokenPipe));
+            }
+            let count = scratch.len().min(state.available());
+            if count == 0 {
+                return Err(KError::WouldBlock);
+            }
+            let result = read_fn(&mut scratch[..count]);
+            if let Ok(read) = result {
+                if read > count {
+                    return Ok(Err(KError::Io));
+                }
+                state.write_from(&scratch[..read]);
+            }
+            Ok(result)
+        }))?;
+        if matches!(result, Ok(count) if count > 0) {
+            self.rd_wait.wake();
+        }
+        result
+    }
+
+    /// Moves up to `len` bytes into another pipe, leaving all untransferred
+    /// bytes in this pipe. Both mutexes are ordered by object address and are
+    /// released before waiting or notifying. May sleep in task context.
+    pub(crate) fn splice_to(
+        &self,
+        destination: &Self,
+        len: usize,
+        nonblocking: bool,
+    ) -> KResult<usize> {
+        if len == 0 {
+            return Ok(0);
+        }
+        if core::ptr::eq(self, destination) {
+            return Err(KError::InvalidInput);
+        }
+        let wait = PipeTransferWait {
+            source: self,
+            destination,
+        };
+        let result = block_on(poll_file_io(
+            &wait,
+            IoEvents::IN | IoEvents::OUT,
+            nonblocking,
+            || {
+                let (mut source, mut target) =
+                    if core::ptr::from_ref(self) < core::ptr::from_ref(destination) {
+                        let source = self.state.lock();
+                        (source, destination.state.lock())
+                    } else {
+                        let target = destination.state.lock();
+                        (self.state.lock(), target)
+                    };
+                if target.readers == 0 {
+                    drop(target);
+                    drop(source);
+                    let _ = send_sig_current(Signo::SIGPIPE);
+                    return Err(KError::BrokenPipe);
+                }
+                if source.buffer.is_empty() && source.writers == 0 {
+                    return Ok(0);
+                }
+                let count = len.min(source.buffer.len()).min(target.available());
+                if count == 0 {
+                    return Err(KError::WouldBlock);
+                }
+                target.buffer.extend(source.buffer.drain(..count));
+                Ok(count)
+            },
+        ));
+        if matches!(result, Ok(count) if count > 0) {
+            self.wr_wait.wake();
+            destination.rd_wait.wake();
+        }
+        result
+    }
+
     fn read_with(
         &self,
         nonblocking: bool,
         mut read: impl FnMut(&mut PipeState) -> KResult<usize>,
     ) -> KResult<usize> {
-        block_on(poll_io(self, IoEvents::IN, nonblocking, || {
+        block_on(poll_file_io(self, IoEvents::IN, nonblocking, || {
             let (read, has_writers) = {
                 let mut state = self.state.lock();
                 let read = read(&mut state)?;
@@ -287,7 +435,7 @@ impl PipeObject {
 
         let size = buf.len();
         let mut written_total = 0usize;
-        block_on(poll_io(self, IoEvents::OUT, nonblocking, || {
+        block_on(poll_file_io(self, IoEvents::OUT, nonblocking, || {
             let written = {
                 let mut state = self.state.lock();
                 if state.readers == 0 {
@@ -404,6 +552,36 @@ impl PipeObject {
         let (wake_readers, wake_writers) = remove_access(&mut self.state.lock(), access);
         self.wake(wake_readers, wake_writers);
         Ok(())
+    }
+}
+
+struct PipeTransferWait<'a> {
+    source: &'a PipeObject,
+    destination: &'a PipeObject,
+}
+
+impl Pollable for PipeTransferWait<'_> {
+    fn poll(&self) -> IoEvents {
+        let source = self.source.poll();
+        let destination = self.destination.poll();
+        if destination.contains(IoEvents::ERR) {
+            IoEvents::ERR
+        } else if source.contains(IoEvents::IN) && destination.contains(IoEvents::OUT) {
+            IoEvents::IN | IoEvents::OUT
+        } else if source.contains(IoEvents::HUP) && !source.contains(IoEvents::IN) {
+            IoEvents::HUP
+        } else {
+            IoEvents::empty()
+        }
+    }
+
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        _: IoEvents,
+    ) -> Result<(), PollRegisterError> {
+        self.source.register(context, IoEvents::IN)?;
+        self.destination.register(context, IoEvents::OUT)
     }
 }
 
@@ -793,9 +971,213 @@ pub fn pipe_file_operations() -> Arc<dyn FileOperations> {
 
 #[cfg(unittest)]
 mod tests {
+    use alloc::vec;
+
     use unittest::def_test;
 
     use super::*;
+
+    #[def_test]
+    fn splice_rejects_oversized_write_without_consuming_source() {
+        for reported in [4, usize::MAX] {
+            let pipe = PipeObject::new_anonymous();
+            pipe.write(true, true, b"abcdef").unwrap();
+            let mut scratch = [0; 3];
+            assert_eq!(
+                pipe.splice_read(true, &mut scratch, |bytes| {
+                    assert_eq!(bytes, b"abc");
+                    Ok(reported)
+                }),
+                Err(KError::Io)
+            );
+            let mut remaining = [0; 6];
+            assert_eq!(pipe.read(true, &mut remaining), Ok(6));
+            assert_eq!(&remaining, b"abcdef");
+        }
+    }
+
+    #[def_test]
+    fn splice_rejects_oversized_read_without_publishing_data() {
+        for reported in [4, usize::MAX] {
+            let pipe = PipeObject::new_anonymous();
+            pipe.resize(PIPE_BUF).unwrap();
+            let original = vec![1; PIPE_BUF - 3];
+            pipe.write(true, true, &original).unwrap();
+            let mut scratch = [0; 8];
+            assert_eq!(
+                pipe.splice_write(true, &mut scratch, |bytes| {
+                    assert_eq!(bytes.len(), 3);
+                    bytes.fill(2);
+                    Ok(reported)
+                }),
+                Err(KError::Io)
+            );
+            let mut remaining = vec![0; PIPE_BUF];
+            assert_eq!(pipe.read(true, &mut remaining), Ok(original.len()));
+            assert_eq!(&remaining[..original.len()], original.as_slice());
+            assert_eq!(pipe.read(true, &mut remaining), Err(KError::WouldBlock));
+        }
+    }
+
+    #[def_test]
+    fn splice_retains_rejected_and_short_written_data() {
+        let pipe = PipeObject::new_anonymous();
+        pipe.write(true, true, b"abcdef").unwrap();
+        let mut scratch = [0; 6];
+        assert_eq!(
+            pipe.splice_read(true, &mut scratch, |_| Err(KError::IoWaitInterrupted)),
+            Err(KError::IoWaitInterrupted)
+        );
+        assert_eq!(
+            pipe.splice_read(true, &mut scratch, |bytes| {
+                assert_eq!(bytes, b"abcdef");
+                Ok(2)
+            }),
+            Ok(2)
+        );
+        let mut remaining = [0; 6];
+        assert_eq!(pipe.read(true, &mut remaining), Ok(4));
+        assert_eq!(&remaining[..4], b"cdef");
+    }
+
+    #[def_test]
+    fn splice_reserves_space_before_reading_source() {
+        let pipe = PipeObject::new_anonymous();
+        pipe.resize(PIPE_BUF).unwrap();
+        pipe.write(true, true, &vec![1; PIPE_BUF]).unwrap();
+        let mut scratch = [0; 8];
+        assert_eq!(
+            pipe.splice_write(true, &mut scratch, |_| panic!(
+                "full pipe must not consume source"
+            )),
+            Err(KError::WouldBlock)
+        );
+        let mut drain = [0; 3];
+        pipe.read(true, &mut drain).unwrap();
+        assert_eq!(
+            pipe.splice_write(true, &mut scratch, |bytes| {
+                assert_eq!(bytes.len(), 3);
+                bytes.copy_from_slice(b"end");
+                Ok(3)
+            }),
+            Ok(3)
+        );
+    }
+
+    #[def_test]
+    fn splice_between_pipes_retains_untransferred_suffix() {
+        let source = PipeObject::new_anonymous();
+        let destination = PipeObject::new_anonymous();
+        destination.resize(PIPE_BUF).unwrap();
+        let data = [vec![1; PIPE_BUF], vec![2; PIPE_BUF]].concat();
+        source.write(true, false, &data).unwrap();
+        assert_eq!(
+            source.splice_to(&destination, data.len(), true),
+            Ok(PIPE_BUF)
+        );
+        assert_eq!(
+            source.splice_to(&destination, data.len(), true),
+            Err(KError::WouldBlock)
+        );
+        let mut bytes = vec![0; PIPE_BUF];
+        assert_eq!(source.read(true, &mut bytes), Ok(PIPE_BUF));
+        assert!(bytes.iter().all(|byte| *byte == 2));
+        assert_eq!(destination.read(true, &mut bytes), Ok(PIPE_BUF));
+        assert!(bytes.iter().all(|byte| *byte == 1));
+        assert_eq!(
+            source.splice_to(&source, 1, true),
+            Err(KError::InvalidInput)
+        );
+    }
+
+    #[def_test]
+    fn interrupted_pipe_write_preserves_committed_prefix() {
+        let pipe = PipeObject::new_anonymous();
+        pipe.resize(PIPE_BUF).unwrap();
+        let bytes = vec![0x53; PIPE_BUF + 17];
+        let task = ktask::current();
+        task.interrupt();
+        let result = pipe.write(false, false, &bytes);
+        task.clear_interrupt();
+        assert_eq!(result, Ok(PIPE_BUF));
+        let mut output = vec![0; PIPE_BUF + 17];
+        assert_eq!(pipe.read(true, &mut output), Ok(PIPE_BUF));
+        assert_eq!(&output[..PIPE_BUF], &bytes[..PIPE_BUF]);
+        assert_eq!(pipe.read(true, &mut output), Err(KError::WouldBlock));
+    }
+
+    #[def_test]
+    fn interrupted_pipe_iterator_preserves_previous_block_and_rewinds_tail() {
+        let pipe = PipeObject::new_anonymous();
+        pipe.resize(PIPE_BUF).unwrap();
+        let root = crate::Mount::new_root(&crate::nullfs::new_superblock()).root_path();
+        let mut builder = VfsFileBuilder::from_path_state(
+            root,
+            FMode::WRITE,
+            crate::OpenFlags::empty(),
+            pipe_file_operations(),
+            kcred::initial_cred(),
+        );
+        builder.set_private_data(pipe.clone());
+        let file = builder.finish().unwrap();
+        let bytes = vec![0x64; PIPE_BUF + 31];
+        let mut iter = iov_iter::iov_iter_kvec_source(&bytes);
+        let mut iocb = Kiocb::new(&file, 7);
+        let task = ktask::current();
+        task.interrupt();
+        let result = pipe_write_iter(&mut iocb, &mut iter);
+        task.clear_interrupt();
+        assert_eq!(result, Ok(PIPE_BUF));
+        assert_eq!(iocb.ki_pos(), 7 + PIPE_BUF as u64);
+        assert_eq!(iter.count(), 31);
+        assert_eq!(pipe.readable_len(), PIPE_BUF);
+        let mut output = vec![0; PIPE_BUF];
+        assert_eq!(pipe.read(true, &mut output), Ok(PIPE_BUF));
+        assert_eq!(&output, &bytes[..PIPE_BUF]);
+    }
+
+    #[def_test]
+    fn interrupted_small_pipe_write_remains_atomic() {
+        let pipe = PipeObject::new_anonymous();
+        pipe.resize(PIPE_BUF).unwrap();
+        assert_eq!(
+            pipe.write(true, false, &vec![0x21; PIPE_BUF - 2]),
+            Ok(PIPE_BUF - 2)
+        );
+        let task = ktask::current();
+        task.interrupt();
+        let result = pipe.write(false, true, b"abcd");
+        task.clear_interrupt();
+        assert_eq!(result, Err(KError::IoWaitInterrupted));
+        assert_eq!(pipe.readable_len(), PIPE_BUF - 2);
+        let mut output = vec![0; PIPE_BUF];
+        assert_eq!(pipe.read(true, &mut output), Ok(PIPE_BUF - 2));
+        assert!(output[..PIPE_BUF - 2].iter().all(|byte| *byte == 0x21));
+    }
+
+    #[def_test]
+    fn pipe_readiness_and_eof_precede_interrupt_but_empty_wait_is_marked() {
+        let pipe = PipeObject::new_anonymous();
+        let task = ktask::current();
+        let mut output = [0; 4];
+        task.interrupt();
+        let waiting = pipe.read(false, &mut output);
+        task.clear_interrupt();
+        assert_eq!(waiting, Err(KError::IoWaitInterrupted));
+        assert_eq!(pipe.write(true, true, b"data"), Ok(4));
+        task.interrupt();
+        let ready = pipe.read(false, &mut output);
+        let preserved = task.is_interrupted();
+        task.clear_interrupt();
+        assert_eq!(ready, Ok(4));
+        assert_eq!(&output, b"data");
+        assert!(preserved);
+        pipe.state.lock().writers = 0;
+        task.interrupt();
+        let eof = pipe.read(false, &mut output);
+        task.clear_interrupt();
+        assert_eq!(eof, Ok(0));
+    }
 
     #[def_test]
     fn fifo_partner_counter_records_completed_rendezvous() {

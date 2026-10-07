@@ -11,13 +11,13 @@
 //! - Splice and transfer operations (splice, sendfile, etc.)
 //! - File synchronization (fsync, fdatasync, etc.)
 
-use alloc::{sync::Arc, vec};
+#[cfg(unittest)]
+use alloc::sync::Arc;
 use core::ffi::{c_char, c_int};
 
 use iov_iter::{IovSink, IovSource, iov_iter_dest, iov_iter_source};
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
-use kpoll::IoEvents;
 use kvfs::{FMode, Filename, LookupFlags, LookupIntent, OpenFlags, VfsFile, pipe::PipeObject};
 use linux_raw_sys::general::__kernel_off_t;
 use linux_sysno::Sysno;
@@ -103,10 +103,11 @@ fn write_zeros_range(file: &VfsFile, start: u64, end: u64) -> KResult<()> {
     Ok(())
 }
 
-fn read_file_to_io(file: &VfsFile, dst: impl Write + IoBufMut + RewindBytes) -> KResult<usize> {
+// Finalize a complete request, not one step of an aggregate transfer.
+fn read_request_to_io(file: &VfsFile, dst: impl Write + IoBufMut + RewindBytes) -> KResult<usize> {
     let mut dst = IoSinkAdapter(dst);
     let mut iter = iov_iter_dest(&mut dst);
-    file.read_iter(&mut iter)
+    finish_restartable_io(file.read_iter(&mut iter))
 }
 
 fn read_file_at_to_io(
@@ -131,14 +132,16 @@ fn write_file_from_io_with_pos(
     file.write_iter_from(&mut iter, pos)
 }
 
-fn write_file_from_io(file: &VfsFile, src: impl Read + IoBuf + RewindBytes) -> KResult<usize> {
-    if file.is_stream() {
+// Finalize a complete request, not one step of an aggregate transfer.
+fn write_request_from_io(file: &VfsFile, src: impl Read + IoBuf + RewindBytes) -> KResult<usize> {
+    let result = if file.is_stream() {
         let mut pos = 0;
         write_file_from_io_with_pos(file, src, &mut pos)
     } else {
         let mut pos = file.position_lock();
         write_file_from_io_with_pos(file, src, &mut pos)
-    }
+    };
+    finish_restartable_io(result)
 }
 
 fn write_file_at_from_io(
@@ -178,7 +181,8 @@ pub fn sys_read(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
     debug!("sys_read <= fd: {fd}, buf: {:p}, len: {len}", buf.as_ptr());
     // Get the file object and perform the read operation into the user buffer
     let file = kprocess::current_resources().get_file(fd)?;
-    Ok(read_file_to_io(&file, VmBytesMut::new(buf.as_ptr().cast_mut(), len))? as _)
+    read_request_to_io(&file, VmBytesMut::new(buf.as_ptr().cast_mut(), len))
+        .map(|count| count as isize)
 }
 
 /// Vectored read into multiple buffers.
@@ -187,7 +191,7 @@ pub fn sys_readv(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<is
     // Vectored read - read data into multiple buffers in a single operation
     let f = kprocess::current_resources().get_file(fd)?;
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
-    read_file_to_io(&f, iov.into_io()).map(|n| n as _)
+    read_request_to_io(&f, iov.into_io()).map(|count| count as isize)
 }
 
 /// Write data to the file indicated by `fd`.
@@ -196,7 +200,7 @@ pub fn sys_readv(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<is
 pub fn sys_write(fd: i32, buf: UserConstPtr<u8>, len: usize) -> KResult<isize> {
     debug!("sys_write <= fd: {fd}, buf: {:p}, len: {len}", buf.as_ptr());
     let file = kprocess::current_resources().get_file(fd)?;
-    Ok(write_file_from_io(&file, VmBytes::new(buf.as_ptr(), len))? as _)
+    write_request_from_io(&file, VmBytes::new(buf.as_ptr(), len)).map(|count| count as isize)
 }
 
 /// Vectored write from multiple buffers.
@@ -205,7 +209,282 @@ pub fn sys_writev(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<i
     // Vectored write - write data from multiple buffers in a single operation
     let f = kprocess::current_resources().get_file(fd)?;
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
-    write_file_from_io(&f, iov.into_io()).map(|n| n as _)
+    write_request_from_io(&f, iov.into_io()).map(|count| count as isize)
+}
+
+// The non-positioned request helpers share this exit, including v2 offset=-1.
+// Object/iterator progress has already been accounted for. Copy syscalls must
+// use raw VFS operations and decide interruption at their aggregate boundary.
+fn finish_restartable_io(result: KResult<usize>) -> KResult<usize> {
+    match result {
+        Err(KError::IoWaitInterrupted) => Err(LinuxError::ERESTARTSYS.into()),
+        result => result,
+    }
+}
+
+#[cfg(unittest)]
+mod restart_tests {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use kvfs::{FMode, FileOperations, OpenFlags};
+
+    use super::*;
+
+    struct TransferOperations {
+        fail_after: usize,
+        max_write: usize,
+        calls: AtomicUsize,
+        transferred: AtomicUsize,
+    }
+
+    impl FileOperations for TransferOperations {
+        fn supports_read(&self) -> bool {
+            true
+        }
+
+        fn supports_write(&self) -> bool {
+            true
+        }
+
+        fn read(&self, _: &VfsFile, bytes: &mut [u8], _: u64) -> KResult<usize> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            bytes.fill(0x45);
+            Ok(bytes.len())
+        }
+
+        fn write(&self, _: &VfsFile, bytes: &[u8], _: u64) -> KResult<usize> {
+            if self.calls.fetch_add(1, Ordering::Relaxed) == self.fail_after {
+                return Err(KError::IoWaitInterrupted);
+            }
+            assert!(bytes.iter().all(|byte| *byte == 0x45));
+            let written = bytes.len().min(self.max_write);
+            self.transferred.fetch_add(written, Ordering::Relaxed);
+            Ok(written)
+        }
+    }
+
+    #[unittest::def_test]
+    fn aggregate_transfer_does_not_promote_leaf_interruption_after_output() {
+        let base = memfs::shmem::create_memfd_file("restart-test", false, kcred::initial_cred())
+            .unwrap()
+            .into_file(kcred::initial_cred())
+            .unwrap();
+        for completed_blocks in [0, 1] {
+            let source = Arc::new(TransferOperations {
+                fail_after: usize::MAX,
+                max_write: usize::MAX,
+                calls: AtomicUsize::new(0),
+                transferred: AtomicUsize::new(0),
+            });
+            let destination = Arc::new(TransferOperations {
+                fail_after: completed_blocks,
+                max_write: usize::MAX,
+                calls: AtomicUsize::new(0),
+                transferred: AtomicUsize::new(0),
+            });
+            let input = base
+                .alloc_clone(FMode::READ, OpenFlags::empty(), source.clone())
+                .unwrap();
+            let output = base
+                .alloc_clone(FMode::WRITE, OpenFlags::empty(), destination.clone())
+                .unwrap();
+            let result = finish_restartable_io(kvfs::transfer_files(
+                &input, None, &output, None, 8192, false,
+            ));
+            assert_eq!(
+                result,
+                if completed_blocks == 0 {
+                    Err(LinuxError::ERESTARTSYS.into())
+                } else {
+                    Ok(completed_blocks * 4096)
+                }
+            );
+            assert_eq!(source.calls.load(Ordering::Relaxed), completed_blocks + 1);
+            assert_eq!(*input.position_lock(), completed_blocks as u64 * 4096);
+            assert_eq!(*output.position_lock(), completed_blocks as u64 * 4096);
+            assert_eq!(
+                destination.calls.load(Ordering::Relaxed),
+                completed_blocks + 1
+            );
+            assert_eq!(
+                destination.transferred.load(Ordering::Relaxed),
+                completed_blocks * 4096
+            );
+        }
+    }
+
+    #[unittest::def_test]
+    fn aggregate_short_write_commits_only_accepted_bytes() {
+        let base = memfs::shmem::create_memfd_file("short-copy", false, kcred::initial_cred())
+            .unwrap()
+            .into_file(kcred::initial_cred())
+            .unwrap();
+        let operations = Arc::new(TransferOperations {
+            fail_after: usize::MAX,
+            max_write: 123,
+            calls: AtomicUsize::new(0),
+            transferred: AtomicUsize::new(0),
+        });
+        let input = base
+            .alloc_clone(FMode::READ, OpenFlags::empty(), operations.clone())
+            .unwrap();
+        let output = base
+            .alloc_clone(FMode::WRITE, OpenFlags::empty(), operations.clone())
+            .unwrap();
+        assert_eq!(
+            finish_restartable_io(kvfs::transfer_files(
+                &input, None, &output, None, 8192, false,
+            )),
+            Ok(123)
+        );
+        assert_eq!(input.position(), 123);
+        assert_eq!(output.position(), 123);
+        assert_eq!(operations.transferred.load(Ordering::Relaxed), 123);
+    }
+
+    #[unittest::def_test]
+    fn only_file_wait_marker_requests_restart() {
+        assert_eq!(
+            finish_restartable_io(Err(KError::IoWaitInterrupted)),
+            Err(LinuxError::ERESTARTSYS.into())
+        );
+        for error in [
+            KError::Interrupted,
+            KError::WouldBlock,
+            KError::NoMemory,
+            KError::InvalidInput,
+        ] {
+            assert_eq!(finish_restartable_io(Err(error)), Err(error));
+        }
+        for count in [0, 1, 4096] {
+            assert_eq!(finish_restartable_io(Ok(count)), Ok(count));
+        }
+    }
+}
+
+#[cfg(unittest)]
+mod transfer_count_tests {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use iov_iter::{IovIterDest, IovIterSource};
+    use kvfs::{FileOperations, Kiocb, transfer_files};
+
+    use super::*;
+
+    struct TransferBackend {
+        invalid_call: usize,
+        invalid_count: usize,
+        calls: AtomicUsize,
+    }
+
+    impl TransferBackend {
+        fn complete(&self, iocb: &mut Kiocb<'_>, count: usize) -> KResult<usize> {
+            let reported = if self.calls.fetch_add(1, Ordering::Relaxed) == self.invalid_call {
+                self.invalid_count
+            } else {
+                count
+            };
+            iocb.advance(reported);
+            Ok(reported)
+        }
+    }
+
+    impl FileOperations for TransferBackend {
+        fn supports_read(&self) -> bool {
+            true
+        }
+
+        fn supports_write(&self) -> bool {
+            true
+        }
+
+        fn read_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterDest<'_>) -> KResult<usize> {
+            self.complete(iocb, iter.count())
+        }
+
+        fn write_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> KResult<usize> {
+            self.complete(iocb, iter.count())
+        }
+    }
+
+    fn transfer_file(backend: Arc<TransferBackend>, mode: FMode) -> Arc<VfsFile> {
+        let base =
+            memfs::shmem::create_memfd_file("transfer-count-test", false, kcred::initial_cred())
+                .unwrap()
+                .into_file(kcred::initial_cred())
+                .unwrap();
+        base.alloc_clone(mode, OpenFlags::empty(), backend).unwrap()
+    }
+
+    #[unittest::def_test]
+    fn oversized_backend_counts_preserve_only_valid_transfer_progress() {
+        for is_read_fault in [true, false] {
+            for completed_blocks in [0, 1] {
+                for invalid_count in [4097, usize::MAX] {
+                    for has_explicit_offsets in [false, true] {
+                        let source = Arc::new(TransferBackend {
+                            invalid_call: if is_read_fault {
+                                completed_blocks
+                            } else {
+                                usize::MAX
+                            },
+                            invalid_count,
+                            calls: AtomicUsize::new(0),
+                        });
+                        let destination = Arc::new(TransferBackend {
+                            invalid_call: if is_read_fault {
+                                usize::MAX
+                            } else {
+                                completed_blocks
+                            },
+                            invalid_count,
+                            calls: AtomicUsize::new(0),
+                        });
+                        let input = transfer_file(source.clone(), FMode::READ);
+                        let output = transfer_file(destination.clone(), FMode::WRITE);
+                        let mut input_offset = 0;
+                        let mut output_offset = 0;
+                        let result = transfer_files(
+                            &input,
+                            has_explicit_offsets.then_some(&mut input_offset),
+                            &output,
+                            has_explicit_offsets.then_some(&mut output_offset),
+                            8192,
+                            false,
+                        );
+                        let completed = completed_blocks * 4096;
+                        assert_eq!(
+                            result,
+                            if completed == 0 {
+                                Err(KError::Io)
+                            } else {
+                                Ok(completed)
+                            }
+                        );
+                        let expected_position = if has_explicit_offsets {
+                            0
+                        } else {
+                            completed as u64
+                        };
+                        assert_eq!(input.position(), expected_position);
+                        assert_eq!(output.position(), expected_position);
+                        let expected_offset = if has_explicit_offsets {
+                            completed as u64
+                        } else {
+                            0
+                        };
+                        assert_eq!(input_offset, expected_offset);
+                        assert_eq!(output_offset, expected_offset);
+                        assert_eq!(source.calls.load(Ordering::Relaxed), completed_blocks + 1);
+                        assert_eq!(
+                            destination.calls.load(Ordering::Relaxed),
+                            completed_blocks + usize::from(!is_read_fault)
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Repositions the read/write file offset.
@@ -520,7 +799,7 @@ pub fn sys_preadv2(
     }
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
     if offset == -1 {
-        read_file_to_io(&f, iov.into_io()).map(|n| n as _)
+        read_request_to_io(&f, iov.into_io()).map(|n| n as _)
     } else {
         read_file_at_to_io(&f, iov.into_io(), offset as _).map(|n| n as _)
     }
@@ -548,130 +827,41 @@ pub fn sys_pwritev2(
     }
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
     if offset == -1 {
-        write_file_from_io(&f, iov.into_io()).map(|n| n as _)
+        write_request_from_io(&f, iov.into_io()).map(|n| n as _)
     } else {
         write_file_at_from_io(&f, iov.into_io(), offset as _).map(|n| n as _)
     }
 }
 
-/// Helper for sendfile and copy_file_range operations
-/// Abstracts both fixed position (via offset pointer) and current position reads/writes
-enum SendFile {
-    Direct(Arc<VfsFile>),
-    Offset(Arc<VfsFile>, UserPtr<u64>),
-}
-
-impl SendFile {
-    /// Check if data is available for reading
-    fn has_data(&self) -> bool {
-        match self {
-            SendFile::Direct(file) => file.poll(),
-            SendFile::Offset(file, ..) => file.poll(),
-        }
-        .contains(IoEvents::IN)
-    }
-
-    /// Read from this file, either at current position or from fixed offset
-    fn read(&mut self, buf: &mut [u8]) -> KResult<usize> {
-        match self {
-            SendFile::Direct(file) => file.read(buf),
-            SendFile::Offset(file, offset) => {
-                reject_positioned_stream_io(file)?;
-                let mut off = offset.read_vm()?;
-                let bytes_read = file.read_from(buf, &mut off)?;
-                offset.write_vm(off)?;
-                Ok(bytes_read)
-            }
-        }
-    }
-
-    /// Write to this file, either at current position or to fixed offset
-    fn write(&mut self, buf: &[u8]) -> KResult<usize> {
-        match self {
-            SendFile::Direct(file) => file.write(buf),
-            SendFile::Offset(file, offset) => {
-                reject_positioned_stream_io(file)?;
-                let mut off = offset.read_vm()?;
-                let bytes_written = file.write_from(buf, &mut off)?;
-                offset.write_vm(off)?;
-                Ok(bytes_written)
-            }
-        }
-    }
-}
-
-/// Core implementation for sendfile/splice/copy_file_range
-/// Copies data from source to destination with buffering
-fn do_send(mut src: SendFile, mut dst: SendFile, len: usize) -> KResult<usize> {
-    let mut buf = vec![0; 0x1000]; // 4KB intermediate buffer
-    let mut total_written = 0;
-    let mut remaining = len;
-
-    while remaining > 0 {
-        // After first successful write, stop if no more data available
-        if total_written > 0 && !src.has_data() {
-            break;
-        }
-        let to_read = buf.len().min(remaining);
-        // Try to read - WouldBlock is acceptable if we've already written some data
-        let bytes_read = match src.read(&mut buf[..to_read]) {
-            Ok(n) => n,
-            Err(KError::WouldBlock) if total_written > 0 => break,
-            Err(e) => return Err(e),
-        };
-        if bytes_read == 0 {
-            break; // EOF reached
-        }
-
-        // Write the data to destination
-        let bytes_written = dst.write(&buf[..bytes_read])?;
-        if bytes_written < bytes_read {
-            break; // Destination full or error
-        }
-
-        total_written += bytes_written;
-        remaining -= bytes_written;
-    }
-
-    Ok(total_written)
-}
-
-/// Efficiently transfer data from in_fd to out_fd without going through user space
-/// Transfers data from one file descriptor to another.
+/// Transfers data to the destination's current position.
 pub fn sys_sendfile(
     out_fd: c_int,
     in_fd: c_int,
     offset: UserPtr<u64>,
     len: usize,
 ) -> KResult<isize> {
-    debug!(
-        "sys_sendfile <= out_fd: {}, in_fd: {}, offset: {}, len: {}",
-        out_fd,
-        in_fd,
-        !offset.is_null(),
-        len
-    );
-
-    // Source can use fixed offset or current file position
     let resources = kprocess::current_resources();
-    let src = if !offset.is_null() {
-        // Check offset fits in 32-bit range (legacy syscall limitation)
-        if offset.read_vm()? > u32::MAX as u64 {
+    let input = resources.get_file(in_fd)?;
+    let output = resources.get_file(out_fd)?;
+    let mut input_offset = if offset.is_null() {
+        None
+    } else {
+        let position = offset.read_vm()?;
+        // Retain the existing legacy offset limit.
+        if position > u32::MAX as u64 {
             return Err(KError::InvalidInput);
         }
-        SendFile::Offset(resources.get_file(in_fd)?, offset)
-    } else {
-        SendFile::Direct(resources.get_file(in_fd)?)
+        Some(position)
     };
-
-    // Destination always uses current file position
-    let dst = SendFile::Direct(resources.get_file(out_fd)?);
-
-    do_send(src, dst, len).map(|n| n as _)
+    let result = kvfs::transfer_files(&input, input_offset.as_mut(), &output, None, len, false);
+    // Linux sendfile copies back an explicit offset even after EOF or error.
+    if let Some(position) = input_offset {
+        offset.write_vm(position)?;
+    }
+    finish_restartable_io(result).map(|count| count as _)
 }
 
-/// Copy data from one file to another, both with optional fixed offsets
-/// Copies a range of bytes between two file descriptors.
+/// Copies a file range with optional explicit source and destination offsets.
 pub fn sys_copy_file_range(
     fd_in: c_int,
     off_in: UserPtr<u64>,
@@ -680,112 +870,101 @@ pub fn sys_copy_file_range(
     len: usize,
     flags: u32,
 ) -> KResult<isize> {
-    debug!(
-        "sys_copy_file_range <= fd_in: {}, off_in: {}, fd_out: {}, off_out: {}, len: {}, flags: {}",
-        fd_in,
-        !off_in.is_null(),
-        fd_out,
-        !off_out.is_null(),
-        len,
-        flags
-    );
-
     if flags != 0 {
         return Err(KError::InvalidInput);
     }
-    // TODO: check both regular files
-    // TODO: check same file and overlap
-
-    // Source can use fixed offset or current file position
+    // TODO: check both regular files, same-file overlap and filesystem support.
     let resources = kprocess::current_resources();
-    let src = if !off_in.is_null() {
-        SendFile::Offset(resources.get_file(fd_in)?, off_in)
+    let input = resources.get_file(fd_in)?;
+    let output = resources.get_file(fd_out)?;
+    let mut input_offset = if off_in.is_null() {
+        None
     } else {
-        SendFile::Direct(resources.get_file(fd_in)?)
+        Some(off_in.read_vm()?)
     };
-
-    // Destination can also use fixed offset or current file position
-    let dst = if !off_out.is_null() {
-        SendFile::Offset(resources.get_file(fd_out)?, off_out)
+    let mut output_offset = if off_out.is_null() {
+        None
     } else {
-        SendFile::Direct(resources.get_file(fd_out)?)
+        Some(off_out.read_vm()?)
     };
-
-    do_send(src, dst, len).map(|n| n as _)
+    let result = kvfs::transfer_files(
+        &input,
+        input_offset.as_mut(),
+        &output,
+        output_offset.as_mut(),
+        len,
+        false,
+    );
+    // Unlike splice, copy_file_range copies offsets out only after progress.
+    // Both offsets record committed output even if one copyout faults.
+    if matches!(result, Ok(count) if count > 0) {
+        let input_copyout = input_offset.map_or(Ok(()), |position| off_in.write_vm(position));
+        let output_copyout = output_offset.map_or(Ok(()), |position| off_out.write_vm(position));
+        input_copyout?;
+        output_copyout?;
+    }
+    finish_restartable_io(result).map(|count| count as _)
 }
 
-/// Move data between file descriptors, with at least one being a pipe
-/// Splice can connect pipes to regular files or between pipes without user-space buffering
+/// Transfers data between file descriptors, at least one of which is a pipe.
 pub fn sys_splice(
     fd_in: c_int,
     off_in: UserPtr<i64>,
     fd_out: c_int,
     off_out: UserPtr<i64>,
     len: usize,
-    _flags: u32,
+    flags: u32,
 ) -> KResult<isize> {
-    debug!(
-        "sys_splice <= fd_in: {}, off_in: {}, fd_out: {}, off_out: {}, len: {}, flags: {}",
-        fd_in,
-        !off_in.is_null(),
-        fd_out,
-        !off_out.is_null(),
-        len,
-        _flags
-    );
-
-    // Track if we have a pipe - at least one must be present for splice
-    let mut has_pipe = false;
-
     let resources = kprocess::current_resources();
-
-    // Setup source: either with fixed offset or using current position
-    let src = if !off_in.is_null() {
-        // Fixed offset must be non-negative
-        if off_in.read_vm()? < 0 {
+    let input = resources.get_file(fd_in)?;
+    let output = resources.get_file(fd_out)?;
+    let mut input_offset = if off_in.is_null() {
+        if input.is_path() {
             return Err(KError::InvalidInput);
         }
-        SendFile::Offset(resources.get_file(fd_in)?, off_in.cast())
+        None
     } else {
-        let file = resources.get_file(fd_in)?;
-        if PipeObject::from_file(&file).is_ok() {
-            if !file.mode().contains(FMode::READ) {
-                return Err(KError::BadFileDescriptor);
-            }
-            has_pipe = true;
-        }
-        if file.is_path() {
+        let position = off_in.read_vm()?;
+        if position < 0 {
             return Err(KError::InvalidInput);
         }
-        SendFile::Direct(file)
+        Some(position as u64)
     };
-
-    // Setup destination: either with fixed offset or using current position
-    let dst = if !off_out.is_null() {
-        // Fixed offset must be non-negative
-        if off_out.read_vm()? < 0 {
+    let mut output_offset = if off_out.is_null() {
+        if output.flags().contains(OpenFlags::APPEND) {
             return Err(KError::InvalidInput);
         }
-        SendFile::Offset(resources.get_file(fd_out)?, off_out.cast())
+        output.write(b"")?;
+        None
     } else {
-        let file = resources.get_file(fd_out)?;
-        if PipeObject::from_file(&file).is_ok() {
-            if !file.mode().contains(FMode::WRITE) {
-                return Err(KError::BadFileDescriptor);
-            }
-            has_pipe = true;
-        }
-        if file.flags().contains(OpenFlags::APPEND) {
+        let position = off_out.read_vm()?;
+        if position < 0 {
             return Err(KError::InvalidInput);
         }
-        file.write(b"")?;
-        SendFile::Direct(file)
+        Some(position as u64)
     };
-
-    // At least one of source or destination must be a pipe
-    if !has_pipe {
+    let has_input_pipe = PipeObject::from_file(&input).is_ok();
+    let has_output_pipe = PipeObject::from_file(&output).is_ok();
+    if !has_input_pipe && !has_output_pipe {
         return Err(KError::InvalidInput);
     }
-
-    do_send(src, dst, len).map(|n| n as _)
+    let result = kvfs::transfer_files(
+        &input,
+        input_offset.as_mut(),
+        &output,
+        output_offset.as_mut(),
+        len,
+        flags & linux_raw_sys::general::SPLICE_F_NONBLOCK != 0,
+    );
+    // Linux splice copies out after any successful result, including EOF.
+    // Destination copyout precedes source copyout, and the first fault wins.
+    if result.is_ok() {
+        if let Some(position) = output_offset {
+            off_out.write_vm(position as i64)?;
+        }
+        if let Some(position) = input_offset {
+            off_in.write_vm(position as i64)?;
+        }
+    }
+    finish_restartable_io(result).map(|count| count as _)
 }

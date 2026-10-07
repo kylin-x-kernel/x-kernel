@@ -24,7 +24,6 @@ iov_iter.workspace = true
 kio.workspace = true
 klogger.workspace = true
 memaddr.workspace = true
-kpoll.workspace = true
 kprocess.workspace = true
 kvfs.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }

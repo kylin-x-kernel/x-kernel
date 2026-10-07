@@ -530,6 +530,12 @@ task would wrongly allow preemption in the second half of the trap handler.
 
 ### Block / wake and WaitQueue / Future
 
+`poll_io_with_cause` preserves the outer task-interruption cause separately from
+operation and I/O registration errors. `poll_io` flattens this same implementation
+for existing callers. Both check task interruption before polling the operation
+and release their owned registrations on completion or cancellation; file-specific
+readiness precedence and Linux restart policy belong to their callers.
+
 - `future::PreparedTaskWait` checks sleepable context before publication and
   allocates a `KWaker` Arc. It keeps one strong task ref for
   `blocked_resched`. The handle is not `Send`/`Sync`; `park()` checks current

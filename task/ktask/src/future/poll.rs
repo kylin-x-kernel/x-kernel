@@ -24,10 +24,26 @@ pub async fn poll_io<P: Pollable, F: FnMut() -> KResult<T>, T>(
     pollable: &P,
     events: IoEvents,
     non_blocking: bool,
-    mut f: F,
+    f: F,
 ) -> KResult<T> {
+    poll_io_with_cause(pollable, events, non_blocking, f).await?
+}
+
+/// Waits for I/O while retaining the source of interruption.
+///
+/// The outer error belongs to task interruption or its registration; operation
+/// and I/O registration errors remain in the inner result. Like [`poll_io`],
+/// task interruption is checked before each operation poll. Poll this future
+/// in task context without locks that prohibit blocking; dropping it removes
+/// its wait registrations. No Linux syscall restart policy is applied here.
+pub async fn poll_io_with_cause<P: Pollable, F: FnMut() -> KResult<T>, T>(
+    pollable: &P,
+    events: IoEvents,
+    non_blocking: bool,
+    mut operation_fn: F,
+) -> Result<KResult<T>, super::Interrupted> {
     let mut registrations = PollRegistrations::new();
-    super::interruptible(poll_fn(move |cx| match f() {
+    super::interruptible(poll_fn(move |cx| match operation_fn() {
         Ok(value) => Poll::Ready(Ok(value)),
         Err(KError::WouldBlock) => {
             if non_blocking {
@@ -38,7 +54,7 @@ pub async fn poll_io<P: Pollable, F: FnMut() -> KResult<T>, T>(
                 return Poll::Ready(Err(map_register_error(error)));
             }
             drop(context);
-            match f() {
+            match operation_fn() {
                 Ok(value) => Poll::Ready(Ok(value)),
                 Err(KError::WouldBlock) => Poll::Pending,
                 Err(e) => Poll::Ready(Err(e)),
@@ -46,7 +62,7 @@ pub async fn poll_io<P: Pollable, F: FnMut() -> KResult<T>, T>(
         }
         Err(e) => Poll::Ready(Err(e)),
     }))
-    .await?
+    .await
 }
 
 fn map_register_error(error: PollRegisterError) -> KError {

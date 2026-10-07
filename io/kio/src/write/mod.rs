@@ -95,7 +95,7 @@ pub trait Write {
             match self.write(buf) {
                 Ok(0) => return Err(Error::WriteZero),
                 Ok(n) => buf = &buf[n..],
-                Err(e) if e.canonicalize() == Error::Interrupted => {}
+                Err(e) if e.is_interrupted() => {}
                 Err(e) => return Err(e),
             }
         }

@@ -217,7 +217,7 @@ impl<W: ?Sized + Write> BufWriter<W> {
                     return Err(Error::WriteZero);
                 }
                 Ok(n) => guard.consume(n),
-                Err(ref e) if e.canonicalize() == Error::Interrupted => {}
+                Err(ref e) if e.is_interrupted() => {}
                 Err(e) => return Err(e),
             }
         }

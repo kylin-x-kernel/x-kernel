@@ -92,7 +92,7 @@ kfd resources / kvfs / device and pipe implementations
    `fallocate` 对负 offset/len 和 `offset + len` 溢出返回 `InvalidInput`；
    `lseek` 目录 offset 使用 `checked_add_signed`；
    定点 I/O 拒绝负 offset；
-   fd-to-fd 复制写回用户 offset 时使用 `checked_add`。
+   fd-to-fd 复制由 VFS 更新内核态 offset，再经 `UserPtr` 回写。
 6. **临时 ABI 结构不能泄露未初始化内存**：
    `statfs` 使用零初始化；
    `getdents64` 的临时 `Vec` 初始为零，目录项记录显式写入尾部 NUL。
@@ -105,6 +105,16 @@ kfd resources / kvfs / device and pipe implementations
    选项，必须只复制已解析状态。
 
 ## 权限与语义不变量
+
+读写 syscall 只对已识别的文件等待中断请求信号重启，且必须在完成量汇总后转换。
+不能将所有 EINTR 升级，或在复制类 syscall 共用的底层 helper 中无条件转换；
+否则已经提交的输出可能被整个请求重放。正数完成量和普通错误不得被覆盖。
+
+复制请求先提交实际完成量，再进行用户 offset 回写；回写 EFAULT 可以与已输出
+数据同时存在，不能据此重放请求。源文件的预读位置不直接发布，管道源保留未接受
+的后缀。位置锁顺序和管道消费由 KVFS 统一管理，syscall 不持这些锁回写用户内存。
+零完成量并不一律免除回写：sendfile 的传输错误以及 sendfile/splice 的 EOF
+仍可能因偏移不可写返回 EFAULT；copy_file_range 则仅在正数完成后回写。
 
 1. `O_CLOEXEC`、`FD_CLOEXEC` 和 `close_range(CLOEXEC)` 必须只影响 descriptor flags，
    不应改变底层 `FileLike` 对象。
@@ -195,7 +205,7 @@ kfd resources / kvfs / device and pipe implementations
 | F-03 | 用户输出缓冲区太小 | `getdents64` 一条记录也放不下，`getcwd` size 不足 | 返回 `InvalidInput` 或 `OutOfRange` | 调用方可扩大缓冲区重试 | 4 | 写入前计算长度 |
 | F-04 | 设备 open 失败 | 设备 file operations 拒绝 open 或初始化失败 | open 返回错误 | 终端相关程序无法打开目标设备 | 3 | 错误传播；设备语义由对应设备实现维护 |
 | F-05 | `fallocate` 后端写零返回 0 | 底层文件系统无法前进写入 | 返回 `WriteZero` | 操作失败但文件不应继续无限循环 | 2 | `write_zeros_range` 检测 0 字节写 |
-| F-06 | `sendfile`/`splice` 遇到 `WouldBlock` | 非阻塞源暂时无数据 | 已写入部分则返回部分进度，否则返回错误 | 调用方可轮询后重试 | 4 | `do_send` 保留部分写入语义 |
+| F-06 | `sendfile`/`splice` 遇到 `WouldBlock` | 非阻塞源暂时无数据 | 已写入部分则返回部分进度，否则返回错误 | 调用方可轮询后重试 | 4 | `kvfs::transfer_files` 保留部分写入语义 |
 | F-07 | `mount` 请求未知文件系统类型或无效 backing source | 名称未注册，或 source 不是可用 block-special path | 返回 `NoSuchDevice`、`ENOTBLK`、`ENXIO` 等对应错误 | 用户态 mount 失败 | 3 | 按 KVFS registry 精确查找；nodev/device-backed 类型统一经 `FsContext`，设备 source 由 `get_tree_bdev` 校验 |
 | F-08 | `syncfs` 目标不是文件或目录 | fd 指向 pipe/socket/设备 | 返回 `InvalidInput` | 当前同步请求失败 | 4 | downcast 后只 flush 文件系统对象 |
 | F-09 | `copy_file_range` 语义不完整 | 重叠和普通文件检查 TODO | 可能出现与 Linux 不一致的数据结果 | 相关应用复制行为异常 | 2 | 非零 flags 显式拒绝；其余限制实现前需要补充测试 |

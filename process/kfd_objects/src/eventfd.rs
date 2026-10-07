@@ -14,8 +14,8 @@ use anon_inodefs::AnonInodeFs;
 use kcred::Cred;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
-use ktask::future::{block_on, poll_io};
-use kvfs::{FMode, FileOperations, OpenFlags, VfsFile};
+use ktask::future::block_on;
+use kvfs::{FMode, FileOperations, OpenFlags, VfsFile, poll_file_io};
 
 /// Kernel object implementing eventfd semantics.
 pub struct EventFd {
@@ -83,53 +83,38 @@ impl EventfdFops {
     fn state(file: &VfsFile) -> kio::Result<Arc<EventFd>> {
         EventFd::from_file(file)
     }
-}
 
-impl FileOperations for EventfdFops {
-    fn supports_read(&self) -> bool {
-        true
-    }
-
-    fn supports_write(&self) -> bool {
-        true
-    }
-
-    fn read(&self, file: &VfsFile, buf: &mut [u8], _offset: u64) -> kio::Result<usize> {
+    async fn read_wait(file: &VfsFile, buf: &mut [u8]) -> kio::Result<usize> {
         let state = Self::state(file)?;
         if buf.len() < size_of::<u64>() {
             return Err(KError::InvalidInput);
         }
 
-        block_on(poll_io(
-            state.as_ref(),
-            IoEvents::IN,
-            file.is_nonblocking(),
-            || {
-                let result =
-                    state
-                        .count
-                        .fetch_update(Ordering::Release, Ordering::Acquire, |count| {
-                            if count > 0 {
-                                let dec = if state.semaphore { 1 } else { count };
-                                Some(count - dec)
-                            } else {
-                                None
-                            }
-                        });
-
-                match result {
-                    Ok(count) => {
-                        buf[..size_of::<u64>()].copy_from_slice(&count.to_ne_bytes());
-                        state.poll_tx.wake();
-                        Ok(size_of::<u64>())
+        poll_file_io(state.as_ref(), IoEvents::IN, file.is_nonblocking(), || {
+            let result = state
+                .count
+                .fetch_update(Ordering::Release, Ordering::Acquire, |count| {
+                    if count > 0 {
+                        let dec = if state.semaphore { 1 } else { count };
+                        Some(count - dec)
+                    } else {
+                        None
                     }
-                    Err(_) => Err(KError::WouldBlock),
+                });
+
+            match result {
+                Ok(count) => {
+                    buf[..size_of::<u64>()].copy_from_slice(&count.to_ne_bytes());
+                    state.poll_tx.wake();
+                    Ok(size_of::<u64>())
                 }
-            },
-        ))
+                Err(_) => Err(KError::WouldBlock),
+            }
+        })
+        .await
     }
 
-    fn write(&self, file: &VfsFile, buf: &[u8], _offset: u64) -> kio::Result<usize> {
+    async fn write_wait(file: &VfsFile, buf: &[u8]) -> kio::Result<usize> {
         let state = Self::state(file)?;
         if buf.len() < size_of::<u64>() {
             return Err(KError::InvalidInput);
@@ -142,31 +127,44 @@ impl FileOperations for EventfdFops {
             return Err(KError::InvalidInput);
         }
 
-        block_on(poll_io(
-            state.as_ref(),
-            IoEvents::OUT,
-            file.is_nonblocking(),
-            || {
-                let result =
-                    state
-                        .count
-                        .fetch_update(Ordering::Release, Ordering::Acquire, |count| {
-                            if u64::MAX - count > value {
-                                Some(count + value)
-                            } else {
-                                None
-                            }
-                        });
-
-                match result {
-                    Ok(_) => {
-                        state.poll_rx.wake();
-                        Ok(size_of::<u64>())
+        poll_file_io(state.as_ref(), IoEvents::OUT, file.is_nonblocking(), || {
+            let result = state
+                .count
+                .fetch_update(Ordering::Release, Ordering::Acquire, |count| {
+                    if u64::MAX - count > value {
+                        Some(count + value)
+                    } else {
+                        None
                     }
-                    Err(_) => Err(KError::WouldBlock),
+                });
+
+            match result {
+                Ok(_) => {
+                    state.poll_rx.wake();
+                    Ok(size_of::<u64>())
                 }
-            },
-        ))
+                Err(_) => Err(KError::WouldBlock),
+            }
+        })
+        .await
+    }
+}
+
+impl FileOperations for EventfdFops {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn supports_write(&self) -> bool {
+        true
+    }
+
+    fn read(&self, file: &VfsFile, buf: &mut [u8], _offset: u64) -> kio::Result<usize> {
+        block_on(Self::read_wait(file, buf))
+    }
+
+    fn write(&self, file: &VfsFile, buf: &[u8], _offset: u64) -> kio::Result<usize> {
+        block_on(Self::write_wait(file, buf))
     }
 
     fn poll(&self, file: &VfsFile) -> IoEvents {
@@ -226,6 +224,121 @@ mod eventfd_tests {
         let eventfd = EventFd::new(0, false);
         assert!(!eventfd.poll().contains(IoEvents::IN));
         assert!(eventfd.poll().contains(IoEvents::OUT));
+    }
+
+    #[def_test]
+    fn eventfd_wait_interruption_does_not_override_ready_or_nonblocking_io() {
+        let file = EventFd::new_file(0, false, 0, kcred::initial_cred()).unwrap();
+        let task = ktask::current();
+        let mut bytes = [0; 8];
+        let mut pos = 0;
+        task.interrupt();
+        let blocked = file.read_from(&mut bytes, &mut pos);
+        task.clear_interrupt();
+        assert_eq!(blocked, Err(KError::IoWaitInterrupted));
+
+        file.set_nonblocking(true);
+        task.interrupt();
+        let empty = file.read_from(&mut bytes, &mut pos);
+        let preserved = task.is_interrupted();
+        task.clear_interrupt();
+        assert_eq!(empty, Err(KError::WouldBlock));
+        assert!(preserved);
+
+        task.interrupt();
+        let write = file.write_from(&7u64.to_ne_bytes(), &mut pos);
+        let read = file.read_from(&mut bytes, &mut pos);
+        let preserved = task.is_interrupted();
+        task.clear_interrupt();
+        assert_eq!(write, Ok(8));
+        assert_eq!(read, Ok(8));
+        assert_eq!(u64::from_ne_bytes(bytes), 7);
+        assert!(preserved);
+
+        file.set_nonblocking(false);
+        assert_eq!(
+            file.write_from(&(u64::MAX - 1).to_ne_bytes(), &mut pos),
+            Ok(8)
+        );
+        task.interrupt();
+        let full = file.write_from(&1u64.to_ne_bytes(), &mut pos);
+        task.clear_interrupt();
+        assert_eq!(full, Err(KError::IoWaitInterrupted));
+        assert_eq!(file.read_from(&mut bytes, &mut pos), Ok(8));
+        assert_eq!(u64::from_ne_bytes(bytes), u64::MAX - 1);
+    }
+
+    #[def_test]
+    fn eventfd_pending_read_and_write_recheck_ready_state_after_signal() {
+        use alloc::boxed::Box;
+        use core::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+
+        struct ClearInterrupt;
+        impl Drop for ClearInterrupt {
+            fn drop(&mut self) {
+                ktask::current().clear_interrupt();
+            }
+        }
+        let _cleanup = ClearInterrupt;
+        let task = ktask::current();
+        task.clear_interrupt();
+        let file = EventFd::new_file(0, false, 0, kcred::initial_cred()).unwrap();
+        let state = EventFd::from_file(&file).unwrap();
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut bytes = [0; 8];
+        let mut read = Box::pin(EventfdFops::read_wait(&file, &mut bytes));
+        assert_eq!(read.as_mut().poll(&mut cx), Poll::Pending);
+        assert_eq!(EventfdFops.write(&file, &7u64.to_ne_bytes(), 0), Ok(8));
+        task.interrupt();
+        assert_eq!(read.as_mut().poll(&mut cx), Poll::Ready(Ok(8)));
+        drop(read);
+        assert_eq!(u64::from_ne_bytes(bytes), 7);
+        assert_eq!(state.count.load(Ordering::Acquire), 0);
+        task.clear_interrupt();
+
+        assert_eq!(
+            EventfdFops.write(&file, &(u64::MAX - 1).to_ne_bytes(), 0),
+            Ok(8)
+        );
+        let increment = 3u64.to_ne_bytes();
+        let mut write = Box::pin(EventfdFops::write_wait(&file, &increment));
+        assert_eq!(write.as_mut().poll(&mut cx), Poll::Pending);
+        assert_eq!(EventfdFops.read(&file, &mut bytes, 0), Ok(8));
+        assert_eq!(u64::from_ne_bytes(bytes), u64::MAX - 1);
+        task.interrupt();
+        assert_eq!(write.as_mut().poll(&mut cx), Poll::Ready(Ok(8)));
+        drop(write);
+        assert_eq!(state.count.load(Ordering::Acquire), 3);
+        assert_eq!(EventfdFops.read(&file, &mut bytes, 0), Ok(8));
+        assert_eq!(u64::from_ne_bytes(bytes), 3);
+        assert_eq!(state.count.load(Ordering::Acquire), 0);
+        task.clear_interrupt();
+        let mut read = Box::pin(EventfdFops::read_wait(&file, &mut bytes));
+        assert_eq!(read.as_mut().poll(&mut cx), Poll::Pending);
+        task.interrupt();
+        assert_eq!(
+            read.as_mut().poll(&mut cx),
+            Poll::Ready(Err(KError::IoWaitInterrupted))
+        );
+        drop(read);
+        assert_eq!(state.count.load(Ordering::Acquire), 0);
+        task.clear_interrupt();
+        assert_eq!(
+            EventfdFops.write(&file, &(u64::MAX - 1).to_ne_bytes(), 0),
+            Ok(8)
+        );
+        let mut write = Box::pin(EventfdFops::write_wait(&file, &increment));
+        assert_eq!(write.as_mut().poll(&mut cx), Poll::Pending);
+        task.interrupt();
+        assert_eq!(
+            write.as_mut().poll(&mut cx),
+            Poll::Ready(Err(KError::IoWaitInterrupted))
+        );
+        drop(write);
+        assert_eq!(state.count.load(Ordering::Acquire), u64::MAX - 1);
     }
 
     #[def_test]

@@ -29,7 +29,7 @@ permission, inode, mount, and character-device dispatch semantics.
 fs/filesystems/devfs/src/
 ├── lib.rs             # filesystem registration and singleton superblock
 ├── dynamic.rs         # DeviceNode -> DeviceFile projection
-├── device_file.rs     # character-device VFS adapter
+├── device_file.rs     # special-device inode projection
 ├── root.rs            # root directory assembly
 └── nodes/
     ├── dri.rs         # dynamic /dev/dri directory
@@ -37,6 +37,15 @@ fs/filesystems/devfs/src/
 ```
 
 ## Architecture
+
+`DeviceFile` projects special-device identity and inode flags; it is not an
+open-file operations adapter. KVFS owns character-device dispatch, including
+capabilities, I/O, poll registration and open/release forwarding.
+PTMX creates the pair and installs the master through `kvfs::open_character_device`,
+the same adapter used by registry-based opens. It opens the master once during
+the multiplexer callback; VFS does not reopen the replacement table. Final file
+drop releases the selected master, not the multiplexer. Master device-number
+registration and the slave PTS table retain their existing lifetime policy.
 
 ```text
 kclass input/display activation
@@ -93,7 +102,7 @@ through `kclass/display`, so DRM primary nodes remain available independently.
    unregisters the character-device number, and returns. `kdevice` releases
    the class index only after all projection callbacks finish.
 
-Open files may retain their own `Arc<DeviceFile>` after removal. `EventDev`
+Open files retain their concrete backend through KVFS dispatch after removal. `EventDev`
 enters a terminal detached state and reports `ENODEV` plus
 `POLLERR|POLLHUP`. `DrmCard` observes that its bound class handle is no longer
 available and reports `ENODEV`. A later device that reuses the same index gets

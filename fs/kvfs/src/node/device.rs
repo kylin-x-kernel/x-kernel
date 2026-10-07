@@ -91,9 +91,7 @@ impl ChrdevRegistry {
         let ops = self
             .get(f_inode)
             .ok_or_else(|| VfsError::from(LinuxError::ENXIO))?;
-        let fops = Arc::new(ChrdevFileOperations::new(ops));
-        file.replace_fops(fops.clone());
-        fops.open(inode, file)
+        open_character_device(inode, file, ops)
     }
 }
 
@@ -107,6 +105,27 @@ pub fn cdev_add(device: DeviceId, ops: Arc<dyn DeviceFileOps>) {
 /// Remove a character-device operation table for a device number.
 pub fn cdev_del(device: DeviceId) -> Option<Arc<dyn DeviceFileOps>> {
     CHRDEV_REGISTRY.del(device)
+}
+
+/// Installs character-device dispatch and opens the selected backend once.
+///
+/// Called in sleepable task context during file open, including multiplexer
+/// replacement. This does not register a device number. The backend must not
+/// already have been opened for this builder; VFS does not reopen a replacement
+/// table. After successful file publication, final file drop forwards release
+/// to the installed backend. No registry lock is held across the callback.
+///
+/// # Errors
+/// Propagates the backend's open error. On failure the caller must abort this
+/// open; the backend is responsible for rolling back its incomplete setup.
+pub fn open_character_device(
+    inode: &VfsInode,
+    file: &mut VfsFileBuilder,
+    ops: Arc<dyn DeviceFileOps>,
+) -> VfsResult<()> {
+    let fops = Arc::new(ChrdevFileOperations::new(ops));
+    file.replace_fops(fops.clone());
+    fops.open(inode, file)
 }
 
 struct ChrdevFileOperations {
@@ -523,7 +542,12 @@ pub trait DeviceFileOps: Send + Sync {
 #[cfg(unittest)]
 mod tests {
     use alloc::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
+    use core::{
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        task::{Context, Waker},
+    };
 
+    use kpoll::{PollRegistrations, PollSet};
     use ksync::Mutex;
     use ktime_types::SystemTime;
     use unittest::def_test;
@@ -594,6 +618,194 @@ mod tests {
         ) -> VfsResult<MetadataUpdate> {
             Ok(update)
         }
+    }
+
+    struct CharacterBackend {
+        can_read: bool,
+        can_write: bool,
+        fail_open: bool,
+        is_ready: AtomicBool,
+        reject_registration: AtomicBool,
+        opens: AtomicUsize,
+        releases: AtomicUsize,
+        waiters: PollSet,
+    }
+
+    impl CharacterBackend {
+        fn new(can_read: bool, can_write: bool, fail_open: bool) -> Arc<Self> {
+            Arc::new(Self {
+                can_read,
+                can_write,
+                fail_open,
+                is_ready: AtomicBool::new(false),
+                reject_registration: AtomicBool::new(false),
+                opens: AtomicUsize::new(0),
+                releases: AtomicUsize::new(0),
+                waiters: PollSet::new(),
+            })
+        }
+    }
+
+    impl DeviceFileOps for CharacterBackend {
+        fn open(&self, _: &VfsInode, _: &mut VfsFileBuilder) -> VfsResult<()> {
+            self.opens.fetch_add(1, Ordering::Relaxed);
+            if self.fail_open {
+                Err(VfsError::NoSuchDevice)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn release(&self, _: &VfsInode, _: &VfsFile) -> VfsResult<()> {
+            self.releases.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn supports_read(&self) -> bool {
+            self.can_read
+        }
+
+        fn supports_write(&self) -> bool {
+            self.can_write
+        }
+
+        fn poll(&self, _: &VfsFile) -> IoEvents {
+            if self.is_ready.load(Ordering::Acquire) {
+                IoEvents::IN
+            } else {
+                IoEvents::empty()
+            }
+        }
+
+        fn register_poll(
+            &self,
+            _: &VfsFile,
+            context: &mut PollContext<'_>,
+            events: IoEvents,
+        ) -> Result<(), PollRegisterError> {
+            if self.reject_registration.load(Ordering::Relaxed) {
+                return Err(PollRegisterError::InvalidState);
+            }
+            if events.contains(IoEvents::IN) {
+                context.register(&self.waiters)?;
+            }
+            Ok(())
+        }
+    }
+
+    struct CharacterMultiplexer {
+        backend: Arc<CharacterBackend>,
+        opens: AtomicUsize,
+        releases: AtomicUsize,
+    }
+
+    impl DeviceFileOps for CharacterMultiplexer {
+        fn open(&self, inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
+            self.opens.fetch_add(1, Ordering::Relaxed);
+            open_character_device(inode, file, self.backend.clone())
+        }
+
+        fn release(&self, _: &VfsInode, _: &VfsFile) -> VfsResult<()> {
+            self.releases.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    fn open_test_character(ops: Arc<dyn DeviceFileOps>) -> VfsResult<Arc<VfsFile>> {
+        // An inode-local backend exercises registry dispatch without publishing
+        // a test device number or disturbing another test's registration.
+        let device = DeviceId::default();
+        let init = VfsInodeInit::new(
+            99,
+            0,
+            Umode::new(NodeType::CharacterDevice, NodePermission::default()),
+        );
+        let inode = VfsInode::new_special(
+            Arc::new(TestChrdevInode { rdev: device }),
+            NodeFlags::empty(),
+            init,
+        );
+        inode.set_character_device(ops);
+        let mount = crate::Mount::new_root(&crate::nullfs::new_superblock());
+        let dentry = crate::Dentry::new_file_from_inode(inode, None, String::from("device"));
+        let path = crate::Path::new(mount, dentry);
+        VfsFileBuilder::allocate(crate::OpenFlags::READ_WRITE, kcred::initial_cred())?
+            .vfs_open(path)
+    }
+
+    #[def_test]
+    fn character_replacement_opens_once_and_releases_only_final_backend() {
+        for can_read in [false, true] {
+            for can_write in [false, true] {
+                let backend = CharacterBackend::new(can_read, can_write, false);
+                let multiplexer = Arc::new(CharacterMultiplexer {
+                    backend: backend.clone(),
+                    opens: AtomicUsize::new(0),
+                    releases: AtomicUsize::new(0),
+                });
+                let file = open_test_character(multiplexer.clone()).unwrap();
+                assert_eq!(multiplexer.opens.load(Ordering::Relaxed), 1);
+                assert_eq!(backend.opens.load(Ordering::Relaxed), 1);
+                assert_eq!(file.mode().contains(FMode::CAN_READ), can_read);
+                assert_eq!(file.mode().contains(FMode::CAN_WRITE), can_write);
+                let alias = file.clone();
+                drop(file);
+                assert_eq!(backend.releases.load(Ordering::Relaxed), 0);
+                drop(alias);
+                assert_eq!(backend.releases.load(Ordering::Relaxed), 1);
+                assert_eq!(multiplexer.releases.load(Ordering::Relaxed), 0);
+            }
+        }
+        let backend = CharacterBackend::new(true, true, true);
+        let multiplexer = Arc::new(CharacterMultiplexer {
+            backend: backend.clone(),
+            opens: AtomicUsize::new(0),
+            releases: AtomicUsize::new(0),
+        });
+        assert!(matches!(
+            open_test_character(multiplexer.clone()),
+            Err(VfsError::NoSuchDevice)
+        ));
+        assert_eq!(multiplexer.opens.load(Ordering::Relaxed), 1);
+        assert_eq!(backend.opens.load(Ordering::Relaxed), 1);
+        assert_eq!(backend.releases.load(Ordering::Relaxed), 0);
+        assert_eq!(multiplexer.releases.load(Ordering::Relaxed), 0);
+    }
+
+    struct CharacterWake(AtomicBool);
+
+    impl alloc::task::Wake for CharacterWake {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[def_test]
+    fn character_adapter_forwards_readiness_event_mask_and_registration_error() {
+        let backend = CharacterBackend::new(true, true, false);
+        let file = open_test_character(backend.clone()).unwrap();
+        assert!(file.poll().is_empty());
+        let wake = Arc::new(CharacterWake(AtomicBool::new(false)));
+        let waker = Waker::from(wake.clone());
+        let cx = Context::from_waker(&waker);
+        let mut registrations = PollRegistrations::new();
+        file.register_poll(&mut registrations.context(&cx), IoEvents::OUT)
+            .unwrap();
+        backend.waiters.wake();
+        assert!(!wake.0.load(Ordering::Acquire));
+        file.register_poll(&mut registrations.context(&cx), IoEvents::IN)
+            .unwrap();
+        backend.is_ready.store(true, Ordering::Release);
+        backend.waiters.wake();
+        assert!(wake.0.load(Ordering::Acquire));
+        assert_eq!(file.poll().bits(), IoEvents::IN.bits());
+        backend.is_ready.store(false, Ordering::Release);
+        assert!(file.poll().is_empty());
+        backend.reject_registration.store(true, Ordering::Relaxed);
+        assert_eq!(
+            file.register_poll(&mut registrations.context(&cx), IoEvents::IN),
+            Err(PollRegisterError::InvalidState)
+        );
     }
 
     #[def_test]

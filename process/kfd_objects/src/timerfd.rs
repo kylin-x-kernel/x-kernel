@@ -8,6 +8,8 @@
 //! counts are maintained here, not in the timer core; reading an expiration
 //! count rearms its next notification. See the crate design for locking and
 //! the final-owner teardown contract.
+//! File reads recheck expirations after signal interruption; a still-empty wait
+//! reports the VFS file-wait marker. Syscall return owns handler restart policy.
 
 use alloc::sync::Arc;
 use core::mem::size_of;
@@ -19,9 +21,9 @@ use khal::time::monotonic_time;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use kspin::SpinNoIrq;
 use ksync::Mutex;
-use ktask::future::{block_on, poll_io};
+use ktask::future::block_on;
 use ktime_types::{MonotonicInstant, SystemTime, TimeSpan};
-use kvfs::{FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
+use kvfs::{FMode, FileOperations, OpenFlags, VfsFile, VfsInode, poll_file_io};
 use linux_raw_sys::general::{CLOCK_BOOTTIME, CLOCK_MONOTONIC};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -372,7 +374,7 @@ impl FileOperations for TimerfdFops {
         }
 
         let timerfd = Self::timerfd(file)?;
-        block_on(poll_io(
+        block_on(poll_file_io(
             timerfd.as_ref(),
             IoEvents::IN,
             file.is_nonblocking(),
@@ -414,6 +416,64 @@ mod timerfd_tests {
 
     fn monotonic(span: TimeSpan) -> TimerDeadline {
         TimerDeadline::Monotonic(MonotonicInstant::from_span_since_origin(span))
+    }
+
+    #[def_test]
+    fn interrupted_timerfd_read_preserves_nonblocking_and_count_consumption() {
+        let file = TimerFd::new_file(CLOCK_MONOTONIC, 0, kcred::initial_cred()).unwrap();
+        let timerfd = TimerFd::from_file(&file).unwrap();
+        let task = ktask::current();
+        let mut bytes = [0; 8];
+        let mut pos = 0;
+        task.interrupt();
+        let waiting = file.read_from(&mut bytes, &mut pos);
+        task.clear_interrupt();
+        assert_eq!(waiting, Err(KError::IoWaitInterrupted));
+        file.set_nonblocking(true);
+        task.interrupt();
+        let empty = file.read_from(&mut bytes, &mut pos);
+        let preserved = task.is_interrupted();
+        task.clear_interrupt();
+        assert_eq!(empty, Err(KError::WouldBlock));
+        assert!(preserved);
+        timerfd.timer.handler().inner.lock().expirations = 3;
+        task.interrupt();
+        let ready = file.read_from(&mut bytes, &mut pos);
+        let preserved = task.is_interrupted();
+        task.clear_interrupt();
+        assert_eq!(ready, Ok(8));
+        assert_eq!(u64::from_ne_bytes(bytes), 3);
+        assert!(preserved);
+        assert_eq!(
+            file.read_from(&mut bytes, &mut pos),
+            Err(KError::WouldBlock)
+        );
+    }
+
+    #[def_test]
+    fn timerfd_expirations_after_pending_precede_signal_and_are_consumed_once() {
+        use alloc::boxed::Box;
+        use core::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+        let timerfd = TimerFd::new(CLOCK_MONOTONIC);
+        let task = ktask::current();
+        task.clear_interrupt();
+        let mut read = Box::pin(poll_file_io(timerfd.as_ref(), IoEvents::IN, false, || {
+            timerfd.read_expirations()
+        }));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(read.as_mut().poll(&mut cx), Poll::Pending);
+        // Establish completed expirations without relying on timer IRQ timing.
+        timerfd.timer.handler().inner.lock().expirations = 5;
+        timerfd.timer.handler().poll_rx.wake();
+        task.interrupt();
+        let result = read.as_mut().poll(&mut cx);
+        task.clear_interrupt();
+        assert_eq!(result, Poll::Ready(Ok(5)));
+        drop(read);
+        assert_eq!(timerfd.read_expirations(), Err(KError::WouldBlock));
     }
 
     #[def_test(serial)]

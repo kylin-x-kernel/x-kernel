@@ -42,22 +42,19 @@ fn add_slave(fs: Arc<SimpleFs>, pty: Arc<PtyDriver>) -> KResult<u32> {
 pub struct Ptmx(pub Arc<SimpleFs>);
 
 impl Ptmx {
-    /// Create a new PTY pair and return the master device file.
-    pub fn create_pty(&self) -> KResult<(Arc<DeviceFile>, u32)> {
+    fn create_pty(&self) -> KResult<Arc<PtyDriver>> {
         let (master, slave) = create_pty_pair();
         add_slave(self.0.clone(), slave)?;
         let pty_number = master.pty_number();
-        let device =
-            DeviceFile::new_character(self.0.clone(), DeviceId::new(128, pty_number), master);
-        Ok((device, pty_number))
+        kvfs::cdev_add(DeviceId::new(128, pty_number), master.clone());
+        Ok(master)
     }
 }
 
 impl DeviceFileOps for Ptmx {
-    fn open(&self, _inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
-        let (master, _) = self.create_pty()?;
-        file.replace_fops(master);
-        Ok(())
+    fn open(&self, inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
+        let master = self.create_pty()?;
+        kvfs::open_character_device(inode, file, master)
     }
 
     fn ioctl(&self, _file: &VfsFile, _cmd: u32, _arg: usize) -> KResult<usize> {

@@ -157,6 +157,14 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
 
 ## 线程安全
 
+字符设备适配器持有选定后端的 `Arc`，不在 open/release 或 poll 回调外加锁。
+open 中替换后端必须在文件发布前完成；失败由后端回滚，不调用成功文件的 release。
+只有最终操作表决定已打开文件的能力和释放回调，multiplexer 不额外释放被替换表。
+
+文件等待的中断来源标记不代表零完成量，也不授权重放整个传输。调用方必须保留
+对象及 iterator 已完成量；普通操作错误或注册失败不可伪装成信号中断。等待
+future 拥有订阅并在取消时清理，操作闭包不得将对象锁带入等待阶段。
+
 共享 dentry、inode、mount 和 file 状态由 mutex、atomic、`Arc` 和 `Weak` 保护。
 VFS inode-cache mutex 只保护 `New/Live/Freeing` entry；initializer、eviction hook 和 wait 均不持有
 该 mutex。每个 slot 有独立等待队列；未发布 reservation 的 drop 和正常状态迁移都在释放 mutex
@@ -218,6 +226,19 @@ FIFO session 生命周期使用 inode pipe-slot lock 串行化 get/create/`files
 release/clear，slot lock 获取后才可获取 pipe state lock。reader/writer close 先释放
 pipe state lock，再进入 slot 生命周期路径，避免反向嵌套。同一 inode 因此不能同时发布
 两个活动 pipe session。
+
+管道复制必须将目标接收和源消费串行化，不能先消费再把失败的后缀丢弃。双管道
+操作按对象地址顺序取锁，等待和通知均在解锁后进行。单管道复制回调运行在可睡眠
+mutex 下，仅允许非管道后端；不得重入任何管道。管道锁先于非管道文件位置锁，
+禁止持文件位置锁进入管道复制，以免等待空间时阻塞其他文件位置使用者。
+回调的成功字节数不得超过传入 slice 长度；超限返回 EIO，不消费源管道或发布目标
+管道数据，也不截断计数伪装成成功。后端自身已经发生的副作用无法回滚。
+文件到文件的传输位置锁按 open description 地址排序，同一对象只获取一次；
+暂存读取位置不得按预读长度提交。传输入口只更新内核态偏移，用户指针回写由
+syscall 在释放位置锁之后完成，回写失败不能撤销已经接受的数据。
+文件间复制在切片、累计和位置提交之前校验读写返回计数：读取不得超过本轮请求，
+写入不得超过本轮读取量。超限按 EIO 处理，不提交本轮暂存位置；此前合法完成量
+仍优先返回，后端已经发生的数据副作用不承诺回滚。
 
 文件系统类型注册表由独立 mutex 保护。boot 串行注册，查找返回按值复制的静态描述符，
 枚举返回快照；注册表锁内不调用 mount factory，避免把文件系统初始化带入全局临界区。

@@ -18,6 +18,47 @@ use crate::{
 // ============ Read trait helpers ============
 
 #[def_test]
+fn file_wait_marker_retries_only_remaining_bytes() {
+    struct InterruptedStream {
+        calls: usize,
+        written: Vec<u8>,
+    }
+    impl Read for InterruptedStream {
+        fn read(&mut self, buf: &mut [u8]) -> crate::Result<usize> {
+            self.calls += 1;
+            if self.calls == 2 {
+                return Err(Error::IoWaitInterrupted);
+            }
+            buf[0] = if self.calls == 1 { b'a' } else { b'b' };
+            Ok(1)
+        }
+    }
+    impl Write for InterruptedStream {
+        fn write(&mut self, buf: &[u8]) -> crate::Result<usize> {
+            self.calls += 1;
+            if self.calls == 2 {
+                return Err(Error::IoWaitInterrupted);
+            }
+            self.written.push(buf[0]);
+            Ok(1)
+        }
+        fn flush(&mut self) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+    let mut stream = InterruptedStream {
+        calls: 0,
+        written: Vec::new(),
+    };
+    let mut bytes = [0; 2];
+    stream.read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"ab");
+    stream.calls = 0;
+    stream.write_all(b"ab").unwrap();
+    assert_eq!(stream.written, b"ab");
+}
+
+#[def_test]
 fn test_read_exact_basic() {
     let data = b"ABCDEFGHIJ";
     let mut reader = data.as_slice();

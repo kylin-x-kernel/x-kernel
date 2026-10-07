@@ -3957,7 +3957,6 @@ dependencies = [
  "kfd",
  "kio",
  "klogger",
- "kpoll",
  "kprocess",
  "ktime",
  "ktime_types",

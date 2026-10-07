@@ -25,11 +25,13 @@ mod open_flags;
 pub mod path;
 mod permission;
 pub mod pipe;
+mod poll;
 mod seq_file;
 mod simple_dir;
 mod simple_file;
 mod simple_fs;
 mod super_block;
+mod transfer;
 mod type_map;
 mod types;
 mod xattr;
@@ -59,6 +61,7 @@ pub use node::{
     InodeFiemapOperations, InodeLookupFlags, InodeOperations, InodeSymlinkOperations,
     InodeUpdateTime, LockedDentry, MmapMapper, NodeFlags, RenameFlags, VfsInode, VfsInodeInit,
     WeakVfsInode, cdev_add, cdev_del, empty_inode_operations, get_next_ino, inode_init_owner,
+    open_character_device,
 };
 pub(crate) use node::{
     DentryKey, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive,
@@ -67,6 +70,7 @@ pub use open_flags::OpenFlags;
 pub(crate) use open_flags::{AccMode, OpenHow, OpenParams};
 pub use pagecache::WritebackRangeResult;
 pub use permission::{Permission, generic_permission, open_access_to_permission};
+pub use poll::poll_file_io;
 pub use seq_file::{SeqFile, SeqFileInode, SeqIterator, seq_open};
 pub use simple_dir::{
     ChainedDirOps, DirMaker, DirMapping, IntoDirMappingEntry, SimpleDir, SimpleDirEntry,
@@ -79,6 +83,7 @@ pub use super_block::{
     SuperBlockRegistry, default_evict_inode, get_tree_bdev, get_tree_nodev, super_block_registry,
     sync_filesystems,
 };
+pub use transfer::transfer_files;
 pub(crate) use type_map::TypeMap;
 pub use types::{
     DeviceId, InodeTimes, Metadata, MetadataUpdate, NodePermission, NodeType, SetattrTime, Umode,
