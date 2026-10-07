@@ -5,7 +5,7 @@
 `kclass` is x-kernel's typed runtime device class layer. Built on top of
 the `kdevice` device core, it provides type-safe publication, enumeration,
 lookup, and availability-subscription interfaces for each device category
-(net / block / char / display / input / vsock / 9p).
+(net / block / char / hwrng / display / input / vsock / 9p).
 
 After a successful probe, a driver publishes its runtime capability into
 the matching class registry through `publish_<class>()`; subsystems (such
@@ -41,7 +41,7 @@ devices organized by functional category, orthogonal to bus topology
 
 - **kdevice** owns bus attachment, lifecycle state, and driver binding;
 - **kclass** adds the typed per-category view
-  (net/block/char/display/input/vsock/9p) on top;
+  (net/block/char/hwrng/display/input/vsock/9p) on top;
 - **kdriver** calls `publish_*()` after a successful probe to inject the
   runtime capability into the kclass registries.
 
@@ -125,7 +125,7 @@ drivers/contracts/kclass/
 | `ClassRegistry<T>` | Typed registry: publish (unique publication), devices (enumerate available), find (lookup by id), subscribe (availability notification), remove (remove by id) |
 | `ACTIVATION_BRIDGE` | Global event bridge: subscribes to `kdevice` `Activated` / `Removed` events and drives class-level notify/remove |
 | `ClassRuntimeMetadata::device_node_class` | Supplies input capability metadata or the DRM primary class to `kdevice`; other runtime classes return no node request |
-| `class_registries!` macro | Declaratively generates all 7 class registries and their companion functions |
+| `class_registries!` macro | Declaratively generates all 8 class registries and their companion functions |
 | `ClassDeviceMetadata` | Optional class-specific metadata (currently only the input class carries physical_location / unique_id) |
 | `prelude` module | Centralized re-export of all public types for publishers such as `kdriver` |
 | Trait delegation impls | Implement the operation traits (e.g. `NetDevice`) for categories consumed through class handles, delegating to the inner runtime; the net class also forwards `NetRxScheduler` attach/detach, while block I/O goes only through the block core canonical `BlockDevice` |
@@ -275,6 +275,14 @@ scanout" model applies uniformly to any `DisplayDevice`, so drivers never
 need to expose a directly-mapped framebuffer, and kclass needs no
 framebuffer special-casing or unsafe boundary.
 
+## Hardware entropy class
+
+The `hwrng` feature adds `HwrngDeviceImpl = Arc<dyn HwrngDevice + Send + Sync>`
+and the standard class publication and discovery APIs.
+`ClassDevice<HwrngDeviceImpl>` forwards `read` without holding the registry
+lock, allowing the driver to sleep. The host must prepare completion delivery
+before publication; kclass does not implement waiting or entropy trust policy.
+
 ## Concurrency Model
 
 - Each class registry is protected by `SpinNoPreempt<ClassRegistry<T>>`:
@@ -296,13 +304,13 @@ framebuffer special-casing or unsafe boundary.
 
 ### Macro-driven instead of hand-written per class
 
-**Choice**: generate all code for the 7 device classes with the
+**Choice**: generate all code for the 8 device classes with the
 `class_registries!` macro.
 
 **Trade-off**: macro debugging is harder, in exchange for:
 
 - identical publish/devices/find/subscribe/notify/remove logic per class;
-  writing it 7 times by hand would duplicate heavily;
+  writing it 8 times by hand would duplicate heavily;
 - adding a new class is one line at the `class_registries!` call site,
   with no repeated boilerplate;
 - the expanded code is exactly what a hand-written version would be — no

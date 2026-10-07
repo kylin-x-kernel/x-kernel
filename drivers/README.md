@@ -36,7 +36,7 @@ drivers and a host kernel:
 | `device-res` | Kernel capability contracts requested by drivers: MMIO, IRQ, DMA, time, and devres ownership helpers. |
 | `kdevice` | Shared bus/device/driver model, topology, matching, lifecycle, and device-managed cleanup storage. |
 | `kclass` | Runtime publication layer for typed device classes. |
-| `block`, `char_driver`, `display`, `input`, `net`, `vsock` | Device class contracts that concrete drivers implement and kernel subsystems consume. |
+| `block`, `char_driver`, `display`, `input`, `net`, `vsock`, `hwrng` | Device class contracts that concrete drivers implement and kernel subsystems consume. |
 
 These crates should stay OS-neutral. They may depend on other driver contract
 crates and small shared utility crates, but not on host-kernel implementation

@@ -16,6 +16,7 @@ ignored = ["display", "input", "kalloc", "vsock"]
 pci-non-ecam = []
 net = ["dep:net", "kclass/net"]
 block = ["dep:block", "kclass/block", "dep:ktask", "dep:kpoll", "dep:kirq", "dep:linked_list_r4l", "dep:kcpu_id_map", "dep:ksync"]
+hwrng = ["dep:hwrng", "kclass/hwrng", "dep:ktask", "dep:kpoll"]
 char = ["dep:char_driver", "kclass/char"]
 display = ["dep:display", "kclass/display"]
 input = ["dep:input", "kclass/input"]
@@ -40,7 +41,7 @@ virtio-gpu = ["display", "virtio", "virtio/gpu"]
 virtio-input = ["input", "virtio", "virtio/input"]
 virtio-socket = ["vsock", "virtio", "virtio/socket"]
 virtio-9p = ["virtio", "virtio/virtio-9p", "kclass/virtio-9p"]
-virtio-rng = ["char", "virtio", "virtio/rng"]
+virtio-rng = ["char", "hwrng", "virtio", "virtio/rng"]
 
 console = ["char", "dep:console_driver"]
 console-pl011 = ["console", "console_driver/pl011"]
@@ -81,6 +82,7 @@ karch = { workspace = true }
 kclass = { workspace = true }
 kdevice = { workspace = true }
 block = { workspace = true, optional = true }
+hwrng = { workspace = true, optional = true }
 ktask = { workspace = true, optional = true }
 kpoll = { workspace = true, optional = true }
 ksync = { workspace = true, optional = true }

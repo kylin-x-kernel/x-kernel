@@ -6,7 +6,7 @@
 //!
 //! The generic class-device handle and registry mechanics live in the internal
 //! `generic` module. This crate root wires those mechanics to concrete
-//! block/net/char/display/input/vsock/9P operation traits.
+//! block/net/char/hwrng/display/input/vsock/9P operation traits.
 //! Drivers publish runtime capabilities here after probe succeeds so subsystems
 //! can enumerate existing devices and subscribe to later availability without
 //! depending on probe order.
@@ -246,6 +246,12 @@ pub type BlockDeviceImpl = Arc<block::Gendisk>;
 /// Concrete runtime type for character devices.
 #[cfg(feature = "char")]
 pub type CharDeviceImpl = Box<dyn CharDevice + Send + Sync>;
+/// Shared hardware entropy source, also retained by its host activation owner.
+///
+/// Publish only after the driver can receive completion IRQs and accept reads.
+/// Registry removal does not stop the source or prove that DMA has stopped.
+#[cfg(feature = "hwrng")]
+pub type HwrngDeviceImpl = Arc<dyn HwrngDevice + Send + Sync>;
 /// Concrete runtime type for display devices.
 #[cfg(feature = "display")]
 pub type DisplayDeviceImpl = Box<dyn DisplayDevice + Send + Sync>;
@@ -268,6 +274,9 @@ pub use char_driver::CharDevice;
 /// Re-export display device trait and framebuffer metadata.
 #[cfg(feature = "display")]
 pub use display::{DisplayDevice, DisplayInfo};
+/// Re-export the hardware entropy source contract.
+#[cfg(feature = "hwrng")]
+pub use hwrng::HwrngDevice;
 /// Re-export input device trait, event types, and identity types.
 #[cfg(feature = "input")]
 pub use input::{Event, EventType, InputDevice, InputDeviceId};
@@ -313,6 +322,9 @@ impl ClassRuntimeMetadata for BlockDeviceImpl {
 
 #[cfg(feature = "char")]
 impl ClassRuntimeMetadata for CharDeviceImpl {}
+
+#[cfg(feature = "hwrng")]
+impl ClassRuntimeMetadata for HwrngDeviceImpl {}
 
 #[cfg(feature = "display")]
 impl ClassRuntimeMetadata for DisplayDeviceImpl {
@@ -378,6 +390,13 @@ impl CharDevice for ClassDevice<CharDeviceImpl> {
 
     fn flush(&self) -> DriverResult {
         self.with(|device| device.flush())
+    }
+}
+
+#[cfg(feature = "hwrng")]
+impl HwrngDevice for ClassDevice<HwrngDeviceImpl> {
+    fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
+        self.with(|device| device.read(buf))
     }
 }
 
@@ -585,6 +604,17 @@ class_registries! {
     subscribe_char_available,
     notify_char_available,
     remove_char_device;
+    "hwrng",
+    HwrngDeviceImpl,
+    DeviceKind::Hwrng,
+    HWRNG_DEVICES,
+    hwrng_class_registry,
+    publish_hwrng,
+    hwrng_devices,
+    find_hwrng_device,
+    subscribe_hwrng_available,
+    notify_hwrng_available,
+    remove_hwrng_device;
     "display",
     DisplayDeviceImpl,
     DeviceKind::Display,
@@ -645,6 +675,8 @@ pub mod prelude {
     pub use crate::{DisplayDevice, DisplayDeviceImpl, DisplayInfo};
     #[cfg(feature = "input")]
     pub use crate::{Event, EventType, InputDevice, InputDeviceId, InputDeviceImpl};
+    #[cfg(feature = "hwrng")]
+    pub use crate::{HwrngDevice, HwrngDeviceImpl};
     #[cfg(feature = "net")]
     pub use crate::{NetBufHandle, NetDevice, NetDeviceImpl, NetRxScheduler};
     #[cfg(feature = "virtio-9p")]

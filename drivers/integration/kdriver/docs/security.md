@@ -637,3 +637,17 @@ When modifying this module, verify:
 - New `DeviceDriver::probe_device` implementations return `DriverError` on failure
   rather than panicking.
 - New `VirtIoHal` methods preserve `share`/`unshare` and `dma_alloc`/`dma_dealloc` pairing.
+
+## Hardware entropy completion provider
+
+`wait_until` requires a sleepable current task. `PreparedTaskWait::prepare`
+rejects invalid context before the driver's predicate can consume bytes.
+Task interruption does not cancel this internal read. The device notification
+registration is removed by RAII when the wait ends.
+
+The provider registers wake sources before checking readiness. A notification
+between that check and `park` remains a wake hint, preventing a lost completion;
+spurious wakes only trigger another check. The driver must call IRQ-safe
+`notify` after releasing its request lock, and its predicate must not sleep.
+The provider retains neither the predicate nor DMA storage. Invalid context and
+registration failures do not establish a device fault.

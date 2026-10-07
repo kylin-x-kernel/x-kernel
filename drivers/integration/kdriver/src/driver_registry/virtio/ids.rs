@@ -54,6 +54,7 @@ pub const fn device_kind_to_virtio_type(kind: DeviceKind) -> Option<u32> {
         DeviceKind::Input => Some(virtio_type::INPUT),
         DeviceKind::Vsock => Some(virtio_type::VSOCK),
         DeviceKind::Fs9p => Some(virtio_type::NINEP),
+        DeviceKind::Hwrng => None,
         DeviceKind::Bus => None,
     }
 }

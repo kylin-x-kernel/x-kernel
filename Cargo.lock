@@ -1851,6 +1851,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hwrng"
+version = "0.3.0-dev"
+dependencies = [
+ "driver_base",
+ "kspin",
+ "unittest",
+]
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2111,6 +2120,7 @@ dependencies = [
  "char_driver",
  "display",
  "driver_base",
+ "hwrng",
  "input",
  "kdevice",
  "kspin",
@@ -2235,6 +2245,7 @@ dependencies = [
  "device-res-xkernel",
  "display",
  "driver_base",
+ "hwrng",
  "input",
  "kalloc",
  "karch",

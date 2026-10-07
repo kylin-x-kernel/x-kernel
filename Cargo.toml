@@ -147,6 +147,7 @@ watchdog = { path = "io/watchdog" }
 
 # Internal: driver contracts and model
 block = { path = "drivers/contracts/block" }
+hwrng = { path = "drivers/contracts/hwrng" }
 char_driver = { path = "drivers/contracts/char" }
 display = { path = "drivers/contracts/display" }
 driver_base = { path = "drivers/contracts/driver_base" }

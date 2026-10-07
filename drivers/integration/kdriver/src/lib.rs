@@ -42,6 +42,8 @@ pub mod driver_registry;
 mod enumeration;
 mod manager;
 mod resource;
+#[cfg(feature = "hwrng")]
+pub mod rng_completion;
 
 /// Re-export the PCI configuration space accessor from the `pci` crate.
 pub use pci::set_pci_config_space;

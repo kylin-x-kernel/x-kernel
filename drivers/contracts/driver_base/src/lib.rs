@@ -80,6 +80,8 @@ pub enum DeviceKind {
     Fs9p,
     /// Bus controller / bridge (e.g., PCI host bridge).
     Bus,
+    /// Hardware or virtual random source device.
+    Hwrng,
 }
 
 impl DeviceKind {
@@ -113,6 +115,7 @@ impl DeviceKind {
             Vsock => "vsock",
             Fs9p => "fs9p",
             Bus => "bus",
+            Hwrng => "hwrng",
         }
     }
 }

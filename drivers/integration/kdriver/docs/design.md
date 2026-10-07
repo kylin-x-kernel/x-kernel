@@ -672,3 +672,15 @@ ixgbe ─────────► net (placeholder)
 `any_firmware_driver` is an umbrella feature: true whenever any DT/ACPI
 platform driver is enabled; `cfg(feature = "any_firmware_driver")`
 replaces the verbose `any(ahci, bcm2835-sdhci, sdmmc, fxmac)` condition.
+
+## Hardware entropy completion provider
+
+`rng_completion.rs` is the X-Kernel implementation of the driver-facing
+`RngCompletion` capability. `wait_until` prepares the current task to sleep,
+registers its device wake source with `PollSet`, checks the driver's readiness
+predicate, and parks if the request is still pending.
+`notify` wakes registered tasks so they can check readiness again. The
+provider owns wait registrations; the concrete driver owns its request and DMA
+buffer.
+
+The `hwrng` feature compiles this provider for injection into concrete drivers.
