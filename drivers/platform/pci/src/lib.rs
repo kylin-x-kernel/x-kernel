@@ -350,6 +350,30 @@ impl PciConfigAccess {
         }
     }
 
+    /// Writes a 16-bit halfword to PCI configuration space.
+    ///
+    /// `register_offset` is the byte offset; the LSB is ignored. This is useful
+    /// for registers such as PCI Command whose adjacent halfword has different
+    /// write semantics.
+    pub fn write_halfword(
+        &mut self,
+        device_function: DeviceFunction,
+        register_offset: u16,
+        data: u16,
+    ) {
+        let address =
+            self.cam_offset(device_function, register_offset) + u32::from(register_offset & 0x2);
+        // SAFETY: cam_offset() returns a word-aligned address, and adding the
+        // selected halfword offset (zero or two) keeps the u16 access naturally
+        // aligned and within that 32-bit configuration word.
+        unsafe {
+            (self.mmio_base as *mut u8)
+                .add(address as usize)
+                .cast::<u16>()
+                .write_volatile(data);
+        }
+    }
+
     /// Writes a 32-bit word to PCI configuration space.
     ///
     /// `register_offset` is the byte offset; the two LSBs are ignored.

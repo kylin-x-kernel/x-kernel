@@ -1,50 +1,38 @@
 # inputdev — Security and reliability
 
-## Analysis scope
+## Trust boundaries
 
-This analysis covers the whole crate, which currently consists of
-`src/lib.rs`. No source module or test-only path is excluded.
-
-## Trust model
-
-The crate receives class handles and removal ids from trusted kernel driver
-infrastructure. `kdevice` and `kclass` create and validate those handles and
-ids; `inputdev` trusts that contract and does not independently revalidate
-their provenance or internal identity. Its local validation is limited to
-deduplicating registration by id and removing the matching lifecycle entry.
-It has no user-memory, MMIO, DMA, network, or filesystem boundary and contains
-no unsafe code.
+`inputdev` receives hardware-origin event type, code, and value fields through
+the `InputDevice` class contract. It receives device identity and lifecycle
+notifications from `kclass` and `kdevice`. It does not access userspace memory
+or hardware registers directly and contains no unsafe code.
 
 ## Invariants and thread safety
 
-- At most one stored handle has a given driver-core id.
-- Every registry mutation is serialized by the same mutex.
-- Snapshot callers receive cloned handles; reading the registry does not alter
-  availability for another caller.
-- Removal of an absent id is a no-op.
+- One driver-core id has at most one endpoint and one active poller.
+- The hard-IRQ notifier only schedules work; driver reads and listener calls
+  happen in task context.
+- No endpoint lock is held while reading the driver or invoking a listener.
+- A partial input frame contains at most 256 events. Device-wide key state is
+  updated only for codes within the key bitmap.
+- A detached endpoint cannot accept new listeners or distribute new frames.
+- Removal stops the notifier before waiting for the poller to finish.
 
 ## Threat analysis
 
-| ID | Threat | Impact | Trigger | Existing control |
-|----|--------|--------|---------|------------------|
-| T-01 | Duplicate callbacks grow the registry | Low — unbounded registry memory growth | Probe notification repeats | Deduplicate by id under the registry lock. |
-| T-02 | One consumer hides devices from another | Medium — peer consumers omit live devices | A destructive registry read | `input_devices` returns a clone and preserves the registry. |
-| T-03 | Consumer retains a removed handle | Medium — stale operations can outlive hot-unplug | Hot-unplug races a snapshot | Accepted by design: driver-core availability remains authoritative for post-removal semantics, and consumers must return `ENODEV` after removal. |
+| ID | Threat | Impact | Trigger | Control |
+|----|--------|--------|---------|---------|
+| T-01 | Device floods events | Worker starvation | The device continuously completes descriptors | The work callback reads at most 64 events per round and requeues after two rounds. |
+| T-02 | Device omits `SYN_REPORT` | Unbounded frame memory | Malformed input stream | A 256-event limit discards until the next report and emits `SYN_DROPPED`. |
+| T-03 | Device reports an out-of-range key code | Bitmap corruption | Hardware-origin `EV_KEY` code exceeds `KEY_COUNT` | Check the code before changing the bitmap. |
+| T-04 | Slow or absent file reader holds the hardware queue | Input stalls for every reader | Events remain in the VirtIO used ring | The endpoint drains the driver independently of file readers; each listener bounds its own queue. |
+| T-05 | Removal races a scheduled event read | Freed transport or stale callback | Device removal while work is pending | Detach removes the notifier, shuts down and drains the work handle, then detaches listeners. It runs on removal notification and does not ensure that the worker stops before driver-resource cleanup. |
 
-Retaining a class handle across removal is an explicitly accepted residual
-risk. `inputdev` cannot invalidate cloned handles already owned by consumers;
-the driver core remains responsible for making the removed state authoritative,
-and each consumer must translate that state into its post-removal error
-semantics.
+## Failure handling and limitations
 
-## Failure modes and limitations
-
-An empty snapshot is valid. Handle order is unstable after removal. There is no
-blocking wait API; consumers that need change notification subscribe at the
-class or devfs layer.
-
-## Audit checklist
-
-- Keep registration deduplication and mutation under one lock.
-- Do not reintroduce destructive drain semantics.
-- Keep slow consumer work outside the registry lock.
+Work-handle preparation or notifier attachment errors prevent endpoint publication and
+are logged. An event read error ends the current poll round; a later device
+notification may retry it. The input layer keeps key state after a client
+queue overflows so userspace can query current state during resynchronization.
+The input layer does not interpret unknown event categories or implement
+evdev grab policy.

@@ -1145,6 +1145,7 @@ dependencies = [
  "flatten_objects",
  "gimli 0.34.0",
  "inherit-methods-macro",
+ "inputdev",
  "kalloc",
  "kclass",
  "kcred",
@@ -1954,11 +1955,16 @@ dependencies = [
 name = "inputdev"
 version = "0.3.0-dev"
 dependencies = [
+ "bitmaps",
  "kclass",
  "kdevice",
  "ksync",
+ "ktime",
+ "ktime_types",
+ "kworkng",
  "lazyinit",
  "log",
+ "unittest",
 ]
 
 [[package]]

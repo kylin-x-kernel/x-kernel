@@ -80,7 +80,7 @@ Feature flags 控制编译哪些设备适配器：
 | `lib.rs` | 设备探测（`probe_mmio_device` / `probe_pci_device`）、VirtIO 错误到 `DriverError` 的转换、公共类型 re-export |
 | `blk.rs` / `blk/requests.rs` | `VirtIoBlkDev` 实现 `BlockDeviceOperations`，管理准入、请求及 DMA 回收 |
 | `gpu.rs` | 将 `VirtIOGpu` 封装为实现 `DisplayDevice` 的 `VirtIoGpuDev` |
-| `input.rs` | 将 `VirtIOInput` 封装为实现 `InputDevice` 的 `VirtIoInputDev` |
+| `input.rs` | 将 `VirtIOInput` 封装为实现 `InputDevice` 的 `VirtIoInputDev`，在 IRQ 中确认 ISR 并通知输入层延迟取事件 |
 | `net.rs` | 将 `VirtIONetRaw` 封装为实现 `NetDevice` 的 `VirtIoNetDev`，管理收发缓冲区、IRQ ack 和网络 RX scheduler 调度 |
 | `socket.rs` | 将 `VirtIOSocket` 封装为实现 `VsockDevice` 的原始包收发适配器 `VirtIoVsockDev`；连接状态由 `net/knet` 的 `VSOCK_CONN_MANAGER` 持有 |
 | `virtio_9p.rs` | 将 `VirtIO9p` 封装为实现 `Virtio9pDevice` 的 `VirtIo9pDev`，提供 `mount_tag()` 和 `request()` |
@@ -114,6 +114,10 @@ Feature flags 控制编译哪些设备适配器：
   virtio-net IRQ handler 按 resolved IRQ 过滤对应设备 handle，
   ack 设备中断后只调用上层通过 `driver_net::NetRxScheduler`
   attach 的 RX 调度能力，不直接运行协议栈或 socket 唤醒逻辑。
+- **输入设备的 IRQ handler 仅确认中断**：
+  `VirtIoInputIrqHandler` 可在硬中断上下文运行。它获取设备的 `SpinNoIrq`，
+  读取并清除 VirtIO ISR；共享中断线上的 ISR 为空时返回 `NOT_HANDLED`。
+  该处理程序不会消费输入事件、分配内存或进入 VFS；队列消费仍在任务上下文完成。
 - **设备对象的共享安全依赖 trait 约束和内部封装**：
   blk 使用内部锁保护队列和请求状态；其他非 net 设备主要通过 `&mut self` 独占访问；
   net 设备依赖内部锁和 token-buffer 对应关系维持正确性。
@@ -274,7 +278,9 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
    - aarch64：`pci::legacy_interrupt_route()` 获取设备树路由，按触发类型创建 GIC 描述符
    - riscv64：映射为 PLIC 中断
    - loongarch64：直接使用硬件 IRQ 号
-5. 创建 `PciTransport`，返回 `(DeviceKind, PciTransport, irq)`
+5. 屏蔽输入设备及当前仅轮询的 vsock 路径所使用的 legacy INTx，随后返回
+   `(DeviceKind, PciTransport, irq)`。host 集成层仅在输入设备的共享中断处理程序
+   注册完成后解除其 INTx 屏蔽；vsock 的 INTx 保持屏蔽。
 
 ### MMIO 设备探测
 
@@ -349,7 +355,7 @@ headers and allocator overhead. The logical sector size is the protocol's fixed
 
 **初始化流程**：
 
-1. `try_new(transport)` → `InnerDev::new(transport)`：协商 feature、分配 VirtIO 队列
+1. `try_new(transport, irq)` → `InnerDev::new(transport)`：协商 feature、分配 VirtIO 队列
 2. `name()`：读取设备名称字符串（失败则使用 `"<unknown>"`）
 3. `ids()`：读取设备 ID（bustype / vendor / product / version），封装为 `InputDeviceId`
 
@@ -357,7 +363,7 @@ headers and allocator overhead. The logical sector size is the protocol's fixed
 
 1. 调用 `read_event()` → `inner.pop_pending_event()`
 2. 若队列有待读取事件：返回 `Event { event_type, code, value }`
-3. 若队列为空：返回 `DriverError::WouldBlock`，由上层决定轮询策略
+3. 若队列为空：返回 `DriverError::WouldBlock`；`inputdev` 在设备通知后负责延迟取事件
 
 **能力查询流程**：
 
@@ -395,6 +401,23 @@ headers and allocator overhead. The logical sector size is the protocol's fixed
 2. 若该 IRQ 首次注册（`REGISTERED_NET_IRQS` 去重），调用 `Irq::request_with(irq_provider, resource, Arc::new(handle_virtio_net_irq))` 注册中断，guard 存入 `NET_IRQ_GUARDS`
 3. 中断到来时 `handle_virtio_net_irq()` 遍历所有句柄，调用 `ack_interrupt()` 确认中断，返回包含来源位图的 `IrqEvent`，没有句柄确认中断时返回 `IrqEvent::NOT_HANDLED`
 4. 已注册 IRQ 时，`ack_interrupt()` 仅由 IRQ handler 调用，避免 RX 任务清除运行期间新到达但尚未调度的设备事件；未注册 IRQ 时，由 `recv()` 在纯轮询路径中确认中断
+
+### VirtIO 输入设备中断流程
+
+1. `VirtIoInputDev::try_new(transport, irq)` 初始化两个输入队列，缓存设备标识信息，
+   并记录解析后的 IRQ。
+2. host 集成层获取 `irq_handler()`，通过 `device_res` 契约注册处理程序，
+   随后再发布 class 设备。
+3. 硬中断处理程序检查回调传入的 IRQ，在共享的 `SpinNoIrq` 保护下确认 transport
+   ISR，并且仅在 ISR 非空时认领该中断线。只有队列中断才调用已安装的
+   `InputEventNotifier`；配置中断不会伪造输入事件通知。
+4. `inputdev` 在任务上下文中调用 `read_event()`，通过 `pop_pending_event()`
+   取出已完成事件并重新提交描述符，然后按输入帧分发给各个设备文件。
+
+中断处理程序和 `VirtIoInputDev` 共享同一个 `Arc<VirtIoInputState>`。底层 transport
+与 notifier 分别由 `SpinNoIrq` 保护，调用 notifier 时不持有 transport 锁。已发布的
+输入设备和已注册的 IRQ action 都释放引用后，transport 才会被销毁；可复用驱动无需依赖
+host IRQ 核心或工作队列。
 
 ### Vsock 原始传输适配器
 
@@ -456,8 +479,11 @@ headers and allocator overhead. The logical sector size is the protocol's fixed
 - **blk**: shared synchronous callers use one device SpinNoIrq for queue/state;
   all task waits and notifications occur outside it. IRQ acknowledgement uses
   the same lock; the host serializes per-device completion passes.
-- **gpu / input / socket / virtio_9p**：所有操作通过 `&mut self` 独占访问，
+- **gpu / socket / virtio_9p**：所有操作通过 `&mut self` 独占访问，
   调用者负责串行化，模块内部无锁。
+- **input**：`VirtIoInputState` 使用 `Arc<SpinNoIrq<_>>` 封装底层设备。
+  硬中断上下文中的中断确认与任务上下文中的能力查询或事件访问互斥；
+  任务不会持有该锁等待。
 - **net**：`InnerDev` 被 `Arc<SpinNoIrq<...>>` 包裹，因为 IRQ 回调在中断上下文中
   访问设备（`ack_interrupt`），与正常收发路径并发。全局静态变量
   `NET_IRQ_HANDLES`、`NET_IRQ_GUARDS` 和 `REGISTERED_NET_IRQS` 也使用 `SpinNoIrq` 保护。
@@ -493,6 +519,12 @@ headers and allocator overhead. The logical sector size is the protocol's fixed
 `Drop`，设备资源（DMA 缓冲区、VirtIO 队列）的释放依赖 `virtio-drivers` 内部类型的
 `Drop` 实现。当设备结构体离开作用域时，`InnerDev` 的 `Drop` 会自动通知设备重置
 并释放 DMA 内存。
+
+输入设备的 IRQ 由 host 通过 devres 注册。PCI 输入设备随后添加用于屏蔽 INTx 的
+devres 清理动作，因此 LIFO 析构会先阻止新的设备中断，再释放 IRQ action。
+释放 action 时会等待正在执行的回调结束，并丢弃中断处理程序持有的共享状态引用。
+已发布的 class 设备持有另一份引用；取消发布并丢弃该引用后，底层 transport 和队列
+随之清理。
 
 For IRQ block instances, host activation keeps the device alive through admitted
 I/O drain, device IRQ suppression, native Irq release and reclaimer stop.

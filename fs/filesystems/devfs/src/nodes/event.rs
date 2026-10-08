@@ -2,16 +2,17 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{string::ToString, sync::Arc, vec, vec::Vec};
+use alloc::{collections::VecDeque, string::ToString, sync::Arc, vec, vec::Vec};
 
 use bitmaps::Bitmap;
-use kclass::ClassDevice;
-#[allow(unused_imports)]
-use kclass::prelude::{DriverError, Event, EventType, InputDevice, InputDeviceId, InputDeviceImpl};
+use inputdev::{InputEndpoint, InputEventListener, TimedInputEvent};
+use kclass::{
+    ClassDevice,
+    prelude::{Event, EventType, InputDevice, InputDeviceImpl},
+};
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;
-use ktime_types::SystemTime;
 use kvfs::{
     DeviceFileOps, DirMapping, NodeFlags, SimpleDir, SimpleFs, VfsFile, VfsFileBuilder, VfsInode,
     VfsResult,
@@ -25,67 +26,133 @@ use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 use crate::dynamic::DynamicDeviceDir;
 
-const KEY_CNT: usize = EventType::Key.bits_count();
+const MAX_CLIENT_EVENTS: usize = 256;
+const SYN_REPORT: u16 = 0;
+const SYN_DROPPED: u16 = 3;
 
-struct Inner {
-    device: Option<ClassDevice<InputDeviceImpl>>,
-    read_ahead: Option<(SystemTime, Event)>,
-    key_state: Bitmap<KEY_CNT>,
+struct ClientState {
+    events: VecDeque<TimedInputEvent>,
+    is_detached: bool,
 }
-impl Inner {
-    fn detach(&mut self) {
-        self.device = None;
-        self.read_ahead = None;
-        self.key_state = Bitmap::new();
+
+struct EventClient {
+    state: Mutex<ClientState>,
+    poll_set: PollSet,
+}
+
+impl EventClient {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ClientState {
+                events: VecDeque::with_capacity(MAX_CLIENT_EVENTS),
+                is_detached: false,
+            }),
+            poll_set: PollSet::new(),
+        }
     }
 
-    fn live_device(&mut self) -> KResult<&mut ClassDevice<InputDeviceImpl>> {
-        if self
-            .device
-            .as_ref()
-            .is_none_or(|device| !device.is_available())
-        {
-            self.detach();
+    fn read(&self, buf: &mut [u8]) -> KResult<usize> {
+        let mut state = self.state.lock();
+        if state.is_detached {
             return Err(KError::NoSuchDevice);
         }
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if buf.len() < size_of::<InputEvent>() {
+            return Err(KError::InvalidInput);
+        }
+        let mut read = 0;
+        for out in buf.chunks_exact_mut(size_of::<InputEvent>()) {
+            let Some(TimedInputEvent { time, event }) = state.events.pop_front() else {
+                break;
+            };
+            let input_event = InputEvent {
+                time: KernelTimeval {
+                    tv_sec: time.unix_seconds() as _,
+                    tv_usec: (time.subsec_nanos() / 1_000) as _,
+                },
+                event_type: event.event_type,
+                code: event.code,
+                value: event.value as _,
+            };
+            out.copy_from_slice(input_event.as_bytes());
+            read += out.len();
+        }
+        if read == 0 {
+            Err(KError::WouldBlock)
+        } else {
+            Ok(read)
+        }
+    }
+}
 
-        self.device.as_mut().ok_or(KError::NoSuchDevice)
+impl InputEventListener for EventClient {
+    fn receive_frame(&self, frame: &[TimedInputEvent]) {
+        if frame.is_empty() {
+            return;
+        }
+        let mut state = self.state.lock();
+        if state.is_detached {
+            return;
+        }
+        if state.events.len() + frame.len() > MAX_CLIENT_EVENTS {
+            state.events.clear();
+            let time = frame[frame.len() - 1].time;
+            for code in [SYN_DROPPED, SYN_REPORT] {
+                state.events.push_back(TimedInputEvent {
+                    time,
+                    event: Event::new(EventType::Synchronization as u16, code, 0),
+                });
+            }
+        } else {
+            state.events.extend(frame.iter().copied());
+        }
+        drop(state);
+        self.poll_set.wake();
     }
 
-    fn has_event(&mut self) -> KResult<bool> {
-        let needs_read = self.read_ahead.is_none();
-        let device = self.live_device()?;
-        if needs_read {
-            let event_result = device.read_event();
-            match event_result {
-                Ok(event) => {
-                    if event.event_type == EventType::Key as u16 {
-                        if event.value == 0 {
-                            self.key_state.set(event.code as usize, false);
-                        } else if event.value == 1 {
-                            self.key_state.set(event.code as usize, true);
-                        }
-                    }
-                    self.read_ahead = Some((ktime::realtime(), event));
-                }
-                Err(DriverError::WouldBlock) => {}
-                Err(err) => {
-                    warn!("Failed to read event: {err:?}");
-                }
-            }
+    fn detach(&self) {
+        let mut state = self.state.lock();
+        state.is_detached = true;
+        state.events.clear();
+        drop(state);
+        self.poll_set.wake();
+    }
+}
+
+impl Pollable for EventClient {
+    fn poll(&self) -> IoEvents {
+        let state = self.state.lock();
+        if state.is_detached {
+            IoEvents::ERR | IoEvents::HUP
+        } else if state.events.is_empty() {
+            IoEvents::empty()
+        } else {
+            IoEvents::IN
         }
-        Ok(self.read_ahead.is_some())
+    }
+
+    fn register(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
+        if !events.is_empty() {
+            context.register(&self.poll_set)?;
+        }
+        Ok(())
     }
 }
 
 pub struct EventDev {
-    inner: Mutex<Inner>,
+    device: ClassDevice<InputDeviceImpl>,
+    endpoint: Arc<InputEndpoint>,
     ev_bits: Bitmap<{ EventType::COUNT as usize }>,
-    poll_set: PollSet,
 }
 
 impl EventDev {
-    pub fn new(device: ClassDevice<InputDeviceImpl>) -> Self {
+    pub fn new(device: ClassDevice<InputDeviceImpl>, endpoint: Arc<InputEndpoint>) -> Self {
         let mut ev_bits = Bitmap::new();
         for i in 0..EventType::COUNT {
             let Some(ty) = EventType::from_repr(i) else {
@@ -100,24 +167,17 @@ impl EventDev {
         }
 
         Self {
-            inner: Mutex::new(Inner {
-                device: Some(device),
-                read_ahead: None,
-                key_state: Bitmap::new(),
-            }),
+            device,
+            endpoint,
             ev_bits,
-            poll_set: PollSet::new(),
         }
     }
 
     pub(crate) fn detach(&self) {
-        let mut inner = self.inner.lock();
-        inner.detach();
-        drop(inner);
-        self.poll_set.wake();
+        self.endpoint.detach();
     }
 
-    fn get_event_bits(&self, inner: &mut Inner, arg: usize, size: usize, ty: u8) -> KResult<usize> {
+    fn get_event_bits(&self, arg: usize, size: usize, ty: u8) -> KResult<usize> {
         let user_bits = UserPtr::<u8>::from(arg);
         if ty == 0 {
             let len = self.ev_bits.as_bytes().len().min(size);
@@ -126,8 +186,7 @@ impl EventDev {
         } else {
             let ty = EventType::from_repr(ty).ok_or(KError::InvalidInput)?;
             let mut bits = vec![0u8; size];
-            let device = inner.live_device()?;
-            match device.get_event_bits(ty, &mut bits) {
+            match self.device.get_event_bits(ty, &mut bits) {
                 Ok(true) => {}
                 Ok(false) => {
                     debug!("No events for {ty:?}");
@@ -192,7 +251,20 @@ pub extern "C" fn ongkey() {
 
 impl DeviceFileOps for EventDev {
     fn open(&self, _inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
+        let client = Arc::new(EventClient::new());
+        self.endpoint
+            .subscribe(client.clone())
+            .map_err(|_| KError::NoSuchDevice)?;
+        file.set_private_data(client);
         file.stream_open();
+        Ok(())
+    }
+
+    fn release(&self, _inode: &VfsInode, file: &VfsFile) -> VfsResult<()> {
+        if let Some(client) = file.private_data_get::<EventClient>() {
+            let listener: Arc<dyn InputEventListener> = client;
+            self.endpoint.unsubscribe(&listener);
+        }
         Ok(())
     }
 
@@ -200,47 +272,14 @@ impl DeviceFileOps for EventDev {
         true
     }
 
-    fn read(&self, _file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
-        let mut inner = self.inner.lock();
-        // Linux evdev reports ENODEV before handling a zero-length read once
-        // the device has disappeared.
-        inner.live_device()?;
-        if buf.is_empty() {
-            return Ok(0);
+    fn read(&self, file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+        if !self.device.is_available() {
+            return Err(KError::NoSuchDevice);
         }
-        if buf.len() < size_of::<InputEvent>() {
-            return Err(KError::InvalidInput);
-        }
-        let mut read = 0;
-        for out in buf.chunks_exact_mut(size_of::<InputEvent>()) {
-            match inner.has_event() {
-                Ok(true) => {}
-                Ok(false) => break,
-                Err(err) if read == 0 => return Err(err),
-                // Preserve completed records. The next read observes the
-                // terminal detached state and returns ENODEV.
-                Err(_) => break,
-            }
-            let Some((time, event)) = inner.read_ahead.take() else {
-                break;
-            };
-            let input_event = InputEvent {
-                time: KernelTimeval {
-                    tv_sec: time.unix_seconds() as _,
-                    tv_usec: (time.subsec_nanos() / 1_000) as _,
-                },
-                event_type: event.event_type,
-                code: event.code,
-                value: event.value as _,
-            };
-            out.copy_from_slice(input_event.as_bytes());
-            read += out.len();
-        }
-        if read == 0 {
-            Err(KError::WouldBlock)
-        } else {
-            Ok(read)
-        }
+        let client = file
+            .private_data_get::<EventClient>()
+            .ok_or(KError::BadFileDescriptor)?;
+        client.read(buf)
     }
 
     fn flags(&self) -> NodeFlags {
@@ -248,16 +287,16 @@ impl DeviceFileOps for EventDev {
     }
 
     fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
-        let mut inner = self.inner.lock();
-        inner.live_device()?;
+        if !self.device.is_available() {
+            return Err(KError::NoSuchDevice);
+        }
         match cmd {
             EVIOCGVERSION => {
                 UserPtr::<u32>::from(arg).write_vm(0x10001)?;
                 Ok(0)
             }
             EVIOCGID => {
-                let device = inner.device.as_ref().ok_or(KError::NoSuchDevice)?;
-                let device_id = device.device_id();
+                let device_id = self.device.device_id();
                 UserPtr::<InputId>::from(arg).write_vm(InputId {
                     bus_type: device_id.bus_type,
                     vendor: device_id.vendor,
@@ -292,19 +331,16 @@ impl DeviceFileOps for EventDev {
                         match nr {
                             // EVIOCGNAME
                             0x06 => {
-                                let device = inner.device.as_ref().ok_or(KError::NoSuchDevice)?;
-                                return return_str(arg, size, device.name());
+                                return return_str(arg, size, self.device.name());
                             }
                             // EVIOCGPHYS
                             0x07 => {
-                                let device = inner.device.as_ref().ok_or(KError::NoSuchDevice)?;
-                                let value = device.physical_location().to_string();
+                                let value = self.device.physical_location().to_string();
                                 return return_str(arg, size, &value);
                             }
                             // EVIOCGUNIQ
                             0x08 => {
-                                let device = inner.device.as_ref().ok_or(KError::NoSuchDevice)?;
-                                let value = device.unique_id().to_string();
+                                let value = self.device.unique_id().to_string();
                                 return return_str(arg, size, &value);
                             }
                             // EVIOCGPROP
@@ -315,7 +351,7 @@ impl DeviceFileOps for EventDev {
                             }
                             // EVIOCGKEY
                             0x18 => {
-                                let key_bits = inner.key_state.as_bytes().to_vec();
+                                let key_bits = self.endpoint.key_state();
                                 let len = key_bits.len().min(size);
                                 UserPtr::<u8>::from(arg).write_vm_slice(&key_bits[..len])?;
                                 return Ok(len);
@@ -335,7 +371,7 @@ impl DeviceFileOps for EventDev {
                             _ => {}
                         }
                         if nr & !EventType::MAX == EventType::COUNT {
-                            return self.get_event_bits(&mut inner, arg, size, nr & EventType::MAX);
+                            return self.get_event_bits(arg, size, nr & EventType::MAX);
                         }
                         const ABS_CNT: u8 = 0x40;
                         if nr & !(ABS_CNT - 1) == ABS_CNT {
@@ -352,45 +388,24 @@ impl DeviceFileOps for EventDev {
         }
     }
 
-    fn poll(&self, _file: &VfsFile) -> IoEvents {
-        Pollable::poll(self)
+    fn poll(&self, file: &VfsFile) -> IoEvents {
+        if !self.device.is_available() {
+            return IoEvents::ERR | IoEvents::HUP;
+        }
+        file.private_data_get::<EventClient>()
+            .map_or(IoEvents::ERR | IoEvents::HUP, |client| client.poll())
     }
 
     fn register_poll(
         &self,
-        _file: &VfsFile,
+        file: &VfsFile,
         context: &mut PollContext<'_>,
         events: IoEvents,
     ) -> Result<(), PollRegisterError> {
-        Pollable::register(self, context, events)
-    }
-}
-
-impl Pollable for EventDev {
-    fn poll(&self) -> IoEvents {
-        let mut inner = self.inner.lock();
-        let mut events = IoEvents::empty();
-        match inner.has_event() {
-            Ok(has_event) => {
-                events.set(IoEvents::IN, has_event);
-                events
-            }
-            Err(_) => IoEvents::ERR | IoEvents::HUP,
-        }
-    }
-
-    fn register(
-        &self,
-        context: &mut PollContext<'_>,
-        events: IoEvents,
-    ) -> Result<(), PollRegisterError> {
-        if events.contains(IoEvents::IN) {
-            context.register(&self.poll_set)?;
-            // Input devices do not expose a callback-based wake source yet,
-            // so retain the existing prompt-repoll behavior for this waiter only.
-            context.wake_by_ref();
-        }
-        Ok(())
+        let client = file
+            .private_data_get::<EventClient>()
+            .ok_or(PollRegisterError::InvalidState)?;
+        client.register(context, events)
     }
 }
 
@@ -403,9 +418,10 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
 
 #[cfg(unittest)]
 mod tests {
-    use unittest::{assert_eq, def_test};
+    use ktime_types::SystemTime;
+    use unittest::{assert, assert_eq, def_test};
 
-    use super::evdev_string_bytes;
+    use super::*;
 
     #[def_test]
     fn evdev_strings_follow_linux_truncation_and_nul_rules() {
@@ -414,5 +430,55 @@ mod tests {
         assert_eq!(evdev_string_bytes("key", 3), b"key");
         assert_eq!(evdev_string_bytes("key", 4), b"key\0");
         assert_eq!(evdev_string_bytes("key", 8), b"key\0");
+    }
+
+    fn frame() -> [TimedInputEvent; 2] {
+        let time = SystemTime::UNIX_EPOCH;
+        [
+            TimedInputEvent {
+                time,
+                event: Event::new(EventType::Key as u16, 30, 1),
+            },
+            TimedInputEvent {
+                time,
+                event: Event::new(EventType::Synchronization as u16, SYN_REPORT, 0),
+            },
+        ]
+    }
+
+    #[def_test]
+    fn independent_event_clients_receive_the_same_frame() {
+        let first = EventClient::new();
+        let second = EventClient::new();
+        first.receive_frame(&frame());
+        second.receive_frame(&frame());
+
+        let mut first_buf = [0u8; size_of::<InputEvent>() * 2];
+        let mut second_buf = [0u8; size_of::<InputEvent>() * 2];
+        assert_eq!(first.read(&mut first_buf), Ok(first_buf.len()));
+        assert_eq!(second.read(&mut second_buf), Ok(second_buf.len()));
+        assert_eq!(first_buf, second_buf);
+        assert_eq!(first.read(&mut first_buf), Err(KError::WouldBlock));
+    }
+
+    #[def_test]
+    fn slow_event_client_reports_overflow_without_affecting_peer() {
+        let slow = EventClient::new();
+        let fast = EventClient::new();
+        let input_frame = frame();
+
+        for _ in 0..MAX_CLIENT_EVENTS / input_frame.len() {
+            slow.receive_frame(&input_frame);
+        }
+        fast.receive_frame(&input_frame);
+        slow.receive_frame(&input_frame);
+
+        let slow_state = slow.state.lock();
+        assert_eq!(slow_state.events.len(), 2);
+        assert_eq!(slow_state.events[0].event.code, SYN_DROPPED);
+        assert_eq!(slow_state.events[1].event.code, SYN_REPORT);
+        drop(slow_state);
+        assert_eq!(fast.state.lock().events.len(), input_frame.len());
+        assert!(fast.poll().contains(IoEvents::IN));
     }
 }

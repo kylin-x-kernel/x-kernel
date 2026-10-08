@@ -6,6 +6,10 @@
 
 #![no_std]
 
+extern crate alloc;
+
+use alloc::sync::Arc;
+
 #[doc(no_inline)]
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use strum::FromRepr;
@@ -145,6 +149,15 @@ impl AbsInfo {
     }
 }
 
+/// IRQ-safe notification that an input device may have completed events.
+///
+/// Implementations must only schedule input processing. They must not sleep,
+/// allocate, or call back into the driver from interrupt context.
+pub trait InputEventNotifier: Send + Sync {
+    /// Schedule task-context processing of completed input events.
+    fn notify_events(&self);
+}
+
 /// Operations that require an input device driver to implement.
 pub trait InputDevice: Device {
     /// Returns the device ID of the input device.
@@ -167,4 +180,23 @@ pub trait InputDevice: Device {
     ///
     /// If no events are available, `Err(DriverError::WouldBlock)` is returned.
     fn read_event(&self) -> DriverResult<Event>;
+
+    /// Attach or detach the input layer's event notification capability.
+    ///
+    /// Registration and removal run in task context, but an installed notifier
+    /// may be called from hard IRQ context. The driver must synchronize changes
+    /// with its IRQ handler so a completed event is either observed by the
+    /// input layer's initial drain or triggers a notification. The callback
+    /// must run without driver locks that an event read might acquire.
+    ///
+    /// Drivers without event notifications may use the default implementation.
+    /// The current input layer requires notifications for activation and treats
+    /// `Unsupported` as an activation failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unsupported` if the driver does not provide notifications.
+    fn set_event_notifier(&self, _notifier: Option<Arc<dyn InputEventNotifier>>) -> DriverResult {
+        Err(DriverError::Unsupported)
+    }
 }

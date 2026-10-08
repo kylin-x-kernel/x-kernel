@@ -77,7 +77,7 @@ and clones the matching `DeviceFile` for lookup.
 
 ## Configuration and dependencies
 
-The optional Cargo feature `input` enables `kclass/input`; the top-level
+The optional Cargo feature `input` enables `kclass/input` and `inputdev`; the top-level
 `kfeat/input` feature selects it through `devfs/input`. When enabled, devfs can
 adapt input node assignments to `EventDev`. Display support is unconditional
 through `kclass/display`, so DRM primary nodes remain available independently.
@@ -102,31 +102,41 @@ through `kclass/display`, so DRM primary nodes remain available independently.
    unregisters the character-device number, and returns. `kdevice` releases
    the class index only after all projection callbacks finish.
 
-Open files retain their concrete backend through KVFS dispatch after removal. `EventDev`
-enters a terminal detached state and reports `ENODEV` plus
+Open files retain their concrete backend through KVFS dispatch after removal.
+Read and poll check class availability even before the removal callback detaches
+clients. Their
+`EventClient` objects enter a terminal detached state and report `ENODEV` plus
 `POLLERR|POLLHUP`. `DrmCard` observes that its bound class handle is no longer
 available and reports `ENODEV`. A later device that reuses the same index gets
 a new file object and cannot reconnect an old file descriptor.
 
-`EventDev::Inner.device` is its attachment state. `Some(handle)` means that
-the file is attached to its original class device; `None` is terminal.
-Explicit removal calls `EventDev::detach`. Reads, ioctls, and poll also call
-`Inner::live_device`, which changes `Some` to `None` when the class handle is
-unavailable and clears cached event/key state. A read after detach returns
-`ENODEV`, including a zero-length read. If detach is observed after complete
-event records were already copied, that read returns the copied byte count and
-the next read returns `ENODEV`.
+`EventDev` owns node-level identity and capability data. Each independent
+`open()` creates an `EventClient` in the `VfsFile` private data; duplicated
+descriptors share that open-file client. The client owns a bounded event
+queue and `PollSet`. `inputdev::InputEndpoint` drains the device independently
+of userspace and copies each completed frame to every subscribed client.
+When a client's 256-event queue overflows, it drops the buffered events and
+reports `EV_SYN/SYN_DROPPED` plus `SYN_REPORT`. One slow client cannot consume
+another client's events or hold the hardware queue. Explicit removal calls
+`EventDev::detach`, which stops the endpoint and detaches its clients. A read
+after detach returns `ENODEV`, including a zero-length read.
 
 Variable-length evdev string ioctls follow Linux `str_to_user` behavior. The
 terminating NUL is copied when it fits; a shorter user buffer receives the
 requested string prefix without reserving one byte for a terminator.
+
+For readable waits, `EventClient::register` attaches the waiter to the
+client's `PollSet`. Enqueue and detach both wake that set. The caller rechecks
+the queue after registration, closing the event-arrival race. No physical IRQ
+identity is passed to devfs.
 
 ## Execution context
 
 Initialization and node callbacks run in normal task context. They allocate,
 acquire a sleepable mutex, create VFS objects, and register character devices;
 they are not valid in hard interrupt context. Event reads and ioctls run in
-process syscall context.
+process syscall context. The input layer delivers frames from a task-context
+worker. Hard-IRQ dispatch does not enter `EventDev` or take a client mutex.
 
 ## Concurrency model
 
@@ -135,6 +145,11 @@ The `kdevice` registry never invokes callbacks while holding its own lock.
 Removal extracts the record before running the class-specific detach callback
 or calling `cdev_del`, so those operations cannot re-enter the projection
 mutex.
+
+The input driver's IRQ handler and `EventClient` do not share a lock. The
+handler schedules inputdev, whose worker drains events and calls each client
+outside the endpoint lock. A client releases its mutex before waking poll
+waiters. Clients never read the VirtIO queue or register IRQ-line waiters.
 
 ## Design decisions
 

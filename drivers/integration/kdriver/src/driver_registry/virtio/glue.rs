@@ -48,23 +48,6 @@ cfg_if! {
 }
 
 cfg_if! {
-    if #[cfg(feature = "virtio-input")] {
-        pub struct VirtIoInput;
-
-        impl VirtIoInput {
-            pub fn try_new<T: virtio::Transport + 'static>(
-                transport: T,
-                _irq: Option<usize>,
-            ) -> DriverResult<kclass::prelude::InputDeviceImpl> {
-                Ok(Box::new(virtio::VirtIoInputDev::<VirtIoHalImpl, T>::try_new(
-                    transport,
-                )?))
-            }
-        }
-    }
-}
-
-cfg_if! {
     if #[cfg(feature = "virtio-socket")] {
         pub struct VirtIoSocket;
 
@@ -269,7 +252,6 @@ mod tests {
     use virtio::{BufferDirection, VirtIoHal};
 
     use super::VirtIoHalImpl;
-
     #[def_test(serial)]
     fn unshare_ignores_zero_streaming_dma_mapping() {
         let mut byte = 0u8;

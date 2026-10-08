@@ -450,7 +450,7 @@ transports:
    - `DeviceKind::Net` → `VirtIoNet::try_new` → `kclass::publish_net`
    - `DeviceKind::Block` → `block::activate` → IRQ setup → `kclass::publish_block`
    - `DeviceKind::Display` → `VirtIoGpu::try_new` → `kclass::publish_display`
-   - `DeviceKind::Input` → `VirtIoInput::try_new` → `kclass::publish_input`
+   - `DeviceKind::Input` → local `virtio/input.rs` activation → devres IRQ registration → PCI INTx enable when applicable → `kclass::publish_input`
    - `DeviceKind::Vsock` → `VirtIoSocket::try_new` → `kclass::publish_vsock`
    - `DeviceKind::Fs9p` → `VirtIo9p::try_new` → `kclass::publish_virtio_9p`
 
@@ -467,6 +467,15 @@ handles return to the same provider that created them:
   automatically `iounmap`s on probe failure or device remove.
 - **`device.devm_request_irq`**: adapts the devres IRQ handler into a
   `kirq` shared action registered on the `kirq` IRQ core action list.
+  VirtIO input uses this path before class publication; a missing IRQ or failed
+  registration aborts probe rather than publishing a polling-only device.
+  The PCI path keeps INTx masked during queue construction and handler
+  registration, adds a later cleanup that masks the source before IRQ release,
+  and only then unmasks INTx and publishes the class device.
+  `virtio/input.rs` owns this lifecycle and uses the framework's
+  `DeviceResourceExt::devm_request_irq` helper. `glue.rs` only adapts the
+  VirtIO HAL and other class constructors; it no longer selects an input IRQ
+  provider or binds input devres.
 - **`device.devm_request_threaded_irq` /
   `device.devm_request_threaded_irq_default`**: bind devres primary/thread
   handlers to the provider contract. The current mainline
@@ -508,8 +517,10 @@ core per API:
    resolved `virq` as the handler argument. Each wrapper then converts the
    devres handler's `device_res::IrqEvent` into `kirq::IrqEvent`.
 4. After the whole line's fanout, `kirq` aggregates the handled result.
-   Device subsystems own readiness wakeup and deferred-work submission;
-   there is no generic line/source waiter table or kdriver wake bridge.
+   VirtIO input reports `NOT_HANDLED` for an empty device ISR and calls the
+   input layer's notifier only for an event-queue interrupt. The input layer
+   drains events in deferred work and wakes each evdev client's waiters when
+   its queue receives an event; it does not register a physical IRQ waiter.
 5. `release_irq` calls `kirq::free_irq_action()` for shared hardirq
    tokens, removing only the action belonging to this devres handler.
 
@@ -647,6 +658,10 @@ hard-coded total IRQ limit.
   explicit release.
 - Interrupt release removes the device handler by token; once the last
   handler goes, the `kirq` handler is deregistered.
+- A VirtIO input action is registered before class publication. PCI input adds
+  its INTx-mask cleanup after the action, so LIFO device removal masks the
+  source first, then releases and synchronizes the action before the detached
+  class object and its shared transport state are finally dropped.
 - Shared DMA buffers are reclaimed by `kdma::deallocate_dma_memory` after
   the last handle drops.
 

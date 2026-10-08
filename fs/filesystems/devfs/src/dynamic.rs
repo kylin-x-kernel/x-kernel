@@ -61,7 +61,14 @@ fn input_file(
     id: CoreDeviceId,
 ) -> Option<(Arc<DeviceFile>, DeviceRemovalCallback)> {
     let device = find_input_device(id)?;
-    let event = Arc::new(EventDev::new(device));
+    let endpoint = match inputdev::input_endpoint(device.clone()) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            warn!("devtmpfs: input endpoint for {id:?} failed: {error:?}");
+            return None;
+        }
+    };
+    let event = Arc::new(EventDev::new(device, endpoint));
     let weak_event = Arc::downgrade(&event);
     let on_remove: DeviceRemovalCallback = Arc::new(move || {
         if let Some(event) = weak_event.upgrade() {

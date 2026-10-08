@@ -110,6 +110,23 @@ close. No IRQ callback owns activation or can run its synchronous destructor.
 Malformed device completion remains fatal; graceful close has no forced-DMA
 cancellation or timeout guarantee for a nonresponsive device.
 
+## VirtIO 输入设备 IRQ 安全性
+
+`VirtIoInputDev` 与其 IRQ handler 共享同一个 `VirtIoInputState`。对 transport、
+配置和队列的每次访问都会获取该状态的 `SpinNoIrq`，因此任务持有 transport 时，
+本地输入中断无法抢占该任务。远端 CPU 仅可能在有界的配置、队列或 ISR 访问期间自旋。
+
+handler 在访问 transport 前校验回调传入的 IRQ。ISR 为空时返回
+`IrqEvent::NOT_HANDLED`，从而保留共享中断线的分发语义；队列或配置中断则返回
+`HANDLED`。只有队列中断会调用输入层的 `InputEventNotifier` 安排延迟工作。
+handler 不分配内存、不访问 VFS、不复制事件，也不遍历唤醒列表。
+host 通过 `device_res` 注册和释放 handler；释放过程会等待正在执行的回调结束，
+随后才丢弃 handler 持有的 `Arc`。
+
+`inputdev` 的任务上下文 worker 在通知后调用 `pop_pending_event()`，即使没有文件读者
+也会回收完成的描述符。因此，不可信的事件内容不会在硬中断上下文中进入用户缓冲区；
+输入层负责帧界限和按键码范围检查，devfs 负责每个打开文件的有界队列。
+
 ## unsafe 代码清单
 
 ### 1. `probe_mmio_device`（`lib.rs:102`）
@@ -243,8 +260,11 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 **不变量**：设备类型可以安全地跨线程传递（Send）和共享引用（Sync）。
 
 **为何安全**：
-- blk / gpu / input / socket / virtio_9p：所有操作通过 `&mut self` 独占访问，
+- blk / gpu / socket / virtio_9p：所有操作通过 `&mut self` 独占访问，
   `Sync` 仅允许共享不可变引用，不会导致数据竞争。
+- input：`VirtIoInputState` 手动实现 `Send` 和 `Sync`；对底层输入设备的每次访问
+  都通过其 `SpinNoIrq` 串行化。通知回调由独立的 `SpinNoIrq` 保存，IRQ 处理程序
+  在释放 transport 锁后调用它，回调只能安排延迟工作，不能重新读取驱动。
 - net：内部使用 `SpinNoIrq` 保护共享状态，`Send`/`Sync` 安全。
 
 ## 内存安全不变量
@@ -263,13 +283,14 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 |------|-------------|-------------|
 | `VirtIoBlkDev<H, T>` | `H: Hal, T: Transport`（手动 impl） | `H: Hal, T: Transport`（手动 impl） |
 | `VirtIoGpuDev<H, T>` | `H: Hal, T: Transport`（手动 impl） | `H: Hal, T: Transport`（手动 impl） |
-| `VirtIoInputDev<H, T>` | `H: Hal, T: Transport`（手动 impl） | `H: Hal, T: Transport`（手动 impl） |
+| `VirtIoInputDev<H, T>` | 通过 `Arc<VirtIoInputState<H, T>>`；状态手动实现 `Send` | 通过 `Arc<VirtIoInputState<H, T>>`；状态手动实现 `Sync` |
 | `VirtIoNetDev<H, T, QS>` | `H: Hal + 'static, T: Transport + 'static`（手动 impl） | `H: Hal + 'static, T: Transport + 'static`（手动 impl） |
 | `VirtIoSocketDev<H, T>` | `H: Hal, T: Transport`（手动 impl） | `H: Hal, T: Transport`（手动 impl） |
 | `VirtIo9pDev<H, T>` | `H: Hal, T: Transport`（手动 impl） | `H: Hal, T: Transport`（手动 impl） |
 
 **说明**：所有设备类型的手动 `Send`/`Sync` impl 依赖以下保证：
-- blk 使用内部 SpinNoIrq 保护设备和请求状态；其他非 net 设备通过 `&mut self` 独占访问，无内部可变性。
+- blk 和 input 使用内部 `SpinNoIrq` 状态；其他非 net 设备通过独占的 `&mut self`
+  访问，不使用内部可变性。
 - net 设备通过 `SpinNoIrq` 保护共享的 `InnerDev`，中断回调和正常路径互斥。
 
 ## 威胁分析
@@ -288,6 +309,7 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 | T-10 | 恶意 VMM 返回伪造的 9p 响应 | 中 | `request()` 返回的数据不符合 9p 协议 | 上层 9p 文件系统应校验响应格式；本模块不解析内容 |
 | T-11 | 恶意 VMM 返回超长 `mount_tag` | 中 | `VirtIO9p::mount_tag()` 返回超长字符串 | `virtio-drivers` 内部从配置空间读取，长度由设备配置空间字段限制 |
 | T-12 | VirtIO 块设备的只读能力未被上层执行 | 中 | VMM 协商 `VIRTIO_BLK_F_RO`，但 block core 仍把磁盘视为可写 | `VirtIoBlkDev` 把固有只读能力传播给 block core，并在底层写入口再次拒绝写请求 |
+| T-13 | 输入设备 handler 误认领属于其他设备的共享 IRQ | 中 | 共享中断线触发，但输入设备 ISR 为空 | handler 检查已配置的 IRQ，确认本设备的 ISR，并在状态为空时返回 `NOT_HANDLED` |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -304,6 +326,7 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 | F-09 | 网络缓冲区 token 不匹配 | 内部状态不一致 | DMA 到错误地址 | 内存破坏 | 1 | `assert_eq!` 和 `is_some()` 检查；`BadState` 错误返回 |
 | F-10 | 网络 RX 事件丢失 | IRQ handler 和任务上下文都调用 `ack_interrupt()`，任务上下文清除新到事件 | virtio RX 队列停止推进并重复触发未处理 IRQ | TCP 接收窗口降为零，host→guest 传输超时 | 2 | 已注册 IRQ 时仅由 handler 调用 `ack_interrupt()`，`recv()` 仅消费已完成队列项；纯轮询模式由 `recv()` 确认中断 |
 | F-11 | 对固有只读块设备发起写请求 | 上层绕过或尚未建立 block-device view | 单次写入被拒绝 | 文件系统保持只读且介质不被修改 | 3 | `write_block()` 的轮询和 IRQ 请求路径均在提交前返回 `DriverError::ReadOnly` |
+| F-12 | 输入设备 IRQ 注册失败 | IRQ 缺失、无效或共享 action 数量达到上限 | 输入设备无法唤醒读取者 | 键盘或鼠标不会发布 | 3 | host 激活流程传播注册错误，且 VirtIO 输入设备不提供轮询降级路径 |
 
 ## 故障管理
 
@@ -345,6 +368,7 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 - [ ] 新增原子操作的内存序不低于已有要求
 - [ ] Drop 实现正确处理所有状态（已实现 net 设备 Drop，其他设备无需自定义 Drop）
 - [ ] 新增 panic 路径有对应的 PanicGuard 或等效保护
+- [ ] 输入设备 IRQ handler 仅确认本设备的非空 ISR，且不会在硬中断上下文中消费事件
 
 ## IRQ-driven RNG safety boundary
 

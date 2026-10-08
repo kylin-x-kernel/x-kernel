@@ -531,6 +531,7 @@ Callers:
 | T-13 | An unchecked firmware IRQ number is registered on the wrong vector | Medium | `kirq::register` does not validate the IRQ number sufficiently | Depends on the platform IRQ backend and `kirq` descriptor handling; IRQ numbers passed by `kdriver` come from firmware or PCI INTx routing. |
 | T-14 | Static platform device addresses such as AHCI_PADDR are misconfigured at compile time | Low | `kbuild_config` constants specify invalid physical addresses | `iomap_first_mmio` validates through `devm_iomap` and `iomap_device`; mapping failure prevents driver activation. |
 | T-15 | Incorrect conversion between devres and kernel IRQ types causes bad IRQ configuration, lost source bitmaps, or unwoken IRQ threads | Medium | The `device-res-xkernel` adapter omits trigger/controller/event/wake-thread fields | `device-res-xkernel` centralizes `device_res` to `kirq` conversion; the IRQ core does not depend on devres. |
+| T-16 | VirtIO input is published before its interrupt action is usable | Medium | Input construction succeeds but IRQ registration fails or races publication | `virtio/input.rs` requires an IRQ, registers its devres action first, and calls `publish_input` only after registration succeeds. |
 
 Impact levels:
 
@@ -547,7 +548,7 @@ Impact levels:
 | F-03 | One device fails probe | The driver's `probe_device` returns an error | That device unavailable | Other devices on the same bus activate normally | 4 | Log the probe error at warn level and place the device in the unclaimed list; continue with subsequent devices. |
 | F-04 | PCI BAR allocator uninitialized | `pci_bar_allocation_range()` returns `None` and a device has unassigned memory BARs | The PCI device is skipped | One PCI device unavailable | 3 | `configure_pci_device_if_needed` returns `NoMemory`, and the device is skipped. |
 | F-05 | VirtIO MMIO discovery returns no device | No VirtIO device in the region or a `MagicValue` mismatch | The MMIO region is skipped | Other platform devices unaffected | 4 | `probe_mmio_device` and then `virtio_mmio_registration` return `None`; log at trace level and skip the region. |
-| F-06 | IRQ handler registration fails | `kirq` rejects a shared action or its action limit is reached | The device cannot receive interrupts | Block disk is not published; no polling fallback | 3 | `request_irq` returns `Busy`; partial activation closes before probe returns an error. |
+| F-06 | IRQ handler registration fails | `kirq` rejects a shared action or its action limit is reached | The device cannot receive interrupts | Block and input devices are not published; no polling fallback | 3 | `request_irq` returns `Busy`; partial activation is dropped before probe returns an error. |
 | F-07 | PCI host bridge adoption fails | Platform bus unregistered or `adopt_active_device` fails | PCI devices have no host bridge parent | PCI endpoints are still enumerated, but the device tree is incomplete | 3 | Log a warning and continue enumeration with a parentless layout. |
 | F-08 | Static device MMIO mapping fails | Invalid `kbuild_config` address or absent hardware | The static device unavailable | Other devices on the same bus unaffected | 3 | `iomap_first_mmio` returns an error, and probe fails. |
 | F-09 | Bus-type matcher is not ready when a driver registers | `register_bus_type` runs after driver registration | No device matches the driver | Devices enter the unclaimed list | 2 | `default_bus_manager` registers bus-type matchers before bus backends; drivers are then registered in `DeviceManager::new`. |
@@ -627,6 +628,10 @@ When modifying this module, verify:
   with matching layouts at `free` time.
 - New IRQ registration passes through the `device-res-xkernel` devres provider into
   the `kirq` action list, instead of maintaining separate line-local fanout in `kdriver`.
+- VirtIO input keeps PCI INTx masked until its devres handler is installed,
+  masks it again before handler release, and leaves an empty input ISR
+  unclaimed. Its input-layer notifier is called only for a queue interrupt;
+  configuration interrupts do not wake input readers.
 - New IRQ release uses `device-res-xkernel` to call the matching `kirq` release API
   by token; `kirq` performs masking, synchronization, and cleanup after the final action leaves.
 - When a new bus backend implements `BusBackend`, an individual device error in

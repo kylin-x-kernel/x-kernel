@@ -10,7 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [features]
-input = ["kclass/input"]
+input = ["kclass/input", "dep:inputdev"]
 serial = ["kclass/char", "dep:console_driver"]
 memtrack = ["kalloc/tracking", "dep:gimli"]
 dev-log = []
@@ -57,6 +57,7 @@ entropy.workspace = true
 kvmm-api = { workspace = true, optional = true }
 tee_crypto = { workspace = true, features = ["alloc"], optional = true }
 kclass = { workspace = true, features = ["display"] }
+inputdev = { workspace = true, optional = true }
 console_driver = { workspace = true, optional = true }
 driver_base.workspace = true
 kdevice.workspace = true

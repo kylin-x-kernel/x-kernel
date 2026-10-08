@@ -189,7 +189,7 @@ impl Transport for MockTransport {
 
     fn ack_interrupt(&mut self) -> InterruptStatus {
         self.interrupt_ack_count.fetch_add(1, Ordering::Relaxed);
-        InterruptStatus::from_bits_truncate(self.interrupt_status.swap(0, Ordering::Relaxed) as u32)
+        InterruptStatus::from_bits_truncate(self.interrupt_status.swap(0, Ordering::AcqRel) as u32)
     }
 
     fn read_config_generation(&self) -> u32 {

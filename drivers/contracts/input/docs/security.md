@@ -3,7 +3,7 @@
 ## Scope
 
 This analysis covers the entire crate — the single `src/lib.rs` (the
-evdev-compatible value types and the `InputDevice` trait). The crate
+evdev-compatible value types, `InputDevice`, and `InputEventNotifier`). The crate
 holds no state and no unsafe code; the security-relevant content is the
 `repr(C)` ABI contract and the obligations placed on driver
 implementations.
@@ -18,14 +18,16 @@ space) and the obligations placed on driver implementations.
 
 ## External Boundaries
 
-- `Event`, `InputDeviceId`, and `AbsInfo` are `repr(C)` and layout-
-  compatible with Linux evdev definitions; the input layer may expose
-  them to user space verbatim. Layout drift would corrupt the user
-  ABI — the `repr(C)` attribute and constant definitions are the
-  invariant to audit.
+- `Event`, `InputDeviceId`, and `AbsInfo` are `repr(C)` contract values.
+  `Event` omits the userspace `input_event` timestamp; devfs constructs
+  that complete record. Layout changes require checking both the driver
+  contract and the devfs conversion.
 - Driver implementations fetch events from real hardware; hardware event
   payloads (`code`, `value`) are device-controlled input once they reach
   consumers, but sanitization belongs to the input layer, not here.
+- Drivers may call `InputEventNotifier` from hard IRQ context. An
+  implementation must schedule work without sleeping, allocating, or
+  re-entering the driver.
 
 ## Unsafe Code
 
@@ -49,6 +51,7 @@ None. The crate contains no `unsafe`, no FFI, and no inline assembly.
 | T-01 | Layout drift from the Linux uapi structs | Medium — user-visible ABI corruption | Editing the `repr(C)` structs | `repr(C)` plus documented Linux-origin of each field; changes require an explicit ABI review. |
 | T-02 | Driver writes past the capability bitmap | High — kernel buffer overflow | Misbehaving `get_event_bits` | Contract: bounded by `out.len()` and `bits_count(ty)`; enforcement by driver review (trait cannot constrain implementations). |
 | T-03 | Malicious device flooding the event stream | Low — consumer starvation | Device emits events continuously | `read_event` returns one event per call with `WouldBlock` when empty; throttling is the input layer's policy. |
+| T-04 | Notification re-enters a driver while its IRQ state is locked | Medium — deadlock | A notifier calls `read_event` synchronously | The notifier contract permits scheduling only; the input layer drains in task context. |
 
 ## Failure Modes
 

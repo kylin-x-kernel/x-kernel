@@ -78,14 +78,18 @@ provider crates.
   compares the complete `DeviceNode` snapshot.
 - Directory lookup returns only a file object still present in the projection
   at the time of lookup.
+- Each open evdev file has a bounded queue and its own `PollSet`. The caller
+  rechecks readiness after registering a waiter with that set.
 
 ## Thread safety
 
-`DeviceProjection` is protected by one `ksync::Mutex`. Per-open operations use
-locks owned by `EventDev` or `DrmCard`. `kdevice` delivers owned node snapshots
+`DeviceProjection` is protected by one `ksync::Mutex`. Per-open evdev operations
+use an `EventClient` mutex; DRM uses its own locks. `kdevice` delivers owned node snapshots
 without holding its registry lock, so no borrowed registry data escapes into
 devfs. Removal extracts the record before running detach and `cdev_del`. The
-implementation requires normal task context and may allocate.
+implementation requires normal task context and may allocate. Hard-IRQ code
+never acquires an `EventClient` mutex; the inputdev worker distributes frames
+and wakes client-owned poll registrations.
 
 ## Threat analysis
 
@@ -95,7 +99,9 @@ implementation requires normal task context and may allocate.
 | T-02 | Device removal redirects an old fd to a newly reused index | High — an old descriptor could operate on a different physical device | Hot-unplug followed by another device registration | Each node owns a distinct file object; removal detaches the old object, unregisters its number, then permits index reuse. |
 | T-03 | Device event arrives before the class is active | Medium — node creation fails and userspace cannot access the device | Node publication is moved ahead of the `Activated` transition | `kclass` registers the node inside its activation callback; devfs then resolves an available class handle. |
 | T-04 | A stale remove deletes a new projection | Medium — the replacement device disappears from `/dev` | A future device id or assignment is reused | Removal compares the complete recorded `DeviceNode` before deleting it. |
-| T-05 | Removed device remains apparently readable | Medium — callers could mistake stale data or delayed errors for live hardware | An fd survives hot-unplug | evdev returns `ENODEV` and poll error/hangup; DRM checks `ClassDevice::is_available`. |
+| T-05 | Removed device remains apparently readable | Medium — callers could mistake stale data or delayed errors for live hardware | An fd survives hot-unplug | evdev checks class availability before read/poll and returns `ENODEV` or poll error/hangup even before client detach; DRM checks `ClassDevice::is_available`. |
+| T-06 | An input event arrives between readiness check and waiter registration | Medium — a reader could sleep despite queued input | The queue changes while a task is preparing to sleep | Registration precedes the caller's second readiness check; either the client `PollSet` wake or the recheck observes the event. |
+| T-07 | One slow reader exhausts input buffers | Medium — another reader loses events or the VirtIO queue stalls | A process leaves its event file open without reading | Each file has a 256-event cap; overflow emits `SYN_DROPPED`; inputdev continues draining the hardware queue. |
 
 ## Failure modes and effects
 
@@ -105,10 +111,13 @@ implementation requires normal task context and may allocate.
 | F-02 | Character-device unregister races with lookup | Lookup either clones the old object or reports not found | An already opened old object reports removal | 3 | Registry serialization plus detached file semantics. |
 | F-03 | Active class handle cannot be found for an add event | The `/dev` node is absent | sysfs may still expose the identity | 3 | Log the inconsistent activation ordering; `kclass` publishes nodes only from the active transition. |
 | F-04 | Removal wins during initial snapshot insertion | The callback waits for initialization | No stale node survives | 4 | Initialization holds the projection mutex across subscription and snapshot insertion, then the queued remove callback deletes the record. |
+| F-05 | Client poll registration is rejected | The current poll operation fails | The task does not sleep without a wake source | 3 | Propagate `PollRegisterError`. |
 
 ## Known limitations
 
 - Only input and DRM primary `DeviceNodeKind` values have devfs adapters.
+- An input driver must provide event notification for inputdev to create an
+  endpoint and devfs to publish its event file.
 - There are no DRM render nodes because the DRM implementation is KMS-only.
 
 ## Audit checklist
@@ -118,3 +127,5 @@ implementation requires normal task context and may allocate.
 - Never allocate or reinterpret node names and numbers inside devfs.
 - Preserve detached-fd behavior before enabling index reuse.
 - Add a class adapter before accepting a new `DeviceNodeKind` in devfs.
+- Register removal wakeups before IRQ wakeups and keep event draining in task
+  context.

@@ -279,7 +279,7 @@ pub use display::{DisplayDevice, DisplayInfo};
 pub use hwrng::HwrngDevice;
 /// Re-export input device trait, event types, and identity types.
 #[cfg(feature = "input")]
-pub use input::{Event, EventType, InputDevice, InputDeviceId};
+pub use input::{Event, EventType, InputDevice, InputDeviceId, InputEventNotifier};
 /// Re-export network device trait, buffer handle, and RX scheduler capability.
 #[cfg(feature = "net")]
 pub use net::{NetBufHandle, NetDevice, NetRxScheduler};
@@ -460,6 +460,10 @@ impl InputDevice for ClassDevice<InputDeviceImpl> {
 
     fn read_event(&self) -> DriverResult<Event> {
         self.with(|device| device.read_event())
+    }
+
+    fn set_event_notifier(&self, notifier: Option<Arc<dyn InputEventNotifier>>) -> DriverResult {
+        self.with(|device| device.set_event_notifier(notifier))
     }
 }
 

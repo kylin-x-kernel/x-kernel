@@ -2,61 +2,75 @@
 
 ## Purpose
 
-`inputdev` maintains a live snapshot of input class handles for kernel
-consumers. It seeds from the `kclass` registry, subscribes to later arrivals,
-deduplicates by driver-core id, and removes handles on device removal.
+`inputdev` owns event progress and distribution after an input class device
+becomes active. It drains completed driver events even when no evdev file is
+open, tracks device-wide key state, and delivers complete frames to independent
+listeners. Hardware probing and user-facing file semantics stay in the driver
+framework and devfs respectively.
 
-## Responsibilities
-
-- Seed a process-wide snapshot from the input class registry.
-- Track later registration and removal callbacks by driver-core id.
-- Return cloned class handles so multiple kernel consumers can rescan without
-  consuming shared discovery state.
-
-## Non-responsibilities
-
-`inputdev` does not detect hardware, bind drivers, or define input-device
-identity; `kdevice`, `kclass`, and input drivers own those tasks. It does not
-read input events, implement evdev operations, or provide blocking waits.
-Userspace device-node creation, numbering, file operations, and hot-remove
-behavior belong to devfs and its `EventDev` adapter.
-
-## Architecture and lifecycle
+## Architecture
 
 ```text
-kclass input snapshot + availability callback
-                    │
-                    ▼
-INPUT_DEVICES: Mutex<Vec<ClassDevice<InputDeviceImpl>>>
-                    │ clone
-                    ▼
-             input_devices()
-
-kdevice removal callback ──> remove matching id
+VirtIO input IRQ -> InputEventNotifier -> InputEndpoint::WorkHandle
+                                            |
+                                            v
+                                InputDevice::read_event()
+                                            |
+                               frame and key-state updates
+                                            |
+                          InputEventListener::receive_frame()
+                                            |
+                          independent devfs open-file queues
 ```
 
-`init_input` initializes the registry, takes the existing class snapshot,
-installs the availability callback, and installs removal handling. Registration
-is idempotent. `input_devices` clones the current vector and does not consume
-it, so multiple peers such as devfs can obtain consistent handles without
-stealing devices from one another.
+`INPUT_ENDPOINTS` holds at most one `InputEndpoint` per driver-core device id.
+`init_input` subscribes to removal and availability, then visits the existing
+class snapshot. `input_endpoint` also creates an endpoint on demand because
+device-node publication can precede the class availability callback. The same
+mutex serializes both registration paths and prevents duplicate workers.
 
-## Execution context
+Each endpoint prepares a `kworkng::WorkHandle` in task context, attaches a
+weak-backed `InputEventNotifier` to the class device, then schedules one initial
+round.
+That round drains events completed before notifier attachment. A hardware
+interrupt only schedules the worker. A pending work occurrence coalesces
+additional notifications; a notification during execution can queue a follow-up.
+Task-context rounds read up to 64 events, with at most two immediate rounds
+before queuing another occurrence and yielding to another work item.
 
-Initialization and callbacks run in device-probe/removal task context. They
-acquire a sleepable mutex and registration may grow the vector. The API is not
-valid in interrupt context and requires the registry to have been initialized.
+The endpoint buffers events until `EV_SYN/SYN_REPORT` and distributes each
+frame to the current listeners. A listener added during a partial frame starts
+with the next frame. If a device sends more than 256 events without a report,
+the endpoint discards the malformed frame until its next report and delivers
+`EV_SYN/SYN_DROPPED` followed by `SYN_REPORT`. Device-wide pressed-key state
+still tracks valid key transitions while events are drained.
 
-## Concurrency model
+## Execution context and concurrency
 
-One mutex protects the vector and deduplication. Device callbacks hold it only
-for lookup and push/remove. Consumers receive cloned class handles and operate
-outside the registry lock. Removal uses `swap_remove`; ordering is deliberately
-unspecified.
+`InputEventNotifier::notify_events` can run in hard IRQ context and only calls
+the prepared handle's IRQ-safe `queue_default` method. Event reads, timestamps, listener
+callbacks, registry changes, and teardown run in task context. The endpoint
+releases its state mutex before calling any listener. The driver owns its
+transport lock; no inputdev lock is held across a driver read.
 
-## Design decisions
+The endpoint registry mutex protects identity and creation. The per-endpoint
+mutex protects the partial frame, key state, listener lists, and detached
+state. Listeners are weak references, so open files do not form a cycle with
+the endpoint. Stale weak references are pruned during frame delivery or
+explicit unsubscription.
 
-- Snapshot semantics support multiple consumers and repeated rescans.
-- Driver-core ids are the identity key across probe and removal.
-- Device behavior remains in class handles; this crate only owns discovery
-  state.
+## Removal and failure handling
+
+Removal marks the endpoint detached, clears its partial frame, removes the
+driver notifier, shuts down the work handle after any running callback finishes, and
+notifies all listeners. The device-node callback can initiate the same detach
+before the inputdev removal callback; detach is idempotent. An endpoint is
+published to the registry only after its work handle and driver notifier start
+successfully. A failed registration leaves the class device untouched and is
+reported to the caller.
+
+The current managed removal path runs the driver and bus removal hooks and
+`device.run_cleanups()` before emitting `DeviceEvent::Removed`. The inputdev
+removal subscriber stops the worker only after that notification, so detach
+does not establish a barrier before driver resources are released. Fixing that
+ordering requires a separate driver-core lifecycle change.

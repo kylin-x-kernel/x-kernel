@@ -19,9 +19,10 @@ and MSI-X capability setup (`msix` module).
   own `PciBus`, which pairs a `PciRoot<MmioCam<'static>>` with a
   `PciConfigAccess` and records its base, bus end, and source;
   `parts_mut` splits it for bus walking.
-- Provide `PciConfigAccess`, a re-implementation of MMIO CAM
-  read/write of 32-bit config words (virtio-drivers keeps its own access
-  `pub(crate)`), used by MSI-X and other non-virtio callers.
+- Provide `PciConfigAccess`, a re-implementation of MMIO CAM reads and
+  16-/32-bit writes (virtio-drivers keeps its own access `pub(crate)`), used
+  by MSI-X and other non-virtio callers. Halfword writes let callers update
+  PCI Command without writing the adjacent write-one-to-clear Status register.
 - Allocate BAR addresses: `PciRangeAllocator` (sequential, power-of-two,
   naturally aligned) plus `pci_bar_allocation_range` source resolution
   (firmware range → kbuild `PCI_RANGES[1]`), and `configure_device` to
@@ -144,7 +145,8 @@ cam offset math is duplicated deliberately, documented on the type.
   4-byte-aligned, program-lifetime MMIO mapping sized for all later BDF
   accesses, no aliasing abstraction).
 - `read_word` / `write_word`: volatile u32 accesses at cam-computed
-  offsets, bounded by the CAM geometry.
+  offsets, bounded by the CAM geometry. `write_halfword` uses an aligned
+  volatile u16 access within the same selected configuration word.
 - `msix::MsixTable::new`: documented `# Safety` contract (mapped table
   with `len` valid entries, unique ownership, lifetime coverage).
 - `configure_msix_entry` and entry accessors: volatile writes plus a

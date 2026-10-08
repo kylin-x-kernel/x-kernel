@@ -16,6 +16,9 @@ mod glue;
 #[cfg(feature = "virtio-blk")]
 mod block;
 
+#[cfg(feature = "virtio-input")]
+mod input;
+
 #[cfg(feature = "virtio")]
 use alloc::sync::Arc;
 
@@ -192,6 +195,11 @@ fn activate_virtio_pci(device: Arc<DeviceObject>, device_kind: DeviceKind) -> Dr
         return Err(DriverError::Unsupported);
     }
 
+    #[cfg(feature = "virtio-input")]
+    if device_kind == DeviceKind::Input {
+        return input::activate_pci(device, transport, irq, config, bdf);
+    }
+
     dispatch_virtio_try_new(device, device_kind, transport, Some(irq))
 }
 
@@ -237,10 +245,7 @@ fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
             kclass::publish_display(parent, VirtIoGpu::try_new(transport, irq)?).map(drop)
         }
         #[cfg(feature = "virtio-input")]
-        DeviceKind::Input => {
-            use glue::VirtIoInput;
-            kclass::publish_input(parent, VirtIoInput::try_new(transport, irq)?).map(drop)
-        }
+        DeviceKind::Input => input::activate_mmio(parent, transport, irq),
         #[cfg(feature = "virtio-socket")]
         DeviceKind::Vsock => {
             use glue::VirtIoSocket;

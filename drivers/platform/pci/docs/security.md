@@ -46,8 +46,9 @@ MSI-X tables, each with `SAFETY:` comments:
 - `PciConfigAccess::new` (`pub unsafe fn`) — documented `# Safety`:
   valid, 4-byte-aligned, program-lifetime MMIO mapping sized for every
   later BDF access, and no aliasing abstraction on the same window.
-- `read_word` / `write_word` — volatile u32 access at cam-computed
-  offsets; bounded by CAM geometry (bus shift 8/12 per access width).
+- `read_word` / `write_word` — volatile u32 access at cam-computed offsets;
+  `write_halfword` — aligned volatile u16 access within the selected word.
+  All are bounded by CAM geometry (bus shift 8/12 per access width).
 - `msix::MsixTable::new` (`pub unsafe fn`, x86_64) — documented `# Safety`:
   mapped table with `len` valid entries, unique ownership of table
   register accesses, lifetime coverage.
@@ -85,7 +86,7 @@ No FFI or inline assembly exists in the crate.
 |----|--------|--------|---------|------------------|
 | T-01 | Malicious device lying about BAR sizes | Medium — wrong MMIO window sizing | Device header reports bogus sizes | Sizes validated before allocation (`alloc_buf` rejects 0/non-power-of-two/overflow); allocation failures surface as `PciInitError::NoMemory`. |
 | T-02 | Malicious device with corrupt MSI-X capability | Medium — writes to arbitrary device MMIO via table pointer | Table/PBA offsets outside their BARs | `validate_msix_layout` range-checks offsets against BAR sizes and rejects; enable bit stays clear on failure. |
-| T-03 | Config-space access beyond the mapped window | High — kernel memory corruption via MMIO | BDF/register arithmetic overflow | `cam_offset` builds bounded offsets from the CAM geometry; register offsets are masked to 32-bit alignment; `unsafe` contracts require a window sized for all accesses. Residual risk sits in the `PciConfigAccess::new` contract. |
+| T-03 | Config-space access beyond the mapped window | High — kernel memory corruption via MMIO | BDF/register arithmetic overflow | `cam_offset` builds bounded offsets from the CAM geometry; word offsets are masked to 32-bit alignment and halfword writes add only the selected in-word offset; `unsafe` contracts require a window sized for all accesses. Residual risk sits in the `PciConfigAccess::new` contract. |
 | T-04 | Firmware/build CAM mismatch | Medium — garbage config accesses | Firmware CAM kind differs from build-selected `Cam` | Cross-check at `PciBus::new` with warning and fallback to static configuration. |
 | T-05 | ECAM base from runtime override pointing at non-ECAM memory | High — MMIO corruption of unrelated regions | Operator error via `set_pci_config_space` | Override is a bring-up/debug facility requiring explicit action; mapping still goes through `memspace` which owns region sanity. Residual risk accepted as a debug feature. |
 
